@@ -185,6 +185,7 @@ type Differ struct {
 	Handle string  `json:"handle"`
 	What   string  `json:"what"` // corpus | baseline
 	Diff   float64 `json:"difference,omitempty"`
+	Est    bool    `json:"established,omitempty"` // the account's work would have counted towards scores
 }
 
 type Entry struct {

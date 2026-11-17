@@ -1342,6 +1342,10 @@ func (a *App) submitScript(ctx context.Context, acctID, claimID int64, p *Script
 			tx.saveClaim(c)
 			a.moved(tx, rd)
 			tx.event("established-differ", map[string]any{"round": p.Round, "verifier": acct.Handle, "what": "corpus"})
+			if len(rd.Differs) < 50 {
+				rd.Differs = append(rd.Differs, Differ{Handle: acct.Handle, What: "corpus", Est: true})
+				tx.saveRound(rd)
+			}
 			refused = fail(409, "your corpus for %s differs from the round's. This verifier rebuilds its copy once", p.Round)
 			a.settleReady(tx)
 			return nil
@@ -1596,8 +1600,12 @@ func (a *App) submitResult(ctx context.Context, acctID, claimID int64, p *Result
 			if est {
 				tx.event("established-differ", map[string]any{"round": p.Round, "verifier": acct.Handle, "what": what})
 				a.moved(tx, rd)
-			} else if len(rd.Differs) < 50 {
-				rd.Differs = append(rd.Differs, Differ{Handle: acct.Handle, What: what, Diff: diff})
+			}
+			// Whoever is turned away is told it will be listed with the round, and it is,
+			// established or not: if honest machines of one kind keep landing here the
+			// tolerance is wrong, and this list is how anyone would see it.
+			if len(rd.Differs) < 50 {
+				rd.Differs = append(rd.Differs, Differ{Handle: acct.Handle, What: what, Diff: diff, Est: est})
 				tx.saveRound(rd)
 			}
 			refused = fail(409, format, args...)

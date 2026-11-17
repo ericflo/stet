@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"strings"
 	"testing"
@@ -452,6 +453,62 @@ func TestARunThatWasGivenUpDoesNotUseUpOneOfAnEntrysRuns(t *testing.T) {
 	e := w.entry(idx, "tidy")
 	if e.Status != "settled" || e.Valid || e.Void || e.NRuns != 2 || len(e.Dropped) != 1 {
 		t.Fatalf("the entry: %+v", e)
+	}
+	w.check()
+}
+
+// A verifier turned away for another corpus or another unedited loss is told it will be
+// listed with the round. That holds for an established one as much as a newcomer: theirs
+// are the machines whose baselines decide scores.
+func TestAnEstablishedVerifierTurnedAwayIsListedWithTheRound(t *testing.T) {
+	pub, priv := newKey()
+	w := newWorld(t, pub)
+	anchor, bob := w.join("anchor-one", priv), w.join("bob", nil)
+	w.established("bob")
+	for _, name := range []string{"ref-a", "ref-b"} {
+		w.submit(anchor, name, "print('"+name+"')")
+	}
+	idx := w.draw()
+	w.editAll(anchor)
+	if code, status := w.report(anchor, w.claim(anchor, true), 5.5); code != 200 {
+		t.Fatal(status)
+	}
+	c := w.claim(bob, false)
+	if c.Job == nil {
+		t.Fatal("no work for an established volunteer")
+	}
+	var out struct {
+		Error string `json:"error"`
+	}
+	if code := bob.do("POST", fmt.Sprintf("/api/v1/jobs/%d/result", c.Job.ID), w.result(c, 5.5, 7.5), &out); code != 409 || !strings.Contains(out.Error, "published") {
+		t.Fatalf("a grade with another unedited loss: HTTP %d %s", code, out.Error)
+	}
+	// Bob goes away, and the organisers' machine finishes the round alone.
+	w.pass(2 * w.cfg.ActiveWindow)
+	for n := 0; n < 10; n++ {
+		c := w.claim(anchor, true)
+		if c.Job == nil {
+			break
+		}
+		if code, status := w.report(anchor, c, 5.5); code != 200 {
+			t.Fatal(status)
+		}
+	}
+	w.pass(2 * w.cfg.ReplicaWait)
+	listed := false
+	w.app.st.view(func(s *State) {
+		if s.Rounds[idx].Status != "settled" {
+			t.Fatalf("the round did not settle: %s", s.Rounds[idx].Status)
+		}
+		for _, d := range s.Rounds[idx].Differs {
+			listed = listed || (d.Handle == "bob" && d.What == "baseline" && d.Est)
+		}
+	})
+	if !listed {
+		t.Fatal("an established verifier was told its difference would be published with the round, and it is not there")
+	}
+	if _, body := w.page("/rounds/" + roundID(w.app.season.ID, idx)); !strings.Contains(body, "/u/bob") || !strings.Contains(body, "established; ") {
+		t.Fatal("the round's page does not name the established verifier that was turned away")
 	}
 	w.check()
 }

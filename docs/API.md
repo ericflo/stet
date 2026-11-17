@@ -66,9 +66,10 @@ An entry settled before harness 0.3.0 was run once and scored by the organisers'
 grade. It is shown in the same shape, as one run with `self` set, and its `detail` also
 keeps the old list of volunteers' grades under `replications`.
 
-A settled round's `differs` lists volunteers who were turned away before grading: `what`
-is `corpus` (their machine built another corpus or exam) or `baseline` (their unedited
-loss was out of tolerance, by `difference`).
+A settled round's `differs` lists verifiers who were turned away before their run or
+grade was taken: `what` is `corpus` (their machine built another corpus or exam) or
+`baseline` (their unedited loss was out of tolerance, by `difference`), and `established`
+is set for an account whose work would otherwise have counted.
 
 A round that was announced for one draw and then moved lists the beacon rounds it left in
 `moved_from`.

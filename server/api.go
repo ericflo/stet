@@ -1005,7 +1005,7 @@ func (a *App) roundJSON(s *State, r *Round) map[string]any {
 		j["baseline_loss"], j["baseline"], j["baseline_verifiers"] = *r.BaselineLoss, r.Baseline, r.BaselineN
 	}
 	if len(r.Differs) > 0 && r.Status == "settled" {
-		j["differs"] = r.Differs // volunteers turned away: another corpus, or another unedited loss
+		j["differs"] = r.Differs // verifiers turned away: another corpus, or another unedited loss
 	}
 	if r.CorpusSHA != "" {
 		j["corpus_sha256"], j["exam_sha256"] = r.CorpusSHA, r.ExamSHA
