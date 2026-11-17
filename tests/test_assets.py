@@ -1,0 +1,208 @@
+"""Model weights by reference: what an entry may name, and how a machine comes to hold it."""
+
+import hashlib
+import tomllib
+
+import pytest
+
+from stet import assets
+from stet.assets import Asset, AssetError
+from stet.project import ProjectError, load_project
+from stet.spec import load_season
+
+COMMIT = "93efa2f097d58c2a74874c7e644dbc9b0cee75a2"
+URL = f"https://huggingface.co/HuggingFaceTB/SmolLM2-135M/resolve/{COMMIT}/model.safetensors"
+SHA = "80521b40281d6ce74e35c9282c22539e75aa0ac8578892b2a59955ef78d55da1"
+GOOD = {"path": "smol/model.safetensors", "url": URL, "sha256": SHA, "size": 269060552}
+
+
+@pytest.fixture
+def season():
+    return load_season()
+
+
+def test_a_well_formed_table_is_taken_as_written(season):
+    assert assets.parse([GOOD], season) == [Asset("smol/model.safetensors", URL, SHA, 269060552)]
+    assert assets.parse(None, season) == [] and assets.parse([], season) == []
+    dataset = {**GOOD, "url": f"https://huggingface.co/datasets/owner/name/resolve/{COMMIT}/data/train.bin"}
+    assert assets.parse([dataset], season)[0].url.startswith("https://huggingface.co/datasets/")
+
+
+@pytest.mark.parametrize(
+    "change, why",
+    [
+        ({"url": URL.replace(COMMIT, "main")}, "pinned to a commit"),  # a branch can move
+        ({"url": URL.replace("https://", "http://")}, "pinned to a commit"),
+        ({"url": URL.replace("huggingface.co", "example.test")}, "pinned to a commit"),
+        ({"url": URL + "?download=true"}, "pinned to a commit"),
+        ({"url": URL.replace("/model.safetensors", "/../../other/model.safetensors")}, "pinned to a commit"),
+        ({"url": URL.replace("/model.safetensors", "//model.safetensors")}, "pinned to a commit"),
+        ({"sha256": SHA.upper()}, "64 lowercase hex"),
+        ({"sha256": SHA[:40]}, "64 lowercase hex"),
+        ({"size": 0}, "length in bytes"),
+        ({"size": True}, "length in bytes"),
+        ({"size": 1.5}, "length in bytes"),
+        ({"size": "269060552"}, "length in bytes"),
+        ({"path": "/etc/passwd"}, "relative path of plain names"),
+        ({"path": "../up"}, "relative path of plain names"),
+        ({"path": "smol/.hidden"}, "relative path of plain names"),
+        ({"path": "smol//model"}, "relative path of plain names"),
+        ({"path": "smol/mo del"}, "relative path of plain names"),
+        ({"path": "a/" * 120 + "b"}, "relative path of plain names"),
+        ({"path": 7}, "must be strings"),
+        ({"mirror": "https://example.test/x"}, "unknown key 'mirror'"),
+    ],
+)
+def test_each_rule_is_enforced(season, change, why):
+    with pytest.raises(AssetError, match=why):
+        assets.parse([{**GOOD, **change}], season)
+
+
+def test_a_missing_field_and_a_wrong_shape_are_refused(season):
+    for field in ("path", "url", "sha256", "size"):
+        with pytest.raises(AssetError, match=f"missing {field}"):
+            assets.parse([{k: v for k, v in GOOD.items() if k != field}], season)
+    for shape in (5, "none", {}, [1], [[GOOD]]):
+        with pytest.raises(AssetError, match=r"\[\[assets\]\] tables"):
+            assets.parse(shape, season)
+
+
+def test_two_assets_cannot_claim_one_place(season):
+    for a, b in (("smol/model", "smol/model"), ("smol/Model", "smol/model"), ("smol", "smol/model"), ("smol/model/x", "smol/model")):
+        with pytest.raises(AssetError, match="collides"):
+            assets.parse([{**GOOD, "path": a}, {**GOOD, "path": b}], season)
+    assert len(assets.parse([{**GOOD, "path": "smol/model"}, {**GOOD, "path": "smol/model2"}], season)) == 2
+
+
+def test_the_season_bounds_how_many_and_how_much(season):
+    lim = assets.limits(season)
+    assert lim["max_files"] >= 8 and lim["max_bytes"] >= 2 << 30  # room for a small language model
+    many = [{**GOOD, "path": f"m/{i}", "size": 1} for i in range(lim["max_files"] + 1)]
+    with pytest.raises(AssetError, match=f"the limit is {lim['max_files']}"):
+        assets.parse(many, season)
+    big = [{**GOOD, "path": "a", "size": lim["max_bytes"]}, {**GOOD, "path": "b", "size": 1}]
+    with pytest.raises(AssetError, match="GiB; the limit is"):
+        assets.parse(big, season)
+    assert len(assets.parse([{**GOOD, "path": "a", "size": lim["max_bytes"]}], season)) == 1
+
+
+def test_a_season_that_says_nothing_allows_none(season, monkeypatch):
+    monkeypatch.setitem(season.raw, "assets", None)
+    assert assets.parse([], season) == []
+    with pytest.raises(AssetError, match="does not allow"):
+        assets.parse([GOOD], season)
+
+
+def test_what_is_written_into_a_manifest_reads_back_the_same(season, tmp_path):
+    items = assets.parse([GOOD, {**GOOD, "path": "smol/config.json", "size": 704}], season)
+    (tmp_path / "stet.toml").write_text('name = "an-editor"\nentry = "python editor.py"\n\n' + assets.to_toml(items))
+    assert tomllib.loads((tmp_path / "stet.toml").read_text())["assets"][0] == GOOD
+    assert load_project(tmp_path).assets == items
+    (tmp_path / "stet.toml").write_text('name = "an-editor"\nentry = "python editor.py"\n[[assets]]\npath = "x"\n')
+    with pytest.raises(ProjectError, match="asset 1: missing url"):
+        load_project(tmp_path)
+
+
+def blob_asset(path: str, blob: bytes) -> Asset:
+    return Asset(path, URL, hashlib.sha256(blob).hexdigest(), len(blob))
+
+
+def test_a_file_is_fetched_once_checked_and_kept_by_its_hash(monkeypatch):
+    from stet import data
+
+    blob = b"weights" * 100
+    a = blob_asset("smol/model.safetensors", blob)
+    calls = []
+
+    def fetch(urls, sha256, dest, label="", quiet=False, max_bytes=0, gzipped=False):
+        calls.append((urls, sha256, max_bytes))
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(blob)
+        return dest
+
+    monkeypatch.setattr(data, "fetch", fetch)
+    assets.fetch([a], quiet=True)
+    assert calls == [([URL], a.sha256, len(blob))]  # never more bytes than the entry said
+    assert assets.cached(a).read_bytes() == blob and not (assets.cached(a).stat().st_mode & 0o222)
+    assets.fetch([a, blob_asset("other/name", blob)], quiet=True)  # the same bytes under another name: one copy
+    assert len(calls) == 1
+
+
+def test_a_file_that_is_not_the_size_its_entry_says_is_not_kept(monkeypatch):
+    from stet import data
+
+    a = Asset("smol/model", URL, SHA, 1000)
+
+    def fetch(urls, sha256, dest, **k):
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"short")
+        return dest
+
+    monkeypatch.setattr(data, "fetch", fetch)
+    with pytest.raises(data.FetchError, match="not the size"):
+        assets.fetch([a], quiet=True)
+    assert not assets.cached(a).exists()
+
+
+def test_the_cache_lets_go_of_what_was_used_longest_ago_and_never_of_what_is_needed(tmp_path):
+    import os
+
+    d = assets.cache()
+    d.mkdir(parents=True)
+    made = []
+    for i in range(4):
+        a = blob_asset(f"m/{i}", bytes([i]) * 1000)
+        assets.cached(a).write_bytes(bytes([i]) * 1000)
+        os.utime(assets.cached(a), (1000 + i, 1000 + i))
+        made.append(a)
+    (d / "notes.txt").write_text("not ours to remove")
+    assert assets.prune(keep=[made[0]], limit_bytes=2500) == 2
+    assert [assets.cached(a).exists() for a in made] == [True, False, False, True] and (d / "notes.txt").exists()
+    assert assets.prune(limit_bytes=10**9) == 0
+
+
+def test_outside_the_sandbox_the_files_are_laid_out_by_their_paths(tmp_path):
+    a, b = blob_asset("smol/model.safetensors", b"w"), blob_asset("smol/sub/config.json", b"{}")
+    assets.cache().mkdir(parents=True)
+    for x, blob in ((a, b"w"), (b, b"{}")):
+        assets.cached(x).write_bytes(blob)
+    root = assets.link_tree([a, b], tmp_path / "assets")
+    assert (root / "smol/model.safetensors").read_bytes() == b"w" and (root / "smol/sub/config.json").read_bytes() == b"{}"
+    assets.link_tree([a], tmp_path / "assets")  # again, over what is there
+
+
+TREE = [
+    {"type": "file", "path": ".gitattributes", "size": 1519},
+    {"type": "file", "path": "README.md", "size": 6340},
+    {"type": "file", "path": "config.json", "size": 704},
+    {"type": "file", "path": "model.safetensors", "size": 135, "lfs": {"oid": SHA, "size": 269060552}},
+    {"type": "file", "path": "pytorch_model.bin", "size": 135, "lfs": {"oid": "b" * 64, "size": 269000000}},
+    {"type": "file", "path": "onnx/model.onnx", "size": 135, "lfs": {"oid": "c" * 64, "size": 540000000}},
+    {"type": "directory", "path": "onnx"},
+]
+
+
+def test_a_repository_is_pinned_to_the_commit_it_is_at(monkeypatch):
+    asked = []
+
+    def get(url):
+        asked.append(url)
+        return TREE if "/tree/" in url else {"sha": COMMIT, "gated": False, "private": False}
+
+    monkeypatch.setattr(assets, "_get_json", get)
+    commit, found, skipped = assets.lookup("HuggingFaceTB/SmolLM2-135M")
+    assert commit == COMMIT and f"/tree/{COMMIT}?" in asked[1]
+    assert [(a.path, a.size, a.sha256) for a in found] == [("smollm2-135m/config.json", 704, ""), ("smollm2-135m/model.safetensors", 269060552, SHA)]
+    assert found[1].url == URL and set(skipped) == {".gitattributes", "README.md", "pytorch_model.bin", "onnx/model.onnx"}
+    _, only, _ = assets.lookup("HuggingFaceTB/SmolLM2-135M", include=["*.bin"], under="weights")
+    assert [a.path for a in only] == ["weights/pytorch_model.bin"]
+    assets.lookup("HuggingFaceTB/SmolLM2-135M", revision="refs/pr/1")
+    assert asked[-2].endswith("/revision/refs%2Fpr%2F1")
+
+
+def test_a_repository_that_needs_an_account_is_refused(monkeypatch):
+    monkeypatch.setattr(assets, "_get_json", lambda url: {"sha": COMMIT, "gated": "manual"})
+    with pytest.raises(AssetError, match="volunteers have no login"):
+        assets.lookup("meta-llama/Llama-3.2-1B")
+    with pytest.raises(AssetError, match="owner/name"):
+        assets.lookup("just-a-name")

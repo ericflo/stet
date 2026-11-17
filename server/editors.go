@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"sort"
 	"strconv"
 	"strings"
@@ -133,9 +134,20 @@ func (a *App) submit(ctx context.Context, acctID int64, blob []byte) (*Submissio
 		return nil, pre
 	}
 	// Only now is the bundle unpacked: that costs memory, and the account has earned it.
-	m, files, err := parseBundle(blob)
+	m, files, err := parseBundle(blob, a.season.Assets)
 	if err != nil {
 		return nil, fail(400, "%s", err.Error())
+	}
+	// Volunteers will download what the entry names. The host is asked now whether each
+	// file is there for anyone, and is the file the entry says it is.
+	if err := checkAssets(ctx, m.Files); errors.Is(err, errHubAway) {
+		return nil, fail(503, "the entry names files on Hugging Face, and Hugging Face could not be asked about them just now. Nothing was submitted; try again in a minute")
+	} else if err != nil {
+		return nil, fail(400, "%s", err.Error())
+	}
+	var assetBytes int64
+	for _, as := range m.Files {
+		assetBytes += as.Size
 	}
 	// The files go first. If the record that follows is never written, an unreferenced
 	// file is all that is left behind.
@@ -172,7 +184,7 @@ func (a *App) submit(ctx context.Context, acctID int64, blob []byte) (*Submissio
 		ed := &Editor{
 			ID: id, AccountID: acctID, Name: m.Name, Version: version, Description: m.Description, Technique: m.Technique,
 			Parent: parent, Entry: m.Entry, Files: files, Size: int64(len(blob)), CreatedAt: now(), Status: "queued",
-			GithubID: acct.GithubID,
+			GithubID: acct.GithubID, Assets: m.Files, AssetBytes: assetBytes,
 		}
 		tx.saveEditor(ed)
 		tx.event("submit", map[string]any{"editor": id, "name": m.Name, "version": version, "owner": acct.Handle})

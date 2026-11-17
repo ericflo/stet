@@ -335,7 +335,7 @@ func (a *App) jobFor(s *State, c *Claim) *Job {
 
 func (a *App) checkHarness(harness, season, digest string) error {
 	if season != a.season.ID || digest != a.season.Digest || versionLess(harness, a.season.Harness) {
-		return fail(426, "this verifier is out of date (season %s, harness %s is current). Upgrade: curl -fsSL %s/install.sh | sh (on an AMD GPU, with STET_TORCH_INDEX set as it was when you installed)", a.season.ID, a.season.Harness, a.cfg.BaseURL)
+		return fail(426, "this verifier is out of date (season %s, harness %s is current). Upgrade: curl -fsSL %s/install.sh | sh", a.season.ID, a.season.Harness, a.cfg.BaseURL)
 	}
 	return nil
 }

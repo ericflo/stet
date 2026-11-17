@@ -106,6 +106,7 @@ func sumBytes(b []byte) (n int64) {
 func (s *Site) mountDownloads(mux *http.ServeMux) {
 	mux.HandleFunc("GET /files/{name}", s.file)
 	mux.HandleFunc("GET /install.sh", s.installSh)
+	mux.HandleFunc("GET /constraints.txt", s.constraints)
 	mux.HandleFunc("GET /install.ps1", s.installPs1)
 	mux.HandleFunc("GET /AGENTS.md", s.agentsMd)
 }
@@ -1100,21 +1101,21 @@ func (s *Site) file(w http.ResponseWriter, r *http.Request) {
 
 const installShTmpl = `#!/bin/sh
 # Installs the Stet command line. Usage:  curl -fsSL {{.Base}}/install.sh | sh
+#
+# It installs its own Python {{.Python}} and, with it, the libraries an editor may use, at the
+# season's exact versions: the same on every machine, so that an editor behaves the same
+# wherever it is run. PyTorch is among them, in the build for this machine's GPU.
+#
+#   STET_LIGHT=1         only what "stet submit", "stet status" and friends need: no
+#                        PyTorch and no libraries. Seconds to install, and megabytes.
+#   STET_TORCH_INDEX=... take PyTorch from this wheel index, not the one chosen below.
 set -eu
 WHEEL="{{.Files}}/files/{{.Wheel}}"
-SPEC="stet-cli @ $WHEEL"
+PY="{{.Python}}"
 
 say() { printf '%s\n' "$*"; }
 
 if ! command -v uv >/dev/null 2>&1; then
-  if command -v pipx >/dev/null 2>&1; then
-    say "Installing stet with pipx..."
-    pipx install --force "$WHEEL"
-    pipx inject stet-cli torch >/dev/null 2>&1 || say "Could not add PyTorch; see https://pytorch.org/get-started/locally/"
-    say ""
-    say "Done. Next:  stet doctor"
-    exit 0
-  fi
   say "Stet installs with uv (https://docs.astral.sh/uv/). Install uv first:"
   say ""
   say "  curl -LsSf https://astral.sh/uv/install.sh | sh"
@@ -1123,16 +1124,43 @@ if ! command -v uv >/dev/null 2>&1; then
   exit 1
 fi
 
-say "Installing stet with uv..."
-# PyTorch does the training. On Linux the default build targets NVIDIA; on a Mac it uses
-# Metal. For AMD (ROCm) or anything unusual, set STET_TORCH_INDEX to the right wheel index
-# from https://pytorch.org/get-started/locally/ before running this.
-if [ -n "${STET_TORCH_INDEX:-}" ]; then
-  uv tool install --force --python ">=3.11" --with torch --index "$STET_TORCH_INDEX" --index-strategy unsafe-best-match "$SPEC"
-elif [ "${STET_NO_TORCH:-}" = "1" ]; then
-  uv tool install --force --python ">=3.11" "$SPEC"
+if [ "${STET_LIGHT:-}" = "1" ] || [ "${STET_NO_TORCH:-}" = "1" ]; then
+  say "Installing stet (light: no PyTorch, no libraries)..."
+  uv tool install --force --python "$PY" "stet-cli @ $WHEEL"
 else
-  uv tool install --force --python ">=3.11" --with torch "$SPEC"
+  # Which build of PyTorch. With an NVIDIA GPU, the default one. With an AMD GPU and no
+  # NVIDIA one, the ROCm build. On a Mac the default build uses Metal.
+  INDEX="${STET_TORCH_INDEX:-}"
+  if [ -z "$INDEX" ] && [ "$(uname -s)" = "Linux" ]; then
+    VENDORS="$(cat /sys/class/drm/card*/device/vendor 2>/dev/null || true)"
+    case "$VENDORS" in
+      *0x10de*) ;;
+      *0x1002*) INDEX="{{.AMDIndex}}"; say "AMD GPU found: taking the ROCm build of PyTorch." ;;
+    esac
+  fi
+  TMP="$(mktemp -d)"
+  trap 'rm -rf "$TMP"' EXIT
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL "{{.Base}}/constraints.txt" -o "$TMP/constraints.txt"
+  else
+    wget -qO "$TMP/constraints.txt" "{{.Base}}/constraints.txt"
+  fi
+  say "Installing stet with Python $PY, PyTorch and the editor libraries (a few GB the first time)..."
+  set -- uv tool install --force --python "$PY" --constraints "$TMP/constraints.txt"
+  if [ -n "$INDEX" ]; then
+    set -- "$@" --index "$INDEX" --index-strategy unsafe-best-match
+  fi
+  if ! "$@" "stet-cli[run] @ $WHEEL"; then
+    say ""
+    say "The full set of editor libraries could not be installed on this machine."
+    say "Installing stet with PyTorch alone: enough to grade, and to run editors that"
+    say "need nothing else. 'stet doctor' will say what is missing."
+    set -- uv tool install --force --python "$PY" --with "torch=={{.Torch}}"
+    if [ -n "$INDEX" ]; then
+      set -- "$@" --index "$INDEX" --index-strategy unsafe-best-match
+    fi
+    "$@" "stet-cli @ $WHEEL"
+  fi
 fi
 
 say ""
@@ -1147,9 +1175,12 @@ esac
 `
 
 const installPs1Tmpl = `# Installs the Stet command line. Usage:  irm {{.Base}}/install.ps1 | iex
+#
+# It installs its own Python {{.Python}} and the libraries an editor may use, at the season's
+# exact versions. Set $env:STET_LIGHT = "1" for the command line alone.
 $ErrorActionPreference = "Stop"
 $wheel = "{{.Files}}/files/{{.Wheel}}"
-$spec = "stet-cli @ $wheel"
+$py = "{{.Python}}"
 
 if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
   Write-Host "Stet installs with uv (https://docs.astral.sh/uv/). Install uv first:"
@@ -1160,16 +1191,25 @@ if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
   return
 }
 
-Write-Host "Installing stet with uv..."
-# On Windows the default PyTorch build is CPU-only; with an NVIDIA card, use the CUDA build.
-$index = $env:STET_TORCH_INDEX
-if (-not $index -and (Get-Command nvidia-smi -ErrorAction SilentlyContinue)) {
-  $index = "https://download.pytorch.org/whl/cu124"
-}
-if ($index) {
-  uv tool install --force --python ">=3.11" --with torch --index $index --index-strategy unsafe-best-match $spec
+if ($env:STET_LIGHT -eq "1" -or $env:STET_NO_TORCH -eq "1") {
+  Write-Host "Installing stet (light: no PyTorch, no libraries)..."
+  uv tool install --force --python $py "stet-cli @ $wheel"
 } else {
-  uv tool install --force --python ">=3.11" --with torch $spec
+  # On Windows the default PyTorch build is CPU-only; with an NVIDIA card, use the CUDA build.
+  $index = $env:STET_TORCH_INDEX
+  if (-not $index -and (Get-Command nvidia-smi -ErrorAction SilentlyContinue)) {
+    $index = "{{.NvidiaWindowsIndex}}"
+  }
+  $constraints = Join-Path ([System.IO.Path]::GetTempPath()) "stet-constraints.txt"
+  Invoke-WebRequest -UseBasicParsing "{{.Base}}/constraints.txt" -OutFile $constraints
+  Write-Host "Installing stet with Python $py, PyTorch and the editor libraries (a few GB the first time)..."
+  $more = @()
+  if ($index) { $more = @("--index", $index, "--index-strategy", "unsafe-best-match") }
+  uv tool install --force --python $py --constraints $constraints @more "stet-cli[run] @ $wheel"
+  if ($LASTEXITCODE -ne 0) {
+    Write-Host "The full set of editor libraries could not be installed here. Installing stet with PyTorch alone."
+    uv tool install --force --python $py --with "torch=={{.Torch}}" @more "stet-cli @ $wheel"
+  }
 }
 
 Write-Host ""
@@ -1179,13 +1219,40 @@ Write-Host "  stet init my-editor      start an editor"
 Write-Host "  stet verify              lend your GPU to the leaderboard"
 `
 
+// constraints is every library of the season's environment at its exact version: what the
+// installer holds the install to, so that what an editor imports is the same everywhere.
+func (s *Site) constraints(w http.ResponseWriter, r *http.Request) {
+	env := s.app.season.Environment
+	only := map[string]bool{}
+	for _, name := range env.Linux {
+		only[name] = true
+	}
+	var lines []string
+	for _, set := range []map[string]string{env.Packages, env.Also} {
+		for name, version := range set {
+			line := name + "==" + version
+			if only[name] {
+				line += " ; sys_platform == 'linux' and platform_machine == 'x86_64'"
+			}
+			lines = append(lines, line)
+		}
+	}
+	sort.Strings(lines)
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Cache-Control", "public, max-age=300")
+	w.Write([]byte(strings.Join(lines, "\n") + "\n"))
+}
+
 func (s *Site) installScript(w http.ResponseWriter, r *http.Request, tmpl string) {
 	wheel, _ := s.wheel()
 	if wheel == "" {
 		http.Error(w, "echo 'The Stet CLI is not published on this server yet.'; exit 1\n", 503)
 		return
 	}
-	out := strings.NewReplacer("{{.Base}}", s.app.cfg.BaseURL, "{{.Files}}", s.app.cfg.APIURL, "{{.Wheel}}", wheel).Replace(tmpl)
+	env := s.app.season.Environment
+	out := strings.NewReplacer("{{.Base}}", s.app.cfg.BaseURL, "{{.Files}}", s.app.cfg.APIURL, "{{.Wheel}}", wheel,
+		"{{.Python}}", env.Python, "{{.Torch}}", env.Packages["torch"],
+		"{{.AMDIndex}}", env.TorchIndex["amd"], "{{.NvidiaWindowsIndex}}", env.TorchIndex["nvidia_windows"]).Replace(tmpl)
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("Cache-Control", "public, max-age=300")
 	w.Write([]byte(out))

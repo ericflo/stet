@@ -276,11 +276,16 @@ func (w *world) join(handle string, priv ed25519.PrivateKey) *actor {
 }
 
 func bundle(t *testing.T, name, body string) []byte {
+	return bundleWith(t, name, body, "")
+}
+
+// bundleWith is a bundle whose manifest ends with more TOML: its [[assets]] tables.
+func bundleWith(t *testing.T, name, body, more string) []byte {
 	t.Helper()
 	var tb bytes.Buffer
 	tw := tar.NewWriter(&tb)
 	files := map[string]string{
-		"stet.toml": fmt.Sprintf("name = %q\nentry = \"python editor.py\"\ntechnique = \"test\"\n", name),
+		"stet.toml": fmt.Sprintf("name = %q\nentry = \"python editor.py\"\ntechnique = \"test\"\n", name) + more,
 		"editor.py": body,
 	}
 	for _, n := range []string{"editor.py", "stet.toml"} {
@@ -1935,7 +1940,7 @@ func TestABundleIsBoundedInEveryDimension(t *testing.T) {
 		enc, _ := zstd.NewWriter(nil)
 		return enc.EncodeAll(tb.Bytes(), nil)
 	}
-	if _, _, err := parseBundle(pack([]*tar.Header{{Name: "stet.toml"}}, nil)); err != nil {
+	if _, _, err := parseBundle(pack([]*tar.Header{{Name: "stet.toml"}}, nil), testAssetLimits); err != nil {
 		t.Fatalf("a plain bundle: %v", err)
 	}
 	if tr, _, done, err := untar(sparseBundle()); err == nil {
@@ -1962,11 +1967,11 @@ func TestABundleIsBoundedInEveryDimension(t *testing.T) {
 		"a field name in capitals":      manifest("name = \"tidy\"\nName = \"other\"\nentry = \"python editor.py\"\n"),
 		"a field name in other letters": manifest("name = \"tidy\"\nentry = \"python editor.py\"\n\"licen\u017fe\" = \"x\"\n"),
 	} {
-		if _, _, err := parseBundle(blob); err == nil {
+		if _, _, err := parseBundle(blob, testAssetLimits); err == nil {
 			t.Fatalf("a bundle with %s was accepted", what)
 		}
 	}
-	if _, _, err := parseBundle(manifest("name = \"tidy\"\nentry = \"python editor.py\"\nmine = 3\n")); err != nil {
+	if _, _, err := parseBundle(manifest("name = \"tidy\"\nentry = \"python editor.py\"\nmine = 3\n"), testAssetLimits); err != nil {
 		t.Fatalf("a key of the entrant's own: %v", err)
 	}
 }
@@ -2002,6 +2007,8 @@ func bigManifest() []byte {
 
 // sparseBundle is a bundle holding a file that says it is a terabyte of nothing. Go's tar
 // writer will not make one, so the blocks are written by hand.
+var testAssetLimits = AssetLimits{MaxFiles: 32, MaxBytes: 4 << 30}
+
 func sparseBundle() []byte {
 	block := func(name string, size int, typeflag byte) []byte {
 		h := make([]byte, 512)
@@ -2363,7 +2370,7 @@ func TestAMachineThatBuildsTheRoundDifferentlyIsNotGivenMoreOfIt(t *testing.T) {
 	tw.Write([]byte(manifest))
 	tw.Close()
 	enc, _ := zstd.NewWriter(nil)
-	if _, _, err := parseBundle(enc.EncodeAll(tb.Bytes(), nil)); err == nil || !strings.Contains(err.Error(), "ordinary text") {
+	if _, _, err := parseBundle(enc.EncodeAll(tb.Bytes(), nil), testAssetLimits); err == nil || !strings.Contains(err.Error(), "ordinary text") {
 		t.Fatalf("a description with terminal escapes in it: %v", err)
 	}
 	w.check()

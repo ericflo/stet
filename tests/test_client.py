@@ -168,6 +168,9 @@ class Stop(Exception):
     pass
 
 
+FAST_MACHINE = {"gpu": "Test GPU", "gpu_tokens_per_second": 500_000, "cpu_mb_per_second": 500, "cores": 16, "memory_gb": 64, "gpu_memory_gb": 24, "disk_gb": 500, "at": 0}
+
+
 class Args:
     once = False
     max_jobs = 0
@@ -184,7 +187,13 @@ def loop(monkeypatch):
     import sys
     import types
 
-    from stet import cli
+    from stet import bench, cli, env
+
+    # This machine, as far as `stet verify` can tell, has the season's libraries and is fast
+    # enough to run editors. The tests of those checks say otherwise where they need to.
+    monkeypatch.setattr(env, "problems", lambda *a, **k: [])
+    monkeypatch.setattr(bench, "saved", lambda *a, **k: FAST_MACHINE)
+    monkeypatch.setattr(bench, "measure", lambda *a, **k: pytest.fail("the machine's speed was measured in a test"))
 
     key = client.create_key()
     key.handle = "tester"
@@ -1149,3 +1158,45 @@ def test_submit_says_which_round_only_when_the_server_expects_it_there(monkeypat
         client.cmd_submit(args)
         err = capsys.readouterr().err.split("Submitted", 1)[1]
         assert said.replace("Submitted", "").strip() in err and unsaid not in err
+
+
+def test_a_machine_without_the_seasons_libraries_takes_no_edit_jobs(loop, monkeypatch, capsys):
+    from stet import env, runner
+
+    for check in ("bwrap_available", "scope_available", "sandbox_selftest"):
+        monkeypatch.setattr(runner, check, lambda: (True, ""))
+    monkeypatch.setattr(env, "problems", lambda season, only=None: [] if only else ["a different version: transformers 5.0.0 (the season's is 5.23.0)"])
+    args = Args()
+    args.edits = True
+    with pytest.raises(SystemExit):
+        client.cmd_verify(args)
+    err = capsys.readouterr().err
+    assert "promised the season's Python and libraries" in err and "transformers 5.0.0" in err and "install.sh" in err
+
+
+def test_a_machine_slower_than_the_floor_takes_no_edit_jobs_and_is_told_it_can_grade(loop, monkeypatch, capsys):
+    from stet import bench, runner
+
+    for check in ("bwrap_available", "scope_available", "sandbox_selftest"):
+        monkeypatch.setattr(runner, check, lambda: (True, ""))
+    monkeypatch.setattr(bench, "saved", lambda *a, **k: {**FAST_MACHINE, "gpu_tokens_per_second": 10, "gpu_memory_gb": 6})
+    args = Args()
+    args.edits = True
+    with pytest.raises(SystemExit):
+        client.cmd_verify(args)
+    err = capsys.readouterr().err
+    assert "cannot run editors for the leaderboard" in err and "slower than the floor" in err and "It can still grade" in err
+
+
+def test_a_grader_with_another_pytorch_is_turned_away_before_it_grades(loop, monkeypatch, capsys):
+    from stet import env
+
+    monkeypatch.setattr(env, "problems", lambda season, only=None: ["a different version: torch 2.9.0 (the season's is 2.15.0)"] if only == ("torch",) else [])
+    from stet.spec import load_season
+
+    monkeypatch.setattr(Args, "any_device", False, raising=False)
+    monkeypatch.setitem(load_season("s0").raw, "grade_devices", ["cuda", "cpu"])  # the test machine's device counts, so the check is reached
+    loop.claims = [a_job()]
+    with pytest.raises(SystemExit):
+        client.cmd_verify(Args())
+    assert "the season's PyTorch" in capsys.readouterr().err and not loop.graded

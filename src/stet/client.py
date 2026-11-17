@@ -890,7 +890,10 @@ def _edit_job(job, season, scale, key, out, work: Path, sandbox: str) -> dict:
         return payload
     from .pipeline import edit_round
 
-    edit = edit_round(bundle_dir, project.entry, rnd, scale, work, sandbox=sandbox, log=lambda m: out.line("", out.dim(m)), limits={"required": sandbox == "bwrap"})
+    edit = edit_round(
+        bundle_dir, project.entry, rnd, scale, work, sandbox=sandbox, log=lambda m: out.line("", out.dim(m)),
+        limits={"required": sandbox == "bwrap"}, assets=project.assets,
+    )  # fmt: skip
     payload["edit"] = edit.to_dict()
     payload["finished_at"] = int(time.time())
     if edit.script is not None:
@@ -1067,7 +1070,7 @@ def cmd_verify(args):
 
 
 def _verify(args):
-    from .cli import Out, torch_index_hint
+    from .cli import Out
     from .data import heldout_pack_file, heldout_pack_path
     from .runner import bwrap_available, remove_tree, sandbox_selftest, scope_available
     from .spec import load_season
@@ -1088,10 +1091,17 @@ def _verify(args):
             "  computed with the same arithmetic. You can still build, run and submit editors on this machine.\n"
         )
         sys.exit(1)
+    from . import bench, env
+
+    dev = os.environ.get("STET_DEV") == "1"
+    # Every grade is trained by the same PyTorch. A different version is a different trainer.
+    if (wrong := env.problems(season, only=("torch",))) and not dev and not args.any_device:
+        sys.stderr.write(f"stet: grading for the leaderboard uses the season's PyTorch, and this machine's is {'; '.join(wrong)}.\n  The installer puts it right: curl -fsSL https://www.stetrun.com/install.sh | sh\n")
+        sys.exit(1)
     sandbox = "none"
     if args.edits:
         sandbox = "none" if args.no_sandbox else "bwrap"
-        if sandbox == "none" and os.environ.get("STET_DEV") != "1":
+        if sandbox == "none" and not dev:
             sys.stderr.write("stet: edit jobs run other people's code, and only ever in the sandbox\n")
             sys.exit(1)
         if sandbox == "bwrap":
@@ -1099,6 +1109,21 @@ def _verify(args):
                 if not ok:
                     sys.stderr.write(f"stet: edit jobs run other people's code and need the sandbox: {why}\n")
                     sys.exit(1)
+        # An editor may import any of the season's libraries and is promised a machine no
+        # slower than the floor. A machine that cannot keep either promise takes no edit jobs.
+        if (wrong := env.problems(season)) and not dev:
+            sys.stderr.write("stet: editors are promised the season's Python and libraries, and this machine's differ:\n  " + "\n  ".join(w[:400] for w in wrong)
+                             + "\n  The installer puts it right: curl -fsSL https://www.stetrun.com/install.sh | sh\n")  # fmt: skip
+            sys.exit(1)
+        measured = bench.saved()
+        if measured is None:
+            out.line("", out.dim("measuring this machine's speed (about half a minute; it is kept for a week) ..."))
+            measured = bench.measure(season)
+            bench.save(measured)
+        if (short := bench.shortfalls(season, measured)) and not dev:
+            sys.stderr.write("stet: this machine cannot run editors for the leaderboard: " + "; ".join(short) + ".\n  It can still grade: stet verify\n")
+            sys.exit(1)
+        hw = {**hw, "bench": {k: measured.get(k) for k in ("gpu_tokens_per_second", "cpu_mb_per_second", "cores", "memory_gb", "gpu_memory_gb")}}
     try:
         slot, lock = claim_workdir()  # `lock` is held until this process ends
     except OSError as e:
@@ -1191,7 +1216,7 @@ def _verify(args):
                 r = request("POST", "/api/v1/jobs/claim", hello, key=key)
             except ApiError as e:
                 if e.status in (400, 401, 403, 426):
-                    sys.stderr.write(f"stet: {e}\n" + (torch_index_hint() if e.status == 426 else ""))
+                    sys.stderr.write(f"stet: {e}\n")
                     sys.exit(1)
                 out.line("", out.dim(f"server unavailable ({e}); retrying in 60s"))
                 time.sleep(60)

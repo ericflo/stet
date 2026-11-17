@@ -67,6 +67,8 @@ type Editor struct {
 	Status      string       `json:"status"`              // queued | running | retired | withdrawn
 	GithubID    int64        `json:"github_id,omitempty"` // whose it was when submitted
 	Public      bool         `json:"public,omitempty"`
+	Assets      []Asset      `json:"assets,omitempty"`      // files it needs by reference: model weights
+	AssetBytes  int64        `json:"asset_bytes,omitempty"` // and what they come to
 }
 
 type Round struct {

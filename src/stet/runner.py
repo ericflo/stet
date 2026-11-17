@@ -7,9 +7,14 @@ Two modes:
 
 Inside the sandbox an editor has no network, a private process tree, and a file system
 made of: the system's software read-only, the corpus read-only, its own bundle read-only,
-a memory-backed scratch directory, and one output directory. The home directory, the Stet
-cache and the exam are not mounted, /etc is reduced to what a dynamic linker needs and /sys
-to what a GPU driver needs. Memory and process counts are capped by a cgroup.
+the files it named as assets read-only, a memory-backed scratch directory, and one output
+directory. The home directory, the Stet cache and the exam are not mounted, /etc is reduced
+to what a dynamic linker needs and /sys to what a GPU driver needs.
+
+Every editor is given the same machine, whatever the machine that runs it has: the
+season's number of CPU cores, its memory, and its GPU memory ("machine" in the season
+file). Memory, CPU time and process counts are capped by a cgroup. The GPU has no such
+thing, so the GPU memory limit is PyTorch's own, set through the environment.
 
 What it does not do, so that nobody relies on it:
 
@@ -21,6 +26,10 @@ What it does not do, so that nobody relies on it:
     virtual machine.
   - The memory cap is the cgroup's. Memory a GPU driver allocates for the editor may not
     be charged to it; on a machine whose GPU shares system memory that is ordinary RAM.
+  - The GPU memory limit binds PyTorch, in each process, and a program can lift it. So
+    can it widen the set of cores it runs on (where the cgroup cannot cap CPU time, that
+    is the only limit there is). Bundles are public: an editor that does either breaks
+    the rules in plain sight.
   - The output directory is on disk and has no quota. The harness watches it and kills an
     editor that writes too much, hides what it wrote, or runs the disk low.
 
@@ -65,21 +74,86 @@ GPU_DEVICES = ("/dev/nvidiactl", "/dev/nvidia-uvm", "/dev/nvidia-uvm-tools", "/d
 SYSTEM_DIRS = ("/usr", "/opt")
 USR_LINKS = ("/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32")
 ETC_ALLOW = ("ld.so.cache", "ld.so.conf", "ld.so.conf.d", "alternatives", "OpenCL", "vulkan", "glvnd")
-DEFAULT_LIMITS = {"memory_gb": 48, "tasks": 4096, "scratch_gb": 16, "required": False}
+# Used for a season that does not say what machine an editor is given.
+DEFAULT_LIMITS = {"memory_gb": 48, "tasks": 4096, "scratch_gb": 16, "cores": 0, "gpu_memory_gb": 0, "required": False}
+# Inside the sandbox nothing can be downloaded. Libraries that would try are told so, and
+# fail at once with a message instead of waiting on a network that is not there.
+OFFLINE_ENV = {"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1", "HF_DATASETS_OFFLINE": "1", "HF_HUB_DISABLE_TELEMETRY": "1"}
+
+
+def machine_limits(season) -> dict:
+    """What every editor is given this season: see "machine" in the season file."""
+    m = season.raw.get("machine") or {}
+    return {k: m[k] for k in ("cores", "memory_gb", "gpu_memory_gb", "scratch_gb") if k in m}
+
+
+def pick_cpus(n: int) -> list[int]:
+    """Which CPUs an editor runs on: `n` of them, each on a different physical core, the
+    fastest cores first. Fewer if the machine has fewer; all of them if n is 0."""
+    try:
+        allowed = sorted(os.sched_getaffinity(0))
+    except AttributeError:  # not Linux
+        return []
+    if n <= 0 or n >= len(allowed):
+        return allowed
+    best: dict[tuple[str, str], tuple[int, int]] = {}  # physical core -> (-speed, cpu)
+    for cpu in allowed:
+        base = f"/sys/devices/system/cpu/cpu{cpu}"
+        try:
+            core = (Path(f"{base}/topology/physical_package_id").read_text().strip(), Path(f"{base}/topology/core_id").read_text().strip())
+        except OSError:
+            core = ("?", str(cpu))
+        try:
+            speed = int(Path(f"{base}/cpufreq/cpuinfo_max_freq").read_text())
+        except (OSError, ValueError):
+            speed = 0
+        if core not in best:
+            best[core] = (-speed, cpu)
+    cpus = [cpu for _, cpu in sorted(best.values())[:n]]
+    spare = [c for c in allowed if c not in cpus]
+    return sorted(cpus + spare[: n - len(cpus)])  # fewer physical cores than n: hyperthreads make up the number
+
+
+_gpu_total: list[int] = []
+
+
+def gpu_total_bytes() -> int:
+    """How much memory PyTorch says the GPU has, or 0 with no usable GPU. Asked once."""
+    if not _gpu_total:
+        total = 0
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                total = int(torch.cuda.mem_get_info()[1])
+        except Exception:
+            total = 0
+        _gpu_total.append(total)
+    return _gpu_total[0]
 
 
 # What the sandbox starts, and it starts the editor. It tells the harness that the sandbox
 # came up, on a pipe it closes before the editor exists. A message in the editor's output
 # could say anything; this cannot be forged, so "the sandbox failed" and "the editor
 # failed" are never confused.
+# Before that it puts itself on the CPUs the editor is given. Everything the editor starts
+# inherits them, and libraries that size their thread pools by the CPUs they may use get
+# the right answer.
 LAUNCHER = """import os, sys
 fd = int(sys.argv[1])
+cpus = [int(c) for c in sys.argv[2].split(",") if c]
+if cpus:
+    try:
+        os.sched_setaffinity(0, cpus)
+    except OSError as e:
+        sys.stderr.write(f"stet: cannot limit the editor to {len(cpus)} CPUs: {e.strerror}\\n")
+        sys.exit(126)
 os.write(fd, b"up")
 os.close(fd)
 try:
-    os.execvp(sys.argv[2], sys.argv[2:])
+    os.execvp(sys.argv[3], sys.argv[3:])
 except OSError as e:
-    sys.stderr.write(f"stet: cannot start {sys.argv[2]!r}: {e.strerror}\\n")
+    sys.stderr.write(f"stet: cannot start {sys.argv[3]!r}: {e.strerror}\\n")
     sys.exit(127)
 """
 
@@ -113,10 +187,12 @@ class EditRun:
         }
 
 
-def task_info(rnd: Round, scale: Scale, time_limit: float) -> dict:
+def task_info(rnd: Round, scale: Scale, time_limit: float, machine: dict | None = None, assets=()) -> dict:
     """Everything an editor is told. Nothing here depends on the exam passages or the seed."""
     season = rnd.season
     return {
+        "machine": {k: (machine or {}).get(k, 0) for k in ("cores", "memory_gb", "gpu_memory_gb", "scratch_gb")},
+        "assets": [a.path for a in assets],
         "season": season.id,
         "round": rnd.id,
         "kind": rnd.kind,
@@ -218,22 +294,29 @@ def scope_available() -> tuple[bool, str]:
     Asks for a small scope and reads the limits back from inside it: systemd accepting the
     properties is not the same as the kernel enforcing them.
     """
+    ok, why, _ = scope_limits()
+    return ok, why
+
+
+def scope_limits() -> tuple[bool, str, bool]:
+    """(memory and process limits work, the program or why not, CPU time can be capped too)."""
     exe = shutil.which("systemd-run")
     if not exe:
-        return False, "systemd-run is not installed"
-    probe = 'g=$(cut -d: -f3 /proc/self/cgroup | head -n 1); cat "/sys/fs/cgroup$g/memory.max" "/sys/fs/cgroup$g/pids.max"'
+        return False, "systemd-run is not installed", False
+    probe = 'g=$(cut -d: -f3 /proc/self/cgroup | head -n 1); cat "/sys/fs/cgroup$g/memory.max" "/sys/fs/cgroup$g/pids.max"; cat "/sys/fs/cgroup$g/cpu.max" 2>/dev/null; true'
     try:
         r = subprocess.run(
-            [exe, "--user", "--scope", "--quiet", "--collect", "-p", "MemoryMax=64M", "-p", "TasksMax=16", "--", "/bin/sh", "-c", probe],
+            [exe, "--user", "--scope", "--quiet", "--collect", "-p", "MemoryMax=64M", "-p", "TasksMax=16", "-p", "CPUQuota=200%", "--", "/bin/sh", "-c", probe],
             capture_output=True, text=True, timeout=20,
         )  # fmt: skip
     except Exception as e:
-        return False, f"systemd-run failed to start: {e}"
+        return False, f"systemd-run failed to start: {e}", False
     if r.returncode != 0:
-        return False, "cannot create a limited scope with systemd-run --user: " + r.stderr.strip()[:300]
-    if r.stdout.split() != [str(64 << 20), "16"]:
-        return False, "systemd-run --user made a scope, but its memory and process limits are not in force (are the cgroup controllers delegated?)"
-    return True, exe
+        return False, "cannot create a limited scope with systemd-run --user: " + r.stderr.strip()[:300], False
+    said = r.stdout.split()
+    if said[:2] != [str(64 << 20), "16"]:
+        return False, "systemd-run --user made a scope, but its memory and process limits are not in force (are the cgroup controllers delegated?)", False
+    return True, exe, said[2:4] == ["200000", "100000"]
 
 
 def _sys_binds() -> list[str]:
@@ -246,7 +329,9 @@ def _sys_binds() -> list[str]:
     return sorted(p for p in want if os.path.isdir(p))
 
 
-def bwrap_command(bundle: Path, corpus_dir: Path, out_dir: Path, scratch_dir: Path | None, pkg_dir: Path, etc_dir: Path, scratch_bytes: int) -> list[str]:
+def bwrap_command(
+    bundle: Path, corpus_dir: Path, out_dir: Path, scratch_dir: Path | None, pkg_dir: Path, etc_dir: Path, scratch_bytes: int, assets=()
+) -> list[str]:
     small = str(256 << 20)
     cmd = [
         "bwrap", "--die-with-parent", "--new-session", "--clearenv",
@@ -284,13 +369,22 @@ def bwrap_command(bundle: Path, corpus_dir: Path, out_dir: Path, scratch_dir: Pa
         "--ro-bind", str(bundle), "/editor",
         "--ro-bind", str(corpus_dir), "/corpus",
         "--bind", str(out_dir), "/out",
+        "--dir", "/assets",
     ]  # fmt: skip
+    for a in assets:  # each file by its hash in the cache, under the path the entry gave it
+        cmd += ["--ro-bind", str(_asset_file(a)), f"/assets/{a.path}"]
     if scratch_dir is None:
         cmd += ["--size", str(scratch_bytes), "--tmpfs", "/scratch"]  # memory-backed, so the cgroup bounds it
     else:
         cmd += ["--bind", str(scratch_dir), "/scratch"]
     cmd += ["--chdir", "/editor"]
     return cmd
+
+
+def _asset_file(asset) -> Path:
+    from .assets import cached
+
+    return cached(asset)
 
 
 def _usage(path: Path, max_entries: int) -> tuple[int, int, bool]:
@@ -469,23 +563,31 @@ def run_editor(
     sandbox: str = "none",
     echo: bool = False,
     limits: dict | None = None,
+    assets=(),
 ) -> EditRun:
     """Run `entry` from the bundle directory against a corpus.
+
+    `assets` are the files the editor named by reference (stet.assets.Asset). They must be
+    in the cache already: fetching them is the caller's job, and is not on the clock.
 
     Never raises on editor failure: whatever the bundle or its program does wrong comes
     back as an EditRun. Raises HarnessError when this machine is at fault: the sandbox
     cannot be set up, the disk is short, or what a previous editor left cannot be removed.
     """
-    limits = {**DEFAULT_LIMITS, **(limits or {})}
+    limits = {**DEFAULT_LIMITS, **machine_limits(rnd.season), **(limits or {})}
     bundle = bundle.resolve()
     work = work.resolve()
     out_dir = work / "out"
     scratch_dir = work / "scratch"
     etc_dir = work / "etc"
-    for d in (out_dir, scratch_dir, etc_dir):
+    assets_dir = work / "assets"
+    for d in (out_dir, scratch_dir, etc_dir, assets_dir):
         if not remove_tree(d):
             raise HarnessError(f"could not clear {d} before the run")
         d.mkdir(parents=True)
+    for a in assets:
+        if not _asset_file(a).is_file():
+            raise HarnessError(f"the asset {a.path} has not been fetched")
     free = shutil.disk_usage(work).free
     if free < FREE_SPACE_FLOOR + OUT_LIMIT_BYTES:
         raise HarnessError(f"only {free / 1e9:.1f} GB free under {work}; running an editor needs {(FREE_SPACE_FLOOR + OUT_LIMIT_BYTES) / 1e9:.0f} GB")
@@ -514,8 +616,15 @@ def run_editor(
         "STET_CORPUS": "/corpus" if inside else str(corpus.path.resolve()),
         "STET_OUT": "/out" if inside else str(out_dir),
         "STET_SCRATCH": "/scratch" if inside else str(scratch_dir),
+        "STET_ASSETS": "/assets" if inside else str(assets_dir),
     }
-    (out_dir / "task.json").write_text(json.dumps(task_info(rnd, scale, time_limit), indent=1))
+    if not inside and assets:
+        from .assets import link_tree
+
+        link_tree(list(assets), assets_dir)
+    cpus = pick_cpus(int(limits["cores"])) if int(limits["cores"]) > 0 else []
+    machine = {**limits, "cores": len(cpus) or (os.cpu_count() or 1)}
+    (out_dir / "task.json").write_text(json.dumps(task_info(rnd, scale, time_limit, machine, assets), indent=1))
     env = {
         "PATH": os.pathsep.join([os.path.dirname(py_exe), "/usr/local/bin", "/usr/bin", "/bin"]),
         "PYTHONPATH": os.pathsep.join(["/stet-pkg"] + py_path) if inside else str(pkg_dir.parent),
@@ -525,8 +634,16 @@ def run_editor(
         "STET_TIME_LIMIT": str(time_limit),
         "HOME": "/scratch" if inside else str(scratch_dir),
         "TMPDIR": "/tmp" if inside else str(scratch_dir),
+        "HF_HOME": "/scratch/hf" if inside else str(scratch_dir / "hf"),
+        "NUMBA_CACHE_DIR": "/scratch/numba" if inside else str(scratch_dir / "numba"),
+        **OFFLINE_ENV,
         **paths,
     }
+    # The same GPU memory on every machine: PyTorch is told what fraction of this card that is.
+    gpu_cap = float(limits["gpu_memory_gb"]) * 2**30
+    if gpu_cap > 0 and (total := gpu_total_bytes()) > 0:
+        env["PYTORCH_ALLOC_CONF"] = f"per_process_memory_fraction:{min(1.0, gpu_cap / total):.6f}"
+        env["STET_GPU_MEMORY_BYTES"] = str(int(min(gpu_cap, total)))
     for k in ("LD_LIBRARY_PATH", "CUDA_VISIBLE_DEVICES", "HSA_OVERRIDE_GFX_VERSION", "ROCM_PATH", "HIP_VISIBLE_DEVICES", "TORCH_BLAS_PREFER_HIPBLASLT"):
         if k in os.environ:
             env[k] = os.environ[k]
@@ -539,21 +656,26 @@ def run_editor(
             raise HarnessError(f"refusing to sandbox: {why}")
         (etc_dir / "passwd").write_text("stet:x:1000:1000:stet:/scratch:/bin/sh\n")
         (etc_dir / "group").write_text("stet:x:1000:\n")
-        scoped, why = scope_available()
+        scoped, why, cpu_capped = scope_limits()
         if not scoped and limits["required"]:
             raise HarnessError(f"cannot limit the sandbox's memory and processes: {why}")
         scratch_bytes = int(limits["scratch_gb"]) << 30
-        cmd = bwrap_command(bundle, corpus.path.resolve(), out_dir, None if scoped else scratch_dir, pkg_dir, etc_dir, scratch_bytes)
+        cmd = bwrap_command(bundle, corpus.path.resolve(), out_dir, None if scoped else scratch_dir, pkg_dir, etc_dir, scratch_bytes, assets)
         popen_env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin")}
         if scoped:
             for k in ("XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"):
                 if k in os.environ:
                     popen_env[k] = os.environ[k]
             applied = {"memory_gb": limits["memory_gb"], "tasks": limits["tasks"], "scratch_gb": limits["scratch_gb"]}
-            cmd = [
-                "systemd-run", "--user", "--scope", "--quiet", "--collect",
-                "-p", f"MemoryMax={int(limits['memory_gb'])}G", "-p", "MemorySwapMax=0", "-p", f"TasksMax={int(limits['tasks'])}", "--",
-            ] + cmd  # fmt: skip
+            props = ["-p", f"MemoryMax={int(limits['memory_gb'])}G", "-p", "MemorySwapMax=0", "-p", f"TasksMax={int(limits['tasks'])}"]
+            if cpus and cpu_capped:
+                props += ["-p", f"CPUQuota={100 * len(cpus)}%"]
+            cmd = ["systemd-run", "--user", "--scope", "--quiet", "--collect", *props, "--", *cmd]
+        if cpus:
+            applied["cores"] = len(cpus)
+            applied["cpu_time_capped"] = bool(scoped and cpu_capped)
+        if "PYTORCH_ALLOC_CONF" in env:
+            applied["gpu_memory_gb"] = limits["gpu_memory_gb"]
         cwd = None
     else:
         cmd = argv
@@ -570,7 +692,7 @@ def run_editor(
         up_r, up_w = os.pipe()
         for k, v in env.items():
             cmd += ["--setenv", k, v]
-        cmd += ["--", py_exe, "-I", "-c", LAUNCHER, str(up_w)] + argv
+        cmd += ["--", py_exe, "-I", "-c", LAUNCHER, str(up_w), ",".join(map(str, cpus))] + argv
 
     status = "ok"
     reason = ""
@@ -630,6 +752,11 @@ def run_editor(
             finally:
                 if up_w is not None:
                     os.close(up_w)
+            if not inside and cpus:
+                try:  # a run on your own machine: the same cores, set from outside, a moment late
+                    os.sched_setaffinity(proc.pid, cpus)
+                except OSError:
+                    pass
             t.start()
             threading.Thread(target=watch, daemon=True).start()
             while proc.poll() is None:
@@ -727,4 +854,43 @@ def sandbox_selftest() -> tuple[bool, str]:
             return False, str(e)
         if run.status != "ok" or run.script is None or run.script.read_text().split() != ["0"]:
             return False, f"a trivial editor did not run in the sandbox ({run.status}: {run.reason or run.log_tail.strip()[-300:]})"
+        if gpu_total_bytes() <= 0:
+            return True, ""
+        # An editor is promised the GPU and the season's libraries. Find out here, not from
+        # the first entrant whose editor fails for a reason that is this machine's.
+        want = int(machine_limits(season).get("cores") or 0)
+        (root / "bundle" / "editor.py").write_text(GPU_PROBE.replace("WANT_CORES", str(want)))
+        try:
+            run = run_editor(root / "bundle", "python editor.py", Corpus(root / "corpus"), practice_round(season, 0), season.scale("nano"),
+                             root / "work", 180, sandbox="bwrap", limits={"required": True})  # fmt: skip
+        except HarnessError as e:
+            return False, str(e)
+        if run.status != "ok" or run.script is None:
+            return False, f"an editor could not use the GPU inside the sandbox ({run.status}: {run.reason or ''} {run.log_tail.strip()[-400:]})"
     return True, ""
+
+
+# What sandbox_selftest runs second: the GPU answers, its memory limit is in force, and the
+# editor is on the cores it was given.
+GPU_PROBE = """import os, sys
+from stet.editor import Task
+task = Task.from_env()
+import torch
+if not torch.cuda.is_available():
+    sys.exit("PyTorch cannot see the GPU inside the sandbox")
+x = torch.randn(512, 512, device="cuda", dtype=torch.float16)
+if not torch.isfinite((x @ x).float().sum()).item():
+    sys.exit("the GPU gave a result that is not a number")
+want = WANT_CORES
+if want and len(os.sched_getaffinity(0)) > want:
+    sys.exit(f"the editor is on {len(os.sched_getaffinity(0))} CPUs, not {want}")
+limit = float(os.environ.get("STET_GPU_MEMORY_BYTES") or 0)
+if limit and limit < torch.cuda.mem_get_info()[1] * 0.98:
+    try:
+        torch.empty(int(limit * 1.05), dtype=torch.uint8, device="cuda")
+    except torch.OutOfMemoryError:
+        pass
+    else:
+        sys.exit("the GPU memory limit is not in force")
+task.write([i for i, _ in task.corpus])
+"""

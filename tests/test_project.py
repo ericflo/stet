@@ -55,7 +55,7 @@ def test_a_bundle_that_is_too_big_says_what_can_be_done_about_it(tmp_path, monke
     monkeypatch.setattr(project, "MAX_BUNDLE_BYTES", 2000)
     with pytest.raises(ProjectError) as e:
         pack(p)
-    assert "assets" not in str(e.value) and "Nothing can be downloaded" in str(e.value)
+    assert "stet asset add" in str(e.value) and "fetched before the editor starts" in str(e.value)
     monkeypatch.setattr(project, "MAX_BUNDLE_FILES", 2)
     with pytest.raises(ProjectError, match="at most 2"):
         pack(p)
@@ -119,7 +119,8 @@ NOT_AS_THE_SERVER_READS_IT = {
     "'ENTRY' must be written entry": [OK + 'ENTRY = "sh -c anything"\n', 'name = "an-editor"\nENTRY = "python editor.py"\n'],
     "'Assets' must be written assets": [OK + '[[Assets]]\nurl = "http://x.test/model.bin"\n'],
     "must be written license": [OK + 'LICENSE = "proprietary"\n', OK + '"licen\u017fe" = "x"\n'],
-    "are not supported this season": [OK + "assets = 5\n", OK + 'assets = "none"\n', OK + "assets = false\n", OK + "assets = {}\n", OK + '[[assets]]\nurl = "x"\n'],
+    r"must be written as \[\[assets\]\] tables": [OK + "assets = 5\n", OK + 'assets = "none"\n', OK + "assets = false\n", OK + "assets = {}\n", OK + "assets = [1]\n"],
+    "asset 1: missing path": [OK + '[[assets]]\nurl = "x"\n'],
 }
 AS_THE_SERVER_READS_IT = [
     OK + "budget = 9223372036854775807\nfloor = -9223372036854775808\nrate = 1e308\nnone = inf\nodd = nan\nflag = true\n",

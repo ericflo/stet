@@ -30,7 +30,82 @@ const (
 var (
 	editorNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,38}[a-z0-9]$`)
 	sha256Re     = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	// These three mirror src/stet/assets.py.
+	assetURLRe  = regexp.MustCompile(`^https://huggingface\.co/(?:datasets/)?[A-Za-z0-9][A-Za-z0-9._-]{0,95}/[A-Za-z0-9][A-Za-z0-9._-]{0,95}/resolve/[0-9a-f]{40}/[A-Za-z0-9][A-Za-z0-9._/-]{0,400}$`)
+	assetPartRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$`)
 )
+
+const maxAssetPath = 200
+
+// Asset is a file an editor needs that is too big for its bundle: public, pinned to a
+// commit, and named by its hash. See src/stet/assets.py for the rules and the reasons.
+type Asset struct {
+	Path   string `json:"path"`
+	URL    string `json:"url"`
+	SHA256 string `json:"sha256"`
+	Size   int64  `json:"size"`
+}
+
+// parseAssets checks the [[assets]] tables of a manifest. It mirrors stet.assets.parse.
+func parseAssets(raw []map[string]any, lim AssetLimits) ([]Asset, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	if lim.MaxFiles == 0 {
+		return nil, errors.New("stet.toml: this season does not allow [[assets]]")
+	}
+	if len(raw) > lim.MaxFiles {
+		return nil, fmt.Errorf("stet.toml: %d assets; the limit is %d", len(raw), lim.MaxFiles)
+	}
+	var out []Asset
+	var total int64
+	seen := map[string]string{}
+	for i, t := range raw {
+		where := fmt.Sprintf("stet.toml: asset %d", i+1)
+		for k := range t {
+			if k != "path" && k != "url" && k != "sha256" && k != "size" {
+				return nil, fmt.Errorf("%s: unknown key %q (an asset has path, url, sha256 and size)", where, clip(k, 40))
+			}
+		}
+		p, ok1 := t["path"].(string)
+		u, ok2 := t["url"].(string)
+		sha, ok3 := t["sha256"].(string)
+		size, ok4 := t["size"].(int64)
+		if !ok1 || !ok2 || !ok3 {
+			return nil, fmt.Errorf("%s: path, url and sha256 are required, and are strings", where)
+		}
+		if !ok4 || size < 1 {
+			return nil, fmt.Errorf("%s: size must be the file's length in bytes", where)
+		}
+		if len(p) > maxAssetPath {
+			return nil, fmt.Errorf("%s: the path is over %d characters", where, maxAssetPath)
+		}
+		for _, part := range strings.Split(p, "/") {
+			if !assetPartRe.MatchString(part) {
+				return nil, fmt.Errorf("%s: path %q must be a relative path of plain names (letters, digits, dot, dash and underscore, none starting with a dot)", where, clip(p, 60))
+			}
+		}
+		if !assetURLRe.MatchString(u) || strings.Contains(u, "..") || strings.Contains(u[8:], "//") {
+			return nil, fmt.Errorf("%s: the url must be a Hugging Face file pinned to a commit: https://huggingface.co/<owner>/<repository>/resolve/<40-character commit>/<file>", where)
+		}
+		if !sha256Re.MatchString(sha) {
+			return nil, fmt.Errorf("%s: sha256 must be 64 lowercase hex characters", where)
+		}
+		key := strings.ToLower(p)
+		for other, name := range seen {
+			if key == other || strings.HasPrefix(key, other+"/") || strings.HasPrefix(other, key+"/") {
+				return nil, fmt.Errorf("%s: path %q collides with %q", where, p, name)
+			}
+		}
+		seen[key] = p
+		total += size
+		if total > lim.MaxBytes {
+			return nil, fmt.Errorf("stet.toml: the assets come to more than the limit of %d GiB", lim.MaxBytes>>30)
+		}
+		out = append(out, Asset{Path: p, URL: u, SHA256: sha, Size: size})
+	}
+	return out, nil
+}
 
 type Manifest struct {
 	Name        string           `toml:"name"`
@@ -40,6 +115,8 @@ type Manifest struct {
 	Parent      string           `toml:"parent"`
 	License     string           `toml:"license"`
 	Assets      []map[string]any `toml:"assets"`
+
+	Files []Asset `toml:"-"` // the assets, checked
 }
 
 type BundleFile struct {
@@ -86,7 +163,7 @@ func leftOut(p string) string {
 }
 
 // parseBundle validates an uploaded bundle and returns its manifest and file list.
-func parseBundle(blob []byte) (*Manifest, []BundleFile, error) {
+func parseBundle(blob []byte, lim AssetLimits) (*Manifest, []BundleFile, error) {
 	if len(blob) > maxBundleBytes {
 		return nil, nil, fmt.Errorf("the bundle is %d MB; the limit is %d MB", len(blob)>>20, maxBundleBytes>>20)
 	}
@@ -171,6 +248,14 @@ func parseBundle(blob []byte) (*Manifest, []BundleFile, error) {
 			}
 		}
 	}
+	// Anything but a list of tables is said plainly, before the decoder says it obscurely.
+	if v, ok := keys["assets"]; ok {
+		if _, isTables := v.([]map[string]any); !isTables {
+			if list, isList := v.([]any); !isList || len(list) > 0 {
+				return nil, nil, errors.New("stet.toml: assets must be written as [[assets]] tables")
+			}
+		}
+	}
 	var m Manifest
 	if _, err := toml.Decode(string(manifestRaw), &m); err != nil {
 		return nil, nil, fmt.Errorf("stet.toml is not valid TOML: %v", err)
@@ -196,8 +281,8 @@ func parseBundle(blob []byte) (*Manifest, []BundleFile, error) {
 	if m.Parent != "" && !sha256Re.MatchString(m.Parent) {
 		m.Parent = ""
 	}
-	if len(m.Assets) > 0 {
-		return nil, nil, errors.New("stet.toml: [[assets]] are not supported this season. Put what the editor needs inside the bundle (up to 50 MB)")
+	if m.Files, err = parseAssets(m.Assets, lim); err != nil {
+		return nil, nil, err
 	}
 	return &m, files, nil
 }

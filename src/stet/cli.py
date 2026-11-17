@@ -77,32 +77,14 @@ def die(msg: str, code: int = 1):
 
 
 TORCH_HELP = (
-    "  The installer brings PyTorch with it. Run it again:\n"
+    "  The installer brings PyTorch with it, in the build for this machine's GPU (NVIDIA or AMD).\n"
+    "  Run it again:\n"
     "    curl -fsSL https://www.stetrun.com/install.sh | sh\n"
-    "  For an AMD GPU, give it the ROCm wheel index for your ROCm version (they are listed at\n"
+    "  If it picks the wrong build, name the wheel index yourself (they are listed at\n"
     "  https://pytorch.org/get-started/locally/), for example:\n"
     "    curl -fsSL https://www.stetrun.com/install.sh | STET_TORCH_INDEX=https://download.pytorch.org/whl/rocm7.14 sh\n"
     "  If you installed stet with pip instead, install PyTorch into the same environment."
 )
-
-
-def torch_index_hint() -> str:
-    """For a machine whose PyTorch came from a GPU maker's wheel index: how to keep that
-    build when installing stet again. The plain installer would bring the default one."""
-    import re
-
-    try:
-        import torch
-
-        m = re.search(r"\+((?:rocm|cu)[0-9.]+)$", str(torch.__version__))
-    except Exception:
-        return ""
-    if not m:
-        return ""
-    return (
-        f"  This machine's PyTorch is the {m.group(1)} build. To keep it, give the installer the same index:\n"
-        f"    curl -fsSL https://www.stetrun.com/install.sh | STET_TORCH_INDEX=https://download.pytorch.org/whl/{m.group(1)} sh\n"
-    )
 
 
 def gpu_vendors() -> set[str]:
@@ -278,6 +260,29 @@ def _summary(out: Out, results: list[dict]) -> dict:
     return {"rounds": [r["round"]["id"] for r in results], "gains": gains, "mean_gain": round(mean, 5), "se": None if se is None else round(se, 5)}
 
 
+def _edit_time_line(out: Out, result: dict, season) -> None:
+    """How long the edit took here, and what that means on the slowest machine that runs
+    editors. A time limit in seconds is only as fair as the comparison is plain."""
+    from . import bench
+
+    edit = result.get("edit") or {}
+    took, limit = edit.get("seconds"), edit.get("time_limit")
+    if not took or not limit:
+        return
+    m = bench.saved()
+    if m is None:
+        out.line("edit", f"{took:.0f}s of {limit:.0f}s here. `stet bench` says how this machine compares with the slowest that runs editors")
+        return
+    g, c = bench.ratios(season, m)
+    if g <= 0 or c <= 0:
+        out.line("edit", f"{took:.0f}s of {limit:.0f}s here")
+        return
+    lo, hi = sorted((took * min(g, c), took * max(g, c)))
+    lo, hi = max(lo, took) if min(g, c) >= 1 else lo, hi
+    verdict = "over the limit if most of that time is spent on the faster part" if hi > limit >= lo else ("over the limit" if lo > limit else "inside the limit")
+    out.line("edit", f"{took:.0f}s of {limit:.0f}s here. This machine's GPU is {g:.1f}x and its CPU {c:.1f}x the slowest that runs editors: allow {lo:.0f}-{hi:.0f}s there, {verdict}")
+
+
 def cmd_run(args):
     need_torch()
     from .pipeline import run_round
@@ -313,6 +318,7 @@ def cmd_run(args):
             result = run_round(
                 bundle, project.entry, rnd, scale, work, sandbox=sandbox, device=device,
                 echo=args.verbose, progress=out.progress("training"), log=lambda m: out.line("", out.dim(m)),
+                assets=project.assets, time_limit=getattr(args, "time_limit", None),
             )  # fmt: skip
         finally:
             if bundle != project.path:
@@ -321,6 +327,7 @@ def cmd_run(args):
         base = _with_baseline(result, rnd, scale, device, out, args.no_baseline)
         (work / "result.json").write_text(json.dumps(public_part(args, result), indent=1))
         report(out, result, base, season)
+        _edit_time_line(out, result, season)
         _heldout_line(args, out, result)
         out.line("saved", str((work / "result.json").relative_to(Path.cwd()) if work.is_relative_to(Path.cwd()) else work / "result.json"))
         results.append(result)
@@ -468,12 +475,13 @@ def cmd_fetch(args):
 
 
 def cmd_doctor(args):
-    from . import data
+    from . import bench, data, env
     from .runner import bwrap_available, scope_available
     from .spec import load_season
 
     out = Out()
-    grade_devices = load_season().raw.get("grade_devices", ["cuda"])
+    season = load_season()
+    grade_devices = season.raw.get("grade_devices", ["cuda"])
     rows: list[tuple[str, str, str]] = []
     rows.append((OK, "stet", f"{__version__} on Python {sys.version.split()[0]} ({sys.platform})"))
     try:
@@ -503,6 +511,21 @@ def cmd_doctor(args):
         rows.append((OK, "sandbox", f"bubblewrap at {why}" + (", with memory and process limits" if scoped else "") + " (`stet run --sandbox`)"))
     elif sys.platform == "linux":
         rows.append((WARN, "sandbox", why + ". Optional: only `stet run --sandbox` uses it."))
+    # The libraries an editor may import. `stet run` uses whatever is installed; a machine
+    # that runs editors for others must have exactly the season's.
+    differs = env.problems(season)
+    if not differs:
+        rows.append((OK, "libraries", env.summary(season)))
+    else:
+        rows.append((WARN, "libraries", "not the season's set: " + "; ".join(d[:300] for d in differs) + ".\n  An editor that imports one of these may behave differently here than in an official run. The installer puts it right:\n    curl -fsSL https://www.stetrun.com/install.sh | sh"))
+    m = bench.saved()
+    if m is None:
+        rows.append((WARN, "speed", "not measured yet: `stet bench` (half a minute) compares this machine with the slowest that runs editors"))
+    else:
+        g, c = bench.ratios(season, m)
+        short = bench.shortfalls(season, m)
+        text = f"GPU {g:.1f}x and CPU {c:.1f}x the slowest machine that runs editors"
+        rows.append((OK, "speed", text) if not short else (WARN, "speed", text + ". It cannot run editors for the leaderboard: " + "; ".join(short)))
     cache = data.cache_dir()
     cache.mkdir(parents=True, exist_ok=True)
     free = shutil.disk_usage(cache).free / 2**30
@@ -511,6 +534,125 @@ def cmd_doctor(args):
         mark = {OK: out.good("✓"), WARN: out.c("33", "!"), BAD: out.bad("✗")}[status]
         out.line("", f" {mark} {name:<8} {text}")
     sys.exit(1 if any(s == BAD for s, _, _ in rows) else 0)
+
+
+def cmd_bench(args):
+    """Measure this machine against the slowest that may run editors."""
+    need_torch()
+    from . import bench
+    from .spec import load_season
+
+    out = Out()
+    season = load_season()
+    out.line("", out.dim("measuring CPU and GPU (about half a minute; close other GPU work first) ..."))
+    m = bench.measure(season)
+    bench.save(m)
+    need = bench.floor(season)
+    g, c = bench.ratios(season, m)
+    machine = season.raw.get("machine") or {}
+    out.line("gpu", f"{m['gpu'] or 'none'} · {m['gpu_tokens_per_second']:,.0f} tokens a second · {g:.1f}x the floor of {need['gpu_tokens_per_second']:,.0f} · {m['gpu_memory_gb']:.0f} GB")
+    out.line("cpu", f"{m['cpu_mb_per_second']:.0f} MB a second on {min(int(need['cores']), m['cores'])} cores · {c:.1f}x the floor of {need['cpu_mb_per_second']:.0f} · {m['cores']} cores, {m['memory_gb']:.0f} GB")
+    out.line("", "")
+    out.line("", f"Every editor is given {machine.get('cores', '?')} cores, {machine.get('memory_gb', '?')} GB of memory and {machine.get('gpu_memory_gb', '?')} GB of GPU memory,")
+    out.line("", "on a machine at least as fast as the floor. An editor that fits its time limit on the")
+    out.line("", "floor fits it everywhere, so plan for the floor:")
+    scale = season.scale(season.official_scale)
+    if g > 0 and c > 0:
+        out.line("", f"  the {scale.edit_seconds}s limit at {scale.name} is worth {scale.edit_seconds / max(g, 1e-9):.0f}s of this GPU and {scale.edit_seconds / max(c, 1e-9):.0f}s of this CPU.")
+    short = bench.shortfalls(season, m)
+    out.line("", "")
+    if short:
+        out.line("", "This machine cannot run editors for the leaderboard: " + "; ".join(short) + ".")
+        out.line("", "It can still grade (`stet verify`) if it has an NVIDIA or AMD GPU, and run your own editor (`stet run`).")
+    else:
+        out.line("", "This machine is fast enough to run editors for the leaderboard.")
+    if args.json:
+        json.dump(m, sys.stdout, indent=1)
+        sys.stdout.write("\n")
+
+
+def _manifest_without_assets(text: str) -> str:
+    """stet.toml with its [[assets]] tables taken out, so that they can be written again."""
+    keep, skipping = [], False
+    for line in text.splitlines():
+        head = line.strip()
+        if head.startswith("[[assets]]"):
+            skipping = True
+            continue
+        if skipping and head.startswith("["):
+            skipping = False
+        if not skipping:
+            keep.append(line)
+    return "\n".join(keep).rstrip() + "\n"
+
+
+def cmd_asset(args):
+    """Name the files an editor needs that are too big for its bundle: model weights."""
+    from . import assets as assets_
+    from .project import ProjectError, load_project
+    from .spec import load_season
+
+    out = Out()
+    season = load_season()
+    lim = assets_.limits(season)
+    try:
+        project = load_project(args.path)
+    except ProjectError as e:
+        die(str(e))
+    have: list = list(project.assets)
+
+    def show(items):
+        for a in items:
+            mark = "cached" if assets_.cached(a).exists() else "not fetched"
+            out.line("", f"  {a.size / 1e6:9.1f} MB  {a.path}  {out.dim(mark)}")
+        total = sum(a.size for a in items)
+        out.line("", f"  {len(items)} of {lim['max_files']} files, {total / 2**30:.2f} of {lim['max_bytes'] / 2**30:.0f} GiB")
+
+    if args.action == "list":
+        if not have:
+            out.line("", "This editor names no assets. `stet asset add <owner>/<repository>` adds a Hugging Face repository's files.")
+            return
+        show(have)
+        return
+    if args.action == "fetch":
+        assets_.fetch(have)
+        show(have)
+        return
+    if args.action == "remove":
+        prefix = (args.what or "").strip("/")
+        if not prefix:
+            die("say which to remove: a path, or the directory they are under")
+        keep = [a for a in have if a.path != prefix and not a.path.startswith(prefix + "/")]
+        if len(keep) == len(have):
+            die(f"no asset at or under {prefix!r}")
+        have = keep
+    elif args.action == "add":
+        if not args.what:
+            die("say which repository: stet asset add <owner>/<repository>")
+        try:
+            commit, found, skipped = assets_.lookup(args.what, args.revision or "", args.include or None, args.under or "")
+            if not found:
+                die("nothing in that repository matches. See its file list on Hugging Face, and name files with --include")
+            out.line("", out.dim(f"{args.what} at commit {commit[:12]}"))
+            found = assets_.fill_hashes(found, quiet=True)
+        except assets_.AssetError as e:
+            die(str(e))
+        taken = {a.path for a in found}
+        have = [a for a in have if a.path not in taken] + found
+        if skipped:
+            out.line("", out.dim(f"left out (name them with --include if the editor needs them): {', '.join(skipped[:12])}" + (" ..." if len(skipped) > 12 else "")))
+    try:
+        assets_.parse([{"path": a.path, "url": a.url, "sha256": a.sha256, "size": a.size} for a in have], season)
+    except assets_.AssetError as e:
+        die(str(e))
+    toml = project.path / "stet.toml"
+    text = _manifest_without_assets(toml.read_text(encoding="utf-8"))
+    toml.write_text(text + ("\n" + assets_.to_toml(have) if have else ""), encoding="utf-8")
+    show(have)
+    if args.action == "add":
+        out.line("", "")
+        out.line("", f"Written to stet.toml. In the editor: task.asset(\"{found[0].path.split('/')[0]}\") is the directory holding them.")
+        out.line("", "They are downloaded the first time `stet run` needs them (or now: stet asset fetch).")
 
 
 def cmd_agents(args):
@@ -552,8 +694,22 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--rounds", type=int, default=1, help="run this many consecutive rounds and report the mean gain with its standard error")
     p.add_argument("--sandbox", action="store_true", help="run the editor in the same sandbox official runs use (Linux)")
     p.add_argument("--no-baseline", action="store_true", help="skip the baseline comparison")
+    p.add_argument("--time-limit", type=float, default=None, help="give the editor this many seconds instead of the round's limit (see `stet bench`)")
     p.add_argument("-v", "--verbose", action="store_true", help="show the editor's output as it runs")
     p.set_defaults(fn=cmd_run)
+
+    p = sub.add_parser("asset", help="name model weights and other large files your editor needs (fetched by reference, not bundled)")
+    p.add_argument("action", choices=["add", "list", "fetch", "remove"])
+    p.add_argument("what", nargs="?", help="add: a Hugging Face repository, owner/name. remove: a path or directory")
+    p.add_argument("--path", default=".", help="the editor project (default: here)")
+    p.add_argument("--revision", help="a branch, tag or commit (default: the repository's latest). It is pinned to a commit either way")
+    p.add_argument("--include", action="append", help="only files matching this pattern (may be given more than once), e.g. --include '*.safetensors'")
+    p.add_argument("--under", help="the directory the files appear under for the editor (default: the repository's name, lowercased)")
+    p.set_defaults(fn=cmd_asset)
+
+    p = sub.add_parser("bench", help="measure this machine against the slowest that runs editors")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(fn=cmd_bench)
 
     p = sub.add_parser("score", help="grade an edit script directly, without running an editor")
     p.add_argument("script", help="a script file (.jsonl, or .zst as downloaded), a published script's sha256, or an entry's name in the official round given by --round")
@@ -587,6 +743,7 @@ def main(argv=None):
     if not getattr(args, "fn", None):
         ap.print_help()
         return 0
+    from .assets import AssetError
     from .client import ApiError
     from .data import HeldoutError
     from .project import ProjectError
@@ -597,8 +754,8 @@ def main(argv=None):
     except KeyboardInterrupt:
         die("interrupted", 130)
     except ApiError as e:
-        die(str(e) + ("\n" + torch_index_hint().rstrip() if e.status == 426 and torch_index_hint() else ""))
-    except (OSError, HarnessError, HeldoutError, ProjectError) as e:
+        die(str(e))
+    except (OSError, HarnessError, HeldoutError, ProjectError, AssetError) as e:
         die(str(e))
 
 

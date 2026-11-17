@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from functools import cache
 from importlib import resources
 
-HARNESS_VERSION = "0.2.2"
+HARNESS_VERSION = "0.3.0"
 
 
 @dataclass(frozen=True)
@@ -45,7 +45,7 @@ class Shard:
     url: str
 
 
-POLICY_KEYS = ("reference", "reference_curves", "tolerance", "noise", "record", "heldout_exam")
+POLICY_KEYS = ("reference", "reference_curves", "tolerance", "noise", "record", "heldout_exam", "runner")
 
 
 @dataclass(frozen=True)
@@ -59,8 +59,9 @@ class Season:
         """Hash of everything in the season that decides a score, pool manifests included.
 
         Left out: the numbers that only say how results are read (tolerances, the record
-        rule, reference curves). Those are the server's to apply and can be re-measured
-        without every verifier having to upgrade.
+        rule, reference curves) and who may run editors (the floor for a runner's
+        machine). Those are the server's to apply and can be re-measured without every
+        verifier having to upgrade.
         """
         rules = {k: v for k, v in self.raw.items() if k not in POLICY_KEYS}
         h = hashlib.sha256(json.dumps(rules, sort_keys=True, separators=(",", ":")).encode())

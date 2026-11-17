@@ -257,13 +257,3 @@ def test_an_invalid_run_has_a_gain_of_nothing_written_down(monkeypatch):
     result = {"valid": False, "invalid_reason": "ink over budget"}
     cli._with_baseline(result, None, None, None, out, skip=False)
     assert result["gain"] == 0.0 and result["baseline"]["loss"] == 5.3
-
-
-def test_an_out_of_date_client_on_a_gpu_makers_build_is_told_how_to_keep_it(monkeypatch):
-    for version, tag in (("2.15.0+rocm7.14", "rocm7.14"), ("2.5.1+cu124", "cu124")):
-        monkeypatch.setitem(sys.modules, "torch", types.SimpleNamespace(__version__=version))
-        hint = cli.torch_index_hint()
-        assert f"STET_TORCH_INDEX=https://download.pytorch.org/whl/{tag} sh" in hint and f"the {tag} build" in hint
-    for version in ("2.15.0", "2.15.0+cpu", "2.15.0.dev20261101"):
-        monkeypatch.setitem(sys.modules, "torch", types.SimpleNamespace(__version__=version))
-        assert cli.torch_index_hint() == ""

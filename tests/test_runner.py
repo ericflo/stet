@@ -455,3 +455,100 @@ def test_a_low_disk_with_output_that_cannot_be_measured_is_the_editors_error(cor
             assert run.status == "error" and run.reason == "the editor ran the disk low and made part of its output directory unreadable"
         monkeypatch.undo()
         assert runner.remove_tree(work)
+
+
+# --- the same machine for every editor ---------------------------------------------------------
+#
+# Volunteers' machines differ. What an editor is given does not: the season's cores, memory
+# and GPU memory, the files it named, and no network to fetch anything else.
+
+LOOK = """
+import json, os
+from stet.editor import Task
+task = Task.from_env()
+seen = {"cpus": len(os.sched_getaffinity(0)), "cores": task.cores, "memory_gb": task.memory_gb, "gpu_memory_gb": task.gpu_memory_gb,
+        "offline": os.environ.get("HF_HUB_OFFLINE"), "alloc": os.environ.get("PYTORCH_ALLOC_CONF", ""), "assets": task.info["assets"],
+        "weights": task.asset("smol/model.bin").read_bytes().decode(), "dir": sorted(p.name for p in task.asset("smol").iterdir())}
+try:
+    open(task.asset("smol/model.bin"), "ab").write(b"x"); seen["writable"] = True
+except OSError:
+    seen["writable"] = False
+try:
+    task.asset("smol/missing"); seen["missing"] = "found"
+except FileNotFoundError as e:
+    seen["missing"] = str(e)
+print("LOOK" + json.dumps(seen))
+task.write([0])
+"""
+
+
+def an_asset(blob: bytes, path: str = "smol/model.bin"):
+    import hashlib
+
+    from stet import assets
+
+    a = assets.Asset(path, "https://huggingface.co/o/n/resolve/" + "a" * 40 + "/f", hashlib.sha256(blob).hexdigest(), len(blob))
+    assets.cache().mkdir(parents=True, exist_ok=True)
+    if not assets.cached(a).exists():
+        assets.cached(a).write_bytes(blob)
+        assets.cached(a).chmod(0o444)
+    return a
+
+
+@pytest.mark.parametrize("sandbox", ["none", pytest.param("bwrap", marks=needs_sandbox)])
+def test_an_editor_is_given_its_assets_and_the_seasons_machine(corpus, tmp_path, monkeypatch, sandbox):
+    from stet import runner
+
+    if sys.platform != "linux":
+        pytest.skip("cores are assigned on Linux")
+    monkeypatch.setattr(runner, "_gpu_total", [16 << 30])  # a 16 GB card, whatever this machine has
+    a, b = an_asset(b"the weights"), an_asset(b"{}", "smol/config.json")
+    limits = {"cores": 2, "memory_gb": 4, "gpu_memory_gb": 8}
+    run = run_editor(editor(tmp_path, LOOK), "python editor.py", corpus, RND, SCALE, tmp_path / "work", 60, sandbox=sandbox, limits=limits, assets=[a, b])
+    assert run.status == "ok", run.log_tail
+    seen = json.loads(run.log_tail.split("LOOK", 1)[1].splitlines()[0])
+    want = min(2, len(os.sched_getaffinity(0)))
+    assert seen["cpus"] == want and seen["cores"] == want and seen["memory_gb"] == 4 and seen["gpu_memory_gb"] == 8
+    assert seen["offline"] == "1" and seen["alloc"] == "per_process_memory_fraction:0.500000"
+    assert seen["weights"] == "the weights" and seen["dir"] == ["config.json", "model.bin"] and seen["assets"] == ["smol/model.bin", "smol/config.json"]
+    assert seen["writable"] is False and "no asset at 'smol/missing'" in seen["missing"] and "smol/model.bin" in seen["missing"]
+    if sandbox == "bwrap" and scope_available()[0]:
+        assert run.limits["cores"] == want and run.limits["gpu_memory_gb"] == 8
+
+
+def test_an_asset_that_was_never_fetched_is_the_machines_error(corpus, tmp_path):
+    from stet import assets
+    from stet.runner import HarnessError
+
+    missing = assets.Asset("smol/model.bin", "https://huggingface.co/o/n/resolve/" + "a" * 40 + "/f", "b" * 64, 5)
+    with pytest.raises(HarnessError, match="has not been fetched"):
+        run_editor(editor(tmp_path, WRITE_ALL), "python editor.py", corpus, RND, SCALE, tmp_path / "work", 60, assets=[missing])
+
+
+def test_the_cores_an_editor_gets_are_different_physical_cores():
+    from stet.runner import pick_cpus
+
+    if sys.platform != "linux":
+        pytest.skip("Linux only")
+    allowed = sorted(os.sched_getaffinity(0))
+    assert pick_cpus(0) == allowed and pick_cpus(10**6) == allowed
+    two = pick_cpus(2)
+    assert len(two) == min(2, len(allowed)) and set(two) <= set(allowed)
+
+    def core(cpu):
+        base = f"/sys/devices/system/cpu/cpu{cpu}/topology/"
+        try:
+            return open(base + "physical_package_id").read(), open(base + "core_id").read()
+        except OSError:
+            return ("?", cpu)
+
+    physical = {core(c) for c in allowed}
+    if len(physical) >= 2:
+        assert len({core(c) for c in two}) == 2
+
+
+def test_the_season_says_what_machine_an_editor_is_given():
+    from stet.runner import machine_limits
+
+    m = machine_limits(SEASON)
+    assert set(m) == {"cores", "memory_gb", "gpu_memory_gb", "scratch_gb"} and all(v > 0 for v in m.values())

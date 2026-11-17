@@ -52,10 +52,44 @@ type Pool struct {
 type Tolerance struct {
 	Grade    float64 `json:"grade"`    // two grades of the same edit script
 	Baseline float64 `json:"baseline"` // a verifier's baseline against the round's
+	Run      float64 `json:"run"`      // two runs of the same editor: the gains of the scripts they wrote
 }
 
 type ScriptLimits struct {
 	MaxBytes int64 `json:"max_bytes"`
+}
+
+// AssetLimits bounds the files an editor may name by reference (model weights).
+type AssetLimits struct {
+	MaxFiles int   `json:"max_files"`
+	MaxBytes int64 `json:"max_bytes"`
+}
+
+// Machine is what every editor is given, whatever the machine that runs it has.
+type Machine struct {
+	Cores       int `json:"cores"`
+	MemoryGB    int `json:"memory_gb"`
+	GPUMemoryGB int `json:"gpu_memory_gb"`
+	ScratchGB   int `json:"scratch_gb"`
+}
+
+// RunnerFloor is the slowest machine that may run editors: see src/stet/bench.py.
+type RunnerFloor struct {
+	GPUTokensPerSecond float64 `json:"gpu_tokens_per_second"`
+	CPUMBPerSecond     float64 `json:"cpu_mb_per_second"`
+	GPUMemoryGB        float64 `json:"gpu_memory_gb"`
+	MemoryGB           float64 `json:"memory_gb"`
+	Cores              int     `json:"cores"`
+	DiskGB             float64 `json:"disk_gb"`
+}
+
+// Environment is the Python and the libraries an editor may count on, at exact versions.
+type Environment struct {
+	Python     string            `json:"python"`
+	TorchIndex map[string]string `json:"torch_index"` // where PyTorch's build for each GPU maker is
+	Packages   map[string]string `json:"packages"`
+	Also       map[string]string `json:"also"` // what those bring with them, pinned too
+	Linux      []string          `json:"linux_x86_64_only"`
 }
 
 // RecordRule is how the record changes hands. See checkRecord.
@@ -94,6 +128,10 @@ type Season struct {
 	Parity        json.RawMessage         `json:"parity"`
 	Train         map[string]float64      `json:"train"`
 	Tokenizer     map[string]int          `json:"tokenizer"`
+	Assets        AssetLimits             `json:"assets"`
+	Machine       Machine                 `json:"machine"`
+	Runner        RunnerFloor             `json:"runner"`
+	Environment   Environment             `json:"environment"`
 }
 
 func loadSeason() *Season {

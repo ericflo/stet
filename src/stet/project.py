@@ -15,6 +15,7 @@ import re
 import tarfile
 import tomllib
 from dataclasses import dataclass
+from dataclasses import field as dc_field
 from pathlib import Path
 
 import zstandard
@@ -51,6 +52,7 @@ class Project:
     technique: str = ""
     parent: str = ""
     license: str = "MIT"
+    assets: list = dc_field(default_factory=list)  # of stet.assets.Asset: files fetched by reference
 
     def manifest(self) -> dict:
         return {
@@ -129,8 +131,13 @@ def load_project(path: str | Path) -> Project:
         raise ProjectError('stet.toml: entry is required, e.g. entry = "python editor.py"')
     if len(entry.encode("utf-8", "replace")) > MAX_ENTRY_BYTES or any(ch in entry for ch in "\0\n\r"):
         raise ProjectError(f"stet.toml: entry is one command line of at most {MAX_ENTRY_BYTES} characters")
-    if cfg.get("assets", []) != []:
-        raise ProjectError("stet.toml: [[assets]] are not supported this season. Put what your editor needs in the bundle (up to 50 MB).")
+    from . import assets as assets_
+    from .spec import load_season
+
+    try:
+        named = assets_.parse(cfg.get("assets"), load_season())
+    except assets_.AssetError as e:
+        raise ProjectError(str(e)) from None
     description, technique = _clip(cfg.get("description", "").strip(), 300), _clip(cfg.get("technique", "").strip(), 120)
     # These two are shown on the site and printed in other people's terminals.
     if not (description + technique).isprintable():
@@ -143,6 +150,7 @@ def load_project(path: str | Path) -> Project:
         technique=technique,
         parent=cfg.get("parent", "").strip(),
         license=cfg.get("license", "MIT").strip(),
+        assets=named,
     )
 
 
@@ -232,7 +240,8 @@ def pack(project: Project) -> tuple[bytes, str]:
     if len(blob) > MAX_BUNDLE_BYTES:
         raise ProjectError(
             f"bundle is {len(blob) / 1e6:.1f} MB; the limit is {MAX_BUNDLE_BYTES >> 20} MB. "
-            "Shrink it: quantise or prune the model, or leave files out. Nothing can be downloaded at run time."
+            "Model weights and other large files do not go in the bundle: put them on Hugging Face and name them "
+            "with `stet asset add <owner>/<repository>`. They are fetched before the editor starts."
         )
     return blob, hashlib.sha256(blob).hexdigest()
 

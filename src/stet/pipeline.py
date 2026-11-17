@@ -71,14 +71,36 @@ def _cached(path: Path) -> dict | None:
 
 
 def edit_round(
-    bundle: Path, entry: str, rnd: Round, scale: Scale, work: Path, sandbox: str = "none", echo: bool = False, log=None, limits: dict | None = None
+    bundle: Path,
+    entry: str,
+    rnd: Round,
+    scale: Scale,
+    work: Path,
+    sandbox: str = "none",
+    echo: bool = False,
+    log=None,
+    limits: dict | None = None,
+    assets=(),
+    time_limit: float | None = None,
 ) -> EditRun:
-    """Run an editor on a round's corpus. Never raises on editor failure."""
+    """Run an editor on a round's corpus. Never raises on editor failure.
+
+    The files the editor named by reference are fetched first, before its clock starts.
+    A file that cannot be fetched raises data.FetchError: that is the network's failure or
+    the host's, and no run of the editor.
+    """
     log = log or (lambda msg: None)
     corpus = data.corpus(rnd, scale)
     log(f"round {rnd.id} ({scale.name}): {len(corpus):,} documents, {corpus.total_bytes / 1e6:.0f} MB")
-    log(f"editing (limit {scale.edit_seconds}s, sandbox: {sandbox}) ...")
-    edit = run_editor(bundle, entry, corpus, rnd, scale, work, float(scale.edit_seconds), sandbox=sandbox, echo=echo, limits=limits)
+    if assets:
+        from . import assets as assets_
+
+        log(f"assets: {len(assets)} files, {sum(a.size for a in assets) / 2**30:.2f} GiB")
+        assets_.fetch(list(assets))
+        assets_.prune(keep=list(assets))
+    limit = float(scale.edit_seconds if time_limit is None else time_limit)
+    log(f"editing (limit {limit:.0f}s, sandbox: {sandbox}) ...")
+    edit = run_editor(bundle, entry, corpus, rnd, scale, work, limit, sandbox=sandbox, echo=echo, limits=limits, assets=assets)
     log(f"editor finished: {edit.status} in {edit.seconds:.1f}s")
     return edit
 
@@ -90,11 +112,22 @@ def grade_round(rnd: Round, scale: Scale, script_path: Path, device=None, progre
 
 
 def run_round(
-    bundle: Path, entry: str, rnd: Round, scale: Scale, work: Path, sandbox: str = "none", device=None, echo: bool = False, progress=None, log=None
+    bundle: Path,
+    entry: str,
+    rnd: Round,
+    scale: Scale,
+    work: Path,
+    sandbox: str = "none",
+    device=None,
+    echo: bool = False,
+    progress=None,
+    log=None,
+    assets=(),
+    time_limit: float | None = None,
 ) -> dict:
     """Edit, then grade. If the editor leaves no script the result is invalid and carries no
     exam score: by the rules its student is the one trained on the unedited corpus."""
-    edit = edit_round(bundle, entry, rnd, scale, work, sandbox=sandbox, echo=echo, log=log)
+    edit = edit_round(bundle, entry, rnd, scale, work, sandbox=sandbox, echo=echo, log=log, assets=assets, time_limit=time_limit)
     if edit.script is None:
         corpus, exam = data.materialize(rnd, scale)
         result = {
