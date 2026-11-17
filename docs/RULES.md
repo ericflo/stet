@@ -294,8 +294,9 @@ are graded by **verifiers**: anyone who runs `stet verify`.
 - **Someone has to be first.** The organisers' own accounts start out established. They
   are marked on the verifiers page, their work is checked like anyone's, and the season
   does not need them once other people are established.
-- **Each entry is run twice,** by two different established verifiers, on an NVIDIA and
-  an AMD GPU when there are both. Nobody runs their own entry, runs one entry twice, or
+- **Each entry is run twice,** by two different established verifiers. A machine asking
+  for work is handed first an entry whose other run was on the other make of GPU, so the
+  two runs are on NVIDIA and AMD when machines of both are asking. Nobody runs their own entry, runs one entry twice, or
   runs an entry after being shown a script of it. Scripts are sealed until the round
   settles, so the second runner cannot copy the first: a script is served only to the
   verifier handed it to grade, and a verifier holds one job at a time.
@@ -334,7 +335,10 @@ are graded by **verifiers**: anyone who runs `stet verify`.
   exactly two established grades disagree and nobody is there to break the tie, neither
   is struck, and the entry says so.
 - A verifier whose job runs out of time unreported is offered no work for a day. A round
-  waits up to 45 minutes for verifiers still at work whose grades have agreed before.
+  waits for an established verifier that holds a job until the job is reported, handed
+  back or out of time, which is three hours at most. For anyone else whose grades have
+  agreed before it waits up to 45 minutes, and for an account with no such grade it does
+  not wait.
 - Agreeing about an entry that left the corpus as it was earns no standing. Its loss is
   the round's unedited loss, which every grader measures anyway. Nor does agreeing that
   a script is invalid, which is decided before anything is trained.

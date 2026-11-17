@@ -121,7 +121,7 @@
           {{else}}
           <div class="row"><span class="k">Next draw</span><span class="v">not scheduled</span></div>
           {{end}}
-          <div class="row"><span class="k">Cadence</span><span class="v">every {{.Interval}}</span></div>
+          <div class="row"><span class="k">Rounds</span><span class="v">when an entry is waiting<br><span class="muted" style="font-size:12.5px">and every {{.Interval}} regardless</span></span></div>
           {{with $d.Crawl}}<div class="row"><span class="k">Crawl</span><span class="v">{{.Crawl}}<br><span class="muted num" style="font-size:12.5px">{{comma .NShards}} files</span></span></div>{{end}}
           <div class="row"><span class="k">Student</span><span class="v">{{.Scale.NLayer}} layers × {{.Scale.DModel}}, {{compact .Scale.TrainTokens}} tokens</span></div>
         </div>

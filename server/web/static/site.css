@@ -410,6 +410,7 @@ a.pill:hover { border-color: var(--red); color: var(--red); }
 .mast nav .sep { width: 1px; align-self: stretch; margin: 6px 0; background: var(--rule); }
 .doors-band { padding: 56px 0 64px; border-top: 1px solid var(--rule); }
 .doors { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 22px; }
+.doors.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .door { display: flex; flex-direction: column; background: var(--card); border: 1px solid var(--rule); border-top: 3px solid var(--red); border-radius: 4px; padding: 24px 26px 20px; text-decoration: none; color: var(--ink); transition: border-color 0.15s, transform 0.15s; }
 .door:hover { border-color: var(--ink); border-top-color: var(--red); transform: translateY(-2px); }
 .door h3 { font-size: 27px; margin: 10px 0 10px; }
@@ -468,7 +469,7 @@ a.pill:hover { border-color: var(--red); color: var(--red); }
 .qa p { margin: 0 0 18px; color: var(--ink-2); font-size: 17px; max-width: 44em; }
 
 @media (max-width: 920px) {
-  .doors { grid-template-columns: minmax(0, 1fr); }
+  .doors, .doors.two { grid-template-columns: minmax(0, 1fr); }
   .guide-cols { grid-template-columns: minmax(0, 1fr); gap: 34px; }
   .guide .side { position: static; }
   .timeline > li { grid-template-columns: minmax(0, 1fr); gap: 6px; padding: 18px 20px; }

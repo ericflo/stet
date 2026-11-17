@@ -39,22 +39,27 @@
   </div>
 
   <h2>Join them</h2>
-  <div class="grid2">
-    <div class="stack">
-      {{template "install" .}}
-      <div class="cmd"><pre><span class="p">$ </span>stet login
-<span class="p">$ </span><span data-copy-text>stet verify</span></pre><button type="button" data-copy>copy</button></div>
-      <p class="muted" style="font-size:16px">Leave it running. It asks for a job, downloads an edit script and the round's corpus, trains the student on {{compact .Scale.TrainTokens}} tokens (minutes on a desktop GPU), reports the loss, and asks again. Stop it whenever you like. Needs an NVIDIA or AMD GPU: grades must agree to within {{f2 $d.Tolerance.Grade}} nats, and that takes the same arithmetic.</p>
-      <div class="cmd"><pre><span class="c"># once established: run the editors too, in a sandbox (Linux)</span>
-<span class="p">$ </span><span data-copy-text>stet verify --edits</span></pre><button type="button" data-copy>copy</button></div>
-      <p class="muted" style="font-size:16px">An editor has a time limit, so a machine that runs one has to be at least as fast as the season's floor. <code>stet bench</code> measures yours and says.</p>
-    </div>
-    <div class="stack">
+  <div class="doors two">
+    <a class="door" href="/verify">
+      <span class="eyebrow">You have a GPU</span>
+      <h3>Verify scores</h3>
+      <p>Retrain the fixed model on entrants' edit scripts and report what you measure. Scripts are plain data: nobody else's code runs on your machine.</p>
+      <code>stet verify</code>
+      <span class="go">How to verify →</span>
+    </a>
+    <a class="door" href="/run">
+      <span class="eyebrow">You have a Linux box that stays on</span>
+      <h3>Run editors</h3>
+      <p>Once established, run entrants' editors in a sandbox on the round's fresh pages. <code style="display:inline;border:0;padding:0;background:none">stet bench</code> says whether the machine is fast enough.</p>
+      <code>stet verify --edits</code>
+      <span class="go">How to run editors →</span>
+    </a>
+  </div>
+  <div class="grid2" style="margin-top:34px">
       <div class="claim"><h3>Grading runs nobody's code but ours</h3><p>What a grader downloads is an edit script, which is data: a list of spans to copy. The harness checks it line by line. Entrants' programs are a separate job that you ask for, given only to established verifiers and run in a sandbox with no network.</p></div>
       <div class="claim"><h3>Standing is earned</h3><p>Every grade is sealed until its round settles. A script's gain is the median of the established verifiers' grades of it, and everyone else's grade is compared with that; the round's page shows every one, whatever it said. After {{$d.EstablishAfter}} grades that agreed, an account is established: its grades count towards scores, and it may run editors. An account whose grades differ {{$d.MuteAfter}} times, and more than once for every ten that agreed, is given no work for {{$d.MuteDays}} days.</p></div>
       <div class="claim"><h3>Nobody is taken at their word</h3><p>Each entry is run by {{$d.RunsPerEntry}} different people, and a third when they differ. Nobody runs their own entry, and no volunteer grades a script that only they wrote. The organisers' account is one more verifier: when its machine is the only one there it grades its own runs, and those scores say that they are not confirmed.</p></div>
-      <div class="claim"><h3>You go first</h3><p>When more editors are waiting than a round can take, the entries of people who verified in the last two weeks are drawn first.</p></div>
-    </div>
+      <div class="claim"><h3>You go first</h3><p>When more editors are waiting than a round can take, the entries of people who verified in the last two weeks are drawn first.</p>
   </div>
 </div>
 </main>

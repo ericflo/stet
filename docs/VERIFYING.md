@@ -135,8 +135,10 @@ A verifier does not take the server's word for what a round is.
 same number of tokens. Two honest machines agree to within a small tolerance
 *(provisional: 0.08 nats at the official scale; see [Experiments](EXPERIMENTS.md))*.
 
-**Every editor is run twice, by different people.** On an NVIDIA and an AMD GPU when
-there are both. Nobody runs their own entry or runs one entry twice. When two runs differ
+**Every editor is run twice, by different people,** when two are around. A machine is
+handed first an entry whose other run was on the other make of GPU, so the two are on
+NVIDIA and AMD when machines of both are asking. Nobody runs their own entry or runs one
+entry twice. When two runs differ
 by more than a tolerance *(provisional: 0.12 nats)*, or one fails, a third person runs it
 and the middle one counts.
 
@@ -193,9 +195,10 @@ A round settles as a whole, when every entry has its runs and every script its g
 It does not wait for people who are not there. If nobody who is at work on a job, or has
 asked for one in the last ten minutes, could give an entry its second run, the entry
 settles with one. If a
-verifier is part-way through a job, the round waits for them, up to 45 minutes, and only
-for accounts with a grade that has agreed before: a key costs nothing, and one that
-could hold a round back just by taking a job would. So until your first grade has
+verifier is part-way through a job, the round waits for them: for an established
+verifier until the job is reported, handed back or out of time (three hours at most), and
+for anyone else up to 45 minutes, and only if a grade of theirs has agreed before. A key
+costs nothing, and one that could hold a round back just by taking a job would. So until your first grade has
 agreed, start early in a round. A grade that arrives after the round has settled earns
 nothing, and for a newcomer costs nothing either.
 
