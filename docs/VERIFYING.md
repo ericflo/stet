@@ -1,6 +1,6 @@
 # Verifying
 
-Nothing on the leaderboard is one machine's word. Editors are run and edit scripts are
+Nothing on the leaderboard is one machine's word. Curators are run and edit scripts are
 graded on volunteers' machines, each piece of work by more than one person, and all of it
 is published. `stet verify` is how you lend a machine. This page is what that involves,
 and why a score made that way can be believed.
@@ -11,19 +11,19 @@ and why a score made that way can be believed.
 stet doctor            # checks the GPU, the libraries and the disk
 stet login             # makes a key and an account; no email, no password
 stet verify            # grades until you press Ctrl-C
-stet verify --edits    # also runs entrants' editors, in a sandbox
+stet verify --edits    # also runs entrants' curators, in a sandbox
 ```
 
 There are two kinds of work, and you choose whether to take the second.
 
-| | Grading | Running editors (`--edits`) |
+| | Grading | Running curators (`--edits`) |
 |---|---|---|
 | What runs on your machine | the fixed trainer, on plain data | entrants' programs, in a sandbox |
 | Needs | an NVIDIA (CUDA) or AMD (ROCm) GPU, the season's PyTorch, 10 GB of disk | also Linux, bubblewrap, the season's libraries, a machine at or above the floor, 60 GB of disk |
 | Who is given it | anyone | accounts that are established (below) |
 
 The installer brings Python 3.13, PyTorch in the build for your GPU, and the season's
-libraries. `stet bench` measures your machine against the floor for running editors and
+libraries. `stet bench` measures your machine against the floor for running curators and
 says what, if anything, falls short. Run it when the GPU is doing nothing else.
 
 `stet verify --once` does one job and exits; `--max-jobs 5` does five. One verifier runs
@@ -68,7 +68,7 @@ The first job of a round also downloads the round's raw text (about half a gigab
 1.2 GB once built) and trains on the unedited corpus once, so it takes about twice as
 long.
 
-### Running editors
+### Running curators
 
 **This runs strangers' programs on your machine**, which is why it is a flag you have to
 pass. Each one runs in a sandbox:
@@ -82,13 +82,13 @@ pass. Each one runs in a sandbox:
   which it is killed.
 
 `stet verify --edits` tests the sandbox before it takes any work and will not start
-without it. What the sandbox cannot do is stand between the editor and your GPU's
+without it. What the sandbox cannot do is stand between the curator and your GPU's
 driver: using the GPU means talking to it. A flaw in the driver or the kernel is outside
-what any of this contains. Editors are public code from accounts tied to a GitHub
-identity, which is a deterrent and not a guarantee. Run editors on a machine you could
+what any of this contains. Curators are public code from accounts tied to a GitHub
+identity, which is a deterrent and not a guarantee. Run curators on a machine you could
 reinstall without loss.
 
-An editor may name model files, up to 4 GiB an entry. They are fetched from Hugging Face
+A curator may name model files, up to 4 GiB an entry. They are fetched from Hugging Face
 before it runs, checked against their hashes, and kept in a cache that is trimmed at
 40 GB (`STET_ASSET_CACHE_GB` changes that). A run takes up to ten minutes at the official
 scale, plus the download.
@@ -102,14 +102,14 @@ agrees counts towards the 5. `stet whoami` shows where you stand.
 
 ### What is sent and what is published
 
-With each result your machine sends: the losses it measured, or the script the editor
+With each result your machine sends: the losses it measured, or the script the curator
 wrote; hashes of the corpus and exam it built; how long the work took and a thinned loss
 curve; and a description of the machine: GPU name and memory, operating system and
 processor type, the speeds `stet bench` measured, and the versions of Python, PyTorch and
 the harness.
 
 Published: your handle and linked GitHub login, the GPU's name, how many of your grades
-agreed, how many editors you have run, your streak, GPU hours, when you were last seen,
+agreed, how many curators you have run, your streak, GPU hours, when you were last seen,
 and every run and grade you report, on the round's page. Your IP address is used for rate
 limits and appears in the server's logs; it is not published.
 
@@ -135,7 +135,7 @@ A verifier does not take the server's word for what a round is.
 same number of tokens. Two honest machines agree to within a small tolerance
 *(provisional: 0.08 nats at the official scale; see [Experiments](EXPERIMENTS.md))*.
 
-**Every editor is run twice, by different people,** when two are around. A machine is
+**Every curator is run twice, by different people,** when two are around. A machine is
 handed first an entry whose other run was on the other make of GPU, so the two are on
 NVIDIA and AMD when machines of both are asking. Nobody runs their own entry or runs one
 entry twice. When two runs differ
@@ -146,7 +146,7 @@ runner who could give that third run is handed none of them while someone else c
 **Every script is graded by someone other than its runner.** A runner who could also say
 what its script scored would be taking its own word. Its gain is the median of the
 established graders' results, and when two of them disagree a third is taken. Most
-editors write the same script on both runs, byte for byte; such a script is nobody's
+curators write the same script on both runs, byte for byte; such a script is nobody's
 own, and either runner may grade it.
 
 **Work is assigned.** You cannot choose what you run or grade, you are offered an entry
@@ -184,7 +184,7 @@ established grades agree on, or an organisers' machine's. A grade that differs f
 volunteer's lone grade is published as *unresolved* and counts against nobody.
 
 **What this cannot show.** Two scores closer together than the tolerance are not told
-apart. A runner who hands back a script the editor did not write is caught only as far
+apart. A runner who hands back a script the curator did not write is caught only as far
 as the second run differs from it. Two verifiers assigned to the same entry who agree on
 a lie are not caught at all; what stands in the way is that nobody chooses their work.
 [The rules](RULES.md#what-is-trusted-and-what-is-not) list all of it.
@@ -214,9 +214,9 @@ the account is offered no work for a day.
 ## What you get
 
 - A place on the [verifier board](/verifiers): grades that agreed, in total and in the
-  last two weeks, editors run, your streak, and GPU hours given.
+  last two weeks, curators run, your streak, and GPU hours given.
 - Your name on every entry you ran or graded.
-- **Your own entries go first.** When more editors are waiting than a round can take,
+- **Your own entries go first.** When more curators are waiting than a round can take,
   entries from people who worked for others in the last two weeks run before the rest.
 
 ## If something goes wrong
@@ -226,15 +226,15 @@ the account is offered no work for a day.
 | "your corpus or exam for ... differs from the round's ..." | A download was cut short or a cache is stale. The verifier drops its copy of the round and rebuilds it once by itself. If it happens twice in a round, it takes no more work from that round. |
 | "your unedited baseline for ... is further from what the round's established graders measured than the tolerance ..." | Your machine trains differently: usually another PyTorch or a CPU fallback. `stet doctor` shows what is in use. The difference is listed on the round's page. |
 | "sealed until the round settles" | Normal. Your run or grade is in, and is compared with everyone else's when the round settles. |
-| "Not given editors to run: ..." | You asked for editors with `--edits` and the server gave its reason: the account is not established yet, has no GitHub account linked, or the machine is under the floor. It grades meanwhile, and is told when that changes. |
+| "Not given curators to run: ..." | You asked for curators with `--edits` and the server gave its reason: the account is not established yet, has no GitHub account linked, or the machine is under the floor. It grades meanwhile, and is told when that changes. |
 | "this entry settled before your result arrived ..." or "this job ended before your result arrived: the round settled first ..." | The round settled while you were training. No credit, and nothing against you. |
 | "this job ended before your result arrived: it was given up on ..." or "a job this verifier took was given up on ..." | A job ran out of time with no result and without being handed back. Work is offered again a day later. |
 | "this account is given no work until ..." | Three grades that differed from what established verifiers found for the same scripts. It lifts on the date given. If you think your machine is right, tell the organisers. |
-| "editors are run by established verifiers only" | The account lost its standing between taking an editor and reporting on it. The run is not recorded. |
+| "curators are run by established verifiers only" | The account lost its standing between taking a curator and reporting on it. The run is not recorded. |
 | "the result could not be delivered ..." | The server was away or failing when your grade was ready. The job is handed back; nothing counts against you. |
 | "No work right now" or "Nothing in the open round is this machine's to do ..." | No round is open, or nothing in the open one is yours: you have had each job once, it is your own entry or a script only your run wrote, or it has the runs and grades it wants. Leave it running; it asks again. |
 | "this verifier is out of date" (HTTP 426) | The harness changed. A verifier upgrades itself and carries on. With upgrades turned off, or an install the installer did not make, run `stet upgrade` or the installer again. |
-| "This account holds an editor it took to run ..." | The verifier was restarted without `--edits` while it held an editor. It is handed nothing until that job is reported, handed back or out of time: start it with `--edits` again. |
+| "This account holds a curator it took to run ..." | The verifier was restarted without `--edits` while it held a curator. It is handed nothing until that job is reported, handed back or out of time: start it with `--edits` again. |
 | "... handed it back, or let the job run out, so it is offered no more of that round's scripts" | An account that is not established yet gave a script back. It is offered work again in the next round. |
 
 Pressing Ctrl-C hands the job back so that someone else can take it, and so does stopping

@@ -7,7 +7,7 @@
     <p class="sub">
       {{if eq $r.Status "scheduled"}}Announced. It will be drawn <span data-until="{{$r.DrawAt}}">{{ago $r.DrawAt}}</span>, from a beacon value that does not exist yet.
       {{else if eq $r.Status "open"}}Drawn {{ago $r.DrawnAt}}. {{$r.Edited}} of {{$r.Entries}} {{plural $r.Entries "entry" "entries"}} run at least once. Every run, script and grade stays sealed until the whole round settles.
-      {{else}}Settled {{ago $r.SettledAt}}: {{$r.Entries}} {{plural $r.Entries "editor" "editors"}} on one fresh corpus.{{end}}
+      {{else}}Settled {{ago $r.SettledAt}}: {{$r.Entries}} {{plural $r.Entries "entry" "entries"}} on one fresh corpus.{{end}}
     </p>
     <div class="meta">
       <span>draw {{datetime $r.DrawAt}}</span>
@@ -28,7 +28,7 @@
   <div class="table-wrap" id="entries" data-live>
     {{if $d.Entries}}
     <table>
-      <thead><tr><th>#</th><th>Editor</th><th>Status</th><th class="r">Loss</th><th class="r">Gain</th><th class="r hide-s">Kept</th><th class="hide-s" title="How many verifiers ran the editor, each on their own machine, and whether their runs agreed">Runs</th><th class="hide-s" title="The established verifiers whose grades are the score, then everyone else whose own grades agreed">Graded by</th></tr></thead>
+      <thead><tr><th>#</th><th>Curator</th><th>Status</th><th class="r">Loss</th><th class="r">Gain</th><th class="r hide-s">Kept</th><th class="hide-s" title="How many verifiers ran the curator, each on their own machine, and whether their runs agreed">Runs</th><th class="hide-s" title="The established verifiers whose grades are the score, then everyone else whose own grades agreed">Graded by</th></tr></thead>
       <tbody>
         {{range $i, $e := $d.Entries}}<tr>
           <td class="rank">{{if and $e.Settled $e.Valid}}{{add $i 1}}{{else}}·{{end}}</td>
@@ -46,7 +46,7 @@
             <td><span class="stage {{$e.Stage}}">{{$e.Stage}}</span></td><td class="r muted">sealed</td><td class="r muted">·</td>
           {{end}}
           <td class="r num hide-s">{{if $e.HasStats}}{{pct1 $e.Script.KeptDocFrac}}{{else}}—{{end}}</td>
-          <td class="hide-s" style="font-size:14.5px">{{if and $e.Settled $e.NRuns}}<a class="num" href="#runs">{{$e.NRuns}}</a> {{if $e.Confirmed}}<span class="stage settled" title="Two verifiers ran it on their own machines and got the same gain, to within {{f2 $d.Tolerance.Run}} nats, and more than one verifier graded it">confirmed</span>{{else if $e.OneGrader}}<span class="muted" title="Its runs agree, and one verifier graded them all: nobody else was there to">one grader</span>{{else if $e.RunsDiffer}}<span class="tag red" title="Its runs did not agree with each other. The gain is their median, and they are all below.">runs differed</span>{{else if eq $e.NRuns 1}}<span class="muted" title="Nobody else was there to run it a second time">run once</span>{{end}}{{if $e.Own}} <span class="tag" title="Nobody else was there to grade a script, so the machine that ran the editor graded it too. Only the organisers' machine may, and the score says so.">graded by its own runner</span>{{end}}{{else}}<span class="muted">—</span>{{end}}</td>
+          <td class="hide-s" style="font-size:14.5px">{{if and $e.Settled $e.NRuns}}<a class="num" href="#runs">{{$e.NRuns}}</a> {{if $e.Confirmed}}<span class="stage settled" title="Two verifiers ran it on their own machines and got the same gain, to within {{f2 $d.Tolerance.Run}} nats, and more than one verifier graded it">confirmed</span>{{else if $e.OneGrader}}<span class="muted" title="Its runs agree, and one verifier graded them all: nobody else was there to">one grader</span>{{else if $e.RunsDiffer}}<span class="tag red" title="Its runs did not agree with each other. The gain is their median, and they are all below.">runs differed</span>{{else if eq $e.NRuns 1}}<span class="muted" title="Nobody else was there to run it a second time">run once</span>{{end}}{{if $e.Own}} <span class="tag" title="Nobody else was there to grade a script, so the machine that ran the curator graded it too. Only the organisers' machine may, and the score says so.">graded by its own runner</span>{{end}}{{else}}<span class="muted">—</span>{{end}}</td>
           <td class="hide-s muted" style="font-size:14.5px">{{if $e.Verifiers}}{{join $e.Verifiers ", "}}{{if $e.Together}} <span class="tag red" title="Two established verifiers measured different gains for one of its scripts, and nobody was there to say which was right. The script's gain is midway between them.">disputed</span>{{end}}{{if $e.Disputed}} <a class="tag red" href="#grades" title="Graders whose grade of one of its scripts was further from the script's gain than the tolerance. Their numbers are below.">{{$e.Disputed}} differed</a>{{end}}{{else}}—{{end}}</td>
         </tr>{{end}}
       </tbody>
@@ -59,7 +59,7 @@
 
   {{if $d.Runs}}
   <h2 id="runs">Runs</h2>
-  <p class="lead">Every run of every entry: who ran the editor, on what, and what the script it wrote was worth. Runs that agree to within {{f2 $d.Tolerance.Run}} nats confirm each other; when two differ, a third is run and the median is the score.</p>
+  <p class="lead">Every run of every entry: who ran the curator, on what, and what the script it wrote was worth. Runs that agree to within {{f2 $d.Tolerance.Run}} nats confirm each other; when two differ, a third is run and the median is the score.</p>
   <div class="table-wrap">
     <table>
       <thead><tr><th>Entry</th><th class="r">Run</th><th>Run by</th><th class="hide-s">On</th><th class="r hide-s">Edit took</th><th class="hide-s">Script</th><th class="r">Gain</th><th>Outcome</th></tr></thead>
@@ -72,7 +72,7 @@
           <td class="r num hide-s">{{f1 .EditSeconds}}s</td>
           <td class="hide-s">{{if .Script}}<a class="num" href="/api/v1/scripts/{{.Script}}" title="Download the edit script ({{bytes .ScriptSize}} unpacked)">{{tiny .Script}}</a>{{else}}<span class="muted">—</span>{{end}}</td>
           <td class="r num {{if gt .Gain 0.0}}pos{{else if lt .Gain 0.0}}neg{{end}}">{{if eq .Status "dropped"}}<span class="muted">—</span>{{else}}{{gain .Gain}}{{end}}</td>
-          <td>{{if eq .Status "ok"}}<span class="stage settled">ok</span>{{if .Self}} <span class="tag" title="Nobody else was there to grade this script, so the machine that ran the editor graded it too. Only the organisers' machine may.">graded by its own runner</span>{{end}}{{else if eq .Status "failed"}}<span class="stage invalid">failed</span><span class="reason">{{.Reason}}</span>{{else}}<span class="muted">set aside: {{.Reason}}</span>{{end}}</td>
+          <td>{{if eq .Status "ok"}}<span class="stage settled">ok</span>{{if .Self}} <span class="tag" title="Nobody else was there to grade this script, so the machine that ran the curator graded it too. Only the organisers' machine may.">graded by its own runner</span>{{end}}{{else if eq .Status "failed"}}<span class="stage invalid">failed</span><span class="reason">{{.Reason}}</span>{{else}}<span class="muted">set aside: {{.Reason}}</span>{{end}}</td>
         </tr>{{end}}
       </tbody>
     </table>
@@ -90,7 +90,7 @@
         {{range $d.Grades}}<tr>
           <td><a class="name" href="/editors/{{short .EditorID}}">{{.Name}}</a><span class="by"><a href="/u/{{.Owner}}">{{.Owner}}</a></span></td>
           <td class="num">{{.Runs}}</td>
-          <td><a href="/u/{{.Handle}}">{{.Handle}}</a>{{if .Self}} <span class="muted" title="This account also ran the editor, and nobody else's run wrote the same script">· its own runner</span>{{end}}{{if .First}} <span class="muted" title="No grade of this account's had agreed before this round">· first grade</span>{{end}}</td>
+          <td><a href="/u/{{.Handle}}">{{.Handle}}</a>{{if .Self}} <span class="muted" title="This account also ran the curator, and nobody else's run wrote the same script">· its own runner</span>{{end}}{{if .First}} <span class="muted" title="No grade of this account's had agreed before this round">· first grade</span>{{end}}</td>
           <td class="r num">{{if has .Loss}}{{f3 (ptr .Loss)}}{{else}}<span class="muted">invalid</span>{{end}}</td>
           <td class="r num">{{if has .Gain}}{{gain (ptr .Gain)}}{{else}}—{{end}}</td>
           <td class="r num">{{if .Dropped}}—{{else if .ScriptValid}}{{gain .ScriptGain}}{{else}}<span class="muted">invalid</span>{{end}}</td>

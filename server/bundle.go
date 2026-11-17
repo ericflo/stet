@@ -297,7 +297,7 @@ func bundleFile(blob []byte, want string) (text string, binary, truncated bool, 
 	for {
 		h, err := tr.Next()
 		if err != nil {
-			return "", false, false, errors.New("no such file in this editor")
+			return "", false, false, errors.New("no such file in this curator")
 		}
 		if p, ok := cleanBundlePath(h.Name); !ok || p != want {
 			continue

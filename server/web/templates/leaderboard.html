@@ -4,7 +4,7 @@
   <div class="wrap">
     <span class="eyebrow">{{.Season.Title}} · {{.ScaleID}} scale</span>
     <h1>Leaderboard</h1>
-    <p class="sub">The standings of the competition. Every entry is a data editor: a program that edits each round's raw corpus before a fixed model trains on it. Entries are ranked by mean gain over the unedited corpus: how much lower the model's exam loss is after the editor has been at the data. Fresh corpus every round, so nothing here was tuned to one sample.</p>
+    <p class="sub">The standings of the competition. Every entry is a curator: a program that edits each round's raw corpus before a fixed model trains on it. Entries are ranked by mean gain over the unedited corpus: how much lower the model's exam loss is after the curator has been at the data. Fresh corpus every round, so nothing here was tuned to one sample.</p>
   </div>
 </div>
 <div class="wrap">
@@ -35,7 +35,7 @@
   <figure class="figure"><div class="plot">{{$d.RecordChart}}</div><figcaption>Each step is a new holder.</figcaption></figure>
   <div class="table-wrap" style="margin-top:22px">
     <table>
-      <thead><tr><th>#</th><th>Editor</th><th class="r">Rating</th><th class="r">Beat the last by</th><th class="r hide-s">Over</th><th class="r hide-s">p</th><th class="hide-s">Taken</th></tr></thead>
+      <thead><tr><th>#</th><th>Curator</th><th class="r">Rating</th><th class="r">Beat the last by</th><th class="r hide-s">Over</th><th class="r hide-s">p</th><th class="hide-s">Taken</th></tr></thead>
       <tbody>
         {{range $d.Records}}<tr>
           <td class="rank">{{.N}}</td>
@@ -50,7 +50,7 @@
     </table>
   </div>
   {{else}}
-  <div class="table-wrap"><div class="empty"><span class="hand">unclaimed</span>The first record goes to the first editor that beats the unedited corpus by more than {{f2 $d.Margin}} nats over {{index $d.Rule.Looks 0}} rounds.</div></div>
+  <div class="table-wrap"><div class="empty"><span class="hand">unclaimed</span>The first record goes to the first curator that beats the unedited corpus by more than {{f2 $d.Margin}} nats over {{index $d.Rule.Looks 0}} rounds.</div></div>
   {{end}}
   <p class="note" style="margin-top:22px">The record changes hands only when a challenger beats the holder on the rounds both ran, by more than {{f2 $d.Margin}} nats, on a one-sided paired test. A challenger is looked at {{len $d.Rule.Looks}} times against a given holder ({{range $i, $l := $d.Rule.Looks}}{{if $i}}, {{end}}{{$l}}{{end}} shared rounds) and not otherwise, so checking after every round cannot hand it to a lucky near-copy. <a href="/docs/rules#the-record">The rule in full →</a></p>
 </div>

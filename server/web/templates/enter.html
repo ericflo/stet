@@ -4,7 +4,7 @@
   <div class="wrap">
     <span class="eyebrow">Take part · 1 of 3</span>
     <h1>Enter the competition</h1>
-    <p class="sub">You compete by writing a <b>data editor</b>: a program that turns a pile of raw web pages into training data. Write one, test it on your own machine as often as you like, and enter it. Volunteers run it on pages nobody has seen, and the leaderboard ranks it against everyone else's by how much more a model learns from your data than from the raw pile.</p>
+    <p class="sub">You compete by writing a <b>curator</b>: a program that turns a pile of raw web pages into training data. Write one, test it on your own machine as often as you like, and enter it. Volunteers run it on pages nobody has seen, and the leaderboard ranks it against everyone else's by how much more a model learns from your data than from the raw pile.</p>
     <div class="roles"><a href="/enter" aria-current="page">Compete</a><a href="/verify">Verify scores</a><a href="/run">Run entries</a></div>
   </div>
 </div>
@@ -16,17 +16,17 @@
       <ol class="gsteps">
         <li>
           <h3>Install</h3>
-          <p>One command. It brings its own Python {{.Season.Environment.Python}}, PyTorch for your GPU, and every library an editor may use.</p>
+          <p>One command. It brings its own Python {{.Season.Environment.Python}}, PyTorch for your GPU, and every library a curator may use.</p>
           {{template "install" .}}
         </li>
         <li>
-          <h3>Start from a working editor</h3>
-          <p>A single file that already beats the raw pages. Or copy the best reference editor with <code>stet fork stet/tidy</code>.</p>
-          <div class="cmd"><pre><span class="p">$ </span><span data-copy-text>stet init my-editor &amp;&amp; cd my-editor</span></pre><button type="button" data-copy>copy</button></div>
+          <h3>Start from a working curator</h3>
+          <p>A single file that already beats the raw pages. Or copy the best reference curator with <code>stet fork stet/tidy</code>.</p>
+          <div class="cmd"><pre><span class="p">$ </span><span data-copy-text>stet init my-curator &amp;&amp; cd my-curator</span></pre><button type="button" data-copy>copy</button></div>
         </li>
         <li>
           <h3>Score it on your own machine</h3>
-          <p>This runs your editor on a practice round, trains the model on what it kept, sits the exam and prints your <b>gain</b>. A minute or two on a GPU.</p>
+          <p>This runs your curator on a practice round, trains the model on what it kept, sits the exam and prints your <b>gain</b>. A minute or two on a GPU.</p>
           <div class="cmd"><pre><span class="p">$ </span><span data-copy-text>stet run</span></pre><button type="button" data-copy>copy</button></div>
         </li>
         <li>
@@ -49,14 +49,14 @@
         </li>
         <li>
           <h3>Watch it run</h3>
-          <p><code>stet status</code>, or your editor's page here. You do not need to keep anything running.</p>
+          <p><code>stet status</code>, or your curator's page here. You do not need to keep anything running.</p>
         </li>
       </ol>
 
       <div class="agent tall" style="margin-top:34px">
         <div>
           <h2>Or hand the whole job to a coding agent.</h2>
-          <p>The brief is one file. An agent with a terminal can install, write an editor, measure it and submit. Two steps need you: linking GitHub, and agreeing that the editor is published.</p>
+          <p>The brief is one file. An agent with a terminal can install, write a curator, measure it and submit. Two steps need you: linking GitHub, and agreeing that the curator is published.</p>
         </div>
         <div class="cmd"><pre><span data-copy-text>Read {{.BaseURL}}/AGENTS.md and enter Stet.</span></pre><button type="button" data-copy>copy</button></div>
       </div>
@@ -73,7 +73,7 @@
         <div class="row head"><span class="k">Right now</span></div>
         <div class="row"><span class="k">Next round</span><span class="v">{{if $d.Open}}one is running{{else}}{{with $d.Next}}<span data-until="{{.DrawAt}}">{{ago .DrawAt}}</span>{{else}}not scheduled{{end}}{{end}}</span></div>
         <div class="row"><span class="k">Waiting to run</span><span class="v">{{$d.Queued}} {{plural $d.Queued "entry" "entries"}}</span></div>
-        <div class="row"><span class="k">Running editors, last hour</span><span class="v">{{$d.Runners}} {{plural $d.Runners "machine" "machines"}}</span></div>
+        <div class="row"><span class="k">Running curators, last hour</span><span class="v">{{$d.Runners}} {{plural $d.Runners "machine" "machines"}}</span></div>
         <div class="row"><span class="k">To beat</span><span class="v">{{with $d.Record}}{{gain .Rating}} nats · <a href="/editors/{{short .EditorID}}">{{.Name}}</a>{{else}}nobody yet{{end}}</span></div>
       </div>
       <div class="panel">
@@ -92,19 +92,19 @@
     <div class="sec-head"><div><h2>After you submit</h2><p>You can close the laptop. Everything below happens on other people's machines.</p></div></div>
     <ol class="timeline">
       <li><span class="when">usually within the hour</span><div><h3>Your entry is drawn into a round</h3><p>A round is drawn as soon as an entry is waiting and the last round has settled, and every {{.Interval}} regardless. A public randomness beacon picks a fresh slice of the newest web crawl after entries are locked, so nobody has seen the pages, you and us included.</p></div></li>
-      <li><span class="when">during the round</span><div><h3>Volunteers run it and grade it</h3><p>Your editor gets {{howlong .Scale.EditSeconds}} on a machine with {{.Season.Machine.Cores}} cores, {{.Season.Machine.MemoryGB}} GB and one GPU. Two different people run it when two are around, and other people train the model on what it wrote. You see only "running" until the round settles.</p></div></li>
+      <li><span class="when">during the round</span><div><h3>Volunteers run it and grade it</h3><p>Your curator gets {{howlong .Scale.EditSeconds}} on a machine with {{.Season.Machine.Cores}} cores, {{.Season.Machine.MemoryGB}} GB and one GPU. Two different people run it when two are around, and other people train the model on what it wrote. You see only "running" until the round settles.</p></div></li>
       <li><span class="when">when it settles</span><div><h3>Your gain is published</h3><p>With every run, every grade and the edit script itself. Your code becomes public, under the MIT licence, the first time it is drawn.</p></div></li>
-      <li><span class="when">after {{$d.Qualify}} rounds</span><div><h3>You are ranked</h3><p>The best {{$d.Ladder}} editors, one per person, stay on the ladder and keep running in every round. Beat the record holder over the rounds you share and the record is yours.</p></div></li>
+      <li><span class="when">after {{$d.Qualify}} rounds</span><div><h3>You are ranked</h3><p>The best {{$d.Ladder}} curators, one per person, stay on the ladder and keep running in every round. Beat the record holder over the rounds you share and the record is yours.</p></div></li>
     </ol>
   </div>
 </section>
 
 <section>
   <div class="wrap">
-    <div class="sec-head"><div><h2>What a data editor may be</h2><p>The harness is yours. The limits are the machine and the clock, not the method.</p></div><a class="more" href="/docs/agents">the full brief →</a></div>
+    <div class="sec-head"><div><h2>What a curator may be</h2><p>The harness is yours. The limits are the machine and the clock, not the method.</p></div><a class="more" href="/docs/agents">the full brief →</a></div>
     <div class="cols">
       <div class="grid2">
-        <div class="claim"><h3>A few rules</h3><p>Twenty lines that keep English prose and drop boilerplate already gain a lot. The reference editors are this, and they are open.</p></div>
+        <div class="claim"><h3>A few rules</h3><p>Twenty lines that keep English prose and drop boilerplate already gain a lot. The reference curators are this, and they are open.</p></div>
         <div class="claim"><h3>A model you trained</h3><p>Fine-tune a small model at home, on anything but the exams, and run it over every chunk. Name up to {{bytes .Season.Assets.MaxBytes}} of public Hugging Face files and they are in place before the clock starts.</p></div>
         <div class="claim"><h3>An agent</h3><p>Serve your model inside the sandbox and point a harness at it. Node.js is there beside Python, and <code>examples/agent</code> is a complete one.</p></div>
         <div class="claim"><h3>Anything that writes a script in time</h3><p>Python {{.Season.Environment.Python}} and {{len .Season.Environment.Packages}} libraries are on every machine. It has to run on NVIDIA and AMD alike: use the GPU through PyTorch and it does.</p></div>
@@ -126,12 +126,12 @@
     <div class="sec-head"><div><h2>Questions entrants ask</h2></div><a class="more" href="/docs/rules">the rules, in full →</a></div>
     <div class="qa">
       <details open><summary>How many things can I try?</summary><p>On your own machine, as many as you like: <code>stet run</code> is the leaderboard's own harness, practice rounds never change, and every official round can be replayed once it settles. Officially you may have {{$d.InPlay}} {{plural $d.InPlay "entry" "entries"}} in play at once and submit {{$d.PerDay}} a day, because each one costs volunteers GPU time. Submitting an entry again under the same name replaces it; another name is another entry.</p></details>
-      <details><summary>Do I need a GPU?</summary><p>Not to enter: your editor is run on volunteers' machines. To develop one, a GPU turns a practice run from a long wait into a minute or two. Any NVIDIA or AMD card, or a Mac, will do for that.</p></details>
+      <details><summary>Do I need a GPU?</summary><p>Not to enter: your curator is run on volunteers' machines. To develop one, a GPU turns a practice run from a long wait into a minute or two. Any NVIDIA or AMD card, or a Mac, will do for that.</p></details>
       <details><summary>What is the gain, exactly?</summary><p>The exam loss of a model trained on the raw pages, minus the exam loss of one trained on your edit, on the same round. In nats per token; higher is better. The board also shows it as a multiplier: how much more raw data the model would have needed to do as well.</p></details>
-      <details><summary>Can my editor write new text?</summary><p>Almost none. At least {{pct1 $d.CopyFrac}} of what the model reads must be copied byte for byte from the round's pages. The competition is about choosing and ordering data, not about bringing your own.</p></details>
-      <details><summary>Is the exam secret?</summary><p>No. The exam is public, your editor cannot read it while it runs officially, and pages that quote it are removed from the corpus first. A second, held-out exam decides the season's final table.</p></details>
-      <details><summary>What if my editor crashes or runs out of time?</summary><p>The last complete script it wrote still counts, so write one early and improve it. With no script at all, that run scores a gain of 0.</p></details>
-      <details><summary>Why is my code published?</summary><p>So that anyone can check an editor does what the rules allow, and so that the next person can build on it. <code>stet fork</code> copies any editor on the board.</p></details>
+      <details><summary>Can my curator write new text?</summary><p>Almost none. At least {{pct1 $d.CopyFrac}} of what the model reads must be copied byte for byte from the round's pages. The competition is about choosing and ordering data, not about bringing your own.</p></details>
+      <details><summary>Is the exam secret?</summary><p>No. The exam is public, your curator cannot read it while it runs officially, and pages that quote it are removed from the corpus first. A second, held-out exam decides the season's final table.</p></details>
+      <details><summary>What if my curator crashes or runs out of time?</summary><p>The last complete script it wrote still counts, so write one early and improve it. With no script at all, that run scores a gain of 0.</p></details>
+      <details><summary>Why is my code published?</summary><p>So that anyone can check a curator does what the rules allow, and so that the next person can build on it. <code>stet fork</code> copies any curator on the board.</p></details>
     </div>
   </div>
 </section>

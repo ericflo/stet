@@ -385,7 +385,7 @@ func (a *App) maybeDraw(ctx context.Context, force bool) error {
 			problem = errors.New("the previous round is still being graded")
 		case len(a.selectEntrants(s, r.DrawAt)) == 0:
 			a.reschedule(tx, cur, a.laterSlot())
-			problem = errors.New("no editors are waiting to run")
+			problem = errors.New("no curators are waiting to run")
 		case r.Crawl == nil:
 			problem = errors.New("the round has no crawl")
 		}
@@ -421,7 +421,7 @@ func (a *App) maybeDraw(ctx context.Context, force bool) error {
 		entrants := a.selectEntrants(s, cur.DrawAt)
 		if len(entrants) == 0 {
 			a.reschedule(tx, cur, a.laterSlot())
-			problem = errors.New("no editors are waiting to run")
+			problem = errors.New("no curators are waiting to run")
 			return nil
 		}
 		// The crawl is the one announced with the round, never one chosen now.

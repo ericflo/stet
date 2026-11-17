@@ -45,7 +45,7 @@ func TestARoundIsDrawnSoonWhenAnEntryIsWaiting(t *testing.T) {
 	w.submit(alice, "first", "print(1)")
 	w.app.tick(context.Background())
 	if at := w.scheduledAt(); at != usual {
-		t.Fatalf("the draw moved from %d to %d with nobody there to run editors", usual, at)
+		t.Fatalf("the draw moved from %d to %d with nobody there to run curators", usual, at)
 	}
 
 	// The organisers' machine asks for work. The entry that is waiting gets its round at
@@ -102,7 +102,7 @@ func TestDrawsOnDemandKeepAGapAndStopWhenNobodyIsWaiting(t *testing.T) {
 	w.app.tick(context.Background())
 	w.app.st.view(func(s *State) {
 		if w.app.waiting(s) {
-			t.Fatal("an editor that has had its rounds still counts as waiting")
+			t.Fatal("a curator that has had its rounds still counts as waiting")
 		}
 	})
 	// (A slot once announced for another round is not used again, so "the usual time" may
@@ -248,10 +248,10 @@ func TestEachWayOfTakingPartHasAPageOfItsOwn(t *testing.T) {
 	for path, want := range map[string][]string{
 		// The first screen says what this is, a competition, and what one enters, by a name
 		// that says what it does.
-		"/":       {`href="/enter"`, `href="/verify"`, `href="/run"`, "Three ways to take part", "Stet is a competition to make the best training data", "data editor", "Enter the competition", "See the leaderboard", ">Compete</a>", ">Run entries</a>"},
-		"/enter":  {"stet init my-editor", "stet run", "stet submit", "3 entries in play at once", "6 a day", "/AGENTS.md", "<h1>Enter the competition</h1>", "data editor"},
+		"/":       {`href="/enter"`, `href="/verify"`, `href="/run"`, "Three ways to take part", "Stet is a competition to make the best training data", "You enter a <strong>curator</strong>", "Enter the competition", "See the leaderboard", ">Compete</a>", ">Run entries</a>"},
+		"/enter":  {"stet init my-curator", "stet run", "stet submit", "3 entries in play at once", "6 a day", "/AGENTS.md", "<h1>Enter the competition</h1>", "writing a <b>curator</b>"},
 		"/verify": {"stet verify", "stet service install", "--no-upgrade", "STET_AUTO_UPGRADE=0", "stet upgrade", "Nobody else's code runs on your machine"},
-		"/run":    {"<h1>Run entries</h1>", "data editor", "stet verify --edits", "stet service install --edits", "stet bench", "bubblewrap", "strangers' programs", "could reinstall"},
+		"/run":    {"<h1>Run entries</h1>", "is a curator", "stet verify --edits", "stet service install --edits", "stet bench", "bubblewrap", "strangers' programs", "could reinstall"},
 	} {
 		code, body := w.page(path)
 		if code != 200 {

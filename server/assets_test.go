@@ -75,7 +75,7 @@ func shaOf(s string) string {
 
 func TestAnAssetsTableIsHeldToTheRules(t *testing.T) {
 	sha := strings.Repeat("a", 64)
-	ok := "name = \"an-editor\"\nentry = \"python editor.py\"\n"
+	ok := "name = \"an-curator\"\nentry = \"python editor.py\"\n"
 	m, _, err := parseBundle(manifest(ok+assetTable("smol/model.safetensors", "model.safetensors", sha, 269060552)+assetTable("smol/config.json", "config.json", sha, 704)), testAssetLimits)
 	if err != nil || len(m.Files) != 2 || m.Files[0].Path != "smol/model.safetensors" || m.Files[0].Size != 269060552 || m.Files[1].SHA256 != sha {
 		t.Fatalf("a well-formed table: %v %+v", err, m)
@@ -197,7 +197,7 @@ func TestAnEntryWithAssetsIsCheckedAndShowsThem(t *testing.T) {
 	var ed *Editor
 	w.app.st.view(func(s *State) { ed = s.Editors[out.Editor.ID] })
 	if ed == nil || len(ed.Assets) != 1 || ed.Assets[0].SHA256 != weights || ed.AssetBytes != 1000 {
-		t.Fatalf("the editor's record: %+v", ed)
+		t.Fatalf("the curator's record: %+v", ed)
 	}
 	w.check()
 	// Once it is drawn, its page lists what it fetches: each file, its size, where from,
@@ -206,7 +206,7 @@ func TestAnEntryWithAssetsIsCheckedAndShowsThem(t *testing.T) {
 	code, page := w.page("/editors/" + out.Editor.ID[:12])
 	for _, want := range []string{`id="assets"`, "smol/model.safetensors", `href="https://huggingface.co/owner/model/resolve/` + testCommit + `/model.safetensors"`, weights[:12], "1000 B", ">total<"} {
 		if code != 200 || !strings.Contains(page, want) {
-			t.Fatalf("the editor's page (HTTP %d) does not show %q", code, want)
+			t.Fatalf("the curator's page (HTTP %d) does not show %q", code, want)
 		}
 	}
 }

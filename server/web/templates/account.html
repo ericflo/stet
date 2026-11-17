@@ -16,15 +16,15 @@
     {{if $a.Anchor}}<div><span class="eyebrow">Organisers' account</span><div class="v" style="font-size:22px">established from the start</div></div>
     {{else}}<div><span class="eyebrow">Grades that agreed</span><div class="v">{{index $d.V "validated"}}{{if not (index $d.V "established")}}<small>of {{index $d.V "establish_after"}} to be established</small>{{end}}</div></div>
     <div><span class="eyebrow">Last two weeks</span><div class="v">{{index $d.V "recent"}}</div></div>{{end}}
-    <div><span class="eyebrow">Editors run</span><div class="v">{{index $d.V "runs"}}</div></div>
+    <div><span class="eyebrow">Curators run</span><div class="v">{{index $d.V "runs"}}</div></div>
     <div><span class="eyebrow">GPU time given</span><div class="v">{{f1 (index $d.V "gpu_hours")}}<small>hours</small></div></div>
-    <div><span class="eyebrow">Editors entered</span><div class="v">{{len $d.Editors}}</div></div>
+    <div><span class="eyebrow">Curators entered</span><div class="v">{{len $d.Editors}}</div></div>
   </div>
-  <h2>Editors</h2>
+  <h2>Curators</h2>
   <div class="table-wrap">
     {{if $d.Editors}}
     <table>
-      <thead><tr><th>Editor</th><th class="r">Worth</th><th class="r">Rating</th><th class="r hide-s">Rounds</th><th class="hide-s">Entered</th></tr></thead>
+      <thead><tr><th>Curator</th><th class="r">Worth</th><th class="r">Rating</th><th class="r hide-s">Rounds</th><th class="hide-s">Entered</th></tr></thead>
       <tbody>
         {{range $d.Editors}}<tr>
           <td><a class="name" href="/editors/{{short .E.ID}}">{{.E.Name}}</a><span class="by">v{{.E.Version}}</span>{{with .Row}}{{if .Record}}<span class="tag red">record</span>{{end}}{{if .Ladder}}<span class="tag">ladder</span>{{end}}{{end}}</td>

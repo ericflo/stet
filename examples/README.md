@@ -1,6 +1,6 @@
-# Reference editors
+# Reference curators
 
-Three complete editors, entered in the competition by the organisers so that the board has
+Three complete curators, entered in the competition by the organisers so that the board has
 fixed points. Fork any of them: `stet fork stet/tidy`.
 
 | | What it does |

@@ -272,13 +272,13 @@ func (a *App) runsEditors(acct *Account, h *Hello) (bool, string) {
 	case muted(acct, now()):
 		return false, "this account is given no work for now"
 	case a.mayEnter(acct) != nil:
-		return false, "running editors needs a linked GitHub account, as entering does: stet login --github"
+		return false, "running curators needs a linked GitHub account, as entering does: stet login --github"
 	case !a.established(acct):
-		return false, fmt.Sprintf("editors are run by established verifiers: accounts with %d grades that agreed. This one has %d", a.cfg.EstablishAfter, acct.Agreed)
+		return false, fmt.Sprintf("curators are run by established verifiers: accounts with %d grades that agreed. This one has %d", a.cfg.EstablishAfter, acct.Agreed)
 	case h.Sandbox != "bwrap" && !a.cfg.Dev:
-		return false, "running editors needs the bubblewrap sandbox"
+		return false, "running curators needs the bubblewrap sandbox"
 	case !a.meetsFloor(h.Hardware):
-		return false, "this machine is slower or smaller than the season's floor for running editors, or sent no measurement of itself: stet bench"
+		return false, "this machine is slower or smaller than the season's floor for running curators, or sent no measurement of itself: stet bench"
 	}
 	return true, ""
 }
@@ -1222,7 +1222,7 @@ func (a *App) claim(ctx context.Context, acctID int64, h *Hello) (*Handed, error
 			}
 		}
 		if mine != nil && mine.Kind == "edit" && !canEdit {
-			out.Note = "This account holds an editor it took to run, and is asking now as a machine that does not run editors. It is handed nothing else until that job is reported, handed back or out of time. To finish it, start `stet verify --edits` on the machine that took it."
+			out.Note = "This account holds a curator it took to run, and is asking now as a machine that does not run curators. It is handed nothing else until that job is reported, handed back or out of time. To finish it, start `stet verify --edits` on the machine that took it."
 			return nil
 		}
 		if mine != nil {
@@ -1378,7 +1378,7 @@ func (a *App) submitScript(ctx context.Context, acctID, claimID int64, p *Script
 	check := func(s *State) (c *Claim, other, saw bool, err error) {
 		acct := s.Accounts[acctID]
 		if acct == nil || !a.established(acct) {
-			return nil, false, false, fail(403, "editors are run by established verifiers only")
+			return nil, false, false, fail(403, "curators are run by established verifiers only")
 		}
 		if c, err = findClaim(s, acct, claimID, "edit"); err != nil {
 			return nil, false, false, err
@@ -2242,7 +2242,7 @@ func (a *App) settleEntry(tx *Tx, j *judge, st *entryState) {
 				if run.Edit != nil {
 					status = run.Edit.Status
 				}
-				run.Reason = fmt.Sprintf("the editor produced no script (%s)", status)
+				run.Reason = fmt.Sprintf("the curator produced no script (%s)", status)
 			}
 		} else {
 			run.Grades, run.Self = g.grades, g.v.self

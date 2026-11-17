@@ -131,9 +131,9 @@ func (s *Site) mount(mux *http.ServeMux) {
 	mux.HandleFunc("GET /rounds", s.rounds)
 	mux.HandleFunc("GET /rounds/{id}", s.round)
 	mux.HandleFunc("GET /verifiers", s.verifiersPage)
-	mux.HandleFunc("GET /enter", s.guide("enter", "Enter the competition", "You compete by writing a data editor: a program that edits pretraining data. Test it on your own machine as often as you like, and enter it to be scored on volunteers' GPUs and ranked on the leaderboard."))
+	mux.HandleFunc("GET /enter", s.guide("enter", "Enter the competition", "You compete by writing a curator: a program that edits pretraining data. Test it on your own machine as often as you like, and enter it to be scored on volunteers' GPUs and ranked on the leaderboard."))
 	mux.HandleFunc("GET /verify", s.guide("verify", "Verify scores", "Lend a GPU to the leaderboard: one command retrains a fixed model on entrants' edit scripts. No one else's code runs on your machine, and it keeps itself up to date."))
-	mux.HandleFunc("GET /run", s.guide("run", "Run entries", "Run entrants' data editors in a sandbox on a Linux machine with a GPU. What it needs, what the sandbox does, and how to leave it running."))
+	mux.HandleFunc("GET /run", s.guide("run", "Run entries", "Run entrants' curators in a sandbox on a Linux machine with a GPU. What it needs, what the sandbox does, and how to leave it running."))
 	mux.HandleFunc("GET /u/{handle}", s.account)
 	mux.HandleFunc("GET /docs", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/docs/rules", http.StatusFound)
@@ -172,7 +172,7 @@ func (s *Site) page(r *http.Request, title, nav string, d any) *Page {
 		Title: title, Nav: nav, Path: r.URL.Path, Season: a.season, Scale: a.season.Scales[a.cfg.Scale], ScaleID: a.cfg.Scale,
 		BaseURL: a.cfg.BaseURL, APIURL: a.cfg.APIURL, Version: s.version, Dev: a.cfg.Dev, Now: now(), Wheel: wheel, CLI: version,
 		Docs: s.docList(), Interval: plainDuration(a.cfg.RoundInterval), Github: a.cfg.RequireGithub, D: d,
-		Desc: "Stet is an open competition to make the best training data for a language model. You enter a data editor: a program that cuts, keeps and reorders raw web crawl. The model, the trainer and the budget are fixed. The only thing you can touch is the data.",
+		Desc: "Stet is an open competition to make the best training data for a language model. You enter a curator: a program that cuts, keeps and reorders raw web crawl. The model, the trainer and the budget are fixed. The only thing you can touch is the data.",
 	}
 }
 
@@ -537,7 +537,7 @@ func feed(s *State, limit int) []FeedItem {
 			h = fmt.Sprintf(`<a href="/u/%s">%s</a> entered <b>%s</b> v%d`, esc(str("owner")), esc(str("owner")), esc(str("name")), int(num("version")))
 		case "draw":
 			h = fmt.Sprintf(`Round <a href="/rounds/%s">%s</a> drawn: %d %s on %s`, esc(str("round")), esc(str("round")), int(num("entries")),
-				map[bool]string{true: "editor", false: "editors"}[int(num("entries")) == 1], esc(str("crawl")))
+				map[bool]string{true: "entry", false: "entries"}[int(num("entries")) == 1], esc(str("crawl")))
 		case "settle":
 			h = fmt.Sprintf(`Round <a href="/rounds/%s">%s</a> settled; best gain <span class="num">%s</span>`, esc(str("round")), esc(str("round")), signed(num("best_gain"), 3))
 		case "record":
@@ -789,7 +789,7 @@ func (s *Site) editorByName(w http.ResponseWriter, r *http.Request) {
 		}
 	})
 	if id == "" {
-		s.notFound(w, r, "No such editor. It may not have been drawn yet: an editor is published when it is first drawn into a round.")
+		s.notFound(w, r, "No such curator. It may not have been drawn yet: a curator is published when it is first drawn into a round.")
 		return
 	}
 	http.Redirect(w, r, "/editors/"+id[:12], http.StatusFound)
@@ -849,7 +849,7 @@ func (s *Site) editor(w http.ResponseWriter, r *http.Request) {
 		d["Forks"], d["Versions"] = forks, versions
 	})
 	if e == nil {
-		s.notFound(w, r, "No such editor. Entries become public when they are first drawn into a round.")
+		s.notFound(w, r, "No such curator. Entries become public when they are first drawn into a round.")
 		return
 	}
 	d["E"], d["Owner"], d["Github"], d["Row"] = e, owner, github, b.ByID[e.ID]
@@ -1281,15 +1281,15 @@ else
     fi
     rm -rf "$PRE"
   fi
-  say "Installing stet with Python $PY, PyTorch and the editor libraries (a few GB the first time)..."
+  say "Installing stet with Python $PY, PyTorch and the curator libraries (a few GB the first time)..."
   set -- uv tool install --force --python "$PY" --constraints "$TMP/constraints.txt"
   if [ -n "$INDEX" ]; then
     set -- "$@" --index "$INDEX" --index-strategy unsafe-best-match
   fi
   if ! "$@" "stet-cli[run] @ $WHEEL"; then
     say ""
-    say "The full set of editor libraries could not be installed on this machine."
-    say "Installing stet with PyTorch alone: enough to grade, and to run editors that"
+    say "The full set of curator libraries could not be installed on this machine."
+    say "Installing stet with PyTorch alone: enough to grade, and to run curators that"
     say "need nothing else. 'stet doctor' will say what is missing."
     set -- uv tool install --force --python "$PY" --with "torch=={{.Torch}}"
     if [ -n "$INDEX" ]; then
@@ -1302,7 +1302,7 @@ fi
 say ""
 say "Done. Next:"
 say "  stet doctor              check this machine"
-say "  stet init my-editor      start an editor"
+say "  stet init my-curator      start a curator"
 say "  stet verify              lend your GPU to the leaderboard"
 case ":$PATH:" in
   *":$HOME/.local/bin:"*) ;;
@@ -1338,12 +1338,12 @@ if ($env:STET_LIGHT -eq "1" -or $env:STET_NO_TORCH -eq "1") {
   }
   $constraints = Join-Path ([System.IO.Path]::GetTempPath()) "stet-constraints.txt"
   Invoke-WebRequest -UseBasicParsing "{{.Base}}/constraints.txt" -OutFile $constraints
-  Write-Host "Installing stet with Python $py, PyTorch and the editor libraries (a few GB the first time)..."
+  Write-Host "Installing stet with Python $py, PyTorch and the curator libraries (a few GB the first time)..."
   $more = @()
   if ($index) { $more = @("--index", $index, "--index-strategy", "unsafe-best-match") }
   uv tool install --force --python $py --constraints $constraints @more "stet-cli[run] @ $wheel"
   if ($LASTEXITCODE -ne 0) {
-    Write-Host "The full set of editor libraries could not be installed here. Installing stet with PyTorch alone."
+    Write-Host "The full set of curator libraries could not be installed here. Installing stet with PyTorch alone."
     uv tool install --force --python $py --with "torch=={{.Torch}}" @more "stet-cli @ $wheel"
   }
 }
@@ -1351,7 +1351,7 @@ if ($env:STET_LIGHT -eq "1" -or $env:STET_NO_TORCH -eq "1") {
 Write-Host ""
 Write-Host "Done. Next:"
 Write-Host "  stet doctor              check this machine"
-Write-Host "  stet init my-editor      start an editor"
+Write-Host "  stet init my-curator      start a curator"
 Write-Host "  stet verify              lend your GPU to the leaderboard"
 `
 

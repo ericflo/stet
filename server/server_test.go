@@ -416,7 +416,7 @@ func (w *world) edit(a *actor, c *claimed, script string) (int, string) {
 		"edit": map[string]any{"status": "ok", "seconds": 3.0, "time_limit": 60.0, "sandbox": "bwrap"},
 	}
 	if script == "" {
-		p["edit"] = map[string]any{"status": "timeout", "seconds": 60.0, "time_limit": 60.0, "reason": "the editor ran out of time"}
+		p["edit"] = map[string]any{"status": "timeout", "seconds": 60.0, "time_limit": 60.0, "reason": "the curator ran out of time"}
 	} else {
 		enc, _ := zstd.NewWriter(nil)
 		sum := sha256.Sum256([]byte(script))
@@ -572,7 +572,7 @@ func (w *world) run(a *actor, script string) *claimed {
 	w.t.Helper()
 	c := w.claim(a, true)
 	if c.Job == nil || c.Job.Kind != "edit" {
-		w.t.Fatalf("%s should be running an editor: %+v", a.handle, c.Job)
+		w.t.Fatalf("%s should be running a curator: %+v", a.handle, c.Job)
 	}
 	if code, status := w.edit(a, c, script); code != 200 {
 		w.t.Fatalf("%s's run: HTTP %d %s", a.handle, code, status)
@@ -630,10 +630,10 @@ func TestAnEntryIsRunThenGradedAndSettles(t *testing.T) {
 	// Not public, and not downloadable by strangers, until it is drawn.
 	stranger := &actor{t: t, srv: w.srv}
 	if code := stranger.do("GET", "/api/v1/editors/"+id, nil, nil); code != 404 {
-		t.Fatalf("an undrawn editor is visible: HTTP %d", code)
+		t.Fatalf("an undrawn curator is visible: HTTP %d", code)
 	}
 	if code := stranger.do("GET", "/api/v1/editors/"+id+"/bundle", nil, nil); code != 404 {
-		t.Fatalf("an undrawn editor can be downloaded: HTTP %d", code)
+		t.Fatalf("an undrawn curator can be downloaded: HTTP %d", code)
 	}
 	if code := alice.do("GET", "/api/v1/editors/"+id, nil, nil); code != 200 {
 		t.Fatalf("its owner cannot see it: HTTP %d", code)
@@ -642,7 +642,7 @@ func TestAnEntryIsRunThenGradedAndSettles(t *testing.T) {
 	idx := w.draw()
 	w.check()
 	if code := stranger.do("GET", "/api/v1/editors/"+id+"/bundle", nil, nil); code != 200 {
-		t.Fatalf("a drawn editor cannot be downloaded: HTTP %d", code)
+		t.Fatalf("a drawn curator cannot be downloaded: HTTP %d", code)
 	}
 
 	// Nobody but an established verifier is ever handed an entrant's code to run. One who
@@ -652,11 +652,11 @@ func TestAnEntryIsRunThenGradedAndSettles(t *testing.T) {
 		t.Fatalf("a volunteer was given %s job before any script existed", nb.Job.Kind)
 	}
 	if why, _ := nb.Runner["reason"].(string); nb.Runner["eligible"] != false || !strings.Contains(why, "5 grades that agreed") {
-		t.Fatalf("a volunteer who asked for editors was not told why it gets none: %+v", nb.Runner)
+		t.Fatalf("a volunteer who asked for curators was not told why it gets none: %+v", nb.Runner)
 	}
 	c := w.claim(anchor, true)
 	if c.Job == nil || c.Job.Kind != "edit" || c.Job.Script != nil || c.Job.Editor.ID != id || c.Runner["eligible"] != true {
-		t.Fatalf("the organisers' machine should be running the editor: %+v %+v", c.Job, c.Runner)
+		t.Fatalf("the organisers' machine should be running the curator: %+v %+v", c.Job, c.Runner)
 	}
 	if c.Announced == nil {
 		t.Fatal("a claim does not say what the next draw is committed to")
@@ -1182,7 +1182,7 @@ func TestAFailedEditScoresAsUneditedAndRetiresTheEditor(t *testing.T) {
 	}
 	w.app.st.view(func(s *State) {
 		if e := s.Editors[id]; e.Status != "retired" {
-			t.Fatalf("an editor that failed %d times is still %s", retireAfterInvalid, e.Status)
+			t.Fatalf("a curator that failed %d times is still %s", retireAfterInvalid, e.Status)
 		}
 		if r := s.roundWithStatus("open"); r != nil {
 			t.Fatal("a round whose only entry failed is still open")
@@ -1290,7 +1290,7 @@ func TestTheBoardsCountWholeRoundsAndRealGraders(t *testing.T) {
 				return *r.Rating
 			}
 		}
-		t.Fatal("the editor is not on the board")
+		t.Fatal("the curator is not on the board")
 		return 0
 	}
 	before := rating()
@@ -1606,17 +1606,17 @@ func TestAnEditorTheVerifiersCannotRunDoesNotHoldTheRoundOpen(t *testing.T) {
 			t.Fatal("the round is still open")
 		}
 		if e := s.Editors[id]; e.Status == "retired" {
-			t.Fatal("the editor was retired for something that may be the verifiers' fault")
+			t.Fatal("the curator was retired for something that may be the verifiers' fault")
 		}
 		// The round does not count for the editor: not as one of its qualifying rounds,
 		// and not as a gain of nothing in its rating.
 		if e := s.ofEditor[id][0]; !e.Void || roundsRun(s, id) != 0 {
-			t.Fatalf("a round the anchor could not run counts for the editor: %+v", e)
+			t.Fatalf("a round the anchor could not run counts for the curator: %+v", e)
 		}
 	})
 	for _, r := range append(w.app.board().Rated, w.app.board().Provisional...) {
 		if r.ID == id {
-			t.Fatalf("the editor has a rating from a round that was never run: %+v", r)
+			t.Fatalf("the curator has a rating from a round that was never run: %+v", r)
 		}
 	}
 	// It is drawn again, however often that happens: a round in which the anchor ran
@@ -1651,18 +1651,18 @@ func TestAnEditorTheVerifiersCannotRunDoesNotHoldTheRoundOpen(t *testing.T) {
 			}
 		}
 		if tries != maxEditAttempts {
-			t.Fatalf("round %d: the editor was tried %d times", n, tries)
+			t.Fatalf("round %d: the curator was tried %d times", n, tries)
 		}
 		w.app.tick(context.Background())
 	}
 	w.app.st.view(func(s *State) {
 		if !failing(s, id) {
-			t.Fatal("an editor the verifiers could not run in three rounds, while running others, is still being scheduled")
+			t.Fatal("a curator the verifiers could not run in three rounds, while running others, is still being scheduled")
 		}
 		// Whether the verifiers ran the others is known only when the round has settled, and
 		// that is when the editor stops: it is not drawn a fourth time.
 		if e := s.Editors[id]; e.Status != "retired" {
-			t.Fatalf("the editor is still %s", e.Status)
+			t.Fatalf("the curator is still %s", e.Status)
 		}
 	})
 	next := w.draw()
@@ -1984,7 +1984,7 @@ func TestOneProcessServesTheSiteTheAPIAndTheRedirect(t *testing.T) {
 	}
 	if promised.Machine.Cores != 6 || promised.Runner.GPUTokensPerSecond <= 0 || promised.Assets.MaxFiles != 32 || promised.Environment.Python != "3.13" ||
 		promised.Environment.Packages["torch"] == "" || promised.Environment.Packages["nodejs-wheel"] == "" {
-		t.Fatalf("the season does not say what an editor is promised: %+v", promised)
+		t.Fatalf("the season does not say what a curator is promised: %+v", promised)
 	}
 	if code, _, _ := get("api.test", "/readyz"); code != 200 {
 		t.Fatalf("readyz: HTTP %d", code)
@@ -2128,11 +2128,11 @@ func TestTheWholeFlowOnDurableDB(t *testing.T) {
 		return n
 	}
 	if n := editors(); n != 2 {
-		t.Fatalf("the second server holds %d editors before it has been told of the third", n)
+		t.Fatalf("the second server holds %d curators before it has been told of the third", n)
 	}
 	other.app.st.sync(context.Background())
 	if n := editors(); n != 3 {
-		t.Fatalf("the second server holds %d editors after asking the database", n)
+		t.Fatalf("the second server holds %d curators after asking the database", n)
 	}
 	other.check()
 }
@@ -2198,7 +2198,7 @@ func TestAnEditorReferenceCannotBeTakenOver(t *testing.T) {
 		t.Fatalf("alice/tidy for alice: HTTP %d %s", code, out.Editor.ID)
 	}
 	if code := stranger.do("GET", "/api/v1/editors/"+v2, nil, nil); code != 404 {
-		t.Fatalf("an editor that has not run is visible by its id: HTTP %d", code)
+		t.Fatalf("a curator that has not run is visible by its id: HTTP %d", code)
 	}
 	_ = mallory
 }
@@ -2496,7 +2496,7 @@ func TestAnEditorThatKeepsFailingLeavesTheLadder(t *testing.T) {
 	w.play(anchor, w.app.cfg.QualifyRounds, func(string, int) float64 { return 5.99 })
 	w.app.st.view(func(s *State) {
 		if s.holder() != nil {
-			t.Fatal("this test is about an editor that does not hold the record")
+			t.Fatal("this test is about a curator that does not hold the record")
 		}
 	})
 	onLadder := func() bool {
@@ -2508,21 +2508,21 @@ func TestAnEditorThatKeepsFailingLeavesTheLadder(t *testing.T) {
 		return false
 	}
 	if !onLadder() {
-		t.Fatal("a rated editor with nobody above it is not on the ladder")
+		t.Fatal("a rated curator with nobody above it is not on the ladder")
 	}
 	// On the ladder it runs every round. Now it times out twice.
 	for n := 0; n < retireAfterInvalid; n++ {
 		w.draw()
 		c := w.claim(anchor, true)
 		if c.Job == nil || c.Job.Kind != "edit" || c.Job.Editor.ID != id {
-			t.Fatalf("the ladder editor was not drawn: %+v", c.Job)
+			t.Fatalf("the ladder curator was not drawn: %+v", c.Job)
 		}
 		if code, status := w.edit(anchor, c, ""); code != 200 {
 			t.Fatal(status)
 		}
 	}
 	if onLadder() {
-		t.Fatal("an editor that failed twice running is still on the ladder, costing the verifiers an edit every round")
+		t.Fatal("a curator that failed twice running is still on the ladder, costing the verifiers an edit every round")
 	}
 	w.check()
 }
@@ -2643,7 +2643,7 @@ func TestAMachineThatBuildsTheRoundDifferentlyIsNotGivenMoreOfIt(t *testing.T) {
 	// Text that would be printed in other people's terminals is plain text.
 	var tb bytes.Buffer
 	tw := tar.NewWriter(&tb)
-	manifest := "name = \"tidy\"\nentry = \"python editor.py\"\ndescription = \"nice \\u001b]0;owned\\u0007 editor\"\n"
+	manifest := "name = \"tidy\"\nentry = \"python editor.py\"\ndescription = \"nice \\u001b]0;owned\\u0007 curator\"\n"
 	tw.WriteHeader(&tar.Header{Name: "stet.toml", Mode: 0o644, Size: int64(len(manifest)), Typeflag: tar.TypeReg})
 	tw.Write([]byte(manifest))
 	tw.Close()
@@ -3000,7 +3000,7 @@ func TestTwoVolunteersConfirmAnEntryWithNoOrganiser(t *testing.T) {
 		t.Fatalf("the verifier board: %+v", vs.Verifiers)
 	}
 	if _, page := w.page("/verifiers"); !strings.Contains(page, ">established<") || !strings.Contains(page, ">Runs<") {
-		t.Fatal("the verifiers page does not show who is established, or how many editors each has run")
+		t.Fatal("the verifiers page does not show who is established, or how many curators each has run")
 	}
 	var me struct {
 		Account  map[string]any `json:"account"`
@@ -3281,7 +3281,7 @@ func TestOnlyAnEstablishedAccountOnAMachineUpToTheFloorIsHandedEditors(t *testin
 		c := w.claimWith(who, h)
 		reason, _ := c.Runner["reason"].(string)
 		if c.Job != nil || c.Runner["eligible"] != false || !strings.Contains(reason, why) {
-			t.Fatalf("%s was not refused editors for %q: job %+v, %+v", who.handle, why, c.Job, c.Runner)
+			t.Fatalf("%s was not refused curators for %q: job %+v, %+v", who.handle, why, c.Job, c.Runner)
 		}
 	}
 	slow, small := bench(), bench()
@@ -3294,7 +3294,7 @@ func TestOnlyAnEstablishedAccountOnAMachineUpToTheFloorIsHandedEditors(t *testin
 	refused(bob, hello(bench(), "none"), "sandbox")      // nothing to run entrants' code in
 	refused(anchor, hello(nil, "bwrap"), "floor")        // the organisers' machines are held to it too
 	if a := w.account("bob"); a.RunnerSeen != 0 {
-		t.Fatalf("a machine that may not run editors is counted as one that could: %+v", a)
+		t.Fatalf("a machine that may not run curators is counted as one that could: %+v", a)
 	}
 	c := w.claimWith(bob, hello(bench(), "bwrap"))
 	if c.Job == nil || c.Job.Kind != "edit" || c.Runner["eligible"] != true {
@@ -3528,7 +3528,7 @@ func TestAVolunteersRunIsNotTakenOnItsWordAlone(t *testing.T) {
 			}
 			// Counted neither for the entry nor against it.
 			if en := s.entry(idx, id); !en.Unattended || failing(s, id) || roundsRun(s, id) != 0 || s.Editors[id].Status == "retired" {
-				t.Fatalf("the entry afterwards: %+v, editor %s", en, s.Editors[id].Status)
+				t.Fatalf("the entry afterwards: %+v, curator %s", en, s.Editors[id].Status)
 			}
 		})
 		if b := w.account("bob"); b.Runs != 0 || b.Strikes != 0 { // (a run nobody could check is not credited)
@@ -3633,7 +3633,7 @@ func TestEntriesFromBeforeRunsKeepTheirScores(t *testing.T) {
 				return *r.Rating
 			}
 		}
-		t.Fatal("the editor is not on the board")
+		t.Fatal("the curator is not on the board")
 		return 0
 	}
 	before := rating(w)
@@ -3656,7 +3656,7 @@ func TestEntriesFromBeforeRunsKeepTheirScores(t *testing.T) {
 		t.Fatalf("the old round's page: HTTP %d", code)
 	}
 	if code, page := old.page("/editors/" + id[:12]); code != 200 || !strings.Contains(page, ">run once<") {
-		t.Fatalf("the old editor's page: HTTP %d", code)
+		t.Fatalf("the old curator's page: HTTP %d", code)
 	}
 
 	// An entry that was half-way through its round when the server learned about runs
@@ -3800,7 +3800,7 @@ func TestBeingEstablishedNeedsTheGithubIdentityThatEnteringDoes(t *testing.T) {
 	}
 	c := w.claim(bob, true)
 	if why, _ := c.Runner["reason"].(string); c.Job != nil || c.Runner["eligible"] != false || !strings.Contains(why, "GitHub") {
-		t.Fatalf("handed an editor without one: %+v %+v", c.Job, c.Runner)
+		t.Fatalf("handed a curator without one: %+v %+v", c.Job, c.Runner)
 	}
 	w.app.st.update(context.Background(), func(tx *Tx) error {
 		b := tx.s.byHandle["bob"]

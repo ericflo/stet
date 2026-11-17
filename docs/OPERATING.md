@@ -16,7 +16,7 @@ which build is live (`server`) and which harness version it accepts (`harness`).
 
 ## The organisers' verifier
 
-The organisers run one verifier of their own. It is not needed for a score: editors are
+The organisers run one verifier of their own. It is not needed for a score: curators are
 run and scripts graded by any established accounts. It is there because someone has to
 be first. Until volunteers are established it does all the work, alone, and entries it
 ran alone are marked *run once*. If it is down and nobody else is established, rounds
@@ -34,12 +34,12 @@ the same libraries volunteers install, with the account whose key is in
 `~/.config/stet/key.json`. The server knows an organisers' account by its public key:
 `STET_ANCHOR_KEYS` in Epsilon's `apps/stet/deployment.yaml`. Those accounts start out
 established, may draw and publish, and, when nobody else who is around could do it, may
-run and grade the organisers' own reference editors and grade a script they wrote. That
+run and grade the organisers' own reference curators and grade a script they wrote. That
 is all the name buys.
 
 It has to meet the floor like anyone's (`stet bench`, on a quiet GPU; the measurement is
 kept for a week). Edit time is wall-clock time, so do not run other GPU or heavy CPU
-work on it while it is running an editor.
+work on it while it is running a curator.
 
 One verifier runs per key. A second `stet verify` on the same key refuses to start.
 
@@ -88,7 +88,7 @@ and each the held-out exam. A machine that only grades (`stet service install`, 
 `--edits`) needs no sandbox and no floor, and is enough to turn *run once* into a second
 opinion on every script.
 
-When volunteers arrive nothing needs changing: an established volunteer who runs editors
+When volunteers arrive nothing needs changing: an established volunteer who runs curators
 is preferred for the second run, and the organisers' machines stop grading their own
 scripts as soon as somebody else can.
 
@@ -108,7 +108,7 @@ scripts as soon as somebody else can.
    ```
 
 Bump the harness version whenever a change could alter a corpus, a script's meaning, a
-loss, or what an editor finds when it runs (the library list, the machine it is given).
+loss, or what a curator finds when it runs (the library list, the machine it is given).
 Volunteers on the old version are told to upgrade.
 
 **Changing the library list.** The list is `environment` in `src/stet/seasons/s0.json`.
@@ -148,7 +148,7 @@ gaps can be filled here.
 
 `python tools/heldout_report.py ~/.config/stet/heldout/s0.jsonl` prints the table so far:
 the public leaderboard's own arithmetic, on held-out losses. Do not publish it, quote it,
-or tune a reference editor on it. Remember that you can see it when you choose the closing
+or tune a reference curator on it. Remember that you can see it when you choose the closing
 date. It exits 0 when the table is whole, 1 when its arithmetic on the public losses does
 not give the public leaderboard (stop and find out why), and 2 when that checks out but
 official entries are missing from the record.
@@ -191,14 +191,14 @@ Set in `apps/stet/deployment.yaml`. The ones that are rules:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `STET_LADDER_SIZE` | 8 | Editors that run in every round |
+| `STET_LADDER_SIZE` | 8 | Curators that run in every round |
 | `STET_MAX_NEW_PER_ROUND` | 3 | New entries admitted per round |
 | `STET_ROUND_INTERVAL` | 6h | A round is drawn this often whether or not anybody is waiting |
 | `STET_ROUND_MIN_GAP` | 1h | When an entry is waiting and a runner is around, the next round is drawn this long after the last draw at the soonest. `0` turns drawing on demand off |
 | `STET_ENTRIES_IN_PLAY` | 3 | Entries one person may have waiting or qualifying at once |
 | `STET_SUBMISSIONS_PER_DAY` | 6 | Submissions one person may make in a day |
 | `STET_QUALIFY_ROUNDS` | 3 | Rounds a new entry runs |
-| `STET_RATED_ROUNDS` | 3 | Rounds before an editor is ranked |
+| `STET_RATED_ROUNDS` | 3 | Rounds before a curator is ranked |
 | `STET_GITHUB_MIN_AGE_DAYS` | 30 | Age of the GitHub account an entrant must link |
 | `STET_GITHUB_TOKEN` | none | Optional. Without it GitHub lookups share 60 requests an hour |
 | `STET_ANCHOR_KEYS` | | Public keys of the organisers' accounts, comma-separated |
@@ -219,15 +219,15 @@ when rounds settle well inside six hours.
 | Sign | Likely cause | Do |
 |---|---|---|
 | A round stays `open` | Nobody established is verifying, or a verifier is stuck | Check the organisers' unit and its log; look at the verifiers page for who was last seen |
-| Every entry is marked *run once* | Only one established account is running editors | Expected early in a season. It ends when volunteers are established and pass `--edits` |
+| Every entry is marked *run once* | Only one established account is running curators | Expected early in a season. It ends when volunteers are established and pass `--edits` |
 | The log says "this verifier is out of date" | The server was deployed with a newer harness | It upgrades itself within ten minutes. If the log says the upgrade did not work, it says why: run `stet upgrade` by hand |
-| A runner that crashed is handed nothing | It held an editor and was started again without `--edits` | Start it with `--edits`, or wait for the job's lease to end |
+| A runner that crashed is handed nothing | It held a curator and was started again without `--edits` | Start it with `--edits`, or wait for the job's lease to end |
 | `stet verify --edits` says the machine is slower than the floor | The GPU was busy when `stet bench` ran, or the machine really is below it | Run `stet bench` again on a quiet GPU. A machine below the floor can still grade |
 | `stet verify --edits` says the libraries differ | An old install, or another Python | Run the installer again |
 | The site says "back in a moment" | The server cannot reach durable-db | It recovers by itself; alert `StetDBUnavailable` fires meanwhile |
 | An entry is "not run" | Verifiers failed to run it three times, or to grade a script five times, or one volunteer ran it and nobody else was there to grade it | Read the round page and the log. The round is void for that entry. Three such rounds in a row, with other entries running, and it stops being drawn |
-| Every entry of a round is "not run" | The machines doing the work were in trouble (disk, network, GPU) | Nothing is held against any editor for a round in which nothing ran |
-| An entry is marked *runs differed* | Two people's runs of one editor scored further apart than the run tolerance and nobody was there for a third | Look at the two scripts. An editor that depends on the GPU's make or the machine's speed does this honestly; the tolerance is provisional until there are enough such pairs to measure it |
+| Every entry of a round is "not run" | The machines doing the work were in trouble (disk, network, GPU) | Nothing is held against any curator for a round in which nothing ran |
+| An entry is marked *runs differed* | Two people's runs of one curator scored further apart than the run tolerance and nobody was there for a third | Look at the two scripts. A curator that depends on the GPU's make or the machine's speed does this honestly; the tolerance is provisional until there are enough such pairs to measure it |
 | An entry shows a dispute, or the log has a `disputed` event | Two established grades of one script disagreed and nobody was there for a third | Grade the script again (`stet score <hash> --round <id>`). If the two share nothing but a GPU type, the grade tolerance is too tight for it: the round pages have the differences |
 | Many verifiers listed as "turned away" on round pages | Their unedited loss is out of tolerance on some GPU type | The same: the tolerance is a guess until this is measured |
 | An entry's submission is refused over an asset | The file is not at that commit, is not public, or its hash or size is not what `stet.toml` says | The message names the file. `stet asset add` again writes the right tables |

@@ -7,15 +7,15 @@ will be set.
 ## The idea
 
 A small language model, the **student**, is trained on raw web text for a fixed number of
-tokens and then sits an **exam** of curated text. The model, the trainer and the exam
-never change. You change one thing: the data. You write a **data editor** (an *editor*, from here on), a program that is
+tokens and then sits an **exam** of hand-picked text. The model, the trainer and the exam
+never change. You change one thing: the data. You write a **curator**, a program that is
 handed raw web pages it has never seen and ten minutes on one GPU. It answers with an
 **edit script**: what to keep, what to cut, and in what order to train on it. The lower
-the student's exam loss, the better the editor.
+the student's exam loss, the better the curator.
 
 ## What you enter
 
-An editor is a directory with a `stet.toml` and any program. `stet init` makes one.
+A curator is a directory with a `stet.toml` and any program. `stet init` makes one.
 
 - **The harness is yours.** `stet.toml` names one command, and how it gets from the corpus
   to a script is up to you: a loop that runs a classifier or a model you fine-tuned over
@@ -27,15 +27,15 @@ An editor is a directory with a `stet.toml` and any program. `stet init` makes o
   most 50 MB, 400 MB unpacked and 2,000 files. Hidden files, `venv/`, `node_modules/`,
   `__pycache__/`, `runs/`, compiled Python and symbolic links are never packed;
   `stet submit --dry-run` lists exactly what is.
-- **Model weights go by reference.** An editor may use a model of its own: up to 32 files
+- **Model weights go by reference.** A curator may use a model of its own: up to 32 files
   and 4 GiB in all, named in `stet.toml` as `[[assets]]`. Each is a public file on Hugging
   Face, pinned to a commit and named by its sha256. `stet asset add <owner>/<repository>`
   writes the tables. The files are fetched before the clock starts and are in place,
-  read-only, when the editor runs. Nothing can be downloaded while it runs.
+  read-only, when the curator runs. Nothing can be downloaded while it runs.
 - **Libraries are provided.** PyTorch, transformers, scikit-learn and some forty-five
-  others, and Node.js, at exact versions: see [the editor's machine](#the-editors-machine).
+  others, and Node.js, at exact versions: see [the curator's machine](#the-curators-machine).
   You bundle your own code and nothing else.
-- **It has to run on both makes of GPU.** Editors are run by volunteers, on NVIDIA and on
+- **It has to run on both makes of GPU.** Curators are run by volunteers, on NVIDIA and on
   AMD. Use the GPU through PyTorch (`device="cuda"` is right on both) and it will. A run
   that fails scores a gain of 0.
 - **Try as much as you like on your own machine.** `stet run` is the leaderboard's own
@@ -48,35 +48,35 @@ An editor is a directory with a `stet.toml` and any program. `stet init` makes o
   Every entry costs volunteers GPU time, so one person is one entrant: the limits above
   are counted per GitHub identity, and linking yours to a new key withdraws the old key's
   entries.
-- **Editors are published.** From the moment yours is first drawn into an official round,
+- **Curators are published.** From the moment yours is first drawn into an official round,
   its code is public under the MIT licence, and so is every edit script it writes once
   its round settles. `stet fork` copies any of them. Its name and yours are public as
   soon as you submit.
 - Not allowed: per-document knowledge of official data (lists of hashes, precomputed
   labels, tables by host or URL built from the crawl), exam text in any form, models
   trained on either exam, lifting the limits the sandbox sets, and anything that tries to
-  leave it. Models trained on other data are fine. Editors that break these are removed,
-  and since every editor is public, anyone can check.
+  leave it. Models trained on other data are fine. Curators that break these are removed,
+  and since every curator is public, anyone can check.
 
 ## A round
 
 A round is drawn when an entry is waiting for one, and every 6 hours whether or not one
 is. Never two at once: a round starts only when the one before has settled. A round drawn
 because somebody is waiting comes at least an hour after the last draw, and only while a
-verifier who runs editors is around to run it.
+verifier who runs curators is around to run it.
 
 1. **Announce.** The server names, in advance, the drand round whose randomness will seed
    the draw and the Common Crawl crawl it will draw from. Verifiers keep a log of these
    announcements and refuse a round that contradicts what they were told. No draw is
    announced less than six minutes ahead, and a draw that is moved is announced again the
    same way, for a time no round was ever announced for before.
-2. **Commit.** Your editor must be submitted at least 30 seconds before the draw.
+2. **Commit.** Your curator must be submitted at least 30 seconds before the draw.
 3. **Draw.** The seed is `sha256(season, round number, drand round, drand randomness,
    crawl)`. It picks the corpus files, the order of the documents, the exam passages and
    the student's initial weights. Nobody can know or steer any of that beforehand,
    organisers included. Draws happen only at fixed ten-minute marks, so the organisers
    cannot pick a favourable drand round either.
-4. **Edit.** Two volunteers each run every editor, in a sandbox, with a time limit. Each
+4. **Edit.** Two volunteers each run every curator, in a sandbox, with a time limit. Each
    run writes an edit script.
 5. **Grade.** Other volunteers train the student on what each script says and measure its
    exam loss. Grading runs no entrant code: a script is plain data.
@@ -99,9 +99,9 @@ drawn at the first ten-minute mark that is at least six minutes after it settles
 The newest published Common Crawl crawl at the time of the draw, as full-page text: every
 language, with menus, cookie banners, footers, shop listings, spam and duplicates
 alongside real prose. A round's corpus is a seeded sample of it, roughly ten times more
-text than the student can be trained on. Your editor has to choose.
+text than the student can be trained on. Your curator has to choose.
 
-Before your editor sees the corpus, every document that contains the opening 64 bytes of
+Before your curator sees the corpus, every document that contains the opening 64 bytes of
 a long exam sentence is removed. Nine tenths of the exam's text is in such sentences.
 
 ## The edit script
@@ -137,12 +137,12 @@ science (abstracts), questions and answers, books, news. The score is the mean o
 per-source losses, in nats per token, so a student that is excellent at one source and
 poor at the rest does badly.
 
-The exam pack is public, so that anyone can reproduce any score. Your editor cannot read
+The exam pack is public, so that anyone can reproduce any score. Your curator cannot read
 it while it runs, the corpus is cleaned of it, and so is your script's output.
 
 ## The held-out exam
 
-A public exam can be learned. An editor could be tuned to the exam's own passages rather
+A public exam can be learned. A curator could be tuned to the exam's own passages rather
 than to good data, and its score would then say more than it should.
 
 So the season has a second exam, and only the organisers hold it. It is built by the same
@@ -151,10 +151,10 @@ use, chosen by a secret random seed. Its hash is in the season file (`heldout_ex
 at `/api/v1/season`. `stet` remembers the first hash it sees for a season and says so if
 it is ever shown another.
 
-What it tests is narrow: whether an editor's gain belongs to the public exam's particular
+What it tests is narrow: whether a curator's gain belongs to the public exam's particular
 passages or to the kind of writing they are. It is drawn from the same collections, so it
 says nothing about writing of other kinds. Those collections are public, and you may
-build your editor with them. You may not build it with either exam.
+build your curator with them. You may not build it with either exam.
 
 Nothing is decided by it while the season runs, and nothing about it is published. When
 the organisers' own machine grades a script, the student it has just trained also sits
@@ -163,7 +163,7 @@ the round's draw from the held-out exam, and the result stays on that machine.
 When the season closes, the held-out exam and its seed are published, and every script
 that counted is graded on it the way scripts are graded during the season: by volunteers,
 more than one to a script. The season's final table is the leaderboard worked out again
-with held-out losses in place of public ones: the same editors, the same rounds, the same
+with held-out losses in place of public ones: the same curators, the same rounds, the same
 scripts, the same arithmetic.
 
 Season 0 has no closing date yet. It will be announced on the site at least two weeks
@@ -185,9 +185,9 @@ shares no document and no sentence opening with the public one.
 An ordinary GPT with an 8,192-token vocabulary, AdamW, warm-up and cosine decay. Training
 is counted in tokens, never seconds, so every machine does the same work.
 
-## The editor's machine
+## The curator's machine
 
-Editors are run on volunteers' machines, which differ. What an editor is given does not:
+Curators are run on volunteers' machines, which differ. What a curator is given does not:
 
 | | |
 |---|---|
@@ -195,29 +195,29 @@ Editors are run on volunteers' machines, which differ. What an editor is given d
 | Memory | 24 GB |
 | GPU | one, NVIDIA or AMD, with 8 GB of its memory |
 | Scratch space | 16 GB at `/scratch`, held in memory, so it comes out of the 24 |
-| Network | none, but loopback (`127.0.0.1`) works between the editor's own processes |
+| Network | none, but loopback (`127.0.0.1`) works between the curator's own processes |
 | Software | Python 3.13, Node.js 24 and the season's libraries |
 
 - **The libraries** are listed in `AGENTS.md` and at `/api/v1/season` (`environment`),
   each at an exact version: PyTorch, transformers, sentence-transformers, tokenizers,
   safetensors, scikit-learn, numpy, scipy, pandas, polars, faiss, fastText, tiktoken and
   more, with what serving a model to a harness of your own needs (FastAPI, uvicorn, the
-  `openai` client, Node.js). Every machine that runs editors has exactly those.
+  `openai` client, Node.js). Every machine that runs curators has exactly those.
   `stet doctor` checks yours.
-- **An editor may be many processes.** They share the cores, the memory and the clock,
+- **A curator may be many processes.** They share the cores, the memory and the clock,
   and all of them are stopped with it.
-- **The time limit is wall-clock time.** When it passes, the editor is killed, and the
+- **The time limit is wall-clock time.** When it passes, the curator is killed, and the
   last complete script it wrote still counts. Write one early and improve it.
-- **Machines that run editors are at least as fast as a floor**, measured with a fixed
+- **Machines that run curators are at least as fast as a floor**, measured with a fixed
   piece of GPU work and a fixed piece of CPU work (`stet bench`). The floor is a
-  mid-range desktop GPU; the numbers are at `/api/v1/season` (`runner`). An editor that
+  mid-range desktop GPU; the numbers are at `/api/v1/season` (`runner`). A curator that
   finishes in time on the floor finishes in time everywhere, and `stet run` says how your
   machine compares with it. A faster machine gets more done in the same seconds. An
-  editor that does as much as time allows will therefore do a little better on some runs
+  curator that does as much as time allows will therefore do a little better on some runs
   than on others, and its score is taken over its runs.
 - The cores, the memory and the scratch space are enforced by the operating system. The
   limit on GPU memory is set through PyTorch, and a program could lift it; so could it
-  lift its restriction to six cores. Doing either is against the rules, and editors are
+  lift its restriction to six cores. Doing either is against the rules, and curators are
   public.
 
 If no verifier can run an entry at all (three attempts fail on the verifiers' side, or
@@ -231,14 +231,14 @@ where other entries did run, are taken to be the entry's doing, and it stops bei
   round with the same initial weights, both measured by the same grader. The unedited
   corpus is every document in the order it was drawn.
 - **An entry's gain for a round is taken over its runs**: the mean of two, or the median
-  of three. Two runs of an editor that uses neither the clock nor a GPU write the same
+  of three. Two runs of a curator that uses neither the clock nor a GPU write the same
   script, and then there is one number.
 - A run with no usable script (nothing written, malformed, over the ink limit, or the
-  editor crashed) scores a gain of 0. A round in which every run failed is **invalid**.
-  An editor with two invalid rounds in its last five stops being run, whether it is
+  curator crashed) scores a gain of 0. A round in which every run failed is **invalid**.
+  A curator with two invalid rounds in its last five stops being run, whether it is
   qualifying or on the ladder.
 - **Rating** = your mean gain, adjusted for how hard your rounds were. Every entry runs 3
-  rounds and is ranked when it has them. An editor you replace keeps its page and its
+  rounds and is ranked when it has them. A curator you replace keeps its page and its
   results but leaves the ranking.
 - **Multiplier** = how many times more unedited data the student would have needed to do
   as well, read off a measured curve of baseline loss against training tokens. It is never
@@ -246,28 +246,28 @@ where other entries did run, are taken to be the entry's doing, and it stops bei
 
 ## The ladder
 
-Eight editors run in every round: the record holder and the best-rated editors, one per
+Eight curators run in every round: the record holder and the best-rated curators, one per
 entrant. That is what lets any two of them be compared on the same data. The numbers in
 this section and the last are what a few machines can run and grade between draws; they
 go up as more people lend a GPU.
 
 The record holder keeps its place whatever happens to it: replaced by its owner, or
 failing. The record can only be taken in rounds the holder runs, so a holder that stopped
-running would hold it for ever. Its place is its own, and its owner's best other editor
+running would hold it for ever. Its place is its own, and its owner's best other curator
 may hold one too. That is how you beat your own record.
 
-The organisers' three reference editors (`stet/identity`, `stet/english`, `stet/tidy`) are
+The organisers' three reference curators (`stet/identity`, `stet/english`, `stet/tidy`) are
 the one exception to "one per entrant". They are yardsticks: all three hold places while
-they rank in the eight, and they leave as better editors arrive. Any other editor that
+they rank in the eight, and they leave as better curators arrive. Any other curator that
 has stopped producing valid scripts leaves the ladder too.
 
 ## The record
 
-One editor holds the record. A challenger takes it when all of these hold:
+One curator holds the record. A challenger takes it when all of these hold:
 
 - it has run 5, 10, 20 or 40 rounds that the holder also ran. It is tested when it
   reaches each of those four counts and at no other time. (When the holder changes, an
-  editor that already shares more rounds with the new one is tested once, at the largest
+  curator that already shares more rounds with the new one is tested once, at the largest
   count it has reached.)
 - its gain over those rounds beats the holder's by more than a **margin** of 0.02 nats
   *(provisional)* in a one-sided paired test, at p < 0.05 split across the four looks.
@@ -284,7 +284,7 @@ be. [Experiments](EXPERIMENTS.md#what-the-record-rule-can-tell-apart) has the nu
 
 ## Running and grading
 
-No score comes from the organisers' machines in particular. Editors are run and scripts
+No score comes from the organisers' machines in particular. Curators are run and scripts
 are graded by **verifiers**: anyone who runs `stet verify`.
 
 - **Established verifiers.** An account is established once 5 of its grades have agreed
@@ -314,7 +314,7 @@ are graded by **verifiers**: anyone who runs `stet verify`.
   it up.
 - **The entry's gain is the mean of its two runs.** When they differ by more than 0.12
   nats *(provisional)*, or one failed and the other did not, a third verifier runs the
-  editor and the median of the three is the score.
+  curator and the median of the three is the score.
 - **A round does not wait for people who are not there.** If nobody who is around (at
   work on a job, or has asked for one in the last ten minutes) could give an entry its
   second run, it settles with one. Every entry's page shows its runs, who made each, on what GPU, each run's
@@ -345,7 +345,7 @@ are graded by **verifiers**: anyone who runs `stet verify`.
 - Agreeing about an entry that left the corpus as it was earns no standing. Its loss is
   the round's unedited loss, which every grader measures anyway. Nor does agreeing that
   a script is invalid, which is decided before anything is trained.
-- Running editors needs Linux, the sandbox, the season's libraries and a machine at or
+- Running curators needs Linux, the sandbox, the season's libraries and a machine at or
   above the floor. Grading needs an NVIDIA (CUDA) or AMD (ROCm) GPU and the season's
   PyTorch, so that every grade uses the same arithmetic.
 
@@ -361,13 +361,13 @@ dishonest verifier is outvoted or shows up as a difference. Two who are both ass
 the same entry, and agree on a lie, are not. What stands in the way: an account needs a
 GitHub identity at least 30 days old and a record of agreeing before it is given any
 work that counts; nobody chooses their work; everything is published when the round
-settles; and anyone can rerun any editor with `stet run --round <id>` and grade any
+settles; and anyone can rerun any curator with `stet run --round <id>` and grade any
 script with `stet score`.
 
 **What that does not catch:**
 
-- A runner who hands back a script the editor did not write. The second run is the check,
-  and it is a loose one: two honest runs of an editor that uses a GPU or the clock differ
+- A runner who hands back a script the curator did not write. The second run is the check,
+  and it is a loose one: two honest runs of a curator that uses a GPU or the clock differ
   a little, so a dishonest script that scores within the tolerance of the honest one is
   not told apart from it. It moves the entry's gain by at most half that tolerance, in
   one round.
@@ -383,7 +383,7 @@ script with `stet score`.
   are compared with.
 - **Assigning work at random.** The server chooses who runs and who grades what.
 - **Keeping the held-out exam to themselves** until the season closes, and tuning nothing
-  on it, their own reference editors included. Its hash is public now; the exam and its
+  on it, their own reference curators included. Its hash is public now; the exam and its
   seed are published when the season closes.
 - **Choosing when the season closes.** They can see held-out results from their own
   machine while it runs. The close is announced two weeks ahead, and the final table
@@ -395,5 +395,5 @@ script with `stet score`.
   and left, and verifiers keep their own record of what they were told.
 
 They are not trusted with the seed, the corpus, the exam draw, the arithmetic, running
-your editor or grading it. All of those are done by other people or can be checked by
+your curator or grading it. All of those are done by other people or can be checked by
 anyone.

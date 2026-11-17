@@ -2,7 +2,7 @@
 
 **The model is fixed. The trainer is fixed. The only thing you can touch is the data.**
 
-Stet is an open competition to make the best training data. You enter a *data editor*:
+Stet is an open competition to make the best training data. You enter a *curator*:
 a program that is handed raw web pages it has never seen and ten minutes on one GPU. It decides what to
 keep, what to cut, and in what order. How is up to you: a few rules, a small model you
 fine-tuned and run over every chunk, an agent harness driving a model of your own. A
@@ -15,7 +15,7 @@ loss wins.
 
 ```sh
 curl -fsSL https://www.stetrun.com/install.sh | sh
-stet init my-editor && cd my-editor
+stet init my-curator && cd my-curator
 stet run                  # edit, train, grade a practice round: a minute or two on a GPU
 stet login --github       # entering needs a GitHub account at least 30 days old
 stet submit
@@ -27,17 +27,17 @@ https://www.stetrun.com/AGENTS.md and enter Stet.* · [How to enter](https://www
 
 ## Lend a GPU
 
-Scores are made on volunteers' machines: each editor is run by two people, each script
+Scores are made on volunteers' machines: each curator is run by two people, each script
 graded by someone else, all of it published.
 
 ```sh
 stet login
 stet verify               # grade edit scripts: plain data, nobody else's code
-stet verify --edits       # also run editors, in a sandbox (Linux)
+stet verify --edits       # also run entrants' curators, in a sandbox (Linux)
 stet service install      # leave it running: starts with the machine, upgrades itself
 ```
 
-[Verify scores](https://www.stetrun.com/verify) · [Run editors](https://www.stetrun.com/run)
+[Verify scores](https://www.stetrun.com/verify) · [Run curators](https://www.stetrun.com/run)
 
 ## How it stays honest
 
@@ -45,16 +45,16 @@ stet service install      # leave it running: starts with the machine, upgrades 
   newest Common Crawl after entries are locked.
 - **Almost no ink.** 99.9% of what the student reads must be copied byte for byte from the
   round's corpus.
-- **Checked by other people.** Two volunteers run each editor, on NVIDIA and AMD, and
+- **Checked by other people.** Two volunteers run each curator, on NVIDIA and AMD, and
   someone else grades each script. A score that only one machine stands behind says so,
   and no score needs the organisers' hardware.
-- **The same machine for every editor.** Six cores, 24 GB, 8 GB of GPU memory, a fixed
+- **The same machine for every curator.** Six cores, 24 GB, 8 GB of GPU memory, a fixed
   list of libraries, whoever runs it.
 - **Paired scores.** Gain is measured against the unedited corpus on the same round, and
   the record needs a margin over shared rounds.
 - **A held-out exam.** A second exam, drawn in secret from the same collections and
   committed to by hash, decides the season's final table.
-- **Everything else is public.** Editors, scripts, seeds, the exam, the harness.
+- **Everything else is public.** Curators, scripts, seeds, the exam, the harness.
 
 ## Train a policy on it
 
@@ -72,7 +72,7 @@ reward, info = env.step(edit_script)  # the gain, in nats per token
 |---|---|
 | `src/stet/` | The harness and CLI (Python) |
 | `server/` | The API and website (Go) |
-| `examples/` | Reference editors: `identity`, `english`, `tidy`; `reader` (a small language model reads the pages); `agent` (an agent harness and a model served in the sandbox) |
+| `examples/` | Reference curators: `identity`, `english`, `tidy`; `reader` (a small language model reads the pages); `agent` (an agent harness and a model served in the sandbox) |
 | `docs/` | [Rules](docs/RULES.md), [design](docs/DESIGN.md), [verifying](docs/VERIFYING.md), [experiments](docs/EXPERIMENTS.md), [API](docs/API.md), [FAQ](docs/FAQ.md) |
 
 ## Develop

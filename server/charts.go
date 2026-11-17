@@ -270,17 +270,17 @@ func sourceChart(sources []string, base, edited map[string]float64) template.HTM
 	}
 	x := func(v float64) float64 { return left + (v-lo)/(hi-lo)*float64(w-left-right) }
 	var b svg
-	b.open(w, h, "chart", "Exam loss by kind of text, unedited against this editor")
+	b.open(w, h, "chart", "Exam loss by kind of text, unedited against this curator")
 	for _, v := range ticks(lo, hi, step) {
 		b.f(`<line class="grid" x1="%.1f" x2="%.1f" y1="%d" y2="%d"/>`, x(v), x(v), top-6, h-bottom+4)
 		b.f(`<text x="%.1f" y="%d" text-anchor="middle">%s</text>`, x(v), h-10, tickLabel(v, step))
 	}
 	b.f(`<circle class="hollow" cx="%d" cy="12" r="4.5"/><text x="%d" y="16">unedited</text>`, left+6, left+16)
-	b.f(`<circle class="dot" cx="%d" cy="12" r="4.5"/><text x="%d" y="16">this editor</text>`, left+96, left+106)
+	b.f(`<circle class="dot" cx="%d" cy="12" r="4.5"/><text x="%d" y="16">this curator</text>`, left+96, left+106)
 	for i, s := range sources {
 		cy := float64(top + rowH*i + rowH/2)
 		bv, ev := base[s], edited[s]
-		tip := fmt.Sprintf("%s · unedited %.3f, this editor %.3f (%s)", s, bv, ev, signed(bv-ev, 3))
+		tip := fmt.Sprintf("%s · unedited %.3f, this curator %.3f (%s)", s, bv, ev, signed(bv-ev, 3))
 		b.f(`<text class="lbl" x="%d" y="%.1f" text-anchor="end">%s</text>`, left-14, cy+4, esc(s))
 		cls := "link"
 		if ev > bv {

@@ -7,20 +7,23 @@ API. Base URL: `https://api.stetrun.com`. Responses are JSON. Errors are
 The API can change between harness versions. The season endpoint says which version the
 server speaks.
 
+A curator is called an `editor` in paths and field names: that was its name when they
+were given, and changing them would break every client for a word.
+
 ## Reading
 
 No key needed.
 
 | | |
 |---|---|
-| `GET /api/v1/season` | The season: student, budgets, tolerances, the record rule, the next and open rounds, the current CLI version, the hashes of the exam and of the held-out exam; and what an editor is promised: its `machine`, the floor for machines that run it (`runner`), the limits on `assets`, and the `environment` (Python and every library, with versions) |
+| `GET /api/v1/season` | The season: student, budgets, tolerances, the record rule, the next and open rounds, the current CLI version, the hashes of the exam and of the held-out exam; and what a curator is promised: its `machine`, the floor for machines that run it (`runner`), the limits on `assets`, and the `environment` (Python and every library, with versions) |
 | `GET /api/v1/leaderboard` | `editors` (ranked) and `provisional` (fewer than `rated_rounds` rounds) |
 | `GET /api/v1/rounds?limit=30` | Recent rounds, newest first, and `next`: what the next draw is committed to |
 | `GET /api/v1/rounds/{id}` | One round with its entries. A round id looks like `s0-o00012` |
-| `GET /api/v1/editors/{ref}` | One editor. `ref` is an id, the first 8 or more characters of one (the oldest editor that fits), or `handle/name` with the slash written `%2F` |
-| `GET /api/v1/editors/{ref}/bundle` | The editor's files (`.tar.zst`), once it is public |
+| `GET /api/v1/editors/{ref}` | One curator. `ref` is an id, the first 8 or more characters of one (the oldest curator that fits), or `handle/name` with the slash written `%2F` |
+| `GET /api/v1/editors/{ref}/bundle` | The curator's files (`.tar.zst`), once it is public |
 | `GET /api/v1/scripts/{sha256}` | An edit script, zstd-compressed JSON Lines. Public once a round that holds it has settled. Before that it is sealed: `403`, unless the request is signed by the account that holds the script as a grade job |
-| `GET /api/v1/verifiers` | The verifier board: the organisers' accounts, and every volunteer with a grade that has agreed or an editor run. A row has `handle`, `validated` (grades that agreed), `runs` (editors run), `established`, `gpu_hours`, `gpu` and `last_seen`; `trusted` and `anchor` mark an organisers' account |
+| `GET /api/v1/verifiers` | The verifier board: the organisers' accounts, and every volunteer with a grade that has agreed or a curator run. A row has `handle`, `validated` (grades that agreed), `runs` (curators run), `established`, `gpu_hours`, `gpu` and `last_seen`; `trusted` and `anchor` mark an organisers' account |
 | `GET /api/v1/records` | Every time the record changed hands |
 | `GET /files/{name}` | Downloads: the CLI wheel, the exam pack |
 
@@ -48,8 +51,8 @@ A run:
 | Field of a run | |
 |---|---|
 | `n`, `by`, `gpu`, `backend` | Which run, whose machine, and its GPU (`cuda` is NVIDIA, `rocm` is AMD) |
-| `edit_seconds` | How long the editor took there |
-| `status` | `ok`, or `failed`: the editor wrote no script, or wrote an invalid one. `reason` says which |
+| `edit_seconds` | How long the curator took there |
+| `status` | `ok`, or `failed`: the curator wrote no script, or wrote an invalid one. `reason` says which |
 | `script`, `script_size` | The sha256 of the edit script it wrote. Two runs that wrote the same bytes name the same script and share its grades |
 | `gain`, `loss` | The script's gain: the median of the grades that count |
 | `self` | Its only established grade is its own runner's, which only an organisers' machine with nobody else around is ever asked for |
@@ -80,8 +83,8 @@ A leaderboard row:
 
 | Field | |
 |---|---|
-| `id`, `name`, `version`, `owner`, `technique` | The editor |
-| `rank` | Place among rated editors |
+| `id`, `name`, `version`, `owner`, `technique` | The curator |
+| `rank` | Place among rated curators |
 | `rounds` | Official rounds it has settled |
 | `rating` | Mean gain adjusted for round difficulty, nats per token. The board is sorted by this |
 | `mean_gain`, `se` | Plain mean gain and its standard error |
@@ -121,7 +124,7 @@ the server, so a key should not be used with a server its owner does not trust.
 |---|---|
 | `POST /api/v1/accounts` `{"handle": "..."}` | Create the account for the signing key |
 | `POST /api/v1/accounts/github` `{"gist": "<url>"}` | Link GitHub. The gist must be public and contain the line `stet-key:<public key>` |
-| `GET /api/v1/me` | Your account, your editors, and under `verifier` your standing: `validated` (grades that agreed), `establish_after` (how many it takes), `established`, `needs_github` (no GitHub account is linked, and being established needs one), `runs` (editors run), `strikes`, `muted` |
+| `GET /api/v1/me` | Your account, your curators, and under `verifier` your standing: `validated` (grades that agreed), `establish_after` (how many it takes), `established`, `needs_github` (no GitHub account is linked, and being established needs one), `runs` (curators run), `strikes`, `muted` |
 | `POST /api/v1/editors` | Submit. The body is the bundle: a zstd-compressed tar of the project directory, at most 50 MB. Every file its `stet.toml` names under `[[assets]]` is checked with its host first: `400` says which one is wrong, `503` that the host could not be asked. The reply has the `editor`, `in_play` and `in_play_limit` (how many entries this person now has waiting or qualifying, and how many they may), `replaced` (the id of an entry this one took the place of, if it did) and either `enters` (`round`, `draw_at`: the round it is expected to run in) or, when that round has no room for it or is too close, `earliest` (the first round it could run in) |
 
 ## Jobs
@@ -131,9 +134,9 @@ grades: a grade computed any other way will not agree.
 
 | | |
 |---|---|
-| `POST /api/v1/jobs/claim` | Ask for work. The body says which harness and season you run, what hardware, and whether you will run editors (`edits`, with the sandbox in use and the speeds `stet bench` measured). Returns `job` (`kind` is `grade` or `edit`; or null, with `retry_after`), `announced` (the next draw's commitment) and, when the body asked for editors, `runner`: `eligible`, and a `reason` if not. A grade job names its `script` (`sha256`, `size`) and which `run` wrote it; before a round settles that is the only way a script's hash is told to anyone |
+| `POST /api/v1/jobs/claim` | Ask for work. The body says which harness and season you run, what hardware, and whether you will run curators (`edits`, with the sandbox in use and the speeds `stet bench` measured). Returns `job` (`kind` is `grade` or `edit`; or null, with `retry_after`), `announced` (the next draw's commitment) and, when the body asked for curators, `runner`: `eligible`, and a `reason` if not. A grade job names its `script` (`sha256`, `size`) and which `run` wrote it; before a round settles that is the only way a script's hash is told to anyone |
 | `POST /api/v1/jobs/{id}/result` | Report a grade: the script's hash, exam loss, per-source losses, your baseline for the round, corpus and exam hashes. The answer is `pending` until the round settles |
-| `POST /api/v1/jobs/{id}/script` | Report a run of an editor and upload the script it wrote, or say that it wrote none. The answer is `edited`. Established accounts only: `403` otherwise |
+| `POST /api/v1/jobs/{id}/script` | Report a run of a curator and upload the script it wrote, or say that it wrote none. The answer is `edited`. Established accounts only: `403` otherwise |
 | `POST /api/v1/jobs/{id}/release` | Hand a job back |
 
 Status codes worth handling: `403` (this account is given no work for now: the

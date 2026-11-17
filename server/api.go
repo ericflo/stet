@@ -92,7 +92,7 @@ func (a *App) signedBy(w http.ResponseWriter, r *http.Request, limit int64, must
 	case who == organisers && !acct.Anchor:
 		return nil, "", nil, fail(403, "organisers only")
 	case who == runners && !a.established(acct):
-		return nil, "", nil, fail(403, "editors are run by established verifiers only")
+		return nil, "", nil, fail(403, "curators are run by established verifiers only")
 	}
 	sum, proved := strings.ToLower(r.Header.Get("X-Stet-Body")), false
 	if limit > uploadBytes {
@@ -880,7 +880,7 @@ func (a *App) apiEditor(w http.ResponseWriter, r *http.Request) {
 		out = map[string]any{"editor": j, "results": results}
 	})
 	if out == nil {
-		writeErr(w, fail(404, "no such editor (entries become public when they are first drawn into a round)"))
+		writeErr(w, fail(404, "no such curator (entries become public when they are first drawn into a round)"))
 		return
 	}
 	writeJSON(w, 200, out)
@@ -897,7 +897,7 @@ func (a *App) apiBundle(w http.ResponseWriter, r *http.Request) {
 		id, name = e.ID, fmt.Sprintf("%s-v%d.tar.zst", e.Name, e.Version)
 	})
 	if id == "" {
-		writeErr(w, fail(404, "no such editor"))
+		writeErr(w, fail(404, "no such curator"))
 		return
 	}
 	// Streamed from storage: a slow reader holds a connection, not the bundle in memory.
@@ -1198,7 +1198,7 @@ func (a *App) apiClaim(w http.ResponseWriter, r *http.Request) {
 	a.st.view(func(s *State) { out["announced"], open = a.announcement(s), len(openRounds(s)) > 0 })
 	if handed.Job == nil {
 		out["retry_after"] = 60
-		out["message"] = "No work right now. Editors to run and scripts to grade appear when a round is drawn."
+		out["message"] = "No work right now. Curators to run and scripts to grade appear when a round is drawn."
 		if open {
 			// A verifier is offered each job once, never its own entry, and never a script
 			// that it alone wrote: with a round open, that is why there is nothing for it.

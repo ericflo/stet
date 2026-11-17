@@ -122,7 +122,7 @@ func TestARunnerInTheMiddleOfAnEntryIsNotShownItsOtherRun(t *testing.T) {
 	// Carol still holds the entry. Asking as a machine that only grades gets her nothing:
 	// not bob's script, and no second job beside the one she has.
 	c := w.claim(carol, false)
-	if c.Job != nil || !strings.Contains(c.Message, "holds an editor it took to run") {
+	if c.Job != nil || !strings.Contains(c.Message, "holds a curator it took to run") {
 		t.Fatalf("a runner in the middle of an entry was handed %+v (%q)", c.Job, c.Message)
 	}
 	// Nor does her other key, which holds no job at all.

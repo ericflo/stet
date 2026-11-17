@@ -7,9 +7,9 @@ Everything here was run on the reference machine (Radeon 8060S, ROCm, PyTorch 2.
 `tools/exp.py`, on practice rounds, which anyone can rebuild. The command is under each
 table. Losses are exam losses in nats per token; lower is better.
 
-## The reference editors
+## The reference curators
 
-Three editors ship with Stet. `identity` changes nothing. `english` keeps documents that
+Three curators ship with Stet. `identity` changes nothing. `english` keeps documents that
 look like English prose. `tidy` also cuts navigation and boilerplate lines out of each
 page, drops duplicates and ranks what is left.
 
@@ -47,13 +47,13 @@ python tools/exp.py --scale micro --rounds 1 2 --editors identity english tidy
 to compete. The gap between `english` and `tidy` nearly closes at micro: 0.017 on average
 against 0.135 at nano, and on one round in four `english` is ahead. A bigger student is
 less hurt by boilerplate, and the easy wins shrink. At the official scale the two
-reference editors cannot be told apart in four rounds, which is the rule working: neither
+reference curators cannot be told apart in four rounds, which is the rule working: neither
 would take the record from the other. Beating both by more than the margin is the
 season's first target.
 
 An earlier version of this page gave `tidy` 5.513 at nano and 4.375 at micro on round
-s0-p00000. Those were measured with an earlier version of the editor, before a change to
-how many bytes it keeps. Every `tidy` number on this page is now from the editor in
+s0-p00000. Those were measured with an earlier version of the curator, before a change to
+how many bytes it keeps. Every `tidy` number on this page is now from the curator in
 `examples/tidy` as published.
 
 ## Is the student learning anything?
@@ -61,7 +61,7 @@ how many bytes it keeps. Every `tidy` number on this page is now from the editor
 A check that the exam measures more than word counts: a trigram count table built from
 the same training stream sits the same exam.
 
-| Scale, editor | Student | Trigram table |
+| Scale, curator | Student | Trigram table |
 |---|---|---|
 | nano, identity | 6.382 | 6.435 |
 | nano, tidy *(earlier version)* | 5.513 | 5.804 |
@@ -73,7 +73,7 @@ python tools/exp.py --scale micro --rounds 0 --table
 ```
 
 **What it decided.** At nano, a student trained on the unedited crawl is barely better
-than a lookup table. Nano is for testing that an editor runs; it is not for ranking. At
+than a lookup table. Nano is for testing that a curator runs; it is not for ranking. At
 micro the student is 0.65 to 1.1 nats ahead of the table, which is why micro is the
 official scale.
 
@@ -100,7 +100,7 @@ On that round `english` (4.418) matches 5.8× the data and `tidy` (4.389) matche
 This is the curve the leaderboard uses, read by gain: a gain of 0.53 nats is 2×, 0.83 is
 4×, and 1.02 or more is past the last point and is shown as "more than 8×".
 
-The reference editors are already there on some rounds. The second official round's
+The reference curators are already there on some rounds. The second official round's
 corpus was rawer than the first (unedited loss 5.56 against 5.34), and `tidy` gained 1.17
 nats on it against 0.93 on the first. So the curve needs a 16× point, and one round's
 corpus is too small to measure it: 16× the budget is more text than a round holds, and
@@ -133,8 +133,8 @@ python tools/exp.py --scale micro --rounds 0 --editors identity tidy --lr 0.0007
 **What it decided.** Two things, and the second is a limit on what this page can claim.
 
 An edited corpus's loss hardly moves: 0.027 nats across a fourfold change in learning
-rate, about two standard deviations of order noise. Editors are ranked against each other
-by their losses on the same rounds, so the ranking of editors that clean the corpus does
+rate, about two standard deviations of order noise. Curators are ranked against each other
+by their losses on the same rounds, so the ranking of curators that clean the corpus does
 not hang on this choice.
 
 The unedited corpus's loss moves a great deal, 0.38 nats, and it is better at half the
@@ -146,7 +146,7 @@ belong to this trainer. A baseline trained at its own best rate would make both 
 it would change what every settled round measured. The next season should choose the
 rate at which the unedited corpus does best.
 
-Only `tidy` was run at the other rates. Whether two editors that are close together keep
+Only `tidy` was run at the other rates. Whether two curators that are close together keep
 their order has not been measured.
 
 ## How much is noise?
@@ -157,7 +157,7 @@ Two grades of one script on the reference machine agree to the last printed digi
 **The order of the documents: 0.011.** `tidy`'s output, shuffled with four other seeds
 and graded on the same round at nano: 5.537, 5.524, 5.549, 5.541, against 5.552 in its
 own order. Standard deviation 0.011. At micro, three shuffles gave 4.388, 4.400 and
-4.378: also 0.011. An editor's order matters about this much by chance.
+4.378: also 0.011. A curator's order matters about this much by chance.
 
 **The round: 0.05 to 0.09.** Across the five nano rounds above, the unedited loss has a
 standard deviation of 0.066, `english`'s gain 0.092 and `tidy`'s gain 0.061. Compared on
@@ -227,16 +227,16 @@ runs (the unedited corpus and three entries) and three edits of 1, 45 and 56 sec
 45 minutes from the first job to the last grade. One machine did all of it.
 
 A full round is 17 entries. Done by one machine, once each, that is 18 training runs and
-17 edits: about three and a quarter hours when the editors are quick, and six if every
+17 edits: about three and a quarter hours when the curators are quick, and six if every
 one of them uses its whole ten minutes, which is all the time there is between draws.
 Done as the rules now ask, twice by different people with each script graded by someone
 else, it is up to twice the work, shared out: with three machines of that speed a full
-round of slow editors takes about four hours. Editors that write the same script on both
+round of slow curators takes about four hours. Curators that write the same script on both
 runs are graded once.
 
 ## What a small model can read in ten minutes
 
-An editor that uses a language model is limited by the clock before it is limited by
+A curator that uses a language model is limited by the clock before it is limited by
 memory. Measured on the reference machine with nothing else running, PyTorch 2.15 on
 ROCm, half precision, batches of 128 passages of 128 tokens, one forward pass:
 
@@ -256,12 +256,12 @@ pass leaves about 47,000 candidates. So a 0.6-billion-parameter model can read t
 the whole corpus. Writing is far slower than reading, 350 to 1,250 tokens a second in
 batches of 16, and the ink allowance leaves almost nothing for written text to do.
 
-That machine is about 1.2 times the floor for running editors
+That machine is about 1.2 times the floor for running curators
 (`runner.gpu_tokens_per_second` in the season file is this measurement's cousin: a fixed
 110M-parameter model, 80,000 tokens a second).
 
 **What it decided.** The edit limit at the official scale went from 300 to 600 seconds,
-an editor is given 8 GB of GPU memory, and model files may total 4 GiB: enough for any
+a curator is given 8 GB of GPU memory, and model files may total 4 GiB: enough for any
 model in this table.
 
 ## Does a small language model beat rules?
@@ -311,7 +311,7 @@ round drew. Measured on the organisers' machine, without publishing which pages.
 
 ## Why so little ink?
 
-The threat: ignore the corpus and ship good text inside the editor. To measure it, `tidy`'s
+The threat: ignore the corpus and ship good text inside the curator. To measure it, `tidy`'s
 output was mixed with passages from the same six sources as the exam (ones this round is
 not examined on), taking a share of the training budget. Nano, round s0-p00000:
 
@@ -338,13 +338,13 @@ but it is not nothing, and a lower limit (0.02%) is under consideration for that
 ## Still to measure
 
 - Micro: the 16× point of the reference curve, on two rounds' corpora joined.
-- Two runs of one editor on two machines: how far apart honest runs land, which is what
+- Two runs of one curator on two machines: how far apart honest runs land, which is what
   the run tolerance (0.12 nats, a guess) should be set from.
 - A language model trained for the job, against `tidy`.
-- Micro: whether two close editors keep their order at another learning rate, and at
+- Micro: whether two close curators keep their order at another learning rate, and at
   what rate the unedited corpus trains best.
 - Two machines: the real tolerance, from verifiers on NVIDIA hardware. The data arrives
   by itself, on every round's page.
-- Whether the held-out exam and the public one rank editors the same way. Known only to
+- Whether the held-out exam and the public one rank curators the same way. Known only to
   the organisers until the season closes.
 - The first official rounds, which use a different crawl sample every six hours.

@@ -2,7 +2,7 @@
 <main class="page">
 <div class="page-head">
   <div class="wrap">
-    <span class="eyebrow">Editor</span>
+    <span class="eyebrow">Curator</span>
     <h1>{{$e.Name}} <span class="muted" style="font-weight:400">v{{$e.Version}}</span>{{with $row}}{{if .Record}}<span class="tag red">record holder</span>{{end}}{{if .Ladder}}<span class="tag">ladder</span>{{end}}{{if .Provisional}}<span class="tag">qualifying</span>{{end}}{{end}}{{if eq $e.Status "withdrawn"}}<span class="tag">replaced</span>{{end}}</h1>
     {{if $e.Technique}}<p class="sub"><i>{{$e.Technique}}</i></p>{{end}}
     {{if $e.Description}}<p class="sub" style="font-size:18px">{{$e.Description}}</p>{{end}}
@@ -31,7 +31,7 @@
   </div>
 
   {{if $d.GainChart}}
-  <figure class="figure"><h3>Gain in each round</h3><div class="plot">{{$d.GainChart}}</div><figcaption>Unedited loss minus this editor's, on each round's fresh corpus. Above the line beats doing nothing.</figcaption></figure>
+  <figure class="figure"><h3>Gain in each round</h3><div class="plot">{{$d.GainChart}}</div><figcaption>Unedited loss minus this curator's, on each round's fresh corpus. Above the line beats doing nothing.</figcaption></figure>
   {{end}}
 
   {{with $d.Latest}}
@@ -49,7 +49,7 @@
   </div>
   <div class="grid2">
     {{if $d.SourceChart}}<figure class="figure"><h3>Where the gain comes from</h3><div class="plot">{{$d.SourceChart}}</div><figcaption>Loss on each of the public exam's six kinds of text, in nats per token. Left is better; the score is the plain mean of the six.</figcaption></figure>{{end}}
-    {{if $d.CurveChart}}<figure class="figure"><h3>The student, learning from it</h3><div class="plot">{{$d.CurveChart}}</div><figcaption>Training loss on the edited corpus. Low here is not the goal: an editor can make data easy to fit and useless on the exam.</figcaption></figure>{{end}}
+    {{if $d.CurveChart}}<figure class="figure"><h3>The student, learning from it</h3><div class="plot">{{$d.CurveChart}}</div><figcaption>Training loss on the edited corpus. Low here is not the goal: a curator can make data easy to fit and useless on the exam.</figcaption></figure>{{end}}
   </div>
   {{end}}
 
@@ -73,7 +73,7 @@
           {{else}}
             <td><span class="stage {{.Stage}}">{{.Stage}}</span></td><td class="r muted">sealed</td><td class="r muted">·</td><td class="r muted">·</td>
           {{end}}
-          <td class="hide-s" style="font-size:14.5px">{{if and .Settled .NRuns}}<a class="num" href="/rounds/{{.Round}}#runs">{{.NRuns}}</a> {{if .Confirmed}}<span class="stage settled">confirmed</span>{{else if .OneGrader}}<span class="muted" title="Its runs agree, and one verifier graded them all">one grader</span>{{else if .RunsDiffer}}<span class="tag red">runs differed</span>{{else if eq .NRuns 1}}<span class="muted">run once</span>{{end}}{{if .Own}} <span class="tag" title="Nobody else was there to grade a script, so the machine that ran the editor graded it too">graded by its own runner</span>{{end}}{{else}}<span class="muted">—</span>{{end}}</td>
+          <td class="hide-s" style="font-size:14.5px">{{if and .Settled .NRuns}}<a class="num" href="/rounds/{{.Round}}#runs">{{.NRuns}}</a> {{if .Confirmed}}<span class="stage settled">confirmed</span>{{else if .OneGrader}}<span class="muted" title="Its runs agree, and one verifier graded them all">one grader</span>{{else if .RunsDiffer}}<span class="tag red">runs differed</span>{{else if eq .NRuns 1}}<span class="muted">run once</span>{{end}}{{if .Own}} <span class="tag" title="Nobody else was there to grade a script, so the machine that ran the curator graded it too">graded by its own runner</span>{{end}}{{else}}<span class="muted">—</span>{{end}}</td>
           <td class="r num hide-s">{{with .Edit}}{{f1 .Seconds}}s{{else}}—{{end}}</td>
           <td class="hide-s">{{if .ScriptSHA}}<a class="num" href="/api/v1/scripts/{{.ScriptSHA}}" title="Download the edit script ({{bytes .ScriptSize}} unpacked)">{{tiny .ScriptSHA}}</a>{{else}}<span class="muted">—</span>{{end}}</td>
           <td class="hide-s muted" style="font-size:14.5px">{{if .Verifiers}}{{join .Verifiers ", "}}{{if .Together}} <a class="tag red" href="/rounds/{{.Round}}#grades" title="Two established verifiers measured different gains for one of its scripts, and nobody was there to say which was right">disputed</a>{{end}}{{if .Disputed}} <a class="tag red" href="/rounds/{{.Round}}#grades" title="Graders whose grade of one of its scripts was further from the script's gain than the tolerance. Their numbers are on the round's page.">{{.Disputed}} differed</a>{{end}}{{else}}—{{end}}</td>
@@ -100,7 +100,7 @@
 
   {{if $e.Assets}}
   <h2 id="assets">Files it fetches</h2>
-  <p class="muted" style="font-size:16px;margin-top:-8px">Too large for the bundle, so named in it by address and hash: {{bytes $e.AssetBytes}} in {{len $e.Assets}} {{plural (len $e.Assets) "file" "files"}}. Every verifier downloads each one and checks it against its sha256 before the editor runs, and the editor still has no network.</p>
+  <p class="muted" style="font-size:16px;margin-top:-8px">Too large for the bundle, so named in it by address and hash: {{bytes $e.AssetBytes}} in {{len $e.Assets}} {{plural (len $e.Assets) "file" "files"}}. Every verifier downloads each one and checks it against its sha256 before the curator runs, and the curator still has no network.</p>
   <div class="table-wrap">
     <table>
       <thead><tr><th>Path</th><th class="r">Size</th><th class="hide-s">sha256</th><th>From</th></tr></thead>
