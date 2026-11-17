@@ -219,6 +219,7 @@ type Entry struct {
 	NRuns      int         `json:"n_runs,omitempty"`      // runs that counted
 	Confirmed  bool        `json:"confirmed,omitempty"`   // two people's runs agree, and none rests on its own runner's grade
 	RunsDiffer bool        `json:"runs_differ,omitempty"` // two or more runs, and no two of them agree
+	OneGrader  bool        `json:"one_grader,omitempty"`  // its runs agree, and one account's grades decide them all
 }
 
 type Claim struct {

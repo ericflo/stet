@@ -72,6 +72,12 @@ package main
 //     could grade it; the grade counts only until someone else's exists, and an entry
 //     resting on one is never called confirmed.
 //   - Two established grades of a script that disagree get a third, and the median decides.
+//   - A script that two runs wrote is the entry's only script, so one grade of it would
+//     be one machine's word for the whole score: it gets a second, from someone else, when
+//     someone else who is around could give it. An entry's scripts go to different graders
+//     when there is other work for them. An entry is called CONFIRMED only when two
+//     people's runs agree and more than one account's grades decide them; when one
+//     account's do, it says so (ONE GRADER).
 //   - Everyone else's grade is compared with the script's gain when the round settles. One
 //     that agrees earns standing; one that does not is a strike. Agreeing about the
 //     unedited corpus, or that a script is invalid, earns nothing: neither takes training.
@@ -956,6 +962,12 @@ func (j *judge) offers(st *entryState, q *asker, closing bool) []offer {
 			}
 		}
 		o := offer{st: st, kind: "grade", sc: sc, score: base + under} // oldest round, least attention
+		for _, other := range st.Scripts {
+			if other != sc && (other.Graded[q.acct.ID] || other.Offered[q.acct.ID]) {
+				o.score += 50 // an entry's scripts go to different graders when there are any
+				break
+			}
+		}
 		switch {
 		case sc.wroteAlone(q.acct):
 			// Its own script. Never a volunteer's to grade; an organisers' machine's only when
@@ -966,8 +978,11 @@ func (j *judge) offers(st *entryState, q *asker, closing bool) []offer {
 			}
 		case q.est:
 			// A script wants one grade that counts and is not its own writer's, and a third
-			// when two disagree. Beyond that an established account replicates, like anyone.
-			if o.required = counting == 0 && (!v.known || v.self || v.tie); o.required || (!closing && under < 1+maxReplicas) {
+			// when two disagree. A script that two runs wrote wants two, from two people:
+			// it is the entry's only script, and one grade of it would be one machine's
+			// word for the whole score. Beyond that an established account replicates,
+			// like anyone.
+			if o.required = counting == 0 && (!v.known || v.self || v.tie || (len(sc.Writers) > 1 && len(v.counted) < 2)); o.required || (!closing && under < 1+maxReplicas) {
 				out = append(out, o)
 			}
 		default:
@@ -2209,7 +2224,20 @@ func (a *App) settleEntry(tx *Tx, j *judge, st *entryState) {
 			pair = pair || (same && (len(runs) == 2 || p == middle || q == middle))
 		}
 	}
-	e.NRuns, e.Confirmed, e.RunsDiffer = len(runs), pair && !self, len(runs) > 1 && !pair
+	// And two people answer for it: the grades that decide its runs are not all one
+	// account's. (A run that wrote no script is its runner's own word.)
+	deciders := map[int64]bool{}
+	for _, run := range runs {
+		if g := scripts[run.Script]; g != nil {
+			for _, gv := range g.v.counted {
+				deciders[gv.r.AccountID] = true
+			}
+		} else {
+			deciders[run.By] = true
+		}
+	}
+	e.NRuns, e.Confirmed, e.RunsDiffer = len(runs), pair && !self && len(deciders) > 1, len(runs) > 1 && !pair
+	e.OneGrader = pair && !self && len(deciders) < 2
 	e.Script, e.ScriptSize, e.Edit, e.EditedAt, e.EditedBy = rep.Script, rep.ScriptSize, rep.Edit, rep.At, rep.By
 	e.Loss, e.BySource, e.Reason = nil, nil, ""
 	if e.Valid {

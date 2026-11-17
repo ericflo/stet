@@ -168,8 +168,10 @@ and that is how anyone would see it.
 **Everything is published.** When a round settles, its page shows every run of every
 entry and every grade of every script: who, on what GPU, what they measured, and how far
 it was from the script's gain. An entry is marked **confirmed** when two runs by
-different people agree and each was graded by someone else; **run once** or **runs
-differed** otherwise.
+different people agree, each was graded by someone else, and the grades behind them are
+not all one person's; **one grader** when the runs agree and one person graded them all;
+**run once** or **runs differed** otherwise. A script that both runs wrote is graded
+twice, by two people, when two are around.
 
 **Differing is a strike.** A grade outside the tolerance of the script's gain counts
 against your account. Three of those, and more than one for every ten grades that

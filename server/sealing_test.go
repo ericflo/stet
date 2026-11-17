@@ -295,10 +295,14 @@ func TestARunIsCreditedWhenItsRoundSettles(t *testing.T) {
 			t.Fatalf("%s was credited with a run of an open round: %+v", h, a)
 		}
 	}
-	if _, status := w.grade(bob, true, 5.5); status != "settled" {
+	// Both runs wrote the same script, so it is the entry's only one and is graded twice.
+	if _, status := w.grade(bob, true, 5.5); status != "pending" {
+		t.Fatalf("one grade of a script both runs wrote, with a second grader around: %s", status)
+	}
+	if _, status := w.grade(anchor, true, 5.5); status != "settled" {
 		t.Fatalf("the grade that settles it: %s", status)
 	}
-	if a := w.account("anchor-one"); a.Runs != 1 || a.GPUSeconds != 3 {
+	if a := w.account("anchor-one"); a.Runs != 1 || a.GPUSeconds < 3 {
 		t.Fatalf("the organisers' account after the round: %+v", a)
 	}
 	if b := w.account("bob"); b.Runs != 1 || b.GPUSeconds < 3 {
@@ -585,4 +589,67 @@ func TestAnOrganisersMachineTakesItsOwnEntryOnlyWhenNobodyElseCan(t *testing.T) 
 		t.Fatal("alone, the organisers' machine did not run and grade the organisers' own entries")
 	}
 	w.check()
+}
+
+// "Confirmed" says that more than one person answers for a score. Two runs that one
+// account graded alone are two runs and one person's word, and the entry says so.
+func TestAnEntryOneAccountGradedAloneIsNotCalledConfirmed(t *testing.T) {
+	w := newWorld(t)
+	alice, bob, carol, dave := w.join("alice", nil), w.join("bob", nil), w.join("carol", nil), w.join("dave", nil)
+	w.submit(alice, "steady", "print('steady')")
+	w.established("bob", "carol", "dave")
+	idx := w.draw()
+	w.run(bob, scriptOne)
+	w.run(carol, scriptTwo)
+	// The two runners leave, and dave is the only grader there is.
+	w.pass(2 * w.cfg.ActiveWindow)
+	w.grade(dave, false, 5.5)
+	if _, status := w.grade(dave, false, 5.5); status != "settled" {
+		t.Fatalf("the only grader there is graded both scripts: %s", status)
+	}
+	w.check()
+	e := w.entry(idx, "steady")
+	if !e.Valid || e.NRuns != 2 || e.Confirmed || !e.OneGrader || e.RunsDiffer {
+		t.Fatalf("two runs, both graded by one account: %+v", e)
+	}
+	if _, page := w.page("/rounds/" + roundID(w.app.season.ID, idx)); !strings.Contains(page, ">one grader<") || strings.Contains(page, ">confirmed<") {
+		t.Fatal("the round's page calls an entry one account graded alone confirmed")
+	}
+}
+
+// With two graders and other work to do, an entry's scripts go to different graders, so
+// that the usual entry has two people's grades behind it without anybody grading twice.
+func TestAnEntrysScriptsGoToDifferentGraders(t *testing.T) {
+	// Jobs that are equally wanted are handed out at random, so once proves nothing.
+	for try := 0; try < 24; try++ {
+		w := newWorld(t)
+		alice, zed := w.join("alice", nil), w.join("zed", nil)
+		bob, carol, dave, erin := w.join("bob", nil), w.join("carol", nil), w.join("dave", nil), w.join("erin", nil)
+		w.submit(alice, "steady", "print('steady')")
+		w.submit(zed, "other-one", "print('other')")
+		w.established("bob", "carol", "dave", "erin")
+		idx := w.draw()
+		n := 0
+		for _, who := range []*actor{bob, carol} {
+			for range 2 {
+				n++
+				w.run(who, fmt.Sprintf("{\"doc\": %d}\n", n))
+			}
+		}
+		first, _ := w.grade(dave, false, 5.5)
+		second, _ := w.grade(dave, false, 5.5)
+		if first.Job.Editor.ID == second.Job.Editor.ID {
+			t.Fatal("one grader was handed both of an entry's scripts while another entry's were waiting")
+		}
+		w.grade(erin, false, 5.5)
+		if _, status := w.grade(erin, false, 5.5); status != "settled" {
+			t.Fatalf("four scripts, four grades: %s", status)
+		}
+		w.check()
+		for _, name := range []string{"steady", "other-one"} {
+			if e := w.entry(idx, name); !e.Valid || e.NRuns != 2 || !e.Confirmed || e.OneGrader {
+				t.Fatalf("%s, graded by two people: %+v", name, e)
+			}
+		}
+	}
 }

@@ -481,6 +481,7 @@ type entryJ struct {
 	Dropped    []RunView      `json:"dropped_runs"`
 	NRuns      int            `json:"n_runs"`
 	Confirmed  bool           `json:"confirmed"`
+	OneGrader  bool           `json:"one_grader"`
 	RunsDiffer bool           `json:"runs_differ"`
 }
 
@@ -3026,8 +3027,13 @@ func TestAScriptTwoPeoplesRunsWroteIsNobodysOwn(t *testing.T) {
 	if g.Job == nil || g.Job.Kind != "grade" || g.Job.Script.SHA256 != shaOf(same) || g.Job.Run != 1 {
 		t.Fatalf("bob should be grading the script both runs wrote: %+v", g.Job)
 	}
-	if code, status := w.report(bob, g, 5.5); code != 200 || status != "settled" {
-		t.Fatalf("HTTP %d %s", code, status)
+	// It is the entry's only script, so one grade of it would be one machine's word for
+	// the whole score. Carol is there, and grades it too.
+	if code, status := w.report(bob, g, 5.5); code != 200 || status != "pending" {
+		t.Fatalf("one grade of the entry's only script, with a second grader around: HTTP %d %s", code, status)
+	}
+	if _, status := w.grade(carol, true, 5.5); status != "settled" {
+		t.Fatalf("the second grade: %s", status)
 	}
 	w.check()
 	e := w.entry(idx, "steady")
@@ -3036,12 +3042,12 @@ func TestAScriptTwoPeoplesRunsWroteIsNobodysOwn(t *testing.T) {
 	}
 	// One script, one set of grades, shown with both runs.
 	for _, r := range e.Runs {
-		if r.Self || len(r.Grades) != 1 || r.Grades[0].Handle != "bob" || r.Grades[0].Self || !r.Grades[0].Counted {
+		if r.Self || len(r.Grades) != 2 || r.Grades[0].Handle != "bob" || r.Grades[1].Handle != "carol" || r.Grades[0].Self || !r.Grades[0].Counted || !r.Grades[1].Counted {
 			t.Fatalf("run %d: %+v", r.N, r)
 		}
 	}
 	w.app.st.view(func(s *State) {
-		if n := len(s.results(idx, id)); n != 1 {
+		if n := len(s.results(idx, id)); n != 2 {
 			t.Fatalf("%d grades of one script", n)
 		}
 	})
@@ -3125,7 +3131,7 @@ func TestRunsThatDifferGetAThirdAndTheMedianIsTheScore(t *testing.T) {
 	}
 
 	// With somebody there to run it a third time.
-	w, idx, bob, _, dave := start(true)
+	w, idx, bob, carol, dave := start(true)
 	if g, status := w.grade(bob, true, 5.5); status != "pending" || g.Job.Script.SHA256 != shaOf(good) {
 		t.Fatalf("one run failed and one did not, and somebody could run it again: %s", status)
 	}
@@ -3134,12 +3140,12 @@ func TestRunsThatDifferGetAThirdAndTheMedianIsTheScore(t *testing.T) {
 		t.Fatalf("dave should be running it a third time: %+v", cd.Job)
 	}
 	w.edit(dave, cd, other)
-	if g, status := w.grade(bob, true, 5.4); status != "settled" || g.Job.Script.SHA256 != shaOf(other) || g.Job.Run != 3 {
+	if g, status := w.grade(carol, true, 5.4); status != "settled" || g.Job.Script.SHA256 != shaOf(other) || g.Job.Run != 3 {
 		t.Fatalf("the last grade: %s %+v", status, g.Job)
 	}
 	w.check()
 	e := w.entry(idx, "flaky")
-	if !e.Valid || e.NRuns != 3 || !e.Confirmed || e.RunsDiffer || math.Abs(*e.Gain-0.5) > 1e-9 || math.Abs(*e.Loss-5.5) > 1e-9 || e.Script["sha256"] != shaOf(good) {
+	if !e.Valid || e.NRuns != 3 || !e.Confirmed || e.OneGrader || e.RunsDiffer || math.Abs(*e.Gain-0.5) > 1e-9 || math.Abs(*e.Loss-5.5) > 1e-9 || e.Script["sha256"] != shaOf(good) {
 		t.Fatalf("the median of nothing, 0.5 and 0.6: %+v", e)
 	}
 	if r := e.Runs[0]; r.Status != "failed" || r.Gain != 0 || r.Script != "" || !strings.Contains(r.Reason, "out of time") || r.By != "bob" {

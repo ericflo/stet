@@ -817,6 +817,9 @@ func (a *App) entryJSON(s *State, e *Entry) map[string]any {
 		}
 	}
 	j["runs"], j["n_runs"], j["confirmed"], j["runs_differ"] = runs, len(runs), e.Confirmed, e.RunsDiffer
+	if e.OneGrader {
+		j["one_grader"] = true
+	}
 	if len(dropped) > 0 {
 		j["dropped_runs"] = dropped
 	}

@@ -463,6 +463,7 @@ type EntryView struct {
 	NRuns      int         // those that count
 	Confirmed  bool        // two people's runs agree, and none rests on its own runner's grade
 	RunsDiffer bool        // no two runs agree
+	OneGrader  bool        // the runs agree, and one account graded them all
 	Own        bool        // a run's gain rests on a grade by its own runner
 	Edit       *EditReport // the run the score is nearest to: its edit, its script
 	ScriptSHA  string
@@ -490,7 +491,7 @@ func (a *App) entryView(s *State, e *Entry) EntryView {
 	if e.EditedAt > 0 {
 		v.Edit, v.ScriptSHA, v.ScriptSize = e.Edit, e.Script, e.ScriptSize
 	}
-	v.Runs, v.Confirmed, v.RunsDiffer = a.runViews(s, e), e.Confirmed, e.RunsDiffer
+	v.Runs, v.Confirmed, v.RunsDiffer, v.OneGrader = a.runViews(s, e), e.Confirmed, e.RunsDiffer, e.OneGrader
 	for _, run := range v.Runs {
 		if run.Status != "dropped" {
 			v.NRuns++
