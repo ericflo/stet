@@ -353,6 +353,7 @@ func (a *App) apiSeason(w http.ResponseWriter, r *http.Request) {
 		"rules_version": a.season.RulesVersion, "scale": a.cfg.Scale, "student": a.season.Scales[a.cfg.Scale],
 		"ink_frac": a.season.InkFrac, "ink_tokens": a.season.InkTokens[a.cfg.Scale],
 		"round_interval_seconds": int(a.cfg.RoundInterval.Seconds()), "draw_grid_seconds": a.season.DrawGrid,
+		"round_min_gap_seconds": int(a.cfg.RoundMinGap.Seconds()), "entries_in_play": a.cfg.EntriesInPlay, "submissions_per_day": a.cfg.SubmitsPerDay,
 		"qualify_rounds": a.cfg.QualifyRounds, "rated_rounds": a.cfg.RatedRounds, "ladder_size": a.cfg.LadderSize,
 		"beacon": a.season.Beacon, "pools": a.season.Pools, "tolerance": a.tolerance(), "record": a.season.Record,
 		"grade_devices": a.season.GradeDevices, "site": a.cfg.BaseURL, "api": a.cfg.APIURL,
@@ -584,7 +585,7 @@ func (a *App) apiMe(w http.ResponseWriter, r *http.Request) {
 			j := a.editorJSON(s, e, board)
 			es := s.ofEditor[e.ID]
 			for i := len(es) - 1; i >= 0; i-- {
-				if es[i].Status == "settled" {
+				if !sealed(s, es[i]) {
 					j["last"] = map[string]any{"round": roundID(a.season.ID, es[i].RoundIdx), "gain": places5(es[i].Gain), "valid": es[i].Valid}
 					break
 				}
@@ -633,6 +634,9 @@ func (a *App) apiSubmit(w http.ResponseWriter, r *http.Request) {
 		out = map[string]any{"editor": a.editorJSON(s, ed, board), "url": a.cfg.BaseURL + "/editors/" + ed.ID[:12], "message": sub.Message}
 		if sub.Replaced != "" {
 			out["replaced"] = sub.Replaced
+		}
+		if sub.InPlay > 0 {
+			out["in_play"], out["in_play_limit"] = sub.InPlay, a.cfg.EntriesInPlay
 		}
 		if next := s.roundWithStatus("scheduled"); next != nil {
 			// "It enters round X" only when it will: there is room for it, and it is in
@@ -773,8 +777,17 @@ func (a *App) runViews(s *State, e *Entry) []RunView {
 	return append(out, v)
 }
 
-// entryJSON is the public face of an entry. Sealed until settled: an open entry says
-// nothing about its runs, the scripts they wrote, or any grade of them.
+// sealed reports whether an entry is still under seal: it is open, or its round is. A
+// round settles as a whole. An entry that was given up early (nobody could run it, or
+// check its run) is closed in the records before its round is, and says nothing until then.
+func sealed(s *State, e *Entry) bool {
+	rd := s.Rounds[e.RoundIdx]
+	return e.Status != "settled" || rd == nil || rd.Status != "settled"
+}
+
+// entryJSON is the public face of an entry. Sealed until its round settles: before that it
+// says nothing about its runs, the scripts they wrote, any grade of them, or whether it
+// has been given up.
 func (a *App) entryJSON(s *State, e *Entry) map[string]any {
 	ed, rd := s.Editors[e.EditorID], s.Rounds[e.RoundIdx]
 	j := map[string]any{"round": roundID(a.season.ID, e.RoundIdx), "editor": e.EditorID, "name": ed.Name, "version": ed.Version,
@@ -782,7 +795,8 @@ func (a *App) entryJSON(s *State, e *Entry) map[string]any {
 	if len(e.Runs) > 0 || e.EditedAt > 0 {
 		j["stage"] = "grading"
 	}
-	if e.Status != "settled" {
+	if sealed(s, e) {
+		j["status"] = "open"
 		return j
 	}
 	j["stage"] = "settled"
@@ -828,8 +842,13 @@ func (a *App) entryJSON(s *State, e *Entry) map[string]any {
 func entriesOfRound(s *State, idx int) []*Entry {
 	es := append([]*Entry(nil), s.inRound[idx]...)
 	sort.SliceStable(es, func(i, j int) bool {
-		if (es[i].Status == "settled") != (es[j].Status == "settled") {
-			return es[i].Status == "settled"
+		// (An entry given up before its round settles is in no different a place from the
+		// rest: where it stood would say that it had been.)
+		if x, y := !sealed(s, es[i]), !sealed(s, es[j]); x != y {
+			return x
+		}
+		if sealed(s, es[i]) {
+			return es[i].EditorID < es[j].EditorID
 		}
 		if es[i].Gain != es[j].Gain {
 			return es[i].Gain > es[j].Gain
@@ -898,12 +917,52 @@ func viewerID(viewer *Account) int64 {
 	return viewer.ID
 }
 
-// apiGetScript serves an edit script: the plain-data record of what an editor did in a
-// round, which is all anyone needs to grade it again.
+// scriptAccess says who may read a script. Once a round that holds it has settled it is
+// public: the plain record of what an editor did, which is all anyone needs to grade it
+// again. Until then it is sealed, and goes only to an account that holds it as a grade job
+// (one under way, or one it has reported). A script no entry's run wrote is nobody's to read.
+func scriptAccess(s *State, sha string, viewer *Account) (known, public, holder bool) {
+	for _, e := range s.Entries {
+		has := e.Script == sha
+		for _, run := range e.Runs {
+			has = has || run.Script == sha
+		}
+		if !has {
+			continue
+		}
+		known = true
+		if rd := s.Rounds[e.RoundIdx]; rd != nil && rd.Status == "settled" {
+			public = true
+		}
+	}
+	if viewer != nil {
+		for _, c := range s.Claims {
+			if c.AccountID == viewer.ID && c.Kind == "grade" && c.Script == sha && (c.live(now()) || c.Status == "done") {
+				holder = true
+			}
+		}
+	}
+	return known, public, holder
+}
+
+// apiGetScript serves an edit script: to anyone once its round has settled, and before
+// that only to a signed request from the account that holds it as a grade job.
 func (a *App) apiGetScript(w http.ResponseWriter, r *http.Request) {
 	sha := strings.ToLower(r.PathValue("sha"))
 	if !sha256Re.MatchString(sha) {
 		writeErr(w, fail(404, "no such script"))
+		return
+	}
+	viewer := a.viewer(r)
+	var known, public, holder bool
+	a.st.view(func(s *State) { known, public, holder = scriptAccess(s, sha, viewer) })
+	switch {
+	case !known:
+		writeErr(w, fail(404, "no such script"))
+		return
+	case !public && !holder:
+		w.Header().Set("Cache-Control", "no-store")
+		writeErr(w, fail(403, "this script's round has not settled. Until it does the script is sealed: it is served only to the verifier that holds it as a grade job, in a signed request. (A verifier that is told this about its own job is out of date. Upgrade: curl -fsSL %s/install.sh | sh)", a.cfg.BaseURL))
 		return
 	}
 	// Streamed from storage, like a bundle: a script may be tens of megabytes, and every
@@ -921,7 +980,11 @@ func (a *App) apiGetScript(w http.ResponseWriter, r *http.Request) {
 	defer f.Close()
 	w.Header().Set("Content-Type", "application/zstd")
 	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
-	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	if public {
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	} else {
+		w.Header().Set("Cache-Control", "private, no-store") // sealed: for this account, for now
+	}
 	w.Header().Set("Content-Disposition", `attachment; filename="`+sha[:12]+`.script.jsonl.zst"`)
 	// All of it. What is stored is the compressed script, and a script that does not
 	// compress is a little larger stored than raw: cut at the raw limit, it could never be
@@ -1137,6 +1200,9 @@ func (a *App) apiClaim(w http.ResponseWriter, r *http.Request) {
 			// A verifier is offered each job once, never its own entry, and never a script
 			// that it alone wrote: with a round open, that is why there is nothing for it.
 			out["message"] = "Nothing in the open round is this machine's to do right now: it is waiting on other verifiers."
+		}
+		if handed.Note != "" {
+			out["message"] = handed.Note
 		}
 	}
 	writeJSON(w, 200, out)

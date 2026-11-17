@@ -197,6 +197,31 @@ func (a *actor) do(method, path string, body any, into any) int {
 	return resp.StatusCode
 }
 
+// fetch downloads a script as this actor: in a signed request if it has a key.
+func (a *actor) fetch(sha string) (int, []byte) {
+	a.t.Helper()
+	path := "/api/v1/scripts/" + sha
+	req, _ := http.NewRequest("GET", a.srv.URL+path, nil)
+	if a.priv != nil {
+		ts := strconv.FormatInt(time.Now().Unix(), 10)
+		sum := sha256.Sum256(nil)
+		msg := strings.Join([]string{"stet-v1", "GET", path, ts, hex.EncodeToString(sum[:])}, "\n")
+		req.Header.Set("X-Stet-Key", a.pub)
+		req.Header.Set("X-Stet-Time", ts)
+		req.Header.Set("X-Stet-Sig", hex.EncodeToString(ed25519.Sign(a.priv, []byte(msg))))
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		a.t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	blob, err := io.ReadAll(resp.Body)
+	if err != nil {
+		a.t.Fatal(err)
+	}
+	return resp.StatusCode, blob
+}
+
 type world struct {
 	t     *testing.T
 	app   *App
@@ -356,6 +381,7 @@ type claimed struct {
 	} `json:"job"`
 	Runner    map[string]any `json:"runner"`
 	Announced map[string]any `json:"announced"`
+	Message   string         `json:"message"`
 	Error     string         `json:"error"`
 }
 
@@ -656,22 +682,27 @@ func TestAnEntryIsRunThenGradedAndSettles(t *testing.T) {
 	if len(es) != 1 || es[0].Stage != "grading" || es[0].Loss != nil || es[0].Script != nil || es[0].Edit != nil || len(es[0].Runs) != 0 {
 		t.Fatalf("after the edit: %+v", es)
 	}
-	// The script is stored exactly as uploaded, for whoever is handed its name.
+	// The script is sealed too: its name gets nobody its bytes, with a key or without.
 	sha := shaOf(script)
-	resp, err := http.Get(w.srv.URL + "/api/v1/scripts/" + sha)
-	if err != nil || resp.StatusCode != 200 {
-		t.Fatalf("fetching the script: %v", err)
+	if code, _ := stranger.fetch(sha); code != 403 {
+		t.Fatalf("a sealed script was served to somebody with no key: HTTP %d", code)
 	}
-	blob, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if raw, err := unzstd(blob, 1<<20); err != nil || string(raw) != script {
-		t.Fatalf("the stored script is not the one uploaded: %q %v", raw, err)
+	if code, _ := bob.fetch(sha); code != 403 {
+		t.Fatalf("a sealed script was served to an account that does not hold it: HTTP %d", code)
 	}
 
 	// A volunteer's grade is sealed, and says nothing to anyone.
 	cb := w.claim(bob, false)
 	if cb.Job == nil || cb.Job.Kind != "grade" || cb.Job.Script == nil || cb.Job.Script.SHA256 != sha || cb.Job.Run != 1 || cb.Runner != nil {
 		t.Fatalf("bob should be grading that script: %+v", cb.Job)
+	}
+	// The script is stored exactly as uploaded, for whoever is handed it to grade.
+	code, blob := bob.fetch(sha)
+	if code != 200 {
+		t.Fatalf("fetching the script: HTTP %d", code)
+	}
+	if raw, err := unzstd(blob, 1<<20); err != nil || string(raw) != script {
+		t.Fatalf("the stored script is not the one uploaded: %q %v", raw, err)
 	}
 	w.app.st.update(context.Background(), func(tx *Tx) error {
 		c := tx.s.Claims[cb.Job.ID]
@@ -717,6 +748,13 @@ func TestAnEntryIsRunThenGradedAndSettles(t *testing.T) {
 	}
 	if es[0].Script == nil || es[0].Script["sha256"] != sha || es[0].Edit == nil {
 		t.Fatalf("a settled entry does not name its script: %+v", es[0])
+	}
+	// And the script is anybody's to read and grade again.
+	if code, again := stranger.fetch(sha); code != 200 || !bytes.Equal(again, blob) {
+		t.Fatalf("a settled round's script, asked for with no key: HTTP %d", code)
+	}
+	if code, _ := stranger.fetch(strings.Repeat("9", 64)); code != 404 {
+		t.Fatalf("a script nobody wrote: HTTP %d", code)
 	}
 	// One run, graded by its own runner: a score, and not a confirmed one.
 	if es[0].NRuns != 1 || es[0].Confirmed || es[0].RunsDiffer || len(es[0].Runs) != 1 || len(es[0].Dropped) != 0 {
@@ -1077,8 +1115,13 @@ func TestAScriptNobodyCanGradeIsDroppedAndTheOtherRunStands(t *testing.T) {
 	if len(e.Runs) != 1 || e.Runs[0].By != "anchor-one" || len(e.Dropped) != 1 || e.Dropped[0].By != "bob" || e.Dropped[0].N != 2 || !strings.Contains(e.Dropped[0].Reason, "could not grade") {
 		t.Fatalf("its runs: %+v, dropped %+v", e.Runs, e.Dropped)
 	}
-	if b := w.account("bob"); b.Runs != 1 || b.Strikes != 0 {
+	// A run is credited when it counts. One that was set aside is not held against its
+	// runner, and is not to their credit either: nobody could check it.
+	if b := w.account("bob"); b.Runs != 0 || b.Strikes != 0 {
 		t.Fatalf("bob: %+v", b)
+	}
+	if a := w.account("anchor-one"); a.Runs != 1 {
+		t.Fatalf("the run that stood was not credited: %+v", a)
 	}
 	if _, page := w.page("/rounds/" + roundID(w.app.season.ID, idx)); !strings.Contains(page, "set aside: the verifiers could not grade") {
 		t.Fatal("the round's page does not show the run that was set aside")
@@ -1814,7 +1857,7 @@ func TestEnteringNeedsAnEstablishedGithubAccount(t *testing.T) {
 	})
 	// The day's submissions are counted for the person, whichever key they use.
 	w.app.st.update(context.Background(), func(tx *Tx) error {
-		for i := 0; i < maxSubmissionsPerDay; i++ {
+		for i := 0; i < w.app.cfg.SubmitsPerDay; i++ {
 			tx.saveEditor(&Editor{ID: fmt.Sprintf("%064x", i+1), AccountID: tx.s.byHandle["alice"].ID, Name: "old", Version: i + 1,
 				CreatedAt: now() - 60, Status: "withdrawn", GithubID: 4242})
 		}
@@ -2834,14 +2877,13 @@ func TestAScriptThatDoesNotCompressIsServedWhole(t *testing.T) {
 		t.Fatalf("HTTP %d %s", code, status)
 	}
 	sum := sha256.Sum256(raw)
-	resp, err := http.Get(w.srv.URL + "/api/v1/scripts/" + hex.EncodeToString(sum[:]))
-	if err != nil {
-		t.Fatal(err)
+	// Sealed while the round is open: it goes to the machine that holds it as a grade job.
+	if c := w.claim(anchor, true); c.Job == nil || c.Job.Kind != "grade" {
+		t.Fatalf("the organisers' machine should be grading its script: %+v", c.Job)
 	}
-	defer resp.Body.Close()
-	blob, err := io.ReadAll(resp.Body)
-	if err != nil || resp.StatusCode != 200 {
-		t.Fatalf("the download: HTTP %d, %v after %d bytes", resp.StatusCode, err, len(blob))
+	code, blob := anchor.fetch(hex.EncodeToString(sum[:]))
+	if code != 200 {
+		t.Fatalf("the download: HTTP %d after %d bytes", code, len(blob))
 	}
 	if int64(len(blob)) <= w.app.season.Script.MaxBytes {
 		t.Fatalf("the test is not testing anything: %d bytes stored", len(blob))
@@ -3481,7 +3523,7 @@ func TestAVolunteersRunIsNotTakenOnItsWordAlone(t *testing.T) {
 				t.Fatalf("the entry afterwards: %+v, editor %s", en, s.Editors[id].Status)
 			}
 		})
-		if b := w.account("bob"); b.Runs != 1 || b.Strikes != 0 {
+		if b := w.account("bob"); b.Runs != 0 || b.Strikes != 0 { // (a run nobody could check is not credited)
 			t.Fatalf("bob: %+v", b)
 		}
 		// Nothing is held against the volunteer either.

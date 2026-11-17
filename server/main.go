@@ -41,7 +41,10 @@ type Config struct {
 	AnchorKeys       map[string]bool
 	Scale            string
 	RoundInterval    time.Duration
+	RoundMinGap      time.Duration // a round is drawn this long after the last when an entry is waiting; 0 keeps to the interval alone
 	MaxNewPerRound   int
+	EntriesInPlay    int // entries one person may have waiting or qualifying at once
+	SubmitsPerDay    int // submissions one person may make in a day
 	LadderSize       int
 	QualifyRounds    int // rounds every entry is given
 	RatedRounds      int // rounds before an editor is ranked
@@ -116,11 +119,14 @@ func loadConfig(season *Season) (Config, error) {
 		AnchorKeys:    map[string]bool{},
 		Scale:         env("STET_SCALE", season.OfficialScale),
 		RoundInterval: envDuration("STET_ROUND_INTERVAL", 6*time.Hour),
+		RoundMinGap:   envDuration("STET_ROUND_MIN_GAP", time.Hour),
 		// Running an entry and grading its script take about 12 minutes each at the
 		// official scale. A full round is the ladder plus three rounds' worth of newcomers:
 		// 17 entries, a little over three hours of one machine doing everything once, inside
 		// the six between draws. With two machines every entry is run twice in the same time.
 		MaxNewPerRound:   envInt("STET_MAX_NEW_PER_ROUND", 3),
+		EntriesInPlay:    envInt("STET_ENTRIES_IN_PLAY", 3),
+		SubmitsPerDay:    envInt("STET_SUBMISSIONS_PER_DAY", 6),
 		LadderSize:       envInt("STET_LADDER_SIZE", 8),
 		QualifyRounds:    envInt("STET_QUALIFY_ROUNDS", 3),
 		RatedRounds:      envInt("STET_RATED_ROUNDS", 3),
@@ -233,6 +239,12 @@ func newApp(ctx context.Context, cfg Config, season *Season, kv KV, blobs Blobs)
 	}
 	if cfg.RunsPerEntry < 1 {
 		cfg.RunsPerEntry = 2
+	}
+	if cfg.EntriesInPlay < 1 {
+		cfg.EntriesInPlay = 1
+	}
+	if cfg.SubmitsPerDay < 1 {
+		cfg.SubmitsPerDay = 6
 	}
 	if cfg.ActiveWindow <= 0 {
 		cfg.ActiveWindow = 10 * time.Minute

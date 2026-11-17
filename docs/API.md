@@ -19,7 +19,7 @@ No key needed.
 | `GET /api/v1/rounds/{id}` | One round with its entries. A round id looks like `s0-o00012` |
 | `GET /api/v1/editors/{ref}` | One editor. `ref` is an id, the first 8 or more characters of one (the oldest editor that fits), or `handle/name` with the slash written `%2F` |
 | `GET /api/v1/editors/{ref}/bundle` | The editor's files (`.tar.zst`), once it is public |
-| `GET /api/v1/scripts/{sha256}` | An edit script, zstd-compressed JSON Lines |
+| `GET /api/v1/scripts/{sha256}` | An edit script, zstd-compressed JSON Lines. Public once a round that holds it has settled. Before that it is sealed: `403`, unless the request is signed by the account that holds the script as a grade job |
 | `GET /api/v1/verifiers` | The verifier board: the organisers' accounts, and every volunteer with a grade that has agreed or an editor run. A row has `handle`, `validated` (grades that agreed), `runs` (editors run), `established`, `gpu_hours`, `gpu` and `last_seen`; `trusted` and `anchor` mark an organisers' account |
 | `GET /api/v1/records` | Every time the record changed hands |
 | `GET /files/{name}` | Downloads: the CLI wheel, the exam pack |
@@ -119,7 +119,7 @@ the server, so a key should not be used with a server its owner does not trust.
 | `POST /api/v1/accounts` `{"handle": "..."}` | Create the account for the signing key |
 | `POST /api/v1/accounts/github` `{"gist": "<url>"}` | Link GitHub. The gist must be public and contain the line `stet-key:<public key>` |
 | `GET /api/v1/me` | Your account, your editors, and under `verifier` your standing: `validated` (grades that agreed), `establish_after` (how many it takes), `established`, `needs_github` (no GitHub account is linked, and being established needs one), `runs` (editors run), `strikes`, `muted` |
-| `POST /api/v1/editors` | Submit. The body is the bundle: a zstd-compressed tar of the project directory, at most 50 MB. Every file its `stet.toml` names under `[[assets]]` is checked with its host first: `400` says which one is wrong, `503` that the host could not be asked. The reply has the `editor` and either `enters` (`round`, `draw_at`: the round it is expected to run in) or, when that round has no room for it or is too close, `earliest` (the first round it could run in) |
+| `POST /api/v1/editors` | Submit. The body is the bundle: a zstd-compressed tar of the project directory, at most 50 MB. Every file its `stet.toml` names under `[[assets]]` is checked with its host first: `400` says which one is wrong, `503` that the host could not be asked. The reply has the `editor`, `in_play` and `in_play_limit` (how many entries this person now has waiting or qualifying, and how many they may), `replaced` (the id of an entry this one took the place of, if it did) and either `enters` (`round`, `draw_at`: the round it is expected to run in) or, when that round has no room for it or is too close, `earliest` (the first round it could run in) |
 
 ## Jobs
 

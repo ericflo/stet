@@ -133,6 +133,7 @@ func (a *App) tick(ctx context.Context) {
 			}
 		}
 		a.schedule(tx)
+		a.onDemand(tx)
 		a.carryOver(tx)
 		a.abandonStuck(tx)
 		a.settleReady(tx)
@@ -156,6 +157,69 @@ func (a *App) schedule(tx *Tx) {
 		}
 		tx.saveRound(&Round{Idx: s.maxRound() + 1, Status: "scheduled", Scale: a.cfg.Scale, DrawAt: at, DrandRound: a.season.Beacon.drandRoundAt(at), Crawl: crawl})
 	}
+}
+
+// onDemand brings the next draw forward when an entry is waiting for it. Left to the
+// interval alone, somebody who submits just after a draw waits most of six hours to learn
+// anything, and three rounds of that is most of a day. So when an entry is waiting to run,
+// or part-way through its qualifying rounds, the next round is drawn as soon as it fairly
+// can be: at the first mark on the grid that gives verifiers their notice.
+//
+// A round is paid for in volunteers' GPU time, and three things hold this back. Nothing is
+// drawn while a round is open. Draws are at least RoundMinGap apart. And somebody who can
+// run editors must have asked for work a short while ago: a round nobody is there to run
+// only uses up a round number, and that can wait for the usual time. So can the next round
+// when the last two both came to nothing: whatever is wrong, hurrying will not mend it.
+func (a *App) onDemand(tx *Tx) {
+	s := tx.s
+	gap := int64(a.cfg.RoundMinGap.Seconds())
+	r := s.roundWithStatus("scheduled")
+	if gap <= 0 || r == nil || r.Crawl == nil || s.roundWithStatus("open") != nil || !a.waiting(s) || !a.runnerAround(s) {
+		return
+	}
+	at, empty := now()+drawNotice, 0
+	for _, rd := range s.roundsDesc(3) {
+		if rd.DrawnAt == 0 {
+			continue // the scheduled round itself
+		}
+		if empty >= 0 && rd.Status == "settled" && rd.BaselineLoss == nil {
+			empty++ // nothing in it could be graded
+		} else {
+			empty = -1 << 30
+		}
+		if rd.DrawnAt+gap > at {
+			at = rd.DrawnAt + gap
+		}
+	}
+	if empty >= 2 {
+		return
+	}
+	if at = a.season.nextGrid(at - 1); at < r.DrawAt {
+		a.reschedule(tx, r, at)
+		slog.Info("draw brought forward: an entry is waiting", "round", roundID(a.season.ID, r.Idx), "at", r.DrawAt)
+	}
+}
+
+// waiting reports whether an entry is waiting for a round: one that has not run, or one
+// part-way through its qualifying rounds.
+func (a *App) waiting(s *State) bool {
+	for _, e := range s.Editors {
+		if e.Status == "queued" || (e.Status == "running" && roundsRun(s, e.ID) < a.cfg.QualifyRounds) {
+			return true
+		}
+	}
+	return false
+}
+
+// runnerAround reports whether somebody who runs editors asked for work a short while ago.
+func (a *App) runnerAround(s *State) bool {
+	since := now() - int64(a.cfg.ActiveWindow.Seconds())
+	for _, acct := range s.Accounts {
+		if acct.LastSeen > since && acct.RunnerSeen != 0 && a.established(acct) {
+			return true
+		}
+	}
+	return false
 }
 
 // announcedSlots is every beacon round that a draw has ever been announced for, by any
@@ -232,8 +296,25 @@ func (a *App) selectEntrants(s *State, cutoff int64) []entrant {
 	for _, e := range qualifying {
 		add(e.ID, "qualifying")
 	}
+	// One person may have several entries waiting. Each person's first goes before anyone's
+	// second, so that nobody fills a round alone while others wait; an entry of theirs that
+	// is already qualifying counts as a turn taken.
+	sort.Slice(queue, func(i, j int) bool {
+		return queue[i].CreatedAt < queue[j].CreatedAt || (queue[i].CreatedAt == queue[j].CreatedAt && queue[i].ID < queue[j].ID)
+	})
+	turns, turn := map[string]int{}, map[string]int{}
+	for _, e := range qualifying {
+		turns[person(e)]++
+	}
+	for _, e := range queue {
+		turn[e.ID] = turns[person(e)]
+		turns[person(e)]++
+	}
 	priority := recentWork(s) // runs and grades for others in the last two weeks
 	sort.SliceStable(queue, func(i, j int) bool {
+		if ti, tj := turn[queue[i].ID], turn[queue[j].ID]; ti != tj {
+			return ti < tj
+		}
 		pi, pj := priority[queue[i].AccountID], priority[queue[j].AccountID]
 		if pi != pj {
 			return pi > pj

@@ -21,7 +21,9 @@ stet login --github       # entering needs a GitHub account at least 30 days old
 stet submit
 ```
 
-Using a coding agent? Tell it: *Read https://www.stetrun.com/AGENTS.md and enter Stet.*
+`stet run` has no limit and uploads nothing: try as many ideas as you like, then submit
+the ones worth volunteers' GPU time. Using a coding agent? Tell it: *Read
+https://www.stetrun.com/AGENTS.md and enter Stet.* · [How to enter](https://www.stetrun.com/enter)
 
 ## Lend a GPU
 
@@ -30,9 +32,12 @@ graded by someone else, all of it published.
 
 ```sh
 stet login
-stet verify            # grade edit scripts: plain data, nobody else's code
-stet verify --edits    # also run editors, in a sandbox (Linux)
+stet verify               # grade edit scripts: plain data, nobody else's code
+stet verify --edits       # also run editors, in a sandbox (Linux)
+stet service install      # leave it running: starts with the machine, upgrades itself
 ```
+
+[Verify scores](https://www.stetrun.com/verify) · [Run editors](https://www.stetrun.com/run)
 
 ## How it stays honest
 

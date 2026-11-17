@@ -65,11 +65,10 @@ func findEditor(s *State, ref string, viewer int64) *Editor {
 	return nil
 }
 
-const maxSubmissionsPerDay = 6
-
 type Submission struct {
 	Editor   *Editor
 	Replaced string
+	InPlay   int // how many entries this person now has waiting or qualifying
 	Round    *Round
 	Message  string
 }
@@ -125,8 +124,8 @@ func (a *App) submit(ctx context.Context, acctID int64, blob []byte) (*Submissio
 				recent++
 			}
 		}
-		if recent >= maxSubmissionsPerDay && !acct.Anchor {
-			return fail(429, "that is %d entries in a day. Each one is run and graded on volunteers' machines, about half an hour of GPU time a round, three rounds over; use `stet run` to iterate and come back tomorrow", recent)
+		if recent >= a.cfg.SubmitsPerDay && !acct.Anchor {
+			return fail(429, "that is %d entries in a day, which is the most one person may submit. Each is run and graded on volunteers' machines for at least %d rounds. `stet run` has no limit and uses the same harness: try things there, and submit again tomorrow", recent, a.cfg.QualifyRounds)
 		}
 		return nil
 	}
@@ -173,15 +172,38 @@ func (a *App) submit(ctx context.Context, acctID int64, blob []byte) (*Submissio
 				version = e.Version + 1
 			}
 		}
-		if !acct.Anchor { // the organisers seed the board with reference editors and may have several in play at once
-			for _, e := range s.ownedBy[acctID] {
-				if e.Status == "queued" || e.Status == "running" {
-					// Open entries of a replaced editor still settle: verifiers may already be at work on them.
-					e.Status = "withdrawn"
-					tx.saveEditor(e)
-					sub.Replaced = e.ID
+		if !acct.Anchor { // the organisers seed the board with reference editors, as many as it takes
+			// One person may have a few entries waiting or qualifying at once: ideas to compare
+			// on the same rounds. A new version of an entry takes the old version's place, and
+			// past the limit the oldest makes way. Open entries of an editor that leaves still
+			// settle: verifiers may already be at work on them.
+			var mine []*Editor
+			for _, e := range s.Editors {
+				if (e.Status == "queued" || e.Status == "running") && (e.AccountID == acctID || (acct.GithubID != 0 && e.GithubID == acct.GithubID)) {
+					mine = append(mine, e)
 				}
 			}
+			sort.Slice(mine, func(i, j int) bool {
+				return mine[i].CreatedAt < mine[j].CreatedAt || (mine[i].CreatedAt == mine[j].CreatedAt && mine[i].ID < mine[j].ID)
+			})
+			leave := func(e *Editor) {
+				e.Status = "withdrawn"
+				tx.saveEditor(e)
+				sub.Replaced = e.ID
+			}
+			var others []*Editor
+			for _, e := range mine {
+				if e.Name == m.Name {
+					leave(e)
+				} else {
+					others = append(others, e)
+				}
+			}
+			for len(others) >= a.cfg.EntriesInPlay {
+				leave(others[0])
+				others = others[1:]
+			}
+			sub.InPlay = len(others) + 1
 		}
 		ed := &Editor{
 			ID: id, AccountID: acctID, Name: m.Name, Version: version, Description: m.Description, Technique: m.Technique,
@@ -190,6 +212,7 @@ func (a *App) submit(ctx context.Context, acctID int64, blob []byte) (*Submissio
 		}
 		tx.saveEditor(ed)
 		tx.event("submit", map[string]any{"editor": id, "name": m.Name, "version": version, "owner": acct.Handle})
+		a.onDemand(tx) // somebody is waiting now: the reply should name the draw they will be in
 		sub.Editor, sub.Round = ed, s.roundWithStatus("scheduled")
 		ahead := 0
 		for _, e := range s.Editors {

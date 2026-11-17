@@ -38,8 +38,12 @@ An editor is a directory with a `stet.toml` and any program. `stet init` makes o
 - **It has to run on both makes of GPU.** Editors are run by volunteers, on NVIDIA and on
   AMD. Use the GPU through PyTorch (`device="cuda"` is right on both) and it will. A run
   that fails scores a gain of 0.
-- You have one entry in play at a time. Submitting again replaces your entry if it is
-  still waiting or qualifying. At most 6 submissions a day.
+- **Try as much as you like on your own machine.** `stet run` is the leaderboard's own
+  harness: nothing is uploaded and nothing is counted. Practice rounds never change, and
+  every official round can be replayed once it has settled (`stet run --round s0-o00012`).
+- Officially you may have 3 entries in play at once, waiting or qualifying, and make 6
+  submissions a day. A new version of an entry (the same name) takes the old version's
+  place; another name is another entry, and past three the oldest makes way.
 - Entering needs a GitHub account at least 30 days old, linked with `stet login --github`.
   Every entry costs volunteers GPU time, so one person is one entrant: the limits above
   are counted per GitHub identity, and linking yours to a new key withdraws the old key's
@@ -56,8 +60,10 @@ An editor is a directory with a `stet.toml` and any program. `stet init` makes o
 
 ## A round
 
-Official rounds are drawn about every 6 hours and never two at once: a round starts only
-when the one before has settled.
+A round is drawn when an entry is waiting for one, and every 6 hours whether or not one
+is. Never two at once: a round starts only when the one before has settled. A round drawn
+because somebody is waiting comes at least an hour after the last draw, and only while a
+verifier who runs editors is around to run it.
 
 1. **Announce.** The server names, in advance, the drand round whose randomness will seed
    the draw and the Common Crawl crawl it will draw from. Verifiers keep a log of these
@@ -291,7 +297,13 @@ are graded by **verifiers**: anyone who runs `stet verify`.
 - **Each entry is run twice,** by two different established verifiers, on an NVIDIA and
   an AMD GPU when there are both. Nobody runs their own entry, runs one entry twice, or
   runs an entry after being shown a script of it. Scripts are sealed until the round
-  settles, so the second runner cannot copy the first.
+  settles, so the second runner cannot copy the first: a script is served only to the
+  verifier handed it to grade, and a verifier holds one job at a time.
+- **Early on there may be one machine.** While the organisers' verifier is the only
+  established one, it runs each entry once and grades it, the entry is marked *run once*,
+  and rounds do not wait for people who are not there. Every script is published when the
+  round settles, so anyone can check any score afterwards, and entries are *confirmed*
+  from the first round a second established verifier is around for.
 - **Each script is graded by someone other than the verifier who wrote it.** Its gain is
   the median of the established verifiers' grades, each against that grader's own
   measurement of the unedited corpus. Two honest machines agree to within a small

@@ -160,6 +160,9 @@ type Run struct {
 	// Dropped: no established account could grade its script, so it counts for nothing.
 	Dropped bool    `json:"dropped,omitempty"`
 	Grades  []Grade `json:"grades,omitempty"`
+	// Owed: its runner has not been credited with it yet. That happens when the entry
+	// settles, so that nothing public moves when a run arrives.
+	Owed bool `json:"owed,omitempty"`
 }
 
 // Grade is one verifier's grade of a script, as published when the round settles.

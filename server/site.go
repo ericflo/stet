@@ -131,6 +131,9 @@ func (s *Site) mount(mux *http.ServeMux) {
 	mux.HandleFunc("GET /rounds", s.rounds)
 	mux.HandleFunc("GET /rounds/{id}", s.round)
 	mux.HandleFunc("GET /verifiers", s.verifiersPage)
+	mux.HandleFunc("GET /enter", s.guide("enter", "Enter an editor", "Write a program that edits pretraining data, test it on your own machine as often as you like, and submit it to be scored on volunteers' GPUs."))
+	mux.HandleFunc("GET /verify", s.guide("verify", "Verify scores", "Lend a GPU to the leaderboard: one command retrains a fixed model on entrants' edit scripts. No one else's code runs on your machine, and it keeps itself up to date."))
+	mux.HandleFunc("GET /run", s.guide("run", "Run editors", "Run entrants' editors in a sandbox on a Linux machine with a GPU. What it needs, what the sandbox does, and how to leave it running."))
 	mux.HandleFunc("GET /u/{handle}", s.account)
 	mux.HandleFunc("GET /docs", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/docs/rules", http.StatusFound)
@@ -351,6 +354,7 @@ func (s *Site) funcs() template.FuncMap {
 		"date":     func(ts int64) string { return time.Unix(ts, 0).UTC().Format("2 Jan 2006") },
 		"datetime": func(ts int64) string { return time.Unix(ts, 0).UTC().Format("2 Jan 2006, 15:04 UTC") },
 		"iso":      func(ts int64) string { return time.Unix(ts, 0).UTC().Format(time.RFC3339) },
+		"f0":       func(v float64) string { return trimZero(strconv.FormatFloat(v, 'f', 1, 64)) },
 		"f1":       func(v float64) string { return strconv.FormatFloat(v, 'f', 1, 64) },
 		"gpunum":   func(hours float64) string { return gpuTime(hours)[0] },
 		"gpuunit":  func(hours float64) string { return gpuTime(hours)[1] },
@@ -477,7 +481,7 @@ func (a *App) entryView(s *State, e *Entry) EntryView {
 	if len(e.Runs) > 0 || e.EditedAt > 0 {
 		v.Stage = "grading"
 	}
-	if e.Status != "settled" {
+	if sealed(s, e) { // until its round settles: not even whether it has been given up
 		return v
 	}
 	v.Stage, v.Settled, v.Valid, v.Gain, v.BySource = "settled", true, e.Valid, e.Gain, e.BySource
@@ -668,11 +672,77 @@ func (s *Site) home(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		d["Editors"], d["Queued"], d["Feed"] = public, queued, feed(st, 9)
+		runners := 0
+		for _, acct := range st.Accounts {
+			if acct.RunnerSeen != 0 && acct.LastSeen > now()-3600 && a.established(acct) {
+				runners++
+			}
+		}
+		d["Runners"] = runners
 		if c := a.savedCrawl(st); c != nil {
 			d["Crawl"] = *c
 		}
 	})
 	s.render(w, 200, "home", s.page(r, "", "home", d))
+}
+
+// guide is one of the three pages written for somebody who came to do one thing: enter
+// an editor, verify scores, or run editors. Each says what to type, what happens next and
+// what it costs, with the numbers that are true now.
+func (s *Site) guide(name, title, desc string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		a := s.app
+		d := map[string]any{
+			"InPlay": a.cfg.EntriesInPlay, "PerDay": a.cfg.SubmitsPerDay, "Qualify": a.cfg.QualifyRounds, "Ladder": a.cfg.LadderSize,
+			"Establish": a.cfg.EstablishAfter, "GithubDays": a.cfg.GithubMinAgeDays, "CopyFrac": 1 - a.season.InkFrac,
+		}
+		a.st.view(func(st *State) { a.nowFacts(st, d) })
+		p := s.page(r, title, name, d)
+		p.Desc = desc
+		s.render(w, 200, name, p)
+	}
+}
+
+// nowFacts is what the pages say about this moment: who is waiting, who is working, what
+// is open and what comes next.
+func (a *App) nowFacts(st *State, d map[string]any) {
+	recs := a.records(st)
+	if len(recs) > 0 {
+		d["Record"] = &recs[len(recs)-1]
+	}
+	active, runners, queued := 0, 0, 0
+	var gpuHours float64
+	for _, v := range a.verifiers(st) {
+		if v.LastSeen > now()-14*86400 {
+			active++
+		}
+		gpuHours += v.GPUHours
+	}
+	for _, acct := range st.Accounts {
+		if acct.RunnerSeen != 0 && acct.LastSeen > now()-3600 && a.established(acct) {
+			runners++
+		}
+	}
+	for _, e := range st.Editors {
+		if e.Status == "queued" {
+			queued++
+		}
+	}
+	d["Active"], d["GPUHours"], d["Runners"], d["Queued"] = active, gpuHours, runners, queued
+	if next := st.roundWithStatus("scheduled"); next != nil {
+		c := *next
+		d["Next"] = &c
+	}
+	if open := st.roundWithStatus("open"); open != nil {
+		rs := a.roundSummary(st, open)
+		d["Open"] = &rs
+	}
+	for _, rd := range st.roundsDesc(0) {
+		if rd.Status == "settled" && rd.BaselineLoss != nil {
+			d["LastSettled"] = roundID(a.season.ID, rd.Idx)
+			break
+		}
+	}
 }
 
 func (s *Site) leaderboard(w http.ResponseWriter, r *http.Request) {
@@ -1150,6 +1220,8 @@ const installShTmpl = `#!/bin/sh
 #   STET_LIGHT=1         only what "stet submit", "stet status" and friends need: no
 #                        PyTorch and no libraries. Seconds to install, and megabytes.
 #   STET_TORCH_INDEX=... take PyTorch from this wheel index, not the one chosen below.
+#   STET_UPGRADE=1       replacing an install: fetch everything before touching it.
+#                        "stet upgrade", and a running "stet verify", set this.
 set -eu
 WHEEL="{{.Files}}/files/{{.Wheel}}"
 PY="{{.Python}}"
@@ -1185,6 +1257,25 @@ else
     curl -fsSL "{{.Base}}/constraints.txt" -o "$TMP/constraints.txt"
   else
     wget -qO "$TMP/constraints.txt" "{{.Base}}/constraints.txt"
+  fi
+  if [ "${STET_UPGRADE:-}" = "1" ]; then
+    # An upgrade replaces an install that works, and a verifier may be doing it with
+    # nobody watching. So fetch and build everything first, in a scratch environment:
+    # if a download fails, the install that is there is left alone.
+    PRE="${XDG_CACHE_HOME:-$HOME/.cache}/stet/upgrade-env"
+    rm -rf "$PRE"
+    say "Fetching the new version before replacing the one in use..."
+    uv venv --quiet --python "$PY" "$PRE"
+    set -- uv pip install --quiet --python "$PRE/bin/python" --constraints "$TMP/constraints.txt"
+    if [ -n "$INDEX" ]; then
+      set -- "$@" --index "$INDEX" --index-strategy unsafe-best-match
+    fi
+    if ! "$@" "stet-cli[run] @ $WHEEL"; then
+      rm -rf "$PRE"
+      say "The new version could not be fetched whole. Nothing was changed."
+      exit 1
+    fi
+    rm -rf "$PRE"
   fi
   say "Installing stet with Python $PY, PyTorch and the editor libraries (a few GB the first time)..."
   set -- uv tool install --force --python "$PY" --constraints "$TMP/constraints.txt"

@@ -34,6 +34,20 @@ official scale is about eight minutes of training on an integrated Radeon. `stet
 tells you what your machine can do. Running other people's editors for the leaderboard
 asks for more, a mid-range desktop card; `stet bench` measures yours.
 
+## How many things can I try?
+
+On your own machine, as many as you like. `stet run` is the same harness, exam and
+arithmetic the leaderboard uses, nothing is uploaded, and nothing is counted. Practice
+rounds never change, so two ideas can be compared on the same data; `--rounds 5` gives a
+mean and its error; and every official round can be replayed once it settles
+(`stet rounds`, then `stet run --round <id>`). To run many trials from a program there
+is `stet.gym`, the same thing as a Python environment.
+
+Official runs cost volunteers GPU time, so those are rationed: three entries in play at
+once and six submissions a day. A round is drawn as soon as an entry is waiting and the
+last round has settled, so an entry usually has its first score within a couple of
+hours, not at the next fixed time.
+
 ## Can my coding agent do this?
 
 That is the intended way in. Give it one line:
@@ -158,8 +172,8 @@ licence, along with every script it writes. `stet fork` copies any of them, and 
 ## Why do I need a GitHub account to enter?
 
 Running and grading an entry takes volunteers about half an hour of GPU time a round,
-for at least three rounds. That is the scarce resource, so one person gets one entry in
-play.
+for at least three rounds. That is the scarce resource, so one person gets three entries
+in play and six submissions a day, and a person has to be someone.
 Practice runs, forking and verifying need no account at GitHub.
 
 ## How do I know the organisers are not cheating?

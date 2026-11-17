@@ -1,0 +1,102 @@
+{{define "body"}}{{$d := .D}}
+<main class="page guide">
+<div class="page-head">
+  <div class="wrap">
+    <span class="eyebrow">Take part · 2 of 3</span>
+    <h1>Verify scores with your GPU</h1>
+    <p class="sub">Every number on the leaderboard is measured on volunteers' machines. A verifier is handed an edit script, which is plain data, trains the fixed model on it and reports the exam loss. <b>Nobody else's code runs on your machine.</b> One command, and you can leave it running.</p>
+    <div class="roles"><a href="/enter">Enter an editor</a><a href="/verify" aria-current="page">Verify scores</a><a href="/run">Run editors</a></div>
+  </div>
+</div>
+
+<section>
+  <div class="wrap cols guide-cols">
+    <div>
+      <h2>Do this</h2>
+      <ol class="gsteps">
+        <li>
+          <h3>Install</h3>
+          <p>It brings its own Python and the build of PyTorch for your GPU.</p>
+          {{template "install" .}}
+        </li>
+        <li>
+          <h3>Check the machine</h3>
+          <p>Says whether the GPU, the libraries and the disk are what grading needs.</p>
+          <div class="cmd"><pre><span class="p">$ </span><span data-copy-text>stet doctor</span></pre><button type="button" data-copy>copy</button></div>
+        </li>
+        <li>
+          <h3>Make an account</h3>
+          <p>A key on your disk and a public name. No email, no password.</p>
+          <div class="cmd"><pre><span class="p">$ </span><span data-copy-text>stet login --handle yourname</span></pre><button type="button" data-copy>copy</button></div>
+        </li>
+        <li>
+          <h3>Start verifying</h3>
+          <p>It waits for a round, does the work it is handed, and waits again. Ctrl-C stops it and hands back whatever it held.</p>
+          <div class="cmd"><pre><span class="p">$ </span><span data-copy-text>stet verify</span></pre><button type="button" data-copy>copy</button></div>
+        </li>
+        <li>
+          <h3>Leave it running</h3>
+          <p>On Linux this makes it a service: it starts with the machine, comes back if it stops, and <b>upgrades itself</b> between jobs when a new version is out.</p>
+          <div class="cmd"><pre><span class="p">$ </span><span data-copy-text>stet service install</span></pre><button type="button" data-copy>copy</button></div>
+        </li>
+      </ol>
+      {{if .Github}}<p class="note" style="margin-top:26px">To have your grades count towards scores, also link a GitHub account at least {{$d.GithubDays}} days old: <code>stet login --github</code>. Until you do, your grades are checked and published but decide nothing.</p>{{end}}
+    </div>
+
+    <aside class="stack side">
+      <div class="panel">
+        <div class="row head"><span class="k">You need</span></div>
+        <div class="row"><span class="v l">An NVIDIA or AMD GPU. Linux, or Windows with NVIDIA. Not a Mac: every grade has to use the same arithmetic.</span></div>
+        <div class="row"><span class="v l">10 GB of free disk, and a connection that can fetch about 1 GB a round.</span></div>
+        <div class="row"><span class="v l">That is all. No sandbox, no GitHub account, no fast machine.</span></div>
+      </div>
+      <div class="panel" data-live>
+        <div class="row head"><span class="k">Right now</span></div>
+        <div class="row"><span class="k">Round</span><span class="v">{{if $d.Open}}<a href="/rounds/{{$d.Open.ID}}">{{$d.Open.ID}}</a> is being graded{{else}}{{with $d.Next}}next draw <span data-until="{{.DrawAt}}">{{ago .DrawAt}}</span>{{else}}none scheduled{{end}}{{end}}</span></div>
+        <div class="row"><span class="k">Verifiers, last two weeks</span><span class="v">{{$d.Active}}</span></div>
+        <div class="row"><span class="k">GPU time given</span><span class="v">{{gpunum $d.GPUHours}} {{gpuunit $d.GPUHours}}</span></div>
+        <div class="row"><span class="v l"><a href="/verifiers">Everyone who verifies →</a></span></div>
+      </div>
+    </aside>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <div class="sec-head"><div><h2>What happens next</h2><p>You do nothing. This is what the machine does.</p></div></div>
+    <ol class="timeline">
+      <li><span class="when">when a round is drawn</span><div><h3>It builds the round for itself</h3><p>It fetches the round's raw pages from Common Crawl, about half a gigabyte, checks the draw against the public randomness beacon, and trains the model once on the unedited pages. That is the baseline every score is measured from.</p></div></li>
+      <li><span class="when">about ten minutes each</span><div><h3>It grades the scripts it is handed</h3><p>One training run per script, on a mid-range GPU. You cannot choose which, and you are never handed your own entry's.</p></div></li>
+      <li><span class="when">your first {{$d.Establish}} {{plural $d.Establish "grade" "grades"}}</span><div><h3>You are checked against others</h3><p>At first your grades are replications: compared with established verifiers' and published, deciding nothing. After {{$d.Establish}} that {{plural $d.Establish "agrees" "agree"}}{{if .Github}}, with GitHub linked,{{end}} you are <b>established</b>, and your grades make scores.</p></div></li>
+      <li><span class="when">when the round settles</span><div><h3>Your work is published</h3><p>The round's page lists every grade: who, on what GPU, what they measured. You appear on the <a href="/verifiers">verifiers board</a> with the GPU time you have given, and your own entries are drawn ahead of other people's.</p></div></li>
+    </ol>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <div class="sec-head"><div><h2>What it costs you</h2></div></div>
+    <div class="grid3">
+      <div class="card"><span class="eyebrow">GPU</span><h3>Busy during rounds, idle between</h3><p>A round is drawn when an entry is waiting, and every {{.Interval}} regardless. Each script is one training run of about ten minutes. Stop it whenever you like.</p></div>
+      <div class="card"><span class="eyebrow">Disk and network</span><h3>About 1 GB a round</h3><p>Old rounds are deleted as new ones arrive, so a verifier left running does not fill the disk.</p></div>
+      <div class="card"><span class="eyebrow">Risk</span><h3>It runs our trainer, on data</h3><p>An edit script is a list of document numbers and byte ranges. It is validated before use and nothing in it is executed.</p></div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap narrow">
+    <div class="sec-head"><div><h2>Questions verifiers ask</h2></div><a class="more" href="/docs/verifying">how scores are checked, in full →</a></div>
+    <div class="qa">
+      <details><summary>Does it keep itself up to date?</summary><p>Yes. When a new version is out, a verifier that holds no job installs it and starts again. It runs the same installer you ran, from this site, and nothing else. Turn it off with <code>stet verify --no-upgrade</code> or <code>STET_AUTO_UPGRADE=0</code>, and upgrade when you choose with <code>stet upgrade</code>.</p></details>
+      <details><summary>What if my number differs from everyone else's?</summary><p>Two honest machines agree to within a small tolerance. A grade outside it is published as differing and counts as a strike; after three, and more than one for every ten that agreed, the account gets no work for two weeks and may then try again. If your copy of the round itself differs, that is a broken download, and it does not count against you.</p></details>
+      <details><summary>Can I stop and start whenever I like?</summary><p>Yes. Ctrl-C, or stopping the service, hands back the job in hand and someone else is given it. Nothing is held against you for stopping.</p></details>
+      <details><summary>I have two GPUs.</summary><p>Run one verifier per GPU, each with an account of its own: set <code>STET_CONFIG</code> to another directory and run <code>stet login</code> there.</p></details>
+      <details><summary>What does my machine send, and what is public?</summary><p>The losses it measured, hashes of the round it built, how long the work took, and a description of the machine: GPU, operating system, versions. Your handle, GPU name, grades and GPU hours are published. Your IP address is used for rate limits and is not published.</p></details>
+      <details><summary>Does it trust the server?</summary><p>Not for what a round is. It recomputes the round's seed from the beacon, fetches the pages from Common Crawl itself, checks the exam by hash, and refuses a round that does not match what was announced before the draw.</p></details>
+      <details><summary>Can I do more?</summary><p>Yes: once you are established, the same machine can <a href="/run">run entrants' editors</a>, which is the work the competition is shortest of.</p></details>
+    </div>
+  </div>
+</section>
+</main>
+{{end}}

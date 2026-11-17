@@ -405,3 +405,79 @@ a.pill:hover { border-color: var(--red); color: var(--red); }
   .kv dt { border-bottom: 0; padding: 12px 20px 0; }
   .kv dd { padding: 4px 20px 12px; }
 }
+
+/* --- the three ways to take part --- */
+.mast nav .sep { width: 1px; align-self: stretch; margin: 6px 0; background: var(--rule); }
+.doors-band { padding: 56px 0 64px; border-top: 1px solid var(--rule); }
+.doors { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 22px; }
+.door { display: flex; flex-direction: column; background: var(--card); border: 1px solid var(--rule); border-top: 3px solid var(--red); border-radius: 4px; padding: 24px 26px 20px; text-decoration: none; color: var(--ink); transition: border-color 0.15s, transform 0.15s; }
+.door:hover { border-color: var(--ink); border-top-color: var(--red); transform: translateY(-2px); }
+.door h3 { font-size: 27px; margin: 10px 0 10px; }
+.door p { margin: 0 0 14px; color: var(--ink-2); font-size: 16.5px; line-height: 1.5; }
+.door ul { list-style: none; margin: 0 0 16px; padding: 0; font-size: 15px; color: var(--ink-2); }
+.door li { padding: 5px 0 5px 20px; position: relative; border-top: 1px solid var(--rule-2); }
+.door li::before { content: "✓"; position: absolute; left: 0; color: var(--green); font-size: 13px; top: 6px; }
+.door code { display: block; font-family: var(--mono); font-size: 13.5px; background: var(--paper); border: 1px solid var(--rule); border-radius: 4px; padding: 9px 12px; margin-top: auto; }
+.door .go { font-family: var(--mono); font-size: 14px; font-weight: 500; color: var(--red); margin-top: 14px; }
+.door .live { font-family: var(--mono); font-size: 12px; color: var(--ink-3); margin-top: 8px; min-height: 1.4em; }
+
+.roles { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 24px; }
+.roles a { font-family: var(--mono); font-size: 13px; text-decoration: none; color: var(--ink-2); padding: 7px 14px; border: 1px solid var(--rule); border-radius: 999px; }
+.roles a:hover { border-color: var(--ink); color: var(--ink); }
+.roles a[aria-current="page"] { background: var(--ink); border-color: var(--ink); color: var(--paper); }
+
+.guide h2 { font-size: clamp(28px, 3.2vw, 38px); margin-bottom: 22px; }
+.guide .sec-head h2 { margin-bottom: 0; }
+.guide-cols { grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr); gap: 44px; }
+.guide .side { position: sticky; top: 86px; }
+.gsteps { list-style: none; margin: 0; padding: 0; counter-reset: g; }
+.gsteps > li { counter-increment: g; position: relative; padding: 0 0 30px 58px; }
+.gsteps > li::before { content: counter(g); position: absolute; left: 0; top: -2px; width: 36px; height: 36px; border-radius: 50%; border: 1.5px solid var(--red); color: var(--red); font-family: var(--display); font-weight: 600; font-size: 18px; display: flex; align-items: center; justify-content: center; background: var(--paper); z-index: 1; }
+.gsteps > li::after { content: ""; position: absolute; left: 18px; top: 36px; bottom: 0; width: 1px; background: var(--rule); }
+.gsteps > li:last-child { padding-bottom: 0; }
+.gsteps > li:last-child::after { display: none; }
+.gsteps h3 { font-size: 23px; margin-bottom: 6px; }
+.gsteps p { margin: 0 0 12px; color: var(--ink-2); font-size: 17px; max-width: 36em; }
+.gsteps .cmd, .gsteps .tabbed { max-width: 620px; }
+.gsteps .ways { margin: 0; max-width: 620px; border: 1px solid var(--rule); border-radius: 5px; background: var(--card); }
+.gsteps .ways dt { padding: 11px 14px 0; }
+.gsteps .ways dt code { font-size: 13.5px; background: none; padding: 0; color: var(--ink); }
+.gsteps .ways dd { margin: 0; padding: 2px 14px 11px; font-size: 15.5px; color: var(--ink-2); border-bottom: 1px solid var(--rule-2); }
+.gsteps .ways dd:last-child { border-bottom: 0; }
+.agent.tall { grid-template-columns: minmax(0, 1fr); gap: 18px; max-width: 678px; }
+.panel .row.head { background: color-mix(in srgb, var(--rule-2) 45%, transparent); padding-top: 10px; padding-bottom: 10px; }
+.panel .row.head .k { color: var(--ink-2); }
+.panel .row .v.l { text-align: left; color: var(--ink-2); font-size: 15.5px; line-height: 1.45; }
+.note.warn { border-left-color: var(--red); background: color-mix(in srgb, var(--red) 6%, transparent); padding: 14px 18px; border-radius: 0 4px 4px 0; color: var(--ink); margin-bottom: 30px; max-width: 44em; }
+
+.timeline { list-style: none; margin: 0; padding: 0; border: 1px solid var(--rule); border-radius: 4px; background: var(--card); }
+.timeline > li { display: grid; grid-template-columns: 210px minmax(0, 1fr); gap: 26px; padding: 22px 26px; border-bottom: 1px solid var(--rule-2); align-items: baseline; }
+.timeline > li:last-child { border-bottom: 0; }
+.timeline .when { font-family: var(--mono); font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--red); }
+.timeline h3 { font-size: 21px; margin-bottom: 5px; }
+.timeline p { margin: 0; color: var(--ink-2); font-size: 16.5px; max-width: 46em; }
+
+.narrow { max-width: 860px; }
+.qa details { border-top: 1px solid var(--rule); }
+.qa details:last-child { border-bottom: 1px solid var(--rule); }
+.qa summary { cursor: pointer; list-style: none; padding: 16px 34px 16px 0; font-family: var(--display); font-size: 20px; font-weight: 600; position: relative; }
+.qa summary::-webkit-details-marker { display: none; }
+.qa summary::after { content: "+"; position: absolute; right: 4px; top: 13px; font-family: var(--mono); font-size: 20px; font-weight: 400; color: var(--red); }
+.qa details[open] summary::after { content: "–"; }
+.qa summary:hover { color: var(--red); }
+.qa p { margin: 0 0 18px; color: var(--ink-2); font-size: 17px; max-width: 44em; }
+
+@media (max-width: 920px) {
+  .doors { grid-template-columns: minmax(0, 1fr); }
+  .guide-cols { grid-template-columns: minmax(0, 1fr); gap: 34px; }
+  .guide .side { position: static; }
+  .timeline > li { grid-template-columns: minmax(0, 1fr); gap: 6px; padding: 18px 20px; }
+  .mast nav .sep { display: none; }
+}
+@media (max-width: 560px) {
+  .gsteps > li { padding-left: 46px; }
+  .gsteps > li::before { width: 30px; height: 30px; font-size: 15px; }
+  .gsteps > li::after { left: 15px; top: 30px; }
+  .door h3 { font-size: 24px; }
+}
+@media (prefers-reduced-motion: reduce) { .door { transition: none; } .door:hover { transform: none; } }

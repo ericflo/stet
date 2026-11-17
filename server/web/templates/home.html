@@ -5,11 +5,10 @@
     <div>
       <span class="eyebrow">An open competition · {{.Season.Title}}</span>
       <h1 aria-label="Same model. Same budget. Better data wins.">Same model. Same budget. Better <span class="fix"><span class="struck">luck</span><span class="insert" aria-hidden="true">data</span><svg class="caret" viewBox="0 0 20 16" aria-hidden="true"><path d="M2 14 L10 3 L18 14"/></svg></span> wins.</h1>
-      <p class="lede">Every round, everyone gets the same slice of raw web crawl. <strong>Your agent has {{howlong .Scale.EditSeconds}} to edit it</strong>: cut, keep, reorder, repeat. Then one fixed model trains on what is left for a fixed budget, and sits an exam. <strong>Lowest loss wins.</strong></p>
-      {{template "install" .}}
-      <div class="cta" style="margin-top:18px">
-        <a class="btn" href="/docs/agents">Give this to your agent</a>
-        <a class="btn ghost" href="/docs/rules">Read the rules</a>
+      <p class="lede">Every round, everyone's program gets the same slice of raw web crawl and <strong>{{howlong .Scale.EditSeconds}} to edit it</strong>: cut, keep, reorder. One fixed model trains on what is left and sits an exam. <strong>Lowest loss wins</strong>, and every score is measured on volunteers' GPUs.</p>
+      <div class="cta" style="margin-top:22px">
+        <a class="btn" href="/enter">Enter an editor</a>
+        <a class="btn ghost" href="/verify">Lend a GPU</a>
       </div>
     </div>
     <div class="galley" data-galley aria-label="An illustration: lines of raw web crawl, some struck out and some kept">
@@ -28,6 +27,41 @@
     </div>
   </div>
 </div>
+
+<section class="doors-band">
+  <div class="wrap">
+    <div class="sec-head"><div><h2>Three ways to take part</h2><p>Pick the one that sounds like you. Each has its own page, written for that job and nothing else.</p></div></div>
+    <div class="doors">
+      <a class="door" href="/enter">
+        <span class="eyebrow">You have an idea, or an agent</span>
+        <h3>Enter an editor</h3>
+        <p>Write a program that picks the training data. Test it on your own machine as often as you like, then submit it and let other people's GPUs score it.</p>
+        <ul><li>Any computer; a GPU makes practice quick</li><li>{{if .Github}}A GitHub account to submit{{else}}No account needed to practise{{end}}</li></ul>
+        <code>stet init my-editor</code>
+        <span class="go">How to enter →</span>
+        <span class="live" data-live>{{if $d.Queued}}{{$d.Queued}} waiting · {{end}}{{if $d.Open}}a round is running now{{else}}{{with $d.Next}}next round <span data-until="{{.DrawAt}}">{{ago .DrawAt}}</span>{{end}}{{end}}</span>
+      </a>
+      <a class="door" href="/verify">
+        <span class="eyebrow">You have a GPU</span>
+        <h3>Verify scores</h3>
+        <p>Retrain the fixed model on entrants' edit scripts and report what you measure. Scripts are plain data: nobody else's code runs on your machine.</p>
+        <ul><li>NVIDIA or AMD, Linux or Windows</li><li>One command; leave it running</li></ul>
+        <code>stet verify</code>
+        <span class="go">How to verify →</span>
+        <span class="live" data-live>{{$d.Active}} {{plural $d.Active "verifier" "verifiers"}} in the last two weeks</span>
+      </a>
+      <a class="door" href="/run">
+        <span class="eyebrow">You have a Linux box that stays on</span>
+        <h3>Run editors</h3>
+        <p>Run entrants' editors in a sandbox, on the round's fresh pages. The competition is shortest of this: more runners means more entries scored, sooner.</p>
+        <ul><li>Linux, a {{f0 .Season.Runner.GPUMemoryGB}} GB+ GPU, {{f0 .Season.Runner.MemoryGB}} GB of memory</li><li>A machine you could reinstall</li></ul>
+        <code>stet verify --edits</code>
+        <span class="go">How to run editors →</span>
+        <span class="live" data-live>{{$d.Runners}} {{plural $d.Runners "machine" "machines"}} running editors in the last hour</span>
+      </a>
+    </div>
+  </div>
+</section>
 
 <div class="ticker" id="ticker" data-live>
   <div class="wrap">
@@ -58,25 +92,6 @@
     </div>
   </div>
 </div>
-
-<section>
-  <div class="wrap">
-    <div class="sec-head">
-      <div>
-        <h2>One variable.</h2>
-        <p>The model, the trainer, the token budget and the exam are fixed and public. The data is the only thing an entry can change, so the data is the only thing a score can be about.</p>
-      </div>
-    </div>
-    <div class="steps">
-      <div class="step"><h3>A corpus is drawn</h3><p>A random slice of the newest Common Crawl, picked by a public randomness beacon <em>after</em> entries are locked. Nobody, including us, can know it in advance.</p></div>
-      <div class="step"><h3>Your agent edits it</h3><p>{{howlong .Scale.EditSeconds | title}} in a sandbox with a GPU and no network. It writes an edit script: which spans of which documents, in what order, how many times.</p></div>
-      <div class="step"><h3>A fixed student trains</h3><p>A {{.Scale.NLayer}}-layer transformer reads exactly {{compact .Scale.TrainTokens}} tokens of your edit. Too little data repeats; too much is cut off.</p></div>
-      <div class="step"><h3>It sits an exam</h3><p>Loss on curated human writing of {{len .Season.ExamSources}} kinds, from encyclopedias to news. Anything in the corpus that quotes the exam is removed first.</p></div>
-      <div class="step"><h3>Volunteers check each other</h3><p>Two different people run each editor on their own GPUs, and others grade what it wrote. Everything is sealed until the round settles; then every run and every grade is published.</p></div>
-      <div class="step"><h3>The board moves</h3><p>Your gain is the unedited corpus's loss minus yours, round after round on fresh data. Luck on one corpus does not last.</p></div>
-    </div>
-  </div>
-</section>
 
 <section id="standings" data-live>
   <div class="wrap">
@@ -126,107 +141,21 @@
   <div class="wrap">
     <div class="sec-head">
       <div>
-        <h2>A few rules, a model of your own, or an agent.</h2>
-        <p>An editor is a program, and the harness is yours. Twenty lines of tests; a small model you fine-tuned, run over every chunk; an agent harness driving a model with tools. Whatever it is, it gets the same machine, whoever's GPU it runs on.</p>
+        <h2>How a round works</h2>
+        <p>The model, the trainer, the token budget and the exam are fixed and public. The data is the only thing an entry can change, so the data is the only thing a score can be about.</p>
       </div>
-      <a class="more" href="/docs/rules#the-editors-machine">the editor's machine →</a>
+      <a class="more" href="/docs/verifying#why-a-score-can-be-believed">why a number here can be believed →</a>
     </div>
-    <div class="cols">
-      <div class="grid2">
-        <div class="claim"><h3>Bring weights</h3><p>Name up to {{bytes .Season.Assets.MaxBytes}} of public Hugging Face files in <code>stet.toml</code>. They are in place before the clock starts: room for a model of a billion or two parameters at half precision.</p></div>
-        <div class="claim"><h3>Import, don't bundle</h3><p>Python {{.Season.Environment.Python}} and {{len .Season.Environment.Packages}} libraries at fixed versions are on every machine: PyTorch, transformers, sentence-transformers, scikit-learn, faiss and the rest.</p></div>
-        <div class="claim"><h3>Run your own harness</h3><p>Start processes, serve your model on loopback, point an agent at it. Node.js is there beside Python. It has to work on NVIDIA and AMD alike: use the GPU through PyTorch and it does.</p></div>
-        <div class="claim"><h3>Time is the limit</h3><p>A round's corpus is about ten times what the student can read, and {{howlong .Scale.EditSeconds}} is not long. A model cannot read all of it. Spend it where cheaper tests cannot decide.</p></div>
-      </div>
-      <div class="stack">
-        <div class="panel">
-          <div class="row"><span class="k">Time</span><span class="v">{{howlong .Scale.EditSeconds}}</span></div>
-          <div class="row"><span class="k">GPU</span><span class="v">one, {{.Season.Machine.GPUMemoryGB}} GB of memory</span></div>
-          <div class="row"><span class="k">CPU</span><span class="v">{{.Season.Machine.Cores}} cores, {{.Season.Machine.MemoryGB}} GB</span></div>
-          <div class="row"><span class="k">Network</span><span class="v">none, but loopback</span></div>
-          <div class="row"><span class="k">Weights</span><span class="v">{{bytes .Season.Assets.MaxBytes}} in {{.Season.Assets.MaxFiles}} files</span></div>
-          <div class="row"><span class="k">New text</span><span class="v">{{pct1 .Season.InkFrac}} of what the student reads</span></div>
-        </div>
-      </div>
+    <div class="steps">
+      <div class="step"><h3>A corpus is drawn</h3><p>A random slice of the newest Common Crawl, picked by a public randomness beacon <em>after</em> entries are locked. Nobody, including us, can know it in advance.</p></div>
+      <div class="step"><h3>Each editor edits it</h3><p>{{howlong .Scale.EditSeconds | title}} in a sandbox with a GPU and no network. It writes an edit script: which spans of which documents, in what order, how many times.</p></div>
+      <div class="step"><h3>A fixed student trains</h3><p>A {{.Scale.NLayer}}-layer transformer reads exactly {{compact .Scale.TrainTokens}} tokens of your edit. Too little data repeats; too much is cut off.</p></div>
+      <div class="step"><h3>It sits an exam</h3><p>Loss on curated human writing of {{len .Season.ExamSources}} kinds, from encyclopedias to news. Anything in the corpus that quotes the exam is removed first.</p></div>
+      <div class="step"><h3>Volunteers check each other</h3><p>Two different people run each editor on their own GPUs, and others grade what it wrote. Everything is sealed until the round settles; then every run and every grade is published.</p></div>
+      <div class="step"><h3>The board moves</h3><p>Your gain is the unedited corpus's loss minus yours, round after round on fresh data. Luck on one corpus does not last.</p></div>
     </div>
   </div>
 </section>
 
-<section>
-  <div class="wrap">
-    <div class="agent">
-      <div>
-        <h2>Built to be entered by an agent.</h2>
-        <p>The whole brief is one file. Hand it to a coding agent with a terminal and it can install the CLI, write an editor, measure it locally and submit, without you in the loop.</p>
-      </div>
-      <div class="stack">
-        <div class="cmd"><pre><span class="c"># tell your agent:</span>
-<span data-copy-text>Read {{.BaseURL}}/AGENTS.md and enter Stet.</span></pre><button type="button" data-copy>copy</button></div>
-        <div class="cmd"><pre><span class="c"># or by hand:</span>
-<span class="p">$ </span>stet init my-editor &amp;&amp; cd my-editor
-<span class="p">$ </span>stet run            <span class="c"># edit, train, exam: your gain, locally</span>
-<span class="p">$ </span>stet login --github <span class="c"># once, to enter</span>
-<span class="p">$ </span>stet submit</pre></div>
-      </div>
-    </div>
-  </div>
-</section>
-
-<section>
-  <div class="wrap">
-    <div class="sec-head">
-      <div>
-        <h2>Why believe a number on this site</h2>
-        <p>A leaderboard is only worth entering if the top of it means something. These are the ways this one could be wrong, and what stops each.</p>
-      </div>
-      <a class="more" href="/docs/design">the full design →</a>
-    </div>
-    <div class="grid2">
-      <div class="claim"><h3>Nobody chooses the data</h3><p>A round's corpus follows from a <a href="https://drand.love">drand</a> beacon value that did not exist when entries closed, at a draw time fixed on a public grid, from a crawl named in advance. Every verifier re-derives the seed before doing any work.</p></div>
-      <div class="claim"><h3>The exam cannot be copied in</h3><p>Any crawl document that contains the opening of a long exam sentence is dropped before anyone sees the corpus, and all but {{pct1 .Season.InkFrac}} of what the student reads must be copied from the corpus, byte for byte. A second exam, drawn in secret from the same collections and committed to by hash, decides the season's final table.</p></div>
-      <div class="claim"><h3>Every score can be re-run</h3><p>An entry's edit scripts are plain data, published under their hashes when the round settles. Grading runs no entrant code, so any GPU can retrain one. Each entry is run by two different verifiers and each script is graded by others, whenever they are there, and every run and grade is shown, whether they agree or not. A score that only one machine stands behind says so.</p></div>
-      <div class="claim"><h3>The record is not a coin flip</h3><p>Taking it means beating the holder head to head, on the rounds both ran, by more than a measured margin, at one of four fixed looks. A lucky copy of the leader does not get there.</p></div>
-    </div>
-  </div>
-</section>
-
-{{if $d.RecordChart}}
-<section>
-  <div class="wrap">
-    <div class="sec-head"><div><h2>The record so far</h2><p>Each step is a new holder: an editor that beat the last one on the rounds they shared.</p></div></div>
-    <figure class="figure"><div class="plot">{{$d.RecordChart}}</div></figure>
-  </div>
-</section>
-{{end}}
-
-<section>
-  <div class="wrap">
-    <div class="grid2">
-      <div>
-        <h2 style="font-size:clamp(30px,3.6vw,44px)">Got a GPU? Keep it honest.</h2>
-        <p class="lead" style="margin-top:14px">A score here is confirmed when two people's machines agree on it, and nobody's machine is in charge, the organisers' included. One command retrains edit scripts on the GPU you already have and reports what it got. It runs none of the entrants' code unless you ask it to.</p>
-        <div class="cmd" style="margin:20px 0"><pre><span class="p">$ </span><span data-copy-text>stet verify</span></pre><button type="button" data-copy>copy</button></div>
-        <p class="muted" style="font-size:16px">Your grade is sealed until the round settles, then published beside everyone else's. Verifiers' own entries go to the front of the queue. <a href="/docs/verifying" style="white-space:nowrap">How verifying works →</a></p>
-      </div>
-      <div class="table-wrap">
-        {{if $d.Verifiers}}
-        <table>
-          <thead><tr><th>Verifier</th><th class="r">Grades</th><th class="r hide-s">GPU time</th><th class="hide-s">Machine</th></tr></thead>
-          <tbody>
-            {{range $d.Verifiers}}<tr>
-              <td><a class="name" href="/u/{{.Handle}}">{{.Handle}}</a>{{if .Anchor}}<span class="tag blue">organisers</span>{{end}}</td>
-              <td class="r num">{{if .Anchor}}<span class="muted">·</span>{{else}}{{.Validated}}{{end}}</td>
-              <td class="r num hide-s">{{gpunum .GPUHours}} {{gpuunit .GPUHours}}</td>
-              <td class="hide-s muted" style="font-size:14.5px">{{.GPU}}</td>
-            </tr>{{end}}
-          </tbody>
-        </table>
-        {{else}}
-        <div class="empty"><span class="hand">first chair is free</span>Nobody is verifying yet. The first name on this list could be yours.</div>
-        {{end}}
-      </div>
-    </div>
-  </div>
-</section>
 </main>
 {{end}}

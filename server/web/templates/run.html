@@ -1,0 +1,107 @@
+{{define "body"}}{{$d := .D}}{{$f := .Season.Runner}}
+<main class="page guide">
+<div class="page-head">
+  <div class="wrap">
+    <span class="eyebrow">Take part · 3 of 3</span>
+    <h1>Run editors</h1>
+    <p class="sub">Somebody has to run each entrant's editor on the round's fresh pages, and it must not be the organisers alone. A runner does that, in a sandbox with no network, and uploads the script the editor writes. <b>This is the work the competition is shortest of</b>: every runner means more entries in each round and a sooner score for everyone.</p>
+    <div class="roles"><a href="/enter">Enter an editor</a><a href="/verify">Verify scores</a><a href="/run" aria-current="page">Run editors</a></div>
+  </div>
+</div>
+
+<section>
+  <div class="wrap cols guide-cols">
+    <div>
+      <p class="note warn"><b>This runs strangers' programs on your machine.</b> They run in a sandbox, described below, and every one is public code from an account tied to a GitHub identity. That is a deterrent, not a guarantee. Use a machine you could reinstall without loss.</p>
+      <h2>Do this</h2>
+      <ol class="gsteps">
+        <li>
+          <h3>Install, on Linux</h3>
+          <p>The installer brings Python {{.Season.Environment.Python}}, PyTorch for your GPU and the {{len .Season.Environment.Packages}} libraries editors are promised. You also need <code>bubblewrap</code> from your distribution's packages.</p>
+          <div class="cmd"><pre><span class="p">$ </span><span data-copy-text>curl -fsSL {{.BaseURL}}/install.sh | sh</span></pre><button type="button" data-copy>copy</button></div>
+        </li>
+        <li>
+          <h3>See whether the machine is fast enough</h3>
+          <p>Every editor is promised a machine at least as fast as a floor. This measures yours against it, in under a minute, and says what falls short if anything does. Run it with the GPU doing nothing else.</p>
+          <div class="cmd"><pre><span class="p">$ </span>stet doctor
+<span class="p">$ </span>stet bench</pre></div>
+        </li>
+        <li>
+          <h3>Make an account and link GitHub</h3>
+          <p>Running editors is for accounts with a name behind them.</p>
+          <div class="cmd"><pre><span class="p">$ </span>stet login --handle yourname
+<span class="p">$ </span>stet login --github</pre></div>
+        </li>
+        <li>
+          <h3>Start</h3>
+          <p>It tests its own sandbox, then takes work. Until you are established it is given scripts to grade; after {{$d.Establish}} {{plural $d.Establish "grade that agrees" "grades that agree"}} with other people's, editors start arriving by themselves.</p>
+          <div class="cmd"><pre><span class="p">$ </span><span data-copy-text>stet verify --edits</span></pre><button type="button" data-copy>copy</button></div>
+        </li>
+        <li>
+          <h3>Leave it running</h3>
+          <p>As a service it starts with the machine, comes back if it stops, and <b>upgrades itself</b> between jobs.</p>
+          <div class="cmd"><pre><span class="p">$ </span><span data-copy-text>stet service install --edits</span></pre><button type="button" data-copy>copy</button></div>
+        </li>
+      </ol>
+    </div>
+
+    <aside class="stack side">
+      <div class="panel">
+        <div class="row head"><span class="k">You need</span></div>
+        <div class="row"><span class="k">System</span><span class="v">Linux, bubblewrap, systemd</span></div>
+        <div class="row"><span class="k">GPU</span><span class="v">NVIDIA or AMD, {{f0 $f.GPUMemoryGB}} GB+</span></div>
+        <div class="row"><span class="k">GPU speed</span><span class="v">{{comma $f.GPUTokensPerSecond}} tokens/s in <code>stet bench</code></span></div>
+        <div class="row"><span class="k">CPU</span><span class="v">{{$f.Cores}} cores, {{f0 $f.CPUMBPerSecond}} MB/s</span></div>
+        <div class="row"><span class="k">Memory</span><span class="v">{{f0 $f.MemoryGB}} GB</span></div>
+        <div class="row"><span class="k">Disk</span><span class="v">{{f0 $f.DiskGB}} GB free</span></div>
+        <div class="row"><span class="k">Standing</span><span class="v">{{$d.Establish}} agreed {{plural $d.Establish "grade" "grades"}}{{if .Github}}, GitHub linked{{end}}</span></div>
+      </div>
+      <div class="panel" data-live>
+        <div class="row head"><span class="k">Right now</span></div>
+        <div class="row"><span class="k">Running editors, last hour</span><span class="v">{{$d.Runners}} {{plural $d.Runners "machine" "machines"}}</span></div>
+        <div class="row"><span class="k">Entries waiting</span><span class="v">{{$d.Queued}}</span></div>
+        <div class="row"><span class="k">Round</span><span class="v">{{if $d.Open}}<a href="/rounds/{{$d.Open.ID}}">{{$d.Open.ID}}</a> is running{{else}}{{with $d.Next}}next draw <span data-until="{{.DrawAt}}">{{ago .DrawAt}}</span>{{else}}none scheduled{{end}}{{end}}</span></div>
+      </div>
+    </aside>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <div class="sec-head"><div><h2>What the sandbox does</h2><p><code>stet verify --edits</code> tests it before taking any work, and will not start without it.</p></div></div>
+    <div class="grid2">
+      <div class="card"><span class="eyebrow">An editor gets</span><h3>Its own files, and a fixed machine</h3><p>Its bundle, the round's pages and the model files it named, all read-only. {{.Season.Machine.Cores}} cores, {{.Season.Machine.MemoryGB}} GB of memory, one GPU with {{.Season.Machine.GPUMemoryGB}} GB of its memory, {{.Season.Machine.ScratchGB}} GB of scratch space held in that memory, and {{howlong .Scale.EditSeconds}}, after which everything it started is killed.</p></div>
+      <div class="card"><span class="eyebrow">An editor does not get</span><h3>Your network or your files</h3><p>No network at all. None of your files, your other processes, or your machine's name. It can see the paths of the directories it was given, and so the name of the account <code>stet</code> runs as.</p></div>
+      <div class="card"><span class="eyebrow">What it cannot contain</span><h3>The GPU driver and the kernel</h3><p>Using a GPU means talking to its driver. The sandbox is namespaces and resource limits, not a virtual machine, and a flaw in the driver or the kernel is outside it.</p></div>
+      <div class="card"><span class="eyebrow">What comes out</span><h3>One file of plain data</h3><p>The edit script: document numbers and byte ranges. The harness checks it before anything else reads it, and nothing in it is ever executed.</p></div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <div class="sec-head"><div><h2>What happens next</h2></div></div>
+    <ol class="timeline">
+      <li><span class="when">first round or two</span><div><h3>You grade, and become established</h3><p>Your grades are compared with other verifiers'. After {{$d.Establish}} that {{plural $d.Establish "agrees" "agree"}} the account is established: from then on its work makes scores, and it is handed editors.</p></div></li>
+      <li><span class="when">each round</span><div><h3>You are handed editors to run</h3><p>One at a time, never your own, never the same entry twice. The machine fetches any model files the entry names (up to {{bytes .Season.Assets.MaxBytes}}, cached), runs the editor for at most {{howlong .Scale.EditSeconds}}, and uploads the script.</p></div></li>
+      <li><span class="when">between editors</span><div><h3>You grade other runners' scripts</h3><p>Never one you wrote yourself. A second person runs each editor too, and when two runs disagree a third is asked.</p></div></li>
+      <li><span class="when">when the round settles</span><div><h3>Every run is published</h3><p>Who ran what, on which GPU, how long it took and what it scored. Your GPU time and the editors you ran are on the verifiers board.</p></div></li>
+    </ol>
+  </div>
+</section>
+
+<section>
+  <div class="wrap narrow">
+    <div class="sec-head"><div><h2>Questions runners ask</h2></div><a class="more" href="/docs/verifying">the details →</a></div>
+    <div class="qa">
+      <details><summary>Does it keep itself up to date?</summary><p>Yes. A new release can change the libraries editors are promised, so a runner that holds no job installs it and starts again, using the installer from this site. Turn that off with <code>--no-upgrade</code> or <code>STET_AUTO_UPGRADE=0</code>; then it stops taking work when it falls behind, and <code>stet upgrade</code> brings it back.</p></details>
+      <details><summary>How much disk and network will it use?</summary><p>About 1 GB a round for the pages, and the model files entries name: up to {{bytes .Season.Assets.MaxBytes}} an entry, kept in a cache trimmed at 40 GB (<code>STET_ASSET_CACHE_GB</code> changes that).</p></details>
+      <details><summary>What if an editor fails on my machine?</summary><p>If the editor is at fault, that run scores 0 for the entry, and another person's run shows whether it was the editor. If the machine is at fault (a full disk, a GPU something else is using) the job is handed back and nothing is held against the entry.</p></details>
+      <details><summary>My machine is under the floor.</summary><p>Then it can still <a href="/verify">verify scores</a>, which needs only the GPU. The floor exists so that an editor that finishes in time on one runner finishes in time on all of them.</p></details>
+      <details><summary>Can I run it in a virtual machine or a container?</summary><p>If the GPU is passed through and <code>stet doctor</code> is happy, yes, and a virtual machine is the stronger wall. The sandbox itself needs unprivileged user namespaces and a systemd user session.</p></details>
+      <details><summary>Why must I be established first?</summary><p>A runner's script decides somebody's score. An account earns that by showing, on work that can be checked, that its machine computes what everyone else's does.</p></details>
+    </div>
+  </div>
+</section>
+</main>
+{{end}}

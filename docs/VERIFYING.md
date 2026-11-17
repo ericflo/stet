@@ -27,8 +27,34 @@ libraries. `stet bench` measures your machine against the floor for running edit
 says what, if anything, falls short. Run it when the GPU is doing nothing else.
 
 `stet verify --once` does one job and exits; `--max-jobs 5` does five. One verifier runs
-per account. For a second GPU, give the second verifier an account of its own: set
-`STET_CONFIG` to another directory and run `stet login` there.
+per account, and holds one job at a time. For a second GPU, give the second verifier an
+account of its own: set `STET_CONFIG` to another directory and run `stet login` there.
+
+### Leaving it running
+
+```
+stet service install            # or: stet service install --edits
+stet service status
+stet service logs
+stet service uninstall
+```
+
+On Linux with systemd this makes `stet verify` a service of your own user: it starts
+with the machine, starts again if it stops, and writes to
+`~/.local/state/stet/stet-verify.log`. It needs no root. If the machine logs you out, it
+may ask you to run `sudo loginctl enable-linger $USER` once so that it keeps going.
+Elsewhere, leave `stet verify` in a terminal or under your system's own scheduler.
+
+**It keeps itself up to date.** When a new version of stet is out, a verifier that holds
+no job installs it and starts again with the same arguments. It does this by running the
+site's installer, the same one you ran, fetched over TLS from the same address. Everything
+is downloaded into a scratch environment first, so a failed download leaves the version
+you have running. Nothing is upgraded in the middle of a job.
+
+To decide for yourself when to upgrade, start it with `stet verify --no-upgrade` (or
+`stet service install --no-upgrade`, or set `STET_AUTO_UPGRADE=0`). It then says when a
+new version is out, stops being given work once the server needs the new one, and
+`stet upgrade` installs it when you are ready.
 
 ### Grading
 
@@ -50,9 +76,10 @@ pass. Each one runs in a sandbox:
 - no network, at all;
 - none of your files: it sees its own bundle, the round's corpus and the model files it
   named, all read-only, and scratch space held in memory;
-- not your machine's name, users, other processes or hardware serial numbers;
-- six cores, 24 GB of memory, 8 GB of GPU memory, and the time limit, after which it is
-  killed.
+- not your machine's name, other processes or hardware serial numbers. It can see the
+  path of the directories it was given, and so the name of the account `stet` runs as;
+- six cores, 24 GB of memory, one GPU with 8 GB of its memory, and the time limit, after
+  which it is killed.
 
 `stet verify --edits` tests the sandbox before it takes any work and will not start
 without it. What the sandbox cannot do is stand between the editor and your GPU's
@@ -123,9 +150,11 @@ own, and either runner may grade it.
 once, you never work on your own, and ties between jobs are broken at random.
 
 **Everything is sealed.** Nobody can see a script, a grade or the round's unedited loss
-until the whole round settles, beyond the job in hand. A grade cannot be copied, and
-neither can a run: an account that has been shown a script of an entry is never asked to
-run that entry.
+until the whole round settles, beyond the job in hand: a script is served only to the
+verifier that holds it as a grade job. A grade cannot be copied, and neither can a run:
+a person who has been shown a script of an entry is never asked to run that entry, and
+an account that is not established is shown a script only once its entry is closed to
+further runs.
 
 **Everyone proves the round first.** Every grade comes with your baseline for the round:
 the unedited corpus's loss. If your corpus, your exam or your baseline differs from the
@@ -196,7 +225,9 @@ the account is offered no work for a day.
 | "editors are run by established verifiers only" | The account lost its standing between taking an editor and reporting on it. The run is not recorded. |
 | "the result could not be delivered ..." | The server was away or failing when your grade was ready. The job is handed back; nothing counts against you. |
 | "No work right now" or "Nothing in the open round is this machine's to do ..." | No round is open, or nothing in the open one is yours: you have had each job once, it is your own entry or a script only your run wrote, or it has the runs and grades it wants. Leave it running; it asks again. |
-| HTTP 426 | The harness changed. Reinstall with the command on the [home page](/). On an AMD GPU, set `STET_TORCH_INDEX` as you did the first time. |
+| "this verifier is out of date" (HTTP 426) | The harness changed. A verifier upgrades itself and carries on. With upgrades turned off, or an install the installer did not make, run `stet upgrade` or the installer again. |
+| "This account holds an editor it took to run ..." | The verifier was restarted without `--edits` while it held an editor. It is handed nothing until that job is reported, handed back or out of time: start it with `--edits` again. |
+| "... handed it back, or let the job run out, so it is offered no more of that round's scripts" | An account that is not established yet gave a script back. It is offered work again in the next round. |
 
 Pressing Ctrl-C hands the job back so that someone else can take it, and so does stopping
 any other way the verifier gets a say in. If the server cannot be told, it says that the

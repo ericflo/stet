@@ -58,8 +58,38 @@ afresh. The log says which it was. A volunteer's verifier hands the job back ins
 
 **To add an organisers' account:** install the CLI there, `stet login --handle <name>`,
 add its public key (`stet whoami`) to `STET_ANCHOR_KEYS`, copy the held-out exam to it
-(below), and run `stet verify --edits` under systemd. Whoever holds such a key is
+(below), and run `stet service install --edits`. Whoever holds such a key is
 established from the start and can settle an entry alone, so there should be few.
+
+**It upgrades itself.** Like any verifier, it installs a new release when it holds no
+job and starts again, so a deploy that changes the harness needs nothing done here. The
+log says `upgraded to <version>. Starting again.` To do it by hand: `stet upgrade`, then
+`systemctl --user restart stet-anchor`.
+
+## The early days: only the organisers' machines
+
+With one established machine, every entry is run once and graded by the machine that ran
+it, and marked *run once*. Rounds do not wait for a second person who is not there, so
+the board fills at the speed of that one machine: about a quarter of an hour an entry a
+round at the official scale. The scripts are published when the round settles, so every one of
+those scores can be re-run by anyone later.
+
+More of the organisers' machines help in one of two ways, and `STET_RUNS_PER_ENTRY`
+chooses which:
+
+| `STET_RUNS_PER_ENTRY` | With two organisers' machines | Use it when |
+|---|---|---|
+| 2 (the default) | Each entry is run by both and each grades the other's script: entries are *confirmed*. Same speed as one machine | Confirmation matters more than speed |
+| 1 | Each entry is run once by whichever machine is free, and graded by the other when it is around: about twice the speed | The queue is long and the machines are the organisers' own |
+
+Each machine needs its own key (one verifier per key), each key in `STET_ANCHOR_KEYS`,
+and each the held-out exam. A machine that only grades (`stet service install`, no
+`--edits`) needs no sandbox and no floor, and is enough to turn *run once* into a second
+opinion on every script.
+
+When volunteers arrive nothing needs changing: an established volunteer who runs editors
+is preferred for the second run, and the organisers' machines stop grading their own
+scripts as soon as somebody else can.
 
 ## Deploying
 
@@ -162,6 +192,10 @@ Set in `apps/stet/deployment.yaml`. The ones that are rules:
 |---|---|---|
 | `STET_LADDER_SIZE` | 8 | Editors that run in every round |
 | `STET_MAX_NEW_PER_ROUND` | 3 | New entries admitted per round |
+| `STET_ROUND_INTERVAL` | 6h | A round is drawn this often whether or not anybody is waiting |
+| `STET_ROUND_MIN_GAP` | 1h | When an entry is waiting and a runner is around, the next round is drawn this long after the last draw at the soonest. `0` turns drawing on demand off |
+| `STET_ENTRIES_IN_PLAY` | 3 | Entries one person may have waiting or qualifying at once |
+| `STET_SUBMISSIONS_PER_DAY` | 6 | Submissions one person may make in a day |
 | `STET_QUALIFY_ROUNDS` | 3 | Rounds a new entry runs |
 | `STET_RATED_ROUNDS` | 3 | Rounds before an editor is ranked |
 | `STET_GITHUB_MIN_AGE_DAYS` | 30 | Age of the GitHub account an entrant must link |
@@ -185,7 +219,8 @@ when rounds settle well inside six hours.
 |---|---|---|
 | A round stays `open` | Nobody established is verifying, or a verifier is stuck | Check the organisers' unit and its log; look at the verifiers page for who was last seen |
 | Every entry is marked *run once* | Only one established account is running editors | Expected early in a season. It ends when volunteers are established and pass `--edits` |
-| The log says "this verifier is out of date" once a minute | The server was deployed with a newer harness | Upgrade (above) |
+| The log says "this verifier is out of date" | The server was deployed with a newer harness | It upgrades itself within ten minutes. If the log says the upgrade did not work, it says why: run `stet upgrade` by hand |
+| A runner that crashed is handed nothing | It held an editor and was started again without `--edits` | Start it with `--edits`, or wait for the job's lease to end |
 | `stet verify --edits` says the machine is slower than the floor | The GPU was busy when `stet bench` ran, or the machine really is below it | Run `stet bench` again on a quiet GPU. A machine below the floor can still grade |
 | `stet verify --edits` says the libraries differ | An old install, or another Python | Run the installer again |
 | The site says "back in a moment" | The server cannot reach durable-db | It recovers by itself; alert `StetDBUnavailable` fires meanwhile |
