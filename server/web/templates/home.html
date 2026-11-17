@@ -60,6 +60,7 @@
         <span class="live" data-live>{{$d.Runners}} {{plural $d.Runners "machine" "machines"}} running editors in the last hour</span>
       </a>
     </div>
+    {{if not $d.Volunteers}}<p class="note early"><b>Early days.</b> So far every score is measured by the organisers' machine alone and marked <i>run once</i>. Each edit script is published when its round settles, so anyone can re-run any score. The first established volunteer turns <i>run once</i> into <i>confirmed</i>: <a href="/verify">that could be your GPU →</a></p>{{end}}
   </div>
 </section>
 

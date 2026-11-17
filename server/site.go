@@ -672,13 +672,7 @@ func (s *Site) home(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		d["Editors"], d["Queued"], d["Feed"] = public, queued, feed(st, 9)
-		runners := 0
-		for _, acct := range st.Accounts {
-			if acct.RunnerSeen != 0 && acct.LastSeen > now()-3600 && a.established(acct) {
-				runners++
-			}
-		}
-		d["Runners"] = runners
+		a.nowFacts(st, d)
 		if c := a.savedCrawl(st); c != nil {
 			d["Crawl"] = *c
 		}
@@ -710,7 +704,7 @@ func (a *App) nowFacts(st *State, d map[string]any) {
 	if len(recs) > 0 {
 		d["Record"] = &recs[len(recs)-1]
 	}
-	active, runners, queued := 0, 0, 0
+	active, runners, queued, volunteers := 0, 0, 0, 0
 	var gpuHours float64
 	for _, v := range a.verifiers(st) {
 		if v.LastSeen > now()-14*86400 {
@@ -722,7 +716,13 @@ func (a *App) nowFacts(st *State, d map[string]any) {
 		if acct.RunnerSeen != 0 && acct.LastSeen > now()-3600 && a.established(acct) {
 			runners++
 		}
+		// Established people who are not the organisers, and have been here lately: while
+		// there are none, every score is one machine's, and the pages say so.
+		if !acct.Anchor && a.established(acct) && acct.LastSeen > now()-14*86400 {
+			volunteers++
+		}
 	}
+	d["Volunteers"] = volunteers
 	for _, e := range st.Editors {
 		if e.Status == "queued" {
 			queued++

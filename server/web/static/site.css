@@ -449,6 +449,8 @@ a.pill:hover { border-color: var(--red); color: var(--red); }
 .panel .row.head { background: color-mix(in srgb, var(--rule-2) 45%, transparent); padding-top: 10px; padding-bottom: 10px; }
 .panel .row.head .k { color: var(--ink-2); }
 .panel .row .v.l { text-align: left; color: var(--ink-2); font-size: 15.5px; line-height: 1.45; }
+.note.early { border-left-color: var(--blue); background: color-mix(in srgb, var(--blue) 6%, transparent); padding: 14px 18px; border-radius: 0 4px 4px 0; color: var(--ink); margin: 28px 0 0; max-width: 60em; }
+.guide .note.early { margin-bottom: 30px; }
 .note.warn { border-left-color: var(--red); background: color-mix(in srgb, var(--red) 6%, transparent); padding: 14px 18px; border-radius: 0 4px 4px 0; color: var(--ink); margin-bottom: 30px; max-width: 44em; }
 
 .timeline { list-style: none; margin: 0; padding: 0; border: 1px solid var(--rule); border-radius: 4px; background: var(--card); }

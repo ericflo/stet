@@ -262,3 +262,24 @@ func TestEachWayOfTakingPartHasAPageOfItsOwn(t *testing.T) {
 		}
 	}
 }
+
+// While the organisers' machines are the only established ones, every score is one
+// machine's word, and the site says so where a visitor will see it. It stops saying so
+// when an established volunteer has been around.
+func TestThePagesSayWhenTheOrganisersAreAlone(t *testing.T) {
+	w, anchor := demandWorld(t, nil)
+	w.claim(anchor, true)
+	for _, path := range []string{"/", "/verify"} {
+		if _, body := w.page(path); !strings.Contains(body, "note early") {
+			t.Fatalf("%s does not say that only the organisers are verifying", path)
+		}
+	}
+	bob := w.join("bob", nil)
+	w.established("bob")
+	w.claim(bob, false)
+	for _, path := range []string{"/", "/verify"} {
+		if _, body := w.page(path); strings.Contains(body, "note early") {
+			t.Fatalf("%s still says the organisers are alone, with an established volunteer around", path)
+		}
+	}
+}
