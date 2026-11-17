@@ -131,9 +131,9 @@ func (s *Site) mount(mux *http.ServeMux) {
 	mux.HandleFunc("GET /rounds", s.rounds)
 	mux.HandleFunc("GET /rounds/{id}", s.round)
 	mux.HandleFunc("GET /verifiers", s.verifiersPage)
-	mux.HandleFunc("GET /enter", s.guide("enter", "Enter an editor", "Write a program that edits pretraining data, test it on your own machine as often as you like, and submit it to be scored on volunteers' GPUs."))
+	mux.HandleFunc("GET /enter", s.guide("enter", "Enter the competition", "You compete by writing a data editor: a program that edits pretraining data. Test it on your own machine as often as you like, and enter it to be scored on volunteers' GPUs and ranked on the leaderboard."))
 	mux.HandleFunc("GET /verify", s.guide("verify", "Verify scores", "Lend a GPU to the leaderboard: one command retrains a fixed model on entrants' edit scripts. No one else's code runs on your machine, and it keeps itself up to date."))
-	mux.HandleFunc("GET /run", s.guide("run", "Run editors", "Run entrants' editors in a sandbox on a Linux machine with a GPU. What it needs, what the sandbox does, and how to leave it running."))
+	mux.HandleFunc("GET /run", s.guide("run", "Run entries", "Run entrants' data editors in a sandbox on a Linux machine with a GPU. What it needs, what the sandbox does, and how to leave it running."))
 	mux.HandleFunc("GET /u/{handle}", s.account)
 	mux.HandleFunc("GET /docs", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/docs/rules", http.StatusFound)
@@ -172,7 +172,7 @@ func (s *Site) page(r *http.Request, title, nav string, d any) *Page {
 		Title: title, Nav: nav, Path: r.URL.Path, Season: a.season, Scale: a.season.Scales[a.cfg.Scale], ScaleID: a.cfg.Scale,
 		BaseURL: a.cfg.BaseURL, APIURL: a.cfg.APIURL, Version: s.version, Dev: a.cfg.Dev, Now: now(), Wheel: wheel, CLI: version,
 		Docs: s.docList(), Interval: plainDuration(a.cfg.RoundInterval), Github: a.cfg.RequireGithub, D: d,
-		Desc: "An open competition for agents that edit pretraining data. The model is fixed. The trainer is fixed. The only thing you can touch is the data.",
+		Desc: "Stet is an open competition to make the best training data for a language model. You enter a data editor: a program that cuts, keeps and reorders raw web crawl. The model, the trainer and the budget are fixed. The only thing you can touch is the data.",
 	}
 }
 
@@ -624,6 +624,9 @@ func (s *Site) home(w http.ResponseWriter, r *http.Request) {
 		top = top[:8]
 	}
 	d := map[string]any{"Top": top, "Provisional": provisional}
+	if len(b.Rated) > 0 {
+		d["Leader"] = &b.Rated[0] // the ranked entry ahead, while nobody holds the record
+	}
 	a.st.view(func(st *State) {
 		recs := a.records(st)
 		if len(recs) > 0 {

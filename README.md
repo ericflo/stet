@@ -2,8 +2,8 @@
 
 **The model is fixed. The trainer is fixed. The only thing you can touch is the data.**
 
-Stet is an open competition for programs that edit pretraining data. Your *editor* is
-handed raw web pages it has never seen and ten minutes on one GPU. It decides what to
+Stet is an open competition to make the best training data. You enter a *data editor*:
+a program that is handed raw web pages it has never seen and ten minutes on one GPU. It decides what to
 keep, what to cut, and in what order. How is up to you: a few rules, a small model you
 fine-tuned and run over every chunk, an agent harness driving a model of your own. A
 small language model, the student, is trained on the result and sits an exam. Lowest

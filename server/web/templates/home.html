@@ -3,13 +3,14 @@
 <div class="hero">
   <div class="wrap">
     <div>
-      <span class="eyebrow">An open competition · {{.Season.Title}}</span>
+      <span class="eyebrow">An open competition in training data · {{.Season.Title}}</span>
       <h1 aria-label="Same model. Same budget. Better data wins.">Same model. Same budget. Better <span class="fix"><span class="struck">luck</span><span class="insert" aria-hidden="true">data</span><svg class="caret" viewBox="0 0 20 16" aria-hidden="true"><path d="M2 14 L10 3 L18 14"/></svg></span> wins.</h1>
-      <p class="lede">Every round, everyone's program gets the same slice of raw web crawl and <strong>{{howlong .Scale.EditSeconds}} to edit it</strong>: cut, keep, reorder. One fixed model trains on what is left and sits an exam. <strong>Lowest loss wins</strong>, and every score is measured on volunteers' GPUs.</p>
+      <p class="lede"><strong>Stet is a competition to make the best training data.</strong> You enter a <strong>data editor</strong>: a program that gets a fresh slice of raw web crawl and {{howlong .Scale.EditSeconds}} to cut, keep and reorder it. One fixed model trains on what is left and sits an exam. <strong>Lowest loss wins.</strong></p>
       <div class="cta" style="margin-top:22px">
-        <a class="btn" href="/enter">Enter an editor</a>
-        <a class="btn ghost" href="/verify">Lend a GPU</a>
+        <a class="btn" href="/enter">Enter the competition</a>
+        <a class="btn ghost" href="/leaderboard">See the leaderboard</a>
       </div>
+      <p class="also">Every score is measured on volunteers' GPUs. <a href="/verify">Lend yours →</a></p>
     </div>
     <div class="galley" data-galley aria-label="An illustration: lines of raw web crawl, some struck out and some kept">
       <div class="head"><span>Galley proof · raw crawl</span><span>illustration</span></div>
@@ -28,42 +29,6 @@
   </div>
 </div>
 
-<section class="doors-band">
-  <div class="wrap">
-    <div class="sec-head"><div><h2>Three ways to take part</h2><p>Pick the one that sounds like you. Each has its own page, written for that job and nothing else.</p></div></div>
-    <div class="doors">
-      <a class="door" href="/enter">
-        <span class="eyebrow">You have an idea, or an agent</span>
-        <h3>Enter an editor</h3>
-        <p>Write a program that picks the training data. Test it on your own machine as often as you like, then submit it and let other people's GPUs score it.</p>
-        <ul><li>Any computer; a GPU makes practice quick</li><li>{{if .Github}}A GitHub account to submit{{else}}No account needed to practise{{end}}</li></ul>
-        <code>stet init my-editor</code>
-        <span class="go">How to enter →</span>
-        <span class="live" data-live>{{if $d.Queued}}{{$d.Queued}} waiting · {{end}}{{if $d.Open}}a round is running now{{else}}{{with $d.Next}}next round <span data-until="{{.DrawAt}}">{{ago .DrawAt}}</span>{{end}}{{end}}</span>
-      </a>
-      <a class="door" href="/verify">
-        <span class="eyebrow">You have a GPU</span>
-        <h3>Verify scores</h3>
-        <p>Retrain the fixed model on entrants' edit scripts and report what you measure. Scripts are plain data: nobody else's code runs on your machine.</p>
-        <ul><li>NVIDIA or AMD, Linux or Windows</li><li>One command; leave it running</li></ul>
-        <code>stet verify</code>
-        <span class="go">How to verify →</span>
-        <span class="live" data-live>{{$d.Active}} {{plural $d.Active "verifier" "verifiers"}} in the last two weeks</span>
-      </a>
-      <a class="door" href="/run">
-        <span class="eyebrow">You have a Linux box that stays on</span>
-        <h3>Run editors</h3>
-        <p>Run entrants' editors in a sandbox, on the round's fresh pages. The competition is shortest of this: more runners means more entries scored, sooner.</p>
-        <ul><li>Linux, a {{f0 .Season.Runner.GPUMemoryGB}} GB+ GPU, {{f0 .Season.Runner.MemoryGB}} GB of memory</li><li>A machine you could reinstall</li></ul>
-        <code>stet verify --edits</code>
-        <span class="go">How to run editors →</span>
-        <span class="live" data-live>{{$d.Runners}} {{plural $d.Runners "machine" "machines"}} running editors in the last hour</span>
-      </a>
-    </div>
-    {{if not $d.Volunteers}}<p class="note early"><b>Early days.</b> So far every score is measured by the organisers' machine alone and marked <i>run once</i>. Each edit script is published when its round settles, so anyone can re-run any score. The first established volunteer turns <i>run once</i> into <i>confirmed</i>: <a href="/verify">that could be your GPU →</a></p>{{end}}
-  </div>
-</section>
-
 <div class="ticker" id="ticker" data-live>
   <div class="wrap">
     <div class="cell">
@@ -73,11 +38,11 @@
       <div class="s"><a href="/editors/{{short .EditorID}}">{{.Name}}</a> by {{.Owner}}</div>
       {{else}}
       <div class="v">open</div>
-      <div class="s">Nobody holds it yet.</div>
+      <div class="s">{{with $d.Leader}}<a href="/editors/{{short .ID}}">{{.Name}}</a> by {{.Owner}} leads{{else}}Nobody holds it yet.{{end}}</div>
       {{end}}
     </div>
     <div class="cell">
-      <span class="eyebrow">Editors</span>
+      <span class="eyebrow">Entries</span>
       <div class="v count">{{$d.Editors}}</div>
       <div class="s">{{if $d.Queued}}{{$d.Queued}} more waiting for the next draw{{else}}have run in a round{{end}}</div>
     </div>
@@ -94,12 +59,48 @@
   </div>
 </div>
 
+<section class="doors-band">
+  <div class="wrap">
+    <div class="sec-head"><div><h2>Three ways to take part</h2><p>Pick the one that sounds like you. Each has its own page, written for that job and nothing else.</p></div></div>
+    <div class="doors">
+      <a class="door" href="/enter">
+        <span class="eyebrow">You have an idea, or an agent</span>
+        <h3>Compete</h3>
+        <p>Write a data editor: a program that picks what the model trains on. Test it on your own machine as often as you like, then enter it and let other people's GPUs score it against everyone else's.</p>
+        <ul><li>Any computer; a GPU makes practice quick</li><li>{{if .Github}}A GitHub account to submit{{else}}No account needed to practise{{end}}</li></ul>
+        <code>stet init my-editor</code>
+        <span class="go">How to enter →</span>
+        <span class="live" data-live>{{if $d.Queued}}{{$d.Queued}} waiting · {{end}}{{if $d.Open}}a round is running now{{else}}{{with $d.Next}}next round <span data-until="{{.DrawAt}}">{{ago .DrawAt}}</span>{{end}}{{end}}</span>
+      </a>
+      <a class="door" href="/verify">
+        <span class="eyebrow">You have a GPU</span>
+        <h3>Verify scores</h3>
+        <p>Retrain the fixed model on entrants' edit scripts and report what you measure. Scripts are plain data: nobody else's code runs on your machine.</p>
+        <ul><li>NVIDIA or AMD, Linux or Windows</li><li>One command; leave it running</li></ul>
+        <code>stet verify</code>
+        <span class="go">How to verify →</span>
+        <span class="live" data-live>{{$d.Active}} {{plural $d.Active "verifier" "verifiers"}} in the last two weeks</span>
+      </a>
+      <a class="door" href="/run">
+        <span class="eyebrow">You have a Linux box that stays on</span>
+        <h3>Run entries</h3>
+        <p>Run entrants' data editors in a sandbox, on the round's fresh pages. The competition is shortest of this: more runners means more entries scored, sooner.</p>
+        <ul><li>Linux, a {{f0 .Season.Runner.GPUMemoryGB}} GB+ GPU, {{f0 .Season.Runner.MemoryGB}} GB of memory</li><li>A machine you could reinstall</li></ul>
+        <code>stet verify --edits</code>
+        <span class="go">How to run entries →</span>
+        <span class="live" data-live>{{$d.Runners}} {{plural $d.Runners "machine" "machines"}} running entries in the last hour</span>
+      </a>
+    </div>
+    {{if not $d.Volunteers}}<p class="note early"><b>Early days.</b> So far every score is measured by the organisers' machine alone and marked <i>run once</i>. Each edit script is published when its round settles, so anyone can re-run any score. The first established volunteer turns <i>run once</i> into <i>confirmed</i>: <a href="/verify">that could be your GPU →</a></p>{{end}}
+  </div>
+</section>
+
 <section id="standings" data-live>
   <div class="wrap">
     <div class="sec-head">
       <div>
         <h2>{{if $d.Provisional}}Qualifying now{{else}}The leaderboard{{end}}</h2>
-        <p>{{if $d.Top}}Rating is the mean gain over the unedited corpus, in nats per token, adjusted for which rounds an editor happened to run in.{{else}}Nothing has been scored yet. The first entries will be.{{end}}</p>
+        <p>{{if $d.Top}}Entries are ranked by rating: the mean gain over the unedited corpus, in nats per token, adjusted for which rounds an entry happened to run in.{{else}}Nothing has been scored yet. The first entries will be.{{end}}</p>
       </div>
       <a class="more" href="/leaderboard">full leaderboard →</a>
     </div>
@@ -108,7 +109,7 @@
         {{if $d.Top}}
         <table>{{template "boardhead"}}<tbody>{{template "boardrows" $d.Top}}</tbody></table>
         {{else}}
-        <div class="empty"><span class="hand">a blank page</span>No editor has finished a round yet. Enter one and this table starts with you.</div>
+        <div class="empty"><span class="hand">a blank page</span>No entry has finished a round yet. Enter one and this table starts with you.</div>
         {{end}}
       </div>
       <div class="stack">
@@ -149,10 +150,10 @@
     </div>
     <div class="steps">
       <div class="step"><h3>A corpus is drawn</h3><p>A random slice of the newest Common Crawl, picked by a public randomness beacon <em>after</em> entries are locked. Nobody, including us, can know it in advance.</p></div>
-      <div class="step"><h3>Each editor edits it</h3><p>{{howlong .Scale.EditSeconds | title}} in a sandbox with a GPU and no network. It writes an edit script: which spans of which documents, in what order, how many times.</p></div>
+      <div class="step"><h3>Each entry edits it</h3><p>{{howlong .Scale.EditSeconds | title}} in a sandbox with a GPU and no network. It writes an edit script: which spans of which documents, in what order, how many times.</p></div>
       <div class="step"><h3>A fixed student trains</h3><p>A {{.Scale.NLayer}}-layer transformer reads exactly {{compact .Scale.TrainTokens}} tokens of your edit. Too little data repeats; too much is cut off.</p></div>
       <div class="step"><h3>It sits an exam</h3><p>Loss on curated human writing of {{len .Season.ExamSources}} kinds, from encyclopedias to news. Anything in the corpus that quotes the exam is removed first.</p></div>
-      <div class="step"><h3>Volunteers check each other</h3><p>Two different people run each editor on their own GPUs, and others grade what it wrote. Everything is sealed until the round settles; then every run and every grade is published.</p></div>
+      <div class="step"><h3>Volunteers check each other</h3><p>Two different people run each entry on their own GPUs, and others grade what it wrote. Everything is sealed until the round settles; then every run and every grade is published.</p></div>
       <div class="step"><h3>The board moves</h3><p>Your gain is the unedited corpus's loss minus yours, round after round on fresh data. Luck on one corpus does not last.</p></div>
     </div>
   </div>

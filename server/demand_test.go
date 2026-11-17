@@ -246,10 +246,12 @@ func TestTwoOrganisersMachinesConfirmOrGoTwiceAsFast(t *testing.T) {
 func TestEachWayOfTakingPartHasAPageOfItsOwn(t *testing.T) {
 	w, _ := demandWorld(t, nil)
 	for path, want := range map[string][]string{
-		"/":       {`href="/enter"`, `href="/verify"`, `href="/run"`, "Three ways to take part"},
-		"/enter":  {"stet init my-editor", "stet run", "stet submit", "3 entries in play at once", "6 a day", "/AGENTS.md"},
+		// The first screen says what this is, a competition, and what one enters, by a name
+		// that says what it does.
+		"/":       {`href="/enter"`, `href="/verify"`, `href="/run"`, "Three ways to take part", "Stet is a competition to make the best training data", "data editor", "Enter the competition", "See the leaderboard", ">Compete</a>", ">Run entries</a>"},
+		"/enter":  {"stet init my-editor", "stet run", "stet submit", "3 entries in play at once", "6 a day", "/AGENTS.md", "<h1>Enter the competition</h1>", "data editor"},
 		"/verify": {"stet verify", "stet service install", "--no-upgrade", "STET_AUTO_UPGRADE=0", "stet upgrade", "Nobody else's code runs on your machine"},
-		"/run":    {"stet verify --edits", "stet service install --edits", "stet bench", "bubblewrap", "strangers' programs", "could reinstall"},
+		"/run":    {"<h1>Run entries</h1>", "data editor", "stet verify --edits", "stet service install --edits", "stet bench", "bubblewrap", "strangers' programs", "could reinstall"},
 	} {
 		code, body := w.page(path)
 		if code != 200 {

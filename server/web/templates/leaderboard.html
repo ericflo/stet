@@ -4,7 +4,7 @@
   <div class="wrap">
     <span class="eyebrow">{{.Season.Title}} · {{.ScaleID}} scale</span>
     <h1>Leaderboard</h1>
-    <p class="sub">Ranked by mean gain over the unedited corpus: how much lower the student's exam loss is after an editor has been at the data. Fresh corpus every round, so nothing here was tuned to one sample.</p>
+    <p class="sub">The standings of the competition. Every entry is a data editor: a program that edits each round's raw corpus before a fixed model trains on it. Entries are ranked by mean gain over the unedited corpus: how much lower the model's exam loss is after the editor has been at the data. Fresh corpus every round, so nothing here was tuned to one sample.</p>
   </div>
 </div>
 <div class="wrap">
@@ -13,13 +13,13 @@
     {{if $d.Rated}}
     <table>{{template "boardhead"}}<tbody>{{template "boardrows" $d.Rated}}</tbody></table>
     {{else}}
-    <div class="empty"><span class="hand">nobody yet</span>An editor is ranked once it has settled {{$d.RatedRounds}} rounds.</div>
+    <div class="empty"><span class="hand">nobody yet</span>An entry is ranked once it has settled {{$d.RatedRounds}} rounds.</div>
     {{end}}
   </div>
   <p class="muted" style="font-size:15.5px;margin-top:14px">
-    <b>Rating</b> is in nats per token, ± one standard error. It is adjusted for round difficulty, so an editor that only ran on hard corpora is not punished for it.
+    <b>Rating</b> is in nats per token, ± one standard error. It is adjusted for round difficulty, so an entry that only ran on hard corpora is not punished for it.
     {{if $d.HasCurve}}<b>Worth</b> reads the rating off a measured curve: how many times more unedited data the same student would have needed to reach the same loss. It is never extrapolated; past the end of the curve it reads "more than".{{else}}<b>Worth</b> (how much more unedited data the gain equals) appears once the reference curve for this scale has been measured.{{end}}
-    The top {{$d.LadderSize}} editors, one per person, run in every round.
+    The top {{$d.LadderSize}} entries, one per person, run in every round.
   </p>
 
   {{if $d.Provisional}}

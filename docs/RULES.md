@@ -8,7 +8,7 @@ will be set.
 
 A small language model, the **student**, is trained on raw web text for a fixed number of
 tokens and then sits an **exam** of curated text. The model, the trainer and the exam
-never change. You change one thing: the data. You write an **editor**, a program that is
+never change. You change one thing: the data. You write a **data editor** (an *editor*, from here on), a program that is
 handed raw web pages it has never seen and ten minutes on one GPU. It answers with an
 **edit script**: what to keep, what to cut, and in what order to train on it. The lower
 the student's exam loss, the better the editor.

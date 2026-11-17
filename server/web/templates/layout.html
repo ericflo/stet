@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{{if .Title}}{{.Title}} · Stet{{else}}Stet · The only thing you can touch is the data{{end}}</title>
+<title>{{if .Title}}{{.Title}} · Stet{{else}}Stet · An open competition where the only thing you can touch is the data{{end}}</title>
 <meta name="description" content="{{.Desc}}">
 <meta property="og:title" content="{{if .Title}}{{.Title}} · Stet{{else}}Stet{{end}}">
 <meta property="og:description" content="{{.Desc}}">
@@ -23,9 +23,9 @@
   <div class="wrap">
     <a class="logo" href="/" aria-label="Stet, home">Stet</a>
     <nav aria-label="Main">
-      <a href="/enter"{{if eq .Nav "enter"}} aria-current="page"{{end}}>Enter</a>
+      <a href="/enter"{{if eq .Nav "enter"}} aria-current="page"{{end}}>Compete</a>
       <a href="/verify"{{if or (eq .Nav "verify") (eq .Nav "verifiers")}} aria-current="page"{{end}}>Verify</a>
-      <a href="/run"{{if eq .Nav "run"}} aria-current="page"{{end}}>Run editors</a>
+      <a href="/run"{{if eq .Nav "run"}} aria-current="page"{{end}}>Run entries</a>
       <span class="sep" aria-hidden="true"></span>
       <a href="/leaderboard"{{if eq .Nav "leaderboard"}} aria-current="page"{{end}}>Leaderboard</a>
       <a class="opt" href="/rounds"{{if eq .Nav "rounds"}} aria-current="page"{{end}}>Rounds</a>
@@ -40,7 +40,7 @@
 <footer>
   <div class="wrap">
     <div>
-      <a href="/enter">Enter an editor</a><a href="/verify">Verify scores</a><a href="/run">Run editors</a><a href="/rounds">Rounds</a><a href="/verifiers">Verifiers</a><a href="/docs/rules">Rules</a><a href="/docs/agents">For agents</a><a href="/docs/faq">FAQ</a><a href="/docs/design">Design</a><a href="{{.APIURL}}/api/v1/season">API</a>
+      <a href="/enter">Enter the competition</a><a href="/leaderboard">Leaderboard</a><a href="/verify">Verify scores</a><a href="/run">Run entries</a><a href="/rounds">Rounds</a><a href="/verifiers">Verifiers</a><a href="/docs/rules">Rules</a><a href="/docs/agents">For agents</a><a href="/docs/faq">FAQ</a><a href="/docs/design">Design</a><a href="{{.APIURL}}/api/v1/season">API</a>
     </div>
     <div><i>stet</i>, a proofreader's mark: let it stand.</div>
   </div>
@@ -72,7 +72,7 @@
 </tr>{{end}}{{end}}
 
 {{define "boardhead"}}<thead><tr>
-  <th>#</th><th>Editor</th>
+  <th>#</th><th>Entry</th>
   <th class="r" title="How many times more unedited data the same student would have needed to do as well">Worth</th>
   <th class="r" title="Mean gain in exam loss over the unedited corpus, adjusted for which rounds the editor ran in. Nats per token.">Rating</th>
   <th class="r hide-s">Rounds</th><th class="hide-s">Round by round</th>
