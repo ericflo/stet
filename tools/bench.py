@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """Throughput of candidate student configs on this machine (random tokens)."""
-import sys, time
+import sys
+import time
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-import torch, torch.nn.functional as F
+import torch
+import torch.nn.functional as F
+
 from stet.model import GPT
 
 dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")

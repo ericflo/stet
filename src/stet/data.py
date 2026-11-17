@@ -16,6 +16,7 @@ import io
 import json
 import mmap
 import os
+import re
 import shutil
 import sys
 import time
@@ -28,8 +29,7 @@ import zstandard
 from .spec import HARNESS_VERSION, Round, Scale, Season, Shard
 
 USER_AGENT = f"stet/{HARNESS_VERSION}"
-MIN_DECONTAM_LINE = 80
-DEFAULT_API = "https://stet.maxint.co"
+DEFAULT_API = "https://api.stetrun.com"
 FETCH_TRIES = 4
 
 
@@ -97,7 +97,7 @@ def round_shards(rnd: Round, scale: Scale, quiet: bool = False) -> list[Shard]:
     """The pool files this round's corpus is built from, in draw order."""
     cfg = rnd.pool_cfg
     if cfg["kind"] == "dclm":
-        pool = rnd.season.pool("practice")
+        pool = rnd.season.pool(rnd.kind)
     elif cfg["kind"] == "cc-wet":
         # A crawl is identified by the hash of its published file list, fixed in the round.
         listing = fetch(
@@ -206,31 +206,131 @@ class Corpus:
         return int(self.idx[-1])
 
 
-def _exam_lines(exam: dict[str, list[dict]]) -> set[int]:
-    lines: set[int] = set()
-    for items in exam.values():
-        for it in items:
-            for line in it["text"].split("\n"):
-                line = line.strip()
-                if len(line) >= MIN_DECONTAM_LINE:
-                    lines.add(hash(line))
-    return lines
+# --- keeping the exam out of the corpus --------------------------------------------------------
+#
+# The exam is public (verifiers need it), so the corpus must not contain it. The rule: take
+# every sentence of every exam passage in the season's pack, normalise it (lowercase, runs of
+# whitespace collapsed) and keep its first `key_bytes` bytes as a key. A document that contains
+# any key anywhere in its own normalised text is dropped.
+#
+# Matching anywhere, rather than at the document's own sentence boundaries, matters: web pages
+# run menus and headings straight into prose, and an editor that trims them would otherwise
+# uncover exam text the filter had missed. It also gives editors a guarantee: no piece copied
+# from a corpus document can ever contain a key, so only text an editor writes or joins
+# together has to be checked again.
+
+SENTENCE_END = re.compile(r"(?<=[.!?]) ")
+_HASH_P = 0x9E3779B97F4A7C15  # odd, so it has an inverse modulo 2**64
+_tables: list[np.ndarray] = []
 
 
-def build_corpus(rnd: Round, scale: Scale, dest: Path, exam: dict[str, list[dict]], quiet: bool = False) -> Path:
-    """Materialise a round's corpus. Deterministic: same round and scale, same bytes."""
+def normalise(text: str) -> bytes:
+    return " ".join(text.lower().split()).encode("utf-8", errors="replace")
+
+
+def _power_tables(n: int) -> tuple[np.ndarray, np.ndarray]:
+    if not _tables or len(_tables[0]) < n:
+        m = 1 << max(19, int(n - 1).bit_length())
+        fwd = np.full(m, _HASH_P, dtype=np.uint64)
+        inv = np.full(m, pow(_HASH_P, -1, 1 << 64), dtype=np.uint64)
+        fwd[0] = inv[0] = 1
+        _tables[:] = [np.cumprod(fwd, dtype=np.uint64), np.cumprod(inv, dtype=np.uint64)]
+    return _tables[0], _tables[1]
+
+
+def window_hashes(b: bytes, k: int) -> np.ndarray:
+    """A 64-bit polynomial hash of every k-byte window of b, in one pass. Exact integer
+    arithmetic modulo 2**64, so every machine computes the same values."""
+    n = len(b)
+    if n < k:
+        return np.empty(0, dtype=np.uint64)
+    fwd, inv = _power_tables(n)
+    a = np.frombuffer(b, dtype=np.uint8).astype(np.uint64)
+    c = np.zeros(n + 1, dtype=np.uint64)
+    np.cumsum(a * inv[:n], dtype=np.uint64, out=c[1:])
+    return (c[k:] - c[:-k]) * fwd[k - 1 : n]
+
+
+def sentence_starts(text: str, key_bytes: int, min_letters: int):
+    """The keys of a passage: the opening of each sentence long enough to be distinctive.
+
+    Openings that are mostly digits or punctuation (a run of page numbers, a ruled line) are
+    skipped: they would match thousands of unrelated pages.
+    """
+    for s in SENTENCE_END.split(" ".join(text.lower().split())):
+        key = s.encode("utf-8", errors="replace")[:key_bytes]
+        if len(key) == key_bytes and sum(97 <= c <= 122 for c in key) >= min_letters:
+            yield key
+
+
+_exam_keys: dict[str, np.ndarray] = {}
+
+
+def keys_array(keys, key_bytes: int) -> np.ndarray:
+    keys = sorted(set(keys))
+    if not keys:
+        return np.empty(0, dtype=np.uint64)
+    return np.unique(np.concatenate([window_hashes(k, key_bytes) for k in keys]))
+
+
+def exam_keys(season: Season) -> np.ndarray:
+    """Sorted hashes of the keys of every exam passage in the season's pack, both halves."""
+    if season.id not in _exam_keys:
+        cfg = season.raw["decontam"]
+        k, need = int(cfg["key_bytes"]), int(cfg["min_letters"])
+        cached = cache_dir() / "exam" / f"keys-{season.raw['exam']['sha256'][:16]}-{k}-{need}.npy"
+        if cached.exists() and not os.environ.get("STET_EXAM_PACK"):
+            _exam_keys[season.id] = np.load(cached)
+        else:
+            keys: set[bytes] = set()
+            for split in ("practice", "official"):
+                for items in load_exam_pool(season, split).values():
+                    for it in items:
+                        keys.update(sentence_starts(it["text"], k, need))
+            arr = keys_array(keys, k)
+            if not os.environ.get("STET_EXAM_PACK"):
+                tmp = cached.with_name(cached.name + f".tmp{os.getpid()}.npy")
+                np.save(tmp, arr)
+                tmp.replace(cached)
+            _exam_keys[season.id] = arr
+    return _exam_keys[season.id]
+
+
+def contains_exam_text(text: str, season: Season, keys: np.ndarray | None = None) -> bool:
+    keys = exam_keys(season) if keys is None else keys
+    if not len(keys):
+        return False
+    h = window_hashes(normalise(text), int(season.raw["decontam"]["key_bytes"]))
+    if not len(h):
+        return False
+    pos = np.searchsorted(keys, h)
+    pos[pos == len(keys)] = 0
+    return bool((keys[pos] == h).any())
+
+
+def build_corpus(rnd: Round, scale: Scale, dest: Path, quiet: bool = False) -> Path:
+    """Materialise a round's corpus. Deterministic: same round and scale, same bytes.
+
+    Three things happen to the pool files on the way in, and nothing else:
+
+      - any document that contains the opening of a sentence of any exam passage is dropped;
+      - documents longer than the season's cap are cut at it;
+      - the documents are written in a seeded shuffle of their arrival order.
+
+    None of it depends on which exam passages this round will use.
+    """
     tmp = dest.with_name(dest.name + f".tmp{os.getpid()}")
     shutil.rmtree(tmp, ignore_errors=True)
     tmp.mkdir(parents=True)
-    max_doc = rnd.season.max_doc_bytes
-    banned = _exam_lines(exam)
+    season = rnd.season
+    max_doc = season.max_doc_bytes
+    banned = exam_keys(season)
     offsets = [0]
     urls: list[str] = []
-    h = hashlib.sha256()
     dropped = 0
     kind = rnd.pool_cfg["kind"]
     shards = round_shards(rnd, scale, quiet)
-    with open(tmp / "docs.bin", "wb") as out:
+    with open(tmp / "arrival.bin", "wb") as out:
         for shard in shards:
             path = shard_path(shard, quiet)
             try:
@@ -241,29 +341,42 @@ def build_corpus(rnd: Round, scale: Scale, dest: Path, exam: dict[str, list[dict
             for url, text in docs:
                 if not text.strip():
                     continue
-                if banned and any(
-                    len(s) >= MIN_DECONTAM_LINE and hash(s) in banned for s in (ln.strip() for ln in text.split("\n"))
-                ):
+                if contains_exam_text(text, season, banned):
                     dropped += 1
                     continue
                 b = text.encode("utf-8", errors="replace")
                 if len(b) > max_doc:
                     b = b[:max_doc].decode("utf-8", errors="ignore").encode("utf-8")
                 out.write(b)
-                h.update(b)
                 offsets.append(offsets[-1] + len(b))
                 urls.append(url.replace("\n", " ").replace("\r", " "))
-    np.asarray(offsets, dtype="<u8").tofile(tmp / "docs.idx")
-    (tmp / "urls.txt").write_text("\n".join(urls) + "\n", encoding="utf-8")
+    n = len(urls)
+    order = rnd.doc_order(n)
+    h = hashlib.sha256()
+    final = [0]
+    with open(tmp / "arrival.bin", "rb") as f, open(tmp / "docs.bin", "wb") as out:
+        src = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) if offsets[-1] else b""
+        for i in order:
+            b = src[offsets[i] : offsets[i + 1]]
+            out.write(b)
+            h.update(b)
+            final.append(final[-1] + len(b))
+        if offsets[-1]:
+            src.close()
+    (tmp / "arrival.bin").unlink()
+    np.asarray(final, dtype="<u8").tofile(tmp / "docs.idx")
+    (tmp / "urls.txt").write_text("\n".join(urls[i] for i in order) + "\n", encoding="utf-8")
     meta = {
         "round": rnd.id,
         "scale": scale.name,
-        "n_docs": len(urls),
-        "bytes": offsets[-1],
+        "n_docs": n,
+        "bytes": final[-1],
         "sha256": h.hexdigest(),
         "pool": kind,
         "shards": [s.path for s in shards],
         "decontaminated_docs": dropped,
+        "order": "seeded shuffle",
+        "decontam": dict(season.raw["decontam"]),
     }
     (tmp / "meta.json").write_text(json.dumps(meta, indent=1))
     shutil.rmtree(dest, ignore_errors=True)
@@ -317,10 +430,14 @@ def round_dir(rnd: Round, scale: Scale) -> Path:
     return cache_dir() / "rounds" / rnd.id / scale.name
 
 
-def materialize(rnd: Round, scale: Scale, quiet: bool = False) -> tuple[Corpus, dict[str, list[dict]]]:
-    """Corpus and exam for a round, building and caching the corpus on first use."""
-    exam = round_exam(rnd, scale)
-    dest = round_dir(rnd, scale) / "corpus"
+def corpus(rnd: Round, scale: Scale, quiet: bool = False) -> Corpus:
+    """A round's corpus, built and cached on first use. Knows nothing about the round's exam."""
+    dest = round_dir(rnd, scale) / "corpus-v3"
     if not (dest / "meta.json").exists():
-        build_corpus(rnd, scale, dest, exam, quiet)
-    return Corpus(dest), exam
+        build_corpus(rnd, scale, dest, quiet)
+    return Corpus(dest)
+
+
+def materialize(rnd: Round, scale: Scale, quiet: bool = False) -> tuple[Corpus, dict[str, list[dict]]]:
+    """Corpus and exam for a round."""
+    return corpus(rnd, scale, quiet), round_exam(rnd, scale)

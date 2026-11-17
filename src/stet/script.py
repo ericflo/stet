@@ -9,9 +9,9 @@ the order the student is trained in. A line is one of:
     {"s": [[123, 0, 900], "text"]}    any mix of copies [doc, start, end] and literal text
     {"t": "text"}                     a new document made only of literal text
 
-Cuts are free. Ink is scarce: literal text, and copies too short to be honest quotations,
-are charged against the ink budget. Byte offsets are into the document's UTF-8 bytes and
-are snapped forward to a character boundary.
+Cuts, reordering and repetition are free. Ink is scarce: literal text, and copies too short
+to be honest quotations, are charged against a small ink budget counted in tokens. Byte
+offsets are into the document's UTF-8 bytes and are snapped forward to a character boundary.
 
 Why short copies are ink: with enough tiny copies you can spell out any text you like from
 the corpus's letters and words, which would make the ink limit meaningless. (A short
@@ -20,6 +20,10 @@ document kept whole, on its own, is not ink: nothing can be spelled across docum
 The script is consumed until the training budget is used. Anything after that is ignored.
 A script that is shorter than the budget is repeated from the top, so listing less means
 training on it more often.
+
+A script is plain data written by untrusted code. Everything here treats it that way: it
+is opened without following links, capped in size, and any malformed line is a ScriptError
+rather than a crash.
 """
 
 from __future__ import annotations
@@ -27,15 +31,16 @@ from __future__ import annotations
 import hashlib
 import heapq
 import json
+import os
+import stat
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
 
-from .data import Corpus
+from .data import Corpus, contains_exam_text
 from .spec import Scale, Season
 
-MAX_OUT_DOC_BYTES = 1 << 20
 TOKENIZE_BATCH = 1024
 
 
@@ -47,19 +52,23 @@ class ScriptError(ValueError):
 class Stats:
     out_docs: int = 0  # output documents consumed in the first pass
     out_bytes: int = 0
-    ink_bytes: int = 0
     copy_bytes: int = 0
+    ink_tokens: int = 0  # the editor's own text among the tokens trained on, repeats included
+    ink_budget: int = 0
+    exam_dropped: int = 0  # output documents left out because they contained exam text
     src_docs: int = 0  # distinct source documents drawn from
     script_lines: int = 0  # lines in the script (may exceed out_docs if truncated)
     tokens_one_pass: int = 0
+    train_tokens: int = 0
     passes: float = 0.0  # how many times the stream was repeated to fill the budget
     truncated: bool = False  # the script was longer than the budget
     script_sha256: str = ""
+    tokens_sha256: str = ""  # of the exact token array the student trains on
     preview: list[str] = field(default_factory=list)
 
     @property
     def ink_frac(self) -> float:
-        return self.ink_bytes / self.out_bytes if self.out_bytes else 0.0
+        return self.ink_tokens / self.train_tokens if self.train_tokens else 0.0
 
     def to_dict(self, corpus: Corpus | None = None) -> dict:
         d = {k: v for k, v in self.__dict__.items()}
@@ -72,6 +81,38 @@ class Stats:
         return d
 
 
+def open_script(path: str | Path, max_bytes: int):
+    """Open a script for reading without trusting what is at the path.
+
+    An editor could leave a symlink, a FIFO or a device where its script should be. Opening
+    with O_NOFOLLOW and O_NONBLOCK and then insisting on a regular file of bounded size
+    means the worst a hostile script can be is invalid.
+    """
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError as e:
+        raise ScriptError(f"cannot open the script ({e.strerror})") from None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise ScriptError("the script is not a regular file")
+        if st.st_size > max_bytes:
+            raise ScriptError(f"the script is {st.st_size:,} bytes; the limit is {max_bytes:,}")
+        return os.fdopen(fd, "rb")
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def file_sha256(path: str | Path, max_bytes: int) -> str:
+    h = hashlib.sha256()
+    with open_script(path, max_bytes) as f:
+        while chunk := f.read(1 << 20):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def _snap(buf, pos: int, end: int) -> int:
     """Move pos forward off any UTF-8 continuation byte."""
     while pos < end and (buf[pos] & 0xC0) == 0x80:
@@ -79,7 +120,7 @@ def _snap(buf, pos: int, end: int) -> int:
     return pos
 
 
-def _segments(line_no: int, obj) -> list:
+def _segments(line_no: int, obj, max_segments: int) -> list:
     """Normalise one script line to a list of [doc, start, end|None] and str."""
     if isinstance(obj, bool):
         raise ScriptError(f"line {line_no}: expected a document, got a boolean")
@@ -91,36 +132,49 @@ def _segments(line_no: int, obj) -> list:
         segs = obj["s"]
         if not isinstance(segs, list):
             raise ScriptError(f"line {line_no}: \"s\" must be a list")
-        return segs
-    if "t" in obj:
-        return [obj["t"]]
-    if "d" in obj:
+    elif "t" in obj:
+        if not isinstance(obj["t"], str):
+            raise ScriptError(f"line {line_no}: \"t\" must be a string")
+        segs = [obj["t"]]
+    elif "d" in obj:
         d = obj["d"]
         if "k" not in obj:
             return [[d, 0, None]]
         ranges = obj["k"]
         if not isinstance(ranges, list):
             raise ScriptError(f"line {line_no}: \"k\" must be a list of [start, end]")
-        out = []
+        segs = []
         for r in ranges:
             if not (isinstance(r, list) and len(r) == 2):
                 raise ScriptError(f"line {line_no}: each range in \"k\" must be [start, end]")
-            out.append([d, r[0], r[1]])
-        return out
-    raise ScriptError(f"line {line_no}: object needs one of \"d\", \"s\" or \"t\"")
+            segs.append([d, r[0], r[1]])
+    else:
+        raise ScriptError(f"line {line_no}: object needs one of \"d\", \"s\" or \"t\"")
+    if len(segs) > max_segments:
+        raise ScriptError(f"line {line_no}: {len(segs)} segments in one document; the limit is {max_segments}")
+    return segs
 
 
-def build_doc(corpus: Corpus, line_no: int, obj, min_copy: int) -> tuple[bytes, int, int, list[int]]:
-    """Return (bytes, ink_bytes, copy_bytes, source doc ids) for one script line."""
+@dataclass
+class Built:
+    data: bytes
+    ink: list[bytes]  # the pieces charged as ink
+    copied: int
+    docs: list[int]
+    spliced: bool  # more than one piece: joins can form text that is in no source document
+
+
+def build_doc(corpus: Corpus, line_no: int, obj, min_copy: int, max_segments: int = 20000, max_out: int = 1 << 20) -> Built:
+    """Resolve one script line against the corpus."""
     n = len(corpus)
     parts: list[bytes] = []
-    ink = 0
+    ink: list[bytes] = []
     copied = 0
     docs: list[int] = []
     # Resolve and merge copies that are contiguous in the source, so that keeping lines
     # 1, 2 and 3 as three ranges costs the same as keeping them as one.
     resolved: list = []
-    for seg in _segments(line_no, obj):
+    for seg in _segments(line_no, obj, max_segments):
         if isinstance(seg, str):
             if seg:
                 resolved.append(seg)
@@ -129,14 +183,14 @@ def build_doc(corpus: Corpus, line_no: int, obj, min_copy: int) -> tuple[bytes, 
             raise ScriptError(f"line {line_no}: a copy must be [doc, start, end]")
         d, s, e = seg
         if isinstance(d, bool) or not isinstance(d, int) or not (0 <= d < n):
-            raise ScriptError(f"line {line_no}: document {d!r} is out of range (corpus has {n})")
+            raise ScriptError(f"line {line_no}: document {str(d)[:40]} is out of range (corpus has {n})")
         lo, hi = int(corpus.idx[d]), int(corpus.idx[d + 1])
         size = hi - lo
         e = size if e is None else e
         if isinstance(s, bool) or isinstance(e, bool) or not isinstance(s, int) or not isinstance(e, int):
             raise ScriptError(f"line {line_no}: range bounds must be integers")
         if s < 0 or e > size or s > e:
-            raise ScriptError(f"line {line_no}: range [{s}, {e}) is outside document {d} (0..{size})")
+            raise ScriptError(f"line {line_no}: range [{str(s)[:20]}, {str(e)[:20]}) is outside document {d} (0..{size})")
         s = _snap(corpus.bin, lo + s, hi) - lo
         e = _snap(corpus.bin, lo + e, hi) - lo
         if e <= s:
@@ -145,41 +199,30 @@ def build_doc(corpus: Corpus, line_no: int, obj, min_copy: int) -> tuple[bytes, 
             resolved[-1][2] = e
         else:
             resolved.append([d, s, e, size])
+    total = 0
     for seg in resolved:
         if isinstance(seg, str):
             b = seg.encode("utf-8", errors="replace")
             parts.append(b)
-            ink += len(b)
-            continue
-        d, s, e, size = seg
-        lo = int(corpus.idx[d])
-        parts.append(corpus.bin[lo + s : lo + e])
-        length = e - s
-        docs.append(d)
-        if length >= min_copy or (length == size and len(resolved) == 1):
-            copied += length  # long enough to be a quotation, or a short document kept as it is
+            ink.append(b)
         else:
-            ink += length
-    out = b"".join(parts)
-    if len(out) > MAX_OUT_DOC_BYTES:
-        raise ScriptError(f"line {line_no}: output document is {len(out)} bytes; the limit is {MAX_OUT_DOC_BYTES}")
-    return out, ink, copied, docs
-
-
-def exam_lines(exam: dict[str, list[dict]] | None, min_len: int = 80) -> set[bytes]:
-    """Long lines of the round's exam passages. New text may not reproduce them."""
-    out: set[bytes] = set()
-    for items in (exam or {}).values():
-        for it in items:
-            for line in it["text"].encode("utf-8").split(b"\n"):
-                line = line.strip()
-                if len(line) >= min_len:
-                    out.add(line)
-    return out
+            d, s, e, size = seg
+            lo = int(corpus.idx[d])
+            b = corpus.bin[lo + s : lo + e]
+            parts.append(b)
+            docs.append(d)
+            if len(b) >= min_copy or (len(b) == size and len(resolved) == 1):
+                copied += len(b)  # long enough to be a quotation, or a short document kept as it is
+            else:
+                ink.append(b)
+        total += len(b)
+        if total > max_out:
+            raise ScriptError(f"line {line_no}: the output document is over {max_out:,} bytes")
+    return Built(b"".join(parts), ink, copied, docs, len(resolved) > 1)
 
 
 def materialize(
-    corpus: Corpus, script_path: str | Path, season: Season, scale: Scale, enc=None, exam: dict | None = None
+    corpus: Corpus, script_path: str | Path, season: Season, scale: Scale, enc=None, check_exam: bool = True
 ) -> tuple[np.ndarray, Stats]:
     """Turn an edit script into the training tokens: shape (batch_size, steps * ctx + 1).
 
@@ -191,23 +234,28 @@ def materialize(
     The script is consumed until every lane is full. A longer script is cut off there; a
     shorter one is dealt again from the top.
 
-    If `exam` is given, an output document containing new text may not reproduce a long line
-    of an exam passage. (Corpus documents that do were removed when the corpus was built.)
+    With `check_exam`, an output document that contains ink or joins pieces together is left
+    out if it contains the opening of a sentence of any exam passage. (Corpus documents that
+    do were removed when the corpus was built, so whole and trimmed copies never can.)
     """
     if enc is None:
         from .tok import load_encoding
 
         enc = load_encoding(season)
+    limits = season.raw["script"]
+    max_line = int(limits["max_line_bytes"])
+    max_segments = int(limits["max_segments"])
+    max_out = int(limits["max_out_doc_bytes"])
     eot = season.eot
     lanes = scale.batch_size
     lane_len = scale.steps * scale.ctx + 1
-    stats = Stats()
+    stats = Stats(ink_budget=season.ink_tokens(scale), train_tokens=lanes * lane_len)
     min_copy = season.min_copy_bytes
-    banned = exam_lines(exam)
     seen_docs: set[int] = set()
-    batch: list[tuple[bytes, int, int, list[int]]] = []
+    batch: list[tuple[int, Built]] = []
     digest = hashlib.sha256()
     first_pass: list[np.ndarray] = []
+    first_ink: list[int] = []
     lane_chunks: list[list[np.ndarray]] = [[] for _ in range(lanes)]
     heap = [(0, b) for b in range(lanes)]  # (tokens so far, lane); ties go to the lowest lane
     total = 0
@@ -223,28 +271,42 @@ def materialize(
         nonlocal total, full
         if not batch:
             return
-        texts = [b.decode("utf-8", errors="replace") for b, _, _, _ in batch]
-        for (b, ink, copied, docs), toks in zip(batch, enc.encode_ordinary_batch(texts)):
+        texts = [bd.data.decode("utf-8", errors="replace") for _, bd in batch]
+        ink_texts = [piece.decode("utf-8", errors="replace") for _, bd in batch for piece in bd.ink]
+        ink_lens = iter([len(t) for t in enc.encode_ordinary_batch(ink_texts)] if ink_texts else [])
+        for (line_no, bd), text, toks in zip(batch, texts, enc.encode_ordinary_batch(texts)):
+            ink = sum(next(ink_lens) for _ in bd.ink)
             if full:
                 stats.truncated = True  # the budget ran out part-way through this batch
                 break
+            if check_exam and (bd.ink or bd.spliced) and contains_exam_text(text, season):
+                stats.exam_dropped += 1  # never trained on; the rest of the script stands
+                continue
             arr = np.empty(len(toks) + 1, dtype=np.uint16)
             arr[0] = eot
             arr[1:] = toks
             first_pass.append(arr)
+            first_ink.append(ink)
             total += len(arr)
             stats.out_docs += 1
-            stats.out_bytes += len(b)
-            stats.ink_bytes += ink
-            stats.copy_bytes += copied
-            seen_docs.update(docs)
+            stats.out_bytes += len(bd.data)
+            stats.ink_tokens += ink
+            stats.copy_bytes += bd.copied
+            seen_docs.update(bd.docs)
             if len(stats.preview) < 5:
-                stats.preview.append(b[:600].decode("utf-8", errors="replace"))
+                stats.preview.append(text[:600])
             full = deal(arr)
         batch.clear()
 
-    with open(script_path, "rb") as f:
-        for line_no, raw in enumerate(f, 1):
+    with open_script(script_path, int(limits["max_bytes"])) as f:
+        line_no = 0
+        while True:
+            raw = f.readline(max_line + 1)
+            if not raw:
+                break
+            line_no += 1
+            if len(raw) > max_line:
+                raise ScriptError(f"line {line_no}: longer than {max_line:,} bytes")
             digest.update(raw)
             stats.script_lines += 1
             raw = raw.strip()
@@ -255,14 +317,12 @@ def materialize(
                 continue
             try:
                 obj = json.loads(raw)
-            except json.JSONDecodeError as e:
-                raise ScriptError(f"line {line_no}: not valid JSON ({e.msg})") from None
-            built = build_doc(corpus, line_no, obj, min_copy)
-            if not built[0]:
+            except (ValueError, RecursionError):
+                raise ScriptError(f"line {line_no}: not valid JSON") from None
+            built = build_doc(corpus, line_no, obj, min_copy, max_segments, max_out)
+            if not built.data:
                 continue
-            if banned and built[1] and any(ln.strip() in banned for ln in built[0].split(b"\n") if len(ln) >= 80):
-                raise ScriptError(f"line {line_no}: new text reproduces an exam passage")
-            batch.append(built)
+            batch.append((line_no, built))
             if len(batch) >= TOKENIZE_BATCH:
                 flush()
         flush()
@@ -272,19 +332,22 @@ def materialize(
     stats.tokens_one_pass = total
     if total < 2 * scale.ctx:
         raise ScriptError(f"the script yields only {total} tokens; it needs at least {2 * scale.ctx}")
-    if stats.ink_frac > season.ink_frac + 1e-9:
-        raise ScriptError(
-            f"ink over budget: {stats.ink_bytes} of {stats.out_bytes} bytes are new text "
-            f"({100 * stats.ink_frac:.2f}%); the limit is {100 * season.ink_frac:.0f}%"
-        )
     i = 0
     while not full:  # a short script is dealt again from the top
-        full = deal(first_pass[i % len(first_pass)])
+        j = i % len(first_pass)
+        full = deal(first_pass[j])
+        stats.ink_tokens += first_ink[j]
         i += 1
     stats.passes = round(1.0 + i / len(first_pass), 4) if i else 1.0
+    if stats.ink_tokens > stats.ink_budget:
+        raise ScriptError(
+            f"ink over budget: {stats.ink_tokens:,} of the tokens trained on are new text or copies shorter than "
+            f"{min_copy} bytes; the limit is {stats.ink_budget:,} ({100 * season.ink_frac:g}% of the training budget)"
+        )
     tokens = np.empty((lanes, lane_len), dtype=np.uint16)
     for b in range(lanes):
         tokens[b] = np.concatenate(lane_chunks[b])[:lane_len]
+    stats.tokens_sha256 = hashlib.sha256(tokens.astype("<u2", copy=False).tobytes()).hexdigest()
     return tokens, stats
 
 

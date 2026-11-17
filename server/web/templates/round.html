@@ -1,0 +1,92 @@
+{{define "body"}}{{$d := .D}}{{$r := $d.R}}
+<main class="page">
+<div class="page-head">
+  <div class="wrap">
+    <span class="eyebrow">Round · {{$r.Scale}} scale</span>
+    <h1>{{$d.ID}}</h1>
+    <p class="sub">
+      {{if eq $r.Status "scheduled"}}Announced. It will be drawn <span data-until="{{$r.DrawAt}}">{{ago $r.DrawAt}}</span>, from a beacon value that does not exist yet.
+      {{else if eq $r.Status "open"}}Drawn {{ago $r.DrawnAt}}. {{$r.Edited}} of {{$r.Entries}} {{plural $r.Entries "entry" "entries"}} edited, {{$r.Settled}} graded. Grades stay sealed until an entry settles.
+      {{else}}Settled {{ago $r.SettledAt}}: {{$r.Entries}} {{plural $r.Entries "editor" "editors"}} on one fresh corpus.{{end}}
+    </p>
+    <div class="meta">
+      <span>draw {{datetime $r.DrawAt}}</span>
+      {{with $r.Crawl}}<span>{{.Crawl}}</span>{{end}}
+      <span>{{$d.Scale.NLayer}} layers × {{$d.Scale.DModel}} · {{compact $d.Scale.TrainTokens}} tokens</span>
+    </div>
+  </div>
+</div>
+<div class="wrap">
+  {{if ne $r.Status "scheduled"}}
+  <div class="stats" id="round-stats" data-live>
+    <div><span class="eyebrow">Entries</span><div class="v">{{$r.Entries}}</div></div>
+    <div><span class="eyebrow">Unedited loss</span><div class="v">{{if has $r.BaselineLoss}}{{f3 (ptr $r.BaselineLoss)}}<small>{{$r.BaselineN}} {{plural $r.BaselineN "measurement" "measurements"}}</small>{{else}}—{{end}}</div></div>
+    <div><span class="eyebrow">Best gain</span><div class="v">{{if has $r.BestGain}}{{gain (ptr $r.BestGain)}}{{else}}—{{end}}</div></div>
+    <div><span class="eyebrow">Graded</span><div class="v">{{$r.Settled}}<small>of {{$r.Entries}}</small></div></div>
+  </div>
+
+  <div class="table-wrap" id="entries" data-live>
+    {{if $d.Entries}}
+    <table>
+      <thead><tr><th>#</th><th>Editor</th><th>Status</th><th class="r">Loss</th><th class="r">Gain</th><th class="r hide-s">Kept</th><th class="r hide-s">Edit took</th><th class="hide-s">Script</th><th class="hide-s">Graded by</th></tr></thead>
+      <tbody>
+        {{range $i, $e := $d.Entries}}<tr>
+          <td class="rank">{{if and $e.Settled $e.Valid}}{{add $i 1}}{{else}}·{{end}}</td>
+          <td><a class="name" href="/editors/{{short $e.EditorID}}">{{$e.Name}}</a><span class="by">v{{$e.Version}} · <a href="/u/{{$e.Owner}}">{{$e.Owner}}</a></span></td>
+          {{if $e.Settled}}
+            {{if $e.Valid}}
+            <td><span class="stage settled">settled</span></td>
+            <td class="r num">{{f3 $e.Loss}}</td>
+            <td class="r num {{if gt $e.Gain 0.0}}pos{{else if lt $e.Gain 0.0}}neg{{end}}">{{gain $e.Gain}}</td>
+            {{else}}
+            <td colspan="2"><span class="stage invalid">invalid</span><span class="reason">{{$e.Reason}}</span></td>
+            <td class="r num">0.000</td>
+            {{end}}
+          {{else}}
+            <td><span class="stage {{$e.Stage}}">{{$e.Stage}}</span></td><td class="r muted">sealed</td><td class="r muted">·</td>
+          {{end}}
+          <td class="r num hide-s">{{if $e.HasStats}}{{pct1 $e.Script.KeptDocFrac}}{{else}}—{{end}}</td>
+          <td class="r num hide-s">{{with $e.Edit}}{{f1 .Seconds}}s{{else}}—{{end}}</td>
+          <td class="hide-s">{{if $e.ScriptSHA}}<a class="num" href="/api/v1/scripts/{{$e.ScriptSHA}}" title="Download the edit script ({{bytes $e.ScriptSize}} unpacked)">{{tiny $e.ScriptSHA}}</a>{{else}}<span class="muted">—</span>{{end}}</td>
+          <td class="hide-s muted" style="font-size:14.5px">{{if $e.Verifiers}}{{join $e.Verifiers ", "}}{{if $e.Audited}} <span class="tag blue">audited</span>{{end}}{{else}}—{{end}}</td>
+        </tr>{{end}}
+      </tbody>
+    </table>
+    {{else}}
+    <div class="empty">No entries.</div>
+    {{end}}
+  </div>
+  <p class="muted" style="font-size:15.5px;margin-top:14px">Two grades of the same script must agree to within {{f2 $d.Tolerance.Grade}} nats. Any script above can be re-graded by anyone: <code>stet score script.jsonl --round {{$d.ID}}</code>.</p>
+
+  {{if $d.BaselineChart}}
+  <h2>The corpus, unedited</h2>
+  <figure class="figure">{{$d.BaselineChart}}<figcaption>Exam loss of the student trained on this round's corpus as drawn, by kind of exam text. This is what every entry is measured against.</figcaption></figure>
+  {{end}}
+  {{end}}
+
+  <h2>Where this corpus {{if eq $r.Status "scheduled"}}will come{{else}}came{{end}} from</h2>
+  <p class="lead">Nobody picked it. {{if eq $r.Status "scheduled"}}The time and the crawl below are fixed now; the randomness will exist only at the draw.{{else}}Everything below can be checked against sources Stet does not control, and every verifier does so before training anything.{{end}}</p>
+  <div class="panel">
+    <dl class="kv">
+      <dt>Draw time</dt><dd>{{datetime $r.DrawAt}}{{if $d.Slot}} <span class="muted">· on the season's {{minutes .Season.DrawGrid}}-minute grid</span>{{else}} <span class="tag red">off the grid</span>{{end}}</dd>
+      <dt>Beacon round</dt><dd>{{if $d.BeaconURL}}<a href="{{$d.BeaconURL}}" rel="noopener">drand {{.Season.Beacon.Name}} #{{$r.DrandRound}}</a>{{else}}drand {{.Season.Beacon.Name}} #{{$r.DrandRound}}{{end}} <span class="muted">· the first emitted at or after the draw time</span></dd>
+      {{if $r.Randomness}}<dt>Randomness</dt><dd><code>{{$r.Randomness}}</code></dd>{{end}}
+      {{with $r.Crawl}}
+      <dt>Crawl</dt><dd>{{.Crawl}} <span class="muted">· {{comma .NShards}} files · named when the round was announced</span></dd>
+      <dt>File list sha256</dt><dd><code>{{.PathsSHA256}}</code></dd>
+      {{end}}
+      {{if $d.SeedInput}}
+      <dt>Seed</dt><dd><code>sha256("{{$d.SeedInput}}")</code><br><code>= {{$r.Seed}}</code></dd>
+      {{end}}
+      {{if $d.Shards}}<dt>Files drawn</dt><dd><span class="num" style="font-size:14px">{{range $i, $s := $d.Shards}}{{if $i}}, {{end}}#{{$s}}{{end}}</span> <span class="muted">· of the crawl's list, in order</span></dd>{{end}}
+      {{if $r.CorpusSHA}}<dt>Corpus sha256</dt><dd><code>{{$r.CorpusSHA}}</code></dd>{{end}}
+      {{if $r.ExamSHA}}<dt>Exam sha256</dt><dd><code>{{$r.ExamSHA}}</code></dd>{{end}}
+    </dl>
+  </div>
+  {{if ne $r.Status "scheduled"}}
+  <div class="cmd" style="margin-top:16px"><pre><span class="c"># rebuild it yourself, and measure the unedited loss</span>
+<span class="p">$ </span><span data-copy-text>stet baseline --round {{$d.ID}} --scale {{$r.Scale}}</span></pre><button type="button" data-copy>copy</button></div>
+  {{end}}
+</div>
+</main>
+{{end}}

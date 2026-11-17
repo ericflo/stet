@@ -1,23 +1,33 @@
 {
   "id": "s0",
   "title": "Season 0",
-  "rules_version": 1,
+  "rules_version": 2,
   "tokenizer": {
     "file": "s0-vocab.tiktoken",
     "sha256": "1f9a7504aed76742fb2a55b68533cc60cc9d9fe2cb7434b5f26a2829aa7be63f",
     "vocab_size": 8192,
     "eot": 8191
   },
-  "ink_frac": 0.1,
+  "ink_frac": 0.001,
   "min_copy_bytes": 64,
   "max_doc_bytes": 262144,
   "pools": {
     "practice": {
+      "kind": "cc-wet",
+      "base_url": "https://data.commoncrawl.org/",
+      "paths": "crawl-data/{crawl}/wet.paths.gz",
+      "shards_per_unit": 2,
+      "crawl": "CC-MAIN-2026-43",
+      "paths_sha256": "662f8425bc1e6211d388f8ed0a375835d96ffa277469200053ff3fbbd51db46f",
+      "n_shards": 100000,
+      "about": "One pinned Common Crawl crawl, full-page text (WET). The same kind of data as official rounds, with fixed public seeds."
+    },
+    "gym": {
       "kind": "dclm",
-      "manifest": "s0-pool-practice.txt",
+      "manifest": "s0-pool-gym.txt",
       "base_url": "https://huggingface.co/datasets/mlfoundations/dclm-pool-400m-1x/resolve/f20ae752116ce7b4ab15d31e1e40b094229bf911/",
       "shards_per_unit": 1,
-      "about": "DCLM-Pool: raw Common Crawl up to 2022, main-content text extraction. Pinned by sha256."
+      "about": "DCLM-Pool: raw Common Crawl up to 2022, main-content text extraction. Pinned by sha256. The gym: a fixed, different dataset to train agents on."
     },
     "official": {
       "kind": "cc-wet",
@@ -52,7 +62,7 @@
       "ctx": 256,
       "batch_size": 16,
       "lr": 0.002,
-      "exam_items_per_source": 100,
+      "exam_items_per_source": 200,
       "edit_seconds": 60
     },
     "micro": {
@@ -64,7 +74,7 @@
       "ctx": 512,
       "batch_size": 16,
       "lr": 0.0015,
-      "exam_items_per_source": 250,
+      "exam_items_per_source": 600,
       "edit_seconds": 300
     },
     "standard": {
@@ -76,7 +86,7 @@
       "ctx": 512,
       "batch_size": 32,
       "lr": 0.001,
-      "exam_items_per_source": 400,
+      "exam_items_per_source": 800,
       "edit_seconds": 600
     }
   },
@@ -90,10 +100,8 @@
     "grad_clip": 1.0
   },
   "reference": {
-    "gpu": "NVIDIA RTX 4090 (24 GB)",
-    "cpu_cores": 8,
-    "ram_gb": 32,
-    "note": "Edit-phase time limits are stated for this machine and scaled by `stet calibrate` on others."
+    "anchor": "AMD Ryzen AI Max+ 395 (16 cores), Radeon 8060S, 128 GB unified memory, ROCm",
+    "note": "Official edit runs happen on this machine, in its own wall-clock seconds. On a desktop NVIDIA GPU your editor will finish GPU work several times sooner than it will here."
   },
   "beacon": {
     "name": "drand quicknet",
@@ -106,5 +114,47 @@
       "https://api3.drand.sh",
       "https://drand.cloudflare.com"
     ]
+  },
+  "decontam": {
+    "key_bytes": 64,
+    "min_letters": 38
+  },
+  "script": {
+    "max_bytes": 67108864,
+    "max_line_bytes": 1048576,
+    "max_segments": 20000,
+    "max_out_doc_bytes": 1048576
+  },
+  "grade_devices": [
+    "cuda"
+  ],
+  "draw_grid_seconds": 600,
+  "record": {
+    "looks": [
+      5,
+      10,
+      20
+    ],
+    "alpha": 0.05,
+    "min_audited": 2,
+    "margin": {
+      "nano": 0.03,
+      "micro": 0.02,
+      "standard": 0.02
+    }
+  },
+  "tolerance": {
+    "nano": {
+      "grade": 0.12,
+      "baseline": 0.12
+    },
+    "micro": {
+      "grade": 0.08,
+      "baseline": 0.08
+    },
+    "standard": {
+      "grade": 0.08,
+      "baseline": 0.08
+    }
   }
 }

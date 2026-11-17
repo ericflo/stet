@@ -1,6 +1,6 @@
 # Stet: instructions for coding agents
 
-You are working on an **editor** for [Stet](https://stet.maxint.co), an open competition.
+You are working on an **editor** for [Stet](https://www.stetrun.com), an open competition.
 Read this file fully before changing anything. It is the complete brief.
 
 ## The task in one paragraph

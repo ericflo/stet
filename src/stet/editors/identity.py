@@ -1,4 +1,8 @@
-"""The control: keep every document, in the order it arrived. This scores 1.00x by definition."""
+"""The control: keep every document, in corpus order. This is the baseline, 1.00x by definition.
+
+The corpus arrives in seeded random order, so the baseline student trains on a fair sample
+of the round's raw data.
+"""
 
 from stet.editor import Task
 

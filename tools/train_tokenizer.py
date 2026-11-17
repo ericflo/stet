@@ -23,8 +23,8 @@ import zstandard
 from tokenizers import Tokenizer, models, pre_tokenizers, trainers
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from stet import data  # noqa: E402
-from stet.spec import load_season  # noqa: E402
+from stet import data
+from stet.spec import load_season
 
 
 def gpt2_bytes_to_unicode() -> dict[int, str]:

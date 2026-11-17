@@ -18,9 +18,6 @@ from . import __version__
 from .data import USER_AGENT, api_base, cache_dir
 from .keys import Key, config_dir, create_key, key_path, load_key
 
-ASSET_HOSTS = ("huggingface.co", "github.com", "objects.githubusercontent.com", "raw.githubusercontent.com", "files.pythonhosted.org")
-MAX_ASSET_BYTES = 2 << 30
-
 
 class ApiError(Exception):
     def __init__(self, status: int, message: str):
@@ -98,6 +95,11 @@ def round_from_api(season, description: dict):
     from .spec import round_from_description
 
     rnd = round_from_description(season, description)
+    if rnd.kind == "official" and os.environ.get("STET_DEV") != "1" and season.draw_slot(rnd.beacon["round"]) is None:
+        raise ValueError(
+            f"round {rnd.id} was drawn from drand round {rnd.beacon['round']}, which is not on the season's draw grid "
+            f"(every {season.raw['draw_grid_seconds']} seconds). This verifier will not score it. Please report this."
+        )
     if rnd.kind == "official":
         marker = cache_dir() / "rounds" / rnd.id / f"beacon-{rnd.seed.hex()[:16]}.ok"
         if not marker.exists():
@@ -138,8 +140,10 @@ def fmt_gain(v) -> str:
     return "" if v is None else f"{v:+.4f}"
 
 
-def fmt_mult(v, extrapolated=False) -> str:
-    return "" if v is None else f"{v:.2f}x" + ("*" if extrapolated else "")
+def fmt_mult(v, capped=False) -> str:
+    if v is None:
+        return ""
+    return f">{v:g}x" if capped else f"{v:.2f}x"
 
 
 def ago(ts) -> str:
@@ -225,10 +229,6 @@ def cmd_submit(args):
     key = need_key()
     try:
         project = load_project(args.path)
-        for a in project.assets:
-            host = urllib.parse.urlparse(a.url).hostname or ""
-            if host not in ASSET_HOSTS:
-                raise ProjectError(f"asset host {host!r} is not allowed; use one of: {', '.join(ASSET_HOSTS)}")
         blob, editor_id = pack(project)
     except ProjectError as e:
         sys.stderr.write(f"stet: {e}\n")
@@ -244,7 +244,7 @@ def cmd_submit(args):
             sys.exit(1)
         sys.stderr.write(
             f"\nThis enters {project.name!r} in the next official round as {key.handle}.\n"
-            "Its code becomes public under the MIT licence once it has run.\n"
+            "Its code, and every edit script it writes, become public under the MIT licence once it has run.\n"
         )
         if input("Submit? [y/N] ").strip().lower() not in ("y", "yes"):
             sys.stderr.write("Not submitted.\n")
@@ -280,7 +280,7 @@ def cmd_status(args):
         last = e.get("last") or {}
         rows.append([
             f"{e['name']} v{e['version']}", e["id"][:10], e["status"], str(e.get("rounds") or 0),
-            fmt_gain(e.get("rating")), fmt_mult(e.get("multiplier"), e.get("extrapolated")),
+            fmt_gain(e.get("rating")), fmt_mult(e.get("multiplier"), e.get("capped")),
             f"#{e['rank']}" if e.get("rank") else "",
             (f"{last.get('round', '')} {fmt_gain(last.get('gain')) if last.get('valid', True) else 'invalid'}").strip(),
         ])  # fmt: skip
@@ -298,7 +298,7 @@ def cmd_leaderboard(args):
         return
     rows = [
         [
-            ("★" if e.get("record") else "") + str(e["rank"]), editor_label(e), fmt_mult(e.get("multiplier"), e.get("extrapolated")),
+            ("★" if e.get("record") else "") + str(e["rank"]), editor_label(e), fmt_mult(e.get("multiplier"), e.get("capped")),
             fmt_gain(e.get("rating")), f"±{e['se']:.4f}" if e.get("se") is not None else "", str(e["rounds"]), e.get("technique") or "",
         ]
         for e in r["editors"][: args.top]
@@ -307,7 +307,7 @@ def cmd_leaderboard(args):
         sys.stderr.write("No rated editors yet. Be the first: `stet submit`.\n")
         return
     print(table(rows, ["#", "editor", "multiplier", "mean gain", "", "rounds", "technique"], right=(0, 2, 3, 5)))
-    sys.stderr.write("\n★ record holder   * multiplier extrapolated beyond the measured reference curve\n")
+    sys.stderr.write("\n★ record holder   > beyond the end of the measured reference curve\n")
 
 
 def cmd_rounds(args):
@@ -355,104 +355,172 @@ def cmd_fork(args):
 
 
 # --- verifying ------------------------------------------------------------------------------
-
-
-def fetch_assets(project, bundle_dir: Path) -> None:
-    """Fetch an editor's declared assets, by hash, before the sandbox closes the network."""
-    from .data import fetch
-
-    total = 0
-    for a in project.assets:
-        host = urllib.parse.urlparse(a.url).hostname or ""
-        if host not in ASSET_HOSTS:
-            raise OSError(f"asset host {host!r} is not on the allowlist")
-        cached = fetch([a.url], a.sha256, cache_dir() / "assets" / a.sha256, a.path, quiet=True)
-        total += cached.stat().st_size
-        if total > MAX_ASSET_BYTES:
-            raise OSError("the editor's assets exceed the size limit")
-        target = (bundle_dir / a.path).resolve()
-        if not str(target).startswith(str(bundle_dir.resolve()) + os.sep):
-            raise OSError(f"asset path escapes the bundle: {a.path}")
-        target.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            os.link(cached, target)
-        except OSError:
-            shutil.copyfile(cached, target)
+#
+# Two kinds of job. A *grade* job is "here is an edit script (plain data) for this round:
+# what does the student score on it?" It runs no entrant code, so any machine with a
+# suitable GPU can do it. An *edit* job runs an entrant's program in the sandbox to produce
+# that script; only the organisers' anchor machines are given those.
 
 
 def slim_result(result: dict, base: dict) -> dict:
-    """What a verifier reports: everything needed to judge the run, nothing bulky."""
-    out = {k: result.get(k) for k in ("harness", "season", "season_digest", "scale", "corpus_sha256", "exam_sha256", "edit", "valid", "invalid_reason", "hardware", "started_at", "finished_at")}
+    """What a grader reports: everything needed to judge the run, nothing bulky."""
+    keys = ("harness", "harness_sha256", "season", "season_digest", "scale", "corpus_sha256", "exam_sha256", "script_sha256",
+            "valid", "invalid_reason", "hardware", "started_at", "finished_at")  # fmt: skip
+    out = {k: result.get(k) for k in keys}
     out["round"] = result["round"]["id"]
     out["baseline"] = {"loss": base["exam"]["loss"], "by_source": {k: v["loss"] for k, v in base["exam"]["by_source"].items()}}
     if result.get("valid"):
         s = result["script"]
-        out["script"] = {k: s.get(k) for k in ("script_sha256", "script_lines", "out_docs", "out_bytes", "src_docs", "ink_frac", "kept_doc_frac", "kept_byte_frac", "tokens_one_pass", "passes", "truncated")}
+        out["script"] = {k: s.get(k) for k in ("script_sha256", "tokens_sha256", "script_lines", "out_docs", "out_bytes", "src_docs", "ink_tokens", "ink_frac", "kept_doc_frac", "kept_byte_frac", "tokens_one_pass", "passes", "truncated")}
         out["exam"] = {"loss": result["exam"]["loss"], "by_source": {k: v["loss"] for k, v in result["exam"]["by_source"].items()}}
         t = result["train"]
-        out["train"] = {"seconds": t["seconds"], "tokens_per_second": t["tokens_per_second"], "final_train_loss": t["final_train_loss"], "curve": t["curve"][:: max(1, len(t["curve"]) // 60)]}
+        out["train"] = {k: t.get(k) for k in ("seconds", "tokens_per_second", "final_train_loss", "init_sha256", "precision")}
+        out["train"]["curve"] = t["curve"][:: max(1, len(t["curve"]) // 60)]
     return out
 
 
-def calibration(season, scale, device) -> dict:
-    """This machine's speed relative to the reference, measured once and remembered."""
-    from .cli import calibrate
-    from .train import hardware_info
+def _announcements() -> Path:
+    return config_dir() / "announced.json"
 
-    hw = hardware_info(device)
-    tag = hashlib.sha256(json.dumps([hw, scale.name, __version__], sort_keys=True).encode()).hexdigest()[:16]
-    path = config_dir() / f"calibration-{tag}.json"
-    if path.exists():
-        return json.loads(path.read_text())
-    cal = calibrate(season, scale, device)
+
+def remember_announcement(a: dict | None) -> None:
+    """Keep our own record of what the server said a draw would use.
+
+    The beacon round a draw uses is fixed by its time. The crawl is not: it is named when
+    the draw is scheduled, before the beacon value exists. Every verifier that is online
+    keeps this log, so a server that changed the crawl after seeing the randomness would be
+    contradicting records it does not control.
+    """
+    if not a or not a.get("drand_round") or not a.get("crawl"):
+        return
+    path = _announcements()
+    try:
+        log = json.loads(path.read_text())
+    except (OSError, ValueError):
+        log = {}
+    slot = str(int(a["drand_round"]))
+    if slot in log:
+        return
+    log[slot] = {"id": a.get("id"), "crawl": a["crawl"].get("crawl"), "paths_sha256": a["crawl"].get("paths_sha256"), "seen_at": int(time.time())}
+    for k in sorted(log, key=int)[:-200]:
+        del log[k]
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(cal))
-    return cal
+    path.write_text(json.dumps(log, indent=1))
 
 
-def time_factor(cal: dict) -> float:
-    """Slower machines get proportionally longer edit limits; nobody gets less than the nominal limit."""
-    f = cal.get("factor") or 1.0
-    return max(1.0, min(10.0, f))
+def check_announcement(season, rnd) -> None:
+    """Refuse a round that was not drawn the way we were told it would be."""
+    try:
+        seen = json.loads(_announcements().read_text()).get(str(int(rnd.beacon["round"])))
+    except (OSError, ValueError):
+        return
+    if not seen or seen["seen_at"] >= season.beacon_time(rnd.beacon["round"]):
+        return  # we never saw it announced, or only after the draw: we can vouch for nothing
+    told = (seen["id"], seen["crawl"], seen["paths_sha256"])
+    got = (rnd.id, rnd.crawl["crawl"], rnd.crawl["paths_sha256"])
+    if told != got:
+        raise ValueError(
+            f"the draw at drand round {rnd.beacon['round']} was announced as {told[0]} on {told[1]}, but the server now says {got[0]} on {got[1]}. "
+            "This verifier will not score it. Please report this."
+        )
+
+
+def _grade_job(job, season, scale, device, key, out, work: Path) -> tuple[dict, dict]:
+    import zstandard
+
+    from .pipeline import baseline, grade_round
+
+    rnd = round_from_api(season, job["round"])
+    check_announcement(season, rnd)
+    base = baseline(rnd, scale, device, progress=out.progress("baseline"), log=lambda m: out.line("", out.dim("baseline " + m)))
+    want = job["script"]["sha256"]
+    blob = request("GET", f"/api/v1/scripts/{want}", raw=True, timeout=600)
+    limit = int(season.raw["script"]["max_bytes"])
+    raw = zstandard.ZstdDecompressor().decompressobj().decompress(blob, max_length=limit + 1)
+    if len(raw) > limit or hashlib.sha256(raw).hexdigest() != want:
+        raise OSError("the script the server sent does not match its hash")
+    work.mkdir(parents=True, exist_ok=True)
+    path = work / "script.jsonl"
+    path.write_bytes(raw)
+    result = grade_round(rnd, scale, path, device=device, progress=out.progress("training"), log=lambda m: out.line("", out.dim(m)))
+    return result, base
+
+
+def _edit_job(job, season, scale, key, out, work: Path, sandbox: str) -> dict:
+    import base64
+
+    import zstandard
+
+    from . import data
+    from .pipeline import edit_round
+    from .project import ProjectError, load_project, unpack
+    from .spec import HARNESS_VERSION
+
+    rnd = round_from_api(season, job["round"])
+    check_announcement(season, rnd)
+    e = job["editor"]
+    blob = request("GET", f"/api/v1/editors/{e['id']}/bundle", key=key, raw=True, timeout=600)
+    if hashlib.sha256(blob).hexdigest() != e["id"]:
+        raise OSError("the bundle does not match the editor's id")
+    corpus = data.corpus(rnd, scale)
+    payload = {
+        "harness": HARNESS_VERSION, "season": season.id, "season_digest": season.digest, "round": rnd.id, "scale": scale.name,
+        "corpus_sha256": corpus.meta["sha256"], "script_sha256": None, "started_at": int(time.time()),
+    }  # fmt: skip
+    bundle_dir = work / "bundle"
+    try:
+        unpack(blob, bundle_dir)
+        project = load_project(bundle_dir)
+    except (ProjectError, ValueError, OSError) as err:  # the entrant's bundle is at fault, not this machine
+        payload["edit"] = {"status": "error", "seconds": 0, "time_limit": scale.edit_seconds, "reason": f"the bundle could not be loaded: {err}"[:300]}
+        return payload
+    edit = edit_round(bundle_dir, project.entry, rnd, scale, work, sandbox=sandbox, log=lambda m: out.line("", out.dim(m)), limits={"required": sandbox == "bwrap"})
+    payload["edit"] = edit.to_dict()
+    payload["finished_at"] = int(time.time())
+    if edit.script is not None:
+        raw = edit.script.read_bytes()
+        payload["script_sha256"] = hashlib.sha256(raw).hexdigest()
+        payload["script_size"] = len(raw)
+        payload["script_zst"] = base64.b64encode(zstandard.ZstdCompressor(level=10).compress(raw)).decode()
+    return payload
 
 
 def cmd_verify(args):
     from .cli import Out, need_torch
 
     need_torch()
-    from .pipeline import baseline, run_round
-    from .project import load_project, unpack
-    from .runner import bwrap_available
+    from .runner import HarnessError, bwrap_available, scope_available
     from .spec import load_season
     from .train import hardware_info, pick_device
 
     out = Out()
     key = need_key()
-    ok, why = bwrap_available()
-    if not ok and not args.no_sandbox:
-        sys.stderr.write(
-            f"stet: verifying runs other people's code, and the sandbox is unavailable: {why}\n"
-            "  Install bubblewrap (apt install bubblewrap / dnf install bubblewrap / pacman -S bubblewrap).\n"
-        )
-        sys.exit(1)
-    sandbox = "none" if args.no_sandbox else "bwrap"
     season = load_season(args.season)
     info = request("GET", "/api/v1/season")
     scale = season.scale(info["scale"])
     device = pick_device(args.device)
     hw = hardware_info(device)
+    allowed = season.raw.get("grade_devices", ["cuda"])
+    if device.type not in allowed and not args.any_device:
+        sys.stderr.write(
+            "stet: grading for the leaderboard needs an NVIDIA (CUDA) or AMD (ROCm) GPU, so that every grade is\n"
+            "  computed with the same arithmetic. You can still build, run and submit editors on this machine.\n"
+        )
+        sys.exit(1)
+    sandbox = "none"
+    if args.edits:
+        sandbox = "none" if args.no_sandbox else "bwrap"
+        if sandbox == "bwrap":
+            for ok, why in (bwrap_available(), scope_available()):
+                if not ok:
+                    sys.stderr.write(f"stet: edit jobs run other people's code and need the sandbox: {why}\n")
+                    sys.exit(1)
     out.line("", out.bold(f"stet verify · {key.handle} · {hw.get('gpu', device.type)}"))
-    if device.type != "cuda":
-        out.line("", "warning: no CUDA or ROCm GPU found. Verifying on this machine will be very slow.")
-    cal = calibration(season, scale, device)
-    factor = time_factor(cal)
-    out.line("speed", f"{cal['tokens_per_second']:,} tokens/s on the {scale.name} student · edit time limit x{factor:.2f}")
-    hello = {
-        "harness": __version__, "season": season.id, "season_digest": season.digest, "hardware": hw,
-        "tokens_per_second": cal["tokens_per_second"], "sandbox": sandbox,
-    }  # fmt: skip
+    out.line("", out.dim("Grading published edit scripts with the fixed trainer. No one else's code runs on this machine." if not args.edits
+                         else "Running edit jobs in the sandbox, and grading."))  # fmt: skip
+    hello = {"harness": __version__, "season": season.id, "season_digest": season.digest, "hardware": hw, "edits": bool(args.edits), "sandbox": sandbox}
     done = 0
-    idle_since = None
+    idle = False
     while True:
         try:
             r = request("POST", "/api/v1/jobs/claim", hello, key=key)
@@ -463,63 +531,62 @@ def cmd_verify(args):
             out.line("", out.dim(f"server unavailable ({e}); retrying in 60s"))
             time.sleep(60)
             continue
+        remember_announcement(r.get("announced"))
         job = r.get("job")
         if not job:
             if args.once or (args.max_jobs and done >= args.max_jobs):
                 out.line("", r.get("message") or "No work right now.")
                 return
-            if idle_since is None:
-                idle_since = time.time()
+            if not idle:
+                idle = True
                 out.line("", out.dim((r.get("message") or "No work right now.") + " Waiting; Ctrl-C to stop."))
             time.sleep(min(300, max(5, int(r.get("retry_after") or 60))))
             continue
-        idle_since = None
+        idle = False
         work = cache_dir() / "verify" / str(job["id"])
         shutil.rmtree(work, ignore_errors=True)
         e = job["editor"]
         out.line("", "")
-        out.line("job", f"{job['id']} · {editor_label(e)} · round {job['round']['id']}")
+        out.line(job["kind"], f"job {job['id']} · {editor_label(e)} · round {job['round']['id']}")
         try:
-            rnd = round_from_api(season, job["round"])
-            base = baseline(rnd, scale, device, progress=out.progress("baseline"), log=lambda m: out.line("", out.dim("baseline " + m)))
-            blob = request("GET", f"/api/v1/editors/{e['id']}/bundle", key=key, raw=True)
-            if hashlib.sha256(blob).hexdigest() != e["id"]:
-                raise OSError("the bundle does not match the editor's id")
-            bundle_dir = work / "bundle"
-            unpack(blob, bundle_dir)
-            project = load_project(bundle_dir)
-            fetch_assets(project, bundle_dir)
-            result = run_round(
-                bundle_dir, project.entry, rnd, scale, work, sandbox=sandbox, device=device, time_factor=factor,
-                progress=out.progress("training"), log=lambda m: out.line("", out.dim(m)),
-            )  # fmt: skip
+            if job["kind"] == "edit":
+                payload = _edit_job(job, season, scale, key, out, work, sandbox)
+                path = f"/api/v1/jobs/{job['id']}/script"
+            else:
+                result, base = _grade_job(job, season, scale, device, key, out, work)
+                payload = slim_result(result, base)
+                path = f"/api/v1/jobs/{job['id']}/result"
         except KeyboardInterrupt:
             _release(job, key, "interrupted")
             shutil.rmtree(work, ignore_errors=True)
             out.line("", "Stopped; the job was handed back.")
             return
-        except Exception as err:  # our problem, not the editor's: hand the job back untouched
+        except (HarnessError, Exception) as err:  # our problem, not the editor's: hand the job back untouched
             _release(job, key, f"{type(err).__name__}: {err}"[:300])
             shutil.rmtree(work, ignore_errors=True)
             out.line("", out.bad(f"could not run this job ({err}); handed it back"))
+            if args.once:
+                sys.exit(1)
             time.sleep(30)
             continue
-        payload = slim_result(result, base)
         try:
-            ack = request("POST", f"/api/v1/jobs/{job['id']}/result", payload, key=key)
+            ack = request("POST", path, payload, key=key, timeout=600)
         except ApiError as err:
             out.line("", out.bad(f"the server did not accept the result: {err}"))
             ack = {}
         shutil.rmtree(work, ignore_errors=True)
         done += 1
-        if result["valid"]:
+        if job["kind"] == "edit":
+            ed = payload["edit"]
+            out.line("result", f"{ed['status']} in {ed['seconds']:.0f}s" + (f" · script {payload['script_sha256'][:12]} ({payload['script_size'] / 1e6:.1f} MB)" if payload.get("script_sha256") else f" · no script: {ed.get('reason', '')}"))
+        elif result["valid"]:
             gain = base["exam"]["loss"] - result["exam"]["loss"]
             out.line("result", f"exam {result['exam']['loss']:.4f} · baseline {base['exam']['loss']:.4f} · gain {out.bold(f'{gain:+.4f}')}")
         else:
             out.line("result", f"invalid: {result['invalid_reason']}")
         if ack:
             v = ack.get("verifier") or {}
-            out.line("server", f"{ack.get('status', '')}" + (f" · {ack['message']}" if ack.get("message") else "") + (f" · {v.get('validated', 0)} validated, streak {v.get('streak', 0)}" if v else ""))
+            out.line("server", f"{ack.get('status', '')}" + (f" · {ack['message']}" if ack.get("message") else "") + (f" · {v.get('validated', 0)} validated" if v else ""))
         if args.once or (args.max_jobs and done >= args.max_jobs):
             return
 
@@ -570,10 +637,12 @@ def add_commands(sub) -> None:
     p.add_argument("dest", nargs="?")
     p.set_defaults(fn=cmd_fork)
 
-    p = sub.add_parser("verify", help="lend your GPU: run and score other people's editors")
+    p = sub.add_parser("verify", help="lend your GPU: grade published edit scripts for the leaderboard")
     p.add_argument("--once", action="store_true", help="do one job and exit")
     p.add_argument("--max-jobs", type=int, default=0)
     p.add_argument("--device", default=None)
     p.add_argument("--season", default="s0", help=argparse.SUPPRESS)
+    p.add_argument("--edits", action="store_true", help="also run edit jobs in the sandbox (anchor machines only)")
     p.add_argument("--no-sandbox", action="store_true", help=argparse.SUPPRESS)  # local testing only
+    p.add_argument("--any-device", action="store_true", help=argparse.SUPPRESS)  # local testing only
     p.set_defaults(fn=cmd_verify)

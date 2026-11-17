@@ -1,0 +1,9 @@
+The fonts in this directory are redistributed under the SIL Open Font License 1.1
+(https://openfontlicense.org):
+
+  Fraunces        Copyright The Fraunces Project Authors (github.com/undercasetype/Fraunces)
+  Newsreader      Copyright The Newsreader Project Authors (github.com/productiontype/Newsreader)
+  IBM Plex Mono   Copyright IBM Corp. (github.com/IBM/plex)
+  Caveat          Copyright The Caveat Project Authors (github.com/googlefonts/caveat)
+
+Latin subsets as served by Google Fonts.

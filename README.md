@@ -12,7 +12,7 @@ sits an exam. Lower exam loss wins.
 ## Try it
 
 ```sh
-curl -fsSL https://stet.maxint.co/install.sh | sh
+curl -fsSL https://www.stetrun.com/install.sh | sh
 stet init my-editor && cd my-editor
 stet run            # edit, train, grade a practice round (about a minute on a GPU)
 stet login && stet submit

@@ -1,0 +1,203 @@
+{
+ "beacon": {
+  "chain_hash": "52db9ba70e0cc0f6eaf7803dd07447a1f5477735fd3f661792ba94600c84e971",
+  "genesis": 1692803367,
+  "name": "drand quicknet",
+  "period": 3,
+  "relays": [
+   "https://api.drand.sh",
+   "https://api2.drand.sh",
+   "https://api3.drand.sh",
+   "https://drand.cloudflare.com"
+  ]
+ },
+ "decontam": {
+  "key_bytes": 64,
+  "min_letters": 38
+ },
+ "digest": "2e2173f736af7ee25d0b180bff8c036e7910482c96c449864e632512a904d20e",
+ "draw_grid_seconds": 600,
+ "exam_file": "exam-s0.jsonl.zst",
+ "exam_sha256": "c5186955b7b659ec3ad866a3ef4d1ee87ad7d6afddeb4cdf3825079b873b37e9",
+ "exam_sources": [
+  "encyclopedia",
+  "textbooks",
+  "science",
+  "qa",
+  "books",
+  "news"
+ ],
+ "grade_devices": [
+  "cuda"
+ ],
+ "harness": "0.2.0",
+ "id": "s0",
+ "ink_frac": 0.001,
+ "ink_tokens": {
+  "micro": 40000,
+  "nano": 8000,
+  "standard": 160000
+ },
+ "max_doc_bytes": 262144,
+ "min_copy_bytes": 64,
+ "noise": {},
+ "official_scale": "micro",
+ "parity": {
+  "beacon": {
+   "randomness": "abababababababababababababababababababababababababababababababab",
+   "round": 123456
+  },
+  "crawl": {
+   "crawl": "CC-MAIN-2026-43",
+   "n_shards": 100000,
+   "paths_sha256": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+  },
+  "grid": {
+   "off": null,
+   "round": 35732212,
+   "slot": 1800000000
+  },
+  "index": 7,
+  "order": [
+   6,
+   8,
+   5,
+   9,
+   2,
+   3,
+   7,
+   11,
+   0,
+   10,
+   1,
+   4
+  ],
+  "prf": "9091049708302675390",
+  "seed": "5209edcdd19de21c53b4e0b5913c17ff0f0bfc1f66894baaf509d96f664b1c13",
+  "shards": [
+   91838,
+   95535,
+   71983,
+   24687,
+   41439,
+   84995,
+   85189,
+   51150
+  ]
+ },
+ "pools": {
+  "gym": {
+   "about": "DCLM-Pool: raw Common Crawl up to 2022, main-content text extraction. Pinned by sha256. The gym: a fixed, different dataset to train agents on.",
+   "base_url": "https://huggingface.co/datasets/mlfoundations/dclm-pool-400m-1x/resolve/f20ae752116ce7b4ab15d31e1e40b094229bf911/",
+   "kind": "dclm",
+   "shards_per_unit": 1
+  },
+  "official": {
+   "about": "The newest published Common Crawl crawl at the time of the draw: full-page text (WET), every language.",
+   "base_url": "https://data.commoncrawl.org/",
+   "kind": "cc-wet",
+   "paths": "crawl-data/{crawl}/wet.paths.gz",
+   "shards_per_unit": 2
+  },
+  "practice": {
+   "about": "One pinned Common Crawl crawl, full-page text (WET). The same kind of data as official rounds, with fixed public seeds.",
+   "base_url": "https://data.commoncrawl.org/",
+   "crawl": "CC-MAIN-2026-43",
+   "kind": "cc-wet",
+   "n_shards": 100000,
+   "paths": "crawl-data/{crawl}/wet.paths.gz",
+   "paths_sha256": "662f8425bc1e6211d388f8ed0a375835d96ffa277469200053ff3fbbd51db46f",
+   "shards_per_unit": 2
+  }
+ },
+ "record": {
+  "alpha": 0.05,
+  "looks": [
+   5,
+   10,
+   20
+  ],
+  "margin": {
+   "micro": 0.02,
+   "nano": 0.03,
+   "standard": 0.02
+  },
+  "min_audited": 2
+ },
+ "reference": {
+  "anchor": "AMD Ryzen AI Max+ 395 (16 cores), Radeon 8060S, 128 GB unified memory, ROCm",
+  "note": "Official edit runs happen on this machine, in its own wall-clock seconds. On a desktop NVIDIA GPU your editor will finish GPU work several times sooner than it will here."
+ },
+ "reference_curves": {},
+ "rules_version": 2,
+ "scales": {
+  "micro": {
+   "batch_size": 16,
+   "corpus_units": 4,
+   "ctx": 512,
+   "d_model": 384,
+   "edit_seconds": 300,
+   "exam_items_per_source": 600,
+   "lr": 0.0015,
+   "n_head": 6,
+   "n_layer": 6,
+   "train_tokens": 40000000
+  },
+  "nano": {
+   "batch_size": 16,
+   "corpus_units": 1,
+   "ctx": 256,
+   "d_model": 192,
+   "edit_seconds": 60,
+   "exam_items_per_source": 200,
+   "lr": 0.002,
+   "n_head": 4,
+   "n_layer": 4,
+   "train_tokens": 8000000
+  },
+  "standard": {
+   "batch_size": 32,
+   "corpus_units": 8,
+   "ctx": 512,
+   "d_model": 512,
+   "edit_seconds": 600,
+   "exam_items_per_source": 800,
+   "lr": 0.001,
+   "n_head": 8,
+   "n_layer": 8,
+   "train_tokens": 160000000
+  }
+ },
+ "script": {
+  "max_bytes": 67108864,
+  "max_line_bytes": 1048576,
+  "max_out_doc_bytes": 1048576,
+  "max_segments": 20000
+ },
+ "title": "Season 0",
+ "tokenizer": {
+  "vocab_size": 8192
+ },
+ "tolerance": {
+  "micro": {
+   "baseline": 0.08,
+   "grade": 0.08
+  },
+  "nano": {
+   "baseline": 0.12,
+   "grade": 0.12
+  },
+  "standard": {
+   "baseline": 0.08,
+   "grade": 0.08
+  }
+ },
+ "train": {
+  "beta1": 0.9,
+  "beta2": 0.95,
+  "final_lr_frac": 0.05,
+  "grad_clip": 1.0,
+  "warmup_frac": 0.03,
+  "weight_decay": 0.1
+ }
+}

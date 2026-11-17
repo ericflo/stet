@@ -6,7 +6,8 @@
   4. Rank what is left by a crude "is this explanatory prose" score.
   5. Keep the best documents until the training budget is filled once, and shuffle them.
 
-No model, no GPU, a few seconds per shard. Everything here is a cut, so it spends no ink.
+No model, no GPU, a few seconds per shard. Everything here is a cut of at least
+min_copy_bytes, so it spends no ink.
 """
 
 import hashlib
@@ -20,10 +21,9 @@ SENTENCE_END = re.compile(r"[.!?][\"')\]]?\s")
 BYTES_PER_TOKEN = 3.3  # rough, for English prose under the season tokenizer
 
 
-def prose_ranges(text: str) -> tuple[list[list[int]], int]:
+def prose_ranges(text: str, min_copy: int = 64) -> tuple[list[list[int]], int]:
     """Byte ranges of the lines worth keeping, and how many bytes they hold."""
     ranges: list[list[int]] = []
-    kept = 0
     pos = 0
     for line in text.split("\n"):
         n = len(line.encode("utf-8")) + 1  # + the newline
@@ -35,9 +35,10 @@ def prose_ranges(text: str) -> tuple[list[list[int]], int]:
                 ranges[-1][1] = pos + n
             else:
                 ranges.append([pos, pos + n])
-            kept += n
         pos += n
-    return ranges, kept
+    # A kept run shorter than min_copy bytes would be charged as ink. Drop those.
+    ranges = [r for r in ranges if r[1] - r[0] >= min_copy + 4]
+    return ranges, sum(b - a for a, b in ranges)
 
 
 def score(text: str, kept: int) -> float:
@@ -53,12 +54,13 @@ def score(text: str, kept: int) -> float:
 
 def edit(task: Task):
     corpus = task.corpus
+    min_copy = int(task.info.get("min_copy_bytes", 64))
     seen: set[bytes] = set()
     scored = []
     for i, text in corpus:
         if not looks_english(text):
             continue
-        ranges, kept = prose_ranges(text)
+        ranges, kept = prose_ranges(text, min_copy)
         if kept < 400:
             continue
         key = hashlib.blake2b(text[:2000].encode("utf-8", "replace"), digest_size=8).digest()
@@ -67,7 +69,7 @@ def edit(task: Task):
         seen.add(key)
         size = corpus.size(i)
         # Clamp to the document: the last line may not end in a newline.
-        ranges = [[a, min(b, size)] for a, b in ranges if a < size]
+        ranges = [[a, min(b, size)] for a, b in ranges if a < size and min(b, size) - a >= min_copy]
         scored.append((score(text, kept), i, ranges, kept))
 
     scored.sort(key=lambda t: -t[0])

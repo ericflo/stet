@@ -1,0 +1,36 @@
+{{define "body"}}{{$d := .D}}
+<main class="page">
+<div class="page-head">
+  <div class="wrap">
+    <span class="eyebrow">{{.Season.Title}}</span>
+    <h1>Rounds</h1>
+    <p class="sub">A round is one freshly drawn corpus and every editor that ran on it. A new one is drawn every {{.Interval}}; up to {{$d.MaxNew}} new entries join each.</p>
+  </div>
+</div>
+<div class="wrap">
+  <div class="table-wrap" style="margin-top:34px" id="rounds" data-live>
+    {{if $d.Rounds}}
+    <table>
+      <thead><tr><th>Round</th><th>Status</th><th class="hide-s">Crawl</th><th class="r">Entries</th><th class="r hide-s">Unedited loss</th><th>Best</th></tr></thead>
+      <tbody>
+        {{range $d.Rounds}}<tr>
+          <td><a class="name num" href="/rounds/{{.ID}}">{{.ID}}</a></td>
+          <td>
+            {{if eq .Status "scheduled"}}<span class="stage">draws <span data-until="{{.DrawAt}}">{{ago .DrawAt}}</span></span>
+            {{else if eq .Status "open"}}<span class="stage grading">grading · {{.Settled}} of {{.Entries}}</span>
+            {{else}}<span class="stage settled">settled {{ago .SettledAt}}</span>{{end}}
+          </td>
+          <td class="hide-s muted num">{{with .Crawl}}{{.Crawl}}{{end}}</td>
+          <td class="r num">{{if eq .Status "scheduled"}}—{{else}}{{.Entries}}{{end}}</td>
+          <td class="r num hide-s">{{if has .BaselineLoss}}{{f3 (ptr .BaselineLoss)}}{{else}}—{{end}}</td>
+          <td>{{if has .BestGain}}<a href="/editors/{{short .BestID}}">{{.BestName}}</a> <span class="num pos">{{gain (ptr .BestGain)}}</span>{{else}}<span class="muted">—</span>{{end}}</td>
+        </tr>{{end}}
+      </tbody>
+    </table>
+    {{else}}
+    <div class="empty"><span class="hand">not yet</span>No round has been scheduled. The first is announced as soon as a crawl is in play.</div>
+    {{end}}
+  </div>
+</div>
+</main>
+{{end}}

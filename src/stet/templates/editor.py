@@ -8,10 +8,11 @@ line per output document, in the order the student should be trained on them.
 
     123                               keep document 123 whole
     {"d": 123, "k": [[0, 900]]}       keep byte ranges of document 123
-    {"s": [[123, 0, 900], "text"]}    mix copies with new text (new text is "ink": max 10%)
+    {"s": [[123, 0, 900], "text"]}    join copies, with a little text of your own
     {"t": "text"}                     a new document
 
-Deleting, reordering and repeating are free. The stream is cut off at the training budget
+Deleting, reordering and repeating are free. Your own text, and copies shorter than 64
+bytes, are "ink": task.info["ink_tokens"] of it per round, which is very little. The stream is cut off at the training budget
 (task.train_tokens) and repeated from the top if it is shorter, so keeping less means
 training on it more often.
 """

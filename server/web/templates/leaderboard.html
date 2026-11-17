@@ -1,0 +1,58 @@
+{{define "body"}}{{$d := .D}}
+<main class="page">
+<div class="page-head">
+  <div class="wrap">
+    <span class="eyebrow">{{.Season.Title}} · {{.ScaleID}} scale</span>
+    <h1>Leaderboard</h1>
+    <p class="sub">Ranked by mean gain over the unedited corpus: how much lower the student's exam loss is after an editor has been at the data. Fresh corpus every round, so nothing here was tuned to one sample.</p>
+  </div>
+</div>
+<div class="wrap">
+  <h2>Ranked</h2>
+  <div class="table-wrap" id="rated" data-live>
+    {{if $d.Rated}}
+    <table>{{template "boardhead"}}<tbody>{{template "boardrows" $d.Rated}}</tbody></table>
+    {{else}}
+    <div class="empty"><span class="hand">nobody yet</span>An editor is ranked once it has settled {{$d.RatedRounds}} rounds.</div>
+    {{end}}
+  </div>
+  <p class="muted" style="font-size:15.5px;margin-top:14px">
+    <b>Rating</b> is in nats per token, ± one standard error. It is adjusted for round difficulty, so an editor that only ran on hard corpora is not punished for it.
+    {{if $d.HasCurve}}<b>Worth</b> reads the rating off a measured curve: how many times more unedited data the same student would have needed to reach the same loss. It is never extrapolated; past the end of the curve it reads "more than".{{else}}<b>Worth</b> (how much more unedited data the gain equals) appears once the reference curve for this scale has been measured.{{end}}
+    The top {{$d.LadderSize}} editors, one per person, run in every round.
+  </p>
+
+  {{if $d.Provisional}}
+  <h2>Qualifying</h2>
+  <div class="table-wrap" id="provisional" data-live>
+    <table>{{template "boardhead"}}<tbody>{{template "boardrows" $d.Provisional}}</tbody></table>
+  </div>
+  <p class="muted" style="font-size:15.5px;margin-top:14px">Every entry is given {{$d.QualifyRounds}} rounds. It is ranked after {{$d.RatedRounds}}.</p>
+  {{end}}
+
+  <h2>The record</h2>
+  {{if $d.Records}}
+  <figure class="figure">{{$d.RecordChart}}<figcaption>Each step is a new holder.</figcaption></figure>
+  <div class="table-wrap" style="margin-top:22px">
+    <table>
+      <thead><tr><th>#</th><th>Editor</th><th class="r">Rating</th><th class="r">Beat the last by</th><th class="r hide-s">Over</th><th class="r hide-s">p</th><th class="hide-s">Taken</th></tr></thead>
+      <tbody>
+        {{range $d.Records}}<tr>
+          <td class="rank">{{.N}}</td>
+          <td><a class="name" href="/editors/{{short .EditorID}}">{{.Name}}</a><span class="by">v{{.Version}} · <a href="/u/{{.Owner}}">{{.Owner}}</a></span>{{if .Technique}}<span class="tech">{{.Technique}}</span>{{end}}</td>
+          <td class="r num">{{gain .Rating}}</td>
+          <td class="r num">{{gain .Advantage}}{{if not .Beat}} <span class="pm">vs unedited</span>{{end}}</td>
+          <td class="r num hide-s">{{.Rounds}} rounds</td>
+          <td class="r num hide-s">{{printf "%.2g" .P}}</td>
+          <td class="hide-s muted">{{date .At}} · <a href="/rounds/{{.RoundID}}">{{.RoundID}}</a></td>
+        </tr>{{end}}
+      </tbody>
+    </table>
+  </div>
+  {{else}}
+  <div class="table-wrap"><div class="empty"><span class="hand">unclaimed</span>The first record goes to the first editor that beats the unedited corpus by more than {{f2 $d.Margin}} nats over {{index $d.Rule.Looks 0}} rounds.</div></div>
+  {{end}}
+  <p class="note" style="margin-top:22px">The record changes hands only when a challenger beats the holder on the rounds both ran, by more than {{f2 $d.Margin}} nats, on a one-sided paired test. A challenger is looked at {{len $d.Rule.Looks}} times against a given holder ({{range $i, $l := $d.Rule.Looks}}{{if $i}}, {{end}}{{$l}}{{end}} shared rounds) and not otherwise, so checking after every round cannot hand it to a lucky near-copy. <a href="/docs/rules#the-record">The rule in full →</a></p>
+</div>
+</main>
+{{end}}

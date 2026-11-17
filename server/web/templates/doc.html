@@ -1,0 +1,11 @@
+{{define "body"}}{{$slug := .D.Slug}}
+<main class="page">
+<div class="wrap docs">
+  <aside>
+    <span class="eyebrow">Handbook</span>
+    {{range .Docs}}<a href="/docs/{{.Slug}}"{{if eq .Slug $slug}} aria-current="page"{{end}}>{{.Title}}</a>{{end}}
+  </aside>
+  <article class="prose">{{.D.Doc.HTML}}</article>
+</div>
+</main>
+{{end}}

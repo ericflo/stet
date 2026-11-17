@@ -14,3 +14,6 @@ runs/
 /server/stet-server
 /server/data/
 .DS_Store
+/server/server
+/server/files/
+.dev/

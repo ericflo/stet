@@ -32,7 +32,7 @@ class Task:
         self.deadline = deadline
 
     @classmethod
-    def from_env(cls) -> "Task":
+    def from_env(cls) -> Task:
         info = json.loads(Path(os.environ["STET_TASK"]).read_text())
         return cls(
             info,

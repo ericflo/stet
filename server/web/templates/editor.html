@@ -1,0 +1,108 @@
+{{define "body"}}{{$d := .D}}{{$e := $d.E}}{{$row := $d.Row}}
+<main class="page">
+<div class="page-head">
+  <div class="wrap">
+    <span class="eyebrow">Editor</span>
+    <h1>{{$e.Name}} <span class="muted" style="font-weight:400">v{{$e.Version}}</span>{{with $row}}{{if .Record}}<span class="tag red">record holder</span>{{end}}{{if .Ladder}}<span class="tag">ladder</span>{{end}}{{if .Provisional}}<span class="tag">qualifying</span>{{end}}{{end}}{{if eq $e.Status "withdrawn"}}<span class="tag">replaced</span>{{end}}</h1>
+    {{if $e.Technique}}<p class="sub"><i>{{$e.Technique}}</i></p>{{end}}
+    {{if $e.Description}}<p class="sub" style="font-size:18px">{{$e.Description}}</p>{{end}}
+    <div class="meta">
+      <span>by <a href="/u/{{$d.Owner}}">{{$d.Owner}}</a>{{if $d.Github}} (<a href="{{gh $d.Github}}" rel="nofollow noopener">github.com/{{$d.Github}}</a>){{end}}</span>
+      <span>entered {{date $e.CreatedAt}}</span>
+      <span>{{bytes $e.Size}} · {{len $e.Files}} {{plural (len $e.Files) "file" "files"}}</span>
+      <span title="{{$e.ID}}">{{short $e.ID}}</span>
+      {{with $d.Parent}}<span>forked from <a href="/editors/{{short .ID}}">{{.Name}} v{{.Version}}</a> by {{.Owner}}</span>{{end}}
+    </div>
+  </div>
+</div>
+<div class="wrap">
+  <div class="stats">
+    {{with $row}}
+    <div><span class="eyebrow">Worth</span><div class="v">{{mult .Multiplier .Capped}}{{if .Multiplier}}<small>the data</small>{{end}}</div></div>
+    <div><span class="eyebrow">Rating</span><div class="v">{{gain (ptr .Rating)}}<small>{{if has .SE}}± {{f3 (ptr .SE)}} {{end}}nats</small></div></div>
+    <div><span class="eyebrow">Rounds</span><div class="v">{{.Rounds}}{{if .Invalid}}<small>{{.Invalid}} invalid</small>{{end}}</div></div>
+    <div><span class="eyebrow">Rank</span><div class="v">{{if .Rank}}{{.Rank}}{{else}}—{{end}}</div></div>
+    {{else}}
+    <div><span class="eyebrow">Worth</span><div class="v">—</div></div>
+    <div><span class="eyebrow">Rating</span><div class="v">—</div></div>
+    <div><span class="eyebrow">Rounds</span><div class="v">0</div></div>
+    <div><span class="eyebrow">Rank</span><div class="v">—</div></div>
+    {{end}}
+  </div>
+
+  {{if $d.GainChart}}
+  <figure class="figure"><h3>Gain in each round</h3>{{$d.GainChart}}<figcaption>Unedited loss minus this editor's, on each round's fresh corpus. Above the line beats doing nothing.</figcaption></figure>
+  {{end}}
+
+  {{with $d.Latest}}
+  <h2>Its latest round, <a href="/rounds/{{.Round}}">{{.Round}}</a></h2>
+  <div class="stats" style="margin-top:0">
+    <div><span class="eyebrow">Exam loss</span><div class="v">{{f3 .Loss}}<small>vs {{f3 .Baseline}} unedited</small></div></div>
+    {{if .HasStats}}
+    <div><span class="eyebrow">Documents kept</span><div class="v">{{pct1 .Script.KeptDocFrac}}</div></div>
+    <div><span class="eyebrow">Read</span><div class="v">{{f1 .Script.Passes}}<small>times over</small></div></div>
+    <div><span class="eyebrow">Its own words</span><div class="v">{{pct1 .Script.InkFrac}}<small>of tokens</small></div></div>
+    {{else}}
+    <div><span class="eyebrow">Gain</span><div class="v">{{gain .Gain}}</div></div>
+    <div><span class="eyebrow">Graded by</span><div class="v">{{.Results}}</div></div>
+    <div><span class="eyebrow">Audited</span><div class="v">{{if .Audited}}yes{{else}}no{{end}}</div></div>
+    {{end}}
+  </div>
+  <div class="grid2">
+    {{if $d.SourceChart}}<figure class="figure"><h3>Where the gain comes from</h3>{{$d.SourceChart}}<figcaption>Exam loss on each kind of held-out text. The score is the plain mean of these.</figcaption></figure>{{end}}
+    {{if $d.CurveChart}}<figure class="figure"><h3>The student, learning from it</h3>{{$d.CurveChart}}<figcaption>Training loss on the edited corpus. Low here is not the goal: an editor can make data easy to fit and useless on the exam.</figcaption></figure>{{end}}
+  </div>
+  {{end}}
+
+  <h2>Every round</h2>
+  <div class="table-wrap">
+    {{if $d.Results}}
+    <table>
+      <thead><tr><th>Round</th><th>Status</th><th class="r">Loss</th><th class="r">Unedited</th><th class="r">Gain</th><th class="r hide-s">Edit took</th><th class="hide-s">Script</th><th class="hide-s">Graded by</th></tr></thead>
+      <tbody>
+        {{range $d.Results}}<tr>
+          <td><a class="num" href="/rounds/{{.Round}}">{{.Round}}</a></td>
+          {{if .Settled}}
+            {{if .Valid}}
+            <td><span class="stage settled">settled</span></td>
+            <td class="r num">{{f3 .Loss}}</td><td class="r num">{{f3 .Baseline}}</td>
+            <td class="r num {{if gt .Gain 0.0}}pos{{else if lt .Gain 0.0}}neg{{end}}">{{gain .Gain}}</td>
+            {{else}}
+            <td colspan="3"><span class="stage invalid">invalid</span><span class="reason">{{.Reason}}</span></td>
+            <td class="r num">0.000</td>
+            {{end}}
+          {{else}}
+            <td><span class="stage {{.Stage}}">{{.Stage}}</span></td><td class="r muted">sealed</td><td class="r muted">·</td><td class="r muted">·</td>
+          {{end}}
+          <td class="r num hide-s">{{with .Edit}}{{f1 .Seconds}}s{{else}}—{{end}}</td>
+          <td class="hide-s">{{if .ScriptSHA}}<a class="num" href="/api/v1/scripts/{{.ScriptSHA}}" title="Download the edit script ({{bytes .ScriptSize}} unpacked)">{{tiny .ScriptSHA}}</a>{{else}}<span class="muted">—</span>{{end}}</td>
+          <td class="hide-s muted" style="font-size:14.5px">{{if .Verifiers}}{{join .Verifiers ", "}}{{if .Audited}} <span class="tag blue">audited</span>{{end}}{{else}}—{{end}}</td>
+        </tr>{{end}}
+      </tbody>
+    </table>
+    {{else}}
+    <div class="empty">Drawn, but not yet run.</div>
+    {{end}}
+  </div>
+
+  <h2>Source</h2>
+  <p class="muted" style="font-size:16px;margin-top:-8px">Every entry is public from the moment it is first drawn. Read it, run it, improve on it.</p>
+  <div class="cmd" style="margin-bottom:16px"><pre><span class="p">$ </span><span data-copy-text>stet fork {{short $e.ID}}</span></pre><button type="button" data-copy>copy</button></div>
+  <div class="files" id="source">
+    <ul>
+      {{range $e.Files}}<li><a href="?file={{.Path}}#source"{{if eq .Path $d.File}} class="on"{{end}}>{{.Path}}<span>{{bytes .Size}}</span></a></li>{{end}}
+    </ul>
+    {{if $d.FileBinary}}<div class="binary">{{$d.File}} is not text. <a href="/api/v1/editors/{{$e.ID}}/bundle">Download the bundle</a> to look at it.</div>
+    {{else}}<pre><code>{{$d.FileText}}</code>{{if $d.FileTruncated}}
+<span class="muted">… the rest is in the bundle.</span>{{end}}</pre>{{end}}
+  </div>
+  <p style="margin-top:12px"><a class="pill" href="/api/v1/editors/{{$e.ID}}/bundle">download bundle (.tar.zst)</a></p>
+
+  {{if or $d.Versions $d.Forks}}
+  <h2>Lineage</h2>
+  {{if gt (len $d.Versions) 1}}<p><span class="eyebrow" style="margin-right:12px">Versions</span>{{range $d.Versions}}<a class="pill" href="/editors/{{short .ID}}">v{{.Version}}{{if eq .ID $e.ID}} · this one{{end}}</a>{{end}}</p>{{end}}
+  {{if $d.Forks}}<p><span class="eyebrow" style="margin-right:12px">Forked by</span>{{range $d.Forks}}<a class="pill" href="/editors/{{short .ID}}">{{.Owner}}/{{.Name}} v{{.Version}}</a>{{end}}</p>{{end}}
+  {{end}}
+</div>
+</main>
+{{end}}

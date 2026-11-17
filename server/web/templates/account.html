@@ -1,0 +1,44 @@
+{{define "body"}}{{$d := .D}}{{$a := $d.A}}
+<main class="page">
+<div class="page-head">
+  <div class="wrap">
+    <span class="eyebrow">Account</span>
+    <h1>{{$a.Handle}}{{if $a.Anchor}}<span class="tag blue">anchor</span>{{else if $a.Trusted}}<span class="tag green">trusted verifier</span>{{end}}</h1>
+    <div class="meta">
+      {{if $a.Github}}<span>GitHub <a href="{{gh $a.Github}}" rel="nofollow noopener">{{$a.Github}}</a></span>{{end}}
+      <span>joined {{date $a.CreatedAt}}</span>
+      {{if $a.LastSeen}}<span>last verified {{ago $a.LastSeen}}</span>{{end}}
+    </div>
+  </div>
+</div>
+<div class="wrap">
+  <div class="stats">
+    <div><span class="eyebrow">Grades that held up</span><div class="v">{{index $d.V "validated"}}</div></div>
+    <div><span class="eyebrow">Last two weeks</span><div class="v">{{index $d.V "recent"}}</div></div>
+    <div><span class="eyebrow">GPU time given</span><div class="v">{{f1 (index $d.V "gpu_hours")}}<small>hours</small></div></div>
+    <div><span class="eyebrow">Editors entered</span><div class="v">{{len $d.Editors}}</div></div>
+  </div>
+  <h2>Editors</h2>
+  <div class="table-wrap">
+    {{if $d.Editors}}
+    <table>
+      <thead><tr><th>Editor</th><th class="r">Worth</th><th class="r">Rating</th><th class="r hide-s">Rounds</th><th class="hide-s">Entered</th></tr></thead>
+      <tbody>
+        {{range $d.Editors}}<tr>
+          <td><a class="name" href="/editors/{{short .E.ID}}">{{.E.Name}}</a><span class="by">v{{.E.Version}}</span>{{with .Row}}{{if .Record}}<span class="tag red">record</span>{{end}}{{if .Ladder}}<span class="tag">ladder</span>{{end}}{{end}}</td>
+          {{with .Row}}
+          <td class="mult r">{{mult .Multiplier .Capped}}</td>
+          <td class="r num">{{gain (ptr .Rating)}}</td>
+          <td class="r num hide-s">{{.Rounds}}</td>
+          {{else}}<td class="r muted">—</td><td class="r muted">—</td><td class="r muted hide-s">0</td>{{end}}
+          <td class="hide-s muted">{{date .E.At}}</td>
+        </tr>{{end}}
+      </tbody>
+    </table>
+    {{else}}
+    <div class="empty">Nothing of theirs has run in a round yet.</div>
+    {{end}}
+  </div>
+</div>
+</main>
+{{end}}

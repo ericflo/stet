@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
-from functools import lru_cache
+from functools import cache
 from importlib import resources
 
 from .spec import Season
@@ -17,7 +17,7 @@ from .spec import Season
 PAT_STR = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}++| ?\p{N}++| ?[^\s\p{L}\p{N}]++|\s++$|\s+(?!\S)|\s"""
 
 
-@lru_cache(maxsize=None)
+@cache
 def load_encoding(season: Season):
     import tiktoken
 

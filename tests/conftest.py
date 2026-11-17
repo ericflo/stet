@@ -42,3 +42,19 @@ class FakeEnc:
 @pytest.fixture
 def enc():
     return FakeEnc()
+
+
+EXAM_SENTENCE = "The committee met on a rainy Tuesday and agreed, after much argument, to postpone the vote."
+
+
+@pytest.fixture(autouse=True)
+def tiny_exam(monkeypatch):
+    """Stand in for the season's exam pack, so tests need no download."""
+    from stet import data
+    from stet.spec import load_season
+
+    cfg = load_season("s0").raw["decontam"]
+    keys = data.keys_array(data.sentence_starts(EXAM_SENTENCE, cfg["key_bytes"], cfg["min_letters"]), cfg["key_bytes"])
+    assert len(keys) == 1
+    monkeypatch.setitem(data._exam_keys, "s0", keys)
+    return keys

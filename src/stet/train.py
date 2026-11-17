@@ -50,6 +50,22 @@ def _autocast(device: torch.device):
     return torch.autocast(device_type="cpu", enabled=False)
 
 
+def precision(device: torch.device) -> str:
+    """The arithmetic the student trains in. Official grades must all use the same one."""
+    return "bf16" if device.type == "cuda" else "fp32"
+
+
+def weights_sha256(model: torch.nn.Module) -> str:
+    """Hash of a model's weights. Two machines that start a round agree on this exactly."""
+    import hashlib
+
+    h = hashlib.sha256()
+    for name, p in sorted(model.named_parameters()):
+        h.update(name.encode())
+        h.update(p.detach().to("cpu", torch.float32).numpy().astype("<f4").tobytes())
+    return h.hexdigest()
+
+
 def build_model(scale: Scale, season: Season, init_seed: int, device: torch.device) -> GPT:
     torch.manual_seed(init_seed)
     if device.type == "cuda":
@@ -81,6 +97,7 @@ def train(
     cfg = season.train_cfg
     torch.set_float32_matmul_precision("high")
     model = build_model(scale, season, init_seed, device)
+    init_sha256 = weights_sha256(model)
     decay = [p for p in model.parameters() if p.dim() >= 2]
     no_decay = [p for p in model.parameters() if p.dim() < 2]
     opt = torch.optim.AdamW(
@@ -134,6 +151,8 @@ def train(
         "final_train_loss": curve[-1][1] if curve else None,
         "curve": curve,
         "params": model.n_params(),
+        "init_sha256": init_sha256,
+        "precision": precision(device),
     }
     return model, info
 

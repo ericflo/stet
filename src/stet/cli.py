@@ -87,24 +87,29 @@ def need_torch():
         )
 
 
-def resolve_round(args):
+def resolve_round(args, offset: int = 0):
+    """--round accepts 3 (practice round 3), g3 (gym round 3), or a full id like s0-o00012."""
+    import re
+
     from .spec import load_season, parse_round_id, practice_round
 
     season = load_season(args.season)
     r = str(args.round)
     try:
-        if r.isdigit():
-            return season, season.scale(args.scale or "nano"), practice_round(season, int(r))
-        try:
-            _, kind, index = parse_round_id(r)
-        except Exception:
-            die(f"cannot parse round {r!r}; use a number for a practice round, or an id like {season.id}-o00003")
-        if kind != "practice":
+        m = re.fullmatch(r"([pg]?)(\d+)", r)
+        if m:
+            kind, index = {"": "practice", "p": "practice", "g": "gym"}[m.group(1)], int(m.group(2))
+        else:
+            try:
+                _, kind, index = parse_round_id(r)
+            except Exception:
+                die(f"cannot parse round {r!r}; use 3 (practice), g3 (gym), or an id like {season.id}-o00003")
+        if kind == "official":
             from .client import fetch_round
 
             # Replays of official rounds default to the scale they were scored at.
-            return season, season.scale(args.scale or season.official_scale), fetch_round(season, index)
-        return season, season.scale(args.scale or "nano"), practice_round(season, index)
+            return season, season.scale(args.scale or season.official_scale), fetch_round(season, index + offset)
+        return season, season.scale(args.scale or "nano"), practice_round(season, index + offset, kind)
     except ValueError as e:
         die(str(e))
 
@@ -112,12 +117,13 @@ def resolve_round(args):
 def report(out: Out, result: dict, base: dict | None, season) -> None:
     from .score import format_multiplier, multiplier
 
-    edit = result["edit"]
-    status = out.good(edit["status"]) if edit["status"] == "ok" else out.bad(edit["status"])
-    out.line("editing", f"{status} in {edit['seconds']:.1f}s of {edit['time_limit']:.0f}s")
+    edit = result.get("edit")
+    if edit:
+        status = out.good(edit["status"]) if edit["status"] == "ok" else out.bad(edit["status"])
+        out.line("editing", f"{status} in {edit['seconds']:.1f}s of {edit['time_limit']:.0f}s")
     if not result["valid"]:
         out.line("result", out.bad("invalid") + f": {result['invalid_reason']}")
-        if edit.get("log_tail"):
+        if edit and edit.get("log_tail"):
             out.line("", out.dim("--- last lines of the editor's output ---"))
             out.line("", edit["log_tail"].rstrip()[-1500:])
         out.line("", "An invalid run scores as the unedited corpus: gain 0.")
@@ -126,7 +132,7 @@ def report(out: Out, result: dict, base: dict | None, season) -> None:
     out.line(
         "script",
         f"{s['out_docs']:,} documents from {s['src_docs']:,} sources ({100 * s['kept_doc_frac']:.1f}% of the corpus) · "
-        f"{s['out_bytes'] / 1e6:.1f} MB · ink {100 * s['ink_frac']:.1f}% · {s['passes']:.2f} passes"
+        f"{s['out_bytes'] / 1e6:.1f} MB · ink {s['ink_tokens']:,}/{s['ink_budget']:,} tokens · {s['passes']:.2f} passes"
         + (" · truncated at the budget" if s["truncated"] else ""),
     )
     t = result["train"]
@@ -136,10 +142,13 @@ def report(out: Out, result: dict, base: dict | None, season) -> None:
     out.line("", "          " + " · ".join(f"{k} {v['loss']:.3f}" for k, v in e["by_source"].items()))
     if base:
         gain = base["exam"]["loss"] - e["loss"]
-        m = multiplier(season, result["scale"], gain)
+        m = multiplier(season, result["round"]["kind"], result["scale"], gain)
         text = out.bold(f"{gain:+.4f}") + " nats"
         if m:
             text += f"   →   {out.bold(format_multiplier(m))} data efficiency"
+        noise = ((season.raw.get("noise") or {}).get(result["scale"]) or {}).get("gain_sd")
+        if noise:
+            text += out.dim(f"   (run-to-run noise is about ±{noise:.3f}; smaller differences mean nothing)")
         out.line("gain", text)
 
 
@@ -171,9 +180,42 @@ def cmd_init(args):
     out.line("", "AGENTS.md has everything a coding agent needs to work on it.")
 
 
+def _with_baseline(result: dict, rnd, scale, device, out: Out, skip: bool):
+    from .pipeline import baseline
+
+    if skip:
+        return None
+    base = baseline(rnd, scale, device, progress=out.progress("baseline"), log=lambda m: out.line("", out.dim("baseline " + m)))
+    result["baseline"] = {"loss": base["exam"]["loss"], "by_source": {k: v["loss"] for k, v in base["exam"]["by_source"].items()}}
+    if result["valid"]:
+        result["gain"] = round(base["exam"]["loss"] - result["exam"]["loss"], 5)
+    return base
+
+
+def _emit(args, result: dict):
+    if args.json:
+        slim = dict(result)
+        if "train" in slim:
+            slim["train"] = {k: v for k, v in slim["train"].items() if k != "curve"}
+        json.dump(slim, sys.stdout, indent=1)
+        sys.stdout.write("\n")
+
+
+def _summary(out: Out, results: list[dict]) -> dict:
+    """Mean gain over several rounds, with its standard error."""
+    import math
+
+    gains = [r.get("gain", 0.0) if r["valid"] else 0.0 for r in results]
+    mean = sum(gains) / len(gains)
+    se = math.sqrt(sum((g - mean) ** 2 for g in gains) / (len(gains) - 1) / len(gains)) if len(gains) > 1 else None
+    out.line("", "")
+    out.line("mean gain", out.bold(f"{mean:+.4f}") + (f" ± {se:.4f} (standard error over {len(gains)} rounds)" if se is not None else ""))
+    return {"rounds": [r["round"]["id"] for r in results], "gains": gains, "mean_gain": round(mean, 5), "se": None if se is None else round(se, 5)}
+
+
 def cmd_run(args):
     need_torch()
-    from .pipeline import baseline, run_round
+    from .pipeline import run_round
     from .project import ProjectError, load_project
     from .train import pick_device
 
@@ -182,33 +224,49 @@ def cmd_run(args):
         project = load_project(args.path)
     except ProjectError as e:
         die(str(e))
+    device = pick_device(args.device)
+    sandbox = "bwrap" if args.sandbox else "none"
+    results = []
+    for k in range(max(1, args.rounds)):
+        season, scale, rnd = resolve_round(args, offset=k)
+        stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
+        work = project.path / ".stet" / "runs" / f"{stamp}-{rnd.id}-{scale.name}"
+        work.mkdir(parents=True, exist_ok=True)
+        out.line("", out.bold(f"stet · {project.name} · {rnd.kind} round {rnd.id} · {scale.name} · {device.type}"))
+        result = run_round(
+            project.path, project.entry, rnd, scale, work, sandbox=sandbox, device=device,
+            echo=args.verbose, progress=out.progress("training"), log=lambda m: out.line("", out.dim(m)),
+        )  # fmt: skip
+        result["editor"] = {"name": project.name}
+        base = _with_baseline(result, rnd, scale, device, out, args.no_baseline)
+        (work / "result.json").write_text(json.dumps(result, indent=1))
+        report(out, result, base, season)
+        out.line("saved", str((work / "result.json").relative_to(Path.cwd()) if work.is_relative_to(Path.cwd()) else work / "result.json"))
+        results.append(result)
+    if len(results) == 1:
+        _emit(args, results[0])
+    else:
+        summary = _summary(out, results)
+        if args.json:
+            json.dump(summary, sys.stdout, indent=1)
+            sys.stdout.write("\n")
+    sys.exit(0 if all(r["valid"] for r in results) else 2)
+
+
+def cmd_score(args):
+    """Grade an edit script you already have, skipping the editor."""
+    need_torch()
+    from .pipeline import grade_round
+    from .train import pick_device
+
+    out = Out(quiet=args.quiet)
     season, scale, rnd = resolve_round(args)
     device = pick_device(args.device)
-    stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
-    work = project.path / ".stet" / "runs" / f"{stamp}-{rnd.id}-{scale.name}"
-    work.mkdir(parents=True, exist_ok=True)
-    out.line("", out.bold(f"stet · {project.name} · {rnd.kind} round {rnd.id} · {scale.name} · {device.type}"))
-    sandbox = "bwrap" if args.sandbox else "none"
-    result = run_round(
-        project.path, project.entry, rnd, scale, work, sandbox=sandbox, device=device,
-        echo=args.verbose, progress=out.progress("training"), log=lambda m: out.line("", out.dim(m)),
-    )  # fmt: skip
-    result["editor"] = {"name": project.name}
-    base = None
-    if not args.no_baseline:
-        base = baseline(rnd, scale, device, progress=out.progress("baseline"), log=lambda m: out.line("", out.dim("baseline " + m)))
-        result["baseline"] = {"loss": base["exam"]["loss"], "by_source": {k: v["loss"] for k, v in base["exam"]["by_source"].items()}}
-        if result["valid"]:
-            result["gain"] = round(base["exam"]["loss"] - result["exam"]["loss"], 5)
-    (work / "result.json").write_text(json.dumps(result, indent=1))
+    out.line("", out.bold(f"stet score · {args.script} · {rnd.kind} round {rnd.id} · {scale.name} · {device.type}"))
+    result = grade_round(rnd, scale, Path(args.script), device=device, progress=out.progress("training"), log=lambda m: out.line("", out.dim(m)))
+    base = _with_baseline(result, rnd, scale, device, out, args.no_baseline)
     report(out, result, base, season)
-    out.line("saved", str((work / "result.json").relative_to(Path.cwd()) if work.is_relative_to(Path.cwd()) else work / "result.json"))
-    if args.json:
-        slim = dict(result)
-        if "train" in slim:
-            slim["train"] = {k: v for k, v in slim["train"].items() if k != "curve"}
-        json.dump(slim, sys.stdout, indent=1)
-        sys.stdout.write("\n")
+    _emit(args, result)
     sys.exit(0 if result["valid"] else 2)
 
 
@@ -235,69 +293,13 @@ def cmd_fetch(args):
     Out().line("ready", f"{rnd.id} · {scale.name}: {len(corpus):,} documents, {corpus.total_bytes / 1e6:.0f} MB at {corpus.path}")
 
 
-def calibrate(season, scale, device, seconds: float = 8.0) -> dict:
-    """Training throughput of the given scale on this machine, on random tokens."""
-    import numpy as np
-    import torch
-    import torch.nn.functional as F
-
-    from .train import _autocast, build_model
-
-    model = build_model(scale, season, 0, device)
-    opt = torch.optim.AdamW(model.parameters(), lr=1e-4, fused=device.type == "cuda")
-    rng = np.random.default_rng(0)
-    x = torch.from_numpy(rng.integers(0, season.vocab_size, (scale.batch_size, scale.ctx))).to(device)
-    y = torch.from_numpy(rng.integers(0, season.vocab_size, (scale.batch_size, scale.ctx))).to(device)
-
-    def step():
-        with _autocast(device):
-            logits = model(x)
-        loss = F.cross_entropy(logits.float().view(-1, logits.size(-1)), y.view(-1))
-        opt.zero_grad(set_to_none=True)
-        loss.backward()
-        opt.step()
-        return loss
-
-    for _ in range(3):
-        step()
-    if device.type == "cuda":
-        torch.cuda.synchronize()
-    n = 0
-    t0 = time.time()
-    while time.time() - t0 < seconds:
-        step().item()
-        n += 1
-    dt = time.time() - t0
-    tps = n * scale.batch_size * scale.ctx / dt
-    ref = (season.raw.get("reference") or {}).get("tokens_per_second", {}).get(scale.name)
-    return {"scale": scale.name, "tokens_per_second": round(tps), "reference_tokens_per_second": ref, "factor": round(ref / tps, 3) if ref else None}
-
-
-def cmd_calibrate(args):
-    need_torch()
-    from .spec import load_season
-    from .train import hardware_info, pick_device
-
-    season = load_season(args.season)
-    scale = season.scale(args.scale or season.official_scale)
-    device = pick_device(args.device)
-    out = Out()
-    cal = calibrate(season, scale, device)
-    cal["hardware"] = hardware_info(device)
-    out.line("device", f"{cal['hardware'].get('gpu', device.type)} · torch {cal['hardware']['torch']}")
-    out.line("speed", f"{cal['tokens_per_second']:,} tokens/s training the {scale.name} student")
-    if cal["factor"]:
-        out.line("reference", f"{cal['reference_tokens_per_second']:,} tokens/s → this machine gets {cal['factor']:.2f}x the edit-phase time limit")
-    if args.json:
-        json.dump(cal, sys.stdout, indent=1)
-        sys.stdout.write("\n")
-
-
 def cmd_doctor(args):
     from . import data
-    from .runner import bwrap_available
+    from .runner import bwrap_available, scope_available
+    from .spec import load_season
 
     out = Out()
+    grade_devices = load_season().raw.get("grade_devices", ["cuda"])
     rows: list[tuple[str, str, str]] = []
     rows.append((OK, "stet", f"{__version__} on Python {sys.version.split()[0]} ({sys.platform})"))
     try:
@@ -310,16 +312,19 @@ def cmd_doctor(args):
         if dev.type == "cuda":
             rows.append((OK, "gpu", f"{hw['gpu']} · {hw['vram_gb']} GB · {hw['backend']} · torch {torch.__version__}"))
         else:
-            rows.append((WARN, "gpu", f"none found; training will run on {dev.type} (slow, fine for --scale nano)"))
+            rows.append((WARN, "gpu", f"no CUDA or ROCm GPU; training will run on {dev.type} (fine for --scale nano)"))
+        if dev.type in grade_devices:
+            rows.append((OK, "verify", "this machine can grade for the leaderboard: `stet verify`"))
+        else:
+            rows.append((WARN, "verify", "official grading needs an NVIDIA or AMD GPU, so every grade uses the same arithmetic"))
     except ImportError:
         rows.append((WARN, "torch", "not installed: `stet run` and `stet verify` need it (https://pytorch.org/get-started/locally/)"))
-    ok, why = bwrap_available()
+    ok, why = bwrap_available() if sys.platform == "linux" else (False, "")
     if ok:
-        rows.append((OK, "sandbox", f"bubblewrap at {why}"))
-    elif sys.platform != "linux":
-        rows.append((WARN, "sandbox", "verifying needs Linux (bubblewrap). You can still build, run and submit editors here."))
-    else:
-        rows.append((WARN, "sandbox", why + ". Needed only for `stet verify` and `stet run --sandbox`."))
+        scoped, _ = scope_available()
+        rows.append((OK, "sandbox", f"bubblewrap at {why}" + (", with memory and process limits" if scoped else "") + " (`stet run --sandbox`)"))
+    elif sys.platform == "linux":
+        rows.append((WARN, "sandbox", why + ". Optional: only `stet run --sandbox` uses it."))
     cache = data.cache_dir()
     cache.mkdir(parents=True, exist_ok=True)
     free = shutil.disk_usage(cache).free / 2**30
@@ -338,7 +343,7 @@ def cmd_agents(args):
 
 
 def add_round_args(p, default_round="0"):
-    p.add_argument("--round", default=default_round, help="practice round number, or a round id (default: 0)")
+    p.add_argument("--round", default=default_round, help="3 = practice round 3, g3 = gym round 3, or a round id like s0-o00012 (default: 0)")
     p.add_argument("--scale", default=None, help="nano, micro or standard (default: nano)")
     p.add_argument("--season", default="s0", help=argparse.SUPPRESS)
     p.add_argument("--device", default=None, help="torch device (default: best available)")
@@ -363,10 +368,17 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("run", help="run your editor on a round and score it")
     p.add_argument("path", nargs="?", default=".")
     add_round_args(p)
-    p.add_argument("--sandbox", action="store_true", help="run the editor in the same sandbox verifiers use (Linux)")
+    p.add_argument("--rounds", type=int, default=1, help="run this many consecutive rounds and report the mean gain with its standard error")
+    p.add_argument("--sandbox", action="store_true", help="run the editor in the same sandbox official runs use (Linux)")
     p.add_argument("--no-baseline", action="store_true", help="skip the baseline comparison")
     p.add_argument("-v", "--verbose", action="store_true", help="show the editor's output as it runs")
     p.set_defaults(fn=cmd_run)
+
+    p = sub.add_parser("score", help="grade an edit script directly, without running an editor")
+    p.add_argument("script", help="path to a script.jsonl")
+    add_round_args(p)
+    p.add_argument("--no-baseline", action="store_true", help="skip the baseline comparison")
+    p.set_defaults(fn=cmd_score)
 
     p = sub.add_parser("baseline", help="score the unedited corpus for a round")
     add_round_args(p)
@@ -378,13 +390,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("doctor", help="check this machine")
     p.set_defaults(fn=cmd_doctor)
-
-    p = sub.add_parser("calibrate", help="measure this machine against the reference GPU")
-    p.add_argument("--scale", default=None)
-    p.add_argument("--season", default="s0", help=argparse.SUPPRESS)
-    p.add_argument("--device", default=None)
-    p.add_argument("--json", action="store_true")
-    p.set_defaults(fn=cmd_calibrate)
 
     p = sub.add_parser("agents", help="print the instructions for coding agents (AGENTS.md)")
     p.set_defaults(fn=cmd_agents)

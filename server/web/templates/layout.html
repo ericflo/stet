@@ -1,0 +1,76 @@
+{{define "layout.html"}}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{if .Title}}{{.Title}} · Stet{{else}}Stet · The only thing you can touch is the data{{end}}</title>
+<meta name="description" content="{{.Desc}}">
+<meta property="og:title" content="{{if .Title}}{{.Title}} · Stet{{else}}Stet{{end}}">
+<meta property="og:description" content="{{.Desc}}">
+<meta property="og:type" content="website">
+<meta property="og:url" content="{{.BaseURL}}{{.Path}}">
+<meta name="twitter:card" content="summary">
+<link rel="canonical" href="{{.BaseURL}}{{.Path}}">
+<link rel="icon" href="/static/favicon.svg?v={{.Version}}" type="image/svg+xml">
+<link rel="preload" href="/static/fonts/fraunces.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/static/fonts/newsreader.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="/static/site.css?v={{.Version}}">
+<script>try{var t=localStorage.getItem("stet-theme");if(t==="light"||t==="dark")document.documentElement.dataset.theme=t}catch(e){}</script>
+</head>
+<body>
+{{if .Dev}}<div class="dev">development server · rounds here are not real</div>{{end}}
+<header class="mast">
+  <div class="wrap">
+    <a class="logo" href="/" aria-label="Stet, home">Stet</a>
+    <nav aria-label="Main">
+      <a href="/leaderboard"{{if eq .Nav "leaderboard"}} aria-current="page"{{end}}>Leaderboard</a>
+      <a href="/rounds"{{if eq .Nav "rounds"}} aria-current="page"{{end}}>Rounds</a>
+      <a href="/verifiers"{{if eq .Nav "verifiers"}} aria-current="page"{{end}}>Verifiers</a>
+      <a href="/docs/rules"{{if eq .Nav "docs"}} aria-current="page"{{end}}>Handbook</a>
+    </nav>
+    <span class="spacer"></span>
+    <span class="season">{{.Season.Title}} · {{.ScaleID}}</span>
+    <button class="theme" type="button" data-theme-toggle aria-label="Switch between light and dark">◐</button>
+  </div>
+</header>
+{{template "body" .}}
+<footer>
+  <div class="wrap">
+    <div>
+      <a href="/docs/rules">Rules</a><a href="/docs/agents">For agents</a><a href="/docs/verifying">Verifying</a><a href="/docs/design">Design</a><a href="/docs/faq">FAQ</a><a href="{{.APIURL}}/api/v1/season">API</a>
+    </div>
+    <div><i>stet</i>, a proofreader's mark: let it stand.</div>
+  </div>
+</footer>
+<script src="/static/site.js?v={{.Version}}" defer></script>
+</body>
+</html>{{end}}
+
+{{define "install"}}<div class="tabbed" data-tabs>
+  <div class="tabs" role="tablist">
+    <button type="button" role="tab" aria-selected="true" data-tab="sh">macOS / Linux</button>
+    <button type="button" role="tab" aria-selected="false" data-tab="ps">Windows</button>
+  </div>
+  <div class="cmd" data-pane="sh"><pre><span class="p">$ </span><span data-copy-text>curl -fsSL {{.BaseURL}}/install.sh | sh</span></pre><button type="button" data-copy>copy</button></div>
+  <div class="cmd" data-pane="ps" hidden><pre><span class="p">&gt; </span><span data-copy-text>irm {{.BaseURL}}/install.ps1 | iex</span></pre><button type="button" data-copy>copy</button></div>
+</div>{{end}}
+
+{{define "boardrows"}}{{range .}}
+<tr{{if .Record}} class="record"{{end}}>
+  <td class="rank">{{if .Rank}}{{.Rank}}{{else}}·{{end}}</td>
+  <td>
+    <a class="name" href="/editors/{{short .ID}}">{{.Name}}</a><span class="by">v{{.Version}} · <a href="/u/{{.Owner}}">{{.Owner}}</a></span>{{if .Record}}<span class="tag red">record</span>{{end}}{{if .Provisional}}<span class="tag">qualifying</span>{{end}}
+    {{if .Technique}}<span class="tech">{{.Technique}}</span>{{end}}
+  </td>
+  <td class="mult r">{{mult .Multiplier .Capped}}</td>
+  <td class="r num">{{gain (ptr .Rating)}}{{if has .SE}} <span class="pm">± {{f3 (ptr .SE)}}</span>{{end}}</td>
+  <td class="r num hide-s">{{.Rounds}}{{if .Invalid}} <span class="pm">({{.Invalid}} invalid)</span>{{end}}</td>
+  <td class="hide-s">{{spark .Gains}}</td>
+</tr>{{end}}{{end}}
+
+{{define "boardhead"}}<thead><tr>
+  <th>#</th><th>Editor</th>
+  <th class="r" title="How many times more unedited data the same student would have needed to do as well">Worth</th>
+  <th class="r" title="Mean gain in exam loss over the unedited corpus, adjusted for which rounds the editor ran in. Nats per token.">Rating</th>
+  <th class="r hide-s">Rounds</th><th class="hide-s">Round by round</th>
+</tr></thead>{{end}}

@@ -12,13 +12,12 @@ import io
 import re
 import tarfile
 import tomllib
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 import zstandard
 
 MAX_BUNDLE_BYTES = 50 << 20
-MAX_ASSET_BYTES = 2 << 30
 EXCLUDE_DIRS = {".git", ".hg", ".stet", ".venv", "venv", "__pycache__", "node_modules", "runs", ".pytest_cache", ".ruff_cache", ".mypy_cache"}
 EXCLUDE_SUFFIXES = (".pyc", ".pyo", ".DS_Store")
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,38}[a-z0-9]$")
@@ -26,13 +25,6 @@ NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,38}[a-z0-9]$")
 
 class ProjectError(ValueError):
     pass
-
-
-@dataclass
-class Asset:
-    url: str
-    sha256: str
-    path: str
 
 
 @dataclass
@@ -44,7 +36,6 @@ class Project:
     technique: str = ""
     parent: str = ""
     license: str = "MIT"
-    assets: list[Asset] = field(default_factory=list)
 
     def manifest(self) -> dict:
         return {
@@ -54,7 +45,6 @@ class Project:
             "technique": self.technique,
             "parent": self.parent,
             "license": self.license,
-            "assets": [a.__dict__ for a in self.assets],
         }
 
 
@@ -73,16 +63,8 @@ def load_project(path: str | Path) -> Project:
     entry = str(cfg.get("entry", "")).strip()
     if not entry:
         raise ProjectError('stet.toml: entry is required, e.g. entry = "python editor.py"')
-    assets = []
-    for a in cfg.get("assets", []) or []:
-        url, sha, rel = str(a.get("url", "")), str(a.get("sha256", "")).lower(), str(a.get("path", ""))
-        if not url.startswith("https://"):
-            raise ProjectError(f"stet.toml: asset url must be https ({url!r})")
-        if not re.fullmatch(r"[0-9a-f]{64}", sha):
-            raise ProjectError(f"stet.toml: asset {url} needs a sha256")
-        if not rel or rel.startswith("/") or ".." in Path(rel).parts:
-            raise ProjectError(f"stet.toml: asset path must be relative and inside the project ({rel!r})")
-        assets.append(Asset(url, sha, rel))
+    if cfg.get("assets"):
+        raise ProjectError("stet.toml: [[assets]] are not supported this season. Put what your editor needs in the bundle (up to 50 MB).")
     return Project(
         path=path,
         name=name,
@@ -91,12 +73,10 @@ def load_project(path: str | Path) -> Project:
         technique=str(cfg.get("technique", "")).strip()[:120],
         parent=str(cfg.get("parent", "")).strip(),
         license=str(cfg.get("license", "MIT")).strip(),
-        assets=assets,
     )
 
 
 def bundle_files(project: Project) -> list[Path]:
-    asset_paths = {(project.path / a.path).resolve() for a in project.assets}
     out = []
     for p in sorted(project.path.rglob("*")):
         rel = p.relative_to(project.path)
@@ -104,7 +84,7 @@ def bundle_files(project: Project) -> list[Path]:
             continue
         if p.is_symlink() or not p.is_file():
             continue
-        if p.name.endswith(EXCLUDE_SUFFIXES) or p.resolve() in asset_paths:
+        if p.name.endswith(EXCLUDE_SUFFIXES):
             continue
         out.append(p)
     return out

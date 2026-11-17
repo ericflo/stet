@@ -11,10 +11,10 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, field
-from functools import lru_cache
+from functools import cache
 from importlib import resources
 
-HARNESS_VERSION = "0.1.0"
+HARNESS_VERSION = "0.2.0"
 
 
 @dataclass(frozen=True)
@@ -44,6 +44,9 @@ class Shard:
     url: str
 
 
+POLICY_KEYS = ("reference", "reference_curves", "tolerance", "noise", "record")
+
+
 @dataclass(frozen=True)
 class Season:
     id: str
@@ -52,16 +55,26 @@ class Season:
 
     @property
     def digest(self) -> str:
-        """Hash of the whole season definition, pool manifests included."""
-        h = hashlib.sha256(json.dumps(self.raw, sort_keys=True, separators=(",", ":")).encode())
+        """Hash of everything in the season that decides a score, pool manifests included.
+
+        Left out: the numbers that only say how results are read (tolerances, the record
+        rule, reference curves). Those are the server's to apply and can be re-measured
+        without every verifier having to upgrade.
+        """
+        rules = {k: v for k, v in self.raw.items() if k not in POLICY_KEYS}
+        h = hashlib.sha256(json.dumps(rules, sort_keys=True, separators=(",", ":")).encode())
         h.update(resources.files("stet.seasons").joinpath(self.raw["tokenizer"]["file"]).read_bytes())
-        for s in self.pool("practice"):
+        for s in self.pool("gym"):
             h.update(bytes.fromhex(s.sha256))
         return h.hexdigest()
 
     @property
     def ink_frac(self) -> float:
         return float(self.raw["ink_frac"])
+
+    def ink_tokens(self, scale: Scale) -> int:
+        """How many of the tokens the student trains on may be the editor's own text."""
+        return int(self.ink_frac * scale.train_tokens)
 
     @property
     def min_copy_bytes(self) -> int:
@@ -91,6 +104,29 @@ class Season:
     def train_cfg(self) -> dict:
         return dict(self.raw["train"])
 
+    def beacon_time(self, beacon_round: int) -> int:
+        """When a beacon round is emitted (unix seconds)."""
+        cfg = self.raw["beacon"]
+        return int(cfg["genesis"]) + (int(beacon_round) - 1) * int(cfg["period"])
+
+    def beacon_round_at(self, t: int) -> int:
+        """The first beacon round emitted at or after unix time t."""
+        cfg = self.raw["beacon"]
+        if t <= cfg["genesis"]:
+            return 1
+        return (int(t) - int(cfg["genesis"]) + int(cfg["period"]) - 1) // int(cfg["period"]) + 1
+
+    def draw_slot(self, beacon_round: int) -> int | None:
+        """The draw time a beacon round belongs to, or None if it belongs to none.
+
+        Official rounds are drawn only at whole multiples of the season's grid, from the
+        first beacon round at or after that moment. So which beacon rounds can seed a round
+        is public and fixed in advance: nobody can go shopping among them for a seed.
+        """
+        grid = int(self.raw["draw_grid_seconds"])
+        slot = self.beacon_time(beacon_round) // grid * grid
+        return slot if self.beacon_round_at(slot) == int(beacon_round) else None
+
     def scale(self, name: str) -> Scale:
         try:
             return Scale(name=name, **self.raw["scales"][name])
@@ -101,13 +137,13 @@ class Season:
         return _pool(self.id, split)
 
 
-@lru_cache(maxsize=None)
+@cache
 def load_season(season_id: str = "s0") -> Season:
     raw = json.loads(resources.files("stet.seasons").joinpath(f"{season_id}.json").read_text())
     return Season(id=raw["id"], title=raw["title"], raw=raw)
 
 
-@lru_cache(maxsize=None)
+@cache
 def _pool(season_id: str, split: str) -> list[Shard]:
     cfg = load_season(season_id).raw["pools"][split]
     out = []
@@ -152,7 +188,7 @@ def sample_without_replacement(seed: bytes, label: str, n: int, k: int) -> list[
 @dataclass(frozen=True)
 class Round:
     season: Season
-    kind: str  # "practice" or "official"
+    kind: str  # "practice", "gym" or "official"
     index: int
     seed: bytes
     beacon: dict | None = None  # the drand round an official seed was drawn from
@@ -164,14 +200,20 @@ class Round:
 
     @property
     def split(self) -> str:
-        return self.kind
+        """Which half of the exam pack this round is examined on."""
+        return "official" if self.kind == "official" else "practice"
 
     @property
     def pool_cfg(self) -> dict:
-        """Where this round's corpus comes from. Practice and official rounds use different datasets."""
-        if self.kind == "practice":
-            return dict(self.season.raw["pools"]["practice"])
-        return {**self.season.raw["pools"]["official"], **(self.crawl or {})}
+        """Where this round's corpus comes from.
+
+        official   the newest Common Crawl crawl at the time of the draw
+        practice   one pinned crawl: the same kind of data, with seeds anyone can replay
+        gym        a different dataset altogether (DCLM-Pool), for training agents
+        """
+        if self.kind == "official":
+            return {**self.season.raw["pools"]["official"], **(self.crawl or {})}
+        return dict(self.season.raw["pools"][self.kind])
 
     def shard_indices(self, scale: Scale, n_shards: int) -> list[int]:
         k = scale.corpus_units * int(self.pool_cfg["shards_per_unit"])
@@ -180,6 +222,15 @@ class Round:
     def exam_indices(self, scale: Scale, source: str, n_available: int) -> list[int]:
         k = min(scale.exam_items_per_source, n_available)
         return sorted(sample_without_replacement(self.seed, f"exam:{source}", n_available, k))
+
+    def doc_order(self, n_docs: int) -> list[int]:
+        """The order the corpus's documents are written in: a seeded shuffle of arrival order.
+
+        A crawl arrives grouped by host. Shuffling makes "the first N tokens" a fair sample,
+        which is what the baseline trains on.
+        """
+        keys = [prf_u64(self.seed, "order", i) for i in range(n_docs)]
+        return sorted(range(n_docs), key=keys.__getitem__)
 
     @property
     def init_seed(self) -> int:
@@ -194,10 +245,12 @@ class Round:
         return d
 
 
-def practice_round(season: Season, index: int) -> Round:
-    """Practice rounds have fixed public seeds: run them any time, as often as you like."""
-    seed = hashlib.sha256(f"stet|{season.id}|practice|{index}".encode()).digest()
-    return Round(season=season, kind="practice", index=index, seed=seed)
+def practice_round(season: Season, index: int, kind: str = "practice") -> Round:
+    """Practice and gym rounds have fixed public seeds: run them any time, as often as you like."""
+    if kind not in ("practice", "gym"):
+        raise ValueError(f"{kind!r} rounds do not have fixed seeds")
+    seed = hashlib.sha256(f"stet|{season.id}|{kind}|{index}".encode()).digest()
+    return Round(season=season, kind=kind, index=index, seed=seed)
 
 
 def official_seed(season_id: str, index: int, beacon: dict, crawl: dict) -> bytes:
@@ -223,8 +276,8 @@ def official_round(season: Season, index: int, beacon: dict, crawl: dict) -> Rou
 
 def round_from_description(season: Season, d: dict) -> Round:
     """Rebuild a round from its public description, checking that the seed follows from it."""
-    if d["kind"] == "practice":
-        rnd = practice_round(season, int(d["index"]))
+    if d["kind"] in ("practice", "gym"):
+        rnd = practice_round(season, int(d["index"]), d["kind"])
     else:
         rnd = official_round(season, int(d["index"]), d["beacon"], d["crawl"])
     if "seed" in d and d["seed"] != rnd.seed.hex():
@@ -234,5 +287,5 @@ def round_from_description(season: Season, d: dict) -> Round:
 
 def parse_round_id(round_id: str) -> tuple[str, str, int]:
     season_id, tail = round_id.rsplit("-", 1)
-    kind = {"p": "practice", "o": "official"}[tail[0]]
+    kind = {"p": "practice", "g": "gym", "o": "official"}[tail[0]]
     return season_id, kind, int(tail[1:])
