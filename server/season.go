@@ -184,6 +184,10 @@ func (s *Season) drawSlot(round int64) (int64, bool) {
 	return slot, s.Beacon.drandRoundAt(slot) == round
 }
 
+// maxScriptBlob bounds a script as it is uploaded and stored: compressed. Compression can
+// make incompressible data slightly larger, so this is more than the raw limit.
+func (s *Season) maxScriptBlob() int64 { return s.Script.MaxBytes*4/3 + (1 << 20) }
+
 // nextGrid is the first grid moment strictly after t.
 func (s *Season) nextGrid(t int64) int64 { return (t/s.DrawGrid + 1) * s.DrawGrid }
 

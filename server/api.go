@@ -535,8 +535,13 @@ func (a *App) apiLinkGithub(w http.ResponseWriter, r *http.Request) {
 }
 
 func verifierStats(s *State, c *Account) map[string]any {
-	recent := recentAgreed(s)[c.ID]
-	return map[string]any{"validated": c.Agreed, "recent": recent, "streak": c.Streak, "trusted": c.Anchor, "strikes": c.Strikes, "muted": muted(c, now()), "gpu_hours": c.GPUSeconds / 3600, "priority": recent}
+	recent, agreed, streak := recentAgreed(s)[c.ID], c.Agreed, c.Streak
+	if c.Anchor {
+		// An anchor sets the scores; it does not agree with them. (An account that became an
+		// anchor may carry counts from before.)
+		recent, agreed, streak = 0, 0, 0
+	}
+	return map[string]any{"validated": agreed, "recent": recent, "streak": streak, "trusted": c.Anchor, "strikes": c.Strikes, "muted": muted(c, now()), "gpu_hours": c.GPUSeconds / 3600, "priority": recent}
 }
 
 func (a *App) apiMe(w http.ResponseWriter, r *http.Request) {
@@ -605,7 +610,19 @@ func (a *App) apiSubmit(w http.ResponseWriter, r *http.Request) {
 			out["replaced"] = sub.Replaced
 		}
 		if next := s.roundWithStatus("scheduled"); next != nil {
-			out["enters"] = map[string]any{"round": roundID(a.season.ID, next.Idx), "draw_at": next.DrawAt}
+			// "It enters round X" only when it will: there is room for it, and it is in
+			// time. Otherwise X is the earliest it could be.
+			ahead := 0
+			for _, e := range s.Editors {
+				if e.Status == "queued" && e.ID != ed.ID && e.CreatedAt <= ed.CreatedAt {
+					ahead++
+				}
+			}
+			key := "earliest"
+			if ed.Status == "queued" && ahead < a.cfg.MaxNewPerRound && ed.CreatedAt <= next.DrawAt-commitMargin {
+				key = "enters"
+			}
+			out[key] = map[string]any{"round": roundID(a.season.ID, next.Idx), "draw_at": next.DrawAt}
 		}
 	})
 	writeJSON(w, 201, out)
@@ -769,7 +786,10 @@ func (a *App) apiGetScript(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
 	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 	w.Header().Set("Content-Disposition", `attachment; filename="`+sha[:12]+`.script.jsonl.zst"`)
-	io.Copy(w, io.LimitReader(f, a.season.Script.MaxBytes))
+	// All of it. What is stored is the compressed script, and a script that does not
+	// compress is a little larger stored than raw: cut at the raw limit, it could never be
+	// downloaded whole, and so never graded. Its size was bounded when it was uploaded.
+	io.Copy(w, f)
 }
 
 // --- rounds ---------------------------------------------------------------------------------
@@ -985,7 +1005,7 @@ func (a *App) apiClaim(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) apiScript(w http.ResponseWriter, r *http.Request) {
 	// base64 of a compressed script, plus the report around it
-	acct, _, body, err := a.signedBy(w, r, a.season.Script.MaxBytes*4/3+(1<<20), true, true)
+	acct, _, body, err := a.signedBy(w, r, a.season.maxScriptBlob(), true, true)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -1058,9 +1078,9 @@ func (a *App) apiAdminFile(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, fail(403, "anchors only"))
 		return
 	}
-	// An organiser publishes two files this way, and the season already says what each
-	// hashes to: the exam, and, on the day the season closes, the held-out exam. A stolen
-	// anchor key publishes nothing else.
+	// An organiser publishes two files this way whose hashes the season already gives: the
+	// exam, and, on the day the season closes, the held-out exam. A stolen anchor key
+	// publishes nothing else while the season runs.
 	name := r.PathValue("name")
 	sum := sha256.Sum256(body)
 	got := hex.EncodeToString(sum[:])
@@ -1073,8 +1093,24 @@ func (a *App) apiAdminFile(w http.ResponseWriter, r *http.Request) {
 		closing = closing || (a.cfg.SeasonClosed && a.season.HeldoutSHA256 != "" && name == "heldout-"+a.season.ID+suffix)
 	}
 	if !exam && !heldout && !closing {
-		writeErr(w, fail(400, "the only files published here are %s and, when the season closes, %s, each with the hash the season gives for it", a.season.ExamFile, a.season.heldoutFile()))
+		writeErr(w, fail(400, "the only files published here are %s and, when the season closes, %s (each with the hash the season gives for it) and heldout-%s.seed, .results.jsonl and .table.json",
+			a.season.ExamFile, a.season.heldoutFile(), a.season.ID))
 		return
+	}
+	// The seed, the record and the table have no hash to be held to, so they are held to
+	// being first: once one is published, nothing replaces it. Not a later mistake, and
+	// not a stolen key.
+	if closing {
+		rc, _, err := a.st.blobs.Open(r.Context(), "files/"+name)
+		if err == nil {
+			rc.Close()
+			writeErr(w, fail(409, "%s is already published, and what is published when a season closes is not replaced", name))
+			return
+		}
+		if !errors.Is(err, errNoBlob) {
+			writeErr(w, fail(503, "the file store is not answering; try again in a moment"))
+			return
+		}
 	}
 	// Publishing the held-out exam cannot be taken back, so one command sent early must not
 	// be able to do it: the server has to have been told the season is over as well.

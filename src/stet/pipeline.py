@@ -48,10 +48,13 @@ def baseline(rnd: Round, scale: Scale, device=None, progress=None, log=None) -> 
     # Written whole or not at all: a file cut short by a full disk would otherwise stop
     # every later job of the round. With a held-out part in it, it is nobody else's to read.
     tmp = path.with_name(f"{path.name}.tmp{os.getpid()}")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600 if "heldout" in result else 0o644)
-    with os.fdopen(fd, "w") as f:
-        f.write(json.dumps(result))
-    os.replace(tmp, path)
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600 if "heldout" in result else 0o644)
+        with os.fdopen(fd, "w") as f:
+            f.write(json.dumps(result))
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)  # nothing is there once it has been renamed
     return result
 
 

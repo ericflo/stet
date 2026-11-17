@@ -1,5 +1,13 @@
 import dataclasses
+import gzip
+import hashlib
 import json
+import os
+import subprocess
+import sys
+import time
+import types
+import zlib
 
 import pytest
 from conftest import EXAM_SENTENCE
@@ -128,6 +136,211 @@ def test_a_download_stops_at_its_limit_and_is_not_tried_again(tmp_path, monkeypa
     with pytest.raises(data.TooBig):
         data.fetch(["http://a.test/x"], "", tmp_path / "y.bin", quiet=True, max_bytes=3 << 20)
     assert len(opened) == 2 and opened[1].sent == 1 << 20 and not list(tmp_path.iterdir())
+
+
+class Sends:
+    """A host that promises `promised` bytes and closes after sending `body`."""
+
+    def __init__(self, body: bytes, promised: int | None):
+        self.left, self.headers = body, {} if promised is None else {"Content-Length": str(promised)}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def read(self, n):
+        out, self.left = self.left[:n], self.left[n:]
+        return out
+
+
+def test_a_download_cut_short_is_fetched_again_not_kept(tmp_path, monkeypatch):
+    # Crawl files are named by path and have no hash to check them by. A connection that
+    # closes early ends the read like the end of the file, and a gzip file cut off between
+    # two members still opens: the corpus built from it would be another corpus.
+    whole = b"member one|member two|member three"
+    answers = [Sends(whole[:10], len(whole)), Sends(whole, len(whole))]
+    monkeypatch.setattr(data.urllib.request, "urlopen", lambda req, timeout=None: answers.pop(0))
+    monkeypatch.setattr(data.time, "sleep", lambda s: None)
+    got = data.fetch(["http://a.test/x.gz"], "", tmp_path / "x.gz", quiet=True)
+    assert got.read_bytes() == whole and not answers and [p.name for p in tmp_path.iterdir()] == ["x.gz"]
+    # A host that keeps doing it is a download that failed, which a verifier waits out.
+    monkeypatch.setattr(data.urllib.request, "urlopen", lambda req, timeout=None: Sends(whole[:10], len(whole)))
+    with pytest.raises(data.FetchError, match="cut short"):
+        data.fetch(["http://a.test/y.gz"], "", tmp_path / "y.gz", quiet=True)
+    assert [p.name for p in tmp_path.iterdir()] == ["x.gz"]
+
+
+def gz(*members: bytes) -> bytes:
+    return b"".join(gzip.compress(m) for m in members)
+
+
+def wet(url: str, text: str) -> bytes:
+    body = text.encode()
+    return f"WARC/1.0\r\nWARC-Type: conversion\r\nWARC-Target-URI: {url}\r\nContent-Length: {len(body)}\r\n\r\n".encode() + body + b"\r\n\r\n"
+
+
+PAGES = [(f"http://h.test/{i}", f"Page {i} of the crawl says something of its own, at some length. " * 4) for i in range(6)]
+CRAWL_FILE = gz(*(wet(u, t) for u, t in PAGES))  # one gzip member per record, as Common Crawl writes them
+A_SHARD = Shard("", 0, "crawl-data/CC-MAIN-2026-43/segments/1/wet/00000.warc.wet.gz", "http://cc.test/00000.warc.wet.gz")
+
+
+def test_a_crawl_file_is_read_to_its_end_before_it_is_kept(tmp_path, monkeypatch):
+    # No hash names a crawl file, and a host need not say how long one is. What can be
+    # checked is that the gzip stream it sent ends where a gzip stream ends, and holds something.
+    answers = [Sends(CRAWL_FILE[:-7], None), Sends(b"", None), Sends(b"<html>busy</html>", None), Sends(CRAWL_FILE, None)]
+    monkeypatch.setattr(data.urllib.request, "urlopen", lambda req, timeout=None: answers.pop(0))
+    monkeypatch.setattr(data.time, "sleep", lambda s: None)
+    path = data.shard_path(A_SHARD, quiet=True)
+    assert path.read_bytes() == CRAWL_FILE and not answers and list(data.read_wet(path)) == PAGES
+    assert [p.name for p in path.parent.iterdir()] == [path.name]
+    # A host that only ever sends nothing, or a gzip file of nothing, is a download that failed.
+    other = Shard("", 0, "crawl-data/x/00001.warc.wet.gz", "http://cc.test/00001.warc.wet.gz")
+    for nothing in (b"", gzip.compress(b"")):
+        monkeypatch.setattr(data.urllib.request, "urlopen", lambda req, timeout=None, nothing=nothing: Sends(nothing, len(nothing)))
+        with pytest.raises(data.FetchError, match="not a whole gzip file"):
+            data.shard_path(other, quiet=True)
+        assert [p.name for p in path.parent.iterdir()] == [path.name]
+    # A file that has a hash is checked by its hash, as before, whatever it holds.
+    blob = b"not gzip at all"
+    monkeypatch.setattr(data.urllib.request, "urlopen", lambda req, timeout=None: Sends(blob, len(blob)))
+    assert data.fetch(["http://a.test/b"], hashlib.sha256(blob).hexdigest(), tmp_path / "b.bin", quiet=True, gzipped=True).read_bytes() == blob
+
+
+def test_a_damaged_crawl_file_in_the_cache_is_dropped_whatever_the_damage_looks_like(tmp_path, monkeypatch):
+    rnd, scale = practice_round(SEASON, 0), SEASON.scale("nano")
+    monkeypatch.setattr(data, "round_shards", lambda rnd, scale, quiet=False: [A_SHARD])
+    monkeypatch.setattr(data.urllib.request, "urlopen", lambda req, timeout=None: Sends(CRAWL_FILE, len(CRAWL_FILE)))
+    path = data.shard_path_of(A_SHARD)
+    path.parent.mkdir(parents=True)
+    dest = tmp_path / "round" / "corpus-v3"
+    damage = {
+        EOFError: CRAWL_FILE[:-9],  # cut off inside the last record
+        gzip.BadGzipFile: CRAWL_FILE[:-4] + b"\0\0\0\0",  # a trailer that does not match
+        zlib.error: CRAWL_FILE[:10] + b"\xff" * 64,  # a header, and then nothing that inflates
+        ValueError: gz(b"WARC/1.0\r\nWARC-Type: conversion\r\nContent-Length: lots\r\n\r\nbody\r\n\r\n"),  # a length that is not a number
+    }
+    for error, blob in damage.items():
+        path.write_bytes(blob)
+        with pytest.raises(error):
+            list(data.read_wet(path))
+        with pytest.raises(OSError, match="is damaged .*removed from the cache, run again"):
+            data.build_corpus(rnd, scale, dest, quiet=True)
+        assert not path.exists() and not dest.exists() and list(dest.parent.iterdir()) == []  # and no half-built corpus beside it
+        # Run again, as it says: the file is fetched afresh and the corpus is built.
+        assert len(data.Corpus(data.build_corpus(rnd, scale, dest, quiet=True))) == len(PAGES)
+        import shutil
+
+        shutil.rmtree(dest)
+
+
+def test_nothing_half_made_is_left_behind_on_any_way_out(tmp_path, monkeypatch):
+    class Interrupted(Sends):
+        def read(self, n):
+            if len(self.left) < 20:
+                raise KeyboardInterrupt
+            return super().read(10)
+
+    # Ctrl-C in the middle of a download.
+    monkeypatch.setattr(data.urllib.request, "urlopen", lambda req, timeout=None: Interrupted(b"x" * 100, 100))
+    with pytest.raises(KeyboardInterrupt):
+        data.fetch(["http://a.test/x"], "", tmp_path / "pool" / "x.gz", quiet=True)
+    assert list((tmp_path / "pool").iterdir()) == []
+
+    # Ctrl-C in the middle of a build, with a shard already written out.
+    docs = [(f"http://h.test/{i}", f"Document number {i} says something of its own. " * 5) for i in range(20)]
+    fake_pool(monkeypatch, docs)
+
+    def read_shard(path, kind):
+        if path == "fake-1":
+            raise KeyboardInterrupt
+        return iter(docs[:10])
+
+    monkeypatch.setattr(data, "read_shard", read_shard)
+    dest = tmp_path / "round" / "corpus-v3"
+    with pytest.raises(KeyboardInterrupt):
+        data.build_corpus(practice_round(SEASON, 0), SEASON.scale("nano"), dest, quiet=True)
+    assert list(dest.parent.iterdir()) == []
+
+
+@pytest.mark.skipif(os.name == "nt", reason="asks whether a process is running")
+def test_what_a_killed_build_left_is_cleared_by_the_next_one(tmp_path, monkeypatch):
+    def a_dead_pid() -> int:
+        p = subprocess.Popen([sys.executable, "-c", "pass"])
+        p.wait()
+        return p.pid
+
+    dead, other_dead, alive = a_dead_pid(), a_dead_pid(), os.getppid()
+    assert len({dead, other_dead, alive, os.getpid()}) == 4
+    hour_ago = time.time() - 3600
+    rounds, pool = tmp_path / "round", data.cache_dir() / "pool" / "wet"
+    rounds.mkdir()
+    pool.mkdir(parents=True)
+
+    def leave(path, directory=False, fresh_inside=False):
+        if directory:
+            path.mkdir()
+            (path / "arrival.bin").write_bytes(b"x" * 100)
+            if not fresh_inside:
+                os.utime(path / "arrival.bin", (hour_ago, hour_ago))
+        else:
+            path.write_bytes(b"x" * 100)
+        os.utime(path, (hour_ago, hour_ago))
+        return path
+
+    killed = [leave(rounds / f"corpus-v3.tmp{dead}", directory=True), leave(pool / f"0123.warc.wet.gz.part{dead}"), leave(data.cache_dir() / "pool" / f"abcd.jsonl.zst.part{dead}")]
+    kept = [
+        leave(rounds / f"corpus-v3.tmp{alive}", directory=True),  # its process is running
+        leave(pool / f"4567.warc.wet.gz.part{alive}"),
+        leave(rounds / f"corpus-v3.tmp{other_dead}", directory=True, fresh_inside=True),  # no such process here, but written to a moment ago: another machine's
+        leave(pool / "89ab.warc.wet.gz"),  # not a temporary file at all
+        leave(pool / "notes.part"),
+        leave(pool / "odd.part99999999999"),  # no process has that number; nor did this program write it
+        leave(rounds / "corpus-v2.tmp1", directory=True),  # some other file's, and none of this build's business
+    ]
+    docs = [(f"http://h.test/{i}", f"Document number {i} says something of its own. " * 5) for i in range(20)]
+    fake_pool(monkeypatch, docs)
+    data.build_corpus(practice_round(SEASON, 0), SEASON.scale("nano"), rounds / "corpus-v3", quiet=True)
+    assert not any(os.path.lexists(p) for p in killed) and all(os.path.lexists(p) for p in kept)
+    assert (rounds / "corpus-v3" / "meta.json").exists()
+    # Left alone long enough, the one nobody is writing goes too.
+    assert data.sweep_stale(rounds, "corpus-v3.tmp*", now=time.time() + data.STALE_AFTER + 1) == 1
+    assert not (rounds / f"corpus-v3.tmp{other_dead}").exists() and (rounds / f"corpus-v3.tmp{alive}").exists()
+
+
+def test_a_cached_file_list_that_is_not_the_rounds_is_fetched_again(tmp_path, monkeypatch):
+    paths = [f"crawl-data/CC-MAIN-2026-43/segments/1/wet/{i:05d}.warc.wet.gz" for i in range(5)]
+    listing = gzip.compress(("\n".join(paths) + "\n").encode())
+    cfg = {"kind": "cc-wet", "base_url": "http://cc.test/", "paths": "crawl-data/{crawl}/wet.paths.gz", "crawl": "CC-MAIN-2026-43",
+           "paths_sha256": hashlib.sha256(listing).hexdigest(), "n_shards": 5, "shards_per_unit": 2}  # fmt: skip
+    rnd = types.SimpleNamespace(pool_cfg=cfg, shard_indices=lambda scale, n: [3, 1])
+    asked = []
+
+    def urlopen(req, timeout=None):
+        asked.append(req.full_url)
+        return Sends(listing, len(listing))
+
+    monkeypatch.setattr(data.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(data.time, "sleep", lambda s: None)
+    cached = data.cache_dir() / "pool" / "wet" / "CC-MAIN-2026-43.paths.gz"
+    cached.parent.mkdir(parents=True)
+    # Under the same name, a list that is not this round's: five files, in another order.
+    # It opens, it has the right number of lines, and it would build a different corpus.
+    cached.write_bytes(gzip.compress(("\n".join(reversed(paths)) + "\n").encode()))
+    assert [s.path for s in data.round_shards(rnd, None, quiet=True)] == [paths[3], paths[1]]
+    assert asked == ["http://cc.test/crawl-data/CC-MAIN-2026-43/wet.paths.gz"] and cached.read_bytes() == listing
+    # The round's own list is not fetched twice.
+    assert [s.path for s in data.round_shards(rnd, None, quiet=True)] == [paths[3], paths[1]] and len(asked) == 1
+    # One cut short on disk is fetched again like a wrong one.
+    cached.write_bytes(listing[:40])
+    assert [s.url for s in data.round_shards(rnd, None, quiet=True)] == ["http://cc.test/" + paths[3], "http://cc.test/" + paths[1]] and len(asked) == 2
+    # With no hash to go by, a list that cannot be read is removed, and the next run fetches it.
+    rnd.pool_cfg = {**cfg, "paths_sha256": ""}
+    cached.write_bytes(listing[:40])
+    with pytest.raises(OSError, match="file list of CC-MAIN-2026-43 is damaged"):
+        data.round_shards(rnd, None, quiet=True)
+    assert not cached.exists() and len(data.round_shards(rnd, None, quiet=True)) == 2 and len(asked) == 3
 
 
 def test_a_crawl_id_is_checked_where_it_becomes_a_file_name():

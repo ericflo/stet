@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from functools import cache
 from importlib import resources
 
-HARNESS_VERSION = "0.2.1"
+HARNESS_VERSION = "0.2.2"
 
 
 @dataclass(frozen=True)

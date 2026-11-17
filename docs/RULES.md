@@ -66,7 +66,7 @@ entries. When more than 3 are waiting, entries from people who have graded for o
 the last two weeks go first.
 
 Rounds never overlap. If one is still being graded when the next is due, the next is
-drawn at the first ten-minute mark after it settles.
+drawn at the first ten-minute mark that is at least six minutes after it settles.
 
 ## The corpus
 
@@ -90,8 +90,9 @@ One line per output document. Line order is training order: the trainer does not
 ```
 
 - **Cutting, reordering and repeating are free.**
-- **New text is ink, and there is almost none.** Literal text, and copies shorter than 64
-  bytes that are not a whole document, are ink. A script may train the student on at most
+- **New text is ink, and there is almost none.** Literal text and copies shorter than 64
+  bytes are ink. The one exception is a whole short document kept on a line of its own.
+  A script may train the student on at most
   0.1% ink, counted in tokens: 40,000 tokens at the official scale. That is enough for
   separators and small repairs and nothing else. It is what makes this an editing
   competition: without it the winning move is to ignore the corpus and ship a dataset.
@@ -101,7 +102,7 @@ One line per output document. Line order is training order: the trainer does not
 - Output documents that contain the opening of a long exam sentence are dropped, whatever
   they are made of.
 - Limits: 64 MB per script, 1 MB per line and per output document, 20,000 pieces joined
-  in one document.
+  in one document, and no line nested more than 16 brackets deep (the lines above need 3).
 
 ## The exam
 
@@ -215,8 +216,9 @@ Every number in the test is an anchor's grade. The first record of a season goes
 way, with the unedited corpus standing in for the holder.
 
 One lucky round never makes a record, and neither does resubmitting the leader with a
-different seed: in simulation, with the noise measured at the practice scale, a copy of
-the holder takes the record less than once in a thousand tries. The price is patience. A real lead well clear of the margin is confirmed
+different seed: in simulation, with the noise measured so far, a copy of the holder
+takes the record about twice in a thousand tries. The price is patience. A real lead well
+clear of the margin is confirmed
 almost always, though it can take all 40 rounds; one that only just clears it may never
 be. [Experiments](EXPERIMENTS.md#what-the-record-rule-can-tell-apart) has the numbers.
 
@@ -235,18 +237,22 @@ be. [Experiments](EXPERIMENTS.md#what-the-record-rule-can-tell-apart) has the nu
   tolerance itself gets measured across GPUs.
 - Volunteers are assigned their work. They cannot choose it, are offered an entry once,
   never grade their own, and cannot see any grade or the round's unedited loss until the
-  round settles. A round waits up to 45 minutes after the anchor's last grade for
-  volunteers who are still at work, if a grade of theirs has agreed before. A volunteer it
+  round settles. A round waits up to 45 minutes after the anchor finished its last entry
+  for volunteers who are still at work, if a grade of theirs has agreed before. A volunteer it
   had to give up on, or whose job ran out of time unreported, is offered no work for a day.
-- A grade that differs from the anchor's, with no other volunteer finding the same, is a
-  strike. With three strikes, and more than one for every ten grades that agreed, an
-  account is given no grading work for two weeks after the latest. It can still enter.
+- A grade that differs from the anchor's is a strike, unless two volunteers who have
+  each agreed with an anchor before stand behind it (next). With three strikes, and more
+  than one for every ten grades that agreed, an account is given no grading work for two
+  weeks after the latest. It can still enter.
 - When two volunteers who have each agreed with an anchor before differ from the anchor
-  and agree with each other, neither is struck and the entry says so: the anchor's grade
-  may be the one that is wrong. The score stays the anchor's until the organisers have
-  looked.
+  and agree with each other, neither is struck, nor is anyone else who found what they
+  found, and the entry says so: the anchor's grade may be the one that is wrong. The
+  score stays the anchor's until the organisers have looked.
 - Agreeing about an entry that left the corpus as it was earns no standing. Its loss is
-  the round's unedited loss, which every grader measures anyway.
+  the round's unedited loss, which every grader measures anyway. Nor does agreeing that
+  a script is invalid, which is decided before anything is trained.
+- If the anchors cannot grade a script at all, volunteers' grades of it are published
+  with nothing beside them, and count for and against nobody.
 - Grades come from NVIDIA (CUDA) and AMD (ROCm) GPUs only, so that every grade uses the
   same arithmetic.
 

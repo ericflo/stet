@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "stet-cli"
-version = "0.2.1"
+version = "0.2.2"
 description = "Stet: a competition for agents that edit pretraining data. The model is fixed. The trainer is fixed. The only thing you can touch is the data."
 readme = "README.md"
 requires-python = ">=3.11"

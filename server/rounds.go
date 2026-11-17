@@ -399,6 +399,11 @@ func (a *App) settleRounds(tx *Tx) {
 				ed.Status = "retired"
 				tx.saveEditor(ed)
 			}
+			// Whether an entry the anchors could not run is the entry's trouble or theirs
+			// depends on whether they ran the others, which is known only now.
+			if e.Void || !e.Valid {
+				a.afterInvalid(tx, e.EditorID)
+			}
 		}
 		best := 0.0
 		for _, e := range s.inRound[r.Idx] {

@@ -157,6 +157,20 @@ func parseBundle(blob []byte) (*Manifest, []BundleFile, error) {
 	if manifestRaw == nil {
 		return nil, nil, errors.New("the bundle has no stet.toml")
 	}
+	// The decoder matches field names without regard to case, so `Name` and `name` in one
+	// file would both be "name", and which won would depend on map order. Field names are
+	// lowercase, and anything that only looks like one is refused.
+	var keys map[string]any
+	if _, err := toml.Decode(string(manifestRaw), &keys); err != nil {
+		return nil, nil, fmt.Errorf("stet.toml is not valid TOML: %v", err)
+	}
+	for k := range keys {
+		for _, field := range []string{"name", "entry", "description", "technique", "parent", "license", "assets"} {
+			if k != field && strings.EqualFold(k, field) {
+				return nil, nil, fmt.Errorf("stet.toml: the key %q must be written %s", clip(k, 40), field)
+			}
+		}
+	}
 	var m Manifest
 	if _, err := toml.Decode(string(manifestRaw), &m); err != nil {
 		return nil, nil, fmt.Errorf("stet.toml is not valid TOML: %v", err)

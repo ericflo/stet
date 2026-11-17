@@ -9,6 +9,9 @@ the order the student is trained in. A line is one of:
     {"s": [[123, 0, 900], "text"]}    any mix of copies [doc, start, end] and literal text
     {"t": "text"}                     a new document made only of literal text
 
+A line may nest lists and objects at most 16 deep (the forms above need three). A line
+nested deeper is invalid.
+
 Cuts, reordering and repetition are free. Ink is scarce: literal text, and copies too short
 to be honest quotations, are charged against a small ink budget counted in tokens. Byte
 offsets are into the document's UTF-8 bytes and are snapped forward to a character boundary.
@@ -46,6 +49,13 @@ from .spec import Scale, Season
 # (see materialize); the byte limit only bounds memory, and changes no result.
 TOKENIZE_BATCH = 1024
 TOKENIZE_BYTES = 4 << 20
+
+# How deep a line may nest lists and objects. The forms a line can take need three levels;
+# the limit is a rule so that whether a line is valid does not depend on the interpreter
+# that reads it. Without one it would: how deep a JSON parser can recurse is different in
+# every version of Python, so a line nested a few thousand deep would be valid JSON to one
+# grader and "not valid JSON" to the next.
+MAX_DEPTH = 16
 
 
 class ScriptError(ValueError):
@@ -115,6 +125,23 @@ def file_sha256(path: str | Path, max_bytes: int) -> str:
         while chunk := f.read(1 << 20):
             h.update(chunk)
     return h.hexdigest()
+
+
+def too_deep(obj, limit: int = MAX_DEPTH) -> bool:
+    """Whether a parsed line nests lists and objects more than `limit` deep.
+
+    Every container counts, under any key: 123 is 0 deep, {"d": 1} is 1, and
+    {"d": 1, "k": [[0, 900]]} is 3. It goes down a level at a time and never recurses, so
+    it gives the same answer for a line 17 deep and a line 100,000 deep, on any Python.
+    """
+    if obj.__class__ is not dict and obj.__class__ is not list:
+        return False
+    level = [obj]
+    for _ in range(limit):
+        level = [v for c in level for v in (c.values() if c.__class__ is dict else c) if v.__class__ is list or v.__class__ is dict]
+        if not level:
+            return False
+    return True
 
 
 def _snap(buf, pos: int, end: int) -> int:
@@ -325,8 +352,16 @@ def materialize(
                 continue
             try:
                 obj = json.loads(raw)
-            except (ValueError, RecursionError):
+            except RecursionError:
+                # Deeper than this interpreter's parser can follow. Another one might have
+                # parsed it, and would then find it too deep: the same verdict, in the same words.
+                raise ScriptError(f"line {line_no}: nested more than {MAX_DEPTH} deep") from None
+            except ValueError:
                 raise ScriptError(f"line {line_no}: not valid JSON") from None
+            # A line cannot nest deeper than it has opening brackets, which is quick to
+            # count and settles it for nearly every line; the rest are walked.
+            if raw.count(b"[") + raw.count(b"{") > MAX_DEPTH and too_deep(obj):
+                raise ScriptError(f"line {line_no}: nested more than {MAX_DEPTH} deep")
             # Every line up to the end of the window the budget fills in is checked, and a
             # bad one makes the script invalid. That is the rule every grader applies, so it
             # must not depend on how much text happened to be tokenised at once.

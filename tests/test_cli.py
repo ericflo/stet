@@ -145,6 +145,61 @@ def test_score_refuses_a_script_that_is_not_the_one_asked_for(monkeypatch, tmp_p
     assert "no file called" in capsys.readouterr().err
 
 
+def test_score_tells_two_versions_of_one_editor_apart(monkeypatch, tmp_path, capsys):
+    import hashlib
+
+    import zstandard
+
+    # A rated editor stays on the ladder while its owner's next version qualifies, so the
+    # two share every round for a while, and the name alone no longer says which.
+    other_raw = b'1\n{"d": 3, "k": [[0, 500]]}\n'
+    other = hashlib.sha256(other_raw).hexdigest()
+    entries = lambda sha: [  # noqa: E731
+        {"name": "prose", "owner": "alice", "version": 1, "script": {"sha256": sha}},
+        {"name": "prose", "owner": "alice", "version": 2, "script": {"sha256": other}},
+        {"name": "prose", "owner": "bob", "version": 7, "script": {"sha256": "0" * 64}},
+        {"name": "prose", "owner": "carol", "version": 3},  # no script yet: not something to grade
+    ]
+    blobs = {other: zstandard.ZstdCompressor().compress(other_raw)}
+    season, official, practice, raw, sha, packed, asked = _score_setup(monkeypatch, tmp_path, entries, blobs)
+    assert cli.script_file("alice/prose@v1", season, official).read_bytes() == raw
+    assert cli.script_file("alice/prose@2", season, official).read_bytes() == other_raw
+    assert cli.script_file("alice/prose@V2", season, official).read_bytes() == other_raw
+    with pytest.raises(KeyError):  # this test's server does not hold bob's script
+        cli.script_file("prose@v7", season, official)
+    assert asked[-1] == "/api/v1/scripts/" + "0" * 64  # but it was bob's that was asked for: his alone is a version 7
+    for ref in ("alice/prose", "prose"):
+        with pytest.raises(SystemExit):
+            cli.script_file(ref, season, official)
+        err = capsys.readouterr().err
+        # It names each with its version, and the command that picks one.
+        assert "more than one entry called 'prose'" in err and "alice/prose@v1, alice/prose@v2" in err and "stet score alice/prose@v1 --round s0-o00001" in err
+        assert ("bob/prose@v7" in err) == (ref == "prose") and "carol" not in err
+    with pytest.raises(SystemExit):
+        cli.script_file("alice/prose@v9", season, official)
+    err = capsys.readouterr().err
+    assert "no entry of that name" in err and "alice/prose@v2" in err and "bob/prose@v7" in err
+    with pytest.raises(SystemExit):
+        cli.script_file("alice/prose@latest", season, official)
+    assert "a version is written like alice/prose@v2" in capsys.readouterr().err
+
+
+def test_the_gain_line_says_what_its_noise_figure_is(capsys):
+    from stet.spec import load_season
+
+    season = load_season("s0")
+    result = {
+        "round": {"id": "s0-p00000", "kind": "practice"}, "scale": "nano", "valid": True,
+        "script": {"out_docs": 1, "src_docs": 1, "kept_doc_frac": 0.1, "out_bytes": 10, "ink_tokens": 0, "ink_budget": 8000, "passes": 1.0, "truncated": False},
+        "train": {"tokens": 10, "seconds": 1.0, "tokens_per_second": 10, "final_train_loss": 3.0},
+        "exam": {"loss": 5.5, "by_source": {"news": {"loss": 5.5}}},
+    }  # fmt: skip
+    cli.report(cli.Out(), result, {"exam": {"loss": 6.4}}, season)
+    err = capsys.readouterr().err
+    # The same script graded twice on one machine gives the same number: this is not that.
+    assert "reordering the same documents moves this by about ±0.011" in err and "treat differences under 0.03 as noise" in err and "run-to-run" not in err
+
+
 # --- what a run writes down -------------------------------------------------------------------
 
 

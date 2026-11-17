@@ -317,3 +317,141 @@ def test_the_sandbox_self_test_passes_here(tmp_path, monkeypatch):
 
     monkeypatch.setenv("STET_CACHE", str(tmp_path / "cache"))
     assert sandbox_selftest() == (True, "")
+
+
+# --- an editor does not outlive its run, and what it leaves is removed with care -----------------
+
+LINGER = """
+import os, subprocess, sys, time
+child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+with open(os.path.join(os.environ["STET_OUT"], "pids.tmp"), "w") as f:
+    f.write(f"{os.getpid()} {child.pid}")
+os.rename(os.path.join(os.environ["STET_OUT"], "pids.tmp"), os.path.join(os.environ["STET_OUT"], "pids"))
+time.sleep(120)
+"""
+
+
+def _gone(pid: int) -> bool:
+    for _ in range(100):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        try:  # killed, and waiting for whoever adopted it to notice
+            if open(f"/proc/{pid}/stat").read().rsplit(")", 1)[1].split()[0] == "Z":
+                return True
+        except OSError:
+            return True
+        time.sleep(0.05)
+    return False
+
+
+@pytest.mark.skipif(os.name == "nt" or not os.path.isdir("/proc/self"), reason="needs process groups and /proc")
+@pytest.mark.parametrize("trouble", [KeyboardInterrupt(), OSError(5, "Input/output error")], ids=["ctrl-c", "a disk that cannot be asked"])
+def test_no_way_out_of_a_run_leaves_the_editor_running(corpus, tmp_path, monkeypatch, trouble):
+    from stet import runner
+
+    work = tmp_path / "work"
+    pids = work / "out" / "pids"
+    real = runner.shutil.disk_usage
+
+    def disk_usage(path):
+        if pids.exists():
+            raise trouble  # in the middle of the run, with the editor and its child alive
+        return real(path)
+
+    monkeypatch.setattr(runner.shutil, "disk_usage", disk_usage)
+    with pytest.raises(type(trouble)):
+        run_editor(editor(tmp_path, LINGER), "python editor.py", corpus, RND, SCALE, work, 60)
+    monkeypatch.undo()
+    # Whoever called is about to remove the work directory. Nothing is left to write in it.
+    for pid in map(int, pids.read_text().split()):
+        assert _gone(pid)
+    assert runner.remove_tree(work) and not work.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX only")
+def test_a_directory_moved_while_it_is_being_removed_takes_nothing_else_with_it(tmp_path, monkeypatch):
+    from stet import runner
+
+    # root/a holds b (with c inside) and x. Somewhere else entirely there is another x,
+    # with something in it that is not ours.
+    root, elsewhere = tmp_path / "root", tmp_path / "elsewhere"
+    (root / "a" / "b" / "c").mkdir(parents=True)
+    (root / "a" / "x").mkdir()
+    (root / "a" / "x" / "ours.txt").write_text("")
+    (elsewhere / "x").mkdir(parents=True)
+    (elsewhere / "x" / "thesis.txt").write_text("three years")
+    real, calls = runner._empty, []
+
+    def empty(fd):
+        calls.append(fd)
+        if len(calls) == 4:  # root, a, b, and now c: while we are down here, b is moved away
+            os.rename(root / "a" / "b", elsewhere / "b")
+        return sorted(real(fd), reverse=True)  # b before x
+
+    monkeypatch.setattr(runner, "_empty", empty)
+    # ".." from b is no longer a. The names still to do there ("b" itself, then "x") are
+    # a's; used in the directory we have landed in, "x" would be someone else's.
+    assert runner.remove_tree(root) is False
+    assert (elsewhere / "x" / "thesis.txt").read_text() == "three years" and (elsewhere / "b").is_dir()
+    assert (root / "a" / "x" / "ours.txt").exists()  # it stopped; it did not guess
+    monkeypatch.undo()
+    assert runner.remove_tree(root) and not root.exists()  # and with nothing moving, it finishes
+
+
+CHATTY = """
+import os, sys
+line = "progress " + "." * 110 + "\\n"
+for i in range(20000):  # about 2.4 MB, more than the log keeps
+    sys.stdout.write(line)
+sys.stdout.flush()
+raise RuntimeError("the real reason: the tokenizer file is missing")
+"""
+
+
+def test_what_an_editor_said_last_is_what_is_reported(corpus, tmp_path):
+    from stet import runner
+
+    run = run_editor(editor(tmp_path, CHATTY), "python editor.py", corpus, RND, SCALE, tmp_path / "work", 60)
+    assert run.status == "error" and run.exit_code == 1
+    # The log file holds the first megabyte. The reason it stopped came after that.
+    log = (tmp_path / "work" / "editor.log").read_bytes()
+    assert len(log) == runner.LOG_LIMIT_BYTES and b"the real reason" not in log and log.startswith(b"progress")
+    assert "RuntimeError: the real reason: the tokenizer file is missing" in run.log_tail and "Traceback" in run.log_tail
+    assert len(run.log_tail) <= 4000 and "the real reason" in run.to_dict()["log_tail"]
+    # A quiet editor's output is all there, as before.
+    run = run_editor(editor(tmp_path, "print('one line')"), "python editor.py", corpus, RND, SCALE, tmp_path / "w2", 60)
+    assert run.log_tail == "one line\n"
+
+
+WAIT = """
+import os, time
+out = os.environ["STET_OUT"]
+%s
+open(os.path.join(out, "started"), "w").close()
+time.sleep(120)
+"""
+
+
+@pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="needs POSIX permissions that apply to this user")
+def test_a_low_disk_with_output_that_cannot_be_measured_is_the_editors_error(corpus, tmp_path, monkeypatch):
+    from stet import runner
+
+    real = runner.shutil.disk_usage
+    for n, (body, hidden) in enumerate((("", False), ('os.mkdir(os.path.join(out, "x"), 0o300)', True))):
+        work = tmp_path / f"work{n}"
+        started = work / "out" / "started"
+        # Plenty of room until the editor is running; none from then on, and none after it is gone.
+        monkeypatch.setattr(runner.shutil, "disk_usage", lambda p, started=started: type("U", (), {"free": 1 << 20})() if started.exists() else real(p))
+        if not hidden:
+            # Nothing of the editor's accounts for it: the machine's disk is full, and no editor is blamed.
+            with pytest.raises(runner.HarnessError, match="still low without it"):
+                run_editor(editor(tmp_path, WAIT % body), "python editor.py", corpus, RND, SCALE, work, 60)
+        else:
+            # What the editor wrote cannot be added up, because the editor made it so. That
+            # is not the machine's failure, and an anchor does not stop for it.
+            run = run_editor(editor(tmp_path, WAIT % body), "python editor.py", corpus, RND, SCALE, work, 60)
+            assert run.status == "error" and run.reason == "the editor ran the disk low and made part of its output directory unreadable"
+        monkeypatch.undo()
+        assert runner.remove_tree(work)

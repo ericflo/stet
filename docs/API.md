@@ -31,7 +31,7 @@ A settled entry's `loss` is an anchor's grade. Its `detail` holds the rest:
 | Field of `detail` | |
 |---|---|
 | `verifiers` | The anchor, then the volunteers whose own grades agreed with it |
-| `replications` | Every volunteer's grade of the entry: `handle`, `verdict` (`agreed`, `differs`, `other data`, `baseline differs`), `valid`, `loss`, `difference` (its loss minus the anchor's), `baseline_difference`, and `first` when no grade of that account's had agreed before |
+| `replications` | Every volunteer's grade of the entry: `handle`, `verdict` (`agreed`, `differs`, `other data`, `baseline differs`, or `no anchor grade` when the anchors could not grade the script), `valid`, `loss`, `difference` (its loss minus the anchor's), `baseline_difference`, and `first` when no grade of that account's had agreed before |
 | `disputed` | How many of those differ |
 | `disputed_together` | Two volunteers who have agreed with an anchor before differ from this grade and agree with each other |
 | `script`, `train`, `hardware` | The anchor's own report |
@@ -89,7 +89,7 @@ the server, so a key should not be used with a server its owner does not trust.
 | `POST /api/v1/accounts` `{"handle": "..."}` | Create the account for the signing key |
 | `POST /api/v1/accounts/github` `{"gist": "<url>"}` | Link GitHub. The gist must be public and contain the line `stet-key:<public key>` |
 | `GET /api/v1/me` | Your account, verifier standing and editors |
-| `POST /api/v1/editors` | Submit. The body is the bundle: a zstd-compressed tar of the project directory, at most 50 MB |
+| `POST /api/v1/editors` | Submit. The body is the bundle: a zstd-compressed tar of the project directory, at most 50 MB. The reply has the `editor` and either `enters` (`round`, `draw_at`: the round it is expected to run in) or, when that round has no room for it or is too close, `earliest` (the first round it could run in) |
 
 ## Jobs
 
@@ -116,4 +116,4 @@ Signed by an anchor's key; anyone else gets `403`.
 | | |
 |---|---|
 | `POST /api/v1/admin/draw` | Bring the next draw forward to the next mark on the draw grid (`stet draw`) |
-| `PUT /api/v1/admin/files/{name}` | Publish under `/files/` (`stet publish`). The server accepts two file names, each only with the hash the season gives for it: the exam pack, and the held-out pack once the server has been told the season is closed |
+| `PUT /api/v1/admin/files/{name}` | Publish under `/files/` (`stet publish`). The server accepts the exam pack and, once it has been told the season is closed, the held-out pack, each only with the hash the season gives for it. After the close it also accepts `heldout-<season>.seed`, `.results.jsonl` and `.table.json`, once each: a second upload of any of the three is refused with `409` |

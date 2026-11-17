@@ -43,6 +43,12 @@ def test_a_report_that_landed_before_the_error_is_not_an_error(monkeypatch):
     monkeypatch.setattr(client, "request", lambda *a, **k: (_ for _ in ()).throw(answers.pop(0)))
     monkeypatch.setattr(client.time, "sleep", lambda s: None)
     assert client.report("/api/v1/jobs/7/result", {}, key=None) == {"status": "recorded"}
+    # Only "done" means it landed. A refusal heard on the second try is still a refusal,
+    # and so is anything else the server has to say about a job that is over.
+    for said in ("this job was already refused", "this job was already released", "this entry already has that grade", "this entry has already been edited"):
+        answers[:] = [client.ApiError(503, "try again"), client.ApiError(409, said)]
+        with pytest.raises(client.ApiError, match=said):
+            client.report("/api/v1/jobs/7/result", {}, key=None)
 
 
 def test_a_refused_report_is_not_retried(monkeypatch):
@@ -80,6 +86,21 @@ class FakeResponse:
     def read(self, n=-1):
         self.asked.append(n)
         return self.body if self.body is not None else b"x" * n
+
+
+def test_an_answer_cut_short_is_asked_for_again_not_taken_for_the_whole(monkeypatch):
+    # A connection that closes early hands over what had arrived and raises nothing. The
+    # caller would take a truncated script for the wrong bytes and hand its job back.
+    short = FakeResponse(b"x" * 1000)
+    short.headers = {"Content-Length": "5000"}
+    monkeypatch.setattr(client.urllib.request, "urlopen", lambda req, timeout=0: short)
+    with pytest.raises(client.ApiError, match="cut short") as e:
+        client.request("GET", "/api/v1/scripts/" + "ab" * 32, raw=True, limit=1 << 20)
+    assert e.value.status == 0 and not isinstance(e.value, client.WrongBytes)  # status 0: retried like any lost connection
+    whole = FakeResponse(b"x" * 1000)
+    whole.headers = {"Content-Length": "1000"}
+    monkeypatch.setattr(client.urllib.request, "urlopen", lambda req, timeout=0: whole)
+    assert client.request("GET", "/api/v1/scripts/" + "ab" * 32, raw=True, limit=1 << 20) == b"x" * 1000
 
 
 def test_an_answer_is_read_up_to_its_limit_and_no_further(monkeypatch):
@@ -271,9 +292,14 @@ def test_a_job_whose_downloads_fail_is_kept_and_waited_out(loop, capsys):
     with pytest.raises(Stop):
         client.cmd_verify(Args())
     assert loop.graded == [1] * 7 + [2]
-    assert loop.slept == [60, 120, 240, 480, 960, 1920, 3600, 3600]  # minutes, then an hour at most; it does not give up
-    # Half an hour of that (60 + 120 + 240 + 480 + 960 s) and the job goes back, once, for someone else to try.
-    assert [p for p, _ in loop.released] == ["/api/v1/jobs/1/release"]
+    # A job is kept for half an hour and not a second longer (60 + 120 + 240 + 480 + 900 s):
+    # the server stops waiting for a job it has heard nothing about. Then it goes back, and
+    # the wait that follows holds nothing. Handed the same job again, it is kept for half an
+    # hour again; a job it has not seen before starts with a short wait.
+    assert loop.slept == [60, 120, 240, 480, 900, 1920, 1800, 60]
+    # The loop ends here with job 2 still kept (the test's server goes away), and a
+    # volunteer hands back whatever it holds on the way out.
+    assert loop.released == [("/api/v1/jobs/1/release", "FetchError: could not fetch crawl-data/x.warc.wet.gz: timed out"), ("/api/v1/jobs/2/release", "the verifier stopped")]
     assert "Keeping the job" in capsys.readouterr().err
 
     # What will be the same next time is handed back at once: bytes that are not what
@@ -283,15 +309,16 @@ def test_a_job_whose_downloads_fail_is_kept_and_waited_out(loop, capsys):
         with pytest.raises(Stop):
             client.cmd_verify(Args())
         assert loop.released[-1][0] == f"/api/v1/jobs/{n}/release"
-    assert len(loop.released) == 3
+    assert len(loop.released) == 4  # each once
 
     # A verifier asked to do one job does not sit on it.
     loop.claims, loop.grade = [a_job(id=20)], FetchError("timed out")
     args = Args()
     args.once = True
+    before = len(loop.released)
     with pytest.raises(SystemExit):
         client.cmd_verify(args)
-    assert loop.released[-1][0] == "/api/v1/jobs/20/release"
+    assert [p for p, _ in loop.released[before:]] == ["/api/v1/jobs/20/release"]  # once, not once more on the way out
 
 
 def test_a_job_that_fails_here_is_tried_again_before_it_is_handed_back(loop, capsys):
@@ -388,7 +415,7 @@ def test_what_a_verifier_reports_and_prints_has_nothing_of_the_held_out_exam_in_
     held = {"loss": 4.61234, "by_source": {"news": {"loss": 4.61234}}, "exam_sha256": "ee" * 32}
     base = {"exam": {"loss": 5.3, "by_source": {"news": {"loss": 5.3}}}, "heldout": {"loss": 5.56789, "by_source": {"news": {"loss": 5.56789}}}}
     result = {
-        "harness": "0.2.1", "season": "s0", "scale": "micro", "round": {"id": "s0-o00007"}, "valid": True, "script_sha256": SHA,
+        "harness": "0.2.2", "season": "s0", "scale": "micro", "round": {"id": "s0-o00007"}, "valid": True, "script_sha256": SHA,
         "exam_sha256": "cd" * 32, "script": {"out_docs": 5}, "exam": exam, "heldout": held,
         "train": {"curve": [[1, 2.0]], "seconds": 1.0, "tokens_per_second": 5, "final_train_loss": 3.0},
     }  # fmt: skip
@@ -682,7 +709,7 @@ def test_what_the_held_out_exam_said_is_kept_here_and_never_reported():
     held = {"loss": 4.61234, "by_source": {"news": {"loss": 4.61234}}, "exam_sha256": "ee" * 32}
     base = {"exam": {"loss": 5.3, "by_source": {"news": {"loss": 5.3}}}, "heldout": {"loss": 5.56789, "by_source": {"news": {"loss": 5.56789}}}}
     result = {
-        "harness": "0.2.1", "season": "s0", "scale": "micro", "round": {"id": "s0-o00007"}, "valid": True, "script_sha256": "ab" * 32,
+        "harness": "0.2.2", "season": "s0", "scale": "micro", "round": {"id": "s0-o00007"}, "valid": True, "script_sha256": "ab" * 32,
         "exam_sha256": "cd" * 32, "script": {}, "exam": exam, "heldout": held, "train": {"curve": [[1, 2.0]]},
     }  # fmt: skip
     job = {"id": 9, "kind": "grade", "editor": {"id": "f" * 64, "owner": "ann", "name": "sieve", "version": 2}}
@@ -769,3 +796,356 @@ def test_the_held_out_exam_is_not_published_by_a_slip_of_the_hand(monkeypatch, t
     client.cmd_publish(PublishArgs(other))  # anything else is published as before
     client.cmd_publish(PublishArgs(pack, close_season="s0"))  # and this, when it is meant
     assert sent == ["/api/v1/admin/files/exam-pack.jsonl.zst", "/api/v1/admin/files/heldout-s0.jsonl.zst"]
+
+
+# --- what stops a verifier, and what becomes of the job it holds -----------------------------
+
+
+def a_beacon(number: int, signature: bytes = b"\x01" * 48) -> dict:
+    import hashlib
+
+    return {"round": number, "signature": signature.hex(), "randomness": hashlib.sha256(signature).hexdigest()}
+
+
+def test_a_relay_that_cannot_be_read_has_said_nothing(monkeypatch):
+    from stet.data import FetchError
+    from stet.spec import load_season
+
+    season = load_season("s0")
+    relays = season.raw["beacon"]["relays"]
+    good = a_beacon(1234)
+    beacon = {"round": 1234, "randomness": good["randomness"].upper()}
+    asked = []
+
+    def serve(*answers):
+        answers = list(answers)
+        asked.clear()
+
+        def urlopen(req, timeout=0):
+            asked.append(req.full_url)
+            a = answers.pop(0)
+            if isinstance(a, Exception):
+                raise a
+            return FakeResponse(a if isinstance(a, bytes) else json.dumps(a).encode())
+
+        monkeypatch.setattr(client.urllib.request, "urlopen", urlopen)
+
+    # An error object, a page that is not JSON, a list, a beacon for another round, one whose
+    # randomness is not the hash of its signature, a relay that is down: each is that relay
+    # having said nothing, and the next one is asked.
+    unreadable = [{"error": "internal"}, b"<html>busy</html>", [1, 2], a_beacon(1235), {**good, "randomness": "00" * 32}, {"round": 1234, "randomness": good["randomness"]}, OSError("timed out")]
+    for bad in unreadable:
+        serve(bad, good)
+        client.verify_beacon(season, beacon)
+        assert len(asked) == 2 and asked[0].startswith(relays[0]) and asked[1].startswith(relays[1])
+    # No relay with anything readable to say is a download that failed, to be waited out.
+    # It is not a reason to refuse the round.
+    serve(*[{"error": "internal"}] * len(relays))
+    with pytest.raises(FetchError, match="no drand relay gave a readable answer") as e:
+        client.verify_beacon(season, beacon)
+    assert len(asked) == len(relays) and not isinstance(e.value, ValueError)
+    # A well-formed beacon that says something else is. It is not put to a vote.
+    other = a_beacon(1234, b"\x02" * 48)
+    serve({"error": "internal"}, other, good)
+    with pytest.raises(ValueError, match="does not match drand round 1234"):
+        client.verify_beacon(season, beacon)
+    assert len(asked) == 2
+
+
+class AnchorArgs(Args):
+    edits = True
+    no_sandbox = True  # with STET_DEV=1: these tests run no editor, and need no bubblewrap
+
+
+@pytest.fixture
+def anchor(loop, monkeypatch):
+    monkeypatch.setenv("STET_DEV", "1")
+    return loop
+
+
+def test_an_anchor_that_cannot_vouch_for_a_round_stops_with_the_job_in_hand(anchor, capsys):
+    # Handing the job back would spend one of the few attempts an entry gets, and going on
+    # to take and hand back the round's other jobs would void every entry in it.
+    anchor.claims = [a_job(id=1), a_job(id=2)]
+    anchor.grade = client.RoundRefused("round s0-o00001: the seed does not follow from the beacon and the crawl")
+    with pytest.raises(SystemExit) as e:
+        client.cmd_verify(AnchorArgs())
+    assert e.value.code == 1 and anchor.graded == [1] and not anchor.released and len(anchor.claims) == 1
+    err = capsys.readouterr().err
+    assert "does not follow" in err and "Stopping with the job still held" in err
+
+    # A volunteer hands it back and takes no more of that round this session.
+    anchor.claims, anchor.graded[:] = [a_job(id=3), a_job(id=4), a_job(id=5, round={"id": "s0-o00002"})], []
+    anchor.grade = [client.RoundRefused("the seed does not follow"), None]
+    with pytest.raises(Stop):
+        client.cmd_verify(Args())
+    assert anchor.graded == [3, 5] and [p for p, _ in anchor.released] == ["/api/v1/jobs/3/release", "/api/v1/jobs/4/release"]
+
+
+def test_an_anchor_does_not_walk_away_from_a_round_over_refused_results(anchor):
+    # Two results the server will not have is a reason for a volunteer to leave the round
+    # alone. An anchor that took and handed back every other job of it would void them all.
+    anchor.claims = [a_job(id=n) for n in (1, 2, 3)]
+    anchor.report = client.ApiError(400, "the exam score is out of range")
+    with pytest.raises(Stop):
+        client.cmd_verify(AnchorArgs())
+    assert anchor.graded == [1, 2, 3]
+
+
+def test_a_result_that_could_not_be_delivered_is_not_a_refusal(anchor, capsys):
+    # The server's file store is failing: every report answers 500 until report() gives up.
+    # Nobody refused anything, so the round's copy is not dropped and no refusal is counted.
+    for err in (client.ApiError(0, "gave up reporting after many attempts"), client.ApiError(500, "could not store the script"), client.ApiError(426, "upgrade")):
+        anchor.claims, anchor.report = [a_job(id=1), a_job(id=2)], err
+        anchor.graded[:], anchor.released[:] = [], []
+        # An anchor stops with the job still its own: started again it is given the same
+        # job, and the entry has lost none of its attempts.
+        with pytest.raises(SystemExit) as e:
+            client.cmd_verify(AnchorArgs())
+        assert e.value.code == 1 and anchor.graded == [1] and not anchor.released and not anchor.forgot
+        assert "could not be delivered" in capsys.readouterr().err
+        # A volunteer hands the job back, says why, and carries on.
+        anchor.claims, anchor.graded[:] = [a_job(id=3), a_job(id=4)], []
+        with pytest.raises(Stop):
+            client.cmd_verify(Args())
+        assert anchor.graded == [3, 4] and anchor.released == [(f"/api/v1/jobs/{n}/release", "the result could not be delivered") for n in (3, 4)]
+        assert "could not be delivered" in capsys.readouterr().err and not anchor.forgot
+
+
+def test_a_no_that_is_not_about_the_round_is_handed_back_and_counts_against_no_round(anchor, capsys):
+    # 413, 403, 404: the server will never take this result. An anchor that stopped with the
+    # job held would be given it again and do it again, for ever, and the round would never
+    # settle. Handed back, the entry runs out of attempts and the round moves on. It is no
+    # disagreement about the round either: the copy on disk is kept and nothing is counted.
+    for status in (403, 404, 413):
+        anchor.claims, anchor.report = [a_job(id=1), a_job(id=2), a_job(id=3)], client.ApiError(status, "no")
+        anchor.graded[:], anchor.released[:] = [], []
+        with pytest.raises(Stop):
+            client.cmd_verify(AnchorArgs())
+        assert anchor.graded == [1, 2, 3] and [r for _, r in anchor.released] == ["result refused"] * 3 and not anchor.forgot
+        assert "did not accept the result" in capsys.readouterr().err
+        anchor.claims, anchor.graded[:], anchor.released[:] = [a_job(id=4), a_job(id=5), a_job(id=6)], [], []
+        with pytest.raises(Stop):
+            client.cmd_verify(Args())
+        assert anchor.graded == [4, 5, 6] and len(anchor.released) == 3 and not anchor.forgot
+
+
+def test_a_refusal_heard_on_the_second_try_is_still_a_refusal(loop):
+    # "Already refused" is what a retry hears when the first answer was lost. It is the
+    # refusal, not a result that came too late: the round's copy is dropped and rebuilt once.
+    loop.claims = [a_job(id=n) for n in (1, 2, 3)]
+    loop.report = client.ApiError(409, "this job was already refused")
+    with pytest.raises(Stop):
+        client.cmd_verify(Args())
+    assert loop.graded == [1, 2] and loop.forgot == ["s0-o00001"]
+    for late in ("this job was already released", "this entry already has that grade", "this job ended before your result arrived: its time ran out"):
+        loop.claims, loop.report = [a_job(id=n, round={"id": "s0-o00005"}) for n in (4, 5, 6)], client.ApiError(409, late)
+        loop.graded[:] = []
+        with pytest.raises(Stop):
+            client.cmd_verify(Args())
+        assert loop.graded == [4, 5, 6] and loop.forgot == ["s0-o00001"]
+
+
+def test_a_hand_back_the_server_never_heard_is_not_called_one(loop, monkeypatch, capsys):
+    served = client.request
+    lost = []
+
+    def request(method, path, body=None, **kw):
+        if path.endswith("/release"):
+            lost.append(path)
+            raise client.ApiError(503, "could not make the write durable")
+        return served(method, path, body, **kw)
+
+    monkeypatch.setattr(client, "request", request)
+    job = a_job(id=5, expires_at=4_102_444_800)  # 2100-01-01 00:00 UTC
+    loop.claims, loop.grade, loop.interrupt_at = [job], RuntimeError("CUDA error: device lost"), 60  # Ctrl-C between two tries
+    client.cmd_verify(Args())
+    err = capsys.readouterr().err
+    # Asked three times, a few seconds apart, and then the truth: it is still held.
+    assert lost == ["/api/v1/jobs/5/release"] * 3 and loop.slept == [60, 2, 5]
+    assert "handed back" not in err and "still held until 00:00 UTC" in err and "costs this account a day" in err and "Run `stet verify` again" in err
+
+    # The second try getting through is a hand-back like any other.
+    answers = [client.ApiError(0, "cannot reach"), {}]
+
+    def flaky(method, path, body=None, **kw):
+        a = answers.pop(0)
+        if isinstance(a, Exception):
+            raise a
+        return a
+
+    monkeypatch.setattr(client, "request", flaky)
+    assert client._release(5, None, "interrupted") is True and not answers
+    # And a server that says the job is not ours to hand back has nothing of ours.
+    monkeypatch.setattr(client, "request", lambda *a, **k: (_ for _ in ()).throw(client.ApiError(404, "no such job for this account")))
+    assert client._release(5, None, "interrupted") is True
+
+
+def test_a_volunteer_hands_its_job_back_on_every_way_out(loop, monkeypatch, capsys):
+    from stet.data import FetchError
+
+    # Kept through a failed download, and then the server says this client is out of date.
+    answers = [{"job": a_job(id=8)}, client.ApiError(426, "this server speaks harness 0.9; upgrade")]
+
+    def request(method, path, body=None, **kw):
+        if path == "/api/v1/season":
+            return {"scale": "nano"}
+        if path.endswith("/release"):
+            loop.released.append((path, body["reason"]))
+            return {}
+        a = answers.pop(0)
+        if isinstance(a, Exception):
+            raise a
+        return a
+
+    monkeypatch.setattr(client, "request", request)
+    loop.grade = FetchError("timed out")
+    with pytest.raises(SystemExit):
+        client.cmd_verify(Args())
+    assert loop.released == [("/api/v1/jobs/8/release", "the verifier stopped")] and "The job in hand was handed back." in capsys.readouterr().err
+
+    # Something nobody expected, in the middle of a job.
+    answers[:] = [{"job": a_job(id=9)}]
+    monkeypatch.setattr(client, "slim_result", lambda result, base: 1 / 0)
+    loop.grade, loop.released[:] = None, []
+    monkeypatch.setattr(client, "STOP_AFTER_FAILURES", 1)
+    with pytest.raises(SystemExit):
+        client.cmd_verify(Args())
+    assert [p for p, _ in loop.released] == ["/api/v1/jobs/9/release"]  # handed back where it failed, and not twice
+
+    # A job the server took for ours before this client could make sense of it.
+    answers[:] = [{"job": a_job(id=10, kind="shell")}]
+    loop.released[:] = []
+    with pytest.raises(IndexError):  # the test's server has no more to say
+        client.cmd_verify(Args())
+    assert loop.released == [("/api/v1/jobs/10/release", "this client does not understand the job")]
+
+    # The one way out that hands nothing back: a work directory that cannot be cleared.
+    from stet import runner
+
+    answers[:] = [{"job": a_job(id=11)}]
+    loop.released[:] = []
+    monkeypatch.setattr(runner, "remove_tree", lambda path: False)
+    with pytest.raises(SystemExit):
+        client.cmd_verify(Args())
+    assert not loop.released and "could not clear" in capsys.readouterr().err
+
+
+def test_an_anchor_stopped_any_other_way_keeps_its_job(anchor, monkeypatch):
+    from stet.data import FetchError
+
+    answers = [{"job": a_job(id=8)}, client.ApiError(426, "upgrade")]
+
+    def request(method, path, body=None, **kw):
+        if path == "/api/v1/season":
+            return {"scale": "nano"}
+        if path.endswith("/release"):
+            anchor.released.append(path)
+            return {}
+        a = answers.pop(0)
+        if isinstance(a, Exception):
+            raise a
+        return a
+
+    monkeypatch.setattr(client, "request", request)
+    anchor.grade = FetchError("timed out")
+    with pytest.raises(SystemExit):
+        client.cmd_verify(AnchorArgs())
+    assert not anchor.released  # started again, it is given the same job; handing it back would spend an attempt
+
+
+def test_an_announcement_that_cannot_be_written_down_stops_nothing(loop, monkeypatch, capsys):
+    def full(season, announced, now=None):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(client, "remember_announcement", full)
+    loop.claims, loop.report = [a_job(id=1), a_job(id=2)], {"status": "pending"}
+    args = Args()
+    args.max_jobs = 2
+    client.cmd_verify(args)
+    err = capsys.readouterr().err
+    assert loop.graded == [1, 2] and not loop.released
+    assert err.count("could not write down what the server announced") == 1 and "No space left on device" in err
+
+
+def test_a_held_out_record_that_cannot_be_written_does_not_cost_the_public_grade(monkeypatch, tmp_path, capsys):
+    import sys
+    import types
+
+    import zstandard
+
+    from stet import cli
+    from stet.spec import load_season
+
+    season = load_season("s0")
+    raw = b'1\n{"d": 2}\n'
+    sha = __import__("hashlib").sha256(raw).hexdigest()
+    held = {"loss": 4.61234, "by_source": {"news": {"loss": 4.61234}}, "exam_sha256": "ee" * 32}
+    base = {"exam": {"loss": 5.3, "by_source": {}}, "heldout": {"loss": 5.56789, "by_source": {}}}
+    result = {"harness": "0.2.2", "scale": "micro", "round": {"id": "s0-o00007"}, "valid": True, "script_sha256": sha, "exam": {"loss": 4.4, "by_source": {}}, "heldout": held}
+    monkeypatch.setitem(sys.modules, "stet.pipeline", types.SimpleNamespace(baseline=lambda *a, **k: base, grade_round=lambda *a, **k: dict(result)))
+    monkeypatch.setattr(client, "_job_round", lambda season, job, out: types.SimpleNamespace(id="s0-o00007"))
+    monkeypatch.setattr(client, "request", lambda *a, **k: zstandard.ZstdCompressor().compress(raw))
+    job = {"id": 9, "kind": "grade", "script": {"sha256": sha}, "editor": {"id": "f" * 64, "owner": "ann", "name": "sieve", "version": 2}}
+    out = cli.Out()
+
+    log = client.heldout_log(season)
+    assert client.heldout_log_trouble(season) == "" and log.exists()  # what an anchor checks before it takes a job
+    got, _ = client._grade_job(job, season, None, None, None, out, tmp_path / "w1")
+    assert got["exam"]["loss"] == 4.4 and len(log.read_text().splitlines()) == 1
+
+    # Restored with the wrong mode, made read-only "to protect it", on a disk that is full:
+    # the grade that took ten minutes is still the server's to have.
+    def refuse(*a, **k):
+        raise OSError(13, "Permission denied")
+
+    monkeypatch.setattr(client, "keep_heldout", refuse)
+    capsys.readouterr()
+    got, _ = client._grade_job(job, season, None, None, None, out, tmp_path / "w2")
+    err = capsys.readouterr().err
+    assert got["exam"]["loss"] == 4.4 and "COULD NOT BE WRITTEN DOWN" in err and "Permission denied" in err and "public grade is reported" in err
+    assert "4.6123" not in err and "5.5678" not in err  # and it says so without saying what the exam said
+
+
+@pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="needs file modes that bind")
+def test_an_anchor_does_not_start_with_a_record_it_cannot_add_to(loop, monkeypatch, capsys):
+    from stet import data
+    from stet.spec import load_season
+
+    season = load_season("s0")
+    monkeypatch.setenv("STET_DEV", "1")
+    monkeypatch.setattr(data, "heldout_pack_path", lambda season: "/somewhere/heldout-s0.jsonl.zst")
+    log = client.heldout_log(season)
+    log.parent.mkdir(parents=True)
+    log.write_text("")
+    log.chmod(0o400)
+    loop.claims = [a_job()]
+    with pytest.raises(SystemExit):
+        client.cmd_verify(AnchorArgs())
+    err = capsys.readouterr().err
+    assert "cannot be written" in err and str(log) in err and "will not start" in err and not loop.graded and len(loop.claims) == 1
+    log.chmod(0o600)
+    with pytest.raises(Stop):
+        client.cmd_verify(AnchorArgs())
+    assert loop.graded == [7]
+
+
+def test_submit_says_which_round_only_when_the_server_expects_it_there(monkeypatch, tmp_path, capsys):
+    from test_project import make
+
+    p = make(tmp_path, {})
+    key = client.create_key()
+    key.handle = "tester"
+    key.save()
+    args = SubmitArgs(p.path)
+    args.dry_run, args.yes = False, True
+    editor = {"name": "an-editor", "version": 1, "id": "ab" * 32}
+    for reply, said, unsaid in (
+        ({"enters": {"round": "s0-o00002", "draw_at": 0}}, "It enters round s0-o00002.", "earliest"),
+        ({"earliest": {"round": "s0-o00002", "draw_at": 0}, "message": "The queue is longer than one round can take."}, "The earliest round it can enter is s0-o00002.", "It enters"),
+        ({}, "Submitted an-editor v1", "round"),
+    ):
+        monkeypatch.setattr(client, "request", lambda *a, reply=reply, **k: {"editor": editor, "url": "http://x/editors/abab", **reply})
+        client.cmd_submit(args)
+        err = capsys.readouterr().err.split("Submitted", 1)[1]
+        assert said.replace("Submitted", "").strip() in err and unsaid not in err

@@ -91,17 +91,21 @@ the tolerance is an agreement: your name goes on the entry, and the grade and it
 time on the [verifier board](/verifiers). One outside it differs: either that verifier
 or the anchor is wrong, and `stet score` lets a third person find out which.
 
-**Differing alone is a strike; differing together is a question for the anchor.** If
-yours is the only grade that differs, it counts against your account. Three of those, and
-more than one for every ten grades that agreed, and the account gets no grading work for
-two weeks after the latest. Then it may try again: the machine may be honest and merely
-different. If another volunteer who has agreed with an anchor before finds what you
-found, neither of you is struck, and the entry is marked: its score may be the thing
-that is wrong.
+**Differing alone is a strike; differing together is a question for the anchor.** A
+grade that differs counts against your account. Three of those, and more than one for
+every ten grades that agreed, and the account gets no grading work for two weeks after
+the latest. Then it may try again: the machine may be honest and merely different. The
+exception: when two volunteers who have each agreed with an anchor before find the same
+thing against it, neither is struck, nor is anyone else who found it with them, and the
+entry is marked: its score may be the thing that is wrong. (Two are needed, and both
+with a record, because a second key costs nothing.)
 
 **What replication cannot show.** Two scores closer together than the tolerance are not
-told apart by it, and an entry that leaves the corpus unedited has the round's unedited
-loss, which every grader has already measured, so agreeing about it earns no standing.
+told apart by it. An entry that leaves the corpus unedited has the round's unedited
+loss, which every grader has already measured, and a script that is invalid is found so
+before anything is trained: agreeing about either earns no standing. And if the anchor
+cannot grade a script at all, your grade of it is published with nothing to compare it
+with.
 
 **Anyone can check anything.** `stet rounds` lists every official round, and
 `stet run --round <id>` or `stet score <script> --round <id>` recomputes any score on it,
@@ -111,7 +115,7 @@ with or without an account.
 
 A round settles as a whole, when an anchor has graded every entry in it. If a volunteer
 is part-way through a grade at that moment, the round waits for them, up to 45 minutes
-after the anchor's last grade.
+after the anchor finished its last entry.
 
 It waits only for accounts with a grade that has agreed before. A key costs nothing, and
 one that could hold a round back just by taking a job would. So until your first grade
@@ -134,18 +138,21 @@ back, the account is offered no work for a day.
 
 | Message | What it means |
 |---|---|
-| "your corpus or exam differs from the round's" | A download was cut short or a cache is stale. The verifier drops its copy of the round and rebuilds it once by itself. If it happens twice in a round, it takes no more work from that round. |
+| "your corpus or exam for ... differs from the round's ..." | A download was cut short or a cache is stale. The verifier drops its copy of the round and rebuilds it once by itself. If it happens twice in a round, it takes no more work from that round. |
 | "your unedited baseline for ... is further from the anchor's than the tolerance ..." | Your machine trains differently: usually an old PyTorch or a CPU fallback. `stet doctor` shows what is in use. The difference is listed on the round's page. |
 | "sealed until the round settles" | Normal. Your grade is in, and is compared with the anchor's when the round settles. |
-| "this entry settled before your result arrived" | The round settled while you were training. No credit. |
-| "a job this verifier took was given up on ..." | A job ran out of time with no result and without being handed back. Work is offered again a day later. |
+| "this entry settled before your result arrived ..." or "this job ended before your result arrived: the round settled first ..." | The round settled while you were training. No credit, and nothing against you. |
+| "this job ended before your result arrived: it was given up on ..." or "a job this verifier took was given up on ..." | A job ran out of time with no result and without being handed back. Work is offered again a day later. |
 | "this account is given no grading work until ..." | Three grades that differed from the anchor's with nobody else finding the same. It lifts on the date given. If you think your machine is right, tell the organisers. |
+| "the result could not be delivered ..." | The server was away or failing when your grade was ready. The job is handed back; nothing counts against you. |
 | "No work right now" | No round is open, or every open entry has its volunteers. Leave it running; it asks again. |
 | HTTP 426 | The harness changed. Reinstall with the command on the [home page](/). On an AMD GPU, set `STET_TORCH_INDEX` as you did the first time. |
 
-Pressing Ctrl-C hands the job back so that someone else can take it. A failed download is
-waited out with the job kept, a little longer each time, and handed back after about half
-an hour. A job that fails on your machine is tried again twice before it is handed back.
+Pressing Ctrl-C hands the job back so that someone else can take it, and so does stopping
+any other way the verifier gets a say in. If the server cannot be told, it says that the
+job is still held and until when: run `stet verify` again before then and it is picked up
+where it was. A failed download is waited out with the job kept, a little longer each
+time, and handed back after about half an hour. A job that fails on your machine is tried again twice before it is handed back.
 The verifier stops by itself when jobs keep failing on your machine (nine failed tries
 in a row), when the server says it is out of date or is giving this account no work, or
 when the server asks it to do something it should not.

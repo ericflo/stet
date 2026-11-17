@@ -184,7 +184,7 @@ def report(out: Out, result: dict, base: dict | None, season) -> None:
             text += f"   →   {out.bold(format_multiplier(m))} data efficiency"
         noise = ((season.raw.get("noise") or {}).get(result["scale"]) or {}).get("gain_sd")
         if noise:
-            text += out.dim(f"   (run-to-run noise is about ±{noise:.3f}; smaller differences mean nothing)")
+            text += out.dim(f"   (reordering the same documents moves this by about ±{noise:.3f}; on one round, treat differences under 0.03 as noise)")
         out.line("gain", text)
 
 
@@ -339,7 +339,8 @@ def script_file(ref: str, season, rnd) -> Path:
 
     `ref` is a file (plain, or zstd-compressed as the site serves them), the sha256 of a
     published script, or the name of an entry in the official round being replayed
-    (`tidy`, or `stet/tidy`). Anything fetched is checked against its hash.
+    (`tidy`, `stet/tidy`, or `stet/tidy@v2` when the round holds more than one version of
+    it). Anything fetched is checked against its hash.
     """
     import hashlib
     import re
@@ -388,11 +389,29 @@ def script_file(ref: str, season, rnd) -> Path:
             entries = request("GET", f"/api/v1/rounds/{rnd.id}").get("entries") or []
         except ApiError as e:
             die(str(e))
+        from .client import clean
+
         owner, _, name = ref.rpartition("/")
-        found = [e for e in entries if e.get("name") == name and (not owner or e.get("owner") == owner) and (e.get("script") or {}).get("sha256")]
-        if len(found) != 1:
-            names = ", ".join(sorted(f"{e.get('owner')}/{e.get('name')}" for e in entries if (e.get("script") or {}).get("sha256")))
-            die(f"no file called {ref!r}, and round {rnd.id} has {'more than one' if found else 'no'} entry of that name with a script. Its entries: {names or 'none yet'}")
+        name, at, version = name.partition("@")
+        wanted = re.fullmatch(r"v?([0-9]{1,6})", version.lower())
+        if at and not wanted:
+            die(f"{ref!r}: a version is written like {owner + '/' if owner else ''}{name}@v2")
+        scripted = [e for e in entries if isinstance(e, dict) and (e.get("script") or {}).get("sha256")]
+        found = [
+            e for e in scripted
+            if e.get("name") == name and (not owner or e.get("owner") == owner) and (not wanted or str(e.get("version")) == str(int(wanted.group(1))))
+        ]  # fmt: skip
+        full = lambda e: clean(f"{e.get('owner')}/{e.get('name')}@v{e.get('version')}", 100)  # noqa: E731
+        if len(found) > 1:
+            # Two versions of one editor share a round while the newer one qualifies, and two
+            # people may use one name.
+            die(
+                f"round {rnd.id} has more than one entry called {name!r} with a script: {', '.join(sorted(full(e) for e in found))}. "
+                f"Say which: stet score {full(found[0])} --round {rnd.id}"
+            )
+        if not found:
+            names = ", ".join(sorted(full(e) for e in scripted))
+            die(f"no file called {ref!r}, and round {rnd.id} has no entry of that name with a script. Its entries: {names or 'none yet'}")
         sha = str(found[0]["script"]["sha256"]).lower()
         if not re.fullmatch(r"[0-9a-f]{64}", sha):
             die("the server described that script in a way this client does not accept")

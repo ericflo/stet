@@ -45,6 +45,13 @@ anchor: after 3 failed edit jobs or 5 failed grade jobs an entry is void for the
 A restart by systemd costs no attempt: the anchor gets the same job back. Ctrl-C on an
 anchor run by hand does hand the job back, and costs one.
 
+An anchor stops by itself, with the job still held, in two cases: it cannot vouch for the
+round (the seed, the moment of the draw or the announcement does not check out), or a
+finished result could not be delivered after many tries (the server is away, or its file
+store is failing). Neither spends an attempt. systemd starts it again a minute later, it
+is given the same job, and it checks the round or does the job afresh. The log says which
+it was. A round the anchor keeps stopping on stays open until someone looks.
+
 **To add an anchor:** install the CLI there, `stet login --handle <name>`, add its public
 key (`stet whoami`) to `STET_ANCHOR_KEYS`, copy the held-out exam to it (below), and run
 `stet verify --edits` under systemd. Whoever holds an anchor key sets scores.
@@ -85,16 +92,24 @@ Back all three up somewhere private, with `key.json`. If the results file is los
 numbers can be measured again on the same anchor, at one training run per line: grading
 is deterministic on one machine.
 
-An anchor in a season with a held-out exam refuses to start without the pack, and sits
-every official student on it. `python tools/heldout_report.py ~/.config/stet/heldout/s0.jsonl`
-prints the table so far: the public leaderboard's own arithmetic, on held-out losses. Do
-not publish it, quote it, or tune a reference editor on it. Remember that you can see it
-when you choose the closing date.
+An anchor in a season with a held-out exam refuses to start without the pack, or if the
+record cannot be appended to, and sits every official student on it. If one grade's line
+cannot be written, the log says so in capitals, the public grade is reported all the same,
+and the entry is a gap to fill in (below).
+
+`python tools/heldout_report.py ~/.config/stet/heldout/s0.jsonl` prints the table so far:
+the public leaderboard's own arithmetic, on held-out losses. Do not publish it, quote it,
+or tune a reference editor on it. Remember that you can see it when you choose the closing
+date. It exits 0 when the table is whole, 1 when its arithmetic on the public losses does
+not give the public leaderboard (stop and find out why), and 2 when that checks out but
+official entries are missing from the record.
 
 The report lists any official entry the record has no line for, with the command that
 measures it again (`stet score <sha> --round <id> --heldout --json`, on the anchor). Save
 what that prints beside the record and pass the files with `--also`. Round s0-o00001 was
-graded before the held-out exam existed, so its three entries are filled in this way.
+graded before the held-out exam existed, so its three entries are filled in this way. The
+table written with `--out` lists every entry it used and says which came from the record
+and which were measured again.
 
 **Closing a season:**
 
@@ -108,7 +123,10 @@ graded before the held-out exam existed, so its three entries are filled in this
    `heldout-s0.seed`, `heldout-s0.results.jsonl` (the anchor's `heldout/s0.jsonl`) and
    `heldout-s0.table.json` (`tools/heldout_report.py --out`), each with
    `stet publish <file> --name <name>`. The build command is in
-   `tools/build_exam_pack.py`'s header.
+   `tools/build_exam_pack.py`'s header. Each of the three is published once: the server
+   refuses a second upload of the same name, so that nothing published at the close can
+   be swapped later. Check each file before sending it. A mistake after that is put right
+   in the bucket by hand, and said on the site.
 5. Put the final table on the site as a page.
 
 ## Things only the organisers hold
@@ -152,4 +170,6 @@ anchors.
 | Many volunteers listed as "turned away" on round pages | Their unedited loss is out of tolerance on some GPU type | The same: the tolerance is a guess until this is measured |
 | The anchor exits saying a pack "is not the held-out exam that season s0 committed to" | Wrong or damaged pack | Restore it from backup |
 | The anchor refuses to start without the held-out pack | The pack is not on this machine | Copy it from backup; official grades without it leave holes in the final table. Only a development server (`STET_DEV=1`) runs without it |
+| The anchor's log repeats "Stopping with the job still held" | It cannot vouch for a round, or cannot deliver a result | Read the line before it. A result that will not deliver is the server or its bucket. A round it will not vouch for needs a person: compare the round's beacon with drand's before anything else |
+| The anchor exits saying the held-out record "cannot be written" | Permissions or a full disk under `~/.config/stet/heldout/` | Put it right; the anchor does not grade until it can keep the record |
 | `stet verify` says another verifier is running with this key | One verifier per key | Stop the other one, or give the second its own `STET_CONFIG` and account |

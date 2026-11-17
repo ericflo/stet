@@ -22,6 +22,7 @@ import shutil
 import sys
 import time
 import urllib.request
+import zlib
 from pathlib import Path
 
 import numpy as np
@@ -33,6 +34,11 @@ USER_AGENT = f"stet/{HARNESS_VERSION}"
 DEFAULT_API = "https://api.stetrun.com"
 FETCH_TRIES = 4
 FETCH_LIMIT_BYTES = 2 << 30  # no single file a round needs is near this
+# What a download or a build leaves behind when it is killed outright is cleared away by the
+# next build, once the process that was writing it is gone and it has been still this long.
+# (The wait is for a cache shared between machines, where another machine's process cannot
+# be seen from here: nothing live goes this long without writing.)
+STALE_AFTER = 15 * 60
 
 
 def cache_dir() -> Path:
@@ -62,11 +68,77 @@ class TooBig(FetchError):
     """A download ran past its limit. Not retried: the next try would do the same."""
 
 
-def fetch(urls: list[str], sha256: str, dest: Path, label: str = "", quiet: bool = False, max_bytes: int = FETCH_LIMIT_BYTES) -> Path:
+def _read_gzip_through(path: Path) -> None:
+    """Read a gzip file to its end. Raises if it is cut off, damaged, or holds nothing."""
+    size = 0
+    with gzip.open(path, "rb") as f:
+        while chunk := f.read(1 << 20):
+            size += len(chunk)
+    if not size:
+        raise OSError("the file is empty")
+
+
+def _running(pid: int) -> bool:
+    """Whether a process with this id exists on this machine. POSIX only: on Windows,
+    signal 0 is Ctrl-C, and sending it is no way to ask."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except (OSError, OverflowError):
+        return True  # someone else's process, or a number no process has: not ours to judge
+    return True
+
+
+def sweep_stale(directory: Path, pattern: str, now: float | None = None) -> int:
+    """Remove what a killed download or build left in `directory`: entries matching
+    `pattern` whose name ends in the id of a process that is no longer running, and that
+    nothing has written to for STALE_AFTER seconds. Returns how many were removed.
+
+    Every temporary file here is named for the process writing it and removed on the way
+    out, whatever the way out is. That leaves `kill -9` and a power cut, and a verifier
+    that is restarted after either would otherwise lose a gigabyte to each.
+
+    On Windows a process cannot be asked after safely, so there it goes by age alone, and
+    waits a day.
+    """
+    now = time.time() if now is None else now
+    posix = os.name != "nt"
+    wait = STALE_AFTER if posix else 24 * 3600
+    removed = 0
+    try:
+        found = list(directory.glob(pattern))
+    except OSError:
+        return 0
+    for p in found:
+        m = re.search(r"\.(?:part|tmp)([0-9]{1,10})(?:\.npy)?$", p.name)
+        if not m or int(m.group(1)) == os.getpid() or (posix and _running(int(m.group(1)))):
+            continue
+        try:
+            is_dir = p.is_dir() and not p.is_symlink()
+            latest = max([p.lstat().st_mtime] + ([q.lstat().st_mtime for q in p.iterdir()] if is_dir else []))
+            if now - latest < wait:
+                continue
+            if is_dir:
+                shutil.rmtree(p, ignore_errors=True)
+            else:
+                p.unlink(missing_ok=True)
+            removed += not os.path.lexists(p)
+        except OSError:
+            continue
+    return removed
+
+
+def fetch(
+    urls: list[str], sha256: str, dest: Path, label: str = "", quiet: bool = False, max_bytes: int = FETCH_LIMIT_BYTES, gzipped: bool = False
+) -> Path:
     """Download to `dest` unless it is already there, verifying the content hash.
 
     Stops at `max_bytes`: the hash is only known at the end, and a host that never stops
     sending must not fill the disk first.
+
+    `gzipped` is for a file that has no hash to check it by: it is read through to the end
+    of its gzip stream before it is kept, so that a copy in the cache is a whole one.
     """
     if dest.exists():
         return dest
@@ -97,20 +169,31 @@ def fetch(urls: list[str], sha256: str, dest: Path, label: str = "", quiet: bool
                         pct = f"{100 * done / total:5.1f}%" if total else ""
                         sys.stderr.write(f"\r  fetching {label or dest.name} {done / 1e6:7.1f} MB {pct}")
                         sys.stderr.flush()
+            if total and done != total:
+                # A connection that closes early ends the loop like the end of the file. Most
+                # of what is fetched here has no hash to catch it (crawl files are named by
+                # path), and a file cut off at the right place still opens.
+                raise OSError(f"the download of {url} was cut short: {done:,} of {total:,} bytes arrived")
             if not quiet:
                 sys.stderr.write(f"\r  fetched  {label or dest.name} {done / 1e6:7.1f} MB in {time.time() - t0:.0f}s\n")
             if sha256 and h.hexdigest() != sha256:
                 raise OSError(f"sha256 mismatch for {url}: got {h.hexdigest()}, want {sha256}")
+            if gzipped and not sha256:
+                try:
+                    _read_gzip_through(part)
+                except (OSError, EOFError, zlib.error) as e:
+                    raise OSError(f"what {url} sent is not a whole gzip file ({e})") from None
             part.replace(dest)
             return dest
         except TooBig:
-            part.unlink(missing_ok=True)
             raise
         except Exception as e:  # try the next mirror
-            part.unlink(missing_ok=True)
             if isinstance(e, OSError) and e.errno in (errno.ENOSPC, errno.EDQUOT, errno.EROFS):
                 raise  # this machine's disk, not the host: trying again will not help
             last_err = e
+        finally:
+            # On every way out, Ctrl-C included. (Once it has been renamed there is nothing here.)
+            part.unlink(missing_ok=True)
     raise FetchError(f"could not fetch {label or dest.name}: {last_err}")
 
 
@@ -121,16 +204,22 @@ def round_shards(rnd: Round, scale: Scale, quiet: bool = False) -> list[Shard]:
         pool = rnd.season.pool(rnd.kind)
     elif cfg["kind"] == "cc-wet":
         # A crawl is identified by the hash of its published file list, fixed in the round.
-        listing = fetch(
-            [cfg["base_url"] + cfg["paths"].format(crawl=cfg["crawl"])],
-            cfg["paths_sha256"],
-            cache_dir() / "pool" / "wet" / f"{_crawl_id(cfg['crawl'])}.paths.gz",
-            f"{cfg['crawl']} file list",
-            quiet,
-            max_bytes=64 << 20,
-        )
-        paths = gzip.decompress(listing.read_bytes()).decode().split()
+        want = str(cfg.get("paths_sha256") or "")
+        cached = cache_dir() / "pool" / "wet" / f"{_crawl_id(cfg['crawl'])}.paths.gz"
+        # A copy already in the cache is checked like a fresh one. Which files a round is
+        # built from is read off this list by position: a list that is not the round's
+        # would build some other corpus, and nothing later would say why.
+        if want and cached.exists() and _sha256_file(cached) != want:
+            cached.unlink(missing_ok=True)
+        listing = fetch([cfg["base_url"] + cfg["paths"].format(crawl=cfg["crawl"])], want, cached, f"{cfg['crawl']} file list", quiet, max_bytes=64 << 20)
+        try:
+            paths = gzip.decompress(listing.read_bytes()).decode().split()
+        except (OSError, EOFError, zlib.error, ValueError) as e:
+            listing.unlink(missing_ok=True)
+            raise OSError(f"the file list of {cfg['crawl']} is damaged ({e}); it has been removed from the cache, run again") from None
         if len(paths) != int(cfg["n_shards"]):
+            if not want:
+                listing.unlink(missing_ok=True)  # nothing vouched for it: fetch it again next time
             raise OSError(f"{cfg['crawl']}: expected {cfg['n_shards']} files, the list has {len(paths)}")
         pool = [Shard(sha256="", size=0, path=p, url=cfg["base_url"] + p) for p in paths]
     else:
@@ -160,8 +249,9 @@ def shard_path(shard: Shard, quiet: bool = False) -> Path:
     if shard.sha256:
         return fetch([shard.url], shard.sha256, shard_path_of(shard), shard.path, quiet, max_bytes=shard.size or FETCH_LIMIT_BYTES)
     # Crawl files are not listed with hashes. They are gzip, which carries its own checksum,
-    # and the built corpus's sha256 is compared across verifiers.
-    return fetch([shard.url], "", shard_path_of(shard), shard.path.rsplit("/", 1)[-1], quiet)
+    # so each is read to the end of its stream before it is kept; and the built corpus's
+    # sha256 is compared across verifiers.
+    return fetch([shard.url], "", shard_path_of(shard), shard.path.rsplit("/", 1)[-1], quiet, gzipped=True)
 
 
 def read_dclm(path: Path):
@@ -329,8 +419,11 @@ def exam_keys(season: Season) -> np.ndarray:
             arr = keys_array(keys, k)
             if not os.environ.get("STET_EXAM_PACK"):
                 tmp = cached.with_name(cached.name + f".tmp{os.getpid()}.npy")
-                np.save(tmp, arr)
-                tmp.replace(cached)
+                try:
+                    np.save(tmp, arr)
+                    tmp.replace(cached)
+                finally:
+                    tmp.unlink(missing_ok=True)
             _exam_keys[season.id] = arr
     return _exam_keys[season.id]
 
@@ -359,72 +452,84 @@ def build_corpus(rnd: Round, scale: Scale, dest: Path, quiet: bool = False) -> P
     None of it depends on which exam passages this round will use.
     """
     tmp = dest.with_name(dest.name + f".tmp{os.getpid()}")
+    # What an earlier build or download left when it was killed, here and among the pool files.
+    sweep_stale(dest.parent, dest.name + ".tmp*")
+    for d in (cache_dir() / "pool", cache_dir() / "pool" / "wet", cache_dir() / "exam"):
+        sweep_stale(d, "*.part*")
+    sweep_stale(cache_dir() / "exam", "keys-*.tmp*")
     shutil.rmtree(tmp, ignore_errors=True)
     tmp.mkdir(parents=True)
-    season = rnd.season
-    max_doc = season.max_doc_bytes
-    banned = exam_keys(season)
-    offsets = [0]
-    urls: list[str] = []
-    dropped = 0
-    kind = rnd.pool_cfg["kind"]
-    shards = round_shards(rnd, scale, quiet)
-    with open(tmp / "arrival.bin", "wb") as out:
-        for shard in shards:
-            path = shard_path(shard, quiet)
-            try:
-                docs = list(read_shard(path, kind))
-            except (OSError, EOFError, zstandard.ZstdError) as e:
-                path.unlink(missing_ok=True)  # a damaged download: fetch it again next time
-                raise OSError(f"{shard.path} is damaged ({e}); it has been removed from the cache, run again") from None
-            for url, text in docs:
-                if not text.strip():
-                    continue
-                if contains_exam_text(text, season, banned):
-                    dropped += 1
-                    continue
-                b = text.encode("utf-8", errors="replace")
-                if len(b) > max_doc:
-                    b = b[:max_doc].decode("utf-8", errors="ignore").encode("utf-8")
+    try:
+        season = rnd.season
+        max_doc = season.max_doc_bytes
+        banned = exam_keys(season)
+        offsets = [0]
+        urls: list[str] = []
+        dropped = 0
+        kind = rnd.pool_cfg["kind"]
+        shards = round_shards(rnd, scale, quiet)
+        with open(tmp / "arrival.bin", "wb") as out:
+            for shard in shards:
+                path = shard_path(shard, quiet)
+                try:
+                    docs = list(read_shard(path, kind))
+                except (OSError, EOFError, zstandard.ZstdError, zlib.error, ValueError) as e:
+                    # A damaged copy, whatever the damage makes the reader say: a stream cut
+                    # short, a checksum that fails, a record length that is not a number.
+                    path.unlink(missing_ok=True)  # fetch it again next time
+                    raise OSError(f"{shard.path} is damaged ({e}); it has been removed from the cache, run again") from None
+                for url, text in docs:
+                    if not text.strip():
+                        continue
+                    if contains_exam_text(text, season, banned):
+                        dropped += 1
+                        continue
+                    b = text.encode("utf-8", errors="replace")
+                    if len(b) > max_doc:
+                        b = b[:max_doc].decode("utf-8", errors="ignore").encode("utf-8")
+                    out.write(b)
+                    offsets.append(offsets[-1] + len(b))
+                    urls.append(url.replace("\n", " ").replace("\r", " "))
+        n = len(urls)
+        order = rnd.doc_order(n)
+        h = hashlib.sha256()
+        final = [0]
+        with open(tmp / "arrival.bin", "rb") as f, open(tmp / "docs.bin", "wb") as out:
+            src = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) if offsets[-1] else b""
+            for i in order:
+                b = src[offsets[i] : offsets[i + 1]]
                 out.write(b)
-                offsets.append(offsets[-1] + len(b))
-                urls.append(url.replace("\n", " ").replace("\r", " "))
-    n = len(urls)
-    order = rnd.doc_order(n)
-    h = hashlib.sha256()
-    final = [0]
-    with open(tmp / "arrival.bin", "rb") as f, open(tmp / "docs.bin", "wb") as out:
-        src = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) if offsets[-1] else b""
-        for i in order:
-            b = src[offsets[i] : offsets[i + 1]]
-            out.write(b)
-            h.update(b)
-            final.append(final[-1] + len(b))
-        if offsets[-1]:
-            src.close()
-    (tmp / "arrival.bin").unlink()
-    np.asarray(final, dtype="<u8").tofile(tmp / "docs.idx")
-    (tmp / "urls.txt").write_text("\n".join(urls[i] for i in order) + "\n", encoding="utf-8")
-    meta = {
-        "round": rnd.id,
-        "scale": scale.name,
-        "n_docs": n,
-        "bytes": final[-1],
-        "sha256": h.hexdigest(),
-        "pool": kind,
-        "shards": [s.path for s in shards],
-        "decontaminated_docs": dropped,
-        "order": "seeded shuffle",
-        "decontam": dict(season.raw["decontam"]),
-    }
-    (tmp / "meta.json").write_text(json.dumps(meta, indent=1))
-    shutil.rmtree(dest, ignore_errors=True)
-    tmp.replace(dest)
-    if rnd.kind == "official" and kind == "cc-wet" and os.environ.get("STET_KEEP_DOWNLOADS") != "1":
-        # An official round's files are a random handful out of a hundred thousand and will
-        # not be drawn again. The corpus is built; the downloads are dead weight.
-        for shard in shards:
-            shard_path_of(shard).unlink(missing_ok=True)
+                h.update(b)
+                final.append(final[-1] + len(b))
+            if offsets[-1]:
+                src.close()
+        (tmp / "arrival.bin").unlink()
+        np.asarray(final, dtype="<u8").tofile(tmp / "docs.idx")
+        (tmp / "urls.txt").write_text("\n".join(urls[i] for i in order) + "\n", encoding="utf-8")
+        meta = {
+            "round": rnd.id,
+            "scale": scale.name,
+            "n_docs": n,
+            "bytes": final[-1],
+            "sha256": h.hexdigest(),
+            "pool": kind,
+            "shards": [s.path for s in shards],
+            "decontaminated_docs": dropped,
+            "order": "seeded shuffle",
+            "decontam": dict(season.raw["decontam"]),
+        }
+        (tmp / "meta.json").write_text(json.dumps(meta, indent=1))
+        shutil.rmtree(dest, ignore_errors=True)
+        tmp.replace(dest)
+        if rnd.kind == "official" and kind == "cc-wet" and os.environ.get("STET_KEEP_DOWNLOADS") != "1":
+            # An official round's files are a random handful out of a hundred thousand and will
+            # not be drawn again. The corpus is built; the downloads are dead weight.
+            for shard in shards:
+                shard_path_of(shard).unlink(missing_ok=True)
+    finally:
+        # On every way out, Ctrl-C included: a half-built corpus is a gigabyte nobody will
+        # come back for. (Once it has been renamed into place there is nothing here.)
+        shutil.rmtree(tmp, ignore_errors=True)
     return dest
 
 

@@ -700,7 +700,7 @@ func (s *Site) editorByName(w http.ResponseWriter, r *http.Request) {
 		}
 	})
 	if id == "" {
-		s.notFound(w, r, "No such editor. It may not have run yet: editors are published when they first run.")
+		s.notFound(w, r, "No such editor. It may not have been drawn yet: an editor is published when it is first drawn into a round.")
 		return
 	}
 	http.Redirect(w, r, "/editors/"+id[:12], http.StatusFound)
@@ -881,15 +881,29 @@ func (s *Site) round(w http.ResponseWriter, r *http.Request) {
 		Replication
 		Name, Owner, EditorID string
 		Anchor                float64
-		AnchorValid           bool
+		AnchorValid, Void     bool
 	}
 	var replicas []replica
 	for _, e := range entries {
 		for _, rep := range e.Replications {
-			replicas = append(replicas, replica{rep, e.Name, e.Owner, e.EditorID, e.Loss, e.Valid})
+			replicas = append(replicas, replica{rep, e.Name, e.Owner, e.EditorID, e.Loss, e.Valid, e.Void})
 		}
 	}
 	d["Replicas"] = replicas
+	// The command that re-grades an entry names it. Two versions of one editor can share a
+	// round (a rated editor and its successor), and then the name needs its version.
+	if len(entries) > 0 {
+		first, n := entries[0], 0
+		for _, e := range entries {
+			if e.Owner == first.Owner && e.Name == first.Name {
+				n++
+			}
+		}
+		d["Example"] = first.Owner + "/" + first.Name
+		if n > 1 {
+			d["Example"] = fmt.Sprintf("%s/%s@v%d", first.Owner, first.Name, first.Version)
+		}
+	}
 	if rs.Status != "scheduled" && rs.Crawl != nil {
 		if seed, err := hex.DecodeString(rs.Seed); err == nil && rs.Crawl.NShards > 0 {
 			want := sc.CorpusUnits * a.season.Pools["official"].ShardsPerUnit

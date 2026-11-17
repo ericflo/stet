@@ -24,23 +24,32 @@ Nano scale (4 layers × 192, 8M tokens), five practice rounds:
 | s0-p00004 | 6.335 | 5.739 | 5.598 | +0.597 | +0.737 |
 | **mean** | | | | **+0.695** | **+0.830** |
 
-Official scale (micro: 6 layers × 384, 40M tokens), one practice round so far:
+Official scale (micro: 6 layers × 384, 40M tokens), three practice rounds and the first
+official one:
 
-| Round | identity | english | tidy | english gain | tidy gain |
-|---|---|---|---|---|---|
-| s0-p00000 | 5.355 | 4.418 | 4.389 | +0.937 | +0.966 |
+| Round | identity | english | tidy | english gain | tidy gain | tidy − english |
+|---|---|---|---|---|---|---|
+| s0-p00000 | 5.355 | 4.418 | 4.389 | +0.937 | +0.966 | +0.029 |
+| s0-p00001 | 5.399 | 4.456 | 4.403 | +0.942 | +0.996 | +0.054 |
+| s0-p00002 | 5.354 | 4.437 | 4.473 | +0.917 | +0.882 | −0.036 |
+| s0-o00001 | 5.342 | 4.430 | 4.410 | +0.912 | +0.933 | +0.020 |
+| **mean** | | | | **+0.927** | **+0.944** | **+0.017** |
 
-`tidy`'s micro figure is the mean of three gradings of its output in shuffled order
-(4.388, 4.400, 4.378). More micro rounds: *running*.
+`tidy`'s figure on s0-p00000 is the mean of three gradings of its output in shuffled
+order (4.388, 4.400, 4.378).
 
 ```
 python tools/exp.py --scale nano --rounds 0 1 2 3 4 --editors identity english tidy
+python tools/exp.py --scale micro --rounds 1 2 --editors identity english tidy
 ```
 
 **What it decided.** A few lines of filtering are worth 0.7 to 1.0 nats, so there is room
-to compete. The gap between `english` and `tidy` is much smaller at micro than at nano
-(0.03 against 0.12 on the same round): a bigger student is less hurt by boilerplate, and
-the easy wins shrink. Beating `tidy` at the official scale is the season's first target.
+to compete. The gap between `english` and `tidy` nearly closes at micro: 0.017 on average
+against 0.135 at nano, and on one round in four `english` is ahead. A bigger student is
+less hurt by boilerplate, and the easy wins shrink. At the official scale the two
+reference editors cannot be told apart in four rounds, which is the rule working: neither
+would take the record from the other. Beating both by more than the margin is the
+season's first target.
 
 An earlier version of this page gave `tidy` 5.513 at nano and 4.375 at micro on round
 s0-p00000. Those were measured with an earlier version of the editor, before a change to
@@ -81,8 +90,15 @@ Nano, round s0-p00000:
 
 On that round `english` (5.669) matches 3.3× the data and `tidy` (5.552) matches 3.8×.
 
-Micro: *running*. Until it is measured, the leaderboard shows gains only and leaves the
-multiplier blank.
+Micro, round s0-p00000:
+
+| Tokens | 20M (0.5×) | 40M (1×) | 80M (2×) | 160M (4×) | 320M (8×) |
+|---|---|---|---|---|---|
+| Unedited loss | 6.057 | 5.355 | 4.828 | 4.522 | *running* |
+
+On that round `english` (4.418) and `tidy` (4.389) are both past the last measured point:
+each is worth more than four times the data. Until the 8× point is in, the leaderboard
+shows gains only and leaves the multiplier blank.
 
 ```
 python tools/exp.py --scale nano --rounds 0 --editors identity --train-tokens 32000000
@@ -90,6 +106,41 @@ python tools/exp.py --scale nano --rounds 0 --editors identity --train-tokens 32
 
 **What it decided.** The multiplier is read between measured points and never
 extrapolated. A gain past the last point is shown as "more than 8×".
+
+## Does the answer depend on the learning rate?
+
+The trainer is fixed, and so is its learning rate. If a different one gave a different
+answer, the leaderboard would be measuring the trainer. Micro, round s0-p00000, at half
+and twice the season's rate:
+
+| Peak learning rate | 0.00075 (½×) | 0.0015 (the season's) | 0.003 (2×) |
+|---|---|---|---|
+| Unedited | 5.170 | 5.355 | 5.546 |
+| `tidy` | 4.400 | 4.389 | 4.373 |
+| `tidy` gain | +0.770 | +0.966 | +1.173 |
+
+```
+python tools/exp.py --scale micro --rounds 0 --editors identity tidy --lr 0.00075
+```
+
+**What it decided.** Two things, and the second is a limit on what this page can claim.
+
+An edited corpus's loss hardly moves: 0.027 nats across a fourfold change in learning
+rate, about two standard deviations of order noise. Editors are ranked against each other
+by their losses on the same rounds, so the ranking of editors that clean the corpus does
+not hang on this choice.
+
+The unedited corpus's loss moves a great deal, 0.38 nats, and it is better at half the
+season's rate. So a *gain* is a gain over a baseline that this trainer does not train as
+well as it could, and part of every gain here is the edited corpus being easier to train
+on at this rate. The size of a gain, and the "worth N× the data" figure read from it,
+belong to this trainer. A baseline trained at its own best rate would make both smaller:
+`tidy`'s gain would be nearer 0.77 than 0.97. The season keeps its rate, because changing
+it would change what every settled round measured. The next season should choose the
+rate at which the unedited corpus does best.
+
+Only `tidy` was run at the other rates. Whether two editors that are close together keep
+their order has not been measured.
 
 ## How much is noise?
 
@@ -141,8 +192,23 @@ uv run --no-project --with numpy --with scipy python tools/record_power.py --sd 
 **What it decided.** A copy of the holder does not take the record, and a lead equal to
 the margin does so 4% of the time, inside the 5% the rule allows. Three looks were too
 few: a challenger that really was 0.05 better lost more often than it won. The rule now
-has a fourth look at 40 shared rounds (ten days). The margin and the looks for the
-official scale will be set the same way once micro's paired noise is measured: *running*.
+has a fourth look at 40 shared rounds (ten days).
+
+At the official scale the paired standard deviation is, so far, the same: `tidy` minus
+`english` over the four micro rounds above has a standard deviation of 0.04. With 0.046
+and micro's margin of 0.02:
+
+| True lead, nats | 0 (a copy) | 0.02 | 0.03 | 0.04 | 0.05 | 0.06 | 0.08 |
+|---|---|---|---|---|---|---|---|
+| Looks at 5, 10, 20, 40 rounds | 0.2% | 4% | 24% | 70% | 97% | 99.9% | 100% |
+
+```
+uv run --no-project --with numpy --with scipy python tools/record_power.py --sd 0.046 --margin 0.02 --leads 0 0.02 0.03 0.04 0.05 0.06 0.08
+```
+
+So at the official scale a challenger 0.05 nats better than the holder takes the record
+nearly always within ten days, and one 0.03 better takes it one time in four. Four rounds
+is a thin estimate of the noise; it is measured again as official rounds accumulate.
 
 ## How long a round takes
 
@@ -192,9 +258,9 @@ Micro: *running*.
 
 ## Still to measure
 
-- Micro: the reference curve, order noise, more rounds, shipped text at 0.1%.
-- Micro: whether the ranking of editors survives a learning rate half or twice as large.
-  If it does not, the student is tuned to one kind of data and the scale needs changing.
+- Micro: the 8× point of the reference curve, and shipped text at 0.1%.
+- Micro: whether two close editors keep their order at another learning rate, and at
+  what rate the unedited corpus trains best.
 - Two machines: the real tolerance, from verifiers on NVIDIA hardware. The data arrives
   by itself, on every round's page.
 - Whether the held-out exam and the public one rank editors the same way. Known only to

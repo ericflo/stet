@@ -43,16 +43,26 @@ func fitRatings(entries []entryRow) (map[string]*Rating, map[int]float64) {
 		byEditor[e.EditorID] = append(byEditor[e.EditorID], e)
 		byRound[e.RoundIdx] = append(byRound[e.RoundIdx], e)
 	}
+	// skill is what an editor does in the rounds where it ran: its mean over valid entries
+	// only. It is what explains a round's difficulty. The rating published below counts an
+	// invalid round as zero, but that zero must not be used here: an editor with one
+	// timeout would look much better than its "skill" in its good rounds, those rounds
+	// would be taken for easy ones, and everyone who shared them would be marked down.
 	skill := map[string]float64{}
 	diff := map[int]float64{}
 	for i := 0; i < 200; i++ {
 		delta := 0.0
 		for id, es := range byEditor {
-			s := 0.0
+			s, n := 0.0, 0
 			for _, e := range es {
-				s += e.adjusted(diff)
+				if e.Valid {
+					s += e.Gain - diff[e.RoundIdx]
+					n++
+				}
 			}
-			s /= float64(len(es))
+			if n > 0 {
+				s /= float64(n)
+			}
 			delta = math.Max(delta, math.Abs(s-skill[id]))
 			skill[id] = s
 		}

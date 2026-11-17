@@ -67,6 +67,7 @@ def request(method: str, path: str, body=None, key: Key | None = None, raw: bool
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             payload = r.read(limit + 1)
+            promised = str((getattr(r, "headers", None) or {}).get("Content-Length") or "")
     except urllib.error.HTTPError as e:
         text = e.read(1 << 16).decode("utf-8", "replace")
         try:
@@ -80,6 +81,10 @@ def request(method: str, path: str, body=None, key: Key | None = None, raw: bool
         raise ApiError(0, f"lost the connection to {api_base()}: {e}") from None
     if len(payload) > limit:
         raise ApiError(0, f"{api_base()} sent more than {limit / 1e6:.0f} MB in answer to {method} {path.split('?')[0]}; refusing it")
+    if promised.isdigit() and len(payload) < int(promised):
+        # A connection that closes early hands over what had arrived, without a word. Those
+        # are not the bytes that were asked for, and asking again may well get them.
+        raise ApiError(0, f"the download was cut short: {api_base()} promised {int(promised):,} bytes for {method} {path.split('?')[0]} and {len(payload):,} arrived")
     if raw:
         return payload
     try:
@@ -93,14 +98,19 @@ def report(path: str, payload: dict, key: Key, log=None) -> dict:
 
     A result is minutes of GPU time. The server answers 503 when it could not make a write
     durable, in which case the write may or may not have happened; sending the same report
-    again is always safe, and "already reported" means the first one did land.
+    again is always safe, and "this job was already done" in answer to a second try means
+    the first one did land. Nothing else does: "already refused" or "already released" is
+    the server saying no, and is raised like any other refusal.
+
+    Raises ApiError with the server's status when it refuses, and with status 0 when the
+    report could not be delivered at all.
     """
     delay = 5
     for attempt in range(40):
         try:
             return request("POST", path, payload, key=key, timeout=600)
         except ApiError as e:
-            if e.status == 409 and attempt > 0 and "already" in str(e):
+            if e.status == 409 and attempt > 0 and "already done" in str(e):
                 return {"status": "recorded"}
             if e.status not in (0, 429, 500, 502, 503, 504):
                 raise
@@ -123,28 +133,37 @@ def need_key() -> Key:
 
 
 def verify_beacon(season, beacon: dict) -> None:
-    """Check a round's randomness against drand itself, not against what the server says."""
+    """Check a round's randomness against drand itself, not against what the server says.
+
+    A relay that cannot be reached, or whose answer cannot be read as this round's beacon
+    (not JSON, an error object, fields missing or that do not add up), has said nothing,
+    and the next relay is asked. The round is refused (ValueError) only when a relay
+    returns a well-formed beacon for this round whose randomness is not the server's. If
+    no relay gives a readable answer, that is a download that failed (FetchError), to be
+    waited out like any other: it says nothing against the round.
+    """
     cfg = season.raw["beacon"]
+    number = int(beacon["round"])
     last: Exception | None = None
     for relay in cfg["relays"]:
-        url = f"{relay}/{cfg['chain_hash']}/public/{int(beacon['round'])}"
+        url = f"{relay}/{cfg['chain_hash']}/public/{number}"
         try:
             req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
             with urllib.request.urlopen(req, timeout=20) as r:
                 got = json.loads(r.read(1 << 16))
-        except Exception as e:  # try the next relay
+            randomness = str(got["randomness"]).lower()
+            if int(got["round"]) != number or hashlib.sha256(bytes.fromhex(got["signature"])).hexdigest() != randomness:
+                raise ValueError("the beacon it returned does not add up")
+        except Exception as e:  # this relay has told us nothing; try the next
             last = e
             continue
-        derived = hashlib.sha256(bytes.fromhex(got["signature"])).hexdigest()
-        if int(got["round"]) != int(beacon["round"]) or derived != got["randomness"]:
-            raise ValueError(f"drand relay {relay} returned an inconsistent beacon")
-        if got["randomness"].lower() != str(beacon["randomness"]).lower():
+        if randomness != str(beacon["randomness"]).lower():
             raise ValueError(
-                f"round randomness does not match drand round {beacon['round']}: the server says "
-                f"{beacon['randomness'][:16]}…, drand says {got['randomness'][:16]}…"
+                f"round randomness does not match drand round {number}: the server says "
+                f"{str(beacon['randomness'])[:16]}…, drand says {randomness[:16]}…"
             )
         return
-    raise FetchError(f"could not reach any drand relay to check the round's randomness ({last})")
+    raise FetchError(f"no drand relay gave a readable answer about round {number}, so the round's randomness could not be checked ({last})")
 
 
 def round_from_api(season, description: dict):
@@ -351,7 +370,8 @@ def cmd_submit(args):
     except ProjectError as e:
         sys.stderr.write(f"stet: {e}\n")
         sys.exit(1)
-    # A bundle is public for good once it has run, so the entrant sees every file first.
+    # A bundle is public for good from the moment it is first drawn into an official round,
+    # whether or not it then runs, so the entrant sees every file first.
     sys.stderr.write(f"{project.name}: {len(files)} files, {len(blob) / 1e3:.1f} KB packed, id {editor_id[:12]}\n")
     sys.stderr.write(_listing(project, files, skipped, args.dry_run))
     if args.dry_run:
@@ -367,7 +387,8 @@ def cmd_submit(args):
             sys.exit(1)
         sys.stderr.write(
             f"\nThis enters {project.name!r} in the next official round as {key.handle}.\n"
-            "The files listed above, and every edit script the editor writes, become public under the MIT licence once it has run.\n"
+            "The files listed above become public under the MIT licence from the moment the editor is first drawn into an\n"
+            "official round, and so does every edit script it writes.\n"
         )
         if input("Submit? [y/N] ").strip().lower() not in ("y", "yes"):
             sys.stderr.write("Not submitted.\n")
@@ -381,8 +402,14 @@ def cmd_submit(args):
     sys.stderr.write(f"\nSubmitted {clean(e['name'])} v{clean(e['version'])}  ({clean(e['id'])[:12]})\n")
     if r.get("replaced"):
         sys.stderr.write(f"It replaces your earlier entry {clean(r['replaced'])[:12]}, which will not run again.\n")
-    if r.get("enters"):
-        sys.stderr.write(f"It enters round {clean(r['enters']['round'])}, drawn {ago(r['enters']['draw_at'])}.\n")
+    # `enters` when the server expects it in that round; `earliest` when the queue is long or
+    # the draw too close for that to be a promise.
+    for field, words in (("enters", "It enters round"), ("earliest", "The earliest round it can enter is")):
+        when = r.get(field)
+        if isinstance(when, dict) and when.get("round"):
+            drawn = ago(when.get("draw_at"))
+            sys.stderr.write(f"{words} {clean(when['round'], 40)}" + (f", drawn {drawn}" if drawn else "") + ".\n")
+            break
     if r.get("message"):
         sys.stderr.write(clean(r["message"], 1000) + "\n")
     sys.stderr.write(f"{clean(r.get('url', ''))}\n\nFollow it with `stet status`.\n")
@@ -748,7 +775,16 @@ def _grade_job(job, season, scale, device, key, out, work: Path) -> tuple[dict, 
     path.write_bytes(raw)
     result = grade_round(rnd, scale, path, device=device, progress=out.progress("training"), log=lambda m: out.line("", out.dim(m)))
     if result.get("heldout"):
-        keep_heldout(season, job, result, base)
+        try:
+            keep_heldout(season, job, result, base)
+        except OSError as e:
+            # The grade is finished and it is the public one that is owed to the server.
+            # What the held-out exam said about it is lost; the entry shows as a gap in the
+            # season's held-out table, with the command that measures it again.
+            out.line("", out.bad(
+                f"WHAT THE HELD-OUT EXAM SAID ABOUT THIS GRADE COULD NOT BE WRITTEN DOWN ({heldout_log(season)}: {clean(e.strerror or e)}). "
+                "The public grade is reported as usual. Put the record right before the next job."
+            ))  # fmt: skip
     elif result.get("heldout_error"):
         out.line("", out.bad(f"The held-out exam could not be sat for this grade ({clean(result['heldout_error'])}). The public grade is reported as usual."))
     return result, base
@@ -798,6 +834,17 @@ def keep_heldout(season, job: dict, result: dict, base: dict) -> None:
         f.write(json.dumps(line, sort_keys=True) + "\n")
         f.flush()
         os.fsync(f.fileno())
+
+
+def heldout_log_trouble(season) -> str:
+    """Why the held-out record cannot be added to, or "" if it can. Makes the file if it is not there."""
+    path = heldout_log(season)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.close(os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600))
+    except OSError as e:
+        return clean(e.strerror or e)
+    return ""
 
 
 MACHINE_ERRNOS = (errno.ENOSPC, errno.EDQUOT, errno.EROFS, errno.EIO, errno.EMFILE, errno.ENFILE, errno.ENOMEM)
@@ -1063,6 +1110,15 @@ def _verify(args):
                          else "Running edit jobs in the sandbox, and grading."))  # fmt: skip
     try:
         if heldout_pack_path(season) is not None:
+            trouble = heldout_log_trouble(season)
+            if trouble:
+                sys.stderr.write(
+                    f"stet: this machine holds the season's held-out exam, and what it says about each official grade is added to\n"
+                    f"  {heldout_log(season)}\n"
+                    f"  That file cannot be written ({trouble}). Every grade made without it is a gap in the season's final table,\n"
+                    "  so this verifier will not start until it can be.\n"
+                )
+                sys.exit(1)
             out.line("", out.dim(f"This machine holds the season's held-out exam. What it says is kept in {heldout_log(season)} and sent nowhere."))
         elif args.edits and (season.raw.get("heldout_exam") or {}).get("sha256") and os.environ.get("STET_DEV") != "1":
             sys.stderr.write(
@@ -1082,25 +1138,52 @@ def _verify(args):
     stuck: dict[int, int] = {}  # job id -> seconds spent waiting for a download it needs
     idle = False
     holding: int | None = None  # the job this verifier has taken and has neither reported nor handed back
+    held_until = 0  # when the server stops waiting for that job, if it said
+    last_job: int | None = None  # the last job worked on, to tell a new one from the same one again
+    leave_held = False  # set on the ways out that must not hand the job back
+    told_log = False
 
     def stop_if_once():
         if args.once:
             sys.exit(1)
 
-    def patience(why: str) -> int:
-        """Wait out something that is not this machine's fault, a little longer each time."""
+    def patience(why: str, keeping: int | None = None) -> int:
+        """Wait out something that is not this machine's fault, a little longer each time.
+
+        While a job is being kept for it (`keeping`), never past what is left of the time a
+        job is kept: the server stops waiting for a job it has heard nothing about, and a
+        volunteer whose job is given up on is offered no work for a day.
+        """
         nonlocal waits
         waits += 1
         pause = min(3600, 60 * 2 ** min(waits - 1, 6))
-        out.line("", out.dim(f"{why}; trying again in {pause // 60} min"))
+        if keeping is not None:
+            pause = max(1, min(pause, FETCH_PATIENCE - stuck.get(keeping, 0)))
+        out.line("", out.dim(f"{why}; trying again in {max(1, round(pause / 60))} min"))
         stop_if_once()
         time.sleep(pause)
         return pause
 
-    def hand_back(reason: str) -> None:
+    def still_held() -> str:
+        until = f" until {time.strftime('%H:%M UTC', time.gmtime(held_until))}" if held_until > time.time() else ""
+        if args.edits:
+            return f"The server could not be told, so the job is still this anchor's{until}. It is handed the same job the next time it asks."
+        return (
+            f"The server could not be told, so the job is still held{until}. Run `stet verify` again before then and it is picked up "
+            "where it was. A job left to run out costs this account a day without work."
+        )
+
+    def hand_back(reason: str) -> bool:
+        """Give the job back. False if the server could not be told, in which case it is still ours."""
         nonlocal holding
-        _release(holding, key, reason)
-        holding = None
+        if _release(holding, key, reason):
+            holding = None
+            return True
+        out.line("", out.bad(still_held()))
+        return False
+
+    def handed(back: bool) -> str:
+        return "handed it back" if back else "it could not be handed back"
 
     try:
         while True:
@@ -1115,8 +1198,23 @@ def _verify(args):
                 continue
             if not isinstance(r, dict):
                 r = {}
-            remember_announcement(season, r.get("announced"))
             job = r.get("job")
+            # Before anything else that can fail: from this answer on, the server counts the
+            # job as ours, and whatever stops this verifier must know there is one to hand back.
+            if isinstance(job, dict) and isinstance(job.get("id"), int) and not isinstance(job["id"], bool) and 0 < job["id"] < 1 << 62:
+                holding = job["id"]
+                held_until = job["expires_at"] if isinstance(job.get("expires_at"), int) and not isinstance(job.get("expires_at"), bool) else 0
+            elif not job:
+                holding = None  # the server gives a verifier the job it holds each time it asks: no job means none is held
+            try:
+                remember_announcement(season, r.get("announced"))
+            except OSError as e:
+                # This verifier's own record of what was announced. Without it the next draw
+                # cannot be checked against what was said beforehand, which is worth saying,
+                # and no reason to stop grading.
+                if not told_log:
+                    told_log = True
+                    out.line("", out.bad(f"could not write down what the server announced for the next draw ({_announcements()}: {clean(e.strerror or e)}). Carrying on without that record."))
             if not job:
                 if args.once or (args.max_jobs and done >= args.max_jobs):
                     out.line("", clean(r.get("message") or "No work right now."))
@@ -1134,6 +1232,8 @@ def _verify(args):
             try:
                 job_id = check_job(job)
             except ValueError as err:
+                if holding is not None:
+                    hand_back("this client does not understand the job")
                 patience(str(err))
                 continue
             holding = job_id
@@ -1148,11 +1248,17 @@ def _verify(args):
                     "  It was refused, and this verifier has stopped. Please report this.\n"
                 )
                 sys.exit(1)
-            if refused.get(round_id, 0) >= 2:
+            # A volunteer steps away from a round it and the server disagree about. An anchor
+            # does not: each job it took and handed back would be one of the few attempts an
+            # entry gets, and a whole round's entries would be void for one disagreement.
+            if refused.get(round_id, 0) >= 2 and not args.edits:
                 hand_back("this verifier and the server disagree about this round")
                 patience(f"not taking more work from round {round_id}, which the server and this machine disagree about")
                 continue
+            if job_id != last_job:
+                waits, last_job = 0, job_id  # a new job starts with short waits, whatever the last one met
             if not remove_tree(work):
+                leave_held = True
                 sys.stderr.write(f"stet: could not clear {work}. Something an editor left there cannot be removed; stopping.\n")
                 sys.exit(1)
             result = base = None
@@ -1165,8 +1271,19 @@ def _verify(args):
                     payload = slim_result(result, base)
                     path = f"/api/v1/jobs/{job_id}/result"
             except RoundRefused as err:
-                hand_back(clean(f"round refused: {err}", 300))
                 remove_tree(work)
+                if args.edits:
+                    # Not handed back, and not skipped either. The service manager starts this
+                    # anchor again, the server gives it the same job, and the round is checked
+                    # afresh: nothing is spent while someone finds out what is wrong.
+                    sys.stderr.write(
+                        f"stet: {err}\n"
+                        "  An anchor does not work on a round it cannot vouch for, and it does not hand the job back either: a job\n"
+                        "  handed back is one of the few attempts an entry gets. Stopping with the job still held. Started again,\n"
+                        "  this anchor is given the same job and checks the round afresh.\n"
+                    )
+                    sys.exit(1)
+                hand_back(clean(f"round refused: {err}", 300))
                 refused[round_id] = 2  # not this session
                 out.line("", out.bad(str(err)))
                 stop_if_once()
@@ -1178,14 +1295,14 @@ def _verify(args):
                 # same next time. Anything else may pass.
                 final = isinstance(err, WrongBytes) or (isinstance(err, ApiError) and 400 <= err.status < 500 and err.status not in (408, 429))
                 if final or args.once or waited >= FETCH_PATIENCE:
-                    hand_back(clean(f"{type(err).__name__}: {err}", 300))
+                    back = hand_back(clean(f"{type(err).__name__}: {err}", 300))
                     stuck.pop(job_id, None)
-                    patience(f"could not fetch what this job needs ({clean(err)}); handed it back")
+                    patience(f"could not fetch what this job needs ({clean(err)}); {handed(back)}")
                 else:
                     # Kept, not handed back. A job handed back is not free: an entry gets only
                     # a few attempts from the anchors, and a volunteer is offered an entry
                     # once. The server gives this job back to us the next time we ask.
-                    stuck[job_id] = waited + patience(f"could not fetch what this job needs ({clean(err)}). Keeping the job")
+                    stuck[job_id] = waited + patience(f"could not fetch what this job needs ({clean(err)}). Keeping the job", keeping=job_id)
                 continue
             except Exception as err:  # this machine's trouble, not the editor's
                 remove_tree(work)
@@ -1201,9 +1318,9 @@ def _verify(args):
                     out.line("", out.bad(f"{what}; keeping it and trying again in {pause // 60} min"))
                     time.sleep(pause)
                     continue
-                hand_back(clean(f"{type(err).__name__}: {err}", 300))
+                back = hand_back(clean(f"{type(err).__name__}: {err}", 300))
                 tries.pop(job_id, None)
-                out.line("", out.bad(f"{what}; handed it back"))
+                out.line("", out.bad(f"{what}; {handed(back)}"))
                 if stopping:
                     sys.stderr.write("stet: stopping, because jobs keep failing on this machine. `stet doctor` checks the setup.\n")
                     sys.exit(1)
@@ -1215,13 +1332,36 @@ def _verify(args):
             try:
                 ack = report(path, payload, key, log=lambda m: out.line("", out.dim(m)))
             except ApiError as err:
+                if err.status == 0 or err.status >= 500 or err.status in (408, 425, 426, 429):
+                    # Not a refusal: the server never said no to this result, it could not be
+                    # given it (it is away, its file store is failing, this client is out of
+                    # date). The work is good, and a job handed back spends an attempt.
+                    # Any other answer in the 400s is a no, and is treated as one below: an
+                    # anchor that kept a job the server will never take would do it again
+                    # for ever, and the round would never settle.
+                    remove_tree(work)
+                    if args.edits:
+                        sys.stderr.write(
+                            f"stet: the result of job {job_id} could not be delivered ({err}).\n"
+                            "  That is not a refusal, so the job is not handed back: handing it back would spend one of the entry's\n"
+                            "  few attempts. Stopping with the job still held. Started again, this anchor is given the same job and\n"
+                            "  does it again.\n"
+                        )
+                        sys.exit(1)
+                    back = hand_back("the result could not be delivered")
+                    out.line("", out.bad(f"the result could not be delivered ({err}); the job was {'handed back' if back else 'not handed back either'}"))
+                    stop_if_once()
+                    continue
                 # The server will not have this result. Training the same thing again would get
                 # the same answer, so say so, let go of the job, and do not take it up again.
                 out.line("", out.bad(f"the server did not accept the result: {err}"))
                 hand_back("result refused")
                 remove_tree(work)
-                late = err.status == 409 and any(w in str(err) for w in ("already", "ended before", "settled before"))
-                if err.status in (400, 409) and not late:  # a disagreement, not a result that merely arrived too late
+                said = str(err)
+                # A result that merely arrived too late is nobody's fault. "Already refused" is
+                # not that: it is the refusal itself, heard on a second try.
+                late = err.status == 409 and "already refused" not in said and any(w in said for w in ("already", "ended before", "settled before"))
+                if err.status in (400, 409) and not late:  # a disagreement about the round, not some other no
                     refused[round_id] = refused.get(round_id, 0) + 1
                     if err.status == 409 and refused[round_id] == 1:
                         # Our corpus or baseline differs from the round's. The copy on disk is the first suspect.
@@ -1251,17 +1391,44 @@ def _verify(args):
         # Wherever it lands: mid-job, between two tries at one, or while a result is on its way.
         if holding is None:
             raise
-        hand_back("interrupted")
+        leave_held = True  # said once, here
+        back = hand_back("interrupted")
         remove_tree(work)
-        out.line("", "Stopped; the job was handed back.")
+        out.line("", "Stopped; the job was handed back." if back else "Stopped.")
         return
+    finally:
+        # Every other way out. A volunteer's job that is merely left keeps its place on the
+        # entry until its time runs out, and the account is then offered no work for a day.
+        # An anchor's is left where it is: started again, it is given the same job, and a
+        # job handed back would be one of the entry's few attempts.
+        if holding is not None and not args.edits and not leave_held:
+            if _release(holding, key, "the verifier stopped"):
+                out.line("", out.dim("The job in hand was handed back."))
+            else:
+                out.line("", out.bad(still_held()))
 
 
-def _release(job_id: int, key: Key, reason: str) -> None:
-    try:
-        request("POST", f"/api/v1/jobs/{int(job_id)}/release", {"reason": reason}, key=key, timeout=20)
-    except Exception:
-        pass
+RELEASE_PAUSES = (2, 5)  # seconds between tries at handing a job back
+
+
+def _release(job_id: int, key: Key, reason: str) -> bool:
+    """Hand a job back. True if the server heard, or says the job is not ours to hand back.
+
+    Asked up to three times: saying it twice costs nothing, and a hand-back that is lost
+    leaves the job held until its time runs out.
+    """
+    for pause in (*RELEASE_PAUSES, None):
+        try:
+            request("POST", f"/api/v1/jobs/{int(job_id)}/release", {"reason": reason}, key=key, timeout=20)
+            return True
+        except ApiError as e:
+            if e.status in (404, 409):  # finished, settled or long gone: nothing is held
+                return True
+        except Exception:
+            pass
+        if pause is not None:
+            time.sleep(pause)
+    return False
 
 
 # --- wiring ---------------------------------------------------------------------------------

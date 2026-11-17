@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import math
 import posixpath
 import re
 import tarfile
@@ -32,6 +33,9 @@ MAX_ENTRY_BYTES = 200
 EXCLUDE_DIRS = {"venv", "__pycache__", "node_modules", "runs"}
 EXCLUDE_SUFFIXES = (".pyc", ".pyo")
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,38}[a-z0-9]$")
+# Every key the server reads from stet.toml. It matches them without regard to case, so
+# `Name` is `name` to the server and nothing at all to this client: see load_project.
+MANIFEST_FIELDS = ("name", "entry", "description", "technique", "parent", "license", "assets")
 
 
 class ProjectError(ValueError):
@@ -64,19 +68,56 @@ def _clip(text: str, limit: int) -> str:
     return text.encode("utf-8", "replace")[:limit].decode("utf-8", "ignore")
 
 
+def _float(text: str) -> float:
+    """A TOML float as the server reads one: a number too large for 64 bits is refused, not
+    rounded up to infinity. (`inf` itself is a float, and is let through.)"""
+    value = float(text)
+    if math.isinf(value) and "inf" not in text:
+        raise ValueError(f"the number {text[:40]} does not fit in a 64-bit float")
+    return value
+
+
+def _whole_numbers_fit(cfg: dict) -> None:
+    """Refuse an integer the server cannot hold, wherever in the file it is. Python reads an
+    integer of any size; the server reads 64 bits and calls anything larger a file it
+    cannot parse."""
+    todo: list = [cfg]
+    while todo:
+        value = todo.pop()
+        if isinstance(value, dict):
+            todo.extend(value.values())
+        elif isinstance(value, list):
+            todo.extend(value)
+        elif isinstance(value, int) and not isinstance(value, bool) and not -(1 << 63) <= value < (1 << 63):
+            raise ProjectError(f"stet.toml is not valid TOML: the integer {str(value)[:40]} does not fit in 64 bits")
+
+
 def load_project(path: str | Path) -> Project:
     """Read a project's stet.toml. Whatever the server would refuse in one is refused here,
-    in the same words, so that `stet run` and `stet submit --dry-run` find it first."""
+    so that `stet run` and `stet submit --dry-run` find it first. So is what the server
+    would read differently from this client."""
     path = Path(path).resolve()
     toml = path / "stet.toml"
+    if toml.is_symlink():
+        # Links are never packed, so the bundle would arrive without one.
+        raise ProjectError("stet.toml is a symbolic link. Links are not packed into a bundle, so it would be submitted without a stet.toml: make it a plain file.")
     if not toml.exists():
         raise ProjectError(f"{path} has no stet.toml. Run `stet init` to create an editor project.")
+    if not toml.is_file():
+        raise ProjectError("stet.toml is not a plain file")
     if toml.stat().st_size > MAX_MANIFEST_BYTES:
         raise ProjectError(f"stet.toml is over {MAX_MANIFEST_BYTES >> 10} KB. It holds a name, a command and a few lines about the editor.")
     try:
-        cfg = tomllib.loads(toml.read_text(encoding="utf-8"))
-    except (tomllib.TOMLDecodeError, UnicodeDecodeError, RecursionError) as e:
+        cfg = tomllib.loads(toml.read_text(encoding="utf-8"), parse_float=_float)
+    except (ValueError, RecursionError) as e:  # not TOML, not UTF-8, or a number nothing can hold
         raise ProjectError(f"stet.toml is not valid TOML: {e}") from None
+    _whole_numbers_fit(cfg)
+    for key in cfg:
+        for field in MANIFEST_FIELDS:
+            if key != field and key.casefold() == field:
+                # The server matches field names without regard to case, and this client
+                # does not. Left alone, the two would read different manifests from one file.
+                raise ProjectError(f"stet.toml: the key {key[:40]!r} must be written {field}. Field names are lowercase, and the server would take this one for {field}.")
     for field in ("name", "entry", "description", "technique", "parent", "license"):
         if not isinstance(cfg.get(field, ""), str):
             raise ProjectError(f'stet.toml: {field} must be text in quotes, e.g. {field} = "..."')
@@ -88,7 +129,7 @@ def load_project(path: str | Path) -> Project:
         raise ProjectError('stet.toml: entry is required, e.g. entry = "python editor.py"')
     if len(entry.encode("utf-8", "replace")) > MAX_ENTRY_BYTES or any(ch in entry for ch in "\0\n\r"):
         raise ProjectError(f"stet.toml: entry is one command line of at most {MAX_ENTRY_BYTES} characters")
-    if cfg.get("assets"):
+    if cfg.get("assets", []) != []:
         raise ProjectError("stet.toml: [[assets]] are not supported this season. Put what your editor needs in the bundle (up to 50 MB).")
     description, technique = _clip(cfg.get("description", "").strip(), 300), _clip(cfg.get("technique", "").strip(), 120)
     # These two are shown on the site and printed in other people's terminals.

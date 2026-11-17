@@ -182,23 +182,29 @@ func (a *App) agree(x, y *Result) bool {
 	if x.CorpusSHA != y.CorpusSHA || x.ExamSHA != y.ExamSHA || x.Valid != y.Valid {
 		return false
 	}
-	return !x.Valid || math.Abs(x.Loss-y.Loss) <= a.tolerance().Grade
+	return !x.Valid || within(x.Loss-y.Loss, a.tolerance().Grade)
 }
+
+// within reports whether a difference is inside a tolerance. Losses are reported to five
+// places, and 4.48954 - 4.40954 is 0.08000000000000007 in floating point: a difference of
+// exactly the tolerance agrees, as the page that prints both numbers says it does.
+func within(d, tol float64) bool { return math.Abs(d) <= tol+1e-9 }
 
 // --- claiming -------------------------------------------------------------------------------
 
 type entryState struct {
 	Entry      *Entry
 	OwnerID    int64
-	Editing    bool // an anchor holds a live edit claim
-	EditTries  int  // edit jobs handed out for it so far
-	Graded     bool // an anchor's grade is in
-	Grading    bool // an anchor holds a live grade claim
-	GradeTries int  // grade jobs handed to anchors for it so far
-	Replicas   int  // volunteers' grades, reported or under way
-	Newcomer   bool // one of those volunteers has no agreed grade to its name yet
-	Mine       bool // this verifier has had this entry before, whatever became of it
-	Closing    bool // an anchor has graded every entry in the round: it is about to settle
+	OwnerGH    int64 // the GitHub identity the editor was entered under, wherever it is linked now
+	Editing    bool  // an anchor holds a live edit claim
+	EditTries  int   // edit jobs handed out for it so far
+	Graded     bool  // an anchor's grade is in
+	Grading    bool  // an anchor holds a live grade claim
+	GradeTries int   // grade jobs handed to anchors for it so far
+	Replicas   int   // volunteers' grades, reported or under way
+	Newcomer   bool  // one of those volunteers has no agreed grade to its name yet
+	Mine       bool  // this verifier has had this entry before, whatever became of it
+	Closing    bool  // an anchor has graded every entry in the round: it is about to settle
 }
 
 // openEntryStates describes every entry that still needs work, as one verifier sees it.
@@ -214,7 +220,7 @@ func openEntryStates(s *State, acctID int64) []*entryState {
 			if e.Status != "open" {
 				continue
 			}
-			st := &entryState{Entry: e, OwnerID: s.Editors[e.EditorID].AccountID}
+			st := &entryState{Entry: e, OwnerID: s.Editors[e.EditorID].AccountID, OwnerGH: s.Editors[e.EditorID].GithubID}
 			index[entryKey(e.RoundIdx, e.EditorID)] = st
 			states = append(states, st)
 		}
@@ -293,7 +299,7 @@ func wantsGrade(st *entryState, acct, owner *Account) bool {
 	if st.Mine || st.Closing || st.OwnerID == acct.ID || st.Replicas >= maxReplicas {
 		return false
 	}
-	if owner != nil && owner.GithubID != 0 && owner.GithubID == acct.GithubID {
+	if acct.GithubID != 0 && ((owner != nil && owner.GithubID == acct.GithubID) || st.OwnerGH == acct.GithubID) {
 		return false // the same person under another key
 	}
 	return acct.Agreed > 0 || !st.Newcomer
@@ -470,8 +476,11 @@ func findClaim(s *State, acct *Account, claimID int64, kind string) (*Claim, err
 	switch {
 	case c.Status == "done" || c.Status == "released" || c.Status == "refused":
 		return nil, fail(409, "this job was already %s", c.Status)
+	case !acct.Anchor && c.Status == "lapsed":
+		return nil, fail(409, "this job ended before your result arrived: it was given up on at %s, with no result and without being handed back. It earns no credit, and this account is offered work again a day after that",
+			time.Unix(c.ExpiresAt, 0).UTC().Format("15:04 UTC"))
 	case !acct.Anchor && !c.live(now()):
-		return nil, fail(409, "this job ended before your result arrived: its time ran out or the round settled. It earns no credit, and it does not count against you")
+		return nil, fail(409, "this job ended before your result arrived: the round settled first. It earns no credit, and it does not count against you")
 	}
 	return c, nil
 }
@@ -499,7 +508,7 @@ func (a *App) readScript(ctx context.Context, sha string) ([]byte, error) {
 	if !sha256Re.MatchString(sha) {
 		return nil, errNoBlob
 	}
-	return a.st.blobs.Read(ctx, scriptKey(sha), a.season.Script.MaxBytes)
+	return a.st.blobs.Read(ctx, scriptKey(sha), a.season.maxScriptBlob())
 }
 
 type Ack struct {
@@ -679,9 +688,12 @@ func othersRan(s *State, e *Entry) bool {
 func roundsRun(s *State, editorID string) int {
 	n := 0
 	for _, e := range s.ofEditor[editorID] {
-		if !e.Void {
-			n++
+		// A round that settled with no baseline (the anchors graded nothing in it) cannot be
+		// rated, so it does not use up one of an editor's rounds either.
+		if rd := s.Rounds[e.RoundIdx]; e.Void || (rd != nil && rd.Status == "settled" && rd.BaselineLoss == nil) {
+			continue
 		}
+		n++
 	}
 	return n
 }
@@ -700,7 +712,10 @@ func (a *App) afterInvalid(tx *Tx, editorID string) {
 func finite(x float64) bool { return !math.IsNaN(x) && !math.IsInf(x, 0) }
 
 func (a *App) checkScore(sc *ExamScore, what string) error {
-	if sc == nil || !finite(sc.Loss) || sc.Loss <= 0 || sc.Loss > 30 {
+	// A student that is confidently wrong can score far above chance (9 nats), and what an
+	// anchor measured has to be recordable whatever it is. The bound only keeps nonsense out.
+	const maxLoss = 1e4
+	if sc == nil || !finite(sc.Loss) || sc.Loss <= 0 || sc.Loss > maxLoss {
 		return fail(400, "the result has no usable %s score", what)
 	}
 	// Exactly the season's sources and nothing else: what is sent here is stored.
@@ -710,8 +725,11 @@ func (a *App) checkScore(sc *ExamScore, what string) error {
 	sum := 0.0
 	for _, src := range a.season.ExamSources {
 		v, ok := sc.BySource[src]
-		if !ok || !finite(v) || v <= 0 || v > 30 {
+		if !ok {
 			return fail(400, "the %s score is missing source %q", what, src)
+		}
+		if !finite(v) || v <= 0 || v > maxLoss {
+			return fail(400, "the %s score for source %q is not a usable number", what, src)
 		}
 		sum += v
 	}
@@ -794,9 +812,9 @@ func (a *App) submitResult(ctx context.Context, acctID, claimID int64, p *Result
 				rd.Differs = append(rd.Differs, Differ{Handle: acct.Handle, What: "corpus"})
 				tx.saveRound(rd)
 			}
-			return refuse("your corpus or exam for %s differs from the round's. Delete ~/.cache/stet/rounds/%s and the pool cache, then try again", p.Round, p.Round)
+			return refuse("your corpus or exam for %s differs from the round's. This verifier rebuilds its copy once", p.Round)
 		}
-		if tol := a.tolerance(); rd.BaselineLoss != nil && math.Abs(*rd.BaselineLoss-p.Baseline.Loss) > tol.Baseline {
+		if tol := a.tolerance(); rd.BaselineLoss != nil && !within(*rd.BaselineLoss-p.Baseline.Loss, tol.Baseline) {
 			if acct.Anchor {
 				tx.event("anchors-differ", map[string]any{"round": p.Round, "anchor": acct.Handle})
 			}
@@ -949,9 +967,13 @@ func (a *App) settleReady(tx *Tx) {
 			continue
 		}
 		var open []*Entry
+		// last is when the round became ready: the anchor's last grade, or the moment its
+		// last ungraded entry was settled without one. Volunteers are handed work until
+		// then, so the wait is counted from then.
 		last, graded := int64(0), true
 		for _, e := range s.inRound[rd.Idx] {
 			if e.Status != "open" {
+				last = max(last, e.SettledAt)
 				continue
 			}
 			r := anchorResult(s, e)
@@ -1019,7 +1041,24 @@ func (a *App) abandonStuck(tx *Tx) {
 			continue
 		}
 		e.Void = true
-		a.settleInvalid(tx, e, why, &EntryDetail{})
+		// Volunteers may have graded the script the anchor could not. Their grades are
+		// published like any others; there is nothing to compare them with.
+		detail := &EntryDetail{}
+		for _, r := range tx.s.results(e.RoundIdx, e.EditorID) {
+			acct := tx.s.Accounts[r.AccountID]
+			if r.Verdict != "pending" || acct == nil || acct.Anchor {
+				continue
+			}
+			row := Replication{Handle: acct.Handle, Verdict: "no anchor grade", Valid: r.Valid, First: acct.Agreed == 0}
+			if r.Valid {
+				loss := r.Loss
+				row.Loss = &loss
+			}
+			detail.Replications = append(detail.Replications, row)
+			r.Verdict, r.Summary = "void", nil
+			tx.saveResult(r)
+		}
+		a.settleInvalid(tx, e, why, detail)
 		tx.event("abandoned", map[string]any{"round": roundID(a.season.ID, e.RoundIdx), "editor": e.EditorID, "at": t})
 	}
 }
@@ -1048,7 +1087,8 @@ func (a *App) settleEntry(tx *Tx, e *Entry, standing map[int64]bool) {
 	// An entry that is the unedited corpus itself has the round's baseline for its loss, and
 	// every grader reports the baseline with every grade. Agreeing about it shows nothing
 	// that was not already shown, so it earns no standing.
-	plain := rep.Valid && rd.BaselineLoss != nil && math.Abs(rep.Loss-*rd.BaselineLoss) < 1e-9
+	// Nor does agreeing that a script is invalid: that is decided before anything is trained.
+	plain := !rep.Valid || (rd.BaselineLoss != nil && math.Abs(rep.Loss-*rd.BaselineLoss) < 1e-9)
 	type differing struct {
 		r    *Result
 		acct *Account
@@ -1083,7 +1123,7 @@ func (a *App) settleEntry(tx *Tx, e *Entry, standing map[int64]bool) {
 		case r.CorpusSHA != rep.CorpusSHA || r.ExamSHA != rep.ExamSHA:
 			// It graded different data. A setup problem, and no evidence about this entry.
 			r.Verdict, row.Verdict = "void", "other data"
-		case b == nil || rd.BaselineLoss == nil || math.Abs(b.Loss-*rd.BaselineLoss) > tol.Baseline:
+		case b == nil || rd.BaselineLoss == nil || !within(b.Loss-*rd.BaselineLoss, tol.Baseline):
 			// Its arithmetic differs on the unedited corpus too.
 			r.Verdict, row.Verdict = "void", "baseline differs"
 		case a.agree(rep, r):
@@ -1111,16 +1151,27 @@ func (a *App) settleEntry(tx *Tx, e *Entry, standing map[int64]bool) {
 	// A volunteer who differs from the anchor alone has a strike against it. Two who differ
 	// from the anchor and agree with each other do not: then it is the anchor's grade that
 	// is in doubt, and the entry says so.
+	backed := make([]bool, len(differ))
 	for i, v := range differ {
-		backed := false
 		for j, w := range differ {
 			// Both must have agreed with an anchor before, or a second key would be all it
 			// took to stand behind an invented number.
 			same := v.acct.GithubID != 0 && v.acct.GithubID == w.acct.GithubID
-			backed = backed || (i != j && !same && standing[v.acct.ID] && standing[w.acct.ID] && a.agree(v.r, w.r))
+			backed[i] = backed[i] || (i != j && !same && standing[v.acct.ID] && standing[w.acct.ID] && a.agree(v.r, w.r))
 		}
-		if backed {
+	}
+	for i, v := range differ {
+		if backed[i] {
 			detail.DisputedTogether = true
+			continue
+		}
+		// Whoever else found what such a pair found is not struck for it either. It adds
+		// nothing to their case, and takes nothing from the volunteer.
+		cleared := false
+		for j, w := range differ {
+			cleared = cleared || (backed[j] && a.agree(v.r, w.r))
+		}
+		if cleared {
 			continue
 		}
 		v.acct.Streak = 0

@@ -671,14 +671,15 @@ func (w *world) established(handles ...string) {
 func TestVolunteersWhoFindTheSameThingAreNotStruck(t *testing.T) {
 	pub, priv := newKey()
 	w := newWorld(t, pub)
-	anchor, alice, bob, carol := w.join("anchor-one", priv), w.join("alice", nil), w.join("bob", nil), w.join("carol", nil)
+	anchor, alice, bob, carol, dave := w.join("anchor-one", priv), w.join("alice", nil), w.join("bob", nil), w.join("carol", nil), w.join("dave", nil)
 	w.submit(alice, "tidy", "print('v1')")
 	w.established("bob", "carol")
 	idx := w.draw()
 	if code, status := w.edit(anchor, w.claim(anchor, true), "{\"doc\": 1}\n"); code != 200 {
 		t.Fatal(status)
 	}
-	for who, loss := range map[*actor]float64{bob: 5.0, carol: 5.01} {
+	// dave has never had a grade agree. He finds what the other two find.
+	for who, loss := range map[*actor]float64{bob: 5.0, carol: 5.01, dave: 5.0} {
 		if code, status := w.report(who, w.claim(who, false), loss); code != 200 || status != "pending" {
 			t.Fatalf("%s: HTTP %d %s", who.handle, code, status)
 		}
@@ -691,10 +692,10 @@ func TestVolunteersWhoFindTheSameThingAreNotStruck(t *testing.T) {
 	// so neither is struck, and the entry says the anchor's grade is in question.
 	es := w.entries(alice, idx)
 	d := es[0].Detail
-	if math.Abs(*es[0].Loss-5.5) > 1e-9 || d.Disputed != 2 || !d.DisputedTogether || len(d.Replications) != 2 {
+	if math.Abs(*es[0].Loss-5.5) > 1e-9 || d.Disputed != 3 || !d.DisputedTogether || len(d.Replications) != 3 {
 		t.Fatalf("the entry: %+v %+v", es[0], d)
 	}
-	for _, h := range []string{"bob", "carol"} {
+	for _, h := range []string{"bob", "carol", "dave"} {
 		if c := w.account(h); c.Strikes != 0 || c.LastStrikeAt != 0 {
 			t.Fatalf("%s was struck for a grade another volunteer also found: %+v", h, c)
 		}
@@ -797,13 +798,17 @@ func TestAMuteLiftsAndAJobLeftToRunOutCostsADay(t *testing.T) {
 func TestAnEntryTheAnchorCannotGradeIsGivenUp(t *testing.T) {
 	pub, priv := newKey()
 	w := newWorld(t, pub)
-	anchor, alice := w.join("anchor-one", priv), w.join("alice", nil)
+	anchor, alice, bob := w.join("anchor-one", priv), w.join("alice", nil), w.join("bob", nil)
 	id := w.submit(alice, "tidy", "print('v1')")
 	idx := w.draw()
 	if code, status := w.edit(anchor, w.claim(anchor, true), "{\"doc\": 1}\n"); code != 200 {
 		t.Fatal(status)
 	}
-	// The script is one the harness falls over on, every time.
+	// A volunteer's machine manages what the anchor's will not.
+	if code, status := w.report(bob, w.claim(bob, false), 5.2); code != 200 || status != "pending" {
+		t.Fatalf("HTTP %d %s", code, status)
+	}
+	// The script is one the anchor's harness falls over on, every time.
 	for i := 0; i < maxGradeAttempts; i++ {
 		c := w.claim(anchor, true)
 		if c.Job == nil || c.Job.Kind != "grade" {
@@ -823,7 +828,31 @@ func TestAnEntryTheAnchorCannotGradeIsGivenUp(t *testing.T) {
 		if s.Rounds[idx].Status != "settled" || !s.ofEditor[id][0].Void {
 			t.Fatalf("the round is held open by an entry nobody can grade: %+v", s.Rounds[idx])
 		}
+		// The volunteer's grade is not left pending for ever.
+		for _, r := range s.results(idx, id) {
+			if r.Verdict != "void" || r.Summary != nil {
+				t.Fatalf("a grade of an entry that was given up: %+v", r)
+			}
+		}
 	})
+	// It is published, with nothing to compare it with, and counts for and against nobody.
+	d := es[0].Detail
+	if d == nil || len(d.Replications) != 1 || d.Replications[0].Handle != "bob" || d.Replications[0].Verdict != "no anchor grade" || d.Replications[0].Loss == nil {
+		t.Fatalf("the volunteer's grade was not published: %+v", d)
+	}
+	if b := w.account("bob"); b.Agreed != 0 || b.Strikes != 0 {
+		t.Fatalf("bob: %+v", b)
+	}
+	req, _ := http.NewRequest("GET", w.srv.URL+"/rounds/"+roundID(w.app.season.ID, idx), nil)
+	req.Host = "site.test"
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if page, _ := io.ReadAll(resp.Body); resp.StatusCode != 200 || !strings.Contains(string(page), "no anchor grade") || strings.Contains(string(page), "set aside: no anchor grade") {
+		t.Fatalf("the round's page: HTTP %d", resp.StatusCode)
+	}
 	w.check()
 }
 
@@ -963,6 +992,13 @@ func TestOnlyAnAnchorPublishesFiles(t *testing.T) {
 	}
 	if code := anchor.do("PUT", "/api/v1/admin/files/anything.txt", []byte("abc"), &out); code != 400 {
 		t.Fatalf("something else was published after the close: HTTP %d", code)
+	}
+	// These three have no hash to be held to, so the first one published stands.
+	if code := anchor.do("PUT", "/api/v1/admin/files/"+seedName, []byte("another seed"), &out); code != 409 {
+		t.Fatalf("the published seed was replaced: HTTP %d", code)
+	}
+	if blob, err := w.app.st.blobs.Read(context.Background(), "files/"+seedName, 1<<20); err != nil || string(blob) != "abc" {
+		t.Fatalf("the seed in the bucket: %q %v", blob, err)
 	}
 }
 
@@ -1357,6 +1393,19 @@ func TestAnEditorTheAnchorCannotRunDoesNotHoldTheRoundOpen(t *testing.T) {
 	w.app.st.view(func(s *State) {
 		if !failing(s, id) {
 			t.Fatal("an editor the anchors could not run in three rounds, while running others, is still being scheduled")
+		}
+		// Whether the anchors ran the others is known only when the round has settled, and
+		// that is when the editor stops: it is not drawn a fourth time.
+		if e := s.Editors[id]; e.Status != "retired" {
+			t.Fatalf("the editor is still %s", e.Status)
+		}
+	})
+	next := w.draw()
+	w.app.st.view(func(s *State) {
+		for _, e := range s.inRound[next] {
+			if e.EditorID == id {
+				t.Fatal("it was drawn a fourth time")
+			}
 		}
 	})
 	w.check()
@@ -1909,11 +1958,27 @@ func TestABundleIsBoundedInEveryDimension(t *testing.T) {
 		"a file as ./file":            pack([]*tar.Header{{Name: "stet.toml"}, {Name: "./editor.py"}}, nil),
 		"a book of file names":        pack(manyNames(400, 200), nil),
 		"a manifest of a megabyte":    bigManifest(),
+		// The decoder would take either for "name", and which one would be chance.
+		"a field name in capitals":      manifest("name = \"tidy\"\nName = \"other\"\nentry = \"python editor.py\"\n"),
+		"a field name in other letters": manifest("name = \"tidy\"\nentry = \"python editor.py\"\n\"licen\u017fe\" = \"x\"\n"),
 	} {
 		if _, _, err := parseBundle(blob); err == nil {
 			t.Fatalf("a bundle with %s was accepted", what)
 		}
 	}
+	if _, _, err := parseBundle(manifest("name = \"tidy\"\nentry = \"python editor.py\"\nmine = 3\n")); err != nil {
+		t.Fatalf("a key of the entrant's own: %v", err)
+	}
+}
+
+func manifest(body string) []byte {
+	var tb bytes.Buffer
+	tw := tar.NewWriter(&tb)
+	tw.WriteHeader(&tar.Header{Name: "stet.toml", Mode: 0o644, Size: int64(len(body)), Typeflag: tar.TypeReg})
+	tw.Write([]byte(body))
+	tw.Close()
+	enc, _ := zstd.NewWriter(nil)
+	return enc.EncodeAll(tb.Bytes(), nil)
 }
 
 func manyNames(n, length int) []*tar.Header {
@@ -2302,4 +2367,234 @@ func TestAMachineThatBuildsTheRoundDifferentlyIsNotGivenMoreOfIt(t *testing.T) {
 		t.Fatalf("a description with terminal escapes in it: %v", err)
 	}
 	w.check()
+}
+
+func TestOneEditorsTimeoutMovesNobodyElsesRating(t *testing.T) {
+	// The references run every round. carol qualifies in rounds 1-3 and dave in 4-6, both
+	// gaining 0.925 every time. zed shares carol's rounds, and times out in one of them.
+	var es []entryRow
+	for r := 1; r <= 6; r++ {
+		for id, g := range map[string]float64{"identity": 0, "english": 0.912, "tidy": 0.933} {
+			es = append(es, entryRow{RoundIdx: r, EditorID: id, Gain: g, Valid: true})
+		}
+		who := "carol"
+		if r > 3 {
+			who = "dave"
+		}
+		es = append(es, entryRow{RoundIdx: r, EditorID: who, Gain: 0.925, Valid: true})
+	}
+	es = append(es, entryRow{RoundIdx: 1, EditorID: "zed", Gain: 0.9, Valid: true}, entryRow{RoundIdx: 2, EditorID: "zed"}, entryRow{RoundIdx: 3, EditorID: "zed", Gain: 0.9, Valid: true})
+	rt, diff := fitRatings(es)
+	if d := rt["carol"].Adjusted - rt["dave"].Adjusted; math.Abs(d) > 1e-6 {
+		t.Fatalf("carol %v, dave %v: someone else's timeout moved a rating by %v", rt["carol"].Adjusted, rt["dave"].Adjusted, d)
+	}
+	for r, d := range diff {
+		if math.Abs(d) > 1e-6 {
+			t.Fatalf("round %d is taken to be %v easier than the others; they were all alike", r, d)
+		}
+	}
+	// zed's own rating still pays for the timeout.
+	if z := rt["zed"]; math.Abs(z.Adjusted-0.6) > 1e-6 || z.Invalid != 1 {
+		t.Fatalf("zed: %+v", z)
+	}
+}
+
+func TestSmallRulesOfJudging(t *testing.T) {
+	// A difference of exactly the tolerance agrees, whatever floating point makes of it.
+	x, y := 4.48954, 4.40954 // variables: Go would subtract the constants exactly
+	if d := x - y; d <= 0.08 || !within(d, 0.08) || within(0.0801, 0.08) {
+		t.Fatalf("within: %v", d)
+	}
+	// A person is not handed their own entry under a second key, even when the first key
+	// no longer has the GitHub identity the editor was entered under.
+	st := &entryState{Entry: &Entry{Script: strings.Repeat("a", 64)}, OwnerID: 1, OwnerGH: 4242}
+	if wantsGrade(st, &Account{ID: 2, GithubID: 4242, Agreed: 1}, &Account{ID: 1}) {
+		t.Fatal("handed their own entry")
+	}
+	if !wantsGrade(st, &Account{ID: 3, GithubID: 77, Agreed: 1}, &Account{ID: 1}) {
+		t.Fatal("somebody else was refused it")
+	}
+	// An anchor sets the scores; counts from before it was one are not agreements.
+	w := newWorld(t)
+	w.app.st.view(func(s *State) {
+		if v := verifierStats(s, &Account{ID: 9, Anchor: true, Agreed: 3, Streak: 3}); v["validated"] != 0 || v["streak"] != 0 {
+			t.Fatalf("an anchor's stats: %+v", v)
+		}
+	})
+	// What an anchor measures can be recorded, however bad.
+	score := func(v float64) *ExamScore {
+		by := map[string]float64{}
+		for _, src := range w.app.season.ExamSources {
+			by[src] = v
+		}
+		return &ExamScore{Loss: v, BySource: by}
+	}
+	if err := w.app.checkScore(score(45), "exam"); err != nil {
+		t.Fatalf("a loss of 45: %v", err)
+	}
+	if err := w.app.checkScore(score(1e6), "exam"); err == nil {
+		t.Fatal("a loss of a million was taken")
+	}
+}
+
+func TestAgreeingThatAScriptIsInvalidEarnsNoStanding(t *testing.T) {
+	pub, priv := newKey()
+	w := newWorld(t, pub)
+	anchor, alice, bob := w.join("anchor-one", priv), w.join("alice", nil), w.join("bob", nil)
+	w.submit(alice, "tidy", "print('v1')")
+	idx := w.draw()
+	if code, status := w.edit(anchor, w.claim(anchor, true), "{\"doc\": 1}\n"); code != 200 {
+		t.Fatal(status)
+	}
+	// Finding a script invalid takes no training: it is decided before any.
+	invalid := func(a *actor) (int, string) {
+		c := w.claim(a, a == anchor)
+		p := w.result(c, 5.5, 6.0)
+		p["valid"], p["invalid_reason"] = false, "the script spends more ink than the round allows"
+		delete(p, "exam")
+		var ack struct {
+			Status string `json:"status"`
+			Error  string `json:"error"`
+		}
+		code := a.do("POST", fmt.Sprintf("/api/v1/jobs/%d/result", c.Job.ID), p, &ack)
+		return code, ack.Status + ack.Error
+	}
+	if code, status := invalid(bob); code != 200 {
+		t.Fatalf("HTTP %d %s", code, status)
+	}
+	if code, status := invalid(anchor); code != 200 || status != "settled" {
+		t.Fatalf("HTTP %d %s", code, status)
+	}
+	w.check()
+	es := w.entries(alice, idx)
+	if es[0].Valid || len(es[0].Detail.Replications) != 1 || es[0].Detail.Replications[0].Verdict != "agreed" {
+		t.Fatalf("the entry: %+v %+v", es[0], es[0].Detail)
+	}
+	if b := w.account("bob"); b.Agreed != 0 || b.Streak != 0 || b.Strikes != 0 {
+		t.Fatalf("bob after agreeing that a script is invalid: %+v", b)
+	}
+}
+
+func TestARoundThatEndsByGivingAnEntryUpStillWaitsForItsVolunteers(t *testing.T) {
+	pub, priv := newKey()
+	w := newWorld(t, pub)
+	anchor, bob := w.join("anchor-one", priv), w.join("bob", nil)
+	good := w.submit(anchor, "ref-a", "print(1)")
+	w.submit(bob, "trouble", "print(2)") // his own, so it is never his to grade
+	idx := w.draw()
+	for i := 0; i < 2; i++ {
+		if code, status := w.edit(anchor, w.claim(anchor, true), fmt.Sprintf("{\"doc\": %d}\n", i)); code != 200 {
+			t.Fatal(status)
+		}
+	}
+	w.established("bob")
+	ctx := context.Background()
+	// The anchor grades one entry, and cannot grade the other however often it tries.
+	tries := 0
+	for {
+		c := w.claim(anchor, true)
+		if c.Job == nil {
+			break
+		}
+		if c.Job.Editor.ID == good {
+			if code, status := w.report(anchor, c, 5.5); code != 200 || status != "pending" {
+				t.Fatalf("HTTP %d %s", code, status)
+			}
+			continue
+		}
+		tries++
+		anchor.do("POST", fmt.Sprintf("/api/v1/jobs/%d/release", c.Job.ID), map[string]string{"reason": "the harness fell over"}, nil)
+	}
+	if tries != maxGradeAttempts {
+		t.Fatalf("the anchor tried %d times", tries)
+	}
+	// All that took a long time: the anchor's one grade is far in the past. Just before the
+	// other entry is given up, a volunteer is handed the graded one, because a round with
+	// an ungraded entry is not yet closing.
+	w.app.st.update(ctx, func(tx *Tx) error {
+		for _, r := range tx.s.results(idx, good) {
+			r.ReceivedAt = now() - int64(w.app.cfg.ReplicaWait.Seconds()) - 600
+			tx.saveResult(r)
+		}
+		return nil
+	})
+	held := w.claim(bob, false)
+	if held.Job == nil || held.Job.Editor.ID != good {
+		t.Fatalf("the volunteer was given %+v", held.Job)
+	}
+	w.app.tick(ctx)
+	// The round became ready a moment ago, when its last entry was given up. The volunteer
+	// has the wait that every volunteer is promised, counted from then.
+	w.app.st.view(func(s *State) {
+		if c := s.Claims[held.Job.ID]; c.Status != "claimed" {
+			t.Fatalf("a job a minute old, in a round that became ready this minute: %+v", c)
+		}
+		if s.Rounds[idx].Status != "open" {
+			t.Fatal("the round settled under a volunteer who had just started")
+		}
+	})
+	if code, status := w.report(bob, held, 5.52); code != 200 || status != "settled" {
+		t.Fatalf("HTTP %d %s", code, status)
+	}
+	var out claimed
+	if code := bob.do("POST", "/api/v1/jobs/claim", w.hello(false), &out); code != 200 {
+		t.Fatalf("the volunteer is refused work afterwards: HTTP %d", code)
+	}
+	w.check()
+}
+
+func TestTheSubmitReplySaysWhichRoundOnlyWhenItKnows(t *testing.T) {
+	w := newWorld(t)
+	w.app.cfg.RequireGithub = false
+	w.app.tick(context.Background()) // schedules the first round
+	reply := func(handle string) map[string]any {
+		a := w.join(handle, nil)
+		var out map[string]any
+		if code := a.do("POST", "/api/v1/editors", bundle(t, "ed-"+handle, "print('"+handle+"')"), &out); code != 201 {
+			t.Fatalf("submit: HTTP %d %v", code, out)
+		}
+		return out
+	}
+	for i := 0; i < w.app.cfg.MaxNewPerRound; i++ {
+		if out := reply(fmt.Sprintf("early%d", i)); out["enters"] == nil || out["earliest"] != nil {
+			t.Fatalf("entry %d, with room in the round: %v", i, out)
+		}
+	}
+	// The round takes no more new entries than that: the next is told the earliest it could be.
+	if out := reply("late"); out["enters"] != nil || out["earliest"] == nil {
+		t.Fatalf("an entry past the round's room: %v", out)
+	}
+}
+
+func TestAScriptThatDoesNotCompressIsServedWhole(t *testing.T) {
+	pub, priv := newKey()
+	w := newWorld(t, pub)
+	anchor, alice := w.join("anchor-one", priv), w.join("alice", nil)
+	w.submit(alice, "noisy", "print(1)")
+	w.draw()
+	// A script of exactly the season's limit, of bytes that will not compress: stored, it
+	// is a little larger than the limit.
+	w.app.season.Script.MaxBytes = 4096
+	raw := make([]byte, 4096)
+	rand.Read(raw)
+	script := string(raw)
+	if code, status := w.edit(anchor, w.claim(anchor, true), script); code != 200 {
+		t.Fatalf("HTTP %d %s", code, status)
+	}
+	sum := sha256.Sum256(raw)
+	resp, err := http.Get(w.srv.URL + "/api/v1/scripts/" + hex.EncodeToString(sum[:]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	blob, err := io.ReadAll(resp.Body)
+	if err != nil || resp.StatusCode != 200 {
+		t.Fatalf("the download: HTTP %d, %v after %d bytes", resp.StatusCode, err, len(blob))
+	}
+	if int64(len(blob)) <= w.app.season.Script.MaxBytes {
+		t.Fatalf("the test is not testing anything: %d bytes stored", len(blob))
+	}
+	if got, err := unzstd(blob, w.app.season.Script.MaxBytes); err != nil || !bytes.Equal(got, raw) {
+		t.Fatalf("what was served is not the script: %v", err)
+	}
 }

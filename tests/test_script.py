@@ -172,6 +172,51 @@ def test_malformed_scripts_are_rejected(corpus, enc, bad):
         materialize(corpus, path, SEASON, SCALE, enc)
 
 
+def nested(depth: int, inside: str = "0") -> str:
+    return "[" * depth + inside + "]" * depth
+
+
+@pytest.mark.parametrize("depth", [17, 2_000, 100_000])
+def test_a_line_nested_too_deep_is_invalid_whatever_python_reads_it(corpus, enc, depth):
+    # How deep a JSON parser can go differs between versions of Python: 2,000 levels is
+    # RecursionError on 3.11 and a parsed value on 3.13. Two graders must not disagree
+    # about a script over that, so the limit is a rule, far below any parser's.
+    path = corpus.path / "script.jsonl"
+    for line in (nested(depth), '{"a":' * depth + "1" + "}" * depth, '{"d": 0, "x": ' + nested(depth - 1) + "}", '{"s": [' + nested(depth - 2) + "]}", '{"d": 0, "k": ' + nested(depth - 1) + "}"):
+        path.write_text("0\n" + line + "\n")
+        with pytest.raises(ScriptError) as e:
+            materialize(corpus, path, SEASON, SCALE, enc)
+        assert str(e.value) == "line 2: nested more than 16 deep"
+
+
+def test_sixteen_deep_is_allowed_and_every_container_counts(corpus, enc):
+    from stet.script import MAX_DEPTH, too_deep
+
+    assert MAX_DEPTH == 16
+    # Sixteen deep, under a key the format has no use for: still a line that keeps document 0.
+    plain, plain_stats = run(corpus, enc, [0] * 40)
+    path = corpus.path / "script.jsonl"
+    path.write_text(('{"d": 0, "x": ' + nested(15) + "}\n") * 40)
+    tokens, stats = materialize(corpus, path, SEASON, SCALE, enc)
+    assert (tokens == plain).all() and stats.out_docs == plain_stats.out_docs and stats.script_lines == 40
+    # What a line is for is still checked: sixteen deep in the wrong place is wrong for the old reason.
+    path.write_text('{"s": ' + nested(15) + "}\n")
+    with pytest.raises(ScriptError, match="a copy must be"):
+        materialize(corpus, path, SEASON, SCALE, enc)
+
+    for flat in (7, "text", None, 1.5, True):
+        assert not too_deep(flat)
+    assert not too_deep({"d": 1, "k": [[0, 900]] * 20000}) and not too_deep([]) and not too_deep({})
+    for wrap in (lambda v: [v], lambda v: {"a": v}, lambda v: [1, "x", None, v], lambda v: {"p": "text", "q": v, "r": 2.5}):
+        for depth, deep in ((16, False), (17, True), (2_000, True), (100_000, True)):
+            v = 0
+            for _ in range(depth):
+                v = wrap(v)
+            assert too_deep(v) is deep, depth
+    assert too_deep([[[]]], limit=2) and not too_deep([[[]]], limit=3)
+    assert too_deep([0, [1, {"a": [2]}]], limit=3) and not too_deep([0, [1, {"a": [2]}]], limit=4)  # the deepest branch decides
+
+
 def test_a_line_longer_than_the_limit_is_rejected_without_being_read_whole(corpus, enc):
     path = corpus.path / "script.jsonl"
     with open(path, "wb") as f:

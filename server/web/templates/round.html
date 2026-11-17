@@ -56,7 +56,7 @@
     <div class="empty">No entries.</div>
     {{end}}
   </div>
-  <p class="muted" style="font-size:15.5px;margin-top:14px">The loss is an anchor's grade. A volunteer's grade of the same script replicates it if it lands within {{f2 $d.Tolerance.Grade}} nats. Any script above can be re-graded by anyone, by the entry's name: <code>stet score {{if $d.Entries}}{{with index $d.Entries 0}}{{.Owner}}/{{.Name}}{{end}}{{else}}owner/name{{end}} --round {{$d.ID}}</code>.</p>
+  <p class="muted" style="font-size:15.5px;margin-top:14px">The loss is an anchor's grade. A volunteer's grade of the same script replicates it if it lands within {{f2 $d.Tolerance.Grade}} nats. Any script above can be re-graded by anyone, by the entry's name: <code>stet score {{if $d.Example}}{{$d.Example}}{{else}}owner/name{{end}} --round {{$d.ID}}</code>.</p>
 
   {{if or $d.Replicas $r.Differs}}
   <h2 id="replications">Replications</h2>
@@ -70,10 +70,10 @@
           <td><a class="name" href="/editors/{{short .EditorID}}">{{.Name}}</a><span class="by"><a href="/u/{{.Owner}}">{{.Owner}}</a></span></td>
           <td><a href="/u/{{.Handle}}">{{.Handle}}</a>{{if .First}} <span class="muted" title="No grade of this account's had agreed with an anchor's before this round">· first grade</span>{{end}}</td>
           <td class="r num">{{if has .Loss}}{{f3 (ptr .Loss)}}{{else}}<span class="muted">invalid</span>{{end}}</td>
-          <td class="r num">{{if .AnchorValid}}{{f3 .Anchor}}{{else}}<span class="muted">invalid</span>{{end}}</td>
+          <td class="r num">{{if .Void}}—{{else if .AnchorValid}}{{f3 .Anchor}}{{else}}<span class="muted">invalid</span>{{end}}</td>
           <td class="r num">{{if has .Diff}}{{gain (ptr .Diff)}}{{else}}—{{end}}</td>
           <td class="r num hide-s">{{if has .BaseDiff}}{{gain (ptr .BaseDiff)}}{{else}}—{{end}}</td>
-          <td>{{if eq .Verdict "agreed"}}<span class="stage settled">agreed</span>{{else if eq .Verdict "differs"}}<span class="tag red">differs</span>{{else}}<span class="muted">set aside: {{.Verdict}}</span>{{end}}</td>
+          <td>{{if eq .Verdict "agreed"}}<span class="stage settled">agreed</span>{{else if eq .Verdict "differs"}}<span class="tag red">differs</span>{{else if eq .Verdict "no anchor grade"}}<span class="muted" title="The anchor could not grade this script, so there is nothing to compare with">no anchor grade</span>{{else}}<span class="muted">set aside: {{.Verdict}}</span>{{end}}</td>
         </tr>{{end}}
       </tbody>
     </table>

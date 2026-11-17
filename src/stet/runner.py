@@ -57,6 +57,10 @@ OUT_LIMIT_FILES = 10_000
 FREE_SPACE_FLOOR = 5 << 30
 ENTRY_LIMIT_BYTES = 4096
 LOG_LIMIT_BYTES = 1 << 20
+# The start of an editor's output is kept in editor.log, up to the limit above. Its end is
+# kept in memory, this much of it: what an editor says last is why it stopped, and that is
+# what gets reported, however much it said first.
+LOG_TAIL_BYTES = 8 << 10
 GPU_DEVICES = ("/dev/nvidiactl", "/dev/nvidia-uvm", "/dev/nvidia-uvm-tools", "/dev/nvidia-modeset", "/dev/nvidia-caps", "/dev/kfd", "/dev/dri")
 SYSTEM_DIRS = ("/usr", "/opt")
 USR_LINKS = ("/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32")
@@ -351,8 +355,13 @@ def remove_tree(path: Path) -> bool:
 
     So nothing here goes by path or keeps more than one directory open. It walks down by
     name from the directory it is in, taking each one's permissions back as it enters, and
-    climbs back through "..". Links are removed, never followed. Call this only once the
-    editor is dead: with nothing left to move a directory, ".." is where we came from.
+    climbs back through "..". Links are removed, never followed.
+
+    Call this only once the editor is dead: with nothing left to move a directory, ".." is
+    where we came from. That is checked all the same. Each directory's device and inode are
+    noted on the way down, and if ".." is ever some other directory (something moved the one
+    we were in), the walk stops there and the answer is False. The names still to be removed
+    belong to the directory we came from; in any other they would be someone else's files.
     """
     path = Path(path)
     if not os.path.lexists(path):
@@ -370,8 +379,13 @@ def remove_tree(path: Path) -> bool:
         here = os.open(path, flags)
     except OSError:
         return False
+    def which(fd: int) -> tuple[int, int]:
+        st = os.fstat(fd)
+        return st.st_dev, st.st_ino
+
     try:
         names: list[str] = []  # the way down from `path` to the directory open at `here`
+        seen = [which(here)]  # which directory each one on that way is, `path` first
         todo = [_empty(here)]  # for each directory on that way, the directories in it still to go
         while True:
             if todo[-1]:
@@ -384,11 +398,15 @@ def remove_tree(path: Path) -> bool:
                 os.close(here)
                 here = below
                 names.append(name)
+                seen.append(which(here))
                 todo.append(_empty(here))
             elif names:
                 above = os.open("..", flags, dir_fd=here)
                 os.close(here)
                 here = above
+                if which(here) != seen[-2]:
+                    return False  # not the directory we came down from: nothing in it is ours to remove
+                seen.pop()
                 todo.pop()
                 try:
                     os.rmdir(names.pop(), dir_fd=here)
@@ -557,20 +575,8 @@ def run_editor(
     status = "ok"
     reason = ""
     low_disk = False
+    last = bytearray()  # the end of what the editor said
     with open(log_path, "wb") as log:
-        try:
-            proc = subprocess.Popen(
-                cmd, cwd=cwd, env=popen_env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                start_new_session=True, pass_fds=(up_w,) if inside else (),
-            )  # fmt: skip
-        except (OSError, ValueError) as e:
-            if inside:
-                os.close(up_r)
-                raise HarnessError(f"the sandbox could not be started: {e}") from None
-            return refused(f"the entry command could not be started: {e}")
-        finally:
-            if up_w is not None:
-                os.close(up_w)
 
         def pump():
             written = 0
@@ -578,6 +584,8 @@ def run_editor(
                 if written < LOG_LIMIT_BYTES:
                     log.write(chunk[: LOG_LIMIT_BYTES - written])
                     written += len(chunk)
+                last.extend(chunk[-LOG_TAIL_BYTES:])
+                del last[:-LOG_TAIL_BYTES]
                 if echo:
                     sys.stderr.buffer.write(chunk)
                     sys.stderr.flush()
@@ -606,24 +614,55 @@ def run_editor(
                     found.append(why)
 
         t = threading.Thread(target=pump, daemon=True)
-        t.start()
-        threading.Thread(target=watch, daemon=True).start()
-        while proc.poll() is None:
-            if time.time() >= deadline:
-                status, reason = "timeout", f"the editor was still running at the {time_limit:.0f}s limit"
-            elif found:
-                status, reason = "error", found[0]
-            elif shutil.disk_usage(out_dir).free < FREE_SPACE_FLOOR:
-                status, reason, low_disk = "error", "the editor ran the disk low", True
-            if status != "ok":
+        proc = None
+        # From before the editor exists until it is known to be gone, there is one way out,
+        # and it is the `finally` below.
+        try:
+            try:
+                proc = subprocess.Popen(
+                    cmd, cwd=cwd, env=popen_env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    start_new_session=True, pass_fds=(up_w,) if inside else (),
+                )  # fmt: skip
+            except (OSError, ValueError) as e:
+                if inside:
+                    raise HarnessError(f"the sandbox could not be started: {e}") from None
+                return refused(f"the entry command could not be started: {e}")
+            finally:
+                if up_w is not None:
+                    os.close(up_w)
+            t.start()
+            threading.Thread(target=watch, daemon=True).start()
+            while proc.poll() is None:
+                if time.time() >= deadline:
+                    status, reason = "timeout", f"the editor was still running at the {time_limit:.0f}s limit"
+                elif found:
+                    status, reason = "error", found[0]
+                elif shutil.disk_usage(out_dir).free < FREE_SPACE_FLOOR:
+                    status, reason, low_disk = "error", "the editor ran the disk low", True
+                if status != "ok":
+                    _kill(proc)
+                    break
+                time.sleep(0.05)
+            proc.wait()
+        except BaseException:
+            if up_r is not None:
+                os.close(up_r)
+            raise
+        finally:
+            # No way out of here leaves an editor running: not Ctrl-C, not a disk that cannot
+            # be asked how full it is, not a thread that would not start. Whoever called is
+            # about to remove the directories it writes in, and remove_tree is only safe
+            # once nothing is left to move them.
+            if proc is not None and proc.poll() is None:
                 _kill(proc)
-                break
-            time.sleep(0.05)
-        proc.wait()
-        done.set()
-        t.join(timeout=5)
+                proc.wait()
+            done.set()
+            if t.ident is not None:
+                t.join(timeout=5)
     seconds = time.time() - start
-    tail = log_path.read_bytes()[-4000:].decode("utf-8", errors="replace")
+    # From what it said last, not from the log file: that holds the first megabyte, and an
+    # editor that printed more than that would be reported by something it said long before.
+    tail = bytes(last).decode("utf-8", errors="replace")[-4000:]
     if inside:
         os.set_blocking(up_r, False)
         try:
@@ -635,9 +674,17 @@ def run_editor(
             raise HarnessError(f"the sandbox failed to start: {tail.strip()[:300]}")
     if not remove_tree(scratch_dir):
         raise HarnessError(f"could not remove what the editor left in {scratch_dir}")
-    if low_disk and shutil.disk_usage(work).free + _usage(out_dir, OUT_LIMIT_FILES)[0] < FREE_SPACE_FLOOR + OUT_LIMIT_BYTES:
-        # The space did not come back with the editor gone, so it was not the editor's.
-        raise HarnessError(f"the disk under {work} ran low while an editor was running, and is still low without it")
+    if low_disk:
+        size, entries, readable = _usage(out_dir, OUT_LIMIT_FILES)
+        if not readable or entries > OUT_LIMIT_FILES:
+            # What it wrote cannot be added up, and that is its doing. The run stays the
+            # editor's error: called the machine's, an editor could stop an anchor by
+            # filling the disk somewhere the count cannot look.
+            hidden = "made part of its output directory unreadable" if not readable else f"created more than {OUT_LIMIT_FILES:,} files in its output directory"
+            reason = f"the editor ran the disk low and {hidden}"
+        elif shutil.disk_usage(work).free + size < FREE_SPACE_FLOOR + OUT_LIMIT_BYTES:
+            # The space did not come back with the editor gone, so it was not the editor's.
+            raise HarnessError(f"the disk under {work} ran low while an editor was running, and is still low without it")
     if status == "ok" and proc.returncode != 0:
         status, reason = "error", f"the editor exited with status {proc.returncode}"
     if status == "ok" and (why := over()):  # what it did in its last two seconds counts too

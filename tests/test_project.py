@@ -106,6 +106,78 @@ def test_a_manifest_that_cannot_be_read_is_a_project_error(tmp_path):
             load_project(root)
 
 
+# What the server would refuse, or would read differently from this client. Each of these
+# was put to the server's own TOML decoder: see the note in the test below.
+OK = 'name = "an-editor"\nentry = "python editor.py"\n'
+NOT_AS_THE_SERVER_READS_IT = {
+    # An integer of any size is an integer to Python. The server reads 64 bits.
+    "does not fit in 64 bits": [OK + "budget = 9223372036854775808\n", OK + "[tool.mine]\nseeds = [1, [2, {n = -9223372036854775809}]]\n", OK + "mask = 0xFFFFFFFFFFFFFFFFFF\n"],
+    "not valid TOML": [OK + "big = " + "9" * 5000 + "\n", OK + "rate = 1e400\n", OK + "rate = -1.5E+999\n"],
+    # The server matches a field's name whatever its case. `Name` beside `name` is two
+    # answers to one question, and which the server takes is not this client's to say.
+    "'Name' must be written name": [OK + 'Name = "another-editor"\n'],
+    "'ENTRY' must be written entry": [OK + 'ENTRY = "sh -c anything"\n', 'name = "an-editor"\nENTRY = "python editor.py"\n'],
+    "'Assets' must be written assets": [OK + '[[Assets]]\nurl = "http://x.test/model.bin"\n'],
+    "must be written license": [OK + 'LICENSE = "proprietary"\n', OK + '"licen\u017fe" = "x"\n'],
+    "are not supported this season": [OK + "assets = 5\n", OK + 'assets = "none"\n', OK + "assets = false\n", OK + "assets = {}\n", OK + '[[assets]]\nurl = "x"\n'],
+}
+AS_THE_SERVER_READS_IT = [
+    OK + "budget = 9223372036854775807\nfloor = -9223372036854775808\nrate = 1e308\nnone = inf\nodd = nan\nflag = true\n",
+    OK + "assets = []\n",
+    OK + 'names = ["Name", "ENTRY"]\n[tool]\nName = "inside a table of its own, nobody matches it against anything"\n',
+    OK + 'nickname = "x"\nentry_point = "y"\n',
+]
+
+
+def test_the_client_reads_a_manifest_as_the_server_does(tmp_path):
+    # Checked against github.com/BurntSushi/toml v1.6.0 decoding into the server's Manifest
+    # struct: every entry of NOT_AS_THE_SERVER_READS_IT is one it either refuses or takes a
+    # field from that this client would not, and every entry of AS_THE_SERVER_READS_IT is
+    # one it accepts with the same name and entry.
+    n = 0
+    for why, manifests in NOT_AS_THE_SERVER_READS_IT.items():
+        for text in manifests:
+            n += 1
+            root = tmp_path / f"m{n}"
+            root.mkdir()
+            (root / "stet.toml").write_text(text, encoding="utf-8")
+            with pytest.raises(ProjectError, match=why):
+                load_project(root)
+    for text in AS_THE_SERVER_READS_IT:
+        n += 1
+        root = tmp_path / f"m{n}"
+        root.mkdir()
+        (root / "stet.toml").write_text(text, encoding="utf-8")
+        p = load_project(root)
+        assert (p.name, p.entry) == ("an-editor", "python editor.py")
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink") or os.name == "nt", reason="POSIX only")
+def test_a_manifest_that_is_a_link_is_refused_before_the_server_misses_it(tmp_path):
+    # Links are left out of a bundle. A project whose stet.toml is one would pass every
+    # local check and arrive at the server with no manifest at all.
+    real = tmp_path / "shared.toml"
+    real.write_text(OK)
+    root = tmp_path / "proj"
+    root.mkdir()
+    (root / "editor.py").write_text("print('hi')\n")
+    os.symlink(real, root / "stet.toml")
+    with pytest.raises(ProjectError, match="stet.toml is a symbolic link"):
+        load_project(root)
+    (root / "stet.toml").unlink()
+    os.symlink(tmp_path / "nowhere.toml", root / "stet.toml")  # and one that points nowhere is a link first
+    with pytest.raises(ProjectError, match="symbolic link"):
+        load_project(root)
+    (root / "stet.toml").unlink()
+    (root / "stet.toml").mkdir()
+    with pytest.raises(ProjectError, match="not a plain file"):
+        load_project(root)
+    (root / "stet.toml").rmdir()
+    (root / "stet.toml").write_text(OK)
+    p = load_project(root)
+    assert "stet.toml" in [f.name for f in survey(p)[0]] and unpack(pack(p)[0], tmp_path / "out") == []
+
+
 def test_a_bundle_names_each_file_once_and_plainly(tmp_path):
     manifest = ("stet.toml", b'name = "x-y"\nentry = "python editor.py"\n')
     harmless, real = ("editor.py", b"print('nothing to see')\n"), ("editor.py", b"print('what runs')\n")

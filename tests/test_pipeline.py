@@ -61,6 +61,22 @@ def test_an_anchors_baseline_has_a_held_out_part_and_is_its_own_to_read(graded):
     assert stat.S_IMODE(graded.path.stat().st_mode) == 0o600
 
 
+def test_a_baseline_that_cannot_be_saved_leaves_nothing_half_written(graded, monkeypatch):
+    from stet import pipeline
+
+    real = os.replace
+
+    def replace(src, dst, **kw):
+        if "baseline-" in str(dst):
+            raise OSError(28, "No space left on device")
+        return real(src, dst, **kw)
+
+    monkeypatch.setattr(pipeline.os, "replace", replace)
+    with pytest.raises(OSError, match="No space left"):
+        graded.run()
+    assert graded.files() == []  # not the baseline, and not the file it was being written to
+
+
 def test_a_baseline_that_cannot_be_graded_is_not_kept(graded):
     graded.valid = False
     with pytest.raises(RuntimeError, match="could not be graded"):

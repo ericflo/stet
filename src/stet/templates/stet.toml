@@ -4,4 +4,4 @@ description = "One line on what this editor does."
 technique = ""            # a few words for the record table, e.g. "fastText quality filter + easy-to-hard order"
 entry = "python editor.py"
 parent = ""               # the editor id this was forked from, if any
-license = "MIT"           # editors are published once they have run
+license = "MIT"           # an editor is published when it is first drawn into a round
