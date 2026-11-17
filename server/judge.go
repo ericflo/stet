@@ -771,6 +771,17 @@ func (j *judge) owns(st *entryState, acct *Account) bool {
 	return acct.GithubID != 0 && (st.OwnerGH == acct.GithubID || (owner != nil && owner.GithubID == acct.GithubID))
 }
 
+// own reports whether an entry is this account's own when it comes to who runs and grades
+// it: its owner's, and, for an organisers' machine, any entry of the organisers'. Two of
+// their machines are not two parties, so neither stands in for a volunteer to the other.
+func (j *judge) own(st *entryState, acct *Account) bool {
+	if j.owns(st, acct) {
+		return true
+	}
+	owner := j.s.Accounts[st.OwnerID]
+	return acct.Anchor && owner != nil && owner.Anchor
+}
+
 // mayRun reports whether a runner could be handed an entry to run.
 func (j *judge) mayRun(st *entryState, q *asker) bool {
 	// A run that was given up, because nobody could check it, does not use up one of the
@@ -836,7 +847,7 @@ func (j *judge) couldRun(st *entryState, q *asker) bool {
 	// Nobody runs their own entry. The organisers' machines may run the organisers' own,
 	// which is how the reference editors get run at all while a season starts, but only
 	// when nobody else who is around could be handed it.
-	if j.owns(st, acct) && (!acct.Anchor || j.otherRunner(st, acct)) {
+	if j.own(st, acct) && (!acct.Anchor || j.otherRunner(st, acct)) {
 		return false
 	}
 	// A job is offered once. An organisers' machine gets one that came to nothing again.
@@ -860,7 +871,7 @@ func (j *judge) couldRun(st *entryState, q *asker) bool {
 // be handed it to run.
 func (j *judge) otherRunner(st *entryState, not *Account) bool {
 	for _, q := range j.active() {
-		if q.acct.ID != not.ID && !j.owns(st, q.acct) && j.mayRun(st, q) {
+		if q.acct.ID != not.ID && !j.own(st, q.acct) && j.mayRun(st, q) {
 			return true
 		}
 	}
@@ -871,7 +882,7 @@ func (j *judge) otherRunner(st *entryState, not *Account) bool {
 // give one of its scripts a grade that counts.
 func (j *judge) otherGrader(st *entryState, sc *scriptState, not *Account) bool {
 	for _, q := range j.active() {
-		if q.acct.ID != not.ID && q.est && !j.owns(st, q.acct) && !sc.wroteAlone(q.acct) && j.mayGrade(st, sc, q.acct) {
+		if q.acct.ID != not.ID && q.est && !j.own(st, q.acct) && !sc.wroteAlone(q.acct) && j.mayGrade(st, sc, q.acct) {
 			return true
 		}
 	}
@@ -927,7 +938,7 @@ func (j *judge) mayGrade(st *entryState, sc *scriptState, acct *Account) bool {
 	}
 	// Nobody grades their own entry. The organisers' machines may grade the organisers'
 	// own, but only when nobody else who is around could: see mayRun.
-	if j.owns(st, acct) && (!acct.Anchor || j.otherGrader(st, sc, acct)) {
+	if j.own(st, acct) && (!acct.Anchor || j.otherGrader(st, sc, acct)) {
 		return false
 	}
 	if !sc.Offered[acct.ID] {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -784,6 +785,54 @@ func TestTheRunnerWhoCouldGiveAThirdRunIsKeptClearOfTheScripts(t *testing.T) {
 	w.run(bob, scriptOne)
 	if _, status := w.grade(carol, true, 5.5); status != "settled" {
 		t.Fatalf("the only other verifier there is: %s", status)
+	}
+	w.check()
+}
+
+// Two of the organisers' machines, and nobody else. Neither is a volunteer to the other:
+// they share the organisers' own entries between them, as they share anybody's.
+func TestTwoOrganisersMachinesShareTheOrganisersOwnEntries(t *testing.T) {
+	pubA, privA := newKey()
+	pubB, privB := newKey()
+	cfg := testConfig(t, pubA, pubB)
+	cfg.RunsPerEntry = 1
+	w := startWorld(t, cfg, newMemKV(), dirBlobs{filepath.Join(cfg.DataDir, "blobs")})
+	a, b := w.join("anchor-one", privA), w.join("anchor-two", privB)
+	w.submit(a, "ref-a", "print('a')")
+	w.submit(a, "ref-b", "print('b')")
+	idx := w.draw()
+	ran, graded := map[string]int{}, map[string]int{}
+	for step := 0; step < 20; step++ {
+		busy := false
+		for _, who := range []*actor{a, b} {
+			c := w.claim(who, true)
+			if c.Job == nil {
+				continue
+			}
+			busy = true
+			if c.Job.Kind == "edit" {
+				ran[who.handle]++
+				if code, status := w.edit(who, c, "{\"doc\": 1, \"by\": \""+c.Job.Editor.Name+"\"}\n"); code != 200 {
+					t.Fatal(status)
+				}
+			} else {
+				graded[who.handle]++
+				if code, status := w.report(who, c, 5.5); code != 200 {
+					t.Fatal(status)
+				}
+			}
+		}
+		if !busy {
+			break
+		}
+	}
+	if w.settled(idx) != 2 {
+		t.Fatal("the round did not settle")
+	}
+	for _, h := range []string{"anchor-one", "anchor-two"} {
+		if ran[h] != 1 || graded[h] != 1 {
+			t.Fatalf("the two machines did not share the work: ran %v, graded %v", ran, graded)
+		}
 	}
 	w.check()
 }
