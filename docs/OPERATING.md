@@ -33,8 +33,9 @@ It runs the installed release (`~/.local/bin/stet verify --edits`), the same whe
 the same libraries volunteers install, with the account whose key is in
 `~/.config/stet/key.json`. The server knows an organisers' account by its public key:
 `STET_ANCHOR_KEYS` in Epsilon's `apps/stet/deployment.yaml`. Those accounts start out
-established, may draw and publish, may run the organisers' own reference editors, and
-may grade a script they wrote when nobody else is around to. That is all the name buys.
+established, may draw and publish, and, when nobody else who is around could do it, may
+run and grade the organisers' own reference editors and grade a script they wrote. That
+is all the name buys.
 
 It has to meet the floor like anyone's (`stet bench`, on a quiet GPU; the measurement is
 kept for a week). Edit time is wall-clock time, so do not run other GPU or heavy CPU

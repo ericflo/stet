@@ -512,3 +512,77 @@ func TestAnEstablishedVerifierTurnedAwayIsListedWithTheRound(t *testing.T) {
 	}
 	w.check()
 }
+
+// "Nobody runs or grades their own entry" has one exception, for the organisers' machines,
+// because a season has to start somewhere. It holds only while nobody else could do the
+// job: with volunteers around, the organisers' machine keeps its hands off the organisers'
+// own entries.
+func TestAnOrganisersMachineTakesItsOwnEntryOnlyWhenNobodyElseCan(t *testing.T) {
+	pub, priv := newKey()
+	w := newWorld(t, pub)
+	anchor, bob, carol := w.join("anchor-one", priv), w.join("bob", nil), w.join("carol", nil)
+	w.established("bob", "carol")
+	w.submit(anchor, "ref-a", "print('a')")
+	idx := w.draw()
+	w.claim(bob, false) // both are around, and both run editors
+	w.claim(carol, false)
+	w.app.st.update(context.Background(), func(tx *Tx) error {
+		for _, h := range []string{"bob", "carol"} {
+			tx.s.byHandle[h].RunnerSeen = now()
+			tx.saveAccount(tx.s.byHandle[h])
+		}
+		return nil
+	})
+	w.idle(anchor, true, "the organisers' own entry, with two volunteers around who could run it")
+	w.run(bob, scriptOne)
+	w.run(carol, scriptOne)
+	w.idle(anchor, true, "a script of the organisers' own entry, with volunteers around who could grade it")
+	for _, who := range []*actor{bob, carol} {
+		if c := w.claim(who, true); c.Job != nil {
+			if code, status := w.report(who, c, 5.5); code != 200 {
+				t.Fatal(status)
+			}
+		}
+	}
+	w.pass(2 * w.cfg.ReplicaWait)
+	me := w.account("anchor-one").ID
+	w.app.st.view(func(s *State) {
+		e := s.entry(idx, s.inRound[idx][0].EditorID)
+		if e.Status != "settled" || !e.Valid {
+			t.Fatalf("the entry did not settle with a score: %s %s", e.Status, e.Reason)
+		}
+		for _, run := range e.Runs {
+			if run.By == me {
+				t.Fatal("the organisers' machine ran the organisers' own entry with volunteers around")
+			}
+		}
+		for _, r := range s.results(idx, e.EditorID) {
+			if r.AccountID == me {
+				t.Fatal("the organisers' machine graded the organisers' own entry with volunteers around")
+			}
+		}
+	})
+	w.check()
+
+	// With the volunteers gone, it is the only machine there is, and the season goes on.
+	w.submit(anchor, "ref-b", "print('b')")
+	w.pass(2 * w.cfg.ActiveWindow)
+	next := w.draw()
+	for n := 0; n < 20; n++ {
+		c := w.claim(anchor, true)
+		if c.Job == nil {
+			break
+		}
+		if c.Job.Kind == "edit" {
+			if code, status := w.edit(anchor, c, scriptTwo); code != 200 {
+				t.Fatal(status)
+			}
+		} else if code, status := w.report(anchor, c, 5.5); code != 200 {
+			t.Fatal(status)
+		}
+	}
+	if w.settled(next) != 2 {
+		t.Fatal("alone, the organisers' machine did not run and grade the organisers' own entries")
+	}
+	w.check()
+}

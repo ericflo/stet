@@ -35,7 +35,8 @@ package main
 //   - An entry is run twice, by two different people, and a third time if the first two
 //     differ: one failed and the other did not, or the gains of their scripts are further
 //     apart than the season's tolerance for runs.
-//   - Nobody runs their own entry (the organisers run their reference editors), nobody
+//   - Nobody runs their own entry (an organisers' machine runs the organisers' reference
+//     editors, and grades their scripts, only when nobody else who is around could), nobody
 //     runs an entry twice, and nobody who has been handed one of an entry's scripts to
 //     grade is then handed the entry to run, or has a run of it taken: they could hand the
 //     script back as their own. "Nobody" is a person: an account, and any other key of the
@@ -774,7 +775,13 @@ func (j *judge) mayRun(st *entryState, q *asker) bool {
 	// once one has gone to an account that is not established the entry takes no more
 	// runs from anybody: such an account is a key, keys are free, and whoever made it could
 	// be the next runner.
-	if st.Shown || j.sawScript(st, acct) || (!acct.Anchor && j.owns(st, acct)) {
+	if st.Shown || j.sawScript(st, acct) {
+		return false
+	}
+	// Nobody runs their own entry. The organisers' machines may run the organisers' own,
+	// which is how the reference editors get run at all while a season starts, but only
+	// when nobody else who is around could be handed it.
+	if j.owns(st, acct) && (!acct.Anchor || j.otherRunner(st, acct)) {
 		return false
 	}
 	// A job is offered once. An organisers' machine gets one that came to nothing again.
@@ -792,6 +799,28 @@ func (j *judge) mayRun(st *entryState, q *asker) bool {
 		}
 	}
 	return true
+}
+
+// otherRunner reports whether somebody who is around, and does not own the entry, could
+// be handed it to run.
+func (j *judge) otherRunner(st *entryState, not *Account) bool {
+	for _, q := range j.active() {
+		if q.acct.ID != not.ID && !j.owns(st, q.acct) && j.mayRun(st, q) {
+			return true
+		}
+	}
+	return false
+}
+
+// otherGrader reports whether somebody who is around, and does not own the entry, could
+// give one of its scripts a grade that counts.
+func (j *judge) otherGrader(st *entryState, sc *scriptState, not *Account) bool {
+	for _, q := range j.active() {
+		if q.acct.ID != not.ID && q.est && !j.owns(st, q.acct) && !sc.wroteAlone(q.acct) && j.mayGrade(st, sc, q.acct) {
+			return true
+		}
+	}
+	return false
 }
 
 // sawScript reports whether a person has been handed any of an entry's scripts to grade,
@@ -838,7 +867,12 @@ func (j *judge) runPending(st *entryState) bool {
 // mayGrade reports whether an account could be handed a script at all: it is not the
 // entry's owner, and has not had the script before.
 func (j *judge) mayGrade(st *entryState, sc *scriptState, acct *Account) bool {
-	if sc.Graded[acct.ID] || j.barred(acct, st.Round.Idx) || (!acct.Anchor && j.owns(st, acct)) {
+	if sc.Graded[acct.ID] || j.barred(acct, st.Round.Idx) {
+		return false
+	}
+	// Nobody grades their own entry. The organisers' machines may grade the organisers'
+	// own, but only when nobody else who is around could: see mayRun.
+	if j.owns(st, acct) && (!acct.Anchor || j.otherGrader(st, sc, acct)) {
 		return false
 	}
 	if !sc.Offered[acct.ID] {

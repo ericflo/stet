@@ -152,7 +152,7 @@ publish both rankings. That has not been run yet.
 | A new account invents grades | Its grades set no score until it is established: five that agreed, and a GitHub identity |
 | Two verifiers agree on a lie | Not caught, if both are established and both are assigned to the entry. Nobody chooses their work, and everything is published and can be re-run |
 | A verifier takes jobs and sits on them | A round waits only for accounts with an agreed grade, and an abandoned job costs a day without work |
-| A verifier runs or grades their own entry | Never offered it, by account or by GitHub identity |
+| A verifier runs or grades their own entry | Never offered it, by account or by GitHub identity. The organisers' machines are offered the organisers' reference editors only when nobody else who is around could take the job |
 | Someone uploads under another person's key | An upload's signature is checked from its headers before any of it is read or counted |
 | A verifier copies a grade | Nothing is visible until the round settles |
 | Resubmit the leader for a lucky draw | Four fixed looks, a margin, paired on shared rounds |
