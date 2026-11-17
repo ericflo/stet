@@ -41,7 +41,7 @@ def clean(text, limit: int = 400) -> str:
     """Make text from the server, or from another entrant, safe to print.
 
     A terminal obeys control characters: they move the cursor, retitle the window, and on
-    some terminals write to the clipboard. An editor's description is 120 bytes of anything.
+    some terminals write to the clipboard. A curator's description is 120 bytes of anything.
     """
     return "".join(ch if ch.isprintable() else " " for ch in str(text)[:limit])
 
@@ -296,7 +296,7 @@ def cmd_whoami(args):
     sys.stderr.write(f"key       {key.public_hex}\n")
     sys.stderr.write(f"verified  {int(v['validated'])} grades agreed ({int(v['recent'])} in the last 14 days), streak {int(v['streak'])}" + (f"  [{', '.join(flags)}]" if flags else "") + "\n")
     sys.stderr.write(f"standing  {standing_line(a, v)}\n")
-    sys.stderr.write(f"editors   {len(me['editors'])}\n")
+    sys.stderr.write(f"entries   {len(me['editors'])}\n")
 
 
 def standing_line(a: dict, v: dict) -> str:
@@ -305,7 +305,7 @@ def standing_line(a: dict, v: dict) -> str:
     def count(x) -> int:
         return x if isinstance(x, int) and not isinstance(x, bool) else 0
 
-    ran = f"; {count(v.get('runs'))} editors run" if count(v.get("runs")) else ""
+    ran = f"; {count(v.get('runs'))} curators run" if count(v.get("runs")) else ""
     if v.get("established"):
         return "established: its runs and grades count towards scores" + ran
     missing = []
@@ -348,7 +348,7 @@ def cmd_publish(args):
         # the runbook a season early.
         sys.stderr.write(
             f"stet: {path.name} is season {season.id}'s held-out exam. Nothing was sent.\n"
-            "  Publishing it cannot be taken back: from that moment anyone can fit an editor to it, and the season's\n"
+            "  Publishing it cannot be taken back: from that moment anyone can fit a curator to it, and the season's\n"
             "  final table is worth only what was measured before. It is published once, when the season has closed\n"
             f"  and its last round has settled:  stet publish {args.file} --close-season {season.id}\n"
         )
@@ -372,7 +372,7 @@ def _listing(project, files, skipped, everything: bool) -> str:
     if len(show) < len(rows):
         out.append(f"  ... and {len(rows) - len(show)} smaller files (`stet submit --dry-run` lists every one)")
     if skipped:
-        out.append("Left out (not uploaded, so not there when the editor runs):")
+        out.append("Left out (not uploaded, so not there when the curator runs):")
         out += [f"  {name}  ({why})" for name, why in (skipped if everything else skipped[:15])]
         if not everything and len(skipped) > 15:
             out.append(f"  ... and {len(skipped) - 15} more")
@@ -399,14 +399,14 @@ def cmd_submit(args):
     key = need_key()
     runs = sorted((project.path / ".stet" / "runs").glob("*/result.json"))
     if not any(json.loads(p.read_text()).get("valid") for p in runs[-5:]):
-        sys.stderr.write("warning: no recent valid `stet run` for this project. An editor that fails scores a gain of 0.\n")
+        sys.stderr.write("warning: no recent valid `stet run` for this project. A curator that fails scores a gain of 0.\n")
     if not args.yes:
         if not sys.stdin.isatty():
             sys.stderr.write("stet: pass --yes to submit without a prompt\n")
             sys.exit(1)
         sys.stderr.write(
             f"\nThis enters {project.name!r} in the next official round as {key.handle}.\n"
-            "The files listed above become public under the MIT licence from the moment the editor is first drawn into an\n"
+            "The files listed above become public under the MIT licence from the moment the curator is first drawn into an\n"
             "official round, and so does every edit script it writes.\n"
         )
         if input("Submit? [y/N] ").strip().lower() not in ("y", "yes"):
@@ -450,7 +450,7 @@ def cmd_status(args):
         sys.stdout.write("\n")
         return
     if not me["editors"]:
-        sys.stderr.write("No entries yet. `stet submit` enters the editor in this directory.\n")
+        sys.stderr.write("No entries yet. `stet submit` enters the curator in this directory.\n")
         return
     rows = []
     for e in me["editors"]:
@@ -461,7 +461,7 @@ def cmd_status(args):
             f"#{e['rank']}" if e.get("rank") else "",
             (f"{last.get('round', '')} {fmt_gain(last.get('gain')) if last.get('valid', True) else 'invalid'}").strip(),
         ])  # fmt: skip
-    print(table(rows, ["editor", "id", "status", "rounds", "rating", "multiplier", "rank", "last round"], right=(3, 4, 5)))
+    print(table(rows, ["entry", "id", "status", "rounds", "rating", "multiplier", "rank", "last round"], right=(3, 4, 5)))
     nxt = me.get("next_round")
     if nxt:
         sys.stderr.write(f"\nNext round {clean(nxt['id'])} is drawn {ago(nxt['draw_at'])}.\n")
@@ -481,7 +481,7 @@ def cmd_leaderboard(args):
         for e in r["editors"][: args.top]
     ]  # fmt: skip
     if rows:
-        print(table(rows, ["#", "editor", "multiplier", "rating", "", "rounds", "technique"], right=(0, 2, 3, 5)))
+        print(table(rows, ["#", "entry", "multiplier", "rating", "", "rounds", "technique"], right=(0, 2, 3, 5)))
         sys.stderr.write("\n★ record holder   > beyond the end of the measured reference curve\n")
     qualifying = [
         [editor_label(e), fmt_gain(e.get("rating")), f"{e['rounds']} of {r.get('rated_rounds', 3)}", e.get("technique") or ""]
@@ -489,9 +489,9 @@ def cmd_leaderboard(args):
     ]
     if qualifying:
         sys.stderr.write(("\n" if rows else "") + "Qualifying (ranked once they have enough rounds):\n")
-        print(table(qualifying, ["editor", "rating so far", "rounds", "technique"], right=(1, 2)))
+        print(table(qualifying, ["entry", "rating so far", "rounds", "technique"], right=(1, 2)))
     if not rows and not qualifying:
-        sys.stderr.write("No editors yet. Be the first: `stet submit`.\n")
+        sys.stderr.write("No curators yet. Be the first: `stet submit`.\n")
 
 
 def cmd_rounds(args):
@@ -517,11 +517,11 @@ def cmd_fork(args):
     e = info["editor"]
     # The server's answer names a directory and a download. Neither is taken on trust.
     if not isinstance(e.get("id"), str) or not SHA256_RE.fullmatch(e["id"]) or not isinstance(e.get("name"), str) or not NAME_RE.fullmatch(e["name"]):
-        sys.stderr.write("stet: the server described that editor in a way this client does not accept\n")
+        sys.stderr.write("stet: the server described that curator in a way this client does not accept\n")
         sys.exit(1)
     asked = args.editor.lower()
     if re.fullmatch(r"[0-9a-f]{8,64}", asked) and not e["id"].startswith(asked):
-        sys.stderr.write(f"stet: asked for editor {asked[:12]}, but the server answered with {e['id'][:12]}\n")
+        sys.stderr.write(f"stet: asked for curator {asked[:12]}, but the server answered with {e['id'][:12]}\n")
         sys.exit(1)
     dest = Path(args.dest or e["name"]).resolve()
     if dest.exists() and any(dest.iterdir()):
@@ -529,7 +529,7 @@ def cmd_fork(args):
         sys.exit(1)
     blob = request("GET", f"/api/v1/editors/{e['id']}/bundle", key=key, raw=True, limit=MAX_BUNDLE_BYTES)
     if hashlib.sha256(blob).hexdigest() != e["id"]:
-        sys.stderr.write("stet: the downloaded bundle does not match the editor's id\n")
+        sys.stderr.write("stet: the downloaded bundle does not match the curator's id\n")
         sys.exit(1)
     try:
         left_out = unpack(blob, dest)
@@ -564,7 +564,7 @@ def cmd_fork(args):
 # Two kinds of job. A *grade* job is "here is an edit script (plain data) for this round:
 # what does the student score on it?" It runs no entrant code, so any machine with a
 # suitable GPU can do it. An *edit* job runs an entrant's program in the sandbox to produce
-# that script; only established accounts that asked to run editors are given those.
+# that script; only established accounts that asked to run curators are given those.
 
 
 def slim_result(result: dict, base: dict) -> dict:
@@ -745,6 +745,20 @@ def check_job(job) -> int:
     return job["id"]
 
 
+def tidy(out) -> None:
+    """What a verifier left running does for its own disk while it waits: delete what it
+    downloaded and no longer uses, and keep its log from growing for ever."""
+    from . import data, service
+
+    try:
+        freed = data.sweep_unused()
+        if freed > 1 << 20:
+            out.line("", out.dim(f"cleared {freed / 2**30:.1f} GB this machine downloaded and has not used for {data.cache_days():g} days"))
+        service.trim_log()
+    except OSError:
+        pass
+
+
 def claim_workdir() -> tuple[Path, object]:
     """A directory under the cache that this process alone works in, and the lock that says so.
 
@@ -771,8 +785,54 @@ def claim_workdir() -> tuple[Path, object]:
         for p in root.iterdir():  # what earlier releases left behind, in directories named by job
             if not p.name.startswith("slot"):
                 remove_tree(p)
+        clear_free_slots(root, n)
         return root / f"slot{n}", lock
     raise OSError(f"64 verifiers already hold {root}")
+
+
+def clear_free_slots(root: Path, mine: int) -> None:
+    """Empty the slots no verifier holds. A second verifier that ran here once and was killed
+    in the middle of a job left that job's files in a slot nobody may ever claim again."""
+    import fcntl
+
+    from .runner import remove_tree
+
+    for p in sorted(root.glob("slot*.lock")):
+        n = p.name[4:-5]
+        if not n.isdigit() or int(n) == mine or not (root / f"slot{n}").exists():
+            continue
+        try:
+            lock = open(p, "w")
+        except OSError:
+            continue
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            remove_tree(root / f"slot{n}")
+        except OSError:
+            pass  # held: a verifier is at work in it
+        finally:
+            lock.close()
+
+
+def verifiers_running() -> int:
+    """How many `stet verify` are at work in this cache right now (0 where that cannot be told)."""
+    try:
+        import fcntl
+    except ImportError:
+        return 0
+    held = 0
+    for p in (cache_dir() / "verify").glob("slot*.lock"):
+        try:
+            lock = open(p, "a")
+        except OSError:
+            continue
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            held += 1
+        finally:
+            lock.close()
+    return held
 
 
 def _grade_job(job, season, scale, device, key, out, work: Path) -> tuple[dict, dict]:
@@ -882,7 +942,7 @@ def _edit_job(job, season, scale, key, out, work: Path, sandbox: str, gpu: int =
     # Checked here as well as where the flag is read: this is the function that runs a
     # stranger's program, and nothing that calls it should be able to get that wrong.
     if sandbox != "bwrap" and os.environ.get("STET_DEV") != "1":
-        raise HarnessError("refusing to run an entrant's editor outside the sandbox")
+        raise HarnessError("refusing to run an entrant's curator outside the sandbox")
     from . import data
     from .project import load_project, unpack
     from .spec import HARNESS_VERSION
@@ -891,7 +951,7 @@ def _edit_job(job, season, scale, key, out, work: Path, sandbox: str, gpu: int =
     e = job["editor"]
     blob = request("GET", f"/api/v1/editors/{e['id']}/bundle", key=key, raw=True, timeout=600, limit=MAX_BUNDLE_BYTES)
     if hashlib.sha256(blob).hexdigest() != e["id"]:
-        raise WrongBytes("the bundle the server sent does not match the editor's id")
+        raise WrongBytes("the bundle the server sent does not match the curator's id")
     corpus = data.corpus(rnd, scale)
     payload = {
         "harness": HARNESS_VERSION, "season": season.id, "season_digest": season.digest, "round": rnd.id, "scale": scale.name,
@@ -913,7 +973,7 @@ def _edit_job(job, season, scale, key, out, work: Path, sandbox: str, gpu: int =
     from .pipeline import edit_round
 
     # This process trained the last script it graded, and PyTorch keeps that memory. The
-    # editor is promised its share of the card: let go of ours before it starts.
+    # curator is promised its share of the card: let go of ours before it starts.
     release_gpu_memory()
     edit = edit_round(
         bundle_dir, project.entry, rnd, scale, work, sandbox=sandbox, log=lambda m: out.line("", out.dim(m)),
@@ -1122,7 +1182,7 @@ def cmd_service(args):
 
                 for ok, why in (runner.bwrap_available(), runner.scope_available()):
                     if not ok:
-                        sys.stderr.write(f"stet: this machine cannot run editors yet: {why}\n  `stet service install` without --edits sets it up to grade.\n")
+                        sys.stderr.write(f"stet: this machine cannot run curators yet: {why}\n  `stet service install` without --edits sets it up to grade.\n")
                         sys.exit(1)
             done = service.install(name, edits=args.edits, no_upgrade=args.no_upgrade, device=args.device)
             out.line("", out.good(f"{name} is installed and running."))
@@ -1201,7 +1261,7 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
     if device.type not in allowed and not args.any_device:
         sys.stderr.write(
             "stet: grading for the leaderboard needs an NVIDIA (CUDA) or AMD (ROCm) GPU, so that every grade is\n"
-            "  computed with the same arithmetic. You can still build, run and submit editors on this machine.\n"
+            "  computed with the same arithmetic. You can still build, run and submit curators on this machine.\n"
         )
         sys.exit(1)
     from . import bench, env
@@ -1222,10 +1282,10 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
                 if not ok:
                     sys.stderr.write(f"stet: edit jobs run other people's code and need the sandbox: {why}\n")
                     sys.exit(1)
-        # An editor may import any of the season's libraries and is promised a machine no
+        # A curator may import any of the season's libraries and is promised a machine no
         # slower than the floor. A machine that cannot keep either promise takes no edit jobs.
         if (wrong := env.problems(season)) and not dev:
-            sys.stderr.write("stet: editors are promised the season's Python and libraries, and this machine's differ:\n  " + "\n  ".join(w[:400] for w in wrong)
+            sys.stderr.write("stet: curators are promised the season's Python and libraries, and this machine's differ:\n  " + "\n  ".join(w[:400] for w in wrong)
                              + "\n  The installer puts it right: curl -fsSL https://www.stetrun.com/install.sh | sh\n")  # fmt: skip
             sys.exit(1)
         measured = bench.saved()
@@ -1235,7 +1295,7 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
             bench.save(measured)
         if (short := bench.shortfalls(season, measured)) and not dev:
             sys.stderr.write(
-                "stet: this machine cannot run editors for the leaderboard: " + "; ".join(short) + ".\n"
+                "stet: this machine cannot run curators for the leaderboard: " + "; ".join(short) + ".\n"
                 "  If the GPU or the CPU was busy when that was measured, measure again with nothing else running: stet bench\n"
                 "  It can still grade: stet verify\n"
             )
@@ -1249,7 +1309,7 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
     work = slot / "job"
     out.line("", out.bold(f"stet verify · {key.handle} · {hw.get('gpu', device.type)}"))
     out.line("", out.dim("Grading edit scripts with the fixed trainer. No one else's code runs on this machine." if not args.edits
-                         else "Running entrants' editors in the sandbox, and grading."))  # fmt: skip
+                         else "Running entrants' curators in the sandbox, and grading."))  # fmt: skip
     try:
         if heldout_pack_path(season) is not None:
             trouble = heldout_log_trouble(season)
@@ -1284,7 +1344,7 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
     last_job: int | None = None  # the last job worked on, to tell a new one from the same one again
     leave_held = False  # set on the ways out that must not hand the job back
     told_log = False
-    no_editors: str | None = None  # why the server gives this machine no editors to run, as last said
+    no_editors: str | None = None  # why the server gives this machine no curators to run, as last said
 
     def stop_if_once():
         if args.once:
@@ -1360,15 +1420,15 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
                 held_until = job["expires_at"] if isinstance(job.get("expires_at"), int) and not isinstance(job.get("expires_at"), bool) else 0
             elif not job:
                 holding = None  # the server gives a verifier the job it holds each time it asks: no job means none is held
-            # Whether this account, on this machine, is handed editors to run is the server's
+            # Whether this account, on this machine, is handed curators to run is the server's
             # to say, with each answer. Said here once, and again when it changes.
             runner = r.get("runner")
             if args.edits and isinstance(runner, dict):
                 why = "" if runner.get("eligible") is True else clean(runner.get("reason") or "the server did not say why", 300)
                 if why and why != no_editors:
-                    out.line("", out.dim(f"Not given editors to run: {why}. Given grading meanwhile."))
+                    out.line("", out.dim(f"Not given curators to run: {why}. Given grading meanwhile."))
                 elif not why and no_editors:
-                    out.line("", out.dim("This machine is now given editors to run."))
+                    out.line("", out.dim("This machine is now given curators to run."))
                 no_editors = why
             try:
                 remember_announcement(season, r.get("announced"))
@@ -1390,6 +1450,7 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
                     pause = int(r.get("retry_after") or 60)
                 except (TypeError, ValueError):
                     pause = 60
+                tidy(out)
                 time.sleep(min(300, max(5, pause)))
                 continue
             idle = False
@@ -1424,7 +1485,7 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
                 waits, last_job = 0, job_id  # a new job starts with short waits, whatever the last one met
             if not remove_tree(work):
                 leave_held = True
-                sys.stderr.write(f"stet: could not clear {work}. Something an editor left there cannot be removed; stopping.\n")
+                sys.stderr.write(f"stet: could not clear {work}. Something a curator left there cannot be removed; stopping.\n")
                 sys.exit(1)
             result = base = None
             try:
@@ -1469,7 +1530,7 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
                     # gives this job back to us the next time we ask.
                     stuck[job_id] = waited + patience(f"could not fetch what this job needs ({clean(err)}). Keeping the job", keeping=job_id)
                 continue
-            except BaseException as err:  # this machine's trouble, not the editor's
+            except BaseException as err:  # this machine's trouble, not the curator's
                 # A panic in a compiled library is not an Exception. It is a failed job all
                 # the same, and must not be what stops this machine.
                 if isinstance(err, (KeyboardInterrupt, SystemExit, GeneratorExit)):
@@ -1540,7 +1601,7 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
                 continue
             holding = None
             if not remove_tree(work):
-                sys.stderr.write(f"stet: could not clear {work}. Something an editor left there cannot be removed; stopping.\n")
+                sys.stderr.write(f"stet: could not clear {work}. Something a curator left there cannot be removed; stopping.\n")
                 sys.exit(1)
             done += 1
             if job["kind"] == "edit":
@@ -1614,7 +1675,7 @@ def add_commands(sub) -> None:
     p.add_argument("--json", action="store_true")
     p.set_defaults(fn=cmd_whoami)
 
-    p = sub.add_parser("submit", help="enter your editor in the competition")
+    p = sub.add_parser("submit", help="enter your curator in the competition")
     p.add_argument("path", nargs="?", default=".")
     p.add_argument("-y", "--yes", action="store_true", help="do not ask for confirmation")
     p.add_argument("--dry-run", action="store_true", help="list every file that would be published, and send nothing")
@@ -1635,8 +1696,8 @@ def add_commands(sub) -> None:
     p.add_argument("--json", action="store_true")
     p.set_defaults(fn=cmd_rounds)
 
-    p = sub.add_parser("fork", help="start from any public editor")
-    p.add_argument("editor", help="an editor id, or handle/name")
+    p = sub.add_parser("fork", help="start from any public curator")
+    p.add_argument("editor", help="a curator id, or handle/name")
     p.add_argument("dest", nargs="?")
     p.set_defaults(fn=cmd_fork)
 
@@ -1653,12 +1714,12 @@ def add_commands(sub) -> None:
     p.add_argument("--season", default="s0", help=argparse.SUPPRESS)
     p.set_defaults(fn=cmd_publish)
 
-    p = sub.add_parser("verify", help="lend your GPU: grade edit scripts for the leaderboard, and (with --edits) run editors")
+    p = sub.add_parser("verify", help="lend your GPU: grade edit scripts for the leaderboard, and (with --edits) run curators")
     p.add_argument("--once", action="store_true", help="do one job and exit")
     p.add_argument("--max-jobs", type=int, default=0)
     p.add_argument("--device", default=None)
     p.add_argument("--season", default="s0", help=argparse.SUPPRESS)
-    p.add_argument("--edits", "--run-editors", dest="edits", action="store_true", help="also run entrants' editors, in the sandbox (Linux; `stet bench` says whether this machine is fast enough)")
+    p.add_argument("--edits", "--run-editors", dest="edits", action="store_true", help="also run entrants' curators, in the sandbox (Linux; `stet bench` says whether this machine is fast enough)")
     p.add_argument("--no-upgrade", action="store_true", help="do not install newer versions of stet automatically (the default is to, between jobs; STET_AUTO_UPGRADE=0 does the same)")
     p.add_argument("--no-sandbox", action="store_true", help=argparse.SUPPRESS)  # local testing only
     p.add_argument("--any-device", action="store_true", help=argparse.SUPPRESS)  # local testing only
@@ -1666,7 +1727,7 @@ def add_commands(sub) -> None:
 
     p = sub.add_parser("service", help="keep `stet verify` running on this machine: start with it, restart, upgrade (Linux)")
     p.add_argument("action", choices=["install", "status", "logs", "uninstall"])
-    p.add_argument("--edits", "--run-editors", dest="edits", action="store_true", help="also run entrants' editors, in the sandbox")
+    p.add_argument("--edits", "--run-editors", dest="edits", action="store_true", help="also run entrants' curators, in the sandbox")
     p.add_argument("--no-upgrade", action="store_true", help="do not install newer versions of stet automatically")
     p.add_argument("--device", default=None, help=argparse.SUPPRESS)
     p.add_argument("--name", default="stet-verify", help="the service's name, for a second verifier on one machine (default: stet-verify)")

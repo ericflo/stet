@@ -1,7 +1,7 @@
-"""Files an editor needs that are too big to ship in its bundle: model weights, by reference.
+"""Files a curator needs that are too big to ship in its bundle: model weights, by reference.
 
 A bundle is small (50 MB), so that it can be read by a person and passed around. What does
-not fit, an editor names in stet.toml, and every machine that runs it fetches the same bytes:
+not fit, a curator names in stet.toml, and every machine that runs it fetches the same bytes:
 
     [[assets]]
     path = "smollm2-135m/model.safetensors"
@@ -12,12 +12,12 @@ not fit, an editor names in stet.toml, and every machine that runs it fetches th
 The rules, and why:
 
   - The file is public and anyone can download it without an account. Volunteers run
-    editors, and a volunteer has no login to give.
+    curators, and a volunteer has no login to give.
   - The address names a commit, not a branch, and the entry names the file's hash. What is
     scored is what was submitted: a model cannot be swapped under an entry afterwards.
-  - Files are fetched before the editor's clock starts and are read-only inside the
+  - Files are fetched before the curator's clock starts and are read-only inside the
     sandbox, at $STET_ASSETS/<path> (task.asset("<path>")). The sandbox has no network.
-  - A season bounds how many files and how many bytes an editor may name.
+  - A season bounds how many files and how many bytes a curator may name.
 
 `stet asset add <repository>` writes these tables for you. The same checks are made by the
 server when an entry is submitted (server/bundle.go); keep the two in step.
@@ -157,7 +157,7 @@ def cache() -> Path:
 
 
 def cached(asset: Asset) -> Path:
-    """Where this file lives on this machine, by its hash. Two editors that name the same
+    """Where this file lives on this machine, by its hash. Two curators that name the same
     file share one copy."""
     return cache() / asset.sha256
 
@@ -177,7 +177,7 @@ def fetch(assets: list[Asset], quiet: bool = False, verify: bool = False) -> Non
 
     `verify` reads the copies this machine already has and checks them again. A run for
     the leaderboard does: a copy that has changed on disk since it was fetched would make
-    this machine's run of an editor differ from everyone else's, and nobody could say why.
+    this machine's run of a curator differ from everyone else's, and nobody could say why.
     """
     from .data import FetchError, Mismatch, TooBig, fetch, sweep_stale
 
@@ -215,7 +215,7 @@ def fetch(assets: list[Asset], quiet: bool = False, verify: bool = False) -> Non
 def prune(keep: list[Asset] = (), limit_bytes: int | None = None) -> int:
     """Clear the least recently used files away until the cache is under its limit.
 
-    A machine that runs editors for others sees many models. The limit is 40 GB unless
+    A machine that runs curators for others sees many models. The limit is 40 GB unless
     STET_ASSET_CACHE_GB says otherwise; what the current job needs is never cleared.
     """
     if limit_bytes is None:
@@ -282,7 +282,7 @@ def lookup(repo: str, revision: str = "", include: list[str] | None = None, unde
 
     Returns (commit, assets, skipped). `include` is a list of glob patterns; without it,
     everything except other frameworks' copies of the weights and files no program reads.
-    `under` is the directory the files appear in for the editor (the repository's name,
+    `under` is the directory the files appear in for the curator (the repository's name,
     lowercased, unless given).
     """
     kind = "datasets" if repo.startswith("datasets/") else "models"
@@ -303,7 +303,7 @@ def lookup(repo: str, revision: str = "", include: list[str] | None = None, unde
     if len(page) >= 1000:
         # The listing comes a thousand files at a time, and a model is a dozen. Half a
         # repository listed would look like all of it.
-        raise AssetError("that repository has more than a thousand files, too many to list. Write the [[assets]] tables for the files the editor needs by hand")
+        raise AssetError("that repository has more than a thousand files, too many to list. Write the [[assets]] tables for the files the curator needs by hand")
     tree.extend(page)
     prefix = "datasets/" if kind == "datasets" else ""
     under = (under or name.split("/")[1].lower()).strip("/")
@@ -332,7 +332,7 @@ def lookup(repo: str, revision: str = "", include: list[str] | None = None, unde
 def fill_hashes(assets: list[Asset], quiet: bool = False) -> list[Asset]:
     """Small files are kept in git, which names them by a hash of its own. Fetch those to
     learn their sha256; large files already have theirs. What is fetched goes into the
-    cache, so it is not fetched again to run the editor."""
+    cache, so it is not fetched again to run the curator."""
     from .data import fetch
 
     out = []

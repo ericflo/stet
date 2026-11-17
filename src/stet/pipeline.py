@@ -85,11 +85,11 @@ def edit_round(
     verify_assets: bool = False,
     gpu: int = 0,
 ) -> EditRun:
-    """Run an editor on a round's corpus. Never raises on editor failure.
+    """Run a curator on a round's corpus. Never raises on curator failure.
 
-    The files the editor named by reference are fetched first, before its clock starts.
+    The files the curator named by reference are fetched first, before its clock starts.
     A file that cannot be fetched because the host is away raises data.FetchError: that
-    is the network's failure, and no run of the editor. A file that is no longer there,
+    is the network's failure, and no run of the curator. A file that is no longer there,
     or no longer the bytes the entry names, is the entry's: a run that failed.
     """
     log = log or (lambda msg: None)
@@ -102,14 +102,14 @@ def edit_round(
         try:
             assets_.fetch(list(assets), verify=verify_assets)
         except assets_.Unavailable as e:
-            log(f"editor not run: {e}")
+            log(f"curator not run: {e}")
             limit = float(scale.edit_seconds if time_limit is None else time_limit)
             return EditRun("error", 0.0, limit, None, None, "", sandbox, reason=str(e))
         assets_.prune(keep=list(assets))
     limit = float(scale.edit_seconds if time_limit is None else time_limit)
     log(f"editing (limit {limit:.0f}s, sandbox: {sandbox}) ...")
     edit = run_editor(bundle, entry, corpus, rnd, scale, work, limit, sandbox=sandbox, echo=echo, limits=limits, assets=assets, gpu=gpu)
-    log(f"editor finished: {edit.status} in {edit.seconds:.1f}s")
+    log(f"curator finished: {edit.status} in {edit.seconds:.1f}s")
     return edit
 
 
@@ -133,7 +133,7 @@ def run_round(
     assets=(),
     time_limit: float | None = None,
 ) -> dict:
-    """Edit, then grade. If the editor leaves no script the result is invalid and carries no
+    """Edit, then grade. If the curator leaves no script the result is invalid and carries no
     exam score: by the rules its student is the one trained on the unedited corpus."""
     edit = edit_round(bundle, entry, rnd, scale, work, sandbox=sandbox, echo=echo, log=log, assets=assets, time_limit=time_limit)
     if edit.script is None:
@@ -141,7 +141,7 @@ def run_round(
         result = {
             "harness": HARNESS_VERSION, "season": rnd.season.id, "season_digest": rnd.season.digest, "round": rnd.describe(),
             "scale": scale.name, "corpus_sha256": corpus.meta["sha256"], "exam_sha256": data.exam_digest(exam),
-            "valid": False, "invalid_reason": edit.reason or f"the editor produced no script ({edit.status})",
+            "valid": False, "invalid_reason": edit.reason or f"the curator produced no script ({edit.status})",
         }  # fmt: skip
     else:
         result = grade_round(rnd, scale, edit.script, device=device, progress=progress, log=log)

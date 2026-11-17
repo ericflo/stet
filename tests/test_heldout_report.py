@@ -26,7 +26,7 @@ def line(rnd, editor, script, public, heldout, base=(5.3, 5.5)):
 @pytest.fixture
 def season(tmp_path):
     """Two settled rounds and an open one. Ann and Bob wrote the same script in the first;
-    Cat's editor timed out in the first; the anchor could not run Bob's in the second."""
+    Cat's curator timed out in the first; the anchor could not run Bob's in the second."""
     rounds = [
         {"round": {"id": "s0-o00001", "index": 1, "status": "settled", "baseline_loss": 5.3}, "entries": [
             entry(ANN, "ann", S1, loss=4.40, gain=0.90), entry(BOB, "bob", S1, loss=4.40, gain=0.90), entry(CAT, "cat", reason="timeout")]},
@@ -54,10 +54,10 @@ def test_the_fit_is_the_leaderboards(season):
     rows = [(r, e, g + d, True) for r, d in ((1, 0.05), (2, -0.03), (3, 0.01)) for e, g in (("a", 0.9), ("b", 0.7))]
     got, diff = hr.fit(rows)
     assert got["a"]["rating"] == pytest.approx(0.91) and got["b"]["rating"] == pytest.approx(0.71) and sum(diff.values()) == pytest.approx(0)
-    # An editor that ran only the hard round is not marked down for it...
+    # A curator that ran only the hard round is not marked down for it...
     got, diff = hr.fit([(1, "a", 0.9, True), (2, "a", 0.7, True), (1, "b", 0.8, True), (2, "b", 0.6, True), (2, "c", 0.6, True)])
     assert diff[2] == pytest.approx(-0.1) and got["c"]["rating"] == pytest.approx(got["b"]["rating"]) and got["c"]["rounds"] == 1
-    # ...and an invalid entry counts as zero for its editor and says nothing about its round.
+    # ...and an invalid entry counts as zero for its curator and says nothing about its round.
     before, _ = hr.fit(rows)
     after, _ = hr.fit(rows + [(2, "z", 0.0, False)])
     assert after["a"]["rating"] == pytest.approx(before["a"]["rating"])
@@ -67,7 +67,7 @@ def test_the_fit_is_the_leaderboards(season):
 def test_one_editors_timeout_does_not_move_anyone_elses_rating():
     import heldout_report as hr
 
-    # Three reference editors in six rounds; carol in rounds 1-3 and dave in 4-6, each
+    # Three reference curators in six rounds; carol in rounds 1-3 and dave in 4-6, each
     # gaining 0.925 every time. zed runs 1-3, gaining 0.9, and times out in round 2.
     rows = [(r, e, g, True) for r in range(1, 7) for e, g in (("identity", 0.0), ("english", 0.912), ("tidy", 0.933))]
     rows += [(r, "carol", 0.925, True) for r in (1, 2, 3)] + [(r, "dave", 0.925, True) for r in (4, 5, 6)]
@@ -99,7 +99,7 @@ def test_the_final_table_is_the_public_one_on_held_out_losses(season, tmp_path, 
     heldout, _ = hr.fit([(r["index"], r["editor"], r["heldout"], r["valid"]) for r in rows])
     board = board_of(public, ranked=[("ann", ANN), ("cat", CAT)], provisional=[("bob", BOB)])
     by = {r["label"][:3]: r for r in hr.table(rows, 2, board)}
-    # Two editors that wrote one script each keep their round.
+    # Two curators that wrote one script each keep their round.
     assert by["bob"]["rounds"] == 1 and by["ann"]["rounds"] == 2
     assert by["cat"]["rounds"] == 2 and by["cat"]["invalid"] == 1  # the timeout is a round, and a zero, on both exams
     for who, editor in (("ann", ANN), ("bob", BOB), ("cat", CAT)):
@@ -115,7 +115,7 @@ def test_the_final_table_is_the_public_one_on_held_out_losses(season, tmp_path, 
     rounds_file.write_text(json.dumps({**source, "leaderboard": board}))
     assert hr.main([str(log), "--rounds-file", str(rounds_file), "--out", str(out)]) == 0
     shown = capsys.readouterr().out
-    assert "reproduces the leaderboard's rating for all 3 editors" in shown and "s0-o00003" in shown and "fewer than 2 rounds: not ranked" in shown and "ann/ed v1" in shown
+    assert "reproduces the leaderboard's rating for all 3 curators" in shown and "s0-o00003" in shown and "fewer than 2 rounds: not ranked" in shown and "ann/ed v1" in shown
     rep = json.loads(out.read_text())
     assert rep["rounds"] == ["s0-o00001", "s0-o00002"] and rep["open_rounds"] == ["s0-o00003"] and len(rep["record_sha256"]) == 64
     assert [(t["label"][:3], t["status"]) for t in rep["table"]] == [("ann", "ranked"), ("cat", "ranked"), ("bob", "provisional")]  # by held-out rating; Bob has one round of the two it takes
@@ -128,7 +128,7 @@ def test_the_final_table_is_the_public_one_on_held_out_losses(season, tmp_path, 
     rounds_file.write_text(json.dumps({**source, "leaderboard": board}))
     assert hr.main([str(log), "--rounds-file", str(rounds_file)]) == 1  # it differs, and that is not success
     assert "DOES NOT REPRODUCE THE LEADERBOARD" in capsys.readouterr().out
-    # So is a leaderboard that ranks an editor this tool has too few rounds for.
+    # So is a leaderboard that ranks a curator this tool has too few rounds for.
     board["editors"][0]["rating"] -= 0.01
     board["editors"].append(board["provisional"].pop(0))
     check = hr.check_public(rows, board)
@@ -144,16 +144,16 @@ def test_an_editor_its_owner_replaced_has_no_rank_here_either(season, tmp_path, 
     source, log, _ = season
     rows, _ = hr.entries(source["rounds"], hr.load(log))
     public, _ = hr.fit([(r["index"], r["editor"], r["public"], r["valid"]) for r in rows])
-    # Cat's editor has its two rounds, and Cat has since submitted a new one. The
-    # leaderboard keeps the old editor's results and gives it no rank; it lists it nowhere.
+    # Cat's curator has its two rounds, and Cat has since submitted a new one. The
+    # leaderboard keeps the old curator's results and gives it no rank; it lists it nowhere.
     board = board_of(public, ranked=[("ann", ANN)], provisional=[("bob", BOB)])
     lines = hr.table(rows, 2, board)
     assert [(t["label"][:3], t["status"], t["ranked"]) for t in lines] == [("ann", "ranked", True), ("bob", "provisional", False), ("cat", "replaced", False)]
-    # What it gave up is still shown, but it is not one of the editors the median is taken over.
+    # What it gave up is still shown, but it is not one of the curators the median is taken over.
     by = {t["label"][:3]: t for t in lines}
     assert hr.median_gives_up(lines) == pytest.approx(statistics_median([by["ann"]["gives_up"], by["bob"]["gives_up"]]))
     assert by["cat"]["beyond_median"] == pytest.approx(by["cat"]["gives_up"] - hr.median_gives_up(lines), abs=2e-5)
-    # That is what a replaced editor looks like, not a fault in the arithmetic.
+    # That is what a replaced curator looks like, not a fault in the arithmetic.
     check = hr.check_public(rows, board)
     assert check["ranked_only_here"] == [{"editor": CAT, "label": "cat/ed v1", "rounds": 2}] and not check["differs"] and not check["ranked_only_there"]
     rounds_file = tmp_path / "rounds.json"
@@ -174,8 +174,8 @@ def statistics_median(values):
 def test_what_an_editor_gives_up_is_counted_over_the_rounds_it_was_valid_in():
     import heldout_report as hr
 
-    # Five editors over six rounds. Every valid entry scores exactly 0.2 higher on the
-    # held-out exam than on the public one; one editor times out in two rounds of six.
+    # Five curators over six rounds. Every valid entry scores exactly 0.2 higher on the
+    # held-out exam than on the public one; one curator times out in two rounds of six.
     def row(r, e, public, valid=True):
         return {"round": f"s0-o{r:05d}", "index": r, "editor": e, "label": e, "valid": valid, "public": public if valid else 0.0, "heldout": round(public + 0.2, 5) if valid else 0.0}
 
@@ -189,7 +189,7 @@ def test_what_an_editor_gives_up_is_counted_over_the_rounds_it_was_valid_in():
     assert by["late"]["invalid"] == 2 and by["late"]["public"] - by["late"]["heldout"] == pytest.approx(-0.2 * 4 / 6, abs=1e-4)
     for e in ("a", "b", "c", "d", "late"):
         assert by[e]["gives_up"] == pytest.approx(-0.2, abs=1e-5) and by[e]["beyond_median"] == pytest.approx(0.0, abs=1e-5)
-    # An editor that was never valid gave up nothing that can be measured, and is not in the median.
+    # A curator that was never valid gave up nothing that can be measured, and is not in the median.
     by = {t["editor"]: t for t in hr.table(rows + [row(1, "never", 0.0, valid=False)], 3)}
     assert by["never"]["gives_up"] is None and by["never"]["beyond_median"] is None and by["a"]["beyond_median"] == pytest.approx(0.0, abs=1e-5)
 

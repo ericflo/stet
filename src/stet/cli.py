@@ -142,7 +142,7 @@ def report(out: Out, result: dict, base: dict | None, season) -> None:
     if not result["valid"]:
         out.line("result", out.bad("invalid") + f": {result['invalid_reason']}")
         if edit and edit.get("log_tail"):
-            out.line("", out.dim("--- last lines of the editor's output ---"))
+            out.line("", out.dim("--- last lines of the curator's output ---"))
             out.line("", edit["log_tail"].rstrip()[-1500:])
         out.line("", "An invalid run scores as the unedited corpus: gain 0.")
         return
@@ -179,7 +179,7 @@ def cmd_init(args):
     tpl = resources.files("stet.templates")
     dest.mkdir(parents=True, exist_ok=True)
     wrote = []
-    for src, dst in (("stet.toml", "stet.toml"), ("editor.py", "editor.py"), ("AGENTS.md", "AGENTS.md"), ("gitignore", ".gitignore")):
+    for src, dst in (("stet.toml", "stet.toml"), ("curator.py", "curator.py"), ("AGENTS.md", "AGENTS.md"), ("gitignore", ".gitignore")):
         target = dest / dst
         if target.exists() and not args.force:
             continue
@@ -189,7 +189,7 @@ def cmd_init(args):
         target.write_text(text, encoding="utf-8")
         wrote.append(dst)
     out = Out()
-    out.line("", f"Editor project ready in {dest}" + (f" ({', '.join(wrote)})" if wrote else " (nothing overwritten)"))
+    out.line("", f"Curator project ready in {dest}" + (f" ({', '.join(wrote)})" if wrote else " (nothing overwritten)"))
     out.line("", "")
     out.line("", f"  cd {args.path}" if args.path != "." else "")
     out.line("", "  stet run            score it on a practice round")
@@ -262,7 +262,7 @@ def _summary(out: Out, results: list[dict]) -> dict:
 
 def _edit_time_line(out: Out, result: dict, season) -> None:
     """How long the edit took here, and what that means on the slowest machine that runs
-    editors. A time limit in seconds is only as fair as the comparison is plain."""
+    curators. A time limit in seconds is only as fair as the comparison is plain."""
     from . import bench
 
     edit = result.get("edit") or {}
@@ -271,7 +271,7 @@ def _edit_time_line(out: Out, result: dict, season) -> None:
         return
     m = bench.saved()
     if m is None:
-        out.line("edit", f"{took:.0f}s of {limit:.0f}s here. `stet bench` says how this machine compares with the slowest that runs editors")
+        out.line("edit", f"{took:.0f}s of {limit:.0f}s here. `stet bench` says how this machine compares with the slowest that runs curators")
         return
     g, c = bench.ratios(season, m)
     if g <= 0 or c <= 0:
@@ -280,7 +280,7 @@ def _edit_time_line(out: Out, result: dict, season) -> None:
     lo, hi = sorted((took * min(g, c), took * max(g, c)))
     lo, hi = max(lo, took) if min(g, c) >= 1 else lo, hi
     verdict = "over the limit if most of that time is spent on the faster part" if hi > limit >= lo else ("over the limit" if lo > limit else "inside the limit")
-    out.line("edit", f"{took:.0f}s of {limit:.0f}s here. This machine's GPU is {g:.1f}x and its CPU {c:.1f}x the slowest that runs editors: allow {lo:.0f}-{hi:.0f}s there, {verdict}")
+    out.line("edit", f"{took:.0f}s of {limit:.0f}s here. This machine's GPU is {g:.1f}x and its CPU {c:.1f}x the slowest that runs curators: allow {lo:.0f}-{hi:.0f}s there, {verdict}")
 
 
 def cmd_run(args):
@@ -410,7 +410,7 @@ def script_file(ref: str, season, rnd) -> Path:
         ]  # fmt: skip
         full = lambda e: clean(f"{e.get('owner')}/{e.get('name')}@v{e.get('version')}", 100)  # noqa: E731
         if len(found) > 1:
-            # Two versions of one editor share a round while the newer one qualifies, and two
+            # Two versions of one curator share a round while the newer one qualifies, and two
             # people may use one name.
             die(
                 f"round {rnd.id} has more than one entry called {name!r} with a script: {', '.join(sorted(full(e) for e in found))}. "
@@ -430,7 +430,7 @@ def script_file(ref: str, season, rnd) -> Path:
 
 
 def cmd_score(args):
-    """Grade an edit script you already have, skipping the editor."""
+    """Grade an edit script you already have, skipping the curator."""
     need_torch()
     from .pipeline import grade_round
     from .train import pick_device
@@ -474,6 +474,41 @@ def cmd_fetch(args):
     Out().line("ready", f"{rnd.id} · {scale.name}: {len(corpus):,} documents, {corpus.total_bytes / 1e6:.0f} MB at {corpus.path}")
 
 
+def size_text(n: int) -> str:
+    return f"{n / 2**30:.1f} GB" if n >= 1 << 30 else f"{n / 2**20:.0f} MB"
+
+
+def cmd_clean(args):
+    """Delete what stet downloaded to this machine."""
+    from . import data
+    from .client import verifiers_running
+
+    out = Out()
+    cache = data.cache_dir()
+    rows = data.cache_report()
+    if not rows:
+        out.line("", f"Nothing to clear: stet has nothing downloaded in {cache}.")
+        return
+    out.line("", out.bold(f"{cache} · {size_text(sum(size for _, _, size in rows))}"))
+    for _, what, size in rows:
+        out.line("", f"  {size_text(size):>8}  {what}")
+    days = data.cache_days()
+    if args.dry_run:
+        out.line("", "")
+        out.line("", "Nothing was deleted. `stet clean` deletes all of it; it is fetched again when it is next needed.")
+        if days:
+            out.line("", out.dim(f"Left alone, stet deletes what it has not used for {days:g} days (STET_CACHE_DAYS)."))
+        return
+    busy = verifiers_running()
+    freed = data.clear_cache(in_use=bool(busy))
+    out.line("", "")
+    out.line("", f"Cleared {size_text(freed)}. It is fetched again when it is next needed.")
+    if busy:
+        out.line("", "A `stet verify` is running here, so what it used in the last few hours was left for it.")
+    out.line("", out.dim("Not touched: your key and account, your own projects, and the packages stet was installed from"))
+    out.line("", out.dim("(those are in uv's cache, shared with anything else uv installs: `uv cache clean` frees it)."))
+
+
 def cmd_doctor(args):
     from . import bench, data, env
     from .runner import bwrap_available, scope_available
@@ -511,25 +546,29 @@ def cmd_doctor(args):
         rows.append((OK, "sandbox", f"bubblewrap at {why}" + (", with memory and process limits" if scoped else "") + " (`stet run --sandbox`)"))
     elif sys.platform == "linux":
         rows.append((WARN, "sandbox", why + ". Optional: only `stet run --sandbox` uses it."))
-    # The libraries an editor may import. `stet run` uses whatever is installed; a machine
-    # that runs editors for others must have exactly the season's.
+    # The libraries a curator may import. `stet run` uses whatever is installed; a machine
+    # that runs curators for others must have exactly the season's.
     differs = env.problems(season)
     if not differs:
         rows.append((OK, "libraries", env.summary(season)))
     else:
-        rows.append((WARN, "libraries", "not the season's set: " + "; ".join(d[:300] for d in differs) + ".\n  An editor that imports one of these may behave differently here than in an official run. The installer puts it right:\n    curl -fsSL https://www.stetrun.com/install.sh | sh"))
+        rows.append((WARN, "libraries", "not the season's set: " + "; ".join(d[:300] for d in differs) + ".\n  A curator that imports one of these may behave differently here than in an official run. The installer puts it right:\n    curl -fsSL https://www.stetrun.com/install.sh | sh"))
     m = bench.saved()
     if m is None:
-        rows.append((WARN, "speed", "not measured yet: `stet bench` (half a minute) compares this machine with the slowest that runs editors"))
+        rows.append((WARN, "speed", "not measured yet: `stet bench` (half a minute) compares this machine with the slowest that runs curators"))
     else:
         g, c = bench.ratios(season, m)
         short = bench.shortfalls(season, m)
-        text = f"GPU {g:.1f}x and CPU {c:.1f}x the slowest machine that runs editors"
-        rows.append((OK, "speed", text) if not short else (WARN, "speed", text + ". It cannot run editors for the leaderboard: " + "; ".join(short)))
+        text = f"GPU {g:.1f}x and CPU {c:.1f}x the slowest machine that runs curators"
+        rows.append((OK, "speed", text) if not short else (WARN, "speed", text + ". It cannot run curators for the leaderboard: " + "; ".join(short)))
     cache = data.cache_dir()
     cache.mkdir(parents=True, exist_ok=True)
     free = shutil.disk_usage(cache).free / 2**30
-    rows.append((OK if free > 10 else WARN, "cache", f"{cache} · {free:.0f} GB free" + ("" if free > 10 else " (a round needs a few GB)")))
+    held = sum(size for _, _, size in data.cache_report())
+    days = data.cache_days()
+    keeps = f"what goes unused for {days:g} days is deleted" if days else "nothing is deleted (STET_CACHE_DAYS=0)"
+    rows.append((OK if free > 10 else WARN, "cache", f"{cache} · {size_text(held)} downloaded, {free:.0f} GB free" + ("" if free > 10 else " (a round needs a few GB)")
+                 + f" · {keeps}; `stet clean` clears it now"))  # fmt: skip
     for status, name, text in rows:
         mark = {OK: out.good("✓"), WARN: out.c("33", "!"), BAD: out.bad("✗")}[status]
         out.line("", f" {mark} {name:<8} {text}")
@@ -537,7 +576,7 @@ def cmd_doctor(args):
 
 
 def cmd_bench(args):
-    """Measure this machine against the slowest that may run editors."""
+    """Measure this machine against the slowest that may run curators."""
     need_torch()
     from . import bench
     from .spec import load_season
@@ -553,8 +592,8 @@ def cmd_bench(args):
     out.line("gpu", f"{m['gpu'] or 'none'} · {m['gpu_tokens_per_second']:,.0f} tokens a second · {g:.1f}x the floor of {need['gpu_tokens_per_second']:,.0f} · {m['gpu_memory_gb']:.0f} GB")
     out.line("cpu", f"{m['cpu_mb_per_second']:.0f} MB a second on {min(int(need['cores']), m['cores'])} cores · {c:.1f}x the floor of {need['cpu_mb_per_second']:.0f} · {m['cores']} cores, {m['memory_gb']:.0f} GB")
     out.line("", "")
-    out.line("", f"Every editor is given {machine.get('cores', '?')} cores, {machine.get('memory_gb', '?')} GB of memory and {machine.get('gpu_memory_gb', '?')} GB of GPU memory,")
-    out.line("", "on a machine at least as fast as the floor. An editor that fits its time limit on the")
+    out.line("", f"Every curator is given {machine.get('cores', '?')} cores, {machine.get('memory_gb', '?')} GB of memory and {machine.get('gpu_memory_gb', '?')} GB of GPU memory,")
+    out.line("", "on a machine at least as fast as the floor. A curator that fits its time limit on the")
     out.line("", "floor fits it everywhere, so plan for the floor:")
     scale = season.scale(season.official_scale)
     if g > 0 and c > 0:
@@ -562,10 +601,10 @@ def cmd_bench(args):
     short = bench.shortfalls(season, m)
     out.line("", "")
     if short:
-        out.line("", "This machine cannot run editors for the leaderboard: " + "; ".join(short) + ".")
-        out.line("", "It can still grade (`stet verify`) if it has an NVIDIA or AMD GPU, and run your own editor (`stet run`).")
+        out.line("", "This machine cannot run curators for the leaderboard: " + "; ".join(short) + ".")
+        out.line("", "It can still grade (`stet verify`) if it has an NVIDIA or AMD GPU, and run your own curator (`stet run`).")
     else:
-        out.line("", "This machine is fast enough to run editors for the leaderboard: `stet verify --edits`, on Linux.")
+        out.line("", "This machine is fast enough to run curators for the leaderboard: `stet verify --edits`, on Linux.")
     if args.json:
         json.dump(m, sys.stdout, indent=1)
         sys.stdout.write("\n")
@@ -587,7 +626,7 @@ def _manifest_without_assets(text: str) -> str:
 
 
 def cmd_asset(args):
-    """Name the files an editor needs that are too big for its bundle: model weights."""
+    """Name the files a curator needs that are too big for its bundle: model weights."""
     from . import assets as assets_
     from .project import ProjectError, load_project
     from .spec import load_season
@@ -610,7 +649,7 @@ def cmd_asset(args):
 
     if args.action == "list":
         if not have:
-            out.line("", "This editor names no assets. `stet asset add <owner>/<repository>` adds a Hugging Face repository's files.")
+            out.line("", "This curator names no assets. `stet asset add <owner>/<repository>` adds a Hugging Face repository's files.")
             return
         show(have)
         return
@@ -639,7 +678,7 @@ def cmd_asset(args):
             together = [a for a in have if a.path not in taken] + found
             if len(together) > lim["max_files"] or sum(a.size for a in together) > lim["max_bytes"]:
                 die(
-                    f"that would be {len(together)} files and {sum(a.size for a in together) / 2**30:.2f} GiB; an editor may name "
+                    f"that would be {len(together)} files and {sum(a.size for a in together) / 2**30:.2f} GiB; a curator may name "
                     f"{lim['max_files']} files and {lim['max_bytes'] / 2**30:.0f} GiB. Pick the files it needs with --include (for example --include '*.safetensors' --include '*.json')"
                 )
             found = assets_.fill_hashes(found, quiet=True)
@@ -648,7 +687,7 @@ def cmd_asset(args):
         taken = {a.path for a in found}
         have = [a for a in have if a.path not in taken] + found
         if skipped:
-            out.line("", out.dim(f"left out (name them with --include if the editor needs them): {', '.join(skipped[:12])}" + (" ..." if len(skipped) > 12 else "")))
+            out.line("", out.dim(f"left out (name them with --include if the curator needs them): {', '.join(skipped[:12])}" + (" ..." if len(skipped) > 12 else "")))
     try:
         assets_.parse([{"path": a.path, "url": a.url, "sha256": a.sha256, "size": a.size} for a in have], season)
     except assets_.AssetError as e:
@@ -659,7 +698,7 @@ def cmd_asset(args):
     show(have)
     if args.action == "add":
         out.line("", "")
-        out.line("", f"Written to stet.toml. In the editor: task.asset(\"{found[0].path.split('/')[0]}\") is the directory holding them.")
+        out.line("", f"Written to stet.toml. In the curator: task.asset(\"{found[0].path.split('/')[0]}\") is the directory holding them.")
         out.line("", "They are downloaded the first time `stet run` needs them (or now: stet asset fetch).")
 
 
@@ -690,36 +729,36 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--version", action="version", version=f"stet {__version__}")
     sub = ap.add_subparsers(dest="cmd", metavar="command")
 
-    p = sub.add_parser("init", help="create an editor project")
+    p = sub.add_parser("init", help="create a curator project")
     p.add_argument("path", nargs="?", default=".")
     p.add_argument("--name")
     p.add_argument("--force", action="store_true", help="overwrite existing files")
     p.set_defaults(fn=cmd_init)
 
-    p = sub.add_parser("run", help="run your editor on a round and score it")
+    p = sub.add_parser("run", help="run your curator on a round and score it")
     p.add_argument("path", nargs="?", default=".")
     add_round_args(p)
     p.add_argument("--rounds", type=int, default=1, help="run this many consecutive rounds and report the mean gain with its standard error")
-    p.add_argument("--sandbox", action="store_true", help="run the editor in the same sandbox official runs use (Linux)")
+    p.add_argument("--sandbox", action="store_true", help="run the curator in the same sandbox official runs use (Linux)")
     p.add_argument("--no-baseline", action="store_true", help="skip the baseline comparison")
-    p.add_argument("--time-limit", type=float, default=None, help="give the editor this many seconds instead of the round's limit (see `stet bench`)")
-    p.add_argument("-v", "--verbose", action="store_true", help="show the editor's output as it runs")
+    p.add_argument("--time-limit", type=float, default=None, help="give the curator this many seconds instead of the round's limit (see `stet bench`)")
+    p.add_argument("-v", "--verbose", action="store_true", help="show the curator's output as it runs")
     p.set_defaults(fn=cmd_run)
 
-    p = sub.add_parser("asset", help="name model weights and other large files your editor needs (fetched by reference, not bundled)")
+    p = sub.add_parser("asset", help="name model weights and other large files your curator needs (fetched by reference, not bundled)")
     p.add_argument("action", choices=["add", "list", "fetch", "remove"])
     p.add_argument("what", nargs="?", help="add: a Hugging Face repository, owner/name. remove: a path or directory")
-    p.add_argument("--path", default=".", help="the editor project (default: here)")
+    p.add_argument("--path", default=".", help="the curator project (default: here)")
     p.add_argument("--revision", help="a branch, tag or commit (default: the repository's latest). It is pinned to a commit either way")
     p.add_argument("--include", action="append", help="only files matching this pattern (may be given more than once), e.g. --include '*.safetensors'")
-    p.add_argument("--under", help="the directory the files appear under for the editor (default: the repository's name, lowercased)")
+    p.add_argument("--under", help="the directory the files appear under for the curator (default: the repository's name, lowercased)")
     p.set_defaults(fn=cmd_asset)
 
-    p = sub.add_parser("bench", help="measure this machine against the slowest that runs editors")
+    p = sub.add_parser("bench", help="measure this machine against the slowest that runs curators")
     p.add_argument("--json", action="store_true")
     p.set_defaults(fn=cmd_bench)
 
-    p = sub.add_parser("score", help="grade an edit script directly, without running an editor")
+    p = sub.add_parser("score", help="grade an edit script directly, without running a curator")
     p.add_argument("script", help="a script file (.jsonl, or .zst as downloaded), a published script's sha256, or an entry's name in the official round given by --round")
     add_round_args(p)
     p.add_argument("--no-baseline", action="store_true", help="skip the baseline comparison")
@@ -735,6 +774,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("doctor", help="check this machine")
     p.set_defaults(fn=cmd_doctor)
+
+    p = sub.add_parser("clean", help="delete what stet downloaded to this machine (it is fetched again when needed)")
+    p.add_argument("--dry-run", action="store_true", help="show what is there and delete nothing")
+    p.set_defaults(fn=cmd_clean)
 
     p = sub.add_parser("agents", help="print the instructions for coding agents (AGENTS.md)")
     p.set_defaults(fn=cmd_agents)

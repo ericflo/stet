@@ -14,7 +14,7 @@ import hashlib
 import random
 import re
 
-from stet.editor import Task
+from stet.curator import Task
 
 SENTENCE_END = re.compile(r"[.!?][\"')\]]?\s")
 STOPWORDS = (" the ", " of ", " and ", " to ", " in ", " is ", " that ", " for ")

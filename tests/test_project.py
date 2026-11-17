@@ -14,7 +14,7 @@ from stet.project import ProjectError, load_project, pack, survey, unpack
 
 def make(tmp_path, files: dict[str, str]):
     root = tmp_path / "proj"
-    for name, text in {"stet.toml": 'name = "an-editor"\nentry = "python editor.py"\n', "editor.py": "print('hi')\n", **files}.items():
+    for name, text in {"stet.toml": 'name = "a-curator"\nentry = "python curator.py"\n', "curator.py": "print('hi')\n", **files}.items():
         (root / name).parent.mkdir(parents=True, exist_ok=True)
         (root / name).write_text(text)
     return load_project(root)
@@ -38,16 +38,16 @@ def test_a_bundle_holds_the_project_and_not_what_lives_beside_it(tmp_path):
         ".env": "API_KEY=secret", ".git/config": "[core]", ".claude/notes.md": "x", ".gitignore": ".stet/\n",
         "runs/best/model.pt": "w", "venv/lib/x.py": "x", "pkg/__pycache__/m.pyc": "x", "pkg/m.py": "x = 1\n", "weights/model.bin": "w",
     })  # fmt: skip
-    os.symlink(p.path / "editor.py", p.path / "link.py")
+    os.symlink(p.path / "curator.py", p.path / "link.py")
     files, skipped = survey(p)
-    assert [f.relative_to(p.path).as_posix() for f in files] == ["editor.py", "pkg/m.py", "stet.toml", "weights/model.bin"]
+    assert [f.relative_to(p.path).as_posix() for f in files] == ["curator.py", "pkg/m.py", "stet.toml", "weights/model.bin"]
     left = dict(skipped)
     assert set(left) == {".env", ".git/", ".claude/", ".gitignore", "runs/", "venv/", "pkg/__pycache__/", "link.py"}
     assert "dot" in left[".env"] and "link" in left["link.py"]
     blob, editor_id = pack(p)
     assert pack(p) == (blob, editor_id)  # same files in, same bytes out
     assert unpack(blob, tmp_path / "out") == []
-    assert sorted(f.relative_to(tmp_path / "out").as_posix() for f in (tmp_path / "out").rglob("*") if f.is_file()) == ["editor.py", "pkg/m.py", "stet.toml", "weights/model.bin"]
+    assert sorted(f.relative_to(tmp_path / "out").as_posix() for f in (tmp_path / "out").rglob("*") if f.is_file()) == ["curator.py", "pkg/m.py", "stet.toml", "weights/model.bin"]
 
 
 def test_a_bundle_that_is_too_big_says_what_can_be_done_about_it(tmp_path, monkeypatch):
@@ -55,7 +55,7 @@ def test_a_bundle_that_is_too_big_says_what_can_be_done_about_it(tmp_path, monke
     monkeypatch.setattr(project, "MAX_BUNDLE_BYTES", 2000)
     with pytest.raises(ProjectError) as e:
         pack(p)
-    assert "stet asset add" in str(e.value) and "fetched before the editor starts" in str(e.value)
+    assert "stet asset add" in str(e.value) and "fetched before the curator starts" in str(e.value)
     monkeypatch.setattr(project, "MAX_BUNDLE_FILES", 2)
     with pytest.raises(ProjectError, match="at most 2"):
         pack(p)
@@ -108,15 +108,15 @@ def test_a_manifest_that_cannot_be_read_is_a_project_error(tmp_path):
 
 # What the server would refuse, or would read differently from this client. Each of these
 # was put to the server's own TOML decoder: see the note in the test below.
-OK = 'name = "an-editor"\nentry = "python editor.py"\n'
+OK = 'name = "a-curator"\nentry = "python curator.py"\n'
 NOT_AS_THE_SERVER_READS_IT = {
     # An integer of any size is an integer to Python. The server reads 64 bits.
     "does not fit in 64 bits": [OK + "budget = 9223372036854775808\n", OK + "[tool.mine]\nseeds = [1, [2, {n = -9223372036854775809}]]\n", OK + "mask = 0xFFFFFFFFFFFFFFFFFF\n"],
     "not valid TOML": [OK + "big = " + "9" * 5000 + "\n", OK + "rate = 1e400\n", OK + "rate = -1.5E+999\n"],
     # The server matches a field's name whatever its case. `Name` beside `name` is two
     # answers to one question, and which the server takes is not this client's to say.
-    "'Name' must be written name": [OK + 'Name = "another-editor"\n'],
-    "'ENTRY' must be written entry": [OK + 'ENTRY = "sh -c anything"\n', 'name = "an-editor"\nENTRY = "python editor.py"\n'],
+    "'Name' must be written name": [OK + 'Name = "another-curator"\n'],
+    "'ENTRY' must be written entry": [OK + 'ENTRY = "sh -c anything"\n', 'name = "a-curator"\nENTRY = "python curator.py"\n'],
     "'Assets' must be written assets": [OK + '[[Assets]]\nurl = "http://x.test/model.bin"\n'],
     "must be written license": [OK + 'LICENSE = "proprietary"\n', OK + '"licen\u017fe" = "x"\n'],
     r"must be written as \[\[assets\]\] tables": [OK + "assets = 5\n", OK + 'assets = "none"\n', OK + "assets = false\n", OK + "assets = {}\n", OK + "assets = [1]\n"],
@@ -150,7 +150,7 @@ def test_the_client_reads_a_manifest_as_the_server_does(tmp_path):
         root.mkdir()
         (root / "stet.toml").write_text(text, encoding="utf-8")
         p = load_project(root)
-        assert (p.name, p.entry) == ("an-editor", "python editor.py")
+        assert (p.name, p.entry) == ("a-curator", "python curator.py")
 
 
 @pytest.mark.skipif(not hasattr(os, "symlink") or os.name == "nt", reason="POSIX only")
@@ -161,7 +161,7 @@ def test_a_manifest_that_is_a_link_is_refused_before_the_server_misses_it(tmp_pa
     real.write_text(OK)
     root = tmp_path / "proj"
     root.mkdir()
-    (root / "editor.py").write_text("print('hi')\n")
+    (root / "curator.py").write_text("print('hi')\n")
     os.symlink(real, root / "stet.toml")
     with pytest.raises(ProjectError, match="stet.toml is a symbolic link"):
         load_project(root)
@@ -180,8 +180,8 @@ def test_a_manifest_that_is_a_link_is_refused_before_the_server_misses_it(tmp_pa
 
 
 def test_a_bundle_names_each_file_once_and_plainly(tmp_path):
-    manifest = ("stet.toml", b'name = "x-y"\nentry = "python editor.py"\n')
-    harmless, real = ("editor.py", b"print('nothing to see')\n"), ("editor.py", b"print('what runs')\n")
+    manifest = ("stet.toml", b'name = "x-y"\nentry = "python curator.py"\n')
+    harmless, real = ("curator.py", b"print('nothing to see')\n"), ("curator.py", b"print('what runs')\n")
     # Of two files with one name the anchor would run the last, and the site shows the first.
     with pytest.raises(ProjectError, match="twice"):
         unpack(bundle([manifest, harmless, real]), tmp_path / "a")
@@ -212,15 +212,15 @@ def test_the_dry_run_refuses_what_the_server_would(tmp_path, monkeypatch):
         (root / "stet.toml").write_text(toml)
         return root
 
-    ok = 'name = "an-editor"\nentry = "python editor.py"\n'
+    ok = 'name = "a-curator"\nentry = "python curator.py"\n'
     load_project(project_with(0, ok + 'description = "café, 中文 and ordinary punctuation."\n'))
     refused = {
-        "one command line": 'name = "an-editor"\nentry = "python editor.py ' + "x" * 200 + '"\n',
-        "one command line of": 'name = "an-editor"\nentry = "python a.py\\npython b.py"\n',
-        "ordinary text": ok + 'description = "nice \\u001b]0;owned\\u0007 editor"\n',
+        "one command line": 'name = "a-curator"\nentry = "python curator.py ' + "x" * 200 + '"\n',
+        "one command line of": 'name = "a-curator"\nentry = "python a.py\\npython b.py"\n',
+        "ordinary text": ok + 'description = "nice \\u001b]0;owned\\u0007 curator"\n',
         "ordinary text each": ok + 'technique = "two\\nlines"\n',
-        "must be text": 'name = 123\nentry = "python editor.py"\n',
-        "entry must be text": 'name = "an-editor"\nentry = ["python", "editor.py"]\n',
+        "must be text": 'name = 123\nentry = "python curator.py"\n',
+        "entry must be text": 'name = "a-curator"\nentry = ["python", "curator.py"]\n',
         "over 64 KB": ok + "# " + "x" * (65 << 10) + "\n",
     }
     for n, (why, toml) in enumerate(refused.items(), 1):
@@ -231,7 +231,7 @@ def test_the_dry_run_refuses_what_the_server_would(tmp_path, monkeypatch):
     # so the client packs it, and an anchor unpacks it.
     p = make(tmp_path, {"runs": "a file, not a directory", "data/venv": "likewise", "runs2/x": "x"})
     files, skipped = survey(p)
-    assert [f.relative_to(p.path).as_posix() for f in files] == ["data/venv", "editor.py", "runs", "runs2/x", "stet.toml"] and not skipped
+    assert [f.relative_to(p.path).as_posix() for f in files] == ["curator.py", "data/venv", "runs", "runs2/x", "stet.toml"] and not skipped
     assert unpack(pack(p)[0], tmp_path / "out") == [] and (tmp_path / "out" / "runs").is_file()
 
     # Paths: each is bounded, and so is the list of them.

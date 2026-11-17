@@ -857,7 +857,7 @@ func (s *Site) editor(w http.ResponseWriter, r *http.Request) {
 	// Source viewer: one file at a time, read out of the stored bundle.
 	want := r.URL.Query().Get("file")
 	if want == "" {
-		for _, pref := range []string{"editor.py", "stet.toml"} {
+		for _, pref := range []string{"curator.py", "editor.py", "stet.toml"} {
 			for _, f := range e.Files {
 				if f.Path == pref && want == "" {
 					want = pref
@@ -1256,7 +1256,8 @@ else
     esac
   fi
   TMP="$(mktemp -d)"
-  trap 'rm -rf "$TMP"' EXIT
+  PRE=""
+  trap 'rm -rf "$TMP" ${PRE:+"$PRE"}' EXIT
   if command -v curl >/dev/null 2>&1; then
     curl -fsSL "{{.Base}}/constraints.txt" -o "$TMP/constraints.txt"
   else
@@ -1266,7 +1267,7 @@ else
     # An upgrade replaces an install that works, and a verifier may be doing it with
     # nobody watching. So fetch and build everything first, in a scratch environment:
     # if a download fails, the install that is there is left alone.
-    PRE="${XDG_CACHE_HOME:-$HOME/.cache}/stet/upgrade-env"
+    PRE="${STET_CACHE:-$HOME/.cache/stet}/upgrade-env"
     rm -rf "$PRE"
     say "Fetching the new version before replacing the one in use..."
     uv venv --quiet --python "$PY" "$PRE"

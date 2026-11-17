@@ -46,7 +46,7 @@ def test_a_sandboxed_run_sees_the_bundle_and_nothing_the_bundle_leaves_out(ran, 
     with pytest.raises(SystemExit) as e:
         cli.cmd_run(Args(p.path))
     assert e.value.code == 0 and ran.sandbox == "bwrap"
-    assert ran.files == ["editor.py", "stet.toml", "weights/model.bin"]  # what an anchor would unpack
+    assert ran.files == ["curator.py", "stet.toml", "weights/model.bin"]  # what an anchor would unpack
     assert ran.bundle != p.path and not ran.bundle.exists()  # and the copy is not kept
     args = Args(p.path)
     args.sandbox = False
@@ -150,7 +150,7 @@ def test_score_tells_two_versions_of_one_editor_apart(monkeypatch, tmp_path, cap
 
     import zstandard
 
-    # A rated editor stays on the ladder while its owner's next version qualifies, so the
+    # A rated curator stays on the ladder while its owner's next version qualifies, so the
     # two share every round for a while, and the name alone no longer says which.
     other_raw = b'1\n{"d": 3, "k": [[0, 500]]}\n'
     other = hashlib.sha256(other_raw).hexdigest()
@@ -251,7 +251,7 @@ def test_what_the_held_out_exam_said_is_left_out_of_what_a_run_saves_and_prints(
 
 def test_an_invalid_run_has_a_gain_of_nothing_written_down(monkeypatch):
     out = cli.Out(quiet=True)
-    result = {"valid": False, "invalid_reason": "the editor produced no script (timeout)"}
+    result = {"valid": False, "invalid_reason": "the curator produced no script (timeout)"}
     assert cli._with_baseline(result, None, None, None, out, skip=True) is None and result["gain"] == 0.0
     monkeypatch.setitem(sys.modules, "stet.pipeline", types.SimpleNamespace(baseline=lambda *a, **k: {"exam": {"loss": 5.3, "by_source": {}}}))
     result = {"valid": False, "invalid_reason": "ink over budget"}

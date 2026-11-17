@@ -26,7 +26,7 @@ def takes_record(lead: float, sd: float, margin: float, looks: tuple[int, ...], 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--sd", type=float, required=True, help="standard deviation of the paired difference between two editors' gains")
+    ap.add_argument("--sd", type=float, required=True, help="standard deviation of the paired difference between two curators' gains")
     ap.add_argument("--margin", type=float, required=True)
     ap.add_argument("--looks", type=int, nargs="+", default=[5, 10, 20, 40])
     ap.add_argument("--alpha", type=float, default=0.05)

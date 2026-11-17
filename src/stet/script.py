@@ -1,4 +1,4 @@
-"""The edit script: what an editor hands back, and how it becomes a training stream.
+"""The edit script: what a curator hands back, and how it becomes a training stream.
 
 An edit script is JSON Lines. Each line is one output document, and the order of lines is
 the order the student is trained in. A line is one of:
@@ -68,7 +68,7 @@ class Stats:
     out_docs: int = 0  # output documents consumed in the first pass
     out_bytes: int = 0
     copy_bytes: int = 0
-    ink_tokens: int = 0  # the editor's own text among the tokens trained on, repeats included
+    ink_tokens: int = 0  # the curator's own text among the tokens trained on, repeats included
     ink_budget: int = 0
     exam_dropped: int = 0  # output documents left out because they contained exam text
     src_docs: int = 0  # distinct source documents drawn from
@@ -99,7 +99,7 @@ class Stats:
 def open_script(path: str | Path, max_bytes: int):
     """Open a script for reading without trusting what is at the path.
 
-    An editor could leave a symlink, a FIFO or a device where its script should be. Opening
+    A curator could leave a symlink, a FIFO or a device where its script should be. Opening
     with O_NOFOLLOW and O_NONBLOCK and then insisting on a regular file of bounded size
     means the worst a hostile script can be is invalid.
     """

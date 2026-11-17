@@ -4,7 +4,7 @@ The corpus arrives in seeded random order, so the baseline student trains on a f
 of the round's raw data.
 """
 
-from stet.editor import Task
+from stet.curator import Task
 
 
 def edit(task: Task):

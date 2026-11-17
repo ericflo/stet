@@ -1,4 +1,4 @@
-"""An agent decides: how to run a harness of your own, with a model of your own, in an editor.
+"""An agent decides: how to run a harness of your own, with a model of your own, in a curator.
 
 A small language model is served inside the sandbox on loopback, and a real agent harness
 (pi, https://pi.dev, run by the machine's Node) is pointed at it. The agent is shown what
@@ -43,7 +43,7 @@ import time
 import urllib.request
 from pathlib import Path
 
-from stet.editor import Task
+from stet.curator import Task
 
 SENTENCE_END = re.compile(r"[.!?][\"')\]]?\s")
 STOPWORDS = (" the ", " of ", " and ", " to ", " in ", " is ", " that ", " for ")

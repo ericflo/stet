@@ -1,4 +1,4 @@
-"""Pool shards, the exam pack, and the on-disk corpus an editor reads.
+"""Pool shards, the exam pack, and the on-disk corpus a curator reads.
 
 Corpus layout (language-agnostic, mmap-friendly):
 
@@ -47,6 +47,175 @@ def cache_dir() -> Path:
 
 def api_base() -> str:
     return os.environ.get("STET_API", DEFAULT_API).rstrip("/")
+
+
+# --- keeping the cache small ---------------------------------------------------------------
+
+# Everything under the cache was downloaded, or built from downloads, and can be had again.
+# So nothing in it is kept for good: what has not been used for this many days is deleted.
+# STET_CACHE_DAYS changes the number, and 0 keeps everything. Some things go sooner by
+# rules of their own: a round's crawl files as soon as its corpus is built from them, the
+# rounds a verifier graded except the newest few, model files past the cache's size limit.
+CACHE_DAYS = 14
+SWEEP_EVERY = 6 * 3600  # a sweep costs a few hundred stat calls: not on every job
+SET_ASIDE_FOR = 3 * 3600  # seconds a set-aside round is kept: longer than any job that could be reading it
+# What the cache holds, by the directory it is in, largest users first. The exam is the
+# season's and every run needs it, so it is not swept; `stet clean` removes it with the rest.
+CACHE_KINDS = (
+    ("rounds", "built rounds"),
+    ("pool", "downloaded crawl files"),
+    ("assets", "curators' model files"),
+    ("verify", "a verifier's working files"),
+    ("scripts", "edit scripts"),
+    ("exam", "the exam"),
+    ("upgrade-env", "what an upgrade left"),
+)
+
+
+def cache_days() -> float:
+    """How many days something in the cache may go unused. Never less than a job could take:
+    another process on this machine may be in the middle of reading it."""
+    try:
+        days = float(os.environ.get("STET_CACHE_DAYS") or CACHE_DAYS)
+    except ValueError:
+        return float(CACHE_DAYS)
+    return 0.0 if days <= 0 else max(days, SET_ASIDE_FOR / 86400)
+
+
+def used(path: Path) -> None:
+    """Note that something in the cache was used just now, so that it is among the last to go."""
+    try:
+        os.utime(path)
+    except OSError:
+        pass
+
+
+def tree_bytes(path: Path) -> int:
+    try:
+        if path.is_symlink() or not path.is_dir():
+            return path.lstat().st_size
+    except OSError:
+        return 0
+    total = 0
+    for root, _, files in os.walk(path):
+        for name in files:
+            try:
+                total += os.lstat(os.path.join(root, name)).st_size
+            except OSError:
+                pass
+    return total
+
+
+def _remove(path: Path) -> int:
+    """Delete one thing in the cache. Returns the bytes it held, or 0 if it is still there."""
+    size = tree_bytes(path)
+    try:
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path, ignore_errors=True)
+        else:
+            path.unlink(missing_ok=True)
+    except OSError:
+        pass
+    return 0 if os.path.lexists(path) else size
+
+
+def _last_use(path: Path) -> float:
+    """When something in the cache was last used. A round's directory carries a marker that
+    every use touches; anything else is touched itself."""
+    times = []
+    for p in (path / ".used", path):
+        try:
+            times.append(p.lstat().st_mtime)
+        except OSError:
+            pass
+    return max(times, default=0.0)
+
+
+def cache_entries() -> list[tuple[str, Path, float]]:
+    """Everything a sweep may delete: (kind, path, how long it may go unused in seconds)."""
+    root, days = cache_dir(), cache_days() * 86400
+    out: list[tuple[str, Path, float]] = []
+
+    def each(d: Path):
+        try:
+            return sorted(d.iterdir())
+        except OSError:
+            return []
+
+    for d in each(root / "rounds"):
+        if d.name == ".stale":
+            out += [("rounds", old, float(SET_ASIDE_FOR)) for old in each(d)]
+        else:
+            out.append(("rounds", d, days))
+    for p in each(root / "pool"):
+        if p.name == "wet" and p.is_dir():
+            out += [("pool", q, days) for q in each(p)]
+        else:
+            out.append(("pool", p, days))
+    for kind in ("assets", "scripts"):
+        out += [(kind, p, days) for p in each(root / kind)]
+    # What a process that was killed outright never got to remove.
+    if (root / "upgrade-env").exists():
+        out.append(("upgrade-env", root / "upgrade-env", 86400.0))
+    out += [("selftest", p, 86400.0) for p in each(root) if p.name.startswith("stet-selftest-")]
+    return out
+
+
+def sweep_unused(now: float | None = None, every: float = SWEEP_EVERY) -> int:
+    """Delete what this machine downloaded and has not used for a while. Returns the bytes freed.
+
+    Called wherever the cache is used, and it looks at most once every `every` seconds. A
+    machine left verifying for months, and one that practised for a week and stopped, both
+    end with a cache no bigger than their last two weeks needed.
+    """
+    days = cache_days()
+    if days <= 0:
+        return 0
+    now = time.time() if now is None else now
+    marker = cache_dir() / ".swept"
+    try:
+        if every and abs(now - marker.stat().st_mtime) < every:
+            return 0
+    except OSError:
+        pass
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.touch()
+        os.utime(marker, (now, now))
+    except OSError:
+        return 0
+    freed = 0
+    for _, path, allowed in cache_entries():
+        last = _last_use(path)
+        if last and now - last > allowed:
+            freed += _remove(path)
+    return freed
+
+
+def cache_report() -> list[tuple[str, str, int]]:
+    """What the cache holds: (directory, what it is, bytes), largest first."""
+    root = cache_dir()
+    rows = [(name, what, tree_bytes(root / name)) for name, what in CACHE_KINDS if (root / name).exists()]
+    return sorted((r for r in rows if r[2]), key=lambda r: -r[2])
+
+
+def clear_cache(in_use: bool = False, now: float | None = None) -> int:
+    """Delete everything in the cache. All of it can be fetched again. Returns the bytes freed.
+
+    With `in_use`, a verifier is at work in this cache: what was used in the last few hours,
+    which it may be reading, is left, and so are its working files and the exam.
+    """
+    root = cache_dir()
+    if in_use:
+        now = time.time() if now is None else now
+        return sum(_remove(p) for _, p, _ in cache_entries() if now - _last_use(p) > SET_ASIDE_FOR)
+    freed = sum(_remove(root / name) for name, _ in CACHE_KINDS)
+    try:
+        freed += sum(_remove(p) for p in root.glob("stet-selftest-*"))
+        (root / ".swept").unlink(missing_ok=True)
+    except OSError:
+        pass
+    return freed
 
 
 # --- downloads ----------------------------------------------------------------------------
@@ -218,6 +387,7 @@ def round_shards(rnd: Round, scale: Scale, quiet: bool = False) -> list[Shard]:
         if want and cached.exists() and _sha256_file(cached) != want:
             cached.unlink(missing_ok=True)
         listing = fetch([cfg["base_url"] + cfg["paths"].format(crawl=cfg["crawl"])], want, cached, f"{cfg['crawl']} file list", quiet, max_bytes=64 << 20)
+        used(listing)
         try:
             paths = gzip.decompress(listing.read_bytes()).decode().split()
         except (OSError, EOFError, zlib.error, ValueError) as e:
@@ -253,11 +423,14 @@ def shard_path_of(shard: Shard) -> Path:
 
 def shard_path(shard: Shard, quiet: bool = False) -> Path:
     if shard.sha256:
-        return fetch([shard.url], shard.sha256, shard_path_of(shard), shard.path, quiet, max_bytes=shard.size or FETCH_LIMIT_BYTES)
-    # Crawl files are not listed with hashes. They are gzip, which carries its own checksum,
-    # so each is read to the end of its stream before it is kept; and the built corpus's
-    # sha256 is compared across verifiers.
-    return fetch([shard.url], "", shard_path_of(shard), shard.path.rsplit("/", 1)[-1], quiet, gzipped=True)
+        path = fetch([shard.url], shard.sha256, shard_path_of(shard), shard.path, quiet, max_bytes=shard.size or FETCH_LIMIT_BYTES)
+    else:
+        # Crawl files are not listed with hashes. They are gzip, which carries its own checksum,
+        # so each is read to the end of its stream before it is kept; and the built corpus's
+        # sha256 is compared across verifiers.
+        path = fetch([shard.url], "", shard_path_of(shard), shard.path.rsplit("/", 1)[-1], quiet, gzipped=True)
+    used(path)
+    return path
 
 
 def read_dclm(path: Path):
@@ -349,9 +522,9 @@ class Corpus:
 # any key anywhere in its own normalised text is dropped.
 #
 # Matching anywhere, rather than at the document's own sentence boundaries, matters: web pages
-# run menus and headings straight into prose, and an editor that trims them would otherwise
-# uncover exam text the filter had missed. It also gives editors a guarantee: no piece copied
-# from a corpus document can ever contain a key, so only text an editor writes or joins
+# run menus and headings straight into prose, and a curator that trims them would otherwise
+# uncover exam text the filter had missed. It also gives curators a guarantee: no piece copied
+# from a corpus document can ever contain a key, so only text a curator writes or joins
 # together has to be checked again.
 
 SENTENCE_END = re.compile(r"(?<=[.!?]) ")
@@ -527,15 +700,17 @@ def build_corpus(rnd: Round, scale: Scale, dest: Path, quiet: bool = False) -> P
         (tmp / "meta.json").write_text(json.dumps(meta, indent=1))
         if (dest / "meta.json").exists():
             # Another verifier on this machine built the same round while this one did, and
-            # an editor may already be reading its copy. Use that one: replacing it would
+            # a curator may already be reading its copy. Use that one: replacing it would
             # empty the directory under a program that has it open.
             shutil.rmtree(tmp, ignore_errors=True)
             return
         shutil.rmtree(dest, ignore_errors=True)
         tmp.replace(dest)
-        if rnd.kind == "official" and kind == "cc-wet" and os.environ.get("STET_KEEP_DOWNLOADS") != "1":
-            # An official round's files are a random handful out of a hundred thousand and will
-            # not be drawn again. The corpus is built; the downloads are dead weight.
+        if kind == "cc-wet" and os.environ.get("STET_KEEP_DOWNLOADS") != "1":
+            # A round's files are a random handful out of a hundred thousand, and no other
+            # round will draw them. The corpus is built; the downloads are dead weight, in a
+            # practice round as much as an official one. (The same round at a larger scale
+            # fetches its first few again: a minute, against half a gigabyte kept per round.)
             for shard in shards:
                 shard_path_of(shard).unlink(missing_ok=True)
     finally:
@@ -673,14 +848,11 @@ def round_dir(rnd: Round, scale: Scale) -> Path:
     return cache_dir() / "rounds" / rnd.id / scale.name
 
 
-SET_ASIDE_FOR = 3 * 3600  # seconds a set-aside round is kept: longer than any job that could be reading it
-
-
 def set_aside(path: Path, now: float | None = None) -> None:
     """Take a round's cached files out of use without pulling them from under anyone.
 
     Two verifiers on one machine share the cache. One of them may be in the middle of a
-    job, with an editor reading these very files, when the other decides they are not to
+    job, with a curator reading these very files, when the other decides they are not to
     be trusted. So the directory is renamed, which a program that has it open does not
     notice, and deleted some hours later.
     """
@@ -703,8 +875,20 @@ def set_aside(path: Path, now: float | None = None) -> None:
 def corpus(rnd: Round, scale: Scale, quiet: bool = False) -> Corpus:
     """A round's corpus, built and cached on first use. Knows nothing about the round's exam."""
     dest = round_dir(rnd, scale) / "corpus-v3"
+    # This round is in use from now: marked first, so that the sweep below leaves it alone.
+    marker = dest.parent.parent / ".used"
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.touch()
+    except OSError:
+        pass
+    sweep_unused()
     if not (dest / "meta.json").exists():
         build_corpus(rnd, scale, dest, quiet)
+    for old in dest.parent.glob("corpus*"):
+        # A corpus an earlier release built in its own layout: nothing reads it now.
+        if old.name != dest.name and re.fullmatch(r"corpus(-v[0-9]+)?", old.name):
+            set_aside(old)
     return Corpus(dest)
 
 

@@ -1,7 +1,7 @@
 {
   "name": "stet-example-agent",
   "private": true,
-  "description": "The agent harness this example editor runs. ./pack.sh turns it into harness.tar.zst.",
+  "description": "The agent harness this example curator runs. ./pack.sh turns it into harness.tar.zst.",
   "dependencies": {
     "@earendil-works/pi-coding-agent": "1.5.2"
   }

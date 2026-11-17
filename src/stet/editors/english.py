@@ -4,7 +4,7 @@ The exam is English, and a large share of a raw crawl is not. This is the first 
 anyone would try, and the first rung of the ladder.
 """
 
-from stet.editor import Task
+from stet.curator import Task
 
 STOPWORDS = (" the ", " of ", " and ", " to ", " in ", " is ", " that ", " for ")
 

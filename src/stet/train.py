@@ -2,7 +2,7 @@
 
 Training is budgeted in tokens, never in seconds: every machine does exactly the same
 work, in exactly the same order, on exactly the tokens the edit script produced. There is
-no shuffling here. The order of the stream is the editor's to choose.
+no shuffling here. The order of the stream is the curator's to choose.
 """
 
 from __future__ import annotations

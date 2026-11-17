@@ -3,9 +3,9 @@
 # Run it once before `stet run` or `stet submit`, and again when package.json changes.
 #
 # A bundle holds at most 2,000 files and never packs node_modules/ as it is, so a
-# JavaScript harness goes in as one archive and is unpacked to /scratch when the editor
-# starts (about a second). Any Node 22 or newer will do to build it; the editor itself
-# runs on the season's Node, which every machine that runs editors has.
+# JavaScript harness goes in as one archive and is unpacked to /scratch when the curator
+# starts (about a second). Any Node 22 or newer will do to build it; the curator itself
+# runs on the season's Node, which every machine that runs curators has.
 set -eu
 cd "$(dirname "$0")"
 npm ci --ignore-scripts --no-audit --no-fund

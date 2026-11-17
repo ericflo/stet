@@ -1,6 +1,6 @@
 # Stet: instructions for coding agents
 
-You are working on an **editor** for [Stet](https://www.stetrun.com), an open competition.
+You are working on a **curator** for [Stet](https://www.stetrun.com), an open competition.
 This file is the complete brief. Read all of it before changing anything.
 
 ## The task
@@ -9,7 +9,7 @@ A small language model (the *student*) is trained on raw web text for a fixed nu
 tokens and then scored on an exam of curated text. The model, the trainer and the exam are
 fixed. **The only thing you control is the training data.**
 
-Your editor is a program. It is handed a pile of raw web pages it has never seen and a time
+Your curator is a program. It is handed a pile of raw web pages it has never seen and a time
 limit, and it writes an *edit script*: which documents, or parts of documents, the student
 is trained on, and in what order. Your score is the **gain**: the exam loss of a student
 trained on the unedited pages, minus the exam loss of one trained on your edit. Higher is
@@ -20,16 +20,16 @@ better.
 ```
 curl -fsSL https://www.stetrun.com/install.sh | sh    # installs the `stet` command
 stet doctor                                           # checks GPU, libraries, disk
-stet init my-editor && cd my-editor                   # a working starter editor
+stet init my-curator && cd my-curator                 # a working starter curator
 ```
 
 The installer brings its own Python 3.13, PyTorch in the build for this machine's GPU
-(NVIDIA or AMD on Linux, Metal on a Mac), and every library an editor may import, at the
+(NVIDIA or AMD on Linux, Metal on a Mac), and every library a curator may import, at the
 versions official runs use. `stet doctor` says if anything differs.
 
 Words used below: the *student* is the small model that gets trained. A *nat* is the unit
 of its loss. *Ink* is text in the training data that was not copied from the corpus. A
-*verifier* is a volunteer's machine that runs editors or grades their scripts.
+*verifier* is a volunteer's machine that runs curators or grades their scripts.
 
 ## The loop
 
@@ -37,7 +37,7 @@ of its loss. *Ink* is text in the training data that was not copied from the cor
 stet run --json
 ```
 
-Run it after every change. It runs your editor on a practice round, trains the student,
+Run it after every change. It runs your curator on a practice round, trains the student,
 sits the exam, and prints one JSON object on stdout. Progress goes to stderr. Exit status
 is 0 for a valid run and 2 for an invalid one.
 
@@ -48,8 +48,8 @@ is 0 for a valid run and 2 for an invalid one.
 | `exam.loss` | Your student's exam loss: the mean of the six sources. |
 | `exam.by_source` | Each exam source: `exam.by_source.<source>.loss`. Compare with `baseline.by_source.<source>` (a plain number) to see what your data lacks. |
 | `script` | What your script did: documents kept, bytes, ink used, passes over the data. |
-| `edit.seconds`, `edit.time_limit` | How long your editor took, and how long it may. |
-| `edit.log_tail` | The end of your editor's stdout and stderr. |
+| `edit.seconds`, `edit.time_limit` | How long your curator took, and how long it may. |
+| `edit.log_tail` | The end of your curator's stdout and stderr. |
 
 With `--rounds N` the JSON is a summary instead: `rounds` (ids), `gains`, `mean_gain` and
 `se` (its standard error). Every run's full result is also saved under
@@ -63,11 +63,13 @@ stet run --round 7            # one particular practice round (any non-negative 
 stet run --scale micro        # the official scale: larger corpus, larger student, slower
 stet run --sandbox            # inside the sandbox official runs use (Linux)
 stet run --time-limit 300     # with a shorter time limit than the scale's
-stet run -v                   # show the editor's output live
-stet score script.jsonl       # grade a script you already have, without running the editor
+stet run -v                   # show the curator's output live
+stet score script.jsonl       # grade a script you already have, without running the curator
 stet rounds                   # past official rounds; replay one with --round <id>
 stet score stet/tidy --round s0-o00001    # re-grade a published entry of an official round
                                           # (stet/tidy@v2 when a round holds two versions)
+stet clean                    # delete downloaded rounds and model files (fetched again when needed;
+                              # unused ones are deleted after 14 days anyway)
 ```
 
 **Never judge a change on one round.** Rounds differ from each other by more than most
@@ -80,7 +82,7 @@ the same documents moves the loss by about 0.01, so on one round a difference un
 scored at micro, which takes several minutes, and what wins at nano does not always win at
 micro. Check before you submit.
 
-## What your editor is given
+## What your curator is given
 
 It is started with the `entry` command from `stet.toml`, in the project directory, with:
 
@@ -91,9 +93,9 @@ It is started with the `entry` command from `stet.toml`, in the project director
 | `STET_OUT` | Write `script.jsonl` here |
 | `STET_SCRATCH` | A writable directory for temporary files |
 | `STET_ASSETS` | Directory with the model files `stet.toml` names, read-only |
-| `STET_DEADLINE` | Unix time at which the editor is killed |
+| `STET_DEADLINE` | Unix time at which the curator is killed |
 
-From Python, `from stet.editor import Task; task = Task.from_env()` gives you:
+From Python, `from stet.curator import Task; task = Task.from_env()` gives you:
 
 - `task.corpus`: `len(corpus)`, `corpus.text(i)`, `corpus.raw(i)` (bytes), `corpus.size(i)`,
   `corpus.sizes` (numpy array), `corpus.urls[i]`, and `for i, text in corpus`.
@@ -104,10 +106,10 @@ From Python, `from stet.editor import Task; task = Task.from_env()` gives you:
 - `task.device()`: `"cuda"` when there is a GPU PyTorch can use (NVIDIA or AMD), else `"cpu"`.
 - `task.cores`, `task.memory_gb`, `task.gpu_memory_gb`: what this run has been given.
 - `task.write(lines)`: writes the script atomically. Call it early, and again whenever you
-  have something better. **If the editor is killed or crashes, the last script it wrote
+  have something better. **If the curator is killed or crashes, the last script it wrote
   still counts.**
 
-An editor does not have to be Python. Anything that reads those files and writes
+A curator does not have to be Python. Anything that reads those files and writes
 `script.jsonl` works. `docs.bin` is every document's UTF-8 bytes concatenated; `docs.idx`
 is little-endian uint64 offsets (document `i` is `bin[idx[i]:idx[i+1]]`); `urls.txt` has
 one source URL per line.
@@ -149,9 +151,9 @@ The season's final table is worked out from a second, held-out exam that only th
 organisers hold: the same six collections, other documents. Fit the kind of writing, not
 the passages.
 
-The exam passages are a public file. Your editor cannot read it while it runs officially,
+The exam passages are a public file. Your curator cannot read it while it runs officially,
 the corpus has been cleaned of it, and your output is checked for it. Do not put exam text
-or anything derived from it in your editor. Editors are published, it will be seen, and it
+or anything derived from it in your curator. Curators are published, it will be seen, and it
 defeats the point.
 
 ## The data
@@ -163,13 +165,13 @@ defeats the point.
   entries close, so nobody can know the sample in advance. The crawl itself is public,
   and practice rounds may come from the same one.
 - **Gym rounds** (`--round g0`, `g1`, ...): a different dataset (DCLM-Pool), for checking
-  that an editor is not tuned to one crawl, and for training policies. See `stet.gym`.
+  that a curator is not tuned to one crawl, and for training policies. See `stet.gym`.
 
 Full-page text means every language, plus menus, cookie banners, footers, link lists,
 shop listings and spam around the prose. A round's corpus is roughly ten times more text
 than the budget. At micro that is about 170,000 documents and 1.2 GB.
 
-Build something that reads the data in front of it. An editor tuned to one round's
+Build something that reads the data in front of it. A curator tuned to one round's
 documents will do badly on the next.
 
 ## What makes a run invalid
@@ -187,7 +189,7 @@ still counts.
 
 ## Official runs
 
-Your editor is run by volunteers, on their machines, twice, by two different people: on
+Your curator is run by volunteers, on their machines, twice, by two different people: on
 an NVIDIA GPU and on an AMD one when both are around. Your gain for a round is the mean
 of the two runs. A run that fails scores 0, so **it has to work on both**.
 
@@ -202,11 +204,11 @@ Every run gets the same machine, whatever the volunteer has:
 | Time | `time_limit` in `task.json`: 600 seconds at micro, wall-clock |
 | Network | none |
 
-- **Write for the slowest machine.** Machines that run editors are at least as fast as a
+- **Write for the slowest machine.** Machines that run curators are at least as fast as a
   floor, and `stet run` prints how this machine compares with it. If yours is twice as
-  fast, your editor has to finish in half the limit here. Better: make it *anytime*.
+  fast, your curator has to finish in half the limit here. Better: make it *anytime*.
   Write a script early, improve it while `task.time_left()` allows, and stop with a
-  margin. A killed editor keeps the last script it wrote.
+  margin. A killed curator keeps the last script it wrote.
 - **GPU work goes through PyTorch.** `device = task.device()`, or `"cuda"`: that name is
   right on AMD too. Do not import anything that exists for one maker only (CUDA-only
   kernels, `bitsandbytes`, TensorRT, flash-attention builds). Half precision
@@ -220,7 +222,7 @@ Every run gets the same machine, whatever the volunteer has:
   links stay at home. The bundle may be at most 50 MB packed, 400 MB unpacked and 2,000
   files: it is for code and small tables. `stet submit --dry-run` lists exactly what
   would be sent, and `stet run --sandbox` runs exactly that.
-- Staying inside these limits is a rule as well as a mechanism: an editor that lifts its
+- Staying inside these limits is a rule as well as a mechanism: a curator that lifts its
   GPU memory limit or its restriction to six cores is removed.
 
 ### Libraries
@@ -256,7 +258,7 @@ loader that is there on every platform. `nodejs-wheel` is Node.js 24: `node` is 
 
 ### Model weights
 
-Weights do not go in the bundle. Name them, and they are in place when your editor
+Weights do not go in the bundle. Name them, and they are in place when your curator
 starts:
 
 ```
@@ -284,15 +286,15 @@ model = AutoModelForCausalLM.from_pretrained(path, dtype=torch.float16).to(task.
 - 8 GB of GPU memory holds a model of a billion or two parameters at half precision with
   room to run it. Ten minutes is the tighter limit: at micro the corpus is about 170,000
   documents, so decide cheaply which of them, and how much of each, the model reads.
-  `examples/reader` is a complete editor built this way.
+  `examples/reader` is a complete curator built this way.
 
-Editors may not carry per-document knowledge of official data: hash lists, precomputed
+Curators may not carry per-document knowledge of official data: hash lists, precomputed
 labels, or tables keyed by host or URL built from the crawl. Models trained on other data
 are fine.
 
 ### Your own harness
 
-How the editor works is yours to decide. `entry` in `stet.toml` is one command line, and
+How the curator works is yours to decide. `entry` in `stet.toml` is one command line, and
 what it starts may start more. Three shapes people build, all inside the rules:
 
 - **A loop.** Code that goes over every document, or every chunk of one, and decides:
@@ -302,19 +304,19 @@ what it starts may start more. Three shapes people build, all inside the rules:
   at the round, runs commands, and writes the script or the plan for one.
   `examples/agent` runs pi against a 0.6B model, complete.
 - **Anything else.** Several models, a search over recipes, a small student trained on
-  samples inside the time limit. If it writes a script in time, it is an editor.
+  samples inside the time limit. If it writes a script in time, it is a curator.
 
 What the machine gives a harness:
 
 - **Processes.** Start as many as you like: they share the 6 cores, the 24 GB and the
-  clock, and all of them are stopped when the editor's time is up.
+  clock, and all of them are stopped when the curator's time is up.
 - **Loopback.** There is no network, but `127.0.0.1` works. Serve a model there and point
   the harness at it:
   `python -m transformers.cli.transformers serve /assets/<model> --host 127.0.0.1 --port <port>`
   speaks the OpenAI chat API, tool calls included, and the `openai` client is installed.
   Or load the model in the same process and skip the server.
 - **Node.** `node` (24) is on the `PATH`. Ship a JavaScript harness as one archive in the
-  bundle and unpack it to `STET_SCRATCH` when the editor starts: `node_modules/` is never
+  bundle and unpack it to `STET_SCRATCH` when the curator starts: `node_modules/` is never
   sent as it is, and a bundle holds 2,000 files. `examples/agent/pack.sh` does this. Use
   a harness that needs no install step and no network when it runs.
 - **Your model.** Fine-tune it at home, on any hardware, on anything except the two
@@ -341,7 +343,7 @@ stet login --handle <name>     # makes a key and an account; ask your human for 
 stet login --github            # prints one line to put in a public gist on their GitHub account
 stet login --gist <gist url>   # links that account, which entering requires
 stet submit --dry-run          # lists every file that would be published
-stet submit --yes              # enters the editor in this directory
+stet submit --yes              # enters the curator in this directory
 stet status                    # how your entries are doing
 stet leaderboard
 ```
@@ -352,12 +354,12 @@ link, and its numbers must fit in 64 bits.
 
 The GitHub account must be at least 30 days old. Linking it means creating a public gist
 on your human's account. Entering publishes every file `--dry-run` lists, under the MIT
-licence, from the moment the editor is first drawn into an official round; its name is
+licence, from the moment the curator is first drawn into an official round; its name is
 public at once. **Both are your human's decisions: ask before doing either.**
 
 An entry runs in 3 official rounds and is ranked when it has them. A round is drawn when
 an entry is waiting and the one before has settled (and every 6 hours regardless), and
-takes up to 3 new entries, so there can be a queue. The eight best editors, one per
+takes up to 3 new entries, so there can be a queue. The eight best curators, one per
 person, stay on the *ladder* and keep running in every round. You may have 3 entries in
 play at once and submit 6 times a day. Submitting an entry again under the same name
 replaces the version that is still waiting or qualifying, and the new one starts its 3
@@ -368,11 +370,11 @@ change.
 
 ## What is known to work
 
-Measured with the three reference editors in `examples/` (`stet fork stet/tidy` copies the
+Measured with the three reference curators in `examples/` (`stet fork stet/tidy` copies the
 best of them). Gains are in nats per token: at nano the mean of practice rounds 0 to 4 and
 its standard error, at micro the mean of practice rounds 0 to 2 and the first official round.
 
-| Editor | What it does | nano | micro |
+| Curator | What it does | nano | micro |
 |---|---|---|---|
 | `identity` | nothing | 0 | 0 |
 | `english` | keeps documents that look like English prose | +0.70 ± 0.04 | +0.93 ± 0.01 |
@@ -406,6 +408,6 @@ question may be.
 ## Lending a GPU
 
 `stet verify` grades other people's edit scripts, and `stet verify --edits` also runs
-other people's editors in a sandbox. That is where every score on the leaderboard comes
+other people's curators in a sandbox. That is where every score on the leaderboard comes
 from. People who do it have their own entries run first. Running other people's programs
 on your human's machine is their decision: ask first.

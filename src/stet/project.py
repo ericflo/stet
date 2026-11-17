@@ -1,7 +1,7 @@
-"""An editor project on disk: stet.toml, and how it is packed into a bundle.
+"""A curator project on disk: stet.toml, and how it is packed into a bundle.
 
 A bundle is a deterministic tar of the project directory, zstd-compressed. Its sha256 is
-the editor's identity: the leaderboard, the verifiers and the audit trail all refer to
+the curator's identity: the leaderboard, the verifiers and the audit trail all refer to
 exactly those bytes.
 """
 
@@ -26,11 +26,11 @@ MAX_BUNDLE_BYTES = 50 << 20
 MAX_UNPACKED_BYTES = 400 << 20
 MAX_BUNDLE_FILES = 2000
 MAX_PATH_BYTES = 255  # one file's path inside the bundle
-MAX_PATHS_BYTES = 64 << 10  # every file's path, added up: the file list is kept with the editor for good
+MAX_PATHS_BYTES = 64 << 10  # every file's path, added up: the file list is kept with the curator for good
 MAX_MANIFEST_BYTES = 64 << 10  # stet.toml is five short fields
 MAX_ENTRY_BYTES = 200
 # Never packed. A bundle is public, so anything whose name starts with a dot stays home too:
-# .env, .git, .venv, an editor's settings, a tool's cache.
+# .env, .git, .venv, a curator's settings, a tool's cache.
 EXCLUDE_DIRS = {"venv", "__pycache__", "node_modules", "runs"}
 EXCLUDE_SUFFIXES = (".pyc", ".pyo")
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,38}[a-z0-9]$")
@@ -104,11 +104,11 @@ def load_project(path: str | Path) -> Project:
         # Links are never packed, so the bundle would arrive without one.
         raise ProjectError("stet.toml is a symbolic link. Links are not packed into a bundle, so it would be submitted without a stet.toml: make it a plain file.")
     if not toml.exists():
-        raise ProjectError(f"{path} has no stet.toml. Run `stet init` to create an editor project.")
+        raise ProjectError(f"{path} has no stet.toml. Run `stet init` to create a curator project.")
     if not toml.is_file():
         raise ProjectError("stet.toml is not a plain file")
     if toml.stat().st_size > MAX_MANIFEST_BYTES:
-        raise ProjectError(f"stet.toml is over {MAX_MANIFEST_BYTES >> 10} KB. It holds a name, a command and a few lines about the editor.")
+        raise ProjectError(f"stet.toml is over {MAX_MANIFEST_BYTES >> 10} KB. It holds a name, a command and a few lines about the curator.")
     try:
         cfg = tomllib.loads(toml.read_text(encoding="utf-8"), parse_float=_float)
     except (ValueError, RecursionError) as e:  # not TOML, not UTF-8, or a number nothing can hold
@@ -128,7 +128,7 @@ def load_project(path: str | Path) -> Project:
         raise ProjectError("stet.toml: name must be 3-40 characters of lowercase letters, digits and hyphens")
     entry = cfg.get("entry", "").strip()
     if not entry:
-        raise ProjectError('stet.toml: entry is required, e.g. entry = "python editor.py"')
+        raise ProjectError('stet.toml: entry is required, e.g. entry = "python curator.py"')
     if len(entry.encode("utf-8", "replace")) > MAX_ENTRY_BYTES or any(ch in entry for ch in "\0\n\r"):
         raise ProjectError(f"stet.toml: entry is one command line of at most {MAX_ENTRY_BYTES} characters")
     from . import assets as assets_
@@ -205,7 +205,7 @@ def bundle_files(project: Project) -> list[Path]:
 
 
 def pack(project: Project) -> tuple[bytes, str]:
-    """Return (bundle bytes, editor id). Same files in, same bytes out."""
+    """Return (bundle bytes, curator id). Same files in, same bytes out."""
     files = bundle_files(project)
     if len(files) > MAX_BUNDLE_FILES:
         raise ProjectError(f"{len(files):,} files; a bundle holds at most {MAX_BUNDLE_FILES:,}. `stet submit --dry-run` lists them.")
@@ -219,7 +219,7 @@ def pack(project: Project) -> tuple[bytes, str]:
     if sum(len(name.encode("utf-8", "surrogateescape")) for name in names) > MAX_PATHS_BYTES:
         raise ProjectError(
             f"the paths of the {len(files):,} files add up to more than {MAX_PATHS_BYTES >> 10} KB. "
-            "Put many small files into one archive that the editor opens, or shorten their names."
+            "Put many small files into one archive that the curator opens, or shorten their names."
         )
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w", format=tarfile.PAX_FORMAT) as tar:
@@ -241,7 +241,7 @@ def pack(project: Project) -> tuple[bytes, str]:
         raise ProjectError(
             f"bundle is {len(blob) / 1e6:.1f} MB; the limit is {MAX_BUNDLE_BYTES >> 20} MB. "
             "Model weights and other large files do not go in the bundle: put them on Hugging Face and name them "
-            "with `stet asset add <owner>/<repository>`. They are fetched before the editor starts."
+            "with `stet asset add <owner>/<repository>`. They are fetched before the curator starts."
         )
     return blob, hashlib.sha256(blob).hexdigest()
 

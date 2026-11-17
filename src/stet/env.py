@@ -1,11 +1,11 @@
-"""The environment an editor runs in: one Python, one list of libraries, the same everywhere.
+"""The environment a curator runs in: one Python, one list of libraries, the same everywhere.
 
-Editors are run by volunteers, on machines of every kind. A program that imports a library
-has to find the same version of it on each of them, or the same editor would behave
+Curators are run by volunteers, on machines of every kind. A program that imports a library
+has to find the same version of it on each of them, or the same curator would behave
 differently depending on who ran it. So the season names a Python version and an exact
-version of every library an editor may count on ("environment" in the season file), the
+version of every library a curator may count on ("environment" in the season file), the
 installer installs exactly those, and a machine whose environment differs is not given
-editors to run.
+curators to run.
 
 Grading is plainer: it uses PyTorch and nothing else from this list, so a machine that only
 grades has to match on PyTorch alone.
@@ -73,7 +73,7 @@ def problems(season: Season, only: tuple[str, ...] | None = None) -> list[str]:
 
 
 def promised(season: Season) -> dict[str, str]:
-    """The libraries an editor is told it may import, by name and version (what brings
+    """The libraries a curator is told it may import, by name and version (what brings
     them along is pinned too, but is nobody's to rely on)."""
     env = season.raw.get("environment") or {}
     return dict(env.get("packages") or {})

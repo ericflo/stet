@@ -1,7 +1,7 @@
 """Gain and the data-efficiency multiplier.
 
-Gain is measured directly: baseline exam loss minus the editor's, same round, same initial
-weights. Gain, in nats, is what ranks editors.
+Gain is measured directly: baseline exam loss minus the curator's, same round, same initial
+weights. Gain, in nats, is what ranks curators.
 
 The multiplier is a translation for humans: "how many times more unedited data would the
 student have needed to do this well?" It is read off a reference curve of baseline loss

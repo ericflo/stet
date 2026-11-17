@@ -2,5 +2,5 @@
 name = "english"
 description = "Keeps the documents that look like English prose and drops everything else. Order unchanged."
 technique = "stop-word language filter"
-entry = "python editor.py"
+entry = "python curator.py"
 license = "MIT"

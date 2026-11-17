@@ -1,4 +1,4 @@
-"""A small language model reads the candidates: how to use model weights in an editor.
+"""A small language model reads the candidates: how to use model weights in a curator.
 
   1. Do what `tidy` does: English prose, duplicates dropped, boilerplate lines cut, a crude
      quality score. Write that script straight away, so there is always one to fall back on.
@@ -13,9 +13,9 @@ is about as good as `tidy`'s heuristics. Fork it and bring a better reader.
 What to copy from it, whatever your model is:
 
   - Ask for the GPU with task.device(). It is "cuda" on NVIDIA and AMD alike.
-  - Load from task.asset(...). Nothing can be downloaded while the editor runs.
+  - Load from task.asset(...). Nothing can be downloaded while the curator runs.
   - Half precision, and batches sorted by length: the time limit is on the slowest machine
-    that runs editors, and `stet bench` says how yours compares.
+    that runs curators, and `stet bench` says how yours compares.
   - Watch task.time_left() and write the script before it runs out. A script written
     earlier still counts if this one never is.
   - Two machines will not give the same numbers to the last digit. Round what the model
@@ -28,7 +28,7 @@ import random
 import re
 import sys
 
-from stet.editor import Task
+from stet.curator import Task
 
 SENTENCE_END = re.compile(r"[.!?][\"')\]]?\s")
 STOPWORDS = (" the ", " of ", " and ", " to ", " in ", " is ", " that ", " for ")

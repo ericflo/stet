@@ -56,6 +56,33 @@ To decide for yourself when to upgrade, start it with `stet verify --no-upgrade`
 new version is out, stops being given work once the server needs the new one, and
 `stet upgrade` installs it when you are ready.
 
+### What it keeps on your disk
+
+Everything stet downloads goes in one directory, `~/.cache/stet` (`STET_CACHE` moves it),
+and all of it can be fetched again. It cleans up after itself:
+
+| What | How long it is kept |
+|---|---|
+| A round's raw crawl files | Deleted as soon as the round's corpus is built from them |
+| Rounds you graded | The newest three |
+| Curators' model files | Until the cache passes 40 GB (`STET_ASSET_CACHE_GB`), least recently used first |
+| A job's working files | Deleted when the job ends |
+| Anything else: practice rounds, model files, scripts | Deleted after 14 days without being used (`STET_CACHE_DAYS`; `0` keeps everything) |
+| The service's log | Cut back to its newest megabyte when it passes 8 MB |
+
+```
+stet clean --dry-run   # what is there, and how big
+stet clean             # delete all of it now
+```
+
+`stet clean` is safe while a verifier is running: it leaves what that verifier used in the
+last few hours. `stet doctor` shows how much is held.
+
+To remove stet altogether: `stet service uninstall`, `stet clean`, `uv tool uninstall
+stet-cli`, and delete `~/.config/stet` (your key: without it the account cannot be used
+again) and `~/.local/state/stet` (logs). The packages it was installed from are in uv's
+own cache, shared with anything else uv installs: `uv cache clean` frees that.
+
 ### Grading
 
 **No one else's code runs.** A grade job is an edit script, which is plain data: lists of
@@ -90,8 +117,9 @@ reinstall without loss.
 
 A curator may name model files, up to 4 GiB an entry. They are fetched from Hugging Face
 before it runs, checked against their hashes, and kept in a cache that is trimmed at
-40 GB (`STET_ASSET_CACHE_GB` changes that). A run takes up to ten minutes at the official
-scale, plus the download.
+40 GB and of whatever has gone unused for two weeks
+([what it keeps on your disk](#what-it-keeps-on-your-disk)). A run takes up to ten minutes
+at the official scale, plus the download.
 
 ### Becoming established
 

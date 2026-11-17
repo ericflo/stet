@@ -1,4 +1,4 @@
-"""A starter editor. Keep English prose, drop the rest, shuffle. Make it better.
+"""A starter curator. Keep English prose, drop the rest, shuffle. Make it better.
 
 Run it:      stet run
 Submit it:   stet submit
@@ -19,7 +19,7 @@ training on it more often.
 
 import random
 
-from stet.editor import Task
+from stet.curator import Task
 
 STOPWORDS = (" the ", " of ", " and ", " to ", " in ", " is ", " that ", " for ")
 

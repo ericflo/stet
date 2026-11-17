@@ -18,7 +18,7 @@ RND = practice_round(SEASON, 0)
 def editor(tmp_path, body: str):
     bundle = tmp_path / "bundle"
     bundle.mkdir(exist_ok=True)
-    (bundle / "editor.py").write_text(body)
+    (bundle / "curator.py").write_text(body)
     return bundle
 
 
@@ -34,20 +34,20 @@ print("kept", n, "of", task["train_tokens"])
 
 
 def test_an_editor_runs_and_its_script_is_copied_out(corpus, tmp_path):
-    run = run_editor(editor(tmp_path, WRITE_ALL), "python editor.py", corpus, RND, SCALE, tmp_path / "work", 30)
+    run = run_editor(editor(tmp_path, WRITE_ALL), "python curator.py", corpus, RND, SCALE, tmp_path / "work", 30)
     assert run.status == "ok" and run.script == (tmp_path / "work" / "script.jsonl").resolve()
     assert run.script.read_text().split() == ["0", "1", "2", "3"]
     assert "kept 4" in run.log_tail and "seed" not in json.dumps(json.load(open(tmp_path / "work" / "out" / "task.json")))
 
 
 def test_no_script_a_crash_and_a_timeout(corpus, tmp_path):
-    run = run_editor(editor(tmp_path, "print('nothing')"), "python editor.py", corpus, RND, SCALE, tmp_path / "w1", 30)
+    run = run_editor(editor(tmp_path, "print('nothing')"), "python curator.py", corpus, RND, SCALE, tmp_path / "w1", 30)
     assert run.status == "no_script" and run.script is None and "script.jsonl" in run.reason
-    run = run_editor(editor(tmp_path, "raise SystemExit(3)"), "python editor.py", corpus, RND, SCALE, tmp_path / "w2", 30)
+    run = run_editor(editor(tmp_path, "raise SystemExit(3)"), "python curator.py", corpus, RND, SCALE, tmp_path / "w2", 30)
     assert run.status == "error" and run.exit_code == 3
-    # A script written before the deadline still counts when the editor is killed at it.
+    # A script written before the deadline still counts when the curator is killed at it.
     slow = WRITE_ALL + "\nimport time\ntime.sleep(60)\n"
-    run = run_editor(editor(tmp_path, slow), "python editor.py", corpus, RND, SCALE, tmp_path / "w3", 2)
+    run = run_editor(editor(tmp_path, slow), "python curator.py", corpus, RND, SCALE, tmp_path / "w3", 2)
     assert run.status == "timeout" and run.script is not None and run.seconds < 10
 
 
@@ -56,10 +56,10 @@ def test_a_script_that_points_somewhere_else_is_not_read(corpus, tmp_path):
     secret = tmp_path / "secret.jsonl"
     secret.write_text("3\n")
     body = f"import os\nos.symlink({str(secret)!r}, os.path.join(os.environ['STET_OUT'], 'script.jsonl'))\n"
-    run = run_editor(editor(tmp_path, body), "python editor.py", corpus, RND, SCALE, tmp_path / "work", 30)
+    run = run_editor(editor(tmp_path, body), "python curator.py", corpus, RND, SCALE, tmp_path / "work", 30)
     assert run.script is None and run.status == "no_script"
     body = "import os\nos.mkfifo(os.path.join(os.environ['STET_OUT'], 'script.jsonl'))\n"
-    run = run_editor(editor(tmp_path, body), "python editor.py", corpus, RND, SCALE, tmp_path / "work2", 30)
+    run = run_editor(editor(tmp_path, body), "python curator.py", corpus, RND, SCALE, tmp_path / "work2", 30)
     assert run.script is None and "regular file" in run.reason
     out = tmp_path / "out"
     out.mkdir()
@@ -96,7 +96,7 @@ open("/scratch/ok", "w").write("x")
 
 @pytest.mark.skipif(sys.platform != "linux" or not bwrap_available()[0], reason="needs bubblewrap")
 def test_the_sandbox_hides_the_machine(corpus, tmp_path):
-    run = run_editor(editor(tmp_path, SNOOP), "python editor.py", corpus, RND, SCALE, tmp_path / "work", 60, sandbox="bwrap")
+    run = run_editor(editor(tmp_path, SNOOP), "python curator.py", corpus, RND, SCALE, tmp_path / "work", 60, sandbox="bwrap")
     assert run.status == "ok", run.log_tail
     seen = json.loads(run.log_tail.split("SNOOP", 1)[1].splitlines()[0])
     assert seen["/etc/machine-id"] is None and seen["/etc/hostname"] is None and seen["/etc/hosts"] is None and seen["/etc/shadow"] is None
@@ -120,15 +120,15 @@ while True:
 
 @pytest.mark.skipif(sys.platform != "linux" or not bwrap_available()[0] or not scope_available()[0], reason="needs bubblewrap and systemd-run --user")
 def test_the_sandbox_caps_memory(corpus, tmp_path):
-    run = run_editor(editor(tmp_path, HOG), "python editor.py", corpus, RND, SCALE, tmp_path / "work", 120, sandbox="bwrap", limits={"memory_gb": 1, "required": True})
+    run = run_editor(editor(tmp_path, HOG), "python curator.py", corpus, RND, SCALE, tmp_path / "work", 120, sandbox="bwrap", limits={"memory_gb": 1, "required": True})
     assert run.status == "error" and run.seconds < 60  # killed by the cgroup, not by the deadline
     assert run.script is not None  # what it wrote before dying still counts
 
 
 # --- whose fault a failure is ---------------------------------------------------------------
 #
-# An anchor hands a job back when the machine failed and reports it when the editor did. If
-# an editor could make its own failure look like the machine's, its job would be retried
+# An anchor hands a job back when the machine failed and reports it when the curator did. If
+# a curator could make its own failure look like the machine's, its job would be retried
 # for ever and nobody else's would run.
 
 needs_sandbox = pytest.mark.skipif(sys.platform != "linux" or not bwrap_available()[0], reason="needs bubblewrap")
@@ -136,7 +136,7 @@ needs_sandbox = pytest.mark.skipif(sys.platform != "linux" or not bwrap_availabl
 
 def test_a_bad_entry_command_is_the_editors_error(corpus, tmp_path):
     bundle = editor(tmp_path, WRITE_ALL)
-    for n, entry in enumerate(['python "editor.py', "no-such-program-xyz editor.py", "python editor.py " + "x" * 5000, "./editor.py"]):
+    for n, entry in enumerate(['python "curator.py', "no-such-program-xyz curator.py", "python curator.py " + "x" * 5000, "./editor.py"]):
         run = run_editor(bundle, entry, corpus, RND, SCALE, tmp_path / f"w{n}", 30)
         assert run.status == "error" and run.script is None, entry
         assert "entry command" in run.reason, run.reason
@@ -145,7 +145,7 @@ def test_a_bad_entry_command_is_the_editors_error(corpus, tmp_path):
 @needs_sandbox
 def test_in_the_sandbox_a_bad_entry_or_a_forged_message_is_still_the_editors_error(corpus, tmp_path):
     bundle = editor(tmp_path, "import sys\nprint('bwrap: execvp python: No such file or directory')\nsys.exit(1)\n")
-    run = run_editor(bundle, "python editor.py", corpus, RND, SCALE, tmp_path / "w1", 30, sandbox="bwrap")
+    run = run_editor(bundle, "python curator.py", corpus, RND, SCALE, tmp_path / "w1", 30, sandbox="bwrap")
     assert run.status == "error" and run.exit_code == 1 and "bwrap:" in run.log_tail
     for n, entry in enumerate(["no-such-program index.js", "./editor.py"]):  # not installed; not executable
         run = run_editor(bundle, entry, corpus, RND, SCALE, tmp_path / f"v{n}", 30, sandbox="bwrap")
@@ -159,7 +159,7 @@ def test_a_sandbox_that_does_not_start_is_the_machines_error(corpus, tmp_path, m
     real = runner.bwrap_command
     monkeypatch.setattr(runner, "bwrap_command", lambda *a: [*real(*a), "--ro-bind", "/no/such/directory", "/nowhere"])
     with pytest.raises(runner.HarnessError, match="failed to start"):
-        run_editor(editor(tmp_path, WRITE_ALL), "python editor.py", corpus, RND, SCALE, tmp_path / "work", 30, sandbox="bwrap")
+        run_editor(editor(tmp_path, WRITE_ALL), "python curator.py", corpus, RND, SCALE, tmp_path / "work", 30, sandbox="bwrap")
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX only")
@@ -182,7 +182,7 @@ def test_nothing_private_is_mounted_where_an_editor_could_read_it(corpus, tmp_pa
     assert "the cache" in runner._exposed(SEASON, shown)
     if sys.platform == "linux" and bwrap_available()[0]:  # and nothing is started in that case
         with pytest.raises(runner.HarnessError, match="refusing to sandbox: the cache"):
-            run_editor(editor(tmp_path, WRITE_ALL), "python editor.py", corpus, RND, SCALE, tmp_path / "work", 30, sandbox="bwrap")
+            run_editor(editor(tmp_path, WRITE_ALL), "python curator.py", corpus, RND, SCALE, tmp_path / "work", 30, sandbox="bwrap")
 
 
 def test_a_full_disk_is_the_machines_error(corpus, tmp_path, monkeypatch):
@@ -190,7 +190,7 @@ def test_a_full_disk_is_the_machines_error(corpus, tmp_path, monkeypatch):
 
     monkeypatch.setattr(runner.shutil, "disk_usage", lambda p: type("U", (), {"free": 1 << 30})())
     with pytest.raises(runner.HarnessError, match="free"):
-        run_editor(editor(tmp_path, WRITE_ALL), "python editor.py", corpus, RND, SCALE, tmp_path / "work", 30)
+        run_editor(editor(tmp_path, WRITE_ALL), "python curator.py", corpus, RND, SCALE, tmp_path / "work", 30)
 
 
 # --- the output directory ---------------------------------------------------------------------
@@ -220,14 +220,14 @@ def test_an_editor_cannot_hide_what_it_writes_and_it_can_be_removed(corpus, tmp_
     from stet.runner import remove_tree
 
     work = tmp_path / "work"
-    run = run_editor(editor(tmp_path, HIDE), "python editor.py", corpus, RND, SCALE, work, 30)
+    run = run_editor(editor(tmp_path, HIDE), "python curator.py", corpus, RND, SCALE, work, 30)
     assert run.status == "error" and run.seconds < 15
     assert run.script is not None  # what it wrote before being stopped still counts
     assert (work / "out" / "x").exists() and remove_tree(work) and not work.exists()
 
 
 def _dig(root, names, bottom_mode=None):
-    """Make a chain of directories under root by name alone, as an editor would with mkdir and
+    """Make a chain of directories under root by name alone, as a curator would with mkdir and
     chdir: no path string ever has to hold the whole way down. A file goes at the bottom."""
     fd = os.open(root, os.O_RDONLY)
     for name in names:
@@ -279,19 +279,19 @@ def test_whatever_shape_an_editor_leaves_its_directory_in_it_can_be_removed(tmp_
 
 
 def test_an_editor_cannot_bury_the_harness_in_files(corpus, tmp_path):
-    run = run_editor(editor(tmp_path, LITTER), "python editor.py", corpus, RND, SCALE, tmp_path / "work", 30)
+    run = run_editor(editor(tmp_path, LITTER), "python curator.py", corpus, RND, SCALE, tmp_path / "work", 30)
     assert run.status == "error" and "files" in run.reason and run.seconds < 20
 
 
 def test_the_clock_does_not_wait_for_the_accounting(corpus, tmp_path, monkeypatch):
     from stet import runner
 
-    def slow(path, max_entries):  # a walk over a directory the editor has stuffed
+    def slow(path, max_entries):  # a walk over a directory the curator has stuffed
         time.sleep(30)
         return 0, 0, True
 
     monkeypatch.setattr(runner, "_usage", slow)
-    run = run_editor(editor(tmp_path, WRITE_ALL + "\nimport time\ntime.sleep(60)\n"), "python editor.py", corpus, RND, SCALE, tmp_path / "work", 3)
+    run = run_editor(editor(tmp_path, WRITE_ALL + "\nimport time\ntime.sleep(60)\n"), "python curator.py", corpus, RND, SCALE, tmp_path / "work", 3)
     assert run.status == "timeout" and run.seconds < 8
 
 
@@ -316,14 +316,14 @@ def test_the_sandbox_self_test_passes_here(tmp_path, monkeypatch):
     from stet.runner import node_dir, sandbox_selftest
 
     monkeypatch.setenv("STET_CACHE", str(tmp_path / "cache"))
-    if node_dir() is None:  # a checkout without the season's Node: not a machine that may run editors
+    if node_dir() is None:  # a checkout without the season's Node: not a machine that may run curators
         ok, why = sandbox_selftest()
         assert not ok and "Node.js" in why
     else:
         assert sandbox_selftest() == (True, "")
 
 
-# --- an editor does not outlive its run, and what it leaves is removed with care -----------------
+# --- a curator does not outlive its run, and what it leaves is removed with care -----------------
 
 LINGER = """
 import os, subprocess, sys, time
@@ -361,12 +361,12 @@ def test_no_way_out_of_a_run_leaves_the_editor_running(corpus, tmp_path, monkeyp
 
     def disk_usage(path):
         if pids.exists():
-            raise trouble  # in the middle of the run, with the editor and its child alive
+            raise trouble  # in the middle of the run, with the curator and its child alive
         return real(path)
 
     monkeypatch.setattr(runner.shutil, "disk_usage", disk_usage)
     with pytest.raises(type(trouble)):
-        run_editor(editor(tmp_path, LINGER), "python editor.py", corpus, RND, SCALE, work, 60)
+        run_editor(editor(tmp_path, LINGER), "python curator.py", corpus, RND, SCALE, work, 60)
     monkeypatch.undo()
     # Whoever called is about to remove the work directory. Nothing is left to write in it.
     for pid in map(int, pids.read_text().split()):
@@ -417,15 +417,15 @@ raise RuntimeError("the real reason: the tokenizer file is missing")
 def test_what_an_editor_said_last_is_what_is_reported(corpus, tmp_path):
     from stet import runner
 
-    run = run_editor(editor(tmp_path, CHATTY), "python editor.py", corpus, RND, SCALE, tmp_path / "work", 60)
+    run = run_editor(editor(tmp_path, CHATTY), "python curator.py", corpus, RND, SCALE, tmp_path / "work", 60)
     assert run.status == "error" and run.exit_code == 1
     # The log file holds the first megabyte. The reason it stopped came after that.
     log = (tmp_path / "work" / "editor.log").read_bytes()
     assert len(log) == runner.LOG_LIMIT_BYTES and b"the real reason" not in log and log.startswith(b"progress")
     assert "RuntimeError: the real reason: the tokenizer file is missing" in run.log_tail and "Traceback" in run.log_tail
     assert len(run.log_tail) <= 4000 and "the real reason" in run.to_dict()["log_tail"]
-    # A quiet editor's output is all there, as before.
-    run = run_editor(editor(tmp_path, "print('one line')"), "python editor.py", corpus, RND, SCALE, tmp_path / "w2", 60)
+    # A quiet curator's output is all there, as before.
+    run = run_editor(editor(tmp_path, "print('one line')"), "python curator.py", corpus, RND, SCALE, tmp_path / "w2", 60)
     assert run.log_tail == "one line\n"
 
 
@@ -446,29 +446,29 @@ def test_a_low_disk_with_output_that_cannot_be_measured_is_the_editors_error(cor
     for n, (body, hidden) in enumerate((("", False), ('os.mkdir(os.path.join(out, "x"), 0o300)', True))):
         work = tmp_path / f"work{n}"
         started = work / "out" / "started"
-        # Plenty of room until the editor is running; none from then on, and none after it is gone.
+        # Plenty of room until the curator is running; none from then on, and none after it is gone.
         monkeypatch.setattr(runner.shutil, "disk_usage", lambda p, started=started: type("U", (), {"free": 1 << 20})() if started.exists() else real(p))
         if not hidden:
-            # Nothing of the editor's accounts for it: the machine's disk is full, and no editor is blamed.
+            # Nothing of the curator's accounts for it: the machine's disk is full, and no curator is blamed.
             with pytest.raises(runner.HarnessError, match="still low without it"):
-                run_editor(editor(tmp_path, WAIT % body), "python editor.py", corpus, RND, SCALE, work, 60)
+                run_editor(editor(tmp_path, WAIT % body), "python curator.py", corpus, RND, SCALE, work, 60)
         else:
-            # What the editor wrote cannot be added up, because the editor made it so. That
+            # What the curator wrote cannot be added up, because the curator made it so. That
             # is not the machine's failure, and an anchor does not stop for it.
-            run = run_editor(editor(tmp_path, WAIT % body), "python editor.py", corpus, RND, SCALE, work, 60)
-            assert run.status == "error" and run.reason == "the editor ran the disk low and made part of its output directory unreadable"
+            run = run_editor(editor(tmp_path, WAIT % body), "python curator.py", corpus, RND, SCALE, work, 60)
+            assert run.status == "error" and run.reason == "the curator ran the disk low and made part of its output directory unreadable"
         monkeypatch.undo()
         assert runner.remove_tree(work)
 
 
-# --- the same machine for every editor ---------------------------------------------------------
+# --- the same machine for every curator ---------------------------------------------------------
 #
-# Volunteers' machines differ. What an editor is given does not: the season's cores, memory
+# Volunteers' machines differ. What a curator is given does not: the season's cores, memory
 # and GPU memory, the files it named, and no network to fetch anything else.
 
 LOOK = """
 import json, os
-from stet.editor import Task
+from stet.curator import Task
 task = Task.from_env()
 seen = {"cpus": len(os.sched_getaffinity(0)), "cores": task.cores, "memory_gb": task.memory_gb, "gpu_memory_gb": task.gpu_memory_gb,
         "offline": os.environ.get("HF_HUB_OFFLINE"), "alloc": os.environ.get("PYTORCH_ALLOC_CONF", ""), "assets": task.info["assets"],
@@ -508,7 +508,7 @@ def test_an_editor_is_given_its_assets_and_the_seasons_machine(corpus, tmp_path,
     monkeypatch.setattr(runner, "_gpu_total", [16 << 30])  # a 16 GB card, whatever this machine has
     a, b = an_asset(b"the weights"), an_asset(b"{}", "smol/config.json")
     limits = {"cores": 2, "memory_gb": 4, "gpu_memory_gb": 8}
-    run = run_editor(editor(tmp_path, LOOK), "python editor.py", corpus, RND, SCALE, tmp_path / "work", 60, sandbox=sandbox, limits=limits, assets=[a, b])
+    run = run_editor(editor(tmp_path, LOOK), "python curator.py", corpus, RND, SCALE, tmp_path / "work", 60, sandbox=sandbox, limits=limits, assets=[a, b])
     assert run.status == "ok", run.log_tail
     seen = json.loads(run.log_tail.split("LOOK", 1)[1].splitlines()[0])
     want = min(2, len(os.sched_getaffinity(0)))
@@ -523,7 +523,7 @@ def test_an_editor_is_given_its_assets_and_the_seasons_machine(corpus, tmp_path,
 HARNESS = """
 import json, os, subprocess, sys, threading, urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from stet.editor import Task
+from stet.curator import Task
 task = Task.from_env()
 
 class Model(BaseHTTPRequestHandler):  # stands in for a model served to a harness
@@ -561,7 +561,7 @@ def test_an_editor_may_run_a_harness_of_its_own_against_a_model_it_serves_itself
 
     if node_dir() is None:
         pytest.skip("the season's Node.js is not installed here")
-    run = run_editor(editor(tmp_path, HARNESS), "python editor.py", corpus, RND, SCALE, tmp_path / "work", 120, sandbox=sandbox)
+    run = run_editor(editor(tmp_path, HARNESS), "python curator.py", corpus, RND, SCALE, tmp_path / "work", 120, sandbox=sandbox)
     assert run.status == "ok", run.log_tail
     seen = json.loads(run.log_tail.split("HARNESS", 1)[1].splitlines()[0])
     assert seen["node"] == "v24.19.0 keep or cut?", seen  # the season's Node, whatever /usr/bin holds
@@ -587,7 +587,7 @@ def test_an_asset_that_was_never_fetched_is_the_machines_error(corpus, tmp_path)
 
     missing = assets.Asset("smol/model.bin", "https://huggingface.co/o/n/resolve/" + "a" * 40 + "/f", "b" * 64, 5)
     with pytest.raises(HarnessError, match="has not been fetched"):
-        run_editor(editor(tmp_path, WRITE_ALL), "python editor.py", corpus, RND, SCALE, tmp_path / "work", 60, assets=[missing])
+        run_editor(editor(tmp_path, WRITE_ALL), "python curator.py", corpus, RND, SCALE, tmp_path / "work", 60, assets=[missing])
 
 
 def test_the_cores_an_editor_gets_are_different_physical_cores():
@@ -633,7 +633,7 @@ def test_an_editor_is_shown_one_gpu_whatever_the_machine_has():
 
 SHOW_GPUS = """
 import os
-from stet.editor import Task
+from stet.curator import Task
 print("GPUS", os.environ.get("CUDA_VISIBLE_DEVICES"), os.environ.get("HIP_VISIBLE_DEVICES"))
 Task.from_env().write([0])
 """
@@ -643,7 +643,7 @@ Task.from_env().write([0])
 def test_in_the_sandbox_the_editor_is_told_to_use_one_gpu(corpus, tmp_path, monkeypatch):
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
     monkeypatch.delenv("HIP_VISIBLE_DEVICES", raising=False)
-    run = run_editor(editor(tmp_path, SHOW_GPUS), "python editor.py", corpus, RND, SCALE, tmp_path / "work", 60, sandbox="bwrap")
+    run = run_editor(editor(tmp_path, SHOW_GPUS), "python curator.py", corpus, RND, SCALE, tmp_path / "work", 60, sandbox="bwrap")
     assert run.status == "ok" and "GPUS 0 0" in run.log_tail, run.log_tail
 
 
@@ -654,9 +654,9 @@ def test_a_gpu_whose_memory_is_taken_is_this_machines_trouble_not_the_editors(co
     monkeypatch.setattr(runner, "_gpu_total", [10 << 30])
     monkeypatch.setattr(runner, "gpu_free_bytes", lambda index=0: 6 << 30)  # the verifier, or a game, holds the rest
     limits = {"gpu_memory_gb": 8, "required": True}
-    with pytest.raises(HarnessError, match="6.0 GB of memory free and an editor is promised 8.0"):
-        run_editor(editor(tmp_path, WRITE_ALL), "python editor.py", corpus, RND, SCALE, tmp_path / "w1", 60, limits=limits)
+    with pytest.raises(HarnessError, match="6.0 GB of memory free and a curator is promised 8.0"):
+        run_editor(editor(tmp_path, WRITE_ALL), "python curator.py", corpus, RND, SCALE, tmp_path / "w1", 60, limits=limits)
     monkeypatch.setattr(runner, "gpu_free_bytes", lambda index=0: int(7.8 * 2**30))  # all but what the drivers keep: enough
     monkeypatch.setattr(runner, "scope_available", lambda: (True, ""))
-    run = run_editor(editor(tmp_path, WRITE_ALL), "python editor.py", corpus, RND, SCALE, tmp_path / "w2", 60, limits={"gpu_memory_gb": 8})
+    run = run_editor(editor(tmp_path, WRITE_ALL), "python curator.py", corpus, RND, SCALE, tmp_path / "w2", 60, limits={"gpu_memory_gb": 8})
     assert run.status == "ok"

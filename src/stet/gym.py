@@ -18,7 +18,7 @@ being tested on data, and a kind of data, it has never seen. Rounds are pure fun
 (season, split, index), so a reward can be reproduced on any machine, and there are as
 many rounds as there are non-negative integers.
 
-What the gym does not do is hide the exam. In the competition your editor runs in a sandbox
+What the gym does not do is hide the exam. In the competition your curator runs in a sandbox
 with no exam on disk. Here your code runs in your own process, and the exam pack is a public
 file. A policy that peeks will score well in the gym and nowhere else.
 """
@@ -40,7 +40,7 @@ from .train import pick_device
 @dataclass
 class Observation:
     corpus: data.Corpus  # len(corpus), corpus.text(i), corpus.raw(i), corpus.size(i), corpus.urls[i]
-    task: dict  # the same task.json an editor is given: budgets, limits, the student, the exam's sources
+    task: dict  # the same task.json a curator is given: budgets, limits, the student, the exam's sources
     round: Round = field(repr=False)
 
     @property

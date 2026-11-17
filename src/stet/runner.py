@@ -1,17 +1,17 @@
-"""Run an editor: the one place untrusted code executes.
+"""Run a curator: the one place untrusted code executes.
 
 Two modes:
 
-  sandbox="none"   plain subprocess. For running your own editor on your own machine.
+  sandbox="none"   plain subprocess. For running your own curator on your own machine.
   sandbox="bwrap"  a Linux namespace sandbox (bubblewrap). What official runs use.
 
-Inside the sandbox an editor has no network, a private process tree, and a file system
+Inside the sandbox a curator has no network, a private process tree, and a file system
 made of: the system's software read-only, the corpus read-only, its own bundle read-only,
 the files it named as assets read-only, a memory-backed scratch directory, and one output
 directory. The home directory, the Stet cache and the exam are not mounted, /etc is reduced
 to what a dynamic linker needs and /sys to what a GPU driver needs.
 
-Every editor is given the same machine, whatever the machine that runs it has: the
+Every curator is given the same machine, whatever the machine that runs it has: the
 season's number of CPU cores, its memory, and its GPU memory ("machine" in the season
 file). Memory, CPU time and process counts are capped by a cgroup. The GPU has no such
 thing, so the GPU memory limit is PyTorch's own, set through the environment.
@@ -21,24 +21,24 @@ What it does not do, so that nobody relies on it:
   - It does not make the machine anonymous. /proc/self/mountinfo names the directories
     behind the mounts (and so the account the harness runs as), and the kernel and the GPU
     are what they are.
-  - It applies no system-call filter. The editor can make any call an unprivileged process
+  - It applies no system-call filter. The curator can make any call an unprivileged process
     can, so a kernel or GPU-driver bug could defeat it. This is namespace isolation, not a
     virtual machine.
-  - The memory cap is the cgroup's. Memory a GPU driver allocates for the editor may not
+  - The memory cap is the cgroup's. Memory a GPU driver allocates for the curator may not
     be charged to it; on a machine whose GPU shares system memory that is ordinary RAM.
   - The GPU memory limit binds PyTorch, in each process, and a program can lift it. The
-    editor is shown one GPU through the environment, and a program can look past that
+    curator is shown one GPU through the environment, and a program can look past that
     too. So can it widen the set of cores it runs on (where the cgroup cannot cap CPU time, that
-    is the only limit there is). Bundles are public: an editor that does either breaks
+    is the only limit there is). Bundles are public: a curator that does either breaks
     the rules in plain sight.
-  - The output directory is on disk and has no quota. The harness watches it and kills an
-    editor that writes too much, hides what it wrote, or runs the disk low.
+  - The output directory is on disk and has no quota. The harness watches it and kills a
+    curator that writes too much, hides what it wrote, or runs the disk low.
 
-So running editors is something a volunteer chooses, with `stet verify --edits`, knowing
+So running curators is something a volunteer chooses, with `stet verify --edits`, knowing
 this: it is for a machine they would be content to reinstall. Grading alone runs nobody
-else's code. Editors are public, and each comes from an account tied to a GitHub identity.
+else's code. Curators are public, and each comes from an account tied to a GitHub identity.
 
-An editor's one product is the edit script: plain data, copied out through a descriptor
+A curator's one product is the edit script: plain data, copied out through a descriptor
 that refuses links and devices, and validated afterwards by trusted code.
 """
 
@@ -68,17 +68,17 @@ OUT_LIMIT_FILES = 10_000
 FREE_SPACE_FLOOR = 5 << 30
 ENTRY_LIMIT_BYTES = 4096
 LOG_LIMIT_BYTES = 1 << 20
-# The start of an editor's output is kept in editor.log, up to the limit above. Its end is
-# kept in memory, this much of it: what an editor says last is why it stopped, and that is
+# The start of a curator's output is kept in curator.log, up to the limit above. Its end is
+# kept in memory, this much of it: what a curator says last is why it stopped, and that is
 # what gets reported, however much it said first.
 LOG_TAIL_BYTES = 8 << 10
 GPU_DEVICES = ("/dev/nvidiactl", "/dev/nvidia-uvm", "/dev/nvidia-uvm-tools", "/dev/nvidia-modeset", "/dev/nvidia-caps", "/dev/kfd", "/dev/dri")
 SYSTEM_DIRS = ("/usr", "/opt")
 USR_LINKS = ("/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32")
 ETC_ALLOW = ("ld.so.cache", "ld.so.conf", "ld.so.conf.d", "alternatives", "OpenCL", "vulkan", "glvnd")
-# Used for a season that does not say what machine an editor is given.
-# How much of an editor's promised GPU memory has to be free when it starts. Not all of it:
-# the drivers hold a little for each process, and that is not the editor's to lose.
+# Used for a season that does not say what machine a curator is given.
+# How much of a curator's promised GPU memory has to be free when it starts. Not all of it:
+# the drivers hold a little for each process, and that is not the curator's to lose.
 GPU_FREE_SHARE = 0.95
 
 DEFAULT_LIMITS = {"memory_gb": 48, "tasks": 4096, "scratch_gb": 16, "cores": 0, "gpu_memory_gb": 0, "required": False}
@@ -88,13 +88,13 @@ OFFLINE_ENV = {"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1", "HF_DATASETS_
 
 
 def machine_limits(season) -> dict:
-    """What every editor is given this season: see "machine" in the season file."""
+    """What every curator is given this season: see "machine" in the season file."""
     m = season.raw.get("machine") or {}
     return {k: m[k] for k in ("cores", "memory_gb", "gpu_memory_gb", "scratch_gb") if k in m}
 
 
 def pick_cpus(n: int) -> list[int]:
-    """Which CPUs an editor runs on: `n` of them, each on a different physical core, the
+    """Which CPUs a curator runs on: `n` of them, each on a different physical core, the
     fastest cores first. Fewer if the machine has fewer; all of them if n is 0."""
     try:
         allowed = sorted(os.sched_getaffinity(0))
@@ -154,7 +154,7 @@ def release_gpu_memory() -> None:
     """Give back what this process holds of the GPU and is not using.
 
     A verifier trains and grades in its own process, and PyTorch keeps the memory it used
-    for the next time. An editor started afterwards is promised its share of the card, so
+    for the next time. A curator started afterwards is promised its share of the card, so
     the verifier lets go first.
     """
     import gc
@@ -170,10 +170,10 @@ def release_gpu_memory() -> None:
 
 
 def one_gpu(environ=None, index: int = 0) -> dict[str, str]:
-    """The environment that shows an editor one GPU: the one this machine grades on.
+    """The environment that shows a curator one GPU: the one this machine grades on.
 
-    Every editor is promised the same machine, and that machine has one GPU. A volunteer
-    with two cards would otherwise hand an editor both. What the operator set is kept,
+    Every curator is promised the same machine, and that machine has one GPU. A volunteer
+    with two cards would otherwise hand a curator both. What the operator set is kept,
     cut down to its first device; with nothing set, device `index` is the one.
     """
     environ = os.environ if environ is None else environ
@@ -187,11 +187,11 @@ def one_gpu(environ=None, index: int = 0) -> dict[str, str]:
     return out
 
 
-# What the sandbox starts, and it starts the editor. It tells the harness that the sandbox
-# came up, on a pipe it closes before the editor exists. A message in the editor's output
-# could say anything; this cannot be forged, so "the sandbox failed" and "the editor
+# What the sandbox starts, and it starts the curator. It tells the harness that the sandbox
+# came up, on a pipe it closes before the curator exists. A message in the curator's output
+# could say anything; this cannot be forged, so "the sandbox failed" and "the curator
 # failed" are never confused.
-# Before that it puts itself on the CPUs the editor is given. Everything the editor starts
+# Before that it puts itself on the CPUs the curator is given. Everything the curator starts
 # inherits them, and libraries that size their thread pools by the CPUs they may use get
 # the right answer.
 LAUNCHER = """import os, sys
@@ -201,7 +201,7 @@ if cpus:
     try:
         os.sched_setaffinity(0, cpus)
     except OSError as e:
-        sys.stderr.write(f"stet: cannot limit the editor to {len(cpus)} CPUs: {e.strerror}\\n")
+        sys.stderr.write(f"stet: cannot limit the curator to {len(cpus)} CPUs: {e.strerror}\\n")
         sys.exit(126)
 os.write(fd, b"up")
 os.close(fd)
@@ -214,7 +214,7 @@ except OSError as e:
 
 
 class HarnessError(RuntimeError):
-    """Our side failed (no sandbox, no limits, no disk). Never the editor's fault, never scored."""
+    """Our side failed (no sandbox, no limits, no disk). Never the curator's fault, never scored."""
 
 
 @dataclass
@@ -223,7 +223,7 @@ class EditRun:
     seconds: float
     time_limit: float
     exit_code: int | None
-    script: Path | None  # a harness-owned copy of the editor's script, or None
+    script: Path | None  # a harness-owned copy of the curator's script, or None
     log_tail: str
     sandbox: str
     reason: str = ""  # why there is no usable script
@@ -243,7 +243,7 @@ class EditRun:
 
 
 def task_info(rnd: Round, scale: Scale, time_limit: float, machine: dict | None = None, assets=()) -> dict:
-    """Everything an editor is told. Nothing here depends on the exam passages or the seed."""
+    """Everything a curator is told. Nothing here depends on the exam passages or the seed."""
     season = rnd.season
     return {
         "machine": {k: (machine or {}).get(k, 0) for k in ("cores", "memory_gb", "gpu_memory_gb", "scratch_gb")},
@@ -309,7 +309,7 @@ def node_dir(binds: list[tuple[str, str]] | None = None) -> str | None:
 
     Node is one of the season's libraries: it comes as a wheel, and its binary lives among
     the Python packages. With `binds` (what the sandbox mounts, and where), the answer is
-    the path inside the sandbox. An editor that runs a JavaScript harness finds `node` on
+    the path inside the sandbox. A curator that runs a JavaScript harness finds `node` on
     its PATH either way.
     """
     import importlib.util
@@ -332,7 +332,7 @@ def node_dir(binds: list[tuple[str, str]] | None = None) -> str | None:
 
 
 def _exposed(season, shown: list[str]) -> str:
-    """What the editor would be able to see that it must not, or "" if nothing.
+    """What the curator would be able to see that it must not, or "" if nothing.
 
     Belt and braces. The cache holds the exam pack; the config directory holds this
     machine's key and, on the organisers' machine, the held-out exam and what it has said so far. All of
@@ -349,7 +349,7 @@ def _exposed(season, shown: list[str]) -> str:
         for what, path in private.items():
             p = os.path.realpath(path)
             if p == d or p.startswith(d.rstrip("/") + "/"):
-                return f"{what} ({p}) would be visible to the editor, under {d}"
+                return f"{what} ({p}) would be visible to the curator, under {d}"
     return ""
 
 
@@ -470,7 +470,7 @@ def _asset_file(asset) -> Path:
 
 
 def _usage(path: Path, max_entries: int) -> tuple[int, int, bool]:
-    """(bytes, entries, could all of it be read) for a directory an editor writes in.
+    """(bytes, entries, could all of it be read) for a directory a curator writes in.
 
     Nothing about that directory is trusted. A file counts as the larger of its length and
     the blocks it holds, since space can be reserved past the end of a file. A directory
@@ -520,9 +520,9 @@ def _empty(fd: int) -> list[str]:
 
 
 def remove_tree(path: Path) -> bool:
-    """Delete a directory an editor has written in. True if nothing is left.
+    """Delete a directory a curator has written in. True if nothing is left.
 
-    The editor ran as this user, so what it leaves is its to shape: a directory this user
+    The curator ran as this user, so what it leaves is its to shape: a directory this user
     cannot list (mode 0300) or cannot enter at all (mode 000), at the bottom of a tree
     whose path is longer than the kernel will take as one string, or deeper than this
     process may hold directories open. A plain rmtree gives up on each of those without a
@@ -533,7 +533,7 @@ def remove_tree(path: Path) -> bool:
     name from the directory it is in, taking each one's permissions back as it enters, and
     climbs back through "..". Links are removed, never followed.
 
-    Call this only once the editor is dead: with nothing left to move a directory, ".." is
+    Call this only once the curator is dead: with nothing left to move a directory, ".." is
     where we came from. That is checked all the same. Each directory's device and inode are
     noted on the way down, and if ".." is ever some other directory (something moved the one
     we were in), the walk stops there and the answer is False. The names still to be removed
@@ -546,7 +546,7 @@ def remove_tree(path: Path) -> bool:
         path.unlink(missing_ok=True)
         return not os.path.lexists(path)
     by_fd = {os.open, os.unlink, os.rmdir, os.chmod} <= os.supports_dir_fd and os.scandir in os.supports_fd
-    if not by_fd:  # Windows: no editor runs sandboxed there, and this is the best there is
+    if not by_fd:  # Windows: no curator runs sandboxed there, and this is the best there is
         shutil.rmtree(path, ignore_errors=True)
         return not os.path.lexists(path)
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
@@ -602,7 +602,7 @@ def remove_tree(path: Path) -> bool:
 
 
 def _kill(proc: subprocess.Popen) -> None:
-    """Stop the editor and everything it started."""
+    """Stop the curator and everything it started."""
     try:
         if os.name == "nt":
             subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True)
@@ -614,9 +614,9 @@ def _kill(proc: subprocess.Popen) -> None:
 
 
 def collect_script(out_dir: Path, work: Path, max_bytes: int) -> Path:
-    """Copy the editor's script out to a file the harness owns. Raises ScriptError.
+    """Copy the curator's script out to a file the harness owns. Raises ScriptError.
 
-    The editor's file is opened without following links and must be a regular file of
+    The curator's file is opened without following links and must be a regular file of
     bounded size, so a symlink to someone else's file, a FIFO or a device cannot be read
     as a script.
     """
@@ -650,14 +650,14 @@ def run_editor(
 ) -> EditRun:
     """Run `entry` from the bundle directory against a corpus.
 
-    `gpu` is the index of the one GPU the editor is shown: the one this machine grades on.
+    `gpu` is the index of the one GPU the curator is shown: the one this machine grades on.
 
-    `assets` are the files the editor named by reference (stet.assets.Asset). They must be
+    `assets` are the files the curator named by reference (stet.assets.Asset). They must be
     in the cache already: fetching them is the caller's job, and is not on the clock.
 
-    Never raises on editor failure: whatever the bundle or its program does wrong comes
+    Never raises on curator failure: whatever the bundle or its program does wrong comes
     back as an EditRun. Raises HarnessError when this machine is at fault: the sandbox
-    cannot be set up, the disk is short, or what a previous editor left cannot be removed.
+    cannot be set up, the disk is short, or what a previous curator left cannot be removed.
     """
     limits = {**DEFAULT_LIMITS, **machine_limits(rnd.season), **(limits or {})}
     bundle = bundle.resolve()
@@ -675,7 +675,7 @@ def run_editor(
             raise HarnessError(f"the asset {a.path} has not been fetched")
     free = shutil.disk_usage(work).free
     if free < FREE_SPACE_FLOOR + OUT_LIMIT_BYTES:
-        raise HarnessError(f"only {free / 1e9:.1f} GB free under {work}; running an editor needs {(FREE_SPACE_FLOOR + OUT_LIMIT_BYTES) / 1e9:.0f} GB")
+        raise HarnessError(f"only {free / 1e9:.1f} GB free under {work}; running a curator needs {(FREE_SPACE_FLOOR + OUT_LIMIT_BYTES) / 1e9:.0f} GB")
     pkg_dir = Path(__file__).resolve().parent
     max_script = int(rnd.season.raw["script"]["max_bytes"])
 
@@ -734,11 +734,11 @@ def run_editor(
         env["PYTORCH_ALLOC_CONF"] = f"per_process_memory_fraction:{min(1.0, gpu_cap / total):.6f}"
         env["STET_GPU_MEMORY_BYTES"] = str(promised)
         # The promise has to be there to be kept. If something else on this machine holds
-        # the memory, an editor that runs out of it has not failed: this machine has.
+        # the memory, a curator that runs out of it has not failed: this machine has.
         free = gpu_free_bytes(gpu)
         if limits.get("required") and 0 <= free < promised * GPU_FREE_SHARE:
             raise HarnessError(
-                f"the GPU has {free / 2**30:.1f} GB of memory free and an editor is promised {promised / 2**30:.1f}: "
+                f"the GPU has {free / 2**30:.1f} GB of memory free and a curator is promised {promised / 2**30:.1f}: "
                 "something else on this machine is using it"
             )
     for k in ("LD_LIBRARY_PATH", "HSA_OVERRIDE_GFX_VERSION", "ROCM_PATH", "TORCH_BLAS_PREFER_HIPBLASLT"):
@@ -798,7 +798,7 @@ def run_editor(
     status = "ok"
     reason = ""
     low_disk = False
-    last = bytearray()  # the end of what the editor said
+    last = bytearray()  # the end of what the curator said
     with open(log_path, "wb") as log:
 
         def pump():
@@ -814,31 +814,31 @@ def run_editor(
                     sys.stderr.flush()
 
         def over() -> str:
-            """What the editor has done to its directories that it may not, or ""."""
+            """What the curator has done to its directories that it may not, or ""."""
             size, entries, readable = _usage(out_dir, OUT_LIMIT_FILES)
             if not readable:
-                return "the editor made part of its output directory unreadable"
+                return "the curator made part of its output directory unreadable"
             if entries > OUT_LIMIT_FILES:
-                return f"the editor created more than {OUT_LIMIT_FILES:,} files in its output directory"
+                return f"the curator created more than {OUT_LIMIT_FILES:,} files in its output directory"
             if size > OUT_LIMIT_BYTES:
-                return "the editor wrote more than 1 GB to its output directory"
+                return "the curator wrote more than 1 GB to its output directory"
             if scratch_on_disk and _usage(scratch_dir, 5_000_000)[0] > SCRATCH_LIMIT_BYTES:
-                return "the editor filled its scratch directory"
+                return "the curator filled its scratch directory"
             return ""
 
         found: list[str] = []
         done = threading.Event()
 
         def watch():
-            # On its own thread: a walk over a directory the editor controls takes as long
-            # as the editor likes, and the clock below must not wait for it.
+            # On its own thread: a walk over a directory the curator controls takes as long
+            # as the curator likes, and the clock below must not wait for it.
             while not found and not done.wait(2):
                 if why := over():
                     found.append(why)
 
         t = threading.Thread(target=pump, daemon=True)
         proc = None
-        # From before the editor exists until it is known to be gone, there is one way out,
+        # From before the curator exists until it is known to be gone, there is one way out,
         # and it is the `finally` below.
         try:
             try:
@@ -862,11 +862,11 @@ def run_editor(
             threading.Thread(target=watch, daemon=True).start()
             while proc.poll() is None:
                 if time.time() >= deadline:
-                    status, reason = "timeout", f"the editor was still running at the {time_limit:.0f}s limit"
+                    status, reason = "timeout", f"the curator was still running at the {time_limit:.0f}s limit"
                 elif found:
                     status, reason = "error", found[0]
                 elif shutil.disk_usage(out_dir).free < FREE_SPACE_FLOOR:
-                    status, reason, low_disk = "error", "the editor ran the disk low", True
+                    status, reason, low_disk = "error", "the curator ran the disk low", True
                 if status != "ok":
                     _kill(proc)
                     break
@@ -877,7 +877,7 @@ def run_editor(
                 os.close(up_r)
             raise
         finally:
-            # No way out of here leaves an editor running: not Ctrl-C, not a disk that cannot
+            # No way out of here leaves a curator running: not Ctrl-C, not a disk that cannot
             # be asked how full it is, not a thread that would not start. Whoever called is
             # about to remove the directories it writes in, and remove_tree is only safe
             # once nothing is left to move them.
@@ -888,8 +888,8 @@ def run_editor(
             if t.ident is not None:
                 t.join(timeout=5)
     seconds = time.time() - start
-    # From what it said last, not from the log file: that holds the first megabyte, and an
-    # editor that printed more than that would be reported by something it said long before.
+    # From what it said last, not from the log file: that holds the first megabyte, and a
+    # curator that printed more than that would be reported by something it said long before.
     tail = bytes(last).decode("utf-8", errors="replace")[-4000:]
     if inside:
         os.set_blocking(up_r, False)
@@ -901,27 +901,27 @@ def run_editor(
         if not up:
             raise HarnessError(f"the sandbox failed to start: {tail.strip()[:300]}")
     if not remove_tree(scratch_dir):
-        raise HarnessError(f"could not remove what the editor left in {scratch_dir}")
+        raise HarnessError(f"could not remove what the curator left in {scratch_dir}")
     if low_disk:
         size, entries, readable = _usage(out_dir, OUT_LIMIT_FILES)
         if not readable or entries > OUT_LIMIT_FILES:
             # What it wrote cannot be added up, and that is its doing. The run stays the
-            # editor's error: called the machine's, an editor could stop a verifier by
+            # curator's error: called the machine's, a curator could stop a verifier by
             # filling the disk somewhere the count cannot look.
             hidden = "made part of its output directory unreadable" if not readable else f"created more than {OUT_LIMIT_FILES:,} files in its output directory"
-            reason = f"the editor ran the disk low and {hidden}"
+            reason = f"the curator ran the disk low and {hidden}"
         elif shutil.disk_usage(work).free + size < FREE_SPACE_FLOOR + OUT_LIMIT_BYTES:
-            # The space did not come back with the editor gone, so it was not the editor's.
-            raise HarnessError(f"the disk under {work} ran low while an editor was running, and is still low without it")
+            # The space did not come back with the curator gone, so it was not the curator's.
+            raise HarnessError(f"the disk under {work} ran low while a curator was running, and is still low without it")
     if status == "ok" and proc.returncode != 0:
-        status, reason = "error", f"the editor exited with status {proc.returncode}"
+        status, reason = "error", f"the curator exited with status {proc.returncode}"
     if status == "ok" and (why := over()):  # what it did in its last two seconds counts too
         status, reason = "error", why
-    # A script written before a crash or a timeout still counts: editors are encouraged to
+    # A script written before a crash or a timeout still counts: curators are encouraged to
     # write early and improve. script.jsonl is replaced atomically, so it is never half-written.
     if not os.path.lexists(out_dir / "script.jsonl"):
         return EditRun(status if status != "ok" else "no_script", seconds, time_limit, proc.returncode, None, tail, sandbox,
-                       reason or "the editor finished without writing script.jsonl", applied)  # fmt: skip
+                       reason or "the curator finished without writing script.jsonl", applied)  # fmt: skip
     try:
         script = collect_script(out_dir, work, max_script)
     except ScriptError as e:
@@ -930,8 +930,8 @@ def run_editor(
 
 
 def sandbox_selftest() -> tuple[bool, str]:
-    """Run a known-good editor in the sandbox. A verifier does this before taking edit jobs,
-    so that a broken sandbox is never mistaken for a run of broken editors."""
+    """Run a known-good curator in the sandbox. A verifier does this before taking edit jobs,
+    so that a broken sandbox is never mistaken for a run of broken curators."""
     import tempfile
 
     import numpy as np
@@ -947,38 +947,38 @@ def sandbox_selftest() -> tuple[bool, str]:
         (root / "corpus" / "urls.txt").write_text("http://example.test/0\n")
         (root / "corpus" / "meta.json").write_text(json.dumps({"n_docs": 1, "bytes": 12, "sha256": "selftest"}))
         (root / "bundle").mkdir()
-        (root / "bundle" / "editor.py").write_text("from stet.editor import Task\ntask = Task.from_env()\ntask.write([i for i, _ in task.corpus])\n")
+        (root / "bundle" / "curator.py").write_text("from stet.curator import Task\ntask = Task.from_env()\ntask.write([i for i, _ in task.corpus])\n")
         try:
-            run = run_editor(root / "bundle", "python editor.py", Corpus(root / "corpus"), practice_round(season, 0), season.scale("nano"),
+            run = run_editor(root / "bundle", "python curator.py", Corpus(root / "corpus"), practice_round(season, 0), season.scale("nano"),
                              root / "work", 60, sandbox="bwrap", limits={"required": True})  # fmt: skip
         except HarnessError as e:
             return False, str(e)
         if run.status != "ok" or run.script is None or run.script.read_text().split() != ["0"]:
-            return False, f"a trivial editor did not run in the sandbox ({run.status}: {run.reason or run.log_tail.strip()[-300:]})"
-        # An editor is promised Node beside Python, and loopback between its own processes:
+            return False, f"a trivial curator did not run in the sandbox ({run.status}: {run.reason or run.log_tail.strip()[-300:]})"
+        # A curator is promised Node beside Python, and loopback between its own processes:
         # what a harness of its own needs. Find out here, not from the first entrant whose
-        # editor fails for a reason that is this machine's.
+        # curator fails for a reason that is this machine's.
         if "nodejs-wheel" in ((season.raw.get("environment") or {}).get("packages") or {}):
-            (root / "bundle" / "editor.py").write_text(HARNESS_PROBE)
+            (root / "bundle" / "curator.py").write_text(HARNESS_PROBE)
             try:
-                run = run_editor(root / "bundle", "python editor.py", Corpus(root / "corpus"), practice_round(season, 0), season.scale("nano"),
+                run = run_editor(root / "bundle", "python curator.py", Corpus(root / "corpus"), practice_round(season, 0), season.scale("nano"),
                                  root / "work", 60, sandbox="bwrap", limits={"required": True})  # fmt: skip
             except HarnessError as e:
                 return False, str(e)
             if run.status != "ok" or run.script is None:
-                return False, f"an editor could not run the season's Node.js, or reach itself on loopback, inside the sandbox ({run.status}: {run.reason or ''} {run.log_tail.strip()[-400:]})"
+                return False, f"a curator could not run the season's Node.js, or reach itself on loopback, inside the sandbox ({run.status}: {run.reason or ''} {run.log_tail.strip()[-400:]})"
         if gpu_total_bytes() <= 0:
             return True, ""
         # The same for the GPU and the season's libraries.
         want = int(machine_limits(season).get("cores") or 0)
-        (root / "bundle" / "editor.py").write_text(GPU_PROBE.replace("WANT_CORES", str(want)))
+        (root / "bundle" / "curator.py").write_text(GPU_PROBE.replace("WANT_CORES", str(want)))
         try:
-            run = run_editor(root / "bundle", "python editor.py", Corpus(root / "corpus"), practice_round(season, 0), season.scale("nano"),
+            run = run_editor(root / "bundle", "python curator.py", Corpus(root / "corpus"), practice_round(season, 0), season.scale("nano"),
                              root / "work", 180, sandbox="bwrap", limits={"required": True})  # fmt: skip
         except HarnessError as e:
             return False, str(e)
         if run.status != "ok" or run.script is None:
-            return False, f"an editor could not use the GPU inside the sandbox ({run.status}: {run.reason or ''} {run.log_tail.strip()[-400:]})"
+            return False, f"a curator could not use the GPU inside the sandbox ({run.status}: {run.reason or ''} {run.log_tail.strip()[-400:]})"
     return True, ""
 
 
@@ -986,7 +986,7 @@ def sandbox_selftest() -> tuple[bool, str]:
 HARNESS_PROBE = """
 import subprocess, threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from stet.editor import Task
+from stet.curator import Task
 task = Task.from_env()
 
 class Answer(BaseHTTPRequestHandler):
@@ -1006,9 +1006,9 @@ task.write([i for i, _ in task.corpus])
 
 
 # What sandbox_selftest runs last: the GPU answers, its memory limit is in force, and the
-# editor is on the cores it was given.
+# curator is on the cores it was given.
 GPU_PROBE = """import os, sys
-from stet.editor import Task
+from stet.curator import Task
 task = Task.from_env()
 import torch
 if not torch.cuda.is_available():
@@ -1018,7 +1018,7 @@ if not torch.isfinite((x @ x).float().sum()).item():
     sys.exit("the GPU gave a result that is not a number")
 want = WANT_CORES
 if want and len(os.sched_getaffinity(0)) > want:
-    sys.exit(f"the editor is on {len(os.sched_getaffinity(0))} CPUs, not {want}")
+    sys.exit(f"the curator is on {len(os.sched_getaffinity(0))} CPUs, not {want}")
 limit = float(os.environ.get("STET_GPU_MEMORY_BYTES") or 0)
 if limit and limit < torch.cuda.mem_get_info()[1] * 0.98:
     try:

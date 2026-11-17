@@ -425,13 +425,13 @@ def test_a_round_that_is_set_aside_stays_readable_to_whoever_has_it_open_and_is_
 
     d = data.cache_dir() / "rounds" / "s0-o00009" / "micro"
     (d / "corpus-v3").mkdir(parents=True)
-    (d / "corpus-v3" / "docs.bin").write_bytes(b"what an editor is reading")
+    (d / "corpus-v3" / "docs.bin").write_bytes(b"what a curator is reading")
     held = os.open(d / "corpus-v3", os.O_RDONLY)  # as a sandbox holds the directory it was given
     try:
         data.set_aside(d, now=1_000_000.0)
         assert not d.exists()  # the next job builds the round afresh
         with open(os.open("docs.bin", os.O_RDONLY, dir_fd=held), "rb") as f:
-            assert f.read() == b"what an editor is reading"  # and nothing was pulled from under this one
+            assert f.read() == b"what a curator is reading"  # and nothing was pulled from under this one
     finally:
         os.close(held)
     stale = data.cache_dir() / "rounds" / ".stale"

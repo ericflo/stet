@@ -1,10 +1,10 @@
 # An agent harness (pi) driven by a small language model served inside the sandbox. A
-# template for editors that bring a harness of their own: see editor.py and pack.sh.
+# template for curators that bring a harness of their own: see curator.py and pack.sh.
 # https://www.stetrun.com
 name = "agent"
 description = "tidy's candidates; how strictly to filter them is decided each round by an agent: a 0.6B model served on loopback, driven by the pi harness. Shows how to run your own harness and model."
 technique = "prose-line ranges + dedup + an agent's choice of strictness"
-entry = "python editor.py"
+entry = "python curator.py"
 license = "MIT"
 
 [[assets]]

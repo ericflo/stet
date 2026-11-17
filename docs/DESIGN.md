@@ -78,9 +78,9 @@ can only choose and arrange what the crawl already says.
 **Every curator gets the same machine.** Volunteers' machines differ, and an edit limit in
 seconds means something only if the machine is known. So the sandbox gives every curator
 the same cores, memory and GPU memory whatever the host has, and only machines at or
-above a measured floor run curators. What is left over is speed above the floor, which an
+above a measured floor run curators. What is left over is speed above the floor, which a
 curator that works until the clock runs out can use. That is disclosed, bounded by taking
-the score over runs on different machines, and cheaper than the alternative: counting an
+the score over runs on different machines, and cheaper than the alternative: counting a
 curator's work instead of its seconds would mean running entrants' models for them, and
 then the curator is no longer any program.
 
@@ -109,7 +109,7 @@ the people lending GPUs can run and grade between draws
 
 **Scores are gains, on shared rounds.** Rounds differ in difficulty by far more than
 curators differ from each other. Every score is a difference from the unedited corpus on
-the same round with the same initial weights, ratings are adjusted for which rounds an
+the same round with the same initial weights, ratings are adjusted for which rounds a
 curator happened to get, and the top curators run in every round so that any two of them can
 be compared directly.
 

@@ -1,10 +1,10 @@
-"""How fast is this machine at the two things an editor spends its time on: GPU and CPU.
+"""How fast is this machine at the two things a curator spends its time on: GPU and CPU.
 
-An editor has a time limit in seconds, and the machines that run editors differ. So the
+A curator has a time limit in seconds, and the machines that run curators differ. So the
 season names the slowest machine that may run one ("runner" in the season file): a GPU
-speed, a CPU speed, and how much memory of each kind. Every machine that runs editors is
-at least that fast, and the sandbox gives every editor the same cores and the same memory
-whatever the machine has. An editor that finishes in time on the slowest machine finishes
+speed, a CPU speed, and how much memory of each kind. Every machine that runs curators is
+at least that fast, and the sandbox gives every curator the same cores and the same memory
+whatever the machine has. A curator that finishes in time on the slowest machine finishes
 in time everywhere.
 
 This module measures a machine against that floor. Both measurements are fixed pieces of
@@ -14,7 +14,7 @@ work, described entirely here, so the numbers mean the same thing on every machi
     parameters, random weights, half precision), 32 passages of 256 tokens at a time.
     About the work of a small encoder reading text.
   - CPU: megabytes of text per second through a fixed mix of regular expressions, set
-    building and checksums, on the cores an editor is given.
+    building and checksums, on the cores a curator is given.
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ from .spec import Season
 GPU_SECONDS = 4.0
 CPU_ROUNDS = 6
 WORDS = re.compile(r"[A-Za-z']+")
-# Used when a season says nothing about who may run editors.
+# Used when a season says nothing about who may run curators.
 NO_FLOOR = {"gpu_tokens_per_second": 0, "cpu_mb_per_second": 0, "gpu_memory_gb": 0, "memory_gb": 0, "cores": 1, "disk_gb": 0}
 
 
@@ -67,7 +67,7 @@ def gpu_rate(seconds: float = GPU_SECONDS) -> float:
     model = model.half().cuda().eval()
     ids = torch.randint(0, vocab, (batch, length), generator=torch.Generator().manual_seed(0)).cuda()
     with torch.inference_mode():
-        for _ in range(3):  # the first passes pay for set-up that an editor pays once
+        for _ in range(3):  # the first passes pay for set-up that a curator pays once
             model(ids)
         torch.cuda.synchronize()
         n, t0 = 0, time.perf_counter()
@@ -172,7 +172,7 @@ def measure(season: Season, quiet: bool = False) -> dict:
 
 
 def shortfalls(season: Season, m: dict) -> list[str]:
-    """Why this machine may not run editors for the leaderboard, in words. Empty if it may."""
+    """Why this machine may not run curators for the leaderboard, in words. Empty if it may."""
     need = floor(season)
     out = []
     if not m.get("gpu"):
@@ -180,15 +180,15 @@ def shortfalls(season: Season, m: dict) -> list[str]:
     if m["gpu_tokens_per_second"] < need["gpu_tokens_per_second"]:
         out.append(f"the GPU is slower than the floor ({m['gpu_tokens_per_second']:,.0f} tokens a second; the floor is {need['gpu_tokens_per_second']:,.0f})")
     if m["gpu_memory_gb"] < need["gpu_memory_gb"]:
-        out.append(f"the GPU has {m['gpu_memory_gb']:.0f} GB of memory; running editors needs {need['gpu_memory_gb']:.0f} GB")
+        out.append(f"the GPU has {m['gpu_memory_gb']:.0f} GB of memory; running curators needs {need['gpu_memory_gb']:.0f} GB")
     if m["cores"] < need["cores"]:
-        out.append(f"{m['cores']} CPU cores; running editors needs {need['cores']}")
+        out.append(f"{m['cores']} CPU cores; running curators needs {need['cores']}")
     elif m["cpu_mb_per_second"] < need["cpu_mb_per_second"]:
         out.append(f"the CPU is slower than the floor ({m['cpu_mb_per_second']:.0f} MB a second; the floor is {need['cpu_mb_per_second']:.0f})")
     if m["memory_gb"] < need["memory_gb"]:
-        out.append(f"{m['memory_gb']:.0f} GB of memory; running editors needs {need['memory_gb']:.0f} GB")
+        out.append(f"{m['memory_gb']:.0f} GB of memory; running curators needs {need['memory_gb']:.0f} GB")
     if m.get("disk_gb", 0) < need["disk_gb"]:
-        out.append(f"{m.get('disk_gb', 0):.0f} GB of free disk under the cache; running editors needs {need['disk_gb']:.0f} GB")
+        out.append(f"{m.get('disk_gb', 0):.0f} GB of free disk under the cache; running curators needs {need['disk_gb']:.0f} GB")
     return out
 
 

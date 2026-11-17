@@ -5,7 +5,7 @@ writes a systemd user unit that starts it with the machine, starts it again if i
 and keeps its log. With automatic upgrades (stet.upgrade) that is a machine its owner can
 forget about.
 
-Linux with systemd only: it is where editors are run, and where a GPU box left alone
+Linux with systemd only: it is where curators are run, and where a GPU box left alone
 usually is. Elsewhere `stet service` says so and what to do instead.
 
 Nothing here needs root. The unit lives in the user's own systemd directory; the one step
@@ -18,6 +18,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -80,7 +81,7 @@ def unit_text(stet: str, name: str = DEFAULT_NAME, edits: bool = False, no_upgra
         if environ.get(k):
             env.append(f"Environment={quote(f'{k}={environ[k]}')}")
     log = str(log_path(name)).replace("%", "%%")
-    what = "runs entrants' editors in a sandbox and grades edit scripts" if edits else "grades edit scripts"
+    what = "runs entrants' curators in a sandbox and grades edit scripts" if edits else "grades edit scripts"
     return "\n".join(
         [
             "[Unit]",
@@ -192,3 +193,35 @@ def tail(name: str = DEFAULT_NAME, lines: int = 40) -> list[str]:
     except OSError:
         return []
     return text.splitlines()[-lines:]
+
+
+LOG_LIMIT = 8 << 20  # bytes a verifier's log may reach
+LOG_KEEP = 1 << 20  # and what is kept of it then: the newest
+
+
+def trim_log(fd: int = 1, limit: int = LOG_LIMIT, keep: int = LOG_KEEP) -> bool:
+    """Cut a log this process is appending to back to its newest part. True if it was cut.
+
+    A service's output is appended to one file for as long as the service is installed,
+    and a verifier left alone for a year would leave a log nobody rotates. Only a file
+    opened for appending is touched: writing goes on at the new end of it. Anything else
+    (a terminal, a pipe, a file being written from a fixed place) is left alone.
+    """
+    try:
+        import fcntl
+
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_size <= limit or not fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_APPEND:
+            return False
+        with open(f"/proc/self/fd/{fd}", "rb") as f:
+            f.seek(st.st_size - keep)
+            tail = f.read()
+        tail = tail[tail.find(b"\n") + 1 :]  # from the start of a line
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os.ftruncate(fd, 0)
+        os.write(fd, b"(older lines were cleared to keep this log small)\n" + tail)
+        return True
+    except (ImportError, OSError, ValueError):
+        return False
+

@@ -4,7 +4,7 @@
     python tools/heldout_report.py s0.jsonl --rounds-file rounds.json     # offline, from saved rounds
     python tools/heldout_report.py s0.jsonl --save-rounds rounds.json --out final.json
 
-Same editors, same rounds, same arithmetic. The rounds and their entries are the public
+Same curators, same rounds, same arithmetic. The rounds and their entries are the public
 ones, read from the API. For every entry that counts on the public leaderboard:
 
   - an entry that was void (nobody could run it) is left out, as it is publicly;
@@ -13,31 +13,31 @@ ones, read from the API. For every entry that counts on the public leaderboard:
     than once, by different people, and each run writes a script. A script's held-out gain
     is the unedited held-out loss minus its own, both measured on one machine that holds
     the pack: a line of that machine's record (one per official grade it made, keyed by
-    round and editor), or a result passed with --also. A run that failed is a gain of 0.
+    round and curator), or a result passed with --also. A run that failed is a gain of 0.
     The entry's gain is the mean of two runs or the median of three, as it is publicly.
     (Entries settled before runs existed have one script and one grade, and are placed by
     that grade's public loss.)
 
 The rating is then fitted exactly as the server fits it (`fit` below is fitRatings in
-server/rating.go): gain = editor + round, so an editor is not flattered by easy rounds. The
+server/rating.go): gain = curator + round, so a curator is not flattered by easy rounds. The
 public column is checked against the live leaderboard, and the tool says so if it differs.
-Who is ranked is the leaderboard's word too: an editor its owner replaced keeps its
+Who is ranked is the leaderboard's word too: a curator its owner replaced keeps its
 results and has no rank there, so it has none here, and is listed apart.
 
 A valid entry with no usable line in the record (none for its script, none with a held-out
 baseline, none whose public loss is the published one) cannot be placed. It is listed,
 with the command that measures it again on a machine holding the pack, and that round is
-left out of *both* columns for that editor, so the two stay comparable. `--also` takes the
+left out of *both* columns for that curator, so the two stay comparable. `--also` takes the
 JSON that command prints and fills the gap. While any gap is left the public column is not
-the leaderboard's for the editors concerned, the tool says so, and it exits 2.
+the leaderboard's for the curators concerned, the tool says so, and it exits 2.
 
-How to read "gives up". The two exams are different passages, so every editor's held-out
+How to read "gives up". The two exams are different passages, so every curator's held-out
 gains differ from its public ones by some common amount; that amount says nothing about
-anyone. An editor that learned the kind of writing gives up about what the others give up.
-An editor that fitted the public exam's own passages gives up more than the others do: that
-is the last column, each editor against the median. It is worked out over the rounds an
-editor's entry was valid in: a timeout is a zero on both exams and gives up nothing, and
-counted in, it would make an editor that timed out look as if it had given up less.
+anyone. A curator that learned the kind of writing gives up about what the others give up.
+A curator that fitted the public exam's own passages gives up more than the others do: that
+is the last column, each curator against the median. It is worked out over the rounds a
+curator's entry was valid in: a timeout is a zero on both exams and gives up nothing, and
+counted in, it would make a curator that timed out look as if it had given up less.
 
 The JSON report (`--json`, `--out`) carries every entry the table was computed from, with
 its losses on both exams and their `source`: "record" (a line of the record for that grade)
@@ -76,13 +76,13 @@ RUN_TIE = 0.25
 
 
 def load(path: Path) -> dict[tuple[str, str], list[dict]]:
-    """The record of a machine that holds the pack: every line for each (round, editor), in
+    """The record of a machine that holds the pack: every line for each (round, curator), in
     the order written.
 
     A machine may grade a script twice after a restart, and an entry has a script for each
     of its runs: which line is whose is decided where the entry is known (`entries`), not
-    here. The key is the editor, never
-    the script: two editors can write the same script in a round (the starting template
+    here. The key is the curator, never
+    the script: two curators can write the same script in a round (the starting template
     does, for everyone who enters it unchanged), and each of them has that round.
     """
     lines: dict[tuple[str, str], list[dict]] = {}
@@ -96,7 +96,7 @@ def load(path: Path) -> dict[tuple[str, str], list[dict]]:
 def load_also(paths: list[Path]) -> dict[tuple[str, str], dict]:
     """Results of `stet score <sha> --round <id> --heldout --json`, by (round, script).
 
-    Such a result names a script, not an editor: it stands for every entry of that round
+    Such a result names a script, not a curator: it stands for every entry of that round
     whose script it is, which is right, because the same script on the same round is the
     same training run.
     """
@@ -140,7 +140,7 @@ def counts(rd: dict) -> bool:
     """Whether the public leaderboard counts this round: settled, with its unedited loss known.
 
     The same rule as settledEntries in server/rating.go. A round still open has entries that
-    are settled already (an editor that wrote no script settles at once), and on their own
+    are settled already (a curator that wrote no script settles at once), and on their own
     they would stand for the whole round.
     """
     return rd.get("status") == "settled" and rd.get("baseline_loss") is not None
@@ -194,7 +194,7 @@ def _place_run(run: dict, script: str, lines: list[dict], again: dict | None) ->
 
     def off(public: dict) -> float:
         if run.get("gain") is None or public.get("loss") is None or public.get("baseline") is None:
-            return 0.0  # nothing to compare: the round, the editor and the script name it
+            return 0.0  # nothing to compare: the round, the curator and the script name it
         return abs((public["baseline"] - public["loss"]) - float(run["gain"]))
 
     best = None
@@ -251,7 +251,7 @@ def _by_runs(rd: dict, e: dict, label: str, row: dict, lines: list[dict], also: 
 def entries(rounds: list[dict], log: dict, also: dict | None = None) -> tuple[list[dict], list[dict]]:
     """(the entries that count, the ones that cannot be placed).
 
-    Each entry that counts is a row: round, index, editor, label, valid, script, its gain on
+    Each entry that counts is a row: round, index, curator, label, valid, script, its gain on
     each exam (`public`, `heldout`), and the losses those gains are made of with where the
     held-out ones came from (`source`: "record" or "remeasured"). `heldout` is None where
     nothing usable was measured, and those entries are listed in the second value as well,
@@ -291,17 +291,17 @@ def entries(rounds: list[dict], log: dict, also: dict | None = None) -> tuple[li
 
 
 def fit(rows: list[tuple[int, str, float, bool]]) -> tuple[dict[str, dict], dict[int, float]]:
-    """fitRatings in server/rating.go, line for line. rows are (round, editor, gain, valid).
+    """fitRatings in server/rating.go, line for line. rows are (round, curator, gain, valid).
 
-    gain = skill[editor] + difficulty[round], solved by alternating means. Skill is what an
-    editor does in the rounds where it ran: its mean over valid entries only. A round's
+    gain = skill[curator] + difficulty[round], solved by alternating means. Skill is what a
+    curator does in the rounds where it ran: its mean over valid entries only. A round's
     difficulty is read from its valid entries, against that skill, and averages to zero
-    over the season. The rating is the mean over all of an editor's entries, an invalid one
+    over the season. The rating is the mean over all of a curator's entries, an invalid one
     counting as zero whatever its round was like; that zero is kept out of the skill, or
-    one editor's timeout would make the rounds it did run in look easy and mark down
+    one curator's timeout would make the rounds it did run in look easy and mark down
     everyone who shared them.
 
-    Each editor's `skill` is returned beside its `rating` (None if it was never valid).
+    Each curator's `skill` is returned beside its `rating` (None if it was never valid).
     """
     by_editor: dict[str, list] = {}
     by_round: dict[int, list] = {}
@@ -356,7 +356,7 @@ def fit(rows: list[tuple[int, str, float, bool]]) -> tuple[dict[str, dict], dict
 
 
 def standing(leaderboard: dict | None) -> dict[str, str] | None:
-    """Each editor the leaderboard lists, and how: "ranked" or "provisional". None without a leaderboard."""
+    """Each curator the leaderboard lists, and how: "ranked" or "provisional". None without a leaderboard."""
     if not leaderboard:
         return None
     out = {e["id"]: "provisional" for e in leaderboard.get("provisional") or []}
@@ -365,11 +365,11 @@ def standing(leaderboard: dict | None) -> dict[str, str] | None:
 
 
 def table(rows: list[dict], rated_rounds: int = 3, leaderboard: dict | None = None) -> list[dict]:
-    """One line per editor: its public rating and its held-out rating over the same rounds.
+    """One line per curator: its public rating and its held-out rating over the same rounds.
 
-    Who is ranked is the leaderboard's to say. An editor it does not list has been replaced
+    Who is ranked is the leaderboard's to say. A curator it does not list has been replaced
     by its owner: it keeps its results there and has no rank, so here it is "replaced",
-    apart from the rest and out of the median. Without a leaderboard to ask, an editor is
+    apart from the rest and out of the median. Without a leaderboard to ask, a curator is
     ranked when it has the rounds, which cannot tell a replaced one.
     """
     placed = [r for r in rows if r["heldout"] is not None]
@@ -385,12 +385,12 @@ def table(rows: list[dict], rated_rounds: int = 3, leaderboard: dict | None = No
             "editor": editor, "label": labels[editor], "rounds": h["rounds"], "invalid": h["invalid"], "status": status, "ranked": status == "ranked",
             "public": round(p["rating"], 5), "heldout": round(h["rating"], 5), "heldout_se": None if h["se"] is None else round(h["se"], 5),
             # Over the rounds its entry was valid in. An invalid round is a zero on both
-            # exams: it gives up nothing, and averaged in it would shrink what the editor's
+            # exams: it gives up nothing, and averaged in it would shrink what the curator's
             # real entries gave up by the share of its rounds that failed.
             "gives_up": None if h["skill"] is None else round(p["skill"] - h["skill"], 5),
         })  # fmt: skip
-    # What every editor gives up says something about the two exams. What one editor gives
-    # up beyond that says something about the editor.
+    # What every curator gives up says something about the two exams. What one curator gives
+    # up beyond that says something about the curator.
     usual = median_gives_up(out)
     for r in out:
         r["beyond_median"] = None if r["gives_up"] is None else round(r["gives_up"] - usual, 5)
@@ -405,11 +405,11 @@ def median_gives_up(lines: list[dict]) -> float:
 def check_public(rows: list[dict], leaderboard: dict | None, rated_rounds: int | None = None) -> dict:
     """Does this tool's arithmetic, on every public entry, give the leaderboard's own ratings and its ranks?
 
-    `differs`: editors whose rating here is not the leaderboard's. `ranked_only_there`:
-    editors the leaderboard ranks that have too few rounds here. Either means the rounds
+    `differs`: curators whose rating here is not the leaderboard's. `ranked_only_there`:
+    curators the leaderboard ranks that have too few rounds here. Either means the rounds
     read are not the ones the leaderboard counted, or the arithmetic has drifted.
-    `ranked_only_here`: editors with the rounds to be ranked that the leaderboard does not
-    list at all. That is what a replaced editor looks like, and is not a fault.
+    `ranked_only_here`: curators with the rounds to be ranked that the leaderboard does not
+    list at all. That is what a replaced curator looks like, and is not a fault.
     """
     if not leaderboard:
         return {"checked": 0, "differs": [], "ranked_only_there": [], "ranked_only_here": [], "note": "no leaderboard to compare with"}
@@ -444,7 +444,7 @@ def report(log_path: Path, source: dict, also_paths: list[Path] = (), rated_roun
     lines = table(rows, rated, board)
     check = check_public(rows, board, rated)
     # The check is of the arithmetic, on every public entry. The column in the table leaves
-    # out the entries below, so for their editors it is not the leaderboard's number.
+    # out the entries below, so for their curators it is not the leaderboard's number.
     check["entries_left_out"] = len(missing)
     check["editors_not_whole"] = sorted({m["label"] for m in missing})
     return {
@@ -490,7 +490,7 @@ def show(rep: dict, out=None) -> None:
     n = len(rep["rounds"])
     print(f"\n{n} settled round{'' if n == 1 else 's'}.", end=" ", file=out)
     if any(t["gives_up"] is not None and t["status"] != "replaced" for t in rep["table"]):
-        print(f"Editors give up {rep['median_gives_up']:+.4f} at the median, over the rounds their entries were valid in: that much is the two exams, not the editors.", file=out)
+        print(f"Curators give up {rep['median_gives_up']:+.4f} at the median, over the rounds their entries were valid in: that much is the two exams, not the curators.", file=out)
     else:
         print("No valid entry could be placed on the held-out exam.", file=out)
     if rep["open_rounds"]:
@@ -500,7 +500,7 @@ def show(rep: dict, out=None) -> None:
     if check.get("note"):
         print(f"The public column was not checked: {check['note']}.", file=out)
     elif check["differs"] or check["ranked_only_there"]:
-        print(f"\nTHE PUBLIC COLUMN DOES NOT REPRODUCE THE LEADERBOARD ({check['checked']} editors compared):", file=out)
+        print(f"\nTHE PUBLIC COLUMN DOES NOT REPRODUCE THE LEADERBOARD ({check['checked']} curators compared):", file=out)
         for d in check["differs"]:
             print(f"  {d['label']}: the leaderboard says {d['leaderboard']:+.5f}, this says {'nothing' if d['here'] is None else format(d['here'], '+.5f')}", file=out)
         for d in check["ranked_only_there"]:
@@ -508,16 +508,16 @@ def show(rep: dict, out=None) -> None:
         print("  (A round that is open, or entries that settled since the rounds were read, would do this. Otherwise the arithmetic has drifted from server/rating.go.)", file=out)
     elif gaps:
         print(
-            f"\nTHE TABLE IS NOT WHOLE. Counting every public entry, this tool's arithmetic gives the leaderboard's rating for all {check['checked']} editors on it. "
+            f"\nTHE TABLE IS NOT WHOLE. Counting every public entry, this tool's arithmetic gives the leaderboard's rating for all {check['checked']} curators on it. "
             f"But {gaps} valid entr{'y' if gaps == 1 else 'ies'} could not be placed on the held-out exam and {'is' if gaps == 1 else 'are'} left out of both columns above, "
             f"so the public column is not the leaderboard's for: {', '.join(check['editors_not_whole'])}.",
             file=out,
         )
     else:
-        print(f"The public column reproduces the leaderboard's rating for all {check['checked']} editors on it.", file=out)
+        print(f"The public column reproduces the leaderboard's rating for all {check['checked']} curators on it.", file=out)
     if not check.get("note") and check["ranked_only_here"]:
         names = ", ".join(d["label"] for d in check["ranked_only_here"])
-        print(f"Not on the leaderboard, though they have the rounds: {names}. An editor its owner replaced keeps its results and loses its rank.", file=out)
+        print(f"Not on the leaderboard, though they have the rounds: {names}. A curator its owner replaced keeps its results and loses its rank.", file=out)
     if gaps:
         print(f"\n{gaps} valid entr{'y' if gaps == 1 else 'ies'} could not be placed:", file=out)
         for m in rep["missing"]:
@@ -535,7 +535,7 @@ def main(argv=None):
     ap.add_argument("--rounds-file", type=Path, help="read the rounds from a file written by --save-rounds instead of from the API")
     ap.add_argument("--save-rounds", type=Path, help="keep what was read from the API, to publish beside the table")
     ap.add_argument("--also", type=Path, nargs="*", default=[], help="results of `stet score <sha> --round <id> --heldout --json`, for entries the record lacks")
-    ap.add_argument("--rated-rounds", type=int, help="rounds an editor needs to be ranked when there is no leaderboard to ask (default: what the leaderboard says, else 3)")
+    ap.add_argument("--rated-rounds", type=int, help="rounds a curator needs to be ranked when there is no leaderboard to ask (default: what the leaderboard says, else 3)")
     ap.add_argument("--json", action="store_true", help="print the whole report as JSON")
     ap.add_argument("--out", type=Path, help="also write the report, as JSON, to this file")
     args = ap.parse_args(argv)

@@ -1,4 +1,4 @@
-"""Reference editors. Each is a complete, runnable editor: `python -m stet.editors.<name>`.
+"""Reference curators. Each is a complete, runnable curator: `python -m stet.curators.<name>`.
 
 They exist to anchor the leaderboard (what does doing nothing score? what does an
 afternoon of heuristics score?) and to be forked. Each file stands alone, and is copied

@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from functools import cache
 from importlib import resources
 
-HARNESS_VERSION = "0.3.3"
+HARNESS_VERSION = "0.3.4"
 
 
 @dataclass(frozen=True)
@@ -59,7 +59,7 @@ class Season:
         """Hash of everything in the season that decides a score, pool manifests included.
 
         Left out: the numbers that only say how results are read (tolerances, the record
-        rule, reference curves) and who may run editors (the floor for a runner's
+        rule, reference curves) and who may run curators (the floor for a runner's
         machine). Those are the server's to apply and can be re-measured without every
         verifier having to upgrade.
         """
@@ -75,7 +75,7 @@ class Season:
         return float(self.raw["ink_frac"])
 
     def ink_tokens(self, scale: Scale) -> int:
-        """How many of the tokens the student trains on may be the editor's own text."""
+        """How many of the tokens the student trains on may be the curator's own text."""
         return int(self.ink_frac * scale.train_tokens)
 
     @property
@@ -271,7 +271,7 @@ def official_round(season: Season, index: int, beacon: dict, crawl: dict) -> Rou
     `beacon` is {"round": int, "randomness": hex}: the drand round named when the round was
     announced. `crawl` is {"crawl": id, "paths_sha256": hex, "n_shards": int}: the newest
     published Common Crawl crawl at that time. Nobody, the organisers included, can know or
-    choose the corpus before that drand round is emitted, and editors are committed before
+    choose the corpus before that drand round is emitted, and curators are committed before
     then.
     """
     beacon = {"round": int(beacon["round"]), "randomness": str(beacon["randomness"]).lower()}

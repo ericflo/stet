@@ -212,7 +212,7 @@ Curators are run on volunteers' machines, which differ. What a curator is given 
   piece of GPU work and a fixed piece of CPU work (`stet bench`). The floor is a
   mid-range desktop GPU; the numbers are at `/api/v1/season` (`runner`). A curator that
   finishes in time on the floor finishes in time everywhere, and `stet run` says how your
-  machine compares with it. A faster machine gets more done in the same seconds. An
+  machine compares with it. A faster machine gets more done in the same seconds. A
   curator that does as much as time allows will therefore do a little better on some runs
   than on others, and its score is taken over its runs.
 - The cores, the memory and the scratch space are enforced by the operating system. The
@@ -266,7 +266,7 @@ has stopped producing valid scripts leaves the ladder too.
 One curator holds the record. A challenger takes it when all of these hold:
 
 - it has run 5, 10, 20 or 40 rounds that the holder also ran. It is tested when it
-  reaches each of those four counts and at no other time. (When the holder changes, an
+  reaches each of those four counts and at no other time. (When the holder changes, a
   curator that already shares more rounds with the new one is tested once, at the largest
   count it has reached.)
 - its gain over those rounds beats the holder's by more than a **margin** of 0.02 nats

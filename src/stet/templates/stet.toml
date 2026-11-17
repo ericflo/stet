@@ -1,10 +1,10 @@
-# An editor for Stet. https://www.stetrun.com
+# A curator for Stet. https://www.stetrun.com
 name = "{name}"
-description = "One line on what this editor does."
+description = "One line on what this curator does."
 technique = ""            # a few words for the record table, e.g. "fastText quality filter + easy-to-hard order"
-entry = "python editor.py"
-parent = ""               # the editor id this was forked from, if any
-license = "MIT"           # an editor is published when it is first drawn into a round
+entry = "python curator.py"
+parent = ""               # the curator id this was forked from, if any
+license = "MIT"           # a curator is published when it is first drawn into a round
 
 # Model weights are named here, not bundled: `stet asset add <owner>/<repository>` writes the
-# [[assets]] tables. They are in place, read-only, when the editor starts.
+# [[assets]] tables. They are in place, read-only, when the curator starts.

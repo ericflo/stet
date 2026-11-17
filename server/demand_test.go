@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"html"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -250,7 +252,7 @@ func TestEachWayOfTakingPartHasAPageOfItsOwn(t *testing.T) {
 		// that says what it does.
 		"/":       {`href="/enter"`, `href="/verify"`, `href="/run"`, "Three ways to take part", "Stet is a competition to make the best training data", "You enter a <strong>curator</strong>", "Enter the competition", "See the leaderboard", ">Compete</a>", ">Run entries</a>"},
 		"/enter":  {"stet init my-curator", "stet run", "stet submit", "3 entries in play at once", "6 a day", "/AGENTS.md", "<h1>Enter the competition</h1>", "writing a <b>curator</b>"},
-		"/verify": {"stet verify", "stet service install", "--no-upgrade", "STET_AUTO_UPGRADE=0", "stet upgrade", "Nobody else's code runs on your machine"},
+		"/verify": {"stet verify", "stet service install", "--no-upgrade", "STET_AUTO_UPGRADE=0", "stet upgrade", "Nobody else's code runs on your machine", "cleans up after itself", "stet clean"},
 		"/run":    {"<h1>Run entries</h1>", "is a curator", "stet verify --edits", "stet service install --edits", "stet bench", "bubblewrap", "strangers' programs", "could reinstall"},
 	} {
 		code, body := w.page(path)
@@ -282,6 +284,38 @@ func TestThePagesSayWhenTheOrganisersAreAlone(t *testing.T) {
 	for _, path := range []string{"/", "/verify"} {
 		if _, body := w.page(path); strings.Contains(body, "note early") {
 			t.Fatalf("%s still says the organisers are alone, with an established volunteer around", path)
+		}
+	}
+}
+
+// Every verifier that upgrades itself runs this script with nobody watching: it has to be
+// a script a shell will take, and it must not leave its scratch environment behind.
+func TestTheInstallerIsAScriptAShellAcceptsAndClearsUpAfterItself(t *testing.T) {
+	w, _ := demandWorld(t, nil)
+	w.app.cfg.FilesDir = t.TempDir()
+	if err := os.WriteFile(filepath.Join(w.app.cfg.FilesDir, "stet_cli-9.9.9-py3-none-any.whl"), []byte("a wheel"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, body := w.page("/install.sh")
+	if code != 200 {
+		t.Fatalf("/install.sh: HTTP %d", code)
+	}
+	for _, s := range []string{`PRE="${STET_CACHE:-$HOME/.cache/stet}/upgrade-env"`, `trap 'rm -rf "$TMP" ${PRE:+"$PRE"}' EXIT`, "stet init my-curator"} {
+		if !strings.Contains(body, s) {
+			t.Errorf("the installer does not have %q", s)
+		}
+	}
+	for _, sh := range []string{"sh", "dash", "bash"} {
+		bin, err := exec.LookPath(sh)
+		if err != nil {
+			continue
+		}
+		path := filepath.Join(t.TempDir(), "install.sh")
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if out, err := exec.Command(bin, "-n", path).CombinedOutput(); err != nil {
+			t.Errorf("%s does not accept the installer: %v\n%s", sh, err, out)
 		}
 	}
 }

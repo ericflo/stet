@@ -1,4 +1,4 @@
-"""The season's libraries: what an editor may import, and how a machine is held to it."""
+"""The season's libraries: what a curator may import, and how a machine is held to it."""
 
 import subprocess
 import sys
@@ -78,7 +78,7 @@ FAST = {"gpu": "A GPU", "gpu_tokens_per_second": 400_000, "cpu_mb_per_second": 4
 
 def test_the_floor_is_a_machine_people_have(season):
     need, machine = bench.floor(season), season.raw["machine"]
-    # What an editor is given has to fit inside the smallest machine that runs editors.
+    # What a curator is given has to fit inside the smallest machine that runs curators.
     assert machine["cores"] <= need["cores"] and machine["memory_gb"] < need["memory_gb"] and machine["gpu_memory_gb"] < need["gpu_memory_gb"]
     assert need["gpu_memory_gb"] <= 12 and need["memory_gb"] <= 32 and need["cores"] <= 8  # an ordinary desktop with a mid-range card
     assert season.raw["assets"]["max_bytes"] <= machine["gpu_memory_gb"] * 2**30  # what may be named fits where it will be loaded

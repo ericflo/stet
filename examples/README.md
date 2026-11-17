@@ -9,7 +9,7 @@ fixed points. Fork any of them: `stet fork stet/tidy`.
 | `english` | Keeps documents that look like English prose. |
 | `tidy` | English, deduplicated, boilerplate lines cut, best budget's worth, shuffled. |
 
-Each `editor.py` is the same file as `src/stet/editors/<name>.py` (a test keeps them identical).
+Each `curator.py` is the same file as `src/stet/editors/<name>.py` (a test keeps them identical).
 
 And two that are not entered, as patterns to build on:
 

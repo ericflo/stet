@@ -97,10 +97,10 @@ def test_a_season_that_says_nothing_allows_none(season, monkeypatch):
 
 def test_what_is_written_into_a_manifest_reads_back_the_same(season, tmp_path):
     items = assets.parse([GOOD, {**GOOD, "path": "smol/config.json", "size": 704}], season)
-    (tmp_path / "stet.toml").write_text('name = "an-editor"\nentry = "python editor.py"\n\n' + assets.to_toml(items))
+    (tmp_path / "stet.toml").write_text('name = "a-curator"\nentry = "python curator.py"\n\n' + assets.to_toml(items))
     assert tomllib.loads((tmp_path / "stet.toml").read_text())["assets"][0] == GOOD
     assert load_project(tmp_path).assets == items
-    (tmp_path / "stet.toml").write_text('name = "an-editor"\nentry = "python editor.py"\n[[assets]]\npath = "x"\n')
+    (tmp_path / "stet.toml").write_text('name = "a-curator"\nentry = "python curator.py"\n[[assets]]\npath = "x"\n')
     with pytest.raises(ProjectError, match="asset 1: missing url"):
         load_project(tmp_path)
 
@@ -218,8 +218,8 @@ def test_the_example_that_uses_a_model_names_files_the_season_allows(season):
     assert len(project.assets) >= 2 and all(a.path.startswith("smollm2-135m/") for a in project.assets)
     assert sum(a.size for a in project.assets) < 1 << 30  # a small model: this is the pattern, not the limit
     assert len({a.url.split("/resolve/")[1].split("/")[0] for a in project.assets}) == 1  # one commit
-    source = (root / "editor.py").read_text()
-    compile(source, "editor.py", "exec")
+    source = (root / "curator.py").read_text()
+    compile(source, "curator.py", "exec")
     assert 'task.asset("smollm2-135m")' in source and "task.device()" in source
     main = source[source.index("def main()") :]
     assert main.index("task.write(") < main.index("read_candidates(")  # a script is written before the model is even loaded
@@ -287,11 +287,11 @@ def test_a_run_whose_asset_is_gone_is_a_failed_run_not_a_broken_machine(tmp_path
     season = load_season()
     monkeypatch.setattr(data, "corpus", lambda rnd, scale: type("C", (), {"total_bytes": 0, "__len__": lambda self: 0})())
     monkeypatch.setattr(assets, "fetch", lambda items, **k: (_ for _ in ()).throw(assets.Unavailable("the asset smol/model is no longer public at its address (the host answers 404)")))
-    monkeypatch.setattr(pipeline, "run_editor", lambda *a, **k: pytest.fail("the editor was run without its files"))
+    monkeypatch.setattr(pipeline, "run_editor", lambda *a, **k: pytest.fail("the curator was run without its files"))
     said = []
-    run = pipeline.edit_round(tmp_path, "python editor.py", practice_round(season, 0), season.scale("nano"), tmp_path / "work", assets=[Asset("smol/model", URL, SHA, 5)], log=said.append)
+    run = pipeline.edit_round(tmp_path, "python curator.py", practice_round(season, 0), season.scale("nano"), tmp_path / "work", assets=[Asset("smol/model", URL, SHA, 5)], log=said.append)
     assert run.status == "error" and run.script is None and "no longer public" in run.reason and run.seconds == 0
-    assert any("editor not run" in m for m in said)
+    assert any("curator not run" in m for m in said)
 
 
 def test_names_the_rules_do_not_allow_are_left_out_of_a_lookup(monkeypatch):

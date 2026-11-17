@@ -1,6 +1,6 @@
 """Write the `run` extra in pyproject.toml from the season's environment.
 
-The season file names the Python and the exact version of every library an editor may
+The season file names the Python and the exact version of every library a curator may
 count on. Installing `stet-cli[run]` must give exactly those, so the list in
 pyproject.toml is written out from the season, not kept by hand:
 
@@ -8,8 +8,8 @@ pyproject.toml is written out from the season, not kept by hand:
     python tools/sync_environment.py --check  exit 1 if it is out of date (the tests do this)
 
 To change a library: edit "environment" in src/stet/seasons/s0.json (both "packages", what
-editors are promised, and "also", what those bring with them), run this, and bump the
-harness version: an editor may behave differently under the new one.
+curators are promised, and "also", what those bring with them), run this, and bump the
+harness version: a curator may behave differently under the new one.
 """
 
 import json

@@ -1,7 +1,7 @@
 """Your identity: an Ed25519 key in your config directory.
 
 There are no passwords and no browser logins. The key signs every request that needs to
-be attributed to you: submitting an editor, claiming a verification job, reporting a
+be attributed to you: submitting a curator, claiming a verification job, reporting a
 result. Back the file up if your standing matters to you; it cannot be recovered.
 """
 

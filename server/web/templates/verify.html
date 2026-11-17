@@ -79,7 +79,7 @@
     <div class="sec-head"><div><h2>What it costs you</h2></div></div>
     <div class="grid3">
       <div class="card"><span class="eyebrow">GPU</span><h3>Busy during rounds, idle between</h3><p>A round is drawn when an entry is waiting, and every {{.Interval}} regardless. Each script is one training run of about ten minutes. Stop it whenever you like.</p></div>
-      <div class="card"><span class="eyebrow">Disk and network</span><h3>About 1 GB a round</h3><p>Old rounds are deleted as new ones arrive, so a verifier left running does not fill the disk.</p></div>
+      <div class="card"><span class="eyebrow">Disk and network</span><h3>About 1 GB a round</h3><p>It cleans up after itself: raw downloads go once a round is built, old rounds as new ones arrive, and anything unused for two weeks. <code>stet clean</code> deletes the lot. <a href="/docs/verifying#what-it-keeps-on-your-disk">What it keeps →</a></p></div>
       <div class="card"><span class="eyebrow">Risk</span><h3>It runs our trainer, on data</h3><p>An edit script is a list of document numbers and byte ranges. It is validated before use and nothing in it is executed.</p></div>
     </div>
   </div>

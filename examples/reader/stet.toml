@@ -1,9 +1,9 @@
-# A small language model reads the candidates. A template for editors that use model
-# weights: see editor.py. https://www.stetrun.com
+# A small language model reads the candidates. A template for curators that use model
+# weights: see curator.py. https://www.stetrun.com
 name = "reader"
-description = "tidy's candidates, read by a 135M-parameter language model: the most and least predictable are dropped. Shows how an editor names and loads model weights."
+description = "tidy's candidates, read by a 135M-parameter language model: the most and least predictable are dropped. Shows how a curator names and loads model weights."
 technique = "prose-line ranges + dedup + small-LM perplexity band"
-entry = "python editor.py"
+entry = "python curator.py"
 license = "MIT"
 [[assets]]
 path = "smollm2-135m/config.json"

@@ -1,4 +1,4 @@
-"""Edit script in, exam score out. Trusted code only: nothing here runs an editor.
+"""Edit script in, exam score out. Trusted code only: nothing here runs a curator.
 
 This is the whole of what a volunteer's machine does for the leaderboard: read a script
 (plain data), rebuild the round's corpus and exam from public sources, train the fixed

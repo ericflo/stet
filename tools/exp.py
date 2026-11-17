@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Run reference editors on fixed-seed rounds and print a table. A research tool, not the CLI.
+"""Run reference curators on fixed-seed rounds and print a table. A research tool, not the CLI.
 
-    python tools/exp.py --scale nano --rounds 0 1 --editors identity english tidy
+    python tools/exp.py --scale nano --rounds 0 1 --curators identity english tidy
 """
 import argparse
 import dataclasses
@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from stet import data
-from stet.editor import Task
+from stet.curator import Task
 from stet.grade import grade
 from stet.script import materialize
 from stet.spec import load_season, practice_round
