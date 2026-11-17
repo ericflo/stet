@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -147,6 +149,7 @@ func (a *App) mountAPI(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/jobs/{id}/result", a.apiResult)
 	mux.HandleFunc("POST /api/v1/jobs/{id}/release", a.apiRelease)
 	mux.HandleFunc("POST /api/v1/admin/draw", a.apiAdminDraw)
+	mux.HandleFunc("PUT /api/v1/admin/files/{name}", a.apiAdminFile)
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 404, map[string]string{"error": "no such endpoint"})
 	})
@@ -875,6 +878,34 @@ func (a *App) apiRelease(w http.ResponseWriter, r *http.Request) {
 
 // apiAdminDraw lets an anchor bring the next draw forward to the next moment on the grid
 // instead of waiting for the schedule's.
+// apiAdminFile publishes a download under /files/. It exists for one file a season: the
+// exam pack, which every client fetches by name and checks against the hash in its season
+// file, so a wrong upload is refused by clients, not trusted.
+func (a *App) apiAdminFile(w http.ResponseWriter, r *http.Request) {
+	acct, _, body, err := a.signed(w, r, 128<<20, true)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	if !acct.Anchor {
+		writeErr(w, fail(403, "anchors only"))
+		return
+	}
+	name := r.PathValue("name")
+	if !fileNameRe.MatchString(name) || len(body) == 0 {
+		writeErr(w, fail(400, "a file needs a plain name and some bytes"))
+		return
+	}
+	if err := a.st.blobs.Put(r.Context(), "files/"+name, body, "application/octet-stream"); err != nil {
+		slog.Error("publishing a file", "name", name, "err", err)
+		writeErr(w, fail(503, "the file store is not answering; try again in a moment"))
+		return
+	}
+	sum := sha256.Sum256(body)
+	slog.Info("file published", "name", name, "bytes", len(body), "by", acct.Handle)
+	writeJSON(w, 201, map[string]any{"name": name, "bytes": len(body), "sha256": hex.EncodeToString(sum[:]), "url": a.cfg.APIURL + "/files/" + name})
+}
+
 func (a *App) apiAdminDraw(w http.ResponseWriter, r *http.Request) {
 	acct, _, _, err := a.signed(w, r, 1<<10, true)
 	if err != nil {

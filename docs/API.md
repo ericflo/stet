@@ -85,3 +85,12 @@ grades: a grade computed any other way will not agree.
 Status codes worth handling: `409` (your data or baseline differs from the round's, or the
 job was already reported), `426` (upgrade the harness), `429` (slow down), `503` (the
 server could not make a write durable; send the same request again).
+
+## Organisers
+
+Signed by an anchor's key; anyone else gets `403`.
+
+| | |
+|---|---|
+| `POST /api/v1/admin/draw` | Bring the next draw forward to the next mark on the draw grid (`stet draw`) |
+| `PUT /api/v1/admin/files/{name}` | Publish a download under `/files/`: the season's exam pack (`stet publish`). Clients check it against the hash in their season file |

@@ -658,6 +658,38 @@ func TestAFailedEditScoresAsUneditedAndRetiresTheEditor(t *testing.T) {
 	})
 }
 
+func TestOnlyAnAnchorPublishesFiles(t *testing.T) {
+	pub, priv := newKey()
+	w := newWorld(t, pub)
+	anchor, eve := w.join("anchor-one", priv), w.join("eve", nil)
+	pack := []byte("the exam pack, which clients check against the hash in their season file")
+	var out struct {
+		Error  string `json:"error"`
+		SHA256 string `json:"sha256"`
+		Bytes  int    `json:"bytes"`
+	}
+	if code := eve.do("PUT", "/api/v1/admin/files/exam-s9.jsonl.zst", pack, &out); code != 403 {
+		t.Fatalf("an entrant publishing a file: HTTP %d %s", code, out.Error)
+	}
+	if code := anchor.do("PUT", "/api/v1/admin/files/..%2Fmeta", pack, &out); code == 201 {
+		t.Fatal("a file was published under a name that is not a plain file name")
+	}
+	if code := anchor.do("PUT", "/api/v1/admin/files/exam-s9.jsonl.zst", pack, &out); code != 201 || out.Bytes != len(pack) {
+		t.Fatalf("an anchor publishing a file: HTTP %d %+v", code, out)
+	}
+	if sum := sha256.Sum256(pack); out.SHA256 != hex.EncodeToString(sum[:]) {
+		t.Fatalf("the server reports hash %s", out.SHA256)
+	}
+	resp, err := http.Get(w.srv.URL + "/files/exam-s9.jsonl.zst")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if got, _ := io.ReadAll(resp.Body); resp.StatusCode != 200 || !bytes.Equal(got, pack) {
+		t.Fatalf("downloading it back: HTTP %d, %d bytes", resp.StatusCode, len(got))
+	}
+}
+
 func TestAnAnchorGivesVolunteersFirstGo(t *testing.T) {
 	pub, priv := newKey()
 	w := newWorld(t, pub)

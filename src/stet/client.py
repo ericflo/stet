@@ -261,6 +261,19 @@ def cmd_draw(args):
     sys.stderr.write(f"{rd['id']}: {rd['status']}, draw {ago(rd['draw_at'])}\n")
 
 
+def cmd_publish(args):
+    """Anchors only: publish a download, which is how a season's exam pack reaches the server."""
+    path = Path(args.file)
+    blob = path.read_bytes()
+    name = args.name or path.name
+    sys.stderr.write(f"publishing {name} ({len(blob) / 1e6:.1f} MB) ...\n")
+    r = request("PUT", f"/api/v1/admin/files/{name}", blob, key=need_key(), timeout=1800)
+    if r["sha256"] != hashlib.sha256(blob).hexdigest():
+        sys.stderr.write("stet: the server stored something else; publish it again\n")
+        sys.exit(1)
+    print(f"{r['url']}\nsha256 {r['sha256']}")
+
+
 # --- entries --------------------------------------------------------------------------------
 
 
@@ -712,6 +725,11 @@ def add_commands(sub) -> None:
 
     p = sub.add_parser("draw")  # anchors only; not listed in the help
     p.set_defaults(fn=cmd_draw)
+
+    p = sub.add_parser("publish")  # anchors only; not listed in the help
+    p.add_argument("file")
+    p.add_argument("--name", help="the name to publish it under (default: the file's own)")
+    p.set_defaults(fn=cmd_publish)
 
     p = sub.add_parser("verify", help="lend your GPU: grade published edit scripts for the leaderboard")
     p.add_argument("--once", action="store_true", help="do one job and exit")
