@@ -4,27 +4,28 @@
   <div class="wrap">
     <span class="eyebrow">The people who keep it honest</span>
     <h1>Verifiers</h1>
-    <p class="sub">Stet has no cluster. Every score on the leaderboard was checked by someone here, on their own GPU, for nothing but the standings on this page.</p>
+    <p class="sub">A score on the leaderboard is one organiser's machine saying so. The people here retrain the same edit scripts on their own GPUs and report what they got, for nothing but the standings on this page.</p>
   </div>
 </div>
 <div class="wrap">
   <div class="stats">
     <div><span class="eyebrow">Verifiers</span><div class="v">{{len $d.Verifiers}}</div></div>
-    <div><span class="eyebrow">Grades that held up</span><div class="v">{{comma $d.Validated}}</div></div>
+    <div><span class="eyebrow">Grades that agreed</span><div class="v">{{comma $d.Validated}}</div></div>
     <div><span class="eyebrow">GPU time given</span><div class="v">{{f1 $d.Hours}}<small>hours</small></div></div>
-    <div><span class="eyebrow">To be trusted</span><div class="v">{{$d.TrustAfter}}<small>agreeing grades</small></div></div>
+    <div><span class="eyebrow">To agree</span><div class="v">{{f2 $d.Tolerance.Grade}}<small>nats or closer</small></div></div>
   </div>
   <div class="table-wrap" id="verifiers" data-live>
     {{if $d.Verifiers}}
     <table>
-      <thead><tr><th>#</th><th>Verifier</th><th class="r" title="Grades that agreed with a trusted verifier's, in the last two weeks">Last 14 days</th><th class="r">All time</th><th class="r hide-s">Streak</th><th class="r hide-s">GPU time</th><th class="hide-s">Machine</th><th class="hide-s">Seen</th></tr></thead>
+      <thead><tr><th>#</th><th>Verifier</th><th class="r" title="Grades that agreed with an anchor's, in the last two weeks">Last 14 days</th><th class="r">All time</th><th class="r hide-s">Streak</th><th class="r hide-s">GPU time</th><th class="hide-s">Machine</th><th class="hide-s">Seen</th></tr></thead>
       <tbody>
         {{range $i, $v := $d.Verifiers}}<tr>
           <td class="rank">{{add $i 1}}</td>
-          <td><a class="name" href="/u/{{$v.Handle}}">{{$v.Handle}}</a>{{if $v.Anchor}}<span class="tag blue">anchor</span>{{else if $v.Trusted}}<span class="tag green">trusted</span>{{end}}</td>
-          <td class="r num">{{$v.Recent}}</td>
+          <td><a class="name" href="/u/{{$v.Handle}}">{{$v.Handle}}</a>{{if $v.Anchor}}<span class="tag blue">anchor</span>{{end}}</td>
+          {{if $v.Anchor}}<td class="r muted" colspan="2" title="An anchor's grades are the scores; the counts are of volunteers' grades that agreed with them">sets the scores</td><td class="r muted hide-s">·</td>
+          {{else}}<td class="r num">{{$v.Recent}}</td>
           <td class="r num">{{$v.Validated}}</td>
-          <td class="r num hide-s">{{$v.Streak}}</td>
+          <td class="r num hide-s">{{$v.Streak}}</td>{{end}}
           <td class="r num hide-s">{{gpunum $v.GPUHours}} {{gpuunit $v.GPUHours}}</td>
           <td class="hide-s muted" style="font-size:14.5px">{{$v.GPU}}</td>
           <td class="hide-s muted num">{{ago $v.LastSeen}}</td>
@@ -46,7 +47,7 @@
     </div>
     <div class="stack">
       <div class="claim"><h3>It runs nobody's code but ours</h3><p>Entrants' editors only ever run on the organisers' machines. What you download is an edit script, which is data: a list of spans to copy. The harness checks it line by line.</p></div>
-      <div class="claim"><h3>Trust is earned, and lost</h3><p>Your first grades are compared with a trusted verifier's on the same script. After {{$d.TrustAfter}} that agree, yours count alone, with spot checks. A grade that disagrees is a strike; {{$d.BanAfter}} strikes and the account is given no more work.</p></div>
+      <div class="claim"><h3>Your grade is a replication</h3><p>An anchor, one of the organisers' machines, grades every entry, and that grade is the score. Yours is sealed until the round settles and then compared with it. Up to {{$d.MaxReplicas}} volunteers replicate each entry, and the round's page shows every one of their grades beside the anchor's, whatever it said. An account that differs from the anchor {{$d.MuteAfter}} times with no other volunteer finding the same, and more than once for every ten grades that agreed, is given no grading work for {{$d.MuteDays}} days.</p></div>
       <div class="claim"><h3>You go first</h3><p>When more editors are waiting than a round can take, the entries of people who verified in the last two weeks are drawn first.</p></div>
     </div>
   </div>

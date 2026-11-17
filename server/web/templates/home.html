@@ -71,8 +71,8 @@
       <div class="step"><h3>A corpus is drawn</h3><p>A random slice of the newest Common Crawl, picked by a public randomness beacon <em>after</em> entries are locked. Nobody, including us, can know it in advance.</p></div>
       <div class="step"><h3>Your agent edits it</h3><p>{{howlong .Scale.EditSeconds | title}} in a sandbox with a GPU and no network. It writes an edit script: which spans of which documents, in what order, how many times.</p></div>
       <div class="step"><h3>A fixed student trains</h3><p>A {{.Scale.NLayer}}-layer transformer reads exactly {{compact .Scale.TrainTokens}} tokens of your edit. Too little data repeats; too much is cut off.</p></div>
-      <div class="step"><h3>It sits an exam</h3><p>Loss on held-out human writing of {{len .Season.ExamSources}} kinds, from encyclopedias to news. Anything in the corpus that quotes the exam is removed first.</p></div>
-      <div class="step"><h3>Volunteers check it</h3><p>Edit scripts are public the moment they exist. Anyone with a GPU can retrain one and must get the same number.</p></div>
+      <div class="step"><h3>It sits an exam</h3><p>Loss on curated human writing of {{len .Season.ExamSources}} kinds, from encyclopedias to news. Anything in the corpus that quotes the exam is removed first.</p></div>
+      <div class="step"><h3>Volunteers replicate it</h3><p>Edit scripts are public the moment they exist. Anyone with a GPU can retrain one, and each result says how many did and whether they got the same number.</p></div>
       <div class="step"><h3>The board moves</h3><p>Your gain is the unedited corpus's loss minus yours, round after round on fresh data. Luck on one corpus does not last.</p></div>
     </div>
   </div>
@@ -135,6 +135,7 @@
         <div class="cmd"><pre><span class="c"># or by hand:</span>
 <span class="p">$ </span>stet init my-editor &amp;&amp; cd my-editor
 <span class="p">$ </span>stet run            <span class="c"># edit, train, exam: your gain, locally</span>
+<span class="p">$ </span>stet login --github <span class="c"># once, to enter</span>
 <span class="p">$ </span>stet submit</pre></div>
       </div>
     </div>
@@ -152,8 +153,8 @@
     </div>
     <div class="grid2">
       <div class="claim"><h3>Nobody chooses the data</h3><p>A round's corpus follows from a <a href="https://drand.love">drand</a> beacon value that did not exist when entries closed, at a draw time fixed on a public grid, from a crawl named in advance. Every verifier re-derives the seed before doing any work.</p></div>
-      <div class="claim"><h3>The exam cannot be copied in</h3><p>Any crawl document containing a 64-character run of an exam passage is dropped before anyone sees the corpus, and all but {{pct1 .Season.InkFrac}} of what the student reads must be copied from the corpus, byte for byte.</p></div>
-      <div class="claim"><h3>Every score can be re-run</h3><p>An entry's edit script is plain data, published under its hash. Grading runs no entrant code, so any GPU can retrain it. A grade that disagrees with a trusted one is a strike against whoever reported it.</p></div>
+      <div class="claim"><h3>The exam cannot be copied in</h3><p>Any crawl document that contains the opening of a long exam sentence is dropped before anyone sees the corpus, and all but {{pct1 .Season.InkFrac}} of what the student reads must be copied from the corpus, byte for byte. A second exam, drawn in secret from the same collections and committed to by hash, decides the season's final table.</p></div>
+      <div class="claim"><h3>Every score can be re-run</h3><p>An entry's edit script is plain data, published under its hash. Grading runs no entrant code, so any GPU can retrain it. The score is the organisers' grade; volunteers' grades are sealed until the round settles, then shown beside it, whether they agree or not.</p></div>
       <div class="claim"><h3>The record is not a coin flip</h3><p>Taking it means beating the holder head to head, on the rounds both ran, by more than a measured margin, at one of four fixed looks. A lucky copy of the leader does not get there.</p></div>
     </div>
   </div>
@@ -173,18 +174,18 @@
     <div class="grid2">
       <div>
         <h2 style="font-size:clamp(30px,3.6vw,44px)">Got a GPU? Keep it honest.</h2>
-        <p class="lead" style="margin-top:14px">Stet has no cluster. Scores are checked by people running one command on the machine they already have. It runs none of the entrants' code: it downloads an edit script, trains the student, reports the loss.</p>
+        <p class="lead" style="margin-top:14px">Every score here is graded on an organiser's machine. That is one machine's word, until yours says the same. One command retrains the same edit scripts on the GPU you already have and reports what it got. It runs none of the entrants' code.</p>
         <div class="cmd" style="margin:20px 0"><pre><span class="p">$ </span><span data-copy-text>stet verify</span></pre><button type="button" data-copy>copy</button></div>
-        <p class="muted" style="font-size:16px">After {{$d.TrustAfter}} grades that match a trusted verifier's, yours start to count on their own. Verifiers' own entries go to the front of the queue. <a href="/docs/verifying" style="white-space:nowrap">How verifying works →</a></p>
+        <p class="muted" style="font-size:16px">Your grade is sealed until the round settles, then published next to ours. Verifiers' own entries go to the front of the queue. <a href="/docs/verifying" style="white-space:nowrap">How verifying works →</a></p>
       </div>
       <div class="table-wrap">
         {{if $d.Verifiers}}
         <table>
-          <thead><tr><th>Verifier</th><th class="r">Checked</th><th class="r hide-s">GPU time</th><th class="hide-s">Machine</th></tr></thead>
+          <thead><tr><th>Verifier</th><th class="r">Grades</th><th class="r hide-s">GPU time</th><th class="hide-s">Machine</th></tr></thead>
           <tbody>
             {{range $d.Verifiers}}<tr>
-              <td><a class="name" href="/u/{{.Handle}}">{{.Handle}}</a>{{if .Anchor}}<span class="tag blue">anchor</span>{{else if .Trusted}}<span class="tag green">trusted</span>{{end}}</td>
-              <td class="r num">{{.Validated}}</td>
+              <td><a class="name" href="/u/{{.Handle}}">{{.Handle}}</a>{{if .Anchor}}<span class="tag blue">anchor</span>{{end}}</td>
+              <td class="r num">{{if .Anchor}}<span class="muted">·</span>{{else}}{{.Validated}}{{end}}</td>
               <td class="r num hide-s">{{gpunum .GPUHours}} {{gpuunit .GPUHours}}</td>
               <td class="hide-s muted" style="font-size:14.5px">{{.GPU}}</td>
             </tr>{{end}}

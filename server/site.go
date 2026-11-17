@@ -2,9 +2,11 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"embed"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
 	"io"
@@ -40,6 +42,10 @@ type Site struct {
 
 	docMu sync.Mutex
 	docs  map[string]*docPage
+
+	srcMu   sync.Mutex
+	src     map[string]sourceView
+	srcGate chan struct{} // bundles being unpacked for the source viewer at one time
 }
 
 type docSpec struct{ Slug, File, Title string }
@@ -62,7 +68,7 @@ type docPage struct {
 }
 
 func newSite(a *App) (*Site, error) {
-	s := &Site{app: a, pages: map[string]*template.Template{}, docs: map[string]*docPage{}}
+	s := &Site{app: a, pages: map[string]*template.Template{}, docs: map[string]*docPage{}, src: map[string]sourceView{}, srcGate: make(chan struct{}, 2)}
 	s.md = goldmark.New(
 		goldmark.WithExtensions(extension.GFM),
 		goldmark.WithParserOptions(parser.WithAutoHeadingID()),
@@ -427,30 +433,34 @@ type ScriptStats struct {
 }
 
 type EntryView struct {
-	Round      string
-	RoundIdx   int
-	EditorID   string
-	Name       string
-	Version    int
-	Owner      string
-	Stage      string // editing | grading | settled
-	Settled    bool
-	Valid      bool
-	Loss       float64
-	Gain       float64
-	Baseline   float64
-	BySource   map[string]float64
-	Reason     string
-	Results    int
-	SettledAt  int64
-	Audited    bool
-	Verifiers  []string
-	Edit       *EditReport
-	ScriptSHA  string
-	ScriptSize int64
-	HasStats   bool
-	Script     ScriptStats
-	Train      *TrainInfo
+	Round        string
+	RoundIdx     int
+	EditorID     string
+	Name         string
+	Version      int
+	Owner        string
+	Stage        string // editing | grading | settled
+	Settled      bool
+	Valid        bool
+	Loss         float64
+	Gain         float64
+	Baseline     float64
+	BySource     map[string]float64
+	Reason       string
+	Void         bool // the anchors could not run it; the round does not count for it
+	Results      int
+	SettledAt    int64
+	Replicas     int      // volunteers whose grade agreed with the anchor's
+	Disputed     int      // and those whose grade did not
+	Together     bool     // two of those found the same thing as each other
+	Verifiers    []string // the anchor first
+	Replications []Replication
+	Edit         *EditReport
+	ScriptSHA    string
+	ScriptSize   int64
+	HasStats     bool
+	Script       ScriptStats
+	Train        *TrainInfo
 }
 
 // entryView is the public face of an entry. Sealed until settled: an open entry says
@@ -466,11 +476,14 @@ func (a *App) entryView(s *State, e *Entry) EntryView {
 		return v
 	}
 	v.Stage, v.Settled, v.Valid, v.Gain, v.BySource = "settled", true, e.Valid, e.Gain, e.BySource
-	v.Reason, v.Results, v.SettledAt = e.Reason, e.NResults, e.SettledAt
+	v.Reason, v.Results, v.SettledAt, v.Void = e.Reason, e.NResults, e.SettledAt, e.Void
 	v.Loss = deref(e.Loss)
-	v.Baseline = deref(s.Rounds[e.RoundIdx].BaselineLoss)
+	if rd := s.Rounds[e.RoundIdx]; rd.Status == "settled" { // an entry settled invalid does not unseal the round
+		v.Baseline = deref(rd.BaselineLoss)
+	}
 	if d := e.Detail; d != nil {
-		v.Audited, v.Verifiers, v.Train = d.Audited, d.Verifiers, d.Train
+		v.Verifiers, v.Train, v.Disputed, v.Replicas = d.Verifiers, d.Train, d.Disputed, max(0, len(d.Verifiers)-1)
+		v.Together, v.Replications = d.DisputedTogether, d.Replications
 		v.HasStats = len(d.Script) > 0 && json.Unmarshal(d.Script, &v.Script) == nil
 	}
 	return v
@@ -549,6 +562,10 @@ type roundSummary struct {
 
 func (a *App) roundSummary(s *State, r *Round) roundSummary {
 	rs := roundSummary{Round: *r, ID: roundID(a.season.ID, r.Idx)}
+	if r.Status != "settled" {
+		// Sealed with the grades: a volunteer has to measure the unedited loss, not read it.
+		rs.BaselineLoss, rs.Baseline, rs.BaselineN, rs.Differs = nil, nil, 0, nil
+	}
 	for _, e := range s.inRound[r.Idx] {
 		rs.Entries++
 		if e.EditedAt > 0 || e.Status == "settled" {
@@ -586,7 +603,7 @@ func (s *Site) home(w http.ResponseWriter, r *http.Request) {
 	if len(top) > 8 {
 		top = top[:8]
 	}
-	d := map[string]any{"Top": top, "Provisional": provisional, "TrustAfter": trustAfterAgreements}
+	d := map[string]any{"Top": top, "Provisional": provisional}
 	a.st.view(func(st *State) {
 		recs := a.records(st)
 		if len(recs) > 0 {
@@ -678,7 +695,7 @@ func linkTo(s *State, e *Editor) editorLink {
 func (s *Site) editorByName(w http.ResponseWriter, r *http.Request) {
 	id := ""
 	s.app.st.view(func(st *State) {
-		if e := findEditor(st, r.PathValue("handle")+"/"+r.PathValue("name")); e != nil && e.Public {
+		if e := findEditor(st, r.PathValue("handle")+"/"+r.PathValue("name"), 0); e != nil {
 			id = e.ID
 		}
 	})
@@ -696,8 +713,8 @@ func (s *Site) editor(w http.ResponseWriter, r *http.Request) {
 	d := map[string]any{}
 	owner, github := "", ""
 	a.st.view(func(st *State) {
-		found := findEditor(st, r.PathValue("ref"))
-		if found == nil || !found.Public {
+		found := findEditor(st, r.PathValue("ref"), 0)
+		if found == nil {
 			return
 		}
 		c := *found
@@ -762,11 +779,15 @@ func (s *Site) editor(w http.ResponseWriter, r *http.Request) {
 			want = e.Files[0].Path
 		}
 	}
-	if want != "" && fileRefRe.MatchString(want) {
-		if blob, err := a.readBundle(r.Context(), e.ID); err == nil {
-			if text, binary, truncated, err := bundleFile(blob, want); err == nil {
-				d["File"], d["FileText"], d["FileBinary"], d["FileTruncated"] = want, text, binary, truncated
-			}
+	// Only a file the editor is known to have is worth opening the bundle for, and what is
+	// read out is remembered: the page is public and the bundle can be 50 MB.
+	listed := false
+	for _, f := range e.Files {
+		listed = listed || f.Path == want
+	}
+	if listed && fileRefRe.MatchString(want) {
+		if v, err := s.sourceFile(r.Context(), e.ID, want); err == nil {
+			d["File"], d["FileText"], d["FileBinary"], d["FileTruncated"] = want, v.text, v.binary, v.truncated
 		}
 	}
 	p := s.page(r, fmt.Sprintf("%s v%d", e.Name, e.Version), "leaderboard", d)
@@ -774,6 +795,56 @@ func (s *Site) editor(w http.ResponseWriter, r *http.Request) {
 		p.Desc = fmt.Sprintf("%s v%d by %s: %s", e.Name, e.Version, owner, e.Technique)
 	}
 	s.render(w, 200, "editor", p)
+}
+
+type sourceView struct {
+	text              string
+	binary, truncated bool
+}
+
+// sourceFile reads one file out of an editor's bundle for the source viewer. Bundles never
+// change, so what was read is kept (a few hundred files at most, each at most maxViewBytes),
+// and only one bundle is unpacked at a time.
+func (s *Site) sourceFile(ctx context.Context, id, path string) (sourceView, error) {
+	key := id + "/" + path
+	cached := func() (sourceView, bool) {
+		s.srcMu.Lock()
+		defer s.srcMu.Unlock()
+		v, ok := s.src[key]
+		return v, ok
+	}
+	if v, ok := cached(); ok {
+		return v, nil
+	}
+	// The lock is never held while a bundle is fetched and unpacked: one large bundle and
+	// one patient crawler would otherwise stall every editor page there is.
+	select {
+	case s.srcGate <- struct{}{}:
+		defer func() { <-s.srcGate }()
+	case <-ctx.Done():
+		return sourceView{}, ctx.Err()
+	}
+	if v, ok := cached(); ok {
+		return v, nil
+	}
+	blob, err := s.app.readBundle(ctx, id)
+	if err != nil {
+		return sourceView{}, err
+	}
+	var v sourceView
+	if v.text, v.binary, v.truncated, err = bundleFile(blob, path); err != nil {
+		return sourceView{}, err
+	}
+	s.srcMu.Lock()
+	defer s.srcMu.Unlock()
+	for k := range s.src { // make room by dropping a few, not all
+		if len(s.src) < 300 {
+			break
+		}
+		delete(s.src, k)
+	}
+	s.src[key] = v
+	return v, nil
 }
 
 func (s *Site) rounds(w http.ResponseWriter, r *http.Request) {
@@ -805,6 +876,20 @@ func (s *Site) round(w http.ResponseWriter, r *http.Request) {
 	}
 	sc := a.season.Scales[rs.Scale]
 	d := map[string]any{"R": rs, "ID": rs.ID, "Entries": entries, "Scale": sc, "Tolerance": a.tolerance()}
+	// Every volunteer's grade of the round, beside the anchor's, whatever it said.
+	type replica struct {
+		Replication
+		Name, Owner, EditorID string
+		Anchor                float64
+		AnchorValid           bool
+	}
+	var replicas []replica
+	for _, e := range entries {
+		for _, rep := range e.Replications {
+			replicas = append(replicas, replica{rep, e.Name, e.Owner, e.EditorID, e.Loss, e.Valid})
+		}
+	}
+	d["Replicas"] = replicas
 	if rs.Status != "scheduled" && rs.Crawl != nil {
 		if seed, err := hex.DecodeString(rs.Seed); err == nil && rs.Crawl.NShards > 0 {
 			want := sc.CorpusUnits * a.season.Pools["official"].ShardsPerUnit
@@ -840,7 +925,7 @@ func (s *Site) verifiersPage(w http.ResponseWriter, r *http.Request) {
 		validated += v.Validated
 	}
 	s.render(w, 200, "verifiers", s.page(r, "Verifiers", "verifiers", map[string]any{
-		"Verifiers": vs, "Hours": hours, "Validated": validated, "TrustAfter": trustAfterAgreements, "BanAfter": banAfterStrikes,
+		"Verifiers": vs, "Hours": hours, "Validated": validated, "MuteAfter": muteAfterStrikes, "MuteDays": muteFor / 86400, "ReplicaWait": a.cfg.ReplicaWait.Seconds(), "MaxReplicas": maxReplicas,
 		"Tolerance": a.tolerance(), "Devices": a.season.GradeDevices,
 	}))
 }
@@ -972,21 +1057,24 @@ func (s *Site) file(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	w.Header().Set("Cache-Control", "public, max-age=3600")
 	p := filepath.Join(s.app.cfg.FilesDir, name)
 	if st, err := os.Stat(p); err == nil && !st.IsDir() {
+		w.Header().Set("Cache-Control", "public, max-age=3600")
 		http.ServeFile(w, r, p)
 		return
 	}
 	body, size, err := s.app.st.blobs.Open(r.Context(), "files/"+name)
-	if err != nil {
-		if err != errNoBlob {
-			slog.Error("file", "name", name, "err", err)
-		}
+	if errors.Is(err, errNoBlob) {
 		http.NotFound(w, r)
 		return
 	}
+	if err != nil { // the store's trouble, not the file's absence: nothing a cache should keep
+		slog.Error("file", "name", name, "err", err)
+		http.Error(w, "the file store is not answering; try again in a moment", http.StatusBadGateway)
+		return
+	}
 	defer body.Close()
+	w.Header().Set("Cache-Control", "public, max-age=3600")
 	w.Header().Set("Content-Type", "application/octet-stream")
 	if size > 0 {
 		w.Header().Set("Content-Length", strconv.FormatInt(size, 10))

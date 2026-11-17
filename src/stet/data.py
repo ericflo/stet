@@ -10,6 +10,7 @@ Corpus layout (language-agnostic, mmap-friendly):
 
 from __future__ import annotations
 
+import errno
 import gzip
 import hashlib
 import io
@@ -31,6 +32,7 @@ from .spec import HARNESS_VERSION, Round, Scale, Season, Shard
 USER_AGENT = f"stet/{HARNESS_VERSION}"
 DEFAULT_API = "https://api.stetrun.com"
 FETCH_TRIES = 4
+FETCH_LIMIT_BYTES = 2 << 30  # no single file a round needs is near this
 
 
 def cache_dir() -> Path:
@@ -52,8 +54,20 @@ def _sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
-def fetch(urls: list[str], sha256: str, dest: Path, label: str = "", quiet: bool = False) -> Path:
-    """Download to `dest` unless it is already there, verifying the content hash."""
+class FetchError(OSError):
+    """A download failed after every try. The network's fault, or the host's; not this machine's."""
+
+
+class TooBig(FetchError):
+    """A download ran past its limit. Not retried: the next try would do the same."""
+
+
+def fetch(urls: list[str], sha256: str, dest: Path, label: str = "", quiet: bool = False, max_bytes: int = FETCH_LIMIT_BYTES) -> Path:
+    """Download to `dest` unless it is already there, verifying the content hash.
+
+    Stops at `max_bytes`: the hash is only known at the end, and a host that never stops
+    sending must not fill the disk first.
+    """
     if dest.exists():
         return dest
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -73,9 +87,11 @@ def fetch(urls: list[str], sha256: str, dest: Path, label: str = "", quiet: bool
                 done = 0
                 last = 0.0
                 while chunk := r.read(1 << 20):
+                    done += len(chunk)
+                    if max(done, total) > max_bytes:
+                        raise TooBig(f"{label or dest.name} is larger than {max_bytes / 1e6:.0f} MB; refusing to download it")
                     f.write(chunk)
                     h.update(chunk)
-                    done += len(chunk)
                     if not quiet and time.time() - last > 0.5:
                         last = time.time()
                         pct = f"{100 * done / total:5.1f}%" if total else ""
@@ -87,10 +103,15 @@ def fetch(urls: list[str], sha256: str, dest: Path, label: str = "", quiet: bool
                 raise OSError(f"sha256 mismatch for {url}: got {h.hexdigest()}, want {sha256}")
             part.replace(dest)
             return dest
-        except Exception as e:  # try the next mirror
-            last_err = e
+        except TooBig:
             part.unlink(missing_ok=True)
-    raise OSError(f"could not fetch {label or dest.name}: {last_err}")
+            raise
+        except Exception as e:  # try the next mirror
+            part.unlink(missing_ok=True)
+            if isinstance(e, OSError) and e.errno in (errno.ENOSPC, errno.EDQUOT, errno.EROFS):
+                raise  # this machine's disk, not the host: trying again will not help
+            last_err = e
+    raise FetchError(f"could not fetch {label or dest.name}: {last_err}")
 
 
 def round_shards(rnd: Round, scale: Scale, quiet: bool = False) -> list[Shard]:
@@ -103,9 +124,10 @@ def round_shards(rnd: Round, scale: Scale, quiet: bool = False) -> list[Shard]:
         listing = fetch(
             [cfg["base_url"] + cfg["paths"].format(crawl=cfg["crawl"])],
             cfg["paths_sha256"],
-            cache_dir() / "pool" / "wet" / f"{cfg['crawl']}.paths.gz",
+            cache_dir() / "pool" / "wet" / f"{_crawl_id(cfg['crawl'])}.paths.gz",
             f"{cfg['crawl']} file list",
             quiet,
+            max_bytes=64 << 20,
         )
         paths = gzip.decompress(listing.read_bytes()).decode().split()
         if len(paths) != int(cfg["n_shards"]):
@@ -114,6 +136,16 @@ def round_shards(rnd: Round, scale: Scale, quiet: bool = False) -> list[Shard]:
     else:
         raise ValueError(f"unknown pool kind {cfg['kind']!r}; upgrade stet")
     return [pool[i] for i in rnd.shard_indices(scale, len(pool))]
+
+
+def _crawl_id(crawl: str) -> str:
+    """A crawl id as a file name. Official rounds take theirs from the server, so it is
+    checked where the round is built (spec.official_round) and again here, where it matters."""
+    from .spec import CRAWL_ID_RE
+
+    if not CRAWL_ID_RE.fullmatch(crawl):
+        raise ValueError(f"{crawl[:40]!r} is not a Common Crawl id")
+    return crawl
 
 
 def shard_path_of(shard: Shard) -> Path:
@@ -126,7 +158,7 @@ def shard_path_of(shard: Shard) -> Path:
 
 def shard_path(shard: Shard, quiet: bool = False) -> Path:
     if shard.sha256:
-        return fetch([shard.url], shard.sha256, shard_path_of(shard), shard.path, quiet)
+        return fetch([shard.url], shard.sha256, shard_path_of(shard), shard.path, quiet, max_bytes=shard.size or FETCH_LIMIT_BYTES)
     # Crawl files are not listed with hashes. They are gzip, which carries its own checksum,
     # and the built corpus's sha256 is compared across verifiers.
     return fetch([shard.url], "", shard_path_of(shard), shard.path.rsplit("/", 1)[-1], quiet)
@@ -432,23 +464,79 @@ def exam_pack_path(season: Season, quiet: bool = False) -> Path:
     override = os.environ.get("STET_EXAM_PACK")
     if override:
         return Path(override)
-    return fetch(list(cfg["urls"]), cfg["sha256"], cache_dir() / "exam" / cfg["file"], "exam pack", quiet)
+    return fetch(list(cfg["urls"]), cfg["sha256"], cache_dir() / "exam" / cfg["file"], "exam pack", quiet, max_bytes=512 << 20)
+
+
+def _read_pool(path: Path, sources: list[str], split: str) -> dict[str, list[dict]]:
+    pool: dict[str, list[dict]] = {s: [] for s in sources}
+    with open(path, "rb") as f:
+        reader = zstandard.ZstdDecompressor().stream_reader(f)
+        for line in io.TextIOWrapper(reader, encoding="utf-8"):
+            it = json.loads(line)
+            if it["split"] == split and it["source"] in pool:
+                pool[it["source"]].append(it)
+    return pool
 
 
 def load_exam_pool(season: Season, split: str) -> dict[str, list[dict]]:
     """All exam passages for a split, by source, in pack order."""
     key = (season.id, split)
     if key not in _exam_cache:
-        path = exam_pack_path(season)
-        pool: dict[str, list[dict]] = {s: [] for s in season.exam_sources}
-        with open(path, "rb") as f:
-            reader = zstandard.ZstdDecompressor().stream_reader(f)
-            for line in io.TextIOWrapper(reader, encoding="utf-8"):
-                it = json.loads(line)
-                if it["split"] == split and it["source"] in pool:
-                    pool[it["source"]].append(it)
-        _exam_cache[key] = pool
+        _exam_cache[key] = _read_pool(exam_pack_path(season), season.exam_sources, split)
     return _exam_cache[key]
+
+
+_heldout_pack: dict[str, Path | None] = {}
+
+
+class HeldoutError(RuntimeError):
+    """The held-out pack on this machine is not the one the season committed to."""
+
+
+def heldout_pack_file(season: Season) -> Path:
+    """Where this machine's copy of the held-out exam goes, whether or not it is there."""
+    from .keys import config_dir
+
+    return Path(os.environ.get("STET_HELDOUT_EXAM") or config_dir() / f"heldout-{season.id}.jsonl.zst")
+
+
+def heldout_pack_path(season: Season) -> Path | None:
+    """The season's held-out exam, if this machine has it. Until the season closes, only anchors do.
+
+    It has to be the file the season file commits to. Anything else is refused out loud:
+    results on another pack would be worth nothing on the day the real one is published.
+    """
+    want = (season.raw.get("heldout_exam") or {}).get("sha256")
+    if not want:
+        return None
+    if season.id not in _heldout_pack:
+        path = heldout_pack_file(season)
+        if not path.is_file():
+            _heldout_pack[season.id] = None
+        elif _sha256_file(path) != want:
+            raise HeldoutError(
+                f"{path} is not the held-out exam that season {season.id} committed to "
+                f"(its sha256 should be {want}). Put the right file there, or move this one away to go without."
+            )
+        else:
+            _heldout_pack[season.id] = path
+    return _heldout_pack[season.id]
+
+
+def heldout_exam(rnd: Round, scale: Scale) -> dict[str, list[dict]] | None:
+    """An official round's draw from the held-out exam: same sources, same sizes, other documents.
+
+    None on every machine that does not hold the pack, which is every machine but an anchor.
+    """
+    if rnd.kind != "official":
+        return None
+    path = heldout_pack_path(rnd.season)
+    if path is None:
+        return None
+    key = (rnd.season.id, "heldout:" + rnd.split)
+    if key not in _exam_cache:
+        _exam_cache[key] = _read_pool(path, rnd.season.exam_sources, rnd.split)
+    return {src: [items[i] for i in rnd.exam_indices(scale, src, len(items))] for src, items in _exam_cache[key].items()}
 
 
 def round_exam(rnd: Round, scale: Scale) -> dict[str, list[dict]]:

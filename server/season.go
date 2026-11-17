@@ -60,10 +60,9 @@ type ScriptLimits struct {
 
 // RecordRule is how the record changes hands. See checkRecord.
 type RecordRule struct {
-	Looks      []int              `json:"looks"`
-	Alpha      float64            `json:"alpha"`
-	MinAudited int                `json:"min_audited"`
-	Margin     map[string]float64 `json:"margin"`
+	Looks  []int              `json:"looks"`
+	Alpha  float64            `json:"alpha"`
+	Margin map[string]float64 `json:"margin"`
 }
 
 type Season struct {
@@ -82,6 +81,7 @@ type Season struct {
 	ExamSources   []string                `json:"exam_sources"`
 	ExamFile      string                  `json:"exam_file"`
 	ExamSHA256    string                  `json:"exam_sha256"`
+	HeldoutSHA256 string                  `json:"heldout_exam_sha256"` // a commitment; the server never sees the file
 	Beacon        Beacon                  `json:"beacon"`
 	DrawGrid      int64                   `json:"draw_grid_seconds"`
 	Pools         map[string]Pool         `json:"pools"`
@@ -223,3 +223,6 @@ func (s *Season) multiplier(curveKey string, gain float64) (m float64, capped, o
 	}
 	return 0, false, false
 }
+
+// heldoutFile is the name the held-out exam is published under when the season closes.
+func (s *Season) heldoutFile() string { return "heldout-" + s.ID + ".jsonl.zst" }

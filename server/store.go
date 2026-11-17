@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -39,11 +40,10 @@ type Account struct {
 	GithubID        int64           `json:"github_id,omitempty"`
 	GithubCreatedAt int64           `json:"github_created_at,omitempty"`
 	CreatedAt       int64           `json:"created_at"`
-	Trusted         bool            `json:"trusted,omitempty"`
-	Agreed          int             `json:"agreed,omitempty"` // grades that matched a trusted verifier's, ever
-	Streak          int             `json:"streak,omitempty"`
-	Strikes         int             `json:"strikes,omitempty"`
-	Banned          bool            `json:"banned,omitempty"`
+	Agreed          int             `json:"agreed,omitempty"`  // grades that matched the anchor's, ever
+	Streak          int             `json:"streak,omitempty"`  // and in a row
+	Strikes         int             `json:"strikes,omitempty"` // grades that did not, ever
+	LastStrikeAt    int64           `json:"last_strike_at,omitempty"`
 	Hardware        json.RawMessage `json:"hardware,omitempty"`
 	GPUSeconds      float64         `json:"gpu_seconds,omitempty"`
 	LastSeen        int64           `json:"last_seen,omitempty"`
@@ -51,8 +51,6 @@ type Account struct {
 	// people who run the server, and a database row cannot make one.
 	Anchor bool `json:"-"`
 }
-
-func (a *Account) reliable() bool { return a.Anchor || a.Trusted }
 
 type Editor struct {
 	ID          string       `json:"id"` // sha256 of the bundle
@@ -66,7 +64,8 @@ type Editor struct {
 	Files       []BundleFile `json:"files"`
 	Size        int64        `json:"size"`
 	CreatedAt   int64        `json:"created_at"`
-	Status      string       `json:"status"` // queued | running | retired | withdrawn
+	Status      string       `json:"status"`              // queued | running | retired | withdrawn
+	GithubID    int64        `json:"github_id,omitempty"` // whose it was when submitted
 	Public      bool         `json:"public,omitempty"`
 }
 
@@ -86,36 +85,73 @@ type Round struct {
 	BaselineLoss *float64           `json:"baseline_loss,omitempty"`
 	Baseline     map[string]float64 `json:"baseline,omitempty"`
 	BaselineN    int                `json:"baseline_n,omitempty"`
+	// Was lists the beacon rounds this round was announced for before its draw moved.
+	// No other round is ever announced for one of them: a verifier that saw the first
+	// announcement would rightly refuse the second.
+	Was []int64 `json:"was,omitempty"`
+	// Postponed says the draw was put off because the round before was still being graded.
+	// It is then made at the first grid mark after that round settles.
+	Postponed bool `json:"postponed,omitempty"`
+	// Volunteers whose grades were turned away because their machine built a different
+	// round or measured a different unedited loss. Published when the round settles.
+	Differs []Differ `json:"differs,omitempty"`
 }
 
-// EntryDetail is the public summary of a settled entry: what the grade that defines its
-// score reported, and who stands behind it.
+// EntryDetail is the public summary of a settled entry: what the anchor's grade reported,
+// and how the volunteers' grades of the same script compared with it.
 type EntryDetail struct {
 	Script    json.RawMessage `json:"script,omitempty"`
 	Hardware  json.RawMessage `json:"hardware,omitempty"`
 	Train     *TrainInfo      `json:"train,omitempty"`
-	Verifiers []string        `json:"verifiers"`
-	Audited   bool            `json:"audited,omitempty"` // an anchor graded it
+	Verifiers []string        `json:"verifiers"`          // the anchor, then every volunteer whose grade agreed
+	Disputed  int             `json:"disputed,omitempty"` // volunteers' grades that differed from the anchor's
+	Audited   bool            `json:"audited,omitempty"`  // an anchor graded it (always, since harness 0.2.1)
+	// Every volunteer's grade of the entry, whatever it said. Published when the round settles.
+	Replications []Replication `json:"replications,omitempty"`
+	// Two or more volunteers differed from the anchor and agreed with each other: the
+	// anchor's grade may be the one that is wrong.
+	DisputedTogether bool `json:"disputed_together,omitempty"`
+}
+
+// Replication is one volunteer's grade of an entry, as published beside the anchor's.
+type Replication struct {
+	Handle   string   `json:"handle"`
+	Verdict  string   `json:"verdict"`              // agreed | differs | other data | baseline differs
+	Valid    bool     `json:"valid"`                // whether this volunteer found the script valid
+	Loss     *float64 `json:"loss,omitempty"`       // its exam loss
+	Diff     *float64 `json:"difference,omitempty"` // its loss minus the anchor's
+	BaseDiff *float64 `json:"baseline_difference,omitempty"`
+	First    bool     `json:"first,omitempty"` // this account had no agreed grade before this round
+}
+
+// Differ is a volunteer whose grade was turned away because its machine built a different
+// round or measured a different unedited loss. Kept so that it is on show with the rest.
+type Differ struct {
+	Handle string  `json:"handle"`
+	What   string  `json:"what"` // corpus | baseline
+	Diff   float64 `json:"difference,omitempty"`
 }
 
 type Entry struct {
-	RoundIdx   int                `json:"round"`
-	EditorID   string             `json:"editor"`
-	Status     string             `json:"status"` // open | settled
-	Spot       bool               `json:"spot,omitempty"`
-	Valid      bool               `json:"valid,omitempty"`
-	Loss       *float64           `json:"loss,omitempty"`
-	Gain       float64            `json:"gain,omitempty"`
-	BySource   map[string]float64 `json:"by_source,omitempty"`
-	Detail     *EntryDetail       `json:"detail,omitempty"`
-	NResults   int                `json:"n_results,omitempty"`
-	Reason     string             `json:"reason,omitempty"`
-	SettledAt  int64              `json:"settled_at,omitempty"`
-	Script     string             `json:"script,omitempty"` // sha256 of the edit script an anchor's run produced
-	ScriptSize int64              `json:"script_size,omitempty"`
-	Edit       *EditReport        `json:"edit,omitempty"`
-	EditedAt   int64              `json:"edited_at,omitempty"`
-	EditedBy   int64              `json:"edited_by,omitempty"`
+	RoundIdx int                `json:"round"`
+	EditorID string             `json:"editor"`
+	Status   string             `json:"status"` // open | settled
+	Valid    bool               `json:"valid,omitempty"`
+	Loss     *float64           `json:"loss,omitempty"`
+	Gain     float64            `json:"gain,omitempty"`
+	BySource map[string]float64 `json:"by_source,omitempty"`
+	Detail   *EntryDetail       `json:"detail,omitempty"`
+	NResults int                `json:"n_results,omitempty"`
+	Reason   string             `json:"reason,omitempty"`
+	// Void: the anchors could not run the editor at all (their machine's trouble, not the
+	// editor's). The round does not count for it, for or against.
+	Void       bool        `json:"void,omitempty"`
+	SettledAt  int64       `json:"settled_at,omitempty"`
+	Script     string      `json:"script,omitempty"` // sha256 of the edit script an anchor's run produced
+	ScriptSize int64       `json:"script_size,omitempty"`
+	Edit       *EditReport `json:"edit,omitempty"`
+	EditedAt   int64       `json:"edited_at,omitempty"`
+	EditedBy   int64       `json:"edited_by,omitempty"`
 }
 
 type Claim struct {
@@ -126,7 +162,9 @@ type Claim struct {
 	Kind      string `json:"kind"` // edit | grade
 	ClaimedAt int64  `json:"claimed_at"`
 	ExpiresAt int64  `json:"expires_at"`
-	Status    string `json:"status"` // claimed | done | released | expired
+	// claimed | done | released | refused | expired (the entry settled first) |
+	// lapsed (its time ran out with no report and no release)
+	Status string `json:"status"`
 }
 
 func (c *Claim) live(t int64) bool { return c.Status == "claimed" && c.ExpiresAt > t }
@@ -151,7 +189,7 @@ type Result struct {
 	CorpusSHA     string             `json:"corpus_sha256"`
 	ExamSHA       string             `json:"exam_sha256"`
 	Seconds       float64            `json:"seconds,omitempty"`
-	Verdict       string             `json:"verdict"` // pending | agreed | outlier | void
+	Verdict       string             `json:"verdict"` // pending | agreed | same (agreed, on an entry that earns no standing) | outlier | void
 	// Summary is kept only until the entry settles; the entry's detail keeps the one that
 	// came to define its score.
 	Summary *ResultSummary `json:"summary,omitempty"`
@@ -470,6 +508,7 @@ type Store struct {
 	version uint64         // bumps whenever the state changes; caches key on it
 	lazy    map[string]any // changes not worth a commit of their own (a verifier's last-seen time)
 	stale   bool           // memory could not be reconciled with storage; fixed before the next change
+	down    atomic.Bool    // stale, for whoever must not wait for the lock to learn it
 }
 
 func openStore(ctx context.Context, kv KV, blobs Blobs, anchors map[string]bool) (*Store, error) {
@@ -603,15 +642,21 @@ func encodeWrites(objects map[string]any) ([]KVWrite, error) {
 
 var errUnavailable = fail(503, "the database is not answering; try again in a moment")
 
-// reload replaces the in-memory state with what storage holds. Caller holds the lock.
+// reload replaces the in-memory state with what storage holds. Caller holds the lock. It
+// takes its own time: the caller's may already be spent on the commit that failed, and
+// until a reload succeeds the state in memory may hold a change that was never stored.
 func (st *Store) reload(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), storeBudget)
+	defer cancel()
 	s, rev, err := loadState(ctx, st.kv, st.anchors)
 	if err != nil {
 		st.stale = true
+		st.down.Store(true)
 		slog.Error("could not re-read the database", "err", err)
 		return err
 	}
 	st.s, st.rev, st.stale = s, rev, false
+	st.down.Store(false)
 	st.lazy = map[string]any{}
 	st.version++
 	return nil
@@ -706,11 +751,9 @@ func (st *Store) flush(ctx context.Context) {
 	st.commit(ctx, pending)
 }
 
-func (st *Store) ready() bool {
-	st.mu.RLock()
-	defer st.mu.RUnlock()
-	return !st.stale
-}
+// ready is asked on every request, and while the database is down the lock is held for
+// most of every retry. The answer must not wait behind it.
+func (st *Store) ready() bool { return !st.down.Load() }
 
 // audit checks that memory and storage agree, object for object. Tests call it after every
 // step: a change that forgot to save something it touched fails here.

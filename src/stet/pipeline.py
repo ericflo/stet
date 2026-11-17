@@ -9,6 +9,7 @@ grade the published scripts.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 from . import data
@@ -27,17 +28,43 @@ def baseline(rnd: Round, scale: Scale, device=None, progress=None, log=None) -> 
     """
     device = pick_device(device) if not hasattr(device, "type") else device
     path = data.round_dir(rnd, scale) / f"baseline-{HARNESS_VERSION}-{device.type}.json"
-    if path.exists():
-        return json.loads(path.read_text())
+    cached = _cached(path)
+    # An anchor needs the held-out exam's baseline too, so a baseline measured before the
+    # pack was put in place is measured again.
+    if cached is not None and ("heldout" in cached or data.heldout_exam(rnd, scale) is None):
+        return cached
     corpus, exam = data.materialize(rnd, scale)
-    script = data.round_dir(rnd, scale) / "identity.jsonl"
+    # Named for this process: two verifiers on one machine share the round's directory.
+    script = data.round_dir(rnd, scale) / f"identity-{os.getpid()}.jsonl"
     write_script(script, range(len(corpus)))
-    result = grade(rnd, scale, corpus, exam, script, device=device, progress=progress, log=log)
-    script.unlink(missing_ok=True)
+    try:
+        result = grade(rnd, scale, corpus, exam, script, device=device, progress=progress, log=log)
+    finally:
+        script.unlink(missing_ok=True)
     if not result["valid"]:
         raise RuntimeError(f"the baseline for {rnd.id} could not be graded: {result['invalid_reason']}")
-    path.write_text(json.dumps(result))
+    if result.get("heldout_error"):
+        raise RuntimeError(f"the baseline for {rnd.id} could not sit the held-out exam: {result['heldout_error']}")
+    # Written whole or not at all: a file cut short by a full disk would otherwise stop
+    # every later job of the round. With a held-out part in it, it is nobody else's to read.
+    tmp = path.with_name(f"{path.name}.tmp{os.getpid()}")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600 if "heldout" in result else 0o644)
+    with os.fdopen(fd, "w") as f:
+        f.write(json.dumps(result))
+    os.replace(tmp, path)
     return result
+
+
+def _cached(path: Path) -> dict | None:
+    """A baseline saved earlier, or None if there is none that can be used. A file that
+    cannot be read is as good as no file: the baseline is measured again and it is replaced."""
+    try:
+        cached = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(cached, dict) or not cached.get("valid") or not isinstance(cached.get("exam"), dict):
+        return None
+    return cached
 
 
 def edit_round(

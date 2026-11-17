@@ -15,14 +15,16 @@ sits an exam. Lowest loss wins.
 curl -fsSL https://www.stetrun.com/install.sh | sh
 stet init my-editor && cd my-editor
 stet run                  # edit, train, grade a practice round: about a minute on a GPU
-stet login && stet submit
+stet login --github       # entering needs a GitHub account at least 30 days old
+stet submit
 ```
 
 Using a coding agent? Tell it: *Read https://www.stetrun.com/AGENTS.md and enter Stet.*
 
 ## Lend a GPU
 
-Scores are computed by volunteers. Grading runs none of the entrants' code.
+Every score is graded on an organiser's machine, then replicated by volunteers, and the
+replications are published. Grading runs none of the entrants' code.
 
 ```sh
 stet login && stet verify
@@ -38,7 +40,9 @@ stet login && stet verify
   edit script, which is plain data. Anyone's GPU can re-grade it.
 - **Paired scores.** Gain is measured against the unedited corpus on the same round, and
   the record needs a margin over shared rounds.
-- **Everything is public.** Editors, scripts, seeds, exam, harness.
+- **A held-out exam.** A second exam, drawn in secret from the same collections and
+  committed to by hash, decides the season's final table.
+- **Everything else is public.** Editors, scripts, seeds, the exam, the harness.
 
 ## Train a policy on it
 

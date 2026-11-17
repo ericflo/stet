@@ -74,7 +74,11 @@ type memKV struct {
 	// failNext makes the next commit fail after (if applied) or before applying it: tests
 	// use it to check that the server recovers from an outcome it cannot know.
 	failNext string
+	// down makes every call fail, as a database that is not answering does.
+	down bool
 }
+
+var errDown = errors.New("the test database is down")
 
 func newMemKV() *memKV { return &memKV{data: map[string]json.RawMessage{}} }
 
@@ -83,6 +87,9 @@ func (m *memKV) Describe() string { return "memory (nothing is kept across resta
 func (m *memKV) Load(ctx context.Context, scans []KVScan) ([][]KVItem, int64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.down {
+		return nil, 0, errDown
+	}
 	keys := make([]string, 0, len(m.data))
 	for k := range m.data {
 		keys = append(keys, k)
@@ -110,12 +117,18 @@ func (m *memKV) Load(ctx context.Context, scans []KVScan) ([][]KVItem, int64, er
 func (m *memKV) Revision(ctx context.Context) (int64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.down {
+		return 0, errDown
+	}
 	return m.rev, nil
 }
 
 func (m *memKV) Commit(ctx context.Context, ifRevision int64, writes []KVWrite) (int64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.down {
+		return 0, errDown
+	}
 	fail := m.failNext
 	m.failNext = ""
 	if fail == "before" {

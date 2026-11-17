@@ -21,19 +21,19 @@ var reservedHandles = map[string]bool{
 	"www": true, "root": true, "system": true, "official": true, "maintainer": true, "anonymous": true,
 }
 
-// verifySignature checks the request's Ed25519 signature and returns the signing key (hex).
-// The signed message is "stet-v1\nMETHOD\nPATH?QUERY\nTIME\nSHA256(body)".
-func verifySignature(r *http.Request, body []byte) (string, error) {
+// claimedKey reads who a request says it is from, out of its headers alone: the key (hex,
+// lower case) once the three signing headers are well formed and the timestamp is fresh.
+// It proves nothing yet. It is what lets the server refuse a stranger before reading
+// whatever they are uploading.
+func claimedKey(r *http.Request) (string, error) {
 	keyHex, sigHex, ts := r.Header.Get("X-Stet-Key"), r.Header.Get("X-Stet-Sig"), r.Header.Get("X-Stet-Time")
 	if keyHex == "" || sigHex == "" || ts == "" {
 		return "", errors.New("this request must be signed; run `stet login`")
 	}
-	key, err := hex.DecodeString(keyHex)
-	if err != nil || len(key) != ed25519.PublicKeySize {
+	if key, err := hex.DecodeString(keyHex); err != nil || len(key) != ed25519.PublicKeySize {
 		return "", errors.New("malformed key")
 	}
-	sig, err := hex.DecodeString(sigHex)
-	if err != nil || len(sig) != ed25519.SignatureSize {
+	if sig, err := hex.DecodeString(sigHex); err != nil || len(sig) != ed25519.SignatureSize {
 		return "", errors.New("malformed signature")
 	}
 	t, err := strconv.ParseInt(ts, 10, 64)
@@ -43,10 +43,34 @@ func verifySignature(r *http.Request, body []byte) (string, error) {
 	if d := now() - t; d > maxClockSkew || d < -maxClockSkew {
 		return "", fmt.Errorf("the request's timestamp is %d seconds from the server's clock; check your clock", d)
 	}
-	sum := sha256.Sum256(body)
-	msg := strings.Join([]string{"stet-v1", r.Method, r.URL.RequestURI(), ts, hex.EncodeToString(sum[:])}, "\n")
+	return strings.ToLower(keyHex), nil
+}
+
+// verifySignature checks the request's Ed25519 signature and returns the signing key (hex).
+// The signed message is "stet-v1\nMETHOD\nPATH?QUERY\nTIME\nSHA256(body)".
+func verifySignature(r *http.Request, body []byte) (string, error) {
+	return verifySigned(r, sha256Hex(body))
+}
+
+// verifySigned is verifySignature for a body known only by its hash. A client sends that
+// hash in X-Stet-Body, so that an upload's signature can be checked before the server
+// reads any of it; whoever does this must then check that the body has that hash.
+func verifySigned(r *http.Request, bodySum string) (string, error) {
+	keyHex, err := claimedKey(r)
+	if err != nil {
+		return "", err
+	}
+	key, _ := hex.DecodeString(keyHex)
+	sig, _ := hex.DecodeString(r.Header.Get("X-Stet-Sig"))
+	ts := r.Header.Get("X-Stet-Time")
+	msg := strings.Join([]string{"stet-v1", r.Method, r.URL.RequestURI(), ts, bodySum}, "\n")
 	if !ed25519.Verify(key, []byte(msg), sig) {
 		return "", errors.New("bad signature")
 	}
-	return strings.ToLower(keyHex), nil
+	return keyHex, nil
+}
+
+func sha256Hex(b []byte) string {
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
 }

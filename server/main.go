@@ -45,12 +45,13 @@ type Config struct {
 	LadderSize       int
 	QualifyRounds    int // rounds every entry is given
 	RatedRounds      int // rounds before an editor is ranked
-	SpotRate         float64
 	Lease            time.Duration
-	AnchorPatience   time.Duration // how long an anchor leaves a grade to volunteers who are around
+	ReplicaWait      time.Duration // how long a graded round waits for volunteers who have started
 	FixedCrawl       *Crawl
 	RequireGithub    bool
 	GithubMinAgeDays int
+	GithubToken      string // optional: lifts GitHub's limit on how often the server may look up a gist
+	SeasonClosed     bool   // the season is over: the held-out exam may be published
 	Dev              bool
 }
 
@@ -61,6 +62,9 @@ type App struct {
 	boards boardCache
 	site   *Site
 	limits *limiter
+	// One token per large request body in memory: entrants' bundles, and apart from them
+	// the anchors' scripts and files.
+	uploads, anchorUploads chan struct{}
 }
 
 func env(key, def string) string {
@@ -97,27 +101,31 @@ func envBool(key string, def bool) bool {
 func loadConfig(season *Season) (Config, error) {
 	dev := os.Getenv("STET_DEV") == "1"
 	cfg := Config{
-		Addr:             env("STET_ADDR", ":8080"),
-		BaseURL:          strings.TrimRight(env("STET_BASE_URL", "http://localhost:8080"), "/"),
-		RedirectHosts:    map[string]bool{},
-		DataDir:          env("STET_DATA_DIR", "./data"),
-		FilesDir:         env("STET_FILES_DIR", "./files"),
-		DocsDir:          env("STET_DOCS_DIR", "../docs"),
-		AgentsFile:       env("STET_AGENTS_FILE", "../src/stet/templates/AGENTS.md"),
-		DBURL:            strings.TrimRight(os.Getenv("STET_DB_URL"), "/"),
-		DBName:           env("STET_DB_NAME", "stet"),
-		AnchorKeys:       map[string]bool{},
-		Scale:            env("STET_SCALE", season.OfficialScale),
-		RoundInterval:    envDuration("STET_ROUND_INTERVAL", 6*time.Hour),
-		MaxNewPerRound:   envInt("STET_MAX_NEW_PER_ROUND", 8),
-		LadderSize:       envInt("STET_LADDER_SIZE", 10),
-		QualifyRounds:    envInt("STET_QUALIFY_ROUNDS", 5),
+		Addr:          env("STET_ADDR", ":8080"),
+		BaseURL:       strings.TrimRight(env("STET_BASE_URL", "http://localhost:8080"), "/"),
+		RedirectHosts: map[string]bool{},
+		DataDir:       env("STET_DATA_DIR", "./data"),
+		FilesDir:      env("STET_FILES_DIR", "./files"),
+		DocsDir:       env("STET_DOCS_DIR", "../docs"),
+		AgentsFile:    env("STET_AGENTS_FILE", "../src/stet/templates/AGENTS.md"),
+		DBURL:         strings.TrimRight(os.Getenv("STET_DB_URL"), "/"),
+		DBName:        env("STET_DB_NAME", "stet"),
+		AnchorKeys:    map[string]bool{},
+		Scale:         env("STET_SCALE", season.OfficialScale),
+		RoundInterval: envDuration("STET_ROUND_INTERVAL", 6*time.Hour),
+		// An anchor edits and grades every entry, about 12 minutes each at the official
+		// scale. A full round is the ladder plus three rounds' worth of newcomers: 17
+		// entries, a little over three hours of one anchor, inside the six between draws.
+		MaxNewPerRound:   envInt("STET_MAX_NEW_PER_ROUND", 3),
+		LadderSize:       envInt("STET_LADDER_SIZE", 8),
+		QualifyRounds:    envInt("STET_QUALIFY_ROUNDS", 3),
 		RatedRounds:      envInt("STET_RATED_ROUNDS", 3),
-		SpotRate:         0.25,
 		Lease:            envDuration("STET_LEASE", 3*time.Hour),
-		AnchorPatience:   envDuration("STET_ANCHOR_PATIENCE", 45*time.Minute),
+		ReplicaWait:      envDuration("STET_REPLICA_WAIT", 45*time.Minute),
 		RequireGithub:    envBool("STET_REQUIRE_GITHUB", !dev),
 		GithubMinAgeDays: envInt("STET_GITHUB_MIN_AGE_DAYS", 30),
+		GithubToken:      os.Getenv("STET_GITHUB_TOKEN"),
+		SeasonClosed:     envBool("STET_SEASON_CLOSED", false),
 		Dev:              dev,
 	}
 	cfg.APIURL = strings.TrimRight(env("STET_API_URL", cfg.BaseURL), "/")
@@ -181,6 +189,9 @@ func (cfg *Config) check(season *Season) error {
 	if cfg.DBURL == "" {
 		return errors.New("STET_DB_URL is not set: outside development the records must live in durable-db")
 	}
+	if cfg.S3.Bucket == "" {
+		return errors.New("STET_S3_BUCKET is not set: outside development the files must live in a bucket, not in the container")
+	}
 	return nil
 }
 
@@ -217,7 +228,8 @@ func newApp(ctx context.Context, cfg Config, season *Season, kv KV, blobs Blobs)
 	if err != nil {
 		return nil, err
 	}
-	a := &App{cfg: cfg, st: st, season: season, limits: newLimiter()}
+	a := &App{cfg: cfg, st: st, season: season, limits: newLimiter(), uploads: make(chan struct{}, 4), anchorUploads: make(chan struct{}, 2)}
+	githubToken = cfg.GithubToken
 	a.site, err = newSite(a)
 	return a, err
 }
@@ -252,8 +264,15 @@ func main() {
 		WriteTimeout:      30 * time.Minute,
 		IdleTimeout:       2 * time.Minute,
 	}
+	stopped := make(chan struct{})
 	go func() {
+		defer close(stopped)
 		<-ctx.Done()
+		if !cfg.Dev {
+			// The proxy is told this server is going at the same moment the server is. Keep
+			// answering for as long as it may still be sending requests here.
+			time.Sleep(5 * time.Second)
+		}
 		shut, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
 		srv.Shutdown(shut)
@@ -265,4 +284,5 @@ func main() {
 		slog.Error("server", "err", err)
 		os.Exit(1)
 	}
+	<-stopped // ListenAndServe returns when shutdown starts; requests in flight are still finishing
 }

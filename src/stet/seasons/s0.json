@@ -37,6 +37,10 @@
       "about": "The newest published Common Crawl crawl at the time of the draw: full-page text (WET), every language."
     }
   },
+  "heldout_exam": {
+    "sha256": "c1011b1b09492b7e8a931580ffe5da968472c34269cf886b1868d9f103c69549",
+    "passages": 48000
+  },
   "exam": {
     "file": "exam-s0.jsonl.zst",
     "sha256": "c5186955b7b659ec3ad866a3ef4d1ee87ad7d6afddeb4cdf3825079b873b37e9",
@@ -132,11 +136,21 @@
   "record": {
     "looks": [5, 10, 20, 40],
     "alpha": 0.05,
-    "min_audited": 2,
     "margin": {
       "nano": 0.03,
       "micro": 0.02,
       "standard": 0.02
+    }
+  },
+  "reference_curves": {
+    "practice/nano": [[0.5, 6.670], [1, 6.382], [2, 6.030], [4, 5.519], [8, 5.198]]
+  },
+  "noise": {
+    "nano": {
+      "gain_sd": 0.011
+    },
+    "micro": {
+      "gain_sd": 0.011
     }
   },
   "tolerance": {

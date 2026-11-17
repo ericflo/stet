@@ -20,8 +20,15 @@ func isHex(s string) bool {
 
 // findEditor resolves an id, an id prefix (8+ hex characters) or "handle/name[@version]"
 // (the latest version unless one is named).
-func findEditor(s *State, ref string) *Editor {
+//
+// Only editors the viewer may see are considered (public ones, and the viewer's own; pass 0
+// for a stranger), so a submission that has not run cannot hide a public editor by taking
+// its name or the start of its id. A short id means the oldest editor it fits: ids are
+// hashes, and someone who grinds out a later one with the same first characters gets
+// nothing for it.
+func findEditor(s *State, ref string, viewer int64) *Editor {
 	ref = strings.ToLower(strings.TrimSpace(ref))
+	visible := func(e *Editor) bool { return e != nil && (e.Public || (viewer != 0 && e.AccountID == viewer)) }
 	switch {
 	case strings.Contains(ref, "/"):
 		handle, name, _ := strings.Cut(ref, "/")
@@ -33,7 +40,7 @@ func findEditor(s *State, ref string) *Editor {
 		}
 		var best *Editor
 		for _, e := range s.ownedBy[acct.ID] {
-			if e.Name != name || (want > 0 && e.Version != want) {
+			if e.Name != name || (want > 0 && e.Version != want) || !visible(e) {
 				continue
 			}
 			if best == nil || e.Version > best.Version {
@@ -42,11 +49,13 @@ func findEditor(s *State, ref string) *Editor {
 		}
 		return best
 	case sha256Re.MatchString(ref):
-		return s.Editors[ref]
+		if e := s.Editors[ref]; visible(e) {
+			return e
+		}
 	case len(ref) >= 8 && len(ref) < 64 && isHex(ref):
 		var best *Editor
 		for id, e := range s.Editors {
-			if strings.HasPrefix(id, ref) && (best == nil || e.CreatedAt > best.CreatedAt) {
+			if strings.HasPrefix(id, ref) && visible(e) && (best == nil || e.CreatedAt < best.CreatedAt || (e.CreatedAt == best.CreatedAt && e.ID < best.ID)) {
 				best = e
 			}
 		}
@@ -68,9 +77,6 @@ type Submission struct {
 // Running an entry costs an anchor's time, which is the scarcest thing the competition
 // has, so entries need an identity that is not free to make.
 func (a *App) mayEnter(acct *Account) error {
-	if acct.Banned {
-		return fail(403, "this account is suspended")
-	}
 	if acct.Anchor || !a.cfg.RequireGithub {
 		return nil
 	}
@@ -87,10 +93,6 @@ func (a *App) mayEnter(acct *Account) error {
 // replaces whatever of theirs is still waiting or qualifying. Editors that have finished
 // qualifying keep their results and their place on the ladder.
 func (a *App) submit(ctx context.Context, acctID int64, blob []byte) (*Submission, error) {
-	m, files, err := parseBundle(blob)
-	if err != nil {
-		return nil, fail(400, "%s", err.Error())
-	}
 	sum := sha256.Sum256(blob)
 	id := hex.EncodeToString(sum[:])
 
@@ -107,16 +109,21 @@ func (a *App) submit(ctx context.Context, acctID int64, blob []byte) (*Submissio
 			if existing.AccountID == acctID {
 				return fail(409, "you have already submitted exactly these files (%s v%d). Change something first", existing.Name, existing.Version)
 			}
+			if !existing.Public { // not drawn yet: its code is nobody's to fork
+				return fail(409, "these exact files have already been submitted by someone else. Change something first")
+			}
 			return fail(409, "these exact files have already been submitted by %s. Fork it and make it your own: stet fork %s", s.owner(existing).Handle, id[:12])
 		}
+		// Counted per person, not per key: a GitHub identity that moves to a new account
+		// takes its day's submissions with it.
 		recent := 0
-		for _, e := range s.ownedBy[acctID] {
-			if e.CreatedAt > now()-86400 {
+		for _, e := range s.Editors {
+			if e.CreatedAt > now()-86400 && (e.AccountID == acctID || (acct.GithubID != 0 && e.GithubID == acct.GithubID)) {
 				recent++
 			}
 		}
 		if recent >= maxSubmissionsPerDay && !acct.Anchor {
-			return fail(429, "that is %d entries in a day. Grading is done by volunteers; use `stet run` to iterate and come back tomorrow", recent)
+			return fail(429, "that is %d entries in a day. Running one takes an organiser's machine about a quarter of an hour, three rounds over; use `stet run` to iterate and come back tomorrow", recent)
 		}
 		return nil
 	}
@@ -124,6 +131,11 @@ func (a *App) submit(ctx context.Context, acctID int64, blob []byte) (*Submissio
 	a.st.view(func(s *State) { pre = check(s) })
 	if pre != nil {
 		return nil, pre
+	}
+	// Only now is the bundle unpacked: that costs memory, and the account has earned it.
+	m, files, err := parseBundle(blob)
+	if err != nil {
+		return nil, fail(400, "%s", err.Error())
 	}
 	// The files go first. If the record that follows is never written, an unreferenced
 	// file is all that is left behind.
@@ -160,6 +172,7 @@ func (a *App) submit(ctx context.Context, acctID int64, blob []byte) (*Submissio
 		ed := &Editor{
 			ID: id, AccountID: acctID, Name: m.Name, Version: version, Description: m.Description, Technique: m.Technique,
 			Parent: parent, Entry: m.Entry, Files: files, Size: int64(len(blob)), CreatedAt: now(), Status: "queued",
+			GithubID: acct.GithubID,
 		}
 		tx.saveEditor(ed)
 		tx.event("submit", map[string]any{"editor": id, "name": m.Name, "version": version, "owner": acct.Handle})

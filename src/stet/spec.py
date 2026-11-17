@@ -10,11 +10,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass, field
 from functools import cache
 from importlib import resources
 
-HARNESS_VERSION = "0.2.0"
+HARNESS_VERSION = "0.2.1"
 
 
 @dataclass(frozen=True)
@@ -44,7 +45,7 @@ class Shard:
     url: str
 
 
-POLICY_KEYS = ("reference", "reference_curves", "tolerance", "noise", "record")
+POLICY_KEYS = ("reference", "reference_curves", "tolerance", "noise", "record", "heldout_exam")
 
 
 @dataclass(frozen=True)
@@ -184,6 +185,10 @@ def sample_without_replacement(seed: bytes, label: str, n: int, k: int) -> list[
 
 # --- rounds -------------------------------------------------------------------------------
 
+CRAWL_ID_RE = re.compile(r"^CC-MAIN-\d{4}-\d{2}$")
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+ROUND_ID_RE = re.compile(r"^([a-z0-9]{1,16})-([pgo])(\d{1,9})$")
+
 
 @dataclass(frozen=True)
 class Round:
@@ -270,6 +275,12 @@ def official_round(season: Season, index: int, beacon: dict, crawl: dict) -> Rou
     """
     beacon = {"round": int(beacon["round"]), "randomness": str(beacon["randomness"]).lower()}
     crawl = {"crawl": str(crawl["crawl"]), "paths_sha256": str(crawl["paths_sha256"]).lower(), "n_shards": int(crawl["n_shards"])}
+    # These come from the server and go into the seed, a URL and a file name. A crawl has
+    # one name; anything looser would be a second spelling of it, and so a second seed.
+    if not CRAWL_ID_RE.fullmatch(crawl["crawl"]) or not SHA256_RE.fullmatch(crawl["paths_sha256"]) or not SHA256_RE.fullmatch(beacon["randomness"]):
+        raise ValueError(f"round {index}: the crawl or the beacon is not in the form this season uses")
+    if not (0 < crawl["n_shards"] <= 10_000_000 and beacon["round"] > 0 and index >= 0):
+        raise ValueError(f"round {index}: the crawl or the beacon is out of range")
     seed = official_seed(season.id, index, beacon, crawl)
     return Round(season=season, kind="official", index=index, seed=seed, beacon=beacon, crawl=crawl)
 
@@ -286,6 +297,7 @@ def round_from_description(season: Season, d: dict) -> Round:
 
 
 def parse_round_id(round_id: str) -> tuple[str, str, int]:
-    season_id, tail = round_id.rsplit("-", 1)
-    kind = {"p": "practice", "g": "gym", "o": "official"}[tail[0]]
-    return season_id, kind, int(tail[1:])
+    m = ROUND_ID_RE.fullmatch(round_id)
+    if not m:
+        raise ValueError(f"{round_id[:40]!r} is not a round id (they look like s0-o00012)")
+    return m.group(1), {"p": "practice", "g": "gym", "o": "official"}[m.group(2)], int(m.group(3))

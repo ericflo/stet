@@ -76,15 +76,51 @@ def die(msg: str, code: int = 1):
 # --- helpers --------------------------------------------------------------------------------
 
 
+TORCH_HELP = (
+    "  The installer brings PyTorch with it. Run it again:\n"
+    "    curl -fsSL https://www.stetrun.com/install.sh | sh\n"
+    "  For an AMD GPU, give it the ROCm wheel index for your ROCm version (they are listed at\n"
+    "  https://pytorch.org/get-started/locally/), for example:\n"
+    "    curl -fsSL https://www.stetrun.com/install.sh | STET_TORCH_INDEX=https://download.pytorch.org/whl/rocm7.14 sh\n"
+    "  If you installed stet with pip instead, install PyTorch into the same environment."
+)
+
+
+def torch_index_hint() -> str:
+    """For a machine whose PyTorch came from a GPU maker's wheel index: how to keep that
+    build when installing stet again. The plain installer would bring the default one."""
+    import re
+
+    try:
+        import torch
+
+        m = re.search(r"\+((?:rocm|cu)[0-9.]+)$", str(torch.__version__))
+    except Exception:
+        return ""
+    if not m:
+        return ""
+    return (
+        f"  This machine's PyTorch is the {m.group(1)} build. To keep it, give the installer the same index:\n"
+        f"    curl -fsSL https://www.stetrun.com/install.sh | STET_TORCH_INDEX=https://download.pytorch.org/whl/{m.group(1)} sh\n"
+    )
+
+
+def gpu_vendors() -> set[str]:
+    """Which makers' GPUs this Linux machine has, whatever PyTorch can or cannot see."""
+    found = set()
+    for vendor in Path("/sys/class/drm").glob("card*/device/vendor"):
+        try:
+            found.add({"0x1002": "amd", "0x10de": "nvidia"}.get(vendor.read_text().strip(), ""))
+        except OSError:
+            pass
+    return found - {""}
+
+
 def need_torch():
     try:
         import torch  # noqa: F401
     except ImportError:
-        die(
-            "this command trains a model and needs PyTorch.\n"
-            "  Install the build for your machine from https://pytorch.org/get-started/locally/\n"
-            "  (or `pip install 'stet-cli[train]'` for the default build), then try again."
-        )
+        die("this command trains a model and needs PyTorch.\n" + TORCH_HELP)
 
 
 def resolve_round(args, offset: int = 0):
@@ -181,24 +217,53 @@ def cmd_init(args):
 
 
 def _with_baseline(result: dict, rnd, scale, device, out: Out, skip: bool):
-    from .pipeline import baseline
-
+    if not result["valid"]:
+        result["gain"] = 0.0  # by the rules, and so that whatever reads the JSON finds a number there
     if skip:
         return None
+    from .pipeline import baseline
+
     base = baseline(rnd, scale, device, progress=out.progress("baseline"), log=lambda m: out.line("", out.dim("baseline " + m)))
     result["baseline"] = {"loss": base["exam"]["loss"], "by_source": {k: v["loss"] for k, v in base["exam"]["by_source"].items()}}
     if result["valid"]:
         result["gain"] = round(base["exam"]["loss"] - result["exam"]["loss"], 5)
+    if result.get("heldout") and base.get("heldout"):
+        result["heldout"]["baseline"] = base["heldout"]["loss"]
     return base
+
+
+HELDOUT_KEYS = ("heldout", "heldout_error")
+
+
+def public_part(args, result: dict) -> dict:
+    """A result as it may be written down or printed.
+
+    On a machine that holds the season's held-out exam, a replay of an official round sits
+    it too. What it said belongs in one place, the anchor's own record, and not in a
+    project directory or a terminal where the next script or agent would read it. So it is
+    left out unless `--heldout` asks for it, which is how a published line of that record
+    is checked once the season has closed.
+    """
+    if getattr(args, "heldout", False):
+        return result
+    return {k: v for k, v in result.items() if k not in HELDOUT_KEYS}
 
 
 def _emit(args, result: dict):
     if args.json:
-        slim = dict(result)
+        slim = public_part(args, result)
         if "train" in slim:
             slim["train"] = {k: v for k, v in slim["train"].items() if k != "curve"}
         json.dump(slim, sys.stdout, indent=1)
         sys.stdout.write("\n")
+
+
+def _heldout_line(args, out: Out, result: dict) -> None:
+    held = result.get("heldout")
+    if getattr(args, "heldout", False) and held:
+        out.line("held-out", f"{held['loss']:.4f}" + (f"   baseline {held['baseline']:.4f}" if held.get("baseline") is not None else ""))
+    elif getattr(args, "heldout", False):
+        out.line("held-out", result.get("heldout_error") or "not sat: this machine does not hold the held-out exam, or this is not an official round")
 
 
 def _summary(out: Out, results: list[dict]) -> dict:
@@ -216,7 +281,8 @@ def _summary(out: Out, results: list[dict]) -> dict:
 def cmd_run(args):
     need_torch()
     from .pipeline import run_round
-    from .project import ProjectError, load_project
+    from .project import ProjectError, load_project, pack, unpack
+    from .runner import remove_tree
     from .train import pick_device
 
     out = Out(quiet=args.quiet)
@@ -233,14 +299,29 @@ def cmd_run(args):
         work = project.path / ".stet" / "runs" / f"{stamp}-{rnd.id}-{scale.name}"
         work.mkdir(parents=True, exist_ok=True)
         out.line("", out.bold(f"stet · {project.name} · {rnd.kind} round {rnd.id} · {scale.name} · {device.type}"))
-        result = run_round(
-            project.path, project.entry, rnd, scale, work, sandbox=sandbox, device=device,
-            echo=args.verbose, progress=out.progress("training"), log=lambda m: out.line("", out.dim(m)),
-        )  # fmt: skip
+        bundle = project.path
+        if sandbox == "bwrap":
+            # Run what `stet submit` would send, unpacked as an anchor unpacks it: a file the
+            # bundle leaves out is missing here too, not first in an official round.
+            try:
+                blob, _ = pack(project)
+                unpack(blob, work / "bundle")
+            except ProjectError as e:
+                die(str(e))
+            bundle = work / "bundle"
+        try:
+            result = run_round(
+                bundle, project.entry, rnd, scale, work, sandbox=sandbox, device=device,
+                echo=args.verbose, progress=out.progress("training"), log=lambda m: out.line("", out.dim(m)),
+            )  # fmt: skip
+        finally:
+            if bundle != project.path:
+                remove_tree(bundle)
         result["editor"] = {"name": project.name}
         base = _with_baseline(result, rnd, scale, device, out, args.no_baseline)
-        (work / "result.json").write_text(json.dumps(result, indent=1))
+        (work / "result.json").write_text(json.dumps(public_part(args, result), indent=1))
         report(out, result, base, season)
+        _heldout_line(args, out, result)
         out.line("saved", str((work / "result.json").relative_to(Path.cwd()) if work.is_relative_to(Path.cwd()) else work / "result.json"))
         results.append(result)
     if len(results) == 1:
@@ -253,6 +334,75 @@ def cmd_run(args):
     sys.exit(0 if all(r["valid"] for r in results) else 2)
 
 
+def script_file(ref: str, season, rnd) -> Path:
+    """The edit script `stet score` was asked to grade, as a file of JSON lines.
+
+    `ref` is a file (plain, or zstd-compressed as the site serves them), the sha256 of a
+    published script, or the name of an entry in the official round being replayed
+    (`tidy`, or `stet/tidy`). Anything fetched is checked against its hash.
+    """
+    import hashlib
+    import re
+
+    import zstandard
+
+    from .data import cache_dir
+    from .project import unzstd
+
+    limit = int(season.raw["script"]["max_bytes"])
+
+    def unpacked(blob: bytes, want: str | None) -> Path:
+        try:
+            raw = unzstd(blob, limit)
+        except zstandard.ZstdError:
+            die(f"{'the script the server sent' if want else ref} is zstd-compressed, but damaged or cut short")
+        sha = hashlib.sha256(raw).hexdigest()
+        if len(raw) > limit:
+            die(f"that script is over the {limit >> 20} MB limit")
+        if want and sha != want:
+            die(f"the script the server sent does not match its hash ({want[:12]})")
+        dest = cache_dir() / "scripts" / f"{sha}.jsonl"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dest.with_name(dest.name + f".tmp{os.getpid()}")
+        tmp.write_bytes(raw)
+        tmp.replace(dest)
+        return dest
+
+    path = Path(ref)
+    if path.is_file():
+        with path.open("rb") as f:
+            packed = f.read(4) == b"\x28\xb5\x2f\xfd"  # zstd's magic number
+        return unpacked(path.read_bytes(), None) if packed else path
+    from .client import ApiError, request
+
+    sha = ref.lower()
+    if rnd.kind != "official":
+        # A published script edits one official round's corpus. On any other round its line
+        # numbers mean other documents, and the score would be a number about nothing.
+        hint = f"`stet rounds` lists them, e.g. --round {season.id}-o00001"
+        if re.fullmatch(r"[0-9a-f]{64}", sha):
+            die(f"a published script belongs to the official round it was written for. Say which: stet score {sha[:12]}... --round <official round id> ({hint})")
+        die(f"no file called {ref!r}. To grade a published script, give its sha256 or its entry's name, with --round <official round id> ({hint})")
+    if not re.fullmatch(r"[0-9a-f]{64}", sha):
+        try:
+            entries = request("GET", f"/api/v1/rounds/{rnd.id}").get("entries") or []
+        except ApiError as e:
+            die(str(e))
+        owner, _, name = ref.rpartition("/")
+        found = [e for e in entries if e.get("name") == name and (not owner or e.get("owner") == owner) and (e.get("script") or {}).get("sha256")]
+        if len(found) != 1:
+            names = ", ".join(sorted(f"{e.get('owner')}/{e.get('name')}" for e in entries if (e.get("script") or {}).get("sha256")))
+            die(f"no file called {ref!r}, and round {rnd.id} has {'more than one' if found else 'no'} entry of that name with a script. Its entries: {names or 'none yet'}")
+        sha = str(found[0]["script"]["sha256"]).lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", sha):
+            die("the server described that script in a way this client does not accept")
+    try:
+        blob = request("GET", f"/api/v1/scripts/{sha}", raw=True, timeout=600, limit=limit + (1 << 20))
+    except ApiError as e:
+        die(f"could not fetch script {sha[:12]}: {e}")
+    return unpacked(blob, sha)
+
+
 def cmd_score(args):
     """Grade an edit script you already have, skipping the editor."""
     need_torch()
@@ -261,11 +411,13 @@ def cmd_score(args):
 
     out = Out(quiet=args.quiet)
     season, scale, rnd = resolve_round(args)
+    script = script_file(args.script, season, rnd)
     device = pick_device(args.device)
     out.line("", out.bold(f"stet score · {args.script} · {rnd.kind} round {rnd.id} · {scale.name} · {device.type}"))
-    result = grade_round(rnd, scale, Path(args.script), device=device, progress=out.progress("training"), log=lambda m: out.line("", out.dim(m)))
+    result = grade_round(rnd, scale, script, device=device, progress=out.progress("training"), log=lambda m: out.line("", out.dim(m)))
     base = _with_baseline(result, rnd, scale, device, out, args.no_baseline)
     report(out, result, base, season)
+    _heldout_line(args, out, result)
     _emit(args, result)
     sys.exit(0 if result["valid"] else 2)
 
@@ -280,8 +432,11 @@ def cmd_baseline(args):
     base = baseline(rnd, scale, pick_device(args.device), progress=out.progress("training"), log=lambda m: out.line("", out.dim(m)))
     out.line("round", f"{rnd.id} · {scale.name}")
     out.line("baseline", out.bold(f"{base['exam']['loss']:.4f}") + "   " + " · ".join(f"{k} {v['loss']:.3f}" for k, v in base["exam"]["by_source"].items()))
+    if base.get("heldout"):
+        base["heldout"]["baseline"] = base["heldout"]["loss"]
+    _heldout_line(args, out, base)
     if args.json:
-        json.dump(base, sys.stdout, indent=1)
+        json.dump(public_part(args, base), sys.stdout, indent=1)
         sys.stdout.write("\n")
 
 
@@ -311,6 +466,10 @@ def cmd_doctor(args):
         hw = hardware_info(dev)
         if dev.type == "cuda":
             rows.append((OK, "gpu", f"{hw['gpu']} · {hw['vram_gb']} GB · {hw['backend']} · torch {torch.__version__}"))
+        elif gpu_vendors():
+            # The GPU is there and this PyTorch build cannot use it: the commonest way to end up slow.
+            maker = "an AMD" if "amd" in gpu_vendors() else "an NVIDIA"
+            rows.append((WARN, "gpu", f"this machine has {maker} GPU, but this PyTorch build ({torch.__version__}) cannot use it; training will run on {dev.type}.\n" + TORCH_HELP))
         else:
             rows.append((WARN, "gpu", f"no CUDA or ROCm GPU; training will run on {dev.type} (fine for --scale nano)"))
         if dev.type in grade_devices:
@@ -318,7 +477,7 @@ def cmd_doctor(args):
         else:
             rows.append((WARN, "verify", "official grading needs an NVIDIA or AMD GPU, so every grade uses the same arithmetic"))
     except ImportError:
-        rows.append((WARN, "torch", "not installed: `stet run` and `stet verify` need it (https://pytorch.org/get-started/locally/)"))
+        rows.append((WARN, "torch", "not installed: `stet run` and `stet verify` need it.\n" + TORCH_HELP))
     ok, why = bwrap_available() if sys.platform == "linux" else (False, "")
     if ok:
         scoped, _ = scope_available()
@@ -349,6 +508,9 @@ def add_round_args(p, default_round="0"):
     p.add_argument("--device", default=None, help="torch device (default: best available)")
     p.add_argument("--json", action="store_true", help="print the result as JSON on stdout")
     p.add_argument("-q", "--quiet", action="store_true")
+    # For checking a season's published held-out results once it has closed. Only a machine
+    # with the held-out pack has anything to show, and until then only anchors have it.
+    p.add_argument("--heldout", action="store_true", help=argparse.SUPPRESS)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -375,7 +537,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(fn=cmd_run)
 
     p = sub.add_parser("score", help="grade an edit script directly, without running an editor")
-    p.add_argument("script", help="path to a script.jsonl")
+    p.add_argument("script", help="a script file (.jsonl, or .zst as downloaded), a published script's sha256, or an entry's name in the official round given by --round")
     add_round_args(p)
     p.add_argument("--no-baseline", action="store_true", help="skip the baseline comparison")
     p.set_defaults(fn=cmd_score)
@@ -407,12 +569,17 @@ def main(argv=None):
         ap.print_help()
         return 0
     from .client import ApiError
+    from .data import HeldoutError
+    from .project import ProjectError
+    from .runner import HarnessError
 
     try:
         return args.fn(args) or 0
     except KeyboardInterrupt:
         die("interrupted", 130)
-    except (ApiError, OSError) as e:
+    except ApiError as e:
+        die(str(e) + ("\n" + torch_index_hint().rstrip() if e.status == 426 and torch_index_hint() else ""))
+    except (OSError, HarnessError, HeldoutError, ProjectError) as e:
         die(str(e))
 
 

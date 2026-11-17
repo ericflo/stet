@@ -6,7 +6,7 @@
     <h1>{{$d.ID}}</h1>
     <p class="sub">
       {{if eq $r.Status "scheduled"}}Announced. It will be drawn <span data-until="{{$r.DrawAt}}">{{ago $r.DrawAt}}</span>, from a beacon value that does not exist yet.
-      {{else if eq $r.Status "open"}}Drawn {{ago $r.DrawnAt}}. {{$r.Edited}} of {{$r.Entries}} {{plural $r.Entries "entry" "entries"}} edited, {{$r.Settled}} graded. Grades stay sealed until an entry settles.
+      {{else if eq $r.Status "open"}}Drawn {{ago $r.DrawnAt}}. {{$r.Edited}} of {{$r.Entries}} {{plural $r.Entries "entry" "entries"}} edited. Every grade stays sealed until the whole round settles.
       {{else}}Settled {{ago $r.SettledAt}}: {{$r.Entries}} {{plural $r.Entries "editor" "editors"}} on one fresh corpus.{{end}}
     </p>
     <div class="meta">
@@ -22,13 +22,13 @@
     <div><span class="eyebrow">Entries</span><div class="v">{{$r.Entries}}</div></div>
     <div><span class="eyebrow">Unedited loss</span><div class="v">{{if has $r.BaselineLoss}}{{f3 (ptr $r.BaselineLoss)}}<small>{{$r.BaselineN}} {{plural $r.BaselineN "measurement" "measurements"}}</small>{{else}}—{{end}}</div></div>
     <div><span class="eyebrow">Best gain</span><div class="v">{{if has $r.BestGain}}{{gain (ptr $r.BestGain)}}{{else}}—{{end}}</div></div>
-    <div><span class="eyebrow">Graded</span><div class="v">{{$r.Settled}}<small>of {{$r.Entries}}</small></div></div>
+    <div><span class="eyebrow">{{if eq $r.Status "settled"}}Settled{{else}}Edited{{end}}</span><div class="v">{{if eq $r.Status "settled"}}{{$r.Settled}}{{else}}{{$r.Edited}}{{end}}<small>of {{$r.Entries}}</small></div></div>
   </div>
 
   <div class="table-wrap" id="entries" data-live>
     {{if $d.Entries}}
     <table>
-      <thead><tr><th>#</th><th>Editor</th><th>Status</th><th class="r">Loss</th><th class="r">Gain</th><th class="r hide-s">Kept</th><th class="r hide-s">Edit took</th><th class="hide-s">Script</th><th class="hide-s">Graded by</th></tr></thead>
+      <thead><tr><th>#</th><th>Editor</th><th>Status</th><th class="r">Loss</th><th class="r">Gain</th><th class="r hide-s">Kept</th><th class="r hide-s">Edit took</th><th class="hide-s">Script</th><th class="hide-s" title="The anchor that set the score, then the volunteers whose own grades agreed with it">Graded by</th></tr></thead>
       <tbody>
         {{range $i, $e := $d.Entries}}<tr>
           <td class="rank">{{if and $e.Settled $e.Valid}}{{add $i 1}}{{else}}·{{end}}</td>
@@ -39,7 +39,7 @@
             <td class="r num">{{f3 $e.Loss}}</td>
             <td class="r num {{if gt $e.Gain 0.0}}pos{{else if lt $e.Gain 0.0}}neg{{end}}">{{gain $e.Gain}}</td>
             {{else}}
-            <td colspan="2"><span class="stage invalid">invalid</span><span class="reason">{{$e.Reason}}</span></td>
+            <td colspan="2"><span class="stage invalid">{{if $e.Void}}not run{{else}}invalid{{end}}</span><span class="reason">{{$e.Reason}}</span></td>
             <td class="r num">0.000</td>
             {{end}}
           {{else}}
@@ -48,7 +48,7 @@
           <td class="r num hide-s">{{if $e.HasStats}}{{pct1 $e.Script.KeptDocFrac}}{{else}}—{{end}}</td>
           <td class="r num hide-s">{{with $e.Edit}}{{f1 .Seconds}}s{{else}}—{{end}}</td>
           <td class="hide-s">{{if $e.ScriptSHA}}<a class="num" href="/api/v1/scripts/{{$e.ScriptSHA}}" title="Download the edit script ({{bytes $e.ScriptSize}} unpacked)">{{tiny $e.ScriptSHA}}</a>{{else}}<span class="muted">—</span>{{end}}</td>
-          <td class="hide-s muted" style="font-size:14.5px">{{if $e.Verifiers}}{{join $e.Verifiers ", "}}{{if $e.Audited}} <span class="tag blue">audited</span>{{end}}{{else}}—{{end}}</td>
+          <td class="hide-s muted" style="font-size:14.5px">{{if $e.Verifiers}}{{join $e.Verifiers ", "}}{{if $e.Disputed}} <span class="tag red" title="{{if $e.Together}}Two volunteers measured the same loss as each other and a different one from the anchor. The score is the anchor's; it may be the one that is wrong.{{else}}Volunteers whose grade of this script was further from the anchor's than the tolerance. Their numbers are below.{{end}}">{{$e.Disputed}} differed{{if $e.Together}}, together{{end}}</span>{{end}}{{else}}—{{end}}</td>
         </tr>{{end}}
       </tbody>
     </table>
@@ -56,7 +56,31 @@
     <div class="empty">No entries.</div>
     {{end}}
   </div>
-  <p class="muted" style="font-size:15.5px;margin-top:14px">Two grades of the same script must agree to within {{f2 $d.Tolerance.Grade}} nats. Any script above can be re-graded by anyone: <code>stet score script.jsonl --round {{$d.ID}}</code>.</p>
+  <p class="muted" style="font-size:15.5px;margin-top:14px">The loss is an anchor's grade. A volunteer's grade of the same script replicates it if it lands within {{f2 $d.Tolerance.Grade}} nats. Any script above can be re-graded by anyone, by the entry's name: <code>stet score {{if $d.Entries}}{{with index $d.Entries 0}}{{.Owner}}/{{.Name}}{{end}}{{else}}owner/name{{end}} --round {{$d.ID}}</code>.</p>
+
+  {{if or $d.Replicas $r.Differs}}
+  <h2 id="replications">Replications</h2>
+  <p class="lead">Every volunteer's grade of this round's scripts, beside the anchor's, whatever it said. The score is always the anchor's.</p>
+  {{if $d.Replicas}}
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Entry</th><th>Volunteer</th><th class="r">Their loss</th><th class="r">Anchor's</th><th class="r">Difference</th><th class="r hide-s" title="This volunteer's unedited loss for the round, minus the anchor's">Unedited, difference</th><th>Outcome</th></tr></thead>
+      <tbody>
+        {{range $d.Replicas}}<tr>
+          <td><a class="name" href="/editors/{{short .EditorID}}">{{.Name}}</a><span class="by"><a href="/u/{{.Owner}}">{{.Owner}}</a></span></td>
+          <td><a href="/u/{{.Handle}}">{{.Handle}}</a>{{if .First}} <span class="muted" title="No grade of this account's had agreed with an anchor's before this round">· first grade</span>{{end}}</td>
+          <td class="r num">{{if has .Loss}}{{f3 (ptr .Loss)}}{{else}}<span class="muted">invalid</span>{{end}}</td>
+          <td class="r num">{{if .AnchorValid}}{{f3 .Anchor}}{{else}}<span class="muted">invalid</span>{{end}}</td>
+          <td class="r num">{{if has .Diff}}{{gain (ptr .Diff)}}{{else}}—{{end}}</td>
+          <td class="r num hide-s">{{if has .BaseDiff}}{{gain (ptr .BaseDiff)}}{{else}}—{{end}}</td>
+          <td>{{if eq .Verdict "agreed"}}<span class="stage settled">agreed</span>{{else if eq .Verdict "differs"}}<span class="tag red">differs</span>{{else}}<span class="muted">set aside: {{.Verdict}}</span>{{end}}</td>
+        </tr>{{end}}
+      </tbody>
+    </table>
+  </div>
+  {{end}}
+  {{if $r.Differs}}<p class="muted" style="font-size:15.5px;margin-top:14px">Turned away before their grade was taken: {{range $i, $x := $r.Differs}}{{if $i}}, {{end}}<a href="/u/{{$x.Handle}}">{{$x.Handle}}</a> ({{if eq $x.What "corpus"}}built a different corpus or exam{{else}}unedited loss {{gain $x.Diff}} from the anchor's{{end}}){{end}}. Neither counts against anyone; both are shown because a pattern in them would mean the tolerance is wrong.</p>{{end}}
+  {{end}}
 
   {{if $d.BaselineChart}}
   <h2>The corpus, unedited</h2>
@@ -70,6 +94,7 @@
     <dl class="kv">
       <dt>Draw time</dt><dd>{{datetime $r.DrawAt}}{{if $d.Slot}} <span class="muted">· on the season's {{minutes .Season.DrawGrid}}-minute grid</span>{{else}} <span class="tag red">off the grid</span>{{end}}</dd>
       <dt>Beacon round</dt><dd>{{if $d.BeaconURL}}<a href="{{$d.BeaconURL}}" rel="noopener">{{.Season.Beacon.Name}} #{{$r.DrandRound}}</a>{{else}}{{.Season.Beacon.Name}} #{{$r.DrandRound}}{{end}} <span class="muted">· the first emitted at or after the draw time</span></dd>
+      {{if $r.Was}}<dt>Moved from</dt><dd>{{range $i, $w := $r.Was}}{{if $i}}, {{end}}#{{$w}}{{end}} <span class="muted">· beacon rounds this round was announced for before its draw moved</span></dd>{{end}}
       {{if $r.Randomness}}<dt>Randomness</dt><dd><code>{{$r.Randomness}}</code></dd>{{end}}
       {{with $r.Crawl}}
       <dt>Crawl</dt><dd>{{.Crawl}} <span class="muted">· {{comma .NShards}} files · named when the round was announced</span></dd>

@@ -75,3 +75,26 @@ def test_the_corpus_order_is_a_seeded_shuffle():
     # Pinned, so that another implementation can check itself against this one.
     keys = [prf_u64(a.seed, "order", i) for i in range(5)]
     assert a.doc_order(5) == sorted(range(5), key=keys.__getitem__)
+
+
+def test_an_official_round_is_built_only_from_values_of_the_expected_shape():
+    # A crawl id from the server goes into the seed, a URL and a file name in the cache.
+    season = load_season("s0")
+    beacon = {"round": 100, "randomness": "ab" * 32}
+    for crawl in ("../../../etc/passwd", "CC-MAIN-2026-99/../x", "CC-MAIN-2026-99\n", "CC-MAIN-2026-099", "cc-main-2026-99", ""):
+        with pytest.raises(ValueError):
+            official_round(season, 3, beacon, {**CRAWL, "crawl": crawl})
+    for other in ({"paths_sha256": "zz" * 32}, {"paths_sha256": "66" * 31}, {"n_shards": 0}, {"n_shards": 10**9}):
+        with pytest.raises(ValueError):
+            official_round(season, 3, beacon, {**CRAWL, **other})
+    for bad in ({"round": 100, "randomness": "ab"}, {"round": 0, "randomness": "ab" * 32}, {"round": 100, "randomness": "ab" * 32 + "\n"}):
+        with pytest.raises(ValueError):
+            official_round(season, 3, bad, CRAWL)
+    assert official_round(season, 3, {"round": 100, "randomness": "AB" * 32}, CRAWL).seed == official_round(season, 3, beacon, CRAWL).seed
+
+
+def test_a_round_id_is_a_round_id_and_nothing_else():
+    assert parse_round_id("s0-o00012") == ("s0", "official", 12) and parse_round_id("s0-p3") == ("s0", "practice", 3) and parse_round_id("s0-g00000")[1] == "gym"
+    for junk in ("s0-o00012/../../x", "../s0-o00012", "s0-x00012", "s0-o", "S0-o00012", "s0-o00012\n", "s0-o-1", "s0", ""):
+        with pytest.raises(ValueError):
+            parse_round_id(junk)

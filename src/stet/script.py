@@ -41,7 +41,11 @@ import numpy as np
 from .data import Corpus, contains_exam_text
 from .spec import Scale, Season
 
+# Output documents are checked in windows of TOKENIZE_BATCH, and tokenised whenever
+# TOKENIZE_BYTES of text is waiting. The window decides what counts as part of the script
+# (see materialize); the byte limit only bounds memory, and changes no result.
 TOKENIZE_BATCH = 1024
+TOKENIZE_BYTES = 4 << 20
 
 
 class ScriptError(ValueError):
@@ -252,7 +256,10 @@ def materialize(
     stats = Stats(ink_budget=season.ink_tokens(scale), train_tokens=lanes * lane_len)
     min_copy = season.min_copy_bytes
     seen_docs: set[int] = set()
-    batch: list[tuple[int, Built]] = []
+    batch: list[tuple[int, Built]] = []  # built, waiting to be tokenised
+    waiting = 0  # bytes of text in `batch`
+    in_window = 0  # output documents so far in the current window of TOKENIZE_BATCH
+    closed = False  # the budget is full and the window it filled in has ended
     digest = hashlib.sha256()
     first_pass: list[np.ndarray] = []
     first_ink: list[int] = []
@@ -268,7 +275,8 @@ def materialize(
         return heap[0][0] >= lane_len
 
     def flush():
-        nonlocal total, full
+        nonlocal total, full, waiting
+        waiting = 0
         if not batch:
             return
         texts = [bd.data.decode("utf-8", errors="replace") for _, bd in batch]
@@ -312,19 +320,31 @@ def materialize(
             raw = raw.strip()
             if not raw:
                 continue
-            if full:
+            if closed:
                 stats.truncated = True  # still hashed and counted, never trained on
                 continue
             try:
                 obj = json.loads(raw)
             except (ValueError, RecursionError):
                 raise ScriptError(f"line {line_no}: not valid JSON") from None
+            # Every line up to the end of the window the budget fills in is checked, and a
+            # bad one makes the script invalid. That is the rule every grader applies, so it
+            # must not depend on how much text happened to be tokenised at once.
             built = build_doc(corpus, line_no, obj, min_copy, max_segments, max_out)
             if not built.data:
                 continue
-            batch.append((line_no, built))
-            if len(batch) >= TOKENIZE_BATCH:
+            in_window += 1
+            if full:
+                stats.truncated = True  # checked, but past the budget: not kept in memory
+            else:
+                batch.append((line_no, built))
+                waiting += len(built.data)
+                if waiting >= TOKENIZE_BYTES:
+                    flush()
+            if in_window >= TOKENIZE_BATCH:
                 flush()
+                in_window = 0
+                closed = full
         flush()
 
     stats.script_sha256 = digest.hexdigest()
@@ -354,7 +374,7 @@ def materialize(
 def write_script(path: str | Path, lines) -> None:
     """Write an edit script atomically. `lines` yields ints, dicts, or JSON strings."""
     path = Path(path)
-    tmp = path.with_name(path.name + ".tmp")
+    tmp = path.with_name(f"{path.name}.tmp{os.getpid()}")  # two processes may be writing the same name
     with open(tmp, "w", encoding="utf-8") as f:
         for item in lines:
             f.write(item if isinstance(item, str) else json.dumps(item, ensure_ascii=False, separators=(",", ":")))

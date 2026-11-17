@@ -40,6 +40,7 @@ def export(season_id: str = "s0") -> dict:
         "exam_sources": season.exam_sources,
         "exam_file": raw["exam"]["file"],
         "exam_sha256": raw["exam"]["sha256"],
+        "heldout_exam_sha256": (raw.get("heldout_exam") or {}).get("sha256", ""),
         "beacon": raw["beacon"],
         "draw_grid_seconds": raw["draw_grid_seconds"],
         "pools": {k: {f: v for f, v in pool.items() if f != "manifest"} for k, pool in raw["pools"].items()},

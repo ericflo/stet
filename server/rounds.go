@@ -12,12 +12,16 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"math/rand/v2"
 	"sort"
 	"time"
 )
 
 const commitMargin = 30 // seconds an editor must precede the draw by
+
+// drawNotice is how far ahead a draw that is moved is announced, at least. Verifiers hear
+// of the next draw when they ask for work, and an idle one asks every five minutes; a
+// draw moved with less notice than that is one some of them were never told of.
+const drawNotice = 6 * 60
 
 // beaconSource is where a round's randomness comes from. Tests replace it.
 var beaconSource = fetchBeacon
@@ -35,6 +39,11 @@ func (r *Round) description(s *Season) map[string]any {
 	if r.Crawl != nil {
 		d["crawl"] = r.Crawl
 	}
+	if len(r.Was) > 0 {
+		// Beacon rounds this round was announced for before its draw moved. Public, so
+		// that a draw skipped after its beacon value was known cannot go unnoticed.
+		d["moved_from"] = r.Was
+	}
 	if r.Status != "scheduled" {
 		d["seed"] = r.Seed
 		d["beacon"] = map[string]any{"round": r.DrandRound, "randomness": r.Randomness}
@@ -48,6 +57,17 @@ func (r *Round) description(s *Season) map[string]any {
 func (a *App) nextSlot(after int64) int64 {
 	iv := int64(a.cfg.RoundInterval.Seconds())
 	return (after/iv + 1) * iv
+}
+
+// laterSlot is where a draw goes that is being announced now: the next usual time, or,
+// when that is less than the notice away, the first place on the grid that is not. No
+// draw is ever announced with less than drawNotice to go.
+func (a *App) laterSlot() int64 {
+	at := a.nextSlot(now())
+	if at < now()+drawNotice {
+		at = a.season.nextGrid(now() + drawNotice)
+	}
+	return at
 }
 
 // savedCrawl is the crawl last adopted, without touching the network.
@@ -89,14 +109,17 @@ func (a *App) refreshCrawl(ctx context.Context) {
 
 // tick advances everything that moves on its own. Safe to call at any time.
 func (a *App) tick(ctx context.Context) {
-	a.st.sync(ctx)
+	// Both of these hold the state while they talk to the database, so both get a deadline.
+	bounded, cancel := context.WithTimeout(ctx, storeBudget)
+	defer cancel()
+	a.st.sync(bounded)
 	a.refreshCrawl(ctx)
 	a.st.update(ctx, func(tx *Tx) error {
 		s := tx.s
 		t := now()
 		for _, c := range s.Claims {
 			if c.Status == "claimed" && c.ExpiresAt <= t {
-				c.Status = "expired"
+				c.Status = "lapsed" // out of time, with no report and no release
 				tx.saveClaim(c)
 			}
 		}
@@ -107,11 +130,12 @@ func (a *App) tick(ctx context.Context) {
 			}
 		}
 		a.schedule(tx)
-		a.settleRounds(tx)
+		a.abandonStuck(tx)
+		a.settleReady(tx)
 		return nil
 	})
 	a.maybeDraw(ctx, false)
-	a.st.flush(ctx)
+	a.st.flush(bounded)
 }
 
 // schedule announces the next round, if none is announced: when it will be drawn (and so
@@ -119,18 +143,53 @@ func (a *App) tick(ctx context.Context) {
 func (a *App) schedule(tx *Tx) {
 	s := tx.s
 	if crawl := a.savedCrawl(s); s.roundWithStatus("scheduled") == nil && crawl != nil {
-		at := a.nextSlot(now())
+		// The usual time, or the first free place on the grid after it: a slot some round
+		// was once announced for costs the next round ten minutes, not a whole interval.
+		taken := announcedSlots(s, nil)
+		at := a.laterSlot()
+		for taken[a.season.Beacon.drandRoundAt(at)] {
+			at = a.season.nextGrid(at)
+		}
 		tx.saveRound(&Round{Idx: s.maxRound() + 1, Status: "scheduled", Scale: a.cfg.Scale, DrawAt: at, DrandRound: a.season.Beacon.drandRoundAt(at), Crawl: crawl})
 	}
+}
+
+// announcedSlots is every beacon round that a draw has ever been announced for, by any
+// round, other than the one `except` holds now. A verifier remembers the first thing it
+// was told about a slot, so a slot is used for one announcement and never another.
+func announcedSlots(s *State, except *Round) map[int64]bool {
+	taken := map[int64]bool{}
+	for _, r := range s.Rounds {
+		if r != except {
+			taken[r.DrandRound] = true
+		}
+		for _, was := range r.Was {
+			taken[was] = true
+		}
+	}
+	return taken
 }
 
 // reschedule moves the scheduled round to a later draw time: a new announcement, made
 // before that time's beacon value exists. It takes the newest crawl with it.
 func (a *App) reschedule(tx *Tx, r *Round, at int64) {
+	// A slot this round has been announced for and left is not gone back to, and neither
+	// is one that was ever another round's: by now the crawl may be a newer one, and a
+	// verifier holds the announcement it saw first.
+	for taken := announcedSlots(tx.s, r); taken[a.season.Beacon.drandRoundAt(at)]; {
+		at = a.season.nextGrid(at)
+	}
+	next := a.season.Beacon.drandRoundAt(at)
+	if next == r.DrandRound {
+		return // what was announced for this slot stands, crawl and all
+	}
 	if c := a.savedCrawl(tx.s); c != nil {
 		r.Crawl = c
 	}
-	r.DrawAt, r.DrandRound = at, a.season.Beacon.drandRoundAt(at)
+	if r.Was = append(r.Was, r.DrandRound); len(r.Was) > 64 {
+		r.Was = r.Was[len(r.Was)-64:]
+	}
+	r.DrawAt, r.DrandRound = at, next
 	tx.saveRound(r)
 }
 
@@ -157,9 +216,9 @@ func (a *App) selectEntrants(s *State, cutoff int64) []entrant {
 	var qualifying, queue []*Editor
 	for _, e := range s.Editors {
 		switch {
-		case e.Status == "running" && len(s.ofEditor[e.ID]) < a.cfg.QualifyRounds:
+		case e.Status == "running" && roundsRun(s, e.ID) < a.cfg.QualifyRounds:
 			qualifying = append(qualifying, e)
-		case e.Status == "queued" && e.CreatedAt <= cutoff-commitMargin && !s.owner(e).Banned:
+		case e.Status == "queued" && e.CreatedAt <= cutoff-commitMargin:
 			queue = append(queue, e)
 		}
 	}
@@ -169,12 +228,7 @@ func (a *App) selectEntrants(s *State, cutoff int64) []entrant {
 	for _, e := range qualifying {
 		add(e.ID, "qualifying")
 	}
-	priority := map[int64]int{} // grades for others in the last two weeks
-	for _, r := range s.Results {
-		if r.Verdict == "agreed" && r.ReceivedAt > now()-14*86400 {
-			priority[r.AccountID]++
-		}
-	}
+	priority := recentAgreed(s) // grades for others in the last two weeks
 	sort.SliceStable(queue, func(i, j int) bool {
 		pi, pj := priority[queue[i].AccountID], priority[queue[j].AccountID]
 		if pi != pj {
@@ -207,7 +261,7 @@ func (a *App) bringForward(ctx context.Context) (*Round, error) {
 		if tx.s.roundWithStatus("open") != nil {
 			return fail(409, "the previous round is still being graded")
 		}
-		at := a.season.nextGrid(now() + commitMargin)
+		at := a.season.nextGrid(now() + drawNotice)
 		if a.cfg.Dev {
 			at = now()
 		}
@@ -238,11 +292,14 @@ func (a *App) maybeDraw(ctx context.Context, force bool) error {
 		case !due:
 		case s.roundWithStatus("open") != nil:
 			// Grading of the previous round is still under way. Rounds never overlap, so
-			// that the ladder is always complete; this one moves to the next slot.
-			a.reschedule(tx, cur, a.nextSlot(now()))
+			// that the ladder is always complete. This one moves to the next slot for now,
+			// and is drawn sooner if the round before settles sooner (settleRounds).
+			cur.Postponed = true
+			a.reschedule(tx, cur, a.laterSlot())
+			tx.saveRound(cur)
 			problem = errors.New("the previous round is still being graded")
 		case len(a.selectEntrants(s, r.DrawAt)) == 0:
-			a.reschedule(tx, cur, a.nextSlot(now()))
+			a.reschedule(tx, cur, a.laterSlot())
 			problem = errors.New("no editors are waiting to run")
 		case r.Crawl == nil:
 			problem = errors.New("the round has no crawl")
@@ -278,7 +335,7 @@ func (a *App) maybeDraw(ctx context.Context, force bool) error {
 		}
 		entrants := a.selectEntrants(s, cur.DrawAt)
 		if len(entrants) == 0 {
-			a.reschedule(tx, cur, a.nextSlot(now()))
+			a.reschedule(tx, cur, a.laterSlot())
 			problem = errors.New("no editors are waiting to run")
 			return nil
 		}
@@ -287,7 +344,7 @@ func (a *App) maybeDraw(ctx context.Context, force bool) error {
 		cur.Seed = hexOf(officialSeed(a.season.ID, cur.Idx, cur.DrandRound, randomness, *cur.Crawl))
 		tx.saveRound(cur)
 		for _, e := range entrants {
-			tx.saveEntry(&Entry{RoundIdx: cur.Idx, EditorID: e.EditorID, Status: "open", Spot: rand.Float64() < a.cfg.SpotRate})
+			tx.saveEntry(&Entry{RoundIdx: cur.Idx, EditorID: e.EditorID, Status: "open"})
 			// Once an editor has been drawn into a round it can no longer be changed, and
 			// everyone is entitled to read what is being scored.
 			ed := s.Editors[e.EditorID]
@@ -338,7 +395,7 @@ func (a *App) settleRounds(tx *Tx) {
 		// the ladder (the ladder is recomputed at every draw).
 		for _, e := range s.inRound[r.Idx] {
 			ed := s.Editors[e.EditorID]
-			if ed.Status == "running" && len(s.ofEditor[ed.ID]) >= a.cfg.QualifyRounds {
+			if ed.Status == "running" && roundsRun(s, ed.ID) >= a.cfg.QualifyRounds {
 				ed.Status = "retired"
 				tx.saveEditor(ed)
 			}
@@ -352,6 +409,16 @@ func (a *App) settleRounds(tx *Tx) {
 		tx.event("settle", map[string]any{"round": roundID(a.season.ID, r.Idx), "entries": len(s.inRound[r.Idx]), "best_gain": best})
 		slog.Info("round settled", "round", roundID(a.season.ID, r.Idx), "entries", len(s.inRound[r.Idx]))
 		a.checkRecord(tx, r.Idx)
+		// A round that ran over cost the next one its slot. It does not cost it six hours:
+		// the draw moves to the next mark on the grid.
+		if next := s.roundWithStatus("scheduled"); next != nil && next.Postponed {
+			next.Postponed = false
+			if at := a.season.nextGrid(now() + drawNotice); at < next.DrawAt {
+				a.reschedule(tx, next, at)
+			} else {
+				tx.saveRound(next)
+			}
+		}
 	}
 }
 

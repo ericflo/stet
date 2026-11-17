@@ -13,6 +13,7 @@ package main
 // rounds together, so difficulties are well determined.
 
 import (
+	"fmt"
 	"math"
 	"sort"
 	"sync"
@@ -23,7 +24,6 @@ type entryRow struct {
 	EditorID string
 	Gain     float64
 	Valid    bool
-	Audited  bool
 }
 
 type Rating struct {
@@ -32,7 +32,6 @@ type Rating struct {
 	Adjusted float64 // mean gain adjusted for which rounds it happened to run
 	SE       float64
 	Invalid  int
-	Audited  int
 }
 
 // fitRatings solves the additive model by alternating means. It converges in a handful of
@@ -51,7 +50,7 @@ func fitRatings(entries []entryRow) (map[string]*Rating, map[int]float64) {
 		for id, es := range byEditor {
 			s := 0.0
 			for _, e := range es {
-				s += e.Gain - diff[e.RoundIdx]
+				s += e.adjusted(diff)
 			}
 			s /= float64(len(es))
 			delta = math.Max(delta, math.Abs(s-skill[id]))
@@ -59,11 +58,20 @@ func fitRatings(entries []entryRow) (map[string]*Rating, map[int]float64) {
 		}
 		mean := 0.0
 		for r, es := range byRound {
-			s := 0.0
+			// Only entries that were really measured say anything about the round. An
+			// invalid entry's zero is a penalty, not a reading: counted here, one editor's
+			// timeout would make the round look hard and lift everyone else in it.
+			s, n := 0.0, 0
 			for _, e := range es {
-				s += e.Gain - skill[e.EditorID]
+				if e.Valid {
+					s += e.Gain - skill[e.EditorID]
+					n++
+				}
 			}
-			diff[r] = s / float64(len(es))
+			diff[r] = 0
+			if n > 0 {
+				diff[r] = s / float64(n)
+			}
 			mean += diff[r]
 		}
 		mean /= math.Max(1, float64(len(byRound)))
@@ -80,12 +88,9 @@ func fitRatings(entries []entryRow) (map[string]*Rating, map[int]float64) {
 		var resid []float64
 		for _, e := range es {
 			r.Mean += e.Gain / float64(len(es))
-			resid = append(resid, e.Gain-diff[e.RoundIdx])
+			resid = append(resid, e.adjusted(diff))
 			if !e.Valid {
 				r.Invalid++
-			}
-			if e.Audited {
-				r.Audited++
 			}
 		}
 		r.Adjusted = mean(resid)
@@ -95,6 +100,15 @@ func fitRatings(entries []entryRow) (map[string]*Rating, map[int]float64) {
 		out[id] = r
 	}
 	return out, diff
+}
+
+// adjusted is an entry's gain with its round's difficulty taken out. An invalid entry
+// counts as zero whatever the round was like.
+func (e entryRow) adjusted(diff map[int]float64) float64 {
+	if !e.Valid {
+		return 0
+	}
+	return e.Gain - diff[e.RoundIdx]
 }
 
 func mean(v []float64) float64 {
@@ -233,10 +247,12 @@ func (a *App) curveKey() string { return "official/" + a.cfg.Scale }
 func settledEntries(s *State) []entryRow {
 	var out []entryRow
 	for _, e := range s.Entries {
-		if e.Status != "settled" || s.Rounds[e.RoundIdx].BaselineLoss == nil {
+		// Whole rounds only. An entry with no script settles the moment that is known, while
+		// the rest of its round is still sealed; alone, it would stand for the whole round.
+		if rd := s.Rounds[e.RoundIdx]; e.Status != "settled" || e.Void || rd.BaselineLoss == nil || rd.Status != "settled" {
 			continue
 		}
-		out = append(out, entryRow{RoundIdx: e.RoundIdx, EditorID: e.EditorID, Gain: e.Gain, Valid: e.Valid, Audited: e.Detail != nil && e.Detail.Audited})
+		out = append(out, entryRow{RoundIdx: e.RoundIdx, EditorID: e.EditorID, Gain: e.Gain, Valid: e.Valid})
 	}
 	sort.Slice(out, func(i, j int) bool {
 		return out[i].RoundIdx < out[j].RoundIdx || (out[i].RoundIdx == out[j].RoundIdx && out[i].EditorID < out[j].EditorID)
@@ -271,6 +287,11 @@ func (a *App) computeBoard(s *State) *Board {
 		}
 		r.Record = r.ID == b.RecordID
 		b.ByID[r.ID] = r
+		if e.Status == "withdrawn" {
+			// Replaced by its owner. It keeps its page and its results, but not a rank: a rank
+			// kept by an editor that will never run again is a lucky start made permanent.
+			continue
+		}
 		if rt.N >= a.cfg.RatedRounds {
 			b.Rated = append(b.Rated, r)
 		} else {
@@ -296,21 +317,27 @@ func (a *App) computeBoard(s *State) *Board {
 	}
 	byRating(b.Rated)
 	byRating(b.Provisional)
-	// The ladder: the record holder (a challenger can only take the record by sharing rounds
-	// with it, so it must keep running), then the best-rated editor of each account. The
+	// The ladder: the record holder, then the best-rated editor of each person. The
 	// organisers' reference editors are fixed points for everyone and all stay on.
-	seen := map[int64]bool{}
-	if h := b.ByID[b.RecordID]; h != nil && h.Status != "withdrawn" {
+	//
+	// The holder keeps its place whatever it does. A challenger can only take the record on
+	// rounds it shares with the holder, so a holder that stopped running would hold the
+	// record for ever. One that has started failing scores zero and is soon beaten. Its
+	// place is its own: its owner's best other editor may still take one, which is how a
+	// person improves on their own record.
+	seen := map[string]bool{}
+	if h := b.ByID[b.RecordID]; h != nil {
 		h.Ladder = true
 		b.Ladder = append(b.Ladder, h)
 	}
 	for i, r := range b.Rated {
 		r.Rank = i + 1
 		owner := s.Accounts[r.AccountID]
-		if r.Ladder || r.Status == "withdrawn" || len(b.Ladder) >= a.cfg.LadderSize || (seen[r.AccountID] && (owner == nil || !owner.Anchor)) {
+		who := person(s.Editors[r.ID])
+		if r.Ladder || r.Status == "withdrawn" || failing(s, r.ID) || len(b.Ladder) >= a.cfg.LadderSize || (seen[who] && (owner == nil || !owner.Anchor)) {
 			continue
 		}
-		seen[r.AccountID] = true
+		seen[who] = true
 		r.Ladder = true
 		b.Ladder = append(b.Ladder, r)
 	}
@@ -362,7 +389,7 @@ func gainsByRound(entries []entryRow, editorID string) map[int]float64 {
 //     round) must exceed the season's margin, by a one-sided paired t-test at the season's
 //     alpha divided by the number of looks. The margin is one standard deviation of the
 //     difference between an editor and a trivially different copy of itself, measured.
-//   - At least two of the challenger's rounds must have been graded by an anchor.
+//   - Every number in the test is an anchor's grade: nobody else's can set a score.
 //
 // The first record goes to the first editor that beats the unedited baseline on the same
 // terms.
@@ -386,13 +413,9 @@ func (a *App) checkRecord(tx *Tx, roundIdx int) {
 			continue
 		}
 		var d []float64
-		audited := 0
 		for _, e := range b.Entries {
 			if e.EditorID != c.ID {
 				continue
-			}
-			if e.Audited {
-				audited++
 			}
 			if holder == "" {
 				d = append(d, e.Gain-margin)
@@ -406,8 +429,8 @@ func (a *App) checkRecord(tx *Tx, roundIdx int) {
 				look = l
 			}
 		}
-		if look == 0 || audited < rule.MinAudited {
-			continue // nothing new to look at, or not yet audited enough for the look to count
+		if look == 0 {
+			continue // nothing new to look at
 		}
 		p := pairedP(d) // H0: the mean advantage is no more than the margin
 		advantage := mean(d) + margin
@@ -426,4 +449,17 @@ func (a *App) checkRecord(tx *Tx, roundIdx int) {
 			"multiplier": c.Multiplier, "capped": c.Capped, "technique": c.Technique, "advantage": advantage})
 		return
 	}
+}
+
+// person is who an editor belongs to for "one per entrant": the GitHub identity that
+// entered it, so that a second key linked to the same identity is still the same person.
+// Editors from before identities were recorded fall back to the account.
+func person(e *Editor) string {
+	if e == nil {
+		return ""
+	}
+	if e.GithubID != 0 {
+		return fmt.Sprintf("gh:%d", e.GithubID)
+	}
+	return fmt.Sprintf("acct:%d", e.AccountID)
 }

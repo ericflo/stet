@@ -12,11 +12,14 @@ make the same pages worth twice as much, that is half the compute for the same m
 Stet measures how good such an editor can get, on data it has never seen, with nothing
 else varying.
 
-## What does "2.4×" mean?
+## What is the multiplier?
 
-That a student trained on the edited corpus did as well on the exam as one trained on 2.4
-times as many tokens of the unedited corpus. It is read off a measured curve and never
-extrapolated beyond it.
+How many times more unedited data the student would have needed to do as well. "2×" means
+a student trained on the edited corpus matched one trained on twice as many tokens of the
+raw one. It is read off a measured curve and never extrapolated beyond it. The curve for
+the official scale is still being measured, so for now the board shows the gain in nats
+and leaves the multiplier blank. [Experiments](EXPERIMENTS.md) has the curve for the
+practice scale.
 
 ## Do I need a big GPU?
 
@@ -49,8 +52,8 @@ about editing.
 ## Is the exam secret?
 
 No. It is a public file, so that anyone can reproduce any score. Your editor cannot read
-it while it runs, pages containing exam sentences are removed from the corpus, and your
-script's output is checked for them too.
+it while it runs, pages containing the opening of a long exam sentence are removed from
+the corpus, and your script's output is checked for them too.
 
 ## Then what stops people overfitting the exam?
 
@@ -59,22 +62,36 @@ prose that explains things", which is the point. An editor still has to find tha
 crawl it has never seen, in five minutes, with almost no ink. And editors are public, so
 anything cleverer than that is in plain view.
 
+There is also a second exam that only the organisers' anchors hold, drawn in secret from
+the same collections out of other documents. Its hash is already published. Every
+official grade is quietly repeated on it, and when the season closes it is published and
+the final table is worked out from it. An editor that learned the public exam's passages,
+rather than its kind of text, loses its lead there. See
+[the rules](RULES.md#the-held-out-exam).
+
 ## Who runs my code?
 
-One of the organisers' machines, in a sandbox with no network. Volunteers never run
-entrants' code: they grade the edit script your editor wrote, which is plain data.
+One of the organisers' machines (an *anchor*), in a sandbox with no network. Nobody else
+ever runs it. What your editor writes is an edit script, which is plain data, and that is
+what gets graded.
+
+## Who decides my score?
+
+The anchor grades the script, and that grade is the score. Volunteers grade the same
+script on their own GPUs, and every one of their results is published beside it on the
+round's page, whatever it said. You can re-grade any script yourself with `stet score`.
 
 ## Why is my editor published?
 
 So that everyone can learn from the leader, and so that every result can be checked. It is
-published the first time it runs in an official round, under the MIT licence, along with
-every script it writes. `stet fork` copies any of them, and the fork credits its parent.
+published from the moment it is first drawn into an official round, under the MIT
+licence, along with every script it writes. `stet fork` copies any of them, and the fork credits its parent.
 
 ## Why do I need a GitHub account to enter?
 
-Running an entry takes several minutes of an organiser's machine, five times over. That is
-the scarce resource, so one person gets one entry in play. Practice runs, forking and
-verifying need no account at GitHub.
+Editing and grading an entry takes ten to fifteen minutes of an organiser's machine,
+three times over. That is the scarce resource, so one person gets one entry in play.
+Practice runs, forking and verifying need no account at GitHub.
 
 ## How do I know the organisers are not cheating?
 
@@ -86,14 +103,15 @@ the trainer, every editor and every script are public. Any score can be recomput
 ## Why are grades limited to NVIDIA and AMD GPUs?
 
 Two machines must get the same number for the same script, to within a small tolerance.
-CUDA and ROCm builds of PyTorch do. Other backends have not been measured, so for now they
-can run and submit editors but not grade for the board.
+CUDA and ROCm builds of PyTorch are expected to, and every replication is published with
+its difference from the anchor's, so the first weeks will show whether they do. Other
+backends can run and submit editors but not grade for the board.
 
 ## What happens between seasons?
 
 A season freezes the student, the budgets, the exam and the rules, so that scores stay
-comparable. Season 0 is the first and smallest. Later seasons can raise the scale; the top
-editors of each season are rerun a scale up to see whether what won still wins.
+comparable. Season 0 is the first and smallest. Later seasons can raise the scale. The
+plan is to rerun each season's top editors a scale up, to see whether what won still wins.
 
 ## Is there a prize?
 

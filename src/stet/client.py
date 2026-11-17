@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
-import io
 import json
 import os
-import shutil
+import re
 import sys
 import time
 import urllib.error
@@ -16,8 +16,12 @@ import urllib.request
 from pathlib import Path
 
 from . import __version__
-from .data import USER_AGENT, api_base, cache_dir
+from .data import USER_AGENT, FetchError, api_base, cache_dir
 from .keys import Key, config_dir, create_key, key_path, load_key
+from .project import MAX_BUNDLE_BYTES, NAME_RE, unzstd
+from .spec import CRAWL_ID_RE, SHA256_RE
+
+JSON_LIMIT_BYTES = 16 << 20
 
 
 class ApiError(Exception):
@@ -26,8 +30,28 @@ class ApiError(Exception):
         self.status = status
 
 
-def request(method: str, path: str, body=None, key: Key | None = None, raw: bool = False, timeout: float = 120):
-    """One API call. `body` may be bytes or anything JSON-serialisable."""
+class WrongBytes(ApiError):
+    """What the server sent is not what its hash says it is. Asking again would fetch the same bytes."""
+
+    def __init__(self, message: str):
+        super().__init__(0, message)
+
+
+def clean(text, limit: int = 400) -> str:
+    """Make text from the server, or from another entrant, safe to print.
+
+    A terminal obeys control characters: they move the cursor, retitle the window, and on
+    some terminals write to the clipboard. An editor's description is 120 bytes of anything.
+    """
+    return "".join(ch if ch.isprintable() else " " for ch in str(text)[:limit])
+
+
+def request(method: str, path: str, body=None, key: Key | None = None, raw: bool = False, timeout: float = 120, limit: int = JSON_LIMIT_BYTES):
+    """One API call. `body` may be bytes or anything JSON-serialisable.
+
+    The answer is read up to `limit` bytes and no further: what a server sends is not
+    allowed to decide how much memory this process uses.
+    """
     data = b""
     headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
     if body is not None:
@@ -42,17 +66,26 @@ def request(method: str, path: str, body=None, key: Key | None = None, raw: bool
     req = urllib.request.Request(api_base() + path, data=data if method != "GET" else None, method=method, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
-            payload = r.read()
+            payload = r.read(limit + 1)
     except urllib.error.HTTPError as e:
-        text = e.read().decode("utf-8", "replace")
+        text = e.read(1 << 16).decode("utf-8", "replace")
         try:
             message = json.loads(text).get("error") or text
-        except ValueError:
+        except (ValueError, AttributeError):
             message = text.strip()[:300] or e.reason
-        raise ApiError(e.code, message) from None
+        raise ApiError(e.code, clean(message)) from None
     except urllib.error.URLError as e:
         raise ApiError(0, f"cannot reach {api_base()}: {e.reason}") from None
-    return payload if raw else json.loads(payload or b"{}")
+    except (TimeoutError, ConnectionError) as e:  # while reading the body
+        raise ApiError(0, f"lost the connection to {api_base()}: {e}") from None
+    if len(payload) > limit:
+        raise ApiError(0, f"{api_base()} sent more than {limit / 1e6:.0f} MB in answer to {method} {path.split('?')[0]}; refusing it")
+    if raw:
+        return payload
+    try:
+        return json.loads(payload or b"{}")
+    except ValueError:
+        raise ApiError(0, f"{api_base()} answered {method} {path.split('?')[0]} with something that is not JSON") from None
 
 
 def report(path: str, payload: dict, key: Key, log=None) -> dict:
@@ -98,7 +131,7 @@ def verify_beacon(season, beacon: dict) -> None:
         try:
             req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
             with urllib.request.urlopen(req, timeout=20) as r:
-                got = json.loads(r.read())
+                got = json.loads(r.read(1 << 16))
         except Exception as e:  # try the next relay
             last = e
             continue
@@ -111,7 +144,7 @@ def verify_beacon(season, beacon: dict) -> None:
                 f"{beacon['randomness'][:16]}…, drand says {got['randomness'][:16]}…"
             )
         return
-    raise OSError(f"could not reach any drand relay to check the round's randomness ({last})")
+    raise FetchError(f"could not reach any drand relay to check the round's randomness ({last})")
 
 
 def round_from_api(season, description: dict):
@@ -140,7 +173,7 @@ def fetch_round(season, index: int):
         sys.stderr.write(f"stet: {e}\n")
         sys.exit(1)
     if not d["round"].get("seed"):
-        sys.stderr.write(f"stet: round {d['round']['id']} has not been drawn yet\n")
+        sys.stderr.write(f"stet: round {clean(d['round']['id'], 40)} has not been drawn yet\n")
         sys.exit(1)
     return round_from_api(season, d["round"])
 
@@ -149,6 +182,7 @@ def fetch_round(season, index: int):
 
 
 def table(rows: list[list[str]], header: list[str], right: tuple[int, ...] = ()) -> str:
+    rows = [[clean(c, 160) for c in row] for row in rows]  # most cells are someone else's words
     cols = list(zip(*([header] + rows), strict=True)) if rows else [[h] for h in header]
     widths = [max(len(str(c)) for c in col) for col in cols]
     out = []
@@ -187,7 +221,7 @@ def ago(ts) -> str:
 
 def editor_label(e: dict) -> str:
     owner = e.get("owner") or ""
-    return f"{owner + '/' if owner else ''}{e['name']} v{e['version']}"
+    return clean(f"{owner + '/' if owner else ''}{e.get('name')} v{e.get('version')}", 100)
 
 
 # --- accounts -------------------------------------------------------------------------------
@@ -201,11 +235,11 @@ def cmd_login(args):
         sys.stderr.write(f"Created a new key at {key_path()}\n")
     if args.gist:
         r = request("POST", "/api/v1/accounts/github", {"gist": args.gist}, key=need_key())
-        sys.stderr.write(f"Linked GitHub account @{r['account']['github']} to {r['account']['handle']}.\n")
+        sys.stderr.write(f"Linked GitHub account @{clean(r['account']['github'])} to {clean(r['account']['handle'])}.\n")
         return
     try:
         me = request("GET", "/api/v1/me", key=key)
-        key.handle = me["account"]["handle"]
+        key.handle = clean(me["account"]["handle"], 40)
         key.save()
         sys.stderr.write(f"Logged in as {key.handle}.\n")
     except ApiError as e:
@@ -218,13 +252,14 @@ def cmd_login(args):
                 sys.exit(1)
             handle = input("Choose a handle (3-24 lowercase letters, digits, hyphens): ").strip()
         me = request("POST", "/api/v1/accounts", {"handle": handle}, key=key)
-        key.handle = me["account"]["handle"]
+        key.handle = clean(me["account"]["handle"], 40)
         key.save()
         sys.stderr.write(f"Welcome, {key.handle}. Your key is at {key_path()}; back it up, it cannot be recovered.\n")
     if args.github:
         sys.stderr.write(
-            "\nTo show a verified GitHub name on the leaderboard:\n"
-            f"  1. Create a public gist containing exactly this line:\n\n       stet-key:{key.public_hex}\n\n"
+            "\nEntering the competition needs a GitHub account at least 30 days old, linked to this key.\n"
+            "(Practice runs, forking and verifying do not.)\n"
+            f"  1. On that account, create a public gist containing exactly this line:\n\n       stet-key:{key.public_hex}\n\n"
             "  2. Run: stet login --gist <the gist's URL>\n"
         )
 
@@ -237,10 +272,10 @@ def cmd_whoami(args):
         sys.stdout.write("\n")
         return
     a, v = me["account"], me["verifier"]
-    flags = [f for f, on in (("anchor", a.get("anchor")), ("trusted verifier", v.get("trusted"))) if on]
-    sys.stderr.write(f"{a['handle']}" + (f"  (@{a['github']} on GitHub)" if a.get("github") else "") + "\n")
+    flags = [f for f, on in (("anchor", a.get("anchor")), ("given no more grading work", v.get("muted"))) if on]
+    sys.stderr.write(clean(a["handle"]) + (f"  (@{clean(a['github'])} on GitHub)" if a.get("github") else "") + "\n")
     sys.stderr.write(f"key       {key.public_hex}\n")
-    sys.stderr.write(f"verified  {v['validated']} jobs ({v['recent']} in the last 14 days), streak {v['streak']}" + (f"  [{', '.join(flags)}]" if flags else "") + "\n")
+    sys.stderr.write(f"verified  {int(v['validated'])} grades agreed ({int(v['recent'])} in the last 14 days), streak {int(v['streak'])}" + (f"  [{', '.join(flags)}]" if flags else "") + "\n")
     sys.stderr.write(f"editors   {len(me['editors'])}\n")
 
 
@@ -258,37 +293,71 @@ def cmd_draw(args):
     """Anchors only: bring the next draw forward to the next moment on the draw grid."""
     r = request("POST", "/api/v1/admin/draw", {}, key=need_key(), timeout=300)
     rd = r["round"]
-    sys.stderr.write(f"{rd['id']}: {rd['status']}, draw {ago(rd['draw_at'])}\n")
+    sys.stderr.write(f"{clean(rd['id'])}: {clean(rd['status'])}, draw {ago(rd['draw_at'])}\n")
 
 
 def cmd_publish(args):
     """Anchors only: publish a download, which is how a season's exam pack reaches the server."""
+    from .spec import load_season
+
     path = Path(args.file)
     blob = path.read_bytes()
     name = args.name or path.name
+    season = load_season(args.season)
+    if hashlib.sha256(blob).hexdigest() == (season.raw.get("heldout_exam") or {}).get("sha256") and args.close_season != season.id:
+        # The one file that must not be published by a slip of the hand: a command from
+        # the shell's history, a tab completion in the config directory, an agent following
+        # the runbook a season early.
+        sys.stderr.write(
+            f"stet: {path.name} is season {season.id}'s held-out exam. Nothing was sent.\n"
+            "  Publishing it cannot be taken back: from that moment anyone can fit an editor to it, and the season's\n"
+            "  final table is worth only what was measured before. It is published once, when the season has closed\n"
+            f"  and its last round has settled:  stet publish {args.file} --close-season {season.id}\n"
+        )
+        sys.exit(1)
     sys.stderr.write(f"publishing {name} ({len(blob) / 1e6:.1f} MB) ...\n")
     r = request("PUT", f"/api/v1/admin/files/{name}", blob, key=need_key(), timeout=1800)
     if r["sha256"] != hashlib.sha256(blob).hexdigest():
         sys.stderr.write("stet: the server stored something else; publish it again\n")
         sys.exit(1)
-    print(f"{r['url']}\nsha256 {r['sha256']}")
+    print(f"{clean(r['url'])}\nsha256 {r['sha256']}")
 
 
 # --- entries --------------------------------------------------------------------------------
 
 
-def cmd_submit(args):
-    from .project import ProjectError, bundle_files, load_project, pack
+def _listing(project, files, skipped, everything: bool) -> str:
+    """What `stet submit` would publish, and what it leaves at home."""
+    rows = [(p.relative_to(project.path).as_posix(), p.stat().st_size) for p in files]
+    show = rows if everything or len(rows) <= 40 else sorted(rows, key=lambda r: -r[1])[:30]
+    out = [f"  {size / 1e3:10,.1f} KB  {name}" for name, size in show]
+    if len(show) < len(rows):
+        out.append(f"  ... and {len(rows) - len(show)} smaller files (`stet submit --dry-run` lists every one)")
+    if skipped:
+        out.append("Left out (not uploaded, so not there when the editor runs):")
+        out += [f"  {name}  ({why})" for name, why in (skipped if everything else skipped[:15])]
+        if not everything and len(skipped) > 15:
+            out.append(f"  ... and {len(skipped) - 15} more")
+    return "\n".join(out) + "\n"
 
-    key = need_key()
+
+def cmd_submit(args):
+    from .project import ProjectError, load_project, pack, survey
+
     try:
         project = load_project(args.path)
+        files, skipped = survey(project)
         blob, editor_id = pack(project)
     except ProjectError as e:
         sys.stderr.write(f"stet: {e}\n")
         sys.exit(1)
-    files = bundle_files(project)
+    # A bundle is public for good once it has run, so the entrant sees every file first.
     sys.stderr.write(f"{project.name}: {len(files)} files, {len(blob) / 1e3:.1f} KB packed, id {editor_id[:12]}\n")
+    sys.stderr.write(_listing(project, files, skipped, args.dry_run))
+    if args.dry_run:
+        sys.stderr.write("Nothing was sent.\n")
+        return
+    key = need_key()
     runs = sorted((project.path / ".stet" / "runs").glob("*/result.json"))
     if not any(json.loads(p.read_text()).get("valid") for p in runs[-5:]):
         sys.stderr.write("warning: no recent valid `stet run` for this project. An editor that fails scores a gain of 0.\n")
@@ -298,7 +367,7 @@ def cmd_submit(args):
             sys.exit(1)
         sys.stderr.write(
             f"\nThis enters {project.name!r} in the next official round as {key.handle}.\n"
-            "Its code, and every edit script it writes, become public under the MIT licence once it has run.\n"
+            "The files listed above, and every edit script the editor writes, become public under the MIT licence once it has run.\n"
         )
         if input("Submit? [y/N] ").strip().lower() not in ("y", "yes"):
             sys.stderr.write("Not submitted.\n")
@@ -309,19 +378,25 @@ def cmd_submit(args):
         sys.stdout.write("\n")
         return
     e = r["editor"]
-    sys.stderr.write(f"\nSubmitted {e['name']} v{e['version']}  ({e['id'][:12]})\n")
+    sys.stderr.write(f"\nSubmitted {clean(e['name'])} v{clean(e['version'])}  ({clean(e['id'])[:12]})\n")
     if r.get("replaced"):
-        sys.stderr.write(f"It replaces your earlier entry {r['replaced'][:12]}, which will not run again.\n")
+        sys.stderr.write(f"It replaces your earlier entry {clean(r['replaced'])[:12]}, which will not run again.\n")
     if r.get("enters"):
-        sys.stderr.write(f"It enters round {r['enters']['round']}, drawn {ago(r['enters']['draw_at'])}.\n")
+        sys.stderr.write(f"It enters round {clean(r['enters']['round'])}, drawn {ago(r['enters']['draw_at'])}.\n")
     if r.get("message"):
-        sys.stderr.write(r["message"] + "\n")
-    sys.stderr.write(f"{r.get('url', '')}\n\nFollow it with `stet status`.\n")
+        sys.stderr.write(clean(r["message"], 1000) + "\n")
+    sys.stderr.write(f"{clean(r.get('url', ''))}\n\nFollow it with `stet status`.\n")
 
 
 def cmd_status(args):
+    from .spec import load_season
+
     key = need_key()
     me = request("GET", "/api/v1/me", key=key)
+    try:
+        check_heldout_pin(load_season(), request("GET", "/api/v1/season"))
+    except ApiError:
+        pass
     if args.json:
         json.dump(me, sys.stdout, indent=1)
         sys.stdout.write("\n")
@@ -338,10 +413,10 @@ def cmd_status(args):
             f"#{e['rank']}" if e.get("rank") else "",
             (f"{last.get('round', '')} {fmt_gain(last.get('gain')) if last.get('valid', True) else 'invalid'}").strip(),
         ])  # fmt: skip
-    print(table(rows, ["editor", "id", "status", "rounds", "mean gain", "multiplier", "rank", "last round"], right=(3, 4, 5)))
+    print(table(rows, ["editor", "id", "status", "rounds", "rating", "multiplier", "rank", "last round"], right=(3, 4, 5)))
     nxt = me.get("next_round")
     if nxt:
-        sys.stderr.write(f"\nNext round {nxt['id']} is drawn {ago(nxt['draw_at'])}.\n")
+        sys.stderr.write(f"\nNext round {clean(nxt['id'])} is drawn {ago(nxt['draw_at'])}.\n")
 
 
 def cmd_leaderboard(args):
@@ -358,7 +433,7 @@ def cmd_leaderboard(args):
         for e in r["editors"][: args.top]
     ]  # fmt: skip
     if rows:
-        print(table(rows, ["#", "editor", "multiplier", "mean gain", "", "rounds", "technique"], right=(0, 2, 3, 5)))
+        print(table(rows, ["#", "editor", "multiplier", "rating", "", "rounds", "technique"], right=(0, 2, 3, 5)))
         sys.stderr.write("\n★ record holder   > beyond the end of the measured reference curve\n")
     qualifying = [
         [editor_label(e), fmt_gain(e.get("rating")), f"{e['rounds']} of {r.get('rated_rounds', 3)}", e.get("technique") or ""]
@@ -366,7 +441,7 @@ def cmd_leaderboard(args):
     ]
     if qualifying:
         sys.stderr.write(("\n" if rows else "") + "Qualifying (ranked once they have enough rounds):\n")
-        print(table(qualifying, ["editor", "mean gain so far", "rounds", "technique"], right=(1, 2)))
+        print(table(qualifying, ["editor", "rating so far", "rounds", "technique"], right=(1, 2)))
     if not rows and not qualifying:
         sys.stderr.write("No editors yet. Be the first: `stet submit`.\n")
 
@@ -383,36 +458,57 @@ def cmd_rounds(args):
         for x in r["rounds"]
     ]  # fmt: skip
     print(table(rows, ["round", "status", "drawn", "entries", "baseline", "crawl"], right=(3, 4)))
-    sys.stderr.write("\nReplay any drawn round locally: stet run --round <id> --scale " + r.get("scale", "micro") + "\n")
+    sys.stderr.write("\nReplay any drawn round locally: stet run --round <id> --scale " + clean(r.get("scale", "micro"), 20) + "\n")
 
 
 def cmd_fork(args):
-    from .project import unpack
+    from .project import ProjectError, unpack
 
     key = load_key()
     info = request("GET", f"/api/v1/editors/{urllib.parse.quote(args.editor, safe='')}")
     e = info["editor"]
+    # The server's answer names a directory and a download. Neither is taken on trust.
+    if not isinstance(e.get("id"), str) or not SHA256_RE.fullmatch(e["id"]) or not isinstance(e.get("name"), str) or not NAME_RE.fullmatch(e["name"]):
+        sys.stderr.write("stet: the server described that editor in a way this client does not accept\n")
+        sys.exit(1)
+    asked = args.editor.lower()
+    if re.fullmatch(r"[0-9a-f]{8,64}", asked) and not e["id"].startswith(asked):
+        sys.stderr.write(f"stet: asked for editor {asked[:12]}, but the server answered with {e['id'][:12]}\n")
+        sys.exit(1)
     dest = Path(args.dest or e["name"]).resolve()
     if dest.exists() and any(dest.iterdir()):
         sys.stderr.write(f"stet: {dest} exists and is not empty\n")
         sys.exit(1)
-    blob = request("GET", f"/api/v1/editors/{e['id']}/bundle", key=key, raw=True)
+    blob = request("GET", f"/api/v1/editors/{e['id']}/bundle", key=key, raw=True, limit=MAX_BUNDLE_BYTES)
     if hashlib.sha256(blob).hexdigest() != e["id"]:
         sys.stderr.write("stet: the downloaded bundle does not match the editor's id\n")
         sys.exit(1)
-    unpack(blob, dest)
+    try:
+        left_out = unpack(blob, dest)
+    except ProjectError as err:
+        sys.stderr.write(f"stet: {clean(err)}\n")
+        sys.exit(1)
     toml = dest / "stet.toml"
-    lines = toml.read_text(encoding="utf-8").splitlines()
+    if not toml.is_file():
+        sys.stderr.write("stet: that bundle has no stet.toml\n")
+        sys.exit(1)
+    lines = toml.read_text(encoding="utf-8", errors="replace").splitlines()
     lines = [ln for ln in lines if not ln.strip().startswith("parent")]
     at = next((i for i, ln in enumerate(lines) if ln.strip().startswith("[")), len(lines))
     lines.insert(at, f'parent = "{e["id"]}"   # forked from {editor_label(e)}')
     toml.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    agents = dest / "AGENTS.md"
-    if not agents.exists():
-        from importlib import resources
+    from importlib import resources
 
-        agents.write_text(resources.files("stet.templates").joinpath("AGENTS.md").read_text(encoding="utf-8"), encoding="utf-8")
-    sys.stderr.write(f"Forked {editor_label(e)} into {dest}\nGive it a new name in stet.toml, then: cd {dest.name} && stet run\n")
+    for name, template in (("AGENTS.md", "AGENTS.md"), (".gitignore", "gitignore")):
+        if not (dest / name).exists():
+            (dest / name).write_text(resources.files("stet.templates").joinpath(template).read_text(encoding="utf-8"), encoding="utf-8")
+    sys.stderr.write(f"Forked {editor_label(e)} into {dest}\n")
+    if left_out:
+        sys.stderr.write(f"Left out {len(left_out)} files no bundle should hold: {clean(', '.join(left_out[:5]))}\n")
+    sys.stderr.write(
+        "This is someone else's program. Read it before you run it, or run it boxed in: stet run --sandbox (Linux).\n"
+        f"Give it a new name in stet.toml, then: cd {dest.name} && stet run\n"
+    )
 
 
 # --- verifying ------------------------------------------------------------------------------
@@ -444,83 +540,267 @@ def _announcements() -> Path:
     return config_dir() / "announced.json"
 
 
-def remember_announcement(a: dict | None) -> None:
+ANNOUNCE_MARGIN = 30  # seconds before a beacon is emitted after which an announcement proves nothing
+ANNOUNCE_HORIZON = 8 * 86400  # no draw is announced further ahead than this
+ANNOUNCE_KEEP = 30 * 86400
+
+
+def _announcement_log() -> dict:
+    path = _announcements()
+    try:
+        log = json.loads(path.read_text())
+        if not isinstance(log, dict):
+            raise ValueError("not an object")
+        return log
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError):
+        # A damaged log is evidence of something. Set it aside; do not quietly start again.
+        aside = path.with_name(path.name + ".damaged")
+        try:
+            path.replace(aside)
+            sys.stderr.write(f"stet: {path} could not be read and was moved to {aside.name}; starting a new record of announcements\n")
+        except OSError:
+            pass
+        return {}
+
+
+def remember_announcement(season, a: dict | None, now: float | None = None) -> None:
     """Keep our own record of what the server said a draw would use.
 
     The beacon round a draw uses is fixed by its time. The crawl is not: it is named when
     the draw is scheduled, before the beacon value exists. Every verifier that is online
     keeps this log, so a server that changed the crawl after seeing the randomness would be
     contradicting records it does not control.
+
+    The log is this verifier's, so the server gets no say in what it holds. Only a draw on
+    the season's grid, still in the future and not absurdly far off, is written down: there
+    are few enough of those that nothing honest can be crowded out, and entries leave by
+    age alone. The server may change its mind about a draw as often as it likes before the
+    beacon exists (the last word counts, as it would for anyone listening), and never after.
     """
-    if not a or not a.get("drand_round") or not a.get("crawl"):
-        return
-    path = _announcements()
+    now = time.time() if now is None else now
     try:
-        log = json.loads(path.read_text())
-    except (OSError, ValueError):
-        log = {}
-    slot = str(int(a["drand_round"]))
-    if slot in log:
+        slot = int(a["drand_round"])
+        entry = {"id": str(a["id"]), "crawl": str(a["crawl"]["crawl"]), "paths_sha256": str(a["crawl"]["paths_sha256"]).lower()}
+        at = season.beacon_time(slot)
+    except (KeyError, TypeError, ValueError):
         return
-    log[slot] = {"id": a.get("id"), "crawl": a["crawl"].get("crawl"), "paths_sha256": a["crawl"].get("paths_sha256"), "seen_at": int(time.time())}
-    for k in sorted(log, key=int)[:-200]:
+    if season.draw_slot(slot) is None and os.environ.get("STET_DEV") != "1":
+        return
+    if not (now + ANNOUNCE_MARGIN <= at <= now + ANNOUNCE_HORIZON):
+        return
+    if not CRAWL_ID_RE.fullmatch(entry["crawl"]) or not SHA256_RE.fullmatch(entry["paths_sha256"]) or len(entry["id"]) > 40:
+        return
+    log = _announcement_log()
+    old = log.get(str(slot))
+    if isinstance(old, dict) and all(old.get(k) == v for k, v in entry.items()):
+        return
+    log[str(slot)] = {**entry, "seen_at": int(now), "changed": (old.get("changed", 0) + 1) if isinstance(old, dict) else 0}
+    for k in [k for k in log if not k.isdigit() or season.beacon_time(int(k)) < now - ANNOUNCE_KEEP]:
         del log[k]
+    path = _announcements()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(log, indent=1))
+    tmp = path.with_name(path.name + f".tmp{os.getpid()}")
+    tmp.write_text(json.dumps(log, indent=1))
+    tmp.replace(path)
 
 
-def check_announcement(season, rnd) -> None:
-    """Refuse a round that was not drawn the way we were told it would be."""
-    try:
-        seen = json.loads(_announcements().read_text()).get(str(int(rnd.beacon["round"])))
-    except (OSError, ValueError):
+def check_announcement(season, rnd, warn=None) -> None:
+    """Refuse a round that was not drawn the way we were told it would be.
+
+    If we hold an announcement for this draw from before its beacon existed, the round must
+    match it, or this verifier will not score it. If we hold none, though we heard of other
+    draws in the day before, we cannot tell a draw moved in good time from one chosen after
+    the fact. That is said out loud (`warn`) and the round is scored: the server announces
+    a moved draw at least six minutes ahead, but a verifier in the middle of a job asks for
+    work less often than that, so refusing would stop honest verifiers every time one was
+    busy when a draw moved.
+    """
+    if rnd.kind != "official":
         return
-    if not seen or seen["seen_at"] >= season.beacon_time(rnd.beacon["round"]):
-        return  # we never saw it announced, or only after the draw: we can vouch for nothing
-    told = (seen["id"], seen["crawl"], seen["paths_sha256"])
-    got = (rnd.id, rnd.crawl["crawl"], rnd.crawl["paths_sha256"])
-    if told != got:
-        raise ValueError(
-            f"the draw at drand round {rnd.beacon['round']} was announced as {told[0]} on {told[1]}, but the server now says {got[0]} on {got[1]}. "
-            "This verifier will not score it. Please report this."
-        )
+    log = {k: v for k, v in _announcement_log().items() if isinstance(v, dict) and isinstance(v.get("seen_at"), int)}
+    drawn = season.beacon_time(rnd.beacon["round"])
+    seen = log.get(str(int(rnd.beacon["round"])))
+    if seen and seen["seen_at"] + ANNOUNCE_MARGIN <= drawn:
+        told = (seen.get("id"), seen.get("crawl"), seen.get("paths_sha256"))
+        got = (rnd.id, rnd.crawl["crawl"], rnd.crawl["paths_sha256"])
+        if told != got:
+            raise RoundRefused(
+                f"the draw at drand round {rnd.beacon['round']} was announced as {told[0]} on {told[1]}, but the server now says {got[0]} on {got[1]}. "
+                "This verifier will not score it. Please report this."
+            )
+        return
+    before = [(k, v) for k, v in log.items() if drawn - 86400 <= v["seen_at"] <= drawn - ANNOUNCE_MARGIN]
+    if before and warn:
+        slot, last = max(before, key=lambda kv: kv[1]["seen_at"])
+        if last.get("id") == rnd.id and slot.isdigit():  # the same round, moved to another draw
+            at = lambda t: time.strftime("%H:%M UTC", time.gmtime(t))  # noqa: E731
+            what = (
+                f"this verifier was told that round {rnd.id} would be drawn at {at(season.beacon_time(int(slot)))}. "
+                f"It was drawn at {at(drawn)}, and word of the change did not reach this verifier before then."
+            )
+        else:
+            what = (
+                f"this verifier was not told of the draw of round {rnd.id} before it happened "
+                f"(the last it had heard of, {(drawn - last['seen_at']) // 60} minutes earlier, was {clean(last.get('id'), 40)})."
+            )
+        warn(what + " It cannot vouch for how this draw was chosen.")
 
 
-def unzstd(blob: bytes, limit: int) -> bytes:
-    """Decompress, reading at most one byte past `limit`: a small download cannot expand without bound."""
-    import zstandard
+class RoundRefused(ValueError):
+    """This verifier will not score the round: it was not drawn the way the rules say."""
 
-    reader = zstandard.ZstdDecompressor().stream_reader(io.BytesIO(blob))
-    parts, got = [], 0
-    while got <= limit:
-        chunk = reader.read(min(1 << 20, limit + 1 - got))
-        if not chunk:
-            break
-        parts.append(chunk)
-        got += len(chunk)
-    return b"".join(parts)
+
+_unannounced: set[str] = set()  # rounds already warned about
+
+
+def _job_round(season, job: dict, out):
+    """The round a job is for, rebuilt and checked. Raises RoundRefused if it does not hold up."""
+    from . import data
+
+    try:
+        rnd = round_from_api(season, job["round"])
+    except (ValueError, KeyError, TypeError) as err:  # the seed does not follow, the beacon is off the grid, ...
+        raise RoundRefused(clean(err)) from None
+
+    def warn(message):
+        if rnd.id not in _unannounced:  # once a round, not once a job
+            _unannounced.add(rnd.id)
+            out.line("", out.bad(message))
+
+    check_announcement(season, rnd, warn=warn)
+    data.mark_verified(rnd)
+    data.prune_verified(rnd)
+    return rnd
+
+
+def check_job(job) -> int:
+    """A job as the server described it, checked before any of it reaches a path or a URL.
+
+    Returns the job's id. The server is the only thing that hands out jobs, which is no
+    reason to let a field of one name a directory to delete.
+    """
+    ok = (
+        isinstance(job, dict)
+        and isinstance(job.get("id"), int) and not isinstance(job["id"], bool) and 0 < job["id"] < 1 << 62
+        and job.get("kind") in ("grade", "edit")
+        and isinstance(job.get("round"), dict)
+        and isinstance(job.get("editor"), dict)
+    )  # fmt: skip
+    if ok and job["kind"] == "edit":
+        ok = isinstance(job["editor"].get("id"), str) and bool(SHA256_RE.fullmatch(job["editor"]["id"]))
+    if ok and job["kind"] == "grade":
+        ok = isinstance(job.get("script"), dict) and isinstance(job["script"].get("sha256"), str) and bool(SHA256_RE.fullmatch(job["script"]["sha256"]))
+    if not ok:
+        raise ValueError("the server sent a job this client does not understand")
+    return job["id"]
+
+
+def claim_workdir() -> tuple[Path, object]:
+    """A directory under the cache that this process alone works in, and the lock that says so.
+
+    Two verifiers on one machine (one per GPU, each with a key and an account of its own:
+    see claim_key) must not clear each other's work, so each holds a lock on a numbered
+    slot for as long as it runs. Holding the lock also means whatever is in the slot was
+    left by a dead process.
+    """
+    from .runner import remove_tree
+
+    root = cache_dir() / "verify"
+    root.mkdir(parents=True, exist_ok=True)
+    try:
+        import fcntl
+    except ImportError:  # Windows: one verifier per cache
+        return root / "slot0", None
+    for n in range(64):
+        lock = open(root / f"slot{n}.lock", "w")
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            lock.close()
+            continue
+        for p in root.iterdir():  # what earlier releases left behind, in directories named by job
+            if not p.name.startswith("slot"):
+                remove_tree(p)
+        return root / f"slot{n}", lock
+    raise OSError(f"64 verifiers already hold {root}")
 
 
 def _grade_job(job, season, scale, device, key, out, work: Path) -> tuple[dict, dict]:
-    from . import data
+    import zstandard
+
     from .pipeline import baseline, grade_round
 
-    rnd = round_from_api(season, job["round"])
-    check_announcement(season, rnd)
-    data.mark_verified(rnd)
-    data.prune_verified(rnd)
+    rnd = _job_round(season, job, out)
     base = baseline(rnd, scale, device, progress=out.progress("baseline"), log=lambda m: out.line("", out.dim("baseline " + m)))
     want = job["script"]["sha256"]
-    blob = request("GET", f"/api/v1/scripts/{want}", raw=True, timeout=600)
     limit = int(season.raw["script"]["max_bytes"])
-    raw = unzstd(blob, limit)
+    blob = request("GET", f"/api/v1/scripts/{want}", raw=True, timeout=600, limit=limit + (1 << 20))
+    try:
+        raw = unzstd(blob, limit)
+    except zstandard.ZstdError:
+        raise WrongBytes("the script the server sent is damaged") from None
     if len(raw) > limit or hashlib.sha256(raw).hexdigest() != want:
-        raise OSError("the script the server sent does not match its hash")
+        raise WrongBytes("the script the server sent does not match its hash")
     work.mkdir(parents=True, exist_ok=True)
     path = work / "script.jsonl"
     path.write_bytes(raw)
     result = grade_round(rnd, scale, path, device=device, progress=out.progress("training"), log=lambda m: out.line("", out.dim(m)))
+    if result.get("heldout"):
+        keep_heldout(season, job, result, base)
+    elif result.get("heldout_error"):
+        out.line("", out.bad(f"The held-out exam could not be sat for this grade ({clean(result['heldout_error'])}). The public grade is reported as usual."))
     return result, base
+
+
+def heldout_log(season) -> Path:
+    return config_dir() / "heldout" / f"{season.id}.jsonl"
+
+
+def keep_heldout(season, job: dict, result: dict, base: dict) -> None:
+    """An anchor's record of what the held-out exam said about one official grade.
+
+    It is appended here and reported to nobody: `slim_result` names every field a grader
+    sends, and this is not one of them. The file is published, with the exam, when the
+    season closes.
+
+    Until then held-out numbers are in two places on an anchor, both private to its
+    account: this file (mode 0600, in the config directory), and each official round's
+    cached baseline (~/.cache/stet/rounds/<round>/<scale>/baseline-*.json, mode 0600),
+    which holds the unedited corpus's held-out loss beside its public one. `stet run`,
+    `stet score` and `stet baseline` leave them out of what they print and save unless
+    `--heldout` is given.
+    """
+    held, held_base = result["heldout"], base.get("heldout") or {}
+    editor = job.get("editor") if isinstance(job.get("editor"), dict) else {}
+    line = {
+        "at": int(time.time()),
+        "round": result["round"]["id"],
+        "scale": result["scale"],
+        "harness": result["harness"],
+        "editor": {k: editor.get(k) for k in ("id", "owner", "name", "version")},
+        "script_sha256": result.get("script_sha256"),
+        "exam_sha256": result.get("exam_sha256"),
+        "heldout_exam_sha256": held.get("exam_sha256"),
+        "public": {"loss": result["exam"]["loss"], "baseline": base["exam"]["loss"]},
+        "heldout": {
+            "loss": held["loss"],
+            "baseline": held_base.get("loss"),
+            "by_source": {k: v["loss"] for k, v in held["by_source"].items()},
+            "baseline_by_source": {k: v["loss"] for k, v in (held_base.get("by_source") or {}).items()},
+        },
+    }
+    path = heldout_log(season)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    with os.fdopen(fd, "a", encoding="utf-8") as f:
+        f.write(json.dumps(line, sort_keys=True) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+
+
+MACHINE_ERRNOS = (errno.ENOSPC, errno.EDQUOT, errno.EROFS, errno.EIO, errno.EMFILE, errno.ENFILE, errno.ENOMEM)
 
 
 def _edit_job(job, season, scale, key, out, work: Path, sandbox: str) -> dict:
@@ -528,31 +808,41 @@ def _edit_job(job, season, scale, key, out, work: Path, sandbox: str) -> dict:
 
     import zstandard
 
+    from .runner import EditRun, HarnessError
+
+    # Checked here as well as where the flag is read: this is the function that runs a
+    # stranger's program, and nothing that calls it should be able to get that wrong.
+    if sandbox != "bwrap" and os.environ.get("STET_DEV") != "1":
+        raise HarnessError("refusing to run an entrant's editor outside the sandbox")
     from . import data
-    from .pipeline import edit_round
-    from .project import ProjectError, load_project, unpack
+    from .project import load_project, unpack
     from .spec import HARNESS_VERSION
 
-    rnd = round_from_api(season, job["round"])
-    check_announcement(season, rnd)
-    data.mark_verified(rnd)
-    data.prune_verified(rnd)
+    rnd = _job_round(season, job, out)
     e = job["editor"]
-    blob = request("GET", f"/api/v1/editors/{e['id']}/bundle", key=key, raw=True, timeout=600)
+    blob = request("GET", f"/api/v1/editors/{e['id']}/bundle", key=key, raw=True, timeout=600, limit=MAX_BUNDLE_BYTES)
     if hashlib.sha256(blob).hexdigest() != e["id"]:
-        raise OSError("the bundle does not match the editor's id")
+        raise WrongBytes("the bundle the server sent does not match the editor's id")
     corpus = data.corpus(rnd, scale)
     payload = {
         "harness": HARNESS_VERSION, "season": season.id, "season_digest": season.digest, "round": rnd.id, "scale": scale.name,
         "corpus_sha256": corpus.meta["sha256"], "script_sha256": None, "started_at": int(time.time()),
     }  # fmt: skip
+    # From here on the bundle's bytes are what the entrant submitted, so whatever is wrong
+    # with them is the entrant's failure and is reported as one. Handing the job back
+    # instead would have the next anchor meet the same bundle, for ever.
     bundle_dir = work / "bundle"
     try:
         unpack(blob, bundle_dir)
         project = load_project(bundle_dir)
-    except (ProjectError, ValueError, OSError) as err:  # the entrant's bundle is at fault, not this machine
-        payload["edit"] = {"status": "error", "seconds": 0, "time_limit": scale.edit_seconds, "reason": f"the bundle could not be loaded: {err}"[:300]}
+    except Exception as err:
+        if isinstance(err, MemoryError) or (isinstance(err, OSError) and err.errno in MACHINE_ERRNOS):
+            raise HarnessError(f"could not unpack a bundle on this machine: {err}") from None
+        payload["edit"] = EditRun("error", 0.0, float(scale.edit_seconds), None, None, "", sandbox, reason=clean(f"the bundle could not be loaded: {err}", 300)).to_dict()
+        payload["finished_at"] = int(time.time())
         return payload
+    from .pipeline import edit_round
+
     edit = edit_round(bundle_dir, project.entry, rnd, scale, work, sandbox=sandbox, log=lambda m: out.line("", out.dim(m)), limits={"required": sandbox == "bwrap"})
     payload["edit"] = edit.to_dict()
     payload["finished_at"] = int(time.time())
@@ -564,11 +854,175 @@ def _edit_job(job, season, scale, key, out, work: Path, sandbox: str) -> dict:
     return payload
 
 
+def _forget_round(job: dict, season, scale) -> None:
+    """Drop what is cached for a job's round, so that a second try starts from nothing.
+
+    If the server says our corpus or baseline differs from the round's, the copy on disk is
+    the first suspect, and it would otherwise be used again unchanged.
+    """
+    from . import data
+    from .runner import remove_tree
+
+    try:
+        rnd = round_from_api(season, job["round"])
+    except Exception:
+        return
+    remove_tree(data.round_dir(rnd, scale))
+
+
+def _pins() -> Path:
+    return config_dir() / "pins.json"
+
+
+def check_heldout_pin(season, served: dict | None = None, warn=None, now: float | None = None) -> None:
+    """Hold the organisers to the held-out exam they committed to.
+
+    The season file names the held-out exam by its hash, and the rules promise that hash
+    will not change while the season runs. A promise is only as good as somebody's record
+    of it, so the first hash this machine is shown is written down here, and anything that
+    later says otherwise (a new release's season file, or the server) is said out loud.
+    It is a warning, never a refusal: a volunteer's machine has no way to know which of the
+    two is the true one, only that the organisers have gone back on their word.
+    """
+    warn = warn or (lambda message: sys.stderr.write(message + "\n"))
+    now = time.time() if now is None else now
+    said = {
+        "this copy of stet": (season.raw.get("heldout_exam") or {}).get("sha256"),
+        f"the server at {api_base()}": (served or {}).get("heldout_exam_sha256") if (served or {}).get("season", season.id) == season.id else None,
+    }
+    path = _pins()
+    try:
+        pins = json.loads(path.read_text())
+        pinned = pins["heldout_exam"].get(season.id) if isinstance(pins.get("heldout_exam"), dict) else None
+    except FileNotFoundError:
+        pins, pinned = {}, None
+    except (OSError, ValueError, AttributeError, KeyError, TypeError):
+        # A record that cannot be read is replaced, and that is said too: it is the one
+        # file a changed commitment would have to get past.
+        warn(f"stet: {path} could not be read; starting a new record of the season's commitments")
+        pins, pinned = {}, None
+    if not isinstance(pinned, dict) or not SHA256_RE.fullmatch(str(pinned.get("sha256"))):
+        pinned = None
+    for source, sha in said.items():
+        if not isinstance(sha, str) or not SHA256_RE.fullmatch(sha):
+            if pinned and source == "this copy of stet":
+                warn(
+                    f"WARNING: season {season.id} committed to a held-out exam, {pinned['sha256']}, and {source} no longer names one.\n"
+                    "  The organisers promised it would not change while the season runs. Please report this."
+                )
+            continue
+        if pinned is None:
+            pinned = {"sha256": sha, "seen_at": int(now), "from": source}
+            if not isinstance(pins.get("heldout_exam"), dict):
+                pins["heldout_exam"] = {}
+            pins["heldout_exam"][season.id] = pinned
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_name(path.name + f".tmp{os.getpid()}")
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as f:
+                json.dump(pins, f, indent=1)
+            tmp.replace(path)
+        elif pinned["sha256"] != sha:
+            when = time.strftime("%d %B %Y", time.gmtime(int(pinned.get("seen_at") or 0)))
+            warn(
+                f"WARNING: season {season.id}'s held-out exam has changed.\n"
+                f"  On {when} this machine was shown its hash as {pinned['sha256']} (by {clean(pinned.get('from'), 80)}).\n"
+                f"  Now {source} says it is {sha}.\n"
+                "  The organisers committed to one held-out exam for the whole season and promised it would not change.\n"
+                f"  Please report this. (This machine's record is {path}.)"
+            )
+
+
+def claim_key():
+    """One verifier per key, for as long as it runs. Returns the lock that says so.
+
+    The server gives an account one job at a time, and a verifier that asks for work while
+    its account holds a job is handed that job again: that is how a verifier that was
+    restarted picks up where it stopped. Two verifiers on one key would therefore both be
+    given the first one's job, and either could hand it back from under the other.
+    """
+    try:
+        import fcntl
+    except ImportError:  # Windows
+        return None
+    path = config_dir() / "verify.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock = open(path, "a+")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        lock.seek(0)
+        pid = clean(lock.read(20).strip() or "unknown", 20)
+        lock.close()
+        sys.stderr.write(
+            f"stet: another `stet verify` (process {pid}) is already running with this key.\n"
+            "  The server gives one account one job at a time, so a second verifier on the same key would be handed\n"
+            "  the first one's job. To put a second GPU to work, give it an account of its own:\n"
+            "    STET_CONFIG=<another directory> stet login --handle <another name>\n"
+            "    STET_CONFIG=<that directory> stet verify\n"
+        )
+        sys.exit(1)
+    lock.seek(0)
+    lock.truncate()
+    lock.write(f"{os.getpid()}\n")
+    lock.flush()
+    return lock
+
+
+def _stop_like_ctrl_c() -> dict:
+    """Have a volunteer's verifier treat being told to stop (a closed terminal, `kill`, a
+    service manager) as it treats Ctrl-C: hand the job back, then go. A job that is merely
+    abandoned keeps its place on an entry until its time runs out, and the server then
+    rests the account for a day. Returns what to put back afterwards.
+
+    An anchor does not do this. Its service manager restarts it, the server hands it the
+    same job again, and nothing is lost; handing the job back would count as one of the
+    few attempts an entry gets.
+    """
+    import signal
+    import threading
+
+    def stop(signum, frame):
+        raise KeyboardInterrupt
+
+    old = {}
+    if threading.current_thread() is threading.main_thread():
+        for name in ("SIGTERM", "SIGHUP"):
+            if hasattr(signal, name):
+                try:
+                    old[getattr(signal, name)] = signal.signal(getattr(signal, name), stop)
+                except (ValueError, OSError):
+                    pass
+    return old
+
+
+RETRY_PAUSES = (60, 300)  # a job that fails on this machine is tried again after these waits, then handed back
+STOP_AFTER_FAILURES = 3 * (len(RETRY_PAUSES) + 1)  # three jobs' worth of failures in a row: it is the machine
+FETCH_PATIENCE = 30 * 60  # how long a job is kept while what it needs cannot be downloaded
+
+
 def cmd_verify(args):
-    from .cli import Out, need_torch
+    import signal
+
+    from .cli import need_torch
 
     need_torch()
-    from .runner import HarnessError, bwrap_available, scope_available
+    need_key()
+    lock = claim_key()
+    handlers = {} if args.edits else _stop_like_ctrl_c()
+    try:
+        return _verify(args)
+    finally:
+        for sig, old in handlers.items():
+            signal.signal(sig, old)
+        if lock is not None:
+            lock.close()
+
+
+def _verify(args):
+    from .cli import Out, torch_index_hint
+    from .data import heldout_pack_file, heldout_pack_path
+    from .runner import bwrap_available, remove_tree, sandbox_selftest, scope_available
     from .spec import load_season
     from .train import hardware_info, pick_device
 
@@ -576,6 +1030,7 @@ def cmd_verify(args):
     key = need_key()
     season = load_season(args.season)
     info = request("GET", "/api/v1/season")
+    check_heldout_pin(season, info, warn=lambda message: out.line("", out.bad(message)))
     scale = season.scale(info["scale"])
     device = pick_device(args.device)
     hw = hardware_info(device)
@@ -589,94 +1044,222 @@ def cmd_verify(args):
     sandbox = "none"
     if args.edits:
         sandbox = "none" if args.no_sandbox else "bwrap"
+        if sandbox == "none" and os.environ.get("STET_DEV") != "1":
+            sys.stderr.write("stet: edit jobs run other people's code, and only ever in the sandbox\n")
+            sys.exit(1)
         if sandbox == "bwrap":
-            for ok, why in (bwrap_available(), scope_available()):
+            for ok, why in (bwrap_available(), scope_available(), sandbox_selftest()):
                 if not ok:
                     sys.stderr.write(f"stet: edit jobs run other people's code and need the sandbox: {why}\n")
                     sys.exit(1)
+    try:
+        slot, lock = claim_workdir()  # `lock` is held until this process ends
+    except OSError as e:
+        sys.stderr.write(f"stet: {e}\n")
+        sys.exit(1)
+    work = slot / "job"
     out.line("", out.bold(f"stet verify · {key.handle} · {hw.get('gpu', device.type)}"))
     out.line("", out.dim("Grading published edit scripts with the fixed trainer. No one else's code runs on this machine." if not args.edits
                          else "Running edit jobs in the sandbox, and grading."))  # fmt: skip
-    hello = {"harness": __version__, "season": season.id, "season_digest": season.digest, "hardware": hw, "edits": bool(args.edits), "sandbox": sandbox}
-    done = failures = 0
-    idle = False
-    while True:
-        try:
-            r = request("POST", "/api/v1/jobs/claim", hello, key=key)
-        except ApiError as e:
-            if e.status in (400, 401, 403, 426):
-                sys.stderr.write(f"stet: {e}\n")
-                sys.exit(1)
-            out.line("", out.dim(f"server unavailable ({e}); retrying in 60s"))
-            time.sleep(60)
-            continue
-        remember_announcement(r.get("announced"))
-        job = r.get("job")
-        if not job:
-            if args.once or (args.max_jobs and done >= args.max_jobs):
-                out.line("", r.get("message") or "No work right now.")
-                return
-            if not idle:
-                idle = True
-                out.line("", out.dim((r.get("message") or "No work right now.") + " Waiting; Ctrl-C to stop."))
-            time.sleep(min(300, max(5, int(r.get("retry_after") or 60))))
-            continue
-        idle = False
-        work = cache_dir() / "verify" / str(job["id"])
-        shutil.rmtree(cache_dir() / "verify", ignore_errors=True)  # anything a killed run left behind
-        e = job["editor"]
-        out.line("", "")
-        out.line(job["kind"], f"job {job['id']} · {editor_label(e)} · round {job['round']['id']}")
-        try:
-            if job["kind"] == "edit":
-                payload = _edit_job(job, season, scale, key, out, work, sandbox)
-                path = f"/api/v1/jobs/{job['id']}/script"
-            else:
-                result, base = _grade_job(job, season, scale, device, key, out, work)
-                payload = slim_result(result, base)
-                path = f"/api/v1/jobs/{job['id']}/result"
-        except KeyboardInterrupt:
-            _release(job, key, "interrupted")
-            shutil.rmtree(work, ignore_errors=True)
-            out.line("", "Stopped; the job was handed back.")
-            return
-        except (HarnessError, Exception) as err:  # our problem, not the editor's: hand the job back untouched
-            _release(job, key, f"{type(err).__name__}: {err}"[:300])
-            shutil.rmtree(work, ignore_errors=True)
-            out.line("", out.bad(f"could not run this job ({type(err).__name__}: {err}); handed it back"))
-            failures += 1
-            if args.once or failures >= 3:
-                # Three in a row is this machine, not the jobs. Stop rather than churn through the queue.
-                sys.stderr.write("stet: stopping, because jobs keep failing on this machine. `stet doctor` checks the setup.\n")
-                sys.exit(1)
-            time.sleep(30)
-            continue
-        try:
-            ack = report(path, payload, key, log=lambda m: out.line("", out.dim(m)))
-        except ApiError as err:
-            out.line("", out.bad(f"the server did not accept the result: {err}"))
-            ack = {}
-        shutil.rmtree(work, ignore_errors=True)
-        done += 1
-        failures = 0
-        if job["kind"] == "edit":
-            ed = payload["edit"]
-            out.line("result", f"{ed['status']} in {ed['seconds']:.0f}s" + (f" · script {payload['script_sha256'][:12]} ({payload['script_size'] / 1e6:.1f} MB)" if payload.get("script_sha256") else f" · no script: {ed.get('reason', '')}"))
-        elif result["valid"]:
-            gain = base["exam"]["loss"] - result["exam"]["loss"]
-            out.line("result", f"exam {result['exam']['loss']:.4f} · baseline {base['exam']['loss']:.4f} · gain {out.bold(f'{gain:+.4f}')}")
-        else:
-            out.line("result", f"invalid: {result['invalid_reason']}")
-        if ack:
-            v = ack.get("verifier") or {}
-            out.line("server", f"{ack.get('status', '')}" + (f" · {ack['message']}" if ack.get("message") else "") + (f" · {v.get('validated', 0)} validated" if v else ""))
-        if args.once or (args.max_jobs and done >= args.max_jobs):
-            return
-
-
-def _release(job: dict, key: Key, reason: str) -> None:
     try:
-        request("POST", f"/api/v1/jobs/{job['id']}/release", {"reason": reason}, key=key, timeout=20)
+        if heldout_pack_path(season) is not None:
+            out.line("", out.dim(f"This machine holds the season's held-out exam. What it says is kept in {heldout_log(season)} and sent nowhere."))
+        elif args.edits and (season.raw.get("heldout_exam") or {}).get("sha256") and os.environ.get("STET_DEV") != "1":
+            sys.stderr.write(
+                f"stet: season {season.id} has a held-out exam, and an anchor sits every official student on it.\n"
+                f"  This machine does not hold it. It belongs at {heldout_pack_file(season)}\n"
+                "  (or wherever STET_HELDOUT_EXAM points). Every official grade made without it is a gap in the season's\n"
+                "  final table that has to be measured again, so this anchor will not start until the pack is in place.\n"
+            )
+            sys.exit(1)
+    except RuntimeError as e:  # a pack that is not the committed one: an anchor must not grade until that is put right
+        sys.stderr.write(f"stet: {e}\n")
+        sys.exit(1)
+    hello = {"harness": __version__, "season": season.id, "season_digest": season.digest, "hardware": hw, "edits": bool(args.edits), "sandbox": sandbox}
+    done = failures = waits = 0
+    refused: dict[str, int] = {}  # round id -> how many times this machine and the server disagreed about it
+    tries: dict[int, int] = {}  # job id -> how many times it has failed on this machine
+    stuck: dict[int, int] = {}  # job id -> seconds spent waiting for a download it needs
+    idle = False
+    holding: int | None = None  # the job this verifier has taken and has neither reported nor handed back
+
+    def stop_if_once():
+        if args.once:
+            sys.exit(1)
+
+    def patience(why: str) -> int:
+        """Wait out something that is not this machine's fault, a little longer each time."""
+        nonlocal waits
+        waits += 1
+        pause = min(3600, 60 * 2 ** min(waits - 1, 6))
+        out.line("", out.dim(f"{why}; trying again in {pause // 60} min"))
+        stop_if_once()
+        time.sleep(pause)
+        return pause
+
+    def hand_back(reason: str) -> None:
+        nonlocal holding
+        _release(holding, key, reason)
+        holding = None
+
+    try:
+        while True:
+            try:
+                r = request("POST", "/api/v1/jobs/claim", hello, key=key)
+            except ApiError as e:
+                if e.status in (400, 401, 403, 426):
+                    sys.stderr.write(f"stet: {e}\n" + (torch_index_hint() if e.status == 426 else ""))
+                    sys.exit(1)
+                out.line("", out.dim(f"server unavailable ({e}); retrying in 60s"))
+                time.sleep(60)
+                continue
+            if not isinstance(r, dict):
+                r = {}
+            remember_announcement(season, r.get("announced"))
+            job = r.get("job")
+            if not job:
+                if args.once or (args.max_jobs and done >= args.max_jobs):
+                    out.line("", clean(r.get("message") or "No work right now."))
+                    return
+                if not idle:
+                    idle = True
+                    out.line("", out.dim(clean(r.get("message") or "No work right now.") + " Waiting; Ctrl-C to stop."))
+                try:
+                    pause = int(r.get("retry_after") or 60)
+                except (TypeError, ValueError):
+                    pause = 60
+                time.sleep(min(300, max(5, pause)))
+                continue
+            idle = False
+            try:
+                job_id = check_job(job)
+            except ValueError as err:
+                patience(str(err))
+                continue
+            holding = job_id
+            round_id = clean(job["round"].get("id"), 40)
+            out.line("", "")
+            out.line(job["kind"], f"job {job_id} · {editor_label(job['editor'])} · round {round_id}")
+            if job["kind"] == "edit" and not args.edits:
+                # An honest server never does this. Whatever it is, it is not going to run here.
+                hand_back("this verifier does not run edit jobs")
+                sys.stderr.write(
+                    "stet: the server handed this verifier an edit job, which would run an entrant's program on this machine.\n"
+                    "  It was refused, and this verifier has stopped. Please report this.\n"
+                )
+                sys.exit(1)
+            if refused.get(round_id, 0) >= 2:
+                hand_back("this verifier and the server disagree about this round")
+                patience(f"not taking more work from round {round_id}, which the server and this machine disagree about")
+                continue
+            if not remove_tree(work):
+                sys.stderr.write(f"stet: could not clear {work}. Something an editor left there cannot be removed; stopping.\n")
+                sys.exit(1)
+            result = base = None
+            try:
+                if job["kind"] == "edit":
+                    payload = _edit_job(job, season, scale, key, out, work, sandbox)
+                    path = f"/api/v1/jobs/{job_id}/script"
+                else:
+                    result, base = _grade_job(job, season, scale, device, key, out, work)
+                    payload = slim_result(result, base)
+                    path = f"/api/v1/jobs/{job_id}/result"
+            except RoundRefused as err:
+                hand_back(clean(f"round refused: {err}", 300))
+                remove_tree(work)
+                refused[round_id] = 2  # not this session
+                out.line("", out.bad(str(err)))
+                stop_if_once()
+                continue
+            except (FetchError, ApiError) as err:  # a download failed: the network's trouble, or the host's
+                remove_tree(work)
+                waited = stuck.get(job_id, 0)
+                # Bytes that do not match their hash, or an answer that says no, will be the
+                # same next time. Anything else may pass.
+                final = isinstance(err, WrongBytes) or (isinstance(err, ApiError) and 400 <= err.status < 500 and err.status not in (408, 429))
+                if final or args.once or waited >= FETCH_PATIENCE:
+                    hand_back(clean(f"{type(err).__name__}: {err}", 300))
+                    stuck.pop(job_id, None)
+                    patience(f"could not fetch what this job needs ({clean(err)}); handed it back")
+                else:
+                    # Kept, not handed back. A job handed back is not free: an entry gets only
+                    # a few attempts from the anchors, and a volunteer is offered an entry
+                    # once. The server gives this job back to us the next time we ask.
+                    stuck[job_id] = waited + patience(f"could not fetch what this job needs ({clean(err)}). Keeping the job")
+                continue
+            except Exception as err:  # this machine's trouble, not the editor's
+                remove_tree(work)
+                failures += 1
+                tries[job_id] = tries.get(job_id, 0) + 1
+                what = f"could not run this job ({type(err).__name__}: {clean(err)})"
+                # Three in a row on three jobs is this machine, not the jobs. Stop rather than churn through the queue.
+                stopping = args.once or failures >= STOP_AFTER_FAILURES
+                if tries[job_id] <= len(RETRY_PAUSES) and not stopping:
+                    # A fault that passes (a full disk someone is clearing, a driver that
+                    # recovers) should cost a few minutes, not one of the entry's attempts.
+                    pause = RETRY_PAUSES[tries[job_id] - 1]
+                    out.line("", out.bad(f"{what}; keeping it and trying again in {pause // 60} min"))
+                    time.sleep(pause)
+                    continue
+                hand_back(clean(f"{type(err).__name__}: {err}", 300))
+                tries.pop(job_id, None)
+                out.line("", out.bad(f"{what}; handed it back"))
+                if stopping:
+                    sys.stderr.write("stet: stopping, because jobs keep failing on this machine. `stet doctor` checks the setup.\n")
+                    sys.exit(1)
+                time.sleep(30)
+                continue
+            failures = waits = 0
+            tries.pop(job_id, None)
+            stuck.pop(job_id, None)
+            try:
+                ack = report(path, payload, key, log=lambda m: out.line("", out.dim(m)))
+            except ApiError as err:
+                # The server will not have this result. Training the same thing again would get
+                # the same answer, so say so, let go of the job, and do not take it up again.
+                out.line("", out.bad(f"the server did not accept the result: {err}"))
+                hand_back("result refused")
+                remove_tree(work)
+                late = err.status == 409 and any(w in str(err) for w in ("already", "ended before", "settled before"))
+                if err.status in (400, 409) and not late:  # a disagreement, not a result that merely arrived too late
+                    refused[round_id] = refused.get(round_id, 0) + 1
+                    if err.status == 409 and refused[round_id] == 1:
+                        # Our corpus or baseline differs from the round's. The copy on disk is the first suspect.
+                        _forget_round(job, season, scale)
+                        out.line("", out.dim(f"dropped this machine's copy of round {round_id}; it is rebuilt once, in case the copy was at fault"))
+                stop_if_once()
+                continue
+            holding = None
+            if not remove_tree(work):
+                sys.stderr.write(f"stet: could not clear {work}. Something an editor left there cannot be removed; stopping.\n")
+                sys.exit(1)
+            done += 1
+            if job["kind"] == "edit":
+                ed = payload["edit"]
+                out.line("result", f"{ed['status']} in {ed['seconds']:.0f}s" + (f" · script {payload['script_sha256'][:12]} ({payload['script_size'] / 1e6:.1f} MB)" if payload.get("script_sha256") else f" · no script: {clean(ed.get('reason', ''))}"))
+            elif result["valid"]:
+                gain = base["exam"]["loss"] - result["exam"]["loss"]
+                out.line("result", f"exam {result['exam']['loss']:.4f} · baseline {base['exam']['loss']:.4f} · gain {out.bold(f'{gain:+.4f}')}")
+            else:
+                out.line("result", f"invalid: {clean(result['invalid_reason'])}")
+            if ack:
+                v = ack.get("verifier") or {}
+                out.line("server", clean(ack.get("status", "")) + (f" · {clean(ack['message'])}" if ack.get("message") else "") + (f" · {clean(v.get('validated', 0))} of your grades have agreed so far" if v and job["kind"] == "grade" else ""))
+            if args.once or (args.max_jobs and done >= args.max_jobs):
+                return
+    except KeyboardInterrupt:
+        # Wherever it lands: mid-job, between two tries at one, or while a result is on its way.
+        if holding is None:
+            raise
+        hand_back("interrupted")
+        remove_tree(work)
+        out.line("", "Stopped; the job was handed back.")
+        return
+
+
+def _release(job_id: int, key: Key, reason: str) -> None:
+    try:
+        request("POST", f"/api/v1/jobs/{int(job_id)}/release", {"reason": reason}, key=key, timeout=20)
     except Exception:
         pass
 
@@ -698,6 +1281,7 @@ def add_commands(sub) -> None:
     p = sub.add_parser("submit", help="enter your editor in the competition")
     p.add_argument("path", nargs="?", default=".")
     p.add_argument("-y", "--yes", action="store_true", help="do not ask for confirmation")
+    p.add_argument("--dry-run", action="store_true", help="list every file that would be published, and send nothing")
     p.add_argument("--json", action="store_true")
     p.set_defaults(fn=cmd_submit)
 
@@ -729,6 +1313,8 @@ def add_commands(sub) -> None:
     p = sub.add_parser("publish")  # anchors only; not listed in the help
     p.add_argument("file")
     p.add_argument("--name", help="the name to publish it under (default: the file's own)")
+    p.add_argument("--close-season", metavar="SEASON", help="needed to publish a season's held-out exam: the id of the season being closed")
+    p.add_argument("--season", default="s0", help=argparse.SUPPRESS)
     p.set_defaults(fn=cmd_publish)
 
     p = sub.add_parser("verify", help="lend your GPU: grade published edit scripts for the leaderboard")

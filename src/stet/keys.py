@@ -42,8 +42,11 @@ class Key:
     def headers(self, method: str, path: str, body: bytes) -> dict[str, str]:
         """Signature headers for one request. `path` includes the query string."""
         now = str(int(time.time()))
-        message = "\n".join(["stet-v1", method.upper(), path, now, hashlib.sha256(body).hexdigest()]).encode()
-        return {"X-Stet-Key": self.public_hex, "X-Stet-Time": now, "X-Stet-Sig": self.sign(message)}
+        # The body's hash travels with the request, so that the server can check an upload's
+        # signature before it reads any of the upload.
+        digest = hashlib.sha256(body).hexdigest()
+        message = "\n".join(["stet-v1", method.upper(), path, now, digest]).encode()
+        return {"X-Stet-Key": self.public_hex, "X-Stet-Time": now, "X-Stet-Sig": self.sign(message), "X-Stet-Body": digest}
 
     def save(self) -> None:
         path = key_path()

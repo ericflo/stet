@@ -10,6 +10,13 @@ whose sha256 goes into the season file; after that the pack, not this script, is
 source of truth.
 
     python tools/build_exam_pack.py --upstream ~/.cache/stet/upstream --out exam-s0.jsonl.zst
+
+A season's *held-out* exam is built the same way from the same files, with a seed that is
+kept secret. It shares no document and no sentence opening with the public pack, and its
+books come from other shards of the same collection:
+
+    python tools/build_exam_pack.py --upstream ~/.cache/stet/upstream --out heldout.jsonl.zst \\
+        --seed "$(cat seed.txt)" --exclude-pack exam-s0.jsonl.zst
 """
 
 from __future__ import annotations
@@ -39,6 +46,21 @@ UPSTREAM = {
     "books": [("common-pile/project_gutenberg_filtered", "3cdf6879c807f4e4e063f2ceb23bc268d8c29ab7", "project_gutenberg-dolma-0014.json.gz")],
     "news": [("common-pile/news_filtered", "59aaa8f104e189e6fb8033f0ed319c5c343a03b1", "news-dolma-0000.json.gz")],
 }
+
+# The public pack draws from every book in its one shard, so a held-out pack has no book
+# left there to use. Its books come from two other shards of the same collection, picked
+# by its secret seed. Which two is not said until the season closes.
+BOOK_SHARDS = [f"project_gutenberg-dolma-{i:04d}.json.gz" for i in range(14)]
+
+
+def heldout_upstream(seed: str) -> dict:
+    repo, revision, _ = UPSTREAM["books"][0]
+    n = len(BOOK_SHARDS)
+    first = int.from_bytes(hashlib.sha256(f"{seed}:books:shard".encode()).digest()[:8], "big") % n
+    step = int.from_bytes(hashlib.sha256(f"{seed}:books:second".encode()).digest()[:8], "big") % (n - 1)
+    picks = sorted({first, (first + 1 + step) % n})
+    return {**UPSTREAM, "books": [(repo, revision, BOOK_SHARDS[i]) for i in picks]}
+
 
 MAX_CHARS = 4000  # a passage is at most this long
 MIN_CHARS = 600
@@ -92,9 +114,30 @@ def passage(text: str, rng: random.Random, source: str) -> str | None:
     return chunk if len(chunk) >= MIN_CHARS else None
 
 
-def read_source(source: str, upstream: Path, want: int, rng: random.Random):
+def pack_marks(path: Path, season_id: str):
+    """What a held-out pack must not share with an existing one: its documents, and its sentences.
+
+    Returns the upstream documents the pack drew from, and a function that says whether a
+    passage opens a sentence the way one of the pack's passages does (the same test that
+    removes exam text from a corpus).
+    """
+    from stet.data import sentence_starts
+    from stet.spec import load_season
+
+    cfg = load_season(season_id).raw["decontam"]
+    k, need = int(cfg["key_bytes"]), int(cfg["min_letters"])
+    with open(path, "rb") as f:
+        text = zstandard.ZstdDecompressor().stream_reader(f).read().decode("utf-8")
+    items = [json.loads(line) for line in text.split("\n") if line]  # not splitlines: passages hold U+2028
+    keys: set[bytes] = set()
+    for it in items:
+        keys.update(sentence_starts(it["text"], k, need))
+    return frozenset(it["origin"] for it in items), lambda p: not keys.isdisjoint(sentence_starts(p, k, need))
+
+
+def read_source(source: str, upstream: Path, want: int, rng: random.Random, exclude: frozenset[str] = frozenset(), files=None, shares=None):
     """Reservoir-sample `want` passages across this source's files."""
-    files = UPSTREAM[source]
+    files = files or UPSTREAM[source]
     out: list[dict] = []
     seen = 0
     dropped = Counter()
@@ -110,6 +153,9 @@ def read_source(source: str, upstream: Path, want: int, rng: random.Random):
                 if not keep_record(source, rec):
                     dropped["filtered"] += 1
                     continue
+                if f"{repo}@{revision[:12]}/{filename}#{rec.get('id')}" in exclude:
+                    dropped["in_other_pack"] += 1
+                    continue
                 text = rec.get("text") or ""
                 # One passage per document, more for very long ones (books).
                 n_pass = 1 if len(text) < 200_000 else min(6, len(text) // 150_000)
@@ -120,6 +166,9 @@ def read_source(source: str, upstream: Path, want: int, rng: random.Random):
                         continue
                     if not looks_english(p):
                         dropped["not_english"] += 1
+                        continue
+                    if shares is not None and shares(p):
+                        dropped["shares_a_sentence"] += 1
                         continue
                     md = rec.get("metadata") or {}
                     item = {
@@ -144,13 +193,26 @@ def main():
     ap.add_argument("--upstream", type=Path, required=True)
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--per-split", type=int, default=4000, help="passages per source per split")
-    ap.add_argument("--seed", type=int, default=20261116)
+    ap.add_argument("--seed", default="20261116")
+    ap.add_argument("--exclude-pack", type=Path, help="build a held-out pack: share no document and no sentence opening with this pack")
+    ap.add_argument("--season", default="s0", help="whose rule for what a sentence opening is (with --exclude-pack)")
+    ap.add_argument("--missing", action="store_true", help="print the upstream files this build needs and does not have (url, tab, local name), then stop")
     args = ap.parse_args()
 
+    exclude, shares = pack_marks(args.exclude_pack, args.season) if args.exclude_pack and not args.missing else (frozenset(), None)
+    upstream = heldout_upstream(args.seed) if args.exclude_pack else UPSTREAM
+    if args.missing:
+        for files in upstream.values():
+            for repo, revision, filename in files:
+                if not (args.upstream / local_name(repo, filename)).exists():
+                    print(f"https://huggingface.co/datasets/{repo}/resolve/{revision}/{filename}\t{local_name(repo, filename)}")
+        return
     items: list[dict] = []
     for source in UPSTREAM:
         rng = random.Random(f"{args.seed}:{source}")
-        got, seen, dropped = read_source(source, args.upstream, 2 * args.per_split, rng)
+        got, seen, dropped = read_source(source, args.upstream, 2 * args.per_split, rng, exclude, upstream[source], shares)
+        if not got:
+            sys.exit(f"{source}: no passages")
         rng.shuffle(got)
         half = len(got) // 2
         for i, it in enumerate(got):

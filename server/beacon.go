@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -19,17 +20,30 @@ var httpClient = &http.Client{Timeout: 60 * time.Second}
 
 const userAgent = "stet-server/0.1"
 
+// errBusy is an upstream service saying the server has asked too often.
+var errBusy = errors.New("rate limited")
+
 func httpGet(ctx context.Context, url string, limit int64) ([]byte, error) {
+	return httpGetAs(ctx, url, "", limit)
+}
+
+func httpGetAs(ctx context.Context, url, bearer string, limit int64) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("User-Agent", userAgent)
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
+	}
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == 429 || (resp.StatusCode == 403 && resp.Header.Get("X-RateLimit-Remaining") == "0") {
+		return nil, errBusy
+	}
 	if resp.StatusCode != 200 {
 		return nil, fmt.Errorf("%s: HTTP %d", url, resp.StatusCode)
 	}
@@ -98,8 +112,10 @@ func discoverCrawl(ctx context.Context, pool Pool) (*Crawl, error) {
 	return fingerprintCrawl(ctx, pool, infos[0].ID)
 }
 
+var crawlIDRe = regexp.MustCompile(`^CC-MAIN-\d{4}-\d{2}$`)
+
 func fingerprintCrawl(ctx context.Context, pool Pool, id string) (*Crawl, error) {
-	if !strings.HasPrefix(id, "CC-MAIN-") || strings.ContainsAny(id, "/?# ") {
+	if !crawlIDRe.MatchString(id) { // the same pattern every verifier holds a round to
 		return nil, fmt.Errorf("unexpected crawl id %q", id)
 	}
 	listing, err := httpGet(ctx, pool.BaseURL+strings.ReplaceAll(pool.Paths, "{crawl}", id), 64<<20)

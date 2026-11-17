@@ -44,6 +44,20 @@ def enc():
     return FakeEnc()
 
 
+@pytest.fixture(autouse=True)
+def nothing_real(tmp_path, monkeypatch):
+    """No test touches this machine's key, announcement log or cache, or the live server."""
+    monkeypatch.setenv("STET_CONFIG", str(tmp_path / "stet-config"))
+    monkeypatch.setenv("STET_CACHE", str(tmp_path / "stet-cache"))
+    monkeypatch.setenv("STET_API", "http://127.0.0.1:9")
+    monkeypatch.delenv("STET_DEV", raising=False)
+    # Nor the held-out exam, wherever this machine keeps it, nor what an earlier test found.
+    monkeypatch.delenv("STET_HELDOUT_EXAM", raising=False)
+    from stet import data
+
+    monkeypatch.setattr(data, "_heldout_pack", {})
+
+
 EXAM_SENTENCE = "The committee met on a rainy Tuesday and agreed, after much argument, to postpone the vote."
 
 

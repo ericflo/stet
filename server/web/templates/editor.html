@@ -44,12 +44,11 @@
     <div><span class="eyebrow">Its own words</span><div class="v">{{pct1 .Script.InkFrac}}<small>of tokens</small></div></div>
     {{else}}
     <div><span class="eyebrow">Gain</span><div class="v">{{gain .Gain}}</div></div>
-    <div><span class="eyebrow">Graded by</span><div class="v">{{.Results}}</div></div>
-    <div><span class="eyebrow">Audited</span><div class="v">{{if .Audited}}yes{{else}}no{{end}}</div></div>
+    <div><span class="eyebrow">Replicated by</span><div class="v">{{.Replicas}}<small>{{plural .Replicas "volunteer" "volunteers"}}{{if .Disputed}}, {{.Disputed}} differed{{end}}</small></div></div>
     {{end}}
   </div>
   <div class="grid2">
-    {{if $d.SourceChart}}<figure class="figure"><h3>Where the gain comes from</h3><div class="plot">{{$d.SourceChart}}</div><figcaption>Exam loss on each kind of held-out text, in nats per token. Left is better; the score is the plain mean of the six.</figcaption></figure>{{end}}
+    {{if $d.SourceChart}}<figure class="figure"><h3>Where the gain comes from</h3><div class="plot">{{$d.SourceChart}}</div><figcaption>Loss on each of the public exam's six kinds of text, in nats per token. Left is better; the score is the plain mean of the six.</figcaption></figure>{{end}}
     {{if $d.CurveChart}}<figure class="figure"><h3>The student, learning from it</h3><div class="plot">{{$d.CurveChart}}</div><figcaption>Training loss on the edited corpus. Low here is not the goal: an editor can make data easy to fit and useless on the exam.</figcaption></figure>{{end}}
   </div>
   {{end}}
@@ -58,7 +57,7 @@
   <div class="table-wrap">
     {{if $d.Results}}
     <table>
-      <thead><tr><th>Round</th><th>Status</th><th class="r">Loss</th><th class="r">Unedited</th><th class="r">Gain</th><th class="r hide-s">Edit took</th><th class="hide-s">Script</th><th class="hide-s">Graded by</th></tr></thead>
+      <thead><tr><th>Round</th><th>Status</th><th class="r">Loss</th><th class="r">Unedited</th><th class="r">Gain</th><th class="r hide-s">Edit took</th><th class="hide-s">Script</th><th class="hide-s" title="The anchor that set the score, then the volunteers whose own grades agreed with it">Graded by</th></tr></thead>
       <tbody>
         {{range $d.Results}}<tr>
           <td><a class="num" href="/rounds/{{.Round}}">{{.Round}}</a></td>
@@ -68,7 +67,7 @@
             <td class="r num">{{f3 .Loss}}</td><td class="r num">{{f3 .Baseline}}</td>
             <td class="r num {{if gt .Gain 0.0}}pos{{else if lt .Gain 0.0}}neg{{end}}">{{gain .Gain}}</td>
             {{else}}
-            <td colspan="3"><span class="stage invalid">invalid</span><span class="reason">{{.Reason}}</span></td>
+            <td colspan="3"><span class="stage invalid">{{if .Void}}not run{{else}}invalid{{end}}</span><span class="reason">{{.Reason}}</span></td>
             <td class="r num">0.000</td>
             {{end}}
           {{else}}
@@ -76,7 +75,7 @@
           {{end}}
           <td class="r num hide-s">{{with .Edit}}{{f1 .Seconds}}s{{else}}—{{end}}</td>
           <td class="hide-s">{{if .ScriptSHA}}<a class="num" href="/api/v1/scripts/{{.ScriptSHA}}" title="Download the edit script ({{bytes .ScriptSize}} unpacked)">{{tiny .ScriptSHA}}</a>{{else}}<span class="muted">—</span>{{end}}</td>
-          <td class="hide-s muted" style="font-size:14.5px">{{if .Verifiers}}{{join .Verifiers ", "}}{{if .Audited}} <span class="tag blue">audited</span>{{end}}{{else}}—{{end}}</td>
+          <td class="hide-s muted" style="font-size:14.5px">{{if .Verifiers}}{{join .Verifiers ", "}}{{if .Disputed}} <a class="tag red" href="/rounds/{{.Round}}#replications" title="Volunteers whose grade of this script differed from the anchor's by more than the tolerance. Their numbers are on the round's page.">{{.Disputed}} differed{{if .Together}}, together{{end}}</a>{{end}}{{else}}—{{end}}</td>
         </tr>{{end}}
       </tbody>
     </table>

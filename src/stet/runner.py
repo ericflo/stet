@@ -7,17 +7,28 @@ Two modes:
 
 Inside the sandbox an editor has no network, a private process tree, and a file system
 made of: the system's software read-only, the corpus read-only, its own bundle read-only,
-a memory-backed scratch directory, and one output directory. It cannot see the home
-directory, the Stet cache, the exam, or anything that identifies the machine (/etc is
-reduced to what a dynamic linker needs, /sys to what a GPU driver needs). Memory and
-process counts are capped by a cgroup.
+a memory-backed scratch directory, and one output directory. The home directory, the Stet
+cache and the exam are not mounted, /etc is reduced to what a dynamic linker needs and /sys
+to what a GPU driver needs. Memory and process counts are capped by a cgroup.
 
-Its one product is the edit script: plain data, copied out through a descriptor that
-refuses links and devices, and validated afterwards by trusted code.
+What it does not do, so that nobody relies on it:
 
-This is namespace isolation, not a virtual machine. A kernel or GPU-driver bug could defeat
-it. Official edits therefore run only on machines the organisers control, and volunteers
-are never asked to run an entrant's code.
+  - It does not make the machine anonymous. /proc/self/mountinfo names the directories
+    behind the mounts (and so the account the harness runs as), and the kernel and the GPU
+    are what they are.
+  - It applies no system-call filter. The editor can make any call an unprivileged process
+    can, so a kernel or GPU-driver bug could defeat it. This is namespace isolation, not a
+    virtual machine.
+  - The memory cap is the cgroup's. Memory a GPU driver allocates for the editor may not
+    be charged to it; on a machine whose GPU shares system memory that is ordinary RAM.
+  - The output directory is on disk and has no quota. The harness watches it and kills an
+    editor that writes too much, hides what it wrote, or runs the disk low.
+
+Official edits therefore run only on machines the organisers control, and volunteers are
+never asked to run an entrant's code.
+
+An editor's one product is the edit script: plain data, copied out through a descriptor
+that refuses links and devices, and validated afterwards by trusted code.
 """
 
 from __future__ import annotations
@@ -28,6 +39,7 @@ import os
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import threading
@@ -41,7 +53,9 @@ from .spec import Round, Scale
 
 SCRATCH_LIMIT_BYTES = 20 << 30  # unsandboxed runs: scratch lives on disk
 OUT_LIMIT_BYTES = 1 << 30
+OUT_LIMIT_FILES = 10_000
 FREE_SPACE_FLOOR = 5 << 30
+ENTRY_LIMIT_BYTES = 4096
 LOG_LIMIT_BYTES = 1 << 20
 GPU_DEVICES = ("/dev/nvidiactl", "/dev/nvidia-uvm", "/dev/nvidia-uvm-tools", "/dev/nvidia-modeset", "/dev/nvidia-caps", "/dev/kfd", "/dev/dri")
 SYSTEM_DIRS = ("/usr", "/opt")
@@ -50,8 +64,24 @@ ETC_ALLOW = ("ld.so.cache", "ld.so.conf", "ld.so.conf.d", "alternatives", "OpenC
 DEFAULT_LIMITS = {"memory_gb": 48, "tasks": 4096, "scratch_gb": 16, "required": False}
 
 
+# What the sandbox starts, and it starts the editor. It tells the harness that the sandbox
+# came up, on a pipe it closes before the editor exists. A message in the editor's output
+# could say anything; this cannot be forged, so "the sandbox failed" and "the editor
+# failed" are never confused.
+LAUNCHER = """import os, sys
+fd = int(sys.argv[1])
+os.write(fd, b"up")
+os.close(fd)
+try:
+    os.execvp(sys.argv[2], sys.argv[2:])
+except OSError as e:
+    sys.stderr.write(f"stet: cannot start {sys.argv[2]!r}: {e.strerror}\\n")
+    sys.exit(127)
+"""
+
+
 class HarnessError(RuntimeError):
-    """Our side failed (no sandbox, no limits). Never the editor's fault, never scored."""
+    """Our side failed (no sandbox, no limits, no disk). Never the editor's fault, never scored."""
 
 
 @dataclass
@@ -139,6 +169,28 @@ def _python_mounts() -> tuple[list[tuple[str, str]], str, list[str]]:
     return binds, exe, extra
 
 
+def _exposed(season, shown: list[str]) -> str:
+    """What the editor would be able to see that it must not, or "" if nothing.
+
+    Belt and braces. The cache holds the exam pack; the config directory holds this
+    machine's key and, on an anchor, the held-out exam and what it has said so far. All of
+    it lives under the home directory by default, which is never mounted. But STET_CACHE,
+    STET_CONFIG and STET_HELDOUT_EXAM can point anywhere, and a link can lead anywhere, so
+    each is checked where it really is against every directory the sandbox mounts.
+    """
+    from .data import heldout_pack_file
+    from .keys import config_dir
+
+    private = {"the cache": cache_dir(), "the config directory": config_dir(), "the held-out exam": heldout_pack_file(season)}
+    for d in list(SYSTEM_DIRS) + [link for link in USR_LINKS if os.path.isdir(link)] + shown:
+        d = os.path.realpath(d)
+        for what, path in private.items():
+            p = os.path.realpath(path)
+            if p == d or p.startswith(d.rstrip("/") + "/"):
+                return f"{what} ({p}) would be visible to the editor, under {d}"
+    return ""
+
+
 def bwrap_available() -> tuple[bool, str]:
     exe = shutil.which("bwrap")
     if not exe:
@@ -157,19 +209,26 @@ def bwrap_available() -> tuple[bool, str]:
 
 
 def scope_available() -> tuple[bool, str]:
-    """Can we put the sandbox in a cgroup with memory and process limits?"""
+    """Can we put the sandbox in a cgroup with memory and process limits?
+
+    Asks for a small scope and reads the limits back from inside it: systemd accepting the
+    properties is not the same as the kernel enforcing them.
+    """
     exe = shutil.which("systemd-run")
     if not exe:
         return False, "systemd-run is not installed"
+    probe = 'g=$(cut -d: -f3 /proc/self/cgroup | head -n 1); cat "/sys/fs/cgroup$g/memory.max" "/sys/fs/cgroup$g/pids.max"'
     try:
         r = subprocess.run(
-            [exe, "--user", "--scope", "--quiet", "--collect", "-p", "MemoryMax=64M", "-p", "TasksMax=16", "--", "/usr/bin/true"],
+            [exe, "--user", "--scope", "--quiet", "--collect", "-p", "MemoryMax=64M", "-p", "TasksMax=16", "--", "/bin/sh", "-c", probe],
             capture_output=True, text=True, timeout=20,
         )  # fmt: skip
     except Exception as e:
         return False, f"systemd-run failed to start: {e}"
     if r.returncode != 0:
         return False, "cannot create a limited scope with systemd-run --user: " + r.stderr.strip()[:300]
+    if r.stdout.split() != [str(64 << 20), "16"]:
+        return False, "systemd-run --user made a scope, but its memory and process limits are not in force (are the cgroup controllers delegated?)"
     return True, exe
 
 
@@ -230,15 +289,134 @@ def bwrap_command(bundle: Path, corpus_dir: Path, out_dir: Path, scratch_dir: Pa
     return cmd
 
 
-def _du(path: Path) -> int:
-    total = 0
-    for root, _, files in os.walk(path):
-        for f in files:
-            try:
-                total += os.lstat(os.path.join(root, f)).st_size
-            except OSError:
-                pass
-    return total
+def _usage(path: Path, max_entries: int) -> tuple[int, int, bool]:
+    """(bytes, entries, could all of it be read) for a directory an editor writes in.
+
+    Nothing about that directory is trusted. A file counts as the larger of its length and
+    the blocks it holds, since space can be reserved past the end of a file. A directory
+    that cannot be listed could hide anything, so the caller is told. And the count stops
+    at `max_entries`, because a walk over millions of files would never end.
+    """
+    total = entries = 0
+    readable = True
+    stack = [str(path)]
+    while stack:
+        try:
+            with os.scandir(stack.pop()) as it:
+                for e in it:
+                    entries += 1
+                    if entries > max_entries:
+                        return total, entries, readable
+                    try:
+                        st = e.stat(follow_symlinks=False)
+                    except OSError:
+                        continue  # gone already
+                    if stat.S_ISDIR(st.st_mode):
+                        stack.append(e.path)
+                    else:
+                        total += max(st.st_size, getattr(st, "st_blocks", 0) * 512)
+        except FileNotFoundError:
+            continue
+        except OSError:
+            readable = False
+    return total, entries, readable
+
+
+def _empty(fd: int) -> list[str]:
+    """Unlink everything in the directory open at `fd` that is not a directory. Returns the
+    names of the directories in it."""
+    with os.scandir(fd) as it:
+        entries = list(it)
+    dirs = []
+    for e in entries:
+        try:
+            if e.is_dir(follow_symlinks=False):
+                dirs.append(e.name)
+            else:
+                os.unlink(e.name, dir_fd=fd)
+        except OSError:
+            pass
+    return dirs
+
+
+def remove_tree(path: Path) -> bool:
+    """Delete a directory an editor has written in. True if nothing is left.
+
+    The editor ran as this user, so what it leaves is its to shape: a directory this user
+    cannot list (mode 0300) or cannot enter at all (mode 000), at the bottom of a tree
+    whose path is longer than the kernel will take as one string, or deeper than this
+    process may hold directories open. A plain rmtree gives up on each of those without a
+    word and leaves the disk full, and an anchor that cannot clear its work directory
+    cannot take another job.
+
+    So nothing here goes by path or keeps more than one directory open. It walks down by
+    name from the directory it is in, taking each one's permissions back as it enters, and
+    climbs back through "..". Links are removed, never followed. Call this only once the
+    editor is dead: with nothing left to move a directory, ".." is where we came from.
+    """
+    path = Path(path)
+    if not os.path.lexists(path):
+        return True
+    if os.path.islink(path) or not os.path.isdir(path):
+        path.unlink(missing_ok=True)
+        return not os.path.lexists(path)
+    by_fd = {os.open, os.unlink, os.rmdir, os.chmod} <= os.supports_dir_fd and os.scandir in os.supports_fd
+    if not by_fd:  # Windows: no editor runs sandboxed there, and this is the best there is
+        shutil.rmtree(path, ignore_errors=True)
+        return not os.path.lexists(path)
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    try:
+        os.chmod(path, 0o700)
+        here = os.open(path, flags)
+    except OSError:
+        return False
+    try:
+        names: list[str] = []  # the way down from `path` to the directory open at `here`
+        todo = [_empty(here)]  # for each directory on that way, the directories in it still to go
+        while True:
+            if todo[-1]:
+                name = todo[-1].pop()
+                try:
+                    os.chmod(name, 0o700, dir_fd=here)
+                    below = os.open(name, flags, dir_fd=here)
+                except OSError:
+                    continue  # it stays, and so does everything above it; the answer is False
+                os.close(here)
+                here = below
+                names.append(name)
+                todo.append(_empty(here))
+            elif names:
+                above = os.open("..", flags, dir_fd=here)
+                os.close(here)
+                here = above
+                todo.pop()
+                try:
+                    os.rmdir(names.pop(), dir_fd=here)
+                except OSError:
+                    pass
+            else:
+                break
+    except OSError:
+        pass
+    finally:
+        os.close(here)
+    try:
+        os.rmdir(path)
+    except OSError:
+        pass
+    return not os.path.lexists(path)
+
+
+def _kill(proc: subprocess.Popen) -> None:
+    """Stop the editor and everything it started."""
+    try:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True)
+            proc.kill()
+        else:
+            os.killpg(proc.pid, signal.SIGKILL)
+    except OSError:
+        pass
 
 
 def collect_script(out_dir: Path, work: Path, max_bytes: int) -> Path:
@@ -276,7 +454,9 @@ def run_editor(
 ) -> EditRun:
     """Run `entry` from the bundle directory against a corpus.
 
-    Never raises on editor failure. Raises HarnessError if the sandbox cannot be set up.
+    Never raises on editor failure: whatever the bundle or its program does wrong comes
+    back as an EditRun. Raises HarnessError when this machine is at fault: the sandbox
+    cannot be set up, the disk is short, or what a previous editor left cannot be removed.
     """
     limits = {**DEFAULT_LIMITS, **(limits or {})}
     bundle = bundle.resolve()
@@ -285,13 +465,27 @@ def run_editor(
     scratch_dir = work / "scratch"
     etc_dir = work / "etc"
     for d in (out_dir, scratch_dir, etc_dir):
-        shutil.rmtree(d, ignore_errors=True)
+        if not remove_tree(d):
+            raise HarnessError(f"could not clear {d} before the run")
         d.mkdir(parents=True)
+    free = shutil.disk_usage(work).free
+    if free < FREE_SPACE_FLOOR + OUT_LIMIT_BYTES:
+        raise HarnessError(f"only {free / 1e9:.1f} GB free under {work}; running an editor needs {(FREE_SPACE_FLOOR + OUT_LIMIT_BYTES) / 1e9:.0f} GB")
     pkg_dir = Path(__file__).resolve().parent
     max_script = int(rnd.season.raw["script"]["max_bytes"])
-    argv = shlex.split(entry)
+
+    def refused(why: str) -> EditRun:
+        return EditRun("error", 0.0, time_limit, None, None, "", sandbox, why)
+
+    # The entry command is the entrant's. Nothing it says may crash the harness.
+    if "\0" in entry or len(entry.encode("utf-8", "replace")) > ENTRY_LIMIT_BYTES:
+        return refused(f"stet.toml: the entry command is longer than {ENTRY_LIMIT_BYTES:,} bytes or contains a NUL")
+    try:
+        argv = shlex.split(entry)
+    except ValueError as e:
+        return refused(f"stet.toml: the entry command cannot be parsed ({e})")
     if not argv:
-        return EditRun("error", 0.0, time_limit, None, None, "", sandbox, "stet.toml has an empty entry command")
+        return refused("stet.toml has an empty entry command")
     inside = sandbox == "bwrap"
     py_binds, py_exe, py_path = _python_mounts() if inside else ([], sys.executable, [])
     if argv[0] in ("python", "python3"):
@@ -323,11 +517,8 @@ def run_editor(
         ok, why = bwrap_available()
         if not ok:
             raise HarnessError(f"sandbox unavailable: {why}")
-        # Belt and braces: the cache holds the exam pack. It lives under the home directory by
-        # default (never bound), but STET_CACHE can point anywhere.
-        cache = str(cache_dir().resolve())
-        if any(cache == d or cache.startswith(d + "/") for d in SYSTEM_DIRS + tuple(src for src, _ in py_binds)):
-            raise HarnessError(f"refusing to sandbox: the cache {cache} would be visible to the editor")
+        if why := _exposed(rnd.season, [src for src, _ in py_binds] + [str(bundle), str(corpus.path.resolve()), str(out_dir)]):
+            raise HarnessError(f"refusing to sandbox: {why}")
         (etc_dir / "passwd").write_text("stet:x:1000:1000:stet:/scratch:/bin/sh\n")
         (etc_dir / "group").write_text("stet:x:1000:\n")
         scoped, why = scope_available()
@@ -350,20 +541,36 @@ def run_editor(
         cmd = argv
         popen_env = env
         cwd = str(bundle)
+    scratch_on_disk = not inside or not applied  # otherwise it is memory, and the cgroup bounds it
 
     log_path = work / "editor.log"
     start = time.time()
     deadline = start + time_limit
     env["STET_DEADLINE"] = str(deadline)
+    up_r = up_w = None
     if inside:
+        up_r, up_w = os.pipe()
         for k, v in env.items():
             cmd += ["--setenv", k, v]
-        cmd += ["--"] + argv
+        cmd += ["--", py_exe, "-I", "-c", LAUNCHER, str(up_w)] + argv
 
     status = "ok"
     reason = ""
+    low_disk = False
     with open(log_path, "wb") as log:
-        proc = subprocess.Popen(cmd, cwd=cwd, env=popen_env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
+        try:
+            proc = subprocess.Popen(
+                cmd, cwd=cwd, env=popen_env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                start_new_session=True, pass_fds=(up_w,) if inside else (),
+            )  # fmt: skip
+        except (OSError, ValueError) as e:
+            if inside:
+                os.close(up_r)
+                raise HarnessError(f"the sandbox could not be started: {e}") from None
+            return refused(f"the entry command could not be started: {e}")
+        finally:
+            if up_w is not None:
+                os.close(up_w)
 
         def pump():
             written = 0
@@ -375,37 +582,66 @@ def run_editor(
                     sys.stderr.buffer.write(chunk)
                     sys.stderr.flush()
 
+        def over() -> str:
+            """What the editor has done to its directories that it may not, or ""."""
+            size, entries, readable = _usage(out_dir, OUT_LIMIT_FILES)
+            if not readable:
+                return "the editor made part of its output directory unreadable"
+            if entries > OUT_LIMIT_FILES:
+                return f"the editor created more than {OUT_LIMIT_FILES:,} files in its output directory"
+            if size > OUT_LIMIT_BYTES:
+                return "the editor wrote more than 1 GB to its output directory"
+            if scratch_on_disk and _usage(scratch_dir, 5_000_000)[0] > SCRATCH_LIMIT_BYTES:
+                return "the editor filled its scratch directory"
+            return ""
+
+        found: list[str] = []
+        done = threading.Event()
+
+        def watch():
+            # On its own thread: a walk over a directory the editor controls takes as long
+            # as the editor likes, and the clock below must not wait for it.
+            while not found and not done.wait(2):
+                if why := over():
+                    found.append(why)
+
         t = threading.Thread(target=pump, daemon=True)
         t.start()
-        last_du = 0.0
+        threading.Thread(target=watch, daemon=True).start()
         while proc.poll() is None:
-            now = time.time()
-            if now >= deadline:
+            if time.time() >= deadline:
                 status, reason = "timeout", f"the editor was still running at the {time_limit:.0f}s limit"
-            elif now - last_du > 2:
-                last_du = now
-                if _du(out_dir) > OUT_LIMIT_BYTES:
-                    status, reason = "error", "the editor wrote more than 1 GB to its output directory"
-                elif (not inside or not applied) and _du(scratch_dir) > SCRATCH_LIMIT_BYTES:
-                    status, reason = "error", "the editor filled its scratch directory"
-                elif shutil.disk_usage(out_dir).free < FREE_SPACE_FLOOR:
-                    status, reason = "error", "the disk ran low while the editor was running"
+            elif found:
+                status, reason = "error", found[0]
+            elif shutil.disk_usage(out_dir).free < FREE_SPACE_FLOOR:
+                status, reason, low_disk = "error", "the editor ran the disk low", True
             if status != "ok":
-                try:
-                    os.killpg(proc.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+                _kill(proc)
                 break
             time.sleep(0.05)
         proc.wait()
+        done.set()
         t.join(timeout=5)
     seconds = time.time() - start
     tail = log_path.read_bytes()[-4000:].decode("utf-8", errors="replace")
-    shutil.rmtree(scratch_dir, ignore_errors=True)
-    if inside and proc.returncode not in (0, None) and seconds < 5 and tail.lstrip().startswith(("bwrap:", "Failed to start transient scope", "systemd-run")):
-        raise HarnessError(f"the sandbox failed to start: {tail.strip()[:300]}")
+    if inside:
+        os.set_blocking(up_r, False)
+        try:
+            up = os.read(up_r, 8) == b"up"
+        except BlockingIOError:
+            up = False
+        os.close(up_r)
+        if not up:
+            raise HarnessError(f"the sandbox failed to start: {tail.strip()[:300]}")
+    if not remove_tree(scratch_dir):
+        raise HarnessError(f"could not remove what the editor left in {scratch_dir}")
+    if low_disk and shutil.disk_usage(work).free + _usage(out_dir, OUT_LIMIT_FILES)[0] < FREE_SPACE_FLOOR + OUT_LIMIT_BYTES:
+        # The space did not come back with the editor gone, so it was not the editor's.
+        raise HarnessError(f"the disk under {work} ran low while an editor was running, and is still low without it")
     if status == "ok" and proc.returncode != 0:
         status, reason = "error", f"the editor exited with status {proc.returncode}"
+    if status == "ok" and (why := over()):  # what it did in its last two seconds counts too
+        status, reason = "error", why
     # A script written before a crash or a timeout still counts: editors are encouraged to
     # write early and improve. script.jsonl is replaced atomically, so it is never half-written.
     if not os.path.lexists(out_dir / "script.jsonl"):
@@ -416,3 +652,32 @@ def run_editor(
     except ScriptError as e:
         return EditRun("no_script" if status == "ok" else status, seconds, time_limit, proc.returncode, None, tail, sandbox, str(e), applied)
     return EditRun(status, seconds, time_limit, proc.returncode, script, tail, sandbox, "", applied)
+
+
+def sandbox_selftest() -> tuple[bool, str]:
+    """Run a known-good editor in the sandbox. An anchor does this before taking edit jobs,
+    so that a broken sandbox is never mistaken for a run of broken editors."""
+    import tempfile
+
+    import numpy as np
+
+    from .spec import load_season, practice_round
+
+    season = load_season()
+    with tempfile.TemporaryDirectory(prefix="stet-selftest-", dir=cache_dir() if cache_dir().is_dir() else None) as tmp:
+        root = Path(tmp)
+        (root / "corpus").mkdir()
+        (root / "corpus" / "docs.bin").write_bytes(b"one document")
+        np.array([0, 12], dtype="<u8").tofile(root / "corpus" / "docs.idx")
+        (root / "corpus" / "urls.txt").write_text("http://example.test/0\n")
+        (root / "corpus" / "meta.json").write_text(json.dumps({"n_docs": 1, "bytes": 12, "sha256": "selftest"}))
+        (root / "bundle").mkdir()
+        (root / "bundle" / "editor.py").write_text("from stet.editor import Task\ntask = Task.from_env()\ntask.write([i for i, _ in task.corpus])\n")
+        try:
+            run = run_editor(root / "bundle", "python editor.py", Corpus(root / "corpus"), practice_round(season, 0), season.scale("nano"),
+                             root / "work", 60, sandbox="bwrap", limits={"required": True})  # fmt: skip
+        except HarnessError as e:
+            return False, str(e)
+        if run.status != "ok" or run.script is None or run.script.read_text().split() != ["0"]:
+            return False, f"a trivial editor did not run in the sandbox ({run.status}: {run.reason or run.log_tail.strip()[-300:]})"
+    return True, ""

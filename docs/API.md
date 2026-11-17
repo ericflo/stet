@@ -13,19 +13,35 @@ No key needed.
 
 | | |
 |---|---|
-| `GET /api/v1/season` | The season: student, budgets, tolerances, the record rule, the next and open rounds, the current CLI version |
+| `GET /api/v1/season` | The season: student, budgets, tolerances, the record rule, the next and open rounds, the current CLI version, the hashes of the exam and of the held-out exam |
 | `GET /api/v1/leaderboard` | `editors` (ranked) and `provisional` (fewer than `rated_rounds` rounds) |
 | `GET /api/v1/rounds?limit=30` | Recent rounds, newest first, and `next`: what the next draw is committed to |
 | `GET /api/v1/rounds/{id}` | One round with its entries. A round id looks like `s0-o00012` |
-| `GET /api/v1/editors/{ref}` | One editor. `ref` is an id, an id prefix of 8 or more characters, or `handle/name` |
+| `GET /api/v1/editors/{ref}` | One editor. `ref` is an id, the first 8 or more characters of one (the oldest editor that fits), or `handle/name` with the slash written `%2F` |
 | `GET /api/v1/editors/{ref}/bundle` | The editor's files (`.tar.zst`), once it is public |
 | `GET /api/v1/scripts/{sha256}` | An edit script, zstd-compressed JSON Lines |
-| `GET /api/v1/verifiers` | The verifier board |
+| `GET /api/v1/verifiers` | The verifier board: the anchors, and every volunteer with a grade that has agreed. `validated` counts those grades; `trusted` is an old name for `anchor` |
 | `GET /api/v1/records` | Every time the record changed hands |
 | `GET /files/{name}` | Downloads: the CLI wheel, the exam pack |
 
-An entry in a round is **sealed** until it settles: before that it shows its stage
-(`editing`, `grading`) and nothing about its grades.
+A round is **sealed** until it settles: before that an entry shows its stage (`editing`,
+`grading`) and nothing about its grades, and the round does not show its unedited loss.
+A settled entry's `loss` is an anchor's grade. Its `detail` holds the rest:
+
+| Field of `detail` | |
+|---|---|
+| `verifiers` | The anchor, then the volunteers whose own grades agreed with it |
+| `replications` | Every volunteer's grade of the entry: `handle`, `verdict` (`agreed`, `differs`, `other data`, `baseline differs`), `valid`, `loss`, `difference` (its loss minus the anchor's), `baseline_difference`, and `first` when no grade of that account's had agreed before |
+| `disputed` | How many of those differ |
+| `disputed_together` | Two volunteers who have agreed with an anchor before differ from this grade and agree with each other |
+| `script`, `train`, `hardware` | The anchor's own report |
+
+A settled round's `differs` lists volunteers who were turned away before grading: `what`
+is `corpus` (their machine built another corpus or exam) or `baseline` (their unedited
+loss was out of tolerance, by `difference`).
+
+A round that was announced for one draw and then moved lists the beacon rounds it left in
+`moved_from`.
 
 A leaderboard row:
 
@@ -41,13 +57,17 @@ A leaderboard row:
 
 ## Signing
 
-Requests that act for an account are signed with its Ed25519 key. Three headers:
+Requests that act for an account are signed with its Ed25519 key. Four headers:
 
 ```
 X-Stet-Key:  <public key, hex>
 X-Stet-Time: <unix seconds>
 X-Stet-Sig:  <signature, hex>
+X-Stet-Body: <sha256 of the request body, hex>
 ```
+
+`X-Stet-Body` is required on uploads (a bundle, a script, a published file), where it lets
+the server check the signature before reading the body. Elsewhere it is optional.
 
 The signed message is five lines joined by `\n`:
 
@@ -59,7 +79,8 @@ stet-v1
 <sha256 of the request body, hex>
 ```
 
-The timestamp must be within 300 seconds of the server's clock.
+The timestamp must be within 300 seconds of the server's clock. The message does not name
+the server, so a key should not be used with a server its owner does not trust.
 
 ## Accounts and entries
 
@@ -78,13 +99,15 @@ grades: a grade computed any other way will not agree.
 | | |
 |---|---|
 | `POST /api/v1/jobs/claim` | Ask for work. The body says which harness and season you run and what hardware. Returns `job` (or null, with `retry_after`) and `announced`: the next draw's commitment |
-| `POST /api/v1/jobs/{id}/result` | Report a grade: exam loss, per-source losses, your baseline for the round, corpus and exam hashes |
+| `POST /api/v1/jobs/{id}/result` | Report a grade: exam loss, per-source losses, your baseline for the round, corpus and exam hashes. The answer is `pending` until the round settles |
 | `POST /api/v1/jobs/{id}/script` | Anchors only: report an edit and upload its script |
 | `POST /api/v1/jobs/{id}/release` | Hand a job back |
 
-Status codes worth handling: `409` (your data or baseline differs from the round's, or the
-job was already reported), `426` (upgrade the harness), `429` (slow down), `503` (the
-server could not make a write durable; send the same request again).
+Status codes worth handling: `403` (this account is given no grading work for now: the
+message says why and until when), `409` (your data or baseline differs from the round's,
+the job was already reported, or it ended before your result arrived), `426` (upgrade
+the harness), `429` (slow down), `503` (the server could not make a write durable, or
+cannot reach its records; send the same request again).
 
 ## Organisers
 
@@ -93,4 +116,4 @@ Signed by an anchor's key; anyone else gets `403`.
 | | |
 |---|---|
 | `POST /api/v1/admin/draw` | Bring the next draw forward to the next mark on the draw grid (`stet draw`) |
-| `PUT /api/v1/admin/files/{name}` | Publish a download under `/files/`: the season's exam pack (`stet publish`). Clients check it against the hash in their season file |
+| `PUT /api/v1/admin/files/{name}` | Publish under `/files/` (`stet publish`). The server accepts two file names, each only with the hash the season gives for it: the exam pack, and the held-out pack once the server has been told the season is closed |

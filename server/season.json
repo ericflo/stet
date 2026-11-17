@@ -30,7 +30,8 @@
  "grade_devices": [
   "cuda"
  ],
- "harness": "0.2.0",
+ "harness": "0.2.1",
+ "heldout_exam_sha256": "c1011b1b09492b7e8a931580ffe5da968472c34269cf886b1868d9f103c69549",
  "id": "s0",
  "ink_frac": 0.001,
  "ink_tokens": {
@@ -40,7 +41,14 @@
  },
  "max_doc_bytes": 262144,
  "min_copy_bytes": 64,
- "noise": {},
+ "noise": {
+  "micro": {
+   "gain_sd": 0.011
+  },
+  "nano": {
+   "gain_sd": 0.011
+  }
+ },
  "official_scale": "micro",
  "parity": {
   "beacon": {
@@ -122,14 +130,36 @@
    "micro": 0.02,
    "nano": 0.03,
    "standard": 0.02
-  },
-  "min_audited": 2
+  }
  },
  "reference": {
   "anchor": "AMD Ryzen AI Max+ 395 (16 cores), Radeon 8060S, 128 GB unified memory, ROCm",
   "note": "Official edit runs happen on this machine, in its own wall-clock seconds. On a desktop NVIDIA GPU your editor will finish GPU work several times sooner than it will here."
  },
- "reference_curves": {},
+ "reference_curves": {
+  "practice/nano": [
+   [
+    0.5,
+    6.67
+   ],
+   [
+    1,
+    6.382
+   ],
+   [
+    2,
+    6.03
+   ],
+   [
+    4,
+    5.519
+   ],
+   [
+    8,
+    5.198
+   ]
+  ]
+ },
  "rules_version": 2,
  "scales": {
   "micro": {

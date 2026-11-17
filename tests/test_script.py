@@ -213,3 +213,63 @@ def test_stats_report_what_was_kept(corpus, enc):
     d = stats.to_dict(corpus)
     assert d["src_docs"] == 2 and d["corpus_docs"] == 4
     assert json.dumps(d)  # serialisable
+
+
+# --- memory is bounded without changing what a script means ----------------------------------
+#
+# Text is tokenised whenever a few megabytes are waiting, so a script of huge documents
+# cannot make a grader hold gigabytes. That must not move a single token, nor change which
+# scripts are valid: these values were recorded from the materialiser before it had a byte
+# limit (commit 34ffe54), with the season's real tokenizer.
+
+EMPTY = {"d": 0, "k": [[5, 5]]}
+MIXED = [0, 3, 2, {"d": 3, "k": [[36, 900]]}, 1, {"s": [[0, 0, 450], [2, 0, 300]]}]
+FOUR = "9263de96f144d33e9ab0be585afb2b3c7d9172bd156387d65fd3ca01d148af32"  # the stream of [0, 3, 0, 3], which fills the budget
+RECORDED = [
+    # (lines, documents per window, tokens_sha256 or the error, truncated, script_lines)
+    ([2, 1], 1024, "a787c1f1c0bb1b464a93927479bda2806bd310e6dd7b749c69acc1cc3b411990", False, 2),
+    (MIXED * 30, 1024, "7f2abe076974c45bca6116c60eeb8d4cddbfe31701914d81e49a47c75ba7e332", True, 180),
+    ([0, 3, 0, 3, 9999], 3, "line 5: document 9999", None, None),  # a bad line in the window the budget fills in
+    ([0, 3, 0, 3, 0, 0, 9999], 3, FOUR, True, 7),  # the same line after that window: never read
+    ([0, 3, 0, 3, EMPTY, 0, EMPTY, 9999], 3, "line 8: document 9999", None, None),  # empty documents do not fill a window
+    ([0, 3, 0, 3, EMPTY, 0, EMPTY, 0, 9999], 3, FOUR, True, 9),
+    ([0, 3, 0, 3], 3, FOUR, False, 4),
+    ([0, 3, 0, 3, 0], 3, FOUR, True, 5),
+    ([0, 3, 0, 3], 2, FOUR, False, 4),
+    ([0, 3, 0, 3, 9999], 2, FOUR, True, 5),
+    ([0, 3, 0, 3, "{not json"], 3, "line 5: not valid JSON", None, None),
+    ([0, 3, 0, 3, 0, 0, "{not json"], 3, FOUR, True, 7),
+]
+
+
+@pytest.mark.parametrize("waiting_bytes", [1, 700, 3000, 4 << 20])
+def test_the_byte_limit_changes_no_stream_and_no_verdict(corpus, monkeypatch, waiting_bytes):
+    from stet import script
+    from stet.tok import load_encoding
+
+    real = load_encoding(SEASON)
+    monkeypatch.setattr(script, "TOKENIZE_BYTES", waiting_bytes)
+    for lines, window, want, truncated, script_lines in RECORDED:
+        monkeypatch.setattr(script, "TOKENIZE_BATCH", window)
+        if truncated is None:
+            with pytest.raises(ScriptError, match=want):
+                run(corpus, real, lines)
+            continue
+        _, stats = run(corpus, real, lines)
+        assert (stats.tokens_sha256, stats.truncated, stats.script_lines) == (want, truncated, script_lines), lines
+
+
+def test_text_past_the_budget_is_not_held_in_memory(corpus, enc, monkeypatch):
+    from stet import script
+
+    sizes = []
+
+    class Watching:
+        def encode_ordinary_batch(self, texts):
+            sizes.append(sum(len(t) for t in texts))
+            return enc.encode_ordinary_batch(texts)
+
+    monkeypatch.setattr(script, "TOKENIZE_BYTES", 4000)
+    _, stats = run(corpus, Watching(), [0, 3] * 400)  # one window of 800 documents, about 1.3 MB
+    assert stats.truncated and stats.script_lines == 800
+    assert max(sizes) < 8000 and sum(sizes) < 20_000  # tokenised a little at a time, and not at all once full

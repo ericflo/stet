@@ -37,8 +37,8 @@ func esc(s string) string { return template.HTMLEscapeString(s) }
 
 // niceStep picks a round tick spacing giving about n ticks across span.
 func niceStep(span float64, n int) float64 {
-	if span <= 0 {
-		return 1
+	if !(span > 1e-9) || math.IsInf(span, 0) {
+		return 1 // no span worth dividing, or not a number at all
 	}
 	raw := span / float64(n)
 	mag := math.Pow(10, math.Floor(math.Log10(raw)))
@@ -101,6 +101,22 @@ func sparkSVG(gains []float64) template.HTML {
 	return b.done()
 }
 
+// ticks lists the gridline values from lo to hi. It counts them rather than adding step
+// until hi is passed: the numbers come from graders, and adding a step too small to change
+// a float64 would never end.
+func ticks(lo, hi, step float64) []float64 {
+	n := (hi - lo) / step
+	if !(n >= 1) {
+		n = 1
+	}
+	n = math.Min(math.Round(n), 40)
+	out := make([]float64, 0, int(n)+1)
+	for i := 0; i <= int(n); i++ {
+		out = append(out, lo+float64(i)*step)
+	}
+	return out
+}
+
 // frame draws the plot area's horizontal rules and y labels, and returns the y scale.
 func (b *svg) frame(w, h, left, right, top, bottom int, lo, hi float64, unit string) func(float64) float64 {
 	step := niceStep(hi-lo, 4)
@@ -109,7 +125,7 @@ func (b *svg) frame(w, h, left, right, top, bottom int, lo, hi float64, unit str
 		hi = lo + step
 	}
 	y := func(v float64) float64 { return float64(top) + (hi-v)/(hi-lo)*float64(h-top-bottom) }
-	for v := lo; v <= hi+step/2; v += step {
+	for _, v := range ticks(lo, hi, step) {
 		cls := "grid"
 		if math.Abs(v) < step/1e6 {
 			cls = "axis"
@@ -255,7 +271,7 @@ func sourceChart(sources []string, base, edited map[string]float64) template.HTM
 	x := func(v float64) float64 { return left + (v-lo)/(hi-lo)*float64(w-left-right) }
 	var b svg
 	b.open(w, h, "chart", "Exam loss by kind of text, unedited against this editor")
-	for v := lo; v <= hi+step/2; v += step {
+	for _, v := range ticks(lo, hi, step) {
 		b.f(`<line class="grid" x1="%.1f" x2="%.1f" y1="%d" y2="%d"/>`, x(v), x(v), top-6, h-bottom+4)
 		b.f(`<text x="%.1f" y="%d" text-anchor="middle">%s</text>`, x(v), h-10, tickLabel(v, step))
 	}
@@ -302,7 +318,7 @@ func baselineChart(sources []string, base map[string]float64) template.HTML {
 	x := func(v float64) float64 { return left + v/hi*float64(w-left-right) }
 	var b svg
 	b.open(w, h, "chart", "Baseline exam loss by kind of text")
-	for v := 0.0; v <= hi+step/2; v += step {
+	for _, v := range ticks(0, hi, step) {
 		b.f(`<line class="grid" x1="%.1f" x2="%.1f" y1="%d" y2="%d"/>`, x(v), x(v), top, h-bottom+4)
 		b.f(`<text x="%.1f" y="%d" text-anchor="middle">%s</text>`, x(v), h-8, tickLabel(v, step))
 	}

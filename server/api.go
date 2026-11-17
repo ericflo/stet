@@ -9,8 +9,10 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
+	"net/netip"
 	"regexp"
 	"sort"
 	"strconv"
@@ -56,17 +58,74 @@ func readBody(w http.ResponseWriter, r *http.Request, limit int64) ([]byte, erro
 // signed authenticates a request and returns a copy of the account behind it. With
 // mustExist, the key must belong to an account.
 func (a *App) signed(w http.ResponseWriter, r *http.Request, limit int64, mustExist bool) (*Account, string, []byte, error) {
-	body, err := readBody(w, r, limit)
-	if err != nil {
-		return nil, "", nil, err
-	}
-	key, err := verifySignature(r, body)
+	return a.signedBy(w, r, limit, mustExist, false)
+}
+
+// A body larger than this is an upload: only so many are held in memory at once.
+const uploadBytes = 2 << 20
+
+// signedBy is signed, with the option of admitting anchors only.
+//
+// An upload is proved before any of it is read. The client sends the hash of the body it
+// signed, so the signature can be checked from the headers alone; only then is the upload
+// counted against the account and given one of the few places for large bodies. A key is
+// public, and naming someone else's must cost them nothing. The place is kept until the
+// handler has finished with the body, and anchors have places of their own, so that no
+// amount of entrants' traffic keeps an anchor's script from arriving.
+func (a *App) signedBy(w http.ResponseWriter, r *http.Request, limit int64, mustExist, anchorsOnly bool) (*Account, string, []byte, error) {
+	key, err := claimedKey(r)
 	if err != nil {
 		return nil, "", nil, fail(401, "%s", err.Error())
 	}
 	acct := a.accountByKey(key)
-	if acct == nil && mustExist {
+	if acct == nil && (mustExist || anchorsOnly) {
 		return nil, "", nil, fail(401, "no account for this key; run `stet login`")
+	}
+	if anchorsOnly && !acct.Anchor {
+		return nil, "", nil, fail(403, "anchors only")
+	}
+	sum, proved := strings.ToLower(r.Header.Get("X-Stet-Body")), false
+	if limit > uploadBytes {
+		if !sha256Re.MatchString(sum) {
+			return nil, "", nil, fail(426, "this copy of stet is out of date: it cannot send an upload the way the server now needs. Upgrade: curl -fsSL %s/install.sh | sh", a.cfg.BaseURL)
+		}
+		if _, err := verifySigned(r, sum); err != nil {
+			return nil, "", nil, fail(401, "%s", err.Error())
+		}
+		proved = true
+		// The only upload that is not an anchor's is an entry, so whoever may not enter
+		// has no call on a place either.
+		if !anchorsOnly && acct != nil {
+			if err := a.mayEnter(acct); err != nil {
+				return nil, "", nil, err
+			}
+		}
+		if !a.limits.allow("upload:"+key, 40, 3600) {
+			return nil, "", nil, fail(429, "that is a great many uploads in an hour; try again later")
+		}
+		pool := a.uploads
+		if anchorsOnly {
+			pool = a.anchorUploads
+		}
+		select {
+		case pool <- struct{}{}:
+			context.AfterFunc(r.Context(), func() { <-pool }) // when the handler returns
+		default:
+			return nil, "", nil, fail(503, "the server is busy with other uploads; try again in a moment")
+		}
+	}
+	body, err := readBody(w, r, limit)
+	if err != nil {
+		return nil, "", nil, err
+	}
+	got := sha256Hex(body)
+	if sum != "" && sum != got {
+		return nil, "", nil, fail(400, "the body that arrived is not the one that was signed")
+	}
+	if !proved {
+		if _, err := verifySigned(r, got); err != nil {
+			return nil, "", nil, fail(401, "%s", err.Error())
+		}
 	}
 	return acct, key, body, nil
 }
@@ -105,19 +164,44 @@ func (l *limiter) allow(key string, max int, window int64) bool {
 		return false
 	}
 	l.hits[key] = append(kept, t)
+	// Bounded, without forgetting who is over a limit: drop the keys with nothing recent
+	// first, and only then, if a flood of new keys has filled it, the rest.
 	if len(l.hits) > 50000 {
-		l.hits = map[string][]int64{}
+		for k, hs := range l.hits {
+			if len(hs) == 0 || t-hs[len(hs)-1] > 3600 {
+				delete(l.hits, k)
+			}
+		}
+		for k := range l.hits {
+			if len(l.hits) <= 40000 {
+				break
+			}
+			if k != key {
+				delete(l.hits, k)
+			}
+		}
 	}
 	return true
 }
 
+// clientIP is the address the proxy in front of the server saw the request come from: the
+// last entry of X-Forwarded-For, which the proxy appends. Everything to its left is
+// whatever the client chose to send. An IPv6 address counts as its /64, which is what one
+// subscriber is given.
 func clientIP(r *http.Request) string {
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		first, _, _ := strings.Cut(xff, ",")
-		return strings.TrimSpace(first)
+	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+	// A proxy may append to the client's header line or add a line of its own; either
+	// way its entry is the last one of all.
+	if xff := strings.Join(r.Header.Values("X-Forwarded-For"), ","); xff != "" {
+		parts := strings.Split(xff, ",")
+		ip = strings.TrimSpace(parts[len(parts)-1])
 	}
-	host, _, _ := net.SplitHostPort(r.RemoteAddr)
-	return host
+	if addr, err := netip.ParseAddr(ip); err == nil && addr.Is6() && !addr.Is4In6() {
+		if p, err := addr.Prefix(64); err == nil {
+			return p.String()
+		}
+	}
+	return ip
 }
 
 // --- routes ---------------------------------------------------------------------------------
@@ -187,8 +271,21 @@ func (a *App) routes() http.Handler {
 	return logRequests(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		host := strings.ToLower(r.Host)
 		switch {
+		case r.URL.Path == "/healthz" || r.URL.Path == "/readyz":
+			site.ServeHTTP(w, r)
 		case a.cfg.RedirectHosts[host]:
 			http.Redirect(w, r, a.cfg.BaseURL+r.URL.RequestURI(), http.StatusPermanentRedirect)
+		case !strings.HasPrefix(r.URL.Path, "/static/") && !a.st.ready():
+			// The last change could not be stored and has not been read back, so what is in
+			// memory may never have happened. Say so rather than show it.
+			w.Header().Set("Retry-After", "20")
+			if host == apiHost && apiHost != siteHost || strings.HasPrefix(r.URL.Path, "/api/") {
+				writeJSON(w, 503, map[string]string{"error": errUnavailable.Message})
+			} else {
+				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+				w.WriteHeader(503)
+				io.WriteString(w, unavailablePage)
+			}
 		case host == apiHost && apiHost != siteHost:
 			api.ServeHTTP(w, r)
 		default:
@@ -196,6 +293,14 @@ func (a *App) routes() http.Handler {
 		}
 	}))
 }
+
+// unavailablePage is what the site says while the server cannot vouch for what it remembers.
+const unavailablePage = `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="refresh" content="20"><title>Stet · back in a moment</title>
+<body style="margin:0;background:#f2eee2;color:#1d1b16;font:19px/1.6 Georgia,serif">
+<div style="max-width:560px;margin:18vh auto;padding:0 24px"><h1 style="font-size:40px;margin:0 0 12px">Back in a moment.</h1>
+<p>Stet cannot reach its records right now, and will not show you numbers it cannot vouch for. Nothing is lost. This page tries again every twenty seconds.</p></div>
+`
 
 type statusWriter struct {
 	http.ResponseWriter
@@ -242,6 +347,7 @@ func (a *App) apiSeason(w http.ResponseWriter, r *http.Request) {
 		"beacon": a.season.Beacon, "pools": a.season.Pools, "tolerance": a.tolerance(), "record": a.season.Record,
 		"grade_devices": a.season.GradeDevices, "site": a.cfg.BaseURL, "api": a.cfg.APIURL,
 		"requires_github": a.cfg.RequireGithub, "server": revision,
+		"exam_sha256": a.season.ExamSHA256, "heldout_exam_sha256": a.season.HeldoutSHA256,
 	}
 	if name, version := a.site.wheel(); name != "" {
 		out["cli"] = map[string]any{"version": version, "wheel": a.cfg.APIURL + "/files/" + name}
@@ -261,7 +367,7 @@ func (a *App) apiSeason(w http.ResponseWriter, r *http.Request) {
 // --- accounts -------------------------------------------------------------------------------
 
 func accountJSON(c *Account) map[string]any {
-	return map[string]any{"handle": c.Handle, "github": c.Github, "created_at": c.CreatedAt, "anchor": c.Anchor, "trusted": c.reliable()}
+	return map[string]any{"handle": c.Handle, "github": c.Github, "created_at": c.CreatedAt, "anchor": c.Anchor, "trusted": c.Anchor}
 }
 
 func (a *App) apiCreateAccount(w http.ResponseWriter, r *http.Request) {
@@ -319,9 +425,13 @@ func (a *App) apiCreateAccount(w http.ResponseWriter, r *http.Request) {
 
 var gistRe = regexp.MustCompile(`([0-9a-f]{20,40})/?$`)
 
+// githubToken, when set, goes with the server's questions to GitHub. Without one GitHub
+// answers 60 an hour for the server's whole address, which is 30 links.
+var githubToken string
+
 // githubLookup is how the server asks GitHub about a gist and its owner. Tests replace it.
 var githubLookup = func(ctx context.Context, gistID string) (login string, id int64, created int64, content string, err error) {
-	raw, err := httpGet(ctx, "https://api.github.com/gists/"+gistID, 4<<20)
+	raw, err := httpGetAs(ctx, "https://api.github.com/gists/"+gistID, githubToken, 4<<20)
 	if err != nil {
 		return "", 0, 0, "", err
 	}
@@ -342,7 +452,7 @@ var githubLookup = func(ctx context.Context, gistID string) (login string, id in
 		all.WriteString(f.Content)
 		all.WriteString("\n")
 	}
-	raw, err = httpGet(ctx, "https://api.github.com/users/"+gist.Owner.Login, 1<<20)
+	raw, err = httpGetAs(ctx, "https://api.github.com/users/"+gist.Owner.Login, githubToken, 1<<20)
 	if err != nil {
 		return "", 0, 0, "", err
 	}
@@ -372,13 +482,19 @@ func (a *App) apiLinkGithub(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, fail(400, "that does not look like a gist URL"))
 		return
 	}
-	if !a.limits.allow("gist:"+acct.Handle, 10, 3600) {
+	// Per account and per address: accounts are free, and GitHub answers this server only
+	// so many times an hour for everybody put together.
+	if !a.limits.allow("gist:"+acct.Handle, 10, 3600) || !a.limits.allow("gistip:"+clientIP(r), 10, 3600) {
 		writeErr(w, fail(429, "too many attempts; try again in an hour"))
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 	login, ghID, created, content, err := githubLookup(ctx, m[1])
+	if errors.Is(err, errBusy) {
+		writeErr(w, fail(503, "GitHub is limiting how often this server may ask it things. Nothing is wrong with your gist; try again in an hour"))
+		return
+	}
 	if err != nil {
 		writeErr(w, fail(502, "could not read that gist from GitHub; is it public?"))
 		return
@@ -391,11 +507,19 @@ func (a *App) apiLinkGithub(w http.ResponseWriter, r *http.Request) {
 	err = a.st.update(r.Context(), func(tx *Tx) error {
 		s := tx.s
 		me := s.Accounts[acct.ID]
-		// One GitHub identity, one account: linking moves it to whoever proved it last.
+		// One GitHub identity, one account: linking moves it to whoever proved it last, and
+		// the entries it was vouching for leave play with it. Otherwise one person could
+		// keep an entry in play under every key they cared to make.
 		for _, other := range s.Accounts {
 			if other.ID != me.ID && (strings.EqualFold(other.Github, login) || (ghID != 0 && other.GithubID == ghID)) {
 				other.Github, other.GithubID, other.GithubCreatedAt = "", 0, 0
 				tx.saveAccount(other)
+				for _, e := range s.ownedBy[other.ID] {
+					if e.Status == "queued" || e.Status == "running" {
+						e.Status = "withdrawn"
+						tx.saveEditor(e)
+					}
+				}
 			}
 		}
 		me.Github, me.GithubID, me.GithubCreatedAt = login, ghID, created
@@ -411,13 +535,8 @@ func (a *App) apiLinkGithub(w http.ResponseWriter, r *http.Request) {
 }
 
 func verifierStats(s *State, c *Account) map[string]any {
-	recent := 0
-	for _, r := range s.Results {
-		if r.AccountID == c.ID && r.Verdict == "agreed" && r.ReceivedAt > now()-14*86400 {
-			recent++
-		}
-	}
-	return map[string]any{"validated": c.Agreed, "recent": recent, "streak": c.Streak, "trusted": c.reliable(), "strikes": c.Strikes, "gpu_hours": c.GPUSeconds / 3600, "priority": recent}
+	recent := recentAgreed(s)[c.ID]
+	return map[string]any{"validated": c.Agreed, "recent": recent, "streak": c.Streak, "trusted": c.Anchor, "strikes": c.Strikes, "muted": muted(c, now()), "gpu_hours": c.GPUSeconds / 3600, "priority": recent}
 }
 
 func (a *App) apiMe(w http.ResponseWriter, r *http.Request) {
@@ -436,7 +555,7 @@ func (a *App) apiMe(w http.ResponseWriter, r *http.Request) {
 			es := s.ofEditor[e.ID]
 			for i := len(es) - 1; i >= 0; i-- {
 				if es[i].Status == "settled" {
-					j["last"] = map[string]any{"round": roundID(a.season.ID, es[i].RoundIdx), "gain": es[i].Gain, "valid": es[i].Valid}
+					j["last"] = map[string]any{"round": roundID(a.season.ID, es[i].RoundIdx), "gain": places5(es[i].Gain), "valid": es[i].Valid}
 					break
 				}
 			}
@@ -457,7 +576,7 @@ func (a *App) editorJSON(s *State, e *Editor, b *Board) map[string]any {
 		"rounds": 0, "url": a.cfg.BaseURL + "/editors/" + e.ID[:12],
 	}
 	if row := b.ByID[e.ID]; row != nil {
-		j["rounds"], j["rating"], j["mean_gain"], j["se"] = row.Rounds, row.Rating, row.MeanGain, row.SE
+		j["rounds"], j["rating"], j["mean_gain"], j["se"] = row.Rounds, places5p(row.Rating), places5p(row.MeanGain), places5p(row.SE)
 		j["multiplier"], j["capped"], j["provisional"], j["record"], j["ladder"] = row.Multiplier, row.Capped, row.Provisional, row.Record, row.Ladder
 		if row.Rank > 0 {
 			j["rank"] = row.Rank
@@ -504,6 +623,18 @@ func (a *App) viewer(r *http.Request) *Account {
 	return a.accountByKey(key)
 }
 
+// places5 is a number as the API prints it: losses are measured to five places, and
+// arithmetic on them should not print as 0.9124699999999999.
+func places5(v float64) float64 { return math.Round(v*1e5) / 1e5 }
+
+func places5p(v *float64) *float64 {
+	if v == nil {
+		return nil
+	}
+	r := places5(*v)
+	return &r
+}
+
 // entryJSON is the public face of an entry. Sealed until settled: an open entry says
 // nothing about any grade it may have.
 func (a *App) entryJSON(s *State, e *Entry) map[string]any {
@@ -522,13 +653,16 @@ func (a *App) entryJSON(s *State, e *Entry) map[string]any {
 	}
 	j["stage"] = "settled"
 	j["valid"], j["results"], j["settled_at"] = e.Valid, e.NResults, e.SettledAt
-	if rd.BaselineLoss != nil {
+	if rd.BaselineLoss != nil && rd.Status == "settled" { // an entry settled invalid does not unseal the round
 		j["baseline"] = *rd.BaselineLoss
 	}
 	if e.Valid && e.Loss != nil {
-		j["loss"], j["gain"], j["by_source"] = *e.Loss, e.Gain, e.BySource
+		j["loss"], j["gain"], j["by_source"] = *e.Loss, places5(e.Gain), e.BySource
 	} else {
 		j["gain"], j["reason"] = 0.0, e.Reason
+		if e.Void {
+			j["void"] = true
+		}
 	}
 	if e.Detail != nil {
 		j["detail"] = e.Detail
@@ -556,8 +690,8 @@ func (a *App) apiEditor(w http.ResponseWriter, r *http.Request) {
 	board := a.board()
 	var out map[string]any
 	a.st.view(func(s *State) {
-		e := findEditor(s, r.PathValue("ref"))
-		if e == nil || (!e.Public && (viewer == nil || viewer.ID != e.AccountID)) {
+		e := findEditor(s, r.PathValue("ref"), viewerID(viewer))
+		if e == nil {
 			return
 		}
 		j := a.editorJSON(s, e, board)
@@ -580,8 +714,8 @@ func (a *App) apiBundle(w http.ResponseWriter, r *http.Request) {
 	viewer := a.viewer(r)
 	var id, name string
 	a.st.view(func(s *State) {
-		e := findEditor(s, r.PathValue("ref"))
-		if e == nil || (!e.Public && (viewer == nil || viewer.ID != e.AccountID)) {
+		e := findEditor(s, r.PathValue("ref"), viewerID(viewer))
+		if e == nil {
 			return
 		}
 		id, name = e.ID, fmt.Sprintf("%s-v%d.tar.zst", e.Name, e.Version)
@@ -590,29 +724,52 @@ func (a *App) apiBundle(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, fail(404, "no such editor"))
 		return
 	}
-	blob, err := a.readBundle(r.Context(), id)
+	// Streamed from storage: a slow reader holds a connection, not the bundle in memory.
+	f, size, err := a.st.blobs.Open(r.Context(), bundleKey(id))
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
+	defer f.Close()
 	w.Header().Set("Content-Type", "application/zstd")
+	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
 	w.Header().Set("Content-Disposition", `attachment; filename="`+name+`"`)
-	w.Write(blob)
+	io.Copy(w, io.LimitReader(f, maxBundleBytes))
+}
+
+func viewerID(viewer *Account) int64 {
+	if viewer == nil {
+		return 0
+	}
+	return viewer.ID
 }
 
 // apiGetScript serves an edit script: the plain-data record of what an editor did in a
 // round, which is all anyone needs to grade it again.
 func (a *App) apiGetScript(w http.ResponseWriter, r *http.Request) {
 	sha := strings.ToLower(r.PathValue("sha"))
-	blob, err := a.readScript(r.Context(), sha)
-	if err != nil {
+	if !sha256Re.MatchString(sha) {
 		writeErr(w, fail(404, "no such script"))
 		return
 	}
+	// Streamed from storage, like a bundle: a script may be tens of megabytes, and every
+	// volunteer starting on a round asks for the same ones at once.
+	f, size, err := a.st.blobs.Open(r.Context(), scriptKey(sha))
+	if errors.Is(err, errNoBlob) {
+		writeErr(w, fail(404, "no such script"))
+		return
+	}
+	if err != nil {
+		slog.Error("reading a script", "sha", sha, "err", err)
+		writeErr(w, fail(503, "the file store is not answering; try again in a moment"))
+		return
+	}
+	defer f.Close()
 	w.Header().Set("Content-Type", "application/zstd")
+	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
 	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 	w.Header().Set("Content-Disposition", `attachment; filename="`+sha[:12]+`.script.jsonl.zst"`)
-	w.Write(blob)
+	io.Copy(w, io.LimitReader(f, a.season.Script.MaxBytes))
 }
 
 // --- rounds ---------------------------------------------------------------------------------
@@ -623,8 +780,12 @@ func (a *App) roundJSON(s *State, r *Round) map[string]any {
 	if r.Crawl != nil {
 		j["crawl_id"] = r.Crawl.Crawl
 	}
-	if r.BaselineLoss != nil {
+	// Sealed with the grades: a published baseline would tell a grader what to report.
+	if r.BaselineLoss != nil && r.Status == "settled" {
 		j["baseline_loss"], j["baseline"], j["baseline_verifiers"] = *r.BaselineLoss, r.Baseline, r.BaselineN
+	}
+	if len(r.Differs) > 0 && r.Status == "settled" {
+		j["differs"] = r.Differs // volunteers turned away: another corpus, or another unedited loss
 	}
 	if r.CorpusSHA != "" {
 		j["corpus_sha256"], j["exam_sha256"] = r.CorpusSHA, r.ExamSHA
@@ -687,15 +848,22 @@ func (a *App) apiRound(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) apiLeaderboard(w http.ResponseWriter, r *http.Request) {
 	b := a.board()
-	rated, prov := b.Rated, b.Provisional
-	if rated == nil {
-		rated = []*BoardRow{}
+	// The same numbers as every other route prints, to the same five places.
+	printed := func(rows []*BoardRow) []*BoardRow {
+		out := make([]*BoardRow, len(rows))
+		for i, r := range rows {
+			c := *r
+			c.Rating, c.MeanGain, c.SE, c.Multiplier = places5p(r.Rating), places5p(r.MeanGain), places5p(r.SE), places5p(r.Multiplier)
+			out[i] = &c
+		}
+		return out
 	}
-	if prov == nil {
-		prov = []*BoardRow{}
-	}
-	writeJSON(w, 200, map[string]any{"scale": a.cfg.Scale, "editors": rated, "provisional": prov, "rated_rounds": a.cfg.RatedRounds})
+	writeJSON(w, 200, map[string]any{"scale": a.cfg.Scale, "editors": printed(b.Rated), "provisional": printed(b.Provisional), "rated_rounds": a.cfg.RatedRounds})
 }
+
+// gpuNameRe is what a GPU's name looks like. The name is whatever the client sent, and it
+// is shown on the site.
+var gpuNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9 ()\[\]._+/@:-]{0,59}$`)
 
 type VerifierRow struct {
 	Handle    string  `json:"handle"`
@@ -710,18 +878,13 @@ type VerifierRow struct {
 	LastSeen  int64   `json:"last_seen"`
 }
 
-// verifiers lists everyone who grades, most active in the last two weeks first.
+// verifiers lists the anchors and every volunteer with a grade that has agreed with an
+// anchor's, most active in the last two weeks first. Asking for work puts nobody on it.
 func verifiers(s *State) []VerifierRow {
-	since := now() - 14*86400
-	recent := map[int64]int{}
-	for _, r := range s.Results {
-		if r.Verdict == "agreed" && r.ReceivedAt > since {
-			recent[r.AccountID]++
-		}
-	}
+	recent := recentAgreed(s)
 	out := []VerifierRow{}
 	for _, c := range s.Accounts {
-		if c.Banned || (c.Agreed == 0 && c.LastSeen <= since) {
+		if muted(c, now()) || (c.Agreed == 0 && !c.Anchor) {
 			continue
 		}
 		var h struct {
@@ -729,11 +892,18 @@ func verifiers(s *State) []VerifierRow {
 			Device string `json:"device"`
 		}
 		json.Unmarshal(c.Hardware, &h)
-		if h.GPU == "" {
-			h.GPU = h.Device
+		if !gpuNameRe.MatchString(h.GPU) {
+			h.GPU = ""
+			if gpuNameRe.MatchString(h.Device) {
+				h.GPU = h.Device
+			}
 		}
-		out = append(out, VerifierRow{Handle: c.Handle, Github: c.Github, Validated: c.Agreed, Recent: recent[c.ID], Streak: c.Streak,
-			Trusted: c.reliable(), Anchor: c.Anchor, GPUHours: c.GPUSeconds / 3600, GPU: h.GPU, LastSeen: c.LastSeen})
+		row := VerifierRow{Handle: c.Handle, Github: c.Github, Validated: c.Agreed, Recent: recent[c.ID], Streak: c.Streak,
+			Trusted: c.Anchor, Anchor: c.Anchor, GPUHours: c.GPUSeconds / 3600, GPU: h.GPU, LastSeen: c.LastSeen}
+		if c.Anchor { // an anchor's grades are what the others agree with
+			row.Validated, row.Recent, row.Streak = 0, 0, 0
+		}
+		out = append(out, row)
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Recent != out[j].Recent {
@@ -808,17 +978,14 @@ func (a *App) apiClaim(w http.ResponseWriter, r *http.Request) {
 	a.st.view(func(s *State) { out["announced"] = a.announcement(s) })
 	if job == nil {
 		out["retry_after"] = 60
-		out["message"] = "No work right now."
-		if !acct.reliable() {
-			out["message"] = "No work right now. A new verifier grades entries that a trusted verifier also grades; more will come with the next round."
-		}
+		out["message"] = "No work right now. Scripts to grade appear when a round is drawn."
 	}
 	writeJSON(w, 200, out)
 }
 
 func (a *App) apiScript(w http.ResponseWriter, r *http.Request) {
 	// base64 of a compressed script, plus the report around it
-	acct, _, body, err := a.signed(w, r, a.season.Script.MaxBytes*4/3+(1<<20), true)
+	acct, _, body, err := a.signedBy(w, r, a.season.Script.MaxBytes*4/3+(1<<20), true, true)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -882,7 +1049,7 @@ func (a *App) apiRelease(w http.ResponseWriter, r *http.Request) {
 // exam pack, which every client fetches by name and checks against the hash in its season
 // file, so a wrong upload is refused by clients, not trusted.
 func (a *App) apiAdminFile(w http.ResponseWriter, r *http.Request) {
-	acct, _, body, err := a.signed(w, r, 128<<20, true)
+	acct, _, body, err := a.signedBy(w, r, 128<<20, true, true)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -891,9 +1058,28 @@ func (a *App) apiAdminFile(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, fail(403, "anchors only"))
 		return
 	}
+	// An organiser publishes two files this way, and the season already says what each
+	// hashes to: the exam, and, on the day the season closes, the held-out exam. A stolen
+	// anchor key publishes nothing else.
 	name := r.PathValue("name")
-	if !fileNameRe.MatchString(name) || len(body) == 0 {
-		writeErr(w, fail(400, "a file needs a plain name and some bytes"))
+	sum := sha256.Sum256(body)
+	got := hex.EncodeToString(sum[:])
+	exam := name == a.season.ExamFile && got == a.season.ExamSHA256
+	heldout := a.season.HeldoutSHA256 != "" && name == a.season.heldoutFile() && got == a.season.HeldoutSHA256
+	// With the held-out exam go the things that let it be checked: the seed it was built
+	// from, every result on it, and the final table. Only once the season is closed.
+	closing := false
+	for _, suffix := range []string{".seed", ".results.jsonl", ".table.json"} {
+		closing = closing || (a.cfg.SeasonClosed && a.season.HeldoutSHA256 != "" && name == "heldout-"+a.season.ID+suffix)
+	}
+	if !exam && !heldout && !closing {
+		writeErr(w, fail(400, "the only files published here are %s and, when the season closes, %s, each with the hash the season gives for it", a.season.ExamFile, a.season.heldoutFile()))
+		return
+	}
+	// Publishing the held-out exam cannot be taken back, so one command sent early must not
+	// be able to do it: the server has to have been told the season is over as well.
+	if heldout && !a.cfg.SeasonClosed {
+		writeErr(w, fail(403, "the held-out exam is published when the season has closed, and this server has not been told that it has (STET_SEASON_CLOSED)"))
 		return
 	}
 	if err := a.st.blobs.Put(r.Context(), "files/"+name, body, "application/octet-stream"); err != nil {
@@ -901,9 +1087,8 @@ func (a *App) apiAdminFile(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, fail(503, "the file store is not answering; try again in a moment"))
 		return
 	}
-	sum := sha256.Sum256(body)
 	slog.Info("file published", "name", name, "bytes", len(body), "by", acct.Handle)
-	writeJSON(w, 201, map[string]any{"name": name, "bytes": len(body), "sha256": hex.EncodeToString(sum[:]), "url": a.cfg.APIURL + "/files/" + name})
+	writeJSON(w, 201, map[string]any{"name": name, "bytes": len(body), "sha256": got, "url": a.cfg.APIURL + "/files/" + name})
 }
 
 func (a *App) apiAdminDraw(w http.ResponseWriter, r *http.Request) {

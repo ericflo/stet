@@ -283,7 +283,9 @@ main.page h2 { font-size: 28px; margin: 48px 0 18px; }
 .prose ul, .prose ol { padding-left: 1.25em; margin: 0 0 1em; }
 .prose li { margin-bottom: 0.4em; }
 .prose pre { background: var(--card); border: 1px solid var(--rule); border-radius: 4px; padding: 14px 16px; overflow-x: auto; font-size: 13.5px; line-height: 1.55; }
-.prose table { font-size: 15.5px; margin: 0 0 1.2em; border: 1px solid var(--rule); background: var(--card); }
+.prose table { font-size: 15.5px; margin: 0; }
+.prose .table-wrap { margin: 0 0 1.3em; }
+.prose pre { margin: 0 0 1.3em; }
 .prose th, .prose td { padding: 9px 13px; }
 .prose blockquote { margin: 0 0 1em; padding-left: 18px; border-left: 2px solid var(--red); color: var(--ink-2); }
 .prose em { font-style: italic; }
