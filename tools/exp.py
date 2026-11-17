@@ -14,12 +14,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from stet import data  # noqa: E402
-from stet.editor import Task  # noqa: E402
-from stet.grade import grade  # noqa: E402
-from stet.script import materialize  # noqa: E402
-from stet.spec import load_season, practice_round  # noqa: E402
-from stet.train import pick_device  # noqa: E402
+from stet import data
+from stet.editor import Task
+from stet.grade import grade
+from stet.script import materialize
+from stet.spec import load_season, practice_round
+from stet.train import pick_device
 
 
 def main():
@@ -143,6 +143,7 @@ def main():
             extra = ""
             if args.table:
                 from count_table import exam_loss, fit
+
                 from stet.tok import load_encoding
 
                 enc = load_encoding(season)

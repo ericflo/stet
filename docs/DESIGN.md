@@ -1,227 +1,155 @@
-# Stet — design
+# Design
 
-*stet* (Latin, "let it stand"): the mark an editor writes beside a passage to say **keep this**.
+*stet* (Latin, "let it stand"): the mark a proofreader writes beside a passage to say
+**keep this**.
 
-Status: draft 1, 2026-11-17. Numbers marked *(provisional)* are set by experiments recorded
-in [EXPERIMENTS.md](EXPERIMENTS.md) and may change before Season 0 opens.
+This page is why Stet is built the way it is. The rules themselves are in
+[Rules](RULES.md).
 
-## The idea in one paragraph
+## The question
 
-Speedruns fix the data and let people change the model or the kernels. Stet fixes the model
-and the kernels and lets people change only the data. You write an **editor**: a program
-that is handed a pile of raw web text it has never seen and a few minutes on one GPU. It
-hands back an **edit script** — what to keep, what to cut, in what order, with what small
-repairs. A fixed small language model (the **student**) is trained on the result for a
-fixed number of tokens and then sits an **exam** of curated text. The lower the student's
-exam loss, the better the editor. The point is not the edited dataset. The point is to
-find out how good an editing agent can get, so that later a swarm of them can be set loose
-on a real pretraining corpus.
+Speedruns fix the data and let people change the model. Stet fixes the model and lets
+people change the data. The thing being searched for is not a dataset. It is an **agent
+that makes datasets**: a program that can be handed raw web text it has never seen and
+return something a model learns more from. If such an agent can be found at small scale,
+many copies of it can be set loose on a real pretraining corpus.
 
-## 1. What is fixed and what is free
+So the competition is shaped to measure one thing, the editor, and to make every other
+explanation for a good score unavailable.
+
+## One variable
 
 | Fixed for a season | Free |
 |---|---|
-| Student architecture and initialisation | Which documents and spans are kept |
+| Student architecture and initial weights | Which documents and spans are kept |
 | Optimiser, schedule, batch size | The order they are trained in |
 | Training budget, counted in tokens | How often anything is repeated |
-| Tokenizer | Clean-up inside a document |
-| The exam's sources and scoring | A little new text (the ink budget) |
-| The edit-phase time limit and hardware class | Everything about how the editor decides |
+| Tokenizer | Small repairs (the ink budget) |
+| The exam's sources and scoring | Everything about how the editor decides |
 
-There is no shuffling in the trainer. The stream the editor writes is the stream the
-student sees, so curriculum is a first-class move.
+Training is budgeted in tokens, never seconds, so a faster GPU buys nothing. The trainer
+does not shuffle: the stream the editor writes is the stream the student sees, which makes
+curriculum a real move.
 
-## 2. A round
+## Decisions, and what they are for
 
-1. **Commit.** Editors are uploaded and hashed before the round closes.
-2. **Draw.** At the close, the round's seed is taken from a public randomness beacon
-   (drand). The seed picks the corpus shards and the exam passages. Nobody, organisers
-   included, can know or steer them beforehand.
-3. **Edit.** A verifier runs the editor in a sandbox: no network, read-only corpus, a time
-   limit. The editor writes an edit script.
-4. **Train.** Trusted harness code applies the script and trains the student for exactly
-   the token budget.
-5. **Exam.** The student is scored on the round's exam passages.
-6. **Score.** The editor's gain is the baseline's exam loss minus its own, on the same
-   round, same initial weights.
+**The exam is not a slice of the corpus.** On held-out text from the same pool, careful
+selection barely beats random, because perplexity rewards matching the test distribution.
+So the exam is what we want a model to have learned: six kinds of curated, openly licensed
+English writing, weighted equally. A specialist cannot win by acing one.
 
-Practice rounds use fixed public seeds and can be run by anyone at any time. Official
-rounds are drawn daily *(provisional)*.
+**The exam is public.** A secret exam needs a trusted party to hold it and makes every
+score unreproducible. Stet publishes it and defends it three other ways: the editor runs
+in a sandbox without it; every corpus document containing a sentence of it is removed
+before the editor sees the corpus; and the script's output is checked for it again.
 
-## 3. The corpus
+**The data is drawn after the entries are locked.** The seed comes from drand, a public
+randomness beacon, at a time fixed on a public grid, and the corpus comes from the newest
+Common Crawl. An editor cannot be tuned to data that did not exist as a sample when it was
+submitted, and the organisers cannot choose a draw that suits anyone.
 
-Raw, unfiltered Common Crawl text: the DCLM pool shards, pinned by sha256. It is genuinely
-messy — about a third is not English, and the rest includes error pages, shop listings,
-navigation menus, spam and duplicates alongside real prose.
+**Almost no ink.** If new text were allowed, the winning move would be to ignore the
+corpus and ship a dataset, or to have a large model write one. Ink is capped at 0.1% of
+the training tokens: enough for separators and repairs. Everything else the student reads
+is copied byte for byte from the corpus. This is also what rules out distilling a frontier
+model into the training data.
 
-- A round's corpus is a seed-chosen set of shards, about eight times the training budget.
-  The editor must choose; it cannot keep everything.
-- **Practice and official rounds draw from different dataset releases** with no shard in
-  common (`dclm-pool-400m-1x` and `dclm-pool-1b-1x`). An editor is developed on one and
-  judged on the other.
-- Documents that share a long line with any of the round's exam passages are removed
-  before the editor sees the corpus.
-- On disk the corpus is three flat files (`docs.bin`, `docs.idx`, `urls.txt`) that any
-  language can memory-map.
+**Editing and grading are separate.** Only the edit runs an entrant's code. It produces an
+edit script, which is plain data: document numbers and byte ranges. Grading turns a script
+into a score with trusted code alone. That split is what lets volunteers do the expensive
+part safely: a stranger's GPU never runs a stranger's program.
 
-## 4. The exam
+**Edits run on the organisers' machines.** Sandboxing untrusted code well enough to ask
+volunteers to run it is not something a namespace sandbox can promise, and edit time has to
+be measured on known hardware to mean anything. So anchors run the editors (minutes each)
+and volunteers do the training (most of the compute).
 
-The research is blunt about this: on held-out text from the *same* pool, careful selection
-barely beats random, because perplexity rewards matching the test distribution. So the
-exam is not a slice of the pool. It is what we want a model to have learned:
+**Scores are gains, on shared rounds.** Rounds differ in difficulty by far more than
+editors differ from each other. Every score is a difference from the unedited corpus on
+the same round with the same initial weights, ratings are adjusted for which rounds an
+editor happened to get, and the top editors run in every round so that any two of them can
+be compared directly.
 
-| Source | What it is |
+**The record is hard to take by luck.** A challenger is tested against the holder at 5, 10
+and 20 shared rounds, must win by more than a margin set from measured noise, and must
+have been graded by an anchor. Copying the leader and hoping for a good draw does not
+work, and neither does entering many near-copies.
+
+**The headline is a multiplier.** "+0.31 nats" means little to anyone. "This edit made the
+data worth 2.4× as much" does. It is read off a measured curve of the baseline's loss
+against training tokens, and never extrapolated past the curve.
+
+**Small on purpose.** The official student is 6 layers by 384, trained on 40M tokens: about
+eight minutes on an integrated GPU. Verification has to be cheap while the verifier
+network is small. Whether what wins here also wins at larger scale is something Stet
+measures rather than assumes: each season the top editors are rerun a scale up.
+
+## What could go wrong
+
+| Attack | What stops it |
 |---|---|
-| encyclopedia | English Wikipedia articles |
-| textbooks | Open textbooks and course material (LibreTexts, Pressbooks, OER Commons) |
-| science | arXiv abstracts |
-| qa | Stack Exchange questions with their answers |
-| books | Project Gutenberg |
-| news | Openly licensed news |
+| Tune an editor to a known corpus | Drawn after commit from a crawl newer than the editor |
+| Ship a dataset instead of editing | Ink budget; 50 MB bundle |
+| Smuggle exam text in | Corpus and script output are both cleaned of it; editors are public |
+| Editor reads the exam or phones home | Sandbox: no network, no exam on disk, script-only output |
+| A hostile editor attacks the machine running it | Only anchors run editors; volunteers never do |
+| A hostile script attacks the grader | Scripts are parsed as data with hard limits; nothing in one is executed |
+| A verifier invents a score | Sealed grades, assigned work, per-round baseline check, strikes |
+| A verifier copies a score | Nothing is visible until an entry settles |
+| Many accounts grade each other | Trust comes only from agreeing with already-trusted verifiers; anchors audit records |
+| Resubmit the leader for a lucky draw | Three fixed looks, a margin, paired on shared rounds |
+| Organiser picks a good seed | drand, a ten-minute grid, the crawl named in advance, checked by every client |
+| Flood the queue | GitHub-linked accounts, one entry in play, six submissions a day |
 
-All of it is from the Common Pile, so every passage is openly licensed. The score is the
-**unweighted mean of the six per-source losses**. A specialist cannot win by acing one
-source, and each source's loss is reported so that lopsided strategies are visible.
+What is left is in [Rules](RULES.md#what-the-organisers-are-trusted-with): anchors are
+trusted to run editors honestly, and anyone can check them by rerunning.
 
-The exam pack is public. That is deliberate: every score can be reproduced by anyone, and
-no trusted party is needed to hold a secret. What keeps it honest is in §5 and §10.
+## How it is built
 
-## 5. The edit script and the ink budget
+- **The harness** (Python, `src/stet`) is what decides a score: rounds from seeds, the
+  corpus, the script format, the student, the trainer, the exam. It is the same code in
+  `stet run`, `stet verify` and the gym. A hash of its scoring files goes into every
+  result.
+- **The server** (Go, `server/`) keeps the books: accounts, entries, rounds, jobs, grades,
+  ratings. It trains nothing. One stateless process serves the website, the API and the
+  downloads.
+- **Records** live in [durable-db](https://github.com/ericflo/durable-db), a versioned
+  key-value database over object storage. The server holds every record in memory and
+  writes each change through as one conditional commit. A commit that fails or conflicts
+  changes nothing in memory: the server reloads and answers "try again". There is no SQL
+  and no migration step.
+- **Files** (entries, edit scripts, the exam pack) live in a bucket, addressed by hash.
+- **Identity** is an Ed25519 key made by `stet login`. Every request that matters is
+  signed. There are no passwords.
 
-An edit script is JSON Lines. One line is one output document; line order is training
-order.
+Limits worth knowing: every record is loaded at start (tens of megabytes after a year at
+four rounds a day), and readers wait while a change is being committed. Both are fine at
+this size and are the first things to revisit if Stet outgrows one process.
 
-```
-123                               keep document 123 whole
-{"d": 123, "k": [[0, 900]]}       keep these byte ranges of document 123
-{"s": [[123, 0, 900], "text"]}    any mix of copies and literal text
-{"t": "text"}                     a new document of literal text
-```
+## The gym
 
-The four proofreader's marks map onto it directly: **stet** (keep), **dele** (leave out),
-**transpose** (reorder), **caret** (insert).
+`stet.gym.Env` is the same harness as an environment: the observation is a corpus, the
+action is an edit script, the reward is the gain. Its rounds come from a different dataset
+(DCLM-Pool) than official rounds, so a policy trained in the gym and entered in the
+competition is tested on data of a kind it has not seen.
 
-- **Cuts are free.** Deleting, reordering and repeating cost nothing.
-- **Ink is scarce.** Literal text, and copies shorter than 64 bytes that are not a whole
-  document, are *ink*. At most 10% *(provisional)* of the bytes the student is trained on
-  may be ink. This is what keeps Stet an editing competition: without it, the winning move
-  is to ignore the corpus and ship a canned dataset.
-- **The budget cuts both ways.** A script longer than the token budget is truncated. A
-  shorter one is repeated from the top. Keeping less means training on it more often.
+## What Stet is not
 
-The script is plain data. The harness validates it and never executes anything from it.
+It does not build the best dataset, change the student, or reward writing new training
+text. It exists to find out how good an editor can get.
 
-## 6. The student and the scales
+## Prior work
 
-An ordinary GPT: pre-norm, rotary positions, tied embeddings, no dropout, GPT-2 tokenizer.
-AdamW, linear warm-up, cosine decay. Initial weights are derived from the round seed, so
-every editor in a round starts its student from the same point.
+The nearest competition is DataComp-LM: it also fixes the training recipe and varies only
+the data. But an entry there is a finished dataset, trained by the entrant at tens to
+thousands of GPU-hours a run, from one static pool, with a mandatory shuffle. There are
+also recent papers in which an agent searches for data-selection programs and scores each
+with a short proxy training run. Stet differs from all of them in the same ways: the entry
+is a time-boxed *program*, it is judged on fresh data it has never seen, the whole edit
+space is open (cut, reorder, repeat, repair), a score costs minutes on a consumer GPU, and
+scores are checked by volunteers rather than taken on trust.
 
-| Scale | Corpus | Train tokens | Student | Use |
-|---|---|---|---|---|
-| nano | part of 1 shard | *(provisional)* | 4 layers × 192 | Smoke tests, RL inner loops |
-| micro | 1 shard (~380 MB) | *(provisional)* | 6 layers × 384 | **Season 0 official scale** |
-| standard | 4 shards (~1.5 GB) | 50M | 8 layers × 512 | Scale-up checks; a later season |
-
-Season 0 runs at micro because verification has to be cheap while the verifier network is
-small: about a minute of training on an RTX 4090. Whether what wins at micro also wins at
-standard is an open question that Stet measures rather than assumes (§11).
-
-Training is budgeted in tokens, never seconds, so every machine does identical work. Only
-the edit phase is timed. Its limit is stated for a reference machine (RTX 4090, 8 cores,
-32 GB) and scaled on other hardware by a calibration run.
-
-## 7. Scoring
-
-- **Gain** (per round) = baseline exam loss − editor exam loss, in nats per token. The
-  baseline is the `identity` editor: every document, in the order it arrived.
-- **Rating** = mean gain over the official rounds an editor has run, with a standard error.
-  An editor is *provisional* until it has three rounds.
-- **The headline number is a multiplier.** Each season publishes a reference curve: the
-  baseline's exam loss as a function of training tokens. An editor's gain is mapped through
-  it to answer one question: *how many times more raw data would the student have needed to
-  do this well?* "2.4×" means the edit made the data worth 2.4 times as many tokens.
-  Multipliers beyond the measured range of the curve are marked as extrapolated.
-- **Records.** The top editors (the *ladder*) are re-run on every new round, so any two of
-  them share rounds. A challenger takes the record when it has at least five shared rounds
-  with the holder and beats it in a one-sided paired test at p < 0.05. One lucky round
-  never makes a record.
-- **Failures.** If an editor crashes, times out or writes an invalid script, the student is
-  trained on the unedited corpus: gain 0.
-
-## 8. Verification
-
-There is no central compute. Scores come from **verifiers**: volunteers who run
-`stet verify` on a machine with a GPU.
-
-**What a verifier does.** Claims a job (one editor on one round); derives the round from
-its seed; runs the editor in a sandbox; applies the script, trains and grades with the
-trusted harness; signs the result and uploads it.
-
-**Sandbox.** Only the edit phase is untrusted code. It runs in a Linux namespace sandbox
-(bubblewrap): no network, read-only filesystem, home directory hidden, a private scratch
-directory, hard limits on time, memory and processes. The editor's only output is the
-edit script. This is not VM-grade isolation and the docs say so; a dedicated account or
-machine is recommended.
-
-**Why trust a result.**
-- *Assignment is the server's.* A verifier cannot choose which job it gets and never gets
-  its own editor.
-- *Results are sealed.* Nobody can see a job's results until the job settles, and a
-  verifier never knows whether its job is also being run by someone else. Copying is
-  impossible and fabrication is a gamble.
-- *Everyone proves themselves every round.* A verifier's first job in each round is the
-  baseline. Its corpus hash, exam hash and loss must match the round's consensus, or its
-  results for that round are held.
-- *Adaptive replication.* New verifiers are always paired with another. After a streak of
-  agreements they are spot-checked at random. One disagreement resets the streak.
-- *Anchors.* A few maintainer-designated verifiers settle disputes, and audit at least two
-  rounds of any editor before it can hold a record.
-- *Everything is reproducible.* Editors, seeds, exam and harness are public. Anyone can
-  re-run any score, and a refutation is a first-class result.
-
-## 9. Why anyone would take part
-
-- **One number that means something.** "My editor makes raw web text worth 2.4× more."
-- **Numbered records** with a named technique each, and a chart of the record over time.
-- **Everything is forkable.** Editors are public once they have run. `stet fork` starts you
-  from any of them, and lineage is credited on the leaderboard.
-- **A verifier leaderboard** counting validated jobs only (total and recent), with
-  agreement streaks.
-- **Verify to jump the queue.** Nobody pays to enter, but entries from people who have
-  verified for others are run first.
-- **Built for coding agents.** `stet init` drops an `AGENTS.md`, and the practice loop is a
-  single command with machine-readable output.
-
-## 10. Threat model
-
-| Attack | Defence |
-|---|---|
-| Tune an editor to a known corpus or exam | Official corpus and exam are drawn after commit, from a pool the editor was not developed on |
-| Ship a canned dataset, ignore the corpus | Ink budget; bundle size cap |
-| Smuggle exam text into training | Exam-overlapping corpus documents removed; ink is checked for exam overlap; editors are public |
-| Editor reads the exam, phones home, tampers with the trainer | Sandbox: no network, no exam on disk, script-only output, trusted grader |
-| Verifier fabricates or inflates a score | Sealed results, server assignment, baseline-per-round, replication, anchor audits |
-| Verifier copies someone else's answer | Results sealed until settled |
-| Many accounts to self-verify | Server assignment, GitHub-linked identities, anchors audit every record |
-| Resubmit the leader hoping for a lucky draw | Five shared rounds and a paired test |
-| Mine noise with many near-identical entries | One new editor per account per round; ratings regress as rounds accumulate |
-| Flood the queue | Rate limits; verified-work priority |
-
-## 11. What we do not know yet, and how Stet finds out
-
-- **Noise.** Run-to-run and cross-GPU variance of the exam loss is measured before launch
-  and published; tolerances and the record test are set from it.
-- **Scale transfer.** Published evidence says coarse data rankings transfer across model
-  scale and fine ones are fragile. Each season, the top editors are re-run at the next
-  scale up and the rank correlation is published.
-- **Is the exam the right target?** Gains are reported per source, and periodically on
-  sources the exam does not contain, to check that editors are learning "good data" and
-  not "data that looks like these six sources".
-- **Reference hardware.** Time limits were calibrated on the hardware available to the
-  maintainer; the reference constants are provisional until measured on an RTX 4090.
-
-## 12. Not in scope
-
-Building the best dataset. Distilling a frontier model. Changing the student. Stet exists
-to elicit editors.
+Two findings from that literature shaped the design. On held-out text from the same pool,
+careful selection is almost indistinguishable from random, which is why the exam is curated
+text from elsewhere. And run-to-run noise at this scale is large enough to mislead, which
+is why every comparison here is paired on shared rounds and the record needs a margin.

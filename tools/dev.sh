@@ -21,9 +21,8 @@ if [ ! -x "$DDB" ]; then
 fi
 
 # The CLI wheel the site's installer hands out, and the exam pack the CLI downloads.
-if ! ls "$DEV"/files/stet_cli-*.whl >/dev/null 2>&1; then
-  (cd "$ROOT" && uv build --wheel -o "$DEV/files" >/dev/null)
-fi
+rm -f "$DEV"/files/stet_cli-*.whl
+(cd "$ROOT" && uv build --wheel -o "$DEV/files" >/dev/null 2>&1)
 EXAM="${STET_CACHE:-$HOME/.cache/stet}/exam/exam-s0.jsonl.zst"
 if [ -f "$EXAM" ] && [ ! -f "$DEV/data/blobs/files/exam-s0.jsonl.zst" ]; then
   cp "$EXAM" "$DEV/data/blobs/files/"
@@ -47,5 +46,6 @@ STET_DOCS_DIR="$ROOT/docs" \
 STET_AGENTS_FILE="$ROOT/src/stet/templates/AGENTS.md" \
 STET_SCALE="${STET_SCALE:-nano}" \
 STET_ROUND_INTERVAL="${STET_ROUND_INTERVAL:-10m}" \
+STET_ANCHOR_PATIENCE="${STET_ANCHOR_PATIENCE:-20s}" \
 STET_CRAWL="${STET_CRAWL:-CC-MAIN-2026-43:662f8425bc1e6211d388f8ed0a375835d96ffa277469200053ff3fbbd51db46f:100000}" \
 ./stet-server

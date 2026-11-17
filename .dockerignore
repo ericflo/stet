@@ -1,0 +1,11 @@
+.git
+.venv
+.dev
+runs
+**/__pycache__
+**/.pytest_cache
+**/.ruff_cache
+server/stet-server
+server/server
+server/files
+dist

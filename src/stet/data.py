@@ -116,13 +116,20 @@ def round_shards(rnd: Round, scale: Scale, quiet: bool = False) -> list[Shard]:
     return [pool[i] for i in rnd.shard_indices(scale, len(pool))]
 
 
+def shard_path_of(shard: Shard) -> Path:
+    """Where a pool file is (or would be) cached."""
+    if shard.sha256:
+        return cache_dir() / "pool" / f"{shard.sha256}.jsonl.zst"
+    name = hashlib.sha256(shard.url.encode()).hexdigest()[:32]
+    return cache_dir() / "pool" / "wet" / f"{name}.warc.wet.gz"
+
+
 def shard_path(shard: Shard, quiet: bool = False) -> Path:
     if shard.sha256:
-        return fetch([shard.url], shard.sha256, cache_dir() / "pool" / f"{shard.sha256}.jsonl.zst", shard.path, quiet)
+        return fetch([shard.url], shard.sha256, shard_path_of(shard), shard.path, quiet)
     # Crawl files are not listed with hashes. They are gzip, which carries its own checksum,
     # and the built corpus's sha256 is compared across verifiers.
-    name = hashlib.sha256(shard.url.encode()).hexdigest()[:32]
-    return fetch([shard.url], "", cache_dir() / "pool" / "wet" / f"{name}.warc.wet.gz", shard.path.rsplit("/", 1)[-1], quiet)
+    return fetch([shard.url], "", shard_path_of(shard), shard.path.rsplit("/", 1)[-1], quiet)
 
 
 def read_dclm(path: Path):
@@ -381,7 +388,38 @@ def build_corpus(rnd: Round, scale: Scale, dest: Path, quiet: bool = False) -> P
     (tmp / "meta.json").write_text(json.dumps(meta, indent=1))
     shutil.rmtree(dest, ignore_errors=True)
     tmp.replace(dest)
+    if rnd.kind == "official" and kind == "cc-wet" and os.environ.get("STET_KEEP_DOWNLOADS") != "1":
+        # An official round's files are a random handful out of a hundred thousand and will
+        # not be drawn again. The corpus is built; the downloads are dead weight.
+        for shard in shards:
+            shard_path_of(shard).unlink(missing_ok=True)
     return dest
+
+
+def mark_verified(rnd: Round) -> None:
+    """Note that a round is in the cache because `stet verify` graded it, not because you asked for it."""
+    d = cache_dir() / "rounds" / rnd.id
+    d.mkdir(parents=True, exist_ok=True)
+    (d / ".verified").touch()
+
+
+def prune_verified(rnd: Round, keep: int = 3) -> int:
+    """Delete the cached rounds `stet verify` fetched, except the newest few. Returns bytes freed.
+
+    A verifier left running would otherwise fill its disk at a few gigabytes a round.
+    Rounds you fetched yourself (`stet run --round ...`) are left alone.
+    """
+    freed = 0
+    for d in (cache_dir() / "rounds").glob(f"{rnd.season.id}-o*"):
+        try:
+            index = int(d.name.rsplit("-o", 1)[1])
+        except ValueError:
+            continue
+        if index > rnd.index - keep or not (d / ".verified").exists():
+            continue
+        freed += sum(f.stat().st_size for f in d.rglob("*") if f.is_file())
+        shutil.rmtree(d, ignore_errors=True)
+    return freed
 
 
 # --- exam ---------------------------------------------------------------------------------

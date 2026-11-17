@@ -52,8 +52,8 @@
       <div class="s">{{with $d.Next}}next draw <span data-until="{{.DrawAt}}">{{ago .DrawAt}}</span>{{else}}no draw scheduled yet{{end}}</div>
     </div>
     <div class="cell">
-      <span class="eyebrow">Volunteer GPU time</span>
-      <div class="v count">{{f1 $d.GPUHours}}<small>hours</small></div>
+      <span class="eyebrow">GPU time given</span>
+      <div class="v count">{{gpunum $d.GPUHours}}<small>{{gpuunit $d.GPUHours}}</small></div>
       <div class="s">{{$d.Active}} {{plural $d.Active "verifier" "verifiers"}} in the last two weeks</div>
     </div>
   </div>
@@ -175,17 +175,17 @@
         <h2 style="font-size:clamp(30px,3.6vw,44px)">Got a GPU? Keep it honest.</h2>
         <p class="lead" style="margin-top:14px">Stet has no cluster. Scores are checked by people running one command on the machine they already have. It runs none of the entrants' code: it downloads an edit script, trains the student, reports the loss.</p>
         <div class="cmd" style="margin:20px 0"><pre><span class="p">$ </span><span data-copy-text>stet verify</span></pre><button type="button" data-copy>copy</button></div>
-        <p class="muted" style="font-size:16px">After {{$d.TrustAfter}} grades that match a trusted verifier's, yours start to count on their own. Verifiers' own entries go to the front of the queue. <a href="/docs/verifying">How verifying works →</a></p>
+        <p class="muted" style="font-size:16px">After {{$d.TrustAfter}} grades that match a trusted verifier's, yours start to count on their own. Verifiers' own entries go to the front of the queue. <a href="/docs/verifying" style="white-space:nowrap">How verifying works →</a></p>
       </div>
       <div class="table-wrap">
         {{if $d.Verifiers}}
         <table>
-          <thead><tr><th>Verifier</th><th class="r">Checked</th><th class="r hide-s">GPU hours</th><th class="hide-s">Machine</th></tr></thead>
+          <thead><tr><th>Verifier</th><th class="r">Checked</th><th class="r hide-s">GPU time</th><th class="hide-s">Machine</th></tr></thead>
           <tbody>
             {{range $d.Verifiers}}<tr>
               <td><a class="name" href="/u/{{.Handle}}">{{.Handle}}</a>{{if .Anchor}}<span class="tag blue">anchor</span>{{else if .Trusted}}<span class="tag green">trusted</span>{{end}}</td>
               <td class="r num">{{.Validated}}</td>
-              <td class="r num hide-s">{{f1 .GPUHours}}</td>
+              <td class="r num hide-s">{{gpunum .GPUHours}} {{gpuunit .GPUHours}}</td>
               <td class="hide-s muted" style="font-size:14.5px">{{.GPU}}</td>
             </tr>{{end}}
           </tbody>

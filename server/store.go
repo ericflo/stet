@@ -677,6 +677,24 @@ func (st *Store) commit(ctx context.Context, objects map[string]any) error {
 	return errUnavailable
 }
 
+// sync re-reads storage if another server has written to it. One server writes in normal
+// running, but during a deploy the old one and the new one overlap for a few seconds, and
+// this is what stops the old one answering from what it remembers.
+func (st *Store) sync(ctx context.Context) {
+	rev, err := st.kv.Revision(ctx)
+	if err != nil {
+		slog.Warn("could not ask the database for its revision", "err", err)
+		return
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	// Only ever forwards: a commit of our own may have landed since the question was asked.
+	if rev > st.rev || st.stale {
+		slog.Info("the database moved on; reading it again", "ours", st.rev, "theirs", rev)
+		st.reload(ctx)
+	}
+}
+
 // flush writes out changes that were waiting for company.
 func (st *Store) flush(ctx context.Context) {
 	st.mu.Lock()

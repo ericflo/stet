@@ -89,6 +89,7 @@ func (a *App) refreshCrawl(ctx context.Context) {
 
 // tick advances everything that moves on its own. Safe to call at any time.
 func (a *App) tick(ctx context.Context) {
+	a.st.sync(ctx)
 	a.refreshCrawl(ctx)
 	a.st.update(ctx, func(tx *Tx) error {
 		s := tx.s

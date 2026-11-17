@@ -10,6 +10,7 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -119,6 +120,7 @@ func (s *Site) mount(mux *http.ServeMux) {
 	mux.HandleFunc("GET /{$}", s.home)
 	mux.HandleFunc("GET /leaderboard", s.leaderboard)
 	mux.HandleFunc("GET /editors/{ref}", s.editor)
+	mux.HandleFunc("GET /editors/{handle}/{name}", s.editorByName)
 	mux.HandleFunc("GET /rounds", s.rounds)
 	mux.HandleFunc("GET /rounds/{id}", s.round)
 	mux.HandleFunc("GET /verifiers", s.verifiersPage)
@@ -298,6 +300,21 @@ func deref(p *float64) float64 {
 
 // multText writes a data multiplier: "1.42×", or ">8×" when the gain runs off the end of
 // the measured curve.
+// gpuTime writes an amount of GPU time in the unit that suits its size.
+func gpuTime(hours float64) [2]string {
+	switch minutes := math.Round(hours * 60); {
+	case minutes < 1:
+		return [2]string{"0", "minutes"}
+	case minutes == 1:
+		return [2]string{"1", "minute"}
+	case minutes < 90:
+		return [2]string{strconv.Itoa(int(minutes)), "minutes"}
+	case hours < 100:
+		return [2]string{strconv.FormatFloat(hours, 'f', 1, 64), "hours"}
+	}
+	return [2]string{comma(int64(math.Round(hours))), "hours"}
+}
+
 func multText(p *float64, capped bool) string {
 	if p == nil {
 		return "—"
@@ -328,6 +345,8 @@ func (s *Site) funcs() template.FuncMap {
 		"datetime": func(ts int64) string { return time.Unix(ts, 0).UTC().Format("2 Jan 2006, 15:04 UTC") },
 		"iso":      func(ts int64) string { return time.Unix(ts, 0).UTC().Format(time.RFC3339) },
 		"f1":       func(v float64) string { return strconv.FormatFloat(v, 'f', 1, 64) },
+		"gpunum":   func(hours float64) string { return gpuTime(hours)[0] },
+		"gpuunit":  func(hours float64) string { return gpuTime(hours)[1] },
 		"f2":       func(v float64) string { return strconv.FormatFloat(v, 'f', 2, 64) },
 		"f3":       func(v float64) string { return strconv.FormatFloat(v, 'f', 3, 64) },
 		"gain":     func(v float64) string { return signed(v, 3) },
@@ -654,6 +673,22 @@ func linkTo(s *State, e *Editor) editorLink {
 	return editorLink{ID: e.ID, Name: e.Name, Version: e.Version, Owner: s.owner(e).Handle, Status: e.Status, At: e.CreatedAt}
 }
 
+// editorByName sends /editors/<handle>/<name> to that editor's newest version. An editor's
+// own address is its content hash, which never changes meaning.
+func (s *Site) editorByName(w http.ResponseWriter, r *http.Request) {
+	id := ""
+	s.app.st.view(func(st *State) {
+		if e := findEditor(st, r.PathValue("handle")+"/"+r.PathValue("name")); e != nil && e.Public {
+			id = e.ID
+		}
+	})
+	if id == "" {
+		s.notFound(w, r, "No such editor. It may not have run yet: editors are published when they first run.")
+		return
+	}
+	http.Redirect(w, r, "/editors/"+id[:12], http.StatusFound)
+}
+
 func (s *Site) editor(w http.ResponseWriter, r *http.Request) {
 	a := s.app
 	b := a.board()
@@ -860,6 +895,8 @@ func (s *Site) docList() []docSpec {
 	return out
 }
 
+var docLinkRe = regexp.MustCompile(`href="(?:[./A-Za-z]*/)?([A-Z]+\.md)(#[^"]*)?"`)
+
 func (s *Site) loadDoc(spec docSpec) (*docPage, error) {
 	p := s.docPath(spec.File)
 	st, err := os.Stat(p)
@@ -881,6 +918,16 @@ func (s *Site) loadDoc(spec docSpec) (*docPage, error) {
 	}
 	out := strings.ReplaceAll(buf.String(), "<table>", `<div class="table-wrap"><table>`)
 	out = strings.ReplaceAll(out, "</table>", "</table></div>")
+	// The handbook's pages link to each other by file name, which is what works on GitHub.
+	out = docLinkRe.ReplaceAllStringFunc(out, func(m string) string {
+		parts := docLinkRe.FindStringSubmatch(m)
+		for _, d := range docSpecs {
+			if d.File == parts[1] {
+				return `href="/docs/` + d.Slug + parts[2] + `"`
+			}
+		}
+		return m
+	})
 	d := &docPage{Spec: spec, HTML: template.HTML(out), ModTime: st.ModTime()}
 	s.docs[spec.Slug] = d
 	return d, nil

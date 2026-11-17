@@ -1,0 +1,6 @@
+# The control. https://www.stetrun.com
+name = "identity"
+description = "Every document, in the order it was drawn. This is the unedited corpus, entered as an editor so that the board has a zero."
+technique = "nothing"
+entry = "python editor.py"
+license = "MIT"

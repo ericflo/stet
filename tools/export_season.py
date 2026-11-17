@@ -11,7 +11,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from stet.spec import HARNESS_VERSION, load_season, official_round, prf_u64  # noqa: E402
+from stet.spec import HARNESS_VERSION, load_season, official_round, prf_u64
 
 
 def export(season_id: str = "s0") -> dict:

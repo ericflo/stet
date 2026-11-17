@@ -36,7 +36,7 @@ def gpt2_bytes_to_unicode() -> dict[int, str]:
             bs.append(b)
             cs.append(256 + n)
             n += 1
-    return dict(zip(bs, map(chr, cs)))
+    return dict(zip(bs, map(chr, cs), strict=True))
 
 
 def main():

@@ -227,7 +227,8 @@ func sourceChart(sources []string, base, edited map[string]float64) template.HTM
 	if len(base) == 0 || len(edited) == 0 {
 		return ""
 	}
-	const w, rowH, left, right, top, bottom = 720, 34, 150, 86, 30, 30
+	// Drawn at the width of the half-page column it sits in, so the text is not scaled down.
+	const w, rowH, left, right, top, bottom = 500, 32, 112, 66, 30, 28
 	h := top + bottom + rowH*len(sources)
 	lo, hi := math.Inf(1), math.Inf(-1)
 	for _, s := range sources {
@@ -254,7 +255,6 @@ func sourceChart(sources []string, base, edited map[string]float64) template.HTM
 	}
 	b.f(`<circle class="hollow" cx="%d" cy="12" r="4.5"/><text x="%d" y="16">unedited</text>`, left+6, left+16)
 	b.f(`<circle class="dot" cx="%d" cy="12" r="4.5"/><text x="%d" y="16">this editor</text>`, left+96, left+106)
-	b.f(`<text x="%d" y="16" text-anchor="end">exam loss, nats per token (left is better)</text>`, w-right)
 	for i, s := range sources {
 		cy := float64(top + rowH*i + rowH/2)
 		bv, ev := base[s], edited[s]
@@ -324,7 +324,7 @@ func curveChart(curve [][]float64) template.HTML {
 	if len(pts) < 3 {
 		return ""
 	}
-	const w, h, left, right, top, bottom = 720, 230, 46, 16, 22, 28
+	const w, h, left, right, top, bottom = 500, 250, 44, 14, 24, 28
 	lo, hi := math.Inf(1), math.Inf(-1)
 	for _, p := range pts[1:] { // the first step is the untrained model: off the scale and uninformative
 		lo, hi = math.Min(lo, p[1]), math.Max(hi, p[1])

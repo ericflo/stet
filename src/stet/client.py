@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
 import os
 import shutil
@@ -52,6 +53,29 @@ def request(method: str, path: str, body=None, key: Key | None = None, raw: bool
     except urllib.error.URLError as e:
         raise ApiError(0, f"cannot reach {api_base()}: {e.reason}") from None
     return payload if raw else json.loads(payload or b"{}")
+
+
+def report(path: str, payload: dict, key: Key, log=None) -> dict:
+    """Send a finished job's result, and keep trying while the server is away.
+
+    A result is minutes of GPU time. The server answers 503 when it could not make a write
+    durable, in which case the write may or may not have happened; sending the same report
+    again is always safe, and "already reported" means the first one did land.
+    """
+    delay = 5
+    for attempt in range(40):
+        try:
+            return request("POST", path, payload, key=key, timeout=600)
+        except ApiError as e:
+            if e.status == 409 and attempt > 0 and "already" in str(e):
+                return {"status": "recorded"}
+            if e.status not in (0, 429, 500, 502, 503, 504):
+                raise
+            if log:
+                log(f"the server is not answering ({e}); trying again in {delay}s")
+            time.sleep(delay)
+            delay = min(120, delay * 2)
+    raise ApiError(0, "gave up reporting after many attempts")
 
 
 def need_key() -> Key:
@@ -125,11 +149,11 @@ def fetch_round(season, index: int):
 
 
 def table(rows: list[list[str]], header: list[str], right: tuple[int, ...] = ()) -> str:
-    cols = list(zip(*([header] + rows))) if rows else [[h] for h in header]
+    cols = list(zip(*([header] + rows), strict=True)) if rows else [[h] for h in header]
     widths = [max(len(str(c)) for c in col) for col in cols]
     out = []
     for r, row in enumerate([header] + rows):
-        cells = [str(c).rjust(w) if i in right else str(c).ljust(w) for i, (c, w) in enumerate(zip(row, widths))]
+        cells = [str(c).rjust(w) if i in right else str(c).ljust(w) for i, (c, w) in enumerate(zip(row, widths, strict=True))]
         out.append("  ".join(cells).rstrip())
         if r == 0:
             out.append("  ".join("-" * w for w in widths))
@@ -220,6 +244,23 @@ def cmd_whoami(args):
     sys.stderr.write(f"editors   {len(me['editors'])}\n")
 
 
+def cmd_key(args):
+    """Print this machine's public key, making one if there is none. Contacts nobody."""
+    key = load_key()
+    if key is None:
+        key = create_key()
+        key.save()
+        sys.stderr.write(f"Created a new key at {key_path()}\n")
+    print(key.public_hex)
+
+
+def cmd_draw(args):
+    """Anchors only: bring the next draw forward to the next moment on the draw grid."""
+    r = request("POST", "/api/v1/admin/draw", {}, key=need_key(), timeout=300)
+    rd = r["round"]
+    sys.stderr.write(f"{rd['id']}: {rd['status']}, draw {ago(rd['draw_at'])}\n")
+
+
 # --- entries --------------------------------------------------------------------------------
 
 
@@ -303,11 +344,18 @@ def cmd_leaderboard(args):
         ]
         for e in r["editors"][: args.top]
     ]  # fmt: skip
-    if not rows:
-        sys.stderr.write("No rated editors yet. Be the first: `stet submit`.\n")
-        return
-    print(table(rows, ["#", "editor", "multiplier", "mean gain", "", "rounds", "technique"], right=(0, 2, 3, 5)))
-    sys.stderr.write("\n★ record holder   > beyond the end of the measured reference curve\n")
+    if rows:
+        print(table(rows, ["#", "editor", "multiplier", "mean gain", "", "rounds", "technique"], right=(0, 2, 3, 5)))
+        sys.stderr.write("\n★ record holder   > beyond the end of the measured reference curve\n")
+    qualifying = [
+        [editor_label(e), fmt_gain(e.get("rating")), f"{e['rounds']} of {r.get('rated_rounds', 3)}", e.get("technique") or ""]
+        for e in r.get("provisional", [])[: args.top]
+    ]
+    if qualifying:
+        sys.stderr.write(("\n" if rows else "") + "Qualifying (ranked once they have enough rounds):\n")
+        print(table(qualifying, ["editor", "mean gain so far", "rounds", "technique"], right=(1, 2)))
+    if not rows and not qualifying:
+        sys.stderr.write("No editors yet. Be the first: `stet submit`.\n")
 
 
 def cmd_rounds(args):
@@ -318,7 +366,7 @@ def cmd_rounds(args):
         return
     rows = [
         [x["id"], x["status"], ago(x.get("drawn_at") or x.get("draw_at")), str(x.get("entries", "")),
-         f"{x['baseline_loss']:.4f}" if x.get("baseline_loss") else "", x.get("crawl") or ""]
+         f"{x['baseline_loss']:.4f}" if x.get("baseline_loss") else "", x.get("crawl_id") or ""]
         for x in r["rounds"]
     ]  # fmt: skip
     print(table(rows, ["round", "status", "drawn", "entries", "baseline", "crawl"], right=(3, 4)))
@@ -425,18 +473,34 @@ def check_announcement(season, rnd) -> None:
         )
 
 
-def _grade_job(job, season, scale, device, key, out, work: Path) -> tuple[dict, dict]:
+def unzstd(blob: bytes, limit: int) -> bytes:
+    """Decompress, reading at most one byte past `limit`: a small download cannot expand without bound."""
     import zstandard
 
+    reader = zstandard.ZstdDecompressor().stream_reader(io.BytesIO(blob))
+    parts, got = [], 0
+    while got <= limit:
+        chunk = reader.read(min(1 << 20, limit + 1 - got))
+        if not chunk:
+            break
+        parts.append(chunk)
+        got += len(chunk)
+    return b"".join(parts)
+
+
+def _grade_job(job, season, scale, device, key, out, work: Path) -> tuple[dict, dict]:
+    from . import data
     from .pipeline import baseline, grade_round
 
     rnd = round_from_api(season, job["round"])
     check_announcement(season, rnd)
+    data.mark_verified(rnd)
+    data.prune_verified(rnd)
     base = baseline(rnd, scale, device, progress=out.progress("baseline"), log=lambda m: out.line("", out.dim("baseline " + m)))
     want = job["script"]["sha256"]
     blob = request("GET", f"/api/v1/scripts/{want}", raw=True, timeout=600)
     limit = int(season.raw["script"]["max_bytes"])
-    raw = zstandard.ZstdDecompressor().decompressobj().decompress(blob, max_length=limit + 1)
+    raw = unzstd(blob, limit)
     if len(raw) > limit or hashlib.sha256(raw).hexdigest() != want:
         raise OSError("the script the server sent does not match its hash")
     work.mkdir(parents=True, exist_ok=True)
@@ -458,6 +522,8 @@ def _edit_job(job, season, scale, key, out, work: Path, sandbox: str) -> dict:
 
     rnd = round_from_api(season, job["round"])
     check_announcement(season, rnd)
+    data.mark_verified(rnd)
+    data.prune_verified(rnd)
     e = job["editor"]
     blob = request("GET", f"/api/v1/editors/{e['id']}/bundle", key=key, raw=True, timeout=600)
     if hashlib.sha256(blob).hexdigest() != e["id"]:
@@ -519,7 +585,7 @@ def cmd_verify(args):
     out.line("", out.dim("Grading published edit scripts with the fixed trainer. No one else's code runs on this machine." if not args.edits
                          else "Running edit jobs in the sandbox, and grading."))  # fmt: skip
     hello = {"harness": __version__, "season": season.id, "season_digest": season.digest, "hardware": hw, "edits": bool(args.edits), "sandbox": sandbox}
-    done = 0
+    done = failures = 0
     idle = False
     while True:
         try:
@@ -544,7 +610,7 @@ def cmd_verify(args):
             continue
         idle = False
         work = cache_dir() / "verify" / str(job["id"])
-        shutil.rmtree(work, ignore_errors=True)
+        shutil.rmtree(cache_dir() / "verify", ignore_errors=True)  # anything a killed run left behind
         e = job["editor"]
         out.line("", "")
         out.line(job["kind"], f"job {job['id']} · {editor_label(e)} · round {job['round']['id']}")
@@ -564,18 +630,22 @@ def cmd_verify(args):
         except (HarnessError, Exception) as err:  # our problem, not the editor's: hand the job back untouched
             _release(job, key, f"{type(err).__name__}: {err}"[:300])
             shutil.rmtree(work, ignore_errors=True)
-            out.line("", out.bad(f"could not run this job ({err}); handed it back"))
-            if args.once:
+            out.line("", out.bad(f"could not run this job ({type(err).__name__}: {err}); handed it back"))
+            failures += 1
+            if args.once or failures >= 3:
+                # Three in a row is this machine, not the jobs. Stop rather than churn through the queue.
+                sys.stderr.write("stet: stopping, because jobs keep failing on this machine. `stet doctor` checks the setup.\n")
                 sys.exit(1)
             time.sleep(30)
             continue
         try:
-            ack = request("POST", path, payload, key=key, timeout=600)
+            ack = report(path, payload, key, log=lambda m: out.line("", out.dim(m)))
         except ApiError as err:
             out.line("", out.bad(f"the server did not accept the result: {err}"))
             ack = {}
         shutil.rmtree(work, ignore_errors=True)
         done += 1
+        failures = 0
         if job["kind"] == "edit":
             ed = payload["edit"]
             out.line("result", f"{ed['status']} in {ed['seconds']:.0f}s" + (f" · script {payload['script_sha256'][:12]} ({payload['script_size'] / 1e6:.1f} MB)" if payload.get("script_sha256") else f" · no script: {ed.get('reason', '')}"))
@@ -636,6 +706,12 @@ def add_commands(sub) -> None:
     p.add_argument("editor", help="an editor id, or handle/name")
     p.add_argument("dest", nargs="?")
     p.set_defaults(fn=cmd_fork)
+
+    p = sub.add_parser("key", help="print this machine's public key")
+    p.set_defaults(fn=cmd_key)
+
+    p = sub.add_parser("draw")  # anchors only; not listed in the help
+    p.set_defaults(fn=cmd_draw)
 
     p = sub.add_parser("verify", help="lend your GPU: grade published edit scripts for the leaderboard")
     p.add_argument("--once", action="store_true", help="do one job and exit")

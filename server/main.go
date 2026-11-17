@@ -20,6 +20,9 @@ import (
 	"time"
 )
 
+// revision is the commit the binary was built from. The image build sets it.
+var revision = "dev"
+
 type Config struct {
 	Addr          string
 	BaseURL       string          // the website, e.g. https://www.stetrun.com
@@ -44,6 +47,7 @@ type Config struct {
 	RatedRounds      int // rounds before an editor is ranked
 	SpotRate         float64
 	Lease            time.Duration
+	AnchorPatience   time.Duration // how long an anchor leaves a grade to volunteers who are around
 	FixedCrawl       *Crawl
 	RequireGithub    bool
 	GithubMinAgeDays int
@@ -111,6 +115,7 @@ func loadConfig(season *Season) (Config, error) {
 		RatedRounds:      envInt("STET_RATED_ROUNDS", 3),
 		SpotRate:         0.25,
 		Lease:            envDuration("STET_LEASE", 3*time.Hour),
+		AnchorPatience:   envDuration("STET_ANCHOR_PATIENCE", 45*time.Minute),
 		RequireGithub:    envBool("STET_REQUIRE_GITHUB", !dev),
 		GithubMinAgeDays: envInt("STET_GITHUB_MIN_AGE_DAYS", 30),
 		Dev:              dev,
@@ -254,7 +259,7 @@ func main() {
 		srv.Shutdown(shut)
 		app.st.flush(shut)
 	}()
-	slog.Info("listening", "addr", cfg.Addr, "season", season.ID, "scale", cfg.Scale, "site", cfg.BaseURL, "api", cfg.APIURL,
+	slog.Info("listening", "revision", revision, "addr", cfg.Addr, "season", season.ID, "scale", cfg.Scale, "site", cfg.BaseURL, "api", cfg.APIURL,
 		"records", kv.Describe(), "files", blobs.Describe(), "anchors", len(cfg.AnchorKeys), "dev", cfg.Dev)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		slog.Error("server", "err", err)

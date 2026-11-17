@@ -59,6 +59,9 @@ type KV interface {
 	// Commit applies the writes atomically if the database is still at ifRevision, and
 	// returns the new revision. errConflict means it was not, and nothing was written.
 	Commit(ctx context.Context, ifRevision int64, writes []KVWrite) (int64, error)
+	// Revision is the database's current revision: a cheap way to ask whether anyone
+	// else has written.
+	Revision(ctx context.Context) (int64, error)
 	Describe() string
 }
 
@@ -102,6 +105,12 @@ func (m *memKV) Load(ctx context.Context, scans []KVScan) ([][]KVItem, int64, er
 		}
 	}
 	return out, m.rev, nil
+}
+
+func (m *memKV) Revision(ctx context.Context) (int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.rev, nil
 }
 
 func (m *memKV) Commit(ctx context.Context, ifRevision int64, writes []KVWrite) (int64, error) {
@@ -335,6 +344,18 @@ attempt:
 		return out, revision, nil
 	}
 	return nil, 0, errors.New("the database kept changing while it was being read")
+}
+
+func (d *ddbKV) Revision(ctx context.Context) (int64, error) {
+	var p struct {
+		Revision int64 `json:"revision"`
+	}
+	// A strong read of nothing much: durable-db answers it with one HEAD of its bucket.
+	body := map[string]any{"consistency": "strong", "keys": []string{"meta"}}
+	if err := d.post(ctx, "/read", body, &p); err != nil {
+		return 0, err
+	}
+	return p.Revision, nil
 }
 
 func (d *ddbKV) Commit(ctx context.Context, ifRevision int64, writes []KVWrite) (int64, error) {

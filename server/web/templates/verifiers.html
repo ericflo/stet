@@ -17,7 +17,7 @@
   <div class="table-wrap" id="verifiers" data-live>
     {{if $d.Verifiers}}
     <table>
-      <thead><tr><th>#</th><th>Verifier</th><th class="r" title="Grades that agreed with a trusted verifier's, in the last two weeks">Last 14 days</th><th class="r">All time</th><th class="r hide-s">Streak</th><th class="r hide-s">GPU hours</th><th class="hide-s">Machine</th><th class="hide-s">Seen</th></tr></thead>
+      <thead><tr><th>#</th><th>Verifier</th><th class="r" title="Grades that agreed with a trusted verifier's, in the last two weeks">Last 14 days</th><th class="r">All time</th><th class="r hide-s">Streak</th><th class="r hide-s">GPU time</th><th class="hide-s">Machine</th><th class="hide-s">Seen</th></tr></thead>
       <tbody>
         {{range $i, $v := $d.Verifiers}}<tr>
           <td class="rank">{{add $i 1}}</td>
@@ -25,7 +25,7 @@
           <td class="r num">{{$v.Recent}}</td>
           <td class="r num">{{$v.Validated}}</td>
           <td class="r num hide-s">{{$v.Streak}}</td>
-          <td class="r num hide-s">{{f1 $v.GPUHours}}</td>
+          <td class="r num hide-s">{{gpunum $v.GPUHours}} {{gpuunit $v.GPUHours}}</td>
           <td class="hide-s muted" style="font-size:14.5px">{{$v.GPU}}</td>
           <td class="hide-s muted num">{{ago $v.LastSeen}}</td>
         </tr>{{end}}

@@ -3,46 +3,52 @@
 **The model is fixed. The trainer is fixed. The only thing you can touch is the data.**
 
 Stet is an open competition for programs that edit pretraining data. Your *editor* is
-handed raw web text it has never seen and a few minutes on one GPU. It decides what to
-keep, what to cut and in what order. A small language model is trained on the result and
-sits an exam. Lower exam loss wins.
+handed raw web pages it has never seen and a few minutes on one GPU. It decides what to
+keep, what to cut, and in what order. A small language model is trained on the result and
+sits an exam. Lowest loss wins.
 
-*stet*: the proofreader's mark for "let it stand".
+[www.stetrun.com](https://www.stetrun.com) · *stet*: the proofreader's mark for "let it stand".
 
-## Try it
+## Enter
 
 ```sh
 curl -fsSL https://www.stetrun.com/install.sh | sh
 stet init my-editor && cd my-editor
-stet run            # edit, train, grade a practice round (about a minute on a GPU)
+stet run                  # edit, train, grade a practice round: about a minute on a GPU
 stet login && stet submit
 ```
 
-Working with a coding agent? `stet init` drops an `AGENTS.md` with the whole brief.
+Using a coding agent? Tell it: *Read https://www.stetrun.com/AGENTS.md and enter Stet.*
 
 ## Lend a GPU
 
-Scores come from volunteers, not a central cluster.
+Scores are computed by volunteers. Grading runs none of the entrants' code.
 
 ```sh
 stet login && stet verify
 ```
 
-Editors run in a sandbox with no network. Validated work is credited on the verifier
-leaderboard, and your own entries are run first.
+## How it stays honest
 
-## How it works
+- **Draw after commit.** A public randomness beacon picks each round's corpus from the
+  newest Common Crawl after entries are locked.
+- **Almost no ink.** 99.9% of what the student reads must be copied byte for byte from the
+  round's corpus.
+- **Edit here, grade anywhere.** Editors run on the organisers' machines and publish an
+  edit script, which is plain data. Anyone's GPU can re-grade it.
+- **Paired scores.** Gain is measured against the unedited corpus on the same round, and
+  the record needs a margin over shared rounds.
+- **Everything is public.** Editors, scripts, seeds, exam, harness.
 
-- **Commit, then draw.** Editors are uploaded before a public randomness beacon picks the
-  round's corpus and exam. Nobody can tune to a round, the organisers included.
-- **Fresh data.** Official rounds use the newest Common Crawl crawl. Practice rounds use a
-  different, pinned dataset.
-- **Paired scoring.** Gain = unedited corpus's exam loss minus yours, same round, same
-  initial weights. The headline number is how many times more raw data the model would
-  have needed to do as well.
-- **Replicated verification.** Results are sealed until independent verifiers agree.
-- **Everything is public.** Editors, seeds, exam and harness. Any score can be re-run by
-  anyone, and `stet fork` starts you from any editor on the board.
+## Train a policy on it
+
+```python
+from stet.gym import Env
+
+env = Env(scale="nano")
+obs = env.reset(0)                    # a raw corpus and the task
+reward, info = env.step(edit_script)  # the gain, in nats per token
+```
 
 ## Layout
 
@@ -50,14 +56,14 @@ leaderboard, and your own entries are run first.
 |---|---|
 | `src/stet/` | The harness and CLI (Python) |
 | `server/` | The API and website (Go) |
-| `docs/DESIGN.md` | The design and the reasoning behind it |
-| `docs/EXPERIMENTS.md` | Measurements the rules are based on |
-| `docs/research/` | Prior art and mechanics research |
+| `examples/` | Reference editors: `identity`, `english`, `tidy` |
+| `docs/` | [Rules](docs/RULES.md), [design](docs/DESIGN.md), [verifying](docs/VERIFYING.md), [experiments](docs/EXPERIMENTS.md), [API](docs/API.md), [FAQ](docs/FAQ.md) |
 
 ## Develop
 
 ```sh
-uv venv && uv pip install -e '.[dev]'   # plus a torch build for your machine
-pytest
-cd server && go test ./...
+uv venv && uv pip install -e '.[dev]'   # plus a PyTorch build for your machine
+pytest && ruff check src tests tools examples
+(cd server && go test ./...)
+tools/dev.sh                            # the whole thing locally, on a real durable-db
 ```

@@ -406,11 +406,13 @@ def main(argv=None):
     if not getattr(args, "fn", None):
         ap.print_help()
         return 0
+    from .client import ApiError
+
     try:
         return args.fn(args) or 0
     except KeyboardInterrupt:
         die("interrupted", 130)
-    except OSError as e:
+    except (ApiError, OSError) as e:
         die(str(e))
 
 

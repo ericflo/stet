@@ -49,7 +49,7 @@
     {{end}}
   </div>
   <div class="grid2">
-    {{if $d.SourceChart}}<figure class="figure"><h3>Where the gain comes from</h3>{{$d.SourceChart}}<figcaption>Exam loss on each kind of held-out text. The score is the plain mean of these.</figcaption></figure>{{end}}
+    {{if $d.SourceChart}}<figure class="figure"><h3>Where the gain comes from</h3>{{$d.SourceChart}}<figcaption>Exam loss on each kind of held-out text, in nats per token. Left is better; the score is the plain mean of the six.</figcaption></figure>{{end}}
     {{if $d.CurveChart}}<figure class="figure"><h3>The student, learning from it</h3>{{$d.CurveChart}}<figcaption>Training loss on the edited corpus. Low here is not the goal: an editor can make data easy to fit and useless on the exam.</figcaption></figure>{{end}}
   </div>
   {{end}}
@@ -98,7 +98,7 @@
   </div>
   <p style="margin-top:12px"><a class="pill" href="/api/v1/editors/{{$e.ID}}/bundle">download bundle (.tar.zst)</a></p>
 
-  {{if or $d.Versions $d.Forks}}
+  {{if or (gt (len $d.Versions) 1) $d.Forks}}
   <h2>Lineage</h2>
   {{if gt (len $d.Versions) 1}}<p><span class="eyebrow" style="margin-right:12px">Versions</span>{{range $d.Versions}}<a class="pill" href="/editors/{{short .ID}}">v{{.Version}}{{if eq .ID $e.ID}} · this one{{end}}</a>{{end}}</p>{{end}}
   {{if $d.Forks}}<p><span class="eyebrow" style="margin-right:12px">Forked by</span>{{range $d.Forks}}<a class="pill" href="/editors/{{short .ID}}">{{.Owner}}/{{.Name}} v{{.Version}}</a>{{end}}</p>{{end}}

@@ -1,0 +1,6 @@
+# An afternoon of heuristics: the entry to beat. https://www.stetrun.com
+name = "tidy"
+description = "English prose only, exact duplicates dropped, navigation and boilerplate lines cut out of each page, the best budget's worth kept, shuffled. No model, no GPU."
+technique = "prose-line ranges + dedup + crude quality rank, shuffled"
+entry = "python editor.py"
+license = "MIT"

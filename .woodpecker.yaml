@@ -1,0 +1,130 @@
+# Epsilon's Woodpecker runs this on every push to main: both test suites, then one image.
+when:
+  - evaluate: 'CI_PIPELINE_EVENT == "push" && CI_COMMIT_BRANCH == CI_REPO_DEFAULT_BRANCH'
+
+steps:
+  - name: test-server
+    image: docker.io/library/golang:1.26.10-bookworm@sha256:e0c50aecba3a2edfab18924d493cd9210b73c4746fc5fd5b3bb46e0ec7f0465a
+    commands:
+      - export HOME=/tmp/stet-home GOCACHE=/tmp/stet-go-build GOMODCACHE=/tmp/stet-go-mod GOFLAGS=-buildvcs=false CGO_ENABLED=0
+      - cd server
+      - test -z "$$(gofmt -l .)"
+      - go vet ./...
+      - go build ./...
+      - go test -count=1 ./...
+    backend_options:
+      kubernetes:
+        resources:
+          requests:
+            cpu: 250m
+            memory: 512Mi
+          limits:
+            cpu: "2"
+            memory: 2Gi
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          runAsGroup: 1000
+          fsGroup: 1000
+          fsGroupChangePolicy: OnRootMismatch
+          seccompProfile:
+            type: RuntimeDefault
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+              - ALL
+
+  # The harness without PyTorch: everything that decides what a round and a script are.
+  # Training itself is exercised by the verifiers, on GPUs this cluster does not have.
+  - name: test-harness
+    image: ghcr.io/astral-sh/uv:python3.13-bookworm-slim@sha256:531f855bda2c73cd6ef67d56b733b357cea384185b3022bd09f05e002cd144ca
+    commands:
+      - export HOME=/tmp/stet-home UV_CACHE_DIR=/tmp/stet-uv UV_LINK_MODE=copy
+      - uv venv /tmp/stet-venv
+      - VIRTUAL_ENV=/tmp/stet-venv uv pip install -e '.[dev]'
+      - export PATH=/tmp/stet-venv/bin:$$PATH
+      - ruff check src tests tools examples
+      - python -m pytest -q
+    backend_options:
+      kubernetes:
+        resources:
+          requests:
+            cpu: 250m
+            memory: 512Mi
+          limits:
+            cpu: "2"
+            memory: 2Gi
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          runAsGroup: 1000
+          fsGroup: 1000
+          fsGroupChangePolicy: OnRootMismatch
+          seccompProfile:
+            type: RuntimeDefault
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+              - ALL
+
+  - name: publish-immutable-images
+    image: docker.io/moby/buildkit:v0.34.2-rootless@sha256:c8252268760e1baba80780d63d738ef9f260fb7c7c0973c78494cb9ddd99eda1
+    depends_on:
+      - test-server
+      - test-harness
+    commands:
+      - |-
+        set -eu
+        buildkit_addr=tcp://buildkit.ci-build.svc.cluster.local:1234
+        attempt=0
+        until buildctl --addr "$${buildkit_addr}" debug workers >/dev/null 2>&1; do
+          attempt=$$((attempt + 1))
+          if [ "$${attempt}" -ge 30 ]; then
+            echo "BuildKit did not become ready" >&2
+            exit 1
+          fi
+          sleep 2
+        done
+
+        build_time="$$(date -u -d "@$${CI_PIPELINE_CREATED}" +%Y%m%d%H%M%S)"
+        short_sha="$$(printf '%s' "$${CI_COMMIT_SHA}" | cut -c1-12)"
+        image_tag="main-$${build_time}-$${short_sha}"
+        registry=registry.clouderic.svc.cluster.local:5000
+        cache_ref="$${registry}/stet-build-cache:main"
+
+        buildctl --addr "$${buildkit_addr}" build \
+          --frontend dockerfile.v0 \
+          --local context=. \
+          --local dockerfile=. \
+          --opt filename=docker/Dockerfile \
+          --opt platform=linux/amd64 \
+          --opt "build-arg:STET_REVISION=$${CI_COMMIT_SHA}" \
+          --opt "label:org.opencontainers.image.source=$${CI_REPO_URL}" \
+          --opt "label:org.opencontainers.image.revision=$${CI_COMMIT_SHA}" \
+          --opt "label:org.opencontainers.image.created=$$(date -u -d "@$${CI_PIPELINE_CREATED}" +%Y-%m-%dT%H:%M:%SZ)" \
+          --opt attest:provenance=mode=max \
+          --import-cache "type=registry,ref=$${cache_ref},registry.insecure=true" \
+          --export-cache "type=registry,ref=$${cache_ref},mode=max,registry.insecure=true" \
+          --output "type=image,name=$${registry}/stet:$${image_tag},push=true,registry.insecure=true"
+        printf 'Published %s at immutable tag %s\n' stet "$${image_tag}"
+    backend_options:
+      kubernetes:
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: "1"
+            memory: 1Gi
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          runAsGroup: 1000
+          fsGroup: 1000
+          fsGroupChangePolicy: OnRootMismatch
+          seccompProfile:
+            type: RuntimeDefault
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+              - ALL

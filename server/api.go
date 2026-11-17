@@ -238,7 +238,7 @@ func (a *App) apiSeason(w http.ResponseWriter, r *http.Request) {
 		"qualify_rounds": a.cfg.QualifyRounds, "rated_rounds": a.cfg.RatedRounds, "ladder_size": a.cfg.LadderSize,
 		"beacon": a.season.Beacon, "pools": a.season.Pools, "tolerance": a.tolerance(), "record": a.season.Record,
 		"grade_devices": a.season.GradeDevices, "site": a.cfg.BaseURL, "api": a.cfg.APIURL,
-		"requires_github": a.cfg.RequireGithub,
+		"requires_github": a.cfg.RequireGithub, "server": revision,
 	}
 	if name, version := a.site.wheel(); name != "" {
 		out["cli"] = map[string]any{"version": version, "wheel": a.cfg.APIURL + "/files/" + name}
@@ -280,7 +280,7 @@ func (a *App) apiCreateAccount(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, fail(400, "a handle is 3-24 lowercase letters, digits and single hyphens, starting and ending with a letter or digit"))
 		return
 	}
-	if reservedHandles[handle] {
+	if reservedHandles[handle] && !a.cfg.AnchorKeys[key] { // the organisers' own accounts hold these
 		writeErr(w, fail(409, "that handle is reserved"))
 		return
 	}
@@ -807,7 +807,7 @@ func (a *App) apiClaim(w http.ResponseWriter, r *http.Request) {
 		out["retry_after"] = 60
 		out["message"] = "No work right now."
 		if !acct.reliable() {
-			out["message"] = "No work right now. New verifiers are given entries that a trusted verifier is also grading; more will come with the next round."
+			out["message"] = "No work right now. A new verifier grades entries that a trusted verifier also grades; more will come with the next round."
 		}
 	}
 	writeJSON(w, 200, out)

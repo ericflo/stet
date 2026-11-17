@@ -15,10 +15,23 @@ import random
 import re
 
 from stet.editor import Task
-from stet.editors.english import looks_english
 
 SENTENCE_END = re.compile(r"[.!?][\"')\]]?\s")
-BYTES_PER_TOKEN = 3.3  # rough, for English prose under the season tokenizer
+STOPWORDS = (" the ", " of ", " and ", " to ", " in ", " is ", " that ", " for ")
+# Rough, for English prose under the season tokenizer, and on the generous side: a stream
+# that runs over the budget is cut off, one that falls short repeats from the top.
+BYTES_PER_TOKEN = 3.7
+
+
+def looks_english(text: str) -> bool:
+    sample = text[:3000]
+    if len(sample) < 200:
+        return False
+    letters = sum(c.isascii() and (c.isalpha() or c == " ") for c in sample)
+    if letters / len(sample) < 0.75:
+        return False
+    low = sample.lower()
+    return sum(low.count(w) for w in STOPWORDS) >= max(4, len(sample) // 300)
 
 
 def prose_ranges(text: str, min_copy: int = 64) -> tuple[list[list[int]], int]:
@@ -76,7 +89,7 @@ def edit(task: Task):
     budget_bytes = task.train_tokens * BYTES_PER_TOKEN
     chosen = []
     used = 0
-    for s, i, ranges, kept in scored:
+    for _, i, ranges, kept in scored:
         if used >= budget_bytes:
             break
         chosen.append({"d": i, "k": ranges})

@@ -658,6 +658,77 @@ func TestAFailedEditScoresAsUneditedAndRetiresTheEditor(t *testing.T) {
 	})
 }
 
+func TestAnAnchorGivesVolunteersFirstGo(t *testing.T) {
+	pub, priv := newKey()
+	w := newWorld(t, pub)
+	w.app.cfg.AnchorPatience = time.Hour
+	anchor, bob := w.join("anchor-one", priv), w.join("bob", nil)
+	w.submit(anchor, "ref-a", "print(1)")
+	w.submit(anchor, "ref-b", "print(2)")
+	idx := w.draw()
+	for i := 0; i < 2; i++ {
+		c := w.claim(anchor, true)
+		if c.Job == nil || c.Job.Kind != "edit" {
+			t.Fatalf("expected an edit job, got %+v", c.Job)
+		}
+		w.edit(anchor, c, fmt.Sprintf("{\"doc\": %d}\n", i))
+	}
+	// Nobody else has ever asked for work, so the anchor grades rather than leave the board waiting.
+	alone := w.claim(anchor, true)
+	if alone.Job == nil || alone.Job.Kind != "grade" {
+		t.Fatalf("an anchor with nobody around was given %+v", alone.Job)
+	}
+	anchor.do("POST", fmt.Sprintf("/api/v1/jobs/%d/release", alone.Job.ID), map[string]string{"reason": "test"}, nil)
+
+	// A volunteer turns up and starts on one entry. Now the anchor holds back on both: the
+	// one being graded, and the one a volunteer could still take.
+	cb := w.claim(bob, false)
+	if cb.Job == nil {
+		t.Fatal("the volunteer was given nothing")
+	}
+	if c := w.claim(anchor, true); c.Job != nil {
+		t.Fatalf("the anchor took %s of %s from under a volunteer", c.Job.Kind, c.Job.Editor.Name)
+	}
+	// The volunteer's grade arrives and waits for someone to vouch for it: that is the anchor's cue.
+	if _, status := w.report(bob, cb, 5.5); status != "pending" {
+		t.Fatal(status)
+	}
+	ca := w.claim(anchor, true)
+	if ca.Job == nil || ca.Job.Editor.ID != cb.Job.Editor.ID {
+		t.Fatalf("the anchor should vouch for the waiting grade, got %+v", ca.Job)
+	}
+	if _, status := w.report(anchor, ca, 5.5); status != "settled" {
+		t.Fatal(status)
+	}
+	if b := w.account("bob"); b.Agreed != 1 {
+		t.Fatalf("the volunteer's agreed grade was not counted: %+v", b)
+	}
+	// The other entry is still inside its patience...
+	if c := w.claim(anchor, true); c.Job != nil {
+		t.Fatalf("the anchor did not wait for volunteers: %+v", c.Job)
+	}
+	// ...and once that has run out, the anchor does it, volunteers or no volunteers.
+	if err := w.app.st.update(context.Background(), func(tx *Tx) error {
+		for _, e := range tx.s.inRound[idx] {
+			if e.Status == "open" {
+				e.EditedAt -= 2 * 3600
+				tx.saveEntry(e)
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	last := w.claim(anchor, true)
+	if last.Job == nil || last.Job.Kind != "grade" {
+		t.Fatalf("an entry nobody took was never graded: %+v", last.Job)
+	}
+	if _, status := w.report(anchor, last, 5.4); status != "settled" {
+		t.Fatal(status)
+	}
+	w.check()
+}
+
 func TestTrustIsEarnedAndThenSettlesAlone(t *testing.T) {
 	pub, priv := newKey()
 	w := newWorld(t, pub)
@@ -1113,4 +1184,19 @@ func TestTheWholeFlowOnDurableDB(t *testing.T) {
 	if a := w.account("bob"); a.Handle != "bob" {
 		t.Fatal("the first server never learned of the account made on the second")
 	}
+
+	// A server that has nothing to write still catches up: its scheduler asks the database
+	// for its revision, so the old server of a deploy does not answer from memory.
+	editors := func() (n int) {
+		other.app.st.view(func(s *State) { n = len(s.Editors) })
+		return n
+	}
+	if n := editors(); n != 2 {
+		t.Fatalf("the second server holds %d editors before it has been told of the third", n)
+	}
+	other.app.st.sync(context.Background())
+	if n := editors(); n != 3 {
+		t.Fatalf("the second server holds %d editors after asking the database", n)
+	}
+	other.check()
 }

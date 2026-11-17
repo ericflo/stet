@@ -170,8 +170,9 @@ type entryState struct {
 	Trusted   int // trusted results and live claims
 	Untrusted int
 	Claims    int
-	HasAnchor bool // an anchor grade exists or an anchor is grading it
-	Mine      bool // this verifier already has a grade or a live claim
+	HasAnchor bool  // an anchor grade exists or an anchor is grading it
+	Mine      bool  // this verifier already has a grade or a live claim
+	Since     int64 // when the oldest live grade claim was made
 }
 
 // openEntryStates describes every entry that still needs work, as one verifier sees it.
@@ -238,19 +239,46 @@ func openEntryStates(s *State, acctID int64) []*entryState {
 			st.Editing = true
 			continue
 		}
+		if st.Since == 0 || c.ClaimedAt < st.Since {
+			st.Since = c.ClaimedAt
+		}
 		tally(st, c.AccountID, false)
 	}
 	return states
 }
 
+// volunteersAround says whether anyone but the anchors has asked for work lately.
+func volunteersAround(s *State) bool {
+	since := now() - 30*60
+	for _, acct := range s.Accounts {
+		if !acct.Anchor && !acct.Banned && acct.LastSeen >= since {
+			return true
+		}
+	}
+	return false
+}
+
 // wantsGrade decides whether this verifier should grade this entry now.
-func wantsGrade(st *entryState, acct *Account) bool {
+//
+// An anchor's grade settles an entry on the spot and ends everyone else's work on it, so
+// anchors hold back: a volunteer who is here gets first go, and one who has started is
+// given `patience` seconds to finish. An anchor grades at once only when a volunteer's
+// grade is waiting to be vouched for, or when nobody else is around to do the work.
+func wantsGrade(st *entryState, acct *Account, volunteers bool, patience int64) bool {
 	if st.Entry.Script == "" || st.Mine || st.HasAnchor {
 		return false
 	}
 	total := st.Results + st.Claims
-	if acct.Anchor {
-		return true // including the reference editors the organisers enter themselves
+	if acct.Anchor { // including the reference editors the organisers enter themselves
+		switch {
+		case st.Results > 0:
+			return true
+		case st.Claims > 0:
+			return now()-st.Since >= patience
+		case volunteers:
+			return now()-st.Entry.EditedAt >= patience
+		}
+		return true
 	}
 	if st.OwnerID == acct.ID {
 		return false
@@ -362,11 +390,17 @@ func (a *App) claim(ctx context.Context, acctID int64, h *Hello) (*Job, error) {
 				}
 			}
 		}
+		volunteers, patience := volunteersAround(s), int64(a.cfg.AnchorPatience.Seconds())
 		for _, st := range openEntryStates(s, acctID) {
 			if canEdit && st.Entry.EditedAt == 0 && !st.Editing {
 				consider(st, "edit", st.Entry.RoundIdx*1000-500) // edits first: they unblock everyone else
 			}
-			if wantsGrade(st, acct) {
+			if !wantsGrade(st, acct, volunteers, patience) {
+				continue
+			}
+			if acct.Anchor {
+				consider(st, "grade", st.Entry.RoundIdx*1000-st.Results) // oldest round; a waiting grade first
+			} else {
 				consider(st, "grade", st.Entry.RoundIdx*1000+st.Results+st.Claims) // oldest round, least attention
 			}
 		}
