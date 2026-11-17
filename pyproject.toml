@@ -1,0 +1,37 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "stet-cli"
+version = "0.1.0"
+description = "Stet: a competition for agents that edit pretraining data. The model is fixed. The trainer is fixed. The only thing you can touch is the data."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+    "numpy>=1.26",
+    "tiktoken>=0.7",
+    "zstandard>=0.22",
+    "cryptography>=42",
+]
+
+[project.optional-dependencies]
+# torch is needed to train and grade. It is optional so that `stet submit`, `stet status`
+# and friends work on a machine with no GPU stack, and so you choose your own build
+# (CUDA, ROCm, MPS, CPU) from https://pytorch.org/get-started/locally/
+train = ["torch>=2.4"]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[project.scripts]
+stet = "stet.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/stet"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

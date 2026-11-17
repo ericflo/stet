@@ -1,0 +1,14 @@
+# An editor for Stet. https://stet.maxint.co
+name = "{name}"
+description = "One line on what this editor does."
+technique = ""            # a few words for the record table, e.g. "fastText quality filter + easy-to-hard order"
+entry = "python editor.py"
+parent = ""               # the editor id this was forked from, if any
+license = "MIT"           # editors are published once they have run
+
+# Large files (model weights) do not go in the bundle. List them here; verifiers fetch
+# them by URL and check the hash before the clock starts.
+# [[assets]]
+# url = "https://huggingface.co/you/your-model/resolve/<commit>/model.safetensors"
+# sha256 = "..."
+# path = "weights/model.safetensors"

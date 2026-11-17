@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+runs/
+.stet/
+*.db
+*.db-wal
+*.db-shm
+/server/stet-server
+/server/data/
+.DS_Store

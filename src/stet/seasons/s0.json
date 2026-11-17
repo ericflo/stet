@@ -1,0 +1,110 @@
+{
+  "id": "s0",
+  "title": "Season 0",
+  "rules_version": 1,
+  "tokenizer": {
+    "file": "s0-vocab.tiktoken",
+    "sha256": "1f9a7504aed76742fb2a55b68533cc60cc9d9fe2cb7434b5f26a2829aa7be63f",
+    "vocab_size": 8192,
+    "eot": 8191
+  },
+  "ink_frac": 0.1,
+  "min_copy_bytes": 64,
+  "max_doc_bytes": 262144,
+  "pools": {
+    "practice": {
+      "kind": "dclm",
+      "manifest": "s0-pool-practice.txt",
+      "base_url": "https://huggingface.co/datasets/mlfoundations/dclm-pool-400m-1x/resolve/f20ae752116ce7b4ab15d31e1e40b094229bf911/",
+      "shards_per_unit": 1,
+      "about": "DCLM-Pool: raw Common Crawl up to 2022, main-content text extraction. Pinned by sha256."
+    },
+    "official": {
+      "kind": "cc-wet",
+      "base_url": "https://data.commoncrawl.org/",
+      "paths": "crawl-data/{crawl}/wet.paths.gz",
+      "shards_per_unit": 2,
+      "about": "The newest published Common Crawl crawl at the time of the draw: full-page text (WET), every language."
+    }
+  },
+  "exam": {
+    "file": "exam-s0.jsonl.zst",
+    "sha256": "c5186955b7b659ec3ad866a3ef4d1ee87ad7d6afddeb4cdf3825079b873b37e9",
+    "urls": [
+      "{api}/files/exam-s0.jsonl.zst"
+    ],
+    "sources": [
+      "encyclopedia",
+      "textbooks",
+      "science",
+      "qa",
+      "books",
+      "news"
+    ]
+  },
+  "scales": {
+    "nano": {
+      "corpus_units": 1,
+      "train_tokens": 8000000,
+      "n_layer": 4,
+      "n_head": 4,
+      "d_model": 192,
+      "ctx": 256,
+      "batch_size": 16,
+      "lr": 0.002,
+      "exam_items_per_source": 100,
+      "edit_seconds": 60
+    },
+    "micro": {
+      "corpus_units": 4,
+      "train_tokens": 40000000,
+      "n_layer": 6,
+      "n_head": 6,
+      "d_model": 384,
+      "ctx": 512,
+      "batch_size": 16,
+      "lr": 0.0015,
+      "exam_items_per_source": 250,
+      "edit_seconds": 300
+    },
+    "standard": {
+      "corpus_units": 8,
+      "train_tokens": 160000000,
+      "n_layer": 8,
+      "n_head": 8,
+      "d_model": 512,
+      "ctx": 512,
+      "batch_size": 32,
+      "lr": 0.001,
+      "exam_items_per_source": 400,
+      "edit_seconds": 600
+    }
+  },
+  "official_scale": "micro",
+  "train": {
+    "warmup_frac": 0.03,
+    "final_lr_frac": 0.05,
+    "weight_decay": 0.1,
+    "beta1": 0.9,
+    "beta2": 0.95,
+    "grad_clip": 1.0
+  },
+  "reference": {
+    "gpu": "NVIDIA RTX 4090 (24 GB)",
+    "cpu_cores": 8,
+    "ram_gb": 32,
+    "note": "Edit-phase time limits are stated for this machine and scaled by `stet calibrate` on others."
+  },
+  "beacon": {
+    "name": "drand quicknet",
+    "chain_hash": "52db9ba70e0cc0f6eaf7803dd07447a1f5477735fd3f661792ba94600c84e971",
+    "genesis": 1692803367,
+    "period": 3,
+    "relays": [
+      "https://api.drand.sh",
+      "https://api2.drand.sh",
+      "https://api3.drand.sh",
+      "https://drand.cloudflare.com"
+    ]
+  }
+}
