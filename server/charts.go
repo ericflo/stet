@@ -18,8 +18,14 @@ type svg struct{ strings.Builder }
 func (b *svg) f(format string, args ...any) { fmt.Fprintf(&b.Builder, format, args...) }
 
 func (b *svg) open(w, h int, class, label string) {
-	b.f(`<svg class="%s" viewBox="0 0 %d %d" width="%d" height="%d" role="img" aria-label="%s" preserveAspectRatio="xMidYMid meet">`,
-		class, w, h, w, h, template.HTMLEscapeString(label))
+	// A chart's text shrinks with it. It may shrink a little; past that the page lets it
+	// scroll sideways instead (.figure .plot), so the labels stay readable on a phone.
+	floor := ""
+	if class == "chart" {
+		floor = fmt.Sprintf(` style="min-width:%dpx"`, w*17/20)
+	}
+	b.f(`<svg class="%s" viewBox="0 0 %d %d" width="%d" height="%d"%s role="img" aria-label="%s" preserveAspectRatio="xMidYMid meet">`,
+		class, w, h, w, h, floor, template.HTMLEscapeString(label))
 }
 
 func (b *svg) done() template.HTML {

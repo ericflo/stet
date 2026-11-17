@@ -31,7 +31,7 @@
   </div>
 
   {{if $d.GainChart}}
-  <figure class="figure"><h3>Gain in each round</h3>{{$d.GainChart}}<figcaption>Unedited loss minus this editor's, on each round's fresh corpus. Above the line beats doing nothing.</figcaption></figure>
+  <figure class="figure"><h3>Gain in each round</h3><div class="plot">{{$d.GainChart}}</div><figcaption>Unedited loss minus this editor's, on each round's fresh corpus. Above the line beats doing nothing.</figcaption></figure>
   {{end}}
 
   {{with $d.Latest}}
@@ -49,8 +49,8 @@
     {{end}}
   </div>
   <div class="grid2">
-    {{if $d.SourceChart}}<figure class="figure"><h3>Where the gain comes from</h3>{{$d.SourceChart}}<figcaption>Exam loss on each kind of held-out text, in nats per token. Left is better; the score is the plain mean of the six.</figcaption></figure>{{end}}
-    {{if $d.CurveChart}}<figure class="figure"><h3>The student, learning from it</h3>{{$d.CurveChart}}<figcaption>Training loss on the edited corpus. Low here is not the goal: an editor can make data easy to fit and useless on the exam.</figcaption></figure>{{end}}
+    {{if $d.SourceChart}}<figure class="figure"><h3>Where the gain comes from</h3><div class="plot">{{$d.SourceChart}}</div><figcaption>Exam loss on each kind of held-out text, in nats per token. Left is better; the score is the plain mean of the six.</figcaption></figure>{{end}}
+    {{if $d.CurveChart}}<figure class="figure"><h3>The student, learning from it</h3><div class="plot">{{$d.CurveChart}}</div><figcaption>Training loss on the edited corpus. Low here is not the goal: an editor can make data easy to fit and useless on the exam.</figcaption></figure>{{end}}
   </div>
   {{end}}
 

@@ -263,7 +263,7 @@ svg text { font-family: var(--mono); font-size: 11px; fill: var(--ink-3); }
 .stats > div { padding: 18px 22px; border-left: 1px solid var(--rule); }
 .stats > div:first-child { border-left: 0; }
 .stats .v { font-family: var(--display); font-size: 32px; font-weight: 600; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
-.stats .v small { font-family: var(--mono); font-size: 12px; font-weight: 400; color: var(--ink-3); margin-left: 4px; }
+.stats .v small { font-family: var(--mono); font-size: 12px; font-weight: 400; color: var(--ink-3); margin-left: 4px; white-space: nowrap; }
 main.page { padding: 0 0 80px; }
 main.page h2 { font-size: 28px; margin: 48px 0 18px; }
 
@@ -300,21 +300,22 @@ footer a { color: var(--ink-2); margin-right: 18px; }
 @media (max-width: 920px) {
   body { font-size: 17px; }
   .hero { padding: 48px 0 40px; }
-  .hero .wrap { grid-template-columns: 1fr; gap: 40px; }
+  .hero .wrap { grid-template-columns: minmax(0, 1fr); gap: 40px; }
   .galley { transform: none; }
   .ticker .wrap { grid-template-columns: 1fr 1fr; }
   .ticker .cell { border-left: 0; padding: 16px 0; }
   .ticker .cell:nth-child(n + 3) { border-top: 1px solid var(--rule); }
-  .steps { grid-template-columns: 1fr; }
+  .steps { grid-template-columns: minmax(0, 1fr); }
   .step { border-right: 0 !important; border-bottom: 1px solid var(--rule) !important; }
   .step:last-child { border-bottom: 0 !important; }
-  .grid2, .grid3 { grid-template-columns: 1fr; }
+  .grid2, .grid3 { grid-template-columns: minmax(0, 1fr); }
   .stats { grid-template-columns: 1fr 1fr; }
   .stats > div:nth-child(odd) { border-left: 0; }
   .stats > div:nth-child(n + 3) { border-top: 1px solid var(--rule); }
-  .files { grid-template-columns: 1fr; }
+  .stats .v small { display: block; margin: 2px 0 0; }
+  .files { grid-template-columns: minmax(0, 1fr); }
   .files ul { border-right: 0; border-bottom: 1px solid var(--rule); max-height: 180px; }
-  .docs { grid-template-columns: 1fr; gap: 0; }
+  .docs { grid-template-columns: minmax(0, 1fr); gap: 0; }
   .docs aside { position: static; padding-top: 28px; display: flex; flex-wrap: wrap; gap: 4px 18px; }
   .mast nav { gap: 16px; font-size: 15px; overflow-x: auto; }
   .mast .season { display: none; }
@@ -329,6 +330,11 @@ footer a { color: var(--ink-2); margin-right: 18px; }
   .line .mark { left: -56px; width: 42px; font-size: 17px; }
   td, th { padding: 11px 10px; }
   .mast nav a.opt { display: none; }
+  /* The four links do not fit beside the name on a phone: they get a row of their own. */
+  .mast .wrap { flex-wrap: wrap; height: auto; gap: 0 14px; padding-top: 9px; }
+  .mast nav { order: 3; width: 100%; margin: 0; gap: 10px; justify-content: space-between; overflow: visible; padding: 4px 0 7px; }
+  .hero h1 { font-size: 39px; }
+  .hero .lede { font-size: 19px; }
 }
 
 /* --- charts --- */
@@ -353,6 +359,8 @@ svg .cross { stroke: var(--ink-3); stroke-width: 1; stroke-dasharray: 3 3; point
 svg .focus { fill: var(--mark); stroke: var(--card); stroke-width: 2; pointer-events: none; }
 .figure { background: var(--card); border: 1px solid var(--rule); border-radius: 4px; padding: 20px 22px 14px; margin: 0; }
 .figure figcaption { font-size: 15px; color: var(--ink-3); margin-top: 10px; }
+/* A chart's labels shrink with it, so on a phone it keeps its size and scrolls sideways. */
+.figure .plot { overflow-x: auto; }
 .figure h3 { font-size: 19px; margin-bottom: 14px; }
 .tip { position: fixed; z-index: 50; pointer-events: none; background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 12px; padding: 6px 9px; border-radius: 4px; white-space: nowrap; transform: translate(-50%, calc(-100% - 12px)); opacity: 0; transition: opacity 0.08s; }
 .tip.on { opacity: 1; }
@@ -389,9 +397,9 @@ a.pill:hover { border-color: var(--red); color: var(--red); }
 .dev { background: var(--red); color: #fff; font-family: var(--mono); font-size: 12px; text-align: center; padding: 5px 10px; position: relative; z-index: 2; }
 .files .binary { padding: 40px; color: var(--ink-3); text-align: center; }
 @media (max-width: 920px) {
-  .agent { grid-template-columns: 1fr; padding: 24px 22px; gap: 22px; }
-  .cols { grid-template-columns: 1fr; }
-  .kv { grid-template-columns: 1fr; }
+  .agent { grid-template-columns: minmax(0, 1fr); padding: 24px 22px; gap: 22px; }
+  .cols { grid-template-columns: minmax(0, 1fr); }
+  .kv { grid-template-columns: minmax(0, 1fr); }
   .kv dt { border-bottom: 0; padding: 12px 20px 0; }
   .kv dd { padding: 4px 20px 12px; }
 }
