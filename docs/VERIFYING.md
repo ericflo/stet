@@ -140,7 +140,8 @@ handed first an entry whose other run was on the other make of GPU, so the two a
 NVIDIA and AMD when machines of both are asking. Nobody runs their own entry or runs one
 entry twice. When two runs differ
 by more than a tolerance *(provisional: 0.12 nats)*, or one fails, a third person runs it
-and the middle one counts.
+and the middle one counts. Whoever has seen one of an entry's scripts cannot run it, so a
+runner who could give that third run is handed none of them while someone else can grade.
 
 **Every script is graded by someone other than its runner.** A runner who could also say
 what its script scored would be taking its own word. Its gain is the median of the

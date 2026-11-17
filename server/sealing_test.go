@@ -732,3 +732,58 @@ func TestAStrikeNeedsSomethingSolidToBeMeasuredAgainst(t *testing.T) {
 		t.Fatalf("against two established grades that agree: %s %+v", verdict(e), r)
 	}
 }
+
+// Whoever has seen one of an entry's scripts cannot run it. So the one runner left who
+// could give an entry a third run is not handed its scripts while its first two runs may
+// yet differ and someone else can grade them: otherwise runs that differ settle on two.
+func TestTheRunnerWhoCouldGiveAThirdRunIsKeptClearOfTheScripts(t *testing.T) {
+	w := newWorld(t)
+	alice, bob, carol, dave := w.join("alice", nil), w.join("bob", nil), w.join("carol", nil), w.join("dave", nil)
+	w.submit(alice, "flaky", "print('sometimes')")
+	w.established("bob", "carol", "dave")
+	idx := w.draw()
+	cb, cc := w.claim(bob, true), w.claim(carol, true)
+	w.idle(dave, true, "a third run before the first two are known to differ")
+	if code, status := w.edit(bob, cb, ""); code != 200 { // the editor fails on bob's machine
+		t.Fatal(status)
+	}
+	w.edit(carol, cc, scriptOne)
+	// One run failed, and the other wrote a script nobody has graded. Bob can grade it, and
+	// he has had his run.
+	w.idle(dave, true, "the grade a score is waiting for, which someone who has run the entry can give")
+	g := w.claim(bob, true)
+	if g.Job == nil || g.Job.Kind != "grade" {
+		t.Fatalf("bob should be grading carol's script: %+v", g.Job)
+	}
+	w.idle(dave, true, "a second grade of the script, while the entry may yet want a run from him")
+	if code, status := w.report(bob, g, 5.5); code != 200 || status != "pending" {
+		t.Fatalf("one run failed and one did not: HTTP %d %s", code, status)
+	}
+	// Now the runs are known to differ, and dave is the one who can settle it.
+	third := w.claim(dave, true)
+	if third.Job == nil || third.Job.Kind != "edit" {
+		t.Fatalf("dave should be running it a third time: %+v", third.Job)
+	}
+	w.edit(dave, third, scriptTwo)
+	if _, status := w.grade(carol, true, 5.5); status != "settled" {
+		t.Fatalf("the grade of the third run: %s", status)
+	}
+	w.check()
+	if e := w.entry(idx, "flaky"); !e.Valid || e.NRuns != 3 || !e.Confirmed || e.RunsDiffer || math.Abs(*e.Gain-0.5) > 1e-9 {
+		t.Fatalf("a failed run and two that agree: %+v", e)
+	}
+
+	// With nobody else to give the grade, he gives it: a round does not wait for a run
+	// that may never be wanted.
+	w = newWorld(t)
+	alice, bob, carol = w.join("alice", nil), w.join("bob", nil), w.join("carol", nil)
+	w.submit(alice, "steady", "print('steady')")
+	w.established("bob", "carol")
+	w.app.cfg.RunsPerEntry = 1
+	w.draw()
+	w.run(bob, scriptOne)
+	if _, status := w.grade(carol, true, 5.5); status != "settled" {
+		t.Fatalf("the only other verifier there is: %s", status)
+	}
+	w.check()
+}

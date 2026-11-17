@@ -35,6 +35,8 @@ package main
 //   - An entry is run twice, by two different people, and a third time if the first two
 //     differ: one failed and the other did not, or the gains of their scripts are further
 //     apart than the season's tolerance for runs.
+//   - A runner who could give an entry the run that settles it, should its runs differ,
+//     is kept clear of its scripts while someone else who is around can grade them.
 //   - Nobody runs their own entry (an organisers' machine runs the organisers' reference
 //     editors, and grades their scripts, only when nobody else who is around could), nobody
 //     runs an entry twice, and nobody who has been handed one of an entry's scripts to
@@ -771,13 +773,57 @@ func (j *judge) owns(st *entryState, acct *Account) bool {
 
 // mayRun reports whether a runner could be handed an entry to run.
 func (j *judge) mayRun(st *entryState, q *asker) bool {
-	acct := q.acct
-	if !q.canEdit || j.barred(acct, st.Round.Idx) {
-		return false
-	}
 	// A run that was given up, because nobody could check it, does not use up one of the
 	// entry's runs: somebody who comes later may give it another. Three is still the most.
 	if st.EditFailed >= maxEditAttempts || len(st.Runs)+len(st.LiveEdits) >= j.runsWanted(st) || len(st.Entry.Runs)+len(st.LiveEdits) >= maxRuns {
+		return false
+	}
+	return j.couldRun(st, q)
+}
+
+// spare reports whether an entry may yet need a run from this account: its runs may turn
+// out to differ, and this is somebody who could give the one that settles it. Whoever has
+// seen one of an entry's scripts cannot run it, so such an account is kept clear of them
+// while someone else who is around can grade them.
+func (j *judge) spare(st *entryState, q *asker) bool {
+	if j.a.cfg.RunsPerEntry >= maxRuns || st.EditFailed >= maxEditAttempts || len(st.Entry.Runs)+len(st.LiveEdits) >= maxRuns {
+		return false
+	}
+	return j.mayDiffer(st) && j.couldRun(st, q)
+}
+
+// mayDiffer reports whether the runs an entry has, or is getting, may yet be found to
+// differ. Runs that all wrote one script, or all wrote none, cannot.
+func (j *judge) mayDiffer(st *entryState) bool {
+	if len(st.LiveEdits) > 0 || len(st.Runs) < j.a.cfg.RunsPerEntry {
+		return true
+	}
+	same, known := true, true
+	for _, run := range st.Runs {
+		same = same && run.Script == st.Runs[0].Script
+		known = known && (run.Script == "" || j.weigh(st.byScript[run.Script]).known)
+	}
+	if same {
+		return false
+	}
+	return !known || len(st.Runs) < j.runsWanted(st)
+}
+
+// unspared reports whether somebody who is around, other than this account, could give a
+// script a grade that counts without being a runner the entry may yet need.
+func (j *judge) unspared(st *entryState, sc *scriptState, not *Account) bool {
+	for _, q := range j.active() {
+		if q.acct.ID != not.ID && q.est && !sc.wroteAlone(q.acct) && j.mayGrade(st, sc, q.acct) && !j.running(st, q.acct) && !j.spare(st, q) {
+			return true
+		}
+	}
+	return false
+}
+
+// couldRun reports whether an entry is one this runner could be handed, if it wanted a run.
+func (j *judge) couldRun(st *entryState, q *asker) bool {
+	acct := q.acct
+	if !q.canEdit || j.barred(acct, st.Round.Idx) {
 		return false
 	}
 	// Whoever has been handed one of its scripts has seen what a run of it writes. And
@@ -985,7 +1031,11 @@ func (j *judge) offers(st *entryState, q *asker, closing bool) []offer {
 			// it is the entry's only script, and one grade of it would be one machine's
 			// word for the whole score. Beyond that an established account replicates,
 			// like anyone.
-			if o.required = counting == 0 && (!v.known || v.self || v.tie || (len(sc.Writers) > 1 && len(v.counted) < 2)); o.required || (!closing && under < 1+maxReplicas) {
+			o.required = counting == 0 && (!v.known || v.self || v.tie || (len(sc.Writers) > 1 && len(v.counted) < 2))
+			switch spare := j.spare(st, q); {
+			case o.required && spare && j.unspared(st, sc, q.acct):
+				// Somebody who cannot give the entry a run can give it this grade.
+			case o.required || (!closing && !spare && under < 1+maxReplicas):
 				out = append(out, o)
 			}
 		default:
