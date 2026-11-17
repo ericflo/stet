@@ -278,6 +278,7 @@ def test_a_file_that_is_gone_is_the_entrys_failure_and_a_host_that_is_away_is_no
 
 
 def test_a_run_whose_asset_is_gone_is_a_failed_run_not_a_broken_machine(tmp_path, monkeypatch):
+    pytest.importorskip("torch")  # the pipeline trains, so it imports the trainer
     from stet import data, pipeline
     from stet.spec import practice_round
 
