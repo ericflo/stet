@@ -56,8 +56,9 @@ A run:
 | `grades` | Every grade of the script, those that count first |
 
 A grade has `by`, `valid`, `loss`, `gain` (that grader's own unedited loss minus its loss
-on the script), and a `verdict`: `agreed`, `outlier`, `disputed` (two established grades
-disagreed and no third was made), `other data` or `baseline differs` (a set-up problem:
+on the script), and a `verdict`: `agreed`, `outlier`, `unresolved` (it differs from a gain
+that rests on one volunteer's grade, or on two that disagree: no strike), `disputed` (two
+established grades disagreed and no third was made), `other data` or `baseline differs` (a set-up problem:
 no evidence about the script), or `no established grade`. `counted` marks the grades the
 script's gain is the median of, `established` those by established accounts, `self` a
 grade by the only person whose run wrote the script, and `first` an account's first

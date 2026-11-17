@@ -178,7 +178,9 @@ against your account. Three of those, and more than one for every ten grades tha
 agreed, and the account gets no work for two weeks after the latest. Then it may try
 again: the machine may be honest and merely different. When exactly two established
 grades disagree and nobody is there to break the tie, neither is struck and the entry
-says so.
+says so. And a strike needs something solid to be measured against: a gain that two
+established grades agree on, or an organisers' machine's. A grade that differs from one
+volunteer's lone grade is published as *unresolved* and counts against nobody.
 
 **What this cannot show.** Two scores closer together than the tolerance are not told
 apart. A runner who hands back a script the editor did not write is caught only as far

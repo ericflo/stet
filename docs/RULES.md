@@ -334,7 +334,9 @@ are graded by **verifiers**: anyone who runs `stet verify`.
   it is a strike. With three strikes, and more than one for every ten grades that agreed,
   an account is given no work for two weeks after the latest. It can still enter. When
   exactly two established grades disagree and nobody is there to break the tie, neither
-  is struck, and the entry says so.
+  is struck, and the entry says so. A grade is a strike only against a gain that two
+  established grades agree on, or an organisers' machine's; against one volunteer's lone
+  grade it is published as unresolved and counts against nobody.
 - A verifier whose job runs out of time unreported is offered no work for a day. A round
   waits for an established verifier that holds a job until the job is reported, handed
   back or out of time, which is three hours at most. For anyone else whose grades have

@@ -72,6 +72,9 @@ package main
 //     could grade it; the grade counts only until someone else's exists, and an entry
 //     resting on one is never called confirmed.
 //   - Two established grades of a script that disagree get a third, and the median decides.
+//   - A grade that differs from a script's gain is a strike only when that gain is one two
+//     established grades agree on, or an organisers' machine's. Against one volunteer's
+//     grade, or two that disagree, it is published as UNRESOLVED and held against nobody.
 //   - A script that two runs wrote is the entry's only script, so one grade of it would
 //     be one machine's word for the whole score: it gets a second, from someone else, when
 //     someone else who is around could give it. An entry's scripts go to different graders
@@ -2075,6 +2078,13 @@ func (a *App) settleScript(tx *Tx, j *judge, st *entryState, sc *scriptState) *g
 	// that was not already shown, so it earns no standing. Nor does agreeing that a script
 	// is invalid: that is decided before anything is trained.
 	plain := !v.valid || math.Abs(v.gain) < 1e-9
+	// A strike says that a grade is wrong, and one volunteer's grade against another's
+	// does not show which of them is. It takes a gain that two established grades agree
+	// on, or one of an organisers' machine.
+	solid := !v.tie && len(v.counted) > 1
+	for _, g := range v.counted {
+		solid = solid || (!v.tie && g.acct.Anchor)
+	}
 	ref := map[string]any{"round": roundID(a.season.ID, rd.Idx), "editor": st.Entry.EditorID}
 	for _, r := range sc.Results {
 		g := j.view(sc, r)
@@ -2101,13 +2111,17 @@ func (a *App) settleScript(tx *Tx, j *judge, st *entryState, sc *scriptState) *g
 			r.Verdict, shown = "void", "baseline differs"
 		case j.agrees(g, v):
 			r.Verdict = "agreed"
-			if plain {
-				r.Verdict = "same" // agreed, and counted for nothing
+			if plain || v.tie {
+				r.Verdict = "same" // agreed, and counted for nothing: with a tie, agreed with neither
 			} else if !g.acct.Anchor {
 				g.acct.Agreed++
 				g.acct.Streak++
 			}
 			g.acct.GPUSeconds += r.Seconds
+		case !solid:
+			// A real difference, and nothing to say which side of it is wrong.
+			r.Verdict, shown = "unresolved", "unresolved"
+			out.outliers++
 		default:
 			// Same script, same corpus, same code, same baseline: a real difference.
 			r.Verdict, shown = "outlier", "outlier"

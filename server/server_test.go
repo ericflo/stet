@@ -926,7 +926,9 @@ func TestAnIndependentGradeReplacesTheRunnersOwn(t *testing.T) {
 	if g := e.Runs[0].Grades[0]; g.Handle != "bob" || !g.Counted || g.Self || g.Verdict != "agreed" {
 		t.Fatalf("the grade that counts: %+v", g)
 	}
-	if g := e.Runs[0].Grades[1]; g.Handle != "anchor-one" || g.Counted || !g.Self || g.Verdict != "outlier" || math.Abs(*g.Gain-1.0) > 1e-9 {
+	// One volunteer's grade against the runner's own: they differ, and nothing says which
+	// of the two is wrong.
+	if g := e.Runs[0].Grades[1]; g.Handle != "anchor-one" || g.Counted || !g.Self || g.Verdict != "unresolved" || math.Abs(*g.Gain-1.0) > 1e-9 {
 		t.Fatalf("the runner's own grade: %+v", g)
 	}
 	if o := w.entry(idx, first.Job.Editor.Name); math.Abs(*o.Gain-0.5) > 1e-9 || o.Runs[0].Self || len(o.Runs[0].Grades) != 1 {

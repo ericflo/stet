@@ -653,3 +653,82 @@ func TestAnEntrysScriptsGoToDifferentGraders(t *testing.T) {
 		}
 	}
 }
+
+// A strike says that a grade is wrong. One volunteer's grade against another's does not
+// show which of them is, and neither does the midpoint of two that disagree.
+func TestAStrikeNeedsSomethingSolidToBeMeasuredAgainst(t *testing.T) {
+	// The organisers' machine runs the entry. The established volunteers named grade its
+	// script, and rita, who is not established, replicates it at a gain of 0.5.
+	start := func(established map[string]float64) (*world, string, entryJ) {
+		pub, priv := newKey()
+		w := newWorld(t, pub)
+		anchor, alice, rita := w.join("anchor-one", priv), w.join("alice", nil), w.join("rita", nil)
+		w.submit(alice, "steady", "print('steady')")
+		var names []string
+		graders := map[string]*actor{}
+		for _, name := range []string{"bob", "carol"} {
+			if _, ok := established[name]; ok {
+				graders[name] = w.join(name, nil)
+				names = append(names, name)
+			}
+		}
+		w.established(names...)
+		idx := w.draw()
+		w.run(anchor, scriptOne)
+		jobs := map[string]*claimed{}
+		for _, name := range names {
+			if jobs[name] = w.claim(graders[name], false); jobs[name].Job == nil {
+				t.Fatalf("no grade for %s", name)
+			}
+		}
+		cr := w.claim(rita, false)
+		if cr.Job == nil {
+			t.Fatal("no script for a volunteer who is not established to replicate")
+		}
+		if code, status := w.report(rita, cr, 5.5); code != 200 {
+			t.Fatal(status)
+		}
+		for _, name := range names {
+			if code, status := w.report(graders[name], jobs[name], 6.0-established[name]); code != 200 {
+				t.Fatal(status)
+			}
+		}
+		w.pass(2 * w.cfg.ReplicaWait)
+		w.check()
+		e := w.entry(idx, "steady")
+		if e.Status != "settled" {
+			t.Fatalf("the round did not settle: %+v", e)
+		}
+		return w, roundID(w.app.season.ID, idx), e
+	}
+	verdict := func(e entryJ) string {
+		for _, g := range e.Runs[0].Grades {
+			if g.Handle == "rita" {
+				return g.Verdict
+			}
+		}
+		return "not listed"
+	}
+
+	// One volunteer's grade is all there is, and rita's differs from it.
+	w, round, e := start(map[string]float64{"carol": 0.9})
+	if r := w.account("rita"); verdict(e) != "unresolved" || r.Strikes != 0 || r.Agreed != 0 || e.Detail.Disputed != 1 {
+		t.Fatalf("against one volunteer's lone grade: %s %+v", verdict(e), r)
+	}
+	if _, page := w.page("/rounds/" + round); !strings.Contains(page, ">differs, unresolved<") {
+		t.Fatal("the round's page does not show the difference nobody could resolve")
+	}
+
+	// Two established grades disagree and nobody breaks the tie. Rita's is the same as one
+	// of them, and differs from their midpoint.
+	w, _, e = start(map[string]float64{"bob": 0.5, "carol": 0.9})
+	if r := w.account("rita"); verdict(e) != "unresolved" || r.Strikes != 0 || r.Agreed != 0 {
+		t.Fatalf("against the midpoint of two grades that disagree: %s %+v", verdict(e), r)
+	}
+
+	// Two established grades agree, and hers differs from both: that is a strike.
+	w, _, e = start(map[string]float64{"bob": 0.9, "carol": 0.9})
+	if r := w.account("rita"); verdict(e) != "outlier" || r.Strikes != 1 {
+		t.Fatalf("against two established grades that agree: %s %+v", verdict(e), r)
+	}
+}
