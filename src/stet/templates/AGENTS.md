@@ -226,33 +226,33 @@ Every run gets the same machine, whatever the volunteer has:
 ### Libraries
 
 Python 3.13 with the standard library and exactly these, on every machine. Import them
-freely; do not bundle them. Anything else goes in your project as pure Python.
+freely; do not bundle them. Anything else goes in your project: pure Python as it is,
+JavaScript as an archive (see *Your own harness*).
 
 ```
-accelerate 1.16.0            lightgbm 4.7.0               py3langid 0.4.0
-bm25s 0.3.16                 lingua-language-detector 2.2.0   pyahocorasick 2.3.1
-datasketch 2.0.0             mmh3 5.3.1                   pyarrow 26.0.1
-einops 0.8.2                 model2vec 0.10.0             rapidfuzz 3.14.6
-emoji 2.16.0                 networkx 3.7                 regex 2026.11.15
-faiss-cpu 1.16.0             nltk 3.10.4                  safetensors 0.8.0
-fasttext-numpy2 0.10.4       numba 0.68.1                 scikit-learn 1.9.1
-fasttext-predict 0.9.2.4     numpy 2.5.5                  scipy 1.18.1
-ftfy 6.3.1                   onnxruntime 1.32.0           sentence-transformers 6.3.0
-gensim 4.4.0                 orjson 3.13.0                sentencepiece 0.2.3
-jinja2 3.1.6                 pandas 3.1.1                 tiktoken 0.14.0
-joblib 1.6.0                 peft 0.21.3                  tokenizers 0.23.3
-                             polars 2.1.0                 torch 2.15.0
-                             protobuf 7.36.2              tqdm 4.70.1
-                             psutil 7.2.2                 transformers 5.23.0
-                                                          unidecode 1.4.0
-                                                          xgboost 3.4.1
-                                                          xxhash 4.1.0
-                                                          zstandard 0.25.0
+accelerate 1.16.0                networkx 3.7           regex 2026.11.15
+bm25s 0.3.16                     nltk 3.10.4            safetensors 0.8.0
+datasketch 2.0.0                 nodejs-wheel 24.19.0   scikit-learn 1.9.1
+einops 0.8.2                     numba 0.68.1           scipy 1.18.1
+emoji 2.16.0                     numpy 2.5.5            sentence-transformers 6.3.0
+faiss-cpu 1.16.0                 onnxruntime 1.32.0     sentencepiece 0.2.3
+fastapi 0.163.2                  openai 3.53.0          tiktoken 0.14.0
+fasttext-numpy2 0.10.4           orjson 3.13.0          tokenizers 0.23.3
+fasttext-predict 0.9.2.4         pandas 3.1.1           torch 2.15.0
+ftfy 6.3.1                       peft 0.21.3            tqdm 4.70.1
+gensim 4.4.0                     polars 2.1.0           transformers 5.23.0
+jinja2 3.1.6                     protobuf 7.36.2        unidecode 1.4.0
+joblib 1.6.0                     psutil 7.2.2           uvicorn 0.54.0
+lightgbm 4.7.0                   py3langid 0.4.0        xgboost 3.4.1
+lingua-language-detector 2.2.0   pyahocorasick 2.3.1    xxhash 4.1.0
+mmh3 5.3.1                       pyarrow 26.0.1         zstandard 0.25.0
+model2vec 0.10.0                 rapidfuzz 3.14.6
 ```
 
 `faiss` and `onnxruntime` are the CPU builds. `nltk` comes without its data files; name
 any you need as assets. `import fasttext` works on Linux; `fasttext-predict` is the
-loader that is there on every platform.
+loader that is there on every platform. `nodejs-wheel` is Node.js 24: `node` is on the
+`PATH`. `fastapi`, `uvicorn` and `openai` are what serving a model to a harness needs.
 
 ### Model weights
 
@@ -289,6 +289,50 @@ model = AutoModelForCausalLM.from_pretrained(path, dtype=torch.float16).to(task.
 Editors may not carry per-document knowledge of official data: hash lists, precomputed
 labels, or tables keyed by host or URL built from the crawl. Models trained on other data
 are fine.
+
+### Your own harness
+
+How the editor works is yours to decide. `entry` in `stet.toml` is one command line, and
+what it starts may start more. Three shapes people build, all inside the rules:
+
+- **A loop.** Code that goes over every document, or every chunk of one, and decides:
+  rules, a classifier, a model you fine-tuned for the job. `examples/tidy` and
+  `examples/reader`.
+- **An agent.** A harness (pi, or one you wrote) that drives a model with tools: it looks
+  at the round, runs commands, and writes the script or the plan for one.
+  `examples/agent` runs pi against a 0.6B model, complete.
+- **Anything else.** Several models, a search over recipes, a small student trained on
+  samples inside the time limit. If it writes a script in time, it is an editor.
+
+What the machine gives a harness:
+
+- **Processes.** Start as many as you like: they share the 6 cores, the 24 GB and the
+  clock, and all of them are stopped when the editor's time is up.
+- **Loopback.** There is no network, but `127.0.0.1` works. Serve a model there and point
+  the harness at it:
+  `python -m transformers.cli.transformers serve /assets/<model> --host 127.0.0.1 --port <port>`
+  speaks the OpenAI chat API, tool calls included, and the `openai` client is installed.
+  Or load the model in the same process and skip the server.
+- **Node.** `node` (24) is on the `PATH`. Ship a JavaScript harness as one archive in the
+  bundle and unpack it to `STET_SCRATCH` when the editor starts: `node_modules/` is never
+  sent as it is, and a bundle holds 2,000 files. `examples/agent/pack.sh` does this. Use
+  a harness that needs no install step and no network when it runs.
+- **Your model.** Fine-tune it at home, on any hardware, on anything except the two
+  exams; publish the weights on Hugging Face; name them in `[[assets]]`. See *Model
+  weights*.
+
+What decides the design is time. At micro the corpus is about 490 million tokens and the
+limit is 600 seconds on a machine that may be no faster than the floor. On that machine,
+roughly: a 20M-parameter encoder reads 670,000 tokens a second, a 150M-parameter one
+76,000, a 135M-parameter language model 65,000, a 0.6B one 16,000. So a small classifier
+can read the opening of every document; a 0.6B model can read about 2% of the corpus:
+say, the opening of the few tens of thousands of documents that cheaper code liked best.
+Generating is far slower than reading: an agent's turn takes seconds. An agent can decide
+how a round should be handled; it cannot visit every page.
+
+An agent is not deterministic, and each entry is run twice, by two people. Keep a script
+on disk before the agent starts, give every step a time limit from `task.time_left()`,
+close its standard input, and check what it writes before you use it.
 
 ## Entering
 

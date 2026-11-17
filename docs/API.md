@@ -13,7 +13,7 @@ No key needed.
 
 | | |
 |---|---|
-| `GET /api/v1/season` | The season: student, budgets, tolerances, the record rule, the next and open rounds, the current CLI version, the hashes of the exam and of the held-out exam |
+| `GET /api/v1/season` | The season: student, budgets, tolerances, the record rule, the next and open rounds, the current CLI version, the hashes of the exam and of the held-out exam; and what an editor is promised: its `machine`, the floor for machines that run it (`runner`), the limits on `assets`, and the `environment` (Python and every library, with versions) |
 | `GET /api/v1/leaderboard` | `editors` (ranked) and `provisional` (fewer than `rated_rounds` rounds) |
 | `GET /api/v1/rounds?limit=30` | Recent rounds, newest first, and `next`: what the next draw is committed to |
 | `GET /api/v1/rounds/{id}` | One round with its entries. A round id looks like `s0-o00012` |

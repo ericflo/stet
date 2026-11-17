@@ -17,6 +17,12 @@ the student's exam loss, the better the editor.
 
 An editor is a directory with a `stet.toml` and any program. `stet init` makes one.
 
+- **The harness is yours.** `stet.toml` names one command, and how it gets from the corpus
+  to a script is up to you: a loop that runs a classifier or a model you fine-tuned over
+  every chunk, an agent harness driving a small model with tools, or something nobody has
+  tried. It may start other processes and talk to them over loopback; Node.js is there
+  beside Python. The limits are the machine and the clock, not the method.
+
 - **Code goes in the bundle.** The bundle is the files in the directory, compressed: at
   most 50 MB, 400 MB unpacked and 2,000 files. Hidden files, `venv/`, `node_modules/`,
   `__pycache__/`, `runs/`, compiled Python and symbolic links are never packed;
@@ -26,9 +32,9 @@ An editor is a directory with a `stet.toml` and any program. `stet init` makes o
   Face, pinned to a commit and named by its sha256. `stet asset add <owner>/<repository>`
   writes the tables. The files are fetched before the clock starts and are in place,
   read-only, when the editor runs. Nothing can be downloaded while it runs.
-- **Libraries are provided.** PyTorch, transformers, scikit-learn and some forty others,
-  at exact versions: see [the editor's machine](#the-editors-machine). You bundle your
-  own code and nothing else.
+- **Libraries are provided.** PyTorch, transformers, scikit-learn and some forty-five
+  others, and Node.js, at exact versions: see [the editor's machine](#the-editors-machine).
+  You bundle your own code and nothing else.
 - **It has to run on both makes of GPU.** Editors are run by volunteers, on NVIDIA and on
   AMD. Use the GPU through PyTorch (`device="cuda"` is right on both) and it will. A run
   that fails scores a gain of 0.
@@ -183,13 +189,17 @@ Editors are run on volunteers' machines, which differ. What an editor is given d
 | Memory | 24 GB |
 | GPU | one, NVIDIA or AMD, with 8 GB of its memory |
 | Scratch space | 16 GB at `/scratch`, held in memory, so it comes out of the 24 |
-| Network | none |
-| Software | Python 3.13 and the season's libraries |
+| Network | none, but loopback (`127.0.0.1`) works between the editor's own processes |
+| Software | Python 3.13, Node.js 24 and the season's libraries |
 
 - **The libraries** are listed in `AGENTS.md` and at `/api/v1/season` (`environment`),
   each at an exact version: PyTorch, transformers, sentence-transformers, tokenizers,
   safetensors, scikit-learn, numpy, scipy, pandas, polars, faiss, fastText, tiktoken and
-  more. Every machine that runs editors has exactly those. `stet doctor` checks yours.
+  more, with what serving a model to a harness of your own needs (FastAPI, uvicorn, the
+  `openai` client, Node.js). Every machine that runs editors has exactly those.
+  `stet doctor` checks yours.
+- **An editor may be many processes.** They share the cores, the memory and the clock,
+  and all of them are stopped with it.
 - **The time limit is wall-clock time.** When it passes, the editor is killed, and the
   last complete script it wrote still counts. Write one early and improve it.
 - **Machines that run editors are at least as fast as a floor**, measured with a fixed

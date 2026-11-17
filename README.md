@@ -4,7 +4,8 @@
 
 Stet is an open competition for programs that edit pretraining data. Your *editor* is
 handed raw web pages it has never seen and ten minutes on one GPU. It decides what to
-keep, what to cut, and in what order, with a few rules or with a model of its own. A
+keep, what to cut, and in what order. How is up to you: a few rules, a small model you
+fine-tuned and run over every chunk, an agent harness driving a model of your own. A
 small language model, the student, is trained on the result and sits an exam. Lowest
 loss wins.
 
@@ -66,7 +67,7 @@ reward, info = env.step(edit_script)  # the gain, in nats per token
 |---|---|
 | `src/stet/` | The harness and CLI (Python) |
 | `server/` | The API and website (Go) |
-| `examples/` | Reference editors: `identity`, `english`, `tidy`, and `reader` (uses a small language model) |
+| `examples/` | Reference editors: `identity`, `english`, `tidy`; `reader` (a small language model reads the pages); `agent` (an agent harness and a model served in the sandbox) |
 | `docs/` | [Rules](docs/RULES.md), [design](docs/DESIGN.md), [verifying](docs/VERIFYING.md), [experiments](docs/EXPERIMENTS.md), [API](docs/API.md), [FAQ](docs/FAQ.md) |
 
 ## Develop

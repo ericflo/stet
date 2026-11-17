@@ -249,6 +249,33 @@ def _python_mounts() -> tuple[list[tuple[str, str]], str, list[str]]:
     return binds, exe, extra
 
 
+def node_dir(binds: list[tuple[str, str]] | None = None) -> str | None:
+    """The directory that holds the season's Node.js, or None if this machine has none.
+
+    Node is one of the season's libraries: it comes as a wheel, and its binary lives among
+    the Python packages. With `binds` (what the sandbox mounts, and where), the answer is
+    the path inside the sandbox. An editor that runs a JavaScript harness finds `node` on
+    its PATH either way.
+    """
+    import importlib.util
+
+    try:
+        spec = importlib.util.find_spec("nodejs_wheel")
+    except (ImportError, ValueError):
+        return None
+    if spec is None or not spec.origin:
+        return None
+    real = os.path.join(os.path.dirname(os.path.realpath(spec.origin)), "bin")
+    if not os.access(os.path.join(real, "node"), os.X_OK):
+        return None
+    if binds is None:
+        return real
+    for src, dst in binds:
+        if real == src or real.startswith(src.rstrip("/") + "/"):
+            return dst + real[len(src.rstrip("/")) :]
+    return None  # installed somewhere the sandbox does not show
+
+
 def _exposed(season, shown: list[str]) -> str:
     """What the editor would be able to see that it must not, or "" if nothing.
 
@@ -610,6 +637,7 @@ def run_editor(
     py_binds, py_exe, py_path = _python_mounts() if inside else ([], sys.executable, [])
     if argv[0] in ("python", "python3"):
         argv[0] = py_exe
+    node = node_dir(py_binds if inside else None)
     applied: dict = {}
     paths = {
         "STET_TASK": "/out/task.json" if inside else str(out_dir / "task.json"),
@@ -626,7 +654,9 @@ def run_editor(
     machine = {**limits, "cores": len(cpus) or (os.cpu_count() or 1)}
     (out_dir / "task.json").write_text(json.dumps(task_info(rnd, scale, time_limit, machine, assets), indent=1))
     env = {
-        "PATH": os.pathsep.join([os.path.dirname(py_exe), "/usr/local/bin", "/usr/bin", "/bin"]),
+        # The season's Python and Node come first, so that `python` and `node` mean the same
+        # program on every machine, whatever else its /usr/bin holds.
+        "PATH": os.pathsep.join([os.path.dirname(py_exe)] + ([node] if node else []) + ["/usr/local/bin", "/usr/bin", "/bin"]),
         "PYTHONPATH": os.pathsep.join(["/stet-pkg"] + py_path) if inside else str(pkg_dir.parent),
         "PYTHONUNBUFFERED": "1",
         "PYTHONDONTWRITEBYTECODE": "1",
@@ -854,10 +884,21 @@ def sandbox_selftest() -> tuple[bool, str]:
             return False, str(e)
         if run.status != "ok" or run.script is None or run.script.read_text().split() != ["0"]:
             return False, f"a trivial editor did not run in the sandbox ({run.status}: {run.reason or run.log_tail.strip()[-300:]})"
+        # An editor is promised Node beside Python, and loopback between its own processes:
+        # what a harness of its own needs. Find out here, not from the first entrant whose
+        # editor fails for a reason that is this machine's.
+        if "nodejs-wheel" in ((season.raw.get("environment") or {}).get("packages") or {}):
+            (root / "bundle" / "editor.py").write_text(HARNESS_PROBE)
+            try:
+                run = run_editor(root / "bundle", "python editor.py", Corpus(root / "corpus"), practice_round(season, 0), season.scale("nano"),
+                                 root / "work", 60, sandbox="bwrap", limits={"required": True})  # fmt: skip
+            except HarnessError as e:
+                return False, str(e)
+            if run.status != "ok" or run.script is None:
+                return False, f"an editor could not run the season's Node.js, or reach itself on loopback, inside the sandbox ({run.status}: {run.reason or ''} {run.log_tail.strip()[-400:]})"
         if gpu_total_bytes() <= 0:
             return True, ""
-        # An editor is promised the GPU and the season's libraries. Find out here, not from
-        # the first entrant whose editor fails for a reason that is this machine's.
+        # The same for the GPU and the season's libraries.
         want = int(machine_limits(season).get("cores") or 0)
         (root / "bundle" / "editor.py").write_text(GPU_PROBE.replace("WANT_CORES", str(want)))
         try:
@@ -870,7 +911,30 @@ def sandbox_selftest() -> tuple[bool, str]:
     return True, ""
 
 
-# What sandbox_selftest runs second: the GPU answers, its memory limit is in force, and the
+# What sandbox_selftest runs for a harness: Node answers a server in this process, on loopback.
+HARNESS_PROBE = """
+import subprocess, threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from stet.editor import Task
+task = Task.from_env()
+
+class Answer(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200); self.send_header("content-length", "2"); self.end_headers(); self.wfile.write(b"ok")
+    def log_message(self, *a):
+        pass
+
+server = HTTPServer(("127.0.0.1", 0), Answer)
+threading.Thread(target=server.serve_forever, daemon=True).start()
+js = "fetch(process.argv[1]).then(r => r.text()).then(t => console.log(process.version, t))"
+said = subprocess.run(["node", "-e", js, f"http://127.0.0.1:{server.server_address[1]}/"], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=40)
+if said.returncode != 0 or not said.stdout.strip().endswith(" ok"):
+    raise SystemExit("node: " + (said.stdout + said.stderr)[-300:])
+task.write([i for i, _ in task.corpus])
+"""
+
+
+# What sandbox_selftest runs last: the GPU answers, its memory limit is in force, and the
 # editor is on the cores it was given.
 GPU_PROBE = """import os, sys
 from stet.editor import Task

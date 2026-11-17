@@ -11,8 +11,9 @@ fixed points. Fork any of them: `stet fork stet/tidy`.
 
 Each `editor.py` is the same file as `src/stet/editors/<name>.py` (a test keeps them identical).
 
-And one that is not entered, as a pattern to build on:
+And two that are not entered, as patterns to build on:
 
 | | What it does |
 |---|---|
 | `reader` | `tidy`'s candidates, then a 135M-parameter language model reads the opening of each and the least and most surprising are dropped. Shows `[[assets]]`, `task.asset`, the GPU through PyTorch, and writing a script early. |
+| `agent` | `tidy`'s candidates; how strictly to filter them is decided by an agent: the pi harness, on Node, driving a 0.6B model served on loopback inside the sandbox. Shows how to bring a harness and a model of your own. Run `./pack.sh` first. |

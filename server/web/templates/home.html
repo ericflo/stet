@@ -126,8 +126,8 @@
   <div class="wrap">
     <div class="sec-head">
       <div>
-        <h2>A few rules, or a model of your own.</h2>
-        <p>An editor is a program. It can be twenty lines of tests, or a small language model that reads the pages and decides. Either way it gets the same machine, whoever's GPU it runs on.</p>
+        <h2>A few rules, a model of your own, or an agent.</h2>
+        <p>An editor is a program, and the harness is yours. Twenty lines of tests; a small model you fine-tuned, run over every chunk; an agent harness driving a model with tools. Whatever it is, it gets the same machine, whoever's GPU it runs on.</p>
       </div>
       <a class="more" href="/docs/rules#the-editors-machine">the editor's machine →</a>
     </div>
@@ -135,7 +135,7 @@
       <div class="grid2">
         <div class="claim"><h3>Bring weights</h3><p>Name up to {{bytes .Season.Assets.MaxBytes}} of public Hugging Face files in <code>stet.toml</code>. They are in place before the clock starts: room for a model of a billion or two parameters at half precision.</p></div>
         <div class="claim"><h3>Import, don't bundle</h3><p>Python {{.Season.Environment.Python}} and {{len .Season.Environment.Packages}} libraries at fixed versions are on every machine: PyTorch, transformers, sentence-transformers, scikit-learn, faiss and the rest.</p></div>
-        <div class="claim"><h3>NVIDIA and AMD</h3><p>Volunteers run editors on both, so an editor has to work on both. Use the GPU through PyTorch and it does.</p></div>
+        <div class="claim"><h3>Run your own harness</h3><p>Start processes, serve your model on loopback, point an agent at it. Node.js is there beside Python. It has to work on NVIDIA and AMD alike: use the GPU through PyTorch and it does.</p></div>
         <div class="claim"><h3>Time is the limit</h3><p>A round's corpus is about ten times what the student can read, and {{howlong .Scale.EditSeconds}} is not long. A model cannot read all of it. Spend it where cheaper tests cannot decide.</p></div>
       </div>
       <div class="stack">
@@ -143,7 +143,7 @@
           <div class="row"><span class="k">Time</span><span class="v">{{howlong .Scale.EditSeconds}}</span></div>
           <div class="row"><span class="k">GPU</span><span class="v">one, {{.Season.Machine.GPUMemoryGB}} GB of memory</span></div>
           <div class="row"><span class="k">CPU</span><span class="v">{{.Season.Machine.Cores}} cores, {{.Season.Machine.MemoryGB}} GB</span></div>
-          <div class="row"><span class="k">Network</span><span class="v">none</span></div>
+          <div class="row"><span class="k">Network</span><span class="v">none, but loopback</span></div>
           <div class="row"><span class="k">Weights</span><span class="v">{{bytes .Season.Assets.MaxBytes}} in {{.Season.Assets.MaxFiles}} files</span></div>
           <div class="row"><span class="k">New text</span><span class="v">{{pct1 .Season.InkFrac}} of what the student reads</span></div>
         </div>

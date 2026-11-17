@@ -147,7 +147,7 @@ def test_in_the_sandbox_a_bad_entry_or_a_forged_message_is_still_the_editors_err
     bundle = editor(tmp_path, "import sys\nprint('bwrap: execvp python: No such file or directory')\nsys.exit(1)\n")
     run = run_editor(bundle, "python editor.py", corpus, RND, SCALE, tmp_path / "w1", 30, sandbox="bwrap")
     assert run.status == "error" and run.exit_code == 1 and "bwrap:" in run.log_tail
-    for n, entry in enumerate(["node index.js", "./editor.py"]):  # not installed; not executable
+    for n, entry in enumerate(["no-such-program index.js", "./editor.py"]):  # not installed; not executable
         run = run_editor(bundle, entry, corpus, RND, SCALE, tmp_path / f"v{n}", 30, sandbox="bwrap")
         assert run.status == "error" and run.exit_code == 127 and "cannot start" in run.log_tail, run
 
@@ -313,10 +313,14 @@ def test_usage_counts_what_a_file_claims_and_notices_what_it_cannot_read(tmp_pat
 
 @pytest.mark.skipif(sys.platform != "linux" or not bwrap_available()[0] or not scope_available()[0], reason="needs bubblewrap and systemd-run --user")
 def test_the_sandbox_self_test_passes_here(tmp_path, monkeypatch):
-    from stet.runner import sandbox_selftest
+    from stet.runner import node_dir, sandbox_selftest
 
     monkeypatch.setenv("STET_CACHE", str(tmp_path / "cache"))
-    assert sandbox_selftest() == (True, "")
+    if node_dir() is None:  # a checkout without the season's Node: not a machine that may run editors
+        ok, why = sandbox_selftest()
+        assert not ok and "Node.js" in why
+    else:
+        assert sandbox_selftest() == (True, "")
 
 
 # --- an editor does not outlive its run, and what it leaves is removed with care -----------------
@@ -514,6 +518,67 @@ def test_an_editor_is_given_its_assets_and_the_seasons_machine(corpus, tmp_path,
     assert seen["writable"] is False and "no asset at 'smol/missing'" in seen["missing"] and "smol/model.bin" in seen["missing"]
     if sandbox == "bwrap" and scope_available()[0]:
         assert run.limits["cores"] == want and run.limits["gpu_memory_gb"] == 8
+
+
+HARNESS = """
+import json, os, subprocess, sys, threading, urllib.request
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from stet.editor import Task
+task = Task.from_env()
+
+class Model(BaseHTTPRequestHandler):  # stands in for a model served to a harness
+    def do_POST(self):
+        said = self.rfile.read(int(self.headers["content-length"]))
+        body = json.dumps({"heard": said.decode()}).encode()
+        self.send_response(200); self.send_header("content-length", str(len(body))); self.end_headers(); self.wfile.write(body)
+    def log_message(self, *a):
+        pass
+
+server = HTTPServer(("127.0.0.1", 0), Model)
+threading.Thread(target=server.serve_forever, daemon=True).start()
+url = f"http://127.0.0.1:{server.server_address[1]}/v1/x"
+seen = {}
+# A harness in another process, in another language, talking to the model over loopback.
+js = "fetch(process.argv[1], {method: 'POST', body: 'keep or cut?'}).then(r => r.json()).then(j => console.log(process.version + ' ' + j.heard))"
+node = subprocess.run(["node", "-e", js, url], capture_output=True, text=True, timeout=60)
+seen["node"] = (node.stdout + node.stderr).strip()
+py = subprocess.run([sys.executable, "-c", "import sys, urllib.request; print(urllib.request.urlopen(sys.argv[1], data=b'hello', timeout=10).read().decode())", url], capture_output=True, text=True, timeout=60)
+seen["python"] = (py.stdout + py.stderr).strip()
+try:
+    urllib.request.urlopen("http://1.1.1.1/", timeout=3); seen["outside"] = "reached"
+except OSError as e:
+    seen["outside"] = "no"
+print("HARNESS" + json.dumps(seen))
+task.write([0])
+"""
+
+
+@pytest.mark.parametrize("sandbox", ["none", pytest.param("bwrap", marks=needs_sandbox)])
+def test_an_editor_may_run_a_harness_of_its_own_against_a_model_it_serves_itself(corpus, tmp_path, sandbox):
+    # The shape of an agent: a model served on loopback, and a harness in another process
+    # (here Node, the season's own) that talks to it. No network is needed for either.
+    from stet.runner import node_dir
+
+    if node_dir() is None:
+        pytest.skip("the season's Node.js is not installed here")
+    run = run_editor(editor(tmp_path, HARNESS), "python editor.py", corpus, RND, SCALE, tmp_path / "work", 120, sandbox=sandbox)
+    assert run.status == "ok", run.log_tail
+    seen = json.loads(run.log_tail.split("HARNESS", 1)[1].splitlines()[0])
+    assert seen["node"] == "v24.19.0 keep or cut?", seen  # the season's Node, whatever /usr/bin holds
+    assert json.loads(seen["python"]) == {"heard": "hello"}
+    if sandbox == "bwrap":
+        assert seen["outside"] == "no"
+
+
+def test_the_seasons_node_is_found_where_the_sandbox_shows_it(monkeypatch):
+    from stet import runner
+
+    real = runner.node_dir()
+    if real is None:
+        pytest.skip("the season's Node.js is not installed here")
+    site = os.path.dirname(os.path.dirname(real))
+    assert runner.node_dir([(site, "/stet-site0")]) == "/stet-site0/nodejs_wheel/bin"
+    assert runner.node_dir([("/somewhere/else", "/stet-site0")]) is None  # not mounted: not promised
 
 
 def test_an_asset_that_was_never_fetched_is_the_machines_error(corpus, tmp_path):

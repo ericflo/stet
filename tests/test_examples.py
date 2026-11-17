@@ -24,3 +24,46 @@ def test_the_package_version_is_the_harness_version():
     import tomllib
 
     assert tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"] == __version__
+
+
+# --- the example that brings a harness of its own ----------------------------------------------
+
+
+def test_the_agent_example_is_a_whole_project_that_pins_what_it_runs():
+    import json
+
+    from stet.spec import load_season
+
+    season = load_season()
+    root = ROOT / "examples" / "agent"
+    project = load_project(root)
+    assert project.name == "agent" and project.entry == "python editor.py"
+    assert project.assets and all(a.path.startswith("qwen3-0.6b/") for a in project.assets)
+    assert sum(a.size for a in project.assets) <= season.raw["assets"]["max_bytes"]
+    assert len({a.url.split("/resolve/")[1].split("/")[0] for a in project.assets}) == 1  # one commit
+    package = json.loads((root / "package.json").read_text())
+    assert all(v[0].isdigit() for v in package["dependencies"].values())  # exact versions: the harness is part of the entry
+    source = (root / "editor.py").read_text()
+    compile(source, "editor.py", "exec")
+    main = source[source.index("def main()") :]
+    assert main.index("task.write(") < main.index("ask_agent(")  # a script is on disk before the agent starts
+    assert "stdin=subprocess.DEVNULL" in source and "timeout=limit" in source
+    assert "harness.tar.zst" in (root / ".gitignore").read_text() and "npm ci" in (root / "pack.sh").read_text()
+
+
+def test_the_agent_example_keeps_its_first_script_when_the_harness_cannot_run(corpus, tmp_path):
+    import dataclasses
+    import shutil
+
+    from stet.runner import run_editor
+    from stet.spec import load_season, practice_round
+
+    season = load_season()
+    scale = dataclasses.replace(season.scale("nano"), train_tokens=512, ctx=64, batch_size=4)
+    project = tmp_path / "agent"
+    project.mkdir()
+    for name in ("editor.py", "stet.toml"):  # no harness archive, and no model weights either
+        shutil.copy(ROOT / "examples" / "agent" / name, project / name)
+    run = run_editor(project, "python editor.py", corpus, practice_round(season, 0), scale, tmp_path / "work", 60)
+    assert run.status == "ok", run.log_tail
+    assert "keeping the fallback script" in run.log_tail and "harness.tar.zst is not in the bundle" in run.log_tail

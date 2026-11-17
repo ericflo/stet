@@ -1919,8 +1919,26 @@ func TestOneProcessServesTheSiteTheAPIAndTheRedirect(t *testing.T) {
 	if code, body, _ := get("api.test", "/leaderboard"); code != 404 || !strings.HasPrefix(body, "{") {
 		t.Fatalf("the API host served a page: HTTP %d", code)
 	}
-	if code, _, _ := get("api.test", "/api/v1/season"); code != 200 {
+	code, body, _ := get("api.test", "/api/v1/season")
+	if code != 200 {
 		t.Fatalf("the API host: HTTP %d", code)
+	}
+	// The season says what an editor is promised: the rules point here for the numbers.
+	var promised struct {
+		Machine     Machine     `json:"machine"`
+		Runner      RunnerFloor `json:"runner"`
+		Assets      AssetLimits `json:"assets"`
+		Environment struct {
+			Python   string            `json:"python"`
+			Packages map[string]string `json:"packages"`
+		} `json:"environment"`
+	}
+	if err := json.Unmarshal([]byte(body), &promised); err != nil {
+		t.Fatal(err)
+	}
+	if promised.Machine.Cores != 6 || promised.Runner.GPUTokensPerSecond <= 0 || promised.Assets.MaxFiles != 32 || promised.Environment.Python != "3.13" ||
+		promised.Environment.Packages["torch"] == "" || promised.Environment.Packages["nodejs-wheel"] == "" {
+		t.Fatalf("the season does not say what an editor is promised: %+v", promised)
 	}
 	if code, _, _ := get("api.test", "/readyz"); code != 200 {
 		t.Fatalf("readyz: HTTP %d", code)

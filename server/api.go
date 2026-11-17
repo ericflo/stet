@@ -359,6 +359,10 @@ func (a *App) apiSeason(w http.ResponseWriter, r *http.Request) {
 		"requires_github": a.cfg.RequireGithub, "server": revision,
 		"establish_after": a.cfg.EstablishAfter, "runs_per_entry": a.cfg.RunsPerEntry,
 		"exam_sha256": a.season.ExamSHA256, "heldout_exam_sha256": a.season.HeldoutSHA256,
+		// What an editor is promised, whoever runs it: its machine, the slowest machine that
+		// may run it, how much it may name by reference, and what it may import.
+		"machine": a.season.Machine, "runner": a.season.Runner, "assets": a.season.Assets,
+		"environment": map[string]any{"python": a.season.Environment.Python, "packages": a.season.Environment.Packages},
 	}
 	if name, version := a.site.wheel(); name != "" {
 		out["cli"] = map[string]any{"version": version, "wheel": a.cfg.APIURL + "/files/" + name}

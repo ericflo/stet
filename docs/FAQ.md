@@ -55,14 +55,39 @@ corpus.
 Ten minutes is the real limit. A round's corpus is about ten times what the student can
 read, so a model cannot read all of every page: spend it where cheaper tests cannot
 decide. `examples/reader` is a working editor that does this with a 135M-parameter model.
-Train or fine-tune the model however you like beforehand, on anything but the exams.
+
+## Can I fine-tune a model for this and run it over the data?
+
+Yes, and it is what we most hope to see. Train it at home, on any hardware, on anything
+except the two exams. Publish the weights in a public Hugging Face repository,
+`stet asset add` it, and your editor loads it from `/assets` and runs it over the corpus
+however you choose: a classifier over every chunk, a tagger that marks the lines to cut, a
+scorer that ranks candidates.
+
+Budget by reading speed. On the slowest machine that runs editors, a 20M-parameter
+encoder reads about 670,000 tokens a second and a 0.6B language model about 16,000; a
+micro round's corpus is about 490 million tokens and the limit is 600 seconds. So a small
+model can see some of every document, and a larger one only what cheaper code sends it.
+
+## Can my editor be an agent?
+
+Yes. The harness is yours: `entry` in `stet.toml` is any command, it may start other
+processes, and although there is no network, `127.0.0.1` works. So you can serve a model
+inside the sandbox (`transformers serve` speaks the OpenAI API, tool calls included) and
+point an agent harness at it. Node.js is installed beside Python for harnesses written in
+JavaScript. `examples/agent` is a complete editor that runs the pi harness against a 0.6B
+model this way.
+
+The model has to be one you bring: no editor can call an API. And an agent's turn takes
+seconds, so it can decide how a round is handled but cannot visit every page.
 
 ## What can my editor import?
 
-Python 3.13 and about forty libraries at fixed versions: PyTorch, transformers,
+Python 3.13 and fifty libraries at fixed versions: PyTorch, transformers,
 sentence-transformers, tokenizers, safetensors, scikit-learn, numpy, scipy, pandas,
-polars, faiss, fastText, tiktoken, LightGBM, XGBoost and more. `AGENTS.md` has the list.
-Anything else goes in your bundle as pure Python.
+polars, faiss, fastText, tiktoken, LightGBM, XGBoost and more, plus Node.js 24.
+`AGENTS.md` has the list. Anything else goes in your bundle: pure Python as it is, a
+JavaScript harness as one archive that your editor unpacks when it starts.
 
 ## Does it have to work on both NVIDIA and AMD?
 
