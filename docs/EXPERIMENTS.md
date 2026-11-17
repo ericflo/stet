@@ -94,11 +94,18 @@ Micro, round s0-p00000:
 
 | Tokens | 20M (0.5×) | 40M (1×) | 80M (2×) | 160M (4×) | 320M (8×) |
 |---|---|---|---|---|---|
-| Unedited loss | 6.057 | 5.355 | 4.828 | 4.522 | *running* |
+| Unedited loss | 6.057 | 5.355 | 4.828 | 4.522 | 4.332 |
 
-On that round `english` (4.418) and `tidy` (4.389) are both past the last measured point:
-each is worth more than four times the data. Until the 8× point is in, the leaderboard
-shows gains only and leaves the multiplier blank.
+On that round `english` (4.418) matches 5.8× the data and `tidy` (4.389) matches 6.5×.
+This is the curve the leaderboard uses, read by gain: a gain of 0.53 nats is 2×, 0.83 is
+4×, and 1.02 or more is past the last point and is shown as "more than 8×".
+
+The reference editors are already there on some rounds. The second official round's
+corpus was rawer than the first (unedited loss 5.56 against 5.34), and `tidy` gained 1.17
+nats on it against 0.93 on the first. So the curve needs a 16× point, and one round's
+corpus is too small to measure it: 16× the budget is more text than a round holds, and
+a student that reads the same pages twice is not a student with more data. It has to be
+measured on two rounds' corpora joined.
 
 ```
 python tools/exp.py --scale nano --rounds 0 --editors identity --train-tokens 32000000
@@ -330,7 +337,7 @@ but it is not nothing, and a lower limit (0.02%) is under consideration for that
 
 ## Still to measure
 
-- Micro: the 8× point of the reference curve.
+- Micro: the 16× point of the reference curve, on two rounds' corpora joined.
 - Two runs of one editor on two machines: how far apart honest runs land, which is what
   the run tolerance (0.12 nats, a guess) should be set from.
 - A language model trained for the job, against `tidy`.

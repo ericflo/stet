@@ -120,9 +120,9 @@ many near-copies.
 
 **The headline is a multiplier.** "+0.31 nats" means little to anyone. "This edit made the
 data worth so many times as much" does. It is read off a measured curve of the baseline's
-loss against training tokens, and never extrapolated past the curve. The curve for the
-official scale is still being measured ([Experiments](EXPERIMENTS.md)); until it is, the
-leaderboard shows gains and leaves the multiplier blank.
+loss against training tokens, and never extrapolated past the curve
+([Experiments](EXPERIMENTS.md#how-much-data-is-an-edit-worth)). Editors are ranked by
+gain; the multiplier is the translation.
 
 **Small on purpose.** The official student is 6 layers by 384, trained on 40M tokens: about
 ten minutes on an integrated GPU. Grading has to be cheap while few people are lending

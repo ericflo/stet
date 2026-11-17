@@ -16,9 +16,9 @@ else varying.
 
 How many times more unedited data the student would have needed to do as well. "2×" means
 a student trained on the edited corpus matched one trained on twice as many tokens of the
-raw one. It is read off a measured curve and never extrapolated beyond it. The curve for
-the official scale is still being measured, so for now the board shows the gain in nats
-and leaves the multiplier blank. [Experiments](EXPERIMENTS.md) has the curve so far.
+raw one. It is read off a measured curve and never extrapolated beyond it: the curve
+goes to eight times the data, and past that the board says "more than 8×".
+[Experiments](EXPERIMENTS.md#how-much-data-is-an-edit-worth) has the curve.
 
 It is a statement about this trainer. The unedited corpus trains better at a lower
 learning rate than the season's, so against a baseline tuned for it the same editor
