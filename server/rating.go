@@ -355,8 +355,9 @@ func gainsByRound(entries []entryRow, editorID string) map[int]float64 {
 // rule that looked after every round would sooner or later hand the record to a lucky copy
 // of the holder, so:
 //
-//   - A challenger gets a fixed number of looks at a holder: when the two have shared 5,
-//     10 and 20 rounds. After the last, that challenger has had its chance at that holder.
+//   - A challenger gets a fixed number of looks at a holder, at the shared-round counts the
+//     season lists (5, 10, 20 and 40). After the last, that challenger has had its chance
+//     at that holder. tools/record_power.py simulates what this can and cannot tell apart.
 //   - At a look, the challenger's advantage over the holder (gain minus gain, round by
 //     round) must exceed the season's margin, by a one-sided paired t-test at the season's
 //     alpha divided by the number of looks. The margin is one standard deviation of the

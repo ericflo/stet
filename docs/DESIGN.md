@@ -70,8 +70,8 @@ the same round with the same initial weights, ratings are adjusted for which rou
 editor happened to get, and the top editors run in every round so that any two of them can
 be compared directly.
 
-**The record is hard to take by luck.** A challenger is tested against the holder at 5, 10
-and 20 shared rounds, must win by more than a margin set from measured noise, and must
+**The record is hard to take by luck.** A challenger is tested against the holder at 5, 10,
+20 and 40 shared rounds, must win by more than a margin set from measured noise, and must
 have been graded by an anchor. Copying the leader and hoping for a good draw does not
 work, and neither does entering many near-copies.
 
@@ -97,7 +97,7 @@ measures rather than assumes: each season the top editors are rerun a scale up.
 | A verifier invents a score | Sealed grades, assigned work, per-round baseline check, strikes |
 | A verifier copies a score | Nothing is visible until an entry settles |
 | Many accounts grade each other | Trust comes only from agreeing with already-trusted verifiers; anchors audit records |
-| Resubmit the leader for a lucky draw | Three fixed looks, a margin, paired on shared rounds |
+| Resubmit the leader for a lucky draw | Four fixed looks, a margin, paired on shared rounds |
 | Organiser picks a good seed | drand, a ten-minute grid, the crawl named in advance, checked by every client |
 | Flood the queue | GitHub-linked accounts, one entry in play, six submissions a day |
 

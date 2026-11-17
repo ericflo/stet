@@ -135,14 +135,17 @@ entrant. That is what lets any two of them be compared on the same data.
 
 One editor holds the record. A challenger takes it when all of these hold:
 
-- it has shared 5, 10 or 20 rounds with the holder (it is tested at those three moments
-  and no others);
+- it has shared 5, 10, 20 or 40 rounds with the holder (it is tested at those four
+  moments and no others);
 - its gain over those rounds beats the holder's by more than a **margin** of 0.02 nats
-  *(provisional)* in a one-sided paired test, at p < 0.05 split across the three looks;
+  *(provisional)* in a one-sided paired test, at p < 0.05 split across the four looks;
 - an anchor has graded at least 2 of its rounds itself.
 
 One lucky round never makes a record, and neither does resubmitting the leader with a
-different seed.
+different seed: in simulation a copy of the holder takes the record less than once in a
+thousand tries. The price is patience. A real lead well clear of the margin is confirmed
+almost always, though it can take all 40 rounds; one that only just clears it may never
+be. [Experiments](EXPERIMENTS.md#what-the-record-rule-can-tell-apart) has the numbers.
 
 ## Grading and trust
 

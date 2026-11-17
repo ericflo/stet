@@ -130,11 +130,7 @@
   ],
   "draw_grid_seconds": 600,
   "record": {
-    "looks": [
-      5,
-      10,
-      20
-    ],
+    "looks": [5, 10, 20, 40],
     "alpha": 0.05,
     "min_audited": 2,
     "margin": {
