@@ -800,6 +800,8 @@ func TestTwoOrganisersMachinesShareTheOrganisersOwnEntries(t *testing.T) {
 	a, b := w.join("anchor-one", privA), w.join("anchor-two", privB)
 	w.submit(a, "ref-a", "print('a')")
 	w.submit(a, "ref-b", "print('b')")
+	w.claim(a, true) // both are up and asking before the round is drawn
+	w.claim(b, true)
 	idx := w.draw()
 	ran, graded := map[string]int{}, map[string]int{}
 	for step := 0; step < 20; step++ {
