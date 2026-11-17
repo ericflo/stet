@@ -291,11 +291,30 @@ def cmd_whoami(args):
         sys.stdout.write("\n")
         return
     a, v = me["account"], me["verifier"]
-    flags = [f for f, on in (("anchor", a.get("anchor")), ("given no more grading work", v.get("muted"))) if on]
+    flags = [f for f, on in (("an organisers' account", a.get("anchor")), ("given no more work for now", v.get("muted"))) if on]
     sys.stderr.write(clean(a["handle"]) + (f"  (@{clean(a['github'])} on GitHub)" if a.get("github") else "") + "\n")
     sys.stderr.write(f"key       {key.public_hex}\n")
     sys.stderr.write(f"verified  {int(v['validated'])} grades agreed ({int(v['recent'])} in the last 14 days), streak {int(v['streak'])}" + (f"  [{', '.join(flags)}]" if flags else "") + "\n")
+    sys.stderr.write(f"standing  {standing_line(a, v)}\n")
     sys.stderr.write(f"editors   {len(me['editors'])}\n")
+
+
+def standing_line(a: dict, v: dict) -> str:
+    """Whether this account's work counts towards scores yet, and what is missing if not."""
+
+    def count(x) -> int:
+        return x if isinstance(x, int) and not isinstance(x, bool) else 0
+
+    ran = f"; {count(v.get('runs'))} editors run" if count(v.get("runs")) else ""
+    if v.get("established"):
+        return "established: its runs and grades count towards scores" + ran
+    missing = []
+    need = count(v.get("establish_after"))
+    if need and count(v.get("validated")) < need:
+        missing.append(f"{need - count(v.get('validated'))} more grades that agree")
+    if v.get("needs_github"):
+        missing.append("a linked GitHub account of the age entering asks for (stet login --github)")
+    return "not yet established: its grades are published and compared, and do not set scores" + (". Still to come: " + "; ".join(missing) if missing else "")
 
 
 def cmd_key(args):
@@ -543,7 +562,7 @@ def cmd_fork(args):
 # Two kinds of job. A *grade* job is "here is an edit script (plain data) for this round:
 # what does the student score on it?" It runs no entrant code, so any machine with a
 # suitable GPU can do it. An *edit* job runs an entrant's program in the sandbox to produce
-# that script; only the organisers' anchor machines are given those.
+# that script; only established accounts that asked to run editors are given those.
 
 
 def slim_result(result: dict, base: dict) -> dict:
@@ -795,13 +814,13 @@ def heldout_log(season) -> Path:
 
 
 def keep_heldout(season, job: dict, result: dict, base: dict) -> None:
-    """An anchor's record of what the held-out exam said about one official grade.
+    """This machine's record of what the held-out exam said about one official grade.
 
     It is appended here and reported to nobody: `slim_result` names every field a grader
     sends, and this is not one of them. The file is published, with the exam, when the
     season closes.
 
-    Until then held-out numbers are in two places on an anchor, both private to its
+    Until then held-out numbers are in two places on the machine that holds the pack, both private to its
     account: this file (mode 0600, in the config directory), and each official round's
     cached baseline (~/.cache/stet/rounds/<round>/<scale>/baseline-*.json, mode 0600),
     which holds the unedited corpus's held-out loss beside its public one. `stet run`,
@@ -877,7 +896,7 @@ def _edit_job(job, season, scale, key, out, work: Path, sandbox: str) -> dict:
     }  # fmt: skip
     # From here on the bundle's bytes are what the entrant submitted, so whatever is wrong
     # with them is the entrant's failure and is reported as one. Handing the job back
-    # instead would have the next anchor meet the same bundle, for ever.
+    # instead would have the next verifier meet the same bundle, for ever.
     bundle_dir = work / "bundle"
     try:
         unpack(blob, bundle_dir)
@@ -892,7 +911,7 @@ def _edit_job(job, season, scale, key, out, work: Path, sandbox: str) -> dict:
 
     edit = edit_round(
         bundle_dir, project.entry, rnd, scale, work, sandbox=sandbox, log=lambda m: out.line("", out.dim(m)),
-        limits={"required": sandbox == "bwrap"}, assets=project.assets,
+        limits={"required": sandbox == "bwrap"}, assets=project.assets, verify_assets=True,
     )  # fmt: skip
     payload["edit"] = edit.to_dict()
     payload["finished_at"] = int(time.time())
@@ -1057,11 +1076,16 @@ def cmd_verify(args):
     from .cli import need_torch
 
     need_torch()
-    need_key()
+    key = need_key()
     lock = claim_key()
-    handlers = {} if args.edits else _stop_like_ctrl_c()
+    # An organisers' machine runs as a service: stopped, it is started again and given the
+    # job it held. Anyone else's hands its job back when it stops, however it is stopped.
+    me = request("GET", "/api/v1/me", key=key)
+    me = me if isinstance(me, dict) else {}
+    organiser = bool((me.get("account") or {}).get("anchor"))
+    handlers = {} if organiser else _stop_like_ctrl_c()
     try:
-        return _verify(args)
+        return _verify(args, organiser, me)
     finally:
         for sig, old in handlers.items():
             signal.signal(sig, old)
@@ -1069,7 +1093,7 @@ def cmd_verify(args):
             lock.close()
 
 
-def _verify(args):
+def _verify(args, organiser: bool = False, me: dict | None = None):
     from .cli import Out
     from .data import heldout_pack_file, heldout_pack_path
     from .runner import bwrap_available, remove_tree, sandbox_selftest, scope_available
@@ -1121,7 +1145,11 @@ def _verify(args):
             measured = bench.measure(season)
             bench.save(measured)
         if (short := bench.shortfalls(season, measured)) and not dev:
-            sys.stderr.write("stet: this machine cannot run editors for the leaderboard: " + "; ".join(short) + ".\n  It can still grade: stet verify\n")
+            sys.stderr.write(
+                "stet: this machine cannot run editors for the leaderboard: " + "; ".join(short) + ".\n"
+                "  If the GPU or the CPU was busy when that was measured, measure again with nothing else running: stet bench\n"
+                "  It can still grade: stet verify\n"
+            )
             sys.exit(1)
         hw = {**hw, "bench": {k: measured.get(k) for k in ("gpu_tokens_per_second", "cpu_mb_per_second", "cores", "memory_gb", "gpu_memory_gb")}}
     try:
@@ -1131,8 +1159,8 @@ def _verify(args):
         sys.exit(1)
     work = slot / "job"
     out.line("", out.bold(f"stet verify · {key.handle} · {hw.get('gpu', device.type)}"))
-    out.line("", out.dim("Grading published edit scripts with the fixed trainer. No one else's code runs on this machine." if not args.edits
-                         else "Running edit jobs in the sandbox, and grading."))  # fmt: skip
+    out.line("", out.dim("Grading edit scripts with the fixed trainer. No one else's code runs on this machine." if not args.edits
+                         else "Running entrants' editors in the sandbox, and grading."))  # fmt: skip
     try:
         if heldout_pack_path(season) is not None:
             trouble = heldout_log_trouble(season)
@@ -1145,15 +1173,15 @@ def _verify(args):
                 )
                 sys.exit(1)
             out.line("", out.dim(f"This machine holds the season's held-out exam. What it says is kept in {heldout_log(season)} and sent nowhere."))
-        elif args.edits and (season.raw.get("heldout_exam") or {}).get("sha256") and os.environ.get("STET_DEV") != "1":
+        elif organiser and (season.raw.get("heldout_exam") or {}).get("sha256") and os.environ.get("STET_DEV") != "1":
             sys.stderr.write(
-                f"stet: season {season.id} has a held-out exam, and an anchor sits every official student on it.\n"
+                f"stet: season {season.id} has a held-out exam, and the organisers' machine sits every student it grades on it.\n"
                 f"  This machine does not hold it. It belongs at {heldout_pack_file(season)}\n"
                 "  (or wherever STET_HELDOUT_EXAM points). Every official grade made without it is a gap in the season's\n"
-                "  final table that has to be measured again, so this anchor will not start until the pack is in place.\n"
+                "  final table that has to be measured again, so this machine will not start until the pack is in place.\n"
             )
             sys.exit(1)
-    except RuntimeError as e:  # a pack that is not the committed one: an anchor must not grade until that is put right
+    except RuntimeError as e:  # a pack that is not the committed one: nothing is graded until that is put right
         sys.stderr.write(f"stet: {e}\n")
         sys.exit(1)
     hello = {"harness": __version__, "season": season.id, "season_digest": season.digest, "hardware": hw, "edits": bool(args.edits), "sandbox": sandbox}
@@ -1167,6 +1195,7 @@ def _verify(args):
     last_job: int | None = None  # the last job worked on, to tell a new one from the same one again
     leave_held = False  # set on the ways out that must not hand the job back
     told_log = False
+    no_editors: str | None = None  # why the server gives this machine no editors to run, as last said
 
     def stop_if_once():
         if args.once:
@@ -1191,8 +1220,8 @@ def _verify(args):
 
     def still_held() -> str:
         until = f" until {time.strftime('%H:%M UTC', time.gmtime(held_until))}" if held_until > time.time() else ""
-        if args.edits:
-            return f"The server could not be told, so the job is still this anchor's{until}. It is handed the same job the next time it asks."
+        if organiser:
+            return f"The server could not be told, so the job is still this machine's{until}. It is handed the same job the next time it asks."
         return (
             f"The server could not be told, so the job is still held{until}. Run `stet verify` again before then and it is picked up "
             "where it was. A job left to run out costs this account a day without work."
@@ -1231,6 +1260,16 @@ def _verify(args):
                 held_until = job["expires_at"] if isinstance(job.get("expires_at"), int) and not isinstance(job.get("expires_at"), bool) else 0
             elif not job:
                 holding = None  # the server gives a verifier the job it holds each time it asks: no job means none is held
+            # Whether this account, on this machine, is handed editors to run is the server's
+            # to say, with each answer. Said here once, and again when it changes.
+            runner = r.get("runner")
+            if args.edits and isinstance(runner, dict):
+                why = "" if runner.get("eligible") is True else clean(runner.get("reason") or "the server did not say why", 300)
+                if why and why != no_editors:
+                    out.line("", out.dim(f"Not given editors to run: {why}. Given grading meanwhile."))
+                elif not why and no_editors:
+                    out.line("", out.dim("This machine is now given editors to run."))
+                no_editors = why
             try:
                 remember_announcement(season, r.get("announced"))
             except OSError as e:
@@ -1273,10 +1312,11 @@ def _verify(args):
                     "  It was refused, and this verifier has stopped. Please report this.\n"
                 )
                 sys.exit(1)
-            # A volunteer steps away from a round it and the server disagree about. An anchor
-            # does not: each job it took and handed back would be one of the few attempts an
-            # entry gets, and a whole round's entries would be void for one disagreement.
-            if refused.get(round_id, 0) >= 2 and not args.edits:
+            # A volunteer steps away from a round it and the server disagree about. The
+            # organisers' machine does not: early in a season it may be the only one there
+            # is, each job it took and handed back would be one of the few attempts an entry
+            # gets, and a whole round's entries would be void for one disagreement.
+            if refused.get(round_id, 0) >= 2 and not organiser:
                 hand_back("this verifier and the server disagree about this round")
                 patience(f"not taking more work from round {round_id}, which the server and this machine disagree about")
                 continue
@@ -1297,15 +1337,15 @@ def _verify(args):
                     path = f"/api/v1/jobs/{job_id}/result"
             except RoundRefused as err:
                 remove_tree(work)
-                if args.edits:
+                if organiser:
                     # Not handed back, and not skipped either. The service manager starts this
-                    # anchor again, the server gives it the same job, and the round is checked
+                    # machine again, the server gives it the same job, and the round is checked
                     # afresh: nothing is spent while someone finds out what is wrong.
                     sys.stderr.write(
                         f"stet: {err}\n"
-                        "  An anchor does not work on a round it cannot vouch for, and it does not hand the job back either: a job\n"
-                        "  handed back is one of the few attempts an entry gets. Stopping with the job still held. Started again,\n"
-                        "  this anchor is given the same job and checks the round afresh.\n"
+                        "  The organisers' machine does not work on a round it cannot vouch for, and it does not hand the job back\n"
+                        "  either: a job handed back is one of the few attempts an entry gets. Stopping with the job still held.\n"
+                        "  Started again, it is given the same job and checks the round afresh.\n"
                     )
                     sys.exit(1)
                 hand_back(clean(f"round refused: {err}", 300))
@@ -1325,8 +1365,8 @@ def _verify(args):
                     patience(f"could not fetch what this job needs ({clean(err)}); {handed(back)}")
                 else:
                     # Kept, not handed back. A job handed back is not free: an entry gets only
-                    # a few attempts from the anchors, and a volunteer is offered an entry
-                    # once. The server gives this job back to us the next time we ask.
+                    # a few attempts, and a verifier is offered an entry once. The server
+                    # gives this job back to us the next time we ask.
                     stuck[job_id] = waited + patience(f"could not fetch what this job needs ({clean(err)}). Keeping the job", keeping=job_id)
                 continue
             except Exception as err:  # this machine's trouble, not the editor's
@@ -1361,15 +1401,15 @@ def _verify(args):
                     # Not a refusal: the server never said no to this result, it could not be
                     # given it (it is away, its file store is failing, this client is out of
                     # date). The work is good, and a job handed back spends an attempt.
-                    # Any other answer in the 400s is a no, and is treated as one below: an
-                    # anchor that kept a job the server will never take would do it again
+                    # Any other answer in the 400s is a no, and is treated as one below: a
+                    # machine that kept a job the server will never take would do it again
                     # for ever, and the round would never settle.
                     remove_tree(work)
-                    if args.edits:
+                    if organiser:
                         sys.stderr.write(
                             f"stet: the result of job {job_id} could not be delivered ({err}).\n"
                             "  That is not a refusal, so the job is not handed back: handing it back would spend one of the entry's\n"
-                            "  few attempts. Stopping with the job still held. Started again, this anchor is given the same job and\n"
+                            "  few attempts. Stopping with the job still held. Started again, this machine is given the same job and\n"
                             "  does it again.\n"
                         )
                         sys.exit(1)
@@ -1424,9 +1464,9 @@ def _verify(args):
     finally:
         # Every other way out. A volunteer's job that is merely left keeps its place on the
         # entry until its time runs out, and the account is then offered no work for a day.
-        # An anchor's is left where it is: started again, it is given the same job, and a
-        # job handed back would be one of the entry's few attempts.
-        if holding is not None and not args.edits and not leave_held:
+        # The organisers' machine's is left where it is: started again, it is given the same
+        # job, and a job handed back would be one of the entry's few attempts.
+        if holding is not None and not organiser and not leave_held:
             if _release(holding, key, "the verifier stopped"):
                 out.line("", out.dim("The job in hand was handed back."))
             else:
@@ -1499,22 +1539,22 @@ def add_commands(sub) -> None:
     p = sub.add_parser("key", help="print this machine's public key")
     p.set_defaults(fn=cmd_key)
 
-    p = sub.add_parser("draw")  # anchors only; not listed in the help
+    p = sub.add_parser("draw")  # organisers only; not listed in the help
     p.set_defaults(fn=cmd_draw)
 
-    p = sub.add_parser("publish")  # anchors only; not listed in the help
+    p = sub.add_parser("publish")  # organisers only; not listed in the help
     p.add_argument("file")
     p.add_argument("--name", help="the name to publish it under (default: the file's own)")
     p.add_argument("--close-season", metavar="SEASON", help="needed to publish a season's held-out exam: the id of the season being closed")
     p.add_argument("--season", default="s0", help=argparse.SUPPRESS)
     p.set_defaults(fn=cmd_publish)
 
-    p = sub.add_parser("verify", help="lend your GPU: grade published edit scripts for the leaderboard")
+    p = sub.add_parser("verify", help="lend your GPU: grade edit scripts for the leaderboard, and (with --edits) run editors")
     p.add_argument("--once", action="store_true", help="do one job and exit")
     p.add_argument("--max-jobs", type=int, default=0)
     p.add_argument("--device", default=None)
     p.add_argument("--season", default="s0", help=argparse.SUPPRESS)
-    p.add_argument("--edits", action="store_true", help="also run edit jobs in the sandbox (anchor machines only)")
+    p.add_argument("--edits", "--run-editors", dest="edits", action="store_true", help="also run entrants' editors, in the sandbox (Linux; `stet bench` says whether this machine is fast enough)")
     p.add_argument("--no-sandbox", action="store_true", help=argparse.SUPPRESS)  # local testing only
     p.add_argument("--any-device", action="store_true", help=argparse.SUPPRESS)  # local testing only
     p.set_defaults(fn=cmd_verify)

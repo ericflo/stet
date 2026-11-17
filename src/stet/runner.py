@@ -3,7 +3,7 @@
 Two modes:
 
   sandbox="none"   plain subprocess. For running your own editor on your own machine.
-  sandbox="bwrap"  a Linux namespace sandbox (bubblewrap). What the anchors use.
+  sandbox="bwrap"  a Linux namespace sandbox (bubblewrap). What official runs use.
 
 Inside the sandbox an editor has no network, a private process tree, and a file system
 made of: the system's software read-only, the corpus read-only, its own bundle read-only,
@@ -253,7 +253,7 @@ def _exposed(season, shown: list[str]) -> str:
     """What the editor would be able to see that it must not, or "" if nothing.
 
     Belt and braces. The cache holds the exam pack; the config directory holds this
-    machine's key and, on an anchor, the held-out exam and what it has said so far. All of
+    machine's key and, on the organisers' machine, the held-out exam and what it has said so far. All of
     it lives under the home directory by default, which is never mounted. But STET_CACHE,
     STET_CONFIG and STET_HELDOUT_EXAM can point anywhere, and a link can lead anywhere, so
     each is checked where it really is against every directory the sandbox mounts.
@@ -444,7 +444,7 @@ def remove_tree(path: Path) -> bool:
     cannot list (mode 0300) or cannot enter at all (mode 000), at the bottom of a tree
     whose path is longer than the kernel will take as one string, or deeper than this
     process may hold directories open. A plain rmtree gives up on each of those without a
-    word and leaves the disk full, and an anchor that cannot clear its work directory
+    word and leaves the disk full, and a verifier that cannot clear its work directory
     cannot take another job.
 
     So nothing here goes by path or keeps more than one directory open. It walks down by
@@ -805,7 +805,7 @@ def run_editor(
         size, entries, readable = _usage(out_dir, OUT_LIMIT_FILES)
         if not readable or entries > OUT_LIMIT_FILES:
             # What it wrote cannot be added up, and that is its doing. The run stays the
-            # editor's error: called the machine's, an editor could stop an anchor by
+            # editor's error: called the machine's, an editor could stop a verifier by
             # filling the disk somewhere the count cannot look.
             hidden = "made part of its output directory unreadable" if not readable else f"created more than {OUT_LIMIT_FILES:,} files in its output directory"
             reason = f"the editor ran the disk low and {hidden}"
@@ -829,7 +829,7 @@ def run_editor(
 
 
 def sandbox_selftest() -> tuple[bool, str]:
-    """Run a known-good editor in the sandbox. An anchor does this before taking edit jobs,
+    """Run a known-good editor in the sandbox. A verifier does this before taking edit jobs,
     so that a broken sandbox is never mistaken for a run of broken editors."""
     import tempfile
 

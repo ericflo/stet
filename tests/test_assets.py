@@ -139,7 +139,7 @@ def test_a_file_that_is_not_the_size_its_entry_says_is_not_kept(monkeypatch):
         return dest
 
     monkeypatch.setattr(data, "fetch", fetch)
-    with pytest.raises(data.FetchError, match="not the size"):
+    with pytest.raises(assets.Unavailable, match="not the size"):  # the entry's mistake, not the network's
         assets.fetch([a], quiet=True)
     assert not assets.cached(a).exists()
 
@@ -206,3 +206,117 @@ def test_a_repository_that_needs_an_account_is_refused(monkeypatch):
         assets.lookup("meta-llama/Llama-3.2-1B")
     with pytest.raises(AssetError, match="owner/name"):
         assets.lookup("just-a-name")
+
+
+def test_the_example_that_uses_a_model_names_files_the_season_allows(season):
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1] / "examples" / "reader"
+    project = load_project(root)
+    assert len(project.assets) >= 2 and all(a.path.startswith("smollm2-135m/") for a in project.assets)
+    assert sum(a.size for a in project.assets) < 1 << 30  # a small model: this is the pattern, not the limit
+    assert len({a.url.split("/resolve/")[1].split("/")[0] for a in project.assets}) == 1  # one commit
+    source = (root / "editor.py").read_text()
+    compile(source, "editor.py", "exec")
+    assert 'task.asset("smollm2-135m")' in source and "task.device()" in source
+    main = source[source.index("def main()") :]
+    assert main.index("task.write(") < main.index("read_candidates(")  # a script is written before the model is even loaded
+
+
+# --- when a file cannot be had ------------------------------------------------------------------
+
+
+def test_a_copy_that_changed_on_disk_is_fetched_again_for_an_official_run(monkeypatch):
+    from stet import data
+
+    blob = b"weights" * 100
+    a = blob_asset("smol/model.safetensors", blob)
+    assets.cache().mkdir(parents=True)
+    assets.cached(a).write_bytes(b"x" * len(blob))  # the right length, the wrong bytes
+    calls = []
+
+    def fetch(urls, sha256, dest, **k):
+        calls.append(dest)
+        dest.write_bytes(blob)
+        return dest
+
+    monkeypatch.setattr(data, "fetch", fetch)
+    assets.fetch([a], quiet=True)  # a practice run takes the cache's word
+    assert not calls
+    assets.fetch([a], quiet=True, verify=True)
+    assert len(calls) == 1 and assets.cached(a).read_bytes() == blob
+    assets.fetch([a], quiet=True, verify=True)  # and a good copy is left alone
+    assert len(calls) == 1
+
+
+def test_a_file_that_is_gone_is_the_entrys_failure_and_a_host_that_is_away_is_not(monkeypatch):
+    import urllib.error
+
+    from stet import data
+
+    a = Asset("smol/model", URL, SHA, 1000)
+
+    def failing(last):
+        def fetch(urls, sha256, dest, **k):
+            err = data.FetchError(f"could not fetch: {last}")
+            err.last = last
+            raise err
+
+        return fetch
+
+    for code in (401, 403, 404, 410):
+        monkeypatch.setattr(data, "fetch", failing(urllib.error.HTTPError(URL, code, "no", None, None)))
+        with pytest.raises(assets.Unavailable, match=f"no longer public at its address .*{code}"):
+            assets.fetch([a], quiet=True)
+    monkeypatch.setattr(data, "fetch", failing(data.Mismatch("sha256 mismatch")))
+    with pytest.raises(assets.Unavailable, match="not the bytes its entry names"):
+        assets.fetch([a], quiet=True)
+    for last in (urllib.error.HTTPError(URL, 503, "busy", None, None), urllib.error.HTTPError(URL, 429, "slow down", None, None), TimeoutError("timed out")):
+        monkeypatch.setattr(data, "fetch", failing(last))
+        with pytest.raises(data.FetchError):
+            assets.fetch([a], quiet=True)
+
+
+def test_a_run_whose_asset_is_gone_is_a_failed_run_not_a_broken_machine(tmp_path, monkeypatch):
+    from stet import data, pipeline
+    from stet.spec import practice_round
+
+    season = load_season()
+    monkeypatch.setattr(data, "corpus", lambda rnd, scale: type("C", (), {"total_bytes": 0, "__len__": lambda self: 0})())
+    monkeypatch.setattr(assets, "fetch", lambda items, **k: (_ for _ in ()).throw(assets.Unavailable("the asset smol/model is no longer public at its address (the host answers 404)")))
+    monkeypatch.setattr(pipeline, "run_editor", lambda *a, **k: pytest.fail("the editor was run without its files"))
+    said = []
+    run = pipeline.edit_round(tmp_path, "python editor.py", practice_round(season, 0), season.scale("nano"), tmp_path / "work", assets=[Asset("smol/model", URL, SHA, 5)], log=said.append)
+    assert run.status == "error" and run.script is None and "no longer public" in run.reason and run.seconds == 0
+    assert any("editor not run" in m for m in said)
+
+
+def test_names_the_rules_do_not_allow_are_left_out_of_a_lookup(monkeypatch):
+    tree = [
+        {"type": "file", "path": "config.json", "size": 10},
+        {"type": "file", "path": "my model.safetensors", "size": 10, "lfs": {"oid": SHA, "size": 10}},
+        {"type": "file", "path": "sub/.hidden.json", "size": 10},
+    ]
+    monkeypatch.setattr(assets, "_get_json", lambda url: tree if "/tree/" in url else {"sha": COMMIT})
+    _, found, skipped = assets.lookup("owner/name", include=["*"])
+    assert [a.path for a in found] == ["name/config.json"] and set(skipped) == {"my model.safetensors", "sub/.hidden.json"}
+    monkeypatch.setattr(assets, "_get_json", lambda url: [{"type": "file", "path": f"f{i}", "size": 1} for i in range(1000)] if "/tree/" in url else {"sha": COMMIT})
+    with pytest.raises(AssetError, match="more than a thousand files"):
+        assets.lookup("owner/name")
+
+
+def test_small_files_are_hashed_as_they_arrive_and_kept(monkeypatch):
+    from stet import data
+
+    blob = b'{"hidden_size": 576}'
+
+    def fetch(urls, sha256, dest, **k):
+        dest.write_bytes(blob)
+        return dest
+
+    monkeypatch.setattr(data, "fetch", fetch)
+    big = Asset("smol/model.safetensors", URL, SHA, 269060552)
+    small = Asset("smol/config.json", URL.replace("model.safetensors", "config.json"), "", 704)
+    out = assets.fill_hashes([big, small], quiet=True)
+    assert out[0] == big and out[1].sha256 == hashlib.sha256(blob).hexdigest() and out[1].size == len(blob)
+    assert assets.cached(out[1]).read_bytes() == blob and not [p for p in assets.cache().iterdir() if p.name.startswith(".new")]

@@ -9,7 +9,7 @@ will be set.
 A small language model, the **student**, is trained on raw web text for a fixed number of
 tokens and then sits an **exam** of curated text. The model, the trainer and the exam
 never change. You change one thing: the data. You write an **editor**, a program that is
-handed raw web pages it has never seen and a few minutes on one GPU. It answers with an
+handed raw web pages it has never seen and ten minutes on one GPU. It answers with an
 **edit script**: what to keep, what to cut, and in what order to train on it. The lower
 the student's exam loss, the better the editor.
 
@@ -17,24 +17,36 @@ the student's exam loss, the better the editor.
 
 An editor is a directory with a `stet.toml` and any program. `stet init` makes one.
 
-- The bundle (the files in the directory, compressed) may be at most 50 MB, 400 MB
-  unpacked and 2,000 files. Models and word lists your editor needs go in the bundle.
-  There is nothing to download at run time. Hidden files, `venv/`, `node_modules/`,
+- **Code goes in the bundle.** The bundle is the files in the directory, compressed: at
+  most 50 MB, 400 MB unpacked and 2,000 files. Hidden files, `venv/`, `node_modules/`,
   `__pycache__/`, `runs/`, compiled Python and symbolic links are never packed;
   `stet submit --dry-run` lists exactly what is.
+- **Model weights go by reference.** An editor may use a model of its own: up to 32 files
+  and 4 GiB in all, named in `stet.toml` as `[[assets]]`. Each is a public file on Hugging
+  Face, pinned to a commit and named by its sha256. `stet asset add <owner>/<repository>`
+  writes the tables. The files are fetched before the clock starts and are in place,
+  read-only, when the editor runs. Nothing can be downloaded while it runs.
+- **Libraries are provided.** PyTorch, transformers, scikit-learn and some forty others,
+  at exact versions: see [the editor's machine](#the-editors-machine). You bundle your
+  own code and nothing else.
+- **It has to run on both makes of GPU.** Editors are run by volunteers, on NVIDIA and on
+  AMD. Use the GPU through PyTorch (`device="cuda"` is right on both) and it will. A run
+  that fails scores a gain of 0.
 - You have one entry in play at a time. Submitting again replaces your entry if it is
   still waiting or qualifying. At most 6 submissions a day.
 - Entering needs a GitHub account at least 30 days old, linked with `stet login --github`.
-  Running your editor takes time on an organiser's machine, which is the scarcest thing
-  the competition has, so one person is one entrant: the limits above are counted per
-  GitHub identity, and linking yours to a new key withdraws the old key's entries.
+  Every entry costs volunteers GPU time, so one person is one entrant: the limits above
+  are counted per GitHub identity, and linking yours to a new key withdraws the old key's
+  entries.
 - **Editors are published.** From the moment yours is first drawn into an official round,
-  its code and every edit script it writes are public under the MIT licence. `stet fork`
-  copies any of them. Its name and yours are public as soon as you submit.
+  its code is public under the MIT licence, and so is every edit script it writes once
+  its round settles. `stet fork` copies any of them. Its name and yours are public as
+  soon as you submit.
 - Not allowed: per-document knowledge of official data (lists of hashes, precomputed
-  labels, tables by host or URL built from the crawl), exam text in any form, and anything
-  that tries to leave the sandbox. Models trained on other data are fine. Editors that
-  break these are removed, and since every editor is public, anyone can check.
+  labels, tables by host or URL built from the crawl), exam text in any form, models
+  trained on either exam, lifting the limits the sandbox sets, and anything that tries to
+  leave it. Models trained on other data are fine. Editors that break these are removed,
+  and since every editor is public, anyone can check.
 
 ## A round
 
@@ -52,14 +64,16 @@ when the one before has settled.
    the student's initial weights. Nobody can know or steer any of that beforehand,
    organisers included. Draws happen only at fixed ten-minute marks, so the organisers
    cannot pick a favourable drand round either.
-4. **Edit.** An **anchor** (an organiser's machine) runs each editor in a sandbox, with a
-   time limit, and publishes the edit script it wrote.
-5. **Grade.** The anchor trains the student on what each script says, and the exam loss
-   it measures is the score. Volunteers grade the same scripts on their own GPUs. Grading
-   runs no entrant code: a script is plain data.
-6. **Settle.** A round settles as a whole, once an anchor has graded every entry. Until
-   then every grade is sealed. Then each score is published, and with it every
-   volunteer's grade of the same script, whatever it said.
+4. **Edit.** Two volunteers each run every editor, in a sandbox, with a time limit. Each
+   run writes an edit script.
+5. **Grade.** Other volunteers train the student on what each script says and measure its
+   exam loss. Grading runs no entrant code: a script is plain data.
+6. **Settle.** A round settles as a whole. Until then every script and every grade is
+   sealed. Then each score is published, with every run and every grade behind it,
+   whoever made them and whatever they said.
+
+[Running and grading](#running-and-grading) says who those volunteers are and how their
+work becomes a score.
 
 Who runs in a round: the ladder (see below), entries still qualifying, and up to 3 new
 entries. When more than 3 are waiting, entries from people who have graded for others in
@@ -119,7 +133,7 @@ it while it runs, the corpus is cleaned of it, and so is your script's output.
 A public exam can be learned. An editor could be tuned to the exam's own passages rather
 than to good data, and its score would then say more than it should.
 
-So the season has a second exam, and only the anchors hold it. It is built by the same
+So the season has a second exam, and only the organisers hold it. It is built by the same
 program from the same six public collections, out of documents the public exam does not
 use, chosen by a secret random seed. Its hash is in the season file (`heldout_exam`) and
 at `/api/v1/season`. `stet` remembers the first hash it sees for a season and says so if
@@ -130,14 +144,15 @@ passages or to the kind of writing they are. It is drawn from the same collectio
 says nothing about writing of other kinds. Those collections are public, and you may
 build your editor with them. You may not build it with either exam.
 
-Whenever an anchor grades an official entry, the student it has just trained also sits
-the round's draw from the held-out exam. Those results stay on the anchor. Nothing is
-published and nothing is decided by them while the season runs.
+Nothing is decided by it while the season runs, and nothing about it is published. When
+the organisers' own machine grades a script, the student it has just trained also sits
+the round's draw from the held-out exam, and the result stays on that machine.
 
-When the season closes, the held-out exam, its seed and every result on it are published.
-The season's final table is the leaderboard worked out again with held-out losses in
-place of public ones: the same editors, the same rounds, the same arithmetic. Grading is
-reproducible, so anyone can then check each of those numbers.
+When the season closes, the held-out exam and its seed are published, and every script
+that counted is graded on it the way scripts are graded during the season: by volunteers,
+more than one to a script. The season's final table is the leaderboard worked out again
+with held-out losses in place of public ones: the same editors, the same rounds, the same
+scripts, the same arithmetic.
 
 Season 0 has no closing date yet. It will be announced on the site at least two weeks
 ahead.
@@ -151,32 +166,61 @@ shares no document and no sentence opening with the public one.
 
 | | Layers × width | Context | Training budget | Edit limit |
 |---|---|---|---|---|
-| nano | 4 × 192 | 256 | 8M tokens | 60 s |
-| **micro (official)** | 6 × 384 | 512 | 40M tokens | 300 s |
-| standard | 8 × 512 | 512 | 160M tokens | 600 s |
+| nano | 4 × 192 | 256 | 8M tokens | 120 s |
+| **micro (official)** | 6 × 384 | 512 | 40M tokens | 600 s |
+| standard | 8 × 512 | 512 | 160M tokens | 1,200 s |
 
 An ordinary GPT with an 8,192-token vocabulary, AdamW, warm-up and cosine decay. Training
 is counted in tokens, never seconds, so every machine does the same work.
 
-The edit limit is wall-clock time on the anchor: AMD Ryzen AI Max+ 395 (16 cores),
-Radeon 8060S, 128 GB unified memory, ROCm. In the sandbox an editor gets 48 GB of memory,
-16 GB of scratch space (held in memory, so it comes out of the 48), the GPU, no network,
-and the anchor's own Python (3.15 today) with numpy, PyTorch and tiktoken. If the limit
-passes, the editor is killed, and the last complete script it wrote still counts.
+## The editor's machine
 
-If an anchor cannot run an entry at all (three attempts fail on the anchor's side, or
-five at grading its script), the round is void for that entry. It counts neither for nor
+Editors are run on volunteers' machines, which differ. What an editor is given does not:
+
+| | |
+|---|---|
+| CPU | 6 cores |
+| Memory | 24 GB |
+| GPU | one, NVIDIA or AMD, with 8 GB of its memory |
+| Scratch space | 16 GB at `/scratch`, held in memory, so it comes out of the 24 |
+| Network | none |
+| Software | Python 3.13 and the season's libraries |
+
+- **The libraries** are listed in `AGENTS.md` and at `/api/v1/season` (`environment`),
+  each at an exact version: PyTorch, transformers, sentence-transformers, tokenizers,
+  safetensors, scikit-learn, numpy, scipy, pandas, polars, faiss, fastText, tiktoken and
+  more. Every machine that runs editors has exactly those. `stet doctor` checks yours.
+- **The time limit is wall-clock time.** When it passes, the editor is killed, and the
+  last complete script it wrote still counts. Write one early and improve it.
+- **Machines that run editors are at least as fast as a floor**, measured with a fixed
+  piece of GPU work and a fixed piece of CPU work (`stet bench`). The floor is a
+  mid-range desktop GPU; the numbers are at `/api/v1/season` (`runner`). An editor that
+  finishes in time on the floor finishes in time everywhere, and `stet run` says how your
+  machine compares with it. A faster machine gets more done in the same seconds. An
+  editor that does as much as time allows will therefore do a little better on some runs
+  than on others, and its score is taken over its runs.
+- The cores, the memory and the scratch space are enforced by the operating system. The
+  limit on GPU memory is set through PyTorch, and a program could lift it; so could it
+  lift its restriction to six cores. Doing either is against the rules, and editors are
+  public.
+
+If no verifier can run an entry at all (three attempts fail on the verifiers' side, or
+five at grading a script), the round is void for that entry. It counts neither for nor
 against it, and the entry is drawn again. Three void rounds in a row, each in a round
-where the anchor did run other entries, are taken to be the entry's doing, and it stops
-being run.
+where other entries did run, are taken to be the entry's doing, and it stops being run.
 
 ## The score
 
-- **Gain** = the unedited corpus's exam loss minus yours, on the same round with the same
-  initial weights. The unedited corpus is every document in the order it was drawn.
-- A run with no usable script (nothing written, malformed, over the ink limit) is
-  **invalid** and scores a gain of 0. An editor with two invalid rounds in its last five
-  stops being run, whether it is qualifying or on the ladder.
+- **Gain** = the unedited corpus's exam loss minus the loss with your script, on the same
+  round with the same initial weights, both measured by the same grader. The unedited
+  corpus is every document in the order it was drawn.
+- **An entry's gain for a round is taken over its runs**: the mean of two, or the median
+  of three. Two runs of an editor that uses neither the clock nor a GPU write the same
+  script, and then there is one number.
+- A run with no usable script (nothing written, malformed, over the ink limit, or the
+  editor crashed) scores a gain of 0. A round in which every run failed is **invalid**.
+  An editor with two invalid rounds in its last five stops being run, whether it is
+  qualifying or on the ladder.
 - **Rating** = your mean gain, adjusted for how hard your rounds were. Every entry runs 3
   rounds and is ranked when it has them. An editor you replace keeps its page and its
   results but leaves the ranking.
@@ -188,8 +232,8 @@ being run.
 
 Eight editors run in every round: the record holder and the best-rated editors, one per
 entrant. That is what lets any two of them be compared on the same data. The numbers in
-this section and the last are what one anchor can grade between draws; they go up when
-there are more anchors.
+this section and the last are what a few machines can run and grade between draws; they
+go up as more people lend a GPU.
 
 The record holder keeps its place whatever happens to it: replaced by its owner, or
 failing. The record can only be taken in rounds the holder runs, so a holder that stopped
@@ -212,7 +256,7 @@ One editor holds the record. A challenger takes it when all of these hold:
 - its gain over those rounds beats the holder's by more than a **margin** of 0.02 nats
   *(provisional)* in a one-sided paired test, at p < 0.05 split across the four looks.
 
-Every number in the test is an anchor's grade. The first record of a season goes the same
+Every number in the test is a settled gain. The first record of a season goes the same
 way, with the unedited corpus standing in for the holder.
 
 One lucky round never makes a record, and neither does resubmitting the leader with a
@@ -222,65 +266,105 @@ clear of the margin is confirmed
 almost always, though it can take all 40 rounds; one that only just clears it may never
 be. [Experiments](EXPERIMENTS.md#what-the-record-rule-can-tell-apart) has the numbers.
 
-## Grading and replication
+## Running and grading
 
-- **An anchor's grade is the score.** An anchor is a machine the organisers run. It
-  grades every entry in every round. Nobody else's grade moves the leaderboard.
-- **A volunteer's grade is a replication.** A grade is a claim anyone can check: the
-  script, the corpus, the exam and the trainer are public, and deterministic enough that
-  two honest machines agree to within a small tolerance *(provisional: 0.08 nats at
-  micro)*. Up to three volunteers grade each entry. Their grades are sealed until the
-  round settles and are then compared with the anchor's. The round's page shows every
-  one of them beside the anchor's, with the difference, whoever sent it.
-- Replication can only show what the tolerance lets it: two scores closer together than
-  the tolerance are not told apart by it. The published differences are also how the
-  tolerance itself gets measured across GPUs.
-- Volunteers are assigned their work. They cannot choose it, are offered an entry once,
-  never grade their own, and cannot see any grade or the round's unedited loss until the
-  round settles. A round waits up to 45 minutes after the anchor finished its last entry
-  for volunteers who are still at work, if a grade of theirs has agreed before. A volunteer it
-  had to give up on, or whose job ran out of time unreported, is offered no work for a day.
-- A grade that differs from the anchor's is a strike, unless two volunteers who have
-  each agreed with an anchor before stand behind it (next). With three strikes, and more
-  than one for every ten grades that agreed, an account is given no grading work for two
-  weeks after the latest. It can still enter.
-- When two volunteers who have each agreed with an anchor before differ from the anchor
-  and agree with each other, neither is struck, nor is anyone else who found what they
-  found, and the entry says so: the anchor's grade may be the one that is wrong. The
-  score stays the anchor's until the organisers have looked.
+No score comes from the organisers' machines in particular. Editors are run and scripts
+are graded by **verifiers**: anyone who runs `stet verify`.
+
+- **Established verifiers.** An account is established once 5 of its grades have agreed
+  with other people's, and it has a linked GitHub account at least 30 days old. Scores
+  are made only from established verifiers' work. Everyone else's grades are
+  replications: published, compared, and counted towards becoming established.
+- **Someone has to be first.** The organisers' own accounts start out established. They
+  are marked on the verifiers page, their work is checked like anyone's, and the season
+  does not need them once other people are established.
+- **Each entry is run twice,** by two different established verifiers, on an NVIDIA and
+  an AMD GPU when there are both. Nobody runs their own entry, runs one entry twice, or
+  runs an entry after being shown a script of it. Scripts are sealed until the round
+  settles, so the second runner cannot copy the first.
+- **Each script is graded by someone other than the verifier who wrote it.** Its gain is
+  the median of the established verifiers' grades, each against that grader's own
+  measurement of the unedited corpus. Two honest machines agree to within a small
+  tolerance *(provisional: 0.08 nats at micro)*. When two established grades of a script
+  differ by more than that, a third is taken. When both runs write the same script, byte
+  for byte, it is nobody's own and either runner may grade it: neither could have made
+  it up.
+- **The entry's gain is the mean of its two runs.** When they differ by more than 0.12
+  nats *(provisional)*, or one failed and the other did not, a third verifier runs the
+  editor and the median of the three is the score.
+- **A round does not wait for people who are not there.** If nobody who is around (at
+  work on a job, or has asked for one in the last ten minutes) could give an entry its
+  second run, it settles with one. Every entry's page shows its runs, who made each, on what GPU, each run's
+  gain and every grade, and the entry is marked **confirmed** (two or more runs by
+  different people that agree, each graded by someone else), **run once**, or **runs
+  differed**.
+- **No score rests on one volunteer's word.** A volunteer never grades a script that only
+  it wrote. If nobody else is there to grade it within 45 minutes, that run is dropped,
+  and if it was the entry's only run the round is void for that entry. The one exception is the
+  organisers' accounts: alone, one of their machines runs and grades, so that a season
+  can start. Such entries are marked run once, and say who graded them.
+- Verifiers are assigned their work. They cannot choose it, are offered an entry once,
+  never grade their own, and cannot see any script, any grade or the round's unedited
+  loss until the round settles, beyond the one they are working on.
+- **Standing.** A grade within the tolerance of the script's gain has agreed. One outside
+  it is a strike. With three strikes, and more than one for every ten grades that agreed,
+  an account is given no work for two weeks after the latest. It can still enter. When
+  exactly two established grades disagree and nobody is there to break the tie, neither
+  is struck, and the entry says so.
+- A verifier whose job runs out of time unreported is offered no work for a day. A round
+  waits up to 45 minutes for verifiers still at work whose grades have agreed before.
 - Agreeing about an entry that left the corpus as it was earns no standing. Its loss is
   the round's unedited loss, which every grader measures anyway. Nor does agreeing that
   a script is invalid, which is decided before anything is trained.
-- If the anchors cannot grade a script at all, volunteers' grades of it are published
-  with nothing beside them, and count for and against nobody.
-- Grades come from NVIDIA (CUDA) and AMD (ROCm) GPUs only, so that every grade uses the
-  same arithmetic.
+- Running editors needs Linux, the sandbox, the season's libraries and a machine at or
+  above the floor. Grading needs an NVIDIA (CUDA) or AMD (ROCm) GPU and the season's
+  PyTorch, so that every grade uses the same arithmetic.
 
 More in [Verifying](VERIFYING.md).
 
-## What the organisers are trusted with
+## What is trusted, and what is not
 
-Stated plainly, because it is short:
+Stated plainly, because it is short.
 
-- **Running your editor honestly.** Edits happen on anchors. An anchor could in principle
-  publish a script your editor did not write. Editors and scripts are public, and anyone
-  can rerun an editor on the same corpus with `stet run --round <id>` and compare. An
-  editor that uses neither the clock nor a GPU writes the same script anywhere, hash for
-  hash. One that does may not, and then the thing to compare is the gain.
-- **Grading honestly.** The score is an anchor's grade. That is a real trust, and the
-  check on it is replication: every script is public, anyone can grade it with
-  `stet score`, and volunteers' grades are published beside the anchor's whether they
-  agree or not.
+**The verifiers assigned to an entry are trusted not to be working together.** A score
+is two runs and their grades, by different people the server picked at random. One
+dishonest verifier is outvoted or shows up as a difference. Two who are both assigned to
+the same entry, and agree on a lie, are not. What stands in the way: an account needs a
+GitHub identity at least 30 days old and a record of agreeing before it is given any
+work that counts; nobody chooses their work; everything is published when the round
+settles; and anyone can rerun any editor with `stet run --round <id>` and grade any
+script with `stet score`.
+
+**What that does not catch:**
+
+- A runner who hands back a script the editor did not write. The second run is the check,
+  and it is a loose one: two honest runs of an editor that uses a GPU or the clock differ
+  a little, so a dishonest script that scores within the tolerance of the honest one is
+  not told apart from it. It moves the entry's gain by at most half that tolerance, in
+  one round.
+- A runner on a much faster machine. The time limit is seconds, not work.
+- Two scores closer together than the grade tolerance. Replication cannot tell them
+  apart. The published differences are how the tolerances get measured.
+- Early in a season, when the organisers' machine may be the only established verifier,
+  an entry marked run once rests on that machine alone.
+
+**The organisers are trusted with:**
+
+- **The first established accounts.** Theirs, and so which grades the first volunteers
+  are compared with.
+- **Assigning work at random.** The server chooses who runs and who grades what.
 - **Keeping the held-out exam to themselves** until the season closes, and tuning nothing
-  on it, their own reference editors included. Its hash is public now; the exam, its seed
-  and every result are published when the season closes.
-- **Choosing when the season closes.** They can see held-out results while it runs. The
-  close is announced two weeks ahead, and the final table covers every round.
+  on it, their own reference editors included. Its hash is public now; the exam and its
+  seed are published when the season closes.
+- **Choosing when the season closes.** They can see held-out results from their own
+  machine while it runs. The close is announced two weeks ahead, and the final table
+  covers every round.
 - **Choosing the moment a round is scheduled**, and with it the crawl. Not the seed.
 - **Drawing when they said they would.** A draw can be put off, for a round still being
   graded or for want of entries, and an organiser could put one off for a worse reason
   after seeing its beacon value. Every round's page lists the draws it was announced for
   and left, and verifiers keep their own record of what they were told.
 
-They are not trusted with the seed, the corpus, the exam draw or the arithmetic: all of
-those can be checked by anyone, and the client checks them every time.
+They are not trusted with the seed, the corpus, the exam draw, the arithmetic, running
+your editor or grading it. All of those are done by other people or can be checked by
+anyone.

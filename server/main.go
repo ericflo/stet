@@ -46,7 +46,10 @@ type Config struct {
 	QualifyRounds    int // rounds every entry is given
 	RatedRounds      int // rounds before an editor is ranked
 	Lease            time.Duration
-	ReplicaWait      time.Duration // how long a graded round waits for volunteers who have started
+	ReplicaWait      time.Duration // how long a round waits for people who have started, and before giving up what nobody is there to do
+	EstablishAfter   int           // grades that must have agreed before an account's grades count and it may run editors
+	RunsPerEntry     int           // times each entry is run, by different people, before a third is wanted
+	ActiveWindow     time.Duration // how recently a verifier must have asked for work to be counted as around
 	FixedCrawl       *Crawl
 	RequireGithub    bool
 	GithubMinAgeDays int
@@ -63,8 +66,8 @@ type App struct {
 	site   *Site
 	limits *limiter
 	// One token per large request body in memory: entrants' bundles, and apart from them
-	// the anchors' scripts and files.
-	uploads, anchorUploads chan struct{}
+	// the runners' scripts and the organisers' files.
+	uploads, runnerUploads chan struct{}
 }
 
 func env(key, def string) string {
@@ -113,15 +116,19 @@ func loadConfig(season *Season) (Config, error) {
 		AnchorKeys:    map[string]bool{},
 		Scale:         env("STET_SCALE", season.OfficialScale),
 		RoundInterval: envDuration("STET_ROUND_INTERVAL", 6*time.Hour),
-		// An anchor edits and grades every entry, about 12 minutes each at the official
-		// scale. A full round is the ladder plus three rounds' worth of newcomers: 17
-		// entries, a little over three hours of one anchor, inside the six between draws.
+		// Running an entry and grading its script take about 12 minutes each at the
+		// official scale. A full round is the ladder plus three rounds' worth of newcomers:
+		// 17 entries, a little over three hours of one machine doing everything once, inside
+		// the six between draws. With two machines every entry is run twice in the same time.
 		MaxNewPerRound:   envInt("STET_MAX_NEW_PER_ROUND", 3),
 		LadderSize:       envInt("STET_LADDER_SIZE", 8),
 		QualifyRounds:    envInt("STET_QUALIFY_ROUNDS", 3),
 		RatedRounds:      envInt("STET_RATED_ROUNDS", 3),
 		Lease:            envDuration("STET_LEASE", 3*time.Hour),
 		ReplicaWait:      envDuration("STET_REPLICA_WAIT", 45*time.Minute),
+		EstablishAfter:   envInt("STET_ESTABLISH_AFTER", 5),
+		RunsPerEntry:     envInt("STET_RUNS_PER_ENTRY", 2),
+		ActiveWindow:     envDuration("STET_ACTIVE_WINDOW", 10*time.Minute),
 		RequireGithub:    envBool("STET_REQUIRE_GITHUB", !dev),
 		GithubMinAgeDays: envInt("STET_GITHUB_MIN_AGE_DAYS", 30),
 		GithubToken:      os.Getenv("STET_GITHUB_TOKEN"),
@@ -224,11 +231,20 @@ func newApp(ctx context.Context, cfg Config, season *Season, kv KV, blobs Blobs)
 	if cfg.APIURL == "" {
 		cfg.APIURL = cfg.BaseURL
 	}
+	if cfg.RunsPerEntry < 1 {
+		cfg.RunsPerEntry = 2
+	}
+	if cfg.ActiveWindow <= 0 {
+		cfg.ActiveWindow = 10 * time.Minute
+	}
+	if cfg.EstablishAfter < 1 { // standing is always earned
+		cfg.EstablishAfter = 5
+	}
 	st, err := openStore(ctx, kv, blobs, cfg.AnchorKeys)
 	if err != nil {
 		return nil, err
 	}
-	a := &App{cfg: cfg, st: st, season: season, limits: newLimiter(), uploads: make(chan struct{}, 4), anchorUploads: make(chan struct{}, 2)}
+	a := &App{cfg: cfg, st: st, season: season, limits: newLimiter(), uploads: make(chan struct{}, 4), runnerUploads: make(chan struct{}, 4)}
 	githubToken = cfg.GithubToken
 	a.site, err = newSite(a)
 	return a, err
@@ -279,7 +295,7 @@ func main() {
 		app.st.flush(shut)
 	}()
 	slog.Info("listening", "revision", revision, "addr", cfg.Addr, "season", season.ID, "scale", cfg.Scale, "site", cfg.BaseURL, "api", cfg.APIURL,
-		"records", kv.Describe(), "files", blobs.Describe(), "anchors", len(cfg.AnchorKeys), "dev", cfg.Dev)
+		"records", kv.Describe(), "files", blobs.Describe(), "organisers", len(cfg.AnchorKeys), "dev", cfg.Dev)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		slog.Error("server", "err", err)
 		os.Exit(1)

@@ -2,7 +2,7 @@
 
 The two halves are deliberately separate. *Editing* runs an entrant's program and yields an
 edit script. *Grading* turns a script into a score and runs no entrant code at all. In the
-competition, official edits happen on the organisers' anchor machines and anyone's GPU can
+competition, official edits happen in the sandbox on volunteers' machines and anyone's GPU can
 grade the published scripts.
 """
 
@@ -29,7 +29,7 @@ def baseline(rnd: Round, scale: Scale, device=None, progress=None, log=None) -> 
     device = pick_device(device) if not hasattr(device, "type") else device
     path = data.round_dir(rnd, scale) / f"baseline-{HARNESS_VERSION}-{device.type}.json"
     cached = _cached(path)
-    # An anchor needs the held-out exam's baseline too, so a baseline measured before the
+    # A machine that holds the held-out exam needs its baseline too, so a baseline measured before the
     # pack was put in place is measured again.
     if cached is not None and ("heldout" in cached or data.heldout_exam(rnd, scale) is None):
         return cached
@@ -82,12 +82,14 @@ def edit_round(
     limits: dict | None = None,
     assets=(),
     time_limit: float | None = None,
+    verify_assets: bool = False,
 ) -> EditRun:
     """Run an editor on a round's corpus. Never raises on editor failure.
 
     The files the editor named by reference are fetched first, before its clock starts.
-    A file that cannot be fetched raises data.FetchError: that is the network's failure or
-    the host's, and no run of the editor.
+    A file that cannot be fetched because the host is away raises data.FetchError: that
+    is the network's failure, and no run of the editor. A file that is no longer there,
+    or no longer the bytes the entry names, is the entry's: a run that failed.
     """
     log = log or (lambda msg: None)
     corpus = data.corpus(rnd, scale)
@@ -96,7 +98,12 @@ def edit_round(
         from . import assets as assets_
 
         log(f"assets: {len(assets)} files, {sum(a.size for a in assets) / 2**30:.2f} GiB")
-        assets_.fetch(list(assets))
+        try:
+            assets_.fetch(list(assets), verify=verify_assets)
+        except assets_.Unavailable as e:
+            log(f"editor not run: {e}")
+            limit = float(scale.edit_seconds if time_limit is None else time_limit)
+            return EditRun("error", 0.0, limit, None, None, "", sandbox, reason=str(e))
         assets_.prune(keep=list(assets))
     limit = float(scale.edit_seconds if time_limit is None else time_limit)
     log(f"editing (limit {limit:.0f}s, sandbox: {sandbox}) ...")

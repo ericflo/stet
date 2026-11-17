@@ -58,31 +58,41 @@ func readBody(w http.ResponseWriter, r *http.Request, limit int64) ([]byte, erro
 // signed authenticates a request and returns a copy of the account behind it. With
 // mustExist, the key must belong to an account.
 func (a *App) signed(w http.ResponseWriter, r *http.Request, limit int64, mustExist bool) (*Account, string, []byte, error) {
-	return a.signedBy(w, r, limit, mustExist, false)
+	return a.signedBy(w, r, limit, mustExist, anyone)
 }
+
+// Who a request must come from.
+const (
+	anyone     = iota
+	runners    // established accounts: the ones that are handed editors to run
+	organisers // the organisers' accounts
+)
 
 // A body larger than this is an upload: only so many are held in memory at once.
 const uploadBytes = 2 << 20
 
-// signedBy is signed, with the option of admitting anchors only.
+// signedBy is signed, with the option of admitting only runners or only organisers.
 //
 // An upload is proved before any of it is read. The client sends the hash of the body it
 // signed, so the signature can be checked from the headers alone; only then is the upload
 // counted against the account and given one of the few places for large bodies. A key is
 // public, and naming someone else's must cost them nothing. The place is kept until the
-// handler has finished with the body, and anchors have places of their own, so that no
-// amount of entrants' traffic keeps an anchor's script from arriving.
-func (a *App) signedBy(w http.ResponseWriter, r *http.Request, limit int64, mustExist, anchorsOnly bool) (*Account, string, []byte, error) {
+// handler has finished with the body, and runners have places of their own, so that no
+// amount of entrants' traffic keeps a run's script from arriving.
+func (a *App) signedBy(w http.ResponseWriter, r *http.Request, limit int64, mustExist bool, who int) (*Account, string, []byte, error) {
 	key, err := claimedKey(r)
 	if err != nil {
 		return nil, "", nil, fail(401, "%s", err.Error())
 	}
 	acct := a.accountByKey(key)
-	if acct == nil && (mustExist || anchorsOnly) {
+	if acct == nil && (mustExist || who != anyone) {
 		return nil, "", nil, fail(401, "no account for this key; run `stet login`")
 	}
-	if anchorsOnly && !acct.Anchor {
-		return nil, "", nil, fail(403, "anchors only")
+	switch {
+	case who == organisers && !acct.Anchor:
+		return nil, "", nil, fail(403, "organisers only")
+	case who == runners && !a.established(acct):
+		return nil, "", nil, fail(403, "editors are run by established verifiers only")
 	}
 	sum, proved := strings.ToLower(r.Header.Get("X-Stet-Body")), false
 	if limit > uploadBytes {
@@ -93,9 +103,9 @@ func (a *App) signedBy(w http.ResponseWriter, r *http.Request, limit int64, must
 			return nil, "", nil, fail(401, "%s", err.Error())
 		}
 		proved = true
-		// The only upload that is not an anchor's is an entry, so whoever may not enter
-		// has no call on a place either.
-		if !anchorsOnly && acct != nil {
+		// The only upload that is not a runner's or an organiser's is an entry, so whoever
+		// may not enter has no call on a place either.
+		if who == anyone && acct != nil {
 			if err := a.mayEnter(acct); err != nil {
 				return nil, "", nil, err
 			}
@@ -104,8 +114,8 @@ func (a *App) signedBy(w http.ResponseWriter, r *http.Request, limit int64, must
 			return nil, "", nil, fail(429, "that is a great many uploads in an hour; try again later")
 		}
 		pool := a.uploads
-		if anchorsOnly {
-			pool = a.anchorUploads
+		if who != anyone {
+			pool = a.runnerUploads
 		}
 		select {
 		case pool <- struct{}{}:
@@ -347,6 +357,7 @@ func (a *App) apiSeason(w http.ResponseWriter, r *http.Request) {
 		"beacon": a.season.Beacon, "pools": a.season.Pools, "tolerance": a.tolerance(), "record": a.season.Record,
 		"grade_devices": a.season.GradeDevices, "site": a.cfg.BaseURL, "api": a.cfg.APIURL,
 		"requires_github": a.cfg.RequireGithub, "server": revision,
+		"establish_after": a.cfg.EstablishAfter, "runs_per_entry": a.cfg.RunsPerEntry,
 		"exam_sha256": a.season.ExamSHA256, "heldout_exam_sha256": a.season.HeldoutSHA256,
 	}
 	if name, version := a.site.wheel(); name != "" {
@@ -366,8 +377,13 @@ func (a *App) apiSeason(w http.ResponseWriter, r *http.Request) {
 
 // --- accounts -------------------------------------------------------------------------------
 
-func accountJSON(c *Account) map[string]any {
-	return map[string]any{"handle": c.Handle, "github": c.Github, "created_at": c.CreatedAt, "anchor": c.Anchor, "trusted": c.Anchor}
+// accountJSON is an account as the API shows it. "anchor" and "trusted" both say that it is
+// one of the organisers' accounts; "established" says that its grades count towards scores
+// and that it may run editors, which the organisers' accounts do from the start and anyone
+// else earns.
+func (a *App) accountJSON(c *Account) map[string]any {
+	return map[string]any{"handle": c.Handle, "github": c.Github, "created_at": c.CreatedAt, "anchor": c.Anchor, "trusted": c.Anchor,
+		"established": a.established(c)}
 }
 
 func (a *App) apiCreateAccount(w http.ResponseWriter, r *http.Request) {
@@ -377,7 +393,7 @@ func (a *App) apiCreateAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if existing != nil {
-		writeJSON(w, 200, map[string]any{"account": accountJSON(existing)})
+		writeJSON(w, 200, map[string]any{"account": a.accountJSON(existing)})
 		return
 	}
 	var req struct {
@@ -402,7 +418,7 @@ func (a *App) apiCreateAccount(w http.ResponseWriter, r *http.Request) {
 	err = a.st.update(r.Context(), func(tx *Tx) error {
 		s := tx.s
 		if acct := s.byPubkey[key]; acct != nil { // two requests raced; the first one won
-			out, status = accountJSON(acct), 200
+			out, status = a.accountJSON(acct), 200
 			return nil
 		}
 		if s.byHandle[handle] != nil {
@@ -413,7 +429,7 @@ func (a *App) apiCreateAccount(w http.ResponseWriter, r *http.Request) {
 		s.Meta.NextAccount++
 		tx.put(metaKey, &s.Meta)
 		tx.saveAccount(acct)
-		out = accountJSON(acct)
+		out = a.accountJSON(acct)
 		return nil
 	})
 	if err != nil {
@@ -524,7 +540,7 @@ func (a *App) apiLinkGithub(w http.ResponseWriter, r *http.Request) {
 		}
 		me.Github, me.GithubID, me.GithubCreatedAt = login, ghID, created
 		tx.saveAccount(me)
-		out = accountJSON(me)
+		out = a.accountJSON(me)
 		return nil
 	})
 	if err != nil {
@@ -534,14 +550,19 @@ func (a *App) apiLinkGithub(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"account": out})
 }
 
-func verifierStats(s *State, c *Account) map[string]any {
+// verifierStats is an account's standing as a verifier. An account is established when
+// "validated" has reached "establish_after", it is not muted, and (where entering needs a
+// GitHub identity) it has one: "needs_github" says that is what is missing.
+func (a *App) verifierStats(s *State, c *Account) map[string]any {
 	recent, agreed, streak := recentAgreed(s)[c.ID], c.Agreed, c.Streak
 	if c.Anchor {
-		// An anchor sets the scores; it does not agree with them. (An account that became an
-		// anchor may carry counts from before.)
+		// The organisers' accounts start out established, and their grades earn them
+		// nothing. (An account that became one may carry counts from before.)
 		recent, agreed, streak = 0, 0, 0
 	}
-	return map[string]any{"validated": agreed, "recent": recent, "streak": streak, "trusted": c.Anchor, "strikes": c.Strikes, "muted": muted(c, now()), "gpu_hours": c.GPUSeconds / 3600, "priority": recent}
+	return map[string]any{"validated": agreed, "recent": recent, "streak": streak, "trusted": c.Anchor, "established": a.established(c),
+		"establish_after": a.cfg.EstablishAfter, "needs_github": !c.Anchor && a.mayEnter(c) != nil, "runs": c.Runs, "strikes": c.Strikes,
+		"muted": muted(c, now()), "gpu_hours": c.GPUSeconds / 3600, "priority": recentWork(s)[c.ID]}
 }
 
 func (a *App) apiMe(w http.ResponseWriter, r *http.Request) {
@@ -566,7 +587,7 @@ func (a *App) apiMe(w http.ResponseWriter, r *http.Request) {
 			}
 			editors = append(editors, j)
 		}
-		out = map[string]any{"account": accountJSON(me), "verifier": verifierStats(s, me), "editors": editors, "next_round": a.announcement(s)}
+		out = map[string]any{"account": a.accountJSON(me), "verifier": a.verifierStats(s, me), "editors": editors, "next_round": a.announcement(s)}
 	})
 	writeJSON(w, 200, out)
 }
@@ -652,23 +673,135 @@ func places5p(v *float64) *float64 {
 	return &r
 }
 
+// RunView is one run of an entry as the API and the site show it, once it is public.
+type RunView struct {
+	N           int      `json:"n"`
+	By          string   `json:"by"`
+	GPU         string   `json:"gpu,omitempty"`
+	Backend     string   `json:"backend,omitempty"`
+	EditSeconds float64  `json:"edit_seconds"`
+	Status      string   `json:"status"` // ok | failed; or dropped: nobody could check it, and it counts for nothing
+	Reason      string   `json:"reason,omitempty"`
+	Script      string   `json:"script,omitempty"`
+	ScriptSize  int64    `json:"script_size,omitempty"`
+	Gain        float64  `json:"gain"`
+	Loss        *float64 `json:"loss,omitempty"` // the round's unedited loss less the gain
+	Self        bool     `json:"self,omitempty"` // its only established grade is its own runner's
+	Grades      []Grade  `json:"grades"`
+}
+
+// runViews lists a settled entry's runs, with every grade of each. An open entry has none
+// to show: runs are sealed with the grades.
+func (a *App) runViews(s *State, e *Entry) []RunView {
+	out := []RunView{}
+	rd := s.Rounds[e.RoundIdx]
+	if e.Status != "settled" || rd == nil || rd.Status != "settled" { // an entry given up early does not unseal anything
+		return out
+	}
+	handle := func(id int64) string {
+		if acct := s.Accounts[id]; acct != nil {
+			return acct.Handle
+		}
+		return "unknown"
+	}
+	lossOf := func(gain float64) *float64 {
+		if rd == nil || rd.Status != "settled" || rd.BaselineLoss == nil {
+			return nil
+		}
+		loss := places5(*rd.BaselineLoss - gain)
+		return &loss
+	}
+	for _, run := range e.Runs {
+		v := RunView{N: run.N, By: handle(run.By), GPU: run.GPU, Backend: run.Backend, Status: "failed", Reason: run.Reason,
+			Script: run.Script, ScriptSize: run.ScriptSize, Gain: places5(run.Gain), Self: run.Self, Grades: run.Grades}
+		if run.Edit != nil {
+			v.EditSeconds = run.Edit.Seconds
+		}
+		switch {
+		case run.Dropped:
+			v.Status = "dropped"
+		case run.Valid:
+			v.Status, v.Loss = "ok", lossOf(run.Gain)
+		}
+		if v.Grades == nil {
+			v.Grades = []Grade{}
+		}
+		out = append(out, v)
+	}
+	if len(e.Runs) > 0 || e.EditedAt == 0 {
+		return out
+	}
+	// Settled before harness 0.3.0: one run, on the organisers' machine, whose own grade of
+	// the script was the score. Shown in the same shape, and said to be what it was.
+	v := RunView{N: 1, By: handle(e.EditedBy), Status: "failed", Reason: e.Reason, Script: e.Script, ScriptSize: e.ScriptSize,
+		Gain: places5(e.Gain), Grades: []Grade{}}
+	if e.Edit != nil {
+		v.EditSeconds = e.Edit.Seconds
+	}
+	if e.Valid {
+		v.Status, v.Loss, v.Reason = "ok", e.Loss, ""
+	}
+	if d := e.Detail; d != nil && e.Script != "" {
+		if len(d.Verifiers) > 0 {
+			g := Grade{Handle: d.Verifiers[0], Verdict: "agreed", Valid: e.Valid, Self: d.Verifiers[0] == v.By, Counted: true, Established: true}
+			if e.Valid {
+				gain := places5(e.Gain)
+				g.Loss, g.Gain = e.Loss, &gain
+			}
+			v.Self = g.Self
+			v.Grades = append(v.Grades, g)
+		}
+		for _, rep := range d.Replications {
+			g := Grade{Handle: rep.Handle, Verdict: rep.Verdict, Valid: rep.Valid, Loss: rep.Loss, First: rep.First}
+			switch rep.Verdict {
+			case "differs":
+				g.Verdict = "outlier"
+			case "no anchor grade":
+				g.Verdict = "no established grade"
+			}
+			if rep.Loss != nil && rep.BaseDiff != nil && rd != nil && rd.BaselineLoss != nil {
+				gain := places5(*rd.BaselineLoss + *rep.BaseDiff - *rep.Loss)
+				g.Gain = &gain
+			}
+			v.Grades = append(v.Grades, g)
+		}
+	}
+	return append(out, v)
+}
+
 // entryJSON is the public face of an entry. Sealed until settled: an open entry says
-// nothing about any grade it may have.
+// nothing about its runs, the scripts they wrote, or any grade of them.
 func (a *App) entryJSON(s *State, e *Entry) map[string]any {
 	ed, rd := s.Editors[e.EditorID], s.Rounds[e.RoundIdx]
 	j := map[string]any{"round": roundID(a.season.ID, e.RoundIdx), "editor": e.EditorID, "name": ed.Name, "version": ed.Version,
 		"owner": s.owner(ed).Handle, "status": e.Status, "stage": "editing"}
-	if e.EditedAt > 0 {
+	if len(e.Runs) > 0 || e.EditedAt > 0 {
 		j["stage"] = "grading"
-		j["edit"] = e.Edit
-		if e.Script != "" {
-			j["script"] = map[string]any{"sha256": e.Script, "size": e.ScriptSize, "url": a.cfg.APIURL + "/api/v1/scripts/" + e.Script}
-		}
 	}
 	if e.Status != "settled" {
 		return j
 	}
 	j["stage"] = "settled"
+	// The run the score is nearest to stands for the entry where one script is wanted.
+	if e.EditedAt > 0 {
+		j["edit"] = e.Edit
+		if e.Script != "" {
+			j["script"] = map[string]any{"sha256": e.Script, "size": e.ScriptSize, "url": a.cfg.APIURL + "/api/v1/scripts/" + e.Script}
+		}
+	}
+	// The runs the score is made of, and apart from them any that nobody could check.
+	runs, dropped := []RunView{}, []RunView{}
+	for _, run := range a.runViews(s, e) {
+		if run.Status == "dropped" {
+			dropped = append(dropped, run)
+		} else {
+			runs = append(runs, run)
+		}
+	}
+	j["runs"], j["n_runs"], j["confirmed"], j["runs_differ"] = runs, len(runs), e.Confirmed, e.RunsDiffer
+	if len(dropped) > 0 {
+		j["dropped_runs"] = dropped
+	}
 	j["valid"], j["results"], j["settled_at"] = e.Valid, e.NResults, e.SettledAt
 	if rd.BaselineLoss != nil && rd.Status == "settled" { // an entry settled invalid does not unseal the round
 		j["baseline"] = *rd.BaselineLoss
@@ -886,41 +1019,34 @@ func (a *App) apiLeaderboard(w http.ResponseWriter, r *http.Request) {
 var gpuNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9 ()\[\]._+/@:-]{0,59}$`)
 
 type VerifierRow struct {
-	Handle    string  `json:"handle"`
-	Github    string  `json:"github,omitempty"`
-	Validated int     `json:"validated"`
-	Recent    int     `json:"recent"`
-	Streak    int     `json:"streak"`
-	Trusted   bool    `json:"trusted"`
-	Anchor    bool    `json:"anchor,omitempty"`
-	GPUHours  float64 `json:"gpu_hours"`
-	GPU       string  `json:"gpu,omitempty"`
-	LastSeen  int64   `json:"last_seen"`
+	Handle      string  `json:"handle"`
+	Github      string  `json:"github,omitempty"`
+	Validated   int     `json:"validated"`
+	Recent      int     `json:"recent"`
+	Streak      int     `json:"streak"`
+	Runs        int     `json:"runs"`             // editors it has run
+	Established bool    `json:"established"`      // its grades count towards scores, and it may run editors
+	Trusted     bool    `json:"trusted"`          // one of the organisers' accounts
+	Anchor      bool    `json:"anchor,omitempty"` // the same, under its older name
+	GPUHours    float64 `json:"gpu_hours"`
+	GPU         string  `json:"gpu,omitempty"`
+	LastSeen    int64   `json:"last_seen"`
 }
 
-// verifiers lists the anchors and every volunteer with a grade that has agreed with an
-// anchor's, most active in the last two weeks first. Asking for work puts nobody on it.
-func verifiers(s *State) []VerifierRow {
+// verifiers lists the organisers' accounts and every volunteer with a grade that has agreed
+// or an editor run, most active in the last two weeks first. Asking for work puts nobody
+// on it.
+func (a *App) verifiers(s *State) []VerifierRow {
 	recent := recentAgreed(s)
 	out := []VerifierRow{}
 	for _, c := range s.Accounts {
-		if muted(c, now()) || (c.Agreed == 0 && !c.Anchor) {
+		if muted(c, now()) || (c.Agreed == 0 && c.Runs == 0 && !c.Anchor) {
 			continue
 		}
-		var h struct {
-			GPU    string `json:"gpu"`
-			Device string `json:"device"`
-		}
-		json.Unmarshal(c.Hardware, &h)
-		if !gpuNameRe.MatchString(h.GPU) {
-			h.GPU = ""
-			if gpuNameRe.MatchString(h.Device) {
-				h.GPU = h.Device
-			}
-		}
-		row := VerifierRow{Handle: c.Handle, Github: c.Github, Validated: c.Agreed, Recent: recent[c.ID], Streak: c.Streak,
-			Trusted: c.Anchor, Anchor: c.Anchor, GPUHours: c.GPUSeconds / 3600, GPU: h.GPU, LastSeen: c.LastSeen}
-		if c.Anchor { // an anchor's grades are what the others agree with
+		row := VerifierRow{Handle: c.Handle, Github: c.Github, Validated: c.Agreed, Recent: recent[c.ID], Streak: c.Streak, Runs: c.Runs,
+			Established: a.established(c), Trusted: c.Anchor, Anchor: c.Anchor, GPUHours: c.GPUSeconds / 3600,
+			GPU: readHardware(c.Hardware).gpuName(), LastSeen: c.LastSeen}
+		if c.Anchor { // established from the start: its grades earn it nothing
 			row.Validated, row.Recent, row.Streak = 0, 0, 0
 		}
 		out = append(out, row)
@@ -945,7 +1071,7 @@ func verifiers(s *State) []VerifierRow {
 
 func (a *App) apiVerifiers(w http.ResponseWriter, r *http.Request) {
 	var out []VerifierRow
-	a.st.view(func(s *State) { out = verifiers(s) })
+	a.st.view(func(s *State) { out = a.verifiers(s) })
 	writeJSON(w, 200, map[string]any{"verifiers": out})
 }
 
@@ -989,23 +1115,32 @@ func (a *App) apiClaim(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, fail(400, "malformed request"))
 		return
 	}
-	job, err := a.claim(r.Context(), acct.ID, &h)
+	handed, err := a.claim(r.Context(), acct.ID, &h)
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	out := map[string]any{"job": job}
-	a.st.view(func(s *State) { out["announced"] = a.announcement(s) })
-	if job == nil {
+	out := map[string]any{"job": handed.Job}
+	if handed.Runner != nil {
+		out["runner"] = handed.Runner // whether this machine is handed editors to run, and if not, why
+	}
+	open := false
+	a.st.view(func(s *State) { out["announced"], open = a.announcement(s), len(openRounds(s)) > 0 })
+	if handed.Job == nil {
 		out["retry_after"] = 60
-		out["message"] = "No work right now. Scripts to grade appear when a round is drawn."
+		out["message"] = "No work right now. Editors to run and scripts to grade appear when a round is drawn."
+		if open {
+			// A verifier is offered each job once, never its own entry, and never a script
+			// that it alone wrote: with a round open, that is why there is nothing for it.
+			out["message"] = "Nothing in the open round is this machine's to do right now: it is waiting on other verifiers."
+		}
 	}
 	writeJSON(w, 200, out)
 }
 
 func (a *App) apiScript(w http.ResponseWriter, r *http.Request) {
 	// base64 of a compressed script, plus the report around it
-	acct, _, body, err := a.signedBy(w, r, a.season.maxScriptBlob(), true, true)
+	acct, _, body, err := a.signedBy(w, r, a.season.maxScriptBlob(), true, runners)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -1063,23 +1198,17 @@ func (a *App) apiRelease(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"released": true})
 }
 
-// apiAdminDraw lets an anchor bring the next draw forward to the next moment on the grid
-// instead of waiting for the schedule's.
 // apiAdminFile publishes a download under /files/. It exists for one file a season: the
 // exam pack, which every client fetches by name and checks against the hash in its season
 // file, so a wrong upload is refused by clients, not trusted.
 func (a *App) apiAdminFile(w http.ResponseWriter, r *http.Request) {
-	acct, _, body, err := a.signedBy(w, r, 128<<20, true, true)
+	acct, _, body, err := a.signedBy(w, r, 128<<20, true, organisers)
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	if !acct.Anchor {
-		writeErr(w, fail(403, "anchors only"))
-		return
-	}
 	// An organiser publishes two files this way whose hashes the season already gives: the
-	// exam, and, on the day the season closes, the held-out exam. A stolen anchor key
+	// exam, and, on the day the season closes, the held-out exam. A stolen organiser's key
 	// publishes nothing else while the season runs.
 	name := r.PathValue("name")
 	sum := sha256.Sum256(body)
@@ -1127,6 +1256,8 @@ func (a *App) apiAdminFile(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 201, map[string]any{"name": name, "bytes": len(body), "sha256": got, "url": a.cfg.APIURL + "/files/" + name})
 }
 
+// apiAdminDraw lets an organiser bring the next draw forward to the next moment on the grid
+// instead of waiting for the schedule's.
 func (a *App) apiAdminDraw(w http.ResponseWriter, r *http.Request) {
 	acct, _, _, err := a.signed(w, r, 1<<10, true)
 	if err != nil {
@@ -1134,7 +1265,7 @@ func (a *App) apiAdminDraw(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !acct.Anchor {
-		writeErr(w, fail(403, "anchors only"))
+		writeErr(w, fail(403, "organisers only"))
 		return
 	}
 	rd, err := a.bringForward(r.Context())

@@ -5,3 +5,6 @@ technique = ""            # a few words for the record table, e.g. "fastText qua
 entry = "python editor.py"
 parent = ""               # the editor id this was forked from, if any
 license = "MIT"           # an editor is published when it is first drawn into a round
+
+# Model weights are named here, not bundled: `stet asset add <owner>/<repository>` writes the
+# [[assets]] tables. They are in place, read-only, when the editor starts.

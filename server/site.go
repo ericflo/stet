@@ -434,44 +434,48 @@ type ScriptStats struct {
 }
 
 type EntryView struct {
-	Round        string
-	RoundIdx     int
-	EditorID     string
-	Name         string
-	Version      int
-	Owner        string
-	Stage        string // editing | grading | settled
-	Settled      bool
-	Valid        bool
-	Loss         float64
-	Gain         float64
-	Baseline     float64
-	BySource     map[string]float64
-	Reason       string
-	Void         bool // the anchors could not run it; the round does not count for it
-	Results      int
-	SettledAt    int64
-	Replicas     int      // volunteers whose grade agreed with the anchor's
-	Disputed     int      // and those whose grade did not
-	Together     bool     // two of those found the same thing as each other
-	Verifiers    []string // the anchor first
-	Replications []Replication
-	Edit         *EditReport
-	ScriptSHA    string
-	ScriptSize   int64
-	HasStats     bool
-	Script       ScriptStats
-	Train        *TrainInfo
+	Round      string
+	RoundIdx   int
+	EditorID   string
+	Name       string
+	Version    int
+	Owner      string
+	Stage      string // editing | grading | settled
+	Settled    bool
+	Valid      bool
+	Loss       float64
+	Gain       float64
+	Baseline   float64
+	BySource   map[string]float64
+	Reason     string
+	Void       bool // nobody could run it, or check its run; the round does not count for it
+	Results    int
+	SettledAt  int64
+	Replicas   int         // graders, beyond the first, whose grades agreed
+	Disputed   int         // and those whose grade did not
+	Together   bool        // two established graders disagreed, with nobody to say which was right
+	Verifiers  []string    // those whose grades are the score first
+	Runs       []RunView   // every run of it, with every grade of each
+	NRuns      int         // those that count
+	Confirmed  bool        // two people's runs agree, and none rests on its own runner's grade
+	RunsDiffer bool        // no two runs agree
+	Own        bool        // a run's gain rests on a grade by its own runner
+	Edit       *EditReport // the run the score is nearest to: its edit, its script
+	ScriptSHA  string
+	ScriptSize int64
+	HasStats   bool
+	Script     ScriptStats
+	Train      *TrainInfo
 }
 
 // entryView is the public face of an entry. Sealed until settled: an open entry says
-// nothing about any grade it may have.
+// nothing about its runs, the scripts they wrote, or any grade of them.
 func (a *App) entryView(s *State, e *Entry) EntryView {
 	ed := s.Editors[e.EditorID]
 	v := EntryView{Round: roundID(a.season.ID, e.RoundIdx), RoundIdx: e.RoundIdx, EditorID: e.EditorID, Name: ed.Name, Version: ed.Version,
 		Owner: s.owner(ed).Handle, Stage: "editing"}
-	if e.EditedAt > 0 {
-		v.Stage, v.Edit, v.ScriptSHA, v.ScriptSize = "grading", e.Edit, e.Script, e.ScriptSize
+	if len(e.Runs) > 0 || e.EditedAt > 0 {
+		v.Stage = "grading"
 	}
 	if e.Status != "settled" {
 		return v
@@ -479,12 +483,22 @@ func (a *App) entryView(s *State, e *Entry) EntryView {
 	v.Stage, v.Settled, v.Valid, v.Gain, v.BySource = "settled", true, e.Valid, e.Gain, e.BySource
 	v.Reason, v.Results, v.SettledAt, v.Void = e.Reason, e.NResults, e.SettledAt, e.Void
 	v.Loss = deref(e.Loss)
+	if e.EditedAt > 0 {
+		v.Edit, v.ScriptSHA, v.ScriptSize = e.Edit, e.Script, e.ScriptSize
+	}
+	v.Runs, v.Confirmed, v.RunsDiffer = a.runViews(s, e), e.Confirmed, e.RunsDiffer
+	for _, run := range v.Runs {
+		if run.Status != "dropped" {
+			v.NRuns++
+			v.Own = v.Own || run.Self
+		}
+	}
 	if rd := s.Rounds[e.RoundIdx]; rd.Status == "settled" { // an entry settled invalid does not unseal the round
 		v.Baseline = deref(rd.BaselineLoss)
 	}
 	if d := e.Detail; d != nil {
 		v.Verifiers, v.Train, v.Disputed, v.Replicas = d.Verifiers, d.Train, d.Disputed, max(0, len(d.Verifiers)-1)
-		v.Together, v.Replications = d.DisputedTogether, d.Replications
+		v.Together = d.DisputedTogether
 		v.HasStats = len(d.Script) > 0 && json.Unmarshal(d.Script, &v.Script) == nil
 	}
 	return v
@@ -569,7 +583,7 @@ func (a *App) roundSummary(s *State, r *Round) roundSummary {
 	}
 	for _, e := range s.inRound[r.Idx] {
 		rs.Entries++
-		if e.EditedAt > 0 || e.Status == "settled" {
+		if len(e.Runs) > 0 || e.EditedAt > 0 || e.Status == "settled" {
 			rs.Edited++
 		}
 		if e.Status != "settled" {
@@ -611,7 +625,7 @@ func (s *Site) home(w http.ResponseWriter, r *http.Request) {
 			d["Record"] = &recs[len(recs)-1]
 		}
 		d["Records"], d["RecordChart"] = recs, recordChart(recs)
-		vs := verifiers(st)
+		vs := a.verifiers(st)
 		active := 0
 		var gpuHours float64
 		for _, v := range vs {
@@ -876,21 +890,42 @@ func (s *Site) round(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sc := a.season.Scales[rs.Scale]
-	d := map[string]any{"R": rs, "ID": rs.ID, "Entries": entries, "Scale": sc, "Tolerance": a.tolerance()}
-	// Every volunteer's grade of the round, beside the anchor's, whatever it said.
-	type replica struct {
-		Replication
+	d := map[string]any{"R": rs, "ID": rs.ID, "Entries": entries, "Scale": sc, "Tolerance": a.tolerance(), "RunsPerEntry": a.cfg.RunsPerEntry}
+	// Every run of the round's entries, and every grade of every script they wrote, whatever
+	// it said. A script that two runs wrote has one set of grades.
+	type runRow struct {
+		RunView
 		Name, Owner, EditorID string
-		Anchor                float64
-		AnchorValid, Void     bool
 	}
-	var replicas []replica
+	type gradeRow struct {
+		Grade
+		Name, Owner, EditorID string
+		Runs                  string // the runs that wrote the script
+		ScriptGain            float64
+		ScriptValid, Dropped  bool
+	}
+	var runs []runRow
+	var grades []gradeRow
 	for _, e := range entries {
-		for _, rep := range e.Replications {
-			replicas = append(replicas, replica{rep, e.Name, e.Owner, e.EditorID, e.Loss, e.Valid, e.Void})
+		seen := map[string]bool{}
+		for _, run := range e.Runs {
+			runs = append(runs, runRow{run, e.Name, e.Owner, e.EditorID})
+			if run.Script == "" || seen[run.Script] {
+				continue
+			}
+			seen[run.Script] = true
+			var wrote []string
+			for _, o := range e.Runs {
+				if o.Script == run.Script {
+					wrote = append(wrote, strconv.Itoa(o.N))
+				}
+			}
+			for _, g := range run.Grades {
+				grades = append(grades, gradeRow{g, e.Name, e.Owner, e.EditorID, strings.Join(wrote, " and "), run.Gain, run.Status == "ok", run.Status == "dropped"})
+			}
 		}
 	}
-	d["Replicas"] = replicas
+	d["Runs"], d["Grades"] = runs, grades
 	// The command that re-grades an entry names it. Two versions of one editor can share a
 	// round (a rated editor and its successor), and then the name needs its version.
 	if len(entries) > 0 {
@@ -932,16 +967,22 @@ func (s *Site) round(w http.ResponseWriter, r *http.Request) {
 func (s *Site) verifiersPage(w http.ResponseWriter, r *http.Request) {
 	a := s.app
 	var vs []VerifierRow
-	a.st.view(func(st *State) { vs = verifiers(st) })
+	a.st.view(func(st *State) { vs = a.verifiers(st) })
 	var hours float64
-	var validated int
+	var validated, runs, established int
 	for _, v := range vs {
 		hours += v.GPUHours
 		validated += v.Validated
+		runs += v.Runs
+		if v.Established {
+			established++
+		}
 	}
 	s.render(w, 200, "verifiers", s.page(r, "Verifiers", "verifiers", map[string]any{
-		"Verifiers": vs, "Hours": hours, "Validated": validated, "MuteAfter": muteAfterStrikes, "MuteDays": muteFor / 86400, "ReplicaWait": a.cfg.ReplicaWait.Seconds(), "MaxReplicas": maxReplicas,
-		"Tolerance": a.tolerance(), "Devices": a.season.GradeDevices,
+		"Verifiers": vs, "Hours": hours, "Validated": validated, "Runs": runs, "Established": established, "MuteAfter": muteAfterStrikes,
+		"MuteDays": muteFor / 86400, "ReplicaWait": a.cfg.ReplicaWait.Seconds(), "MaxReplicas": maxReplicas,
+		"Tolerance": a.tolerance(), "Devices": a.season.GradeDevices, "EstablishAfter": a.cfg.EstablishAfter, "RunsPerEntry": a.cfg.RunsPerEntry,
+		"Floor": a.season.Runner,
 	}))
 }
 
@@ -961,7 +1002,7 @@ func (s *Site) account(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		c := *found
-		acct, stats = &c, verifierStats(st, found)
+		acct, stats = &c, a.verifierStats(st, found)
 		for _, e := range editorsOf(st, found.ID, 100) {
 			if e.Public {
 				eds = append(eds, row{linkTo(st, e), b.ByID[e.ID]})

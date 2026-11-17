@@ -205,13 +205,17 @@ def loop(monkeypatch):
 
     seen.interrupt = interrupt
 
+    seen.me = {"account": {"handle": "tester"}, "verifier": {"validated": 0}}
+
     def request(method, path, body=None, key=None, raw=False, timeout=120, limit=0):
         if path == "/api/v1/season":
             return {"scale": "nano"}
+        if path == "/api/v1/me":
+            return seen.me
         if path == "/api/v1/jobs/claim":
             if not seen.claims:
                 raise Stop
-            return {"job": seen.claims.pop(0)}
+            return {"job": seen.claims.pop(0), **({"runner": seen.runner.pop(0)} if getattr(seen, "runner", None) else {})}
         if path.endswith("/release"):
             seen.released.append((path, body["reason"]))
             return {}
@@ -401,21 +405,23 @@ def test_one_key_runs_one_verifier(loop, capsys):
     client.claim_key().close()  # and a verifier that has stopped leaves the key free
 
 
-def test_an_anchor_does_not_start_without_the_held_out_exam(loop, monkeypatch, capsys):
+def test_the_organisers_machine_does_not_start_without_the_held_out_exam(loop, monkeypatch, capsys):
     from stet import runner
 
     for check in ("bwrap_available", "scope_available", "sandbox_selftest"):
         monkeypatch.setattr(runner, check, lambda: (True, ""))
     monkeypatch.setattr(client, "_edit_job", lambda *a, **k: pytest.fail("an edit job was run"))
     loop.claims = [a_job()]
-    args = Args()
-    args.edits = True
+    loop.me = {"account": {"handle": "tester", "anchor": True}, "verifier": {}}
     with pytest.raises(SystemExit):
-        client.cmd_verify(args)
+        client.cmd_verify(Args())
     err = capsys.readouterr().err
     assert "does not hold it" in err and "heldout-s0.jsonl.zst" in err and "gap in the season's" in err and not loop.graded
-    with pytest.raises(Stop):  # a volunteer never holds it, and grades
-        client.cmd_verify(Args())
+    loop.me = {"account": {"handle": "tester"}, "verifier": {"established": True}}
+    args = Args()
+    args.edits = True
+    with pytest.raises(Stop):  # a volunteer never holds it: it grades, and it runs editors if it has the standing
+        client.cmd_verify(args)
     assert loop.graded == [7]
 
 
@@ -868,11 +874,13 @@ class AnchorArgs(Args):
 
 @pytest.fixture
 def anchor(loop, monkeypatch):
+    """The organisers' machine: the server says so, not a flag."""
     monkeypatch.setenv("STET_DEV", "1")
+    loop.me = {"account": {"handle": "tester", "anchor": True}, "verifier": {}}
     return loop
 
 
-def test_an_anchor_that_cannot_vouch_for_a_round_stops_with_the_job_in_hand(anchor, capsys):
+def test_the_organisers_machine_stops_with_the_job_in_hand_when_it_cannot_vouch_for_a_round(anchor, capsys):
     # Handing the job back would spend one of the few attempts an entry gets, and going on
     # to take and hand back the round's other jobs would void every entry in it.
     anchor.claims = [a_job(id=1), a_job(id=2)]
@@ -883,15 +891,17 @@ def test_an_anchor_that_cannot_vouch_for_a_round_stops_with_the_job_in_hand(anch
     err = capsys.readouterr().err
     assert "does not follow" in err and "Stopping with the job still held" in err
 
-    # A volunteer hands it back and takes no more of that round this session.
+    # A volunteer hands it back and takes no more of that round this session, whether or
+    # not it runs editors.
+    anchor.me = {"account": {"handle": "tester"}, "verifier": {"established": True}}
     anchor.claims, anchor.graded[:] = [a_job(id=3), a_job(id=4), a_job(id=5, round={"id": "s0-o00002"})], []
     anchor.grade = [client.RoundRefused("the seed does not follow"), None]
     with pytest.raises(Stop):
-        client.cmd_verify(Args())
+        client.cmd_verify(AnchorArgs())
     assert anchor.graded == [3, 5] and [p for p, _ in anchor.released] == ["/api/v1/jobs/3/release", "/api/v1/jobs/4/release"]
 
 
-def test_an_anchor_does_not_walk_away_from_a_round_over_refused_results(anchor):
+def test_the_organisers_machine_does_not_walk_away_from_a_round_over_refused_results(anchor):
     # Two results the server will not have is a reason for a volunteer to leave the round
     # alone. An anchor that took and handed back every other job of it would void them all.
     anchor.claims = [a_job(id=n) for n in (1, 2, 3)]
@@ -907,16 +917,18 @@ def test_a_result_that_could_not_be_delivered_is_not_a_refusal(anchor, capsys):
     for err in (client.ApiError(0, "gave up reporting after many attempts"), client.ApiError(500, "could not store the script"), client.ApiError(426, "upgrade")):
         anchor.claims, anchor.report = [a_job(id=1), a_job(id=2)], err
         anchor.graded[:], anchor.released[:] = [], []
-        # An anchor stops with the job still its own: started again it is given the same
-        # job, and the entry has lost none of its attempts.
+        anchor.me = {"account": {"handle": "tester", "anchor": True}, "verifier": {}}
+        # The organisers' machine stops with the job still its own: started again it is
+        # given the same job, and the entry has lost none of its attempts.
         with pytest.raises(SystemExit) as e:
             client.cmd_verify(AnchorArgs())
         assert e.value.code == 1 and anchor.graded == [1] and not anchor.released and not anchor.forgot
         assert "could not be delivered" in capsys.readouterr().err
         # A volunteer hands the job back, says why, and carries on.
+        anchor.me = {"account": {"handle": "tester"}, "verifier": {"established": True}}
         anchor.claims, anchor.graded[:] = [a_job(id=3), a_job(id=4)], []
         with pytest.raises(Stop):
-            client.cmd_verify(Args())
+            client.cmd_verify(AnchorArgs())
         assert anchor.graded == [3, 4] and anchor.released == [(f"/api/v1/jobs/{n}/release", "the result could not be delivered") for n in (3, 4)]
         assert "could not be delivered" in capsys.readouterr().err and not anchor.forgot
 
@@ -999,6 +1011,8 @@ def test_a_volunteer_hands_its_job_back_on_every_way_out(loop, monkeypatch, caps
     def request(method, path, body=None, **kw):
         if path == "/api/v1/season":
             return {"scale": "nano"}
+        if path == "/api/v1/me":
+            return loop.me
         if path.endswith("/release"):
             loop.released.append((path, body["reason"]))
             return {}
@@ -1040,7 +1054,7 @@ def test_a_volunteer_hands_its_job_back_on_every_way_out(loop, monkeypatch, caps
     assert not loop.released and "could not clear" in capsys.readouterr().err
 
 
-def test_an_anchor_stopped_any_other_way_keeps_its_job(anchor, monkeypatch):
+def test_the_organisers_machine_stopped_any_other_way_keeps_its_job(anchor, monkeypatch):
     from stet.data import FetchError
 
     answers = [{"job": a_job(id=8)}, client.ApiError(426, "upgrade")]
@@ -1048,6 +1062,8 @@ def test_an_anchor_stopped_any_other_way_keeps_its_job(anchor, monkeypatch):
     def request(method, path, body=None, **kw):
         if path == "/api/v1/season":
             return {"scale": "nano"}
+        if path == "/api/v1/me":
+            return anchor.me
         if path.endswith("/release"):
             anchor.released.append(path)
             return {}
@@ -1117,7 +1133,7 @@ def test_a_held_out_record_that_cannot_be_written_does_not_cost_the_public_grade
 
 
 @pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="needs file modes that bind")
-def test_an_anchor_does_not_start_with_a_record_it_cannot_add_to(loop, monkeypatch, capsys):
+def test_a_machine_with_the_held_out_exam_does_not_start_with_a_record_it_cannot_add_to(loop, monkeypatch, capsys):
     from stet import data
     from stet.spec import load_season
 
@@ -1200,3 +1216,56 @@ def test_a_grader_with_another_pytorch_is_turned_away_before_it_grades(loop, mon
     with pytest.raises(SystemExit):
         client.cmd_verify(Args())
     assert "the season's PyTorch" in capsys.readouterr().err and not loop.graded
+
+
+def test_an_account_is_told_where_it_stands():
+    # Scores are made from established accounts' work. An account that is not there yet
+    # is told what is missing, in numbers.
+    said = client.standing_line({}, {"validated": 2, "establish_after": 5, "needs_github": True})
+    assert "not yet established" in said and "3 more grades that agree" in said and "stet login --github" in said
+    assert client.standing_line({}, {"validated": 9, "established": True, "runs": 4}) == "established: its runs and grades count towards scores; 4 editors run"
+    assert "Still to come" not in client.standing_line({}, {})  # an older server says nothing about it
+    assert "more grades" not in client.standing_line({}, {"validated": True, "establish_after": "5"})  # and nonsense is not arithmetic
+
+
+def test_a_volunteer_who_asks_to_run_editors_before_it_is_established_is_told_why_it_gets_none(loop, monkeypatch, capsys):
+    from stet import runner
+
+    monkeypatch.setenv("STET_DEV", "1")
+    for check in ("bwrap_available", "scope_available", "sandbox_selftest"):
+        monkeypatch.setattr(runner, check, lambda: (True, ""))
+    # The server says, with each answer, whether this machine is handed editors, and why not.
+    why = "editors are run by established verifiers: accounts with 5 grades that agreed. This one has 2"
+    loop.claims = [a_job(), a_job(id=8), a_job(id=9), a_job(id=10)]
+    loop.runner = [{"eligible": False, "reason": why}, {"eligible": False, "reason": why + "\x1b[2J"}, {"eligible": True, "reason": ""}, {"eligible": True}]
+    args = Args()
+    args.edits = True
+    with pytest.raises(Stop):
+        client.cmd_verify(args)
+    err = capsys.readouterr().err
+    # Said once while it stays the same, in the server's words made safe to print, and unsaid when it changes.
+    assert err.count("Not given editors to run: editors are run by established verifiers") == 2 and "\x1b" not in err
+    assert err.count("This one has 2. Given grading meanwhile.") == 1 and err.count("now given editors to run") == 1 and loop.graded == [7, 8, 9, 10]
+    # A machine that may run them from the start is told nothing of the kind.
+    loop.claims, loop.runner = [a_job()], [{"eligible": True, "reason": ""}]
+    with pytest.raises(Stop):
+        client.cmd_verify(args)
+    err = capsys.readouterr().err
+    assert "Not given editors" not in err and "now given" not in err
+
+
+def test_a_volunteer_who_runs_editors_hands_back_what_it_cannot_finish(loop, monkeypatch):
+    # Only the organisers' machine keeps a job through a stop. A volunteer who runs editors
+    # is still a volunteer: its job goes back, so that someone else can take it.
+    from stet import runner
+
+    monkeypatch.setenv("STET_DEV", "1")
+    for check in ("bwrap_available", "scope_available", "sandbox_selftest"):
+        monkeypatch.setattr(runner, check, lambda: (True, ""))
+    loop.me = {"account": {"handle": "tester"}, "verifier": {"established": True}}
+    monkeypatch.setattr(client, "_edit_job", lambda *a, **k: loop.interrupt())
+    loop.claims = [a_job(kind="edit", script=None)]
+    args = Args()
+    args.edits = True
+    client.cmd_verify(args)
+    assert loop.released == [("/api/v1/jobs/7/release", "interrupted")]

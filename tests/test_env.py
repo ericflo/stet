@@ -113,3 +113,35 @@ def test_a_measurement_is_kept_until_the_machine_changes(season, monkeypatch):
 def test_the_cpu_measurement_runs_and_counts_physical_cores():
     assert bench.physical_cores() >= 1
     assert bench.cpu_rate(2, rounds=1) > 0
+
+
+# --- what the documents say is what the season says ------------------------------------------
+
+
+def words(name: str) -> str:
+    return " ".join((ROOT / name).read_text().split())
+
+
+def test_the_brief_lists_exactly_the_libraries_an_editor_is_promised(season):
+    import re
+
+    brief = (ROOT / "src/stet/templates/AGENTS.md").read_text()
+    block = brief.split("### Libraries", 1)[1].split("```")[1]
+    listed = dict(re.findall(r"(\S+) (\d\S*)", block))
+    assert listed == env.promised(season)
+    assert f"Python {season.raw['environment']['python']}" in brief
+
+
+def test_the_documents_give_the_seasons_numbers(season):
+    m, a, need = season.raw["machine"], season.raw["assets"], season.raw["runner"]
+    micro = season.scale("micro").edit_seconds
+    gib = a["max_bytes"] // 2**30
+    rules, brief, faq, verifying = (words(n) for n in ("docs/RULES.md", "src/stet/templates/AGENTS.md", "docs/FAQ.md", "docs/VERIFYING.md"))
+    for doc in (rules, brief):
+        assert f"| CPU | {m['cores']} cores |" in doc and f"| Memory | {m['memory_gb']} GB |" in doc
+        assert f"with {m['gpu_memory_gb']} GB of its memory" in doc and f"{m['scratch_gb']} GB" in doc
+        assert f"{a['max_files']} files and {gib} GiB" in doc
+    assert f"| 40M tokens | {micro} s |" in rules and f"{micro} seconds at micro" in brief
+    assert f"up to {gib} GiB" in faq and f"{m['gpu_memory_gb']} GB of memory" in faq
+    assert f"{m['memory_gb']} GB of memory, {m['gpu_memory_gb']} GB of GPU memory" in verifying and f"{need['disk_gb']} GB of disk" in verifying
+    assert f"more than {season.raw['tolerance']['micro']['run']} nats" in rules.replace("by more than", "more than")

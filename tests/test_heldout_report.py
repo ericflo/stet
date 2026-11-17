@@ -274,3 +274,83 @@ def test_a_table_with_gaps_does_not_pass_for_the_leaderboards(season, tmp_path, 
     assert rep["public_check"]["entries_left_out"] == 1 and rep["public_check"]["editors_not_whole"] == ["cat/ed v1"] and not rep["public_check"]["differs"]
     cat = next(t for t in rep["table"] if t["label"][:3] == "cat")
     assert cat["status"] == "ranked" and cat["rounds"] == 1  # still ranked, as the leaderboard has it, on the one round that could be placed
+
+
+# --- entries that were run more than once ----------------------------------------------------
+
+
+def run(n, script=None, gain=None, status="ok"):
+    return {"n": n, "status": status, "script": script, "gain": gain}
+
+
+def ran(editor, name, runs, gain, valid=True):
+    scripts = [r["script"] for r in runs if r["status"] == "ok"]
+    e = {"editor": editor, "owner": name, "name": "ed", "version": 1, "status": "settled", "valid": valid, "gain": gain, "runs": runs}
+    if valid:
+        e.update(loss=round(5.3 - gain, 5), script={"sha256": scripts[0]})
+    return e
+
+
+def test_an_entry_run_twice_is_scored_over_its_runs_on_the_held_out_exam_too(tmp_path):
+    import heldout_report as hr
+
+    rounds = [{"round": {"id": "s0-o00007", "index": 7, "status": "settled", "baseline_loss": 5.3}, "entries": [
+        # Ann's two runs wrote different scripts; Bob's wrote the same one; one of Cat's three failed.
+        ran(ANN, "ann", [run(1, S1, 0.90), run(2, S2, 0.84)], 0.87),
+        ran(BOB, "bob", [run(1, S3, 0.70), run(2, S3, 0.70)], 0.70),
+        ran(CAT, "cat", [run(1, S4, 0.60), run(2, status="failed"), run(3, S4, 0.60)], 0.60),
+    ]}]  # fmt: skip
+    lines = [
+        # This machine's own measure of each script: near the published gain, not equal to it.
+        line("s0-o00007", ANN, S1, 4.41, 4.70),  # public gain 0.89, held-out 0.80
+        line("s0-o00007", ANN, S2, 4.45, 4.78),  # 0.85, 0.72
+        line("s0-o00007", BOB, S3, 4.60, 4.90),  # one line stands for both of Bob's runs: 0.60
+        line("s0-o00007", CAT, S4, 4.70, 5.00),  # 0.50
+    ]
+    log = tmp_path / "s0.jsonl"
+    log.write_text("".join(json.dumps(ln) + "\n" for ln in lines))
+    rows, missing = hr.entries(rounds, hr.load(log))
+    assert not missing
+    by = {r["label"][:3]: r for r in rows}
+    assert by["ann"]["heldout"] == pytest.approx(0.76) and by["ann"]["public"] == 0.87  # the mean of two
+    assert by["bob"]["heldout"] == pytest.approx(0.60)
+    assert by["cat"]["heldout"] == pytest.approx(0.50)  # the median of 0.50, 0 and 0.50: the failed run is a zero, and is outvoted
+    assert [p["heldout"] for p in by["cat"]["runs"]] == [0.5, 0.0, 0.5] and by["cat"]["runs"][1]["source"] is None
+    assert by["ann"]["source"] == "record" and by["ann"]["script"] == S1
+
+
+def test_a_run_whose_script_was_never_measured_is_named_and_can_be_measured_again(tmp_path):
+    import heldout_report as hr
+
+    rounds = [{"round": {"id": "s0-o00007", "index": 7, "status": "settled", "baseline_loss": 5.3}, "entries": [ran(ANN, "ann", [run(1, S1, 0.90), run(2, S2, 0.84)], 0.87)]}]
+    log = tmp_path / "s0.jsonl"
+    # The machine with the pack graded only the first run's script; a volunteer graded the other.
+    # And one line here is for the right script on what cannot be this round: its public gain is nowhere near.
+    log.write_text(json.dumps(line("s0-o00007", ANN, S1, 4.41, 4.70)) + "\n" + json.dumps(line("s0-o00007", ANN, S2, 5.20, 5.40)) + "\n")
+    rows, missing = hr.entries(rounds, hr.load(log))
+    assert rows[0]["heldout"] is None and [p["heldout"] for p in rows[0]["runs"]] == [0.8, None]
+    assert [(m["script_sha256"], m["measure"]) for m in missing] == [(S2, f"stet score {S2} --round s0-o00007 --heldout --json")] and "far from the published one" in missing[0]["why"]
+    again = tmp_path / "again.json"
+    again.write_text(json.dumps({"valid": True, "round": {"id": "s0-o00007"}, "script_sha256": S2, "exam": {"loss": 4.45}, "baseline": {"loss": 5.3}, "heldout": {"loss": 4.78, "baseline": 5.5}}))
+    rows, missing = hr.entries(rounds, hr.load(log), hr.load_also([again]))
+    assert not missing and rows[0]["heldout"] == pytest.approx(0.76) and rows[0]["source"] == "remeasured"
+
+
+def test_an_entry_from_before_runs_is_placed_the_same_once_the_server_shows_it_as_one_run(season):
+    import heldout_report as hr
+
+    # The server shows an entry settled before runs existed as one run, whose gain is the
+    # one grade there was. The row must come out as it did when the entry had no runs.
+    source, log, _ = season
+    before, missing = hr.entries(source["rounds"], hr.load(log))
+    assert not missing
+    shown = json.loads(json.dumps(source["rounds"]))
+    for r in shown:
+        for e in r["entries"]:
+            if e.get("status") == "settled" and not e.get("void"):
+                ok = bool(e.get("valid"))
+                e["runs"] = [{"n": 1, "status": "ok" if ok else "failed", "script": (e.get("script") or {}).get("sha256"), "gain": e.get("gain", 0.0)}]
+    after, missing = hr.entries(shown, hr.load(log))
+    assert not missing
+    strip = lambda rows: [{k: v for k, v in r.items() if k != "runs"} for r in rows]  # noqa: E731
+    assert strip(after) == strip(before)

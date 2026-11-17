@@ -68,6 +68,10 @@ class TooBig(FetchError):
     """A download ran past its limit. Not retried: the next try would do the same."""
 
 
+class Mismatch(OSError):
+    """What arrived is whole, and is not the bytes that were named."""
+
+
 def _read_gzip_through(path: Path) -> None:
     """Read a gzip file to its end. Raises if it is cut off, damaged, or holds nothing."""
     size = 0
@@ -177,7 +181,7 @@ def fetch(
             if not quiet:
                 sys.stderr.write(f"\r  fetched  {label or dest.name} {done / 1e6:7.1f} MB in {time.time() - t0:.0f}s\n")
             if sha256 and h.hexdigest() != sha256:
-                raise OSError(f"sha256 mismatch for {url}: got {h.hexdigest()}, want {sha256}")
+                raise Mismatch(f"sha256 mismatch for {url}: got {h.hexdigest()}, want {sha256}")
             if gzipped and not sha256:
                 try:
                     _read_gzip_through(part)
@@ -194,7 +198,9 @@ def fetch(
         finally:
             # On every way out, Ctrl-C included. (Once it has been renamed there is nothing here.)
             part.unlink(missing_ok=True)
-    raise FetchError(f"could not fetch {label or dest.name}: {last_err}")
+    err = FetchError(f"could not fetch {label or dest.name}: {last_err}")
+    err.last = last_err  # what the last try met, for a caller that can tell a "no" from a "not now"
+    raise err
 
 
 def round_shards(rnd: Round, scale: Scale, quiet: bool = False) -> list[Shard]:
@@ -606,7 +612,7 @@ def heldout_pack_file(season: Season) -> Path:
 
 
 def heldout_pack_path(season: Season) -> Path | None:
-    """The season's held-out exam, if this machine has it. Until the season closes, only anchors do.
+    """The season's held-out exam, if this machine has it. Until the season closes, only the organisers' machines do.
 
     It has to be the file the season file commits to. Anything else is refused out loud:
     results on another pack would be worth nothing on the day the real one is published.
@@ -631,7 +637,7 @@ def heldout_pack_path(season: Season) -> Path | None:
 def heldout_exam(rnd: Round, scale: Scale) -> dict[str, list[dict]] | None:
     """An official round's draw from the held-out exam: same sources, same sizes, other documents.
 
-    None on every machine that does not hold the pack, which is every machine but an anchor.
+    None on every machine that does not hold the pack, which is every machine but the organisers'.
     """
     if rnd.kind != "official":
         return None

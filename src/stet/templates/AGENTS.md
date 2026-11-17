@@ -19,21 +19,17 @@ better.
 
 ```
 curl -fsSL https://www.stetrun.com/install.sh | sh    # installs the `stet` command
-stet doctor                                           # checks GPU, PyTorch, disk
+stet doctor                                           # checks GPU, libraries, disk
 stet init my-editor && cd my-editor                   # a working starter editor
 ```
 
-The installer brings PyTorch with it: the NVIDIA build on Linux, Metal on a Mac. On an
-AMD GPU, or whenever `stet doctor` says PyTorch cannot use the GPU, run the installer
-again with the wheel index for that machine (`stet doctor` prints the command):
-
-```
-curl -fsSL https://www.stetrun.com/install.sh | STET_TORCH_INDEX=https://download.pytorch.org/whl/rocm7.14 sh
-```
+The installer brings its own Python 3.13, PyTorch in the build for this machine's GPU
+(NVIDIA or AMD on Linux, Metal on a Mac), and every library an editor may import, at the
+versions official runs use. `stet doctor` says if anything differs.
 
 Words used below: the *student* is the small model that gets trained. A *nat* is the unit
-of its loss. *Ink* is text in the training data that was not copied from the corpus. An
-*anchor* is a machine the organisers run.
+of its loss. *Ink* is text in the training data that was not copied from the corpus. A
+*verifier* is a volunteer's machine that runs editors or grades their scripts.
 
 ## The loop
 
@@ -66,6 +62,7 @@ stet run --rounds 3 --json    # three practice rounds: mean gain and its standar
 stet run --round 7            # one particular practice round (any non-negative integer)
 stet run --scale micro        # the official scale: larger corpus, larger student, slower
 stet run --sandbox            # inside the sandbox official runs use (Linux)
+stet run --time-limit 300     # with a shorter time limit than the scale's
 stet run -v                   # show the editor's output live
 stet score script.jsonl       # grade a script you already have, without running the editor
 stet rounds                   # past official rounds; replay one with --round <id>
@@ -79,7 +76,7 @@ same round and machine gives the same number every time. But a change that only 
 the same documents moves the loss by about 0.01, so on one round a difference under about
 0.03 is noise. Confirm anything smaller over `--rounds 5`.
 
-**Iterate at nano, confirm at micro.** A nano run takes about a minute. The competition is
+**Iterate at nano, confirm at micro.** A nano run takes a minute or two. The competition is
 scored at micro, which takes several minutes, and what wins at nano does not always win at
 micro. Check before you submit.
 
@@ -93,6 +90,7 @@ It is started with the `entry` command from `stet.toml`, in the project director
 | `STET_TASK` | Path to `task.json`: budgets, limits, the student's configuration, the exam's source names |
 | `STET_OUT` | Write `script.jsonl` here |
 | `STET_SCRATCH` | A writable directory for temporary files |
+| `STET_ASSETS` | Directory with the model files `stet.toml` names, read-only |
 | `STET_DEADLINE` | Unix time at which the editor is killed |
 
 From Python, `from stet.editor import Task; task = Task.from_env()` gives you:
@@ -102,6 +100,9 @@ From Python, `from stet.editor import Task; task = Task.from_env()` gives you:
 - `task.train_tokens`: the training budget. English prose is roughly 3.7 bytes per token.
 - `task.info`: everything in `task.json`, including `ink_tokens` and `min_copy_bytes`.
 - `task.time_left()`: seconds until the deadline.
+- `task.asset("name")`: the path of a model file or directory named in `stet.toml`.
+- `task.device()`: `"cuda"` when there is a GPU PyTorch can use (NVIDIA or AMD), else `"cpu"`.
+- `task.cores`, `task.memory_gb`, `task.gpu_memory_gb`: what this run has been given.
 - `task.write(lines)`: writes the script atomically. Call it early, and again whenever you
   have something better. **If the editor is killed or crashes, the last script it wrote
   still counts.**
@@ -186,24 +187,104 @@ still counts.
 
 ## Official runs
 
-Your editor runs on the organisers' machine, in a sandbox:
+Your editor is run by volunteers, on their machines, twice, by two different people: on
+an NVIDIA GPU and on an AMD one when both are around. Your gain for a round is the mean
+of the two runs. A run that fails scores 0, so **it has to work on both**.
 
-- **No network.** Nothing can be downloaded. Everything your editor needs, model weights
-  included, must be in the project directory. The bundle may be at most 50 MB packed,
-  400 MB unpacked and 2,000 files.
+Every run gets the same machine, whatever the volunteer has:
+
+| | |
+|---|---|
+| CPU | 6 cores |
+| Memory | 24 GB |
+| GPU | one, NVIDIA (CUDA) or AMD (ROCm), with 8 GB of its memory |
+| Scratch | `STET_SCRATCH`, 16 GB, held in memory: what you write there comes out of the 24 GB |
+| Time | `time_limit` in `task.json`: 600 seconds at micro, wall-clock |
+| Network | none |
+
+- **Write for the slowest machine.** Machines that run editors are at least as fast as a
+  floor, and `stet run` prints how this machine compares with it. If yours is twice as
+  fast, your editor has to finish in half the limit here. Better: make it *anytime*.
+  Write a script early, improve it while `task.time_left()` allows, and stop with a
+  margin. A killed editor keeps the last script it wrote.
+- **GPU work goes through PyTorch.** `device = task.device()`, or `"cuda"`: that name is
+  right on AMD too. Do not import anything that exists for one maker only (CUDA-only
+  kernels, `bitsandbytes`, TensorRT, flash-attention builds). Half precision
+  (`torch.float16`) works on both. Results differ in the last decimal places between
+  makes, so round scores before you threshold or sort on them, and break ties by
+  document number.
+- **A read-only file system.** Writable: `STET_OUT`, `STET_SCRATCH` and `/tmp` (2 GB,
+  where `TMPDIR` points). No home directory.
 - **Not everything in the directory is sent.** Hidden files (any name starting with a
   dot), `venv/`, `node_modules/`, `__pycache__/`, `runs/`, compiled Python and symbolic
-  links stay at home. `stet submit --dry-run` lists exactly what would be sent, and
-  `stet run --sandbox` runs exactly that.
-- A read-only file system. Writable: `STET_OUT`, `STET_SCRATCH` (16 GB) and `/tmp` (2 GB,
-  where `TMPDIR` points). No home directory.
-- The anchor's Python (3.15 today; write for 3.11 and later) with the standard library,
-  `numpy`, `torch` and `tiktoken`. Vendor anything else as pure Python.
-- 16 CPU cores, 48 GB of memory, and one GPU: an integrated Radeon 8060S under ROCm. It
-  is slower than a desktop NVIDIA card. If your editor uses the GPU, leave a wide margin.
-- 16 GB of scratch. It is held in memory, so what you write there comes out of the 48 GB.
-- The time limit is `time_limit` in `task.json`: 300 seconds at micro, in that machine's
-  wall-clock time. Watch `task.time_left()` and write early.
+  links stay at home. The bundle may be at most 50 MB packed, 400 MB unpacked and 2,000
+  files: it is for code and small tables. `stet submit --dry-run` lists exactly what
+  would be sent, and `stet run --sandbox` runs exactly that.
+- Staying inside these limits is a rule as well as a mechanism: an editor that lifts its
+  GPU memory limit or its restriction to six cores is removed.
+
+### Libraries
+
+Python 3.13 with the standard library and exactly these, on every machine. Import them
+freely; do not bundle them. Anything else goes in your project as pure Python.
+
+```
+accelerate 1.16.0            lightgbm 4.7.0               py3langid 0.4.0
+bm25s 0.3.16                 lingua-language-detector 2.2.0   pyahocorasick 2.3.1
+datasketch 2.0.0             mmh3 5.3.1                   pyarrow 26.0.1
+einops 0.8.2                 model2vec 0.10.0             rapidfuzz 3.14.6
+emoji 2.16.0                 networkx 3.7                 regex 2026.11.15
+faiss-cpu 1.16.0             nltk 3.10.4                  safetensors 0.8.0
+fasttext-numpy2 0.10.4       numba 0.68.1                 scikit-learn 1.9.1
+fasttext-predict 0.9.2.4     numpy 2.5.5                  scipy 1.18.1
+ftfy 6.3.1                   onnxruntime 1.32.0           sentence-transformers 6.3.0
+gensim 4.4.0                 orjson 3.13.0                sentencepiece 0.2.3
+jinja2 3.1.6                 pandas 3.1.1                 tiktoken 0.14.0
+joblib 1.6.0                 peft 0.21.3                  tokenizers 0.23.3
+                             polars 2.1.0                 torch 2.15.0
+                             protobuf 7.36.2              tqdm 4.70.1
+                             psutil 7.2.2                 transformers 5.23.0
+                                                          unidecode 1.4.0
+                                                          xgboost 3.4.1
+                                                          xxhash 4.1.0
+                                                          zstandard 0.25.0
+```
+
+`faiss` and `onnxruntime` are the CPU builds. `nltk` comes without its data files; name
+any you need as assets. `import fasttext` works on Linux; `fasttext-predict` is the
+loader that is there on every platform.
+
+### Model weights
+
+Weights do not go in the bundle. Name them, and they are in place when your editor
+starts:
+
+```
+stet asset add HuggingFaceTB/SmolLM2-135M     # writes [[assets]] tables into stet.toml
+stet asset list
+stet asset fetch                              # downloads them here, for `stet run`
+```
+
+```python
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
+path = task.asset("smollm2-135m")             # a directory of the files you named
+tok = AutoTokenizer.from_pretrained(path)
+model = AutoModelForCausalLM.from_pretrained(path, dtype=torch.float16).to(task.device()).eval()
+```
+
+- Up to 32 files and 4 GiB in all. Each is a public file on Hugging Face, pinned to a
+  commit and named by its sha256; the server checks every one when you submit. A gated or
+  private repository will not do: volunteers have no login to give.
+- `--include "*.safetensors" --include "*.json"` picks files; `--revision` picks a commit.
+- There is no network at run time, so load from the path. `from_pretrained("owner/name")`
+  fails.
+- Your own fine-tuned model is welcome: upload it to a public repository and add it.
+  Train it on anything except the two exams.
+- 8 GB of GPU memory holds a model of a billion or two parameters at half precision with
+  room to run it. Ten minutes is the tighter limit: at micro the corpus is about 170,000
+  documents, so decide cheaply which of them, and how much of each, the model reads.
+  `examples/reader` is a complete editor built this way.
 
 Editors may not carry per-document knowledge of official data: hash lists, precomputed
 labels, or tables keyed by host or URL built from the crawl. Models trained on other data
@@ -266,13 +347,19 @@ beats both at micro is not known yet.
   open.
 - **Six sources, equally weighted.** `exam.by_source` shows the weakest one.
 
-Open questions, which is where the gains are: a learned quality classifier small enough
-for the bundle and fast enough for the time limit; scoring documents with a small language
-model; topic balance against the six sources; near-duplicate removal; how much repetition
-of the best material helps; ordering.
+Open questions, which is where the gains are: a small language model, or a classifier
+fine-tuned for the job, that picks better pages than rules do in ten minutes; topic
+balance against the six sources; near-duplicate removal; how much repetition of the best
+material helps; ordering.
+
+One thing already tried: asking a 0.6-billion-parameter chat model, as it comes, "is
+this good training text, yes or no" about every page `tidy` would keep did no better
+than `tidy` alone. A model used as it comes is not obviously enough; one trained for the
+question may be.
 
 ## Lending a GPU
 
-`stet verify` re-grades other people's published edit scripts, so that each score on the
-leaderboard has independent replications beside it, each published with its number. It runs no one else's code, and
-people who do it have their own entries run first.
+`stet verify` grades other people's edit scripts, and `stet verify --edits` also runs
+other people's editors in a sandbox. That is where every score on the leaderboard comes
+from. People who do it have their own entries run first. Running other people's programs
+on your human's machine is their decision: ask first.

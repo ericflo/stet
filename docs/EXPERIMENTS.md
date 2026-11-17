@@ -162,9 +162,11 @@ shared rounds.
 reference machine cannot stand in for. As a stand-in, runs that start from initial
 weights changed by one part in a million are *running*. Until verifiers on other hardware
 have graded the same scripts, the tolerance (0.08 nats at micro) is a guess. Every
-volunteer's grade is published with its difference from the anchor's, and its unedited
-loss with it, so the first rounds with volunteers on other GPUs are the measurement.
-Nothing rides on the guess meanwhile: only an anchor's grade is ever a score.
+grade is published with its difference from the others of the same script, and its
+unedited loss with it, so the first rounds with verifiers on other GPUs are the
+measurement. Something does ride on the guess now: grades further apart than the
+tolerance call for a third. Too tight costs extra grades; too loose lets a wrong one
+through. Both show on the round pages.
 
 ```
 python tools/exp.py --scale nano --rounds 0 --editors tidy --reseed 1
@@ -212,13 +214,75 @@ is a thin estimate of the noise; it is measured again as official rounds accumul
 
 ## How long a round takes
 
-On the anchor, one training run at the official scale takes about ten minutes. The first
-official round, s0-o00001, was four runs (the unedited corpus and three entries) and
-three edits of 1, 45 and 56 seconds: 45 minutes from the first job to the last grade.
+On the reference machine (an integrated Radeon 8060S), one training run at the official
+scale takes about ten minutes. The first official round, s0-o00001, was four training
+runs (the unedited corpus and three entries) and three edits of 1, 45 and 56 seconds:
+45 minutes from the first job to the last grade. One machine did all of it.
 
-A full round is 17 entries: 18 runs and 17 edits. That is about three and a quarter
-hours when the editors are quick, and four and a half if every one of them uses its
-whole five minutes. Draws are six hours apart.
+A full round is 17 entries. Done by one machine, once each, that is 18 training runs and
+17 edits: about three and a quarter hours when the editors are quick, and six if every
+one of them uses its whole ten minutes, which is all the time there is between draws.
+Done as the rules now ask, twice by different people with each script graded by someone
+else, it is up to twice the work, shared out: with three machines of that speed a full
+round of slow editors takes about four hours. Editors that write the same script on both
+runs are graded once.
+
+## What a small model can read in ten minutes
+
+An editor that uses a language model is limited by the clock before it is limited by
+memory. Measured on the reference machine with nothing else running, PyTorch 2.15 on
+ROCm, half precision, batches of 128 passages of 128 tokens, one forward pass:
+
+| Model | Parameters | Tokens read per second | In 9 minutes |
+|---|---|---|---|
+| MiniLM-L6 (encoder) | 22M | 669,000 | 361M |
+| ModernBERT-base (encoder) | 149M | 76,000 | 41M |
+| SmolLM2-135M | 135M | 65,000 | 35M |
+| SmolLM2-360M | 362M | 29,000 | 16M |
+| Qwen3-0.6B | 596M | 15,800 | 8.5M |
+| Qwen2.5-1.5B | 1,544M | 7,900 | 4.3M |
+| SmolLM2-1.7B | 1,711M | 6,300 | 3.4M |
+
+A micro corpus is about 320 million tokens in 170,000 documents, and `tidy`'s cheap first
+pass leaves about 47,000 candidates. So a 0.6-billion-parameter model can read the first
+180 tokens of every candidate, a 135M one the first 750, and nothing above 22M can read
+the whole corpus. Writing is far slower than reading, 350 to 1,250 tokens a second in
+batches of 16, and the ink allowance leaves almost nothing for written text to do.
+
+That machine is about 1.2 times the floor for running editors
+(`runner.gpu_tokens_per_second` in the season file is this measurement's cousin: a fixed
+110M-parameter model, 80,000 tokens a second).
+
+**What it decided.** The edit limit at the official scale went from 300 to 600 seconds,
+an editor is given 8 GB of GPU memory, and model files may total 4 GiB: enough for any
+model in this table.
+
+## Does a small language model beat rules?
+
+One trial so far, and the answer was no. `tidy`'s candidates were ranked by a model
+instead of by `tidy`'s hand-written score: Qwen3-0.6B, as downloaded, shown the first 480
+bytes of each candidate and asked whether it is well-written, informative prose worth
+learning from; the rank is how strongly it says yes. Everything else is `tidy`: the same
+candidates, the same budget rule, the same shuffle. Micro, round s0-p00000:
+
+| Ranking | Exam loss |
+|---|---|
+| `tidy`'s own score | 4.355 |
+| the model, every candidate judged | 4.360 |
+| the model's answer and `tidy`'s score, equal weight | 4.352 |
+| the model, as many as it judged in 300 s (12,288), the rest by `tidy`'s score | 4.372 |
+| the model, as many as it judged in 600 s (28,672), the rest by `tidy`'s score | 4.377 |
+
+The same documents in another order move the loss by about 0.01, so none of these is a
+gain, and the two that ran out of time are losses: they put whatever the model had got
+to ahead of everything it had not. Judging all 47,497 candidates took 930 seconds on a
+shared GPU, more than the limit.
+
+**What it decided.** Nothing about the rules: this is one model, one question and one
+round. It is here so that nobody mistakes "a language model is allowed" for "a language
+model wins". In published work the small models that do curate data well were trained
+for it, on labels from a much larger model. That is open to an entry (train it
+beforehand, name the weights) and has not been tried here.
 
 ## What the exam filter catches
 
@@ -236,7 +300,7 @@ candidate that does.
 Pages that quote it stay in the corpus, because removing them would say which passages
 it holds. How many are there? In the corpus of round s0-o00001, 47 of 168,080 pages
 contain the opening of any held-out sentence, and 2 contain one from the passages that
-round drew. Measured on the anchor, without publishing which pages.
+round drew. Measured on the organisers' machine, without publishing which pages.
 
 ## Why so little ink?
 
@@ -252,17 +316,28 @@ not examined on), taking a share of the training budget. Nano, round s0-p00000:
 python tools/exp.py --scale nano --rounds 0 --editors tidy --canned 0.01
 ```
 
-**What it decided.** At 0.1%, shipped text cannot be told from order noise. At 1% it is
-worth about 0.08 nats, more than half of `tidy`'s lead over `english`. The limit is 0.1%.
-Micro: *running*.
+Micro, the same round, against `tidy` at 4.355:
+
+| Share of the budget that is shipped text | 0.01% | 0.03% | 0.1% |
+|---|---|---|---|
+| Exam loss | 4.357 | 4.346 | 4.334 |
+
+**What it decided.** At nano, 0.1% of shipped text cannot be told from order noise, and
+1% is worth about 0.08 nats, more than half of `tidy`'s lead over `english`. The limit is
+0.1%. At micro the same 0.1% is worth about 0.02 nats: twice the order noise, and the
+size of the record's margin. It is open to every entry alike, so it moves no ranking,
+but it is not nothing, and a lower limit (0.02%) is under consideration for that reason.
 
 ## Still to measure
 
-- Micro: the 8× point of the reference curve, and shipped text at 0.1%.
+- Micro: the 8× point of the reference curve.
+- Two runs of one editor on two machines: how far apart honest runs land, which is what
+  the run tolerance (0.12 nats, a guess) should be set from.
+- A language model trained for the job, against `tidy`.
 - Micro: whether two close editors keep their order at another learning rate, and at
   what rate the unedited corpus trains best.
 - Two machines: the real tolerance, from verifiers on NVIDIA hardware. The data arrives
   by itself, on every round's page.
 - Whether the held-out exam and the public one rank editors the same way. Known only to
-  the anchor until the season closes.
+  the organisers until the season closes.
 - The first official rounds, which use a different crawl sample every six hours.

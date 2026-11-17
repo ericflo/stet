@@ -65,6 +65,13 @@ class AssetError(ValueError):
     """An assets table that breaks a rule. The message is for the entrant."""
 
 
+class Unavailable(Exception):
+    """A file an entry names is not there to be had: taken down, made private, or no longer
+    the bytes the entry says. The server checked every file when the entry was submitted,
+    so this is something that happened to the entry's files since, and it is the entry's
+    failure. A host that is merely away is not this: that is data.FetchError."""
+
+
 @dataclass(frozen=True)
 class Asset:
     path: str
@@ -154,24 +161,48 @@ def cached(asset: Asset) -> Path:
     return cache() / asset.sha256
 
 
-def fetch(assets: list[Asset], quiet: bool = False) -> None:
-    """Download whichever of these files this machine does not have, checking each hash."""
-    from .data import FetchError, fetch
+def _sha256(path: Path) -> str:
+    import hashlib
+
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while chunk := f.read(1 << 22):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def fetch(assets: list[Asset], quiet: bool = False, verify: bool = False) -> None:
+    """Download whichever of these files this machine does not have, checking each hash.
+
+    `verify` reads the copies this machine already has and checks them again. A run for
+    the leaderboard does: a copy that has changed on disk since it was fetched would make
+    this machine's run of an editor differ from everyone else's, and nobody could say why.
+    """
+    from .data import FetchError, Mismatch, TooBig, fetch
 
     for a in assets:
         dest = cached(a)
         if dest.exists():
-            os.utime(dest)  # most recently used: the last to be cleared away
-            continue
+            if not verify or (dest.stat().st_size == a.size and _sha256(dest) == a.sha256):
+                os.utime(dest)  # most recently used: the last to be cleared away
+                continue
+            dest.unlink(missing_ok=True)  # not the file it was: fetched again below
         try:
             fetch([a.url], a.sha256, dest, label=a.path, quiet=quiet, max_bytes=a.size)
-        except FetchError:
+        except TooBig:
+            raise Unavailable(f"the asset {a.path} is larger than its entry says") from None
+        except FetchError as e:
+            last = getattr(e, "last", None)
+            if isinstance(last, urllib.error.HTTPError) and last.code in (401, 403, 404, 410):
+                raise Unavailable(f"the asset {a.path} is no longer public at its address (the host answers {last.code})") from None
+            if isinstance(last, Mismatch):
+                raise Unavailable(f"the asset {a.path} is not the bytes its entry names") from None
             raise
         except OSError as e:
             raise FetchError(f"could not fetch the asset {a.path}: {e}") from None
         if dest.stat().st_size != a.size:
             dest.unlink(missing_ok=True)
-            raise FetchError(f"the asset {a.path} is not the size its entry says")
+            raise Unavailable(f"the asset {a.path} is not the size its entry says")
         dest.chmod(0o444)
 
 
@@ -263,6 +294,10 @@ def lookup(repo: str, revision: str = "", include: list[str] | None = None, unde
     page = _get_json(url)
     if not isinstance(page, list):
         raise AssetError("Hugging Face did not list that repository's files")
+    if len(page) >= 1000:
+        # The listing comes a thousand files at a time, and a model is a dozen. Half a
+        # repository listed would look like all of it.
+        raise AssetError("that repository has more than a thousand files, too many to list. Write the [[assets]] tables for the files the editor needs by hand")
     tree.extend(page)
     prefix = "datasets/" if kind == "datasets" else ""
     under = (under or name.split("/")[1].lower()).strip("/")
@@ -280,33 +315,37 @@ def lookup(repo: str, revision: str = "", include: list[str] | None = None, unde
             continue
         lfs = f.get("lfs") or {}
         sha, size = lfs.get("oid") or "", int(lfs.get("size") or f.get("size") or 0)
-        assets.append(Asset(f"{under}/{path}", f"{HUB}/{prefix}{name}/resolve/{commit}/{path}", sha, size))
+        a = Asset(f"{under}/{path}", f"{HUB}/{prefix}{name}/resolve/{commit}/{path}", sha if SHA_RE.match(sha) else "", size)
+        if not URL_RE.match(a.url) or ".." in a.url or "//" in a.url[8:] or not all(PART_RE.match(p) for p in a.path.split("/")) or len(a.path) > MAX_PATH:
+            skipped.append(path)  # a name the rules do not allow (a space, a leading dot): it cannot be an asset
+            continue
+        assets.append(a)
     return commit, assets, skipped
 
 
 def fill_hashes(assets: list[Asset], quiet: bool = False) -> list[Asset]:
     """Small files are kept in git, which names them by a hash of its own. Fetch those to
-    learn their sha256; large files already have theirs."""
-    import hashlib
-    import tempfile
-
+    learn their sha256; large files already have theirs. What is fetched goes into the
+    cache, so it is not fetched again to run the editor."""
     from .data import fetch
 
     out = []
-    for a in assets:
+    cache().mkdir(parents=True, exist_ok=True)
+    for i, a in enumerate(assets):
         if a.sha256:
             out.append(a)
             continue
-        with tempfile.TemporaryDirectory(prefix="stet-asset-") as tmp:
-            p = fetch([a.url], "", Path(tmp) / "file", label=a.path, quiet=quiet, max_bytes=max(a.size, 1) + (1 << 20))
-            blob = p.read_bytes()
-        sha = hashlib.sha256(blob).hexdigest()
-        dest = cached(Asset(a.path, a.url, sha, len(blob)))
-        if not dest.exists():
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            tmp_dest = dest.with_suffix(f".part{os.getpid()}")
-            tmp_dest.write_bytes(blob)
-            tmp_dest.chmod(0o444)
-            tmp_dest.replace(dest)
-        out.append(Asset(a.path, a.url, sha, len(blob)))
+        part = cache() / f".new{os.getpid()}-{i}"
+        part.unlink(missing_ok=True)
+        try:
+            fetch([a.url], "", part, label=a.path, quiet=quiet, max_bytes=max(a.size, 1) + (1 << 20))
+            found = Asset(a.path, a.url, _sha256(part), part.stat().st_size)
+            if cached(found).exists():
+                part.unlink()
+            else:
+                part.chmod(0o444)
+                part.replace(cached(found))
+        finally:
+            part.unlink(missing_ok=True)
+        out.append(found)
     return out

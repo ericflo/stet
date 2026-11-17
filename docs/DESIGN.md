@@ -27,7 +27,7 @@ explanation for a good score unavailable.
 | Tokenizer | Small repairs (the ink budget) |
 | The exam's sources and scoring | Everything about how the editor decides |
 
-Training is budgeted in tokens, never seconds, so a faster GPU buys nothing. The trainer
+Training is budgeted in tokens, never seconds, so a faster GPU buys nothing there. The trainer
 does not shuffle: the stream the editor writes is the stream the student sees, which makes
 curriculum a real move.
 
@@ -48,8 +48,8 @@ public exam's passages: choosing pages about the very people and places it happe
 mention. The usual cure is a secret test set, and its usual cost is that someone must be
 trusted with it for ever. Stet's is trusted with it for one season. The held-out exam is
 built like the public one from other documents, and its hash is published at the start.
-Anchors sit every official student on both. At the close the held-out exam and all its
-results are published, the final table is read from them, and every number can be re-run.
+At the close the held-out exam is published, every script that counted is graded on it
+by volunteers, and the final table is read from that.
 
 **The data is drawn after the entries are locked.** The seed comes from drand, a public
 randomness beacon, at a time fixed on a public grid, and the corpus comes from the newest
@@ -68,25 +68,44 @@ edit script, which is plain data: document numbers and byte ranges. Grading turn
 into a score with the harness alone. That split is what lets anyone re-grade any score
 safely: a stranger's GPU never runs a stranger's program.
 
-**Edits run on the organisers' machines.** Sandboxing untrusted code well enough to ask
-volunteers to run it is not something a namespace sandbox can promise, and edit time has to
-be measured on known hardware to mean anything. So anchors, the organisers' machines, run
-the editors.
+**An editor may be a small language model.** The interesting editors read the text, and
+a program that reads text well is a model. So an editor names its weights (up to 4 GiB,
+public files pinned by hash) and they are in place when it starts, and it gets a GPU
+through PyTorch and a fixed list of libraries at exact versions. What it does not get is
+a way to turn a big model into training text: the ink limit sees to that. A model here
+can only choose and arrange what the crawl already says.
 
-**An anchor grades everything; volunteers replicate.** The first design let a volunteer's
-grade set a score once the volunteer had earned trust by agreeing with others. Review
-took it apart: accounts are free, grading is deterministic, so trust is cheap to earn
-honestly and then spend once, on the entry that matters. Every patch added a rule and
-left a gap. So the score is the anchor's grade, always, and a volunteer's grade is what
-it can honestly be: an independent replication, sealed until the round settles and then
-published beside the anchor's, agreeing or not. A made-up grade changes nothing and is
-on show. A grade that differs alone counts against whoever sent it; two that differ
-together, from accounts that have agreed with an anchor before, count against nobody and
-put the question to the anchor instead. The price is throughput. A round holds what one
-anchor can grade between draws: the ladder of 8 and up to 9 newer entries, between three
-and four and a half hours of work in every six
-([Experiments](EXPERIMENTS.md#how-long-a-round-takes)). More anchors, not more rules, is
-how that grows.
+**Every editor gets the same machine.** Volunteers' machines differ, and an edit limit in
+seconds means something only if the machine is known. So the sandbox gives every editor
+the same cores, memory and GPU memory whatever the host has, and only machines at or
+above a measured floor run editors. What is left over is speed above the floor, which an
+editor that works until the clock runs out can use. That is disclosed, bounded by taking
+the score over runs on different machines, and cheaper than the alternative: counting an
+editor's work instead of its seconds would mean running entrants' models for them, and
+then the editor is no longer any program.
+
+**Volunteers run the editors, not the organisers.** The first version ran every editor on
+the organisers' machine and took that machine's grade as the score. That made the whole
+competition as available, and as trustworthy, as one computer. Now every entry is run
+twice, by two different people, and each script is graded by someone who did not write
+it. The organisers' accounts are verifiers like the rest, with one difference: they
+start out established, because someone has to be first.
+
+**Trust is earned slowly and never spent alone.** Accounts are free, so an account's
+word counts only once it has agreed with other people's a number of times and is tied to
+a GitHub identity with some age. Even then no score rests on one volunteer: a runner
+never grades a script that only it wrote, runs are compared with each other, grades with
+each other, and the server deals the work at random. An earlier design let one trusted volunteer's
+grade set a score, and review took it apart: trust is cheap to earn honestly and then
+spend once, on the entry that matters. What survives that argument is needing two people
+who were not able to choose each other.
+
+**A round does not wait for people who are not there.** With few volunteers the honest
+options are to stall or to settle with less and say so. Stet settles: an entry that only
+one person was around to run is scored on that run and marked *run once*; one that two
+people ran and agreed on is marked *confirmed*. The throughput of a round is whatever
+the people lending GPUs can run and grade between draws
+([Experiments](EXPERIMENTS.md#how-long-a-round-takes)).
 
 **Scores are gains, on shared rounds.** Rounds differ in difficulty by far more than
 editors differ from each other. Every score is a difference from the unedited corpus on
@@ -106,7 +125,8 @@ official scale is still being measured ([Experiments](EXPERIMENTS.md)); until it
 leaderboard shows gains and leaves the multiplier blank.
 
 **Small on purpose.** The official student is 6 layers by 384, trained on 40M tokens: about
-ten minutes on an integrated GPU. Grading has to be cheap while there is one anchor.
+ten minutes on an integrated GPU. Grading has to be cheap while few people are lending
+GPUs.
 Whether what wins here also wins at a larger scale is an open question, and the plan is
 to measure it: at the end of a season, rerun the ladder's editors one scale up and
 publish both rankings. That has not been run yet.
@@ -116,25 +136,30 @@ publish both rankings. That has not been run yet.
 | Attack | What stops it |
 |---|---|
 | Tune an editor to a known corpus | The crawl is public, but which files are drawn is unknown until after commit |
-| Ship a dataset instead of editing | Ink budget; 50 MB bundle |
-| Smuggle exam text in | Corpus and script output are both cleaned of it; editors are public |
+| Ship a dataset instead of editing | The ink budget. A model's weights can be large; the text it may add cannot |
+| Have a large model write the data | The same: 0.1% ink, and no network while the editor runs |
+| Smuggle exam text in | Corpus and script output are both cleaned of it; editors and their model files are public |
 | Tune an editor to the exam's own passages | A held-out exam, drawn in secret from the same collections and committed to by hash, decides the season's final table |
 | Editor reads the exam or phones home | Sandbox: no network, no exam on disk, script-only output |
-| A hostile editor attacks the machine running it | Only anchors run editors; volunteers never do |
+| A hostile editor attacks the machine running it | Sandbox: no files, no network, no view of the host. Running editors is opt-in, and the guide says what a sandbox cannot promise |
+| An editor swaps its weights after it is checked | Assets are pinned to a commit and named by sha256; every machine checks the hash |
+| An editor takes more than its share of the machine | Cores, memory and scratch are enforced by the kernel. The GPU memory limit is not; lifting it is against the rules and editors are public |
 | A hostile script attacks the grader | Scripts are parsed as data with hard limits; nothing in one is executed |
-| A volunteer invents a grade | It changes no score: only an anchor's grade is one. It is published, with its difference, and is a strike |
-| Two accounts invent the same grade | Still no score changes. They escape the strike only if both have agreed with an anchor before; the entry is flagged and the organisers look |
-| A volunteer takes jobs and sits on them | A round waits only for accounts with an agreed grade, and an abandoned job costs a day without work |
+| A runner hands back a script the editor did not write | A second person runs the same editor. Runs that differ by more than a tolerance get a third, and the middle one counts |
+| A runner makes up its script's score | A runner never grades a script that only it wrote |
+| A runner copies the other runner's script | Scripts are sealed until the round settles, and nobody who has been shown one is asked to run that entry |
+| A verifier invents a grade | Compared with the other grades of the same script. Outside the tolerance it is a strike, and it is published |
+| A new account invents grades | Its grades set no score until it is established: five that agreed, and a GitHub identity |
+| Two verifiers agree on a lie | Not caught, if both are established and both are assigned to the entry. Nobody chooses their work, and everything is published and can be re-run |
+| A verifier takes jobs and sits on them | A round waits only for accounts with an agreed grade, and an abandoned job costs a day without work |
+| A verifier runs or grades their own entry | Never offered it, by account or by GitHub identity |
 | Someone uploads under another person's key | An upload's signature is checked from its headers before any of it is read or counted |
-| A volunteer copies a grade | Nothing is visible until the round settles |
-| Many accounts grade each other | Volunteers' grades never set a score, whoever agrees with them |
-| An anchor's grade is wrong | Every script is public; every volunteer's grade is published beside it; two that agree against it flag the entry; `stet score` re-grades anything |
+| A verifier copies a grade | Nothing is visible until the round settles |
 | Resubmit the leader for a lucky draw | Four fixed looks, a margin, paired on shared rounds |
 | Organiser picks a good seed | drand, a ten-minute grid, the crawl named in advance, checked by every client |
 | Flood the queue | GitHub-linked accounts, one entry in play, six submissions a day |
 
-What is left is in [Rules](RULES.md#what-the-organisers-are-trusted-with): anchors are
-trusted to run editors and to grade honestly, and anyone can check either by rerunning.
+What is left is in [Rules](RULES.md#what-is-trusted-and-what-is-not).
 
 ## How it is built
 
@@ -151,6 +176,7 @@ trusted to run editors and to grade honestly, and anyone can check either by rer
   cannot reload it stops showing numbers until it can. There is no SQL and no migration
   step.
 - **Files** (entries, edit scripts, the exam pack) live in a bucket, addressed by hash.
+  Model weights do not: an entry names them where they already are.
 - **Identity** is an Ed25519 key made by `stet login`. Every request that matters is
   signed. There are no passwords.
 
@@ -179,7 +205,7 @@ also recent papers in which an agent searches for data-selection programs and sc
 with a short proxy training run. Stet differs from all of them in the same ways: the entry
 is a time-boxed *program*, it is judged on fresh data it has never seen, the whole edit
 space is open (cut, reorder, repeat, repair), a score costs minutes on a consumer GPU, and
-every score can be replicated by anyone, with the replications published.
+every score is made by more than one volunteer's machine and can be re-run by anyone.
 
 Two findings from that literature shaped the design. On held-out text from the same pool,
 careful selection is almost indistinguishable from random, which is why the exam is curated

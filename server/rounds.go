@@ -1,7 +1,7 @@
 package main
 
 // The life of a round: scheduled (announced, with its draw time and its crawl) -> open
-// (drawn; anchors edit, verifiers grade) -> settled.
+// (drawn; verifiers run the editors and grade what they wrote) -> settled.
 //
 // A round is drawn at a moment on the season's public grid, from the first beacon round
 // emitted at or after it. The crawl is named when the round is scheduled. So everything
@@ -121,6 +121,9 @@ func (a *App) tick(ctx context.Context) {
 			if c.Status == "claimed" && c.ExpiresAt <= t {
 				c.Status = "lapsed" // out of time, with no report and no release
 				tx.saveClaim(c)
+				if rd := s.Rounds[c.RoundIdx]; rd != nil && rd.Status == "open" && a.established(s.Accounts[c.AccountID]) {
+					a.moved(tx, rd)
+				}
 			}
 		}
 		// Claims of rounds long settled have nothing left to say.
@@ -130,6 +133,7 @@ func (a *App) tick(ctx context.Context) {
 			}
 		}
 		a.schedule(tx)
+		a.carryOver(tx)
 		a.abandonStuck(tx)
 		a.settleReady(tx)
 		return nil
@@ -228,7 +232,7 @@ func (a *App) selectEntrants(s *State, cutoff int64) []entrant {
 	for _, e := range qualifying {
 		add(e.ID, "qualifying")
 	}
-	priority := recentAgreed(s) // grades for others in the last two weeks
+	priority := recentWork(s) // runs and grades for others in the last two weeks
 	sort.SliceStable(queue, func(i, j int) bool {
 		pi, pj := priority[queue[i].AccountID], priority[queue[j].AccountID]
 		if pi != pj {
@@ -248,7 +252,7 @@ func (a *App) selectEntrants(s *State, cutoff int64) []entrant {
 	return out
 }
 
-// bringForward moves the scheduled round to the next moment on the grid (an anchor asked
+// bringForward moves the scheduled round to the next moment on the grid (an organiser asked
 // for a draw sooner than the schedule's). In development the draw is immediate and off the
 // grid, which real verifiers would refuse.
 func (a *App) bringForward(ctx context.Context) (*Round, error) {
@@ -340,7 +344,7 @@ func (a *App) maybeDraw(ctx context.Context, force bool) error {
 			return nil
 		}
 		// The crawl is the one announced with the round, never one chosen now.
-		cur.Status, cur.Randomness, cur.DrawnAt = "open", randomness, now()
+		cur.Status, cur.Randomness, cur.DrawnAt, cur.ActiveAt = "open", randomness, now(), now()
 		cur.Seed = hexOf(officialSeed(a.season.ID, cur.Idx, cur.DrandRound, randomness, *cur.Crawl))
 		tx.saveRound(cur)
 		for _, e := range entrants {
@@ -399,7 +403,7 @@ func (a *App) settleRounds(tx *Tx) {
 				ed.Status = "retired"
 				tx.saveEditor(ed)
 			}
-			// Whether an entry the anchors could not run is the entry's trouble or theirs
+			// Whether an entry the verifiers could not run is the entry's trouble or theirs
 			// depends on whether they ran the others, which is known only now.
 			if e.Void || !e.Valid {
 				a.afterInvalid(tx, e.EditorID)

@@ -212,7 +212,7 @@ func testConfig(t *testing.T, anchors ...ed25519.PublicKey) Config {
 		DataDir: t.TempDir(), FilesDir: t.TempDir(), DocsDir: "../docs", AgentsFile: "../src/stet/templates/AGENTS.md", AnchorKeys: map[string]bool{}, Scale: "nano",
 		RoundInterval: 6 * time.Hour, MaxNewPerRound: 8, LadderSize: 10, QualifyRounds: 5, RatedRounds: 3, ReplicaWait: 45 * time.Minute,
 		Lease: 3 * time.Hour, FixedCrawl: &Crawl{Crawl: "CC-MAIN-TEST", PathsSHA256: strings.Repeat("ab", 32), NShards: 1000},
-		GithubMinAgeDays: 30, Dev: true,
+		GithubMinAgeDays: 30, Dev: true, EstablishAfter: 5, RunsPerEntry: 2, ActiveWindow: 10 * time.Minute,
 	}
 	for _, k := range anchors {
 		cfg.AnchorKeys[hex.EncodeToString(k)] = true
@@ -352,7 +352,9 @@ type claimed struct {
 			Name string `json:"name"`
 		} `json:"editor"`
 		Script *ScriptRef `json:"script"`
+		Run    int        `json:"run"`
 	} `json:"job"`
+	Runner    map[string]any `json:"runner"`
 	Announced map[string]any `json:"announced"`
 	Error     string         `json:"error"`
 }
@@ -364,8 +366,14 @@ func (w *world) hello(edits bool) map[string]any {
 
 func (w *world) claim(a *actor, edits bool) *claimed {
 	w.t.Helper()
+	return w.claimWith(a, w.hello(edits))
+}
+
+// claimWith asks for work with a hello of the caller's own making.
+func (w *world) claimWith(a *actor, hello map[string]any) *claimed {
+	w.t.Helper()
 	var c claimed
-	if code := a.do("POST", "/api/v1/jobs/claim", w.hello(edits), &c); code != 200 {
+	if code := a.do("POST", "/api/v1/jobs/claim", hello, &c); code != 200 {
 		w.t.Fatalf("claim by %s: HTTP %d %s", a.handle, code, c.Error)
 	}
 	return &c
@@ -430,16 +438,24 @@ func (w *world) report(a *actor, c *claimed, loss float64) (int, string) {
 }
 
 type entryJ struct {
-	Editor  string         `json:"editor"`
-	Status  string         `json:"status"`
-	Stage   string         `json:"stage"`
-	Valid   bool           `json:"valid"`
-	Loss    *float64       `json:"loss"`
-	Gain    *float64       `json:"gain"`
-	Results int            `json:"results"`
-	Reason  string         `json:"reason"`
-	Script  map[string]any `json:"script"`
-	Detail  *EntryDetail   `json:"detail"`
+	Editor     string         `json:"editor"`
+	Name       string         `json:"name"`
+	Status     string         `json:"status"`
+	Stage      string         `json:"stage"`
+	Valid      bool           `json:"valid"`
+	Void       bool           `json:"void"`
+	Loss       *float64       `json:"loss"`
+	Gain       *float64       `json:"gain"`
+	Results    int            `json:"results"`
+	Reason     string         `json:"reason"`
+	Script     map[string]any `json:"script"`
+	Edit       map[string]any `json:"edit"`
+	Detail     *EntryDetail   `json:"detail"`
+	Runs       []RunView      `json:"runs"`
+	Dropped    []RunView      `json:"dropped_runs"`
+	NRuns      int            `json:"n_runs"`
+	Confirmed  bool           `json:"confirmed"`
+	RunsDiffer bool           `json:"runs_differ"`
 }
 
 func (w *world) entries(a *actor, idx int) []entryJ {
@@ -460,7 +476,122 @@ func (w *world) account(handle string) Account {
 	return out
 }
 
-func TestAnEntryIsEditedByAnAnchorThenGradedByAnyone(t *testing.T) {
+// entry is one entry of a round as the API shows it, by its editor's name.
+func (w *world) entry(idx int, name string) entryJ {
+	w.t.Helper()
+	for _, e := range w.entries(&actor{t: w.t, srv: w.srv}, idx) {
+		if e.Name == name {
+			return e
+		}
+	}
+	w.t.Fatalf("round %d has no entry called %s", idx, name)
+	return entryJ{}
+}
+
+// page fetches a page of the website.
+func (w *world) page(path string) (int, string) {
+	w.t.Helper()
+	req, _ := http.NewRequest("GET", w.srv.URL+path, nil)
+	req.Host = "site.test"
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		w.t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, string(body)
+}
+
+// age makes everything that has happened in the open round, and every verifier's last
+// word, that much older: the same as that much time going by with nobody doing anything.
+func (w *world) age(d time.Duration) {
+	n := int64(d.Seconds())
+	w.app.st.update(context.Background(), func(tx *Tx) error {
+		for _, r := range tx.s.Rounds {
+			if r.Status == "open" {
+				r.DrawnAt, r.ActiveAt = r.DrawnAt-n, r.ActiveAt-n
+				tx.saveRound(r)
+			}
+		}
+		for _, c := range tx.s.Accounts {
+			if c.LastSeen > 0 {
+				c.LastSeen -= n
+			}
+			if c.RunnerSeen > 0 {
+				c.RunnerSeen -= n
+			}
+			tx.saveAccount(c)
+		}
+		for _, c := range tx.s.Claims {
+			c.ClaimedAt, c.ExpiresAt = c.ClaimedAt-n, c.ExpiresAt-n
+			tx.saveClaim(c)
+		}
+		for _, r := range tx.s.Results {
+			r.ReceivedAt -= n
+			tx.saveResult(r)
+		}
+		return nil
+	})
+}
+
+// pass lets that much time go by, and the server's clock tick at the end of it.
+func (w *world) pass(d time.Duration) {
+	w.age(d)
+	w.app.tick(context.Background())
+}
+
+// run has a verifier take an edit job and report it. An empty script means the editor failed.
+func (w *world) run(a *actor, script string) *claimed {
+	w.t.Helper()
+	c := w.claim(a, true)
+	if c.Job == nil || c.Job.Kind != "edit" {
+		w.t.Fatalf("%s should be running an editor: %+v", a.handle, c.Job)
+	}
+	if code, status := w.edit(a, c, script); code != 200 {
+		w.t.Fatalf("%s's run: HTTP %d %s", a.handle, code, status)
+	}
+	return c
+}
+
+// grade has a verifier take a grade job and report it, and returns the job and what the
+// server said. edits says whether the verifier is also asking for editors to run.
+func (w *world) grade(a *actor, edits bool, loss float64) (*claimed, string) {
+	w.t.Helper()
+	c := w.claim(a, edits)
+	if c.Job == nil || c.Job.Kind != "grade" {
+		w.t.Fatalf("%s should be grading: %+v", a.handle, c.Job)
+	}
+	code, status := w.report(a, c, loss)
+	if code != 200 {
+		w.t.Fatalf("%s's grade: HTTP %d %s", a.handle, code, status)
+	}
+	return c, status
+}
+
+// idle fails the test if a verifier that asks for work is handed any.
+func (w *world) idle(a *actor, edits bool, why string) {
+	w.t.Helper()
+	if c := w.claim(a, edits); c.Job != nil {
+		w.t.Fatalf("%s: %s was handed %s job on %s", why, a.handle, article(c.Job.Kind), c.Job.Editor.Name)
+	}
+}
+
+// as is somebody of another world in this one: the same key, talking to this server. (A
+// world started on another's storage is the same server after a restart.)
+func (w *world) as(a *actor) *actor {
+	c := *a
+	c.srv = w.srv
+	return &c
+}
+
+func (w *world) release(a *actor, c *claimed) {
+	w.t.Helper()
+	if code := a.do("POST", fmt.Sprintf("/api/v1/jobs/%d/release", c.Job.ID), map[string]string{"reason": "test"}, nil); code != 200 {
+		w.t.Fatalf("%s handing job %d back: HTTP %d", a.handle, c.Job.ID, code)
+	}
+}
+
+func TestAnEntryIsRunThenGradedAndSettles(t *testing.T) {
 	pub, priv := newKey()
 	w := newWorld(t, pub)
 	anchor := w.join("anchor-one", priv)
@@ -487,23 +618,28 @@ func TestAnEntryIsEditedByAnAnchorThenGradedByAnyone(t *testing.T) {
 		t.Fatalf("a drawn editor cannot be downloaded: HTTP %d", code)
 	}
 
-	// Nobody but an anchor is ever handed an entrant's code to run.
-	if c := w.claim(bob, true); c.Job != nil {
-		t.Fatalf("a volunteer was given %s job before any script existed", c.Job.Kind)
+	// Nobody but an established verifier is ever handed an entrant's code to run. One who
+	// asks and is not is told why, and is given grading when there is some.
+	nb := w.claim(bob, true)
+	if nb.Job != nil {
+		t.Fatalf("a volunteer was given %s job before any script existed", nb.Job.Kind)
+	}
+	if why, _ := nb.Runner["reason"].(string); nb.Runner["eligible"] != false || !strings.Contains(why, "5 grades that agreed") {
+		t.Fatalf("a volunteer who asked for editors was not told why it gets none: %+v", nb.Runner)
 	}
 	c := w.claim(anchor, true)
-	if c.Job == nil || c.Job.Kind != "edit" || c.Job.Script != nil || c.Job.Editor.ID != id {
-		t.Fatalf("the anchor should be editing: %+v", c.Job)
+	if c.Job == nil || c.Job.Kind != "edit" || c.Job.Script != nil || c.Job.Editor.ID != id || c.Runner["eligible"] != true {
+		t.Fatalf("the organisers' machine should be running the editor: %+v %+v", c.Job, c.Runner)
 	}
 	if c.Announced == nil {
 		t.Fatal("a claim does not say what the next draw is committed to")
 	}
 	if again := w.claim(anchor, true); again.Job == nil || again.Job.ID != c.Job.ID {
-		t.Fatal("a restarted anchor does not get its unfinished job back")
+		t.Fatal("a restarted verifier does not get its unfinished job back")
 	}
 	w.check()
-	if code, msg := w.edit(bob, c, "{}\n"); code != 403 && code != 404 {
-		t.Fatalf("a volunteer reported an edit: HTTP %d %s", code, msg)
+	if code, msg := w.edit(bob, c, "{}\n"); code != 403 {
+		t.Fatalf("a volunteer with no standing reported an edit: HTTP %d %s", code, msg)
 	}
 	script := `{"doc": 3}` + "\n" + `{"doc": 1, "cut": [[0, 40]]}` + "\n"
 	if code, status := w.edit(anchor, c, script); code != 200 || status != "edited" {
@@ -514,12 +650,14 @@ func TestAnEntryIsEditedByAnAnchorThenGradedByAnyone(t *testing.T) {
 		t.Fatalf("an edit was reported twice: HTTP %d", code)
 	}
 
-	// The script is public the moment it exists, and is exactly what was uploaded.
+	// The run is sealed: the entry says it is being graded, and nothing about by whom, how
+	// long it took or what it wrote.
 	es := w.entries(stranger, idx)
-	if len(es) != 1 || es[0].Stage != "grading" || es[0].Loss != nil || es[0].Script == nil {
+	if len(es) != 1 || es[0].Stage != "grading" || es[0].Loss != nil || es[0].Script != nil || es[0].Edit != nil || len(es[0].Runs) != 0 {
 		t.Fatalf("after the edit: %+v", es)
 	}
-	sha, _ := es[0].Script["sha256"].(string)
+	// The script is stored exactly as uploaded, for whoever is handed its name.
+	sha := shaOf(script)
 	resp, err := http.Get(w.srv.URL + "/api/v1/scripts/" + sha)
 	if err != nil || resp.StatusCode != 200 {
 		t.Fatalf("fetching the script: %v", err)
@@ -527,12 +665,12 @@ func TestAnEntryIsEditedByAnAnchorThenGradedByAnyone(t *testing.T) {
 	blob, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	if raw, err := unzstd(blob, 1<<20); err != nil || string(raw) != script {
-		t.Fatalf("the published script is not the one uploaded: %q %v", raw, err)
+		t.Fatalf("the stored script is not the one uploaded: %q %v", raw, err)
 	}
 
 	// A volunteer's grade is sealed, and says nothing to anyone.
 	cb := w.claim(bob, false)
-	if cb.Job == nil || cb.Job.Kind != "grade" || cb.Job.Script == nil || cb.Job.Script.SHA256 != sha {
+	if cb.Job == nil || cb.Job.Kind != "grade" || cb.Job.Script == nil || cb.Job.Script.SHA256 != sha || cb.Job.Run != 1 || cb.Runner != nil {
 		t.Fatalf("bob should be grading that script: %+v", cb.Job)
 	}
 	w.app.st.update(context.Background(), func(tx *Tx) error {
@@ -545,17 +683,21 @@ func TestAnEntryIsEditedByAnAnchorThenGradedByAnyone(t *testing.T) {
 		t.Fatalf("bob's grade: HTTP %d %s", code, status)
 	}
 	w.check()
-	if es := w.entries(stranger, idx); es[0].Status != "open" || es[0].Loss != nil || es[0].Gain != nil || es[0].Detail != nil {
+	if es := w.entries(stranger, idx); es[0].Status != "open" || es[0].Loss != nil || es[0].Gain != nil || es[0].Detail != nil || len(es[0].Runs) != 0 {
 		t.Fatalf("an unsettled entry leaks its grade: %+v", es[0])
 	}
 	if code, _ := w.report(bob, cb, 5.40); code != 409 {
 		t.Fatalf("a grade was reported twice: HTTP %d", code)
 	}
+	if b := w.account("bob"); b.Agreed != 0 || b.GPUSeconds != 0 {
+		t.Fatalf("a sealed grade has already earned something: %+v", b)
+	}
 
-	// The anchor's grade is the score, to the digit, and bob's agreement counts for him.
+	// Nobody established is there but the machine that ran the editor, so it grades its own
+	// script. That is the score, and the score says so. Bob's agreement counts for him.
 	ca := w.claim(anchor, true)
-	if ca.Job == nil || ca.Job.Kind != "grade" {
-		t.Fatalf("the anchor should be grading: %+v", ca.Job)
+	if ca.Job == nil || ca.Job.Kind != "grade" || ca.Job.Script.SHA256 != sha {
+		t.Fatalf("the organisers' machine should be grading: %+v", ca.Job)
 	}
 	wrong := w.result(ca, 5.52, 6.0)
 	wrong["script_sha256"] = strings.Repeat("9", 64)
@@ -563,25 +705,48 @@ func TestAnEntryIsEditedByAnAnchorThenGradedByAnyone(t *testing.T) {
 		t.Fatalf("a grade of some other script was accepted: HTTP %d", code)
 	}
 	if code, status := w.report(anchor, ca, 5.52); code != 200 || status != "settled" {
-		t.Fatalf("the anchor's grade: HTTP %d %s", code, status)
+		t.Fatalf("the deciding grade: HTTP %d %s", code, status)
 	}
 	w.check()
 	es = w.entries(stranger, idx)
 	if es[0].Status != "settled" || !es[0].Valid || es[0].Loss == nil || *es[0].Loss != 5.52 || math.Abs(*es[0].Gain-0.48) > 1e-9 {
 		t.Fatalf("settled entry: %+v", es[0])
 	}
-	if es[0].Detail == nil || !es[0].Detail.Audited || len(es[0].Detail.Verifiers) != 2 || es[0].Detail.Train == nil {
+	if es[0].Detail == nil || !es[0].Detail.Audited || len(es[0].Detail.Verifiers) != 2 || es[0].Detail.Verifiers[0] != "anchor-one" || es[0].Detail.Train == nil {
 		t.Fatalf("settled entry's detail: %+v", es[0].Detail)
+	}
+	if es[0].Script == nil || es[0].Script["sha256"] != sha || es[0].Edit == nil {
+		t.Fatalf("a settled entry does not name its script: %+v", es[0])
+	}
+	// One run, graded by its own runner: a score, and not a confirmed one.
+	if es[0].NRuns != 1 || es[0].Confirmed || es[0].RunsDiffer || len(es[0].Runs) != 1 || len(es[0].Dropped) != 0 {
+		t.Fatalf("settled entry's runs: %+v", es[0])
+	}
+	run := es[0].Runs[0]
+	if run.N != 1 || run.By != "anchor-one" || run.Status != "ok" || run.Script != sha || run.ScriptSize != int64(len(script)) ||
+		math.Abs(run.Gain-0.48) > 1e-9 || run.Loss == nil || *run.Loss != 5.52 || !run.Self || run.GPU != "Test GPU" || run.EditSeconds != 3 || len(run.Grades) != 2 {
+		t.Fatalf("the run as published: %+v", run)
+	}
+	if g := run.Grades[0]; g.Handle != "anchor-one" || g.Verdict != "agreed" || !g.Counted || !g.Self || !g.Established || g.First || g.Loss == nil || *g.Loss != 5.52 || math.Abs(*g.Gain-0.48) > 1e-9 {
+		t.Fatalf("the deciding grade as published: %+v", g)
+	}
+	if g := run.Grades[1]; g.Handle != "bob" || g.Verdict != "agreed" || g.Counted || g.Self || g.Established || !g.First || *g.Loss != 5.5 || math.Abs(*g.Gain-0.5) > 1e-9 {
+		t.Fatalf("bob's grade as published: %+v", g)
 	}
 	if b := w.account("bob"); b.Agreed != 1 || b.Streak != 1 || b.Strikes != 0 || b.GPUSeconds != 60 {
 		t.Fatalf("bob after agreeing once: %+v", b)
+	}
+	if a := w.account("anchor-one"); a.Runs != 1 || a.Agreed != 0 || a.Streak != 0 {
+		t.Fatalf("the organisers' account after a run and a grade: %+v", a)
 	}
 	w.app.st.view(func(s *State) {
 		if r := s.Rounds[idx]; r.Status != "settled" || r.BaselineLoss == nil || *r.BaselineLoss != 6.0 || r.CorpusSHA != corpusSHA {
 			t.Fatalf("the round did not settle: %+v", r)
 		}
 		for _, r := range s.Results {
-			if r.Summary != nil || r.Verdict != "agreed" {
+			// The grade that stood alone is the gain; the other agreed with it.
+			want := map[bool]string{true: "counted", false: "agreed"}[r.AccountID == s.byHandle["anchor-one"].ID]
+			if r.Summary != nil || r.Verdict != want || r.Script != sha {
 				t.Fatalf("a settled entry's results: %+v", r)
 			}
 		}
@@ -607,25 +772,25 @@ func TestAnEntryIsEditedByAnAnchorThenGradedByAnyone(t *testing.T) {
 	}
 	again.check()
 	if a := again.account("anchor-one"); !a.Anchor {
-		t.Fatal("the anchor is no longer one after a restart")
+		t.Fatal("the organisers' account is no longer one after a restart")
+	}
+	if es2 := again.entries(&actor{t: t, srv: again.srv}, idx); len(es2) != 1 || len(es2[0].Runs) != 1 || len(es2[0].Runs[0].Grades) != 2 {
+		t.Fatalf("the runs after a restart: %+v", es2)
 	}
 }
 
-func TestADisagreeingGradeIsAStrike(t *testing.T) {
+func TestADisagreeingGradeIsAStrikeAndCannotMoveTheScore(t *testing.T) {
 	pub, priv := newKey()
 	w := newWorld(t, pub)
 	anchor, alice, bob := w.join("anchor-one", priv), w.join("alice", nil), w.join("bob", nil)
 	w.submit(alice, "tidy", "print('v1')")
 	idx := w.draw()
-	if code, status := w.edit(anchor, w.claim(anchor, true), "{\"doc\": 1}\n"); code != 200 {
-		t.Fatal(status)
+	w.run(anchor, "{\"doc\": 1}\n")
+	if _, status := w.grade(bob, false, 5.0); status != "pending" {
+		t.Fatalf("a grade by an account that is not established: %s", status)
 	}
-	cb := w.claim(bob, false)
-	if code, status := w.report(bob, cb, 5.0); code != 200 || status != "pending" {
-		t.Fatalf("HTTP %d %s", code, status)
-	}
-	if code, status := w.report(anchor, w.claim(anchor, true), 5.5); code != 200 || status != "settled" {
-		t.Fatalf("HTTP %d %s", code, status)
+	if _, status := w.grade(anchor, true, 5.5); status != "settled" {
+		t.Fatalf("the established grade: %s", status)
 	}
 	w.check()
 	es := w.entries(bob, idx)
@@ -635,34 +800,41 @@ func TestADisagreeingGradeIsAStrike(t *testing.T) {
 	if b := w.account("bob"); b.Strikes != 1 || b.Agreed != 0 || b.GPUSeconds != 0 || b.LastStrikeAt == 0 || muted(&b, now()) {
 		t.Fatalf("bob after an outlier: %+v", b)
 	}
-	// Every volunteer's grade is on show beside the anchor's: this one differed, and it came
-	// from an account nobody has reason to believe yet. Both are said.
+	// Every grade is on show beside the script's gain: this one differed, and it came from
+	// an account nobody has reason to believe yet. Both are said.
 	d := es[0].Detail
-	if d.Disputed != 1 || d.DisputedTogether || len(d.Verifiers) != 1 || len(d.Replications) != 1 {
-		t.Fatalf("the entry's detail: %+v", d)
+	if d.Disputed != 1 || d.DisputedTogether || len(d.Verifiers) != 1 || len(es[0].Runs) != 1 || len(es[0].Runs[0].Grades) != 2 {
+		t.Fatalf("the entry's detail: %+v %+v", d, es[0].Runs)
 	}
-	if r := d.Replications[0]; r.Handle != "bob" || r.Verdict != "differs" || !r.Valid || r.Loss == nil || *r.Loss != 5.0 ||
-		r.Diff == nil || math.Abs(*r.Diff+0.5) > 1e-9 || r.BaseDiff == nil || *r.BaseDiff != 0 || !r.First {
-		t.Fatalf("bob's grade as published: %+v", r)
+	if g := es[0].Runs[0].Grades[1]; g.Handle != "bob" || g.Verdict != "outlier" || !g.Valid || g.Loss == nil || *g.Loss != 5.0 ||
+		g.Gain == nil || math.Abs(*g.Gain-1.0) > 1e-9 || !g.First || g.Counted || g.Established {
+		t.Fatalf("bob's grade as published: %+v", g)
 	}
 	// And on the round's page, for people.
-	req, _ := http.NewRequest("GET", w.srv.URL+"/rounds/"+roundID(w.app.season.ID, idx), nil)
-	req.Host = "site.test"
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	page, _ := io.ReadAll(resp.Body)
-	for _, want := range []string{`id="replications"`, `<a href="/u/bob">bob</a>`, `5.000`, `−0.500`, `differs`, `first grade`, `1 differed`} {
-		if !strings.Contains(string(page), want) {
+	_, page := w.page("/rounds/" + roundID(w.app.season.ID, idx))
+	for _, want := range []string{`id="runs"`, `id="grades"`, `<a href="/u/bob">bob</a>`, `5.000`, `&#43;1.000`, `outlier`, `first grade`, `1 differed`, `>run once<`, `>graded by its own runner<`} {
+		if !strings.Contains(page, want) {
 			t.Fatalf("the round's page does not show %q", want)
 		}
 	}
 }
 
-// established gives a volunteer a grade that agreed, some time ago.
+// established gives volunteers the record of an established verifier: enough grades that
+// agreed, some time ago, for their grades to count and for them to be handed editors.
 func (w *world) established(handles ...string) {
+	w.app.st.update(context.Background(), func(tx *Tx) error {
+		for _, h := range handles {
+			c := tx.s.byHandle[h]
+			c.Agreed += 2 * w.cfg.EstablishAfter
+			tx.saveAccount(c)
+		}
+		return nil
+	})
+}
+
+// standing gives volunteers one grade that agreed, some time ago: no longer newcomers, and
+// not yet established.
+func (w *world) standing(handles ...string) {
 	w.app.st.update(context.Background(), func(tx *Tx) error {
 		for _, h := range handles {
 			c := tx.s.byHandle[h]
@@ -673,37 +845,61 @@ func (w *world) established(handles ...string) {
 	})
 }
 
-func TestVolunteersWhoFindTheSameThingAreNotStruck(t *testing.T) {
+func TestAnIndependentGradeReplacesTheRunnersOwn(t *testing.T) {
 	pub, priv := newKey()
 	w := newWorld(t, pub)
-	anchor, alice, bob, carol, dave := w.join("anchor-one", priv), w.join("alice", nil), w.join("bob", nil), w.join("carol", nil), w.join("dave", nil)
-	w.submit(alice, "tidy", "print('v1')")
-	w.established("bob", "carol")
+	anchor, alice, zed, bob := w.join("anchor-one", priv), w.join("alice", nil), w.join("zed", nil), w.join("bob", nil)
+	w.submit(alice, "one", "print(1)")
+	w.submit(zed, "two", "print(2)")
+	w.established("bob")
 	idx := w.draw()
-	if code, status := w.edit(anchor, w.claim(anchor, true), "{\"doc\": 1}\n"); code != 200 {
-		t.Fatal(status)
-	}
-	// dave has never had a grade agree. He finds what the other two find.
-	for who, loss := range map[*actor]float64{bob: 5.0, carol: 5.01, dave: 5.0} {
-		if code, status := w.report(who, w.claim(who, false), loss); code != 200 || status != "pending" {
-			t.Fatalf("%s: HTTP %d %s", who.handle, code, status)
+	// The organisers' machine is alone. It runs both entries, and grades the first of its
+	// own scripts, generously.
+	for i := 0; i < 2; i++ {
+		c := w.claim(anchor, true)
+		if c.Job == nil || c.Job.Kind != "edit" {
+			t.Fatalf("run %d: %+v", i, c.Job)
 		}
+		w.edit(anchor, c, fmt.Sprintf("{\"doc\": 1, \"by\": %q}\n", c.Job.Editor.Name))
 	}
-	if code, status := w.report(anchor, w.claim(anchor, true), 5.5); code != 200 || status != "settled" {
-		t.Fatalf("HTTP %d %s", code, status)
+	own, status := w.grade(anchor, true, 5.0)
+	if status != "pending" {
+		t.Fatalf("a round with an ungraded script settled: %s", status)
+	}
+	// Before the round settles an established volunteer arrives. Both scripts want a grade
+	// from somebody who did not write them: the one with none first.
+	first, status := w.grade(bob, false, 5.5)
+	if status != "pending" || first.Job.Editor.Name == own.Job.Editor.Name {
+		t.Fatalf("bob's first grade: %s of %s", status, first.Job.Editor.Name)
+	}
+	// With him around, the machine that wrote the scripts is not asked to grade another.
+	w.idle(anchor, true, "somebody else is there to grade it")
+	second, status := w.grade(bob, false, 5.5)
+	if status != "settled" || second.Job.Editor.Name != own.Job.Editor.Name {
+		t.Fatalf("bob's second grade: %s of %s", status, second.Job.Editor.Name)
 	}
 	w.check()
-	// The score is still the anchor's. But two volunteers found the same thing against it,
-	// so neither is struck, and the entry says the anchor's grade is in question.
-	es := w.entries(alice, idx)
-	d := es[0].Detail
-	if math.Abs(*es[0].Loss-5.5) > 1e-9 || d.Disputed != 3 || !d.DisputedTogether || len(d.Replications) != 3 {
-		t.Fatalf("the entry: %+v %+v", es[0], d)
+	// His grade is the gain. The runner's own counts for nothing now, and is seen to differ.
+	e := w.entry(idx, own.Job.Editor.Name)
+	if !e.Valid || math.Abs(*e.Gain-0.5) > 1e-9 || e.NRuns != 1 || e.Confirmed || e.Detail.Disputed != 1 || e.Runs[0].Self || len(e.Runs[0].Grades) != 2 {
+		t.Fatalf("the entry its runner graded first: %+v %+v", e, e.Runs)
 	}
-	for _, h := range []string{"bob", "carol", "dave"} {
-		if c := w.account(h); c.Strikes != 0 || c.LastStrikeAt != 0 {
-			t.Fatalf("%s was struck for a grade another volunteer also found: %+v", h, c)
-		}
+	if g := e.Runs[0].Grades[0]; g.Handle != "bob" || !g.Counted || g.Self || g.Verdict != "agreed" {
+		t.Fatalf("the grade that counts: %+v", g)
+	}
+	if g := e.Runs[0].Grades[1]; g.Handle != "anchor-one" || g.Counted || !g.Self || g.Verdict != "outlier" || math.Abs(*g.Gain-1.0) > 1e-9 {
+		t.Fatalf("the runner's own grade: %+v", g)
+	}
+	if o := w.entry(idx, first.Job.Editor.Name); math.Abs(*o.Gain-0.5) > 1e-9 || o.Runs[0].Self || len(o.Runs[0].Grades) != 1 {
+		t.Fatalf("the entry only he graded: %+v %+v", o, o.Runs)
+	}
+	// The organisers' accounts are not struck, and earn nothing.
+	if a := w.account("anchor-one"); a.Strikes != 0 || a.Agreed != 0 {
+		t.Fatalf("the organisers' account: %+v", a)
+	}
+	// A grade that stands alone has nothing to agree with, so it earns no standing either.
+	if b := w.account("bob"); b.Agreed != 2*w.cfg.EstablishAfter || b.Strikes != 0 {
+		t.Fatalf("bob: %+v", b)
 	}
 }
 
@@ -713,22 +909,18 @@ func TestAgreeingAboutTheUneditedCorpusEarnsNoStanding(t *testing.T) {
 	anchor, alice, bob := w.join("anchor-one", priv), w.join("alice", nil), w.join("bob", nil)
 	w.submit(alice, "identity", "print('everything')")
 	idx := w.draw()
-	if code, status := w.edit(anchor, w.claim(anchor, true), "{\"doc\": 1}\n"); code != 200 {
-		t.Fatal(status)
-	}
+	w.run(anchor, "{\"doc\": 1}\n")
 	// The unedited corpus's loss is the round's baseline (6.0 here), which every grader
 	// reports with every grade and which hardly moves from round to round. A volunteer who
 	// "agrees" about it may not have trained anything.
-	if code, status := w.report(bob, w.claim(bob, false), 6.0); code != 200 {
+	w.grade(bob, false, 6.0)
+	if _, status := w.grade(anchor, true, 6.0); status != "settled" {
 		t.Fatal(status)
 	}
-	if code, status := w.report(anchor, w.claim(anchor, true), 6.0); code != 200 || status != "settled" {
-		t.Fatalf("HTTP %d %s", code, status)
-	}
 	w.check()
-	d := w.entries(alice, idx)[0].Detail
-	if len(d.Replications) != 1 || d.Replications[0].Verdict != "agreed" || len(d.Verifiers) != 2 {
-		t.Fatalf("the entry's detail: %+v", d)
+	e := w.entries(alice, idx)[0]
+	if g := e.Runs[0].Grades; len(g) != 2 || g[1].Handle != "bob" || g[1].Verdict != "agreed" || len(e.Detail.Verifiers) != 2 {
+		t.Fatalf("the entry's grades: %+v %+v", g, e.Detail)
 	}
 	if b := w.account("bob"); b.Agreed != 0 || b.Streak != 0 || b.Strikes != 0 {
 		t.Fatalf("bob after agreeing about the unedited corpus: %+v", b)
@@ -800,37 +992,33 @@ func TestAMuteLiftsAndAJobLeftToRunOutCostsADay(t *testing.T) {
 	w.check()
 }
 
-func TestAnEntryTheAnchorCannotGradeIsGivenUp(t *testing.T) {
+func TestAScriptNoEstablishedVerifierCanGradeIsGivenUp(t *testing.T) {
 	pub, priv := newKey()
 	w := newWorld(t, pub)
 	anchor, alice, bob := w.join("anchor-one", priv), w.join("alice", nil), w.join("bob", nil)
 	id := w.submit(alice, "tidy", "print('v1')")
 	idx := w.draw()
-	if code, status := w.edit(anchor, w.claim(anchor, true), "{\"doc\": 1}\n"); code != 200 {
+	w.run(anchor, "{\"doc\": 1}\n")
+	// A volunteer's machine manages what the established one will not.
+	if _, status := w.grade(bob, false, 5.2); status != "pending" {
 		t.Fatal(status)
 	}
-	// A volunteer's machine manages what the anchor's will not.
-	if code, status := w.report(bob, w.claim(bob, false), 5.2); code != 200 || status != "pending" {
-		t.Fatalf("HTTP %d %s", code, status)
-	}
-	// The script is one the anchor's harness falls over on, every time.
+	// The script is one its harness falls over on, every time.
 	for i := 0; i < maxGradeAttempts; i++ {
 		c := w.claim(anchor, true)
 		if c.Job == nil || c.Job.Kind != "grade" {
 			t.Fatalf("attempt %d: %+v", i, c.Job)
 		}
-		anchor.do("POST", fmt.Sprintf("/api/v1/jobs/%d/release", c.Job.ID), map[string]string{"reason": "the harness fell over"}, nil)
+		w.release(anchor, c)
 	}
-	if c := w.claim(anchor, true); c.Job != nil {
-		t.Fatalf("a sixth attempt was handed out: %+v", c.Job)
-	}
+	w.idle(anchor, true, "a sixth attempt")
 	w.app.tick(context.Background())
 	es := w.entries(alice, idx)
-	if es[0].Status != "settled" || es[0].Valid || !strings.Contains(es[0].Reason, "could not grade") {
+	if es[0].Status != "settled" || es[0].Valid || !es[0].Void || !strings.Contains(es[0].Reason, "could not grade") {
 		t.Fatalf("the entry: %+v", es[0])
 	}
 	w.app.st.view(func(s *State) {
-		if s.Rounds[idx].Status != "settled" || !s.ofEditor[id][0].Void {
+		if s.Rounds[idx].Status != "settled" || !s.ofEditor[id][0].Void || s.ofEditor[id][0].Unattended {
 			t.Fatalf("the round is held open by an entry nobody can grade: %+v", s.Rounds[idx])
 		}
 		// The volunteer's grade is not left pending for ever.
@@ -841,22 +1029,59 @@ func TestAnEntryTheAnchorCannotGradeIsGivenUp(t *testing.T) {
 		}
 	})
 	// It is published, with nothing to compare it with, and counts for and against nobody.
-	d := es[0].Detail
-	if d == nil || len(d.Replications) != 1 || d.Replications[0].Handle != "bob" || d.Replications[0].Verdict != "no anchor grade" || d.Replications[0].Loss == nil {
+	if len(es[0].Runs) != 0 || len(es[0].Dropped) != 1 || es[0].NRuns != 0 {
+		t.Fatalf("the run nobody could grade: %+v %+v", es[0].Runs, es[0].Dropped)
+	}
+	d := es[0].Dropped[0]
+	if d.Status != "dropped" || d.By != "anchor-one" || !strings.Contains(d.Reason, "could not grade") || len(d.Grades) != 1 ||
+		d.Grades[0].Handle != "bob" || d.Grades[0].Verdict != "no established grade" || d.Grades[0].Loss == nil {
 		t.Fatalf("the volunteer's grade was not published: %+v", d)
 	}
 	if b := w.account("bob"); b.Agreed != 0 || b.Strikes != 0 {
 		t.Fatalf("bob: %+v", b)
 	}
-	req, _ := http.NewRequest("GET", w.srv.URL+"/rounds/"+roundID(w.app.season.ID, idx), nil)
-	req.Host = "site.test"
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
+	if code, page := w.page("/rounds/" + roundID(w.app.season.ID, idx)); code != 200 || !strings.Contains(page, "no established grade") || strings.Contains(page, "set aside: no established grade") {
+		t.Fatalf("the round's page: HTTP %d", code)
 	}
-	defer resp.Body.Close()
-	if page, _ := io.ReadAll(resp.Body); resp.StatusCode != 200 || !strings.Contains(string(page), "no anchor grade") || strings.Contains(string(page), "set aside: no anchor grade") {
-		t.Fatalf("the round's page: HTTP %d", resp.StatusCode)
+	w.check()
+}
+
+func TestAScriptNobodyCanGradeIsDroppedAndTheOtherRunStands(t *testing.T) {
+	pub, priv := newKey()
+	w := newWorld(t, pub)
+	anchor, alice, bob := w.join("anchor-one", priv), w.join("alice", nil), w.join("bob", nil)
+	w.submit(alice, "tidy", "print('v1')")
+	w.established("bob")
+	idx := w.draw()
+	one, two := "{\"doc\": 1}\n", "{\"doc\": 2}\n"
+	ca, cb := w.claim(anchor, true), w.claim(bob, true)
+	w.edit(anchor, ca, one)
+	w.edit(bob, cb, two)
+	if g, status := w.grade(bob, true, 5.5); status != "pending" || g.Job.Script.SHA256 != shaOf(one) {
+		t.Fatalf("bob's grade of the other run's script: %s %+v", status, g.Job)
+	}
+	// The only machine that may grade bob's script cannot.
+	for i := 0; i < maxGradeAttempts; i++ {
+		c := w.claim(anchor, true)
+		if c.Job == nil || c.Job.Kind != "grade" || c.Job.Script.SHA256 != shaOf(two) || c.Job.Run != 2 {
+			t.Fatalf("attempt %d: %+v", i, c.Job)
+		}
+		w.release(anchor, c)
+	}
+	w.idle(anchor, true, "a sixth attempt")
+	w.app.tick(context.Background())
+	e := w.entry(idx, "tidy")
+	if e.Status != "settled" || !e.Valid || e.Void || e.NRuns != 1 || e.Confirmed || e.RunsDiffer || math.Abs(*e.Gain-0.5) > 1e-9 {
+		t.Fatalf("the entry: %+v", e)
+	}
+	if len(e.Runs) != 1 || e.Runs[0].By != "anchor-one" || len(e.Dropped) != 1 || e.Dropped[0].By != "bob" || e.Dropped[0].N != 2 || !strings.Contains(e.Dropped[0].Reason, "could not grade") {
+		t.Fatalf("its runs: %+v, dropped %+v", e.Runs, e.Dropped)
+	}
+	if b := w.account("bob"); b.Runs != 1 || b.Strikes != 0 {
+		t.Fatalf("bob: %+v", b)
+	}
+	if _, page := w.page("/rounds/" + roundID(w.app.season.ID, idx)); !strings.Contains(page, "set aside: the verifiers could not grade") {
+		t.Fatal("the round's page does not show the run that was set aside")
 	}
 	w.check()
 }
@@ -919,7 +1144,7 @@ func TestAFailedEditScoresAsUneditedAndRetiresTheEditor(t *testing.T) {
 	})
 }
 
-func TestOnlyAnAnchorPublishesFiles(t *testing.T) {
+func TestOnlyAnOrganiserPublishesFiles(t *testing.T) {
 	pub, priv := newKey()
 	w := newWorld(t, pub)
 	anchor, eve := w.join("anchor-one", priv), w.join("eve", nil)
@@ -939,15 +1164,15 @@ func TestOnlyAnAnchorPublishesFiles(t *testing.T) {
 	if code := anchor.do("PUT", "/api/v1/admin/files/..%2Fmeta", pack, &out); code == 201 {
 		t.Fatal("a file was published under a name that is not a plain file name")
 	}
-	// Not even an anchor's key publishes anything else: another name, or other bytes.
+	// Not even an organiser's key publishes anything else: another name, or other bytes.
 	if code := anchor.do("PUT", "/api/v1/admin/files/install.sh", pack, &out); code != 400 {
-		t.Fatalf("an anchor published a file the season does not name: HTTP %d %s", code, out.Error)
+		t.Fatalf("an organiser published a file the season does not name: HTTP %d %s", code, out.Error)
 	}
 	if code := anchor.do("PUT", "/api/v1/admin/files/"+name, []byte("some other exam"), &out); code != 400 {
-		t.Fatalf("an anchor published an exam pack with the wrong hash: HTTP %d %s", code, out.Error)
+		t.Fatalf("an organiser published an exam pack with the wrong hash: HTTP %d %s", code, out.Error)
 	}
 	if code := anchor.do("PUT", "/api/v1/admin/files/"+name, pack, &out); code != 201 || out.Bytes != len(pack) {
-		t.Fatalf("an anchor publishing a file: HTTP %d %+v", code, out)
+		t.Fatalf("an organiser publishing a file: HTTP %d %+v", code, out)
 	}
 	if out.SHA256 != hex.EncodeToString(sum[:]) {
 		t.Fatalf("the server reports hash %s", out.SHA256)
@@ -1100,7 +1325,7 @@ func TestARoundSettlesAsAWholeAndWaitsForAVolunteerWhoHasStarted(t *testing.T) {
 	if w.editAll(anchor) != 2 {
 		t.Fatal("the anchor should have edited both entries")
 	}
-	w.established("bob") // the round waits only for a volunteer who has finished a job before
+	w.standing("bob") // the round waits only for a volunteer who has finished a job before
 	cb := w.claim(bob, false)
 	if cb.Job == nil {
 		t.Fatal("the volunteer was given nothing")
@@ -1112,7 +1337,7 @@ func TestARoundSettlesAsAWholeAndWaitsForAVolunteerWhoHasStarted(t *testing.T) {
 			t.Fatalf("the anchor should be grading, got %+v", c.Job)
 		}
 		if code, status := w.report(anchor, c, 5.5); code != 200 || status != "pending" {
-			t.Fatalf("an anchor's grade with a volunteer still at work: HTTP %d %s", code, status)
+			t.Fatalf("a grade with a volunteer still at work: HTTP %d %s", code, status)
 		}
 	}
 	// Nothing is public while a volunteer who started in time is still training...
@@ -1129,7 +1354,7 @@ func TestARoundSettlesAsAWholeAndWaitsForAVolunteerWhoHasStarted(t *testing.T) {
 	}
 	bob.do("GET", "/api/v1/rounds/"+roundID(w.app.season.ID, idx), nil, &rd)
 	if _, ok := rd.Round["baseline_loss"]; ok {
-		t.Fatal("an open round publishes the anchor's baseline, which is half of every grade")
+		t.Fatal("an open round publishes its baseline, which is half of every grade")
 	}
 	// ...and nobody new is started on a round that is only waiting to close.
 	if c := w.claim(carol, false); c.Job != nil {
@@ -1155,24 +1380,17 @@ func TestAGradeThatArrivesAfterTheRoundSettlesCountsForNothing(t *testing.T) {
 	w.submit(anchor, "ref-a", "print(1)")
 	idx := w.draw()
 	w.editAll(anchor)
-	w.established("mallory")
+	w.standing("mallory")
 	// Mallory takes the job and trains nothing.
 	cm := w.claim(mallory, false)
 	if cm.Job == nil {
 		t.Fatal("no job")
 	}
 	if _, status := w.report(anchor, w.claim(anchor, true), 5.5); status != "pending" {
-		t.Fatalf("the anchor's grade should wait for the volunteer: %s", status)
+		t.Fatalf("the grade should wait for the volunteer: %s", status)
 	}
 	// The wait runs out. The round settles without her.
-	w.app.st.update(context.Background(), func(tx *Tx) error {
-		for _, r := range tx.s.Results {
-			r.ReceivedAt -= 3600
-			tx.saveResult(r)
-		}
-		return nil
-	})
-	w.app.tick(context.Background())
+	w.pass(w.cfg.ReplicaWait + time.Minute)
 	if w.settled(idx) != 1 {
 		t.Fatal("the round waited for ever for a volunteer who never reported")
 	}
@@ -1199,14 +1417,14 @@ func TestAGradeThatArrivesAfterTheRoundSettlesCountsForNothing(t *testing.T) {
 	w.check()
 }
 
-func TestOnlyAnAnchorSetsAScore(t *testing.T) {
+func TestOnlyEstablishedGradesSetAScore(t *testing.T) {
 	pub, priv := newKey()
 	w := newWorld(t, pub)
 	anchor, m1, m2 := w.join("anchor-one", priv), w.join("mallory", nil), w.join("mallet", nil)
-	// Mallory has agreed with the anchor before, so her account is not a newcomer's.
+	// Mallory has had grades agree before, one short of enough to be established.
 	w.app.st.update(context.Background(), func(tx *Tx) error {
 		acct := tx.s.byHandle["mallory"]
-		acct.Agreed = 4
+		acct.Agreed = w.cfg.EstablishAfter - 1
 		tx.saveAccount(acct)
 		return nil
 	})
@@ -1215,32 +1433,28 @@ func TestOnlyAnAnchorSetsAScore(t *testing.T) {
 	w.editAll(anchor)
 	// Two accounts report the same invented number, 0.3 nats better than the truth.
 	for _, m := range []*actor{m1, m2} {
-		c := w.claim(m, false)
-		if c.Job == nil {
-			t.Fatalf("%s was given nothing", m.handle)
-		}
-		if code, status := w.report(m, c, 5.2); code != 200 || status != "pending" {
-			t.Fatalf("HTTP %d %s", code, status)
+		if _, status := w.grade(m, true, 5.2); status != "pending" {
+			t.Fatalf("%s: %s", m.handle, status)
 		}
 	}
 	if w.settled(idx) != 0 {
-		t.Fatal("two volunteers settled an entry between them")
+		t.Fatal("two accounts that are not established settled an entry between them")
 	}
-	if code, status := w.report(anchor, w.claim(anchor, true), 5.5); code != 200 || status != "settled" {
-		t.Fatalf("HTTP %d %s", code, status)
+	if _, status := w.grade(anchor, true, 5.5); status != "settled" {
+		t.Fatal(status)
 	}
 	es := w.entries(m1, idx)
 	if *es[0].Loss != 5.5 {
-		t.Fatalf("volunteers moved the score: %v", *es[0].Loss)
+		t.Fatalf("they moved the score: %v", *es[0].Loss)
 	}
-	// Both are on record as differing, with their numbers. One of them has never agreed
-	// with an anchor, so neither can stand behind the other: both are struck.
-	if d := es[0].Detail; d.Disputed != 2 || d.DisputedTogether || len(d.Verifiers) != 1 || len(d.Replications) != 2 {
+	// Both are on record as differing, with their numbers, and both are struck: that two
+	// keys say the same thing is no evidence, since keys are free.
+	if d := es[0].Detail; d.Disputed != 2 || d.DisputedTogether || len(d.Verifiers) != 1 || len(es[0].Runs[0].Grades) != 3 {
 		t.Fatalf("the entry's detail: %+v", d)
 	}
 	for _, h := range []string{"mallory", "mallet"} {
 		if m := w.account(h); m.Strikes != 1 || m.Streak != 0 {
-			t.Fatalf("%s after disagreeing with the anchor: %+v", h, m)
+			t.Fatalf("%s after disagreeing with the established grade: %+v", h, m)
 		}
 	}
 	w.check()
@@ -1320,7 +1534,7 @@ func TestGradesThatKeepDisagreeingEndTheWorkButNotTheEntries(t *testing.T) {
 	w.check()
 }
 
-func TestAnEditorTheAnchorCannotRunDoesNotHoldTheRoundOpen(t *testing.T) {
+func TestAnEditorTheVerifiersCannotRunDoesNotHoldTheRoundOpen(t *testing.T) {
 	pub, priv := newKey()
 	w := newWorld(t, pub)
 	anchor, alice := w.join("anchor-one", priv), w.join("alice", nil)
@@ -1346,7 +1560,7 @@ func TestAnEditorTheAnchorCannotRunDoesNotHoldTheRoundOpen(t *testing.T) {
 			t.Fatal("the round is still open")
 		}
 		if e := s.Editors[id]; e.Status == "retired" {
-			t.Fatal("the editor was retired for something that may be the anchor's fault")
+			t.Fatal("the editor was retired for something that may be the verifiers' fault")
 		}
 		// The round does not count for the editor: not as one of its qualifying rounds,
 		// and not as a gain of nothing in its rating.
@@ -1397,9 +1611,9 @@ func TestAnEditorTheAnchorCannotRunDoesNotHoldTheRoundOpen(t *testing.T) {
 	}
 	w.app.st.view(func(s *State) {
 		if !failing(s, id) {
-			t.Fatal("an editor the anchors could not run in three rounds, while running others, is still being scheduled")
+			t.Fatal("an editor the verifiers could not run in three rounds, while running others, is still being scheduled")
 		}
-		// Whether the anchors ran the others is known only when the round has settled, and
+		// Whether the verifiers ran the others is known only when the round has settled, and
 		// that is when the editor stops: it is not drawn a fourth time.
 		if e := s.Editors[id]; e.Status != "retired" {
 			t.Fatalf("the editor is still %s", e.Status)
@@ -1441,7 +1655,7 @@ func TestARoundDoesNotWaitForAnAccountThatHasNeverAgreed(t *testing.T) {
 	w.check()
 }
 
-// season plays whole rounds with an anchor doing all the work. loss gives each editor's
+// play plays whole rounds with one machine, the organisers', doing all the work. loss gives each editor's
 // exam loss in a round, by editor name.
 func (w *world) play(anchor *actor, rounds int, loss func(name string, round int) float64) {
 	w.t.Helper()
@@ -1957,7 +2171,7 @@ func TestABundleIsBoundedInEveryDimension(t *testing.T) {
 		"a hidden file":         pack([]*tar.Header{{Name: "stet.toml"}, {Name: "src/.env"}}, nil),
 		"a virtual environment": pack([]*tar.Header{{Name: "stet.toml"}, {Name: "venv/lib/site.py"}}, nil),
 		"compiled Python":       pack([]*tar.Header{{Name: "stet.toml"}, {Name: "editor.pyc"}}, nil),
-		// What the site shows and what an anchor runs must be one file.
+		// What the site shows and what a verifier runs must be one file.
 		"the same file twice":         pack([]*tar.Header{{Name: "stet.toml"}, {Name: "editor.py"}, {Name: "editor.py"}}, nil),
 		"a file by a roundabout path": pack([]*tar.Header{{Name: "stet.toml"}, {Name: "x/../editor.py"}}, nil),
 		"a file as ./file":            pack([]*tar.Header{{Name: "stet.toml"}, {Name: "./editor.py"}}, nil),
@@ -2176,7 +2390,7 @@ func TestADrawNeverReusesASlotAnnouncedForAnotherRound(t *testing.T) {
 		return r
 	}
 	first := scheduled()
-	// An anchor asks for the draw sooner. Verifiers have already been told the old slot was this round's.
+	// An organiser asks for the draw sooner. Verifiers have already been told the old slot was this round's.
 	if _, err := w.app.bringForward(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -2244,7 +2458,7 @@ func TestAnEditorThatKeepsFailingLeavesTheLadder(t *testing.T) {
 		}
 	}
 	if onLadder() {
-		t.Fatal("an editor that failed twice running is still on the ladder, costing an anchor an edit every round")
+		t.Fatal("an editor that failed twice running is still on the ladder, costing the verifiers an edit every round")
 	}
 	w.check()
 }
@@ -2414,21 +2628,32 @@ func TestSmallRulesOfJudging(t *testing.T) {
 	}
 	// A person is not handed their own entry under a second key, even when the first key
 	// no longer has the GitHub identity the editor was entered under.
-	st := &entryState{Entry: &Entry{Script: strings.Repeat("a", 64)}, OwnerID: 1, OwnerGH: 4242}
-	if wantsGrade(st, &Account{ID: 2, GithubID: 4242, Agreed: 1}, &Account{ID: 1}) {
-		t.Fatal("handed their own entry")
+	j := &judge{s: &State{Accounts: map[int64]*Account{1: {ID: 1}}}}
+	st := &entryState{OwnerID: 1, OwnerGH: 4242}
+	if !j.owns(st, &Account{ID: 2, GithubID: 4242, Agreed: 1}) || !j.owns(st, &Account{ID: 1}) {
+		t.Fatal("their own entry is not seen to be theirs")
 	}
-	if !wantsGrade(st, &Account{ID: 3, GithubID: 77, Agreed: 1}, &Account{ID: 1}) {
-		t.Fatal("somebody else was refused it")
+	if j.owns(st, &Account{ID: 3, GithubID: 77, Agreed: 1}) || j.owns(st, &Account{ID: 4}) {
+		t.Fatal("somebody else's entry is taken for theirs")
 	}
-	// An anchor sets the scores; counts from before it was one are not agreements.
+	// Two keys are one person when they share a GitHub identity, and never for want of one.
+	if !samePerson(&Account{ID: 2, GithubID: 7}, &Account{ID: 3, GithubID: 7}) || samePerson(&Account{ID: 2}, &Account{ID: 3}) {
+		t.Fatal("samePerson")
+	}
+	// The organisers' accounts start out established; counts from before one was theirs are
+	// not agreements.
 	w := newWorld(t)
 	w.app.st.view(func(s *State) {
-		if v := verifierStats(s, &Account{ID: 9, Anchor: true, Agreed: 3, Streak: 3}); v["validated"] != 0 || v["streak"] != 0 {
-			t.Fatalf("an anchor's stats: %+v", v)
+		v := w.app.verifierStats(s, &Account{ID: 9, Anchor: true, Agreed: 3, Streak: 3})
+		if v["validated"] != 0 || v["streak"] != 0 || v["established"] != true || v["needs_github"] != false {
+			t.Fatalf("an organisers' account's stats: %+v", v)
+		}
+		v = w.app.verifierStats(s, &Account{ID: 10, Agreed: 3, Runs: 2})
+		if v["validated"] != 3 || v["established"] != false || v["establish_after"] != 5 || v["runs"] != 2 || v["needs_github"] != false {
+			t.Fatalf("a volunteer's stats: %+v", v)
 		}
 	})
-	// What an anchor measures can be recorded, however bad.
+	// What a machine measures can be recorded, however bad.
 	score := func(v float64) *ExamScore {
 		by := map[string]float64{}
 		for _, src := range w.app.season.ExamSources {
@@ -2450,9 +2675,7 @@ func TestAgreeingThatAScriptIsInvalidEarnsNoStanding(t *testing.T) {
 	anchor, alice, bob := w.join("anchor-one", priv), w.join("alice", nil), w.join("bob", nil)
 	w.submit(alice, "tidy", "print('v1')")
 	idx := w.draw()
-	if code, status := w.edit(anchor, w.claim(anchor, true), "{\"doc\": 1}\n"); code != 200 {
-		t.Fatal(status)
-	}
+	w.run(anchor, "{\"doc\": 1}\n")
 	// Finding a script invalid takes no training: it is decided before any.
 	invalid := func(a *actor) (int, string) {
 		c := w.claim(a, a == anchor)
@@ -2474,8 +2697,12 @@ func TestAgreeingThatAScriptIsInvalidEarnsNoStanding(t *testing.T) {
 	}
 	w.check()
 	es := w.entries(alice, idx)
-	if es[0].Valid || len(es[0].Detail.Replications) != 1 || es[0].Detail.Replications[0].Verdict != "agreed" {
-		t.Fatalf("the entry: %+v %+v", es[0], es[0].Detail)
+	// A run whose script is invalid is a failed run, and says why.
+	if es[0].Valid || !strings.Contains(es[0].Reason, "more ink") || len(es[0].Runs) != 1 || es[0].Runs[0].Status != "failed" || es[0].Runs[0].Gain != 0 {
+		t.Fatalf("the entry: %+v %+v", es[0], es[0].Runs)
+	}
+	if g := es[0].Runs[0].Grades; len(g) != 2 || g[1].Handle != "bob" || g[1].Verdict != "agreed" || g[1].Valid || g[1].Loss != nil {
+		t.Fatalf("its grades: %+v", g)
 	}
 	if b := w.account("bob"); b.Agreed != 0 || b.Streak != 0 || b.Strikes != 0 {
 		t.Fatalf("bob after agreeing that a script is invalid: %+v", b)
@@ -2515,7 +2742,7 @@ func TestARoundThatEndsByGivingAnEntryUpStillWaitsForItsVolunteers(t *testing.T)
 	if tries != maxGradeAttempts {
 		t.Fatalf("the anchor tried %d times", tries)
 	}
-	// All that took a long time: the anchor's one grade is far in the past. Just before the
+	// All that took a long time: the one grade is far in the past. Just before the
 	// other entry is given up, a volunteer is handed the graded one, because a round with
 	// an ungraded entry is not yet closing.
 	w.app.st.update(ctx, func(tx *Tx) error {
@@ -2603,5 +2830,928 @@ func TestAScriptThatDoesNotCompressIsServedWhole(t *testing.T) {
 	}
 	if got, err := unzstd(blob, w.app.season.Script.MaxBytes); err != nil || !bytes.Equal(got, raw) {
 		t.Fatalf("what was served is not the script: %v", err)
+	}
+}
+
+// --- runs by volunteers ---------------------------------------------------------------------
+
+func TestTwoVolunteersConfirmAnEntryWithNoOrganiser(t *testing.T) {
+	w := newWorld(t) // nobody's machine here is the organisers'
+	alice, bob, carol := w.join("alice", nil), w.join("bob", nil), w.join("carol", nil)
+	id := w.submit(alice, "tidy", "print('v1')")
+	w.established("bob", "carol")
+	idx := w.draw()
+	rid := roundID(w.app.season.ID, idx)
+	// Both are handed the entry to run, at once: neither waits for the other.
+	cb, cc := w.claim(bob, true), w.claim(carol, true)
+	if cb.Job == nil || cb.Job.Kind != "edit" || cc.Job == nil || cc.Job.Kind != "edit" || cb.Job.ID == cc.Job.ID {
+		t.Fatalf("two runners of one entry: %+v %+v", cb.Job, cc.Job)
+	}
+	one, two := "{\"doc\": 1}\n", "{\"doc\": 2}\n"
+	if code, status := w.edit(bob, cb, one); code != 200 || status != "edited" {
+		t.Fatalf("HTTP %d %s", code, status)
+	}
+	if code, status := w.edit(carol, cc, two); code != 200 || status != "edited" {
+		t.Fatalf("HTTP %d %s", code, status)
+	}
+	// Sealed: nothing public says who ran it, or names a script. A second run that could
+	// read the first one's script could hand it in as its own.
+	sealed := func(when string) {
+		t.Helper()
+		var raw bytes.Buffer
+		for _, path := range []string{"/api/v1/rounds/" + rid, "/api/v1/editors/" + id, "/api/v1/rounds", "/api/v1/leaderboard", "/api/v1/verifiers"} {
+			resp, err := http.Get(w.srv.URL + path)
+			if err != nil || resp.StatusCode != 200 {
+				t.Fatalf("%s: %v", path, err)
+			}
+			raw.ReadFrom(resp.Body)
+			resp.Body.Close()
+		}
+		for _, path := range []string{"/rounds/" + rid, "/editors/" + id[:12], "/", "/verifiers", "/u/bob"} {
+			_, page := w.page(path)
+			raw.WriteString(page)
+		}
+		for _, secret := range []string{shaOf(one), shaOf(two), shaOf(one)[:8], shaOf(two)[:8], `"runs":[{`, `"edit":{`, `id="runs"`, `id="grades"`} {
+			if strings.Contains(raw.String(), secret) {
+				t.Fatalf("%s, something public shows %q", when, secret)
+			}
+		}
+	}
+	sealed("after the runs")
+	// Neither is handed its own script. Each is handed the other's.
+	gb := w.claim(bob, true)
+	if gb.Job == nil || gb.Job.Kind != "grade" || gb.Job.Script.SHA256 != shaOf(two) || gb.Job.Run != 2 {
+		t.Fatalf("bob should be grading carol's script: %+v", gb.Job)
+	}
+	gc := w.claim(carol, true)
+	if gc.Job == nil || gc.Job.Kind != "grade" || gc.Job.Script.SHA256 != shaOf(one) || gc.Job.Run != 1 {
+		t.Fatalf("carol should be grading bob's script: %+v", gc.Job)
+	}
+	if code, status := w.report(bob, gb, 5.50); code != 200 || status != "pending" {
+		t.Fatalf("HTTP %d %s", code, status)
+	}
+	sealed("after a grade")
+	if code, status := w.report(carol, gc, 5.46); code != 200 || status != "settled" {
+		t.Fatalf("HTTP %d %s", code, status)
+	}
+	w.check()
+	// Two runs that agree: the score is their mean, and it is confirmed.
+	e := w.entry(idx, "tidy")
+	if !e.Valid || !e.Confirmed || e.RunsDiffer || e.NRuns != 2 || math.Abs(*e.Gain-0.52) > 1e-9 || math.Abs(*e.Loss-5.48) > 1e-9 || len(e.Runs) != 2 {
+		t.Fatalf("the entry: %+v", e)
+	}
+	if r := e.Runs[0]; r.By != "bob" || r.Status != "ok" || r.Script != shaOf(one) || math.Abs(r.Gain-0.54) > 1e-9 || r.Self || len(r.Grades) != 1 || r.Grades[0].Handle != "carol" || !r.Grades[0].Counted || r.Grades[0].Self {
+		t.Fatalf("the first run: %+v", r)
+	}
+	if r := e.Runs[1]; r.By != "carol" || r.Status != "ok" || r.Script != shaOf(two) || math.Abs(r.Gain-0.5) > 1e-9 || r.Self || len(r.Grades) != 1 || r.Grades[0].Handle != "bob" {
+		t.Fatalf("the second run: %+v", r)
+	}
+	if v := e.Detail.Verifiers; len(v) != 2 || v[0] != "carol" || v[1] != "bob" {
+		t.Fatalf("who graded it: %v", v)
+	}
+	for _, h := range []string{"bob", "carol"} {
+		if a := w.account(h); a.Runs != 1 || a.Strikes != 0 || a.GPUSeconds < 3 {
+			t.Fatalf("%s: %+v", h, a)
+		}
+	}
+	w.app.st.view(func(s *State) {
+		if r := s.Rounds[idx]; r.Status != "settled" || r.BaselineLoss == nil || *r.BaselineLoss != 6.0 || r.BaselineN != 2 {
+			t.Fatalf("the round: %+v", r)
+		}
+	})
+	// And now it is all on show.
+	_, page := w.page("/rounds/" + rid)
+	for _, want := range []string{`id="runs"`, shaOf(one)[:8], shaOf(two)[:8], ">confirmed<", `<a href="/u/carol">carol</a>`} {
+		if !strings.Contains(page, want) {
+			t.Fatalf("the settled round's page does not show %q", want)
+		}
+	}
+	if strings.Contains(page, ">graded by its own runner<") || strings.Contains(page, ">run once<") || strings.Contains(page, ">runs differed<") {
+		t.Fatal("a confirmed entry is shown as something less")
+	}
+	var vs struct {
+		Verifiers []VerifierRow `json:"verifiers"`
+	}
+	bob.do("GET", "/api/v1/verifiers", nil, &vs)
+	if len(vs.Verifiers) != 2 || vs.Verifiers[0].Runs != 1 || !vs.Verifiers[0].Established || vs.Verifiers[0].Trusted {
+		t.Fatalf("the verifier board: %+v", vs.Verifiers)
+	}
+	if _, page := w.page("/verifiers"); !strings.Contains(page, ">established<") || !strings.Contains(page, ">Runs<") {
+		t.Fatal("the verifiers page does not show who is established, or how many editors each has run")
+	}
+	var me struct {
+		Account  map[string]any `json:"account"`
+		Verifier map[string]any `json:"verifier"`
+	}
+	bob.do("GET", "/api/v1/me", nil, &me)
+	if me.Account["established"] != true || me.Verifier["established"] != true || me.Verifier["runs"] != 1.0 || me.Verifier["establish_after"] != 5.0 || me.Verifier["needs_github"] != false || me.Verifier["trusted"] != false {
+		t.Fatalf("/api/v1/me: %+v", me)
+	}
+}
+
+func TestAScriptTwoPeoplesRunsWroteIsNobodysOwn(t *testing.T) {
+	w := newWorld(t)
+	alice, bob, carol := w.join("alice", nil), w.join("bob", nil), w.join("carol", nil)
+	id := w.submit(alice, "steady", "print('the same every time')")
+	w.established("bob", "carol")
+	idx := w.draw()
+	cb, cc := w.claim(bob, true), w.claim(carol, true)
+	same := "{\"doc\": 7}\n"
+	w.edit(bob, cb, same)
+	// While his is the only run that wrote it, the script is his own, and not his to grade.
+	w.idle(bob, true, "a script only he wrote")
+	w.edit(carol, cc, same)
+	// Now two people's runs wrote the same bytes, so neither chose them. Either may grade.
+	g := w.claim(bob, true)
+	if g.Job == nil || g.Job.Kind != "grade" || g.Job.Script.SHA256 != shaOf(same) || g.Job.Run != 1 {
+		t.Fatalf("bob should be grading the script both runs wrote: %+v", g.Job)
+	}
+	if code, status := w.report(bob, g, 5.5); code != 200 || status != "settled" {
+		t.Fatalf("HTTP %d %s", code, status)
+	}
+	w.check()
+	e := w.entry(idx, "steady")
+	if !e.Valid || !e.Confirmed || e.NRuns != 2 || math.Abs(*e.Gain-0.5) > 1e-9 || e.Runs[0].Script != e.Runs[1].Script {
+		t.Fatalf("the entry: %+v", e)
+	}
+	// One script, one set of grades, shown with both runs.
+	for _, r := range e.Runs {
+		if r.Self || len(r.Grades) != 1 || r.Grades[0].Handle != "bob" || r.Grades[0].Self || !r.Grades[0].Counted {
+			t.Fatalf("run %d: %+v", r.N, r)
+		}
+	}
+	w.app.st.view(func(s *State) {
+		if n := len(s.results(idx, id)); n != 1 {
+			t.Fatalf("%d grades of one script", n)
+		}
+	})
+	if _, page := w.page("/rounds/" + roundID(w.app.season.ID, idx)); !strings.Contains(page, ">1 and 2<") {
+		t.Fatal("the round's page does not say that both runs wrote the script")
+	}
+}
+
+func TestTheOrganisersGradeStopsBeingItsOwnWhenAnotherRunWritesTheSameScript(t *testing.T) {
+	pub, priv := newKey()
+	w := newWorld(t, pub)
+	anchor, alice, zed, bob := w.join("anchor-one", priv), w.join("alice", nil), w.join("zed", nil), w.join("bob", nil)
+	w.submit(alice, "one", "print(1)")
+	w.submit(zed, "two", "print(2)")
+	w.established("bob")
+	idx := w.draw()
+	script := func(name string) string { return fmt.Sprintf("{\"doc\": 1, \"by\": %q}\n", name) }
+	// Alone, the organisers' machine runs both and grades one of its own scripts.
+	for i := 0; i < 2; i++ {
+		c := w.claim(anchor, true)
+		w.edit(anchor, c, script(c.Job.Editor.Name))
+	}
+	if _, status := w.grade(anchor, true, 5.5); status != "pending" {
+		t.Fatal(status)
+	}
+	// A volunteer arrives, and its runs of the same editors write the same bytes.
+	for busy := true; busy; {
+		busy = false
+		for _, a := range []*actor{bob, anchor} {
+			c := w.claim(a, true)
+			if c.Job == nil {
+				continue
+			}
+			busy = true
+			if c.Job.Kind == "edit" {
+				if code, status := w.edit(a, c, script(c.Job.Editor.Name)); code != 200 {
+					t.Fatal(status)
+				}
+			} else if code, status := w.report(a, c, 5.5); code != 200 {
+				t.Fatal(status)
+			}
+		}
+	}
+	w.check()
+	if w.settled(idx) != 2 {
+		t.Fatal("the round did not settle")
+	}
+	for _, name := range []string{"one", "two"} {
+		e := w.entry(idx, name)
+		if !e.Valid || !e.Confirmed || e.NRuns != 2 || e.Runs[0].Script != e.Runs[1].Script || math.Abs(*e.Gain-0.5) > 1e-9 {
+			t.Fatalf("%s: %+v", name, e)
+		}
+		for _, r := range e.Runs {
+			for _, g := range r.Grades {
+				if r.Self || g.Self || !g.Counted {
+					t.Fatalf("%s, run %d: a grade of a script two runs wrote is called its runner's own: %+v", name, r.N, g)
+				}
+			}
+		}
+	}
+}
+
+func TestRunsThatDifferGetAThirdAndTheMedianIsTheScore(t *testing.T) {
+	good, other := "{\"doc\": 1}\n", "{\"doc\": 2}\n"
+	start := func(third bool) (*world, int, *actor, *actor, *actor) {
+		w := newWorld(t)
+		alice, bob, carol, dave := w.join("alice", nil), w.join("bob", nil), w.join("carol", nil), w.join("dave", nil)
+		w.submit(alice, "flaky", "print('sometimes')")
+		w.established("bob", "carol", "dave")
+		idx := w.draw()
+		cb, cc := w.claim(bob, true), w.claim(carol, true)
+		if third {
+			// Two runs are under way, which is all an entry wants unless they differ.
+			w.idle(dave, true, "a third run before the first two are known to differ")
+		}
+		if code, status := w.edit(bob, cb, ""); code != 200 || status != "edited" { // the editor fails on bob's machine
+			t.Fatalf("a failed run: HTTP %d %s", code, status)
+		}
+		w.edit(carol, cc, good)
+		return w, idx, bob, carol, dave
+	}
+
+	// With somebody there to run it a third time.
+	w, idx, bob, _, dave := start(true)
+	if g, status := w.grade(bob, true, 5.5); status != "pending" || g.Job.Script.SHA256 != shaOf(good) {
+		t.Fatalf("one run failed and one did not, and somebody could run it again: %s", status)
+	}
+	cd := w.claim(dave, true)
+	if cd.Job == nil || cd.Job.Kind != "edit" {
+		t.Fatalf("dave should be running it a third time: %+v", cd.Job)
+	}
+	w.edit(dave, cd, other)
+	if g, status := w.grade(bob, true, 5.4); status != "settled" || g.Job.Script.SHA256 != shaOf(other) || g.Job.Run != 3 {
+		t.Fatalf("the last grade: %s %+v", status, g.Job)
+	}
+	w.check()
+	e := w.entry(idx, "flaky")
+	if !e.Valid || e.NRuns != 3 || !e.Confirmed || e.RunsDiffer || math.Abs(*e.Gain-0.5) > 1e-9 || math.Abs(*e.Loss-5.5) > 1e-9 || e.Script["sha256"] != shaOf(good) {
+		t.Fatalf("the median of nothing, 0.5 and 0.6: %+v", e)
+	}
+	if r := e.Runs[0]; r.Status != "failed" || r.Gain != 0 || r.Script != "" || !strings.Contains(r.Reason, "out of time") || r.By != "bob" {
+		t.Fatalf("the failed run: %+v", r)
+	}
+
+	// With nobody there: the score is the mean of the two, and says that they differed.
+	w, idx, bob, _, _ = start(false)
+	if _, status := w.grade(bob, true, 5.5); status != "settled" {
+		t.Fatalf("nobody could run it a third time, and the round did not settle: %s", status)
+	}
+	w.check()
+	e = w.entry(idx, "flaky")
+	if !e.Valid || e.NRuns != 2 || e.Confirmed || !e.RunsDiffer || math.Abs(*e.Gain-0.25) > 1e-9 || math.Abs(*e.Loss-5.75) > 1e-9 {
+		t.Fatalf("the mean of nothing and 0.5: %+v", e)
+	}
+	if _, page := w.page("/rounds/" + roundID(w.app.season.ID, idx)); !strings.Contains(page, ">runs differed<") {
+		t.Fatal("the round's page does not say that the runs differed")
+	}
+}
+
+func TestOneMachineAloneSettlesItsRoundsAsItFinishesThem(t *testing.T) {
+	pub, priv := newKey()
+	w := newWorld(t, pub)
+	anchor, alice, zed := w.join("anchor-one", priv), w.join("alice", nil), w.join("zed", nil)
+	w.submit(alice, "one", "print(1)")
+	w.submit(zed, "two", "print(2)")
+	idx := w.draw()
+	last, jobs := "", 0
+	for {
+		c := w.claim(anchor, true)
+		if c.Job == nil {
+			break
+		}
+		jobs++
+		if c.Job.Kind == "edit" {
+			w.edit(anchor, c, fmt.Sprintf("{\"doc\": 1, \"by\": %q}\n", c.Job.Editor.Name))
+			continue
+		}
+		if _, last = w.report(anchor, c, 5.5); last == "settled" && w.settled(idx) != 2 {
+			t.Fatal("an entry settled before its round")
+		}
+	}
+	// No waiting for a second machine that is not there: the last grade settles the round.
+	if jobs != 4 || last != "settled" || w.settled(idx) != 2 {
+		t.Fatalf("%d jobs, the last %s, %d entries settled", jobs, last, w.settled(idx))
+	}
+	for _, name := range []string{"one", "two"} {
+		e := w.entry(idx, name)
+		if !e.Valid || e.NRuns != 1 || e.Confirmed || e.RunsDiffer || !e.Runs[0].Self || e.Runs[0].By != "anchor-one" || math.Abs(*e.Gain-0.5) > 1e-9 {
+			t.Fatalf("%s: %+v", name, e)
+		}
+	}
+	w.check()
+}
+
+func TestNobodyRunsTheirOwnEntryOrOneEntryTwice(t *testing.T) {
+	w := newWorld(t)
+	bob, bob2, carol, carol2 := w.join("bob", nil), w.join("bob-again", nil), w.join("carol", nil), w.join("carol-again", nil)
+	github := func(handle string, id int64) {
+		w.app.st.update(context.Background(), func(tx *Tx) error {
+			c := tx.s.byHandle[handle]
+			c.GithubID = id
+			tx.saveAccount(c)
+			return nil
+		})
+	}
+	github("bob", 4242)
+	id := w.submit(bob, "mine", "print('bob')")
+	// Bob's GitHub identity moves to a second key of his. The entry is still his.
+	github("bob", 0)
+	github("bob-again", 4242)
+	github("carol", 77)
+	w.established("bob", "bob-again", "carol", "carol-again")
+	idx := w.draw()
+	w.idle(bob, true, "its owner")
+	w.idle(bob2, true, "its owner, under another key")
+	c := w.claim(carol, true)
+	if c.Job == nil || c.Job.Kind != "edit" {
+		t.Fatalf("somebody else should be running it: %+v", c.Job)
+	}
+	script := "{\"doc\": 1}\n"
+	w.edit(carol, c, script)
+	w.idle(carol, true, "a second run of an entry she has run, or her own script")
+	// Carol's identity moves to a second key of hers. It is still one person: no second run
+	// of the entry, and no grade of the script her first key wrote.
+	github("carol", 0)
+	github("carol-again", 77)
+	w.idle(carol2, true, "the person who ran it, under another key")
+	w.app.st.view(func(s *State) {
+		edits := 0
+		for _, c := range s.Claims {
+			if c.Kind == "edit" {
+				edits++
+			}
+		}
+		if e := s.entry(idx, id); len(e.Runs) != 1 || e.Runs[0].GithubID != 77 || edits != 1 || len(s.results(idx, id)) != 0 {
+			t.Fatalf("the entry's runs: %+v, %d edit jobs", e.Runs, edits)
+		}
+	})
+	w.check()
+}
+
+func TestOnlyAnEstablishedAccountOnAMachineUpToTheFloorIsHandedEditors(t *testing.T) {
+	pub, priv := newKey()
+	w := newWorld(t, pub)
+	anchor, alice, bob, eve := w.join("anchor-one", priv), w.join("alice", nil), w.join("bob", nil), w.join("eve", nil)
+	w.submit(alice, "tidy", "print('v1')")
+	w.established("bob")
+	w.standing("eve")
+	w.draw()
+	w.app.cfg.Dev = false // as in production: the sandbox and the floor are required
+	f := w.app.season.Runner
+	if f.GPUTokensPerSecond <= 0 || f.Cores <= 0 {
+		t.Fatalf("the season has no floor to test against: %+v", f)
+	}
+	bench := func() map[string]any {
+		return map[string]any{"gpu_tokens_per_second": f.GPUTokensPerSecond, "cpu_mb_per_second": f.CPUMBPerSecond, "cores": f.Cores, "memory_gb": f.MemoryGB, "gpu_memory_gb": f.GPUMemoryGB}
+	}
+	hello := func(b map[string]any, sandbox string) map[string]any {
+		h := w.hello(true)
+		hw := map[string]any{"gpu": "Test GPU", "device": "cuda", "backend": "cuda"}
+		if b != nil {
+			hw["bench"] = b
+		}
+		h["hardware"], h["sandbox"] = hw, sandbox
+		return h
+	}
+	refused := func(who *actor, h map[string]any, why string) {
+		t.Helper()
+		c := w.claimWith(who, h)
+		reason, _ := c.Runner["reason"].(string)
+		if c.Job != nil || c.Runner["eligible"] != false || !strings.Contains(reason, why) {
+			t.Fatalf("%s was not refused editors for %q: job %+v, %+v", who.handle, why, c.Job, c.Runner)
+		}
+	}
+	slow, small := bench(), bench()
+	slow["gpu_tokens_per_second"] = f.GPUTokensPerSecond - 1
+	small["cores"] = f.Cores - 1
+	refused(eve, hello(bench(), "bwrap"), "established") // a fast machine, and an account without the record
+	refused(bob, hello(nil, "bwrap"), "floor")           // no measurement of itself
+	refused(bob, hello(slow, "bwrap"), "floor")          // too slow
+	refused(bob, hello(small, "bwrap"), "floor")         // too small
+	refused(bob, hello(bench(), "none"), "sandbox")      // nothing to run entrants' code in
+	refused(anchor, hello(nil, "bwrap"), "floor")        // the organisers' machines are held to it too
+	if a := w.account("bob"); a.RunnerSeen != 0 {
+		t.Fatalf("a machine that may not run editors is counted as one that could: %+v", a)
+	}
+	c := w.claimWith(bob, hello(bench(), "bwrap"))
+	if c.Job == nil || c.Job.Kind != "edit" || c.Runner["eligible"] != true {
+		t.Fatalf("an established account on a machine up to the floor: %+v %+v", c.Job, c.Runner)
+	}
+	if a := w.account("bob"); a.RunnerSeen == 0 || a.Backend != "cuda" {
+		t.Fatalf("the runner's record: %+v", a)
+	}
+	// An account that loses its standing while it holds the job cannot hand in the run.
+	w.app.st.update(context.Background(), func(tx *Tx) error {
+		b := tx.s.byHandle["bob"]
+		b.Agreed = 0
+		tx.saveAccount(b)
+		return nil
+	})
+	if code, msg := w.edit(bob, c, "{\"doc\": 1}\n"); code != 403 {
+		t.Fatalf("a run by an account that is no longer established: HTTP %d %s", code, msg)
+	}
+	w.check()
+}
+
+func TestTwoEstablishedGradesThatDisagreeGetAThird(t *testing.T) {
+	start := func(third bool) (*world, int, *actor, *actor, *actor, *claimed, *claimed) {
+		pub, priv := newKey()
+		w := newWorld(t, pub)
+		anchor, alice, bob, carol, dave := w.join("anchor-one", priv), w.join("alice", nil), w.join("bob", nil), w.join("carol", nil), w.join("dave", nil)
+		w.submit(alice, "tidy", "print('v1')")
+		w.established("bob", "carol", "dave")
+		if third {
+			w.idle(dave, false, "no round is open") // a third grader's machine is up
+		}
+		idx := w.draw()
+		w.run(anchor, "{\"doc\": 1}\n")
+		cb, cc := w.claim(bob, false), w.claim(carol, false)
+		if cb.Job == nil || cc.Job == nil || cb.Job.Kind != "grade" || cc.Job.Kind != "grade" {
+			t.Fatalf("two established graders: %+v %+v", cb.Job, cc.Job)
+		}
+		// With them there, the machine that wrote the script is not asked to grade it.
+		w.idle(anchor, true, "others are there to grade it")
+		return w, idx, bob, carol, dave, cb, cc
+	}
+
+	// Nobody is there to say which of two is right: the gain is midway, and says so.
+	w, idx, bob, carol, _, cb, cc := start(false)
+	if code, status := w.report(bob, cb, 5.5); code != 200 || status != "pending" {
+		t.Fatalf("HTTP %d %s", code, status)
+	}
+	if code, status := w.report(carol, cc, 5.2); code != 200 || status != "settled" {
+		t.Fatalf("HTTP %d %s", code, status)
+	}
+	w.check()
+	e := w.entry(idx, "tidy")
+	if !e.Valid || math.Abs(*e.Gain-0.65) > 1e-9 || !e.Detail.DisputedTogether || e.Detail.Disputed != 0 || len(e.Runs[0].Grades) != 2 {
+		t.Fatalf("two grades that disagree and no third: %+v %+v", e, e.Detail)
+	}
+	for _, g := range e.Runs[0].Grades {
+		if g.Verdict != "disputed" || !g.Counted {
+			t.Fatalf("a disputed grade: %+v", g)
+		}
+	}
+	for _, h := range []string{"bob", "carol"} {
+		if a := w.account(h); a.Strikes != 0 || a.Agreed != 2*w.cfg.EstablishAfter {
+			t.Fatalf("%s was struck, or earned standing, in a dispute nobody settled: %+v", h, a)
+		}
+	}
+	if _, page := w.page("/rounds/" + roundID(w.app.season.ID, idx)); !strings.Contains(page, ">disputed<") {
+		t.Fatal("the round's page does not show the dispute")
+	}
+
+	// A third established verifier is around: the round waits for it, and the median decides.
+	w, idx, bob, carol, dave, cb, cc := start(true)
+	w.report(bob, cb, 5.5)
+	if code, status := w.report(carol, cc, 5.2); code != 200 || status != "pending" {
+		t.Fatalf("two grades disagree and a third grader is around: HTTP %d %s", code, status)
+	}
+	if g, status := w.grade(dave, false, 5.45); status != "settled" || g.Job.Run != 1 {
+		t.Fatalf("the tie-break: %s", status)
+	}
+	w.check()
+	e = w.entry(idx, "tidy")
+	if !e.Valid || math.Abs(*e.Gain-0.55) > 1e-9 || e.Detail.DisputedTogether || e.Detail.Disputed != 1 || len(e.Runs[0].Grades) != 3 {
+		t.Fatalf("the median of three: %+v %+v", e, e.Detail)
+	}
+	if a := w.account("carol"); a.Strikes != 1 || a.Streak != 0 {
+		t.Fatalf("the one the median went against: %+v", a)
+	}
+	for _, h := range []string{"bob", "dave"} {
+		if a := w.account(h); a.Strikes != 0 || a.Agreed != 2*w.cfg.EstablishAfter+1 || a.Streak != 1 {
+			t.Fatalf("%s, whose grade agreed with the median: %+v", h, a)
+		}
+	}
+}
+
+func TestARoundWaitsForAVerifierWhoIsAroundAndNotForOneWhoHasGone(t *testing.T) {
+	pub, priv := newKey()
+	w := newWorld(t, pub)
+	anchor, alice, bob, carol := w.join("anchor-one", priv), w.join("alice", nil), w.join("bob", nil), w.join("carol", nil)
+	w.submit(alice, "tidy", "print('v1')")
+	w.established("bob", "carol")
+	// Bob's machine is up, and may run editors. No round is open yet.
+	w.idle(bob, true, "no round is open")
+	idx := w.draw()
+	w.run(anchor, "{\"doc\": 1}\n")
+	// Somebody else is around who could grade the script, so its own runner is not asked to.
+	w.idle(anchor, true, "others are around to grade it")
+	if _, status := w.grade(carol, false, 5.5); status != "pending" {
+		t.Fatalf("the entry could be scored on one run, but bob is around to give it a second: %s", status)
+	}
+	w.pass(w.cfg.ActiveWindow - time.Minute)
+	if w.settled(idx) != 0 {
+		t.Fatal("the round settled while a runner was around who had not run the entry")
+	}
+	// Bob never comes back. A little later nobody is waiting for him.
+	w.pass(2 * time.Minute)
+	if w.settled(idx) != 1 {
+		t.Fatal("the round waits for ever for a verifier who has stopped asking for work")
+	}
+	e := w.entry(idx, "tidy")
+	if !e.Valid || e.NRuns != 1 || e.Confirmed || e.Runs[0].Self || len(e.Runs[0].Grades) != 1 || e.Runs[0].Grades[0].Handle != "carol" || math.Abs(*e.Gain-0.5) > 1e-9 {
+		t.Fatalf("run once, and graded by somebody else: %+v %+v", e, e.Runs)
+	}
+	w.check()
+}
+
+func TestAVerifierAtWorkIsNotTakenForOneWhoHasGone(t *testing.T) {
+	for _, how := range []string{"handed back", "ran out"} {
+		pub, priv := newKey()
+		w := newWorld(t, pub)
+		anchor, alice, bob := w.join("anchor-one", priv), w.join("alice", nil), w.join("bob", nil)
+		w.submit(alice, "tidy", "print('v1')")
+		w.established("bob")
+		idx := w.draw()
+		w.run(anchor, "{\"doc\": 1}\n")
+		g := w.claim(anchor, true) // nobody else is around: it is handed its own script
+		if g.Job == nil || g.Job.Kind != "grade" {
+			t.Fatalf("%+v", g.Job)
+		}
+		// A volunteer's machine arrives and takes the entry's second run.
+		cb := w.claim(bob, true)
+		if cb.Job == nil || cb.Job.Kind != "edit" {
+			t.Fatalf("bob should be running the entry: %+v", cb.Job)
+		}
+		if code, status := w.report(anchor, g, 5.5); code != 200 || status != "pending" {
+			t.Fatalf("the entry has a score, and a second run under way: HTTP %d %s", code, status)
+		}
+		// It works for longer than a verifier that had gone would be waited for, and says
+		// nothing meanwhile. It holds a job: it is at work, not gone.
+		w.pass(w.cfg.ActiveWindow + w.cfg.ReplicaWait + time.Minute)
+		w.app.st.view(func(s *State) {
+			if s.Claims[cb.Job.ID].Status != "claimed" || s.Rounds[idx].Status != "open" {
+				t.Fatalf("%s: the round settled on one run under a verifier at work on the second: %+v", how, s.Claims[cb.Job.ID])
+			}
+		})
+		if how == "handed back" {
+			w.release(bob, cb)
+		} else {
+			w.pass(w.cfg.Lease)
+		}
+		if w.settled(idx) != 1 {
+			t.Fatalf("%s: the round did not settle once the job was over and its holder long silent", how)
+		}
+		if e := w.entry(idx, "tidy"); !e.Valid || e.NRuns != 1 || e.Confirmed || !e.Runs[0].Self {
+			t.Fatalf("%s: %+v", how, e)
+		}
+		// Letting a job run out costs a day. Handing it back costs nothing.
+		var out claimed
+		if code := bob.do("POST", "/api/v1/jobs/claim", w.hello(true), &out); (code == 403) != (how == "ran out") {
+			t.Fatalf("%s: bob asks for work afterwards: HTTP %d %s", how, code, out.Error)
+		}
+		w.check()
+	}
+}
+
+func TestWhoeverHasBeenHandedAScriptIsNotHandedItsEntryToRun(t *testing.T) {
+	pub, priv := newKey()
+	w := newWorld(t, pub)
+	anchor, alice, bob := w.join("anchor-one", priv), w.join("alice", nil), w.join("bob", nil)
+	id := w.submit(alice, "tidy", "print('v1')")
+	w.established("bob")
+	idx := w.draw()
+	w.run(anchor, "{\"doc\": 1}\n")
+	g := w.claim(bob, false)
+	if g.Job == nil || g.Job.Kind != "grade" {
+		t.Fatalf("%+v", g.Job)
+	}
+	// He has the first run's script now. He hands the job back and asks for the entry to
+	// run: he could hand that script in as his own, and it would confirm itself.
+	w.release(bob, g)
+	w.idle(bob, true, "a run of an entry whose script he has been handed")
+	// Nor is the job he handed back offered again, so nobody else can grade the script, and
+	// its runner is asked to.
+	if _, status := w.grade(anchor, true, 5.5); status != "settled" {
+		t.Fatal(status)
+	}
+	w.app.st.view(func(s *State) {
+		if e := s.entry(idx, id); len(e.Runs) != 1 || e.Confirmed {
+			t.Fatalf("the entry: %+v", e)
+		}
+	})
+	w.check()
+}
+
+func TestAVolunteersRunIsNotTakenOnItsWordAlone(t *testing.T) {
+	ctx := context.Background()
+	for _, script := range []string{"{\"doc\": 1}\n", ""} { // a run that wrote a script, and one that says the editor failed
+		w := newWorld(t)
+		alice, bob := w.join("alice", nil), w.join("bob", nil)
+		id := w.submit(alice, "tidy", "print('v1')")
+		w.established("bob")
+		idx := w.draw()
+		w.run(bob, script)
+		// A volunteer is never handed a script that only it wrote, however long it asks.
+		w.idle(bob, true, "its own script")
+		w.app.tick(ctx)
+		if w.settled(idx) != 0 {
+			t.Fatal("the entry was given up before anybody else had a chance to come")
+		}
+		w.age(w.cfg.ReplicaWait + time.Minute)
+		w.idle(bob, true, "its own script, later")
+		w.app.tick(ctx)
+		e := w.entry(idx, "tidy")
+		if e.Status != "settled" || e.Valid || !e.Void || !strings.Contains(e.Reason, "no second verifier was there") || len(e.Runs) != 0 || len(e.Dropped) != 1 || e.Dropped[0].By != "bob" {
+			t.Fatalf("script %q: %+v", script, e)
+		}
+		if why := e.Dropped[0].Reason; !strings.Contains(why, "nobody else was there") {
+			t.Fatalf("why the run was set aside: %q", why)
+		}
+		w.app.st.view(func(s *State) {
+			if r := s.Rounds[idx]; r.Status != "settled" {
+				t.Fatal("the round is held open by a run nobody else can check")
+			}
+			// Counted neither for the entry nor against it.
+			if en := s.entry(idx, id); !en.Unattended || failing(s, id) || roundsRun(s, id) != 0 || s.Editors[id].Status == "retired" {
+				t.Fatalf("the entry afterwards: %+v, editor %s", en, s.Editors[id].Status)
+			}
+		})
+		if b := w.account("bob"); b.Runs != 1 || b.Strikes != 0 {
+			t.Fatalf("bob: %+v", b)
+		}
+		// Nothing is held against the volunteer either.
+		w.idle(bob, true, "no round is open")
+		w.check()
+	}
+	// A round nobody was there for never counts towards the three in a row that say an
+	// entry cannot be run; three in which the verifiers ran others and failed on it do.
+	rounds := func(unattended bool) *State {
+		s := &State{ofEditor: map[string][]*Entry{}, inRound: map[int][]*Entry{}}
+		for r := 1; r <= maxEditAttempts; r++ {
+			e := &Entry{RoundIdx: r, EditorID: "x", Status: "settled", Void: true, Unattended: unattended}
+			o := &Entry{RoundIdx: r, EditorID: "y", Status: "settled", Valid: true}
+			s.ofEditor["x"], s.inRound[r] = append(s.ofEditor["x"], e), []*Entry{e, o}
+		}
+		return s
+	}
+	if failing(rounds(true), "x") || !failing(rounds(false), "x") {
+		t.Fatal("which void rounds count against an entry")
+	}
+}
+
+func TestARoundIsNotHeldUpByAnEntryNobodyAroundMayRun(t *testing.T) {
+	w := newWorld(t)
+	alice, bob, carol := w.join("alice", nil), w.join("bob", nil), w.join("carol", nil)
+	w.submit(alice, "hers", "print('alice')")
+	mine := w.submit(bob, "his", "print('bob')")
+	w.established("bob", "carol")
+	idx := w.draw()
+	// Carol grades and does not run editors, so bob is the only runner: of alice's entry,
+	// which carol then grades, and never of his own.
+	w.run(bob, "{\"doc\": 1}\n")
+	w.idle(bob, true, "his own entry")
+	if _, status := w.grade(carol, false, 5.5); status != "pending" {
+		t.Fatal(status)
+	}
+	// While nothing has waited long, the round waits for a runner to come.
+	w.pass(w.cfg.ReplicaWait - time.Minute)
+	if w.settled(idx) != 0 {
+		t.Fatal("an entry was given up at once")
+	}
+	w.pass(2 * time.Minute)
+	if w.settled(idx) != 2 {
+		t.Fatal("one entry nobody around may run holds the other's score back for ever")
+	}
+	if e := w.entry(idx, "hers"); !e.Valid || e.NRuns != 1 || math.Abs(*e.Gain-0.5) > 1e-9 {
+		t.Fatalf("the entry that was run: %+v", e)
+	}
+	e := w.entry(idx, "his")
+	if !e.Void || e.Valid || !strings.Contains(e.Reason, "no verifier was there to run") {
+		t.Fatalf("the entry nobody could run: %+v", e)
+	}
+	w.app.st.view(func(s *State) {
+		if failing(s, mine) || roundsRun(s, mine) != 0 {
+			t.Fatal("it was held against the entry")
+		}
+	})
+	w.check()
+
+	// A round in which nothing has been run does not give its entries up: it waits.
+	w = newWorld(t)
+	alice = w.join("alice", nil)
+	w.submit(alice, "hers", "print('alice')")
+	idx = w.draw()
+	w.pass(10 * w.cfg.ReplicaWait)
+	if w.settled(idx) != 0 {
+		t.Fatal("a round nobody has come to yet threw its entries away")
+	}
+}
+
+func TestEntriesFromBeforeRunsKeepTheirScores(t *testing.T) {
+	ctx := context.Background()
+	pub, priv := newKey()
+	w := newWorld(t, pub)
+	anchor, alice, bob := w.join("anchor-one", priv), w.join("alice", nil), w.join("bob", nil)
+	id := w.submit(alice, "tidy", "print('v1')")
+	idx := w.draw()
+	w.run(anchor, "{\"doc\": 1}\n")
+	w.grade(bob, false, 5.48)
+	if _, status := w.grade(anchor, true, 5.5); status != "settled" {
+		t.Fatal(status)
+	}
+	// Put the entry back the way the server stored one before it knew about runs: one
+	// edit, on the organisers' machine, and each volunteer's grade beside its own.
+	w.app.st.update(ctx, func(tx *Tx) error {
+		e := tx.s.entry(idx, id)
+		if e.Script == "" || e.EditedAt == 0 || e.EditedBy == 0 {
+			t.Fatalf("a settled entry no longer names the run it stands on: %+v", e)
+		}
+		e.Runs, e.NRuns, e.Confirmed, e.RunsDiffer = nil, 0, false, false
+		loss, diff, zero := 5.48, -0.02, 0.0
+		e.Detail.Replications = []Replication{{Handle: "bob", Verdict: "agreed", Valid: true, Loss: &loss, Diff: &diff, BaseDiff: &zero, First: true}}
+		tx.saveEntry(e)
+		return nil
+	})
+	rating := func(w *world) float64 {
+		for _, r := range append(w.app.board().Rated, w.app.board().Provisional...) {
+			if r.ID == id {
+				return *r.Rating
+			}
+		}
+		t.Fatal("the editor is not on the board")
+		return 0
+	}
+	before := rating(w)
+	old := startWorld(t, w.cfg, w.kv, w.blobs)
+	anchor, bob = old.as(anchor), old.as(bob)
+	old.app.tick(ctx)
+	old.check()
+	e := old.entry(idx, "tidy")
+	if !e.Valid || *e.Loss != 5.5 || math.Abs(*e.Gain-0.5) > 1e-9 || rating(old) != before {
+		t.Fatalf("an entry settled before runs changed its score: %+v", e)
+	}
+	// It is shown as what it was: run once, and graded by the machine that ran it.
+	if e.NRuns != 1 || e.Confirmed || len(e.Runs) != 1 || e.Runs[0].By != "anchor-one" || e.Runs[0].Status != "ok" || !e.Runs[0].Self || e.Runs[0].Script != e.Script["sha256"] || len(e.Runs[0].Grades) != 2 {
+		t.Fatalf("its run, as shown: %+v", e.Runs)
+	}
+	if g := e.Runs[0].Grades[1]; g.Handle != "bob" || g.Verdict != "agreed" || *g.Loss != 5.48 || math.Abs(*g.Gain-0.52) > 1e-9 || !g.First {
+		t.Fatalf("the volunteer's grade, as shown: %+v", g)
+	}
+	if code, page := old.page("/rounds/" + roundID(w.app.season.ID, idx)); code != 200 || !strings.Contains(page, ">graded by its own runner<") || !strings.Contains(page, ">run once<") || strings.Contains(page, "<no value>") {
+		t.Fatalf("the old round's page: HTTP %d", code)
+	}
+	if code, page := old.page("/editors/" + id[:12]); code != 200 || !strings.Contains(page, ">run once<") {
+		t.Fatalf("the old editor's page: HTTP %d", code)
+	}
+
+	// An entry that was half-way through its round when the server learned about runs
+	// carries on: its one edit is its first run, and the grades it has name its script.
+	id2 := old.submit(bob, "next", "print('v2')")
+	idx2 := old.draw()
+	var script string
+	for {
+		c := old.claim(anchor, true)
+		if c.Job == nil {
+			break
+		}
+		if c.Job.Kind != "edit" {
+			old.release(anchor, c)
+			break
+		}
+		if c.Job.Editor.ID == id2 {
+			script = "{\"doc\": 2}\n"
+			old.edit(anchor, c, script)
+		} else {
+			old.edit(anchor, c, "{\"doc\": 3}\n")
+		}
+	}
+	carol := old.join("carol", nil)
+	var held []*claimed
+	for {
+		c := old.claim(carol, false)
+		if c.Job == nil {
+			break
+		}
+		if c.Job.Editor.ID != id2 {
+			old.report(carol, c, 5.5)
+			continue
+		}
+		held = append(held, c)
+		old.report(carol, c, 5.3)
+	}
+	if len(held) != 1 {
+		t.Fatalf("carol graded the new entry %d times", len(held))
+	}
+	old.app.st.update(ctx, func(tx *Tx) error {
+		e := tx.s.entry(idx2, id2)
+		run := e.Runs[0]
+		e.Script, e.ScriptSize, e.Edit, e.EditedAt, e.EditedBy, e.Runs = run.Script, run.ScriptSize, run.Edit, run.At, run.By, nil
+		tx.saveEntry(e)
+		for _, r := range tx.s.results(idx2, id2) {
+			r.Script = ""
+			tx.saveResult(r)
+		}
+		for _, c := range tx.s.Claims {
+			if c.EditorID == id2 && c.Kind == "grade" {
+				c.Script = ""
+				tx.saveClaim(c)
+			}
+		}
+		return nil
+	})
+	mid := startWorld(t, w.cfg, w.kv, w.blobs)
+	anchor = mid.as(anchor)
+	mid.app.tick(ctx)
+	mid.check()
+	mid.app.st.view(func(s *State) {
+		e := s.entry(idx2, id2)
+		if len(e.Runs) != 1 || e.Runs[0].Script != shaOf(script) || e.Runs[0].By != s.byHandle["anchor-one"].ID || e.EditedAt != 0 || e.Script != "" {
+			t.Fatalf("the half-finished entry was not carried over: %+v", e)
+		}
+		for _, r := range s.results(idx2, id2) {
+			if r.Script != shaOf(script) {
+				t.Fatalf("a grade from before does not name its script: %+v", r)
+			}
+		}
+	})
+	for {
+		c := mid.claim(anchor, true)
+		if c.Job == nil {
+			break
+		}
+		if c.Job.Kind != "grade" {
+			t.Fatalf("the round wants only grades: %+v", c.Job)
+		}
+		mid.report(anchor, c, 5.5)
+	}
+	e = mid.entry(idx2, "next")
+	if e.Status != "settled" || !e.Valid || math.Abs(*e.Gain-0.5) > 1e-9 || len(e.Runs) != 1 || len(e.Runs[0].Grades) != 2 || e.Runs[0].Grades[1].Verdict != "outlier" {
+		t.Fatalf("the entry that was carried over: %+v %+v", e, e.Runs)
+	}
+	mid.check()
+}
+
+func TestASecondRunGoesToTheOtherMakeOfGPUWhenThereIsOne(t *testing.T) {
+	w := newWorld(t)
+	alice, zed, bob, carol, dave := w.join("alice", nil), w.join("zed", nil), w.join("bob", nil), w.join("carol", nil), w.join("dave", nil)
+	w.submit(alice, "one", "print(1)")
+	w.submit(zed, "two", "print(2)")
+	w.established("bob", "carol", "dave")
+	idx := w.draw()
+	on := func(backend string) map[string]any {
+		h := w.hello(true)
+		h["hardware"] = map[string]any{"gpu": "Test GPU", "device": "cuda", "backend": backend}
+		return h
+	}
+	// First runs come before second runs: the two entries go to the first two runners.
+	cb := w.claimWith(bob, on("cuda"))
+	w.edit(bob, cb, "{\"doc\": 1}\n")
+	cc := w.claimWith(carol, on("rocm"))
+	if cc.Job == nil || cc.Job.Kind != "edit" || cc.Job.Editor.ID == cb.Job.Editor.ID {
+		t.Fatalf("an entry was given a second run while another had none: %+v", cc.Job)
+	}
+	w.edit(carol, cc, "{\"doc\": 2}\n")
+	// Both want a second run. A third machine has an NVIDIA GPU, like the one that ran the
+	// first entry: it is handed the entry that has only been run on AMD.
+	cd := w.claimWith(dave, on("cuda"))
+	if cd.Job == nil || cd.Job.Kind != "edit" || cd.Job.Editor.ID != cc.Job.Editor.ID {
+		t.Fatalf("the second run went to the same make of GPU as the first: %+v", cd.Job)
+	}
+	w.app.st.view(func(s *State) {
+		if e := s.entry(idx, cc.Job.Editor.ID); len(e.Runs) != 1 || e.Runs[0].Backend != "rocm" || e.Runs[0].GPU != "Test GPU" {
+			t.Fatalf("what a run was made on: %+v", e.Runs)
+		}
+	})
+	w.check()
+}
+
+func TestBeingEstablishedNeedsTheGithubIdentityThatEnteringDoes(t *testing.T) {
+	pub, priv := newKey()
+	w := newWorld(t, pub)
+	w.app.cfg.RequireGithub = true
+	anchor, bob := w.join("anchor-one", priv), w.join("bob", nil)
+	w.submit(anchor, "ref-a", "print(1)")
+	w.established("bob") // the grades, and no GitHub account
+	w.draw()
+	standing := func() map[string]any {
+		var me struct {
+			Verifier map[string]any `json:"verifier"`
+		}
+		bob.do("GET", "/api/v1/me", nil, &me)
+		return me.Verifier
+	}
+	if v := standing(); v["established"] != false || v["needs_github"] != true || v["validated"] != 10.0 || v["establish_after"] != 5.0 {
+		t.Fatalf("enough grades and no GitHub identity: %+v", v)
+	}
+	c := w.claim(bob, true)
+	if why, _ := c.Runner["reason"].(string); c.Job != nil || c.Runner["eligible"] != false || !strings.Contains(why, "GitHub") {
+		t.Fatalf("handed an editor without one: %+v %+v", c.Job, c.Runner)
+	}
+	w.app.st.update(context.Background(), func(tx *Tx) error {
+		b := tx.s.byHandle["bob"]
+		b.Github, b.GithubID, b.GithubCreatedAt = "bob", 5, now()-400*86400
+		tx.saveAccount(b)
+		return nil
+	})
+	if v := standing(); v["established"] != true || v["needs_github"] != false {
+		t.Fatalf("with one: %+v", v)
+	}
+	if c := w.claim(bob, true); c.Job == nil || c.Job.Kind != "edit" || c.Runner["eligible"] != true {
+		t.Fatalf("an established account with a GitHub identity: %+v %+v", c.Job, c.Runner)
+	}
+	// The organisers' accounts need none.
+	var me struct {
+		Verifier map[string]any `json:"verifier"`
+	}
+	anchor.do("GET", "/api/v1/me", nil, &me)
+	if me.Verifier["established"] != true || me.Verifier["needs_github"] != false {
+		t.Fatalf("the organisers' account: %+v", me.Verifier)
 	}
 }

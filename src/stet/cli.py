@@ -221,7 +221,7 @@ def public_part(args, result: dict) -> dict:
     """A result as it may be written down or printed.
 
     On a machine that holds the season's held-out exam, a replay of an official round sits
-    it too. What it said belongs in one place, the anchor's own record, and not in a
+    it too. What it said belongs in one place, the record on the machine that holds the pack, and not in a
     project directory or a terminal where the next script or agent would read it. So it is
     left out unless `--heldout` asks for it, which is how a published line of that record
     is checked once the season has closed.
@@ -306,7 +306,7 @@ def cmd_run(args):
         out.line("", out.bold(f"stet · {project.name} · {rnd.kind} round {rnd.id} · {scale.name} · {device.type}"))
         bundle = project.path
         if sandbox == "bwrap":
-            # Run what `stet submit` would send, unpacked as an anchor unpacks it: a file the
+            # Run what `stet submit` would send, unpacked as a verifier unpacks it: a file the
             # bundle leaves out is missing here too, not first in an official round.
             try:
                 blob, _ = pack(project)
@@ -565,7 +565,7 @@ def cmd_bench(args):
         out.line("", "This machine cannot run editors for the leaderboard: " + "; ".join(short) + ".")
         out.line("", "It can still grade (`stet verify`) if it has an NVIDIA or AMD GPU, and run your own editor (`stet run`).")
     else:
-        out.line("", "This machine is fast enough to run editors for the leaderboard.")
+        out.line("", "This machine is fast enough to run editors for the leaderboard: `stet verify --edits`, on Linux.")
     if args.json:
         json.dump(m, sys.stdout, indent=1)
         sys.stdout.write("\n")
@@ -634,6 +634,14 @@ def cmd_asset(args):
             if not found:
                 die("nothing in that repository matches. See its file list on Hugging Face, and name files with --include")
             out.line("", out.dim(f"{args.what} at commit {commit[:12]}"))
+            # Before anything is downloaded to learn its hash: does it fit at all?
+            taken = {a.path for a in found}
+            together = [a for a in have if a.path not in taken] + found
+            if len(together) > lim["max_files"] or sum(a.size for a in together) > lim["max_bytes"]:
+                die(
+                    f"that would be {len(together)} files and {sum(a.size for a in together) / 2**30:.2f} GiB; an editor may name "
+                    f"{lim['max_files']} files and {lim['max_bytes'] / 2**30:.0f} GiB. Pick the files it needs with --include (for example --include '*.safetensors' --include '*.json')"
+                )
             found = assets_.fill_hashes(found, quiet=True)
         except assets_.AssetError as e:
             die(str(e))
@@ -670,7 +678,7 @@ def add_round_args(p, default_round="0"):
     p.add_argument("--json", action="store_true", help="print the result as JSON on stdout")
     p.add_argument("-q", "--quiet", action="store_true")
     # For checking a season's published held-out results once it has closed. Only a machine
-    # with the held-out pack has anything to show, and until then only anchors have it.
+    # with the held-out pack has anything to show, and until then only the organisers have it.
     p.add_argument("--heldout", action="store_true", help=argparse.SUPPRESS)
 
 
@@ -743,7 +751,7 @@ def main(argv=None):
     if not getattr(args, "fn", None):
         ap.print_help()
         return 0
-    from .assets import AssetError
+    from .assets import AssetError, Unavailable
     from .client import ApiError
     from .data import HeldoutError
     from .project import ProjectError
@@ -755,7 +763,7 @@ def main(argv=None):
         die("interrupted", 130)
     except ApiError as e:
         die(str(e))
-    except (OSError, HarnessError, HeldoutError, ProjectError, AssetError) as e:
+    except (OSError, HarnessError, HeldoutError, ProjectError, AssetError, Unavailable) as e:
         die(str(e))
 
 

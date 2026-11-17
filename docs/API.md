@@ -20,21 +20,51 @@ No key needed.
 | `GET /api/v1/editors/{ref}` | One editor. `ref` is an id, the first 8 or more characters of one (the oldest editor that fits), or `handle/name` with the slash written `%2F` |
 | `GET /api/v1/editors/{ref}/bundle` | The editor's files (`.tar.zst`), once it is public |
 | `GET /api/v1/scripts/{sha256}` | An edit script, zstd-compressed JSON Lines |
-| `GET /api/v1/verifiers` | The verifier board: the anchors, and every volunteer with a grade that has agreed. `validated` counts those grades; `trusted` is an old name for `anchor` |
+| `GET /api/v1/verifiers` | The verifier board: the organisers' accounts, and every volunteer with a grade that has agreed or an editor run. A row has `handle`, `validated` (grades that agreed), `runs` (editors run), `established`, `gpu_hours`, `gpu` and `last_seen`; `trusted` and `anchor` mark an organisers' account |
 | `GET /api/v1/records` | Every time the record changed hands |
 | `GET /files/{name}` | Downloads: the CLI wheel, the exam pack |
 
-A round is **sealed** until it settles: before that an entry shows its stage (`editing`,
-`grading`) and nothing about its grades, and the round does not show its unedited loss.
-A settled entry's `loss` is an anchor's grade. Its `detail` holds the rest:
+A round is **sealed** until it settles: before that an entry shows its `stage` (`editing`,
+`grading`) and nothing about its runs, the scripts they wrote or any grade of them, and
+the round does not show its unedited loss.
 
-| Field of `detail` | |
+A settled entry:
+
+| Field | |
 |---|---|
-| `verifiers` | The anchor, then the volunteers whose own grades agreed with it |
-| `replications` | Every volunteer's grade of the entry: `handle`, `verdict` (`agreed`, `differs`, `other data`, `baseline differs`, or `no anchor grade` when the anchors could not grade the script), `valid`, `loss`, `difference` (its loss minus the anchor's), `baseline_difference`, and `first` when no grade of that account's had agreed before |
-| `disputed` | How many of those differ |
-| `disputed_together` | Two volunteers who have agreed with an anchor before differ from this grade and agree with each other |
-| `script`, `train`, `hardware` | The anchor's own report |
+| `valid`, `gain`, `loss` | The score. `gain` is taken over the entry's runs: the mean of two, the median of three, a failed run counting 0. `loss` is the round's unedited loss less the gain |
+| `n_runs` | How many runs the score is made of |
+| `confirmed` | Two different people's runs agree, to within the season's tolerance for runs, and neither rests on a grade by its own runner |
+| `runs_differ` | It was run more than once and no two runs agree |
+| `runs` | Each run: see below |
+| `dropped_runs` | Runs that count for nothing because nobody else was there to check them, in the same shape with `status` `dropped` and a `reason` |
+| `script`, `edit`, `by_source` | Those of the run whose gain is nearest the entry's, for anything that wants one script |
+| `void`, `reason` | A round that does not count for the entry, and why; or why it is invalid |
+| `detail` | `verifiers` (whose grades the score is made of, then everyone else whose grade agreed), `disputed` (grades that differed), `disputed_together` (two established accounts graded one of its scripts, disagreed, and nobody was there to break the tie), and `script`, `train`, `hardware` from the grade nearest the score |
+
+A run:
+
+| Field of a run | |
+|---|---|
+| `n`, `by`, `gpu`, `backend` | Which run, whose machine, and its GPU (`cuda` is NVIDIA, `rocm` is AMD) |
+| `edit_seconds` | How long the editor took there |
+| `status` | `ok`, or `failed`: the editor wrote no script, or wrote an invalid one. `reason` says which |
+| `script`, `script_size` | The sha256 of the edit script it wrote. Two runs that wrote the same bytes name the same script and share its grades |
+| `gain`, `loss` | The script's gain: the median of the grades that count |
+| `self` | Its only established grade is its own runner's, which only an organisers' machine with nobody else around is ever asked for |
+| `grades` | Every grade of the script, those that count first |
+
+A grade has `by`, `valid`, `loss`, `gain` (that grader's own unedited loss minus its loss
+on the script), and a `verdict`: `agreed`, `outlier`, `disputed` (two established grades
+disagreed and no third was made), `other data` or `baseline differs` (a set-up problem:
+no evidence about the script), or `no established grade`. `counted` marks the grades the
+script's gain is the median of, `established` those by established accounts, `self` a
+grade by the only person whose run wrote the script, and `first` an account's first
+grade.
+
+An entry settled before harness 0.3.0 was run once and scored by the organisers' own
+grade. It is shown in the same shape, as one run with `self` set, and its `detail` also
+keeps the old list of volunteers' grades under `replications`.
 
 A settled round's `differs` lists volunteers who were turned away before grading: `what`
 is `corpus` (their machine built another corpus or exam) or `baseline` (their unedited
@@ -88,8 +118,8 @@ the server, so a key should not be used with a server its owner does not trust.
 |---|---|
 | `POST /api/v1/accounts` `{"handle": "..."}` | Create the account for the signing key |
 | `POST /api/v1/accounts/github` `{"gist": "<url>"}` | Link GitHub. The gist must be public and contain the line `stet-key:<public key>` |
-| `GET /api/v1/me` | Your account, verifier standing and editors |
-| `POST /api/v1/editors` | Submit. The body is the bundle: a zstd-compressed tar of the project directory, at most 50 MB. The reply has the `editor` and either `enters` (`round`, `draw_at`: the round it is expected to run in) or, when that round has no room for it or is too close, `earliest` (the first round it could run in) |
+| `GET /api/v1/me` | Your account, your editors, and under `verifier` your standing: `validated` (grades that agreed), `establish_after` (how many it takes), `established`, `needs_github` (no GitHub account is linked, and being established needs one), `runs` (editors run), `strikes`, `muted` |
+| `POST /api/v1/editors` | Submit. The body is the bundle: a zstd-compressed tar of the project directory, at most 50 MB. Every file its `stet.toml` names under `[[assets]]` is checked with its host first: `400` says which one is wrong, `503` that the host could not be asked. The reply has the `editor` and either `enters` (`round`, `draw_at`: the round it is expected to run in) or, when that round has no room for it or is too close, `earliest` (the first round it could run in) |
 
 ## Jobs
 
@@ -98,12 +128,12 @@ grades: a grade computed any other way will not agree.
 
 | | |
 |---|---|
-| `POST /api/v1/jobs/claim` | Ask for work. The body says which harness and season you run and what hardware. Returns `job` (or null, with `retry_after`) and `announced`: the next draw's commitment |
-| `POST /api/v1/jobs/{id}/result` | Report a grade: exam loss, per-source losses, your baseline for the round, corpus and exam hashes. The answer is `pending` until the round settles |
-| `POST /api/v1/jobs/{id}/script` | Anchors only: report an edit and upload its script |
+| `POST /api/v1/jobs/claim` | Ask for work. The body says which harness and season you run, what hardware, and whether you will run editors (`edits`, with the sandbox in use and the speeds `stet bench` measured). Returns `job` (`kind` is `grade` or `edit`; or null, with `retry_after`), `announced` (the next draw's commitment) and, when the body asked for editors, `runner`: `eligible`, and a `reason` if not. A grade job names its `script` (`sha256`, `size`) and which `run` wrote it; before a round settles that is the only way a script's hash is told to anyone |
+| `POST /api/v1/jobs/{id}/result` | Report a grade: the script's hash, exam loss, per-source losses, your baseline for the round, corpus and exam hashes. The answer is `pending` until the round settles |
+| `POST /api/v1/jobs/{id}/script` | Report a run of an editor and upload the script it wrote, or say that it wrote none. The answer is `edited`. Established accounts only: `403` otherwise |
 | `POST /api/v1/jobs/{id}/release` | Hand a job back |
 
-Status codes worth handling: `403` (this account is given no grading work for now: the
+Status codes worth handling: `403` (this account is given no work for now: the
 message says why and until when), `409` (your data or baseline differs from the round's,
 the job was already reported, or it ended before your result arrived), `426` (upgrade
 the harness), `429` (slow down), `503` (the server could not make a write durable, or
@@ -111,7 +141,7 @@ cannot reach its records; send the same request again).
 
 ## Organisers
 
-Signed by an anchor's key; anyone else gets `403`.
+Signed by an organisers' key; anyone else gets `403`.
 
 | | |
 |---|---|

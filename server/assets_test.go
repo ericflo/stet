@@ -200,4 +200,13 @@ func TestAnEntryWithAssetsIsCheckedAndShowsThem(t *testing.T) {
 		t.Fatalf("the editor's record: %+v", ed)
 	}
 	w.check()
+	// Once it is drawn, its page lists what it fetches: each file, its size, where from,
+	// and what they come to.
+	w.draw()
+	code, page := w.page("/editors/" + out.Editor.ID[:12])
+	for _, want := range []string{`id="assets"`, "smol/model.safetensors", `href="https://huggingface.co/owner/model/resolve/` + testCommit + `/model.safetensors"`, weights[:12], "1000 B", ">total<"} {
+		if code != 200 || !strings.Contains(page, want) {
+			t.Fatalf("the editor's page (HTTP %d) does not show %q", code, want)
+		}
+	}
 }

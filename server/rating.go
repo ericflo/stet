@@ -399,7 +399,8 @@ func gainsByRound(entries []entryRow, editorID string) map[int]float64 {
 //     round) must exceed the season's margin, by a one-sided paired t-test at the season's
 //     alpha divided by the number of looks. The margin is one standard deviation of the
 //     difference between an editor and a trivially different copy of itself, measured.
-//   - Every number in the test is an anchor's grade: nobody else's can set a score.
+//   - Every number in the test is a settled score: the median of established accounts'
+//     grades, which nobody else's grade can move.
 //
 // The first record goes to the first editor that beats the unedited baseline on the same
 // terms.

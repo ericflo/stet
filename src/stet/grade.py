@@ -68,7 +68,7 @@ def grade(
         result["exam"]["seconds"] = round(time.time() - t1, 2)
         result["valid"] = True
         if held is not None:
-            # An anchor: the same student sits the held-out exam too. This stays on the
+            # A machine that holds the held-out exam: the same student sits it too. This stays on the
             # machine (see client.keep_heldout) and is never part of what a grader reports.
             # The public grade is finished and stands whatever happens here; a sitting that
             # fails is said out loud and shows as a gap in the season's held-out table,

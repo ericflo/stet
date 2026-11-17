@@ -7,10 +7,16 @@
 Same editors, same rounds, same arithmetic. The rounds and their entries are the public
 ones, read from the API. For every entry that counts on the public leaderboard:
 
-  - an entry that was void (the anchor could not run it) is left out, as it is publicly;
+  - an entry that was void (nobody could run it) is left out, as it is publicly;
   - an invalid entry scores a gain of 0 on both exams, as it does publicly;
-  - a valid entry's held-out gain is the round's unedited held-out loss minus its own,
-    from the anchor's record: one line per official grade, keyed by round and editor.
+  - a valid entry's held-out gain is made the way its public gain is. An entry is run more
+    than once, by different people, and each run writes a script. A script's held-out gain
+    is the unedited held-out loss minus its own, both measured on one machine that holds
+    the pack: a line of that machine's record (one per official grade it made, keyed by
+    round and editor), or a result passed with --also. A run that failed is a gain of 0.
+    The entry's gain is the mean of two runs or the median of three, as it is publicly.
+    (Entries settled before runs existed have one script and one grade, and are placed by
+    that grade's public loss.)
 
 The rating is then fitted exactly as the server fits it (`fit` below is fitRatings in
 server/rating.go): gain = editor + round, so an editor is not flattered by easy rounds. The
@@ -34,7 +40,7 @@ editor's entry was valid in: a timeout is a zero on both exams and gives up noth
 counted in, it would make an editor that timed out look as if it had given up less.
 
 The JSON report (`--json`, `--out`) carries every entry the table was computed from, with
-its losses on both exams and their `source`: "record" (the anchor's line for that grade)
+its losses on both exams and their `source`: "record" (a line of the record for that grade)
 or "remeasured" (a result passed with --also). When a season closes, the record,
 the report and the held-out pack are published, and the table can be rebuilt from the
 report alone. Anyone can then check an entry: put the pack where STET_HELDOUT_EXAM points
@@ -63,14 +69,19 @@ from pathlib import Path
 
 DEFAULT_API = "https://api.stetrun.com"
 TOLERANCE = 1e-4  # how closely the public column must reproduce the leaderboard
+# A run's published gain is a median over several graders, each on their own machine, so
+# this machine's measure of the same script is near it and not equal to it. A line further
+# away than this is not a measure of that script on that round.
+RUN_TIE = 0.25
 
 
 def load(path: Path) -> dict[tuple[str, str], list[dict]]:
-    """The anchor's record: every line for each (round, editor), in the order written.
+    """The record of a machine that holds the pack: every line for each (round, editor), in
+    the order written.
 
-    An anchor may grade an entry twice after a restart, and with two anchors one of them
-    may write a line for a grade the other got in first: which line is the entry's is
-    decided where the entry is known (`entries`), not here. The key is the editor, never
+    A machine may grade a script twice after a restart, and an entry has a script for each
+    of its runs: which line is whose is decided where the entry is known (`entries`), not
+    here. The key is the editor, never
     the script: two editors can write the same script in a round (the starting template
     does, for everyone who enters it unchanged), and each of them has that round.
     """
@@ -162,6 +173,81 @@ def _place(e: dict, script: str | None, lines: list[dict], again: dict | None) -
     return None, "", why
 
 
+def _script(x: dict) -> str | None:
+    """The hash of the script an entry or a run names, however it is written."""
+    s = x.get("script")
+    if isinstance(s, dict):
+        s = s.get("sha256")
+    return s if isinstance(s, str) and s else None
+
+
+def _place_run(run: dict, script: str, lines: list[dict], again: dict | None) -> tuple[dict | None, str, str]:
+    """The measurement of one run's script: (it, where it came from, or why there is none).
+
+    A line is the run's if it is for the run's script, has both held-out losses, and its
+    public gain is near the run's published one. Of several, the one whose public gain is
+    nearest the published one is taken, and the later of two as near: where this machine's
+    grade was the score, that is the very training run the score came from. Failing any, a
+    result passed with --also on the same terms.
+    """
+    why = "the record has no line for it"
+
+    def off(public: dict) -> float:
+        if run.get("gain") is None or public.get("loss") is None or public.get("baseline") is None:
+            return 0.0  # nothing to compare: the round, the editor and the script name it
+        return abs((public["baseline"] - public["loss"]) - float(run["gain"]))
+
+    best = None
+    for rec in lines:
+        held = rec.get("heldout") or {}
+        if rec.get("script_sha256") != script:
+            continue
+        if held.get("loss") is None or held.get("baseline") is None:
+            why = "its line has no held-out baseline"
+        elif (d := off(rec.get("public") or {})) > RUN_TIE:
+            why = "its line's public gain is far from the published one: not a measure of this script on this round"
+        elif best is None or d <= best[0] + 1e-9:
+            best = (d, rec)
+    if best is not None:
+        return best[1], "record", ""
+    if again is not None:
+        if off(again["public"]) > RUN_TIE:
+            return None, "", "the result given with --also has a public gain far from the published one"
+        again["used"] = True
+        return again, "remeasured", ""
+    return None, "", why
+
+
+def _by_runs(rd: dict, e: dict, label: str, row: dict, lines: list[dict], also: dict, missing: list[dict]) -> None:
+    """Fill in a row for an entry that was run more than once: each run's script placed, then
+    the entry's gain taken over its runs as the server takes it."""
+    gains, parts, lacking = [], [], False
+    for run in e["runs"]:
+        script = _script(run)
+        part = {"n": run.get("n"), "script": script, "public": run.get("gain"), "heldout": 0.0, "heldout_loss": None, "heldout_baseline": None, "source": None}
+        if run.get("status") != "ok" or not script:
+            part["public"] = 0.0  # a run that failed: a zero on both exams
+        else:
+            rec, source, why = _place_run(run, script, lines, also.get((rd["id"], script)))
+            if rec is None:
+                lacking = True
+                part["heldout"] = None
+                missing.append({"round": rd["id"], "editor": e["editor"], "label": label, "script_sha256": script, "why": why,
+                                "measure": f"stet score {script} --round {rd['id']} --heldout --json"})  # fmt: skip
+            else:
+                held = rec["heldout"]
+                part.update(heldout=round(held["baseline"] - held["loss"], 5), heldout_loss=held["loss"], heldout_baseline=held["baseline"], source=source)
+        parts.append(part)
+        gains.append(part["heldout"])
+    row.update(script=_script(e), public=float(e["gain"]), public_loss=e.get("loss"), runs=parts, heldout=None)
+    if not lacking:
+        # The mean of two, the median of three: statistics.median is both.
+        row["heldout"] = round(statistics.median(gains), 5)
+        row["source"] = "remeasured" if any(p["source"] == "remeasured" for p in parts) else "record"
+        if len(parts) == 1:  # one run: the row is made of that run's losses, and says which
+            row.update(heldout_loss=parts[0]["heldout_loss"], heldout_baseline=parts[0]["heldout_baseline"])
+
+
 def entries(rounds: list[dict], log: dict, also: dict | None = None) -> tuple[list[dict], list[dict]]:
     """(the entries that count, the ones that cannot be placed).
 
@@ -185,8 +271,10 @@ def entries(rounds: list[dict], log: dict, also: dict | None = None) -> tuple[li
                 "round": rd["id"], "index": int(rd["index"]), "editor": e["editor"], "label": label, "valid": bool(e.get("valid")), "script": None,
                 "public": 0.0, "heldout": 0.0, "public_loss": None, "public_baseline": rd.get("baseline_loss"), "heldout_loss": None, "heldout_baseline": None, "source": None,
             }  # fmt: skip
-            if row["valid"]:
-                script = (e.get("script") or {}).get("sha256")
+            if row["valid"] and e.get("runs"):
+                _by_runs(rd, e, label, row, log.get((rd["id"], e["editor"])) or [], also, missing)
+            elif row["valid"]:
+                script = _script(e)
                 rec, source, why = _place(e, script, log.get((rd["id"], e["editor"])) or [], also.get((rd["id"], script)))
                 row.update(script=script, public=float(e["gain"]), public_loss=e["loss"], heldout=None)
                 if rec is not None:
@@ -440,8 +528,8 @@ def show(rep: dict, out=None) -> None:
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description="The season's table on the held-out exam, from an anchor's record of it.")
-    ap.add_argument("log", type=Path, help="the anchor's record, ~/.config/stet/heldout/<season>.jsonl")
+    ap = argparse.ArgumentParser(description="The season's table on the held-out exam, from the record of a machine that holds it.")
+    ap.add_argument("log", type=Path, help="the record, ~/.config/stet/heldout/<season>.jsonl")
     ap.add_argument("--season", default="s0")
     ap.add_argument("--api", default=DEFAULT_API, help=f"where to read the public rounds from (default {DEFAULT_API})")
     ap.add_argument("--rounds-file", type=Path, help="read the rounds from a file written by --save-rounds instead of from the API")

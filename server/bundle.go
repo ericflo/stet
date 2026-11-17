@@ -189,7 +189,7 @@ func parseBundle(blob []byte, lim AssetLimits) (*Manifest, []BundleFile, error) 
 			return nil, nil, fmt.Errorf("the bundle contains an entry that is not a plain file with a path of at most %d bytes: %q", maxBundlePath, clip(h.Name, 80))
 		}
 		// Each file once, under the one name it has. Otherwise the copy shown on the site
-		// and the copy an anchor runs could be different files.
+		// and the copy a verifier runs could be different files.
 		if p != h.Name || seen[p] {
 			return nil, nil, fmt.Errorf("the bundle names %q twice, or by a roundabout path; submit with `stet submit`", clip(h.Name, 80))
 		}
@@ -204,7 +204,7 @@ func parseBundle(blob []byte, lim AssetLimits) (*Manifest, []BundleFile, error) 
 				return nil, nil, fmt.Errorf("the bundle contains a sparse file: %q", clip(h.Name, 80))
 			}
 		}
-		// `stet submit` leaves these at home, and an anchor will not unpack them. A bundle
+		// `stet submit` leaves these at home, and a verifier will not unpack them. A bundle
 		// that holds one was not made by it, and would not run as its author expects.
 		if why := leftOut(p); why != "" {
 			return nil, nil, fmt.Errorf("the bundle contains %q, which %s; submit with `stet submit`", clip(p, 80), why)

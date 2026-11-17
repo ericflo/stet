@@ -4,27 +4,28 @@
   <div class="wrap">
     <span class="eyebrow">The people who keep it honest</span>
     <h1>Verifiers</h1>
-    <p class="sub">A score on the leaderboard is one organiser's machine saying so. The people here retrain the same edit scripts on their own GPUs and report what they got, for nothing but the standings on this page.</p>
+    <p class="sub">A score on the leaderboard is confirmed when two people's machines agree on it. The people here run the editors and retrain what they wrote on their own GPUs, each checking the others, for nothing but the standings on this page.</p>
   </div>
 </div>
 <div class="wrap">
   <div class="stats">
-    <div><span class="eyebrow">Verifiers</span><div class="v">{{len $d.Verifiers}}</div></div>
-    <div><span class="eyebrow">Grades that agreed</span><div class="v">{{comma $d.Validated}}</div></div>
+    <div><span class="eyebrow">Verifiers</span><div class="v">{{len $d.Verifiers}}<small>{{$d.Established}} established</small></div></div>
+    <div><span class="eyebrow">Grades that agreed</span><div class="v">{{comma $d.Validated}}<small>within {{f2 $d.Tolerance.Grade}} nats</small></div></div>
+    <div><span class="eyebrow">Editors run</span><div class="v">{{comma $d.Runs}}</div></div>
     <div><span class="eyebrow">GPU time given</span><div class="v">{{f1 $d.Hours}}<small>hours</small></div></div>
-    <div><span class="eyebrow">To agree</span><div class="v">{{f2 $d.Tolerance.Grade}}<small>nats or closer</small></div></div>
   </div>
   <div class="table-wrap" id="verifiers" data-live>
     {{if $d.Verifiers}}
     <table>
-      <thead><tr><th>#</th><th>Verifier</th><th class="r" title="Grades that agreed with an anchor's, in the last two weeks">Last 14 days</th><th class="r">All time</th><th class="r hide-s">Streak</th><th class="r hide-s">GPU time</th><th class="hide-s">Machine</th><th class="hide-s">Seen</th></tr></thead>
+      <thead><tr><th>#</th><th>Verifier</th><th class="r" title="Grades that agreed with what established verifiers found for the same script, in the last two weeks">Last 14 days</th><th class="r">All time</th><th class="r hide-s" title="Editors this account has run for the leaderboard">Runs</th><th class="r hide-s">Streak</th><th class="r hide-s">GPU time</th><th class="hide-s">Machine</th><th class="hide-s">Seen</th></tr></thead>
       <tbody>
         {{range $i, $v := $d.Verifiers}}<tr>
           <td class="rank">{{add $i 1}}</td>
-          <td><a class="name" href="/u/{{$v.Handle}}">{{$v.Handle}}</a>{{if $v.Anchor}}<span class="tag blue">anchor</span>{{end}}</td>
-          {{if $v.Anchor}}<td class="r muted" colspan="2" title="An anchor's grades are the scores; the counts are of volunteers' grades that agreed with them">sets the scores</td><td class="r muted hide-s">·</td>
+          <td><a class="name" href="/u/{{$v.Handle}}">{{$v.Handle}}</a>{{if $v.Anchor}}<span class="tag blue" title="One of the organisers' accounts. It starts out established, and is a verifier like any other.">organisers</span>{{else if $v.Established}}<span class="tag" title="{{$d.EstablishAfter}} or more of its grades have agreed: its grades count towards scores, and it may run editors">established</span>{{end}}</td>
+          {{if $v.Anchor}}<td class="r muted" colspan="2" title="The organisers' accounts start out established, so their grades earn them nothing">established from the start</td><td class="r num hide-s">{{$v.Runs}}</td><td class="r muted hide-s">·</td>
           {{else}}<td class="r num">{{$v.Recent}}</td>
           <td class="r num">{{$v.Validated}}</td>
+          <td class="r num hide-s">{{$v.Runs}}</td>
           <td class="r num hide-s">{{$v.Streak}}</td>{{end}}
           <td class="r num hide-s">{{gpunum $v.GPUHours}} {{gpuunit $v.GPUHours}}</td>
           <td class="hide-s muted" style="font-size:14.5px">{{$v.GPU}}</td>
@@ -44,10 +45,14 @@
       <div class="cmd"><pre><span class="p">$ </span>stet login
 <span class="p">$ </span><span data-copy-text>stet verify</span></pre><button type="button" data-copy>copy</button></div>
       <p class="muted" style="font-size:16px">Leave it running. It asks for a job, downloads an edit script and the round's corpus, trains the student on {{compact .Scale.TrainTokens}} tokens (minutes on a desktop GPU), reports the loss, and asks again. Stop it whenever you like. Needs an NVIDIA or AMD GPU: grades must agree to within {{f2 $d.Tolerance.Grade}} nats, and that takes the same arithmetic.</p>
+      <div class="cmd"><pre><span class="c"># once established: run the editors too, in a sandbox (Linux)</span>
+<span class="p">$ </span><span data-copy-text>stet verify --edits</span></pre><button type="button" data-copy>copy</button></div>
+      <p class="muted" style="font-size:16px">An editor has a time limit, so a machine that runs one has to be at least as fast as the season's floor. <code>stet bench</code> measures yours and says.</p>
     </div>
     <div class="stack">
-      <div class="claim"><h3>It runs nobody's code but ours</h3><p>Entrants' editors only ever run on the organisers' machines. What you download is an edit script, which is data: a list of spans to copy. The harness checks it line by line.</p></div>
-      <div class="claim"><h3>Your grade is a replication</h3><p>An anchor, one of the organisers' machines, grades every entry, and that grade is the score. Yours is sealed until the round settles and then compared with it. Up to {{$d.MaxReplicas}} volunteers replicate each entry, and the round's page shows every one of their grades beside the anchor's, whatever it said. An account that differs from the anchor {{$d.MuteAfter}} times with no other volunteer finding the same, and more than once for every ten grades that agreed, is given no grading work for {{$d.MuteDays}} days.</p></div>
+      <div class="claim"><h3>Grading runs nobody's code but ours</h3><p>What a grader downloads is an edit script, which is data: a list of spans to copy. The harness checks it line by line. Entrants' programs are a separate job that you ask for, given only to established verifiers and run in a sandbox with no network.</p></div>
+      <div class="claim"><h3>Standing is earned</h3><p>Every grade is sealed until its round settles. A script's gain is the median of the established verifiers' grades of it, and everyone else's grade is compared with that; the round's page shows every one, whatever it said. After {{$d.EstablishAfter}} grades that agreed, an account is established: its grades count towards scores, and it may run editors. An account whose grades differ {{$d.MuteAfter}} times, and more than once for every ten that agreed, is given no work for {{$d.MuteDays}} days.</p></div>
+      <div class="claim"><h3>Nobody is taken at their word</h3><p>Each entry is run by {{$d.RunsPerEntry}} different people, and a third when they differ. Nobody runs their own entry, and no volunteer grades a script that only they wrote. The organisers' account is one more verifier: when its machine is the only one there it grades its own runs, and those scores say that they are not confirmed.</p></div>
       <div class="claim"><h3>You go first</h3><p>When more editors are waiting than a round can take, the entries of people who verified in the last two weeks are drawn first.</p></div>
     </div>
   </div>

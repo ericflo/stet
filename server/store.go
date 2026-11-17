@@ -40,15 +40,22 @@ type Account struct {
 	GithubID        int64           `json:"github_id,omitempty"`
 	GithubCreatedAt int64           `json:"github_created_at,omitempty"`
 	CreatedAt       int64           `json:"created_at"`
-	Agreed          int             `json:"agreed,omitempty"`  // grades that matched the anchor's, ever
+	Agreed          int             `json:"agreed,omitempty"`  // grades that matched established accounts' grades of the same script, ever
 	Streak          int             `json:"streak,omitempty"`  // and in a row
 	Strikes         int             `json:"strikes,omitempty"` // grades that did not, ever
 	LastStrikeAt    int64           `json:"last_strike_at,omitempty"`
+	Runs            int             `json:"runs,omitempty"` // editors run for the leaderboard, ever
 	Hardware        json.RawMessage `json:"hardware,omitempty"`
 	GPUSeconds      float64         `json:"gpu_seconds,omitempty"`
 	LastSeen        int64           `json:"last_seen,omitempty"`
-	// Anchor comes from configuration, never from storage: anchors are named by the
-	// people who run the server, and a database row cannot make one.
+	// RunnerSeen is when it last asked for work as a machine that may run editors; zero if
+	// the last time it asked, it was not one. Backend is the kind of GPU it had then.
+	RunnerSeen int64  `json:"runner_seen,omitempty"`
+	Backend    string `json:"backend,omitempty"`
+	// Anchor marks an organisers' account. It comes from configuration, never from storage:
+	// the organisers' accounts are named by the people who run the server, and a database
+	// row cannot make one. Such an account starts out established and administers the
+	// season; no score depends on it.
 	Anchor bool `json:"-"`
 }
 
@@ -94,39 +101,82 @@ type Round struct {
 	// Postponed says the draw was put off because the round before was still being graded.
 	// It is then made at the first grid mark after that round settles.
 	Postponed bool `json:"postponed,omitempty"`
-	// Volunteers whose grades were turned away because their machine built a different
+	// Verifiers whose grades were turned away because their machine built a different
 	// round or measured a different unedited loss. Published when the round settles.
 	Differs []Differ `json:"differs,omitempty"`
+	// ActiveAt is when something last moved the round on: a run, a grade by an established
+	// account, a job one of them took, handed back or let run out, an entry given up. How
+	// long the round waits for people is counted from here.
+	ActiveAt int64 `json:"active_at,omitempty"`
 }
 
-// EntryDetail is the public summary of a settled entry: what the anchor's grade reported,
-// and how the volunteers' grades of the same script compared with it.
+// EntryDetail is the public summary of a settled entry: what the grade its score rests on
+// reported, and who graded it. Every run and every grade is in the entry's Runs.
 type EntryDetail struct {
 	Script    json.RawMessage `json:"script,omitempty"`
 	Hardware  json.RawMessage `json:"hardware,omitempty"`
 	Train     *TrainInfo      `json:"train,omitempty"`
-	Verifiers []string        `json:"verifiers"`          // the anchor, then every volunteer whose grade agreed
-	Disputed  int             `json:"disputed,omitempty"` // volunteers' grades that differed from the anchor's
-	Audited   bool            `json:"audited,omitempty"`  // an anchor graded it (always, since harness 0.2.1)
-	// Every volunteer's grade of the entry, whatever it said. Published when the round settles.
+	Verifiers []string        `json:"verifiers"`          // whose grades the score is made of, then everyone else whose grade agreed
+	Disputed  int             `json:"disputed,omitempty"` // grades that differed from what the score is made of
+	Audited   bool            `json:"audited,omitempty"`  // an established account graded it (always, for an entry with a score)
+	// Replications is how entries settled before harness 0.3.0 listed volunteers' grades,
+	// beside the grade of the organisers' machine that was then the score.
 	Replications []Replication `json:"replications,omitempty"`
-	// Two or more volunteers differed from the anchor and agreed with each other: the
-	// anchor's grade may be the one that is wrong.
+	// Two established accounts graded one of its scripts, disagreed, and nobody was there
+	// to break the tie: the score is their mean, and one of them is wrong.
 	DisputedTogether bool `json:"disputed_together,omitempty"`
 }
 
-// Replication is one volunteer's grade of an entry, as published beside the anchor's.
+// Replication is one volunteer's grade of an entry settled before harness 0.3.0.
 type Replication struct {
 	Handle   string   `json:"handle"`
 	Verdict  string   `json:"verdict"`              // agreed | differs | other data | baseline differs
 	Valid    bool     `json:"valid"`                // whether this volunteer found the script valid
 	Loss     *float64 `json:"loss,omitempty"`       // its exam loss
-	Diff     *float64 `json:"difference,omitempty"` // its loss minus the anchor's
+	Diff     *float64 `json:"difference,omitempty"` // its loss minus the score's
 	BaseDiff *float64 `json:"baseline_difference,omitempty"`
 	First    bool     `json:"first,omitempty"` // this account had no agreed grade before this round
 }
 
-// Differ is a volunteer whose grade was turned away because its machine built a different
+// Run is one execution of an entry's editor on one verifier's machine, and the script it
+// wrote. What follows At is filled in when the entry settles, and is what is published.
+type Run struct {
+	N          int         `json:"n"`                   // 1, 2, 3: the order they arrived in
+	By         int64       `json:"by"`                  // the account that ran it
+	GithubID   int64       `json:"github_id,omitempty"` // and the GitHub identity it had then
+	Claim      int64       `json:"claim"`               // the job it was
+	Script     string      `json:"script,omitempty"`    // sha256 of the script; empty if the editor wrote none
+	ScriptSize int64       `json:"script_size,omitempty"`
+	Edit       *EditReport `json:"edit,omitempty"`
+	At         int64       `json:"at"`
+	GPU        string      `json:"gpu,omitempty"`
+	Backend    string      `json:"backend,omitempty"` // cuda | rocm
+
+	Valid  bool    `json:"valid,omitempty"`  // it wrote a script, and the script is valid
+	Gain   float64 `json:"gain,omitempty"`   // its script's gain; 0 for a run that failed
+	Reason string  `json:"reason,omitempty"` // why it failed, or why it was dropped
+	// Self: the only established grade of its script is by the account that ran it.
+	Self bool `json:"self,omitempty"`
+	// Dropped: no established account could grade its script, so it counts for nothing.
+	Dropped bool    `json:"dropped,omitempty"`
+	Grades  []Grade `json:"grades,omitempty"`
+}
+
+// Grade is one verifier's grade of a script, as published when the round settles.
+type Grade struct {
+	Handle string `json:"by"`
+	// agreed | outlier | disputed | other data | baseline differs | no established grade
+	Verdict     string   `json:"verdict"`
+	Valid       bool     `json:"valid"`          // whether this grader found the script valid
+	Loss        *float64 `json:"loss,omitempty"` // its exam loss
+	Gain        *float64 `json:"gain,omitempty"` // its own unedited loss minus that
+	First       bool     `json:"first,omitempty"`
+	Self        bool     `json:"self,omitempty"`        // it graded a script that it alone wrote
+	Counted     bool     `json:"counted,omitempty"`     // the script's gain is the median of these
+	Established bool     `json:"established,omitempty"` // by an established account
+}
+
+// Differ is a verifier whose grade was turned away because its machine built a different
 // round or measured a different unedited loss. Kept so that it is on show with the rest.
 type Differ struct {
 	Handle string  `json:"handle"`
@@ -145,15 +195,26 @@ type Entry struct {
 	Detail   *EntryDetail       `json:"detail,omitempty"`
 	NResults int                `json:"n_results,omitempty"`
 	Reason   string             `json:"reason,omitempty"`
-	// Void: the anchors could not run the editor at all (their machine's trouble, not the
-	// editor's). The round does not count for it, for or against.
-	Void       bool        `json:"void,omitempty"`
-	SettledAt  int64       `json:"settled_at,omitempty"`
-	Script     string      `json:"script,omitempty"` // sha256 of the edit script an anchor's run produced
+	// Void: the verifiers could not run the editor at all, or could not grade what it wrote
+	// (their machines' trouble, not the editor's). The round does not count for it, for or
+	// against. Unattended: and that was because nobody was there to do it, which is not
+	// held against the entry in any way.
+	Void       bool  `json:"void,omitempty"`
+	Unattended bool  `json:"unattended,omitempty"`
+	SettledAt  int64 `json:"settled_at,omitempty"`
+	// The runs of the editor in this round. Sealed until the round settles.
+	Runs []*Run `json:"runs,omitempty"`
+	// Of those, the one the score is nearest to, copied here when the entry settles. (An
+	// entry settled before harness 0.3.0 has only these: its one run, by the organisers'
+	// machine.)
+	Script     string      `json:"script,omitempty"` // sha256 of the edit script
 	ScriptSize int64       `json:"script_size,omitempty"`
 	Edit       *EditReport `json:"edit,omitempty"`
 	EditedAt   int64       `json:"edited_at,omitempty"`
 	EditedBy   int64       `json:"edited_by,omitempty"`
+	NRuns      int         `json:"n_runs,omitempty"`      // runs that counted
+	Confirmed  bool        `json:"confirmed,omitempty"`   // two people's runs agree, and none rests on its own runner's grade
+	RunsDiffer bool        `json:"runs_differ,omitempty"` // two or more runs, and no two of them agree
 }
 
 type Claim struct {
@@ -161,7 +222,8 @@ type Claim struct {
 	RoundIdx  int    `json:"round"`
 	EditorID  string `json:"editor"`
 	AccountID int64  `json:"account"`
-	Kind      string `json:"kind"` // edit | grade
+	Kind      string `json:"kind"`             // edit | grade
+	Script    string `json:"script,omitempty"` // a grade job: which of the entry's scripts
 	ClaimedAt int64  `json:"claimed_at"`
 	ExpiresAt int64  `json:"expires_at"`
 	// claimed | done | released | refused | expired (the entry settled first) |
@@ -183,6 +245,7 @@ type Result struct {
 	RoundIdx      int                `json:"round"`
 	EditorID      string             `json:"editor"`
 	AccountID     int64              `json:"account"`
+	Script        string             `json:"script,omitempty"` // which of the entry's scripts it graded
 	ReceivedAt    int64              `json:"received_at"`
 	Valid         bool               `json:"valid,omitempty"`
 	Loss          float64            `json:"loss,omitempty"`
@@ -191,7 +254,10 @@ type Result struct {
 	CorpusSHA     string             `json:"corpus_sha256"`
 	ExamSHA       string             `json:"exam_sha256"`
 	Seconds       float64            `json:"seconds,omitempty"`
-	Verdict       string             `json:"verdict"` // pending | agreed | same (agreed, on an entry that earns no standing) | outlier | void
+	// pending | counted (an established grade that stood alone as its script's gain) |
+	// agreed | same (agreed, on a script that earns no standing) | outlier | disputed (one
+	// of two established grades that disagree) | void
+	Verdict string `json:"verdict"`
 	// Summary is kept only until the entry settles; the entry's detail keeps the one that
 	// came to define its score.
 	Summary *ResultSummary `json:"summary,omitempty"`
@@ -205,6 +271,9 @@ type Baseline struct {
 	CorpusSHA  string             `json:"corpus_sha256"`
 	ExamSHA    string             `json:"exam_sha256"`
 	ReceivedAt int64              `json:"received_at"`
+	// Established says the account was established when it measured this, so the measurement
+	// is one of those the round's unedited loss is the median of.
+	Established bool `json:"established,omitempty"`
 }
 
 type Record struct {

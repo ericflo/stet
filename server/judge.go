@@ -2,30 +2,94 @@ package main
 
 // Jobs, results and settlement: how a number becomes a score.
 //
-// An entry in a round goes through two stages.
+// An entry in a round is worked on in two kinds of job.
 //
-//   - EDIT. An anchor (a machine the organisers run) executes the editor in a sandbox and
-//     uploads the edit script it wrote. The script is plain data, stored and published under
-//     its sha256. Only anchors are ever given an entrant's code.
-//   - GRADE. Any verifier downloads the script, trains the fixed student on what it says
-//     and reports the exam loss. Grading runs no entrant code, and every grader of an entry
+//   - EDIT. A verifier executes the editor in the sandbox and uploads the edit script it
+//     wrote. That is a run. The script is plain data, stored under its sha256.
+//   - GRADE. A verifier downloads a script, trains the fixed student on what it says and
+//     reports the exam loss. Grading runs no entrant code, and every grader of a script
 //     trains on exactly the same tokens, so their results can be compared directly.
 //
-// The rules for grades, in one place:
+// No score depends on one machine, and none on a machine the organisers run. The
+// organisers' accounts start out established, may run their own reference editors, and
+// administer the season (the draws, the exam files). In judging they are verifiers like
+// any other, with the two exceptions marked (*) below. Both exist so that the competition
+// can run while one machine is all there is, and the first is printed on every score it
+// touches.
 //
-//   - An anchor grades every entry, and the anchor's grade is the score. Nobody else's
-//     grade can move a score, so nobody gains by reporting a false one.
-//   - Volunteers grade the same scripts on their own GPUs. Their grades are replications:
-//     each is compared with the anchor's when the round's results are published, and the
-//     outcome is shown next to the score.
-//   - Grades are sealed. Nothing about an entry's grades is visible until its round
-//     settles, and no grade is accepted afterwards, so a replication cannot be copied.
-//   - A round settles as a whole: when an anchor has graded every entry, and every
-//     volunteer who had started has reported or a fixed wait has passed.
-//   - Two grades agree if both say the script is invalid, or both are valid with exam
-//     losses within the season's tolerance.
-//   - A volunteer never chooses its job, never grades its own editor, and is offered an
-//     entry once. An account whose grades keep disagreeing stops being given work.
+// Who may do what:
+//
+//   - An account is ESTABLISHED when enough of its grades (five, unless configured) have
+//     agreed with established accounts' grades of the same scripts, it is not muted, and
+//     it has the GitHub identity that entering needs. Standing is earned from accounts that have it,
+//     beginning with the organisers'. Once volunteers have it, nobody needs the organisers
+//     to earn it.
+//   - A RUNNER is an established account whose machine has the sandbox and is at least as
+//     fast as the season's floor. Only runners are handed entrants' code.
+//   - Anyone may grade. Only an established account's grade can move a score, so nobody
+//     else gains by reporting a false one.
+//
+// Runs:
+//
+//   - An entry is run twice, by two different people, and a third time if the first two
+//     differ: one failed and the other did not, or the gains of their scripts are further
+//     apart than the season's tolerance for runs.
+//   - Nobody runs their own entry (the organisers run their reference editors), nobody
+//     runs an entry twice, and nobody who has been handed one of an entry's scripts to
+//     grade is then handed the entry to run: they could hand the script back as their own.
+//   - First runs come before second runs, and a second run goes to the other make of GPU
+//     when there is one.
+//   - A job is offered once. Handing it back does not buy another go. (*) An organisers'
+//     machine is offered a job again after one that came to nothing, a few times over:
+//     while it is the only machine there is, a restart must not cost an entry its round.
+//
+// Grades:
+//
+//   - A grade names one script. Two runs that wrote the same bytes share one set of grades.
+//   - A script's gain is the median, over the established accounts that graded it and
+//     found it valid, of each one's own unedited loss minus its loss on the script. If
+//     most of them find it invalid, or as many as do not, it is invalid.
+//   - A grade of a script by the only person who wrote it is a SELF grade: that person
+//     would control both the script and the number said about it. A volunteer is never
+//     handed its own script. (*) An organisers' machine is, when nobody else who is around
+//     could grade it; the grade counts only until someone else's exists, and an entry
+//     resting on one is never called confirmed.
+//   - Two established grades of a script that disagree get a third, and the median decides.
+//   - Everyone else's grade is compared with the script's gain when the round settles. One
+//     that agrees earns standing; one that does not is a strike. Agreeing about the
+//     unedited corpus, or that a script is invalid, earns nothing: neither takes training.
+//   - Nobody chooses their job, grades their own entry, or is offered a script twice. An
+//     account whose grades keep disagreeing stops being given work.
+//
+// Scores:
+//
+//   - A run's gain is its script's gain, or nothing if it failed (no script, or an invalid
+//     one). An entry's gain is the median of its runs' gains (the mean of two), and its
+//     loss is the round's unedited loss less that. The round's unedited loss is the median
+//     of what its established graders measured.
+//   - An entry is CONFIRMED when two people's runs agree and neither rests on a self
+//     grade. Otherwise its score says which it is: run once, runs differed, or graded by
+//     its own runner.
+//
+// Sealing and settling:
+//
+//   - Nothing about an entry's runs, scripts or grades is public until its round settles,
+//     and nothing is accepted afterwards. A script's hash is told only to whoever is
+//     handed it to grade, so a second run cannot be a copy of the first.
+//   - A round settles as a whole: when every entry has the runs and grades it wants; or
+//     when every entry has at least one graded run, no established verifier is at work on
+//     the round, and nobody who is around could be handed a job a score is waiting for.
+//     So one machine alone settles its rounds as it finishes them, and the moment a second
+//     is there every entry gets its second run.
+//   - A verifier is around if it asked for work a short while ago, or holds a job: one
+//     that is training says nothing, and is not gone. An established verifier's job holds
+//     the round until it is reported, handed back, or out of time. For anyone else who
+//     has had a grade agree the round waits a fixed while, and for a newcomer not at all:
+//     keys are free.
+//   - What nobody is there to do is given up after the same fixed while: a script nobody
+//     else could grade, a failed run nobody else could repeat, an entry nobody could run
+//     while other entries' scores waited behind it. A round in which that leaves an entry
+//     with nothing is void for it: counted neither for nor against.
 
 import (
 	"bytes"
@@ -47,22 +111,35 @@ import (
 )
 
 const (
-	maxReplicas        = 3  // volunteers' grades of one entry, reported or under way
+	maxReplicas        = 3  // grades of one script by accounts not yet established, reported or under way
 	muteAfterStrikes   = 3  // disagreements before an account stops being given work...
 	muteUnlessAgreed   = 10 // ...unless it has this many agreements for each of them
 	retireAfterInvalid = 2
-	maxEditAttempts    = 3
-	maxGradeAttempts   = 5          // anchor grade jobs handed out for one entry before it is given up
+	maxRuns            = 3          // runs of one entry in one round, at most
+	maxEditAttempts    = 3          // edit jobs on one entry that came to nothing before it is given up
+	maxGradeAttempts   = 5          // grade jobs on one script, handed to established accounts, that came to nothing
 	muteFor            = 14 * 86400 // how long a mute lasts after the latest disagreement
 	lapseRest          = 86400      // no new work for this long after letting a job run out
 )
 
-// muted reports whether a volunteer is being given no grading work: three grades that
-// differed from the anchor's with nobody else finding the same, and not ten agreements
-// for each. It lifts by itself, muteFor after the latest such grade, because the machine
-// may be honest and merely different, and the only way to find out is to let it try again.
+// muted reports whether an account is being given no work: three grades that differed
+// from what established accounts found, and not ten agreements for each. It lifts by
+// itself, muteFor after the latest such grade, because the machine may be honest and
+// merely different, and the only way to find out is to let it try again.
 func muted(c *Account, t int64) bool {
 	return !c.Anchor && c.Strikes >= muteAfterStrikes && c.Agreed < muteUnlessAgreed*c.Strikes && t < c.LastStrikeAt+muteFor
+}
+
+// established reports whether an account's grades can move a score, and whether it may be
+// handed entrants' code: the organisers' accounts, and anyone who has earned it.
+func (a *App) established(acct *Account) bool {
+	if acct == nil {
+		return false
+	}
+	if acct.Anchor {
+		return true
+	}
+	return !muted(acct, now()) && acct.Agreed >= a.cfg.EstablishAfter && a.mayEnter(acct) == nil
 }
 
 type apiError struct {
@@ -86,13 +163,82 @@ type Hello struct {
 	Sandbox      string          `json:"sandbox"`
 }
 
-// deviceOf reads the kind of device out of a hardware description.
-func deviceOf(hardware json.RawMessage) string {
-	var h struct {
-		Device string `json:"device"`
+// hardwareFacts is the part of a hardware description the server reads. All of it is
+// whatever the client sent.
+type hardwareFacts struct {
+	Device  string `json:"device"`
+	GPU     string `json:"gpu"`
+	Backend string `json:"backend"`
+	// Bench is the machine's measurement of itself against the season's floor: see
+	// src/stet/bench.py.
+	Bench *struct {
+		GPUTokensPerSecond float64 `json:"gpu_tokens_per_second"`
+		CPUMBPerSecond     float64 `json:"cpu_mb_per_second"`
+		Cores              float64 `json:"cores"`
+		MemoryGB           float64 `json:"memory_gb"`
+		GPUMemoryGB        float64 `json:"gpu_memory_gb"`
+	} `json:"bench"`
+}
+
+func readHardware(raw json.RawMessage) hardwareFacts {
+	var h hardwareFacts
+	json.Unmarshal(raw, &h)
+	return h
+}
+
+// gpuName is the GPU's name if it looks like one. It is shown on the site.
+func (h hardwareFacts) gpuName() string {
+	switch {
+	case gpuNameRe.MatchString(h.GPU):
+		return h.GPU
+	case gpuNameRe.MatchString(h.Device):
+		return h.Device
 	}
-	json.Unmarshal(hardware, &h)
-	return h.Device
+	return ""
+}
+
+// gpuMake is which maker's arithmetic the GPU does: cuda (NVIDIA) or rocm (AMD).
+func (h hardwareFacts) gpuMake() string {
+	if h.Backend == "cuda" || h.Backend == "rocm" {
+		return h.Backend
+	}
+	return ""
+}
+
+// deviceOf reads the kind of device out of a hardware description.
+func deviceOf(hardware json.RawMessage) string { return readHardware(hardware).Device }
+
+// meetsFloor reports whether a machine says it is at least the slowest one that may run
+// editors. An editor has a time limit in seconds, so every machine that runs one has to
+// be at least that fast.
+func (a *App) meetsFloor(hardware json.RawMessage) bool {
+	f := a.season.Runner
+	if a.cfg.Dev || (f.GPUTokensPerSecond == 0 && f.CPUMBPerSecond == 0 && f.GPUMemoryGB == 0 && f.MemoryGB == 0 && f.Cores == 0) {
+		return true
+	}
+	b := readHardware(hardware).Bench
+	return b != nil && b.GPUTokensPerSecond >= f.GPUTokensPerSecond && b.CPUMBPerSecond >= f.CPUMBPerSecond &&
+		b.GPUMemoryGB >= f.GPUMemoryGB && b.MemoryGB >= f.MemoryGB && b.Cores >= float64(f.Cores)
+}
+
+// runsEditors says whether an account asking for work may be handed editors to run, and
+// if it asked to and may not, why.
+func (a *App) runsEditors(acct *Account, h *Hello) (bool, string) {
+	switch {
+	case !h.Edits:
+		return false, ""
+	case muted(acct, now()):
+		return false, "this account is given no work for now"
+	case a.mayEnter(acct) != nil:
+		return false, "running editors needs a linked GitHub account, as entering does: stet login --github"
+	case !a.established(acct):
+		return false, fmt.Sprintf("editors are run by established verifiers: accounts with %d grades that agreed. This one has %d", a.cfg.EstablishAfter, acct.Agreed)
+	case h.Sandbox != "bwrap" && !a.cfg.Dev:
+		return false, "running editors needs the bubblewrap sandbox"
+	case !a.meetsFloor(h.Hardware):
+		return false, "this machine is slower or smaller than the season's floor for running editors, or sent no measurement of itself: stet bench"
+	}
+	return true, ""
 }
 
 // ResultPayload is what a grader reports. Mirrors stet.client.slim_result.
@@ -131,7 +277,7 @@ type TrainInfo struct {
 	Curve           [][]float64 `json:"curve,omitempty"`
 }
 
-// EditReport is what an anchor says about an edit run. Mirrors stet.runner.EditRun.
+// EditReport is what a runner says about an edit run. Mirrors stet.runner.EditRun.
 type EditReport struct {
 	Status    string         `json:"status"`
 	Seconds   float64        `json:"seconds"`
@@ -143,7 +289,7 @@ type EditReport struct {
 	LogTail   string         `json:"log_tail,omitempty"`
 }
 
-// ScriptPayload is an anchor's report of an edit job, script included.
+// ScriptPayload is a runner's report of an edit job, script included.
 type ScriptPayload struct {
 	Harness      string     `json:"harness"`
 	Season       string     `json:"season"`
@@ -158,14 +304,18 @@ type ScriptPayload struct {
 }
 
 func (a *App) tolerance() Tolerance {
-	if t, ok := a.season.Tolerance[a.cfg.Scale]; ok {
-		return t
+	t, ok := a.season.Tolerance[a.cfg.Scale]
+	if !ok {
+		t = Tolerance{Grade: 0.1, Baseline: 0.1}
 	}
-	return Tolerance{Grade: 0.1, Baseline: 0.1}
+	if t.Run <= 0 { // a season from before runs were compared
+		t.Run = 1.5 * t.Grade
+	}
+	return t
 }
 
 // recentAgreed counts each account's grades that agreed in the last two weeks: what the
-// verifier board shows, and what puts a volunteer's own entries ahead in the queue.
+// verifier board shows.
 func recentAgreed(s *State) map[int64]int {
 	since := now() - 14*86400
 	out := map[int64]int{}
@@ -177,12 +327,27 @@ func recentAgreed(s *State) map[int64]int {
 	return out
 }
 
-// agree reports whether two grades of the same entry are consistent with honest runs.
-func (a *App) agree(x, y *Result) bool {
-	if x.CorpusSHA != y.CorpusSHA || x.ExamSHA != y.ExamSHA || x.Valid != y.Valid {
-		return false
+// recentWork counts what each account did for other people's entries in the last two
+// weeks: grades that agreed, grades that stood alone as a script's gain, and editors run.
+// It is what puts a volunteer's own entries ahead in the queue.
+func recentWork(s *State) map[int64]int {
+	since := now() - 14*86400
+	out := recentAgreed(s)
+	for _, r := range s.Results {
+		if r.Verdict == "counted" && r.ReceivedAt > since {
+			out[r.AccountID]++
+		}
 	}
-	return !x.Valid || within(x.Loss-y.Loss, a.tolerance().Grade)
+	for _, es := range s.inRound {
+		for _, e := range es {
+			for _, run := range e.Runs {
+				if e.Status == "settled" && !run.Dropped && run.At > since {
+					out[run.By]++
+				}
+			}
+		}
+	}
+	return out
 }
 
 // within reports whether a difference is inside a tolerance. Losses are reported to five
@@ -190,120 +355,555 @@ func (a *App) agree(x, y *Result) bool {
 // exactly the tolerance agrees, as the page that prints both numbers says it does.
 func within(d, tol float64) bool { return math.Abs(d) <= tol+1e-9 }
 
-// --- claiming -------------------------------------------------------------------------------
-
-type entryState struct {
-	Entry      *Entry
-	OwnerID    int64
-	OwnerGH    int64 // the GitHub identity the editor was entered under, wherever it is linked now
-	Editing    bool  // an anchor holds a live edit claim
-	EditTries  int   // edit jobs handed out for it so far
-	Graded     bool  // an anchor's grade is in
-	Grading    bool  // an anchor holds a live grade claim
-	GradeTries int   // grade jobs handed to anchors for it so far
-	Replicas   int   // volunteers' grades, reported or under way
-	Newcomer   bool  // one of those volunteers has no agreed grade to its name yet
-	Mine       bool  // this verifier has had this entry before, whatever became of it
-	Closing    bool  // an anchor has graded every entry in the round: it is about to settle
+// samePerson reports whether two accounts are one person: one account, or two keys linked
+// to one GitHub identity.
+func samePerson(x, y *Account) bool {
+	return x.ID == y.ID || (x.GithubID != 0 && x.GithubID == y.GithubID)
 }
 
-// openEntryStates describes every entry that still needs work, as one verifier sees it.
-func openEntryStates(s *State, acctID int64) []*entryState {
-	t := now()
-	index := map[string]*entryState{}
-	var states []*entryState
-	for _, r := range s.Rounds {
-		if r.Status != "open" {
-			continue
-		}
-		for _, e := range s.inRound[r.Idx] {
-			if e.Status != "open" {
-				continue
-			}
-			st := &entryState{Entry: e, OwnerID: s.Editors[e.EditorID].AccountID, OwnerGH: s.Editors[e.EditorID].GithubID}
-			index[entryKey(e.RoundIdx, e.EditorID)] = st
-			states = append(states, st)
-		}
-	}
-	sort.Slice(states, func(i, j int) bool {
-		x, y := states[i].Entry, states[j].Entry
-		return x.RoundIdx < y.RoundIdx || (x.RoundIdx == y.RoundIdx && x.EditorID < y.EditorID)
-	})
-	replica := func(st *entryState, acct *Account) {
-		st.Replicas++
-		st.Newcomer = st.Newcomer || acct.Agreed == 0
-	}
-	for k, st := range index {
-		for _, r := range s.resultsOf[k] {
-			acct := s.Accounts[r.AccountID]
-			if acct == nil {
-				continue
-			}
-			if r.AccountID == acctID {
-				st.Mine = true
-			}
-			if acct.Anchor {
-				st.Graded = true
-			} else {
-				replica(st, acct)
-			}
-		}
+// --- what an entry has, and what it still wants ----------------------------------------------
+
+// judge is one look at the state: who is established, who is around and who is being
+// given no work, all as they were when the look began. Settling a round changes accounts'
+// standing as it goes, and settling one entry must not change what the grades of the next
+// are taken for.
+type judge struct {
+	a        *App
+	s        *State
+	t        int64
+	est      map[int64]bool        // established
+	standing map[int64]bool        // has had a grade agree
+	busy     map[int64]bool        // holds a job
+	resting  map[int64]bool        // let a job run out within the last day
+	differs  map[int64]map[int]int // jobs turned away for building a round differently, by round
+	around   []*asker              // found when first asked for
+}
+
+func (a *App) newJudge(s *State) *judge {
+	j := &judge{a: a, s: s, t: now(), est: map[int64]bool{}, standing: map[int64]bool{}, busy: map[int64]bool{},
+		resting: map[int64]bool{}, differs: map[int64]map[int]int{}}
+	for id, acct := range s.Accounts {
+		j.est[id], j.standing[id] = a.established(acct), acct.Agreed > 0
 	}
 	for _, c := range s.Claims {
-		st, acct := index[entryKey(c.RoundIdx, c.EditorID)], s.Accounts[c.AccountID]
-		if st == nil || acct == nil {
+		switch {
+		case c.live(j.t):
+			j.busy[c.AccountID] = true
+		case c.Status == "lapsed" && c.ExpiresAt > j.t-lapseRest:
+			j.resting[c.AccountID] = true
+		case c.Status == "refused":
+			if j.differs[c.AccountID] == nil {
+				j.differs[c.AccountID] = map[int]int{}
+			}
+			j.differs[c.AccountID][c.RoundIdx]++
+		}
+	}
+	return j
+}
+
+// barred reports whether an account is being given none of a round's work: it is muted, it
+// let a job run out within the last day, or its machine has twice built this round
+// differently from everyone else and would do so a third time.
+func (j *judge) barred(acct *Account, round int) bool {
+	if muted(acct, j.t) {
+		return true
+	}
+	return !acct.Anchor && (j.resting[acct.ID] || j.differs[acct.ID][round] >= 2)
+}
+
+// asker is an account as it stands when it asks for work, or as it stood when it last did.
+type asker struct {
+	acct    *Account
+	est     bool
+	canEdit bool   // it may be handed editors to run
+	gpuMake string // cuda | rocm
+}
+
+// active lists the accounts that are around: those that asked for work a short while ago,
+// and those at work on a job now. A verifier says nothing to the server while it trains,
+// so a silent one that holds a job is busy, not gone.
+func (j *judge) active() []*asker {
+	if j.around == nil {
+		j.around = []*asker{}
+		since := j.t - int64(j.a.cfg.ActiveWindow.Seconds())
+		for id, acct := range j.s.Accounts {
+			if acct.LastSeen > since || j.busy[id] {
+				j.around = append(j.around, &asker{acct: acct, est: j.est[id], canEdit: j.est[id] && acct.RunnerSeen != 0, gpuMake: acct.Backend})
+			}
+		}
+		sort.Slice(j.around, func(x, y int) bool { return j.around[x].acct.ID < j.around[y].acct.ID })
+	}
+	return j.around
+}
+
+// scriptState is one script an entry's runs wrote, and what has been said about it.
+type scriptState struct {
+	SHA     string
+	Size    int64
+	Run     int            // the first run that wrote it
+	Writers []writer       // whose runs wrote it
+	Results []*Result      // grades of it, in the order they came
+	Live    []*Claim       // grade jobs on it under way
+	Offered map[int64]bool // accounts that have been handed it to grade, whatever came of it
+	Graded  map[int64]bool // and those that reported
+	Tries   int            // grade jobs on it, handed to established accounts, that came to nothing
+	verdict *verdict       // worked out once
+}
+
+// writer is whoever's run wrote a script: the account, and the GitHub identity it had at
+// the time, which may since have moved to another key.
+type writer struct {
+	acct *Account
+	gh   int64
+}
+
+func (wr writer) is(acct *Account) bool {
+	return samePerson(wr.acct, acct) || (wr.gh != 0 && wr.gh == acct.GithubID)
+}
+
+// wroteAlone reports whether a script is this person's own: their run wrote it, and
+// nobody else's did. A script that two people's runs both wrote is nobody's own: neither
+// chose its bytes.
+func (sc *scriptState) wroteAlone(acct *Account) bool {
+	for _, wr := range sc.Writers {
+		if !wr.is(acct) {
+			return false
+		}
+	}
+	return len(sc.Writers) > 0
+}
+
+// entryState is everything about an open entry that deciding its next job needs.
+type entryState struct {
+	Entry       *Entry
+	Round       *Round
+	OwnerID     int64
+	OwnerGH     int64          // the GitHub identity the editor was entered under, wherever it is linked now
+	Runs        []*Run         // those that count
+	Dropped     int            // and those that were given up
+	Scripts     []*scriptState // what the runs that count wrote, in order
+	byScript    map[string]*scriptState
+	LiveEdits   []*Claim       // edit jobs under way
+	EditOffered map[int64]int  // edit jobs each account has been handed for it
+	EditFailed  int            // edit jobs that came to nothing
+	GradeSeen   map[int64]bool // accounts that have been handed any of its scripts
+}
+
+// states describes the open entries of a round.
+func (j *judge) states(rd *Round) []*entryState {
+	s := j.s
+	index := map[string]*entryState{}
+	var out []*entryState
+	for _, e := range s.inRound[rd.Idx] {
+		if e.Status != "open" {
+			continue
+		}
+		ed := s.Editors[e.EditorID]
+		st := &entryState{Entry: e, Round: rd, OwnerID: ed.AccountID, OwnerGH: ed.GithubID, byScript: map[string]*scriptState{},
+			EditOffered: map[int64]int{}, GradeSeen: map[int64]bool{}}
+		for _, run := range e.Runs {
+			if run.Dropped {
+				st.Dropped++
+				continue
+			}
+			st.Runs = append(st.Runs, run)
+			if run.Script == "" {
+				continue
+			}
+			sc := st.byScript[run.Script]
+			if sc == nil {
+				sc = &scriptState{SHA: run.Script, Size: run.ScriptSize, Run: run.N, Offered: map[int64]bool{}, Graded: map[int64]bool{}}
+				st.byScript[run.Script] = sc
+				st.Scripts = append(st.Scripts, sc)
+			}
+			if by := s.Accounts[run.By]; by != nil {
+				sc.Writers = append(sc.Writers, writer{by, run.GithubID})
+			}
+		}
+		index[entryKey(e.RoundIdx, e.EditorID)] = st
+		out = append(out, st)
+	}
+	sort.Slice(out, func(x, y int) bool { return out[x].Entry.EditorID < out[y].Entry.EditorID })
+	for k, st := range index {
+		for _, r := range s.resultsOf[k] {
+			st.GradeSeen[r.AccountID] = true
+			if sc := st.byScript[r.Script]; sc != nil {
+				sc.Results = append(sc.Results, r)
+				sc.Offered[r.AccountID], sc.Graded[r.AccountID] = true, true
+			}
+		}
+	}
+	// In the order the jobs were handed out, so that nothing below depends on a map's.
+	ids := make([]int64, 0, len(s.Claims))
+	for id, c := range s.Claims {
+		if c.RoundIdx == rd.Idx {
+			ids = append(ids, id)
+		}
+	}
+	sort.Slice(ids, func(x, y int) bool { return ids[x] < ids[y] })
+	for _, id := range ids {
+		c := s.Claims[id]
+		st := index[entryKey(c.RoundIdx, c.EditorID)]
+		if st == nil {
 			continue
 		}
 		if c.Kind == "edit" {
-			st.EditTries++
-			st.Editing = st.Editing || c.live(t)
+			st.EditOffered[c.AccountID]++
+			switch {
+			case c.live(j.t):
+				st.LiveEdits = append(st.LiveEdits, c)
+			case c.Status != "done":
+				st.EditFailed++
+			}
 			continue
 		}
-		if c.AccountID == acctID {
-			st.Mine = true // released and lapsed jobs count: an entry is offered once
+		st.GradeSeen[c.AccountID] = true
+		sc := st.byScript[c.Script]
+		if sc == nil {
+			continue
 		}
-		if acct.Anchor {
-			st.GradeTries++
-		}
+		sc.Offered[c.AccountID] = true
 		switch {
-		case !c.live(t):
-		case acct.Anchor:
-			st.Grading = true
-		default:
-			replica(st, acct)
+		case c.live(j.t):
+			sc.Live = append(sc.Live, c)
+		case c.Status != "done" && j.est[c.AccountID]:
+			sc.Tries++
 		}
 	}
-	ungraded := map[int]bool{}
-	for _, st := range states {
-		ungraded[st.Entry.RoundIdx] = ungraded[st.Entry.RoundIdx] || !st.Graded
-	}
-	for _, st := range states {
-		st.Closing = !ungraded[st.Entry.RoundIdx]
-	}
-	return states
+	return out
 }
 
-// wantsGrade decides whether this verifier should grade this entry now.
-//
-// An anchor grades every entry, once. A volunteer replicates: any entry that is not its
-// own, that it has not been offered before, and that does not already have enough
-// volunteers on it. At most one of those may be a newcomer (an account with no agreed
-// grade yet), so that fresh accounts cannot crowd established volunteers out of the work.
-func wantsGrade(st *entryState, acct, owner *Account) bool {
-	if st.Entry.Script == "" {
-		return false
+// openRounds lists the rounds being worked on, oldest first. (There is one at a time.)
+func openRounds(s *State) []*Round {
+	var out []*Round
+	for _, r := range s.Rounds {
+		if r.Status == "open" {
+			out = append(out, r)
+		}
 	}
-	if acct.Anchor { // including the reference editors the organisers enter themselves
-		return !st.Graded && !st.Grading && st.GradeTries < maxGradeAttempts
-	}
-	if st.Mine || st.Closing || st.OwnerID == acct.ID || st.Replicas >= maxReplicas {
-		return false
-	}
-	if acct.GithubID != 0 && ((owner != nil && owner.GithubID == acct.GithubID) || st.OwnerGH == acct.GithubID) {
-		return false // the same person under another key
-	}
-	return acct.Agreed > 0 || !st.Newcomer
+	sort.Slice(out, func(x, y int) bool { return out[x].Idx < out[y].Idx })
+	return out
 }
+
+// gradeView is one grade of a script, with what settling it needs to know.
+type gradeView struct {
+	r    *Result
+	acct *Account
+	est  bool
+	self bool    // by the only person who wrote the script
+	base bool    // it measured the round's unedited loss
+	gain float64 // that, minus its loss on the script
+}
+
+func (j *judge) view(sc *scriptState, r *Result) *gradeView {
+	acct := j.s.Accounts[r.AccountID]
+	if acct == nil {
+		return nil
+	}
+	g := &gradeView{r: r, acct: acct, est: j.est[acct.ID], self: sc.wroteAlone(acct)}
+	if b := j.s.Baselines[baselineKey(r.RoundIdx, r.AccountID)]; b != nil {
+		g.base = true
+		if r.Valid {
+			g.gain = b.Loss - r.Loss
+		}
+	}
+	return g
+}
+
+// verdict is what the established accounts' grades of a script come to.
+type verdict struct {
+	counted []*gradeView // the grades that decide it
+	self    bool         // which are its own writer's, because there are no others
+	known   bool         // there is at least one
+	valid   bool
+	gain    float64
+	tie     bool // two decide it, and they disagree
+}
+
+// same reports whether two grades of a script are consistent with honest runs.
+func (j *judge) same(x, y *gradeView) bool {
+	if x.r.Valid != y.r.Valid {
+		return false
+	}
+	return !x.r.Valid || within(x.gain-y.gain, j.a.tolerance().Grade)
+}
+
+// agrees reports whether a grade is consistent with what a script was found to be.
+func (j *judge) agrees(g *gradeView, v *verdict) bool {
+	if g.r.Valid != v.valid {
+		return false
+	}
+	return !v.valid || within(g.gain-v.gain, j.a.tolerance().Grade)
+}
+
+// weigh works out what a script's grades come to so far. The established accounts' grades
+// decide; a self grade counts only while it is all there is.
+func (j *judge) weigh(sc *scriptState) *verdict {
+	if sc.verdict != nil {
+		return sc.verdict
+	}
+	v := &verdict{}
+	var own []*gradeView
+	for _, r := range sc.Results {
+		switch g := j.view(sc, r); {
+		case g == nil || !g.est:
+		case g.self:
+			own = append(own, g)
+		default:
+			v.counted = append(v.counted, g)
+		}
+	}
+	if len(v.counted) == 0 {
+		v.counted, v.self = own, len(own) > 0
+	}
+	v.known = len(v.counted) > 0
+	var gains []float64
+	for _, g := range v.counted {
+		if g.r.Valid {
+			gains = append(gains, g.gain)
+		}
+	}
+	// Most of them must find it valid. As many for as against is not enough.
+	if v.valid = 2*len(gains) > len(v.counted); v.valid {
+		v.gain = median(gains)
+	}
+	v.tie = len(v.counted) == 2 && !j.same(v.counted[0], v.counted[1])
+	sc.verdict = v
+	return v
+}
+
+// runsWanted is how many runs an entry should have: the usual number, and one more when
+// two of those it has are known to differ.
+func (j *judge) runsWanted(st *entryState) int {
+	n := j.a.cfg.RunsPerEntry
+	if n >= maxRuns {
+		return n
+	}
+	type outcome struct {
+		failed bool
+		gain   float64
+	}
+	var known []outcome
+	for _, run := range st.Runs {
+		if run.Script == "" {
+			known = append(known, outcome{failed: true})
+		} else if v := j.weigh(st.byScript[run.Script]); v.known {
+			known = append(known, outcome{failed: !v.valid, gain: v.gain})
+		}
+	}
+	tol := j.a.tolerance().Run
+	for x := range known {
+		for y := x + 1; y < len(known); y++ {
+			if known[x].failed != known[y].failed || (!known[x].failed && !within(known[x].gain-known[y].gain, tol)) {
+				return n + 1
+			}
+		}
+	}
+	if n == 1 && len(st.Runs) == 1 && st.Runs[0].Script == "" && !j.vouched(st, st.Runs[0]) {
+		return 2 // one volunteer says the editor failed: somebody else has to find the same
+	}
+	return n
+}
+
+// owns reports whether an entry is this person's: entered by this account, or under the
+// GitHub identity this account has, wherever that identity is linked now.
+func (j *judge) owns(st *entryState, acct *Account) bool {
+	if st.OwnerID == acct.ID {
+		return true
+	}
+	owner := j.s.Accounts[st.OwnerID]
+	return acct.GithubID != 0 && (st.OwnerGH == acct.GithubID || (owner != nil && owner.GithubID == acct.GithubID))
+}
+
+// mayRun reports whether a runner could be handed an entry to run.
+func (j *judge) mayRun(st *entryState, q *asker) bool {
+	acct := q.acct
+	if !q.canEdit || j.barred(acct, st.Round.Idx) {
+		return false
+	}
+	if st.EditFailed >= maxEditAttempts || len(st.Runs)+st.Dropped+len(st.LiveEdits) >= j.runsWanted(st) {
+		return false
+	}
+	// Whoever has been handed one of its scripts has seen what a run of it writes.
+	if st.GradeSeen[acct.ID] || (!acct.Anchor && j.owns(st, acct)) {
+		return false
+	}
+	// A job is offered once. An organisers' machine gets one that came to nothing again.
+	if st.EditOffered[acct.ID] > 0 && !acct.Anchor {
+		return false
+	}
+	for _, run := range st.Entry.Runs {
+		if by := j.s.Accounts[run.By]; run.By == acct.ID || (by != nil && (writer{by, run.GithubID}).is(acct)) {
+			return false // one run of an entry each
+		}
+	}
+	for _, c := range st.LiveEdits {
+		if by := j.s.Accounts[c.AccountID]; c.AccountID == acct.ID || (by != nil && samePerson(by, acct)) {
+			return false
+		}
+	}
+	return true
+}
+
+// mayGrade reports whether an account could be handed a script at all: it is not the
+// entry's owner, and has not had the script before.
+func (j *judge) mayGrade(st *entryState, sc *scriptState, acct *Account) bool {
+	if sc.Graded[acct.ID] || j.barred(acct, st.Round.Idx) || (!acct.Anchor && j.owns(st, acct)) {
+		return false
+	}
+	if !sc.Offered[acct.ID] {
+		return true
+	}
+	// A job is offered once. An organisers' machine gets one that came to nothing again.
+	if !acct.Anchor || sc.Tries >= maxGradeAttempts {
+		return false
+	}
+	for _, c := range sc.Live {
+		if c.AccountID == acct.ID {
+			return false
+		}
+	}
+	return true
+}
+
+// someoneElse reports whether anybody who is around, other than this account, could give
+// a script a grade that counts: an established account that did not write it alone.
+func (j *judge) someoneElse(st *entryState, sc *scriptState, not *Account) bool {
+	for _, q := range j.active() {
+		if q.acct.ID != not.ID && q.est && !sc.wroteAlone(q.acct) && j.mayGrade(st, sc, q.acct) {
+			return true
+		}
+	}
+	return false
+}
+
+// offer is a job an account could be handed.
+type offer struct {
+	st       *entryState
+	kind     string       // edit | grade
+	sc       *scriptState // a grade job's script
+	score    int          // lowest first
+	required bool         // a score is waiting for it
+}
+
+// offers lists the jobs on an entry that an account could be handed now. With closing, only
+// those a score is waiting for: the round has everything else it is going to get, and a
+// job started now would be thrown away when it settles.
+func (j *judge) offers(st *entryState, q *asker, closing bool) []offer {
+	var out []offer
+	base := st.Round.Idx * 1000
+	if j.mayRun(st, q) {
+		// Edits first, since they unblock everyone else, and first runs before second ones.
+		score := base - 500 + 100*(len(st.Runs)+st.Dropped+len(st.LiveEdits))
+		other := len(st.Runs) > 0 && q.gpuMake != ""
+		for _, run := range st.Runs {
+			other = other && run.Backend != "" && run.Backend != q.gpuMake
+		}
+		if other {
+			score -= 10 // an entry run on one make of GPU goes to the other when it can
+		}
+		out = append(out, offer{st: st, kind: "edit", score: score, required: true})
+	}
+	for _, sc := range st.Scripts {
+		if !j.mayGrade(st, sc, q.acct) {
+			continue
+		}
+		v := j.weigh(sc)
+		under, others, newcomer := len(sc.Results)+len(sc.Live), 0, false // grades reported or under way; by accounts not yet established
+		counting, any := 0, 0                                             // under way by established accounts: not its own writer's, and all
+		for _, c := range sc.Live {
+			acct := j.s.Accounts[c.AccountID]
+			switch {
+			case acct == nil:
+			case !j.est[acct.ID]:
+				others++
+				newcomer = newcomer || acct.Agreed == 0
+			default:
+				any++
+				if !sc.wroteAlone(acct) {
+					counting++
+				}
+			}
+		}
+		for _, r := range sc.Results {
+			if acct := j.s.Accounts[r.AccountID]; acct != nil && !j.est[acct.ID] {
+				others++
+				newcomer = newcomer || acct.Agreed == 0
+			}
+		}
+		o := offer{st: st, kind: "grade", sc: sc, score: base + under} // oldest round, least attention
+		switch {
+		case sc.wroteAlone(q.acct):
+			// Its own script. Never a volunteer's to grade; an organisers' machine's only when
+			// the script has no grade, and nobody else who is around could give it one.
+			if q.acct.Anchor && !v.known && any == 0 && !j.someoneElse(st, sc, q.acct) {
+				o.required = true
+				out = append(out, o)
+			}
+		case q.est:
+			// A script wants one grade that counts and is not its own writer's, and a third
+			// when two disagree. Beyond that an established account replicates, like anyone.
+			if o.required = counting == 0 && (!v.known || v.self || v.tie); o.required || (!closing && under < 1+maxReplicas) {
+				out = append(out, o)
+			}
+		default:
+			// At most one of those not yet established may be a newcomer (no agreed grade to
+			// its name), so that fresh accounts cannot crowd the others out of the work.
+			if !closing && others < maxReplicas && (q.acct.Agreed > 0 || !newcomer) {
+				out = append(out, o)
+			}
+		}
+	}
+	return out
+}
+
+// settleable reports whether an entry could be given a score as it stands: it has a run,
+// nobody is at work on another, every script its runs wrote has a grade that counts and
+// no established account at work on one more, and a run that wrote no script is not one
+// volunteer's word alone.
+func (j *judge) settleable(st *entryState) bool {
+	if len(st.LiveEdits) > 0 {
+		return false
+	}
+	for _, sc := range st.Scripts {
+		if !j.weigh(sc).known {
+			return false
+		}
+		for _, c := range sc.Live {
+			if j.est[c.AccountID] {
+				return false
+			}
+		}
+	}
+	for _, run := range st.Runs {
+		if run.Script == "" && !j.vouched(st, run) {
+			return false
+		}
+	}
+	return len(st.Runs) > 0
+}
+
+// ready reports whether a round has everything it is going to get: every open entry could
+// be scored as it stands, and nobody who is around could be handed a job that a score is
+// waiting for. Someone at work on a job is around, and is asked what they could be handed
+// when it is done.
+func (j *judge) ready(states []*entryState) bool {
+	for _, st := range states {
+		if !j.settleable(st) {
+			return false
+		}
+	}
+	for _, q := range j.active() {
+		for _, st := range states {
+			if len(j.offers(st, q, true)) > 0 {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// --- claiming -------------------------------------------------------------------------------
 
 type ScriptRef struct {
 	SHA256 string `json:"sha256"`
@@ -317,6 +917,7 @@ type Job struct {
 	Scale     string         `json:"scale"`
 	Editor    map[string]any `json:"editor"`
 	Script    *ScriptRef     `json:"script,omitempty"`
+	Run       int            `json:"run,omitempty"` // a grade job: which run of the entry wrote the script
 	ExpiresAt int64          `json:"expires_at"`
 }
 
@@ -327,8 +928,13 @@ func (a *App) jobFor(s *State, c *Claim) *Job {
 		Editor: map[string]any{"id": ed.ID, "name": ed.Name, "version": ed.Version, "owner": s.owner(ed).Handle, "size": ed.Size},
 	}
 	if c.Kind == "grade" {
-		e := s.entry(c.RoundIdx, c.EditorID)
-		job.Script = &ScriptRef{SHA256: e.Script, Size: e.ScriptSize}
+		job.Script = &ScriptRef{SHA256: c.Script}
+		for _, run := range s.entry(c.RoundIdx, c.EditorID).Runs {
+			if run.Script == c.Script {
+				job.Script.Size, job.Run = run.ScriptSize, run.N
+				break
+			}
+		}
 	}
 	return job
 }
@@ -340,15 +946,23 @@ func (a *App) checkHarness(harness, season, digest string) error {
 	return nil
 }
 
-// claim hands a verifier its next job, or nil if there is nothing it should do right now.
-func (a *App) claim(ctx context.Context, acctID int64, h *Hello) (*Job, error) {
+// Handed is the answer to a request for work.
+type Handed struct {
+	Job *Job
+	// Runner says whether this account, on this machine, may be handed editors to run, and
+	// if it asked to and may not, why. A machine that may not is handed grade jobs.
+	Runner map[string]any
+}
+
+// claim hands a verifier its next job, or none if there is nothing it should do right now.
+func (a *App) claim(ctx context.Context, acctID int64, h *Hello) (*Handed, error) {
 	if err := a.checkHarness(h.Harness, h.Season, h.SeasonDigest); err != nil {
 		return nil, err
 	}
 	if !a.cfg.Dev && !a.season.gradesOn(deviceOf(h.Hardware)) {
 		return nil, fail(400, "grading for the leaderboard needs an NVIDIA (CUDA) or AMD (ROCm) GPU, so that every grade uses the same arithmetic")
 	}
-	var job *Job
+	out := &Handed{}
 	err := a.st.update(ctx, func(tx *Tx) error {
 		s := tx.s
 		acct := s.Accounts[acctID]
@@ -356,12 +970,12 @@ func (a *App) claim(ctx context.Context, acctID int64, h *Hello) (*Job, error) {
 			return fail(401, "no such account")
 		}
 		if muted(acct, now()) {
-			return fail(403, "this account is given no grading work until %s: its grades kept differing from the anchor's, and no other volunteer found what it found. If this machine is honest, the organisers want to hear about it",
+			return fail(403, "this account is given no work until %s: its grades kept differing from what established verifiers found for the same scripts. If this machine is honest, the organisers want to hear about it",
 				time.Unix(acct.LastStrikeAt+muteFor, 0).UTC().Format("2 January"))
 		}
 		if !acct.Anchor {
-			// Taking a job and neither reporting nor handing it back holds a volunteer's place
-			// on that entry for hours. After that, a day's rest.
+			// Taking a job and neither reporting nor handing it back holds a place on that
+			// entry for hours, and may hold its round. After that, a day's rest.
 			for _, c := range s.Claims {
 				if c.AccountID == acctID && c.Status == "lapsed" && c.ExpiresAt > now()-lapseRest {
 					return fail(403, "a job this verifier took was given up on at %s: no result had come, and it had not been handed back. It is offered work again a day after that. (Ctrl-C hands a job back at once.)",
@@ -369,11 +983,18 @@ func (a *App) claim(ctx context.Context, acctID int64, h *Hello) (*Job, error) {
 				}
 			}
 		}
-		canEdit := h.Edits && acct.Anchor && (h.Sandbox == "bwrap" || a.cfg.Dev)
-		if hw := clip(string(h.Hardware), 2000); json.Valid([]byte(hw)) {
-			acct.Hardware = json.RawMessage(hw)
+		canEdit, why := a.runsEditors(acct, h)
+		if h.Edits {
+			out.Runner = map[string]any{"eligible": canEdit, "reason": why}
 		}
-		acct.LastSeen = now()
+		hw := readHardware(h.Hardware)
+		if raw := clip(string(h.Hardware), 2000); json.Valid([]byte(raw)) {
+			acct.Hardware = json.RawMessage(raw)
+		}
+		acct.LastSeen, acct.RunnerSeen, acct.Backend = now(), 0, hw.gpuMake()
+		if canEdit {
+			acct.RunnerSeen = now()
+		}
 		tx.touch(acct)
 
 		// A verifier that restarts picks its unfinished job back up.
@@ -390,42 +1011,29 @@ func (a *App) claim(ctx context.Context, acctID int64, h *Hello) (*Job, error) {
 			}
 		}
 		if mine != nil {
-			job = a.jobFor(s, mine)
+			out.Job = a.jobFor(s, mine)
 			return nil
 		}
-		var pick *entryState
-		pickKind := ""
+		var pick *offer
 		best, n := math.MaxInt, 0
-		consider := func(st *entryState, kind string, score int) {
-			// Lowest score first; ties at random so that nobody can predict or steer what they
-			// will be given.
-			switch {
-			case score < best:
-				best, pick, pickKind, n = score, st, kind, 1
-			case score == best:
-				n++
-				if rand.IntN(n) == 0 {
-					pick, pickKind = st, kind
+		j := a.newJudge(s)
+		q := &asker{acct: acct, est: j.est[acctID], canEdit: canEdit, gpuMake: hw.gpuMake()}
+		for _, rd := range openRounds(s) {
+			states := j.states(rd)
+			closing := j.ready(states)
+			for _, st := range states {
+				for _, o := range j.offers(st, q, closing) {
+					// Lowest score first; ties at random so that nobody can predict or steer
+					// what they will be given.
+					switch {
+					case o.score < best:
+						best, pick, n = o.score, &o, 1
+					case o.score == best:
+						if n++; rand.IntN(n) == 0 {
+							pick = &o
+						}
+					}
 				}
-			}
-		}
-		// A machine whose corpus or baseline for a round has twice differed from the anchor's
-		// will get the same answer a third time. It is given no more of that round.
-		differs := map[int]int{}
-		for _, c := range s.Claims {
-			if c.AccountID == acctID && c.Status == "refused" {
-				differs[c.RoundIdx]++
-			}
-		}
-		for _, st := range openEntryStates(s, acctID) {
-			if differs[st.Entry.RoundIdx] >= 2 && !acct.Anchor {
-				continue
-			}
-			if canEdit && st.Entry.EditedAt == 0 && !st.Editing && st.EditTries < maxEditAttempts {
-				consider(st, "edit", st.Entry.RoundIdx*1000-500) // edits first: they unblock everyone else
-			}
-			if wantsGrade(st, acct, s.Accounts[st.OwnerID]) {
-				consider(st, "grade", st.Entry.RoundIdx*1000+st.Replicas) // oldest round, least attention
 			}
 		}
 		if pick == nil {
@@ -435,13 +1043,26 @@ func (a *App) claim(ctx context.Context, acctID int64, h *Hello) (*Job, error) {
 		if !acct.Anchor && !a.limits.allow(fmt.Sprintf("claim:%d", acctID), 30, 3600) {
 			return fail(429, "this account has been handed a great many jobs in the last hour; try again later")
 		}
-		c := &Claim{RoundIdx: pick.Entry.RoundIdx, EditorID: pick.Entry.EditorID, AccountID: acctID, Kind: pickKind,
+		e := pick.st.Entry
+		c := &Claim{RoundIdx: e.RoundIdx, EditorID: e.EditorID, AccountID: acctID, Kind: pick.kind,
 			ClaimedAt: now(), ExpiresAt: now() + int64(a.cfg.Lease.Seconds()), Status: "claimed"}
+		if pick.sc != nil {
+			c.Script = pick.sc.SHA
+		}
 		tx.newClaim(c)
-		job = a.jobFor(s, c)
+		if q.est {
+			a.moved(tx, pick.st.Round) // the round waits its fixed while for this job, from now
+		}
+		out.Job = a.jobFor(s, c)
 		return nil
 	})
-	return job, err
+	return out, err
+}
+
+// moved notes that a round has just been moved on by someone whose word counts.
+func (a *App) moved(tx *Tx, rd *Round) {
+	rd.ActiveAt = now()
+	tx.saveRound(rd)
 }
 
 func (a *App) release(ctx context.Context, acctID, claimID int64) error {
@@ -449,6 +1070,9 @@ func (a *App) release(ctx context.Context, acctID, claimID int64) error {
 		if c := tx.s.Claims[claimID]; c != nil && c.AccountID == acctID && c.Status == "claimed" {
 			c.Status = "released"
 			tx.saveClaim(c)
+			if rd := tx.s.Rounds[c.RoundIdx]; rd != nil && rd.Status == "open" && a.established(tx.s.Accounts[acctID]) {
+				a.moved(tx, rd)
+			}
 			a.settleReady(tx) // the round may have been waiting for this job alone
 		}
 		return nil
@@ -462,9 +1086,9 @@ func article(kind string) string {
 	return "a " + kind
 }
 
-// findClaim checks that a job is this account's to report on. A volunteer's job ends with
-// its lease and with the round: a grade that arrives after the results are public could
-// have been copied from them.
+// findClaim checks that a job is this account's to report on. A job ends with its lease
+// and with the round: a grade that arrives after the results are public could have been
+// copied from them.
 func findClaim(s *State, acct *Account, claimID int64, kind string) (*Claim, error) {
 	c := s.Claims[claimID]
 	if c == nil || c.AccountID != acct.ID {
@@ -517,8 +1141,9 @@ type Ack struct {
 	Verifier map[string]any `json:"verifier,omitempty"`
 }
 
-// submitScript records the outcome of an edit job. With a script, the entry moves on to
-// grading. Without one, the editor failed and the entry settles at once as invalid.
+// submitScript records a run: the outcome of an edit job. With a script, the run goes on
+// to be graded. Without one, the editor failed on this machine; that is a run too, and
+// the entry's other run may still succeed.
 func (a *App) submitScript(ctx context.Context, acctID, claimID int64, p *ScriptPayload) (*Ack, error) {
 	if err := a.checkHarness(p.Harness, p.Season, p.SeasonDigest); err != nil {
 		return nil, err
@@ -526,29 +1151,34 @@ func (a *App) submitScript(ctx context.Context, acctID, claimID int64, p *Script
 	if !sha256Re.MatchString(p.CorpusSHA256) {
 		return nil, fail(400, "the edit does not say which corpus it ran on")
 	}
-	check := func(s *State) (*Claim, error) {
+	// check says whether the run may be recorded, and whether it was made on the round's
+	// corpus. A run on some other corpus ends the job and records nothing.
+	check := func(s *State) (c *Claim, other bool, err error) {
 		acct := s.Accounts[acctID]
-		if acct == nil || !acct.Anchor {
-			return nil, fail(403, "edit jobs are run by anchors only")
+		if acct == nil || !a.established(acct) {
+			return nil, false, fail(403, "editors are run by established verifiers only")
 		}
-		c, err := findClaim(s, acct, claimID, "edit")
-		if err != nil {
-			return nil, err
+		if c, err = findClaim(s, acct, claimID, "edit"); err != nil {
+			return nil, false, err
 		}
 		rd := s.Rounds[c.RoundIdx]
 		if p.Round != roundID(a.season.ID, c.RoundIdx) || p.Scale != rd.Scale {
-			return nil, fail(400, "this edit is for %s at %s, but the job is %s at %s", p.Round, p.Scale, roundID(a.season.ID, c.RoundIdx), rd.Scale)
+			return nil, false, fail(400, "this edit is for %s at %s, but the job is %s at %s", p.Round, p.Scale, roundID(a.season.ID, c.RoundIdx), rd.Scale)
 		}
-		if rd.CorpusSHA != "" && rd.CorpusSHA != p.CorpusSHA256 {
-			return nil, fail(409, "your corpus for %s differs from the round's", p.Round)
+		e := s.entry(c.RoundIdx, c.EditorID)
+		if e == nil || e.Status != "open" {
+			return nil, false, fail(409, "this entry settled before your run arrived. It does not count against you")
 		}
-		if e := s.entry(c.RoundIdx, c.EditorID); e == nil || e.Status != "open" || e.EditedAt != 0 {
-			return nil, fail(409, "this entry has already been edited")
+		for _, run := range e.Runs {
+			if run.Claim == c.ID || run.By == acctID {
+				return nil, false, fail(409, "this entry already has your run")
+			}
 		}
-		return c, nil
+		return c, rd.CorpusSHA != "" && rd.CorpusSHA != p.CorpusSHA256, nil
 	}
 	var pre error
-	a.st.view(func(s *State) { _, pre = check(s) })
+	other := false
+	a.st.view(func(s *State) { _, other, pre = check(s) })
 	if pre != nil {
 		return nil, pre
 	}
@@ -561,7 +1191,7 @@ func (a *App) submitScript(ctx context.Context, acctID, claimID int64, p *Script
 	seconds = math.Min(seconds, 2*float64(a.season.Scales[a.cfg.Scale].EditSeconds)) // an edit has a time limit
 	sha := ""
 	var size int64
-	if p.ScriptSHA256 != "" {
+	if p.ScriptSHA256 != "" && !other {
 		if !sha256Re.MatchString(p.ScriptSHA256) {
 			return nil, fail(400, "malformed script hash")
 		}
@@ -582,37 +1212,50 @@ func (a *App) submitScript(ctx context.Context, acctID, claimID int64, p *Script
 			return nil, err
 		}
 	}
-	ack := &Ack{Status: "edited", Message: "the script is published and waiting for grades"}
+	ack := &Ack{Status: "edited", Message: "sealed until the round settles"}
+	var refused error // the job is over, and that has to be stored, so it is not the update's error
 	err := a.st.update(ctx, func(tx *Tx) error {
 		s := tx.s
-		c, err := check(s)
+		c, other, err := check(s)
 		if err != nil {
 			return err
 		}
 		acct, rd, e := s.Accounts[acctID], s.Rounds[c.RoundIdx], s.entry(c.RoundIdx, c.EditorID)
+		if other || (sha == "" && p.ScriptSHA256 != "") {
+			// The first run of a round fixes its corpus. A machine that built another has run
+			// the editor on other documents, and its script would mean nothing here.
+			c.Status = "refused"
+			tx.saveClaim(c)
+			a.moved(tx, rd)
+			tx.event("established-differ", map[string]any{"round": p.Round, "verifier": acct.Handle, "what": "corpus"})
+			refused = fail(409, "your corpus for %s differs from the round's. This verifier rebuilds its copy once", p.Round)
+			a.settleReady(tx)
+			return nil
+		}
+		hw := readHardware(acct.Hardware)
 		edit := p.Edit
-		e.Script, e.ScriptSize, e.Edit, e.EditedAt, e.EditedBy = sha, size, &edit, now(), acctID
+		e.Runs = append(e.Runs, &Run{N: len(e.Runs) + 1, By: acctID, GithubID: acct.GithubID, Claim: c.ID, Script: sha, ScriptSize: size, Edit: &edit,
+			At: now(), GPU: hw.gpuName(), Backend: hw.gpuMake()})
 		tx.saveEntry(e)
 		if rd.CorpusSHA == "" {
 			rd.CorpusSHA = p.CorpusSHA256
-			tx.saveRound(rd)
 		}
+		a.moved(tx, rd)
 		c.Status = "done"
 		tx.saveClaim(c)
 		acct.GPUSeconds += seconds
+		acct.Runs++
 		acct.LastSeen = now()
 		tx.saveAccount(acct)
-		if sha == "" {
-			reason := edit.Reason
-			if reason == "" {
-				reason = fmt.Sprintf("the editor produced no script (%s)", edit.Status)
-			}
-			a.settleInvalid(tx, e, reason, &EntryDetail{Verifiers: []string{acct.Handle}})
-			a.settleReady(tx)
-			ack = &Ack{Status: "settled", Message: "no script: the entry scores as the unedited corpus"}
+		a.settleReady(tx)
+		if e.Status == "settled" {
+			ack = &Ack{Status: "settled"}
 		}
 		return nil
 	})
+	if err == nil && refused != nil {
+		return nil, refused
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -642,13 +1285,14 @@ func (a *App) settleInvalid(tx *Tx, e *Entry, reason string, detail *EntryDetail
 }
 
 // failing says an editor keeps failing: two of its last five rounds were invalid. Such an
-// editor is not scheduled again, whether it is still qualifying or sits on the ladder; an
-// anchor's time is better spent on someone else's entry.
+// editor is not scheduled again, whether it is still qualifying or sits on the ladder; the
+// verifiers' time is better spent on someone else's entry.
 //
-// A round in which the anchors could not run an entry is void for it and is not held
-// against it. Three of those in a row are, when the anchors ran other entries in each:
-// whatever the cause, it is this entry they cannot run. A round in which nothing ran,
-// or a void long ago, says nothing about the editor.
+// A round in which the verifiers could not run an entry is void for it and is not held
+// against it. Three of those in a row are, when the verifiers ran other entries in each:
+// whatever the cause, it is this entry they cannot run. A round in which nothing ran, a
+// void long ago, or a round in which nobody was there to run or check it, says nothing
+// about the editor.
 func failing(s *State, editorID string) bool {
 	es := s.ofEditor[editorID]
 	seen, invalid, void := 0, 0, 0
@@ -656,7 +1300,7 @@ func failing(s *State, editorID string) bool {
 	for i := len(es) - 1; i >= 0; i-- {
 		switch e := es[i]; {
 		case e.Void:
-			if unbroken && othersRan(s, e) {
+			if unbroken && !e.Unattended && othersRan(s, e) {
 				void++
 			}
 		case e.Status == "settled":
@@ -672,8 +1316,8 @@ func failing(s *State, editorID string) bool {
 	return invalid >= retireAfterInvalid || void >= maxEditAttempts
 }
 
-// othersRan reports whether the anchors ran some other entry of the same round. A round in
-// which nothing ran says the anchor was in trouble, not the entry.
+// othersRan reports whether the verifiers ran some other entry of the same round. A round
+// in which nothing ran says the verifiers were in trouble, not the entry.
 func othersRan(s *State, e *Entry) bool {
 	for _, o := range s.inRound[e.RoundIdx] {
 		if o != e && o.Status == "settled" && !o.Void {
@@ -684,12 +1328,12 @@ func othersRan(s *State, e *Entry) bool {
 }
 
 // roundsRun is how many rounds count for an editor: all it was drawn into, except those
-// the anchors could not run.
+// the verifiers could not run.
 func roundsRun(s *State, editorID string) int {
 	n := 0
 	for _, e := range s.ofEditor[editorID] {
-		// A round that settled with no baseline (the anchors graded nothing in it) cannot be
-		// rated, so it does not use up one of an editor's rounds either.
+		// A round that settled with no baseline (nothing in it was graded) cannot be rated, so
+		// it does not use up one of an editor's rounds either.
 		if rd := s.Rounds[e.RoundIdx]; e.Void || (rd != nil && rd.Status == "settled" && rd.BaselineLoss == nil) {
 			continue
 		}
@@ -712,8 +1356,8 @@ func (a *App) afterInvalid(tx *Tx, editorID string) {
 func finite(x float64) bool { return !math.IsNaN(x) && !math.IsInf(x, 0) }
 
 func (a *App) checkScore(sc *ExamScore, what string) error {
-	// A student that is confidently wrong can score far above chance (9 nats), and what an
-	// anchor measured has to be recordable whatever it is. The bound only keeps nonsense out.
+	// A student that is confidently wrong can score far above chance (9 nats), and what a
+	// machine measured has to be recordable whatever it is. The bound only keeps nonsense out.
 	const maxLoss = 1e4
 	if sc == nil || !finite(sc.Loss) || sc.Loss <= 0 || sc.Loss > maxLoss {
 		return fail(400, "the result has no usable %s score", what)
@@ -774,7 +1418,7 @@ func (a *App) submitResult(ctx context.Context, acctID, claimID int64, p *Result
 			return fail(401, "no such account")
 		}
 		if muted(acct, now()) {
-			return fail(403, "this account is given no grading work for now")
+			return fail(403, "this account is given no work for now")
 		}
 		c, err := findClaim(s, acct, claimID, "grade")
 		if err != nil {
@@ -787,58 +1431,63 @@ func (a *App) submitResult(ctx context.Context, acctID, claimID int64, p *Result
 		if e == nil || e.Status != "open" {
 			return fail(409, "this entry settled before your result arrived. It earns no credit, and it does not count against you")
 		}
-		if e.Script == "" || p.ScriptSHA256 != e.Script {
+		written := false
+		for _, run := range e.Runs {
+			written = written || (!run.Dropped && run.Script != "" && run.Script == c.Script)
+		}
+		if c.Script == "" || p.ScriptSHA256 != c.Script {
 			return fail(400, "this result is for a different edit script than the one the job named")
 		}
+		if !written {
+			return fail(409, "this script was given up before your result arrived. It earns no credit, and it does not count against you")
+		}
 		for _, r := range s.results(c.RoundIdx, c.EditorID) {
-			if other := s.Accounts[r.AccountID]; r.AccountID == acctID || (acct.Anchor && other != nil && other.Anchor) {
-				return fail(409, "this entry already has that grade")
+			if r.AccountID == acctID && r.Script == c.Script {
+				return fail(409, "this script already has your grade")
 			}
 		}
-		refuse := func(format string, args ...any) error {
+		est := a.established(acct)
+		refuse := func(what string, diff float64, format string, args ...any) error {
 			c.Status = "refused"
 			tx.saveClaim(c)
+			if est {
+				tx.event("established-differ", map[string]any{"round": p.Round, "verifier": acct.Handle, "what": what})
+				a.moved(tx, rd)
+			} else if len(rd.Differs) < 50 {
+				rd.Differs = append(rd.Differs, Differ{Handle: acct.Handle, What: what, Diff: diff})
+				tx.saveRound(rd)
+			}
 			refused = fail(409, format, args...)
+			a.settleReady(tx) // the round may have been waiting for this job alone
 			return nil
 		}
 		// Everyone must be looking at the same corpus and exam, and must measure the same
-		// unedited baseline on them. The first anchor to report fixes all three for the round.
-		// A volunteer who reports before that is checked when the round settles instead.
+		// unedited baseline on them. The round's first run fixes the corpus, and the first
+		// established account to report a grade fixes the exam and the baseline. Whoever
+		// reports before that is checked when the round settles instead.
 		if (rd.CorpusSHA != "" && rd.CorpusSHA != p.CorpusSHA256) || (rd.ExamSHA != "" && rd.ExamSHA != p.ExamSHA256) {
-			if acct.Anchor {
-				tx.event("anchors-differ", map[string]any{"round": p.Round, "anchor": acct.Handle})
-			}
-			if !acct.Anchor && len(rd.Differs) < 50 {
-				rd.Differs = append(rd.Differs, Differ{Handle: acct.Handle, What: "corpus"})
-				tx.saveRound(rd)
-			}
-			return refuse("your corpus or exam for %s differs from the round's. This verifier rebuilds its copy once", p.Round)
+			return refuse("corpus", 0, "your corpus or exam for %s differs from the round's. This verifier rebuilds its copy once", p.Round)
 		}
 		if tol := a.tolerance(); rd.BaselineLoss != nil && !within(*rd.BaselineLoss-p.Baseline.Loss, tol.Baseline) {
-			if acct.Anchor {
-				tx.event("anchors-differ", map[string]any{"round": p.Round, "anchor": acct.Handle})
-			}
-			if !acct.Anchor && len(rd.Differs) < 50 {
-				rd.Differs = append(rd.Differs, Differ{Handle: acct.Handle, What: "baseline", Diff: places5(p.Baseline.Loss - *rd.BaselineLoss)})
-				tx.saveRound(rd)
-			}
-			return refuse("your unedited baseline for %s is further from the anchor's than the tolerance of %.2f nats allows, so this machine's setup or arithmetic differs. That is published with the round when it settles; nothing counts against you", p.Round, tol.Baseline)
+			return refuse("baseline", places5(p.Baseline.Loss-*rd.BaselineLoss),
+				"your unedited baseline for %s is further from what the round's established graders measured than the tolerance of %.2f nats allows, so this machine's setup or arithmetic differs. That is published with the round when it settles; nothing counts against you", p.Round, tol.Baseline)
 		}
 
 		// Everything is checked. From here on the change is made.
 		tx.saveBaseline(&Baseline{RoundIdx: rd.Idx, AccountID: acctID, Loss: p.Baseline.Loss, BySource: p.Baseline.BySource,
-			CorpusSHA: p.CorpusSHA256, ExamSHA: p.ExamSHA256, ReceivedAt: now()})
-		if acct.Anchor {
+			CorpusSHA: p.CorpusSHA256, ExamSHA: p.ExamSHA256, ReceivedAt: now(), Established: est})
+		if est {
 			rd.CorpusSHA, rd.ExamSHA = p.CorpusSHA256, p.ExamSHA256
-			tx.saveRound(rd)
+			a.moved(tx, rd)
 			a.refreshBaseline(tx, rd)
 		}
-		// GPU time is what the grader says, but never more than the job was out for.
+		// GPU time is what the grader says, but never more than the job was out for. It
+		// counts once the grade has: when the round settles.
 		seconds := math.Min(float64(p.FinishedAt-p.StartedAt), float64(now()-c.ClaimedAt))
 		if !finite(seconds) || seconds < 0 {
 			seconds = 0
 		}
-		res := &Result{ClaimID: claimID, RoundIdx: rd.Idx, EditorID: e.EditorID, AccountID: acctID, ReceivedAt: now(),
+		res := &Result{ClaimID: claimID, RoundIdx: rd.Idx, EditorID: e.EditorID, AccountID: acctID, Script: c.Script, ReceivedAt: now(),
 			Valid: p.Valid, CorpusSHA: p.CorpusSHA256, ExamSHA: p.ExamSHA256, Seconds: seconds, Verdict: "pending",
 			InvalidReason: clip(strings.ToValidUTF8(p.InvalidReason, "?"), 300),
 			Summary:       &ResultSummary{Script: clipJSON(p.Script, 16<<10), Hardware: clipJSON(p.Hardware, 2000), Train: p.Train}}
@@ -849,20 +1498,13 @@ func (a *App) submitResult(ctx context.Context, acctID, claimID int64, p *Result
 		c.Status = "done"
 		tx.saveClaim(c)
 		acct.LastSeen = now()
-		if acct.Anchor {
-			acct.GPUSeconds += seconds // a volunteer's time counts once its grade has agreed
-		}
 		tx.saveAccount(acct)
 
 		a.settleReady(tx)
-		ack = &Ack{Status: "pending", Verifier: map[string]any{"validated": acct.Agreed, "streak": acct.Streak, "trusted": acct.Anchor}}
-		switch {
-		case e.Status == "settled":
-			ack.Status = "settled"
-		case acct.Anchor:
-			ack.Message = "sealed until the round's other entries are graded"
-		default:
-			ack.Message = "sealed until the round settles, then compared with the anchor's grade"
+		ack = &Ack{Status: "pending", Message: "sealed until the round settles",
+			Verifier: map[string]any{"validated": acct.Agreed, "streak": acct.Streak, "trusted": acct.Anchor, "established": a.established(acct)}}
+		if e.Status == "settled" {
+			ack.Status, ack.Message = "settled", ""
 		}
 		return nil
 	})
@@ -896,14 +1538,17 @@ func cleanTrain(t *TrainInfo) *TrainInfo {
 	return &c
 }
 
-// refreshBaseline sets the round's baseline to what its anchors measured (the median, if
-// there are several).
+// refreshBaseline sets the round's unedited loss to what its established graders measured:
+// the median, so that no one of them decides it.
 func (a *App) refreshBaseline(tx *Tx, rd *Round) {
 	var losses []float64
 	per := map[string][]float64{}
 	for _, b := range tx.s.Baselines {
+		// Whether a measurement counts was settled when it arrived: standing earned as the
+		// round settles must not move the round's own baseline. (One from before that was
+		// written down counts if it is the organisers'.)
 		acct := tx.s.Accounts[b.AccountID]
-		if b.RoundIdx != rd.Idx || acct == nil || !acct.Anchor || b.CorpusSHA != rd.CorpusSHA || b.ExamSHA != rd.ExamSHA {
+		if b.RoundIdx != rd.Idx || !(b.Established || (acct != nil && acct.Anchor)) || b.CorpusSHA != rd.CorpusSHA || b.ExamSHA != rd.ExamSHA {
 			continue
 		}
 		losses = append(losses, b.Loss)
@@ -920,7 +1565,7 @@ func (a *App) refreshBaseline(tx *Tx, rd *Round) {
 	}
 	m := median(losses)
 	rd.BaselineLoss, rd.Baseline = &m, by
-	// How many machines measured it, volunteers included.
+	// How many machines measured it, whoever they were.
 	rd.BaselineN = 0
 	for _, b := range tx.s.Baselines {
 		if b.RoundIdx == rd.Idx && b.CorpusSHA == rd.CorpusSHA && b.ExamSHA == rd.ExamSHA && math.Abs(b.Loss-m) <= a.tolerance().Baseline {
@@ -945,273 +1590,502 @@ func median(v []float64) float64 {
 
 // --- settlement -----------------------------------------------------------------------------
 
-// anchorResult is the grade that defines an entry's score: the first an anchor reported.
-func anchorResult(s *State, e *Entry) *Result {
-	var first *Result
-	for _, r := range s.results(e.RoundIdx, e.EditorID) {
-		if acct := s.Accounts[r.AccountID]; acct != nil && acct.Anchor && (first == nil || r.ID < first.ID) {
-			first = r
-		}
-	}
-	return first
-}
-
-// settleReady publishes the grades of every round that is ready: an anchor has graded each
-// of its entries, and no volunteer is still at work on one. A volunteer who has started
-// gets ReplicaWait after the anchor's last grade to finish; after that the round settles
-// without them.
+// settleReady publishes every round that is ready. It runs after anything that could make
+// one ready, and on the clock, because a round also becomes ready by time passing: someone
+// stops asking for work, or the wait for them runs out.
 func (a *App) settleReady(tx *Tx) {
-	s, t := tx.s, now()
-	for _, rd := range s.Rounds {
-		if rd.Status != "open" {
-			continue
-		}
-		var open []*Entry
-		// last is when the round became ready: the anchor's last grade, or the moment its
-		// last ungraded entry was settled without one. Volunteers are handed work until
-		// then, so the wait is counted from then.
-		last, graded := int64(0), true
-		for _, e := range s.inRound[rd.Idx] {
-			if e.Status != "open" {
-				last = max(last, e.SettledAt)
-				continue
-			}
-			r := anchorResult(s, e)
-			if r == nil {
-				graded = false
-				break
-			}
-			open = append(open, e)
-			last = max(last, r.ReceivedAt)
-		}
-		if !graded {
-			continue
-		}
-		// The round waits a while for volunteers who are at work on it, but only for those
-		// who have finished a job before: an account that has never reported a grade that
-		// agreed could otherwise hold every round back just by taking a job.
-		waiting := false
-		if t < last+int64(a.cfg.ReplicaWait.Seconds()) {
-			for _, c := range s.Claims {
-				if acct := s.Accounts[c.AccountID]; c.RoundIdx == rd.Idx && c.Kind == "grade" && c.live(t) && acct != nil && !acct.Anchor && acct.Agreed > 0 {
-					waiting = true
-					break
-				}
-			}
-		}
-		if waiting {
-			continue
-		}
-		// A volunteer the round waited for to the end, and who never reported, has let a job
-		// run out as surely as one whose lease ended.
-		for _, c := range s.Claims {
-			if acct := s.Accounts[c.AccountID]; c.RoundIdx == rd.Idx && c.Kind == "grade" && c.live(t) && acct != nil && !acct.Anchor && acct.Agreed > 0 {
-				c.Status, c.ExpiresAt = "lapsed", t
-				tx.saveClaim(c)
-			}
-		}
-		// Who had standing before this round: settling one entry must not change what a
-		// volunteer's grade of the next one is taken for.
-		standing := map[int64]bool{}
-		for id, acct := range s.Accounts {
-			standing[id] = acct.Agreed > 0
-		}
-		sort.Slice(open, func(i, j int) bool { return open[i].EditorID < open[j].EditorID })
-		for _, e := range open {
-			a.settleEntry(tx, e, standing)
-		}
+	for _, rd := range openRounds(tx.s) {
+		a.settleRound(tx, rd)
 	}
 	a.settleRounds(tx)
 }
 
-// abandonStuck settles, as not run, any entry that anchors have tried and failed to edit
-// maxEditAttempts times, or to grade maxGradeAttempts times. Without this one bundle or
-// one script that upsets the harness would hold its round open for ever, and no later
-// round could be drawn.
-func (a *App) abandonStuck(tx *Tx) {
-	t := now()
-	for _, st := range openEntryStates(tx.s, 0) {
-		e, why := st.Entry, ""
-		switch {
-		case e.EditedAt == 0 && !st.Editing && st.EditTries >= maxEditAttempts:
-			why = fmt.Sprintf("the anchor could not run this entry in %d attempts; the round does not count for it", maxEditAttempts)
-		case e.EditedAt != 0 && !st.Graded && !st.Grading && st.GradeTries >= maxGradeAttempts:
-			why = fmt.Sprintf("the anchor could not grade this entry's script in %d attempts; the round does not count for it", maxGradeAttempts)
-		default:
-			continue
+// settleRound settles a round's open entries, all at once, if the round is ready.
+func (a *App) settleRound(tx *Tx, rd *Round) {
+	s, t := tx.s, now()
+	wait := int64(a.cfg.ReplicaWait.Seconds())
+	j := a.newJudge(s)
+	states := j.states(rd)
+	// What nobody is there to do is given up, once the round has waited its while.
+	if t >= max(rd.ActiveAt, rd.DrawnAt)+wait {
+		// An entry nobody has run waits for somebody to come, unless other entries' scores
+		// are waiting behind it.
+		held := false
+		for _, st := range states {
+			held = held || j.settleable(st)
 		}
-		e.Void = true
-		// Volunteers may have graded the script the anchor could not. Their grades are
-		// published like any others; there is nothing to compare them with.
-		detail := &EntryDetail{}
-		for _, r := range tx.s.results(e.RoundIdx, e.EditorID) {
-			acct := tx.s.Accounts[r.AccountID]
-			if r.Verdict != "pending" || acct == nil || acct.Anchor {
-				continue
-			}
-			row := Replication{Handle: acct.Handle, Verdict: "no anchor grade", Valid: r.Valid, First: acct.Agreed == 0}
-			if r.Valid {
-				loss := r.Loss
-				row.Loss = &loss
-			}
-			detail.Replications = append(detail.Replications, row)
-			r.Verdict, r.Summary = "void", nil
-			tx.saveResult(r)
+		gave := false
+		for _, st := range states {
+			gave = a.giveUp(tx, j, st, held) || gave
 		}
-		a.settleInvalid(tx, e, why, detail)
-		tx.event("abandoned", map[string]any{"round": roundID(a.season.ID, e.RoundIdx), "editor": e.EditorID, "at": t})
+		if gave {
+			j = a.newJudge(s)
+			states = j.states(rd)
+		}
+	}
+	if len(states) == 0 || !j.ready(states) {
+		return
+	}
+	// The round has everything it is going to get, and no established account is at work
+	// on it. It waits a while for whoever else is, but only for those who have finished a
+	// job before: an account that has never reported a grade that agreed could otherwise
+	// hold every round back by taking a job. The while is counted from the last thing that
+	// happened in the round, or from when the job was taken if that was later: whoever is
+	// handed a job is given the time to do it.
+	var held []*Claim
+	for _, c := range s.Claims {
+		if c.RoundIdx == rd.Idx && c.live(t) && j.standing[c.AccountID] {
+			if t < max(rd.ActiveAt, rd.DrawnAt, c.ClaimedAt)+wait {
+				return
+			}
+			held = append(held, c)
+		}
+	}
+	// Whoever the round waited for to the end, and who never reported, has let a job run
+	// out as surely as one whose lease ended.
+	for _, c := range held {
+		c.Status, c.ExpiresAt = "lapsed", t
+		tx.saveClaim(c)
+	}
+	for _, st := range states {
+		a.settleEntry(tx, j, st)
 	}
 }
 
-// settleEntry makes an anchor-graded entry's score public and compares every volunteer's
-// grade of it with the anchor's. standing says which accounts had a grade that agreed
-// before the round settled.
-func (a *App) settleEntry(tx *Tx, e *Entry, standing map[int64]bool) {
-	s := tx.s
-	rd := s.Rounds[e.RoundIdx]
-	rep := anchorResult(s, e)
-	if rep == nil || e.Status != "open" {
-		return
-	}
-	baselines := map[int64]*Baseline{}
-	for _, b := range s.Baselines {
-		if b.RoundIdx == e.RoundIdx {
-			baselines[b.AccountID] = b
+// anyone reports whether somebody who is around could be handed a job on an entry that
+// would give it what a score needs: with a script, a grade of it that counts; without
+// one, a run.
+func (j *judge) anyone(st *entryState, sc *scriptState) bool {
+	for _, q := range j.active() {
+		if sc == nil {
+			if j.mayRun(st, q) {
+				return true
+			}
+		} else if q.est && j.mayGrade(st, sc, q.acct) && (q.acct.Anchor || !sc.wroteAlone(q.acct)) {
+			return true
 		}
 	}
-	tol := a.tolerance()
-	detail := &EntryDetail{Verifiers: []string{s.Accounts[rep.AccountID].Handle}, Audited: true}
-	if rep.Summary != nil {
-		detail.Script, detail.Hardware, detail.Train = rep.Summary.Script, rep.Summary.Hardware, rep.Summary.Train
+	return false
+}
+
+// vouched reports whether a run that wrote no script can be taken at its word. From an
+// organisers' machine it can. From a volunteer's it cannot, alone: one account could
+// otherwise say of any entry that it failed. A second person's run of the entry, whatever
+// it found, makes the score something two people answer for.
+func (j *judge) vouched(st *entryState, run *Run) bool {
+	by := j.s.Accounts[run.By]
+	return len(st.Runs) > 1 || (by != nil && by.Anchor)
+}
+
+// giveUp drops what nobody is there to check: a script that no established account has
+// graded, is grading, or could be handed; a failed run with nobody to run the entry a
+// second time; and, when the rest of the round is being held up by it, an entry with no
+// run and nobody to give it one. An entry left with nothing is void for the round, and
+// that is not held against it. Reports whether it changed anything.
+func (a *App) giveUp(tx *Tx, j *judge, st *entryState, held bool) bool {
+	e := st.Entry
+	if len(st.Runs) == 0 {
+		if held && len(st.LiveEdits) == 0 && !j.anyone(st, nil) {
+			a.voidEntry(tx, e, "no verifier was there to run this entry; the round does not count for it", true)
+			return true
+		}
+		return false
 	}
-	// An entry that is the unedited corpus itself has the round's baseline for its loss, and
-	// every grader reports the baseline with every grade. Agreeing about it shows nothing
-	// that was not already shown, so it earns no standing.
-	// Nor does agreeing that a script is invalid: that is decided before anything is trained.
-	plain := !rep.Valid || (rd.BaselineLoss != nil && math.Abs(rep.Loss-*rd.BaselineLoss) < 1e-9)
-	type differing struct {
-		r    *Result
-		acct *Account
+	gave := false
+	for _, sc := range st.Scripts {
+		counting := false
+		for _, c := range sc.Live {
+			counting = counting || j.est[c.AccountID]
+		}
+		if !j.weigh(sc).known && !counting && !j.anyone(st, sc) {
+			a.dropScript(tx, j, st, sc, "nobody else was there to grade it")
+			gave = true
+		}
 	}
-	var differ []differing
-	for _, r := range s.results(e.RoundIdx, e.EditorID) {
-		acct := s.Accounts[r.AccountID]
-		if r.Verdict != "pending" || acct == nil {
+	for _, run := range st.Runs {
+		if run.Script == "" && !j.vouched(st, run) && len(st.LiveEdits) == 0 && !j.anyone(st, nil) {
+			run.Dropped, run.Reason = true, "nobody else was there to run the entry a second time"
+			tx.saveEntry(e)
+			gave = true
+		}
+	}
+	if gave && !counts(e) {
+		a.voidEntry(tx, e, "no second verifier was there to check this entry's run; the round does not count for it", true)
+	}
+	return gave
+}
+
+// counts reports whether an entry has a run that has not been dropped.
+func counts(e *Entry) bool {
+	for _, run := range e.Runs {
+		if !run.Dropped {
+			return true
+		}
+	}
+	return false
+}
+
+// dropScript gives up every run that wrote a script nobody established could grade. What
+// others made of the script is published with the runs, with nothing to compare it with.
+func (a *App) dropScript(tx *Tx, j *judge, st *entryState, sc *scriptState, why string) {
+	var grades []Grade
+	for _, r := range sc.Results {
+		g := j.view(sc, r)
+		if g == nil || r.Verdict != "pending" {
 			continue
 		}
-		if r == rep || acct.Anchor {
-			r.Verdict, r.Summary = "agreed", nil
+		grades = append(grades, j.publish(g, "no established grade", false))
+		r.Verdict, r.Summary = "void", nil
+		tx.saveResult(r)
+	}
+	for _, c := range sc.Live {
+		c.Status = "expired" // nothing is held against whoever was at work on it
+		tx.saveClaim(c)
+	}
+	for _, run := range st.Entry.Runs {
+		if !run.Dropped && run.Script == sc.SHA {
+			run.Dropped, run.Reason, run.Grades = true, why, grades
+		}
+	}
+	tx.saveEntry(st.Entry)
+	a.moved(tx, st.Round)
+	tx.event("dropped", map[string]any{"round": roundID(a.season.ID, st.Round.Idx), "editor": st.Entry.EditorID, "run": sc.Run})
+}
+
+// voidEntry settles an entry as not run: the round does not count for it. unattended says
+// that nobody was there to do it, which says nothing about the entry.
+func (a *App) voidEntry(tx *Tx, e *Entry, why string, unattended bool) {
+	for _, r := range tx.s.results(e.RoundIdx, e.EditorID) {
+		if r.Verdict == "pending" {
+			r.Verdict, r.Summary = "void", nil
 			tx.saveResult(r)
-			continue
 		}
-		// Every volunteer's grade is published, whatever it says and whoever sent it.
-		row := Replication{Handle: acct.Handle, Valid: r.Valid, First: !standing[acct.ID]}
-		if r.Valid {
-			loss := r.Loss
-			row.Loss = &loss
-			if rep.Valid {
-				d := places5(r.Loss - rep.Loss)
-				row.Diff = &d
+	}
+	e.Void, e.Unattended, e.NRuns = true, unattended, 0
+	a.settleInvalid(tx, e, why, &EntryDetail{})
+	a.moved(tx, tx.s.Rounds[e.RoundIdx])
+	tx.event("abandoned", map[string]any{"round": roundID(a.season.ID, e.RoundIdx), "editor": e.EditorID, "at": now()})
+}
+
+// abandonStuck gives up what the verifiers have tried and failed to do: an entry that
+// maxEditAttempts edit jobs could not run, a script that maxGradeAttempts grade jobs by
+// established accounts could not grade. Without this one bundle or one script that upsets
+// the harness would hold its round open for ever, and no later round could be drawn.
+func (a *App) abandonStuck(tx *Tx) {
+	for _, rd := range openRounds(tx.s) {
+		j := a.newJudge(tx.s)
+		for _, st := range j.states(rd) {
+			e := st.Entry
+			if len(e.Runs) == 0 {
+				if len(st.LiveEdits) == 0 && st.EditFailed >= maxEditAttempts {
+					a.voidEntry(tx, e, fmt.Sprintf("the verifiers could not run this entry in %d attempts; the round does not count for it", maxEditAttempts), false)
+				}
+				continue
+			}
+			gave := false
+			for _, sc := range st.Scripts {
+				counting := false
+				for _, c := range sc.Live {
+					counting = counting || j.est[c.AccountID]
+				}
+				if !j.weigh(sc).known && !counting && sc.Tries >= maxGradeAttempts {
+					a.dropScript(tx, j, st, sc, fmt.Sprintf("the verifiers could not grade this script in %d attempts", maxGradeAttempts))
+					gave = true
+				}
+			}
+			if gave && !counts(e) {
+				a.voidEntry(tx, e, fmt.Sprintf("the verifiers could not grade this entry's script in %d attempts; the round does not count for it", maxGradeAttempts), false)
 			}
 		}
-		b := baselines[r.AccountID]
-		if b != nil && rd.BaselineLoss != nil {
-			d := places5(b.Loss - *rd.BaselineLoss)
-			row.BaseDiff = &d
+	}
+}
+
+// publish is a grade as the round's page shows it.
+func (j *judge) publish(g *gradeView, verdict string, counted bool) Grade {
+	row := Grade{Handle: g.acct.Handle, Verdict: verdict, Valid: g.r.Valid, Self: g.self, Counted: counted, Established: g.est,
+		First: !j.standing[g.acct.ID] && !g.acct.Anchor}
+	if g.r.Valid {
+		loss := g.r.Loss
+		row.Loss = &loss
+		if g.base {
+			gain := places5(g.gain)
+			row.Gain = &gain
 		}
+	}
+	return row
+}
+
+// graded is what settling a script found.
+type graded struct {
+	v        *verdict
+	grades   []Grade        // every grade of it, as published
+	best     *Result        // of the grades that decided it, the one nearest their median
+	summary  *ResultSummary // and what that one said about its training
+	reason   string         // why it is invalid, if it is
+	outliers int
+	names    [2][]string // whose grades decided it; who else agreed
+}
+
+// settleScript compares every grade of a script with what the established accounts'
+// grades of it come to, and gives each grader what that earns.
+func (a *App) settleScript(tx *Tx, j *judge, st *entryState, sc *scriptState) *graded {
+	rd, tol := st.Round, a.tolerance()
+	v := j.weigh(sc)
+	out := &graded{v: v}
+	decides := map[*Result]bool{}
+	for _, g := range v.counted {
+		decides[g.r] = true
+		if g.r.Valid && v.valid && (out.best == nil || math.Abs(g.gain-v.gain) < math.Abs(j.view(sc, out.best).gain-v.gain)-1e-12) {
+			out.best, out.summary = g.r, g.r.Summary
+		}
+		if !g.r.Valid && !v.valid && out.reason == "" {
+			out.reason = g.r.InvalidReason
+		}
+	}
+	if !v.valid && out.reason == "" {
+		out.reason = "the script is invalid"
+	}
+	// A script that is the unedited corpus itself has the round's baseline for its loss, and
+	// every grader reports the baseline with every grade. Agreeing about it shows nothing
+	// that was not already shown, so it earns no standing. Nor does agreeing that a script
+	// is invalid: that is decided before anything is trained.
+	plain := !v.valid || math.Abs(v.gain) < 1e-9
+	ref := map[string]any{"round": roundID(a.season.ID, rd.Idx), "editor": st.Entry.EditorID}
+	for _, r := range sc.Results {
+		g := j.view(sc, r)
+		if g == nil || r.Verdict != "pending" {
+			continue
+		}
+		shown := "agreed"
+		b := j.s.Baselines[baselineKey(r.RoundIdx, r.AccountID)]
 		switch {
-		case r.CorpusSHA != rep.CorpusSHA || r.ExamSHA != rep.ExamSHA:
-			// It graded different data. A setup problem, and no evidence about this entry.
-			r.Verdict, row.Verdict = "void", "other data"
-		case b == nil || rd.BaselineLoss == nil || !within(b.Loss-*rd.BaselineLoss, tol.Baseline):
+		case decides[r] && len(v.counted) == 1:
+			// It is the script's gain, with nothing to compare it with: shown as agreed, and
+			// not counted among the grades that did agree with somebody's.
+			r.Verdict = "counted"
+			g.acct.GPUSeconds += r.Seconds
+		case decides[r] && v.tie:
+			// Two established accounts, two answers, and nobody to say which is right.
+			r.Verdict, shown = "disputed", "disputed"
+			g.acct.GPUSeconds += r.Seconds
+		case !decides[r] && (r.CorpusSHA != rd.CorpusSHA || r.ExamSHA != rd.ExamSHA):
+			// It graded different data. A setup problem, and no evidence about this script.
+			r.Verdict, shown = "void", "other data"
+		case !decides[r] && (b == nil || rd.BaselineLoss == nil || !within(b.Loss-*rd.BaselineLoss, tol.Baseline)):
 			// Its arithmetic differs on the unedited corpus too.
-			r.Verdict, row.Verdict = "void", "baseline differs"
-		case a.agree(rep, r):
-			r.Verdict, row.Verdict = "agreed", "agreed"
+			r.Verdict, shown = "void", "baseline differs"
+		case j.agrees(g, v):
+			r.Verdict = "agreed"
 			if plain {
 				r.Verdict = "same" // agreed, and counted for nothing
-			} else {
-				acct.Agreed++
-				acct.Streak++
+			} else if !g.acct.Anchor {
+				g.acct.Agreed++
+				g.acct.Streak++
 			}
-			acct.GPUSeconds += r.Seconds
-			tx.saveAccount(acct)
-			detail.Verifiers = append(detail.Verifiers, acct.Handle)
+			g.acct.GPUSeconds += r.Seconds
 		default:
 			// Same script, same corpus, same code, same baseline: a real difference.
-			r.Verdict, row.Verdict = "outlier", "differs"
-			detail.Disputed++
-			differ = append(differ, differing{r, acct})
-			tx.event("outlier", map[string]any{"round": roundID(a.season.ID, e.RoundIdx), "editor": e.EditorID, "verifier": acct.Handle, "difference": row.Diff})
+			r.Verdict, shown = "outlier", "outlier"
+			out.outliers++
+			if !g.acct.Anchor {
+				g.acct.Streak = 0
+				g.acct.Strikes++
+				g.acct.LastStrikeAt = now()
+			}
+			tx.event("outlier", map[string]any{"round": ref["round"], "editor": ref["editor"], "verifier": g.acct.Handle})
 		}
-		detail.Replications = append(detail.Replications, row)
+		tx.saveAccount(g.acct)
+		switch {
+		case decides[r]:
+			out.names[0] = append(out.names[0], g.acct.Handle)
+		case shown == "agreed":
+			out.names[1] = append(out.names[1], g.acct.Handle)
+		}
+		out.grades = append(out.grades, j.publish(g, shown, decides[r]))
 		r.Summary = nil // it has done its job; the entry keeps the one that counts
 		tx.saveResult(r)
 	}
-	// A volunteer who differs from the anchor alone has a strike against it. Two who differ
-	// from the anchor and agree with each other do not: then it is the anchor's grade that
-	// is in doubt, and the entry says so.
-	backed := make([]bool, len(differ))
-	for i, v := range differ {
-		for j, w := range differ {
-			// Both must have agreed with an anchor before, or a second key would be all it
-			// took to stand behind an invented number.
-			same := v.acct.GithubID != 0 && v.acct.GithubID == w.acct.GithubID
-			backed[i] = backed[i] || (i != j && !same && standing[v.acct.ID] && standing[w.acct.ID] && a.agree(v.r, w.r))
-		}
+	// The grades that decide it first, then everyone else's, each in the order they came.
+	sort.SliceStable(out.grades, func(x, y int) bool { return out.grades[x].Counted && !out.grades[y].Counted })
+	if v.tie {
+		tx.event("disputed", ref)
 	}
-	for i, v := range differ {
-		if backed[i] {
-			detail.DisputedTogether = true
+	return out
+}
+
+// settleEntry makes an entry's score public: the median of its runs, each run the median of
+// the established grades of the script it wrote.
+func (a *App) settleEntry(tx *Tx, j *judge, st *entryState) {
+	e, rd, tol := st.Entry, st.Round, a.tolerance()
+	if e.Status != "open" {
+		return
+	}
+	scripts := map[string]*graded{}
+	for _, sc := range st.Scripts {
+		scripts[sc.SHA] = a.settleScript(tx, j, st, sc)
+	}
+	detail := &EntryDetail{Verifiers: []string{}, Audited: len(st.Scripts) > 0}
+	var runs []*Run
+	var gains []float64
+	valid, self := 0, false
+	for _, run := range e.Runs {
+		if run.Dropped {
 			continue
 		}
-		// Whoever else found what such a pair found is not struck for it either. It adds
-		// nothing to their case, and takes nothing from the volunteer.
-		cleared := false
-		for j, w := range differ {
-			cleared = cleared || (backed[j] && a.agree(v.r, w.r))
+		run.Valid, run.Gain, run.Reason = false, 0, ""
+		if g := scripts[run.Script]; g == nil {
+			if run.Edit != nil {
+				run.Reason = run.Edit.Reason
+			}
+			if run.Reason == "" {
+				status := "no report"
+				if run.Edit != nil {
+					status = run.Edit.Status
+				}
+				run.Reason = fmt.Sprintf("the editor produced no script (%s)", status)
+			}
+		} else {
+			run.Grades, run.Self = g.grades, g.v.self
+			self = self || g.v.self
+			if g.v.valid {
+				run.Valid, run.Gain = true, places5(g.v.gain)
+				valid++
+			} else {
+				run.Reason = clip(g.reason, 300)
+			}
 		}
-		if cleared {
-			continue
+		runs = append(runs, run)
+		gains = append(gains, run.Gain)
+	}
+	if len(runs) == 0 { // not reached: a round is settled only when every entry has a run
+		a.voidEntry(tx, e, "no verifier ran this entry; the round does not count for it", true)
+		return
+	}
+	// The score. With three runs of which two failed, the editor fails more often than
+	// not, and its score is not a measurement.
+	e.Gain, e.Valid = places5(median(gains)), valid > 0 && 2*valid >= len(runs)
+	if !e.Valid {
+		e.Gain = 0
+	}
+	// The run the score is nearest to stands for the entry wherever one script is wanted.
+	var rep *Run
+	for _, run := range runs {
+		if run.Valid == e.Valid && (rep == nil || math.Abs(run.Gain-e.Gain) < math.Abs(rep.Gain-e.Gain)-1e-12) {
+			rep = run
 		}
-		v.acct.Streak = 0
-		v.acct.Strikes++
-		v.acct.LastStrikeAt = now()
-		tx.saveAccount(v.acct)
 	}
-	if detail.DisputedTogether {
-		tx.event("disputed", map[string]any{"round": roundID(a.season.ID, e.RoundIdx), "editor": e.EditorID})
+	if rep == nil {
+		rep = runs[0]
 	}
-	e.Status, e.Valid, e.Detail, e.NResults, e.SettledAt = "settled", rep.Valid, detail, len(detail.Verifiers), now()
+	// Confirmed: two people's runs agree, the score is theirs, and no run rests on a grade
+	// by its own runner.
+	sorted := append([]*Run(nil), runs...)
+	sort.SliceStable(sorted, func(x, y int) bool { return sorted[x].Gain < sorted[y].Gain })
+	middle := sorted[len(sorted)/2] // of three; with two, the score is between them
+	pair := false
+	for x, p := range runs {
+		for _, q := range runs[x+1:] {
+			same := p.Valid == q.Valid && (!p.Valid || within(p.Gain-q.Gain, tol.Run))
+			pair = pair || (same && (len(runs) == 2 || p == middle || q == middle))
+		}
+	}
+	e.NRuns, e.Confirmed, e.RunsDiffer = len(runs), pair && !self, len(runs) > 1 && !pair
+	e.Script, e.ScriptSize, e.Edit, e.EditedAt, e.EditedBy = rep.Script, rep.ScriptSize, rep.Edit, rep.At, rep.By
 	e.Loss, e.BySource, e.Reason = nil, nil, ""
-	if rep.Valid {
-		loss := rep.Loss
-		e.Loss, e.BySource = &loss, rep.BySource
+	if e.Valid {
+		if g := scripts[rep.Script]; g != nil && g.best != nil {
+			e.BySource = g.best.BySource
+			if g.summary != nil {
+				detail.Script, detail.Hardware, detail.Train = g.summary.Script, g.summary.Hardware, g.summary.Train
+			}
+		}
+		if rd.BaselineLoss != nil {
+			loss := places5(*rd.BaselineLoss - e.Gain)
+			e.Loss = &loss
+		}
 	} else {
-		e.Reason = rep.InvalidReason
+		for _, run := range runs {
+			if !run.Valid {
+				e.Reason = run.Reason
+				break
+			}
+		}
 	}
+	// Who graded it: those whose grades are the score, then everyone else who agreed.
+	named := map[string]bool{}
+	for _, k := range []int{0, 1} {
+		for _, sc := range st.Scripts {
+			for _, h := range scripts[sc.SHA].names[k] {
+				if !named[h] {
+					named[h] = true
+					detail.Verifiers = append(detail.Verifiers, h)
+				}
+			}
+		}
+	}
+	for _, sc := range st.Scripts {
+		detail.Disputed += scripts[sc.SHA].outliers
+		detail.DisputedTogether = detail.DisputedTogether || scripts[sc.SHA].v.tie
+	}
+	e.Status, e.Detail, e.NResults, e.SettledAt = "settled", detail, len(detail.Verifiers), now()
 	tx.saveEntry(e)
 	expireClaims(tx, e)
-	a.regain(tx, rd)
 	if !e.Valid {
 		a.afterInvalid(tx, e.EditorID)
 	}
 }
 
-// regain recomputes every settled entry's gain in a round from the round's current baseline.
+// regain recomputes every settled entry's loss in a round from the round's current
+// baseline. An entry's gain is what was measured (each grader's own unedited loss minus
+// its loss on the script); the loss shown beside it is the round's unedited loss less that.
 func (a *App) regain(tx *Tx, rd *Round) {
 	for _, e := range tx.s.inRound[rd.Idx] {
-		if e.Status != "settled" {
+		if e.Status != "settled" || !e.Valid || rd.BaselineLoss == nil {
 			continue
 		}
-		gain := 0.0
-		if e.Valid && e.Loss != nil && rd.BaselineLoss != nil {
-			// Losses are reported to five places; so is their difference (not 0.9124699999999999).
-			gain = math.Round((*rd.BaselineLoss-*e.Loss)*1e5) / 1e5
+		if len(e.Runs) == 0 {
+			// Settled before harness 0.3.0: its loss was measured, by the one machine that
+			// graded it, and its gain follows from that.
+			if e.Loss != nil {
+				if gain := places5(*rd.BaselineLoss - *e.Loss); gain != e.Gain {
+					e.Gain = gain
+					tx.saveEntry(e)
+				}
+			}
+			continue
 		}
-		if gain != e.Gain {
-			e.Gain = gain
+		if loss := places5(*rd.BaselineLoss - e.Gain); e.Loss == nil || *e.Loss != loss {
+			e.Loss = &loss
 			tx.saveEntry(e)
+		}
+	}
+}
+
+// carryOver brings an entry that was half-way through a round when the server learned
+// about runs into the new shape: its one edit becomes its first run, and the grades of
+// its script name the script.
+func (a *App) carryOver(tx *Tx) {
+	for _, rd := range openRounds(tx.s) {
+		for _, e := range tx.s.inRound[rd.Idx] {
+			if e.Status != "open" || e.EditedAt == 0 || len(e.Runs) > 0 {
+				continue
+			}
+			script := e.Script
+			e.Runs = []*Run{{N: 1, By: e.EditedBy, Script: e.Script, ScriptSize: e.ScriptSize, Edit: e.Edit, At: e.EditedAt}}
+			e.Script, e.ScriptSize, e.Edit, e.EditedAt, e.EditedBy = "", 0, nil, 0, 0
+			tx.saveEntry(e)
+			for _, r := range tx.s.results(e.RoundIdx, e.EditorID) {
+				if r.Script == "" {
+					r.Script = script
+					tx.saveResult(r)
+				}
+			}
+			for _, c := range tx.s.Claims {
+				if c.RoundIdx == e.RoundIdx && c.EditorID == e.EditorID && c.Kind == "grade" && c.Script == "" {
+					c.Script = script
+					tx.saveClaim(c)
+				}
+			}
 		}
 	}
 }

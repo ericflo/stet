@@ -233,7 +233,7 @@ def pack(project: Project) -> tuple[bytes, str]:
             info.uname = info.gname = ""
             tar.addfile(info, io.BytesIO(data))
     # The limit is on the tar, headers and padding included: that is what the server and
-    # an anchor measure when they unpack it.
+    # a verifier measure when they unpack it.
     if buf.tell() > MAX_UNPACKED_BYTES:
         raise too_big
     blob = zstandard.ZstdCompressor(level=10).compress(buf.getvalue())
@@ -305,7 +305,7 @@ def unpack(blob: bytes, dest: Path) -> list[str]:
                     raise ProjectError(f"the bundle contains an entry that is not a plain file: {info.name[:80]!r}")
                 # One name, one file, written one way. Of two files with a name the later
                 # would be the one that runs, and the site shows only the first: what
-                # everyone reads and what the anchor runs must be the same bytes.
+                # everyone reads and what a verifier runs must be the same bytes.
                 if posixpath.normpath(info.name) != info.name or info.name in seen:
                     raise ProjectError(f"the bundle names a file twice, or by a roundabout path: {info.name[:80]!r}")
                 seen.add(info.name)

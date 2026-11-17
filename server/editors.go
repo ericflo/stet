@@ -75,8 +75,10 @@ type Submission struct {
 }
 
 // mayEnter says whether an account may submit, and if not, what it should do about it.
-// Running an entry costs an anchor's time, which is the scarcest thing the competition
-// has, so entries need an identity that is not free to make.
+// Running an entry costs volunteers' GPU time, which is the scarcest thing the competition
+// has, so entries need an identity that is not free to make. The same test stands between
+// an account and being established: whoever is handed entrants' code, and whose grades
+// move scores, is one person too.
 func (a *App) mayEnter(acct *Account) error {
 	if acct.Anchor || !a.cfg.RequireGithub {
 		return nil
@@ -124,7 +126,7 @@ func (a *App) submit(ctx context.Context, acctID int64, blob []byte) (*Submissio
 			}
 		}
 		if recent >= maxSubmissionsPerDay && !acct.Anchor {
-			return fail(429, "that is %d entries in a day. Running one takes an organiser's machine about a quarter of an hour, three rounds over; use `stet run` to iterate and come back tomorrow", recent)
+			return fail(429, "that is %d entries in a day. Each one is run and graded on volunteers' machines, about half an hour of GPU time a round, three rounds over; use `stet run` to iterate and come back tomorrow", recent)
 		}
 		return nil
 	}
@@ -171,7 +173,7 @@ func (a *App) submit(ctx context.Context, acctID int64, blob []byte) (*Submissio
 				version = e.Version + 1
 			}
 		}
-		if !acct.Anchor { // anchors seed the board with reference editors and may run several at once
+		if !acct.Anchor { // the organisers seed the board with reference editors and may have several in play at once
 			for _, e := range s.ownedBy[acctID] {
 				if e.Status == "queued" || e.Status == "running" {
 					// Open entries of a replaced editor still settle: verifiers may already be at work on them.

@@ -44,7 +44,7 @@
     <div><span class="eyebrow">Its own words</span><div class="v">{{pct1 .Script.InkFrac}}<small>of tokens</small></div></div>
     {{else}}
     <div><span class="eyebrow">Gain</span><div class="v">{{gain .Gain}}</div></div>
-    <div><span class="eyebrow">Replicated by</span><div class="v">{{.Replicas}}<small>{{plural .Replicas "volunteer" "volunteers"}}{{if .Disputed}}, {{.Disputed}} differed{{end}}</small></div></div>
+    <div><span class="eyebrow">Runs</span><div class="v">{{.NRuns}}<small>{{if .Confirmed}}confirmed{{else if .RunsDiffer}}differed{{else if eq .NRuns 1}}run once{{end}}{{if .Disputed}}, {{.Disputed}} {{plural .Disputed "grade" "grades"}} differed{{end}}</small></div></div>
     {{end}}
   </div>
   <div class="grid2">
@@ -57,7 +57,7 @@
   <div class="table-wrap">
     {{if $d.Results}}
     <table>
-      <thead><tr><th>Round</th><th>Status</th><th class="r">Loss</th><th class="r">Unedited</th><th class="r">Gain</th><th class="r hide-s">Edit took</th><th class="hide-s">Script</th><th class="hide-s" title="The anchor that set the score, then the volunteers whose own grades agreed with it">Graded by</th></tr></thead>
+      <thead><tr><th>Round</th><th>Status</th><th class="r">Loss</th><th class="r">Unedited</th><th class="r">Gain</th><th class="hide-s" title="How many verifiers ran it, each on their own machine, and whether their runs agreed">Runs</th><th class="r hide-s" title="In the run its score is nearest to">Edit took</th><th class="hide-s" title="The script of the run its score is nearest to">Script</th><th class="hide-s" title="The established verifiers whose grades are the score, then everyone else whose own grades agreed">Graded by</th></tr></thead>
       <tbody>
         {{range $d.Results}}<tr>
           <td><a class="num" href="/rounds/{{.Round}}">{{.Round}}</a></td>
@@ -73,9 +73,10 @@
           {{else}}
             <td><span class="stage {{.Stage}}">{{.Stage}}</span></td><td class="r muted">sealed</td><td class="r muted">·</td><td class="r muted">·</td>
           {{end}}
+          <td class="hide-s" style="font-size:14.5px">{{if and .Settled .NRuns}}<a class="num" href="/rounds/{{.Round}}#runs">{{.NRuns}}</a> {{if .Confirmed}}<span class="stage settled">confirmed</span>{{else if .RunsDiffer}}<span class="tag red">runs differed</span>{{else if eq .NRuns 1}}<span class="muted">run once</span>{{end}}{{if .Own}} <span class="tag" title="Nobody else was there to grade a script, so the machine that ran the editor graded it too">graded by its own runner</span>{{end}}{{else}}<span class="muted">—</span>{{end}}</td>
           <td class="r num hide-s">{{with .Edit}}{{f1 .Seconds}}s{{else}}—{{end}}</td>
           <td class="hide-s">{{if .ScriptSHA}}<a class="num" href="/api/v1/scripts/{{.ScriptSHA}}" title="Download the edit script ({{bytes .ScriptSize}} unpacked)">{{tiny .ScriptSHA}}</a>{{else}}<span class="muted">—</span>{{end}}</td>
-          <td class="hide-s muted" style="font-size:14.5px">{{if .Verifiers}}{{join .Verifiers ", "}}{{if .Disputed}} <a class="tag red" href="/rounds/{{.Round}}#replications" title="Volunteers whose grade of this script differed from the anchor's by more than the tolerance. Their numbers are on the round's page.">{{.Disputed}} differed{{if .Together}}, together{{end}}</a>{{end}}{{else}}—{{end}}</td>
+          <td class="hide-s muted" style="font-size:14.5px">{{if .Verifiers}}{{join .Verifiers ", "}}{{if .Together}} <a class="tag red" href="/rounds/{{.Round}}#grades" title="Two established verifiers measured different gains for one of its scripts, and nobody was there to say which was right">disputed</a>{{end}}{{if .Disputed}} <a class="tag red" href="/rounds/{{.Round}}#grades" title="Graders whose grade of one of its scripts was further from the script's gain than the tolerance. Their numbers are on the round's page.">{{.Disputed}} differed</a>{{end}}{{else}}—{{end}}</td>
         </tr>{{end}}
       </tbody>
     </table>
@@ -96,6 +97,25 @@
 <span class="muted">… the rest is in the bundle.</span>{{end}}</pre>{{end}}
   </div>
   <p style="margin-top:12px"><a class="pill" href="/api/v1/editors/{{$e.ID}}/bundle">download bundle (.tar.zst)</a></p>
+
+  {{if $e.Assets}}
+  <h2 id="assets">Files it fetches</h2>
+  <p class="muted" style="font-size:16px;margin-top:-8px">Too large for the bundle, so named in it by address and hash: {{bytes $e.AssetBytes}} in {{len $e.Assets}} {{plural (len $e.Assets) "file" "files"}}. Every verifier downloads each one and checks it against its sha256 before the editor runs, and the editor still has no network.</p>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Path</th><th class="r">Size</th><th class="hide-s">sha256</th><th>From</th></tr></thead>
+      <tbody>
+        {{range $e.Assets}}<tr>
+          <td class="num">{{.Path}}</td>
+          <td class="r num">{{bytes .Size}}</td>
+          <td class="hide-s num" title="{{.SHA256}}">{{short .SHA256}}</td>
+          <td style="font-size:14.5px;word-break:break-all"><a href="{{.URL}}" rel="nofollow noopener">{{.URL}}</a></td>
+        </tr>{{end}}
+        <tr><td class="muted">total</td><td class="r num">{{bytes $e.AssetBytes}}</td><td class="hide-s"></td><td></td></tr>
+      </tbody>
+    </table>
+  </div>
+  {{end}}
 
   {{if or (gt (len $d.Versions) 1) $d.Forks}}
   <h2>Lineage</h2>
