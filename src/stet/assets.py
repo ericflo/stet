@@ -25,6 +25,7 @@ server when an entry is submitted (server/bundle.go); keep the two in step.
 
 from __future__ import annotations
 
+import errno
 import fnmatch
 import json
 import os
@@ -178,8 +179,11 @@ def fetch(assets: list[Asset], quiet: bool = False, verify: bool = False) -> Non
     the leaderboard does: a copy that has changed on disk since it was fetched would make
     this machine's run of an editor differ from everyone else's, and nobody could say why.
     """
-    from .data import FetchError, Mismatch, TooBig, fetch
+    from .data import FetchError, Mismatch, TooBig, fetch, sweep_stale
 
+    # What a verifier killed in the middle of a download left behind: up to 4 GiB each,
+    # which nothing else would ever clear or count against the cache's limit.
+    sweep_stale(cache(), "*.part*")
     for a in assets:
         dest = cached(a)
         if dest.exists():
@@ -199,6 +203,8 @@ def fetch(assets: list[Asset], quiet: bool = False, verify: bool = False) -> Non
                 raise Unavailable(f"the asset {a.path} is not the bytes its entry names") from None
             raise
         except OSError as e:
+            if e.errno in (errno.ENOSPC, errno.EDQUOT, errno.EROFS):
+                raise  # this machine's disk, not the host's fault: waiting will not help
             raise FetchError(f"could not fetch the asset {a.path}: {e}") from None
         if dest.stat().st_size != a.size:
             dest.unlink(missing_ok=True)

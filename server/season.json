@@ -149,7 +149,7 @@
  "grade_devices": [
   "cuda"
  ],
- "harness": "0.3.2",
+ "harness": "0.3.3",
  "heldout_exam_sha256": "c1011b1b09492b7e8a931580ffe5da968472c34269cf886b1868d9f103c69549",
  "id": "s0",
  "ink_frac": 0.001,

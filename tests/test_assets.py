@@ -1,6 +1,8 @@
 """Model weights by reference: what an entry may name, and how a machine comes to hold it."""
 
 import hashlib
+import os
+import time
 import tomllib
 
 import pytest
@@ -321,3 +323,57 @@ def test_small_files_are_hashed_as_they_arrive_and_kept(monkeypatch):
     out = assets.fill_hashes([big, small], quiet=True)
     assert out[0] == big and out[1].sha256 == hashlib.sha256(blob).hexdigest() and out[1].size == len(blob)
     assert assets.cached(out[1]).read_bytes() == blob and not [p for p in assets.cache().iterdir() if p.name.startswith(".new")]
+
+
+def test_a_full_disk_is_this_machines_trouble_not_the_networks(monkeypatch):
+    """A download that fails because the disk is full will fail the same way in a minute.
+    Called the network's fault, the verifier would hold the job, and the round, for half
+    an hour, and never notice that the trouble is its own."""
+    import errno
+
+    from stet import data
+
+    a = Asset("smol/model", URL, SHA, 1000)
+
+    def full(urls, sha256, dest, label="", quiet=False, max_bytes=0, gzipped=False):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(data, "fetch", full)
+    with pytest.raises(OSError) as e:
+        assets.fetch([a], quiet=True)
+    assert not isinstance(e.value, data.FetchError) and e.value.errno == errno.ENOSPC
+
+    def dropped(urls, sha256, dest, label="", quiet=False, max_bytes=0, gzipped=False):
+        raise ConnectionResetError(errno.ECONNRESET, "Connection reset by peer")
+
+    monkeypatch.setattr(data, "fetch", dropped)  # the network's, as before
+    with pytest.raises(data.FetchError):
+        assets.fetch([a], quiet=True)
+
+
+def test_what_a_killed_download_left_is_cleared_away(monkeypatch):
+    """Killed outright in the middle of a 4 GiB file, a verifier leaves the part behind.
+    Nothing else would remove it, or count it against the cache's limit."""
+    from stet import data
+
+    blob = b"weights" * 100
+    a = blob_asset("smol/model.safetensors", blob)
+    d = assets.cache()
+    d.mkdir(parents=True, exist_ok=True)
+    dead = d / f"{'ab' * 32}.part999999999"  # no process has this id
+    mine = d / f"{'cd' * 32}.part{os.getpid()}"  # a download this process is making now
+    fresh = d / f"{'ef' * 32}.part999999998"  # written a moment ago: its process may be starting
+    for p in (dead, mine, fresh):
+        p.write_bytes(b"half a model")
+    old = time.time() - 2 * data.STALE_AFTER
+    os.utime(dead, (old, old))
+    os.utime(mine, (old, old))
+
+    def fetch(urls, sha256, dest, label="", quiet=False, max_bytes=0, gzipped=False):
+        dest.write_bytes(blob)
+        return dest
+
+    monkeypatch.setattr(data, "fetch", fetch)
+    assets.fetch([a], quiet=True)
+    assert not dead.exists() and mine.exists() and fresh.exists()
+    assert assets.cached(a).read_bytes() == blob
