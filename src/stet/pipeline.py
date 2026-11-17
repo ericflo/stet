@@ -83,6 +83,7 @@ def edit_round(
     assets=(),
     time_limit: float | None = None,
     verify_assets: bool = False,
+    gpu: int = 0,
 ) -> EditRun:
     """Run an editor on a round's corpus. Never raises on editor failure.
 
@@ -107,7 +108,7 @@ def edit_round(
         assets_.prune(keep=list(assets))
     limit = float(scale.edit_seconds if time_limit is None else time_limit)
     log(f"editing (limit {limit:.0f}s, sandbox: {sandbox}) ...")
-    edit = run_editor(bundle, entry, corpus, rnd, scale, work, limit, sandbox=sandbox, echo=echo, limits=limits, assets=assets)
+    edit = run_editor(bundle, entry, corpus, rnd, scale, work, limit, sandbox=sandbox, echo=echo, limits=limits, assets=assets, gpu=gpu)
     log(f"editor finished: {edit.status} in {edit.seconds:.1f}s")
     return edit
 

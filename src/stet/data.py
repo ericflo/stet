@@ -525,6 +525,12 @@ def build_corpus(rnd: Round, scale: Scale, dest: Path, quiet: bool = False) -> P
             "decontam": dict(season.raw["decontam"]),
         }
         (tmp / "meta.json").write_text(json.dumps(meta, indent=1))
+        if (dest / "meta.json").exists():
+            # Another verifier on this machine built the same round while this one did, and
+            # an editor may already be reading its copy. Use that one: replacing it would
+            # empty the directory under a program that has it open.
+            shutil.rmtree(tmp, ignore_errors=True)
+            return
         shutil.rmtree(dest, ignore_errors=True)
         tmp.replace(dest)
         if rnd.kind == "official" and kind == "cc-wet" and os.environ.get("STET_KEEP_DOWNLOADS") != "1":
@@ -665,6 +671,33 @@ def exam_digest(exam: dict[str, list[dict]]) -> str:
 
 def round_dir(rnd: Round, scale: Scale) -> Path:
     return cache_dir() / "rounds" / rnd.id / scale.name
+
+
+SET_ASIDE_FOR = 3 * 3600  # seconds a set-aside round is kept: longer than any job that could be reading it
+
+
+def set_aside(path: Path, now: float | None = None) -> None:
+    """Take a round's cached files out of use without pulling them from under anyone.
+
+    Two verifiers on one machine share the cache. One of them may be in the middle of a
+    job, with an editor reading these very files, when the other decides they are not to
+    be trusted. So the directory is renamed, which a program that has it open does not
+    notice, and deleted some hours later.
+    """
+    now = time.time() if now is None else now
+    stale = cache_dir() / "rounds" / ".stale"
+    try:
+        if path.exists():
+            stale.mkdir(parents=True, exist_ok=True)
+            path.rename(stale / f"{path.parent.name}-{path.name}-{os.getpid()}-{int(now)}")
+    except OSError:
+        shutil.rmtree(path, ignore_errors=True)  # cannot be renamed (another file system?): as before
+    try:
+        for old in stale.iterdir():
+            if now - old.stat().st_mtime > SET_ASIDE_FOR:
+                shutil.rmtree(old, ignore_errors=True)
+    except OSError:
+        pass
 
 
 def corpus(rnd: Round, scale: Scale, quiet: bool = False) -> Corpus:

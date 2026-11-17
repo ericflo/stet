@@ -149,7 +149,7 @@
  "grade_devices": [
   "cuda"
  ],
- "harness": "0.3.1",
+ "harness": "0.3.2",
  "heldout_exam_sha256": "c1011b1b09492b7e8a931580ffe5da968472c34269cf886b1868d9f103c69549",
  "id": "s0",
  "ink_frac": 0.001,
@@ -259,7 +259,7 @@
  },
  "reference": {
   "anchor": "AMD Ryzen AI Max+ 395 (16 cores), Radeon 8060S, 128 GB unified memory, ROCm",
-  "note": "Official edit runs happen on this machine, in its own wall-clock seconds. On a desktop NVIDIA GPU your editor will finish GPU work several times sooner than it will here."
+  "note": "The organisers' own verifier, and the machine the experiments in the documents were run on. Editors are run by volunteers' machines too: time yours against the floor in \"runner\" (stet bench), not against this."
  },
  "reference_curves": {
   "official/micro": [

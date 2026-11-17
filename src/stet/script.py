@@ -43,6 +43,7 @@ import numpy as np
 
 from .data import Corpus, contains_exam_text
 from .spec import Scale, Season
+from .tok import Unreadable, encode_batch
 
 # Output documents are checked in windows of TOKENIZE_BATCH, and tokenised whenever
 # TOKENIZE_BYTES of text is waiting. The window decides what counts as part of the script
@@ -308,8 +309,13 @@ def materialize(
             return
         texts = [bd.data.decode("utf-8", errors="replace") for _, bd in batch]
         ink_texts = [piece.decode("utf-8", errors="replace") for _, bd in batch for piece in bd.ink]
-        ink_lens = iter([len(t) for t in enc.encode_ordinary_batch(ink_texts)] if ink_texts else [])
-        for (_, bd), text, toks in zip(batch, texts, enc.encode_ordinary_batch(texts), strict=True):
+        try:
+            ink_toks = encode_batch(enc, ink_texts) if ink_texts else []
+            text_toks = encode_batch(enc, texts)
+        except Unreadable:
+            raise ScriptError("the tokenizer cannot read one of this script's documents, even with its whitespace cut short") from None
+        ink_lens = iter([len(t) for t in ink_toks])
+        for (_, bd), text, toks in zip(batch, texts, text_toks, strict=True):
             ink = sum(next(ink_lens) for _ in bd.ink)
             if full:
                 stats.truncated = True  # the budget ran out part-way through this batch

@@ -1269,3 +1269,111 @@ def test_a_volunteer_who_runs_editors_hands_back_what_it_cannot_finish(loop, mon
     args.edits = True
     client.cmd_verify(args)
     assert loop.released == [("/api/v1/jobs/7/release", "interrupted")]
+
+
+# --- a verifier left running keeps itself current -------------------------------------------------
+
+
+@pytest.fixture
+def upgrades(monkeypatch):
+    """An install the installer made, where an upgrade works and a restart is the end of the process."""
+    import types
+
+    from stet import upgrade
+
+    class Restarted(Exception):
+        pass
+
+    seen = types.SimpleNamespace(installs=[], Restarted=Restarted)
+
+    def restart(path):
+        raise Restarted(path)
+
+    monkeypatch.delenv("STET_DEV", raising=False)
+    monkeypatch.delenv("STET_AUTO_UPGRADE", raising=False)
+    monkeypatch.setattr(upgrade, "can", lambda: (True, ""))
+    monkeypatch.setattr(upgrade, "launcher", lambda: "/home/u/.local/bin/stet")
+    monkeypatch.setattr(upgrade, "install", lambda site, env=None, log=None: (seen.installs.append(site), (True, ""))[1])
+    monkeypatch.setattr(upgrade, "installed_version", lambda path: "99.0.0")
+    monkeypatch.setattr(upgrade, "restart", restart)
+    return seen
+
+
+def test_a_verifier_started_on_an_old_version_upgrades_before_it_asks_for_work(loop, upgrades, monkeypatch):
+    asked = []
+
+    def request(method, path, body=None, **kw):
+        asked.append(path)
+        if path == "/api/v1/season":
+            return {"scale": "nano", "site": "https://site.test", "cli": {"version": "99.0.0"}}
+        if path == "/api/v1/me":
+            return loop.me
+        raise AssertionError(f"unexpected request: {method} {path}")
+
+    monkeypatch.setattr(client, "request", request)
+    with pytest.raises(upgrades.Restarted):
+        client.cmd_verify(Args())
+    assert upgrades.installs == ["https://site.test"] and "/api/v1/jobs/claim" not in asked
+
+
+def test_a_verifier_the_server_calls_out_of_date_upgrades_itself_when_it_holds_no_job(loop, upgrades, monkeypatch, capsys):
+    season = [{"scale": "nano"}, {"scale": "nano", "site": "https://site.test", "cli": {"version": "99.0.0"}}]
+
+    def request(method, path, body=None, **kw):
+        if path == "/api/v1/season":
+            return season.pop(0)  # current when it started; a release came out while it ran
+        if path == "/api/v1/me":
+            return loop.me
+        if path == "/api/v1/jobs/claim":
+            raise client.ApiError(426, "this verifier is out of date")
+        raise AssertionError(f"unexpected request: {method} {path}")
+
+    monkeypatch.setattr(client, "request", request)
+    with pytest.raises(upgrades.Restarted):
+        client.cmd_verify(Args())
+    assert upgrades.installs == ["https://site.test"] and not loop.released
+
+
+def test_with_upgrades_turned_off_an_out_of_date_verifier_stops_and_says_what_to_run(loop, upgrades, monkeypatch, capsys):
+    def request(method, path, body=None, **kw):
+        if path == "/api/v1/season":
+            return {"scale": "nano", "site": "https://site.test", "cli": {"version": "99.0.0"}}
+        if path == "/api/v1/me":
+            return loop.me
+        if path == "/api/v1/jobs/claim":
+            raise client.ApiError(426, "this verifier is out of date. Upgrade: curl -fsSL https://site.test/install.sh | sh")
+        raise AssertionError(f"unexpected request: {method} {path}")
+
+    class Off(Args):
+        no_upgrade = True
+
+    monkeypatch.setattr(client, "request", request)
+    with pytest.raises(SystemExit) as e:
+        client.cmd_verify(Off())
+    said = capsys.readouterr()
+    assert e.value.code == 1 and upgrades.installs == []
+    assert "Automatic upgrades are off" in said.out + said.err and "install.sh" in said.err
+
+
+def test_an_upgrade_that_cannot_get_through_is_tried_again_rather_than_stopping_an_unattended_verifier(loop, upgrades, monkeypatch, capsys):
+    from stet import upgrade
+
+    monkeypatch.setattr(upgrade, "install", lambda site, env=None, log=None: (upgrades.installs.append(site), (False, "no route to host"))[1])
+    season = [{"scale": "nano"}]
+
+    def request(method, path, body=None, **kw):
+        if path == "/api/v1/season":
+            return season.pop(0) if season else {"scale": "nano", "site": "https://site.test", "cli": {"version": "99.0.0"}}
+        if path == "/api/v1/me":
+            return loop.me
+        if path == "/api/v1/jobs/claim":
+            raise client.ApiError(426, "this verifier is out of date")
+        raise AssertionError(f"unexpected request: {method} {path}")
+
+    loop.interrupt_at = 600  # the wait before the next try: stop the test there
+    monkeypatch.setattr(client, "request", request)
+    with pytest.raises((KeyboardInterrupt, SystemExit)):
+        client.cmd_verify(Args())
+    assert upgrades.installs == ["https://site.test"] and 600 in loop.slept
+    said = capsys.readouterr().err
+    assert "did not work" in said and "trying again in 10 minutes" in said

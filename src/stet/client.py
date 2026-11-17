@@ -420,7 +420,9 @@ def cmd_submit(args):
     e = r["editor"]
     sys.stderr.write(f"\nSubmitted {clean(e['name'])} v{clean(e['version'])}  ({clean(e['id'])[:12]})\n")
     if r.get("replaced"):
-        sys.stderr.write(f"It replaces your earlier entry {clean(r['replaced'])[:12]}, which will not run again.\n")
+        sys.stderr.write(f"It takes the place of your earlier entry {clean(r['replaced'])[:12]}, which will not run again.\n")
+    if isinstance(r.get("in_play"), int) and isinstance(r.get("in_play_limit"), int) and r["in_play_limit"] > 1:
+        sys.stderr.write(f"You have {r['in_play']} of {r['in_play_limit']} entries in play. A new version of an entry replaces the old one; another name is another entry.\n")
     # `enters` when the server expects it in that round; `earliest` when the queue is long or
     # the draw too close for that to be a promise.
     for field, words in (("enters", "It enters round"), ("earliest", "The earliest round it can enter is")):
@@ -782,7 +784,8 @@ def _grade_job(job, season, scale, device, key, out, work: Path) -> tuple[dict, 
     base = baseline(rnd, scale, device, progress=out.progress("baseline"), log=lambda m: out.line("", out.dim("baseline " + m)))
     want = job["script"]["sha256"]
     limit = int(season.raw["script"]["max_bytes"])
-    blob = request("GET", f"/api/v1/scripts/{want}", raw=True, timeout=600, limit=limit + (1 << 20))
+    # Signed: until its round settles, a script is given only to whoever was handed it to grade.
+    blob = request("GET", f"/api/v1/scripts/{want}", key=key, raw=True, timeout=600, limit=limit + (1 << 20))
     try:
         raw = unzstd(blob, limit)
     except zstandard.ZstdError:
@@ -869,12 +872,12 @@ def heldout_log_trouble(season) -> str:
 MACHINE_ERRNOS = (errno.ENOSPC, errno.EDQUOT, errno.EROFS, errno.EIO, errno.EMFILE, errno.ENFILE, errno.ENOMEM)
 
 
-def _edit_job(job, season, scale, key, out, work: Path, sandbox: str) -> dict:
+def _edit_job(job, season, scale, key, out, work: Path, sandbox: str, gpu: int = 0) -> dict:
     import base64
 
     import zstandard
 
-    from .runner import EditRun, HarnessError
+    from .runner import EditRun, HarnessError, release_gpu_memory
 
     # Checked here as well as where the flag is read: this is the function that runs a
     # stranger's program, and nothing that calls it should be able to get that wrong.
@@ -909,9 +912,12 @@ def _edit_job(job, season, scale, key, out, work: Path, sandbox: str) -> dict:
         return payload
     from .pipeline import edit_round
 
+    # This process trained the last script it graded, and PyTorch keeps that memory. The
+    # editor is promised its share of the card: let go of ours before it starts.
+    release_gpu_memory()
     edit = edit_round(
         bundle_dir, project.entry, rnd, scale, work, sandbox=sandbox, log=lambda m: out.line("", out.dim(m)),
-        limits={"required": sandbox == "bwrap"}, assets=project.assets, verify_assets=True,
+        limits={"required": sandbox == "bwrap"}, assets=project.assets, verify_assets=True, gpu=gpu,
     )  # fmt: skip
     payload["edit"] = edit.to_dict()
     payload["finished_at"] = int(time.time())
@@ -930,13 +936,12 @@ def _forget_round(job: dict, season, scale) -> None:
     the first suspect, and it would otherwise be used again unchanged.
     """
     from . import data
-    from .runner import remove_tree
 
     try:
         rnd = round_from_api(season, job["round"])
     except Exception:
         return
-    remove_tree(data.round_dir(rnd, scale))
+    data.set_aside(data.round_dir(rnd, scale))  # not deleted: another verifier here may be reading it
 
 
 def _pins() -> Path:
@@ -1070,6 +1075,84 @@ STOP_AFTER_FAILURES = 3 * (len(RETRY_PAUSES) + 1)  # three jobs' worth of failur
 FETCH_PATIENCE = 30 * 60  # how long a job is kept while what it needs cannot be downloaded
 
 
+def cmd_upgrade(args):
+    from . import __version__, upgrade
+    from .cli import Out
+    from .spec import load_season
+
+    out = Out()
+    info = request("GET", "/api/v1/season")
+    info = info if isinstance(info, dict) else {}
+    theirs = str((info.get("cli") or {}).get("version") or "")
+    if not upgrade.newer(theirs):
+        out.line("", f"stet {__version__} is the newest.")
+        return
+    if args.check:
+        out.line("", f"stet {theirs} is out; this is {__version__}. Install it: stet upgrade")
+        return
+    ok, why = upgrade.can()
+    site = str(info.get("site") or "https://www.stetrun.com")
+    if not ok:
+        sys.stderr.write(f"stet: {theirs} is out, and it cannot be installed from here: {why}.\n  Install it with: curl -fsSL {site}/install.sh | sh\n")
+        sys.exit(1)
+    out.line("", f"stet {theirs} is out; this is {__version__}. Upgrading.")
+    try:
+        season_env = load_season().raw.get("environment") or {}
+    except Exception:
+        season_env = {}
+    worked, tail = upgrade.install(site, season_env, lambda m: out.line("", out.dim(m)))
+    have = upgrade.installed_version(upgrade.launcher() or "stet") if worked else ""
+    if not worked or not upgrade.newer(have):
+        sys.stderr.write(f"stet: the upgrade did not work ({tail or 'the installer said nothing'}). This is still {__version__}.\n")
+        sys.exit(1)
+    out.line("", out.good(f"Now stet {have}."))
+
+
+def cmd_service(args):
+    from . import service
+    from .cli import Out
+
+    out = Out()
+    name = args.name
+    try:
+        if args.action == "install":
+            need_key()
+            if args.edits:
+                from . import runner
+
+                for ok, why in (runner.bwrap_available(), runner.scope_available()):
+                    if not ok:
+                        sys.stderr.write(f"stet: this machine cannot run editors yet: {why}\n  `stet service install` without --edits sets it up to grade.\n")
+                        sys.exit(1)
+            done = service.install(name, edits=args.edits, no_upgrade=args.no_upgrade, device=args.device)
+            out.line("", out.good(f"{name} is installed and running."))
+            out.line("", f"It runs `stet verify{' --edits' if args.edits else ''}`, starts with this machine, and starts again if it stops.")
+            out.line("", "It installs new versions of stet by itself, between jobs." if not args.no_upgrade else "It will not upgrade itself: run `stet upgrade` when a new version is out.")
+            if done["note"]:
+                out.line("", out.bad(done["note"]))
+            out.line("", "")
+            out.line("", "  stet service status       how it is doing")
+            out.line("", "  stet service logs         what it has been saying")
+            out.line("", "  stet service uninstall    stop it and remove it")
+            out.line("", out.dim(f"  log: {done['log']}"))
+        elif args.action == "uninstall":
+            out.line("", f"{name} is stopped and removed." if service.uninstall(name) else f"There is no {name} service here.")
+        elif args.action == "status":
+            st = service.status(name)
+            if not st["installed"]:
+                out.line("", f"There is no {name} service here. Make one: stet service install")
+                return
+            out.line("", f"{name}: {st['active']}, {'starts with the machine' if st['enabled'] == 'enabled' else 'does not start with the machine'}")
+            for line in st["tail"]:
+                out.line("", out.dim("  " + line[:200]))
+        elif args.action == "logs":
+            for line in service.tail(name, args.lines):
+                print(line)
+    except service.ServiceError as e:
+        sys.stderr.write(f"stet: {e}\n")
+        sys.exit(1)
+
+
 def cmd_verify(args):
     import signal
 
@@ -1104,6 +1187,12 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
     key = need_key()
     season = load_season(args.season)
     info = request("GET", "/api/v1/season")
+    # A verifier left running keeps itself current: see upgrade.py. First of all here, since
+    # a newer stet is the usual reason this one's season or libraries would differ below.
+    from . import upgrade
+
+    upgrader = upgrade.Upgrader(args, season.raw.get("environment") or {}, say=lambda m: out.line("", out.dim(m)), fetch_info=lambda: request("GET", "/api/v1/season"))
+    upgrader.consider(info if isinstance(info, dict) else {})
     check_heldout_pin(season, info, warn=lambda message: out.line("", out.bad(message)))
     scale = season.scale(info["scale"])
     device = pick_device(args.device)
@@ -1241,9 +1330,20 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
 
     try:
         while True:
+            if holding is None:
+                upgrader.look()  # never with a job in hand
             try:
                 r = request("POST", "/api/v1/jobs/claim", hello, key=key)
             except ApiError as e:
+                if e.status == 426 and holding is None:
+                    upgrader.now()  # does not come back if it worked
+                    if upgrader.on and upgrade.can()[0] and not args.once:
+                        # Too old to be given work, and the upgrade did not go through this
+                        # time (the network, most likely). Someone who left this running
+                        # wants it to keep trying, not to find it stopped.
+                        out.line("", out.bad(f"{e}. Waiting to upgrade; trying again in 10 minutes."))
+                        time.sleep(600)
+                        continue
                 if e.status in (400, 401, 403, 426):
                     sys.stderr.write(f"stet: {e}\n")
                     sys.exit(1)
@@ -1329,7 +1429,7 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
             result = base = None
             try:
                 if job["kind"] == "edit":
-                    payload = _edit_job(job, season, scale, key, out, work, sandbox)
+                    payload = _edit_job(job, season, scale, key, out, work, sandbox, gpu=getattr(device, "index", None) or 0)
                     path = f"/api/v1/jobs/{job_id}/script"
                 else:
                     result, base = _grade_job(job, season, scale, device, key, out, work)
@@ -1369,7 +1469,11 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
                     # gives this job back to us the next time we ask.
                     stuck[job_id] = waited + patience(f"could not fetch what this job needs ({clean(err)}). Keeping the job", keeping=job_id)
                 continue
-            except Exception as err:  # this machine's trouble, not the editor's
+            except BaseException as err:  # this machine's trouble, not the editor's
+                # A panic in a compiled library is not an Exception. It is a failed job all
+                # the same, and must not be what stops this machine.
+                if isinstance(err, (KeyboardInterrupt, SystemExit, GeneratorExit)):
+                    raise
                 remove_tree(work)
                 failures += 1
                 tries[job_id] = tries.get(job_id, 0) + 1
@@ -1555,6 +1659,20 @@ def add_commands(sub) -> None:
     p.add_argument("--device", default=None)
     p.add_argument("--season", default="s0", help=argparse.SUPPRESS)
     p.add_argument("--edits", "--run-editors", dest="edits", action="store_true", help="also run entrants' editors, in the sandbox (Linux; `stet bench` says whether this machine is fast enough)")
+    p.add_argument("--no-upgrade", action="store_true", help="do not install newer versions of stet automatically (the default is to, between jobs; STET_AUTO_UPGRADE=0 does the same)")
     p.add_argument("--no-sandbox", action="store_true", help=argparse.SUPPRESS)  # local testing only
     p.add_argument("--any-device", action="store_true", help=argparse.SUPPRESS)  # local testing only
     p.set_defaults(fn=cmd_verify)
+
+    p = sub.add_parser("service", help="keep `stet verify` running on this machine: start with it, restart, upgrade (Linux)")
+    p.add_argument("action", choices=["install", "status", "logs", "uninstall"])
+    p.add_argument("--edits", "--run-editors", dest="edits", action="store_true", help="also run entrants' editors, in the sandbox")
+    p.add_argument("--no-upgrade", action="store_true", help="do not install newer versions of stet automatically")
+    p.add_argument("--device", default=None, help=argparse.SUPPRESS)
+    p.add_argument("--name", default="stet-verify", help="the service's name, for a second verifier on one machine (default: stet-verify)")
+    p.add_argument("--lines", type=int, default=40, help="with logs: how many lines")
+    p.set_defaults(fn=cmd_service)
+
+    p = sub.add_parser("upgrade", help="install the newest stet now (a running `stet verify` does this by itself)")
+    p.add_argument("--check", action="store_true", help="only say whether a newer version is out")
+    p.set_defaults(fn=cmd_upgrade)

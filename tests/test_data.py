@@ -413,3 +413,32 @@ def test_the_season_commits_to_a_held_out_exam_without_it_being_a_rule_of_the_ro
     assert "heldout_exam" in POLICY_KEYS  # sitting it changes no round, corpus, script or grade
     assert len(season.raw["heldout_exam"]["sha256"]) == 64
     assert season.raw["heldout_exam"]["sha256"] != season.raw["exam"]["sha256"]
+
+
+# --- two verifiers on one machine share the cache -------------------------------------------------
+
+
+def test_a_round_that_is_set_aside_stays_readable_to_whoever_has_it_open_and_is_deleted_later(tmp_path):
+    import os
+
+    from stet import data
+
+    d = data.cache_dir() / "rounds" / "s0-o00009" / "micro"
+    (d / "corpus-v3").mkdir(parents=True)
+    (d / "corpus-v3" / "docs.bin").write_bytes(b"what an editor is reading")
+    held = os.open(d / "corpus-v3", os.O_RDONLY)  # as a sandbox holds the directory it was given
+    try:
+        data.set_aside(d, now=1_000_000.0)
+        assert not d.exists()  # the next job builds the round afresh
+        with open(os.open("docs.bin", os.O_RDONLY, dir_fd=held), "rb") as f:
+            assert f.read() == b"what an editor is reading"  # and nothing was pulled from under this one
+    finally:
+        os.close(held)
+    stale = data.cache_dir() / "rounds" / ".stale"
+    assert len(list(stale.iterdir())) == 1
+    for p in stale.iterdir():
+        os.utime(p, (1_000_000.0, 1_000_000.0))
+    data.set_aside(d, now=1_000_000.0 + data.SET_ASIDE_FOR - 60)  # nothing to set aside, and not old enough to delete
+    assert len(list(stale.iterdir())) == 1
+    data.set_aside(d, now=1_000_000.0 + data.SET_ASIDE_FOR + 60)
+    assert list(stale.iterdir()) == []

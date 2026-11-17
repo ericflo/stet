@@ -318,3 +318,27 @@ def test_text_past_the_budget_is_not_held_in_memory(corpus, enc, monkeypatch):
     _, stats = run(corpus, Watching(), [0, 3] * 400)  # one window of 800 documents, about 1.3 MB
     assert stats.truncated and stats.script_lines == 800
     assert max(sizes) < 8000 and sum(sizes) < 20_000  # tokenised a little at a time, and not at all once full
+
+
+# --- a text the tokenizer gives up on -----------------------------------------------------------
+
+
+def test_a_script_whose_text_makes_the_tokenizer_panic_is_still_read_by_every_grader(corpus):
+    # A million spaces and then a letter: tiktoken's matcher gives up with a Rust panic, which
+    # is not an Exception, and would stop every machine handed the script. The run is cut
+    # short and the text read again, the same on every machine.
+    from stet.tok import LONG_SPACE_CHARS, encode_batch, load_encoding
+
+    real = load_encoding(SEASON)
+    bad = " " * 1_048_000 + "x"
+    with pytest.raises(BaseException) as e:  # the fault this guards against, as the library raises it
+        real.encode_ordinary_batch([bad])
+    assert not isinstance(e.value, Exception)
+    got = encode_batch(real, ["plain words", bad, "more plain words"])
+    assert got[0] == real.encode_ordinary("plain words") and got[2] == real.encode_ordinary("more plain words")
+    assert got[1] == real.encode_ordinary(" " * LONG_SPACE_CHARS + "x")  # as if the shorter run had been written
+    ok = " " * 500_000 + "x"
+    assert encode_batch(real, [ok]) == [real.encode_ordinary(ok)]  # what could be read before is read as before
+    # And as a script: over the ink budget, an ordinary invalid script, not a crash.
+    with pytest.raises(ScriptError, match="ink"):
+        run(corpus, real, [{"t": bad}], season=SEASON)

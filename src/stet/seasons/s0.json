@@ -105,7 +105,7 @@
   },
   "reference": {
     "anchor": "AMD Ryzen AI Max+ 395 (16 cores), Radeon 8060S, 128 GB unified memory, ROCm",
-    "note": "Official edit runs happen on this machine, in its own wall-clock seconds. On a desktop NVIDIA GPU your editor will finish GPU work several times sooner than it will here."
+    "note": "The organisers' own verifier, and the machine the experiments in the documents were run on. Editors are run by volunteers' machines too: time yours against the floor in \"runner\" (stet bench), not against this."
   },
   "beacon": {
     "name": "drand quicknet",

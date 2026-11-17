@@ -26,15 +26,17 @@ What it does not do, so that nobody relies on it:
     virtual machine.
   - The memory cap is the cgroup's. Memory a GPU driver allocates for the editor may not
     be charged to it; on a machine whose GPU shares system memory that is ordinary RAM.
-  - The GPU memory limit binds PyTorch, in each process, and a program can lift it. So
-    can it widen the set of cores it runs on (where the cgroup cannot cap CPU time, that
+  - The GPU memory limit binds PyTorch, in each process, and a program can lift it. The
+    editor is shown one GPU through the environment, and a program can look past that
+    too. So can it widen the set of cores it runs on (where the cgroup cannot cap CPU time, that
     is the only limit there is). Bundles are public: an editor that does either breaks
     the rules in plain sight.
   - The output directory is on disk and has no quota. The harness watches it and kills an
     editor that writes too much, hides what it wrote, or runs the disk low.
 
-Official edits therefore run only on machines the organisers control, and volunteers are
-never asked to run an entrant's code.
+So running editors is something a volunteer chooses, with `stet verify --edits`, knowing
+this: it is for a machine they would be content to reinstall. Grading alone runs nobody
+else's code. Editors are public, and each comes from an account tied to a GitHub identity.
 
 An editor's one product is the edit script: plain data, copied out through a descriptor
 that refuses links and devices, and validated afterwards by trusted code.
@@ -75,6 +77,10 @@ SYSTEM_DIRS = ("/usr", "/opt")
 USR_LINKS = ("/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32")
 ETC_ALLOW = ("ld.so.cache", "ld.so.conf", "ld.so.conf.d", "alternatives", "OpenCL", "vulkan", "glvnd")
 # Used for a season that does not say what machine an editor is given.
+# How much of an editor's promised GPU memory has to be free when it starts. Not all of it:
+# the drivers hold a little for each process, and that is not the editor's to lose.
+GPU_FREE_SHARE = 0.95
+
 DEFAULT_LIMITS = {"memory_gb": 48, "tasks": 4096, "scratch_gb": 16, "cores": 0, "gpu_memory_gb": 0, "required": False}
 # Inside the sandbox nothing can be downloaded. Libraries that would try are told so, and
 # fail at once with a message instead of waiting on a network that is not there.
@@ -130,6 +136,55 @@ def gpu_total_bytes() -> int:
             total = 0
         _gpu_total.append(total)
     return _gpu_total[0]
+
+
+def gpu_free_bytes(index: int = 0) -> int:
+    """How much of the GPU's memory nothing is using right now, or -1 if that cannot be asked."""
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return -1
+        return int(torch.cuda.mem_get_info(index)[0])
+    except Exception:
+        return -1
+
+
+def release_gpu_memory() -> None:
+    """Give back what this process holds of the GPU and is not using.
+
+    A verifier trains and grades in its own process, and PyTorch keeps the memory it used
+    for the next time. An editor started afterwards is promised its share of the card, so
+    the verifier lets go first.
+    """
+    import gc
+
+    gc.collect()
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
+
+
+def one_gpu(environ=None, index: int = 0) -> dict[str, str]:
+    """The environment that shows an editor one GPU: the one this machine grades on.
+
+    Every editor is promised the same machine, and that machine has one GPU. A volunteer
+    with two cards would otherwise hand an editor both. What the operator set is kept,
+    cut down to its first device; with nothing set, device `index` is the one.
+    """
+    environ = os.environ if environ is None else environ
+    out = {}
+    for name in ("CUDA_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES"):
+        value = str(environ.get(name) or "").strip()
+        if value:
+            out[name] = value.split(",")[0].strip()
+    if not out:
+        out = {"CUDA_VISIBLE_DEVICES": str(index), "HIP_VISIBLE_DEVICES": str(index)}
+    return out
 
 
 # What the sandbox starts, and it starts the editor. It tells the harness that the sandbox
@@ -591,8 +646,11 @@ def run_editor(
     echo: bool = False,
     limits: dict | None = None,
     assets=(),
+    gpu: int = 0,
 ) -> EditRun:
     """Run `entry` from the bundle directory against a corpus.
+
+    `gpu` is the index of the one GPU the editor is shown: the one this machine grades on.
 
     `assets` are the files the editor named by reference (stet.assets.Asset). They must be
     in the cache already: fetching them is the caller's job, and is not on the clock.
@@ -672,11 +730,24 @@ def run_editor(
     # The same GPU memory on every machine: PyTorch is told what fraction of this card that is.
     gpu_cap = float(limits["gpu_memory_gb"]) * 2**30
     if gpu_cap > 0 and (total := gpu_total_bytes()) > 0:
+        promised = int(min(gpu_cap, total))
         env["PYTORCH_ALLOC_CONF"] = f"per_process_memory_fraction:{min(1.0, gpu_cap / total):.6f}"
-        env["STET_GPU_MEMORY_BYTES"] = str(int(min(gpu_cap, total)))
-    for k in ("LD_LIBRARY_PATH", "CUDA_VISIBLE_DEVICES", "HSA_OVERRIDE_GFX_VERSION", "ROCM_PATH", "HIP_VISIBLE_DEVICES", "TORCH_BLAS_PREFER_HIPBLASLT"):
+        env["STET_GPU_MEMORY_BYTES"] = str(promised)
+        # The promise has to be there to be kept. If something else on this machine holds
+        # the memory, an editor that runs out of it has not failed: this machine has.
+        free = gpu_free_bytes(gpu)
+        if limits.get("required") and 0 <= free < promised * GPU_FREE_SHARE:
+            raise HarnessError(
+                f"the GPU has {free / 2**30:.1f} GB of memory free and an editor is promised {promised / 2**30:.1f}: "
+                "something else on this machine is using it"
+            )
+    for k in ("LD_LIBRARY_PATH", "HSA_OVERRIDE_GFX_VERSION", "ROCM_PATH", "TORCH_BLAS_PREFER_HIPBLASLT"):
         if k in os.environ:
             env[k] = os.environ[k]
+    if inside or limits.get("required"):
+        env.update(one_gpu(index=gpu))  # the same single GPU on every machine
+    else:
+        env.update({k: os.environ[k] for k in ("CUDA_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES") if k in os.environ})
 
     if inside:
         ok, why = bwrap_available()

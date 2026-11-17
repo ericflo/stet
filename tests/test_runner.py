@@ -617,3 +617,46 @@ def test_the_season_says_what_machine_an_editor_is_given():
 
     m = machine_limits(SEASON)
     assert set(m) == {"cores", "memory_gb", "gpu_memory_gb", "scratch_gb"} and all(v > 0 for v in m.values())
+
+
+# --- one GPU, with its memory there to be had -----------------------------------------------------
+
+
+def test_an_editor_is_shown_one_gpu_whatever_the_machine_has():
+    from stet.runner import one_gpu
+
+    assert one_gpu({}) == {"CUDA_VISIBLE_DEVICES": "0", "HIP_VISIBLE_DEVICES": "0"}
+    assert one_gpu({}, index=1) == {"CUDA_VISIBLE_DEVICES": "1", "HIP_VISIBLE_DEVICES": "1"}  # the card this machine grades on
+    assert one_gpu({"CUDA_VISIBLE_DEVICES": "2,3"}) == {"CUDA_VISIBLE_DEVICES": "2"}  # the operator's choice, cut to one
+    assert one_gpu({"HIP_VISIBLE_DEVICES": " 1 "}) == {"HIP_VISIBLE_DEVICES": "1"}  # and never both, or the second would index into the first
+
+
+SHOW_GPUS = """
+import os
+from stet.editor import Task
+print("GPUS", os.environ.get("CUDA_VISIBLE_DEVICES"), os.environ.get("HIP_VISIBLE_DEVICES"))
+Task.from_env().write([0])
+"""
+
+
+@needs_sandbox
+def test_in_the_sandbox_the_editor_is_told_to_use_one_gpu(corpus, tmp_path, monkeypatch):
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    monkeypatch.delenv("HIP_VISIBLE_DEVICES", raising=False)
+    run = run_editor(editor(tmp_path, SHOW_GPUS), "python editor.py", corpus, RND, SCALE, tmp_path / "work", 60, sandbox="bwrap")
+    assert run.status == "ok" and "GPUS 0 0" in run.log_tail, run.log_tail
+
+
+def test_a_gpu_whose_memory_is_taken_is_this_machines_trouble_not_the_editors(corpus, tmp_path, monkeypatch):
+    from stet import runner
+    from stet.runner import HarnessError
+
+    monkeypatch.setattr(runner, "_gpu_total", [10 << 30])
+    monkeypatch.setattr(runner, "gpu_free_bytes", lambda index=0: 6 << 30)  # the verifier, or a game, holds the rest
+    limits = {"gpu_memory_gb": 8, "required": True}
+    with pytest.raises(HarnessError, match="6.0 GB of memory free and an editor is promised 8.0"):
+        run_editor(editor(tmp_path, WRITE_ALL), "python editor.py", corpus, RND, SCALE, tmp_path / "w1", 60, limits=limits)
+    monkeypatch.setattr(runner, "gpu_free_bytes", lambda index=0: int(7.8 * 2**30))  # all but what the drivers keep: enough
+    monkeypatch.setattr(runner, "scope_available", lambda: (True, ""))
+    run = run_editor(editor(tmp_path, WRITE_ALL), "python editor.py", corpus, RND, SCALE, tmp_path / "w2", 60, limits={"gpu_memory_gb": 8})
+    assert run.status == "ok"
