@@ -92,49 +92,78 @@
   <div class="cmd" data-pane="ps" hidden><pre><span class="p">&gt; </span><span data-copy-text>irm {{.BaseURL}}/install.ps1 | iex</span></pre><button type="button" data-copy>copy</button></div>
 </div>{{end}}
 
-{{/* A bar on a table's axis. Called with (dict "S" scale "V" value "SE" uncertainty "Q" qualifying). */}}
-{{define "gbar"}}<span class="gbar{{if .Q}} q{{end}}{{if neg .V}} neg{{end}}" style="{{.S.Bar .V .SE}}" aria-hidden="true">{{range .S.Ticks}}{{if not .Zero}}<i class="g" style="{{.Style}}"></i>{{end}}{{end}}<i class="z"></i><i class="f"></i>{{if .SE}}<i class="e"></i>{{end}}</span>{{end}}
+{{/* The axis over a column of lanes: where zero is, and the round numbers along it; under
+     them, on the standings, what a gain is worth in unedited data. Called with a scale. */}}
+{{define "axis"}}<span class="axis" aria-hidden="true"><span class="nats">{{range .Ticks}}<span style="{{.Style}}"{{if .Zero}} class="zero"{{else if .Edge}} class="{{.Edge}}"{{end}}>{{.Label}}</span>{{end}}</span>{{if .Worth}}<span class="worth">{{range .Worth}}<span style="{{.Style}}"{{if .Zero}} class="zero"{{else if .Edge}} class="{{.Edge}}"{{end}}>{{.Label}}{{if .Zero}} the data{{end}}</span>{{end}}</span>{{end}}</span>{{end}}
 
-{{/* The axis over a column of bars. Called with a scale. */}}
-{{define "gaxis"}}<span class="gaxis" aria-hidden="true">{{range .Ticks}}<span style="{{.Style}}"{{if .Zero}} class="zero"{{end}}>{{if .Zero}}unedited{{else}}{{.Label}}{{end}}</span>{{end}}</span>{{end}}
+{{/* One row's lane on that axis: a bar from zero, its ± at the tip, and under it a mark for
+     each round behind the number. Called with (dict "S" scale "V" value "SE" uncertainty
+     "Q" qualifying "Rug" marks). */}}
+{{define "lane"}}<span class="lane{{if .Q}} q{{end}}{{if neg .V}} neg{{end}}" style="{{.S.Bar .V .SE}}" aria-hidden="true">{{range .S.Ticks}}{{if not .Zero}}<i class="g" style="{{.Style}}"></i>{{end}}{{end}}<i class="z"></i>{{if .Fail}}<i class="x"></i>{{else}}<i class="f"></i>{{end}}{{if .SE}}<i class="e"></i>{{end}}{{range .Rug}}<i class="t" style="{{.}}"></i>{{end}}</span>{{end}}
+
+{{/* A curator's rounds, one cell each, in order: how high it scored, whether it was the
+     best of that round, where it failed, and whether it is being run now. */}}
+{{define "form"}}<span class="form" aria-hidden="true">{{range .}}<i{{if .Kind}} class="{{.Kind}}"{{end}}{{if .Tip}} data-tip="{{.Tip}}"{{end}}>{{if .H}}<b style="{{.H}}"></b>{{end}}</i>{{end}}</span>{{end}}
 
 {{/* The standings: every rating a bar on one axis, the ranked above, those still qualifying
-     below a line. Called with (dict "Rated" rows "Qual" rows "Need" rounds-to-be-ranked). */}}
-{{define "board"}}{{$s := boardscale .Rated .Qual}}{{$need := .Need}}
-<div class="m-axis">{{template "gaxis" $s}}</div>
-<table class="rt board">
+     below a line. Called with a standings. */}}
+{{define "board"}}{{$b := .}}
+<div class="board-axis" aria-hidden="true">{{template "axis" .S}}</div>
+<table class="board{{if .Compact}} compact{{end}}">
   <thead><tr>
-    <th class="rank">#</th>
-    <th>Curator</th>
-    <th class="r">Rating</th>
-    <th class="barcol">{{template "gaxis" $s}}</th>
-    <th class="r">Worth</th>
-    <th class="r">Rounds</th>
+    <th class="c-rank">#</th>
+    <th class="c-name">Curator</th>
+    <th class="c-num">Rating</th>
+    <th class="c-lane">{{template "axis" .S}}</th>
+    {{if not .Compact}}<th class="c-worth">Worth<small>× the data</small></th>
+    <th class="c-form">Round by round{{if .To}}<small>{{.From}} to {{.To}}</small>{{end}}</th>{{end}}
   </tr></thead>
-  {{if .Rated}}<tbody>{{range .Rated}}{{template "boardrow" (dict "R" . "S" $s "Need" $need)}}{{end}}</tbody>{{end}}
+  {{if .Rated}}<tbody>{{range .Rated}}{{template "boardrow" (dict "R" . "B" $b)}}{{end}}</tbody>{{end}}
   {{if .Qual}}<tbody class="qual">
-    <tr class="divider"><td colspan="6"><span>Qualifying · ranked after {{$need}} rounds</span></td></tr>
-    {{range .Qual}}{{template "boardrow" (dict "R" . "S" $s "Need" $need)}}{{end}}
+    <tr class="divider"><td colspan="6"><span>Qualifying</span> ranked after {{.Need}} rounds</td></tr>
+    {{range .Qual}}{{template "boardrow" (dict "R" . "B" $b)}}{{end}}
   </tbody>{{end}}
 </table>{{end}}
 
-{{define "boardrow"}}{{$r := .R}}<tr class="{{if $r.Record}}record{{end}}{{if $r.Provisional}} qrow{{end}}">
-  <td class="rank">{{if $r.Rank}}{{$r.Rank}}{{else}}<span class="muted" title="Not ranked yet: still qualifying">–</span>{{end}}</td>
-  <td class="main">{{if $r.Rank}}<span class="rankno" aria-hidden="true">{{$r.Rank}}</span>{{end}}<a class="name" href="/editors/{{short $r.ID}}">{{$r.Name}}</a><span class="by">v{{$r.Version}} · <a href="/u/{{$r.Owner}}">{{$r.Owner}}</a></span><span class="tags">{{if $r.Record}}<a class="tag red" href="/glossary#record">record</a>{{end}}{{if $r.Organisers}}<a class="tag" href="/glossary#reference">reference</a>{{end}}{{if $r.Invalid}}<a class="tag red" href="/glossary#failed">failed {{$r.Invalid}} of {{$r.Rounds}}</a>{{end}}</span>
-    {{if $r.Technique}}<span class="tech">{{$r.Technique}}</span>{{end}}</td>
-  <td class="r big" data-label="Rating">{{gain (ptr $r.Rating)}}{{if has $r.SE}}<span class="pm">± {{f3 (ptr $r.SE)}}</span>{{end}}</td>
-  <td class="barcell wide">{{template "gbar" (dict "S" .S "V" (ptr $r.Rating) "SE" $r.SE "Q" $r.Provisional)}}</td>
-  <td class="r mult" data-label="Worth">{{if $r.Multiplier}}{{mult $r.Multiplier $r.Capped}}{{else}}<span class="muted">—</span>{{end}}</td>
-  <td class="r num" data-label="Rounds">{{if $r.Provisional}}{{template "dots" (dict "N" $r.Rounds "Of" .Need)}}{{else}}{{$r.Rounds}}{{end}}</td>
+{{define "boardrow"}}{{$r := .R}}{{$b := .B}}<tr class="{{if $r.Record}}rec{{end}}{{if $r.Provisional}} q{{end}}">
+  <td class="c-rank">{{if $r.Rank}}{{$r.Rank}}{{else}}<span title="Not ranked yet: still qualifying">–</span>{{end}}</td>
+  <td class="c-name"><a class="name" href="/editors/{{short $r.ID}}">{{$r.Name}}</a> <span class="by">{{if not $b.Compact}}v{{$r.Version}} · {{end}}<a href="/u/{{$r.Owner}}">{{$r.Owner}}</a></span>{{if $r.Record}} <a class="tag red" href="/glossary#record">record</a>{{end}}{{if and $r.Organisers (not $b.Compact)}} <a class="tag" href="/glossary#reference">reference</a>{{end}}{{if $r.Invalid}} <a class="tag red" href="/glossary#failed">failed {{$r.Invalid}} of {{$r.Rounds}}</a>{{end}}{{if and $r.Technique (not $b.Compact)}}<span class="tech">{{$r.Technique}}</span>{{end}}</td>
+  <td class="c-num"><b>{{gain (ptr $r.Rating)}}</b>{{if and (has $r.SE) (not $b.Compact)}}<span class="pm">±{{f3 (ptr $r.SE)}}</span>{{end}}</td>
+  <td class="c-lane">{{template "lane" (dict "S" $b.S "V" (ptr $r.Rating) "SE" $r.SE "Q" $r.Provisional "Rug" $r.Rug)}}</td>
+  {{if not $b.Compact}}<td class="c-worth">{{if $r.Multiplier}}<b>{{mult $r.Multiplier $r.Capped}}</b><span class="k"> the data</span>{{else}}<span class="muted">—</span>{{end}}</td>
+  <td class="c-form">{{template "form" $r.Form}}<span class="n">{{if $r.Provisional}}{{template "dots" (dict "N" $r.Rounds "Of" $b.Need)}}{{else}}{{$r.Rounds}} {{plural $r.Rounds "round" "rounds"}}{{if not $r.Ladder}} · <a href="/glossary#ladder" title="Outside the top {{$b.Ladder}}, one per person, so it is not run in new rounds">off the ladder</a>{{end}}{{end}}</span></td>{{end}}
 </tr>{{end}}
 
-{{/* n of m, as filled and empty marks. */}}
-{{define "dots"}}<span class="of" role="img" aria-label="{{.N}} of {{.Of}}">{{range pips .N .N .Of}}<i class="p{{.}}"></i>{{end}}<span>{{.N}}/{{.Of}}</span></span>{{end}}
+{{/* The head to head with the record holder: for each challenger its mean lead on the rounds
+     both ran, ± its range, a mark for each of those rounds, the margin it has to clear,
+     and how many shared rounds it is from its next test. Called with (dict "Race" race
+     "Rows" rows "Looks" the rule's looks). */}}
+{{define "versus"}}{{$race := .Race}}{{$s := $race.S}}{{$looks := .Looks}}
+<div class="board-axis flush" aria-hidden="true">{{template "axis" $s}}</div>
+<table class="board versus-rows">
+  <thead><tr>
+    <th class="c-name">Challenger</th>
+    <th class="c-num">Ahead by<small>a round</small></th>
+    <th class="c-lane">{{template "axis" $s}}</th>
+    <th class="c-looks">Rounds shared<small>tested at each mark</small></th>
+  </tr></thead>
+  <tbody>
+    {{range .Rows}}<tr class="{{if .Provisional}}q{{end}}{{if .Clear}} clear{{end}}">
+      <td class="c-name"><a class="name" href="/editors/{{short .ID}}">{{.Name}}</a> <span class="by">v{{.Version}} · <a href="/u/{{.Owner}}">{{.Owner}}</a></span>{{if .Provisional}} <a class="tag amber" href="/glossary#qualifying">qualifying</a>{{end}}</td>
+      <td class="c-num">{{if .Shared}}<b{{if lt .Mean 0.0}} class="neg"{{end}}>{{gain .Mean}}</b>{{if has .SE}}<span class="pm">±{{f3 (ptr .SE)}}</span>{{end}}{{else}}<span class="muted">—</span>{{end}}</td>
+      <td class="c-lane"><span class="lane vs{{if lt .Mean 0.0}} neg{{end}}{{if .Off}} off{{end}}"{{if .Shared}} style="{{.Bar}}"{{end}} aria-hidden="true">{{range $s.Ticks}}{{if not .Zero}}<i class="g" style="{{.Style}}"></i>{{end}}{{end}}<i class="z" style="{{$s.Pos 0.0}}"></i><i class="m" style="{{$race.MarginX}}"></i>{{if .Shared}}<i class="f"></i>{{if .SE}}<i class="e"></i>{{end}}{{range .Dots}}<i class="t" style="{{.}}"></i>{{end}}{{end}}</span></td>
+      <td class="c-looks"><span class="looks" role="img" aria-label="{{.Shared}} rounds shared{{if .Next}}; next tested at {{.Next}}{{else}}; it has had every test{{end}}"><i class="fill" style="{{looksfill .Shared $looks}}"></i>{{range $i, $l := .Looks}}<b class="{{$l.State}}" style="{{looksat $i (len $looks)}}">{{$l.At}}</b>{{end}}</span><span class="n">{{.Shared}} shared{{if .Next}} · {{if .ToGo}}{{.ToGo}} to its {{if eq .Next (index $looks 0)}}first{{else}}next{{end}} test{{else}}tested when this round settles{{end}}{{else}} · every test taken{{end}}</span></td>
+    </tr>{{end}}
+  </tbody>
+</table>{{end}}
 
-{{define "board-legend"}}<div class="legend" aria-label="How to read the bars">
-  <span><span class="gbar demo" style="--z:0%;--v:78%;--a:64%;--b:92%"><i class="z"></i><i class="f"></i><i class="e"></i></span>rating, with its ± range</span>
-  <span><span class="gbar demo q" style="--z:0%;--v:78%"><i class="z"></i><i class="f"></i></span>still qualifying</span>
-  <span><span class="zl"></span>no better than unedited data</span>
+{{/* n of m, as filled and empty marks. */}}
+{{define "dots"}}<span class="of" role="img" aria-label="{{.N}} of {{.Of}} rounds">{{range pips .N .N .Of}}<i class="p{{.}}"></i>{{end}}<span>{{.N}} of {{.Of}}</span></span>{{end}}
+
+{{define "board-legend"}}<div class="legend" aria-label="How to read the standings">
+  <span><span class="lane demo" style="--z:0%;--v:74%;--a:62%;--b:86%"><i class="z"></i><i class="f"></i><i class="e"></i><i class="t" style="left:58%"></i><i class="t" style="left:70%"></i><i class="t" style="left:79%"></i><i class="t" style="left:90%"></i></span>rating, its ± range, and each round behind it</span>
+  <span><span class="lane demo q" style="--z:0%;--v:74%"><i class="z"></i><i class="f"></i></span>still qualifying</span>
+  {{if not .}}<span><span class="form demo"><i class="ok"><b style="height:70%"></b></i><i class="best"><b style="height:90%"></b></i><i class="fail"></i><i></i><i class="now"></i></span>a round · best of it · failed · not in it · being run now</span>{{end}}
   <a href="/glossary#rating">what the numbers mean</a>
 </div>{{end}}
 
@@ -152,6 +181,46 @@
 {{define "life"}}<ol class="track">
   <li class="{{if eq .Status "scheduled"}}here{{else}}done{{end}}"><span class="st">Announced</span><span class="when">{{if eq .Status "scheduled"}}draws <span data-until="{{.DrawAt}}">{{ago .DrawAt}}</span>{{else}}{{hm .DrawAt}}{{end}}</span></li>
   <li class="{{if ne .Status "scheduled"}}done{{end}}"><span class="st">Drawn</span><span class="when">{{if .DrawnAt}}{{ago .DrawnAt}}{{else}}&nbsp;{{end}}</span></li>
-  <li class="{{if eq .Status "open"}}here{{else if eq .Status "settled"}}done{{end}}"><span class="st">Running</span><span class="when">{{if eq .Status "open"}}{{.Edited}} of {{.Entries}} run{{else}}&nbsp;{{end}}</span></li>
+  <li class="{{if eq .Status "open"}}here{{else if eq .Status "settled"}}done{{end}}"><span class="st">Running</span><span class="when">{{if eq .Status "open"}}{{.Edited}} of {{.Entries}} run{{else if eq .Status "settled"}}{{.Entries}} {{plural .Entries "entry" "entries"}}{{else}}&nbsp;{{end}}</span></li>
   <li class="{{if eq .Status "settled"}}done{{end}}"><span class="st">Settled</span><span class="when">{{if .SettledAt}}{{ago .SettledAt}}{{else}}&nbsp;{{end}}</span></li>
 </ol>{{end}}
+
+{{/* A round's entries as a ranking, each gain a bar on one axis. Called with
+     (dict "Entries" entries "S" scale "R" round "Here" on-the-round's-own-page). */}}
+{{define "results"}}{{$s := .S}}{{$r := .R}}{{$here := .Here}}{{$open := ne $r.Status "settled"}}
+{{if not $open}}<div class="board-axis" aria-hidden="true">{{template "axis" $s}}</div>{{end}}
+<table class="board results{{if $open}} sealed{{end}}">
+  <thead><tr>
+    <th class="c-rank">#</th>
+    <th class="c-name">Curator</th>
+    <th class="c-num">Gain</th>
+    <th class="c-lane">{{if $open}}Where it has got to{{else}}{{template "axis" $s}}{{end}}</th>
+    {{if not $open}}<th class="c-loss">Exam loss{{if has $r.BaselineLoss}}<small>unedited {{f3 (ptr $r.BaselineLoss)}}</small>{{end}}</th>
+    <th class="c-kept">Pages kept</th>
+    <th class="c-sure">How sure</th>{{end}}
+  </tr></thead>
+  <tbody>
+    {{range .Entries}}<tr>
+      <td class="c-rank">{{if .Place}}{{.Place}}{{else}}<span class="muted">–</span>{{end}}</td>
+      <td class="c-name"><a class="name" href="/editors/{{short .EditorID}}">{{.Name}}</a> <span class="by">v{{.Version}} · <a href="/u/{{.Owner}}">{{.Owner}}</a></span>{{if and .Settled (not .Valid)}} <span class="chip bad">{{if .Void}}not run{{else}}failed{{end}}</span>{{if .Reason}}<span class="reason">{{.Reason}}</span>{{end}}{{end}}</td>
+      {{if .Settled}}
+        {{if .Valid}}
+        <td class="c-num"><b{{if lt .Gain 0.0}} class="neg"{{end}}>{{gain .Gain}}</b></td>
+        <td class="c-lane">{{template "lane" (dict "S" $s "V" .Gain)}}</td>
+        <td class="c-loss"><span class="k">loss </span>{{f3 .Loss}}</td>
+        <td class="c-kept">{{if .HasStats}}<span class="k">kept </span>{{pct1 .Script.KeptDocFrac}}{{else}}<span class="muted d-only">—</span>{{end}}</td>
+        {{else}}
+        <td class="c-num">{{if .Void}}<span class="muted">—</span>{{else}}<b>0.000</b><span class="pm">scores 0</span>{{end}}</td>
+        <td class="c-lane">{{if not .Void}}{{template "lane" (dict "S" $s "V" 0.0 "Fail" true)}}{{end}}</td>
+        <td class="c-loss"><span class="muted d-only">—</span></td>
+        <td class="c-kept"><span class="muted d-only">—</span></td>
+        {{end}}
+        <td class="c-sure">{{if $here}}<a class="why" href="#e-{{short .EditorID}}">{{template "sure" .EntryView}}</a>{{else}}<a class="why" href="/rounds/{{.Round}}#e-{{short .EditorID}}">{{template "sure" .EntryView}}</a>{{end}}{{if .Together}} <a class="tag red" href="{{if not $here}}/rounds/{{.Round}}{{end}}#e-{{short .EditorID}}" title="Two established verifiers measured different gains for one of its scripts, and nobody was there to say which was right. The script's gain is midway between them.">disputed</a>{{end}}{{if .Disputed}} <a class="tag red" href="{{if not $here}}/rounds/{{.Round}}{{end}}#e-{{short .EditorID}}" title="Graders whose grade of one of its scripts was further from the script's gain than the tolerance">{{.Disputed}} differed</a>{{end}}</td>
+      {{else}}
+        <td class="c-num"><span class="muted">sealed</span></td>
+        <td class="c-lane"><span class="stages s-{{.Stage}}" role="img" aria-label="{{if eq .Stage "editing"}}waiting to be run{{else}}run, being graded{{end}}"><i></i><i></i><i></i><span>{{if eq .Stage "editing"}}waiting to be run{{else}}run · being graded{{end}}</span></span></td>
+
+      {{end}}
+    </tr>{{end}}
+  </tbody>
+</table>{{end}}

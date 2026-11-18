@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"html/template"
 	"math"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -64,42 +65,6 @@ func tickLabel(v, step float64) string {
 		s = "−" + s[1:]
 	}
 	return s
-}
-
-// sparkSVG is a row's history at a glance: its gain in each round it has run, against the
-// zero line of the unedited baseline.
-func sparkSVG(gains []float64) template.HTML {
-	const w, h, pad = 96, 26, 3
-	if len(gains) == 0 {
-		return ""
-	}
-	lo, hi := 0.0, 0.0
-	for _, g := range gains {
-		lo, hi = math.Min(lo, g), math.Max(hi, g)
-	}
-	if hi-lo < 1e-9 {
-		hi = lo + 1
-	}
-	y := func(v float64) float64 { return pad + (hi-v)/(hi-lo)*(h-2*pad) }
-	x := func(i int) float64 {
-		if len(gains) == 1 {
-			return w - pad
-		}
-		return pad + float64(i)/float64(len(gains)-1)*(w-2*pad)
-	}
-	var b svg
-	b.open(w, h, "spark", fmt.Sprintf("gain over %d rounds", len(gains)))
-	b.f(`<line class="axis" x1="0" x2="%d" y1="%.1f" y2="%.1f"/>`, w, y(0), y(0))
-	if len(gains) > 1 {
-		b.WriteString(`<polyline class="ln" points="`)
-		for i, g := range gains {
-			b.f("%.1f,%.1f ", x(i), y(g))
-		}
-		b.WriteString(`"/>`)
-	}
-	last := len(gains) - 1
-	b.f(`<circle class="dot" cx="%.1f" cy="%.1f" r="2.4"/>`, x(last), y(gains[last]))
-	return b.done()
 }
 
 // ticks lists the gridline values from lo to hi. It counts them rather than adding step
@@ -184,64 +149,6 @@ func recordChart(recs []RecordRow) template.HTML {
 	b.f(`<text x="%d" y="%d" text-anchor="start">%s</text>`, left, h-8, time.Unix(t0, 0).UTC().Format("2 Jan 2006"))
 	b.f(`<text x="%d" y="%d" text-anchor="end">now</text>`, w-right, h-8)
 	return b.done()
-}
-
-// gainChart shows an editor's gain in each of its rounds, oldest first. Bars above the
-// zero line beat the unedited corpus; bars below made it worse.
-func gainChart(entries []EntryView) template.HTML {
-	var rows []EntryView
-	for i := len(entries) - 1; i >= 0; i-- { // entries come newest first
-		if entries[i].Settled {
-			rows = append(rows, entries[i])
-		}
-	}
-	if len(rows) == 0 {
-		return ""
-	}
-	const w, h, left, right, top, bottom = 720, 230, 46, 12, 22, 28
-	lo, hi := 0.0, 0.0
-	for _, r := range rows {
-		lo, hi = math.Min(lo, r.Gain), math.Max(hi, r.Gain)
-	}
-	if hi-lo < 1e-9 {
-		hi = 0.1
-	}
-	var b svg
-	b.open(w, h, "chart", "Gain in each round")
-	y := b.frame(w, h, left, right, top, bottom, lo, hi, "gain, nats")
-	slot := float64(w-left-right) / float64(len(rows))
-	bar := math.Min(24, math.Max(3, slot-2))
-	for i, r := range rows {
-		cx := left + slot*(float64(i)+0.5)
-		tip := fmt.Sprintf("Round %d · %s nats", r.RoundIdx, signed(r.Gain, 3))
-		if !r.Valid {
-			tip = fmt.Sprintf("Round %d · failed, scored as unedited", r.RoundIdx)
-			b.f(`<circle class="void" cx="%.1f" cy="%.1f" r="3.5"/>`, cx, y(0))
-		} else {
-			cls, y0, y1 := "bar", y(r.Gain), y(0)
-			if r.Gain < 0 {
-				cls, y0, y1 = "bar neg", y(0), y(r.Gain)
-			}
-			b.WriteString(barPath(cls, cx-bar/2, y0, bar, math.Max(1, y1-y0), r.Gain >= 0))
-		}
-		b.f(`<rect class="hit" x="%.1f" y="%d" width="%.1f" height="%d" data-tip="%s"/>`, cx-slot/2, top, slot, h-top-bottom, esc(tip))
-	}
-	b.f(`<text x="%d" y="%d" text-anchor="start">round %d</text>`, left, h-8, rows[0].RoundIdx)
-	if len(rows) > 1 {
-		b.f(`<text x="%d" y="%d" text-anchor="end">round %d</text>`, w-right, h-8, rows[len(rows)-1].RoundIdx)
-	}
-	return b.done()
-}
-
-// barPath is a bar with its data end rounded and its base square on the baseline.
-func barPath(class string, x, y, w, h float64, up bool) string {
-	r := math.Min(4, math.Min(w/2, h))
-	if up {
-		return fmt.Sprintf(`<path class="%s" d="M%.1f,%.1f V%.1f Q%.1f,%.1f %.1f,%.1f H%.1f Q%.1f,%.1f %.1f,%.1f V%.1f Z"/>`,
-			class, x, y+h, y+r, x, y, x+r, y, x+w-r, x+w, y, x+w, y+r, y+h)
-	}
-	return fmt.Sprintf(`<path class="%s" d="M%.1f,%.1f V%.1f Q%.1f,%.1f %.1f,%.1f H%.1f Q%.1f,%.1f %.1f,%.1f V%.1f Z"/>`,
-		class, x, y, y+h-r, x, y+h, x+r, y+h, x+w-r, x+w, y+h, x+w, y+h-r, y)
 }
 
 // sourceChart compares the exam loss on each kind of text: the unedited corpus (hollow)
@@ -382,17 +289,38 @@ func curveChart(curve [][]float64) template.HTML {
 	return b.done()
 }
 
-// --- bars in tables -------------------------------------------------------------------------
+// --- marks on a shared axis -----------------------------------------------------------------
 
 // barScale puts every number of one table on one axis, so rows can be compared by the length
 // of their bars without reading a digit. Zero, the unedited data, is always on it: a bar
 // that reaches right of it beat doing nothing.
-type barScale struct{ Lo, Hi, Step float64 }
+type barScale struct {
+	Lo, Hi, Step float64
+	// Worth marks where on the axis a gain is worth 2, 4, 8 times as much unedited data,
+	// read off the season's measured curve. Only the standings carry them.
+	Worth []barTick
+	// Zero is what the axis calls its zero: the unedited pages, unless it is something else.
+	Zero string
+}
 
 type barTick struct {
 	Style template.CSS
 	Label string
 	Zero  bool
+	Edge  string // "end" or "start" when the label would run off that end of the axis
+}
+
+// tick is one label on the axis, turned inward if it sits at either end.
+func (s barScale) tick(v float64, label string, zero bool) barTick {
+	t := barTick{Style: s.Pos(v), Label: label, Zero: zero}
+	switch x := s.X(v); {
+	case zero:
+	case x > 95:
+		t.Edge = "end"
+	case x < 4:
+		t.Edge = "start"
+	}
+	return t
 }
 
 func newBarScale(vals []float64) barScale {
@@ -413,9 +341,14 @@ func newBarScale(vals []float64) barScale {
 	return barScale{Lo: lo, Hi: hi, Step: niceStep(hi-lo, 4)}
 }
 
-// X is where a value falls along the bar, in percent.
+// X is where a value falls along the axis, in percent.
 func (s barScale) X(v float64) float64 {
 	return math.Max(0, math.Min(100, (v-s.Lo)/(s.Hi-s.Lo)*100))
+}
+
+// Pos places one mark on the axis.
+func (s barScale) Pos(v float64) template.CSS {
+	return template.CSS(fmt.Sprintf("left:%.2f%%", s.X(v)))
 }
 
 // Bar places one row's bar: zero, the value, and the ends of its ± whisker if it has one.
@@ -439,37 +372,45 @@ func (s barScale) Ticks() []barTick {
 		if v > 0 {
 			label = "+" + label
 		}
-		out = append(out, barTick{Style: template.CSS(fmt.Sprintf("left:%.2f%%", s.X(v))), Label: label, Zero: v == 0})
+		if v < 0 {
+			label = "−" + label[1:]
+		}
+		if v == 0 {
+			if label = s.Zero; label == "" {
+				label = "unedited"
+			}
+		}
+		out = append(out, s.tick(v, label, v == 0))
 	}
 	return out
 }
 
-// boardScale is the axis for the standings: every rating and the reach of its whisker.
-func boardScale(groups ...[]*BoardRow) barScale {
-	var vals []float64
-	for _, rows := range groups {
-		for _, r := range rows {
-			if r.Rating == nil {
-				continue
-			}
-			vals = append(vals, *r.Rating)
-			if r.SE != nil {
-				vals = append(vals, *r.Rating-*r.SE, *r.Rating+*r.SE)
-			}
+// worthTicks marks, on a scale of gains, where a gain is worth each measured multiple of
+// the unedited data. The curve is the season's; nothing is drawn past its last point.
+func (s *Season) worthTicks(curveKey string, sc barScale) []barTick {
+	pts := append([][2]float64(nil), s.Curves[curveKey]...)
+	sort.Slice(pts, func(i, j int) bool { return pts[i][0] < pts[j][0] })
+	base := math.NaN()
+	for _, p := range pts {
+		if p[0] == 1 {
+			base = p[1]
 		}
 	}
-	return newBarScale(vals)
-}
-
-// roundScale is the axis for one round's results: every settled gain in it.
-func roundScale(entries []EntryView) barScale {
-	var vals []float64
-	for _, e := range entries {
-		if e.Settled && e.Valid {
-			vals = append(vals, e.Gain)
-		}
+	if math.IsNaN(base) {
+		return nil
 	}
-	return newBarScale(vals)
+	var out []barTick
+	for _, p := range pts {
+		g := base - p[1]
+		if p[0] < 1 || g < sc.Lo || g > sc.Hi {
+			continue
+		}
+		out = append(out, sc.tick(g, trimZero(strconv.FormatFloat(p[0], 'f', 1, 64))+"×", p[0] == 1))
+	}
+	if len(out) < 2 {
+		return nil
+	}
+	return out
 }
 
 // pips are a round's entries as marks, in order: 2 for settled, 1 for run at least once,
@@ -485,17 +426,6 @@ func pips(settled, edited, total int) []int {
 		}
 	}
 	return out
-}
-
-// roundsScale is the axis for the list of rounds: each one's best gain.
-func roundsScale(rounds []roundSummary) barScale {
-	var vals []float64
-	for _, r := range rounds {
-		if r.BestGain != nil {
-			vals = append(vals, *r.BestGain)
-		}
-	}
-	return newBarScale(vals)
 }
 
 // agree places one grade beside the gain it is checked against: the middle of the strip is

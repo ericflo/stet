@@ -12,34 +12,26 @@
   </div>
 </div>
 <div class="wrap">
-  <div class="stats">
-    {{if $a.Anchor}}<div><div class="k">Organisers' account</div><div class="v" style="font-size:22px">established from the start</div><div class="cap">so a season can begin; checked like anyone else</div></div>
-    {{else}}<div><div class="k">Grades that agreed</div><div class="v">{{index $d.V "validated"}}{{if not (index $d.V "established")}}<small>of {{index $d.V "establish_after"}}</small>{{end}}</div><div class="cap">{{if index $d.V "established"}}established: its grades make scores{{else}}to be established and have its grades make scores{{end}}</div></div>
-    <div><div class="k">Last two weeks</div><div class="v">{{index $d.V "recent"}}</div><div class="cap">grades that agreed lately</div></div>{{end}}
-    <div><div class="k">Curators run</div><div class="v">{{index $d.V "runs"}}</div><div class="cap">entrants' programs run for the leaderboard</div></div>
-    <div><div class="k">GPU time given</div><div class="v">{{f1 (index $d.V "gpu_hours")}}<small>hours</small></div><div class="cap">running and grading</div></div>
-  </div>
+  <dl class="nums inline top">
+    {{if $a.Anchor}}<div><dt>Organisers' account</dt><dd><b class="word">established from the start</b><small>so a season can begin; checked like anyone else</small></dd></div>
+    {{else}}<div><dt>Grades that agreed</dt><dd><b>{{index $d.V "validated"}}</b>{{if not (index $d.V "established")}} <span class="by">of {{index $d.V "establish_after"}}</span>{{end}}<small>{{if index $d.V "established"}}established: its grades make scores{{else}}to be established and have its grades make scores{{end}}</small></dd></div>
+    <div><dt>Last two weeks</dt><dd><b>{{index $d.V "recent"}}</b><small>grades that agreed lately</small></dd></div>{{end}}
+    <div><dt>Curators run</dt><dd><b>{{index $d.V "runs"}}</b><small>entrants' programs run for the leaderboard</small></dd></div>
+    <div><dt>GPU time given</dt><dd><b>{{f1 (index $d.V "gpu_hours")}}</b><small>hours, running and grading</small></dd></div>
+  </dl>
   <h2>Curators entered</h2>
-  <div class="table-wrap">
-    {{if $d.Editors}}
-    <table class="rt">
-      <thead><tr><th>Curator</th><th class="r">Rating<small>nats better than unedited</small></th><th class="r">Worth<small>as good as this much unedited data</small></th><th class="r">Rounds</th><th>Entered</th></tr></thead>
-      <tbody>
-        {{range $d.Editors}}<tr>
-          <td class="main"><a class="name" href="/editors/{{short .E.ID}}">{{.E.Name}}</a><span class="by">v{{.E.Version}}</span>{{with .Row}}<span class="tags">{{if .Record}}<a class="tag red" href="/glossary#record">record holder</a>{{end}}{{if .Ladder}}<a class="tag green" href="/glossary#ladder">on the ladder</a>{{end}}{{if .Provisional}}<a class="tag amber" href="/glossary#qualifying">qualifying</a>{{end}}{{if .Rank}}<span class="tag">ranked #{{.Rank}}</span>{{end}}</span>{{end}}</td>
-          {{with .Row}}
-          <td class="r big" data-label="Rating">{{gain (ptr .Rating)}}{{if has .SE}}<span class="pm">± {{f3 (ptr .SE)}}</span>{{end}}</td>
-          <td class="r mult" data-label="Worth">{{mult .Multiplier .Capped}}</td>
-          <td class="r num" data-label="Rounds">{{.Rounds}}</td>
-          {{else}}<td class="r dim" data-label="Rating">—</td><td class="r dim" data-label="Worth">—</td><td class="r dim" data-label="Rounds">0</td>{{end}}
-          <td class="dim wide" data-label="Entered">{{date .E.At}}</td>
-        </tr>{{end}}
-      </tbody>
-    </table>
-    {{else}}
-    <div class="empty">Nothing of theirs has run in a round yet.</div>
-    {{end}}
-  </div>
+  {{if or $d.Board.Rated $d.Board.Qual}}
+  <div class="fig">{{template "board" $d.Board}}</div>
+  {{template "board-legend"}}
+  {{end}}
+  {{if $d.Other}}
+  <ul class="others">
+    {{range $d.Other}}<li><a class="name" href="/editors/{{short .E.ID}}">{{.E.Name}}</a> <span class="by">v{{.E.Version}} · entered {{date .E.At}}</span>{{if eq .E.Status "withdrawn"}} <span class="tag">replaced</span>{{else}} <span class="tag blue">no score yet</span>{{end}}{{with .Row}} <span class="num">{{gain (ptr .Rating)}}</span> <span class="by">over {{.Rounds}} {{plural .Rounds "round" "rounds"}}</span>{{end}}</li>{{end}}
+  </ul>
+  {{end}}
+  {{if not (or $d.Board.Rated $d.Board.Qual $d.Other)}}
+  <div class="fig"><div class="empty">Nothing of theirs has run in a round yet.</div></div>
+  {{end}}
 </div>
 </main>
 {{end}}

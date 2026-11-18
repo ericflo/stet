@@ -18,68 +18,60 @@
 <div class="wrap">
   {{if not $row}}<p class="banner blue">{{if $d.Results}}In a round now: its score is <a class="term" href="/glossary#sealed">sealed</a> until that round settles.{{else}}Waiting for its first round.{{end}}</p>{{end}}
 
-  {{with $row}}
-  <div class="stats">
-    <div><div class="k">Rank</div><div class="v">{{if .Rank}}#{{.Rank}}<small>of {{$d.Ranked}}</small>{{else if .Provisional}}<span class="muted" style="font-size:22px">qualifying</span>{{else}}<span class="muted">—</span>{{end}}</div><div class="cap">{{if .Provisional}}{{template "dots" (dict "N" .Rounds "Of" $d.RatedRounds)}} rounds to be ranked{{else if not .Rank}}replaced by a newer version{{end}}</div></div>
-    <div><div class="k">Rating</div><div class="v">{{gain (ptr .Rating)}}</div><div class="cap">{{if has .SE}}± {{f3 (ptr .SE)}} · {{end}}nats better than unedited</div></div>
-    <div><div class="k">Worth</div><div class="v">{{mult .Multiplier .Capped}}</div><div class="cap">as much unedited data</div></div>
-    <div><div class="k">Rounds</div><div class="v">{{.Rounds}}</div><div class="cap">{{if .Invalid}}<span class="neg">{{.Invalid}} failed</span>{{else}}none failed{{end}}</div></div>
-  </div>
-  {{end}}
-
-  {{if $d.GainChart}}
-  <figure class="figure"><h3>Gain, round by round</h3><p class="how">Above zero beats unedited pages. Even bars: not luck.</p><div class="plot">{{$d.GainChart}}</div></figure>
-  {{end}}
-
-  {{with $d.Latest}}
-  <h2>Its latest round: <a href="/rounds/{{.Round}}">round {{.RoundIdx}}</a></h2>
-  <div class="stats" style="margin-top:0">
-    <div><div class="k">Exam loss</div><div class="v">{{f3 .Loss}}</div><div class="cap">vs {{f3 .Baseline}} unedited · gain {{gain .Gain}}</div></div>
-    {{if .HasStats}}
-    <div><div class="k">Pages kept</div><div class="v">{{pct1 .Script.KeptDocFrac}}</div><div class="cap">of the documents drawn</div></div>
-    <div><div class="k">Read</div><div class="v">{{f1 .Script.Passes}}<small>times over</small></div><div class="cap">passes over what it kept</div></div>
-    <div><div class="k">Its own words</div><div class="v">{{pct1 .Script.InkFrac}}</div><div class="cap">of tokens not copied</div></div>
-    {{else}}
-    <div><div class="k">Gain</div><div class="v">{{gain .Gain}}</div><div class="cap">nats below the unedited loss</div></div>
-    <div><div class="k">How sure</div><div class="v" style="font-size:18px">{{template "sure" .}}</div><div class="cap">{{.NRuns}} {{plural .NRuns "run" "runs"}}</div></div>
-    {{end}}
-  </div>
-  <div class="grid2">
-    {{if $d.SourceChart}}<figure class="figure"><h3>Where the gain comes from</h3><p class="how">Exam loss by kind of text. Hollow: unedited. Filled: this curator. Left is better.</p><div class="plot">{{$d.SourceChart}}</div></figure>{{end}}
-    {{if $d.CurveChart}}<figure class="figure"><h3>The model, learning from it</h3><p class="how">Training loss on its pages. Low here is not the goal; the exam is.</p><div class="plot">{{$d.CurveChart}}</div></figure>{{end}}
+  {{with $row}}{{$b := $d.Stand}}{{$me := $d.StandRow}}
+  <div class="standing">
+    <dl class="nums">
+      <div><dt>Rank</dt><dd>{{if .Rank}}<b>{{.Rank}}</b><small>of {{$d.Ranked}}</small>{{else if .Provisional}}<b class="word">qualifying</b><small>{{template "dots" (dict "N" .Rounds "Of" $d.RatedRounds)}} rounds</small>{{else}}<b class="word muted">none</b><small>replaced by a newer version</small>{{end}}</dd></div>
+      <div><dt>Rating</dt><dd><b>{{gain (ptr .Rating)}}</b><small>{{if has .SE}}±{{f3 (ptr .SE)}} · {{end}}nats better than unedited</small></dd></div>
+      <div><dt>Worth</dt><dd><b>{{mult .Multiplier .Capped}}</b><small>as much unedited data</small></dd></div>
+      <div><dt>Rounds</dt><dd><b>{{.Rounds}}</b><small>{{if .Invalid}}<span class="neg">{{.Invalid}} failed</span>{{else}}none failed{{end}}</small></dd></div>
+    </dl>
+    <div class="st-where">
+      <h3>Where it stands <small>its rating among every curator's, on the leaderboard's axis</small></h3>
+      <div class="board-axis on" aria-hidden="true">{{template "axis" $b.S}}</div>
+      <span class="lane field{{if .Provisional}} q{{end}}{{if neg (ptr .Rating)}} neg{{end}}" style="{{$b.S.Bar (ptr .Rating) .SE}}" role="img" aria-label="rating {{gain (ptr .Rating)}}{{if .Rank}}, ranked {{.Rank}} of {{$d.Ranked}}{{end}}">{{range $b.S.Ticks}}{{if not .Zero}}<i class="g" style="{{.Style}}"></i>{{end}}{{end}}<i class="z"></i>{{range $d.Field}}<i class="o" style="{{.}}"></i>{{end}}<i class="f"></i>{{if .SE}}<i class="e"></i>{{end}}{{range $me.Rug}}<i class="t" style="{{.}}"></i>{{end}}</span>
+      <div class="legend"><span><span class="lane demo" style="--z:0%;--v:74%;--a:62%;--b:86%"><i class="z"></i><i class="f"></i><i class="e"></i><i class="t" style="left:58%"></i><i class="t" style="left:79%"></i></span>its rating, ± range, and each of its rounds</span><span><span class="lane demo field"><i class="o" style="left:30%"></i><i class="o" style="left:70%"></i></span>every other curator</span></div>
+    </div>
+    {{if $me.Form}}<div class="st-when">
+      <h3>Round by round <small>rounds {{$b.From}} to {{$b.To}}</small></h3>
+      {{template "form" $me.Form}}
+      <div class="legend"><span><span class="form demo"><i class="ok"><b style="height:70%"></b></i><i class="best"><b style="height:90%"></b></i><i class="fail"></i><i></i><i class="now"></i></span>a round · best of it · failed · not in it · being run now</span></div>
+    </div>{{end}}
+    {{if $d.Vs}}{{$race := $d.Race}}<div class="st-vs">
+      <h3>{{if $d.Holds}}It holds the record <small>the nearest to taking it, on the rounds each shared with it</small>{{else}}Against the record <small>{{with $race.Holder}}held by <a href="/editors/{{short .ID}}">{{.Name}}</a>: this curator's gain less {{.Name}}'s, on the rounds both ran{{else}}nobody holds it yet: its gain over unedited pages, round by round{{end}}</small>{{end}}</h3>
+      {{template "versus" (dict "Race" $race "Rows" $d.Vs "Looks" $.Season.Record.Looks)}}
+      <div class="legend"><span><span class="ml"></span>right of this line is far enough ahead to take the record, if it holds up when tested</span><a href="/leaderboard#record">the whole race</a></div>
+    </div>{{end}}
   </div>
   {{end}}
 
   <h2>Every round it played</h2>
-  <div class="table-wrap">
-    {{if $d.Results}}
-    <table class="rt">
-      <thead><tr><th>Round</th><th class="r">Gain<small>nats below unedited</small></th><th class="r">Exam loss</th><th class="r">Unedited<small>loss to beat</small></th><th>How sure</th><th class="r">Edit took</th><th>Script<small>download it</small></th><th>Graded by</th></tr></thead>
+  <div class="fig">
+    {{if $d.Played}}{{$s := $d.PlayedScale}}
+    <div class="board-axis flush" aria-hidden="true">{{template "axis" $s}}</div>
+    <table class="board played">
+      <thead><tr>
+        <th class="c-name">Round</th>
+        <th class="c-num">Gain</th>
+        <th class="c-lane">{{template "axis" $s}}</th>
+        <th class="c-place">Came</th>
+        <th class="c-loss">Exam loss<small>against unedited</small></th>
+        <th class="c-sure">How sure</th>
+      </tr></thead>
       <tbody>
-        {{range $d.Results}}<tr>
-          <td class="main"><a class="name" href="/rounds/{{.Round}}">Round {{.RoundIdx}}</a> <span class="by num">{{.Round}}</span>
-            {{if not .Settled}}<span class="tags"><span class="chip live" style="margin-left:8px">{{if eq .Stage "editing"}}waiting to be run{{else}}run; being graded{{end}}</span></span>
-            {{else if not .Valid}}<span class="tags"><span class="chip bad" style="margin-left:8px">{{if .Void}}not run{{else}}failed{{end}}</span></span>{{if .Reason}}<span class="reason">{{.Reason}}</span>{{end}}{{end}}</td>
+        {{range $d.Played}}<tr>
+          <td class="c-name"><a class="name" href="/rounds/{{.Round}}">Round {{.RoundIdx}}</a>
+            {{if not .Settled}} <span class="chip live">running</span>
+            {{else if not .Valid}} <span class="chip bad">{{if .Void}}not run{{else}}failed{{end}}</span>{{if .Reason}}<span class="reason">{{.Reason}}</span>{{end}}{{end}}{{if and .Settled .ScriptSHA}}<span class="sub">script <a class="num" href="/api/v1/scripts/{{.ScriptSHA}}" title="Download the edit script ({{bytes .ScriptSize}} unpacked)">{{tiny .ScriptSHA}}</a>{{with .Edit}} · written in {{f1 .Seconds}}s{{end}}</span>{{end}}</td>
           {{if .Settled}}
-            {{if .Valid}}
-            <td class="r big {{if gt .Gain 0.0}}pos{{else if lt .Gain 0.0}}neg{{end}}" data-label="Gain">{{gain .Gain}}</td>
-            <td class="r num" data-label="Exam loss">{{f3 .Loss}}</td>
-            <td class="r num" data-label="Unedited">{{f3 .Baseline}}</td>
-            {{else}}
-            <td class="r big" data-label="Gain">{{if .Void}}<span class="muted">—</span><span class="pm">does not count</span>{{else}}0.000<span class="pm">a failed round scores 0</span>{{end}}</td>
-            <td class="r num" data-label="Exam loss"><span class="muted">—</span></td>
-            <td class="r num" data-label="Unedited">{{if .Baseline}}{{f3 .Baseline}}{{else}}<span class="muted">—</span>{{end}}</td>
-            {{end}}
-            <td class="wide" data-label="How sure">{{template "sure" .}}{{if .NRuns}} <a class="by nowrap" href="/rounds/{{.Round}}#runs">{{.NRuns}} {{plural .NRuns "run" "runs"}}</a>{{end}}{{if .Together}} <a class="tag red" href="/rounds/{{.Round}}#grades">disputed</a>{{end}}{{if .Disputed}} <a class="tag red" href="/rounds/{{.Round}}#grades">{{.Disputed}} differed</a>{{end}}</td>
-            <td class="r num" data-label="Edit took">{{with .Edit}}{{f1 .Seconds}}s{{else}}<span class="muted">—</span>{{end}}</td>
-            <td class="num" data-label="Script">{{if .ScriptSHA}}<a href="/api/v1/scripts/{{.ScriptSHA}}" title="Download the edit script ({{bytes .ScriptSize}} unpacked)">{{tiny .ScriptSHA}}</a>{{else}}<span class="muted">—</span>{{end}}</td>
-            <td class="dim" data-label="Graded by">{{if .Verifiers}}{{join .Verifiers ", "}}{{else}}—{{end}}</td>
+            <td class="c-num">{{if .Valid}}<b{{if lt .Gain 0.0}} class="neg"{{end}}>{{gain .Gain}}</b>{{else if .Void}}<span class="muted">—</span><span class="pm">does not count</span>{{else}}<b>0.000</b><span class="pm">a failed round scores 0</span>{{end}}</td>
+            <td class="c-lane"><span class="lane dots mine{{if lt .Gain 0.0}} neg{{end}}"{{if .Bar}} style="{{.Bar}}"{{end}} aria-hidden="true">{{range $s.Ticks}}{{if not .Zero}}<i class="g" style="{{.Style}}"></i>{{end}}{{end}}<i class="z" style="{{$s.Pos 0.0}}"></i>{{if .Bar}}<i class="f"></i>{{end}}{{range .Field}}<i class="d" style="{{.Style}}" data-tip="{{.Tip}}"></i>{{end}}</span></td>
+            <td class="c-place">{{if .Place}}<b>{{.Place}}</b><span class="k"> of {{.Of}}</span>{{else}}<span class="muted d-only">—</span>{{end}}</td>
+            <td class="c-loss">{{if .Valid}}<span class="k">loss </span>{{f3 .Loss}}<span class="vs"> / {{f3 .Baseline}}</span>{{else if .Baseline}}<span class="muted">—</span><span class="vs"> / {{f3 .Baseline}}</span>{{end}}</td>
+            <td class="c-sure"><a class="why" href="/rounds/{{.Round}}#e-{{short .EditorID}}">{{template "sure" .EntryView}}</a>{{if .Together}} <a class="tag red" href="/rounds/{{.Round}}#e-{{short .EditorID}}">disputed</a>{{end}}{{if .Disputed}} <a class="tag red" href="/rounds/{{.Round}}#e-{{short .EditorID}}">{{.Disputed}} differed</a>{{end}}{{if .Verifiers}}<span class="sub">graded by {{join .Verifiers ", "}}</span>{{end}}</td>
           {{else}}
-            <td class="r big" data-label="Gain"><span class="muted">sealed</span></td>
-            <td class="r num" data-label="Exam loss"><span class="muted">sealed</span></td>
-            <td class="r num" data-label="Unedited"><span class="muted">sealed</span></td>
-            <td class="wide" data-label="How sure"><span class="muted">published when the round settles</span></td>
-            <td></td><td></td><td></td>
+            <td class="c-num"><span class="muted">sealed</span></td>
+            <td class="c-lane" colspan="4"><span class="stages s-{{.Stage}}" role="img" aria-label="{{if eq .Stage "editing"}}waiting to be run{{else}}run, being graded{{end}}"><i></i><i></i><i></i><span>{{if eq .Stage "editing"}}waiting to be run{{else}}run; being graded{{end}} · published when the round settles</span></span></td>
           {{end}}
         </tr>{{end}}
       </tbody>
@@ -88,8 +80,21 @@
     <div class="empty">Drawn, but not yet run.</div>
     {{end}}
   </div>
+  {{if $d.Played}}<div class="legend"><span><span class="lane dots mine demo" style="--z:0%;--v:70%"><i class="z" style="left:0"></i><i class="f"></i><i class="d" style="left:40%"></i><i class="d" style="left:88%"></i></span>its gain, and every other entry in that round</span></div>{{template "sure-key"}}{{end}}
 
-  {{if $d.Results}}{{template "sure-key"}}{{end}}
+  {{with $d.Latest}}
+  <h2>Inside its latest round: <a href="/rounds/{{.Round}}">round {{.RoundIdx}}</a></h2>
+  {{if .HasStats}}<dl class="nums inline">
+    <div><dt>Pages kept</dt><dd><b>{{pct1 .Script.KeptDocFrac}}</b><small>of the documents drawn</small></dd></div>
+    <div><dt>Read</dt><dd><b>{{f1 .Script.Passes}}</b><small>times over what it kept</small></dd></div>
+    <div><dt>Its own words</dt><dd><b>{{pct1 .Script.InkFrac}}</b><small>of tokens not copied</small></dd></div>
+    <div><dt>Exam loss</dt><dd><b>{{f3 .Loss}}</b><small>against {{f3 .Baseline}} unedited</small></dd></div>
+  </dl>{{end}}
+  <div class="grid2">
+    {{if $d.SourceChart}}<figure class="figure"><h3>Where the gain comes from</h3><p class="how">Exam loss by kind of text. Hollow: unedited. Filled: this curator. Left is better.</p><div class="plot">{{$d.SourceChart}}</div></figure>{{end}}
+    {{if $d.CurveChart}}<figure class="figure"><h3>The model, learning from it</h3><p class="how">Training loss on its pages. Low here is not the goal; the exam is.</p><div class="plot">{{$d.CurveChart}}</div></figure>{{end}}
+  </div>
+  {{end}}
 
   <h2>Its code</h2>
   <p class="lead">Public from its first round. Start from it:</p>

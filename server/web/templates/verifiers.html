@@ -8,31 +8,37 @@
   </div>
 </div>
 <div class="wrap">
-  <div class="stats">
-    <div><div class="k">Verifiers</div><div class="v">{{len $d.Verifiers}}</div><div class="cap">{{$d.Established}} <a class="term" href="/glossary#established">established</a>: their grades make scores</div></div>
-    <div><div class="k">Grades that agreed</div><div class="v">{{comma $d.Validated}}</div><div class="cap">landed within {{f2 $d.Tolerance.Grade}} nats of the score: how standing is earned</div></div>
-    <div><div class="k">Curators run</div><div class="v">{{comma $d.Runs}}</div><div class="cap">runs of entrants' programs, in a sandbox</div></div>
-    <div><div class="k">GPU time given</div><div class="v">{{f1 $d.Hours}}<small>hours</small></div><div class="cap">running and grading, all told</div></div>
-  </div>
+  <dl class="nums inline top">
+    <div><dt>Verifiers</dt><dd><b>{{len $d.Verifiers}}</b><small>{{$d.Established}} <a class="term" href="/glossary#established">established</a>: their grades make scores</small></dd></div>
+    <div><dt>Grades that agreed</dt><dd><b>{{comma $d.Validated}}</b><small>within {{f2 $d.Tolerance.Grade}} nats of the score: how standing is earned</small></dd></div>
+    <div><dt>Curators run</dt><dd><b>{{comma $d.Runs}}</b><small>runs of entrants' programs, in a sandbox</small></dd></div>
+    <div><dt>GPU time given</dt><dd><b>{{f1 $d.Hours}}</b><small>hours, running and grading</small></dd></div>
+  </dl>
 
   <h2>Everyone verifying</h2>
-  <p class="lead">Most active in the last two weeks first. An account becomes <b>established</b> after {{$d.EstablishAfter}} grades that agree with other people's; until then its grades are checks that decide nothing. The <span class="tag blue" style="margin:0">organisers</span> accounts start out established so a season can begin, and count as one person however many machines they have.</p>
-  <div class="table-wrap" id="verifiers" data-live>
+  <p class="lead">Most active in the last two weeks first. An account is <b>established</b> after {{$d.EstablishAfter}} grades that agree with other people's; until then its grades are checks that decide nothing. The <span class="tag blue" style="margin:0">organisers</span> accounts start out established so a season can begin, and count as one person however many machines they have.</p>
+  <div class="fig" id="verifiers" data-live>
     {{if $d.Verifiers}}
-    <table class="rt">
-      <thead><tr><th class="rank">#</th><th>Verifier</th><th class="r">Last 14 days<small>grades that agreed</small></th><th class="r">All time<small>grades that agreed</small></th><th class="r">Runs<small>curators run</small></th><th class="r">Streak<small>agreed in a row</small></th><th class="r">GPU time</th><th>Machine</th><th>Last seen</th></tr></thead>
+    <table class="board people">
+      <thead><tr>
+        <th class="c-rank">#</th>
+        <th class="c-name">Verifier</th>
+        <th class="c-bar">Grades that agreed<small>all time · last 14 days</small></th>
+        <th class="c-bar">Runs<small>curators run</small></th>
+        <th class="c-bar">GPU time</th>
+        <th class="c-streak">Streak<small>agreed in a row</small></th>
+        <th class="c-seen">Machine<small>last seen</small></th>
+      </tr></thead>
       <tbody>
         {{range $i, $v := $d.Verifiers}}<tr>
-          <td class="rank">{{add $i 1}}</td>
-          <td class="main"><span class="rankno" aria-hidden="true">{{add $i 1}}</span><a class="name" href="/u/{{$v.Handle}}">{{$v.Handle}}</a>{{if $v.Anchor}}<span class="tag blue" title="One of the organisers' accounts. It starts out established, and is checked like any other.">organisers</span>{{else if $v.Established}}<a class="tag green" href="/glossary#established">established</a>{{else}}<span class="tag" title="Its grades are checks until {{$d.EstablishAfter}} of them have agreed">{{$v.Validated}} of {{$d.EstablishAfter}} to be established</span>{{end}}</td>
-          {{if $v.Anchor}}<td class="r dim two" colspan="2" data-label="Grades that agreed">established from the start</td>
-          {{else}}<td class="r num" data-label="Last 14 days">{{$v.Recent}}</td>
-          <td class="r num" data-label="All time">{{$v.Validated}}</td>{{end}}
-          <td class="r num" data-label="Curators run">{{$v.Runs}}</td>
-          <td class="r num" data-label="Streak">{{if $v.Anchor}}<span class="muted">·</span>{{else}}{{$v.Streak}}{{end}}</td>
-          <td class="r num" data-label="GPU time">{{gpunum $v.GPUHours}} {{gpuunit $v.GPUHours}}</td>
-          <td class="dim two" data-label="Machine">{{if $v.GPU}}{{$v.GPU}}{{else}}—{{end}}</td>
-          <td class="dim num" data-label="Last seen">{{ago $v.LastSeen}}</td>
+          <td class="c-rank">{{add $i 1}}</td>
+          <td class="c-name"><a class="name" href="/u/{{$v.Handle}}">{{$v.Handle}}</a>{{if $v.Anchor}} <span class="tag blue" title="One of the organisers' accounts. It starts out established, and is checked like any other.">organisers</span>{{else if $v.Established}} <a class="tag green" href="/glossary#established">established</a>{{else}} <span class="tag" title="Its grades are checks until {{$d.EstablishAfter}} of them have agreed">{{template "dots" (dict "N" $v.Validated "Of" $d.EstablishAfter)}} to be established</span>{{end}}</td>
+          {{if $v.Anchor}}<td class="c-bar"><span class="k">grades that agreed </span><span class="note">established from the start</span></td>
+          {{else}}<td class="c-bar"><span class="k">grades that agreed </span><span class="hbar"><i style="{{wide $v.Validated $d.TopAgreed}}"></i><i class="recent" style="{{wide $v.Recent $d.TopAgreed}}"></i></span><b>{{$v.Validated}}</b><span class="sub">{{$v.Recent}} lately</span></td>{{end}}
+          <td class="c-bar"><span class="k">curators run </span><span class="hbar"><i style="{{wide $v.Runs $d.TopRuns}}"></i></span><b>{{$v.Runs}}</b></td>
+          <td class="c-bar"><span class="k">GPU time </span><span class="hbar"><i style="{{wide $v.GPUHours $d.TopHours}}"></i></span><b>{{gpunum $v.GPUHours}}</b><span class="sub">{{gpuunit $v.GPUHours}}</span></td>
+          <td class="c-streak">{{if $v.Anchor}}<span class="muted d-only">·</span>{{else}}<span class="k">streak </span>{{$v.Streak}}{{end}}</td>
+          <td class="c-seen">{{if $v.GPU}}{{$v.GPU}}{{else}}—{{end}}<span class="sub">{{ago $v.LastSeen}}</span></td>
         </tr>{{end}}
       </tbody>
     </table>

@@ -389,39 +389,36 @@ func multText(p *float64, capped bool) string {
 
 func (s *Site) funcs() template.FuncMap {
 	return template.FuncMap{
-		"ago":         ago,
-		"span":        span,
-		"bytes":       humanBytes,
-		"comma":       func(n any) string { return comma(toInt(n)) },
-		"compact":     func(n any) string { return compact(toInt(n)) },
-		"short":       func(id string) string { return clipID(id, 12) },
-		"tiny":        func(id string) string { return clipID(id, 8) },
-		"date":        func(ts int64) string { return time.Unix(ts, 0).UTC().Format("2 Jan 2006") },
-		"datetime":    func(ts int64) string { return time.Unix(ts, 0).UTC().Format("2 Jan 2006, 15:04 UTC") },
-		"iso":         func(ts int64) string { return time.Unix(ts, 0).UTC().Format(time.RFC3339) },
-		"f0":          func(v float64) string { return trimZero(strconv.FormatFloat(v, 'f', 1, 64)) },
-		"f1":          func(v float64) string { return strconv.FormatFloat(v, 'f', 1, 64) },
-		"gpunum":      func(hours float64) string { return gpuTime(hours)[0] },
-		"gpuunit":     func(hours float64) string { return gpuTime(hours)[1] },
-		"f2":          func(v float64) string { return strconv.FormatFloat(v, 'f', 2, 64) },
-		"f3":          func(v float64) string { return strconv.FormatFloat(v, 'f', 3, 64) },
-		"gain":        func(v float64) string { return signed(v, 3) },
-		"ptr":         deref,
-		"has":         func(p *float64) bool { return p != nil },
-		"mult":        multText,
-		"pct":         func(v float64) string { return fmt.Sprintf("%.0f%%", 100*v) },
-		"pct1":        func(v float64) string { return trimZero(fmt.Sprintf("%.1f", 100*v)) + "%" },
-		"spark":       sparkSVG,
-		"add":         func(a, b int) int { return a + b },
-		"sub":         func(a, b int) int { return a - b },
-		"trust":       trustOf,
-		"boardscale":  boardScale,
-		"roundscale":  roundScale,
-		"roundsscale": roundsScale,
-		"agree":       agree,
-		"pips":        pips,
-		"neg":         func(v float64) bool { return v < 0 },
-		"hm":          func(ts int64) string { return time.Unix(ts, 0).UTC().Format("2 Jan, 15:04") },
+		"ago":        ago,
+		"span":       span,
+		"bytes":      humanBytes,
+		"comma":      func(n any) string { return comma(toInt(n)) },
+		"compact":    func(n any) string { return compact(toInt(n)) },
+		"short":      func(id string) string { return clipID(id, 12) },
+		"tiny":       func(id string) string { return clipID(id, 8) },
+		"date":       func(ts int64) string { return time.Unix(ts, 0).UTC().Format("2 Jan 2006") },
+		"datetime":   func(ts int64) string { return time.Unix(ts, 0).UTC().Format("2 Jan 2006, 15:04 UTC") },
+		"iso":        func(ts int64) string { return time.Unix(ts, 0).UTC().Format(time.RFC3339) },
+		"f0":         func(v float64) string { return trimZero(strconv.FormatFloat(v, 'f', 1, 64)) },
+		"f1":         func(v float64) string { return strconv.FormatFloat(v, 'f', 1, 64) },
+		"gpunum":     func(hours float64) string { return gpuTime(hours)[0] },
+		"gpuunit":    func(hours float64) string { return gpuTime(hours)[1] },
+		"f2":         func(v float64) string { return strconv.FormatFloat(v, 'f', 2, 64) },
+		"f3":         func(v float64) string { return strconv.FormatFloat(v, 'f', 3, 64) },
+		"gain":       func(v float64) string { return signed(v, 3) },
+		"ptr":        deref,
+		"has":        func(p *float64) bool { return p != nil },
+		"mult":       multText,
+		"pct":        func(v float64) string { return fmt.Sprintf("%.0f%%", 100*v) },
+		"pct1":       func(v float64) string { return trimZero(fmt.Sprintf("%.1f", 100*v)) + "%" },
+		"add":        func(a, b int) int { return a + b },
+		"sub":        func(a, b int) int { return a - b },
+		"trust":      trustOf,
+		"entryscale": entryScale,
+		"agree":      agree,
+		"pips":       pips,
+		"neg":        func(v float64) bool { return v < 0 },
+		"hm":         func(ts int64) string { return time.Unix(ts, 0).UTC().Format("2 Jan, 15:04") },
 		"dict": func(kv ...any) map[string]any {
 			m := map[string]any{}
 			for i := 0; i+1 < len(kv); i += 2 {
@@ -457,6 +454,32 @@ func (s *Site) funcs() template.FuncMap {
 			}
 			return strings.ToUpper(s[:1]) + s[1:]
 		},
+		// looksat is where one of the record's tests sits along a challenger's track, and
+		// looksfill how far along it the rounds it shares with the holder have got: the
+		// tests are evenly spaced, and the rounds between two of them spread evenly too.
+		"looksat": func(i, n int) template.CSS {
+			return template.CSS(fmt.Sprintf("left:%.1f%%", 100*float64(i+1)/float64(max(n, 1))))
+		},
+		"looksfill": func(shared int, looks []int) template.CSS {
+			at, prev := 0.0, 0
+			for i, l := range looks {
+				if shared >= l {
+					at, prev = float64(i+1), l
+					continue
+				}
+				at += float64(shared-prev) / float64(l-prev)
+				break
+			}
+			return template.CSS(fmt.Sprintf("width:%.1f%%", 100*at/float64(max(len(looks), 1))))
+		},
+		// wide is a bar's width: a share of the longest in its column.
+		"wide": func(v, top any) template.CSS {
+			x, t := toFloat(v), toFloat(top)
+			if !(t > 0) || !(x > 0) {
+				return "width:0"
+			}
+			return template.CSS(fmt.Sprintf("width:%.1f%%", math.Min(100, 100*x/t)))
+		},
 		"frac": func(done, total int) float64 {
 			if total <= 0 {
 				return 0
@@ -476,6 +499,13 @@ func toInt(n any) int64 {
 		return int64(v)
 	}
 	return 0
+}
+
+func toFloat(n any) float64 {
+	if v, ok := n.(float64); ok {
+		return v
+	}
+	return float64(toInt(n))
 }
 
 func clipID(id string, n int) string {
@@ -717,78 +747,546 @@ func (a *App) roundSummaries(s *State, limit int) []roundSummary {
 	return out
 }
 
+// --- what the pages draw --------------------------------------------------------------------
+
+// formCell is one round in a curator's row of rounds: whether it was in it, and how it did.
+type formCell struct {
+	Kind string       // "" not in it | ok | best (of that round) | neg | fail | now (being run)
+	H    template.CSS // how tall its bar is
+	Tip  string
+}
+
+// standRow is one curator on the standings, with what its row draws.
+type standRow struct {
+	*BoardRow
+	Rug     []template.CSS // its gain in each settled round, as marks under its bar
+	Form    []formCell     // the season's rounds in order, one cell each
+	Playing bool           // it is in the round being run now
+}
+
+// standings is the leaderboard as it is drawn: every rating a bar on one axis, the ranked
+// above and those still qualifying below, and beside each its rounds one by one.
+type standings struct {
+	Rated, Qual []standRow
+	S           barScale
+	Need        int // settled rounds before an entry is ranked
+	Ladder      int // how many are run again every round
+	From, To    int // the rounds the row of rounds covers
+	Compact     bool
+}
+
+// formRounds is how many rounds a row of rounds reaches back.
+const formRounds = 24
+
+// boardScale is the axis for the standings: every rating, the reach of its whisker, and
+// each round behind it.
+func boardScale(groups ...[]*BoardRow) barScale {
+	var vals []float64
+	for _, rows := range groups {
+		for _, r := range rows {
+			if r.Rating == nil {
+				continue
+			}
+			vals = append(vals, *r.Rating)
+			if r.SE != nil {
+				vals = append(vals, *r.Rating-*r.SE, *r.Rating+*r.SE)
+			}
+			vals = append(vals, r.Gains...)
+		}
+	}
+	return newBarScale(vals)
+}
+
+func (a *App) standings(st *State, b *Board, rated, qual []*BoardRow, compact bool) standings {
+	out := standings{Need: a.cfg.RatedRounds, Ladder: a.cfg.LadderSize, Compact: compact, S: boardScale(b.Rated, b.Provisional, rated, qual)}
+	if compact {
+		out.S.Zero = "0"
+	} else {
+		out.S.Worth = a.season.worthTicks(a.curveKey(), out.S)
+	}
+	mine := map[string]map[int]entryRow{}
+	best, seen, top := map[int]float64{}, map[int]bool{}, 0.0
+	for _, e := range b.Entries {
+		if mine[e.EditorID] == nil {
+			mine[e.EditorID] = map[int]entryRow{}
+		}
+		mine[e.EditorID][e.RoundIdx] = e
+		seen[e.RoundIdx] = true
+		if e.Valid {
+			if g, ok := best[e.RoundIdx]; !ok || e.Gain > g {
+				best[e.RoundIdx] = e.Gain
+			}
+			top = math.Max(top, e.Gain)
+		}
+	}
+	var rounds []int
+	for idx := range seen {
+		rounds = append(rounds, idx)
+	}
+	sort.Ints(rounds)
+	open, playing := 0, map[string]bool{}
+	if rd := st.roundWithStatus("open"); rd != nil {
+		open = rd.Idx
+		rounds = append(rounds, open)
+		for _, e := range st.inRound[open] {
+			playing[e.EditorID] = true
+		}
+	}
+	if len(rounds) > formRounds {
+		rounds = rounds[len(rounds)-formRounds:]
+	}
+	if len(rounds) > 0 {
+		out.From, out.To = rounds[0], rounds[len(rounds)-1]
+	}
+	row := func(r *BoardRow) standRow {
+		sr := standRow{BoardRow: r, Playing: playing[r.ID]}
+		gains := r.Gains
+		if len(gains) > 200 {
+			gains = gains[len(gains)-200:]
+		}
+		for _, g := range gains {
+			sr.Rug = append(sr.Rug, out.S.Pos(g))
+		}
+		if compact {
+			return sr
+		}
+		for _, idx := range rounds {
+			var c formCell
+			e, in := mine[r.ID][idx]
+			switch {
+			case idx == open:
+				if playing[r.ID] {
+					c.Kind, c.Tip = "now", fmt.Sprintf("Round %d · being run now", idx)
+				}
+			case !in:
+			case !e.Valid:
+				c.Kind, c.Tip = "fail", fmt.Sprintf("Round %d · failed, scores 0", idx)
+			case e.Gain < 0:
+				c.Kind, c.Tip = "neg", fmt.Sprintf("Round %d · %s", idx, signed(e.Gain, 3))
+			default:
+				c.Kind, c.Tip = "ok", fmt.Sprintf("Round %d · %s", idx, signed(e.Gain, 3))
+				if e.Gain >= best[idx] {
+					c.Kind, c.Tip = "best", c.Tip+" · best of the round"
+				}
+				h := 100.0
+				if top > 0 {
+					h = math.Max(6, math.Min(100, 100*e.Gain/top))
+				}
+				c.H = template.CSS(fmt.Sprintf("height:%.0f%%", h))
+			}
+			sr.Form = append(sr.Form, c)
+		}
+		return sr
+	}
+	for _, r := range rated {
+		out.Rated = append(out.Rated, row(r))
+	}
+	for _, r := range qual {
+		out.Qual = append(out.Qual, row(r))
+	}
+	return out
+}
+
+// lookPip is one of a challenger's chances at the record: a count of rounds shared with
+// the holder at which it is tested.
+type lookPip struct {
+	At    int
+	State string // done | next | later
+}
+
+// challengerRow is one curator set against the record holder, on the rounds both ran.
+type challengerRow struct {
+	*BoardRow
+	Shared int
+	Dots   []template.CSS // each shared round: its gain less the holder's
+	Mean   float64
+	SE     *float64
+	Bar    template.CSS
+	Looks  []lookPip
+	Next   int // the count of shared rounds it is next tested at; 0 when it has had every look
+	ToGo   int
+	Clear  bool // ahead by more than the margin so far
+	Off    bool // so far behind that its bar runs off the axis
+}
+
+// recordRace is the state of the record: who holds it, and where each curator still being
+// run stands against the holder, head to head.
+type recordRace struct {
+	Holder  *BoardRow // nil while nobody holds it: the unedited pages stand in
+	Rows    []challengerRow
+	S       barScale
+	Margin  float64
+	MarginX template.CSS
+	More    int
+}
+
+func (a *App) recordRace(st *State, b *Board, limit int) recordRace {
+	rule := a.season.Record
+	race := recordRace{Margin: rule.Margin[a.cfg.Scale], Holder: b.ByID[b.RecordID]}
+	holder := b.RecordID
+	held := gainsByRound(b.Entries, holder)
+	of := map[string][]entryRow{}
+	for _, e := range b.Entries {
+		of[e.EditorID] = append(of[e.EditorID], e)
+	}
+	diffs := map[string][]float64{}
+	for _, c := range append(append([]*BoardRow(nil), b.Rated...), b.Provisional...) {
+		if c.ID == holder || !(c.Ladder || c.Provisional) {
+			continue // only a curator still being run can come to share more rounds
+		}
+		var d []float64
+		for _, e := range of[c.ID] {
+			if holder == "" {
+				d = append(d, e.Gain)
+			} else if h, ok := held[e.RoundIdx]; ok {
+				d = append(d, e.Gain-h)
+			}
+		}
+		row := challengerRow{BoardRow: c, Shared: len(d)}
+		if len(d) > 0 {
+			row.Mean = mean(d)
+			row.Clear = row.Mean > race.Margin
+		}
+		if len(d) >= 2 {
+			se := stddev(d) / math.Sqrt(float64(len(d)))
+			row.SE = &se
+		}
+		for _, l := range rule.Looks {
+			p := lookPip{At: l, State: "later"}
+			switch {
+			case st.Looks[lookKey(c.ID, holder, l)] != nil:
+				p.State = "done"
+			case row.Next == 0:
+				p.State, row.Next, row.ToGo = "next", l, max(0, l-len(d))
+			}
+			row.Looks = append(row.Looks, p)
+		}
+		diffs[c.ID] = d
+		race.Rows = append(race.Rows, row)
+	}
+	sort.SliceStable(race.Rows, func(i, j int) bool {
+		x, y := race.Rows[i], race.Rows[j]
+		if (x.Shared > 0) != (y.Shared > 0) {
+			return x.Shared > 0
+		}
+		return x.Mean > y.Mean
+	})
+	if limit > 0 && len(race.Rows) > limit {
+		race.More, race.Rows = len(race.Rows)-limit, race.Rows[:limit]
+	}
+	// The axis is drawn for the race: it reaches as far as the three nearest challengers
+	// do. One further behind than that has its bar run off the edge, and says so.
+	vals := []float64{race.Margin}
+	for i, r := range race.Rows {
+		if i >= 3 || r.Shared == 0 {
+			break
+		}
+		vals = append(vals, r.Mean)
+		vals = append(vals, diffs[r.ID]...)
+		if r.SE != nil {
+			vals = append(vals, r.Mean-*r.SE, r.Mean+*r.SE)
+		}
+	}
+	race.S = newBarScale(vals)
+	race.S.Zero = "level"
+	if race.Holder == nil {
+		race.S.Zero = "unedited"
+	}
+	race.MarginX = race.S.Pos(race.Margin)
+	for i := range race.Rows {
+		r := &race.Rows[i]
+		if r.Shared == 0 {
+			continue
+		}
+		if r.Off = r.Mean < race.S.Lo; r.Off {
+			r.Bar = race.S.Bar(race.S.Lo, nil)
+		} else {
+			r.Bar = race.S.Bar(r.Mean, r.SE)
+		}
+		d := diffs[r.ID]
+		if len(d) > 200 {
+			d = d[len(d)-200:]
+		}
+		for _, v := range d {
+			if !r.Off && v >= race.S.Lo && v <= race.S.Hi {
+				r.Dots = append(r.Dots, race.S.Pos(v))
+			}
+		}
+	}
+	return race
+}
+
+// scriptView is one edit script an entry's runs wrote, with the runs that wrote it and
+// every grade of it. Two runs that write the same bytes have one script between them.
+type scriptView struct {
+	SHA    string
+	Size   int64
+	Runs   []RunView
+	Ns     string // the runs that wrote it: "1 and 2"
+	Gain   float64
+	Delta  float64 // its gain less the entry's score, when the entry has more than one script
+	Status string  // ok | failed | dropped
+	Reason string
+	Self   bool // its gain rests on a grade by its own runner
+	Grades []Grade
+}
+
+// roundEntry is one entry in a round as its page draws it: its place, and the chain behind
+// its score, from the machines that ran it to the scripts they wrote to who graded each.
+type roundEntry struct {
+	EntryView
+	Place   int
+	Scripts []scriptView
+	Failed  []RunView // runs that wrote nothing
+	NGrades int
+}
+
+func evidenceOf(e EntryView) roundEntry {
+	out := roundEntry{EntryView: e}
+	at := map[string]int{}
+	for _, run := range e.Runs {
+		if run.Script == "" {
+			out.Failed = append(out.Failed, run)
+			continue
+		}
+		i, ok := at[run.Script]
+		if !ok {
+			i, at[run.Script] = len(out.Scripts), len(out.Scripts)
+			out.Scripts = append(out.Scripts, scriptView{SHA: run.Script, Size: run.ScriptSize, Gain: run.Gain, Status: run.Status, Reason: run.Reason, Grades: run.Grades})
+			out.NGrades += len(run.Grades)
+		}
+		sc := &out.Scripts[i]
+		sc.Runs, sc.Self = append(sc.Runs, run), sc.Self || run.Self
+		if sc.Ns != "" {
+			sc.Ns += " and "
+		}
+		sc.Ns += strconv.Itoa(run.N)
+	}
+	if e.Settled && e.Valid && len(out.Scripts) > 1 {
+		for i := range out.Scripts {
+			if sc := &out.Scripts[i]; sc.Status == "ok" {
+				sc.Delta = sc.Gain - e.Gain
+			}
+		}
+	}
+	return out
+}
+
+// Apart says whether this script's gain is further from the entry's score than runs of
+// one curator are allowed to be from each other.
+func (s scriptView) Apart(tol float64) bool { return math.Abs(s.Delta) > tol }
+
+// roundEntries lists a round's entries as a ranking: those with a score, best first, then
+// those that failed or were not run, whose zero is not a place.
+func (a *App) roundEntries(st *State, idx int) []roundEntry {
+	var out []roundEntry
+	for _, e := range entriesOfRound(st, idx) {
+		out = append(out, evidenceOf(a.entryView(st, e)))
+	}
+	scored := func(e roundEntry) bool { return e.Settled && e.Valid && !e.Void }
+	sort.SliceStable(out, func(i, j int) bool { return scored(out[i]) && !scored(out[j]) })
+	next := 1
+	for i := range out {
+		if scored(out[i]) {
+			out[i].Place, next = next, next+1
+		}
+	}
+	return out
+}
+
+// entryScale is the axis for one round's results: every settled gain in it.
+func entryScale(entries []roundEntry) barScale {
+	var vals []float64
+	for _, e := range entries {
+		if e.Settled && e.Valid {
+			vals = append(vals, e.Gain)
+		}
+	}
+	return newBarScale(vals)
+}
+
+// roundDot is one entry's gain in a round, as a mark on the axis.
+type roundDot struct {
+	Style template.CSS
+	Kind  string // "" | best | fail | neg | me
+	Tip   string
+}
+
+// trustSeg is how many of a round's entries stand at one level of trust.
+type trustSeg struct {
+	Kind  string // l3 confirmed | l2 agreed, one person | l1 one run | l0 failed or not run
+	N     int
+	Style template.CSS
+}
+
+// roundRow is one round in the list of rounds: every entry's gain as a mark on one axis,
+// and how many people stand behind the scores.
+type roundRow struct {
+	roundSummary
+	Dots  []roundDot
+	Best  template.CSS
+	Trust []trustSeg
+	Says  string
+}
+
+// trustLevel is trustOf's level, read straight off a settled entry.
+func trustLevel(e *Entry) int {
+	switch {
+	case e.Void || !e.Valid:
+		return 0
+	case e.Confirmed:
+		return 3
+	case e.OneGrader || e.OneRunner:
+		return 2
+	}
+	return 1
+}
+
+func (a *App) roundRows(st *State, limit int) ([]roundRow, barScale) {
+	var rows []roundRow
+	var vals []float64
+	for _, rd := range st.roundsDesc(limit) {
+		rows = append(rows, roundRow{roundSummary: a.roundSummary(st, rd)})
+		if rd.Status != "settled" {
+			continue
+		}
+		for _, e := range st.inRound[rd.Idx] {
+			if e.Valid && !e.Void {
+				vals = append(vals, e.Gain)
+			}
+		}
+	}
+	sc := newBarScale(vals)
+	words := [4]string{"failed or not run", "run once or runs differed", "agreed, one person behind them", "confirmed"}
+	for i := range rows {
+		r := &rows[i]
+		if r.Status != "settled" {
+			continue
+		}
+		var n [4]int
+		for _, e := range entriesOfRound(st, r.Idx) {
+			n[trustLevel(e)]++
+			if e.Void {
+				continue
+			}
+			ed := st.Editors[e.EditorID]
+			dot := roundDot{Style: sc.Pos(e.Gain), Tip: fmt.Sprintf("%s · %s", ed.Name, signed(e.Gain, 3))}
+			switch {
+			case !e.Valid:
+				dot.Kind, dot.Tip = "fail", ed.Name+" · failed, scores 0"
+			case r.BestID == e.EditorID:
+				dot.Kind = "best"
+			case e.Gain < 0:
+				dot.Kind = "neg"
+			}
+			r.Dots = append(r.Dots, dot)
+		}
+		if r.BestGain != nil {
+			r.Best = sc.Pos(*r.BestGain)
+		}
+		var says []string
+		for l := 3; l >= 0; l-- {
+			if n[l] == 0 {
+				continue
+			}
+			r.Trust = append(r.Trust, trustSeg{Kind: fmt.Sprintf("l%d", l), N: n[l], Style: template.CSS(fmt.Sprintf("flex-grow:%d", n[l]))})
+			says = append(says, fmt.Sprintf("%d %s", n[l], words[l]))
+		}
+		r.Says = strings.Join(says, ", ")
+	}
+	return rows, sc
+}
+
+// playedRow is one round a curator played, set among the round's other entries.
+type playedRow struct {
+	EntryView
+	Place, Of int
+	Bar       template.CSS
+	Field     []roundDot
+}
+
+func (a *App) played(st *State, results []EntryView) ([]playedRow, barScale) {
+	var vals []float64
+	for _, v := range results {
+		if !v.Settled {
+			continue
+		}
+		for _, e := range st.inRound[v.RoundIdx] {
+			if e.Valid && !e.Void {
+				vals = append(vals, e.Gain)
+			}
+		}
+	}
+	sc := newBarScale(vals)
+	var rows []playedRow
+	for _, v := range results {
+		row := playedRow{EntryView: v}
+		if v.Settled {
+			for _, e := range st.inRound[v.RoundIdx] {
+				if !e.Valid || e.Void {
+					continue
+				}
+				row.Of++
+				if e.EditorID == v.EditorID {
+					continue
+				}
+				if e.Gain > v.Gain || !v.Valid {
+					row.Place++
+				}
+				row.Field = append(row.Field, roundDot{Style: sc.Pos(e.Gain), Tip: fmt.Sprintf("%s · %s", st.Editors[e.EditorID].Name, signed(e.Gain, 3))})
+			}
+			if v.Valid && !v.Void {
+				row.Place++
+				row.Bar = sc.Bar(v.Gain, nil)
+			} else {
+				row.Place = 0
+			}
+		}
+		rows = append(rows, row)
+	}
+	return rows, sc
+}
+
 // --- pages ----------------------------------------------------------------------------------
 
 func (s *Site) home(w http.ResponseWriter, r *http.Request) {
 	a := s.app
 	b := a.board()
-	top, provisional := b.Rated, false
-	if len(top) == 0 && len(b.Provisional) > 0 {
-		top, provisional = b.Provisional, true
-	}
+	top, qual := b.Rated, b.Provisional
 	if len(top) > 8 {
 		top = top[:8]
 	}
-	d := map[string]any{"Top": top, "Provisional": provisional, "RatedRounds": a.cfg.RatedRounds, "Ranked": len(b.Rated), "Qualifying": len(b.Provisional)}
-	if !provisional { // the newcomers, under the ranked, on the same axis
-		d["Qual"] = b.Provisional[:min(len(b.Provisional), 3)]
+	if len(qual) > 4 {
+		qual = qual[:4]
 	}
+	d := map[string]any{"RatedRounds": a.cfg.RatedRounds, "Ranked": len(b.Rated), "Qualifying": len(b.Provisional),
+		"More": len(b.Rated) + len(b.Provisional) - len(top) - len(qual)}
 	if len(b.Rated) > 0 {
-		d["Leader"] = &b.Rated[0] // the ranked entry ahead, while nobody holds the record
+		d["Leader"] = b.Rated[0] // the ranked entry ahead, while nobody holds the record
 	}
 	a.st.view(func(st *State) {
-		recs := a.records(st)
-		if len(recs) > 0 {
-			d["Record"] = &recs[len(recs)-1]
-		}
-		d["Records"], d["RecordChart"] = recs, recordChart(recs)
-		vs := a.verifiers(st)
-		active := 0
-		var gpuHours float64
-		for _, v := range vs {
-			if v.LastSeen > now()-14*86400 {
-				active++
-			}
-			gpuHours += v.GPUHours
-		}
-		if len(vs) > 5 {
-			vs = vs[:5]
-		}
-		d["Verifiers"], d["Active"], d["GPUHours"] = vs, active, gpuHours
+		d["Board"] = a.standings(st, b, top, qual, true)
 		settled := 0
-		for _, rs := range a.roundSummaries(st, 0) {
-			if rs.Status != "settled" {
+		for _, rd := range st.roundsDesc(0) {
+			if rd.Status != "settled" {
 				continue
 			}
 			settled++
-			if d["Latest"] == nil && rs.BestGain != nil && rs.BaselineLoss != nil {
-				rs := rs
-				d["Latest"] = &rs
+			if d["Last"] == nil && rd.BaselineLoss != nil {
+				rs := a.roundSummary(st, rd)
+				es := a.roundEntries(st, rd.Idx)
+				d["Last"], d["LastEntries"], d["LastScale"] = &rs, es, entryScale(es)
 			}
 		}
 		d["Rounds"] = settled
-		if next := st.roundWithStatus("scheduled"); next != nil {
-			c := *next
-			d["Next"] = &c
-		}
-		if open := st.roundWithStatus("open"); open != nil {
-			rs := a.roundSummary(st, open)
-			d["Open"] = &rs
-		}
-		public, queued := 0, 0
+		public := 0
 		for _, e := range st.Editors {
-			switch {
-			case e.Public:
+			if e.Public {
 				public++
-			case e.Status == "queued":
-				queued++
 			}
 		}
-		d["Editors"], d["Queued"], d["Feed"] = public, queued, feed(st, 9)
+		d["Editors"], d["Feed"] = public, feed(st, 9)
 		a.nowFacts(st, d)
-		if c := a.savedCrawl(st); c != nil {
-			d["Crawl"] = *c
-		}
 	})
 	s.render(w, 200, "home", s.page(r, "", "home", d))
 }
@@ -862,13 +1360,18 @@ func (s *Site) leaderboard(w http.ResponseWriter, r *http.Request) {
 	a := s.app
 	b := a.board()
 	var recs []RecordRow
-	a.st.view(func(st *State) { recs = a.records(st) })
+	var board standings
+	var race recordRace
+	a.st.view(func(st *State) {
+		recs = a.records(st)
+		board = a.standings(st, b, b.Rated, b.Provisional, false)
+		race = a.recordRace(st, b, 12)
+	})
 	chart := recordChart(recs)
 	sort.Slice(recs, func(i, j int) bool { return recs[i].N > recs[j].N })
-	_, hasCurve := a.season.Curves[a.curveKey()]
 	s.render(w, 200, "leaderboard", s.page(r, "Leaderboard", "leaderboard", map[string]any{
-		"Rated": b.Rated, "Provisional": b.Provisional, "Records": recs, "RecordChart": chart, "RatedRounds": a.cfg.RatedRounds,
-		"QualifyRounds": a.cfg.QualifyRounds, "LadderSize": a.cfg.LadderSize, "HasCurve": hasCurve, "Rule": a.season.Record,
+		"Board": board, "Race": race, "Records": recs, "RecordChart": chart, "RatedRounds": a.cfg.RatedRounds,
+		"QualifyRounds": a.cfg.QualifyRounds, "LadderSize": a.cfg.LadderSize, "Rule": a.season.Record,
 		"Margin": a.season.Record.Margin[a.cfg.Scale], "Holder": b.ByID[b.RecordID],
 	}))
 }
@@ -923,7 +1426,32 @@ func (s *Site) editor(w http.ResponseWriter, r *http.Request) {
 		for i := len(es) - 1; i >= 0; i-- {
 			results = append(results, a.entryView(st, es[i]))
 		}
-		d["Results"], d["GainChart"] = results, gainChart(results)
+		d["Results"] = results
+		d["Played"], d["PlayedScale"] = a.played(st, results)
+		// Where it stands: its own row of the standings, on the standings' own axis, with
+		// every other curator's rating marked along it.
+		rows := append(append([]*BoardRow(nil), b.Rated...), b.Provisional...)
+		own := b.ByID[e.ID]
+		if own != nil {
+			board := a.standings(st, b, []*BoardRow{own}, nil, false)
+			var field []template.CSS
+			for _, o := range rows {
+				if o.ID != own.ID && o.Rating != nil {
+					field = append(field, board.S.Pos(*o.Rating))
+				}
+			}
+			d["Stand"], d["StandRow"], d["Field"] = board, board.Rated[0], field
+		}
+		// Where it stands against the record: its own line of the head to head, or, if it
+		// holds the record, the three nearest to taking it.
+		race := a.recordRace(st, b, 0)
+		var vs []challengerRow
+		for i, c := range race.Rows {
+			if c.ID == e.ID || (b.RecordID == e.ID && i < 3) {
+				vs = append(vs, c)
+			}
+		}
+		d["Race"], d["Vs"], d["Holds"] = race, vs, b.RecordID == e.ID
 		for i := range results {
 			if results[i].Settled && results[i].Valid {
 				latest := results[i]
@@ -1048,16 +1576,25 @@ func (s *Site) sourceFile(ctx context.Context, id, path string) (sourceView, err
 
 func (s *Site) rounds(w http.ResponseWriter, r *http.Request) {
 	a := s.app
-	var rounds []roundSummary
-	a.st.view(func(st *State) { rounds = a.roundSummaries(st, 100) })
-	s.render(w, 200, "rounds", s.page(r, "Rounds", "rounds", map[string]any{"Rounds": rounds, "MaxNew": a.cfg.MaxNewPerRound}))
+	var rows []roundRow
+	var sc barScale
+	a.st.view(func(st *State) { rows, sc = a.roundRows(st, 100) })
+	// The list stops at a hundred rounds. The ones before keep their pages, each linked
+	// from the next, so the page says where they start.
+	earlier, earlierIdx := "", 0
+	if n := len(rows); n > 0 && rows[n-1].Idx > 1 {
+		earlierIdx = rows[n-1].Idx - 1
+		earlier = roundID(a.season.ID, earlierIdx)
+	}
+	s.render(w, 200, "rounds", s.page(r, "Rounds", "rounds", map[string]any{"Rounds": rows, "S": sc, "MaxNew": a.cfg.MaxNewPerRound, "Earlier": earlier, "EarlierIdx": earlierIdx}))
 }
 
 func (s *Site) round(w http.ResponseWriter, r *http.Request) {
 	a := s.app
 	idx, ok := a.parseRoundID(r.PathValue("id"))
 	var rs *roundSummary
-	var entries []EntryView
+	var entries []roundEntry
+	prev, next := "", ""
 	a.st.view(func(st *State) {
 		rd := st.Rounds[idx]
 		if !ok || rd == nil {
@@ -1065,58 +1602,30 @@ func (s *Site) round(w http.ResponseWriter, r *http.Request) {
 		}
 		sum := a.roundSummary(st, rd)
 		rs = &sum
-		for _, e := range entriesOfRound(st, idx) {
-			entries = append(entries, a.entryView(st, e))
+		// The page reads as a ranking: entries with a score, best first, then those that
+		// failed or were not run, whose zero is not a place.
+		entries = a.roundEntries(st, idx)
+		if st.Rounds[idx-1] != nil {
+			prev = roundID(a.season.ID, idx-1)
+		}
+		if st.Rounds[idx+1] != nil {
+			next = roundID(a.season.ID, idx+1)
 		}
 	})
 	if rs == nil {
 		s.notFound(w, r, "No such round.")
 		return
 	}
-	// The page reads as a ranking: entries with a score, best first, then those that failed
-	// or were not run, whose zero is not a place.
-	sort.SliceStable(entries, func(i, j int) bool {
-		x := entries[i].Settled && entries[i].Valid && !entries[i].Void
-		y := entries[j].Settled && entries[j].Valid && !entries[j].Void
-		return x && !y
-	})
 	sc := a.season.Scales[rs.Scale]
-	d := map[string]any{"R": rs, "ID": rs.ID, "Entries": entries, "Scale": sc, "Tolerance": a.tolerance(), "RunsPerEntry": a.cfg.RunsPerEntry}
+	d := map[string]any{"R": rs, "ID": rs.ID, "Entries": entries, "S": entryScale(entries), "Scale": sc, "Tolerance": a.tolerance(),
+		"RunsPerEntry": a.cfg.RunsPerEntry, "Prev": prev, "Next": next}
 	// Every run of the round's entries, and every grade of every script they wrote, whatever
-	// it said. A script that two runs wrote has one set of grades.
-	type runRow struct {
-		RunView
-		Name, Owner, EditorID string
-	}
-	type gradeRow struct {
-		Grade
-		Name, Owner, EditorID string
-		Runs                  string // the runs that wrote the script
-		ScriptGain            float64
-		ScriptValid, Dropped  bool
-	}
-	var runs []runRow
-	var grades []gradeRow
+	// it said, is drawn entry by entry: who ran it, what each run wrote, who graded that.
+	runs := 0
 	for _, e := range entries {
-		seen := map[string]bool{}
-		for _, run := range e.Runs {
-			runs = append(runs, runRow{run, e.Name, e.Owner, e.EditorID})
-			if run.Script == "" || seen[run.Script] {
-				continue
-			}
-			seen[run.Script] = true
-			var wrote []string
-			for _, o := range e.Runs {
-				if o.Script == run.Script {
-					wrote = append(wrote, strconv.Itoa(o.N))
-				}
-			}
-			for _, g := range run.Grades {
-				grades = append(grades, gradeRow{g, e.Name, e.Owner, e.EditorID, strings.Join(wrote, " and "), run.Gain, run.Status == "ok", run.Status == "dropped"})
-			}
-		}
+		runs += len(e.Runs)
 	}
-	d["Runs"], d["Grades"] = runs, grades
+	d["Runs"] = runs
 	// The command that re-grades an entry names it. Two versions of one editor can share a
 	// round (a rated editor and its successor), and then the name needs its version.
 	if len(entries) > 0 {
@@ -1162,14 +1671,6 @@ func (s *Site) round(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	d["Alone"], d["Scored"] = alone && scored > 0, scored
-	// Places count only the entries with a score: one that failed or was not run has none.
-	places, next := make([]int, len(entries)), 1
-	for i, e := range entries {
-		if e.Settled && e.Valid && !e.Void {
-			places[i], next = next, next+1
-		}
-	}
-	d["Places"] = places
 	s.render(w, 200, "round", s.page(r, "Round "+rs.ID, "rounds", d))
 }
 
@@ -1177,8 +1678,8 @@ func (s *Site) verifiersPage(w http.ResponseWriter, r *http.Request) {
 	a := s.app
 	var vs []VerifierRow
 	a.st.view(func(st *State) { vs = a.verifiers(st) })
-	var hours float64
-	var validated, runs, established int
+	var hours, topHours float64
+	var validated, runs, established, topAgreed, topRuns int
 	for _, v := range vs {
 		hours += v.GPUHours
 		validated += v.Validated
@@ -1186,12 +1687,13 @@ func (s *Site) verifiersPage(w http.ResponseWriter, r *http.Request) {
 		if v.Established {
 			established++
 		}
+		topHours, topAgreed, topRuns = math.Max(topHours, v.GPUHours), max(topAgreed, v.Validated), max(topRuns, v.Runs)
 	}
 	s.render(w, 200, "verifiers", s.page(r, "Verifiers", "verifiers", map[string]any{
 		"Verifiers": vs, "Hours": hours, "Validated": validated, "Runs": runs, "Established": established, "MuteAfter": muteAfterStrikes,
 		"MuteDays": muteFor / 86400, "ReplicaWait": a.cfg.ReplicaWait.Seconds(), "MaxReplicas": maxReplicas,
 		"Tolerance": a.tolerance(), "Devices": a.season.GradeDevices, "EstablishAfter": a.cfg.EstablishAfter, "RunsPerEntry": a.cfg.RunsPerEntry,
-		"Floor": a.season.Runner,
+		"Floor": a.season.Runner, "TopAgreed": topAgreed, "TopRuns": topRuns, "TopHours": topHours,
 	}))
 }
 
@@ -1216,7 +1718,8 @@ func (s *Site) account(w http.ResponseWriter, r *http.Request) {
 		Row *BoardRow
 	}
 	var acct *Account
-	var eds []row
+	var other []row
+	var board standings
 	var stats map[string]any
 	a.st.view(func(st *State) {
 		found := st.byHandle[strings.ToLower(r.PathValue("handle"))]
@@ -1225,17 +1728,29 @@ func (s *Site) account(w http.ResponseWriter, r *http.Request) {
 		}
 		c := *found
 		acct, stats = &c, a.verifierStats(st, found)
+		// Its curators on the standings' own axis; then those with no place on it: not yet
+		// through a round, or replaced.
+		var rated, qual []*BoardRow
 		for _, e := range editorsOf(st, found.ID, 100) {
-			if e.Public {
-				eds = append(eds, row{linkTo(st, e), b.ByID[e.ID]})
+			br := b.ByID[e.ID]
+			switch {
+			case !e.Public:
+			case br == nil || e.Status == "withdrawn":
+				other = append(other, row{linkTo(st, e), br})
+			case br.Provisional:
+				qual = append(qual, br)
+			default:
+				rated = append(rated, br)
 			}
 		}
+		sort.SliceStable(rated, func(i, j int) bool { return rated[i].Rank < rated[j].Rank })
+		board = a.standings(st, b, rated, qual, false)
 	})
 	if acct == nil {
 		s.notFound(w, r, "No such account.")
 		return
 	}
-	s.render(w, 200, "account", s.page(r, acct.Handle, "", map[string]any{"A": acct, "Editors": eds, "V": stats}))
+	s.render(w, 200, "account", s.page(r, acct.Handle, "", map[string]any{"A": acct, "Board": board, "Other": other, "V": stats}))
 }
 
 // --- documents ------------------------------------------------------------------------------

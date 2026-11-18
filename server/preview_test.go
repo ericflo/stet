@@ -10,6 +10,8 @@ package main
 //                       "scheduled": the last round has settled and the next is announced
 //                       "volunteers": as "open", with volunteers established from round 3
 //                       "empty": nothing has happened yet
+//                       "stress": a long season with a crowd in it: 70 rounds, thirty
+//                       people's curators, some of them failing, the record changing hands
 
 import (
 	"context"
@@ -49,6 +51,9 @@ func TestPreview(t *testing.T) {
 	cfg := testConfig(t, orgPub, machPub)
 	cfg.Scale, cfg.QualifyRounds, cfg.RatedRounds, cfg.LadderSize, cfg.MaxNewPerRound = "micro", 3, 3, 8, 3
 	cfg.BaseURL = "https://www.stetrun.com"
+	if state == "stress" {
+		cfg.LadderSize, cfg.MaxNewPerRound = 24, 6
+	}
 	w := startWorld(t, cfg, newMemKV(), dirBlobs{filepath.Join(cfg.DataDir, "blobs")})
 	if state == "empty" {
 		w.app.tick(context.Background())
@@ -77,9 +82,49 @@ func TestPreview(t *testing.T) {
 		w.submit(stet, n, fmt.Sprintf("print(%q)", n))
 	}
 	crew := []*previewActor{machine}
-	volunteers := state == "volunteers"
+	volunteers := state == "volunteers" || state == "stress"
 	rounds := 6
+	var stressCrew []*previewActor
+	// The crowd: one curator a person, entered a few a round, each with a level of its own.
+	// Some arrive late and better than whoever holds the record.
+	var crowd []string
+	if state == "stress" {
+		rounds = 70
+		crowd = []string{"dedupe-first", "longform", "no-nav", "prose-only", "wiki-heavy", "short-lines-out", "paragraphs", "anti-seo", "readable", "sentence-rank", "low-entropy-out", "textbook-bias", "quotes-kept", "tables-out", "plain-english", "noisy", "half-and-half", "footer-cutter", "perplexity-sort", "curriculum", "ngram-novelty", "boiler-two", "keep-it-all", "minhash", "backwards", "density", "late-bloomer", "the-long-name-of-a-curator-entry", "second-wind", "closer"}
+		for i, n := range crowd {
+			level[n] = 0.25 + 0.75*math.Abs(math.Sin(float64(i)*2.1+0.4))
+		}
+		level["backwards"], level["noisy"] = -0.21, 0.31
+		level["late-bloomer"], level["second-wind"], level["closer"] = 1.19, 1.27, 1.31
+		// Two more machines, so a third can run what two disagree about; one curator whose
+		// runs come out different on one of them, and one grader who is sometimes out alone.
+		carol := &previewActor{actor: w.join("carol", nil), gpu: "NVIDIA GeForce RTX 4070", edits: true, skew: 0.004}
+		dave := &previewActor{actor: w.join("dave", nil), gpu: "AMD Radeon RX 7800 XT", skew: -0.005}
+		stressCrew = []*previewActor{carol, dave}
+		previewTwist = func(name, script, grader string, round int) float64 {
+			switch {
+			case name == "ngram-novelty" && round%4 == 1 && previewRanBy[script] == "alice":
+				return 0.19
+			case grader == "dave" && round > 40 && round%6 == 0 && name == "readable":
+				return 0.31
+			}
+			return 0
+		}
+		previewFails = func(name string, round int) bool {
+			switch name {
+			case "noisy":
+				return round%3 == 0
+			case "half-and-half", "tables-out":
+				return round%11 == 4
+			}
+			return false
+		}
+	}
+	entered := 0
 	for r := 1; r <= rounds; r++ {
+		if r == 6 {
+			crew = append(crew, stressCrew...)
+		}
 		switch r {
 		case 2:
 			w.submit(maria, "boilerplate-be-gone", "print('bbg')")
@@ -90,6 +135,19 @@ func TestPreview(t *testing.T) {
 		case 5:
 			w.submit(stet, "compass", "print('compass')")
 			w.submit(maria, "kitchen-sink", "print('ks')")
+		}
+		// Three of the crowd a round, the late ones held back until the season is under way.
+		for k := 0; k < 3 && entered < len(crowd) && r >= 3; k++ {
+			n := crowd[entered]
+			if late := map[string]int{"late-bloomer": 22, "second-wind": 38, "closer": 61}[n]; r < late {
+				break
+			}
+			who := []string{"noor", "tomas", "yuki", "priya", "olu", "ines", "mateo", "linh", "sven", "amara"}[entered%10]
+			if entered >= 10 {
+				who = fmt.Sprintf("%s%d", who, entered/10+1)
+			}
+			w.submit(w.join(who, nil), n, fmt.Sprintf("print(%q)", n))
+			entered++
 		}
 		playRound(t, w, crew, gain, baseline)
 		shift(w, 5*time.Hour+17*time.Minute)
@@ -129,7 +187,7 @@ func serve(t *testing.T, w *world, addr string) {
 // playRound draws a round and has the crew work it until it settles.
 func playRound(t *testing.T, w *world, crew []*previewActor, gain func(string, int) float64, baseline func(int) float64) {
 	idx := w.draw()
-	for guard := 0; guard < 200; guard++ {
+	for guard := 0; guard < 2000; guard++ {
 		busy := false
 		for _, a := range crew {
 			c := claimAs(t, w, a)
@@ -140,11 +198,15 @@ func playRound(t *testing.T, w *world, crew []*previewActor, gain func(string, i
 				continue
 			}
 			busy = true
+			w.app.limits = newLimiter() // a preview's hour is over in a moment
 			if c.Job.Kind == "edit" {
 				editAs(t, w, a, c, c.Job.Editor.Name)
 				continue
 			}
 			loss := baseline(idx) - gain(c.Job.Editor.Name, idx) + a.skew
+			if previewTwist != nil {
+				loss += previewTwist(c.Job.Editor.Name, c.Job.Script.SHA256, a.handle, idx)
+			}
 			reportAs(t, w, a, c, loss, baseline(idx)+a.skew)
 		}
 		settled := false
@@ -165,13 +227,29 @@ func claimAs(t *testing.T, w *world, a *previewActor) *claimed {
 	return w.claimWith(a.actor, h)
 }
 
+// previewFails says whether a curator's run fails in a round, in the seasons where some do.
+var previewFails func(name string, round int) bool
+
+// previewTwist is what a season adds to one grade of one script: a run that came out worse
+// than the other, a grader out on their own. previewRanBy is whose run wrote each script.
+var (
+	previewTwist func(name, script, grader string, round int) float64
+	previewRanBy = map[string]string{}
+)
+
+func roundOf(c *claimed) (idx int) {
+	fmt.Sscanf(fmt.Sprint(c.Job.Round["id"]), "s0-o%d", &idx)
+	return idx
+}
+
 func editAs(t *testing.T, w *world, a *previewActor, c *claimed, name string) {
-	if name == "kitchen-sink" {
+	failed := previewFails != nil && previewFails(name, roundOf(c))
+	if name == "kitchen-sink" || failed {
 		w.edit(a.actor, c, "")
 		return
 	}
 	script := fmt.Sprintf("{\"doc\": 1, \"round\": %v, \"by\": %q}\n", c.Job.Round["id"], name)
-	if name == "compass" { // it uses the GPU: no two runs write the same bytes
+	if name == "compass" || name == "ngram-novelty" { // it uses the GPU: no two runs write the same bytes
 		script += a.handle + "\n"
 	}
 	p := map[string]any{
@@ -182,6 +260,7 @@ func editAs(t *testing.T, w *world, a *previewActor, c *claimed, name string) {
 	enc, _ := zstd.NewWriter(nil)
 	sum := sha256.Sum256([]byte(script))
 	p["script_sha256"], p["script_size"] = hex.EncodeToString(sum[:]), len(script)
+	previewRanBy[hex.EncodeToString(sum[:])] = a.handle
 	p["script_zst"] = base64.StdEncoding.EncodeToString(enc.EncodeAll([]byte(script), nil))
 	var ack struct {
 		Error string `json:"error"`
@@ -205,7 +284,10 @@ func reportAs(t *testing.T, w *world, a *previewActor, c *claimed, loss, base fl
 	for i, s := range srcs {
 		by[s], bb[s] = loss+oe[i]-me, base+ob[i]-mb
 	}
-	kept := map[string]float64{"identity": 1, "english": 0.103, "tidy": 0.096, "compass": 0.088, "boilerplate-be-gone": 0.41}[c.Job.Editor.Name]
+	kept, ok := map[string]float64{"identity": 1, "english": 0.103, "tidy": 0.096, "compass": 0.088, "boilerplate-be-gone": 0.41}[c.Job.Editor.Name]
+	if !ok {
+		kept = 0.05 + 0.6*math.Abs(math.Sin(float64(len(c.Job.Editor.Name))))
+	}
 	var curve [][]float64
 	for i := 1; i <= 60; i++ {
 		step := float64(i) * 80

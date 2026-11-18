@@ -2,102 +2,78 @@
 <main>
 <div class="hero">
   <div class="wrap">
-    <div>
+    <div class="pitch">
       <span class="eyebrow">An open competition in training data · {{.Season.Title}}</span>
       <h1 aria-label="Same model. Same budget. Better data wins.">Same model. Same budget. Better <span class="fix"><span class="struck">luck</span><span class="insert" aria-hidden="true">data</span><svg class="caret" viewBox="0 0 20 16" aria-hidden="true"><path d="M2 14 L10 3 L18 14"/></svg></span> wins.</h1>
-      <p class="lede"><strong>Stet is a competition to make the best training data.</strong> You enter a <strong>curator</strong>: a program that gets a fresh slice of raw web pages and {{howlong .Scale.EditSeconds}} to cut, keep and reorder them. The same small language model is trained on every curator's pick and sits the same exam. <strong>Lowest exam loss wins.</strong></p>
+      <p class="lede"><strong>Stet is a competition to make the best training data.</strong> You enter a <strong>curator</strong>: a program that cuts, keeps and reorders a fresh slice of raw web pages. The same small model trains on every curator's pick and sits the same exam. <strong>Lowest loss wins.</strong></p>
       <div class="cta">
         <a class="btn" href="/leaderboard">See the leaderboard</a>
         <a class="btn ghost" href="/enter">Enter the competition</a>
       </div>
       <p class="also">New here? <a href="#how">How a round works</a> · <a href="/glossary">every term, explained</a></p>
     </div>
-    <div class="galley" data-galley aria-label="An illustration: lines of raw web pages, some struck out and some kept">
-      <div class="head"><span>What a curator does</span><span>illustration</span></div>
-      <p class="line cut" style="--d:0.3s"><span class="mark">cut</span><span class="t">Home | About | Contact | Privacy Policy | Terms of Service</span></p>
-      <p class="line keep" style="--d:0.8s"><span class="mark">stet</span><span class="t">In 1854 John Snow traced a cholera outbreak to a single pump on Broad Street.</span></p>
-      <p class="line cut" style="--d:1.3s"><span class="mark">cut</span><span class="t">We use cookies to improve your experience. Accept all cookies?</span></p>
-      <p class="line cut" style="--d:1.8s"><span class="mark">cut</span><span class="t">BUY NOW!!! best cheap deals deals deals click here &gt;&gt;&gt;</span></p>
-      <p class="line keep" style="--d:2.3s"><span class="mark">stet</span><span class="t">To find the slope of a line, divide the change in y by the change in x.</span></p>
-      <p class="line cut" style="--d:2.8s"><span class="mark">cut</span><span class="t">Copyright © 2019. All rights reserved. Powered by WordPress.</span></p>
-      <p class="line keep" style="--d:3.3s"><span class="mark">stet</span><span class="t">The court held that the statute did not apply to contracts signed before it passed.</span></p>
-      <div class="tally"><span><b>7</b> lines in</span><span class="arrow">→</span><span><b>3</b> let stand</span><span>the model learns from what is left</span></div>
-      <button class="replay" type="button" data-replay>replay</button>
+    <div class="live-card" id="right-now" data-live>
+      <div class="lc-round">
+        {{with $d.Open}}
+        <div class="lc-head"><h2><a href="/rounds/{{.ID}}">Round {{.Idx}}</a></h2><span class="chip live">running</span><a class="more" href="/rounds/{{.ID}}">follow it →</a></div>
+        {{template "life" .}}
+        <p class="tally"><span class="pips" role="img" aria-label="{{.Edited}} of {{.Entries}} entries run">{{range pips .Settled .Edited .Entries}}<i class="p{{.}}"></i>{{end}}</span> <b>{{.Edited}} of {{.Entries}}</b> entries run · results <a class="term" href="/glossary#sealed">sealed</a> until all are done</p>
+        {{else}}{{with $d.Next}}
+        <div class="lc-head"><h2><a href="/rounds/{{$.Live.NextID}}">Round {{.Idx}}</a></h2><span class="chip wait">next</span><a class="more" href="/rounds/{{$.Live.NextID}}">what is fixed already →</a></div>
+        {{template "life" .}}
+        <p class="tally">the draw is <b data-until="{{.DrawAt}}">{{ago .DrawAt}}</b> · {{hm .DrawAt}} UTC{{if $d.Queued}} · {{$d.Queued}} new {{plural $d.Queued "entry" "entries"}} waiting{{end}}</p>
+        {{else}}
+        <div class="lc-head"><h2>No round scheduled</h2></div>
+        <p class="tally">One is drawn as soon as an entry is waiting, and every {{$.Interval}} regardless.</p>
+        {{end}}{{end}}
+      </div>
+      <div class="lc-board">
+        <div class="lc-head"><h2>Standings</h2><span class="sub">{{if $d.Rounds}}after {{$d.Rounds}} {{plural $d.Rounds "round" "rounds"}}{{end}}</span><a class="more" href="/leaderboard">full leaderboard →</a></div>
+        {{if or $d.Board.Rated $d.Board.Qual}}
+        {{template "board" $d.Board}}
+        {{if gt $d.More 0}}<p class="more-rows"><a href="/leaderboard">and {{$d.More}} more →</a></p>{{end}}
+        {{else}}
+        <div class="empty small"><span class="hand">a blank page</span>No entry has finished a round yet. Enter one and this table starts with you.</div>
+        {{end}}
+      </div>
     </div>
   </div>
 </div>
 
-<section id="right-now" data-live style="background:var(--paper-2)">
+<section id="season" data-live class="band">
   <div class="wrap">
-    <div class="sec-head"><div><h2>Right now</h2></div><a class="more" href="/rounds">every round →</a></div>
-    <div class="state">
-      <div class="round-card">
-        {{with $d.Open}}
-        <h3><a href="/rounds/{{.ID}}" style="text-decoration:none">Round {{.Idx}}</a> <span class="chip live">running</span></h3>
-        <div class="entries-now">
-          <span class="pips big" role="img" aria-label="{{.Edited}} of {{.Entries}} entries run">{{range pips .Settled .Edited .Entries}}<i class="p{{.}}"></i>{{end}}</span>
-          <span class="count"><b>{{.Edited}}</b> of {{.Entries}} entries run</span>
-        </div>
-        <span class="pips-key"><span><i class="p1"></i>run</span><span><i></i>waiting</span><span>results <a class="term" href="/glossary#sealed">sealed</a> until all are done</span></span>
-        <div class="track-box" style="margin-top:18px">{{template "life" .}}</div>
-        {{else}}{{with $d.Next}}
-        <h3><a href="/rounds/{{$.Live.NextID}}" style="text-decoration:none">Round {{.Idx}}</a> <span class="chip wait">next</span></h3>
-        <div class="countdown"><span class="big" data-until="{{.DrawAt}}">{{ago .DrawAt}}</span><span class="muted">the draw · {{hm .DrawAt}} UTC{{if $d.Queued}} · {{$d.Queued}} new {{plural $d.Queued "entry" "entries"}} waiting{{end}}</span></div>
-        <div class="track-box" style="margin-top:18px">{{template "life" .}}</div>
-        {{else}}
-        <h3>No round scheduled</h3>
-        <p>One is drawn as soon as an entry is waiting, and every {{.Interval}} regardless.</p>
-        {{end}}{{end}}
-        {{with $.Live.Last}}<p class="last"><span class="chip done">settled</span> <a href="/rounds/{{.ID}}">Round {{.Idx}}</a> {{ago .SettledAt}}{{if .BestName}} · best: <b>{{.BestName}}</b> <span class="num pos">{{gain (ptr .BestGain)}}</span>{{end}}</p>{{end}}
-      </div>
-      <div class="facts">
-        <div>
-          <div class="k">Record</div>
-          {{with $d.Record}}<div class="v"><a href="/editors/{{short .EditorID}}" style="text-decoration:none">{{.Name}}</a><small>{{.Owner}}</small></div>
-          <div class="s"><span class="num">{{gain .Rating}}</span>{{if .Multiplier}} · worth {{mult .Multiplier .Capped}} the data{{end}} · since {{date .At}}</div>
-          {{else}}<div class="v muted">unclaimed</div>{{end}}
-        </div>
-        <div>
-          <div class="k">Ranked first</div>
-          {{with $d.Leader}}<div class="v"><a href="/editors/{{short .ID}}" style="text-decoration:none">{{.Name}}</a><small>{{.Owner}}</small></div>
-          <div class="s"><span class="num">{{gain (ptr .Rating)}}</span> over {{.Rounds}} rounds</div>
-          {{else}}<div class="v muted">nobody yet</div>{{end}}
-        </div>
-        <div>
-          <div class="k">Entries</div>
-          <div class="v">{{$d.Editors}}</div>
-          <div class="s">{{$d.Ranked}} ranked · {{$d.Qualifying}} qualifying{{if $d.Queued}} · {{$d.Queued}} waiting{{end}} · {{$d.Rounds}} {{plural $d.Rounds "round" "rounds"}} settled</div>
-        </div>
-        <div>
-          <div class="k">Verifiers</div>
-          <div class="v">{{$d.Active}}<small>{{plural $d.Active "machine" "machines"}}, 2 weeks</small></div>
-          <div class="s">{{gpunum $d.GPUHours}} {{gpuunit $d.GPUHours}} of GPU time · <a href="/verifiers">who</a></div>
-        </div>
-      </div>
-    </div>
-    {{if not $d.Volunteers}}<p class="note early"><b>Early days.</b> {{if $d.Rounds}}Every score so far is the organisers' machine's alone, marked <a class="term" href="/glossary#run-once"><i>run once</i></a>.{{else}}For now the organisers' machine is the only established verifier, so the first scores will be marked <a class="term" href="/glossary#run-once"><i>run once</i></a>.{{end}} A second machine turns them <a class="term" href="/glossary#confirmed"><i>confirmed</i></a>: <a href="/verify">lend a GPU →</a></p>{{end}}
+    <dl class="facts">
+      <div><dt>Record</dt><dd>{{with $d.Record}}<a href="/editors/{{short .EditorID}}"><b>{{.Name}}</b></a> <span class="by">{{.Owner}}</span><small>since {{date .At}}{{if .Multiplier}} · worth {{mult .Multiplier .Capped}} the data{{end}}</small>{{else}}<b class="muted">unclaimed</b><small>first to beat unedited pages on shared rounds</small>{{end}}</dd></div>
+      <div><dt>Ranked first</dt><dd>{{with $d.Leader}}<a href="/editors/{{short .ID}}"><b>{{.Name}}</b></a> <span class="by">{{.Owner}}</span><small><span class="num">{{gain (ptr .Rating)}}</span> over {{.Rounds}} rounds</small>{{else}}<b class="muted">nobody yet</b><small>ranked after {{$d.RatedRounds}} rounds</small>{{end}}</dd></div>
+      <div><dt>Curators</dt><dd><b>{{$d.Editors}}</b><small>{{$d.Ranked}} ranked · {{$d.Qualifying}} qualifying{{if $d.Queued}} · {{$d.Queued}} waiting{{end}}</small></dd></div>
+      <div><dt>Rounds settled</dt><dd><b>{{$d.Rounds}}</b><small><a href="/rounds">every round →</a></small></dd></div>
+      <div><dt>Verifiers</dt><dd><b>{{$d.Active}}</b> <span class="by">{{plural $d.Active "machine" "machines"}}, 2 weeks</span><small>{{gpunum $d.GPUHours}} {{gpuunit $d.GPUHours}} of GPU time · <a href="/verifiers">who →</a></small></dd></div>
+    </dl>
   </div>
 </section>
 
-<section id="standings" data-live>
+{{with $d.Last}}
+<section id="last-round" data-live>
   <div class="wrap">
     <div class="sec-head">
       <div>
-        <h2>{{if $d.Provisional}}Qualifying now{{else}}The leaderboard{{end}}</h2>
-        <p>How much better the model did on each curator's pick than on <a class="term" href="/glossary#unedited">unedited</a> pages. Longer bar, better data.</p>
+        <h2>The last round</h2>
+        <p><a href="/rounds/{{.ID}}">Round {{.Idx}}</a> settled {{ago .SettledAt}}. Every curator in it edited the same fresh pages; each bar is how far below the unedited loss, <span class="num">{{f3 (ptr .BaselineLoss)}}</span>, the model then got.</p>
       </div>
-      <a class="more" href="/leaderboard">full leaderboard →</a>
+      <a class="more" href="/rounds/{{.ID}}#runs">who ran and graded each →</a>
     </div>
-    <div class="table-wrap">
-      {{if $d.Top}}
-      {{if $d.Provisional}}{{template "board" (dict "Qual" $d.Top "Need" $d.RatedRounds)}}{{else}}{{template "board" (dict "Rated" $d.Top "Qual" $d.Qual "Need" $d.RatedRounds)}}{{end}}
-      {{else}}
-      <div class="empty"><span class="hand">a blank page</span>No entry has finished a round yet. Enter one and this table starts with you.</div>
-      {{end}}
-    </div>
-    {{if $d.Top}}{{template "board-legend"}}{{end}}
+    <div class="fig">{{template "results" (dict "Entries" $d.LastEntries "S" $d.LastScale "R" . "Here" false)}}</div>
+    {{template "sure-key"}}
+    {{if not $d.Volunteers}}<p class="note early"><b>Early days.</b> Every score so far is the organisers' machine's alone, marked <a class="term" href="/glossary#run-once"><i>run once</i></a>. A second machine turns them <a class="term" href="/glossary#confirmed"><i>confirmed</i></a>: <a href="/verify">lend a GPU →</a></p>{{end}}
   </div>
 </section>
+{{else}}{{if not $d.Volunteers}}
+<section>
+  <div class="wrap">
+    <p class="note early" style="margin-top:0"><b>Early days.</b> For now the organisers' machine is the only established verifier, so the first scores will be marked <a class="term" href="/glossary#run-once"><i>run once</i></a>. A second machine turns them <a class="term" href="/glossary#confirmed"><i>confirmed</i></a>: <a href="/verify">lend a GPU →</a></p>
+  </div>
+</section>
+{{end}}{{end}}
 
 <section id="how">
   <div class="wrap">
@@ -108,13 +84,27 @@
       </div>
       <a class="more" href="/docs/verifying#why-a-score-can-be-believed">why a number here can be believed →</a>
     </div>
-    <div class="steps">
-      <div class="step"><h3>Fresh pages are drawn</h3><p>A random slice of the newest Common Crawl, picked by a public random number <em>after</em> entries are locked. Nobody, including the organisers, can know it in advance.</p></div>
-      <div class="step"><h3>Each curator edits them</h3><p>{{howlong .Scale.EditSeconds | title}} in a sandbox with a GPU and no network. It writes an <a class="term" href="/glossary#edit-script">edit script</a>: which pieces of which pages to keep, in what order.</p></div>
-      <div class="step"><h3>The same model trains on each</h3><p>A {{.Scale.NLayer}}-layer language model reads exactly {{compact .Scale.TrainTokens}} tokens of each edit, from the same starting point. Too little data repeats; too much is cut off.</p></div>
-      <div class="step"><h3>It sits an exam</h3><p>Its <a class="term" href="/glossary#loss">loss</a> on carefully chosen human writing of {{len .Season.ExamSources}} kinds, from encyclopedias to news. Anything in the pages that quotes the exam is removed first.</p></div>
-      <div class="step"><h3>Volunteers check each other</h3><p>Two different people run each curator on their own GPUs, and others grade what it wrote. Everything is sealed until the round settles; then every run and every grade is published.</p></div>
-      <div class="step"><h3>The leaderboard moves</h3><p>A curator's <a class="term" href="/glossary#gain">gain</a> is the unedited pages' loss minus its own, round after round on fresh pages. Luck on one round does not last.</p></div>
+    <div class="how-cols">
+      <div class="galley" data-galley aria-label="An illustration: lines of raw web pages, some struck out and some kept">
+        <div class="head"><span>What a curator does</span><span>illustration</span></div>
+        <p class="line cut" style="--d:0.3s"><span class="mark">cut</span><span class="t">Home | About | Contact | Privacy Policy | Terms of Service</span></p>
+        <p class="line keep" style="--d:0.8s"><span class="mark">stet</span><span class="t">In 1854 John Snow traced a cholera outbreak to a single pump on Broad Street.</span></p>
+        <p class="line cut" style="--d:1.3s"><span class="mark">cut</span><span class="t">We use cookies to improve your experience. Accept all cookies?</span></p>
+        <p class="line cut" style="--d:1.8s"><span class="mark">cut</span><span class="t">BUY NOW!!! best cheap deals deals deals click here &gt;&gt;&gt;</span></p>
+        <p class="line keep" style="--d:2.3s"><span class="mark">stet</span><span class="t">To find the slope of a line, divide the change in y by the change in x.</span></p>
+        <p class="line cut" style="--d:2.8s"><span class="mark">cut</span><span class="t">Copyright © 2019. All rights reserved. Powered by WordPress.</span></p>
+        <p class="line keep" style="--d:3.3s"><span class="mark">stet</span><span class="t">The court held that the statute did not apply to contracts signed before it passed.</span></p>
+        <div class="tally"><span><b>7</b> lines in</span><span class="arrow">→</span><span><b>3</b> let stand</span><span>the model learns from what is left</span></div>
+        <button class="replay" type="button" data-replay>replay</button>
+      </div>
+      <ol class="steps">
+        <li><h3>Fresh pages are drawn</h3><p>A random slice of the newest Common Crawl, picked by a public random number <em>after</em> entries are locked. Nobody, including the organisers, can know it in advance.</p></li>
+        <li><h3>Each curator edits them</h3><p>{{howlong .Scale.EditSeconds | title}} in a sandbox with a GPU and no network. It writes an <a class="term" href="/glossary#edit-script">edit script</a>: which pieces of which pages to keep, in what order.</p></li>
+        <li><h3>The same model trains on each</h3><p>A {{.Scale.NLayer}}-layer language model reads exactly {{compact .Scale.TrainTokens}} tokens of each edit, from the same starting point.</p></li>
+        <li><h3>It sits an exam</h3><p>Its <a class="term" href="/glossary#loss">loss</a> on carefully chosen human writing of {{len .Season.ExamSources}} kinds. Anything in the pages that quotes the exam is removed first.</p></li>
+        <li><h3>Volunteers check each other</h3><p>Two different people run each curator on their own GPUs, and others grade what it wrote. Everything is sealed until the round settles; then every run and grade is published.</p></li>
+        <li><h3>The leaderboard moves</h3><p>A curator's <a class="term" href="/glossary#gain">gain</a> is the unedited pages' loss minus its own, round after round on fresh pages. Luck on one round does not last.</p></li>
+      </ol>
     </div>
   </div>
 </section>

@@ -67,7 +67,7 @@
         <div class="row head"><span class="k">You need</span></div>
         <div class="row"><span class="v l">A computer. A GPU makes local runs quick: NVIDIA, AMD or a Mac.</span></div>
         {{if .Github}}<div class="row"><span class="v l">A GitHub account, {{$d.GithubDays}}+ days old, to submit. Not to practise.</span></div>{{end}}
-        <div class="row"><span class="v l">Nothing else. Official runs happen on volunteers' machines, not yours.</span></div>
+        <div class="row"><span class="v l">Nothing else. Official runs happen on verifiers' machines, not yours.</span></div>
       </div>
       <div class="panel" data-live>
         <div class="row head"><span class="k">Right now</span></div>
@@ -126,7 +126,7 @@
     <div class="sec-head"><div><h2>Questions entrants ask</h2></div><a class="more" href="/docs/rules">the rules, in full →</a></div>
     <div class="qa">
       <details open><summary>How many things can I try?</summary><p>On your own machine, as many as you like: <code>stet run</code> is the leaderboard's own harness, practice rounds never change, and every official round can be replayed once it settles. Officially you may have {{$d.InPlay}} {{plural $d.InPlay "entry" "entries"}} in play at once and submit {{$d.PerDay}} a day, because each one costs volunteers GPU time. Submitting an entry again under the same name replaces it; another name is another entry.</p></details>
-      <details><summary>Do I need a GPU?</summary><p>Not to enter: your curator is run on volunteers' machines. To develop one, a GPU turns a practice run from a long wait into a minute or two. Any NVIDIA or AMD card, or a Mac, will do for that.</p></details>
+      <details><summary>Do I need a GPU?</summary><p>Not to enter: your curator is run on verifiers' machines. To develop one, a GPU turns a practice run from a long wait into a minute or two. Any NVIDIA or AMD card, or a Mac, will do for that.</p></details>
       <details><summary>What is the gain, exactly?</summary><p>The exam loss of a model trained on the raw pages, minus the exam loss of one trained on your edit, on the same round. In nats per token; higher is better. The board also shows it as a multiplier: how much more raw data the model would have needed to do as well.</p></details>
       <details><summary>Can my curator write new text?</summary><p>Almost none. At least {{pct1 $d.CopyFrac}} of what the model reads must be copied byte for byte from the round's pages. The competition is about choosing and ordering data, not about bringing your own.</p></details>
       <details><summary>Is the exam secret?</summary><p>No. The exam is public, your curator cannot read it while it runs officially, and pages that quote it are removed from the corpus first. A second, held-out exam decides the season's final table.</p></details>
