@@ -6,18 +6,22 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
 )
 
-func cmdKeys(ctx context.Context, f *Fleet, add int, prefix string) error {
+func cmdKeys(ctx context.Context, f *Fleet, add int, prefix string, vouch bool, revoke []string) error {
+	unlock, err := f.lock(time.Minute)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if len(revoke) > 0 {
+		return f.revoke(ctx, revoke)
+	}
 	if add > 0 {
-		unlock, err := f.lock(time.Minute)
-		if err != nil {
-			return err
-		}
-		defer unlock()
 		made, err := f.addKeys(add, prefix)
 		if err != nil {
 			return err
@@ -26,39 +30,76 @@ func cmdKeys(ctx context.Context, f *Fleet, add int, prefix string) error {
 		for i, k := range made {
 			names[i] = k.Handle
 		}
-		fmt.Fprintf(f.out, "Made %d keys: %s (in %s).\n\n", len(made), strings.Join(names, ", "), f.keyDir())
+		fmt.Fprintf(f.out, "Made %d keys: %s (in %s).\n", len(made), strings.Join(names, ", "), f.keyDir())
+		vouch = true
 	}
 	if len(f.keys) == 0 {
 		fmt.Fprintln(f.out, "No keys yet. Make some: stet-runpod keys --add 4")
 		return nil
 	}
-	// What the server knows of each, when the organisers' key is to hand to ask with.
-	var op *Key
-	if k, err := loadKey(f.o.OperatorKey); err == nil {
-		op = k
+	vouched, err := f.st.vouched(ctx, f.op)
+	if err != nil {
+		return err
 	}
-	known := 0
-	for _, k := range f.keys {
-		say := ""
-		if op != nil {
-			exists, worker, err := f.st.lookup(ctx, op, k.Handle)
-			switch {
-			case err != nil:
-				say = "the server could not be asked: " + err.Error()
-			case worker:
-				say, known = "a rented machine to the server", known+1
-			case exists:
-				say = "has an account, and the server does not know the key as a rented machine yet"
-			default:
-				say = "no account yet: it is made when the machine is first rented"
+	if vouch {
+		// Vouched for with the organisers' own key, and each given its account now: the
+		// server needs nothing else to take them as the organisers' rented machines.
+		for _, k := range f.keys {
+			if vouched[k.Public].Counts {
+				continue
 			}
+			if err := f.ready(ctx, k, vouched); err != nil {
+				return err
+			}
+		}
+		if vouched, err = f.st.vouched(ctx, f.op); err != nil {
+			return err
+		}
+		fmt.Fprintln(f.out)
+	}
+	missing := 0
+	for _, k := range f.keys {
+		v, ok := vouched[k.Public]
+		say := ""
+		switch {
+		case ok && v.Counts && v.Busy:
+			say = fmt.Sprintf("vouched for by %s · at work now", v.By)
+		case ok && v.Counts && v.LastSeen > 0:
+			say = fmt.Sprintf("vouched for by %s · last seen %s ago", v.By, f.now().Sub(time.Unix(v.LastSeen, 0)).Round(time.Minute))
+		case ok && v.Counts:
+			say = fmt.Sprintf("vouched for by %s · not used yet", v.By)
+		case ok:
+			say, missing = fmt.Sprintf("vouched for by %s, whose key is not one of the organisers' any more", v.By), missing+1
+		default:
+			say, missing = "not vouched for", missing+1
 		}
 		fmt.Fprintf(f.out, "  %-14s %s…  %s\n", k.Handle, k.Public[:12], say)
 	}
-	fmt.Fprintf(f.out, "\nThe server takes these keys as the organisers' rented machines once they are in\n"+
-		"STET_WORKER_KEYS (Epsilon: apps/stet/deployment.yaml) and it has been started again.\n"+
-		"Each machine counts as one of the organisers', and is given no held-out exam.\n\n"+
-		"STET_WORKER_KEYS=%s\n", f.workerKeys())
+	if missing > 0 {
+		fmt.Fprintf(f.out, "\n%d not vouched for: stet-runpod keys --vouch (they are vouched for when first rented, too).\n", missing)
+	}
+	return nil
+}
+
+// revoke takes the organisers' grant for these keys back and forgets them here.
+func (f *Fleet) revoke(ctx context.Context, handles []string) error {
+	byHandle := map[string]*Key{}
+	for _, k := range f.keys {
+		byHandle[k.Handle] = k
+	}
+	for _, h := range handles {
+		k := byHandle[h]
+		if k == nil {
+			return fmt.Errorf("there is no key %q in the pool", h)
+		}
+		if err := f.st.revoke(ctx, f.op, k.Public); err != nil {
+			return fmt.Errorf("taking back %s: %w", h, err)
+		}
+		if err := os.Remove(filepath.Join(f.keyDir(), h+".json")); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		f.say("took back %s: the server no longer takes it as the organisers', and its key is gone from here. A machine still running with it should be ended: stet-runpod down %s", h, h)
+	}
 	return nil
 }
 

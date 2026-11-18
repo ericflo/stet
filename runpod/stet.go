@@ -226,8 +226,9 @@ func (s *Stet) work(ctx context.Context, op *Key) (*Work, error) {
 }
 
 // account makes sure a rented machine's key has its account, and says whether the server
-// takes it as one of the organisers' rented machines (STET_WORKER_KEYS). Asking twice is
-// harmless: an account that is there is returned as it is.
+// takes it as one of the organisers' rented machines. Asking twice is harmless: an account
+// that is there is returned as it is. Vouch for the key first: the server lets the
+// organisers' machines make accounts without counting them against the address.
 func (s *Stet) account(ctx context.Context, k *Key) (worker bool, err error) {
 	var out struct {
 		Account struct {
@@ -245,20 +246,63 @@ func (s *Stet) account(ctx context.Context, k *Key) (worker bool, err error) {
 	return out.Account.Anchor && out.Account.Worker, nil
 }
 
-// lookup says what the server knows of a handle: nothing (no account yet), an account, or
-// an organisers' rented machine. Asked with the organisers' own key.
-func (s *Stet) lookup(ctx context.Context, op *Key, handle string) (exists, worker bool, err error) {
+// grantMessage is what an organisers' key signs to vouch for a rented machine's key
+// (server/store.go, WorkerGrant).
+func grantMessage(key string, at int64) []byte {
+	return []byte("stet-worker-v1\n" + key + "\n" + strconv.FormatInt(at, 10))
+}
+
+// vouch has the organisers' own key vouch for a rented machine's: from then on the server
+// takes it as one of the organisers' machines, with nothing changed in its configuration.
+func (s *Stet) vouch(ctx context.Context, op, worker *Key) error {
+	at := s.now().Unix()
+	sig := hex.EncodeToString(ed25519.Sign(op.priv, grantMessage(worker.Public, at)))
+	err := s.do(ctx, "POST", "/api/v1/admin/workers", map[string]any{"key": worker.Public, "at": at, "sig": sig}, op, nil)
+	switch statusOf(err) {
+	case 404:
+		return errors.New("this Stet server does not take grants for rented machines (POST /api/v1/admin/workers): it is older than this tool")
+	case 403:
+		return fmt.Errorf("%s is not one of the organisers' own keys, and only they may vouch for a rented machine (--key)", op.Handle)
+	}
+	return err
+}
+
+// revoke takes the organisers' grant for a key back. A key nobody vouched for is not an error.
+func (s *Stet) revoke(ctx context.Context, op *Key, public string) error {
+	err := s.do(ctx, "DELETE", "/api/v1/admin/workers/"+public, nil, op, nil)
+	if statusOf(err) == 404 {
+		return nil
+	}
+	return err
+}
+
+// Vouched is one of the organisers' grants, as the server shows it.
+type Vouched struct {
+	Key      string `json:"key"`
+	Handle   string `json:"handle"`
+	By       string `json:"by"`
+	At       int64  `json:"at"`
+	Counts   bool   `json:"counts"`
+	LastSeen int64  `json:"last_seen"`
+	Busy     bool   `json:"busy"`
+}
+
+// vouched is every grant the server keeps, by key.
+func (s *Stet) vouched(ctx context.Context, op *Key) (map[string]Vouched, error) {
 	var out struct {
-		Key    string `json:"key"`
-		Worker bool   `json:"worker"`
+		Workers []Vouched `json:"workers"`
 	}
-	if err := s.do(ctx, "GET", "/api/v1/admin/accounts/"+handle, nil, op, &out); err != nil {
-		if statusOf(err) == 404 {
-			return false, false, nil
+	if err := s.do(ctx, "GET", "/api/v1/admin/workers", nil, op, &out); err != nil {
+		if statusOf(err) == 403 {
+			return nil, fmt.Errorf("%s is not one of the organisers' own keys (--key)", op.Handle)
 		}
-		return false, false, err
+		return nil, err
 	}
-	return true, out.Worker, nil
+	m := map[string]Vouched{}
+	for _, v := range out.Workers {
+		m[v.Key] = v
+	}
+	return m, nil
 }
 
 // site is the website whose installer a rented machine runs.

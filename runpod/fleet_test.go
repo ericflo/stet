@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -94,13 +96,16 @@ func (f *fakeRunPod) serve(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// fakeStet is the Stet server: what is waiting, accounts, and the season's site.
+// fakeStet is the Stet server: what is waiting, accounts, grants, and the season's site.
 type fakeStet struct {
-	mu      sync.Mutex
-	work    Work
-	workers map[string]bool // public keys the server takes as rented machines
-	signed  []string        // who signed each request
-	srv     *httptest.Server
+	mu       sync.Mutex
+	work     Work
+	workers  map[string]bool // public keys the server takes as rented machines
+	signed   []string        // who signed each request
+	vouches  int             // grants it was sent, each with a good signature
+	refusing bool            // the key vouching is not one of the organisers' own
+	taken    map[string]bool // handles somebody else has
+	srv      *httptest.Server
 }
 
 func newFakeStet(t *testing.T) *fakeStet {
@@ -114,12 +119,52 @@ func newFakeStet(t *testing.T) *fakeStet {
 			json.NewEncoder(w).Encode(f.work)
 		case "/api/v1/season":
 			io.WriteString(w, `{"site": "https://www.stet.test"}`)
+		case "/api/v1/admin/workers":
+			switch r.Method {
+			case "GET":
+				var list []map[string]any
+				for k := range f.workers {
+					list = append(list, map[string]any{"key": k, "counts": true, "by": "stet"})
+				}
+				json.NewEncoder(w).Encode(map[string]any{"workers": list})
+			case "POST":
+				var g struct {
+					Key string `json:"key"`
+					At  int64  `json:"at"`
+					Sig string `json:"sig"`
+				}
+				json.NewDecoder(r.Body).Decode(&g)
+				pub, _ := hex.DecodeString(r.Header.Get("X-Stet-Key"))
+				sig, _ := hex.DecodeString(g.Sig)
+				switch {
+				case f.refusing:
+					w.WriteHeader(403)
+					io.WriteString(w, `{"error": "organisers only"}`)
+				case len(pub) != ed25519.PublicKeySize || !ed25519.Verify(pub, grantMessage(g.Key, g.At), sig):
+					w.WriteHeader(400)
+				default:
+					f.workers[g.Key] = true
+					f.vouches++
+					w.WriteHeader(201)
+					io.WriteString(w, "{}")
+				}
+			}
 		case "/api/v1/accounts":
 			var body struct{ Handle string }
 			json.NewDecoder(r.Body).Decode(&body)
+			if f.taken[body.Handle] {
+				w.WriteHeader(409)
+				io.WriteString(w, `{"error": "the handle \"`+body.Handle+`\" is taken"}`)
+				return
+			}
 			worker := f.workers[r.Header.Get("X-Stet-Key")]
 			json.NewEncoder(w).Encode(map[string]any{"account": map[string]any{"handle": body.Handle, "anchor": worker, "worker": worker}})
 		default:
+			if key, ok := strings.CutPrefix(r.URL.Path, "/api/v1/admin/workers/"); ok && r.Method == "DELETE" && f.workers[key] {
+				delete(f.workers, key)
+				io.WriteString(w, "{}")
+				return
+			}
 			w.WriteHeader(404)
 		}
 	}))
@@ -246,16 +291,32 @@ func TestScaleRentsTheCheapestThatFitsAndEndsWhatIsNotWanted(t *testing.T) {
 	}
 }
 
-// A key the server does not yet take as a rented machine is never rented for: such a
-// machine's grades would be a stranger's, and a stranger is not given work like this.
-func TestNothingIsRentedForAKeyTheServerDoesNotKnow(t *testing.T) {
+// A key is vouched for with the organisers' own key before a machine is rented with it, and
+// nothing is rented for a key the server would not take: such a machine's work would be a
+// stranger's.
+func TestAKeyIsVouchedForBeforeAMachineIsRentedWithIt(t *testing.T) {
 	rp, st := newFakeRunPod(t), newFakeStet(t)
-	f, _ := testFleet(t, rp, st, 2)
+	f, out := testFleet(t, rp, st, 2)
 	st.workers = map[string]bool{}
+	st.refusing = true // run with a key that is not one of the organisers' own
 	st.work = *round(30, 1, 0, 0)
 	err := tick(context.Background(), f)
-	if err == nil || !strings.Contains(err.Error(), "STET_WORKER_KEYS") || len(rp.created) != 0 {
-		t.Fatalf("rented %d for a key the server does not know (%v)", len(rp.created), err)
+	if err == nil || !strings.Contains(err.Error(), "organisers' own keys") || len(rp.created) != 0 {
+		t.Fatalf("rented %d for keys nobody could vouch for (%v)", len(rp.created), err)
+	}
+	st.refusing = false
+	if err := tick(context.Background(), f); err != nil {
+		t.Fatal(err)
+	}
+	if st.vouches != 2 || len(rp.created) != 2 || strings.Count(out.String(), "vouched for stet-rp-") != 2 {
+		t.Fatalf("vouched %d times, rented %d:\n%s", st.vouches, len(rp.created), out)
+	}
+	// Vouched for once is enough.
+	for _, p := range rp.pods {
+		delete(rp.pods, p.ID)
+	}
+	if err := tick(context.Background(), f); err != nil || st.vouches != 2 {
+		t.Fatalf("vouched again: %d (%v)", st.vouches, err)
 	}
 }
 
@@ -310,5 +371,53 @@ func TestSettingsAfterTheNumberAreNotIgnored(t *testing.T) {
 	}
 	if len(rp.created) != 0 {
 		t.Fatalf("rented %d", len(rp.created))
+	}
+}
+
+// keys --add makes keys and vouches for them; --revoke takes a grant back and forgets the key.
+func TestKeysAreVouchedForAndTakenBack(t *testing.T) {
+	rp, st := newFakeRunPod(t), newFakeStet(t)
+	home := t.TempDir()
+	op, _ := newKey("stet")
+	if err := op.save(home + "/operator.json"); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("RUNPOD_API_KEY", "rp-key")
+	common := []string{"--home", home, "--api", st.srv.URL, "--runpod-api", rp.srv.URL, "--key", home + "/operator.json"}
+	var out, errs bytes.Buffer
+	if err := run(append([]string{"keys", "--add", "2"}, common...), &out, &errs); err != nil {
+		t.Fatalf("%v %s", err, errs.String())
+	}
+	if st.vouches != 2 || len(st.workers) != 2 || strings.Count(out.String(), "vouched for by") != 2 {
+		t.Fatalf("keys --add: %d vouched\n%s", st.vouches, out.String())
+	}
+	out.Reset()
+	if err := run(append([]string{"keys", "--revoke", "stet-rp-01"}, common...), &out, &errs); err != nil {
+		t.Fatal(err)
+	}
+	f := &Fleet{o: &Options{Home: home}}
+	if err := f.loadKeys(); err != nil || len(f.keys) != 1 || f.keys[0].Handle != "stet-rp-02" || len(st.workers) != 1 {
+		t.Fatalf("after taking stet-rp-01 back: %d keys here, %d vouched for", len(f.keys), len(st.workers))
+	}
+	if err := run(append([]string{"keys", "--revoke"}, common...), &out, &errs); err == nil {
+		t.Fatal("keys --revoke with nothing named was taken")
+	}
+}
+
+// A handle somebody else took on the server is no obstacle: the key takes another name.
+func TestAKeyWhoseHandleIsTakenTakesAnother(t *testing.T) {
+	rp, st := newFakeRunPod(t), newFakeStet(t)
+	f, out := testFleet(t, rp, st, 1)
+	st.taken = map[string]bool{"stet-rp-01": true}
+	st.work = *round(30, 1, 0, 0)
+	if err := tick(context.Background(), f); err != nil {
+		t.Fatal(err)
+	}
+	if len(rp.created) != 1 || rp.created[0].Name == "stet-rp-01" || !strings.HasPrefix(rp.created[0].Name, "stet-rp-") || !strings.Contains(out.String(), "somebody else's handle") {
+		t.Fatalf("rented %+v\n%s", rp.created, out)
+	}
+	again := &Fleet{o: f.o}
+	if err := again.loadKeys(); err != nil || len(again.keys) != 1 || again.keys[0].Handle != rp.created[0].Name || again.keys[0].Public != f.keys[0].Public {
+		t.Fatalf("the pool after the rename: %+v (%v)", again.keys, err)
 	}
 }

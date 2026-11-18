@@ -150,11 +150,14 @@ cannot reach its records; send the same request again).
 ## Organisers
 
 Signed by an organisers' key; anyone else gets `403`, and so does a machine the organisers
-rent (`STET_WORKER_KEYS`).
+rent (one an organisers' key has vouched for).
 
 | | |
 |---|---|
 | `GET /api/v1/admin/accounts/{handle}` | An account's public key, for adding it to the organisers' keys, and whether it is one of their rented machines (`worker`) |
+| `POST /api/v1/admin/workers` `{"key", "at", "sig"}` | Vouch for a machine the organisers rent. `sig` is the signing organisers' Ed25519 signature, in hex, of `stet-worker-v1\n<key>\n<at>`; `at` is now, in Unix seconds, give or take an hour. From then on the key is one of the organisers' machines to the judge, and administers nothing. The grant is kept with its signature, and counts while the key that signed it is one of the organisers' |
+| `GET /api/v1/admin/workers` | The grants: each machine's `key`, its `handle` once it has an account, who vouched for it (`by`) and when (`at`), whether it `counts`, `last_seen`, and `busy` if it holds a job |
+| `DELETE /api/v1/admin/workers/{key}` | Take a grant back. The account stays, and is nobody's machine |
 | `GET /api/v1/admin/work` | What the open rounds are waiting for, as counts: for each round `entries`, `runs_waiting` (entries someone who is around could be handed to run, and nobody is running), `runs_wanted` (entries a runner of the organisers' that had just started could be handed), `edits_under_way`, `grades_wanted` (scripts a score waits on that a grader of the organisers' who had just started could be handed now) and `grades_under_way`; `runners` (accounts around that run curators); `waiting` (an entry is waiting for a round); `next_draw_at`; and `machines`, the organisers' accounts with `last_seen` and `busy` (`edit` or `grade`). What `stet-runpod` rents by |
 | `GET /api/v1/admin/sealed` | Which organisers' keys have a copy of the held-out exam sealed to them |
 | `PUT /api/v1/admin/sealed/{key}` | Keep a copy sealed to that organisers' key. Only sealed files are taken; the server cannot open them |

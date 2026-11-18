@@ -9,11 +9,14 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -57,10 +60,61 @@ type Account struct {
 	// row cannot make one. Such an account starts out established and administers the
 	// season; no score depends on it.
 	Anchor bool `json:"-"`
-	// Worker marks an organisers' account that is a machine they rent (Config.organiser).
-	// Anchor is set too: to the judge it is one of the organisers' machines. It administers
-	// nothing.
+	// Worker marks an organisers' account that is a machine they rent, because one of the
+	// organisers' own keys has vouched for it (WorkerGrant). Anchor is set too: to the judge
+	// it is one of the organisers' machines. It administers nothing.
 	Worker bool `json:"-"`
+}
+
+// WorkerGrant is one of the organisers vouching for a machine they rent by the hour
+// (stet-runpod): an organisers' machine in every rule about who works on what, so one person
+// with the rest of them, and nothing more. It draws nothing, publishes nothing, and is never
+// given the held-out exam, which stays on hardware the organisers own.
+//
+// It is kept in the database, signed. A database row cannot make an organisers' machine:
+// a grant counts only while its signature checks out and the key that made it is one of the
+// organisers' own, in the server's configuration. Take that key out and its grants lapse.
+type WorkerGrant struct {
+	Key string `json:"key"` // the rented machine's public key
+	By  string `json:"by"`  // the organisers' key that vouched for it
+	At  int64  `json:"at"`
+	Sig string `json:"sig"` // By's signature of grantMessage(Key, At)
+	ok  bool   // the signature checks out; worked out when it is read or made
+}
+
+func grantMessage(key string, at int64) []byte {
+	return []byte("stet-worker-v1\n" + key + "\n" + strconv.FormatInt(at, 10))
+}
+
+// check works out whether the grant is signed by the key it names.
+func (g *WorkerGrant) check() bool {
+	pub, err1 := hex.DecodeString(g.By)
+	sig, err2 := hex.DecodeString(g.Sig)
+	g.ok = err1 == nil && err2 == nil && len(pub) == ed25519.PublicKeySize && len(sig) == ed25519.SignatureSize &&
+		sha256Re.MatchString(g.Key) && ed25519.Verify(pub, grantMessage(g.Key, g.At), sig)
+	return g.ok
+}
+
+func workerKey(key string) string { return "worker/" + key }
+
+// organiser says whether a key is one of the organisers', and of which kind: their own
+// (anchor), or one they rent and one of their own keys vouches for (worker).
+func (s *State) organiser(anchors map[string]bool, key string) (anchor, worker bool) {
+	if anchors[key] {
+		return true, false
+	}
+	if g := s.Workers[key]; g != nil && g.ok && anchors[g.By] {
+		return true, true
+	}
+	return false, false
+}
+
+// markOrganisers sets every account's Anchor and Worker from the configuration and the
+// grants: after loading, and whenever a grant is made or taken back.
+func (s *State) markOrganisers(anchors map[string]bool) {
+	for _, a := range s.Accounts {
+		a.Anchor, a.Worker = s.organiser(anchors, a.Pubkey)
+	}
 }
 
 // administers reports whether an account may act for the organisers: draw, publish, look
@@ -361,7 +415,7 @@ const (
 
 var loadScans = []KVScan{
 	{Prefix: "account/"}, {Prefix: "editor/"}, {Prefix: "round/"}, {Prefix: "entry/"}, {Prefix: "claim/"},
-	{Prefix: "result/"}, {Prefix: "baseline/"}, {Prefix: "record/"}, {Prefix: "look/"}, {Prefix: "meta/"}, {Prefix: "shadow/"},
+	{Prefix: "result/"}, {Prefix: "baseline/"}, {Prefix: "record/"}, {Prefix: "look/"}, {Prefix: "meta/"}, {Prefix: "shadow/"}, {Prefix: "worker/"},
 	{Prefix: "event/", Reverse: true, Limit: eventsKept},
 }
 
@@ -377,8 +431,9 @@ type State struct {
 	Baselines map[string]*Baseline
 	Records   []*Record // oldest first
 	Looks     map[string]*Look
-	Shadows   map[int]*Shadow // the next exam's verdict on settled rounds, by round
-	Events    []*Event        // oldest first; only the most recent are kept in memory
+	Shadows   map[int]*Shadow         // the next exam's verdict on settled rounds, by round
+	Workers   map[string]*WorkerGrant // the machines the organisers rent, by public key
+	Events    []*Event                // oldest first; only the most recent are kept in memory
 	Meta      Meta
 	Crawl     *SavedCrawl
 
@@ -394,7 +449,7 @@ func newState() *State {
 	return &State{
 		Accounts: map[int64]*Account{}, Editors: map[string]*Editor{}, Rounds: map[int]*Round{}, Entries: map[string]*Entry{},
 		Claims: map[int64]*Claim{}, Results: map[int64]*Result{}, Baselines: map[string]*Baseline{}, Looks: map[string]*Look{},
-		Shadows:  map[int]*Shadow{},
+		Shadows: map[int]*Shadow{}, Workers: map[string]*WorkerGrant{},
 		Meta:     Meta{NextAccount: 1, NextClaim: 1, NextResult: 1, NextEvent: 1},
 		byPubkey: map[string]*Account{}, byHandle: map[string]*Account{}, inRound: map[int][]*Entry{}, ofEditor: map[string][]*Entry{},
 		resultsOf: map[string][]*Result{}, ownedBy: map[int64][]*Editor{},
@@ -475,7 +530,7 @@ func (s *State) holder() *Record {
 }
 
 // decode puts one stored item into the state.
-func (s *State) decode(it KVItem, organiser func(key string) (anchor, worker bool)) error {
+func (s *State) decode(it KVItem) error {
 	into := func(v any) error {
 		if err := json.Unmarshal(it.Value, v); err != nil {
 			return fmt.Errorf("%s: %w", it.Key, err)
@@ -488,8 +543,7 @@ func (s *State) decode(it KVItem, organiser func(key string) (anchor, worker boo
 		if err := into(a); err != nil {
 			return err
 		}
-		a.Anchor, a.Worker = organiser(a.Pubkey)
-		s.addAccount(a)
+		s.addAccount(a) // whether it is an organisers' is worked out once everything is read
 	case "editor":
 		e := &Editor{}
 		if err := into(e); err != nil {
@@ -544,6 +598,13 @@ func (s *State) decode(it KVItem, organiser func(key string) (anchor, worker boo
 			return err
 		}
 		s.Shadows[sh.RoundIdx] = sh
+	case "worker":
+		g := &WorkerGrant{}
+		if err := into(g); err != nil {
+			return err
+		}
+		g.check()
+		s.Workers[g.Key] = g
 	case "event":
 		e := &Event{}
 		if err := into(e); err != nil {
@@ -562,7 +623,7 @@ func (s *State) decode(it KVItem, organiser func(key string) (anchor, worker boo
 	return nil
 }
 
-func loadState(ctx context.Context, kv KV, organiser func(key string) (anchor, worker bool)) (*State, int64, error) {
+func loadState(ctx context.Context, kv KV, anchors map[string]bool) (*State, int64, error) {
 	pages, rev, err := kv.Load(ctx, loadScans)
 	if err != nil {
 		return nil, 0, err
@@ -570,12 +631,13 @@ func loadState(ctx context.Context, kv KV, organiser func(key string) (anchor, w
 	s := newState()
 	for _, items := range pages {
 		for _, it := range items {
-			if err := s.decode(it, organiser); err != nil {
+			if err := s.decode(it); err != nil {
 				return nil, 0, err
 			}
 		}
 	}
 	sort.Slice(s.Records, func(i, j int) bool { return s.Records[i].N < s.Records[j].N })
+	s.markOrganisers(anchors)
 	sort.Slice(s.Events, func(i, j int) bool { return s.Events[i].ID < s.Events[j].ID })
 	for _, es := range s.ofEditor {
 		sort.Slice(es, func(i, j int) bool { return es[i].RoundIdx < es[j].RoundIdx })
@@ -595,19 +657,19 @@ type Store struct {
 	mu    sync.RWMutex
 	kv    KV
 	blobs *blobCache
-	// organiser says which keys are the organisers' (Config.organiser)
-	organiser func(key string) (anchor, worker bool)
-	s         *State
-	rev       int64
-	version   uint64         // bumps whenever the state changes; caches key on it
-	lazy      map[string]any // changes not worth a commit of their own (a verifier's last-seen time)
-	stale     bool           // memory could not be reconciled with storage; fixed before the next change
-	down      atomic.Bool    // stale, for whoever must not wait for the lock to learn it
+	// anchors are the organisers' own keys, from the configuration (State.organiser)
+	anchors map[string]bool
+	s       *State
+	rev     int64
+	version uint64         // bumps whenever the state changes; caches key on it
+	lazy    map[string]any // changes not worth a commit of their own (a verifier's last-seen time)
+	stale   bool           // memory could not be reconciled with storage; fixed before the next change
+	down    atomic.Bool    // stale, for whoever must not wait for the lock to learn it
 }
 
-func openStore(ctx context.Context, kv KV, blobs Blobs, organiser func(key string) (anchor, worker bool)) (*Store, error) {
-	st := &Store{kv: kv, blobs: newBlobCache(blobs, 128<<20), organiser: organiser, lazy: map[string]any{}}
-	s, rev, err := loadState(ctx, kv, organiser)
+func openStore(ctx context.Context, kv KV, blobs Blobs, anchors map[string]bool) (*Store, error) {
+	st := &Store{kv: kv, blobs: newBlobCache(blobs, 128<<20), anchors: anchors, lazy: map[string]any{}}
+	s, rev, err := loadState(ctx, kv, anchors)
 	if err != nil {
 		return nil, fmt.Errorf("reading the database: %w", err)
 	}
@@ -742,7 +804,7 @@ var errUnavailable = fail(503, "the database is not answering; try again in a mo
 func (st *Store) reload(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), storeBudget)
 	defer cancel()
-	s, rev, err := loadState(ctx, st.kv, st.organiser)
+	s, rev, err := loadState(ctx, st.kv, st.anchors)
 	if err != nil {
 		st.stale = true
 		st.down.Store(true)
@@ -888,6 +950,9 @@ func (st *Store) audit(ctx context.Context) error {
 	}
 	for _, sh := range st.s.Shadows {
 		mem[shadowKey(sh.RoundIdx)] = sh
+	}
+	for k, g := range st.s.Workers {
+		mem[workerKey(k)] = g
 	}
 	for _, e := range st.s.Events {
 		mem[eventKey(e.ID)] = e

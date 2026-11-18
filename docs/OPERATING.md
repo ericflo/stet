@@ -121,9 +121,14 @@ ways a curator might, and says what held.
 A host where the container sandbox cannot be made (an old kernel, no Landlock) still
 grades: the machine falls back to `stet verify` without `--edits`.
 
-Each rented machine has a key of its own from a pool kept by `stet-runpod`, and the
-server knows those keys from `STET_WORKER_KEYS`, not `STET_ANCHOR_KEYS`. A worker key is
-one of the organisers' machines in everything the judge decides: established from the
+Each rented machine has a key of its own from a pool kept by `stet-runpod`, and one of the
+organisers' own keys (in `STET_ANCHOR_KEYS`) **vouches for it**: it signs a grant naming the
+machine's key, and the server keeps the grant (`POST /api/v1/admin/workers`). Nothing in
+the server's configuration changes. The grant is kept with its signature and checked each
+time the server reads it, and it counts only while the key that signed it is still one of
+the organisers': a row in the database cannot make an organisers' machine by itself, and
+taking an organisers' key out of `STET_ANCHOR_KEYS` takes its grants with it. A machine
+vouched for is one of the organisers' machines in everything the judge decides: established from the
 start, one person with the rest of the organisers' machines, given the organisers' own
 entries only when nobody else can take them. It is nothing more. It administers nothing
 (no draws, no files, no account lookups), and **it is never given the held-out exam**: the
@@ -133,10 +138,11 @@ machine hands back the job it holds, as a volunteer's does.
 
 Setting it up:
 
-1. `stet-runpod keys --add 4` makes four keys and prints the line for `STET_WORKER_KEYS`.
-   Put it in `apps/stet/deployment.yaml` and deploy.
-2. `stet-runpod scale --follow` on a machine that holds the organisers' own key (it asks
-   the server what is waiting with it), or `stet-runpod up 2` to rent two by hand.
+1. `stet-runpod keys --add 6`, on a machine that holds an organisers' own key: six keys,
+   each vouched for with that key and given its account.
+2. `stet-runpod scale --follow` there (it asks the server what is waiting with the same
+   key), or `stet-runpod up 2` to rent two by hand. A key in the pool that nobody has
+   vouched for is vouched for when it is first rented.
 
 A rented machine installs stet when its pod starts (about two and a half minutes) into
 `/opt/stet`, where the curator's user can read it, keeps its key and cache under `/root`,
@@ -150,8 +156,8 @@ drawn early as it would be for anyone. It never rents past `--max` machines or
 
 The keys are on RunPod's machines while they work. On `--cloud community` (strangers'
 machines, cheaper) a host could read one. Anyone holding a worker key can grade as the
-organisers, so a key that may have leaked comes out of `STET_WORKER_KEYS`, and the pool
-gets new ones. The default, `--cloud secure`, rents only from RunPod's own data centres.
+organisers, so a key that may have leaked is taken back (`stet-runpod keys --revoke
+stet-rp-03`, or `DELETE /api/v1/admin/workers/<key>`), and the pool gets a new one. The default, `--cloud secure`, rents only from RunPod's own data centres.
 
 ## Deploying
 
@@ -299,8 +305,7 @@ Set in `apps/stet/deployment.yaml`. The ones that are rules:
 | `STET_RATED_ROUNDS` | 3 | Rounds before a curator is ranked |
 | `STET_GITHUB_MIN_AGE_DAYS` | 30 | Age of the GitHub account an entrant must link |
 | `STET_GITHUB_TOKEN` | none | Optional. Without it GitHub lookups share 60 requests an hour |
-| `STET_ANCHOR_KEYS` | | Public keys of the organisers' accounts, comma-separated |
-| `STET_WORKER_KEYS` | | Public keys of the machines the organisers rent ([above](#rented-machines)), comma-separated. One of the organisers' machines to the judge, which may run curators in the container sandbox; no administering, no held-out exam |
+| `STET_ANCHOR_KEYS` | | Public keys of the organisers' accounts, comma-separated. They vouch for the machines the organisers rent through the API ([above](#rented-machines)) |
 | `STET_ESTABLISH_AFTER` | 5 | Agreed grades before an account's work counts towards scores |
 | `STET_RUNS_PER_ENTRY` | 2 | Different people who run each entry (a third when two differ) |
 | `STET_ACTIVE_WINDOW` | 10m | How recently a verifier must have asked for work to be waited for |

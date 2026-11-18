@@ -3,9 +3,10 @@
 // nothing to grade.
 //
 // Each rented machine runs the stet command line, `stet verify`, with a key of its own
-// from a pool kept here. The server knows those keys as the organisers' rented machines
-// (STET_WORKER_KEYS): it hands them work as it would any of the organisers' machines, and
-// gives them nothing else, the held-out exam least of all. A machine stops by itself after
+// from a pool kept here. The organisers' own key (--key) vouches for each, by a grant the
+// server keeps: from then on the server hands it work as it would any of the organisers'
+// machines, and gives it nothing else, the held-out exam least of all. Nothing in the
+// server's configuration changes. A machine stops by itself after
 // a while with nothing to do and ends its own pod; stet-runpod rents more when work is
 // waiting, ends what is idle when nothing is, and ends anything that has gone quiet.
 //
@@ -30,8 +31,9 @@ import (
 
 const usage = `stet-runpod: rent GPUs from RunPod to grade for Stet, as many as the work wants.
 
-  stet-runpod keys [--add N]     the pool of keys the rented machines use, and the
-                                 line for the server's STET_WORKER_KEYS
+  stet-runpod keys [--add N]     the pool of keys the rented machines use; --add makes
+                                 more and vouches for them with the organisers' key
+                                 (--vouch: any not vouched for; --revoke HANDLE...)
   stet-runpod gpus               what would be rented, cheapest first
   stet-runpod status             what is waiting, what is rented, what it costs
   stet-runpod scale [--follow]   rent and end machines to match the work (once, or
@@ -42,7 +44,8 @@ const usage = `stet-runpod: rent GPUs from RunPod to grade for Stet, as many as 
                                  too, and their jobs are handed back
   stet-runpod ssh HANDLE         log in to one (rented with --ssh)
 
-Needs RUNPOD_API_KEY, and the organisers' own stet key (--key) to ask what is waiting.
+Needs RUNPOD_API_KEY, and the organisers' own stet key (--key), to vouch for machines
+and ask what is waiting.
 Run any command with -h for its settings.
 `
 
@@ -196,20 +199,22 @@ func run(args []string, stdout, stderr io.Writer) error {
 	defer stop()
 	switch cmd {
 	case "keys":
-		add := fs.Int("add", 0, "make this many more keys")
+		add := fs.Int("add", 0, "make this many more keys, and vouch for them")
 		prefix := fs.String("prefix", "stet-rp", "their handles start with this")
+		vouch := fs.Bool("vouch", false, "vouch for every key in the pool the server does not take yet")
+		revoke := fs.Bool("revoke", false, "take back the grant for the keys named, and forget them")
 		rest, err := parse(fs, args)
 		if err != nil {
 			return err
 		}
-		if len(rest) > 0 && cmd != "up" && cmd != "down" && cmd != "ssh" {
-			return fmt.Errorf("%s takes no %q", cmd, rest[0])
+		if *revoke != (len(rest) > 0) {
+			return errors.New("keys --revoke takes the handles of the keys to take back, and nothing else does")
 		}
-		f, err := open(o, stdout, false, false)
+		f, err := open(o, stdout, false, true)
 		if err != nil {
 			return err
 		}
-		return cmdKeys(ctx, f, *add, *prefix)
+		return cmdKeys(ctx, f, *add, *prefix, *vouch, rest)
 	case "gpus":
 		rest, err := parse(fs, args)
 		if err != nil {

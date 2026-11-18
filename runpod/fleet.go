@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
 	_ "embed"
 	"encoding/base64"
 	"encoding/json"
@@ -87,13 +88,37 @@ func (f *Fleet) addKeys(n int, prefix string) ([]*Key, error) {
 	return made, nil
 }
 
-// workerKeys is the value for STET_WORKER_KEYS: every key in the pool.
-func (f *Fleet) workerKeys() string {
-	var pubs []string
-	for _, k := range f.keys {
-		pubs = append(pubs, k.Public)
+// rename gives a key a new handle, the same prefix and a random end, before it has an
+// account or a pod by the old one.
+func (f *Fleet) rename(k *Key) error {
+	prefix := k.Handle
+	if i := strings.LastIndex(prefix, "-"); i > 0 {
+		prefix = prefix[:i]
 	}
-	return strings.Join(pubs, ",")
+	have := map[string]bool{}
+	for _, other := range f.keys {
+		have[other.Handle] = true
+	}
+	const letters = "abcdefghijklmnopqrstuvwxyz0123456789"
+	for {
+		b := make([]byte, 4)
+		if _, err := rand.Read(b); err != nil {
+			return err
+		}
+		for i := range b {
+			b[i] = letters[int(b[i])%len(letters)]
+		}
+		handle := prefix + "-" + string(b)
+		if have[handle] || !handleRe.MatchString(handle) {
+			continue
+		}
+		old := filepath.Join(f.keyDir(), k.Handle+".json")
+		k.Handle = handle
+		if err := k.save(filepath.Join(f.keyDir(), handle+".json")); err != nil {
+			return err
+		}
+		return os.Remove(old)
+	}
 }
 
 // lock keeps two of these from renting at once on one pool: two would each see the same
@@ -408,6 +433,10 @@ func (f *Fleet) launch(ctx context.Context, v *View, n int) (int, error) {
 		f.say("RunPod has no GPU free now that fits (%s cloud%s); trying again later", strings.ToLower(f.o.Cloud), map[bool]string{true: ", --gpu " + strings.Join(f.o.GPUs, ","), false: ""}[len(f.o.GPUs) > 0])
 		return 0, nil
 	}
+	vouched, err := f.st.vouched(ctx, f.op)
+	if err != nil {
+		return 0, err
+	}
 	rented := 0
 	for _, w := range v.Workers {
 		if rented == n {
@@ -416,22 +445,8 @@ func (f *Fleet) launch(ctx context.Context, v *View, n int) (int, error) {
 		if w.Pod != nil {
 			continue
 		}
-		var worker bool
-		if f.o.DryRun {
-			// Looked up, not made: a dry run changes nothing anywhere.
-			exists, known, err := f.st.lookup(ctx, f.op, w.Key.Handle)
-			if err != nil {
-				return rented, fmt.Errorf("%s's account: %w", w.Key.Handle, err)
-			}
-			worker = known || !exists
-		} else {
-			worker, err = f.st.account(ctx, w.Key)
-			if err != nil {
-				return rented, fmt.Errorf("%s's account: %w", w.Key.Handle, err)
-			}
-		}
-		if !worker {
-			return rented, fmt.Errorf("the Stet server does not take %s as one of the organisers' rented machines yet. Its key goes in STET_WORKER_KEYS (`stet-runpod keys` prints the line), and the server is started again", w.Key.Handle)
+		if err := f.ready(ctx, w.Key, vouched); err != nil {
+			return rented, err
 		}
 		pod, err := f.rent(ctx, v, w.Key, gpus, site)
 		if err != nil {
@@ -444,6 +459,43 @@ func (f *Fleet) launch(ctx context.Context, v *View, n int) (int, error) {
 		rented++
 	}
 	return rented, nil
+}
+
+// ready makes sure the server takes a key as one of the organisers' rented machines: the
+// organisers' key vouches for it if it does not count yet, and its account is made. A dry
+// run says what it would do.
+func (f *Fleet) ready(ctx context.Context, k *Key, vouched map[string]Vouched) error {
+	if vouched[k.Public].Counts {
+		if f.o.DryRun {
+			return nil
+		}
+	} else if f.o.DryRun {
+		f.say("would vouch for %s with %s's key", k.Handle, f.op.Handle)
+		return nil
+	} else {
+		if err := f.st.vouch(ctx, f.op, k); err != nil {
+			return fmt.Errorf("vouching for %s: %w", k.Handle, err)
+		}
+		f.say("vouched for %s with %s's key", k.Handle, f.op.Handle)
+	}
+	worker, err := f.st.account(ctx, k)
+	for tries := 0; statusOf(err) == 409 && strings.Contains(err.Error(), "taken") && tries < 3; tries++ {
+		// Somebody else has the handle, and handles are anybody's to take. The grant is
+		// for the key, not the name, so the key takes another name.
+		old := k.Handle
+		if err := f.rename(k); err != nil {
+			return err
+		}
+		f.say("%s is somebody else's handle on the server: this key is %s now", old, k.Handle)
+		worker, err = f.st.account(ctx, k)
+	}
+	if err != nil {
+		return fmt.Errorf("%s's account: %w", k.Handle, err)
+	}
+	if !worker {
+		return fmt.Errorf("the Stet server does not take %s as one of the organisers' rented machines, though %s vouched for it", k.Handle, f.op.Handle)
+	}
+	return nil
 }
 
 // rent tries each kind of GPU in turn until RunPod gives one. nil, nil: none could be had

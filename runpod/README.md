@@ -27,20 +27,23 @@ the season's limits, by a cgroup where the host allows one and otherwise watched
 say what differs for a curator. Where it cannot be made (an old kernel, no Landlock) the
 machine only grades. `--no-edits` rents machines that only grade.
 
-Each machine has a key of its own from a pool kept here. The server knows them from
-`STET_WORKER_KEYS`: one of the organisers' machines to the judge, and nothing more. It
-administers nothing, and is never given the held-out exam
+Each machine has a key of its own from a pool kept here, and the organisers' own key
+(`--key`) vouches for each: it signs a grant the server keeps. Nothing in the server's
+configuration changes. A machine vouched for is one of the organisers' machines to the
+judge, and nothing more: it administers nothing, and is never given the held-out exam
 ([Operating: rented machines](../docs/OPERATING.md#rented-machines)).
 
 ## Setting up
 
 ```sh
 export RUNPOD_API_KEY=...            # https://www.runpod.io/console/user/settings
-stet-runpod keys --add 4             # four keys, and the STET_WORKER_KEYS line
+stet-runpod keys --add 6             # six keys, vouched for with your organisers' key
 ```
 
-Put that line in Epsilon's `apps/stet/deployment.yaml` and deploy. `stet-runpod keys` then
-says, for each key, whether the server takes it as a rented machine.
+Run it where the organisers' key is (`~/.config/stet/key.json`, or `--key`). That is all
+the server needs. `stet-runpod keys` says, for each key, who vouched for it and when it was
+last at work; `--vouch` vouches for any that are not; `--revoke stet-rp-03` takes one back
+and forgets it. A key not vouched for is vouched for when it is first rented.
 
 ## Running it
 
@@ -74,7 +77,7 @@ the cheapest per job.
 `--cloud secure` (the default) rents only from RunPod's own data centres. `--cloud
 community` is strangers' machines, at a third of the price or less, and the host of one
 could read the key it is given. Anyone holding a worker key can grade as the organisers:
-a key that may have leaked comes out of `STET_WORKER_KEYS`.
+take back a key that may have leaked (`stet-runpod keys --revoke HANDLE`).
 
 Leaving it running, as a service of your own user:
 

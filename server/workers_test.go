@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/ed25519"
 	"encoding/hex"
 	"path/filepath"
 	"strings"
@@ -15,10 +16,13 @@ func TestARentedMachineGradesForTheOrganisersAndAdministersNothing(t *testing.T)
 	pubA, privA := newKey()
 	pubW, privW := newKey()
 	cfg := testConfig(t, pubA)
-	cfg.WorkerKeys = map[string]bool{hex.EncodeToString(pubW): true}
 	cfg.RunsPerEntry = 1
 	w := startWorld(t, cfg, newMemKV(), dirBlobs{filepath.Join(cfg.DataDir, "blobs")})
-	anchor, worker := w.join("anchor-one", privA), w.join("rented-one", privW)
+	anchor := w.join("anchor-one", privA)
+	if code := w.vouch(anchor, pubW); code != 201 {
+		t.Fatalf("an organiser vouching for a rented machine: HTTP %d", code)
+	}
+	worker := w.join("rented-one", privW)
 	var out struct {
 		Error string `json:"error"`
 	}
@@ -153,14 +157,14 @@ func TestARentedMachineGradesForTheOrganisersAndAdministersNothing(t *testing.T)
 // A rented machine's key that nobody has used is not listed among the verifiers.
 func TestAnUnusedRentedMachineIsNotOnTheBoard(t *testing.T) {
 	pubW, privW := newKey()
-	cfg := testConfig(t)
-	cfg.WorkerKeys = map[string]bool{hex.EncodeToString(pubW): true}
-	w := startWorld(t, cfg, newMemKV(), dirBlobs{filepath.Join(cfg.DataDir, "blobs")})
+	pubA, privA := newKey()
+	w := newWorld(t, pubA)
+	w.vouch(w.join("anchor-one", privA), pubW)
 	w.join("rented-two", privW)
 	var board struct {
 		Verifiers []VerifierRow `json:"verifiers"`
 	}
-	if code := (&actor{t: t, srv: w.srv}).do("GET", "/api/v1/verifiers", nil, &board); code != 200 || len(board.Verifiers) != 0 {
+	if code := (&actor{t: t, srv: w.srv}).do("GET", "/api/v1/verifiers", nil, &board); code != 200 || len(board.Verifiers) != 1 || board.Verifiers[0].Handle != "anchor-one" {
 		t.Fatalf("HTTP %d %+v", code, board.Verifiers)
 	}
 }
@@ -171,10 +175,10 @@ func TestAnUnusedRentedMachineIsNotOnTheBoard(t *testing.T) {
 func TestOnlyARentedMachineRunsCuratorsInTheContainerSandbox(t *testing.T) {
 	pubA, privA := newKey()
 	pubW, privW := newKey()
-	cfg := testConfig(t, pubA)
-	cfg.WorkerKeys = map[string]bool{hex.EncodeToString(pubW): true}
-	w := startWorld(t, cfg, newMemKV(), dirBlobs{filepath.Join(cfg.DataDir, "blobs")})
-	anchor, worker := w.join("anchor-one", privA), w.join("rented-one", privW)
+	w := newWorld(t, pubA)
+	anchor := w.join("anchor-one", privA)
+	w.vouch(anchor, pubW)
+	worker := w.join("rented-one", privW)
 	alice, bob, carol := w.join("alice", nil), w.join("bob", nil), w.join("carol", nil)
 	w.submit(alice, "tidy", "print('v1')")
 	w.submit(carol, "trim", "print('v2')")
@@ -213,4 +217,106 @@ func TestOnlyARentedMachineRunsCuratorsInTheContainerSandbox(t *testing.T) {
 	if code := anchor.do("GET", "/api/v1/admin/work", nil, &work); code != 200 || work.Rounds[0].RunsWanted != 2 || work.Rounds[0].RunsWaiting != 1 {
 		t.Fatalf("after one run: HTTP %d %+v", code, work)
 	}
+}
+
+// vouch has an organiser vouch for a rented machine's key, as stet-runpod does.
+func (w *world) vouch(by *actor, worker ed25519.PublicKey) int {
+	w.t.Helper()
+	key, at := hex.EncodeToString(worker), now()
+	sig := hex.EncodeToString(ed25519.Sign(by.priv, grantMessage(key, at)))
+	return by.do("POST", "/api/v1/admin/workers", map[string]any{"key": key, "at": at, "sig": sig}, nil)
+}
+
+// An organiser vouches for a machine they rent, with nothing changed in the server's
+// configuration. The grant is kept signed, and counts only while the key that made it is
+// one of the organisers' own.
+func TestAnOrganiserVouchesForARentedMachineWithoutAChangeToTheServer(t *testing.T) {
+	pubA, privA := newKey()
+	pubB, privB := newKey()
+	pubW, privW := newKey()
+	pubX, _ := newKey()
+	w := newWorld(t, pubA, pubB)
+	one, two, eve := w.join("anchor-one", privA), w.join("anchor-two", privB), w.join("eve", nil)
+	worker := w.join("rented-one", privW) // an account before anybody vouches for it: nobody's machine
+	isWorker := func(wd *world, a *actor) bool {
+		t.Helper()
+		var me struct {
+			Account struct {
+				Anchor, Worker, Established bool
+			} `json:"account"`
+		}
+		if code := wd.as(a).do("GET", "/api/v1/me", nil, &me); code != 200 {
+			t.Fatalf("/me: HTTP %d", code)
+		}
+		return me.Account.Anchor && me.Account.Worker && me.Account.Established
+	}
+	if isWorker(w, worker) {
+		t.Fatal("a machine nobody vouched for is the organisers'")
+	}
+
+	// Only an organiser's own key may vouch, and only with a grant it signed, for now, for a
+	// key that is not already the organisers' own.
+	key, at := hex.EncodeToString(pubW), now()
+	post := func(by *actor, body map[string]any) int {
+		var out struct {
+			Error string `json:"error"`
+		}
+		return by.do("POST", "/api/v1/admin/workers", body, &out)
+	}
+	good := hex.EncodeToString(ed25519.Sign(privA, grantMessage(key, at)))
+	if code := post(eve, map[string]any{"key": key, "at": at, "sig": good}); code != 403 {
+		t.Fatalf("an entrant vouched: HTTP %d", code)
+	}
+	if code := post(two, map[string]any{"key": key, "at": at, "sig": good}); code != 400 {
+		t.Fatalf("a grant signed by another organiser than the one who sent it: HTTP %d", code)
+	}
+	stale := hex.EncodeToString(ed25519.Sign(privA, grantMessage(key, at-7200)))
+	if code := post(one, map[string]any{"key": key, "at": at - 7200, "sig": stale}); code != 400 {
+		t.Fatalf("a grant two hours old: HTTP %d", code)
+	}
+	if code := w.vouch(one, pubB); code != 400 {
+		t.Fatalf("vouching for an organisers' own key: HTTP %d", code)
+	}
+	if isWorker(w, worker) {
+		t.Fatal("a refused grant made a machine the organisers'")
+	}
+	if code := post(one, map[string]any{"key": key, "at": at, "sig": good}); code != 201 || !isWorker(w, worker) {
+		t.Fatalf("the organiser's grant: HTTP %d, worker %v", code, isWorker(w, worker))
+	}
+	// A rented machine vouches for nothing.
+	if code := w.vouch(worker, pubX); code != 403 {
+		t.Fatalf("a rented machine vouched for another: HTTP %d", code)
+	}
+	var list struct {
+		Workers []WorkerView `json:"workers"`
+	}
+	if code := two.do("GET", "/api/v1/admin/workers", nil, &list); code != 200 || len(list.Workers) != 1 ||
+		list.Workers[0].Handle != "rented-one" || list.Workers[0].By != "anchor-one" || !list.Workers[0].Counts {
+		t.Fatalf("the grants: HTTP %d %+v", code, list)
+	}
+	if code := eve.do("GET", "/api/v1/admin/workers", nil, nil); code != 403 {
+		t.Fatalf("an entrant listed the grants: HTTP %d", code)
+	}
+	w.check()
+
+	// It holds across a restart, and lapses with the key that made it.
+	again := startWorld(t, w.cfg, w.kv, w.blobs)
+	if !isWorker(again, worker) {
+		t.Fatal("the grant did not survive a restart")
+	}
+	cfg := w.cfg
+	cfg.AnchorKeys = map[string]bool{hex.EncodeToString(pubB): true}
+	without := startWorld(t, cfg, w.kv, w.blobs)
+	if isWorker(without, worker) {
+		t.Fatal("a grant by a key that is no longer the organisers' still counts")
+	}
+
+	// Taken back, it is nobody's machine.
+	if code := again.as(two).do("DELETE", "/api/v1/admin/workers/"+key, nil, nil); code != 200 || isWorker(again, worker) {
+		t.Fatalf("taking the grant back: HTTP %d", code)
+	}
+	if code := again.as(two).do("DELETE", "/api/v1/admin/workers/"+key, nil, nil); code != 404 {
+		t.Fatalf("taking it back twice: HTTP %d", code)
+	}
+	again.check()
 }

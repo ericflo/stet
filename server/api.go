@@ -247,6 +247,9 @@ func (a *App) mountAPI(mux *http.ServeMux) {
 	mux.HandleFunc("PUT /api/v1/admin/files/{name}", a.apiAdminFile)
 	mux.HandleFunc("GET /api/v1/admin/accounts/{handle}", a.apiAdminAccount)
 	mux.HandleFunc("GET /api/v1/admin/work", a.apiAdminWork)
+	mux.HandleFunc("GET /api/v1/admin/workers", a.apiWorkers)
+	mux.HandleFunc("POST /api/v1/admin/workers", a.apiWorkerGrant)
+	mux.HandleFunc("DELETE /api/v1/admin/workers/{key}", a.apiWorkerRevoke)
 	mux.HandleFunc("GET /api/v1/admin/sealed", a.apiSealedList)
 	mux.HandleFunc("GET /api/v1/admin/sealed/mine", a.apiSealedMine)
 	mux.HandleFunc("PUT /api/v1/admin/sealed/{key}", a.apiSealedPut)
@@ -424,9 +427,10 @@ func (a *App) apiCreateAccount(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, fail(409, "that handle is reserved"))
 		return
 	}
-	// The organisers' keys are named in the server's configuration, so they cost nothing to
-	// let through: a pool of rented machines' accounts is made from one address in a day.
-	anchor, worker := a.cfg.organiser(key)
+	// The organisers' keys, and those they vouch for, cost nothing to let through: a pool of
+	// rented machines' accounts is made from one address in a day.
+	var anchor, worker bool
+	a.st.view(func(s *State) { anchor, worker = s.organiser(a.cfg.AnchorKeys, key) })
 	if !a.cfg.Dev && !anchor && !worker && !a.limits.allow("acct:"+clientIP(r), 5, 86400) {
 		writeErr(w, fail(429, "too many new accounts from this address today"))
 		return
@@ -442,6 +446,7 @@ func (a *App) apiCreateAccount(w http.ResponseWriter, r *http.Request) {
 		if s.byHandle[handle] != nil {
 			return fail(409, "the handle %q is taken", handle)
 		}
+		anchor, worker := s.organiser(a.cfg.AnchorKeys, key)
 		acct := &Account{ID: s.Meta.NextAccount, Handle: handle, Pubkey: key, CreatedAt: now(), Anchor: anchor, Worker: worker}
 		s.Meta.NextAccount++
 		tx.put(metaKey, &s.Meta)
