@@ -243,6 +243,7 @@ func (a *App) mountAPI(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/jobs/{id}/result", a.apiResult)
 	mux.HandleFunc("POST /api/v1/jobs/{id}/release", a.apiRelease)
 	mux.HandleFunc("POST /api/v1/admin/draw", a.apiAdminDraw)
+	mux.HandleFunc("POST /api/v1/admin/shadow", a.apiAdminShadow)
 	mux.HandleFunc("PUT /api/v1/admin/files/{name}", a.apiAdminFile)
 	mux.HandleFunc("GET /api/v1/admin/accounts/{handle}", a.apiAdminAccount)
 	mux.HandleFunc("GET /api/v1/admin/sealed", a.apiSealedList)
@@ -1066,6 +1067,9 @@ func (a *App) apiRound(w http.ResponseWriter, r *http.Request) {
 			entries = append(entries, a.entryJSON(s, e))
 		}
 		out = map[string]any{"round": a.roundJSON(s, rd), "entries": entries}
+		if sh := s.Shadows[idx]; sh != nil {
+			out["shadow"] = sh
+		}
 	})
 	if out == nil {
 		writeErr(w, fail(404, "no such round"))

@@ -66,6 +66,19 @@
     </details></li>{{end}}
   </ol>
   {{if and $d.Same (not $d.Alone)}}<p class="after">Every score here is {{template "sure" $d.Same}}: {{lower (trust $d.Same).Says}}</p>{{end}}
+  {{with $d.Shadow}}<div class="block" id="next">
+    <div class="list-head"><h2>On the next exam</h2><a class="go" href="/next">what it is →</a></div>
+    <p class="caption">The exam proposed for season 1, made after this round's draw: {{.Items}} items from {{.Corners}} corners ({{.Generated}} generated, {{.Fresh}} published after the draw). Gain in bits per byte over the unedited pages. It ranks nothing yet.</p>
+    <ol class="ranked">
+      {{range $i, $x := $d.ShadowRows}}<li><a class="row" href="/editors/{{short $x.EditorID}}">
+        <span class="rank">{{add $i 1}}</span>
+        <span class="who"><span class="name">{{$x.Name}}</span>{{if gt $x.Version 1}}<span class="ver">v{{$x.Version}}</span>{{end}}
+          <span class="by">{{$x.Owner}}{{if $x.Place}} · {{ordinal $x.Place}} on the season's exam{{end}}</span></span>
+        {{template "bar" (dict "V" $x.Score "Top" $d.ShadowTop)}}
+        <span class="val{{if neg $x.Score}} neg{{end}}">{{gain $x.Score}}</span>
+      </a></li>{{end}}
+    </ol>
+  </div>{{end}}
   {{if $r.Differs}}<p class="after">Turned away before their grade was taken: {{range $i, $x := $r.Differs}}{{if $i}}, {{end}}<a href="/u/{{$x.Handle}}">{{$x.Handle}}</a> ({{if $x.Est}}established; {{end}}{{if eq $x.What "corpus"}}built a different set of pages or exam{{else}}unedited loss {{gain $x.Diff}} from the round's{{end}}){{end}}. Neither counts against anyone; both are shown because a pattern in them would mean the tolerance is wrong.</p>{{end}}
   {{end}}
 

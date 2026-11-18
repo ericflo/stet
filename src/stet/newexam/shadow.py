@@ -127,7 +127,7 @@ def shadow_round(rnd: Round, scale: Scale, scripts: dict[str, Path], device, out
         else:
             row["reason"] = r.get("invalid_reason")
         rows.append(row)
-    summary = {"round": rnd.id, "scale": scale.name, "items": len(items), "items_digest": digest(items),
+    summary = {"round": rnd.id, "scale": scale.name, "items": len(items), "corners": len({it.corner for it in items}), "items_digest": digest(items),
                "generator_version": gen.VERSION, "baseline_exam_loss": base["exam_loss"], "entries": rows}
     _write(out_dir / "summary.json", summary)
     return summary

@@ -477,12 +477,13 @@ def cmd_shadow(args):
     out = Out(quiet=args.quiet)
     season, scale, rnd = resolve_round(args)
     scripts: dict[str, Path] = {}
+    editors: dict[str, str] = {}
     if rnd.kind == "official":
         for e in request("GET", f"/api/v1/rounds/{rnd.id}").get("entries") or []:
             sha = ((e.get("detail") or {}).get("script") or {}).get("script_sha256")
             label = f"{e.get('owner')}/{e.get('name')}@v{e.get('version')}"
             if sha and (not args.entries or e.get("name") in args.entries or label in args.entries):
-                scripts[label] = script_file(sha, season, rnd)
+                scripts[label], editors[label] = script_file(sha, season, rnd), e.get("editor", "")
     for ref in args.script or []:
         scripts[Path(ref).name] = script_file(ref, season, rnd)
     if not scripts:
@@ -491,7 +492,7 @@ def cmd_shadow(args):
     work = Path(args.out) if args.out else cache_dir() / "shadow" / rnd.id / scale.name
     out.line("", out.bold(f"stet shadow · {rnd.kind} round {rnd.id} · {scale.name} · {len(scripts)} scripts · {device.type}"))
     log = lambda m: out.line("", out.dim(m))  # noqa: E731
-    fresh = None
+    fresh, mix = None, None
     snapshot = work / "fresh.jsonl"
     if args.fresh and not snapshot.exists():
         if rnd.kind != "official":
@@ -526,6 +527,18 @@ def cmd_shadow(args):
             log(f"  {len(dropped)} fresh items are in the round's corpus already, and are dropped")
         fresh = [it for i, it in enumerate(fresh) if i not in dropped]
     summary = shadow_round(rnd, scale, scripts, device, work, args.per_corner, fresh=fresh, log=log)
+    if args.upload:
+        from .client import need_key
+
+        fresh_n = len(fresh or [])
+        sent = {"round": rnd.index, "items": summary["items"], "corners": summary["corners"], "generated": summary["items"] - fresh_n,
+                "fresh": fresh_n, "items_digest": summary["items_digest"], "generator_version": summary["generator_version"],
+                "languages": dict(list((mix or {}).items())[:200]),
+                "entries": [{"editor": editors[r["name"]], "score": r["next_score"], "generated": r.get("generated_score"),
+                             "fresh": r.get("fresh_score"), "families": r["families"]}
+                            for r in summary["entries"] if r["valid"] and editors.get(r["name"])]}
+        request("POST", "/api/v1/admin/shadow", sent, key=need_key())
+        out.line("sent", f"the next exam's verdict on {rnd.id}, {len(sent['entries'])} entries")
     rows = sorted(summary["entries"], key=lambda r: -(r.get("next_score") or -9))
     by_season = sorted((r for r in rows if r["valid"]), key=lambda r: -r["season_gain"])
     rank = {r["name"]: i + 1 for i, r in enumerate(by_season)}
@@ -855,6 +868,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--fresh", action="store_true", help="add text published in the window after the round's draw (harvested once, then kept)")
     p.add_argument("--fresh-items", type=int, default=900, help="fresh items to keep (default: 900)")
     p.add_argument("--window", type=int, default=7200, help="seconds after the draw that fresh text may come from (default: 7200)")
+    p.add_argument("--upload", action="store_true", help=argparse.SUPPRESS)  # organisers: send the verdict to the site
     p.set_defaults(fn=cmd_shadow)
 
     p = sub.add_parser("fetch", help="download and build a round's corpus ahead of time")

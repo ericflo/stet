@@ -16,6 +16,7 @@ import hashlib
 import json
 import re
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import asdict, dataclass, field
@@ -40,17 +41,33 @@ class Doc:
     extra: dict = field(default_factory=dict)
 
 
-def get_json(url: str, params: dict, tries: int = 4, pause: float = 2.0):
+GAP = 0.15  # seconds between requests to one host: the sources are shared, and say so when pressed
+_last: dict[str, float] = {}
+
+
+def get_json(url: str, params: dict, tries: int = 6, pause: float = 2.0):
+    """GET a JSON document politely: one request at a time per host, a gap between them, and
+    when a host says it is too busy (429, 503), as long a wait as it asks for."""
+    host = urllib.parse.urlsplit(url).netloc
     q = urllib.parse.urlencode(params)
     for i in range(tries):
+        wait = _last.get(host, 0) + GAP - time.time()
+        if wait > 0:
+            time.sleep(wait)
+        _last[host] = time.time()
         try:
             req = urllib.request.Request(f"{url}?{q}", headers={**UA, "Accept-Encoding": "identity"})
             with urllib.request.urlopen(req, timeout=60) as r:
                 return json.load(r)
+        except urllib.error.HTTPError as e:
+            if i == tries - 1 or e.code not in (429, 500, 502, 503, 504):
+                raise
+            asked = e.headers.get("Retry-After", "")
+            time.sleep(min(120.0, float(asked)) if asked.isdigit() else pause * 2**i)
         except Exception:
             if i == tries - 1:
                 raise
-            time.sleep(pause * (i + 1))
+            time.sleep(pause * 2**i)
 
 
 class _Text(HTMLParser):

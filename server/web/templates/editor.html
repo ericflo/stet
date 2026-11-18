@@ -28,6 +28,8 @@
   {{else}}{{with $d.Mine}}{{if .Shared}}<p class="vs-line">Against the record{{with $d.Race.Holder}} holder, <b>{{.Name}}</b>{{end}}: {{if gt .Mean 0.0}}ahead by <span class="num">{{gain .Mean}}</span>{{else}}behind by <span class="num">{{gain .Mean}}</span>{{end}} a round over {{.Shared}} shared {{plural .Shared "round" "rounds"}}.{{if .Next}} {{if .ToGo}}Tested at {{.Next}}, {{.ToGo}} to go.{{else}}Tested when this round settles.{{end}}{{end}} <a class="go" href="/record">the race →</a></p>{{end}}{{end}}{{end}}
   {{end}}
 
+  {{with $d.Next}}<p class="vs-line">On <a href="/next">the next exam</a>, which ranks nothing yet: <b>{{gain .Mean}}</b> over {{.Rounds}} {{plural .Rounds "round" "rounds"}}, {{ordinal $d.NextPlace}} of {{$d.NextOf}}.{{if $d.NextStrong}} Strongest at {{$d.NextStrong}}; weakest at {{$d.NextWeak}}.{{end}}</p>{{end}}
+
   <div class="block">
     <div class="list-head"><h2>Round by round</h2>{{with $row}}<p>{{.Rounds}} {{plural .Rounds "round" "rounds"}}{{if .Invalid}} · <span class="neg">{{.Invalid}} failed</span>{{end}}</p>{{end}}</div>
     {{if $d.Played}}

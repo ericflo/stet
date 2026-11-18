@@ -353,7 +353,7 @@ const (
 
 var loadScans = []KVScan{
 	{Prefix: "account/"}, {Prefix: "editor/"}, {Prefix: "round/"}, {Prefix: "entry/"}, {Prefix: "claim/"},
-	{Prefix: "result/"}, {Prefix: "baseline/"}, {Prefix: "record/"}, {Prefix: "look/"}, {Prefix: "meta/"},
+	{Prefix: "result/"}, {Prefix: "baseline/"}, {Prefix: "record/"}, {Prefix: "look/"}, {Prefix: "meta/"}, {Prefix: "shadow/"},
 	{Prefix: "event/", Reverse: true, Limit: eventsKept},
 }
 
@@ -369,7 +369,8 @@ type State struct {
 	Baselines map[string]*Baseline
 	Records   []*Record // oldest first
 	Looks     map[string]*Look
-	Events    []*Event // oldest first; only the most recent are kept in memory
+	Shadows   map[int]*Shadow // the next exam's verdict on settled rounds, by round
+	Events    []*Event        // oldest first; only the most recent are kept in memory
 	Meta      Meta
 	Crawl     *SavedCrawl
 
@@ -385,6 +386,7 @@ func newState() *State {
 	return &State{
 		Accounts: map[int64]*Account{}, Editors: map[string]*Editor{}, Rounds: map[int]*Round{}, Entries: map[string]*Entry{},
 		Claims: map[int64]*Claim{}, Results: map[int64]*Result{}, Baselines: map[string]*Baseline{}, Looks: map[string]*Look{},
+		Shadows:  map[int]*Shadow{},
 		Meta:     Meta{NextAccount: 1, NextClaim: 1, NextResult: 1, NextEvent: 1},
 		byPubkey: map[string]*Account{}, byHandle: map[string]*Account{}, inRound: map[int][]*Entry{}, ofEditor: map[string][]*Entry{},
 		resultsOf: map[string][]*Result{}, ownedBy: map[int64][]*Editor{},
@@ -528,6 +530,12 @@ func (s *State) decode(it KVItem, anchors map[string]bool) error {
 			return err
 		}
 		s.Looks[it.Key] = l
+	case "shadow":
+		sh := &Shadow{}
+		if err := into(sh); err != nil {
+			return err
+		}
+		s.Shadows[sh.RoundIdx] = sh
 	case "event":
 		e := &Event{}
 		if err := into(e); err != nil {
@@ -868,6 +876,9 @@ func (st *Store) audit(ctx context.Context) error {
 	}
 	for k, l := range st.s.Looks {
 		mem[k] = l
+	}
+	for _, sh := range st.s.Shadows {
+		mem[shadowKey(sh.RoundIdx)] = sh
 	}
 	for _, e := range st.s.Events {
 		mem[eventKey(e.ID)] = e

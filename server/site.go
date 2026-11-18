@@ -127,6 +127,7 @@ func (s *Site) mount(mux *http.ServeMux) {
 	mux.HandleFunc("GET /{$}", s.home)
 	mux.HandleFunc("GET /leaderboard", s.leaderboard)
 	mux.HandleFunc("GET /record", s.record)
+	mux.HandleFunc("GET /next", s.next)
 	mux.HandleFunc("GET /editors/{ref}", s.editor)
 	mux.HandleFunc("GET /editors/{handle}/{name}", s.editorByName)
 	mux.HandleFunc("GET /rounds", s.rounds)
@@ -1196,6 +1197,15 @@ func (s *Site) editor(w http.ResponseWriter, r *http.Request) {
 	d["E"], d["Owner"], d["Github"], d["Row"] = e, owner, github, b.ByID[e.ID]
 	d["RatedRounds"], d["Ranked"], d["LadderSize"] = a.cfg.RatedRounds, len(b.Rated), a.cfg.LadderSize
 	d["FileAsked"] = r.URL.Query().Get("file") != ""
+	a.st.view(func(st *State) {
+		for i, row := range a.shadowStandings(st, b) {
+			if row.EditorID == e.ID {
+				row := row
+				d["Next"], d["NextPlace"], d["NextOf"] = &row, i+1, len(a.shadowStandings(st, b))
+				d["NextStrong"], d["NextWeak"] = strongWeak(row.Families)
+			}
+		}
+	})
 
 	// Source viewer: one file at a time, read out of the stored bundle.
 	want := r.URL.Query().Get("file")
@@ -1392,6 +1402,11 @@ func (s *Site) round(w http.ResponseWriter, r *http.Request) {
 	if same != nil && scored > 1 {
 		d["Same"] = same
 	}
+	a.st.view(func(st *State) {
+		if sh := st.Shadows[idx]; sh != nil {
+			d["Shadow"], d["ShadowRows"], d["ShadowTop"] = sh, a.shadowRows(st, sh, entries), shadowTop(sh)
+		}
+	})
 	s.render(w, 200, "round", s.page(r, "Round "+rs.ID, "rounds", d))
 }
 
@@ -1789,4 +1804,98 @@ func (s *Site) installSh(w http.ResponseWriter, r *http.Request) {
 
 func (s *Site) installPs1(w http.ResponseWriter, r *http.Request) {
 	s.installScript(w, r, installPs1Tmpl)
+}
+
+// --- the next exam (season 0's shadow) ------------------------------------------------------
+
+// shadowRow is one entry of a round as the next exam ranks it, beside where the season's exam put it.
+type shadowRow struct {
+	ShadowEntry
+	Name    string
+	Version int
+	Owner   string
+	Place   int // its place on the season's exam in this round; 0 when it had none
+}
+
+func (a *App) shadowRows(st *State, sh *Shadow, entries []roundEntry) []shadowRow {
+	place := map[string]int{}
+	for _, e := range entries {
+		place[e.EditorID] = e.Place
+	}
+	var out []shadowRow
+	for _, e := range sh.Entries {
+		ed := st.Editors[e.EditorID]
+		if ed == nil {
+			continue
+		}
+		out = append(out, shadowRow{ShadowEntry: e, Name: ed.Name, Version: ed.Version, Owner: st.owner(ed).Handle, Place: place[e.EditorID]})
+	}
+	return out
+}
+
+func shadowTop(sh *Shadow) float64 {
+	top := 0.0
+	for _, e := range sh.Entries {
+		top = math.Max(top, e.Score)
+	}
+	return top
+}
+
+// familyNames are the next exam's families as a page says them.
+var familyNames = map[string]string{
+	"arith": "arithmetic", "word": "word problems", "units": "units and dates", "algebra": "algebra", "prog": "programs",
+	"algo": "algorithms", "logic": "logic", "struct": "structured data", "agent": "agents' tools", "grammar": "grammar",
+	"transform": "formats", "fresh": "fresh text",
+}
+
+// strongWeak names the families a curator gains most and least on.
+func strongWeak(fam map[string]float64) (string, string) {
+	if len(fam) < 3 {
+		return "", ""
+	}
+	keys := make([]string, 0, len(fam))
+	for k := range fam {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if fam[keys[i]] != fam[keys[j]] {
+			return fam[keys[i]] > fam[keys[j]]
+		}
+		return keys[i] < keys[j]
+	})
+	name := func(k string) string {
+		if n, ok := familyNames[k]; ok {
+			return n
+		}
+		return k
+	}
+	return name(keys[0]) + " and " + name(keys[1]), name(keys[len(keys)-1])
+}
+
+// next is the next exam's standings: what season 0 would look like on the exam proposed for
+// season 1. It ranks nothing yet.
+func (s *Site) next(w http.ResponseWriter, r *http.Request) {
+	a := s.app
+	b := a.board()
+	d := map[string]any{}
+	a.st.view(func(st *State) {
+		rows := a.shadowStandings(st, b)
+		top := 0.0
+		for _, row := range rows {
+			top = math.Max(top, row.Mean)
+		}
+		var latest *Shadow
+		for _, sh := range st.Shadows {
+			if latest == nil || sh.RoundIdx > latest.RoundIdx {
+				latest = sh
+			}
+		}
+		d["Rows"], d["Top"], d["Rounds"], d["Latest"] = rows, top, len(st.Shadows), latest
+		if latest != nil {
+			d["LatestID"] = roundID(a.season.ID, latest.RoundIdx)
+		}
+	})
+	p := s.page(r, "The next exam", "leaderboard", d)
+	p.Desc = "Season 0 measured again on the exam proposed for season 1: made after each round's draw, from text published after it and items generated from its seed. It ranks nothing yet."
+	s.render(w, 200, "next", p)
 }
