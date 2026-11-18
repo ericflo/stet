@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -474,5 +475,52 @@ func TestTheCheapestMachineInEitherCloudIsRented(t *testing.T) {
 		if gpus[i].Price < gpus[i-1].Price {
 			t.Fatalf("not cheapest first: %+v", gpus)
 		}
+	}
+}
+
+// down with names ends those machines and no others, however many are named.
+func TestDownEndsOnlyTheMachinesNamed(t *testing.T) {
+	rp, st := newFakeRunPod(t), newFakeStet(t)
+	f, _ := testFleet(t, rp, st, 4)
+	st.work = *round(0, 0, 40, 0)
+	f.o.Policy.MaxWorkers = 4
+	if err := tick(context.Background(), f); err != nil || len(rp.pods) != 4 {
+		t.Fatalf("rented %d (%v)", len(rp.pods), err)
+	}
+	if err := cmdDown(context.Background(), f, true, []string{"stet-rp-01", "stet-rp-03"}); err != nil {
+		t.Fatal(err)
+	}
+	left := []string{}
+	for _, p := range rp.pods {
+		left = append(left, p.Name)
+	}
+	sort.Strings(left)
+	if strings.Join(left, ",") != "stet-rp-02,stet-rp-04" {
+		t.Fatalf("left %v", left)
+	}
+}
+
+// logs prints the last lines a machine's pod said, from RunPod's stream of them.
+func TestLogsPrintWhatAMachineSaid(t *testing.T) {
+	rp, st := newFakeRunPod(t), newFakeStet(t)
+	f, out := testFleet(t, rp, st, 1)
+	rp.pods["pod9"] = &Pod{ID: "pod9", Name: "stet-rp-01", Status: "RUNNING", CreatedAt: time.Now()}
+	logs := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/pods/pod9/logs" {
+			rp.serve(w, r)
+			return
+		}
+		for i, line := range []string{"installing stet", "stet verify · stet-rp-01", "edit job 7"} {
+			fmt.Fprintf(w, "id: %d\ndata: {\"source\":\"container\",\"line\":%q,\"ts\":\"2026-11-18T23:1%d:00Z\"}\n\n", i, line, i)
+		}
+	}))
+	defer logs.Close()
+	f.rp = newRunPod(logs.URL, "rp-key")
+	out.Reset()
+	if err := cmdLogs(context.Background(), f, "stet-rp-01", false, 2); err != nil {
+		t.Fatal(err)
+	}
+	if got := out.String(); got != "23:11:00  stet verify · stet-rp-01\n23:12:00  edit job 7\n" {
+		t.Fatalf("printed %q", got)
 	}
 }

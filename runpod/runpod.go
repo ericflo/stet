@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -280,4 +281,66 @@ func (r *RunPod) gpus(ctx context.Context, cloud, minCUDA string) ([]GPUType, er
 // shortGPU is a GPU's name without the maker's: "RTX A5000", not "NVIDIA RTX A5000".
 func shortGPU(id string) string {
 	return strings.TrimPrefix(strings.TrimPrefix(id, "NVIDIA "), "GeForce ")
+}
+
+// LogLine is one line a pod's container, or RunPod about it, said.
+type LogLine struct {
+	Source string `json:"source"` // container or system
+	Line   string `json:"line"`
+	TS     string `json:"ts"`
+}
+
+// logs reads what a pod has said (GET /pods/{id}/logs: server-sent events, one line each).
+// Without follow it stops once the stream has been quiet for a moment, having sent what
+// there was.
+func (r *RunPod) logs(ctx context.Context, id string, follow bool, emit func(LogLine)) error {
+	req, err := http.NewRequestWithContext(ctx, "GET", r.base+"/pods/"+url.PathEscape(id)+"/logs", nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+r.key)
+	req.Header.Set("Accept", "text/event-stream")
+	resp, err := (&http.Client{}).Do(req) // no timeout: it streams
+	if err != nil {
+		return fmt.Errorf("RunPod could not be reached: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return &RunPodError{Status: resp.StatusCode, Detail: strings.TrimSpace(string(data))}
+	}
+	lines, done := make(chan string), make(chan struct{})
+	defer close(done)
+	go func() {
+		defer close(lines)
+		sc := bufio.NewScanner(resp.Body)
+		sc.Buffer(make([]byte, 64<<10), 1<<20)
+		for sc.Scan() {
+			select {
+			case lines <- sc.Text():
+			case <-done:
+				return
+			}
+		}
+	}()
+	for {
+		select {
+		case l, ok := <-lines:
+			if !ok {
+				return nil
+			}
+			if data, ok := strings.CutPrefix(l, "data: "); ok {
+				var e LogLine
+				if json.Unmarshal([]byte(data), &e) == nil {
+					emit(e)
+				}
+			}
+		case <-time.After(3 * time.Second):
+			if !follow {
+				return nil
+			}
+		case <-ctx.Done():
+			return nil
+		}
+	}
 }

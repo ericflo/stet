@@ -42,6 +42,7 @@ const usage = `stet-runpod: rent GPUs from RunPod to grade for Stet, as many as 
   stet-runpod down [--force] [HANDLE...]
                                  end machines that hold no job; --force ends the rest
                                  too, and their jobs are handed back
+  stet-runpod logs HANDLE [-f]   what a machine has said: its install, stet verify
   stet-runpod ssh HANDLE         log in to one (rented with --ssh)
 
 Needs RUNPOD_API_KEY, and the organisers' own stet key (--key), to vouch for machines
@@ -291,6 +292,21 @@ func run(args []string, stdout, stderr io.Writer) error {
 			return err
 		}
 		return cmdDown(ctx, f, *force, rest)
+	case "logs":
+		follow := fs.Bool("f", false, "keep printing what it says, as it says it")
+		last := fs.Int("n", 60, "how many of its last lines")
+		rest, err := parse(fs, args)
+		if err != nil {
+			return err
+		}
+		if len(rest) != 1 {
+			return errors.New("logs takes one machine's handle")
+		}
+		f, err := open(o, stdout, true, false)
+		if err != nil {
+			return err
+		}
+		return cmdLogs(ctx, f, rest[0], *follow, *last)
 	case "ssh":
 		rest, err := parse(fs, args)
 		if err != nil {

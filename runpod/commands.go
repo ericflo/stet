@@ -259,7 +259,7 @@ func cmdDown(ctx context.Context, f *Fleet, force bool, handles []string) error 
 	if err != nil {
 		return err
 	}
-	want := map[string]bool{}
+	want, found := map[string]bool{}, map[string]bool{}
 	for _, h := range handles {
 		want[h] = true
 	}
@@ -268,7 +268,7 @@ func cmdDown(ctx context.Context, f *Fleet, force bool, handles []string) error 
 		if w.Pod == nil || (len(want) > 0 && !want[w.Key.Handle]) {
 			continue
 		}
-		delete(want, w.Key.Handle)
+		found[w.Key.Handle] = true
 		st := w.state(f.now(), f.o.Policy)
 		if st == "grading" || st == "running" {
 			if !force {
@@ -281,7 +281,9 @@ func cmdDown(ctx context.Context, f *Fleet, force bool, handles []string) error 
 		endings = append(endings, Ending{w, "ended by hand"})
 	}
 	for h := range want {
-		f.say("%s has no pod", h)
+		if !found[h] {
+			f.say("%s has no pod", h)
+		}
 	}
 	if len(endings) == 0 {
 		f.say("nothing to end")
@@ -311,4 +313,41 @@ func cmdSSH(ctx context.Context, f *Fleet, handle string) error {
 		return syscall.Exec(bin, args, os.Environ())
 	}
 	return errors.New(handle + " has no pod running")
+}
+
+// cmdLogs prints what a machine's pod has said: the last lines, or everything as it comes.
+func cmdLogs(ctx context.Context, f *Fleet, handle string, follow bool, last int) error {
+	pods, err := f.rp.pods(ctx)
+	if err != nil {
+		return err
+	}
+	var pod *Pod
+	for i := range pods {
+		if pods[i].Name == handle && (pod == nil || pods[i].CreatedAt.After(pod.CreatedAt)) {
+			pod = &pods[i]
+		}
+	}
+	if pod == nil {
+		return errors.New(handle + " has no pod")
+	}
+	show := func(l LogLine) {
+		ts := l.TS
+		if len(ts) >= 19 {
+			ts = ts[11:19]
+		}
+		fmt.Fprintf(f.out, "%s  %s\n", ts, l.Line)
+	}
+	if follow {
+		return f.rp.logs(ctx, pod.ID, true, show)
+	}
+	var kept []LogLine
+	err = f.rp.logs(ctx, pod.ID, false, func(l LogLine) {
+		if kept = append(kept, l); len(kept) > last {
+			kept = kept[1:]
+		}
+	})
+	for _, l := range kept {
+		show(l)
+	}
+	return err
 }
