@@ -203,6 +203,26 @@ and which were measured again.
    in the bucket by hand, and said on the site.
 5. Put the final table on the site as a page.
 
+## The next exam's shadow
+
+Season 0 is measured again, round by round, on the exam proposed for season 1
+([the proposal](research/exam-proposal.md)). It ranks nothing; the site shows it beside the
+season's scores (`/next`, and each settled round's page).
+
+An organisers' machine measures it, the faster the better: it trains the student once for the
+unedited corpus and once for every entry of the round (about two minutes each on a 4090), after
+the round's harvest window closes (two hours after the draw). From a checkout:
+
+```sh
+git pull && uv run stet shadow --follow           # every round drawn in the last day, then each new one as it settles
+uv run stet shadow --round s0-o00014 --fresh --upload   # one round, by hand
+```
+
+It needs the machine's organisers' key (`stet login`), and keeps what it trains under
+`~/.cache/stet/shadow/`, so a round can be sat again when the exam grows without training again.
+The harvester asks Wikipedia and StackExchange politely and waits when told to; with
+`STET_SE_KEY` set it reads every StackExchange site instead of a sample.
+
 ## Things only the organisers hold
 
 - `~/.config/stet/key.json`: the organisers' account's private key. There is no other copy.

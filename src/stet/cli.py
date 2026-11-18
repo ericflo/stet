@@ -469,6 +469,45 @@ def cmd_baseline(args):
 def cmd_shadow(args):
     """Grade a round's scripts on the next exam, beside the season's: the shadow exam of season 0."""
     need_torch()
+    if args.follow:
+        return _shadow_follow(args)
+    _shadow_one(args)
+
+
+def _shadow_follow(args):
+    """The organisers' machine, measuring every round on the next exam as it settles: once a
+    settled round's harvest window has closed, harvest it, grade every entry, send the verdict."""
+    import copy
+
+    from .client import request
+
+    out = Out(quiet=args.quiet)
+    since = time.time() - 86400 * args.since_days
+    failed: dict[str, int] = {}
+    out.line("", out.bold(f"stet shadow --follow · rounds drawn since {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(since))}"))
+    while True:
+        try:
+            rounds = request("GET", "/api/v1/rounds?limit=50").get("rounds") or []
+        except Exception as e:
+            out.line("", out.dim(f"the server did not answer ({e}); trying again in five minutes"))
+            rounds = []
+        for x in sorted(rounds, key=lambda x: x["id"]):
+            if x.get("status") != "settled" or (x.get("draw_at") or 0) < since or failed.get(x["id"], 0) >= 3:
+                continue
+            try:
+                d = request("GET", f"/api/v1/rounds/{x['id']}")
+                if d.get("shadow") or time.time() < int(d["round"]["draw_at"]) + args.window:
+                    continue
+                one = copy.copy(args)
+                one.round, one.fresh, one.upload, one.entries, one.script = x["id"], True, True, [], None
+                _shadow_one(one)
+            except (Exception, SystemExit) as e:  # one round's trouble does not stop the others
+                failed[x["id"]] = failed.get(x["id"], 0) + 1
+                out.line("", out.bad(f"{x['id']}: {e}"))
+        time.sleep(300)
+
+
+def _shadow_one(args):
     from .client import request, table
     from .data import cache_dir
     from .newexam.shadow import shadow_round
@@ -869,6 +908,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--fresh-items", type=int, default=900, help="fresh items to keep (default: 900)")
     p.add_argument("--window", type=int, default=7200, help="seconds after the draw that fresh text may come from (default: 7200)")
     p.add_argument("--upload", action="store_true", help=argparse.SUPPRESS)  # organisers: send the verdict to the site
+    p.add_argument("--follow", action="store_true", help=argparse.SUPPRESS)  # organisers: every round, as it settles
+    p.add_argument("--since-days", type=float, default=1.0, help=argparse.SUPPRESS)
     p.set_defaults(fn=cmd_shadow)
 
     p = sub.add_parser("fetch", help="download and build a round's corpus ahead of time")
