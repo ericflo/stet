@@ -11,10 +11,13 @@ NAME = "prog"
 PY = ["arith", "concat", "upper", "length", "reverse", "slice", "list-sum", "sorted", "last", "loop-sum", "loop-rev",
       "if-even", "func", "dict", "while-halve", "squares", "count"]
 JS = ["arith", "upper", "length", "slice", "push-length", "reduce", "loop-sum", "ternary", "func", "map-join"]
+SMALL = ["arith", "loop-sum", "func", "if-even", "length"]  # in Go, C and Lua
+OTHER = ["go", "c", "lua"]
 
 
 def corners() -> list[str]:
-    return [f"{NAME}/python/{k}" for k in PY] + [f"{NAME}/javascript/{k}" for k in JS]
+    return ([f"{NAME}/python/{k}" for k in PY] + [f"{NAME}/javascript/{k}" for k in JS]
+            + [f"{NAME}/{lang}/{k}" for lang in OTHER for k in SMALL])
 
 
 def _python(rng: Rng, k: str) -> tuple[str, str]:
@@ -103,10 +106,52 @@ def _javascript(rng: Rng, k: str) -> tuple[str, str]:
     raise ValueError(k)
 
 
+def _other(rng: Rng, lang: str, k: str) -> tuple[str, str]:
+    a, b, c = rng.between(2, 15), rng.between(2, 15), rng.between(1, 9)
+    w = rng.choice(WORDS)
+    n, x, v = rng.between(3, 9), rng.between(1, 12), rng.between(1, 99)
+    want = {"arith": str(a * b - c), "loop-sum": str(sum(i * c for i in range(n))), "func": str(x * a + b),
+            "if-even": "even" if v % 2 == 0 else "odd", "length": str(len(w) * c)}[k]
+    if lang == "go":
+        body = {
+            "arith": f"\ta, b := {a}, {b}\n\tfmt.Println(a*b - {c})",
+            "loop-sum": f"\ttotal := 0\n\tfor i := 0; i < {n}; i++ {{\n\t\ttotal += i * {c}\n\t}}\n\tfmt.Println(total)",
+            "func": f"\tfmt.Println(f({x}))",
+            "if-even": f'\tx := {v}\n\tif x%2 == 0 {{\n\t\tfmt.Println("even")\n\t}} else {{\n\t\tfmt.Println("odd")\n\t}}',
+            "length": f'\tword := "{w}"\n\tfmt.Println(len(word) * {c})',
+        }[k]
+        extra = f"func f(n int) int {{\n\treturn n*{a} + {b}\n}}\n\n" if k == "func" else ""
+        return f'package main\n\nimport "fmt"\n\n{extra}func main() {{\n{body}\n}}', want
+    if lang == "c":
+        body = {
+            "arith": f'    int a = {a}, b = {b};\n    printf("%d\\n", a * b - {c});',
+            "loop-sum": f'    int total = 0;\n    for (int i = 0; i < {n}; i++) {{\n        total += i * {c};\n    }}\n    printf("%d\\n", total);',
+            "func": f'    printf("%d\\n", f({x}));',
+            "if-even": f'    int x = {v};\n    if (x % 2 == 0) {{\n        printf("even\\n");\n    }} else {{\n        printf("odd\\n");\n    }}',
+            "length": f'    const char *word = "{w}";\n    printf("%d\\n", (int)strlen(word) * {c});',
+        }[k]
+        head = "#include <stdio.h>\n" + ("#include <string.h>\n" if k == "length" else "")
+        extra = f"\nint f(int n) {{\n    return n * {a} + {b};\n}}\n" if k == "func" else ""
+        return f"{head}{extra}\nint main(void) {{\n{body}\n    return 0;\n}}", want
+    body = {
+        "arith": f"local a, b = {a}, {b}\nprint(a * b - {c})",
+        "loop-sum": f"local total = 0\nfor i = 0, {n - 1} do\n  total = total + i * {c}\nend\nprint(total)",
+        "func": f"local function f(n)\n  return n * {a} + {b}\nend\nprint(f({x}))",
+        "if-even": f'local x = {v}\nif x % 2 == 0 then\n  print("even")\nelse\n  print("odd")\nend',
+        "length": f'local word = "{w}"\nprint(#word * {c})',
+    }[k]
+    return body, want
+
+
 def program(rng: Rng, corner: str) -> tuple[str, str, str]:
     """(language, code, what it prints)"""
     _, lang, k = corner.split("/")
-    code, out = _python(rng, k) if lang == "python" else _javascript(rng, k)
+    if lang == "python":
+        code, out = _python(rng, k)
+    elif lang == "javascript":
+        code, out = _javascript(rng, k)
+    else:
+        code, out = _other(rng, lang, k)
     return lang, code, out
 
 

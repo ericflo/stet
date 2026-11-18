@@ -35,7 +35,7 @@ def test_rng_is_pinned_and_in_range():
 def test_a_seed_always_makes_the_same_exam():
     # Pinned: a change to any generator that changes what a seed produces must bump gen.VERSION
     # and this hash, on purpose.
-    assert digest(gen.generate(SEED)) == "7606d107eb0b9eb3abd9e0ba51db5fa38502e9ce6e39304ac5c5941d001922e9"
+    assert digest(gen.generate(SEED)) == "96c7c25f469bcd62811a593ae8055de06e2494eca90b12b75a7410f4a34f07e3"
     assert digest(gen.generate(SEED)) == digest(gen.generate(SEED))
     assert digest(gen.generate(b"other")) != digest(gen.generate(SEED))
 
@@ -272,3 +272,31 @@ def test_transforms_are_right():
     for it in _all("transform/csv-json"):
         rows = json.loads(it.cont)
         assert [r["name"] for r in rows] == [ln.split(",")[0] for ln in it.ctx.split("CSV:\n")[1].split("\n\n")[0].splitlines()[1:]]
+
+
+def test_arithmetic_in_other_languages_is_right():
+    items = _all("multi/")
+    assert {it.lang for it in items} >= {"es", "fr", "de", "ru", "ja", "zh"}
+    for it in items:
+        a, b = (int(x) for x in re.findall(r"\d+", it.ctx.split("\n")[0])[:2])
+        op = it.corner.split("/")[2]
+        assert int(it.cont) == {"add": a + b, "sub": a - b, "mul": a * b}[op], it
+
+
+@pytest.mark.parametrize("lang,tool", [("go", "go"), ("c", "gcc"), ("lua", "lua")])
+def test_programs_in_go_c_and_lua_print_what_the_item_says(lang, tool, tmp_path):
+    if not shutil.which(tool):
+        pytest.skip(f"{tool} is not installed")
+    for i, it in enumerate(_all(f"prog/{lang}/", n=2)):
+        code = it.ctx.split(f"```{lang}\n", 1)[1].split("\n```", 1)[0]
+        src = tmp_path / f"p{i}.{ {'go': 'go', 'c': 'c', 'lua': 'lua'}[lang] }"
+        src.write_text(code)
+        if lang == "go":
+            run = ["go", "run", str(src)]
+        elif lang == "c":
+            subprocess.run(["gcc", "-o", str(tmp_path / f"p{i}"), str(src)], check=True, capture_output=True)
+            run = [str(tmp_path / f"p{i}")]
+        else:
+            run = ["lua", str(src)]
+        out = subprocess.run(run, capture_output=True, text=True, timeout=120).stdout
+        assert out.strip() == it.cont.strip(), (code, it.cont)
