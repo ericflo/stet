@@ -92,8 +92,16 @@ func TestDrawsOnDemandKeepAGapAndStopWhenNobodyIsWaiting(t *testing.T) {
 	w.app.st.view(func(s *State) { drawn = s.Rounds[s.maxRound()-1].DrawnAt })
 	w.app.tick(context.Background())
 	at, gap := w.scheduledAt(), int64(w.cfg.RoundMinGap.Seconds())
-	if at > drawn+gap+grid {
-		t.Fatalf("the next draw is %ds after the last; an entry is waiting and the gap is %ds", at-drawn, gap)
+	// It is the first mark on the grid at least the gap after the last draw that no other
+	// round was announced for: a slot once announced is never another round's, and near a
+	// usual time (every six hours) the first mark after the gap is often the one the last
+	// round was announced for before it was drawn early.
+	var taken map[int64]bool
+	w.app.st.view(func(s *State) { taken = announcedSlots(s, s.roundWithStatus("scheduled")) })
+	for m := w.app.season.nextGrid(drawn + gap - 1); m < at; m = w.app.season.nextGrid(m) {
+		if !taken[w.app.season.Beacon.drandRoundAt(m)] {
+			t.Fatalf("the next draw is %ds after the last, though %ds after it was free; an entry is waiting and the gap is %ds", at-drawn, m-drawn, gap)
+		}
 	}
 	if usual := w.app.nextSlot(now()); usual >= drawn+gap && at < drawn+gap {
 		t.Fatalf("the next draw is %ds after the last, inside the gap of %ds", at-drawn, gap)
