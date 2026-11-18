@@ -7,7 +7,7 @@
     <div class="facts">
       <span>by <a href="/u/{{$d.Owner}}">{{$d.Owner}}</a>{{if $d.Github}} (<a href="{{gh $d.Github}}" rel="nofollow noopener">github.com/{{$d.Github}}</a>){{end}}</span>
       <span>entered {{date $e.CreatedAt}}</span>
-      {{with $row}}{{if .Record}}<span class="tag red">record holder</span>{{end}}{{if .Organisers}}<span><a class="term" href="/glossary#reference">a reference curator</a></span>{{end}}{{end}}
+      {{with $row}}{{if .Record}}<span class="tag red">record holder</span>{{end}}{{if .Organisers}}<span><a class="term" href="/glossary#reference">entered by the organisers</a></span>{{end}}{{end}}
       {{if eq $e.Status "withdrawn"}}<span class="tag">replaced by a newer version</span>{{end}}
       {{with $d.Parent}}<span>forked from <a href="/editors/{{short .ID}}">{{.Name}} v{{.Version}}</a> by {{.Owner}}</span>{{end}}
     </div>

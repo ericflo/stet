@@ -68,7 +68,7 @@
 {{define "standrow"}}{{$r := .R}}<li class="{{if $r.Provisional}}soft{{end}}{{if eq $r.Rank 1}} top{{end}}"><a class="row" href="/editors/{{short $r.ID}}">
   <span class="rank">{{if $r.Rank}}{{$r.Rank}}{{else}}–{{end}}</span>
   <span class="who"><span class="name">{{$r.Name}}</span>{{if gt $r.Version 1}}<span class="ver">v{{$r.Version}}</span>{{end}}{{if $r.Record}} <span class="tag red">record</span>{{end}}
-    <span class="by">{{$r.Owner}}{{if $r.Organisers}} · reference{{end}}{{if $r.Provisional}} · <span class="q">unranked, {{$r.Rounds}} of {{.Need}} rounds</span>{{end}}{{if $r.Invalid}} · <span class="neg">failed {{$r.Invalid}} of {{$r.Rounds}}</span>{{end}}</span></span>
+    <span class="by">{{$r.Owner}}{{if $r.Organisers}} (organisers){{end}}{{if $r.Provisional}} · <span class="q">unranked, {{$r.Rounds}} of {{.Need}} rounds</span>{{end}}{{if $r.Invalid}} · <span class="neg">failed {{$r.Invalid}} of {{$r.Rounds}}</span>{{end}}</span></span>
   {{template "bar" (dict "V" (ptr $r.Rating) "Top" .Top "Soft" $r.Provisional)}}
   <span class="val{{if neg (ptr $r.Rating)}} neg{{end}}">{{gain (ptr $r.Rating)}}</span>
 </a></li>{{end}}
