@@ -8,6 +8,7 @@ an instance of: a person, a village, a species) is its topic.
 from __future__ import annotations
 
 import calendar
+import html
 import re
 import time
 from html.parser import HTMLParser
@@ -107,6 +108,7 @@ def _ts(s: str) -> int:
 
 ADD_MIN_BYTES = 600  # an edit must add at least this much (before markup is stripped)
 ADD_MIN_CHARS = 300  # and leave at least this much prose
+TALK_MIN_BYTES = 400  # a comment on a talk page
 
 
 class _Diff(HTMLParser):
@@ -160,23 +162,26 @@ def strip_wikitext(text: str) -> str:
     text = re.sub(r"'{2,}", "", text)
     text = re.sub(r"^=+\s*(.*?)\s*=+\s*$", r"\1", text, flags=re.M)
     text = re.sub(r"<[^>]+>", "", text)
-    text = re.sub(r"^[*#:;|!].*$", "", text, flags=re.M)  # list markup, table rows
+    text = html.unescape(text)
+    text = re.sub(r"^[*#;|!].*$", "", text, flags=re.M)  # list markup, table rows
+    text = re.sub(r"^:+\s*", "", text, flags=re.M)  # indentation, as replies on talk pages are indented
     text = re.sub(r"^[\s{}|\[\]=]*$", "", text, flags=re.M)  # what is left of markup that spanned lines
     return re.sub(r"\n{3,}", "\n\n", re.sub(r"[ \t]{2,}", " ", text)).strip()
 
 
-def additions(lang: str, start: int, end: int, cap: int, rng, log=print) -> list[Doc]:
-    """Prose added to existing articles by people in the window, from up to cap of the largest edits."""
+def additions(lang: str, start: int, end: int, cap: int, rng, log=print, talk: bool = False) -> list[Doc]:
+    """Prose added to existing articles by people in the window, from up to cap of the largest edits.
+    With talk, comments added to articles' talk pages instead: people discussing, in every language."""
     api = f"https://{lang}.wikipedia.org/w/api.php"
     # Registered editors only, and nothing already reverted: vandalism is the usual big edit that is
     # neither.
-    params = {"action": "query", "list": "recentchanges", "rctype": "edit", "rcnamespace": 0, "rcshow": "!bot|!minor|!anon",
+    params = {"action": "query", "list": "recentchanges", "rctype": "edit", "rcnamespace": 1 if talk else 0, "rcshow": "!bot|!minor|!anon",
               "rcstart": iso(end), "rcend": iso(start), "rclimit": 500, "rcprop": "title|ids|timestamp|sizes|tags", "format": "json"}
     edits = []
     while True:
         d = get_json(api, params)
         edits += [rc for rc in d.get("query", {}).get("recentchanges", [])
-                  if rc.get("newlen", 0) - rc.get("oldlen", 0) >= ADD_MIN_BYTES and "mw-reverted" not in rc.get("tags", [])]
+                  if rc.get("newlen", 0) - rc.get("oldlen", 0) >= (TALK_MIN_BYTES if talk else ADD_MIN_BYTES) and "mw-reverted" not in rc.get("tags", [])]
         if "continue" not in d or len(edits) > 20 * cap:
             break
         params.update(d["continue"])
@@ -191,6 +196,10 @@ def additions(lang: str, start: int, end: int, cap: int, rng, log=print) -> list
         text = strip_wikitext("\n".join(added_lines(c.get("compare", {}).get("*", ""))))
         if len(text) >= ADD_MIN_CHARS:
             kept.append((rc, text))
+    if talk:
+        return [Doc(source="wikipedia-talk", id=f"{lang}:{rc['revid']}", lang=lang, license=LICENSE, published=_ts(rc["timestamp"]),
+                    url=f"https://{lang}.wikipedia.org/w/index.php?diff={rc['revid']}&oldid={rc['old_revid']}", title=rc.get("title", ""),
+                    text=text, topic="talk") for rc, text in kept]
     items = {}
     ids = sorted({rc["pageid"] for rc, _ in kept})
     for i in range(0, len(ids), 50):

@@ -29,6 +29,8 @@ def test_wikitext_becomes_prose():
     assert "Ada was a mathematical writer." in out and "She worked with Charles Babbage on the Analytical Engine." in out
     for junk in ("[[", "{{", "<ref", "File:", "a list item", "'''", "<!--", "}}"):
         assert junk not in out
+    reply = strip_wikitext(":: I agree with this.&nbsp;—[[User:Ann|Ann]] ([[User talk:Ann|talk]]) 12:00, 18 November 2026 (UTC)")
+    assert reply == "I agree with this.\xa0—Ann (talk) 12:00, 18 November 2026 (UTC)"
 
 
 def test_html_text():
@@ -49,6 +51,8 @@ def test_documents_become_items_with_corners():
     assert len(ans) == 1 and ans[0].kind == "answer" and ans[0].ctx.startswith("Question: Title 2")
     added = items_of(_doc(3, source="wikipedia-added", lang="simple"))
     assert added[0].lang == "en" and added[0].corner.endswith("/added")
+    talk = items_of(_doc(4, source="wikipedia-talk", topic="talk"))
+    assert talk[0].fmt == "dialogue" and talk[0].corner.startswith("fresh/wikipedia-talk/en/talk/") and talk[0].text.startswith("Talk: Title 4")
 
 
 def test_selection_caps_corners_shares_languages_and_is_repeatable():

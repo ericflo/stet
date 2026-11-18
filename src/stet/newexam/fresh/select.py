@@ -26,6 +26,13 @@ ANSWER_CHARS = 800
 QUESTION_CHARS = 1500
 
 
+def hash_title(title: str) -> int:
+    """A stable bucket for a title: corners for sources that have no topic of their own."""
+    import hashlib
+
+    return int.from_bytes(hashlib.sha256(title.encode()).digest()[:4], "big")
+
+
 def lang_of(doc: Doc) -> str:
     return ALIASES.get(doc.lang, doc.lang)
 
@@ -67,6 +74,9 @@ def items_of(doc: Doc) -> list[Item]:
     if doc.source == "wikipedia-added":
         return [Item(kind="passage", corner=f"{base}/added", fmt="prose", lang=lang, source=src,
                      text=_clip(f"{doc.title}\n\n{doc.text}", PASSAGE_CHARS))]
+    if doc.source == "wikipedia-talk":
+        return [Item(kind="passage", corner=f"{base}/{abs(hash_title(doc.title)) % 64}", fmt="dialogue", lang=lang, source=src,
+                     text=_clip(f"Talk: {doc.title}\n\n{doc.text}", PASSAGE_CHARS))]
     if doc.source == "stackexchange":
         fmt = "code" if _codeish(doc.text) else "dialogue"
         if doc.question:

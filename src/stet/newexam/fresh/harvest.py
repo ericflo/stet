@@ -14,7 +14,8 @@ SE_SITES = 30  # sites a harvest without a StackExchange key visits, the largest
 SE_MAJOR = ["stackoverflow", "math", "superuser", "serverfault", "askubuntu", "unix", "physics", "electronics", "english", "stats",
             "softwareengineering", "apple", "tex", "dba", "codereview", "mathoverflow.net", "security", "academia", "gis", "diy",
             "es.stackoverflow", "ru.stackoverflow", "pt.stackoverflow", "ja.stackoverflow"]
-ADDED_EN, ADDED_OTHER = 150, 15  # edits a harvest reads per language, for text added to existing articles
+ADDED_EN, ADDED_OTHER = 150, 20  # edits a harvest reads per language, for text added to existing articles
+TALK_EN, TALK_OTHER = 60, 8  # and for comments on talk pages
 
 
 def harvest_window(seed: bytes, start: int, end: int, dest: Path, langs: list[str] | None = None, se_sites: int | None = SE_SITES,
@@ -30,6 +31,14 @@ def harvest_window(seed: bytes, start: int, end: int, dest: Path, langs: list[st
             log(f"  wikipedia-added {lang}: {type(e).__name__}: {e}")
     log(f"  wikipedia-added: {len(added)} additions to existing articles")
     docs += added
+    talk = []
+    for lang in sorted(SHARES) if langs is None else langs:
+        try:
+            talk += wikipedia.additions(lang, start, end, TALK_EN if lang == "en" else TALK_OTHER, Rng(seed, f"fresh/talk/{lang}"), log=log, talk=True)
+        except Exception as e:
+            log(f"  wikipedia-talk {lang}: {type(e).__name__}: {e}")
+    log(f"  wikipedia-talk: {len(talk)} comments on talk pages")
+    docs += talk
     sites = stackexchange.sites()
     names = sorted(sites)
     if se_sites is not None and se_sites < len(names):
