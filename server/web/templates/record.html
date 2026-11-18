@@ -25,7 +25,7 @@
     <p class="caption">{{with $race.Holder}}Each curator's gain less {{.Name}}'s, on the rounds both played, averaged.{{else}}Each curator's gain over the unedited pages, averaged over its rounds.{{end}} Right of the line is ahead.</p>
     <ol class="race">
       {{range $race.Rows}}<li><a href="/editors/{{short .ID}}">
-        <span class="who"><span class="name">{{.Name}}</span>{{if gt .Version 1}} <span class="by" style="display:inline">v{{.Version}}</span>{{end}}{{if .Provisional}} <span class="tag amber">not ranked yet</span>{{end}}<span class="by">{{.Owner}} · {{.Shared}} shared {{plural .Shared "round" "rounds"}}</span></span>
+        <span class="who"><span class="name">{{.Name}}</span>{{if gt .Version 1}} <span class="by" style="display:inline">v{{.Version}}</span>{{end}}<span class="by">{{.Owner}}{{if .Provisional}} · <span class="q">unranked</span>{{end}} · {{.Shared}} shared {{plural .Shared "round" "rounds"}}</span></span>
         <span class="vs" aria-hidden="true">{{if .Shared}}<i class="{{if lt .Mean 0.0}}behind{{else}}ahead{{end}}" style="{{halfw .Mean $d.VsTop}}"></i>{{end}}</span>
         <span class="val{{if lt .Mean 0.0}} neg{{end}}">{{if .Shared}}{{gain .Mean}}<small>{{if lt .Mean 0.0}}behind{{else}}ahead{{end}}, a round</small>{{else}}—{{end}}</span>
         <span class="tests">{{if .Next}}{{if le .Next 10}}{{template "of" (dict "N" (min .Shared .Next) "Of" .Next)}}{{end}}<span>{{if .ToGo}}next check at {{.Next}} shared rounds, {{.ToGo}} more to go{{else}}checked when this round settles{{end}}</span>{{else}}<span>every check made</span>{{end}}</span>

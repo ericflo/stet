@@ -536,6 +536,7 @@ td.dim { color: var(--ink-3); }
 .race .who { grid-area: who; line-height: 1.3; }
 .race .who .name { font-family: var(--display); font-weight: 600; font-size: 19px; }
 .race .who .by { display: block; color: var(--ink-3); font-size: 15px; }
+.race .who .q { color: var(--amber); }
 .race .vs { grid-area: vs; position: relative; height: 12px; }
 .race .vs::before { content: ""; position: absolute; left: 50%; top: -5px; bottom: -5px; border-left: 1.5px solid var(--ink-3); }
 .race .vs i { position: absolute; top: 1px; bottom: 1px; border-radius: 2px; }
