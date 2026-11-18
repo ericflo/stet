@@ -219,6 +219,12 @@ def loop(monkeypatch):
         if path.endswith("/release"):
             seen.released.append((path, body["reason"]))
             return {}
+        if path == "/api/v1/admin/sealed/mine":  # the held-out exam, sealed to this machine: not there unless a test puts it
+            if getattr(seen, "sealed", None) is None:
+                raise client.ApiError(404, "no copy of the held-out exam is sealed to this machine's key yet")
+            return seen.sealed
+        if path == "/api/v1/admin/sealed":
+            return {"organisers": []}
         raise AssertionError(f"unexpected request: {method} {path}")
 
     def grade(job, season, scale, device, key, out, work):
@@ -405,6 +411,27 @@ def test_one_key_runs_one_verifier(loop, capsys):
     client.claim_key().close()  # and a verifier that has stopped leaves the key free
 
 
+def test_an_organisers_machine_fetches_the_held_out_exam_sealed_to_it_and_starts(loop, monkeypatch, tmp_path):
+    import hashlib
+
+    from stet import data, sealed
+    from stet.keys import load_key
+    from stet.spec import load_season
+
+    # Nobody carried the pack to this machine. Another organisers' machine sealed a copy to its key.
+    pack = os.urandom(4000)
+    season = load_season("s0")
+    monkeypatch.setitem(season.raw, "heldout_exam", {"sha256": hashlib.sha256(pack).hexdigest()})
+    monkeypatch.setattr(data, "_heldout_pack", {})
+    loop.sealed = sealed.seal(pack, bytes.fromhex(load_key().public_hex))
+    loop.claims = [a_job()]
+    loop.me = {"account": {"handle": "tester", "anchor": True}, "verifier": {}}
+    with pytest.raises(Stop):
+        client.cmd_verify(Args())
+    assert loop.graded == [7]
+    assert data.heldout_pack_file(season).read_bytes() == pack
+
+
 def test_the_organisers_machine_does_not_start_without_the_held_out_exam(loop, monkeypatch, capsys):
     from stet import runner
 
@@ -413,8 +440,10 @@ def test_the_organisers_machine_does_not_start_without_the_held_out_exam(loop, m
     monkeypatch.setattr(client, "_edit_job", lambda *a, **k: pytest.fail("an edit job was run"))
     loop.claims = [a_job()]
     loop.me = {"account": {"handle": "tester", "anchor": True}, "verifier": {}}
+    once = Args()
+    once.once = True  # one job and out: it does not sit waiting for another machine to share the exam
     with pytest.raises(SystemExit):
-        client.cmd_verify(Args())
+        client.cmd_verify(once)
     err = capsys.readouterr().err
     assert "does not hold it" in err and "heldout-s0.jsonl.zst" in err and "gap in the season's" in err and not loop.graded
     loop.me = {"account": {"handle": "tester"}, "verifier": {"established": True}}

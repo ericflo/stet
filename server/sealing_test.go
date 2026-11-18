@@ -1,10 +1,17 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"io"
 	"math"
+	"net/http"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -837,4 +844,119 @@ func TestTwoOrganisersMachinesShareTheOrganisersOwnEntries(t *testing.T) {
 		}
 	}
 	w.check()
+}
+
+// The held-out exam goes between the organisers' machines sealed to each one's key. It is
+// kept for nobody else, in no readable form, and no other road leads to it.
+func TestTheHeldOutExamIsKeptOnlySealedAndOnlyForTheOrganisersMachines(t *testing.T) {
+	pub1, priv1 := newKey()
+	pub2, priv2 := newKey()
+	w := newWorld(t, pub1, pub2)
+	one, two, eve := w.join("anchor-one", priv1), w.join("anchor-two", priv2), w.join("eve", nil)
+	w.app.season.HeldoutSHA256 = strings.Repeat("ab", 32)
+	sealed := append([]byte("stet-sealed-1\n"), bytes.Repeat([]byte{7}, 200)...)
+	raw := func(a *actor, path string) (int, []byte) {
+		t.Helper()
+		req, _ := http.NewRequest("GET", a.srv.URL+path, nil)
+		ts := strconv.FormatInt(time.Now().Unix(), 10)
+		sum := sha256.Sum256(nil)
+		msg := strings.Join([]string{"stet-v1", "GET", path, ts, hex.EncodeToString(sum[:])}, "\n")
+		req.Header.Set("X-Stet-Key", a.pub)
+		req.Header.Set("X-Stet-Time", ts)
+		req.Header.Set("X-Stet-Sig", hex.EncodeToString(ed25519.Sign(a.priv, []byte(msg))))
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		blob, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, blob
+	}
+	var out struct {
+		Error string `json:"error"`
+	}
+	var list struct {
+		Organisers []struct {
+			Key    string `json:"key"`
+			Handle string `json:"handle"`
+			Sealed bool   `json:"sealed"`
+		} `json:"organisers"`
+	}
+	has := func(key string) bool {
+		t.Helper()
+		if code := one.do("GET", "/api/v1/admin/sealed", nil, &list); code != 200 || len(list.Organisers) != 2 {
+			t.Fatalf("the list of organisers' keys: HTTP %d %+v", code, list)
+		}
+		for _, o := range list.Organisers {
+			if o.Key == key {
+				return o.Sealed
+			}
+		}
+		t.Fatalf("%s is not in the list: %+v", key[:8], list)
+		return false
+	}
+
+	// Somebody who is not an organiser learns nothing and leaves nothing.
+	for _, path := range []string{"/api/v1/admin/sealed", "/api/v1/admin/sealed/mine"} {
+		if code := eve.do("GET", path, nil, &out); code != 403 {
+			t.Fatalf("an entrant asked for %s: HTTP %d %s", path, code, out.Error)
+		}
+		if resp, err := http.Get(one.srv.URL + path); err != nil || resp.StatusCode != 401 {
+			t.Fatalf("%s without a signature: %v %v", path, resp, err)
+		}
+	}
+	if code := eve.do("PUT", "/api/v1/admin/sealed/"+two.pub, sealed, &out); code != 403 {
+		t.Fatalf("an entrant left a sealed copy: HTTP %d %s", code, out.Error)
+	}
+	// An organiser shares it with no key but an organisers', and never in a form the
+	// server could read.
+	if code := one.do("PUT", "/api/v1/admin/sealed/"+eve.pub, sealed, &out); code != 403 {
+		t.Fatalf("a copy was kept for a key that is not an organisers': HTTP %d %s", code, out.Error)
+	}
+	if code := one.do("PUT", "/api/v1/admin/sealed/"+two.pub, bytes.Repeat([]byte("the held-out exam, as it is. "), 20), &out); code != 400 {
+		t.Fatalf("something that is not sealed was kept: HTTP %d %s", code, out.Error)
+	}
+	if has(one.pub) || has(two.pub) {
+		t.Fatalf("a copy is listed that nobody sealed: %+v", list)
+	}
+	if code, _ := raw(two, "/api/v1/admin/sealed/mine"); code != 404 {
+		t.Fatalf("a machine nobody has shared with was handed something: HTTP %d", code)
+	}
+
+	// An organiser can look up the key an account signs with, which is what it takes to
+	// make that account's machine an organisers' one. Nobody else can.
+	var acct struct {
+		Key    string `json:"key"`
+		Anchor bool   `json:"anchor"`
+	}
+	if code := one.do("GET", "/api/v1/admin/accounts/eve", nil, &acct); code != 200 || acct.Key != eve.pub || acct.Anchor {
+		t.Fatalf("an organiser looking up an account: HTTP %d %+v", code, acct)
+	}
+	if code := one.do("GET", "/api/v1/admin/accounts/nobody-here", nil, &out); code != 404 {
+		t.Fatalf("an account that does not exist: HTTP %d", code)
+	}
+	if code := eve.do("GET", "/api/v1/admin/accounts/anchor-two", nil, &out); code != 403 {
+		t.Fatalf("an entrant looked up an account's key: HTTP %d", code)
+	}
+
+	// One machine seals a copy to the other's key. The other is handed exactly that, and
+	// nobody is handed a copy that is not their own.
+	if code := one.do("PUT", "/api/v1/admin/sealed/"+two.pub, sealed, &out); code != 201 {
+		t.Fatalf("an organiser sharing the exam with another organisers' machine: HTTP %d %s", code, out.Error)
+	}
+	if !has(two.pub) || has(one.pub) {
+		t.Fatalf("after one copy for anchor-two: %+v", list)
+	}
+	if code, got := raw(two, "/api/v1/admin/sealed/mine"); code != 200 || !bytes.Equal(got, sealed) {
+		t.Fatalf("the machine it was sealed to was handed HTTP %d and %d bytes", code, len(got))
+	}
+	if code, _ := raw(one, "/api/v1/admin/sealed/mine"); code != 404 {
+		t.Fatalf("a machine was handed a copy sealed to another's key: HTTP %d", code)
+	}
+	// And the public file routes do not reach it by any name.
+	for _, path := range []string{"/files/" + two.pub, "/files/sealed", "/files/heldout-" + w.app.season.ID + ".jsonl.zst", "/files/..%2Fsealed%2Fheldout-" + w.app.season.ID + "%2F" + two.pub} {
+		if code, body := w.page(path); code == 200 || strings.Contains(body, "stet-sealed-1") {
+			t.Fatalf("%s served the sealed copy: HTTP %d", path, code)
+		}
+	}
 }

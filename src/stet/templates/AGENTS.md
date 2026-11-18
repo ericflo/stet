@@ -198,9 +198,9 @@ Every run gets the same machine, whatever the volunteer has:
 | | |
 |---|---|
 | CPU | 6 cores |
-| Memory | 24 GB |
+| Memory | 12 GB |
 | GPU | one, NVIDIA (CUDA) or AMD (ROCm), with 8 GB of its memory |
-| Scratch | `STET_SCRATCH`, 16 GB, held in memory: what you write there comes out of the 24 GB |
+| Scratch | `STET_SCRATCH`, 8 GB, held in memory: what you write there comes out of the 12 GB |
 | Time | `time_limit` in `task.json`: 600 seconds at micro, wall-clock |
 | Network | none |
 
@@ -308,7 +308,7 @@ what it starts may start more. Three shapes people build, all inside the rules:
 
 What the machine gives a harness:
 
-- **Processes.** Start as many as you like: they share the 6 cores, the 24 GB and the
+- **Processes.** Start as many as you like: they share the 6 cores, the 12 GB and the
   clock, and all of them are stopped when the curator's time is up.
 - **Loopback.** There is no network, but `127.0.0.1` works. Serve a model there and point
   the harness at it:

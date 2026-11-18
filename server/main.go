@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -71,6 +72,8 @@ type App struct {
 	// One token per large request body in memory: entrants' bundles, and apart from them
 	// the runners' scripts and the organisers' files.
 	uploads, runnerUploads chan struct{}
+	// The organisers' keys known to have a sealed copy of the held-out exam (api.go).
+	sealedKept sync.Map
 }
 
 func env(key, def string) string {

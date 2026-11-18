@@ -58,9 +58,13 @@ again a minute later, it is given the same job, and it checks the round or does 
 afresh. The log says which it was. A volunteer's verifier hands the job back instead.
 
 **To add an organisers' account:** install the CLI there, `stet login --handle <name>`,
-add its public key (`stet whoami`) to `STET_ANCHOR_KEYS`, copy the held-out exam to it
-(below), and run `stet service install --edits`. Whoever holds such a key is
-established from the start and can settle an entry alone, so there should be few.
+add its public key (`stet whoami` there, or `GET /api/v1/admin/accounts/<name>` signed by
+an organisers' key) to `STET_ANCHOR_KEYS`, and then start `stet verify` (or
+`stet service install --edits`). A verifier that was already running has to be started
+again to notice. It fetches the held-out exam by itself, sealed to its own
+key ([below](#sharing-it-between-the-organisers-machines)). Whoever holds such a key is
+established from the start, can settle an entry alone, and is given the held-out exam, so
+there should be few.
 
 **It upgrades itself.** Like any verifier, it installs a new release when it holds no
 job and starts again, so a deploy that changes the harness needs nothing done here. The
@@ -83,8 +87,8 @@ chooses which:
 | 2 (the default) | Each entry is run by both and each grades the other's script: entries are *confirmed*. Same speed as one machine | Confirmation matters more than speed |
 | 1 | Each entry is run once by whichever machine is free, and graded by the other when it is around: about twice the speed | The queue is long and the machines are the organisers' own |
 
-Each machine needs its own key (one verifier per key), each key in `STET_ANCHOR_KEYS`,
-and each the held-out exam. A machine that only grades (`stet service install`, no
+Each machine needs its own key (one verifier per key) and each key in `STET_ANCHOR_KEYS`;
+the held-out exam reaches each by itself. A machine that only grades (`stet service install`, no
 `--edits`) needs no sandbox and no floor, and is enough to turn *run once* into a second
 opinion on every script.
 
@@ -124,8 +128,8 @@ rollback of the image.
 
 ## The held-out exam
 
-Three files on the organisers' machine, none of them ever committed or uploaded before
-the close:
+Three files on the organisers' machine. None is ever committed, and none leaves an
+organisers' machine in a form anyone else can read before the close:
 
 | File | What |
 |---|---|
@@ -133,7 +137,24 @@ the close:
 | `~/.config/stet/heldout-s0.seed` | The seed it was built from, which also picks its book shards: 64 hex characters from the system's random source. Anyone with the seed can rebuild the exam, so it is as secret as the pack |
 | `~/.config/stet/heldout/s0.jsonl` | One line per official grade this machine made: the loss on both exams, for the script and the baseline |
 
-Back all three up somewhere private, with `key.json`. If the results file is lost, the
+### Sharing it between the organisers' machines
+
+Every organisers' machine needs the pack, and nobody carries it about. A machine that
+holds it and is running `stet verify` seals a copy to each other organisers' key, and the
+server keeps those copies. A machine that lacks the pack fetches the copy sealed to it
+when `stet verify` starts, checks it against the hash the season committed to, and writes
+it to `~/.config/stet/` readable by its owner only. A machine that has just been added
+waits a few minutes for its copy, and says that it is waiting.
+
+A sealed copy opens only with the private key of the account it was sealed to
+(`src/stet/sealed.py`: X25519 with the account's own key, ChaCha20-Poly1305). The server
+and its file store hold nothing they can read, serve the copies to organisers' keys only,
+and no public address reaches them. What this trusts is the list in `STET_ANCHOR_KEYS`:
+whoever can add a key to it is given the exam. The seed and the record of results are not
+shared this way; they stay where they were made.
+
+Back all three up somewhere private, with `key.json`. A machine's own sealed copy is on
+the server too, so the pack can be had back with `key.json` alone. If the results file is lost, the
 numbers can be measured again, at one training run per line.
 
 The organisers' verifier, in a season with a held-out exam, refuses to start without the

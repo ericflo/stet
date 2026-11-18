@@ -647,6 +647,32 @@ def test_in_the_sandbox_the_editor_is_told_to_use_one_gpu(corpus, tmp_path, monk
     assert run.status == "ok" and "GPUS 0 0" in run.log_tail, run.log_tail
 
 
+def test_memory_that_is_taken_is_this_machines_trouble_not_the_curators(corpus, tmp_path, monkeypatch):
+    from stet import runner
+    from stet.runner import HarnessError
+
+    # A machine at the floor with a browser open: the limit would let a curator have what
+    # the machine cannot give, and the kernel would kill it for the machine's shortage.
+    monkeypatch.setattr(runner, "memory_free_bytes", lambda: 9 << 30)
+    limits = {"memory_gb": 12, "gpu_memory_gb": 0, "required": True}
+    with pytest.raises(HarnessError, match="9.0 GB of memory free and a curator is promised 12"):
+        run_editor(editor(tmp_path, WRITE_ALL), "python curator.py", corpus, RND, SCALE, tmp_path / "w1", 60, limits=limits)
+    # A run of your own (`stet run`) is not refused: it is your machine and your curator.
+    run = run_editor(editor(tmp_path, WRITE_ALL), "python curator.py", corpus, RND, SCALE, tmp_path / "w2", 60, limits={"memory_gb": 12})
+    assert run.status == "ok"
+
+
+def test_the_gpu_as_windows_wsl_shows_it_is_passed_into_the_sandbox(tmp_path, monkeypatch):
+    from stet import runner
+
+    real = os.path.exists
+    monkeypatch.setattr(runner.os.path, "exists", lambda p: p == "/dev/dxg" or (not str(p).startswith("/dev/") and real(p)))
+    (tmp_path / "etc").mkdir()
+    cmd = runner.bwrap_command(tmp_path, tmp_path, tmp_path, None, tmp_path, tmp_path / "etc", 1 << 30)
+    at = cmd.index("/dev/dxg")
+    assert cmd[at - 1 : at + 2] == ["--dev-bind", "/dev/dxg", "/dev/dxg"]
+
+
 def test_a_gpu_whose_memory_is_taken_is_this_machines_trouble_not_the_editors(corpus, tmp_path, monkeypatch):
     from stet import runner
     from stet.runner import HarnessError

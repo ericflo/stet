@@ -72,7 +72,8 @@ LOG_LIMIT_BYTES = 1 << 20
 # kept in memory, this much of it: what a curator says last is why it stopped, and that is
 # what gets reported, however much it said first.
 LOG_TAIL_BYTES = 8 << 10
-GPU_DEVICES = ("/dev/nvidiactl", "/dev/nvidia-uvm", "/dev/nvidia-uvm-tools", "/dev/nvidia-modeset", "/dev/nvidia-caps", "/dev/kfd", "/dev/dri")
+# /dev/dxg is the GPU under Windows' WSL2, where there are no /dev/nvidia* nodes.
+GPU_DEVICES = ("/dev/nvidiactl", "/dev/nvidia-uvm", "/dev/nvidia-uvm-tools", "/dev/nvidia-modeset", "/dev/nvidia-caps", "/dev/kfd", "/dev/dri", "/dev/dxg")
 SYSTEM_DIRS = ("/usr", "/opt")
 USR_LINKS = ("/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32")
 ETC_ALLOW = ("ld.so.cache", "ld.so.conf", "ld.so.conf.d", "alternatives", "OpenCL", "vulkan", "glvnd")
@@ -136,6 +137,18 @@ def gpu_total_bytes() -> int:
             total = 0
         _gpu_total.append(total)
     return _gpu_total[0]
+
+
+def memory_free_bytes() -> int:
+    """Memory this machine could hand to a new program now, or -1 where that cannot be told."""
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) << 10
+    except (OSError, ValueError, IndexError):
+        pass
+    return -1
 
 
 def gpu_free_bytes(index: int = 0) -> int:
@@ -741,6 +754,13 @@ def run_editor(
                 f"the GPU has {free / 2**30:.1f} GB of memory free and a curator is promised {promised / 2**30:.1f}: "
                 "something else on this machine is using it"
             )
+    # The same goes for ordinary memory. The limit on a curator is a ceiling, not a reserve:
+    # on a machine with little to spare, the kernel would kill a curator that was within it.
+    if limits.get("required") and 0 <= (free := memory_free_bytes()) < int(limits["memory_gb"]) << 30:
+        raise HarnessError(
+            f"this machine has {free / 2**30:.1f} GB of memory free and a curator is promised {int(limits['memory_gb'])}: "
+            "something else on this machine is using it"
+        )
     for k in ("LD_LIBRARY_PATH", "HSA_OVERRIDE_GFX_VERSION", "ROCM_PATH", "TORCH_BLAS_PREFER_HIPBLASLT"):
         if k in os.environ:
             env[k] = os.environ[k]

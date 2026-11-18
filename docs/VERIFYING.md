@@ -105,7 +105,7 @@ pass. Each one runs in a sandbox:
   named, all read-only, and scratch space held in memory;
 - not your machine's name, other processes or hardware serial numbers. It can see the
   path of the directories it was given, and so the name of the account `stet` runs as;
-- six cores, 24 GB of memory, one GPU with 8 GB of its memory, and the time limit, after
+- six cores, 12 GB of memory, one GPU with 8 GB of its memory, and the time limit, after
   which it is killed.
 
 `stet verify --edits` tests the sandbox before it takes any work and will not start

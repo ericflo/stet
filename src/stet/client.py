@@ -918,6 +918,94 @@ def keep_heldout(season, job: dict, result: dict, base: dict) -> None:
         os.fsync(f.fileno())
 
 
+# --- the held-out exam, between the organisers' machines ----------------------------------
+#
+# Every organisers' machine needs the pack, and the pack is a secret until the season
+# closes. So it is never carried about by hand and never sent anywhere readable: a machine
+# that holds it seals a copy to each other organisers' key (sealed.py), the server keeps
+# those copies without being able to open them, and a machine that lacks the pack fetches
+# the one sealed to it.
+
+SEALED_LIMIT_BYTES = 128 << 20
+_shared_at = 0.0
+
+
+def share_heldout(key: Key, season, out, every: float = 300.0) -> int:
+    """Seal this machine's copy of the held-out exam to every organisers' key that has none.
+    Returns how many were sent. Does nothing where there is no pack, and never raises."""
+    global _shared_at
+    from . import sealed
+    from .data import HeldoutError, heldout_pack_path
+
+    now = time.time()
+    if every and now - _shared_at < every:
+        return 0
+    _shared_at = now
+    try:
+        path = heldout_pack_path(season)
+        if path is None:
+            return 0
+        listed = request("GET", "/api/v1/admin/sealed", key=key)
+        wanted = [o for o in listed.get("organisers") or [] if isinstance(o, dict) and not o.get("sealed") and SHA256_RE.fullmatch(str(o.get("key") or ""))]
+        if not wanted:
+            return 0
+        pack = path.read_bytes()
+        sent = 0
+        for o in wanted:
+            blob = sealed.seal(pack, bytes.fromhex(o["key"]))
+            request("PUT", f"/api/v1/admin/sealed/{o['key']}", blob, key=key, timeout=1800)
+            who = clean(str(o.get("handle") or "")) or o["key"][:12]
+            out.line("", out.dim(f"shared the held-out exam with {who}: a copy only that machine's key opens"))
+            sent += 1
+        return sent
+    except (ApiError, OSError, ValueError, HeldoutError):
+        return 0  # not an organisers' key, or the server is away: asked again later
+
+
+def fetch_heldout(key: Key, season, out, wait: bool = True, pause: float = 30.0) -> bool:
+    """Fetch the copy of the held-out exam sealed to this machine's key and put it in place.
+
+    Waits for one to be there if `wait`: another organisers' machine has to seal it, and
+    does so within a few minutes of this key becoming an organisers'. True once the pack
+    is in place.
+    """
+    from . import data, sealed
+
+    want = (season.raw.get("heldout_exam") or {}).get("sha256")
+    dest = data.heldout_pack_file(season)
+    said = False
+    while True:
+        try:
+            blob = request("GET", "/api/v1/admin/sealed/mine", key=key, raw=True, timeout=1800, limit=SEALED_LIMIT_BYTES)
+            pack = key.unseal(blob)
+            if hashlib.sha256(pack).hexdigest() != want:
+                raise sealed.SealError("what was sealed to this machine is not the held-out exam the season committed to")
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            tmp = dest.with_name(dest.name + f".tmp{os.getpid()}")
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "wb") as f:
+                f.write(pack)
+            tmp.replace(dest)
+            data._heldout_pack.pop(season.id, None)
+            out.line("", out.dim(f"fetched the season's held-out exam, sealed to this machine's key, into {dest}"))
+            return True
+        except sealed.SealError as e:
+            sys.stderr.write(f"stet: {e}\n")
+            return False
+        except (ApiError, OSError) as e:
+            # Not an organisers' key after all, or a stet the server no longer talks to:
+            # waiting would not change either, and starting again might.
+            if not wait or (isinstance(e, ApiError) and e.status in (400, 401, 403, 426)):
+                return False
+            if not said:
+                said = True
+                why = clean(str(e)) if isinstance(e, ApiError) and e.status != 404 else "no copy is sealed to this machine's key yet"
+                out.line("", f"This machine does not hold the season's held-out exam ({why}).")
+                out.line("", out.dim("Another organisers' machine shares it within a few minutes. Waiting; Ctrl-C to stop."))
+            time.sleep(pause)
+            pause = min(300.0, pause * 1.5)  # and if nobody is there to share it, the server is not asked every half minute for days
+
+
 def heldout_log_trouble(season) -> str:
     """Why the held-out record cannot be added to, or "" if it can. Makes the file if it is not there."""
     path = heldout_log(season)
@@ -1311,6 +1399,10 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
     out.line("", out.dim("Grading edit scripts with the fixed trainer. No one else's code runs on this machine." if not args.edits
                          else "Running entrants' curators in the sandbox, and grading."))  # fmt: skip
     try:
+        wants_pack = organiser and (season.raw.get("heldout_exam") or {}).get("sha256") and os.environ.get("STET_DEV") != "1"
+        if wants_pack and heldout_pack_path(season) is None:
+            # Not carried here by hand: fetched, sealed to this machine's key.
+            fetch_heldout(key, season, out, wait=not (args.once or args.max_jobs))
         if heldout_pack_path(season) is not None:
             trouble = heldout_log_trouble(season)
             if trouble:
@@ -1322,12 +1414,15 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
                 )
                 sys.exit(1)
             out.line("", out.dim(f"This machine holds the season's held-out exam. What it says is kept in {heldout_log(season)} and sent nowhere."))
-        elif organiser and (season.raw.get("heldout_exam") or {}).get("sha256") and os.environ.get("STET_DEV") != "1":
+            if organiser:
+                share_heldout(key, season, out, every=0)
+        elif wants_pack:
             sys.stderr.write(
                 f"stet: season {season.id} has a held-out exam, and the organisers' machine sits every student it grades on it.\n"
-                f"  This machine does not hold it. It belongs at {heldout_pack_file(season)}\n"
-                "  (or wherever STET_HELDOUT_EXAM points). Every official grade made without it is a gap in the season's\n"
-                "  final table that has to be measured again, so this machine will not start until the pack is in place.\n"
+                f"  This machine does not hold it, and no copy sealed to its key could be fetched. It belongs at\n"
+                f"  {heldout_pack_file(season)} (or wherever STET_HELDOUT_EXAM points). Every official grade made without\n"
+                "  it is a gap in the season's final table that has to be measured again, so this machine will not start\n"
+                "  until the pack is in place. Another organisers' machine that is running shares it by itself.\n"
             )
             sys.exit(1)
     except RuntimeError as e:  # a pack that is not the committed one: nothing is graded until that is put right
@@ -1451,6 +1546,8 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
                 except (TypeError, ValueError):
                     pause = 60
                 tidy(out)
+                if organiser:
+                    share_heldout(key, season, out)  # a machine that has just become an organisers' gets its copy
                 time.sleep(min(300, max(5, pause)))
                 continue
             idle = False

@@ -32,6 +32,11 @@ GPU_SECONDS = 4.0
 CPU_ROUNDS = 6
 WORDS = re.compile(r"[A-Za-z']+")
 # Used when a season says nothing about who may run curators.
+# A machine sold with 16 GB reports about 15.5 of it: firmware and the kernel keep some back.
+# The floor is in the gigabytes people know their machine by, so this much is allowed for.
+# (The server makes the same allowance: server/judge.go.)
+MEMORY_ALLOWANCE_GB = 1.0
+
 NO_FLOOR = {"gpu_tokens_per_second": 0, "cpu_mb_per_second": 0, "gpu_memory_gb": 0, "memory_gb": 0, "cores": 1, "disk_gb": 0}
 
 
@@ -185,8 +190,8 @@ def shortfalls(season: Season, m: dict) -> list[str]:
         out.append(f"{m['cores']} CPU cores; running curators needs {need['cores']}")
     elif m["cpu_mb_per_second"] < need["cpu_mb_per_second"]:
         out.append(f"the CPU is slower than the floor ({m['cpu_mb_per_second']:.0f} MB a second; the floor is {need['cpu_mb_per_second']:.0f})")
-    if m["memory_gb"] < need["memory_gb"]:
-        out.append(f"{m['memory_gb']:.0f} GB of memory; running curators needs {need['memory_gb']:.0f} GB")
+    if m["memory_gb"] < need["memory_gb"] - MEMORY_ALLOWANCE_GB:
+        out.append(f"{m['memory_gb']:.1f} GB of memory; running curators needs {need['memory_gb']:.0f} GB")
     if m.get("disk_gb", 0) < need["disk_gb"]:
         out.append(f"{m.get('disk_gb', 0):.0f} GB of free disk under the cache; running curators needs {need['disk_gb']:.0f} GB")
     return out

@@ -192,9 +192,9 @@ Curators are run on volunteers' machines, which differ. What a curator is given 
 | | |
 |---|---|
 | CPU | 6 cores |
-| Memory | 24 GB |
+| Memory | 12 GB |
 | GPU | one, NVIDIA or AMD, with 8 GB of its memory |
-| Scratch space | 16 GB at `/scratch`, held in memory, so it comes out of the 24 |
+| Scratch space | 8 GB at `/scratch`, held in memory, so it comes out of the 12 |
 | Network | none, but loopback (`127.0.0.1`) works between the curator's own processes |
 | Software | Python 3.13, Node.js 24 and the season's libraries |
 

@@ -244,6 +244,10 @@ func (a *App) mountAPI(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/jobs/{id}/release", a.apiRelease)
 	mux.HandleFunc("POST /api/v1/admin/draw", a.apiAdminDraw)
 	mux.HandleFunc("PUT /api/v1/admin/files/{name}", a.apiAdminFile)
+	mux.HandleFunc("GET /api/v1/admin/accounts/{handle}", a.apiAdminAccount)
+	mux.HandleFunc("GET /api/v1/admin/sealed", a.apiSealedList)
+	mux.HandleFunc("GET /api/v1/admin/sealed/mine", a.apiSealedMine)
+	mux.HandleFunc("PUT /api/v1/admin/sealed/{key}", a.apiSealedPut)
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 404, map[string]string{"error": "no such endpoint"})
 	})
@@ -1327,6 +1331,149 @@ func (a *App) apiAdminFile(w http.ResponseWriter, r *http.Request) {
 	}
 	slog.Info("file published", "name", name, "bytes", len(body), "by", acct.Handle)
 	writeJSON(w, 201, map[string]any{"name": name, "bytes": len(body), "sha256": got, "url": a.cfg.APIURL + "/files/" + name})
+}
+
+// apiAdminAccount tells an organiser an account's public key. That is what the list of
+// organisers' keys is made of, so adding a machine to it needs nothing carried from that
+// machine by hand.
+func (a *App) apiAdminAccount(w http.ResponseWriter, r *http.Request) {
+	if _, _, _, err := a.signedBy(w, r, 1<<10, true, organisers); err != nil {
+		writeErr(w, err)
+		return
+	}
+	handle := strings.ToLower(r.PathValue("handle"))
+	var out map[string]any
+	a.st.view(func(s *State) {
+		if acct := s.byHandle[handle]; acct != nil {
+			out = map[string]any{"handle": acct.Handle, "key": acct.Pubkey, "anchor": acct.Anchor, "github": acct.Github, "created_at": acct.CreatedAt}
+		}
+	})
+	if out == nil {
+		writeErr(w, fail(404, "no account has that handle"))
+		return
+	}
+	writeJSON(w, 200, out)
+}
+
+// --- the held-out exam, between the organisers' machines ---------------------------------------
+//
+// Each of the organisers' machines sits every student it grades on the held-out exam, so
+// each needs the pack, and the pack is a secret until the season closes. A machine that
+// holds it seals a copy to every other organisers' key (stet's sealed.py: X25519 with the
+// account's own key, ChaCha20-Poly1305), and those copies are kept here. This server and
+// its file store can open none of them, and they are served to nobody but the organisers'
+// machines: no path under /files reaches them.
+
+const sealedMagic = "stet-sealed-1\n"
+
+func (a *App) sealedBlob(key string) string { return "sealed/heldout-" + a.season.ID + "/" + key }
+
+// hasSealed says whether a copy is kept for this key. The machines ask every few minutes
+// for as long as they run, so a yes is remembered and the file store is not asked again.
+func (a *App) hasSealed(ctx context.Context, key string) (bool, error) {
+	if _, ok := a.sealedKept.Load(key); ok {
+		return true, nil
+	}
+	rc, _, err := a.st.blobs.Open(ctx, a.sealedBlob(key))
+	if errors.Is(err, errNoBlob) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	rc.Close()
+	a.sealedKept.Store(key, true)
+	return true, nil
+}
+
+// apiSealedList says which of the organisers' keys have a copy sealed to them, so that a
+// machine holding the pack knows whom it still has to share it with.
+func (a *App) apiSealedList(w http.ResponseWriter, r *http.Request) {
+	if _, _, _, err := a.signedBy(w, r, 1<<10, true, organisers); err != nil {
+		writeErr(w, err)
+		return
+	}
+	if a.season.HeldoutSHA256 == "" {
+		writeErr(w, fail(404, "this season has no held-out exam"))
+		return
+	}
+	keys := make([]string, 0, len(a.cfg.AnchorKeys))
+	for k := range a.cfg.AnchorKeys {
+		if sha256Re.MatchString(k) { // a public key is 32 bytes too
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+	out := []map[string]any{}
+	for _, k := range keys {
+		row := map[string]any{"key": k, "sealed": false}
+		if acct := a.accountByKey(k); acct != nil {
+			row["handle"] = acct.Handle
+		}
+		kept, err := a.hasSealed(r.Context(), k)
+		if err != nil {
+			writeErr(w, fail(503, "the file store is not answering; try again in a moment"))
+			return
+		}
+		row["sealed"] = kept
+		out = append(out, row)
+	}
+	writeJSON(w, 200, map[string]any{"season": a.season.ID, "organisers": out})
+}
+
+// apiSealedPut keeps a copy that one organisers' machine sealed to another's key.
+func (a *App) apiSealedPut(w http.ResponseWriter, r *http.Request) {
+	acct, _, body, err := a.signedBy(w, r, 128<<20, true, organisers)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	key := r.PathValue("key")
+	switch {
+	case a.season.HeldoutSHA256 == "":
+		writeErr(w, fail(404, "this season has no held-out exam"))
+		return
+	case !sha256Re.MatchString(key) || !a.cfg.AnchorKeys[key]:
+		writeErr(w, fail(403, "that is not an organisers' key: the held-out exam is shared with nobody else"))
+		return
+	case len(body) < len(sealedMagic)+60 || string(body[:len(sealedMagic)]) != sealedMagic:
+		// Above all, not the pack itself: nothing readable is ever kept here.
+		writeErr(w, fail(400, "that is not a sealed file. The held-out exam is kept here only sealed to an organisers' key"))
+		return
+	}
+	if err := a.st.blobs.Put(r.Context(), a.sealedBlob(key), body, "application/octet-stream"); err != nil {
+		slog.Error("keeping a sealed copy", "err", err)
+		writeErr(w, fail(503, "the file store is not answering; try again in a moment"))
+		return
+	}
+	a.sealedKept.Store(key, true)
+	slog.Info("sealed copy kept", "for", key[:12], "bytes", len(body), "by", acct.Handle)
+	writeJSON(w, 201, map[string]any{"key": key, "bytes": len(body)})
+}
+
+// apiSealedMine hands an organisers' machine the copy sealed to its own key.
+func (a *App) apiSealedMine(w http.ResponseWriter, r *http.Request) {
+	acct, _, _, err := a.signedBy(w, r, 1<<10, true, organisers)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	body, size, err := a.st.blobs.Open(r.Context(), a.sealedBlob(acct.Pubkey))
+	if errors.Is(err, errNoBlob) {
+		writeErr(w, fail(404, "no copy of the held-out exam is sealed to this machine's key yet. An organisers' machine that holds the exam shares it within a few minutes"))
+		return
+	}
+	if err != nil {
+		writeErr(w, fail(503, "the file store is not answering; try again in a moment"))
+		return
+	}
+	defer body.Close()
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Type", "application/octet-stream")
+	if size > 0 {
+		w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+	}
+	io.Copy(w, body)
 }
 
 // apiAdminDraw lets an organiser bring the next draw forward to the next moment on the grid

@@ -250,6 +250,11 @@ func (h hardwareFacts) gpuMake() string {
 // deviceOf reads the kind of device out of a hardware description.
 func deviceOf(hardware json.RawMessage) string { return readHardware(hardware).Device }
 
+// A machine sold with 16 GB reports about 15.5 of it: firmware and the kernel keep some
+// back. The floor is in the gigabytes people know their machine by, so this much is
+// allowed for. (The client makes the same allowance: bench.py.)
+const memoryAllowanceGB = 1.0
+
 // meetsFloor reports whether a machine says it is at least the slowest one that may run
 // editors. An editor has a time limit in seconds, so every machine that runs one has to
 // be at least that fast.
@@ -260,7 +265,7 @@ func (a *App) meetsFloor(hardware json.RawMessage) bool {
 	}
 	b := readHardware(hardware).Bench
 	return b != nil && b.GPUTokensPerSecond >= f.GPUTokensPerSecond && b.CPUMBPerSecond >= f.CPUMBPerSecond &&
-		b.GPUMemoryGB >= f.GPUMemoryGB && b.MemoryGB >= f.MemoryGB && b.Cores >= float64(f.Cores)
+		b.GPUMemoryGB >= f.GPUMemoryGB && b.MemoryGB >= f.MemoryGB-memoryAllowanceGB && b.Cores >= float64(f.Cores)
 }
 
 // runsEditors says whether an account asking for work may be handed editors to run, and

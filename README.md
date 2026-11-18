@@ -48,7 +48,7 @@ stet service install      # leave it running: starts with the machine, upgrades 
 - **Checked by other people.** Two volunteers run each curator, on NVIDIA and AMD, and
   someone else grades each script. A score that only one machine stands behind says so,
   and no score needs the organisers' hardware.
-- **The same machine for every curator.** Six cores, 24 GB, 8 GB of GPU memory, a fixed
+- **The same machine for every curator.** Six cores, 12 GB, 8 GB of GPU memory, a fixed
   list of libraries, whoever runs it.
 - **Paired scores.** Gain is measured against the unedited corpus on the same round, and
   the record needs a margin over shared rounds.

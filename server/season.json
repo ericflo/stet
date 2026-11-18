@@ -19,7 +19,7 @@
   "key_bytes": 64,
   "min_letters": 38
  },
- "digest": "8bb353eb6ff98cbe738025719730e90802e9627e0dac7bd491da23db58b3351d",
+ "digest": "296f19ebcf6752a18c23de626fdbf3b5b12fff67eba4984984bfbaea5118a14a",
  "draw_grid_seconds": 600,
  "environment": {
   "also": {
@@ -149,7 +149,7 @@
  "grade_devices": [
   "cuda"
  ],
- "harness": "0.3.4",
+ "harness": "0.3.5",
  "heldout_exam_sha256": "c1011b1b09492b7e8a931580ffe5da968472c34269cf886b1868d9f103c69549",
  "id": "s0",
  "ink_frac": 0.001,
@@ -161,8 +161,8 @@
  "machine": {
   "cores": 6,
   "gpu_memory_gb": 8,
-  "memory_gb": 24,
-  "scratch_gb": 16
+  "memory_gb": 12,
+  "scratch_gb": 8
  },
  "max_doc_bytes": 262144,
  "min_copy_bytes": 64,
@@ -336,7 +336,7 @@
   "disk_gb": 60,
   "gpu_memory_gb": 10,
   "gpu_tokens_per_second": 80000,
-  "memory_gb": 32
+  "memory_gb": 16
  },
  "scales": {
   "micro": {

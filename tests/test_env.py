@@ -90,9 +90,16 @@ def test_a_machine_is_measured_against_the_floor(season):
     g, c = bench.ratios(season, FAST)
     assert g == pytest.approx(400_000 / need["gpu_tokens_per_second"]) and c == pytest.approx(400 / need["cpu_mb_per_second"])
     assert bench.shortfalls(season, {**FAST, "gpu": ""}) == ["no NVIDIA (CUDA) or AMD (ROCm) GPU that this PyTorch build can use"]
-    slow = bench.shortfalls(season, {**FAST, "gpu_tokens_per_second": 1000, "gpu_memory_gb": 6, "memory_gb": 16, "cores": 4, "disk_gb": 5})
+    slow = bench.shortfalls(season, {**FAST, "gpu_tokens_per_second": 1000, "gpu_memory_gb": 6, "memory_gb": 8, "cores": 4, "disk_gb": 5})
     assert len(slow) == 5 and "slower than the floor" in slow[0] and "4 CPU cores" in slow[2]
     assert "the CPU is slower" in bench.shortfalls(season, {**FAST, "cpu_mb_per_second": 1})[0]
+    # The floor is in the gigabytes a machine is sold with. One sold with that many reports a
+    # little less, and passes; one a size smaller does not.
+    sold = need["memory_gb"]
+    assert bench.shortfalls(season, {**FAST, "memory_gb": sold - 0.5}) == []
+    assert "of memory" in bench.shortfalls(season, {**FAST, "memory_gb": sold - 2.1})[0]
+    # And a machine at the floor can give a curator what it is promised, with room for itself.
+    assert season.raw["machine"]["memory_gb"] + 3 <= sold - bench.MEMORY_ALLOWANCE_GB
 
 
 def test_a_measurement_is_kept_until_the_machine_changes(season, monkeypatch):

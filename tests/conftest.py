@@ -50,6 +50,8 @@ def nothing_real(tmp_path, monkeypatch):
     monkeypatch.setenv("STET_CONFIG", str(tmp_path / "stet-config"))
     monkeypatch.setenv("STET_CACHE", str(tmp_path / "stet-cache"))
     monkeypatch.setenv("STET_API", "http://127.0.0.1:9")
+    # How much memory this machine has free is not what any test is about.
+    monkeypatch.setattr("stet.runner.memory_free_bytes", lambda: -1)
     monkeypatch.delenv("STET_DEV", raising=False)
     # Nor the held-out exam, wherever this machine keeps it, nor what an earlier test found.
     monkeypatch.delenv("STET_HELDOUT_EXAM", raising=False)

@@ -48,6 +48,12 @@ class Key:
         message = "\n".join(["stet-v1", method.upper(), path, now, digest]).encode()
         return {"X-Stet-Key": self.public_hex, "X-Stet-Time": now, "X-Stet-Sig": self.sign(message), "X-Stet-Body": digest}
 
+    def unseal(self, blob: bytes) -> bytes:
+        """Open a file that was sealed to this key (sealed.py)."""
+        from .sealed import unseal
+
+        return unseal(blob, self._private)
+
     def save(self) -> None:
         path = key_path()
         path.parent.mkdir(parents=True, exist_ok=True)

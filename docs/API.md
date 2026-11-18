@@ -151,5 +151,9 @@ Signed by an organisers' key; anyone else gets `403`.
 
 | | |
 |---|---|
+| `GET /api/v1/admin/accounts/{handle}` | An account's public key, for adding it to the organisers' keys |
+| `GET /api/v1/admin/sealed` | Which organisers' keys have a copy of the held-out exam sealed to them |
+| `PUT /api/v1/admin/sealed/{key}` | Keep a copy sealed to that organisers' key. Only sealed files are taken; the server cannot open them |
+| `GET /api/v1/admin/sealed/mine` | The copy sealed to the caller's key |
 | `POST /api/v1/admin/draw` | Bring the next draw forward to the next mark on the draw grid (`stet draw`) |
 | `PUT /api/v1/admin/files/{name}` | Publish under `/files/` (`stet publish`). The server accepts the exam pack and, once it has been told the season is closed, the held-out pack, each only with the hash the season gives for it. After the close it also accepts `heldout-<season>.seed`, `.results.jsonl` and `.table.json`, once each: a second upload of any of the three is refused with `409` |
