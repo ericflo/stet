@@ -131,7 +131,10 @@ thousands of them.
    by the seed.
 3. **Weighed as decided.** Formats and kinds of task each get a fair share of the round, and
    inside each, every corner counts the same. Languages get the share they have in the
-   round's own corpus.
+   round's own corpus. For fresh text, languages come first and formats are balanced inside
+   each language: what a source offers depends on its language (StackExchange is mostly
+   English), so balancing formats first would let a few English posts outweigh hundreds of
+   passages in other languages. The first shadow run showed exactly that.
 4. **Groups are a view, not a unit.** "Math", "code", "agents" and so on are only ways of
    reading a result: a curator's page shows where it is strong and where it is weak.
 5. **Diversity is measured, not claimed.** Each round reports how many corners, formats,

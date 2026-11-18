@@ -51,7 +51,8 @@ def _write(path: Path, obj) -> None:
 
 
 def shadow_round(rnd: Round, scale: Scale, scripts: dict[str, Path], device, out_dir: Path,
-                 per_corner: int = PER_CORNER, fresh: list[Item] | None = None, log=print) -> dict:
+                 per_corner: int = PER_CORNER, fresh: list[Item] | None = None, log=print,
+                 shares: dict[str, float] | None = None) -> dict:
     """Shadow-grade a round's scripts. Trained students and their results are kept in out_dir by
     script hash, so a run that stops can be resumed and a round sat again without training."""
     import torch
@@ -65,6 +66,8 @@ def shadow_round(rnd: Round, scale: Scale, scripts: dict[str, Path], device, out
     with open(out_dir / "items.jsonl", "w") as f:
         for it in items:
             f.write(json.dumps(it.to_dict(), ensure_ascii=False) + "\n")
+    if shares:
+        _write(out_dir / "languages.json", shares)  # the corpus's languages, which weigh the fresh items
     log(f"{rnd.id}: {len(corpus):,} documents; next exam {len(items)} items in {len({i.corner for i in items})} corners "
         f"({sum(1 for i in items if i.source.startswith('gen:'))} generated, {sum(1 for i in items if not i.source.startswith('gen:'))} fresh; {tag})")
 
@@ -117,13 +120,13 @@ def shadow_round(rnd: Round, scale: Scale, scripts: dict[str, Path], device, out
         if r["valid"]:
             row["season_gain"] = round(base["exam_loss"] - r["exam_loss"], 5)
             g = gains(r["item_scores"], base["item_scores"])
-            agg = round_score(items, g)
+            agg = round_score(items, g, shares=shares)
             row.update(next_score=round(agg["score"], 5), strata=agg["strata"], families=agg["families"])
-            gen_items = [(it, x) for it, x in zip(items, g, strict=True) if it.source.startswith("gen:")]
-            fresh_items = [(it, x) for it, x in zip(items, g, strict=True) if not it.source.startswith("gen:")]
-            for label, part in (("generated", gen_items), ("fresh", fresh_items)):
-                if part:
-                    row[f"{label}_score"] = round(round_score([p[0] for p in part], [p[1] for p in part])["score"], 5)
+            for label in ("generated", "fresh"):
+                if agg[label]:
+                    row[f"{label}_score"] = round(agg[label]["score"], 5)
+            if agg["fresh"]:
+                row["languages"] = {k: v["score"] for k, v in agg["fresh"]["languages"].items()}
         else:
             row["reason"] = r.get("invalid_reason")
         rows.append(row)

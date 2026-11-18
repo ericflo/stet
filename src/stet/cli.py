@@ -565,7 +565,7 @@ def _shadow_one(args):
         if dropped:
             log(f"  {len(dropped)} fresh items are in the round's corpus already, and are dropped")
         fresh = [it for i, it in enumerate(fresh) if i not in dropped]
-    summary = shadow_round(rnd, scale, scripts, device, work, args.per_corner, fresh=fresh, log=log)
+    summary = shadow_round(rnd, scale, scripts, device, work, args.per_corner, fresh=fresh, log=log, shares=mix)
     if args.upload:
         from .client import need_key
 

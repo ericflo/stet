@@ -136,10 +136,10 @@ def test_items_refuse_to_be_malformed():
         Item(kind="essay", corner="x/y", fmt="prose", lang="en", source="gen:x", text="t")
 
 
-def _item(fmt, kind, corner):
+def _item(fmt, kind, corner, lang="en", source="gen:t"):
     if kind == "pair":
-        return Item(kind="pair", corner=corner, fmt=fmt, lang="en", source="t", good="Good.", bad="Bad.")
-    return Item(kind="answer", corner=corner, fmt=fmt, lang="en", source="t", ctx="Q:", cont=" A")
+        return Item(kind="pair", corner=corner, fmt=fmt, lang=lang, source=source, good="Good.", bad="Bad.")
+    return Item(kind="answer", corner=corner, fmt=fmt, lang=lang, source=source, ctx="Q:", cont=" A")
 
 
 def test_the_score_is_balanced_across_strata_and_rewards_breadth():
@@ -153,6 +153,25 @@ def test_the_score_is_balanced_across_strata_and_rewards_breadth():
     spiky = round_score(items, [5.0, 5.0] + [-0.02] * 38)["score"]
     broad = round_score(items, [0.05] * 40)["score"]
     assert broad > spiky
+
+
+def test_fresh_text_is_shared_among_languages_before_formats():
+    # A few English posts in formats nothing else has must not outweigh many passages in other
+    # languages: languages get their share of the corpus, formats are balanced inside each.
+    items = ([_item("prose", "passage", f"w/ru/{i}", lang="ru", source="wikipedia") for i in range(30)]
+             + [_item("prose", "passage", f"w/en/{i}", lang="en", source="wikipedia") for i in range(10)]
+             + [_item(fmt, "answer", f"se/{fmt}/{i}", lang="en", source="stackexchange") for fmt in ("code", "dialogue") for i in range(3)])
+    g = [-0.5] * 30 + [0.5] * 10 + [0.5] * 6
+    r = round_score(items, g, shares={"en": 60.0, "ru": 40.0})
+    assert r["fresh"]["languages"]["ru"]["weight"] == pytest.approx(0.4)
+    assert r["fresh"]["score"] == pytest.approx(0.6 * 0.5 + 0.4 * -0.5)
+    assert r["generated"] is None and r["score"] == pytest.approx(r["fresh"]["score"])
+    # the same items, weighed by the corpus's languages: mostly Russian, so this curator loses
+    assert round_score(items, g, shares={"en": 20.0, "ru": 80.0})["score"] < 0
+    # generated and fresh count by how many items each has
+    both = items + [_item("math", "answer", f"a/{i}") for i in range(46)]
+    r2 = round_score(both, g + [0.0] * 46, shares={"en": 60.0, "ru": 40.0})
+    assert r2["score"] == pytest.approx(r["fresh"]["score"] / 2) and r2["generated"]["score"] == 0.0
 
 
 def test_trimmed_mean_and_gains():
