@@ -240,3 +240,9 @@ def test_a_shadow_round_trains_once_per_script_and_scores_the_unedited_corpus_at
     assert len(trained) == 2  # resumed from what was kept
     kept = [json.loads(line) for line in (tmp_path / "out" / "items.jsonl").read_text().splitlines()]
     assert len(kept) == s["items"] == len(gen.all_corners())
+    # a bigger exam is sat by the students already trained
+    fresh = [Item(kind="passage", corner="fresh/wikipedia/en/Q5/article", fmt="prose", lang="en", source="wikipedia:en:1",
+                  text="A person who was born in a town and later moved to a city, where they worked for many years. " * 4)]
+    s2 = shadow.shadow_round(rnd, scale, scripts, torch.device("cpu"), tmp_path / "out", per_corner=1, fresh=fresh, log=lambda m: None)
+    assert len(trained) == 2 and s2["items"] == s["items"] + 1
+    assert {r["name"]: r for r in s2["entries"]}["other"]["fresh_score"] != 0.0

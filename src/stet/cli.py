@@ -490,7 +490,25 @@ def cmd_shadow(args):
     device = pick_device(args.device)
     work = Path(args.out) if args.out else cache_dir() / "shadow" / rnd.id / scale.name
     out.line("", out.bold(f"stet shadow · {rnd.kind} round {rnd.id} · {scale.name} · {len(scripts)} scripts · {device.type}"))
-    summary = shadow_round(rnd, scale, scripts, device, work, args.per_corner, log=lambda m: out.line("", out.dim(m)))
+    log = lambda m: out.line("", out.dim(m))  # noqa: E731
+    fresh = None
+    snapshot = work / "fresh.jsonl"
+    if args.fresh and not snapshot.exists():
+        if rnd.kind != "official":
+            die("only an official round has a draw for its fresh text to come after")
+        from .newexam.fresh.harvest import harvest_window
+
+        draw_at = int(request("GET", f"/api/v1/rounds/{rnd.id}")["round"]["draw_at"])
+        if time.time() < draw_at + args.window:
+            die(f"the harvest window closes at {time.strftime('%H:%M UTC', time.gmtime(draw_at + args.window))}; try again then")
+        harvest_window(rnd.seed, draw_at, draw_at + args.window, snapshot, log=log)
+    if args.fresh or snapshot.exists():
+        from .newexam.fresh import read_snapshot
+        from .newexam.fresh.select import select
+
+        _, docs = read_snapshot(snapshot)
+        fresh = select(docs, rnd.seed, args.fresh_items)
+    summary = shadow_round(rnd, scale, scripts, device, work, args.per_corner, fresh=fresh, log=log)
     rows = sorted(summary["entries"], key=lambda r: -(r.get("next_score") or -9))
     by_season = sorted((r for r in rows if r["valid"]), key=lambda r: -r["season_gain"])
     rank = {r["name"]: i + 1 for i, r in enumerate(by_season)}
@@ -498,10 +516,14 @@ def cmd_shadow(args):
         json.dump(summary, sys.stdout, indent=1)
         sys.stdout.write("\n")
         return
+
+    def num(r, k):
+        return f"{r[k]:+.4f}" if r["valid"] and k in r else ""
+
     out.line("", "")
-    out.line("", table([[r["name"], f"{r['next_score']:+.4f}" if r["valid"] else "invalid", f"{r['season_gain']:+.4f}" if r["valid"] else "",
+    out.line("", table([[r["name"], num(r, "next_score") or "invalid", num(r, "generated_score"), num(r, "fresh_score"), num(r, "season_gain"),
                          str(rank.get(r["name"], ""))] for r in rows],
-                       ["entry", "next exam", "season exam", "season rank"], right=(1, 2, 3)))
+                       ["entry", "next exam", "generated", "fresh", "season exam", "season rank"], right=(1, 2, 3, 4, 5)))
     out.line("saved", str(work / "summary.json"))
 
 
@@ -813,6 +835,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--script", action="append", help="also grade this script file (may be given more than once)")
     p.add_argument("--per-corner", type=int, default=2, help="items from every generated corner (default: 2)")
     p.add_argument("--out", help="where results go (default: the cache)")
+    p.add_argument("--fresh", action="store_true", help="add text published in the window after the round's draw (harvested once, then kept)")
+    p.add_argument("--fresh-items", type=int, default=900, help="fresh items to keep (default: 900)")
+    p.add_argument("--window", type=int, default=7200, help="seconds after the draw that fresh text may come from (default: 7200)")
     p.set_defaults(fn=cmd_shadow)
 
     p = sub.add_parser("fetch", help="download and build a round's corpus ahead of time")
