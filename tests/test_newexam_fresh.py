@@ -70,3 +70,20 @@ def test_snapshots_round_trip_with_a_stable_hash(tmp_path):
     assert write_snapshot(list(reversed(docs)), tmp_path / "b.jsonl", {"window": [1, 2]}) == sha
     meta, back = read_snapshot(tmp_path / "a.jsonl")
     assert meta == {"window": [1, 2]} and [d.id for d in back] == ["en:1", "en:2"]
+
+
+def test_items_the_corpus_already_holds_are_found(tmp_path):
+    from conftest import make_corpus
+
+    from stet.newexam.decontam import seen
+    from stet.newexam.items import Item
+    from stet.spec import load_season
+
+    quoted = "The river authority approved a new flood barrier for the lower town after three wet winters in a row."
+    corpus = make_corpus(tmp_path / "c", ["Menu | Home\nNews today. " + quoted + " More text follows here.", "Nothing to see."])
+    copied = Item(kind="passage", corner="fresh/x/en/-/added", fmt="prose", lang="en", source="t", text="It was reported that. " + quoted)
+    new = Item(kind="passage", corner="fresh/x/en/-/added", fmt="prose", lang="en", source="t",
+               text="An entirely different passage that nobody has published before this very moment, about otters.")
+    answer = Item(kind="answer", corner="fresh/y/en/-/answer", fmt="dialogue", lang="en", source="t",
+                  ctx=quoted + " Why?", cont=" Nothing in the corpus says this, not even close to it, as far as anyone knows.")
+    assert seen([copied, new, answer], corpus, load_season("s0")) == {0}  # an answer is checked on its answer, not its question

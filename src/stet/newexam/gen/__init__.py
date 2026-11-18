@@ -9,10 +9,10 @@ from __future__ import annotations
 
 from ..items import Item
 from ..rng import Rng
-from . import algebra, algo, arith, grammar, logic, programs, shell, structured, units, word
+from . import algebra, algo, arith, grammar, logic, programs, shell, structured, transform, units, word
 
-FAMILIES = [arith, word, units, algebra, programs, algo, logic, structured, shell, grammar]
-VERSION = 1  # bump when any generator changes what a seed produces
+FAMILIES = [arith, word, units, algebra, programs, algo, logic, structured, shell, grammar, transform]
+VERSION = 2  # bump when any generator changes what a seed produces
 
 
 def all_corners() -> list[str]:

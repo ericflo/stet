@@ -503,11 +503,28 @@ def cmd_shadow(args):
             die(f"the harvest window closes at {time.strftime('%H:%M UTC', time.gmtime(draw_at + args.window))}; try again then")
         harvest_window(rnd.seed, draw_at, draw_at + args.window, snapshot, log=log)
     if args.fresh or snapshot.exists():
+        from . import data
+        from .newexam.decontam import seen
         from .newexam.fresh import read_snapshot
+        from .newexam.fresh.langs import shares
         from .newexam.fresh.select import select
+        from .newexam.items import digest
 
         _, docs = read_snapshot(snapshot)
-        fresh = select(docs, rnd.seed, args.fresh_items)
+        corpus, _ = data.materialize(rnd, scale)
+        mix = shares(corpus, rnd.seed)  # every language in proportion to the round's own corpus
+        log(f"  the corpus's languages: {', '.join(f'{k} {v:.1f}%' for k, v in list(mix.items())[:8])}, and {max(0, len(mix) - 8)} more")
+        fresh = select(docs, rnd.seed, args.fresh_items, shares=mix)
+        # Drop fresh items the round's corpus already holds (copied text), once per selection.
+        mark = work / f"seen-{digest(fresh)[:12]}.json"
+        if mark.exists():
+            dropped = set(json.loads(mark.read_text()))
+        else:
+            dropped = seen(fresh, corpus, season, log=log)
+            mark.write_text(json.dumps(sorted(dropped)))
+        if dropped:
+            log(f"  {len(dropped)} fresh items are in the round's corpus already, and are dropped")
+        fresh = [it for i, it in enumerate(fresh) if i not in dropped]
     summary = shadow_round(rnd, scale, scripts, device, work, args.per_corner, fresh=fresh, log=log)
     rows = sorted(summary["entries"], key=lambda r: -(r.get("next_score") or -9))
     by_season = sorted((r for r in rows if r["valid"]), key=lambda r: -r["season_gain"])

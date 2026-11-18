@@ -35,7 +35,7 @@ def test_rng_is_pinned_and_in_range():
 def test_a_seed_always_makes_the_same_exam():
     # Pinned: a change to any generator that changes what a seed produces must bump gen.VERSION
     # and this hash, on purpose.
-    assert digest(gen.generate(SEED)) == "c937931dfede239c24d3964cb9c8700b37185f7d0618348d3dffbf63ed432677"
+    assert digest(gen.generate(SEED)) == "7606d107eb0b9eb3abd9e0ba51db5fa38502e9ce6e39304ac5c5941d001922e9"
     assert digest(gen.generate(SEED)) == digest(gen.generate(SEED))
     assert digest(gen.generate(b"other")) != digest(gen.generate(SEED))
 
@@ -246,3 +246,29 @@ def test_a_shadow_round_trains_once_per_script_and_scores_the_unedited_corpus_at
     s2 = shadow.shadow_round(rnd, scale, scripts, torch.device("cpu"), tmp_path / "out", per_corner=1, fresh=fresh, log=lambda m: None)
     assert len(trained) == 2 and s2["items"] == s["items"] + 1
     assert {r["name"]: r for r in s2["entries"]}["other"]["fresh_score"] != 0.0
+
+
+def test_transforms_are_right():
+    import sqlite3
+
+    from stet.newexam.gen.transform import roman
+
+    for n in (1, 4, 9, 14, 40, 90, 400, 1994, 2026, 3999):
+        back, rest = 0, roman(n)
+        for v, s in ((1000, "M"), (900, "CM"), (500, "D"), (400, "CD"), (100, "C"), (90, "XC"), (50, "L"), (40, "XL"),
+                     (10, "X"), (9, "IX"), (5, "V"), (4, "IV"), (1, "I")):
+            while rest.startswith(s):
+                back, rest = back + v, rest[len(s):]
+        assert back == n and not rest
+    for it in _all("transform/sql"):
+        db = sqlite3.connect(":memory:")
+        db.execute("CREATE TABLE people (name TEXT, city TEXT, age INTEGER)")
+        for line in it.ctx.split("|---|---|---|\n")[1].split("\n\n")[0].splitlines():
+            name, city, age = [c.strip() for c in line.strip("| ").split("|")]
+            db.execute("INSERT INTO people VALUES (?, ?, ?)", (name, city, int(age)))
+        query = it.ctx.split("\n\n")[-1].split("\nResult:")[0]
+        got = [str(r[0]) for r in db.execute(query)]
+        assert ", ".join(got) == it.cont.strip(), (query, it.cont)
+    for it in _all("transform/csv-json"):
+        rows = json.loads(it.cont)
+        assert [r["name"] for r in rows] == [ln.split(",")[0] for ln in it.ctx.split("CSV:\n")[1].split("\n\n")[0].splitlines()[1:]]
