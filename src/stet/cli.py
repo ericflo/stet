@@ -466,6 +466,45 @@ def cmd_baseline(args):
         sys.stdout.write("\n")
 
 
+def cmd_shadow(args):
+    """Grade a round's scripts on the next exam, beside the season's: the shadow exam of season 0."""
+    need_torch()
+    from .client import request, table
+    from .data import cache_dir
+    from .newexam.shadow import shadow_round
+    from .train import pick_device
+
+    out = Out(quiet=args.quiet)
+    season, scale, rnd = resolve_round(args)
+    scripts: dict[str, Path] = {}
+    if rnd.kind == "official":
+        for e in request("GET", f"/api/v1/rounds/{rnd.id}").get("entries") or []:
+            sha = ((e.get("detail") or {}).get("script") or {}).get("script_sha256")
+            label = f"{e.get('owner')}/{e.get('name')}@v{e.get('version')}"
+            if sha and (not args.entries or e.get("name") in args.entries or label in args.entries):
+                scripts[label] = script_file(sha, season, rnd)
+    for ref in args.script or []:
+        scripts[Path(ref).name] = script_file(ref, season, rnd)
+    if not scripts:
+        die("nothing to grade: name entries of an official round, or give --script files")
+    device = pick_device(args.device)
+    work = Path(args.out) if args.out else cache_dir() / "shadow" / rnd.id / scale.name
+    out.line("", out.bold(f"stet shadow · {rnd.kind} round {rnd.id} · {scale.name} · {len(scripts)} scripts · {device.type}"))
+    summary = shadow_round(rnd, scale, scripts, device, work, args.per_corner, log=lambda m: out.line("", out.dim(m)))
+    rows = sorted(summary["entries"], key=lambda r: -(r.get("next_score") or -9))
+    by_season = sorted((r for r in rows if r["valid"]), key=lambda r: -r["season_gain"])
+    rank = {r["name"]: i + 1 for i, r in enumerate(by_season)}
+    if args.json:
+        json.dump(summary, sys.stdout, indent=1)
+        sys.stdout.write("\n")
+        return
+    out.line("", "")
+    out.line("", table([[r["name"], f"{r['next_score']:+.4f}" if r["valid"] else "invalid", f"{r['season_gain']:+.4f}" if r["valid"] else "",
+                         str(rank.get(r["name"], ""))] for r in rows],
+                       ["entry", "next exam", "season exam", "season rank"], right=(1, 2, 3)))
+    out.line("saved", str(work / "summary.json"))
+
+
 def cmd_fetch(args):
     from . import data
 
@@ -767,6 +806,14 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("baseline", help="score the unedited corpus for a round")
     add_round_args(p)
     p.set_defaults(fn=cmd_baseline)
+
+    p = sub.add_parser("shadow", help="grade a round's scripts on the next exam, beside the season's (season 0's shadow exam)")
+    p.add_argument("entries", nargs="*", help="entries of the official round given by --round, by name (default: every settled entry)")
+    add_round_args(p)
+    p.add_argument("--script", action="append", help="also grade this script file (may be given more than once)")
+    p.add_argument("--per-corner", type=int, default=2, help="items from every generated corner (default: 2)")
+    p.add_argument("--out", help="where results go (default: the cache)")
+    p.set_defaults(fn=cmd_shadow)
 
     p = sub.add_parser("fetch", help="download and build a round's corpus ahead of time")
     add_round_args(p)

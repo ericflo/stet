@@ -1,0 +1,82 @@
+"""Algebra and number patterns: equations to solve, functions to evaluate, sequences to continue."""
+
+from __future__ import annotations
+
+from ..items import Item
+from ..rng import Rng
+
+NAME = "algebra"
+KINDS = ["one-step", "two-step", "both-sides", "evaluate", "system", "seq-arith", "seq-geom", "seq-square", "seq-fib", "seq-alt"]
+STYLES = ["solve", "fill"]
+
+
+def corners() -> list[str]:
+    return [f"{NAME}/{k}/{s}" for k in KINDS for s in STYLES]
+
+
+def _signed(n: int) -> str:
+    return f"+ {n}" if n >= 0 else f"- {-n}"
+
+
+def _nz(rng: Rng, lo: int, hi: int) -> int:
+    while True:
+        v = rng.between(lo, hi)
+        if v:
+            return v
+
+
+def make(rng: Rng, corner: str) -> Item:
+    _, kind, style = corner.split("/")
+    if kind.startswith("seq-"):
+        if kind == "seq-arith":
+            a, d = rng.between(-20, 50), _nz(rng, -12, 15)
+            terms = [a + d * i for i in range(6)]
+        elif kind == "seq-geom":
+            a, r = rng.between(1, 6), rng.choice([2, 3, 4, 5, -2])
+            terms = [a * r**i for i in range(6)]
+        elif kind == "seq-square":
+            s = rng.between(1, 20)
+            terms = [(s + i) ** 2 for i in range(6)]
+        elif kind == "seq-fib":
+            a, b = rng.between(1, 9), rng.between(1, 9)
+            terms = [a, b]
+            while len(terms) < 6:
+                terms.append(terms[-1] + terms[-2])
+        else:
+            a, p, q = rng.between(1, 30), rng.between(2, 9), rng.between(1, 5)
+            terms = [a]
+            for i in range(5):
+                terms.append(terms[-1] + (p if i % 2 == 0 else -q))
+        shown, ans = ", ".join(map(str, terms[:5])), terms[5]
+        ctx = f"What number comes next in the sequence {shown}?\nAnswer:" if style == "solve" else f"{shown},"
+        return Item(kind="answer", corner=corner, fmt="math", lang="en", source=f"gen:{NAME}", ctx=ctx, cont=f" {ans}")
+    if kind == "one-step":
+        x, b = rng.between(-30, 60), rng.between(-40, 40)
+        eq, ans = f"x {_signed(b)} = {x + b}", x
+    elif kind == "two-step":
+        x, a, b = rng.between(-15, 25), _nz(rng, -9, 12), rng.between(-30, 30)
+        eq, ans = f"{a}x {_signed(b)} = {a * x + b}", x
+    elif kind == "both-sides":
+        x, a, c = rng.between(-12, 15), rng.between(2, 12), rng.between(-6, 1)
+        b = rng.between(-20, 20)
+        d = a * x + b - c * x
+        eq, ans = f"{a}x {_signed(b)} = {c}x {_signed(d)}", x
+    elif kind == "evaluate":
+        a, b, c, x = rng.between(1, 6), rng.between(-9, 9), rng.between(-9, 9), rng.between(-6, 8)
+        val = a * x * x + b * x + c
+        ctx = (f"Let f(x) = {a}x^2 {_signed(b)}x {_signed(c)}. What is f({x})?\nAnswer:" if style == "solve"
+               else f"If f(x) = {a}x^2 {_signed(b)}x {_signed(c)}, then f({x}) =")
+        return Item(kind="answer", corner=corner, fmt="math", lang="en", source=f"gen:{NAME}", ctx=ctx, cont=f" {val}")
+    elif kind == "system":
+        x, y = rng.between(-9, 12), rng.between(-9, 12)
+        a, b, c, d = rng.between(1, 5), rng.between(1, 5), rng.between(1, 5), _nz(rng, -5, 5)
+        if a * d == b * c:
+            d = d + 1 if d != -1 else 2
+        ctx = (f"Solve the system: {a}x + {b}y = {a * x + b * y} and {c}x {_signed(d)}y = {c * x + d * y}.\nAnswer:" if style == "solve"
+               else f"If {a}x + {b}y = {a * x + b * y} and {c}x {_signed(d)}y = {c * x + d * y}, then")
+        return Item(kind="answer", corner=corner, fmt="math", lang="en", source=f"gen:{NAME}", ctx=ctx, cont=f" x = {x}, y = {y}")
+    else:
+        raise ValueError(corner)
+    ctx = f"Solve for x: {eq}\nAnswer:" if style == "solve" else f"If {eq}, then x ="
+    cont = f" x = {ans}" if style == "solve" else f" {ans}"
+    return Item(kind="answer", corner=corner, fmt="math", lang="en", source=f"gen:{NAME}", ctx=ctx, cont=cont)
