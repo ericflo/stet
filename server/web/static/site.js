@@ -67,6 +67,27 @@
     if (again) again.addEventListener("click", play);
   }
 
+  // --- the round diagram: its pencil strokes are drawn when it comes into view ---
+  var diagrams = doc.querySelectorAll("[data-play]");
+  if (diagrams.length && "IntersectionObserver" in window) {
+    var seen = new IntersectionObserver(function (es) {
+      es.forEach(function (e) {
+        if (e.isIntersecting) { e.target.classList.add("play"); seen.unobserve(e.target); }
+      });
+    }, { threshold: 0.5 });
+    diagrams.forEach(function (d) { seen.observe(d); });
+  }
+
+  // --- a row that opens: open the one a link points at ---
+  function openTarget() {
+    if (!location.hash) return;
+    var el = doc.getElementById(location.hash.slice(1));
+    var d = el && (el.matches("details") ? el : el.querySelector("details"));
+    if (d) d.open = true;
+  }
+  openTarget();
+  window.addEventListener("hashchange", openTarget);
+
   // --- live parts: re-read the page and swap in the parts marked data-live ---
   var live = doc.querySelectorAll("[data-live][id]");
   if (live.length) {
@@ -77,7 +98,12 @@
         var next = new DOMParser().parseFromString(html, "text/html");
         live.forEach(function (el) {
           var fresh = next.getElementById(el.id);
-          if (fresh && fresh.innerHTML !== el.innerHTML) el.innerHTML = fresh.innerHTML;
+          if (!fresh || fresh.innerHTML === el.innerHTML) return;
+          // What the reader has opened stays open.
+          var open = {};
+          el.querySelectorAll("details[open]").forEach(function (d) { var k = d.id || (d.parentElement && d.parentElement.id); if (k) open[k] = true; });
+          el.innerHTML = fresh.innerHTML;
+          el.querySelectorAll("details").forEach(function (d) { var k = d.id || (d.parentElement && d.parentElement.id); if (k && open[k]) d.open = true; });
         });
         tick();
       }).catch(function () {});

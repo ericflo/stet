@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"html/template"
 	"math"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -289,128 +288,41 @@ func curveChart(curve [][]float64) template.HTML {
 	return b.done()
 }
 
-// --- marks on a shared axis -----------------------------------------------------------------
+// --- bars -----------------------------------------------------------------------------------
 
-// barScale puts every number of one table on one axis, so rows can be compared by the length
-// of their bars without reading a digit. Zero, the unedited data, is always on it: a bar
-// that reaches right of it beat doing nothing.
-type barScale struct {
-	Lo, Hi, Step float64
-	// Worth marks where on the axis a gain is worth 2, 4, 8 times as much unedited data,
-	// read off the season's measured curve. Only the standings carry them.
-	Worth []barTick
-	// Zero is what the axis calls its zero: the unedited pages, unless it is something else.
-	Zero string
+// barWidth is how long one bar in a list is: its value as a share of the list's longest,
+// so rows compare by length without reading a digit. Every bar starts at the left edge,
+// which is the unedited pages; one at or below zero has nothing to draw.
+func barWidth(v, top any) template.CSS {
+	x, t := toFloat(v), toFloat(top)
+	if !(t > 0) || !(x > 0) {
+		return "--w:0%"
+	}
+	return template.CSS(fmt.Sprintf("--w:%.1f%%", math.Min(100, 100*x/t)))
 }
 
-type barTick struct {
-	Style template.CSS
-	Label string
-	Zero  bool
-	Edge  string // "end" or "start" when the label would run off that end of the axis
+// halfWidth is a bar that grows either way from the middle: ahead to the right, behind to
+// the left, half the width at most.
+func halfWidth(v, top float64) template.CSS {
+	if !(top > 0) {
+		return "--w:0%"
+	}
+	return template.CSS(fmt.Sprintf("--w:%.1f%%", math.Min(50, 50*math.Abs(v)/top)))
 }
 
-// tick is one label on the axis, turned inward if it sits at either end.
-func (s barScale) tick(v float64, label string, zero bool) barTick {
-	t := barTick{Style: s.Pos(v), Label: label, Zero: zero}
-	switch x := s.X(v); {
-	case zero:
-	case x > 95:
-		t.Edge = "end"
-	case x < 4:
-		t.Edge = "start"
+// ordinal is a place in words: 1st, 2nd, 3rd, 4th.
+func ordinal(n int) string {
+	suffix := "th"
+	switch {
+	case n%100 >= 11 && n%100 <= 13:
+	case n%10 == 1:
+		suffix = "st"
+	case n%10 == 2:
+		suffix = "nd"
+	case n%10 == 3:
+		suffix = "rd"
 	}
-	return t
-}
-
-func newBarScale(vals []float64) barScale {
-	lo, hi := 0.0, 0.0
-	for _, v := range vals {
-		if !math.IsNaN(v) && !math.IsInf(v, 0) {
-			lo, hi = math.Min(lo, v), math.Max(hi, v)
-		}
-	}
-	if hi-lo < 1e-9 {
-		hi = lo + 1
-	}
-	pad := 0.04 * (hi - lo)
-	if lo < 0 {
-		lo -= pad
-	}
-	hi += pad
-	return barScale{Lo: lo, Hi: hi, Step: niceStep(hi-lo, 4)}
-}
-
-// X is where a value falls along the axis, in percent.
-func (s barScale) X(v float64) float64 {
-	return math.Max(0, math.Min(100, (v-s.Lo)/(s.Hi-s.Lo)*100))
-}
-
-// Pos places one mark on the axis.
-func (s barScale) Pos(v float64) template.CSS {
-	return template.CSS(fmt.Sprintf("left:%.2f%%", s.X(v)))
-}
-
-// Bar places one row's bar: zero, the value, and the ends of its ± whisker if it has one.
-func (s barScale) Bar(v float64, se *float64) template.CSS {
-	css := fmt.Sprintf("--z:%.2f%%;--v:%.2f%%", s.X(0), s.X(v))
-	if se != nil {
-		css += fmt.Sprintf(";--a:%.2f%%;--b:%.2f%%", s.X(v-*se), s.X(v+*se))
-	}
-	return template.CSS(css)
-}
-
-// Ticks are the round numbers along the axis.
-func (s barScale) Ticks() []barTick {
-	var out []barTick
-	for k := math.Ceil(s.Lo/s.Step - 1e-9); k*s.Step <= s.Hi+1e-9; k++ {
-		v := k * s.Step
-		if math.Abs(v) < 1e-9 {
-			v = 0
-		}
-		label := strconv.FormatFloat(v, 'f', -1, 64)
-		if v > 0 {
-			label = "+" + label
-		}
-		if v < 0 {
-			label = "−" + label[1:]
-		}
-		if v == 0 {
-			if label = s.Zero; label == "" {
-				label = "unedited"
-			}
-		}
-		out = append(out, s.tick(v, label, v == 0))
-	}
-	return out
-}
-
-// worthTicks marks, on a scale of gains, where a gain is worth each measured multiple of
-// the unedited data. The curve is the season's; nothing is drawn past its last point.
-func (s *Season) worthTicks(curveKey string, sc barScale) []barTick {
-	pts := append([][2]float64(nil), s.Curves[curveKey]...)
-	sort.Slice(pts, func(i, j int) bool { return pts[i][0] < pts[j][0] })
-	base := math.NaN()
-	for _, p := range pts {
-		if p[0] == 1 {
-			base = p[1]
-		}
-	}
-	if math.IsNaN(base) {
-		return nil
-	}
-	var out []barTick
-	for _, p := range pts {
-		g := base - p[1]
-		if p[0] < 1 || g < sc.Lo || g > sc.Hi {
-			continue
-		}
-		out = append(out, sc.tick(g, trimZero(strconv.FormatFloat(p[0], 'f', 1, 64))+"×", p[0] == 1))
-	}
-	if len(out) < 2 {
-		return nil
-	}
-	return out
+	return strconv.Itoa(n) + suffix
 }
 
 // pips are a round's entries as marks, in order: 2 for settled, 1 for run at least once,
@@ -426,15 +338,4 @@ func pips(settled, edited, total int) []int {
 		}
 	}
 	return out
-}
-
-// agree places one grade beside the gain it is checked against: the middle of the strip is
-// the script's gain, the shaded band is the tolerance either side, and the dot is this
-// grader's measurement. Inside the band, it agreed.
-func agree(their *float64, script, tol float64) template.CSS {
-	if their == nil || tol <= 0 {
-		return ""
-	}
-	x := 50 + (*their-script)/(3*tol)*50
-	return template.CSS(fmt.Sprintf("--d:%.2f%%;--t:%.2f%%", math.Max(1, math.Min(99, x)), 50.0/3))
 }

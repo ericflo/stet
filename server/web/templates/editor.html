@@ -2,137 +2,111 @@
 <main class="page">
 <div class="page-head">
   <div class="wrap">
-    <span class="eyebrow"><a class="term" href="/glossary#curator" style="text-decoration:none">Curator</a></span>
-    <h1>{{$e.Name}} <span class="ver">v{{$e.Version}}</span>{{with $row}}{{if .Record}}<a class="tag red" href="/glossary#record">record holder</a>{{end}}{{if .Ladder}}<a class="tag green" href="/glossary#ladder">on the ladder</a>{{end}}{{if .Provisional}}<a class="tag amber" href="/glossary#qualifying">qualifying</a>{{end}}{{if .Organisers}}<a class="tag" href="/glossary#reference">reference</a>{{end}}{{end}}{{if eq $e.Status "withdrawn"}}<span class="tag">replaced</span>{{end}}</h1>
-    {{if $e.Technique}}<p class="sub"><i>{{$e.Technique}}</i></p>{{end}}
-    {{if $e.Description}}<p class="sub" style="font-size:18px">{{$e.Description}}</p>{{end}}
-    <div class="meta">
+    <a class="back" href="/leaderboard">← Leaderboard</a>
+    <h1>{{$e.Name}} <span class="ver">v{{$e.Version}}</span></h1>
+    <div class="facts">
       <span>by <a href="/u/{{$d.Owner}}">{{$d.Owner}}</a>{{if $d.Github}} (<a href="{{gh $d.Github}}" rel="nofollow noopener">github.com/{{$d.Github}}</a>){{end}}</span>
       <span>entered {{date $e.CreatedAt}}</span>
-      <span>{{bytes $e.Size}} · {{len $e.Files}} {{plural (len $e.Files) "file" "files"}}</span>
-      <span title="{{$e.ID}}">id {{short $e.ID}}</span>
+      {{with $row}}{{if .Record}}<span class="tag red">record holder</span>{{end}}{{if .Organisers}}<span><a class="term" href="/glossary#reference">a reference curator</a></span>{{end}}{{end}}
+      {{if eq $e.Status "withdrawn"}}<span class="tag">replaced by a newer version</span>{{end}}
       {{with $d.Parent}}<span>forked from <a href="/editors/{{short .ID}}">{{.Name}} v{{.Version}}</a> by {{.Owner}}</span>{{end}}
     </div>
+    {{if $e.Technique}}<p class="sub"><i>{{$e.Technique}}</i></p>{{end}}
+    {{if $e.Description}}<p class="sub" style="font-size:17px">{{$e.Description}}</p>{{end}}
   </div>
 </div>
 <div class="wrap">
-  {{if not $row}}<p class="banner blue">{{if $d.Results}}In a round now: its score is <a class="term" href="/glossary#sealed">sealed</a> until that round settles.{{else}}Waiting for its first round.{{end}}</p>{{end}}
+  {{if not $row}}<p class="note">{{if $d.Results}}In a round now. Its score is sealed until that round settles.{{else}}Waiting for its first round.{{end}}</p>{{end}}
 
-  {{with $row}}{{$b := $d.Stand}}{{$me := $d.StandRow}}
-  <div class="standing">
-    <dl class="nums">
-      <div><dt>Rank</dt><dd>{{if .Rank}}<b>{{.Rank}}</b><small>of {{$d.Ranked}}</small>{{else if .Provisional}}<b class="word">qualifying</b><small>{{template "dots" (dict "N" .Rounds "Of" $d.RatedRounds)}} rounds</small>{{else}}<b class="word muted">none</b><small>replaced by a newer version</small>{{end}}</dd></div>
-      <div><dt>Rating</dt><dd><b>{{gain (ptr .Rating)}}</b><small>{{if has .SE}}±{{f3 (ptr .SE)}} · {{end}}nats better than unedited</small></dd></div>
-      <div><dt>Worth</dt><dd><b>{{mult .Multiplier .Capped}}</b><small>as much unedited data</small></dd></div>
-      <div><dt>Rounds</dt><dd><b>{{.Rounds}}</b><small>{{if .Invalid}}<span class="neg">{{.Invalid}} failed</span>{{else}}none failed{{end}}</small></dd></div>
-    </dl>
-    <div class="st-where">
-      <h3>Where it stands <small>its rating among every curator's, on the leaderboard's axis</small></h3>
-      <div class="board-axis on" aria-hidden="true">{{template "axis" $b.S}}</div>
-      <span class="lane field{{if .Provisional}} q{{end}}{{if neg (ptr .Rating)}} neg{{end}}" style="{{$b.S.Bar (ptr .Rating) .SE}}" role="img" aria-label="rating {{gain (ptr .Rating)}}{{if .Rank}}, ranked {{.Rank}} of {{$d.Ranked}}{{end}}">{{range $b.S.Ticks}}{{if not .Zero}}<i class="g" style="{{.Style}}"></i>{{end}}{{end}}<i class="z"></i>{{range $d.Field}}<i class="o" style="{{.}}"></i>{{end}}<i class="f"></i>{{if .SE}}<i class="e"></i>{{end}}{{range $me.Rug}}<i class="t" style="{{.}}"></i>{{end}}</span>
-      <div class="legend"><span><span class="lane demo" style="--z:0%;--v:74%;--a:62%;--b:86%"><i class="z"></i><i class="f"></i><i class="e"></i><i class="t" style="left:58%"></i><i class="t" style="left:79%"></i></span>its rating, ± range, and each of its rounds</span><span><span class="lane demo field"><i class="o" style="left:30%"></i><i class="o" style="left:70%"></i></span>every other curator</span></div>
-    </div>
-    {{if $me.Form}}<div class="st-when">
-      <h3>Round by round <small>rounds {{$b.From}} to {{$b.To}}</small></h3>
-      {{template "form" $me.Form}}
-      <div class="legend"><span><span class="form demo"><i class="ok"><b style="height:70%"></b></i><i class="best"><b style="height:90%"></b></i><i class="fail"></i><i></i><i class="now"></i></span>a round · best of it · failed · not in it · being run now</span></div>
-    </div>{{end}}
-    {{if $d.Vs}}{{$race := $d.Race}}<div class="st-vs">
-      <h3>{{if $d.Holds}}It holds the record <small>the nearest to taking it, on the rounds each shared with it</small>{{else}}Against the record <small>{{with $race.Holder}}held by <a href="/editors/{{short .ID}}">{{.Name}}</a>: this curator's gain less {{.Name}}'s, on the rounds both ran{{else}}nobody holds it yet: its gain over unedited pages, round by round{{end}}</small>{{end}}</h3>
-      {{template "versus" (dict "Race" $race "Rows" $d.Vs "Looks" $.Season.Record.Looks)}}
-      <div class="legend"><span><span class="ml"></span>right of this line is far enough ahead to take the record, if it holds up when tested</span><a href="/leaderboard#record">the whole race</a></div>
-    </div>{{end}}
-  </div>
+  {{with $row}}
+  <dl class="headline">
+    <div><dt>Rank</dt><dd>{{if .Rank}}<b>{{.Rank}}</b><small>of {{$d.Ranked}} on the leaderboard</small>{{else if .Provisional}}<b class="word">not yet</b><small>{{.Rounds}} of the {{$d.RatedRounds}} rounds it needs to be ranked</small>{{else}}<b class="word">—</b><small>replaced by a newer version</small>{{end}}</dd></div>
+    <div><dt>Rating</dt><dd><b{{if neg (ptr .Rating)}} class="neg"{{end}}>{{gain (ptr .Rating)}}</b><small>its gain a round, on average{{if has .SE}} (±{{f3 (ptr .SE)}}){{end}}</small></dd></div>
+    {{if .Multiplier}}<div><dt>Worth</dt><dd><b>{{mult .Multiplier .Capped}}</b><small>its pages taught the model as much as {{mult .Multiplier .Capped}} as many raw pages</small></dd></div>{{end}}
+  </dl>
+  {{if $d.Holds}}<p class="vs-line"><b>It holds the record.</b>{{with $d.Rival}} Nearest to taking it: <b>{{.Name}}</b>, {{if gt .Mean 0.0}}ahead by <span class="num">{{gain .Mean}}</span>{{else}}behind by <span class="num">{{gain .Mean}}</span>{{end}} a round over {{.Shared}} shared {{plural .Shared "round" "rounds"}}.{{end}} <a class="go" href="/record">the race →</a></p>
+  {{else}}{{with $d.Mine}}{{if .Shared}}<p class="vs-line">Against the record{{with $d.Race.Holder}} holder, <b>{{.Name}}</b>{{end}}: {{if gt .Mean 0.0}}ahead by <span class="num">{{gain .Mean}}</span>{{else}}behind by <span class="num">{{gain .Mean}}</span>{{end}} a round over {{.Shared}} shared {{plural .Shared "round" "rounds"}}.{{if .Next}} {{if .ToGo}}Tested at {{.Next}}, {{.ToGo}} to go.{{else}}Tested when this round settles.{{end}}{{end}} <a class="go" href="/record">the race →</a></p>{{end}}{{end}}{{end}}
   {{end}}
 
-  <h2>Every round it played</h2>
-  <div class="fig">
-    {{if $d.Played}}{{$s := $d.PlayedScale}}
-    <div class="board-axis flush" aria-hidden="true">{{template "axis" $s}}</div>
-    <table class="board played">
-      <thead><tr>
-        <th class="c-name">Round</th>
-        <th class="c-num">Gain</th>
-        <th class="c-lane">{{template "axis" $s}}</th>
-        <th class="c-place">Came</th>
-        <th class="c-loss">Exam loss<small>against unedited</small></th>
-        <th class="c-sure">How sure</th>
-      </tr></thead>
-      <tbody>
-        {{range $d.Played}}<tr>
-          <td class="c-name"><a class="name" href="/rounds/{{.Round}}">Round {{.RoundIdx}}</a>
-            {{if not .Settled}} <span class="chip live">running</span>
-            {{else if not .Valid}} <span class="chip bad">{{if .Void}}not run{{else}}failed{{end}}</span>{{if .Reason}}<span class="reason">{{.Reason}}</span>{{end}}{{end}}{{if and .Settled .ScriptSHA}}<span class="sub">script <a class="num" href="/api/v1/scripts/{{.ScriptSHA}}" title="Download the edit script ({{bytes .ScriptSize}} unpacked)">{{tiny .ScriptSHA}}</a>{{with .Edit}} · written in {{f1 .Seconds}}s{{end}}</span>{{end}}</td>
-          {{if .Settled}}
-            <td class="c-num">{{if .Valid}}<b{{if lt .Gain 0.0}} class="neg"{{end}}>{{gain .Gain}}</b>{{else if .Void}}<span class="muted">—</span><span class="pm">does not count</span>{{else}}<b>0.000</b><span class="pm">a failed round scores 0</span>{{end}}</td>
-            <td class="c-lane"><span class="lane dots mine{{if lt .Gain 0.0}} neg{{end}}"{{if .Bar}} style="{{.Bar}}"{{end}} aria-hidden="true">{{range $s.Ticks}}{{if not .Zero}}<i class="g" style="{{.Style}}"></i>{{end}}{{end}}<i class="z" style="{{$s.Pos 0.0}}"></i>{{if .Bar}}<i class="f"></i>{{end}}{{range .Field}}<i class="d" style="{{.Style}}" data-tip="{{.Tip}}"></i>{{end}}</span></td>
-            <td class="c-place">{{if .Place}}<b>{{.Place}}</b><span class="k"> of {{.Of}}</span>{{else}}<span class="muted d-only">—</span>{{end}}</td>
-            <td class="c-loss">{{if .Valid}}<span class="k">loss </span>{{f3 .Loss}}<span class="vs"> / {{f3 .Baseline}}</span>{{else if .Baseline}}<span class="muted">—</span><span class="vs"> / {{f3 .Baseline}}</span>{{end}}</td>
-            <td class="c-sure"><a class="why" href="/rounds/{{.Round}}#e-{{short .EditorID}}">{{template "sure" .EntryView}}</a>{{if .Together}} <a class="tag red" href="/rounds/{{.Round}}#e-{{short .EditorID}}">disputed</a>{{end}}{{if .Disputed}} <a class="tag red" href="/rounds/{{.Round}}#e-{{short .EditorID}}">{{.Disputed}} differed</a>{{end}}{{if .Verifiers}}<span class="sub">graded by {{join .Verifiers ", "}}</span>{{end}}</td>
-          {{else}}
-            <td class="c-num"><span class="muted">sealed</span></td>
-            <td class="c-lane" colspan="4"><span class="stages s-{{.Stage}}" role="img" aria-label="{{if eq .Stage "editing"}}waiting to be run{{else}}run, being graded{{end}}"><i></i><i></i><i></i><span>{{if eq .Stage "editing"}}waiting to be run{{else}}run; being graded{{end}} · published when the round settles</span></span></td>
-          {{end}}
-        </tr>{{end}}
-      </tbody>
-    </table>
+  <div class="block">
+    <div class="list-head"><h2>Round by round</h2>{{with $row}}<p>{{.Rounds}} {{plural .Rounds "round" "rounds"}}{{if .Invalid}} · <span class="neg">{{.Invalid}} failed</span>{{end}}</p>{{end}}</div>
+    {{if $d.Played}}
+    <p class="caption">Where it came in each round, and its gain.</p>
+    <ol class="ranked played">
+      {{range $d.Played}}<li><a class="row" href="/rounds/{{.Round}}#e-{{short .EditorID}}">
+        <span class="rn">Round {{.RoundIdx}}</span>
+        <span class="place">{{if not .Settled}}<span class="chip live">being run</span>{{else if .Place}}<b>{{ordinal .Place}}</b> of {{.Of}}{{else if .Void}}not run{{else}}<span class="neg">failed</span>{{if .Reason}} <span class="reason">{{.Reason}}</span>{{end}}{{end}}{{if .Settled}} <span class="trust">{{(trust .EntryView).Label}}</span>{{end}}</span>
+        <span class="val{{if and .Valid (lt .Gain 0.0)}} neg{{end}}">{{if not .Settled}}<small>sealed</small>{{else if .Valid}}{{gain .Gain}}{{else if .Void}}—{{else}}0.000{{end}}</span>
+      </a></li>{{end}}
+    </ol>
     {{else}}
     <div class="empty">Drawn, but not yet run.</div>
     {{end}}
   </div>
-  {{if $d.Played}}<div class="legend"><span><span class="lane dots mine demo" style="--z:0%;--v:70%"><i class="z" style="left:0"></i><i class="f"></i><i class="d" style="left:40%"></i><i class="d" style="left:88%"></i></span>its gain, and every other entry in that round</span></div>{{template "sure-key"}}{{end}}
 
-  {{with $d.Latest}}
-  <h2>Inside its latest round: <a href="/rounds/{{.Round}}">round {{.RoundIdx}}</a></h2>
-  {{if .HasStats}}<dl class="nums inline">
-    <div><dt>Pages kept</dt><dd><b>{{pct1 .Script.KeptDocFrac}}</b><small>of the documents drawn</small></dd></div>
-    <div><dt>Read</dt><dd><b>{{f1 .Script.Passes}}</b><small>times over what it kept</small></dd></div>
-    <div><dt>Its own words</dt><dd><b>{{pct1 .Script.InkFrac}}</b><small>of tokens not copied</small></dd></div>
-    <div><dt>Exam loss</dt><dd><b>{{f3 .Loss}}</b><small>against {{f3 .Baseline}} unedited</small></dd></div>
-  </dl>{{end}}
-  <div class="grid2">
-    {{if $d.SourceChart}}<figure class="figure"><h3>Where the gain comes from</h3><p class="how">Exam loss by kind of text. Hollow: unedited. Filled: this curator. Left is better.</p><div class="plot">{{$d.SourceChart}}</div></figure>{{end}}
-    {{if $d.CurveChart}}<figure class="figure"><h3>The model, learning from it</h3><p class="how">Training loss on its pages. Low here is not the goal; the exam is.</p><div class="plot">{{$d.CurveChart}}</div></figure>{{end}}
-  </div>
-  {{end}}
+  <div class="block">
+    {{with $d.Latest}}<details class="more">
+      <summary>Inside its latest round <small>round {{.RoundIdx}}</small></summary>
+      <div class="in">
+        {{if .HasStats}}<dl class="stats">
+          <div><dt>pages kept</dt><dd>{{pct1 .Script.KeptDocFrac}}<small>of the documents drawn</small></dd></div>
+          <div><dt>read</dt><dd>{{f1 .Script.Passes}}×<small>over what it kept</small></dd></div>
+          <div><dt>its own words</dt><dd>{{pct1 .Script.InkFrac}}<small>of tokens not copied</small></dd></div>
+          <div><dt>exam loss</dt><dd>{{f3 .Loss}}<small>against {{f3 .Baseline}} unedited</small></dd></div>
+        </dl>{{end}}
+        <div class="grid2">
+          {{if $d.SourceChart}}<figure class="figure"><h3>Where the gain comes from</h3><p class="how">Exam loss by kind of text. Hollow: unedited. Filled: this curator. Left is better.</p><div class="plot">{{$d.SourceChart}}</div></figure>{{end}}
+          {{if $d.CurveChart}}<figure class="figure"><h3>The model, learning from it</h3><p class="how">Training loss on its pages. Low here is not the goal; the exam is.</p><div class="plot">{{$d.CurveChart}}</div></figure>{{end}}
+        </div>
+      </div>
+    </details>{{end}}
 
-  <h2>Its code</h2>
-  <p class="lead">Public from its first round. Start from it:</p>
-  <div class="cmd" style="margin-bottom:16px"><pre><span class="p">$ </span><span data-copy-text>stet fork {{short $e.ID}}</span></pre><button type="button" data-copy>copy</button></div>
-  <div class="files" id="source">
-    <ul>
-      {{range $e.Files}}<li><a href="?file={{.Path}}#source"{{if eq .Path $d.File}} class="on"{{end}}>{{.Path}}<span>{{bytes .Size}}</span></a></li>{{end}}
-    </ul>
-    {{if $d.FileBinary}}<div class="binary">{{$d.File}} is not text. <a href="/api/v1/editors/{{$e.ID}}/bundle">Download the bundle</a> to look at it.</div>
-    {{else}}<pre><code>{{$d.FileText}}</code>{{if $d.FileTruncated}}
+    <details class="more" id="source"{{if $d.FileAsked}} open{{end}}>
+      <summary>Its code <small>{{len $e.Files}} {{plural (len $e.Files) "file" "files"}} · {{bytes $e.Size}}</small></summary>
+      <div class="in">
+        <p class="lead">Public from its first round. Start from it:</p>
+        <div class="cmd" style="margin-bottom:16px"><pre><span class="p">$ </span><span data-copy-text>stet fork {{short $e.ID}}</span></pre><button type="button" data-copy>copy</button></div>
+        <div class="files">
+          <ul>
+            {{range $e.Files}}<li><a href="?file={{.Path}}#source"{{if eq .Path $d.File}} class="on"{{end}}>{{.Path}}<span>{{bytes .Size}}</span></a></li>{{end}}
+          </ul>
+          {{if $d.FileBinary}}<div class="binary">{{$d.File}} is not text. <a href="/api/v1/editors/{{$e.ID}}/bundle">Download the bundle</a> to look at it.</div>
+          {{else}}<pre><code>{{$d.FileText}}</code>{{if $d.FileTruncated}}
 <span class="muted">… the rest is in the bundle.</span>{{end}}</pre>{{end}}
-  </div>
-  <p style="margin-top:12px"><a class="pill" href="/api/v1/editors/{{$e.ID}}/bundle">download bundle (.tar.zst)</a></p>
+        </div>
+        <p style="margin-top:12px"><a class="pill" href="/api/v1/editors/{{$e.ID}}/bundle">download bundle (.tar.zst)</a> <span class="muted" style="font-size:14px">id {{$e.ID}}</span></p>
+      </div>
+    </details>
 
-  {{if $e.Assets}}
-  <h2 id="assets">Files it fetches</h2>
-  <p class="lead">Too large for the bundle, so named in it by address and hash: {{bytes $e.AssetBytes}} in {{len $e.Assets}} {{plural (len $e.Assets) "file" "files"}}. Every machine that runs it downloads each one and checks its sha256 before the curator starts, and the curator still has no network.</p>
-  <div class="table-wrap">
-    <table class="rt">
-      <thead><tr><th>Path</th><th class="r">Size</th><th>sha256</th><th>From</th></tr></thead>
-      <tbody>
-        {{range $e.Assets}}<tr>
-          <td class="main num">{{.Path}}</td>
-          <td class="r num" data-label="Size">{{bytes .Size}}</td>
-          <td class="num two" data-label="sha256" title="{{.SHA256}}">{{short .SHA256}}</td>
-          <td class="wide" data-label="From" style="font-size:14.5px;word-break:break-all"><a href="{{.URL}}" rel="nofollow noopener">{{.URL}}</a></td>
-        </tr>{{end}}
-        <tr><td class="main dim">total</td><td class="r num" data-label="Size">{{bytes $e.AssetBytes}}</td><td></td><td></td></tr>
-      </tbody>
-    </table>
-  </div>
-  {{end}}
+    {{if $e.Assets}}<details class="more" id="assets">
+      <summary>Files it fetches <small>{{bytes $e.AssetBytes}} in {{len $e.Assets}} {{plural (len $e.Assets) "file" "files"}}</small></summary>
+      <div class="in">
+        <p class="lead">Too large for the bundle, so named in it by address and hash. Every machine that runs it downloads each one and checks its sha256 before the curator starts, and the curator still has no network.</p>
+        <div class="table-wrap">
+          <table class="rt">
+            <thead><tr><th>Path</th><th class="r">Size</th><th>sha256</th><th>From</th></tr></thead>
+            <tbody>
+              {{range $e.Assets}}<tr>
+                <td class="num">{{.Path}}</td>
+                <td class="r num" data-label="size">{{bytes .Size}}</td>
+                <td class="num" data-label="sha256" title="{{.SHA256}}">{{short .SHA256}}</td>
+                <td data-label="from" style="font-size:14.5px;word-break:break-all"><a href="{{.URL}}" rel="nofollow noopener">{{.URL}}</a></td>
+              </tr>{{end}}
+              <tr><td class="dim">total</td><td class="r num" data-label="size">{{bytes $e.AssetBytes}}</td><td></td><td></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </details>{{end}}
 
-  {{if or (gt (len $d.Versions) 1) $d.Forks}}
-  <h2>Lineage</h2>
-  {{if gt (len $d.Versions) 1}}<p><span class="eyebrow" style="margin-right:12px">Versions</span>{{range $d.Versions}}<a class="pill" href="/editors/{{short .ID}}">v{{.Version}}{{if eq .ID $e.ID}} · this one{{end}}</a>{{end}}</p>{{end}}
-  {{if $d.Forks}}<p><span class="eyebrow" style="margin-right:12px">Forked by</span>{{range $d.Forks}}<a class="pill" href="/editors/{{short .ID}}">{{.Owner}}/{{.Name}} v{{.Version}}</a>{{end}}</p>{{end}}
-  {{end}}
+    {{if or (gt (len $d.Versions) 1) $d.Forks}}<details class="more">
+      <summary>Versions and forks</summary>
+      <div class="in">
+        {{if gt (len $d.Versions) 1}}<p><span class="eyebrow" style="margin-right:12px">Versions</span>{{range $d.Versions}}<a class="pill" href="/editors/{{short .ID}}">v{{.Version}}{{if eq .ID $e.ID}} · this one{{end}}</a>{{end}}</p>{{end}}
+        {{if $d.Forks}}<p><span class="eyebrow" style="margin-right:12px">Forked by</span>{{range $d.Forks}}<a class="pill" href="/editors/{{short .ID}}">{{.Owner}}/{{.Name}} v{{.Version}}</a>{{end}}</p>{{end}}
+      </div>
+    </details>{{end}}
+  </div>
 </div>
 </main>
 {{end}}

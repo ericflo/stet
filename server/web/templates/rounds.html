@@ -1,66 +1,28 @@
-{{define "body"}}{{$d := .D}}{{$s := $d.S}}
+{{define "body"}}{{$d := .D}}
 <main class="page">
 <div class="page-head">
-  <div class="wrap">
-    <span class="eyebrow">{{.Season.Title}} · every round</span>
-    <h1>Rounds</h1>
-    <p class="sub">In a round, fresh pages are drawn at random, every curator in it edits the same pages, and the model trains on each edit. One at a time, every {{.Interval}} or sooner when an entry is waiting.</p>
-    <div class="track-line"><ol class="track said">
-      <li class="done"><span class="st">Announced</span><span class="when">time and crawl fixed in public</span></li>
-      <li class="done"><span class="st">Drawn</span><span class="when">a public random number picks the pages</span></li>
-      <li class="done"><span class="st">Running</span><span class="when">run and graded; results <a class="term" href="/glossary#sealed">sealed</a></span></li>
-      <li class="done"><span class="st">Settled</span><span class="when">every score published at once</span></li>
-    </ol></div>
+  <div class="wrap split-head">
+    <div>
+      <h1>Rounds</h1>
+      <p class="sub">A round is one contest. Fresh pages are drawn at random, <b>every curator edits the same pages</b>, and the same model learns from each version and sits the same exam. One round at a time, at least every {{.Interval}}.</p>
+    </div>
+    {{template "round-diagram"}}
   </div>
 </div>
 <div class="wrap">
-  <div class="fig first" id="rounds" data-live>
-    {{if $d.Rounds}}
-    <div class="board-axis flush" aria-hidden="true">{{template "axis" $s}}</div>
-    <table class="board rounds">
-      <thead><tr>
-        <th class="c-name">Round</th>
-        <th class="c-best">Did best</th>
-        <th class="c-lane">{{template "axis" $s}}</th>
-        <th class="c-n">Entries<small>how sure</small></th>
-        <th class="c-base">Unedited loss<small>to beat</small></th>
-      </tr></thead>
-      <tbody>
-        {{range $d.Rounds}}<tr class="st-{{.Status}}">
-          <td class="c-name"><a class="name" href="/rounds/{{.ID}}">Round {{.Idx}}</a>
-            {{if eq .Status "scheduled"}}<span class="chip wait">announced</span>
-            {{else if eq .Status "open"}}<span class="chip live">running</span>
-            {{else}}<span class="when">{{ago .SettledAt}}</span>{{end}}</td>
-          {{if eq .Status "settled"}}
-          <td class="c-best">{{if has .BestGain}}<a href="/editors/{{short .BestID}}">{{.BestName}}</a> <b class="num">{{gain (ptr .BestGain)}}</b>{{else}}<span class="muted">nobody scored</span>{{end}}</td>
-          <td class="c-lane"><span class="lane dots" role="img" aria-label="{{.Entries}} {{plural .Entries "entry" "entries"}}{{if has .BestGain}}; best {{.BestName}} at {{gain (ptr .BestGain)}}{{end}}">{{range $s.Ticks}}{{if not .Zero}}<i class="g" style="{{.Style}}"></i>{{end}}{{end}}<i class="z" style="{{$s.Pos 0.0}}"></i>{{range .Dots}}<i class="d{{if .Kind}} {{.Kind}}{{end}}" style="{{.Style}}" data-tip="{{.Tip}}"></i>{{end}}</span></td>
-          <td class="c-n"><span class="trust" role="img" aria-label="{{.Says}}" title="{{.Says}}">{{range .Trust}}<i class="{{.Kind}}" style="{{.Style}}"></i>{{end}}</span><span class="n">{{.Entries}}<span class="k"> {{plural .Entries "entry" "entries"}}</span></span></td>
-          <td class="c-base"><span class="k">unedited </span>{{if has .BaselineLoss}}{{f3 (ptr .BaselineLoss)}}{{else}}<span class="muted">—</span>{{end}}</td>
-          {{else if eq .Status "open"}}
-          <td class="c-best"><span class="muted">sealed</span></td>
-          <td class="c-lane"><span class="lane sealed" role="img" aria-label="{{.Edited}} of {{.Entries}} entries run; results sealed"><span class="pips">{{range pips .Settled .Edited .Entries}}<i class="p{{.}}"></i>{{end}}</span><span class="say">{{.Edited}} of {{.Entries}} run · results sealed</span></span></td>
-          <td class="c-n"><span class="n">{{.Entries}}<span class="k"> {{plural .Entries "entry" "entries"}}</span></span></td>
-          <td class="c-base"></td>
-          {{else}}
-          <td class="c-best"></td>
-          <td class="c-lane"><span class="lane sealed soon"><span class="say">draws <span data-until="{{.DrawAt}}">{{ago .DrawAt}}</span> · {{hm .DrawAt}} UTC</span></span></td>
-          <td class="c-n"></td>
-          <td class="c-base"></td>
-          {{end}}
-        </tr>{{end}}
-      </tbody>
-    </table>
-    {{else}}
-    <div class="empty"><span class="hand">not yet</span>No round has been scheduled. The first is announced as soon as a crawl is in play.</div>
-    {{end}}
-  </div>
-  {{if $d.Rounds}}<div class="legend" aria-label="How to read the rounds">
-    <span><span class="lane dots demo"><i class="z" style="left:0"></i><i class="d" style="left:30%"></i><i class="d" style="left:62%"></i><i class="d best" style="left:86%"></i></span>each entry's gain; the best one filled</span>
-    <span><span class="lane dots demo short"><i class="d fail" style="left:50%"></i></span>failed: scores 0</span>
-    <span><span class="trust demo"><i class="l3" style="flex-grow:3"></i><i class="l2" style="flex-grow:1"></i><i class="l1" style="flex-grow:1"></i><i class="l0" style="flex-grow:1"></i></span>entries: confirmed · agreed, one person · run once · failed</span>
-    <a href="/glossary#confirmed">how sure a score is</a>
-  </div>{{end}}
-  {{if $d.Earlier}}<p class="after">These are the latest {{len $d.Rounds}} rounds. The ones before keep their pages: <a href="/rounds/{{$d.Earlier}}">round {{$d.EarlierIdx}}</a> and back from there.</p>{{end}}
+  {{if $d.Rounds}}
+  <ol class="rounds-list" id="rounds" data-live>
+    {{range $d.Rounds}}<li{{if ne .Status "settled"}} class="now"{{end}}><a href="/rounds/{{.ID}}">
+      <span class="n">Round {{.Idx}}</span>
+      {{if eq .Status "scheduled"}}<span class="won"><span class="dot wait" aria-hidden="true"></span> starts <b data-until="{{.DrawAt}}">{{ago .DrawAt}}</b></span><span class="when">{{hm .DrawAt}} UTC</span>
+      {{else if eq .Status "open"}}<span class="won"><span class="dot live" aria-hidden="true"></span> running · <b>{{.Edited}} of {{.Entries}}</b> run · scores sealed</span><span class="when">began {{ago .DrawnAt}}</span>
+      {{else}}<span class="won">{{if has .BestGain}}<b>{{.BestName}}</b> won with <span class="num">{{gain (ptr .BestGain)}}</span><span class="k"> · {{.Entries}} {{plural .Entries "curator" "curators"}}</span>{{else}}<span class="k">no curator scored · {{.Entries}} {{plural .Entries "entry" "entries"}}</span>{{end}}</span><span class="when">{{ago .SettledAt}}</span>{{end}}
+    </a></li>{{end}}
+  </ol>
+  {{if $d.Earlier}}<p class="after">The latest {{len $d.Rounds}} rounds. Older ones keep their pages: <a href="/rounds/{{$d.Earlier}}">round {{$d.EarlierIdx}}</a> and back from there.</p>{{end}}
+  {{else}}
+  <div class="empty"><span class="hand">not yet</span>No round has been scheduled. The first is announced as soon as a crawl is in play.</div>
+  {{end}}
 </div>
 </main>
 {{end}}

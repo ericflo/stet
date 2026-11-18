@@ -2,9 +2,9 @@
 <main class="page">
 <div class="page-head">
   <div class="wrap">
-    <span class="eyebrow">Account</span>
-    <h1>{{$a.Handle}}{{if $a.Anchor}}<span class="tag blue">organisers</span>{{else if index $d.V "established"}}<a class="tag green" href="/glossary#established">established verifier</a>{{end}}</h1>
-    <div class="meta">
+    <h1>{{$a.Handle}}</h1>
+    <div class="facts">
+      {{if $a.Anchor}}<span class="tag blue">organisers</span>{{else if index $d.V "established"}}<a class="tag green" href="/glossary#established">established verifier</a>{{end}}
       {{if $a.Github}}<span>GitHub <a href="{{gh $a.Github}}" rel="nofollow noopener">{{$a.Github}}</a></span>{{end}}
       <span>joined {{date $a.CreatedAt}}</span>
       {{if $a.LastSeen}}<span>last verified {{ago $a.LastSeen}}</span>{{end}}
@@ -12,26 +12,22 @@
   </div>
 </div>
 <div class="wrap">
-  <dl class="nums inline top">
-    {{if $a.Anchor}}<div><dt>Organisers' account</dt><dd><b class="word">established from the start</b><small>so a season can begin; checked like anyone else</small></dd></div>
-    {{else}}<div><dt>Grades that agreed</dt><dd><b>{{index $d.V "validated"}}</b>{{if not (index $d.V "established")}} <span class="by">of {{index $d.V "establish_after"}}</span>{{end}}<small>{{if index $d.V "established"}}established: its grades make scores{{else}}to be established and have its grades make scores{{end}}</small></dd></div>
-    <div><dt>Last two weeks</dt><dd><b>{{index $d.V "recent"}}</b><small>grades that agreed lately</small></dd></div>{{end}}
-    <div><dt>Curators run</dt><dd><b>{{index $d.V "runs"}}</b><small>entrants' programs run for the leaderboard</small></dd></div>
-    <div><dt>GPU time given</dt><dd><b>{{f1 (index $d.V "gpu_hours")}}</b><small>hours, running and grading</small></dd></div>
+  <dl class="totals">
+    {{if not $a.Anchor}}<div><dt>Grades that agreed</dt><dd><b>{{index $d.V "validated"}}</b>{{if not (index $d.V "established")}} of {{index $d.V "establish_after"}} to be established{{end}}</dd></div>
+    <div><dt>Last two weeks</dt><dd><b>{{index $d.V "recent"}}</b></dd></div>{{end}}
+    <div><dt>Curators run</dt><dd><b>{{index $d.V "runs"}}</b></dd></div>
+    <div><dt>GPU time</dt><dd><b>{{f1 (index $d.V "gpu_hours")}}</b> hours</dd></div>
   </dl>
-  <h2>Curators entered</h2>
-  {{if or $d.Board.Rated $d.Board.Qual}}
-  <div class="fig">{{template "board" $d.Board}}</div>
-  {{template "board-legend"}}
-  {{end}}
-  {{if $d.Other}}
-  <ul class="others">
-    {{range $d.Other}}<li><a class="name" href="/editors/{{short .E.ID}}">{{.E.Name}}</a> <span class="by">v{{.E.Version}} · entered {{date .E.At}}</span>{{if eq .E.Status "withdrawn"}} <span class="tag">replaced</span>{{else}} <span class="tag blue">no score yet</span>{{end}}{{with .Row}} <span class="num">{{gain (ptr .Rating)}}</span> <span class="by">over {{.Rounds}} {{plural .Rounds "round" "rounds"}}</span>{{end}}</li>{{end}}
-  </ul>
-  {{end}}
-  {{if not (or $d.Board.Rated $d.Board.Qual $d.Other)}}
-  <div class="fig"><div class="empty">Nothing of theirs has run in a round yet.</div></div>
-  {{end}}
+  <div class="block">
+    <h2>Curators entered</h2>
+    {{if $d.Rows}}{{template "standings" (dict "Rows" $d.Rows "Top" $d.Top "Need" $d.Need)}}{{end}}
+    {{if $d.Other}}
+    <ul class="waiting" style="margin-top:12px">
+      {{range $d.Other}}<li><span><a class="name" href="/editors/{{short .E.ID}}">{{.E.Name}}</a><span class="by">v{{.E.Version}} · entered {{date .E.At}}</span></span><span class="muted" style="font-size:15px">{{if eq .E.Status "withdrawn"}}replaced{{with .Row}} · {{gain (ptr .Rating)}} over {{.Rounds}} {{plural .Rounds "round" "rounds"}}{{end}}{{else}}no score yet{{end}}</span></li>{{end}}
+    </ul>
+    {{end}}
+    {{if not (or $d.Rows $d.Other)}}<div class="empty">Nothing of theirs has run in a round yet.</div>{{end}}
+  </div>
 </div>
 </main>
 {{end}}

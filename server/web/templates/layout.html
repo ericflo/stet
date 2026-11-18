@@ -25,63 +25,29 @@
     <nav aria-label="Main">
       <a href="/leaderboard"{{if eq .Nav "leaderboard"}} aria-current="page"{{end}}>Leaderboard</a>
       <a href="/rounds"{{if eq .Nav "rounds"}} aria-current="page"{{end}}>Rounds</a>
-      <a href="/verifiers"{{if eq .Nav "verifiers"}} aria-current="page"{{end}}>Verifiers</a>
-      <a href="/glossary"{{if eq .Nav "glossary"}} aria-current="page"{{end}}>Glossary</a>
-      <span class="sep" aria-hidden="true"></span>
       <a href="/enter"{{if eq .Nav "enter"}} aria-current="page"{{end}}>Compete</a>
-      <a href="/verify"{{if eq .Nav "verify"}} aria-current="page"{{end}}>Verify</a>
-      <a href="/run"{{if eq .Nav "run"}} aria-current="page"{{end}}>Run entries</a>
-      <a href="/docs/rules"{{if eq .Nav "docs"}} aria-current="page"{{end}}>Rules</a>
+      <a href="/verify"{{if or (eq .Nav "verify") (eq .Nav "run") (eq .Nav "verifiers")}} aria-current="page"{{end}}>Verify</a>
     </nav>
     <span class="spacer"></span>
-    <button class="theme" type="button" data-theme-toggle aria-label="Switch between light and dark"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 1.5a6.5 6.5 0 0 1 0 13z" fill="currentColor"/></svg><span class="lbl">Theme</span></button>
+    <span id="status" data-live>{{template "status" .Live}}</span>
+    <button class="theme" type="button" data-theme-toggle aria-label="Switch between light and dark"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 1.5a6.5 6.5 0 0 1 0 13z" fill="currentColor"/></svg></button>
   </div>
 </header>
-{{template "now" .}}
 {{template "body" .}}
 <footer>
-  <div class="wrap cols4">
-    <div>
-      <h4>Follow it</h4>
-      <a href="/leaderboard">Leaderboard</a><a href="/rounds">Rounds</a><a href="/verifiers">Verifiers</a>
-    </div>
-    <div>
-      <h4>Understand it</h4>
-      <a href="/glossary">Glossary</a><a href="/docs/rules">Rules</a><a href="/docs/faq">FAQ</a><a href="/docs/verifying">How scores are checked</a><a href="/docs/design">Design</a><a href="/docs/experiments">Experiments</a>
-    </div>
-    <div>
-      <h4>Take part</h4>
-      <a href="/enter">Enter the competition</a><a href="/verify">Verify scores</a><a href="/run">Run entries</a><a href="/docs/agents">For coding agents</a><a href="{{.APIURL}}/api/v1/season">API</a>
-    </div>
-    <div>
-      <h4>{{.Season.Title}}</h4>
-      <p>Official rounds are run at the <a class="term" style="display:inline" href="/glossary#scale">{{.ScaleID}} scale</a>.</p>
-      <p style="margin-top:12px"><i>stet</i>, a proofreader's mark: let it stand.</p>
-    </div>
+  <div class="wrap">
+    <nav aria-label="More">
+      <a href="/leaderboard">Leaderboard</a><a href="/rounds">Rounds</a><a href="/record">The record</a><a href="/verifiers">Verifiers</a><a href="/glossary">Glossary</a><a href="/docs/rules">Rules</a><a href="/docs/faq">FAQ</a><a href="/enter">Compete</a><a href="/verify">Verify</a><a href="/run">Run entries</a><a href="{{.APIURL}}/api/v1/season">API</a>
+    </nav>
+    <p>{{.Season.Title}}, run at the <a class="term" href="/glossary#scale">{{.ScaleID}} scale</a>. <i>stet</i>, a proofreader's mark: let it stand.</p>
   </div>
 </footer>
 <script src="/static/site.js?v={{.Version}}" defer></script>
 </body>
 </html>{{end}}
 
-{{/* What is happening at this moment, on every page. */}}
-{{define "now"}}{{$n := .Live}}<div class="now" id="now" data-live aria-label="What is happening now">
-  <div class="wrap">
-    {{with $n.Open}}
-    <span class="chip live">Round {{.Idx}} running</span>
-    <span class="pips" role="img" aria-label="{{.Edited}} of {{.Entries}} entries run">{{range pips .Settled .Edited .Entries}}<i class="p{{.}}"></i>{{end}}</span>
-    <span class="what"><b>{{.Edited}} of {{.Entries}}</b> run · results <a class="term" href="/glossary#sealed">sealed</a> until all are done</span>
-    <a class="go" href="/rounds/{{.ID}}">Follow round {{.Idx}} →</a>
-    {{else}}{{with $n.Next}}
-    <span class="chip wait">Next: round {{.Idx}}</span>
-    <span class="what">draws <b data-until="{{.DrawAt}}">{{ago .DrawAt}}</b>{{if $n.Queued}} · {{$n.Queued}} new {{plural $n.Queued "entry" "entries"}} waiting{{end}}{{with $n.Last}} · <a href="/rounds/{{.ID}}">round {{.Idx}}</a> settled {{ago .SettledAt}}{{end}}</span>
-    <a class="go" href="/rounds/{{$n.NextID}}">Round {{.Idx}} →</a>
-    {{else}}
-    <span class="chip wait">Quiet</span>
-    <span class="what">no round running or scheduled{{with $n.Last}} · <a href="/rounds/{{.ID}}">round {{.Idx}}</a> settled {{ago .SettledAt}}{{end}}</span>
-    {{end}}{{end}}
-  </div>
-</div>{{end}}
+{{/* What is happening now, on every page: one pill that leads to the round. */}}
+{{define "status"}}{{with .Open}}<a class="status" href="/rounds/{{.ID}}"><span class="dot live" aria-hidden="true"></span>Round {{.Idx}} running · <b>{{.Edited}} of {{.Entries}}</b></a>{{else}}{{with .Next}}<a class="status" href="/rounds/{{$.NextID}}"><span class="dot wait" aria-hidden="true"></span>Round {{.Idx}} <b data-until="{{.DrawAt}}">{{ago .DrawAt}}</b></a>{{else}}{{with .Last}}<a class="status" href="/rounds/{{.ID}}"><span class="dot done" aria-hidden="true"></span>Round {{.Idx}} settled</a>{{end}}{{end}}{{end}}{{end}}
 
 {{define "install"}}<div class="tabbed" data-tabs>
   <div class="tabs" role="tablist">
@@ -92,135 +58,50 @@
   <div class="cmd" data-pane="ps" hidden><pre><span class="p">&gt; </span><span data-copy-text>irm {{.BaseURL}}/install.ps1 | iex</span></pre><button type="button" data-copy>copy</button></div>
 </div>{{end}}
 
-{{/* The axis over a column of lanes: where zero is, and the round numbers along it; under
-     them, on the standings, what a gain is worth in unedited data. Called with a scale. */}}
-{{define "axis"}}<span class="axis" aria-hidden="true"><span class="nats">{{range .Ticks}}<span style="{{.Style}}"{{if .Zero}} class="zero"{{else if .Edge}} class="{{.Edge}}"{{end}}>{{.Label}}</span>{{end}}</span>{{if .Worth}}<span class="worth">{{range .Worth}}<span style="{{.Style}}"{{if .Zero}} class="zero"{{else if .Edge}} class="{{.Edge}}"{{end}}>{{.Label}}{{if .Zero}} the data{{end}}</span>{{end}}</span>{{end}}</span>{{end}}
+{{/* The standings as one list, best first. A curator still qualifying stands where its
+     rating puts it, with no rank number and a paler bar. Called with (dict "Rows" rows
+     "Top" the longest bar's value "Need" rounds before an entry is ranked). */}}
+{{define "standings"}}{{$top := .Top}}{{$need := .Need}}<ol class="ranked">
+  {{range .Rows}}{{template "standrow" (dict "R" . "Top" $top "Need" $need)}}{{end}}
+</ol>{{end}}
 
-{{/* One row's lane on that axis: a bar from zero, its ± at the tip, and under it a mark for
-     each round behind the number. Called with (dict "S" scale "V" value "SE" uncertainty
-     "Q" qualifying "Rug" marks). */}}
-{{define "lane"}}<span class="lane{{if .Q}} q{{end}}{{if neg .V}} neg{{end}}" style="{{.S.Bar .V .SE}}" aria-hidden="true">{{range .S.Ticks}}{{if not .Zero}}<i class="g" style="{{.Style}}"></i>{{end}}{{end}}<i class="z"></i>{{if .Fail}}<i class="x"></i>{{else}}<i class="f"></i>{{end}}{{if .SE}}<i class="e"></i>{{end}}{{range .Rug}}<i class="t" style="{{.}}"></i>{{end}}</span>{{end}}
+{{define "standrow"}}{{$r := .R}}<li class="{{if $r.Provisional}}soft{{end}}{{if eq $r.Rank 1}} top{{end}}"><a class="row" href="/editors/{{short $r.ID}}">
+  <span class="rank">{{if $r.Rank}}{{$r.Rank}}{{else}}–{{end}}</span>
+  <span class="who"><span class="name">{{$r.Name}}</span>{{if gt $r.Version 1}}<span class="ver">v{{$r.Version}}</span>{{end}}{{if $r.Record}} <span class="tag red">record</span>{{end}}
+    <span class="by">{{$r.Owner}}{{if $r.Organisers}} · reference{{end}}{{if $r.Provisional}} · <span class="q">unranked, {{$r.Rounds}} of {{.Need}} rounds</span>{{end}}{{if $r.Invalid}} · <span class="neg">failed {{$r.Invalid}} of {{$r.Rounds}}</span>{{end}}</span></span>
+  {{template "bar" (dict "V" (ptr $r.Rating) "Top" .Top "Soft" $r.Provisional)}}
+  <span class="val{{if neg (ptr $r.Rating)}} neg{{end}}">{{gain (ptr $r.Rating)}}</span>
+</a></li>{{end}}
 
-{{/* A curator's rounds, one cell each, in order: how high it scored, whether it was the
-     best of that round, where it failed, and whether it is being run now. */}}
-{{define "form"}}<span class="form" aria-hidden="true">{{range .}}<i{{if .Kind}} class="{{.Kind}}"{{end}}{{if .Tip}} data-tip="{{.Tip}}"{{end}}>{{if .H}}<b style="{{.H}}"></b>{{end}}</i>{{end}}</span>{{end}}
+{{/* A gain as a bar from the left edge. Called with (dict "V" value "Top" the list's
+     longest "Soft" not yet certain "Fail" it failed). */}}
+{{define "bar"}}<span class="bar{{if .Fail}} fail{{else if neg .V}} neg{{else if eq .V 0.0}} zero{{else if .Soft}} soft{{end}}" style="{{barw .V .Top}}" aria-hidden="true"><i></i></span>{{end}}
 
-{{/* The standings: every rating a bar on one axis, the ranked above, those still qualifying
-     below a line. Called with a standings. */}}
-{{define "board"}}{{$b := .}}
-<div class="board-axis" aria-hidden="true">{{template "axis" .S}}</div>
-<table class="board{{if .Compact}} compact{{end}}">
-  <thead><tr>
-    <th class="c-rank">#</th>
-    <th class="c-name">Curator</th>
-    <th class="c-num">Rating</th>
-    <th class="c-lane">{{template "axis" .S}}</th>
-    {{if not .Compact}}<th class="c-worth">Worth<small>× the data</small></th>
-    <th class="c-form">Round by round{{if .To}}<small>{{.From}} to {{.To}}</small>{{end}}</th>{{end}}
-  </tr></thead>
-  {{if .Rated}}<tbody>{{range .Rated}}{{template "boardrow" (dict "R" . "B" $b)}}{{end}}</tbody>{{end}}
-  {{if .Qual}}<tbody class="qual">
-    <tr class="divider"><td colspan="6"><span>Qualifying</span> ranked after {{.Need}} rounds</td></tr>
-    {{range .Qual}}{{template "boardrow" (dict "R" . "B" $b)}}{{end}}
-  </tbody>{{end}}
-</table>{{end}}
+{{/* n of m, as filled and empty dots. */}}
+{{define "of"}}<span class="of" aria-hidden="true">{{range pips .N .N .Of}}<i{{if .}} class="on"{{end}}></i>{{end}}</span>{{end}}
 
-{{define "boardrow"}}{{$r := .R}}{{$b := .B}}<tr class="{{if $r.Record}}rec{{end}}{{if $r.Provisional}} q{{end}}">
-  <td class="c-rank">{{if $r.Rank}}{{$r.Rank}}{{else}}<span title="Not ranked yet: still qualifying">–</span>{{end}}</td>
-  <td class="c-name"><a class="name" href="/editors/{{short $r.ID}}">{{$r.Name}}</a> <span class="by">{{if not $b.Compact}}v{{$r.Version}} · {{end}}<a href="/u/{{$r.Owner}}">{{$r.Owner}}</a></span>{{if $r.Record}} <a class="tag red" href="/glossary#record">record</a>{{end}}{{if and $r.Organisers (not $b.Compact)}} <a class="tag" href="/glossary#reference">reference</a>{{end}}{{if $r.Invalid}} <a class="tag red" href="/glossary#failed">failed {{$r.Invalid}} of {{$r.Rounds}}</a>{{end}}{{if and $r.Technique (not $b.Compact)}}<span class="tech">{{$r.Technique}}</span>{{end}}</td>
-  <td class="c-num"><b>{{gain (ptr $r.Rating)}}</b>{{if and (has $r.SE) (not $b.Compact)}}<span class="pm">±{{f3 (ptr $r.SE)}}</span>{{end}}</td>
-  <td class="c-lane">{{template "lane" (dict "S" $b.S "V" (ptr $r.Rating) "SE" $r.SE "Q" $r.Provisional "Rug" $r.Rug)}}</td>
-  {{if not $b.Compact}}<td class="c-worth">{{if $r.Multiplier}}<b>{{mult $r.Multiplier $r.Capped}}</b><span class="k"> the data</span>{{else}}<span class="muted">—</span>{{end}}</td>
-  <td class="c-form">{{template "form" $r.Form}}<span class="n">{{if $r.Provisional}}{{template "dots" (dict "N" $r.Rounds "Of" $b.Need)}}{{else}}{{$r.Rounds}} {{plural $r.Rounds "round" "rounds"}}{{if not $r.Ladder}} · <a href="/glossary#ladder" title="Outside the top {{$b.Ladder}}, one per person, so it is not run in new rounds">off the ladder</a>{{end}}{{end}}</span></td>{{end}}
-</tr>{{end}}
-
-{{/* The head to head with the record holder: for each challenger its mean lead on the rounds
-     both ran, ± its range, a mark for each of those rounds, the margin it has to clear,
-     and how many shared rounds it is from its next test. Called with (dict "Race" race
-     "Rows" rows "Looks" the rule's looks). */}}
-{{define "versus"}}{{$race := .Race}}{{$s := $race.S}}{{$looks := .Looks}}
-<div class="board-axis flush" aria-hidden="true">{{template "axis" $s}}</div>
-<table class="board versus-rows">
-  <thead><tr>
-    <th class="c-name">Challenger</th>
-    <th class="c-num">Ahead by<small>a round</small></th>
-    <th class="c-lane">{{template "axis" $s}}</th>
-    <th class="c-looks">Rounds shared<small>tested at each mark</small></th>
-  </tr></thead>
-  <tbody>
-    {{range .Rows}}<tr class="{{if .Provisional}}q{{end}}{{if .Clear}} clear{{end}}">
-      <td class="c-name"><a class="name" href="/editors/{{short .ID}}">{{.Name}}</a> <span class="by">v{{.Version}} · <a href="/u/{{.Owner}}">{{.Owner}}</a></span>{{if .Provisional}} <a class="tag amber" href="/glossary#qualifying">qualifying</a>{{end}}</td>
-      <td class="c-num">{{if .Shared}}<b{{if lt .Mean 0.0}} class="neg"{{end}}>{{gain .Mean}}</b>{{if has .SE}}<span class="pm">±{{f3 (ptr .SE)}}</span>{{end}}{{else}}<span class="muted">—</span>{{end}}</td>
-      <td class="c-lane"><span class="lane vs{{if lt .Mean 0.0}} neg{{end}}{{if .Off}} off{{end}}"{{if .Shared}} style="{{.Bar}}"{{end}} aria-hidden="true">{{range $s.Ticks}}{{if not .Zero}}<i class="g" style="{{.Style}}"></i>{{end}}{{end}}<i class="z" style="{{$s.Pos 0.0}}"></i><i class="m" style="{{$race.MarginX}}"></i>{{if .Shared}}<i class="f"></i>{{if .SE}}<i class="e"></i>{{end}}{{range .Dots}}<i class="t" style="{{.}}"></i>{{end}}{{end}}</span></td>
-      <td class="c-looks"><span class="looks" role="img" aria-label="{{.Shared}} rounds shared{{if .Next}}; next tested at {{.Next}}{{else}}; it has had every test{{end}}"><i class="fill" style="{{looksfill .Shared $looks}}"></i>{{range $i, $l := .Looks}}<b class="{{$l.State}}" style="{{looksat $i (len $looks)}}">{{$l.At}}</b>{{end}}</span><span class="n">{{.Shared}} shared{{if .Next}} · {{if .ToGo}}{{.ToGo}} to its {{if eq .Next (index $looks 0)}}first{{else}}next{{end}} test{{else}}tested when this round settles{{end}}{{else}} · every test taken{{end}}</span></td>
-    </tr>{{end}}
-  </tbody>
-</table>{{end}}
-
-{{/* n of m, as filled and empty marks. */}}
-{{define "dots"}}<span class="of" role="img" aria-label="{{.N}} of {{.Of}} rounds">{{range pips .N .N .Of}}<i class="p{{.}}"></i>{{end}}<span>{{.N}} of {{.Of}}</span></span>{{end}}
-
-{{define "board-legend"}}<div class="legend" aria-label="How to read the standings">
-  <span><span class="lane demo" style="--z:0%;--v:74%;--a:62%;--b:86%"><i class="z"></i><i class="f"></i><i class="e"></i><i class="t" style="left:58%"></i><i class="t" style="left:70%"></i><i class="t" style="left:79%"></i><i class="t" style="left:90%"></i></span>rating, its ± range, and each round behind it</span>
-  <span><span class="lane demo q" style="--z:0%;--v:74%"><i class="z"></i><i class="f"></i></span>still qualifying</span>
-  {{if not .}}<span><span class="form demo"><i class="ok"><b style="height:70%"></b></i><i class="best"><b style="height:90%"></b></i><i class="fail"></i><i></i><i class="now"></i></span>a round · best of it · failed · not in it · being run now</span>{{end}}
-  <a href="/glossary#rating">what the numbers mean</a>
-</div>{{end}}
+{{/* A round's entries as segments, filled as each is run and graded. */}}
+{{define "seg"}}<span class="seg" role="img" aria-label="{{.Edited}} of {{.Entries}} run">{{range pips .Settled .Edited .Entries}}<i class="p{{.}}"></i>{{end}}</span>{{end}}
 
 {{/* How sure a settled score is, as dots and a word. Called with an EntryView. */}}
 {{define "sure"}}{{$t := trust .}}<span class="sure l{{$t.Level}}" title="{{$t.Says}}"><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>{{$t.Label}}</span>{{if and .Settled .Own}} <span class="tag amber" title="Nobody else was there to grade a script, so the machine that ran the curator graded it too. Only the organisers' machine may.">graded by its own runner</span>{{end}}{{end}}
 
-{{define "sure-key"}}<div class="legend" aria-label="How sure a score is">
-  <span><span class="sure l3"><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span></span>two people ran it and agree</span>
-  <span><span class="sure l2"><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span></span>runs agree, one person behind them</span>
-  <span><span class="sure l1"><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span></span>one run, or runs that differ</span>
-  <a href="/glossary#confirmed">more</a>
+{{/* The same, as dots and a word alone. */}}
+{{define "sure-word"}}{{$t := trust .}}<span class="sure l{{$t.Level}}" title="{{$t.Says}}"><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>{{$t.Label}}</span>{{end}}
+
+{{/* How a round works, drawn: the same fresh pages, edited two ways and left as they were,
+     the same model trained on each, and the losses on the same exam. */}}
+{{define "round-diagram"}}<div class="rd" data-play aria-label="A diagram: the same fresh pages, left unedited and edited by two curators, A and B; the same model learns from each version and sits the same exam. Unedited scores a loss of 5.28, A 4.21 and B 4.45, so A has the bigger gain and wins.">
+  <span class="lbl l1">Fresh pages</span><span class="lbl l3">Each version of them</span><span class="lbl l5">Exam loss</span>
+  <span class="mini pages" aria-hidden="true"><i style="width:92%"></i><i style="width:70%"></i><i style="width:84%"></i><i style="width:58%"></i><i style="width:88%"></i></span>
+  <span class="fork" aria-hidden="true"><i></i><i></i><i></i></span>
+  <span class="ed r2" aria-hidden="true"><span class="who"></span><span class="mini"><i style="width:92%"></i><i style="width:70%"></i><i style="width:84%"></i><i style="width:58%"></i></span></span>
+  <span class="to r2" aria-hidden="true">→</span>
+  <span class="score r2"><b>5.28</b><span class="lose">unedited</span></span>
+  <span class="ed r3 best" aria-hidden="true"><span class="who">A</span><span class="mini"><i class="x" style="width:92%;--d:0.3s"></i><i class="k" style="width:70%"></i><i class="x" style="width:84%;--d:0.7s"></i><i class="k" style="width:58%"></i></span></span>
+  <span class="to r3" aria-hidden="true">→</span>
+  <span class="score r3 best"><b>4.21</b><span class="lose">gain +1.07</span></span>
+  <span class="ed r4" aria-hidden="true"><span class="who">B</span><span class="mini"><i class="k" style="width:92%"></i><i class="x" style="width:70%;--d:1.1s"></i><i class="k" style="width:84%"></i><i class="k" style="width:58%"></i></span></span>
+  <span class="to r4" aria-hidden="true">→</span>
+  <span class="score r4"><b>4.45</b><span class="lose">gain +0.83</span></span>
 </div>{{end}}
-
-{{/* The four stages of a round, the one it is in marked. Called with a round. */}}
-{{define "life"}}<ol class="track">
-  <li class="{{if eq .Status "scheduled"}}here{{else}}done{{end}}"><span class="st">Announced</span><span class="when">{{if eq .Status "scheduled"}}draws <span data-until="{{.DrawAt}}">{{ago .DrawAt}}</span>{{else}}{{hm .DrawAt}}{{end}}</span></li>
-  <li class="{{if ne .Status "scheduled"}}done{{end}}"><span class="st">Drawn</span><span class="when">{{if .DrawnAt}}{{ago .DrawnAt}}{{else}}&nbsp;{{end}}</span></li>
-  <li class="{{if eq .Status "open"}}here{{else if eq .Status "settled"}}done{{end}}"><span class="st">Running</span><span class="when">{{if eq .Status "open"}}{{.Edited}} of {{.Entries}} run{{else if eq .Status "settled"}}{{.Entries}} {{plural .Entries "entry" "entries"}}{{else}}&nbsp;{{end}}</span></li>
-  <li class="{{if eq .Status "settled"}}done{{end}}"><span class="st">Settled</span><span class="when">{{if .SettledAt}}{{ago .SettledAt}}{{else}}&nbsp;{{end}}</span></li>
-</ol>{{end}}
-
-{{/* A round's entries as a ranking, each gain a bar on one axis. Called with
-     (dict "Entries" entries "S" scale "R" round "Here" on-the-round's-own-page). */}}
-{{define "results"}}{{$s := .S}}{{$r := .R}}{{$here := .Here}}{{$open := ne $r.Status "settled"}}
-{{if not $open}}<div class="board-axis" aria-hidden="true">{{template "axis" $s}}</div>{{end}}
-<table class="board results{{if $open}} sealed{{end}}">
-  <thead><tr>
-    <th class="c-rank">#</th>
-    <th class="c-name">Curator</th>
-    <th class="c-num">Gain</th>
-    <th class="c-lane">{{if $open}}Where it has got to{{else}}{{template "axis" $s}}{{end}}</th>
-    {{if not $open}}<th class="c-loss">Exam loss{{if has $r.BaselineLoss}}<small>unedited {{f3 (ptr $r.BaselineLoss)}}</small>{{end}}</th>
-    <th class="c-kept">Pages kept</th>
-    <th class="c-sure">How sure</th>{{end}}
-  </tr></thead>
-  <tbody>
-    {{range .Entries}}<tr>
-      <td class="c-rank">{{if .Place}}{{.Place}}{{else}}<span class="muted">–</span>{{end}}</td>
-      <td class="c-name"><a class="name" href="/editors/{{short .EditorID}}">{{.Name}}</a> <span class="by">v{{.Version}} · <a href="/u/{{.Owner}}">{{.Owner}}</a></span>{{if and .Settled (not .Valid)}} <span class="chip bad">{{if .Void}}not run{{else}}failed{{end}}</span>{{if .Reason}}<span class="reason">{{.Reason}}</span>{{end}}{{end}}</td>
-      {{if .Settled}}
-        {{if .Valid}}
-        <td class="c-num"><b{{if lt .Gain 0.0}} class="neg"{{end}}>{{gain .Gain}}</b></td>
-        <td class="c-lane">{{template "lane" (dict "S" $s "V" .Gain)}}</td>
-        <td class="c-loss"><span class="k">loss </span>{{f3 .Loss}}</td>
-        <td class="c-kept">{{if .HasStats}}<span class="k">kept </span>{{pct1 .Script.KeptDocFrac}}{{else}}<span class="muted d-only">—</span>{{end}}</td>
-        {{else}}
-        <td class="c-num">{{if .Void}}<span class="muted">—</span>{{else}}<b>0.000</b><span class="pm">scores 0</span>{{end}}</td>
-        <td class="c-lane">{{if not .Void}}{{template "lane" (dict "S" $s "V" 0.0 "Fail" true)}}{{end}}</td>
-        <td class="c-loss"><span class="muted d-only">—</span></td>
-        <td class="c-kept"><span class="muted d-only">—</span></td>
-        {{end}}
-        <td class="c-sure">{{if $here}}<a class="why" href="#e-{{short .EditorID}}">{{template "sure" .EntryView}}</a>{{else}}<a class="why" href="/rounds/{{.Round}}#e-{{short .EditorID}}">{{template "sure" .EntryView}}</a>{{end}}{{if .Together}} <a class="tag red" href="{{if not $here}}/rounds/{{.Round}}{{end}}#e-{{short .EditorID}}" title="Two established verifiers measured different gains for one of its scripts, and nobody was there to say which was right. The script's gain is midway between them.">disputed</a>{{end}}{{if .Disputed}} <a class="tag red" href="{{if not $here}}/rounds/{{.Round}}{{end}}#e-{{short .EditorID}}" title="Graders whose grade of one of its scripts was further from the script's gain than the tolerance">{{.Disputed}} differed</a>{{end}}</td>
-      {{else}}
-        <td class="c-num"><span class="muted">sealed</span></td>
-        <td class="c-lane"><span class="stages s-{{.Stage}}" role="img" aria-label="{{if eq .Stage "editing"}}waiting to be run{{else}}run, being graded{{end}}"><i></i><i></i><i></i><span>{{if eq .Stage "editing"}}waiting to be run{{else}}run · being graded{{end}}</span></span></td>
-
-      {{end}}
-    </tr>{{end}}
-  </tbody>
-</table>{{end}}

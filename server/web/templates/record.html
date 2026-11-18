@@ -1,0 +1,55 @@
+{{define "body"}}{{$d := .D}}{{$race := $d.Race}}
+<main class="page">
+<div class="page-head">
+  <div class="wrap">
+    <a class="back" href="/leaderboard">← Leaderboard</a>
+    <h1>The record</h1>
+    <p class="sub">Harder to take than first place. A challenger has to beat the holder <b>on the rounds both played</b>, by more than {{f2 $d.Margin}} a round, and it is checked only when they have shared {{range $i, $l := $d.Rule.Looks}}{{if $i}}, {{end}}{{$l}}{{end}} rounds. One lucky round, or a lucky streak, is not enough.</p>
+  </div>
+</div>
+<div class="wrap">
+  <div class="record-card" id="holder" data-live>
+    {{if $d.Records}}{{$cur := index $d.Records 0}}
+    <span class="eyebrow">Held by</span>
+    <div class="holder"><a class="name" href="/editors/{{short $cur.EditorID}}">{{$cur.Name}}</a><span class="by">v{{$cur.Version}} · {{$cur.Owner}} · since <a href="/rounds/{{$cur.RoundID}}">round {{$cur.RoundIdx}}</a>, {{date $cur.At}}</span></div>
+    <p>{{if $cur.Beat}}It took the record from the last holder, <span class="num">{{gain $cur.Advantage}}</span> a round better over {{$cur.Rounds}} shared rounds.{{else}}The first to hold it: <span class="num">{{gain $cur.Advantage}}</span> a round better than the unedited pages, over {{$cur.Rounds}} rounds.{{end}}{{with $d.Holder}} Its rating now is <span class="num">{{gain (ptr .Rating)}}</span>{{if .Multiplier}}: its pages are worth {{mult .Multiplier .Capped}} as much raw data{{end}}.{{end}}</p>
+    {{else}}
+    <span class="eyebrow">Unclaimed</span>
+    <p>It goes to the first curator to beat the unedited pages by more than {{f2 $d.Margin}} nats a round when tested at {{index $d.Rule.Looks 0}} rounds or later.</p>
+    {{end}}
+  </div>
+
+  <div class="block" id="race" data-live>
+    <h2>Challengers</h2>
+    {{if $race.Rows}}
+    <p class="caption">{{with $race.Holder}}Each curator's gain less {{.Name}}'s, on the rounds both played, averaged.{{else}}Each curator's gain over the unedited pages, averaged over its rounds.{{end}} Right of the line is ahead.</p>
+    <ol class="race">
+      {{range $race.Rows}}<li><a href="/editors/{{short .ID}}">
+        <span class="who"><span class="name">{{.Name}}</span>{{if gt .Version 1}} <span class="by" style="display:inline">v{{.Version}}</span>{{end}}{{if .Provisional}} <span class="tag amber">not ranked yet</span>{{end}}<span class="by">{{.Owner}} · {{.Shared}} shared {{plural .Shared "round" "rounds"}}</span></span>
+        <span class="vs" aria-hidden="true">{{if .Shared}}<i class="{{if lt .Mean 0.0}}behind{{else}}ahead{{end}}" style="{{halfw .Mean $d.VsTop}}"></i>{{end}}</span>
+        <span class="val{{if lt .Mean 0.0}} neg{{end}}">{{if .Shared}}{{gain .Mean}}<small>{{if lt .Mean 0.0}}behind{{else}}ahead{{end}}, a round</small>{{else}}—{{end}}</span>
+        <span class="tests">{{if .Next}}{{if le .Next 10}}{{template "of" (dict "N" (min .Shared .Next) "Of" .Next)}}{{end}}<span>{{if .ToGo}}next check at {{.Next}} shared rounds, {{.ToGo}} more to go{{else}}checked when this round settles{{end}}</span>{{else}}<span>every check made</span>{{end}}</span>
+      </a></li>{{end}}
+    </ol>
+    {{if $race.More}}<p class="after">And {{$race.More}} more further back.</p>{{end}}
+    {{else}}
+    <div class="empty">No curator still being run has shared a round with the holder yet.</div>
+    {{end}}
+  </div>
+
+  {{if gt (len $d.Records) 1}}
+  <div class="block">
+    <h2>Every holder</h2>
+    <ol class="rounds-list">
+      {{range $d.Records}}<li><a href="/editors/{{short .EditorID}}">
+        <span class="n">{{.Name}}</span>
+        <span class="won">took it by <span class="num">{{gain .Advantage}}</span> a round over {{if .Beat}}the last holder{{else}}unedited pages{{end}}<span class="k"> · {{.Rounds}} shared rounds · p {{printf "%.2g" .P}}</span></span>
+        <span class="when">round {{.RoundIdx}} · {{date .At}}</span>
+      </a></li>{{end}}
+    </ol>
+    {{if $d.RecordChart}}<details class="more"><summary>The record over time</summary><div class="in"><figure class="figure"><div class="plot">{{$d.RecordChart}}</div></figure></div></details>{{end}}
+  </div>
+  {{end}}
+</div>
+</main>
+{{end}}

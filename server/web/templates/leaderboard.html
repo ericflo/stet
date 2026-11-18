@@ -1,77 +1,27 @@
-{{define "body"}}{{$d := .D}}{{$race := $d.Race}}
+{{define "body"}}{{$d := .D}}
 <main class="page">
 <div class="page-head">
   <div class="wrap">
-    <span class="eyebrow">{{.Season.Title}} · standings</span>
     <h1>Leaderboard</h1>
-    <p class="sub">How much better the same model did on each <a class="term" href="/glossary#curator">curator</a>'s pick than on <a class="term" href="/glossary#unedited">unedited</a> pages, averaged over its rounds. <b>Longer is better.</b></p>
+    <p class="sub">Curators ranked by how much better the model learned from their pages than from the same pages unedited, on average, round after round. <b>Longer is better.</b></p>
   </div>
 </div>
 <div class="wrap">
-  <div class="fig first" id="rated" data-live>
-    {{if or $d.Board.Rated $d.Board.Qual}}
-    {{template "board" $d.Board}}
+  <div id="standings" data-live>
+    {{if $d.Rows}}
+    {{template "standings" (dict "Rows" $d.Rows "Top" $d.Top "Need" $d.Need)}}
+    <p class="after">Tap a curator to see every round it played, and its code.</p>
     {{else}}
-    <div class="empty"><span class="hand">nobody yet</span>An entry appears here after its first round.</div>
+    <div class="empty"><span class="hand">nobody yet</span>A curator appears here after its first round.</div>
     {{end}}
   </div>
-  {{if or $d.Board.Rated $d.Board.Qual}}{{template "board-legend"}}{{end}}
-  <p class="after">The top {{$d.LadderSize}}, one per person, are the <a class="term" href="/glossary#ladder">ladder</a>: run again every round.{{if or $d.Board.Rated $d.Board.Qual}} {{if $.Live.Volunteers}}Who ran and graded each score is on <a href="/rounds">its round's page</a>.{{else}}So far every score is the organisers' machine's alone: <a href="/rounds">see who measured what</a>.{{end}}{{end}}</p>
 
-  <h2 id="record">The record</h2>
-  <p class="lead">Stricter than first place. It changes hands only when a challenger beats the holder <b>on the rounds both ran</b>, by more than {{f2 $d.Margin}} nats a round, tested when they have shared {{range $i, $l := $d.Rule.Looks}}{{if $i}}, {{end}}{{$l}}{{end}} rounds. <a href="/docs/rules#the-record">The rule →</a></p>
-  <div class="race" id="race" data-live>
-    <div class="holder">
-      <span class="eyebrow">Held by</span>
-      {{if $d.Records}}{{$cur := index $d.Records 0}}
-      <div class="who"><a class="name" href="/editors/{{short $cur.EditorID}}">{{$cur.Name}}</a> <span class="by">v{{$cur.Version}} · <a href="/u/{{$cur.Owner}}">{{$cur.Owner}}</a></span></div>
-      <dl>
-        <div><dt>since</dt><dd>{{date $cur.At}} · <a href="/rounds/{{$cur.RoundID}}">round {{$cur.RoundIdx}}</a></dd></div>
-        <div><dt>took it by</dt><dd><span class="num">{{gain $cur.Advantage}}</span> a round over {{if $cur.Beat}}the last holder{{else}}unedited pages{{end}}, on {{$cur.Rounds}} shared rounds</dd></div>
-        <div><dt>rating</dt><dd><span class="num">{{with $d.Holder}}{{gain (ptr .Rating)}}{{else}}{{gain $cur.Rating}}{{end}}</span>{{with $d.Holder}}{{if .Multiplier}} · worth {{mult .Multiplier .Capped}} the data{{end}}{{end}}</dd></div>
-      </dl>
-      {{else}}
-      <div class="who"><span class="hand">unclaimed</span></div>
-      <p>Goes to the first curator to beat unedited pages by more than {{f2 $d.Margin}} nats a round over {{index $d.Rule.Looks 0}} rounds.</p>
-      {{end}}
-    </div>
-    <div class="versus">
-      <h3>{{with $race.Holder}}Head to head with {{.Name}}{{else}}Against unedited pages{{end}}</h3>
-      <p class="how">{{with $race.Holder}}Each challenger's gain less {{.Name}}'s, on the rounds both ran.{{else}}Each curator's gain, round by round.{{end}} Right of the red line is far enough ahead to take the record, if it holds up when tested.</p>
-      {{if $race.Rows}}{{$s := $race.S}}
-      {{template "versus" (dict "Race" $race "Rows" $race.Rows "Looks" $d.Rule.Looks)}}
-      {{if $race.More}}<p class="after">And {{$race.More}} more further back.</p>{{end}}
-      <div class="legend" aria-label="How to read the head to head">
-        <span><span class="lane vs demo" style="--z:30%;--v:66%;--a:54%;--b:78%"><i class="z" style="left:30%"></i><i class="f"></i><i class="e"></i><i class="t" style="left:48%"></i><i class="t" style="left:62%"></i><i class="t" style="left:74%"></i><i class="t" style="left:84%"></i></span>mean lead, its ± range, and each shared round</span>
-        <span><span class="ml"></span>the margin to beat: {{gain $race.Margin}}</span>
-        <span><span class="looks demo"><i class="fill" style="width:38%"></i><b class="done" style="left:25%">5</b><b class="next" style="left:50%">10</b></span>tested at 5 · next at 10</span>
-      </div>
-      {{else}}
-      <div class="empty small">{{if $race.Holder}}No curator still being run has shared a round with the holder yet.{{else}}No curator has a round behind it yet.{{end}}</div>
-      {{end}}
-    </div>
+  <div class="block record-line" id="record" data-live>
+    <h2>The record</h2>
+    <p>{{with $d.Holder}}Held by <a href="/editors/{{short .ID}}"><b>{{.Name}}</b></a>{{with $d.Since}} since round {{.RoundIdx}}{{end}}.{{else}}Nobody holds it yet.{{end}}
+    It is harder to take than first place: a challenger has to beat {{with $d.Holder}}the holder{{else}}the unedited pages{{end}} on the same rounds, checked at set points.{{with $d.Lead}}{{if gt .Mean 0.0}} <b>{{.Name}}</b> is ahead{{if .Next}}, {{if .ToGo}}next checked in {{.ToGo}} {{plural .ToGo "round" "rounds"}}{{else}}checked when this round settles{{end}}{{end}}.{{end}}{{end}}</p>
+    <a class="go" href="/record">The race for the record →</a>
   </div>
-
-  {{if gt (len $d.Records) 1}}
-  <h2>Every holder so far</h2>
-  <figure class="figure"><h3>The record over time</h3><p class="how">Each step up is a new holder.</p><div class="plot">{{$d.RecordChart}}</div></figure>
-  <div class="table-wrap" style="margin-top:22px">
-    <table class="rt">
-      <thead><tr><th class="rank">#</th><th>Holder</th><th class="r">Rating</th><th class="r">Beat the last by</th><th class="r">Over</th><th class="r">p</th><th>Taken</th></tr></thead>
-      <tbody>
-        {{range $d.Records}}<tr>
-          <td class="rank">{{.N}}</td>
-          <td class="main"><span class="rankno" aria-hidden="true">{{.N}}</span><a class="name" href="/editors/{{short .EditorID}}">{{.Name}}</a><span class="by">v{{.Version}} · <a href="/u/{{.Owner}}">{{.Owner}}</a></span></td>
-          <td class="r num" data-label="Rating">{{gain .Rating}}</td>
-          <td class="r num" data-label="Beat the last by">{{gain .Advantage}}{{if not .Beat}}<span class="unit">over unedited</span>{{end}}</td>
-          <td class="r num" data-label="Shared rounds">{{.Rounds}}</td>
-          <td class="r num" data-label="p">{{printf "%.2g" .P}}</td>
-          <td class="dim two" data-label="Taken">{{date .At}} · <a href="/rounds/{{.RoundID}}">round {{.RoundIdx}}</a></td>
-        </tr>{{end}}
-      </tbody>
-    </table>
-  </div>
-  {{end}}
 </div>
 </main>
 {{end}}
