@@ -134,6 +134,7 @@ func (s *Site) mount(mux *http.ServeMux) {
 	mux.HandleFunc("GET /enter", s.guide("enter", "Enter the competition", "You compete by writing a curator: a program that edits pretraining data. Test it on your own machine as often as you like, and enter it to be scored on volunteers' GPUs and ranked on the leaderboard."))
 	mux.HandleFunc("GET /verify", s.guide("verify", "Verify scores", "Lend a GPU to the leaderboard: one command retrains a fixed model on entrants' edit scripts. No one else's code runs on your machine, and it keeps itself up to date."))
 	mux.HandleFunc("GET /run", s.guide("run", "Run entries", "Run entrants' curators in a sandbox on a Linux machine with a GPU. What it needs, what the sandbox does, and how to leave it running."))
+	mux.HandleFunc("GET /glossary", s.glossary)
 	mux.HandleFunc("GET /u/{handle}", s.account)
 	mux.HandleFunc("GET /docs", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/docs/rules", http.StatusFound)
@@ -161,14 +162,58 @@ type Page struct {
 	CLI      string
 	Docs     []docSpec
 	Interval string
-	Github   bool // entering needs a linked GitHub account
+	Github   bool    // entering needs a linked GitHub account
+	Live     NowView // what is happening now, said at the top of every page
 	D        any
+}
+
+// NowView is what is happening at this moment, said at the top of every page: the round
+// being run, or the next one, and the last to finish.
+type NowView struct {
+	Open       *roundSummary
+	Next       *Round
+	NextID     string
+	Last       *roundSummary
+	Queued     int
+	Volunteers int // established people, not the organisers, here in the last two weeks
+}
+
+func (a *App) now(st *State) NowView {
+	var n NowView
+	if open := st.roundWithStatus("open"); open != nil {
+		rs := a.roundSummary(st, open)
+		n.Open = &rs
+	}
+	if next := st.roundWithStatus("scheduled"); next != nil {
+		c := *next
+		n.Next, n.NextID = &c, roundID(a.season.ID, c.Idx)
+	}
+	for _, rd := range st.roundsDesc(0) {
+		if rd.Status == "settled" {
+			rs := a.roundSummary(st, rd)
+			n.Last = &rs
+			break
+		}
+	}
+	for _, e := range st.Editors {
+		if e.Status == "queued" {
+			n.Queued++
+		}
+	}
+	for _, acct := range st.Accounts {
+		if !acct.Anchor && a.established(acct) && acct.LastSeen > now()-14*86400 {
+			n.Volunteers++
+		}
+	}
+	return n
 }
 
 func (s *Site) page(r *http.Request, title, nav string, d any) *Page {
 	a := s.app
 	wheel, version := s.wheel()
-	return &Page{
+	var nv NowView
+	a.st.view(func(st *State) { nv = a.now(st) })
+	return &Page{Live: nv,
 		Title: title, Nav: nav, Path: r.URL.Path, Season: a.season, Scale: a.season.Scales[a.cfg.Scale], ScaleID: a.cfg.Scale,
 		BaseURL: a.cfg.BaseURL, APIURL: a.cfg.APIURL, Version: s.version, Dev: a.cfg.Dev, Now: now(), Wheel: wheel, CLI: version,
 		Docs: s.docList(), Interval: plainDuration(a.cfg.RoundInterval), Github: a.cfg.RequireGithub, D: d,
@@ -344,33 +389,50 @@ func multText(p *float64, capped bool) string {
 
 func (s *Site) funcs() template.FuncMap {
 	return template.FuncMap{
-		"ago":      ago,
-		"span":     span,
-		"bytes":    humanBytes,
-		"comma":    func(n any) string { return comma(toInt(n)) },
-		"compact":  func(n any) string { return compact(toInt(n)) },
-		"short":    func(id string) string { return clipID(id, 12) },
-		"tiny":     func(id string) string { return clipID(id, 8) },
-		"date":     func(ts int64) string { return time.Unix(ts, 0).UTC().Format("2 Jan 2006") },
-		"datetime": func(ts int64) string { return time.Unix(ts, 0).UTC().Format("2 Jan 2006, 15:04 UTC") },
-		"iso":      func(ts int64) string { return time.Unix(ts, 0).UTC().Format(time.RFC3339) },
-		"f0":       func(v float64) string { return trimZero(strconv.FormatFloat(v, 'f', 1, 64)) },
-		"f1":       func(v float64) string { return strconv.FormatFloat(v, 'f', 1, 64) },
-		"gpunum":   func(hours float64) string { return gpuTime(hours)[0] },
-		"gpuunit":  func(hours float64) string { return gpuTime(hours)[1] },
-		"f2":       func(v float64) string { return strconv.FormatFloat(v, 'f', 2, 64) },
-		"f3":       func(v float64) string { return strconv.FormatFloat(v, 'f', 3, 64) },
-		"gain":     func(v float64) string { return signed(v, 3) },
-		"ptr":      deref,
-		"has":      func(p *float64) bool { return p != nil },
-		"mult":     multText,
-		"pct":      func(v float64) string { return fmt.Sprintf("%.0f%%", 100*v) },
-		"pct1":     func(v float64) string { return trimZero(fmt.Sprintf("%.1f", 100*v)) + "%" },
-		"spark":    sparkSVG,
-		"add":      func(a, b int) int { return a + b },
-		"lower":    strings.ToLower,
-		"join":     strings.Join,
-		"roundid":  func(idx int) string { return roundID(s.app.season.ID, idx) },
+		"ago":         ago,
+		"span":        span,
+		"bytes":       humanBytes,
+		"comma":       func(n any) string { return comma(toInt(n)) },
+		"compact":     func(n any) string { return compact(toInt(n)) },
+		"short":       func(id string) string { return clipID(id, 12) },
+		"tiny":        func(id string) string { return clipID(id, 8) },
+		"date":        func(ts int64) string { return time.Unix(ts, 0).UTC().Format("2 Jan 2006") },
+		"datetime":    func(ts int64) string { return time.Unix(ts, 0).UTC().Format("2 Jan 2006, 15:04 UTC") },
+		"iso":         func(ts int64) string { return time.Unix(ts, 0).UTC().Format(time.RFC3339) },
+		"f0":          func(v float64) string { return trimZero(strconv.FormatFloat(v, 'f', 1, 64)) },
+		"f1":          func(v float64) string { return strconv.FormatFloat(v, 'f', 1, 64) },
+		"gpunum":      func(hours float64) string { return gpuTime(hours)[0] },
+		"gpuunit":     func(hours float64) string { return gpuTime(hours)[1] },
+		"f2":          func(v float64) string { return strconv.FormatFloat(v, 'f', 2, 64) },
+		"f3":          func(v float64) string { return strconv.FormatFloat(v, 'f', 3, 64) },
+		"gain":        func(v float64) string { return signed(v, 3) },
+		"ptr":         deref,
+		"has":         func(p *float64) bool { return p != nil },
+		"mult":        multText,
+		"pct":         func(v float64) string { return fmt.Sprintf("%.0f%%", 100*v) },
+		"pct1":        func(v float64) string { return trimZero(fmt.Sprintf("%.1f", 100*v)) + "%" },
+		"spark":       sparkSVG,
+		"add":         func(a, b int) int { return a + b },
+		"sub":         func(a, b int) int { return a - b },
+		"trust":       trustOf,
+		"boardscale":  boardScale,
+		"roundscale":  roundScale,
+		"roundsscale": roundsScale,
+		"agree":       agree,
+		"pips":        pips,
+		"neg":         func(v float64) bool { return v < 0 },
+		"hm":          func(ts int64) string { return time.Unix(ts, 0).UTC().Format("2 Jan, 15:04") },
+		"dict": func(kv ...any) map[string]any {
+			m := map[string]any{}
+			for i := 0; i+1 < len(kv); i += 2 {
+				m[fmt.Sprint(kv[i])] = kv[i+1]
+			}
+			return m
+		},
+		"above":   func(a, b *float64) bool { return a != nil && b != nil && *a > *b },
+		"lower":   strings.ToLower,
+		"join":    strings.Join,
+		"roundid": func(idx int) string { return roundID(s.app.season.ID, idx) },
 		"plural": func(n int, one, many string) string {
 			if n == 1 {
 				return one
@@ -510,6 +572,39 @@ func (a *App) entryView(s *State, e *Entry) EntryView {
 	return v
 }
 
+// trustView says, in words, how many people stand behind a settled score.
+type trustView struct {
+	Level int // 0: nothing to say yet; 1: one machine; 2: agreed, but not independently; 3: confirmed
+	Label string
+	Says  string
+}
+
+func trustOf(e EntryView) trustView {
+	switch {
+	case !e.Settled:
+		return trustView{0, "sealed", "Who ran it and what they measured are published when the round settles."}
+	case e.Void || e.NRuns == 0:
+		return trustView{0, "not run", "Nobody could run it, or check a run of it, so this round does not count for it."}
+	case !e.Valid && e.NRuns > 1:
+		return trustView{0, "failed on every run", fmt.Sprintf("All %d machines that ran it got no usable edit script from it.", e.NRuns)}
+	case !e.Valid:
+		return trustView{0, "failed", "The one machine that ran it got no usable edit script from it."}
+	case e.Confirmed:
+		return trustView{3, "confirmed", "Two people ran it on their own machines and got the same result, and more than one person graded it."}
+	case e.OneGrader:
+		return trustView{2, "one grader", "Its runs agree, but one person's machines graded all of them."}
+	case e.OneRunner:
+		return trustView{2, "one runner", "Its runs agree, but they were all made on the organisers' machines, which count as one person."}
+	case e.RunsDiffer:
+		return trustView{1, "runs differed", "Its runs did not agree with each other. The score is their median, and every run is listed."}
+	case e.NRuns == 1 && e.Own:
+		return trustView{1, "run once", "One machine, the organisers', ran it and graded what it wrote. Nobody else has checked it yet, but its script is public, so anyone can."}
+	case e.NRuns == 1:
+		return trustView{1, "run once", "One machine ran it: nobody else was around to run it a second time. Someone else graded what it wrote."}
+	}
+	return trustView{1, fmt.Sprintf("%d runs", e.NRuns), "Its runs are listed on the round's page."}
+}
+
 type FeedItem struct {
 	At   int64
 	HTML template.HTML
@@ -535,14 +630,14 @@ func feed(s *State, limit int) []FeedItem {
 		var h string
 		switch ev.Kind {
 		case "submit":
-			h = fmt.Sprintf(`<a href="/u/%s">%s</a> entered <b>%s</b> v%d`, esc(str("owner")), esc(str("owner")), esc(str("name")), int(num("version")))
+			h = fmt.Sprintf(`<a href="/u/%s">%s</a> entered a curator, <b>%s</b> v%d`, esc(str("owner")), esc(str("owner")), esc(str("name")), int(num("version")))
 		case "draw":
-			h = fmt.Sprintf(`Round <a href="/rounds/%s">%s</a> drawn: %d %s on %s`, esc(str("round")), esc(str("round")), int(num("entries")),
-				map[bool]string{true: "entry", false: "entries"}[int(num("entries")) == 1], esc(str("crawl")))
+			h = fmt.Sprintf(`<a href="/rounds/%s">%s</a> drawn: %d %s started work on fresh pages from %s`, esc(str("round")), roundName(str("round")), int(num("entries")),
+				map[bool]string{true: "curator", false: "curators"}[int(num("entries")) == 1], esc(str("crawl")))
 		case "settle":
-			h = fmt.Sprintf(`Round <a href="/rounds/%s">%s</a> settled; best gain <span class="num">%s</span>`, esc(str("round")), esc(str("round")), signed(num("best_gain"), 3))
+			h = fmt.Sprintf(`<a href="/rounds/%s">%s</a> settled and its scores were published; the best gain was <span class="num">%s</span>`, esc(str("round")), roundName(str("round")), signed(num("best_gain"), 3))
 		case "record":
-			h = fmt.Sprintf(`<span class="tag red">record</span> <a href="/editors/%s"><b>%s</b></a> by %s took the record at <span class="num">%s</span> nats`,
+			h = fmt.Sprintf(`<span class="tag red" style="margin:0 4px 0 0">record</span> <a href="/editors/%s"><b>%s</b></a> by %s took the record, with a rating of <span class="num">%s</span> nats`,
 				esc(clipID(str("editor"), 12)), esc(str("name")), esc(str("owner")), signed(num("rating"), 3))
 		case "crawl":
 			h = fmt.Sprintf(`New crawl in play: <b>%s</b> (%s files)`, esc(str("crawl")), comma(int64(num("files"))))
@@ -552,6 +647,16 @@ func feed(s *State, limit int) []FeedItem {
 		out = append(out, FeedItem{At: ev.At, HTML: template.HTML(h)})
 	}
 	return out
+}
+
+// roundName is how the pages name a round: "Round 6" for s0-o00006.
+func roundName(id string) string {
+	if i := strings.LastIndex(id, "-o"); i >= 0 {
+		if n, err := strconv.Atoi(id[i+2:]); err == nil {
+			return fmt.Sprintf("Round %d", n)
+		}
+	}
+	return esc(id)
 }
 
 // wheel is the newest CLI wheel in the files directory, and its version.
@@ -624,7 +729,10 @@ func (s *Site) home(w http.ResponseWriter, r *http.Request) {
 	if len(top) > 8 {
 		top = top[:8]
 	}
-	d := map[string]any{"Top": top, "Provisional": provisional}
+	d := map[string]any{"Top": top, "Provisional": provisional, "RatedRounds": a.cfg.RatedRounds, "Ranked": len(b.Rated), "Qualifying": len(b.Provisional)}
+	if !provisional { // the newcomers, under the ranked, on the same axis
+		d["Qual"] = b.Provisional[:min(len(b.Provisional), 3)]
+	}
 	if len(b.Rated) > 0 {
 		d["Leader"] = &b.Rated[0] // the ranked entry ahead, while nobody holds the record
 	}
@@ -761,7 +869,7 @@ func (s *Site) leaderboard(w http.ResponseWriter, r *http.Request) {
 	s.render(w, 200, "leaderboard", s.page(r, "Leaderboard", "leaderboard", map[string]any{
 		"Rated": b.Rated, "Provisional": b.Provisional, "Records": recs, "RecordChart": chart, "RatedRounds": a.cfg.RatedRounds,
 		"QualifyRounds": a.cfg.QualifyRounds, "LadderSize": a.cfg.LadderSize, "HasCurve": hasCurve, "Rule": a.season.Record,
-		"Margin": a.season.Record.Margin[a.cfg.Scale],
+		"Margin": a.season.Record.Margin[a.cfg.Scale], "Holder": b.ByID[b.RecordID],
 	}))
 }
 
@@ -854,6 +962,7 @@ func (s *Site) editor(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	d["E"], d["Owner"], d["Github"], d["Row"] = e, owner, github, b.ByID[e.ID]
+	d["RatedRounds"], d["Ranked"], d["LadderSize"] = a.cfg.RatedRounds, len(b.Rated), a.cfg.LadderSize
 
 	// Source viewer: one file at a time, read out of the stored bundle.
 	want := r.URL.Query().Get("file")
@@ -964,6 +1073,13 @@ func (s *Site) round(w http.ResponseWriter, r *http.Request) {
 		s.notFound(w, r, "No such round.")
 		return
 	}
+	// The page reads as a ranking: entries with a score, best first, then those that failed
+	// or were not run, whose zero is not a place.
+	sort.SliceStable(entries, func(i, j int) bool {
+		x := entries[i].Settled && entries[i].Valid && !entries[i].Void
+		y := entries[j].Settled && entries[j].Valid && !entries[j].Void
+		return x && !y
+	})
 	sc := a.season.Scales[rs.Scale]
 	d := map[string]any{"R": rs, "ID": rs.ID, "Entries": entries, "Scale": sc, "Tolerance": a.tolerance(), "RunsPerEntry": a.cfg.RunsPerEntry}
 	// Every run of the round's entries, and every grade of every script they wrote, whatever
@@ -1036,6 +1152,24 @@ func (s *Site) round(w http.ResponseWriter, r *http.Request) {
 	if rs.Baseline != nil {
 		d["BaselineChart"] = baselineChart(a.season.ExamSources, rs.Baseline)
 	}
+	// Whether every score in the round rests on one machine running and grading alone: then
+	// the page says so once, at the top, as well as against each entry.
+	alone, scored := true, 0
+	for _, e := range entries {
+		if e.Settled && e.Valid && !e.Void {
+			scored++
+			alone = alone && e.NRuns == 1 && e.Own
+		}
+	}
+	d["Alone"], d["Scored"] = alone && scored > 0, scored
+	// Places count only the entries with a score: one that failed or was not run has none.
+	places, next := make([]int, len(entries)), 1
+	for i, e := range entries {
+		if e.Settled && e.Valid && !e.Void {
+			places[i], next = next, next+1
+		}
+	}
+	d["Places"] = places
 	s.render(w, 200, "round", s.page(r, "Round "+rs.ID, "rounds", d))
 }
 
@@ -1059,6 +1193,19 @@ func (s *Site) verifiersPage(w http.ResponseWriter, r *http.Request) {
 		"Tolerance": a.tolerance(), "Devices": a.season.GradeDevices, "EstablishAfter": a.cfg.EstablishAfter, "RunsPerEntry": a.cfg.RunsPerEntry,
 		"Floor": a.season.Runner,
 	}))
+}
+
+// glossary says what every word the pages use means, with the numbers that are true now.
+func (s *Site) glossary(w http.ResponseWriter, r *http.Request) {
+	a := s.app
+	p := s.page(r, "Glossary", "glossary", map[string]any{
+		"Tolerance": a.tolerance(), "Margin": a.season.Record.Margin[a.cfg.Scale], "Rule": a.season.Record,
+		"QualifyRounds": a.cfg.QualifyRounds, "RatedRounds": a.cfg.RatedRounds, "LadderSize": a.cfg.LadderSize,
+		"EstablishAfter": a.cfg.EstablishAfter, "RunsPerEntry": a.cfg.RunsPerEntry, "MaxNew": a.cfg.MaxNewPerRound,
+		"MuteAfter": muteAfterStrikes, "MuteDays": muteFor / 86400, "CopyFrac": 1 - a.season.InkFrac, "GithubDays": a.cfg.GithubMinAgeDays,
+	})
+	p.Desc = "Every word on the Stet website, in plain language: curator, round, gain, rating, worth, the record, runs, grades, verifiers, and what each label on a score means."
+	s.render(w, 200, "glossary", p)
 }
 
 func (s *Site) account(w http.ResponseWriter, r *http.Request) {

@@ -2,81 +2,85 @@
 <main class="page">
 <div class="page-head">
   <div class="wrap">
-    <span class="eyebrow">Curator</span>
-    <h1>{{$e.Name}} <span class="muted" style="font-weight:400">v{{$e.Version}}</span>{{with $row}}{{if .Record}}<span class="tag red">record holder</span>{{end}}{{if .Ladder}}<span class="tag">ladder</span>{{end}}{{if .Provisional}}<span class="tag">qualifying</span>{{end}}{{end}}{{if eq $e.Status "withdrawn"}}<span class="tag">replaced</span>{{end}}</h1>
+    <span class="eyebrow"><a class="term" href="/glossary#curator" style="text-decoration:none">Curator</a></span>
+    <h1>{{$e.Name}} <span class="ver">v{{$e.Version}}</span>{{with $row}}{{if .Record}}<a class="tag red" href="/glossary#record">record holder</a>{{end}}{{if .Ladder}}<a class="tag green" href="/glossary#ladder">on the ladder</a>{{end}}{{if .Provisional}}<a class="tag amber" href="/glossary#qualifying">qualifying</a>{{end}}{{if .Organisers}}<a class="tag" href="/glossary#reference">reference</a>{{end}}{{end}}{{if eq $e.Status "withdrawn"}}<span class="tag">replaced</span>{{end}}</h1>
     {{if $e.Technique}}<p class="sub"><i>{{$e.Technique}}</i></p>{{end}}
     {{if $e.Description}}<p class="sub" style="font-size:18px">{{$e.Description}}</p>{{end}}
     <div class="meta">
       <span>by <a href="/u/{{$d.Owner}}">{{$d.Owner}}</a>{{if $d.Github}} (<a href="{{gh $d.Github}}" rel="nofollow noopener">github.com/{{$d.Github}}</a>){{end}}</span>
       <span>entered {{date $e.CreatedAt}}</span>
       <span>{{bytes $e.Size}} · {{len $e.Files}} {{plural (len $e.Files) "file" "files"}}</span>
-      <span title="{{$e.ID}}">{{short $e.ID}}</span>
+      <span title="{{$e.ID}}">id {{short $e.ID}}</span>
       {{with $d.Parent}}<span>forked from <a href="/editors/{{short .ID}}">{{.Name}} v{{.Version}}</a> by {{.Owner}}</span>{{end}}
     </div>
   </div>
 </div>
 <div class="wrap">
+  {{if not $row}}<p class="banner blue">{{if $d.Results}}In a round now: its score is <a class="term" href="/glossary#sealed">sealed</a> until that round settles.{{else}}Waiting for its first round.{{end}}</p>{{end}}
+
+  {{with $row}}
   <div class="stats">
-    {{with $row}}
-    <div><span class="eyebrow">Worth</span><div class="v">{{mult .Multiplier .Capped}}{{if .Multiplier}}<small>the data</small>{{end}}</div></div>
-    <div><span class="eyebrow">Rating</span><div class="v">{{gain (ptr .Rating)}}<small>{{if has .SE}}± {{f3 (ptr .SE)}} {{end}}nats</small></div></div>
-    <div><span class="eyebrow">Rounds</span><div class="v">{{.Rounds}}{{if .Invalid}}<small>{{.Invalid}} invalid</small>{{end}}</div></div>
-    <div><span class="eyebrow">Rank</span><div class="v">{{if .Rank}}{{.Rank}}{{else}}—{{end}}</div></div>
-    {{else}}
-    <div><span class="eyebrow">Worth</span><div class="v">—</div></div>
-    <div><span class="eyebrow">Rating</span><div class="v">—</div></div>
-    <div><span class="eyebrow">Rounds</span><div class="v">0</div></div>
-    <div><span class="eyebrow">Rank</span><div class="v">—</div></div>
-    {{end}}
+    <div><div class="k">Rank</div><div class="v">{{if .Rank}}#{{.Rank}}<small>of {{$d.Ranked}}</small>{{else if .Provisional}}<span class="muted" style="font-size:22px">qualifying</span>{{else}}<span class="muted">—</span>{{end}}</div><div class="cap">{{if .Provisional}}{{template "dots" (dict "N" .Rounds "Of" $d.RatedRounds)}} rounds to be ranked{{else if not .Rank}}replaced by a newer version{{end}}</div></div>
+    <div><div class="k">Rating</div><div class="v">{{gain (ptr .Rating)}}</div><div class="cap">{{if has .SE}}± {{f3 (ptr .SE)}} · {{end}}nats better than unedited</div></div>
+    <div><div class="k">Worth</div><div class="v">{{mult .Multiplier .Capped}}</div><div class="cap">as much unedited data</div></div>
+    <div><div class="k">Rounds</div><div class="v">{{.Rounds}}</div><div class="cap">{{if .Invalid}}<span class="neg">{{.Invalid}} failed</span>{{else}}none failed{{end}}</div></div>
   </div>
+  {{end}}
 
   {{if $d.GainChart}}
-  <figure class="figure"><h3>Gain in each round</h3><div class="plot">{{$d.GainChart}}</div><figcaption>Unedited loss minus this curator's, on each round's fresh corpus. Above the line beats doing nothing.</figcaption></figure>
+  <figure class="figure"><h3>Gain, round by round</h3><p class="how">Above zero beats unedited pages. Even bars: not luck.</p><div class="plot">{{$d.GainChart}}</div></figure>
   {{end}}
 
   {{with $d.Latest}}
-  <h2>Its latest round, <a href="/rounds/{{.Round}}">{{.Round}}</a></h2>
+  <h2>Its latest round: <a href="/rounds/{{.Round}}">round {{.RoundIdx}}</a></h2>
   <div class="stats" style="margin-top:0">
-    <div><span class="eyebrow">Exam loss</span><div class="v">{{f3 .Loss}}<small>vs {{f3 .Baseline}} unedited</small></div></div>
+    <div><div class="k">Exam loss</div><div class="v">{{f3 .Loss}}</div><div class="cap">vs {{f3 .Baseline}} unedited · gain {{gain .Gain}}</div></div>
     {{if .HasStats}}
-    <div><span class="eyebrow">Documents kept</span><div class="v">{{pct1 .Script.KeptDocFrac}}</div></div>
-    <div><span class="eyebrow">Read</span><div class="v">{{f1 .Script.Passes}}<small>times over</small></div></div>
-    <div><span class="eyebrow">Its own words</span><div class="v">{{pct1 .Script.InkFrac}}<small>of tokens</small></div></div>
+    <div><div class="k">Pages kept</div><div class="v">{{pct1 .Script.KeptDocFrac}}</div><div class="cap">of the documents drawn</div></div>
+    <div><div class="k">Read</div><div class="v">{{f1 .Script.Passes}}<small>times over</small></div><div class="cap">passes over what it kept</div></div>
+    <div><div class="k">Its own words</div><div class="v">{{pct1 .Script.InkFrac}}</div><div class="cap">of tokens not copied</div></div>
     {{else}}
-    <div><span class="eyebrow">Gain</span><div class="v">{{gain .Gain}}</div></div>
-    <div><span class="eyebrow">Runs</span><div class="v">{{.NRuns}}<small>{{if .Confirmed}}confirmed{{else if .OneGrader}}one grader{{else if .OneRunner}}one runner{{else if .RunsDiffer}}differed{{else if eq .NRuns 1}}run once{{end}}{{if .Disputed}}, {{.Disputed}} {{plural .Disputed "grade" "grades"}} differed{{end}}</small></div></div>
+    <div><div class="k">Gain</div><div class="v">{{gain .Gain}}</div><div class="cap">nats below the unedited loss</div></div>
+    <div><div class="k">How sure</div><div class="v" style="font-size:18px">{{template "sure" .}}</div><div class="cap">{{.NRuns}} {{plural .NRuns "run" "runs"}}</div></div>
     {{end}}
   </div>
   <div class="grid2">
-    {{if $d.SourceChart}}<figure class="figure"><h3>Where the gain comes from</h3><div class="plot">{{$d.SourceChart}}</div><figcaption>Loss on each of the public exam's six kinds of text, in nats per token. Left is better; the score is the plain mean of the six.</figcaption></figure>{{end}}
-    {{if $d.CurveChart}}<figure class="figure"><h3>The student, learning from it</h3><div class="plot">{{$d.CurveChart}}</div><figcaption>Training loss on the edited corpus. Low here is not the goal: a curator can make data easy to fit and useless on the exam.</figcaption></figure>{{end}}
+    {{if $d.SourceChart}}<figure class="figure"><h3>Where the gain comes from</h3><p class="how">Exam loss by kind of text. Hollow: unedited. Filled: this curator. Left is better.</p><div class="plot">{{$d.SourceChart}}</div></figure>{{end}}
+    {{if $d.CurveChart}}<figure class="figure"><h3>The model, learning from it</h3><p class="how">Training loss on its pages. Low here is not the goal; the exam is.</p><div class="plot">{{$d.CurveChart}}</div></figure>{{end}}
   </div>
   {{end}}
 
-  <h2>Every round</h2>
+  <h2>Every round it played</h2>
   <div class="table-wrap">
     {{if $d.Results}}
-    <table>
-      <thead><tr><th>Round</th><th>Status</th><th class="r">Loss</th><th class="r">Unedited</th><th class="r">Gain</th><th class="hide-s" title="How many verifiers ran it, each on their own machine, and whether their runs agreed">Runs</th><th class="r hide-s" title="In the run its score is nearest to">Edit took</th><th class="hide-s" title="The script of the run its score is nearest to">Script</th><th class="hide-s" title="The established verifiers whose grades are the score, then everyone else whose own grades agreed">Graded by</th></tr></thead>
+    <table class="rt">
+      <thead><tr><th>Round</th><th class="r">Gain<small>nats below unedited</small></th><th class="r">Exam loss</th><th class="r">Unedited<small>loss to beat</small></th><th>How sure</th><th class="r">Edit took</th><th>Script<small>download it</small></th><th>Graded by</th></tr></thead>
       <tbody>
         {{range $d.Results}}<tr>
-          <td><a class="num" href="/rounds/{{.Round}}">{{.Round}}</a></td>
+          <td class="main"><a class="name" href="/rounds/{{.Round}}">Round {{.RoundIdx}}</a> <span class="by num">{{.Round}}</span>
+            {{if not .Settled}}<span class="tags"><span class="chip live" style="margin-left:8px">{{if eq .Stage "editing"}}waiting to be run{{else}}run; being graded{{end}}</span></span>
+            {{else if not .Valid}}<span class="tags"><span class="chip bad" style="margin-left:8px">{{if .Void}}not run{{else}}failed{{end}}</span></span>{{if .Reason}}<span class="reason">{{.Reason}}</span>{{end}}{{end}}</td>
           {{if .Settled}}
             {{if .Valid}}
-            <td><span class="stage settled">settled</span></td>
-            <td class="r num">{{f3 .Loss}}</td><td class="r num">{{f3 .Baseline}}</td>
-            <td class="r num {{if gt .Gain 0.0}}pos{{else if lt .Gain 0.0}}neg{{end}}">{{gain .Gain}}</td>
+            <td class="r big {{if gt .Gain 0.0}}pos{{else if lt .Gain 0.0}}neg{{end}}" data-label="Gain">{{gain .Gain}}</td>
+            <td class="r num" data-label="Exam loss">{{f3 .Loss}}</td>
+            <td class="r num" data-label="Unedited">{{f3 .Baseline}}</td>
             {{else}}
-            <td colspan="3"><span class="stage invalid">{{if .Void}}not run{{else}}invalid{{end}}</span><span class="reason">{{.Reason}}</span></td>
-            <td class="r num">0.000</td>
+            <td class="r big" data-label="Gain">{{if .Void}}<span class="muted">—</span><span class="pm">does not count</span>{{else}}0.000<span class="pm">a failed round scores 0</span>{{end}}</td>
+            <td class="r num" data-label="Exam loss"><span class="muted">—</span></td>
+            <td class="r num" data-label="Unedited">{{if .Baseline}}{{f3 .Baseline}}{{else}}<span class="muted">—</span>{{end}}</td>
             {{end}}
+            <td class="wide" data-label="How sure">{{template "sure" .}}{{if .NRuns}} <a class="by nowrap" href="/rounds/{{.Round}}#runs">{{.NRuns}} {{plural .NRuns "run" "runs"}}</a>{{end}}{{if .Together}} <a class="tag red" href="/rounds/{{.Round}}#grades">disputed</a>{{end}}{{if .Disputed}} <a class="tag red" href="/rounds/{{.Round}}#grades">{{.Disputed}} differed</a>{{end}}</td>
+            <td class="r num" data-label="Edit took">{{with .Edit}}{{f1 .Seconds}}s{{else}}<span class="muted">—</span>{{end}}</td>
+            <td class="num" data-label="Script">{{if .ScriptSHA}}<a href="/api/v1/scripts/{{.ScriptSHA}}" title="Download the edit script ({{bytes .ScriptSize}} unpacked)">{{tiny .ScriptSHA}}</a>{{else}}<span class="muted">—</span>{{end}}</td>
+            <td class="dim" data-label="Graded by">{{if .Verifiers}}{{join .Verifiers ", "}}{{else}}—{{end}}</td>
           {{else}}
-            <td><span class="stage {{.Stage}}">{{.Stage}}</span></td><td class="r muted">sealed</td><td class="r muted">·</td><td class="r muted">·</td>
+            <td class="r big" data-label="Gain"><span class="muted">sealed</span></td>
+            <td class="r num" data-label="Exam loss"><span class="muted">sealed</span></td>
+            <td class="r num" data-label="Unedited"><span class="muted">sealed</span></td>
+            <td class="wide" data-label="How sure"><span class="muted">published when the round settles</span></td>
+            <td></td><td></td><td></td>
           {{end}}
-          <td class="hide-s" style="font-size:14.5px">{{if and .Settled .NRuns}}<a class="num" href="/rounds/{{.Round}}#runs">{{.NRuns}}</a> {{if .Confirmed}}<span class="stage settled">confirmed</span>{{else if .OneGrader}}<span class="muted" title="Its runs agree, and one person's machines graded them all">one grader</span>{{else if .OneRunner}}<span class="muted" title="Its runs agree, and they were all made on the organisers' machines">one runner</span>{{else if .RunsDiffer}}<span class="tag red">runs differed</span>{{else if eq .NRuns 1}}<span class="muted">run once</span>{{end}}{{if .Own}} <span class="tag" title="Nobody else was there to grade a script, so the machine that ran the curator graded it too">graded by its own runner</span>{{end}}{{else}}<span class="muted">—</span>{{end}}</td>
-          <td class="r num hide-s">{{with .Edit}}{{f1 .Seconds}}s{{else}}—{{end}}</td>
-          <td class="hide-s">{{if .ScriptSHA}}<a class="num" href="/api/v1/scripts/{{.ScriptSHA}}" title="Download the edit script ({{bytes .ScriptSize}} unpacked)">{{tiny .ScriptSHA}}</a>{{else}}<span class="muted">—</span>{{end}}</td>
-          <td class="hide-s muted" style="font-size:14.5px">{{if .Verifiers}}{{join .Verifiers ", "}}{{if .Together}} <a class="tag red" href="/rounds/{{.Round}}#grades" title="Two established verifiers measured different gains for one of its scripts, and nobody was there to say which was right">disputed</a>{{end}}{{if .Disputed}} <a class="tag red" href="/rounds/{{.Round}}#grades" title="Graders whose grade of one of its scripts was further from the script's gain than the tolerance. Their numbers are on the round's page.">{{.Disputed}} differed</a>{{end}}{{else}}—{{end}}</td>
         </tr>{{end}}
       </tbody>
     </table>
@@ -85,8 +89,10 @@
     {{end}}
   </div>
 
-  <h2>Source</h2>
-  <p class="muted" style="font-size:16px;margin-top:-8px">Every entry is public from the moment it is first drawn. Read it, run it, improve on it.</p>
+  {{if $d.Results}}{{template "sure-key"}}{{end}}
+
+  <h2>Its code</h2>
+  <p class="lead">Public from its first round. Start from it:</p>
   <div class="cmd" style="margin-bottom:16px"><pre><span class="p">$ </span><span data-copy-text>stet fork {{short $e.ID}}</span></pre><button type="button" data-copy>copy</button></div>
   <div class="files" id="source">
     <ul>
@@ -100,18 +106,18 @@
 
   {{if $e.Assets}}
   <h2 id="assets">Files it fetches</h2>
-  <p class="muted" style="font-size:16px;margin-top:-8px">Too large for the bundle, so named in it by address and hash: {{bytes $e.AssetBytes}} in {{len $e.Assets}} {{plural (len $e.Assets) "file" "files"}}. Every verifier downloads each one and checks it against its sha256 before the curator runs, and the curator still has no network.</p>
+  <p class="lead">Too large for the bundle, so named in it by address and hash: {{bytes $e.AssetBytes}} in {{len $e.Assets}} {{plural (len $e.Assets) "file" "files"}}. Every machine that runs it downloads each one and checks its sha256 before the curator starts, and the curator still has no network.</p>
   <div class="table-wrap">
-    <table>
-      <thead><tr><th>Path</th><th class="r">Size</th><th class="hide-s">sha256</th><th>From</th></tr></thead>
+    <table class="rt">
+      <thead><tr><th>Path</th><th class="r">Size</th><th>sha256</th><th>From</th></tr></thead>
       <tbody>
         {{range $e.Assets}}<tr>
-          <td class="num">{{.Path}}</td>
-          <td class="r num">{{bytes .Size}}</td>
-          <td class="hide-s num" title="{{.SHA256}}">{{short .SHA256}}</td>
-          <td style="font-size:14.5px;word-break:break-all"><a href="{{.URL}}" rel="nofollow noopener">{{.URL}}</a></td>
+          <td class="main num">{{.Path}}</td>
+          <td class="r num" data-label="Size">{{bytes .Size}}</td>
+          <td class="num two" data-label="sha256" title="{{.SHA256}}">{{short .SHA256}}</td>
+          <td class="wide" data-label="From" style="font-size:14.5px;word-break:break-all"><a href="{{.URL}}" rel="nofollow noopener">{{.URL}}</a></td>
         </tr>{{end}}
-        <tr><td class="muted">total</td><td class="r num">{{bytes $e.AssetBytes}}</td><td class="hide-s"></td><td></td></tr>
+        <tr><td class="main dim">total</td><td class="r num" data-label="Size">{{bytes $e.AssetBytes}}</td><td></td><td></td></tr>
       </tbody>
     </table>
   </div>

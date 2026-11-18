@@ -23,31 +23,65 @@
   <div class="wrap">
     <a class="logo" href="/" aria-label="Stet, home">Stet</a>
     <nav aria-label="Main">
-      <a href="/enter"{{if eq .Nav "enter"}} aria-current="page"{{end}}>Compete</a>
-      <a href="/verify"{{if or (eq .Nav "verify") (eq .Nav "verifiers")}} aria-current="page"{{end}}>Verify</a>
-      <a href="/run"{{if eq .Nav "run"}} aria-current="page"{{end}}>Run entries</a>
-      <span class="sep" aria-hidden="true"></span>
       <a href="/leaderboard"{{if eq .Nav "leaderboard"}} aria-current="page"{{end}}>Leaderboard</a>
-      <a class="opt" href="/rounds"{{if eq .Nav "rounds"}} aria-current="page"{{end}}>Rounds</a>
-      <a class="opt" href="/docs/rules"{{if eq .Nav "docs"}} aria-current="page"{{end}}>Handbook</a>
+      <a href="/rounds"{{if eq .Nav "rounds"}} aria-current="page"{{end}}>Rounds</a>
+      <a href="/verifiers"{{if eq .Nav "verifiers"}} aria-current="page"{{end}}>Verifiers</a>
+      <a href="/glossary"{{if eq .Nav "glossary"}} aria-current="page"{{end}}>Glossary</a>
+      <span class="sep" aria-hidden="true"></span>
+      <a href="/enter"{{if eq .Nav "enter"}} aria-current="page"{{end}}>Compete</a>
+      <a href="/verify"{{if eq .Nav "verify"}} aria-current="page"{{end}}>Verify</a>
+      <a href="/run"{{if eq .Nav "run"}} aria-current="page"{{end}}>Run entries</a>
+      <a href="/docs/rules"{{if eq .Nav "docs"}} aria-current="page"{{end}}>Rules</a>
     </nav>
     <span class="spacer"></span>
-    <span class="season">{{.Season.Title}} · {{.ScaleID}}</span>
-    <button class="theme" type="button" data-theme-toggle aria-label="Switch between light and dark">◐</button>
+    <button class="theme" type="button" data-theme-toggle aria-label="Switch between light and dark"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 1.5a6.5 6.5 0 0 1 0 13z" fill="currentColor"/></svg><span class="lbl">Theme</span></button>
   </div>
 </header>
+{{template "now" .}}
 {{template "body" .}}
 <footer>
-  <div class="wrap">
+  <div class="wrap cols4">
     <div>
-      <a href="/enter">Enter the competition</a><a href="/leaderboard">Leaderboard</a><a href="/verify">Verify scores</a><a href="/run">Run entries</a><a href="/rounds">Rounds</a><a href="/verifiers">Verifiers</a><a href="/docs/rules">Rules</a><a href="/docs/agents">For agents</a><a href="/docs/faq">FAQ</a><a href="/docs/design">Design</a><a href="{{.APIURL}}/api/v1/season">API</a>
+      <h4>Follow it</h4>
+      <a href="/leaderboard">Leaderboard</a><a href="/rounds">Rounds</a><a href="/verifiers">Verifiers</a>
     </div>
-    <div><i>stet</i>, a proofreader's mark: let it stand.</div>
+    <div>
+      <h4>Understand it</h4>
+      <a href="/glossary">Glossary</a><a href="/docs/rules">Rules</a><a href="/docs/faq">FAQ</a><a href="/docs/verifying">How scores are checked</a><a href="/docs/design">Design</a><a href="/docs/experiments">Experiments</a>
+    </div>
+    <div>
+      <h4>Take part</h4>
+      <a href="/enter">Enter the competition</a><a href="/verify">Verify scores</a><a href="/run">Run entries</a><a href="/docs/agents">For coding agents</a><a href="{{.APIURL}}/api/v1/season">API</a>
+    </div>
+    <div>
+      <h4>{{.Season.Title}}</h4>
+      <p>Official rounds are run at the <a class="term" style="display:inline" href="/glossary#scale">{{.ScaleID}} scale</a>.</p>
+      <p style="margin-top:12px"><i>stet</i>, a proofreader's mark: let it stand.</p>
+    </div>
   </div>
 </footer>
 <script src="/static/site.js?v={{.Version}}" defer></script>
 </body>
 </html>{{end}}
+
+{{/* What is happening at this moment, on every page. */}}
+{{define "now"}}{{$n := .Live}}<div class="now" id="now" data-live aria-label="What is happening now">
+  <div class="wrap">
+    {{with $n.Open}}
+    <span class="chip live">Round {{.Idx}} running</span>
+    <span class="pips" role="img" aria-label="{{.Edited}} of {{.Entries}} entries run">{{range pips .Settled .Edited .Entries}}<i class="p{{.}}"></i>{{end}}</span>
+    <span class="what"><b>{{.Edited}} of {{.Entries}}</b> run · results <a class="term" href="/glossary#sealed">sealed</a> until all are done</span>
+    <a class="go" href="/rounds/{{.ID}}">Follow round {{.Idx}} →</a>
+    {{else}}{{with $n.Next}}
+    <span class="chip wait">Next: round {{.Idx}}</span>
+    <span class="what">draws <b data-until="{{.DrawAt}}">{{ago .DrawAt}}</b>{{if $n.Queued}} · {{$n.Queued}} new {{plural $n.Queued "entry" "entries"}} waiting{{end}}{{with $n.Last}} · <a href="/rounds/{{.ID}}">round {{.Idx}}</a> settled {{ago .SettledAt}}{{end}}</span>
+    <a class="go" href="/rounds/{{$n.NextID}}">Round {{.Idx}} →</a>
+    {{else}}
+    <span class="chip wait">Quiet</span>
+    <span class="what">no round running or scheduled{{with $n.Last}} · <a href="/rounds/{{.ID}}">round {{.Idx}}</a> settled {{ago .SettledAt}}{{end}}</span>
+    {{end}}{{end}}
+  </div>
+</div>{{end}}
 
 {{define "install"}}<div class="tabbed" data-tabs>
   <div class="tabs" role="tablist">
@@ -58,22 +92,66 @@
   <div class="cmd" data-pane="ps" hidden><pre><span class="p">&gt; </span><span data-copy-text>irm {{.BaseURL}}/install.ps1 | iex</span></pre><button type="button" data-copy>copy</button></div>
 </div>{{end}}
 
-{{define "boardrows"}}{{range .}}
-<tr{{if .Record}} class="record"{{end}}>
-  <td class="rank">{{if .Rank}}{{.Rank}}{{else}}·{{end}}</td>
-  <td>
-    <a class="name" href="/editors/{{short .ID}}">{{.Name}}</a><span class="by">v{{.Version}} · <a href="/u/{{.Owner}}">{{.Owner}}</a></span>{{if .Record}}<span class="tag red">record</span>{{end}}{{if .Provisional}}<span class="tag">qualifying</span>{{end}}
-    {{if .Technique}}<span class="tech">{{.Technique}}</span>{{end}}
-  </td>
-  <td class="mult r">{{mult .Multiplier .Capped}}</td>
-  <td class="r num">{{gain (ptr .Rating)}}{{if has .SE}} <span class="pm">± {{f3 (ptr .SE)}}</span>{{end}}</td>
-  <td class="r num hide-s">{{.Rounds}}{{if .Invalid}} <span class="pm">({{.Invalid}} invalid)</span>{{end}}</td>
-  <td class="hide-s">{{spark .Gains}}</td>
-</tr>{{end}}{{end}}
+{{/* A bar on a table's axis. Called with (dict "S" scale "V" value "SE" uncertainty "Q" qualifying). */}}
+{{define "gbar"}}<span class="gbar{{if .Q}} q{{end}}{{if neg .V}} neg{{end}}" style="{{.S.Bar .V .SE}}" aria-hidden="true">{{range .S.Ticks}}{{if not .Zero}}<i class="g" style="{{.Style}}"></i>{{end}}{{end}}<i class="z"></i><i class="f"></i>{{if .SE}}<i class="e"></i>{{end}}</span>{{end}}
 
-{{define "boardhead"}}<thead><tr>
-  <th>#</th><th>Entry</th>
-  <th class="r" title="How many times more unedited data the same student would have needed to do as well">Worth</th>
-  <th class="r" title="Mean gain in exam loss over the unedited corpus, adjusted for which rounds the curator ran in. Nats per token.">Rating</th>
-  <th class="r hide-s">Rounds</th><th class="hide-s">Round by round</th>
-</tr></thead>{{end}}
+{{/* The axis over a column of bars. Called with a scale. */}}
+{{define "gaxis"}}<span class="gaxis" aria-hidden="true">{{range .Ticks}}<span style="{{.Style}}"{{if .Zero}} class="zero"{{end}}>{{if .Zero}}unedited{{else}}{{.Label}}{{end}}</span>{{end}}</span>{{end}}
+
+{{/* The standings: every rating a bar on one axis, the ranked above, those still qualifying
+     below a line. Called with (dict "Rated" rows "Qual" rows "Need" rounds-to-be-ranked). */}}
+{{define "board"}}{{$s := boardscale .Rated .Qual}}{{$need := .Need}}
+<div class="m-axis">{{template "gaxis" $s}}</div>
+<table class="rt board">
+  <thead><tr>
+    <th class="rank">#</th>
+    <th>Curator</th>
+    <th class="r">Rating</th>
+    <th class="barcol">{{template "gaxis" $s}}</th>
+    <th class="r">Worth</th>
+    <th class="r">Rounds</th>
+  </tr></thead>
+  {{if .Rated}}<tbody>{{range .Rated}}{{template "boardrow" (dict "R" . "S" $s "Need" $need)}}{{end}}</tbody>{{end}}
+  {{if .Qual}}<tbody class="qual">
+    <tr class="divider"><td colspan="6"><span>Qualifying · ranked after {{$need}} rounds</span></td></tr>
+    {{range .Qual}}{{template "boardrow" (dict "R" . "S" $s "Need" $need)}}{{end}}
+  </tbody>{{end}}
+</table>{{end}}
+
+{{define "boardrow"}}{{$r := .R}}<tr class="{{if $r.Record}}record{{end}}{{if $r.Provisional}} qrow{{end}}">
+  <td class="rank">{{if $r.Rank}}{{$r.Rank}}{{else}}<span class="muted" title="Not ranked yet: still qualifying">–</span>{{end}}</td>
+  <td class="main">{{if $r.Rank}}<span class="rankno" aria-hidden="true">{{$r.Rank}}</span>{{end}}<a class="name" href="/editors/{{short $r.ID}}">{{$r.Name}}</a><span class="by">v{{$r.Version}} · <a href="/u/{{$r.Owner}}">{{$r.Owner}}</a></span><span class="tags">{{if $r.Record}}<a class="tag red" href="/glossary#record">record</a>{{end}}{{if $r.Organisers}}<a class="tag" href="/glossary#reference">reference</a>{{end}}{{if $r.Invalid}}<a class="tag red" href="/glossary#failed">failed {{$r.Invalid}} of {{$r.Rounds}}</a>{{end}}</span>
+    {{if $r.Technique}}<span class="tech">{{$r.Technique}}</span>{{end}}</td>
+  <td class="r big" data-label="Rating">{{gain (ptr $r.Rating)}}{{if has $r.SE}}<span class="pm">± {{f3 (ptr $r.SE)}}</span>{{end}}</td>
+  <td class="barcell wide">{{template "gbar" (dict "S" .S "V" (ptr $r.Rating) "SE" $r.SE "Q" $r.Provisional)}}</td>
+  <td class="r mult" data-label="Worth">{{if $r.Multiplier}}{{mult $r.Multiplier $r.Capped}}{{else}}<span class="muted">—</span>{{end}}</td>
+  <td class="r num" data-label="Rounds">{{if $r.Provisional}}{{template "dots" (dict "N" $r.Rounds "Of" .Need)}}{{else}}{{$r.Rounds}}{{end}}</td>
+</tr>{{end}}
+
+{{/* n of m, as filled and empty marks. */}}
+{{define "dots"}}<span class="of" role="img" aria-label="{{.N}} of {{.Of}}">{{range pips .N .N .Of}}<i class="p{{.}}"></i>{{end}}<span>{{.N}}/{{.Of}}</span></span>{{end}}
+
+{{define "board-legend"}}<div class="legend" aria-label="How to read the bars">
+  <span><span class="gbar demo" style="--z:0%;--v:78%;--a:64%;--b:92%"><i class="z"></i><i class="f"></i><i class="e"></i></span>rating, with its ± range</span>
+  <span><span class="gbar demo q" style="--z:0%;--v:78%"><i class="z"></i><i class="f"></i></span>still qualifying</span>
+  <span><span class="zl"></span>no better than unedited data</span>
+  <a href="/glossary#rating">what the numbers mean</a>
+</div>{{end}}
+
+{{/* How sure a settled score is, as dots and a word. Called with an EntryView. */}}
+{{define "sure"}}{{$t := trust .}}<span class="sure l{{$t.Level}}" title="{{$t.Says}}"><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>{{$t.Label}}</span>{{if and .Settled .Own}} <span class="tag amber" title="Nobody else was there to grade a script, so the machine that ran the curator graded it too. Only the organisers' machine may.">graded by its own runner</span>{{end}}{{end}}
+
+{{define "sure-key"}}<div class="legend" aria-label="How sure a score is">
+  <span><span class="sure l3"><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span></span>two people ran it and agree</span>
+  <span><span class="sure l2"><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span></span>runs agree, one person behind them</span>
+  <span><span class="sure l1"><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span></span>one run, or runs that differ</span>
+  <a href="/glossary#confirmed">more</a>
+</div>{{end}}
+
+{{/* The four stages of a round, the one it is in marked. Called with a round. */}}
+{{define "life"}}<ol class="track">
+  <li class="{{if eq .Status "scheduled"}}here{{else}}done{{end}}"><span class="st">Announced</span><span class="when">{{if eq .Status "scheduled"}}draws <span data-until="{{.DrawAt}}">{{ago .DrawAt}}</span>{{else}}{{hm .DrawAt}}{{end}}</span></li>
+  <li class="{{if ne .Status "scheduled"}}done{{end}}"><span class="st">Drawn</span><span class="when">{{if .DrawnAt}}{{ago .DrawnAt}}{{else}}&nbsp;{{end}}</span></li>
+  <li class="{{if eq .Status "open"}}here{{else if eq .Status "settled"}}done{{end}}"><span class="st">Running</span><span class="when">{{if eq .Status "open"}}{{.Edited}} of {{.Entries}} run{{else}}&nbsp;{{end}}</span></li>
+  <li class="{{if eq .Status "settled"}}done{{end}}"><span class="st">Settled</span><span class="when">{{if .SettledAt}}{{ago .SettledAt}}{{else}}&nbsp;{{end}}</span></li>
+</ol>{{end}}

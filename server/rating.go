@@ -236,6 +236,7 @@ type BoardRow struct {
 	Provisional bool      `json:"provisional,omitempty"`
 	Record      bool      `json:"record,omitempty"`
 	Ladder      bool      `json:"ladder,omitempty"`
+	Organisers  bool      `json:"-"` // entered by the organisers: a reference curator, a yardstick
 	CreatedAt   int64     `json:"created_at"`
 	AccountID   int64     `json:"-"`
 	Gains       []float64 `json:"-"` // per settled round, oldest first, for sparklines
@@ -284,7 +285,7 @@ func (a *App) computeBoard(s *State) *Board {
 		}
 		owner := s.owner(e)
 		r := &BoardRow{ID: e.ID, Name: e.Name, Version: e.Version, Owner: owner.Handle, Github: owner.Github, Technique: e.Technique,
-			Description: e.Description, Parent: e.Parent, Status: e.Status, CreatedAt: e.CreatedAt, AccountID: e.AccountID}
+			Description: e.Description, Parent: e.Parent, Status: e.Status, CreatedAt: e.CreatedAt, AccountID: e.AccountID, Organisers: owner.Anchor}
 		r.Rounds, r.Invalid = rt.N, rt.Invalid
 		adj, mg := rt.Adjusted, rt.Mean
 		r.Rating, r.MeanGain = &adj, &mg

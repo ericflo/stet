@@ -3,7 +3,7 @@
 <div class="page-head">
   <div class="wrap">
     <span class="eyebrow">Account</span>
-    <h1>{{$a.Handle}}{{if $a.Anchor}}<span class="tag blue">organisers</span>{{else if index $d.V "established"}}<span class="tag">established verifier</span>{{end}}</h1>
+    <h1>{{$a.Handle}}{{if $a.Anchor}}<span class="tag blue">organisers</span>{{else if index $d.V "established"}}<a class="tag green" href="/glossary#established">established verifier</a>{{end}}</h1>
     <div class="meta">
       {{if $a.Github}}<span>GitHub <a href="{{gh $a.Github}}" rel="nofollow noopener">{{$a.Github}}</a></span>{{end}}
       <span>joined {{date $a.CreatedAt}}</span>
@@ -13,27 +13,26 @@
 </div>
 <div class="wrap">
   <div class="stats">
-    {{if $a.Anchor}}<div><span class="eyebrow">Organisers' account</span><div class="v" style="font-size:22px">established from the start</div></div>
-    {{else}}<div><span class="eyebrow">Grades that agreed</span><div class="v">{{index $d.V "validated"}}{{if not (index $d.V "established")}}<small>of {{index $d.V "establish_after"}} to be established</small>{{end}}</div></div>
-    <div><span class="eyebrow">Last two weeks</span><div class="v">{{index $d.V "recent"}}</div></div>{{end}}
-    <div><span class="eyebrow">Curators run</span><div class="v">{{index $d.V "runs"}}</div></div>
-    <div><span class="eyebrow">GPU time given</span><div class="v">{{f1 (index $d.V "gpu_hours")}}<small>hours</small></div></div>
-    <div><span class="eyebrow">Curators entered</span><div class="v">{{len $d.Editors}}</div></div>
+    {{if $a.Anchor}}<div><div class="k">Organisers' account</div><div class="v" style="font-size:22px">established from the start</div><div class="cap">so a season can begin; checked like anyone else</div></div>
+    {{else}}<div><div class="k">Grades that agreed</div><div class="v">{{index $d.V "validated"}}{{if not (index $d.V "established")}}<small>of {{index $d.V "establish_after"}}</small>{{end}}</div><div class="cap">{{if index $d.V "established"}}established: its grades make scores{{else}}to be established and have its grades make scores{{end}}</div></div>
+    <div><div class="k">Last two weeks</div><div class="v">{{index $d.V "recent"}}</div><div class="cap">grades that agreed lately</div></div>{{end}}
+    <div><div class="k">Curators run</div><div class="v">{{index $d.V "runs"}}</div><div class="cap">entrants' programs run for the leaderboard</div></div>
+    <div><div class="k">GPU time given</div><div class="v">{{f1 (index $d.V "gpu_hours")}}<small>hours</small></div><div class="cap">running and grading</div></div>
   </div>
-  <h2>Curators</h2>
+  <h2>Curators entered</h2>
   <div class="table-wrap">
     {{if $d.Editors}}
-    <table>
-      <thead><tr><th>Curator</th><th class="r">Worth</th><th class="r">Rating</th><th class="r hide-s">Rounds</th><th class="hide-s">Entered</th></tr></thead>
+    <table class="rt">
+      <thead><tr><th>Curator</th><th class="r">Rating<small>nats better than unedited</small></th><th class="r">Worth<small>as good as this much unedited data</small></th><th class="r">Rounds</th><th>Entered</th></tr></thead>
       <tbody>
         {{range $d.Editors}}<tr>
-          <td><a class="name" href="/editors/{{short .E.ID}}">{{.E.Name}}</a><span class="by">v{{.E.Version}}</span>{{with .Row}}{{if .Record}}<span class="tag red">record</span>{{end}}{{if .Ladder}}<span class="tag">ladder</span>{{end}}{{end}}</td>
+          <td class="main"><a class="name" href="/editors/{{short .E.ID}}">{{.E.Name}}</a><span class="by">v{{.E.Version}}</span>{{with .Row}}<span class="tags">{{if .Record}}<a class="tag red" href="/glossary#record">record holder</a>{{end}}{{if .Ladder}}<a class="tag green" href="/glossary#ladder">on the ladder</a>{{end}}{{if .Provisional}}<a class="tag amber" href="/glossary#qualifying">qualifying</a>{{end}}{{if .Rank}}<span class="tag">ranked #{{.Rank}}</span>{{end}}</span>{{end}}</td>
           {{with .Row}}
-          <td class="mult r">{{mult .Multiplier .Capped}}</td>
-          <td class="r num">{{gain (ptr .Rating)}}</td>
-          <td class="r num hide-s">{{.Rounds}}</td>
-          {{else}}<td class="r muted">—</td><td class="r muted">—</td><td class="r muted hide-s">0</td>{{end}}
-          <td class="hide-s muted">{{date .E.At}}</td>
+          <td class="r big" data-label="Rating">{{gain (ptr .Rating)}}{{if has .SE}}<span class="pm">± {{f3 (ptr .SE)}}</span>{{end}}</td>
+          <td class="r mult" data-label="Worth">{{mult .Multiplier .Capped}}</td>
+          <td class="r num" data-label="Rounds">{{.Rounds}}</td>
+          {{else}}<td class="r dim" data-label="Rating">—</td><td class="r dim" data-label="Worth">—</td><td class="r dim" data-label="Rounds">0</td>{{end}}
+          <td class="dim wide" data-label="Entered">{{date .E.At}}</td>
         </tr>{{end}}
       </tbody>
     </table>

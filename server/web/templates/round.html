@@ -2,52 +2,67 @@
 <main class="page">
 <div class="page-head">
   <div class="wrap">
-    <span class="eyebrow">Round · {{$r.Scale}} scale</span>
-    <h1>{{$d.ID}}</h1>
+    <span class="eyebrow"><a href="/rounds" style="text-decoration:none">Rounds</a> · {{$r.Scale}} scale</span>
+    <h1>Round {{$r.Idx}} <span class="id">{{$d.ID}}</span>
+      {{if eq $r.Status "scheduled"}}<span class="chip big wait">announced</span>{{else if eq $r.Status "open"}}<span class="chip big live">running</span>{{else}}<span class="chip big done">settled</span>{{end}}</h1>
     <p class="sub">
-      {{if eq $r.Status "scheduled"}}Announced. It will be drawn <span data-until="{{$r.DrawAt}}">{{ago $r.DrawAt}}</span>, from a beacon value that does not exist yet.
-      {{else if eq $r.Status "open"}}Drawn {{ago $r.DrawnAt}}. {{$r.Edited}} of {{$r.Entries}} {{plural $r.Entries "entry" "entries"}} run at least once. Every run, script and grade stays sealed until the whole round settles.
-      {{else}}Settled {{ago $r.SettledAt}}: {{$r.Entries}} {{plural $r.Entries "entry" "entries"}} on one fresh corpus.{{end}}
+      {{if eq $r.Status "scheduled"}}Draws <b data-until="{{$r.DrawAt}}">{{ago $r.DrawAt}}</b>, from a random number that does not exist yet.
+      {{else if eq $r.Status "open"}}Drawn {{ago $r.DrawnAt}}. Results stay <a class="term" href="/glossary#sealed">sealed</a> until every entry is done.
+      {{else}}{{with $d.Entries}}{{$best := index . 0}}Settled {{ago $r.SettledAt}}.{{if and $best.Valid (has $r.BaselineLoss)}} <b>{{$best.Name}}</b> did best: loss <span class="num">{{f3 $best.Loss}}</span> against <span class="num">{{f3 (ptr $r.BaselineLoss)}}</span> unedited.{{end}}{{end}}{{end}}
     </p>
     <div class="meta">
       <span>draw {{datetime $r.DrawAt}}</span>
-      {{with $r.Crawl}}<span>{{.Crawl}}</span>{{end}}
-      <span>{{$d.Scale.NLayer}} layers × {{$d.Scale.DModel}} · {{compact $d.Scale.TrainTokens}} tokens</span>
+      {{with $r.Crawl}}<span>pages from {{.Crawl}}</span>{{end}}
+      <span>model {{$d.Scale.NLayer}} layers × {{$d.Scale.DModel}}, {{compact $d.Scale.TrainTokens}} tokens</span>
     </div>
   </div>
 </div>
 <div class="wrap">
+  <div class="track-box" id="round-life" data-live style="margin-top:30px">{{template "life" $r}}</div>
+
   {{if ne $r.Status "scheduled"}}
   <div class="stats" id="round-stats" data-live>
-    <div><span class="eyebrow">Entries</span><div class="v">{{$r.Entries}}</div></div>
-    <div><span class="eyebrow">Unedited loss</span><div class="v">{{if has $r.BaselineLoss}}{{f3 (ptr $r.BaselineLoss)}}<small>{{$r.BaselineN}} {{plural $r.BaselineN "measurement" "measurements"}}</small>{{else}}—{{end}}</div></div>
-    <div><span class="eyebrow">Best gain</span><div class="v">{{if has $r.BestGain}}{{gain (ptr $r.BestGain)}}{{else}}—{{end}}</div></div>
-    <div><span class="eyebrow">{{if eq $r.Status "settled"}}Settled{{else}}Run{{end}}</span><div class="v">{{if eq $r.Status "settled"}}{{$r.Settled}}{{else}}{{$r.Edited}}{{end}}<small>of {{$r.Entries}}</small></div></div>
+    <div><div class="k">Entries</div><div class="v">{{$r.Entries}}</div>{{if eq $r.Status "open"}}<div class="cap"><span class="pips" role="img" aria-label="{{$r.Edited}} of {{$r.Entries}} run">{{range pips $r.Settled $r.Edited $r.Entries}}<i class="p{{.}}"></i>{{end}}</span> {{$r.Edited}} run</div>{{end}}</div>
+    <div><div class="k">Unedited loss</div><div class="v">{{if has $r.BaselineLoss}}{{f3 (ptr $r.BaselineLoss)}}{{else}}<span class="muted">sealed</span>{{end}}</div><div class="cap">the number to get below</div></div>
+    <div><div class="k">Best gain</div><div class="v">{{if has $r.BestGain}}{{gain (ptr $r.BestGain)}}{{else}}<span class="muted">sealed</span>{{end}}</div><div class="cap">{{if has $r.BestGain}}{{$r.BestName}}{{else}}published when settled{{end}}</div></div>
+    <div><div class="k">Measured on</div><div class="v">{{if $r.BaselineN}}{{$r.BaselineN}}<small>{{plural $r.BaselineN "machine" "machines"}}</small>{{else}}<span class="muted">sealed</span>{{end}}</div><div class="cap">that each built the round themselves</div></div>
   </div>
 
+  {{if $d.Alone}}
+  <div class="banner"><span class="sure l1" aria-hidden="true"><span class="dots"><i></i><i></i><i></i></span></span><p><b>One machine behind every score here.</b> No volunteer was around, so the organisers' machine ran and graded each entry itself. Every script is published below for anyone to re-grade. <a href="/verify">Lend a GPU →</a></p></div>
+  {{end}}
+
+  <h2 id="results">Results</h2>
   <div class="table-wrap" id="entries" data-live>
-    {{if $d.Entries}}
-    <table>
-      <thead><tr><th>#</th><th>Curator</th><th>Status</th><th class="r">Loss</th><th class="r">Gain</th><th class="r hide-s">Kept</th><th class="hide-s" title="How many verifiers ran the curator, each on their own machine, and whether their runs agreed">Runs</th><th class="hide-s" title="The established verifiers whose grades are the score, then everyone else whose own grades agreed">Graded by</th></tr></thead>
+    {{if $d.Entries}}{{$s := roundscale $d.Entries}}
+    {{if eq $r.Status "settled"}}<div class="m-axis">{{template "gaxis" $s}}</div>{{end}}
+    <table class="rt board">
+      <thead><tr><th class="rank">#</th><th>Curator</th><th class="r">Gain</th><th class="barcol">{{if eq $r.Status "settled"}}{{template "gaxis" $s}}{{else}}Progress{{end}}</th><th class="r">Exam loss</th><th class="r">Pages kept</th><th>How sure</th></tr></thead>
       <tbody>
         {{range $i, $e := $d.Entries}}<tr>
-          <td class="rank">{{if and $e.Settled $e.Valid}}{{add $i 1}}{{else}}·{{end}}</td>
-          <td><a class="name" href="/editors/{{short $e.EditorID}}">{{$e.Name}}</a><span class="by">v{{$e.Version}} · <a href="/u/{{$e.Owner}}">{{$e.Owner}}</a></span></td>
+          {{$place := index $d.Places $i}}<td class="rank">{{if $place}}{{$place}}{{else}}<span class="muted">–</span>{{end}}</td>
+          <td class="main">{{if $place}}<span class="rankno" aria-hidden="true">{{$place}}</span>{{end}}<a class="name" href="/editors/{{short $e.EditorID}}">{{$e.Name}}</a><span class="by">v{{$e.Version}} · <a href="/u/{{$e.Owner}}">{{$e.Owner}}</a></span>
+            {{if and $e.Settled (not $e.Valid)}}<span class="tags"><span class="chip bad" style="margin-left:8px">{{if $e.Void}}not run{{else}}failed{{end}}</span></span>{{if $e.Reason}}<span class="reason">{{$e.Reason}}</span>{{end}}{{end}}
+          </td>
           {{if $e.Settled}}
             {{if $e.Valid}}
-            <td><span class="stage settled">settled</span></td>
-            <td class="r num">{{f3 $e.Loss}}</td>
-            <td class="r num {{if gt $e.Gain 0.0}}pos{{else if lt $e.Gain 0.0}}neg{{end}}">{{gain $e.Gain}}</td>
+            <td class="r big {{if gt $e.Gain 0.0}}pos{{else if lt $e.Gain 0.0}}neg{{end}}" data-label="Gain">{{gain $e.Gain}}</td>
+            <td class="barcell wide">{{template "gbar" (dict "S" $s "V" $e.Gain)}}</td>
+            <td class="r num" data-label="Exam loss">{{f3 $e.Loss}}</td>
             {{else}}
-            <td colspan="2"><span class="stage invalid">{{if $e.Void}}not run{{else}}invalid{{end}}</span><span class="reason">{{$e.Reason}}</span></td>
-            <td class="r num">0.000</td>
+            <td class="r big" data-label="Gain">{{if $e.Void}}<span class="muted">—</span>{{else}}0.000<span class="pm">scores 0</span>{{end}}</td>
+            <td class="barcell wide"></td>
+            <td class="r num" data-label="Exam loss"><span class="muted">—</span></td>
             {{end}}
+            <td class="r num" data-label="Pages kept">{{if $e.HasStats}}{{pct1 $e.Script.KeptDocFrac}}{{else}}<span class="muted">—</span>{{end}}</td>
+            <td data-label="How sure" class="wide">{{template "sure" $e}}{{if $e.Together}} <a class="tag red" href="#grades" title="Two established verifiers measured different gains for one of its scripts, and nobody was there to say which was right. The script's gain is midway between them.">disputed</a>{{end}}{{if $e.Disputed}} <a class="tag red" href="#grades" title="Graders whose grade of one of its scripts was further from the script's gain than the tolerance">{{$e.Disputed}} differed</a>{{end}}{{if $e.Verifiers}}<span class="sub">graded by {{join $e.Verifiers ", "}}</span>{{end}}</td>
           {{else}}
-            <td><span class="stage {{$e.Stage}}">{{$e.Stage}}</span></td><td class="r muted">sealed</td><td class="r muted">·</td>
+            <td class="r big" data-label="Gain"><span class="muted">sealed</span></td>
+            <td class="barcell wide"><span class="stages" role="img" aria-label="{{if eq $e.Stage "editing"}}waiting to be run{{else}}run, being graded{{end}}"><i class="{{if eq $e.Stage "editing"}}now{{else}}on{{end}}"></i><b class="{{if ne $e.Stage "editing"}}on{{end}}"></b><i class="{{if ne $e.Stage "editing"}}now{{end}}"></i><b></b><i></i><span>{{if eq $e.Stage "editing"}}waiting to be run{{else}}run · being graded{{end}}</span></span></td>
+            <td class="r num" data-label="Exam loss"><span class="muted">sealed</span></td>
+            <td class="r num" data-label="Pages kept"><span class="muted">sealed</span></td>
+            <td></td>
           {{end}}
-          <td class="r num hide-s">{{if $e.HasStats}}{{pct1 $e.Script.KeptDocFrac}}{{else}}—{{end}}</td>
-          <td class="hide-s" style="font-size:14.5px">{{if and $e.Settled $e.NRuns}}<a class="num" href="#runs">{{$e.NRuns}}</a> {{if $e.Confirmed}}<span class="stage settled" title="Two people ran it on their own machines and got the same gain, to within {{f2 $d.Tolerance.Run}} nats, and more than one person graded it">confirmed</span>{{else if $e.OneGrader}}<span class="muted" title="Its runs agree, and one person's machines graded them all: nobody else was there to. The organisers' machines count as one person's.">one grader</span>{{else if $e.OneRunner}}<span class="muted" title="Its runs agree, and they were all made on the organisers' machines, which count as one person's: nobody else was there to run it">one runner</span>{{else if $e.RunsDiffer}}<span class="tag red" title="Its runs did not agree with each other. The gain is their median, and they are all below.">runs differed</span>{{else if eq $e.NRuns 1}}<span class="muted" title="Nobody else was there to run it a second time">run once</span>{{end}}{{if $e.Own}} <span class="tag" title="Nobody else was there to grade a script, so the machine that ran the curator graded it too. Only the organisers' machine may, and the score says so.">graded by its own runner</span>{{end}}{{else}}<span class="muted">—</span>{{end}}</td>
-          <td class="hide-s muted" style="font-size:14.5px">{{if $e.Verifiers}}{{join $e.Verifiers ", "}}{{if $e.Together}} <span class="tag red" title="Two established verifiers measured different gains for one of its scripts, and nobody was there to say which was right. The script's gain is midway between them.">disputed</span>{{end}}{{if $e.Disputed}} <a class="tag red" href="#grades" title="Graders whose grade of one of its scripts was further from the script's gain than the tolerance. Their numbers are below.">{{$e.Disputed}} differed</a>{{end}}{{else}}—{{end}}</td>
         </tr>{{end}}
       </tbody>
     </table>
@@ -55,24 +70,34 @@
     <div class="empty">No entries.</div>
     {{end}}
   </div>
-  <p class="muted" style="font-size:15.5px;margin-top:14px">Each entry is run by {{$d.RunsPerEntry}} different verifiers on their own machines when that many are there, and its gain is the median of its runs. A run's gain is the median of the established verifiers' grades of the script it wrote: each one's own unedited loss, minus its loss on the script. A score that only one machine stands behind says so: run once, or graded by its own runner. Any script below can be re-graded by anyone, by the entry's name: <code>stet score {{if $d.Example}}{{$d.Example}}{{else}}owner/name{{end}} --round {{$d.ID}}</code>.</p>
+  {{if eq $r.Status "settled"}}{{template "sure-key"}}{{else}}<div class="legend"><span class="stages"><i class="on"></i><b class="on"></b><i class="now"></i><b></b><i></i></span><span>run → graded → published</span></div>{{end}}
+
+  <h2 id="how">How each score is made</h2>
+  <p class="lead">Re-grade any of them yourself: <code>stet score {{if $d.Example}}{{$d.Example}}{{else}}owner/name{{end}} --round {{$d.ID}}</code></p>
+  <ol class="flow">
+    <li><span class="who">the entrant's program</span><span class="what">Curator</span><p>gets the fresh pages</p></li>
+    <li><span class="who">a verifier's machine</span><span class="what">Run</span><p>runs it {{howlong .Scale.EditSeconds}}, no network</p></li>
+    <li><span class="who">plain data</span><span class="what">Edit script</span><p>which pieces to keep, in what order</p></li>
+    <li><span class="who">another verifier's GPU</span><span class="what">Grade</span><p>trains the model on it, runs the exam</p></li>
+    <li><span class="who">the score</span><span class="what">Gain</span><p>unedited loss − exam loss</p></li>
+  </ol>
 
   {{if $d.Runs}}
   <h2 id="runs">Runs</h2>
-  <p class="lead">Every run of every entry: who ran the curator, on what, and what the script it wrote was worth. Runs that agree to within {{f2 $d.Tolerance.Run}} nats confirm each other; when two differ, a third is run and the median is the score.</p>
+  <p class="lead">Who ran each curator, on what. Runs within {{f2 $d.Tolerance.Run}} nats of each other confirm each other.</p>
   <div class="table-wrap">
-    <table>
-      <thead><tr><th>Entry</th><th class="r">Run</th><th>Run by</th><th class="hide-s">On</th><th class="r hide-s">Edit took</th><th class="hide-s">Script</th><th class="r">Gain</th><th>Outcome</th></tr></thead>
+    <table class="rt">
+      <thead><tr><th>Entry</th><th class="r">Run</th><th>Run by</th><th>On</th><th class="r">Took</th><th>Script<small>download it</small></th><th class="r">Gain</th><th>Outcome</th></tr></thead>
       <tbody>
         {{range $d.Runs}}<tr>
-          <td><a class="name" href="/editors/{{short .EditorID}}">{{.Name}}</a><span class="by"><a href="/u/{{.Owner}}">{{.Owner}}</a></span></td>
-          <td class="r num">{{.N}}</td>
-          <td><a href="/u/{{.By}}">{{.By}}</a></td>
-          <td class="hide-s muted" style="font-size:14.5px">{{if .GPU}}{{.GPU}}{{else}}—{{end}}</td>
-          <td class="r num hide-s">{{f1 .EditSeconds}}s</td>
-          <td class="hide-s">{{if .Script}}<a class="num" href="/api/v1/scripts/{{.Script}}" title="Download the edit script ({{bytes .ScriptSize}} unpacked)">{{tiny .Script}}</a>{{else}}<span class="muted">—</span>{{end}}</td>
-          <td class="r num {{if gt .Gain 0.0}}pos{{else if lt .Gain 0.0}}neg{{end}}">{{if eq .Status "dropped"}}<span class="muted">—</span>{{else}}{{gain .Gain}}{{end}}</td>
-          <td>{{if eq .Status "ok"}}<span class="stage settled">ok</span>{{if .Self}} <span class="tag" title="Nobody else was there to grade this script, so the machine that ran the curator graded it too. Only the organisers' machine may.">graded by its own runner</span>{{end}}{{else if eq .Status "failed"}}<span class="stage invalid">failed</span><span class="reason">{{.Reason}}</span>{{else}}<span class="muted">set aside: {{.Reason}}</span>{{end}}</td>
+          <td class="main"><a class="name" href="/editors/{{short .EditorID}}">{{.Name}}</a><span class="by">by <a href="/u/{{.Owner}}">{{.Owner}}</a></span> <span class="by m-only">· run {{.N}}</span></td>
+          <td class="r num d-only" data-label="Run">{{.N}}</td>
+          <td data-label="Run by"><span class="who"><a href="/u/{{.By}}">{{.By}}</a></span></td>
+          <td class="dim two" data-label="On">{{if .GPU}}{{.GPU}}{{else}}—{{end}}</td>
+          <td class="r num" data-label="Took">{{f1 .EditSeconds}}s</td>
+          <td class="num" data-label="Script">{{if .Script}}<a href="/api/v1/scripts/{{.Script}}" title="Download the edit script ({{bytes .ScriptSize}} unpacked)">{{tiny .Script}}</a> <span class="muted">{{bytes .ScriptSize}}</span>{{else}}<span class="muted">none</span>{{end}}</td>
+          <td class="r num {{if gt .Gain 0.0}}pos{{else if lt .Gain 0.0}}neg{{end}}" data-label="Gain">{{if eq .Status "dropped"}}<span class="muted">—</span>{{else}}{{gain .Gain}}{{end}}</td>
+          <td class="wide" data-label="Outcome">{{if eq .Status "ok"}}<span class="chip done">counted</span>{{if .Self}} <span class="tag amber" title="Nobody else was there to grade this script, so the machine that ran the curator graded it too. Only the organisers' machine may.">graded by its own runner</span>{{end}}{{else if eq .Status "failed"}}<span class="chip bad">failed</span><span class="reason">{{.Reason}}</span>{{else}}<span class="reason">set aside: {{.Reason}}</span>{{end}}</td>
         </tr>{{end}}
       </tbody>
     </table>
@@ -81,56 +106,57 @@
 
   {{if or $d.Grades $r.Differs}}
   <h2 id="grades">Grades</h2>
-  <p class="lead">Every grade of every script, whatever it said. The grades of established verifiers are the script's gain; everyone else's is compared with it, and lands within {{f2 $d.Tolerance.Grade}} nats or is an outlier.</p>
+  <p class="lead">Every grade of every script. The dot is the grader's number against the score: inside the shaded band (±{{f2 $d.Tolerance.Grade}} nats) it agrees.</p>
   {{if $d.Grades}}
   <div class="table-wrap">
-    <table>
-      <thead><tr><th>Entry</th><th title="The run, or runs, that wrote the script. Two runs that wrote the same bytes share their grades.">Run</th><th>Graded by</th><th class="r">Their loss</th><th class="r" title="This grader's own unedited loss for the round, minus its loss on the script">Their gain</th><th class="r">Script's gain</th><th>Outcome</th></tr></thead>
+    <table class="rt">
+      <thead><tr><th>Entry</th><th>Run<small>that wrote the script</small></th><th>Graded by</th><th class="r">Their loss</th><th class="r">Their gain<small>their unedited loss minus that</small></th><th class="r">Script's gain<small>what counts</small></th><th class="agreecol">Agreement</th><th>Outcome</th></tr></thead>
       <tbody>
         {{range $d.Grades}}<tr>
-          <td><a class="name" href="/editors/{{short .EditorID}}">{{.Name}}</a><span class="by"><a href="/u/{{.Owner}}">{{.Owner}}</a></span></td>
-          <td class="num">{{.Runs}}</td>
-          <td><a href="/u/{{.Handle}}">{{.Handle}}</a>{{if .Self}} <span class="muted" title="This account also ran the curator, and nobody else's run wrote the same script">· its own runner</span>{{end}}{{if .First}} <span class="muted" title="No grade of this account's had agreed before this round">· first grade</span>{{end}}</td>
-          <td class="r num">{{if has .Loss}}{{f3 (ptr .Loss)}}{{else}}<span class="muted">invalid</span>{{end}}</td>
-          <td class="r num">{{if has .Gain}}{{gain (ptr .Gain)}}{{else}}—{{end}}</td>
-          <td class="r num">{{if .Dropped}}—{{else if .ScriptValid}}{{gain .ScriptGain}}{{else}}<span class="muted">invalid</span>{{end}}</td>
-          <td>{{if eq .Verdict "disputed"}}<span class="tag red" title="Two established verifiers, two answers, and nobody was there to say which was right">disputed</span>{{else if .Counted}}<span class="stage settled" title="An established verifier's grade: one of those the script's gain is the median of">counted</span>{{else if eq .Verdict "agreed"}}<span class="stage settled">agreed</span>{{else if eq .Verdict "outlier"}}<span class="tag red">outlier</span>{{else if eq .Verdict "unresolved"}}<span class="muted" title="It differs from the script's gain, and that gain rests on one volunteer's grade or on two that disagree, so nothing shows which is wrong. Not held against anyone.">differs, unresolved</span>{{else if eq .Verdict "no established grade"}}<span class="muted" title="No established verifier could grade this script, so there is nothing to compare with">no established grade</span>{{else}}<span class="muted">set aside: {{.Verdict}}</span>{{end}}</td>
+          <td class="main"><a class="name" href="/editors/{{short .EditorID}}">{{.Name}}</a><span class="by">by <a href="/u/{{.Owner}}">{{.Owner}}</a></span></td>
+          <td class="num" data-label="Script of run">{{.Runs}}</td>
+          <td class="two" data-label="Graded by"><span class="who"><a href="/u/{{.Handle}}">{{.Handle}}</a></span>{{if .Self}} <span class="tag amber" title="This account also ran the curator, and nobody else's run wrote the same script">its own runner</span>{{end}}{{if .First}} <span class="tag" title="No grade of this account's had agreed before this round">first grade</span>{{end}}</td>
+          <td class="r num" data-label="Their exam loss">{{if has .Loss}}{{f3 (ptr .Loss)}}{{else}}<span class="muted">invalid</span>{{end}}</td>
+          <td class="r num" data-label="Their gain">{{if has .Gain}}{{gain (ptr .Gain)}}{{else}}—{{end}}</td>
+          <td class="r num" data-label="Script's gain">{{if .Dropped}}—{{else if .ScriptValid}}{{gain .ScriptGain}}{{else}}<span class="muted">invalid</span>{{end}}</td>
+          <td class="wide" data-label="Agreement">{{if and .ScriptValid (not .Dropped) (has .Gain)}}<span class="agree{{if eq .Verdict "outlier" "disputed"}} off{{end}}" style="{{agree .Gain .ScriptGain $d.Tolerance.Grade}}" role="img" aria-label="{{gain (ptr .Gain)}} against {{gain .ScriptGain}}"><i></i></span>{{end}}</td>
+          <td class="wide" data-label="Outcome">{{if eq .Verdict "disputed"}}<span class="chip bad">disputed</span><span class="reason">Two established verifiers, two answers, and nobody there to say which was right.</span>{{else if .Counted}}<span class="chip done">counted</span>{{else if eq .Verdict "agreed"}}<span class="chip done">agreed</span>{{else if eq .Verdict "outlier"}}<span class="chip bad">outlier</span><span class="reason">Further from the script's gain than {{f2 $d.Tolerance.Grade}} nats: a strike against this account.</span>{{else if eq .Verdict "unresolved"}}<span class="chip wait">differs, unresolved</span><span class="reason">The gain it differs from rests on one volunteer, so nothing shows which is wrong. Held against nobody.</span>{{else if eq .Verdict "no established grade"}}<span class="chip wait">no established grade</span><span class="reason">Nothing to compare it with.</span>{{else}}<span class="chip wait">set aside</span><span class="reason">{{.Verdict}}</span>{{end}}</td>
         </tr>{{end}}
       </tbody>
     </table>
   </div>
   {{end}}
-  {{if $r.Differs}}<p class="muted" style="font-size:15.5px;margin-top:14px">Turned away before their grade was taken: {{range $i, $x := $r.Differs}}{{if $i}}, {{end}}<a href="/u/{{$x.Handle}}">{{$x.Handle}}</a> ({{if $x.Est}}established; {{end}}{{if eq $x.What "corpus"}}built a different corpus or exam{{else}}unedited loss {{gain $x.Diff}} from the round's{{end}}){{end}}. Neither counts against anyone; both are shown because a pattern in them would mean the tolerance is wrong.</p>{{end}}
+  {{if $r.Differs}}<p class="after">Turned away before their grade was taken: {{range $i, $x := $r.Differs}}{{if $i}}, {{end}}<a href="/u/{{$x.Handle}}">{{$x.Handle}}</a> ({{if $x.Est}}established; {{end}}{{if eq $x.What "corpus"}}built a different set of pages or exam{{else}}unedited loss {{gain $x.Diff}} from the round's{{end}}){{end}}. Neither counts against anyone; both are shown because a pattern in them would mean the tolerance is wrong.</p>{{end}}
   {{end}}
 
   {{if $d.BaselineChart}}
-  <h2>The corpus, unedited</h2>
-  <figure class="figure"><div class="plot">{{$d.BaselineChart}}</div><figcaption>Exam loss of the student trained on this round's corpus as drawn, by kind of exam text. This is what every entry is measured against.</figcaption></figure>
+  <h2>The pages, unedited</h2>
+  <figure class="figure"><h3>Exam loss, by kind of text</h3><p class="how">The model trained on the pages as drawn. Their mean is the number to beat.</p><div class="plot">{{$d.BaselineChart}}</div></figure>
   {{end}}
   {{end}}
 
-  <h2>Where this corpus {{if eq $r.Status "scheduled"}}will come{{else}}came{{end}} from</h2>
-  <p class="lead">Nobody picked it. {{if eq $r.Status "scheduled"}}The time and the crawl below are fixed now; the randomness will exist only at the draw.{{else}}Everything below can be checked against sources Stet does not control, and every verifier does so before training anything.{{end}}</p>
+  <h2>Where {{if eq $r.Status "scheduled"}}these pages will come{{else}}these pages came{{end}} from</h2>
+  <p class="lead">Nobody picked them. {{if eq $r.Status "scheduled"}}Time and crawl are fixed now; the random number comes at the draw.{{else}}Every line below can be checked against sources Stet does not control.{{end}}</p>
   <div class="panel">
     <dl class="kv">
-      <dt>Draw time</dt><dd>{{datetime $r.DrawAt}}{{if $d.Slot}} <span class="muted">· on the season's {{minutes .Season.DrawGrid}}-minute grid</span>{{else}} <span class="tag red">off the grid</span>{{end}}</dd>
-      <dt>Beacon round</dt><dd>{{if $d.BeaconURL}}<a href="{{$d.BeaconURL}}" rel="noopener">{{.Season.Beacon.Name}} #{{$r.DrandRound}}</a>{{else}}{{.Season.Beacon.Name}} #{{$r.DrandRound}}{{end}} <span class="muted">· the first emitted at or after the draw time</span></dd>
-      {{if $r.Was}}<dt>Moved from</dt><dd>{{range $i, $w := $r.Was}}{{if $i}}, {{end}}#{{$w}}{{end}} <span class="muted">· beacon rounds this round was announced for before its draw moved</span></dd>{{end}}
-      {{if $r.Randomness}}<dt>Randomness</dt><dd><code>{{$r.Randomness}}</code></dd>{{end}}
+      <dt>Draw time</dt><dd>{{datetime $r.DrawAt}}{{if $d.Slot}}<span class="why">on the season's {{minutes .Season.DrawGrid}}-minute grid, so the time could not be picked to suit anyone</span>{{else}} <span class="tag red">off the grid</span>{{end}}</dd>
+      <dt>Random number</dt><dd>{{if $d.BeaconURL}}<a href="{{$d.BeaconURL}}" rel="noopener">{{.Season.Beacon.Name}} #{{$r.DrandRound}}</a>{{else}}{{.Season.Beacon.Name}} #{{$r.DrandRound}}{{end}}<span class="why">a public randomness beacon: the first value it emitted at or after the draw time</span></dd>
+      {{if $r.Was}}<dt>Moved from</dt><dd>{{range $i, $w := $r.Was}}{{if $i}}, {{end}}#{{$w}}{{end}}<span class="why">beacon rounds this round was announced for before its draw moved</span></dd>{{end}}
+      {{if $r.Randomness}}<dt>Its value</dt><dd><code>{{$r.Randomness}}</code></dd>{{end}}
       {{with $r.Crawl}}
-      <dt>Crawl</dt><dd>{{.Crawl}} <span class="muted">· {{comma .NShards}} files · named when the round was announced</span></dd>
+      <dt>Crawl</dt><dd>{{.Crawl}}<span class="why">{{comma .NShards}} files of Common Crawl, named when the round was announced</span></dd>
       <dt>File list sha256</dt><dd><code>{{.PathsSHA256}}</code></dd>
       {{end}}
       {{if $d.SeedInput}}
-      <dt>Seed</dt><dd><code>sha256("{{$d.SeedInput}}")</code><br><code>= {{$r.Seed}}</code></dd>
+      <dt>Seed</dt><dd><code>sha256("{{$d.SeedInput}}")</code><br><code>= {{$r.Seed}}</code><span class="why">picks the files, the order of the pages, the exam passages and the model's starting weights</span></dd>
       {{end}}
-      {{if $d.Shards}}<dt>Files drawn</dt><dd><span class="num" style="font-size:14px">{{range $i, $s := $d.Shards}}{{if $i}}, {{end}}#{{$s}}{{end}}</span> <span class="muted">· of the crawl's list, in order</span></dd>{{end}}
-      {{if $r.CorpusSHA}}<dt>Corpus sha256</dt><dd><code>{{$r.CorpusSHA}}</code></dd>{{end}}
+      {{if $d.Shards}}<dt>Files drawn</dt><dd><span class="num" style="font-size:14px">{{range $i, $s := $d.Shards}}{{if $i}}, {{end}}#{{$s}}{{end}}</span><span class="why">positions in the crawl's file list</span></dd>{{end}}
+      {{if $r.CorpusSHA}}<dt>Pages sha256</dt><dd><code>{{$r.CorpusSHA}}</code></dd>{{end}}
       {{if $r.ExamSHA}}<dt>Exam sha256</dt><dd><code>{{$r.ExamSHA}}</code></dd>{{end}}
     </dl>
   </div>
   {{if ne $r.Status "scheduled"}}
-  <div class="cmd" style="margin-top:16px"><pre><span class="c"># rebuild it yourself, and measure the unedited loss</span>
+  <div class="cmd" style="margin-top:16px"><pre><span class="c"># rebuild these pages yourself, and measure the unedited loss</span>
 <span class="p">$ </span><span data-copy-text>stet baseline --round {{$d.ID}} --scale {{$r.Scale}}</span></pre><button type="button" data-copy>copy</button></div>
   {{end}}
 </div>

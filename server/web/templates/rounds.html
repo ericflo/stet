@@ -2,28 +2,39 @@
 <main class="page">
 <div class="page-head">
   <div class="wrap">
-    <span class="eyebrow">{{.Season.Title}}</span>
+    <span class="eyebrow">{{.Season.Title}} · every round</span>
     <h1>Rounds</h1>
-    <p class="sub">A round is one freshly drawn corpus and every entry that ran on it. A new one is drawn when an entry is waiting for it, and every {{.Interval}} regardless; up to {{$d.MaxNew}} new entries join each.</p>
+    <p class="sub">One round: fresh pages drawn at random, every curator edits them, the model trains on each result. One at a time, every {{.Interval}} or sooner when an entry is waiting.</p>
   </div>
 </div>
 <div class="wrap">
-  <div class="table-wrap" style="margin-top:34px" id="rounds" data-live>
-    {{if $d.Rounds}}
-    <table>
-      <thead><tr><th>Round</th><th>Status</th><th class="hide-s">Crawl</th><th class="r">Entries</th><th class="r hide-s">Unedited loss</th><th>Best</th></tr></thead>
+  <div class="track-box" style="margin-top:34px">
+    <ol class="track">
+      <li class="done"><span class="st">Announced</span><span class="say">draw time and crawl fixed in public</span></li>
+      <li class="done"><span class="st">Drawn</span><span class="say">a public random number picks the pages</span></li>
+      <li class="done"><span class="st">Running</span><span class="say">curators run, the model trains; results <a class="term" href="/glossary#sealed">sealed</a></span></li>
+      <li class="done"><span class="st">Settled</span><span class="say">every score published at once</span></li>
+    </ol>
+  </div>
+
+  <h2>All rounds</h2>
+  <div class="table-wrap" id="rounds" data-live>
+    {{if $d.Rounds}}{{$s := roundsscale $d.Rounds}}
+    <div class="m-axis">{{template "gaxis" $s}}</div>
+    <table class="rt">
+      <thead><tr><th>Round</th><th>Stage</th><th class="r">Entries</th><th class="r">Unedited loss<small>to beat</small></th><th>Did best</th><th class="barcol">{{template "gaxis" $s}}</th></tr></thead>
       <tbody>
         {{range $d.Rounds}}<tr>
-          <td><a class="name num" href="/rounds/{{.ID}}">{{.ID}}</a></td>
-          <td>
-            {{if eq .Status "scheduled"}}<span class="stage">draws <span data-until="{{.DrawAt}}">{{ago .DrawAt}}</span></span>
-            {{else if eq .Status "open"}}<span class="stage grading">grading · {{.Settled}} of {{.Entries}}</span>
-            {{else}}<span class="stage settled">settled {{ago .SettledAt}}</span>{{end}}
+          <td class="main"><a class="name" href="/rounds/{{.ID}}">Round {{.Idx}}</a> <span class="by num">{{.ID}}</span></td>
+          <td data-label="Stage" class="wide">
+            {{if eq .Status "scheduled"}}<span class="chip wait">announced</span> <span class="sub" style="display:inline">draws <span data-until="{{.DrawAt}}">{{ago .DrawAt}}</span></span>
+            {{else if eq .Status "open"}}<span class="chip live">running</span> <span class="pips" role="img" aria-label="{{.Edited}} of {{.Entries}} entries run">{{range pips .Settled .Edited .Entries}}<i class="p{{.}}"></i>{{end}}</span>
+            {{else}}<span class="chip done">settled</span> <span class="sub" style="display:inline">{{ago .SettledAt}}</span>{{end}}
           </td>
-          <td class="hide-s muted num">{{with .Crawl}}{{.Crawl}}{{end}}</td>
-          <td class="r num">{{if eq .Status "scheduled"}}—{{else}}{{.Entries}}{{end}}</td>
-          <td class="r num hide-s">{{if has .BaselineLoss}}{{f3 (ptr .BaselineLoss)}}{{else}}—{{end}}</td>
-          <td>{{if has .BestGain}}<a href="/editors/{{short .BestID}}">{{.BestName}}</a> <span class="num pos">{{gain (ptr .BestGain)}}</span>{{else}}<span class="muted">—</span>{{end}}</td>
+          <td class="r num" data-label="Entries">{{if eq .Status "scheduled"}}<span class="muted">—</span>{{else}}{{.Entries}}{{end}}</td>
+          <td class="r num" data-label="Unedited loss">{{if has .BaselineLoss}}{{f3 (ptr .BaselineLoss)}}{{else if eq .Status "open"}}<span class="muted">sealed</span>{{else}}<span class="muted">—</span>{{end}}</td>
+          <td data-label="Did best">{{if has .BestGain}}<a href="/editors/{{short .BestID}}">{{.BestName}}</a> <span class="num pos">{{gain (ptr .BestGain)}}</span>{{else if eq .Status "open"}}<span class="muted">sealed</span>{{else}}<span class="muted">—</span>{{end}}</td>
+          <td class="barcell wide">{{if has .BestGain}}{{template "gbar" (dict "S" $s "V" (ptr .BestGain))}}{{end}}</td>
         </tr>{{end}}
       </tbody>
     </table>

@@ -1,0 +1,86 @@
+{{define "body"}}{{$d := .D}}
+<main class="page">
+<div class="page-head">
+  <div class="wrap">
+    <span class="eyebrow">Plain words</span>
+    <h1>Glossary</h1>
+    <p class="sub">Every term the site uses, in plain language, with the numbers that are true this season. If a word on another page has a dotted underline, it links here.</p>
+  </div>
+</div>
+<div class="wrap gloss">
+  <nav aria-label="Glossary sections">
+    <b>The competition</b>
+    <a href="#curator">Curator</a><a href="#round">Round</a><a href="#unedited">Unedited</a><a href="#edit-script">Edit script</a><a href="#model">The model</a><a href="#exam">Exam</a><a href="#loss">Loss</a><a href="#nats">Nats</a><a href="#gain">Gain</a>
+    <b>The standings</b>
+    <a href="#rating">Rating</a><a href="#se">± (uncertainty)</a><a href="#worth">Worth</a><a href="#qualifying">Qualifying</a><a href="#ladder">Ladder</a><a href="#record">Record</a><a href="#reference">Reference curator</a>
+    <b>Who does the work</b>
+    <a href="#verifier">Verifier</a><a href="#run">Run</a><a href="#grade">Grade</a><a href="#established">Established</a><a href="#organisers">Organisers' machine</a>
+    <b>How sure a score is</b>
+    <a href="#sealed">Sealed</a><a href="#settled">Settled</a><a href="#confirmed">Confirmed</a><a href="#one-runner">One runner, one grader</a><a href="#run-once">Run once</a><a href="#runs-differed">Runs differed</a><a href="#disputed">Disputed, outlier</a><a href="#failed">Failed, not run</a>
+    <b>Where the pages come from</b>
+    <a href="#draw">Draw</a><a href="#beacon">Beacon</a><a href="#crawl">Crawl</a><a href="#scale">Scale</a><a href="#season">Season</a>
+  </nav>
+
+  <div>
+    <h2>The competition</h2>
+    <p class="intro">The model, the way it is trained and the exam are the same for everyone. The only thing an entry changes is the data the model learns from.</p>
+    <dl>
+      <div id="curator"><dt>Curator <span class="also">also: entry, editor</span></dt><dd><p>What you enter: a program that is handed a pile of raw web pages it has never seen and {{howlong .Scale.EditSeconds}} on one GPU, and decides what to keep, what to cut, and in what order. It can be a few rules, a small model you trained, or an agent. Its code is public from the first round it plays.</p><span class="eg">Example: <i>tidy</i> keeps English prose, drops exact duplicates, cuts navigation lines, and shuffles what is left.</span></dd></div>
+      <div id="round"><dt>Round</dt><dd><p>One heat of the competition. A fresh random slice of web pages is drawn, every curator in the round edits that same slice, and the model is trained on each result and examined. Rounds run one at a time: one is drawn when an entry is waiting and the last has settled, and every {{.Interval}} regardless. Each has a number (round 6) and an ID (<code>s0-o00006</code>: season 0, official round 6).</p></dd></div>
+      <div id="unedited"><dt>Unedited <span class="also">also: raw, the baseline</span></dt><dd><p>The round's pages exactly as drawn, with nothing cut or reordered: what the model would learn from with no curator at all. The model is trained on the unedited pages too, and its exam loss is the number every entry in that round is trying to get below.</p></dd></div>
+      <div id="edit-script"><dt>Edit script</dt><dd><p>What a curator produces: a list of which pieces of which pages to keep, in what order, and how many times. It is plain data, not code, so anyone can train on it safely. At least {{pct1 $d.CopyFrac}} of what the model reads must be copied byte for byte from the round's pages: the competition is about choosing data, not writing it. Every script is published when its round settles.</p></dd></div>
+      <div id="model"><dt>The model <span class="also">also: the student</span></dt><dd><p>A small language model ({{.Scale.NLayer}} layers, {{.Scale.DModel}} wide) with fixed settings. It reads exactly {{compact .Scale.TrainTokens}} tokens of a script: too little and the data repeats, too much and the rest is cut off. It is trained from the same starting weights for every entry in a round, so the data is the only difference.</p></dd></div>
+      <div id="exam"><dt>Exam</dt><dd><p>Passages of carefully chosen human writing of {{len .Season.ExamSources}} kinds ({{range $i, $s := .Season.ExamSources}}{{if $i}}, {{end}}{{$s}}{{end}}). The model is asked to predict each next word, and its loss is measured. The exam is public, but a curator cannot read it while it runs officially, and pages that quote it are removed first. A second, secret exam decides the season's final table.</p></dd></div>
+      <div id="loss"><dt>Loss <span class="also">also: exam loss</span></dt><dd><p>How surprised the model is by the exam text, on average per token. <b>Lower is better</b>: a model that predicts the next word well is rarely surprised.</p></dd></div>
+      <div id="nats"><dt>Nats</dt><dd><p>The unit loss is measured in (natural-log units, like bits but with base <i>e</i>). You don't need the maths: what matters is the difference between two losses. For a sense of how big a difference is, the <a href="#worth">worth</a> column turns it into how much more data it was worth.</p></dd></div>
+      <div id="gain"><dt>Gain</dt><dd><p>The score for one round: the unedited loss minus the loss on the curator's edit, on the same round, measured by the same machine. <b>Higher is better.</b> 0 means no better than doing nothing; below 0 means the curator made the data worse.</p><span class="eg">Example: if the unedited loss is 5.30 and the loss on a curator's edit is 4.30, its gain is +1.00.</span></dd></div>
+    </dl>
+
+    <h2>The standings</h2>
+    <p class="intro">How rounds add up to a ranking.</p>
+    <dl>
+      <div id="rating"><dt>Rating</dt><dd><p>A curator's average gain over the rounds it has played, adjusted for how hard each round's pages were, so an entry that happened to play only hard rounds isn't punished for it. The leaderboard is sorted by rating.</p></dd></div>
+      <div id="se"><dt>± <span class="also">also: standard error, uncertainty</span></dt><dd><p>How far the rating might be from the curator's true level, given how much its gain moves from round to round. Two curators whose ratings are closer than their ± are hard to tell apart. It shrinks as a curator plays more rounds.</p></dd></div>
+      <div id="worth"><dt>Worth <span class="also">also: multiplier</span></dt><dd><p>The rating said another way: a model trained on this curator's pick did as well as one trained on that many times as much unedited data. It is read off a curve measured by training the model on more and more unedited data, and never guessed beyond it: past the end of the curve it reads "more than", as in &gt;8×.</p><span class="eg">1.00× means no better than unedited. 6× means the curator's data was worth six times as much raw data.</span></dd></div>
+      <div id="qualifying"><dt>Qualifying</dt><dd><p>A new entry's first {{$d.QualifyRounds}} rounds. It is ranked after {{$d.RatedRounds}}. Until then it is listed separately, because one or two lucky rounds can make a newcomer look better than it is.</p></dd></div>
+      <div id="ladder"><dt>Ladder</dt><dd><p>The {{$d.LadderSize}} curators run again in every round: the record holder, then the best-rated curators, at most one per person (the organisers' reference curators excepted). Playing the same rounds is what lets any two of them be compared on the same pages.</p></dd></div>
+      <div id="record"><dt>Record</dt><dd><p>A stricter title than first place. A challenger takes the record only by beating the holder <b>head to head on rounds both played</b>, by more than {{f2 $d.Margin}} nats, in a statistical test that rules out a lucky streak. It is checked only at {{range $i, $l := $d.Rule.Looks}}{{if $i}}, {{end}}{{$l}}{{end}} shared rounds, never in between, so checking after every round cannot hand it to a lucky copy of the holder. The first record goes to the first curator to beat the unedited pages that way.</p></dd></div>
+      <div id="reference"><dt>Reference curator</dt><dd><p>A curator entered by the organisers as a yardstick. <i>identity</i> changes nothing, so its gain should be about 0: a check that the scoring is fair. <i>english</i> and <i>tidy</i> are simple rule-based curators a serious entry should beat. Their code is public; <code>stet fork stet/tidy</code> copies one to start from.</p></dd></div>
+    </dl>
+
+    <h2>Who does the work</h2>
+    <p class="intro">Scores are made on verifiers' machines. Anyone can be one, and the rules are built so that no score needs the organisers' hardware. While volunteers are few, the organisers' own machines fill in, and every score they stand behind alone says so.</p>
+    <dl>
+      <div id="verifier"><dt>Verifier</dt><dd><p>Anyone who lends a GPU by running <code>stet verify</code>. Verifiers run curators and grade scripts. They cannot choose their work, never handle their own entry, and cannot see anyone else's results until the round settles. <a href="/verifiers">Everyone verifying →</a></p></dd></div>
+      <div id="run"><dt>Run</dt><dd><p>One verifier's machine running a curator on the round's pages, in a sandbox with no network, for up to {{howlong .Scale.EditSeconds}}. A run produces an edit script. Each entry gets {{$d.RunsPerEntry}} runs by different people when that many are around; if they differ by more than {{f2 $d.Tolerance.Run}} nats, a third person runs it and the median counts.</p></dd></div>
+      <div id="grade"><dt>Grade</dt><dd><p>One verifier training the model on one edit script and measuring its exam loss, against that same machine's measurement of the unedited loss. Grading runs nobody's code: the script is plain data. A script is never graded only by the person whose run wrote it, except by the organisers' machine when nobody else is there.</p></dd></div>
+      <div id="established"><dt>Established</dt><dd><p>A verifier whose grades have agreed with other people's {{$d.EstablishAfter}} times{{if .Github}}, with a GitHub account at least {{$d.GithubDays}} days old linked{{end}}. Only established verifiers' grades make scores, and only they may run curators. Everyone else's grades are checks: published, compared, and counted towards becoming established. An account whose grades differ {{$d.MuteAfter}} times, and more than once for every ten that agreed, gets no work for {{$d.MuteDays}} days.</p></dd></div>
+      <div id="organisers"><dt>Organisers' machine</dt><dd><p>The organisers' own verifier accounts. They start out established so a season can begin, are marked on every page, and are checked like anyone else. However many machines they have, they count as one person. When nobody else is around, an organisers' machine may run a curator and grade it itself; such scores say so.</p></dd></div>
+    </dl>
+
+    <h2>How sure a score is</h2>
+    <p class="intro">Every score says how many people stand behind it, with one, two or three dots.</p>
+    <dl>
+      <div id="sealed"><dt><span class="chip live">sealed</span></dt><dd><p>While a round is being run, the site and the API show none of its scripts, grades or even its unedited loss, and a verifier sees only the one job in hand. So no runner can copy another's run, and no grader can tune to anyone else's number. Everything is published at once when the round settles.</p></dd></div>
+      <div id="settled"><dt><span class="chip done">settled</span></dt><dd><p>The round is over: every entry has its score, and every run and grade behind it is public.</p></dd></div>
+      <div id="confirmed"><dt><span class="sure l3"><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>Confirmed</span></dt><dd><p>Two or more different people ran the curator on their own machines and got the same result, each run was graded by someone other than its runner, and more than one person's grades are behind the score. The strongest a score gets.</p></dd></div>
+      <div id="one-runner"><dt><span class="sure l2"><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>One runner · One grader</span></dt><dd><p>The runs agree, but they were all made by one person (<i>one runner</i>), or all graded by one person (<i>one grader</i>). The organisers' machines count as one person.</p></dd></div>
+      <div id="run-once"><dt><span class="sure l1"><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>Run once</span> <span class="tag amber" style="margin:0">graded by its own runner</span></dt><dd><p>Only one machine ran the curator, because nobody else was around. <i>Graded by its own runner</i> means that same machine also graded what it wrote; only the organisers' machine may do that, so a season can start. Such a score has been checked by nobody else yet, but its script is public, so anyone can re-grade it with <code>stet score</code>.</p></dd></div>
+      <div id="runs-differed"><dt><span class="sure l1"><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>Runs differed</span></dt><dd><p>Two runs of the curator came out more than {{f2 $d.Tolerance.Run}} nats apart. A third was asked for, and the score is the median. Curators that use the GPU or the clock can legitimately vary.</p></dd></div>
+      <div id="disputed"><dt><span class="tag red" style="margin:0">disputed</span> <span class="chip bad">outlier</span></dt><dd><p><i>Outlier</i> (counted on a score as "1 differed"): a grade landed more than {{f2 $d.Tolerance.Grade}} nats from the script's gain. It is published, and counts as a strike against that account. <i>Disputed</i>: two established verifiers measured different gains for one script and nobody was there to say which was right; the gain is midway, and neither is struck.</p></dd></div>
+      <div id="failed"><dt><span class="chip bad">failed</span> <span class="chip bad">not run</span></dt><dd><p><i>Failed</i>: every run of the curator crashed, ran out of time with nothing written, or wrote an invalid script, so the round scores a gain of 0 for it. A curator with two failed rounds in its last five stops being run. <i>Not run</i>: nobody could run it, or check a run of it, so the round does not count for it at all.</p></dd></div>
+    </dl>
+
+    <h2>Where the pages come from</h2>
+    <p class="intro">Nobody chooses a round's pages, and anyone can check that.</p>
+    <dl>
+      <div id="draw"><dt>Draw</dt><dd><p>The moment a round's pages are picked. The time is announced in advance and falls on a fixed {{minutes .Season.DrawGrid}}-minute grid, so it can't be chosen to suit anyone. Entries must be in before it.</p></dd></div>
+      <div id="beacon"><dt>Beacon</dt><dd><p>{{.Season.Beacon.Name}}: a public source of random numbers run by others, which emits a new value every few seconds. The first value after the draw time picks the round's pages, the exam passages and the model's starting weights. Nobody, organisers included, can know it in advance.</p></dd></div>
+      <div id="crawl"><dt>Crawl</dt><dd><p>Common Crawl, a public archive of billions of web pages. Each round draws a few files from its newest crawl, named when the round is announced. Every verifier fetches the pages from Common Crawl itself and checks them against the announcement.</p></dd></div>
+      <div id="scale"><dt>Scale</dt><dd><p>The size of everything in a round: how big the model is, how much it reads, how many pages are drawn. Official rounds this season are run at <b>{{.ScaleID}}</b>. Smaller scales exist for quick practice on your own machine.</p></dd></div>
+      <div id="season"><dt>Season</dt><dd><p>A run of rounds under one fixed set of rules, model and exam. {{.Season.Title}} is the current one. At its end, the held-out exam decides the final table.</p></dd></div>
+    </dl>
+  </div>
+</div>
+</main>
+{{end}}

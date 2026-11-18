@@ -2,57 +2,55 @@
 <main class="page">
 <div class="page-head">
   <div class="wrap">
-    <span class="eyebrow">{{.Season.Title}} · {{.ScaleID}} scale</span>
+    <span class="eyebrow">{{.Season.Title}} · standings</span>
     <h1>Leaderboard</h1>
-    <p class="sub">The standings of the competition. Every entry is a curator: a program that edits each round's raw corpus before a fixed model trains on it. Entries are ranked by mean gain over the unedited corpus: how much lower the model's exam loss is after the curator has been at the data. Fresh corpus every round, so nothing here was tuned to one sample.</p>
+    <p class="sub">Each <a class="term" href="/glossary#curator">curator</a> picks what the same model trains on. The bar is how much better the model did than on <a class="term" href="/glossary#unedited">unedited</a> pages, averaged over rounds. <b>Longer is better.</b></p>
   </div>
 </div>
 <div class="wrap">
-  <h2>Ranked</h2>
-  <div class="table-wrap" id="rated" data-live>
-    {{if $d.Rated}}
-    <table>{{template "boardhead"}}<tbody>{{template "boardrows" $d.Rated}}</tbody></table>
-    {{else}}
-    <div class="empty"><span class="hand">nobody yet</span>An entry is ranked once it has settled {{$d.RatedRounds}} rounds.</div>
-    {{end}}
+  <div style="margin-top:34px" id="rated" data-live>
+    <div class="table-wrap">
+      {{if or $d.Rated $d.Provisional}}
+      {{template "board" (dict "Rated" $d.Rated "Qual" $d.Provisional "Need" $d.RatedRounds)}}
+      {{else}}
+      <div class="empty"><span class="hand">nobody yet</span>An entry appears here after its first round.</div>
+      {{end}}
+    </div>
+    {{template "board-legend"}}
   </div>
-  <p class="muted" style="font-size:15.5px;margin-top:14px">
-    <b>Rating</b> is in nats per token, ± one standard error. It is adjusted for round difficulty, so an entry that only ran on hard corpora is not punished for it.
-    {{if $d.HasCurve}}<b>Worth</b> reads the rating off a measured curve: how many times more unedited data the same student would have needed to reach the same loss. It is never extrapolated; past the end of the curve it reads "more than".{{else}}<b>Worth</b> (how much more unedited data the gain equals) appears once the reference curve for this scale has been measured.{{end}}
-    The top {{$d.LadderSize}} entries, one per person, run in every round.
-  </p>
+  <p class="after">The top {{$d.LadderSize}}, one per person, are the <a class="term" href="/glossary#ladder">ladder</a>: run again every round. {{if $.Live.Volunteers}}Scores are measured on volunteers' GPUs.{{else}}So far every score is the organisers' machine's alone: <a href="/rounds">see who measured what</a>.{{end}}</p>
 
-  {{if $d.Provisional}}
-  <h2>Qualifying</h2>
-  <div class="table-wrap" id="provisional" data-live>
-    <table>{{template "boardhead"}}<tbody>{{template "boardrows" $d.Provisional}}</tbody></table>
+  <h2 id="record">The record</h2>
+  <p class="lead">Stricter than first place: taken only by beating the holder <b>on the same rounds</b>, by more than {{f2 $d.Margin}} nats, checked at {{range $i, $l := $d.Rule.Looks}}{{if $i}}, {{end}}{{$l}}{{end}} shared rounds. <a href="/docs/rules#the-record">The rule →</a></p>
+  {{if $d.Records}}{{$cur := index $d.Records 0}}
+  <div class="stats">
+    <div><div class="k">Held by</div><div class="v" style="font-size:28px"><a href="/editors/{{short $cur.EditorID}}" style="text-decoration:none">{{$cur.Name}}</a></div><div class="cap">v{{$cur.Version}} · {{$cur.Owner}}</div></div>
+    <div><div class="k">Rating when taken</div><div class="v">{{gain $cur.Rating}}</div><div class="cap">{{with $d.Holder}}{{gain (ptr .Rating)}} now{{end}}</div></div>
+    <div><div class="k">Beat {{if $cur.Beat}}the holder{{else}}unedited{{end}} by</div><div class="v">{{gain $cur.Advantage}}</div><div class="cap">a round, over {{$cur.Rounds}} shared rounds</div></div>
+    <div><div class="k">Taken</div><div class="v" style="font-size:26px">{{date $cur.At}}</div><div class="cap"><a href="/rounds/{{$cur.RoundID}}">round {{$cur.RoundIdx}}</a></div></div>
   </div>
-  <p class="muted" style="font-size:15.5px;margin-top:14px">Every entry is given {{$d.QualifyRounds}} rounds. It is ranked after {{$d.RatedRounds}}.</p>
-  {{end}}
-
-  <h2>The record</h2>
-  {{if $d.Records}}
-  <figure class="figure"><div class="plot">{{$d.RecordChart}}</div><figcaption>Each step is a new holder.</figcaption></figure>
+  {{if gt (len $d.Records) 1}}
+  <figure class="figure"><h3>The record over time</h3><p class="how">Each step up is a new holder.</p><div class="plot">{{$d.RecordChart}}</div></figure>
   <div class="table-wrap" style="margin-top:22px">
-    <table>
-      <thead><tr><th>#</th><th>Curator</th><th class="r">Rating</th><th class="r">Beat the last by</th><th class="r hide-s">Over</th><th class="r hide-s">p</th><th class="hide-s">Taken</th></tr></thead>
+    <table class="rt">
+      <thead><tr><th class="rank">#</th><th>Holder</th><th class="r">Rating</th><th class="r">Beat the last by</th><th class="r">Over</th><th class="r">p</th><th>Taken</th></tr></thead>
       <tbody>
         {{range $d.Records}}<tr>
           <td class="rank">{{.N}}</td>
-          <td><a class="name" href="/editors/{{short .EditorID}}">{{.Name}}</a><span class="by">v{{.Version}} · <a href="/u/{{.Owner}}">{{.Owner}}</a></span>{{if .Technique}}<span class="tech">{{.Technique}}</span>{{end}}</td>
-          <td class="r num">{{gain .Rating}}</td>
-          <td class="r num">{{gain .Advantage}}{{if not .Beat}} <span class="pm">vs unedited</span>{{end}}</td>
-          <td class="r num hide-s">{{.Rounds}} rounds</td>
-          <td class="r num hide-s">{{printf "%.2g" .P}}</td>
-          <td class="hide-s muted">{{date .At}} · <a href="/rounds/{{.RoundID}}">{{.RoundID}}</a></td>
+          <td class="main"><span class="rankno" aria-hidden="true">{{.N}}</span><a class="name" href="/editors/{{short .EditorID}}">{{.Name}}</a><span class="by">v{{.Version}} · <a href="/u/{{.Owner}}">{{.Owner}}</a></span></td>
+          <td class="r num" data-label="Rating">{{gain .Rating}}</td>
+          <td class="r num" data-label="Beat the last by">{{gain .Advantage}}{{if not .Beat}}<span class="unit">over unedited</span>{{end}}</td>
+          <td class="r num" data-label="Shared rounds">{{.Rounds}}</td>
+          <td class="r num" data-label="p">{{printf "%.2g" .P}}</td>
+          <td class="dim two" data-label="Taken">{{date .At}} · <a href="/rounds/{{.RoundID}}">round {{.RoundIdx}}</a></td>
         </tr>{{end}}
       </tbody>
     </table>
   </div>
-  {{else}}
-  <div class="table-wrap"><div class="empty"><span class="hand">unclaimed</span>The first record goes to the first curator that beats the unedited corpus by more than {{f2 $d.Margin}} nats over {{index $d.Rule.Looks 0}} rounds.</div></div>
   {{end}}
-  <p class="note" style="margin-top:22px">The record changes hands only when a challenger beats the holder on the rounds both ran, by more than {{f2 $d.Margin}} nats, on a one-sided paired test. A challenger is looked at {{len $d.Rule.Looks}} times against a given holder ({{range $i, $l := $d.Rule.Looks}}{{if $i}}, {{end}}{{$l}}{{end}} shared rounds) and not otherwise, so checking after every round cannot hand it to a lucky near-copy. <a href="/docs/rules#the-record">The rule in full →</a></p>
+  {{else}}
+  <div class="table-wrap"><div class="empty"><span class="hand">unclaimed</span>Goes to the first curator to beat unedited data by more than {{f2 $d.Margin}} nats over {{index $d.Rule.Looks 0}} rounds.</div></div>
+  {{end}}
 </div>
 </main>
 {{end}}

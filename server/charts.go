@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"html/template"
 	"math"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -212,9 +213,9 @@ func gainChart(entries []EntryView) template.HTML {
 	bar := math.Min(24, math.Max(3, slot-2))
 	for i, r := range rows {
 		cx := left + slot*(float64(i)+0.5)
-		tip := fmt.Sprintf("%s · %s nats", r.Round, signed(r.Gain, 3))
+		tip := fmt.Sprintf("Round %d · %s nats", r.RoundIdx, signed(r.Gain, 3))
 		if !r.Valid {
-			tip = r.Round + " · invalid, scored as unedited"
+			tip = fmt.Sprintf("Round %d · failed, scored as unedited", r.RoundIdx)
 			b.f(`<circle class="void" cx="%.1f" cy="%.1f" r="3.5"/>`, cx, y(0))
 		} else {
 			cls, y0, y1 := "bar", y(r.Gain), y(0)
@@ -225,9 +226,9 @@ func gainChart(entries []EntryView) template.HTML {
 		}
 		b.f(`<rect class="hit" x="%.1f" y="%d" width="%.1f" height="%d" data-tip="%s"/>`, cx-slot/2, top, slot, h-top-bottom, esc(tip))
 	}
-	b.f(`<text x="%d" y="%d" text-anchor="start">%s</text>`, left, h-8, esc(rows[0].Round))
+	b.f(`<text x="%d" y="%d" text-anchor="start">round %d</text>`, left, h-8, rows[0].RoundIdx)
 	if len(rows) > 1 {
-		b.f(`<text x="%d" y="%d" text-anchor="end">%s</text>`, w-right, h-8, esc(rows[len(rows)-1].Round))
+		b.f(`<text x="%d" y="%d" text-anchor="end">round %d</text>`, w-right, h-8, rows[len(rows)-1].RoundIdx)
 	}
 	return b.done()
 }
@@ -379,4 +380,131 @@ func curveChart(curve [][]float64) template.HTML {
 	b.f(`<text x="%d" y="%d" text-anchor="start">step %s</text>`, left, h-8, comma(int64(x0)))
 	b.f(`<text x="%d" y="%d" text-anchor="end">step %s</text>`, w-right, h-8, comma(int64(x1)))
 	return b.done()
+}
+
+// --- bars in tables -------------------------------------------------------------------------
+
+// barScale puts every number of one table on one axis, so rows can be compared by the length
+// of their bars without reading a digit. Zero, the unedited data, is always on it: a bar
+// that reaches right of it beat doing nothing.
+type barScale struct{ Lo, Hi, Step float64 }
+
+type barTick struct {
+	Style template.CSS
+	Label string
+	Zero  bool
+}
+
+func newBarScale(vals []float64) barScale {
+	lo, hi := 0.0, 0.0
+	for _, v := range vals {
+		if !math.IsNaN(v) && !math.IsInf(v, 0) {
+			lo, hi = math.Min(lo, v), math.Max(hi, v)
+		}
+	}
+	if hi-lo < 1e-9 {
+		hi = lo + 1
+	}
+	pad := 0.04 * (hi - lo)
+	if lo < 0 {
+		lo -= pad
+	}
+	hi += pad
+	return barScale{Lo: lo, Hi: hi, Step: niceStep(hi-lo, 4)}
+}
+
+// X is where a value falls along the bar, in percent.
+func (s barScale) X(v float64) float64 {
+	return math.Max(0, math.Min(100, (v-s.Lo)/(s.Hi-s.Lo)*100))
+}
+
+// Bar places one row's bar: zero, the value, and the ends of its ± whisker if it has one.
+func (s barScale) Bar(v float64, se *float64) template.CSS {
+	css := fmt.Sprintf("--z:%.2f%%;--v:%.2f%%", s.X(0), s.X(v))
+	if se != nil {
+		css += fmt.Sprintf(";--a:%.2f%%;--b:%.2f%%", s.X(v-*se), s.X(v+*se))
+	}
+	return template.CSS(css)
+}
+
+// Ticks are the round numbers along the axis.
+func (s barScale) Ticks() []barTick {
+	var out []barTick
+	for k := math.Ceil(s.Lo/s.Step - 1e-9); k*s.Step <= s.Hi+1e-9; k++ {
+		v := k * s.Step
+		if math.Abs(v) < 1e-9 {
+			v = 0
+		}
+		label := strconv.FormatFloat(v, 'f', -1, 64)
+		if v > 0 {
+			label = "+" + label
+		}
+		out = append(out, barTick{Style: template.CSS(fmt.Sprintf("left:%.2f%%", s.X(v))), Label: label, Zero: v == 0})
+	}
+	return out
+}
+
+// boardScale is the axis for the standings: every rating and the reach of its whisker.
+func boardScale(groups ...[]*BoardRow) barScale {
+	var vals []float64
+	for _, rows := range groups {
+		for _, r := range rows {
+			if r.Rating == nil {
+				continue
+			}
+			vals = append(vals, *r.Rating)
+			if r.SE != nil {
+				vals = append(vals, *r.Rating-*r.SE, *r.Rating+*r.SE)
+			}
+		}
+	}
+	return newBarScale(vals)
+}
+
+// roundScale is the axis for one round's results: every settled gain in it.
+func roundScale(entries []EntryView) barScale {
+	var vals []float64
+	for _, e := range entries {
+		if e.Settled && e.Valid {
+			vals = append(vals, e.Gain)
+		}
+	}
+	return newBarScale(vals)
+}
+
+// pips are a round's entries as marks, in order: 2 for settled, 1 for run at least once,
+// 0 for still waiting.
+func pips(settled, edited, total int) []int {
+	out := make([]int, total)
+	for i := range out {
+		switch {
+		case i < settled:
+			out[i] = 2
+		case i < edited:
+			out[i] = 1
+		}
+	}
+	return out
+}
+
+// roundsScale is the axis for the list of rounds: each one's best gain.
+func roundsScale(rounds []roundSummary) barScale {
+	var vals []float64
+	for _, r := range rounds {
+		if r.BestGain != nil {
+			vals = append(vals, *r.BestGain)
+		}
+	}
+	return newBarScale(vals)
+}
+
+// agree places one grade beside the gain it is checked against: the middle of the strip is
+// the script's gain, the shaded band is the tolerance either side, and the dot is this
+// grader's measurement. Inside the band, it agreed.
+func agree(their *float64, script, tol float64) template.CSS {
+	if their == nil || tol <= 0 {
+		return ""
+	}
+	x := 50 + (*their-script)/(3*tol)*50
+	return template.CSS(fmt.Sprintf("--d:%.2f%%;--t:%.2f%%", math.Max(1, math.Min(99, x)), 50.0/3))
 }
