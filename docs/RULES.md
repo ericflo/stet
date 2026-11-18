@@ -321,7 +321,8 @@ are graded by **verifiers**: anyone who runs `stet verify`.
   gain and every grade, and the entry is marked **confirmed** (two or more runs by
   different people that agree, each graded by someone else, with more than one person's
   grades behind them), **one grader** (they agree, and one person graded them all),
-  **run once**, or **runs differed**.
+  **one runner** (they agree, and one person made them all), **run once**, or **runs
+  differed**. The organisers' machines count as one person, however many there are.
 - **No score rests on one volunteer's word.** A volunteer never grades a script that only
   it wrote. If nobody else is there to grade it within 45 minutes, that run is dropped,
   and if it was the entry's only run the round is void for that entry. The one exception is the

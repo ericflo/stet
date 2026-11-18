@@ -44,7 +44,7 @@
     <div><span class="eyebrow">Its own words</span><div class="v">{{pct1 .Script.InkFrac}}<small>of tokens</small></div></div>
     {{else}}
     <div><span class="eyebrow">Gain</span><div class="v">{{gain .Gain}}</div></div>
-    <div><span class="eyebrow">Runs</span><div class="v">{{.NRuns}}<small>{{if .Confirmed}}confirmed{{else if .OneGrader}}one grader{{else if .RunsDiffer}}differed{{else if eq .NRuns 1}}run once{{end}}{{if .Disputed}}, {{.Disputed}} {{plural .Disputed "grade" "grades"}} differed{{end}}</small></div></div>
+    <div><span class="eyebrow">Runs</span><div class="v">{{.NRuns}}<small>{{if .Confirmed}}confirmed{{else if .OneGrader}}one grader{{else if .OneRunner}}one runner{{else if .RunsDiffer}}differed{{else if eq .NRuns 1}}run once{{end}}{{if .Disputed}}, {{.Disputed}} {{plural .Disputed "grade" "grades"}} differed{{end}}</small></div></div>
     {{end}}
   </div>
   <div class="grid2">
@@ -73,7 +73,7 @@
           {{else}}
             <td><span class="stage {{.Stage}}">{{.Stage}}</span></td><td class="r muted">sealed</td><td class="r muted">·</td><td class="r muted">·</td>
           {{end}}
-          <td class="hide-s" style="font-size:14.5px">{{if and .Settled .NRuns}}<a class="num" href="/rounds/{{.Round}}#runs">{{.NRuns}}</a> {{if .Confirmed}}<span class="stage settled">confirmed</span>{{else if .OneGrader}}<span class="muted" title="Its runs agree, and one verifier graded them all">one grader</span>{{else if .RunsDiffer}}<span class="tag red">runs differed</span>{{else if eq .NRuns 1}}<span class="muted">run once</span>{{end}}{{if .Own}} <span class="tag" title="Nobody else was there to grade a script, so the machine that ran the curator graded it too">graded by its own runner</span>{{end}}{{else}}<span class="muted">—</span>{{end}}</td>
+          <td class="hide-s" style="font-size:14.5px">{{if and .Settled .NRuns}}<a class="num" href="/rounds/{{.Round}}#runs">{{.NRuns}}</a> {{if .Confirmed}}<span class="stage settled">confirmed</span>{{else if .OneGrader}}<span class="muted" title="Its runs agree, and one person's machines graded them all">one grader</span>{{else if .OneRunner}}<span class="muted" title="Its runs agree, and they were all made on the organisers' machines">one runner</span>{{else if .RunsDiffer}}<span class="tag red">runs differed</span>{{else if eq .NRuns 1}}<span class="muted">run once</span>{{end}}{{if .Own}} <span class="tag" title="Nobody else was there to grade a script, so the machine that ran the curator graded it too">graded by its own runner</span>{{end}}{{else}}<span class="muted">—</span>{{end}}</td>
           <td class="r num hide-s">{{with .Edit}}{{f1 .Seconds}}s{{else}}—{{end}}</td>
           <td class="hide-s">{{if .ScriptSHA}}<a class="num" href="/api/v1/scripts/{{.ScriptSHA}}" title="Download the edit script ({{bytes .ScriptSize}} unpacked)">{{tiny .ScriptSHA}}</a>{{else}}<span class="muted">—</span>{{end}}</td>
           <td class="hide-s muted" style="font-size:14.5px">{{if .Verifiers}}{{join .Verifiers ", "}}{{if .Together}} <a class="tag red" href="/rounds/{{.Round}}#grades" title="Two established verifiers measured different gains for one of its scripts, and nobody was there to say which was right">disputed</a>{{end}}{{if .Disputed}} <a class="tag red" href="/rounds/{{.Round}}#grades" title="Graders whose grade of one of its scripts was further from the script's gain than the tolerance. Their numbers are on the round's page.">{{.Disputed}} differed</a>{{end}}{{else}}—{{end}}</td>

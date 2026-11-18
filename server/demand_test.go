@@ -184,7 +184,7 @@ func TestEachPersonsFirstEntryGoesBeforeAnyonesSecond(t *testing.T) {
 
 // What the operating guide says about the early days, when the only established machines
 // are the organisers' own.
-func TestTwoOrganisersMachinesConfirmOrGoTwiceAsFast(t *testing.T) {
+func TestTwoOrganisersMachinesAgreeOrGoTwiceAsFast(t *testing.T) {
 	for _, runs := range []int{2, 1} {
 		pubA, privA := newKey()
 		pubB, privB := newKey()
@@ -229,8 +229,9 @@ func TestTwoOrganisersMachinesConfirmOrGoTwiceAsFast(t *testing.T) {
 				switch {
 				case !e.Valid:
 					t.Fatalf("runs per entry %d: %s did not score: %s", runs, name, e.Reason)
-				case runs == 2 && (!both || !e.Confirmed):
-					t.Fatalf("runs per entry 2: %s run by both: %v, confirmed: %v", name, both, e.Confirmed)
+				// Two machines that agree, and one person's: worth knowing, and not called confirmed.
+				case runs == 2 && (!both || e.NRuns != 2 || e.RunsDiffer || e.Confirmed || !e.OneGrader):
+					t.Fatalf("runs per entry 2: %s run by both: %v, runs %d, confirmed: %v, one grader: %v", name, both, e.NRuns, e.Confirmed, e.OneGrader)
 				case runs == 1 && (both || len(e.Runs) != 1):
 					t.Fatalf("runs per entry 1: %s was run %d times", name, len(e.Runs))
 				}

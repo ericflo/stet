@@ -38,7 +38,8 @@ A settled entry:
 | `valid`, `gain`, `loss` | The score. `gain` is taken over the entry's runs: the mean of two, the median of three, a failed run counting 0. `loss` is the round's unedited loss less the gain |
 | `n_runs` | How many runs the score is made of |
 | `confirmed` | Two different people's runs agree, to within the season's tolerance for runs, neither rests on a grade by its own runner, and more than one account's grades decide them |
-| `one_grader` | Its runs agree, and one account's grades decide them all: nobody else was there to grade |
+| `one_grader` | Its runs agree, and one person's grades decide them all: nobody else was there to grade. The organisers' machines count as one person |
+| `one_runner` | Its runs agree, and one person's machines made them all (the organisers'): nobody else was there to run it |
 | `runs_differ` | It was run more than once and no two runs agree |
 | `runs` | Each run: see below |
 | `dropped_runs` | Runs that count for nothing because nobody else was there to check them, in the same shape with `status` `dropped` and a `reason` |

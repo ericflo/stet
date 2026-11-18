@@ -81,8 +81,9 @@ package main
 //     be one machine's word for the whole score: it gets a second, from someone else, when
 //     someone else who is around could give it. An entry's scripts go to different graders
 //     when there is other work for them. An entry is called CONFIRMED only when two
-//     people's runs agree and more than one account's grades decide them; when one
-//     account's do, it says so (ONE GRADER).
+//     people's runs agree and more than one person's grades decide them; when one
+//     person's do, it says so (ONE GRADER), and so it does when the runs that agree are
+//     all one person's (ONE RUNNER). The organisers' machines are one person's.
 //   - Everyone else's grade is compared with the script's gain when the round settles. One
 //     that agrees earns standing; one that does not is a strike. Agreeing about the
 //     unedited corpus, or that a script is invalid, earns nothing: neither takes training.
@@ -2293,31 +2294,42 @@ func (a *App) settleEntry(tx *Tx, j *judge, st *entryState) {
 		rep = runs[0]
 	}
 	// Confirmed: two people's runs agree, the score is theirs, and no run rests on a grade
-	// by its own runner.
+	// by its own runner. The organisers' machines are one person's, however many there
+	// are: two of them agreeing says that the machines agree, not that two people do.
+	person := func(id int64) int64 {
+		if acct := tx.s.Accounts[id]; acct != nil && acct.Anchor {
+			return 0
+		}
+		return id
+	}
 	sorted := append([]*Run(nil), runs...)
 	sort.SliceStable(sorted, func(x, y int) bool { return sorted[x].Gain < sorted[y].Gain })
 	middle := sorted[len(sorted)/2] // of three; with two, the score is between them
-	pair := false
+	pair, two := false, false
 	for x, p := range runs {
 		for _, q := range runs[x+1:] {
 			same := p.Valid == q.Valid && (!p.Valid || within(p.Gain-q.Gain, tol.Run))
-			pair = pair || (same && (len(runs) == 2 || p == middle || q == middle))
+			agree := same && (len(runs) == 2 || p == middle || q == middle)
+			pair = pair || agree
+			two = two || (agree && person(p.By) != person(q.By))
 		}
 	}
 	// And two people answer for it: the grades that decide its runs are not all one
-	// account's. (A run that wrote no script is its runner's own word.)
+	// person's. (A run that wrote no script is its runner's own word.)
 	deciders := map[int64]bool{}
 	for _, run := range runs {
 		if g := scripts[run.Script]; g != nil {
 			for _, gv := range g.v.counted {
-				deciders[gv.r.AccountID] = true
+				deciders[person(gv.r.AccountID)] = true
 			}
 		} else {
-			deciders[run.By] = true
+			deciders[person(run.By)] = true
 		}
 	}
-	e.NRuns, e.Confirmed, e.RunsDiffer = len(runs), pair && !self && len(deciders) > 1, len(runs) > 1 && !pair
+	e.NRuns, e.RunsDiffer = len(runs), len(runs) > 1 && !pair
+	e.Confirmed = two && !self && len(deciders) > 1
 	e.OneGrader = pair && !self && len(deciders) < 2
+	e.OneRunner = pair && !self && !two && len(deciders) > 1
 	e.Script, e.ScriptSize, e.Edit, e.EditedAt, e.EditedBy = rep.Script, rep.ScriptSize, rep.Edit, rep.At, rep.By
 	e.Loss, e.BySource, e.Reason = nil, nil, ""
 	if e.Valid {

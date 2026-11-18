@@ -625,6 +625,42 @@ func TestAnEntryOneAccountGradedAloneIsNotCalledConfirmed(t *testing.T) {
 	}
 }
 
+// The organisers' machines are one person's, however many there are. Two of them agreeing
+// says that two machines agree, which is worth knowing, and is not two people's word.
+func TestTheOrganisersMachinesCountAsOnePerson(t *testing.T) {
+	pubA, privA := newKey()
+	pubB, privB := newKey()
+	w := newWorld(t, pubA, pubB)
+	a, b := w.join("anchor-one", privA), w.join("anchor-two", privB)
+	alice, carol := w.join("alice", nil), w.join("carol", nil)
+	w.submit(alice, "steady", "print('steady')")
+	idx := w.draw()
+	w.run(a, scriptOne)
+	w.run(b, scriptTwo)
+	// A volunteer turns up in time to grade one of the two scripts. The organisers'
+	// machines grade what is left: the one that did not write it.
+	w.established("carol")
+	w.grade(carol, false, 5.5)
+	for step := 0; step < 10 && w.settled(idx) == 0; step++ {
+		for _, who := range []*actor{a, b} {
+			if c := w.claim(who, true); c.Job != nil {
+				if code, status := w.report(who, c, 5.5); code != 200 {
+					t.Fatalf("%s's grade: HTTP %d %s", who.handle, code, status)
+				}
+			}
+		}
+	}
+	w.check()
+	// Two people's grades are behind it, and both runs are the organisers': not confirmed.
+	e := w.entry(idx, "steady")
+	if !e.Valid || e.NRuns != 2 || e.Confirmed || e.OneGrader || !e.OneRunner || e.RunsDiffer {
+		t.Fatalf("two runs by the organisers' machines, graded by them and a volunteer: %+v", e)
+	}
+	if _, page := w.page("/rounds/" + roundID(w.app.season.ID, idx)); !strings.Contains(page, ">one runner<") || strings.Contains(page, ">confirmed<") {
+		t.Fatal("the round's page calls an entry that only the organisers' machines ran confirmed")
+	}
+}
+
 // With two graders and other work to do, an entry's scripts go to different graders, so
 // that the usual entry has two people's grades behind it without anybody grading twice.
 func TestAnEntrysScriptsGoToDifferentGraders(t *testing.T) {

@@ -482,6 +482,7 @@ type entryJ struct {
 	NRuns      int            `json:"n_runs"`
 	Confirmed  bool           `json:"confirmed"`
 	OneGrader  bool           `json:"one_grader"`
+	OneRunner  bool           `json:"one_runner"`
 	RunsDiffer bool           `json:"runs_differ"`
 }
 

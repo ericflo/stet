@@ -84,13 +84,17 @@ chooses which:
 
 | `STET_RUNS_PER_ENTRY` | With two organisers' machines | Use it when |
 |---|---|---|
-| 2 (the default) | Each entry is run by both and each grades the other's script: entries are *confirmed*. Same speed as one machine | Confirmation matters more than speed |
+| 2 (the default) | Each entry is run by both and each grades the other's script: two runs on two machines that have to agree. Same speed as one machine | A second machine's agreement matters more than speed |
 | 1 | Each entry is run once by whichever machine is free, and graded by the other when it is around: about twice the speed | The queue is long and the machines are the organisers' own |
 
 Each machine needs its own key (one verifier per key) and each key in `STET_ANCHOR_KEYS`;
 the held-out exam reaches each by itself. A machine that only grades (`stet service install`, no
 `--edits`) needs no sandbox and no floor, and is enough to turn *run once* into a second
 opinion on every script.
+
+The organisers' machines count as one person, however many there are. An entry that only
+they ran and graded is marked *one grader*, never *confirmed*: that word is kept for two
+people who did not choose each other.
 
 When volunteers arrive nothing needs changing: an established volunteer who runs curators
 is preferred for the second run, and the organisers' machines stop grading their own
