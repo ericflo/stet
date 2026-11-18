@@ -9,11 +9,18 @@ import (
 
 // --- how many machines the work wants ---------------------------------------------------------
 //
-// Rented machines only grade: RunPod's containers cannot make the sandbox a curator runs in
-// (no user namespaces, no cgroup of their own), so curators are run by the organisers' own
-// machines. Scripts to grade come from those runs, as fast as the runners make them. So the
-// machines wanted are two things added up: enough to keep pace with the runners while
-// there are curators still to run, and enough to clear the scripts already waiting.
+// A rented machine runs curators, in stet's container sandbox, and grades. Every curator
+// still to run is two jobs (the run, and a grade of what it writes) and every script waiting
+// is one, and each machine is wanted for a few of them: past that, a machine more would
+// spend longer starting than it saved.
+//
+// With --no-edits they only grade, and curators are run by the organisers' own machines.
+// Scripts to grade then come from those runs, as fast as the runners make them: the
+// machines wanted are enough to keep pace with the runners while curators are still to
+// run, and enough to clear the scripts already waiting.
+//
+// An entry waiting for a round has it drawn early only once somebody who runs curators has
+// asked for work. When nobody has, one machine is rented to ask.
 //
 // Letting machines go needs no decision here. A rented machine stops by itself once it has
 // had nothing to do for a while, and ends its own pod. What is decided here is ending, at
@@ -21,9 +28,10 @@ import (
 // have gone quiet or stopped.
 
 type Policy struct {
+	Edits       bool    // the machines run curators as well as grade
 	MaxWorkers  int     // never more machines than this
-	PerRunner   float64 // machines that keep pace with one curator runner
-	PerWorker   int     // scripts waiting that justify one more machine
+	PerRunner   float64 // grading only: machines that keep pace with one curator runner
+	PerWorker   int     // jobs waiting that justify one more machine
 	MaxHourly   float64 // never rent past this many dollars an hour, all machines together
 	DailyBudget float64 // no new machine once this much has been spent today (UTC); 0: no limit
 	Grace       time.Duration
@@ -32,12 +40,24 @@ type Policy struct {
 
 // target is how many machines the work justifies, before money is counted.
 func (p Policy) target(w *Work) int {
+	per := max(p.PerWorker, 1)
+	if p.Edits {
+		jobs := 0
+		for _, r := range w.Rounds {
+			jobs += 2*r.RunsWanted + r.GradesWanted
+		}
+		n := (jobs + per - 1) / per
+		if len(w.Rounds) == 0 && w.Waiting && w.Runners == 0 {
+			n = 1 // to ask for work, so that the waiting entry's round is drawn
+		}
+		return min(n, p.MaxWorkers)
+	}
 	scripts, curators := 0, 0
 	for _, r := range w.Rounds {
 		scripts += r.GradesWanted
 		curators += r.RunsWaiting + r.EditsUnderWay
 	}
-	n := (scripts + max(p.PerWorker, 1) - 1) / max(p.PerWorker, 1)
+	n := (scripts + per - 1) / per
 	if curators > 0 {
 		n += int(math.Ceil(p.PerRunner * float64(max(w.Runners, 1))))
 	}
@@ -55,7 +75,8 @@ type Worker struct {
 //
 //	free      no pod
 //	starting  a pod, and stet has not yet asked the server for work from it
-//	grading   it holds a job (edit, should one ever be handed it)
+//	grading   it holds a grade job
+//	running   it holds a curator to run
 //	waiting   it asks for work and has none
 //	quiet     it asked, and then nothing for longer than any job takes without asking
 //	stopped   the pod stopped, or never got going
@@ -68,7 +89,7 @@ func (w *Worker) state(now time.Time, p Policy) string {
 	case w.Machine != nil && w.Machine.Busy == "grade":
 		return "grading"
 	case w.Machine != nil && w.Machine.Busy != "":
-		return w.Machine.Busy
+		return "running"
 	}
 	seen := int64(0)
 	if w.Machine != nil {

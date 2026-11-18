@@ -107,19 +107,20 @@ func flags(name string, o *Options) *flag.FlagSet {
 	fs.StringVar(&o.Cloud, "cloud", "secure", "secure (RunPod's data centres) or community (strangers' machines: cheaper, but they could read a machine's key)")
 	gpus := fs.String("gpu", "", "GPU kinds to rent, in order of preference, comma-separated (default: whatever fits, cheapest first)")
 	fs.StringVar(&o.Image, "image", "ubuntu:24.04", "the container image; stet is installed on it when the pod starts")
-	fs.IntVar(&o.Disk, "disk", 40, "container disk, GB")
+	fs.IntVar(&o.Disk, "disk", 80, "container disk, GB: stet and the season's libraries, and the 60 GB a machine that runs curators keeps free")
 	fs.StringVar(&o.MinCUDA, "min-cuda", "13.0", "the oldest CUDA the host's driver may have: the season's PyTorch is built for CUDA 13")
-	fs.IntVar(&o.MinRAM, "min-ram", 12, "host memory, GB")
-	fs.IntVar(&o.MinCPU, "min-cpus", 4, "host vCPUs")
-	fs.IntVar(&o.MinGPUMemory, "min-gpu-memory", 10, "GPU memory, GB")
-	fs.IntVar(&o.Idle, "idle", 10, "minutes a machine waits with nothing to do before it ends its own pod")
+	fs.IntVar(&o.MinRAM, "min-ram", 24, "memory, GB: a curator is given 12, and stet needs its own")
+	fs.IntVar(&o.MinCPU, "min-cpus", 8, "vCPUs: a curator is given 6")
+	fs.IntVar(&o.MinGPUMemory, "min-gpu-memory", 12, "GPU memory, GB: a curator is given 8, and a machine that runs them needs 10")
+	fs.IntVar(&o.Idle, "idle", 15, "minutes a machine waits with nothing to do before it ends its own pod")
+	noEdits := fs.Bool("no-edits", false, "rent machines that only grade, and leave curators to the organisers' own machines")
 	ssh := fs.Bool("ssh", false, "let ~/.ssh/id_ed25519.pub log in to the machines rented (for `stet-runpod ssh`)")
 	fs.BoolVar(&o.DryRun, "dry-run", false, "say what would be rented and ended, and do none of it")
-	fs.IntVar(&o.MaxWorkers, "max", 4, "never more machines than this")
+	fs.IntVar(&o.MaxWorkers, "max", 6, "never more machines than this")
 	fs.Float64Var(&o.MaxHourly, "max-hourly", 3, "never rent past this many dollars an hour, all machines together")
 	fs.Float64Var(&o.DailyBudget, "daily-budget", 0, "rent nothing more once about this many dollars have been spent today, UTC (0: no limit)")
-	fs.Float64Var(&o.PerRunner, "per-runner", 2, "machines that keep pace with one of the organisers' machines running curators")
-	fs.IntVar(&o.PerWorker, "per-machine", 4, "scripts waiting to be graded that justify one more machine")
+	fs.Float64Var(&o.PerRunner, "per-runner", 2, "with --no-edits: machines that keep pace with one of the organisers' machines running curators")
+	fs.IntVar(&o.PerWorker, "per-machine", 6, "jobs waiting (a curator to run is two: the run and its grade) that justify one more machine")
 	fs.DurationVar(&o.Every, "every", time.Minute, "with scale --follow: how often to look")
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), "usage: stet-runpod %s [settings]\n\n", name)
@@ -127,6 +128,7 @@ func flags(name string, o *Options) *flag.FlagSet {
 	}
 	o.Grace, o.Silence = 25*time.Minute, 20*time.Minute
 	finish := func() error {
+		o.Edits = !*noEdits
 		o.Cloud = strings.ToUpper(o.Cloud)
 		if o.Cloud != "SECURE" && o.Cloud != "COMMUNITY" {
 			return fmt.Errorf("--cloud is secure or community, not %q", strings.ToLower(o.Cloud))

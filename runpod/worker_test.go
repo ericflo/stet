@@ -36,7 +36,7 @@ func newWorkerRun(t *testing.T, stet string) *workerRun {
 	write("curl", `echo "$*" >> "$LOG/curl"
 case "$*" in
   *"-X DELETE"*"Bearer pod-key"*"/v2/pods/pod-123"*) printf 204 ;;
-  *install.sh*) echo 'mkdir -p "$HOME/.local/bin" && cp "$STAND_IN" "$HOME/.local/bin/stet"' ;;
+  *install.sh*) echo 'mkdir -p "$UV_TOOL_BIN_DIR" && cp "$STAND_IN" "$UV_TOOL_BIN_DIR/stet"' ;;
   *) printf 401 ;;
 esac
 `)
@@ -47,7 +47,7 @@ esac
 		"PATH=" + w.bin + ":/usr/bin:/bin", "LOG=" + dir, "STAND_IN=" + filepath.Join(w.bin, "stet-stand-in"),
 		"STET_WORKER_HOME=" + w.home, "STET_WORKER_KEY=" + base64.StdEncoding.EncodeToString(k.file()),
 		"STET_API=https://api.stet.test", "STET_INSTALL=https://www.stet.test/install.sh", "STET_IDLE_MINUTES=7",
-		"RUNPOD_POD_ID=pod-123", "RUNPOD_API_KEY=pod-key",
+		"RUNPOD_POD_ID=pod-123", "RUNPOD_API_KEY=pod-key", "STET_WORKER_OPT=" + filepath.Join(dir, "opt"),
 	}
 	return w
 }
@@ -153,5 +153,32 @@ esac
 	}
 	if _, err := os.Stat(filepath.Join(w.home, ".stet-worker-done")); err != nil {
 		t.Fatal("a worker that was stopped would grade again if its container were started again")
+	}
+}
+
+// A machine that runs curators runs them in the container sandbox, with stet installed
+// where the curator's user can read it; where it cannot run them, it grades.
+func TestAWorkerRunsCuratorsAndFallsBackToGrading(t *testing.T) {
+	w := newWorkerRun(t, `case "$1" in
+  --version) echo "stet 0.0.0" ;;
+  verify) echo "$* tools=$UV_TOOL_DIR python=$UV_PYTHON_INSTALL_DIR tmp=$TMPDIR" >> "$LOG/stet"; case "$*" in *--edits*) exit 3 ;; esac ;;
+esac
+`)
+	opt := filepath.Join(w.dir, "opt")
+	w.env = append(w.env, "STET_WORKER_EDITS=1")
+	out, err := w.cmd().CombinedOutput()
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	runs := strings.Split(strings.TrimSpace(w.log("stet")), "\n")
+	want := []string{
+		"verify --edits --sandbox container --exit-when-idle 7 tools=" + opt + "/tools python=" + opt + "/python tmp=" + w.home + "/.cache/stet-tmp",
+		"verify --exit-when-idle 7 tools=" + opt + "/tools python=" + opt + "/python tmp=" + w.home + "/.cache/stet-tmp",
+	}
+	if len(runs) != 2 || runs[0] != want[0] || runs[1] != want[1] {
+		t.Fatalf("stet was run as\n%s\nwant\n%s\n%s", strings.Join(runs, "\n"), strings.Join(want, "\n"), out)
+	}
+	if !strings.Contains(string(out), "grading only") || !strings.Contains(w.log("curl"), "-X DELETE") {
+		t.Fatalf("%s", out)
 	}
 }

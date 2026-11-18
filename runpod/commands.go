@@ -94,8 +94,8 @@ func cmdStatus(ctx context.Context, f *Fleet) error {
 		fmt.Fprintln(f.out, "No round is open.")
 	}
 	for _, r := range v.Work.Rounds {
-		fmt.Fprintf(f.out, "Round %s: %d entries open · %d to run · %d running · %d scripts to grade · %d being graded\n",
-			r.ID, r.Entries, r.RunsWaiting, r.EditsUnderWay, r.GradesWanted, r.GradesUnderWay)
+		fmt.Fprintf(f.out, "Round %s: %d entries open · %d runs a new machine could take · %d running · %d scripts to grade · %d being graded\n",
+			r.ID, r.Entries, r.RunsWanted, r.EditsUnderWay, r.GradesWanted, r.GradesUnderWay)
 	}
 	if v.Work.NextDrawAt > 0 {
 		at := time.Unix(v.Work.NextDrawAt, 0)
@@ -227,9 +227,9 @@ func cmdDown(ctx context.Context, f *Fleet, force bool, handles []string) error 
 		}
 		delete(want, w.Key.Handle)
 		st := w.state(f.now(), f.o.Policy)
-		if st == "grading" || st == "edit" {
+		if st == "grading" || st == "running" {
 			if !force {
-				f.say("left %s, which is grading: it stops by itself once there is nothing more for it. --force ends it now, and hands its job back", w.Key.Handle)
+				f.say("left %s, which is %s: it stops by itself once there is nothing more for it. --force ends it now, and hands its job back", w.Key.Handle, st)
 				continue
 			}
 			endings = append(endings, Ending{w, "ended by hand, in the middle of a job; it hands the job back"})

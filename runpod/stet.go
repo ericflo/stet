@@ -175,17 +175,22 @@ func (s *Stet) do(ctx context.Context, method, path string, body any, key *Key, 
 
 // Work is what GET /api/v1/admin/work says (server/work.go).
 type Work struct {
-	Rounds []struct {
-		ID             string `json:"id"`
-		Entries        int    `json:"entries"`
-		RunsWaiting    int    `json:"runs_waiting"`
-		EditsUnderWay  int    `json:"edits_under_way"`
-		GradesWanted   int    `json:"grades_wanted"`
-		GradesUnderWay int    `json:"grades_under_way"`
-	} `json:"rounds"`
-	Runners    int       `json:"runners"`
-	NextDrawAt int64     `json:"next_draw_at"`
-	Machines   []Machine `json:"machines"`
+	Rounds     []WorkRound `json:"rounds"`
+	Runners    int         `json:"runners"`
+	Waiting    bool        `json:"waiting"`
+	NextDrawAt int64       `json:"next_draw_at"`
+	Machines   []Machine   `json:"machines"`
+}
+
+// WorkRound is what an open round is waiting for.
+type WorkRound struct {
+	ID             string `json:"id"`
+	Entries        int    `json:"entries"`
+	RunsWaiting    int    `json:"runs_waiting"`
+	RunsWanted     int    `json:"runs_wanted"`
+	EditsUnderWay  int    `json:"edits_under_way"`
+	GradesWanted   int    `json:"grades_wanted"`
+	GradesUnderWay int    `json:"grades_under_way"`
 }
 
 // Machine is one of the organisers' accounts as the server sees it.

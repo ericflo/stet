@@ -14,16 +14,7 @@ func testPolicy() Policy {
 }
 
 func round(runsWaiting, editing, wanted, grading int) *Work {
-	w := &Work{Runners: 1}
-	w.Rounds = append(w.Rounds, struct {
-		ID             string `json:"id"`
-		Entries        int    `json:"entries"`
-		RunsWaiting    int    `json:"runs_waiting"`
-		EditsUnderWay  int    `json:"edits_under_way"`
-		GradesWanted   int    `json:"grades_wanted"`
-		GradesUnderWay int    `json:"grades_under_way"`
-	}{"s0-o00001", 36, runsWaiting, editing, wanted, grading})
-	return w
+	return &Work{Runners: 1, Rounds: []WorkRound{{ID: "s0-o00001", Entries: 36, RunsWaiting: runsWaiting, RunsWanted: runsWaiting, EditsUnderWay: editing, GradesWanted: wanted, GradesUnderWay: grading}}}
 }
 
 // pool makes workers: "free", or a pod that is "starting", "waiting", "grading", "quiet",
@@ -89,6 +80,7 @@ func TestTheMachinesWantedKeepPaceWithTheRunnersAndClearWhatIsWaiting(t *testing
 		{round(0, 1, 0, 0), 2},  // the last curator running: its script is coming
 		{round(5, 0, 0, 0), 2},  // runs to give out and the runner between jobs
 		{&Work{Runners: 2, Rounds: round(5, 2, 0, 0).Rounds}, 4}, // two runners
+		{&Work{Waiting: true}, 0},                                // grading only: no round, no work
 	} {
 		if got := p.target(c.w); got != c.want {
 			t.Errorf("%+v: %d machines, want %d", c.w.Rounds, got, c.want)
@@ -147,5 +139,37 @@ func TestMachinesAreRentedForWorkAndEndedWhenThereIsNone(t *testing.T) {
 	}
 	if !strings.Contains(d.End[2].Why, "30m") {
 		t.Fatalf("a quiet machine's ending does not say for how long: %q", d.End[2].Why)
+	}
+}
+
+// Machines that run curators as well as grade are wanted for runs and grades alike.
+func TestMachinesThatRunCuratorsAreRentedForRunsAndGrades(t *testing.T) {
+	p := testPolicy()
+	p.Edits, p.PerWorker, p.MaxWorkers = true, 6, 8
+	for _, c := range []struct {
+		w    *Work
+		want int
+	}{
+		{&Work{}, 0},
+		{round(36, 0, 0, 0), 8},   // a round starting: 72 jobs, at most 8 machines
+		{round(5, 2, 1, 4), 2},    // 2*5 + 1 = 11 jobs
+		{round(0, 3, 0, 5), 0},    // all under way: nothing more for a new machine
+		{round(0, 0, 2, 0), 1},    // two scripts left
+		{&Work{Waiting: true}, 1}, // an entry waiting, and nobody who runs curators around to have its round drawn
+		{&Work{Waiting: true, Runners: 1}, 0},
+	} {
+		if got := p.target(c.w); got != c.want {
+			t.Errorf("%+v waiting %v runners %d: %d machines, want %d", c.w.Rounds, c.w.Waiting, c.w.Runners, got, c.want)
+		}
+	}
+	// A machine running a curator is never ended, and says so.
+	w := round(0, 0, 0, 0)
+	ws := pool(w, "grading", "waiting")
+	ws[0].Machine.Busy = "edit"
+	if st := ws[0].state(t0, p); st != "running" {
+		t.Fatalf("a machine holding a curator is %q", st)
+	}
+	if d := p.decide(w, ws, 0, t0); handles(d.End) != "stet-rp-02" {
+		t.Fatalf("ended %s", handles(d.End))
 	}
 }

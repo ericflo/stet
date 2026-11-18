@@ -376,6 +376,7 @@ func (f *Fleet) spec(k *Key, gpu string, site string) NewPod {
 		"STET_API":          f.st.api,
 		"STET_INSTALL":      site + "/install.sh",
 		"STET_IDLE_MINUTES": fmt.Sprint(f.o.Idle),
+		"STET_WORKER_EDITS": map[bool]string{true: "1", false: "0"}[f.o.Edits],
 	}
 	var ports []string
 	if f.o.SSHKey != "" {

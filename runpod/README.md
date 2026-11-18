@@ -1,7 +1,8 @@
 # stet-runpod
 
-Rents GPUs from RunPod to grade for Stet while the organisers' own machines have more to
-grade than they can get through, and lets them go when there is nothing to grade. For the
+Rents GPUs from RunPod to run curators and grade for Stet while there is more work than the
+organisers' own machines and the volunteers can get through, and lets them go when there
+is none. For the
 organisers: entrants and volunteers never need it. It is built on its own, apart from the
 stet command line and the server, and uses nothing but Go's standard library.
 
@@ -12,15 +13,19 @@ cd runpod && go build -o ~/.local/bin/stet-runpod .
 ## What a rented machine does
 
 It is a RunPod pod running `ubuntu:24.04` and [one script](worker.sh). The script installs
-stet from the site (about two and a half minutes), writes the machine's key, and runs
-`stet verify --exit-when-idle 10`: it grades until it has had nothing to do for ten
-minutes, then ends its own pod with the key RunPod gives each pod for itself. RunPod
-restarts a container whose process exits, and keeps billing for it, so the script never
-just exits.
+stet from the site into `/opt/stet` (about two and a half minutes), writes the machine's
+key under `/root`, and runs `stet verify --edits --sandbox container --exit-when-idle 15`:
+it runs curators and grades until it has had nothing to do for fifteen minutes, then ends
+its own pod with the key RunPod gives each pod for itself. RunPod restarts a container
+whose process exits, and keeps billing for it, so the script never just exits.
 
-It only grades. RunPod's containers cannot make the sandbox a curator runs in (no user
-namespaces, no cgroup of their own, no systemd), so curators are run by the organisers' own
-machines. Both of RunPod's clouds were checked and are the same.
+RunPod's containers cannot make bubblewrap's namespaces, so curators run in stet's
+container sandbox (`src/stet/cage.py`): a user of the curator's own, which cannot enter
+`/root`; a system-call filter that hands it only TCP sockets bound to the loopback device;
+Landlock, keeping it off the machine's other ports (Docker's DNS resolver among them); and
+the season's limits, by a cgroup where the host allows one and otherwise watched. The rules
+say what differs for a curator. Where it cannot be made (an old kernel, no Landlock) the
+machine only grades. `--no-edits` rents machines that only grade.
 
 Each machine has a key of its own from a pool kept here. The server knows them from
 `STET_WORKER_KEYS`: one of the organisers' machines to the judge, and nothing more. It
@@ -51,19 +56,20 @@ stet-runpod down                     # end those that hold no job
 (`GET /api/v1/admin/work`) with the organisers' own key, `~/.config/stet/key.json` by
 default (`--key`). Run them where that key is.
 
-How many it rents: while curators are still to be run, `--per-runner` (2) for each of
-the organisers' machines running them, since a grade takes about twice as long as a
-curator; plus one for every `--per-machine` (4) scripts already waiting. Never more than
-`--max` (4), or past `--max-hourly` dollars an hour (3), and nothing new once
-`--daily-budget` is spent. It never ends a machine that is grading. It ends at once those
-doing nothing when nothing at all is waiting, and any that went quiet or stopped. The
-rest stop by themselves.
+How many it rents: one for every `--per-machine` (6) jobs a new machine could take now,
+counting a curator still to run as two (the run, and a grade of what it writes) and a
+script waiting as one. Never more than `--max` (6), or past `--max-hourly` dollars an hour
+(3), and nothing new once `--daily-budget` is spent. When an entry is waiting for a round
+and nobody who runs curators is around, one, so that the round is drawn early. It never
+ends a machine that holds a job. It ends at once those doing nothing when nothing at all is
+waiting, and any that went quiet or stopped. The rest stop by themselves.
 
-The cheapest GPU RunPod has free that will do is rented first: NVIDIA, 10 GB or more, a
-driver new enough for CUDA 13 (the season's PyTorch), bf16 (nothing older than Ampere),
-and a whole GPU. `--gpu "RTX A5000,RTX 4090"` names them instead. At micro scale a grade
-trains for about two and a half minutes on an RTX 3080, so the cheapest kinds are the
-cheapest per grade.
+The cheapest GPU RunPod has free that will do is rented first: NVIDIA, 12 GB or more (a
+machine that runs curators needs 10 and gives one 8), on a host with 24 GB of memory and 8
+vCPUs, a driver new enough for CUDA 13 (the season's PyTorch), bf16 (nothing older than
+Ampere), and a whole GPU, with an 80 GB disk. `--gpu "RTX A5000,RTX 4090"` names them
+instead. At micro scale a grade trains for a few minutes even on the cheapest, so those are
+the cheapest per job.
 
 `--cloud secure` (the default) rents only from RunPod's own data centres. `--cloud
 community` is strangers' machines, at a third of the price or less, and the host of one

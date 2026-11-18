@@ -6,6 +6,7 @@
 #   STET_API            the Stet API
 #   STET_INSTALL        the site's installer
 #   STET_IDLE_MINUTES   how long it waits with nothing to do before it stops
+#   STET_WORKER_EDITS   1 to run curators too, in the container sandbox (stet's cage.py)
 #   PUBLIC_KEY          optional (--ssh): a key that may log in, to look around
 #   STET_WORKER_HOME    where it keeps its files: /root, but for the tests
 #
@@ -15,7 +16,12 @@
 # have that, it waits for stet-runpod to end it from outside.
 set -u
 home=${STET_WORKER_HOME:-/root}
-export HOME="$home" DEBIAN_FRONTEND=noninteractive PATH="$home/.local/bin:$PATH"
+opt=${STET_WORKER_OPT:-/opt/stet}
+# stet, its Python and the season's libraries go under /opt, where the curator's user can
+# read them; stet's key, cache and temporary files stay under /root, where it cannot.
+export HOME="$home" DEBIAN_FRONTEND=noninteractive PATH="$opt/bin:$home/.local/bin:$PATH" \
+  UV_TOOL_DIR="$opt/tools" UV_PYTHON_INSTALL_DIR="$opt/python" UV_TOOL_BIN_DIR="$opt/bin" TMPDIR="$home/.cache/stet-tmp"
+mkdir -p "$TMPDIR" && chmod 700 "$home" "$TMPDIR" 2>/dev/null
 done_mark=$home/.stet-worker-done
 
 say() { printf '[stet-worker %s] %s\n' "$(date -u +%H:%M:%S)" "$*"; }
@@ -84,8 +90,24 @@ say "$(stet --version)"
 
 # In the background, so that being told to stop (the pod ended from outside) reaches stet,
 # which hands back the job it holds.
-stet verify --exit-when-idle "${STET_IDLE_MINUTES:-10}" &
-child=$!
+verify() {
+  stet verify "$@" --exit-when-idle "${STET_IDLE_MINUTES:-10}" &
+  child=$!
+  wait "$child"
+}
 trap 'say "told to stop"; kill -TERM "$child" 2>/dev/null; wait "$child"; touch "$done_mark"; exit 0' TERM INT
-wait "$child"
-end_pod "stet verify stopped (exit $?)"
+if [ "${STET_WORKER_EDITS:-0}" = "1" ]; then
+  verify --edits --sandbox container
+  rc=$?
+  # It stopped for want of work, or could not run curators here at all: the sandbox would
+  # not hold, the machine is under the floor. Then it grades, which needs neither.
+  if [ "$rc" -ne 0 ]; then
+    say "stet verify --edits stopped (exit $rc); grading only"
+    verify
+    rc=$?
+  fi
+else
+  verify
+  rc=$?
+fi
+end_pod "stet verify stopped (exit $rc)"
