@@ -291,7 +291,8 @@ def cmd_whoami(args):
         sys.stdout.write("\n")
         return
     a, v = me["account"], me["verifier"]
-    flags = [f for f, on in (("an organisers' account", a.get("anchor")), ("given no more work for now", v.get("muted"))) if on]
+    kind = "a machine the organisers rent" if a.get("worker") else "an organisers' account"
+    flags = [f for f, on in ((kind, a.get("anchor")), ("given no more work for now", v.get("muted"))) if on]
     sys.stderr.write(clean(a["handle"]) + (f"  (@{clean(a['github'])} on GitHub)" if a.get("github") else "") + "\n")
     sys.stderr.write(f"key       {key.public_hex}\n")
     sys.stderr.write(f"verified  {int(v['validated'])} grades agreed ({int(v['recent'])} in the last 14 days), streak {int(v['streak'])}" + (f"  [{', '.join(flags)}]" if flags else "") + "\n")
@@ -1311,9 +1312,13 @@ def cmd_verify(args):
     lock = claim_key()
     # An organisers' machine runs as a service: stopped, it is started again and given the
     # job it held. Anyone else's hands its job back when it stops, however it is stopped.
+    # So does a machine the organisers rent (a worker): what stops it is usually its pod
+    # being ended, and it is not started again to pick the job up. Nor is it given the
+    # held-out exam, which stays on the organisers' own machines.
     me = request("GET", "/api/v1/me", key=key)
     me = me if isinstance(me, dict) else {}
-    organiser = bool((me.get("account") or {}).get("anchor"))
+    account = me.get("account") or {}
+    organiser = bool(account.get("anchor")) and not account.get("worker")
     handlers = {} if organiser else _stop_like_ctrl_c()
     try:
         return _verify(args, organiser, me)
@@ -1434,6 +1439,8 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
     tries: dict[int, int] = {}  # job id -> how many times it has failed on this machine
     stuck: dict[int, int] = {}  # job id -> seconds spent waiting for a download it needs
     idle = False
+    idle_for = 0  # seconds spent waiting for work since the last job, for --exit-when-idle
+    idle_limit = 60 * max(0, getattr(args, "exit_when_idle", 0) or 0)
     holding: int | None = None  # the job this verifier has taken and has neither reported nor handed back
     held_until = 0  # when the server stops waiting for that job, if it said
     last_job: int | None = None  # the last job worked on, to tell a new one from the same one again
@@ -1538,6 +1545,11 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
                 if args.once or (args.max_jobs and done >= args.max_jobs):
                     out.line("", clean(r.get("message") or "No work right now."))
                     return
+                # Only here, where the server has just said there is no job for us, so that
+                # stopping for want of work never leaves one held.
+                if idle_limit and idle_for >= idle_limit:
+                    out.line("", f"No work for {idle_for // 60} minutes. Stopping, as asked (--exit-when-idle).")
+                    return
                 if not idle:
                     idle = True
                     out.line("", out.dim(clean(r.get("message") or "No work right now.") + " Waiting; Ctrl-C to stop."))
@@ -1548,9 +1560,11 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
                 tidy(out)
                 if organiser:
                     share_heldout(key, season, out)  # a machine that has just become an organisers' gets its copy
-                time.sleep(min(300, max(5, pause)))
+                pause = min(300, max(5, pause))
+                time.sleep(pause)
+                idle_for += pause
                 continue
-            idle = False
+            idle, idle_for = False, 0
             try:
                 job_id = check_job(job)
             except ValueError as err:
@@ -1818,6 +1832,7 @@ def add_commands(sub) -> None:
     p.add_argument("--season", default="s0", help=argparse.SUPPRESS)
     p.add_argument("--edits", "--run-editors", dest="edits", action="store_true", help="also run entrants' curators, in the sandbox (Linux; `stet bench` says whether this machine is fast enough)")
     p.add_argument("--no-upgrade", action="store_true", help="do not install newer versions of stet automatically (the default is to, between jobs; STET_AUTO_UPGRADE=0 does the same)")
+    p.add_argument("--exit-when-idle", type=int, default=0, metavar="MINUTES", help="stop after this many minutes with no work, never with a job in hand: for a GPU rented by the hour")
     p.add_argument("--no-sandbox", action="store_true", help=argparse.SUPPRESS)  # local testing only
     p.add_argument("--any-device", action="store_true", help=argparse.SUPPRESS)  # local testing only
     p.set_defaults(fn=cmd_verify)

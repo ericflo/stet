@@ -57,7 +57,15 @@ type Account struct {
 	// row cannot make one. Such an account starts out established and administers the
 	// season; no score depends on it.
 	Anchor bool `json:"-"`
+	// Worker marks an organisers' account that is a machine they rent (Config.organiser).
+	// Anchor is set too: to the judge it is one of the organisers' machines. It administers
+	// nothing.
+	Worker bool `json:"-"`
 }
+
+// administers reports whether an account may act for the organisers: draw, publish, look
+// up keys, and keep or fetch the held-out exam. Their rented machines may not.
+func (c *Account) administers() bool { return c.Anchor && !c.Worker }
 
 type Editor struct {
 	ID          string       `json:"id"` // sha256 of the bundle
@@ -467,7 +475,7 @@ func (s *State) holder() *Record {
 }
 
 // decode puts one stored item into the state.
-func (s *State) decode(it KVItem, anchors map[string]bool) error {
+func (s *State) decode(it KVItem, organiser func(key string) (anchor, worker bool)) error {
 	into := func(v any) error {
 		if err := json.Unmarshal(it.Value, v); err != nil {
 			return fmt.Errorf("%s: %w", it.Key, err)
@@ -480,7 +488,7 @@ func (s *State) decode(it KVItem, anchors map[string]bool) error {
 		if err := into(a); err != nil {
 			return err
 		}
-		a.Anchor = anchors[a.Pubkey]
+		a.Anchor, a.Worker = organiser(a.Pubkey)
 		s.addAccount(a)
 	case "editor":
 		e := &Editor{}
@@ -554,7 +562,7 @@ func (s *State) decode(it KVItem, anchors map[string]bool) error {
 	return nil
 }
 
-func loadState(ctx context.Context, kv KV, anchors map[string]bool) (*State, int64, error) {
+func loadState(ctx context.Context, kv KV, organiser func(key string) (anchor, worker bool)) (*State, int64, error) {
 	pages, rev, err := kv.Load(ctx, loadScans)
 	if err != nil {
 		return nil, 0, err
@@ -562,7 +570,7 @@ func loadState(ctx context.Context, kv KV, anchors map[string]bool) (*State, int
 	s := newState()
 	for _, items := range pages {
 		for _, it := range items {
-			if err := s.decode(it, anchors); err != nil {
+			if err := s.decode(it, organiser); err != nil {
 				return nil, 0, err
 			}
 		}
@@ -584,21 +592,22 @@ func loadState(ctx context.Context, kv KV, anchors map[string]bool) (*State, int
 // --- the store --------------------------------------------------------------------------------
 
 type Store struct {
-	mu      sync.RWMutex
-	kv      KV
-	blobs   *blobCache
-	anchors map[string]bool
-	s       *State
-	rev     int64
-	version uint64         // bumps whenever the state changes; caches key on it
-	lazy    map[string]any // changes not worth a commit of their own (a verifier's last-seen time)
-	stale   bool           // memory could not be reconciled with storage; fixed before the next change
-	down    atomic.Bool    // stale, for whoever must not wait for the lock to learn it
+	mu    sync.RWMutex
+	kv    KV
+	blobs *blobCache
+	// organiser says which keys are the organisers' (Config.organiser)
+	organiser func(key string) (anchor, worker bool)
+	s         *State
+	rev       int64
+	version   uint64         // bumps whenever the state changes; caches key on it
+	lazy      map[string]any // changes not worth a commit of their own (a verifier's last-seen time)
+	stale     bool           // memory could not be reconciled with storage; fixed before the next change
+	down      atomic.Bool    // stale, for whoever must not wait for the lock to learn it
 }
 
-func openStore(ctx context.Context, kv KV, blobs Blobs, anchors map[string]bool) (*Store, error) {
-	st := &Store{kv: kv, blobs: newBlobCache(blobs, 128<<20), anchors: anchors, lazy: map[string]any{}}
-	s, rev, err := loadState(ctx, kv, anchors)
+func openStore(ctx context.Context, kv KV, blobs Blobs, organiser func(key string) (anchor, worker bool)) (*Store, error) {
+	st := &Store{kv: kv, blobs: newBlobCache(blobs, 128<<20), organiser: organiser, lazy: map[string]any{}}
+	s, rev, err := loadState(ctx, kv, organiser)
 	if err != nil {
 		return nil, fmt.Errorf("reading the database: %w", err)
 	}
@@ -733,7 +742,7 @@ var errUnavailable = fail(503, "the database is not answering; try again in a mo
 func (st *Store) reload(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), storeBudget)
 	defer cancel()
-	s, rev, err := loadState(ctx, st.kv, st.anchors)
+	s, rev, err := loadState(ctx, st.kv, st.organiser)
 	if err != nil {
 		st.stale = true
 		st.down.Store(true)

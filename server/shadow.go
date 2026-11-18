@@ -90,7 +90,7 @@ func (a *App) apiAdminShadow(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	if !acct.Anchor {
+	if !acct.administers() {
 		writeErr(w, fail(403, "organisers only"))
 		return
 	}

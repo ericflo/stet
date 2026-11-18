@@ -100,6 +100,49 @@ When volunteers arrive nothing needs changing: an established volunteer who runs
 is preferred for the second run, and the organisers' machines stop grading their own
 scripts as soon as somebody else can.
 
+## Rented machines
+
+While there are few volunteers, the organisers can rent GPUs by the hour to grade:
+`stet-runpod` ([its README](../runpod/README.md)) rents them from RunPod when scripts are
+waiting and lets them go when they are not. It is built on its own, from `runpod/`, and is
+not part of the stet command line or the server.
+
+A rented machine **only grades.** RunPod's machines are containers that cannot make the
+sandbox a curator runs in (no user namespaces, no cgroup of their own, no systemd), so
+`stet verify --edits` will not start there. Curators are run by the organisers' own
+machines. Most of a round at the official scale is grading (in round s0-o00013, 1.3 hours
+of training against 0.6 of curators), so a machine of your own that runs curators while
+rented ones grade gets through a round about three times as fast.
+
+Each rented machine has a key of its own from a pool kept by `stet-runpod`, and the
+server knows those keys from `STET_WORKER_KEYS`, not `STET_ANCHOR_KEYS`. A worker key is
+one of the organisers' machines in everything the judge decides: established from the
+start, one person with the rest of the organisers' machines, given the organisers' own
+entries only when nobody else can take them. It is nothing more. It administers nothing
+(no draws, no files, no account lookups), and **it is never given the held-out exam**: the
+exam stays on hardware the organisers own. So the grades rented machines make are gaps in
+the held-out record, filled at the close like volunteers' grades. Stopped, a rented
+machine hands back the job it holds, as a volunteer's does.
+
+Setting it up:
+
+1. `stet-runpod keys --add 4` makes four keys and prints the line for `STET_WORKER_KEYS`.
+   Put it in `apps/stet/deployment.yaml` and deploy.
+2. `stet-runpod scale --follow` on a machine that holds the organisers' own key (it asks
+   the server what is waiting with it), or `stet-runpod up 2` to rent two by hand.
+
+A rented machine installs stet when its pod starts (about two and a half minutes), grades
+until it has had nothing to do for ten minutes (`stet verify --exit-when-idle 10`), and
+then ends its own pod. `stet-runpod scale` rents more when scripts are waiting, ends those
+doing nothing as soon as nothing at all is waiting, and ends any that went quiet. It never
+rents past `--max` machines or `--max-hourly` dollars an hour, and stops renting once
+`--daily-budget` is spent.
+
+The keys are on RunPod's machines while they work. On `--cloud community` (strangers'
+machines, cheaper) a host could read one. Anyone holding a worker key can grade as the
+organisers, so a key that may have leaked comes out of `STET_WORKER_KEYS`, and the pool
+gets new ones. The default, `--cloud secure`, rents only from RunPod's own data centres.
+
 ## Deploying
 
 1. Deploy between rounds, and roll back only between rounds. A round in flight is graded
@@ -247,6 +290,7 @@ Set in `apps/stet/deployment.yaml`. The ones that are rules:
 | `STET_GITHUB_MIN_AGE_DAYS` | 30 | Age of the GitHub account an entrant must link |
 | `STET_GITHUB_TOKEN` | none | Optional. Without it GitHub lookups share 60 requests an hour |
 | `STET_ANCHOR_KEYS` | | Public keys of the organisers' accounts, comma-separated |
+| `STET_WORKER_KEYS` | | Public keys of the machines the organisers rent ([above](#rented-machines)), comma-separated. One of the organisers' machines to the judge; no administering, no held-out exam |
 | `STET_ESTABLISH_AFTER` | 5 | Agreed grades before an account's work counts towards scores |
 | `STET_RUNS_PER_ENTRY` | 2 | Different people who run each entry (a third when two differ) |
 | `STET_ACTIVE_WINDOW` | 10m | How recently a verifier must have asked for work to be waited for |

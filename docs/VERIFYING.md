@@ -26,7 +26,9 @@ The installer brings Python 3.13, PyTorch in the build for your GPU, and the sea
 libraries. `stet bench` measures your machine against the floor for running curators and
 says what, if anything, falls short. Run it when the GPU is doing nothing else.
 
-`stet verify --once` does one job and exits; `--max-jobs 5` does five. One verifier runs
+`stet verify --once` does one job and exits; `--max-jobs 5` does five;
+`--exit-when-idle 15` stops once it has had nothing to do for fifteen minutes, never with a
+job in hand, which suits a GPU rented by the hour. One verifier runs
 per account, and holds one job at a time. For a second GPU, give the second verifier an
 account of its own: set `STET_CONFIG` to another directory and run `stet login` there.
 

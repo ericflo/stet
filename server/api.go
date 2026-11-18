@@ -89,7 +89,7 @@ func (a *App) signedBy(w http.ResponseWriter, r *http.Request, limit int64, must
 		return nil, "", nil, fail(401, "no account for this key; run `stet login`")
 	}
 	switch {
-	case who == organisers && !acct.Anchor:
+	case who == organisers && !acct.administers():
 		return nil, "", nil, fail(403, "organisers only")
 	case who == runners && !a.established(acct):
 		return nil, "", nil, fail(403, "curators are run by established verifiers only")
@@ -246,6 +246,7 @@ func (a *App) mountAPI(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/admin/shadow", a.apiAdminShadow)
 	mux.HandleFunc("PUT /api/v1/admin/files/{name}", a.apiAdminFile)
 	mux.HandleFunc("GET /api/v1/admin/accounts/{handle}", a.apiAdminAccount)
+	mux.HandleFunc("GET /api/v1/admin/work", a.apiAdminWork)
 	mux.HandleFunc("GET /api/v1/admin/sealed", a.apiSealedList)
 	mux.HandleFunc("GET /api/v1/admin/sealed/mine", a.apiSealedMine)
 	mux.HandleFunc("PUT /api/v1/admin/sealed/{key}", a.apiSealedPut)
@@ -392,8 +393,12 @@ func (a *App) apiSeason(w http.ResponseWriter, r *http.Request) {
 // and that it may run editors, which the organisers' accounts do from the start and anyone
 // else earns.
 func (a *App) accountJSON(c *Account) map[string]any {
-	return map[string]any{"handle": c.Handle, "github": c.Github, "created_at": c.CreatedAt, "anchor": c.Anchor, "trusted": c.Anchor,
+	out := map[string]any{"handle": c.Handle, "github": c.Github, "created_at": c.CreatedAt, "anchor": c.Anchor, "trusted": c.Anchor,
 		"established": a.established(c)}
+	if c.Worker {
+		out["worker"] = true // a machine the organisers rent: it is not given the held-out exam
+	}
+	return out
 }
 
 func (a *App) apiCreateAccount(w http.ResponseWriter, r *http.Request) {
@@ -419,7 +424,10 @@ func (a *App) apiCreateAccount(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, fail(409, "that handle is reserved"))
 		return
 	}
-	if !a.cfg.Dev && !a.limits.allow("acct:"+clientIP(r), 5, 86400) {
+	// The organisers' keys are named in the server's configuration, so they cost nothing to
+	// let through: a pool of rented machines' accounts is made from one address in a day.
+	anchor, worker := a.cfg.organiser(key)
+	if !a.cfg.Dev && !anchor && !worker && !a.limits.allow("acct:"+clientIP(r), 5, 86400) {
 		writeErr(w, fail(429, "too many new accounts from this address today"))
 		return
 	}
@@ -434,8 +442,7 @@ func (a *App) apiCreateAccount(w http.ResponseWriter, r *http.Request) {
 		if s.byHandle[handle] != nil {
 			return fail(409, "the handle %q is taken", handle)
 		}
-		anchor := a.cfg.AnchorKeys[key]
-		acct := &Account{ID: s.Meta.NextAccount, Handle: handle, Pubkey: key, CreatedAt: now(), Anchor: anchor}
+		acct := &Account{ID: s.Meta.NextAccount, Handle: handle, Pubkey: key, CreatedAt: now(), Anchor: anchor, Worker: worker}
 		s.Meta.NextAccount++
 		tx.put(metaKey, &s.Meta)
 		tx.saveAccount(acct)
@@ -1109,6 +1116,7 @@ type VerifierRow struct {
 	Established bool    `json:"established"`      // its grades count towards scores, and it may run editors
 	Trusted     bool    `json:"trusted"`          // one of the organisers' accounts
 	Anchor      bool    `json:"anchor,omitempty"` // the same, under its older name
+	Worker      bool    `json:"worker,omitempty"` // one of the machines the organisers rent
 	GPUHours    float64 `json:"gpu_hours"`
 	GPU         string  `json:"gpu,omitempty"`
 	LastSeen    int64   `json:"last_seen"`
@@ -1121,11 +1129,13 @@ func (a *App) verifiers(s *State) []VerifierRow {
 	recent := recentAgreed(s)
 	out := []VerifierRow{}
 	for _, c := range s.Accounts {
-		if muted(c, now()) || (c.Agreed == 0 && c.Runs == 0 && !c.Anchor) {
+		// A rented machine is listed once it has been at work: the organisers may keep many
+		// keys for them, and most are not in use at any one time.
+		if muted(c, now()) || (c.Agreed == 0 && c.Runs == 0 && !c.Anchor) || (c.Worker && c.LastSeen == 0) {
 			continue
 		}
 		row := VerifierRow{Handle: c.Handle, Github: c.Github, Validated: c.Agreed, Recent: recent[c.ID], Streak: c.Streak, Runs: c.Runs,
-			Established: a.established(c), Trusted: c.Anchor, Anchor: c.Anchor, GPUHours: c.GPUSeconds / 3600,
+			Established: a.established(c), Trusted: c.Anchor, Anchor: c.Anchor, Worker: c.Worker, GPUHours: c.GPUSeconds / 3600,
 			GPU: readHardware(c.Hardware).gpuName(), LastSeen: c.LastSeen}
 		if c.Anchor { // established from the start: its grades earn it nothing
 			row.Validated, row.Recent, row.Streak = 0, 0, 0
@@ -1352,7 +1362,7 @@ func (a *App) apiAdminAccount(w http.ResponseWriter, r *http.Request) {
 	var out map[string]any
 	a.st.view(func(s *State) {
 		if acct := s.byHandle[handle]; acct != nil {
-			out = map[string]any{"handle": acct.Handle, "key": acct.Pubkey, "anchor": acct.Anchor, "github": acct.Github, "created_at": acct.CreatedAt}
+			out = map[string]any{"handle": acct.Handle, "key": acct.Pubkey, "anchor": acct.Anchor, "worker": acct.Worker, "github": acct.Github, "created_at": acct.CreatedAt}
 		}
 	})
 	if out == nil {
@@ -1491,7 +1501,7 @@ func (a *App) apiAdminDraw(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	if !acct.Anchor {
+	if !acct.administers() {
 		writeErr(w, fail(403, "organisers only"))
 		return
 	}

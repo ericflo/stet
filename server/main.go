@@ -40,6 +40,7 @@ type Config struct {
 	S3     S3Config
 
 	AnchorKeys       map[string]bool
+	WorkerKeys       map[string]bool // machines the organisers rent: see organiser
 	Scale            string
 	RoundInterval    time.Duration
 	RoundMinGap      time.Duration // a round is drawn this long after the last when an entry is waiting; 0 keeps to the interval alone
@@ -74,6 +75,20 @@ type App struct {
 	uploads, runnerUploads chan struct{}
 	// The organisers' keys known to have a sealed copy of the held-out exam (api.go).
 	sealedKept sync.Map
+}
+
+// organiser says whether a key is one of the organisers', and of which kind. An anchor
+// (STET_ANCHOR_KEYS) is a machine of their own: it administers the season and holds the
+// held-out exam. A worker (STET_WORKER_KEYS) is a machine they rent by the hour to grade
+// (stet-runpod): an organisers' machine in every rule about who works on what, so one
+// person with the rest of them, and nothing more. It draws nothing, publishes nothing,
+// and is never given the held-out exam, so that the exam stays off hardware the
+// organisers do not own. A key on both lists is an anchor.
+func (c *Config) organiser(key string) (anchor, worker bool) {
+	if c.AnchorKeys[key] {
+		return true, false
+	}
+	return c.WorkerKeys[key], c.WorkerKeys[key]
 }
 
 func env(key, def string) string {
@@ -120,6 +135,7 @@ func loadConfig(season *Season) (Config, error) {
 		DBURL:         strings.TrimRight(os.Getenv("STET_DB_URL"), "/"),
 		DBName:        env("STET_DB_NAME", "stet"),
 		AnchorKeys:    map[string]bool{},
+		WorkerKeys:    map[string]bool{},
 		Scale:         env("STET_SCALE", season.OfficialScale),
 		RoundInterval: envDuration("STET_ROUND_INTERVAL", 6*time.Hour),
 		RoundMinGap:   envDuration("STET_ROUND_MIN_GAP", time.Hour),
@@ -153,6 +169,11 @@ func loadConfig(season *Season) (Config, error) {
 	for _, k := range strings.Split(os.Getenv("STET_ANCHOR_KEYS"), ",") {
 		if k = strings.ToLower(strings.TrimSpace(k)); k != "" {
 			cfg.AnchorKeys[k] = true
+		}
+	}
+	for _, k := range strings.Split(os.Getenv("STET_WORKER_KEYS"), ",") {
+		if k = strings.ToLower(strings.TrimSpace(k)); k != "" {
+			cfg.WorkerKeys[k] = true
 		}
 	}
 	if v := os.Getenv("STET_CRAWL"); v != "" { // "CC-MAIN-2026-43:<paths sha256>:<files>": pin the crawl instead of discovering it
@@ -255,7 +276,7 @@ func newApp(ctx context.Context, cfg Config, season *Season, kv KV, blobs Blobs)
 	if cfg.EstablishAfter < 1 { // standing is always earned
 		cfg.EstablishAfter = 5
 	}
-	st, err := openStore(ctx, kv, blobs, cfg.AnchorKeys)
+	st, err := openStore(ctx, kv, blobs, cfg.organiser)
 	if err != nil {
 		return nil, err
 	}
@@ -310,7 +331,7 @@ func main() {
 		app.st.flush(shut)
 	}()
 	slog.Info("listening", "revision", revision, "addr", cfg.Addr, "season", season.ID, "scale", cfg.Scale, "site", cfg.BaseURL, "api", cfg.APIURL,
-		"records", kv.Describe(), "files", blobs.Describe(), "organisers", len(cfg.AnchorKeys), "dev", cfg.Dev)
+		"records", kv.Describe(), "files", blobs.Describe(), "organisers", len(cfg.AnchorKeys), "workers", len(cfg.WorkerKeys), "dev", cfg.Dev)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		slog.Error("server", "err", err)
 		os.Exit(1)

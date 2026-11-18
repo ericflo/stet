@@ -125,7 +125,7 @@ the server, so a key should not be used with a server its owner does not trust.
 |---|---|
 | `POST /api/v1/accounts` `{"handle": "..."}` | Create the account for the signing key |
 | `POST /api/v1/accounts/github` `{"gist": "<url>"}` | Link GitHub. The gist must be public and contain the line `stet-key:<public key>` |
-| `GET /api/v1/me` | Your account, your curators, and under `verifier` your standing: `validated` (grades that agreed), `establish_after` (how many it takes), `established`, `needs_github` (no GitHub account is linked, and being established needs one), `runs` (curators run), `strikes`, `muted` |
+| `GET /api/v1/me` | Your account, your curators, and under `verifier` your standing: `validated` (grades that agreed), `establish_after` (how many it takes), `established`, `needs_github` (no GitHub account is linked, and being established needs one), `runs` (curators run), `strikes`, `muted`. The account has `worker` set if it is one of the machines the organisers rent |
 | `POST /api/v1/editors` | Submit. The body is the bundle: a zstd-compressed tar of the project directory, at most 50 MB. Every file its `stet.toml` names under `[[assets]]` is checked with its host first: `400` says which one is wrong, `503` that the host could not be asked. The reply has the `editor`, `in_play` and `in_play_limit` (how many entries this person now has waiting or qualifying, and how many they may), `replaced` (the id of an entry this one took the place of, if it did) and either `enters` (`round`, `draw_at`: the round it is expected to run in) or, when that round has no room for it or is too close, `earliest` (the first round it could run in) |
 
 ## Jobs
@@ -148,11 +148,13 @@ cannot reach its records; send the same request again).
 
 ## Organisers
 
-Signed by an organisers' key; anyone else gets `403`.
+Signed by an organisers' key; anyone else gets `403`, and so does a machine the organisers
+rent (`STET_WORKER_KEYS`).
 
 | | |
 |---|---|
-| `GET /api/v1/admin/accounts/{handle}` | An account's public key, for adding it to the organisers' keys |
+| `GET /api/v1/admin/accounts/{handle}` | An account's public key, for adding it to the organisers' keys, and whether it is one of their rented machines (`worker`) |
+| `GET /api/v1/admin/work` | What the open rounds are waiting for, as counts: for each round `entries`, `runs_waiting` (entries someone who is around could be handed to run, and nobody is running), `edits_under_way`, `grades_wanted` (scripts a score waits on that a grader of the organisers' who had just started could be handed now) and `grades_under_way`; `runners` (accounts around that run curators); `next_draw_at`; and `machines`, the organisers' accounts with `last_seen` and `busy` (`edit` or `grade`). What `stet-runpod` rents by |
 | `GET /api/v1/admin/sealed` | Which organisers' keys have a copy of the held-out exam sealed to them |
 | `PUT /api/v1/admin/sealed/{key}` | Keep a copy sealed to that organisers' key. Only sealed files are taken; the server cannot open them |
 | `GET /api/v1/admin/sealed/mine` | The copy sealed to the caller's key |

@@ -1406,3 +1406,44 @@ def test_an_upgrade_that_cannot_get_through_is_tried_again_rather_than_stopping_
     assert upgrades.installs == ["https://site.test"] and 600 in loop.slept
     said = capsys.readouterr().err
     assert "did not work" in said and "trying again in 10 minutes" in said
+
+
+# --- a machine the organisers rent --------------------------------------------------------
+
+
+def test_a_verifier_told_to_stop_when_idle_stops_only_with_no_job_in_hand(loop, capsys):
+    args = Args()
+    args.exit_when_idle = 2
+    # Idle for a minute, then a job, which starts the count again; then two minutes with
+    # nothing, and it stops at the next answer that has no job for it.
+    loop.claims = [None, a_job(id=1), None, None, None, a_job(id=2)]
+    client.cmd_verify(args)
+    assert loop.graded == [1] and loop.claims == [a_job(id=2)] and not loop.released
+    assert loop.slept == [60, 60, 60]
+    assert "Stopping, as asked" in capsys.readouterr().err
+
+
+def test_a_rented_machine_hands_its_job_back_and_never_asks_for_the_held_out_exam(loop, monkeypatch):
+    import hashlib
+
+    from stet import data
+    from stet.data import FetchError
+    from stet.spec import load_season
+
+    # The season has a held-out exam. An organisers' own machine will not start without
+    # it; a rented one is never given it, and grades all the same.
+    season = load_season("s0")
+    monkeypatch.setitem(season.raw, "heldout_exam", {"sha256": hashlib.sha256(b"pack").hexdigest()})
+    monkeypatch.setattr(data, "_heldout_pack", {})
+    loop.me = {"account": {"handle": "rented-one", "anchor": True, "worker": True}, "verifier": {}}
+    loop.claims = [a_job(id=1)]
+    with pytest.raises(Stop):
+        client.cmd_verify(Args())
+    assert loop.graded == [1] and data.heldout_pack_path(season) is None
+
+    # Stopped in the middle of a job (here the server goes away while a download is being
+    # waited out), it hands the job back: nobody starts it again to pick the job up.
+    loop.claims, loop.grade = [a_job(id=8)], FetchError("timed out")
+    with pytest.raises(Stop):
+        client.cmd_verify(Args())
+    assert loop.released == [("/api/v1/jobs/8/release", "the verifier stopped")]
