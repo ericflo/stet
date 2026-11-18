@@ -296,7 +296,7 @@ def cmd_run(args):
     except ProjectError as e:
         die(str(e))
     device = pick_device(args.device)
-    sandbox = "bwrap" if args.sandbox else "none"
+    sandbox = "bwrap" if args.sandbox is True else (args.sandbox or "none")  # --sandbox alone is bwrap
     results = []
     for k in range(max(1, args.rounds)):
         season, scale, rnd = resolve_round(args, offset=k)
@@ -305,7 +305,7 @@ def cmd_run(args):
         work.mkdir(parents=True, exist_ok=True)
         out.line("", out.bold(f"stet · {project.name} · {rnd.kind} round {rnd.id} · {scale.name} · {device.type}"))
         bundle = project.path
-        if sandbox == "bwrap":
+        if sandbox != "none":
             # Run what `stet submit` would send, unpacked as a verifier unpacks it: a file the
             # bundle leaves out is missing here too, not first in an official round.
             try:
@@ -675,7 +675,13 @@ def cmd_doctor(args):
         scoped, _ = scope_available()
         rows.append((OK, "sandbox", f"bubblewrap at {why}" + (", with memory and process limits" if scoped else "") + " (`stet run --sandbox`)"))
     elif sys.platform == "linux":
-        rows.append((WARN, "sandbox", why + ". Optional: only `stet run --sandbox` uses it."))
+        from .cage import available as cage_available
+
+        caged, cage_why = cage_available()
+        if caged:
+            rows.append((OK, "sandbox", "the container sandbox: this is a container of its own, as root (`stet run --sandbox container`, `stet verify --edits --sandbox container`)"))
+        else:
+            rows.append((WARN, "sandbox", why + ". Optional: only `stet run --sandbox` uses it."))
     # The libraries a curator may import. `stet run` uses whatever is installed; a machine
     # that runs curators for others must have exactly the season's.
     differs = env.problems(season)
@@ -869,7 +875,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("path", nargs="?", default=".")
     add_round_args(p)
     p.add_argument("--rounds", type=int, default=1, help="run this many consecutive rounds and report the mean gain with its standard error")
-    p.add_argument("--sandbox", action="store_true", help="run the curator in the same sandbox official runs use (Linux)")
+    p.add_argument("--sandbox", nargs="?", const="bwrap", choices=["bwrap", "container"],
+                   help="run the curator in the sandbox official runs use (Linux): bwrap, or container on a container of its own, as root")  # fmt: skip
     p.add_argument("--no-baseline", action="store_true", help="skip the baseline comparison")
     p.add_argument("--time-limit", type=float, default=None, help="give the curator this many seconds instead of the round's limit (see `stet bench`)")
     p.add_argument("-v", "--verbose", action="store_true", help="show the curator's output as it runs")

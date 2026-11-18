@@ -1219,6 +1219,7 @@ def _stop_like_ctrl_c() -> dict:
     return old
 
 
+EXIT_NO_SANDBOX = 3  # `stet verify --edits` cannot run curators here; a rented machine then only grades
 RETRY_PAUSES = (60, 300)  # a job that fails on this machine is tried again after these waits, then handed back
 STOP_AFTER_FAILURES = 3 * (len(RETRY_PAUSES) + 1)  # three jobs' worth of failures in a row: it is the machine
 FETCH_PATIENCE = 30 * 60  # how long a job is kept while what it needs cannot be downloaded
@@ -1366,7 +1367,7 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
         sys.exit(1)
     sandbox = "none"
     if args.edits:
-        sandbox = "none" if args.no_sandbox else "bwrap"
+        sandbox = "none" if args.no_sandbox else (getattr(args, "sandbox", None) or "bwrap")
         if sandbox == "none" and not dev:
             sys.stderr.write("stet: edit jobs run other people's code, and only ever in the sandbox\n")
             sys.exit(1)
@@ -1375,6 +1376,16 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
                 if not ok:
                     sys.stderr.write(f"stet: edit jobs run other people's code and need the sandbox: {why}\n")
                     sys.exit(1)
+        elif sandbox == "container":
+            # For a container that runs stet and nothing else, where namespaces cannot be made
+            # (cage.py). The server hands curators to it from the organisers' machines only.
+            from .cage import available as cage_available
+
+            for check in (cage_available, lambda: sandbox_selftest("container")):
+                ok, why = check()
+                if not ok:
+                    sys.stderr.write(f"stet: edit jobs run other people's code and need the sandbox: {why}\n")
+                    sys.exit(EXIT_NO_SANDBOX)
         # A curator may import any of the season's libraries and is promised a machine no
         # slower than the floor. A machine that cannot keep either promise takes no edit jobs.
         if (wrong := env.problems(season)) and not dev:
@@ -1831,6 +1842,8 @@ def add_commands(sub) -> None:
     p.add_argument("--device", default=None)
     p.add_argument("--season", default="s0", help=argparse.SUPPRESS)
     p.add_argument("--edits", "--run-editors", dest="edits", action="store_true", help="also run entrants' curators, in the sandbox (Linux; `stet bench` says whether this machine is fast enough)")
+    p.add_argument("--sandbox", choices=["bwrap", "container"], default="bwrap",
+                   help="with --edits: bwrap (the default), or container, for a container that runs stet and nothing else, as root, where namespaces cannot be made")  # fmt: skip
     p.add_argument("--no-upgrade", action="store_true", help="do not install newer versions of stet automatically (the default is to, between jobs; STET_AUTO_UPGRADE=0 does the same)")
     p.add_argument("--exit-when-idle", type=int, default=0, metavar="MINUTES", help="stop after this many minutes with no work, never with a job in hand: for a GPU rented by the hour")
     p.add_argument("--no-sandbox", action="store_true", help=argparse.SUPPRESS)  # local testing only

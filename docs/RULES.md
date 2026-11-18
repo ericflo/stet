@@ -219,6 +219,22 @@ Curators are run on volunteers' machines, which differ. What a curator is given 
   limit on GPU memory is set through PyTorch, and a program could lift it; so could it
   lift its restriction to six cores. Doing either is against the rules, and curators are
   public.
+- **Two sandboxes.** Volunteers' machines run curators in bubblewrap. The organisers'
+  rented machines are containers, which cannot make the namespaces bubblewrap is made of,
+  and run them in a second sandbox made for containers: a user of the curator's own, a
+  system-call filter, Landlock and the same limits. A curator finds the same files at the
+  same paths in both, the same cores, memory and GPU, and no network. What differs:
+
+  | | bubblewrap | the container sandbox |
+  |---|---|---|
+  | Scratch space | in memory, part of the 12 GB | on disk, 8 GB, apart from the 12 GB |
+  | Loopback | TCP and UDP | TCP only, to ports 1024 and up |
+  | The machine's other processes | not visible | listed in `/proc`, not readable |
+  | `/tmp`, `/dev/shm` | the curator's own, 2 GB each | the machine's, 2 GB each, emptied of the curator's files after it |
+  | Memory limit | the kernel's | the kernel's where the container allows it, otherwise watched four times a second |
+
+  Each run says which it was in (`sandbox`, on the round's page and at `/api/v1/rounds`).
+  A curator that works in one works in the other unless it relies on one of these.
 
 If no verifier can run an entry at all (three attempts fail on the verifiers' side, or
 five at grading a script), the round is void for that entry. It counts neither for nor

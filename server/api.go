@@ -700,7 +700,8 @@ type RunView struct {
 	GPU         string   `json:"gpu,omitempty"`
 	Backend     string   `json:"backend,omitempty"`
 	EditSeconds float64  `json:"edit_seconds"`
-	Status      string   `json:"status"` // ok | failed; or dropped: nobody could check it, and it counts for nothing
+	Sandbox     string   `json:"sandbox,omitempty"` // bwrap, or container on the organisers' rented machines
+	Status      string   `json:"status"`            // ok | failed; or dropped: nobody could check it, and it counts for nothing
 	Reason      string   `json:"reason,omitempty"`
 	Script      string   `json:"script,omitempty"`
 	ScriptSize  int64    `json:"script_size,omitempty"`
@@ -735,7 +736,7 @@ func (a *App) runViews(s *State, e *Entry) []RunView {
 		v := RunView{N: run.N, By: handle(run.By), GPU: run.GPU, Backend: run.Backend, Status: "failed", Reason: run.Reason,
 			Script: run.Script, ScriptSize: run.ScriptSize, Gain: places5(run.Gain), Self: run.Self, Grades: run.Grades}
 		if run.Edit != nil {
-			v.EditSeconds = run.Edit.Seconds
+			v.EditSeconds, v.Sandbox = run.Edit.Seconds, run.Edit.Sandbox
 		}
 		switch {
 		case run.Dropped:

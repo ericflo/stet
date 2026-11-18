@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/hex"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -161,5 +162,55 @@ func TestAnUnusedRentedMachineIsNotOnTheBoard(t *testing.T) {
 	}
 	if code := (&actor{t: t, srv: w.srv}).do("GET", "/api/v1/verifiers", nil, &board); code != 200 || len(board.Verifiers) != 0 {
 		t.Fatalf("HTTP %d %+v", code, board.Verifiers)
+	}
+}
+
+// The container sandbox is for the organisers' rented machines. A volunteer's machine runs
+// curators in bubblewrap; a rented one may run them in the container sandbox, and the work
+// says how many a runner like it could take.
+func TestOnlyARentedMachineRunsCuratorsInTheContainerSandbox(t *testing.T) {
+	pubA, privA := newKey()
+	pubW, privW := newKey()
+	cfg := testConfig(t, pubA)
+	cfg.WorkerKeys = map[string]bool{hex.EncodeToString(pubW): true}
+	w := startWorld(t, cfg, newMemKV(), dirBlobs{filepath.Join(cfg.DataDir, "blobs")})
+	anchor, worker := w.join("anchor-one", privA), w.join("rented-one", privW)
+	alice, bob, carol := w.join("alice", nil), w.join("bob", nil), w.join("carol", nil)
+	w.submit(alice, "tidy", "print('v1')")
+	w.submit(carol, "trim", "print('v2')")
+	w.established("bob")
+	var work Work
+	if code := anchor.do("GET", "/api/v1/admin/work", nil, &work); code != 200 || !work.Waiting {
+		t.Fatalf("two entries waiting for a round: HTTP %d %+v", code, work)
+	}
+	w.draw()
+	w.app.cfg.Dev = false // as in production: the sandbox and the floor are required
+	f := w.app.season.Runner
+	hello := func(sandbox string) map[string]any {
+		h := w.hello(true)
+		h["sandbox"] = sandbox
+		h["hardware"] = map[string]any{"gpu": "Test GPU", "device": "cuda", "backend": "cuda",
+			"bench": map[string]any{"gpu_tokens_per_second": f.GPUTokensPerSecond, "cpu_mb_per_second": f.CPUMBPerSecond, "cores": f.Cores, "memory_gb": f.MemoryGB, "gpu_memory_gb": f.GPUMemoryGB}}
+		return h
+	}
+	// Nobody who runs curators has asked yet, and a runner that started now could take both.
+	if code := anchor.do("GET", "/api/v1/admin/work", nil, &work); code != 200 || work.Rounds[0].RunsWanted != 2 || work.Rounds[0].RunsWaiting != 0 {
+		t.Fatalf("a round nobody is running yet: HTTP %d %+v", code, work)
+	}
+	c := w.claimWith(bob, hello("container"))
+	if reason, _ := c.Runner["reason"].(string); (c.Job != nil && c.Job.Kind == "edit") || c.Runner["eligible"] != false || !strings.Contains(reason, "rented machines") {
+		t.Fatalf("a volunteer asked to run curators in the container sandbox: %+v %+v", c.Job, c.Runner)
+	}
+	c = w.claimWith(worker, hello("container"))
+	if c.Job == nil || c.Job.Kind != "edit" || c.Runner["eligible"] != true {
+		t.Fatalf("a rented machine in the container sandbox: %+v %+v", c.Job, c.Runner)
+	}
+	if code, status := w.edit(worker, c, "{\"doc\": 1}\n"); code != 200 {
+		t.Fatal(status)
+	}
+	// Each entry is run by two machines. A runner that started now could give the first its
+	// second run and the other its first; the one that ran the first, only the other.
+	if code := anchor.do("GET", "/api/v1/admin/work", nil, &work); code != 200 || work.Rounds[0].RunsWanted != 2 || work.Rounds[0].RunsWaiting != 1 {
+		t.Fatalf("after one run: HTTP %d %+v", code, work)
 	}
 }

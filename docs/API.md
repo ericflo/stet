@@ -52,6 +52,7 @@ A run:
 | Field of a run | |
 |---|---|
 | `n`, `by`, `gpu`, `backend` | Which run, whose machine, and its GPU (`cuda` is NVIDIA, `rocm` is AMD) |
+| `sandbox` | What the curator ran in: `bwrap`, or `container` on the organisers' rented machines ([the rules](RULES.md#the-curators-machine) say how they differ) |
 | `edit_seconds` | How long the curator took there |
 | `status` | `ok`, or `failed`: the curator wrote no script, or wrote an invalid one. `reason` says which |
 | `script`, `script_size` | The sha256 of the edit script it wrote. Two runs that wrote the same bytes name the same script and share its grades |
@@ -135,7 +136,7 @@ grades: a grade computed any other way will not agree.
 
 | | |
 |---|---|
-| `POST /api/v1/jobs/claim` | Ask for work. The body says which harness and season you run, what hardware, and whether you will run curators (`edits`, with the sandbox in use and the speeds `stet bench` measured). Returns `job` (`kind` is `grade` or `edit`; or null, with `retry_after`), `announced` (the next draw's commitment) and, when the body asked for curators, `runner`: `eligible`, and a `reason` if not. A grade job names its `script` (`sha256`, `size`) and which `run` wrote it; before a round settles that is the only way a script's hash is told to anyone |
+| `POST /api/v1/jobs/claim` | Ask for work. The body says which harness and season you run, what hardware, and whether you will run curators (`edits`, with the sandbox in use, `bwrap` or, on the organisers' rented machines only, `container`, and the speeds `stet bench` measured). Returns `job` (`kind` is `grade` or `edit`; or null, with `retry_after`), `announced` (the next draw's commitment) and, when the body asked for curators, `runner`: `eligible`, and a `reason` if not. A grade job names its `script` (`sha256`, `size`) and which `run` wrote it; before a round settles that is the only way a script's hash is told to anyone |
 | `POST /api/v1/jobs/{id}/result` | Report a grade: the script's hash, exam loss, per-source losses, your baseline for the round, corpus and exam hashes. The answer is `pending` until the round settles |
 | `POST /api/v1/jobs/{id}/script` | Report a run of a curator and upload the script it wrote, or say that it wrote none. The answer is `edited`. Established accounts only: `403` otherwise |
 | `POST /api/v1/jobs/{id}/release` | Hand a job back |
@@ -154,7 +155,7 @@ rent (`STET_WORKER_KEYS`).
 | | |
 |---|---|
 | `GET /api/v1/admin/accounts/{handle}` | An account's public key, for adding it to the organisers' keys, and whether it is one of their rented machines (`worker`) |
-| `GET /api/v1/admin/work` | What the open rounds are waiting for, as counts: for each round `entries`, `runs_waiting` (entries someone who is around could be handed to run, and nobody is running), `edits_under_way`, `grades_wanted` (scripts a score waits on that a grader of the organisers' who had just started could be handed now) and `grades_under_way`; `runners` (accounts around that run curators); `next_draw_at`; and `machines`, the organisers' accounts with `last_seen` and `busy` (`edit` or `grade`). What `stet-runpod` rents by |
+| `GET /api/v1/admin/work` | What the open rounds are waiting for, as counts: for each round `entries`, `runs_waiting` (entries someone who is around could be handed to run, and nobody is running), `runs_wanted` (entries a runner of the organisers' that had just started could be handed), `edits_under_way`, `grades_wanted` (scripts a score waits on that a grader of the organisers' who had just started could be handed now) and `grades_under_way`; `runners` (accounts around that run curators); `waiting` (an entry is waiting for a round); `next_draw_at`; and `machines`, the organisers' accounts with `last_seen` and `busy` (`edit` or `grade`). What `stet-runpod` rents by |
 | `GET /api/v1/admin/sealed` | Which organisers' keys have a copy of the held-out exam sealed to them |
 | `PUT /api/v1/admin/sealed/{key}` | Keep a copy sealed to that organisers' key. Only sealed files are taken; the server cannot open them |
 | `GET /api/v1/admin/sealed/mine` | The copy sealed to the caller's key |

@@ -102,17 +102,24 @@ scripts as soon as somebody else can.
 
 ## Rented machines
 
-While there are few volunteers, the organisers can rent GPUs by the hour to grade:
-`stet-runpod` ([its README](../runpod/README.md)) rents them from RunPod when scripts are
-waiting and lets them go when they are not. It is built on its own, from `runpod/`, and is
-not part of the stet command line or the server.
+While there are few volunteers, the organisers can rent GPUs by the hour to run curators
+and grade: `stet-runpod` ([its README](../runpod/README.md)) rents them from RunPod when a
+round has work and lets them go when it has none. It is built on its own, from `runpod/`,
+and is not part of the stet command line or the server.
 
-A rented machine **only grades.** RunPod's machines are containers that cannot make the
-sandbox a curator runs in (no user namespaces, no cgroup of their own, no systemd), so
-`stet verify --edits` will not start there. Curators are run by the organisers' own
-machines. Most of a round at the official scale is grading (in round s0-o00013, 1.3 hours
-of training against 0.6 of curators), so a machine of your own that runs curators while
-rented ones grade gets through a round about three times as fast.
+RunPod's machines are containers that cannot make bubblewrap's namespaces (Docker's
+system-call filter refuses them, and there is no systemd), so a rented machine runs
+curators in the **container sandbox** instead (`stet verify --edits --sandbox container`,
+`src/stet/cage.py`): a user of the curator's own, a system-call filter that hands it only
+TCP sockets bound to the loopback device, Landlock to keep it off the machine's other
+ports (Docker's DNS resolver among them), and the season's limits. What differs for a
+curator is in [the rules](RULES.md#the-curators-machine). The server takes curators run in
+it from the organisers' machines only (`runsEditors`), and each run says which sandbox it
+was in. `python tools/cage_check.py`, as root on such a machine, tries to get out of it the
+ways a curator might, and says what held.
+
+A host where the container sandbox cannot be made (an old kernel, no Landlock) still
+grades: the machine falls back to `stet verify` without `--edits`.
 
 Each rented machine has a key of its own from a pool kept by `stet-runpod`, and the
 server knows those keys from `STET_WORKER_KEYS`, not `STET_ANCHOR_KEYS`. A worker key is
@@ -131,12 +138,15 @@ Setting it up:
 2. `stet-runpod scale --follow` on a machine that holds the organisers' own key (it asks
    the server what is waiting with it), or `stet-runpod up 2` to rent two by hand.
 
-A rented machine installs stet when its pod starts (about two and a half minutes), grades
-until it has had nothing to do for ten minutes (`stet verify --exit-when-idle 10`), and
-then ends its own pod. `stet-runpod scale` rents more when scripts are waiting, ends those
-doing nothing as soon as nothing at all is waiting, and ends any that went quiet. It never
-rents past `--max` machines or `--max-hourly` dollars an hour, and stops renting once
-`--daily-budget` is spent.
+A rented machine installs stet when its pod starts (about two and a half minutes) into
+`/opt/stet`, where the curator's user can read it, keeps its key and cache under `/root`,
+where it cannot, works until it has had nothing to do for fifteen minutes
+(`stet verify --exit-when-idle 15`), and then ends its own pod. `stet-runpod scale` rents
+more when a round has curators to run or scripts to grade, ends those doing nothing as
+soon as nothing at all is waiting, and ends any that went quiet. When an entry is waiting
+for a round and nobody who runs curators is around, it rents one, so that the round is
+drawn early as it would be for anyone. It never rents past `--max` machines or
+`--max-hourly` dollars an hour, and stops renting once `--daily-budget` is spent.
 
 The keys are on RunPod's machines while they work. On `--cloud community` (strangers'
 machines, cheaper) a host could read one. Anyone holding a worker key can grade as the
@@ -290,7 +300,7 @@ Set in `apps/stet/deployment.yaml`. The ones that are rules:
 | `STET_GITHUB_MIN_AGE_DAYS` | 30 | Age of the GitHub account an entrant must link |
 | `STET_GITHUB_TOKEN` | none | Optional. Without it GitHub lookups share 60 requests an hour |
 | `STET_ANCHOR_KEYS` | | Public keys of the organisers' accounts, comma-separated |
-| `STET_WORKER_KEYS` | | Public keys of the machines the organisers rent ([above](#rented-machines)), comma-separated. One of the organisers' machines to the judge; no administering, no held-out exam |
+| `STET_WORKER_KEYS` | | Public keys of the machines the organisers rent ([above](#rented-machines)), comma-separated. One of the organisers' machines to the judge, which may run curators in the container sandbox; no administering, no held-out exam |
 | `STET_ESTABLISH_AFTER` | 5 | Agreed grades before an account's work counts towards scores |
 | `STET_RUNS_PER_ENTRY` | 2 | Different people who run each entry (a third when two differ) |
 | `STET_ACTIVE_WINDOW` | 10m | How recently a verifier must have asked for work to be waited for |

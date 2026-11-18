@@ -281,7 +281,13 @@ func (a *App) runsEditors(acct *Account, h *Hello) (bool, string) {
 		return false, "running curators needs a linked GitHub account, as entering does: stet login --github"
 	case !a.established(acct):
 		return false, fmt.Sprintf("curators are run by established verifiers: accounts with %d grades that agreed. This one has %d", a.cfg.EstablishAfter, acct.Agreed)
-	case h.Sandbox != "bwrap" && !a.cfg.Dev:
+	case h.Sandbox == "container" && !acct.Anchor && !a.cfg.Dev:
+		// The container sandbox (stet's cage.py) is for a container that runs stet and
+		// nothing else, which the organisers' rented machines are and a volunteer's
+		// machine may not be. It is weaker than bubblewrap: the curator sees the machine's
+		// other processes, and its scratch space is on disk.
+		return false, "the container sandbox is for the organisers' rented machines; a volunteer's runs curators in bubblewrap"
+	case h.Sandbox != "bwrap" && h.Sandbox != "container" && !a.cfg.Dev:
 		return false, "running curators needs the bubblewrap sandbox"
 	case !a.meetsFloor(h.Hardware):
 		return false, "this machine is slower or smaller than the season's floor for running curators, or sent no measurement of itself: stet bench"

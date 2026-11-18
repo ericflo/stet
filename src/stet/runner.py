@@ -1,9 +1,14 @@
 """Run a curator: the one place untrusted code executes.
 
-Two modes:
+Three modes:
 
-  sandbox="none"   plain subprocess. For running your own curator on your own machine.
-  sandbox="bwrap"  a Linux namespace sandbox (bubblewrap). What official runs use.
+  sandbox="none"       plain subprocess. For running your own curator on your own machine.
+  sandbox="bwrap"      a Linux namespace sandbox (bubblewrap). What official runs use.
+  sandbox="container"  for a container that runs stet and nothing else, where namespaces
+                       cannot be made: a user of the curator's own, a system-call filter
+                       and limits (cage.py). What the organisers' rented machines use.
+
+What follows is the bubblewrap sandbox; cage.py says how the container one differs.
 
 Inside the sandbox a curator has no network, a private process tree, and a file system
 made of: the system's software read-only, the corpus read-only, its own bundle read-only,
@@ -675,11 +680,18 @@ def run_editor(
     limits = {**DEFAULT_LIMITS, **machine_limits(rnd.season), **(limits or {})}
     bundle = bundle.resolve()
     work = work.resolve()
-    out_dir = work / "out"
-    scratch_dir = work / "scratch"
+    caged = sandbox == "container"
+    if caged:
+        from . import cage
+
+        ok, why = cage.available()
+        if not ok:
+            raise HarnessError(f"the container sandbox is not available: {why}")
+    out_dir = cage.OUT if caged else work / "out"
+    scratch_dir = cage.SCRATCH if caged else work / "scratch"
     etc_dir = work / "etc"
     assets_dir = work / "assets"
-    for d in (out_dir, scratch_dir, etc_dir, assets_dir):
+    for d in (etc_dir, assets_dir) if caged else (out_dir, scratch_dir, etc_dir, assets_dir):
         if not remove_tree(d):
             raise HarnessError(f"could not clear {d} before the run")
         d.mkdir(parents=True)
@@ -704,11 +716,12 @@ def run_editor(
         return refused(f"stet.toml: the entry command cannot be parsed ({e})")
     if not argv:
         return refused("stet.toml has an empty entry command")
-    inside = sandbox == "bwrap"
-    py_binds, py_exe, py_path = _python_mounts() if inside else ([], sys.executable, [])
+    inside = sandbox in ("bwrap", "container")  # the curator finds its files at /corpus, /out and the rest
+    bwrap = sandbox == "bwrap"
+    py_binds, py_exe, py_path = _python_mounts() if bwrap else ([], sys.executable, [])
     if argv[0] in ("python", "python3"):
         argv[0] = py_exe
-    node = node_dir(py_binds if inside else None)
+    node = node_dir(py_binds if bwrap else None)
     applied: dict = {}
     paths = {
         "STET_TASK": "/out/task.json" if inside else str(out_dir / "task.json"),
@@ -723,12 +736,17 @@ def run_editor(
         link_tree(list(assets), assets_dir)
     cpus = pick_cpus(int(limits["cores"])) if int(limits["cores"]) > 0 else []
     machine = {**limits, "cores": len(cpus) or (os.cpu_count() or 1)}
+    if caged:
+        try:
+            cage.prepare(bundle, corpus.path.resolve(), assets)
+        except (cage.CageError, OSError) as e:
+            raise HarnessError(f"the container sandbox could not be prepared: {e}") from None
     (out_dir / "task.json").write_text(json.dumps(task_info(rnd, scale, time_limit, machine, assets), indent=1))
     env = {
         # The season's Python and Node come first, so that `python` and `node` mean the same
         # program on every machine, whatever else its /usr/bin holds.
         "PATH": os.pathsep.join([os.path.dirname(py_exe)] + ([node] if node else []) + ["/usr/local/bin", "/usr/bin", "/bin"]),
-        "PYTHONPATH": os.pathsep.join(["/stet-pkg"] + py_path) if inside else str(pkg_dir.parent),
+        "PYTHONPATH": os.pathsep.join(["/stet-pkg"] + py_path) if bwrap else str(pkg_dir.parent),
         "PYTHONUNBUFFERED": "1",
         "PYTHONDONTWRITEBYTECODE": "1",
         "LANG": "C.UTF-8",
@@ -740,6 +758,8 @@ def run_editor(
         **OFFLINE_ENV,
         **paths,
     }
+    if caged:
+        env.update({"USER": "stet", "LOGNAME": "stet"})  # the curator's user has no name of its own
     # The same GPU memory on every machine: PyTorch is told what fraction of this card that is.
     gpu_cap = float(limits["gpu_memory_gb"]) * 2**30
     if gpu_cap > 0 and (total := gpu_total_bytes()) > 0:
@@ -769,7 +789,18 @@ def run_editor(
     else:
         env.update({k: os.environ[k] for k in ("CUDA_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES") if k in os.environ})
 
-    if inside:
+    cg = None
+    if caged:
+        cg = cage.cgroup(limits, len(cpus))
+        ooms = cage.oom_kills(cg)
+        applied = {"memory_gb": limits["memory_gb"], "tasks": limits["tasks"], "scratch_gb": limits["scratch_gb"], "memory": "cgroup" if cg else "watched"}
+        if cpus:
+            applied["cores"] = len(cpus)
+            applied["cpu_time_capped"] = cg is not None
+        if "PYTORCH_ALLOC_CONF" in env:
+            applied["gpu_memory_gb"] = limits["gpu_memory_gb"]
+        cmd, popen_env, cwd = argv, env, str(cage.EDITOR)
+    elif inside:
         ok, why = bwrap_available()
         if not ok:
             raise HarnessError(f"sandbox unavailable: {why}")
@@ -802,15 +833,23 @@ def run_editor(
         cmd = argv
         popen_env = env
         cwd = str(bundle)
-    scratch_on_disk = not inside or not applied  # otherwise it is memory, and the cgroup bounds it
+    scratch_on_disk = caged or not inside or not applied  # otherwise it is memory, and the cgroup bounds it
+    scratch_cap = int(limits["scratch_gb"]) << 30 if caged else SCRATCH_LIMIT_BYTES
 
     log_path = work / "editor.log"
     start = time.time()
     deadline = start + time_limit
     env["STET_DEADLINE"] = str(deadline)
     up_r = up_w = None
+    chan = chan_child = None
     if inside:
         up_r, up_w = os.pipe()
+    if caged:
+        import socket
+
+        chan, chan_child = socket.socketpair()
+        cmd = cage.boot_command(py_exe, up_w, chan_child.fileno(), cpus, cg, int(limits["tasks"]), argv)
+    elif inside:
         for k, v in env.items():
             cmd += ["--setenv", k, v]
         cmd += ["--", py_exe, "-I", "-c", LAUNCHER, str(up_w), ",".join(map(str, cpus))] + argv
@@ -842,7 +881,7 @@ def run_editor(
                 return f"the curator created more than {OUT_LIMIT_FILES:,} files in its output directory"
             if size > OUT_LIMIT_BYTES:
                 return "the curator wrote more than 1 GB to its output directory"
-            if scratch_on_disk and _usage(scratch_dir, 5_000_000)[0] > SCRATCH_LIMIT_BYTES:
+            if scratch_on_disk and _usage(scratch_dir, 5_000_000)[0] > scratch_cap:
                 return "the curator filled its scratch directory"
             return ""
 
@@ -858,13 +897,20 @@ def run_editor(
 
         t = threading.Thread(target=pump, daemon=True)
         proc = None
+        helpers: list = []  # the container sandbox's supervisor and watch
+
+        def stop():
+            if caged:
+                cage.reap(cg)
+            else:
+                _kill(proc)
         # From before the curator exists until it is known to be gone, there is one way out,
         # and it is the `finally` below.
         try:
             try:
                 proc = subprocess.Popen(
                     cmd, cwd=cwd, env=popen_env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                    start_new_session=True, pass_fds=(up_w,) if inside else (),
+                    start_new_session=True, pass_fds=tuple(fd for fd in (up_w, chan_child.fileno() if chan_child else None) if fd is not None),
                 )  # fmt: skip
             except (OSError, ValueError) as e:
                 if inside:
@@ -873,12 +919,28 @@ def run_editor(
             finally:
                 if up_w is not None:
                     os.close(up_w)
+                if chan_child is not None:
+                    chan_child.close()
             if not inside and cpus:
                 try:  # a run on your own machine: the same cores, set from outside, a moment late
                     os.sched_setaffinity(proc.pid, cpus)
                 except OSError:
                     pass
             t.start()
+            if caged:
+                # The launcher hands over the filter's listener before it becomes the curator.
+                # Until it is answered, every internet socket the curator asks for waits.
+                listener = cage.receive_listener(chan)
+                if listener is None:
+                    stop()
+                    proc.wait()
+                    t.join(timeout=5)
+                    said = bytes(last).decode("utf-8", "replace").strip()[-300:]
+                    raise HarnessError(f"the container sandbox could not be set up: {said or 'its launcher handed over no filter'}")
+                helpers.append(cage.Supervisor(listener))
+                helpers.append(cage.Watch(None if cg else int(limits["memory_gb"]) << 30, found))
+                for h in helpers:
+                    h.start()
             threading.Thread(target=watch, daemon=True).start()
             while proc.poll() is None:
                 if time.time() >= deadline:
@@ -888,7 +950,7 @@ def run_editor(
                 elif shutil.disk_usage(out_dir).free < FREE_SPACE_FLOOR:
                     status, reason, low_disk = "error", "the curator ran the disk low", True
                 if status != "ok":
-                    _kill(proc)
+                    stop()
                     break
                 time.sleep(0.05)
             proc.wait()
@@ -902,8 +964,19 @@ def run_editor(
             # about to remove the directories it writes in, and remove_tree is only safe
             # once nothing is left to move them.
             if proc is not None and proc.poll() is None:
-                _kill(proc)
+                stop()
                 proc.wait()
+            if caged and proc is not None:
+                # What it started is still running when it is done, unlike in the other
+                # sandbox, where it goes with the namespace.
+                if not cage.reap(cg):
+                    raise HarnessError("processes of the curator's user would not die")
+                if status == "ok" and cage.oom_kills(cg) > ooms:
+                    status, reason = "error", f"the curator used more than {int(limits['memory_gb'])} GB of memory, and the kernel stopped it"
+            for h in helpers:
+                (h.stop if isinstance(h, cage.Supervisor) else h.done).set()
+            if chan is not None:
+                chan.close()
             done.set()
             if t.ident is not None:
                 t.join(timeout=5)
@@ -922,6 +995,14 @@ def run_editor(
             raise HarnessError(f"the sandbox failed to start: {tail.strip()[:300]}")
     if not remove_tree(scratch_dir):
         raise HarnessError(f"could not remove what the curator left in {scratch_dir}")
+    run = _outcome(status, reason, low_disk, out_dir, work, proc, seconds, time_limit, tail, sandbox, applied, max_script, over)
+    if caged and not cage.clean():
+        raise HarnessError("what the curator left on this machine could not all be removed")
+    return run
+
+
+def _outcome(status, reason, low_disk, out_dir, work, proc, seconds, time_limit, tail, sandbox, applied, max_script, over) -> EditRun:
+    """What came of a run, from what it left in its output directory."""
     if low_disk:
         size, entries, readable = _usage(out_dir, OUT_LIMIT_FILES)
         if not readable or entries > OUT_LIMIT_FILES:
@@ -949,9 +1030,10 @@ def run_editor(
     return EditRun(status, seconds, time_limit, proc.returncode, script, tail, sandbox, "", applied)
 
 
-def sandbox_selftest() -> tuple[bool, str]:
+def sandbox_selftest(sandbox: str = "bwrap") -> tuple[bool, str]:
     """Run a known-good curator in the sandbox. A verifier does this before taking edit jobs,
-    so that a broken sandbox is never mistaken for a run of broken curators."""
+    so that a broken sandbox is never mistaken for a run of broken curators. The container
+    sandbox is also tried from inside, by a curator that tries to get out of it."""
     import tempfile
 
     import numpy as np
@@ -970,11 +1052,20 @@ def sandbox_selftest() -> tuple[bool, str]:
         (root / "bundle" / "curator.py").write_text("from stet.curator import Task\ntask = Task.from_env()\ntask.write([i for i, _ in task.corpus])\n")
         try:
             run = run_editor(root / "bundle", "python curator.py", Corpus(root / "corpus"), practice_round(season, 0), season.scale("nano"),
-                             root / "work", 60, sandbox="bwrap", limits={"required": True})  # fmt: skip
+                             root / "work", 60, sandbox=sandbox, limits={"required": True})  # fmt: skip
         except HarnessError as e:
             return False, str(e)
         if run.status != "ok" or run.script is None or run.script.read_text().split() != ["0"]:
             return False, f"a trivial curator did not run in the sandbox ({run.status}: {run.reason or run.log_tail.strip()[-300:]})"
+        if sandbox == "container":
+            (root / "bundle" / "curator.py").write_text(isolation_probe())
+            try:
+                run = run_editor(root / "bundle", "python curator.py", Corpus(root / "corpus"), practice_round(season, 0), season.scale("nano"),
+                                 root / "work", 90, sandbox=sandbox, limits={"required": True})  # fmt: skip
+            except HarnessError as e:
+                return False, str(e)
+            if run.status != "ok" or run.script is None:
+                return False, f"the container sandbox did not hold ({run.status}: {run.reason or ''} {run.log_tail.strip()[-600:]})"
         # A curator is promised Node beside Python, and loopback between its own processes:
         # what a harness of its own needs. Find out here, not from the first entrant whose
         # curator fails for a reason that is this machine's.
@@ -982,7 +1073,7 @@ def sandbox_selftest() -> tuple[bool, str]:
             (root / "bundle" / "curator.py").write_text(HARNESS_PROBE)
             try:
                 run = run_editor(root / "bundle", "python curator.py", Corpus(root / "corpus"), practice_round(season, 0), season.scale("nano"),
-                                 root / "work", 60, sandbox="bwrap", limits={"required": True})  # fmt: skip
+                                 root / "work", 60, sandbox=sandbox, limits={"required": True})  # fmt: skip
             except HarnessError as e:
                 return False, str(e)
             if run.status != "ok" or run.script is None:
@@ -994,12 +1085,99 @@ def sandbox_selftest() -> tuple[bool, str]:
         (root / "bundle" / "curator.py").write_text(GPU_PROBE.replace("WANT_CORES", str(want)))
         try:
             run = run_editor(root / "bundle", "python curator.py", Corpus(root / "corpus"), practice_round(season, 0), season.scale("nano"),
-                             root / "work", 180, sandbox="bwrap", limits={"required": True})  # fmt: skip
+                             root / "work", 180, sandbox=sandbox, limits={"required": True})  # fmt: skip
         except HarnessError as e:
             return False, str(e)
         if run.status != "ok" or run.script is None:
             return False, f"a curator could not use the GPU inside the sandbox ({run.status}: {run.reason or ''} {run.log_tail.strip()[-400:]})"
     return True, ""
+
+
+def isolation_probe() -> str:
+    """A curator that tries what the container sandbox must not allow, and fails if it can.
+
+    It is given the places that must stay out of its reach: this machine's key, config and
+    cache; the Stet API's address and a public one, which it must not reach; and everything
+    else listening on this machine (Docker's resolver among them), which it must not reach
+    either. Loopback between its own processes must work.
+    """
+    import socket as _socket
+    from urllib.parse import urlparse
+
+    from .data import api_base
+    from .keys import config_dir
+
+    private = [str(p) for p in (config_dir() / "key.json", config_dir(), cache_dir()) if p.exists()]
+    far = [("1.1.1.1", 80)]
+    try:
+        host = urlparse(api_base()).hostname or ""
+        far.append((_socket.getaddrinfo(host, 443, _socket.AF_INET, _socket.SOCK_STREAM)[0][4][0], 443))
+    except (OSError, IndexError):
+        pass
+    near = []
+    for name in ("/proc/net/tcp", "/proc/net/tcp6"):
+        try:
+            lines = Path(name).read_text().splitlines()[1:]
+        except OSError:
+            continue
+        for line in lines:
+            f = line.split()
+            if len(f) > 3 and f[3] == "0A":
+                addr, port = f[1].rsplit(":", 1)
+                ip = ".".join(str(b) for b in reversed(bytes.fromhex(addr))) if len(addr) == 8 else "::1"
+                near.append(("127.0.0.1" if ip == "0.0.0.0" else ip, int(port, 16)))
+    try:
+        for line in Path("/etc/resolv.conf").read_text().splitlines():
+            parts = line.split()
+            if len(parts) > 1 and parts[0] == "nameserver" and parts[1].startswith("127."):
+                near.append((parts[1], 53))
+    except OSError:
+        pass
+    return ISOLATION_PROBE.replace("PRIVATE", repr(private)).replace("FAR", repr(far)).replace("NEAR", repr(sorted(set(near))))
+
+
+ISOLATION_PROBE = """import os, socket, sys
+from stet.curator import Task
+task = Task.from_env()
+bad = []
+if 0 in (os.getuid(), os.geteuid()):
+    bad.append("it runs as root")
+for path in PRIVATE:
+    try:
+        os.listdir(path) if os.path.isdir(path) else open(path, "rb").read(1)
+        bad.append("it could read " + path)
+    except OSError:
+        pass
+try:
+    open("/root/stet-cage-probe", "w")
+    bad.append("it could write in /root")
+except OSError:
+    pass
+srv = socket.socket()
+srv.bind(("127.0.0.1", 0))
+srv.listen(1)
+socket.create_connection(srv.getsockname(), timeout=5).close()
+for host, port in FAR + NEAR:
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    s = socket.socket(family, socket.SOCK_STREAM)
+    s.settimeout(3)
+    try:
+        s.connect((host, port))
+        bad.append(f"it reached {host}:{port}")
+    except OSError:
+        pass
+    finally:
+        s.close()
+for family, kind in ((socket.AF_INET, socket.SOCK_DGRAM), (socket.AF_PACKET, socket.SOCK_RAW), (socket.AF_INET, socket.SOCK_RAW)):
+    try:
+        socket.socket(family, kind).close()
+        bad.append(f"it could make a socket of family {family} and kind {kind}")
+    except OSError:
+        pass
+if bad:
+    sys.exit("the container sandbox lets the curator out: " + "; ".join(bad))
+task.write([i for i, _ in task.corpus])
+"""
 
 
 # What sandbox_selftest runs for a harness: Node answers a server in this process, on loopback.

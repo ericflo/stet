@@ -111,7 +111,9 @@ pass. Each one runs in a sandbox:
   which it is killed.
 
 `stet verify --edits` tests the sandbox before it takes any work and will not start
-without it. What the sandbox cannot do is stand between the curator and your GPU's
+without it. (The organisers' rented machines are containers that cannot make these namespaces,
+and run curators in a second sandbox made for containers; [the rules](RULES.md#the-curators-machine)
+say how it differs. It is not for volunteers' machines.) What the sandbox cannot do is stand between the curator and your GPU's
 driver: using the GPU means talking to it. A flaw in the driver or the kernel is outside
 what any of this contains. Curators are public code from accounts tied to a GitHub
 identity, which is a deterrent and not a guarantee. Run curators on a machine you could

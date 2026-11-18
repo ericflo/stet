@@ -19,7 +19,11 @@ type WorkRound struct {
 	Entries int    `json:"entries"` // open entries
 	// RunsWaiting counts entries that somebody who is around could be handed to run now and
 	// nobody is running: each is a script to grade soon.
-	RunsWaiting   int `json:"runs_waiting"`
+	RunsWaiting int `json:"runs_waiting"`
+	// RunsWanted counts entries a runner of the organisers' which had just started could be
+	// handed to run now, whoever else is around: the most such machines that could be put
+	// to running curators at once.
+	RunsWanted    int `json:"runs_wanted"`
 	EditsUnderWay int `json:"edits_under_way"`
 	// GradesWanted counts scripts a score is waiting on that a grader of the organisers'
 	// which had just started could be handed now: the most such machines that could be put
@@ -38,8 +42,11 @@ type WorkMachine struct {
 
 // Work is the answer to GET /api/v1/admin/work.
 type Work struct {
-	Rounds     []WorkRound   `json:"rounds"`
-	Runners    int           `json:"runners"` // accounts around that may be handed curators to run
+	Rounds  []WorkRound `json:"rounds"`
+	Runners int         `json:"runners"` // accounts around that may be handed curators to run
+	// Waiting says that an entry is waiting for a round. The next one is drawn early for it
+	// once somebody who runs curators is around.
+	Waiting    bool          `json:"waiting"`
 	NextDrawAt int64         `json:"next_draw_at,omitempty"`
 	Machines   []WorkMachine `json:"machines"`
 }
@@ -52,6 +59,7 @@ func (a *App) work(s *State) Work {
 	j := a.newJudge(s)
 	out := Work{Rounds: []WorkRound{}, Machines: []WorkMachine{}}
 	fresh := &asker{acct: &Account{ID: -1, Anchor: true, Worker: true}, est: true, gpuMake: "cuda"}
+	runner := &asker{acct: &Account{ID: -2, Anchor: true, Worker: true}, est: true, canEdit: true, gpuMake: "cuda"}
 	for _, rd := range openRounds(s) {
 		states := j.states(rd)
 		closing := j.ready(states)
@@ -69,6 +77,9 @@ func (a *App) work(s *State) Work {
 					wr.GradesWanted++
 				}
 			}
+			if j.mayRun(st, runner) {
+				wr.RunsWanted++
+			}
 		}
 		out.Rounds = append(out.Rounds, wr)
 	}
@@ -80,6 +91,7 @@ func (a *App) work(s *State) Work {
 	if r := s.roundWithStatus("scheduled"); r != nil {
 		out.NextDrawAt = r.DrawAt
 	}
+	out.Waiting = a.waiting(s)
 	busy := map[int64]string{}
 	for _, c := range s.Claims {
 		if e := s.entry(c.RoundIdx, c.EditorID); c.live(j.t) && e != nil && e.Status == "open" {

@@ -217,6 +217,11 @@ Every run gets the same machine, whatever the volunteer has:
   document number.
 - **A read-only file system.** Writable: `STET_OUT`, `STET_SCRATCH` and `/tmp` (2 GB,
   where `TMPDIR` points). No home directory.
+- **Two sandboxes.** Volunteers run curators in bubblewrap; the organisers' rented machines,
+  which are containers, in a sandbox made for containers. Write for both: on loopback use
+  TCP, on a port from 1024 up; do not count on scratch coming out of the memory limit (in
+  the container sandbox it is on disk) or on being the only process listed in `/proc`.
+  The rules list every difference.
 - **Not everything in the directory is sent.** Hidden files (any name starting with a
   dot), `venv/`, `node_modules/`, `__pycache__/`, `runs/`, compiled Python and symbolic
   links stay at home. The bundle may be at most 50 MB packed, 400 MB unpacked and 2,000
