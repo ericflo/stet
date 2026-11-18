@@ -521,9 +521,11 @@ def test_an_editor_never_runs_outside_the_sandbox(edit, monkeypatch):
 
 
 def test_both_sandboxes_run_an_editor_with_the_machine_it_is_promised(edit, monkeypatch):
+    import sys
+    import types
+
     from test_project import bundle
 
-    from stet import pipeline
     from stet.runner import EditRun
 
     seen = []
@@ -532,7 +534,8 @@ def test_both_sandboxes_run_an_editor_with_the_machine_it_is_promised(edit, monk
         seen.append((sandbox, (limits or {}).get("required")))
         return EditRun("no_script", 1.0, 60.0, 0, None, "", sandbox, "nothing written")
 
-    monkeypatch.setattr(pipeline, "edit_round", edit_round)
+    # The pipeline itself trains, with PyTorch, which the harness's tests run without.
+    monkeypatch.setitem(sys.modules, "stet.pipeline", types.SimpleNamespace(edit_round=edit_round))
     blob = bundle([("stet.toml", b'name = "probe"\nentry = "python curator.py"\n'), ("curator.py", b"")])
     for sandbox in ("bwrap", "container"):
         payload = edit(blob, sandbox=sandbox)
