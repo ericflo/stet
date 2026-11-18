@@ -73,6 +73,7 @@ reward, info = env.step(edit_script)  # the gain, in nats per token
 | `src/stet/` | The harness and CLI (Python) |
 | `server/` | The API and website (Go) |
 | `examples/` | Reference curators: `identity`, `english`, `tidy`; `reader` (a small language model reads the pages); `agent` (an agent harness and a model served in the sandbox) |
+| `runpod/` | `stet-runpod`, for the organisers: rents GPUs from RunPod to grade while volunteers are few (Go, built on its own) |
 | `docs/` | [Rules](docs/RULES.md), [design](docs/DESIGN.md), [verifying](docs/VERIFYING.md), [experiments](docs/EXPERIMENTS.md), [API](docs/API.md), [FAQ](docs/FAQ.md) |
 
 ## Develop
