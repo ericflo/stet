@@ -520,6 +520,27 @@ def test_an_editor_never_runs_outside_the_sandbox(edit, monkeypatch):
             edit(b"x", sandbox=sandbox)
 
 
+def test_both_sandboxes_run_an_editor_with_the_machine_it_is_promised(edit, monkeypatch):
+    from test_project import bundle
+
+    from stet import pipeline
+    from stet.runner import EditRun
+
+    seen = []
+
+    def edit_round(bundle_dir, entry, rnd, scale, work, sandbox="none", limits=None, **kw):
+        seen.append((sandbox, (limits or {}).get("required")))
+        return EditRun("no_script", 1.0, 60.0, 0, None, "", sandbox, "nothing written")
+
+    monkeypatch.setattr(pipeline, "edit_round", edit_round)
+    blob = bundle([("stet.toml", b'name = "probe"\nentry = "python curator.py"\n'), ("curator.py", b"")])
+    for sandbox in ("bwrap", "container"):
+        payload = edit(blob, sandbox=sandbox)
+        assert payload["edit"]["sandbox"] == sandbox and payload["edit"]["status"] == "no_script"
+    # Held to the promised memory and GPU in both: an official run, wherever it is made.
+    assert seen == [("bwrap", True), ("container", True)]
+
+
 def test_a_bundle_that_cannot_be_loaded_is_the_entrants_failure_and_is_reported(edit, monkeypatch):
     import zstandard
     from test_project import bundle

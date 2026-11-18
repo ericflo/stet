@@ -1030,7 +1030,7 @@ def _edit_job(job, season, scale, key, out, work: Path, sandbox: str, gpu: int =
 
     # Checked here as well as where the flag is read: this is the function that runs a
     # stranger's program, and nothing that calls it should be able to get that wrong.
-    if sandbox != "bwrap" and os.environ.get("STET_DEV") != "1":
+    if sandbox not in SANDBOXES and os.environ.get("STET_DEV") != "1":
         raise HarnessError("refusing to run an entrant's curator outside the sandbox")
     from . import data
     from .project import load_project, unpack
@@ -1066,7 +1066,7 @@ def _edit_job(job, season, scale, key, out, work: Path, sandbox: str, gpu: int =
     release_gpu_memory()
     edit = edit_round(
         bundle_dir, project.entry, rnd, scale, work, sandbox=sandbox, log=lambda m: out.line("", out.dim(m)),
-        limits={"required": sandbox == "bwrap"}, assets=project.assets, verify_assets=True, gpu=gpu,
+        limits={"required": sandbox in SANDBOXES}, assets=project.assets, verify_assets=True, gpu=gpu,
     )  # fmt: skip
     payload["edit"] = edit.to_dict()
     payload["finished_at"] = int(time.time())
@@ -1219,6 +1219,7 @@ def _stop_like_ctrl_c() -> dict:
     return old
 
 
+SANDBOXES = ("bwrap", "container")  # what an entrant's curator may run in: runner.py, cage.py
 EXIT_NO_SANDBOX = 3  # `stet verify --edits` cannot run curators here; a rented machine then only grades
 RETRY_PAUSES = (60, 300)  # a job that fails on this machine is tried again after these waits, then handed back
 STOP_AFTER_FAILURES = 3 * (len(RETRY_PAUSES) + 1)  # three jobs' worth of failures in a row: it is the machine
