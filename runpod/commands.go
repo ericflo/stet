@@ -112,10 +112,12 @@ func cmdGPUs(ctx context.Context, f *Fleet) error {
 		fmt.Fprintf(f.out, "RunPod has no GPU free now that would do (%s cloud).\n", strings.ToLower(f.o.Cloud))
 		return nil
 	}
-	fmt.Fprintf(f.out, "What would be rented, in this order (%s cloud, CUDA %s or newer):\n\n", strings.ToLower(f.o.Cloud), f.o.MinCUDA)
-	for _, g := range gpus {
-		fmt.Fprintf(f.out, "  $%.2f/h  %-34s %3d GB  %s\n", g.price(f.o.Cloud), shortGPU(g.ID), g.Memory, strings.ToLower(g.Availability))
+	fmt.Fprintf(f.out, "What would be rented, in this order (%s cloud, CUDA %s or newer, hosts with %d GB and %d vCPUs a GPU):\n\n",
+		strings.ToLower(f.o.Cloud), f.o.MinCUDA, f.o.MinRAM, f.o.MinCPU)
+	for _, c := range gpus {
+		fmt.Fprintf(f.out, "  $%.2f/h  %-9s  %-34s %3d GB  %s\n", c.Price, strings.ToLower(c.Cloud), shortGPU(c.GPU.ID), c.GPU.Memory, strings.ToLower(c.GPU.Availability))
 	}
+	fmt.Fprintln(f.out, "\nEach is tried in turn until RunPod has a machine of that kind free with room for the rest.")
 	return nil
 }
 

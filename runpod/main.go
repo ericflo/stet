@@ -107,13 +107,13 @@ func flags(name string, o *Options) *flag.FlagSet {
 	fs.StringVar(&o.API, "api", envOr("STET_API", "https://api.stetrun.com"), "the Stet API (STET_API)")
 	fs.StringVar(&o.RunPodAPI, "runpod-api", runpodAPI, "RunPod's API")
 	fs.StringVar(&o.OperatorKey, "key", defaultOperatorKey(), "the organisers' own stet key, to ask what is waiting")
-	fs.StringVar(&o.Cloud, "cloud", "secure", "secure (RunPod's data centres) or community (strangers' machines: cheaper, but they could read a machine's key)")
+	fs.StringVar(&o.Cloud, "cloud", "any", "any (the cheapest of both), community (strangers' machines: cheapest, but a host could read a machine's key), or secure (RunPod's data centres)")
 	gpus := fs.String("gpu", "", "GPU kinds to rent, in order of preference, comma-separated (default: whatever fits, cheapest first)")
 	fs.StringVar(&o.Image, "image", "ubuntu:24.04", "the container image; stet is installed on it when the pod starts")
 	fs.IntVar(&o.Disk, "disk", 80, "container disk, GB: stet and the season's libraries, and the 60 GB a machine that runs curators keeps free")
 	fs.StringVar(&o.MinCUDA, "min-cuda", "13.0", "the oldest CUDA the host's driver may have: the season's PyTorch is built for CUDA 13")
-	fs.IntVar(&o.MinRAM, "min-ram", 24, "memory, GB: a curator is given 12, and stet needs its own")
-	fs.IntVar(&o.MinCPU, "min-cpus", 8, "vCPUs: a curator is given 6")
+	fs.IntVar(&o.MinRAM, "min-ram", 16, "host memory a GPU, GB: the season's floor for a machine that runs curators (a curator is given 12)")
+	fs.IntVar(&o.MinCPU, "min-cpus", 6, "host vCPUs a GPU: the season's floor for a machine that runs curators")
 	fs.IntVar(&o.MinGPUMemory, "min-gpu-memory", 12, "GPU memory, GB: a curator is given 8, and a machine that runs them needs 10")
 	fs.IntVar(&o.Idle, "idle", 15, "minutes a machine waits with nothing to do before it ends its own pod")
 	noEdits := fs.Bool("no-edits", false, "rent machines that only grade, and leave curators to the organisers' own machines")
@@ -133,8 +133,8 @@ func flags(name string, o *Options) *flag.FlagSet {
 	finish := func() error {
 		o.Edits = !*noEdits
 		o.Cloud = strings.ToUpper(o.Cloud)
-		if o.Cloud != "SECURE" && o.Cloud != "COMMUNITY" {
-			return fmt.Errorf("--cloud is secure or community, not %q", strings.ToLower(o.Cloud))
+		if o.Cloud != "SECURE" && o.Cloud != "COMMUNITY" && o.Cloud != "ANY" {
+			return fmt.Errorf("--cloud is any, community or secure, not %q", strings.ToLower(o.Cloud))
 		}
 		o.GPUs = nil
 		for _, g := range strings.Split(*gpus, ",") {

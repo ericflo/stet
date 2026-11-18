@@ -67,16 +67,20 @@ and nobody who runs curators is around, one, so that the round is drawn early. I
 ends a machine that holds a job. It ends at once those doing nothing when nothing at all is
 waiting, and any that went quiet or stopped. The rest stop by themselves.
 
-The cheapest GPU RunPod has free that will do is rented first: NVIDIA, 12 GB or more (a
-machine that runs curators needs 10 and gives one 8), on a host with 24 GB of memory and 8
-vCPUs, a driver new enough for CUDA 13 (the season's PyTorch), bf16 (nothing older than
-Ampere), and a whole GPU, with an 80 GB disk. `--gpu "RTX A5000,RTX 4090"` names them
+Every machine rented is the cheapest that will do, looked up afresh each time: every kind
+of GPU RunPod has free, in both its clouds, is tried in order of price until one has a
+machine with room. What will do: NVIDIA, 12 GB or more (a machine that runs curators needs
+10 and gives one 8), on a host with the season's floor of 16 GB of memory and 6 vCPUs a
+GPU, a driver new enough for CUDA 13 (the season's PyTorch, 2.15.0, is built only for
+13.2), bf16 (nothing older than Ampere), and a whole GPU, with an 80 GB disk.
+`stet-runpod gpus` lists them as they stand. `--gpu "RTX A5000,RTX 4090"` names them
 instead. At micro scale a grade trains for a few minutes even on the cheapest, so those are
 the cheapest per job.
 
-`--cloud secure` (the default) rents only from RunPod's own data centres. `--cloud
-community` is strangers' machines, at a third of the price or less, and the host of one
-could read the key it is given. Anyone holding a worker key can grade as the organisers:
+`--cloud any` (the default) takes the cheaper of RunPod's two clouds, which is nearly
+always the community one: strangers' machines, at a third of the price or less. `--cloud
+secure` rents only from RunPod's own data centres. The host of a community machine could
+read the key it is given, and anyone holding a worker key can grade as the organisers:
 take back a key that may have leaked (`stet-runpod keys --revoke HANDLE`).
 
 Leaving it running, as a service of your own user:

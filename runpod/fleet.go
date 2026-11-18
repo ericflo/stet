@@ -240,7 +240,7 @@ func (f *Fleet) note(l *ledger, pods []Pod) error {
 			}
 			r := l.Pods[p.ID]
 			if r == nil { // rented by another copy of this tool, or by hand
-				r = &podRecord{ID: p.ID, Handle: k.Handle, GPU: p.gpuName(), Cloud: f.o.Cloud, Cost: p.Cost, Start: p.CreatedAt}
+				r = &podRecord{ID: p.ID, Handle: k.Handle, GPU: p.gpuName(), Cost: p.Cost, Start: p.CreatedAt}
 				l.Pods[p.ID] = r
 			}
 			r.Alive, r.Cost = now, p.Cost
@@ -367,35 +367,63 @@ func (f *Fleet) look(ctx context.Context) (*View, error) {
 // one GPU shared with others, and makers other than NVIDIA (grades are taken on CUDA).
 var unfitGPU = regexp.MustCompile(`(?i)V100|\bT4\b|P100|P40|\bP4\b|K80|M60|Quadro|RTX 20|TITAN|GTX|MIG`)
 
-// choices are the GPU kinds to try, cheapest first: those named with --gpu, in that
-// order, or every fit kind RunPod has free now.
-func (f *Fleet) choices(ctx context.Context) ([]GPUType, error) {
-	all, err := f.rp.gpus(ctx, f.o.Cloud, f.o.MinCUDA)
-	if err != nil {
-		return nil, err
+// Choice is one kind of GPU in one of RunPod's clouds, at its price there.
+type Choice struct {
+	GPU   GPUType
+	Cloud string
+	Price float64
+}
+
+// clouds are the clouds --cloud lets machines be rented in.
+func (f *Fleet) clouds() []string {
+	if f.o.Cloud == "ANY" {
+		return []string{"COMMUNITY", "SECURE"}
 	}
+	return []string{f.o.Cloud}
+}
+
+// choices are what to try, looked up afresh each time machines are rented: every fit kind
+// of GPU RunPod has free now, in every cloud allowed, cheapest first (secure first where
+// the price is the same); or those named with --gpu, in that order, each cheapest first.
+func (f *Fleet) choices(ctx context.Context) ([]Choice, error) {
+	var all []Choice
+	for _, cloud := range f.clouds() {
+		gpus, err := f.rp.gpus(ctx, cloud, f.o.MinCUDA)
+		if err != nil {
+			return nil, err
+		}
+		for _, g := range gpus {
+			if p := g.price(cloud); p > 0 && g.Availability != "NONE" && g.Availability != "" {
+				all = append(all, Choice{g, cloud, p})
+			}
+		}
+	}
+	sort.SliceStable(all, func(i, j int) bool {
+		if all[i].Price != all[j].Price {
+			return all[i].Price < all[j].Price
+		}
+		return all[i].Cloud == "SECURE" && all[j].Cloud != "SECURE"
+	})
+	var out []Choice
 	if len(f.o.GPUs) > 0 {
-		var out []GPUType
 		for _, want := range f.o.GPUs {
-			for _, g := range all {
-				if strings.EqualFold(g.ID, want) || strings.EqualFold(g.Name, want) || strings.EqualFold(shortGPU(g.ID), want) {
-					out = append(out, g)
+			for _, c := range all {
+				if strings.EqualFold(c.GPU.ID, want) || strings.EqualFold(c.GPU.Name, want) || strings.EqualFold(shortGPU(c.GPU.ID), want) {
+					out = append(out, c)
 				}
 			}
 		}
 		return out, nil
 	}
-	var out []GPUType
-	for _, g := range all {
-		if g.Manufacturer == "NVIDIA" && g.Memory >= f.o.MinGPUMemory && g.price(f.o.Cloud) > 0 && g.Availability != "NONE" && g.Availability != "" && !unfitGPU.MatchString(g.ID) {
-			out = append(out, g)
+	for _, c := range all {
+		if c.GPU.Manufacturer == "NVIDIA" && c.GPU.Memory >= f.o.MinGPUMemory && !unfitGPU.MatchString(c.GPU.ID) {
+			out = append(out, c)
 		}
 	}
-	sort.SliceStable(out, func(i, j int) bool { return out[i].price(f.o.Cloud) < out[j].price(f.o.Cloud) })
 	return out, nil
 }
 
-func (f *Fleet) spec(k *Key, gpu string, site string) NewPod {
+func (f *Fleet) spec(k *Key, gpu, cloud, site string) NewPod {
 	env := map[string]string{
 		"STET_WORKER_KEY":   base64.StdEncoding.EncodeToString(k.file()),
 		"STET_API":          f.st.api,
@@ -409,7 +437,7 @@ func (f *Fleet) spec(k *Key, gpu string, site string) NewPod {
 		ports = []string{"22/tcp"}
 	}
 	return NewPod{
-		Name: k.Handle, Image: f.o.Image, Cloud: f.o.Cloud, Disk: f.o.Disk, Env: env, Ports: ports,
+		Name: k.Handle, Image: f.o.Image, Cloud: cloud, Disk: f.o.Disk, Env: env, Ports: ports,
 		GPU:        NewPodGPU{ID: gpu, Count: 1, MinRAMPerGPU: f.o.MinRAM, MinVCPUPerGPU: f.o.MinCPU, MinCUDAVersion: f.o.MinCUDA},
 		Entrypoint: []string{"/bin/bash", "-c"}, Cmd: []string{workerScript},
 	}
@@ -498,11 +526,11 @@ func (f *Fleet) ready(ctx context.Context, k *Key, vouched map[string]Vouched) e
 	return nil
 }
 
-// rent tries each kind of GPU in turn until RunPod gives one. nil, nil: none could be had
-// within what may be spent.
-func (f *Fleet) rent(ctx context.Context, v *View, k *Key, gpus []GPUType, site string) (*Pod, error) {
-	for _, g := range gpus {
-		price := g.price(f.o.Cloud)
+// rent tries each kind of GPU in turn, cheapest first, until RunPod gives one. nil, nil:
+// none could be had within what may be spent.
+func (f *Fleet) rent(ctx context.Context, v *View, k *Key, gpus []Choice, site string) (*Pod, error) {
+	for _, c := range gpus {
+		g, price := c.GPU, c.Price
 		if v.Hourly+price > f.o.MaxHourly+1e-9 {
 			if len(f.o.GPUs) == 0 {
 				f.say("not renting another machine: at $%.2f an hour it would pass --max-hourly $%.2f", v.Hourly+price, f.o.MaxHourly)
@@ -511,11 +539,11 @@ func (f *Fleet) rent(ctx context.Context, v *View, k *Key, gpus []GPUType, site 
 			continue
 		}
 		if f.o.DryRun {
-			f.say("would rent %s on %s (%s cloud, about $%.2f an hour)", k.Handle, shortGPU(g.ID), strings.ToLower(f.o.Cloud), price)
+			f.say("would rent %s on %s (%s cloud, about $%.2f an hour)", k.Handle, shortGPU(g.ID), strings.ToLower(c.Cloud), price)
 			v.Hourly += price
 			return &Pod{ID: "dry-run", Name: k.Handle, Status: "PROVISIONING", Cost: price, CreatedAt: f.now()}, nil
 		}
-		pod, err := f.rp.create(ctx, f.spec(k, g.ID, site))
+		pod, err := f.rp.create(ctx, f.spec(k, g.ID, c.Cloud, site))
 		if errors.Is(err, errNoRoom) {
 			continue
 		}
@@ -523,11 +551,11 @@ func (f *Fleet) rent(ctx context.Context, v *View, k *Key, gpus []GPUType, site 
 			return nil, err
 		}
 		v.Hourly += pod.Cost
-		v.Ledger.Pods[pod.ID] = &podRecord{ID: pod.ID, Handle: k.Handle, GPU: shortGPU(g.ID), Cloud: f.o.Cloud, Cost: pod.Cost, Start: f.now(), Alive: f.now()}
+		v.Ledger.Pods[pod.ID] = &podRecord{ID: pod.ID, Handle: k.Handle, GPU: shortGPU(g.ID), Cloud: c.Cloud, Cost: pod.Cost, Start: f.now(), Alive: f.now()}
 		if err := f.writeLedger(v.Ledger); err != nil {
 			return pod, err
 		}
-		f.say("rented %s: %s, %s cloud, $%.2f an hour (pod %s)", k.Handle, shortGPU(g.ID), strings.ToLower(f.o.Cloud), pod.Cost, pod.ID)
+		f.say("rented %s: %s, %s cloud, $%.2f an hour (pod %s)", k.Handle, shortGPU(g.ID), strings.ToLower(c.Cloud), pod.Cost, pod.ID)
 		return pod, nil
 	}
 	f.say("RunPod has none of the %d kinds of GPU tried free for %s just now; trying again later", len(gpus), k.Handle)

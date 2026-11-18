@@ -154,10 +154,13 @@ for a round and nobody who runs curators is around, it rents one, so that the ro
 drawn early as it would be for anyone. It never rents past `--max` machines or
 `--max-hourly` dollars an hour, and stops renting once `--daily-budget` is spent.
 
-The keys are on RunPod's machines while they work. On `--cloud community` (strangers'
-machines, cheaper) a host could read one. Anyone holding a worker key can grade as the
-organisers, so a key that may have leaked is taken back (`stet-runpod keys --revoke
-stet-rp-03`, or `DELETE /api/v1/admin/workers/<key>`), and the pool gets a new one. The default, `--cloud secure`, rents only from RunPod's own data centres.
+Each machine rented is the cheapest that will do at that moment, from either of RunPod's
+clouds (`--cloud any`), and that is nearly always the community one: strangers' machines.
+The keys are on them while they work, and a host could read one. Anyone holding a worker
+key can grade as the organisers, so a key that may have leaked is taken back (`stet-runpod
+keys --revoke stet-rp-03`, or `DELETE /api/v1/admin/workers/<key>`), and the pool gets a
+new one. `--cloud secure` rents only from RunPod's own data centres, at two or three times
+the price.
 
 ## Deploying
 

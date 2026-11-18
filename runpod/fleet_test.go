@@ -44,8 +44,16 @@ func (f *fakeRunPod) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	switch {
 	case r.Method == "GET" && r.URL.Path == "/catalog/gpus":
-		if r.URL.Query().Get("cloud") != "SECURE" || r.URL.Query().Get("minCudaVersion") != "13.0" {
+		if r.URL.Query().Get("minCudaVersion") != "13.0" {
 			w.WriteHeader(422)
+			return
+		}
+		if r.URL.Query().Get("cloud") == "COMMUNITY" {
+			json.NewEncoder(w).Encode(map[string]any{"gpus": []map[string]any{
+				{"id": "NVIDIA GeForce RTX 3080 Ti", "name": "RTX 3080 Ti", "manufacturer": "NVIDIA", "memory": 12, "price": map[string]any{"community": 0.18}, "availability": "LOW"},
+				{"id": "NVIDIA RTX A5000", "name": "RTX A5000", "manufacturer": "NVIDIA", "memory": 24, "price": map[string]any{"community": 0.16}, "availability": "NONE"},
+				{"id": "NVIDIA GeForce RTX 3090 Ti", "name": "RTX 3090 Ti", "manufacturer": "NVIDIA", "memory": 24, "price": map[string]any{"community": 0.27}, "availability": "LOW"},
+			}})
 			return
 		}
 		json.NewEncoder(w).Encode(map[string]any{"gpus": []map[string]any{
@@ -73,7 +81,8 @@ func (f *fakeRunPod) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		f.created = append(f.created, spec)
 		f.n++
-		price := map[string]float64{"NVIDIA RTX A5000": 0.27, "NVIDIA GeForce RTX 3080": 0.2, "NVIDIA RTX PRO 4000 Blackwell": 0.57}[spec.GPU.ID]
+		price := map[string]float64{"NVIDIA RTX A5000": 0.27, "NVIDIA GeForce RTX 3080": 0.2, "NVIDIA RTX PRO 4000 Blackwell": 0.57,
+			"NVIDIA GeForce RTX 3080 Ti": 0.18, "NVIDIA GeForce RTX 3090 Ti": 0.27}[spec.GPU.ID]
 		p := &Pod{ID: fmt.Sprintf("pod%d", f.n), Name: spec.Name, Status: "RUNNING", Cost: price, CreatedAt: time.Now()}
 		p.GPU = &struct {
 			ID     string `json:"id"`
@@ -419,5 +428,51 @@ func TestAKeyWhoseHandleIsTakenTakesAnother(t *testing.T) {
 	again := &Fleet{o: f.o}
 	if err := again.loadKeys(); err != nil || len(again.keys) != 1 || again.keys[0].Handle != rp.created[0].Name || again.keys[0].Public != f.keys[0].Public {
 		t.Fatalf("the pool after the rename: %+v (%v)", again.keys, err)
+	}
+}
+
+// --cloud any rents the cheapest machine in either cloud, every time, and falls back to the
+// next cheapest when RunPod has none of a kind free.
+func TestTheCheapestMachineInEitherCloudIsRented(t *testing.T) {
+	rp, st := newFakeRunPod(t), newFakeStet(t)
+	f, out := testFleet(t, rp, st, 3)
+	f.o.Cloud = "ANY"
+	st.work = *round(30, 1, 0, 0)
+	rp.noRoom["NVIDIA GeForce RTX 3080"] = true
+	if err := tick(context.Background(), f); err != nil {
+		t.Fatal(err)
+	}
+	// Both on the community 3080 Ti at $0.18: the community A5000 is cheaper but has none
+	// free, and every secure kind costs more.
+	got := []string{}
+	for _, spec := range rp.created {
+		got = append(got, strings.ToLower(spec.Cloud)+" "+shortGPU(spec.GPU.ID))
+	}
+	if len(got) != 2 || got[0] != "community RTX 3080 Ti" || got[1] != "community RTX 3080 Ti" {
+		t.Fatalf("rented %v\n%s", got, out)
+	}
+	// With the 3080 Tis gone, the next cheapest: the secure A5000 and the community 3090 Ti
+	// tie at $0.27, and secure goes first.
+	rp.noRoom["NVIDIA GeForce RTX 3080 Ti"] = true
+	for _, p := range rp.pods {
+		delete(rp.pods, p.ID)
+	}
+	if err := tick(context.Background(), f); err != nil {
+		t.Fatal(err)
+	}
+	if last := rp.created[len(rp.created)-1]; last.Cloud != "SECURE" || last.GPU.ID != "NVIDIA RTX A5000" {
+		t.Fatalf("after the cheapest ran out: %+v", last)
+	}
+	if spec := rp.created[0]; spec.GPU.MinRAMPerGPU != f.o.MinRAM || spec.GPU.MinVCPUPerGPU != f.o.MinCPU {
+		t.Fatalf("the host was asked for as %+v", spec.GPU)
+	}
+	gpus, err := f.choices(context.Background())
+	if err != nil || len(gpus) < 3 || gpus[0].Price != 0.18 || gpus[0].Cloud != "COMMUNITY" {
+		t.Fatalf("choices: %+v %v", gpus, err)
+	}
+	for i := 1; i < len(gpus); i++ {
+		if gpus[i].Price < gpus[i-1].Price {
+			t.Fatalf("not cheapest first: %+v", gpus)
+		}
 	}
 }
