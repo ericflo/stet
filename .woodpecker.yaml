@@ -4,7 +4,7 @@ when:
 
 steps:
   - name: test-server
-    image: docker.io/library/golang:1.26.11-bookworm@sha256:dc40a13b61304647ed7e5d581d246b86413dfc29d63c6d018310feb93cd98fc0
+    image: localhost:32000/epsilon-ci-go:main-20261119084320-fb19a1937e22@sha256:0ea790411228b0510099dd16e2986e1ec87ad7a18a3b48cd7196319df447e45b
     commands:
       - export HOME=/tmp/stet-home GOCACHE=/tmp/stet-go-build GOMODCACHE=/tmp/stet-go-mod GOFLAGS=-buildvcs=false CGO_ENABLED=0
       - cd server
@@ -42,7 +42,7 @@ steps:
   # The harness without PyTorch: everything that decides what a round and a script are.
   # Training itself is exercised by the verifiers, on GPUs this cluster does not have.
   - name: test-harness
-    image: ghcr.io/astral-sh/uv:python3.13-bookworm-slim@sha256:531f855bda2c73cd6ef67d56b733b357cea384185b3022bd09f05e002cd144ca
+    image: localhost:32000/epsilon-ci-uv313:main-20261119084320-fb19a1937e22@sha256:c295f6d2255fd808267c3e63cf3f8a0dcf3f14f0e5de5ef90556fea2c9321500
     commands:
       - export HOME=/tmp/stet-home UV_CACHE_DIR=/tmp/stet-uv UV_LINK_MODE=copy
       - uv venv /tmp/stet-venv
