@@ -1,0 +1,85 @@
+"""Facts the web knows, asked in ten languages: where someone was born, a country's capital, who
+wrote a book or directed a film, an element's symbol.
+
+The facts are the season's list (data/facts-s0.jsonl.zst, built from Wikidata by
+tools/build_wikidata_facts.py): well-known subjects, each with one undoubted answer. Which are
+asked is the round's seed's choice. Knowing them is what a model learns from pages that say
+them; a curator that drops such pages loses them, and one that keeps them gains.
+
+The sentences are written so that they read right whatever the noun's gender or case: where a
+language would need an article or an inflection the label does not have, the fact is put as
+a heading and a field, as an infobox puts it.
+"""
+
+from __future__ import annotations
+
+import json
+from functools import cache
+from importlib import resources
+
+from ..items import Item
+from ..rng import Rng
+
+NAME = "knowledge"
+LANGS = ["en", "es", "fr", "de", "it", "pt", "nl", "ru", "ja", "zh"]
+_COUNTRY = {"en": "{s}. Country:", "es": "{s}. País:", "fr": "{s}. Pays :", "de": "{s}. Staat:", "it": "{s}. Stato:", "pt": "{s}. País:",
+            "nl": "{s}. Land:", "ru": "{s}. Страна:", "ja": "{s}の所在国：", "zh": "{s}所在国家："}
+TEMPLATES = {
+    "birthplace": {"en": "{s} was born in", "es": "{s} nació en", "fr": "Le lieu de naissance de {s} est", "de": "Der Geburtsort von {s} ist",
+                   "it": "Il luogo di nascita di {s} è", "pt": "O local de nascimento de {s} é", "nl": "De geboorteplaats van {s} is",
+                   "ru": "{s}. Место рождения:", "ja": "{s}の出生地は", "zh": "{s}的出生地是"},
+    "birthyear": {"en": "{s} was born in the year", "es": "{s} nació en el año", "fr": "L'année de naissance de {s} est",
+                  "de": "Das Geburtsjahr von {s} ist", "it": "L'anno di nascita di {s} è", "pt": "O ano de nascimento de {s} é",
+                  "nl": "Het geboortejaar van {s} is", "ru": "{s}. Год рождения:", "ja": "{s}の生年は", "zh": "{s}的出生年份是"},
+    "capital": {"en": "{s}. Capital:", "es": "La capital de {s} es", "fr": "La capitale de {s} est", "de": "Die Hauptstadt von {s} ist",
+                "it": "La capitale di {s} è", "pt": "A capital de {s} é", "nl": "De hoofdstad van {s} is", "ru": "{s}. Столица:",
+                "ja": "{s}の首都は", "zh": "{s}的首都是"},
+    "currency": {"en": "{s}. Currency:", "es": "{s}. Moneda:", "fr": "{s}. Monnaie :", "de": "{s}. Währung:", "it": "{s}. Valuta:",
+                 "pt": "{s}. Moeda:", "nl": "{s}. Munteenheid:", "ru": "{s}. Валюта:", "ja": "{s}の通貨は", "zh": "{s}的货币是"},
+    "city-country": _COUNTRY,
+    "mountain-country": _COUNTRY,
+    "author": {"en": "{s} was written by", "es": "{s} fue escrito por", "fr": "{s} a été écrit par", "de": "{s} wurde geschrieben von",
+               "it": "{s} è stato scritto da", "pt": "{s} foi escrito por", "nl": "{s} is geschreven door", "ru": "{s}. Автор:",
+               "ja": "{s}の著者は", "zh": "{s}的作者是"},
+    "director": {"en": "{s} was directed by", "es": "{s}. Dirección:", "fr": "{s} a été réalisé par", "de": "{s}. Regie:",
+                 "it": "{s} è stato diretto da", "pt": "{s} foi dirigido por", "nl": "{s} werd geregisseerd door", "ru": "{s}. Режиссёр:",
+                 "ja": "{s}の監督は", "zh": "{s}的导演是"},
+    "painter": {"en": "{s} was painted by", "es": "{s} fue pintado por", "fr": "{s} a été peint par", "de": "{s} wurde gemalt von",
+                "it": "{s} è stato dipinto da", "pt": "{s} foi pintado por", "nl": "{s} is geschilderd door", "ru": "{s}. Автор:",
+                "ja": "{s}の作者は", "zh": "{s}的作者是"},
+    "symbol": {"en": "The chemical symbol of {s} is", "es": "{s}. Símbolo químico:", "fr": "{s}. Symbole :", "de": "Das chemische Symbol von {s} ist",
+               "it": "{s}. Simbolo:", "pt": "{s}. Símbolo:", "nl": "Het chemische symbool van {s} is", "ru": "{s}. Символ:",
+               "ja": "{s}の元素記号は", "zh": "{s}的元素符号是"},
+}
+NO_SPACE = {"ja", "zh"}  # the answer follows without a space
+
+
+@cache
+def facts() -> dict[tuple[str, str], list[tuple[str, str]]]:
+    """(fact, language) -> [(subject, answer)], in the list's order."""
+    import zstandard
+
+    raw = resources.files("stet.newexam").joinpath("data/facts-s0.jsonl.zst").read_bytes()
+    out: dict[tuple[str, str], list[tuple[str, str]]] = {}
+    for line in zstandard.ZstdDecompressor().decompress(raw, max_output_size=256 << 20).decode().splitlines():
+        row = json.loads(line)
+        for lang, (s, o) in row["labels"].items():
+            out.setdefault((row["fact"], lang), []).append((s, o))
+    return out
+
+
+def corners() -> list[str]:
+    return [f"{NAME}/{lang}/{fact}" for fact in TEMPLATES for lang in LANGS]
+
+
+def make(rng: Rng, corner: str) -> Item:
+    _, lang, fact = corner.split("/")
+    pool = facts().get((fact, lang)) or facts()[(fact, "en")]
+    if not facts().get((fact, lang)):
+        lang = "en"
+    s, o = rng.choice(pool)
+    if fact == "birthyear":
+        o = str(int(o))  # 0300 is 300
+    ctx = TEMPLATES[fact][lang].format(s=s)
+    return Item(kind="answer", corner=corner, fmt="prose", lang=lang, source=f"gen:{NAME}", ctx=ctx,
+                cont=o if lang in NO_SPACE else f" {o}")

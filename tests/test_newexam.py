@@ -35,7 +35,7 @@ def test_rng_is_pinned_and_in_range():
 def test_a_seed_always_makes_the_same_exam():
     # Pinned: a change to any generator that changes what a seed produces must bump gen.VERSION
     # and this hash, on purpose.
-    assert digest(gen.generate(SEED)) == "d51964cd47b2ddad5a7c93f13a81cf9bc238a7c36bfd7b20fb9545444c37b87c"
+    assert digest(gen.generate(SEED)) == "1e5e30af39c087026adf7b1fa3099417ece7993f022b228ce92716d8d3dec862"
     assert digest(gen.generate(SEED)) == digest(gen.generate(SEED))
     assert digest(gen.generate(b"other")) != digest(gen.generate(SEED))
 
@@ -436,3 +436,15 @@ def test_reading_in_context_answers_are_in_the_context_or_follow_from_it():
         elif kind == "definition":
             nums = [int(v) for v in re.findall(r"\d+", it.ctx)]
             assert int(ans) in (nums[1] // nums[0], nums[0] * nums[1])
+
+
+def test_knowledge_asks_facts_the_web_knows_in_ten_languages():
+    from stet.newexam.gen import knowledge
+
+    assert ("France", "Paris") in knowledge.facts()[("capital", "en")]
+    assert ("Francia", "París") in knowledge.facts()[("capital", "es")]
+    items = _all("knowledge/", n=2)
+    assert {it.lang for it in items} == set(knowledge.LANGS)
+    for it in items:
+        assert it.cont.strip() and it.ctx.strip() != it.cont.strip(), it  # São Tomé is the capital of São Tomé and Príncipe: allowed
+        assert it.cont.startswith(" ") != (it.lang in knowledge.NO_SPACE)

@@ -64,25 +64,26 @@ def curator_dir(ref: str, season, work: Path) -> Path:
     return dest
 
 
-def run_curator(project_dir: Path, rnd, scale, work: Path, sandbox: str, log) -> Path | None:
+def run_curator(project_dir: Path, rnd, scale, work: Path, sandbox: str, log, label: str | None = None) -> Path | None:
     from stet.pipeline import edit_round
     from stet.project import load_project
 
     project = load_project(project_dir)
-    out = work / "scripts" / f"{project.name}.jsonl"
+    label = label or project.name
+    out = work / "scripts" / f"{label}.jsonl"
     if out.exists():
         return out
-    run_dir = work / "runs" / project.name
+    run_dir = work / "runs" / label
     run_dir.mkdir(parents=True, exist_ok=True)
     t0 = time.time()
     edit = edit_round(project_dir, project.entry, rnd, scale, run_dir, sandbox=sandbox, log=lambda m: None, assets=project.assets,
                       time_limit=float(scale.edit_seconds) * 4)
     if edit.script is None:
-        log(f"  {project.name}: no script ({edit.status}: {edit.reason})")
+        log(f"  {label}: no script ({edit.status}: {edit.reason})")
         return None
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_bytes(Path(edit.script).read_bytes())
-    log(f"  {project.name}: script in {time.time() - t0:.0f}s, {out.stat().st_size / 1e6:.1f} MB")
+    log(f"  {label}: script in {time.time() - t0:.0f}s, {out.stat().st_size / 1e6:.1f} MB")
     return out
 
 
@@ -203,7 +204,8 @@ def one_scale_posted(name, args, season, rnd, items, shares, key, log, holder):
     shas = {}
     for ref in args.curators:
         try:
-            script = run_curator(curator_dir(ref, season, Path(args.out).expanduser()), rnd, scale, work, args.sandbox, log)
+            label = None if Path(ref).is_dir() else ref.split("/")[-1].replace("@v", "-v")  # stet/compass@v2 -> compass-v2
+            script = run_curator(curator_dir(ref, season, Path(args.out).expanduser()), rnd, scale, work, args.sandbox, log, label=label)
         except Exception as e:  # one curator's trouble is not the pilot's
             log(f"  {ref}: {type(e).__name__}: {e}")
             continue
