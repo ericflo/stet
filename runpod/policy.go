@@ -22,7 +22,7 @@ import (
 // An entry waiting for a round has it drawn early only once somebody who runs curators has
 // asked for work. When nobody has, one machine is rented to ask.
 //
-// A machine with nothing official to do trains the next exam's students (a few minutes
+// A machine with nothing official to do trains the organisers' students (a few minutes
 // each), so those waiting want machines too, after the official work and under the same
 // limits: one for every --per-shadow of them. A bigger student holds a machine for hours,
 // and is handed only to one rented to take it (--long-shadow): one machine each.
@@ -37,8 +37,8 @@ type Policy struct {
 	MaxWorkers  int     // never more machines than this
 	PerRunner   float64 // grading only: machines that keep pace with one curator runner
 	PerWorker   int     // jobs waiting that justify one more machine
-	PerShadow   int     // the next exam's students waiting that justify one more machine; 0: none
-	LongShadow  bool    // the machines take the next exam's bigger students too, one machine to each
+	PerShadow   int     // the organisers' students waiting that justify one more machine; 0: none
+	LongShadow  bool    // the machines take the organisers' bigger students too, one machine to each
 	MaxHourly   float64 // never rent past this many dollars an hour, all machines together
 	DailyBudget float64 // no new machine once this much has been spent today (UTC); 0: no limit
 	Grace       time.Duration
@@ -100,7 +100,7 @@ type Worker struct {
 //	starting  a pod, and stet has not yet asked the server for work from it
 //	grading   it holds a grade job
 //	running   it holds a curator to run
-//	training  it trains one of the next exam's students
+//	training  it trains one of the organisers' students
 //	waiting   it asks for work and has none
 //	quiet     it asked, and then nothing for longer than any job takes without asking
 //	stopped   the pod stopped, or never got going
@@ -144,7 +144,7 @@ type Decision struct {
 	Target int // machines the work justifies
 	Live   int // machines rented now
 	Launch int // machines to rent now
-	// Of those, the machines rented for the next exam's bigger students: chosen for what one
+	// Of those, the machines rented for the organisers' bigger students: chosen for what one
 	// of them costs on it, under --long-max-price.
 	LaunchLong int
 	End        []Ending // pods to end now

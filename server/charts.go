@@ -105,8 +105,8 @@ func (b *svg) frame(w, h, left, right, top, bottom int, lo, hi float64, unit str
 }
 
 // recordChart is the record's progression: each time it changed hands, and the rating it
-// changed hands at, in the season's unit.
-func recordChart(recs []RecordRow, unit string) template.HTML {
+// changed hands at, in bits per byte.
+func recordChart(recs []RecordRow) template.HTML {
 	if len(recs) == 0 {
 		return ""
 	}
@@ -150,64 +150,8 @@ func recordChart(recs []RecordRow, unit string) template.HTML {
 	return b.done()
 }
 
-// sourceChart compares the exam loss on each kind of text: the unedited corpus (hollow)
-// and this editor's (filled), joined by the distance between them.
-func sourceChart(sources []string, base, edited map[string]float64) template.HTML {
-	if len(base) == 0 || len(edited) == 0 {
-		return ""
-	}
-	// Drawn at the width of the half-page column it sits in, so the text is not scaled down.
-	const w, rowH, left, right, top, bottom = 500, 32, 112, 66, 30, 28
-	h := top + bottom + rowH*len(sources)
-	lo, hi := math.Inf(1), math.Inf(-1)
-	for _, s := range sources {
-		for _, v := range []float64{base[s], edited[s]} {
-			if v > 0 {
-				lo, hi = math.Min(lo, v), math.Max(hi, v)
-			}
-		}
-	}
-	if math.IsInf(lo, 0) {
-		return ""
-	}
-	step := niceStep(hi-lo, 5)
-	lo, hi = math.Floor(lo/step)*step, math.Ceil(hi/step)*step
-	if hi == lo {
-		hi = lo + step
-	}
-	x := func(v float64) float64 { return left + (v-lo)/(hi-lo)*float64(w-left-right) }
-	var b svg
-	b.open(w, h, "chart", "Exam loss by kind of text, unedited against this curator")
-	for _, v := range ticks(lo, hi, step) {
-		b.f(`<line class="grid" x1="%.1f" x2="%.1f" y1="%d" y2="%d"/>`, x(v), x(v), top-6, h-bottom+4)
-		b.f(`<text x="%.1f" y="%d" text-anchor="middle">%s</text>`, x(v), h-10, tickLabel(v, step))
-	}
-	b.f(`<circle class="hollow" cx="%d" cy="12" r="4.5"/><text x="%d" y="16">unedited</text>`, left+6, left+16)
-	b.f(`<circle class="dot" cx="%d" cy="12" r="4.5"/><text x="%d" y="16">this curator</text>`, left+96, left+106)
-	for i, s := range sources {
-		cy := float64(top + rowH*i + rowH/2)
-		bv, ev := base[s], edited[s]
-		tip := fmt.Sprintf("%s · unedited %.3f, this curator %.3f (%s)", s, bv, ev, signed(bv-ev, 3))
-		b.f(`<text class="lbl" x="%d" y="%.1f" text-anchor="end">%s</text>`, left-14, cy+4, esc(s))
-		cls := "link"
-		if ev > bv {
-			cls = "link neg"
-		}
-		b.f(`<line class="%s" x1="%.1f" x2="%.1f" y1="%.1f" y2="%.1f"/>`, cls, x(bv), x(ev), cy, cy)
-		b.f(`<circle class="hollow" cx="%.1f" cy="%.1f" r="4.5"/>`, x(bv), cy)
-		b.f(`<circle class="dot ring" cx="%.1f" cy="%.1f" r="5"/>`, x(ev), cy)
-		gcls := "val"
-		if ev > bv {
-			gcls = "val neg"
-		}
-		b.f(`<text class="%s" x="%d" y="%.1f" text-anchor="end">%s</text>`, gcls, w-8, cy+4, signed(bv-ev, 3))
-		b.f(`<rect class="hit" x="0" y="%.1f" width="%d" height="%d" data-tip="%s"/>`, cy-rowH/2, w, rowH, esc(tip))
-	}
-	return b.done()
-}
-
-// gainChart is where an entry's gain on the next exam comes from: its gain on each of the
-// exam's capabilities, as a bar from zero, better to the right and worse to the left.
+// gainChart is where an entry's gain on the exam comes from: its gain on each of the exam's
+// pillars, as a bar from zero, better to the right and worse to the left.
 func gainChart(pillars []string, gains map[string]float64) template.HTML {
 	lo, hi, some := 0.0, 0.0, false
 	for _, p := range pillars {
@@ -218,8 +162,8 @@ func gainChart(pillars []string, gains map[string]float64) template.HTML {
 	if !some {
 		return ""
 	}
-	// Drawn at the width of the half-page column it sits in, as sourceChart is.
-	const w, rowH, left, right, top, bottom, unit = 500, 30, 112, 62, 28, 26, "bits per byte better than unedited"
+	// Drawn at the width of the half-page column it sits in, so the text is not scaled down.
+	const w, rowH, left, right, top, bottom, label = 500, 30, 112, 62, 28, 26, unit + " better than unedited"
 	h := top + bottom + rowH*len(pillars)
 	step := niceStep(hi-lo, 4)
 	lo, hi = math.Floor(lo/step)*step, math.Ceil(hi/step)*step
@@ -228,8 +172,8 @@ func gainChart(pillars []string, gains map[string]float64) template.HTML {
 	}
 	x := func(v float64) float64 { return left + (v-lo)/(hi-lo)*float64(w-left-right) }
 	var b svg
-	b.open(w, h, "chart", "Gain on each capability, in "+unit)
-	b.f(`<text x="%d" y="12" text-anchor="start">%s</text>`, left, unit)
+	b.open(w, h, "chart", "Gain on each capability, in "+label)
+	b.f(`<text x="%d" y="12" text-anchor="start">%s</text>`, left, label)
 	for _, v := range ticks(lo, hi, step) {
 		cls := "grid"
 		if math.Abs(v) < step/1e6 {
@@ -253,58 +197,15 @@ func gainChart(pillars []string, gains map[string]float64) template.HTML {
 		x0, x1 := x(0), x(v)
 		b.f(`<rect class="bar%s" x="%.1f" y="%.1f" width="%.1f" height="12" rx="2"/>`, cls, math.Min(x0, x1), cy-6, math.Max(1, math.Abs(x1-x0)))
 		b.f(`<text class="val%s" x="%d" y="%.1f" text-anchor="end">%s</text>`, cls, w-8, cy+4, signed(v, 3))
-		b.f(`<rect class="hit" x="0" y="%.1f" width="%d" height="%d" data-tip="%s"/>`, cy-rowH/2, w, rowH, esc(fmt.Sprintf("%s · %s %s", p, signed(v, 3), unit)))
+		b.f(`<rect class="hit" x="0" y="%.1f" width="%d" height="%d" data-tip="%s"/>`, cy-rowH/2, w, rowH, esc(fmt.Sprintf("%s · %s %s", p, signed(v, 3), label)))
 	}
 	return b.done()
 }
 
-// baselineChart shows how hard each kind of exam text is for the unedited corpus. Only a
-// season whose exam is a pack of texts has a loss for each kind, and it is in nats per token.
-func baselineChart(sources []string, base map[string]float64) template.HTML {
-	if len(base) == 0 {
-		return ""
-	}
-	const w, rowH, left, right, top, bottom = 720, 30, 150, 70, 8, 26
-	h := top + bottom + rowH*len(sources)
-	hi := 0.0
-	for _, s := range sources {
-		hi = math.Max(hi, base[s])
-	}
-	if hi <= 0 {
-		return ""
-	}
-	step := niceStep(hi, 5)
-	hi = math.Ceil(hi/step) * step
-	x := func(v float64) float64 { return left + v/hi*float64(w-left-right) }
-	var b svg
-	b.open(w, h, "chart", "Baseline exam loss by kind of text")
-	for _, v := range ticks(0, hi, step) {
-		b.f(`<line class="grid" x1="%.1f" x2="%.1f" y1="%d" y2="%d"/>`, x(v), x(v), top, h-bottom+4)
-		b.f(`<text x="%.1f" y="%d" text-anchor="middle">%s</text>`, x(v), h-8, tickLabel(v, step))
-	}
-	for i, s := range sources {
-		cy := float64(top + rowH*i + rowH/2)
-		v := base[s]
-		r := 4.0
-		b.f(`<text class="lbl" x="%d" y="%.1f" text-anchor="end">%s</text>`, left-14, cy+4, esc(s))
-		b.f(`<path class="bar quiet" d="M%.1f,%.1f H%.1f Q%.1f,%.1f %.1f,%.1f V%.1f Q%.1f,%.1f %.1f,%.1f H%.1f Z"/>`,
-			x(0), cy-6, x(v)-r, x(v), cy-6, x(v), cy-6+r, cy+6-r, x(v), cy+6, x(v)-r, cy+6, x(0))
-		b.f(`<text class="val" x="%.1f" y="%.1f">%.3f</text>`, x(v)+8, cy+4, v)
-		b.f(`<rect class="hit" x="0" y="%.1f" width="%d" height="%d" data-tip="%s"/>`, cy-rowH/2, w, rowH, esc(fmt.Sprintf("%s · %.3f nats per token", s, v)))
-	}
-	return b.done()
-}
-
-// curveChart is the student's training loss as it works through the edited corpus, in nats
-// per token, as the trainer reports it.
-func curveChart(curve [][]float64) template.HTML { return lossCurve(curve, false) }
-
-// lossCurve draws it; bits draws it in bits per token, for a season scored in bits.
-func lossCurve(curve [][]float64, bits bool) template.HTML {
-	k, unit := 1.0, "training loss, nats per token"
-	if bits {
-		k, unit = 1/math.Ln2, "training loss, bits per token"
-	}
+// curveChart is the student's training loss as it works through the edited corpus, in bits
+// per token: the trainer reports it in natural-log units, and the pages say everything in bits.
+func curveChart(curve [][]float64) template.HTML {
+	const k, label = 1 / math.Ln2, "training loss, bits per token"
 	var pts [][2]float64
 	for _, p := range curve {
 		if len(p) >= 2 && finite(p[0]) && finite(p[1]) {
@@ -326,7 +227,7 @@ func lossCurve(curve [][]float64, bits bool) template.HTML {
 	x := func(v float64) float64 { return left + (v-x0)/(x1-x0)*float64(w-left-right) }
 	var b svg
 	b.open(w, h, "chart", "Training loss by step")
-	y := b.frame(w, h, left, right, top, bottom, lo, hi, unit)
+	y := b.frame(w, h, left, right, top, bottom, lo, hi, label)
 	ceil := y(hi + (hi-lo)*0.2)
 	b.WriteString(`<polyline class="ln" points="`)
 	for _, p := range pts {

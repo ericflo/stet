@@ -1,8 +1,9 @@
 // stet-server: the API and website for Stet.
 //
-// The process keeps nothing of its own. Records live in a durable-db database, files
-// (entries, edit scripts, the exam pack) in a bucket. Either can be swapped for a local
-// stand-in for development: memory for the records, a directory for the files.
+// The process keeps nothing of its own. Records live in a durable-db database, one for each
+// season, and files (entries, edit scripts, the rounds' exams) in a bucket. Either can be
+// swapped for a local stand-in for development: memory for the records, a directory for the
+// files.
 package main
 
 import (
@@ -16,7 +17,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 )
@@ -35,7 +35,7 @@ type Config struct {
 	AgentsFile    string // AGENTS.md, which lives with the CLI's templates so that `stet agents` prints the same text
 
 	DBURL  string // durable-db; empty keeps records in memory
-	DBName string
+	DBName string // the season's own database: "stet-<season>" unless STET_DB_NAME says
 	DBKey  []byte // the durable-db deployment's signing key
 	S3     S3Config
 
@@ -58,7 +58,6 @@ type Config struct {
 	RequireGithub    bool
 	GithubMinAgeDays int
 	GithubToken      string // optional: lifts GitHub's limit on how often the server may look up a gist
-	SeasonClosed     bool   // the season is over: the held-out exam may be published
 	Dev              bool
 }
 
@@ -70,10 +69,8 @@ type App struct {
 	site   *Site
 	limits *limiter
 	// One token per large request body in memory: entrants' bundles, and apart from them
-	// the runners' scripts and the organisers' files.
+	// the runners' scripts and the organisers' uploads (the rounds' exams).
 	uploads, runnerUploads chan struct{}
-	// The organisers' keys known to have a sealed copy of the held-out exam (api.go).
-	sealedKept sync.Map
 }
 
 func env(key, def string) string {
@@ -118,7 +115,7 @@ func loadConfig(season *Season) (Config, error) {
 		DocsDir:       env("STET_DOCS_DIR", "../docs"),
 		AgentsFile:    env("STET_AGENTS_FILE", "../src/stet/templates/AGENTS.md"),
 		DBURL:         strings.TrimRight(os.Getenv("STET_DB_URL"), "/"),
-		DBName:        env("STET_DB_NAME", "stet"),
+		DBName:        env("STET_DB_NAME", "stet-"+season.ID), // a new season starts on a database of its own
 		AnchorKeys:    map[string]bool{},
 		Scale:         env("STET_SCALE", season.OfficialScale),
 		RoundInterval: envDuration("STET_ROUND_INTERVAL", 6*time.Hour),
@@ -141,7 +138,6 @@ func loadConfig(season *Season) (Config, error) {
 		RequireGithub:    envBool("STET_REQUIRE_GITHUB", !dev),
 		GithubMinAgeDays: envInt("STET_GITHUB_MIN_AGE_DAYS", 30),
 		GithubToken:      os.Getenv("STET_GITHUB_TOKEN"),
-		SeasonClosed:     envBool("STET_SEASON_CLOSED", false),
 		Dev:              dev,
 	}
 	cfg.APIURL = strings.TrimRight(env("STET_API_URL", cfg.BaseURL), "/")

@@ -615,7 +615,7 @@ func TestWhatAnEndedMachineHeldIsHandedBack(t *testing.T) {
 	}
 
 	// The round is done: stet-rp-01 grades and is kept, stet-rp-02 waits and is ended, and
-	// stet-rp-03, which no pod is rented for, still holds one of the next exam's students.
+	// stet-rp-03, which no pod is rented for, still holds one of the organisers' students.
 	st.work = *round(0, 0, 0, 1)
 	now := time.Now().Unix()
 	st.work.Machines = []Machine{
@@ -629,7 +629,7 @@ func TestWhatAnEndedMachineHeldIsHandedBack(t *testing.T) {
 	if len(rp.pods) != 1 || strings.Join(st.released, " ") != "stet-rp-03" {
 		t.Fatalf("%d pods left, handed back %v:\n%s", len(rp.pods), st.released, out)
 	}
-	if !strings.Contains(out.String(), "handed back what stet-rp-03 held when it was ended: 1 of the next exam's students") {
+	if !strings.Contains(out.String(), "handed back what stet-rp-03 held when it was ended: 1 of the organisers' students") {
 		t.Fatalf("not said:\n%s", out)
 	}
 	if last := st.signed[len(st.signed)-1]; !strings.HasPrefix(last, "POST /api/v1/admin/workers/"+f.keys[2].Public+"/release ") || !strings.HasSuffix(last, f.op.Public) {
@@ -650,7 +650,7 @@ func TestWhatAnEndedMachineHeldIsHandedBack(t *testing.T) {
 	}
 }
 
-// A machine rented for the next exam's bigger students is chosen for what a student costs on
+// A machine rented for the organisers' bigger students is chosen for what a student costs on
 // it, under --long-max-price: a quick card can train one for less than a cheap one's hours
 // cost. The machines for everything else are still the cheapest under --max-price.
 func TestTheBiggerStudentsGetTheCardThatTrainsOneForLeast(t *testing.T) {

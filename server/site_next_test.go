@@ -10,15 +10,15 @@ import (
 	"time"
 )
 
-// A season whose exam is the next exam reads in bits per byte, says what its exam is, and
-// says nothing of season 0's: nats, a held-out exam, the next exam as a shadow, a multiplier
-// it has no curve for.
-func TestASeasonOnTheNextExamReadsInBitsPerByte(t *testing.T) {
+// The site reads in bits per byte, says what the exam is, and says nothing of an exam that is
+// gone: natural-log units, an exam loss, a held-out exam, the next exam as a shadow beside the
+// season's, a multiplier it has no curve for.
+func TestTheSiteReadsInBitsPerByte(t *testing.T) {
 	pub, priv := newKey()
-	w := newWorldS1(t, pub)
+	w := newWorld(t, pub)
 	anchor, bob, carol := w.join("anchor-one", priv), w.join("bob", nil), w.join("carol", nil)
 	id := w.submit(anchor, "ref-a", "print(1)")
-	idx := w.draw()
+	idx := w.drawWithoutExam()
 	rid := roundID(w.app.season.ID, idx)
 	if w.editAll(anchor) != 1 {
 		t.Fatal("the anchor should have run the entry")
@@ -98,24 +98,24 @@ func TestASeasonOnTheNextExamReadsInBitsPerByte(t *testing.T) {
 		t.Error("a page shows a multiplier with no curve, or the next exam as a shadow")
 	}
 
-	// The shadow page has nothing to show: it sends a reader to what the exam is.
-	req, _ := http.NewRequest("GET", w.srv.URL+"/next", nil)
-	req.Host = "site.test"
-	noFollow := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	resp, err := noFollow.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusFound || resp.Header.Get("Location") != "/glossary#exam" {
-		t.Fatalf("/next: HTTP %d to %q", resp.StatusCode, resp.Header.Get("Location"))
+	// There is no page for a shadow exam, and no file of a held-out one.
+	for _, path := range []string{"/next", "/files/heldout-" + w.app.season.ID + ".jsonl.zst"} {
+		if code, _ := w.page(path); code != http.StatusNotFound {
+			t.Errorf("%s: HTTP %d", path, code)
+		}
 	}
 
-	// The API: the unit, the kind of exam, and no multiplier rather than a wrong one.
+	// The API: the unit, the exam's pillars, and no multiplier rather than a wrong one. Nothing
+	// of an exam that is a published pack, or of a held-out one.
 	var season map[string]any
 	if _, body := w.page("/api/v1/season"); json.Unmarshal([]byte(body), &season) != nil ||
-		season["exam_kind"] != "next" || season["unit"] != "bits per byte" || season["has_multiplier"] != false {
-		t.Fatalf("the season says %v, %v, %v", season["exam_kind"], season["unit"], season["has_multiplier"])
+		season["unit"] != "bits per byte" || season["has_multiplier"] != false || len(season["pillars"].([]any)) != len(w.app.season.ExamSources) {
+		t.Fatalf("the season says %v, %v, %v", season["unit"], season["pillars"], season["has_multiplier"])
+	}
+	for _, gone := range []string{"exam_kind", "exam_sha256", "heldout_exam_sha256"} {
+		if _, ok := season[gone]; ok {
+			t.Errorf("the season still says %s", gone)
+		}
 	}
 	var board struct {
 		Editors     []map[string]any `json:"editors"`
@@ -141,38 +141,39 @@ func TestASeasonOnTheNextExamReadsInBitsPerByte(t *testing.T) {
 	w.check()
 }
 
-// Season 0 reads a multiplier off its curve wherever it has one, and the next exam, with no
-// curve yet, has none at all.
+// With no reference curve measured for the scale there is no multiplier at all, and once one
+// is, a multiplier is read off it.
 func TestAMultiplierIsReadOnlyWhereThereIsACurve(t *testing.T) {
-	cfg := testConfig(t)
-	cfg.Scale = "micro"
-	w := startWorld(t, cfg, newMemKV(), dirBlobs{t.TempDir()})
-	if !w.app.hasMultiplier() || w.app.season.unit() != "nats" || w.app.season.examKind() != "pack" {
-		t.Fatal("season 0 at micro has a curve, in nats")
+	w := newWorld(t)
+	if w.app.hasMultiplier() {
+		t.Fatal("a multiplier with no curve measured")
+	}
+	if _, _, ok := w.app.season.multiplier(w.app.curveKey(), 0.1); ok {
+		t.Fatal("a multiplier read off no curve")
+	}
+	season := *w.app.season
+	season.Curves = map[string][][2]float64{w.app.curveKey(): {{0.5, 1.95}, {1, 1.84}, {2, 1.75}, {4, 1.68}}}
+	w.app.season = &season
+	if !w.app.hasMultiplier() {
+		t.Fatal("no multiplier once there is a curve")
 	}
 	if m, capped, ok := w.app.season.multiplier(w.app.curveKey(), 0); !ok || capped || math.Abs(m-1) > 1e-9 {
 		t.Fatalf("no gain should read 1×, not %v (capped %v, ok %v)", m, capped, ok)
 	}
-	s1 := newWorldS1(t)
-	if s1.app.hasMultiplier() || s1.app.season.unit() != "bits per byte" || s1.app.season.examKind() != "next" {
-		t.Fatal("the next exam has no curve yet, and is in bits per byte")
-	}
-	if _, _, ok := s1.app.season.multiplier(s1.app.curveKey(), 0.1); ok {
-		t.Fatal("a multiplier read off no curve")
+	if m, capped, ok := w.app.season.multiplier(w.app.curveKey(), 0.09); !ok || capped || math.Abs(m-2) > 1e-9 {
+		t.Fatalf("a gain of 0.09 bits per byte should read 2×, not %v (capped %v, ok %v)", m, capped, ok)
 	}
 }
 
-// Every chart is drawn from whatever it is given, nothing included, and the next exam's draws
-// each pillar's gain as a bar from zero.
+// Every chart is drawn from whatever it is given, nothing included, and the gain on each
+// pillar is drawn as a bar from zero.
 func TestTheChartsDrawNothingFromNothingAndTheGainOnEachPillarFromZero(t *testing.T) {
 	pillars := []string{"knowledge", "reading", "reasoning", "code"}
 	for name, out := range map[string]string{
-		"source":                   string(sourceChart(pillars, nil, nil)),
-		"baseline":                 string(baselineChart(pillars, nil)),
 		"gain":                     string(gainChart(pillars, nil)),
 		"gain, no pillar it knows": string(gainChart(pillars, map[string]float64{"astrology": 1})),
-		"record":                   string(recordChart(nil, "bits per byte")),
-		"curve":                    string(lossCurve(nil, true)),
+		"record":                   string(recordChart(nil)),
+		"curve":                    string(curveChart(nil)),
 	} {
 		if out != "" {
 			t.Errorf("the %s chart drew something from nothing", name)
@@ -184,10 +185,11 @@ func TestTheChartsDrawNothingFromNothingAndTheGainOnEachPillarFromZero(t *testin
 			t.Errorf("the gain chart has no %q", want)
 		}
 	}
-	if !strings.Contains(string(recordChart([]RecordRow{{Record: Record{Rating: 0.1, At: now()}, Name: "x"}}, "bits per byte")), "rating, bits per byte better than unedited") {
-		t.Error("the record chart is not in the season's unit")
+	if !strings.Contains(string(recordChart([]RecordRow{{Record: Record{Rating: 0.1, At: now()}, Name: "x"}})), "rating, bits per byte better than unedited") {
+		t.Error("the record chart is not in bits per byte")
 	}
-	if got := string(lossCurve([][]float64{{1, 9}, {50, 6}, {100, 5.5}, {150, 5.2}}, true)); !strings.Contains(got, "bits per token") || strings.Contains(got, "nats") {
-		t.Error("the training curve in bits is not labelled so")
+	// The trainer reports its loss in natural-log units; the chart says it in bits.
+	if got := string(curveChart([][]float64{{1, 9}, {50, 6}, {100, 5.5}, {150, 5.2}})); !strings.Contains(got, "bits per token") || !strings.Contains(got, "loss 7.502") {
+		t.Error("the training curve is not in bits per token")
 	}
 }

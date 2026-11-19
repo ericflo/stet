@@ -15,7 +15,7 @@ cd runpod && go build -o ~/.local/bin/stet-runpod .
 It is a RunPod pod running `ubuntu:24.04` and [one script](worker.sh). The script installs
 stet from the site into `/opt/stet` (about two and a half minutes), writes the machine's
 key under `/root`, and runs `stet verify --edits --sandbox container --exit-when-idle 15`:
-it runs curators and grades, and trains the next exam's students when there is nothing
+it runs curators and grades, and trains the organisers' students when there is nothing
 official to do, until it has had nothing to do for fifteen minutes, then ends
 its own pod with the key RunPod gives each pod for itself. RunPod restarts a container
 whose process exits, and keeps billing for it, so the script never just exits.
@@ -31,7 +31,7 @@ machine only grades. `--no-edits` rents machines that only grade.
 Each machine has a key of its own from a pool kept here, and the organisers' own key
 (`--key`) vouches for each: it signs a grant the server keeps. Nothing in the server's
 configuration changes. A machine vouched for is one of the organisers' machines to the
-judge, and nothing more: it administers nothing
+judge, and nothing more: it administers nothing and posts no round's exam
 ([Operating: rented machines](../docs/OPERATING.md#rented-machines)).
 
 ## Setting up
@@ -54,7 +54,7 @@ stet-runpod status                   # what is waiting, what is rented, what it 
 stet-runpod scale --follow           # rent and end to match the work, every minute
 stet-runpod up 2                     # or by hand: two now, whatever is waiting
 stet-runpod down                     # end those that hold no job
-stet-runpod pause                    # draw no more rounds: the machines turn to the next exam
+stet-runpod pause                    # draw no more rounds: the machines turn to the organisers' students
 stet-runpod resume                   # and start them again
 ```
 
@@ -67,8 +67,8 @@ those.
 
 How many it rents: one for every `--per-machine` (6) jobs a new machine could take now,
 counting a curator still to run as two (the run, and a grade of what it writes) and a
-script waiting as one. A machine with nothing official to do trains the next exam's
-students (a few minutes each, for a settled round's shadow), so one more for every
+script waiting as one. A machine with nothing official to do trains the organisers'
+own students (a few minutes each, on a settled round), so one more for every
 `--per-shadow` (4) of those waiting, after the official work (`--per-shadow 0`: none).
 `--long-shadow 600` rents machines that also take the bigger students, held for hours, one
 machine to each. A machine rented for them is chosen for what a student costs on it, not what

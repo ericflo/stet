@@ -9,21 +9,22 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"regexp"
 	"sort"
 	"strconv"
 )
 
-// --- the next exam's students, farmed out -------------------------------------------------------
+// --- the organisers' own students, farmed out ---------------------------------------------------
 //
-// A round's shadow (shadow.go) needs a student for every entry and one for the unedited corpus,
-// each trained on what its script keeps and then sat on the season's exam and on the round's
-// next exam. The organisers' machine posts a round's students as a batch of tasks. Any of the
-// organisers' machines, rented ones included, takes a task when it has no official work
-// (stet verify) and sends back how its student did on every item. The organisers' machine then
-// adds them up into the round's shadow. Nothing here touches a grade, and a task is handed out
-// only to a machine with nothing official to do.
+// The organisers train students of their own on settled rounds: every entry's and the unedited
+// corpus's, at the season's scales or at one it does not run (the scale check, and the finals),
+// each trained on what its script keeps and sat on the round's exam. The organisers' machine
+// posts a round's students as a batch of tasks. Any of the organisers' machines, rented ones
+// included, takes a task when it has no official work (stet verify) and sends back how its
+// student did on every item. The organisers' machine then adds them up. Nothing here touches a
+// grade, and a task is handed out only to a machine with nothing official to do.
 
 const (
 	shadowLease       = 45 * 60 // seconds a machine holds a task before it may be handed to another, unless its batch says
@@ -43,21 +44,19 @@ type ShadowTask struct {
 	Done   *ShadowDone `json:"done,omitempty"`
 }
 
-// ShadowDone says who trained a task's student and how it did on the season's exam. How it did
-// on each item of the next exam is kept in the file store, beside the batch's items.
+// ShadowDone says who trained a task's student, and what its training kept and took. How it
+// did on each of the batch's items is kept in the file store, beside them.
 type ShadowDone struct {
-	By       string             `json:"by"`
-	At       int64              `json:"at"`
-	Hardware string             `json:"hardware,omitempty"`
-	Valid    bool               `json:"valid"`
-	Reason   string             `json:"reason,omitempty"`
-	Loss     float64            `json:"exam_loss,omitempty"`
-	BySource map[string]float64 `json:"by_source,omitempty"`
-	Kept     float64            `json:"kept_doc_frac,omitempty"`
-	Seconds  float64            `json:"train_seconds,omitempty"`
+	By       string  `json:"by"`
+	At       int64   `json:"at"`
+	Hardware string  `json:"hardware,omitempty"`
+	Valid    bool    `json:"valid"`
+	Reason   string  `json:"reason,omitempty"`
+	Kept     float64 `json:"kept_doc_frac,omitempty"`
+	Seconds  float64 `json:"train_seconds,omitempty"`
 }
 
-// ShadowBatch is a round's students for one version of its next exam.
+// ShadowBatch is a round's students for one set of items, at one scale.
 type ShadowBatch struct {
 	ID       string        `json:"id"`
 	RoundIdx int           `json:"round"`
@@ -99,15 +98,14 @@ func (tx *Tx) saveShadowBatch(b *ShadowBatch) {
 	tx.put(shadowBatchKey(b.ID), b)
 }
 
-// shadowBatchID names a batch by its round, items, scale and model. The season's own micro
-// batches keep the name they have always had.
+// shadowBatchID names a batch by its round, items, scale and model.
 func shadowBatchID(round int, digest, scale string, spec json.RawMessage) string {
-	if scale == "micro" && len(spec) == 0 {
-		return fmt.Sprintf("%08d-%s", round, digest[:12])
-	}
 	h := sha256.Sum256([]byte(digest + "\x00" + scale + "\x00" + string(spec)))
 	return fmt.Sprintf("%08d-%s", round, hex.EncodeToString(h[:])[:12])
 }
+
+// bounded is a number a result may hold: finite, and not absurd.
+func bounded(v float64) bool { return finite(v) && math.Abs(v) < 1e6 }
 
 // open says whether a task may be handed to a machine now.
 func (t *ShadowTask) open(at int64) bool {
@@ -146,8 +144,8 @@ func (s *State) shadowBatchesByAge() []*ShadowBatch {
 	return out
 }
 
-// apiShadowBatch takes a round's batch from the organisers' own machine: the round's next-exam
-// items (zstd JSON lines, base64) and the scripts whose students it wants. Posting the same
+// apiShadowBatch takes a round's batch from the organisers' own machine: the items its students
+// sit (zstd JSON lines, base64) and the scripts whose students it wants. Posting the same
 // items again adds any scripts not yet in the batch, and is otherwise a no-op.
 func (a *App) apiShadowBatch(w http.ResponseWriter, r *http.Request) {
 	acct, _, body, err := a.signedBy(w, r, 4*shadowItemsMax/3+(1<<20), true, organisers)
@@ -297,7 +295,7 @@ func (a *App) shadowMachine(w http.ResponseWriter, r *http.Request, limit int64)
 		return nil, nil, err
 	}
 	if !acct.Anchor {
-		return nil, nil, fail(403, "the next exam's students are trained by the organisers' machines only")
+		return nil, nil, fail(403, "the organisers' students are trained by the organisers' machines only")
 	}
 	return acct, body, nil
 }
@@ -435,19 +433,13 @@ func (a *App) apiShadowResult(w http.ResponseWriter, r *http.Request) {
 	d.By, d.At = acct.Handle, now()
 	d.Hardware, d.Reason = clip(d.Hardware, 200), clip(d.Reason, 500)
 	if d.Valid {
-		if len(req.Scores) != items || !bounded(d.Loss) || !bounded(d.Kept) || !bounded(d.Seconds) || len(d.BySource) > 64 {
+		if len(req.Scores) != items || !bounded(d.Kept) || !bounded(d.Seconds) {
 			writeErr(w, fail(400, "the result does not add up: %d scores for %d items", len(req.Scores), items))
 			return
 		}
 		for _, v := range req.Scores {
 			if !bounded(v) {
 				writeErr(w, fail(400, "a score is not a number"))
-				return
-			}
-		}
-		for k, v := range d.BySource {
-			if len(k) > 64 || !bounded(v) {
-				writeErr(w, fail(400, "a source's loss is not one"))
 				return
 			}
 		}
@@ -458,7 +450,7 @@ func (a *App) apiShadowResult(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else {
-		d.Loss, d.BySource, d.Kept, d.Seconds = 0, nil, 0, 0
+		d.Kept, d.Seconds = 0, 0
 	}
 	err = a.st.update(r.Context(), func(tx *Tx) error {
 		b, t, err := shadowTaskOf(tx.s, acct, id, i)
@@ -501,7 +493,7 @@ func (a *App) apiShadowRelease(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
 
-// apiShadowScriptPut keeps a script for the next exam's students that is no round's entry: a
+// apiShadowScriptPut keeps a script for the organisers' students that is no round's entry: a
 // reference curator's, or an entry's at a scale the season does not run. The organisers' own
 // machine sends it, zstd-compressed; the machines that train it check it against its hash.
 func (a *App) apiShadowScriptPut(w http.ResponseWriter, r *http.Request) {

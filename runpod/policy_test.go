@@ -14,7 +14,7 @@ func testPolicy() Policy {
 }
 
 func round(runsWaiting, editing, wanted, grading int) *Work {
-	return &Work{Runners: 1, Rounds: []WorkRound{{ID: "s0-o00001", Entries: 36, RunsWaiting: runsWaiting, RunsWanted: runsWaiting, EditsUnderWay: editing, GradesWanted: wanted, GradesUnderWay: grading}}}
+	return &Work{Runners: 1, Rounds: []WorkRound{{ID: "s1-o00001", Entries: 36, RunsWaiting: runsWaiting, RunsWanted: runsWaiting, EditsUnderWay: editing, GradesWanted: wanted, GradesUnderWay: grading}}}
 }
 
 // pool makes workers: "free", or a pod that is "starting", "waiting", "grading", "training",
@@ -177,7 +177,7 @@ func TestMachinesThatRunCuratorsAreRentedForRunsAndGrades(t *testing.T) {
 	}
 }
 
-// The next exam's students are trained by machines with nothing official to do: those waiting
+// The organisers' students are trained by machines with nothing official to do: those waiting
 // want machines after the official work, under the same limits, and a machine training one is
 // at work however long it says nothing.
 func TestTheNextExamsStudentsWantMachinesToo(t *testing.T) {

@@ -67,16 +67,17 @@ func TestPreview(t *testing.T) {
 	bob := &previewActor{actor: w.join("bob", nil), gpu: "NVIDIA GeForce RTX 3080", skew: -0.009}
 	maria := w.join("maria", nil)
 
-	// gain is what a curator is truly worth in a round: its own level, the round's mood.
+	// gain is what a curator is truly worth in a round, in bits per byte: its own level (a
+	// tenth of it), the round's mood.
 	level := map[string]float64{"identity": 0, "english": 0.92, "tidy": 0.95, "compass": 1.12, "boilerplate-be-gone": 0.71}
 	gain := func(name string, round int) float64 {
 		wobble := 0.04 * math.Sin(float64(round)*1.7+float64(len(name)))
 		if name == "identity" {
 			wobble /= 2
 		}
-		return level[name] + wobble
+		return (level[name] + wobble) / 10
 	}
-	baseline := func(round int) float64 { return 5.25 + 0.03*math.Sin(float64(round)*2.3) }
+	baseline := func(round int) float64 { return 1.84 + 0.01*math.Sin(float64(round)*2.3) }
 
 	for _, n := range []string{"identity", "english", "tidy"} {
 		w.submit(stet, n, fmt.Sprintf("print(%q)", n))
@@ -167,7 +168,7 @@ func TestPreview(t *testing.T) {
 			if c.Job.Kind == "edit" {
 				editAs(t, w, machine, c, c.Job.Editor.Name)
 			} else {
-				reportAs(t, w, machine, c, 6.0-gain(c.Job.Editor.Name, idx), baseline(idx))
+				reportAs(t, w, machine, c, baseline(idx)-gain(c.Job.Editor.Name, idx), baseline(idx))
 			}
 		}
 		shift(w, 19*time.Minute)
@@ -237,13 +238,13 @@ var (
 	previewRanBy = map[string]string{}
 )
 
-func roundOf(c *claimed) (idx int) {
-	fmt.Sscanf(fmt.Sprint(c.Job.Round["id"]), "s0-o%d", &idx)
+func roundOf(w0 *world, c *claimed) (idx int) {
+	fmt.Sscanf(fmt.Sprint(c.Job.Round["id"]), w0.app.season.ID+"-o%d", &idx)
 	return idx
 }
 
 func editAs(t *testing.T, w *world, a *previewActor, c *claimed, name string) {
-	failed := previewFails != nil && previewFails(name, roundOf(c))
+	failed := previewFails != nil && previewFails(name, roundOf(w, c))
 	if name == "kitchen-sink" || failed {
 		w.edit(a.actor, c, "")
 		return
@@ -271,18 +272,19 @@ func editAs(t *testing.T, w *world, a *previewActor, c *claimed, name string) {
 }
 
 func reportAs(t *testing.T, w *world, a *previewActor, c *claimed, loss, base float64) {
-	// Each kind of exam text is harder or easier; the scores are the plain means of them.
-	by, bb := map[string]float64{}, map[string]float64{}
-	srcs := w.app.season.ExamSources
-	ob, oe := make([]float64, len(srcs)), make([]float64, len(srcs))
+	// Each item of the exam is harder or easier, and the student gains more on some pillars
+	// than on others; loss and base are its mean bits per byte and the unedited student's.
+	table := nextTable()
+	ob, oe := make([]float64, len(table)), make([]float64, len(table))
 	var mb, me float64
-	for i := range srcs {
+	for i := range table {
 		ob[i] = 0.3*math.Sin(float64(i)*1.9) + 0.1*float64(i%3)
 		oe[i] = ob[i] - 0.06*float64(i%2)
-		mb, me = mb+ob[i]/float64(len(srcs)), me+oe[i]/float64(len(srcs))
+		mb, me = mb+ob[i]/float64(len(table)), me+oe[i]/float64(len(table))
 	}
-	for i, s := range srcs {
-		by[s], bb[s] = loss+oe[i]-me, base+ob[i]-mb
+	exam, baseline := make([]float64, len(table)), make([]float64, len(table))
+	for i := range table {
+		exam[i], baseline[i] = -(loss + oe[i] - me), -(base + ob[i] - mb)
 	}
 	kept, ok := map[string]float64{"identity": 1, "english": 0.103, "tidy": 0.096, "compass": 0.088, "boilerplate-be-gone": 0.41}[c.Job.Editor.Name]
 	if !ok {
@@ -291,15 +293,16 @@ func reportAs(t *testing.T, w *world, a *previewActor, c *claimed, loss, base fl
 	var curve [][]float64
 	for i := 1; i <= 60; i++ {
 		step := float64(i) * 80
-		curve = append(curve, []float64{step, loss - 0.6 + 4.2*math.Exp(-float64(i)/6) + 0.05*math.Sin(float64(i))})
+		curve = append(curve, []float64{step, 3.4 + loss - base + 4.2*math.Exp(-float64(i)/6) + 0.05*math.Sin(float64(i))})
 	}
 	p := map[string]any{
 		"harness": w.app.season.Harness, "season": w.app.season.ID, "season_digest": w.app.season.Digest,
 		"round": c.Job.Round["id"], "scale": c.Job.Scale, "corpus_sha256": corpusSHA, "exam_sha256": examSHA,
 		"script_sha256": c.Job.Script.SHA256, "valid": true, "hardware": map[string]any{"gpu": a.gpu, "device": "cuda", "backend": backendOf(a.gpu)},
-		"script":   map[string]any{"script_sha256": c.Job.Script.SHA256, "kept_doc_frac": kept, "kept_byte_frac": kept * 0.8, "passes": 1.0, "out_docs": 1200, "ink_frac": 0.0},
-		"baseline": map[string]any{"loss": base, "by_source": bb}, "exam": map[string]any{"loss": loss, "by_source": by},
-		"train":      map[string]any{"seconds": 410.0, "tokens_per_second": 100000.0, "final_train_loss": loss - 0.5, "curve": curve},
+		"script":     map[string]any{"script_sha256": c.Job.Script.SHA256, "kept_doc_frac": kept, "kept_byte_frac": kept * 0.8, "passes": 1.0, "out_docs": 1200, "ink_frac": 0.0},
+		"baseline":   map[string]any{"kind": "next", "mean": -base, "item_scores": baseline},
+		"exam":       map[string]any{"kind": "next", "mean": -loss, "item_scores": exam},
+		"train":      map[string]any{"seconds": 410.0, "tokens_per_second": 100000.0, "final_train_loss": 3.5 + loss - base, "curve": curve},
 		"started_at": time.Now().Unix() - 600, "finished_at": time.Now().Unix(),
 	}
 	var ack struct {

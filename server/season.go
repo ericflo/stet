@@ -112,11 +112,7 @@ type Season struct {
 	MinCopyBytes  int                     `json:"min_copy_bytes"`
 	MaxDocBytes   int                     `json:"max_doc_bytes"`
 	Script        ScriptLimits            `json:"script"`
-	ExamKind      string                  `json:"exam_kind"` // "pack" (season 0), or "next": see nextexam.go
-	ExamSources   []string                `json:"exam_sources"`
-	ExamFile      string                  `json:"exam_file"`
-	ExamSHA256    string                  `json:"exam_sha256"`
-	HeldoutSHA256 string                  `json:"heldout_exam_sha256"` // a commitment; the server never sees the file
+	ExamSources   []string                `json:"exam_sources"` // the exam's pillars, each counting the same: see nextexam.go
 	Beacon        Beacon                  `json:"beacon"`
 	DrawGrid      int64                   `json:"draw_grid_seconds"`
 	Pools         map[string]Pool         `json:"pools"`
@@ -230,28 +226,14 @@ func (s *Season) maxScriptBlob() int64 { return s.Script.MaxBytes*4/3 + (1 << 20
 // nextGrid is the first grid moment strictly after t.
 func (s *Season) nextGrid(t int64) int64 { return (t/s.DrawGrid + 1) * s.DrawGrid }
 
-// examKind is the season's kind of exam, "pack" for a season that names none.
-func (s *Season) examKind() string {
-	if s.next() {
-		return "next"
-	}
-	return "pack"
-}
-
-// unit is what the season's scores are measured in: season 0's exam in nats per token, the
-// next exam in bits per byte.
-func (s *Season) unit() string {
-	if s.next() {
-		return "bits per byte"
-	}
-	return "nats"
-}
+// unit is what every score is measured in: gains, ratings, tolerances and the record.
+const unit = "bits per byte"
 
 // multiplier reads a gain off the season's reference curve: how many times more unedited
-// data the baseline would have needed to reach the same exam loss. It never extrapolates:
+// data the baseline would have needed to do as well on the exam. It never extrapolates:
 // past either end of the measured curve it returns the end point and capped = true, to be
-// shown as "more than". With no curve for the scale (the next exam has none yet) ok is
-// false, and there is no multiplier: the API says null and the pages leave it out. Mirrors
+// shown as "more than". With no curve for the scale (none is measured yet) ok is false, and
+// there is no multiplier: the API says null and the pages leave it out. Mirrors
 // stet.score.multiplier.
 func (s *Season) multiplier(curveKey string, gain float64) (m float64, capped, ok bool) {
 	pts := append([][2]float64(nil), s.Curves[curveKey]...)
@@ -285,6 +267,3 @@ func (s *Season) multiplier(curveKey string, gain float64) (m float64, capped, o
 	}
 	return 0, false, false
 }
-
-// heldoutFile is the name the held-out exam is published under when the season closes.
-func (s *Season) heldoutFile() string { return "heldout-" + s.ID + ".jsonl.zst" }

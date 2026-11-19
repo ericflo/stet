@@ -144,7 +144,7 @@ func (f *Fleet) listGPUs(ctx context.Context, long bool) error {
 	}
 	what := "What would be rented"
 	if long {
-		what = "For the next exam's bigger students, by what a student costs on each, the quicker card first where that is about the same"
+		what = "For the organisers' bigger students, by what a student costs on each, the quicker card first where that is about the same"
 	}
 	if len(gpus) == 0 {
 		fmt.Fprintf(f.out, "%s: RunPod has no GPU free now that would do (%s cloud%s).\n", what, strings.ToLower(f.o.Cloud), f.ceiling(long))
@@ -190,7 +190,7 @@ func cmdStatus(ctx context.Context, f *Fleet) error {
 		fmt.Fprintf(f.out, "Next draw %s UTC (%s)\n", at.UTC().Format("15:04"), until(now, at))
 	}
 	if v.Work.ShadowWaiting+v.Work.ShadowUnderWay+v.Work.ShadowLongWaiting > 0 {
-		fmt.Fprintf(f.out, "The next exam: %d students to train · %d bigger ones, hours each · %d being trained\n",
+		fmt.Fprintf(f.out, "The organisers' students: %d to train · %d bigger ones, hours each · %d being trained\n",
 			v.Work.ShadowWaiting, v.Work.ShadowLongWaiting, v.Work.ShadowUnderWay)
 	}
 	fmt.Fprintf(f.out, "%d of the organisers' machines running curators\n\n", v.Work.Runners)
@@ -228,7 +228,7 @@ func cmdPause(ctx context.Context, f *Fleet, paused bool) error {
 		return err
 	}
 	if since > 0 {
-		f.say("rounds paused since %s UTC, by %s: none is drawn, and the round under way finishes. The machines turn to the next exam", time.Unix(since, 0).UTC().Format("Jan 2 15:04"), by)
+		f.say("rounds paused since %s UTC, by %s: none is drawn, and the round under way finishes. The machines turn to the organisers' students", time.Unix(since, 0).UTC().Format("Jan 2 15:04"), by)
 		return nil
 	}
 	f.say("rounds resumed: the next is drawn at its time")

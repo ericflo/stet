@@ -1,8 +1,8 @@
 package main
 
-// The next exam as the season's exam (season 1 on). A round's exam is made after its draw: the
-// organisers' examiner harvests the fresh text published in the window after it, builds the
-// round's items and posts them here (postExam). Grades start then. A grader sits every item
+// The season's exam: the next exam. A round's exam is made after its draw: the organisers'
+// examiner harvests the fresh text published in the window after it, builds the round's items
+// and posts them here (apiExamPost). Grades start then. A grader sits every item
 // and reports each one's score, and its own baseline's; the round's baseline is the mean, item
 // by item, of the established graders' baselines; and a grade's score is the next exam's
 // aggregate (NextScore, a port of src/stet/newexam/aggregate.py) of its item scores less the
@@ -25,21 +25,27 @@ import (
 )
 
 const (
-	nextExamFileMax = 64 << 20 // bytes of a round's items, compressed
-	nextExamItemMax = 100_000
-	maxItemScore    = 1e3 // bits per byte, either way: only nonsense is further out
+	examFileMax  = 64 << 20 // bytes of a round's items, compressed
+	examItemMax  = 100_000
+	maxItemScore = 1e3 // bits per byte, either way: only nonsense is further out
 )
 
-func (s *Season) next() bool { return s.ExamKind == "next" }
+// The files a round's exam keeps in the file store.
+const (
+	examItems  = "items.jsonl.zst"  // what graders sit, until the round settles
+	examPublic = "public.jsonl.zst" // what is published when it does
+	examTable  = "table.json"       // what each item counts toward
+	examScores = "scores.json"      // every item score of the settled round
+)
 
-func nextItemsBlob(idx int) string  { return fmt.Sprintf("nextexam/%08d/items.jsonl.zst", idx) }
-func nextTableBlob(idx int) string  { return fmt.Sprintf("nextexam/%08d/table.json", idx) }
-func nextScoresBlob(idx int) string { return fmt.Sprintf("nextexam/%08d/scores.json", idx) }
-func nextPublicBlob(idx int) string { return fmt.Sprintf("nextexam/%08d/public.jsonl.zst", idx) }
+// examBlob is where a round's exam keeps one of its files: under the season, so that no
+// season's rounds are ever taken for another's.
+func (a *App) examBlob(idx int, name string) string {
+	return fmt.Sprintf("nextexam/%s/%08d/%s", a.season.ID, idx, name)
+}
 
-// examPosted reports whether a round's exam is there to be sat. A season whose exam is a pack
-// always has it; the next exam's comes after the draw.
-func (a *App) examPosted(rd *Round) bool { return !a.season.next() || rd.ExamSHA != "" }
+// examPosted reports whether a round's exam is there to be sat: it is made after the draw.
+func examPosted(rd *Round) bool { return rd.ExamSHA != "" }
 
 // ExamPost is what the examiner sends: the round's items for graders, and what each item counts
 // toward for the score.
@@ -57,13 +63,9 @@ type ExamPost struct {
 // apiExamPost: POST /api/v1/admin/rounds/{id}/exam, from the organisers. Posting the same exam
 // again is harmless; posting another is refused.
 func (a *App) apiExamPost(w http.ResponseWriter, r *http.Request) {
-	_, _, body, err := a.signedBy(w, r, 4*nextExamFileMax/3+(8<<20), true, organisers)
+	_, _, body, err := a.signedBy(w, r, 4*examFileMax/3+(8<<20), true, organisers)
 	if err != nil {
 		writeErr(w, err)
-		return
-	}
-	if !a.season.next() {
-		writeErr(w, fail(404, "season %s's exam is a published pack: rounds are not sent one", a.season.ID))
 		return
 	}
 	idx, ok := a.parseRoundID(r.PathValue("id"))
@@ -76,16 +78,24 @@ func (a *App) apiExamPost(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, fail(400, "not an exam: %v", err))
 		return
 	}
-	file, err := base64.StdEncoding.DecodeString(p.File)
-	public, perr := base64.StdEncoding.DecodeString(p.Public)
-	if err != nil || perr != nil || len(public) == 0 || len(public) > nextExamFileMax || len(file) == 0 || len(file) > nextExamFileMax || !sha256Re.MatchString(p.Digest) || len(p.Table) == 0 ||
-		len(p.Table) > nextExamItemMax || (p.Snapshot != "" && !sha256Re.MatchString(p.Snapshot)) || p.Fresh < 0 || p.Fresh > len(p.Table) {
-		writeErr(w, fail(400, "the exam does not add up"))
-		return
-	}
-	if err := a.checkTable(p.Table, p.Shares); err != nil {
+	posted, err := a.postExam(r.Context(), idx, &p)
+	if err != nil {
 		writeErr(w, err)
 		return
+	}
+	writeJSON(w, 200, map[string]any{"round": roundID(a.season.ID, idx), "items": len(p.Table), "posted": posted})
+}
+
+// postExam gives a round the exam the examiner made for it, and reports whether it is new.
+func (a *App) postExam(ctx context.Context, idx int, p *ExamPost) (bool, error) {
+	file, err := base64.StdEncoding.DecodeString(p.File)
+	public, perr := base64.StdEncoding.DecodeString(p.Public)
+	if err != nil || perr != nil || len(public) == 0 || len(public) > examFileMax || len(file) == 0 || len(file) > examFileMax || !sha256Re.MatchString(p.Digest) || len(p.Table) == 0 ||
+		len(p.Table) > examItemMax || (p.Snapshot != "" && !sha256Re.MatchString(p.Snapshot)) || p.Fresh < 0 || p.Fresh > len(p.Table) {
+		return false, fail(400, "the exam does not add up")
+	}
+	if err := a.checkTable(p.Table, p.Shares); err != nil {
+		return false, err
 	}
 	var already bool
 	a.st.view(func(s *State) {
@@ -97,26 +107,20 @@ func (a *App) apiExamPost(w http.ResponseWriter, r *http.Request) {
 			err = fail(409, "%s already has its exam", roundID(a.season.ID, idx))
 		}
 	})
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	if already {
-		writeJSON(w, 200, map[string]any{"round": roundID(a.season.ID, idx), "items": len(p.Table), "posted": false})
-		return
+	if err != nil || already {
+		return false, err
 	}
 	table, _ := json.Marshal(p.Table)
 	for _, put := range []struct {
-		key, kind string
-		b         []byte
-	}{{nextItemsBlob(idx), "application/zstd", file}, {nextPublicBlob(idx), "application/zstd", public}, {nextTableBlob(idx), "application/json", table}} {
-		if err := a.st.blobs.Put(r.Context(), put.key, put.b, put.kind); err != nil {
+		name, kind string
+		b          []byte
+	}{{examItems, "application/zstd", file}, {examPublic, "application/zstd", public}, {examTable, "application/json", table}} {
+		if err := a.st.blobs.Put(ctx, a.examBlob(idx, put.name), put.b, put.kind); err != nil {
 			slog.Error("keeping a round's exam", "round", idx, "err", err)
-			writeErr(w, fail(503, "the file store is not answering; try again in a moment"))
-			return
+			return false, fail(503, "the file store is not answering; try again in a moment")
 		}
 	}
-	err = a.st.update(r.Context(), func(tx *Tx) error {
+	err = a.st.update(ctx, func(tx *Tx) error {
 		rd := tx.s.Rounds[idx]
 		if rd == nil || rd.Status != "open" || (rd.ExamSHA != "" && rd.ExamSHA != p.Digest) {
 			return fail(409, "%s changed while its exam was being kept; send it again", roundID(a.season.ID, idx))
@@ -126,11 +130,7 @@ func (a *App) apiExamPost(w http.ResponseWriter, r *http.Request) {
 		a.moved(tx, rd) // the round's clock starts again: its grades start now
 		return nil
 	})
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, 200, map[string]any{"round": roundID(a.season.ID, idx), "items": len(p.Table), "posted": true})
+	return err == nil, err
 }
 
 // checkTable refuses a table that names a pillar the season does not have, or a language share
@@ -169,14 +169,14 @@ func (a *App) apiExamGet(w http.ResponseWriter, r *http.Request) {
 	var posted, settled bool
 	a.st.view(func(s *State) {
 		rd := s.Rounds[idx]
-		posted = rd != nil && rd.ExamSHA != "" && a.season.next()
+		posted = rd != nil && examPosted(rd)
 		settled = posted && rd.Status == "settled"
 	})
 	if !posted {
 		writeErr(w, fail(404, "%s has no exam yet", roundID(a.season.ID, idx)))
 		return
 	}
-	blob := nextPublicBlob(idx)
+	blob := a.examBlob(idx, examPublic)
 	if !settled {
 		acct, _, _, err := a.signedBy(w, r, 1<<10, true, anyone)
 		if err != nil {
@@ -193,7 +193,7 @@ func (a *App) apiExamGet(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, fail(403, "until a round settles, its exam is given to the machines grading it"))
 			return
 		}
-		blob = nextItemsBlob(idx)
+		blob = a.examBlob(idx, examItems)
 	}
 	f, size, err := a.st.blobs.Open(r.Context(), blob)
 	if err != nil {
@@ -207,7 +207,7 @@ func (a *App) apiExamGet(w http.ResponseWriter, r *http.Request) {
 	io.Copy(w, f)
 }
 
-// checkItems refuses a next-exam report that is not one score for every item of the round's exam.
+// checkItems refuses a report that is not one score for every item of the round's exam.
 func checkItems(sc *ExamScore, n int, what string) error {
 	if sc == nil || sc.Kind != "next" || len(sc.ItemScores) != n || n == 0 {
 		return fail(400, "the %s score is not one score for each of the exam's %d items", what, n)
@@ -250,9 +250,11 @@ func diffItems(x, base []float64) []float64 {
 	return out
 }
 
-// nextBaselines are the round's baselines that make its own: measured on its corpus and exam,
-// by an account established when it measured (or the organisers').
-func (a *App) nextBaselines(s *State, rd *Round) []*Baseline {
+// roundBaselines are the round's baselines that make its own: measured on its corpus and exam,
+// by an account established when it measured (or the organisers'). Whether a measurement
+// counts was settled when it arrived: standing earned as the round settles must not move the
+// round's own baseline.
+func (a *App) roundBaselines(s *State, rd *Round) []*Baseline {
 	var out []*Baseline
 	for _, b := range s.Baselines {
 		acct := s.Accounts[b.AccountID]
@@ -268,7 +270,7 @@ func (a *App) nextBaselines(s *State, rd *Round) []*Baseline {
 // own), on the next exam's score; ok is false while there are no others.
 func (a *App) baselineDev(s *State, rd *Round, acctID int64, items []float64) (dev float64, ok bool) {
 	var rows [][]float64
-	for _, b := range a.nextBaselines(s, rd) {
+	for _, b := range a.roundBaselines(s, rd) {
 		if b.AccountID != acctID {
 			rows = append(rows, b.Items)
 		}
@@ -280,12 +282,22 @@ func (a *App) baselineDev(s *State, rd *Round, acctID int64, items []float64) (d
 	return dev, err == nil
 }
 
-// refreshNext sets the round's baseline to the mean of its baselines, item by item, and every
-// grade's score to the next exam's aggregate of its item scores less that.
-func (a *App) refreshNext(tx *Tx, rd *Round) {
+// baselineAgrees says whether a grader's baseline is within the tolerance of the round's: its
+// score against the round's baseline, on the exam's aggregate.
+func (a *App) baselineAgrees(rd *Round, b *Baseline) bool {
+	if b == nil || len(rd.BaseItems) == 0 || len(b.Items) != len(rd.BaseItems) || b.ExamSHA != rd.ExamSHA {
+		return false
+	}
+	dev, _, err := NextScore(rd.ExamTable, diffItems(b.Items, rd.BaseItems), rd.Shares)
+	return err == nil && within(dev, a.tolerance().Baseline)
+}
+
+// refreshScores sets the round's baseline to the mean of its baselines, item by item, and every
+// grade's score to the exam's aggregate of its item scores less that.
+func (a *App) refreshScores(tx *Tx, rd *Round) {
 	s := tx.s
 	var rows [][]float64
-	for _, b := range a.nextBaselines(s, rd) {
+	for _, b := range a.roundBaselines(s, rd) {
 		rows = append(rows, b.Items)
 	}
 	if len(rows) == 0 {
@@ -298,13 +310,12 @@ func (a *App) refreshNext(tx *Tx, rd *Round) {
 		mean += v
 	}
 	loss := places5(-mean / float64(len(base))) // the unedited student's mean bits per byte: for the record
-	rd.BaselineLoss, rd.Baseline = &loss, nil
+	rd.BaselineLoss = &loss
+	// How many machines measured it, whoever they were.
 	rd.BaselineN = 0
 	for _, b := range s.Baselines {
-		if b.RoundIdx == rd.Idx && b.ExamSHA == rd.ExamSHA && len(b.Items) == len(base) {
-			if dev, _, err := NextScore(rd.ExamTable, diffItems(b.Items, base), rd.Shares); err == nil && math.Abs(dev) <= a.tolerance().Baseline {
-				rd.BaselineN++
-			}
+		if b.RoundIdx == rd.Idx && a.baselineAgrees(rd, b) {
+			rd.BaselineN++
 		}
 	}
 	tx.saveRound(rd)
@@ -339,13 +350,10 @@ type NextScores struct {
 	Grades    map[string][]float64 `json:"grades"`    // by result id
 }
 
-// archiveNext moves what a round held of its exam to the file store, once it has settled, and
+// archiveExam moves what a round held of its exam to the file store, once it has settled, and
 // then out of the database. Called after the transaction that settled it; a round that could
 // not be archived keeps it all, and is tried again on the next tick.
-func (a *App) archiveNext(ctx context.Context) {
-	if !a.season.next() {
-		return
-	}
+func (a *App) archiveExam(ctx context.Context) {
 	var due []int
 	a.st.view(func(s *State) {
 		for _, rd := range s.Rounds {
@@ -378,7 +386,7 @@ func (a *App) archiveNext(ctx context.Context) {
 			}
 		})
 		raw, _ := json.Marshal(out)
-		if err := a.st.blobs.Put(ctx, nextScoresBlob(idx), raw, "application/json"); err != nil {
+		if err := a.st.blobs.Put(ctx, a.examBlob(idx, examScores), raw, "application/json"); err != nil {
 			slog.Error("archiving a round's exam scores", "round", idx, "err", err)
 			continue
 		}

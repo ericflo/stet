@@ -386,7 +386,7 @@ func (f *Fleet) clouds() []string {
 // choices are what to try, looked up afresh each time machines are rented: every fit kind
 // of GPU RunPod has free now, in every cloud allowed, cheapest first (secure first where
 // the price is the same); or those named with --gpu, in that order, each cheapest first.
-// For the next exam's bigger students (long), it is what a student costs on each kind that
+// For the organisers' bigger students (long), it is what a student costs on each kind that
 // counts, not what it costs an hour, under --long-max-price.
 func (f *Fleet) choices(ctx context.Context, long bool) ([]Choice, error) {
 	ceiling := f.maxPrice(long)
@@ -661,9 +661,9 @@ func held(jobs, students int) string {
 	switch students {
 	case 0:
 	case 1:
-		parts = append(parts, "1 of the next exam's students")
+		parts = append(parts, "1 of the organisers' students")
 	default:
-		parts = append(parts, fmt.Sprintf("%d of the next exam's students", students))
+		parts = append(parts, fmt.Sprintf("%d of the organisers' students", students))
 	}
 	return strings.Join(parts, " and ")
 }

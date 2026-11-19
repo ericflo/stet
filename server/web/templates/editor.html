@@ -28,8 +28,6 @@
   {{else}}{{with $d.Mine}}{{if .Shared}}<p class="vs-line">Against the record{{with $d.Race.Holder}} holder, <b>{{.Name}}</b>{{end}}: {{if gt .Mean 0.0}}ahead by <span class="num">{{gain .Mean}}</span>{{else}}behind by <span class="num">{{gain .Mean}}</span>{{end}} a round over {{.Shared}} shared {{plural .Shared "round" "rounds"}}.{{if .Next}} {{if .ToGo}}Tested at {{.Next}}, {{.ToGo}} to go.{{else}}Tested when this round settles.{{end}}{{end}} <a class="go" href="/record">the race →</a></p>{{end}}{{end}}{{end}}
   {{end}}
 
-  {{with $d.Next}}<p class="vs-line">On <a href="/next">the next exam</a>, which ranks nothing yet: <b>{{gain .Mean}}</b> over {{.Rounds}} {{plural .Rounds "round" "rounds"}}, {{ordinal $d.NextPlace}} of {{$d.NextOf}}.{{if $d.NextStrong}} Strongest at {{$d.NextStrong}}; weakest at {{$d.NextWeak}}.{{end}}</p>{{end}}
-
   <div class="block">
     <div class="list-head"><h2>Round by round</h2>{{with $row}}<p>{{.Rounds}} {{plural .Rounds "round" "rounds"}}{{if .Invalid}} · <span class="neg">{{.Invalid}} failed</span>{{end}}</p>{{end}}</div>
     {{if $d.Played}}
@@ -54,10 +52,10 @@
           <div><dt>pages kept</dt><dd>{{pct1 .Script.KeptDocFrac}}<small>of the documents drawn</small></dd></div>
           <div><dt>read</dt><dd>{{f1 .Script.Passes}}×<small>over what it kept</small></dd></div>
           <div><dt>its own words</dt><dd>{{pct1 .Script.InkFrac}}<small>of tokens not copied</small></dd></div>
-          {{if next}}<div><dt>on the exam</dt><dd>{{f3 .Loss}}<small>bits per byte, against {{f3 .Baseline}} unedited</small></dd></div>{{else}}<div><dt>exam loss</dt><dd>{{f3 .Loss}}<small>against {{f3 .Baseline}} unedited</small></dd></div>{{end}}
+          <div><dt>on the exam</dt><dd>{{f3 .Loss}}<small>bits per byte, against {{f3 .Baseline}} unedited</small></dd></div>
         </dl>{{end}}
         <div class="grid2">
-          {{if $d.SourceChart}}<figure class="figure"><h3>Where the gain comes from</h3><p class="how">{{if next}}Its gain on each thing the exam tests, in bits per byte better than unedited. Each counts the same. Right is better.{{else}}Exam loss by kind of text. Hollow: unedited. Filled: this curator. Left is better.{{end}}</p><div class="plot">{{$d.SourceChart}}</div></figure>{{end}}
+          {{if $d.SourceChart}}<figure class="figure"><h3>Where the gain comes from</h3><p class="how">Its gain on each thing the exam tests, in bits per byte better than unedited. Each counts the same. Right is better.</p><div class="plot">{{$d.SourceChart}}</div></figure>{{end}}
           {{if $d.CurveChart}}<figure class="figure"><h3>The model, learning from it</h3><p class="how">Training loss on its pages. Low here is not the goal; the exam is.</p><div class="plot">{{$d.CurveChart}}</div></figure>{{end}}
         </div>
       </div>

@@ -7,11 +7,11 @@ import (
 	"testing"
 )
 
-// The next exam's students are farmed out: the organisers' own machine posts a settled round's
-// batch, any of the organisers' machines (a rented one too) is handed a student to train, one
-// at a time, and its scores are kept for the organisers to add up. Nobody else is handed one or
-// may post one, and a task left by a machine goes to another.
-func TestTheNextExamsStudentsAreTrainedByTheOrganisersMachines(t *testing.T) {
+// The organisers' own students are farmed out: the organisers' own machine posts a settled
+// round's batch, any of the organisers' machines (a rented one too) is handed a student to
+// train, one at a time, and its scores are kept for the organisers to add up. Nobody else is
+// handed one or may post one, and a task left by a machine goes to another.
+func TestTheOrganisersStudentsAreTrainedByTheirMachines(t *testing.T) {
 	pubA, privA := newKey()
 	pubW, privW := newKey()
 	w := newWorld(t, pubA)
@@ -82,12 +82,11 @@ func TestTheNextExamsStudentsAreTrainedByTheOrganisersMachines(t *testing.T) {
 		t.Fatalf("the batch's items: HTTP %d", code)
 	}
 	task := fmt.Sprintf("/api/v1/shadow/batches/%s/tasks/%d", c.Task.Batch, c.Task.Index)
-	good := map[string]any{"valid": true, "exam_loss": 5.4, "by_source": map[string]float64{"wiki": 5.1}, "kept_doc_frac": 1,
-		"train_seconds": 120, "hardware": "RTX 3080 Ti", "item_scores": []float64{-1.2, -0.8, -2.5}}
+	good := map[string]any{"valid": true, "kept_doc_frac": 1, "train_seconds": 120, "hardware": "RTX 3080 Ti", "item_scores": []float64{-1.2, -0.8, -2.5}}
 	if code := anchor.do("POST", task, good, nil); code != 409 {
 		t.Fatalf("another machine posting a task it does not hold: HTTP %d", code)
 	}
-	short := map[string]any{"valid": true, "exam_loss": 5.4, "item_scores": []float64{-1.2}}
+	short := map[string]any{"valid": true, "item_scores": []float64{-1.2}}
 	if code := rented.do("POST", task, short, nil); code != 400 {
 		t.Fatalf("a result with too few scores: HTTP %d", code)
 	}
@@ -131,7 +130,7 @@ func TestTheNextExamsStudentsAreTrainedByTheOrganisersMachines(t *testing.T) {
 	if code := anchor.do("GET", "/api/v1/admin/shadow/batches/"+made.Batch, nil, &got); code != 200 || len(got.Tasks) != 3 {
 		t.Fatalf("the organisers reading the batch: HTTP %d", code)
 	}
-	if d := got.Tasks[0].Done; d == nil || d.By != "rented-one" || d.Loss != 5.4 || len(got.Tasks[0].Scores) != 3 || got.Tasks[0].Scores[2] != -2.5 {
+	if d := got.Tasks[0].Done; d == nil || d.By != "rented-one" || d.Seconds != 120 || len(got.Tasks[0].Scores) != 3 || got.Tasks[0].Scores[2] != -2.5 {
 		t.Fatalf("the unedited student, as kept: %+v %v", d, got.Tasks[0].Scores)
 	}
 
@@ -243,7 +242,7 @@ func TestAStudentAnEndedMachineWasTrainingIsHandedBack(t *testing.T) {
 		t.Fatalf("the student is not waiting again: %d waiting, %d under way", work.ShadowWaiting, work.ShadowUnderWay)
 	}
 	task := fmt.Sprintf("/api/v1/shadow/batches/%s/tasks/%d", c.Task.Batch, c.Task.Index)
-	if code := rented.do("POST", task, map[string]any{"valid": true, "exam_loss": 5.4, "item_scores": []float64{-1, -1, -1}}, nil); code != 409 {
+	if code := rented.do("POST", task, map[string]any{"valid": true, "item_scores": []float64{-1, -1, -1}}, nil); code != 409 {
 		t.Fatalf("a student from the ended machine was taken: HTTP %d", code)
 	}
 	w.check()

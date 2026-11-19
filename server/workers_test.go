@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"crypto/ed25519"
 	"encoding/hex"
 	"path/filepath"
@@ -10,8 +9,7 @@ import (
 )
 
 // A machine the organisers rent grades the organisers' own entries as one of their machines
-// does, and that is all it does: it administers nothing, and the held-out exam is never
-// shared with it.
+// does, and that is all it does: it administers nothing, and posts no round's exam.
 func TestARentedMachineGradesForTheOrganisersAndAdministersNothing(t *testing.T) {
 	pubA, privA := newKey()
 	pubW, privW := newKey()
@@ -44,7 +42,7 @@ func TestARentedMachineGradesForTheOrganisersAndAdministersNothing(t *testing.T)
 	}
 
 	// It administers nothing.
-	for _, path := range []string{"/api/v1/admin/sealed", "/api/v1/admin/sealed/mine", "/api/v1/admin/accounts/anchor-one", "/api/v1/admin/work"} {
+	for _, path := range []string{"/api/v1/admin/accounts/anchor-one", "/api/v1/admin/work"} {
 		if code := worker.do("GET", path, nil, &out); code != 403 {
 			t.Fatalf("a rented machine asked for %s: HTTP %d %s", path, code, out.Error)
 		}
@@ -52,26 +50,9 @@ func TestARentedMachineGradesForTheOrganisersAndAdministersNothing(t *testing.T)
 	if code := worker.do("POST", "/api/v1/admin/draw", nil, &out); code != 403 {
 		t.Fatalf("a rented machine brought the draw forward: HTTP %d", code)
 	}
-	if code := worker.do("PUT", "/api/v1/admin/files/exam-s0.jsonl.zst", []byte("x"), &out); code != 403 {
-		t.Fatalf("a rented machine published a file: HTTP %d", code)
+	if code, _ := w.postExam(worker, 1, nextTable()); code != 403 {
+		t.Fatalf("a rented machine posted a round's exam: HTTP %d", code)
 	}
-
-	// The held-out exam is not shared with it: it is not on the list of keys that want a
-	// copy, and no copy sealed to it is kept.
-	w.app.season.HeldoutSHA256 = "ab" + string(bytes.Repeat([]byte("cd"), 31))
-	var list struct {
-		Organisers []struct {
-			Key string `json:"key"`
-		} `json:"organisers"`
-	}
-	if code := anchor.do("GET", "/api/v1/admin/sealed", nil, &list); code != 200 || len(list.Organisers) != 1 || list.Organisers[0].Key != anchor.pub {
-		t.Fatalf("the keys the held-out exam is shared with: HTTP %d %+v", code, list)
-	}
-	sealed := append([]byte("stet-sealed-1\n"), bytes.Repeat([]byte{7}, 200)...)
-	if code := anchor.do("PUT", "/api/v1/admin/sealed/"+worker.pub, sealed, &out); code != 403 {
-		t.Fatalf("a copy was kept for a rented machine's key: HTTP %d %s", code, out.Error)
-	}
-	w.app.season.HeldoutSHA256 = ""
 
 	// The organisers' own machine runs both reference curators; the rented one grades.
 	w.submit(anchor, "ref-a", "print('a')")

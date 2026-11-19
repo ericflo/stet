@@ -52,7 +52,7 @@
       <div class="now-card">
         <span class="head"><span class="dot" aria-hidden="true"></span>quiet</span>
         {{if $d.Paused}}<h3>Rounds paused</h3>
-        <p>The organisers have paused the rounds{{if not next}} while they work on the next exam{{end}}. No round is drawn until they resume them, and the standings so far stand.</p>
+        <p>The organisers have paused the rounds. No round is drawn until they resume them, and the standings so far stand.</p>
         {{else}}<h3>No round scheduled</h3>
         <p>One is drawn as soon as a curator is waiting, and every {{$.Interval}} regardless.</p>{{end}}
       </div>
@@ -79,7 +79,7 @@
         <li><b>Fresh pages are drawn</b> at random from the web, at least every {{.Interval}}.</li>
         <li><b>Every curator edits the same pages</b>: what to keep, what to cut, in what order.</li>
         <li><b>The same model learns from each version</b>, and from the pages left unedited.</li>
-        {{if next}}<li><b>It sits the same exam</b>, made after the draw. A curator's gain is how much better the model does than with the pages unedited, in bits per byte.</li>{{else}}<li><b>It sits the same exam.</b> A curator's gain is how far its loss falls below the unedited one.</li>{{end}}
+        <li><b>It sits the same exam</b>, made after the draw. A curator's gain is how much better the model does than with the pages unedited, in bits per byte.</li>
       </ol>
       <a class="how-more" href="/rounds">every round so far →</a>
     </div>
