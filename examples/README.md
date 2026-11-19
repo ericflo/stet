@@ -18,9 +18,10 @@ And two that are not entered, as patterns to build on:
 | `reader` | `tidy`'s candidates, then a 135M-parameter language model reads the opening of each and the least and most surprising are dropped. Shows `[[assets]]`, `task.asset`, the GPU through PyTorch, and writing a script early. |
 | `agent` | `tidy`'s candidates; how strictly to filter them is decided by an agent: the pi harness, on Node, driving a 0.6B model served on loopback inside the sandbox. Shows how to bring a harness and a model of your own. Run `./pack.sh` first. |
 
-And three that rebuild published recipes, to check an exam against what is already known:
-large models trained on data made the first two ways beat data made the third way, which
-beats raw crawl text ([the reasoning](../docs/research/exam-first-principles.md#42-trust-the-known-answer-test)).
+And four that rebuild published recipes, to check the exam against what is already known.
+On English benchmarks, large models trained on data made the first two ways beat data made
+the third way, which beats raw crawl text; the fourth keeps every language
+([the reasoning](../docs/research/exam-first-principles.md#42-trust-the-known-answer-test)).
 
 | | What it does |
 |---|---|
