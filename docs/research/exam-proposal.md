@@ -191,6 +191,26 @@ specialisation the exam should see, and it averages out over the rounds a rating
 record test already use. Scoring the student at its last two or three checkpoints and
 averaging is a further damper that costs almost nothing.
 
+**Noise in training, measured (round 12, November 2026).** The same script, trained four
+times on the organisers' rented GPUs from the same initial weights, does not give the same
+student: GPU arithmetic is not deterministic, and the differences grow over training.
+
+| | Season exam loss, sd (nats) | Next exam score, sd (bits per byte) |
+|---|---|---|
+| The unedited corpus | 0.046 | 0.081 |
+| Curated scripts (7) | 0.004 to 0.015 | 0.010 to 0.037 |
+
+Two things follow. The unedited corpus is by far the least stable student, and it is the one
+every gain is measured from, on both exams: one training of it moves every entry's gain in a
+round together. And a pair of curators differs by about 0.03 from training alone, against
+0.015 to 0.02 from the draw of items, so the error of a comparison is about twice what
+resampling items says. `english` against `compass` (0.14 to 0.22 in all four trainings)
+survives that; the compass variants against each other (0.01 to 0.07, sometimes reversed)
+do not, within a round. Remedies, cheapest first: average the unedited corpus over several
+trainings (four halve its noise); measure gains from a stable reference instead (a
+lightly cleaned corpus trains as steadily as the curated ones); and train each entry
+twice where a ranking is close.
+
 ## 4. Speed
 
 Scoring is one forward pass of a ~10M-parameter model. A 4090 trains the student at about
