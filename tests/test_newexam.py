@@ -35,7 +35,7 @@ def test_rng_is_pinned_and_in_range():
 def test_a_seed_always_makes_the_same_exam():
     # Pinned: a change to any generator that changes what a seed produces must bump gen.VERSION
     # and this hash, on purpose.
-    assert digest(gen.generate(SEED)) == "96c7c25f469bcd62811a593ae8055de06e2494eca90b12b75a7410f4a34f07e3"
+    assert digest(gen.generate(SEED)) == "d51964cd47b2ddad5a7c93f13a81cf9bc238a7c36bfd7b20fb9545444c37b87c"
     assert digest(gen.generate(SEED)) == digest(gen.generate(SEED))
     assert digest(gen.generate(b"other")) != digest(gen.generate(SEED))
 
@@ -418,3 +418,21 @@ def test_students_farmed_out_to_the_organisers_machines_add_up_as_a_local_run_do
     assert farmed["baseline_exam_loss"] == pytest.approx(local["baseline_exam_loss"], abs=1e-6)
     # kept as a local run keeps them, for the report
     assert (tmp_path / "farmed" / f"{sha[:16]}.json").exists() and (tmp_path / "farmed" / "items.jsonl").exists()
+
+
+def test_reading_in_context_answers_are_in_the_context_or_follow_from_it():
+    items = _all("context/", n=3)
+    assert {it.corner.split("/")[1] for it in items} == {"passage", "two-hop", "rule", "definition"}
+    for it in items:
+        kind, ans = it.corner.split("/")[1], it.cont.strip().rstrip('".')
+        if kind in ("passage", "two-hop") or it.corner.endswith(("glossary",)):
+            assert ans in it.ctx, it  # read, not remembered
+        elif it.corner.endswith("affine"):
+            pairs = [tuple(int(v) for v in line.split(" -> ")) for line in it.ctx.splitlines()[:-1]]
+            (x1, y1), (x2, y2) = pairs[0], pairs[1]
+            a = (y2 - y1) // (x2 - x1)
+            b = y1 - a * x1
+            assert all(y == a * x + b for x, y in pairs) and int(ans) == a * int(it.ctx.splitlines()[-1].split()[0]) + b
+        elif kind == "definition":
+            nums = [int(v) for v in re.findall(r"\d+", it.ctx)]
+            assert int(ans) in (nums[1] // nums[0], nums[0] * nums[1])
