@@ -15,7 +15,8 @@ cd runpod && go build -o ~/.local/bin/stet-runpod .
 It is a RunPod pod running `ubuntu:24.04` and [one script](worker.sh). The script installs
 stet from the site into `/opt/stet` (about two and a half minutes), writes the machine's
 key under `/root`, and runs `stet verify --edits --sandbox container --exit-when-idle 15`:
-it runs curators and grades until it has had nothing to do for fifteen minutes, then ends
+it runs curators and grades, and trains the next exam's students when there is nothing
+official to do, until it has had nothing to do for fifteen minutes, then ends
 its own pod with the key RunPod gives each pod for itself. RunPod restarts a container
 whose process exits, and keeps billing for it, so the script never just exits.
 
@@ -61,8 +62,11 @@ default (`--key`). Run them where that key is.
 
 How many it rents: one for every `--per-machine` (6) jobs a new machine could take now,
 counting a curator still to run as two (the run, and a grade of what it writes) and a
-script waiting as one. Never more than `--max` (6), or past `--max-hourly` dollars an hour
-(3), and nothing new once `--daily-budget` is spent. When an entry is waiting for a round
+script waiting as one. A machine with nothing official to do trains the next exam's
+students (a few minutes each, for a settled round's shadow), so one more for every
+`--per-shadow` (4) of those waiting, after the official work (`--per-shadow 0`: none).
+Never more than `--max` (6), or past `--max-hourly` dollars an hour (3), and nothing new
+once `--daily-budget` is spent. When an entry is waiting for a round
 and nobody who runs curators is around, one, so that the round is drawn early. It never
 ends a machine that holds a job. It ends at once those doing nothing when nothing at all is
 waiting, and any that went quiet or stopped. The rest stop by themselves.
@@ -118,5 +122,5 @@ RunPod forgets a pod once it ends and does not say what it cost, so what was spe
 worked out from these, and is an estimate. RunPod's billing page is the account.
 
 `--ssh` lets `~/.ssh/id_ed25519.pub` into the machines it rents; `stet-runpod ssh
-stet-rp-01` logs in to one. There is no other way to see a machine's log than RunPod's
-console.
+stet-rp-01` logs in to one. `stet-runpod logs stet-rp-01` shows what one has said (`-f`
+follows it).

@@ -22,6 +22,10 @@ import (
 // An entry waiting for a round has it drawn early only once somebody who runs curators has
 // asked for work. When nobody has, one machine is rented to ask.
 //
+// A machine with nothing official to do trains the next exam's students (a few minutes
+// each), so those waiting want machines too, after the official work and under the same
+// limits: one for every --per-shadow of them.
+//
 // Letting machines go needs no decision here. A rented machine stops by itself once it has
 // had nothing to do for a while, and ends its own pod. What is decided here is ending, at
 // once, the ones that are doing nothing when nothing at all is waiting, and those that
@@ -32,6 +36,7 @@ type Policy struct {
 	MaxWorkers  int     // never more machines than this
 	PerRunner   float64 // grading only: machines that keep pace with one curator runner
 	PerWorker   int     // jobs waiting that justify one more machine
+	PerShadow   int     // the next exam's students waiting that justify one more machine; 0: none
 	MaxHourly   float64 // never rent past this many dollars an hour, all machines together
 	DailyBudget float64 // no new machine once this much has been spent today (UTC); 0: no limit
 	Grace       time.Duration
@@ -40,6 +45,15 @@ type Policy struct {
 
 // target is how many machines the work justifies, before money is counted.
 func (p Policy) target(w *Work) int {
+	n := p.official(w)
+	if p.PerShadow > 0 {
+		n += (w.ShadowWaiting + p.PerShadow - 1) / p.PerShadow
+	}
+	return min(n, p.MaxWorkers)
+}
+
+// official is how many machines the rounds' own work justifies.
+func (p Policy) official(w *Work) int {
 	per := max(p.PerWorker, 1)
 	if p.Edits {
 		jobs := 0
@@ -50,7 +64,7 @@ func (p Policy) target(w *Work) int {
 		if len(w.Rounds) == 0 && w.Waiting && w.Runners == 0 {
 			n = 1 // to ask for work, so that the waiting entry's round is drawn
 		}
-		return min(n, p.MaxWorkers)
+		return n
 	}
 	scripts, curators := 0, 0
 	for _, r := range w.Rounds {
@@ -61,7 +75,7 @@ func (p Policy) target(w *Work) int {
 	if curators > 0 {
 		n += int(math.Ceil(p.PerRunner * float64(max(w.Runners, 1))))
 	}
-	return min(n, p.MaxWorkers)
+	return n
 }
 
 // Worker is one key of the pool, with its pod if it has one and what the server says of it.
@@ -77,6 +91,7 @@ type Worker struct {
 //	starting  a pod, and stet has not yet asked the server for work from it
 //	grading   it holds a grade job
 //	running   it holds a curator to run
+//	training  it trains one of the next exam's students
 //	waiting   it asks for work and has none
 //	quiet     it asked, and then nothing for longer than any job takes without asking
 //	stopped   the pod stopped, or never got going
@@ -88,6 +103,8 @@ func (w *Worker) state(now time.Time, p Policy) string {
 		return "stopped"
 	case w.Machine != nil && w.Machine.Busy == "grade":
 		return "grading"
+	case w.Machine != nil && w.Machine.Busy == "shadow":
+		return "training"
 	case w.Machine != nil && w.Machine.Busy != "":
 		return "running"
 	}
@@ -144,7 +161,7 @@ func (p Policy) decide(w *Work, workers []*Worker, spentToday float64, now time.
 	if d.Target == 0 {
 		// Nothing is waiting for anybody: a machine doing nothing would only wait to stop.
 		for _, wk := range idle {
-			d.End = append(d.End, Ending{wk, "nothing is waiting to be graded"})
+			d.End = append(d.End, Ending{wk, "nothing is waiting for it"})
 			d.Live--
 		}
 		return d

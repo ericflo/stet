@@ -125,6 +125,7 @@ func flags(name string, o *Options) *flag.FlagSet {
 	fs.Float64Var(&o.DailyBudget, "daily-budget", 0, "rent nothing more once about this many dollars have been spent today, UTC (0: no limit)")
 	fs.Float64Var(&o.PerRunner, "per-runner", 2, "with --no-edits: machines that keep pace with one of the organisers' machines running curators")
 	fs.IntVar(&o.PerWorker, "per-machine", 6, "jobs waiting (a curator to run is two: the run and its grade) that justify one more machine")
+	fs.IntVar(&o.PerShadow, "per-shadow", 4, "the next exam's students waiting to be trained that justify one more machine (0: rent none for them)")
 	fs.DurationVar(&o.Every, "every", time.Minute, "with scale --follow: how often to look")
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), "usage: stet-runpod %s [settings]\n\n", name)

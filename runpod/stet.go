@@ -180,6 +180,10 @@ type Work struct {
 	Waiting    bool        `json:"waiting"`
 	NextDrawAt int64       `json:"next_draw_at"`
 	Machines   []Machine   `json:"machines"`
+	// The next exam's students, trained by the organisers' machines when they have nothing
+	// official to do: those a machine could be handed now, and those being trained.
+	ShadowWaiting  int `json:"shadow_waiting"`
+	ShadowUnderWay int `json:"shadow_under_way"`
 }
 
 // WorkRound is what an open round is waiting for.

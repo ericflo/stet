@@ -144,6 +144,9 @@ func cmdStatus(ctx context.Context, f *Fleet) error {
 		at := time.Unix(v.Work.NextDrawAt, 0)
 		fmt.Fprintf(f.out, "Next draw %s UTC (%s)\n", at.UTC().Format("15:04"), until(now, at))
 	}
+	if v.Work.ShadowWaiting+v.Work.ShadowUnderWay > 0 {
+		fmt.Fprintf(f.out, "The next exam: %d students to train · %d being trained\n", v.Work.ShadowWaiting, v.Work.ShadowUnderWay)
+	}
 	fmt.Fprintf(f.out, "%d of the organisers' machines running curators\n\n", v.Work.Runners)
 	rented := 0
 	for _, w := range v.Workers {
@@ -270,7 +273,7 @@ func cmdDown(ctx context.Context, f *Fleet, force bool, handles []string) error 
 		}
 		found[w.Key.Handle] = true
 		st := w.state(f.now(), f.o.Policy)
-		if st == "grading" || st == "running" {
+		if st == "grading" || st == "running" || st == "training" {
 			if !force {
 				f.say("left %s, which is %s: it stops by itself once there is nothing more for it. --force ends it now, and hands its job back", w.Key.Handle, st)
 				continue

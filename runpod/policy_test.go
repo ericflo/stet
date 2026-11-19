@@ -173,3 +173,48 @@ func TestMachinesThatRunCuratorsAreRentedForRunsAndGrades(t *testing.T) {
 		t.Fatalf("ended %s", handles(d.End))
 	}
 }
+
+// The next exam's students are trained by machines with nothing official to do: those waiting
+// want machines after the official work, under the same limits, and a machine training one is
+// at work however long it says nothing.
+func TestTheNextExamsStudentsWantMachinesToo(t *testing.T) {
+	p := testPolicy()
+	p.Edits, p.PerWorker, p.PerShadow, p.MaxWorkers = true, 6, 4, 8
+	for _, c := range []struct {
+		w    *Work
+		want int
+	}{
+		{&Work{ShadowWaiting: 1}, 1},
+		{&Work{ShadowWaiting: 9}, 3},
+		{&Work{ShadowUnderWay: 5}, 0},         // all being trained already
+		{withShadow(round(5, 0, 1, 0), 9), 5}, // 2 for the round's 11 jobs, 3 for the students
+		{withShadow(round(36, 0, 0, 0), 9), 8},
+	} {
+		if got := p.target(c.w); got != c.want {
+			t.Errorf("%+v shadow %d: %d machines, want %d", c.w.Rounds, c.w.ShadowWaiting, got, c.want)
+		}
+	}
+	p.PerShadow = 0
+	if got := p.target(&Work{ShadowWaiting: 9}); got != 0 {
+		t.Fatalf("--per-shadow 0 still rents %d for the students", got)
+	}
+	p.Edits, p.PerShadow = false, 4
+	if got := p.target(&Work{ShadowWaiting: 9}); got != 3 {
+		t.Fatalf("a machine that only grades trains students too: %d machines, want 3", got)
+	}
+
+	w := &Work{ShadowUnderWay: 1}
+	ws := pool(w, "grading", "waiting")
+	ws[0].Machine.Busy = "shadow" // and silent for 40 minutes, as it trains
+	if st := ws[0].state(t0, p); st != "training" {
+		t.Fatalf("a machine training a student is %q", st)
+	}
+	if d := p.decide(w, ws, 0, t0); handles(d.End) != "stet-rp-02" || d.Live != 1 {
+		t.Fatalf("ended %s, %d live", handles(d.End), d.Live)
+	}
+}
+
+func withShadow(w *Work, waiting int) *Work {
+	w.ShadowWaiting = waiting
+	return w
+}
