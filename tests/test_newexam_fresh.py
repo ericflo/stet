@@ -82,6 +82,8 @@ def test_other_sources_become_replies_or_writing():
     assert reply[0].corner.startswith("fresh/hackernews/en/") and reply[0].corner.endswith("/reply")
     import dataclasses
 
+    thread = items_of(_doc(7, source="lemmy", topic="rust", question="Ask HN\n\nWhy?", title="Ask HN"))
+    assert thread[0].ctx == "Ask HN\n\nWhy?\n\n"  # the title once, as the thread gives it
     post = items_of(dataclasses.replace(_doc(6, source="bluesky", topic=""), title=""))
     assert post[0].kind == "passage" and post[0].text.startswith("Document number 6") and post[0].corner.endswith("/text")
 

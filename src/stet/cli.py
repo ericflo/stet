@@ -480,6 +480,7 @@ def _shadow_follow(args):
     import copy
 
     from .client import request
+    from .newexam.fresh.harvest import SETTLE
 
     out = Out(quiet=args.quiet)
     since = time.time() - 86400 * args.since_days
@@ -496,7 +497,7 @@ def _shadow_follow(args):
                 continue
             try:
                 d = request("GET", f"/api/v1/rounds/{x['id']}")
-                if d.get("shadow") or time.time() < int(d["round"]["draw_at"]) + args.window:
+                if d.get("shadow") or time.time() < int(d["round"]["draw_at"]) + args.window + SETTLE:
                     continue
                 one = copy.copy(args)
                 one.round, one.fresh, one.upload, one.entries, one.script = x["id"], True, True, [], None  # --farm carries over
@@ -543,11 +544,12 @@ def _shadow_one(args):
     if args.fresh and not snapshot.exists():
         if rnd.kind != "official":
             die("only an official round has a draw for its fresh text to come after")
-        from .newexam.fresh.harvest import harvest_window
+        from .newexam.fresh.harvest import SETTLE, harvest_window
 
         draw_at = int(request("GET", f"/api/v1/rounds/{rnd.id}")["round"]["draw_at"])
-        if time.time() < draw_at + args.window:
-            die(f"the harvest window closes at {time.strftime('%H:%M UTC', time.gmtime(draw_at + args.window))}; try again then")
+        if time.time() < draw_at + args.window + SETTLE:
+            die(f"the harvest window closes at {time.strftime('%H:%M UTC', time.gmtime(draw_at + args.window))}, and its sources have "
+                f"published it all by {time.strftime('%H:%M UTC', time.gmtime(draw_at + args.window + SETTLE))}; try again then")
         harvest_window(rnd.seed, draw_at, draw_at + args.window, snapshot, log=log)
     if args.fresh or snapshot.exists():
         from . import data

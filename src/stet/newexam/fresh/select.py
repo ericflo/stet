@@ -91,7 +91,7 @@ def items_of(doc: Doc) -> list[Item]:
     corner = f"fresh/{doc.source}/{lang}/{bucket}"
     if doc.question:
         fmt = "code" if _codeish(doc.text) else "dialogue"
-        head = f"{doc.title}\n\n" if doc.title else ""
+        head = f"{doc.title}\n\n" if doc.title and not doc.question.startswith(doc.title) else ""  # a thread starts with its title
         return [Item(kind="answer", corner=f"{corner}/reply", fmt=fmt, lang=lang, source=src,
                      ctx=f"{head}{_tail(doc.question, QUESTION_CHARS)}\n\n", cont=_clip(doc.text, ANSWER_CHARS))]
     fmt = "code" if _codeish(doc.text) else "prose"

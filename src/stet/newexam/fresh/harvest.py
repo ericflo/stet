@@ -7,10 +7,25 @@ import time
 from pathlib import Path
 
 from ..rng import Rng
-from . import read_snapshot, stackexchange, wikipedia, write_snapshot
+from . import (
+    bluesky,
+    ccnews,
+    github,
+    hackernews,
+    lemmy,
+    mastodon,
+    read_snapshot,
+    stackexchange,
+    wikipedia,
+    write_snapshot,
+)
 from .select import SHARES
 
 WINDOW = 2 * 3600  # seconds after the draw
+# And then this long, for the sources to have published all of it and for its text to settle:
+# Common Crawl's news files are public 1-2 hours after the window closes (5 at worst), and Hacker
+# News allows edits for two hours.
+SETTLE = 3 * 3600
 SE_SITES = 30  # sites a harvest without a StackExchange key visits, the largest always among them
 SE_MAJOR = ["stackoverflow", "math", "superuser", "serverfault", "askubuntu", "unix", "physics", "electronics", "english", "stats",
             "softwareengineering", "apple", "tex", "dba", "codereview", "mathoverflow.net", "security", "academia", "gis", "diy",
@@ -18,6 +33,19 @@ SE_MAJOR = ["stackoverflow", "math", "superuser", "serverfault", "askubuntu", "u
 TARGET = 900  # fresh items a round would like
 ADDED_MIN = 20  # edits a harvest reads at least, per language, for text added to existing articles:
 TALK_EN, TALK_OTHER = 60, 8  # and for comments on talk pages
+PER_SOURCE = 150  # documents a harvest keeps from each of the other sources, chosen with the seed
+
+
+def _github(start, end, cap, rng, log):
+    """GitHub's issues, pull requests and release notes. Its comments are left out: in 2026 about
+    half of those in the archive are written by coding agents under people's own accounts, and
+    nothing in the archive tells them apart."""
+    return [d for d in github.harvest(start, end, cap, rng, log=log) if d.source == "github"]
+
+
+# Sources besides Wikipedia, each with the kind of writing it gives (see aggregate.SOURCE_KIND).
+OTHERS = {"ccnews": ccnews.harvest, "github": _github, "hackernews": hackernews.harvest, "lemmy": lemmy.harvest,
+          "bluesky": bluesky.harvest, "mastodon": mastodon.harvest}
 
 
 def added_cap(lang: str) -> int:
@@ -28,7 +56,8 @@ def added_cap(lang: str) -> int:
 
 def harvest_window(seed: bytes, start: int, end: int, dest: Path, langs: list[str] | None = None, se_sites: int | None = 0,
                    log=print) -> tuple[dict, str]:
-    """Harvest [start, end) into a snapshot at dest; returns (metadata, sha256).
+    """Harvest [start, end) into a snapshot at dest; returns (metadata, sha256). Every source in
+    OTHERS gives up to PER_SOURCE documents.
 
     StackExchange is left out unless se_sites says otherwise: without a key it allows a few
     hundred requests a day from an address, and no source here may need a key. A source that
@@ -55,6 +84,14 @@ def harvest_window(seed: bytes, start: int, end: int, dest: Path, langs: list[st
             log(f"  wikipedia-talk {lang}: {type(e).__name__}: {e}")
     log(f"  wikipedia-talk: {len(talk)} comments on talk pages")
     docs += talk
+    others = {}
+    for name, fn in OTHERS.items():
+        try:
+            got = fn(start, end, PER_SOURCE, Rng(seed, f"fresh/{name}"), log)
+            others[name] = len(got)
+            docs += got
+        except Exception as e:
+            log(f"  {name}: {type(e).__name__}: {e}; left out")
     names: list[str] = []
     if se_sites != 0:
         try:
@@ -69,7 +106,7 @@ def harvest_window(seed: bytes, start: int, end: int, dest: Path, langs: list[st
             log(f"  stackexchange: {type(e).__name__}: {e}; left out")
             names = []
     meta = {"window": [start, end], "harvested_at": int(time.time()), "sources": {"wikipedia": langs or "all",
-            "stackexchange": names}, "documents": len(docs)}
+            "stackexchange": names, **others}, "documents": len(docs)}
     sha = write_snapshot(docs, dest, meta)
     log(f"  harvested {len(docs)} documents in {time.time() - t0:.0f}s -> {dest} ({sha[:12]})")
     return meta, sha
