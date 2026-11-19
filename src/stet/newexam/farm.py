@@ -146,9 +146,12 @@ def farm_round(rnd, scale, scripts: dict[str, str], out_dir: Path, items: list[I
         _write(out_dir / "languages.json", shares)
     with tempfile.TemporaryDirectory(prefix="stet-shadow-") as tmp:
         base_sha = unedited_script(Path(tmp) / "unedited.jsonl", n_docs)
-    names = {UNEDITED: "(unedited)", **{sha: name for name, sha in scripts.items()}}
-    local = {UNEDITED: base_sha, **{sha: sha for sha in scripts.values()}}
-    batch = post_batch(rnd, scale, items, [UNEDITED, *scripts.values()], key)
+    # An entry whose script keeps the corpus as it is (identity) is the unedited corpus's student.
+    scripts = {name: (UNEDITED if sha == base_sha else sha) for name, sha in scripts.items()}
+    names = {sha: name for name, sha in scripts.items() if sha != UNEDITED}
+    names[UNEDITED] = "(unedited)"
+    local = {UNEDITED: base_sha, **{sha: sha for sha in scripts.values() if sha != UNEDITED}}
+    batch = post_batch(rnd, scale, items, [UNEDITED, *sorted(set(scripts.values()) - {UNEDITED})], key)
     log(f"{rnd.id}: {len(names)} students posted for the organisers' machines to train (batch {batch})")
     t0, said = time.time(), None
     while True:
@@ -156,7 +159,7 @@ def farm_round(rnd, scale, scripts: dict[str, str], out_dir: Path, items: list[I
         tasks = b["tasks"]
         for t in tasks:
             d = t.get("done")
-            if not d:
+            if not d or t["script"] not in local:  # not done, or a task this run did not ask for
                 continue
             sha16 = local[t["script"]][:16]
             meta = {"name": names[t["script"]], "valid": bool(d["valid"]), "farmed_by": d.get("by"), "hardware": d.get("hardware")}
@@ -191,6 +194,9 @@ def farm_round(rnd, scale, scripts: dict[str, str], out_dir: Path, items: list[I
     if base is None or not base["valid"]:
         raise RuntimeError(f"{rnd.id}: the unedited corpus's student was not trained, so nothing can be added up")
     got = {name: m for name, sha in scripts.items() if (m := student(sha)) is not None}
+    for name, sha in scripts.items():
+        if sha == UNEDITED:
+            got[name] = {**base, "name": name}
     if len(got) < len(scripts):
         log(f"  {len(scripts) - len(got)} students were not trained: left out")
     summary = summarize(rnd, scale, items, base, got, shares)

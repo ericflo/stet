@@ -383,7 +383,10 @@ def test_students_farmed_out_to_the_organisers_machines_add_up_as_a_local_run_do
 
     monkeypatch.setattr(client, "request", request)
     got: dict = {}
-    t = threading.Thread(target=lambda: got.update(s=farm.farm_round(rnd, scale, {"other": sha}, tmp_path / "farmed", items, len(corpus), None,
+    same = tmp_path / "same.jsonl"
+    write_script(same, range(len(corpus)))
+    same_sha = hashlib.sha256(same.read_bytes()).hexdigest()
+    t = threading.Thread(target=lambda: got.update(s=farm.farm_round(rnd, scale, {"other": sha, "same": same_sha}, tmp_path / "farmed", items, len(corpus), None,
                                                                       log=lambda m: None, patience=120)), daemon=True)
     t.start()
     while t.is_alive():
@@ -393,7 +396,10 @@ def test_students_farmed_out_to_the_organisers_machines_add_up_as_a_local_run_do
     local = shadow.shadow_round(rnd, scale, {"other": other}, torch.device("cpu"), tmp_path / "local", per_corner=1, log=lambda m: None)
     # The local run sat every generated item; the farm the first 60 of them. Each item is
     # scored on its own, so the local run's first 60 scores are what the farm should have.
-    assert farmed["items"] == len(items) and farmed["entries"][0]["valid"]
+    rows = {r["name"]: r for r in farmed["entries"]}
+    assert len(batch["tasks"]) == 2  # the unedited corpus, and "other": "same" is the unedited corpus itself
+    assert rows["same"]["next_score"] == 0.0 and json.loads((tmp_path / "farmed" / f"{same_sha[:16]}.json").read_text())["name"] == "(unedited)"
+    assert farmed["items"] == len(items) and rows["other"]["valid"]
     tag = local["items_digest"][:12]
 
     def kept(sha16):
@@ -403,7 +409,7 @@ def test_students_farmed_out_to_the_organisers_machines_add_up_as_a_local_run_do
 
     base16 = next(p.stem for p in (tmp_path / "local").glob("????????????????.json") if p.stem != sha[:16])
     loc = shadow.summarize(rnd, scale, items, kept(base16), {"other": kept(sha[:16])})
-    assert farmed["entries"][0]["next_score"] == pytest.approx(loc["entries"][0]["next_score"], abs=1e-5)
+    assert rows["other"]["next_score"] == pytest.approx(loc["entries"][0]["next_score"], abs=1e-5)
     assert farmed["baseline_exam_loss"] == pytest.approx(local["baseline_exam_loss"], abs=1e-6)
     # kept as a local run keeps them, for the report
     assert (tmp_path / "farmed" / f"{sha[:16]}.json").exists() and (tmp_path / "farmed" / "items.jsonl").exists()
