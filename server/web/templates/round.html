@@ -9,7 +9,7 @@
       {{else if eq $r.Status "open"}}<span class="dot live" aria-hidden="true"></span><span>running · began {{ago $r.DrawnAt}}</span>
       {{else}}<span class="dot done" aria-hidden="true"></span><span>settled {{ago $r.SettledAt}} · {{date $r.SettledAt}}</span>{{end}}
     </div>
-    {{if eq $r.Status "settled"}}{{with $d.Entries}}{{$best := index . 0}}{{if and $best.Valid (has $r.BaselineLoss)}}<p class="sub"><b>{{$best.Name}}</b> did best. The model scored <span class="num">{{f3 $best.Loss}}</span> on the exam after learning from its pages, against <span class="num">{{f3 (ptr $r.BaselineLoss)}}</span> from the same pages unedited.</p>{{end}}{{end}}{{end}}
+    {{if eq $r.Status "settled"}}{{with $d.Entries}}{{$best := index . 0}}{{if and $best.Valid (has $r.BaselineLoss)}}{{if next}}<p class="sub"><b>{{$best.Name}}</b> did best. After learning from its pages, the model did <span class="num">{{gain $best.Gain}}</span> bits per byte better on the exam than after learning from the same pages unedited.</p>{{else}}<p class="sub"><b>{{$best.Name}}</b> did best. The model scored <span class="num">{{f3 $best.Loss}}</span> on the exam after learning from its pages, against <span class="num">{{f3 (ptr $r.BaselineLoss)}}</span> from the same pages unedited.</p>{{end}}{{end}}{{end}}{{end}}
   </div>
 </div>
 <div class="wrap">
@@ -20,7 +20,7 @@
   {{else if eq $r.Status "open"}}
   <div class="progress" id="round-progress" data-live>
     {{template "seg" $r}}
-    <p><b>{{$r.Edited}} of {{$r.Entries}}</b> curators run so far. Every score stays sealed until all are done, then they are published at once.</p>
+    <p><b>{{$r.Edited}} of {{$r.Entries}}</b> curators run so far. Every score stays sealed until all are done, then they are published at once.{{if and next (not $r.ExamSHA)}} Grading starts when its exam is made, from text published in the two hours after the draw.{{end}}</p>
   </div>
   <div class="block">
     <h2>In this round</h2>
@@ -32,7 +32,7 @@
   {{else}}
   {{if $d.Alone}}<p class="note early"><b>One machine behind every score here.</b> No volunteer was around, so the organisers' machine ran and graded each curator itself. Every script is public for anyone to re-grade. <a href="/verify">Lend a GPU →</a></p>{{end}}
   <div class="list-head"><h2>Results</h2></div>
-  <p class="caption"><b>Gain</b> is how far the exam loss fell below the unedited pages' <span class="num">{{if has $r.BaselineLoss}}{{f3 (ptr $r.BaselineLoss)}}{{end}}</span>. Tap a curator to see who ran it and who checked it.</p>
+  <p class="caption">{{if next}}<b>Gain</b> is how much better the model did on the exam after learning from a curator's pages than from the same pages unedited, in bits per byte, each thing the exam tests counting the same.{{else}}<b>Gain</b> is how far the exam loss fell below the unedited pages' <span class="num">{{if has $r.BaselineLoss}}{{f3 (ptr $r.BaselineLoss)}}{{end}}</span>.{{end}} Tap a curator to see who ran it and who checked it.</p>
   <ol class="ranked results" id="runs">
     {{range $d.Entries}}<li id="e-{{short .EditorID}}"><details class="open-row">
       <summary class="row opens">
@@ -48,10 +48,10 @@
         {{range .Scripts}}{{$sc := .}}<div class="script-block">
           <div class="step"><span class="k">ran it</span><span class="v">{{range $i, $run := .Runs}}{{if $i}}<br>{{end}}<a href="/u/{{$run.By}}">{{$run.By}}</a> <span class="meta">run {{$run.N}}{{if $run.GPU}} · {{$run.GPU}}{{end}} · {{f1 $run.EditSeconds}}s</span>{{end}}</span></div>
           <div class="step"><span class="k">wrote</span><span class="v">script <a class="num" href="/api/v1/scripts/{{.SHA}}" title="Download the edit script ({{bytes .Size}} unpacked)">{{tiny .SHA}}</a> <span class="meta">{{bytes .Size}}</span>{{if gt (len .Runs) 1}} <span class="same">runs <b>{{.Ns}}</b> wrote the same bytes</span>{{end}}
-            {{if eq .Status "ok"}}{{if .Apart $d.Tolerance.Run}} <span class="tag amber" title="Further from the entry's score than the {{f2 $d.Tolerance.Run}} nats that runs of one curator may differ by">{{gain .Delta}} from the score</span>{{end}}{{else if eq .Status "failed"}} <span class="chip bad">failed</span> <span class="reason">{{.Reason}}</span>{{else}} <span class="reason">set aside: {{.Reason}}</span>{{end}}</span></div>
+            {{if eq .Status "ok"}}{{if .Apart $d.Tolerance.Run}} <span class="tag amber" title="Further from the entry's score than the {{f2 $d.Tolerance.Run}} {{unit}} that runs of one curator may differ by">{{gain .Delta}} from the score</span>{{end}}{{else if eq .Status "failed"}} <span class="chip bad">failed</span> <span class="reason">{{.Reason}}</span>{{else}} <span class="reason">set aside: {{.Reason}}</span>{{end}}</span></div>
           <div class="step"><span class="k">graded by</span><ul class="grades v">
             {{range .Grades}}<li><a href="/u/{{.Handle}}">{{.Handle}}</a>{{if .Self}} <span class="tag amber" title="This account also ran the curator, and nobody else's run wrote the same script">its own runner</span>{{end}}{{if .First}} <span class="tag" title="No grade of this account's had agreed before this round">first grade</span>{{end}}
-              <span class="num{{if and (has .Gain) (lt (ptr .Gain) 0.0)}} neg{{end}}">{{if has .Gain}}{{gain (ptr .Gain)}}{{else}}—{{end}}</span>              {{if eq .Verdict "disputed"}}<span class="chip bad">disputed</span><span class="reason">Two established verifiers, two answers, and nobody there to say which was right.</span>{{else if eq .Verdict "outlier"}}<span class="chip bad">outlier</span><span class="reason">{{if .Counted}}Counted, and more{{else}}More{{end}} than {{f2 $d.Tolerance.Grade}} nats from the script's gain: a strike against this account.</span>{{else if .Counted}}<span class="chip done">counted</span>{{else if eq .Verdict "agreed"}}<span class="chip done">agreed</span>{{else if eq .Verdict "unresolved"}}<span class="chip wait">differs, unresolved</span><span class="reason">The gain it differs from rests on one volunteer, so nothing shows which is wrong. Held against nobody.</span>{{else if eq .Verdict "no established grade"}}<span class="chip wait">no established grade</span><span class="reason">Nothing to compare it with.</span>{{else}}<span class="chip wait">set aside</span><span class="reason">{{.Verdict}}</span>{{end}}
+              <span class="num{{if and (has .Gain) (lt (ptr .Gain) 0.0)}} neg{{end}}">{{if has .Gain}}{{gain (ptr .Gain)}}{{else}}—{{end}}</span>              {{if eq .Verdict "disputed"}}<span class="chip bad">disputed</span><span class="reason">Two established verifiers, two answers, and nobody there to say which was right.</span>{{else if eq .Verdict "outlier"}}<span class="chip bad">outlier</span><span class="reason">{{if .Counted}}Counted, and more{{else}}More{{end}} than {{f2 $d.Tolerance.Grade}} {{unit}} from the script's gain: a strike against this account.</span>{{else if .Counted}}<span class="chip done">counted</span>{{else if eq .Verdict "agreed"}}<span class="chip done">agreed</span>{{else if eq .Verdict "unresolved"}}<span class="chip wait">differs, unresolved</span><span class="reason">The gain it differs from rests on one volunteer, so nothing shows which is wrong. Held against nobody.</span>{{else if eq .Verdict "no established grade"}}<span class="chip wait">no established grade</span><span class="reason">Nothing to compare it with.</span>{{else}}<span class="chip wait">set aside</span><span class="reason">{{.Verdict}}</span>{{end}}
               <span class="loss">{{if has .Loss}}loss {{f3 (ptr .Loss)}}{{if has .Gain}} against {{f3 (addf (ptr .Loss) (ptr .Gain))}} unedited{{end}}{{else}}found it invalid{{end}}</span>
             </li>{{else}}<li class="none">nobody graded it</li>{{end}}
           </ul></div>
@@ -79,15 +79,15 @@
       </a></li>{{end}}
     </ol>
   </div>{{end}}
-  {{if $r.Differs}}<p class="after">Turned away before their grade was taken: {{range $i, $x := $r.Differs}}{{if $i}}, {{end}}<a href="/u/{{$x.Handle}}">{{$x.Handle}}</a> ({{if $x.Est}}established; {{end}}{{if eq $x.What "corpus"}}built a different set of pages or exam{{else}}unedited loss {{gain $x.Diff}} from the round's{{end}}){{end}}. Neither counts against anyone; both are shown because a pattern in them would mean the tolerance is wrong.</p>{{end}}
+  {{if $r.Differs}}<p class="after">Turned away before their grade was taken: {{range $i, $x := $r.Differs}}{{if $i}}, {{end}}<a href="/u/{{$x.Handle}}">{{$x.Handle}}</a> ({{if $x.Est}}established; {{end}}{{if eq $x.What "corpus"}}built a different set of pages or exam{{else}}unedited {{if next}}score{{else}}loss{{end}} {{gain $x.Diff}} from the round's{{end}}){{end}}. Neither counts against anyone; both are shown because a pattern in them would mean the tolerance is wrong.</p>{{end}}
   {{end}}
 
   <div class="block">
     {{if eq $r.Status "settled"}}<details class="more" id="grades">
       <summary>How these scores were checked</summary>
       <div class="in">
-        <p class="lead">A <b>run</b> is one verifier's machine running a curator on the round's pages, in a sandbox with no network, for up to {{howlong .Scale.EditSeconds}}. It writes an edit script: plain data saying which pieces to keep, in what order.{{if gt $d.RunsPerEntry 1}} Each curator is run by {{$d.RunsPerEntry}} different people when that many are around; runs within {{f2 $d.Tolerance.Run}} nats of each other confirm each other.{{end}}</p>
-        <p class="lead">A <b>grade</b> is a verifier training the model on a script and measuring its exam loss. A grade within {{f2 $d.Tolerance.Grade}} nats of the script's gain agrees; the gain is the median of the grades marked <i>counted</i>.</p>
+        <p class="lead">A <b>run</b> is one verifier's machine running a curator on the round's pages, in a sandbox with no network, for up to {{howlong .Scale.EditSeconds}}. It writes an edit script: plain data saying which pieces to keep, in what order.{{if gt $d.RunsPerEntry 1}} Each curator is run by {{$d.RunsPerEntry}} different people when that many are around; runs within {{f2 $d.Tolerance.Run}} {{unit}} of each other confirm each other.{{end}}</p>
+        <p class="lead">A <b>grade</b> is a verifier training the model on a script and {{if next}}sitting it on the round's exam{{else}}measuring its exam loss{{end}}. A grade within {{f2 $d.Tolerance.Grade}} {{unit}} of the script's gain agrees; the gain is the median of the grades marked <i>counted</i>.</p>
         <p class="lead">Re-grade any of them yourself:</p>
         <div class="cmd"><pre><span class="p">$ </span><span data-copy-text>stet score {{if $d.Example}}{{$d.Example}}{{else}}owner/name{{end}} --round {{$d.ID}}</span></pre><button type="button" data-copy>copy</button></div>
       </div>
@@ -112,10 +112,10 @@
           <dt>Crawl</dt><dd>{{.Crawl}}<span class="why">{{comma .NShards}} files of Common Crawl, named when the round was announced</span></dd>
           <dt>File list sha256</dt><dd><code>{{.PathsSHA256}}</code></dd>
           {{end}}
-          {{if $d.SeedInput}}<dt>Seed</dt><dd><code>sha256("{{$d.SeedInput}}")</code><br><code>= {{$r.Seed}}</code><span class="why">picks the files, the order of the pages, the exam passages and the model's starting weights</span></dd>{{end}}
+          {{if $d.SeedInput}}<dt>Seed</dt><dd><code>sha256("{{$d.SeedInput}}")</code><br><code>= {{$r.Seed}}</code><span class="why">picks the files, the order of the pages, the {{if next}}exam's generated problems{{else}}exam passages{{end}} and the model's starting weights</span></dd>{{end}}
           {{if $d.Shards}}<dt>Files drawn</dt><dd><span class="num" style="font-size:14px">{{range $i, $s := $d.Shards}}{{if $i}}, {{end}}#{{$s}}{{end}}</span><span class="why">positions in the crawl's file list</span></dd>{{end}}
           {{if $r.CorpusSHA}}<dt>Pages sha256</dt><dd><code>{{$r.CorpusSHA}}</code></dd>{{end}}
-          {{if $r.ExamSHA}}<dt>Exam sha256</dt><dd><code>{{$r.ExamSHA}}</code></dd>{{end}}
+          {{if $r.ExamSHA}}<dt>Exam sha256</dt><dd><code>{{$r.ExamSHA}}</code>{{if next}}<span class="why">the round's exam, made after the draw{{if $r.ExamAt}} and posted {{datetime $r.ExamAt}}{{end}}</span>{{end}}</dd>{{end}}
           <dt>The model</dt><dd>{{$d.Scale.NLayer}} layers × {{$d.Scale.DModel}} wide, reading {{compact $d.Scale.TrainTokens}} tokens<span class="why">the {{$r.Scale}} scale; the same for every curator in the round</span></dd>
         </dl>
         {{if ne $r.Status "scheduled"}}<p class="lead" style="margin-top:16px">Rebuild these pages yourself, and measure the unedited loss:</p>

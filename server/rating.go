@@ -254,6 +254,13 @@ type Board struct {
 
 func (a *App) curveKey() string { return "official/" + a.cfg.Scale }
 
+// hasMultiplier says whether a rating can be read as a multiplier at all: whether the season
+// has a reference curve for the scale rounds are run at.
+func (a *App) hasMultiplier() bool {
+	_, _, ok := a.season.multiplier(a.curveKey(), 0)
+	return ok
+}
+
 // settledEntries are the entries that count: settled, in a round whose baseline is known.
 func settledEntries(s *State) []entryRow {
 	var out []entryRow

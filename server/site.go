@@ -461,6 +461,12 @@ func (s *Site) funcs() template.FuncMap {
 			}
 			return strings.ToUpper(s[:1]) + s[1:]
 		},
+		// The season's exam, as the pages say it: next is true when it is the next exam (made
+		// after each draw, scored in bits per byte), unit is what scores are in, and worth
+		// whether a rating can be read as a multiplier at all.
+		"next":  s.app.season.next,
+		"unit":  s.app.season.unit,
+		"worth": s.app.hasMultiplier,
 	}
 }
 
@@ -615,7 +621,7 @@ type FeedItem struct {
 	HTML template.HTML
 }
 
-func feed(s *State, limit int) []FeedItem {
+func feed(s *State, limit int, unit string) []FeedItem {
 	var out []FeedItem
 	for i := len(s.Events) - 1; i >= 0 && len(out) < limit; i-- {
 		ev := s.Events[i]
@@ -642,8 +648,8 @@ func feed(s *State, limit int) []FeedItem {
 		case "settle":
 			h = fmt.Sprintf(`<a href="/rounds/%s">%s</a> settled and its scores were published; the best gain was <span class="num">%s</span>`, esc(str("round")), roundName(str("round")), signed(num("best_gain"), 3))
 		case "record":
-			h = fmt.Sprintf(`<span class="tag red" style="margin:0 4px 0 0">record</span> <a href="/editors/%s"><b>%s</b></a> by %s took the record, with a rating of <span class="num">%s</span> nats`,
-				esc(clipID(str("editor"), 12)), esc(str("name")), esc(str("owner")), signed(num("rating"), 3))
+			h = fmt.Sprintf(`<span class="tag red" style="margin:0 4px 0 0">record</span> <a href="/editors/%s"><b>%s</b></a> by %s took the record, with a rating of <span class="num">%s</span> %s`,
+				esc(clipID(str("editor"), 12)), esc(str("name")), esc(str("owner")), signed(num("rating"), 3), unit)
 		case "pause":
 			h = "The organisers paused the rounds: none is drawn until they resume them"
 		case "resume":
@@ -1090,7 +1096,7 @@ func (s *Site) record(w http.ResponseWriter, r *http.Request) {
 		recs = a.records(st)
 		race = a.recordRace(st, b, 20)
 	})
-	chart := recordChart(recs)
+	chart := recordChart(recs, a.season.unit())
 	sort.Slice(recs, func(i, j int) bool { return recs[i].N > recs[j].N })
 	p := s.page(r, "The record", "leaderboard", map[string]any{
 		"Race": race, "VsTop": race.Top, "Records": recs, "RecordChart": chart, "Holder": b.ByID[b.RecordID],
@@ -1168,9 +1174,14 @@ func (s *Site) editor(w http.ResponseWriter, r *http.Request) {
 			if results[i].Settled && results[i].Valid {
 				latest := results[i]
 				d["Latest"] = &latest
-				d["SourceChart"] = sourceChart(a.season.ExamSources, st.Rounds[latest.RoundIdx].Baseline, latest.BySource)
+				if a.season.next() {
+					// The next exam's BySource is the entry's gain on each pillar, not a loss.
+					d["SourceChart"] = gainChart(a.season.ExamSources, latest.BySource)
+				} else {
+					d["SourceChart"] = sourceChart(a.season.ExamSources, st.Rounds[latest.RoundIdx].Baseline, latest.BySource)
+				}
 				if latest.Train != nil {
-					d["CurveChart"] = curveChart(latest.Train.Curve)
+					d["CurveChart"] = lossCurve(latest.Train.Curve, a.season.next())
 				}
 				break
 			}
@@ -1205,6 +1216,9 @@ func (s *Site) editor(w http.ResponseWriter, r *http.Request) {
 	d["RatedRounds"], d["Ranked"], d["LadderSize"] = a.cfg.RatedRounds, len(b.Rated), a.cfg.LadderSize
 	d["FileAsked"] = r.URL.Query().Get("file") != ""
 	a.st.view(func(st *State) {
+		if a.season.next() {
+			return // the next exam is this season's own: there is nothing to set beside it
+		}
 		for i, row := range a.shadowStandings(st, b) {
 			if row.EditorID == e.ID {
 				row := row
@@ -1410,7 +1424,7 @@ func (s *Site) round(w http.ResponseWriter, r *http.Request) {
 		d["Same"] = same
 	}
 	a.st.view(func(st *State) {
-		if sh := st.Shadows[idx]; sh != nil {
+		if sh := st.Shadows[idx]; sh != nil && !a.season.next() {
 			d["Shadow"], d["ShadowRows"], d["ShadowTop"] = sh, a.shadowRows(st, sh, entries), shadowTop(sh)
 		}
 	})
@@ -1880,9 +1894,14 @@ func strongWeak(fam map[string]float64) (string, string) {
 }
 
 // next is the next exam's standings: what season 0 would look like on the exam proposed for
-// season 1. It ranks nothing yet.
+// season 1. It ranks nothing yet. In a season whose exam is the next exam, the leaderboard is
+// that, and this sends a reader to what the exam is.
 func (s *Site) next(w http.ResponseWriter, r *http.Request) {
 	a := s.app
+	if a.season.next() {
+		http.Redirect(w, r, "/glossary#exam", http.StatusFound)
+		return
+	}
 	b := a.board()
 	d := map[string]any{}
 	a.st.view(func(st *State) {

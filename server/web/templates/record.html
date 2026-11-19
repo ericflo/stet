@@ -15,7 +15,7 @@
     <p>{{if $cur.Beat}}It took the record from the last holder, <span class="num">{{gain $cur.Advantage}}</span> a round better over {{$cur.Rounds}} shared rounds.{{else}}The first to hold it: <span class="num">{{gain $cur.Advantage}}</span> a round better than the unedited pages, over {{$cur.Rounds}} rounds.{{end}}{{with $d.Holder}} Its rating now is <span class="num">{{gain (ptr .Rating)}}</span>{{if .Multiplier}}: its pages are worth {{mult .Multiplier .Capped}} as much raw data{{end}}.{{end}}</p>
     {{else}}
     <span class="eyebrow">Unclaimed</span>
-    <p>It goes to the first curator to beat the unedited pages by more than {{f2 $d.Margin}} nats a round when tested at {{index $d.Rule.Looks 0}} rounds or later.</p>
+    <p>It goes to the first curator to beat the unedited pages by more than {{f2 $d.Margin}} {{unit}} a round when tested at {{index $d.Rule.Looks 0}} rounds or later.</p>
     {{end}}
   </div>
 

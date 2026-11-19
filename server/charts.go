@@ -105,8 +105,8 @@ func (b *svg) frame(w, h, left, right, top, bottom int, lo, hi float64, unit str
 }
 
 // recordChart is the record's progression: each time it changed hands, and the rating it
-// changed hands at.
-func recordChart(recs []RecordRow) template.HTML {
+// changed hands at, in the season's unit.
+func recordChart(recs []RecordRow, unit string) template.HTML {
 	if len(recs) == 0 {
 		return ""
 	}
@@ -123,7 +123,7 @@ func recordChart(recs []RecordRow) template.HTML {
 	x := func(t int64) float64 { return left + float64(t-t0)/float64(t1-t0)*float64(w-left-right) }
 	var b svg
 	b.open(w, h, "chart", "The record over time")
-	y := b.frame(w, h, left, right, top, bottom, lo, hi, "rating, nats better than unedited")
+	y := b.frame(w, h, left, right, top, bottom, lo, hi, "rating, "+unit+" better than unedited")
 	b.WriteString(`<path class="ln" d="`)
 	for i, r := range recs {
 		if i == 0 {
@@ -134,7 +134,7 @@ func recordChart(recs []RecordRow) template.HTML {
 	}
 	b.f(` H%.1f"/>`, x(t1))
 	for i, r := range recs {
-		tip := fmt.Sprintf("%s v%d by %s · %s nats · %s", r.Name, r.Version, r.Owner, signed(r.Rating, 3), time.Unix(r.At, 0).UTC().Format("2 Jan 2006"))
+		tip := fmt.Sprintf("%s v%d by %s · %s %s · %s", r.Name, r.Version, r.Owner, signed(r.Rating, 3), unit, time.Unix(r.At, 0).UTC().Format("2 Jan 2006"))
 		b.f(`<circle class="dot ring" cx="%.1f" cy="%.1f" r="4.5" data-tip="%s"/>`, x(r.At), y(r.Rating), esc(tip))
 		b.f(`<circle class="hit" cx="%.1f" cy="%.1f" r="14" data-tip="%s"/>`, x(r.At), y(r.Rating), esc(tip))
 		if i == len(recs)-1 || len(recs) <= 4 {
@@ -206,7 +206,60 @@ func sourceChart(sources []string, base, edited map[string]float64) template.HTM
 	return b.done()
 }
 
-// baselineChart shows how hard each kind of exam text is for the unedited corpus.
+// gainChart is where an entry's gain on the next exam comes from: its gain on each of the
+// exam's capabilities, as a bar from zero, better to the right and worse to the left.
+func gainChart(pillars []string, gains map[string]float64) template.HTML {
+	lo, hi, some := 0.0, 0.0, false
+	for _, p := range pillars {
+		if v, ok := gains[p]; ok && finite(v) {
+			lo, hi, some = math.Min(lo, v), math.Max(hi, v), true
+		}
+	}
+	if !some {
+		return ""
+	}
+	// Drawn at the width of the half-page column it sits in, as sourceChart is.
+	const w, rowH, left, right, top, bottom, unit = 500, 30, 112, 62, 28, 26, "bits per byte better than unedited"
+	h := top + bottom + rowH*len(pillars)
+	step := niceStep(hi-lo, 4)
+	lo, hi = math.Floor(lo/step)*step, math.Ceil(hi/step)*step
+	if hi == lo {
+		hi = lo + step
+	}
+	x := func(v float64) float64 { return left + (v-lo)/(hi-lo)*float64(w-left-right) }
+	var b svg
+	b.open(w, h, "chart", "Gain on each capability, in "+unit)
+	b.f(`<text x="%d" y="12" text-anchor="start">%s</text>`, left, unit)
+	for _, v := range ticks(lo, hi, step) {
+		cls := "grid"
+		if math.Abs(v) < step/1e6 {
+			cls = "axis"
+		}
+		b.f(`<line class="%s" x1="%.1f" x2="%.1f" y1="%d" y2="%d"/>`, cls, x(v), x(v), top-6, h-bottom+4)
+		b.f(`<text x="%.1f" y="%d" text-anchor="middle">%s</text>`, x(v), h-8, tickLabel(v, step))
+	}
+	for i, p := range pillars {
+		cy := float64(top + rowH*i + rowH/2)
+		b.f(`<text class="lbl" x="%d" y="%.1f" text-anchor="end">%s</text>`, left-14, cy+4, esc(p))
+		v, ok := gains[p]
+		if !ok || !finite(v) {
+			b.f(`<text class="val" x="%d" y="%.1f" text-anchor="end">—</text>`, w-8, cy+4)
+			continue
+		}
+		cls := ""
+		if v < 0 {
+			cls = " neg"
+		}
+		x0, x1 := x(0), x(v)
+		b.f(`<rect class="bar%s" x="%.1f" y="%.1f" width="%.1f" height="12" rx="2"/>`, cls, math.Min(x0, x1), cy-6, math.Max(1, math.Abs(x1-x0)))
+		b.f(`<text class="val%s" x="%d" y="%.1f" text-anchor="end">%s</text>`, cls, w-8, cy+4, signed(v, 3))
+		b.f(`<rect class="hit" x="0" y="%.1f" width="%d" height="%d" data-tip="%s"/>`, cy-rowH/2, w, rowH, esc(fmt.Sprintf("%s · %s %s", p, signed(v, 3), unit)))
+	}
+	return b.done()
+}
+
+// baselineChart shows how hard each kind of exam text is for the unedited corpus. Only a
+// season whose exam is a pack of texts has a loss for each kind, and it is in nats per token.
 func baselineChart(sources []string, base map[string]float64) template.HTML {
 	if len(base) == 0 {
 		return ""
@@ -242,12 +295,20 @@ func baselineChart(sources []string, base map[string]float64) template.HTML {
 	return b.done()
 }
 
-// curveChart is the student's training loss as it works through the edited corpus.
-func curveChart(curve [][]float64) template.HTML {
+// curveChart is the student's training loss as it works through the edited corpus, in nats
+// per token, as the trainer reports it.
+func curveChart(curve [][]float64) template.HTML { return lossCurve(curve, false) }
+
+// lossCurve draws it; bits draws it in bits per token, for a season scored in bits.
+func lossCurve(curve [][]float64, bits bool) template.HTML {
+	k, unit := 1.0, "training loss, nats per token"
+	if bits {
+		k, unit = 1/math.Ln2, "training loss, bits per token"
+	}
 	var pts [][2]float64
 	for _, p := range curve {
 		if len(p) >= 2 && finite(p[0]) && finite(p[1]) {
-			pts = append(pts, [2]float64{p[0], p[1]})
+			pts = append(pts, [2]float64{p[0], p[1] * k})
 		}
 	}
 	if len(pts) < 3 {
@@ -265,7 +326,7 @@ func curveChart(curve [][]float64) template.HTML {
 	x := func(v float64) float64 { return left + (v-x0)/(x1-x0)*float64(w-left-right) }
 	var b svg
 	b.open(w, h, "chart", "Training loss by step")
-	y := b.frame(w, h, left, right, top, bottom, lo, hi, "training loss, nats per token")
+	y := b.frame(w, h, left, right, top, bottom, lo, hi, unit)
 	ceil := y(hi + (hi-lo)*0.2)
 	b.WriteString(`<polyline class="ln" points="`)
 	for _, p := range pts {

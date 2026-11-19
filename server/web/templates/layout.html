@@ -37,7 +37,7 @@
 <footer>
   <div class="wrap">
     <nav aria-label="More">
-      <a href="/leaderboard">Leaderboard</a><a href="/rounds">Rounds</a><a href="/record">The record</a><a href="/next">The next exam</a><a href="/verifiers">Verifiers</a><a href="/glossary">Glossary</a><a href="/docs/rules">Rules</a><a href="/docs/faq">FAQ</a><a href="/enter">Compete</a><a href="/verify">Verify</a><a href="/run">Run entries</a><a href="{{.APIURL}}/api/v1/season">API</a>
+      <a href="/leaderboard">Leaderboard</a><a href="/rounds">Rounds</a><a href="/record">The record</a>{{if not next}}<a href="/next">The next exam</a>{{end}}<a href="/verifiers">Verifiers</a><a href="/glossary">Glossary</a><a href="/docs/rules">Rules</a><a href="/docs/faq">FAQ</a><a href="/enter">Compete</a><a href="/verify">Verify</a><a href="/run">Run entries</a><a href="{{.APIURL}}/api/v1/season">API</a>
     </nav>
     <p>{{.Season.Title}}, run at the <a class="term" href="/glossary#scale">{{.ScaleID}} scale</a>. <i>stet</i>, a proofreader's mark: let it stand.</p>
   </div>
@@ -90,18 +90,19 @@
 {{define "sure-word"}}{{$t := trust .}}<span class="sure l{{$t.Level}}" title="{{$t.Says}}"><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>{{$t.Label}}</span>{{end}}
 
 {{/* How a round works, drawn: the same fresh pages, edited two ways and left as they were,
-     the same model trained on each, and the losses on the same exam. */}}
-{{define "round-diagram"}}<div class="rd" data-play aria-label="A diagram: the same fresh pages, left unedited and edited by two curators, A and B; the same model learns from each version and sits the same exam. Unedited scores a loss of 5.28, A 4.21 and B 4.45, so A has the bigger gain and wins.">
-  <span class="lbl l1">Fresh pages</span><span class="lbl l3">Each version of them</span><span class="lbl l5">Exam loss</span>
+     the same model trained on each, and the losses on the same exam. The next exam's are in
+     bits per byte. */}}
+{{define "round-diagram"}}{{$col := "Exam loss"}}{{$says := "Unedited scores a loss of 5.28, A 4.21 and B 4.45"}}{{$u := "5.28"}}{{$a := "4.21"}}{{$ga := "1.07"}}{{$b := "4.45"}}{{$gb := "0.83"}}{{if next}}{{$col = "Bits per byte"}}{{$says = "Unedited needs 1.84 bits per byte, A 1.62 and B 1.71"}}{{$u = "1.84"}}{{$a = "1.62"}}{{$ga = "0.22"}}{{$b = "1.71"}}{{$gb = "0.13"}}{{end}}<div class="rd" data-play aria-label="A diagram: the same fresh pages, left unedited and edited by two curators, A and B; the same model learns from each version and sits the same exam. {{$says}}, so A has the bigger gain and wins.">
+  <span class="lbl l1">Fresh pages</span><span class="lbl l3">Each version of them</span><span class="lbl l5">{{$col}}</span>
   <span class="mini pages" aria-hidden="true"><i style="width:92%"></i><i style="width:70%"></i><i style="width:84%"></i><i style="width:58%"></i><i style="width:88%"></i></span>
   <span class="fork" aria-hidden="true"><i></i><i></i><i></i></span>
   <span class="ed r2" aria-hidden="true"><span class="who"></span><span class="mini"><i style="width:92%"></i><i style="width:70%"></i><i style="width:84%"></i><i style="width:58%"></i></span></span>
   <span class="to r2" aria-hidden="true">→</span>
-  <span class="score r2"><b>5.28</b><span class="lose">unedited</span></span>
+  <span class="score r2"><b>{{$u}}</b><span class="lose">unedited</span></span>
   <span class="ed r3 best" aria-hidden="true"><span class="who">A</span><span class="mini"><i class="x" style="width:92%;--d:0.3s"></i><i class="k" style="width:70%"></i><i class="x" style="width:84%;--d:0.7s"></i><i class="k" style="width:58%"></i></span></span>
   <span class="to r3" aria-hidden="true">→</span>
-  <span class="score r3 best"><b>4.21</b><span class="lose">gain +1.07</span></span>
+  <span class="score r3 best"><b>{{$a}}</b><span class="lose">gain +{{$ga}}</span></span>
   <span class="ed r4" aria-hidden="true"><span class="who">B</span><span class="mini"><i class="k" style="width:92%"></i><i class="x" style="width:70%;--d:1.1s"></i><i class="k" style="width:84%"></i><i class="k" style="width:58%"></i></span></span>
   <span class="to r4" aria-hidden="true">→</span>
-  <span class="score r4"><b>4.45</b><span class="lose">gain +0.83</span></span>
+  <span class="score r4"><b>{{$b}}</b><span class="lose">gain +{{$gb}}</span></span>
 </div>{{end}}

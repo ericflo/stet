@@ -230,10 +230,29 @@ func (s *Season) maxScriptBlob() int64 { return s.Script.MaxBytes*4/3 + (1 << 20
 // nextGrid is the first grid moment strictly after t.
 func (s *Season) nextGrid(t int64) int64 { return (t/s.DrawGrid + 1) * s.DrawGrid }
 
+// examKind is the season's kind of exam, "pack" for a season that names none.
+func (s *Season) examKind() string {
+	if s.next() {
+		return "next"
+	}
+	return "pack"
+}
+
+// unit is what the season's scores are measured in: season 0's exam in nats per token, the
+// next exam in bits per byte.
+func (s *Season) unit() string {
+	if s.next() {
+		return "bits per byte"
+	}
+	return "nats"
+}
+
 // multiplier reads a gain off the season's reference curve: how many times more unedited
 // data the baseline would have needed to reach the same exam loss. It never extrapolates:
 // past either end of the measured curve it returns the end point and capped = true, to be
-// shown as "more than". Mirrors stet.score.multiplier.
+// shown as "more than". With no curve for the scale (the next exam has none yet) ok is
+// false, and there is no multiplier: the API says null and the pages leave it out. Mirrors
+// stet.score.multiplier.
 func (s *Season) multiplier(curveKey string, gain float64) (m float64, capped, ok bool) {
 	pts := append([][2]float64(nil), s.Curves[curveKey]...)
 	if len(pts) < 2 {
