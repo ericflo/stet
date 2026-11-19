@@ -111,3 +111,32 @@ def test_a_grade_on_the_next_exam_reports_every_items_score(monkeypatch):
     result.update(round={"id": rnd.id}, train={"seconds": 1, "curve": []})
     slim = slim_result(result, result)
     assert slim["exam"] == {"kind": "next", "mean": -2.0, "item_scores": [-1.0, -2.0, -3.0]} and slim["baseline"] == slim["exam"]
+
+
+def test_the_examiner_makes_a_rounds_exam_from_its_harvest_and_seed(monkeypatch, tmp_path):
+    import base64
+
+    from stet.newexam import examine
+    from stet.newexam.aggregate import score_from_table
+    from stet.newexam.farm import unpack_items
+    from stet.newexam.fresh import Doc, write_snapshot
+
+    s1 = load_season("s1")
+    rnd = _official(s1)
+    docs = [Doc(source="wikipedia", id=f"en:{i}", url=f"https://example.org/{i}", lang="en", license="CC BY-SA 4.0",
+                published=1_800_000_000 + i, title=f"Title {i}", text=f"Article number {i} says something new. " * 20, topic=f"Q{i}")
+            for i in range(30)]
+    monkeypatch.setattr("stet.newexam.fresh.harvest.harvest_window",
+                        lambda seed, start, end, dest, log=print: write_snapshot(docs, dest, {"window": [start, end]}))
+    monkeypatch.setattr(data, "corpus", lambda rnd, scale: object())
+    monkeypatch.setattr("stet.newexam.fresh.langs.shares", lambda corpus, seed: {"en": 40.0, "ru": 20.0})
+    monkeypatch.setattr("stet.newexam.decontam.seen", lambda items, corpus, season, log=print: {0})  # the corpus holds one
+    exam = examine.build(rnd, s1.scale("standard"), 1_800_000_000, tmp_path / "work", log=lambda m: None)
+    items = unpack_items(base64.b64decode(exam["items_file"]))
+    assert exam["round"] == rnd.id and exam["items_digest"] == digest(items) and len(exam["table"]) == len(items)
+    assert items[: len(items) - exam["fresh"]] == gen.generate(rnd.seed, per_corner=2)
+    assert 0 < exam["fresh"] < 2 * len(docs) and exam["languages"] == {"en": 40.0, "ru": 20.0} and len(exam["snapshot_sha256"]) == 64
+    # what the server is sent is all it needs to score a grade
+    assert score_from_table(exam["table"], [0.1] * len(items), exam["languages"])["score"] == pytest.approx(0.1)
+    # made again, it is the same exam
+    assert examine.build(rnd, s1.scale("standard"), 1_800_000_000, tmp_path / "work", log=lambda m: None) == exam
