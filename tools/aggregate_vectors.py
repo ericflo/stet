@@ -90,11 +90,11 @@ def fresh_items(rng: random.Random) -> list[Item]:
     plan = {"wikipedia": ["en", "ru", "de", "ja"], "wikinews": ["en", "fr"], "ccnews": ["en", "es", "sw"],
             "wikibooks": ["en", "pt"], "github": ["en", "code:go", "code:python"], "bluesky": ["en", "ja", "pt"],
             "mastodon": ["de", "en", "eo"], "wikipedia-talk": ["en", "ru"], "hackernews": ["en"], "lemmy": ["en", "de"],
-            "stackexchange": ["en", "ru"], "mastodon-reply": ["en", "ja"], "forum": ["zh", "nan"]}
+            "github-comment": ["en", "ru"], "mastodon-reply": ["en", "ja"], "forum": ["zh", "nan"]}
     out = []
     for src, langs in plan.items():
         for _ in range(rng.randint(3, 12)):
-            fmt = rng.choice(("prose", "dialogue", "code")) if src in ("github", "stackexchange") else rng.choice(("prose", "dialogue"))
+            fmt = rng.choice(("prose", "dialogue", "code")) if src in ("github", "github-comment") else rng.choice(("prose", "dialogue"))
             out.append(item(src, rng.choice(langs), fmt, rng.choice(("passage", "answer")), len(out)))
     return out
 

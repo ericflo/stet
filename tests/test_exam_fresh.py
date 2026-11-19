@@ -55,8 +55,8 @@ def test_documents_become_items_with_corners():
     wiki = items_of(_doc(1))
     assert [it.kind for it in wiki] == ["passage", "answer"]
     assert wiki[0].corner == "fresh/wikipedia/en/Q5/article" and wiki[1].ctx == "Title 1\n\n"
-    ans = items_of(_doc(2, source="stackexchange", topic="math/algebra", question="How do I solve x + 1 = 2?"))
-    assert len(ans) == 1 and ans[0].kind == "answer" and ans[0].ctx.startswith("Question: Title 2")
+    ans = items_of(_doc(2, source="lemmy", topic="rust", question="How do I solve x + 1 = 2?"))
+    assert len(ans) == 1 and ans[0].kind == "answer" and ans[0].ctx.startswith("Title 2\n\nHow do I solve")
     added = items_of(_doc(3, source="wikipedia-added", lang="simple"))
     assert added[0].lang == "en" and added[0].corner.endswith("/added")
     talk = items_of(_doc(4, source="wikipedia-talk", topic="talk", title="Talk:Teddy Hill"))

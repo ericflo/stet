@@ -28,8 +28,8 @@ UA = {"User-Agent": "stet-exam-harvester/0.1 (https://www.stetrun.com)"}
 
 @dataclass(frozen=True)
 class Doc:
-    source: str  # "wikipedia", "stackexchange", ...
-    id: str  # immutable within the source: "en:1234567" (a revision), "math.stackexchange:4987654"
+    source: str  # "wikipedia", "ccnews", "hackernews", ...
+    id: str  # immutable within the source: "en:1234567" (a Wikipedia revision), a post's id
     url: str  # shows this document as it was harvested
     lang: str
     license: str

@@ -77,13 +77,6 @@ def items_of(doc: Doc) -> list[Item]:
     if doc.source == "wikipedia-talk":
         return [Item(kind="passage", corner=f"{base}/{abs(hash_title(doc.title)) % 64}", fmt="dialogue", lang=lang, source=src,
                      text=_clip(f"{doc.title}\n\n{doc.text}", PASSAGE_CHARS))]  # the title names the talk page
-    if doc.source == "stackexchange":
-        fmt = "code" if _codeish(doc.text) else "dialogue"
-        if doc.question:
-            return [Item(kind="answer", corner=f"{base}/answer", fmt=fmt, lang=lang, source=src,
-                         ctx=f"Question: {doc.title}\n{_clip(doc.question, QUESTION_CHARS)}\n\nAnswer:", cont=" " + _clip(doc.text, ANSWER_CHARS))]
-        return [Item(kind="passage", corner=f"{base}/question", fmt=fmt, lang=lang, source=src,
-                     text=_clip(f"{doc.title}\n\n{doc.text}", PASSAGE_CHARS))]
     # Every other source: a reply given what it answers, or a piece of writing on its own. A source
     # without topics of its own has its documents spread over buckets of their titles, so that
     # the corner cap does not leave it a couple of items.

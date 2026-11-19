@@ -56,7 +56,7 @@ SOURCE_KIND = {
     "github": "technical",
     "bluesky": "social", "mastodon": "social",
     "wikipedia-talk": "discussion", "hackernews": "discussion", "lemmy": "discussion", "github-comment": "discussion",
-    "bluesky-reply": "discussion", "mastodon-reply": "discussion", "stackexchange": "discussion",
+    "bluesky-reply": "discussion", "mastodon-reply": "discussion",
 }
 CODE = "code"  # every programming language, as one language
 
