@@ -18,6 +18,15 @@ train**, becomes capable at **what pretrained models are for**. So the exam shou
 
 Targeting such an exam is not cheating. It is the job.
 
+**What the scale pilot found** (section 6):
+
+- Curators keep their order from 14M to 54M parameters, on both exams.
+- The two exams order curators in nearly opposite ways at every size. So the choice of
+  target matters more than the size of the student.
+- The next exam's verdict is decided above all by how much each language and capability
+  counts. Under the current weights, the curator to beat cleans every language rather than
+  choosing English.
+
 ## 1. What a pretraining dataset is for
 
 Text has no quality of its own. A page is worth keeping only for the difference it makes
@@ -124,13 +133,15 @@ of other languages is a separate choice.
 
 - **Rounds stay at micro.** They are fast, cheap, and give the steady feedback a competition
   needs.
-- **A pilot, now.** The organisers' curators and the reference curators are run at micro, at
-  standard, and at a scale about ten times larger, each sitting both exams. The question is
-  how far micro's order holds as the model grows. That says how much the round scores can be
-  trusted.
+- **The pilot (done, section 6).** Curators kept their order from micro to a student of 54M
+  parameters on both exams: micro is a sound proxy for ranking curators. What curation is
+  worth against the raw crawl does not carry over: gains shrink, and English-only curators
+  fall below the raw crawl as the student grows.
 - **Finals, each season.** The top curators are run on a much larger pool and train a model
-  of about 150M parameters on a private exam of the same design. On the organisers' rented
-  machines that is a few dollars a curator. Finals decide the season.
+  of about 150M parameters on a private exam of the same design. A 54M student costs about
+  an hour on a rented 4090 ($0.89 an hour); a 150M one, a few hours. Finals check, at a size
+  closer to real models, what rounds measured. Since curators kept their order from 14M to
+  54M, finals are a check, not the only verdict.
 - **Calibration.** For each pillar: does its micro score predict the finals? Pillars that do
   get more weight in next season's rounds.
 
@@ -158,7 +169,92 @@ of other languages is a separate choice.
   better on fresh text than on generated items.
 - **Training noise** is in [the proposal, section 3](exam-proposal.md#3-stability-pairing-continuous-scores-and-a-robust-average).
 
-## 6. Open questions
+## 6. The scale pilot (round 12, November 2026)
+
+Nine curators were run on round 12's pool at three sizes of student, each trained by the
+organisers' rented machines, and each student sat both exams:
+
+- the organisers' curators: `english`, `tidy`, `compass` v1 and v2;
+- four reference curators that rebuild published recipes: `dclm`, `fineweb-edu`, `heuristic`
+  and the multilingual `fineweb2`;
+- the raw crawl.
+
+The next exam is version 5, with 1,897 items: 1,094 generated (knowledge and reading in
+context included) and 803 fresh. The raw crawl's student is averaged over four trainings, or
+two at the large scale.
+
+| | micro | standard | large |
+|---|---|---|---|
+| Student | 14M parameters, 40M tokens | 29M, 160M | 54M, 640M |
+| The raw crawl's spread between trainings (season exam) | 0.081 | 0.028 | 0.004 |
+
+**The next exam's score**, in bits per byte over the raw crawl:
+
+| | micro | standard | large |
+|---|---|---|---|
+| fineweb2 (every language, cleaned) | +0.055 | −0.041 | −0.052 |
+| english | +0.063 | −0.180 | −0.123 |
+| fineweb-edu | −0.015 | −0.185 | −0.201 |
+| dclm | −0.022 | −0.193 | −0.254 |
+| compass v2 | −0.129 | −0.205 | −0.259 |
+| tidy | −0.174 | −0.241 | −0.279 |
+| compass v1 | −0.226 | −0.286 | −0.297 |
+| heuristic | −0.270 | −0.317 | −0.354 |
+
+**The season exam's gain**, in nats over the raw crawl. Compass leads at every size:
+
+| | micro | standard | large |
+|---|---|---|---|
+| compass v1 | 1.131 | 0.476 | 0.421 |
+| fineweb-edu | 1.104 | 0.436 | 0.415 |
+| compass v2 | 1.135 | 0.479 | 0.412 |
+| dclm | 1.063 | 0.443 | 0.392 |
+| tidy | 0.930 | 0.396 | 0.345 |
+| english | 0.916 | 0.376 | 0.337 |
+| heuristic | 0.990 | 0.321 | 0.247 |
+| fineweb2 | 0.375 | 0.189 | 0.205 |
+
+**The next exam at the large scale, by kind of item** (bits per byte over the raw crawl):
+
+| | english | fineweb-edu | dclm | fineweb2 | compass v2 | heuristic |
+|---|---|---|---|---|---|---|
+| Fresh writing, English | +0.17 | +0.22 | +0.20 | +0.09 | +0.25 | +0.23 |
+| Fresh writing, other languages | −0.59 | −0.74 | −0.75 | +0.06 | −0.67 | −0.90 |
+| Maths and logic | −0.09 | +0.03 | +0.12 | +0.07 | +0.03 | +0.10 |
+| Code, tools, structure | +0.09 | +0.01 | −0.08 | −0.15 | −0.16 | −0.21 |
+| Knowledge, ten languages | −0.27 | −0.32 | −0.29 | −0.03 | −0.24 | −0.46 |
+| Reading in context | −0.05 | −0.01 | −0.02 | −0.16 | −0.23 | −0.25 |
+
+What it says:
+
+1. **Curators keep their order as the student grows.** Rank agreement from micro to standard
+   to large is 0.98 and 1.00 on the next exam, and 0.90 and 0.88 on the season's. Within this
+   range, micro is a sound proxy for which curator is better.
+2. **What curation is worth does not hold.** Every English-only curator beats or matches the
+   raw crawl at micro, and falls below it by 54M parameters. The season exam's gains shrink
+   from about 1.1 nats to about 0.4. As the literature says, filtering pays most when the
+   model is small.
+3. **The two exams disagree at every size.** Their rank agreement is −0.45, −0.31 and −0.29.
+   Which exam is used decides the competition more than the size of the student does.
+4. **Quality filters trade capabilities, as published work found.** They help English prose
+   and mathematics. They cost code and tools (the C4 rules delete lines with braces), and
+   everything not in English: knowledge in other languages, and fresh text in them. The
+   season exam, all English prose, sees only the gains. The next exam sees both sides.
+5. **On the next exam, languages decide.** With languages weighed as the crawl has them, the
+   only curator near the raw crawl at 54M is the one that keeps every language. Under this
+   exam, the winning curator has to clean every language, not choose one. That follows from
+   the choice "every language, in proportion to the crawl". Season 0's 8,192-token,
+   English-leaning tokenizer makes other languages costlier for the student, and so the
+   effect larger.
+6. **The known-answer test has to be read per capability.**
+   - The published order (DCLM and FineWeb-Edu above heuristic filtering, above raw) is
+     about English benchmarks.
+   - The season exam reproduces it at every size.
+   - On English fresh writing, the next exam has every recipe above raw, as published.
+   - On code and on other languages, those recipes really are worse. That is why model
+     builders add code, mathematics and other languages to filtered web text separately.
+
+## 7. Open questions
 
 - Likelihood of answers at 150M is validated against benchmarks, not against what a model
   becomes after post-training.
