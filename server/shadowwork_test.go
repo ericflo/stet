@@ -135,6 +135,48 @@ func TestTheNextExamsStudentsAreTrainedByTheOrganisersMachines(t *testing.T) {
 		t.Fatalf("the unedited student, as kept: %+v %v", d, got.Tasks[0].Scores)
 	}
 
+	// A bigger student: a scale of its own, held for hours, a repeat, and a script no round
+	// holds. It goes only to a machine that asks for long ones.
+	big := map[string]any{"round": idx, "scale": "pilot-l", "items_digest": digest, "items": 3, "generator_version": 3,
+		"scale_spec": map[string]float64{"n_layer": 10, "d_model": 640, "train_tokens": 6.4e8}, "lease": 4 * 3600,
+		"scripts": []string{"unedited", "unedited#2", strings.Repeat("12", 32)}, "items_file": base64.StdEncoding.EncodeToString([]byte("zstd bytes"))}
+	var bigMade struct {
+		Batch string `json:"batch"`
+		Tasks int    `json:"tasks"`
+	}
+	if code := anchor.do("POST", "/api/v1/admin/shadow/batches", big, &bigMade); code != 200 || bigMade.Tasks != 3 || bigMade.Batch == made.Batch {
+		t.Fatalf("a batch at a scale of its own: HTTP %d %+v", code, bigMade)
+	}
+	if code := rented.do("PUT", "/api/v1/admin/shadow/scripts/"+strings.Repeat("12", 32), []byte("script bytes"), nil); code != 403 {
+		t.Fatalf("a rented machine keeping a script: HTTP %d", code)
+	}
+	if code := anchor.do("PUT", "/api/v1/admin/shadow/scripts/"+strings.Repeat("12", 32), []byte("script bytes"), nil); code != 200 {
+		t.Fatalf("the organisers keeping a script: HTTP %d", code)
+	}
+	if code := rented.do("GET", "/api/v1/shadow/scripts/"+strings.Repeat("12", 32), nil, nil); code != 200 {
+		t.Fatalf("a rented machine fetching a kept script: HTTP %d", code)
+	}
+	anchor.do("GET", "/api/v1/admin/work", nil, &work)
+	if work.ShadowLongWaiting != 3 {
+		t.Fatalf("long students waiting: %d, not 3", work.ShadowLongWaiting)
+	}
+	// A machine that did not ask for long students finishes the short ones and is then given nothing.
+	for range 4 {
+		var c claimed
+		rented.do("POST", "/api/v1/shadow/claim", map[string]any{}, &c)
+		if c.Task == nil {
+			break
+		}
+		if c.Task.Batch == bigMade.Batch {
+			t.Fatal("a long student was handed to a machine that did not ask for one")
+		}
+		rented.do("POST", fmt.Sprintf("/api/v1/shadow/batches/%s/tasks/%d", c.Task.Batch, c.Task.Index), good, nil)
+	}
+	var long claimed
+	if code := anchor.do("POST", "/api/v1/shadow/claim", map[string]any{"max_minutes": 600}, &long); code != 200 || long.Task == nil || long.Task.Batch != bigMade.Batch {
+		t.Fatalf("a machine set aside for long students: HTTP %d %+v", code, long.Task)
+	}
+
 	// Kept across a restart.
 	w.check()
 	again2 := startWorld(t, w.cfg, w.kv, w.blobs)

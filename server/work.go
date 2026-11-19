@@ -53,6 +53,9 @@ type Work struct {
 	// ShadowUnderWay those being trained: work for a machine with nothing official to do.
 	ShadowWaiting  int `json:"shadow_waiting"`
 	ShadowUnderWay int `json:"shadow_under_way"`
+	// ShadowLongWaiting counts bigger students, held for hours, for a machine set aside for
+	// them (stet verify with STET_SHADOW_MAX_MINUTES): not counted in ShadowWaiting.
+	ShadowLongWaiting int `json:"shadow_long_waiting"`
 }
 
 // work looks at what the open rounds are waiting for, through the judge's own eyes: the
@@ -96,7 +99,7 @@ func (a *App) work(s *State) Work {
 		out.NextDrawAt = r.DrawAt
 	}
 	out.Waiting = a.waiting(s)
-	out.ShadowWaiting, out.ShadowUnderWay = shadowWaiting(s, now())
+	out.ShadowWaiting, out.ShadowUnderWay, out.ShadowLongWaiting = shadowWaiting(s, now())
 	busy := map[int64]string{}
 	// Training one of the next exam's students counts as at work, so that a rented machine is
 	// not ended partway through one; an official job it holds says so instead.

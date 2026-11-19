@@ -1,0 +1,7 @@
+# A reference curator: the published heuristic recipe (Gopher's quality and repetition rules,
+# C4's line filters, exact deduplication). https://www.stetrun.com
+name = "heuristic"
+description = "The published heuristic recipe, rebuilt: English pages, Gopher's quality and repetition rules, C4's line filters, exact duplicates dropped. A reference: large models trained on data made this way beat raw crawl text, and lose to classifier-filtered data."
+technique = "Gopher quality + repetition rules, C4 line filters, exact dedup (RefinedWeb-style)"
+entry = "python curator.py"
+license = "MIT"

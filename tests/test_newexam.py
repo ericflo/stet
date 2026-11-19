@@ -392,7 +392,7 @@ def test_students_farmed_out_to_the_organisers_machines_add_up_as_a_local_run_do
     write_script(same, range(len(corpus)))
     same_sha = hashlib.sha256(same.read_bytes()).hexdigest()
     t = threading.Thread(target=lambda: got.update(s=farm.farm_round(rnd, scale, {"other": sha, "same": same_sha}, tmp_path / "farmed", items, len(corpus), None,
-                                                                      log=lambda m: None, patience=120)), daemon=True)
+                                                                      log=lambda m: None, patience=120, baselines=2)), daemon=True)
     t.start()
     while t.is_alive():
         if not farm.turn(season, None, torch.device("cpu"), log=lambda m: None):
@@ -402,7 +402,7 @@ def test_students_farmed_out_to_the_organisers_machines_add_up_as_a_local_run_do
     # The local run sat every generated item; the farm the first 60 of them. Each item is
     # scored on its own, so the local run's first 60 scores are what the farm should have.
     rows = {r["name"]: r for r in farmed["entries"]}
-    assert len(batch["tasks"]) == 2  # the unedited corpus, and "other": "same" is the unedited corpus itself
+    assert [t["script"] for t in batch["tasks"]] == ["unedited", "unedited#2", sha]  # "same" is the unedited corpus itself
     assert rows["same"]["next_score"] == 0.0 and json.loads((tmp_path / "farmed" / f"{same_sha[:16]}.json").read_text())["name"] == "(unedited)"
     assert farmed["items"] == len(items) and rows["other"]["valid"]
     tag = local["items_digest"][:12]

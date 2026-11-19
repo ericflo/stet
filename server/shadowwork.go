@@ -1,7 +1,9 @@
 package main
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,7 +26,9 @@ import (
 // only to a machine with nothing official to do.
 
 const (
-	shadowLease       = 45 * 60  // seconds a machine holds a task before it may be handed to another
+	shadowLease       = 45 * 60 // seconds a machine holds a task before it may be handed to another, unless its batch says
+	shadowLeaseMax    = 24 * 3600
+	shadowShort       = 3600     // a task held for longer than this goes only to a machine that asks for long ones
 	shadowTries       = 3        // machines a task is handed to before it is left undone
 	shadowItemsMax    = 16 << 20 // bytes of a batch's items, compressed
 	shadowBatchesKept = 60       // the oldest are forgotten past this many
@@ -64,22 +68,45 @@ type ShadowBatch struct {
 	At       int64         `json:"at"`
 	By       string        `json:"by"`
 	Tasks    []*ShadowTask `json:"tasks"`
+	// A scale the season does not name (the scale check, and finals): its model and budget,
+	// for the machines to build it from. And how long a task is held, for a bigger student.
+	Spec  json.RawMessage `json:"scale_spec,omitempty"`
+	Lease int64           `json:"lease,omitempty"`
 }
 
-func shadowBatchKey(id string) string  { return "shadowwork/" + id }
-func shadowItemsBlob(id string) string { return "shadowwork/" + id + "/items.jsonl.zst" }
+func (b *ShadowBatch) lease() int64 {
+	if b.Lease > 0 {
+		return b.Lease
+	}
+	return shadowLease
+}
+
+func shadowBatchKey(id string) string    { return "shadowwork/" + id }
+func shadowScriptBlob(sha string) string { return "shadowwork/scripts/" + sha + ".zst" }
+func shadowItemsBlob(id string) string   { return "shadowwork/" + id + "/items.jsonl.zst" }
 func shadowScoresBlob(id string, i int) string {
 	return fmt.Sprintf("shadowwork/%s/%d.json", id, i)
 }
 
 var (
-	shadowBatchRe = regexp.MustCompile(`^[0-9]{8}-[0-9a-f]{12}$`)
-	scaleRe       = regexp.MustCompile(`^[a-z]{1,16}$`)
+	shadowBatchRe  = regexp.MustCompile(`^[0-9]{8}-[0-9a-f]{12}$`)
+	scaleRe        = regexp.MustCompile(`^[a-z][a-z0-9-]{0,23}$`)
+	shadowScriptRe = regexp.MustCompile(`^(unedited|[0-9a-f]{64})(#[2-9])?$`) // "#2": the same student, trained again
 )
 
 func (tx *Tx) saveShadowBatch(b *ShadowBatch) {
 	tx.s.ShadowWork[b.ID] = b
 	tx.put(shadowBatchKey(b.ID), b)
+}
+
+// shadowBatchID names a batch by its round, items, scale and model. The season's own micro
+// batches keep the name they have always had.
+func shadowBatchID(round int, digest, scale string, spec json.RawMessage) string {
+	if scale == "micro" && len(spec) == 0 {
+		return fmt.Sprintf("%08d-%s", round, digest[:12])
+	}
+	h := sha256.Sum256([]byte(digest + "\x00" + scale + "\x00" + string(spec)))
+	return fmt.Sprintf("%08d-%s", round, hex.EncodeToString(h[:])[:12])
 }
 
 // open says whether a task may be handed to a machine now.
@@ -89,10 +116,12 @@ func (t *ShadowTask) open(at int64) bool {
 
 // shadowWaiting counts the tasks a machine could be handed now: for stet-runpod, which rents
 // for them when there is nothing official to do.
-func shadowWaiting(s *State, at int64) (waiting, underWay int) {
+func shadowWaiting(s *State, at int64) (waiting, underWay, long int) {
 	for _, b := range s.ShadowWork {
 		for _, t := range b.Tasks {
 			switch {
+			case t.open(at) && b.lease() > shadowShort:
+				long++
 			case t.open(at):
 				waiting++
 			case t.Done == nil && t.Holder != 0 && t.Until > at:
@@ -127,13 +156,15 @@ func (a *App) apiShadowBatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Round   int      `json:"round"`
-		Scale   string   `json:"scale"`
-		Digest  string   `json:"items_digest"`
-		Items   int      `json:"items"`
-		Version int      `json:"generator_version"`
-		Scripts []string `json:"scripts"`
-		File    string   `json:"items_file"` // base64 of the zstd JSON lines
+		Round   int             `json:"round"`
+		Scale   string          `json:"scale"`
+		Digest  string          `json:"items_digest"`
+		Items   int             `json:"items"`
+		Version int             `json:"generator_version"`
+		Scripts []string        `json:"scripts"`
+		File    string          `json:"items_file"` // base64 of the zstd JSON lines
+		Spec    json.RawMessage `json:"scale_spec"`
+		Lease   int64           `json:"lease"`
 	}
 	if err := json.Unmarshal(body, &req); err != nil {
 		writeErr(w, fail(400, "not a batch: %v", err))
@@ -141,19 +172,28 @@ func (a *App) apiShadowBatch(w http.ResponseWriter, r *http.Request) {
 	}
 	file, err := base64.StdEncoding.DecodeString(req.File)
 	if err != nil || len(file) == 0 || len(file) > shadowItemsMax || !sha256Re.MatchString(req.Digest) || req.Items <= 0 ||
-		req.Items > 100_000 || !scaleRe.MatchString(req.Scale) || len(req.Scripts) == 0 || len(req.Scripts) > 500 {
+		req.Items > 100_000 || !scaleRe.MatchString(req.Scale) || len(req.Scripts) == 0 || len(req.Scripts) > 500 ||
+		len(req.Spec) > 2048 || req.Lease < 0 || req.Lease > shadowLeaseMax {
 		writeErr(w, fail(400, "the batch does not add up"))
 		return
 	}
+	if len(req.Spec) > 0 {
+		var spec map[string]float64 // a scale is a handful of numbers
+		if json.Unmarshal(req.Spec, &spec) != nil || len(spec) == 0 {
+			writeErr(w, fail(400, "a scale is an object of numbers"))
+			return
+		}
+		req.Spec, _ = json.Marshal(spec) // one spelling, whatever the client sent
+	}
 	seen := map[string]bool{}
 	for _, sc := range req.Scripts {
-		if seen[sc] || (sc != "unedited" && !sha256Re.MatchString(sc)) {
+		if seen[sc] || !shadowScriptRe.MatchString(sc) {
 			writeErr(w, fail(400, "a script is named twice, or is not a sha256"))
 			return
 		}
 		seen[sc] = true
 	}
-	id := fmt.Sprintf("%08d-%s", req.Round, req.Digest[:12])
+	id := shadowBatchID(req.Round, req.Digest, req.Scale, req.Spec)
 	var settled bool
 	a.st.view(func(s *State) { rd := s.Rounds[req.Round]; settled = rd != nil && rd.Status == "settled" })
 	if !settled {
@@ -170,7 +210,8 @@ func (a *App) apiShadowBatch(w http.ResponseWriter, r *http.Request) {
 	err = a.st.update(r.Context(), func(tx *Tx) error {
 		b := tx.s.ShadowWork[id]
 		if b == nil {
-			b = &ShadowBatch{ID: id, RoundIdx: req.Round, Scale: req.Scale, Digest: req.Digest, Items: req.Items, Version: req.Version, At: now(), By: acct.Handle}
+			b = &ShadowBatch{ID: id, RoundIdx: req.Round, Scale: req.Scale, Digest: req.Digest, Items: req.Items, Version: req.Version, At: now(), By: acct.Handle,
+				Spec: req.Spec, Lease: req.Lease}
 		}
 		have := map[string]bool{}
 		for _, t := range b.Tasks {
@@ -246,7 +287,7 @@ func (a *App) apiShadowBatchGet(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, 200, map[string]any{"batch": b.ID, "round": roundID(a.season.ID, b.RoundIdx), "scale": b.Scale, "items_digest": b.Digest,
-		"items": b.Items, "generator_version": b.Version, "tasks": out})
+		"items": b.Items, "generator_version": b.Version, "scale_spec": b.Spec, "lease": b.lease(), "tasks": out})
 }
 
 // shadowMachine admits the organisers' machines, rented ones included.
@@ -264,16 +305,26 @@ func (a *App) shadowMachine(w http.ResponseWriter, r *http.Request, limit int64)
 func (a *App) shadowTaskJSON(b *ShadowBatch, i int) map[string]any {
 	t := b.Tasks[i]
 	return map[string]any{"batch": b.ID, "index": i, "round": roundID(a.season.ID, b.RoundIdx), "round_index": b.RoundIdx, "scale": b.Scale,
-		"script": t.Script, "items_digest": b.Digest, "items": b.Items, "generator_version": b.Version, "until": t.Until}
+		"scale_spec": b.Spec, "script": t.Script, "items_digest": b.Digest, "items": b.Items, "generator_version": b.Version, "until": t.Until}
 }
 
 // apiShadowClaim hands an organisers' machine a student to train: the one it already holds, or
-// the oldest batch's first open task.
+// the oldest batch's first open task it has time for. A machine says how long it will give one
+// (max_minutes, an hour if it does not say), so that a bigger student, held for hours, goes only
+// to a machine set aside for it and never keeps one from the official work.
 func (a *App) apiShadowClaim(w http.ResponseWriter, r *http.Request) {
-	acct, _, err := a.shadowMachine(w, r, 1<<12)
+	acct, body, err := a.shadowMachine(w, r, 1<<12)
 	if err != nil {
 		writeErr(w, err)
 		return
+	}
+	var ask struct {
+		MaxMinutes int64 `json:"max_minutes"`
+	}
+	json.Unmarshal(body, &ask)
+	most := int64(shadowShort)
+	if ask.MaxMinutes > 0 {
+		most = min(ask.MaxMinutes*60, shadowLeaseMax)
 	}
 	var task map[string]any
 	err = a.st.update(r.Context(), func(tx *Tx) error {
@@ -286,7 +337,7 @@ func (a *App) apiShadowClaim(w http.ResponseWriter, r *http.Request) {
 					task = a.shadowTaskJSON(b, i) // one at a time: the same one again
 					return nil
 				}
-				if pick == nil && t.open(at) {
+				if pick == nil && t.open(at) && b.lease() <= most {
 					pick, pi = b, i
 				}
 			}
@@ -295,7 +346,7 @@ func (a *App) apiShadowClaim(w http.ResponseWriter, r *http.Request) {
 			return nil
 		}
 		t := pick.Tasks[pi]
-		t.Holder, t.Until = acct.ID, at+shadowLease
+		t.Holder, t.Until = acct.ID, at+pick.lease()
 		t.Tries++
 		tx.saveShadowBatch(pick)
 		task = a.shadowTaskJSON(pick, pi)
@@ -448,4 +499,57 @@ func (a *App) apiShadowRelease(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{"ok": true})
+}
+
+// apiShadowScriptPut keeps a script for the next exam's students that is no round's entry: a
+// reference curator's, or an entry's at a scale the season does not run. The organisers' own
+// machine sends it, zstd-compressed; the machines that train it check it against its hash.
+func (a *App) apiShadowScriptPut(w http.ResponseWriter, r *http.Request) {
+	_, _, body, err := a.signedBy(w, r, a.season.maxScriptBlob(), true, organisers)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	sha := r.PathValue("sha")
+	if !sha256Re.MatchString(sha) {
+		writeErr(w, fail(400, "a script is named by its sha256"))
+		return
+	}
+	if len(body) == 0 {
+		writeErr(w, fail(400, "not a script"))
+		return
+	}
+	if err := a.st.blobs.Put(r.Context(), shadowScriptBlob(sha), body, "application/zstd"); err != nil {
+		slog.Error("keeping a shadow script", "sha", sha, "err", err)
+		writeErr(w, fail(503, "the file store is not answering; try again in a moment"))
+		return
+	}
+	writeJSON(w, 200, map[string]any{"script": sha, "bytes": len(body)})
+}
+
+// apiShadowScript serves such a script to the organisers' machines.
+func (a *App) apiShadowScript(w http.ResponseWriter, r *http.Request) {
+	if _, _, err := a.shadowMachine(w, r, 1<<10); err != nil {
+		writeErr(w, err)
+		return
+	}
+	sha := r.PathValue("sha")
+	if !sha256Re.MatchString(sha) {
+		writeErr(w, fail(404, "no such script"))
+		return
+	}
+	f, size, err := a.st.blobs.Open(r.Context(), shadowScriptBlob(sha))
+	if errors.Is(err, errNoBlob) {
+		writeErr(w, fail(404, "no such script"))
+		return
+	}
+	if err != nil {
+		slog.Error("reading a shadow script", "sha", sha, "err", err)
+		writeErr(w, fail(503, "the file store is not answering; try again in a moment"))
+		return
+	}
+	defer f.Close()
+	w.Header().Set("Content-Type", "application/zstd")
+	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+	io.Copy(w, f)
 }

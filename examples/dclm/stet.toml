@@ -1,0 +1,12 @@
+# A reference curator: DCLM's classifier filter, rebuilt. https://www.stetrun.com
+name = "dclm"
+description = "DCLM-Baseline's recipe, rebuilt: English pages, exact duplicates dropped, ranked by the published fastText classifier (OpenHermes 2.5 and ELI5 against random web), the top kept. A reference: the best published filter for 1B to 7B models."
+technique = "fastText quality classifier (OH-2.5 + ELI5 vs web), top of the ranking"
+entry = "python curator.py"
+license = "MIT"
+
+[[assets]]
+path = "dclm-fasttext/openhermes_reddit_eli5_vs_rw_v2_bigram_200k_train.bin"
+url = "https://huggingface.co/mlfoundations/fasttext-oh-eli5/resolve/cd8b714a90f2dbcd3b02cf5fc972e5d7c7f4f107/openhermes_reddit_eli5_vs_rw_v2_bigram_200k_train.bin"
+sha256 = "f8da53846636ce5ed2836f95e2fffada6aade035e2169af1d6c099bda2674915"
+size = 2387190433

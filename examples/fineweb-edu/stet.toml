@@ -1,0 +1,42 @@
+# A reference curator: FineWeb-Edu's educational filter, rebuilt. https://www.stetrun.com
+name = "fineweb-edu"
+description = "FineWeb-Edu's recipe, rebuilt: English pages, exact duplicates dropped, ranked by the published educational-value classifier, the most educational kept. A reference: data made this way gave large models their best knowledge and reasoning scores."
+technique = "educational-value classifier (FineWeb-Edu), top of the ranking"
+entry = "python curator.py"
+license = "MIT"
+
+[[assets]]
+path = "fineweb-edu-classifier/config.json"
+url = "https://huggingface.co/HuggingFaceFW/fineweb-edu-classifier/resolve/284663cbb2dabf9bda30d8f8cc49601251ee1631/config.json"
+sha256 = "5efd3893506c5696b90dec74133583568d558a10ed4ab30febccdd5be3ef25af"
+size = 804
+
+[[assets]]
+path = "fineweb-edu-classifier/model.safetensors"
+url = "https://huggingface.co/HuggingFaceFW/fineweb-edu-classifier/resolve/284663cbb2dabf9bda30d8f8cc49601251ee1631/model.safetensors"
+sha256 = "27fbfe65ce71c3fc50df7b71246c83fe9b6da329f9572d957a9355f7d290a1bc"
+size = 437955572
+
+[[assets]]
+path = "fineweb-edu-classifier/special_tokens_map.json"
+url = "https://huggingface.co/HuggingFaceFW/fineweb-edu-classifier/resolve/284663cbb2dabf9bda30d8f8cc49601251ee1631/special_tokens_map.json"
+sha256 = "5d5b662e421ea9fac075174bb0688ee0d9431699900b90662acd44b2a350503a"
+size = 695
+
+[[assets]]
+path = "fineweb-edu-classifier/tokenizer.json"
+url = "https://huggingface.co/HuggingFaceFW/fineweb-edu-classifier/resolve/284663cbb2dabf9bda30d8f8cc49601251ee1631/tokenizer.json"
+sha256 = "91f1def9b9391fdabe028cd3f3fcc4efd34e5d1f08c3bf2de513ebb5911a1854"
+size = 711649
+
+[[assets]]
+path = "fineweb-edu-classifier/tokenizer_config.json"
+url = "https://huggingface.co/HuggingFaceFW/fineweb-edu-classifier/resolve/284663cbb2dabf9bda30d8f8cc49601251ee1631/tokenizer_config.json"
+sha256 = "0e83e9d7206b3ade43f8f2aeef523cf5d5b4a25b67af21b273de21972c0f58b7"
+size = 1381
+
+[[assets]]
+path = "fineweb-edu-classifier/vocab.txt"
+url = "https://huggingface.co/HuggingFaceFW/fineweb-edu-classifier/resolve/284663cbb2dabf9bda30d8f8cc49601251ee1631/vocab.txt"
+sha256 = "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3"
+size = 231508

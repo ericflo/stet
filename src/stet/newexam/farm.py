@@ -11,8 +11,10 @@ adds them up (`farm_round`).
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
+import os
 import tempfile
 import time
 from pathlib import Path
@@ -21,6 +23,7 @@ from .items import Item, digest
 
 UNEDITED = "unedited"
 POLL = 60  # seconds between looks at a batch
+BASELINES = 4  # trainings of the unedited corpus averaged into a round's reference: the least steady student of all
 
 
 def pack_items(items: list[Item]) -> bytes:
@@ -43,13 +46,32 @@ def unpack_items(blob: bytes, limit: int = 256 << 20) -> list[Item]:
 # --- a machine of the organisers', training one ---------------------------------------------------
 
 
-def _fetch_script(sha: str, season, dest: Path) -> Path:
+def scale_of(season, name: str, spec: dict | None):
+    """The scale a task names: one of the season's, or one built from its spec (the scale
+    check and finals), starting from the season's standard scale."""
+    if not spec:
+        return season.scale(name)
+    base = season.scale("standard")
+    fields = {f.name for f in dataclasses.fields(base)} - {"name"}
+    unknown = set(spec) - fields
+    if unknown:
+        raise ValueError(f"a scale this harness does not know how to build: {sorted(unknown)}")
+    return dataclasses.replace(base, name=name, **{k: type(getattr(base, k))(v) for k, v in spec.items()})
+
+
+def _fetch_script(sha: str, season, dest: Path, key=None) -> Path:
     import zstandard
 
-    from ..client import request
+    from ..client import ApiError, request
 
     limit = int(season.raw["script"]["max_bytes"])
-    blob = request("GET", f"/api/v1/scripts/{sha}", raw=True, timeout=600, limit=limit + (1 << 20))
+    try:
+        blob = request("GET", f"/api/v1/scripts/{sha}", raw=True, timeout=600, limit=limit + (1 << 20))
+    except ApiError as e:
+        if e.status not in (403, 404):
+            raise
+        # No round's entry: a reference curator's, or an entry's at a scale of its own.
+        blob = request("GET", f"/api/v1/shadow/scripts/{sha}", key=key, raw=True, timeout=600, limit=limit + (1 << 20))
     with zstandard.ZstdDecompressor().stream_reader(blob) as r:
         raw = r.read(limit + 1)
     if len(raw) > limit or hashlib.sha256(raw).hexdigest() != sha:
@@ -85,7 +107,8 @@ def work_one(task: dict, season, key, device, log=print) -> None:
     where = f"/api/v1/shadow/batches/{task['batch']}/tasks/{int(task['index'])}"
     try:
         rnd = round_from_api(season, request("GET", f"/api/v1/rounds/{task['round']}")["round"])
-        scale = season.scale(task["scale"])
+        scale = scale_of(season, task["scale"], task.get("scale_spec"))
+        script_ref = task["script"].split("#")[0]  # "#2": the same student, trained again
         items = unpack_items(request("GET", f"/api/v1/shadow/batches/{task['batch']}/items", key=key, raw=True, timeout=600, limit=64 << 20))
         if len(items) != task["items"] or digest(items) != task["items_digest"]:
             raise ValueError("the batch's items do not match their digest")
@@ -94,10 +117,10 @@ def work_one(task: dict, season, key, device, log=print) -> None:
         t0 = time.time()
         with tempfile.TemporaryDirectory(prefix="stet-shadow-") as tmp:
             script = Path(tmp) / "script.jsonl"
-            if task["script"] == UNEDITED:
+            if script_ref == UNEDITED:
                 unedited_script(script, len(corpus))
             else:
-                _fetch_script(task["script"], season, script)
+                _fetch_script(script_ref, season, script, key=key)
             meta, model = train_student(rnd, scale, corpus, exam, enc, script, device)
         body = dict(meta)
         body["reason"] = body.pop("invalid_reason", "")
@@ -126,7 +149,12 @@ def turn(season, key, device, log=print) -> bool:
     """Ask for a student to train, and train it. False when there is none."""
     from ..client import request
 
-    task = (request("POST", "/api/v1/shadow/claim", {}, key=key) or {}).get("task")
+    # A machine set aside for bigger students says how long it will give one; any other is
+    # handed only those that take less than an hour.
+    ask = {}
+    if os.environ.get("STET_SHADOW_MAX_MINUTES", "").isdigit():
+        ask["max_minutes"] = int(os.environ["STET_SHADOW_MAX_MINUTES"])
+    task = (request("POST", "/api/v1/shadow/claim", ask, key=key) or {}).get("task")
     if not isinstance(task, dict):
         return False
     work_one(task, season, key, device, log=log)
@@ -136,7 +164,7 @@ def turn(season, key, device, log=print) -> bool:
 # --- the organisers' machine, farming a round out --------------------------------------------------
 
 
-def post_batch(rnd, scale, items: list[Item], scripts: list[str], key) -> str:
+def post_batch(rnd, scale, items: list[Item], scripts: list[str], key, spec: dict | None = None, lease: int = 0) -> str:
     import base64
 
     from ..client import request
@@ -144,13 +172,20 @@ def post_batch(rnd, scale, items: list[Item], scripts: list[str], key) -> str:
 
     body = {"round": rnd.index, "scale": scale.name, "items_digest": digest(items), "items": len(items), "generator_version": VERSION,
             "scripts": scripts, "items_file": base64.b64encode(pack_items(items)).decode()}
+    if spec:
+        body["scale_spec"], body["lease"] = spec, lease
     return request("POST", "/api/v1/admin/shadow/batches", body, key=key, timeout=600)["batch"]
 
 
 def farm_round(rnd, scale, scripts: dict[str, str], out_dir: Path, items: list[Item], n_docs: int, key,
-               shares: dict[str, float] | None = None, log=print, patience: float = 12 * 3600) -> dict:
+               shares: dict[str, float] | None = None, log=print, patience: float = 12 * 3600, baselines: int = BASELINES,
+               spec: dict | None = None, lease: int = 0) -> dict:
     """Have the organisers' machines train a round's students (scripts: name -> sha256), keep
-    what they send in out_dir as a local run would, and add it up."""
+    what they send in out_dir as a local run would, and add it up.
+
+    The unedited corpus is trained `baselines` times and its scores averaged: its student
+    varies between trainings several times as much as a curated corpus's does, and every
+    gain is measured from it. Each training is kept beside the average (`<sha>#k`)."""
     from ..client import request
     from .shadow import _write, summarize, unedited_script, write_items
 
@@ -166,7 +201,8 @@ def farm_round(rnd, scale, scripts: dict[str, str], out_dir: Path, items: list[I
     names = {sha: name for name, sha in scripts.items() if sha != UNEDITED}
     names[UNEDITED] = "(unedited)"
     local = {UNEDITED: base_sha, **{sha: sha for sha in scripts.values() if sha != UNEDITED}}
-    batch = post_batch(rnd, scale, items, [UNEDITED, *sorted(set(scripts.values()) - {UNEDITED})], key)
+    repeats = [UNEDITED] + [f"{UNEDITED}#{k}" for k in range(2, max(1, baselines) + 1)]
+    batch = post_batch(rnd, scale, items, [*repeats, *sorted(set(scripts.values()) - {UNEDITED})], key, spec=spec, lease=lease)
     log(f"{rnd.id}: {len(names)} students posted for the organisers' machines to train (batch {batch})")
     t0, said = time.time(), None
     while True:
@@ -174,10 +210,12 @@ def farm_round(rnd, scale, scripts: dict[str, str], out_dir: Path, items: list[I
         tasks = b["tasks"]
         for t in tasks:
             d = t.get("done")
-            if not d or t["script"] not in local:  # not done, or a task this run did not ask for
+            if not d or t["script"].split("#")[0] not in local:  # not done, or a task this run did not ask for
                 continue
-            sha16 = local[t["script"]][:16]
-            meta = {"name": names[t["script"]], "valid": bool(d["valid"]), "farmed_by": d.get("by"), "hardware": d.get("hardware")}
+            sha16 = local[t["script"].split("#")[0]][:16]
+            if t["script"].startswith(UNEDITED):  # one of the reference's trainings, kept apart
+                sha16 += "#" + (t["script"].split("#")[1] if "#" in t["script"] else "1")
+            meta = {"name": names[t["script"].split("#")[0]], "valid": bool(d["valid"]), "farmed_by": d.get("by"), "hardware": d.get("hardware")}
             if d["valid"]:
                 meta.update(exam_loss=d["exam_loss"], by_source=d.get("by_source") or {}, kept_doc_frac=d.get("kept_doc_frac"),
                             train_seconds=d.get("train_seconds"))
@@ -206,9 +244,23 @@ def farm_round(rnd, scale, scripts: dict[str, str], out_dir: Path, items: list[I
             meta["item_scores"] = json.loads(s.read_text())
         return meta
 
-    base = student(UNEDITED)
-    if base is None or not base["valid"]:
+    trained = []
+    for k in range(1, len(repeats) + 1):
+        p = out_dir / f"{base_sha[:16]}#{k}.json"
+        if p.exists() and (m := json.loads(p.read_text()))["valid"]:
+            m["item_scores"] = json.loads((out_dir / f"{base_sha[:16]}#{k}-{tag}.json").read_text())
+            trained.append(m)
+    if not trained:
         raise RuntimeError(f"{rnd.id}: the unedited corpus's student was not trained, so nothing can be added up")
+    n = len(trained)
+    base = {"name": "(unedited)", "valid": True, "trainings": n, "hardware": sorted({str(m.get("hardware")) for m in trained}),
+            "exam_loss": sum(m["exam_loss"] for m in trained) / n,
+            "by_source": {k: sum(m["by_source"].get(k, 0.0) for m in trained) / n for k in trained[0].get("by_source") or {}},
+            "item_scores": [round(sum(col) / n, 6) for col in zip(*(m["item_scores"] for m in trained), strict=True)]}
+    _write(out_dir / f"{base_sha[:16]}.json", {k: v for k, v in base.items() if k != "item_scores"})
+    _write(out_dir / f"{base_sha[:16]}-{tag}.json", base["item_scores"])
+    log(f"  the unedited corpus: {n} trainings averaged, season exam {base['exam_loss']:.4f}"
+        + (f" (spread {max(m['exam_loss'] for m in trained) - min(m['exam_loss'] for m in trained):.4f})" if n > 1 else ""))
     got = {name: m for name, sha in scripts.items() if (m := student(sha)) is not None}
     for name, sha in scripts.items():
         if sha == UNEDITED:

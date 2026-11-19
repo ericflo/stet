@@ -250,6 +250,8 @@ func (a *App) mountAPI(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/shadow/batches/{id}/items", a.apiShadowItems)
 	mux.HandleFunc("POST /api/v1/shadow/batches/{id}/tasks/{i}", a.apiShadowResult)
 	mux.HandleFunc("POST /api/v1/shadow/batches/{id}/tasks/{i}/release", a.apiShadowRelease)
+	mux.HandleFunc("PUT /api/v1/admin/shadow/scripts/{sha}", a.apiShadowScriptPut)
+	mux.HandleFunc("GET /api/v1/shadow/scripts/{sha}", a.apiShadowScript)
 	mux.HandleFunc("PUT /api/v1/admin/files/{name}", a.apiAdminFile)
 	mux.HandleFunc("GET /api/v1/admin/accounts/{handle}", a.apiAdminAccount)
 	mux.HandleFunc("GET /api/v1/admin/work", a.apiAdminWork)
