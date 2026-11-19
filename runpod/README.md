@@ -74,7 +74,10 @@ once `--daily-budget` is spent. `--max-price` never rents a machine dearer than 
 much is waiting: the work waits for a cheap one instead. When an entry is waiting for a round
 and nobody who runs curators is around, one, so that the round is drawn early. It never
 ends a machine that holds a job. It ends at once those doing nothing when nothing at all is
-waiting, and any that went quiet or stopped. The rest stop by themselves.
+waiting, and any that went quiet or stopped. The rest stop by themselves. A machine ended
+a moment after it took a job, or that stopped partway through one, still holds it as the
+server sees it: what it holds is handed back on the next look, so nothing waits out its
+lease.
 
 Every machine rented is the cheapest that will do, looked up afresh each time: every kind
 of GPU RunPod has free, in both its clouds, is tried in order of price until one has a

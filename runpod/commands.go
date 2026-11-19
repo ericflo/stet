@@ -221,6 +221,7 @@ func tick(ctx context.Context, f *Fleet) error {
 	if err := f.end(ctx, v, d.End); err != nil {
 		return err
 	}
+	f.release(ctx, d.Release)
 	if d.Note != "" && d.Launch < d.Target-d.Live {
 		f.say("%s", d.Note)
 	}

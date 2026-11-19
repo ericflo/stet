@@ -259,6 +259,7 @@ func (a *App) mountAPI(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/admin/workers", a.apiWorkers)
 	mux.HandleFunc("POST /api/v1/admin/workers", a.apiWorkerGrant)
 	mux.HandleFunc("DELETE /api/v1/admin/workers/{key}", a.apiWorkerRevoke)
+	mux.HandleFunc("POST /api/v1/admin/workers/{key}/release", a.apiWorkerRelease)
 	mux.HandleFunc("GET /api/v1/admin/sealed", a.apiSealedList)
 	mux.HandleFunc("GET /api/v1/admin/sealed/mine", a.apiSealedMine)
 	mux.HandleFunc("PUT /api/v1/admin/sealed/{key}", a.apiSealedPut)

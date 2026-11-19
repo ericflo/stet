@@ -295,6 +295,17 @@ func (s *Stet) revoke(ctx context.Context, op *Key, public string) error {
 	return err
 }
 
+// release hands back every job a machine holds, once it has been ended: a machine ended a
+// moment after it took a job would otherwise hold it until its lease ran out.
+func (s *Stet) release(ctx context.Context, op *Key, public string) (jobs, students int, err error) {
+	var out struct {
+		Jobs     int `json:"jobs"`
+		Students int `json:"students"`
+	}
+	err = s.do(ctx, "POST", "/api/v1/admin/workers/"+public+"/release", map[string]any{}, op, &out)
+	return out.Jobs, out.Students, err
+}
+
 // Vouched is one of the organisers' grants, as the server shows it.
 type Vouched struct {
 	Key      string `json:"key"`

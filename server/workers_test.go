@@ -320,3 +320,67 @@ func TestAnOrganiserVouchesForARentedMachineWithoutAChangeToTheServer(t *testing
 	}
 	again.check()
 }
+
+// A rented machine the organisers end a moment after it took a job holds nothing from then on:
+// stet-runpod tells the server it is gone, and the job is handed back as if the machine had
+// handed it back itself, for another to be given. Only the organisers say so, and only of a
+// machine they vouch for.
+func TestTheJobsOfAMachineTheOrganisersEndedAreHandedBack(t *testing.T) {
+	pubA, privA := newKey()
+	pubW, privW := newKey()
+	cfg := testConfig(t, pubA)
+	cfg.RunsPerEntry = 1
+	w := startWorld(t, cfg, newMemKV(), dirBlobs{filepath.Join(cfg.DataDir, "blobs")})
+	anchor := w.join("anchor-one", privA)
+	if code := w.vouch(anchor, pubW); code != 201 {
+		t.Fatalf("vouching for a rented machine: HTTP %d", code)
+	}
+	worker := w.join("rented-one", privW)
+	alice := w.join("alice", nil)
+	w.submit(anchor, "ref-a", "print('a')")
+	w.claim(anchor, true)
+	w.claim(worker, false)
+	w.draw()
+	w.run(anchor, "{\"doc\": 1}\n")
+	c := w.claim(worker, false)
+	if c.Job == nil || c.Job.Kind != "grade" {
+		t.Fatalf("the rented machine should be grading: %+v", c.Job)
+	}
+
+	release := "/api/v1/admin/workers/" + hex.EncodeToString(pubW) + "/release"
+	var out struct {
+		Handle   string `json:"handle"`
+		Jobs     int    `json:"jobs"`
+		Students int    `json:"students"`
+	}
+	if code := alice.do("POST", release, nil, &out); code != 403 {
+		t.Fatalf("a volunteer handed back a rented machine's jobs: HTTP %d", code)
+	}
+	if code := worker.do("POST", release, nil, &out); code != 403 {
+		t.Fatalf("a rented machine handed back its own jobs this way: HTTP %d", code)
+	}
+	if code := anchor.do("POST", "/api/v1/admin/workers/"+alice.pub+"/release", nil, &out); code != 404 {
+		t.Fatalf("handing back the jobs of a machine nobody vouches for: HTTP %d", code)
+	}
+	if code := anchor.do("POST", release, nil, &out); code != 200 || out.Handle != "rented-one" || out.Jobs != 1 || out.Students != 0 {
+		t.Fatalf("handing back the ended machine's grade: HTTP %d %+v", code, out)
+	}
+	var work Work
+	anchor.do("GET", "/api/v1/admin/work", nil, &work)
+	if len(work.Rounds) != 1 || work.Rounds[0].GradesUnderWay != 0 || work.Rounds[0].GradesWanted != 1 {
+		t.Fatalf("the grade is not wanted again: %+v", work.Rounds)
+	}
+	for _, m := range work.Machines {
+		if m.Handle == "rented-one" && m.Busy != "" {
+			t.Fatalf("the ended machine is still at work: %+v", m)
+		}
+	}
+	if code, _ := w.report(worker, c, 5.5); code != 409 {
+		t.Fatalf("a grade from the ended machine was taken: HTTP %d", code)
+	}
+	// Again, it has nothing to hand back.
+	if code := anchor.do("POST", release, nil, &out); code != 200 || out.Jobs != 0 {
+		t.Fatalf("handing back again: HTTP %d %+v", code, out)
+	}
+	w.check()
+}

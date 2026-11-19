@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"sort"
 	"strings"
@@ -134,4 +135,62 @@ func (a *App) apiWorkerRevoke(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{"key": key, "revoked": true})
+}
+
+// apiWorkerRelease hands back every job a rented machine holds, once the organisers have ended
+// it: a machine ended a moment after it took a job would otherwise hold the job, and the round
+// or the next exam's batch waiting on it, until its lease ran out. The official jobs go back
+// as if the machine had handed them back itself, and so do the next exam's students.
+func (a *App) apiWorkerRelease(w http.ResponseWriter, r *http.Request) {
+	op, _, _, err := a.signedBy(w, r, 1<<10, true, organisers)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	key := strings.ToLower(r.PathValue("key"))
+	var handle string
+	jobs, students := 0, 0
+	err = a.st.update(r.Context(), func(tx *Tx) error {
+		s := tx.s
+		if s.Workers[key] == nil {
+			return fail(404, "the organisers do not vouch for that key")
+		}
+		acct := s.byPubkey[key]
+		if acct == nil {
+			return nil // it never asked for work, so it holds none
+		}
+		handle = acct.Handle
+		t := now()
+		for _, c := range s.Claims {
+			if c.AccountID == acct.ID && c.live(t) {
+				a.handBack(tx, c)
+				jobs++
+			}
+		}
+		for _, b := range s.ShadowWork {
+			held := false
+			for _, task := range b.Tasks {
+				if task.Done == nil && task.Holder == acct.ID && task.Until > t {
+					task.Holder, task.Until = 0, 0
+					held = true
+					students++
+				}
+			}
+			if held {
+				tx.saveShadowBatch(b)
+			}
+		}
+		if jobs > 0 {
+			a.settleReady(tx) // a round may have been waiting for these jobs alone
+		}
+		return nil
+	})
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	if jobs+students > 0 {
+		slog.Info("jobs handed back for a machine the organisers ended", "machine", handle, "by", op.Handle, "jobs", jobs, "students", students)
+	}
+	writeJSON(w, 200, map[string]any{"key": key, "handle": handle, "jobs": jobs, "students": students})
 }

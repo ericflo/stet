@@ -1300,15 +1300,20 @@ func (a *App) moved(tx *Tx, rd *Round) {
 func (a *App) release(ctx context.Context, acctID, claimID int64) error {
 	return a.st.update(ctx, func(tx *Tx) error {
 		if c := tx.s.Claims[claimID]; c != nil && c.AccountID == acctID && c.Status == "claimed" {
-			c.Status = "released"
-			tx.saveClaim(c)
-			if rd := tx.s.Rounds[c.RoundIdx]; rd != nil && rd.Status == "open" && a.established(tx.s.Accounts[acctID]) {
-				a.moved(tx, rd)
-			}
+			a.handBack(tx, c)
 			a.settleReady(tx) // the round may have been waiting for this job alone
 		}
 		return nil
 	})
+}
+
+// handBack ends a job its holder gives up, so that it may be handed to somebody else.
+func (a *App) handBack(tx *Tx, c *Claim) {
+	c.Status = "released"
+	tx.saveClaim(c)
+	if rd := tx.s.Rounds[c.RoundIdx]; rd != nil && rd.Status == "open" && a.established(tx.s.Accounts[c.AccountID]) {
+		a.moved(tx, rd)
+	}
 }
 
 func article(kind string) string {

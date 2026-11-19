@@ -110,16 +110,18 @@ func (f *fakeRunPod) serve(w http.ResponseWriter, r *http.Request) {
 type fakeStet struct {
 	mu       sync.Mutex
 	work     Work
-	workers  map[string]bool // public keys the server takes as rented machines
-	signed   []string        // who signed each request
-	vouches  int             // grants it was sent, each with a good signature
-	refusing bool            // the key vouching is not one of the organisers' own
-	taken    map[string]bool // handles somebody else has
+	workers  map[string]bool   // public keys the server takes as rented machines
+	signed   []string          // who signed each request
+	vouches  int               // grants it was sent, each with a good signature
+	refusing bool              // the key vouching is not one of the organisers' own
+	taken    map[string]bool   // handles somebody else has
+	handles  map[string]string // each rented machine's handle, by its public key
+	released []string          // machines whose jobs were handed back, by handle
 	srv      *httptest.Server
 }
 
 func newFakeStet(t *testing.T) *fakeStet {
-	f := &fakeStet{workers: map[string]bool{}}
+	f := &fakeStet{workers: map[string]bool{}, handles: map[string]string{}}
 	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
@@ -185,6 +187,23 @@ func newFakeStet(t *testing.T) *fakeStet {
 				io.WriteString(w, "{}")
 				return
 			}
+			if key, ok := strings.CutSuffix(strings.TrimPrefix(r.URL.Path, "/api/v1/admin/workers/"), "/release"); ok && r.Method == "POST" && f.workers[key] {
+				handle := f.handles[key]
+				f.released = append(f.released, handle)
+				jobs, students := 0, 0
+				for i := range f.work.Machines {
+					if m := &f.work.Machines[i]; m.Handle == handle {
+						if m.Busy == "shadow" {
+							students++
+						} else if m.Busy != "" {
+							jobs++
+						}
+						m.Busy = ""
+					}
+				}
+				fmt.Fprintf(w, `{"handle": %q, "jobs": %d, "students": %d}`, handle, jobs, students)
+				return
+			}
 			w.WriteHeader(404)
 		}
 	}))
@@ -204,6 +223,7 @@ func testFleet(t *testing.T, rp *fakeRunPod, st *fakeStet, keys int) (*Fleet, *b
 	}
 	for _, k := range f.keys {
 		st.workers[k.Public] = true
+		st.handles[k.Public] = k.Handle
 	}
 	return f, &out
 }
@@ -578,5 +598,53 @@ func TestPauseAndResumeTheRounds(t *testing.T) {
 	}
 	if err := cmdPause(context.Background(), f, false); err != nil || st.work.Paused != 0 || !strings.Contains(out.String(), "rounds resumed") {
 		t.Fatalf("resume (%v):\n%s", err, out)
+	}
+}
+
+// A machine ended a moment after it took a job still holds it, as the server sees it, with no
+// pod rented for it: what it holds is handed back on the next look, as the organisers, so that
+// nothing waits out its lease. A rented machine at work keeps its job.
+func TestWhatAnEndedMachineHeldIsHandedBack(t *testing.T) {
+	rp, st := newFakeRunPod(t), newFakeStet(t)
+	f, out := testFleet(t, rp, st, 3)
+	ctx := context.Background()
+	st.work = *round(30, 1, 0, 0)
+	if err := tick(ctx, f); err != nil || len(rp.created) != 2 {
+		t.Fatalf("rented %d machines (%v)", len(rp.created), err)
+	}
+
+	// The round is done: stet-rp-01 grades and is kept, stet-rp-02 waits and is ended, and
+	// stet-rp-03, which no pod is rented for, still holds one of the next exam's students.
+	st.work = *round(0, 0, 0, 1)
+	now := time.Now().Unix()
+	st.work.Machines = []Machine{
+		{Handle: "stet-rp-01", Worker: true, LastSeen: now, Busy: "grade"},
+		{Handle: "stet-rp-02", Worker: true, LastSeen: now},
+		{Handle: "stet-rp-03", Worker: true, LastSeen: now - 3600, Busy: "shadow"},
+	}
+	if err := tick(ctx, f); err != nil {
+		t.Fatal(err)
+	}
+	if len(rp.pods) != 1 || strings.Join(st.released, " ") != "stet-rp-03" {
+		t.Fatalf("%d pods left, handed back %v:\n%s", len(rp.pods), st.released, out)
+	}
+	if !strings.Contains(out.String(), "handed back what stet-rp-03 held when it was ended: 1 of the next exam's students") {
+		t.Fatalf("not said:\n%s", out)
+	}
+	if last := st.signed[len(st.signed)-1]; !strings.HasPrefix(last, "POST /api/v1/admin/workers/"+f.keys[2].Public+"/release ") || !strings.HasSuffix(last, f.op.Public) {
+		t.Fatalf("handed back as %q", last)
+	}
+
+	// stet-rp-02 took a grade in the moment before it was ended: it is handed back now.
+	st.work.Machines[1].Busy = "grade"
+	if err := tick(ctx, f); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(st.released, " ") != "stet-rp-03 stet-rp-02" || !strings.Contains(out.String(), "handed back what stet-rp-02 held when it was ended: 1 job") {
+		t.Fatalf("handed back %v:\n%s", st.released, out)
+	}
+	// Nothing is held any more, so nothing more is handed back.
+	if err := tick(ctx, f); err != nil || len(st.released) != 2 {
+		t.Fatalf("handed back %v (%v)", st.released, err)
 	}
 }

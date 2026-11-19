@@ -186,3 +186,58 @@ func TestTheNextExamsStudentsAreTrainedByTheOrganisersMachines(t *testing.T) {
 		}
 	})
 }
+
+// A student a rented machine was training goes back to be handed to another when the
+// organisers end the machine, without waiting out its lease.
+func TestAStudentAnEndedMachineWasTrainingIsHandedBack(t *testing.T) {
+	pubA, privA := newKey()
+	pubW, privW := newKey()
+	w := newWorld(t, pubA)
+	anchor := w.join("anchor-one", privA)
+	if code := w.vouch(anchor, pubW); code != 201 {
+		t.Fatalf("vouching for a rented machine: HTTP %d", code)
+	}
+	rented := w.join("rented-one", privW)
+	alice := w.join("alice", nil)
+	w.submit(alice, "sieve", "print(1)")
+	w.play(anchor, 1, func(name string, round int) float64 { return 5.3 })
+	idx := 0
+	w.app.st.view(func(s *State) {
+		for i, rd := range s.Rounds {
+			if rd.Status == "settled" && i > idx {
+				idx = i
+			}
+		}
+	})
+	batch := map[string]any{"round": idx, "scale": "micro", "items_digest": strings.Repeat("ab", 32), "items": 3, "generator_version": 3,
+		"scripts": []string{"unedited"}, "items_file": base64.StdEncoding.EncodeToString([]byte("zstd bytes"))}
+	if code := anchor.do("POST", "/api/v1/admin/shadow/batches", batch, nil); code != 200 {
+		t.Fatalf("the organisers' batch: HTTP %d", code)
+	}
+	var c struct {
+		Task *struct {
+			Batch string `json:"batch"`
+			Index int    `json:"index"`
+		} `json:"task"`
+	}
+	if code := rented.do("POST", "/api/v1/shadow/claim", map[string]any{}, &c); code != 200 || c.Task == nil {
+		t.Fatalf("the rented machine is handed a student: HTTP %d", code)
+	}
+	var out struct {
+		Jobs     int `json:"jobs"`
+		Students int `json:"students"`
+	}
+	if code := anchor.do("POST", "/api/v1/admin/workers/"+rented.pub+"/release", nil, &out); code != 200 || out.Jobs != 0 || out.Students != 1 {
+		t.Fatalf("handing back the ended machine's student: HTTP %d %+v", code, out)
+	}
+	var work Work
+	anchor.do("GET", "/api/v1/admin/work", nil, &work)
+	if work.ShadowWaiting != 1 || work.ShadowUnderWay != 0 {
+		t.Fatalf("the student is not waiting again: %d waiting, %d under way", work.ShadowWaiting, work.ShadowUnderWay)
+	}
+	task := fmt.Sprintf("/api/v1/shadow/batches/%s/tasks/%d", c.Task.Batch, c.Task.Index)
+	if code := rented.do("POST", task, map[string]any{"valid": true, "exam_loss": 5.4, "item_scores": []float64{-1, -1, -1}}, nil); code != 409 {
+		t.Fatalf("a student from the ended machine was taken: HTTP %d", code)
+	}
+	w.check()
+}

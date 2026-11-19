@@ -141,7 +141,10 @@ type Decision struct {
 	Live   int      // machines rented now
 	Launch int      // machines to rent now
 	End    []Ending // pods to end now
-	Note   string   // why fewer are rented than wanted, if they are
+	// Machines no pod is rented for that the server says still hold a job: ended a moment
+	// after they took it, or stopped partway through. What they hold is handed back.
+	Release []*Worker
+	Note    string // why fewer are rented than wanted, if they are
 }
 
 func (p Policy) decide(w *Work, workers []*Worker, spentToday float64, now time.Time) Decision {
@@ -152,6 +155,9 @@ func (p Policy) decide(w *Work, workers []*Worker, spentToday float64, now time.
 		switch st := wk.state(now, p); st {
 		case "free":
 			free++
+			if wk.Machine != nil && wk.Machine.Busy != "" {
+				d.Release = append(d.Release, wk)
+			}
 		case "stopped":
 			d.End = append(d.End, Ending{wk, "it stopped, or never asked for work"})
 		case "quiet":

@@ -590,6 +590,43 @@ func (f *Fleet) end(ctx context.Context, v *View, endings []Ending) error {
 	return f.writeLedger(v.Ledger)
 }
 
+// release hands back the jobs of machines that are gone. It is said, not stopped for, when it
+// cannot be done: the job's lease runs out in the end anyway, and the next look tries again.
+func (f *Fleet) release(ctx context.Context, gone []*Worker) {
+	for _, wk := range gone {
+		if f.o.DryRun {
+			f.say("would hand back what %s holds: it is not rented any more", wk.Key.Handle)
+			continue
+		}
+		jobs, students, err := f.st.release(ctx, f.op, wk.Key.Public)
+		switch {
+		case err != nil:
+			f.say("could not hand back what %s holds, though it is not rented any more: %v", wk.Key.Handle, err)
+		case jobs+students > 0:
+			f.say("handed back what %s held when it was ended: %s", wk.Key.Handle, held(jobs, students))
+		}
+	}
+}
+
+func held(jobs, students int) string {
+	var parts []string
+	switch jobs {
+	case 0:
+	case 1:
+		parts = append(parts, "1 job")
+	default:
+		parts = append(parts, fmt.Sprintf("%d jobs", jobs))
+	}
+	switch students {
+	case 0:
+	case 1:
+		parts = append(parts, "1 of the next exam's students")
+	default:
+		parts = append(parts, fmt.Sprintf("%d of the next exam's students", students))
+	}
+	return strings.Join(parts, " and ")
+}
+
 func (f *Fleet) say(format string, args ...any) {
 	fmt.Fprintf(f.out, "%s  %s\n", f.now().UTC().Format("15:04:05"), fmt.Sprintf(format, args...))
 }
