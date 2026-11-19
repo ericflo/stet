@@ -71,7 +71,7 @@ func (w *world) postExam(by *actor, idx int, table []ItemInfo) (int, string) {
 	code := by.do("POST", fmt.Sprintf("/api/v1/admin/rounds/%s/exam", roundID(w.app.season.ID, idx)), map[string]any{
 		"items_digest": nextDigest, "items_file": base64.StdEncoding.EncodeToString(file), "table": table,
 		"public_file": base64.StdEncoding.EncodeToString(public),
-		"languages": map[string]float64{"en": 60, "de": 40}, "fresh": 6,
+		"languages":   map[string]float64{"en": 60, "de": 40}, "fresh": 6,
 	}, &out)
 	return code, out.Error
 }

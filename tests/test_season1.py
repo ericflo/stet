@@ -85,6 +85,7 @@ def test_a_round_carries_its_exams_digest_through_its_description():
 
 
 def test_a_grade_on_the_next_exam_reports_every_items_score(monkeypatch):
+    pytest.importorskip("torch")
     from stet import grade as grading
     from stet import tok
 
