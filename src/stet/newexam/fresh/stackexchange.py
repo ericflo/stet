@@ -25,7 +25,26 @@ def _params(extra: dict) -> dict:
 
 
 def sites() -> dict[str, str]:
-    """Every main site (no meta sites): its api name and its address."""
+    """Every main site (no meta sites): its api name and its address. Kept for a week, as the list
+    rarely changes and a harvest without a key has few requests to spare."""
+    import json
+    import time
+
+    from ...data import cache_dir
+
+    path = cache_dir() / "stackexchange-sites.json"
+    try:
+        if time.time() - path.stat().st_mtime < 7 * 86400:
+            return json.loads(path.read_text())
+    except (OSError, ValueError):
+        pass
+    found = _sites()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(found))
+    return found
+
+
+def _sites() -> dict[str, str]:
     out = {}
     page = 1
     while True:
@@ -60,7 +79,7 @@ def harvest(start: int, end: int, site_urls: dict[str, str], log=print) -> list[
             qs = _all("questions", {"site": site, "fromdate": start, "todate": end, "sort": "creation", "order": "asc", "filter": "withbody"})
             for q in qs:
                 text = html_text(q.get("body", ""))
-                if len(text) < MIN_CHARS:
+                if len(text) < MIN_CHARS or q.get("last_edit_date", 0) >= end:  # edited since the window closed
                     continue
                 docs.append(Doc(source="stackexchange", id=f"{site}:q{q['question_id']}", url=q.get("link", ""), lang=_lang(site),
                                 license=LICENSE, published=int(q["creation_date"]), title=html_text(q.get("title", "")), text=text,
@@ -75,7 +94,7 @@ def harvest(start: int, end: int, site_urls: dict[str, str], log=print) -> list[
                 for a in ans:
                     q = parents.get(a["question_id"])
                     text = html_text(a.get("body", ""))
-                    if not q or len(text) < MIN_CHARS:
+                    if not q or len(text) < MIN_CHARS or a.get("last_edit_date", 0) >= end:
                         continue
                     docs.append(Doc(source="stackexchange", id=f"{site}:a{a['answer_id']}", lang=_lang(site), license=LICENSE,
                                     url=f"{base}/a/{a['answer_id']}",

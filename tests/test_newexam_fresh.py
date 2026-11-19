@@ -29,6 +29,13 @@ def test_wikitext_becomes_prose():
     assert "Ada was a mathematical writer." in out and "She worked with Charles Babbage on the Analytical Engine." in out
     for junk in ("[[", "{{", "<ref", "File:", "a list item", "'''", "<!--", "}}"):
         assert junk not in out
+    # what the first shadow runs found left over: captions with links in them, entities, a citation
+    # its editor broke, a table cut in half by a diff, files under other languages' names
+    left = strip_wikitext("[[File:Teddy Hill.jpg|thumb|At [[Minton's Playhouse]], 1947; by [[William P. Gottlieb]]]]\n"
+                          "Theodore Hill (1909 &ndash; 1978) was a band leader.\n"
+                          'He was ranked 48th."{{cite web }url= https://example.org |title=Unsung |first1=Dean}}\n'
+                          '{| class="wikitable"\n[[Файл:Map.png|мини|Карта]]Population.\n[[Kategorie:Musiker]]')
+    assert left == "Theodore Hill (1909 – 1978) was a band leader.\n\nPopulation.", left
     reply = strip_wikitext(":: I agree with this.&nbsp;—[[User:Ann|Ann]] ([[User talk:Ann|talk]]) 12:00, 18 November 2026 (UTC)")
     assert reply == "I agree with this.\xa0—Ann (talk) 12:00, 18 November 2026 (UTC)"
 
@@ -37,10 +44,10 @@ def test_html_text():
     assert html_text("<p>One <b>two</b></p><p>Three</p>") == "One two\nThree"
 
 
-def _doc(i, lang="en", source="wikipedia", topic="Q5", question=""):
+def _doc(i, lang="en", source="wikipedia", topic="Q5", question="", title=None):
     text = f"Document number {i} has a body of plain text that goes on for a while. " * 8
     return Doc(source=source, id=f"{lang}:{i}", url=f"https://example.org/{i}", lang=lang, license="CC BY-SA 4.0",
-               published=1_800_000_000 + i, title=f"Title {i}", text=text, topic=topic, question=question)
+               published=1_800_000_000 + i, title=title or f"Title {i}", text=text, topic=topic, question=question)
 
 
 def test_documents_become_items_with_corners():
@@ -51,8 +58,8 @@ def test_documents_become_items_with_corners():
     assert len(ans) == 1 and ans[0].kind == "answer" and ans[0].ctx.startswith("Question: Title 2")
     added = items_of(_doc(3, source="wikipedia-added", lang="simple"))
     assert added[0].lang == "en" and added[0].corner.endswith("/added")
-    talk = items_of(_doc(4, source="wikipedia-talk", topic="talk"))
-    assert talk[0].fmt == "dialogue" and talk[0].corner.startswith("fresh/wikipedia-talk/en/talk/") and talk[0].text.startswith("Talk: Title 4")
+    talk = items_of(_doc(4, source="wikipedia-talk", topic="talk", title="Talk:Teddy Hill"))
+    assert talk[0].fmt == "dialogue" and talk[0].corner.startswith("fresh/wikipedia-talk/en/talk/") and talk[0].text.startswith("Talk:Teddy Hill\n")
 
 
 def test_selection_caps_corners_shares_languages_and_is_repeatable():

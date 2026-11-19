@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import time
 from pathlib import Path
 
@@ -14,8 +15,15 @@ SE_SITES = 30  # sites a harvest without a StackExchange key visits, the largest
 SE_MAJOR = ["stackoverflow", "math", "superuser", "serverfault", "askubuntu", "unix", "physics", "electronics", "english", "stats",
             "softwareengineering", "apple", "tex", "dba", "codereview", "mathoverflow.net", "security", "academia", "gis", "diy",
             "es.stackoverflow", "ru.stackoverflow", "pt.stackoverflow", "ja.stackoverflow"]
-ADDED_EN, ADDED_OTHER = 150, 20  # edits a harvest reads per language, for text added to existing articles
+TARGET = 900  # fresh items a round would like
+ADDED_MIN = 20  # edits a harvest reads at least, per language, for text added to existing articles:
 TALK_EN, TALK_OTHER = 60, 8  # and for comments on talk pages
+
+
+def added_cap(lang: str) -> int:
+    """Twice the language's share of the round's fresh items, so that the languages the web writes
+    most in are not left resting on a handful of items."""
+    return max(ADDED_MIN, math.ceil(2 * TARGET * SHARES.get(lang, 0.0) / 100))
 
 
 def harvest_window(seed: bytes, start: int, end: int, dest: Path, langs: list[str] | None = None, se_sites: int | None = SE_SITES,
@@ -26,7 +34,7 @@ def harvest_window(seed: bytes, start: int, end: int, dest: Path, langs: list[st
     added = []
     for lang in sorted(SHARES) if langs is None else langs:
         try:
-            added += wikipedia.additions(lang, start, end, ADDED_EN if lang == "en" else ADDED_OTHER, Rng(seed, f"fresh/added/{lang}"), log=log)
+            added += wikipedia.additions(lang, start, end, added_cap(lang), Rng(seed, f"fresh/added/{lang}"), log=log)
         except Exception as e:
             log(f"  wikipedia-added {lang}: {type(e).__name__}: {e}")
     log(f"  wikipedia-added: {len(added)} additions to existing articles")

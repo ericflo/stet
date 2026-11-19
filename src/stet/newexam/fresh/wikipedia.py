@@ -58,6 +58,19 @@ def _pages(lang: str, pageids: list[int]) -> list[dict]:
     return out
 
 
+def _as_of(lang: str, pageid: int, end: int) -> tuple[dict, str] | None:
+    """A page as it stood when the window closed: its last revision before end, as prose."""
+    d = get_json(f"https://{lang}.wikipedia.org/w/api.php", {
+        "action": "query", "prop": "revisions", "pageids": pageid, "rvlimit": 1, "rvdir": "older", "rvstart": iso(end - 1),
+        "rvprop": "ids|timestamp|content", "rvslots": "main", "format": "json", "formatversion": 2})
+    pages = d.get("query", {}).get("pages") or [{}]
+    revs = pages[0].get("revisions") or []
+    if not revs:
+        return None
+    r = revs[0]
+    return {"revid": r["revid"], "timestamp": r["timestamp"]}, strip_wikitext(r.get("slots", {}).get("main", {}).get("content", ""))
+
+
 def _classes(qids: list[str]) -> dict[str, str]:
     """What each Wikidata item is an instance of (its first P31), by item id."""
     out = {}
@@ -84,7 +97,14 @@ def harvest(start: int, end: int, langs: list[str] | None = None, log=print) -> 
             for p in _pages(lang, [rc["pageid"] for rc in new]):
                 text = (p.get("extract") or "").strip()
                 rev = (p.get("revisions") or [{}])[0]
-                if len(text) < MIN_CHARS or "revid" not in rev:
+                if "revid" not in rev:
+                    continue
+                if _ts(rev["timestamp"]) >= end:  # edited since the window closed: take it as it stood then
+                    then = _as_of(lang, p["pageid"], end)
+                    if then is None:
+                        continue
+                    rev, text = then
+                if len(text) < MIN_CHARS:
                     continue
                 created = next(_ts(rc["timestamp"]) for rc in new if rc["pageid"] == p["pageid"])
                 pending.append((lang, p, rev, text, created))
@@ -147,6 +167,16 @@ def added_lines(diff_html: str) -> list[str]:
     return out
 
 
+# Files and categories, under the names the larger Wikipedias give them, and anything that
+# names an image.
+_FILE = re.compile(r"\[\[\s*(?:File|Image|Category|Datei|Fichier|Archivo|Arquivo|Ficheiro|Imagen|Imagem|Bild|Kategorie|Catégorie|"
+                   r"Categoría|Categoria|Categorie|Kategoria|Kategori|Kategorija|Luokka|Tiedosto|Bestand|Plik|Soubor|Dosya|Fil|Kép|"
+                   r"Файл|Изображение|Категория|Категорія|Αρχείο|Κατηγορία|קובץ|קטגוריה|ملف|تصنيف|پرونده|رده|ファイル|画像|カテゴリ|"
+                   r"文件|图像|分类|檔案|分類|파일|분류|Tập tin|Hình|Thể loại|Berkas|Berkas|Gambar)\s*:[^\[\]]*\]\]"
+                   r"|\[\[[^\[\]|]*\.(?:jpe?g|png|svg|gif|tiff?|webp|webm|ogg|ogv|pdf)\s*\|[^\[\]]*\]\]", re.I)
+_LEFT = re.compile(r"\{\{|\}\}|\[\[|\]\]|\|\s*[\w-]+\s*=")
+
+
 def strip_wikitext(text: str) -> str:
     """Wikitext to plain prose, roughly: references, templates, tables, files and markup go."""
     text = re.sub(r"<!--.*?-->", "", text, flags=re.S)
@@ -155,17 +185,19 @@ def strip_wikitext(text: str) -> str:
     for _ in range(5):  # templates nest
         text = re.sub(r"\{\{[^{}]*\}\}", "", text)
     text = re.sub(r"\{\|.*?\|\}", "", text, flags=re.S)
-    text = re.sub(r"\[\[(?:File|Image|Category|Datei|Fichier|Archivo|Kategorie|Catégorie|Categoría):[^\]]*\]\]", "", text, flags=re.I)
-    text = re.sub(r"\[\[([^|\]]*\|)?([^\]]*)\]\]", r"\2", text)
+    for _ in range(4):  # links nest, inside the captions of files: the innermost go first
+        text = _FILE.sub("", text)
+        text = re.sub(r"\[\[([^\[\]|]*\|)?([^\[\]]*)\]\]", r"\2", text)
     text = re.sub(r"\[https?://\S+ ([^\]]*)\]", r"\1", text)
     text = re.sub(r"\[https?://\S+\]", "", text)
     text = re.sub(r"'{2,}", "", text)
     text = re.sub(r"^=+\s*(.*?)\s*=+\s*$", r"\1", text, flags=re.M)
     text = re.sub(r"<[^>]+>", "", text)
     text = html.unescape(text)
-    text = re.sub(r"^[*#;|!].*$", "", text, flags=re.M)  # list markup, table rows
+    text = re.sub(r"^(\{\||[*#;|!]).*$", "", text, flags=re.M)  # list markup, table rows
     text = re.sub(r"^:+\s*", "", text, flags=re.M)  # indentation, as replies on talk pages are indented
     text = re.sub(r"^[\s{}|\[\]=]*$", "", text, flags=re.M)  # what is left of markup that spanned lines
+    text = "\n".join(line for line in text.split("\n") if not _LEFT.search(line))  # markup broken by its editor
     return re.sub(r"\n{3,}", "\n\n", re.sub(r"[ \t]{2,}", " ", text)).strip()
 
 

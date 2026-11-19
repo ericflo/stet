@@ -76,7 +76,7 @@ def items_of(doc: Doc) -> list[Item]:
                      text=_clip(f"{doc.title}\n\n{doc.text}", PASSAGE_CHARS))]
     if doc.source == "wikipedia-talk":
         return [Item(kind="passage", corner=f"{base}/{abs(hash_title(doc.title)) % 64}", fmt="dialogue", lang=lang, source=src,
-                     text=_clip(f"Talk: {doc.title}\n\n{doc.text}", PASSAGE_CHARS))]
+                     text=_clip(f"{doc.title}\n\n{doc.text}", PASSAGE_CHARS))]  # the title names the talk page
     if doc.source == "stackexchange":
         fmt = "code" if _codeish(doc.text) else "dialogue"
         if doc.question:
