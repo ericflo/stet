@@ -265,6 +265,7 @@
   "margin": {
    "large": 0.01,
    "micro": 0.02,
+   "nano": 0.03,
    "standard": 0.01
   }
  },
