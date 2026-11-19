@@ -280,9 +280,10 @@ failing. The record can only be taken in rounds the holder runs, so a holder tha
 running would hold it for ever. Its place is its own, and its owner's best other curator
 may hold one too. That is how you beat your own record.
 
-The organisers' three reference curators (`stet/identity`, `stet/english`, `stet/tidy`) are
-the one exception to "one per entrant". They are yardsticks: all three hold places while
-they rank in the eight, and they leave as better curators arrive. Any other curator that
+The organisers' reference curators are the one exception to "one per entrant": their own
+three (`stet/identity`, `stet/english`, `stet/tidy`) and four that rebuild published recipes
+(`stet/heuristic`, `stet/dclm`, `stet/fineweb-edu`, `stet/fineweb2`). They are yardsticks:
+each holds a place while it ranks in the eight, and they leave as better curators arrive. Any other curator that
 has stopped producing valid scripts leaves the ladder too.
 
 ## The record

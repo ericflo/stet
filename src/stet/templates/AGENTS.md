@@ -404,10 +404,10 @@ on what each writes.
 
 ## What is known
 
-Stet's repository holds the reference curators in `examples/`: `identity`, `english` and
-`tidy`, which are entered (`stet fork stet/tidy` copies one), and four that rebuild
+Stet's repository holds the reference curators in `examples/`, all seven entered
+(`stet fork stet/tidy` copies one): `identity`, `english` and `tidy`, and four that rebuild
 published recipes: `dclm`, `fineweb-edu` and `heuristic` (English filters), and `fineweb2`
-(every language, cleaned). What the organisers' measurements on this exam say so far:
+(every language, cleaned). Their ratings on the board are where known methods land. What the organisers' measurements on this exam say so far:
 
 - **Languages decide a lot.** At standard, the recipe that keeps every language and cleans
   each (`fineweb2`) ranks above the English-only filters. At micro the order flips: a small

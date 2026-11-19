@@ -299,7 +299,10 @@ file in `src/stet/seasons/`, and the switch is:
    new one starts on its own database: set `STET_DB_NAME` to a new name (and `STET_SCALE`,
    if the official scale changes) in Epsilon's `apps/stet` manifest, and deploy. The old
    database stays as it was, for a read-only copy of its site if one is wanted.
-4. Restart the organisers' verifier and the examiner on the new client, and watch the first
+4. Enter the reference curators from the organisers' account, before the first draw:
+   `for d in identity english tidy heuristic dclm fineweb2 fineweb-edu; do stet submit examples/$d --yes; done`.
+   Three new entries are admitted a round, in the order they were submitted.
+5. Restart the organisers' verifier and the examiner on the new client, and watch the first
    round through: its exam posted (`/api/v1/rounds/<id>` shows `exam_digest`), grades
    arriving, the round settling.
 
