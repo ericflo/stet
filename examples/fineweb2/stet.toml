@@ -1,0 +1,6 @@
+# A reference curator: FineWeb-2's multilingual recipe, rebuilt. https://www.stetrun.com
+name = "fineweb2"
+description = "FineWeb-2's recipe, rebuilt without its per-language tuning: pages in every language, Gopher's quality and repetition rules adapted to scripts without spaces, FineWeb's line filters, exact and near duplicates dropped. A reference: in each language, data made this way beat raw crawl text."
+technique = "multilingual Gopher + FineWeb filters, exact and MinHash dedup, every language kept"
+entry = "python curator.py"
+license = "MIT"

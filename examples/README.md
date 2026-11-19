@@ -27,3 +27,6 @@ beats raw crawl text ([the reasoning](../docs/research/exam-first-principles.md#
 | `dclm` | DCLM-Baseline's filter: English pages ranked by its published fastText classifier (OpenHermes 2.5 and ELI5 against web), the top kept. |
 | `fineweb-edu` | FineWeb-Edu's filter: English pages ranked by its published educational-value classifier, the top kept. |
 | `heuristic` | Gopher's quality and repetition rules, C4's line filters and exact deduplication, on English pages. |
+| `fineweb2` | FineWeb-2's multilingual recipe without its per-language tuning: every language kept, cleaned and deduplicated. |
+
+The English ones decide what is English as the published recipes do: Meta's fastText language identification, English at 0.65 or more.

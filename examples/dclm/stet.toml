@@ -10,3 +10,9 @@ path = "dclm-fasttext/openhermes_reddit_eli5_vs_rw_v2_bigram_200k_train.bin"
 url = "https://huggingface.co/mlfoundations/fasttext-oh-eli5/resolve/cd8b714a90f2dbcd3b02cf5fc972e5d7c7f4f107/openhermes_reddit_eli5_vs_rw_v2_bigram_200k_train.bin"
 sha256 = "f8da53846636ce5ed2836f95e2fffada6aade035e2169af1d6c099bda2674915"
 size = 2387190433
+
+[[assets]]
+path = "lid/model.bin"
+url = "https://huggingface.co/facebook/fasttext-language-identification/resolve/3af127d4124fc58b75666f3594bb5143b9757e78/model.bin"
+sha256 = "8ded5749a2ad79ae9ab7c9190c7c8b97ff20d54ad8b9527ffa50107238fc7f6a"
+size = 1176355829

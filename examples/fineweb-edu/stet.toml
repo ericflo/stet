@@ -40,3 +40,9 @@ path = "fineweb-edu-classifier/vocab.txt"
 url = "https://huggingface.co/HuggingFaceFW/fineweb-edu-classifier/resolve/284663cbb2dabf9bda30d8f8cc49601251ee1631/vocab.txt"
 sha256 = "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3"
 size = 231508
+
+[[assets]]
+path = "lid/model.bin"
+url = "https://huggingface.co/facebook/fasttext-language-identification/resolve/3af127d4124fc58b75666f3594bb5143b9757e78/model.bin"
+sha256 = "8ded5749a2ad79ae9ab7c9190c7c8b97ff20d54ad8b9527ffa50107238fc7f6a"
+size = 1176355829

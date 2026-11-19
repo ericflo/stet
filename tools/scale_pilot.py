@@ -124,6 +124,35 @@ def report(results: dict[str, dict], out: Path) -> str:
     return text
 
 
+def _spearman(a: dict[str, float], b: dict[str, float]) -> float:
+    names = sorted(set(a) & set(b))
+    if len(names) < 3:
+        return float("nan")
+
+    def ranks(d):
+        order = sorted(names, key=lambda n: d[n])
+        return {n: i for i, n in enumerate(order)}
+
+    ra, rb = ranks(a), ranks(b)
+    n = len(names)
+    return 1 - 6 * sum((ra[x] - rb[x]) ** 2 for x in names) / (n * (n * n - 1))
+
+
+def agreement(results: dict[str, dict]) -> str:
+    """How far each exam's order at one scale holds at the next."""
+    lines = ["\nrank agreement between scales (Spearman):"]
+    scales = list(results)
+    for key, exam in (("next_score", "next exam"), ("season_gain", "season exam")):
+        vals = {s: {r["name"]: r[key] for r in results[s]["entries"] if r["valid"] and r["name"] != "identity"} for s in scales}
+        for a, b in zip(scales, scales[1:], strict=False):
+            lines.append(f"  {exam}: {a} vs {b}: {_spearman(vals[a], vals[b]):+.2f}")
+    for s in scales:
+        vals = {r["name"]: r for r in results[s]["entries"] if r["valid"] and r["name"] != "identity"}
+        rho = _spearman({n: r["next_score"] for n, r in vals.items()}, {n: r["season_gain"] for n, r in vals.items()})
+        lines.append(f"  {s}: next exam vs season exam: {rho:+.2f}")
+    return "\n".join(lines)
+
+
 def english_slice(out: Path, scale: str) -> dict[str, float]:
     """Each curator's next-exam score on English items only: what the published order speaks to."""
     d = out / scale
@@ -153,7 +182,18 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--sandbox", default="none", help="none for the organisers' own curators; bwrap for anyone else's")
     ap.add_argument("--edit-only", action="store_true", help="run the curators and keep their scripts; train nothing")
+    ap.add_argument("--report-only", action="store_true", help="report on the scales already done, from their summaries")
     args = ap.parse_args()
+    if args.report_only:
+        out = Path(args.out).expanduser()
+        results = {name: json.loads((out / name / "summary.json").read_text()) for name in args.scales.split(",")
+                   if (out / name / "summary.json").exists()}
+        print(report(results, out))
+        print(agreement(results))
+        for scale in results:
+            eng = english_slice(out, scale)
+            print(f"{scale}, English items only: " + ", ".join(f"{n} {v:+.4f}" for n, v in sorted(eng.items(), key=lambda x: -x[1])))
+        return
     season = load_season("s0")
     from stet.spec import parse_round_id
 

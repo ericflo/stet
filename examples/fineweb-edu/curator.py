@@ -20,20 +20,26 @@ import sys
 from stet.curator import Task
 
 BYTES_PER_TOKEN = 3.7
-STOPWORDS = (" the ", " of ", " and ", " to ", " in ", " is ", " that ", " for ")
 BATCH = 64
 RESERVE_SECONDS = 30
 
 
-def looks_english(text: str) -> bool:
-    sample = text[:3000]
-    if len(sample) < 200:
+LID_MIN = 0.65  # RefinedWeb's and FineWeb's threshold for English
+_lid = None
+
+
+def looks_english(task, text: str) -> bool:
+    """English, as the published recipes decide it: fastText language identification, the
+    English score at least 0.65 (Meta's model, facebook/fasttext-language-identification)."""
+    global _lid
+    if _lid is None:
+        import fasttext
+
+        _lid = fasttext.load_model(str(task.asset("lid/model.bin")))
+    if len(text) < 200:
         return False
-    letters = sum(c.isascii() and (c.isalpha() or c == " ") for c in sample)
-    if letters / len(sample) < 0.75:
-        return False
-    low = sample.lower()
-    return sum(low.count(w) for w in STOPWORDS) >= max(4, len(sample) // 300)
+    labels, probs = _lid.predict(" ".join(text[:2000].split()))
+    return labels[0] == "__label__eng_Latn" and float(probs[0]) >= LID_MIN
 
 
 def edit(task: Task):
@@ -44,7 +50,7 @@ def edit(task: Task):
     seen: set[bytes] = set()
     cands = []
     for i, text in corpus:
-        if not looks_english(text):
+        if not looks_english(task, text):
             continue
         key = hashlib.blake2b(text.encode("utf-8", "replace"), digest_size=8).digest()
         if key in seen:
