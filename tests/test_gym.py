@@ -2,7 +2,7 @@
 
 import pytest
 
-from stet.newexam.items import Item
+from stet.exam.items import Item
 
 pytest.importorskip("torch")
 

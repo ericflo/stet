@@ -7,8 +7,8 @@ import pytest
 import zstandard
 
 from stet import data
-from stet.newexam import gen
-from stet.newexam.items import Item, digest
+from stet.exam import gen
+from stet.exam.items import Item, digest
 from stet.spec import load_season, official_round, practice_round
 
 
@@ -26,7 +26,7 @@ def test_the_season_is_the_next_exam_at_the_standard_scale():
 
     tok = resources.files("stet.seasons").joinpath(s1.raw["tokenizer"]["file"]).read_bytes()
     assert hashlib.sha256(tok).hexdigest() == s1.raw["tokenizer"]["sha256"]
-    facts = resources.files("stet.newexam").joinpath("data", s1.raw["exam"]["facts"]["file"]).read_bytes()
+    facts = resources.files("stet.exam").joinpath("data", s1.raw["exam"]["facts"]["file"]).read_bytes()
     assert hashlib.sha256(facts).hexdigest() == s1.raw["exam"]["facts"]["sha256"]
 
 
@@ -91,7 +91,7 @@ def test_a_grade_on_the_next_exam_reports_every_items_score(monkeypatch):
     monkeypatch.setattr(grading, "file_sha256", lambda path, limit: "ab" * 32)
     monkeypatch.setattr(grading, "hardware_info", lambda device: {})
     monkeypatch.setattr(tok, "load_encoding", lambda season: None)
-    import stet.newexam.score as score
+    import stet.exam.score as score
 
     monkeypatch.setattr(score, "sit", lambda model, its, enc, eot, ctx, device: [-1.0, -2.0, -3.0])
     s1 = load_season("s1")
@@ -110,21 +110,21 @@ def test_a_grade_on_the_next_exam_reports_every_items_score(monkeypatch):
 def test_the_examiner_makes_a_rounds_exam_from_its_harvest_and_seed(monkeypatch, tmp_path):
     import base64
 
-    from stet.newexam import examine
-    from stet.newexam.aggregate import score_from_table
-    from stet.newexam.farm import unpack_items
-    from stet.newexam.fresh import Doc, write_snapshot
+    from stet.exam import examine
+    from stet.exam.aggregate import score_from_table
+    from stet.exam.farm import unpack_items
+    from stet.exam.fresh import Doc, write_snapshot
 
     s1 = load_season("s1")
     rnd = _official(s1)
     docs = [Doc(source="wikipedia", id=f"en:{i}", url=f"https://example.org/{i}", lang="en", license="CC BY-SA 4.0",
                 published=1_800_000_000 + i, title=f"Title {i}", text=f"Article number {i} says something new. " * 20, topic=f"Q{i}")
             for i in range(30)]
-    monkeypatch.setattr("stet.newexam.fresh.harvest.harvest_window",
+    monkeypatch.setattr("stet.exam.fresh.harvest.harvest_window",
                         lambda seed, start, end, dest, log=print: write_snapshot(docs, dest, {"window": [start, end]}))
     monkeypatch.setattr(data, "corpus", lambda rnd, scale: object())
-    monkeypatch.setattr("stet.newexam.fresh.langs.shares", lambda corpus, seed: {"en": 40.0, "ru": 20.0})
-    monkeypatch.setattr("stet.newexam.decontam.seen", lambda items, corpus, season, log=print: {0})  # the corpus holds one
+    monkeypatch.setattr("stet.exam.fresh.langs.shares", lambda corpus, seed: {"en": 40.0, "ru": 20.0})
+    monkeypatch.setattr("stet.exam.decontam.seen", lambda items, corpus, season, log=print: {0})  # the corpus holds one
     exam = examine.build(rnd, s1.scale("standard"), 1_800_000_000, tmp_path / "work", log=lambda m: None)
     items = unpack_items(base64.b64decode(exam["items_file"]))
     assert exam["round"] == rnd.id and exam["items_digest"] == digest(items) and len(exam["table"]) == len(items)
@@ -137,7 +137,7 @@ def test_the_examiner_makes_a_rounds_exam_from_its_harvest_and_seed(monkeypatch,
 
 
 def test_a_settled_rounds_published_exam_gives_the_open_items_and_checks_against_the_digest():
-    from stet.newexam.examine import public_items, read_public
+    from stet.exam.examine import public_items, read_public
 
     s1 = load_season("s1")
     generated = gen.generate(b"pub", per_corner=1)[:5]

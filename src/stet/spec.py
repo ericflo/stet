@@ -72,7 +72,7 @@ class Season:
         h = hashlib.sha256(json.dumps(rules, sort_keys=True, separators=(",", ":")).encode())
         h.update(resources.files("stet.seasons").joinpath(self.raw["tokenizer"]["file"]).read_bytes())
         # the facts its knowledge items ask
-        h.update(resources.files("stet.newexam").joinpath("data", self.raw["exam"]["facts"]["file"]).read_bytes())
+        h.update(resources.files("stet.exam").joinpath("data", self.raw["exam"]["facts"]["file"]).read_bytes())
         for s in self.pool("gym"):
             h.update(bytes.fromhex(s.sha256))
         return h.hexdigest()

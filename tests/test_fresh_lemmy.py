@@ -5,8 +5,8 @@ import urllib.parse
 
 import pytest
 
-from stet.newexam.fresh import lemmy
-from stet.newexam.rng import Rng
+from stet.exam.fresh import lemmy
+from stet.exam.rng import Rng
 
 START = 1_800_000_000
 END = START + 3600

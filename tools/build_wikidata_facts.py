@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Build the season's list of facts the web knows, for the next exam's knowledge items.
+"""Build the season's list of facts the web knows, for the exam's knowledge items.
 
 Well-known subjects (most Wikipedia editions first) and one fact each, with labels in the
 exam's knowledge languages, from Wikidata through QLever's public endpoint (no key). A fact is
 kept only when its subject has exactly one value for it, so its answer is not in doubt.
 
-    python tools/build_wikidata_facts.py src/stet/newexam/data/facts-s1.jsonl.zst
+    python tools/build_wikidata_facts.py src/stet/exam/data/facts-s1.jsonl.zst
 """
 
 from __future__ import annotations

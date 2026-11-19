@@ -2,10 +2,10 @@
 
 import collections
 
-from stet.newexam.aggregate import kind_of
-from stet.newexam.fresh import Doc, html_text, read_snapshot, write_snapshot
-from stet.newexam.fresh.select import items_of, select
-from stet.newexam.fresh.wikipedia import added_lines, strip_wikitext
+from stet.exam.aggregate import kind_of
+from stet.exam.fresh import Doc, html_text, read_snapshot, write_snapshot
+from stet.exam.fresh.select import items_of, select
+from stet.exam.fresh.wikipedia import added_lines, strip_wikitext
 
 DIFF = """
 <tr><td colspan="2" class="diff-lineno">Line 5:</td><td colspan="2" class="diff-lineno">Line 5:</td></tr>
@@ -115,8 +115,8 @@ def test_snapshots_round_trip_with_a_stable_hash(tmp_path):
 def test_items_the_corpus_already_holds_are_found(tmp_path):
     from conftest import make_corpus
 
-    from stet.newexam.decontam import seen
-    from stet.newexam.items import Item
+    from stet.exam.decontam import seen
+    from stet.exam.items import Item
     from stet.spec import load_season
 
     quoted = "The river authority approved a new flood barrier for the lower town after three wet winters in a row."

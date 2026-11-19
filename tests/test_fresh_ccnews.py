@@ -8,8 +8,8 @@ import zlib
 
 import pytest
 
-from stet.newexam.fresh import ccnews
-from stet.newexam.rng import Rng
+from stet.exam.fresh import ccnews
+from stet.exam.rng import Rng
 
 T0 = calendar.timegm((2026, 11, 19, 10, 0, 0, 0, 0, 0))  # the window: 10:00 to 12:00 UTC
 T1 = T0 + 2 * 3600

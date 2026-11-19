@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Test vectors for the server's copy of the next exam's score (server/aggregate.go): item tables,
+"""Test vectors for the server's copy of the exam's score (server/aggregate.go): item tables,
 gains and language shares, and the score and pillars the harness gives them.
 
     python tools/aggregate_vectors.py
@@ -17,10 +17,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from stet.newexam import gen
-from stet.newexam.aggregate import FAMILY_PILLAR, SOURCE_KIND, item_table, round_score, score_from_table
-from stet.newexam.fresh.select import SHARES
-from stet.newexam.items import FORMATS, KINDS, Item
+from stet.exam import gen
+from stet.exam.aggregate import FAMILY_PILLAR, SOURCE_KIND, item_table, round_score, score_from_table
+from stet.exam.fresh.select import SHARES
+from stet.exam.items import FORMATS, KINDS, Item
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "server" / "testdata" / "aggregate_vectors.json"

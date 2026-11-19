@@ -1,4 +1,4 @@
-"""The server scores the next exam from a table of the items and their gains (server/aggregate.go):
+"""The server scores the exam from a table of the items and their gains (server/aggregate.go):
 the table must give what round_score gives, and the server's test vectors must be what the harness
 gives now, so the two cannot drift apart without a test failing."""
 
@@ -9,8 +9,8 @@ from pathlib import Path
 
 import pytest
 
-from stet.newexam import gen
-from stet.newexam.aggregate import item_table, round_score, score_from_table
+from stet.exam import gen
+from stet.exam.aggregate import item_table, round_score, score_from_table
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 

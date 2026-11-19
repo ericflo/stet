@@ -858,7 +858,7 @@ def fetch_exam(rnd, key) -> Path:
     import zstandard
 
     from . import data
-    from .newexam.items import Item, digest
+    from .exam.items import Item, digest
 
     if not rnd.exam_digest:
         raise data.ExamNotReady(f"{rnd.id}: the round's exam has not been posted yet")
@@ -1216,7 +1216,7 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
                          else "Running entrants' curators in the sandbox, and grading."))  # fmt: skip
     hello = {"harness": __version__, "season": season.id, "season_digest": season.digest, "hardware": hw, "edits": bool(args.edits), "sandbox": sandbox}
     # The organisers' machines, rented ones too, train students for the organisers when nothing
-    # official is waiting (newexam/farm.py: finals, measurements). Never before a job.
+    # official is waiting (exam/farm.py: finals, measurements). Never before a job.
     farm_ok = bool(((me or {}).get("account") or {}).get("anchor"))
     farm_rest = 0.0  # after a farm task fails, a while before the next is asked for
     done = failures = waits = 0
@@ -1331,7 +1331,7 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
                     out.line("", clean(r.get("message") or "No work right now."))
                     return
                 if farm_ok and holding is None and time.time() >= farm_rest:
-                    from .newexam import farm
+                    from .exam import farm
 
                     try:
                         if farm.turn(season, key, device, log=lambda m: out.line("farm", m)):

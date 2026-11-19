@@ -1,4 +1,4 @@
-"""The next exam: generators that every machine agrees on, answers that are right, and a score
+"""The exam: generators that every machine agrees on, answers that are right, and a score
 that rewards breadth."""
 
 import contextlib
@@ -11,11 +11,11 @@ import subprocess
 
 import pytest
 
-from stet.newexam import gen
-from stet.newexam.aggregate import gains, round_score, trimmed_mean
-from stet.newexam.gen import lexicon
-from stet.newexam.items import Item, digest
-from stet.newexam.rng import Rng
+from stet.exam import gen
+from stet.exam.aggregate import gains, round_score, trimmed_mean
+from stet.exam.gen import lexicon
+from stet.exam.items import Item, digest
+from stet.exam.rng import Rng
 
 SEED = b"pin"
 
@@ -35,7 +35,7 @@ def test_rng_is_pinned_and_in_range():
 def test_a_seed_always_makes_the_same_exam():
     # Pinned: a change to any generator that changes what a seed produces must bump gen.VERSION
     # and this hash, on purpose.
-    assert digest(gen.generate(SEED)) == "7093569d8ac52b277335a34b7e2766323b198e40bc9aa2f1f328a9a5c43ed16e"
+    assert digest(gen.generate(SEED)) == "590362424bd1050e51cfc6f3c8db7f1082688dc2493497858790b0638a654cf9"
     assert digest(gen.generate(SEED)) == digest(gen.generate(SEED))
     assert digest(gen.generate(b"other")) != digest(gen.generate(SEED))
 
@@ -156,8 +156,8 @@ def test_pillars_count_the_same_and_breadth_wins():
 
 
 def test_every_family_and_source_has_a_pillar():
-    from stet.newexam.aggregate import FAMILY_PILLAR, PILLARS, SOURCE_KIND, pillar_of
-    from stet.newexam.gen import FAMILIES
+    from stet.exam.aggregate import FAMILY_PILLAR, PILLARS, SOURCE_KIND, pillar_of
+    from stet.exam.gen import FAMILIES
 
     assert {f.NAME for f in FAMILIES} <= set(FAMILY_PILLAR) and set(FAMILY_PILLAR.values()) <= set(PILLARS)
     for src in SOURCE_KIND:
@@ -224,7 +224,7 @@ def student():
 def test_sitting_scores_only_what_it_should(student):
     import torch
 
-    from stet.newexam.score import nll, sequences, sit
+    from stet.exam.score import nll, sequences, sit
 
     model, enc, eot, ctx = student
     cpu = torch.device("cpu")
@@ -251,7 +251,7 @@ def test_sitting_scores_only_what_it_should(student):
 def test_transforms_are_right():
     import sqlite3
 
-    from stet.newexam.gen.transform import roman
+    from stet.exam.gen.transform import roman
 
     for n in (1, 4, 9, 14, 40, 90, 400, 1994, 2026, 3999):
         back, rest = 0, roman(n)
@@ -312,7 +312,7 @@ def test_students_farmed_out_to_the_organisers_machines_add_up_as_training_here_
     import zstandard
 
     from stet import client, data
-    from stet.newexam import farm
+    from stet.exam import farm
     from stet.script import write_script
     from stet.spec import load_season, practice_round
 
@@ -391,7 +391,7 @@ def test_students_farmed_out_to_the_organisers_machines_add_up_as_training_here_
     assert rows["same"]["score"] == 0.0 and json.loads((tmp_path / "farmed" / f"{same_sha[:16]}.json").read_text())["name"] == "(unedited)"
     assert farmed["items"] == len(items) and rows["other"]["valid"]
     # What the farm sends back is what training here gives: on a CPU, the same every time.
-    from stet.newexam.score import sit
+    from stet.exam.score import sit
     from stet.tok import load_encoding
 
     enc = load_encoding(season)
@@ -425,7 +425,7 @@ def test_reading_in_context_answers_are_in_the_context_or_follow_from_it():
 
 
 def test_knowledge_asks_facts_the_web_knows_in_ten_languages():
-    from stet.newexam.gen import knowledge
+    from stet.exam.gen import knowledge
 
     assert ("France", "Paris") in knowledge.facts()[("capital", "en")]
     assert ("Francia", "París") in knowledge.facts()[("capital", "es")]

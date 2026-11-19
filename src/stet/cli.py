@@ -206,10 +206,10 @@ def _with_baseline(result: dict, rnd, scale, device, out: Out, skip: bool):
     from .pipeline import baseline
 
     base = baseline(rnd, scale, device, progress=out.progress("baseline"), log=lambda m: out.line("", out.dim("baseline " + m)))
-    # The gain is the next exam's aggregate of the item-by-item differences, with the languages
+    # The gain is the exam's aggregate of the item-by-item differences, with the languages
     # weighed by the published table (a round's own corpus is measured only for official rounds).
     from . import data
-    from .newexam.aggregate import gains, round_score
+    from .exam.aggregate import gains, round_score
 
     result["baseline"] = {"mean": base["exam"]["mean"]}
     if result["valid"]:
@@ -454,8 +454,8 @@ def cmd_examine(args):
 def _examine_one(args, round_id: str) -> None:
     from .client import fetch_round, need_key, request
     from .data import cache_dir
-    from .newexam.examine import examine
-    from .newexam.fresh.harvest import SETTLE
+    from .exam.examine import examine
+    from .exam.fresh.harvest import SETTLE
     from .spec import load_season, parse_round_id
 
     season = load_season(args.season)
@@ -480,7 +480,7 @@ def _examine_one(args, round_id: str) -> None:
 def _examine_follow(args) -> None:
     """Every open round, as soon as its exam can be made."""
     from .client import request
-    from .newexam.fresh.harvest import SETTLE
+    from .exam.fresh.harvest import SETTLE
     from .spec import load_season
 
     season = load_season(args.season)

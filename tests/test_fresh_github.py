@@ -12,8 +12,8 @@ from pathlib import Path
 
 import pytest
 
-from stet.newexam.fresh import github
-from stet.newexam.rng import Rng
+from stet.exam.fresh import github
+from stet.exam.rng import Rng
 
 T0 = calendar.timegm((2026, 11, 19, 13, 0, 0))  # the window opens at 13:00 UTC
 START, END = T0 + 1800, T0 + 5400  # 13:30 to 14:30: three hours of the archive cover it
@@ -269,7 +269,7 @@ def test_an_hour_missing_from_the_archive_loses_only_itself(archive):
 
 def test_languages_are_named_by_lid176(monkeypatch):
     """The language is what lid.176 (langs.model) reads at the start of the text, as its ISO code."""
-    from stet.newexam.fresh import langs
+    from stet.exam.fresh import langs
 
     seen = []
 

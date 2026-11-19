@@ -515,8 +515,8 @@ class Corpus:
 # --- finding text again ---------------------------------------------------------------------------
 #
 # Normalised text (lowercase, runs of whitespace collapsed), its sentence openings as keys of
-# `key_bytes` bytes, and a rolling hash that finds a key anywhere in a document. The next exam
-# uses them to drop fresh items that a round's corpus already holds (newexam/decontam.py).
+# `key_bytes` bytes, and a rolling hash that finds a key anywhere in a document. The exam
+# uses them to drop fresh items that a round's corpus already holds (exam/decontam.py).
 
 SENTENCE_END = re.compile(r"(?<=[.!?]) ")
 _HASH_P = 0x9E3779B97F4A7C15  # odd, so it has an inverse modulo 2**64
@@ -683,7 +683,7 @@ def prune_verified(rnd: Round, keep: int = 3) -> int:
 # --- exam ---------------------------------------------------------------------------------
 
 def round_exam(rnd: Round, scale: Scale):
-    """The round's exam: the next exam's items (stet.newexam), in order."""
+    """The round's exam: its items (stet.exam), in order."""
     return next_exam(rnd)
 
 
@@ -702,11 +702,11 @@ def exam_public_path(rnd: Round, digest: str) -> Path:
 
 
 def next_exam(rnd: Round):
-    """The next exam's items for a round. An official round's are the ones the organisers posted
+    """A round's exam items. An official round's are the ones the organisers posted
     after its draw (fetched by the grader beforehand: see client.fetch_exam); a practice or gym
     round's are generated from its seed."""
-    from .newexam import gen
-    from .newexam.items import Item
+    from .exam import gen
+    from .exam.items import Item
 
     cfg = rnd.season.raw["exam"]
     if gen.VERSION != int(cfg["generator_version"]):
@@ -719,7 +719,7 @@ def next_exam(rnd: Round):
     if path is not None and not path.exists() and exam_public_path(rnd, want).exists():
         # A settled round replayed anywhere: the published exam, which gives the generated items
         # and the openly licensed text whole, checked against the round's digest.
-        from .newexam.examine import read_public
+        from .exam.examine import read_public
 
         raw = zstandard.ZstdDecompressor().decompress(exam_public_path(rnd, want).read_bytes(), max_output_size=1 << 30)
         try:
@@ -738,7 +738,7 @@ def next_exam(rnd: Round):
 
 
 def exam_digest(exam) -> str:
-    from .newexam.items import digest
+    from .exam.items import digest
 
     return digest(exam)
 

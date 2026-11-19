@@ -2,8 +2,8 @@
 
 import pytest
 
-from stet.newexam.fresh import hackernews as hn
-from stet.newexam.rng import Rng
+from stet.exam.fresh import hackernews as hn
+from stet.exam.rng import Rng
 
 T0 = 1_800_000_000
 START, END = T0 + 10 * 1000, T0 + 10 * 1100  # ids 1000 to 1099

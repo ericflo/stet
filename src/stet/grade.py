@@ -28,9 +28,9 @@ def grade(
 ) -> dict:
     """Apply the script, train the student for the budget, sit the exam.
 
-    The exam is the round's items (stet.newexam). The result has every item's score, in bits
+    The exam is the round's items (stet.exam). The result has every item's score, in bits
     per byte, higher is better; the round's score is made from them against the round's
-    baseline (newexam.aggregate).
+    baseline (exam.aggregate).
 
     Never raises on a bad script: the result says `valid: false` and why. A script that
     breaks a rule scores as the unedited corpus (gain 0).
@@ -66,7 +66,7 @@ def grade(
         result["script"] = stats.to_dict(corpus)
         model, result["train"] = train(tokens, scale, season, rnd.init_seed, device, progress)
         t1 = time.time()
-        from .newexam.score import sit
+        from .exam.score import sit
 
         scores = sit(model, exam, enc, season.eot, scale.ctx, device)
         result["exam"] = {"kind": "next", "items": len(exam), "item_scores": [round(x, 6) for x in scores],

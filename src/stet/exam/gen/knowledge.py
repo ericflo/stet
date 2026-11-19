@@ -59,7 +59,7 @@ def facts() -> dict[tuple[str, str], list[tuple[str, str]]]:
     """(fact, language) -> [(subject, answer)], in the list's order."""
     import zstandard
 
-    raw = resources.files("stet.newexam").joinpath("data/facts-s1.jsonl.zst").read_bytes()
+    raw = resources.files("stet.exam").joinpath("data/facts-s1.jsonl.zst").read_bytes()
     out: dict[tuple[str, str], list[tuple[str, str]]] = {}
     for line in zstandard.ZstdDecompressor().decompress(raw, max_output_size=256 << 20).decode().splitlines():
         row = json.loads(line)

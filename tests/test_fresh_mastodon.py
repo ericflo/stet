@@ -8,9 +8,9 @@ import urllib.error
 
 import pytest
 
-from stet.newexam.fresh import mastodon
-from stet.newexam.fresh.mastodon import allowed, candidate, declined, snowflake, text_of, timeline
-from stet.newexam.rng import Rng
+from stet.exam.fresh import mastodon
+from stet.exam.fresh.mastodon import allowed, candidate, declined, snowflake, text_of, timeline
+from stet.exam.rng import Rng
 
 START, END = 1_790_000_000, 1_790_003_600
 LONG = "The river rose all night and by morning the old footbridge was gone, so we walked the long way round to school."

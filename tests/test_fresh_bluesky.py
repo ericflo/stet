@@ -8,8 +8,8 @@ import json
 
 import pytest
 
-from stet.newexam.fresh import bluesky
-from stet.newexam.fresh.bluesky import (
+from stet.exam.fresh import bluesky
+from stet.exam.fresh.bluesky import (
     CLOSE,
     CONT,
     PING,
@@ -31,7 +31,7 @@ from stet.newexam.fresh.bluesky import (
     unfaceted,
     width,
 )
-from stet.newexam.rng import Rng
+from stet.exam.rng import Rng
 
 # --- frames, from RFC 6455's own examples (section 5.7) --------------------------------------------
 

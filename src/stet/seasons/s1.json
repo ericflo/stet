@@ -39,7 +39,7 @@
   },
   "exam": {
     "about": "Seven capabilities, each counting the same, measured as the likelihood of fresh human writing published after the draw and of items generated from the round's seed. See docs/research/exam-first-principles.md.",
-    "generator_version": 6,
+    "generator_version": 7,
     "per_corner": 2,
     "more": {
       "agent": 4,
