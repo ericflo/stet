@@ -692,3 +692,56 @@ func TestTheBiggerStudentsGetTheCardThatTrainsOneForLeast(t *testing.T) {
 		t.Fatalf("for the bigger students with no ceiling of their own: %+v", gpus)
 	}
 }
+
+// A bare `status` judges the work as the service does, by the settings `scale --follow` was
+// started with: without them it would say what its own defaults would rent and end. Settings
+// given to status are taken over the service's.
+func TestStatusJudgesByTheServicesSettings(t *testing.T) {
+	rp, st := newFakeRunPod(t), newFakeStet(t)
+	home := t.TempDir()
+	op, _ := newKey("stet")
+	opPath := home + "/operator.json"
+	if err := op.save(opPath); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("RUNPOD_API_KEY", "rp-key")
+	common := []string{"--home", home, "--api", st.srv.URL, "--runpod-api", rp.srv.URL, "--key", opPath}
+	st.work = Work{ShadowLongWaiting: 7}
+
+	var out, errs bytes.Buffer
+	if err := run(append([]string{"status"}, common...), &out, &errs); err != nil {
+		t.Fatalf("%v\n%s", err, errs.String())
+	}
+	if !strings.Contains(out.String(), "The work wants 0 machines now (at most 6).") || strings.Contains(out.String(), "service") {
+		t.Fatalf("with no service, by its own defaults:\n%s", out.String())
+	}
+
+	o := &Options{}
+	fs := flags("scale", o)
+	fs.Bool("follow", false, "")
+	if _, err := parse(fs, append([]string{"--follow", "--max", "5", "--long-shadow", "600", "--gpu", "RTX 4090,RTX A5000"}, common...)); err != nil {
+		t.Fatal(err)
+	}
+	if err := keepService(fs, home, time.Unix(1795078800, 0)); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := run(append([]string{"status"}, common...), &out, &errs); err != nil {
+		t.Fatalf("%v\n%s", err, errs.String())
+	}
+	if !strings.Contains(out.String(), "The work wants 5 machines now (at most 5)") ||
+		!strings.Contains(out.String(), `Judged as the service judges it: scale --follow `) ||
+		!strings.Contains(out.String(), `--max 5`) || !strings.Contains(out.String(), `--gpu "RTX 4090,RTX A5000"`) ||
+		strings.Contains(out.String(), "--follow true") || !strings.Contains(out.String(), "(started Nov 19 09:00 UTC)") {
+		t.Fatalf("by the service's settings:\n%s", out.String())
+	}
+
+	// A setting given to status is taken over the service's.
+	out.Reset()
+	if err := run(append([]string{"status", "--max", "3"}, common...), &out, &errs); err != nil {
+		t.Fatalf("%v\n%s", err, errs.String())
+	}
+	if !strings.Contains(out.String(), "The work wants 3 machines now (at most 3)") {
+		t.Fatalf("with --max 3 given:\n%s", out.String())
+	}
+}

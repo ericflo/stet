@@ -60,7 +60,10 @@ stet-runpod resume                   # and start them again
 
 `status`, `scale`, `up` and `down` ask the server what is waiting
 (`GET /api/v1/admin/work`) with the organisers' own key, `~/.config/stet/key.json` by
-default (`--key`). Run them where that key is.
+default (`--key`). Run them where that key is. `status` judges the work by the settings
+`scale --follow` was last started with (kept in `service.json`), so that what it says the
+service would rent and end is what the service will; settings given to it are taken over
+those.
 
 How many it rents: one for every `--per-machine` (6) jobs a new machine could take now,
 counting a curator still to run as two (the run, and a grade of what it writes) and a

@@ -215,6 +215,9 @@ func cmdStatus(ctx context.Context, f *Fleet) error {
 	if d.Note != "" {
 		fmt.Fprintf(f.out, "(%s)\n", d.Note)
 	}
+	if svc := f.o.Service; svc != nil {
+		fmt.Fprintf(f.out, "Judged as the service judges it: scale --follow %s (started %s UTC)\n", svc, time.Unix(svc.At, 0).UTC().Format("Jan 2 15:04"))
+	}
 	return nil
 }
 

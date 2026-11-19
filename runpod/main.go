@@ -17,6 +17,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -54,6 +55,7 @@ Run any command with -h for its settings.
 
 // Options are the settings every command shares.
 type Options struct {
+	Service      *Service // the settings the service runs with, when status judges by them
 	Home         string
 	API          string
 	RunPodAPI    string
@@ -247,6 +249,16 @@ func run(args []string, stdout, stderr io.Writer) error {
 		if len(rest) > 0 && cmd != "up" && cmd != "down" && cmd != "ssh" {
 			return fmt.Errorf("%s takes no %q", cmd, rest[0])
 		}
+		if svc := loadService(o.Home); svc != nil {
+			// What the service will rent and end is what it judges by its own settings; any
+			// given here are taken over them.
+			so := &Options{}
+			sfs := flags(cmd, so)
+			sfs.SetOutput(io.Discard)
+			if _, err := parse(sfs, append(append([]string{}, svc.Args...), args...)); err == nil {
+				o, so.Service = so, svc
+			}
+		}
 		f, err := open(o, stdout, true, true)
 		if err != nil {
 			return err
@@ -264,6 +276,11 @@ func run(args []string, stdout, stderr io.Writer) error {
 		f, err := open(o, stdout, true, true)
 		if err != nil {
 			return err
+		}
+		if *follow {
+			if err := keepService(fs, o.Home, time.Now()); err != nil {
+				return err
+			}
 		}
 		return cmdScale(ctx, f, *follow)
 	case "up":
@@ -371,4 +388,68 @@ func open(o *Options, out io.Writer, runpod, operator bool) (*Fleet, error) {
 		f.op = k
 	}
 	return f, nil
+}
+
+// --- the settings the service runs with ----------------------------------------------------------
+//
+// `scale --follow` keeps the settings it was started with, so that `status` judges the work as
+// the service does: by its own defaults, a bare `stet-runpod status` would say what those
+// would rent and end, not what the service will.
+
+// Service is the settings `scale --follow` was last started with.
+type Service struct {
+	Args []string `json:"args"` // those given, and nothing else
+	At   int64    `json:"at"`
+}
+
+func servicePath(home string) string { return filepath.Join(home, "service.json") }
+
+func keepService(fs *flag.FlagSet, home string, at time.Time) error {
+	svc := Service{Args: []string{}, At: at.Unix()}
+	fs.Visit(func(fl *flag.Flag) {
+		if fl.Name != "follow" {
+			svc.Args = append(svc.Args, "--"+fl.Name+"="+fl.Value.String())
+		}
+	})
+	raw, err := json.Marshal(svc)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		return err
+	}
+	tmp := servicePath(home) + ".tmp"
+	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, servicePath(home))
+}
+
+func loadService(home string) *Service {
+	raw, err := os.ReadFile(servicePath(home))
+	if err != nil {
+		return nil
+	}
+	var svc Service
+	if json.Unmarshal(raw, &svc) != nil {
+		return nil
+	}
+	return &svc
+}
+
+// String is the settings as they would be typed.
+func (s *Service) String() string {
+	var words []string
+	for _, a := range s.Args {
+		name, value, _ := strings.Cut(a, "=")
+		switch {
+		case value == "true":
+			words = append(words, name)
+		case strings.ContainsAny(value, " \t"):
+			words = append(words, name, fmt.Sprintf("%q", value))
+		default:
+			words = append(words, name, value)
+		}
+	}
+	return strings.Join(words, " ")
 }
