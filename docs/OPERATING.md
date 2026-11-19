@@ -282,6 +282,35 @@ and which were measured again.
    in the bucket by hand, and said on the site.
 5. Put the final table on the site as a page.
 
+## Starting season 1
+
+Season 1 makes the next exam the score ([the plan](research/season-1-plan.md), [its rules](RULES-s1.md)).
+The code for it is in place and does nothing while the season is s0. Starting it:
+
+1. **End season 0 as its rules say.** The close is announced on the site at least two weeks
+   ahead, and then closed as above (the held-out pack published, the final table made).
+   The organisers may agree with the entrants to end it sooner.
+2. **The code.** In one commit:
+   - `CURRENT_SEASON = "s1"` and a new `HARNESS_VERSION` (0.4.0) in `src/stet/spec.py`;
+   - `python tools/export_season.py s1 > server/season.json`;
+   - `git mv docs/RULES.md docs/seasons/RULES-s0.md && git mv docs/RULES-s1.md docs/RULES.md`.
+
+   Then the tests, and push.
+3. **The server.** Season 1 starts on its own database, since rounds and the record are not
+   kept by season: set `STET_DB_NAME` to a new name and `STET_SCALE=standard` in epsilon's
+   `apps/stet` manifest, and deploy the image from step 2. Season 0's database stays as it
+   was, for a read-only copy of its site if one is wanted.
+4. **The examiner.** On an organisers' machine with the new client: `stet examine --follow`,
+   left running like the verifier (a `stet-examine` user service). It makes each round's
+   exam five hours after the draw, and nothing is graded until it does: if it stops, rounds
+   wait for it. It needs about 3 GB of disk a round and a gigabyte of news downloads an hour
+   of window.
+5. **The machines.** Restart the organisers' verifier on the new client. stet-runpod's
+   machines install the newest client when they start. A standard student needs a GPU with
+   12 GB or more, and trains in about 18 minutes on a 3090 or a 4070 Ti.
+6. **Then** `stet-runpod resume`, and watch the first round through: its exam posted
+   (`/api/v1/rounds/<id>` shows `exam_digest`), grades arriving, the round settling.
+
 ## The next exam's shadow
 
 Season 0 is measured again, round by round, on the exam proposed for season 1
