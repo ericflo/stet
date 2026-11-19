@@ -7,7 +7,7 @@ import (
 	"unicode"
 )
 
-// speeds say roughly how quickly each kind of GPU trains one of the next exam's students,
+// speeds say roughly how quickly each kind of GPU trains one of the organisers' students,
 // against an RTX 3090: from published training benchmarks, and the RTX A4000's from the
 // students it trained. They only order the kinds tried for the bigger students, where an
 // hour of a quick card can cost less than the hours of a cheap one, so a rough figure does.

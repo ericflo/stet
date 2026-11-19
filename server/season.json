@@ -19,7 +19,7 @@
   "key_bytes": 64,
   "min_letters": 38
  },
- "digest": "296f19ebcf6752a18c23de626fdbf3b5b12fff67eba4984984bfbaea5118a14a",
+ "digest": "669816d30faaa9634289849409e7e2bd15288616e79ca3f5728d8141c8e8a918",
  "draw_grid_seconds": 600,
  "environment": {
   "also": {
@@ -136,25 +136,27 @@
    "nvidia_windows": "https://download.pytorch.org/whl/cu132"
   }
  },
- "exam_file": "exam-s0.jsonl.zst",
- "exam_kind": "pack",
- "exam_sha256": "c5186955b7b659ec3ad866a3ef4d1ee87ad7d6afddeb4cdf3825079b873b37e9",
+ "exam_file": "",
+ "exam_kind": "next",
+ "exam_sha256": "",
  "exam_sources": [
-  "encyclopedia",
-  "textbooks",
-  "science",
-  "qa",
-  "books",
-  "news"
+  "knowledge",
+  "reading",
+  "reasoning",
+  "code",
+  "agents",
+  "writing",
+  "conversation"
  ],
  "grade_devices": [
   "cuda"
  ],
  "harness": "0.3.5",
- "heldout_exam_sha256": "c1011b1b09492b7e8a931580ffe5da968472c34269cf886b1868d9f103c69549",
- "id": "s0",
+ "heldout_exam_sha256": "",
+ "id": "s1",
  "ink_frac": 0.001,
  "ink_tokens": {
+  "large": 640000,
   "micro": 40000,
   "nano": 8000,
   "standard": 160000
@@ -169,13 +171,13 @@
  "min_copy_bytes": 64,
  "noise": {
   "micro": {
-   "gain_sd": 0.011
+   "gain_sd": 0.025
   },
-  "nano": {
-   "gain_sd": 0.011
+  "standard": {
+   "gain_sd": 0.013
   }
  },
- "official_scale": "micro",
+ "official_scale": "standard",
  "parity": {
   "beacon": {
    "randomness": "abababababababababababababababababababababababababababababababab",
@@ -194,29 +196,37 @@
   "index": 7,
   "order": [
    6,
+   2,
+   4,
+   1,
    8,
    5,
-   9,
-   2,
-   3,
-   7,
-   11,
    0,
-   10,
-   1,
-   4
+   7,
+   3,
+   11,
+   9,
+   10
   ],
   "prf": "9091049708302675390",
-  "seed": "5209edcdd19de21c53b4e0b5913c17ff0f0bfc1f66894baaf509d96f664b1c13",
+  "seed": "e5c6c0fc9312d995921a4954ef3ee758e177c0eed62a25b2553dacc9810e19e2",
   "shards": [
-   91838,
-   95535,
-   71983,
-   24687,
-   41439,
-   84995,
-   85189,
-   51150
+   46396,
+   64116,
+   29255,
+   75128,
+   93774,
+   97957,
+   267,
+   75599,
+   31702,
+   17330,
+   38494,
+   58354,
+   32198,
+   64460,
+   53049,
+   60904
   ]
  },
  "pools": {
@@ -253,84 +263,18 @@
    40
   ],
   "margin": {
+   "large": 0.01,
    "micro": 0.02,
    "nano": 0.03,
-   "standard": 0.02
+   "standard": 0.01
   }
  },
  "reference": {
   "anchor": "AMD Ryzen AI Max+ 395 (16 cores), Radeon 8060S, 128 GB unified memory, ROCm",
   "note": "The organisers' own verifier, and the machine the experiments in the documents were run on. Editors are run by volunteers' machines too: time yours against the floor in \"runner\" (stet bench), not against this."
  },
- "reference_curves": {
-  "official/micro": [
-   [
-    0.5,
-    6.057
-   ],
-   [
-    1,
-    5.355
-   ],
-   [
-    2,
-    4.828
-   ],
-   [
-    4,
-    4.522
-   ],
-   [
-    8,
-    4.332
-   ]
-  ],
-  "practice/micro": [
-   [
-    0.5,
-    6.057
-   ],
-   [
-    1,
-    5.355
-   ],
-   [
-    2,
-    4.828
-   ],
-   [
-    4,
-    4.522
-   ],
-   [
-    8,
-    4.332
-   ]
-  ],
-  "practice/nano": [
-   [
-    0.5,
-    6.67
-   ],
-   [
-    1,
-    6.382
-   ],
-   [
-    2,
-    6.03
-   ],
-   [
-    4,
-    5.519
-   ],
-   [
-    8,
-    5.198
-   ]
-  ]
- },
- "rules_version": 3,
+ "reference_curves": {},
+ "rules_version": 4,
  "runner": {
   "cores": 6,
   "cpu_mb_per_second": 100,
@@ -340,6 +284,18 @@
   "memory_gb": 16
  },
  "scales": {
+  "large": {
+   "batch_size": 32,
+   "corpus_units": 32,
+   "ctx": 512,
+   "d_model": 640,
+   "edit_seconds": 4800,
+   "exam_items_per_source": 800,
+   "lr": 0.0008,
+   "n_head": 10,
+   "n_layer": 10,
+   "train_tokens": 640000000
+  },
   "micro": {
    "batch_size": 16,
    "corpus_units": 4,
@@ -383,25 +339,30 @@
   "max_out_doc_bytes": 1048576,
   "max_segments": 20000
  },
- "title": "Season 0",
+ "title": "Season 1",
  "tokenizer": {
   "vocab_size": 8192
  },
  "tolerance": {
+  "large": {
+   "baseline": 0.06,
+   "grade": 0.04,
+   "run": 0.06
+  },
   "micro": {
-   "baseline": 0.08,
-   "grade": 0.08,
+   "baseline": 0.15,
+   "grade": 0.1,
    "run": 0.12
   },
   "nano": {
-   "baseline": 0.12,
-   "grade": 0.12,
-   "run": 0.12
+   "baseline": 0.2,
+   "grade": 0.15,
+   "run": 0.15
   },
   "standard": {
-   "baseline": 0.08,
-   "grade": 0.08,
-   "run": 0.12
+   "baseline": 0.1,
+   "grade": 0.06,
+   "run": 0.09
   }
  },
  "train": {

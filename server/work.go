@@ -37,7 +37,7 @@ type WorkMachine struct {
 	Handle   string `json:"handle"`
 	Worker   bool   `json:"worker,omitempty"`
 	LastSeen int64  `json:"last_seen,omitempty"`
-	Busy     string `json:"busy,omitempty"` // edit or grade: the job it holds; shadow: a student it trains for the next exam
+	Busy     string `json:"busy,omitempty"` // edit or grade: the job it holds; shadow: one of the organisers' own students it trains
 	// The student it trains is one of the bigger ones, held for hours: stet-runpod counts the
 	// machine as one of those it rents for them.
 	Long bool `json:"long,omitempty"`
@@ -52,7 +52,7 @@ type Work struct {
 	Waiting    bool          `json:"waiting"`
 	NextDrawAt int64         `json:"next_draw_at,omitempty"`
 	Machines   []WorkMachine `json:"machines"`
-	// ShadowWaiting counts the next exam's students a machine could be handed now, and
+	// ShadowWaiting counts the organisers' own students a machine could be handed now, and
 	// ShadowUnderWay those being trained: work for a machine with nothing official to do.
 	ShadowWaiting  int `json:"shadow_waiting"`
 	ShadowUnderWay int `json:"shadow_under_way"`
@@ -107,7 +107,7 @@ func (a *App) work(s *State) Work {
 	out.Waiting = a.waiting(s)
 	out.ShadowWaiting, out.ShadowUnderWay, out.ShadowLongWaiting = shadowWaiting(s, now())
 	busy, long := map[int64]string{}, map[int64]bool{}
-	// Training one of the next exam's students counts as at work, so that a rented machine is
+	// Training one of the organisers' own students counts as at work, so that a rented machine is
 	// not ended partway through one; an official job it holds says so instead.
 	at := now()
 	for _, b := range s.ShadowWork {

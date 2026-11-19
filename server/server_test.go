@@ -336,8 +336,17 @@ func (w *world) submit(a *actor, name, body string) string {
 	return out.Editor.ID
 }
 
-// draw schedules and draws the next round, and returns its index.
+// draw schedules and draws the next round, gives it its exam as the organisers' examiner
+// would, and returns its index.
 func (w *world) draw() int {
+	w.t.Helper()
+	idx := w.drawWithoutExam()
+	w.exam(idx)
+	return idx
+}
+
+// drawWithoutExam draws the next round and leaves it waiting for its exam.
+func (w *world) drawWithoutExam() int {
 	w.t.Helper()
 	ctx := context.Background()
 	w.app.tick(ctx)
@@ -405,7 +414,67 @@ func (w *world) claimWith(a *actor, hello map[string]any) *claimed {
 	return &c
 }
 
-var corpusSHA, examSHA = strings.Repeat("c0", 32), strings.Repeat("e0", 32)
+// corpusSHA is the round every test machine builds, and examSHA the digest of the exam every
+// round is given (testExam).
+var corpusSHA, examSHA = strings.Repeat("c0", 32), strings.Repeat("d1", 32)
+
+// nextTable is a small exam: items in three pillars, two languages.
+func nextTable() []ItemInfo {
+	var out []ItemInfo
+	for i := 0; i < 12; i++ {
+		out = append(out, ItemInfo{Pillar: "reasoning", Part: "arith", Lang: "en", Stratum: "math/answer"})
+	}
+	for i := 0; i < 6; i++ {
+		out = append(out, ItemInfo{Pillar: "writing", Part: "reference", Lang: []string{"en", "de"}[i%2], Stratum: "prose/passage"})
+	}
+	for i := 0; i < 4; i++ {
+		out = append(out, ItemInfo{Pillar: "code", Part: "prog", Lang: "code", Stratum: "code/answer"})
+	}
+	return out
+}
+
+// testExam is what the organisers' examiner posts for a round: its items for graders, what
+// is published when it settles, and what each item counts toward.
+func testExam(table []ItemInfo) map[string]any {
+	enc, _ := zstd.NewWriter(nil)
+	file := enc.EncodeAll([]byte("{\"kind\": \"passage\"}\n"), nil)
+	public := enc.EncodeAll([]byte("{\"withheld\": true}\n"), nil)
+	return map[string]any{
+		"items_digest": examSHA, "items_file": base64.StdEncoding.EncodeToString(file), "table": table,
+		"public_file": base64.StdEncoding.EncodeToString(public),
+		"languages":   map[string]float64{"en": 60, "de": 40}, "fresh": 6,
+	}
+}
+
+// postExam has an account post a round's exam, as the organisers' examiner does.
+func (w *world) postExam(by *actor, idx int, table []ItemInfo) (int, string) {
+	w.t.Helper()
+	var out struct {
+		Error string `json:"error"`
+	}
+	code := by.do("POST", fmt.Sprintf("/api/v1/admin/rounds/%s/exam", roundID(w.app.season.ID, idx)), testExam(table), &out)
+	return code, out.Error
+}
+
+// exam gives a round its exam (nextTable), as the organisers' examiner would.
+func (w *world) exam(idx int) {
+	w.t.Helper()
+	raw, _ := json.Marshal(testExam(nextTable()))
+	var p ExamPost
+	json.Unmarshal(raw, &p)
+	if _, err := w.app.postExam(context.Background(), idx, &p); err != nil {
+		w.t.Fatalf("posting round %d's exam: %v", idx, err)
+	}
+}
+
+// itemScores is a report on the exam with every item scoring the same.
+func itemScores(score float64) map[string]any {
+	scores := make([]float64, len(nextTable()))
+	for i := range scores {
+		scores[i] = score
+	}
+	return map[string]any{"kind": "next", "mean": score, "item_scores": scores}
+}
 
 // edit reports an edit job. An empty script means the editor failed.
 func (w *world) edit(a *actor, c *claimed, script string) (int, string) {
@@ -434,17 +503,16 @@ func (w *world) edit(a *actor, c *claimed, script string) (int, string) {
 	return code, ack.Status
 }
 
+// result is a grade whose student scores -loss on every item of the exam, and its baseline
+// -baseline: the exam's aggregate of a gain that is the same on every item is that gain, so
+// against a round whose baseline is baseline, its gain is baseline - loss.
 func (w *world) result(c *claimed, loss, baseline float64) map[string]any {
-	by, base := map[string]float64{}, map[string]float64{}
-	for _, s := range w.app.season.ExamSources {
-		by[s], base[s] = loss, baseline
-	}
 	return map[string]any{
 		"harness": w.app.season.Harness, "season": w.app.season.ID, "season_digest": w.app.season.Digest,
 		"round": c.Job.Round["id"], "scale": c.Job.Scale, "corpus_sha256": corpusSHA, "exam_sha256": examSHA,
 		"script_sha256": c.Job.Script.SHA256, "valid": true, "hardware": map[string]any{"gpu": "Test GPU", "device": "cuda"},
 		"script":   map[string]any{"script_sha256": c.Job.Script.SHA256, "kept_doc_frac": 0.1, "kept_byte_frac": 0.08, "passes": 1.4, "out_docs": 1200},
-		"baseline": map[string]any{"loss": baseline, "by_source": base}, "exam": map[string]any{"loss": loss, "by_source": by},
+		"baseline": itemScores(-baseline), "exam": itemScores(-loss),
 		"train":      map[string]any{"seconds": 30.0, "tokens_per_second": 100000.0, "final_train_loss": 5.0, "curve": [][]float64{{1, 9}, {50, 6}, {100, 5.5}, {150, 5.2}}},
 		"started_at": time.Now().Unix() - 60, "finished_at": time.Now().Unix(),
 	}
@@ -1191,91 +1259,36 @@ func TestAFailedEditScoresAsUneditedAndRetiresTheEditor(t *testing.T) {
 	})
 }
 
-func TestOnlyAnOrganiserPublishesFiles(t *testing.T) {
+// /files/ serves what is put in the files directory (the CLI wheel) and nothing else: nothing
+// from the bucket, nothing outside the directory, and nothing anybody can upload, organisers
+// included.
+func TestFilesAreServedFromTheFilesDirectoryAlone(t *testing.T) {
 	pub, priv := newKey()
 	w := newWorld(t, pub)
-	anchor, eve := w.join("anchor-one", priv), w.join("eve", nil)
-	// The season names the one file an organiser publishes, and its hash.
-	pack := []byte("the exam pack, which clients check against the hash in their season file")
-	sum := sha256.Sum256(pack)
-	name := w.app.season.ExamFile
-	w.app.season.ExamSHA256 = hex.EncodeToString(sum[:])
-	var out struct {
-		Error  string `json:"error"`
-		SHA256 string `json:"sha256"`
-		Bytes  int    `json:"bytes"`
-	}
-	if code := eve.do("PUT", "/api/v1/admin/files/"+name, pack, &out); code != 403 {
-		t.Fatalf("an entrant publishing a file: HTTP %d %s", code, out.Error)
-	}
-	if code := anchor.do("PUT", "/api/v1/admin/files/..%2Fmeta", pack, &out); code == 201 {
-		t.Fatal("a file was published under a name that is not a plain file name")
-	}
-	// Not even an organiser's key publishes anything else: another name, or other bytes.
-	if code := anchor.do("PUT", "/api/v1/admin/files/install.sh", pack, &out); code != 400 {
-		t.Fatalf("an organiser published a file the season does not name: HTTP %d %s", code, out.Error)
-	}
-	if code := anchor.do("PUT", "/api/v1/admin/files/"+name, []byte("some other exam"), &out); code != 400 {
-		t.Fatalf("an organiser published an exam pack with the wrong hash: HTTP %d %s", code, out.Error)
-	}
-	if code := anchor.do("PUT", "/api/v1/admin/files/"+name, pack, &out); code != 201 || out.Bytes != len(pack) {
-		t.Fatalf("an organiser publishing a file: HTTP %d %+v", code, out)
-	}
-	if out.SHA256 != hex.EncodeToString(sum[:]) {
-		t.Fatalf("the server reports hash %s", out.SHA256)
-	}
-	resp, err := http.Get(w.srv.URL + "/files/" + name)
-	if err != nil {
+	anchor := w.join("anchor-one", priv)
+	wheel := []byte("a wheel, put there by whoever deployed the server")
+	if err := os.WriteFile(filepath.Join(w.cfg.FilesDir, "stet-9.9.9-py3-none-any.whl"), wheel, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
-	if got, _ := io.ReadAll(resp.Body); resp.StatusCode != 200 || !bytes.Equal(got, pack) {
-		t.Fatalf("downloading it back: HTTP %d, %d bytes", resp.StatusCode, len(got))
+	if err := w.blobs.Put(context.Background(), "files/kept.zst", []byte("in the bucket"), "application/octet-stream"); err != nil {
+		t.Fatal(err)
 	}
-	// The held-out exam is the one other file, published when the season closes: only the
-	// file the season committed to, under its own name.
-	held := []byte("the held-out exam, which nobody has seen until the season closes")
-	hsum := sha256.Sum256(held)
-	heldName := w.app.season.heldoutFile()
-	w.app.season.HeldoutSHA256 = ""
-	if code := anchor.do("PUT", "/api/v1/admin/files/"+heldName, held, &out); code != 400 {
-		t.Fatalf("a held-out exam was published in a season that committed to none: HTTP %d", code)
+	for path, want := range map[string]int{"/files/stet-9.9.9-py3-none-any.whl": 200, "/files/kept.zst": 404, "/files/..%2Fmeta": 404, "/files/nothing.zst": 404} {
+		resp, err := http.Get(w.srv.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != want || (want == 200 && !bytes.Equal(got, wheel)) {
+			t.Fatalf("%s: HTTP %d, %d bytes", path, resp.StatusCode, len(got))
+		}
 	}
-	w.app.season.HeldoutSHA256 = hex.EncodeToString(hsum[:])
-	if code := anchor.do("PUT", "/api/v1/admin/files/"+heldName, pack, &out); code != 400 {
-		t.Fatalf("something else was published as the held-out exam: HTTP %d", code)
+	var out struct {
+		Error string `json:"error"`
 	}
-	if code := anchor.do("PUT", "/api/v1/admin/files/"+name, held, &out); code != 400 {
-		t.Fatalf("the held-out exam was published under the exam's name: HTTP %d", code)
-	}
-	// It cannot be taken back. One command sent a month early must not be enough.
-	if code := anchor.do("PUT", "/api/v1/admin/files/"+heldName, held, &out); code != 403 {
-		t.Fatalf("the held-out exam was published while the season was open: HTTP %d", code)
-	}
-	if _, _, err := w.blobs.Open(context.Background(), "files/"+heldName); err == nil {
-		t.Fatal("the held-out exam is in the bucket")
-	}
-	seedName := "heldout-" + w.app.season.ID + ".seed"
-	if code := anchor.do("PUT", "/api/v1/admin/files/"+seedName, []byte("abc"), &out); code != 400 {
-		t.Fatalf("the seed was published while the season was open: HTTP %d", code)
-	}
-	w.app.cfg.SeasonClosed = true
-	if code := anchor.do("PUT", "/api/v1/admin/files/"+heldName, held, &out); code != 201 || out.SHA256 != hex.EncodeToString(hsum[:]) {
-		t.Fatalf("publishing the held-out exam: HTTP %d %+v", code, out)
-	}
-	// With it go the seed, the results and the table, and still nothing else.
-	if code := anchor.do("PUT", "/api/v1/admin/files/"+seedName, []byte("abc"), &out); code != 201 {
-		t.Fatalf("publishing the seed after the close: HTTP %d %+v", code, out)
-	}
-	if code := anchor.do("PUT", "/api/v1/admin/files/anything.txt", []byte("abc"), &out); code != 400 {
-		t.Fatalf("something else was published after the close: HTTP %d", code)
-	}
-	// These three have no hash to be held to, so the first one published stands.
-	if code := anchor.do("PUT", "/api/v1/admin/files/"+seedName, []byte("another seed"), &out); code != 409 {
-		t.Fatalf("the published seed was replaced: HTTP %d", code)
-	}
-	if blob, err := w.app.st.blobs.Read(context.Background(), "files/"+seedName, 1<<20); err != nil || string(blob) != "abc" {
-		t.Fatalf("the seed in the bucket: %q %v", blob, err)
+	if code := anchor.do("PUT", "/api/v1/admin/files/kept.zst", []byte("x"), &out); code != 404 {
+		t.Fatalf("an organiser uploading a file: HTTP %d %s", code, out.Error)
 	}
 }
 
@@ -1478,7 +1491,7 @@ func TestOnlyEstablishedGradesSetAScore(t *testing.T) {
 	w.submit(anchor, "ref-a", "print(1)")
 	idx := w.draw()
 	w.editAll(anchor)
-	// Two accounts report the same invented number, 0.3 nats better than the truth.
+	// Two accounts report the same invented number, 0.3 bits per byte better than the truth.
 	for _, m := range []*actor{m1, m2} {
 		if _, status := w.grade(m, true, 5.2); status != "pending" {
 			t.Fatalf("%s: %s", m.handle, status)
@@ -1703,7 +1716,7 @@ func TestARoundDoesNotWaitForAnAccountThatHasNeverAgreed(t *testing.T) {
 }
 
 // play plays whole rounds with one machine, the organisers', doing all the work. loss gives each editor's
-// exam loss in a round, by editor name.
+// loss in a round (against an unedited 6.0: its gain is 6.0 less that), by editor name.
 func (w *world) play(anchor *actor, rounds int, loss func(name string, round int) float64) {
 	w.t.Helper()
 	for n := 0; n < rounds; n++ {
@@ -2346,11 +2359,8 @@ func TestAStrangerCannotMakeTheServerHoldAnUpload(t *testing.T) {
 	// The body is never read: the refusal comes from the headers alone, so a body that
 	// would fail the size limit is refused for who sent it, not for its size.
 	huge := bytes.Repeat([]byte("x"), 3<<20)
-	for path, want := range map[string]int{"/api/v1/admin/files/exam.zst": 403, "/api/v1/jobs/1/script": 403} {
+	for path, want := range map[string]int{"/api/v1/admin/rounds/" + roundID(w.app.season.ID, 1) + "/exam": 403, "/api/v1/jobs/1/script": 403} {
 		method := "POST"
-		if strings.Contains(path, "admin") {
-			method = "PUT"
-		}
 		if code := bob.do(method, path, huge, nil); code != want {
 			t.Fatalf("%s from a volunteer: HTTP %d, want %d", path, code, want)
 		}
@@ -2424,7 +2434,7 @@ func TestNamingSomeoneElsesKeyCostsThemNothing(t *testing.T) {
 	}
 }
 
-func TestAResultCarriesTheSeasonsSourcesAndNothingElse(t *testing.T) {
+func TestAResultCarriesOneScoreForEachItemAndNothingElse(t *testing.T) {
 	pub, priv := newKey()
 	w := newWorld(t, pub)
 	anchor, bob := w.join("anchor-one", priv), w.join("bob", nil)
@@ -2432,14 +2442,28 @@ func TestAResultCarriesTheSeasonsSourcesAndNothingElse(t *testing.T) {
 	w.draw()
 	w.editAll(anchor)
 	c := w.claim(bob, false)
-	res := w.result(c, 5.5, 6.0)
-	// Whatever is in a result is stored. A map with fifty thousand keys would be too.
-	res["exam"].(map[string]any)["by_source"].(map[string]float64)["padding"] = 5.5
 	var out struct {
 		Error string `json:"error"`
 	}
-	if code := bob.do("POST", fmt.Sprintf("/api/v1/jobs/%d/result", c.Job.ID), res, &out); code != 400 || !strings.Contains(out.Error, "sources") {
-		t.Fatalf("a result with a source the season does not have: HTTP %d %s", code, out.Error)
+	// Whatever is in a result is stored: one score more than the exam has items is refused,
+	// and so is one fewer, a mean that is not theirs, and a score that is not a number.
+	for what, change := range map[string]func(map[string]any){
+		"an item too many": func(e map[string]any) { e["item_scores"] = append(e["item_scores"].([]float64), -5.5) },
+		"an item short":    func(e map[string]any) { e["item_scores"] = e["item_scores"].([]float64)[1:] },
+		"another mean":     func(e map[string]any) { e["mean"] = -4.0 },
+		"another kind":     func(e map[string]any) { e["kind"] = "pack" },
+		"nonsense": func(e map[string]any) {
+			e["item_scores"].([]float64)[0], e["mean"] = -1e6, -1e6/float64(len(nextTable()))
+		},
+	} {
+		res := w.result(c, 5.5, 6.0)
+		change(res["exam"].(map[string]any))
+		if code := bob.do("POST", fmt.Sprintf("/api/v1/jobs/%d/result", c.Job.ID), res, &out); code != 400 {
+			t.Fatalf("a result with %s: HTTP %d %s", what, code, out.Error)
+		}
+	}
+	if code := bob.do("POST", fmt.Sprintf("/api/v1/jobs/%d/result", c.Job.ID), w.result(c, 5.5, 6.0), &out); code != 200 {
+		t.Fatalf("the result as it should be: HTTP %d %s", code, out.Error)
 	}
 }
 
@@ -2482,8 +2506,16 @@ func TestADrawNeverReusesASlotAnnouncedForAnotherRound(t *testing.T) {
 		t.Fatal(status)
 	}
 	next := scheduled()
-	if grid := w.app.season.DrawGrid; next.Postponed || next.DrawAt > now()+drawNotice+grid || next.DrawAt < now()+drawNotice {
-		t.Fatalf("a put-off draw waits %d s after the round settled; the grid is %d s", next.DrawAt-now(), grid)
+	// The first mark on the grid at least the notice away, passing over any that another
+	// round was ever announced for (which ones those are depends on the time of day).
+	want := w.app.season.nextGrid(now() + drawNotice)
+	w.app.st.view(func(s *State) {
+		for taken := announcedSlots(s, s.Rounds[next.Idx]); taken[w.app.season.Beacon.drandRoundAt(want)]; {
+			want = w.app.season.nextGrid(want)
+		}
+	})
+	if next.Postponed || next.DrawAt > want || next.DrawAt < now()+drawNotice {
+		t.Fatalf("a put-off draw waits %d s after the round settled, not %d s", next.DrawAt-now(), want-now())
 	}
 	w.check()
 }
@@ -2720,17 +2752,17 @@ func TestSmallRulesOfJudging(t *testing.T) {
 	})
 	// What a machine measures can be recorded, however bad.
 	score := func(v float64) *ExamScore {
-		by := map[string]float64{}
-		for _, src := range w.app.season.ExamSources {
-			by[src] = v
+		items := make([]float64, 4)
+		for i := range items {
+			items[i] = v
 		}
-		return &ExamScore{Loss: v, BySource: by}
+		return &ExamScore{Kind: "next", Mean: v, ItemScores: items}
 	}
-	if err := w.app.checkScore(score(45), "exam"); err != nil {
-		t.Fatalf("a loss of 45: %v", err)
+	if err := checkItems(score(-45), 4, "exam"); err != nil {
+		t.Fatalf("an item score of -45: %v", err)
 	}
-	if err := w.app.checkScore(score(1e6), "exam"); err == nil {
-		t.Fatal("a loss of a million was taken")
+	if err := checkItems(score(-1e6), 4, "exam"); err == nil {
+		t.Fatal("an item score of minus a million was taken")
 	}
 }
 
@@ -3601,150 +3633,6 @@ func TestARoundIsNotHeldUpByAnEntryNobodyAroundMayRun(t *testing.T) {
 	if w.settled(idx) != 0 {
 		t.Fatal("a round nobody has come to yet threw its entries away")
 	}
-}
-
-func TestEntriesFromBeforeRunsKeepTheirScores(t *testing.T) {
-	ctx := context.Background()
-	pub, priv := newKey()
-	w := newWorld(t, pub)
-	anchor, alice, bob := w.join("anchor-one", priv), w.join("alice", nil), w.join("bob", nil)
-	id := w.submit(alice, "tidy", "print('v1')")
-	idx := w.draw()
-	w.run(anchor, "{\"doc\": 1}\n")
-	w.grade(bob, false, 5.48)
-	if _, status := w.grade(anchor, true, 5.5); status != "settled" {
-		t.Fatal(status)
-	}
-	// Put the entry back the way the server stored one before it knew about runs: one
-	// edit, on the organisers' machine, and each volunteer's grade beside its own.
-	w.app.st.update(ctx, func(tx *Tx) error {
-		e := tx.s.entry(idx, id)
-		if e.Script == "" || e.EditedAt == 0 || e.EditedBy == 0 {
-			t.Fatalf("a settled entry no longer names the run it stands on: %+v", e)
-		}
-		e.Runs, e.NRuns, e.Confirmed, e.RunsDiffer = nil, 0, false, false
-		loss, diff, zero := 5.48, -0.02, 0.0
-		e.Detail.Replications = []Replication{{Handle: "bob", Verdict: "agreed", Valid: true, Loss: &loss, Diff: &diff, BaseDiff: &zero, First: true}}
-		tx.saveEntry(e)
-		return nil
-	})
-	rating := func(w *world) float64 {
-		for _, r := range append(w.app.board().Rated, w.app.board().Provisional...) {
-			if r.ID == id {
-				return *r.Rating
-			}
-		}
-		t.Fatal("the curator is not on the board")
-		return 0
-	}
-	before := rating(w)
-	old := startWorld(t, w.cfg, w.kv, w.blobs)
-	anchor, bob = old.as(anchor), old.as(bob)
-	old.app.tick(ctx)
-	old.check()
-	e := old.entry(idx, "tidy")
-	if !e.Valid || *e.Loss != 5.5 || math.Abs(*e.Gain-0.5) > 1e-9 || rating(old) != before {
-		t.Fatalf("an entry settled before runs changed its score: %+v", e)
-	}
-	// It is shown as what it was: run once, and graded by the machine that ran it.
-	if e.NRuns != 1 || e.Confirmed || len(e.Runs) != 1 || e.Runs[0].By != "anchor-one" || e.Runs[0].Status != "ok" || !e.Runs[0].Self || e.Runs[0].Script != e.Script["sha256"] || len(e.Runs[0].Grades) != 2 {
-		t.Fatalf("its run, as shown: %+v", e.Runs)
-	}
-	if g := e.Runs[0].Grades[1]; g.Handle != "bob" || g.Verdict != "agreed" || *g.Loss != 5.48 || math.Abs(*g.Gain-0.52) > 1e-9 || !g.First {
-		t.Fatalf("the volunteer's grade, as shown: %+v", g)
-	}
-	if code, page := old.page("/rounds/" + roundID(w.app.season.ID, idx)); code != 200 || !strings.Contains(page, ">graded by its own runner<") || !strings.Contains(page, ">run once<") || strings.Contains(page, "<no value>") {
-		t.Fatalf("the old round's page: HTTP %d", code)
-	}
-	if code, page := old.page("/editors/" + id[:12]); code != 200 || !strings.Contains(page, ">run once<") {
-		t.Fatalf("the old curator's page: HTTP %d", code)
-	}
-
-	// An entry that was half-way through its round when the server learned about runs
-	// carries on: its one edit is its first run, and the grades it has name its script.
-	id2 := old.submit(bob, "next", "print('v2')")
-	idx2 := old.draw()
-	var script string
-	for {
-		c := old.claim(anchor, true)
-		if c.Job == nil {
-			break
-		}
-		if c.Job.Kind != "edit" {
-			old.release(anchor, c)
-			break
-		}
-		if c.Job.Editor.ID == id2 {
-			script = "{\"doc\": 2}\n"
-			old.edit(anchor, c, script)
-		} else {
-			old.edit(anchor, c, "{\"doc\": 3}\n")
-		}
-	}
-	carol := old.join("carol", nil)
-	var held []*claimed
-	for {
-		c := old.claim(carol, false)
-		if c.Job == nil {
-			break
-		}
-		if c.Job.Editor.ID != id2 {
-			old.report(carol, c, 5.5)
-			continue
-		}
-		held = append(held, c)
-		old.report(carol, c, 5.3)
-	}
-	if len(held) != 1 {
-		t.Fatalf("carol graded the new entry %d times", len(held))
-	}
-	old.app.st.update(ctx, func(tx *Tx) error {
-		e := tx.s.entry(idx2, id2)
-		run := e.Runs[0]
-		e.Script, e.ScriptSize, e.Edit, e.EditedAt, e.EditedBy, e.Runs = run.Script, run.ScriptSize, run.Edit, run.At, run.By, nil
-		tx.saveEntry(e)
-		for _, r := range tx.s.results(idx2, id2) {
-			r.Script = ""
-			tx.saveResult(r)
-		}
-		for _, c := range tx.s.Claims {
-			if c.EditorID == id2 && c.Kind == "grade" {
-				c.Script = ""
-				tx.saveClaim(c)
-			}
-		}
-		return nil
-	})
-	mid := startWorld(t, w.cfg, w.kv, w.blobs)
-	anchor = mid.as(anchor)
-	mid.app.tick(ctx)
-	mid.check()
-	mid.app.st.view(func(s *State) {
-		e := s.entry(idx2, id2)
-		if len(e.Runs) != 1 || e.Runs[0].Script != shaOf(script) || e.Runs[0].By != s.byHandle["anchor-one"].ID || e.EditedAt != 0 || e.Script != "" {
-			t.Fatalf("the half-finished entry was not carried over: %+v", e)
-		}
-		for _, r := range s.results(idx2, id2) {
-			if r.Script != shaOf(script) {
-				t.Fatalf("a grade from before does not name its script: %+v", r)
-			}
-		}
-	})
-	for {
-		c := mid.claim(anchor, true)
-		if c.Job == nil {
-			break
-		}
-		if c.Job.Kind != "grade" {
-			t.Fatalf("the round wants only grades: %+v", c.Job)
-		}
-		mid.report(anchor, c, 5.5)
-	}
-	e = mid.entry(idx2, "next")
-	if e.Status != "settled" || !e.Valid || math.Abs(*e.Gain-0.5) > 1e-9 || len(e.Runs) != 1 || len(e.Runs[0].Grades) != 2 || e.Runs[0].Grades[1].Verdict != "outlier" {
-		t.Fatalf("the entry that was carried over: %+v %+v", e, e.Runs)
-	}
-	mid.check()
 }
 
 func TestASecondRunGoesToTheOtherMakeOfGPUWhenThereIsOne(t *testing.T) {

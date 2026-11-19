@@ -68,8 +68,8 @@ type Account struct {
 
 // WorkerGrant is one of the organisers vouching for a machine they rent by the hour
 // (stet-runpod): an organisers' machine in every rule about who works on what, so one person
-// with the rest of them, and nothing more. It draws nothing, publishes nothing, and is never
-// given the held-out exam, which stays on hardware the organisers own.
+// with the rest of them, and nothing more. It draws nothing, posts no exam and administers
+// nothing.
 //
 // It is kept in the database, signed. A database row cannot make an organisers' machine:
 // a grant counts only while its signature checks out and the key that made it is one of the
@@ -117,8 +117,8 @@ func (s *State) markOrganisers(anchors map[string]bool) {
 	}
 }
 
-// administers reports whether an account may act for the organisers: draw, publish, look
-// up keys, and keep or fetch the held-out exam. Their rented machines may not.
+// administers reports whether an account may act for the organisers: draw, post a round's
+// exam, look up keys, and vouch for machines. Their rented machines may not.
 func (c *Account) administers() bool { return c.Anchor && !c.Worker }
 
 type Editor struct {
@@ -141,21 +141,20 @@ type Editor struct {
 }
 
 type Round struct {
-	Idx          int                `json:"idx"`
-	Status       string             `json:"status"` // scheduled | open | settled
-	Scale        string             `json:"scale"`
-	DrawAt       int64              `json:"draw_at"`
-	DrandRound   int64              `json:"drand_round"`
-	Randomness   string             `json:"randomness,omitempty"`
-	Seed         string             `json:"seed,omitempty"`
-	Crawl        *Crawl             `json:"crawl,omitempty"`
-	DrawnAt      int64              `json:"drawn_at,omitempty"`
-	SettledAt    int64              `json:"settled_at,omitempty"`
-	CorpusSHA    string             `json:"corpus_sha256,omitempty"`
-	ExamSHA      string             `json:"exam_sha256,omitempty"`
-	BaselineLoss *float64           `json:"baseline_loss,omitempty"`
-	Baseline     map[string]float64 `json:"baseline,omitempty"`
-	BaselineN    int                `json:"baseline_n,omitempty"`
+	Idx          int      `json:"idx"`
+	Status       string   `json:"status"` // scheduled | open | settled
+	Scale        string   `json:"scale"`
+	DrawAt       int64    `json:"draw_at"`
+	DrandRound   int64    `json:"drand_round"`
+	Randomness   string   `json:"randomness,omitempty"`
+	Seed         string   `json:"seed,omitempty"`
+	Crawl        *Crawl   `json:"crawl,omitempty"`
+	DrawnAt      int64    `json:"drawn_at,omitempty"`
+	SettledAt    int64    `json:"settled_at,omitempty"`
+	CorpusSHA    string   `json:"corpus_sha256,omitempty"`
+	ExamSHA      string   `json:"exam_sha256,omitempty"`   // the round's exam's item digest, once it is posted
+	BaselineLoss *float64 `json:"baseline_loss,omitempty"` // the unedited student's mean bits per byte
+	BaselineN    int      `json:"baseline_n,omitempty"`
 	// Was lists the beacon rounds this round was announced for before its draw moved.
 	// No other round is ever announced for one of them: a verifier that saw the first
 	// announcement would rightly refuse the second.
@@ -164,15 +163,15 @@ type Round struct {
 	// It is then made at the first grid mark after that round settles.
 	Postponed bool `json:"postponed,omitempty"`
 	// Verifiers whose grades were turned away because their machine built a different
-	// round or measured a different unedited loss. Published when the round settles.
+	// round or measured a different unedited baseline. Published when the round settles.
 	Differs []Differ `json:"differs,omitempty"`
 	// ActiveAt is when something last moved the round on: a run, a grade by an established
 	// account, a job one of them took, handed back or let run out, an entry given up. How
 	// long the round waits for people is counted from here.
 	ActiveAt int64 `json:"active_at,omitempty"`
-	// The next exam (see nextexam.go): when the round's exam was posted, what each of its items
-	// counts toward, the corpus's languages, and the unedited student's score on each item.
-	// The table and the item scores are kept only while the round is open.
+	// The round's exam (see nextexam.go): when it was posted, what each of its items counts
+	// toward, the corpus's languages, and the unedited student's score on each item. The table
+	// and the item scores are kept only while the round is open.
 	ExamAt    int64              `json:"exam_at,omitempty"`
 	ExamTable []ItemInfo         `json:"exam_table,omitempty"`
 	Shares    map[string]float64 `json:"languages,omitempty"`
@@ -190,23 +189,9 @@ type EntryDetail struct {
 	Verifiers []string        `json:"verifiers"`          // whose grades the score is made of, then everyone else whose grade agreed
 	Disputed  int             `json:"disputed,omitempty"` // grades that differed from what the score is made of
 	Audited   bool            `json:"audited,omitempty"`  // an established account graded it (always, for an entry with a score)
-	// Replications is how entries settled before harness 0.3.0 listed volunteers' grades,
-	// beside the grade of the organisers' machine that was then the score.
-	Replications []Replication `json:"replications,omitempty"`
 	// Two established accounts graded one of its scripts, disagreed, and nobody was there
 	// to break the tie: the score is their mean, and one of them is wrong.
 	DisputedTogether bool `json:"disputed_together,omitempty"`
-}
-
-// Replication is one volunteer's grade of an entry settled before harness 0.3.0.
-type Replication struct {
-	Handle   string   `json:"handle"`
-	Verdict  string   `json:"verdict"`              // agreed | differs | other data | baseline differs
-	Valid    bool     `json:"valid"`                // whether this volunteer found the script valid
-	Loss     *float64 `json:"loss,omitempty"`       // its exam loss
-	Diff     *float64 `json:"difference,omitempty"` // its loss minus the score's
-	BaseDiff *float64 `json:"baseline_difference,omitempty"`
-	First    bool     `json:"first,omitempty"` // this account had no agreed grade before this round
 }
 
 // Run is one execution of an entry's editor on one verifier's machine, and the script it
@@ -242,8 +227,8 @@ type Grade struct {
 	// agreed | outlier | disputed | other data | baseline differs | no established grade
 	Verdict     string   `json:"verdict"`
 	Valid       bool     `json:"valid"`          // whether this grader found the script valid
-	Loss        *float64 `json:"loss,omitempty"` // its exam loss
-	Gain        *float64 `json:"gain,omitempty"` // its own unedited loss minus that
+	Loss        *float64 `json:"loss,omitempty"` // the unedited student's bits per byte less its gain
+	Gain        *float64 `json:"gain,omitempty"` // its score against the round's baseline
 	First       bool     `json:"first,omitempty"`
 	Self        bool     `json:"self,omitempty"`        // it graded a script that it alone wrote
 	Counted     bool     `json:"counted,omitempty"`     // the script's gain is the median of these
@@ -251,7 +236,7 @@ type Grade struct {
 }
 
 // Differ is a verifier whose grade was turned away because its machine built a different
-// round or measured a different unedited loss. Kept so that it is on show with the rest.
+// round or measured a different unedited baseline. Kept so that it is on show with the rest.
 type Differ struct {
 	Handle string  `json:"handle"`
 	What   string  `json:"what"` // corpus | baseline
@@ -264,9 +249,9 @@ type Entry struct {
 	EditorID string             `json:"editor"`
 	Status   string             `json:"status"` // open | settled
 	Valid    bool               `json:"valid,omitempty"`
-	Loss     *float64           `json:"loss,omitempty"`
-	Gain     float64            `json:"gain,omitempty"`
-	BySource map[string]float64 `json:"by_source,omitempty"`
+	Loss     *float64           `json:"loss,omitempty"`      // the unedited student's bits per byte less the gain
+	Gain     float64            `json:"gain,omitempty"`      // bits per byte better than unedited
+	BySource map[string]float64 `json:"by_source,omitempty"` // the gain on each of the exam's pillars
 	Detail   *EntryDetail       `json:"detail,omitempty"`
 	NResults int                `json:"n_results,omitempty"`
 	Reason   string             `json:"reason,omitempty"`
@@ -279,9 +264,7 @@ type Entry struct {
 	SettledAt  int64 `json:"settled_at,omitempty"`
 	// The runs of the editor in this round. Sealed until the round settles.
 	Runs []*Run `json:"runs,omitempty"`
-	// Of those, the one the score is nearest to, copied here when the entry settles. (An
-	// entry settled before harness 0.3.0 has only these: its one run, by the organisers'
-	// machine.)
+	// Of those, the one the score is nearest to, copied here when the entry settles.
 	Script     string      `json:"script,omitempty"` // sha256 of the edit script
 	ScriptSize int64       `json:"script_size,omitempty"`
 	Edit       *EditReport `json:"edit,omitempty"`
@@ -325,8 +308,8 @@ type Result struct {
 	Script        string             `json:"script,omitempty"` // which of the entry's scripts it graded
 	ReceivedAt    int64              `json:"received_at"`
 	Valid         bool               `json:"valid,omitempty"`
-	Loss          float64            `json:"loss,omitempty"`
-	BySource      map[string]float64 `json:"by_source,omitempty"`
+	Loss          float64            `json:"loss,omitempty"`      // the unedited student's bits per byte less Score
+	BySource      map[string]float64 `json:"by_source,omitempty"` // Score on each of the exam's pillars
 	InvalidReason string             `json:"invalid_reason,omitempty"`
 	CorpusSHA     string             `json:"corpus_sha256"`
 	ExamSHA       string             `json:"exam_sha256"`
@@ -338,24 +321,24 @@ type Result struct {
 	// Summary is kept only until the entry settles; the entry's detail keeps the one that
 	// came to define its score.
 	Summary *ResultSummary `json:"summary,omitempty"`
-	// The next exam: every item's score (kept while the round is open), and the grade's score
-	// against the round's baseline (BySource then holds the pillars).
+	// Every item's score (kept while the round is open), and the grade's score against the
+	// round's baseline: the exam's aggregate of its item scores less the baseline's.
 	Items []float64 `json:"items,omitempty"`
 	Score *float64  `json:"score,omitempty"`
 }
 
+// Baseline is one grader's measurement of the unedited corpus in a round.
 type Baseline struct {
-	RoundIdx   int                `json:"round"`
-	AccountID  int64              `json:"account"`
-	Loss       float64            `json:"loss"`
-	BySource   map[string]float64 `json:"by_source"`
-	CorpusSHA  string             `json:"corpus_sha256"`
-	ExamSHA    string             `json:"exam_sha256"`
-	ReceivedAt int64              `json:"received_at"`
+	RoundIdx   int     `json:"round"`
+	AccountID  int64   `json:"account"`
+	Loss       float64 `json:"loss"` // the student's mean bits per byte on the exam's items
+	CorpusSHA  string  `json:"corpus_sha256"`
+	ExamSHA    string  `json:"exam_sha256"`
+	ReceivedAt int64   `json:"received_at"`
 	// Established says the account was established when it measured this, so the measurement
-	// is one of those the round's unedited loss is the median of.
+	// is one of those the round's baseline is the mean of.
 	Established bool      `json:"established,omitempty"`
-	Items       []float64 `json:"items,omitempty"` // the next exam: every item's score, while the round is open
+	Items       []float64 `json:"items,omitempty"` // every item's score, while the round is open
 }
 
 type Record struct {
@@ -367,7 +350,7 @@ type Record struct {
 	Multiplier *float64 `json:"multiplier,omitempty"`
 	Capped     bool     `json:"capped,omitempty"`
 	Rounds     int      `json:"rounds"`    // rounds shared with the previous holder
-	Advantage  float64  `json:"advantage"` // mean per-round advantage over it, nats
+	Advantage  float64  `json:"advantage"` // mean per-round advantage over it, bits per byte
 	P          float64  `json:"p_value"`
 	Beat       string   `json:"beat,omitempty"` // the previous holder; empty for the first record
 }
@@ -433,7 +416,7 @@ const (
 
 var loadScans = []KVScan{
 	{Prefix: "account/"}, {Prefix: "editor/"}, {Prefix: "round/"}, {Prefix: "entry/"}, {Prefix: "claim/"},
-	{Prefix: "result/"}, {Prefix: "baseline/"}, {Prefix: "record/"}, {Prefix: "look/"}, {Prefix: "meta/"}, {Prefix: "shadow/"}, {Prefix: "shadowwork/"}, {Prefix: "worker/"},
+	{Prefix: "result/"}, {Prefix: "baseline/"}, {Prefix: "record/"}, {Prefix: "look/"}, {Prefix: "meta/"}, {Prefix: "shadowwork/"}, {Prefix: "worker/"},
 	{Prefix: "event/", Reverse: true, Limit: eventsKept},
 }
 
@@ -449,8 +432,7 @@ type State struct {
 	Baselines  map[string]*Baseline
 	Records    []*Record // oldest first
 	Looks      map[string]*Look
-	Shadows    map[int]*Shadow         // the next exam's verdict on settled rounds, by round
-	ShadowWork map[string]*ShadowBatch // the next exam's students, farmed out to the organisers' machines
+	ShadowWork map[string]*ShadowBatch // the organisers' own students, farmed out to their machines
 	Workers    map[string]*WorkerGrant // the machines the organisers rent, by public key
 	Events     []*Event                // oldest first; only the most recent are kept in memory
 	Meta       Meta
@@ -468,7 +450,7 @@ func newState() *State {
 	return &State{
 		Accounts: map[int64]*Account{}, Editors: map[string]*Editor{}, Rounds: map[int]*Round{}, Entries: map[string]*Entry{},
 		Claims: map[int64]*Claim{}, Results: map[int64]*Result{}, Baselines: map[string]*Baseline{}, Looks: map[string]*Look{},
-		Shadows: map[int]*Shadow{}, ShadowWork: map[string]*ShadowBatch{}, Workers: map[string]*WorkerGrant{},
+		ShadowWork: map[string]*ShadowBatch{}, Workers: map[string]*WorkerGrant{},
 		Meta:     Meta{NextAccount: 1, NextClaim: 1, NextResult: 1, NextEvent: 1},
 		byPubkey: map[string]*Account{}, byHandle: map[string]*Account{}, inRound: map[int][]*Entry{}, ofEditor: map[string][]*Entry{},
 		resultsOf: map[string][]*Result{}, ownedBy: map[int64][]*Editor{},
@@ -611,12 +593,6 @@ func (s *State) decode(it KVItem) error {
 			return err
 		}
 		s.Looks[it.Key] = l
-	case "shadow":
-		sh := &Shadow{}
-		if err := into(sh); err != nil {
-			return err
-		}
-		s.Shadows[sh.RoundIdx] = sh
 	case "shadowwork":
 		b := &ShadowBatch{}
 		if err := into(b); err != nil {
@@ -972,9 +948,6 @@ func (st *Store) audit(ctx context.Context) error {
 	}
 	for k, l := range st.s.Looks {
 		mem[k] = l
-	}
-	for _, sh := range st.s.Shadows {
-		mem[shadowKey(sh.RoundIdx)] = sh
 	}
 	for _, b := range st.s.ShadowWork {
 		mem[shadowBatchKey(b.ID)] = b

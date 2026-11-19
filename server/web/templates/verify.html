@@ -4,7 +4,7 @@
   <div class="wrap">
     <span class="eyebrow">Take part · 2 of 3</span>
     <h1>Verify scores with your GPU</h1>
-    <p class="sub">Every number on the leaderboard is measured on a verifier's machine: the organisers' own, and volunteers' like yours. A verifier is handed an edit script, which is plain data, trains the fixed model on it and reports {{if next}}how it does on the round's exam{{else}}the exam loss{{end}}. <b>Nobody else's code runs on your machine.</b> One command, and you can leave it running.</p>
+    <p class="sub">Every number on the leaderboard is measured on a verifier's machine: the organisers' own, and volunteers' like yours. A verifier is handed an edit script, which is plain data, trains the fixed model on it and reports how it does on the round's exam. <b>Nobody else's code runs on your machine.</b> One command, and you can leave it running.</p>
     <div class="roles"><a href="/enter">Compete</a><a href="/verify" aria-current="page">Verify scores</a><a href="/run">Run entries</a></div>
   </div>
 </div>
@@ -93,7 +93,7 @@
       <details><summary>What if my number differs from everyone else's?</summary><p>Two honest machines agree to within a small tolerance. A grade outside it is published as differing and counts as a strike; after three, and more than one for every ten that agreed, the account gets no work for two weeks and may then try again. If your copy of the round itself differs, that is a broken download, and it does not count against you.</p></details>
       <details><summary>Can I stop and start whenever I like?</summary><p>Yes. Ctrl-C, or stopping the service, hands back the job in hand and someone else is given it. Nothing is held against you for stopping.</p></details>
       <details><summary>I have two GPUs.</summary><p>Run one verifier per GPU, each with an account of its own: set <code>STET_CONFIG</code> to another directory and run <code>stet login</code> there.</p></details>
-      <details><summary>What does my machine send, and what is public?</summary><p>The losses it measured, hashes of the round it built, how long the work took, and a description of the machine: GPU, operating system, versions. Your handle, GPU name, grades and GPU hours are published. Your IP address is used for rate limits and is not published.</p></details>
+      <details><summary>What does my machine send, and what is public?</summary><p>The scores it measured on every item of the exam, hashes of the round it built, how long the work took, and a description of the machine: GPU, operating system, versions. Your handle, GPU name, grades and GPU hours are published. Your IP address is used for rate limits and is not published.</p></details>
       <details><summary>Does it trust the server?</summary><p>Not for what a round is. It recomputes the round's seed from the beacon, fetches the pages from Common Crawl itself, checks the exam by hash, and refuses a round that does not match what was announced before the draw.</p></details>
       <details><summary>Can I do more?</summary><p>Yes: once you are established, the same machine can <a href="/run">run entrants' curators</a>, which is the work the competition is shortest of.</p></details>
     </div>

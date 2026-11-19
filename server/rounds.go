@@ -49,7 +49,7 @@ func (r *Round) description(s *Season) map[string]any {
 		d["beacon"] = map[string]any{"round": r.DrandRound, "randomness": r.Randomness}
 		d["drawn_at"] = r.DrawnAt
 	}
-	if s.next() && r.ExamSHA != "" {
+	if examPosted(r) {
 		d["exam_digest"], d["exam_at"] = r.ExamSHA, r.ExamAt
 	}
 	return d
@@ -137,12 +137,11 @@ func (a *App) tick(ctx context.Context) {
 		}
 		a.schedule(tx)
 		a.onDemand(tx)
-		a.carryOver(tx)
 		a.abandonStuck(tx)
 		a.settleReady(tx)
 		return nil
 	})
-	a.archiveNext(ctx)
+	a.archiveExam(ctx)
 	a.maybeDraw(ctx, false)
 	a.st.flush(bounded)
 }
@@ -483,11 +482,7 @@ func (a *App) settleRounds(tx *Tx) {
 	}
 	sort.Slice(due, func(i, j int) bool { return due[i].Idx < due[j].Idx })
 	for _, r := range due {
-		if a.season.next() {
-			a.refreshNext(tx, r)
-		} else {
-			a.refreshBaseline(tx, r)
-		}
+		a.refreshScores(tx, r)
 		a.regain(tx, r)
 		r.Status, r.SettledAt = "settled", now()
 		tx.saveRound(r)
@@ -520,9 +515,8 @@ func (a *App) settleRounds(tx *Tx) {
 			next.Postponed = false
 			if at := a.season.nextGrid(now() + drawNotice); at < next.DrawAt {
 				a.reschedule(tx, next, at)
-			} else {
-				tx.saveRound(next)
 			}
+			tx.saveRound(next) // reschedule keeps the slot it has when no earlier one is free
 		}
 	}
 }

@@ -2,16 +2,10 @@ package main
 
 import (
 	"context"
-	"crypto/ed25519"
-	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"io"
 	"math"
 	"net/http"
-	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -19,64 +13,8 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
-// newWorldS1 is a world whose season's exam is the next exam (testdata/season-s1.json, written by
-// tools/export_season.py s1).
-func newWorldS1(t *testing.T, anchors ...ed25519.PublicKey) *world {
-	t.Helper()
-	raw, err := os.ReadFile("testdata/season-s1.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var season Season
-	if err := json.Unmarshal(raw, &season); err != nil {
-		t.Fatal(err)
-	}
-	cfg := testConfig(t, anchors...)
-	kv, blobs := newMemKV(), dirBlobs{filepath.Join(cfg.DataDir, "blobs")}
-	app, err := newApp(context.Background(), cfg, &season, kv, blobs)
-	if err != nil {
-		t.Fatal(err)
-	}
-	fakeBeacon(t)
-	srv := httptest.NewServer(app.routes())
-	t.Cleanup(srv.Close)
-	return &world{t: t, app: app, srv: srv, kv: kv, blobs: blobs, cfg: cfg}
-}
-
-// nextTable is a small exam: items in three pillars, two languages.
-func nextTable() []ItemInfo {
-	var out []ItemInfo
-	for i := 0; i < 12; i++ {
-		out = append(out, ItemInfo{Pillar: "reasoning", Part: "arith", Lang: "en", Stratum: "math/answer"})
-	}
-	for i := 0; i < 6; i++ {
-		out = append(out, ItemInfo{Pillar: "writing", Part: "reference", Lang: []string{"en", "de"}[i%2], Stratum: "prose/passage"})
-	}
-	for i := 0; i < 4; i++ {
-		out = append(out, ItemInfo{Pillar: "code", Part: "prog", Lang: "code", Stratum: "code/answer"})
-	}
-	return out
-}
-
-var nextDigest = strings.Repeat("d1", 32)
-
-func (w *world) postExam(by *actor, idx int, table []ItemInfo) (int, string) {
-	w.t.Helper()
-	enc, _ := zstd.NewWriter(nil)
-	file := enc.EncodeAll([]byte("{\"kind\": \"passage\"}\n"), nil)
-	var out struct {
-		Error string `json:"error"`
-	}
-	public := enc.EncodeAll([]byte("{\"withheld\": true}\n"), nil)
-	code := by.do("POST", fmt.Sprintf("/api/v1/admin/rounds/%s/exam", roundID(w.app.season.ID, idx)), map[string]any{
-		"items_digest": nextDigest, "items_file": base64.StdEncoding.EncodeToString(file), "table": table,
-		"public_file": base64.StdEncoding.EncodeToString(public),
-		"languages":   map[string]float64{"en": 60, "de": 40}, "fresh": 6,
-	}, &out)
-	return code, out.Error
-}
-
-// nextResult is a grade on the next exam: each item scores base + gain (the baseline, base).
+// nextResult is a grade whose items score differently: each item scores base + gain less a
+// little that depends on the item (the baseline, base less the same).
 func (w *world) nextResult(c *claimed, n int, gain, base float64) map[string]any {
 	p := w.result(c, 5, 6)
 	items := func(x float64) []float64 {
@@ -94,7 +32,6 @@ func (w *world) nextResult(c *claimed, n int, gain, base float64) map[string]any
 		return s / float64(len(v))
 	}
 	b, e := items(base), items(base+gain)
-	p["exam_sha256"] = nextDigest
 	p["baseline"] = map[string]any{"kind": "next", "mean": mean(b), "item_scores": b}
 	p["exam"] = map[string]any{"kind": "next", "mean": mean(e), "item_scores": e}
 	return p
@@ -102,10 +39,10 @@ func (w *world) nextResult(c *claimed, n int, gain, base float64) map[string]any
 
 func TestTheNextExamIsGradedOnceItIsPostedAndScoredAgainstTheRoundsBaseline(t *testing.T) {
 	pub, priv := newKey()
-	w := newWorldS1(t, pub)
+	w := newWorld(t, pub)
 	anchor, bob := w.join("anchor-one", priv), w.join("bob", nil)
 	w.submit(anchor, "ref-a", "print(1)")
-	idx := w.draw()
+	idx := w.drawWithoutExam()
 	if w.editAll(anchor) != 1 {
 		t.Fatal("the anchor should have run the entry")
 	}
@@ -133,7 +70,7 @@ func TestTheNextExamIsGradedOnceItIsPostedAndScoredAgainstTheRoundsBaseline(t *t
 	}
 	// Grades start: the job carries the exam's digest, and the grader may fetch the exam.
 	cb := w.claim(bob, false)
-	if cb.Job == nil || cb.Job.Kind != "grade" || cb.Job.Round["exam_digest"] != nextDigest {
+	if cb.Job == nil || cb.Job.Kind != "grade" || cb.Job.Round["exam_digest"] != examSHA {
 		t.Fatalf("no grade job with the exam's digest: %+v", cb.Job)
 	}
 	if code := bob.do("GET", fmt.Sprintf("/api/v1/rounds/%s/exam", roundID(w.app.season.ID, idx)), nil, nil); code != 200 {
@@ -198,7 +135,7 @@ func TestTheNextExamIsGradedOnceItIsPostedAndScoredAgainstTheRoundsBaseline(t *t
 		t.Fatalf("the published exam is not the public one: %q", plain)
 	}
 	// Once settled, what the round held of its exam is in the file store and out of the database.
-	w.app.archiveNext(context.Background())
+	w.app.archiveExam(context.Background())
 	w.app.st.view(func(s *State) {
 		rd := s.Rounds[idx]
 		if len(rd.ExamTable) != 0 || len(rd.BaseItems) != 0 {
@@ -210,19 +147,12 @@ func TestTheNextExamIsGradedOnceItIsPostedAndScoredAgainstTheRoundsBaseline(t *t
 			}
 		}
 	})
-	if _, _, err := w.blobs.Open(context.Background(), nextScoresBlob(idx)); err != nil {
+	if _, _, err := w.blobs.Open(context.Background(), w.app.examBlob(idx, examScores)); err != nil {
 		t.Fatalf("the round's item scores were not kept: %v", err)
 	}
-	w.check()
-}
-
-func TestAPackSeasonTakesNoPostedExam(t *testing.T) {
-	pub, priv := newKey()
-	w := newWorld(t, pub)
-	anchor := w.join("anchor-one", priv)
-	w.submit(anchor, "ref-a", "print(1)")
-	idx := w.draw()
-	if code, _ := w.postExam(anchor, idx, nextTable()); code != 404 {
-		t.Fatalf("season 0 took a posted exam: HTTP %d", code)
+	// Under the season's own name: a later season's round of the same number is another round.
+	if key := w.app.examBlob(idx, examScores); !strings.HasPrefix(key, "nextexam/"+w.app.season.ID+"/") {
+		t.Fatalf("the round's exam is kept under %s, not under its season", key)
 	}
+	w.check()
 }

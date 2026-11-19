@@ -6,13 +6,15 @@ package main
 //
 //   - EDIT. A verifier executes the editor in the sandbox and uploads the edit script it
 //     wrote. That is a run. The script is plain data, stored under its sha256.
-//   - GRADE. A verifier downloads a script, trains the fixed student on what it says and
-//     reports the exam loss. Grading runs no entrant code, and every grader of a script
-//     trains on exactly the same tokens, so their results can be compared directly.
+//   - GRADE. A verifier downloads a script, trains the fixed student on what it says, sits
+//     it on the round's exam and reports its score on every item, and its own unedited
+//     baseline's the same way. Grading runs no entrant code, and every grader of a script
+//     trains on exactly the same tokens, so their results can be compared directly. The
+//     exam is made after the draw (nextexam.go): grading starts when it is posted.
 //
 // No score depends on one machine, and none on a machine the organisers run. The
 // organisers' accounts start out established, may run their own reference editors, and
-// administer the season (the draws, the exam files). In judging they are verifiers like
+// administer the season (the draws, the rounds' exams). In judging they are verifiers like
 // any other, with the two exceptions marked (*) below. Both exist so that the competition
 // can run while one machine is all there is, and the first is printed on every score it
 // touches.
@@ -66,8 +68,9 @@ package main
 //
 //   - A grade names one script. Two runs that wrote the same bytes share one set of grades.
 //   - A script's gain is the median, over the established accounts that graded it and
-//     found it valid, of each one's own unedited loss minus its loss on the script. If
-//     most of them find it invalid, or as many as do not, it is invalid.
+//     found it valid, of each one's score against the round's baseline: the exam's
+//     aggregate of its item scores less the baseline's. If most of them find it invalid,
+//     or as many as do not, it is invalid.
 //   - A grade of a script by the only person who wrote it is a SELF grade: that person
 //     would control both the script and the number said about it. A volunteer is never
 //     handed its own script. (*) An organisers' machine is, when nobody else who is around
@@ -93,9 +96,9 @@ package main
 // Scores:
 //
 //   - A run's gain is its script's gain, or nothing if it failed (no script, or an invalid
-//     one). An entry's gain is the median of its runs' gains (the mean of two), and its
-//     loss is the round's unedited loss less that. The round's unedited loss is the median
-//     of what its established graders measured.
+//     one). An entry's gain is the median of its runs' gains (the mean of two), in bits per
+//     byte. The round's baseline is the mean, item by item, of what its established graders
+//     measured on the unedited corpus.
 //   - An entry is CONFIRMED when two people's runs agree and neither rests on a self
 //     grade. Otherwise its score says which it is: run once, runs differed, or graded by
 //     its own runner.
@@ -317,13 +320,12 @@ type ResultPayload struct {
 	Train         *TrainInfo      `json:"train"`
 }
 
+// ExamScore is a student's score on the round's exam: one score for each of its items (bits
+// per byte, higher is better), and their mean.
 type ExamScore struct {
-	Loss     float64            `json:"loss"`
-	BySource map[string]float64 `json:"by_source"`
-	// The next exam: one score for each of the round's items, and their mean.
-	Kind       string    `json:"kind,omitempty"`
-	Mean       float64   `json:"mean,omitempty"`
-	ItemScores []float64 `json:"item_scores,omitempty"`
+	Kind       string    `json:"kind"` // "next"
+	Mean       float64   `json:"mean"`
+	ItemScores []float64 `json:"item_scores"`
 }
 
 type TrainInfo struct {
@@ -408,7 +410,7 @@ func recentWork(s *State) map[int64]int {
 	return out
 }
 
-// within reports whether a difference is inside a tolerance. Losses are reported to five
+// within reports whether a difference is inside a tolerance. Scores are reported to five
 // places, and 4.48954 - 4.40954 is 0.08000000000000007 in floating point: a difference of
 // exactly the tolerance agrees, as the page that prints both numbers says it does.
 func within(d, tol float64) bool { return math.Abs(d) <= tol+1e-9 }
@@ -663,8 +665,8 @@ type gradeView struct {
 	acct *Account
 	est  bool
 	self bool    // by the only person who wrote the script
-	base bool    // it measured the round's unedited loss
-	gain float64 // that, minus its loss on the script
+	base bool    // the round has a baseline it was scored against
+	gain float64 // its score against that
 }
 
 func (j *judge) view(sc *scriptState, r *Result) *gradeView {
@@ -674,17 +676,10 @@ func (j *judge) view(sc *scriptState, r *Result) *gradeView {
 	}
 	g := &gradeView{r: r, acct: acct, est: j.est[acct.ID], self: sc.wroteAlone(acct)}
 	if b := j.s.Baselines[baselineKey(r.RoundIdx, r.AccountID)]; b != nil {
-		g.base = true
-		switch {
-		case !r.Valid:
-		case j.a.season.next():
-			// Against the round's baseline, the mean of its graders': not this grader's own.
-			g.base = r.Score != nil
-			if r.Score != nil {
-				g.gain = *r.Score
-			}
-		default:
-			g.gain = b.Loss - r.Loss
+		// Against the round's baseline, the mean of its graders': not this grader's own.
+		g.base = !r.Valid || r.Score != nil
+		if r.Valid && r.Score != nil {
+			g.gain = *r.Score
 		}
 	}
 	return g
@@ -1019,7 +1014,7 @@ func (j *judge) offers(st *entryState, q *asker, closing bool) []offer {
 		out = append(out, offer{st: st, kind: "edit", score: score, required: true})
 	}
 	for _, sc := range st.Scripts {
-		if !j.mayGrade(st, sc, q.acct) || j.running(st, q.acct) || !j.a.examPosted(st.Round) {
+		if !j.mayGrade(st, sc, q.acct) || j.running(st, q.acct) || !examPosted(st.Round) {
 			continue
 		}
 		v := j.weigh(sc)
@@ -1091,7 +1086,7 @@ func (j *judge) offers(st *entryState, q *asker, closing bool) []offer {
 // no established account at work on one more, and a run that wrote no script is not one
 // volunteer's word alone.
 func (j *judge) settleable(st *entryState) bool {
-	if len(st.LiveEdits) > 0 || !j.a.examPosted(st.Round) {
+	if len(st.LiveEdits) > 0 || !examPosted(st.Round) {
 		return false
 	}
 	for _, sc := range st.Scripts {
@@ -1644,34 +1639,6 @@ func (a *App) afterInvalid(tx *Tx, editorID string) {
 
 func finite(x float64) bool { return !math.IsNaN(x) && !math.IsInf(x, 0) }
 
-func (a *App) checkScore(sc *ExamScore, what string) error {
-	// A student that is confidently wrong can score far above chance (9 nats), and what a
-	// machine measured has to be recordable whatever it is. The bound only keeps nonsense out.
-	const maxLoss = 1e4
-	if sc == nil || !finite(sc.Loss) || sc.Loss <= 0 || sc.Loss > maxLoss {
-		return fail(400, "the result has no usable %s score", what)
-	}
-	// Exactly the season's sources and nothing else: what is sent here is stored.
-	if len(sc.BySource) != len(a.season.ExamSources) {
-		return fail(400, "the %s score names %d sources; the season has %d", what, len(sc.BySource), len(a.season.ExamSources))
-	}
-	sum := 0.0
-	for _, src := range a.season.ExamSources {
-		v, ok := sc.BySource[src]
-		if !ok {
-			return fail(400, "the %s score is missing source %q", what, src)
-		}
-		if !finite(v) || v <= 0 || v > maxLoss {
-			return fail(400, "the %s score for source %q is not a usable number", what, src)
-		}
-		sum += v
-	}
-	if math.Abs(sum/float64(len(a.season.ExamSources))-sc.Loss) > 1e-3 {
-		return fail(400, "the %s score is not the mean of its sources", what)
-	}
-	return nil
-}
-
 func clipJSON(raw json.RawMessage, limit int) json.RawMessage {
 	if len(raw) == 0 || len(raw) > limit || !json.Valid(raw) {
 		return nil
@@ -1689,15 +1656,12 @@ func (a *App) submitResult(ctx context.Context, acctID, claimID int64, p *Result
 	if !a.cfg.Dev && !a.season.gradesOn(deviceOf(p.Hardware)) {
 		return nil, fail(400, "grades for the leaderboard must come from an NVIDIA (CUDA) or AMD (ROCm) GPU")
 	}
-	check := a.checkScore
-	if a.season.next() {
-		// One score for every item: how many the round has is checked against the round below.
-		check = func(sc *ExamScore, what string) error {
-			if sc == nil {
-				return fail(400, "the result has no usable %s score", what)
-			}
-			return checkItems(sc, len(sc.ItemScores), what)
+	// One score for every item: how many the round has is checked against the round below.
+	check := func(sc *ExamScore, what string) error {
+		if sc == nil {
+			return fail(400, "the result has no usable %s score", what)
 		}
+		return checkItems(sc, len(sc.ItemScores), what)
 	}
 	if err := check(p.Baseline, "baseline"); err != nil {
 		return nil, err
@@ -1765,48 +1729,38 @@ func (a *App) submitResult(ctx context.Context, acctID, claimID int64, p *Result
 			return nil
 		}
 		// Everyone must be looking at the same corpus and exam, and must measure the same
-		// unedited baseline on them. The round's first run fixes the corpus, and the first
-		// established account to report a grade fixes the exam and the baseline. Whoever
-		// reports before that is checked when the round settles instead.
+		// unedited baseline on them. The round's first run fixes the corpus, and the exam is
+		// the one the organisers posted. A baseline is checked against the round's other
+		// graders' as it arrives; whoever reports before there are any is checked when the
+		// round settles instead.
 		if (rd.CorpusSHA != "" && rd.CorpusSHA != p.CorpusSHA256) || (rd.ExamSHA != "" && rd.ExamSHA != p.ExamSHA256) {
 			return refuse("corpus", 0, "your corpus or exam for %s differs from the round's. This verifier rebuilds its copy once", p.Round)
 		}
-		if a.season.next() {
-			n := len(rd.ExamTable)
-			if rd.ExamSHA == "" || n == 0 {
-				return fail(409, "%s has no exam yet", p.Round)
-			}
-			if err := checkItems(p.Baseline, n, "baseline"); err != nil {
+		n := len(rd.ExamTable)
+		if rd.ExamSHA == "" || n == 0 {
+			return fail(409, "%s has no exam yet", p.Round)
+		}
+		if err := checkItems(p.Baseline, n, "baseline"); err != nil {
+			return err
+		}
+		if p.Valid {
+			if err := checkItems(p.Exam, n, "exam"); err != nil {
 				return err
 			}
-			if p.Valid {
-				if err := checkItems(p.Exam, n, "exam"); err != nil {
-					return err
-				}
-			}
-			tol := a.tolerance()
-			if dev, ok := a.baselineDev(s, rd, acctID, p.Baseline.ItemScores); ok && !within(dev, tol.Baseline) {
-				return refuse("baseline", places5(dev),
-					"your unedited baseline for %s is further from the round's other graders' than the tolerance of %.2f bits per byte allows, so this machine's setup or arithmetic differs. That is published with the round when it settles; nothing counts against you", p.Round, tol.Baseline)
-			}
-		} else if tol := a.tolerance(); rd.BaselineLoss != nil && !within(*rd.BaselineLoss-p.Baseline.Loss, tol.Baseline) {
-			return refuse("baseline", places5(p.Baseline.Loss-*rd.BaselineLoss),
-				"your unedited baseline for %s is further from what the round's established graders measured than the tolerance of %.2f nats allows, so this machine's setup or arithmetic differs. That is published with the round when it settles; nothing counts against you", p.Round, tol.Baseline)
+		}
+		tol := a.tolerance()
+		if dev, ok := a.baselineDev(s, rd, acctID, p.Baseline.ItemScores); ok && !within(dev, tol.Baseline) {
+			return refuse("baseline", places5(dev),
+				"your unedited baseline for %s is further from the round's other graders' than the tolerance of %.2f bits per byte allows, so this machine's setup or arithmetic differs. That is published with the round when it settles; nothing counts against you", p.Round, tol.Baseline)
 		}
 
 		// Everything is checked. From here on the change is made.
-		b := &Baseline{RoundIdx: rd.Idx, AccountID: acctID, Loss: p.Baseline.Loss, BySource: p.Baseline.BySource,
+		b := &Baseline{RoundIdx: rd.Idx, AccountID: acctID, Loss: places5(-p.Baseline.Mean), Items: p.Baseline.ItemScores,
 			CorpusSHA: p.CorpusSHA256, ExamSHA: p.ExamSHA256, ReceivedAt: now(), Established: est}
-		if a.season.next() {
-			b.Loss, b.BySource, b.Items = places5(-p.Baseline.Mean), nil, p.Baseline.ItemScores
-		}
 		tx.saveBaseline(b)
 		if est {
-			rd.CorpusSHA, rd.ExamSHA = p.CorpusSHA256, p.ExamSHA256
+			rd.CorpusSHA = p.CorpusSHA256
 			a.moved(tx, rd)
-			if !a.season.next() {
-				a.refreshBaseline(tx, rd)
-			}
 		}
 		// GPU time is what the grader says, but never more than the job was out for. It
 		// counts once the grade has: when the round settles.
@@ -1819,15 +1773,10 @@ func (a *App) submitResult(ctx context.Context, acctID, claimID int64, p *Result
 			InvalidReason: clip(strings.ToValidUTF8(p.InvalidReason, "?"), 300),
 			Summary:       &ResultSummary{Script: clipJSON(p.Script, 16<<10), Hardware: clipJSON(p.Hardware, 2000), Train: p.Train}}
 		if p.Valid {
-			res.Loss, res.BySource = p.Exam.Loss, p.Exam.BySource
-			if a.season.next() {
-				res.Loss, res.BySource, res.Items = places5(-p.Exam.Mean), nil, p.Exam.ItemScores
-			}
+			res.Loss, res.Items = places5(-p.Exam.Mean), p.Exam.ItemScores
 		}
 		tx.newResult(res)
-		if a.season.next() {
-			a.refreshNext(tx, rd) // the round's baseline, and every grade's score against it
-		}
+		a.refreshScores(tx, rd) // the round's baseline, and every grade's score against it
 		c.Status = "done"
 		tx.saveClaim(c)
 		acct.LastSeen = now()
@@ -1871,43 +1820,6 @@ func cleanTrain(t *TrainInfo) *TrainInfo {
 	return &c
 }
 
-// refreshBaseline sets the round's unedited loss to what its established graders measured:
-// the median, so that no one of them decides it.
-func (a *App) refreshBaseline(tx *Tx, rd *Round) {
-	var losses []float64
-	per := map[string][]float64{}
-	for _, b := range tx.s.Baselines {
-		// Whether a measurement counts was settled when it arrived: standing earned as the
-		// round settles must not move the round's own baseline. (One from before that was
-		// written down counts if it is the organisers'.)
-		acct := tx.s.Accounts[b.AccountID]
-		if b.RoundIdx != rd.Idx || !(b.Established || (acct != nil && acct.Anchor)) || b.CorpusSHA != rd.CorpusSHA || b.ExamSHA != rd.ExamSHA {
-			continue
-		}
-		losses = append(losses, b.Loss)
-		for k, v := range b.BySource {
-			per[k] = append(per[k], v)
-		}
-	}
-	if len(losses) == 0 {
-		return
-	}
-	by := map[string]float64{}
-	for k, v := range per {
-		by[k] = median(v)
-	}
-	m := median(losses)
-	rd.BaselineLoss, rd.Baseline = &m, by
-	// How many machines measured it, whoever they were.
-	rd.BaselineN = 0
-	for _, b := range tx.s.Baselines {
-		if b.RoundIdx == rd.Idx && b.CorpusSHA == rd.CorpusSHA && b.ExamSHA == rd.ExamSHA && math.Abs(b.Loss-m) <= a.tolerance().Baseline {
-			rd.BaselineN++
-		}
-	}
-	tx.saveRound(rd)
-}
-
 func median(v []float64) float64 {
 	s := append([]float64(nil), v...)
 	sort.Float64s(s)
@@ -1939,7 +1851,7 @@ func (a *App) settleRound(tx *Tx, rd *Round) {
 	wait := int64(a.cfg.ReplicaWait.Seconds())
 	j := a.newJudge(s)
 	states := j.states(rd)
-	if !a.examPosted(rd) {
+	if !examPosted(rd) {
 		return // the round waits for its exam, which is made after the draw: nothing is given up meanwhile
 	}
 	// What nobody is there to do is given up, once the round has waited its while.
@@ -2190,7 +2102,7 @@ type graded struct {
 // settleScript compares every grade of a script with what the established accounts'
 // grades of it come to, and gives each grader what that earns.
 func (a *App) settleScript(tx *Tx, j *judge, st *entryState, sc *scriptState) *graded {
-	rd, tol := st.Round, a.tolerance()
+	rd := st.Round
 	v := j.weigh(sc)
 	out := &graded{v: v}
 	decides := map[*Result]bool{}
@@ -2206,8 +2118,8 @@ func (a *App) settleScript(tx *Tx, j *judge, st *entryState, sc *scriptState) *g
 	if !v.valid && out.reason == "" {
 		out.reason = "the script is invalid"
 	}
-	// A script that is the unedited corpus itself has the round's baseline for its loss, and
-	// every grader reports the baseline with every grade. Agreeing about it shows nothing
+	// A script that is the unedited corpus itself scores the round's baseline, and every
+	// grader reports the baseline with every grade. Agreeing about it shows nothing
 	// that was not already shown, so it earns no standing. Nor does agreeing that a script
 	// is invalid: that is decided before anything is trained.
 	plain := !v.valid || math.Abs(v.gain) < 1e-9
@@ -2239,7 +2151,7 @@ func (a *App) settleScript(tx *Tx, j *judge, st *entryState, sc *scriptState) *g
 		case !decides[r] && (r.CorpusSHA != rd.CorpusSHA || r.ExamSHA != rd.ExamSHA):
 			// It graded different data. A setup problem, and no evidence about this script.
 			r.Verdict, shown = "void", "other data"
-		case !decides[r] && (b == nil || rd.BaselineLoss == nil || !within(b.Loss-*rd.BaselineLoss, tol.Baseline)):
+		case !decides[r] && !a.baselineAgrees(rd, b):
 			// Its arithmetic differs on the unedited corpus too.
 			r.Verdict, shown = "void", "baseline differs"
 		case j.agrees(g, v):
@@ -2442,62 +2354,16 @@ func (a *App) settleEntry(tx *Tx, j *judge, st *entryState) {
 }
 
 // regain recomputes every settled entry's loss in a round from the round's current
-// baseline. An entry's gain is what was measured (each grader's own unedited loss minus
-// its loss on the script); the loss shown beside it is the round's unedited loss less that.
+// baseline. An entry's gain is what was measured (its grades' scores against the round's
+// baseline); the loss shown beside it is the unedited student's bits per byte less that.
 func (a *App) regain(tx *Tx, rd *Round) {
 	for _, e := range tx.s.inRound[rd.Idx] {
 		if e.Status != "settled" || !e.Valid || rd.BaselineLoss == nil {
 			continue
 		}
-		if len(e.Runs) == 0 {
-			// Settled before harness 0.3.0: its loss was measured, by the one machine that
-			// graded it, and its gain follows from that.
-			if e.Loss != nil {
-				if gain := places5(*rd.BaselineLoss - *e.Loss); gain != e.Gain {
-					e.Gain = gain
-					tx.saveEntry(e)
-				}
-			}
-			continue
-		}
 		if loss := places5(*rd.BaselineLoss - e.Gain); e.Loss == nil || *e.Loss != loss {
 			e.Loss = &loss
 			tx.saveEntry(e)
-		}
-	}
-}
-
-// carryOver brings an entry that was half-way through a round when the server learned
-// about runs into the new shape: its one edit becomes its first run, and the grades of
-// its script name the script.
-func (a *App) carryOver(tx *Tx) {
-	for _, rd := range openRounds(tx.s) {
-		if rd.ActiveAt == 0 {
-			// Drawn by a server that did not keep this. How long the round waits for people is
-			// counted from when something last moved it on, and for this round that is now:
-			// counted from its draw, the wait would already be over and its entries given up.
-			a.moved(tx, rd)
-		}
-		for _, e := range tx.s.inRound[rd.Idx] {
-			if e.Status != "open" || e.EditedAt == 0 || len(e.Runs) > 0 {
-				continue
-			}
-			script := e.Script
-			e.Runs = []*Run{{N: 1, By: e.EditedBy, Script: e.Script, ScriptSize: e.ScriptSize, Edit: e.Edit, At: e.EditedAt}}
-			e.Script, e.ScriptSize, e.Edit, e.EditedAt, e.EditedBy = "", 0, nil, 0, 0
-			tx.saveEntry(e)
-			for _, r := range tx.s.results(e.RoundIdx, e.EditorID) {
-				if r.Script == "" {
-					r.Script = script
-					tx.saveResult(r)
-				}
-			}
-			for _, c := range tx.s.Claims {
-				if c.RoundIdx == e.RoundIdx && c.EditorID == e.EditorID && c.Kind == "grade" && c.Script == "" {
-					c.Script = script
-					tx.saveClaim(c)
-				}
-			}
 		}
 	}
 }

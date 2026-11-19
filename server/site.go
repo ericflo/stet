@@ -6,10 +6,8 @@ import (
 	"embed"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"html/template"
-	"io"
 	"io/fs"
 	"log/slog"
 	"math"
@@ -127,7 +125,6 @@ func (s *Site) mount(mux *http.ServeMux) {
 	mux.HandleFunc("GET /{$}", s.home)
 	mux.HandleFunc("GET /leaderboard", s.leaderboard)
 	mux.HandleFunc("GET /record", s.record)
-	mux.HandleFunc("GET /next", s.next)
 	mux.HandleFunc("GET /editors/{ref}", s.editor)
 	mux.HandleFunc("GET /editors/{handle}/{name}", s.editorByName)
 	mux.HandleFunc("GET /rounds", s.rounds)
@@ -461,11 +458,8 @@ func (s *Site) funcs() template.FuncMap {
 			}
 			return strings.ToUpper(s[:1]) + s[1:]
 		},
-		// The season's exam, as the pages say it: next is true when it is the next exam (made
-		// after each draw, scored in bits per byte), unit is what scores are in, and worth
-		// whether a rating can be read as a multiplier at all.
-		"next":  s.app.season.next,
-		"unit":  s.app.season.unit,
+		// Whether a rating can be read as a multiplier at all: only once the season has a
+		// reference curve for its scale.
 		"worth": s.app.hasMultiplier,
 	}
 }
@@ -664,7 +658,7 @@ func feed(s *State, limit int, unit string) []FeedItem {
 	return out
 }
 
-// roundName is how the pages name a round: "Round 6" for s0-o00006.
+// roundName is how the pages name a round: "Round 6" for s1-o00006.
 func roundName(id string) string {
 	if i := strings.LastIndex(id, "-o"); i >= 0 {
 		if n, err := strconv.Atoi(id[i+2:]); err == nil {
@@ -704,8 +698,8 @@ type roundSummary struct {
 func (a *App) roundSummary(s *State, r *Round) roundSummary {
 	rs := roundSummary{Round: *r, ID: roundID(a.season.ID, r.Idx)}
 	if r.Status != "settled" {
-		// Sealed with the grades: a volunteer has to measure the unedited loss, not read it.
-		rs.BaselineLoss, rs.Baseline, rs.BaselineN, rs.Differs = nil, nil, 0, nil
+		// Sealed with the grades: a volunteer has to measure the unedited baseline, not read it.
+		rs.BaselineLoss, rs.BaselineN, rs.Differs = nil, 0, nil
 	}
 	for _, e := range s.inRound[r.Idx] {
 		rs.Entries++
@@ -1096,7 +1090,7 @@ func (s *Site) record(w http.ResponseWriter, r *http.Request) {
 		recs = a.records(st)
 		race = a.recordRace(st, b, 20)
 	})
-	chart := recordChart(recs, a.season.unit())
+	chart := recordChart(recs)
 	sort.Slice(recs, func(i, j int) bool { return recs[i].N > recs[j].N })
 	p := s.page(r, "The record", "leaderboard", map[string]any{
 		"Race": race, "VsTop": race.Top, "Records": recs, "RecordChart": chart, "Holder": b.ByID[b.RecordID],
@@ -1174,14 +1168,9 @@ func (s *Site) editor(w http.ResponseWriter, r *http.Request) {
 			if results[i].Settled && results[i].Valid {
 				latest := results[i]
 				d["Latest"] = &latest
-				if a.season.next() {
-					// The next exam's BySource is the entry's gain on each pillar, not a loss.
-					d["SourceChart"] = gainChart(a.season.ExamSources, latest.BySource)
-				} else {
-					d["SourceChart"] = sourceChart(a.season.ExamSources, st.Rounds[latest.RoundIdx].Baseline, latest.BySource)
-				}
+				d["SourceChart"] = gainChart(a.season.ExamSources, latest.BySource) // its gain on each pillar
 				if latest.Train != nil {
-					d["CurveChart"] = lossCurve(latest.Train.Curve, a.season.next())
+					d["CurveChart"] = curveChart(latest.Train.Curve)
 				}
 				break
 			}
@@ -1215,18 +1204,6 @@ func (s *Site) editor(w http.ResponseWriter, r *http.Request) {
 	d["E"], d["Owner"], d["Github"], d["Row"] = e, owner, github, b.ByID[e.ID]
 	d["RatedRounds"], d["Ranked"], d["LadderSize"] = a.cfg.RatedRounds, len(b.Rated), a.cfg.LadderSize
 	d["FileAsked"] = r.URL.Query().Get("file") != ""
-	a.st.view(func(st *State) {
-		if a.season.next() {
-			return // the next exam is this season's own: there is nothing to set beside it
-		}
-		for i, row := range a.shadowStandings(st, b) {
-			if row.EditorID == e.ID {
-				row := row
-				d["Next"], d["NextPlace"], d["NextOf"] = &row, i+1, len(a.shadowStandings(st, b))
-				d["NextStrong"], d["NextWeak"] = strongWeak(row.Families)
-			}
-		}
-	})
 
 	// Source viewer: one file at a time, read out of the stored bundle.
 	want := r.URL.Query().Get("file")
@@ -1393,9 +1370,6 @@ func (s *Site) round(w http.ResponseWriter, r *http.Request) {
 	if slot, onGrid := a.season.drawSlot(rs.DrandRound); onGrid {
 		d["Slot"] = slot
 	}
-	if rs.Baseline != nil {
-		d["BaselineChart"] = baselineChart(a.season.ExamSources, rs.Baseline)
-	}
 	// Whether every score in the round rests on one machine running and grading alone: then
 	// the page says so once, at the top, as well as against each entry.
 	alone, scored := true, 0
@@ -1423,11 +1397,6 @@ func (s *Site) round(w http.ResponseWriter, r *http.Request) {
 	if same != nil && scored > 1 {
 		d["Same"] = same
 	}
-	a.st.view(func(st *State) {
-		if sh := st.Shadows[idx]; sh != nil && !a.season.next() {
-			d["Shadow"], d["ShadowRows"], d["ShadowTop"] = sh, a.shadowRows(st, sh, entries), shadowTop(sh)
-		}
-	})
 	s.render(w, 200, "round", s.page(r, "Round "+rs.ID, "rounds", d))
 }
 
@@ -1603,8 +1572,7 @@ func (s *Site) agentsMd(w http.ResponseWriter, r *http.Request) {
 
 var fileNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]{0,200}$`)
 
-// file serves the CLI wheel from the files directory, and anything else (the exam pack)
-// from the bucket, under files/.
+// file serves the CLI wheel, and whatever else is put beside it, from the files directory.
 func (s *Site) file(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	if !fileNameRe.MatchString(name) {
@@ -1612,30 +1580,12 @@ func (s *Site) file(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p := filepath.Join(s.app.cfg.FilesDir, name)
-	if st, err := os.Stat(p); err == nil && !st.IsDir() {
-		w.Header().Set("Cache-Control", "public, max-age=3600")
-		http.ServeFile(w, r, p)
-		return
-	}
-	body, size, err := s.app.st.blobs.Open(r.Context(), "files/"+name)
-	if errors.Is(err, errNoBlob) {
+	if st, err := os.Stat(p); err != nil || st.IsDir() {
 		http.NotFound(w, r)
 		return
 	}
-	if err != nil { // the store's trouble, not the file's absence: nothing a cache should keep
-		slog.Error("file", "name", name, "err", err)
-		http.Error(w, "the file store is not answering; try again in a moment", http.StatusBadGateway)
-		return
-	}
-	defer body.Close()
 	w.Header().Set("Cache-Control", "public, max-age=3600")
-	w.Header().Set("Content-Type", "application/octet-stream")
-	if size > 0 {
-		w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
-	}
-	if r.Method != http.MethodHead {
-		io.Copy(w, body)
-	}
+	http.ServeFile(w, r, p)
 }
 
 const installShTmpl = `#!/bin/sh
@@ -1825,103 +1775,4 @@ func (s *Site) installSh(w http.ResponseWriter, r *http.Request) {
 
 func (s *Site) installPs1(w http.ResponseWriter, r *http.Request) {
 	s.installScript(w, r, installPs1Tmpl)
-}
-
-// --- the next exam (season 0's shadow) ------------------------------------------------------
-
-// shadowRow is one entry of a round as the next exam ranks it, beside where the season's exam put it.
-type shadowRow struct {
-	ShadowEntry
-	Name    string
-	Version int
-	Owner   string
-	Place   int // its place on the season's exam in this round; 0 when it had none
-}
-
-func (a *App) shadowRows(st *State, sh *Shadow, entries []roundEntry) []shadowRow {
-	place := map[string]int{}
-	for _, e := range entries {
-		place[e.EditorID] = e.Place
-	}
-	var out []shadowRow
-	for _, e := range sh.Entries {
-		ed := st.Editors[e.EditorID]
-		if ed == nil {
-			continue
-		}
-		out = append(out, shadowRow{ShadowEntry: e, Name: ed.Name, Version: ed.Version, Owner: st.owner(ed).Handle, Place: place[e.EditorID]})
-	}
-	return out
-}
-
-func shadowTop(sh *Shadow) float64 {
-	top := 0.0
-	for _, e := range sh.Entries {
-		top = math.Max(top, e.Score)
-	}
-	return top
-}
-
-// familyNames are the next exam's families as a page says them.
-var familyNames = map[string]string{
-	"arith": "arithmetic", "word": "word problems", "units": "units and dates", "algebra": "algebra", "prog": "programs",
-	"algo": "algorithms", "logic": "logic", "struct": "structured data", "agent": "agents' tools", "grammar": "grammar",
-	"transform": "formats", "fresh": "fresh text",
-}
-
-// strongWeak names the families a curator gains most and least on.
-func strongWeak(fam map[string]float64) (string, string) {
-	if len(fam) < 3 {
-		return "", ""
-	}
-	keys := make([]string, 0, len(fam))
-	for k := range fam {
-		keys = append(keys, k)
-	}
-	sort.Slice(keys, func(i, j int) bool {
-		if fam[keys[i]] != fam[keys[j]] {
-			return fam[keys[i]] > fam[keys[j]]
-		}
-		return keys[i] < keys[j]
-	})
-	name := func(k string) string {
-		if n, ok := familyNames[k]; ok {
-			return n
-		}
-		return k
-	}
-	return name(keys[0]) + " and " + name(keys[1]), name(keys[len(keys)-1])
-}
-
-// next is the next exam's standings: what season 0 would look like on the exam proposed for
-// season 1. It ranks nothing yet. In a season whose exam is the next exam, the leaderboard is
-// that, and this sends a reader to what the exam is.
-func (s *Site) next(w http.ResponseWriter, r *http.Request) {
-	a := s.app
-	if a.season.next() {
-		http.Redirect(w, r, "/glossary#exam", http.StatusFound)
-		return
-	}
-	b := a.board()
-	d := map[string]any{}
-	a.st.view(func(st *State) {
-		rows := a.shadowStandings(st, b)
-		top := 0.0
-		for _, row := range rows {
-			top = math.Max(top, row.Mean)
-		}
-		var latest *Shadow
-		for _, sh := range st.Shadows {
-			if latest == nil || sh.RoundIdx > latest.RoundIdx {
-				latest = sh
-			}
-		}
-		d["Rows"], d["Top"], d["Rounds"], d["Latest"] = rows, top, len(st.Shadows), latest
-		if latest != nil {
-			d["LatestID"] = roundID(a.season.ID, latest.RoundIdx)
-		}
-	})
-	p := s.page(r, "The next exam", "leaderboard", d)
-	p.Desc = "Season 0 measured again on the exam proposed for season 1: made after each round's draw, from text published after it and items generated from its seed. It ranks nothing yet."
-	s.render(w, 200, "next", p)
 }

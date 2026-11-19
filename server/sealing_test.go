@@ -1,17 +1,11 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"crypto/ed25519"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
-	"io"
 	"math"
 	"net/http"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -394,44 +388,6 @@ func TestAnEntryGivenUpEarlyStaysSealedUntilItsRoundSettles(t *testing.T) {
 	w.check()
 }
 
-func TestARoundDrawnByAnOlderServerCountsItsWaitFromNow(t *testing.T) {
-	ctx := context.Background()
-	pub, priv := newKey()
-	w := newWorld(t, pub)
-	anchor, alice := w.join("anchor-one", priv), w.join("alice", nil)
-	w.submit(alice, "tidy", "print('v1')")
-	idx := w.draw()
-	w.run(anchor, scriptOne)
-	// As an older server left it: drawn two hours ago, with no note of when it was last
-	// moved on, and the organisers' machine stopped for the upgrade.
-	w.age(2 * time.Hour)
-	w.app.st.update(ctx, func(tx *Tx) error {
-		rd := tx.s.Rounds[idx]
-		rd.ActiveAt = 0
-		tx.saveRound(rd)
-		return nil
-	})
-	w.app.tick(ctx)
-	if w.settled(idx) != 0 {
-		t.Fatal("a round carried over was given up the moment the new server looked at it")
-	}
-	w.app.st.view(func(s *State) {
-		if s.Rounds[idx].ActiveAt == 0 {
-			t.Fatal("the round still has no note of when it was last moved on")
-		}
-	})
-	// From there it waits its while like any other, and the machine that comes back
-	// finishes it.
-	w.pass(w.cfg.ReplicaWait - time.Minute)
-	if w.settled(idx) != 0 {
-		t.Fatal("the round was given up before it had waited its while")
-	}
-	if _, status := w.grade(anchor, true, 5.5); status != "settled" {
-		t.Fatalf("the organisers' grade: %s", status)
-	}
-	w.check()
-}
-
 func TestARunThatWasGivenUpDoesNotUseUpOneOfAnEntrysRuns(t *testing.T) {
 	w := newWorld(t)
 	alice, bob, carol, dave := w.join("alice", nil), w.join("bob", nil), w.join("carol", nil), w.join("dave", nil)
@@ -469,7 +425,7 @@ func TestARunThatWasGivenUpDoesNotUseUpOneOfAnEntrysRuns(t *testing.T) {
 	w.check()
 }
 
-// A verifier turned away for another corpus or another unedited loss is told it will be
+// A verifier turned away for another corpus or another unedited baseline is told it will be
 // listed with the round. That holds for an established one as much as a newcomer: theirs
 // are the machines whose baselines decide scores.
 func TestAnEstablishedVerifierTurnedAwayIsListedWithTheRound(t *testing.T) {
@@ -493,7 +449,7 @@ func TestAnEstablishedVerifierTurnedAwayIsListedWithTheRound(t *testing.T) {
 		Error string `json:"error"`
 	}
 	if code := bob.do("POST", fmt.Sprintf("/api/v1/jobs/%d/result", c.Job.ID), w.result(c, 5.5, 7.5), &out); code != 409 || !strings.Contains(out.Error, "published") {
-		t.Fatalf("a grade with another unedited loss: HTTP %d %s", code, out.Error)
+		t.Fatalf("a grade with another unedited baseline: HTTP %d %s", code, out.Error)
 	}
 	// Bob goes away, and the organisers' machine finishes the round alone.
 	w.pass(2 * w.cfg.ActiveWindow)
@@ -522,6 +478,52 @@ func TestAnEstablishedVerifierTurnedAwayIsListedWithTheRound(t *testing.T) {
 	if _, body := w.page("/rounds/" + roundID(w.app.season.ID, idx)); !strings.Contains(body, "/u/bob") || !strings.Contains(body, "established; ") {
 		t.Fatal("the round's page does not name the established verifier that was turned away")
 	}
+	w.check()
+}
+
+// A grade taken before the round had a baseline to check it against is checked when the round
+// settles, on the exam's aggregate: one whose own baseline is further from the round's than the
+// tolerance is set aside, and held against nobody, whatever it says about the script.
+func TestAGradeWhoseBaselineDiffersIsSetAsideAndHeldAgainstNobody(t *testing.T) {
+	pub, priv := newKey()
+	w := newWorld(t, pub)
+	anchor, alice, bob := w.join("anchor-one", priv), w.join("alice", nil), w.join("bob", nil)
+	w.submit(alice, "tidy", "print('v1')")
+	idx := w.draw()
+	w.run(anchor, scriptOne)
+	cb := w.claim(bob, false)
+	if cb.Job == nil || cb.Job.Kind != "grade" {
+		t.Fatalf("bob should be grading: %+v", cb.Job)
+	}
+	// Bob's machine finds the unedited corpus 1.5 bits per byte harder than anyone else does,
+	// and is first: there is nothing yet to turn it away against.
+	if code := bob.do("POST", fmt.Sprintf("/api/v1/jobs/%d/result", cb.Job.ID), w.result(cb, 7.0, 7.5), nil); code != 200 {
+		t.Fatalf("bob's grade: HTTP %d", code)
+	}
+	if _, status := w.grade(anchor, true, 5.5); status != "settled" {
+		t.Fatalf("the organisers' grade: %s", status)
+	}
+	e := w.entry(idx, "tidy")
+	if !e.Valid || math.Abs(*e.Gain-0.5) > 1e-9 || len(e.Runs) != 1 {
+		t.Fatalf("the entry: %+v", e)
+	}
+	var verdict string
+	for _, g := range e.Runs[0].Grades {
+		if g.Handle == "bob" {
+			verdict = g.Verdict
+		}
+	}
+	if verdict != "baseline differs" {
+		t.Fatalf("bob's grade is shown as %q", verdict)
+	}
+	if b := w.account("bob"); b.Strikes != 0 || b.Agreed != 0 {
+		t.Fatalf("a grade set aside counted for or against bob: %+v", b)
+	}
+	w.app.st.view(func(s *State) {
+		if n := s.Rounds[idx].BaselineN; n != 1 {
+			t.Fatalf("%d baselines agree with the round's, not 1", n)
+		}
+	})
 	w.check()
 }
 
@@ -882,85 +884,15 @@ func TestTwoOrganisersMachinesShareTheOrganisersOwnEntries(t *testing.T) {
 	w.check()
 }
 
-// The held-out exam goes between the organisers' machines sealed to each one's key. It is
-// kept for nobody else, in no readable form, and no other road leads to it.
-func TestTheHeldOutExamIsKeptOnlySealedAndOnlyForTheOrganisersMachines(t *testing.T) {
-	pub1, priv1 := newKey()
-	pub2, priv2 := newKey()
-	w := newWorld(t, pub1, pub2)
-	one, two, eve := w.join("anchor-one", priv1), w.join("anchor-two", priv2), w.join("eve", nil)
-	w.app.season.HeldoutSHA256 = strings.Repeat("ab", 32)
-	sealed := append([]byte("stet-sealed-1\n"), bytes.Repeat([]byte{7}, 200)...)
-	raw := func(a *actor, path string) (int, []byte) {
-		t.Helper()
-		req, _ := http.NewRequest("GET", a.srv.URL+path, nil)
-		ts := strconv.FormatInt(time.Now().Unix(), 10)
-		sum := sha256.Sum256(nil)
-		msg := strings.Join([]string{"stet-v1", "GET", path, ts, hex.EncodeToString(sum[:])}, "\n")
-		req.Header.Set("X-Stet-Key", a.pub)
-		req.Header.Set("X-Stet-Time", ts)
-		req.Header.Set("X-Stet-Sig", hex.EncodeToString(ed25519.Sign(a.priv, []byte(msg))))
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer resp.Body.Close()
-		blob, _ := io.ReadAll(resp.Body)
-		return resp.StatusCode, blob
-	}
+// An organiser can look up the key an account signs with, which is what it takes to make that
+// account's machine an organisers' one. Nobody else can.
+func TestOnlyAnOrganiserLooksUpAnAccountsKey(t *testing.T) {
+	pub, priv := newKey()
+	w := newWorld(t, pub)
+	one, eve := w.join("anchor-one", priv), w.join("eve", nil)
 	var out struct {
 		Error string `json:"error"`
 	}
-	var list struct {
-		Organisers []struct {
-			Key    string `json:"key"`
-			Handle string `json:"handle"`
-			Sealed bool   `json:"sealed"`
-		} `json:"organisers"`
-	}
-	has := func(key string) bool {
-		t.Helper()
-		if code := one.do("GET", "/api/v1/admin/sealed", nil, &list); code != 200 || len(list.Organisers) != 2 {
-			t.Fatalf("the list of organisers' keys: HTTP %d %+v", code, list)
-		}
-		for _, o := range list.Organisers {
-			if o.Key == key {
-				return o.Sealed
-			}
-		}
-		t.Fatalf("%s is not in the list: %+v", key[:8], list)
-		return false
-	}
-
-	// Somebody who is not an organiser learns nothing and leaves nothing.
-	for _, path := range []string{"/api/v1/admin/sealed", "/api/v1/admin/sealed/mine"} {
-		if code := eve.do("GET", path, nil, &out); code != 403 {
-			t.Fatalf("an entrant asked for %s: HTTP %d %s", path, code, out.Error)
-		}
-		if resp, err := http.Get(one.srv.URL + path); err != nil || resp.StatusCode != 401 {
-			t.Fatalf("%s without a signature: %v %v", path, resp, err)
-		}
-	}
-	if code := eve.do("PUT", "/api/v1/admin/sealed/"+two.pub, sealed, &out); code != 403 {
-		t.Fatalf("an entrant left a sealed copy: HTTP %d %s", code, out.Error)
-	}
-	// An organiser shares it with no key but an organisers', and never in a form the
-	// server could read.
-	if code := one.do("PUT", "/api/v1/admin/sealed/"+eve.pub, sealed, &out); code != 403 {
-		t.Fatalf("a copy was kept for a key that is not an organisers': HTTP %d %s", code, out.Error)
-	}
-	if code := one.do("PUT", "/api/v1/admin/sealed/"+two.pub, bytes.Repeat([]byte("the held-out exam, as it is. "), 20), &out); code != 400 {
-		t.Fatalf("something that is not sealed was kept: HTTP %d %s", code, out.Error)
-	}
-	if has(one.pub) || has(two.pub) {
-		t.Fatalf("a copy is listed that nobody sealed: %+v", list)
-	}
-	if code, _ := raw(two, "/api/v1/admin/sealed/mine"); code != 404 {
-		t.Fatalf("a machine nobody has shared with was handed something: HTTP %d", code)
-	}
-
-	// An organiser can look up the key an account signs with, which is what it takes to
-	// make that account's machine an organisers' one. Nobody else can.
 	var acct struct {
 		Key    string `json:"key"`
 		Anchor bool   `json:"anchor"`
@@ -971,28 +903,10 @@ func TestTheHeldOutExamIsKeptOnlySealedAndOnlyForTheOrganisersMachines(t *testin
 	if code := one.do("GET", "/api/v1/admin/accounts/nobody-here", nil, &out); code != 404 {
 		t.Fatalf("an account that does not exist: HTTP %d", code)
 	}
-	if code := eve.do("GET", "/api/v1/admin/accounts/anchor-two", nil, &out); code != 403 {
+	if code := eve.do("GET", "/api/v1/admin/accounts/anchor-one", nil, &out); code != 403 {
 		t.Fatalf("an entrant looked up an account's key: HTTP %d", code)
 	}
-
-	// One machine seals a copy to the other's key. The other is handed exactly that, and
-	// nobody is handed a copy that is not their own.
-	if code := one.do("PUT", "/api/v1/admin/sealed/"+two.pub, sealed, &out); code != 201 {
-		t.Fatalf("an organiser sharing the exam with another organisers' machine: HTTP %d %s", code, out.Error)
-	}
-	if !has(two.pub) || has(one.pub) {
-		t.Fatalf("after one copy for anchor-two: %+v", list)
-	}
-	if code, got := raw(two, "/api/v1/admin/sealed/mine"); code != 200 || !bytes.Equal(got, sealed) {
-		t.Fatalf("the machine it was sealed to was handed HTTP %d and %d bytes", code, len(got))
-	}
-	if code, _ := raw(one, "/api/v1/admin/sealed/mine"); code != 404 {
-		t.Fatalf("a machine was handed a copy sealed to another's key: HTTP %d", code)
-	}
-	// And the public file routes do not reach it by any name.
-	for _, path := range []string{"/files/" + two.pub, "/files/sealed", "/files/heldout-" + w.app.season.ID + ".jsonl.zst", "/files/..%2Fsealed%2Fheldout-" + w.app.season.ID + "%2F" + two.pub} {
-		if code, body := w.page(path); code == 200 || strings.Contains(body, "stet-sealed-1") {
-			t.Fatalf("%s served the sealed copy: HTTP %d", path, code)
-		}
+	if resp, err := http.Get(one.srv.URL + "/api/v1/admin/accounts/eve"); err != nil || resp.StatusCode != 401 {
+		t.Fatalf("a lookup without a signature: %v %v", resp, err)
 	}
 }

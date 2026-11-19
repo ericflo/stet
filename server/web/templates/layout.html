@@ -37,7 +37,7 @@
 <footer>
   <div class="wrap">
     <nav aria-label="More">
-      <a href="/leaderboard">Leaderboard</a><a href="/rounds">Rounds</a><a href="/record">The record</a>{{if not next}}<a href="/next">The next exam</a>{{end}}<a href="/verifiers">Verifiers</a><a href="/glossary">Glossary</a><a href="/docs/rules">Rules</a><a href="/docs/faq">FAQ</a><a href="/enter">Compete</a><a href="/verify">Verify</a><a href="/run">Run entries</a><a href="{{.APIURL}}/api/v1/season">API</a>
+      <a href="/leaderboard">Leaderboard</a><a href="/rounds">Rounds</a><a href="/record">The record</a><a href="/verifiers">Verifiers</a><a href="/glossary">Glossary</a><a href="/docs/rules">Rules</a><a href="/docs/faq">FAQ</a><a href="/enter">Compete</a><a href="/verify">Verify</a><a href="/run">Run entries</a><a href="{{.APIURL}}/api/v1/season">API</a>
     </nav>
     <p>{{.Season.Title}}, run at the <a class="term" href="/glossary#scale">{{.ScaleID}} scale</a>. <i>stet</i>, a proofreader's mark: let it stand.</p>
   </div>
@@ -90,9 +90,8 @@
 {{define "sure-word"}}{{$t := trust .}}<span class="sure l{{$t.Level}}" title="{{$t.Says}}"><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>{{$t.Label}}</span>{{end}}
 
 {{/* How a round works, drawn: the same fresh pages, edited two ways and left as they were,
-     the same model trained on each, and the losses on the same exam. The next exam's are in
-     bits per byte. */}}
-{{define "round-diagram"}}{{$col := "Exam loss"}}{{$says := "Unedited scores a loss of 5.28, A 4.21 and B 4.45"}}{{$u := "5.28"}}{{$a := "4.21"}}{{$ga := "1.07"}}{{$b := "4.45"}}{{$gb := "0.83"}}{{if next}}{{$col = "Bits per byte"}}{{$says = "Unedited needs 1.84 bits per byte, A 1.62 and B 1.71"}}{{$u = "1.84"}}{{$a = "1.62"}}{{$ga = "0.22"}}{{$b = "1.71"}}{{$gb = "0.13"}}{{end}}<div class="rd" data-play aria-label="A diagram: the same fresh pages, left unedited and edited by two curators, A and B; the same model learns from each version and sits the same exam. {{$says}}, so A has the bigger gain and wins.">
+     the same model trained on each, and how each does on the same exam, in bits per byte. */}}
+{{define "round-diagram"}}{{$col := "Bits per byte"}}{{$says := "Unedited needs 1.84 bits per byte, A 1.62 and B 1.71"}}{{$u := "1.84"}}{{$a := "1.62"}}{{$ga := "0.22"}}{{$b := "1.71"}}{{$gb := "0.13"}}<div class="rd" data-play aria-label="A diagram: the same fresh pages, left unedited and edited by two curators, A and B; the same model learns from each version and sits the same exam. {{$says}}, so A has the bigger gain and wins.">
   <span class="lbl l1">Fresh pages</span><span class="lbl l3">Each version of them</span><span class="lbl l5">{{$col}}</span>
   <span class="mini pages" aria-hidden="true"><i style="width:92%"></i><i style="width:70%"></i><i style="width:84%"></i><i style="width:58%"></i><i style="width:88%"></i></span>
   <span class="fork" aria-hidden="true"><i></i><i></i><i></i></span>

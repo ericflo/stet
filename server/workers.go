@@ -139,8 +139,8 @@ func (a *App) apiWorkerRevoke(w http.ResponseWriter, r *http.Request) {
 
 // apiWorkerRelease hands back every job a rented machine holds, once the organisers have ended
 // it: a machine ended a moment after it took a job would otherwise hold the job, and the round
-// or the next exam's batch waiting on it, until its lease ran out. The official jobs go back
-// as if the machine had handed them back itself, and so do the next exam's students.
+// or an organisers' batch waiting on it, until its lease ran out. The official jobs go back
+// as if the machine had handed them back itself, and so do the organisers' own students.
 func (a *App) apiWorkerRelease(w http.ResponseWriter, r *http.Request) {
 	op, _, _, err := a.signedBy(w, r, 1<<10, true, organisers)
 	if err != nil {

@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -246,7 +244,6 @@ func (a *App) mountAPI(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/jobs/{id}/release", a.apiRelease)
 	mux.HandleFunc("POST /api/v1/admin/draw", a.apiAdminDraw)
 	mux.HandleFunc("POST /api/v1/admin/pause", a.apiAdminPause)
-	mux.HandleFunc("POST /api/v1/admin/shadow", a.apiAdminShadow)
 	mux.HandleFunc("POST /api/v1/admin/shadow/batches", a.apiShadowBatch)
 	mux.HandleFunc("GET /api/v1/admin/shadow/batches/{id}", a.apiShadowBatchGet)
 	mux.HandleFunc("POST /api/v1/shadow/claim", a.apiShadowClaim)
@@ -255,16 +252,12 @@ func (a *App) mountAPI(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/shadow/batches/{id}/tasks/{i}/release", a.apiShadowRelease)
 	mux.HandleFunc("PUT /api/v1/admin/shadow/scripts/{sha}", a.apiShadowScriptPut)
 	mux.HandleFunc("GET /api/v1/shadow/scripts/{sha}", a.apiShadowScript)
-	mux.HandleFunc("PUT /api/v1/admin/files/{name}", a.apiAdminFile)
 	mux.HandleFunc("GET /api/v1/admin/accounts/{handle}", a.apiAdminAccount)
 	mux.HandleFunc("GET /api/v1/admin/work", a.apiAdminWork)
 	mux.HandleFunc("GET /api/v1/admin/workers", a.apiWorkers)
 	mux.HandleFunc("POST /api/v1/admin/workers", a.apiWorkerGrant)
 	mux.HandleFunc("DELETE /api/v1/admin/workers/{key}", a.apiWorkerRevoke)
 	mux.HandleFunc("POST /api/v1/admin/workers/{key}/release", a.apiWorkerRelease)
-	mux.HandleFunc("GET /api/v1/admin/sealed", a.apiSealedList)
-	mux.HandleFunc("GET /api/v1/admin/sealed/mine", a.apiSealedMine)
-	mux.HandleFunc("PUT /api/v1/admin/sealed/{key}", a.apiSealedPut)
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 404, map[string]string{"error": "no such endpoint"})
 	})
@@ -380,10 +373,10 @@ func (a *App) apiSeason(w http.ResponseWriter, r *http.Request) {
 		"grade_devices": a.season.GradeDevices, "site": a.cfg.BaseURL, "api": a.cfg.APIURL,
 		"requires_github": a.cfg.RequireGithub, "server": revision,
 		"establish_after": a.cfg.EstablishAfter, "runs_per_entry": a.cfg.RunsPerEntry,
-		"exam_sha256": a.season.ExamSHA256, "heldout_exam_sha256": a.season.HeldoutSHA256,
-		// What a score is: the season's exam ("pack", or "next": made after each draw), the
-		// unit gains and ratings are in, and whether a rating has a multiplier at all.
-		"exam_kind": a.season.examKind(), "unit": a.season.unit(), "has_multiplier": a.hasMultiplier(),
+		// What a score is: the unit gains and ratings are in, the exam's pillars (each counting
+		// the same: an entry's by_source is its gain on each), and whether a rating has a
+		// multiplier at all. Each round's exam is made after its draw: see the round.
+		"unit": unit, "pillars": a.season.ExamSources, "has_multiplier": a.hasMultiplier(),
 		// What an editor is promised, whoever runs it: its machine, the slowest machine that
 		// may run it, how much it may name by reference, and what it may import.
 		"machine": a.season.Machine, "runner": a.season.Runner, "assets": a.season.Assets,
@@ -417,7 +410,7 @@ func (a *App) accountJSON(c *Account) map[string]any {
 	out := map[string]any{"handle": c.Handle, "github": c.Github, "created_at": c.CreatedAt, "anchor": c.Anchor, "trusted": c.Anchor,
 		"established": a.established(c)}
 	if c.Worker {
-		out["worker"] = true // a machine the organisers rent: it is not given the held-out exam
+		out["worker"] = true // a machine the organisers rent: it administers nothing
 	}
 	return out
 }
@@ -704,7 +697,7 @@ func (a *App) viewer(r *http.Request) *Account {
 	return a.accountByKey(key)
 }
 
-// places5 is a number as the API prints it: losses are measured to five places, and
+// places5 is a number as the API prints it: scores are measured to five places, and
 // arithmetic on them should not print as 0.9124699999999999.
 func places5(v float64) float64 { return math.Round(v*1e5) / 1e5 }
 
@@ -729,7 +722,7 @@ type RunView struct {
 	Script      string   `json:"script,omitempty"`
 	ScriptSize  int64    `json:"script_size,omitempty"`
 	Gain        float64  `json:"gain"`
-	Loss        *float64 `json:"loss,omitempty"` // the round's unedited loss less the gain
+	Loss        *float64 `json:"loss,omitempty"` // the unedited student's bits per byte less the gain
 	Self        bool     `json:"self,omitempty"` // its only established grade is its own runner's
 	Grades      []Grade  `json:"grades"`
 }
@@ -772,45 +765,7 @@ func (a *App) runViews(s *State, e *Entry) []RunView {
 		}
 		out = append(out, v)
 	}
-	if len(e.Runs) > 0 || e.EditedAt == 0 {
-		return out
-	}
-	// Settled before harness 0.3.0: one run, on the organisers' machine, whose own grade of
-	// the script was the score. Shown in the same shape, and said to be what it was.
-	v := RunView{N: 1, By: handle(e.EditedBy), Status: "failed", Reason: e.Reason, Script: e.Script, ScriptSize: e.ScriptSize,
-		Gain: places5(e.Gain), Grades: []Grade{}}
-	if e.Edit != nil {
-		v.EditSeconds = e.Edit.Seconds
-	}
-	if e.Valid {
-		v.Status, v.Loss, v.Reason = "ok", e.Loss, ""
-	}
-	if d := e.Detail; d != nil && e.Script != "" {
-		if len(d.Verifiers) > 0 {
-			g := Grade{Handle: d.Verifiers[0], Verdict: "agreed", Valid: e.Valid, Self: d.Verifiers[0] == v.By, Counted: true, Established: true}
-			if e.Valid {
-				gain := places5(e.Gain)
-				g.Loss, g.Gain = e.Loss, &gain
-			}
-			v.Self = g.Self
-			v.Grades = append(v.Grades, g)
-		}
-		for _, rep := range d.Replications {
-			g := Grade{Handle: rep.Handle, Verdict: rep.Verdict, Valid: rep.Valid, Loss: rep.Loss, First: rep.First}
-			switch rep.Verdict {
-			case "differs":
-				g.Verdict = "outlier"
-			case "no anchor grade":
-				g.Verdict = "no established grade"
-			}
-			if rep.Loss != nil && rep.BaseDiff != nil && rd != nil && rd.BaselineLoss != nil {
-				gain := places5(*rd.BaselineLoss + *rep.BaseDiff - *rep.Loss)
-				g.Gain = &gain
-			}
-			v.Grades = append(v.Grades, g)
-		}
-	}
-	return append(out, v)
+	return out
 }
 
 // sealed reports whether an entry is still under seal: it is open, or its round is. A
@@ -1044,10 +999,10 @@ func (a *App) roundJSON(s *State, r *Round) map[string]any {
 	}
 	// Sealed with the grades: a published baseline would tell a grader what to report.
 	if r.BaselineLoss != nil && r.Status == "settled" {
-		j["baseline_loss"], j["baseline"], j["baseline_verifiers"] = *r.BaselineLoss, r.Baseline, r.BaselineN
+		j["baseline_loss"], j["baseline_verifiers"] = *r.BaselineLoss, r.BaselineN
 	}
 	if len(r.Differs) > 0 && r.Status == "settled" {
-		j["differs"] = r.Differs // verifiers turned away: another corpus, or another unedited loss
+		j["differs"] = r.Differs // verifiers turned away: another corpus or exam, or another unedited baseline
 	}
 	if r.CorpusSHA != "" {
 		j["corpus_sha256"], j["exam_sha256"] = r.CorpusSHA, r.ExamSHA
@@ -1098,9 +1053,6 @@ func (a *App) apiRound(w http.ResponseWriter, r *http.Request) {
 			entries = append(entries, a.entryJSON(s, e))
 		}
 		out = map[string]any{"round": a.roundJSON(s, rd), "entries": entries}
-		if sh := s.Shadows[idx]; sh != nil {
-			out["shadow"] = sh
-		}
 	})
 	if out == nil {
 		writeErr(w, fail(404, "no such round"))
@@ -1316,64 +1268,6 @@ func (a *App) apiRelease(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"released": true})
 }
 
-// apiAdminFile publishes a download under /files/. It exists for one file a season: the
-// exam pack, which every client fetches by name and checks against the hash in its season
-// file, so a wrong upload is refused by clients, not trusted.
-func (a *App) apiAdminFile(w http.ResponseWriter, r *http.Request) {
-	acct, _, body, err := a.signedBy(w, r, 128<<20, true, organisers)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	// An organiser publishes two files this way whose hashes the season already gives: the
-	// exam, and, on the day the season closes, the held-out exam. A stolen organiser's key
-	// publishes nothing else while the season runs.
-	name := r.PathValue("name")
-	sum := sha256.Sum256(body)
-	got := hex.EncodeToString(sum[:])
-	exam := name == a.season.ExamFile && got == a.season.ExamSHA256
-	heldout := a.season.HeldoutSHA256 != "" && name == a.season.heldoutFile() && got == a.season.HeldoutSHA256
-	// With the held-out exam go the things that let it be checked: the seed it was built
-	// from, every result on it, and the final table. Only once the season is closed.
-	closing := false
-	for _, suffix := range []string{".seed", ".results.jsonl", ".table.json"} {
-		closing = closing || (a.cfg.SeasonClosed && a.season.HeldoutSHA256 != "" && name == "heldout-"+a.season.ID+suffix)
-	}
-	if !exam && !heldout && !closing {
-		writeErr(w, fail(400, "the only files published here are %s and, when the season closes, %s (each with the hash the season gives for it) and heldout-%s.seed, .results.jsonl and .table.json",
-			a.season.ExamFile, a.season.heldoutFile(), a.season.ID))
-		return
-	}
-	// The seed, the record and the table have no hash to be held to, so they are held to
-	// being first: once one is published, nothing replaces it. Not a later mistake, and
-	// not a stolen key.
-	if closing {
-		rc, _, err := a.st.blobs.Open(r.Context(), "files/"+name)
-		if err == nil {
-			rc.Close()
-			writeErr(w, fail(409, "%s is already published, and what is published when a season closes is not replaced", name))
-			return
-		}
-		if !errors.Is(err, errNoBlob) {
-			writeErr(w, fail(503, "the file store is not answering; try again in a moment"))
-			return
-		}
-	}
-	// Publishing the held-out exam cannot be taken back, so one command sent early must not
-	// be able to do it: the server has to have been told the season is over as well.
-	if heldout && !a.cfg.SeasonClosed {
-		writeErr(w, fail(403, "the held-out exam is published when the season has closed, and this server has not been told that it has (STET_SEASON_CLOSED)"))
-		return
-	}
-	if err := a.st.blobs.Put(r.Context(), "files/"+name, body, "application/octet-stream"); err != nil {
-		slog.Error("publishing a file", "name", name, "err", err)
-		writeErr(w, fail(503, "the file store is not answering; try again in a moment"))
-		return
-	}
-	slog.Info("file published", "name", name, "bytes", len(body), "by", acct.Handle)
-	writeJSON(w, 201, map[string]any{"name": name, "bytes": len(body), "sha256": got, "url": a.cfg.APIURL + "/files/" + name})
-}
-
 // apiAdminAccount tells an organiser an account's public key. That is what the list of
 // organisers' keys is made of, so adding a machine to it needs nothing carried from that
 // machine by hand.
@@ -1394,127 +1288,6 @@ func (a *App) apiAdminAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, out)
-}
-
-// --- the held-out exam, between the organisers' machines ---------------------------------------
-//
-// Each of the organisers' machines sits every student it grades on the held-out exam, so
-// each needs the pack, and the pack is a secret until the season closes. A machine that
-// holds it seals a copy to every other organisers' key (stet's sealed.py: X25519 with the
-// account's own key, ChaCha20-Poly1305), and those copies are kept here. This server and
-// its file store can open none of them, and they are served to nobody but the organisers'
-// machines: no path under /files reaches them.
-
-const sealedMagic = "stet-sealed-1\n"
-
-func (a *App) sealedBlob(key string) string { return "sealed/heldout-" + a.season.ID + "/" + key }
-
-// hasSealed says whether a copy is kept for this key. The machines ask every few minutes
-// for as long as they run, so a yes is remembered and the file store is not asked again.
-func (a *App) hasSealed(ctx context.Context, key string) (bool, error) {
-	if _, ok := a.sealedKept.Load(key); ok {
-		return true, nil
-	}
-	rc, _, err := a.st.blobs.Open(ctx, a.sealedBlob(key))
-	if errors.Is(err, errNoBlob) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	rc.Close()
-	a.sealedKept.Store(key, true)
-	return true, nil
-}
-
-// apiSealedList says which of the organisers' keys have a copy sealed to them, so that a
-// machine holding the pack knows whom it still has to share it with.
-func (a *App) apiSealedList(w http.ResponseWriter, r *http.Request) {
-	if _, _, _, err := a.signedBy(w, r, 1<<10, true, organisers); err != nil {
-		writeErr(w, err)
-		return
-	}
-	if a.season.HeldoutSHA256 == "" {
-		writeErr(w, fail(404, "this season has no held-out exam"))
-		return
-	}
-	keys := make([]string, 0, len(a.cfg.AnchorKeys))
-	for k := range a.cfg.AnchorKeys {
-		if sha256Re.MatchString(k) { // a public key is 32 bytes too
-			keys = append(keys, k)
-		}
-	}
-	sort.Strings(keys)
-	out := []map[string]any{}
-	for _, k := range keys {
-		row := map[string]any{"key": k, "sealed": false}
-		if acct := a.accountByKey(k); acct != nil {
-			row["handle"] = acct.Handle
-		}
-		kept, err := a.hasSealed(r.Context(), k)
-		if err != nil {
-			writeErr(w, fail(503, "the file store is not answering; try again in a moment"))
-			return
-		}
-		row["sealed"] = kept
-		out = append(out, row)
-	}
-	writeJSON(w, 200, map[string]any{"season": a.season.ID, "organisers": out})
-}
-
-// apiSealedPut keeps a copy that one organisers' machine sealed to another's key.
-func (a *App) apiSealedPut(w http.ResponseWriter, r *http.Request) {
-	acct, _, body, err := a.signedBy(w, r, 128<<20, true, organisers)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	key := r.PathValue("key")
-	switch {
-	case a.season.HeldoutSHA256 == "":
-		writeErr(w, fail(404, "this season has no held-out exam"))
-		return
-	case !sha256Re.MatchString(key) || !a.cfg.AnchorKeys[key]:
-		writeErr(w, fail(403, "that is not an organisers' key: the held-out exam is shared with nobody else"))
-		return
-	case len(body) < len(sealedMagic)+60 || string(body[:len(sealedMagic)]) != sealedMagic:
-		// Above all, not the pack itself: nothing readable is ever kept here.
-		writeErr(w, fail(400, "that is not a sealed file. The held-out exam is kept here only sealed to an organisers' key"))
-		return
-	}
-	if err := a.st.blobs.Put(r.Context(), a.sealedBlob(key), body, "application/octet-stream"); err != nil {
-		slog.Error("keeping a sealed copy", "err", err)
-		writeErr(w, fail(503, "the file store is not answering; try again in a moment"))
-		return
-	}
-	a.sealedKept.Store(key, true)
-	slog.Info("sealed copy kept", "for", key[:12], "bytes", len(body), "by", acct.Handle)
-	writeJSON(w, 201, map[string]any{"key": key, "bytes": len(body)})
-}
-
-// apiSealedMine hands an organisers' machine the copy sealed to its own key.
-func (a *App) apiSealedMine(w http.ResponseWriter, r *http.Request) {
-	acct, _, _, err := a.signedBy(w, r, 1<<10, true, organisers)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	body, size, err := a.st.blobs.Open(r.Context(), a.sealedBlob(acct.Pubkey))
-	if errors.Is(err, errNoBlob) {
-		writeErr(w, fail(404, "no copy of the held-out exam is sealed to this machine's key yet. An organisers' machine that holds the exam shares it within a few minutes"))
-		return
-	}
-	if err != nil {
-		writeErr(w, fail(503, "the file store is not answering; try again in a moment"))
-		return
-	}
-	defer body.Close()
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Content-Type", "application/octet-stream")
-	if size > 0 {
-		w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
-	}
-	io.Copy(w, body)
 }
 
 // apiAdminDraw lets an organiser bring the next draw forward to the next moment on the grid
