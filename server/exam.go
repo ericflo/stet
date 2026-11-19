@@ -1,11 +1,11 @@
 package main
 
-// The season's exam: the next exam. A round's exam is made after its draw: the organisers'
+// The season's exam. A round's exam is made after its draw: the organisers'
 // examiner harvests the fresh text published in the window after it, builds the round's items
 // and posts them here (apiExamPost). Grades start then. A grader sits every item
 // and reports each one's score, and its own baseline's; the round's baseline is the mean, item
-// by item, of the established graders' baselines; and a grade's score is the next exam's
-// aggregate (NextScore, a port of src/stet/newexam/aggregate.py) of its item scores less the
+// by item, of the established graders' baselines; and a grade's score is the exam's
+// aggregate (NextScore, a port of src/stet/exam/aggregate.py) of its item scores less the
 // round's baseline. From there on the judge works as it always has, on that score.
 //
 // What a round holds of this (the exam's table, the baseline item by item, every grade's item
@@ -41,7 +41,7 @@ const (
 // examBlob is where a round's exam keeps one of its files: under the season, so that no
 // season's rounds are ever taken for another's.
 func (a *App) examBlob(idx int, name string) string {
-	return fmt.Sprintf("nextexam/%s/%08d/%s", a.season.ID, idx, name)
+	return fmt.Sprintf("exams/%s/%08d/%s", a.season.ID, idx, name)
 }
 
 // examPosted reports whether a round's exam is there to be sat: it is made after the draw.
@@ -267,7 +267,7 @@ func (a *App) roundBaselines(s *State, rd *Round) []*Baseline {
 }
 
 // baselineDev is how far a grader's baseline is from the round's others (all of them but its
-// own), on the next exam's score; ok is false while there are no others.
+// own), on the exam's score; ok is false while there are no others.
 func (a *App) baselineDev(s *State, rd *Round, acctID int64, items []float64) (dev float64, ok bool) {
 	var rows [][]float64
 	for _, b := range a.roundBaselines(s, rd) {

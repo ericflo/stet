@@ -21,7 +21,7 @@ type aggregateVectors struct {
 	} `json:"cases"`
 }
 
-// The server scores a round on the next exam as the harness does, to within 1e-9: every case
+// The server scores a round's exam as the harness does, to within 1e-9: every case
 // the harness wrote, from single items to a whole round of generated and fresh items.
 func TestTheNextScoreIsTheHarnesss(t *testing.T) {
 	raw, err := os.ReadFile("testdata/aggregate_vectors.json")

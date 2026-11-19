@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-// The organisers pause the rounds while they work on the next exam: no round is drawn, by
+// The organisers pause the rounds while they work on something: no round is drawn, by
 // the clock or by hand, nobody is told one is coming, and the pages say they are paused.
 // Resumed, the rounds go on as before.
 func TestTheOrganisersPauseTheRoundsAndResumeThem(t *testing.T) {

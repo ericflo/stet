@@ -169,7 +169,7 @@ type Round struct {
 	// account, a job one of them took, handed back or let run out, an entry given up. How
 	// long the round waits for people is counted from here.
 	ActiveAt int64 `json:"active_at,omitempty"`
-	// The round's exam (see nextexam.go): when it was posted, what each of its items counts
+	// The round's exam (see exam.go): when it was posted, what each of its items counts
 	// toward, the corpus's languages, and the unedited student's score on each item. The table
 	// and the item scores are kept only while the round is open.
 	ExamAt    int64              `json:"exam_at,omitempty"`

@@ -156,14 +156,13 @@ def test_clean_leaves_a_running_verifier_what_it_is_using(capsys):
     idle = put(root / "rounds" / "s1-p00001" / "nano" / "corpus-v3" / "docs.bin", 1 << 20, 1, now)
     aged(idle.parents[2], 1, now)
     job = put(root / "verify" / "slot0" / "job" / "script.jsonl", 100, 0, now)
-    exam = put(root / "exam" / "exam-s0.jsonl.zst", 100, 5, now)
     held = open(root / "verify" / "slot0.lock", "w")
     fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)  # as `stet verify` holds it while it runs
     try:
         assert client.verifiers_running() == 1
         cli.main(["clean"])
         assert "was left for it" in said(capsys)
-        assert in_use.exists() and job.exists() and exam.exists() and not idle.exists()
+        assert in_use.exists() and job.exists() and not idle.exists()
     finally:
         held.close()
     assert client.verifiers_running() == 0

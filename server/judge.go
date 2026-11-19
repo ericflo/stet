@@ -10,7 +10,7 @@ package main
 //     it on the round's exam and reports its score on every item, and its own unedited
 //     baseline's the same way. Grading runs no entrant code, and every grader of a script
 //     trains on exactly the same tokens, so their results can be compared directly. The
-//     exam is made after the draw (nextexam.go): grading starts when it is posted.
+//     exam is made after the draw (exam.go): grading starts when it is posted.
 //
 // No score depends on one machine, and none on a machine the organisers run. The
 // organisers' accounts start out established, may run their own reference editors, and

@@ -693,9 +693,6 @@ def test_a_round_that_does_not_hold_up_is_refused_and_a_warning_is_given_once(dr
         client._job_round(draws.season, {"round": {}}, out)
 
 
-# --- the held-out exam's results stay on the anchor -----------------------------------------
-
-
 # --- what stops a verifier, and what becomes of the job it holds -----------------------------
 
 

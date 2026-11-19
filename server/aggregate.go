@@ -6,8 +6,8 @@ import (
 	"sort"
 )
 
-// The next exam's score of a round, from what each item is and its gain: the server's copy of
-// score_from_table in src/stet/newexam/aggregate.py (what round_score gives), which it must
+// A round's exam score, from what each item is and its gain: the server's copy of
+// score_from_table in src/stet/exam/aggregate.py (what round_score gives), which it must
 // match to the last few bits, since in season 1 it is the official score.
 //
 // The score is the mean of the pillars. Inside a pillar each part (a family of generators, or a
@@ -37,7 +37,7 @@ type ItemInfo struct {
 	Stratum string `json:"stratum"`
 }
 
-// NextScore is a round's score on the next exam and each of its pillars' scores, from its items,
+// NextScore is a round's score on its exam and each of its pillars' scores, from its items,
 // a gain per item (in order), and the round's shares of languages (lang -> percent; a language
 // left out, or with no share above zero, gets nextOther). The harness falls back to a published
 // table of shares when it is given none; the server is always given the round's, and refuses

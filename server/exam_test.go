@@ -151,7 +151,7 @@ func TestTheNextExamIsGradedOnceItIsPostedAndScoredAgainstTheRoundsBaseline(t *t
 		t.Fatalf("the round's item scores were not kept: %v", err)
 	}
 	// Under the season's own name: a later season's round of the same number is another round.
-	if key := w.app.examBlob(idx, examScores); !strings.HasPrefix(key, "nextexam/"+w.app.season.ID+"/") {
+	if key := w.app.examBlob(idx, examScores); !strings.HasPrefix(key, "exams/"+w.app.season.ID+"/") {
 		t.Fatalf("the round's exam is kept under %s, not under its season", key)
 	}
 	w.check()

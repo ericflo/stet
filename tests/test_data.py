@@ -326,9 +326,6 @@ def test_a_crawl_id_is_checked_where_it_becomes_a_file_name():
             data._crawl_id(bad)
 
 
-# --- the held-out exam: only where the pack is, only the committed pack, never sent ----------
-
-
 # --- two verifiers on one machine share the cache -------------------------------------------------
 
 
