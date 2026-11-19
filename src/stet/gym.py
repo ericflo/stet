@@ -103,6 +103,17 @@ class Env:
                 path = Path(tmp) / "script.jsonl"
                 write_script(path, script)
             result = grade(rnd, scale, corpus, exam, path, device=self.device)
+        if base["exam"].get("kind") == "next":
+            # The next exam: the reward is its aggregate of the item-by-item differences.
+            from .newexam.aggregate import gains, round_score
+
+            info = {"round": rnd.id, "valid": result["valid"], "invalid_reason": result["invalid_reason"],
+                    "baseline_mean": base["exam"]["mean"], "script": result.get("script")}
+            if not result["valid"]:
+                return 0.0, info
+            agg = round_score(exam, gains(result["exam"]["item_scores"], base["exam"]["item_scores"]))
+            info.update(mean=result["exam"]["mean"], gain_by_pillar={k: round(v["score"], 5) for k, v in agg["pillars"].items()}, train=result["train"])
+            return round(agg["score"], 5), info
         info = {
             "round": rnd.id,
             "valid": result["valid"],

@@ -157,6 +157,16 @@ def report(out: Out, result: dict, base: dict | None, season) -> None:
     t = result["train"]
     out.line("training", f"{t['tokens']:,} tokens in {t['seconds']:.0f}s ({t['tokens_per_second']:,} tok/s) · final train loss {t['final_train_loss']:.3f}")
     e = result["exam"]
+    if e.get("kind") == "next":
+        out.line("exam", f"{e['items']:,} items · mean {e['mean']:.4f} bits per byte" + (f"   baseline {base['exam']['mean']:.4f}" if base else ""))
+        if base and "gain" in result:
+            out.line("", "          " + " · ".join(f"{k} {v:+.3f}" for k, v in (result.get("pillars") or {}).items()))
+            noise = ((season.raw.get("noise") or {}).get(result["scale"]) or {}).get("gain_sd")
+            text = out.bold(f"{result['gain']:+.4f}") + " bits per byte, the mean of the seven above"
+            if noise:
+                text += out.dim(f"   (training again moves this by about ±{noise:.3f})")
+            out.line("gain", text)
+        return
     out.line("exam", out.bold(f"{e['loss']:.4f}") + (f"   baseline {base['exam']['loss']:.4f}" if base else ""))
     out.line("", "          " + " · ".join(f"{k} {v['loss']:.3f}" for k, v in e["by_source"].items()))
     if base:
@@ -207,6 +217,19 @@ def _with_baseline(result: dict, rnd, scale, device, out: Out, skip: bool):
     from .pipeline import baseline
 
     base = baseline(rnd, scale, device, progress=out.progress("baseline"), log=lambda m: out.line("", out.dim("baseline " + m)))
+    if base["exam"].get("kind") == "next":
+        # The next exam: the gain is its aggregate of the item-by-item differences, with the
+        # languages weighed by the published table (a round's own corpus is measured only for
+        # official rounds).
+        from . import data
+        from .newexam.aggregate import gains, round_score
+
+        result["baseline"] = {"mean": base["exam"]["mean"]}
+        if result["valid"]:
+            agg = round_score(data.round_exam(rnd, scale), gains(result["exam"]["item_scores"], base["exam"]["item_scores"]))
+            result["gain"] = round(agg["score"], 5)
+            result["pillars"] = {k: v["score"] for k, v in agg["pillars"].items()}
+        return base
     result["baseline"] = {"loss": base["exam"]["loss"], "by_source": {k: v["loss"] for k, v in base["exam"]["by_source"].items()}}
     if result["valid"]:
         result["gain"] = round(base["exam"]["loss"] - result["exam"]["loss"], 5)
