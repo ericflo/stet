@@ -2,6 +2,8 @@
 
 import pytest
 
+from stet.newexam.items import Item
+
 pytest.importorskip("torch")
 
 
@@ -16,15 +18,18 @@ def env(corpus, monkeypatch):
         seen["lines"] = lines
         if not lines:
             return {"valid": False, "invalid_reason": "the script is empty"}
-        loss = 5.0 - 0.1 * len(lines)
+        gain = 0.1 * len(lines)
+        scores = [-5.0 + gain + 0.2, -5.0 + gain - 0.2]  # one item a pillar, each 0.2 either side
         return {
             "valid": True, "invalid_reason": None, "script": {"out_docs": len(lines)}, "train": {"tokens": scale.train_tokens},
-            "exam": {"loss": loss, "by_source": {"encyclopedia": {"loss": loss - 0.2}, "news": {"loss": loss + 0.2}}},
+            "exam": {"kind": "next", "items": 2, "mean": -5.0 + gain, "item_scores": scores},
         }  # fmt: skip
 
-    base = {"exam": {"loss": 5.0, "by_source": {"encyclopedia": {"loss": 5.0}, "news": {"loss": 5.0}}}}
+    base = {"exam": {"kind": "next", "items": 2, "mean": -5.0, "item_scores": [-5.0, -5.0]}}
+    items = [Item(kind="answer", corner="arith/x", fmt="math", lang="en", source="gen:arith", ctx="1 + 1 =", cont=" 2"),
+             Item(kind="answer", corner="knowledge/en/capital", fmt="prose", lang="en", source="gen:knowledge", ctx="France. Capital:", cont=" Paris")]
     monkeypatch.setattr(data, "corpus", lambda rnd, scale, quiet=False: corpus)
-    monkeypatch.setattr(data, "materialize", lambda rnd, scale, quiet=False: (corpus, {}))
+    monkeypatch.setattr(data, "materialize", lambda rnd, scale, quiet=False: (corpus, items))
     monkeypatch.setattr(gym, "baseline", lambda rnd, scale, device: base)
     monkeypatch.setattr("stet.grade.grade", fake_grade)
     e = gym.Env(scale="nano", device="cpu")
@@ -34,13 +39,13 @@ def env(corpus, monkeypatch):
 
 def test_an_episode_is_a_round_and_the_reward_is_the_gain(env):
     obs = env.reset(3)
-    assert obs.round.id == "s0-g00003" and obs.round.kind == "gym"
+    assert obs.round.id == "s1-g00003" and obs.round.kind == "gym"
     assert len(obs.corpus) == 4 and obs.train_tokens == env.scale.train_tokens
-    assert "exam_sources" in obs.task and "seed" not in obs.task  # told what the exam covers, never what is in it
+    assert "exam_pillars" in obs.task and "seed" not in obs.task  # told what the exam covers, never what is in it
     reward, info = env.step([0, 3])
     assert env.seen["lines"] == ["0", "3"]
-    assert reward == pytest.approx(0.2) and info["valid"] and info["baseline_loss"] == 5.0
-    assert info["gain_by_source"] == {"encyclopedia": pytest.approx(0.4), "news": pytest.approx(0.0)}
+    assert reward == pytest.approx(0.2) and info["valid"] and info["baseline_mean"] == -5.0
+    assert info["gain_by_pillar"] == {"reasoning": pytest.approx(0.4), "knowledge": pytest.approx(0.0)}
     # The same round can be stepped again to compare another edit of the same corpus.
     assert env.step([0])[0] == pytest.approx(0.1)
 
@@ -55,7 +60,7 @@ def test_rounds_advance_and_the_practice_split_is_available(env):
     from stet import gym
 
     assert env.reset().round.index == 0 and env.reset().round.index == 1
-    assert gym.Env(split="practice", device="cpu").reset(2).round.id == "s0-p00002"
+    assert gym.Env(split="practice", device="cpu").reset(2).round.id == "s1-p00002"
     with pytest.raises(ValueError):
         gym.Env(split="official")
     with pytest.raises(RuntimeError):

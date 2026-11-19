@@ -123,7 +123,7 @@ SHA = "ab" * 32
 
 
 def a_job(**over):
-    job = {"id": 7, "kind": "grade", "round": {"id": "s0-o00001"}, "editor": {"id": SHA, "name": "tidy", "version": 1}, "script": {"sha256": SHA}}
+    job = {"id": 7, "kind": "grade", "round": {"id": "s1-o00001"}, "editor": {"id": SHA, "name": "tidy", "version": 1}, "script": {"sha256": SHA}}
     return {**job, **over}
 
 
@@ -131,7 +131,7 @@ def a_job(**over):
     "bad",
     [
         {"id": "../../../../home/victim"}, {"id": "/home/victim"}, {"id": "7"}, {"id": True}, {"id": 7.0}, {"id": -1}, {"id": None},
-        {"kind": "shell"}, {"round": "s0-o00001"}, {"editor": None}, {"script": {"sha256": "../" + SHA}}, {"script": {"sha256": SHA.upper()}},
+        {"kind": "shell"}, {"round": "s1-o00001"}, {"editor": None}, {"script": {"sha256": "../" + SHA}}, {"script": {"sha256": SHA.upper()}},
         {"kind": "edit", "editor": {"id": SHA + "/../x"}}, {"kind": "edit", "editor": {"id": 5}},
     ],
 )  # fmt: skip
@@ -175,7 +175,7 @@ class Args:
     once = False
     max_jobs = 0
     device = "cpu"
-    season = "s0"
+    season = "s1"
     edits = False
     no_sandbox = False
     any_device = True
@@ -219,12 +219,6 @@ def loop(monkeypatch):
         if path.endswith("/release"):
             seen.released.append((path, body["reason"]))
             return {}
-        if path == "/api/v1/admin/sealed/mine":  # the held-out exam, sealed to this machine: not there unless a test puts it
-            if getattr(seen, "sealed", None) is None:
-                raise client.ApiError(404, "no copy of the held-out exam is sealed to this machine's key yet")
-            return seen.sealed
-        if path == "/api/v1/admin/sealed":
-            return {"organisers": []}
         raise AssertionError(f"unexpected request: {method} {path}")
 
     def grade(job, season, scale, device, key, out, work):
@@ -282,12 +276,12 @@ def test_a_job_with_a_path_for_an_id_touches_nothing(loop, tmp_path):
 
 
 def test_a_refused_result_is_not_trained_again_and_again(loop, capsys):
-    loop.claims = [a_job(id=n) for n in (1, 2, 3, 4)] + [a_job(id=5, round={"id": "s0-o00002"})]
-    loop.report = client.ApiError(409, "your corpus for s0-o00001 differs from the round's")
+    loop.claims = [a_job(id=n) for n in (1, 2, 3, 4)] + [a_job(id=5, round={"id": "s1-o00002"})]
+    loop.report = client.ApiError(409, "your corpus for s1-o00001 differs from the round's")
     with pytest.raises(Stop):
         client.cmd_verify(Args())
     # Once more from a clean copy of the round, in case this machine's copy was at fault; then no more of that round.
-    assert loop.graded == [1, 2, 5] and loop.forgot == ["s0-o00001", "s0-o00002"]
+    assert loop.graded == [1, 2, 5] and loop.forgot == ["s1-o00001", "s1-o00002"]
     assert [p for p, _ in loop.released] == [f"/api/v1/jobs/{n}/release" for n in (1, 2, 3, 4, 5)]
     assert "differs from the round's" in capsys.readouterr().err
 
@@ -411,70 +405,6 @@ def test_one_key_runs_one_verifier(loop, capsys):
     client.claim_key().close()  # and a verifier that has stopped leaves the key free
 
 
-def test_an_organisers_machine_fetches_the_held_out_exam_sealed_to_it_and_starts(loop, monkeypatch, tmp_path):
-    import hashlib
-
-    from stet import data, sealed
-    from stet.keys import load_key
-    from stet.spec import load_season
-
-    # Nobody carried the pack to this machine. Another organisers' machine sealed a copy to its key.
-    pack = os.urandom(4000)
-    season = load_season("s0")
-    monkeypatch.setitem(season.raw, "heldout_exam", {"sha256": hashlib.sha256(pack).hexdigest()})
-    monkeypatch.setattr(data, "_heldout_pack", {})
-    loop.sealed = sealed.seal(pack, bytes.fromhex(load_key().public_hex))
-    loop.claims = [a_job()]
-    loop.me = {"account": {"handle": "tester", "anchor": True}, "verifier": {}}
-    with pytest.raises(Stop):
-        client.cmd_verify(Args())
-    assert loop.graded == [7]
-    assert data.heldout_pack_file(season).read_bytes() == pack
-
-
-def test_the_organisers_machine_does_not_start_without_the_held_out_exam(loop, monkeypatch, capsys):
-    from stet import runner
-
-    for check in ("bwrap_available", "scope_available", "sandbox_selftest"):
-        monkeypatch.setattr(runner, check, lambda: (True, ""))
-    monkeypatch.setattr(client, "_edit_job", lambda *a, **k: pytest.fail("an edit job was run"))
-    loop.claims = [a_job()]
-    loop.me = {"account": {"handle": "tester", "anchor": True}, "verifier": {}}
-    once = Args()
-    once.once = True  # one job and out: it does not sit waiting for another machine to share the exam
-    with pytest.raises(SystemExit):
-        client.cmd_verify(once)
-    err = capsys.readouterr().err
-    assert "does not hold it" in err and "heldout-s0.jsonl.zst" in err and "gap in the season's" in err and not loop.graded
-    loop.me = {"account": {"handle": "tester"}, "verifier": {"established": True}}
-    args = Args()
-    args.edits = True
-    with pytest.raises(Stop):  # a volunteer never holds it: it grades, and it runs curators if it has the standing
-        client.cmd_verify(args)
-    assert loop.graded == [7]
-
-
-def test_what_a_verifier_reports_and_prints_has_nothing_of_the_held_out_exam_in_it(loop, monkeypatch, capsys):
-    exam = {"loss": 4.4, "by_source": {"news": {"loss": 4.4}}}
-    held = {"loss": 4.61234, "by_source": {"news": {"loss": 4.61234}}, "exam_sha256": "ee" * 32}
-    base = {"exam": {"loss": 5.3, "by_source": {"news": {"loss": 5.3}}}, "heldout": {"loss": 5.56789, "by_source": {"news": {"loss": 5.56789}}}}
-    result = {
-        "harness": "0.2.2", "season": "s0", "scale": "micro", "round": {"id": "s0-o00007"}, "valid": True, "script_sha256": SHA,
-        "exam_sha256": "cd" * 32, "script": {"out_docs": 5}, "exam": exam, "heldout": held,
-        "train": {"curve": [[1, 2.0]], "seconds": 1.0, "tokens_per_second": 5, "final_train_loss": 3.0},
-    }  # fmt: skip
-    monkeypatch.setattr(client, "slim_result", REAL_SLIM_RESULT)  # the real one: this is the test of what leaves
-    loop.claims, loop.grade, loop.report = [a_job()], (result, base), {"status": "pending", "message": "sealed"}
-    args = Args()
-    args.max_jobs = 1
-    client.cmd_verify(args)
-    sent, io = json.dumps(loop.payloads), capsys.readouterr()
-    assert len(loop.payloads) == 1 and loop.payloads[0]["exam"]["loss"] == 4.4 and loop.payloads[0]["baseline"]["loss"] == 5.3
-    for text in (sent, io.out, io.err):
-        assert "heldout" not in text and "4.6123" not in text and "5.5678" not in text and "ee" * 32 not in text
-    assert "gain" in io.err and "+0.9000" in io.err  # the public grade is shown as ever
-
-
 def test_what_a_grade_prints_is_cleaned_and_counted(loop, capsys):
     loop.claims = [a_job()]
     loop.report = {"status": "recorded\x1b[31m", "message": "thanks\x07"}
@@ -497,10 +427,10 @@ def edit(monkeypatch, tmp_path):
     from stet import cli, data
     from stet.spec import load_season
 
-    season = load_season("s0")
+    season = load_season("s1")
     state = types.SimpleNamespace(blob=b"")
     monkeypatch.setattr(client, "request", lambda *a, **k: state.blob)
-    monkeypatch.setattr(client, "_job_round", lambda season, job, out: types.SimpleNamespace(id="s0-o00001"))
+    monkeypatch.setattr(client, "_job_round", lambda season, job, out: types.SimpleNamespace(id="s1-o00001"))
     monkeypatch.setattr(data, "corpus", lambda rnd, scale: types.SimpleNamespace(meta={"sha256": "c0"}))
 
     def run(blob: bytes, sandbox: str = "bwrap", editor_id: str | None = None):
@@ -557,7 +487,7 @@ def test_a_bundle_that_cannot_be_loaded_is_the_entrants_failure_and_is_reported(
     for blob, why in ((b"not a bundle", "zstd"), (bomb, "more than 1 MB"), (no_manifest, "no stet.toml"), (bad_manifest, "not valid TOML")):
         payload = edit(blob)
         assert payload["edit"]["status"] == "error" and why in payload["edit"]["reason"] and payload["script_sha256"] is None
-        assert payload["round"] == "s0-o00001" and payload["corpus_sha256"] == "c0"  # a report the server accepts, not a release
+        assert payload["round"] == "s1-o00001" and payload["corpus_sha256"] == "c0"  # a report the server accepts, not a release
 
 
 def test_a_machine_that_cannot_unpack_a_bundle_hands_the_job_back(edit, monkeypatch):
@@ -587,16 +517,16 @@ def draws():
 
     from stet.spec import load_season
 
-    season = load_season("s0")
+    season = load_season("s1")
     grid = int(season.raw["draw_grid_seconds"])
     now = 1_900_000_000 // grid * grid + 100
     slots = [season.beacon_round_at((now // grid + n) * grid) for n in (1, 2, 3)]
     assert all(season.draw_slot(s) is not None for s in slots)
 
-    def said(slot, crawl="CC-MAIN-2026-40", id="s0-o00009"):
+    def said(slot, crawl="CC-MAIN-2026-40", id="s1-o00009"):
         return {"id": id, "drand_round": slot, "crawl": {"crawl": crawl, "paths_sha256": "66" * 32}}
 
-    def drawn(slot, crawl="CC-MAIN-2026-40", id="s0-o00009"):
+    def drawn(slot, crawl="CC-MAIN-2026-40", id="s1-o00009"):
         return types.SimpleNamespace(kind="official", id=id, beacon={"round": slot}, crawl={"crawl": crawl, "paths_sha256": "66" * 32})
 
     return types.SimpleNamespace(season=season, now=now, slots=slots, said=said, drawn=drawn, log=lambda: json.loads(client._announcements().read_text()))
@@ -611,8 +541,8 @@ def test_a_round_must_be_the_one_that_was_announced_before_its_beacon(draws):
     client.remember_announcement(season, draws.said(slot, "CC-MAIN-2026-41"), now=at + 5)
     assert draws.log()[str(slot)]["crawl"] == "CC-MAIN-2026-40" and draws.log()[str(slot)]["changed"] == 1
     client.check_announcement(season, draws.drawn(slot))
-    for other in (draws.drawn(slot, "CC-MAIN-2026-41"), draws.drawn(slot, id="s0-o00010")):
-        with pytest.raises(client.RoundRefused, match="was announced as s0-o00009 on CC-MAIN-2026-40"):
+    for other in (draws.drawn(slot, "CC-MAIN-2026-41"), draws.drawn(slot, id="s1-o00010")):
+        with pytest.raises(client.RoundRefused, match="was announced as s1-o00009 on CC-MAIN-2026-40"):
             client.check_announcement(season, other)
 
 
@@ -640,21 +570,21 @@ def test_a_draw_nobody_announced_is_said_out_loud(draws):
     client.check_announcement(season, draws.drawn(draws.slots[1]), warn=said.append)
     assert not said  # this verifier has heard of no draws at all: it has nothing to go on, and says nothing
     client.remember_announcement(season, draws.said(draws.slots[0]), now=now)
-    client.check_announcement(season, draws.drawn(draws.slots[1], id="s0-o00010"), warn=said.append)
-    assert len(said) == 1 and "was not told of the draw of round s0-o00010" in said[0] and "s0-o00009" in said[0]
+    client.check_announcement(season, draws.drawn(draws.slots[1], id="s1-o00010"), warn=said.append)
+    assert len(said) == 1 and "was not told of the draw of round s1-o00010" in said[0] and "s1-o00009" in said[0]
     client.check_announcement(season, draws.drawn(draws.slots[0]), warn=said.append)
     assert len(said) == 1
     # The round it was told of, drawn at another time: say that, not "the last it heard of was this one".
-    client.check_announcement(season, draws.drawn(draws.slots[1], id="s0-o00009"), warn=said.append)
-    assert len(said) == 2 and "was told that round s0-o00009 would be drawn at" in said[1] and "cannot vouch" in said[1]
+    client.check_announcement(season, draws.drawn(draws.slots[1], id="s1-o00009"), warn=said.append)
+    assert len(said) == 2 and "was told that round s1-o00009 would be drawn at" in said[1] and "cannot vouch" in said[1]
 
 
 def test_a_damaged_record_is_set_aside_not_forgotten(draws, capsys):
     path = client._announcements()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text('{"123": {"id": "s0-o0')
+    path.write_text('{"123": {"id": "s1-o0')
     client.remember_announcement(draws.season, draws.said(draws.slots[0]), now=draws.now)
-    assert path.with_name("announced.json.damaged").read_text() == '{"123": {"id": "s0-o0'
+    assert path.with_name("announced.json.damaged").read_text() == '{"123": {"id": "s1-o0'
     assert list(draws.log()) == [str(draws.slots[0])] and "could not be read" in capsys.readouterr().err
 
 
@@ -749,14 +679,14 @@ def test_a_round_that_does_not_hold_up_is_refused_and_a_warning_is_given_once(dr
     out = types.SimpleNamespace(line=lambda label, text: lines.append(text), bad=str)
     monkeypatch.setattr(data, "mark_verified", lambda rnd: None)
     monkeypatch.setattr(data, "prune_verified", lambda rnd: None)
-    monkeypatch.setattr(client, "round_from_api", lambda season, d: draws.drawn(draws.slots[1], id="s0-o00011"))
+    monkeypatch.setattr(client, "round_from_api", lambda season, d: draws.drawn(draws.slots[1], id="s1-o00011"))
     client.remember_announcement(draws.season, draws.said(draws.slots[0]), now=draws.now)
     for _ in range(3):  # three jobs from one round
-        assert client._job_round(draws.season, {"round": {}}, out).id == "s0-o00011"
+        assert client._job_round(draws.season, {"round": {}}, out).id == "s1-o00011"
     assert len(lines) == 1 and "was not told" in lines[0]
 
     def lies(season, d):
-        raise ValueError("round s0-o00011: the seed does not follow from the beacon and the crawl")
+        raise ValueError("round s1-o00011: the seed does not follow from the beacon and the crawl")
 
     monkeypatch.setattr(client, "round_from_api", lies)
     with pytest.raises(client.RoundRefused, match="does not follow"):
@@ -764,106 +694,6 @@ def test_a_round_that_does_not_hold_up_is_refused_and_a_warning_is_given_once(dr
 
 
 # --- the held-out exam's results stay on the anchor -----------------------------------------
-
-
-def test_what_the_held_out_exam_said_is_kept_here_and_never_reported():
-    import json
-    import stat
-
-    from stet.spec import load_season
-
-    season = load_season("s0")
-    exam = {"loss": 4.4, "by_source": {"news": {"loss": 4.4}}}
-    held = {"loss": 4.61234, "by_source": {"news": {"loss": 4.61234}}, "exam_sha256": "ee" * 32}
-    base = {"exam": {"loss": 5.3, "by_source": {"news": {"loss": 5.3}}}, "heldout": {"loss": 5.56789, "by_source": {"news": {"loss": 5.56789}}}}
-    result = {
-        "harness": "0.2.2", "season": "s0", "scale": "micro", "round": {"id": "s0-o00007"}, "valid": True, "script_sha256": "ab" * 32,
-        "exam_sha256": "cd" * 32, "script": {}, "exam": exam, "heldout": held, "train": {"curve": [[1, 2.0]]},
-    }  # fmt: skip
-    job = {"id": 9, "kind": "grade", "editor": {"id": "f" * 64, "owner": "ann", "name": "sieve", "version": 2}}
-
-    sent = json.dumps(client.slim_result(result, base))
-    assert "heldout" not in sent and "4.61234" not in sent and "5.56789" not in sent and "ee" * 32 not in sent
-
-    client.keep_heldout(season, job, result, base)
-    client.keep_heldout(season, {**job, "editor": {"id": "e" * 64, "owner": "bob", "name": "copy", "version": 1}}, result, base)
-    path = client.heldout_log(season)
-    assert stat.S_IMODE(path.stat().st_mode) == 0o600 and stat.S_IMODE(path.parent.stat().st_mode) == 0o700
-    first, second = [json.loads(line) for line in path.read_text().splitlines()]
-    assert first["round"] == "s0-o00007" and first["editor"]["name"] == "sieve" and first["script_sha256"] == "ab" * 32
-    assert first["heldout"] == {"loss": 4.61234, "baseline": 5.56789, "by_source": {"news": 4.61234}, "baseline_by_source": {"news": 5.56789}}
-    assert first["public"] == {"loss": 4.4, "baseline": 5.3}
-    # Two curators may write the same script. Each grade is a line of its own, under its curator's name.
-    assert second["editor"]["id"] == "e" * 64 and second["script_sha256"] == first["script_sha256"]
-
-
-def test_the_held_out_exam_a_season_committed_to_is_remembered(monkeypatch):
-    import stat
-
-    from stet.spec import load_season
-
-    season = load_season("s0")
-    committed = season.raw["heldout_exam"]["sha256"]
-    said = []
-    client.check_heldout_pin(season, {"season": "s0", "heldout_exam_sha256": committed}, warn=said.append, now=1_800_000_000)
-    pinned = lambda: json.loads(client._pins().read_text())["heldout_exam"]["s0"]  # noqa: E731
-    assert pinned() == {"sha256": committed, "seen_at": 1_800_000_000, "from": "this copy of stet"} and not said
-    assert stat.S_IMODE(client._pins().stat().st_mode) == 0o600
-    client.check_heldout_pin(season, {"season": "s0"}, warn=said.append)  # an older server says nothing: nothing to compare
-    client.check_heldout_pin(season, None, warn=said.append)
-    assert not said
-    # The server names another exam.
-    client.check_heldout_pin(season, {"season": "s0", "heldout_exam_sha256": "9" * 64}, warn=said.append)
-    assert len(said) == 1 and committed in said[0] and "9" * 64 in said[0] and "promised it would not change" in said[0]
-    # A later release's season file names another, or none.
-    monkeypatch.setitem(season.raw, "heldout_exam", {"sha256": "8" * 64, "passages": 1})
-    client.check_heldout_pin(season, None, warn=said.append)
-    assert len(said) == 2 and committed in said[1] and "8" * 64 in said[1] and "this copy of stet" in said[1]
-    monkeypatch.setitem(season.raw, "heldout_exam", {})
-    client.check_heldout_pin(season, None, warn=said.append)
-    assert len(said) == 3 and "no longer names one" in said[2]
-    # None of which changes what this machine wrote down first.
-    assert pinned()["sha256"] == committed and not list(client._pins().parent.glob("*.tmp*"))
-
-
-def test_the_held_out_exam_is_not_published_by_a_slip_of_the_hand(monkeypatch, tmp_path, capsys):
-    import hashlib
-
-    from stet.spec import load_season
-
-    season = load_season("s0")
-    pack, other = tmp_path / "heldout-s0.jsonl.zst", tmp_path / "exam-pack.jsonl.zst"
-    pack.write_bytes(b"the held-out exam")
-    other.write_bytes(b"the public exam")
-    monkeypatch.setitem(season.raw, "heldout_exam", {"sha256": hashlib.sha256(b"the held-out exam").hexdigest()})
-    sent = []
-
-    def request(method, path, body=None, key=None, raw=False, timeout=120, limit=0):
-        sent.append(path)
-        return {"sha256": hashlib.sha256(body).hexdigest(), "url": "http://files.test/" + path.rsplit("/", 1)[1]}
-
-    monkeypatch.setattr(client, "request", request)
-    key = client.create_key()
-    key.handle = "anchor"
-    key.save()
-
-    class PublishArgs:
-        name = None
-        close_season = None
-        season = "s0"
-
-        def __init__(self, file, **over):
-            self.file = str(file)
-            self.__dict__.update(over)
-
-    for args in (PublishArgs(pack), PublishArgs(pack, close_season="s1"), PublishArgs(pack, name="notes.txt")):  # whatever it is called
-        with pytest.raises(SystemExit):
-            client.cmd_publish(args)
-        err = capsys.readouterr().err
-        assert not sent and "cannot be taken back" in err and "--close-season s0" in err
-    client.cmd_publish(PublishArgs(other))  # anything else is published as before
-    client.cmd_publish(PublishArgs(pack, close_season="s0"))  # and this, when it is meant
-    assert sent == ["/api/v1/admin/files/exam-pack.jsonl.zst", "/api/v1/admin/files/heldout-s0.jsonl.zst"]
 
 
 # --- what stops a verifier, and what becomes of the job it holds -----------------------------
@@ -879,7 +709,7 @@ def test_a_relay_that_cannot_be_read_has_said_nothing(monkeypatch):
     from stet.data import FetchError
     from stet.spec import load_season
 
-    season = load_season("s0")
+    season = load_season("s1")
     relays = season.raw["beacon"]["relays"]
     good = a_beacon(1234)
     beacon = {"round": 1234, "randomness": good["randomness"].upper()}
@@ -937,7 +767,7 @@ def test_the_organisers_machine_stops_with_the_job_in_hand_when_it_cannot_vouch_
     # Handing the job back would spend one of the few attempts an entry gets, and going on
     # to take and hand back the round's other jobs would void every entry in it.
     anchor.claims = [a_job(id=1), a_job(id=2)]
-    anchor.grade = client.RoundRefused("round s0-o00001: the seed does not follow from the beacon and the crawl")
+    anchor.grade = client.RoundRefused("round s1-o00001: the seed does not follow from the beacon and the crawl")
     with pytest.raises(SystemExit) as e:
         client.cmd_verify(AnchorArgs())
     assert e.value.code == 1 and anchor.graded == [1] and not anchor.released and len(anchor.claims) == 1
@@ -947,7 +777,7 @@ def test_the_organisers_machine_stops_with_the_job_in_hand_when_it_cannot_vouch_
     # A volunteer hands it back and takes no more of that round this session, whether or
     # not it runs curators.
     anchor.me = {"account": {"handle": "tester"}, "verifier": {"established": True}}
-    anchor.claims, anchor.graded[:] = [a_job(id=3), a_job(id=4), a_job(id=5, round={"id": "s0-o00002"})], []
+    anchor.claims, anchor.graded[:] = [a_job(id=3), a_job(id=4), a_job(id=5, round={"id": "s1-o00002"})], []
     anchor.grade = [client.RoundRefused("the seed does not follow"), None]
     with pytest.raises(Stop):
         client.cmd_verify(AnchorArgs())
@@ -1011,13 +841,13 @@ def test_a_refusal_heard_on_the_second_try_is_still_a_refusal(loop):
     loop.report = client.ApiError(409, "this job was already refused")
     with pytest.raises(Stop):
         client.cmd_verify(Args())
-    assert loop.graded == [1, 2] and loop.forgot == ["s0-o00001"]
+    assert loop.graded == [1, 2] and loop.forgot == ["s1-o00001"]
     for late in ("this job was already released", "this entry already has that grade", "this job ended before your result arrived: its time ran out"):
-        loop.claims, loop.report = [a_job(id=n, round={"id": "s0-o00005"}) for n in (4, 5, 6)], client.ApiError(409, late)
+        loop.claims, loop.report = [a_job(id=n, round={"id": "s1-o00005"}) for n in (4, 5, 6)], client.ApiError(409, late)
         loop.graded[:] = []
         with pytest.raises(Stop):
             client.cmd_verify(Args())
-        assert loop.graded == [4, 5, 6] and loop.forgot == ["s0-o00001"]
+        assert loop.graded == [4, 5, 6] and loop.forgot == ["s1-o00001"]
 
 
 def test_a_hand_back_the_server_never_heard_is_not_called_one(loop, monkeypatch, capsys):
@@ -1146,68 +976,6 @@ def test_an_announcement_that_cannot_be_written_down_stops_nothing(loop, monkeyp
     assert err.count("could not write down what the server announced") == 1 and "No space left on device" in err
 
 
-def test_a_held_out_record_that_cannot_be_written_does_not_cost_the_public_grade(monkeypatch, tmp_path, capsys):
-    import sys
-    import types
-
-    import zstandard
-
-    from stet import cli
-    from stet.spec import load_season
-
-    season = load_season("s0")
-    raw = b'1\n{"d": 2}\n'
-    sha = __import__("hashlib").sha256(raw).hexdigest()
-    held = {"loss": 4.61234, "by_source": {"news": {"loss": 4.61234}}, "exam_sha256": "ee" * 32}
-    base = {"exam": {"loss": 5.3, "by_source": {}}, "heldout": {"loss": 5.56789, "by_source": {}}}
-    result = {"harness": "0.2.2", "scale": "micro", "round": {"id": "s0-o00007"}, "valid": True, "script_sha256": sha, "exam": {"loss": 4.4, "by_source": {}}, "heldout": held}
-    monkeypatch.setitem(sys.modules, "stet.pipeline", types.SimpleNamespace(baseline=lambda *a, **k: base, grade_round=lambda *a, **k: dict(result)))
-    monkeypatch.setattr(client, "_job_round", lambda season, job, out: types.SimpleNamespace(id="s0-o00007"))
-    monkeypatch.setattr(client, "request", lambda *a, **k: zstandard.ZstdCompressor().compress(raw))
-    job = {"id": 9, "kind": "grade", "script": {"sha256": sha}, "editor": {"id": "f" * 64, "owner": "ann", "name": "sieve", "version": 2}}
-    out = cli.Out()
-
-    log = client.heldout_log(season)
-    assert client.heldout_log_trouble(season) == "" and log.exists()  # what an anchor checks before it takes a job
-    got, _ = client._grade_job(job, season, None, None, None, out, tmp_path / "w1")
-    assert got["exam"]["loss"] == 4.4 and len(log.read_text().splitlines()) == 1
-
-    # Restored with the wrong mode, made read-only "to protect it", on a disk that is full:
-    # the grade that took ten minutes is still the server's to have.
-    def refuse(*a, **k):
-        raise OSError(13, "Permission denied")
-
-    monkeypatch.setattr(client, "keep_heldout", refuse)
-    capsys.readouterr()
-    got, _ = client._grade_job(job, season, None, None, None, out, tmp_path / "w2")
-    err = capsys.readouterr().err
-    assert got["exam"]["loss"] == 4.4 and "COULD NOT BE WRITTEN DOWN" in err and "Permission denied" in err and "public grade is reported" in err
-    assert "4.6123" not in err and "5.5678" not in err  # and it says so without saying what the exam said
-
-
-@pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="needs file modes that bind")
-def test_a_machine_with_the_held_out_exam_does_not_start_with_a_record_it_cannot_add_to(loop, monkeypatch, capsys):
-    from stet import data
-    from stet.spec import load_season
-
-    season = load_season("s0")
-    monkeypatch.setenv("STET_DEV", "1")
-    monkeypatch.setattr(data, "heldout_pack_path", lambda season: "/somewhere/heldout-s0.jsonl.zst")
-    log = client.heldout_log(season)
-    log.parent.mkdir(parents=True)
-    log.write_text("")
-    log.chmod(0o400)
-    loop.claims = [a_job()]
-    with pytest.raises(SystemExit):
-        client.cmd_verify(AnchorArgs())
-    err = capsys.readouterr().err
-    assert "cannot be written" in err and str(log) in err and "will not start" in err and not loop.graded and len(loop.claims) == 1
-    log.chmod(0o600)
-    with pytest.raises(Stop):
-        client.cmd_verify(AnchorArgs())
-    assert loop.graded == [7]
-
-
 def test_submit_says_which_round_only_when_the_server_expects_it_there(monkeypatch, tmp_path, capsys):
     from test_project import make
 
@@ -1219,8 +987,8 @@ def test_submit_says_which_round_only_when_the_server_expects_it_there(monkeypat
     args.dry_run, args.yes = False, True
     editor = {"name": "a-curator", "version": 1, "id": "ab" * 32}
     for reply, said, unsaid in (
-        ({"enters": {"round": "s0-o00002", "draw_at": 0}}, "It enters round s0-o00002.", "earliest"),
-        ({"earliest": {"round": "s0-o00002", "draw_at": 0}, "message": "The queue is longer than one round can take."}, "The earliest round it can enter is s0-o00002.", "It enters"),
+        ({"enters": {"round": "s1-o00002", "draw_at": 0}}, "It enters round s1-o00002.", "earliest"),
+        ({"earliest": {"round": "s1-o00002", "draw_at": 0}, "message": "The queue is longer than one round can take."}, "The earliest round it can enter is s1-o00002.", "It enters"),
         ({}, "Submitted a-curator v1", "round"),
     ):
         monkeypatch.setattr(client, "request", lambda *a, reply=reply, **k: {"editor": editor, "url": "http://x/editors/abab", **reply})
@@ -1264,7 +1032,7 @@ def test_a_grader_with_another_pytorch_is_turned_away_before_it_grades(loop, mon
     from stet.spec import load_season
 
     monkeypatch.setattr(Args, "any_device", False, raising=False)
-    monkeypatch.setitem(load_season("s0").raw, "grade_devices", ["cuda", "cpu"])  # the test machine's device counts, so the check is reached
+    monkeypatch.setitem(load_season("s1").raw, "grade_devices", ["cuda", "cpu"])  # the test machine's device counts, so the check is reached
     loop.claims = [a_job()]
     with pytest.raises(SystemExit):
         client.cmd_verify(Args())
@@ -1447,23 +1215,14 @@ def test_a_verifier_told_to_stop_when_idle_stops_only_with_no_job_in_hand(loop, 
     assert "Stopping, as asked" in capsys.readouterr().err
 
 
-def test_a_rented_machine_hands_its_job_back_and_never_asks_for_the_held_out_exam(loop, monkeypatch):
-    import hashlib
-
-    from stet import data
+def test_a_rented_machine_hands_its_job_back(loop, monkeypatch):
     from stet.data import FetchError
-    from stet.spec import load_season
 
-    # The season has a held-out exam. An organisers' own machine will not start without
-    # it; a rented one is never given it, and grades all the same.
-    season = load_season("s0")
-    monkeypatch.setitem(season.raw, "heldout_exam", {"sha256": hashlib.sha256(b"pack").hexdigest()})
-    monkeypatch.setattr(data, "_heldout_pack", {})
     loop.me = {"account": {"handle": "rented-one", "anchor": True, "worker": True}, "verifier": {}}
     loop.claims = [a_job(id=1)]
     with pytest.raises(Stop):
         client.cmd_verify(Args())
-    assert loop.graded == [1] and data.heldout_pack_path(season) is None
+    assert loop.graded == [1]
 
     # Stopped in the middle of a job (here the server goes away while a download is being
     # waited out), it hands the job back: nobody starts it again to pick the job up.

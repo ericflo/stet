@@ -107,7 +107,7 @@ def need_torch():
 
 
 def resolve_round(args, offset: int = 0):
-    """--round accepts 3 (practice round 3), g3 (gym round 3), or a full id like s0-o00012."""
+    """--round accepts 3 (practice round 3), g3 (gym round 3), or a full id like s1-o00012."""
     import re
 
     from .spec import load_season, parse_round_id, practice_round
@@ -157,27 +157,16 @@ def report(out: Out, result: dict, base: dict | None, season) -> None:
     t = result["train"]
     out.line("training", f"{t['tokens']:,} tokens in {t['seconds']:.0f}s ({t['tokens_per_second']:,} tok/s) · final train loss {t['final_train_loss']:.3f}")
     e = result["exam"]
-    if e.get("kind") == "next":
-        out.line("exam", f"{e['items']:,} items · mean {e['mean']:.4f} bits per byte" + (f"   baseline {base['exam']['mean']:.4f}" if base else ""))
-        if base and "gain" in result:
-            out.line("", "          " + " · ".join(f"{k} {v:+.3f}" for k, v in (result.get("pillars") or {}).items()))
-            noise = ((season.raw.get("noise") or {}).get(result["scale"]) or {}).get("gain_sd")
-            text = out.bold(f"{result['gain']:+.4f}") + " bits per byte, the mean of the seven above"
-            if noise:
-                text += out.dim(f"   (training again moves this by about ±{noise:.3f})")
-            out.line("gain", text)
-        return
-    out.line("exam", out.bold(f"{e['loss']:.4f}") + (f"   baseline {base['exam']['loss']:.4f}" if base else ""))
-    out.line("", "          " + " · ".join(f"{k} {v['loss']:.3f}" for k, v in e["by_source"].items()))
-    if base:
-        gain = base["exam"]["loss"] - e["loss"]
-        m = multiplier(season, result["round"]["kind"], result["scale"], gain)
-        text = out.bold(f"{gain:+.4f}") + " nats"
+    out.line("exam", f"{e['items']:,} items · mean {e['mean']:.4f} bits per byte" + (f"   baseline {base['exam']['mean']:.4f}" if base else ""))
+    if base and "gain" in result:
+        out.line("", "          " + " · ".join(f"{k} {v:+.3f}" for k, v in (result.get("pillars") or {}).items()))
+        text = out.bold(f"{result['gain']:+.4f}") + " bits per byte, the mean of the seven above"
+        m = multiplier(season, result["round"]["kind"], result["scale"], result["gain"])
         if m:
             text += f"   →   {out.bold(format_multiplier(m))} data efficiency"
         noise = ((season.raw.get("noise") or {}).get(result["scale"]) or {}).get("gain_sd")
         if noise:
-            text += out.dim(f"   (reordering the same documents moves this by about ±{noise:.3f}; on one round, treat differences under 0.03 as noise)")
+            text += out.dim(f"   (training again moves this by about ±{noise:.3f})")
         out.line("gain", text)
 
 
@@ -217,59 +206,26 @@ def _with_baseline(result: dict, rnd, scale, device, out: Out, skip: bool):
     from .pipeline import baseline
 
     base = baseline(rnd, scale, device, progress=out.progress("baseline"), log=lambda m: out.line("", out.dim("baseline " + m)))
-    if base["exam"].get("kind") == "next":
-        # The next exam: the gain is its aggregate of the item-by-item differences, with the
-        # languages weighed by the published table (a round's own corpus is measured only for
-        # official rounds).
-        from . import data
-        from .newexam.aggregate import gains, round_score
+    # The gain is the next exam's aggregate of the item-by-item differences, with the languages
+    # weighed by the published table (a round's own corpus is measured only for official rounds).
+    from . import data
+    from .newexam.aggregate import gains, round_score
 
-        result["baseline"] = {"mean": base["exam"]["mean"]}
-        if result["valid"]:
-            agg = round_score(data.round_exam(rnd, scale), gains(result["exam"]["item_scores"], base["exam"]["item_scores"]))
-            result["gain"] = round(agg["score"], 5)
-            result["pillars"] = {k: v["score"] for k, v in agg["pillars"].items()}
-        return base
-    result["baseline"] = {"loss": base["exam"]["loss"], "by_source": {k: v["loss"] for k, v in base["exam"]["by_source"].items()}}
+    result["baseline"] = {"mean": base["exam"]["mean"]}
     if result["valid"]:
-        result["gain"] = round(base["exam"]["loss"] - result["exam"]["loss"], 5)
-    if result.get("heldout") and base.get("heldout"):
-        result["heldout"]["baseline"] = base["heldout"]["loss"]
+        agg = round_score(data.round_exam(rnd, scale), gains(result["exam"]["item_scores"], base["exam"]["item_scores"]))
+        result["gain"] = round(agg["score"], 5)
+        result["pillars"] = {k: v["score"] for k, v in agg["pillars"].items()}
     return base
-
-
-HELDOUT_KEYS = ("heldout", "heldout_error")
-
-
-def public_part(args, result: dict) -> dict:
-    """A result as it may be written down or printed.
-
-    On a machine that holds the season's held-out exam, a replay of an official round sits
-    it too. What it said belongs in one place, the record on the machine that holds the pack, and not in a
-    project directory or a terminal where the next script or agent would read it. So it is
-    left out unless `--heldout` asks for it, which is how a published line of that record
-    is checked once the season has closed.
-    """
-    if getattr(args, "heldout", False):
-        return result
-    return {k: v for k, v in result.items() if k not in HELDOUT_KEYS}
 
 
 def _emit(args, result: dict):
     if args.json:
-        slim = public_part(args, result)
+        slim = dict(result)
         if "train" in slim:
             slim["train"] = {k: v for k, v in slim["train"].items() if k != "curve"}
         json.dump(slim, sys.stdout, indent=1)
         sys.stdout.write("\n")
-
-
-def _heldout_line(args, out: Out, result: dict) -> None:
-    held = result.get("heldout")
-    if getattr(args, "heldout", False) and held:
-        out.line("held-out", f"{held['loss']:.4f}" + (f"   baseline {held['baseline']:.4f}" if held.get("baseline") is not None else ""))
-    elif getattr(args, "heldout", False):
-        out.line("held-out", result.get("heldout_error") or "not sat: this machine does not hold the held-out exam, or this is not an official round")
 
 
 def _summary(out: Out, results: list[dict]) -> dict:
@@ -349,10 +305,9 @@ def cmd_run(args):
                 remove_tree(bundle)
         result["editor"] = {"name": project.name}
         base = _with_baseline(result, rnd, scale, device, out, args.no_baseline)
-        (work / "result.json").write_text(json.dumps(public_part(args, result), indent=1))
+        (work / "result.json").write_text(json.dumps(result, indent=1))
         report(out, result, base, season)
         _edit_time_line(out, result, season)
-        _heldout_line(args, out, result)
         out.line("saved", str((work / "result.json").relative_to(Path.cwd()) if work.is_relative_to(Path.cwd()) else work / "result.json"))
         results.append(result)
     if len(results) == 1:
@@ -467,7 +422,6 @@ def cmd_score(args):
     result = grade_round(rnd, scale, script, device=device, progress=out.progress("training"), log=lambda m: out.line("", out.dim(m)))
     base = _with_baseline(result, rnd, scale, device, out, args.no_baseline)
     report(out, result, base, season)
-    _heldout_line(args, out, result)
     _emit(args, result)
     sys.exit(0 if result["valid"] else 2)
 
@@ -481,23 +435,15 @@ def cmd_baseline(args):
     season, scale, rnd = resolve_round(args)
     base = baseline(rnd, scale, pick_device(args.device), progress=out.progress("training"), log=lambda m: out.line("", out.dim(m)))
     out.line("round", f"{rnd.id} · {scale.name}")
-    out.line("baseline", out.bold(f"{base['exam']['loss']:.4f}") + "   " + " · ".join(f"{k} {v['loss']:.3f}" for k, v in base["exam"]["by_source"].items()))
-    if base.get("heldout"):
-        base["heldout"]["baseline"] = base["heldout"]["loss"]
-    _heldout_line(args, out, base)
+    out.line("baseline", out.bold(f"{base['exam']['mean']:.4f}") + f" bits per byte, the mean over {base['exam']['items']:,} items")
     if args.json:
-        json.dump(public_part(args, base), sys.stdout, indent=1)
+        json.dump(base, sys.stdout, indent=1)
         sys.stdout.write("\n")
 
 
 def cmd_examine(args):
-    """The organisers' examiner (seasons whose exam is the next exam): make an official round's
-    exam once its harvest window has closed and its sources have settled, and post it."""
-    need_torch()
-    from .spec import load_season
-
-    if load_season(args.season).exam_kind != "next":
-        die(f"season {args.season}'s exam is a published pack: its rounds have no exam to make")
+    """The organisers' examiner: make an official round's exam once its harvest window has
+    closed and its sources have settled, and post it. It trains nothing."""
     if args.follow:
         return _examine_follow(args)
     if not args.round:
@@ -559,154 +505,6 @@ def _examine_follow(args) -> None:
                 failed[x["id"]] = failed.get(x["id"], 0) + 1
                 out.line("", out.bad(f"{x['id']}: {e}"))
         time.sleep(60)
-
-
-def cmd_shadow(args):
-    """Grade a round's scripts on the next exam, beside the season's: the shadow exam of season 0."""
-    need_torch()
-    if args.follow:
-        return _shadow_follow(args)
-    _shadow_one(args)
-
-
-def _shadow_follow(args):
-    """The organisers' machine, measuring every round on the next exam as it settles: once a
-    settled round's harvest window has closed, harvest it, grade every entry, send the verdict."""
-    import copy
-
-    from .client import request
-    from .newexam.fresh.harvest import SETTLE
-
-    out = Out(quiet=args.quiet)
-    since = time.time() - 86400 * args.since_days
-    failed: dict[str, int] = {}
-    out.line("", out.bold(f"stet shadow --follow · rounds drawn since {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(since))}"))
-    while True:
-        try:
-            rounds = request("GET", "/api/v1/rounds?limit=50").get("rounds") or []
-        except Exception as e:
-            out.line("", out.dim(f"the server did not answer ({e}); trying again in five minutes"))
-            rounds = []
-        for x in sorted(rounds, key=lambda x: x["id"]):
-            if x.get("status") != "settled" or (x.get("draw_at") or 0) < since or failed.get(x["id"], 0) >= 3:
-                continue
-            try:
-                d = request("GET", f"/api/v1/rounds/{x['id']}")
-                if d.get("shadow") or time.time() < int(d["round"]["draw_at"]) + args.window + SETTLE:
-                    continue
-                one = copy.copy(args)
-                one.round, one.fresh, one.upload, one.entries, one.script = x["id"], True, True, [], None  # --farm carries over
-                _shadow_one(one)
-            except (Exception, SystemExit) as e:  # one round's trouble does not stop the others
-                failed[x["id"]] = failed.get(x["id"], 0) + 1
-                out.line("", out.bad(f"{x['id']}: {e}"))
-        time.sleep(300)
-
-
-def _shadow_one(args):
-    from .client import request, table
-    from .data import cache_dir
-    from .newexam.shadow import shadow_round
-    from .train import pick_device
-
-    out = Out(quiet=args.quiet)
-    season, scale, rnd = resolve_round(args)
-    scripts: dict[str, Path] = {}
-    shas: dict[str, str] = {}
-    editors: dict[str, str] = {}
-    farm = bool(getattr(args, "farm", False))
-    if farm and (rnd.kind != "official" or args.script):
-        die("--farm trains the entries of an official round on the organisers' machines; a script file of your own is trained here")
-    if rnd.kind == "official":
-        for e in request("GET", f"/api/v1/rounds/{rnd.id}").get("entries") or []:
-            sha = ((e.get("detail") or {}).get("script") or {}).get("script_sha256")
-            label = f"{e.get('owner')}/{e.get('name')}@v{e.get('version')}"
-            if sha and (not args.entries or e.get("name") in args.entries or label in args.entries):
-                shas[label], editors[label] = sha, e.get("editor", "")
-                if not farm:
-                    scripts[label] = script_file(sha, season, rnd)
-    for ref in args.script or []:
-        scripts[Path(ref).name] = script_file(ref, season, rnd)
-    if not (shas if farm else scripts):
-        die("nothing to grade: name entries of an official round, or give --script files")
-    device = None if farm else pick_device(args.device)
-    work = Path(args.out) if args.out else cache_dir() / "shadow" / rnd.id / scale.name
-    where = "the organisers' machines" if farm else device.type
-    out.line("", out.bold(f"stet shadow · {rnd.kind} round {rnd.id} · {scale.name} · {len(shas if farm else scripts)} scripts · {where}"))
-    log = lambda m: out.line("", out.dim(m))  # noqa: E731
-    fresh, mix = None, None
-    snapshot = work / "fresh.jsonl"
-    if args.fresh and not snapshot.exists():
-        if rnd.kind != "official":
-            die("only an official round has a draw for its fresh text to come after")
-        from .newexam.fresh.harvest import SETTLE, harvest_window
-
-        draw_at = int(request("GET", f"/api/v1/rounds/{rnd.id}")["round"]["draw_at"])
-        if time.time() < draw_at + args.window + SETTLE:
-            die(f"the harvest window closes at {time.strftime('%H:%M UTC', time.gmtime(draw_at + args.window))}, and its sources have "
-                f"published it all by {time.strftime('%H:%M UTC', time.gmtime(draw_at + args.window + SETTLE))}; try again then")
-        harvest_window(rnd.seed, draw_at, draw_at + args.window, snapshot, log=log)
-    if args.fresh or snapshot.exists():
-        from . import data
-        from .newexam.decontam import seen
-        from .newexam.fresh import read_snapshot
-        from .newexam.fresh.langs import shares
-        from .newexam.fresh.select import select
-        from .newexam.items import digest
-
-        _, docs = read_snapshot(snapshot)
-        corpus, _ = data.materialize(rnd, scale)
-        mix = shares(corpus, rnd.seed)  # every language in proportion to the round's own corpus
-        log(f"  the corpus's languages: {', '.join(f'{k} {v:.1f}%' for k, v in list(mix.items())[:8])}, and {max(0, len(mix) - 8)} more")
-        fresh = select(docs, rnd.seed, args.fresh_items, shares=mix)
-        # Drop fresh items the round's corpus already holds (copied text), once per selection.
-        mark = work / f"seen-{digest(fresh)[:12]}.json"
-        if mark.exists():
-            dropped = set(json.loads(mark.read_text()))
-        else:
-            dropped = seen(fresh, corpus, season, log=log)
-            mark.write_text(json.dumps(sorted(dropped)))
-        if dropped:
-            log(f"  {len(dropped)} fresh items are in the round's corpus already, and are dropped")
-        fresh = [it for i, it in enumerate(fresh) if i not in dropped]
-    if farm:
-        from . import data
-        from .client import need_key
-        from .newexam.farm import farm_round
-        from .newexam.shadow import round_items
-
-        corpus, _ = data.materialize(rnd, scale)
-        summary = farm_round(rnd, scale, shas, work, round_items(rnd, args.per_corner, fresh), len(corpus), need_key(), shares=mix, log=log)
-    else:
-        summary = shadow_round(rnd, scale, scripts, device, work, args.per_corner, fresh=fresh, log=log, shares=mix)
-    if args.upload:
-        from .client import need_key
-
-        fresh_n = len(fresh or [])
-        sent = {"round": rnd.index, "items": summary["items"], "corners": summary["corners"], "generated": summary["items"] - fresh_n,
-                "fresh": fresh_n, "items_digest": summary["items_digest"], "generator_version": summary["generator_version"],
-                "languages": dict(list((mix or {}).items())[:200]),
-                "entries": [{"editor": editors[r["name"]], "score": r["next_score"], "generated": r.get("generated_score"),
-                             "fresh": r.get("fresh_score"), "families": r["families"]}
-                            for r in summary["entries"] if r["valid"] and editors.get(r["name"])]}
-        request("POST", "/api/v1/admin/shadow", sent, key=need_key())
-        out.line("sent", f"the next exam's verdict on {rnd.id}, {len(sent['entries'])} entries")
-    rows = sorted(summary["entries"], key=lambda r: -(r.get("next_score") or -9))
-    by_season = sorted((r for r in rows if r["valid"]), key=lambda r: -r["season_gain"])
-    rank = {r["name"]: i + 1 for i, r in enumerate(by_season)}
-    if args.json:
-        json.dump(summary, sys.stdout, indent=1)
-        sys.stdout.write("\n")
-        return
-
-    def num(r, k):
-        return f"{r[k]:+.4f}" if r["valid"] and k in r else ""
-
-    out.line("", "")
-    out.line("", table([[r["name"], num(r, "next_score") or "invalid", num(r, "generated_score"), num(r, "fresh_score"), num(r, "season_gain"),
-                         str(rank.get(r["name"], ""))] for r in rows],
-                       ["entry", "next exam", "generated", "fresh", "season exam", "season rank"], right=(1, 2, 3, 4, 5)))
-    out.line("saved", str(work / "summary.json"))
 
 
 def cmd_fetch(args):
@@ -959,15 +757,12 @@ def cmd_agents(args):
 
 
 def add_round_args(p, default_round="0"):
-    p.add_argument("--round", default=default_round, help="3 = practice round 3, g3 = gym round 3, or a round id like s0-o00012 (default: 0)")
+    p.add_argument("--round", default=default_round, help="3 = practice round 3, g3 = gym round 3, or a round id like s1-o00012 (default: 0)")
     p.add_argument("--scale", default=None, help="nano, micro or standard (default: nano)")
     p.add_argument("--season", default=CURRENT_SEASON, help=argparse.SUPPRESS)
     p.add_argument("--device", default=None, help="torch device (default: best available)")
     p.add_argument("--json", action="store_true", help="print the result as JSON on stdout")
     p.add_argument("-q", "--quiet", action="store_true")
-    # For checking a season's published held-out results once it has closed. Only a machine
-    # with the held-out pack has anything to show, and until then only the organisers have it.
-    p.add_argument("--heldout", action="store_true", help=argparse.SUPPRESS)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1021,24 +816,9 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("examine", help=argparse.SUPPRESS)  # organisers: make each official round's exam after its draw
     p.add_argument("--round", help="the official round (default with --follow: every open one)")
     p.add_argument("--follow", action="store_true", help="every open round, as soon as its exam can be made")
-    p.add_argument("--season", default="s1", help=argparse.SUPPRESS)
+    p.add_argument("--season", default=CURRENT_SEASON, help=argparse.SUPPRESS)
     p.add_argument("--quiet", action="store_true", help=argparse.SUPPRESS)
     p.set_defaults(fn=cmd_examine)
-
-    p = sub.add_parser("shadow", help="grade a round's scripts on the next exam, beside the season's (season 0's shadow exam)")
-    p.add_argument("entries", nargs="*", help="entries of the official round given by --round, by name (default: every settled entry)")
-    add_round_args(p)
-    p.add_argument("--script", action="append", help="also grade this script file (may be given more than once)")
-    p.add_argument("--per-corner", type=int, default=2, help="items from every generated corner (default: 2)")
-    p.add_argument("--out", help="where results go (default: the cache)")
-    p.add_argument("--fresh", action="store_true", help="add text published in the window after the round's draw (harvested once, then kept)")
-    p.add_argument("--fresh-items", type=int, default=900, help="fresh items to keep (default: 900)")
-    p.add_argument("--window", type=int, default=7200, help="seconds after the draw that fresh text may come from (default: 7200)")
-    p.add_argument("--upload", action="store_true", help=argparse.SUPPRESS)  # organisers: send the verdict to the site
-    p.add_argument("--follow", action="store_true", help=argparse.SUPPRESS)  # organisers: every round, as it settles
-    p.add_argument("--farm", action="store_true", help=argparse.SUPPRESS)  # organisers: their machines train the students (stet verify)
-    p.add_argument("--since-days", type=float, default=1.0, help=argparse.SUPPRESS)
-    p.set_defaults(fn=cmd_shadow)
 
     p = sub.add_parser("fetch", help="download and build a round's corpus ahead of time")
     add_round_args(p)
@@ -1068,7 +848,7 @@ def main(argv=None):
         return 0
     from .assets import AssetError, Unavailable
     from .client import ApiError
-    from .data import HeldoutError
+    from .data import ExamNotReady
     from .project import ProjectError
     from .runner import HarnessError
 
@@ -1078,7 +858,7 @@ def main(argv=None):
         die("interrupted", 130)
     except ApiError as e:
         die(str(e))
-    except (OSError, HarnessError, HeldoutError, ProjectError, AssetError, Unavailable) as e:
+    except (OSError, HarnessError, ExamNotReady, ProjectError, AssetError, Unavailable) as e:
         die(str(e))
 
 

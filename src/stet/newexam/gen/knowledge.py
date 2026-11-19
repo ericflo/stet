@@ -1,7 +1,7 @@
 """Facts the web knows, asked in ten languages: where someone was born, a country's capital, who
 wrote a book or directed a film, an element's symbol.
 
-The facts are the season's list (data/facts-s0.jsonl.zst, built from Wikidata by
+The facts are the season's list (data/facts-s1.jsonl.zst, built from Wikidata by
 tools/build_wikidata_facts.py): well-known subjects, each with one undoubted answer. Which are
 asked is the round's seed's choice. Knowing them is what a model learns from pages that say
 them; a curator that drops such pages loses them, and one that keeps them gains.
@@ -59,7 +59,7 @@ def facts() -> dict[tuple[str, str], list[tuple[str, str]]]:
     """(fact, language) -> [(subject, answer)], in the list's order."""
     import zstandard
 
-    raw = resources.files("stet.newexam").joinpath("data/facts-s0.jsonl.zst").read_bytes()
+    raw = resources.files("stet.newexam").joinpath("data/facts-s1.jsonl.zst").read_bytes()
     out: dict[tuple[str, str], list[tuple[str, str]]] = {}
     for line in zstandard.ZstdDecompressor().decompress(raw, max_output_size=256 << 20).decode().splitlines():
         row = json.loads(line)

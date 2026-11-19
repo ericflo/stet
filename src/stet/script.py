@@ -41,7 +41,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .data import Corpus, contains_exam_text
+from .data import Corpus
 from .spec import Scale, Season
 from .tok import Unreadable, encode_batch
 
@@ -70,7 +70,6 @@ class Stats:
     copy_bytes: int = 0
     ink_tokens: int = 0  # the curator's own text among the tokens trained on, repeats included
     ink_budget: int = 0
-    exam_dropped: int = 0  # output documents left out because they contained exam text
     src_docs: int = 0  # distinct source documents drawn from
     script_lines: int = 0  # lines in the script (may exceed out_docs if truncated)
     tokens_one_pass: int = 0
@@ -254,7 +253,7 @@ def build_doc(corpus: Corpus, line_no: int, obj, min_copy: int, max_segments: in
 
 
 def materialize(
-    corpus: Corpus, script_path: str | Path, season: Season, scale: Scale, enc=None, check_exam: bool = True
+    corpus: Corpus, script_path: str | Path, season: Season, scale: Scale, enc=None
 ) -> tuple[np.ndarray, Stats]:
     """Turn an edit script into the training tokens: shape (batch_size, steps * ctx + 1).
 
@@ -265,10 +264,6 @@ def materialize(
 
     The script is consumed until every lane is full. A longer script is cut off there; a
     shorter one is dealt again from the top.
-
-    With `check_exam`, an output document that contains ink or joins pieces together is left
-    out if it contains the opening of a sentence of any exam passage. (Corpus documents that
-    do were removed when the corpus was built, so whole and trimmed copies never can.)
     """
     if enc is None:
         from .tok import load_encoding
@@ -320,9 +315,6 @@ def materialize(
             if full:
                 stats.truncated = True  # the budget ran out part-way through this batch
                 break
-            if check_exam and (bd.ink or bd.spliced) and contains_exam_text(text, season):
-                stats.exam_dropped += 1  # never trained on; the rest of the script stands
-                continue
             arr = np.empty(len(toks) + 1, dtype=np.uint16)
             arr[0] = eot
             arr[1:] = toks

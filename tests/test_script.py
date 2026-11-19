@@ -3,12 +3,11 @@ import json
 import os
 
 import pytest
-from conftest import EXAM_SENTENCE
 
 from stet.script import ScriptError, build_doc, file_sha256, materialize, open_script, write_script
 from stet.spec import Season, load_season
 
-SEASON = load_season("s0")
+SEASON = load_season("s1")
 EOT = SEASON.eot
 SCALE = dataclasses.replace(SEASON.scale("nano"), train_tokens=512, ctx=64, batch_size=4)
 # The real ink budget is a thousandth of the training budget: zero at this toy scale. Tests
@@ -126,24 +125,6 @@ def test_repeating_a_short_script_repeats_its_ink(corpus, enc):
     # One document with 20 ink tokens, trained on several times over: every pass counts.
     with pytest.raises(ScriptError, match="ink over budget"):
         run(corpus, enc, [{"s": [[3, 0, 1400], " " + "word " * 20]}], season=INKY)
-
-
-def test_new_text_that_reproduces_the_exam_is_left_out_however_it_is_wrapped(corpus, enc):
-    big = dataclasses.replace(SCALE, train_tokens=8192)
-    wrapped = EXAM_SENTENCE.upper().replace(" and ", "\n   AND  ")
-    plain, _ = run(corpus, enc, [0] * 40, scale=big, season=INKY)
-    # Mid-line, re-wrapped and shouting, it is still the exam: the document is dropped and
-    # the rest of the script stands.
-    tokens, stats = run(corpus, enc, [{"t": "menu home about " + wrapped}] + [0] * 40, scale=big, season=INKY)
-    assert stats.exam_dropped == 1 and stats.ink_tokens == 0 and (tokens == plain).all()
-    # The same sentence spliced together from an honest copy and two pieces of ink is caught too.
-    tokens, stats = run(corpus, enc, [{"s": [[0, 0, 90], " " + EXAM_SENTENCE[:50], EXAM_SENTENCE[50:]]}] + [0] * 40, scale=big, season=INKY)
-    assert stats.exam_dropped == 1 and (tokens == plain).all()
-    _, stats = run(corpus, enc, [{"t": "A different sentence entirely, of about the same length as the other one."}] + [0] * 40, scale=big, season=INKY)
-    assert stats.ink_tokens > 0 and stats.exam_dropped == 0
-
-
-# --- a script is untrusted data -----------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -269,11 +250,11 @@ def test_stats_report_what_was_kept(corpus, enc):
 
 EMPTY = {"d": 0, "k": [[5, 5]]}
 MIXED = [0, 3, 2, {"d": 3, "k": [[36, 900]]}, 1, {"s": [[0, 0, 450], [2, 0, 300]]}]
-FOUR = "9263de96f144d33e9ab0be585afb2b3c7d9172bd156387d65fd3ca01d148af32"  # the stream of [0, 3, 0, 3], which fills the budget
+FOUR = "26ccb1914fd94a3c5a8b8a81fc500303f47d3e095022049041f57f79c2ed2c94"  # the stream of [0, 3, 0, 3], which fills the budget
 RECORDED = [
     # (lines, documents per window, tokens_sha256 or the error, truncated, script_lines)
-    ([2, 1], 1024, "a787c1f1c0bb1b464a93927479bda2806bd310e6dd7b749c69acc1cc3b411990", False, 2),
-    (MIXED * 30, 1024, "7f2abe076974c45bca6116c60eeb8d4cddbfe31701914d81e49a47c75ba7e332", True, 180),
+    ([2, 1], 1024, "96de5f9a3b07c5364acab7783087bda40c3b901790771e39d7ec3dce5f0be485", False, 2),
+    (MIXED * 30, 1024, "f569b9120b4851d4beec5d525ef8ccad6397dbf33be9ba35c4e9aa326b80d75f", True, 180),
     ([0, 3, 0, 3, 9999], 3, "line 5: document 9999", None, None),  # a bad line in the window the budget fills in
     ([0, 3, 0, 3, 0, 0, 9999], 3, FOUR, True, 7),  # the same line after that window: never read
     ([0, 3, 0, 3, EMPTY, 0, EMPTY, 9999], 3, "line 8: document 9999", None, None),  # empty documents do not fill a window

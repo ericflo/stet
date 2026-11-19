@@ -27,13 +27,10 @@ def baseline(rnd: Round, scale: Scale, device=None, progress=None, log=None) -> 
     the round's raw data.
     """
     device = pick_device(device) if not hasattr(device, "type") else device
-    # A next-exam round's baseline is for the exam it sat: named for it.
-    exam = f"-{(rnd.exam_digest or 'generated')[:12]}" if rnd.season.exam_kind == "next" else ""
-    path = data.round_dir(rnd, scale) / f"baseline-{HARNESS_VERSION}-{device.type}{exam}.json"
+    # A baseline is for the exam it sat: named for it.
+    path = data.round_dir(rnd, scale) / f"baseline-{HARNESS_VERSION}-{device.type}-{(rnd.exam_digest or 'generated')[:12]}.json"
     cached = _cached(path)
-    # A machine that holds the held-out exam needs its baseline too, so a baseline measured before the
-    # pack was put in place is measured again.
-    if cached is not None and ("heldout" in cached or data.heldout_exam(rnd, scale) is None):
+    if cached is not None:
         return cached
     corpus, exam = data.materialize(rnd, scale)
     # Named for this process: two verifiers on one machine share the round's directory.
@@ -45,13 +42,11 @@ def baseline(rnd: Round, scale: Scale, device=None, progress=None, log=None) -> 
         script.unlink(missing_ok=True)
     if not result["valid"]:
         raise RuntimeError(f"the baseline for {rnd.id} could not be graded: {result['invalid_reason']}")
-    if result.get("heldout_error"):
-        raise RuntimeError(f"the baseline for {rnd.id} could not sit the held-out exam: {result['heldout_error']}")
     # Written whole or not at all: a file cut short by a full disk would otherwise stop
-    # every later job of the round. With a held-out part in it, it is nobody else's to read.
+    # every later job of the round.
     tmp = path.with_name(f"{path.name}.tmp{os.getpid()}")
     try:
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600 if "heldout" in result else 0o644)
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
         with os.fdopen(fd, "w") as f:
             f.write(json.dumps(result))
         os.replace(tmp, path)

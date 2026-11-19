@@ -9,7 +9,7 @@ from conftest import make_corpus
 from stet import cli, client, data, service
 from stet.spec import Shard, load_season, practice_round
 
-SEASON = load_season("s0")
+SEASON = load_season("s1")
 DAY = 86400.0
 NOW = 2_000_000_000.0
 
@@ -33,9 +33,9 @@ def aged(path, age_days, now=NOW):
 
 def test_what_goes_unused_is_deleted_and_what_is_in_use_stays():
     root = data.cache_dir()
-    old_round = put(root / "rounds" / "s0-p00001" / "nano" / "corpus-v3" / "docs.bin", 1000, 30)
+    old_round = put(root / "rounds" / "s1-p00001" / "nano" / "corpus-v3" / "docs.bin", 1000, 30)
     aged(old_round.parents[2], 30)
-    used_round = put(root / "rounds" / "s0-p00002" / "nano" / "corpus-v3" / "docs.bin", 1000, 30)
+    used_round = put(root / "rounds" / "s1-p00002" / "nano" / "corpus-v3" / "docs.bin", 1000, 30)
     aged(used_round.parents[2], 30)
     put(used_round.parents[2] / ".used", 0, 1)  # built a month ago, used yesterday
     old_pool = put(root / "pool" / ("a" * 64 + ".jsonl.zst"), 500, 20)
@@ -44,7 +44,6 @@ def test_what_goes_unused_is_deleted_and_what_is_in_use_stays():
     old_model = put(root / "assets" / ("c" * 64), 800, 40)
     new_model = put(root / "assets" / ("d" * 64), 800, 13)
     old_script = put(root / "scripts" / ("e" * 64 + ".jsonl"), 50, 100)
-    exam = put(root / "exam" / "exam-s0.jsonl.zst", 50, 400)  # the season's: every run needs it
     killed_upgrade = put(root / "upgrade-env" / "bin" / "python", 50, 2)
     aged(root / "upgrade-env", 2)
     not_ours = put(root / "upstream" / "something", 50, 400)  # nothing stet put there
@@ -54,7 +53,7 @@ def test_what_goes_unused_is_deleted_and_what_is_in_use_stays():
     assert freed == 1000 + 500 + 500 + 800 + 50 + 50
     for gone in (old_round.parents[2], old_pool, old_wet, old_model, old_script, killed_upgrade.parents[1]):
         assert not gone.exists(), gone
-    for kept in (used_round, new_pool, new_model, exam, not_ours):
+    for kept in (used_round, new_pool, new_model, not_ours):
         assert kept.exists(), kept
 
 
@@ -82,8 +81,6 @@ def fake_crawl(monkeypatch, tmp_path, docs):
     monkeypatch.setattr(data, "round_shards", lambda rnd, scale, quiet=False: shards)
     half = len(docs) // 2
     monkeypatch.setattr(data, "read_shard", lambda path, kind: iter(docs[:half] if path == data.shard_path_of(shards[0]) else docs[half:]))
-    monkeypatch.setattr(data, "exam_keys", lambda season: None)
-    monkeypatch.setattr(data, "contains_exam_text", lambda text, season, banned: False)
     return shards
 
 
@@ -109,7 +106,7 @@ def test_using_a_round_keeps_it_however_long_ago_it_was_built():
     dest = data.round_dir(rnd, scale) / "corpus-v3"
     make_corpus(dest, ["one document", "another"])
     aged(dest.parents[1], 60, now=data.time.time())
-    other = put(data.cache_dir() / "rounds" / "s0-p00009" / "nano" / "corpus-v3" / "docs.bin", 100)
+    other = put(data.cache_dir() / "rounds" / "s1-p00009" / "nano" / "corpus-v3" / "docs.bin", 100)
     aged(other.parents[2], 60, now=data.time.time())
 
     assert len(data.corpus(rnd, scale, quiet=True)) == 2  # used now, and the cache looked over
@@ -130,21 +127,20 @@ def test_a_corpus_in_an_older_layout_is_not_kept_beside_the_new_one():
 
 def test_clean_deletes_what_stet_downloaded_and_nothing_else(capsys):
     root = data.cache_dir()
-    put(root / "rounds" / "s0-p00001" / "nano" / "corpus-v3" / "docs.bin", 3 << 20)
+    put(root / "rounds" / "s1-p00001" / "nano" / "corpus-v3" / "docs.bin", 3 << 20)
     put(root / "pool" / "wet" / "x.warc.wet.gz", 1 << 20)
     put(root / "assets" / ("c" * 64), 2 << 20)
-    put(root / "exam" / "exam-s0.jsonl.zst", 1 << 20)
     put(root / "verify" / "slot0" / "job" / "left", 1 << 20)
     mine = put(root / "upstream" / "something", 50)
 
     cli.main(["clean", "--dry-run"])
     text = said(capsys)
-    assert "8 MB" in text and "built rounds" in text and "Nothing was deleted" in text
+    assert "7 MB" in text and "built rounds" in text and "Nothing was deleted" in text
     assert (root / "rounds").exists()
 
     cli.main(["clean"])
     text = said(capsys)
-    assert "Cleared 8 MB" in text and "uv cache clean" in text
+    assert "Cleared 7 MB" in text and "uv cache clean" in text
     assert sorted(p.name for p in root.iterdir()) == ["upstream"] and mine.exists()
 
     cli.main(["clean"])
@@ -155,9 +151,9 @@ def test_clean_deletes_what_stet_downloaded_and_nothing_else(capsys):
 def test_clean_leaves_a_running_verifier_what_it_is_using(capsys):
     root = data.cache_dir()
     now = data.time.time()
-    in_use = put(root / "rounds" / "s0-o00007" / "micro" / "corpus-v3" / "docs.bin", 1 << 20, 0, now)
-    put(root / "rounds" / "s0-o00007" / ".used", 0, 0, now)
-    idle = put(root / "rounds" / "s0-p00001" / "nano" / "corpus-v3" / "docs.bin", 1 << 20, 1, now)
+    in_use = put(root / "rounds" / "s1-o00007" / "micro" / "corpus-v3" / "docs.bin", 1 << 20, 0, now)
+    put(root / "rounds" / "s1-o00007" / ".used", 0, 0, now)
+    idle = put(root / "rounds" / "s1-p00001" / "nano" / "corpus-v3" / "docs.bin", 1 << 20, 1, now)
     aged(idle.parents[2], 1, now)
     job = put(root / "verify" / "slot0" / "job" / "script.jsonl", 100, 0, now)
     exam = put(root / "exam" / "exam-s0.jsonl.zst", 100, 5, now)

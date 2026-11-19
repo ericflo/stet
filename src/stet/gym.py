@@ -1,9 +1,9 @@
 """The gym: Stet as a reinforcement-learning environment.
 
 One episode is one round. The observation is a raw corpus and a description of the task.
-The action is an edit script. The reward is the gain: how much lower the fixed student's
-exam loss is after training on your edit than after training on the unedited corpus, in
-nats per token.
+The action is an edit script. The reward is the gain: how much better the fixed student does
+on the exam after training on your edit than after training on the unedited corpus, in bits
+per byte (the mean over the exam's seven pillars).
 
     from stet.gym import Env
 
@@ -18,9 +18,9 @@ being tested on data, and a kind of data, it has never seen. Rounds are pure fun
 (season, split, index), so a reward can be reproduced on any machine, and there are as
 many rounds as there are non-negative integers.
 
-What the gym does not do is hide the exam. In the competition your curator runs in a sandbox
-with no exam on disk. Here your code runs in your own process, and the exam pack is a public
-file. A policy that peeks will score well in the gym and nowhere else.
+A gym round's exam is its generated questions: they follow from its seed, so a policy could
+compute them. In the competition nobody can, since the exam is made after the draw and half of
+it is fresh writing. A policy that peeks will score well in the gym and nowhere else.
 """
 
 from __future__ import annotations
@@ -40,7 +40,7 @@ from .train import pick_device
 @dataclass
 class Observation:
     corpus: data.Corpus  # len(corpus), corpus.text(i), corpus.raw(i), corpus.size(i), corpus.urls[i]
-    task: dict  # the same task.json a curator is given: budgets, limits, the student, the exam's sources
+    task: dict  # the same task.json a curator is given: budgets, limits, the student, the exam's pillars
     round: Round = field(repr=False)
 
     @property
@@ -85,7 +85,7 @@ class Env:
     def step(self, script) -> tuple[float, dict]:
         """Grade an edit script. `script` is a path to a script.jsonl or an iterable of lines.
 
-        Returns (reward, info). The reward is the gain in nats per token. A script that
+        Returns (reward, info). The reward is the gain in bits per byte. A script that
         breaks a rule is not an error: it scores as the unedited corpus (reward 0) and
         `info["valid"]` is False with the reason in `info["invalid_reason"]`.
         """
@@ -103,31 +103,13 @@ class Env:
                 path = Path(tmp) / "script.jsonl"
                 write_script(path, script)
             result = grade(rnd, scale, corpus, exam, path, device=self.device)
-        if base["exam"].get("kind") == "next":
-            # The next exam: the reward is its aggregate of the item-by-item differences.
-            from .newexam.aggregate import gains, round_score
+        # The reward is the next exam's aggregate of the item-by-item differences.
+        from .newexam.aggregate import gains, round_score
 
-            info = {"round": rnd.id, "valid": result["valid"], "invalid_reason": result["invalid_reason"],
-                    "baseline_mean": base["exam"]["mean"], "script": result.get("script")}
-            if not result["valid"]:
-                return 0.0, info
-            agg = round_score(exam, gains(result["exam"]["item_scores"], base["exam"]["item_scores"]))
-            info.update(mean=result["exam"]["mean"], gain_by_pillar={k: round(v["score"], 5) for k, v in agg["pillars"].items()}, train=result["train"])
-            return round(agg["score"], 5), info
-        info = {
-            "round": rnd.id,
-            "valid": result["valid"],
-            "invalid_reason": result["invalid_reason"],
-            "baseline_loss": base["exam"]["loss"],
-            "script": result.get("script"),
-        }
+        info = {"round": rnd.id, "valid": result["valid"], "invalid_reason": result["invalid_reason"],
+                "baseline_mean": base["exam"]["mean"], "script": result.get("script")}
         if not result["valid"]:
             return 0.0, info
-        loss = result["exam"]["loss"]
-        info.update(
-            loss=loss,
-            # The exam is six equally weighted sources; this says where a gain came from.
-            gain_by_source={k: round(base["exam"]["by_source"][k]["loss"] - v["loss"], 5) for k, v in result["exam"]["by_source"].items()},
-            train=result["train"],
-        )
-        return round(base["exam"]["loss"] - loss, 5), info
+        agg = round_score(exam, gains(result["exam"]["item_scores"], base["exam"]["item_scores"]))
+        info.update(mean=result["exam"]["mean"], gain_by_pillar={k: round(v["score"], 5) for k, v in agg["pillars"].items()}, train=result["train"])
+        return round(agg["score"], 5), info

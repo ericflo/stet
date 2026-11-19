@@ -216,7 +216,7 @@ def student():
     from stet.tok import load_encoding
     from stet.train import build_model
 
-    season = load_season("s0")
+    season = load_season("s1")
     scale = season.scale("nano")
     return build_model(scale, season, 7, torch.device("cpu")), load_encoding(season), season.eot, scale.ctx
 
@@ -246,47 +246,6 @@ def test_sitting_scores_only_what_it_should(student):
         logp = torch.log_softmax(model(torch.tensor([ids[:-1]])).float(), -1)[0]
     want = -sum(float(logp[t - 1, ids[t]]) for t in range(first, len(ids)))
     assert nll(model, seqs, cpu)[0] == pytest.approx(want, rel=1e-4)
-
-
-def test_a_shadow_round_trains_once_per_script_and_scores_the_unedited_corpus_at_zero(corpus, tmp_path, monkeypatch):
-    pytest.importorskip("torch")
-    import dataclasses
-
-    import torch
-
-    from stet import data
-    from stet.newexam import shadow
-    from stet.script import write_script
-    from stet.spec import load_season, practice_round
-
-    season = load_season("s0")
-    scale = dataclasses.replace(season.scale("nano"), train_tokens=2 * 16 * 256)  # two steps
-    rnd = practice_round(season, 0)
-    exam = {"news": [{"id": "n0", "text": "A short passage of news for the season's exam to score. " * 3}]}
-    monkeypatch.setattr(data, "materialize", lambda r, s: (corpus, exam))
-    trained = []
-    real_train = shadow.train
-    monkeypatch.setattr(shadow, "train", lambda *a, **k: trained.append(1) or real_train(*a, **k))
-    same = tmp_path / "same.jsonl"
-    write_script(same, range(len(corpus)))
-    other = tmp_path / "other.jsonl"
-    write_script(other, [3, 0])
-    scripts = {"same": same, "other": other}
-    s = shadow.shadow_round(rnd, scale, scripts, torch.device("cpu"), tmp_path / "out", per_corner=1, log=lambda m: None)
-    rows = {r["name"]: r for r in s["entries"]}
-    assert rows["same"]["next_score"] == 0.0 and rows["same"]["season_gain"] == 0.0
-    assert rows["other"]["next_score"] != 0.0
-    assert len(trained) == 2  # the unedited corpus and "other"; "same" is the unedited corpus's own script
-    shadow.shadow_round(rnd, scale, scripts, torch.device("cpu"), tmp_path / "out", per_corner=1, log=lambda m: None)
-    assert len(trained) == 2  # resumed from what was kept
-    kept = [json.loads(line) for line in (tmp_path / "out" / "items.jsonl").read_text().splitlines()]
-    assert len(kept) == s["items"] == len(gen.generate(rnd.seed, per_corner=1))
-    # a bigger exam is sat by the students already trained
-    fresh = [Item(kind="passage", corner="fresh/wikipedia/en/Q5/article", fmt="prose", lang="en", source="wikipedia:en:1",
-                  text="A person who was born in a town and later moved to a city, where they worked for many years. " * 4)]
-    s2 = shadow.shadow_round(rnd, scale, scripts, torch.device("cpu"), tmp_path / "out", per_corner=1, fresh=fresh, log=lambda m: None)
-    assert len(trained) == 2 and s2["items"] == s["items"] + 1
-    assert {r["name"]: r for r in s2["entries"]}["other"]["fresh_score"] != 0.0
 
 
 def test_transforms_are_right():
@@ -343,7 +302,7 @@ def test_programs_in_go_c_and_lua_print_what_the_item_says(lang, tool, tmp_path)
         assert out.strip() == it.cont.strip(), (code, it.cont)
 
 
-def test_students_farmed_out_to_the_organisers_machines_add_up_as_a_local_run_does(corpus, tmp_path, monkeypatch):
+def test_students_farmed_out_to_the_organisers_machines_add_up_as_training_here_does(corpus, tmp_path, monkeypatch):
     pytest.importorskip("torch")
     import dataclasses
     import hashlib
@@ -353,23 +312,22 @@ def test_students_farmed_out_to_the_organisers_machines_add_up_as_a_local_run_do
     import zstandard
 
     from stet import client, data
-    from stet.newexam import farm, shadow
+    from stet.newexam import farm
     from stet.script import write_script
     from stet.spec import load_season, practice_round
 
-    season = load_season("s0")
+    season = load_season("s1")
     scale = dataclasses.replace(season.scale("nano"), train_tokens=2 * 16 * 256)
     rnd = practice_round(season, 0)
-    exam = {"news": [{"id": "n0", "text": "A short passage of news for the season's exam to score. " * 3}]}
     busy = {"left": 1}  # the crawl host says "slow down" once: the worker waits and fetches again
 
-    def materialize(r, s):
+    def built(r, s, quiet=False):
         if busy["left"]:
             busy["left"] -= 1
             raise data.FetchError("could not fetch CC-MAIN-x.warc.wet.gz: HTTP Error 503: Service Unavailable")
-        return corpus, exam
+        return corpus
 
-    monkeypatch.setattr(data, "materialize", materialize)
+    monkeypatch.setattr(data, "corpus", built)
     monkeypatch.setattr(type(season), "scale", lambda self, name: scale)
     monkeypatch.setattr(client, "round_from_api", lambda s, d: rnd)
     monkeypatch.setattr(farm, "POLL", 0.05)
@@ -379,7 +337,7 @@ def test_students_farmed_out_to_the_organisers_machines_add_up_as_a_local_run_do
     write_script(other, [3, 0])
     script_bytes = other.read_bytes()
     sha = hashlib.sha256(script_bytes).hexdigest()
-    items = shadow.round_items(rnd, per_corner=1)[:60]
+    items = gen.generate(rnd.seed, per_corner=1)[:60]
 
     # The server, as far as the farm sees it.
     lock = threading.Lock()
@@ -428,24 +386,22 @@ def test_students_farmed_out_to_the_organisers_machines_add_up_as_a_local_run_do
         if not farm.turn(season, None, torch.device("cpu"), log=lambda m: None):
             t.join(0.05)
     farmed = got["s"]
-    local = shadow.shadow_round(rnd, scale, {"other": other}, torch.device("cpu"), tmp_path / "local", per_corner=1, log=lambda m: None)
-    # The local run sat every generated item; the farm the first 60 of them. Each item is
-    # scored on its own, so the local run's first 60 scores are what the farm should have.
     rows = {r["name"]: r for r in farmed["entries"]}
     assert [t["script"] for t in batch["tasks"]] == ["unedited", "unedited#2", sha]  # "same" is the unedited corpus itself
-    assert rows["same"]["next_score"] == 0.0 and json.loads((tmp_path / "farmed" / f"{same_sha[:16]}.json").read_text())["name"] == "(unedited)"
+    assert rows["same"]["score"] == 0.0 and json.loads((tmp_path / "farmed" / f"{same_sha[:16]}.json").read_text())["name"] == "(unedited)"
     assert farmed["items"] == len(items) and rows["other"]["valid"]
-    tag = local["items_digest"][:12]
+    # What the farm sends back is what training here gives: on a CPU, the same every time.
+    from stet.newexam.score import sit
+    from stet.tok import load_encoding
 
-    def kept(sha16):
-        m = json.loads((tmp_path / "local" / f"{sha16}.json").read_text())
-        m["item_scores"] = json.loads((tmp_path / "local" / f"{sha16}-{tag}.json").read_text())[: len(items)]
-        return m
+    enc = load_encoding(season)
 
-    base16 = next(p.stem for p in (tmp_path / "local").glob("????????????????.json") if p.stem != sha[:16])
-    loc = shadow.summarize(rnd, scale, items, kept(base16), {"other": kept(sha[:16])})
-    assert rows["other"]["next_score"] == pytest.approx(loc["entries"][0]["next_score"], abs=1e-5)
-    assert farmed["baseline_exam_loss"] == pytest.approx(local["baseline_exam_loss"], abs=1e-6)
+    def here(script):
+        meta, model = farm.train_student(rnd, scale, corpus, enc, script, torch.device("cpu"))
+        return {**meta, "item_scores": sit(model, items, enc, season.eot, scale.ctx, torch.device("cpu"))}
+
+    loc = farm.summarize(rnd, scale, items, here(same), {"other": here(other)})
+    assert rows["other"]["score"] == pytest.approx(loc["entries"][0]["score"], abs=1e-5)
     # kept as a local run keeps them, for the report
     assert (tmp_path / "farmed" / f"{sha[:16]}.json").exists() and (tmp_path / "farmed" / "items.jsonl").exists()
 

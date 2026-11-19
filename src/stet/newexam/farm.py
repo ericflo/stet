@@ -1,12 +1,12 @@
-"""The next exam's students, farmed out to the organisers' machines.
+"""Students trained for the organisers on their own machines: finals, and measurements.
 
-A round's shadow needs one student per entry and one for the unedited corpus. The organisers'
-machine posts them as a batch: the round's next-exam items, and the scripts whose students it
-wants (`post_batch`). Every organisers' machine running `stet verify`, rented ones included,
-takes one when it has no official work, trains it, sits it on both exams, and sends back how
-it did on each item (`work_one`). The organisers' machine collects the results into the same
-files a local run keeps, so `stet shadow` and tools/next_exam_report.py read them alike, and
-adds them up (`farm_round`).
+A season's finals train the top curators' students at a size larger than rounds use, and the
+exam's calibration trains students again and again. The organisers' machine posts them as a
+batch: the items to sit, and the scripts whose students it wants, at one of the season's
+scales or one built for the purpose (`post_batch`). Every organisers' machine running `stet
+verify`, rented ones included, takes one when it has no official work, trains it, sits it,
+and sends back how it did on each item (`work_one`). The organisers' machine collects the
+results and adds them up (`farm_round`).
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ import tempfile
 import time
 from pathlib import Path
 
+from .aggregate import gains, round_score
 from .items import Item, digest
 
 UNEDITED = "unedited"
@@ -98,12 +99,12 @@ def _send(where: str, body: dict, key, waits=(5, 15, 30, 60, 120)) -> None:
 FETCH_WAITS = (60, 120, 240, 480, 600)  # a crawl host that says "slow down" is waited out, not given up on
 
 
-def _materialize(data, rnd, scale, log):
-    """The round's corpus and exam, waiting out a public data host that is busy: a student held
-    is not handed back (and a try spent) because Common Crawl asked a dozen machines to slow down."""
+def _corpus(data, rnd, scale, log):
+    """The round's corpus, waiting out a public data host that is busy: a student held is not
+    handed back (and a try spent) because Common Crawl asked a dozen machines to slow down."""
     for wait in (*FETCH_WAITS, None):
         try:
-            return data.materialize(rnd, scale)
+            return data.corpus(rnd, scale)
         except data.FetchError as e:
             if wait is None:
                 raise
@@ -118,7 +119,6 @@ def work_one(task: dict, season, key, device, log=print) -> None:
     from ..runner import release_gpu_memory
     from ..tok import load_encoding
     from .score import sit
-    from .shadow import train_student, unedited_script
 
     where = f"/api/v1/shadow/batches/{task['batch']}/tasks/{int(task['index'])}"
     try:
@@ -128,16 +128,16 @@ def work_one(task: dict, season, key, device, log=print) -> None:
         items = unpack_items(request("GET", f"/api/v1/shadow/batches/{task['batch']}/items", key=key, raw=True, timeout=600, limit=64 << 20))
         if len(items) != task["items"] or digest(items) != task["items_digest"]:
             raise ValueError("the batch's items do not match their digest")
-        corpus, exam = _materialize(data, rnd, scale, log)
+        corpus = _corpus(data, rnd, scale, log)
         enc = load_encoding(season)
         t0 = time.time()
-        with tempfile.TemporaryDirectory(prefix="stet-shadow-") as tmp:
+        with tempfile.TemporaryDirectory(prefix="stet-farm-") as tmp:
             script = Path(tmp) / "script.jsonl"
             if script_ref == UNEDITED:
                 unedited_script(script, len(corpus))
             else:
                 _fetch_script(script_ref, season, script, key=key)
-            meta, model = train_student(rnd, scale, corpus, exam, enc, script, device)
+            meta, model = train_student(rnd, scale, corpus, enc, script, device)
         body = dict(meta)
         body["reason"] = body.pop("invalid_reason", "")
         if model is not None:
@@ -151,7 +151,7 @@ def work_one(task: dict, season, key, device, log=print) -> None:
         except Exception:
             body["hardware"] = str(device)
         _send(where, body, key)
-        said = f"season exam {meta['exam_loss']:.4f}" if meta["valid"] else f"not a script: {meta.get('invalid_reason')}"
+        said = "trained" if meta["valid"] else f"not a script: {meta.get('invalid_reason')}"
         log(f"{task['round']} · {task['script'][:12]}: {said}, {len(items)} items sat [{time.time() - t0:.0f}s]")
     except BaseException:
         try:
@@ -180,6 +180,68 @@ def turn(season, key, device, log=print) -> bool:
 # --- the organisers' machine, farming a round out --------------------------------------------------
 
 
+def _sha(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _write(path: Path, obj) -> None:
+    tmp = path.with_name(f"{path.name}.tmp{os.getpid()}")
+    tmp.write_text(json.dumps(obj))
+    tmp.replace(path)
+
+
+def unedited_script(path: Path, n_docs: int) -> str:
+    """Write the script that keeps the corpus as it is; returns its sha256."""
+    from ..script import write_script
+
+    write_script(path, range(n_docs))
+    return _sha(path)
+
+
+def train_student(rnd, scale, corpus, enc, script: Path, device):
+    """Train the student on what a script keeps: (what it says, the model, or None when the
+    script is not one)."""
+    from ..script import ScriptError, materialize
+    from ..train import train
+
+    meta: dict = {"valid": False}
+    try:
+        tokens, stats = materialize(corpus, script, rnd.season, scale, enc)
+    except ScriptError as e:
+        meta["invalid_reason"] = str(e)
+        return meta, None
+    model, tr = train(tokens, scale, rnd.season, rnd.init_seed, device)
+    meta.update(valid=True, kept_doc_frac=stats.to_dict(corpus)["kept_doc_frac"], train_seconds=round(tr["seconds"], 1))
+    return meta, model
+
+
+def write_items(items: list[Item], path: Path) -> None:
+    with open(path, "w") as f:
+        for it in items:
+            f.write(json.dumps(it.to_dict(), ensure_ascii=False) + "\n")
+
+
+def summarize(rnd, scale, items: list[Item], base: dict, students: dict[str, dict], shares: dict[str, float] | None = None) -> dict:
+    """What a batch came to: each script's score on the items over the unedited student's."""
+    from . import gen
+
+    rows = []
+    for name, r in students.items():
+        row = {"name": name, "valid": r["valid"]}
+        if r["valid"]:
+            agg = round_score(items, gains(r["item_scores"], base["item_scores"]), shares=shares)
+            row.update(score=round(agg["score"], 5), pillars={k: v["score"] for k, v in agg["pillars"].items()}, families=agg["families"])
+        else:
+            row["reason"] = r.get("invalid_reason")
+        rows.append(row)
+    return {"round": rnd.id, "scale": scale.name, "items": len(items), "items_digest": digest(items), "generator_version": gen.VERSION,
+            "entries": rows}
+
+
 def post_batch(rnd, scale, items: list[Item], scripts: list[str], key, spec: dict | None = None, lease: int = 0) -> str:
     import base64
 
@@ -203,14 +265,13 @@ def farm_round(rnd, scale, scripts: dict[str, str], out_dir: Path, items: list[I
     varies between trainings several times as much as a curated corpus's does, and every
     gain is measured from it. Each training is kept beside the average (`<sha>#k`)."""
     from ..client import request
-    from .shadow import _write, summarize, unedited_script, write_items
 
     out_dir.mkdir(parents=True, exist_ok=True)
     tag = digest(items)[:12]
     write_items(items, out_dir / "items.jsonl")
     if shares:
         _write(out_dir / "languages.json", shares)
-    with tempfile.TemporaryDirectory(prefix="stet-shadow-") as tmp:
+    with tempfile.TemporaryDirectory(prefix="stet-farm-") as tmp:
         base_sha = unedited_script(Path(tmp) / "unedited.jsonl", n_docs)
     # An entry whose script keeps the corpus as it is (identity) is the unedited corpus's student.
     scripts = {name: (UNEDITED if sha == base_sha else sha) for name, sha in scripts.items()}
@@ -233,8 +294,7 @@ def farm_round(rnd, scale, scripts: dict[str, str], out_dir: Path, items: list[I
                 sha16 += "#" + (t["script"].split("#")[1] if "#" in t["script"] else "1")
             meta = {"name": names[t["script"].split("#")[0]], "valid": bool(d["valid"]), "farmed_by": d.get("by"), "hardware": d.get("hardware")}
             if d["valid"]:
-                meta.update(exam_loss=d["exam_loss"], by_source=d.get("by_source") or {}, kept_doc_frac=d.get("kept_doc_frac"),
-                            train_seconds=d.get("train_seconds"))
+                meta.update(kept_doc_frac=d.get("kept_doc_frac"), train_seconds=d.get("train_seconds"))
                 _write(out_dir / f"{sha16}-{tag}.json", t["item_scores"])
             else:
                 meta["invalid_reason"] = d.get("reason")
@@ -270,13 +330,10 @@ def farm_round(rnd, scale, scripts: dict[str, str], out_dir: Path, items: list[I
         raise RuntimeError(f"{rnd.id}: the unedited corpus's student was not trained, so nothing can be added up")
     n = len(trained)
     base = {"name": "(unedited)", "valid": True, "trainings": n, "hardware": sorted({str(m.get("hardware")) for m in trained}),
-            "exam_loss": sum(m["exam_loss"] for m in trained) / n,
-            "by_source": {k: sum(m["by_source"].get(k, 0.0) for m in trained) / n for k in trained[0].get("by_source") or {}},
             "item_scores": [round(sum(col) / n, 6) for col in zip(*(m["item_scores"] for m in trained), strict=True)]}
     _write(out_dir / f"{base_sha[:16]}.json", {k: v for k, v in base.items() if k != "item_scores"})
     _write(out_dir / f"{base_sha[:16]}-{tag}.json", base["item_scores"])
-    log(f"  the unedited corpus: {n} trainings averaged, season exam {base['exam_loss']:.4f}"
-        + (f" (spread {max(m['exam_loss'] for m in trained) - min(m['exam_loss'] for m in trained):.4f})" if n > 1 else ""))
+    log(f"  the unedited corpus: {n} trainings averaged")
     got = {name: m for name, sha in scripts.items() if (m := student(sha)) is not None}
     for name, sha in scripts.items():
         if sha == UNEDITED:

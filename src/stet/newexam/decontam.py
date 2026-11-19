@@ -1,13 +1,12 @@
 """Keeping the round's corpus out of its exam.
 
-The season 0 exam is fixed and public, so pages that quote it are taken out of the corpus. The
-next exam is made after the corpus, from text published after the draw, which a crawl made
+The exam is made after the corpus, from text published after the draw, which a crawl made
 before the draw cannot hold. But text can be copied: an addition to an article may quote a page
-the crawl has. So the rule turns around: an item whose scored text has a sentence opening that
-appears anywhere in the round's corpus is dropped from the exam.
+the crawl has. So an item whose scored text has a sentence opening that appears anywhere in the
+round's corpus is dropped from the exam.
 
-Openings are found as the season's exam filter finds them (the same normalisation, key length
-and letter count), so a sentence the filter would have caught, this catches.
+Openings are normalised (lowercase, runs of whitespace collapsed) and cut to the season's key
+length, keeping only those with enough letters to be distinctive (`decontam` in the season).
 """
 
 from __future__ import annotations

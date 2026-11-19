@@ -53,24 +53,4 @@ def nothing_real(tmp_path, monkeypatch):
     # How much memory this machine has free is not what any test is about.
     monkeypatch.setattr("stet.runner.memory_free_bytes", lambda: -1)
     monkeypatch.delenv("STET_DEV", raising=False)
-    # Nor the held-out exam, wherever this machine keeps it, nor what an earlier test found.
-    monkeypatch.delenv("STET_HELDOUT_EXAM", raising=False)
-    from stet import data
 
-    monkeypatch.setattr(data, "_heldout_pack", {})
-
-
-EXAM_SENTENCE = "The committee met on a rainy Tuesday and agreed, after much argument, to postpone the vote."
-
-
-@pytest.fixture(autouse=True)
-def tiny_exam(monkeypatch):
-    """Stand in for the season's exam pack, so tests need no download."""
-    from stet import data
-    from stet.spec import load_season
-
-    cfg = load_season("s0").raw["decontam"]
-    keys = data.keys_array(data.sentence_starts(EXAM_SENTENCE, cfg["key_bytes"], cfg["min_letters"]), cfg["key_bytes"])
-    assert len(keys) == 1
-    monkeypatch.setitem(data._exam_keys, "s0", keys)
-    return keys

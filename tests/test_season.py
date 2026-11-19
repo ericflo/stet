@@ -1,4 +1,4 @@
-"""Season 1: the next exam as the season's exam, on the grader's side."""
+"""The season, and its exam on the grader's side and the examiner's."""
 
 import json
 import types
@@ -12,13 +12,14 @@ from stet.newexam.items import Item, digest
 from stet.spec import load_season, official_round, practice_round
 
 
-def test_season_one_is_the_next_exam_at_the_standard_scale():
-    s1, s0 = load_season("s1"), load_season("s0")
-    assert s1.exam_kind == "next" and s0.exam_kind == "pack"
-    assert s1.official_scale == "standard" and "heldout_exam" not in s1.raw
+def test_the_season_is_the_next_exam_at_the_standard_scale():
+    from stet.spec import CURRENT_SEASON
+
+    s1 = load_season()
+    assert s1.id == CURRENT_SEASON == "s1" and s1.official_scale == "standard" and "heldout_exam" not in s1.raw
     assert s1.exam_sources == ["knowledge", "reading", "reasoning", "code", "agents", "writing", "conversation"]
     assert s1.raw["exam"]["generator_version"] == gen.VERSION and s1.raw["exam"]["more"] == gen.MORE
-    assert len(s1.digest) == 64 and s1.digest != s0.digest
+    assert len(s1.digest) == 64 and s1.digest == load_season("s1").digest
     # the tokenizer and the facts its knowledge items ask are what the season says
     import hashlib
     from importlib import resources
@@ -27,12 +28,6 @@ def test_season_one_is_the_next_exam_at_the_standard_scale():
     assert hashlib.sha256(tok).hexdigest() == s1.raw["tokenizer"]["sha256"]
     facts = resources.files("stet.newexam").joinpath("data", s1.raw["exam"]["facts"]["file"]).read_bytes()
     assert hashlib.sha256(facts).hexdigest() == s1.raw["exam"]["facts"]["sha256"]
-
-
-def test_season_one_keeps_nothing_out_of_the_corpus_for_its_exam():
-    s1 = load_season("s1")
-    assert len(data.exam_keys(s1)) == 0
-    assert not data.contains_exam_text("The committee met on a rainy Tuesday and agreed, after much argument, to postpone the vote.", s1)
 
 
 def test_a_practice_rounds_exam_is_generated_from_its_seed():
@@ -67,7 +62,6 @@ def test_an_official_rounds_exam_is_the_one_posted_and_nothing_else():
     assert data.round_exam(rnd, s1.scale("standard")) == items
     # a copy that is not the round's is refused, and removed so that it is fetched again
     path.write_bytes(zstandard.ZstdCompressor().compress(raw.replace(b'"cont": " ', b'"cont": "  ', 1)))
-    data._exam_cache.clear()
     with pytest.raises(data.ExamNotReady):
         data.round_exam(rnd, s1.scale("standard"))
     assert not path.exists()
@@ -92,7 +86,6 @@ def test_a_grade_on_the_next_exam_reports_every_items_score(monkeypatch):
     items = [Item(kind="answer", corner="arith/x", fmt="math", lang="en", source="gen:arith", ctx="1 + 1 =", cont=" 2")] * 3
     stats = types.SimpleNamespace(out_docs=1, out_bytes=1, ink_tokens=0, ink_budget=1, tokens_one_pass=1, passes=1.0,
                                   to_dict=lambda corpus: {"script_sha256": "ab" * 32})
-    monkeypatch.setattr(grading, "heldout_exam", lambda rnd, scale: None)
     monkeypatch.setattr(grading, "train", lambda *a: (None, {"tokens": 9, "curve": []}))
     monkeypatch.setattr(grading, "materialize", lambda *a: ([], stats))
     monkeypatch.setattr(grading, "file_sha256", lambda path, limit: "ab" * 32)

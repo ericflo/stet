@@ -1,4 +1,4 @@
-"""Pool shards, the exam pack, and the on-disk corpus a curator reads.
+"""Pool shards, the on-disk corpus a curator reads, and a round's exam.
 
 Corpus layout (language-agnostic, mmap-friendly):
 
@@ -28,7 +28,7 @@ from pathlib import Path
 import numpy as np
 import zstandard
 
-from .spec import HARNESS_VERSION, Round, Scale, Season, Shard
+from .spec import HARNESS_VERSION, Round, Scale, Shard
 
 USER_AGENT = f"stet/{HARNESS_VERSION}"
 DEFAULT_API = "https://api.stetrun.com"
@@ -59,15 +59,13 @@ def api_base() -> str:
 CACHE_DAYS = 14
 SWEEP_EVERY = 6 * 3600  # a sweep costs a few hundred stat calls: not on every job
 SET_ASIDE_FOR = 3 * 3600  # seconds a set-aside round is kept: longer than any job that could be reading it
-# What the cache holds, by the directory it is in, largest users first. The exam is the
-# season's and every run needs it, so it is not swept; `stet clean` removes it with the rest.
+# What the cache holds, by the directory it is in, largest users first.
 CACHE_KINDS = (
     ("rounds", "built rounds"),
     ("pool", "downloaded crawl files"),
     ("assets", "curators' model files"),
     ("verify", "a verifier's working files"),
     ("scripts", "edit scripts"),
-    ("exam", "the exam"),
     ("upgrade-env", "what an upgrade left"),
 )
 
@@ -514,18 +512,11 @@ class Corpus:
         return int(self.idx[-1])
 
 
-# --- keeping the exam out of the corpus --------------------------------------------------------
+# --- finding text again ---------------------------------------------------------------------------
 #
-# The exam is public (verifiers need it), so the corpus must not contain it. The rule: take
-# every sentence of every exam passage in the season's pack, normalise it (lowercase, runs of
-# whitespace collapsed) and keep its first `key_bytes` bytes as a key. A document that contains
-# any key anywhere in its own normalised text is dropped.
-#
-# Matching anywhere, rather than at the document's own sentence boundaries, matters: web pages
-# run menus and headings straight into prose, and a curator that trims them would otherwise
-# uncover exam text the filter had missed. It also gives curators a guarantee: no piece copied
-# from a corpus document can ever contain a key, so only text a curator writes or joins
-# together has to be checked again.
+# Normalised text (lowercase, runs of whitespace collapsed), its sentence openings as keys of
+# `key_bytes` bytes, and a rolling hash that finds a key anywhere in a document. The next exam
+# uses them to drop fresh items that a round's corpus already holds (newexam/decontam.py).
 
 SENTENCE_END = re.compile(r"(?<=[.!?]) ")
 _HASH_P = 0x9E3779B97F4A7C15  # odd, so it has an inverse modulo 2**64
@@ -571,84 +562,28 @@ def sentence_starts(text: str, key_bytes: int, min_letters: int):
             yield key
 
 
-_exam_keys: dict[str, np.ndarray] = {}
-
-
-def keys_array(keys, key_bytes: int) -> np.ndarray:
-    keys = sorted(set(keys))
-    if not keys:
-        return np.empty(0, dtype=np.uint64)
-    return np.unique(np.concatenate([window_hashes(k, key_bytes) for k in keys]))
-
-
-def exam_keys(season: Season) -> np.ndarray:
-    """Sorted hashes of the keys of every exam passage in the season's pack, both halves. A
-    season whose exam is made after the draw has no passages to keep out of the corpus: its
-    fresh text did not exist yet, and its other items are generated."""
-    if season.exam_kind != "pack":
-        return np.zeros(0, dtype=np.uint64)
-    if season.id not in _exam_keys:
-        cfg = season.raw["decontam"]
-        k, need = int(cfg["key_bytes"]), int(cfg["min_letters"])
-        cached = cache_dir() / "exam" / f"keys-{season.raw['exam']['sha256'][:16]}-{k}-{need}.npy"
-        if cached.exists() and not os.environ.get("STET_EXAM_PACK"):
-            _exam_keys[season.id] = np.load(cached)
-        else:
-            keys: set[bytes] = set()
-            for split in ("practice", "official"):
-                for items in load_exam_pool(season, split).values():
-                    for it in items:
-                        keys.update(sentence_starts(it["text"], k, need))
-            arr = keys_array(keys, k)
-            if not os.environ.get("STET_EXAM_PACK"):
-                tmp = cached.with_name(cached.name + f".tmp{os.getpid()}.npy")
-                try:
-                    np.save(tmp, arr)
-                    tmp.replace(cached)
-                finally:
-                    tmp.unlink(missing_ok=True)
-            _exam_keys[season.id] = arr
-    return _exam_keys[season.id]
-
-
-def contains_exam_text(text: str, season: Season, keys: np.ndarray | None = None) -> bool:
-    keys = exam_keys(season) if keys is None else keys
-    if not len(keys):
-        return False
-    h = window_hashes(normalise(text), int(season.raw["decontam"]["key_bytes"]))
-    if not len(h):
-        return False
-    pos = np.searchsorted(keys, h)
-    pos[pos == len(keys)] = 0
-    return bool((keys[pos] == h).any())
-
-
 def build_corpus(rnd: Round, scale: Scale, dest: Path, quiet: bool = False) -> Path:
     """Materialise a round's corpus. Deterministic: same round and scale, same bytes.
 
-    Three things happen to the pool files on the way in, and nothing else:
+    Two things happen to the pool files on the way in, and nothing else:
 
-      - any document that contains the opening of a sentence of any exam passage is dropped;
       - documents longer than the season's cap are cut at it;
       - the documents are written in a seeded shuffle of their arrival order.
 
-    None of it depends on which exam passages this round will use.
+    Nothing depends on the round's exam, which is made after the draw.
     """
     tmp = dest.with_name(dest.name + f".tmp{os.getpid()}")
     # What an earlier build or download left when it was killed, here and among the pool files.
     sweep_stale(dest.parent, dest.name + ".tmp*")
-    for d in (cache_dir() / "pool", cache_dir() / "pool" / "wet", cache_dir() / "exam"):
+    for d in (cache_dir() / "pool", cache_dir() / "pool" / "wet"):
         sweep_stale(d, "*.part*")
-    sweep_stale(cache_dir() / "exam", "keys-*.tmp*")
     shutil.rmtree(tmp, ignore_errors=True)
     tmp.mkdir(parents=True)
     try:
         season = rnd.season
         max_doc = season.max_doc_bytes
-        banned = exam_keys(season)
         offsets = [0]
         urls: list[str] = []
-        dropped = 0
         kind = rnd.pool_cfg["kind"]
         shards = round_shards(rnd, scale, quiet)
         with open(tmp / "arrival.bin", "wb") as out:
@@ -663,9 +598,6 @@ def build_corpus(rnd: Round, scale: Scale, dest: Path, quiet: bool = False) -> P
                     raise OSError(f"{shard.path} is damaged ({e}); it has been removed from the cache, run again") from None
                 for url, text in docs:
                     if not text.strip():
-                        continue
-                    if contains_exam_text(text, season, banned):
-                        dropped += 1
                         continue
                     b = text.encode("utf-8", errors="replace")
                     if len(b) > max_doc:
@@ -697,9 +629,7 @@ def build_corpus(rnd: Round, scale: Scale, dest: Path, quiet: bool = False) -> P
             "sha256": h.hexdigest(),
             "pool": kind,
             "shards": [s.path for s in shards],
-            "decontaminated_docs": dropped,
             "order": "seeded shuffle",
-            "decontam": dict(season.raw["decontam"]),
         }
         (tmp / "meta.json").write_text(json.dumps(meta, indent=1))
         if (dest / "meta.json").exists():
@@ -752,95 +682,9 @@ def prune_verified(rnd: Round, keep: int = 3) -> int:
 
 # --- exam ---------------------------------------------------------------------------------
 
-_exam_cache: dict[tuple[str, str], dict[str, list[dict]]] = {}
-
-
-def exam_pack_path(season: Season, quiet: bool = False) -> Path:
-    cfg = season.raw["exam"]
-    override = os.environ.get("STET_EXAM_PACK")
-    if override:
-        return Path(override)
-    return fetch(list(cfg["urls"]), cfg["sha256"], cache_dir() / "exam" / cfg["file"], "exam pack", quiet, max_bytes=512 << 20)
-
-
-def _read_pool(path: Path, sources: list[str], split: str) -> dict[str, list[dict]]:
-    pool: dict[str, list[dict]] = {s: [] for s in sources}
-    with open(path, "rb") as f:
-        reader = zstandard.ZstdDecompressor().stream_reader(f)
-        for line in io.TextIOWrapper(reader, encoding="utf-8"):
-            it = json.loads(line)
-            if it["split"] == split and it["source"] in pool:
-                pool[it["source"]].append(it)
-    return pool
-
-
-def load_exam_pool(season: Season, split: str) -> dict[str, list[dict]]:
-    """All exam passages for a split, by source, in pack order."""
-    key = (season.id, split)
-    if key not in _exam_cache:
-        _exam_cache[key] = _read_pool(exam_pack_path(season), season.exam_sources, split)
-    return _exam_cache[key]
-
-
-_heldout_pack: dict[str, Path | None] = {}
-
-
-class HeldoutError(RuntimeError):
-    """The held-out pack on this machine is not the one the season committed to."""
-
-
-def heldout_pack_file(season: Season) -> Path:
-    """Where this machine's copy of the held-out exam goes, whether or not it is there."""
-    from .keys import config_dir
-
-    return Path(os.environ.get("STET_HELDOUT_EXAM") or config_dir() / f"heldout-{season.id}.jsonl.zst")
-
-
-def heldout_pack_path(season: Season) -> Path | None:
-    """The season's held-out exam, if this machine has it. Until the season closes, only the organisers' machines do.
-
-    It has to be the file the season file commits to. Anything else is refused out loud:
-    results on another pack would be worth nothing on the day the real one is published.
-    """
-    want = (season.raw.get("heldout_exam") or {}).get("sha256")
-    if not want:
-        return None
-    if season.id not in _heldout_pack:
-        path = heldout_pack_file(season)
-        if not path.is_file():
-            _heldout_pack[season.id] = None
-        elif _sha256_file(path) != want:
-            raise HeldoutError(
-                f"{path} is not the held-out exam that season {season.id} committed to "
-                f"(its sha256 should be {want}). Put the right file there, or move this one away to go without."
-            )
-        else:
-            _heldout_pack[season.id] = path
-    return _heldout_pack[season.id]
-
-
-def heldout_exam(rnd: Round, scale: Scale) -> dict[str, list[dict]] | None:
-    """An official round's draw from the held-out exam: same sources, same sizes, other documents.
-
-    None on every machine that does not hold the pack, which is every machine but the organisers'.
-    """
-    if rnd.kind != "official":
-        return None
-    path = heldout_pack_path(rnd.season)
-    if path is None:
-        return None
-    key = (rnd.season.id, "heldout:" + rnd.split)
-    if key not in _exam_cache:
-        _exam_cache[key] = _read_pool(path, rnd.season.exam_sources, rnd.split)
-    return {src: [items[i] for i in rnd.exam_indices(scale, src, len(items))] for src, items in _exam_cache[key].items()}
-
-
 def round_exam(rnd: Round, scale: Scale):
-    """The round's exam: a pack season's passages by source, or the next exam's items (a list)."""
-    if rnd.season.exam_kind == "next":
-        return next_exam(rnd)
-    pool = load_exam_pool(rnd.season, rnd.split)
-    return {src: [items[i] for i in rnd.exam_indices(scale, src, len(items))] for src, items in pool.items()}
+    """The round's exam: the next exam's items (stet.newexam), in order."""
+    return next_exam(rnd)
 
 
 class ExamNotReady(RuntimeError):
@@ -894,15 +738,9 @@ def next_exam(rnd: Round):
 
 
 def exam_digest(exam) -> str:
-    if isinstance(exam, list):  # the next exam's items
-        from .newexam.items import digest
+    from .newexam.items import digest
 
-        return digest(exam)
-    h = hashlib.sha256()
-    for src in sorted(exam):
-        for it in exam[src]:
-            h.update(it["id"].encode())
-    return h.hexdigest()
+    return digest(exam)
 
 
 def round_dir(rnd: Round, scale: Scale) -> Path:
@@ -953,6 +791,6 @@ def corpus(rnd: Round, scale: Scale, quiet: bool = False) -> Corpus:
     return Corpus(dest)
 
 
-def materialize(rnd: Round, scale: Scale, quiet: bool = False) -> tuple[Corpus, dict[str, list[dict]]]:
-    """Corpus and exam for a round."""
+def materialize(rnd: Round, scale: Scale, quiet: bool = False):
+    """Corpus and exam (its items) for a round."""
     return corpus(rnd, scale, quiet), round_exam(rnd, scale)

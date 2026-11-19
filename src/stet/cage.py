@@ -456,20 +456,17 @@ def available() -> tuple[bool, str]:
         return False, "the container sandbox needs Landlock's network rules (Linux 6.7 or newer, with Landlock on), to keep the curator off this machine's other ports"
     import sysconfig
 
-    from .data import heldout_pack_file
     from .keys import config_dir
-    from .spec import load_season
 
     # The curator runs this Python, with these packages: its user has to reach them.
     for need in {sys.executable, sys.base_prefix, sysconfig.get_paths()["purelib"], str(Path(__file__).parent)}:
         if (where := _blocked(Path(need))) is not None:
             return False, (f"the curator's user cannot reach {need} (it stops at {where}). Install stet where any user can read it, "
                            "outside /root: UV_TOOL_DIR=/opt/stet/tools UV_PYTHON_INSTALL_DIR=/opt/stet/python before the installer")  # fmt: skip
-    # And must not reach what is this machine's: its key, its cache, the held-out exam.
+    # And must not reach what is this machine's: its key and its cache (a round's exam is kept there).
     from .data import cache_dir
 
-    for what, path in (("the key", config_dir() / "key.json"), ("the config directory", config_dir()), ("the cache", cache_dir()),
-                       ("the held-out exam", heldout_pack_file(load_season()))):  # fmt: skip
+    for what, path in (("the key", config_dir() / "key.json"), ("the config directory", config_dir()), ("the cache", cache_dir())):
         if path.exists() and _blocked(path) is None:
             return False, f"the curator's user could read {what} ({path}): keep it under a directory only root may enter, such as /root"
     for d in (EDITOR, CORPUS, ASSETS, OUT, SCRATCH):

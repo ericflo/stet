@@ -1,11 +1,14 @@
 """Gain and the data-efficiency multiplier.
 
-Gain is measured directly: baseline exam loss minus the curator's, same round, same initial
-weights. Gain, in nats, is what ranks curators.
+Gain is measured directly: how much better the curator's student does on the exam than the
+unedited corpus's, same round, same initial weights. Gain, in bits per byte, is what ranks
+curators.
 
 The multiplier is a translation for humans: "how many times more unedited data would the
-student have needed to do this well?" It is read off a reference curve of baseline loss
-against training tokens, measured once per season and published with it. It is never
+student have needed to do this well?" It is read off a reference curve of the unedited
+student's exam score, as a loss (lower is better: minus the score), against training tokens,
+measured once per season and published with it. Until a season's curve is measured there is
+no multiplier. It is never
 extrapolated: beyond the end of the measured curve it is reported as "more than" the last
 measured point.
 """
@@ -18,7 +21,7 @@ from .spec import Season
 
 
 def reference_curve(season: Season, kind: str, scale: str) -> list[tuple[float, float]] | None:
-    """[(multiple of the budget, mean baseline exam loss), ...] sorted by multiple."""
+    """[(multiple of the budget, the unedited student's exam score as a loss), ...] sorted by multiple."""
     pts = (season.raw.get("reference_curves") or {}).get(f"{kind}/{scale}")
     return sorted((float(m), float(v)) for m, v in pts) if pts else None
 

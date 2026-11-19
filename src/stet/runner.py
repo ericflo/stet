@@ -285,7 +285,7 @@ def task_info(rnd: Round, scale: Scale, time_limit: float, machine: dict | None 
             "vocab_size": season.vocab_size,
             **season.train_cfg,
         },
-        "exam_sources": season.exam_sources,
+        "exam_pillars": season.exam_sources,
         "script_limits": dict(season.raw["script"]),
     }
 
@@ -352,16 +352,14 @@ def node_dir(binds: list[tuple[str, str]] | None = None) -> str | None:
 def _exposed(season, shown: list[str]) -> str:
     """What the curator would be able to see that it must not, or "" if nothing.
 
-    Belt and braces. The cache holds the exam pack; the config directory holds this
-    machine's key and, on the organisers' machine, the held-out exam and what it has said so far. All of
-    it lives under the home directory by default, which is never mounted. But STET_CACHE,
-    STET_CONFIG and STET_HELDOUT_EXAM can point anywhere, and a link can lead anywhere, so
+    Belt and braces. The cache holds the rounds' exams once they are made; the config directory
+    holds this machine's key. Both live under the home directory by default, which is never
+    mounted. But STET_CACHE and STET_CONFIG can point anywhere, and a link can lead anywhere, so
     each is checked where it really is against every directory the sandbox mounts.
     """
-    from .data import heldout_pack_file
     from .keys import config_dir
 
-    private = {"the cache": cache_dir(), "the config directory": config_dir(), "the held-out exam": heldout_pack_file(season)}
+    private = {"the cache": cache_dir(), "the config directory": config_dir()}
     for d in list(SYSTEM_DIRS) + [link for link in USR_LINKS if os.path.isdir(link)] + shown:
         d = os.path.realpath(d)
         for what, path in private.items():

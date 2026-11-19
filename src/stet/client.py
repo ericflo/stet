@@ -195,7 +195,7 @@ def fetch_round(season, index: int):
         sys.stderr.write(f"stet: round {clean(d['round']['id'], 40)} has not been drawn yet\n")
         sys.exit(1)
     rnd = round_from_api(season, d["round"])
-    if season.exam_kind == "next" and rnd.exam_digest and d["round"].get("status") == "settled":
+    if rnd.exam_digest and d["round"].get("status") == "settled":
         fetch_public_exam(rnd)
     return rnd
 
@@ -357,33 +357,6 @@ def cmd_draw(args):
     sys.stderr.write(f"{clean(rd['id'])}: {clean(rd['status'])}, draw {ago(rd['draw_at'])}\n")
 
 
-def cmd_publish(args):
-    """Anchors only: publish a download, which is how a season's exam pack reaches the server."""
-    from .spec import load_season
-
-    path = Path(args.file)
-    blob = path.read_bytes()
-    name = args.name or path.name
-    season = load_season(args.season)
-    if hashlib.sha256(blob).hexdigest() == (season.raw.get("heldout_exam") or {}).get("sha256") and args.close_season != season.id:
-        # The one file that must not be published by a slip of the hand: a command from
-        # the shell's history, a tab completion in the config directory, an agent following
-        # the runbook a season early.
-        sys.stderr.write(
-            f"stet: {path.name} is season {season.id}'s held-out exam. Nothing was sent.\n"
-            "  Publishing it cannot be taken back: from that moment anyone can fit a curator to it, and the season's\n"
-            "  final table is worth only what was measured before. It is published once, when the season has closed\n"
-            f"  and its last round has settled:  stet publish {args.file} --close-season {season.id}\n"
-        )
-        sys.exit(1)
-    sys.stderr.write(f"publishing {name} ({len(blob) / 1e6:.1f} MB) ...\n")
-    r = request("PUT", f"/api/v1/admin/files/{name}", blob, key=need_key(), timeout=1800)
-    if r["sha256"] != hashlib.sha256(blob).hexdigest():
-        sys.stderr.write("stet: the server stored something else; publish it again\n")
-        sys.exit(1)
-    print(f"{clean(r['url'])}\nsha256 {r['sha256']}")
-
-
 # --- entries --------------------------------------------------------------------------------
 
 
@@ -460,14 +433,9 @@ def cmd_submit(args):
 
 
 def cmd_status(args):
-    from .spec import load_season
 
     key = need_key()
     me = request("GET", "/api/v1/me", key=key)
-    try:
-        check_heldout_pin(load_season(), request("GET", "/api/v1/season"))
-    except ApiError:
-        pass
     if args.json:
         json.dump(me, sys.stdout, indent=1)
         sys.stdout.write("\n")
@@ -596,17 +564,12 @@ def slim_result(result: dict, base: dict) -> dict:
             "valid", "invalid_reason", "hardware", "started_at", "finished_at")  # fmt: skip
     out = {k: result.get(k) for k in keys}
     out["round"] = result["round"]["id"]
-    if base["exam"].get("kind") == "next":  # every item's score: the server makes the round's score from them
-        out["baseline"] = {"kind": "next", "mean": base["exam"]["mean"], "item_scores": base["exam"]["item_scores"]}
-    else:
-        out["baseline"] = {"loss": base["exam"]["loss"], "by_source": {k: v["loss"] for k, v in base["exam"]["by_source"].items()}}
+    # Every item's score: the server makes the round's score from them.
+    out["baseline"] = {"kind": "next", "mean": base["exam"]["mean"], "item_scores": base["exam"]["item_scores"]}
     if result.get("valid"):
         s = result["script"]
         out["script"] = {k: s.get(k) for k in ("script_sha256", "tokens_sha256", "script_lines", "out_docs", "out_bytes", "src_docs", "ink_tokens", "ink_frac", "kept_doc_frac", "kept_byte_frac", "tokens_one_pass", "passes", "truncated")}
-        if result["exam"].get("kind") == "next":
-            out["exam"] = {"kind": "next", "mean": result["exam"]["mean"], "item_scores": result["exam"]["item_scores"]}
-        else:
-            out["exam"] = {"loss": result["exam"]["loss"], "by_source": {k: v["loss"] for k, v in result["exam"]["by_source"].items()}}
+        out["exam"] = {"kind": "next", "mean": result["exam"]["mean"], "item_scores": result["exam"]["item_scores"]}
         t = result["train"]
         out["train"] = {k: t.get(k) for k in ("seconds", "tokens_per_second", "final_train_loss", "init_sha256", "precision")}
         out["train"]["curve"] = t["curve"][:: max(1, len(t["curve"]) // 60)]
@@ -870,8 +833,7 @@ def _grade_job(job, season, scale, device, key, out, work: Path) -> tuple[dict, 
     from .pipeline import baseline, grade_round
 
     rnd = _job_round(season, job, out)
-    if season.exam_kind == "next":
-        fetch_exam(rnd, key)
+    fetch_exam(rnd, key)
     base = baseline(rnd, scale, device, progress=out.progress("baseline"), log=lambda m: out.line("", out.dim("baseline " + m)))
     want = job["script"]["sha256"]
     limit = int(season.raw["script"]["max_bytes"])
@@ -887,19 +849,6 @@ def _grade_job(job, season, scale, device, key, out, work: Path) -> tuple[dict, 
     path = work / "script.jsonl"
     path.write_bytes(raw)
     result = grade_round(rnd, scale, path, device=device, progress=out.progress("training"), log=lambda m: out.line("", out.dim(m)))
-    if result.get("heldout"):
-        try:
-            keep_heldout(season, job, result, base)
-        except OSError as e:
-            # The grade is finished and it is the public one that is owed to the server.
-            # What the held-out exam said about it is lost; the entry shows as a gap in the
-            # season's held-out table, with the command that measures it again.
-            out.line("", out.bad(
-                f"WHAT THE HELD-OUT EXAM SAID ABOUT THIS GRADE COULD NOT BE WRITTEN DOWN ({heldout_log(season)}: {clean(e.strerror or e)}). "
-                "The public grade is reported as usual. Put the record right before the next job."
-            ))  # fmt: skip
-    elif result.get("heldout_error"):
-        out.line("", out.bad(f"The held-out exam could not be sat for this grade ({clean(result['heldout_error'])}). The public grade is reported as usual."))
     return result, base
 
 
@@ -932,151 +881,6 @@ def fetch_exam(rnd, key) -> Path:
 
 
 EXAM_LIMIT = 64 << 20  # bytes of a round's posted exam, compressed
-
-
-def heldout_log(season) -> Path:
-    return config_dir() / "heldout" / f"{season.id}.jsonl"
-
-
-def keep_heldout(season, job: dict, result: dict, base: dict) -> None:
-    """This machine's record of what the held-out exam said about one official grade.
-
-    It is appended here and reported to nobody: `slim_result` names every field a grader
-    sends, and this is not one of them. The file is published, with the exam, when the
-    season closes.
-
-    Until then held-out numbers are in two places on the machine that holds the pack, both private to its
-    account: this file (mode 0600, in the config directory), and each official round's
-    cached baseline (~/.cache/stet/rounds/<round>/<scale>/baseline-*.json, mode 0600),
-    which holds the unedited corpus's held-out loss beside its public one. `stet run`,
-    `stet score` and `stet baseline` leave them out of what they print and save unless
-    `--heldout` is given.
-    """
-    held, held_base = result["heldout"], base.get("heldout") or {}
-    editor = job.get("editor") if isinstance(job.get("editor"), dict) else {}
-    line = {
-        "at": int(time.time()),
-        "round": result["round"]["id"],
-        "scale": result["scale"],
-        "harness": result["harness"],
-        "editor": {k: editor.get(k) for k in ("id", "owner", "name", "version")},
-        "script_sha256": result.get("script_sha256"),
-        "exam_sha256": result.get("exam_sha256"),
-        "heldout_exam_sha256": held.get("exam_sha256"),
-        "public": {"loss": result["exam"]["loss"], "baseline": base["exam"]["loss"]},
-        "heldout": {
-            "loss": held["loss"],
-            "baseline": held_base.get("loss"),
-            "by_source": {k: v["loss"] for k, v in held["by_source"].items()},
-            "baseline_by_source": {k: v["loss"] for k, v in (held_base.get("by_source") or {}).items()},
-        },
-    }
-    path = heldout_log(season)
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
-    with os.fdopen(fd, "a", encoding="utf-8") as f:
-        f.write(json.dumps(line, sort_keys=True) + "\n")
-        f.flush()
-        os.fsync(f.fileno())
-
-
-# --- the held-out exam, between the organisers' machines ----------------------------------
-#
-# Every organisers' machine needs the pack, and the pack is a secret until the season
-# closes. So it is never carried about by hand and never sent anywhere readable: a machine
-# that holds it seals a copy to each other organisers' key (sealed.py), the server keeps
-# those copies without being able to open them, and a machine that lacks the pack fetches
-# the one sealed to it.
-
-SEALED_LIMIT_BYTES = 128 << 20
-_shared_at = 0.0
-
-
-def share_heldout(key: Key, season, out, every: float = 300.0) -> int:
-    """Seal this machine's copy of the held-out exam to every organisers' key that has none.
-    Returns how many were sent. Does nothing where there is no pack, and never raises."""
-    global _shared_at
-    from . import sealed
-    from .data import HeldoutError, heldout_pack_path
-
-    now = time.time()
-    if every and now - _shared_at < every:
-        return 0
-    _shared_at = now
-    try:
-        path = heldout_pack_path(season)
-        if path is None:
-            return 0
-        listed = request("GET", "/api/v1/admin/sealed", key=key)
-        wanted = [o for o in listed.get("organisers") or [] if isinstance(o, dict) and not o.get("sealed") and SHA256_RE.fullmatch(str(o.get("key") or ""))]
-        if not wanted:
-            return 0
-        pack = path.read_bytes()
-        sent = 0
-        for o in wanted:
-            blob = sealed.seal(pack, bytes.fromhex(o["key"]))
-            request("PUT", f"/api/v1/admin/sealed/{o['key']}", blob, key=key, timeout=1800)
-            who = clean(str(o.get("handle") or "")) or o["key"][:12]
-            out.line("", out.dim(f"shared the held-out exam with {who}: a copy only that machine's key opens"))
-            sent += 1
-        return sent
-    except (ApiError, OSError, ValueError, HeldoutError):
-        return 0  # not an organisers' key, or the server is away: asked again later
-
-
-def fetch_heldout(key: Key, season, out, wait: bool = True, pause: float = 30.0) -> bool:
-    """Fetch the copy of the held-out exam sealed to this machine's key and put it in place.
-
-    Waits for one to be there if `wait`: another organisers' machine has to seal it, and
-    does so within a few minutes of this key becoming an organisers'. True once the pack
-    is in place.
-    """
-    from . import data, sealed
-
-    want = (season.raw.get("heldout_exam") or {}).get("sha256")
-    dest = data.heldout_pack_file(season)
-    said = False
-    while True:
-        try:
-            blob = request("GET", "/api/v1/admin/sealed/mine", key=key, raw=True, timeout=1800, limit=SEALED_LIMIT_BYTES)
-            pack = key.unseal(blob)
-            if hashlib.sha256(pack).hexdigest() != want:
-                raise sealed.SealError("what was sealed to this machine is not the held-out exam the season committed to")
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            tmp = dest.with_name(dest.name + f".tmp{os.getpid()}")
-            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with os.fdopen(fd, "wb") as f:
-                f.write(pack)
-            tmp.replace(dest)
-            data._heldout_pack.pop(season.id, None)
-            out.line("", out.dim(f"fetched the season's held-out exam, sealed to this machine's key, into {dest}"))
-            return True
-        except sealed.SealError as e:
-            sys.stderr.write(f"stet: {e}\n")
-            return False
-        except (ApiError, OSError) as e:
-            # Not an organisers' key after all, or a stet the server no longer talks to:
-            # waiting would not change either, and starting again might.
-            if not wait or (isinstance(e, ApiError) and e.status in (400, 401, 403, 426)):
-                return False
-            if not said:
-                said = True
-                why = clean(str(e)) if isinstance(e, ApiError) and e.status != 404 else "no copy is sealed to this machine's key yet"
-                out.line("", f"This machine does not hold the season's held-out exam ({why}).")
-                out.line("", out.dim("Another organisers' machine shares it within a few minutes. Waiting; Ctrl-C to stop."))
-            time.sleep(pause)
-            pause = min(300.0, pause * 1.5)  # and if nobody is there to share it, the server is not asked every half minute for days
-
-
-def heldout_log_trouble(season) -> str:
-    """Why the held-out record cannot be added to, or "" if it can. Makes the file if it is not there."""
-    path = heldout_log(season)
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        os.close(os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600))
-    except OSError as e:
-        return clean(e.strerror or e)
-    return ""
 
 
 MACHINE_ERRNOS = (errno.ENOSPC, errno.EDQUOT, errno.EROFS, errno.EIO, errno.EMFILE, errno.ENFILE, errno.ENOMEM)
@@ -1152,69 +956,6 @@ def _forget_round(job: dict, season, scale) -> None:
     except Exception:
         return
     data.set_aside(data.round_dir(rnd, scale))  # not deleted: another verifier here may be reading it
-
-
-def _pins() -> Path:
-    return config_dir() / "pins.json"
-
-
-def check_heldout_pin(season, served: dict | None = None, warn=None, now: float | None = None) -> None:
-    """Hold the organisers to the held-out exam they committed to.
-
-    The season file names the held-out exam by its hash, and the rules promise that hash
-    will not change while the season runs. A promise is only as good as somebody's record
-    of it, so the first hash this machine is shown is written down here, and anything that
-    later says otherwise (a new release's season file, or the server) is said out loud.
-    It is a warning, never a refusal: a volunteer's machine has no way to know which of the
-    two is the true one, only that the organisers have gone back on their word.
-    """
-    warn = warn or (lambda message: sys.stderr.write(message + "\n"))
-    now = time.time() if now is None else now
-    said = {
-        "this copy of stet": (season.raw.get("heldout_exam") or {}).get("sha256"),
-        f"the server at {api_base()}": (served or {}).get("heldout_exam_sha256") if (served or {}).get("season", season.id) == season.id else None,
-    }
-    path = _pins()
-    try:
-        pins = json.loads(path.read_text())
-        pinned = pins["heldout_exam"].get(season.id) if isinstance(pins.get("heldout_exam"), dict) else None
-    except FileNotFoundError:
-        pins, pinned = {}, None
-    except (OSError, ValueError, AttributeError, KeyError, TypeError):
-        # A record that cannot be read is replaced, and that is said too: it is the one
-        # file a changed commitment would have to get past.
-        warn(f"stet: {path} could not be read; starting a new record of the season's commitments")
-        pins, pinned = {}, None
-    if not isinstance(pinned, dict) or not SHA256_RE.fullmatch(str(pinned.get("sha256"))):
-        pinned = None
-    for source, sha in said.items():
-        if not isinstance(sha, str) or not SHA256_RE.fullmatch(sha):
-            if pinned and source == "this copy of stet":
-                warn(
-                    f"WARNING: season {season.id} committed to a held-out exam, {pinned['sha256']}, and {source} no longer names one.\n"
-                    "  The organisers promised it would not change while the season runs. Please report this."
-                )
-            continue
-        if pinned is None:
-            pinned = {"sha256": sha, "seen_at": int(now), "from": source}
-            if not isinstance(pins.get("heldout_exam"), dict):
-                pins["heldout_exam"] = {}
-            pins["heldout_exam"][season.id] = pinned
-            path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = path.with_name(path.name + f".tmp{os.getpid()}")
-            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with os.fdopen(fd, "w") as f:
-                json.dump(pins, f, indent=1)
-            tmp.replace(path)
-        elif pinned["sha256"] != sha:
-            when = time.strftime("%d %B %Y", time.gmtime(int(pinned.get("seen_at") or 0)))
-            warn(
-                f"WARNING: season {season.id}'s held-out exam has changed.\n"
-                f"  On {when} this machine was shown its hash as {pinned['sha256']} (by {clean(pinned.get('from'), 80)}).\n"
-                f"  Now {source} says it is {sha}.\n"
-                "  The organisers committed to one held-out exam for the whole season and promised it would not change.\n"
-                f"  Please report this. (This machine's record is {path}.)"
-            )
 
 
 def claim_key():
@@ -1376,8 +1117,7 @@ def cmd_verify(args):
     # An organisers' machine runs as a service: stopped, it is started again and given the
     # job it held. Anyone else's hands its job back when it stops, however it is stopped.
     # So does a machine the organisers rent (a worker): what stops it is usually its pod
-    # being ended, and it is not started again to pick the job up. Nor is it given the
-    # held-out exam, which stays on the organisers' own machines.
+    # being ended, and it is not started again to pick the job up.
     me = request("GET", "/api/v1/me", key=key)
     me = me if isinstance(me, dict) else {}
     account = me.get("account") or {}
@@ -1394,7 +1134,6 @@ def cmd_verify(args):
 
 def _verify(args, organiser: bool = False, me: dict | None = None):
     from .cli import Out
-    from .data import heldout_pack_file, heldout_pack_path
     from .runner import bwrap_available, remove_tree, sandbox_selftest, scope_available
     from .spec import load_season
     from .train import hardware_info, pick_device
@@ -1409,7 +1148,6 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
 
     upgrader = upgrade.Upgrader(args, season.raw.get("environment") or {}, say=lambda m: out.line("", out.dim(m)), fetch_info=lambda: request("GET", "/api/v1/season"))
     upgrader.consider(info if isinstance(info, dict) else {})
-    check_heldout_pin(season, info, warn=lambda message: out.line("", out.bad(message)))
     scale = season.scale(info["scale"])
     device = pick_device(args.device)
     hw = hardware_info(device)
@@ -1476,41 +1214,11 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
     out.line("", out.bold(f"stet verify · {key.handle} · {hw.get('gpu', device.type)}"))
     out.line("", out.dim("Grading edit scripts with the fixed trainer. No one else's code runs on this machine." if not args.edits
                          else "Running entrants' curators in the sandbox, and grading."))  # fmt: skip
-    try:
-        wants_pack = organiser and (season.raw.get("heldout_exam") or {}).get("sha256") and os.environ.get("STET_DEV") != "1"
-        if wants_pack and heldout_pack_path(season) is None:
-            # Not carried here by hand: fetched, sealed to this machine's key.
-            fetch_heldout(key, season, out, wait=not (args.once or args.max_jobs))
-        if heldout_pack_path(season) is not None:
-            trouble = heldout_log_trouble(season)
-            if trouble:
-                sys.stderr.write(
-                    f"stet: this machine holds the season's held-out exam, and what it says about each official grade is added to\n"
-                    f"  {heldout_log(season)}\n"
-                    f"  That file cannot be written ({trouble}). Every grade made without it is a gap in the season's final table,\n"
-                    "  so this verifier will not start until it can be.\n"
-                )
-                sys.exit(1)
-            out.line("", out.dim(f"This machine holds the season's held-out exam. What it says is kept in {heldout_log(season)} and sent nowhere."))
-            if organiser:
-                share_heldout(key, season, out, every=0)
-        elif wants_pack:
-            sys.stderr.write(
-                f"stet: season {season.id} has a held-out exam, and the organisers' machine sits every student it grades on it.\n"
-                f"  This machine does not hold it, and no copy sealed to its key could be fetched. It belongs at\n"
-                f"  {heldout_pack_file(season)} (or wherever STET_HELDOUT_EXAM points). Every official grade made without\n"
-                "  it is a gap in the season's final table that has to be measured again, so this machine will not start\n"
-                "  until the pack is in place. Another organisers' machine that is running shares it by itself.\n"
-            )
-            sys.exit(1)
-    except RuntimeError as e:  # a pack that is not the committed one: nothing is graded until that is put right
-        sys.stderr.write(f"stet: {e}\n")
-        sys.exit(1)
     hello = {"harness": __version__, "season": season.id, "season_digest": season.digest, "hardware": hw, "edits": bool(args.edits), "sandbox": sandbox}
-    # The organisers' machines, rented ones too, train the next exam's students when nothing
-    # official is waiting (newexam/farm.py). It ranks nothing, and never comes before a job.
-    shadow_ok = bool(((me or {}).get("account") or {}).get("anchor"))
-    shadow_rest = 0.0  # after a shadow task fails, a while before the next is asked for
+    # The organisers' machines, rented ones too, train students for the organisers when nothing
+    # official is waiting (newexam/farm.py: finals, measurements). Never before a job.
+    farm_ok = bool(((me or {}).get("account") or {}).get("anchor"))
+    farm_rest = 0.0  # after a farm task fails, a while before the next is asked for
     done = failures = waits = 0
     refused: dict[str, int] = {}  # round id -> how many times this machine and the server disagreed about it
     tries: dict[int, int] = {}  # job id -> how many times it has failed on this machine
@@ -1622,18 +1330,18 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
                 if args.once or (args.max_jobs and done >= args.max_jobs):
                     out.line("", clean(r.get("message") or "No work right now."))
                     return
-                if shadow_ok and holding is None and time.time() >= shadow_rest:
+                if farm_ok and holding is None and time.time() >= farm_rest:
                     from .newexam import farm
 
                     try:
-                        if farm.turn(season, key, device, log=lambda m: out.line("shadow", m)):
+                        if farm.turn(season, key, device, log=lambda m: out.line("farm", m)):
                             idle, idle_for = False, 0
                             continue
                     except KeyboardInterrupt:
                         raise
-                    except BaseException as e:  # the next exam ranks nothing: what goes wrong there stops nothing official
-                        shadow_rest = time.time() + 600
-                        out.line("", out.bad(f"a student for the next exam could not be trained ({clean(str(e) or type(e).__name__, 300)}); handed back"))
+                    except BaseException as e:  # the farm ranks nothing: what goes wrong there stops nothing official
+                        farm_rest = time.time() + 600
+                        out.line("", out.bad(f"a student for the organisers could not be trained ({clean(str(e) or type(e).__name__, 300)}); handed back"))
                 # Only here, where the server has just said there is no job for us, so that
                 # stopping for want of work never leaves one held.
                 if idle_limit and idle_for >= idle_limit:
@@ -1647,8 +1355,6 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
                 except (TypeError, ValueError):
                     pause = 60
                 tidy(out)
-                if organiser:
-                    share_heldout(key, season, out)  # a machine that has just become an organisers' gets its copy
                 pause = min(300, max(5, pause))
                 time.sleep(pause)
                 idle_for += pause
@@ -1906,13 +1612,6 @@ def add_commands(sub) -> None:
 
     p = sub.add_parser("draw")  # organisers only; not listed in the help
     p.set_defaults(fn=cmd_draw)
-
-    p = sub.add_parser("publish")  # organisers only; not listed in the help
-    p.add_argument("file")
-    p.add_argument("--name", help="the name to publish it under (default: the file's own)")
-    p.add_argument("--close-season", metavar="SEASON", help="needed to publish a season's held-out exam: the id of the season being closed")
-    p.add_argument("--season", default=CURRENT_SEASON, help=argparse.SUPPRESS)
-    p.set_defaults(fn=cmd_publish)
 
     p = sub.add_parser("verify", help="lend your GPU: grade edit scripts for the leaderboard, and (with --edits) run curators")
     p.add_argument("--once", action="store_true", help="do one job and exit")

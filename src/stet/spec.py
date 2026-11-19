@@ -2,8 +2,10 @@
 
 A *season* freezes everything that must not move while scores are being compared: the
 pools, the exam, the student, the budgets and the rules. A *round* is one draw from a
-season: a corpus and an exam, both derived from a single seed. Everything here is a pure
-function of public inputs, so any two parties derive byte-identical rounds.
+season: a corpus, the student's initial weights and the exam's generated questions, all
+derived from a single seed (the exam's fresh text is what was published after the draw).
+Everything here is a pure function of public inputs, so any two parties derive
+byte-identical rounds.
 """
 
 from __future__ import annotations
@@ -16,10 +18,10 @@ from dataclasses import dataclass, field
 from functools import cache
 from importlib import resources
 
-HARNESS_VERSION = "0.3.5"
+HARNESS_VERSION = "0.4.0"
 # The season the competition is in: what every command means when it names none. Changing it is
 # the switch from one season to the next (see docs/OPERATING.md).
-CURRENT_SEASON = "s0"
+CURRENT_SEASON = "s1"
 
 
 @dataclass(frozen=True)
@@ -33,7 +35,6 @@ class Scale:
     ctx: int
     batch_size: int
     lr: float
-    exam_items_per_source: int
     edit_seconds: int
 
     @property
@@ -49,7 +50,7 @@ class Shard:
     url: str
 
 
-POLICY_KEYS = ("reference", "reference_curves", "tolerance", "noise", "record", "heldout_exam", "runner")
+POLICY_KEYS = ("reference", "reference_curves", "tolerance", "noise", "record", "runner")
 
 
 @dataclass(frozen=True)
@@ -70,8 +71,8 @@ class Season:
         rules = {k: v for k, v in self.raw.items() if k not in POLICY_KEYS}
         h = hashlib.sha256(json.dumps(rules, sort_keys=True, separators=(",", ":")).encode())
         h.update(resources.files("stet.seasons").joinpath(self.raw["tokenizer"]["file"]).read_bytes())
-        if self.exam_kind == "next":  # the facts its knowledge items ask
-            h.update(resources.files("stet.newexam").joinpath("data", self.raw["exam"]["facts"]["file"]).read_bytes())
+        # the facts its knowledge items ask
+        h.update(resources.files("stet.newexam").joinpath("data", self.raw["exam"]["facts"]["file"]).read_bytes())
         for s in self.pool("gym"):
             h.update(bytes.fromhex(s.sha256))
         return h.hexdigest()
@@ -101,17 +102,9 @@ class Season:
         return int(self.raw["tokenizer"]["eot"])
 
     @property
-    def exam_kind(self) -> str:
-        """"pack": season 0's exam, passages of six collections in a published pack. "next": the
-        next exam (stet.newexam), made after each round's draw."""
-        return str(self.raw["exam"].get("kind", "pack"))
-
-    @property
     def exam_sources(self) -> list[str]:
-        """What the exam reports on: a pack's collections, or the next exam's pillars."""
-        if self.exam_kind == "next":
-            return list(self.raw["exam"]["pillars"])
-        return list(self.raw["exam"]["sources"])
+        """What the exam reports on: its pillars."""
+        return list(self.raw["exam"]["pillars"])
 
     @property
     def official_scale(self) -> str:
@@ -221,11 +214,6 @@ class Round:
         return f"{self.season.id}-{self.kind[0]}{self.index:05d}"
 
     @property
-    def split(self) -> str:
-        """Which half of the exam pack this round is examined on."""
-        return "official" if self.kind == "official" else "practice"
-
-    @property
     def pool_cfg(self) -> dict:
         """Where this round's corpus comes from.
 
@@ -240,10 +228,6 @@ class Round:
     def shard_indices(self, scale: Scale, n_shards: int) -> list[int]:
         k = scale.corpus_units * int(self.pool_cfg["shards_per_unit"])
         return sample_without_replacement(self.seed, "shard", n_shards, k)
-
-    def exam_indices(self, scale: Scale, source: str, n_available: int) -> list[int]:
-        k = min(scale.exam_items_per_source, n_available)
-        return sorted(sample_without_replacement(self.seed, f"exam:{source}", n_available, k))
 
     def doc_order(self, n_docs: int) -> list[int]:
         """The order the corpus's documents are written in: a seeded shuffle of arrival order.
@@ -322,5 +306,5 @@ def round_from_description(season: Season, d: dict) -> Round:
 def parse_round_id(round_id: str) -> tuple[str, str, int]:
     m = ROUND_ID_RE.fullmatch(round_id)
     if not m:
-        raise ValueError(f"{round_id[:40]!r} is not a round id (they look like s0-o00012)")
+        raise ValueError(f"{round_id[:40]!r} is not a round id (they look like s1-o00012)")
     return m.group(1), {"p": "practice", "g": "gym", "o": "official"}[m.group(2)], int(m.group(3))

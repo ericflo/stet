@@ -126,4 +126,4 @@ def test_items_the_corpus_already_holds_are_found(tmp_path):
                text="An entirely different passage that nobody has published before this very moment, about otters.")
     answer = Item(kind="answer", corner="fresh/y/en/-/answer", fmt="dialogue", lang="en", source="t",
                   ctx=quoted + " Why?", cont=" Nothing in the corpus says this, not even close to it, as far as anyone knows.")
-    assert seen([copied, new, answer], corpus, load_season("s0")) == {0}  # an answer is checked on its answer, not its question
+    assert seen([copied, new, answer], corpus, load_season("s1")) == {0}  # an answer is checked on its answer, not its question

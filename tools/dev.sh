@@ -20,13 +20,9 @@ if [ ! -x "$DDB" ]; then
   exit 1
 fi
 
-# The CLI wheel the site's installer hands out, and the exam pack the CLI downloads.
+# The CLI wheel the site's installer hands out.
 rm -f "$DEV"/files/stet_cli-*.whl
 (cd "$ROOT" && uv build --wheel -o "$DEV/files" >/dev/null 2>&1)
-EXAM="${STET_CACHE:-$HOME/.cache/stet}/exam/exam-s0.jsonl.zst"
-if [ -f "$EXAM" ] && [ ! -f "$DEV/data/blobs/files/exam-s0.jsonl.zst" ]; then
-  cp "$EXAM" "$DEV/data/blobs/files/"
-fi
 
 "$DDB" serve --listen "127.0.0.1:$DDB_PORT" --data "$DEV/ddb" --key-file "$DEV/ddb.key" &
 DDB_PID=$!

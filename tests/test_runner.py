@@ -10,7 +10,7 @@ from stet.runner import bwrap_available, collect_script, run_editor, scope_avail
 from stet.script import ScriptError
 from stet.spec import load_season, practice_round
 
-SEASON = load_season("s0")
+SEASON = load_season("s1")
 SCALE = dataclasses.replace(SEASON.scale("nano"), train_tokens=512, ctx=64, batch_size=4)
 RND = practice_round(SEASON, 0)
 
@@ -167,10 +167,7 @@ def test_nothing_private_is_mounted_where_an_editor_could_read_it(corpus, tmp_pa
     from stet import runner
 
     shown = [str(tmp_path / "site-packages"), str(tmp_path / "corpus")]  # directories the sandbox would mount
-    assert runner._exposed(SEASON, shown) == ""  # the cache, the key and the held-out exam are all elsewhere
-    monkeypatch.setenv("STET_HELDOUT_EXAM", str(tmp_path / "site-packages" / "data" / "heldout-s0.jsonl.zst"))
-    assert "the held-out exam" in runner._exposed(SEASON, shown)
-    monkeypatch.delenv("STET_HELDOUT_EXAM")
+    assert runner._exposed(SEASON, shown) == ""  # the cache and the key are elsewhere
     monkeypatch.setenv("STET_CONFIG", "/usr/share/stet")
     assert "the config directory" in runner._exposed(SEASON, shown)
     # A link is followed to where it leads.

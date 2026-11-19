@@ -4,7 +4,7 @@
   "rules_version": 4,
   "tokenizer": {
     "file": "s1-vocab.tiktoken",
-    "sha256": "0fb2766b08fd47bf8b3285d57b181c7c234b6a78a1c7f854faf12d605b124da1",
+    "sha256": "7df001af5a4b8eef7f371de7a47427afe95fdc285fa42703fe220e259928e19f",
     "vocab_size": 8192,
     "eot": 8191
   },
@@ -24,7 +24,7 @@
     },
     "gym": {
       "kind": "dclm",
-      "manifest": "s0-pool-gym.txt",
+      "manifest": "s1-pool-gym.txt",
       "base_url": "https://huggingface.co/datasets/mlfoundations/dclm-pool-400m-1x/resolve/f20ae752116ce7b4ab15d31e1e40b094229bf911/",
       "shards_per_unit": 1,
       "about": "DCLM-Pool: raw Common Crawl up to 2022, main-content text extraction. Pinned by sha256. The gym: a fixed, different dataset to train agents on."
@@ -38,7 +38,6 @@
     }
   },
   "exam": {
-    "kind": "next",
     "about": "Seven capabilities, each counting the same, measured as the likelihood of fresh human writing published after the draw and of items generated from the round's seed. See docs/research/exam-first-principles.md.",
     "generator_version": 6,
     "per_corner": 2,
@@ -47,7 +46,7 @@
       "context": 2
     },
     "facts": {
-      "file": "facts-s0.jsonl.zst",
+      "file": "facts-s1.jsonl.zst",
       "sha256": "ac1c27bc3461c8ccd6c5b5a5814072b79bc834f7694ba35da14021493edd08e5"
     },
     "fresh": {
@@ -80,7 +79,6 @@
       "ctx": 256,
       "batch_size": 16,
       "lr": 0.002,
-      "exam_items_per_source": 200,
       "edit_seconds": 120
     },
     "micro": {
@@ -92,7 +90,6 @@
       "ctx": 512,
       "batch_size": 16,
       "lr": 0.0015,
-      "exam_items_per_source": 600,
       "edit_seconds": 600
     },
     "standard": {
@@ -104,7 +101,6 @@
       "ctx": 512,
       "batch_size": 32,
       "lr": 0.001,
-      "exam_items_per_source": 800,
       "edit_seconds": 1200
     },
     "large": {
@@ -116,7 +112,6 @@
       "ctx": 512,
       "batch_size": 32,
       "lr": 0.0008,
-      "exam_items_per_source": 800,
       "edit_seconds": 4800
     }
   },

@@ -11,7 +11,7 @@ from stet import cli
 
 class Args:
     round = "0"
-    season = "s0"
+    season = "s1"
     scale = None
     device = "cpu"
     rounds = 1
@@ -80,9 +80,9 @@ def _score_setup(monkeypatch, tmp_path, entries, blobs):
         return blobs[path.rsplit("/", 1)[1]]
 
     monkeypatch.setattr(client, "request", request)
-    official = types.SimpleNamespace(kind="official", id="s0-o00001")
-    practice = types.SimpleNamespace(kind="practice", id="s0-p00000")
-    return load_season("s0"), official, practice, raw, sha, packed, asked
+    official = types.SimpleNamespace(kind="official", id="s1-o00001")
+    practice = types.SimpleNamespace(kind="practice", id="s1-p00000")
+    return load_season("s1"), official, practice, raw, sha, packed, asked
 
 
 def test_score_takes_a_file_a_compressed_file_a_hash_or_an_entry(monkeypatch, tmp_path):
@@ -105,7 +105,7 @@ def test_score_takes_a_file_a_compressed_file_a_hash_or_an_entry(monkeypatch, tm
     assert cli.script_file(sha.upper(), season, official).read_bytes() == raw
     assert cli.script_file("tidy", season, official).read_bytes() == raw
     assert cli.script_file("stet/tidy", season, official).read_bytes() == raw
-    assert asked.count("/api/v1/rounds/s0-o00001") == 2
+    assert asked.count("/api/v1/rounds/s1-o00001") == 2
 
 
 def test_score_refuses_a_script_that_is_not_the_one_asked_for(monkeypatch, tmp_path, capsys):
@@ -173,7 +173,7 @@ def test_score_tells_two_versions_of_one_editor_apart(monkeypatch, tmp_path, cap
             cli.script_file(ref, season, official)
         err = capsys.readouterr().err
         # It names each with its version, and the command that picks one.
-        assert "more than one entry called 'prose'" in err and "alice/prose@v1, alice/prose@v2" in err and "stet score alice/prose@v1 --round s0-o00001" in err
+        assert "more than one entry called 'prose'" in err and "alice/prose@v1, alice/prose@v2" in err and "stet score alice/prose@v1 --round s1-o00001" in err
         assert ("bob/prose@v7" in err) == (ref == "prose") and "carol" not in err
     with pytest.raises(SystemExit):
         cli.script_file("alice/prose@v9", season, official)
@@ -187,73 +187,29 @@ def test_score_tells_two_versions_of_one_editor_apart(monkeypatch, tmp_path, cap
 def test_the_gain_line_says_what_its_noise_figure_is(capsys):
     from stet.spec import load_season
 
-    season = load_season("s0")
+    season = load_season("s1")
     result = {
-        "round": {"id": "s0-p00000", "kind": "practice"}, "scale": "nano", "valid": True,
+        "round": {"id": "s1-p00000", "kind": "practice"}, "scale": "nano", "valid": True,
         "script": {"out_docs": 1, "src_docs": 1, "kept_doc_frac": 0.1, "out_bytes": 10, "ink_tokens": 0, "ink_budget": 8000, "passes": 1.0, "truncated": False},
         "train": {"tokens": 10, "seconds": 1.0, "tokens_per_second": 10, "final_train_loss": 3.0},
-        "exam": {"loss": 5.5, "by_source": {"news": {"loss": 5.5}}},
+        "exam": {"kind": "next", "items": 3, "mean": -2.5, "item_scores": [-2.4, -2.5, -2.6]}, "gain": 0.1, "pillars": {"reasoning": 0.1},
     }  # fmt: skip
-    cli.report(cli.Out(), result, {"exam": {"loss": 6.4}}, season)
+    cli.report(cli.Out(), result, {"exam": {"mean": -2.6}}, season)
     err = capsys.readouterr().err
-    # The same script graded twice on one machine gives the same number: this is not that.
-    assert "reordering the same documents moves this by about ±0.011" in err and "treat differences under 0.03 as noise" in err and "run-to-run" not in err
+    # The same script graded twice on one machine gives the same number: this is what training again does.
+    assert "+0.1000 bits per byte" in err and "reasoning +0.100" in err and "training again moves this by about" not in err
+    cli.report(cli.Out(), {**result, "scale": "standard"}, {"exam": {"mean": -2.6}}, season)
+    assert "training again moves this by about ±0.013" in capsys.readouterr().err
 
 
 # --- what a run writes down -------------------------------------------------------------------
-
-
-def test_what_the_held_out_exam_said_is_left_out_of_what_a_run_saves_and_prints(monkeypatch, tmp_path, capsys):
-    """On a machine with the held-out pack, a replay of an official round sits it. The
-    numbers are for the anchor's record, not for the project directory or the terminal."""
-    import json
-
-    held = {"loss": 4.61234, "by_source": {"news": {"loss": 4.61234}}, "exam_sha256": "ee" * 32}
-    result = {"valid": True, "round": {"id": "s0-o00007", "kind": "official"}, "scale": "micro", "exam": {"loss": 4.4}, "heldout": held, "train": {"curve": [[1, 2.0]], "tokens": 5}}
-    base = {"valid": True, "exam": {"loss": 5.3, "by_source": {"news": {"loss": 5.3}}}, "heldout": {"loss": 5.56789, "by_source": {"news": {"loss": 5.56789}}}}
-
-    def run_round(bundle, entry, rnd, scale, work, **kw):
-        return json.loads(json.dumps(result))
-
-    monkeypatch.setitem(sys.modules, "stet.pipeline", types.SimpleNamespace(run_round=run_round, baseline=lambda *a, **k: json.loads(json.dumps(base))))
-    monkeypatch.setitem(sys.modules, "stet.train", types.SimpleNamespace(pick_device=lambda d: types.SimpleNamespace(type="cpu")))
-    monkeypatch.setattr(cli, "need_torch", lambda: None)
-    monkeypatch.setattr(cli, "report", lambda *a, **k: None)
-    monkeypatch.setattr(cli, "resolve_round", lambda args, offset=0: (None, types.SimpleNamespace(name="micro"), types.SimpleNamespace(id="s0-o00007", kind="official")))
-    p = make(tmp_path, {})
-
-    def run(**over):
-        args = Args(p.path)
-        args.sandbox, args.no_baseline, args.json, args.quiet = False, False, True, False
-        for k, v in over.items():
-            setattr(args, k, v)
-        with pytest.raises(SystemExit):
-            cli.cmd_run(args)
-        saved = max((p.path / ".stet" / "runs").glob("*/result.json"), key=lambda f: f.stat().st_mtime_ns).read_text()
-        io = capsys.readouterr()
-        return saved, io.out, io.err
-
-    for text in run():
-        assert "heldout" not in text and "held-out" not in text and "4.61234" not in text and "5.56789" not in text and "ee" * 32 not in text
-    saved, printed, err = run(heldout=True)  # asked for by name: how a published line is checked after the season
-    assert json.loads(saved)["heldout"]["loss"] == 4.61234 and json.loads(printed)["heldout"]["baseline"] == 5.56789
-    assert "held-out" in err and "4.6123" in err
-
-    # The baseline command prints the unedited corpus's result, which on an anchor has a held-out part.
-    class BaseArgs:
-        device, json, quiet, heldout = "cpu", True, True, False
-
-    monkeypatch.setattr(cli, "resolve_round", lambda args, offset=0: (None, types.SimpleNamespace(name="micro"), types.SimpleNamespace(id="s0-o00007", kind="official")))
-    cli.cmd_baseline(BaseArgs())
-    io = capsys.readouterr()
-    assert "5.56789" not in io.out + io.err and json.loads(io.out)["exam"]["loss"] == 5.3
 
 
 def test_an_invalid_run_has_a_gain_of_nothing_written_down(monkeypatch):
     out = cli.Out(quiet=True)
     result = {"valid": False, "invalid_reason": "the curator produced no script (timeout)"}
     assert cli._with_baseline(result, None, None, None, out, skip=True) is None and result["gain"] == 0.0
-    monkeypatch.setitem(sys.modules, "stet.pipeline", types.SimpleNamespace(baseline=lambda *a, **k: {"exam": {"loss": 5.3, "by_source": {}}}))
+    monkeypatch.setitem(sys.modules, "stet.pipeline", types.SimpleNamespace(baseline=lambda *a, **k: {"exam": {"mean": -5.3, "item_scores": [-5.3]}}))
     result = {"valid": False, "invalid_reason": "ink over budget"}
     cli._with_baseline(result, None, None, None, out, skip=False)
-    assert result["gain"] == 0.0 and result["baseline"]["loss"] == 5.3
+    assert result["gain"] == 0.0 and result["baseline"]["mean"] == -5.3
