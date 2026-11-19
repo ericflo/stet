@@ -26,11 +26,19 @@ def added_cap(lang: str) -> int:
     return max(ADDED_MIN, math.ceil(2 * TARGET * SHARES.get(lang, 0.0) / 100))
 
 
-def harvest_window(seed: bytes, start: int, end: int, dest: Path, langs: list[str] | None = None, se_sites: int | None = SE_SITES,
+def harvest_window(seed: bytes, start: int, end: int, dest: Path, langs: list[str] | None = None, se_sites: int | None = 0,
                    log=print) -> tuple[dict, str]:
-    """Harvest [start, end) into a snapshot at dest; returns (metadata, sha256)."""
+    """Harvest [start, end) into a snapshot at dest; returns (metadata, sha256).
+
+    StackExchange is left out unless se_sites says otherwise: without a key it allows a few
+    hundred requests a day from an address, and no source here may need a key. A source that
+    fails is left out of the snapshot, and the rest is kept."""
     t0 = time.time()
-    docs = wikipedia.harvest(start, end, langs, log=log)
+    docs = []
+    try:
+        docs += wikipedia.harvest(start, end, langs, log=log)
+    except Exception as e:
+        log(f"  wikipedia: {type(e).__name__}: {e}")
     added = []
     for lang in sorted(SHARES) if langs is None else langs:
         try:
@@ -47,13 +55,19 @@ def harvest_window(seed: bytes, start: int, end: int, dest: Path, langs: list[st
             log(f"  wikipedia-talk {lang}: {type(e).__name__}: {e}")
     log(f"  wikipedia-talk: {len(talk)} comments on talk pages")
     docs += talk
-    sites = stackexchange.sites()
-    names = sorted(sites)
-    if se_sites is not None and se_sites < len(names):
-        major = [n for n in SE_MAJOR if n in sites]
-        rest = [n for n in names if n not in major]
-        names = sorted(major + Rng(seed, "fresh/stackexchange-sites").sample(rest, max(0, se_sites - len(major))))
-    docs += stackexchange.harvest(start, end, {k: sites[k] for k in names}, log=log)
+    names: list[str] = []
+    if se_sites != 0:
+        try:
+            sites = stackexchange.sites()
+            names = sorted(sites)
+            if se_sites is not None and se_sites < len(names):
+                major = [n for n in SE_MAJOR if n in sites][:se_sites]
+                rest = [n for n in names if n not in major]
+                names = sorted(major + Rng(seed, "fresh/stackexchange-sites").sample(rest, max(0, se_sites - len(major))))
+            docs += stackexchange.harvest(start, end, {k: sites[k] for k in names}, log=log)
+        except Exception as e:
+            log(f"  stackexchange: {type(e).__name__}: {e}; left out")
+            names = []
     meta = {"window": [start, end], "harvested_at": int(time.time()), "sources": {"wikipedia": langs or "all",
             "stackexchange": names}, "documents": len(docs)}
     sha = write_snapshot(docs, dest, meta)
