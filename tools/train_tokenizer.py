@@ -6,10 +6,16 @@ softmax would be most of its compute and most of its parameters. A small vocabul
 the budget into the transformer, and gets the student past bag-of-words statistics on a
 budget volunteers can afford.
 
-Trained on an equal mix (by bytes) of raw pool text and practice-split exam passages, so it
-is not alien to either. Output is tiktoken's format: `base64(token) rank` per line.
+Season 0's was trained on an equal mix (by bytes) of raw pool text and practice-split exam
+passages, so it is not alien to either. Those passages are English, which leant it to English:
+other languages cost the student more tokens for the same text. A season whose exam weighs every
+language by its share of the crawl trains on the crawl alone (--pool-only): a sample of the
+documents of practice round 0's files at the micro scale, spread across each file, so the
+crawl's own mix of languages decides the vocabulary. Output is tiktoken's format:
+`base64(token) rank` per line.
 
     python tools/train_tokenizer.py --vocab 8192 --out src/stet/seasons/s0-vocab.tiktoken
+    python tools/train_tokenizer.py --vocab 8192 --pool-only --mb 100 --out src/stet/seasons/s1-vocab.tiktoken
 """
 import argparse
 import base64
@@ -44,9 +50,11 @@ def main():
     ap.add_argument("--vocab", type=int, default=8192, help="total vocabulary including <|endoftext|>")
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--mb", type=int, default=50, help="MB of text from each of the two halves")
+    ap.add_argument("--pool-only", action="store_true", help="train on the crawl alone, in its own mix of languages")
+    ap.add_argument("--season", default="s0", help="the season whose practice pool is read")
     args = ap.parse_args()
 
-    season = load_season("s0")
+    season = load_season(args.season)
     limit = args.mb * 1_000_000
 
     def exam_texts():
@@ -62,6 +70,9 @@ def main():
                     return
 
     def pool_texts():
+        if season.raw["pools"]["practice"]["kind"] == "cc-wet":
+            yield from crawl_texts()
+            return
         n = 0
         shard = season.pool("practice")[0]  # the first practice shard, in full, all languages
         for _, text in data.read_shard(data.shard_path(shard)):
@@ -71,8 +82,30 @@ def main():
             if n >= limit:
                 return
 
+    def crawl_texts():
+        """Practice round 0's files at the micro scale: an equal part of the budget from each,
+        every k-th document so that each file's part is spread across it (a crawl file comes
+        grouped by host)."""
+        from stet.spec import practice_round
+
+        rnd = practice_round(season, 0)
+        shards = data.round_shards(rnd, season.scale("micro"))
+        each = limit // len(shards)
+        for shard in shards:
+            path = data.shard_path(shard)
+            docs = [t[:20000] for _, t in data.read_wet(path)]
+            sizes = [len(t.encode("utf-8", "replace")) for t in docs]
+            step = max(1, round(sum(sizes) / each))
+            n = 0
+            for t, b in zip(docs[::step], sizes[::step], strict=True):
+                n += b
+                yield t
+                if n >= each:
+                    break
+
     def both():
-        yield from exam_texts()
+        if not args.pool_only:
+            yield from exam_texts()
         yield from pool_texts()
 
     tok = Tokenizer(models.BPE())
