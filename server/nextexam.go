@@ -142,8 +142,8 @@ func (a *App) checkTable(table []ItemInfo, shares map[string]float64) error {
 			return fail(400, "item %d of the table is not one the season scores", i)
 		}
 	}
-	if len(shares) > 1000 {
-		return fail(400, "too many languages")
+	if len(shares) == 0 || len(shares) > 1000 {
+		return fail(400, "the exam names no languages, or too many: a round's share of each is part of its score")
 	}
 	for k, v := range shares {
 		if len(k) > 32 || !finite(v) || v < 0 || v > 100 {
