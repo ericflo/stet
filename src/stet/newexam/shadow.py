@@ -82,7 +82,8 @@ def summarize(rnd: Round, scale: Scale, items: list[Item], base: dict, students:
         if r["valid"]:
             row["season_gain"] = round(base["exam_loss"] - r["exam_loss"], 5)
             agg = round_score(items, gains(r["item_scores"], base["item_scores"]), shares=shares)
-            row.update(next_score=round(agg["score"], 5), strata=agg["strata"], families=agg["families"])
+            row.update(next_score=round(agg["score"], 5), pillars={k: v["score"] for k, v in agg["pillars"].items()},
+                       strata=agg["strata"], families=agg["families"])
             for label in ("generated", "fresh"):
                 if agg[label]:
                     row[f"{label}_score"] = round(agg[label]["score"], 5)

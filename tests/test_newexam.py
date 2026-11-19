@@ -35,7 +35,7 @@ def test_rng_is_pinned_and_in_range():
 def test_a_seed_always_makes_the_same_exam():
     # Pinned: a change to any generator that changes what a seed produces must bump gen.VERSION
     # and this hash, on purpose.
-    assert digest(gen.generate(SEED)) == "1e5e30af39c087026adf7b1fa3099417ece7993f022b228ce92716d8d3dec862"
+    assert digest(gen.generate(SEED)) == "7093569d8ac52b277335a34b7e2766323b198e40bc9aa2f1f328a9a5c43ed16e"
     assert digest(gen.generate(SEED)) == digest(gen.generate(SEED))
     assert digest(gen.generate(b"other")) != digest(gen.generate(SEED))
 
@@ -44,7 +44,7 @@ def test_every_corner_makes_valid_items_of_its_own():
     corners = gen.all_corners()
     assert len(corners) == len(set(corners)) >= 300
     items = gen.generate(SEED, per_corner=3)
-    assert len(items) == 3 * len(corners)
+    assert len(items) == sum(3 * gen.MORE.get(f.NAME, 1) * len(f.corners()) for f in gen.FAMILIES)
     for it in items:
         assert it.corner in corners and it.source.startswith("gen:")
         if it.kind == "answer":
@@ -142,36 +142,58 @@ def _item(fmt, kind, corner, lang="en", source="gen:t"):
     return Item(kind="answer", corner=corner, fmt=fmt, lang=lang, source=source, ctx="Q:", cont=" A")
 
 
-def test_the_score_is_balanced_across_strata_and_rewards_breadth():
-    # 30 math answers and one grammar pair weigh the same
-    items = [_item("math", "answer", f"a/{i}") for i in range(30)] + [_item("prose", "pair", "g/0")]
+def test_pillars_count_the_same_and_breadth_wins():
+    # 30 arithmetic answers and one grammar pair: reasoning and writing, each half the score
+    items = [_item("math", "answer", f"arith/{i}") for i in range(30)] + [_item("prose", "pair", "grammar/0")]
     r = round_score(items, [0.1] * 30 + [0.5])
     assert r["score"] == pytest.approx((0.1 + 0.5) / 2)
-    assert set(r["strata"]) == {"math/answer", "prose/pair"}
+    assert set(r["pillars"]) == {"reasoning", "writing"} and set(r["strata"]) == {"math/answer", "prose/pair"}
     # a curator that gains hugely on two items and loses on the rest scores below one that gains a little everywhere
-    items = [_item("math", "answer", f"a/{i}") for i in range(40)]
+    items = [_item("math", "answer", f"arith/{i}") for i in range(40)]
     spiky = round_score(items, [5.0, 5.0] + [-0.02] * 38)["score"]
     broad = round_score(items, [0.05] * 40)["score"]
     assert broad > spiky
 
 
-def test_fresh_text_is_shared_among_languages_before_formats():
-    # A few English posts in formats nothing else has must not outweigh many passages in other
-    # languages: languages get their share of the corpus, formats are balanced inside each.
-    items = ([_item("prose", "passage", f"w/ru/{i}", lang="ru", source="wikipedia") for i in range(30)]
-             + [_item("prose", "passage", f"w/en/{i}", lang="en", source="wikipedia") for i in range(10)]
-             + [_item(fmt, "answer", f"se/{fmt}/{i}", lang="en", source="stackexchange") for fmt in ("code", "dialogue") for i in range(3)])
-    g = [-0.5] * 30 + [0.5] * 10 + [0.5] * 6
+def test_every_family_and_source_has_a_pillar():
+    from stet.newexam.aggregate import FAMILY_PILLAR, PILLARS, SOURCE_KIND, pillar_of
+    from stet.newexam.gen import FAMILIES
+
+    assert {f.NAME for f in FAMILIES} <= set(FAMILY_PILLAR) and set(FAMILY_PILLAR.values()) <= set(PILLARS)
+    for src in SOURCE_KIND:
+        assert pillar_of(_item("prose", "passage", "fresh/x", source=f"{src}:1"))[0] in PILLARS
+
+
+def test_inside_a_pillar_each_family_counts_the_same():
+    # 40 arithmetic items and 4 logic items: the two families weigh the same in reasoning
+    items = [_item("math", "answer", f"arith/{i}") for i in range(40)] + [_item("prose", "answer", f"logic/{i}") for i in range(4)]
+    r = round_score(items, [0.2] * 40 + [-0.2] * 4)
+    assert r["score"] == pytest.approx(0.0) and r["pillars"]["reasoning"]["parts"] == {"arith": 0.2, "logic": -0.2}
+
+
+def test_languages_count_by_the_corpus_inside_a_kind_of_writing():
+    # A few English discussions must not outweigh many passages in other languages, and each
+    # language counts by its share of the corpus.
+    items = ([_item("prose", "passage", f"fresh/wikipedia/ru/{i}", lang="ru", source="wikipedia:1") for i in range(30)]
+             + [_item("prose", "passage", f"fresh/wikipedia/en/{i}", lang="en", source="wikipedia:2") for i in range(10)])
+    g = [-0.5] * 30 + [0.5] * 10
     r = round_score(items, g, shares={"en": 60.0, "ru": 40.0})
     assert r["fresh"]["languages"]["ru"]["weight"] == pytest.approx(0.4)
-    assert r["fresh"]["score"] == pytest.approx(0.6 * 0.5 + 0.4 * -0.5)
-    assert r["generated"] is None and r["score"] == pytest.approx(r["fresh"]["score"])
-    # the same items, weighed by the corpus's languages: mostly Russian, so this curator loses
+    assert r["score"] == pytest.approx(0.6 * 0.5 + 0.4 * -0.5) and r["generated"] is None
+    assert set(r["pillars"]) == {"writing"} and r["pillars"]["writing"]["parts"] == {"reference": pytest.approx(0.1)}
+    # the same items, weighed by a corpus that is mostly Russian: this curator loses
     assert round_score(items, g, shares={"en": 20.0, "ru": 80.0})["score"] < 0
-    # generated and fresh count by how many items each has
-    both = items + [_item("math", "answer", f"a/{i}") for i in range(46)]
-    r2 = round_score(both, g + [0.0] * 46, shares={"en": 60.0, "ru": 40.0})
-    assert r2["score"] == pytest.approx(r["fresh"]["score"] / 2) and r2["generated"]["score"] == 0.0
+    # discussion is the conversation pillar, which counts as much as all writing together
+    talk = [_item("dialogue", "passage", f"fresh/wikipedia-talk/en/{i}", source="wikipedia-talk:3") for i in range(3)]
+    r2 = round_score(items + talk, g + [0.3] * 3, shares={"en": 60.0, "ru": 40.0})
+    assert r2["score"] == pytest.approx((0.1 + 0.3) / 2)
+
+
+def test_programming_languages_count_together():
+    items = [_item("code", "answer", f"prog/{i}", lang="code:python") for i in range(10)] + \
+        [_item("code", "answer", f"prog/l{i}", lang="code:lua") for i in range(2)]
+    r = round_score(items, [0.1] * 10 + [0.5] * 2)
+    assert r["score"] == pytest.approx((0.1 * 9 + 0.5) / 10)  # one pool, trimmed by one at each end
 
 
 def test_trimmed_mean_and_gains():
@@ -182,7 +204,7 @@ def test_trimmed_mean_and_gains():
 
 
 def test_slopes_put_gains_into_doublings():
-    items = [_item("math", "answer", f"a/{i}") for i in range(5)]
+    items = [_item("math", "answer", f"arith/{i}") for i in range(5)]
     r = round_score(items, [0.2] * 5, slopes={"math/answer": 0.1})
     assert r["score"] == pytest.approx(2.0) and r["units"] == "doublings"
 
@@ -258,7 +280,7 @@ def test_a_shadow_round_trains_once_per_script_and_scores_the_unedited_corpus_at
     shadow.shadow_round(rnd, scale, scripts, torch.device("cpu"), tmp_path / "out", per_corner=1, log=lambda m: None)
     assert len(trained) == 2  # resumed from what was kept
     kept = [json.loads(line) for line in (tmp_path / "out" / "items.jsonl").read_text().splitlines()]
-    assert len(kept) == s["items"] == len(gen.all_corners())
+    assert len(kept) == s["items"] == len(gen.generate(rnd.seed, per_corner=1))
     # a bigger exam is sat by the students already trained
     fresh = [Item(kind="passage", corner="fresh/wikipedia/en/Q5/article", fmt="prose", lang="en", source="wikipedia:en:1",
                   text="A person who was born in a town and later moved to a city, where they worked for many years. " * 4)]

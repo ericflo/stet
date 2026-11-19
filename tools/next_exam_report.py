@@ -61,6 +61,10 @@ def main():
         fs = r[n]["fresh"]["score"] if r[n]["fresh"] else float("nan")
         season = base[0]["exam_loss"] - students[n][0]["exam_loss"]
         print(f"{n:32s} {r[n]['score']:+8.4f} {gs:+8.4f} {fs:+8.4f} {season:+12.4f}")
+    pillars = sorted({p for n in names for p in r[n]["pillars"]})
+    print(f"\nby pillar (each counts the same in the score){'':4s}" + "".join(f"{n.split('/')[-1][:12]:>14s}" for n in names))
+    for p in pillars:
+        print(f"  {p:34s}" + "".join(f"{r[n]['pillars'][p]['score']:+14.4f}" for n in names))
     fams = sorted({it.family for it in items})
     print(f"\nby family (mean gain, bits per byte){'':6s}" + "".join(f"{n.split('/')[-1][:12]:>14s}" for n in names))
     for f in fams:

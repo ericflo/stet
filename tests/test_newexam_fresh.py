@@ -2,6 +2,7 @@
 
 import collections
 
+from stet.newexam.aggregate import kind_of
 from stet.newexam.fresh import Doc, html_text, read_snapshot, write_snapshot
 from stet.newexam.fresh.select import items_of, select
 from stet.newexam.fresh.wikipedia import added_lines, strip_wikitext
@@ -73,6 +74,32 @@ def test_selection_caps_corners_shares_languages_and_is_repeatable():
     langs = collections.Counter(it.lang for it in a)
     # English has 14 corners (7 topics x 2 kinds), so at most 28 items; a bulk-writing language gets its small share
     assert langs["en"] == 28 and langs["kaa"] <= 4 and langs["de"] > 0
+
+
+def test_other_sources_become_replies_or_writing():
+    reply = items_of(_doc(5, source="hackernews", topic="", question="Ask HN: what do you read?\n\n" + "a " * 2000, title="Ask HN"))
+    assert reply[0].kind == "answer" and reply[0].fmt == "dialogue" and reply[0].ctx.endswith("a\n\n") and len(reply[0].ctx) < 1600
+    assert reply[0].corner.startswith("fresh/hackernews/en/") and reply[0].corner.endswith("/reply")
+    import dataclasses
+
+    post = items_of(dataclasses.replace(_doc(6, source="bluesky", topic=""), title=""))
+    assert post[0].kind == "passage" and post[0].text.startswith("Document number 6") and post[0].corner.endswith("/text")
+
+
+def test_each_kind_of_writing_gets_its_part_and_sources_take_turns():
+    docs = [_doc(i, topic=f"Q{i}") for i in range(300)]  # reference: plenty
+    docs += [_doc(1000 + i, source="github", topic=f"r{i}", title=f"Issue {i}") for i in range(300)]  # technical: plenty
+    docs += [_doc(2000 + i, source="hackernews", topic="", question="Why?", title=f"Story {i}") for i in range(300)]
+    docs += [_doc(3000 + i, source="lemmy", topic=f"c{i}", question="Why?", title=f"Post {i}") for i in range(10)]
+    a = select(docs, b"seed", 90, per_corner=2)
+    by_kind = collections.Counter(kind_of(it) for it in a)
+    assert by_kind == {"reference": 30, "technical": 30, "discussion": 30}
+    # in discussion, Lemmy's ten replies all come in before Hacker News fills the rest
+    disc = collections.Counter(it.source.split(":")[0] for it in a if kind_of(it) == "discussion")
+    assert disc["lemmy"] == 10 and disc["hackernews"] == 20
+    # a kind that runs short gives what it leaves to the others
+    b = select(docs[:300] + docs[-10:], b"seed", 60, per_corner=2)
+    assert collections.Counter(kind_of(it) for it in b) == {"reference": 50, "discussion": 10}
 
 
 def test_snapshots_round_trip_with_a_stable_hash(tmp_path):

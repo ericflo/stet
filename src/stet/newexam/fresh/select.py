@@ -84,24 +84,56 @@ def items_of(doc: Doc) -> list[Item]:
                          ctx=f"Question: {doc.title}\n{_clip(doc.question, QUESTION_CHARS)}\n\nAnswer:", cont=" " + _clip(doc.text, ANSWER_CHARS))]
         return [Item(kind="passage", corner=f"{base}/question", fmt=fmt, lang=lang, source=src,
                      text=_clip(f"{doc.title}\n\n{doc.text}", PASSAGE_CHARS))]
-    return []
+    # Every other source: a reply given what it answers, or a piece of writing on its own. A source
+    # without topics of its own has its documents spread over buckets of their titles, so that
+    # the corner cap does not leave it a couple of items.
+    bucket = doc.topic or str(hash_title(doc.title or doc.id) % 64)
+    corner = f"fresh/{doc.source}/{lang}/{bucket}"
+    if doc.question:
+        fmt = "code" if _codeish(doc.text) else "dialogue"
+        head = f"{doc.title}\n\n" if doc.title else ""
+        return [Item(kind="answer", corner=f"{corner}/reply", fmt=fmt, lang=lang, source=src,
+                     ctx=f"{head}{_tail(doc.question, QUESTION_CHARS)}\n\n", cont=_clip(doc.text, ANSWER_CHARS))]
+    fmt = "code" if _codeish(doc.text) else "prose"
+    return [Item(kind="passage", corner=f"{corner}/text", fmt=fmt, lang=lang, source=src,
+                 text=_clip(f"{doc.title}\n\n{doc.text}" if doc.title else doc.text, PASSAGE_CHARS))]
 
 
-def select(docs: list[Doc], seed: bytes, n: int, per_corner: int = 2, shares: dict | None = None) -> list[Item]:
-    """About n items, at most per_corner from any corner, shared among languages by their share of
-    the web; a language without enough candidates gives its unused share to the others."""
-    shares = shares or SHARES
-    rng = Rng(seed, "fresh/select")
+def _tail(text: str, n: int) -> str:
+    """The last n characters or so, from a word boundary: what a reply answers is nearest the end."""
+    text = text.strip()
+    if len(text) <= n:
+        return text
+    cut = text.find(" ", len(text) - n)
+    return text[cut + 1 if 0 <= cut < len(text) - n // 2 else len(text) - n :]
+
+
+def _interleave(items: list[Item], rng) -> list[Item]:
+    """Items of one language in a seeded order that takes from each source in turn, so that a
+    source with many documents cannot fill a language's quota alone."""
+    by: dict[str, list[Item]] = defaultdict(list)
+    for it in items:
+        by[it.source.split(":", 1)[0]].append(it)
+    for src in sorted(by):
+        rng.child(src).shuffle(by[src])
+    order = sorted(by)
+    rng.shuffle(order)
+    out = []
+    for i in range(max(map(len, by.values()), default=0)):
+        out += [by[src][i] for src in order if i < len(by[src])]
+    return out
+
+
+def _select_kind(items: list[Item], rng, n: int, per_corner: int, shares: dict, used: dict[str, int]) -> list[Item]:
+    """About n items of one kind of writing, shared among languages by their share of the web; a
+    language without enough candidates gives its unused share to the others."""
     by_lang: dict[str, list[Item]] = defaultdict(list)
-    for d in sorted(docs, key=lambda d: (d.source, d.id)):
-        for it in items_of(d):
-            by_lang[it.lang].append(it)
+    for it in items:
+        by_lang[it.lang].append(it)
     for lang in sorted(by_lang):
-        rng.child(lang).shuffle(by_lang[lang])
+        by_lang[lang] = _interleave(by_lang[lang], rng.child(lang))
     weight = {lang: shares.get(lang, OTHER) for lang in by_lang}
     chosen: list[Item] = []
-    used: dict[str, int] = defaultdict(int)
-    taken: dict[str, int] = defaultdict(int)
     pos = {lang: 0 for lang in by_lang}
     want = n
     while want > 0 and weight:
@@ -116,7 +148,6 @@ def select(docs: list[Doc], seed: bytes, n: int, per_corner: int = 2, shares: di
                 if used[it.corner] < per_corner:
                     used[it.corner] += 1
                     chosen.append(it)
-                    taken[lang] += 1
                     q -= 1
                     got += 1
             if pos[lang] >= len(by_lang[lang]):
@@ -125,3 +156,29 @@ def select(docs: list[Doc], seed: bytes, n: int, per_corner: int = 2, shares: di
             break
         want -= got
     return chosen
+
+
+def select(docs: list[Doc], seed: bytes, n: int, per_corner: int = 2, shares: dict | None = None) -> list[Item]:
+    """About n items: each kind of writing an equal part (a kind without enough candidates gives
+    what it leaves to the others), languages inside each kind by their share of the web, sources
+    inside each language in turn, and at most per_corner from any corner."""
+    from ..aggregate import kind_of
+
+    shares = shares or SHARES
+    rng = Rng(seed, "fresh/select")
+    by_kind: dict[str, list[Item]] = defaultdict(list)
+    for d in sorted(docs, key=lambda d: (d.source, d.id)):
+        for it in items_of(d):
+            by_kind[kind_of(it)].append(it)
+    used: dict[str, int] = defaultdict(int)
+    chosen: dict[str, list[Item]] = {k: [] for k in by_kind}
+    left = sorted(by_kind)
+    while left and (want := n - sum(map(len, chosen.values()))) > 0:
+        part = max(1, want // len(left))
+        for k in list(left):
+            got = _select_kind([it for it in by_kind[k] if used[it.corner] < per_corner and it not in set(chosen[k])],
+                               rng.child(f"{k}/{len(chosen[k])}"), part, per_corner, shares, used)
+            chosen[k] += got
+            if len(got) < part:
+                left.remove(k)
+    return [it for k in sorted(chosen) for it in chosen[k]]
