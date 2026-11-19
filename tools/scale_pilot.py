@@ -161,12 +161,12 @@ def english_slice(out: Path, scale: str) -> dict[str, float]:
     from stet.newexam.items import digest
 
     tag = digest(items)[:12]
-    metas = {}
-    for m in d.glob("????????????????.json"):
+    metas, when = {}, {}
+    for m in d.glob("????????????????.json"):  # a curator run again has an older file under its name: the newest is its
         meta = json.loads(m.read_text())
         s = d / f"{m.stem}-{tag}.json"
-        if meta.get("valid") and s.exists():
-            metas[meta["name"]] = json.loads(s.read_text())
+        if meta.get("valid") and s.exists() and m.stat().st_mtime >= when.get(meta["name"], 0):
+            metas[meta["name"]], when[meta["name"]] = json.loads(s.read_text()), m.stat().st_mtime
     base = metas.pop("(unedited)")
     sub = [items[i] for i in keep]
     return {n: round_score(sub, [g for i, g in enumerate(gains(sc, base)) if i in set(keep)])["score"] for n, sc in metas.items()}

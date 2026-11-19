@@ -21,12 +21,12 @@ from stet.newexam.items import Item, digest
 def load(d: Path):
     items = [Item.from_dict(json.loads(line)) for line in (d / "items.jsonl").read_text().splitlines()]
     tag = digest(items)[:12]
-    students = {}
-    for meta_path in d.glob("????????????????.json"):
+    students, when = {}, {}
+    for meta_path in d.glob("????????????????.json"):  # a curator run again leaves its older file: the newest is its
         meta = json.loads(meta_path.read_text())
         scores = d / f"{meta_path.stem}-{tag}.json"
-        if meta.get("valid") and scores.exists():
-            students[meta["name"]] = (meta, json.loads(scores.read_text()))
+        if meta.get("valid") and scores.exists() and meta_path.stat().st_mtime >= when.get(meta["name"], 0):
+            students[meta["name"]], when[meta["name"]] = (meta, json.loads(scores.read_text())), meta_path.stat().st_mtime
     shares = json.loads((d / "languages.json").read_text()) if (d / "languages.json").exists() else None
     return items, students, shares
 
