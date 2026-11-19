@@ -198,7 +198,7 @@ What is left is in [Rules](RULES.md#what-is-trusted-and-what-is-not).
 4. **The server adds it up.** The round's baseline is the item-by-item mean of the
    established graders' baselines. A grade's score is the exam's aggregate (seven pillars,
    each counting the same) of its item scores less that baseline. The server computes it
-   with a Go port of `src/stet/newexam/aggregate.py`, checked against the Python on shared
+   with a Go port of `src/stet/exam/aggregate.py`, checked against the Python on shared
    test vectors (`tools/aggregate_vectors.py`). From there, agreement, settlement, the board
    and the record work on that score.
 5. **Settlement.** The item scores are archived, and the exam is published: the generated
@@ -215,7 +215,7 @@ was written for them.
 - **The harness** (Python, `src/stet`) is what decides a score: rounds from seeds, the
   corpus, the script format, the student, the trainer, the exam. It is the same code in
   `stet run`, `stet verify`, the examiner and the gym. The exam's generators, harvest and
-  aggregate are in `src/stet/newexam`.
+  aggregate are in `src/stet/exam`.
 - **The server** (Go, `server/`) keeps the books: accounts, entries, rounds, jobs, grades,
   ratings, and each round's exam. It trains nothing. One stateless process serves the
   website, the API and the downloads.

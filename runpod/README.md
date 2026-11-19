@@ -31,7 +31,7 @@ machine only grades. `--no-edits` rents machines that only grade.
 Each machine has a key of its own from a pool kept here, and the organisers' own key
 (`--key`) vouches for each: it signs a grant the server keeps. Nothing in the server's
 configuration changes. A machine vouched for is one of the organisers' machines to the
-judge, and nothing more: it administers nothing, and is never given the held-out exam
+judge, and nothing more: it administers nothing
 ([Operating: rented machines](../docs/OPERATING.md#rented-machines)).
 
 ## Setting up

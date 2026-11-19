@@ -151,4 +151,4 @@ def test_the_documents_give_the_seasons_numbers(season):
     assert f"| 40M tokens | {micro} s |" in rules and f"{micro} seconds at micro" in brief
     assert f"up to {gib} GiB" in faq and f"{m['gpu_memory_gb']} GB of memory" in faq
     assert f"{m['memory_gb']} GB of memory, one GPU with {m['gpu_memory_gb']} GB of its memory" in verifying and f"{need['disk_gb']} GB of disk" in verifying
-    assert f"more than {season.raw['tolerance']['micro']['run']} nats" in rules.replace("by more than", "more than")
+    assert f"more than {season.raw['tolerance']['standard']['run']} bits per byte" in rules.replace("by more than", "more than")
