@@ -89,13 +89,16 @@ own cache, shared with anything else uv installs: `uv cache clean` frees that.
 
 **No one else's code runs.** A grade job is an edit script, which is plain data: lists of
 document numbers and byte ranges. Your machine downloads the round's raw text from Common
-Crawl, builds the corpus, trains the fixed student on what the script says, and reports
-the exam loss.
+Crawl, builds the corpus, fetches the round's exam, trains the fixed student on what the
+script says, has it sit every item, and reports one score per item.
 
-At the official scale a grade is one training run, about ten minutes on a mid-range GPU.
-The first job of a round also downloads the round's raw text (about half a gigabyte;
-1.2 GB once built) and trains on the unedited corpus once, so it takes about twice as
-long.
+Grade jobs start when the round's exam is posted, about five hours after the draw. At the
+official scale a grade is one training run, about 18 minutes on an RTX 3090 or 4070 Ti.
+The first job of a round also downloads the round's raw text (about a gigabyte; 2.5 GB
+once built) and trains on the unedited corpus once, so it takes about twice as long.
+
+Until the round settles, its exam is served only to machines holding a grade job in it,
+signed by their key. It sits in your cache with the round; do not pass it on.
 
 ### Running curators
 
@@ -122,8 +125,9 @@ reinstall without loss.
 A curator may name model files, up to 4 GiB an entry. They are fetched from Hugging Face
 before it runs, checked against their hashes, and kept in a cache that is trimmed at
 40 GB and of whatever has gone unused for two weeks
-([what it keeps on your disk](#what-it-keeps-on-your-disk)). A run takes up to ten minutes
-at the official scale, plus the download.
+([what it keeps on your disk](#what-it-keeps-on-your-disk)). A run takes up to twenty
+minutes at the official scale, plus the download. Runs start as soon as the round is
+drawn, hours before its exam exists.
 
 ### Becoming established
 
@@ -134,11 +138,11 @@ agrees counts towards the 5. `stet whoami` shows where you stand.
 
 ### What is sent and what is published
 
-With each result your machine sends: the losses it measured, or the script the curator
-wrote; hashes of the corpus and exam it built; how long the work took and a thinned loss
-curve; and a description of the machine: GPU name and memory, operating system and
-processor type, the speeds `stet bench` measured, and the versions of Python, PyTorch and
-the harness.
+With each result your machine sends: the score it measured on every item of the exam,
+and its own baseline's, or the script the curator wrote; hashes of the corpus and exam it
+built; how long the work took and a thinned loss curve; and a description of the machine:
+GPU name and memory, operating system and processor type, the speeds `stet bench`
+measured, and the versions of Python, PyTorch and the harness.
 
 Published: your handle and linked GitHub login, the GPU's name, how many of your grades
 agreed, how many curators you have run, your streak, GPU hours, when you were last seen,
@@ -156,8 +160,8 @@ A verifier does not take the server's word for what a round is.
 - **The announcement.** Each time it asks for work, a verifier is told what the next draw
   is committed to, and writes it down. A round that does not match what was announced is
   refused.
-- **The data.** Corpus files are fetched from Common Crawl by path, the exam pack is
-  pinned by hash, and the script must match the hash the job named.
+- **The data.** Corpus files are fetched from Common Crawl by path, the round's exam must
+  hash to the digest the round names, and the script must match the hash the job named.
 - **The code.** A verifier running a different version of the harness from the season's
   is asked to upgrade before it is given work.
 
@@ -165,14 +169,13 @@ A verifier does not take the server's word for what a round is.
 
 **Grading is reproducible.** Same script, same corpus, same exam, same initial weights,
 same number of tokens. Two honest machines agree to within a small tolerance
-*(provisional: 0.08 nats at the official scale; see [Experiments](EXPERIMENTS.md))*.
+*(provisional: 0.06 bits per byte at the official scale; see [Experiments](EXPERIMENTS.md))*.
 
 **Every curator is run twice, by different people,** when two are around. A machine is
 handed first an entry whose other run was on the other make of GPU, so the two are on
 NVIDIA and AMD when machines of both are asking. Nobody runs their own entry or runs one
-entry twice. When two runs differ
-by more than a tolerance *(provisional: 0.12 nats)*, or one fails, a third person runs it
-and the middle one counts. Whoever has seen one of an entry's scripts cannot run it, so a
+entry twice. When two runs differ by more than a tolerance *(provisional: 0.09 bits per
+byte)*, or one fails, a third person runs it and the middle one counts. Whoever has seen one of an entry's scripts cannot run it, so a
 runner who could give that third run is handed none of them while someone else can grade.
 
 **Every script is graded by someone other than its runner.** A runner who could also say
@@ -184,7 +187,7 @@ own, and either runner may grade it.
 **Work is assigned.** You cannot choose what you run or grade, you are offered an entry
 once, you never work on your own, and ties between jobs are broken at random.
 
-**Everything is sealed.** Nobody can see a script, a grade or the round's unedited loss
+**Everything is sealed.** Nobody can see a script, a grade or the round's unedited score
 until the whole round settles, beyond the job in hand: a script is served only to the
 verifier that holds it as a grade job. A grade cannot be copied, and neither can a run:
 a person who has been shown a script of an entry is never asked to run that entry, and
@@ -192,9 +195,11 @@ an account that is not established is shown a script only once its entry is clos
 further runs.
 
 **Everyone proves the round first.** Every grade comes with your baseline for the round:
-the unedited corpus's loss. If your corpus, your exam or your baseline differs from the
-round's, your result is set aside with a message saying which. That is a broken cache or
-a different PyTorch, and it does not count against you. It is listed on the round's page
+the unedited corpus's score on every item. The round's baseline is the item-by-item mean of
+the established graders' own. If your corpus or your exam differs from the round's, or your
+baseline is further from the others' than 0.1 bits per byte, your result is set aside with a
+message saying which. That is a broken cache or a different PyTorch, and it does not count
+against you. It is listed on the round's page
 all the same: if honest machines of one kind keep landing there, the tolerance is wrong,
 and that is how anyone would see it.
 

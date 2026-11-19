@@ -1,8 +1,10 @@
 # What the exam should measure, from first principles
 
 Stet exists to find the best pretraining data there is. This note asks what an exam must
-be to point the competition at that, and what that means for Stet. It builds on
-[the exam proposal](exam-proposal.md) and on what the first shadow runs measured.
+be to point the competition at that, and what that means for Stet. It was written while the
+first season's exam (six kinds of English prose, a fixed public pack) was the score, and the
+exam proposed to replace it (here, "the next exam") was being trained and measured beside
+it. Section 7 is what was decided; it is season 1's exam.
 
 ## The answer, in one paragraph
 
@@ -13,8 +15,8 @@ train**, becomes capable at **what pretrained models are for**. So the exam shou
   answers and good writing, with the individual items unknowable in advance;
 - trusted only where it reproduces what is already known about data at scale. The reference
   curators that rebuild published recipes must come out in the order the literature found;
-- decided at the largest scale we can afford. Micro rounds become a fast proxy, and the
-  proxy is checked against larger runs.
+- decided at the largest scale we can afford. Rounds become a fast proxy, and the proxy is
+  checked against larger runs.
 
 Targeting such an exam is not cheating. It is the job.
 
@@ -34,8 +36,8 @@ Targeting such an exam is not cheating. It is the job.
 - The two exams order curators in nearly opposite ways at every size. So the choice of
   target matters more than the size of the student.
 - The next exam's verdict is decided above all by how much each language and capability
-  counts. Under the current weights, the curator to beat cleans every language rather than
-  choosing English.
+  counts. Under the weights the pilot used, the curator to beat cleans every language rather
+  than choosing English.
 
 ## 1. What a pretraining dataset is for
 
@@ -80,8 +82,9 @@ purpose.
 3. **Items nobody can know.** No answer can be memorised or copied in.
 4. **Precision.** Differences between curators must stand clear of noise.
 
-The first two are about validity, and they matter most. The proposal handled the third and
-fourth well, and the shadow runs showed what was missing from the first two.
+The first two are about validity, and they matter most. The first proposal for the next
+exam handled the third and fourth well, and its trial runs showed what was missing from the
+first two.
 
 ## 4. The design
 
@@ -155,13 +158,12 @@ of other languages is a separate choice.
 
 - **A stable reference.** The unedited corpus is the least stable student we train: its
   season-exam loss varies by 0.046 nats between trainings, against 0.004 to 0.015 for
-  curated corpora. Every gain is measured from it. Average it over four trainings, or
-  measure from a reference curator that trains steadily.
+  curated corpora. Every gain is measured from it. So a round's baseline is the mean of
+  every established grader's own, item by item.
 - **Pairs.** A pair of curators varies by about 0.03 from training alone, and 0.015 to 0.02
   from the draw of items. Report both. Train the close ones twice.
 - **Items nobody can know.** Fresh text from after the draw, items generated from the draw's
-  seed, private families for finals, decontamination against the pool, and a check of every
-  item against each script's own literal text.
+  seed, and any fresh item the round's corpus already holds dropped from the exam.
 
 ## 5. What has been measured so far
 
@@ -173,7 +175,17 @@ of other languages is a separate choice.
 - **The two halves of the next exam agree on the top, not below it.** Generated items and
   fresh text both put english first. Below it they differ: tidy and compass-linear do
   better on fresh text than on generated items.
-- **Training noise** is in [the proposal, section 3](exam-proposal.md#3-stability-pairing-continuous-scores-and-a-robust-average).
+- **Training noise.** The same script, trained four times on the organisers' rented GPUs
+  from the same initial weights, does not give the same student: GPU arithmetic is not
+  deterministic, and the differences grow over training. At micro, on round 12:
+
+  | | Season exam loss, sd (nats) | Next exam score, sd (bits per byte) |
+  |---|---|---|
+  | The unedited corpus | 0.046 | 0.081 |
+  | Curated scripts (7) | 0.004 to 0.015 | 0.010 to 0.037 |
+
+  The unedited corpus is by far the least stable student, and every gain is measured from
+  it: one training of it moves every entry's gain in a round together.
 
 ## 6. The scale pilot (round 12, November 2026)
 
@@ -386,8 +398,8 @@ So:
 - **Rounds train the standard student** (29M parameters, 160M tokens). It trains in about 18
   minutes on a rented 3090 or 4070 Ti, under $0.10 a student, against 2 to 3 minutes for micro.
   Its ranking agrees with the large student's.
-- **The unedited corpus is trained four times** a round, as now, since it is still the least
-  steady student.
+- **The unedited corpus is averaged over several trainings**, since it is still the least
+  steady student: a round's baseline is the mean of every established grader's.
 - **Micro stays for practice and the gym:** quick feedback, not a verdict.
 - **Finals decide the season.** The top eight curators of the season's rounds are trained at
   the large size (54M parameters, 640M tokens, about an hour on a 4090) on a fresh round, twice
@@ -416,7 +428,8 @@ noise is dealt with by the size of the student (7.5).
 
 Wikipedia's text is openly licensed and is published with the round. The other sources'
 text (news, GitHub, Hacker News, Lemmy, Bluesky, Mastodon) is held as private exam items only.
-For them, a round publishes each item's id and URL, and anyone can check them at the source.
+For them, a round publishes each item's source, its id there and the item's hash, and anyone
+can check them at the source.
 
 The harvest respects what people asked for:
 

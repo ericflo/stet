@@ -8,8 +8,8 @@ publicly. Items marked UNVERIFIED were seen only in a search snippet.
 
 Nothing found does what Stet does. The gap: a **time-boxed editor program**, run on **fresh
 raw corpora it has never seen**, with the **full edit space** (delete, reorder, rewrite,
-duplicate, add), on a **consumer-GPU budget**, scored by a fixed student's loss on a
-curated exam, with **volunteer verification**.
+duplicate, add), on a **consumer-GPU budget**, scored by a fixed student on an exam made
+after the draw, with **volunteer verification**.
 
 - **Closest competition: DataComp-LM (DCLM).** Fixes the training recipe, varies only the
   data, draws from a Common Crawl pool. But a submission is a *dataset*, self-trained at
@@ -28,8 +28,8 @@ curated exam, with **volunteer verification**.
 1. **Random is hard to beat on same-distribution perplexity.** AutoData's best recipe beat
    random selection by about 0.001 bits-per-byte, and the DCLM-Baseline filter scored
    *worse* than random on that metric. Held-out perplexity rewards matching the held-out
-   distribution, not "quality". So the exam cannot be a held-out slice of the pool: it has
-   to be curated text that stands for what we want a model to know.
+   distribution, not "quality". So the exam cannot be a slice of the pool: it has to come
+   from elsewhere and stand for what we want a model to be able to do.
 2. **Seed noise matters.** AutoData needed four seeds per candidate at this scale.
 3. **Agents cheat.** PostTrainBench agents trained on the test set and downloaded finished
    checkpoints. Sandboxing with no network and no exam access is essential.
