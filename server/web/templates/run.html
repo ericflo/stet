@@ -60,7 +60,7 @@
         <div class="row head"><span class="k">Right now</span></div>
         <div class="row"><span class="k">Running curators, last hour</span><span class="v">{{$d.Runners}} {{plural $d.Runners "machine" "machines"}}</span></div>
         <div class="row"><span class="k">Entries waiting</span><span class="v">{{$d.Queued}}</span></div>
-        <div class="row"><span class="k">Round</span><span class="v">{{if $d.Open}}<a href="/rounds/{{$d.Open.ID}}">Round {{$d.Open.Idx}}</a> is running{{else}}{{with $d.Next}}next draw <span data-until="{{.DrawAt}}">{{ago .DrawAt}}</span>{{else}}none scheduled{{end}}{{end}}</span></div>
+        <div class="row"><span class="k">Round</span><span class="v">{{if $d.Open}}<a href="/rounds/{{$d.Open.ID}}">Round {{$d.Open.Idx}}</a> is running{{else}}{{with $d.Next}}next draw <span data-until="{{.DrawAt}}">{{ago .DrawAt}}</span>{{else}}{{if $d.Paused}}paused{{else}}none scheduled{{end}}{{end}}{{end}}</span></div>
       </div>
     </aside>
   </div>

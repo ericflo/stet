@@ -177,7 +177,8 @@ type NowView struct {
 	NextID     string
 	Last       *roundSummary
 	Queued     int
-	Volunteers int // established people, not the organisers, here in the last two weeks
+	Volunteers int  // established people, not the organisers, here in the last two weeks
+	Paused     bool // the organisers have paused the rounds: none is to be drawn
 }
 
 func (a *App) now(st *State) NowView {
@@ -186,7 +187,8 @@ func (a *App) now(st *State) NowView {
 		rs := a.roundSummary(st, open)
 		n.Open = &rs
 	}
-	if next := st.roundWithStatus("scheduled"); next != nil {
+	n.Paused = st.Meta.Paused != 0
+	if next := st.roundWithStatus("scheduled"); next != nil && !n.Paused {
 		c := *next
 		n.Next, n.NextID = &c, roundID(a.season.ID, c.Idx)
 	}
@@ -642,6 +644,10 @@ func feed(s *State, limit int) []FeedItem {
 		case "record":
 			h = fmt.Sprintf(`<span class="tag red" style="margin:0 4px 0 0">record</span> <a href="/editors/%s"><b>%s</b></a> by %s took the record, with a rating of <span class="num">%s</span> nats`,
 				esc(clipID(str("editor"), 12)), esc(str("name")), esc(str("owner")), signed(num("rating"), 3))
+		case "pause":
+			h = "The organisers paused the rounds: none is drawn until they resume them"
+		case "resume":
+			h = "The organisers resumed the rounds"
 		case "crawl":
 			h = fmt.Sprintf(`New crawl in play: <b>%s</b> (%s files)`, esc(str("crawl")), comma(int64(num("files"))))
 		default:
@@ -1038,7 +1044,8 @@ func (a *App) nowFacts(st *State, d map[string]any) {
 		}
 	}
 	d["Active"], d["GPUHours"], d["Runners"], d["Queued"] = active, gpuHours, runners, queued
-	if next := st.roundWithStatus("scheduled"); next != nil {
+	d["Paused"] = st.Meta.Paused != 0
+	if next := st.roundWithStatus("scheduled"); next != nil && st.Meta.Paused == 0 {
 		c := *next
 		d["Next"] = &c
 	}

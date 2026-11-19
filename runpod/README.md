@@ -54,6 +54,8 @@ stet-runpod status                   # what is waiting, what is rented, what it 
 stet-runpod scale --follow           # rent and end to match the work, every minute
 stet-runpod up 2                     # or by hand: two now, whatever is waiting
 stet-runpod down                     # end those that hold no job
+stet-runpod pause                    # draw no more rounds: the machines turn to the next exam
+stet-runpod resume                   # and start them again
 ```
 
 `status`, `scale`, `up` and `down` ask the server what is waiting
@@ -65,6 +67,8 @@ counting a curator still to run as two (the run, and a grade of what it writes) 
 script waiting as one. A machine with nothing official to do trains the next exam's
 students (a few minutes each, for a settled round's shadow), so one more for every
 `--per-shadow` (4) of those waiting, after the official work (`--per-shadow 0`: none).
+`--long-shadow 600` rents machines that also take the bigger students, held for hours, one
+machine to each.
 Never more than `--max` (6), or past `--max-hourly` dollars an hour (3), and nothing new
 once `--daily-budget` is spent. `--max-price` never rents a machine dearer than that, however
 much is waiting: the work waits for a cheap one instead. When an entry is waiting for a round

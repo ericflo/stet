@@ -148,12 +148,16 @@ func cmdStatus(ctx context.Context, f *Fleet) error {
 		fmt.Fprintf(f.out, "Round %s: %d entries open · %d runs a new machine could take · %d running · %d scripts to grade · %d being graded\n",
 			r.ID, r.Entries, r.RunsWanted, r.EditsUnderWay, r.GradesWanted, r.GradesUnderWay)
 	}
+	if v.Work.Paused > 0 {
+		fmt.Fprintf(f.out, "Rounds paused since %s UTC: none is drawn (stet-runpod resume)\n", time.Unix(v.Work.Paused, 0).UTC().Format("Jan 2 15:04"))
+	}
 	if v.Work.NextDrawAt > 0 {
 		at := time.Unix(v.Work.NextDrawAt, 0)
 		fmt.Fprintf(f.out, "Next draw %s UTC (%s)\n", at.UTC().Format("15:04"), until(now, at))
 	}
-	if v.Work.ShadowWaiting+v.Work.ShadowUnderWay > 0 {
-		fmt.Fprintf(f.out, "The next exam: %d students to train · %d being trained\n", v.Work.ShadowWaiting, v.Work.ShadowUnderWay)
+	if v.Work.ShadowWaiting+v.Work.ShadowUnderWay+v.Work.ShadowLongWaiting > 0 {
+		fmt.Fprintf(f.out, "The next exam: %d students to train · %d bigger ones, hours each · %d being trained\n",
+			v.Work.ShadowWaiting, v.Work.ShadowLongWaiting, v.Work.ShadowUnderWay)
 	}
 	fmt.Fprintf(f.out, "%d of the organisers' machines running curators\n\n", v.Work.Runners)
 	rented := 0
@@ -177,6 +181,20 @@ func cmdStatus(ctx context.Context, f *Fleet) error {
 	if d.Note != "" {
 		fmt.Fprintf(f.out, "(%s)\n", d.Note)
 	}
+	return nil
+}
+
+// cmdPause pauses the rounds, or resumes them.
+func cmdPause(ctx context.Context, f *Fleet, paused bool) error {
+	since, by, err := f.st.pause(ctx, f.op, paused)
+	if err != nil {
+		return err
+	}
+	if since > 0 {
+		f.say("rounds paused since %s UTC, by %s: none is drawn, and the round under way finishes. The machines turn to the next exam", time.Unix(since, 0).UTC().Format("Jan 2 15:04"), by)
+		return nil
+	}
+	f.say("rounds resumed: the next is drawn at its time")
 	return nil
 }
 

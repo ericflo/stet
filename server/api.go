@@ -243,6 +243,7 @@ func (a *App) mountAPI(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/jobs/{id}/result", a.apiResult)
 	mux.HandleFunc("POST /api/v1/jobs/{id}/release", a.apiRelease)
 	mux.HandleFunc("POST /api/v1/admin/draw", a.apiAdminDraw)
+	mux.HandleFunc("POST /api/v1/admin/pause", a.apiAdminPause)
 	mux.HandleFunc("POST /api/v1/admin/shadow", a.apiAdminShadow)
 	mux.HandleFunc("POST /api/v1/admin/shadow/batches", a.apiShadowBatch)
 	mux.HandleFunc("GET /api/v1/admin/shadow/batches/{id}", a.apiShadowBatchGet)
@@ -358,8 +359,8 @@ func logRequests(next http.Handler) http.Handler {
 // exists: when (and so from which beacon round), and from which crawl.
 func (a *App) announcement(s *State) map[string]any {
 	r := s.roundWithStatus("scheduled")
-	if r == nil {
-		return nil
+	if r == nil || s.Meta.Paused != 0 {
+		return nil // while the rounds are paused, none is to be drawn
 	}
 	return map[string]any{"id": roundID(a.season.ID, r.Idx), "draw_at": r.DrawAt, "drand_round": r.DrandRound, "crawl": r.Crawl}
 }
@@ -387,6 +388,9 @@ func (a *App) apiSeason(w http.ResponseWriter, r *http.Request) {
 	}
 	a.st.view(func(s *State) {
 		out["next_round"] = a.announcement(s)
+		if s.Meta.Paused != 0 {
+			out["paused"] = s.Meta.Paused
+		}
 		if open := s.roundWithStatus("open"); open != nil {
 			out["open_round"] = open.description(a.season)
 		}
@@ -1509,6 +1513,49 @@ func (a *App) apiSealedMine(w http.ResponseWriter, r *http.Request) {
 
 // apiAdminDraw lets an organiser bring the next draw forward to the next moment on the grid
 // instead of waiting for the schedule's.
+// apiAdminPause pauses the rounds, or resumes them: while they are paused no round is drawn,
+// and the machines have nothing official to do (the round under way finishes). For the
+// organisers, between seasons or while they work on the next one.
+func (a *App) apiAdminPause(w http.ResponseWriter, r *http.Request) {
+	acct, _, body, err := a.signed(w, r, 1<<10, true)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	if !acct.administers() {
+		writeErr(w, fail(403, "organisers only"))
+		return
+	}
+	var req struct {
+		Paused *bool `json:"paused"`
+	}
+	if json.Unmarshal(body, &req) != nil || req.Paused == nil {
+		writeErr(w, fail(400, `send {"paused": true} or {"paused": false}`))
+		return
+	}
+	var out Meta
+	err = a.st.update(r.Context(), func(tx *Tx) error {
+		m := &tx.s.Meta
+		switch {
+		case *req.Paused && m.Paused == 0:
+			m.Paused, m.PausedBy = now(), acct.Handle
+			tx.event("pause", map[string]any{"by": acct.Handle})
+		case !*req.Paused && m.Paused != 0:
+			m.Paused, m.PausedBy = 0, ""
+			tx.event("resume", map[string]any{"by": acct.Handle})
+		}
+		tx.put(metaKey, m)
+		out = *m
+		return nil
+	})
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	slog.Info("rounds paused or resumed", "paused", out.Paused != 0, "by", acct.Handle)
+	writeJSON(w, 200, map[string]any{"paused": out.Paused, "paused_by": out.PausedBy})
+}
+
 func (a *App) apiAdminDraw(w http.ResponseWriter, r *http.Request) {
 	acct, _, _, err := a.signed(w, r, 1<<10, true)
 	if err != nil {

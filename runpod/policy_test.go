@@ -218,3 +218,22 @@ func withShadow(w *Work, waiting int) *Work {
 	w.ShadowWaiting = waiting
 	return w
 }
+
+// A bigger student holds a machine for hours: one machine each, and only when the machines
+// are rented to take them.
+func TestBiggerStudentsWantAMachineEach(t *testing.T) {
+	p := testPolicy()
+	p.Edits, p.PerWorker, p.PerShadow, p.MaxWorkers = true, 6, 4, 5
+	w := &Work{ShadowWaiting: 4, ShadowLongWaiting: 3}
+	if got := p.target(w); got != 1 {
+		t.Fatalf("machines not rented for bigger students were wanted for them: %d", got)
+	}
+	p.LongShadow = true
+	if got := p.target(w); got != 4 {
+		t.Fatalf("one for the short students and one for each bigger one: %d, want 4", got)
+	}
+	w.ShadowLongWaiting = 12
+	if got := p.target(w); got != 5 {
+		t.Fatalf("past --max: %d", got)
+	}
+}

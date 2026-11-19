@@ -71,7 +71,7 @@
       </div>
       <div class="panel" data-live>
         <div class="row head"><span class="k">Right now</span></div>
-        <div class="row"><span class="k">Next round</span><span class="v">{{if $d.Open}}one is running{{else}}{{with $d.Next}}<span data-until="{{.DrawAt}}">{{ago .DrawAt}}</span>{{else}}not scheduled{{end}}{{end}}</span></div>
+        <div class="row"><span class="k">Next round</span><span class="v">{{if $d.Open}}one is running{{else}}{{with $d.Next}}<span data-until="{{.DrawAt}}">{{ago .DrawAt}}</span>{{else}}{{if $d.Paused}}paused{{else}}not scheduled{{end}}{{end}}{{end}}</span></div>
         <div class="row"><span class="k">Waiting to run</span><span class="v">{{$d.Queued}} {{plural $d.Queued "entry" "entries"}}</span></div>
         <div class="row"><span class="k">Running curators, last hour</span><span class="v">{{$d.Runners}} {{plural $d.Runners "machine" "machines"}}</span></div>
         <div class="row"><span class="k">To beat</span><span class="v">{{with $d.Record}}{{gain .Rating}} nats · <a href="/editors/{{short .EditorID}}">{{.Name}}</a>{{else}}nobody yet{{end}}</span></div>

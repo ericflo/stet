@@ -44,6 +44,8 @@ const usage = `stet-runpod: rent GPUs from RunPod to grade for Stet, as many as 
                                  too, and their jobs are handed back
   stet-runpod logs HANDLE [-f]   what a machine has said: its install, stet verify
   stet-runpod ssh HANDLE         log in to one (rented with --ssh)
+  stet-runpod pause | resume     stop drawing rounds, so that the machines turn to the
+                                 next exam, or start again (the round under way finishes)
 
 Needs RUNPOD_API_KEY, and the organisers' own stet key (--key), to vouch for machines
 and ask what is waiting.
@@ -65,6 +67,7 @@ type Options struct {
 	MinCPU       int
 	MinGPUMemory int
 	MaxPrice     float64 // dollars an hour for one machine; 0: any
+	LongMinutes  int     // the longest of the next exam's students a machine takes, minutes; 0: the short ones only
 	Idle         int
 	SSHKey       string
 	DryRun       bool
@@ -122,6 +125,7 @@ func flags(name string, o *Options) *flag.FlagSet {
 	ssh := fs.Bool("ssh", false, "let ~/.ssh/id_ed25519.pub log in to the machines rented (for `stet-runpod ssh`)")
 	fs.BoolVar(&o.DryRun, "dry-run", false, "say what would be rented and ended, and do none of it")
 	fs.IntVar(&o.MaxWorkers, "max", 6, "never more machines than this")
+	fs.IntVar(&o.LongMinutes, "long-shadow", 0, "rent machines that also take the next exam's bigger students, given up to this many minutes each, and one for each waiting (0: none)")
 	fs.Float64Var(&o.MaxPrice, "max-price", 0, "never rent a machine that costs more than this many dollars an hour, however much work is waiting (0: any)")
 	fs.Float64Var(&o.MaxHourly, "max-hourly", 3, "never rent past this many dollars an hour, all machines together")
 	fs.Float64Var(&o.DailyBudget, "daily-budget", 0, "rent nothing more once about this many dollars have been spent today, UTC (0: no limit)")
@@ -135,6 +139,7 @@ func flags(name string, o *Options) *flag.FlagSet {
 	}
 	o.Grace, o.Silence = 25*time.Minute, 20*time.Minute
 	finish := func() error {
+		o.LongShadow = o.LongMinutes > 0
 		o.Edits = !*noEdits
 		o.Cloud = strings.ToUpper(o.Cloud)
 		if o.Cloud != "SECURE" && o.Cloud != "COMMUNITY" && o.Cloud != "ANY" {
@@ -295,6 +300,17 @@ func run(args []string, stdout, stderr io.Writer) error {
 			return err
 		}
 		return cmdDown(ctx, f, *force, rest)
+	case "pause", "resume":
+		if rest, err := parse(fs, args); err != nil {
+			return err
+		} else if len(rest) > 0 {
+			return fmt.Errorf("%s takes no %q", cmd, rest[0])
+		}
+		f, err := open(o, stdout, false, true)
+		if err != nil {
+			return err
+		}
+		return cmdPause(ctx, f, cmd == "pause")
 	case "logs":
 		follow := fs.Bool("f", false, "keep printing what it says, as it says it")
 		last := fs.Int("n", 60, "how many of its last lines")

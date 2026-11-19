@@ -127,6 +127,16 @@ func newFakeStet(t *testing.T) *fakeStet {
 		switch r.URL.Path {
 		case "/api/v1/admin/work":
 			json.NewEncoder(w).Encode(f.work)
+		case "/api/v1/admin/pause":
+			var req struct {
+				Paused bool `json:"paused"`
+			}
+			json.NewDecoder(r.Body).Decode(&req)
+			f.work.Paused = 0
+			if req.Paused {
+				f.work.Paused = 1795000000
+			}
+			fmt.Fprintf(w, `{"paused": %d, "paused_by": "stet"}`, f.work.Paused)
 		case "/api/v1/season":
 			io.WriteString(w, `{"site": "https://www.stet.test"}`)
 		case "/api/v1/admin/workers":
@@ -467,6 +477,14 @@ func TestTheCheapestMachineInEitherCloudIsRented(t *testing.T) {
 	if spec := rp.created[0]; spec.GPU.MinRAMPerGPU != f.o.MinRAM || spec.GPU.MinVCPUPerGPU != f.o.MinCPU {
 		t.Fatalf("the host was asked for as %+v", spec.GPU)
 	}
+	if _, ok := rp.created[0].Env["STET_SHADOW_MAX_MINUTES"]; ok {
+		t.Fatal("a machine not rented for bigger students was told to take them")
+	}
+	f.o.LongMinutes = 600
+	if spec := f.spec(&Key{Handle: "stet-rp-09"}, "NVIDIA RTX A5000", "SECURE", "https://www.stet.test"); spec.Env["STET_SHADOW_MAX_MINUTES"] != "600" {
+		t.Fatalf("a machine rented for bigger students: %v", spec.Env["STET_SHADOW_MAX_MINUTES"])
+	}
+	f.o.LongMinutes = 0
 	gpus, err := f.choices(context.Background())
 	if err != nil || len(gpus) < 3 || gpus[0].Price != 0.18 || gpus[0].Cloud != "COMMUNITY" {
 		t.Fatalf("choices: %+v %v", gpus, err)
@@ -539,5 +557,26 @@ func TestLogsPrintWhatAMachineSaid(t *testing.T) {
 	}
 	if got := out.String(); got != "23:11:00  stet verify · stet-rp-01\n23:12:00  edit job 7\n" {
 		t.Fatalf("printed %q", got)
+	}
+}
+
+// The organisers pause the rounds with their own key, and status says so.
+func TestPauseAndResumeTheRounds(t *testing.T) {
+	rp, st := newFakeRunPod(t), newFakeStet(t)
+	f, out := testFleet(t, rp, st, 1)
+	if err := cmdPause(context.Background(), f, true); err != nil {
+		t.Fatal(err)
+	}
+	if st.work.Paused == 0 || !strings.Contains(out.String(), "rounds paused") {
+		t.Fatalf("not paused:\n%s", out)
+	}
+	if last := st.signed[len(st.signed)-1]; !strings.HasPrefix(last, "POST /api/v1/admin/pause ") || !strings.HasSuffix(last, f.op.Public) {
+		t.Fatalf("paused as %q", last)
+	}
+	if err := cmdStatus(context.Background(), f); err != nil || !strings.Contains(out.String(), "Rounds paused since") {
+		t.Fatalf("status (%v):\n%s", err, out)
+	}
+	if err := cmdPause(context.Background(), f, false); err != nil || st.work.Paused != 0 || !strings.Contains(out.String(), "rounds resumed") {
+		t.Fatalf("resume (%v):\n%s", err, out)
 	}
 }

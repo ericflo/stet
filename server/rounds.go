@@ -174,7 +174,7 @@ func (a *App) onDemand(tx *Tx) {
 	s := tx.s
 	gap := int64(a.cfg.RoundMinGap.Seconds())
 	r := s.roundWithStatus("scheduled")
-	if gap <= 0 || r == nil || r.Crawl == nil || s.roundWithStatus("open") != nil || !a.waiting(s) || !a.runnerAround(s) {
+	if gap <= 0 || r == nil || r.Crawl == nil || s.Meta.Paused != 0 || s.roundWithStatus("open") != nil || !a.waiting(s) || !a.runnerAround(s) {
 		return
 	}
 	at, empty := now()+drawNotice, 0
@@ -343,6 +343,9 @@ func (a *App) bringForward(ctx context.Context) (*Round, error) {
 		if r == nil {
 			return fail(409, "no round is scheduled")
 		}
+		if tx.s.Meta.Paused != 0 {
+			return fail(409, "the rounds are paused; resume them first")
+		}
 		if tx.s.roundWithStatus("open") != nil {
 			return fail(409, "the previous round is still being graded")
 		}
@@ -375,6 +378,10 @@ func (a *App) maybeDraw(ctx context.Context, force bool) error {
 		due = now() >= a.season.Beacon.timeOf(r.DrandRound)+2 || (force && beaconIsFake)
 		switch {
 		case !due:
+		case s.Meta.Paused != 0:
+			// The organisers have paused the rounds: the slot passes, as when nobody is waiting.
+			a.reschedule(tx, cur, a.laterSlot())
+			problem = errors.New("the organisers have paused the rounds")
 		case s.roundWithStatus("open") != nil:
 			// Grading of the previous round is still under way. Rounds never overlap, so
 			// that the ladder is always complete. This one moves to the next slot for now,

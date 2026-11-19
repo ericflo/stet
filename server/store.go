@@ -381,6 +381,10 @@ type Meta struct {
 	NextClaim   int64 `json:"next_claim"`
 	NextResult  int64 `json:"next_result"`
 	NextEvent   int64 `json:"next_event"`
+	// When the organisers paused the rounds, and who: no round is drawn while they are, and
+	// the round under way finishes. 0: not paused.
+	Paused   int64  `json:"paused,omitempty"`
+	PausedBy string `json:"paused_by,omitempty"`
 }
 
 type SavedCrawl struct {

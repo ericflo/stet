@@ -51,8 +51,10 @@
       {{else}}
       <div class="now-card">
         <span class="head"><span class="dot" aria-hidden="true"></span>quiet</span>
-        <h3>No round scheduled</h3>
-        <p>One is drawn as soon as a curator is waiting, and every {{$.Interval}} regardless.</p>
+        {{if $d.Paused}}<h3>Rounds paused</h3>
+        <p>The organisers have paused the rounds while they work on the next exam. No round is drawn until they resume them, and the standings so far stand.</p>
+        {{else}}<h3>No round scheduled</h3>
+        <p>One is drawn as soon as a curator is waiting, and every {{$.Interval}} regardless.</p>{{end}}
       </div>
       {{end}}{{end}}
       {{if not $d.Volunteers}}<p class="note early"><b>Early days.</b> So far every score comes from the organisers' machine alone. A second machine is what confirms them: <a href="/verify">lend a GPU →</a></p>{{end}}

@@ -152,7 +152,23 @@ more when a round has curators to run or scripts to grade, ends those doing noth
 soon as nothing at all is waiting, and ends any that went quiet. When an entry is waiting
 for a round and nobody who runs curators is around, it rents one, so that the round is
 drawn early as it would be for anyone. It never rents past `--max` machines or
-`--max-hourly` dollars an hour, and stops renting once `--daily-budget` is spent.
+`--max-hourly` dollars an hour, never a machine dearer than `--max-price`, and stops
+renting once `--daily-budget` is spent.
+
+A machine with nothing official to do trains the next exam's students, and `stet-runpod`
+rents for those too. With `--long-shadow MINUTES` the machines it rents also take the
+bigger students, held for hours (they are told `STET_SHADOW_MAX_MINUTES`), one machine to
+each.
+
+## Pausing the rounds
+
+While the organisers work on the next exam, and nobody else is entered, they can pause the
+rounds: `stet-runpod pause` (`POST /api/v1/admin/pause {"paused": true}`, organisers
+only). No round is drawn while they are paused, by the clock, early or by hand; the round
+under way finishes. The machines then have nothing official to do and turn to the next
+exam's students, and `stet-runpod` rents only for those. The site says the rounds are
+paused, and the season's `next_round` is empty. `stet-runpod resume` starts them again:
+the next round is drawn at the next slot on the grid.
 
 Each machine rented is the cheapest that will do at that moment, from either of RunPod's
 clouds (`--cloud any`), and that is nearly always the community one: strangers' machines.

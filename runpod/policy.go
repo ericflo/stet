@@ -24,7 +24,8 @@ import (
 //
 // A machine with nothing official to do trains the next exam's students (a few minutes
 // each), so those waiting want machines too, after the official work and under the same
-// limits: one for every --per-shadow of them.
+// limits: one for every --per-shadow of them. A bigger student holds a machine for hours,
+// and is handed only to one rented to take it (--long-shadow): one machine each.
 //
 // Letting machines go needs no decision here. A rented machine stops by itself once it has
 // had nothing to do for a while, and ends its own pod. What is decided here is ending, at
@@ -37,6 +38,7 @@ type Policy struct {
 	PerRunner   float64 // grading only: machines that keep pace with one curator runner
 	PerWorker   int     // jobs waiting that justify one more machine
 	PerShadow   int     // the next exam's students waiting that justify one more machine; 0: none
+	LongShadow  bool    // the machines take the next exam's bigger students too, one machine to each
 	MaxHourly   float64 // never rent past this many dollars an hour, all machines together
 	DailyBudget float64 // no new machine once this much has been spent today (UTC); 0: no limit
 	Grace       time.Duration
@@ -48,6 +50,9 @@ func (p Policy) target(w *Work) int {
 	n := p.official(w)
 	if p.PerShadow > 0 {
 		n += (w.ShadowWaiting + p.PerShadow - 1) / p.PerShadow
+	}
+	if p.LongShadow {
+		n += w.ShadowLongWaiting // each holds its machine for hours
 	}
 	return min(n, p.MaxWorkers)
 }

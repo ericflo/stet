@@ -56,6 +56,8 @@ type Work struct {
 	// ShadowLongWaiting counts bigger students, held for hours, for a machine set aside for
 	// them (stet verify with STET_SHADOW_MAX_MINUTES): not counted in ShadowWaiting.
 	ShadowLongWaiting int `json:"shadow_long_waiting"`
+	// Paused is when the organisers paused the rounds (0: they are not): none is drawn.
+	Paused int64 `json:"paused,omitempty"`
 }
 
 // work looks at what the open rounds are waiting for, through the judge's own eyes: the
@@ -95,9 +97,10 @@ func (a *App) work(s *State) Work {
 			out.Runners++
 		}
 	}
-	if r := s.roundWithStatus("scheduled"); r != nil {
+	if r := s.roundWithStatus("scheduled"); r != nil && s.Meta.Paused == 0 {
 		out.NextDrawAt = r.DrawAt
 	}
+	out.Paused = s.Meta.Paused
 	out.Waiting = a.waiting(s)
 	out.ShadowWaiting, out.ShadowUnderWay, out.ShadowLongWaiting = shadowWaiting(s, now())
 	busy := map[int64]string{}

@@ -53,7 +53,7 @@
       </div>
       <div class="panel" data-live>
         <div class="row head"><span class="k">Right now</span></div>
-        <div class="row"><span class="k">Round</span><span class="v">{{if $d.Open}}<a href="/rounds/{{$d.Open.ID}}">Round {{$d.Open.Idx}}</a> is running{{else}}{{with $d.Next}}next draw <span data-until="{{.DrawAt}}">{{ago .DrawAt}}</span>{{else}}none scheduled{{end}}{{end}}</span></div>
+        <div class="row"><span class="k">Round</span><span class="v">{{if $d.Open}}<a href="/rounds/{{$d.Open.ID}}">Round {{$d.Open.Idx}}</a> is running{{else}}{{with $d.Next}}next draw <span data-until="{{.DrawAt}}">{{ago .DrawAt}}</span>{{else}}{{if $d.Paused}}paused{{else}}none scheduled{{end}}{{end}}{{end}}</span></div>
         <div class="row"><span class="k">Verifiers, last two weeks</span><span class="v">{{$d.Active}}</span></div>
         <div class="row"><span class="k">GPU time given</span><span class="v">{{gpunum $d.GPUHours}} {{gpuunit $d.GPUHours}}</span></div>
         <div class="row"><span class="v l"><a href="/verifiers">Everyone who verifies →</a></span></div>

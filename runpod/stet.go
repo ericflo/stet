@@ -184,6 +184,11 @@ type Work struct {
 	// official to do: those a machine could be handed now, and those being trained.
 	ShadowWaiting  int `json:"shadow_waiting"`
 	ShadowUnderWay int `json:"shadow_under_way"`
+	// Bigger students, held for hours, handed only to a machine that says it will give one
+	// that long (--long-shadow); not counted in ShadowWaiting.
+	ShadowLongWaiting int `json:"shadow_long_waiting"`
+	// When the organisers paused the rounds (0: they are not): none is drawn.
+	Paused int64 `json:"paused"`
 }
 
 // WorkRound is what an open round is waiting for.
@@ -272,6 +277,16 @@ func (s *Stet) vouch(ctx context.Context, op, worker *Key) error {
 }
 
 // revoke takes the organisers' grant for a key back. A key nobody vouched for is not an error.
+// pause pauses the rounds, or resumes them: when they were paused (0: they are not now).
+func (s *Stet) pause(ctx context.Context, op *Key, paused bool) (since int64, by string, err error) {
+	var out struct {
+		Paused int64  `json:"paused"`
+		By     string `json:"paused_by"`
+	}
+	err = s.do(ctx, "POST", "/api/v1/admin/pause", map[string]bool{"paused": paused}, op, &out)
+	return out.Paused, out.By, err
+}
+
 func (s *Stet) revoke(ctx context.Context, op *Key, public string) error {
 	err := s.do(ctx, "DELETE", "/api/v1/admin/workers/"+public, nil, op, nil)
 	if statusOf(err) == 404 {

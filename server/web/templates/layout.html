@@ -47,7 +47,7 @@
 </html>{{end}}
 
 {{/* What is happening now, on every page: one pill that leads to the round. */}}
-{{define "status"}}{{with .Open}}<a class="status" href="/rounds/{{.ID}}"><span class="dot live" aria-hidden="true"></span>Round {{.Idx}} running · <b>{{.Edited}} of {{.Entries}}</b></a>{{else}}{{with .Next}}<a class="status" href="/rounds/{{$.NextID}}"><span class="dot wait" aria-hidden="true"></span>Round {{.Idx}} <b data-until="{{.DrawAt}}">{{ago .DrawAt}}</b></a>{{else}}{{with .Last}}<a class="status" href="/rounds/{{.ID}}"><span class="dot done" aria-hidden="true"></span>Round {{.Idx}} settled</a>{{end}}{{end}}{{end}}{{end}}
+{{define "status"}}{{with .Open}}<a class="status" href="/rounds/{{.ID}}"><span class="dot live" aria-hidden="true"></span>Round {{.Idx}} running · <b>{{.Edited}} of {{.Entries}}</b></a>{{else}}{{if .Paused}}{{with .Last}}<a class="status" href="/rounds/{{.ID}}"><span class="dot" aria-hidden="true"></span>Rounds paused</a>{{end}}{{else}}{{with .Next}}<a class="status" href="/rounds/{{$.NextID}}"><span class="dot wait" aria-hidden="true"></span>Round {{.Idx}} <b data-until="{{.DrawAt}}">{{ago .DrawAt}}</b></a>{{else}}{{with .Last}}<a class="status" href="/rounds/{{.ID}}"><span class="dot done" aria-hidden="true"></span>Round {{.Idx}} settled</a>{{end}}{{end}}{{end}}{{end}}{{end}}
 
 {{define "install"}}<div class="tabbed" data-tabs>
   <div class="tabs" role="tablist">
