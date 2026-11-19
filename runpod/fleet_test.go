@@ -361,6 +361,40 @@ func TestAKeyIsVouchedForBeforeAMachineIsRentedWithIt(t *testing.T) {
 	}
 }
 
+// Each machine rented takes the key the server has heard from longest ago: the server gives an
+// account one run of an entry, so the key whose last machine ran the round's curators would be
+// given none of their second runs.
+func TestTheQuietestKeyIsRented(t *testing.T) {
+	rp, st := newFakeRunPod(t), newFakeStet(t)
+	f, out := testFleet(t, rp, st, 3)
+	ctx := context.Background()
+	st.work = *round(0, 0, 1, 0)
+	now := time.Now().Unix()
+	st.work.Machines = []Machine{
+		{Handle: "stet-rp-01", Worker: true, LastSeen: now - 60},
+		{Handle: "stet-rp-02", Worker: true, LastSeen: now - 3600},
+	}
+	if err := tick(ctx, f); err != nil || len(rp.created) != 1 || rp.created[0].Name != "stet-rp-03" {
+		t.Fatalf("rented %v, want stet-rp-03, never heard from (%v):\n%s", names(rp.created), err, out)
+	}
+	// stet-rp-03 ran what it could and stopped: stet-rp-02 is next, then stet-rp-01.
+	for _, p := range rp.pods {
+		delete(rp.pods, p.ID)
+	}
+	st.work.Machines = append(st.work.Machines, Machine{Handle: "stet-rp-03", Worker: true, LastSeen: now})
+	if err := tick(ctx, f); err != nil || len(rp.created) != 2 || rp.created[1].Name != "stet-rp-02" {
+		t.Fatalf("rented %v, want stet-rp-02 next (%v):\n%s", names(rp.created), err, out)
+	}
+}
+
+func names(pods []NewPod) []string {
+	var out []string
+	for _, p := range pods {
+		out = append(out, p.Name)
+	}
+	return out
+}
+
 // --dry-run rents and ends nothing.
 func TestADryRunRentsNothing(t *testing.T) {
 	rp, st := newFakeRunPod(t), newFakeStet(t)

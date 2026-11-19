@@ -496,12 +496,9 @@ func (f *Fleet) launchSome(ctx context.Context, v *View, n int, long bool, site 
 		return 0, nil
 	}
 	rented := 0
-	for _, w := range v.Workers {
+	for _, w := range quietest(v.Workers) {
 		if rented == n {
 			break
-		}
-		if w.Pod != nil {
-			continue
 		}
 		if err := f.ready(ctx, w.Key, vouched); err != nil {
 			return rented, err
@@ -517,6 +514,28 @@ func (f *Fleet) launchSome(ctx context.Context, v *View, n int, long bool, site 
 		rented++
 	}
 	return rented, nil
+}
+
+// quietest lists the keys no machine is rented with, the one the server has heard from
+// longest ago first, and one it has never heard from before any. The server gives each
+// account one run of an entry: a machine rented again with the key whose last machine ran
+// the round's curators would find nothing it may run, wait out its idle minutes, end, and
+// be rented again with the same key, while the curators' second runs waited.
+func quietest(ws []*Worker) []*Worker {
+	var free []*Worker
+	for _, w := range ws {
+		if w.Pod == nil {
+			free = append(free, w)
+		}
+	}
+	seen := func(w *Worker) int64 {
+		if w.Machine == nil {
+			return 0
+		}
+		return w.Machine.LastSeen
+	}
+	sort.SliceStable(free, func(i, j int) bool { return seen(free[i]) < seen(free[j]) })
+	return free
 }
 
 // ready makes sure the server takes a key as one of the organisers' rented machines: the
