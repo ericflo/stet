@@ -336,6 +336,57 @@ func (a *App) selectEntrants(s *State, cutoff int64) []entrant {
 	return out
 }
 
+// expectedRow is a curator a scheduled round's draw would enter if it were made now, or a
+// queued one it would leave for a later round.
+type expectedRow struct {
+	EditorID string `json:"editor_id"`
+	Name     string `json:"name"`
+	Version  int    `json:"version"`
+	Owner    string `json:"owner"`
+	Why      string `json:"why"`              // ladder | qualifying | new | later
+	Played   int    `json:"played,omitempty"` // rounds a qualifying curator has played
+	Public   bool   `json:"public"`           // its code is public: it has been drawn before
+}
+
+// expected is what the draw of a scheduled round would do if it were made now: who it would
+// enter, and which queued curators it would leave for a later round. It is not a promise:
+// an entry submitted, replaced or withdrawn before the draw changes it. Nothing about a
+// curator that has never been drawn is shown but its name and its owner.
+func (a *App) expected(s *State, rd *Round) (in, later []expectedRow) {
+	if rd == nil || rd.Status != "scheduled" {
+		return nil, nil
+	}
+	row := func(ed *Editor, why string) expectedRow {
+		return expectedRow{EditorID: ed.ID, Name: ed.Name, Version: ed.Version, Owner: s.owner(ed).Handle, Why: why, Public: ed.Public}
+	}
+	chosen := map[string]bool{}
+	for _, e := range a.selectEntrants(s, rd.DrawAt) {
+		ed := s.Editors[e.EditorID]
+		if ed == nil {
+			continue
+		}
+		chosen[ed.ID] = true
+		r := row(ed, e.Why)
+		if e.Why == "qualifying" {
+			r.Played = roundsRun(s, ed.ID)
+		}
+		in = append(in, r)
+	}
+	var queued []*Editor
+	for _, ed := range s.Editors {
+		if ed.Status == "queued" && !chosen[ed.ID] {
+			queued = append(queued, ed)
+		}
+	}
+	sort.Slice(queued, func(i, j int) bool {
+		return queued[i].CreatedAt < queued[j].CreatedAt || (queued[i].CreatedAt == queued[j].CreatedAt && queued[i].ID < queued[j].ID)
+	})
+	for _, ed := range queued {
+		later = append(later, row(ed, "later"))
+	}
+	return in, later
+}
+
 // bringForward moves the scheduled round to the next moment on the grid (an organiser asked
 // for a draw sooner than the schedule's). In development the draw is immediate and off the
 // grid, which real verifiers would refuse.

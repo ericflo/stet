@@ -15,7 +15,17 @@
 <div class="wrap">
   {{if eq $r.Status "scheduled"}}
   <p class="lead">Nobody knows its pages yet, organisers included. At the draw, a public random number picks them{{with $r.Crawl}} from {{.Crawl}}{{end}}; then every curator in the round gets the same ones.</p>
-  {{if $d.Entries}}<div class="block"><h2>Waiting to play</h2><ul class="waiting">{{range $d.Entries}}<li><span><a class="name" href="/editors/{{short .EditorID}}">{{.Name}}</a><span class="by">{{.Owner}}</span></span></li>{{end}}</ul></div>{{end}}
+  {{if $d.Expected}}<div class="block">
+    <h2>Expected to play</h2>
+    <p class="caption"><b>Not entered yet.</b> Curators are entered at the draw. These are the ones it would enter if it were made now; an entry submitted or replaced before then can change that.</p>
+    <ul class="waiting" id="expected">{{range $d.Expected}}<li><span>{{template "expected-name" .}}</span><span class="chip wait">{{if eq .Why "ladder"}}on the ladder{{else if eq .Why "qualifying"}}qualifying · round {{add .Played 1}} of {{$d.QualifyRounds}}{{else}}new · queued{{end}}</span></li>{{end}}</ul>
+  </div>{{end}}
+  {{with $d.Later}}<div class="block">
+    <h2>Queued for a later round</h2>
+    <p class="caption">A round takes at most {{$d.MaxNew}} new curators, so these wait for a later draw.</p>
+    <ul class="waiting" id="later">{{range .}}<li><span>{{template "expected-name" .}}</span><span class="chip wait">queued</span></li>{{end}}</ul>
+  </div>{{end}}
+  {{if or $d.Expected $d.Later}}<p class="after">A curator's code is public from the first round it is drawn into. Until then only its name shows here.</p>{{end}}
 
   {{else if eq $r.Status "open"}}
   <div class="progress" id="round-progress" data-live>
@@ -107,3 +117,4 @@
 </div>
 </main>
 {{end}}
+{{define "expected-name"}}{{if .Public}}<a class="name" href="/editors/{{short .EditorID}}">{{.Name}}</a>{{else}}<span class="name">{{.Name}}</span>{{end}}{{if gt .Version 1}} <span class="by">v{{.Version}}</span>{{end}}<span class="by">{{.Owner}}</span>{{end}}

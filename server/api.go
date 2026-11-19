@@ -1053,6 +1053,11 @@ func (a *App) apiRound(w http.ResponseWriter, r *http.Request) {
 			entries = append(entries, a.entryJSON(s, e))
 		}
 		out = map[string]any{"round": a.roundJSON(s, rd), "entries": entries}
+		// Before the draw a round has no entries. Who its draw would enter now is not one.
+		if rd.Status == "scheduled" {
+			in, later := a.expected(s, rd)
+			out["expected"], out["later"] = append([]expectedRow{}, in...), append([]expectedRow{}, later...)
+		}
 	})
 	if out == nil {
 		writeErr(w, fail(404, "no such round"))

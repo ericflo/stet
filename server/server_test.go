@@ -2896,6 +2896,85 @@ func TestTheSubmitReplySaysWhichRoundOnlyWhenItKnows(t *testing.T) {
 	}
 }
 
+// Before its draw a round has no entries, and its page and the API say who the draw would
+// enter if it were made now, and who waits for a later round: marked as not entered yet,
+// with no link to code that is not public.
+func TestARoundNotYetDrawnShowsWhoItWouldEnter(t *testing.T) {
+	pub, priv := newKey()
+	w := newWorld(t, pub)
+	w.app.cfg.MaxNewPerRound, w.app.cfg.QualifyRounds = 1, 3
+	anchor := w.join("anchor-one", priv)
+	a, b, c := w.submit(anchor, "ref-a", "print(1)"), w.submit(anchor, "ref-b", "print(2)"), w.submit(anchor, "ref-c", "print(3)")
+	type row struct {
+		EditorID string `json:"editor_id"`
+		Why      string `json:"why"`
+		Played   int    `json:"played"`
+		Public   bool   `json:"public"`
+	}
+	look := func() (string, string, []row, []row) {
+		t.Helper()
+		w.app.tick(context.Background())
+		rid := ""
+		w.app.st.view(func(s *State) {
+			if r := s.roundWithStatus("scheduled"); r != nil {
+				rid = roundID(w.app.season.ID, r.Idx)
+			}
+		})
+		if rid == "" {
+			t.Fatal("no round scheduled")
+		}
+		code, page := w.page("/rounds/" + rid)
+		if code != 200 {
+			t.Fatalf("the round's page: HTTP %d", code)
+		}
+		var api struct {
+			Entries  []map[string]any `json:"entries"`
+			Expected []row            `json:"expected"`
+			Later    []row            `json:"later"`
+		}
+		if _, body := w.page("/api/v1/rounds/" + rid); json.Unmarshal([]byte(body), &api) != nil || len(api.Entries) != 0 {
+			t.Fatalf("the round's API: %s", body)
+		}
+		return rid, page, api.Expected, api.Later
+	}
+
+	// Nothing drawn yet: one new entry a round, so the first waits for this draw and the
+	// others for later ones. Nobody's code is public.
+	_, page, in, later := look()
+	if len(in) != 1 || in[0].EditorID != a || in[0].Why != "new" || in[0].Public || len(later) != 2 || later[0].EditorID != b || later[1].EditorID != c {
+		t.Fatalf("expected %+v, later %+v", in, later)
+	}
+	for _, want := range []string{"Expected to play", "Not entered yet", "new · queued", "Queued for a later round", ">ref-b<", ">ref-c<"} {
+		if !strings.Contains(page, want) {
+			t.Errorf("the page does not say %q", want)
+		}
+	}
+	for _, id := range []string{a, b, c} {
+		if strings.Contains(page, "/editors/"+id[:12]) {
+			t.Errorf("the page links to %s, whose code is not public", id[:12])
+		}
+	}
+
+	// After a draw, the curator it entered is qualifying in the next, and public.
+	first := w.drawWithoutExam()
+	_, page, in, later = look()
+	if len(in) != 2 || in[0].EditorID != a || in[0].Why != "qualifying" || in[0].Played != 1 || !in[0].Public ||
+		in[1].EditorID != b || in[1].Why != "new" || len(later) != 1 || later[0].EditorID != c {
+		t.Fatalf("expected %+v, later %+v", in, later)
+	}
+	if !strings.Contains(page, `href="/editors/`+a[:12]) || !strings.Contains(page, "qualifying · round 2 of 3") || strings.Contains(page, "/editors/"+b[:12]) {
+		t.Error("the page does not link the public curator, say where it is in qualifying, or keeps the rest unlinked")
+	}
+	// A round that has been drawn has entries, and nothing expected.
+	if _, page := w.page("/rounds/" + roundID(w.app.season.ID, first)); strings.Contains(page, "Expected to play") {
+		t.Error("a drawn round still shows who it would enter")
+	}
+	if _, body := w.page("/api/v1/rounds/" + roundID(w.app.season.ID, first)); strings.Contains(body, `"expected"`) {
+		t.Error("a drawn round's API still says who it would enter")
+	}
+	w.check()
+}
+
 func TestAScriptThatDoesNotCompressIsServedWhole(t *testing.T) {
 	pub, priv := newKey()
 	w := newWorld(t, pub)

@@ -1306,6 +1306,7 @@ func (s *Site) round(w http.ResponseWriter, r *http.Request) {
 	idx, ok := a.parseRoundID(r.PathValue("id"))
 	var rs *roundSummary
 	var entries []roundEntry
+	var expected, later []expectedRow
 	prev, next := "", ""
 	a.st.view(func(st *State) {
 		rd := st.Rounds[idx]
@@ -1317,6 +1318,7 @@ func (s *Site) round(w http.ResponseWriter, r *http.Request) {
 		// The page reads as a ranking: entries with a score, best first, then those that
 		// failed or were not run, whose zero is not a place.
 		entries = a.roundEntries(st, idx)
+		expected, later = a.expected(st, rd)
 		if st.Rounds[idx-1] != nil {
 			prev = roundID(a.season.ID, idx-1)
 		}
@@ -1330,7 +1332,8 @@ func (s *Site) round(w http.ResponseWriter, r *http.Request) {
 	}
 	sc := a.season.Scales[rs.Scale]
 	d := map[string]any{"R": rs, "ID": rs.ID, "Entries": entries, "Top": topGain(entries), "Scale": sc, "Tolerance": a.tolerance(),
-		"RunsPerEntry": a.cfg.RunsPerEntry, "Prev": prev, "Next": next}
+		"RunsPerEntry": a.cfg.RunsPerEntry, "Prev": prev, "Next": next,
+		"Expected": expected, "Later": later, "MaxNew": a.cfg.MaxNewPerRound, "QualifyRounds": a.cfg.QualifyRounds}
 	// Every run of the round's entries, and every grade of every script they wrote, whatever
 	// it said, is drawn entry by entry: who ran it, what each run wrote, who graded that.
 	runs := 0
