@@ -93,6 +93,17 @@ def lang_group(it: Item) -> str:
     return CODE if it.lang.startswith("code:") else it.lang
 
 
+def item_table(items: list[Item]) -> list[dict]:
+    """All the score needs to know of each item: its pillar, its part (a family, or a kind of
+    writing), its language (programming languages as one) and its stratum. The server scores a
+    round from this table and the gains alone (server/aggregate.go)."""
+    rows = []
+    for it in items:
+        pillar, part = pillar_of(it)
+        rows.append({"pillar": pillar, "part": part, "lang": lang_group(it), "stratum": stratum_key(it)})
+    return rows
+
+
 def _clip(vals: list[float], k: float) -> list[float]:
     if len(vals) < 3:
         return list(vals)
@@ -131,28 +142,30 @@ def language_weights(langs, shares: dict[str, float] | None = None) -> dict[str,
     return out
 
 
-def _balanced(pairs: list[tuple[Item, float]], clip: float, trim: float) -> tuple[float, dict[str, float]]:
+Pair = tuple[dict, float]  # an item's row of item_table, and its gain
+
+
+def _balanced(pairs: list[Pair], clip: float, trim: float) -> tuple[float, dict[str, float]]:
     """Formats and kinds of task with equal weight, each a trimmed mean of its clipped gains."""
     by: dict[str, list[float]] = defaultdict(list)
-    for it, g in pairs:
-        by[stratum_key(it)].append(g)
+    for row, g in pairs:
+        by[row["stratum"]].append(g)
     strata = {k: trimmed_mean(_clip(v, clip), trim) for k, v in sorted(by.items())}
     return sum(strata.values()) / len(strata), strata
 
 
-def _by_language(pairs: list[tuple[Item, float]], clip: float, trim: float, shares) -> float:
-    langs: dict[str, list[tuple[Item, float]]] = defaultdict(list)
-    for it, g in pairs:
-        langs[lang_group(it)].append((it, g))
+def _by_language(pairs: list[Pair], clip: float, trim: float, shares) -> float:
+    langs: dict[str, list[Pair]] = defaultdict(list)
+    for row, g in pairs:
+        langs[row["lang"]].append((row, g))
     w = language_weights(langs, shares)
     return sum(w[lang] * _balanced(p, clip, trim)[0] for lang, p in langs.items())
 
 
-def _pillars(pairs: list[tuple[Item, float]], clip: float, trim: float, shares) -> dict[str, dict]:
-    tree: dict[str, dict[str, list[tuple[Item, float]]]] = defaultdict(lambda: defaultdict(list))
-    for it, g in pairs:
-        p, sub = pillar_of(it)
-        tree[p][sub].append((it, g))
+def _pillars(pairs: list[Pair], clip: float, trim: float, shares) -> dict[str, dict]:
+    tree: dict[str, dict[str, list[Pair]]] = defaultdict(lambda: defaultdict(list))
+    for row, g in pairs:
+        tree[row["pillar"]][row["part"]].append((row, g))
     out = {}
     for p in sorted(tree):
         subs = {sub: _by_language(v, clip, trim, shares) for sub, v in sorted(tree[p].items())}
@@ -165,6 +178,17 @@ def _mean_of(pillars: dict[str, dict]) -> float:
     return sum(v["score"] for v in pillars.values()) / len(pillars) if pillars else 0.0
 
 
+def score_from_table(table: list[dict], item_gains: list[float], shares: dict[str, float] | None,
+                     clip: float = CLIP, trim: float = TRIM) -> dict:
+    """The round's score and each pillar's, unrounded, from item_table and the gains alone: what
+    round_score gives (without slopes), by the same code, and what the server computes. The server
+    is always given the round's shares (and refuses none); here None or {} means the published SHARES."""
+    if len(table) != len(item_gains):
+        raise ValueError("one gain per item")
+    pillars = _pillars(list(zip(table, item_gains, strict=True)), clip, trim, shares)
+    return {"score": _mean_of(pillars), "pillars": {p: v["score"] for p, v in pillars.items()}}
+
+
 def round_score(items: list[Item], item_gains: list[float], slopes: dict[str, float] | None = None,
                 clip: float = CLIP, trim: float = TRIM, shares: dict[str, float] | None = None) -> dict:
     """The round's score (the mean of its pillars) and what it is made of: each pillar and its
@@ -173,27 +197,28 @@ def round_score(items: list[Item], item_gains: list[float], slopes: dict[str, fl
     if len(items) != len(item_gains):
         raise ValueError("one gain per item")
     slopes = slopes or {}
-    pairs: list[tuple[Item, float]] = []
+    pairs: list[Pair] = []
     fam: dict[str, list[float]] = defaultdict(list)
-    for it, g in zip(items, item_gains, strict=True):
-        s = slopes.get(stratum_key(it))
+    for it, row, g in zip(items, item_table(items), item_gains, strict=True):
+        s = slopes.get(row["stratum"])
         g = g / s if s else g
-        pairs.append((it, g))
+        pairs.append((row, g))
         fam[it.family].append(g)
     pillars = _pillars(pairs, clip, trim, shares)
     out: dict = {"units": "doublings" if slopes else "bits per byte", "items": len(items),
                  "corners": len({it.corner for it in items}), "score": _mean_of(pillars),
                  "pillars": {p: {"score": round(v["score"], 5), "items": v["items"], "parts": v["parts"]} for p, v in pillars.items()},
                  "strata": {}, "generated": None, "fresh": None}
-    gen = [(it, g) for it, g in pairs if is_generated(it)]
-    fresh = [(it, g) for it, g in pairs if not is_generated(it)]
+    gen = [p for it, p in zip(items, pairs, strict=True) if is_generated(it)]
+    fresh = [p for it, p in zip(items, pairs, strict=True) if not is_generated(it)]
     if gen:
         out["generated"] = {"score": _mean_of(_pillars(gen, clip, trim, shares)), "items": len(gen)}
         out["strata"] = {k: round(v, 5) for k, v in _balanced(gen, clip, trim)[1].items()}
     if fresh:
-        by_lang: dict[str, list[tuple[Item, float]]] = defaultdict(list)
-        for it, g in fresh:
-            by_lang[it.lang].append((it, g))
+        by_lang: dict[str, list[Pair]] = defaultdict(list)
+        for it, p in zip(items, pairs, strict=True):
+            if not is_generated(it):
+                by_lang[it.lang].append(p)
         weights = language_weights(by_lang, shares)
         out["fresh"] = {"score": _mean_of(_pillars(fresh, clip, trim, shares)), "items": len(fresh),
                         "languages": {lang: {"weight": round(weights[lang], 5), "score": round(_balanced(p, clip, trim)[0], 5), "items": len(p)}
