@@ -6,7 +6,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -65,8 +67,10 @@ func (w *world) postExam(by *actor, idx int, table []ItemInfo) (int, string) {
 	var out struct {
 		Error string `json:"error"`
 	}
+	public := enc.EncodeAll([]byte("{\"withheld\": true}\n"), nil)
 	code := by.do("POST", fmt.Sprintf("/api/v1/admin/rounds/%s/exam", roundID(w.app.season.ID, idx)), map[string]any{
 		"items_digest": nextDigest, "items_file": base64.StdEncoding.EncodeToString(file), "table": table,
+		"public_file": base64.StdEncoding.EncodeToString(public),
 		"languages": map[string]float64{"en": 60, "de": 40}, "fresh": 6,
 	}, &out)
 	return code, out.Error
@@ -181,6 +185,17 @@ func TestTheNextExamIsGradedOnceItIsPostedAndScoredAgainstTheRoundsBaseline(t *t
 	})
 	if e.Gain == nil || math.Abs(*e.Gain-places5(want)) > 1e-4 {
 		t.Fatalf("the entry's gain is %v, want %.5f", e.Gain, want)
+	}
+	// Settled, the round's published exam is anyone's, unsigned.
+	resp, err := http.Get(w.srv.URL + fmt.Sprintf("/api/v1/rounds/%s/exam", roundID(w.app.season.ID, idx)))
+	if err != nil || resp.StatusCode != 200 {
+		t.Fatalf("a settled round's published exam: %v %v", err, resp)
+	}
+	got, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	dec, _ := zstd.NewReader(nil)
+	if plain, _ := dec.DecodeAll(got, nil); !strings.Contains(string(plain), "withheld") {
+		t.Fatalf("the published exam is not the public one: %q", plain)
 	}
 	// Once settled, what the round held of its exam is in the file store and out of the database.
 	w.app.archiveNext(context.Background())

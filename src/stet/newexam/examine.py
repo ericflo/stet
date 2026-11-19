@@ -23,6 +23,45 @@ from pathlib import Path
 from .farm import pack_items
 from .items import Item, digest
 
+# Sources whose text is openly licensed, and is published with a settled round as it is. Every
+# other source's items are published as their source, id and hash.
+OPEN = ("gen:", "wikipedia:", "wikipedia-added:", "wikipedia-talk:")
+
+
+def public_items(items: list[Item]) -> list[dict]:
+    """A settled round's exam as it is published: the generated items and the openly licensed
+    fresh text whole, every other item as what it was (source, kind, format, language, corner)
+    and its id. The ids, in order, hash to the round's exam digest, so the published file can be
+    checked against it."""
+    out = []
+    for it in items:
+        if it.source.startswith(OPEN):
+            out.append(it.to_dict())
+        else:
+            out.append({"withheld": True, "id": it.id, "source": it.source, "kind": it.kind, "fmt": it.fmt, "lang": it.lang, "corner": it.corner})
+    return out
+
+
+def read_public(raw: bytes, want: str) -> list[Item]:
+    """The items of a published exam that it gives whole, checked against the round's digest."""
+    import hashlib
+
+    h = hashlib.sha256()
+    kept = []
+    for line in raw.decode().splitlines():
+        if not line:
+            continue
+        row = json.loads(line)
+        if row.get("withheld"):
+            h.update(str(row["id"]).encode())
+        else:
+            it = Item.from_dict(row)
+            h.update(it.id.encode())
+            kept.append(it)
+    if h.hexdigest() != want:
+        raise ValueError("the published exam does not hash to the round's exam digest")
+    return kept
+
 
 def build(rnd, scale, draw_at: int, work: Path, log=print) -> dict:
     """The round's exam, as the server takes it. Kept under work, so that a second try costs
@@ -64,7 +103,11 @@ def build(rnd, scale, draw_at: int, work: Path, log=print) -> dict:
     fresh = [it for i, it in enumerate(fresh) if i not in dropped]
     items: list[Item] = gen.generate(rnd.seed, per_corner=int(cfg["per_corner"])) + fresh
     log(f"  the exam: {len(items)} items, {len(fresh)} of them fresh")
+    import zstandard
+
+    public = "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in public_items(items)).encode()
     return {"round": rnd.id, "items_digest": digest(items), "items_file": base64.b64encode(pack_items(items)).decode(),
+            "public_file": base64.b64encode(zstandard.ZstdCompressor(level=10).compress(public)).decode(),
             "table": item_table(items), "languages": dict(list(mix.items())[:500]), "snapshot_sha256": snap_sha, "fresh": len(fresh)}
 
 

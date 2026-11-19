@@ -35,6 +35,7 @@ func (s *Season) next() bool { return s.ExamKind == "next" }
 func nextItemsBlob(idx int) string  { return fmt.Sprintf("nextexam/%08d/items.jsonl.zst", idx) }
 func nextTableBlob(idx int) string  { return fmt.Sprintf("nextexam/%08d/table.json", idx) }
 func nextScoresBlob(idx int) string { return fmt.Sprintf("nextexam/%08d/scores.json", idx) }
+func nextPublicBlob(idx int) string { return fmt.Sprintf("nextexam/%08d/public.jsonl.zst", idx) }
 
 // examPosted reports whether a round's exam is there to be sat. A season whose exam is a pack
 // always has it; the next exam's comes after the draw.
@@ -50,6 +51,7 @@ type ExamPost struct {
 	Shares   map[string]float64 `json:"languages"` // percent of the round's corpus in each language
 	Snapshot string             `json:"snapshot_sha256"`
 	Fresh    int                `json:"fresh"`
+	Public   string             `json:"public_file"` // base64 of the zstd JSON lines published when the round settles
 }
 
 // apiExamPost: POST /api/v1/admin/rounds/{id}/exam, from the organisers. Posting the same exam
@@ -75,7 +77,8 @@ func (a *App) apiExamPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	file, err := base64.StdEncoding.DecodeString(p.File)
-	if err != nil || len(file) == 0 || len(file) > nextExamFileMax || !sha256Re.MatchString(p.Digest) || len(p.Table) == 0 ||
+	public, perr := base64.StdEncoding.DecodeString(p.Public)
+	if err != nil || perr != nil || len(public) == 0 || len(public) > nextExamFileMax || len(file) == 0 || len(file) > nextExamFileMax || !sha256Re.MatchString(p.Digest) || len(p.Table) == 0 ||
 		len(p.Table) > nextExamItemMax || (p.Snapshot != "" && !sha256Re.MatchString(p.Snapshot)) || p.Fresh < 0 || p.Fresh > len(p.Table) {
 		writeErr(w, fail(400, "the exam does not add up"))
 		return
@@ -106,7 +109,7 @@ func (a *App) apiExamPost(w http.ResponseWriter, r *http.Request) {
 	for _, put := range []struct {
 		key, kind string
 		b         []byte
-	}{{nextItemsBlob(idx), "application/zstd", file}, {nextTableBlob(idx), "application/json", table}} {
+	}{{nextItemsBlob(idx), "application/zstd", file}, {nextPublicBlob(idx), "application/zstd", public}, {nextTableBlob(idx), "application/json", table}} {
 		if err := a.st.blobs.Put(r.Context(), put.key, put.b, put.kind); err != nil {
 			slog.Error("keeping a round's exam", "round", idx, "err", err)
 			writeErr(w, fail(503, "the file store is not answering; try again in a moment"))
@@ -153,37 +156,46 @@ func (a *App) checkTable(table []ItemInfo, shares map[string]float64) error {
 	return nil
 }
 
-// apiExamGet: GET /api/v1/rounds/{id}/exam, signed by an account that holds a grade job in the
-// round, or by the organisers. Until a round settles its exam is the graders' alone.
+// apiExamGet: GET /api/v1/rounds/{id}/exam. Once a round settles, its published exam, to anyone:
+// the generated items and the openly licensed text whole, every other item as its source, id
+// and hash. Until then the whole exam, signed, to an account that holds a grade job in the
+// round, or to the organisers.
 func (a *App) apiExamGet(w http.ResponseWriter, r *http.Request) {
-	acct, _, _, err := a.signedBy(w, r, 1<<10, true, anyone)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
 	idx, ok := a.parseRoundID(r.PathValue("id"))
 	if !ok {
 		writeErr(w, fail(404, "no such round"))
 		return
 	}
-	var posted bool
+	var posted, settled bool
 	a.st.view(func(s *State) {
 		rd := s.Rounds[idx]
 		posted = rd != nil && rd.ExamSHA != "" && a.season.next()
-		ok = acct.administers()
-		for _, c := range s.Claims {
-			ok = ok || (c.RoundIdx == idx && c.AccountID == acct.ID && c.Kind == "grade" && c.live(now()))
-		}
+		settled = posted && rd.Status == "settled"
 	})
 	if !posted {
 		writeErr(w, fail(404, "%s has no exam yet", roundID(a.season.ID, idx)))
 		return
 	}
-	if !ok {
-		writeErr(w, fail(403, "a round's exam is given to the machines grading it"))
-		return
+	blob := nextPublicBlob(idx)
+	if !settled {
+		acct, _, _, err := a.signedBy(w, r, 1<<10, true, anyone)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		ok := acct.administers()
+		a.st.view(func(s *State) {
+			for _, c := range s.Claims {
+				ok = ok || (c.RoundIdx == idx && c.AccountID == acct.ID && c.Kind == "grade" && c.live(now()))
+			}
+		})
+		if !ok {
+			writeErr(w, fail(403, "until a round settles, its exam is given to the machines grading it"))
+			return
+		}
+		blob = nextItemsBlob(idx)
 	}
-	f, size, err := a.st.blobs.Open(r.Context(), nextItemsBlob(idx))
+	f, size, err := a.st.blobs.Open(r.Context(), blob)
 	if err != nil {
 		slog.Error("reading a round's exam", "round", idx, "err", err)
 		writeErr(w, fail(503, "the file store is not answering; try again in a moment"))

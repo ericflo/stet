@@ -194,7 +194,29 @@ def fetch_round(season, index: int):
     if not d["round"].get("seed"):
         sys.stderr.write(f"stet: round {clean(d['round']['id'], 40)} has not been drawn yet\n")
         sys.exit(1)
-    return round_from_api(season, d["round"])
+    rnd = round_from_api(season, d["round"])
+    if season.exam_kind == "next" and rnd.exam_digest and d["round"].get("status") == "settled":
+        fetch_public_exam(rnd)
+    return rnd
+
+
+def fetch_public_exam(rnd) -> None:
+    """A settled next-exam round's published exam, kept for replays (see data.next_exam). A
+    machine that graded the round has the whole exam already, and needs none of it."""
+    from . import data
+
+    if data.exam_items_path(rnd, rnd.exam_digest).exists() or data.exam_public_path(rnd, rnd.exam_digest).exists():
+        return
+    try:
+        blob = request("GET", f"/api/v1/rounds/{rnd.id}/exam", raw=True, timeout=600, limit=EXAM_LIMIT)
+    except ApiError as e:
+        sys.stderr.write(f"stet: the published exam of {rnd.id} could not be fetched ({e})\n")
+        return
+    path = data.exam_public_path(rnd, rnd.exam_digest)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.tmp{os.getpid()}")
+    tmp.write_bytes(blob)
+    os.replace(tmp, path)
 
 
 # --- small output helpers -------------------------------------------------------------------

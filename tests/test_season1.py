@@ -140,3 +140,25 @@ def test_the_examiner_makes_a_rounds_exam_from_its_harvest_and_seed(monkeypatch,
     assert score_from_table(exam["table"], [0.1] * len(items), exam["languages"])["score"] == pytest.approx(0.1)
     # made again, it is the same exam
     assert examine.build(rnd, s1.scale("standard"), 1_800_000_000, tmp_path / "work", log=lambda m: None) == exam
+
+
+def test_a_settled_rounds_published_exam_gives_the_open_items_and_checks_against_the_digest():
+    from stet.newexam.examine import public_items, read_public
+
+    s1 = load_season("s1")
+    generated = gen.generate(b"pub", per_corner=1)[:5]
+    wiki = Item(kind="passage", corner="fresh/wikipedia/en/Q5/text", fmt="prose", lang="en", source="wikipedia:en:1", text="An article.")
+    news = Item(kind="passage", corner="fresh/ccnews/en/x/text", fmt="prose", lang="en", source="ccnews:<urn:1>", text="A news story.")
+    items = generated + [wiki, news]
+    rows = public_items(items)
+    assert rows[-1]["withheld"] and "text" not in rows[-1] and rows[-1]["id"] == news.id and "withheld" not in rows[-2]
+    raw = "".join(json.dumps(r) + "\n" for r in rows).encode()
+    assert read_public(raw, digest(items)) == generated + [wiki]
+    with pytest.raises(ValueError):
+        read_public(raw, "00" * 32)
+    # a replay of the settled round sits what was published
+    rnd = _official(s1, digest(items))
+    path = data.exam_public_path(rnd, rnd.exam_digest)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(zstandard.ZstdCompressor().compress(raw))
+    assert data.round_exam(rnd, s1.scale("standard")) == generated + [wiki]

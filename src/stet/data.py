@@ -852,6 +852,11 @@ def exam_items_path(rnd: Round, digest: str) -> Path:
     return cache_dir() / "rounds" / rnd.id / f"exam-{digest[:16]}.jsonl.zst"
 
 
+def exam_public_path(rnd: Round, digest: str) -> Path:
+    """Where a settled round's published exam is kept."""
+    return cache_dir() / "rounds" / rnd.id / f"exam-public-{digest[:16]}.jsonl.zst"
+
+
 def next_exam(rnd: Round):
     """The next exam's items for a round. An official round's are the ones the organisers posted
     after its draw (fetched by the grader beforehand: see client.fetch_exam); a practice or gym
@@ -867,6 +872,17 @@ def next_exam(rnd: Round):
         return gen.generate(rnd.seed, per_corner=int(cfg["per_corner"]))
     want = getattr(rnd, "exam_digest", "") or ""
     path = exam_items_path(rnd, want) if want else None
+    if path is not None and not path.exists() and exam_public_path(rnd, want).exists():
+        # A settled round replayed anywhere: the published exam, which gives the generated items
+        # and the openly licensed text whole, checked against the round's digest.
+        from .newexam.examine import read_public
+
+        raw = zstandard.ZstdDecompressor().decompress(exam_public_path(rnd, want).read_bytes(), max_output_size=1 << 30)
+        try:
+            return read_public(raw, want)
+        except ValueError as e:
+            exam_public_path(rnd, want).unlink(missing_ok=True)
+            raise ExamNotReady(f"{rnd.id}: {e}; it has been removed, fetch it again") from None
     if path is None or not path.exists():
         raise ExamNotReady(f"{rnd.id}: the round's exam has not been posted, or not fetched to this machine")
     raw = zstandard.ZstdDecompressor().decompress(path.read_bytes(), max_output_size=1 << 30)
