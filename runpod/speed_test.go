@@ -8,16 +8,16 @@ import (
 // A kind of GPU is known by the longest name its ID holds as whole words.
 func TestTheSpeedOfEachKindOfGPU(t *testing.T) {
 	for id, want := range map[string]float64{
-		"NVIDIA RTX A4000":               0.64, // not an A40
-		"NVIDIA A40":                     0.95,
-		"NVIDIA L40S":                    1.9, // not an L40
-		"NVIDIA L40":                     1.6,
-		"NVIDIA L4":                      0.45,
-		"NVIDIA GeForce RTX 3080 Ti":     0.95, // not a 3080
-		"NVIDIA GeForce RTX 3080":        0.85,
-		"NVIDIA GeForce RTX 4090":        1.8,
-		"NVIDIA A100-SXM4-80GB":          2,
-		"NVIDIA RTX 6000 Ada Generation": 1.8,
+		"NVIDIA RTX A4000":                             0.64, // not an A40
+		"NVIDIA A40":                                   0.95,
+		"NVIDIA L40S":                                  1.9, // not an L40
+		"NVIDIA L40":                                   1.6,
+		"NVIDIA L4":                                    0.45,
+		"NVIDIA GeForce RTX 3080 Ti":                   0.95, // not a 3080
+		"NVIDIA GeForce RTX 3080":                      0.85,
+		"NVIDIA GeForce RTX 4090":                      1.8,
+		"NVIDIA A100-SXM4-80GB":                        2,
+		"NVIDIA RTX 6000 Ada Generation":               1.8,
 		"NVIDIA RTX PRO 6000 Blackwell Server Edition": 2.6,
 		"AMD Instinct MI300X OAM":                      0,
 		"NVIDIA RTX 4000 SFF Ada Generation":           0,
