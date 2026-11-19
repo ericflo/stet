@@ -101,7 +101,7 @@ Description=Rent GPUs to grade for Stet
 
 [Service]
 EnvironmentFile=%h/.config/stet-runpod/env
-ExecStart=%h/.local/bin/stet-runpod scale --follow --max 5 --max-price 0.22
+ExecStart=%h/.local/bin/stet-runpod scale --follow --max 5 --max-price 0.22 --long-shadow 600
 Restart=always
 RestartSec=60
 
