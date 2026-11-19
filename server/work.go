@@ -37,7 +37,7 @@ type WorkMachine struct {
 	Handle   string `json:"handle"`
 	Worker   bool   `json:"worker,omitempty"`
 	LastSeen int64  `json:"last_seen,omitempty"`
-	Busy     string `json:"busy,omitempty"` // edit or grade: the job it holds
+	Busy     string `json:"busy,omitempty"` // edit or grade: the job it holds; shadow: a student it trains for the next exam
 }
 
 // Work is the answer to GET /api/v1/admin/work.
@@ -49,6 +49,10 @@ type Work struct {
 	Waiting    bool          `json:"waiting"`
 	NextDrawAt int64         `json:"next_draw_at,omitempty"`
 	Machines   []WorkMachine `json:"machines"`
+	// ShadowWaiting counts the next exam's students a machine could be handed now, and
+	// ShadowUnderWay those being trained: work for a machine with nothing official to do.
+	ShadowWaiting  int `json:"shadow_waiting"`
+	ShadowUnderWay int `json:"shadow_under_way"`
 }
 
 // work looks at what the open rounds are waiting for, through the judge's own eyes: the
@@ -92,7 +96,18 @@ func (a *App) work(s *State) Work {
 		out.NextDrawAt = r.DrawAt
 	}
 	out.Waiting = a.waiting(s)
+	out.ShadowWaiting, out.ShadowUnderWay = shadowWaiting(s, now())
 	busy := map[int64]string{}
+	// Training one of the next exam's students counts as at work, so that a rented machine is
+	// not ended partway through one; an official job it holds says so instead.
+	at := now()
+	for _, b := range s.ShadowWork {
+		for _, t := range b.Tasks {
+			if t.Done == nil && t.Holder != 0 && t.Until > at {
+				busy[t.Holder] = "shadow"
+			}
+		}
+	}
 	for _, c := range s.Claims {
 		if e := s.entry(c.RoundIdx, c.EditorID); c.live(j.t) && e != nil && e.Status == "open" {
 			busy[c.AccountID] = c.Kind

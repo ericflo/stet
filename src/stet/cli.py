@@ -499,7 +499,7 @@ def _shadow_follow(args):
                 if d.get("shadow") or time.time() < int(d["round"]["draw_at"]) + args.window:
                     continue
                 one = copy.copy(args)
-                one.round, one.fresh, one.upload, one.entries, one.script = x["id"], True, True, [], None
+                one.round, one.fresh, one.upload, one.entries, one.script = x["id"], True, True, [], None  # --farm carries over
                 _shadow_one(one)
             except (Exception, SystemExit) as e:  # one round's trouble does not stop the others
                 failed[x["id"]] = failed.get(x["id"], 0) + 1
@@ -516,20 +516,27 @@ def _shadow_one(args):
     out = Out(quiet=args.quiet)
     season, scale, rnd = resolve_round(args)
     scripts: dict[str, Path] = {}
+    shas: dict[str, str] = {}
     editors: dict[str, str] = {}
+    farm = bool(getattr(args, "farm", False))
+    if farm and (rnd.kind != "official" or args.script):
+        die("--farm trains the entries of an official round on the organisers' machines; a script file of your own is trained here")
     if rnd.kind == "official":
         for e in request("GET", f"/api/v1/rounds/{rnd.id}").get("entries") or []:
             sha = ((e.get("detail") or {}).get("script") or {}).get("script_sha256")
             label = f"{e.get('owner')}/{e.get('name')}@v{e.get('version')}"
             if sha and (not args.entries or e.get("name") in args.entries or label in args.entries):
-                scripts[label], editors[label] = script_file(sha, season, rnd), e.get("editor", "")
+                shas[label], editors[label] = sha, e.get("editor", "")
+                if not farm:
+                    scripts[label] = script_file(sha, season, rnd)
     for ref in args.script or []:
         scripts[Path(ref).name] = script_file(ref, season, rnd)
-    if not scripts:
+    if not (shas if farm else scripts):
         die("nothing to grade: name entries of an official round, or give --script files")
-    device = pick_device(args.device)
+    device = None if farm else pick_device(args.device)
     work = Path(args.out) if args.out else cache_dir() / "shadow" / rnd.id / scale.name
-    out.line("", out.bold(f"stet shadow · {rnd.kind} round {rnd.id} · {scale.name} · {len(scripts)} scripts · {device.type}"))
+    where = "the organisers' machines" if farm else device.type
+    out.line("", out.bold(f"stet shadow · {rnd.kind} round {rnd.id} · {scale.name} · {len(shas if farm else scripts)} scripts · {where}"))
     log = lambda m: out.line("", out.dim(m))  # noqa: E731
     fresh, mix = None, None
     snapshot = work / "fresh.jsonl"
@@ -565,7 +572,16 @@ def _shadow_one(args):
         if dropped:
             log(f"  {len(dropped)} fresh items are in the round's corpus already, and are dropped")
         fresh = [it for i, it in enumerate(fresh) if i not in dropped]
-    summary = shadow_round(rnd, scale, scripts, device, work, args.per_corner, fresh=fresh, log=log, shares=mix)
+    if farm:
+        from . import data
+        from .client import need_key
+        from .newexam.farm import farm_round
+        from .newexam.shadow import round_items
+
+        corpus, _ = data.materialize(rnd, scale)
+        summary = farm_round(rnd, scale, shas, work, round_items(rnd, args.per_corner, fresh), len(corpus), need_key(), shares=mix, log=log)
+    else:
+        summary = shadow_round(rnd, scale, scripts, device, work, args.per_corner, fresh=fresh, log=log, shares=mix)
     if args.upload:
         from .client import need_key
 
@@ -916,6 +932,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--window", type=int, default=7200, help="seconds after the draw that fresh text may come from (default: 7200)")
     p.add_argument("--upload", action="store_true", help=argparse.SUPPRESS)  # organisers: send the verdict to the site
     p.add_argument("--follow", action="store_true", help=argparse.SUPPRESS)  # organisers: every round, as it settles
+    p.add_argument("--farm", action="store_true", help=argparse.SUPPRESS)  # organisers: their machines train the students (stet verify)
     p.add_argument("--since-days", type=float, default=1.0, help=argparse.SUPPRESS)
     p.set_defaults(fn=cmd_shadow)
 

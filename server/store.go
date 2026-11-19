@@ -415,27 +415,28 @@ const (
 
 var loadScans = []KVScan{
 	{Prefix: "account/"}, {Prefix: "editor/"}, {Prefix: "round/"}, {Prefix: "entry/"}, {Prefix: "claim/"},
-	{Prefix: "result/"}, {Prefix: "baseline/"}, {Prefix: "record/"}, {Prefix: "look/"}, {Prefix: "meta/"}, {Prefix: "shadow/"}, {Prefix: "worker/"},
+	{Prefix: "result/"}, {Prefix: "baseline/"}, {Prefix: "record/"}, {Prefix: "look/"}, {Prefix: "meta/"}, {Prefix: "shadow/"}, {Prefix: "shadowwork/"}, {Prefix: "worker/"},
 	{Prefix: "event/", Reverse: true, Limit: eventsKept},
 }
 
 // --- the state --------------------------------------------------------------------------------
 
 type State struct {
-	Accounts  map[int64]*Account
-	Editors   map[string]*Editor
-	Rounds    map[int]*Round
-	Entries   map[string]*Entry
-	Claims    map[int64]*Claim
-	Results   map[int64]*Result
-	Baselines map[string]*Baseline
-	Records   []*Record // oldest first
-	Looks     map[string]*Look
-	Shadows   map[int]*Shadow         // the next exam's verdict on settled rounds, by round
-	Workers   map[string]*WorkerGrant // the machines the organisers rent, by public key
-	Events    []*Event                // oldest first; only the most recent are kept in memory
-	Meta      Meta
-	Crawl     *SavedCrawl
+	Accounts   map[int64]*Account
+	Editors    map[string]*Editor
+	Rounds     map[int]*Round
+	Entries    map[string]*Entry
+	Claims     map[int64]*Claim
+	Results    map[int64]*Result
+	Baselines  map[string]*Baseline
+	Records    []*Record // oldest first
+	Looks      map[string]*Look
+	Shadows    map[int]*Shadow         // the next exam's verdict on settled rounds, by round
+	ShadowWork map[string]*ShadowBatch // the next exam's students, farmed out to the organisers' machines
+	Workers    map[string]*WorkerGrant // the machines the organisers rent, by public key
+	Events     []*Event                // oldest first; only the most recent are kept in memory
+	Meta       Meta
+	Crawl      *SavedCrawl
 
 	byPubkey  map[string]*Account
 	byHandle  map[string]*Account
@@ -449,7 +450,7 @@ func newState() *State {
 	return &State{
 		Accounts: map[int64]*Account{}, Editors: map[string]*Editor{}, Rounds: map[int]*Round{}, Entries: map[string]*Entry{},
 		Claims: map[int64]*Claim{}, Results: map[int64]*Result{}, Baselines: map[string]*Baseline{}, Looks: map[string]*Look{},
-		Shadows: map[int]*Shadow{}, Workers: map[string]*WorkerGrant{},
+		Shadows: map[int]*Shadow{}, ShadowWork: map[string]*ShadowBatch{}, Workers: map[string]*WorkerGrant{},
 		Meta:     Meta{NextAccount: 1, NextClaim: 1, NextResult: 1, NextEvent: 1},
 		byPubkey: map[string]*Account{}, byHandle: map[string]*Account{}, inRound: map[int][]*Entry{}, ofEditor: map[string][]*Entry{},
 		resultsOf: map[string][]*Result{}, ownedBy: map[int64][]*Editor{},
@@ -598,6 +599,12 @@ func (s *State) decode(it KVItem) error {
 			return err
 		}
 		s.Shadows[sh.RoundIdx] = sh
+	case "shadowwork":
+		b := &ShadowBatch{}
+		if err := into(b); err != nil {
+			return err
+		}
+		s.ShadowWork[b.ID] = b
 	case "worker":
 		g := &WorkerGrant{}
 		if err := into(g); err != nil {
@@ -950,6 +957,9 @@ func (st *Store) audit(ctx context.Context) error {
 	}
 	for _, sh := range st.s.Shadows {
 		mem[shadowKey(sh.RoundIdx)] = sh
+	}
+	for _, b := range st.s.ShadowWork {
+		mem[shadowBatchKey(b.ID)] = b
 	}
 	for k, g := range st.s.Workers {
 		mem[workerKey(k)] = g

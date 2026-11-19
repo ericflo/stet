@@ -1,0 +1,146 @@
+package main
+
+import (
+	"encoding/base64"
+	"fmt"
+	"strings"
+	"testing"
+)
+
+// The next exam's students are farmed out: the organisers' own machine posts a settled round's
+// batch, any of the organisers' machines (a rented one too) is handed a student to train, one
+// at a time, and its scores are kept for the organisers to add up. Nobody else is handed one or
+// may post one, and a task left by a machine goes to another.
+func TestTheNextExamsStudentsAreTrainedByTheOrganisersMachines(t *testing.T) {
+	pubA, privA := newKey()
+	pubW, privW := newKey()
+	w := newWorld(t, pubA)
+	anchor := w.join("anchor-one", privA)
+	if code := w.vouch(anchor, pubW); code != 201 {
+		t.Fatalf("vouching for a rented machine: HTTP %d", code)
+	}
+	rented := w.join("rented-one", privW)
+	alice := w.join("alice", nil)
+	a1 := w.submit(alice, "sieve", "print(1)")
+	_ = a1
+	w.play(anchor, 1, func(name string, round int) float64 { return 5.3 })
+	idx := 0
+	w.app.st.view(func(s *State) {
+		for i, rd := range s.Rounds {
+			if rd.Status == "settled" && i > idx {
+				idx = i
+			}
+		}
+	})
+	digest := strings.Repeat("ab", 32)
+	batch := map[string]any{"round": idx, "scale": "micro", "items_digest": digest, "items": 3, "generator_version": 3,
+		"scripts": []string{"unedited", strings.Repeat("cd", 32)}, "items_file": base64.StdEncoding.EncodeToString([]byte("zstd bytes"))}
+	if code := rented.do("POST", "/api/v1/admin/shadow/batches", batch, nil); code != 403 {
+		t.Fatalf("a rented machine posting a batch: HTTP %d", code)
+	}
+	var made struct {
+		Batch string `json:"batch"`
+		Tasks int    `json:"tasks"`
+	}
+	if code := anchor.do("POST", "/api/v1/admin/shadow/batches", batch, &made); code != 200 || made.Tasks != 2 {
+		t.Fatalf("the organisers' batch: HTTP %d %+v", code, made)
+	}
+	var work Work
+	anchor.do("GET", "/api/v1/admin/work", nil, &work)
+	if work.ShadowWaiting != 2 {
+		t.Fatalf("stet-runpod is told of %d students waiting, not 2", work.ShadowWaiting)
+	}
+
+	type claimed struct {
+		Task *struct {
+			Batch  string `json:"batch"`
+			Index  int    `json:"index"`
+			Round  string `json:"round"`
+			Script string `json:"script"`
+			Items  int    `json:"items"`
+		} `json:"task"`
+	}
+	var c claimed
+	if code := alice.do("POST", "/api/v1/shadow/claim", map[string]any{}, &c); code != 403 {
+		t.Fatalf("a volunteer asking for a student: HTTP %d", code)
+	}
+	if code := rented.do("POST", "/api/v1/shadow/claim", map[string]any{}, &c); code != 200 || c.Task == nil || c.Task.Script != "unedited" || c.Task.Items != 3 {
+		t.Fatalf("the rented machine is handed the unedited corpus first: HTTP %d %+v", code, c.Task)
+	}
+	anchor.do("GET", "/api/v1/admin/work", nil, &work)
+	for _, m := range work.Machines {
+		if m.Handle == "rented-one" && m.Busy != "shadow" {
+			t.Fatalf("a machine training a student is not shown at work: %+v", m)
+		}
+	}
+	var again claimed
+	rented.do("POST", "/api/v1/shadow/claim", map[string]any{}, &again)
+	if again.Task == nil || again.Task.Index != c.Task.Index {
+		t.Fatal("a machine asking again is handed the task it holds")
+	}
+	if code := rented.do("GET", "/api/v1/shadow/batches/"+c.Task.Batch+"/items", nil, nil); code != 200 {
+		t.Fatalf("the batch's items: HTTP %d", code)
+	}
+	task := fmt.Sprintf("/api/v1/shadow/batches/%s/tasks/%d", c.Task.Batch, c.Task.Index)
+	good := map[string]any{"valid": true, "exam_loss": 5.4, "by_source": map[string]float64{"wiki": 5.1}, "kept_doc_frac": 1,
+		"train_seconds": 120, "hardware": "RTX 3080 Ti", "item_scores": []float64{-1.2, -0.8, -2.5}}
+	if code := anchor.do("POST", task, good, nil); code != 409 {
+		t.Fatalf("another machine posting a task it does not hold: HTTP %d", code)
+	}
+	short := map[string]any{"valid": true, "exam_loss": 5.4, "item_scores": []float64{-1.2}}
+	if code := rented.do("POST", task, short, nil); code != 400 {
+		t.Fatalf("a result with too few scores: HTTP %d", code)
+	}
+	if code := rented.do("POST", task, good, nil); code != 200 {
+		t.Fatalf("the rented machine's result: HTTP %d", code)
+	}
+	if code := rented.do("POST", task, good, nil); code != 409 {
+		t.Fatalf("a result for a task already done: HTTP %d", code)
+	}
+
+	// The second task: the organisers' own machine takes it, hands it back, and it waits again.
+	var c2 claimed
+	anchor.do("POST", "/api/v1/shadow/claim", map[string]any{}, &c2)
+	if c2.Task == nil || c2.Task.Script != strings.Repeat("cd", 32) {
+		t.Fatalf("the second student: %+v", c2.Task)
+	}
+	if code := anchor.do("POST", fmt.Sprintf("/api/v1/shadow/batches/%s/tasks/%d/release", c2.Task.Batch, c2.Task.Index), map[string]any{}, nil); code != 200 {
+		t.Fatalf("handing a task back: HTTP %d", code)
+	}
+	anchor.do("GET", "/api/v1/admin/work", nil, &work)
+	if work.ShadowWaiting != 1 || work.ShadowUnderWay != 0 {
+		t.Fatalf("after one done and one handed back: %d waiting, %d under way", work.ShadowWaiting, work.ShadowUnderWay)
+	}
+
+	// Posting the same items again adds only what is new.
+	batch["scripts"] = []string{"unedited", strings.Repeat("cd", 32), strings.Repeat("ef", 32)}
+	if code := anchor.do("POST", "/api/v1/admin/shadow/batches", batch, &made); code != 200 || made.Tasks != 3 {
+		t.Fatalf("a batch posted again: HTTP %d %+v", code, made)
+	}
+
+	var got struct {
+		Tasks []struct {
+			Script string      `json:"script"`
+			Done   *ShadowDone `json:"done"`
+			Scores []float64   `json:"item_scores"`
+		} `json:"tasks"`
+	}
+	if code := rented.do("GET", "/api/v1/admin/shadow/batches/"+made.Batch, nil, &got); code != 403 {
+		t.Fatalf("a rented machine reading the batch: HTTP %d", code)
+	}
+	if code := anchor.do("GET", "/api/v1/admin/shadow/batches/"+made.Batch, nil, &got); code != 200 || len(got.Tasks) != 3 {
+		t.Fatalf("the organisers reading the batch: HTTP %d", code)
+	}
+	if d := got.Tasks[0].Done; d == nil || d.By != "rented-one" || d.Loss != 5.4 || len(got.Tasks[0].Scores) != 3 || got.Tasks[0].Scores[2] != -2.5 {
+		t.Fatalf("the unedited student, as kept: %+v %v", d, got.Tasks[0].Scores)
+	}
+
+	// Kept across a restart.
+	w.check()
+	again2 := startWorld(t, w.cfg, w.kv, w.blobs)
+	again2.app.st.view(func(s *State) {
+		if b := s.ShadowWork[made.Batch]; b == nil || len(b.Tasks) != 3 || b.Tasks[0].Done == nil {
+			t.Fatal("the batch was not kept")
+		}
+	})
+}

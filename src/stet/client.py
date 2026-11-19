@@ -1446,6 +1446,10 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
         sys.stderr.write(f"stet: {e}\n")
         sys.exit(1)
     hello = {"harness": __version__, "season": season.id, "season_digest": season.digest, "hardware": hw, "edits": bool(args.edits), "sandbox": sandbox}
+    # The organisers' machines, rented ones too, train the next exam's students when nothing
+    # official is waiting (newexam/farm.py). It ranks nothing, and never comes before a job.
+    shadow_ok = bool(((me or {}).get("account") or {}).get("anchor"))
+    shadow_rest = 0.0  # after a shadow task fails, a while before the next is asked for
     done = failures = waits = 0
     refused: dict[str, int] = {}  # round id -> how many times this machine and the server disagreed about it
     tries: dict[int, int] = {}  # job id -> how many times it has failed on this machine
@@ -1557,6 +1561,18 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
                 if args.once or (args.max_jobs and done >= args.max_jobs):
                     out.line("", clean(r.get("message") or "No work right now."))
                     return
+                if shadow_ok and holding is None and time.time() >= shadow_rest:
+                    from .newexam import farm
+
+                    try:
+                        if farm.turn(season, key, device, log=lambda m: out.line("shadow", m)):
+                            idle, idle_for = False, 0
+                            continue
+                    except KeyboardInterrupt:
+                        raise
+                    except BaseException as e:  # the next exam ranks nothing: what goes wrong there stops nothing official
+                        shadow_rest = time.time() + 600
+                        out.line("", out.bad(f"a student for the next exam could not be trained ({clean(str(e) or type(e).__name__, 300)}); handed back"))
                 # Only here, where the server has just said there is no job for us, so that
                 # stopping for want of work never leaves one held.
                 if idle_limit and idle_for >= idle_limit:

@@ -50,6 +50,57 @@ def _write(path: Path, obj) -> None:
     tmp.replace(path)
 
 
+def unedited_script(path: Path, n_docs: int) -> str:
+    """Write the script that keeps the corpus as it is; returns its sha256."""
+    write_script(path, range(n_docs))
+    return _sha(path)
+
+
+def train_student(rnd: Round, scale: Scale, corpus, exam, enc, script: Path, device):
+    """Train the student on what a script keeps and sit it on the season's exam: (what it says,
+    the model, or None when the script is not one)."""
+    meta: dict = {"valid": False}
+    try:
+        tokens, stats = materialize(corpus, script, rnd.season, scale, enc)
+    except ScriptError as e:
+        meta["invalid_reason"] = str(e)
+        return meta, None
+    model, tr = train(tokens, scale, rnd.season, rnd.init_seed, device)
+    current = evaluate(model, exam, scale, rnd.season, device, enc)
+    meta.update(valid=True, exam_loss=current["loss"], by_source={k: v["loss"] for k, v in current["by_source"].items()},
+                kept_doc_frac=stats.to_dict(corpus)["kept_doc_frac"], train_seconds=round(tr["seconds"], 1))
+    return meta, model
+
+
+def summarize(rnd: Round, scale: Scale, items: list[Item], base: dict, students: dict[str, dict],
+              shares: dict[str, float] | None = None) -> dict:
+    """The round's shadow, from the unedited student and each script's (name -> what it says,
+    with its item_scores)."""
+    rows = []
+    for name, r in students.items():
+        row = {"name": name, "valid": r["valid"]}
+        if r["valid"]:
+            row["season_gain"] = round(base["exam_loss"] - r["exam_loss"], 5)
+            agg = round_score(items, gains(r["item_scores"], base["item_scores"]), shares=shares)
+            row.update(next_score=round(agg["score"], 5), strata=agg["strata"], families=agg["families"])
+            for label in ("generated", "fresh"):
+                if agg[label]:
+                    row[f"{label}_score"] = round(agg[label]["score"], 5)
+            if agg["fresh"]:
+                row["languages"] = {k: v["score"] for k, v in agg["fresh"]["languages"].items()}
+        else:
+            row["reason"] = r.get("invalid_reason")
+        rows.append(row)
+    return {"round": rnd.id, "scale": scale.name, "items": len(items), "corners": len({it.corner for it in items}), "items_digest": digest(items),
+            "generator_version": gen.VERSION, "baseline_exam_loss": base["exam_loss"], "entries": rows}
+
+
+def write_items(items: list[Item], path: Path) -> None:
+    with open(path, "w") as f:
+        for it in items:
+            f.write(json.dumps(it.to_dict(), ensure_ascii=False) + "\n")
+
+
 def shadow_round(rnd: Round, scale: Scale, scripts: dict[str, Path], device, out_dir: Path,
                  per_corner: int = PER_CORNER, fresh: list[Item] | None = None, log=print,
                  shares: dict[str, float] | None = None) -> dict:
@@ -63,9 +114,7 @@ def shadow_round(rnd: Round, scale: Scale, scripts: dict[str, Path], device, out
     corpus, exam = data.materialize(rnd, scale)
     items = round_items(rnd, per_corner, fresh)
     tag = digest(items)[:12]
-    with open(out_dir / "items.jsonl", "w") as f:
-        for it in items:
-            f.write(json.dumps(it.to_dict(), ensure_ascii=False) + "\n")
+    write_items(items, out_dir / "items.jsonl")
     if shares:
         _write(out_dir / "languages.json", shares)  # the corpus's languages, which weigh the fresh items
     log(f"{rnd.id}: {len(corpus):,} documents; next exam {len(items)} items in {len({i.corner for i in items})} corners "
@@ -75,26 +124,20 @@ def shadow_round(rnd: Round, scale: Scale, scripts: dict[str, Path], device, out
         sha = _sha(script)[:16]
         meta_path, weights = out_dir / f"{sha}.json", out_dir / "students" / f"{sha}.pt"
         meta = json.loads(meta_path.read_text()) if meta_path.exists() else None
+        scores_path = out_dir / f"{sha}-{tag}.json"
         model = None
-        if meta is None or (meta["valid"] and not weights.exists()):
+        # Trained here, or by another of the organisers' machines (farm.py), which keeps no weights.
+        if meta is None or (meta["valid"] and not weights.exists() and not scores_path.exists()):
             t0 = time.time()
-            meta = {"name": name, "valid": False}
-            try:
-                tokens, stats = materialize(corpus, script, season, scale, enc)
-            except ScriptError as e:
-                meta["invalid_reason"] = str(e)
-            else:
-                model, tr = train(tokens, scale, season, rnd.init_seed, device)
-                current = evaluate(model, exam, scale, season, device, enc)
+            meta, model = train_student(rnd, scale, corpus, exam, enc, script, device)
+            meta["name"] = name
+            if model is not None:
                 torch.save(model.state_dict(), weights)
-                meta.update(valid=True, exam_loss=current["loss"], by_source={k: v["loss"] for k, v in current["by_source"].items()},
-                            kept_doc_frac=stats.to_dict(corpus)["kept_doc_frac"], train_seconds=round(tr["seconds"], 1))
             _write(meta_path, meta)
             said = f"season exam {meta['exam_loss']:.4f}" if meta["valid"] else f"invalid: {meta['invalid_reason']}"
             log(f"  {name}: trained, {said} [{time.time() - t0:.0f}s]")
         if not meta["valid"]:
             return meta
-        scores_path = out_dir / f"{sha}-{tag}.json"
         if scores_path.exists():
             meta["item_scores"] = json.loads(scores_path.read_text())
             return meta
@@ -108,29 +151,12 @@ def shadow_round(rnd: Round, scale: Scale, scripts: dict[str, Path], device, out
         return meta
 
     base_script = out_dir / f"unedited-{os.getpid()}.jsonl"
-    write_script(base_script, range(len(corpus)))
+    unedited_script(base_script, len(corpus))
     try:
         base = student("(unedited)", base_script)
     finally:
         base_script.unlink(missing_ok=True)
-    rows = []
-    for name, script in scripts.items():
-        r = student(name, script)
-        row = {"name": name, "valid": r["valid"]}
-        if r["valid"]:
-            row["season_gain"] = round(base["exam_loss"] - r["exam_loss"], 5)
-            g = gains(r["item_scores"], base["item_scores"])
-            agg = round_score(items, g, shares=shares)
-            row.update(next_score=round(agg["score"], 5), strata=agg["strata"], families=agg["families"])
-            for label in ("generated", "fresh"):
-                if agg[label]:
-                    row[f"{label}_score"] = round(agg[label]["score"], 5)
-            if agg["fresh"]:
-                row["languages"] = {k: v["score"] for k, v in agg["fresh"]["languages"].items()}
-        else:
-            row["reason"] = r.get("invalid_reason")
-        rows.append(row)
-    summary = {"round": rnd.id, "scale": scale.name, "items": len(items), "corners": len({it.corner for it in items}), "items_digest": digest(items),
-               "generator_version": gen.VERSION, "baseline_exam_loss": base["exam_loss"], "entries": rows}
+    students = {name: student(name, script) for name, script in scripts.items()}
+    summary = summarize(rnd, scale, items, base, students, shares)
     _write(out_dir / "summary.json", summary)
     return summary

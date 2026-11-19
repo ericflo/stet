@@ -319,3 +319,91 @@ def test_programs_in_go_c_and_lua_print_what_the_item_says(lang, tool, tmp_path)
             run = ["lua", str(src)]
         out = subprocess.run(run, capture_output=True, text=True, timeout=120).stdout
         assert out.strip() == it.cont.strip(), (code, it.cont)
+
+
+def test_students_farmed_out_to_the_organisers_machines_add_up_as_a_local_run_does(corpus, tmp_path, monkeypatch):
+    pytest.importorskip("torch")
+    import dataclasses
+    import hashlib
+    import threading
+
+    import torch
+    import zstandard
+
+    from stet import client, data
+    from stet.newexam import farm, shadow
+    from stet.script import write_script
+    from stet.spec import load_season, practice_round
+
+    season = load_season("s0")
+    scale = dataclasses.replace(season.scale("nano"), train_tokens=2 * 16 * 256)
+    rnd = practice_round(season, 0)
+    exam = {"news": [{"id": "n0", "text": "A short passage of news for the season's exam to score. " * 3}]}
+    monkeypatch.setattr(data, "materialize", lambda r, s: (corpus, exam))
+    monkeypatch.setattr(type(season), "scale", lambda self, name: scale)
+    monkeypatch.setattr(client, "round_from_api", lambda s, d: rnd)
+    monkeypatch.setattr(farm, "POLL", 0.05)
+    other = tmp_path / "other.jsonl"
+    write_script(other, [3, 0])
+    script_bytes = other.read_bytes()
+    sha = hashlib.sha256(script_bytes).hexdigest()
+    items = shadow.round_items(rnd, per_corner=1)[:60]
+
+    # The server, as far as the farm sees it.
+    lock = threading.Lock()
+    batch: dict = {}
+
+    def request(method, path, body=None, key=None, raw=False, timeout=0, limit=0):
+        with lock:
+            if path == "/api/v1/admin/shadow/batches":
+                batch.update(id="b", items=body["items_file"], tasks=[{"script": s, "tries": 0} for s in body["scripts"]])
+                return {"batch": "b"}
+            if path == "/api/v1/admin/shadow/batches/b":
+                return {"tasks": [dict(t) for t in batch["tasks"]]}
+            if path == "/api/v1/shadow/claim":
+                for i, t in enumerate(batch.get("tasks", [])):
+                    if not t.get("done") and not t.get("holder"):
+                        t["holder"], t["tries"] = 1, t["tries"] + 1
+                        return {"task": {"batch": "b", "index": i, "round": rnd.id, "scale": "nano", "script": t["script"],
+                                         "items_digest": digest(items), "items": len(items)}}
+                return {"task": None}
+            if path == "/api/v1/shadow/batches/b/items":
+                import base64
+
+                return base64.b64decode(batch["items"])
+            if path.startswith("/api/v1/shadow/batches/b/tasks/"):
+                t = batch["tasks"][int(path.rsplit("/", 1)[1])]
+                t.update(done={**body, "by": "rented-one"}, item_scores=body.get("item_scores"), holder=None)
+                return {"ok": True}
+            if path == f"/api/v1/scripts/{sha}":
+                return zstandard.ZstdCompressor().compress(script_bytes)
+            if path.startswith("/api/v1/rounds/"):
+                return {"round": {}}
+        raise AssertionError(path)
+
+    monkeypatch.setattr(client, "request", request)
+    got: dict = {}
+    t = threading.Thread(target=lambda: got.update(s=farm.farm_round(rnd, scale, {"other": sha}, tmp_path / "farmed", items, len(corpus), None,
+                                                                      log=lambda m: None, patience=120)), daemon=True)
+    t.start()
+    while t.is_alive():
+        if not farm.turn(season, None, torch.device("cpu"), log=lambda m: None):
+            t.join(0.05)
+    farmed = got["s"]
+    local = shadow.shadow_round(rnd, scale, {"other": other}, torch.device("cpu"), tmp_path / "local", per_corner=1, log=lambda m: None)
+    # The local run sat every generated item; the farm the first 60 of them. Each item is
+    # scored on its own, so the local run's first 60 scores are what the farm should have.
+    assert farmed["items"] == len(items) and farmed["entries"][0]["valid"]
+    tag = local["items_digest"][:12]
+
+    def kept(sha16):
+        m = json.loads((tmp_path / "local" / f"{sha16}.json").read_text())
+        m["item_scores"] = json.loads((tmp_path / "local" / f"{sha16}-{tag}.json").read_text())[: len(items)]
+        return m
+
+    base16 = next(p.stem for p in (tmp_path / "local").glob("????????????????.json") if p.stem != sha[:16])
+    loc = shadow.summarize(rnd, scale, items, kept(base16), {"other": kept(sha[:16])})
+    assert farmed["entries"][0]["next_score"] == pytest.approx(loc["entries"][0]["next_score"], abs=1e-5)
+    assert farmed["baseline_exam_loss"] == pytest.approx(local["baseline_exam_loss"], abs=1e-6)
+    # kept as a local run keeps them, for the report
+    assert (tmp_path / "farmed" / f"{sha[:16]}.json").exists() and (tmp_path / "farmed" / "items.jsonl").exists()

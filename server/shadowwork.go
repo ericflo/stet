@@ -1,0 +1,451 @@
+package main
+
+import (
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"regexp"
+	"sort"
+	"strconv"
+)
+
+// --- the next exam's students, farmed out -------------------------------------------------------
+//
+// A round's shadow (shadow.go) needs a student for every entry and one for the unedited corpus,
+// each trained on what its script keeps and then sat on the season's exam and on the round's
+// next exam. The organisers' machine posts a round's students as a batch of tasks. Any of the
+// organisers' machines, rented ones included, takes a task when it has no official work
+// (stet verify) and sends back how its student did on every item. The organisers' machine then
+// adds them up into the round's shadow. Nothing here touches a grade, and a task is handed out
+// only to a machine with nothing official to do.
+
+const (
+	shadowLease       = 45 * 60  // seconds a machine holds a task before it may be handed to another
+	shadowTries       = 3        // machines a task is handed to before it is left undone
+	shadowItemsMax    = 16 << 20 // bytes of a batch's items, compressed
+	shadowBatchesKept = 60       // the oldest are forgotten past this many
+)
+
+// ShadowTask is one student a batch needs.
+type ShadowTask struct {
+	Script string      `json:"script"` // sha256 of the script, or "unedited"
+	Holder int64       `json:"holder,omitempty"`
+	Until  int64       `json:"until,omitempty"`
+	Tries  int         `json:"tries"`
+	Done   *ShadowDone `json:"done,omitempty"`
+}
+
+// ShadowDone says who trained a task's student and how it did on the season's exam. How it did
+// on each item of the next exam is kept in the file store, beside the batch's items.
+type ShadowDone struct {
+	By       string             `json:"by"`
+	At       int64              `json:"at"`
+	Hardware string             `json:"hardware,omitempty"`
+	Valid    bool               `json:"valid"`
+	Reason   string             `json:"reason,omitempty"`
+	Loss     float64            `json:"exam_loss,omitempty"`
+	BySource map[string]float64 `json:"by_source,omitempty"`
+	Kept     float64            `json:"kept_doc_frac,omitempty"`
+	Seconds  float64            `json:"train_seconds,omitempty"`
+}
+
+// ShadowBatch is a round's students for one version of its next exam.
+type ShadowBatch struct {
+	ID       string        `json:"id"`
+	RoundIdx int           `json:"round"`
+	Scale    string        `json:"scale"`
+	Digest   string        `json:"items_digest"`
+	Items    int           `json:"items"`
+	Version  int           `json:"generator_version"`
+	At       int64         `json:"at"`
+	By       string        `json:"by"`
+	Tasks    []*ShadowTask `json:"tasks"`
+}
+
+func shadowBatchKey(id string) string  { return "shadowwork/" + id }
+func shadowItemsBlob(id string) string { return "shadowwork/" + id + "/items.jsonl.zst" }
+func shadowScoresBlob(id string, i int) string {
+	return fmt.Sprintf("shadowwork/%s/%d.json", id, i)
+}
+
+var (
+	shadowBatchRe = regexp.MustCompile(`^[0-9]{8}-[0-9a-f]{12}$`)
+	scaleRe       = regexp.MustCompile(`^[a-z]{1,16}$`)
+)
+
+func (tx *Tx) saveShadowBatch(b *ShadowBatch) {
+	tx.s.ShadowWork[b.ID] = b
+	tx.put(shadowBatchKey(b.ID), b)
+}
+
+// open says whether a task may be handed to a machine now.
+func (t *ShadowTask) open(at int64) bool {
+	return t.Done == nil && t.Tries < shadowTries && (t.Holder == 0 || t.Until <= at)
+}
+
+// shadowWaiting counts the tasks a machine could be handed now: for stet-runpod, which rents
+// for them when there is nothing official to do.
+func shadowWaiting(s *State, at int64) (waiting, underWay int) {
+	for _, b := range s.ShadowWork {
+		for _, t := range b.Tasks {
+			switch {
+			case t.open(at):
+				waiting++
+			case t.Done == nil && t.Holder != 0 && t.Until > at:
+				underWay++
+			}
+		}
+	}
+	return
+}
+
+func (s *State) shadowBatchesByAge() []*ShadowBatch {
+	out := make([]*ShadowBatch, 0, len(s.ShadowWork))
+	for _, b := range s.ShadowWork {
+		out = append(out, b)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].At != out[j].At {
+			return out[i].At < out[j].At
+		}
+		return out[i].ID < out[j].ID
+	})
+	return out
+}
+
+// apiShadowBatch takes a round's batch from the organisers' own machine: the round's next-exam
+// items (zstd JSON lines, base64) and the scripts whose students it wants. Posting the same
+// items again adds any scripts not yet in the batch, and is otherwise a no-op.
+func (a *App) apiShadowBatch(w http.ResponseWriter, r *http.Request) {
+	acct, _, body, err := a.signedBy(w, r, 4*shadowItemsMax/3+(1<<20), true, organisers)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	var req struct {
+		Round   int      `json:"round"`
+		Scale   string   `json:"scale"`
+		Digest  string   `json:"items_digest"`
+		Items   int      `json:"items"`
+		Version int      `json:"generator_version"`
+		Scripts []string `json:"scripts"`
+		File    string   `json:"items_file"` // base64 of the zstd JSON lines
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeErr(w, fail(400, "not a batch: %v", err))
+		return
+	}
+	file, err := base64.StdEncoding.DecodeString(req.File)
+	if err != nil || len(file) == 0 || len(file) > shadowItemsMax || !sha256Re.MatchString(req.Digest) || req.Items <= 0 ||
+		req.Items > 100_000 || !scaleRe.MatchString(req.Scale) || len(req.Scripts) == 0 || len(req.Scripts) > 500 {
+		writeErr(w, fail(400, "the batch does not add up"))
+		return
+	}
+	seen := map[string]bool{}
+	for _, sc := range req.Scripts {
+		if seen[sc] || (sc != "unedited" && !sha256Re.MatchString(sc)) {
+			writeErr(w, fail(400, "a script is named twice, or is not a sha256"))
+			return
+		}
+		seen[sc] = true
+	}
+	id := fmt.Sprintf("%08d-%s", req.Round, req.Digest[:12])
+	var settled bool
+	a.st.view(func(s *State) { rd := s.Rounds[req.Round]; settled = rd != nil && rd.Status == "settled" })
+	if !settled {
+		writeErr(w, fail(409, "round %d has not settled", req.Round))
+		return
+	}
+	if err := a.st.blobs.Put(r.Context(), shadowItemsBlob(id), file, "application/zstd"); err != nil {
+		slog.Error("keeping a shadow batch's items", "batch", id, "err", err)
+		writeErr(w, fail(503, "the file store is not answering; try again in a moment"))
+		return
+	}
+	var out *ShadowBatch
+	added := 0
+	err = a.st.update(r.Context(), func(tx *Tx) error {
+		b := tx.s.ShadowWork[id]
+		if b == nil {
+			b = &ShadowBatch{ID: id, RoundIdx: req.Round, Scale: req.Scale, Digest: req.Digest, Items: req.Items, Version: req.Version, At: now(), By: acct.Handle}
+		}
+		have := map[string]bool{}
+		for _, t := range b.Tasks {
+			have[t.Script] = true
+		}
+		for _, sc := range req.Scripts {
+			if !have[sc] {
+				b.Tasks = append(b.Tasks, &ShadowTask{Script: sc})
+				added++
+			}
+		}
+		tx.saveShadowBatch(b)
+		// Forget the oldest past what is kept; their results have been added up long since.
+		for _, old := range tx.s.shadowBatchesByAge() {
+			if len(tx.s.ShadowWork) <= shadowBatchesKept {
+				break
+			}
+			if old.ID != id {
+				delete(tx.s.ShadowWork, old.ID)
+				tx.put(shadowBatchKey(old.ID), nil)
+			}
+		}
+		out = b
+		return nil
+	})
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, 200, map[string]any{"batch": out.ID, "tasks": len(out.Tasks), "added": added})
+}
+
+// apiShadowBatchGet shows a batch to the organisers: every task, and how each student did on
+// every item.
+func (a *App) apiShadowBatchGet(w http.ResponseWriter, r *http.Request) {
+	if _, _, _, err := a.signedBy(w, r, 1<<10, true, organisers); err != nil {
+		writeErr(w, err)
+		return
+	}
+	id := r.PathValue("id")
+	var b ShadowBatch
+	var tasks []ShadowTask
+	found := false
+	a.st.view(func(s *State) {
+		if x := s.ShadowWork[id]; x != nil {
+			found, b = true, *x
+			for _, t := range x.Tasks {
+				tasks = append(tasks, *t)
+			}
+		}
+	})
+	if !found {
+		writeErr(w, fail(404, "no such batch"))
+		return
+	}
+	type taskOut struct {
+		ShadowTask
+		Scores []float64 `json:"item_scores,omitempty"`
+	}
+	out := make([]taskOut, len(tasks))
+	for i, t := range tasks {
+		out[i].ShadowTask = t
+		if t.Done != nil && t.Done.Valid {
+			raw, err := a.st.blobs.Read(r.Context(), shadowScoresBlob(id, i), 8<<20)
+			if err == nil {
+				err = json.Unmarshal(raw, &out[i].Scores)
+			}
+			if err != nil {
+				slog.Error("reading a shadow task's scores", "batch", id, "task", i, "err", err)
+				writeErr(w, fail(503, "the file store is not answering; try again in a moment"))
+				return
+			}
+		}
+	}
+	writeJSON(w, 200, map[string]any{"batch": b.ID, "round": roundID(a.season.ID, b.RoundIdx), "scale": b.Scale, "items_digest": b.Digest,
+		"items": b.Items, "generator_version": b.Version, "tasks": out})
+}
+
+// shadowMachine admits the organisers' machines, rented ones included.
+func (a *App) shadowMachine(w http.ResponseWriter, r *http.Request, limit int64) (*Account, []byte, error) {
+	acct, _, body, err := a.signed(w, r, limit, true)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !acct.Anchor {
+		return nil, nil, fail(403, "the next exam's students are trained by the organisers' machines only")
+	}
+	return acct, body, nil
+}
+
+func (a *App) shadowTaskJSON(b *ShadowBatch, i int) map[string]any {
+	t := b.Tasks[i]
+	return map[string]any{"batch": b.ID, "index": i, "round": roundID(a.season.ID, b.RoundIdx), "round_index": b.RoundIdx, "scale": b.Scale,
+		"script": t.Script, "items_digest": b.Digest, "items": b.Items, "generator_version": b.Version, "until": t.Until}
+}
+
+// apiShadowClaim hands an organisers' machine a student to train: the one it already holds, or
+// the oldest batch's first open task.
+func (a *App) apiShadowClaim(w http.ResponseWriter, r *http.Request) {
+	acct, _, err := a.shadowMachine(w, r, 1<<12)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	var task map[string]any
+	err = a.st.update(r.Context(), func(tx *Tx) error {
+		at := now()
+		var pick *ShadowBatch
+		pi := -1
+		for _, b := range tx.s.shadowBatchesByAge() {
+			for i, t := range b.Tasks {
+				if t.Done == nil && t.Holder == acct.ID && t.Until > at {
+					task = a.shadowTaskJSON(b, i) // one at a time: the same one again
+					return nil
+				}
+				if pick == nil && t.open(at) {
+					pick, pi = b, i
+				}
+			}
+		}
+		if pick == nil {
+			return nil
+		}
+		t := pick.Tasks[pi]
+		t.Holder, t.Until = acct.ID, at+shadowLease
+		t.Tries++
+		tx.saveShadowBatch(pick)
+		task = a.shadowTaskJSON(pick, pi)
+		return nil
+	})
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, 200, map[string]any{"task": task})
+}
+
+// apiShadowItems serves a batch's items to the organisers' machines.
+func (a *App) apiShadowItems(w http.ResponseWriter, r *http.Request) {
+	if _, _, err := a.shadowMachine(w, r, 1<<10); err != nil {
+		writeErr(w, err)
+		return
+	}
+	id := r.PathValue("id")
+	if !shadowBatchRe.MatchString(id) {
+		writeErr(w, fail(404, "no such batch"))
+		return
+	}
+	f, size, err := a.st.blobs.Open(r.Context(), shadowItemsBlob(id))
+	if errors.Is(err, errNoBlob) {
+		writeErr(w, fail(404, "no such batch"))
+		return
+	}
+	if err != nil {
+		slog.Error("reading a shadow batch's items", "batch", id, "err", err)
+		writeErr(w, fail(503, "the file store is not answering; try again in a moment"))
+		return
+	}
+	defer f.Close()
+	w.Header().Set("Content-Type", "application/zstd")
+	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+	io.Copy(w, f)
+}
+
+// shadowTaskOf finds the task a machine names, which must be its own.
+func shadowTaskOf(s *State, acct *Account, id string, i int) (*ShadowBatch, *ShadowTask, error) {
+	b := s.ShadowWork[id]
+	if b == nil || i < 0 || i >= len(b.Tasks) {
+		return nil, nil, fail(404, "no such task")
+	}
+	t := b.Tasks[i]
+	if t.Done != nil {
+		return nil, nil, fail(409, "that task is done")
+	}
+	if t.Holder != acct.ID {
+		return nil, nil, fail(409, "that task is not this machine's")
+	}
+	return b, t, nil
+}
+
+// apiShadowResult takes how a task's student did. A task held past its time is still taken
+// from the machine that held it, so long as no other machine has been handed it since.
+func (a *App) apiShadowResult(w http.ResponseWriter, r *http.Request) {
+	acct, body, err := a.shadowMachine(w, r, 8<<20)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	id := r.PathValue("id")
+	i, _ := strconv.Atoi(r.PathValue("i"))
+	var req struct {
+		ShadowDone
+		Scores []float64 `json:"item_scores"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeErr(w, fail(400, "not a result: %v", err))
+		return
+	}
+	var items int
+	a.st.view(func(s *State) {
+		var b *ShadowBatch
+		if b, _, err = shadowTaskOf(s, acct, id, i); err == nil {
+			items = b.Items
+		}
+	})
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	d := req.ShadowDone
+	d.By, d.At = acct.Handle, now()
+	d.Hardware, d.Reason = clip(d.Hardware, 200), clip(d.Reason, 500)
+	if d.Valid {
+		if len(req.Scores) != items || !bounded(d.Loss) || !bounded(d.Kept) || !bounded(d.Seconds) || len(d.BySource) > 64 {
+			writeErr(w, fail(400, "the result does not add up: %d scores for %d items", len(req.Scores), items))
+			return
+		}
+		for _, v := range req.Scores {
+			if !bounded(v) {
+				writeErr(w, fail(400, "a score is not a number"))
+				return
+			}
+		}
+		for k, v := range d.BySource {
+			if len(k) > 64 || !bounded(v) {
+				writeErr(w, fail(400, "a source's loss is not one"))
+				return
+			}
+		}
+		raw, _ := json.Marshal(req.Scores)
+		if err := a.st.blobs.Put(r.Context(), shadowScoresBlob(id, i), raw, "application/json"); err != nil {
+			slog.Error("keeping a shadow task's scores", "batch", id, "task", i, "err", err)
+			writeErr(w, fail(503, "the file store is not answering; try again in a moment"))
+			return
+		}
+	} else {
+		d.Loss, d.BySource, d.Kept, d.Seconds = 0, nil, 0, 0
+	}
+	err = a.st.update(r.Context(), func(tx *Tx) error {
+		b, t, err := shadowTaskOf(tx.s, acct, id, i)
+		if err != nil {
+			return err
+		}
+		t.Done, t.Holder, t.Until = &d, 0, 0
+		tx.saveShadowBatch(b)
+		return nil
+	})
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true})
+}
+
+// apiShadowRelease hands a task back, for another machine to try.
+func (a *App) apiShadowRelease(w http.ResponseWriter, r *http.Request) {
+	acct, _, err := a.shadowMachine(w, r, 1<<12)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	id := r.PathValue("id")
+	i, _ := strconv.Atoi(r.PathValue("i"))
+	err = a.st.update(r.Context(), func(tx *Tx) error {
+		b, t, err := shadowTaskOf(tx.s, acct, id, i)
+		if err != nil {
+			return err
+		}
+		t.Holder, t.Until = 0, 0
+		tx.saveShadowBatch(b)
+		return nil
+	})
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true})
+}

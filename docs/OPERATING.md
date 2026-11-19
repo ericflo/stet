@@ -280,6 +280,16 @@ git pull && uv run stet shadow --follow           # every round drawn in the las
 uv run stet shadow --round s0-o00014 --fresh --upload   # one round, by hand
 ```
 
+With `--farm` (and `--follow --farm`), the students are trained by the organisers' machines
+instead, rented ones included: `stet verify` on any of them takes a student when nothing
+official is waiting, and stet-runpod rents for them (one machine for every four waiting, under
+the same caps). The machine running `stet shadow` only harvests, posts the round's batch, and
+adds up what comes back.
+
+```sh
+uv run stet shadow --follow --farm                    # every round, its students trained across the fleet
+```
+
 It needs the machine's organisers' key (`stet login`), and keeps what it trains under
 `~/.cache/stet/shadow/`, so a round can be sat again when the exam grows without training again.
 The harvester asks Wikipedia and StackExchange politely and waits when told to; with
