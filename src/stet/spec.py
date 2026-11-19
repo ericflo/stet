@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from functools import cache
 from importlib import resources
 
-HARNESS_VERSION = "0.4.0"
+HARNESS_VERSION = "0.4.1"
 # The season the competition is in: what every command means when it names none. Changing it is
 # the switch from one season to the next (see docs/OPERATING.md).
 CURRENT_SEASON = "s1"
