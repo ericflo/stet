@@ -18,6 +18,16 @@ train**, becomes capable at **what pretrained models are for**. So the exam shou
 
 Targeting such an exam is not cheating. It is the job.
 
+**What we decided** (section 7):
+
+- The score is seven capabilities, each counting the same: knowledge, reading, reasoning,
+  code, agents, writing and conversation. Languages count by their share of the crawl, inside
+  every one of them.
+- Fresh text comes from many keyless sources, chosen by kind of writing first, so that no
+  source defines the target.
+- Rounds train the standard student. Micro misranks curators on this target: it rewards the
+  narrow English data that loses at scale. Finals at the large size decide the season.
+
 **What the scale pilot found** (section 6):
 
 - Curators keep their order from 14M to 54M parameters, on both exams.
@@ -131,19 +141,15 @@ of other languages is a separate choice.
 
 ### 4.3 Scale: a ladder, and finals
 
-- **Rounds stay at micro.** They are fast, cheap, and give the steady feedback a competition
-  needs.
-- **The pilot (done, section 6).** Curators kept their order from micro to a student of 54M
-  parameters on both exams: micro is a sound proxy for ranking curators. What curation is
-  worth against the raw crawl does not carry over: gains shrink, and English-only curators
-  fall below the raw crawl as the student grows.
-- **Finals, each season.** The top curators are run on a much larger pool and train a model
-  of about 150M parameters on a private exam of the same design. A 54M student costs about
-  an hour on a rented 4090 ($0.89 an hour); a 150M one, a few hours. Finals check, at a size
-  closer to real models, what rounds measured. Since curators kept their order from 14M to
-  54M, finals are a check, not the only verdict.
-- **Calibration.** For each pillar: does its micro score predict the finals? Pillars that do
-  get more weight in next season's rounds.
+- **Rounds train the standard student** (section 7.5). On the capability target, micro
+  misranks curators: a 14M-parameter student does best on narrow English data, which loses as
+  the student grows. The standard student (29M) orders curators as the large one (54M) does.
+- **Micro stays for practice** and the gym: fast feedback, not a verdict.
+- **Finals decide the season.** The top curators are trained at the large size, twice each,
+  on a fresh round. The top three also go one rung further up, about 150M parameters, as a
+  check on the ladder.
+- **Calibration** (section 7.8). For each pillar: does its score at the rounds' size predict
+  the finals? A pillar that does not gets more items or a bigger student.
 
 ### 4.4 Precision
 
@@ -228,8 +234,10 @@ two at the large scale.
 What it says:
 
 1. **Curators keep their order as the student grows.** Rank agreement from micro to standard
-   to large is 0.98 and 1.00 on the next exam, and 0.90 and 0.88 on the season's. Within this
-   range, micro is a sound proxy for which curator is better.
+   to large is 0.98 and 1.00 on the next exam as it was then weighted, and 0.90 and 0.88 on
+   the season's. That weighting was mostly fresh text in every language, which is measured
+   precisely at every size. On the capability target decided in section 7, micro is no longer
+   a sound proxy, and the standard student is.
 2. **What curation is worth does not hold.** Every English-only curator beats or matches the
    raw crawl at micro, and falls below it by 54M parameters. The season exam's gains shrink
    from about 1.1 nats to about 0.4. As the literature says, filtering pays most when the
@@ -254,10 +262,182 @@ What it says:
    - On code and on other languages, those recipes really are worse. That is why model
      builders add code, mathematics and other languages to filtered web text separately.
 
-## 7. Open questions
+## 7. Decisions (November 2026)
+
+What we want to elicit is a way of choosing data that makes the most capable model at the
+sizes people train. Each decision below follows from that, and from what the pilot measured.
+
+### 7.1 The target: seven capabilities, each counting the same
+
+The score is the mean of seven pillars:
+
+| Pillar | What it asks | Items |
+|---|---|---|
+| Knowledge | Facts the web knows, in ten languages | `knowledge` |
+| Reading | Reading and learning from the context | `context` |
+| Reasoning | Mathematics and logic, in thirteen languages | `arith`, `word`, `units`, `algebra`, `logic`, `algo`, `multi` |
+| Code | Programs and structured data | `prog`, `transform`, `struct` |
+| Agents | An agent at work with tools | `agent` |
+| Writing | Fresh human writing of every kind, in every language | fresh text, and `grammar` |
+| Conversation | Replies in fresh discussions | fresh text |
+
+Inside a pillar each part (a generator family, or a kind of writing) counts the same. Inside a
+part, each language counts by its share of the round's corpus. Inside a language, formats and
+kinds of task count the same.
+
+Why:
+
+- **How much each capability counts is a value choice, so it must be declared, not left to
+  accident.** Before, the generated and fresh items counted by how many of each there happened
+  to be, and formats counted the same whatever they were. So 42% of the score was fresh
+  Wikipedia text, and a stratum of 14 markup answers counted as much as 490 maths answers.
+- **Equal pillars are the choice that favours no use of a model over another.** Calibration
+  (7.8) can move the weights later, and only for a measured reason: a pillar whose small-scale
+  score does not predict the finals.
+- **It bounds every source.** No source, generator or language can weigh more than its part
+  of its pillar. That is the answer to the fear that a biased source defines the target.
+
+### 7.2 Languages: by the crawl's share of bytes, in every part
+
+Kept, as decided, and now applied inside every part of every pillar.
+
+- **It is coherent with the score.** Items are scored in bits per byte. A language's share of
+  the corpus's bytes, times the bits a curator saves on each of its bytes, is the bits saved
+  on a byte of the web. A share by documents would undercount the languages whose scripts take
+  two or three bytes a character, since their bits per byte are correspondingly small.
+- **It is measured, not chosen.** Each round counts its own corpus.
+- **The alternatives fail on first principles.** More weight to English rewards dropping the
+  other two-thirds of the web: the season exam's mistake. Equal or tempered weights reward
+  curators for the smallest languages, where a student of this size learns little and the
+  score is mostly noise.
+
+### 7.3 Fresh text: kinds of writing, each an equal part, from many keyless sources
+
+Fresh text is chosen by kind of writing first:
+
+- reference (Wikipedia's new articles and additions);
+- news (Common Crawl's news crawl);
+- technical (GitHub issues, pull requests and releases);
+- social (public posts on Bluesky and Mastodon);
+- discussion (replies on Hacker News, Lemmy, GitHub and Wikipedia's talk pages, and to
+  social posts). Discussion is the conversation pillar.
+
+Each kind gets an equal part of the round's fresh items. Inside a kind, languages get their
+share of the corpus, and the sources take turns, so one source with many documents cannot
+fill a language alone. No source needs a key or an account. A kind without a source yet (how-to
+writing, government, fiction) is a known gap, not a reason to let one source fill in.
+
+Every source has its own bias: who posts there, about what, and in which languages. The
+remedy is not a perfect source. It is many sources, each capped, none deciding the target.
+
+A live harvest of two hours (09:00 to 11:00 UTC, 19 November) took 26 minutes and gave 1,683
+documents. Chosen for an exam, they made 901 items:
+
+| Kind | Items | Sources (items) | Languages |
+|---|---|---|---|
+| Reference | 255 | Wikipedia additions 151, new articles 104 | 40, a third English |
+| Discussion | 255 | Wikipedia talk 70, Bluesky replies 65, Lemmy 47, Mastodon replies 39, Hacker News 34 | 25, two-thirds English |
+| News | 140 | Common Crawl's news crawl 140, from 110 sites | 39, under half English |
+| Social | 129 | Bluesky 74, Mastodon 55 | 14, half English |
+| Technical | 122 | GitHub 122 | 13, three-quarters English |
+
+News, social and technical had fewer candidates than their part, and gave the rest to the
+other two. GitHub's comments are left out: by our reading about half of those written in 2026
+come from coding agents under people's own accounts.
+
+### 7.4 The tokenizer: trained on the crawl alone
+
+Season 0's 8,192-token vocabulary was trained on equal parts raw crawl and the season exam's
+English passages. Trained on round 12's crawl alone, at the same size, a vocabulary moves
+other languages toward English:
+
+| | Season 0 (characters a token) | On the crawl alone |
+|---|---|---|
+| English | 3.35 | 3.03 |
+| German | 2.40 | 2.58 |
+| Russian | 2.03 | 2.14 |
+| Japanese | 1.04 | 1.12 |
+| Hebrew | 1.10 | 1.33 |
+
+German goes from costing 1.40 times English's tokens for the same characters to 1.17. Season 1
+trains its tokenizer on the crawl alone and keeps 8,192 tokens. A larger vocabulary would close
+more of the gap, but would cost a student this size more of its compute than it saves.
+
+### 7.5 Scale: rounds at the standard student; finals at the large one decide the season
+
+With the target in 7.1, micro is no longer a sound proxy. Every curator was trained again, three
+times at micro and twice at standard. Each training was scored on the new target:
+
+| | micro | standard |
+|---|---|---|
+| Curators' score, sd between trainings of the same script | 0.025 | 0.013 |
+| Spread between curators | 0.095 | 0.077 |
+| Signal to noise | 3.8 | 5.8 |
+| Rank agreement with the large student (Spearman) | 0.69 | 0.95 |
+
+Micro's disagreement is not noise. Averaged over three trainings, micro puts `dclm`
+(+0.22) far ahead of `fineweb2` (+0.07); at the standard and large sizes `fineweb2` is first.
+A 14M-parameter student learns the English skills best from English-only data, and only a
+bigger one gains from breadth. That is the compute-dependence of curation the literature
+found, and a contest decided at micro would reward exactly the narrow data that loses at scale.
+
+So:
+
+- **Rounds train the standard student** (29M parameters, 160M tokens). It trains in about 18
+  minutes on a rented 3090 or 4070 Ti, under $0.10 a student, against 2 to 3 minutes for micro.
+  Its ranking agrees with the large student's.
+- **The unedited corpus is trained four times** a round, as now, since it is still the least
+  steady student.
+- **Micro stays for practice and the gym:** quick feedback, not a verdict.
+- **Finals decide the season.** The top eight curators of the season's rounds are trained at
+  the large size (54M parameters, 640M tokens, about an hour on a 4090) on a fresh round, twice
+  each. That is the largest size where we have measured the order, and where noise between
+  trainings is smallest.
+- **Each season also tries the next rung up** (about 150M parameters) for the top three, as a
+  check on the ladder. If the order changes there, the next season's rounds move up a size.
+
+### 7.6 Scoring: the likelihood of the right answer, as before
+
+We tested another way to score answers. Each answer was scored against two wrong answers taken
+from other items of the same kind, given the same context. It was tried on 20 fresh micro
+trainings.
+
+- **It was steadier.** Noise between trainings halved for knowledge and reasoning.
+- **It also erased most of what separates curators.** In agents, code and reasoning, most of a
+  curator's difference is whether its student knows the form of the answer: a tool's log, a
+  program's output, a number. That is a real effect of data, since a corpus without logs and
+  code makes a student that has never seen them.
+- **It did not carry over better to the large student.**
+
+So answers keep being scored by the likelihood of the right one, as DataDecide validated. The
+noise is dealt with by the size of the student (7.5).
+
+### 7.7 What a settled round publishes
+
+Wikipedia's text is openly licensed and is published with the round. The other sources'
+text (news, GitHub, Hacker News, Lemmy, Bluesky, Mastodon) is held as private exam items only.
+For them, a round publishes each item's id and URL, and anyone can check them at the source.
+
+The harvest respects what people asked for:
+
+- **Bluesky:** authors who keep their posts from logged-out readers, or say no to AI use.
+- **Mastodon:** only authors who opted in to search, only public posts, and no server whose
+  terms forbid this.
+
+### 7.8 Calibration
+
+Each season, every pillar's score at the rounds' size is compared with its score at the finals'
+size. A pillar whose order does not carry over gets more items or a bigger student, not less
+weight. Its weight is a statement of value, and noise is a reason to measure better, not to care
+less.
+
+## 8. Open questions
 
 - Likelihood of answers at 150M is validated against benchmarks, not against what a model
   becomes after post-training.
-- How much each pillar should count is a value choice, not a measurement.
 - A fine-tuning probe deserves a place in calibration: how quickly a trained student
   learns a small new task. Pretraining is for a model that learns well afterwards.
+- Coding agents now write much of what is new on GitHub, and some of what is new elsewhere.
+  Fresh text is not all human writing any more, and no keyless signal tells the two apart.
+- Some kinds of writing have no keyless source that publishes all the time: how-to writing,
+  government and legal text, fiction.

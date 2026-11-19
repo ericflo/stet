@@ -1,17 +1,21 @@
 # A new exam: proposal
 
-Status: proposal, revised 2026-11-18 with the organisers' decisions. Nothing here is in force
+Status: proposal, revised 2026-11-19 with the decisions taken from first principles and the
+scale pilot ([why](exam-first-principles.md#7-decisions-november-2026)). Nothing here is in force
 yet. It runs as a shadow score beside season 0 and becomes the exam in season 1.
 
 ## Decisions taken
 
 | | Decision |
 |---|---|
-| Weighing | Balanced across formats and kinds of task; inside each, every corner the same |
-| Languages | Every language, in proportion to the crawl |
+| Weighing | Seven capabilities, each counting the same: knowledge, reading, reasoning, code, agents, writing, conversation. Inside each, every family or kind of writing the same; then languages; then formats and kinds of task |
+| Languages | Every language, in proportion to the crawl's bytes, inside every capability |
+| Fresh text | By kind of writing first (reference, news, technical, social, discussion), each an equal part; many keyless sources taking turns, none defining the target |
 | Sources | Fresh text and generated items only. No public benchmark or dataset, ever: too easy to cheat with, even by accident |
 | Organisers' curators | Compete, marked, and barred from any prize. The organisers dogfood and bootstrap the competition |
-| Scale | Micro for rounds, plus a check of the ladder at the standard scale each season |
+| Scale | The standard student for rounds; finals at the large size decide the season, with a check one rung further up. Micro for practice |
+| Tokenizer | Season 1's trained on the crawl alone, at 8,192 tokens |
+| Publishing | Wikipedia's text with the round; for every other source, ids and URLs only |
 | When | A shadow score beside season 0 now; the exam in season 1 |
 
 ## The problem

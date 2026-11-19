@@ -289,8 +289,10 @@ Season 0 is measured again, round by round, on the exam proposed for season 1
 season's scores (`/next`, and each settled round's page).
 
 An organisers' machine measures it, the faster the better: it trains the student once for the
-unedited corpus and once for every entry of the round (about two minutes each on a 4090), after
-the round's harvest window closes (two hours after the draw). From a checkout:
+unedited corpus and once for every entry of the round (about two minutes each on a 4090). It
+harvests the round's fresh text three hours after the harvest window closes (five hours after
+the draw), once Common Crawl's news files for the window are public and Hacker News's edits
+have settled. From a checkout:
 
 ```sh
 git pull && uv run stet shadow --follow           # every round drawn in the last day, then each new one as it settles
@@ -309,8 +311,11 @@ uv run stet shadow --follow --farm                    # every round, its student
 
 It needs the machine's organisers' key (`stet login`), and keeps what it trains under
 `~/.cache/stet/shadow/`, so a round can be sat again when the exam grows without training again.
-The harvester asks Wikipedia and StackExchange politely and waits when told to; with
-`STET_SE_KEY` set it reads every StackExchange site instead of a sample.
+The harvester reads Wikipedia, Common Crawl's news crawl, GH Archive, Hacker News, Lemmy, Bluesky
+(Jetstream) and Mastodon, none of them with a key or an account. It asks each politely and
+waits when told to, and a source that fails is left out of that round's snapshot. A harvest
+downloads about a gigabyte of news per hour of window and takes several minutes.
+StackExchange is off: without a key it allows a few hundred requests a day.
 
 ## Things only the organisers hold
 
