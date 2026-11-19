@@ -17,8 +17,8 @@ func round(runsWaiting, editing, wanted, grading int) *Work {
 	return &Work{Runners: 1, Rounds: []WorkRound{{ID: "s0-o00001", Entries: 36, RunsWaiting: runsWaiting, RunsWanted: runsWaiting, EditsUnderWay: editing, GradesWanted: wanted, GradesUnderWay: grading}}}
 }
 
-// pool makes workers: "free", or a pod that is "starting", "waiting", "grading", "quiet",
-// "stopped" or "never" (started long ago and never asked for work).
+// pool makes workers: "free", or a pod that is "starting", "waiting", "grading", "training",
+// "quiet", "stopped" or "never" (started long ago and never asked for work).
 func pool(w *Work, states ...string) []*Worker {
 	var out []*Worker
 	for i, st := range states {
@@ -40,6 +40,9 @@ func pool(w *Work, states ...string) []*Worker {
 			case "grading":
 				m.Busy = "grade"
 				m.LastSeen = t0.Add(-40 * time.Minute).Unix() // says nothing while it trains
+			case "training":
+				m.Busy = "shadow"
+				m.LastSeen = t0.Add(-40 * time.Minute).Unix()
 			case "quiet":
 				m.LastSeen = t0.Add(-30 * time.Minute).Unix()
 			}
@@ -236,6 +239,25 @@ func TestBiggerStudentsWantAMachineEach(t *testing.T) {
 	if got := p.target(w); got != 5 {
 		t.Fatalf("past --max: %d", got)
 	}
+	// The machines training a bigger student count too: with four at it and two waiting,
+	// two more, up to --max.
+	busy := pool(w, "training", "training", "training", "training", "free", "free", "free")
+	for _, wk := range busy[:4] {
+		wk.Machine.Long = true
+	}
+	w2 := &Work{ShadowLongWaiting: 2}
+	if d := p.decide(w2, busy, 0, time.Now()); d.Target != 5 || d.Launch != 1 || d.LaunchLong != 1 {
+		t.Fatalf("four training bigger students, two waiting: target %d, rent %d (%d for them)", d.Target, d.Launch, d.LaunchLong)
+	}
+	busy[3].Machine.Long = false // that one trains a short student, and will be free soon
+	if d := p.decide(w2, busy, 0, time.Now()); d.Target != 5 {
+		t.Fatalf("three training bigger students, two waiting: target %d", d.Target)
+	}
+	busy[2].Machine.Long = false
+	if d := p.decide(w2, busy, 0, time.Now()); d.Target != 4 || d.Launch != 0 {
+		t.Fatalf("two training bigger students, two waiting: target %d, rent %d", d.Target, d.Launch)
+	}
+
 	// Of the machines rented, those for the bigger students are said, to be chosen for them.
 	w.ShadowLongWaiting = 3
 	if d := p.decide(w, pool(w, "free", "free", "free", "free", "free"), 0, time.Now()); d.Launch != 4 || d.LaunchLong != 3 {

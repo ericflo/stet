@@ -38,6 +38,9 @@ type WorkMachine struct {
 	Worker   bool   `json:"worker,omitempty"`
 	LastSeen int64  `json:"last_seen,omitempty"`
 	Busy     string `json:"busy,omitempty"` // edit or grade: the job it holds; shadow: a student it trains for the next exam
+	// The student it trains is one of the bigger ones, held for hours: stet-runpod counts the
+	// machine as one of those it rents for them.
+	Long bool `json:"long,omitempty"`
 }
 
 // Work is the answer to GET /api/v1/admin/work.
@@ -103,7 +106,7 @@ func (a *App) work(s *State) Work {
 	out.Paused = s.Meta.Paused
 	out.Waiting = a.waiting(s)
 	out.ShadowWaiting, out.ShadowUnderWay, out.ShadowLongWaiting = shadowWaiting(s, now())
-	busy := map[int64]string{}
+	busy, long := map[int64]string{}, map[int64]bool{}
 	// Training one of the next exam's students counts as at work, so that a rented machine is
 	// not ended partway through one; an official job it holds says so instead.
 	at := now()
@@ -111,6 +114,7 @@ func (a *App) work(s *State) Work {
 		for _, t := range b.Tasks {
 			if t.Done == nil && t.Holder != 0 && t.Until > at {
 				busy[t.Holder] = "shadow"
+				long[t.Holder] = long[t.Holder] || b.lease() > shadowShort
 			}
 		}
 	}
@@ -121,7 +125,7 @@ func (a *App) work(s *State) Work {
 	}
 	for _, acct := range s.Accounts {
 		if acct.Anchor {
-			out.Machines = append(out.Machines, WorkMachine{Handle: acct.Handle, Worker: acct.Worker, LastSeen: acct.LastSeen, Busy: busy[acct.ID]})
+			out.Machines = append(out.Machines, WorkMachine{Handle: acct.Handle, Worker: acct.Worker, LastSeen: acct.LastSeen, Busy: busy[acct.ID], Long: busy[acct.ID] == "shadow" && long[acct.ID]})
 		}
 	}
 	sort.Slice(out.Machines, func(x, y int) bool { return out.Machines[x].Handle < out.Machines[y].Handle })

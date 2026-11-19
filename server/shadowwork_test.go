@@ -176,6 +176,13 @@ func TestTheNextExamsStudentsAreTrainedByTheOrganisersMachines(t *testing.T) {
 	if code := anchor.do("POST", "/api/v1/shadow/claim", map[string]any{"max_minutes": 600}, &long); code != 200 || long.Task == nil || long.Task.Batch != bigMade.Batch {
 		t.Fatalf("a machine set aside for long students: HTTP %d %+v", code, long.Task)
 	}
+	// stet-runpod is told which machines train a long one, to count them as rented for those.
+	anchor.do("GET", "/api/v1/admin/work", nil, &work)
+	for _, m := range work.Machines {
+		if m.Handle == "anchor-one" && (m.Busy != "shadow" || !m.Long) || m.Handle == "rented-one" && m.Long {
+			t.Fatalf("which machines train a long student: %+v", work.Machines)
+		}
+	}
 
 	// Kept across a restart.
 	w.check()

@@ -208,6 +208,7 @@ type Machine struct {
 	Worker   bool   `json:"worker"`
 	LastSeen int64  `json:"last_seen"`
 	Busy     string `json:"busy"`
+	Long     bool   `json:"long"` // the student it trains is one of the bigger ones, held for hours
 }
 
 func (w *Work) machine(handle string) *Machine {

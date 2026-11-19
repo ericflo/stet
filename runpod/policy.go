@@ -46,13 +46,17 @@ type Policy struct {
 }
 
 // target is how many machines the work justifies, before money is counted.
-func (p Policy) target(w *Work) int {
+func (p Policy) target(w *Work) int { return p.targetHolding(w, 0) }
+
+// targetHolding counts too the machines rented now that train a bigger student (held): each
+// is busy with it for hours, and so is none of the machines the students still waiting want.
+func (p Policy) targetHolding(w *Work, held int) int {
 	n := p.official(w)
 	if p.PerShadow > 0 {
 		n += (w.ShadowWaiting + p.PerShadow - 1) / p.PerShadow
 	}
 	if p.LongShadow {
-		n += w.ShadowLongWaiting // each holds its machine for hours
+		n += w.ShadowLongWaiting + held // a machine to each, held for hours
 	}
 	return min(n, p.MaxWorkers)
 }
@@ -151,7 +155,13 @@ type Decision struct {
 }
 
 func (p Policy) decide(w *Work, workers []*Worker, spentToday float64, now time.Time) Decision {
-	d := Decision{Target: p.target(w)}
+	held := 0
+	for _, wk := range workers {
+		if wk.Machine != nil && wk.Machine.Long && wk.state(now, p) == "training" {
+			held++
+		}
+	}
+	d := Decision{Target: p.targetHolding(w, held)}
 	free := 0
 	var idle []*Worker
 	for _, wk := range workers {
