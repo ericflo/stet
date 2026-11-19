@@ -335,11 +335,11 @@ documents. Chosen for an exam, they made 901 items:
 
 | Kind | Items | Sources (items) | Languages |
 |---|---|---|---|
-| Reference | 255 | Wikipedia additions 151, new articles 104 | 40, a third English |
-| Discussion | 255 | Wikipedia talk 70, Bluesky replies 65, Lemmy 47, Mastodon replies 39, Hacker News 34 | 25, two-thirds English |
-| News | 140 | Common Crawl's news crawl 140, from 110 sites | 39, under half English |
-| Social | 129 | Bluesky 74, Mastodon 55 | 14, half English |
-| Technical | 122 | GitHub 122 | 13, three-quarters English |
+| Reference | 255 | Wikipedia additions 151, new articles 104 | 36, 29% English |
+| Discussion | 255 | Wikipedia talk 70, Bluesky replies 65, Lemmy 47, Mastodon replies 39, Hacker News 34 | 20, 65% English |
+| News | 140 | Common Crawl's news crawl 140, from 110 sites | 39, 45% English |
+| Social | 129 | Bluesky 74, Mastodon 55 | 13, 53% English |
+| Technical | 122 | GitHub 122 | 12, 72% English |
 
 News, social and technical had fewer candidates than their part, and gave the rest to the
 other two. GitHub's comments are left out: by our reading about half of those written in 2026
