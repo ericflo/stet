@@ -58,6 +58,21 @@ def _fetch_script(sha: str, season, dest: Path) -> Path:
     return dest
 
 
+def _send(where: str, body: dict, key, waits=(5, 15, 30, 60, 120)) -> None:
+    """Send a student's result, waiting out a server that is busy for a moment: the student took
+    minutes to train, and is not thrown away for want of one answer."""
+    from ..client import ApiError, request
+
+    for wait in (*waits, None):
+        try:
+            request("POST", where, body, key=key, timeout=300)
+            return
+        except ApiError as e:
+            if wait is None or not (e.status == 0 or e.status == 429 or e.status >= 500):
+                raise
+        time.sleep(wait)
+
+
 def work_one(task: dict, season, key, device, log=print) -> None:
     """Train and sit the student a task names, and send back how it did."""
     from .. import data
@@ -96,7 +111,7 @@ def work_one(task: dict, season, key, device, log=print) -> None:
             body["hardware"] = str((hardware_info(device) or {}).get("gpu") or device)[:200]
         except Exception:
             body["hardware"] = str(device)
-        request("POST", where, body, key=key, timeout=300)
+        _send(where, body, key)
         said = f"season exam {meta['exam_loss']:.4f}" if meta["valid"] else f"not a script: {meta.get('invalid_reason')}"
         log(f"{task['round']} · {task['script'][:12]}: {said}, {len(items)} items sat [{time.time() - t0:.0f}s]")
     except BaseException:
@@ -171,7 +186,8 @@ def farm_round(rnd, scale, scripts: dict[str, str], out_dir: Path, items: list[I
                 meta["invalid_reason"] = d.get("reason")
             _write(out_dir / f"{sha16}.json", meta)
         done = sum(1 for t in tasks if t.get("done"))
-        left = [t for t in tasks if not t.get("done") and t.get("tries", 0) < 3]
+        # Still to come: not done, and either to be tried again or being tried now.
+        left = [t for t in tasks if not t.get("done") and (t.get("tries", 0) < 3 or (t.get("holder") and t.get("until", 0) > time.time()))]
         now = f"{done} of {len(tasks)} trained" + (f", {sum(1 for t in left if t.get('holder'))} under way" if left else "")
         if now != said:
             log(f"  {now} [{time.time() - t0:.0f}s]")

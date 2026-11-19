@@ -343,6 +343,8 @@ def test_students_farmed_out_to_the_organisers_machines_add_up_as_a_local_run_do
     monkeypatch.setattr(type(season), "scale", lambda self, name: scale)
     monkeypatch.setattr(client, "round_from_api", lambda s, d: rnd)
     monkeypatch.setattr(farm, "POLL", 0.05)
+    real_sleep = farm.time.sleep
+    monkeypatch.setattr(farm.time, "sleep", lambda s: None if s > 1 else real_sleep(s))  # no waiting out a busy server here
     other = tmp_path / "other.jsonl"
     write_script(other, [3, 0])
     script_bytes = other.read_bytes()
@@ -372,6 +374,9 @@ def test_students_farmed_out_to_the_organisers_machines_add_up_as_a_local_run_do
 
                 return base64.b64decode(batch["items"])
             if path.startswith("/api/v1/shadow/batches/b/tasks/"):
+                if not batch.get("busied"):  # the server is busy once, as it can be: the worker waits and sends again
+                    batch["busied"] = True
+                    raise client.ApiError(503, "the database is not answering; try again in a moment")
                 t = batch["tasks"][int(path.rsplit("/", 1)[1])]
                 t.update(done={**body, "by": "rented-one"}, item_scores=body.get("item_scores"), holder=None)
                 return {"ok": True}
