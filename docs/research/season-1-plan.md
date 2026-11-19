@@ -58,20 +58,29 @@ stays readable.
 
 ## Stages
 
-1. `s1.json`, and the client reading the next exam from the season. Its parameters are in the
-   season digest, and `newexam` is in the harness hash.
-2. The grader's side: fetch the round's items, sit them, report item scores, and keep a
-   baseline per round.
-3. The server:
-   - the exam endpoint;
-   - holding grade jobs until the exam is posted;
-   - serving items to graders;
-   - storing item scores;
+1. **Done.** `s1.json`, with the next exam's parameters in the season digest and `newexam` in
+   the harness hash. Season 1's tokenizer is trained on the crawl alone.
+2. **Done.** The grader's side: it fetches the round's items, checks them against the round's
+   digest, sits them, and reports item scores, keeping a baseline for each exam.
+3. **Done.** The server:
+   - the exam endpoints;
+   - grades held until the exam is posted, with nothing given up meanwhile;
+   - item scores reported and checked;
    - the round's per-item baseline;
-   - the Go aggregate;
-   - gains and agreement from it.
-4. The examiner, `stet examine --follow`, grown from `stet shadow --follow`.
-5. The site and API: pillars in place of the six sources, bits per byte, no held-out exam.
-6. The rules and documents for season 1.
-7. Calibration at standard: the tolerances, the record's margin, the noise.
-8. The switch: close season 0, start season 1. This needs the organisers' go-ahead.
+   - `NextScore`, a bit-for-bit port of the aggregate with shared test vectors;
+   - archiving at settlement.
+4. **Done.** The examiner: `stet examine --follow`.
+5. **In progress.** The site and API: pillars and bits per byte, no held-out exam, no
+   multiplier until its curve is measured.
+6. **Done.** Season 1's rules (`docs/RULES-s1.md`) and the switch in `docs/OPERATING.md`.
+7. **Calibration**, before the first round:
+   - The tolerances are first values from the NVIDIA repeat trainings: 0.013 between
+     trainings at standard, so grade 0.06, baseline 0.1, run 0.09.
+   - An AMD grader (the organisers' own verifier) must be measured against NVIDIA ones on
+     the same scripts before its grades count.
+   - The record's margin (0.01) stays provisional until the noise between rounds is known.
+8. **The switch.** It needs the organisers' go-ahead: season 0's rules promise two weeks'
+   notice of its close.
+
+Practice rounds, `stet run`, `stet score` and the gym all work on season 1 now
+(`--season s1`). They use generated items only.
