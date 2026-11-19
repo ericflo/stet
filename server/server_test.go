@@ -418,8 +418,8 @@ func (w *world) claimWith(a *actor, hello map[string]any) *claimed {
 // round is given (testExam).
 var corpusSHA, examSHA = strings.Repeat("c0", 32), strings.Repeat("d1", 32)
 
-// nextTable is a small exam: items in three pillars, two languages.
-func nextTable() []ItemInfo {
+// testTable is a small exam: items in three pillars, two languages.
+func testTable() []ItemInfo {
 	var out []ItemInfo
 	for i := 0; i < 12; i++ {
 		out = append(out, ItemInfo{Pillar: "reasoning", Part: "arith", Lang: "en", Stratum: "math/answer"})
@@ -456,10 +456,10 @@ func (w *world) postExam(by *actor, idx int, table []ItemInfo) (int, string) {
 	return code, out.Error
 }
 
-// exam gives a round its exam (nextTable), as the organisers' examiner would.
+// exam gives a round its exam (testTable), as the organisers' examiner would.
 func (w *world) exam(idx int) {
 	w.t.Helper()
-	raw, _ := json.Marshal(testExam(nextTable()))
+	raw, _ := json.Marshal(testExam(testTable()))
 	var p ExamPost
 	json.Unmarshal(raw, &p)
 	if _, err := w.app.postExam(context.Background(), idx, &p); err != nil {
@@ -469,11 +469,11 @@ func (w *world) exam(idx int) {
 
 // itemScores is a report on the exam with every item scoring the same.
 func itemScores(score float64) map[string]any {
-	scores := make([]float64, len(nextTable()))
+	scores := make([]float64, len(testTable()))
 	for i := range scores {
 		scores[i] = score
 	}
-	return map[string]any{"kind": "next", "mean": score, "item_scores": scores}
+	return map[string]any{"mean": score, "item_scores": scores}
 }
 
 // edit reports an edit job. An empty script means the editor failed.
@@ -2451,9 +2451,8 @@ func TestAResultCarriesOneScoreForEachItemAndNothingElse(t *testing.T) {
 		"an item too many": func(e map[string]any) { e["item_scores"] = append(e["item_scores"].([]float64), -5.5) },
 		"an item short":    func(e map[string]any) { e["item_scores"] = e["item_scores"].([]float64)[1:] },
 		"another mean":     func(e map[string]any) { e["mean"] = -4.0 },
-		"another kind":     func(e map[string]any) { e["kind"] = "pack" },
 		"nonsense": func(e map[string]any) {
-			e["item_scores"].([]float64)[0], e["mean"] = -1e6, -1e6/float64(len(nextTable()))
+			e["item_scores"].([]float64)[0], e["mean"] = -1e6, -1e6/float64(len(testTable()))
 		},
 	} {
 		res := w.result(c, 5.5, 6.0)
@@ -2756,7 +2755,7 @@ func TestSmallRulesOfJudging(t *testing.T) {
 		for i := range items {
 			items[i] = v
 		}
-		return &ExamScore{Kind: "next", Mean: v, ItemScores: items}
+		return &ExamScore{Mean: v, ItemScores: items}
 	}
 	if err := checkItems(score(-45), 4, "exam"); err != nil {
 		t.Fatalf("an item score of -45: %v", err)

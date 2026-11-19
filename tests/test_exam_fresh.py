@@ -30,7 +30,7 @@ def test_wikitext_becomes_prose():
     assert "Ada was a mathematical writer." in out and "She worked with Charles Babbage on the Analytical Engine." in out
     for junk in ("[[", "{{", "<ref", "File:", "a list item", "'''", "<!--", "}}"):
         assert junk not in out
-    # what the first shadow runs found left over: captions with links in them, entities, a citation
+    # what the first harvests found left over: captions with links in them, entities, a citation
     # its editor broke, a table cut in half by a diff, files under other languages' names
     left = strip_wikitext("[[File:Teddy Hill.jpg|thumb|At [[Minton's Playhouse]], 1947; by [[William P. Gottlieb]]]]\n"
                           "Theodore Hill (1909 &ndash; 1978) was a band leader.\n"

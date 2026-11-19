@@ -345,23 +345,23 @@ def test_students_farmed_out_to_the_organisers_machines_add_up_as_training_here_
 
     def request(method, path, body=None, key=None, raw=False, timeout=0, limit=0):
         with lock:
-            if path == "/api/v1/admin/shadow/batches":
+            if path == "/api/v1/admin/farm/batches":
                 batch.update(id="b", items=body["items_file"], tasks=[{"script": s, "tries": 0} for s in body["scripts"]])
                 return {"batch": "b"}
-            if path == "/api/v1/admin/shadow/batches/b":
+            if path == "/api/v1/admin/farm/batches/b":
                 return {"tasks": [dict(t) for t in batch["tasks"]]}
-            if path == "/api/v1/shadow/claim":
+            if path == "/api/v1/farm/claim":
                 for i, t in enumerate(batch.get("tasks", [])):
                     if not t.get("done") and not t.get("holder"):
                         t["holder"], t["tries"] = 1, t["tries"] + 1
                         return {"task": {"batch": "b", "index": i, "round": rnd.id, "scale": "nano", "script": t["script"],
                                          "items_digest": digest(items), "items": len(items)}}
                 return {"task": None}
-            if path == "/api/v1/shadow/batches/b/items":
+            if path == "/api/v1/farm/batches/b/items":
                 import base64
 
                 return base64.b64decode(batch["items"])
-            if path.startswith("/api/v1/shadow/batches/b/tasks/"):
+            if path.startswith("/api/v1/farm/batches/b/tasks/"):
                 if not batch.get("busied"):  # the server is busy once, as it can be: the worker waits and sends again
                     batch["busied"] = True
                     raise client.ApiError(503, "the database is not answering; try again in a moment")

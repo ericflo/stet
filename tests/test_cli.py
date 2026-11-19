@@ -192,7 +192,7 @@ def test_the_gain_line_says_what_its_noise_figure_is(capsys):
         "round": {"id": "s1-p00000", "kind": "practice"}, "scale": "nano", "valid": True,
         "script": {"out_docs": 1, "src_docs": 1, "kept_doc_frac": 0.1, "out_bytes": 10, "ink_tokens": 0, "ink_budget": 8000, "passes": 1.0, "truncated": False},
         "train": {"tokens": 10, "seconds": 1.0, "tokens_per_second": 10, "final_train_loss": 3.0},
-        "exam": {"kind": "next", "items": 3, "mean": -2.5, "item_scores": [-2.4, -2.5, -2.6]}, "gain": 0.1, "pillars": {"reasoning": 0.1},
+        "exam": {"items": 3, "mean": -2.5, "item_scores": [-2.4, -2.5, -2.6]}, "gain": 0.1, "pillars": {"reasoning": 0.1},
     }  # fmt: skip
     cli.report(cli.Out(), result, {"exam": {"mean": -2.6}}, season)
     err = capsys.readouterr().err

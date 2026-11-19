@@ -41,7 +41,7 @@ func pool(w *Work, states ...string) []*Worker {
 				m.Busy = "grade"
 				m.LastSeen = t0.Add(-40 * time.Minute).Unix() // says nothing while it trains
 			case "training":
-				m.Busy = "shadow"
+				m.Busy = "farm"
 				m.LastSeen = t0.Add(-40 * time.Minute).Unix()
 			case "quiet":
 				m.LastSeen = t0.Add(-30 * time.Minute).Unix()
@@ -180,35 +180,35 @@ func TestMachinesThatRunCuratorsAreRentedForRunsAndGrades(t *testing.T) {
 // The organisers' students are trained by machines with nothing official to do: those waiting
 // want machines after the official work, under the same limits, and a machine training one is
 // at work however long it says nothing.
-func TestTheNextExamsStudentsWantMachinesToo(t *testing.T) {
+func TestTheFarmsStudentsWantMachinesToo(t *testing.T) {
 	p := testPolicy()
-	p.Edits, p.PerWorker, p.PerShadow, p.MaxWorkers = true, 6, 4, 8
+	p.Edits, p.PerWorker, p.PerFarm, p.MaxWorkers = true, 6, 4, 8
 	for _, c := range []struct {
 		w    *Work
 		want int
 	}{
-		{&Work{ShadowWaiting: 1}, 1},
-		{&Work{ShadowWaiting: 9}, 3},
-		{&Work{ShadowUnderWay: 5}, 0},         // all being trained already
-		{withShadow(round(5, 0, 1, 0), 9), 5}, // 2 for the round's 11 jobs, 3 for the students
-		{withShadow(round(36, 0, 0, 0), 9), 8},
+		{&Work{FarmWaiting: 1}, 1},
+		{&Work{FarmWaiting: 9}, 3},
+		{&Work{FarmUnderWay: 5}, 0},         // all being trained already
+		{withFarm(round(5, 0, 1, 0), 9), 5}, // 2 for the round's 11 jobs, 3 for the students
+		{withFarm(round(36, 0, 0, 0), 9), 8},
 	} {
 		if got := p.target(c.w); got != c.want {
-			t.Errorf("%+v shadow %d: %d machines, want %d", c.w.Rounds, c.w.ShadowWaiting, got, c.want)
+			t.Errorf("%+v farm %d: %d machines, want %d", c.w.Rounds, c.w.FarmWaiting, got, c.want)
 		}
 	}
-	p.PerShadow = 0
-	if got := p.target(&Work{ShadowWaiting: 9}); got != 0 {
-		t.Fatalf("--per-shadow 0 still rents %d for the students", got)
+	p.PerFarm = 0
+	if got := p.target(&Work{FarmWaiting: 9}); got != 0 {
+		t.Fatalf("--per-farm 0 still rents %d for the students", got)
 	}
-	p.Edits, p.PerShadow = false, 4
-	if got := p.target(&Work{ShadowWaiting: 9}); got != 3 {
+	p.Edits, p.PerFarm = false, 4
+	if got := p.target(&Work{FarmWaiting: 9}); got != 3 {
 		t.Fatalf("a machine that only grades trains students too: %d machines, want 3", got)
 	}
 
-	w := &Work{ShadowUnderWay: 1}
+	w := &Work{FarmUnderWay: 1}
 	ws := pool(w, "grading", "waiting")
-	ws[0].Machine.Busy = "shadow" // and silent for 40 minutes, as it trains
+	ws[0].Machine.Busy = "farm" // and silent for 40 minutes, as it trains
 	if st := ws[0].state(t0, p); st != "training" {
 		t.Fatalf("a machine training a student is %q", st)
 	}
@@ -217,8 +217,8 @@ func TestTheNextExamsStudentsWantMachinesToo(t *testing.T) {
 	}
 }
 
-func withShadow(w *Work, waiting int) *Work {
-	w.ShadowWaiting = waiting
+func withFarm(w *Work, waiting int) *Work {
+	w.FarmWaiting = waiting
 	return w
 }
 
@@ -226,16 +226,16 @@ func withShadow(w *Work, waiting int) *Work {
 // are rented to take them.
 func TestBiggerStudentsWantAMachineEach(t *testing.T) {
 	p := testPolicy()
-	p.Edits, p.PerWorker, p.PerShadow, p.MaxWorkers = true, 6, 4, 5
-	w := &Work{ShadowWaiting: 4, ShadowLongWaiting: 3}
+	p.Edits, p.PerWorker, p.PerFarm, p.MaxWorkers = true, 6, 4, 5
+	w := &Work{FarmWaiting: 4, FarmLongWaiting: 3}
 	if got := p.target(w); got != 1 {
 		t.Fatalf("machines not rented for bigger students were wanted for them: %d", got)
 	}
-	p.LongShadow = true
+	p.LongFarm = true
 	if got := p.target(w); got != 4 {
 		t.Fatalf("one for the short students and one for each bigger one: %d, want 4", got)
 	}
-	w.ShadowLongWaiting = 12
+	w.FarmLongWaiting = 12
 	if got := p.target(w); got != 5 {
 		t.Fatalf("past --max: %d", got)
 	}
@@ -245,7 +245,7 @@ func TestBiggerStudentsWantAMachineEach(t *testing.T) {
 	for _, wk := range busy[:4] {
 		wk.Machine.Long = true
 	}
-	w2 := &Work{ShadowLongWaiting: 2}
+	w2 := &Work{FarmLongWaiting: 2}
 	if d := p.decide(w2, busy, 0, time.Now()); d.Target != 5 || d.Launch != 1 || d.LaunchLong != 1 {
 		t.Fatalf("four training bigger students, two waiting: target %d, rent %d (%d for them)", d.Target, d.Launch, d.LaunchLong)
 	}
@@ -259,11 +259,11 @@ func TestBiggerStudentsWantAMachineEach(t *testing.T) {
 	}
 
 	// Of the machines rented, those for the bigger students are said, to be chosen for them.
-	w.ShadowLongWaiting = 3
+	w.FarmLongWaiting = 3
 	if d := p.decide(w, pool(w, "free", "free", "free", "free", "free"), 0, time.Now()); d.Launch != 4 || d.LaunchLong != 3 {
 		t.Fatalf("rented %d, %d of them for the bigger students", d.Launch, d.LaunchLong)
 	}
-	p.LongShadow = false
+	p.LongFarm = false
 	if d := p.decide(w, pool(w, "free", "free", "free", "free", "free"), 0, time.Now()); d.LaunchLong != 0 {
 		t.Fatalf("rented %d for bigger students the machines do not take", d.LaunchLong)
 	}

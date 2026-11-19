@@ -4,15 +4,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
-	"net/http"
 	"strings"
 	"testing"
 	"time"
 )
 
-// The site reads in bits per byte, says what the exam is, and says nothing of an exam that is
-// gone: natural-log units, an exam loss, a held-out exam, the next exam as a shadow beside the
-// season's, a multiplier it has no curve for.
+// The site reads in bits per byte, says what the exam is, and shows no multiplier it has no
+// curve for.
 func TestTheSiteReadsInBitsPerByte(t *testing.T) {
 	pub, priv := newKey()
 	w := newWorld(t, pub)
@@ -28,11 +26,11 @@ func TestTheSiteReadsInBitsPerByte(t *testing.T) {
 		t.Fatalf("the open round does not say it waits for its exam: HTTP %d", code)
 	}
 	w.established("bob", "carol")
-	if code, msg := w.postExam(anchor, idx, nextTable()); code != 200 {
+	if code, msg := w.postExam(anchor, idx, testTable()); code != 200 {
 		t.Fatalf("posting the exam: HTTP %d %s", code, msg)
 	}
 	// Both take the script before either reports; their baselines differ a little.
-	n := len(nextTable())
+	n := len(testTable())
 	var jobs []*claimed
 	for _, a := range []*actor{bob, carol} {
 		c := w.claim(a, false)
@@ -42,7 +40,7 @@ func TestTheSiteReadsInBitsPerByte(t *testing.T) {
 		jobs = append(jobs, c)
 	}
 	for i, a := range []*actor{bob, carol} {
-		if code := a.do("POST", fmt.Sprintf("/api/v1/jobs/%d/result", jobs[i].Job.ID), w.nextResult(jobs[i], n, 0.1-0.02*float64(i), -3+0.02*float64(i)), nil); code != 200 {
+		if code := a.do("POST", fmt.Sprintf("/api/v1/jobs/%d/result", jobs[i].Job.ID), w.examResult(jobs[i], n, 0.1-0.02*float64(i), -3+0.02*float64(i)), nil); code != 200 {
 			t.Fatalf("%s's grade was refused: HTTP %d", a.handle, code)
 		}
 	}
@@ -50,7 +48,7 @@ func TestTheSiteReadsInBitsPerByte(t *testing.T) {
 	if w.settled(idx) != 1 {
 		t.Fatal("the round did not settle")
 	}
-	// The entry's gain on each pillar, as the next exam's aggregate gives it.
+	// The entry's gain on each pillar, as the exam's aggregate gives it.
 	w.app.st.update(t.Context(), func(tx *Tx) error {
 		for _, e := range tx.s.inRound[idx] {
 			e.BySource = map[string]float64{"reasoning": 0.12, "writing": -0.03, "code": 0.05}
@@ -69,12 +67,8 @@ func TestTheSiteReadsInBitsPerByte(t *testing.T) {
 		if code != 200 {
 			t.Fatalf("%s: HTTP %d", path, code)
 		}
-		lower := strings.ToLower(page)
-		for _, never := range []string{"nats", "held-out", "held out", "exam loss", `href="/next"`, "1.00×"} {
-			if strings.Contains(lower, never) {
-				i := strings.Index(lower, never)
-				t.Errorf("%s says %q: …%s…", path, never, page[max(0, i-80):min(len(page), i+80)])
-			}
+		if i := strings.Index(page, "1.00×"); i >= 0 {
+			t.Errorf("%s shows a multiplier with no curve: …%s…", path, page[max(0, i-80):min(len(page), i+80)])
 		}
 		if unit && !strings.Contains(page, "bits per byte") {
 			t.Errorf("%s does not say bits per byte", path)
@@ -94,28 +88,15 @@ func TestTheSiteReadsInBitsPerByte(t *testing.T) {
 			}
 		}
 	}
-	if strings.Contains(got["/editors/"+id[:12]], "Worth") || strings.Contains(got["/rounds/"+rid], "On the next exam") {
-		t.Error("a page shows a multiplier with no curve, or the next exam as a shadow")
+	if strings.Contains(got["/editors/"+id[:12]], "Worth") {
+		t.Error("a page shows a multiplier with no curve")
 	}
 
-	// There is no page for a shadow exam, and no file of a held-out one.
-	for _, path := range []string{"/next", "/files/heldout-" + w.app.season.ID + ".jsonl.zst"} {
-		if code, _ := w.page(path); code != http.StatusNotFound {
-			t.Errorf("%s: HTTP %d", path, code)
-		}
-	}
-
-	// The API: the unit, the exam's pillars, and no multiplier rather than a wrong one. Nothing
-	// of an exam that is a published pack, or of a held-out one.
+	// The API: the unit, the exam's pillars, and no multiplier rather than a wrong one.
 	var season map[string]any
 	if _, body := w.page("/api/v1/season"); json.Unmarshal([]byte(body), &season) != nil ||
 		season["unit"] != "bits per byte" || season["has_multiplier"] != false || len(season["pillars"].([]any)) != len(w.app.season.ExamSources) {
 		t.Fatalf("the season says %v, %v, %v", season["unit"], season["pillars"], season["has_multiplier"])
-	}
-	for _, gone := range []string{"exam_kind", "exam_sha256", "heldout_exam_sha256"} {
-		if _, ok := season[gone]; ok {
-			t.Errorf("the season still says %s", gone)
-		}
 	}
 	var board struct {
 		Editors     []map[string]any `json:"editors"`

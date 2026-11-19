@@ -439,7 +439,7 @@ func (f *Fleet) spec(k *Key, gpu, cloud, site string) NewPod {
 		"STET_WORKER_EDITS": map[bool]string{true: "1", false: "0"}[f.o.Edits],
 	}
 	if f.o.LongMinutes > 0 {
-		env["STET_SHADOW_MAX_MINUTES"] = fmt.Sprint(f.o.LongMinutes)
+		env["STET_FARM_MAX_MINUTES"] = fmt.Sprint(f.o.LongMinutes)
 	}
 	var ports []string
 	if f.o.SSHKey != "" {

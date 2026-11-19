@@ -24,7 +24,7 @@ def graded(monkeypatch):
         assert Path(script).read_text() == "0\n1\n2\n"  # every document, in corpus order
         seen.scripts.append(Path(script).name)
         return {"valid": seen.valid, "invalid_reason": None if seen.valid else "ink over budget",
-                "exam": {"kind": "next", "items": 2, "mean": -5.3, "item_scores": [-5.2, -5.4]}}
+                "exam": {"items": 2, "mean": -5.3, "item_scores": [-5.2, -5.4]}}
 
     monkeypatch.setattr(data, "materialize", lambda rnd, scale: ([b"a", b"b", b"c"], []))
     monkeypatch.setattr(pipeline, "grade", grade)

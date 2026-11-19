@@ -207,7 +207,7 @@ class Round:
     seed: bytes
     beacon: dict | None = None  # the drand round an official seed was drawn from
     crawl: dict | None = None  # the published crawl an official corpus is drawn from
-    exam_digest: str = ""  # a next-exam season's official round: the digest of the exam posted after its draw
+    exam_digest: str = ""  # an official round: the digest of the exam posted after its draw
 
     @property
     def id(self) -> str:
@@ -296,7 +296,7 @@ def round_from_description(season: Season, d: dict) -> Round:
         rnd = official_round(season, int(d["index"]), d["beacon"], d["crawl"])
     if "seed" in d and d["seed"] != rnd.seed.hex():
         raise ValueError(f"round {d.get('id')}: the seed does not follow from the beacon and the crawl")
-    if d.get("exam_digest"):  # a next-exam round whose exam has been posted
+    if d.get("exam_digest"):  # a round whose exam has been posted
         if not SHA256_RE.fullmatch(str(d["exam_digest"])):
             raise ValueError(f"round {d.get('id')}: its exam's digest is not a sha256")
         rnd = dataclasses.replace(rnd, exam_digest=str(d["exam_digest"]))

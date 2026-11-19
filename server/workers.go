@@ -167,7 +167,7 @@ func (a *App) apiWorkerRelease(w http.ResponseWriter, r *http.Request) {
 				jobs++
 			}
 		}
-		for _, b := range s.ShadowWork {
+		for _, b := range s.Farm {
 			held := false
 			for _, task := range b.Tasks {
 				if task.Done == nil && task.Holder == acct.ID && task.Until > t {
@@ -177,7 +177,7 @@ func (a *App) apiWorkerRelease(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			if held {
-				tx.saveShadowBatch(b)
+				tx.saveFarmBatch(b)
 			}
 		}
 		if jobs > 0 {

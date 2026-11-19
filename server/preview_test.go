@@ -274,7 +274,7 @@ func editAs(t *testing.T, w *world, a *previewActor, c *claimed, name string) {
 func reportAs(t *testing.T, w *world, a *previewActor, c *claimed, loss, base float64) {
 	// Each item of the exam is harder or easier, and the student gains more on some pillars
 	// than on others; loss and base are its mean bits per byte and the unedited student's.
-	table := nextTable()
+	table := testTable()
 	ob, oe := make([]float64, len(table)), make([]float64, len(table))
 	var mb, me float64
 	for i := range table {
@@ -300,8 +300,8 @@ func reportAs(t *testing.T, w *world, a *previewActor, c *claimed, loss, base fl
 		"round": c.Job.Round["id"], "scale": c.Job.Scale, "corpus_sha256": corpusSHA, "exam_sha256": examSHA,
 		"script_sha256": c.Job.Script.SHA256, "valid": true, "hardware": map[string]any{"gpu": a.gpu, "device": "cuda", "backend": backendOf(a.gpu)},
 		"script":     map[string]any{"script_sha256": c.Job.Script.SHA256, "kept_doc_frac": kept, "kept_byte_frac": kept * 0.8, "passes": 1.0, "out_docs": 1200, "ink_frac": 0.0},
-		"baseline":   map[string]any{"kind": "next", "mean": -base, "item_scores": baseline},
-		"exam":       map[string]any{"kind": "next", "mean": -loss, "item_scores": exam},
+		"baseline":   map[string]any{"mean": -base, "item_scores": baseline},
+		"exam":       map[string]any{"mean": -loss, "item_scores": exam},
 		"train":      map[string]any{"seconds": 410.0, "tokens_per_second": 100000.0, "final_train_loss": 3.5 + loss - base, "curve": curve},
 		"started_at": time.Now().Unix() - 600, "finished_at": time.Now().Unix(),
 	}

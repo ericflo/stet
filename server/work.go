@@ -37,7 +37,7 @@ type WorkMachine struct {
 	Handle   string `json:"handle"`
 	Worker   bool   `json:"worker,omitempty"`
 	LastSeen int64  `json:"last_seen,omitempty"`
-	Busy     string `json:"busy,omitempty"` // edit or grade: the job it holds; shadow: one of the organisers' own students it trains
+	Busy     string `json:"busy,omitempty"` // edit or grade: the job it holds; farm: one of the organisers' own students it trains
 	// The student it trains is one of the bigger ones, held for hours: stet-runpod counts the
 	// machine as one of those it rents for them.
 	Long bool `json:"long,omitempty"`
@@ -52,13 +52,13 @@ type Work struct {
 	Waiting    bool          `json:"waiting"`
 	NextDrawAt int64         `json:"next_draw_at,omitempty"`
 	Machines   []WorkMachine `json:"machines"`
-	// ShadowWaiting counts the organisers' own students a machine could be handed now, and
-	// ShadowUnderWay those being trained: work for a machine with nothing official to do.
-	ShadowWaiting  int `json:"shadow_waiting"`
-	ShadowUnderWay int `json:"shadow_under_way"`
-	// ShadowLongWaiting counts bigger students, held for hours, for a machine set aside for
-	// them (stet verify with STET_SHADOW_MAX_MINUTES): not counted in ShadowWaiting.
-	ShadowLongWaiting int `json:"shadow_long_waiting"`
+	// FarmWaiting counts the organisers' own students a machine could be handed now, and
+	// FarmUnderWay those being trained: work for a machine with nothing official to do.
+	FarmWaiting  int `json:"farm_waiting"`
+	FarmUnderWay int `json:"farm_under_way"`
+	// FarmLongWaiting counts bigger students, held for hours, for a machine set aside for
+	// them (stet verify with STET_FARM_MAX_MINUTES): not counted in FarmWaiting.
+	FarmLongWaiting int `json:"farm_long_waiting"`
 	// Paused is when the organisers paused the rounds (0: they are not): none is drawn.
 	Paused int64 `json:"paused,omitempty"`
 }
@@ -105,16 +105,16 @@ func (a *App) work(s *State) Work {
 	}
 	out.Paused = s.Meta.Paused
 	out.Waiting = a.waiting(s)
-	out.ShadowWaiting, out.ShadowUnderWay, out.ShadowLongWaiting = shadowWaiting(s, now())
+	out.FarmWaiting, out.FarmUnderWay, out.FarmLongWaiting = farmWaiting(s, now())
 	busy, long := map[int64]string{}, map[int64]bool{}
 	// Training one of the organisers' own students counts as at work, so that a rented machine is
 	// not ended partway through one; an official job it holds says so instead.
 	at := now()
-	for _, b := range s.ShadowWork {
+	for _, b := range s.Farm {
 		for _, t := range b.Tasks {
 			if t.Done == nil && t.Holder != 0 && t.Until > at {
-				busy[t.Holder] = "shadow"
-				long[t.Holder] = long[t.Holder] || b.lease() > shadowShort
+				busy[t.Holder] = "farm"
+				long[t.Holder] = long[t.Holder] || b.lease() > farmShort
 			}
 		}
 	}
@@ -125,7 +125,7 @@ func (a *App) work(s *State) Work {
 	}
 	for _, acct := range s.Accounts {
 		if acct.Anchor {
-			out.Machines = append(out.Machines, WorkMachine{Handle: acct.Handle, Worker: acct.Worker, LastSeen: acct.LastSeen, Busy: busy[acct.ID], Long: busy[acct.ID] == "shadow" && long[acct.ID]})
+			out.Machines = append(out.Machines, WorkMachine{Handle: acct.Handle, Worker: acct.Worker, LastSeen: acct.LastSeen, Busy: busy[acct.ID], Long: busy[acct.ID] == "farm" && long[acct.ID]})
 		}
 	}
 	sort.Slice(out.Machines, func(x, y int) bool { return out.Machines[x].Handle < out.Machines[y].Handle })

@@ -69,8 +69,8 @@ How many it rents: one for every `--per-machine` (6) jobs a new machine could ta
 counting a curator still to run as two (the run, and a grade of what it writes) and a
 script waiting as one. A machine with nothing official to do trains the organisers'
 own students (a few minutes each, on a settled round), so one more for every
-`--per-shadow` (4) of those waiting, after the official work (`--per-shadow 0`: none).
-`--long-shadow 600` rents machines that also take the bigger students, held for hours, one
+`--per-farm` (4) of those waiting, after the official work (`--per-farm 0`: none).
+`--long-farm 600` rents machines that also take the bigger students, held for hours, one
 machine to each. A machine rented for them is chosen for what a student costs on it, not what
 it costs an hour: a 4090 at $0.89 trains one in about half the time of a 3090 at $0.50, so
 the student costs about the same and is done sooner. Where two cost about the same, the
@@ -111,7 +111,7 @@ Description=Rent GPUs to grade for Stet
 
 [Service]
 EnvironmentFile=%h/.config/stet-runpod/env
-ExecStart=%h/.local/bin/stet-runpod scale --follow --max 5 --max-price 0.22 --long-shadow 600 --long-max-price 0.90 --max-hourly 4.50
+ExecStart=%h/.local/bin/stet-runpod scale --follow --max 5 --max-price 0.22 --long-farm 600 --long-max-price 0.90 --max-hourly 4.50
 Restart=always
 RestartSec=60
 

@@ -50,7 +50,7 @@ func TestARentedMachineGradesForTheOrganisersAndAdministersNothing(t *testing.T)
 	if code := worker.do("POST", "/api/v1/admin/draw", nil, &out); code != 403 {
 		t.Fatalf("a rented machine brought the draw forward: HTTP %d", code)
 	}
-	if code, _ := w.postExam(worker, 1, nextTable()); code != 403 {
+	if code, _ := w.postExam(worker, 1, testTable()); code != 403 {
 		t.Fatalf("a rented machine posted a round's exam: HTTP %d", code)
 	}
 

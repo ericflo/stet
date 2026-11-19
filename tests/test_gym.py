@@ -22,10 +22,10 @@ def env(corpus, monkeypatch):
         scores = [-5.0 + gain + 0.2, -5.0 + gain - 0.2]  # one item a pillar, each 0.2 either side
         return {
             "valid": True, "invalid_reason": None, "script": {"out_docs": len(lines)}, "train": {"tokens": scale.train_tokens},
-            "exam": {"kind": "next", "items": 2, "mean": -5.0 + gain, "item_scores": scores},
+            "exam": {"items": 2, "mean": -5.0 + gain, "item_scores": scores},
         }  # fmt: skip
 
-    base = {"exam": {"kind": "next", "items": 2, "mean": -5.0, "item_scores": [-5.0, -5.0]}}
+    base = {"exam": {"items": 2, "mean": -5.0, "item_scores": [-5.0, -5.0]}}
     items = [Item(kind="answer", corner="arith/x", fmt="math", lang="en", source="gen:arith", ctx="1 + 1 =", cont=" 2"),
              Item(kind="answer", corner="knowledge/en/capital", fmt="prose", lang="en", source="gen:knowledge", ctx="France. Capital:", cont=" Paris")]
     monkeypatch.setattr(data, "corpus", lambda rnd, scale, quiet=False: corpus)

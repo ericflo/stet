@@ -323,7 +323,6 @@ type ResultPayload struct {
 // ExamScore is a student's score on the round's exam: one score for each of its items (bits
 // per byte, higher is better), and their mean.
 type ExamScore struct {
-	Kind       string    `json:"kind"` // "next"
 	Mean       float64   `json:"mean"`
 	ItemScores []float64 `json:"item_scores"`
 }

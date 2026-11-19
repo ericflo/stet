@@ -13,9 +13,9 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
-// nextResult is a grade whose items score differently: each item scores base + gain less a
+// examResult is a grade whose items score differently: each item scores base + gain less a
 // little that depends on the item (the baseline, base less the same).
-func (w *world) nextResult(c *claimed, n int, gain, base float64) map[string]any {
+func (w *world) examResult(c *claimed, n int, gain, base float64) map[string]any {
 	p := w.result(c, 5, 6)
 	items := func(x float64) []float64 {
 		out := make([]float64, n)
@@ -32,12 +32,12 @@ func (w *world) nextResult(c *claimed, n int, gain, base float64) map[string]any
 		return s / float64(len(v))
 	}
 	b, e := items(base), items(base+gain)
-	p["baseline"] = map[string]any{"kind": "next", "mean": mean(b), "item_scores": b}
-	p["exam"] = map[string]any{"kind": "next", "mean": mean(e), "item_scores": e}
+	p["baseline"] = map[string]any{"mean": mean(b), "item_scores": b}
+	p["exam"] = map[string]any{"mean": mean(e), "item_scores": e}
 	return p
 }
 
-func TestTheNextExamIsGradedOnceItIsPostedAndScoredAgainstTheRoundsBaseline(t *testing.T) {
+func TestTheExamIsGradedOnceItIsPostedAndScoredAgainstTheRoundsBaseline(t *testing.T) {
 	pub, priv := newKey()
 	w := newWorld(t, pub)
 	anchor, bob := w.join("anchor-one", priv), w.join("bob", nil)
@@ -56,7 +56,7 @@ func TestTheNextExamIsGradedOnceItIsPostedAndScoredAgainstTheRoundsBaseline(t *t
 		t.Fatal("the round settled while waiting for its exam")
 	}
 	// Only the organisers post it, and only a table the season scores.
-	table := nextTable()
+	table := testTable()
 	if code, _ := w.postExam(bob, idx, table); code != 403 {
 		t.Fatalf("a volunteer posted the exam: HTTP %d", code)
 	}
@@ -88,16 +88,16 @@ func TestTheNextExamIsGradedOnceItIsPostedAndScoredAgainstTheRoundsBaseline(t *t
 		t.Fatalf("carol should be grading: %+v", ca.Job)
 	}
 	// A report that is not one score for each item is refused.
-	short := w.nextResult(cb, len(table)-1, 0.1, -3)
+	short := w.examResult(cb, len(table)-1, 0.1, -3)
 	if code := bob.do("POST", fmt.Sprintf("/api/v1/jobs/%d/result", cb.Job.ID), short, nil); code != 400 {
 		t.Fatalf("a report one item short: HTTP %d", code)
 	}
 	// Bob's baseline scores -3 on every item, his student -2.9: a gain of 0.1 against the round's baseline.
-	if code := bob.do("POST", fmt.Sprintf("/api/v1/jobs/%d/result", cb.Job.ID), w.nextResult(cb, len(table), 0.1, -3), nil); code != 200 {
+	if code := bob.do("POST", fmt.Sprintf("/api/v1/jobs/%d/result", cb.Job.ID), w.examResult(cb, len(table), 0.1, -3), nil); code != 200 {
 		t.Fatal("bob's grade was refused")
 	}
 	// Carol's baseline is a little better: the round's is the mean of the two.
-	if code := carol.do("POST", fmt.Sprintf("/api/v1/jobs/%d/result", ca.Job.ID), w.nextResult(ca, len(table), 0.08, -2.98), nil); code != 200 {
+	if code := carol.do("POST", fmt.Sprintf("/api/v1/jobs/%d/result", ca.Job.ID), w.examResult(ca, len(table), 0.08, -2.98), nil); code != 200 {
 		t.Fatal("carol's grade was refused")
 	}
 	w.pass(w.cfg.ReplicaWait + time.Minute)
@@ -118,7 +118,7 @@ func TestTheNextExamIsGradedOnceItIsPostedAndScoredAgainstTheRoundsBaseline(t *t
 		for i := range gains {
 			gains[i] = (-2.9 - float64(i%3)*0.01) - base[i]
 		}
-		want, _, _ = NextScore(table, gains, rd.Shares)
+		want, _, _ = ScoreItems(table, gains, rd.Shares)
 	})
 	if e.Gain == nil || math.Abs(*e.Gain-places5(want)) > 1e-4 {
 		t.Fatalf("the entry's gain is %v, want %.5f", e.Gain, want)

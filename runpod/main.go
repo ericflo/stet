@@ -128,14 +128,14 @@ func flags(name string, o *Options) *flag.FlagSet {
 	ssh := fs.Bool("ssh", false, "let ~/.ssh/id_ed25519.pub log in to the machines rented (for `stet-runpod ssh`)")
 	fs.BoolVar(&o.DryRun, "dry-run", false, "say what would be rented and ended, and do none of it")
 	fs.IntVar(&o.MaxWorkers, "max", 6, "never more machines than this")
-	fs.IntVar(&o.LongMinutes, "long-shadow", 0, "rent machines that also take the organisers' bigger students, given up to this many minutes each, and one for each waiting (0: none)")
+	fs.IntVar(&o.LongMinutes, "long-farm", 0, "rent machines that also take the organisers' bigger students, given up to this many minutes each, and one for each waiting (0: none)")
 	fs.Float64Var(&o.MaxPrice, "max-price", 0, "never rent a machine that costs more than this many dollars an hour, however much work is waiting (0: any)")
 	fs.Float64Var(&o.LongMaxPrice, "long-max-price", 0, "the same, for a machine rented for the organisers' bigger students, which is chosen for what a student costs on it rather than its price (0: --max-price)")
 	fs.Float64Var(&o.MaxHourly, "max-hourly", 3, "never rent past this many dollars an hour, all machines together")
 	fs.Float64Var(&o.DailyBudget, "daily-budget", 0, "rent nothing more once about this many dollars have been spent today, UTC (0: no limit)")
 	fs.Float64Var(&o.PerRunner, "per-runner", 2, "with --no-edits: machines that keep pace with one of the organisers' machines running curators")
 	fs.IntVar(&o.PerWorker, "per-machine", 6, "jobs waiting (a curator to run is two: the run and its grade) that justify one more machine")
-	fs.IntVar(&o.PerShadow, "per-shadow", 4, "the organisers' students waiting to be trained that justify one more machine (0: rent none for them)")
+	fs.IntVar(&o.PerFarm, "per-farm", 4, "the organisers' students waiting to be trained that justify one more machine (0: rent none for them)")
 	fs.DurationVar(&o.Every, "every", time.Minute, "with scale --follow: how often to look")
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), "usage: stet-runpod %s [settings]\n\n", name)
@@ -143,7 +143,7 @@ func flags(name string, o *Options) *flag.FlagSet {
 	}
 	o.Grace, o.Silence = 25*time.Minute, 20*time.Minute
 	finish := func() error {
-		o.LongShadow = o.LongMinutes > 0
+		o.LongFarm = o.LongMinutes > 0
 		o.Edits = !*noEdits
 		o.Cloud = strings.ToUpper(o.Cloud)
 		if o.Cloud != "SECURE" && o.Cloud != "COMMUNITY" && o.Cloud != "ANY" {

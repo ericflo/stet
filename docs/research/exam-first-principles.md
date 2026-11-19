@@ -3,7 +3,7 @@
 Stet exists to find the best pretraining data there is. This note asks what an exam must
 be to point the competition at that, and what that means for Stet. It was written while the
 first season's exam (six kinds of English prose, a fixed public pack) was the score, and the
-exam proposed to replace it (here, "the next exam") was being trained and measured beside
+exam proposed to replace it (here, "the new exam") was being trained and measured beside
 it. Section 7 is what was decided; it is season 1's exam.
 
 ## The answer, in one paragraph
@@ -35,7 +35,7 @@ Targeting such an exam is not cheating. It is the job.
 - Curators keep their order from 14M to 54M parameters, on both exams.
 - The two exams order curators in nearly opposite ways at every size. So the choice of
   target matters more than the size of the student.
-- The next exam's verdict is decided above all by how much each language and capability
+- The new exam's verdict is decided above all by how much each language and capability
   counts. Under the weights the pilot used, the curator to beat cleans every language rather
   than choosing English.
 
@@ -69,7 +69,7 @@ exam (six kinds of English prose), and train on them twice. That is the right ch
 - a model of about 14M parameters trained on 3 tokens a parameter, for which narrow, easy,
   English data is the best use of a tiny capacity.
 
-Neither condition holds for a real model. The next exam, which is broad, already reverses
+Neither condition holds for a real model. The new exam, which is broad, already reverses
 the order. `english` keeps every English page and beats compass on code, programs, other
 languages and fresh text, by 0.14 to 0.22 in all four trainings of round 12. The fault was
 never that compass targeted the exam. The exam was a narrow, unfaithful picture of the
@@ -170,16 +170,16 @@ of other languages is a separate choice.
 - **The two exams disagree.** On round 12:
   - Season exam, as officially graded: compass v1, compass v2, compass-clf-nudge,
     compass-clf, compass-linear, tidy, english.
-  - Next exam, mean of four trainings: english first, by 0.13 or more over every other;
+  - New exam, mean of four trainings: english first, by 0.13 or more over every other;
     compass v1 last; the rest within noise of each other.
-- **The two halves of the next exam agree on the top, not below it.** Generated items and
+- **The two halves of the new exam agree on the top, not below it.** Generated items and
   fresh text both put english first. Below it they differ: tidy and compass-linear do
   better on fresh text than on generated items.
 - **Training noise.** The same script, trained four times on the organisers' rented GPUs
   from the same initial weights, does not give the same student: GPU arithmetic is not
   deterministic, and the differences grow over training. At micro, on round 12:
 
-  | | Season exam loss, sd (nats) | Next exam score, sd (bits per byte) |
+  | | Season exam loss, sd (nats) | New exam score, sd (bits per byte) |
   |---|---|---|
   | The unedited corpus | 0.046 | 0.081 |
   | Curated scripts (7) | 0.004 to 0.015 | 0.010 to 0.037 |
@@ -197,7 +197,7 @@ organisers' rented machines, and each student sat both exams:
   and the multilingual `fineweb2`;
 - the raw crawl.
 
-The next exam is version 5, with 1,897 items: 1,094 generated (knowledge and reading in
+The new exam is version 5, with 1,897 items: 1,094 generated (knowledge and reading in
 context included) and 803 fresh. The raw crawl's student is averaged over four trainings, or
 two at the large scale.
 
@@ -206,7 +206,7 @@ two at the large scale.
 | Student | 14M parameters, 40M tokens | 29M, 160M | 54M, 640M |
 | The raw crawl's spread between trainings (season exam) | 0.081 | 0.028 | 0.004 |
 
-**The next exam's score**, in bits per byte over the raw crawl:
+**The new exam's score**, in bits per byte over the raw crawl:
 
 | | micro | standard | large |
 |---|---|---|---|
@@ -232,7 +232,7 @@ two at the large scale.
 | heuristic | 0.990 | 0.321 | 0.247 |
 | fineweb2 | 0.375 | 0.189 | 0.205 |
 
-**The next exam at the large scale, by kind of item** (bits per byte over the raw crawl):
+**The new exam at the large scale, by kind of item** (bits per byte over the raw crawl):
 
 | | english | fineweb-edu | dclm | fineweb2 | compass v2 | heuristic |
 |---|---|---|---|---|---|---|
@@ -246,7 +246,7 @@ two at the large scale.
 What it says:
 
 1. **Curators keep their order as the student grows.** Rank agreement from micro to standard
-   to large is 0.98 and 1.00 on the next exam as it was then weighted, and 0.90 and 0.88 on
+   to large is 0.98 and 1.00 on the new exam as it was then weighted, and 0.90 and 0.88 on
    the season's. That weighting was mostly fresh text in every language, which is measured
    precisely at every size. On the capability target decided in section 7, micro is no longer
    a sound proxy, and the standard student is.
@@ -259,8 +259,8 @@ What it says:
 4. **Quality filters trade capabilities, as published work found.** They help English prose
    and mathematics. They cost code and tools (the C4 rules delete lines with braces), and
    everything not in English: knowledge in other languages, and fresh text in them. The
-   season exam, all English prose, sees only the gains. The next exam sees both sides.
-5. **On the next exam, languages decide.** With languages weighed as the crawl has them, the
+   season exam, all English prose, sees only the gains. The new exam sees both sides.
+5. **On the new exam, languages decide.** With languages weighed as the crawl has them, the
    only curator near the raw crawl at 54M is the one that keeps every language. Under this
    exam, the winning curator has to clean every language, not choose one. That follows from
    the choice "every language, in proportion to the crawl". Season 0's 8,192-token,
@@ -270,7 +270,7 @@ What it says:
    - The published order (DCLM and FineWeb-Edu above heuristic filtering, above raw) is
      about English benchmarks.
    - The season exam reproduces it at every size.
-   - On English fresh writing, the next exam has every recipe above raw, as published.
+   - On English fresh writing, the new exam has every recipe above raw, as published.
    - On code and on other languages, those recipes really are worse. That is why model
      builders add code, mathematics and other languages to filtered web text separately.
 

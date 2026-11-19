@@ -159,7 +159,7 @@ rent (one an organisers' key has vouched for).
 | `GET /api/v1/admin/workers` | The grants: each machine's `key`, its `handle` once it has an account, who vouched for it (`by`) and when (`at`), whether it `counts`, `last_seen`, and `busy` if it holds a job |
 | `DELETE /api/v1/admin/workers/{key}` | Take a grant back. The account stays, and is nobody's machine |
 | `POST /api/v1/admin/workers/{key}/release` | The machine has been ended: every job it holds, official or one of the farm's students, is handed back as if it had handed it back itself, so that nothing waits out its lease. Answers `handle`, and how many `jobs` and `students` were handed back. Only for a key the organisers vouch for (404 otherwise) |
-| `GET /api/v1/admin/work` | What the open rounds are waiting for, as counts: for each round `entries`, `runs_waiting` (entries someone who is around could be handed to run, and nobody is running), `runs_wanted` (entries a runner of the organisers' that had just started could be handed), `edits_under_way`, `grades_wanted` (scripts a score waits on that a grader of the organisers' who had just started could be handed now) and `grades_under_way`; `runners` (accounts around that run curators); `waiting` (an entry is waiting for a round); `next_draw_at`; `paused` (when the rounds were paused, if they are); `shadow_waiting`, `shadow_under_way` and `shadow_long_waiting` (the farm's students); and `machines`, the organisers' accounts with `last_seen`, `busy` (`edit`, `grade` or `shadow`, a farm student), and `long` when the student it trains is one of the bigger ones. What `stet-runpod` rents by |
+| `GET /api/v1/admin/work` | What the open rounds are waiting for, as counts: for each round `entries`, `runs_waiting` (entries someone who is around could be handed to run, and nobody is running), `runs_wanted` (entries a runner of the organisers' that had just started could be handed), `edits_under_way`, `grades_wanted` (scripts a score waits on that a grader of the organisers' who had just started could be handed now) and `grades_under_way`; `runners` (accounts around that run curators); `waiting` (an entry is waiting for a round); `next_draw_at`; `paused` (when the rounds were paused, if they are); `farm_waiting`, `farm_under_way` and `farm_long_waiting` (the farm's students); and `machines`, the organisers' accounts with `last_seen`, `busy` (`edit`, `grade` or `farm`, a farm student), and `long` when the student it trains is one of the bigger ones. What `stet-runpod` rents by |
 | `POST /api/v1/admin/draw` | Bring the next draw forward to the next mark on the draw grid (`stet draw`). Refused while the rounds are paused |
 | `POST /api/v1/admin/pause` `{"paused": true\|false}` | Pause the rounds, or resume them (`stet-runpod pause`, `resume`). While they are paused no round is drawn, and the round under way finishes; `/season` gives `paused` (when, in Unix seconds) and no `next_round`. Answers `paused` (0 when they are not) and `paused_by` |
 
@@ -171,11 +171,11 @@ also take the machines the organisers rent. Nothing here touches a grade.
 
 | | |
 |---|---|
-| `POST /api/v1/admin/shadow/batches` | Post a batch: a round's exam items (base64 of zstd JSON Lines) and the scripts whose students are wanted, with the scale (or a `scale_spec` for one the season does not name) and how long a task may be held. Posting the same items again adds any new scripts |
-| `GET /api/v1/admin/shadow/batches/{id}` | A batch: every task, and how each student did on every item |
-| `PUT /api/v1/admin/shadow/scripts/{sha256}` | Keep a script that is no round's entry, zstd-compressed, for the farm's students |
-| `POST /api/v1/shadow/claim` | *Machines.* Ask for a student to train, saying how many minutes it will give one (`max_minutes`); a bigger student goes only to a machine set aside for it |
-| `GET /api/v1/shadow/batches/{id}/items` | *Machines.* A batch's items |
-| `GET /api/v1/shadow/scripts/{sha256}` | *Machines.* A script kept for the farm |
-| `POST /api/v1/shadow/batches/{id}/tasks/{i}` | *Machines.* Report how a task's student did on every item |
-| `POST /api/v1/shadow/batches/{id}/tasks/{i}/release` | *Machines.* Hand a task back |
+| `POST /api/v1/admin/farm/batches` | Post a batch: a round's exam items (base64 of zstd JSON Lines) and the scripts whose students are wanted, with the scale (or a `scale_spec` for one the season does not name) and how long a task may be held. Posting the same items again adds any new scripts |
+| `GET /api/v1/admin/farm/batches/{id}` | A batch: every task, and how each student did on every item |
+| `PUT /api/v1/admin/farm/scripts/{sha256}` | Keep a script that is no round's entry, zstd-compressed, for the farm's students |
+| `POST /api/v1/farm/claim` | *Machines.* Ask for a student to train, saying how many minutes it will give one (`max_minutes`); a bigger student goes only to a machine set aside for it |
+| `GET /api/v1/farm/batches/{id}/items` | *Machines.* A batch's items |
+| `GET /api/v1/farm/scripts/{sha256}` | *Machines.* A script kept for the farm |
+| `POST /api/v1/farm/batches/{id}/tasks/{i}` | *Machines.* Report how a task's student did on every item |
+| `POST /api/v1/farm/batches/{id}/tasks/{i}/release` | *Machines.* Hand a task back |

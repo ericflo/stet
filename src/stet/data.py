@@ -684,7 +684,7 @@ def prune_verified(rnd: Round, keep: int = 3) -> int:
 
 def round_exam(rnd: Round, scale: Scale):
     """The round's exam: its items (stet.exam), in order."""
-    return next_exam(rnd)
+    return _items(rnd)
 
 
 class ExamNotReady(RuntimeError):
@@ -701,7 +701,7 @@ def exam_public_path(rnd: Round, digest: str) -> Path:
     return cache_dir() / "rounds" / rnd.id / f"exam-public-{digest[:16]}.jsonl.zst"
 
 
-def next_exam(rnd: Round):
+def _items(rnd: Round):
     """A round's exam items. An official round's are the ones the organisers posted
     after its draw (fetched by the grader beforehand: see client.fetch_exam); a practice or gym
     round's are generated from its seed."""

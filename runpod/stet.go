@@ -182,11 +182,11 @@ type Work struct {
 	Machines   []Machine   `json:"machines"`
 	// The organisers' students, trained by the organisers' machines when they have nothing
 	// official to do: those a machine could be handed now, and those being trained.
-	ShadowWaiting  int `json:"shadow_waiting"`
-	ShadowUnderWay int `json:"shadow_under_way"`
+	FarmWaiting  int `json:"farm_waiting"`
+	FarmUnderWay int `json:"farm_under_way"`
 	// Bigger students, held for hours, handed only to a machine that says it will give one
-	// that long (--long-shadow); not counted in ShadowWaiting.
-	ShadowLongWaiting int `json:"shadow_long_waiting"`
+	// that long (--long-farm); not counted in FarmWaiting.
+	FarmLongWaiting int `json:"farm_long_waiting"`
 	// When the organisers paused the rounds (0: they are not): none is drawn.
 	Paused int64 `json:"paused"`
 }

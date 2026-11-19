@@ -23,7 +23,7 @@ type aggregateVectors struct {
 
 // The server scores a round's exam as the harness does, to within 1e-9: every case
 // the harness wrote, from single items to a whole round of generated and fresh items.
-func TestTheNextScoreIsTheHarnesss(t *testing.T) {
+func TestTheScoreItemsIsTheHarnesss(t *testing.T) {
 	raw, err := os.ReadFile("testdata/aggregate_vectors.json")
 	if err != nil {
 		t.Fatal(err)
@@ -47,7 +47,7 @@ func TestTheNextScoreIsTheHarnesss(t *testing.T) {
 				t.Fatalf("%s: an item without all it says: %+v", c.Name, it)
 			}
 		}
-		score, pillars, err := NextScore(items, c.Gains, c.Shares)
+		score, pillars, err := ScoreItems(items, c.Gains, c.Shares)
 		if err != nil {
 			t.Fatalf("%s: %v", c.Name, err)
 		}
@@ -72,7 +72,7 @@ func TestTheNextScoreIsTheHarnesss(t *testing.T) {
 }
 
 // Programming languages take half of a part beside natural languages, which share the rest by
-// the round's shares; a language without a share, or with none above zero, gets nextOther.
+// the round's shares; a language without a share, or with none above zero, gets otherShare.
 func TestLanguagesWeighByTheRoundsShares(t *testing.T) {
 	items := []ItemInfo{
 		{"writing", "technical", "en", "prose/passage"},
@@ -81,7 +81,7 @@ func TestLanguagesWeighByTheRoundsShares(t *testing.T) {
 		{"writing", "technical", "ru", "prose/passage"},
 	}
 	gains := []float64{1, 10, 100, 1000}
-	score, pillars, err := NextScore(items, gains, map[string]float64{"en": 0.85, "ru": -1})
+	score, pillars, err := ScoreItems(items, gains, map[string]float64{"en": 0.85, "ru": -1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,20 +93,20 @@ func TestLanguagesWeighByTheRoundsShares(t *testing.T) {
 }
 
 // What cannot be scored is refused, not scored as nothing.
-func TestTheNextScoreRefusesWhatItCannotScore(t *testing.T) {
+func TestTheScoreItemsRefusesWhatItCannotScore(t *testing.T) {
 	one := []ItemInfo{{"reasoning", "arith", "en", "math/answer"}}
 	shares := map[string]float64{"en": 43}
 	for name, call := range map[string]func() error{
-		"more gains than items": func() error { _, _, err := NextScore(one, []float64{0.1, 0.2}, shares); return err },
-		"no gains":              func() error { _, _, err := NextScore(one, nil, shares); return err },
-		"no items":              func() error { _, _, err := NextScore(nil, nil, shares); return err },
-		"no shares":             func() error { _, _, err := NextScore(one, []float64{0.1}, nil); return err },
+		"more gains than items": func() error { _, _, err := ScoreItems(one, []float64{0.1, 0.2}, shares); return err },
+		"no gains":              func() error { _, _, err := ScoreItems(one, nil, shares); return err },
+		"no items":              func() error { _, _, err := ScoreItems(nil, nil, shares); return err },
+		"no shares":             func() error { _, _, err := ScoreItems(one, []float64{0.1}, nil); return err },
 	} {
 		if call() == nil {
 			t.Errorf("%s: scored", name)
 		}
 	}
-	if s, p, err := NextScore(one, []float64{0.25}, shares); err != nil || s != 0.25 || p["reasoning"] != 0.25 {
+	if s, p, err := ScoreItems(one, []float64{0.25}, shares); err != nil || s != 0.25 || p["reasoning"] != 0.25 {
 		t.Fatalf("one item: %v %v %v", s, p, err)
 	}
 }

@@ -72,7 +72,7 @@ def _fetch_script(sha: str, season, dest: Path, key=None) -> Path:
         if e.status not in (403, 404):
             raise
         # No round's entry: a reference curator's, or an entry's at a scale of its own.
-        blob = request("GET", f"/api/v1/shadow/scripts/{sha}", key=key, raw=True, timeout=600, limit=limit + (1 << 20))
+        blob = request("GET", f"/api/v1/farm/scripts/{sha}", key=key, raw=True, timeout=600, limit=limit + (1 << 20))
     with zstandard.ZstdDecompressor().stream_reader(blob) as r:
         raw = r.read(limit + 1)
     if len(raw) > limit or hashlib.sha256(raw).hexdigest() != sha:
@@ -120,12 +120,12 @@ def work_one(task: dict, season, key, device, log=print) -> None:
     from ..tok import load_encoding
     from .score import sit
 
-    where = f"/api/v1/shadow/batches/{task['batch']}/tasks/{int(task['index'])}"
+    where = f"/api/v1/farm/batches/{task['batch']}/tasks/{int(task['index'])}"
     try:
         rnd = round_from_api(season, request("GET", f"/api/v1/rounds/{task['round']}")["round"])
         scale = scale_of(season, task["scale"], task.get("scale_spec"))
         script_ref = task["script"].split("#")[0]  # "#2": the same student, trained again
-        items = unpack_items(request("GET", f"/api/v1/shadow/batches/{task['batch']}/items", key=key, raw=True, timeout=600, limit=64 << 20))
+        items = unpack_items(request("GET", f"/api/v1/farm/batches/{task['batch']}/items", key=key, raw=True, timeout=600, limit=64 << 20))
         if len(items) != task["items"] or digest(items) != task["items_digest"]:
             raise ValueError("the batch's items do not match their digest")
         corpus = _corpus(data, rnd, scale, log)
@@ -168,9 +168,9 @@ def turn(season, key, device, log=print) -> bool:
     # A machine set aside for bigger students says how long it will give one; any other is
     # handed only those that take less than an hour.
     ask = {}
-    if os.environ.get("STET_SHADOW_MAX_MINUTES", "").isdigit():
-        ask["max_minutes"] = int(os.environ["STET_SHADOW_MAX_MINUTES"])
-    task = (request("POST", "/api/v1/shadow/claim", ask, key=key) or {}).get("task")
+    if os.environ.get("STET_FARM_MAX_MINUTES", "").isdigit():
+        ask["max_minutes"] = int(os.environ["STET_FARM_MAX_MINUTES"])
+    task = (request("POST", "/api/v1/farm/claim", ask, key=key) or {}).get("task")
     if not isinstance(task, dict):
         return False
     work_one(task, season, key, device, log=log)
@@ -252,7 +252,7 @@ def post_batch(rnd, scale, items: list[Item], scripts: list[str], key, spec: dic
             "scripts": scripts, "items_file": base64.b64encode(pack_items(items)).decode()}
     if spec:
         body["scale_spec"], body["lease"] = spec, lease
-    return request("POST", "/api/v1/admin/shadow/batches", body, key=key, timeout=600)["batch"]
+    return request("POST", "/api/v1/admin/farm/batches", body, key=key, timeout=600)["batch"]
 
 
 def farm_round(rnd, scale, scripts: dict[str, str], out_dir: Path, items: list[Item], n_docs: int, key,
@@ -283,7 +283,7 @@ def farm_round(rnd, scale, scripts: dict[str, str], out_dir: Path, items: list[I
     log(f"{rnd.id}: {len(names)} students posted for the organisers' machines to train (batch {batch})")
     t0, said = time.time(), None
     while True:
-        b = request("GET", f"/api/v1/admin/shadow/batches/{batch}", key=key, timeout=300, limit=256 << 20)
+        b = request("GET", f"/api/v1/admin/farm/batches/{batch}", key=key, timeout=300, limit=256 << 20)
         tasks = b["tasks"]
         for t in tasks:
             d = t.get("done")

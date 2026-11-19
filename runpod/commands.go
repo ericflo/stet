@@ -113,7 +113,7 @@ func (f *Fleet) ceiling(long bool) string {
 
 // longCeiling is --long-max-price, as said in passing, where it is not --max-price.
 func (f *Fleet) longCeiling() string {
-	if !f.o.LongShadow || f.maxPrice(true) == f.maxPrice(false) {
+	if !f.o.LongFarm || f.maxPrice(true) == f.maxPrice(false) {
 		return ""
 	}
 	if f.maxPrice(true) <= 0 {
@@ -130,7 +130,7 @@ func (f *Fleet) maxPrice(long bool) float64 {
 }
 
 func cmdGPUs(ctx context.Context, f *Fleet) error {
-	if err := f.listGPUs(ctx, false); err != nil || !f.o.LongShadow {
+	if err := f.listGPUs(ctx, false); err != nil || !f.o.LongFarm {
 		return err
 	}
 	fmt.Fprintln(f.out)
@@ -189,9 +189,9 @@ func cmdStatus(ctx context.Context, f *Fleet) error {
 		at := time.Unix(v.Work.NextDrawAt, 0)
 		fmt.Fprintf(f.out, "Next draw %s UTC (%s)\n", at.UTC().Format("15:04"), until(now, at))
 	}
-	if v.Work.ShadowWaiting+v.Work.ShadowUnderWay+v.Work.ShadowLongWaiting > 0 {
+	if v.Work.FarmWaiting+v.Work.FarmUnderWay+v.Work.FarmLongWaiting > 0 {
 		fmt.Fprintf(f.out, "The organisers' students: %d to train · %d bigger ones, hours each · %d being trained\n",
-			v.Work.ShadowWaiting, v.Work.ShadowLongWaiting, v.Work.ShadowUnderWay)
+			v.Work.FarmWaiting, v.Work.FarmLongWaiting, v.Work.FarmUnderWay)
 	}
 	fmt.Fprintf(f.out, "%d of the organisers' machines running curators\n\n", v.Work.Runners)
 	rented := 0

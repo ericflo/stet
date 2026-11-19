@@ -69,7 +69,7 @@ def grade(
         from .exam.score import sit
 
         scores = sit(model, exam, enc, season.eot, scale.ctx, device)
-        result["exam"] = {"kind": "next", "items": len(exam), "item_scores": [round(x, 6) for x in scores],
+        result["exam"] = {"items": len(exam), "item_scores": [round(x, 6) for x in scores],
                           "mean": round(sum(scores) / max(1, len(scores)), 6), "seconds": round(time.time() - t1, 2)}
         result["valid"] = True
     except ScriptError as e:

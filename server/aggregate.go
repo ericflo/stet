@@ -23,10 +23,10 @@ import (
 // (tools/aggregate_vectors.py writes it).
 
 const (
-	nextClip  = 4.0    // robust widths
-	nextTrim  = 0.1    // from each end, within a stratum
-	nextOther = 0.05   // the share of a language the round's shares leave out
-	nextCode  = "code" // every programming language, as one language
+	clipWidths = 4.0    // robust widths
+	trimFrac   = 0.1    // from each end, within a stratum
+	otherShare = 0.05   // the share of a language the round's shares leave out
+	codeLang   = "code" // every programming language, as one language
 )
 
 // ItemInfo is all the score needs to know of an item: its row of the harness's item_table.
@@ -37,12 +37,12 @@ type ItemInfo struct {
 	Stratum string `json:"stratum"`
 }
 
-// NextScore is a round's score on its exam and each of its pillars' scores, from its items,
+// ScoreItems is a round's score on its exam and each of its pillars' scores, from its items,
 // a gain per item (in order), and the round's shares of languages (lang -> percent; a language
-// left out, or with no share above zero, gets nextOther). The harness falls back to a published
+// left out, or with no share above zero, gets otherShare). The harness falls back to a published
 // table of shares when it is given none; the server is always given the round's, and refuses
 // to score without them.
-func NextScore(items []ItemInfo, gains []float64, shares map[string]float64) (score float64, pillars map[string]float64, err error) {
+func ScoreItems(items []ItemInfo, gains []float64, shares map[string]float64) (score float64, pillars map[string]float64, err error) {
 	if len(items) != len(gains) {
 		return 0, nil, errors.New("one gain per item")
 	}
@@ -65,7 +65,7 @@ func NextScore(items []ItemInfo, gains []float64, shares map[string]float64) (sc
 		sort.Strings(parts)
 		scores := make([]float64, len(parts))
 		for k, part := range parts {
-			scores[k] = nextByLanguage(items, gains, byPart[part], shares)
+			scores[k] = byLanguage(items, gains, byPart[part], shares)
 		}
 		means[j] = pySum(scores) / float64(len(scores))
 		pillars[p] = means[j]
@@ -88,26 +88,26 @@ func groupInOrder(idx []int, key func(int) string) ([]string, map[string][]int) 
 	return keys, groups
 }
 
-// nextByLanguage is a part's score: each language's balanced score by its weight, added in the
+// byLanguage is a part's score: each language's balanced score by its weight, added in the
 // order the languages first appear.
-func nextByLanguage(items []ItemInfo, gains []float64, idx []int, shares map[string]float64) float64 {
+func byLanguage(items []ItemInfo, gains []float64, idx []int, shares map[string]float64) float64 {
 	langs, byLang := groupInOrder(idx, func(i int) string { return items[i].Lang })
-	w := nextLanguageWeights(langs, shares)
+	w := languageWeights(langs, shares)
 	terms := make([]float64, len(langs))
 	for j, lang := range langs {
-		terms[j] = float64(w[lang] * nextBalanced(items, gains, byLang[lang]))
+		terms[j] = float64(w[lang] * balanced(items, gains, byLang[lang]))
 	}
 	return pySum(terms)
 }
 
-// nextLanguageWeights is each language's weight among some items: its share over the shares of
+// languageWeights is each language's weight among some items: its share over the shares of
 // the natural languages there, halved when programming languages are there too, which take the
 // other half.
-func nextLanguageWeights(langs []string, shares map[string]float64) map[string]float64 {
+func languageWeights(langs []string, shares map[string]float64) map[string]float64 {
 	var natural []string
 	code := false
 	for _, lang := range langs {
-		if lang == nextCode {
+		if lang == codeLang {
 			code = true
 		} else {
 			natural = append(natural, lang)
@@ -118,13 +118,13 @@ func nextLanguageWeights(langs []string, shares map[string]float64) map[string]f
 	for j, lang := range natural {
 		s, ok := shares[lang]
 		if !ok {
-			s = nextOther
+			s = otherShare
 		}
 		if 0.0 > s { // max(share, 0.0)
 			s = 0.0
 		}
 		if s == 0 { // ... or OTHER
-			s = nextOther
+			s = otherShare
 		}
 		w[j] = s
 	}
@@ -135,19 +135,19 @@ func nextLanguageWeights(langs []string, shares map[string]float64) map[string]f
 	}
 	if code {
 		if len(out) == 0 {
-			return map[string]float64{nextCode: 1.0}
+			return map[string]float64{codeLang: 1.0}
 		}
 		for lang, v := range out {
 			out[lang] = v / 2
 		}
-		out[nextCode] = 0.5
+		out[codeLang] = 0.5
 	}
 	return out
 }
 
-// nextBalanced is a language's score: its strata, in sorted order, with equal weight, each a
+// balanced is a language's score: its strata, in sorted order, with equal weight, each a
 // trimmed mean of its clipped gains.
-func nextBalanced(items []ItemInfo, gains []float64, idx []int) float64 {
+func balanced(items []ItemInfo, gains []float64, idx []int) float64 {
 	strata, byStratum := groupInOrder(idx, func(i int) string { return items[i].Stratum })
 	sort.Strings(strata)
 	means := make([]float64, len(strata))
@@ -156,14 +156,14 @@ func nextBalanced(items []ItemInfo, gains []float64, idx []int) float64 {
 		for k, i := range byStratum[s] {
 			vals[k] = gains[i]
 		}
-		means[j] = nextTrimmedMean(nextClipped(vals, nextClip), nextTrim)
+		means[j] = trimmedMean(clipped(vals, clipWidths), trimFrac)
 	}
 	return pySum(means) / float64(len(means))
 }
 
-// nextClipped clips values to k robust widths (1.4826 median absolute deviations) of their
+// clipped clips values to k robust widths (1.4826 median absolute deviations) of their
 // median; fewer than three values, or no spread, are left as they are.
-func nextClipped(vals []float64, k float64) []float64 {
+func clipped(vals []float64, k float64) []float64 {
 	out := append([]float64(nil), vals...)
 	if len(vals) < 3 {
 		return out
@@ -191,8 +191,8 @@ func nextClipped(vals []float64, k float64) []float64 {
 	return out
 }
 
-// nextTrimmedMean is the mean of the values with int(n*trim) cut from each end.
-func nextTrimmedMean(vals []float64, trim float64) float64 {
+// trimmedMean is the mean of the values with int(n*trim) cut from each end.
+func trimmedMean(vals []float64, trim float64) float64 {
 	s := append([]float64(nil), vals...)
 	sort.Float64s(s)
 	cut := int(float64(len(s)) * trim)

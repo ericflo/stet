@@ -201,7 +201,7 @@ def fetch_round(season, index: int):
 
 
 def fetch_public_exam(rnd) -> None:
-    """A settled next-exam round's published exam, kept for replays (see data.next_exam). A
+    """A settled round's published exam, kept for replays (see data.round_exam). A
     machine that graded the round has the whole exam already, and needs none of it."""
     from . import data
 
@@ -565,11 +565,11 @@ def slim_result(result: dict, base: dict) -> dict:
     out = {k: result.get(k) for k in keys}
     out["round"] = result["round"]["id"]
     # Every item's score: the server makes the round's score from them.
-    out["baseline"] = {"kind": "next", "mean": base["exam"]["mean"], "item_scores": base["exam"]["item_scores"]}
+    out["baseline"] = {"mean": base["exam"]["mean"], "item_scores": base["exam"]["item_scores"]}
     if result.get("valid"):
         s = result["script"]
         out["script"] = {k: s.get(k) for k in ("script_sha256", "tokens_sha256", "script_lines", "out_docs", "out_bytes", "src_docs", "ink_tokens", "ink_frac", "kept_doc_frac", "kept_byte_frac", "tokens_one_pass", "passes", "truncated")}
-        out["exam"] = {"kind": "next", "mean": result["exam"]["mean"], "item_scores": result["exam"]["item_scores"]}
+        out["exam"] = {"mean": result["exam"]["mean"], "item_scores": result["exam"]["item_scores"]}
         t = result["train"]
         out["train"] = {k: t.get(k) for k in ("seconds", "tokens_per_second", "final_train_loss", "init_sha256", "precision")}
         out["train"]["curve"] = t["curve"][:: max(1, len(t["curve"]) // 60)]
@@ -853,7 +853,7 @@ def _grade_job(job, season, scale, device, key, out, work: Path) -> tuple[dict, 
 
 
 def fetch_exam(rnd, key) -> Path:
-    """An official next-exam round's items, as the organisers posted them after its draw: fetched
+    """An official round's exam items, as the organisers posted them after its draw: fetched
     once (signed: graders only), checked against the digest the round committed to, and kept."""
     import zstandard
 

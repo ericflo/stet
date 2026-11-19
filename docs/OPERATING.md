@@ -228,9 +228,9 @@ batch ([the API](API.md#the-organisers-farm)); any organisers' machine running
 back how the student did on every item. Nothing here touches a grade, and a student is
 never handed to a machine an official job could use.
 
-`stet-runpod` rents for the farm too, after the official work. With `--long-shadow MINUTES`
+`stet-runpod` rents for the farm too, after the official work. With `--long-farm MINUTES`
 the machines it rents also take the bigger students, held for hours (they are told
-`STET_SHADOW_MAX_MINUTES`), one machine to each. Those machines are chosen for what a
+`STET_FARM_MAX_MINUTES`), one machine to each. Those machines are chosen for what a
 student costs on them (price over speed, the quicker where that is about the same), under
 `--long-max-price` rather than `--max-price`.
 
@@ -252,7 +252,7 @@ on the site at least two weeks ahead: the rules promise it. After the last round
 the eight best-rated curators are run on a fresh round, and the **large** student (10 × 640,
 640M tokens, about an hour on a 4090) is trained on what each writes, twice, and on the
 unedited corpus four times. Those students are trained on [the farm](#the-farm): rent
-machines for them with `--long-shadow`. The three best are also trained one size up, about
+machines for them with `--long-farm`. The three best are also trained one size up, about
 150M parameters, as a check on the ladder that decides nothing this season. Publish the
 table with every script behind it and the round's exam, and put it on the site as a page.
 

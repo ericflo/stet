@@ -12,7 +12,7 @@ from stet.exam.items import Item, digest
 from stet.spec import load_season, official_round, practice_round
 
 
-def test_the_season_is_the_next_exam_at_the_standard_scale():
+def test_the_season_is_the_exam_at_the_standard_scale():
     from stet.spec import CURRENT_SEASON
 
     s1 = load_season()
@@ -78,7 +78,7 @@ def test_a_round_carries_its_exams_digest_through_its_description():
         round_from_description(s1, {**rnd.describe(), "exam_digest": "not a hash"})
 
 
-def test_a_grade_on_the_next_exam_reports_every_items_score(monkeypatch):
+def test_a_grade_reports_every_items_score(monkeypatch):
     pytest.importorskip("torch")
     from stet import grade as grading
     from stet import tok
@@ -98,13 +98,13 @@ def test_a_grade_on_the_next_exam_reports_every_items_score(monkeypatch):
     rnd = practice_round(s1, 0)
     corpus = types.SimpleNamespace(meta={"sha256": "c0"})
     result = grading.grade(rnd, s1.scale("micro"), corpus, items, "script.jsonl", device=types.SimpleNamespace(type="cpu"))
-    assert result["valid"] and result["exam"]["kind"] == "next" and result["exam"]["item_scores"] == [-1.0, -2.0, -3.0]
+    assert result["valid"] and result["exam"]["item_scores"] == [-1.0, -2.0, -3.0]
     assert result["exam"]["mean"] == -2.0 and result["exam_sha256"] == digest(items)
     from stet.client import slim_result
 
     result.update(round={"id": rnd.id}, train={"seconds": 1, "curve": []})
     slim = slim_result(result, result)
-    assert slim["exam"] == {"kind": "next", "mean": -2.0, "item_scores": [-1.0, -2.0, -3.0]} and slim["baseline"] == slim["exam"]
+    assert slim["exam"] == {"mean": -2.0, "item_scores": [-1.0, -2.0, -3.0]} and slim["baseline"] == slim["exam"]
 
 
 def test_the_examiner_makes_a_rounds_exam_from_its_harvest_and_seed(monkeypatch, tmp_path):

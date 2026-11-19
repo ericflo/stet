@@ -194,7 +194,7 @@ func newFakeStet(t *testing.T) *fakeStet {
 				jobs, students := 0, 0
 				for i := range f.work.Machines {
 					if m := &f.work.Machines[i]; m.Handle == handle {
-						if m.Busy == "shadow" {
+						if m.Busy == "farm" {
 							students++
 						} else if m.Busy != "" {
 							jobs++
@@ -498,12 +498,12 @@ func TestTheCheapestMachineInEitherCloudIsRented(t *testing.T) {
 	if spec := rp.created[0]; spec.GPU.MinRAMPerGPU != f.o.MinRAM || spec.GPU.MinVCPUPerGPU != f.o.MinCPU {
 		t.Fatalf("the host was asked for as %+v", spec.GPU)
 	}
-	if _, ok := rp.created[0].Env["STET_SHADOW_MAX_MINUTES"]; ok {
+	if _, ok := rp.created[0].Env["STET_FARM_MAX_MINUTES"]; ok {
 		t.Fatal("a machine not rented for bigger students was told to take them")
 	}
 	f.o.LongMinutes = 600
-	if spec := f.spec(&Key{Handle: "stet-rp-09"}, "NVIDIA RTX A5000", "SECURE", "https://www.stet.test"); spec.Env["STET_SHADOW_MAX_MINUTES"] != "600" {
-		t.Fatalf("a machine rented for bigger students: %v", spec.Env["STET_SHADOW_MAX_MINUTES"])
+	if spec := f.spec(&Key{Handle: "stet-rp-09"}, "NVIDIA RTX A5000", "SECURE", "https://www.stet.test"); spec.Env["STET_FARM_MAX_MINUTES"] != "600" {
+		t.Fatalf("a machine rented for bigger students: %v", spec.Env["STET_FARM_MAX_MINUTES"])
 	}
 	f.o.LongMinutes = 0
 	gpus, err := f.choices(context.Background(), false)
@@ -621,7 +621,7 @@ func TestWhatAnEndedMachineHeldIsHandedBack(t *testing.T) {
 	st.work.Machines = []Machine{
 		{Handle: "stet-rp-01", Worker: true, LastSeen: now, Busy: "grade"},
 		{Handle: "stet-rp-02", Worker: true, LastSeen: now},
-		{Handle: "stet-rp-03", Worker: true, LastSeen: now - 3600, Busy: "shadow"},
+		{Handle: "stet-rp-03", Worker: true, LastSeen: now - 3600, Busy: "farm"},
 	}
 	if err := tick(ctx, f); err != nil {
 		t.Fatal(err)
@@ -657,16 +657,16 @@ func TestTheBiggerStudentsGetTheCardThatTrainsOneForLeast(t *testing.T) {
 	rp, st := newFakeRunPod(t), newFakeStet(t)
 	f, out := testFleet(t, rp, st, 4)
 	f.o.Cloud, f.o.MaxPrice, f.o.LongMaxPrice = "ANY", 0.22, 0.90
-	f.o.LongMinutes, f.o.LongShadow, f.o.PerShadow = 600, true, 4
+	f.o.LongMinutes, f.o.LongFarm, f.o.PerFarm = 600, true, 4
 	rp.noRoom["NVIDIA GeForce RTX 3080 Ti"] = true // a student costs least on it, and it has none free
-	st.work = Work{ShadowWaiting: 1, ShadowLongWaiting: 2}
+	st.work = Work{FarmWaiting: 1, FarmLongWaiting: 2}
 	if err := tick(context.Background(), f); err != nil {
 		t.Fatal(err)
 	}
 	got := []string{}
 	for _, spec := range rp.created {
 		got = append(got, strings.ToLower(spec.Cloud)+" "+shortGPU(spec.GPU.ID))
-		if spec.Env["STET_SHADOW_MAX_MINUTES"] != "600" {
+		if spec.Env["STET_FARM_MAX_MINUTES"] != "600" {
 			t.Fatalf("%s was not told to take the bigger students", spec.Name)
 		}
 	}
@@ -706,7 +706,7 @@ func TestStatusJudgesByTheServicesSettings(t *testing.T) {
 	}
 	t.Setenv("RUNPOD_API_KEY", "rp-key")
 	common := []string{"--home", home, "--api", st.srv.URL, "--runpod-api", rp.srv.URL, "--key", opPath}
-	st.work = Work{ShadowLongWaiting: 7}
+	st.work = Work{FarmLongWaiting: 7}
 
 	var out, errs bytes.Buffer
 	if err := run(append([]string{"status"}, common...), &out, &errs); err != nil {
@@ -719,7 +719,7 @@ func TestStatusJudgesByTheServicesSettings(t *testing.T) {
 	o := &Options{}
 	fs := flags("scale", o)
 	fs.Bool("follow", false, "")
-	if _, err := parse(fs, append([]string{"--follow", "--max", "5", "--long-shadow", "600", "--gpu", "RTX 4090,RTX A5000"}, common...)); err != nil {
+	if _, err := parse(fs, append([]string{"--follow", "--max", "5", "--long-farm", "600", "--gpu", "RTX 4090,RTX A5000"}, common...)); err != nil {
 		t.Fatal(err)
 	}
 	if err := keepService(fs, home, time.Unix(1795078800, 0)); err != nil {

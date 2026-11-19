@@ -24,8 +24,8 @@ import (
 //
 // A machine with nothing official to do trains the organisers' students (a few minutes
 // each), so those waiting want machines too, after the official work and under the same
-// limits: one for every --per-shadow of them. A bigger student holds a machine for hours,
-// and is handed only to one rented to take it (--long-shadow): one machine each.
+// limits: one for every --per-farm of them. A bigger student holds a machine for hours,
+// and is handed only to one rented to take it (--long-farm): one machine each.
 //
 // Letting machines go needs no decision here. A rented machine stops by itself once it has
 // had nothing to do for a while, and ends its own pod. What is decided here is ending, at
@@ -37,8 +37,8 @@ type Policy struct {
 	MaxWorkers  int     // never more machines than this
 	PerRunner   float64 // grading only: machines that keep pace with one curator runner
 	PerWorker   int     // jobs waiting that justify one more machine
-	PerShadow   int     // the organisers' students waiting that justify one more machine; 0: none
-	LongShadow  bool    // the machines take the organisers' bigger students too, one machine to each
+	PerFarm     int     // the organisers' students waiting that justify one more machine; 0: none
+	LongFarm    bool    // the machines take the organisers' bigger students too, one machine to each
 	MaxHourly   float64 // never rent past this many dollars an hour, all machines together
 	DailyBudget float64 // no new machine once this much has been spent today (UTC); 0: no limit
 	Grace       time.Duration
@@ -52,11 +52,11 @@ func (p Policy) target(w *Work) int { return p.targetHolding(w, 0) }
 // is busy with it for hours, and so is none of the machines the students still waiting want.
 func (p Policy) targetHolding(w *Work, held int) int {
 	n := p.official(w)
-	if p.PerShadow > 0 {
-		n += (w.ShadowWaiting + p.PerShadow - 1) / p.PerShadow
+	if p.PerFarm > 0 {
+		n += (w.FarmWaiting + p.PerFarm - 1) / p.PerFarm
 	}
-	if p.LongShadow {
-		n += w.ShadowLongWaiting + held // a machine to each, held for hours
+	if p.LongFarm {
+		n += w.FarmLongWaiting + held // a machine to each, held for hours
 	}
 	return min(n, p.MaxWorkers)
 }
@@ -112,7 +112,7 @@ func (w *Worker) state(now time.Time, p Policy) string {
 		return "stopped"
 	case w.Machine != nil && w.Machine.Busy == "grade":
 		return "grading"
-	case w.Machine != nil && w.Machine.Busy == "shadow":
+	case w.Machine != nil && w.Machine.Busy == "farm":
 		return "training"
 	case w.Machine != nil && w.Machine.Busy != "":
 		return "running"
@@ -197,8 +197,8 @@ func (p Policy) decide(w *Work, workers []*Worker, spentToday float64, now time.
 	if d.Launch > 0 && p.DailyBudget > 0 && spentToday >= p.DailyBudget {
 		d.Launch, d.Note = 0, fmt.Sprintf("about $%.2f spent today, and the daily budget is $%.2f", spentToday, p.DailyBudget)
 	}
-	if p.LongShadow {
-		d.LaunchLong = min(d.Launch, w.ShadowLongWaiting)
+	if p.LongFarm {
+		d.LaunchLong = min(d.Launch, w.FarmLongWaiting)
 	}
 	sort.SliceStable(d.End, func(i, j int) bool { return d.End[i].Worker.Key.Handle < d.End[j].Worker.Key.Handle })
 	return d

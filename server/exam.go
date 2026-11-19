@@ -5,7 +5,7 @@ package main
 // and posts them here (apiExamPost). Grades start then. A grader sits every item
 // and reports each one's score, and its own baseline's; the round's baseline is the mean, item
 // by item, of the established graders' baselines; and a grade's score is the exam's
-// aggregate (NextScore, a port of src/stet/exam/aggregate.py) of its item scores less the
+// aggregate (ScoreItems, a port of src/stet/exam/aggregate.py) of its item scores less the
 // round's baseline. From there on the judge works as it always has, on that score.
 //
 // What a round holds of this (the exam's table, the baseline item by item, every grade's item
@@ -209,7 +209,7 @@ func (a *App) apiExamGet(w http.ResponseWriter, r *http.Request) {
 
 // checkItems refuses a report that is not one score for every item of the round's exam.
 func checkItems(sc *ExamScore, n int, what string) error {
-	if sc == nil || sc.Kind != "next" || len(sc.ItemScores) != n || n == 0 {
+	if sc == nil || len(sc.ItemScores) != n || n == 0 {
 		return fail(400, "the %s score is not one score for each of the exam's %d items", what, n)
 	}
 	sum := 0.0
@@ -278,7 +278,7 @@ func (a *App) baselineDev(s *State, rd *Round, acctID int64, items []float64) (d
 	if len(rows) == 0 || len(items) != len(rd.ExamTable) {
 		return 0, false
 	}
-	dev, _, err := NextScore(rd.ExamTable, diffItems(items, meanItems(rows)), rd.Shares)
+	dev, _, err := ScoreItems(rd.ExamTable, diffItems(items, meanItems(rows)), rd.Shares)
 	return dev, err == nil
 }
 
@@ -288,7 +288,7 @@ func (a *App) baselineAgrees(rd *Round, b *Baseline) bool {
 	if b == nil || len(rd.BaseItems) == 0 || len(b.Items) != len(rd.BaseItems) || b.ExamSHA != rd.ExamSHA {
 		return false
 	}
-	dev, _, err := NextScore(rd.ExamTable, diffItems(b.Items, rd.BaseItems), rd.Shares)
+	dev, _, err := ScoreItems(rd.ExamTable, diffItems(b.Items, rd.BaseItems), rd.Shares)
 	return err == nil && within(dev, a.tolerance().Baseline)
 }
 
@@ -324,7 +324,7 @@ func (a *App) refreshScores(tx *Tx, rd *Round) {
 			if !r.Valid || len(r.Items) != len(base) {
 				continue
 			}
-			score, pillars, err := NextScore(rd.ExamTable, diffItems(r.Items, base), rd.Shares)
+			score, pillars, err := ScoreItems(rd.ExamTable, diffItems(r.Items, base), rd.Shares)
 			if err != nil {
 				continue
 			}
@@ -339,9 +339,9 @@ func (a *App) refreshScores(tx *Tx, rd *Round) {
 	}
 }
 
-// NextScores is what a settled round's exam came to, item by item: kept in the file store, so
+// ExamScores is what a settled round's exam came to, item by item: kept in the file store, so
 // that anyone can work every score out again.
-type NextScores struct {
+type ExamScores struct {
 	Round     string               `json:"round"`
 	Digest    string               `json:"items_digest"`
 	Shares    map[string]float64   `json:"languages"`
@@ -363,10 +363,10 @@ func (a *App) archiveExam(ctx context.Context) {
 		}
 	})
 	for _, idx := range due {
-		var out NextScores
+		var out ExamScores
 		a.st.view(func(s *State) {
 			rd := s.Rounds[idx]
-			out = NextScores{Round: roundID(a.season.ID, idx), Digest: rd.ExamSHA, Shares: rd.Shares, Baseline: rd.BaseItems,
+			out = ExamScores{Round: roundID(a.season.ID, idx), Digest: rd.ExamSHA, Shares: rd.Shares, Baseline: rd.BaseItems,
 				Baselines: map[string][]float64{}, Grades: map[string][]float64{}}
 			for _, b := range s.Baselines {
 				if b.RoundIdx == idx && len(b.Items) > 0 {
