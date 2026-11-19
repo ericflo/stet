@@ -32,7 +32,10 @@ Each machine has a key of its own from a pool kept here, and the organisers' own
 (`--key`) vouches for each: it signs a grant the server keeps. Nothing in the server's
 configuration changes. A machine vouched for is one of the organisers' machines to the
 judge, and nothing more: it administers nothing and posts no round's exam
-([Operating: rented machines](../docs/OPERATING.md#rented-machines)).
+([Operating: rented machines](../docs/OPERATING.md#rented-machines)). A new machine takes
+the key the server has heard from longest ago: the server lets each account run an entry
+once, so a machine on the key that just ran a round's curators could take none of their
+second runs.
 
 ## Setting up
 
@@ -111,7 +114,7 @@ Description=Rent GPUs to grade for Stet
 
 [Service]
 EnvironmentFile=%h/.config/stet-runpod/env
-ExecStart=%h/.local/bin/stet-runpod scale --follow --max 5 --max-price 0.22 --long-farm 600 --long-max-price 0.90 --max-hourly 4.50
+ExecStart=%h/.local/bin/stet-runpod scale --follow --max 5 --max-price 0.25
 Restart=always
 RestartSec=60
 
