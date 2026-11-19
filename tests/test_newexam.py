@@ -339,7 +339,15 @@ def test_students_farmed_out_to_the_organisers_machines_add_up_as_a_local_run_do
     scale = dataclasses.replace(season.scale("nano"), train_tokens=2 * 16 * 256)
     rnd = practice_round(season, 0)
     exam = {"news": [{"id": "n0", "text": "A short passage of news for the season's exam to score. " * 3}]}
-    monkeypatch.setattr(data, "materialize", lambda r, s: (corpus, exam))
+    busy = {"left": 1}  # the crawl host says "slow down" once: the worker waits and fetches again
+
+    def materialize(r, s):
+        if busy["left"]:
+            busy["left"] -= 1
+            raise data.FetchError("could not fetch CC-MAIN-x.warc.wet.gz: HTTP Error 503: Service Unavailable")
+        return corpus, exam
+
+    monkeypatch.setattr(data, "materialize", materialize)
     monkeypatch.setattr(type(season), "scale", lambda self, name: scale)
     monkeypatch.setattr(client, "round_from_api", lambda s, d: rnd)
     monkeypatch.setattr(farm, "POLL", 0.05)

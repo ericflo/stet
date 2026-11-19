@@ -95,6 +95,22 @@ def _send(where: str, body: dict, key, waits=(5, 15, 30, 60, 120)) -> None:
         time.sleep(wait)
 
 
+FETCH_WAITS = (60, 120, 240, 480, 600)  # a crawl host that says "slow down" is waited out, not given up on
+
+
+def _materialize(data, rnd, scale, log):
+    """The round's corpus and exam, waiting out a public data host that is busy: a student held
+    is not handed back (and a try spent) because Common Crawl asked a dozen machines to slow down."""
+    for wait in (*FETCH_WAITS, None):
+        try:
+            return data.materialize(rnd, scale)
+        except data.FetchError as e:
+            if wait is None:
+                raise
+            log(f"{rnd.id}: {e}; trying again in {wait // 60} min")
+            time.sleep(wait)
+
+
 def work_one(task: dict, season, key, device, log=print) -> None:
     """Train and sit the student a task names, and send back how it did."""
     from .. import data
@@ -112,7 +128,7 @@ def work_one(task: dict, season, key, device, log=print) -> None:
         items = unpack_items(request("GET", f"/api/v1/shadow/batches/{task['batch']}/items", key=key, raw=True, timeout=600, limit=64 << 20))
         if len(items) != task["items"] or digest(items) != task["items_digest"]:
             raise ValueError("the batch's items do not match their digest")
-        corpus, exam = data.materialize(rnd, scale)
+        corpus, exam = _materialize(data, rnd, scale, log)
         enc = load_encoding(season)
         t0 = time.time()
         with tempfile.TemporaryDirectory(prefix="stet-shadow-") as tmp:
