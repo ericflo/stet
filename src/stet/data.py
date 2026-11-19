@@ -582,7 +582,11 @@ def keys_array(keys, key_bytes: int) -> np.ndarray:
 
 
 def exam_keys(season: Season) -> np.ndarray:
-    """Sorted hashes of the keys of every exam passage in the season's pack, both halves."""
+    """Sorted hashes of the keys of every exam passage in the season's pack, both halves. A
+    season whose exam is made after the draw has no passages to keep out of the corpus: its
+    fresh text did not exist yet, and its other items are generated."""
+    if season.exam_kind != "pack":
+        return np.zeros(0, dtype=np.uint64)
     if season.id not in _exam_keys:
         cfg = season.raw["decontam"]
         k, need = int(cfg["key_bytes"]), int(cfg["min_letters"])
@@ -831,12 +835,53 @@ def heldout_exam(rnd: Round, scale: Scale) -> dict[str, list[dict]] | None:
     return {src: [items[i] for i in rnd.exam_indices(scale, src, len(items))] for src, items in _exam_cache[key].items()}
 
 
-def round_exam(rnd: Round, scale: Scale) -> dict[str, list[dict]]:
+def round_exam(rnd: Round, scale: Scale):
+    """The round's exam: a pack season's passages by source, or the next exam's items (a list)."""
+    if rnd.season.exam_kind == "next":
+        return next_exam(rnd)
     pool = load_exam_pool(rnd.season, rnd.split)
     return {src: [items[i] for i in rnd.exam_indices(scale, src, len(items))] for src, items in pool.items()}
 
 
-def exam_digest(exam: dict[str, list[dict]]) -> str:
+class ExamNotReady(RuntimeError):
+    """An official round's exam is made after its draw, and this one has not been posted yet."""
+
+
+def exam_items_path(rnd: Round, digest: str) -> Path:
+    """Where an official round's posted items are kept, by their digest."""
+    return cache_dir() / "rounds" / rnd.id / f"exam-{digest[:16]}.jsonl.zst"
+
+
+def next_exam(rnd: Round):
+    """The next exam's items for a round. An official round's are the ones the organisers posted
+    after its draw (fetched by the grader beforehand: see client.fetch_exam); a practice or gym
+    round's are generated from its seed."""
+    from .newexam import gen
+    from .newexam.items import Item
+
+    cfg = rnd.season.raw["exam"]
+    if gen.VERSION != int(cfg["generator_version"]):
+        raise RuntimeError(f"season {rnd.season.id} sets the exam's generators at version {cfg['generator_version']}, "
+                           f"this copy of stet has {gen.VERSION}: upgrade stet")
+    if rnd.kind != "official":
+        return gen.generate(rnd.seed, per_corner=int(cfg["per_corner"]))
+    want = getattr(rnd, "exam_digest", "") or ""
+    path = exam_items_path(rnd, want) if want else None
+    if path is None or not path.exists():
+        raise ExamNotReady(f"{rnd.id}: the round's exam has not been posted, or not fetched to this machine")
+    raw = zstandard.ZstdDecompressor().decompress(path.read_bytes(), max_output_size=1 << 30)
+    items = [Item.from_dict(json.loads(line)) for line in raw.decode().splitlines() if line]
+    if exam_digest(items) != want:
+        path.unlink(missing_ok=True)
+        raise ExamNotReady(f"{rnd.id}: the copy of the exam here is not the round's; it has been removed, fetch it again")
+    return items
+
+
+def exam_digest(exam) -> str:
+    if isinstance(exam, list):  # the next exam's items
+        from .newexam.items import digest
+
+        return digest(exam)
     h = hashlib.sha256()
     for src in sorted(exam):
         for it in exam[src]:

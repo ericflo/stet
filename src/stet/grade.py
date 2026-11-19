@@ -20,13 +20,18 @@ def grade(
     rnd: Round,
     scale: Scale,
     corpus: Corpus,
-    exam: dict[str, list[dict]],
+    exam,
     script_path,
     device=None,
     progress=None,
     log=None,
 ) -> dict:
     """Apply the script, train the student for the budget, sit the exam.
+
+    The exam is a pack season's passages by source (the result has the loss on each), or the
+    next exam's items (a list: the result has every item's score, in bits per byte, higher is
+    better; the round's score is made from them against the round's baseline, see
+    newexam.aggregate).
 
     Never raises on a bad script: the result says `valid: false` and why. A script that
     breaks a rule scores as the unedited corpus (gain 0).
@@ -64,7 +69,14 @@ def grade(
         result["script"] = stats.to_dict(corpus)
         model, result["train"] = train(tokens, scale, season, rnd.init_seed, device, progress)
         t1 = time.time()
-        result["exam"] = evaluate(model, exam, scale, season, device, enc)
+        if isinstance(exam, list):
+            from .newexam.score import sit
+
+            scores = sit(model, exam, enc, season.eot, scale.ctx, device)
+            result["exam"] = {"kind": "next", "items": len(exam), "item_scores": [round(x, 6) for x in scores],
+                              "mean": round(sum(scores) / max(1, len(scores)), 6)}
+        else:
+            result["exam"] = evaluate(model, exam, scale, season, device, enc)
         result["exam"]["seconds"] = round(time.time() - t1, 2)
         result["valid"] = True
         if held is not None:

@@ -17,7 +17,7 @@ def graded(monkeypatch):
     from stet import data, pipeline
 
     seen = types.SimpleNamespace(scripts=[], pack=False, valid=True)
-    seen.rnd, seen.scale, seen.device = types.SimpleNamespace(id="s0-o00007", kind="official"), types.SimpleNamespace(name="micro"), types.SimpleNamespace(type="cpu")
+    seen.rnd, seen.scale, seen.device = types.SimpleNamespace(id="s0-o00007", kind="official", season=types.SimpleNamespace(exam_kind="pack")), types.SimpleNamespace(name="micro"), types.SimpleNamespace(type="cpu")
     data.round_dir(seen.rnd, seen.scale).mkdir(parents=True)
 
     def grade(rnd, scale, corpus, exam, script, device=None, progress=None, log=None):

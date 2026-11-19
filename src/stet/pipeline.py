@@ -27,7 +27,9 @@ def baseline(rnd: Round, scale: Scale, device=None, progress=None, log=None) -> 
     the round's raw data.
     """
     device = pick_device(device) if not hasattr(device, "type") else device
-    path = data.round_dir(rnd, scale) / f"baseline-{HARNESS_VERSION}-{device.type}.json"
+    # A next-exam round's baseline is for the exam it sat: named for it.
+    exam = f"-{(rnd.exam_digest or 'generated')[:12]}" if rnd.season.exam_kind == "next" else ""
+    path = data.round_dir(rnd, scale) / f"baseline-{HARNESS_VERSION}-{device.type}{exam}.json"
     cached = _cached(path)
     # A machine that holds the held-out exam needs its baseline too, so a baseline measured before the
     # pack was put in place is measured again.

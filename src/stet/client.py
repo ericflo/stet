@@ -574,11 +574,17 @@ def slim_result(result: dict, base: dict) -> dict:
             "valid", "invalid_reason", "hardware", "started_at", "finished_at")  # fmt: skip
     out = {k: result.get(k) for k in keys}
     out["round"] = result["round"]["id"]
-    out["baseline"] = {"loss": base["exam"]["loss"], "by_source": {k: v["loss"] for k, v in base["exam"]["by_source"].items()}}
+    if base["exam"].get("kind") == "next":  # every item's score: the server makes the round's score from them
+        out["baseline"] = {"kind": "next", "mean": base["exam"]["mean"], "item_scores": base["exam"]["item_scores"]}
+    else:
+        out["baseline"] = {"loss": base["exam"]["loss"], "by_source": {k: v["loss"] for k, v in base["exam"]["by_source"].items()}}
     if result.get("valid"):
         s = result["script"]
         out["script"] = {k: s.get(k) for k in ("script_sha256", "tokens_sha256", "script_lines", "out_docs", "out_bytes", "src_docs", "ink_tokens", "ink_frac", "kept_doc_frac", "kept_byte_frac", "tokens_one_pass", "passes", "truncated")}
-        out["exam"] = {"loss": result["exam"]["loss"], "by_source": {k: v["loss"] for k, v in result["exam"]["by_source"].items()}}
+        if result["exam"].get("kind") == "next":
+            out["exam"] = {"kind": "next", "mean": result["exam"]["mean"], "item_scores": result["exam"]["item_scores"]}
+        else:
+            out["exam"] = {"loss": result["exam"]["loss"], "by_source": {k: v["loss"] for k, v in result["exam"]["by_source"].items()}}
         t = result["train"]
         out["train"] = {k: t.get(k) for k in ("seconds", "tokens_per_second", "final_train_loss", "init_sha256", "precision")}
         out["train"]["curve"] = t["curve"][:: max(1, len(t["curve"]) // 60)]
@@ -842,6 +848,8 @@ def _grade_job(job, season, scale, device, key, out, work: Path) -> tuple[dict, 
     from .pipeline import baseline, grade_round
 
     rnd = _job_round(season, job, out)
+    if season.exam_kind == "next":
+        fetch_exam(rnd, key)
     base = baseline(rnd, scale, device, progress=out.progress("baseline"), log=lambda m: out.line("", out.dim("baseline " + m)))
     want = job["script"]["sha256"]
     limit = int(season.raw["script"]["max_bytes"])
@@ -871,6 +879,37 @@ def _grade_job(job, season, scale, device, key, out, work: Path) -> tuple[dict, 
     elif result.get("heldout_error"):
         out.line("", out.bad(f"The held-out exam could not be sat for this grade ({clean(result['heldout_error'])}). The public grade is reported as usual."))
     return result, base
+
+
+def fetch_exam(rnd, key) -> Path:
+    """An official next-exam round's items, as the organisers posted them after its draw: fetched
+    once (signed: graders only), checked against the digest the round committed to, and kept."""
+    import zstandard
+
+    from . import data
+    from .newexam.items import Item, digest
+
+    if not rnd.exam_digest:
+        raise data.ExamNotReady(f"{rnd.id}: the round's exam has not been posted yet")
+    path = data.exam_items_path(rnd, rnd.exam_digest)
+    if path.exists():
+        return path
+    blob = request("GET", f"/api/v1/rounds/{rnd.id}/exam", key=key, raw=True, timeout=600, limit=EXAM_LIMIT)
+    try:
+        raw = zstandard.ZstdDecompressor().decompress(blob, max_output_size=1 << 30)
+        items = [Item.from_dict(json.loads(line)) for line in raw.decode().splitlines() if line]
+    except (zstandard.ZstdError, ValueError, TypeError, KeyError) as e:
+        raise WrongBytes(f"the round's exam the server sent cannot be read ({clean(e)})") from None
+    if digest(items) != rnd.exam_digest:
+        raise WrongBytes("the round's exam the server sent is not the one the round committed to")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.tmp{os.getpid()}")
+    tmp.write_bytes(blob)
+    os.replace(tmp, path)
+    return path
+
+
+EXAM_LIMIT = 64 << 20  # bytes of a round's posted exam, compressed
 
 
 def heldout_log(season) -> Path:

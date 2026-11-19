@@ -8,6 +8,7 @@ function of public inputs, so any two parties derive byte-identical rounds.
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import re
@@ -66,6 +67,8 @@ class Season:
         rules = {k: v for k, v in self.raw.items() if k not in POLICY_KEYS}
         h = hashlib.sha256(json.dumps(rules, sort_keys=True, separators=(",", ":")).encode())
         h.update(resources.files("stet.seasons").joinpath(self.raw["tokenizer"]["file"]).read_bytes())
+        if self.exam_kind == "next":  # the facts its knowledge items ask
+            h.update(resources.files("stet.newexam").joinpath("data", self.raw["exam"]["facts"]["file"]).read_bytes())
         for s in self.pool("gym"):
             h.update(bytes.fromhex(s.sha256))
         return h.hexdigest()
@@ -95,7 +98,16 @@ class Season:
         return int(self.raw["tokenizer"]["eot"])
 
     @property
+    def exam_kind(self) -> str:
+        """"pack": season 0's exam, passages of six collections in a published pack. "next": the
+        next exam (stet.newexam), made after each round's draw."""
+        return str(self.raw["exam"].get("kind", "pack"))
+
+    @property
     def exam_sources(self) -> list[str]:
+        """What the exam reports on: a pack's collections, or the next exam's pillars."""
+        if self.exam_kind == "next":
+            return list(self.raw["exam"]["pillars"])
         return list(self.raw["exam"]["sources"])
 
     @property
@@ -199,6 +211,7 @@ class Round:
     seed: bytes
     beacon: dict | None = None  # the drand round an official seed was drawn from
     crawl: dict | None = None  # the published crawl an official corpus is drawn from
+    exam_digest: str = ""  # a next-exam season's official round: the digest of the exam posted after its draw
 
     @property
     def id(self) -> str:
@@ -248,6 +261,8 @@ class Round:
             d["beacon"] = self.beacon
         if self.crawl:
             d["crawl"] = self.crawl
+        if self.exam_digest:
+            d["exam_digest"] = self.exam_digest
         return d
 
 
@@ -294,6 +309,10 @@ def round_from_description(season: Season, d: dict) -> Round:
         rnd = official_round(season, int(d["index"]), d["beacon"], d["crawl"])
     if "seed" in d and d["seed"] != rnd.seed.hex():
         raise ValueError(f"round {d.get('id')}: the seed does not follow from the beacon and the crawl")
+    if d.get("exam_digest"):  # a next-exam round whose exam has been posted
+        if not SHA256_RE.fullmatch(str(d["exam_digest"])):
+            raise ValueError(f"round {d.get('id')}: its exam's digest is not a sha256")
+        rnd = dataclasses.replace(rnd, exam_digest=str(d["exam_digest"]))
     return rnd
 
 
