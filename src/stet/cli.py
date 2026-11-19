@@ -466,6 +466,77 @@ def cmd_baseline(args):
         sys.stdout.write("\n")
 
 
+def cmd_examine(args):
+    """The organisers' examiner (seasons whose exam is the next exam): make an official round's
+    exam once its harvest window has closed and its sources have settled, and post it."""
+    need_torch()
+    from .spec import load_season
+
+    if load_season(args.season).exam_kind != "next":
+        die(f"season {args.season}'s exam is a published pack: its rounds have no exam to make")
+    if args.follow:
+        return _examine_follow(args)
+    if not args.round:
+        die("name a round (--round s1-o00003), or --follow")
+    _examine_one(args, args.round)
+
+
+def _examine_one(args, round_id: str) -> None:
+    from .client import fetch_round, need_key, request
+    from .data import cache_dir
+    from .newexam.examine import examine
+    from .newexam.fresh.harvest import SETTLE
+    from .spec import load_season, parse_round_id
+
+    season = load_season(args.season)
+    _, kind, index = parse_round_id(round_id)
+    if kind != "official":
+        die("only an official round has an exam to make")
+    rnd = fetch_round(season, index)
+    d = request("GET", f"/api/v1/rounds/{rnd.id}")["round"]
+    draw_at, window = int(d["draw_at"]), int(season.raw["exam"]["fresh"]["window_seconds"])
+    if time.time() < draw_at + window + SETTLE:
+        die(f"{rnd.id}'s exam can be made from {time.strftime('%H:%M UTC', time.gmtime(draw_at + window + SETTLE))}")
+    if d.get("exam_digest"):
+        out = Out(quiet=args.quiet)
+        out.line("", f"{rnd.id} has its exam already ({d['exam_digest'][:12]})")
+        return
+    out = Out(quiet=args.quiet)
+    out.line("", out.bold(f"stet examine · {rnd.id} · {d.get('scale')}"))
+    log = lambda m: out.line("", out.dim(m))  # noqa: E731
+    examine(rnd, season.scale(d.get("scale") or season.official_scale), draw_at, cache_dir() / "examine" / rnd.id, need_key(), log=log)
+
+
+def _examine_follow(args) -> None:
+    """Every open round, as soon as its exam can be made."""
+    from .client import request
+    from .newexam.fresh.harvest import SETTLE
+    from .spec import load_season
+
+    season = load_season(args.season)
+    window = int(season.raw["exam"]["fresh"]["window_seconds"])
+    out = Out(quiet=args.quiet)
+    out.line("", out.bold("stet examine --follow"))
+    failed: dict[str, int] = {}
+    while True:
+        try:
+            rounds = request("GET", "/api/v1/rounds?limit=20").get("rounds") or []
+        except Exception as e:
+            out.line("", out.dim(f"the server did not answer ({e}); trying again in a minute"))
+            rounds = []
+        for x in sorted(rounds, key=lambda x: x["id"]):
+            if x.get("status") != "open" or x.get("exam_digest") or failed.get(x["id"], 0) >= 5:
+                continue
+            if time.time() < int(x.get("draw_at") or 0) + window + SETTLE:
+                continue
+            try:
+                _examine_one(args, x["id"])
+            except (Exception, SystemExit) as e:  # tried again in a minute, five times at most
+                failed[x["id"]] = failed.get(x["id"], 0) + 1
+                out.line("", out.bad(f"{x['id']}: {e}"))
+        time.sleep(60)
+
+
 def cmd_shadow(args):
     """Grade a round's scripts on the next exam, beside the season's: the shadow exam of season 0."""
     need_torch()
@@ -922,6 +993,13 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("baseline", help="score the unedited corpus for a round")
     add_round_args(p)
     p.set_defaults(fn=cmd_baseline)
+
+    p = sub.add_parser("examine", help=argparse.SUPPRESS)  # organisers: make each official round's exam after its draw
+    p.add_argument("--round", help="the official round (default with --follow: every open one)")
+    p.add_argument("--follow", action="store_true", help="every open round, as soon as its exam can be made")
+    p.add_argument("--season", default="s1", help=argparse.SUPPRESS)
+    p.add_argument("--quiet", action="store_true", help=argparse.SUPPRESS)
+    p.set_defaults(fn=cmd_examine)
 
     p = sub.add_parser("shadow", help="grade a round's scripts on the next exam, beside the season's (season 0's shadow exam)")
     p.add_argument("entries", nargs="*", help="entries of the official round given by --round, by name (default: every settled entry)")

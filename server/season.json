@@ -137,6 +137,7 @@
   }
  },
  "exam_file": "exam-s0.jsonl.zst",
+ "exam_kind": "pack",
  "exam_sha256": "c5186955b7b659ec3ad866a3ef4d1ee87ad7d6afddeb4cdf3825079b873b37e9",
  "exam_sources": [
   "encyclopedia",

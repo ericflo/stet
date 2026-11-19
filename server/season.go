@@ -112,6 +112,7 @@ type Season struct {
 	MinCopyBytes  int                     `json:"min_copy_bytes"`
 	MaxDocBytes   int                     `json:"max_doc_bytes"`
 	Script        ScriptLimits            `json:"script"`
+	ExamKind      string                  `json:"exam_kind"` // "pack" (season 0), or "next": see nextexam.go
 	ExamSources   []string                `json:"exam_sources"`
 	ExamFile      string                  `json:"exam_file"`
 	ExamSHA256    string                  `json:"exam_sha256"`

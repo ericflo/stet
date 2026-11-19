@@ -49,6 +49,9 @@ func (r *Round) description(s *Season) map[string]any {
 		d["beacon"] = map[string]any{"round": r.DrandRound, "randomness": r.Randomness}
 		d["drawn_at"] = r.DrawnAt
 	}
+	if s.next() && r.ExamSHA != "" {
+		d["exam_digest"], d["exam_at"] = r.ExamSHA, r.ExamAt
+	}
 	return d
 }
 
@@ -139,6 +142,7 @@ func (a *App) tick(ctx context.Context) {
 		a.settleReady(tx)
 		return nil
 	})
+	a.archiveNext(ctx)
 	a.maybeDraw(ctx, false)
 	a.st.flush(bounded)
 }
@@ -479,7 +483,11 @@ func (a *App) settleRounds(tx *Tx) {
 	}
 	sort.Slice(due, func(i, j int) bool { return due[i].Idx < due[j].Idx })
 	for _, r := range due {
-		a.refreshBaseline(tx, r)
+		if a.season.next() {
+			a.refreshNext(tx, r)
+		} else {
+			a.refreshBaseline(tx, r)
+		}
 		a.regain(tx, r)
 		r.Status, r.SettledAt = "settled", now()
 		tx.saveRound(r)

@@ -234,6 +234,8 @@ func (a *App) mountAPI(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/editors/{ref}/bundle", a.apiBundle)
 	mux.HandleFunc("GET /api/v1/rounds", a.apiRounds)
 	mux.HandleFunc("GET /api/v1/rounds/{id}", a.apiRound)
+	mux.HandleFunc("GET /api/v1/rounds/{id}/exam", a.apiExamGet)
+	mux.HandleFunc("POST /api/v1/admin/rounds/{id}/exam", a.apiExamPost)
 	mux.HandleFunc("GET /api/v1/leaderboard", a.apiLeaderboard)
 	mux.HandleFunc("GET /api/v1/verifiers", a.apiVerifiers)
 	mux.HandleFunc("GET /api/v1/records", a.apiRecords)

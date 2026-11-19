@@ -170,6 +170,15 @@ type Round struct {
 	// account, a job one of them took, handed back or let run out, an entry given up. How
 	// long the round waits for people is counted from here.
 	ActiveAt int64 `json:"active_at,omitempty"`
+	// The next exam (see nextexam.go): when the round's exam was posted, what each of its items
+	// counts toward, the corpus's languages, and the unedited student's score on each item.
+	// The table and the item scores are kept only while the round is open.
+	ExamAt    int64              `json:"exam_at,omitempty"`
+	ExamTable []ItemInfo         `json:"exam_table,omitempty"`
+	Shares    map[string]float64 `json:"languages,omitempty"`
+	Snapshot  string             `json:"snapshot_sha256,omitempty"`
+	Fresh     int                `json:"fresh,omitempty"`
+	BaseItems []float64          `json:"baseline_items,omitempty"`
 }
 
 // EntryDetail is the public summary of a settled entry: what the grade its score rests on
@@ -329,6 +338,10 @@ type Result struct {
 	// Summary is kept only until the entry settles; the entry's detail keeps the one that
 	// came to define its score.
 	Summary *ResultSummary `json:"summary,omitempty"`
+	// The next exam: every item's score (kept while the round is open), and the grade's score
+	// against the round's baseline (BySource then holds the pillars).
+	Items []float64 `json:"items,omitempty"`
+	Score *float64  `json:"score,omitempty"`
 }
 
 type Baseline struct {
@@ -341,7 +354,8 @@ type Baseline struct {
 	ReceivedAt int64              `json:"received_at"`
 	// Established says the account was established when it measured this, so the measurement
 	// is one of those the round's unedited loss is the median of.
-	Established bool `json:"established,omitempty"`
+	Established bool      `json:"established,omitempty"`
+	Items       []float64 `json:"items,omitempty"` // the next exam: every item's score, while the round is open
 }
 
 type Record struct {

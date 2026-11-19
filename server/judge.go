@@ -320,6 +320,10 @@ type ResultPayload struct {
 type ExamScore struct {
 	Loss     float64            `json:"loss"`
 	BySource map[string]float64 `json:"by_source"`
+	// The next exam: one score for each of the round's items, and their mean.
+	Kind       string    `json:"kind,omitempty"`
+	Mean       float64   `json:"mean,omitempty"`
+	ItemScores []float64 `json:"item_scores,omitempty"`
 }
 
 type TrainInfo struct {
@@ -671,7 +675,15 @@ func (j *judge) view(sc *scriptState, r *Result) *gradeView {
 	g := &gradeView{r: r, acct: acct, est: j.est[acct.ID], self: sc.wroteAlone(acct)}
 	if b := j.s.Baselines[baselineKey(r.RoundIdx, r.AccountID)]; b != nil {
 		g.base = true
-		if r.Valid {
+		switch {
+		case !r.Valid:
+		case j.a.season.next():
+			// Against the round's baseline, the mean of its graders': not this grader's own.
+			g.base = r.Score != nil
+			if r.Score != nil {
+				g.gain = *r.Score
+			}
+		default:
 			g.gain = b.Loss - r.Loss
 		}
 	}
@@ -1007,7 +1019,7 @@ func (j *judge) offers(st *entryState, q *asker, closing bool) []offer {
 		out = append(out, offer{st: st, kind: "edit", score: score, required: true})
 	}
 	for _, sc := range st.Scripts {
-		if !j.mayGrade(st, sc, q.acct) || j.running(st, q.acct) {
+		if !j.mayGrade(st, sc, q.acct) || j.running(st, q.acct) || !j.a.examPosted(st.Round) {
 			continue
 		}
 		v := j.weigh(sc)
@@ -1079,7 +1091,7 @@ func (j *judge) offers(st *entryState, q *asker, closing bool) []offer {
 // no established account at work on one more, and a run that wrote no script is not one
 // volunteer's word alone.
 func (j *judge) settleable(st *entryState) bool {
-	if len(st.LiveEdits) > 0 {
+	if len(st.LiveEdits) > 0 || !j.a.examPosted(st.Round) {
 		return false
 	}
 	for _, sc := range st.Scripts {
@@ -1677,11 +1689,21 @@ func (a *App) submitResult(ctx context.Context, acctID, claimID int64, p *Result
 	if !a.cfg.Dev && !a.season.gradesOn(deviceOf(p.Hardware)) {
 		return nil, fail(400, "grades for the leaderboard must come from an NVIDIA (CUDA) or AMD (ROCm) GPU")
 	}
-	if err := a.checkScore(p.Baseline, "baseline"); err != nil {
+	check := a.checkScore
+	if a.season.next() {
+		// One score for every item: how many the round has is checked against the round below.
+		check = func(sc *ExamScore, what string) error {
+			if sc == nil {
+				return fail(400, "the result has no usable %s score", what)
+			}
+			return checkItems(sc, len(sc.ItemScores), what)
+		}
+	}
+	if err := check(p.Baseline, "baseline"); err != nil {
 		return nil, err
 	}
 	if p.Valid {
-		if err := a.checkScore(p.Exam, "exam"); err != nil {
+		if err := check(p.Exam, "exam"); err != nil {
 			return nil, err
 		}
 	}
@@ -1749,18 +1771,42 @@ func (a *App) submitResult(ctx context.Context, acctID, claimID int64, p *Result
 		if (rd.CorpusSHA != "" && rd.CorpusSHA != p.CorpusSHA256) || (rd.ExamSHA != "" && rd.ExamSHA != p.ExamSHA256) {
 			return refuse("corpus", 0, "your corpus or exam for %s differs from the round's. This verifier rebuilds its copy once", p.Round)
 		}
-		if tol := a.tolerance(); rd.BaselineLoss != nil && !within(*rd.BaselineLoss-p.Baseline.Loss, tol.Baseline) {
+		if a.season.next() {
+			n := len(rd.ExamTable)
+			if rd.ExamSHA == "" || n == 0 {
+				return fail(409, "%s has no exam yet", p.Round)
+			}
+			if err := checkItems(p.Baseline, n, "baseline"); err != nil {
+				return err
+			}
+			if p.Valid {
+				if err := checkItems(p.Exam, n, "exam"); err != nil {
+					return err
+				}
+			}
+			tol := a.tolerance()
+			if dev, ok := a.baselineDev(s, rd, acctID, p.Baseline.ItemScores); ok && !within(dev, tol.Baseline) {
+				return refuse("baseline", places5(dev),
+					"your unedited baseline for %s is further from the round's other graders' than the tolerance of %.2f bits per byte allows, so this machine's setup or arithmetic differs. That is published with the round when it settles; nothing counts against you", p.Round, tol.Baseline)
+			}
+		} else if tol := a.tolerance(); rd.BaselineLoss != nil && !within(*rd.BaselineLoss-p.Baseline.Loss, tol.Baseline) {
 			return refuse("baseline", places5(p.Baseline.Loss-*rd.BaselineLoss),
 				"your unedited baseline for %s is further from what the round's established graders measured than the tolerance of %.2f nats allows, so this machine's setup or arithmetic differs. That is published with the round when it settles; nothing counts against you", p.Round, tol.Baseline)
 		}
 
 		// Everything is checked. From here on the change is made.
-		tx.saveBaseline(&Baseline{RoundIdx: rd.Idx, AccountID: acctID, Loss: p.Baseline.Loss, BySource: p.Baseline.BySource,
-			CorpusSHA: p.CorpusSHA256, ExamSHA: p.ExamSHA256, ReceivedAt: now(), Established: est})
+		b := &Baseline{RoundIdx: rd.Idx, AccountID: acctID, Loss: p.Baseline.Loss, BySource: p.Baseline.BySource,
+			CorpusSHA: p.CorpusSHA256, ExamSHA: p.ExamSHA256, ReceivedAt: now(), Established: est}
+		if a.season.next() {
+			b.Loss, b.BySource, b.Items = places5(-p.Baseline.Mean), nil, p.Baseline.ItemScores
+		}
+		tx.saveBaseline(b)
 		if est {
 			rd.CorpusSHA, rd.ExamSHA = p.CorpusSHA256, p.ExamSHA256
 			a.moved(tx, rd)
-			a.refreshBaseline(tx, rd)
+			if !a.season.next() {
+				a.refreshBaseline(tx, rd)
+			}
 		}
 		// GPU time is what the grader says, but never more than the job was out for. It
 		// counts once the grade has: when the round settles.
@@ -1774,8 +1820,14 @@ func (a *App) submitResult(ctx context.Context, acctID, claimID int64, p *Result
 			Summary:       &ResultSummary{Script: clipJSON(p.Script, 16<<10), Hardware: clipJSON(p.Hardware, 2000), Train: p.Train}}
 		if p.Valid {
 			res.Loss, res.BySource = p.Exam.Loss, p.Exam.BySource
+			if a.season.next() {
+				res.Loss, res.BySource, res.Items = places5(-p.Exam.Mean), nil, p.Exam.ItemScores
+			}
 		}
 		tx.newResult(res)
+		if a.season.next() {
+			a.refreshNext(tx, rd) // the round's baseline, and every grade's score against it
+		}
 		c.Status = "done"
 		tx.saveClaim(c)
 		acct.LastSeen = now()
@@ -1887,6 +1939,9 @@ func (a *App) settleRound(tx *Tx, rd *Round) {
 	wait := int64(a.cfg.ReplicaWait.Seconds())
 	j := a.newJudge(s)
 	states := j.states(rd)
+	if !a.examPosted(rd) {
+		return // the round waits for its exam, which is made after the draw: nothing is given up meanwhile
+	}
 	// What nobody is there to do is given up, once the round has waited its while.
 	if t >= max(rd.ActiveAt, rd.DrawnAt)+wait {
 		// An entry nobody has run waits for somebody to come, unless other entries' scores

@@ -2,6 +2,7 @@
 """Write the season facts the server needs (it is Go and does not import the harness).
 
     python tools/export_season.py > server/season.json
+    python tools/export_season.py s1 > server/testdata/season-s1.json   # the next season, for the server's tests
 
 A test (tests/test_export.py) fails if the committed file is stale.
 """
@@ -37,9 +38,10 @@ def export(season_id: str = "s0") -> dict:
         "max_doc_bytes": season.max_doc_bytes,
         "script": raw["script"],
         "decontam": raw["decontam"],
+        "exam_kind": season.exam_kind,
         "exam_sources": season.exam_sources,
-        "exam_file": raw["exam"]["file"],
-        "exam_sha256": raw["exam"]["sha256"],
+        "exam_file": raw["exam"].get("file", ""),
+        "exam_sha256": raw["exam"].get("sha256", ""),
         "heldout_exam_sha256": (raw.get("heldout_exam") or {}).get("sha256", ""),
         "beacon": raw["beacon"],
         "draw_grid_seconds": raw["draw_grid_seconds"],
@@ -67,5 +69,5 @@ def export(season_id: str = "s0") -> dict:
 
 
 if __name__ == "__main__":
-    json.dump(export(), sys.stdout, indent=1, sort_keys=True)
+    json.dump(export(*sys.argv[1:2]), sys.stdout, indent=1, sort_keys=True)
     sys.stdout.write("\n")
