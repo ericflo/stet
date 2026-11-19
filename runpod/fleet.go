@@ -393,7 +393,7 @@ func (f *Fleet) choices(ctx context.Context) ([]Choice, error) {
 			return nil, err
 		}
 		for _, g := range gpus {
-			if p := g.price(cloud); p > 0 && g.Availability != "NONE" && g.Availability != "" {
+			if p := g.price(cloud); p > 0 && g.Availability != "NONE" && g.Availability != "" && (f.o.MaxPrice <= 0 || p <= f.o.MaxPrice+1e-9) {
 				all = append(all, Choice{g, cloud, p})
 			}
 		}
@@ -458,7 +458,7 @@ func (f *Fleet) launch(ctx context.Context, v *View, n int) (int, error) {
 		return 0, err
 	}
 	if len(gpus) == 0 {
-		f.say("RunPod has no GPU free now that fits (%s cloud%s); trying again later", strings.ToLower(f.o.Cloud), map[bool]string{true: ", --gpu " + strings.Join(f.o.GPUs, ","), false: ""}[len(f.o.GPUs) > 0])
+		f.say("RunPod has no GPU free now that fits (%s cloud%s%s); trying again later", strings.ToLower(f.o.Cloud), f.ceiling(), map[bool]string{true: ", --gpu " + strings.Join(f.o.GPUs, ","), false: ""}[len(f.o.GPUs) > 0])
 		return 0, nil
 	}
 	vouched, err := f.st.vouched(ctx, f.op)

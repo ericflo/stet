@@ -64,6 +64,7 @@ type Options struct {
 	MinRAM       int
 	MinCPU       int
 	MinGPUMemory int
+	MaxPrice     float64 // dollars an hour for one machine; 0: any
 	Idle         int
 	SSHKey       string
 	DryRun       bool
@@ -121,6 +122,7 @@ func flags(name string, o *Options) *flag.FlagSet {
 	ssh := fs.Bool("ssh", false, "let ~/.ssh/id_ed25519.pub log in to the machines rented (for `stet-runpod ssh`)")
 	fs.BoolVar(&o.DryRun, "dry-run", false, "say what would be rented and ended, and do none of it")
 	fs.IntVar(&o.MaxWorkers, "max", 6, "never more machines than this")
+	fs.Float64Var(&o.MaxPrice, "max-price", 0, "never rent a machine that costs more than this many dollars an hour, however much work is waiting (0: any)")
 	fs.Float64Var(&o.MaxHourly, "max-hourly", 3, "never rent past this many dollars an hour, all machines together")
 	fs.Float64Var(&o.DailyBudget, "daily-budget", 0, "rent nothing more once about this many dollars have been spent today, UTC (0: no limit)")
 	fs.Float64Var(&o.PerRunner, "per-runner", 2, "with --no-edits: machines that keep pace with one of the organisers' machines running curators")

@@ -103,17 +103,25 @@ func (f *Fleet) revoke(ctx context.Context, handles []string) error {
 	return nil
 }
 
+// ceiling is --max-price, as said in passing.
+func (f *Fleet) ceiling() string {
+	if f.o.MaxPrice <= 0 {
+		return ""
+	}
+	return fmt.Sprintf(", $%.2f an hour a machine at most", f.o.MaxPrice)
+}
+
 func cmdGPUs(ctx context.Context, f *Fleet) error {
 	gpus, err := f.choices(ctx)
 	if err != nil {
 		return err
 	}
 	if len(gpus) == 0 {
-		fmt.Fprintf(f.out, "RunPod has no GPU free now that would do (%s cloud).\n", strings.ToLower(f.o.Cloud))
+		fmt.Fprintf(f.out, "RunPod has no GPU free now that would do (%s cloud%s).\n", strings.ToLower(f.o.Cloud), f.ceiling())
 		return nil
 	}
-	fmt.Fprintf(f.out, "What would be rented, in this order (%s cloud, CUDA %s or newer, hosts with %d GB and %d vCPUs a GPU):\n\n",
-		strings.ToLower(f.o.Cloud), f.o.MinCUDA, f.o.MinRAM, f.o.MinCPU)
+	fmt.Fprintf(f.out, "What would be rented, in this order (%s cloud%s, CUDA %s or newer, hosts with %d GB and %d vCPUs a GPU):\n\n",
+		strings.ToLower(f.o.Cloud), f.ceiling(), f.o.MinCUDA, f.o.MinRAM, f.o.MinCPU)
 	for _, c := range gpus {
 		fmt.Fprintf(f.out, "  $%.2f/h  %-9s  %-34s %3d GB  %s\n", c.Price, strings.ToLower(c.Cloud), shortGPU(c.GPU.ID), c.GPU.Memory, strings.ToLower(c.GPU.Availability))
 	}
@@ -206,8 +214,8 @@ func cmdScale(ctx context.Context, f *Fleet, follow bool) error {
 	if !follow {
 		return tick(ctx, f)
 	}
-	f.say("scaling to the work every %s, at most %d machines and $%.2f an hour (%s cloud). Ctrl-C to stop; the machines stop by themselves.",
-		f.o.Every, f.o.MaxWorkers, f.o.MaxHourly, strings.ToLower(f.o.Cloud))
+	f.say("scaling to the work every %s, at most %d machines and $%.2f an hour (%s cloud%s). Ctrl-C to stop; the machines stop by themselves.",
+		f.o.Every, f.o.MaxWorkers, f.o.MaxHourly, strings.ToLower(f.o.Cloud), f.ceiling())
 	for {
 		if err := tick(ctx, f); err != nil {
 			if ctx.Err() != nil {

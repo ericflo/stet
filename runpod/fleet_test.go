@@ -476,6 +476,23 @@ func TestTheCheapestMachineInEitherCloudIsRented(t *testing.T) {
 			t.Fatalf("not cheapest first: %+v", gpus)
 		}
 	}
+
+	// With a ceiling a machine, nothing dearer is rented, however much is waiting: with the
+	// 3080 Tis gone, the $0.27 kinds are over $0.20, and nothing is rented at all.
+	f.o.MaxPrice = 0.20
+	n := len(rp.created)
+	for _, p := range rp.pods {
+		delete(rp.pods, p.ID)
+	}
+	if err := tick(context.Background(), f); err != nil {
+		t.Fatal(err)
+	}
+	if len(rp.created) != n {
+		t.Fatalf("rented %+v over the ceiling", rp.created[n:])
+	}
+	if gpus, _ := f.choices(context.Background()); len(gpus) == 0 || gpus[len(gpus)-1].Price > 0.20 {
+		t.Fatalf("choices under a $0.20 ceiling: %+v", gpus)
+	}
 }
 
 // down with names ends those machines and no others, however many are named.

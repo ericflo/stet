@@ -66,7 +66,8 @@ script waiting as one. A machine with nothing official to do trains the next exa
 students (a few minutes each, for a settled round's shadow), so one more for every
 `--per-shadow` (4) of those waiting, after the official work (`--per-shadow 0`: none).
 Never more than `--max` (6), or past `--max-hourly` dollars an hour (3), and nothing new
-once `--daily-budget` is spent. When an entry is waiting for a round
+once `--daily-budget` is spent. `--max-price` never rents a machine dearer than that, however
+much is waiting: the work waits for a cheap one instead. When an entry is waiting for a round
 and nobody who runs curators is around, one, so that the round is drawn early. It never
 ends a machine that holds a job. It ends at once those doing nothing when nothing at all is
 waiting, and any that went quiet or stopped. The rest stop by themselves.
@@ -96,7 +97,7 @@ Description=Rent GPUs to grade for Stet
 
 [Service]
 EnvironmentFile=%h/.config/stet-runpod/env
-ExecStart=%h/.local/bin/stet-runpod scale --follow --daily-budget 20
+ExecStart=%h/.local/bin/stet-runpod scale --follow --max 5 --max-price 0.30 --daily-budget 20
 Restart=always
 RestartSec=60
 
