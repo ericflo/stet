@@ -175,7 +175,30 @@ def english_slice(out: Path, scale: str) -> dict[str, float]:
     return {n: round_score(sub, [g for i, g in enumerate(gains(sc, base)) if i in set(keep)])["score"] for n, sc in metas.items()}
 
 
+def _patient_requests() -> None:
+    """Every API call here tries again when the network fails it (status 0), or the front end has
+    no server behind it for a moment (502-504): a node restarted, a certificate swapped, a pod
+    rolled. A batch's upload is dozens of calls, and following it takes hours."""
+    from stet import client
+
+    plain = client.request
+
+    def request(*a, **k):
+        for wait in (5, 15, 30, 60, 120, None):
+            try:
+                return plain(*a, **k)
+            except client.ApiError as e:
+                if e.status not in (0, 502, 503, 504) or wait is None:  # no available server: a pod restarting
+                    raise
+                print(f"  ({e}; again in {wait}s)", flush=True)
+                time.sleep(wait)
+
+    client.request = request
+    globals()["request"] = request
+
+
 def main():
+    _patient_requests()
     ap = argparse.ArgumentParser()
     ap.add_argument("--round", required=True)
     ap.add_argument("--scales", default="micro,standard,large")
