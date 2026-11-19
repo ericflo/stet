@@ -12,6 +12,7 @@ from importlib import resources
 from pathlib import Path
 
 from . import __version__
+from .spec import CURRENT_SEASON
 
 OK, WARN, BAD = "ok", "warn", "fail"
 
@@ -937,7 +938,7 @@ def cmd_agents(args):
 def add_round_args(p, default_round="0"):
     p.add_argument("--round", default=default_round, help="3 = practice round 3, g3 = gym round 3, or a round id like s0-o00012 (default: 0)")
     p.add_argument("--scale", default=None, help="nano, micro or standard (default: nano)")
-    p.add_argument("--season", default="s0", help=argparse.SUPPRESS)
+    p.add_argument("--season", default=CURRENT_SEASON, help=argparse.SUPPRESS)
     p.add_argument("--device", default=None, help="torch device (default: best available)")
     p.add_argument("--json", action="store_true", help="print the result as JSON on stdout")
     p.add_argument("-q", "--quiet", action="store_true")

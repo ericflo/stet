@@ -17,6 +17,9 @@ from functools import cache
 from importlib import resources
 
 HARNESS_VERSION = "0.3.5"
+# The season the competition is in: what every command means when it names none. Changing it is
+# the switch from one season to the next (see docs/OPERATING.md).
+CURRENT_SEASON = "s0"
 
 
 @dataclass(frozen=True)
@@ -152,7 +155,7 @@ class Season:
 
 
 @cache
-def load_season(season_id: str = "s0") -> Season:
+def load_season(season_id: str = CURRENT_SEASON) -> Season:
     raw = json.loads(resources.files("stet.seasons").joinpath(f"{season_id}.json").read_text())
     return Season(id=raw["id"], title=raw["title"], raw=raw)
 

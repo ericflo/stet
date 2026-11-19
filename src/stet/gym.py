@@ -33,7 +33,7 @@ from . import data
 from .pipeline import baseline
 from .runner import task_info
 from .script import write_script
-from .spec import Round, Scale, Season, load_season, practice_round
+from .spec import CURRENT_SEASON, Round, Scale, Season, load_season, practice_round
 from .train import pick_device
 
 
@@ -56,7 +56,7 @@ class Env:
     Each call trains one student from the same initial weights.
     """
 
-    def __init__(self, scale: str = "nano", split: str = "gym", device=None, season: str = "s0", quiet: bool = True):
+    def __init__(self, scale: str = "nano", split: str = "gym", device=None, season: str = CURRENT_SEASON, quiet: bool = True):
         if split not in ("gym", "practice"):
             raise ValueError("split must be 'gym' or 'practice'")
         self.season: Season = load_season(season)

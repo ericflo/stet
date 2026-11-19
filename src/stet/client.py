@@ -19,7 +19,7 @@ from . import __version__
 from .data import USER_AGENT, FetchError, api_base, cache_dir
 from .keys import Key, config_dir, create_key, key_path, load_key
 from .project import MAX_BUNDLE_BYTES, NAME_RE, unzstd
-from .spec import CRAWL_ID_RE, SHA256_RE
+from .spec import CRAWL_ID_RE, CURRENT_SEASON, SHA256_RE
 
 JSON_LIMIT_BYTES = 16 << 20
 
@@ -1889,14 +1889,14 @@ def add_commands(sub) -> None:
     p.add_argument("file")
     p.add_argument("--name", help="the name to publish it under (default: the file's own)")
     p.add_argument("--close-season", metavar="SEASON", help="needed to publish a season's held-out exam: the id of the season being closed")
-    p.add_argument("--season", default="s0", help=argparse.SUPPRESS)
+    p.add_argument("--season", default=CURRENT_SEASON, help=argparse.SUPPRESS)
     p.set_defaults(fn=cmd_publish)
 
     p = sub.add_parser("verify", help="lend your GPU: grade edit scripts for the leaderboard, and (with --edits) run curators")
     p.add_argument("--once", action="store_true", help="do one job and exit")
     p.add_argument("--max-jobs", type=int, default=0)
     p.add_argument("--device", default=None)
-    p.add_argument("--season", default="s0", help=argparse.SUPPRESS)
+    p.add_argument("--season", default=CURRENT_SEASON, help=argparse.SUPPRESS)
     p.add_argument("--edits", "--run-editors", dest="edits", action="store_true", help="also run entrants' curators, in the sandbox (Linux; `stet bench` says whether this machine is fast enough)")
     p.add_argument("--sandbox", choices=["bwrap", "container"], default="bwrap",
                    help="with --edits: bwrap (the default), or container, for a container that runs stet and nothing else, as root, where namespaces cannot be made")  # fmt: skip
