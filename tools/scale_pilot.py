@@ -42,6 +42,9 @@ SPECS = {
               "batch_size": 32, "lr": 0.0008, "exam_items_per_source": 800, "edit_seconds": 4800},
 }
 LEASES = {"large": 5 * 3600}
+# The unedited corpus's trainings averaged into the reference: its spread shrinks as the student
+# grows (0.081 at micro, 0.028 at standard), and the large ones are dear.
+BASELINES = {"large": 2}
 ENTRIES: dict[str, str] = {}  # the round's entries, owner/name@vN -> editor id
 # The order large models trained on these curators' data came out in, from the literature
 # (DCLM 2024; FineWeb 2024): each group better than the next.
@@ -257,7 +260,8 @@ def one_scale_posted(name, args, season, rnd, items, shares, key, log, holder):
     def follow():
         try:
             holder["summary"] = farm_round(rnd, scale, shas, work, items, len(corpus), key, shares=shares, log=lambda m: log(f"{name}: {m}"),
-                                           spec=SPECS.get(name), lease=LEASES.get(name, 0), patience=48 * 3600)
+                                           spec=SPECS.get(name), lease=LEASES.get(name, 0), patience=48 * 3600,
+                                           baselines=BASELINES.get(name, 4))
         except Exception as e:
             log(f"{name}: {type(e).__name__}: {e}")
 
