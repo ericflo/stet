@@ -67,6 +67,7 @@ type Options struct {
 	MinCPU       int
 	MinGPUMemory int
 	MaxPrice     float64 // dollars an hour for one machine; 0: any
+	LongMaxPrice float64 // the same, for a machine rented for the next exam's bigger students; 0: MaxPrice
 	LongMinutes  int     // the longest of the next exam's students a machine takes, minutes; 0: the short ones only
 	Idle         int
 	SSHKey       string
@@ -127,6 +128,7 @@ func flags(name string, o *Options) *flag.FlagSet {
 	fs.IntVar(&o.MaxWorkers, "max", 6, "never more machines than this")
 	fs.IntVar(&o.LongMinutes, "long-shadow", 0, "rent machines that also take the next exam's bigger students, given up to this many minutes each, and one for each waiting (0: none)")
 	fs.Float64Var(&o.MaxPrice, "max-price", 0, "never rent a machine that costs more than this many dollars an hour, however much work is waiting (0: any)")
+	fs.Float64Var(&o.LongMaxPrice, "long-max-price", 0, "the same, for a machine rented for the next exam's bigger students, which is chosen for what a student costs on it rather than its price (0: --max-price)")
 	fs.Float64Var(&o.MaxHourly, "max-hourly", 3, "never rent past this many dollars an hour, all machines together")
 	fs.Float64Var(&o.DailyBudget, "daily-budget", 0, "rent nothing more once about this many dollars have been spent today, UTC (0: no limit)")
 	fs.Float64Var(&o.PerRunner, "per-runner", 2, "with --no-edits: machines that keep pace with one of the organisers' machines running curators")

@@ -54,6 +54,7 @@ func (f *fakeRunPod) serve(w http.ResponseWriter, r *http.Request) {
 				{"id": "NVIDIA GeForce RTX 3080 Ti", "name": "RTX 3080 Ti", "manufacturer": "NVIDIA", "memory": 12, "price": map[string]any{"community": 0.18}, "availability": "LOW"},
 				{"id": "NVIDIA RTX A5000", "name": "RTX A5000", "manufacturer": "NVIDIA", "memory": 24, "price": map[string]any{"community": 0.16}, "availability": "NONE"},
 				{"id": "NVIDIA GeForce RTX 3090 Ti", "name": "RTX 3090 Ti", "manufacturer": "NVIDIA", "memory": 24, "price": map[string]any{"community": 0.27}, "availability": "LOW"},
+				{"id": "NVIDIA GeForce RTX 4090", "name": "RTX 4090", "manufacturer": "NVIDIA", "memory": 24, "price": map[string]any{"community": 0.45}, "availability": "LOW"},
 			}})
 			return
 		}
@@ -505,7 +506,7 @@ func TestTheCheapestMachineInEitherCloudIsRented(t *testing.T) {
 		t.Fatalf("a machine rented for bigger students: %v", spec.Env["STET_SHADOW_MAX_MINUTES"])
 	}
 	f.o.LongMinutes = 0
-	gpus, err := f.choices(context.Background())
+	gpus, err := f.choices(context.Background(), false)
 	if err != nil || len(gpus) < 3 || gpus[0].Price != 0.18 || gpus[0].Cloud != "COMMUNITY" {
 		t.Fatalf("choices: %+v %v", gpus, err)
 	}
@@ -528,7 +529,7 @@ func TestTheCheapestMachineInEitherCloudIsRented(t *testing.T) {
 	if len(rp.created) != n {
 		t.Fatalf("rented %+v over the ceiling", rp.created[n:])
 	}
-	if gpus, _ := f.choices(context.Background()); len(gpus) == 0 || gpus[len(gpus)-1].Price > 0.20 {
+	if gpus, _ := f.choices(context.Background(), false); len(gpus) == 0 || gpus[len(gpus)-1].Price > 0.20 {
 		t.Fatalf("choices under a $0.20 ceiling: %+v", gpus)
 	}
 }
@@ -646,5 +647,48 @@ func TestWhatAnEndedMachineHeldIsHandedBack(t *testing.T) {
 	// Nothing is held any more, so nothing more is handed back.
 	if err := tick(ctx, f); err != nil || len(st.released) != 2 {
 		t.Fatalf("handed back %v (%v)", st.released, err)
+	}
+}
+
+// A machine rented for the next exam's bigger students is chosen for what a student costs on
+// it, under --long-max-price: a quick card can train one for less than a cheap one's hours
+// cost. The machines for everything else are still the cheapest under --max-price.
+func TestTheBiggerStudentsGetTheCardThatTrainsOneForLeast(t *testing.T) {
+	rp, st := newFakeRunPod(t), newFakeStet(t)
+	f, out := testFleet(t, rp, st, 4)
+	f.o.Cloud, f.o.MaxPrice, f.o.LongMaxPrice = "ANY", 0.22, 0.90
+	f.o.LongMinutes, f.o.LongShadow, f.o.PerShadow = 600, true, 4
+	rp.noRoom["NVIDIA GeForce RTX 3080 Ti"] = true // a student costs least on it, and it has none free
+	st.work = Work{ShadowWaiting: 1, ShadowLongWaiting: 2}
+	if err := tick(context.Background(), f); err != nil {
+		t.Fatal(err)
+	}
+	got := []string{}
+	for _, spec := range rp.created {
+		got = append(got, strings.ToLower(spec.Cloud)+" "+shortGPU(spec.GPU.ID))
+		if spec.Env["STET_SHADOW_MAX_MINUTES"] != "600" {
+			t.Fatalf("%s was not told to take the bigger students", spec.Name)
+		}
+	}
+	// The 4090 at $0.45 trains a student for less than the 3090 Ti at $0.27, the 3080 at
+	// $0.20 or the A5000 at $0.27; the one for the short students is the $0.20 3080.
+	if strings.Join(got, ", ") != "community RTX 4090, community RTX 4090, secure RTX 3080" {
+		t.Fatalf("rented %v\n%s", got, out)
+	}
+
+	// Under a lower ceiling for them, the 4090 is not among them.
+	f.o.LongMaxPrice = 0.40
+	gpus, err := f.choices(context.Background(), true)
+	var kinds []string
+	for _, c := range gpus {
+		kinds = append(kinds, shortGPU(c.GPU.ID))
+	}
+	if err != nil || strings.Join(kinds, ", ") != "RTX 3080 Ti, RTX 3090 Ti, RTX 3080, RTX A5000" {
+		t.Fatalf("for the bigger students under $0.40: %v %v", kinds, err)
+	}
+	// And with no ceiling of their own, --max-price's.
+	f.o.LongMaxPrice = 0
+	if gpus, _ := f.choices(context.Background(), true); len(gpus) == 0 || gpus[0].Price > 0.22 {
+		t.Fatalf("for the bigger students with no ceiling of their own: %+v", gpus)
 	}
 }

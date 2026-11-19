@@ -103,27 +103,61 @@ func (f *Fleet) revoke(ctx context.Context, handles []string) error {
 	return nil
 }
 
-// ceiling is --max-price, as said in passing.
-func (f *Fleet) ceiling() string {
-	if f.o.MaxPrice <= 0 {
+// ceiling is --max-price, as said in passing; long, --long-max-price.
+func (f *Fleet) ceiling(long bool) string {
+	if p := f.maxPrice(long); p > 0 {
+		return fmt.Sprintf(", $%.2f an hour a machine at most", p)
+	}
+	return ""
+}
+
+// longCeiling is --long-max-price, as said in passing, where it is not --max-price.
+func (f *Fleet) longCeiling() string {
+	if !f.o.LongShadow || f.maxPrice(true) == f.maxPrice(false) {
 		return ""
 	}
-	return fmt.Sprintf(", $%.2f an hour a machine at most", f.o.MaxPrice)
+	if f.maxPrice(true) <= 0 {
+		return ", any price for the bigger students"
+	}
+	return fmt.Sprintf(", $%.2f for the bigger students", f.maxPrice(true))
+}
+
+func (f *Fleet) maxPrice(long bool) float64 {
+	if long && f.o.LongMaxPrice > 0 {
+		return f.o.LongMaxPrice
+	}
+	return f.o.MaxPrice
 }
 
 func cmdGPUs(ctx context.Context, f *Fleet) error {
-	gpus, err := f.choices(ctx)
+	if err := f.listGPUs(ctx, false); err != nil || !f.o.LongShadow {
+		return err
+	}
+	fmt.Fprintln(f.out)
+	return f.listGPUs(ctx, true)
+}
+
+func (f *Fleet) listGPUs(ctx context.Context, long bool) error {
+	gpus, err := f.choices(ctx, long)
 	if err != nil {
 		return err
 	}
+	what := "What would be rented"
+	if long {
+		what = "For the next exam's bigger students, by what a student costs on each, the quicker card first where that is about the same"
+	}
 	if len(gpus) == 0 {
-		fmt.Fprintf(f.out, "RunPod has no GPU free now that would do (%s cloud%s).\n", strings.ToLower(f.o.Cloud), f.ceiling())
+		fmt.Fprintf(f.out, "%s: RunPod has no GPU free now that would do (%s cloud%s).\n", what, strings.ToLower(f.o.Cloud), f.ceiling(long))
 		return nil
 	}
-	fmt.Fprintf(f.out, "What would be rented, in this order (%s cloud%s, CUDA %s or newer, hosts with %d GB and %d vCPUs a GPU):\n\n",
-		strings.ToLower(f.o.Cloud), f.ceiling(), f.o.MinCUDA, f.o.MinRAM, f.o.MinCPU)
+	fmt.Fprintf(f.out, "%s, in this order (%s cloud%s, CUDA %s or newer, hosts with %d GB and %d vCPUs a GPU):\n\n",
+		what, strings.ToLower(f.o.Cloud), f.ceiling(long), f.o.MinCUDA, f.o.MinRAM, f.o.MinCPU)
 	for _, c := range gpus {
-		fmt.Fprintf(f.out, "  $%.2f/h  %-9s  %-34s %3d GB  %s\n", c.Price, strings.ToLower(c.Cloud), shortGPU(c.GPU.ID), c.GPU.Memory, strings.ToLower(c.GPU.Availability))
+		fmt.Fprintf(f.out, "  $%.2f/h  %-9s  %-34s %3d GB  %s", c.Price, strings.ToLower(c.Cloud), shortGPU(c.GPU.ID), c.GPU.Memory, strings.ToLower(c.GPU.Availability))
+		if s := speed(c.GPU.ID); long && s > 0 {
+			fmt.Fprintf(f.out, "  %.1fx a 3090: $%.2f for a 3090's hour", s, c.Price/s)
+		}
+		fmt.Fprintln(f.out)
 	}
 	fmt.Fprintln(f.out, "\nEach is tried in turn until RunPod has a machine of that kind free with room for the rest.")
 	return nil
@@ -225,7 +259,7 @@ func tick(ctx context.Context, f *Fleet) error {
 	if d.Note != "" && d.Launch < d.Target-d.Live {
 		f.say("%s", d.Note)
 	}
-	_, err = f.launch(ctx, v, d.Launch)
+	_, err = f.launch(ctx, v, d.Launch, d.LaunchLong)
 	return err
 }
 
@@ -234,7 +268,7 @@ func cmdScale(ctx context.Context, f *Fleet, follow bool) error {
 		return tick(ctx, f)
 	}
 	f.say("scaling to the work every %s, at most %d machines and $%.2f an hour (%s cloud%s). Ctrl-C to stop; the machines stop by themselves.",
-		f.o.Every, f.o.MaxWorkers, f.o.MaxHourly, strings.ToLower(f.o.Cloud), f.ceiling())
+		f.o.Every, f.o.MaxWorkers, f.o.MaxHourly, strings.ToLower(f.o.Cloud), f.ceiling(false)+f.longCeiling())
 	for {
 		if err := tick(ctx, f); err != nil {
 			if ctx.Err() != nil {
@@ -272,7 +306,7 @@ func cmdUp(ctx context.Context, f *Fleet, n int) error {
 	if v.Today >= f.o.DailyBudget && f.o.DailyBudget > 0 {
 		return fmt.Errorf("about $%.2f spent today, and the daily budget is $%.2f", v.Today, f.o.DailyBudget)
 	}
-	got, err := f.launch(ctx, v, n)
+	got, err := f.launch(ctx, v, n, 0)
 	if err == nil && got > 0 {
 		f.say("each stops by itself after %d minutes with nothing to grade", f.o.Idle)
 	}

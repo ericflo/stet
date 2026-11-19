@@ -158,7 +158,8 @@ renting once `--daily-budget` is spent.
 A machine with nothing official to do trains the next exam's students, and `stet-runpod`
 rents for those too. With `--long-shadow MINUTES` the machines it rents also take the
 bigger students, held for hours (they are told `STET_SHADOW_MAX_MINUTES`), one machine to
-each.
+each. Those machines are chosen for what a student costs on them (price over speed, the
+quicker where that is about the same), under `--long-max-price` rather than `--max-price`.
 
 ## Pausing the rounds
 

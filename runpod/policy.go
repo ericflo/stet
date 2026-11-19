@@ -137,10 +137,13 @@ type Ending struct {
 
 // Decision is one look at the work and the machines.
 type Decision struct {
-	Target int      // machines the work justifies
-	Live   int      // machines rented now
-	Launch int      // machines to rent now
-	End    []Ending // pods to end now
+	Target int // machines the work justifies
+	Live   int // machines rented now
+	Launch int // machines to rent now
+	// Of those, the machines rented for the next exam's bigger students: chosen for what one
+	// of them costs on it, under --long-max-price.
+	LaunchLong int
+	End        []Ending // pods to end now
 	// Machines no pod is rented for that the server says still hold a job: ended a moment
 	// after they took it, or stopped partway through. What they hold is handed back.
 	Release []*Worker
@@ -183,6 +186,9 @@ func (p Policy) decide(w *Work, workers []*Worker, spentToday float64, now time.
 	}
 	if d.Launch > 0 && p.DailyBudget > 0 && spentToday >= p.DailyBudget {
 		d.Launch, d.Note = 0, fmt.Sprintf("about $%.2f spent today, and the daily budget is $%.2f", spentToday, p.DailyBudget)
+	}
+	if p.LongShadow {
+		d.LaunchLong = min(d.Launch, w.ShadowLongWaiting)
 	}
 	sort.SliceStable(d.End, func(i, j int) bool { return d.End[i].Worker.Key.Handle < d.End[j].Worker.Key.Handle })
 	return d

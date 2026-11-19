@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -385,7 +386,10 @@ func (f *Fleet) clouds() []string {
 // choices are what to try, looked up afresh each time machines are rented: every fit kind
 // of GPU RunPod has free now, in every cloud allowed, cheapest first (secure first where
 // the price is the same); or those named with --gpu, in that order, each cheapest first.
-func (f *Fleet) choices(ctx context.Context) ([]Choice, error) {
+// For the next exam's bigger students (long), it is what a student costs on each kind that
+// counts, not what it costs an hour, under --long-max-price.
+func (f *Fleet) choices(ctx context.Context, long bool) ([]Choice, error) {
+	ceiling := f.maxPrice(long)
 	var all []Choice
 	for _, cloud := range f.clouds() {
 		gpus, err := f.rp.gpus(ctx, cloud, f.o.MinCUDA)
@@ -393,7 +397,7 @@ func (f *Fleet) choices(ctx context.Context) ([]Choice, error) {
 			return nil, err
 		}
 		for _, g := range gpus {
-			if p := g.price(cloud); p > 0 && g.Availability != "NONE" && g.Availability != "" && (f.o.MaxPrice <= 0 || p <= f.o.MaxPrice+1e-9) {
+			if p := g.price(cloud); p > 0 && g.Availability != "NONE" && g.Availability != "" && (ceiling <= 0 || p <= ceiling+1e-9) {
 				all = append(all, Choice{g, cloud, p})
 			}
 		}
@@ -419,6 +423,9 @@ func (f *Fleet) choices(ctx context.Context) ([]Choice, error) {
 		if c.GPU.Manufacturer == "NVIDIA" && c.GPU.Memory >= f.o.MinGPUMemory && !unfitGPU.MatchString(c.GPU.ID) {
 			out = append(out, c)
 		}
+	}
+	if long {
+		byStudent(out)
 	}
 	return out, nil
 }
@@ -448,7 +455,7 @@ func (f *Fleet) spec(k *Key, gpu, cloud, site string) NewPod {
 
 // launch rents up to n machines on keys that have no pod, cheapest kind first, within
 // what may be spent an hour. It says what it did as it goes.
-func (f *Fleet) launch(ctx context.Context, v *View, n int) (int, error) {
+func (f *Fleet) launch(ctx context.Context, v *View, n, long int) (int, error) {
 	if n <= 0 {
 		return 0, nil
 	}
@@ -456,17 +463,37 @@ func (f *Fleet) launch(ctx context.Context, v *View, n int) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	gpus, err := f.choices(ctx)
+	vouched, err := f.st.vouched(ctx, f.op)
+	if err != nil {
+		return 0, err
+	}
+	// The machines for the bigger students first, each chosen for what a student costs on
+	// it; then the rest, cheapest first.
+	rented := 0
+	for _, batch := range []struct {
+		n    int
+		long bool
+	}{{min(long, n), true}, {n - min(long, n), false}} {
+		got, err := f.launchSome(ctx, v, batch.n, batch.long, site, vouched)
+		rented += got
+		if err != nil {
+			return rented, err
+		}
+	}
+	return rented, nil
+}
+
+func (f *Fleet) launchSome(ctx context.Context, v *View, n int, long bool, site string, vouched map[string]Vouched) (int, error) {
+	if n <= 0 {
+		return 0, nil
+	}
+	gpus, err := f.choices(ctx, long)
 	if err != nil {
 		return 0, err
 	}
 	if len(gpus) == 0 {
-		f.say("RunPod has no GPU free now that fits (%s cloud%s%s); trying again later", strings.ToLower(f.o.Cloud), f.ceiling(), map[bool]string{true: ", --gpu " + strings.Join(f.o.GPUs, ","), false: ""}[len(f.o.GPUs) > 0])
+		f.say("RunPod has no GPU free now that fits (%s cloud%s%s); trying again later", strings.ToLower(f.o.Cloud), f.ceiling(long), map[bool]string{true: ", --gpu " + strings.Join(f.o.GPUs, ","), false: ""}[len(f.o.GPUs) > 0])
 		return 0, nil
-	}
-	vouched, err := f.st.vouched(ctx, f.op)
-	if err != nil {
-		return 0, err
 	}
 	rented := 0
 	for _, w := range v.Workers {
@@ -532,15 +559,14 @@ func (f *Fleet) ready(ctx context.Context, k *Key, vouched map[string]Vouched) e
 // rent tries each kind of GPU in turn, cheapest first, until RunPod gives one. nil, nil:
 // none could be had within what may be spent.
 func (f *Fleet) rent(ctx context.Context, v *View, k *Key, gpus []Choice, site string) (*Pod, error) {
+	tried, dearer := 0, 0
 	for _, c := range gpus {
 		g, price := c.GPU, c.Price
 		if v.Hourly+price > f.o.MaxHourly+1e-9 {
-			if len(f.o.GPUs) == 0 {
-				f.say("not renting another machine: at $%.2f an hour it would pass --max-hourly $%.2f", v.Hourly+price, f.o.MaxHourly)
-				return nil, nil // cheapest first: the rest cost more
-			}
+			dearer++
 			continue
 		}
+		tried++
 		if f.o.DryRun {
 			f.say("would rent %s on %s (%s cloud, about $%.2f an hour)", k.Handle, shortGPU(g.ID), strings.ToLower(c.Cloud), price)
 			v.Hourly += price
@@ -561,8 +587,23 @@ func (f *Fleet) rent(ctx context.Context, v *View, k *Key, gpus []Choice, site s
 		f.say("rented %s: %s, %s cloud, $%.2f an hour (pod %s)", k.Handle, shortGPU(g.ID), strings.ToLower(c.Cloud), pod.Cost, pod.ID)
 		return pod, nil
 	}
-	f.say("RunPod has none of the %d kinds of GPU tried free for %s just now; trying again later", len(gpus), k.Handle)
+	switch {
+	case tried == 0:
+		f.say("not renting another machine: at $%.2f an hour or more it would pass --max-hourly $%.2f", v.Hourly+cheapest(gpus), f.o.MaxHourly)
+	case dearer > 0:
+		f.say("RunPod has none of the %d kinds of GPU tried free for %s just now, and the other %d would pass --max-hourly $%.2f; trying again later", tried, k.Handle, dearer, f.o.MaxHourly)
+	default:
+		f.say("RunPod has none of the %d kinds of GPU tried free for %s just now; trying again later", tried, k.Handle)
+	}
 	return nil, nil
+}
+
+func cheapest(gpus []Choice) float64 {
+	low := math.Inf(1)
+	for _, c := range gpus {
+		low = min(low, c.Price)
+	}
+	return low
 }
 
 // end ends pods and says why.

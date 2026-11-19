@@ -236,4 +236,13 @@ func TestBiggerStudentsWantAMachineEach(t *testing.T) {
 	if got := p.target(w); got != 5 {
 		t.Fatalf("past --max: %d", got)
 	}
+	// Of the machines rented, those for the bigger students are said, to be chosen for them.
+	w.ShadowLongWaiting = 3
+	if d := p.decide(w, pool(w, "free", "free", "free", "free", "free"), 0, time.Now()); d.Launch != 4 || d.LaunchLong != 3 {
+		t.Fatalf("rented %d, %d of them for the bigger students", d.Launch, d.LaunchLong)
+	}
+	p.LongShadow = false
+	if d := p.decide(w, pool(w, "free", "free", "free", "free", "free"), 0, time.Now()); d.LaunchLong != 0 {
+		t.Fatalf("rented %d for bigger students the machines do not take", d.LaunchLong)
+	}
 }

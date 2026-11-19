@@ -68,7 +68,11 @@ script waiting as one. A machine with nothing official to do trains the next exa
 students (a few minutes each, for a settled round's shadow), so one more for every
 `--per-shadow` (4) of those waiting, after the official work (`--per-shadow 0`: none).
 `--long-shadow 600` rents machines that also take the bigger students, held for hours, one
-machine to each.
+machine to each. A machine rented for them is chosen for what a student costs on it, not what
+it costs an hour: a 4090 at $0.89 trains one in about half the time of a 3090 at $0.50, so
+the student costs about the same and is done sooner. Where two cost about the same, the
+quicker comes first. `--long-max-price` is the ceiling for those machines (the same as
+`--max-price` if not given); `stet-runpod gpus` shows both orders.
 Never more than `--max` (6), or past `--max-hourly` dollars an hour (3), and nothing new
 once `--daily-budget` is spent. `--max-price` never rents a machine dearer than that, however
 much is waiting: the work waits for a cheap one instead. When an entry is waiting for a round
@@ -104,7 +108,7 @@ Description=Rent GPUs to grade for Stet
 
 [Service]
 EnvironmentFile=%h/.config/stet-runpod/env
-ExecStart=%h/.local/bin/stet-runpod scale --follow --max 5 --max-price 0.22 --long-shadow 600
+ExecStart=%h/.local/bin/stet-runpod scale --follow --max 5 --max-price 0.22 --long-shadow 600 --long-max-price 0.90 --max-hourly 4.50
 Restart=always
 RestartSec=60
 
