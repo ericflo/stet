@@ -63,7 +63,21 @@ func byStudent(cs []Choice) {
 	sort.SliceStable(cs, func(i, j int) bool { return score(cs[i]) < score(cs[j]) })
 }
 
-// byGrade orders the kinds to try by what a grade costs on each, its price over its speed:
+// byPace orders the kinds to try the fastest first, the cheapest first where they are as
+// fast, and kinds whose speed is not known last, cheapest first. A round settles only once
+// its slowest grade is in, and a machine's first grade of a round trains the round's
+// baseline as well: on an RTX A4000 that is most of an hour, on an RTX 4090 a quarter.
+func byPace(cs []Choice) {
+	sort.SliceStable(cs, func(i, j int) bool {
+		si, sj := speed(cs[i].GPU.ID), speed(cs[j].GPU.ID)
+		if si != sj {
+			return si > sj
+		}
+		return cs[i].Price < cs[j].Price
+	})
+}
+
+// byGrade orders the kinds to try (with --cheapest) by what a grade costs on each, its price over its speed:
 // a grade trains on a fixed number of tokens, so a quicker card holds its machine for less
 // of the hour, and is done sooner. A kind whose speed is not known counts as half a 3090.
 func byGrade(cs []Choice) {

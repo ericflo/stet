@@ -52,7 +52,7 @@ and forgets it. A key not vouched for is vouched for when it is first rented.
 ## Running it
 
 ```sh
-stet-runpod gpus                     # what would be rented, the cheapest a grade first
+stet-runpod gpus                     # what would be rented, the fastest first
 stet-runpod status                   # what is waiting, what is rented, what it costs
 stet-runpod scale --follow           # rent and end to match the work, every minute
 stet-runpod up 2                     # or by hand: two now, whatever is waiting
@@ -92,14 +92,17 @@ a moment after it took a job, or that stopped partway through one, still holds i
 server sees it: what it holds is handed back on the next look, so nothing waits out its
 lease.
 
-Every machine rented is the one that will do on which a grade costs least, looked up afresh
-each time: every kind of GPU RunPod has free, in both its clouds, is tried in order of its
-price over its speed until one has a machine with room. A grade trains on a fixed number of
-tokens, so a 4090 at $0.89 an hour, done in about 10 minutes, comes before an A40 at $0.59
-that takes 19, and an L4 comes last. What will do: NVIDIA, 12 GB or more (a machine that
-runs curators needs 10 and gives one 8), on a host with the season's floor of 16 GB of
-memory and 6 vCPUs a GPU, a driver new enough for CUDA 13 (the season's PyTorch, 2.15.0, is
-built only for 13.2), bf16 (nothing older than Ampere), and a whole GPU, with an 80 GB disk.
+Every machine rented is the fastest that will do, looked up afresh each time: every kind
+of GPU RunPod has free under `--max-price`, in both its clouds, is tried fastest first (the
+cheaper first where two are as fast) until one has a machine with room. A round settles
+only once its slowest grade is in, and a machine's first grade of a round trains the
+round's baseline too: about 16 minutes on a 4090, and 52 on an RTX A4000, which costs less a
+grade. `--cheapest` rents by what a grade costs instead, its price over its speed: a 4090 at
+$0.89 an hour then comes before an A40 at $0.59, and an A4000 at $0.17 before both. What
+will do: NVIDIA, 12 GB or more (a machine that runs curators needs 10 and gives one 8), on
+a host with the season's floor of 16 GB of memory and 6 vCPUs a GPU, a driver new enough
+for CUDA 13 (the season's PyTorch, 2.15.0, is built only for 13.2), bf16 (nothing older
+than Ampere), and a whole GPU, with an 80 GB disk.
 `stet-runpod gpus` lists them as they stand. `--gpu "RTX A5000,RTX 4090"` names them
 instead.
 

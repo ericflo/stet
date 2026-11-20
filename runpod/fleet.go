@@ -384,10 +384,10 @@ func (f *Fleet) clouds() []string {
 }
 
 // choices are what to try, looked up afresh each time machines are rented: every fit kind
-// of GPU RunPod has free now, in every cloud allowed, the cheapest a grade first (secure
-// first where that is the same); or those named with --gpu, in that order, each cheapest
-// first. For the organisers' bigger students (long), it is what a student costs on each
-// kind that counts, under --long-max-price.
+// of GPU RunPod has free now, in every cloud allowed, the fastest first, or with --cheapest
+// the cheapest a grade first (secure first where that is the same); or those named with
+// --gpu, in that order, each cheapest first. For the organisers' bigger students (long), it
+// is what a student costs on each kind that counts, under --long-max-price.
 func (f *Fleet) choices(ctx context.Context, long bool) ([]Choice, error) {
 	ceiling := f.maxPrice(long)
 	var all []Choice
@@ -424,10 +424,13 @@ func (f *Fleet) choices(ctx context.Context, long bool) ([]Choice, error) {
 			out = append(out, c)
 		}
 	}
-	if long {
+	switch {
+	case long:
 		byStudent(out)
-	} else {
+	case f.o.Cheapest:
 		byGrade(out)
+	default:
+		byPace(out)
 	}
 	return out, nil
 }
@@ -455,8 +458,8 @@ func (f *Fleet) spec(k *Key, gpu, cloud, site string) NewPod {
 	}
 }
 
-// launch rents up to n machines on keys that have no pod, the cheapest a grade first, within
-// what may be spent an hour. It says what it did as it goes.
+// launch rents up to n machines on keys that have no pod, in the order chosen, within what
+// may be spent an hour. It says what it did as it goes.
 func (f *Fleet) launch(ctx context.Context, v *View, n, long int) (int, error) {
 	if n <= 0 {
 		return 0, nil
@@ -470,7 +473,7 @@ func (f *Fleet) launch(ctx context.Context, v *View, n, long int) (int, error) {
 		return 0, err
 	}
 	// The machines for the bigger students first, each chosen for what a student costs on
-	// it; then the rest, the cheapest a grade first.
+	// it; then the rest, the fastest first (or with --cheapest, the cheapest a grade).
 	rented := 0
 	for _, batch := range []struct {
 		n    int

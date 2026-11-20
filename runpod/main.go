@@ -35,7 +35,7 @@ const usage = `stet-runpod: rent GPUs from RunPod to grade for Stet, as many as 
   stet-runpod keys [--add N]     the pool of keys the rented machines use; --add makes
                                  more and vouches for them with the organisers' key
                                  (--vouch: any not vouched for; --revoke HANDLE...)
-  stet-runpod gpus               what would be rented, the cheapest a grade first
+  stet-runpod gpus               what would be rented, the fastest first
   stet-runpod status             what is waiting, what is rented, what it costs
   stet-runpod scale [--follow]   rent and end machines to match the work (once, or
                                  every minute until stopped)
@@ -71,6 +71,7 @@ type Options struct {
 	MaxPrice     float64 // dollars an hour for one machine; 0: any
 	LongMaxPrice float64 // the same, for a machine rented for the organisers' bigger students; 0: MaxPrice
 	LongMinutes  int     // the longest of the organisers' students a machine takes, minutes; 0: the short ones only
+	Cheapest     bool    // rent the cheapest a grade first, not the fastest
 	Idle         int
 	SSHKey       string
 	DryRun       bool
@@ -116,7 +117,8 @@ func flags(name string, o *Options) *flag.FlagSet {
 	fs.StringVar(&o.RunPodAPI, "runpod-api", runpodAPI, "RunPod's API")
 	fs.StringVar(&o.OperatorKey, "key", defaultOperatorKey(), "the organisers' own stet key, to ask what is waiting")
 	fs.StringVar(&o.Cloud, "cloud", "any", "any (the cheapest of both), community (strangers' machines: cheapest, but a host could read a machine's key), or secure (RunPod's data centres)")
-	gpus := fs.String("gpu", "", "GPU kinds to rent, in order of preference, comma-separated (default: whatever fits, the cheapest a grade first)")
+	gpus := fs.String("gpu", "", "GPU kinds to rent, in order of preference, comma-separated (default: whatever fits, the fastest first)")
+	fs.BoolVar(&o.Cheapest, "cheapest", false, "rent the cheapest a grade first, not the fastest: a round settles only when its slowest grade is in, so this saves money and takes longer")
 	fs.StringVar(&o.Image, "image", "ubuntu:24.04", "the container image; stet is installed on it when the pod starts")
 	fs.IntVar(&o.Disk, "disk", 80, "container disk, GB: stet and the season's libraries, and the 60 GB a machine that runs curators keeps free")
 	fs.StringVar(&o.MinCUDA, "min-cuda", "13.0", "the oldest CUDA the host's driver may have: the season's PyTorch is built for CUDA 13")

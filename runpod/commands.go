@@ -142,7 +142,10 @@ func (f *Fleet) listGPUs(ctx context.Context, long bool) error {
 	if err != nil {
 		return err
 	}
-	what := "What would be rented, by what a grade costs on each"
+	what := "What would be rented, the fastest first (the cheapest where they are as fast)"
+	if f.o.Cheapest {
+		what = "What would be rented, by what a grade costs on each"
+	}
 	if long {
 		what = "For the organisers' bigger students, by what a student costs on each, the quicker card first where that is about the same"
 	}

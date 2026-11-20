@@ -497,12 +497,53 @@ func TestAKeyWhoseHandleIsTakenTakesAnother(t *testing.T) {
 	}
 }
 
-// --cloud any rents the cheapest machine in either cloud, every time, and falls back to the
-// next cheapest when RunPod has none of a kind free.
+// By default the fastest machine free is rented, in either cloud, and the next fastest when
+// RunPod has none of a kind free: a round settles only once its slowest grade is in.
+func TestTheFastestMachineIsRentedFirst(t *testing.T) {
+	rp, st := newFakeRunPod(t), newFakeStet(t)
+	f, out := testFleet(t, rp, st, 3)
+	f.o.Cloud = "ANY"
+	st.work = *round(30, 1, 0, 0)
+	if err := tick(context.Background(), f); err != nil {
+		t.Fatal(err)
+	}
+	got := []string{}
+	for _, spec := range rp.created {
+		got = append(got, strings.ToLower(spec.Cloud)+" "+shortGPU(spec.GPU.ID))
+	}
+	if len(got) != 2 || got[0] != "community RTX 4090" || got[1] != "community RTX 4090" {
+		t.Fatalf("rented %v\n%s", got, out)
+	}
+	// With the 4090s gone, the 3090 Ti, the next fastest, though the 3080 Ti is cheaper.
+	rp.noRoom["NVIDIA GeForce RTX 4090"] = true
+	for _, p := range rp.pods {
+		delete(rp.pods, p.ID)
+	}
+	if err := tick(context.Background(), f); err != nil {
+		t.Fatal(err)
+	}
+	if last := rp.created[len(rp.created)-1]; last.Cloud != "COMMUNITY" || last.GPU.ID != "NVIDIA GeForce RTX 3090 Ti" {
+		t.Fatalf("after the fastest ran out: %+v\n%s", last, out)
+	}
+	gpus, err := f.choices(context.Background(), false)
+	if err != nil || len(gpus) < 3 {
+		t.Fatalf("choices: %+v %v", gpus, err)
+	}
+	for i := 1; i < len(gpus); i++ {
+		a, b := gpus[i-1], gpus[i]
+		if speed(b.GPU.ID) > speed(a.GPU.ID) || speed(b.GPU.ID) == speed(a.GPU.ID) && b.Price < a.Price {
+			t.Fatalf("not the fastest first: %+v", gpus)
+		}
+	}
+}
+
+// --cloud any --cheapest rents the cheapest machine a grade in either cloud, every time, and
+// falls back to the next cheapest when RunPod has none of a kind free.
 func TestTheCheapestMachineInEitherCloudIsRented(t *testing.T) {
 	rp, st := newFakeRunPod(t), newFakeStet(t)
 	f, out := testFleet(t, rp, st, 3)
 	f.o.Cloud = "ANY"
+	f.o.Cheapest = true
 	st.work = *round(30, 1, 0, 0)
 	rp.noRoom["NVIDIA GeForce RTX 3080"] = true
 	if err := tick(context.Background(), f); err != nil {
