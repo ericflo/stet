@@ -415,6 +415,20 @@ def test_what_a_grade_prints_is_cleaned_and_counted(loop, capsys):
     assert "\x1b[2J" not in err and "\x07" not in err and "recorded" in err and loop.reports == ["/api/v1/jobs/7/result"]
 
 
+def test_a_valid_grade_is_reported_and_printed_and_the_verifier_carries_on(loop, capsys):
+    # What a season 1 grade gives: item scores and their mean. A verifier that fell over here,
+    # after reporting, ended every rented machine after a grade or two.
+    loop.claims = [a_job(), a_job()]
+    loop.grade = ({"valid": True, "exam": {"items": 2, "mean": -5.1, "item_scores": [-5.0, -5.2]}},
+                  {"exam": {"items": 2, "mean": -5.3, "item_scores": [-5.2, -5.4]}})
+    loop.report = {"status": "recorded"}
+    args = Args()
+    args.max_jobs = 2
+    client.cmd_verify(args)
+    err = capsys.readouterr().err
+    assert loop.reports == ["/api/v1/jobs/7/result"] * 2 and "exam mean -5.1000" in err and "+0.2000" in err
+
+
 # --- edit jobs -------------------------------------------------------------------------------
 
 

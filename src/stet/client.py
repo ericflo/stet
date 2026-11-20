@@ -1514,8 +1514,10 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
                 ed = payload["edit"]
                 out.line("result", f"{ed['status']} in {ed['seconds']:.0f}s" + (f" · script {payload['script_sha256'][:12]} ({payload['script_size'] / 1e6:.1f} MB)" if payload.get("script_sha256") else f" · no script: {clean(ed.get('reason', ''))}"))
             elif result["valid"]:
-                gain = base["exam"]["loss"] - result["exam"]["loss"]
-                out.line("result", f"exam {result['exam']['loss']:.4f} · baseline {base['exam']['loss']:.4f} · gain {out.bold(f'{gain:+.4f}')}")
+                # Item scores are log-likelihoods, higher is better. This is their plain mean; the
+                # round's score is the server's, made from every item by the exam's aggregate.
+                mean, b = result["exam"]["mean"], base["exam"]["mean"]
+                out.line("result", f"exam mean {mean:.4f} · baseline {b:.4f} · {out.bold(f'{mean - b:+.4f}')}")
             else:
                 out.line("result", f"invalid: {clean(result['invalid_reason'])}")
             if ack:
