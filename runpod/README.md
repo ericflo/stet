@@ -68,12 +68,14 @@ default (`--key`). Run them where that key is. `status` judges the work by the s
 service would rent and end is what the service will; settings given to it are taken over
 those.
 
-How many it rents: one for every `--per-machine` (6) jobs a new machine could take now,
-counting a curator still to run as two (the run, and a grade of what it writes) and a
-script waiting as one. Six suits grades of a few minutes; at the standard scale a grade takes
-about 18 minutes on a 3090, and `--per-machine 1` gives each job a machine. A machine with nothing official to do trains the organisers'
-own students (a few minutes each, on a settled round), so one more for every
-`--per-farm` (4) of those waiting, after the official work (`--per-farm 0`: none).
+How many it rents: one for each machine at a round's job, which takes no other until it is
+done, and one more for every `--per-machine` (6) jobs a new machine could take now, counting
+a curator still to run as two (the run, and a grade of what it writes) and a script waiting
+as one. Six suits grades of a few minutes; at the standard scale a grade takes about 18
+minutes on a 3090, and `--per-machine 1` gives each job a machine. A machine with nothing
+official to do trains the organisers' own students (a few minutes each, on a settled round),
+so one more for every `--per-farm` (4) of those waiting, after the official work
+(`--per-farm 0`: none).
 `--long-farm 600` rents machines that also take the bigger students, held for hours, one
 machine to each. A machine rented for them is chosen for what a student costs on it, not what
 it costs an hour: a 4090 at $0.89 trains one in about half the time of a 3090 at $0.50, so

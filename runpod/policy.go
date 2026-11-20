@@ -141,7 +141,8 @@ type Ending struct {
 
 // Decision is one look at the work and the machines.
 type Decision struct {
-	Target int // machines the work justifies
+	// Machines the work justifies: those at a round's job, and enough for what is waiting.
+	Target int
 	Live   int // machines rented now
 	Launch int // machines to rent now
 	// Of those, the machines rented for the organisers' bigger students: chosen for what one
@@ -155,13 +156,21 @@ type Decision struct {
 }
 
 func (p Policy) decide(w *Work, workers []*Worker, spentToday float64, now time.Time) Decision {
-	held := 0
+	// A machine at a round's job takes no other until it is done, twenty minutes or more at
+	// the standard scale: what is waiting wants machines of its own.
+	held, working := 0, 0
 	for _, wk := range workers {
-		if wk.Machine != nil && wk.Machine.Long && wk.state(now, p) == "training" {
-			held++
+		switch wk.state(now, p) {
+		case "grading", "running":
+			working++
+		case "training":
+			if wk.Machine.Long {
+				held++
+			}
 		}
 	}
-	d := Decision{Target: p.targetHolding(w, held)}
+	waiting := p.targetHolding(w, held)
+	d := Decision{Target: min(waiting+working, p.MaxWorkers)}
 	free := 0
 	var idle []*Worker
 	for _, wk := range workers {
@@ -182,7 +191,7 @@ func (p Policy) decide(w *Work, workers []*Worker, spentToday float64, now time.
 			}
 		}
 	}
-	if d.Target == 0 {
+	if waiting == 0 {
 		// Nothing is waiting for anybody: a machine doing nothing would only wait to stop.
 		for _, wk := range idle {
 			d.End = append(d.End, Ending{wk, "nothing is waiting for it"})

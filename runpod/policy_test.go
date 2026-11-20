@@ -17,7 +17,7 @@ func round(runsWaiting, editing, wanted, grading int) *Work {
 	return &Work{Runners: 1, Rounds: []WorkRound{{ID: "s1-o00001", Entries: 36, RunsWaiting: runsWaiting, RunsWanted: runsWaiting, EditsUnderWay: editing, GradesWanted: wanted, GradesUnderWay: grading}}}
 }
 
-// pool makes workers: "free", or a pod that is "starting", "waiting", "grading", "training",
+// pool makes workers: "free", or a pod that is "starting", "waiting", "grading", "running", "training",
 // "quiet", "stopped" or "never" (started long ago and never asked for work).
 func pool(w *Work, states ...string) []*Worker {
 	var out []*Worker
@@ -40,6 +40,9 @@ func pool(w *Work, states ...string) []*Worker {
 			case "grading":
 				m.Busy = "grade"
 				m.LastSeen = t0.Add(-40 * time.Minute).Unix() // says nothing while it trains
+			case "running":
+				m.Busy = "edit"
+				m.LastSeen = t0.Add(-10 * time.Minute).Unix()
 			case "training":
 				m.Busy = "farm"
 				m.LastSeen = t0.Add(-40 * time.Minute).Unix()
@@ -146,6 +149,45 @@ func TestMachinesAreRentedForWorkAndEndedWhenThereIsNone(t *testing.T) {
 }
 
 // Machines that run curators as well as grade are wanted for runs and grades alike.
+// A machine at a round's job is busy with it for twenty minutes or more at the standard scale:
+// it does not count toward what is waiting, which wants machines of its own.
+func TestAMachineAtAJobLeavesWhatIsWaitingToAnother(t *testing.T) {
+	p := testPolicy()
+	p.PerWorker = 1
+	w := round(0, 0, 1, 2) // round 1 at 01:23: two scripts being graded, one waiting
+	d := p.decide(w, pool(w, "grading", "grading", "free", "free"), 0, t0)
+	if d.Target != 3 || d.Launch != 1 || len(d.End) != 0 {
+		t.Fatalf("two grading and one waiting: want 3, rent 1; got %+v", d)
+	}
+	// A curator being run holds its machine as a grade does.
+	p.Edits = true
+	w = round(0, 1, 1, 0)
+	d = p.decide(w, pool(w, "running", "free"), 0, t0)
+	if d.Target != 2 || d.Launch != 1 {
+		t.Fatalf("one running and one waiting: want 2, rent 1; got %+v", d)
+	}
+	// Four to a machine, on top of those at work.
+	p.Edits, p.PerWorker = false, 4
+	w = round(0, 0, 5, 1)
+	d = p.decide(w, pool(w, "grading", "free", "free", "free"), 0, t0)
+	if d.Target != 3 || d.Launch != 2 {
+		t.Fatalf("one grading and five waiting, four to a machine: want 3, rent 2; got %+v", d)
+	}
+	// Nothing waiting: the machines at work are kept, and one doing nothing is ended at once.
+	w = round(0, 0, 0, 1)
+	d = p.decide(w, pool(w, "grading", "waiting"), 0, t0)
+	if d.Target != 1 || d.Launch != 0 || handles(d.End) != "stet-rp-02" {
+		t.Fatalf("one grading, nothing waiting: want 1, end the idle one; got %+v", d)
+	}
+	// Never more than --max.
+	p.PerWorker = 1
+	w = round(0, 0, 3, 3)
+	d = p.decide(w, pool(w, "grading", "grading", "grading", "free", "free"), 0, t0)
+	if d.Target != 4 || d.Launch != 1 {
+		t.Fatalf("three grading and three waiting, at most four: want 4, rent 1; got %+v", d)
+	}
+}
+
 func TestMachinesThatRunCuratorsAreRentedForRunsAndGrades(t *testing.T) {
 	p := testPolicy()
 	p.Edits, p.PerWorker, p.MaxWorkers = true, 6, 8
