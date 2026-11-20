@@ -7,10 +7,10 @@ import (
 	"unicode"
 )
 
-// speeds say roughly how quickly each kind of GPU trains one of the organisers' students,
-// against an RTX 3090: from published training benchmarks, and the RTX A4000's from the
-// students it trained. They only order the kinds tried for the bigger students, where an
-// hour of a quick card can cost less than the hours of a cheap one, so a rough figure does.
+// speeds say roughly how quickly each kind of GPU trains, against an RTX 3090: from
+// published training benchmarks, and the RTX A4000's from the students it trained. A grade
+// trains a model as a student does, so they order the kinds tried, where an hour of a quick
+// card can cost less than the hours of a cheap one, and a rough figure does.
 var speeds = map[string]float64{
 	"RTX 3080": 0.85, "RTX 3080 Ti": 0.95, "RTX 3090": 1, "RTX 3090 Ti": 1.1,
 	"RTX 4070 Ti": 0.95, "RTX 4080": 1.3, "RTX 4080 SUPER": 1.35, "RTX 4090": 1.8,
@@ -59,6 +59,20 @@ func byStudent(cs []Choice) {
 			return c.Price / math.Pow(s, 1.25)
 		}
 		return math.Inf(1)
+	}
+	sort.SliceStable(cs, func(i, j int) bool { return score(cs[i]) < score(cs[j]) })
+}
+
+// byGrade orders the kinds to try by what a grade costs on each, its price over its speed:
+// a grade trains on a fixed number of tokens, so a quicker card holds its machine for less
+// of the hour, and is done sooner. A kind whose speed is not known counts as half a 3090.
+func byGrade(cs []Choice) {
+	score := func(c Choice) float64 {
+		s := speed(c.GPU.ID)
+		if s <= 0 {
+			s = 0.5
+		}
+		return c.Price / s
 	}
 	sort.SliceStable(cs, func(i, j int) bool { return score(cs[i]) < score(cs[j]) })
 }

@@ -9,10 +9,12 @@ import (
 
 // --- how many machines the work wants ---------------------------------------------------------
 //
-// A rented machine runs curators, in stet's container sandbox, and grades. Every curator
-// still to run is two jobs (the run, and a grade of what it writes) and every script waiting
-// is one, and each machine is wanted for a few of them: past that, a machine more would
-// spend longer starting than it saved.
+// A rented machine runs curators, in stet's container sandbox, and grades. A grade holds its
+// machine for twenty minutes or so at the standard scale, and every script waiting wants a
+// machine for every --per-machine of them. A curator is run in a minute or two, and the
+// round's exam, which its grades wait for, is made hours after the draw: the curators want
+// only a machine for every runsPerMachine entries, and never fewer than runsEach, since an
+// account runs an entry once.
 //
 // With --no-edits they only grade, and curators are run by the organisers' own machines.
 // Scripts to grade then come from those runs, as fast as the runners make them: the
@@ -61,15 +63,23 @@ func (p Policy) targetHolding(w *Work, held int) int {
 	return min(n, p.MaxWorkers)
 }
 
+// runsEach is how many times the season runs an entry's curator, each by another account,
+// and runsPerMachine how many entries to run justify one more machine.
+const runsEach, runsPerMachine = 2, 4
+
 // official is how many machines the rounds' own work justifies.
 func (p Policy) official(w *Work) int {
 	per := max(p.PerWorker, 1)
 	if p.Edits {
-		jobs := 0
+		grades, runs := 0, 0
 		for _, r := range w.Rounds {
-			jobs += 2*r.RunsWanted + r.GradesWanted
+			grades += r.GradesWanted
+			runs += r.RunsWanted
 		}
-		n := (jobs + per - 1) / per
+		n := (grades + per - 1) / per
+		if runs > 0 {
+			n += max(runsEach, (runs+runsPerMachine-1)/runsPerMachine)
+		}
 		if len(w.Rounds) == 0 && w.Waiting && w.Runners == 0 {
 			n = 1 // to ask for work, so that the waiting entry's round is drawn
 		}
@@ -141,7 +151,7 @@ type Ending struct {
 
 // Decision is one look at the work and the machines.
 type Decision struct {
-	// Machines the work justifies: those at a round's job, and enough for what is waiting.
+	// Machines the work justifies: those at a grade, and enough for what is waiting.
 	Target int
 	Live   int // machines rented now
 	Launch int // machines to rent now
@@ -156,12 +166,13 @@ type Decision struct {
 }
 
 func (p Policy) decide(w *Work, workers []*Worker, spentToday float64, now time.Time) Decision {
-	// A machine at a round's job takes no other until it is done, twenty minutes or more at
-	// the standard scale: what is waiting wants machines of its own.
+	// A machine at a grade takes no other until it is done, twenty minutes or so at the
+	// standard scale: what is waiting wants machines of its own. One running a curator is
+	// done in a minute or two, and counts among the machines the curators want.
 	held, working := 0, 0
 	for _, wk := range workers {
 		switch wk.state(now, p) {
-		case "grading", "running":
+		case "grading":
 			working++
 		case "training":
 			if wk.Machine.Long {

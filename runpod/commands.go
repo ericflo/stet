@@ -142,7 +142,7 @@ func (f *Fleet) listGPUs(ctx context.Context, long bool) error {
 	if err != nil {
 		return err
 	}
-	what := "What would be rented"
+	what := "What would be rented, by what a grade costs on each"
 	if long {
 		what = "For the organisers' bigger students, by what a student costs on each, the quicker card first where that is about the same"
 	}
@@ -154,7 +154,7 @@ func (f *Fleet) listGPUs(ctx context.Context, long bool) error {
 		what, strings.ToLower(f.o.Cloud), f.ceiling(long), f.o.MinCUDA, f.o.MinRAM, f.o.MinCPU)
 	for _, c := range gpus {
 		fmt.Fprintf(f.out, "  $%.2f/h  %-9s  %-34s %3d GB  %s", c.Price, strings.ToLower(c.Cloud), shortGPU(c.GPU.ID), c.GPU.Memory, strings.ToLower(c.GPU.Availability))
-		if s := speed(c.GPU.ID); long && s > 0 {
+		if s := speed(c.GPU.ID); s > 0 {
 			fmt.Fprintf(f.out, "  %.1fx a 3090: $%.2f for a 3090's hour", s, c.Price/s)
 		}
 		fmt.Fprintln(f.out)

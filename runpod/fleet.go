@@ -384,10 +384,10 @@ func (f *Fleet) clouds() []string {
 }
 
 // choices are what to try, looked up afresh each time machines are rented: every fit kind
-// of GPU RunPod has free now, in every cloud allowed, cheapest first (secure first where
-// the price is the same); or those named with --gpu, in that order, each cheapest first.
-// For the organisers' bigger students (long), it is what a student costs on each kind that
-// counts, not what it costs an hour, under --long-max-price.
+// of GPU RunPod has free now, in every cloud allowed, the cheapest a grade first (secure
+// first where that is the same); or those named with --gpu, in that order, each cheapest
+// first. For the organisers' bigger students (long), it is what a student costs on each
+// kind that counts, under --long-max-price.
 func (f *Fleet) choices(ctx context.Context, long bool) ([]Choice, error) {
 	ceiling := f.maxPrice(long)
 	var all []Choice
@@ -426,6 +426,8 @@ func (f *Fleet) choices(ctx context.Context, long bool) ([]Choice, error) {
 	}
 	if long {
 		byStudent(out)
+	} else {
+		byGrade(out)
 	}
 	return out, nil
 }
@@ -453,7 +455,7 @@ func (f *Fleet) spec(k *Key, gpu, cloud, site string) NewPod {
 	}
 }
 
-// launch rents up to n machines on keys that have no pod, cheapest kind first, within
+// launch rents up to n machines on keys that have no pod, the cheapest a grade first, within
 // what may be spent an hour. It says what it did as it goes.
 func (f *Fleet) launch(ctx context.Context, v *View, n, long int) (int, error) {
 	if n <= 0 {
@@ -468,7 +470,7 @@ func (f *Fleet) launch(ctx context.Context, v *View, n, long int) (int, error) {
 		return 0, err
 	}
 	// The machines for the bigger students first, each chosen for what a student costs on
-	// it; then the rest, cheapest first.
+	// it; then the rest, the cheapest a grade first.
 	rented := 0
 	for _, batch := range []struct {
 		n    int
@@ -575,7 +577,7 @@ func (f *Fleet) ready(ctx context.Context, k *Key, vouched map[string]Vouched) e
 	return nil
 }
 
-// rent tries each kind of GPU in turn, cheapest first, until RunPod gives one. nil, nil:
+// rent tries each kind of GPU in turn, in the order chosen, until RunPod gives one. nil, nil:
 // none could be had within what may be spent.
 func (f *Fleet) rent(ctx context.Context, v *View, k *Key, gpus []Choice, site string) (*Pod, error) {
 	tried, dearer := 0, 0

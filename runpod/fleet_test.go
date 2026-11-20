@@ -517,8 +517,8 @@ func TestTheCheapestMachineInEitherCloudIsRented(t *testing.T) {
 	if len(got) != 2 || got[0] != "community RTX 3080 Ti" || got[1] != "community RTX 3080 Ti" {
 		t.Fatalf("rented %v\n%s", got, out)
 	}
-	// With the 3080 Tis gone, the next cheapest: the secure A5000 and the community 3090 Ti
-	// tie at $0.27, and secure goes first.
+	// With the 3080 Tis gone, the next cheapest a grade: the community 3090 Ti and the secure
+	// A5000 are both $0.27 an hour, and the 3090 Ti grades in three quarters of the time.
 	rp.noRoom["NVIDIA GeForce RTX 3080 Ti"] = true
 	for _, p := range rp.pods {
 		delete(rp.pods, p.ID)
@@ -526,7 +526,7 @@ func TestTheCheapestMachineInEitherCloudIsRented(t *testing.T) {
 	if err := tick(context.Background(), f); err != nil {
 		t.Fatal(err)
 	}
-	if last := rp.created[len(rp.created)-1]; last.Cloud != "SECURE" || last.GPU.ID != "NVIDIA RTX A5000" {
+	if last := rp.created[len(rp.created)-1]; last.Cloud != "COMMUNITY" || last.GPU.ID != "NVIDIA GeForce RTX 3090 Ti" {
 		t.Fatalf("after the cheapest ran out: %+v", last)
 	}
 	if spec := rp.created[0]; spec.GPU.MinRAMPerGPU != f.o.MinRAM || spec.GPU.MinVCPUPerGPU != f.o.MinCPU {
@@ -545,8 +545,8 @@ func TestTheCheapestMachineInEitherCloudIsRented(t *testing.T) {
 		t.Fatalf("choices: %+v %v", gpus, err)
 	}
 	for i := 1; i < len(gpus); i++ {
-		if gpus[i].Price < gpus[i-1].Price {
-			t.Fatalf("not cheapest first: %+v", gpus)
+		if gpus[i].Price/speed(gpus[i].GPU.ID) < gpus[i-1].Price/speed(gpus[i-1].GPU.ID) {
+			t.Fatalf("not the cheapest a grade first: %+v", gpus)
 		}
 	}
 

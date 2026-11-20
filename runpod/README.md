@@ -52,7 +52,7 @@ and forgets it. A key not vouched for is vouched for when it is first rented.
 ## Running it
 
 ```sh
-stet-runpod gpus                     # what would be rented, cheapest first
+stet-runpod gpus                     # what would be rented, the cheapest a grade first
 stet-runpod status                   # what is waiting, what is rented, what it costs
 stet-runpod scale --follow           # rent and end to match the work, every minute
 stet-runpod up 2                     # or by hand: two now, whatever is waiting
@@ -68,14 +68,14 @@ default (`--key`). Run them where that key is. `status` judges the work by the s
 service would rent and end is what the service will; settings given to it are taken over
 those.
 
-How many it rents: one for each machine at a round's job, which takes no other until it is
-done, and one more for every `--per-machine` (6) jobs a new machine could take now, counting
-a curator still to run as two (the run, and a grade of what it writes) and a script waiting
-as one. Six suits grades of a few minutes; at the standard scale a grade takes about 18
-minutes on a 3090, and `--per-machine 1` gives each job a machine. A machine with nothing
-official to do trains the organisers' own students (a few minutes each, on a settled round),
-so one more for every `--per-farm` (4) of those waiting, after the official work
-(`--per-farm 0`: none).
+How many it rents: one for each machine at a grade, which takes no other until it is done
+(about 18 minutes on a 3090 at the standard scale), and one more for every `--per-machine`
+(6) scripts a new machine could grade now: `--per-machine 1` gives each its own. A curator
+is run in a minute or two, and the exam its grades wait for is made hours after the draw, so
+the curators want a machine for every four entries to run, and never fewer than two, since
+each entry is run twice, by two accounts. A machine with nothing official to do trains the
+organisers' own students (a few minutes each, on a settled round), so one more for every
+`--per-farm` (4) of those waiting, after the official work (`--per-farm 0`: none).
 `--long-farm 600` rents machines that also take the bigger students, held for hours, one
 machine to each. A machine rented for them is chosen for what a student costs on it, not what
 it costs an hour: a 4090 at $0.89 trains one in about half the time of a 3090 at $0.50, so
@@ -92,15 +92,16 @@ a moment after it took a job, or that stopped partway through one, still holds i
 server sees it: what it holds is handed back on the next look, so nothing waits out its
 lease.
 
-Every machine rented is the cheapest that will do, looked up afresh each time: every kind
-of GPU RunPod has free, in both its clouds, is tried in order of price until one has a
-machine with room. What will do: NVIDIA, 12 GB or more (a machine that runs curators needs
-10 and gives one 8), on a host with the season's floor of 16 GB of memory and 6 vCPUs a
-GPU, a driver new enough for CUDA 13 (the season's PyTorch, 2.15.0, is built only for
-13.2), bf16 (nothing older than Ampere), and a whole GPU, with an 80 GB disk.
+Every machine rented is the one that will do on which a grade costs least, looked up afresh
+each time: every kind of GPU RunPod has free, in both its clouds, is tried in order of its
+price over its speed until one has a machine with room. A grade trains on a fixed number of
+tokens, so a 4090 at $0.89 an hour, done in about 10 minutes, comes before an A40 at $0.59
+that takes 19, and an L4 comes last. What will do: NVIDIA, 12 GB or more (a machine that
+runs curators needs 10 and gives one 8), on a host with the season's floor of 16 GB of
+memory and 6 vCPUs a GPU, a driver new enough for CUDA 13 (the season's PyTorch, 2.15.0, is
+built only for 13.2), bf16 (nothing older than Ampere), and a whole GPU, with an 80 GB disk.
 `stet-runpod gpus` lists them as they stand. `--gpu "RTX A5000,RTX 4090"` names them
-instead. At micro scale a grade trains for a few minutes even on the cheapest, so those are
-the cheapest per job.
+instead.
 
 `--cloud any` (the default) takes the cheaper of RunPod's two clouds, which is nearly
 always the community one: strangers' machines, at a third of the price or less. `--cloud
@@ -117,7 +118,7 @@ Description=Rent GPUs to grade for Stet
 
 [Service]
 EnvironmentFile=%h/.config/stet-runpod/env
-ExecStart=%h/.local/bin/stet-runpod scale --follow --max 5 --max-price 0.25 --per-machine 1
+ExecStart=%h/.local/bin/stet-runpod scale --follow --max 20 --max-price 1.10 --max-hourly 12 --daily-budget 25 --per-machine 1
 Restart=always
 RestartSec=60
 

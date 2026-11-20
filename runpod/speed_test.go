@@ -48,3 +48,25 @@ func TestTheBiggerStudentsAreRentedByWhatAStudentCosts(t *testing.T) {
 		t.Fatalf("tried in the order %s", s)
 	}
 }
+
+// For grading, what a grade costs comes first: its price over its speed, so a quick card
+// dearer by the hour can come before a slow cheap one, and a kind of unknown speed counts as
+// half a 3090.
+func TestMachinesAreRentedByWhatAGradeCosts(t *testing.T) {
+	kind := func(id string, price float64) Choice { return Choice{GPU: GPUType{ID: id}, Price: price} }
+	cs := []Choice{ // RunPod's on Nov 20, cheapest first
+		kind("NVIDIA GeForce RTX 3080 Ti", 0.18), kind("NVIDIA RTX A4000", 0.25), kind("NVIDIA RTX A4500", 0.25),
+		kind("NVIDIA RTX 4000 Ada Generation", 0.28), kind("NVIDIA Mystery 1", 0.30), kind("NVIDIA RTX PRO 4000 Blackwell", 0.57),
+		kind("NVIDIA A40", 0.59), kind("NVIDIA L4", 0.69), kind("NVIDIA RTX A6000", 0.69), kind("NVIDIA GeForce RTX 4090", 0.89),
+		kind("NVIDIA L40S", 1.09),
+	}
+	byGrade(cs)
+	var got []string
+	for _, c := range cs {
+		got = append(got, shortGPU(c.GPU.ID))
+	}
+	want := "RTX 3080 Ti, RTX A4500, RTX A4000, RTX 4000 Ada Generation, RTX 4090, L40S, Mystery 1, A40, RTX A6000, RTX PRO 4000 Blackwell, L4"
+	if s := strings.Join(got, ", "); s != want {
+		t.Fatalf("tried in the order %s", s)
+	}
+}

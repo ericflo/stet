@@ -159,12 +159,12 @@ func TestAMachineAtAJobLeavesWhatIsWaitingToAnother(t *testing.T) {
 	if d.Target != 3 || d.Launch != 1 || len(d.End) != 0 {
 		t.Fatalf("two grading and one waiting: want 3, rent 1; got %+v", d)
 	}
-	// A curator being run holds its machine as a grade does.
+	// A curator is run in a minute or two: the machine running it takes the script next.
 	p.Edits = true
 	w = round(0, 1, 1, 0)
 	d = p.decide(w, pool(w, "running", "free"), 0, t0)
-	if d.Target != 2 || d.Launch != 1 {
-		t.Fatalf("one running and one waiting: want 2, rent 1; got %+v", d)
+	if d.Target != 1 || d.Launch != 0 {
+		t.Fatalf("one running and one waiting: want 1, rent none; got %+v", d)
 	}
 	// Four to a machine, on top of those at work.
 	p.Edits, p.PerWorker = false, 4
@@ -196,8 +196,9 @@ func TestMachinesThatRunCuratorsAreRentedForRunsAndGrades(t *testing.T) {
 		want int
 	}{
 		{&Work{}, 0},
-		{round(36, 0, 0, 0), 8},   // a round starting: 72 jobs, at most 8 machines
-		{round(5, 2, 1, 4), 2},    // 2*5 + 1 = 11 jobs
+		{round(36, 0, 0, 0), 8},   // a round starting: 36 entries, four to a machine, at most 8
+		{round(3, 0, 0, 0), 2},    // three: each is run twice, by two machines
+		{round(5, 2, 1, 4), 3},    // five entries (two machines) and a script
 		{round(0, 3, 0, 5), 0},    // all under way: nothing more for a new machine
 		{round(0, 0, 2, 0), 1},    // two scripts left
 		{&Work{Waiting: true}, 1}, // an entry waiting, and nobody who runs curators around to have its round drawn
@@ -232,7 +233,7 @@ func TestTheFarmsStudentsWantMachinesToo(t *testing.T) {
 		{&Work{FarmWaiting: 1}, 1},
 		{&Work{FarmWaiting: 9}, 3},
 		{&Work{FarmUnderWay: 5}, 0},         // all being trained already
-		{withFarm(round(5, 0, 1, 0), 9), 5}, // 2 for the round's 11 jobs, 3 for the students
+		{withFarm(round(5, 0, 1, 0), 9), 6}, // 3 for the round's five entries and its script, 3 for the students
 		{withFarm(round(36, 0, 0, 0), 9), 8},
 	} {
 		if got := p.target(c.w); got != c.want {

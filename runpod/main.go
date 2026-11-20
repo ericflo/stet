@@ -35,7 +35,7 @@ const usage = `stet-runpod: rent GPUs from RunPod to grade for Stet, as many as 
   stet-runpod keys [--add N]     the pool of keys the rented machines use; --add makes
                                  more and vouches for them with the organisers' key
                                  (--vouch: any not vouched for; --revoke HANDLE...)
-  stet-runpod gpus               what would be rented, cheapest first
+  stet-runpod gpus               what would be rented, the cheapest a grade first
   stet-runpod status             what is waiting, what is rented, what it costs
   stet-runpod scale [--follow]   rent and end machines to match the work (once, or
                                  every minute until stopped)
@@ -116,7 +116,7 @@ func flags(name string, o *Options) *flag.FlagSet {
 	fs.StringVar(&o.RunPodAPI, "runpod-api", runpodAPI, "RunPod's API")
 	fs.StringVar(&o.OperatorKey, "key", defaultOperatorKey(), "the organisers' own stet key, to ask what is waiting")
 	fs.StringVar(&o.Cloud, "cloud", "any", "any (the cheapest of both), community (strangers' machines: cheapest, but a host could read a machine's key), or secure (RunPod's data centres)")
-	gpus := fs.String("gpu", "", "GPU kinds to rent, in order of preference, comma-separated (default: whatever fits, cheapest first)")
+	gpus := fs.String("gpu", "", "GPU kinds to rent, in order of preference, comma-separated (default: whatever fits, the cheapest a grade first)")
 	fs.StringVar(&o.Image, "image", "ubuntu:24.04", "the container image; stet is installed on it when the pod starts")
 	fs.IntVar(&o.Disk, "disk", 80, "container disk, GB: stet and the season's libraries, and the 60 GB a machine that runs curators keeps free")
 	fs.StringVar(&o.MinCUDA, "min-cuda", "13.0", "the oldest CUDA the host's driver may have: the season's PyTorch is built for CUDA 13")
@@ -134,7 +134,7 @@ func flags(name string, o *Options) *flag.FlagSet {
 	fs.Float64Var(&o.MaxHourly, "max-hourly", 3, "never rent past this many dollars an hour, all machines together")
 	fs.Float64Var(&o.DailyBudget, "daily-budget", 0, "rent nothing more once about this many dollars have been spent today, UTC (0: no limit)")
 	fs.Float64Var(&o.PerRunner, "per-runner", 2, "with --no-edits: machines that keep pace with one of the organisers' machines running curators")
-	fs.IntVar(&o.PerWorker, "per-machine", 6, "jobs waiting (a curator to run is two: the run and its grade) that justify one more machine")
+	fs.IntVar(&o.PerWorker, "per-machine", 6, "scripts waiting to be graded that justify one more machine")
 	fs.IntVar(&o.PerFarm, "per-farm", 4, "the organisers' students waiting to be trained that justify one more machine (0: rent none for them)")
 	fs.DurationVar(&o.Every, "every", time.Minute, "with scale --follow: how often to look")
 	fs.Usage = func() {
