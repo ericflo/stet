@@ -114,6 +114,17 @@ a.term:hover { text-decoration-color: var(--red); }
 .mast nav a { text-decoration: none; color: var(--ink-2); padding: 4px 0; border-bottom: 2px solid transparent; white-space: nowrap; }
 .mast nav a:hover, .mast nav a[aria-current="page"] { color: var(--ink); border-bottom-color: var(--red); }
 .mast .spacer { flex: 1; }
+/* A finished season, under the masthead: which one, and its own pages. */
+.season-bar { background: var(--paper-2); border-bottom: 1px solid var(--rule); }
+.season-bar .wrap { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 28px; min-height: 48px; }
+.season-bar .which { font-family: var(--mono); font-size: 13px; color: var(--ink-3); display: flex; gap: 8px; white-space: nowrap; }
+.season-bar .which a { color: var(--ink-3); text-decoration: none; }
+.season-bar .which a:hover { color: var(--ink); text-decoration: underline; }
+.season-bar .which b { color: var(--ink); font-weight: 600; }
+.season-bar nav { display: flex; gap: 4px 20px; font-size: 15.5px; }
+.season-bar nav a { text-decoration: none; color: var(--ink-2); padding: 3px 0; border-bottom: 2px solid transparent; white-space: nowrap; }
+.season-bar nav a:hover, .season-bar nav a[aria-current="page"] { color: var(--ink); border-bottom-color: var(--ink-3); }
+.season-bar .over { margin-left: auto; font-size: 14.5px; color: var(--ink-3); white-space: nowrap; }
 .theme { border: 1px solid var(--rule); background: none; color: var(--ink-2); border-radius: 999px; width: 34px; height: 34px; padding: 0; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; flex: none; }
 .theme:hover { border-color: var(--ink-3); color: var(--ink); }
 .theme svg { width: 15px; height: 15px; }
@@ -769,6 +780,9 @@ svg .focus { fill: var(--mark); stroke: var(--card); stroke-width: 2; pointer-ev
   .mast .wrap { min-height: 0; padding-top: 12px; padding-bottom: 0; gap: 8px 12px; }
   .mast .logo { font-size: 26px; }
   .mast nav { order: 3; flex-basis: 100%; gap: 0 20px; padding: 2px 0 10px; font-size: 16px; overflow-x: auto; }
+  .season-bar .wrap { padding-top: 8px; padding-bottom: 4px; gap: 2px 12px; }
+  .season-bar .over { order: 2; font-size: 13px; }
+  .season-bar nav { order: 3; flex-basis: 100%; overflow-x: auto; gap: 0 18px; font-size: 15px; padding-bottom: 4px; }
   .status { font-size: 12px; padding: 4px 10px 4px 8px; }
   .hero { padding: 28px 0 36px; }
   .hero h1 { font-size: 35px; margin-top: 10px; line-height: 1.34; }

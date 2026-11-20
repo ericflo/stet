@@ -1,0 +1,16 @@
+{{define "body"}}{{$d := .D}}{{$s := $d.Season}}
+<div class="season-bar">
+  <div class="wrap">
+    <span class="which"><a href="/seasons">Seasons</a><span aria-hidden="true">/</span><b>{{$s.Title}}</b></span>
+    <nav aria-label="{{$s.Title}}">
+      <a href="/seasons/{{$s.ID}}/"{{if eq $d.Tab "leaderboard"}} aria-current="page"{{end}}>Leaderboard</a>
+      <a href="/seasons/{{$s.ID}}/rounds"{{if eq $d.Tab "rounds"}} aria-current="page"{{end}}>Rounds</a>
+      <a href="/seasons/{{$s.ID}}/record"{{if eq $d.Tab "record"}} aria-current="page"{{end}}>The record</a>
+      <a href="/seasons/{{$s.ID}}/verifiers"{{if eq $d.Tab "verifiers"}} aria-current="page"{{end}}>Verifiers</a>
+      <a href="/seasons/{{$s.ID}}/docs/rules"{{if eq $d.Tab "rules"}} aria-current="page"{{end}}>Rules</a>
+    </nav>
+    <span class="over" title="Its pages are kept as they stood when it closed.">Finished {{date $s.Last}}</span>
+  </div>
+</div>
+{{$d.HTML}}
+{{end}}

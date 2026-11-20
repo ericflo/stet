@@ -1,57 +1,54 @@
 #!/usr/bin/env python3
-"""Save a finished season's site as static pages, for /seasons/<id>/.
+"""Save a finished season's pages, for /seasons/<id>/ on the live site.
 
 The live server only ever runs the current season. A finished season keeps its pages as
 they stood when it closed: its last server build is run on a copy of its records (see
-docs/OPERATING.md, "Archiving a season"), and this crawls that server and writes every
-page it can reach, with links rewritten to stay inside the archive.
+docs/OPERATING.md, "Archiving a season"), and this crawls that server and keeps what each
+page says: its title, its description and its content, with links rewritten to stay inside
+the archive. The live site shows them inside its own masthead and footer, under a bar that
+names the season.
 
     python tools/archive_season.py --server http://127.0.0.1:18080 --season s0 \\
-        --title "Season 0" --out server/archive/s0.tar.zst
+        --title "Season 0" --out server/archive/s0.jsonl.zst
 
-What is kept: the home page, leaderboard, record, rounds and each round, each curator with
-each of its files, each account, the verifiers, the glossary and the documents (the rules
-as they were). What is not: the guides to taking part, the API and its downloads, and
-anything else that only made sense while the season ran. Links to the guides go to the
-live site; links to the rest are left as plain text.
+What is kept: the leaderboard (the season's front page), the record, the rounds and each
+round, each curator with each of its files, each account, the verifiers, the glossary and
+the documents (the rules as they were). What is not: the home page, the guides to taking
+part, the API and its downloads, and anything else that only made sense while the season
+ran. Links to the guides go to the live site; links to the rest are left as plain text.
 
-Nothing outside the standard library, and nothing fetched from anywhere but --server.
+The archive is zstd-compressed JSON Lines: the season first, then one line a page.
+Nothing outside the standard library but zstandard, and nothing fetched from anywhere but
+--server.
 """
 
 from __future__ import annotations
 
 import argparse
 import html
-import io
 import json
 import re
 import sys
-import tarfile
 import urllib.error
 import urllib.parse
 import urllib.request
 
 # Pages kept in the archive. A query is kept only where a page is chosen by it (a curator's files).
 KEPT = re.compile(
-    r"^/(|leaderboard|record|rounds|rounds/[^/]+|editors/[^/]+|editors/[^/]+/[^/]+|u/[^/]+|verifiers|glossary|docs|docs/[^/]+)$"
+    r"^/(leaderboard|record|rounds|rounds/[^/]+|editors/[^/]+|editors/[^/]+/[^/]+|u/[^/]+|verifiers|glossary|docs|docs/[^/]+)$"
 )
 KEPT_QUERY = {"file"}
-# Pages of the live site a link may still go to: how to take part now.
-LIVE = {"/enter", "/verify", "/run"}
-# Links taken out of the navigation altogether: they lead nowhere in an archive.
-NAV_DROP = re.compile(r'<a href="(?:/next|/enter|/verify|/run|https?://[^"]*/api/v1/[^"]*)"[^>]*>[^<]*</a>')
+SEEDS = ["/leaderboard", "/record", "/rounds", "/verifiers", "/glossary", "/docs"]
+# Pages of the live site a link may still go to: how to take part now, and its stylesheet's files.
+LIVE = re.compile(r"^/(enter|verify|run|static/.*)$")
 FORK = re.compile(
-    r'<div class="cmd"[^>]*><pre><span class="p">\$ </span><span data-copy-text>stet fork [^<]*</span></pre><button type="button" data-copy>copy</button></div>'
+    r'<div class="cmd"[^>]*><pre><span class="p">\$ </span><span data-copy-text>stet fork [^<]*</span></pre>'
+    r'<button type="button" data-copy>copy</button></div>'
 )
 ATTR = re.compile(r'\b(href|src)="([^"]*)"')
-CSS_URL = re.compile(r"url\((['\"]?)(/static/[^)'\"]+)\1\)")
+TITLE = re.compile(r"<title>(.*?)</title>", re.S)
+DESC = re.compile(r'<meta name="description" content="([^"]*)">')
 MAX_PAGES = 5000
-
-BANNER_CSS = """
-/* archive */
-.archived { background: var(--paper-2); border-bottom: 1px solid var(--rule); color: var(--ink-2); font-size: 15px; padding: 8px 0; }
-.archived a { color: inherit; }
-"""
 
 
 def fetch(base: str, path: str) -> tuple[int, str, bytes]:
@@ -71,101 +68,84 @@ def canonical(url: str) -> str | None:
     return u.path + ("?" + urllib.parse.urlencode(q) if q else "")
 
 
-def key_of(page: str) -> str:
-    """The name a page is stored under: its path without the leading slash, and its query."""
-    return page[1:] or "index"
+def split_page(text: str) -> dict:
+    """A rendered page's title, description and content: what lies between masthead and footer."""
+    start, end = text.find("</header>"), text.rfind("<footer>")
+    if start < 0 or end < start:
+        raise ValueError("a page without the masthead and footer it was rendered with")
+    title = TITLE.search(text)
+    title = html.unescape(title.group(1)).strip() if title else ""
+    title = title.removesuffix(" · Stet") if " · " in title else ""  # the home page's has no page title
+    desc = DESC.search(text)
+    return {
+        "title": title,
+        "desc": html.unescape(desc.group(1)) if desc else "",
+        "html": text[start + len("</header>") : end].strip() + "\n",
+    }
+
+
+def pack(season: dict, pages: dict[str, dict], out: str) -> int:
+    """Write the archive; the same season and pages give the same bytes."""
+    try:
+        import zstandard
+    except ImportError:
+        sys.exit("needs the zstandard module: run it with the stet CLI's Python")
+    lines = [json.dumps({"season": season}, sort_keys=True, ensure_ascii=False)]
+    for key in sorted(pages):
+        lines.append(json.dumps({"page": key, **pages[key]}, sort_keys=True, ensure_ascii=False))
+    packed = zstandard.ZstdCompressor(level=19).compress(("\n".join(lines) + "\n").encode("utf-8"))
+    with open(out, "wb") as f:
+        f.write(packed)
+    return len(packed)
 
 
 class Archiver:
-    def __init__(self, base: str, season: str, title: str, site: str, live: str):
-        self.base, self.season, self.title, self.site, self.live = (
-            base.rstrip("/"),
-            season,
-            title,
-            site.rstrip("/"),
-            live,
-        )
+    def __init__(self, base: str, season: str):
+        self.base = base.rstrip("/")
         self.prefix = "/seasons/" + season
-        self.static: set[str] = set()
 
     def rewrite_url(self, url: str, here: str) -> str | None:
         """Where a link in an archived page should point, or None to make it plain text."""
         raw = html.unescape(url)
-        if raw.startswith("#") or raw.startswith("mailto:"):
+        if raw.startswith(("#", "mailto:")):
             return url
-        absolute = urllib.parse.urljoin(here, raw)
-        u = urllib.parse.urlsplit(absolute)
-        if u.scheme in ("http", "https") and not raw.startswith(("/", "?")):
-            if u.netloc and not self.site.endswith(u.netloc) and "stetrun.com" not in u.netloc:
-                return url  # elsewhere on the web
-            return None  # the live site's API or files: not this season's
-        if u.path.startswith("/static/"):
-            self.static.add(u.path)
-            return self.prefix + u.path
-        page = canonical(raw if raw.startswith("/") else absolute)
+        u = urllib.parse.urlsplit(urllib.parse.urljoin(here, raw))
+        if u.netloc != "archive":
+            if "stetrun.com" in u.netloc:
+                return None  # the live site's API or files: not this season's
+            return url  # elsewhere on the web
+        fragment = "#" + u.fragment if u.fragment else ""
+        if u.path == "/":
+            return self.prefix + "/" + fragment  # the season's front page
+        page = canonical(u.path + ("?" + u.query if u.query else ""))
         if page is not None:
-            return html.escape(
-                self.prefix + (page if page != "/" else "/") + ("#" + u.fragment if u.fragment else ""), quote=True
-            )
-        if u.path in LIVE:
+            return html.escape(self.prefix + page + fragment, quote=True)
+        if LIVE.match(u.path):
             return url
         return None
 
     def rewrite(self, page: str, text: str) -> str:
         here = "http://archive" + page
-        # The navigation: what leads nowhere in an archive goes.
-        for nav in re.findall(r'<nav aria-label="(?:Main|More)">.*?</nav>', text, flags=re.S):
-            text = text.replace(nav, NAV_DROP.sub("", nav))
-        text = FORK.sub("", text)
+        text = FORK.sub("", text)  # a finished season's curators are not forked from here
         text = text.replace(" data-live>", ">").replace(" data-live ", " ")
 
         def attr(m: re.Match) -> str:
             new = self.rewrite_url(m.group(2), here)
             return f'{m.group(1)}="{new}"' if new is not None else ""
 
-        text = ATTR.sub(attr, text)
-        # Then what the archive adds, whose links are not the archived season's own.
-        text = re.sub(
-            r'<link rel="canonical" href="[^"]*">',
-            f'<link rel="canonical" href="{self.site}{self.prefix}{page}">',
-            text,
-        )
-        text = re.sub(r'<meta property="og:url" content="[^"]*">', "", text)
-        # The pill that said what was happening now says the season is over.
-        text = re.sub(
-            r'<span id="status">.*?</span>\s*(?=<button class="theme")',
-            f'<span id="status"><a class="status" href="{self.prefix}/rounds"><span class="dot done" aria-hidden="true"></span>{html.escape(self.title)} is over</a></span>\n    ',
-            text,
-            count=1,
-            flags=re.S,
-        )
-        return text.replace(
-            "<body>",
-            f'<body>\n<div class="archived"><div class="wrap">{html.escape(self.title)} is over. '
-            f"These are its pages as they stood when it closed. "
-            f'<a href="/">The competition goes on: {html.escape(self.live)} →</a> · <a href="/seasons">Every season</a></div></div>',
-            1,
-        )
+        return ATTR.sub(attr, text)
 
     def links(self, page: str, text: str) -> list[str]:
-        here = "http://archive" + page
         out = []
         for _, url in ATTR.findall(text):
-            raw = html.unescape(url)
-            if raw.startswith("#"):
-                continue
-            absolute = urllib.parse.urljoin(here, raw)
-            u = urllib.parse.urlsplit(absolute)
-            if u.netloc != "archive":
-                continue
-            p = canonical(u.path + ("?" + u.query if u.query else ""))
-            if p is not None:
+            u = urllib.parse.urlsplit(urllib.parse.urljoin("http://archive" + page, html.unescape(url)))
+            if u.netloc == "archive" and (p := canonical(u.path + ("?" + u.query if u.query else ""))):
                 out.append(p)
         return out
 
-    def run(self, seeds: list[str]) -> tuple[dict[str, bytes], dict]:
-        files: dict[str, bytes] = {}
-        seen, queue, missing = set(seeds), list(seeds), []
+    def run(self) -> tuple[dict[str, dict], list]:
+        pages: dict[str, dict] = {}
+        seen, queue, missing = set(SEEDS), list(SEEDS), []
         while queue:
             page = queue.pop(0)
             status, ctype, body = fetch(self.base, page)
@@ -179,29 +159,10 @@ class Archiver:
                         sys.exit(f"more than {MAX_PAGES} pages: is something generating links?")
                     seen.add(nxt)
                     queue.append(nxt)
-            files[key_of(page)] = self.rewrite(page, text).encode("utf-8")
-            if len(files) % 50 == 0:
-                print(f"  {len(files)} pages", file=sys.stderr)
-        # The stylesheet, script and what the stylesheet itself loads.
-        pending = sorted(self.static)
-        done: set[str] = set()
-        while pending:
-            path = pending.pop()
-            if path in done:
-                continue
-            done.add(path)
-            status, _, body = fetch(self.base, path)
-            if status != 200:
-                missing.append((path, status))
-                continue
-            if path.endswith(".css"):
-                css = body.decode("utf-8")
-                for _, ref in CSS_URL.findall(css):
-                    pending.append(ref.split("?")[0])
-                css = CSS_URL.sub(lambda m: f"url({m.group(1)}{self.prefix}{m.group(2)}{m.group(1)})", css)
-                body = (css + BANNER_CSS).encode("utf-8")
-            files[path[1:]] = body
-        return files, {"missing": missing}
+            pages[page[1:]] = split_page(self.rewrite(page, text))
+            if len(pages) % 50 == 0:
+                print(f"  {len(pages)} pages", file=sys.stderr)
+        return pages, missing
 
 
 def main() -> None:
@@ -210,8 +171,6 @@ def main() -> None:
     ap.add_argument("--season", required=True, help="its id, as in /seasons/<id>/")
     ap.add_argument("--title", required=True, help='what it is called, e.g. "Season 0"')
     ap.add_argument("--about", default="", help="one line for the list of seasons")
-    ap.add_argument("--live", default="the current season", help="what the live site is, for the banner")
-    ap.add_argument("--site", default="https://www.stetrun.com")
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
 
@@ -230,14 +189,10 @@ def main() -> None:
     for r in listed:
         status, _, body = fetch(args.server, "/api/v1/rounds/" + r["id"])
         rounds.append(json.loads(body)["round"] if status == 200 else r)
-
     status, _, body = fetch(args.server, "/api/v1/leaderboard")
     board = json.loads(body) if status == 200 else {}
-    curators = len(board.get("editors") or []) + len(board.get("provisional") or [])
 
-    a = Archiver(args.server, args.season, args.title, args.site, args.live)
-    seeds = ["/", "/leaderboard", "/record", "/rounds", "/verifiers", "/glossary", "/docs"]
-    files, report = a.run(seeds)
+    pages, missing = Archiver(args.server, args.season).run()
     meta = {
         "id": args.season,
         "title": args.title,
@@ -246,28 +201,13 @@ def main() -> None:
         "first": min((r.get("drawn_at") or r.get("draw_at") or 0 for r in rounds), default=0),
         "last": max((r.get("settled_at") or 0 for r in rounds), default=0),
         "scale": season.get("scale") or "",
-        "curators": curators,
-        "pages": sum(1 for k in files if not k.startswith("static/")),
+        "curators": len(board.get("editors") or []) + len(board.get("provisional") or []),
+        "pages": len(pages),
     }
-    files["meta.json"] = json.dumps(meta, indent=1).encode()
-    try:
-        import zstandard
-    except ImportError:
-        sys.exit("needs the zstandard module: run it with the stet CLI's Python")
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w", format=tarfile.PAX_FORMAT) as tar:
-        for name in sorted(files):
-            info = tarfile.TarInfo(name)
-            info.size, info.mtime, info.mode = len(files[name]), 0, 0o644
-            tar.addfile(info, io.BytesIO(files[name]))
-    packed = zstandard.ZstdCompressor(level=19).compress(buf.getvalue())
-    with open(args.out, "wb") as f:
-        f.write(packed)
-    raw = sum(len(v) for v in files.values())
-    print(
-        f"{args.out}: {meta['pages']} pages, {len(files) - meta['pages'] - 1} static files, {raw / 1e6:.1f} MB as pages, {len(packed) / 1e6:.1f} MB packed"
-    )
-    for path, status in report["missing"]:
+    size = pack(meta, pages, args.out)
+    raw = sum(len(p["html"]) for p in pages.values())
+    print(f"{args.out}: {len(pages)} pages, {raw / 1e6:.1f} MB of content, {size / 1e6:.2f} MB packed")
+    for path, status in missing:
         print(f"  not kept: {path} ({status})", file=sys.stderr)
 
 

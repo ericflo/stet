@@ -310,10 +310,11 @@ file in `src/stet/seasons/`, and the switch is:
 
 ## Archiving a season
 
-The server runs one season. A finished one keeps its site as it stood when it closed: static
-pages under `/seasons/<id>/`, listed at `/seasons` and linked from the footer. Each is one
-file, `server/archive/<id>.tar.zst`, built into the server. Making one takes the season's
-last server build, a copy of its records, and its curators' code:
+The server runs one season. A finished one keeps its pages as they stood when it closed,
+under `/seasons/<id>/`: what each page said, shown inside today's masthead and footer under a
+bar that names the season. `/seasons` lists them, and the footer links there. Each season is
+one file, `server/archive/<id>.jsonl.zst`, built into the server. Making one takes the
+season's last server build, a copy of its records, and its curators' code:
 
 1. **Its records.** Export the season's database (`stet` for season 0, `stet-<id>` after)
    as JSON Lines of `{"key", "value"}`: a scan of every key at one revision, with a token
@@ -338,14 +339,14 @@ last server build, a copy of its records, and its curators' code:
 
    ```sh
    python tools/archive_season.py --server http://127.0.0.1:18080 --season s1 \
-     --title "Season 1" --live "season 2" --about "One line for /seasons." \
-     --out server/archive/s1.tar.zst
+     --title "Season 1" --about "One line for /seasons." --out server/archive/s1.jsonl.zst
    ```
 
-   It saves every page it can reach from the home page (rounds, curators with each of their
-   files, accounts, verifiers, glossary, documents), keeps links inside the archive, sends
-   links to the guides to the live site, and leaves the API and downloads as plain text.
-5. Commit the `.tar.zst`, never the export or the bundles: the export holds every account
+   It keeps the title, description and content of every page it can reach from the
+   leaderboard, which becomes the season's front page: rounds, curators with each of their
+   files, accounts, verifiers, glossary, documents. Links stay inside the archive, links to
+   the guides go to the live site, and the API and downloads are left as plain text.
+5. Commit the `.jsonl.zst`, never the export or the bundles: the export holds every account
    record. The server's tests check every archived page and link.
 
 ## Things only the organisers hold
