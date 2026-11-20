@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -200,6 +201,12 @@ type WorkRound struct {
 	EditsUnderWay  int    `json:"edits_under_way"`
 	GradesWanted   int    `json:"grades_wanted"`
 	GradesUnderWay int    `json:"grades_under_way"`
+	// Before the exam is posted (ExamAt 0), the grades its scores wait on that a grader that
+	// trains early could take now, less those held; and when the round was drawn, asked of
+	// GET /api/v1/rounds/{id} when the work does not say (0: not known).
+	GradesEarly int   `json:"grades_early"`
+	ExamAt      int64 `json:"exam_at"`
+	DrawnAt     int64 `json:"drawn_at"`
 }
 
 // Machine is one of the organisers' accounts as the server sees it.
@@ -231,6 +238,19 @@ func (s *Stet) work(ctx context.Context, op *Key) (*Work, error) {
 			return nil, fmt.Errorf("%s is not one of the organisers' own keys, and only they may ask what is waiting (--key)", op.Handle)
 		}
 		return nil, err
+	}
+	for i := range w.Rounds {
+		r := &w.Rounds[i]
+		if r.DrawnAt == 0 && r.ExamAt == 0 && r.GradesEarly > 0 {
+			var out struct {
+				Round struct {
+					DrawnAt int64 `json:"drawn_at"`
+				} `json:"round"`
+			}
+			if s.do(ctx, "GET", "/api/v1/rounds/"+url.PathEscape(r.ID), nil, nil, &out) == nil {
+				r.DrawnAt = out.Round.DrawnAt
+			}
+		}
 	}
 	return &w, nil
 }

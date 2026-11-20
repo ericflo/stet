@@ -312,3 +312,37 @@ func TestBiggerStudentsWantAMachineEach(t *testing.T) {
 		t.Fatalf("rented %d for bigger students the machines do not take", d.LaunchLong)
 	}
 }
+
+// A round's early grades want machines only from --early before its exam is due; once the
+// exam is posted, its grades are wanted as any are, and when the draw is not known, or
+// --early is 0, none is rented ahead.
+func TestEarlyGradesWantMachinesShortlyBeforeTheExam(t *testing.T) {
+	p := testPolicy()
+	p.PerWorker, p.MaxWorkers, p.Edits = 1, 20, true
+	p.Early, p.ExamAfter = 45*time.Minute, 2*time.Hour+12*time.Minute
+	drawn := time.Unix(1795207805, 0)
+	at := func(r WorkRound, after time.Duration) int {
+		return p.targetHolding(&Work{Runners: 1, Rounds: []WorkRound{r}}, 0, drawn.Add(after))
+	}
+	r := WorkRound{ID: "s1-o00004", Entries: 8, GradesEarly: 8, DrawnAt: drawn.Unix()}
+	for _, c := range []struct {
+		r     WorkRound
+		after time.Duration
+		want  int
+	}{
+		{r, 30 * time.Minute, 0},
+		{r, 86 * time.Minute, 0},
+		{r, 87 * time.Minute, 8}, // 45 minutes before 2h12m
+		{r, 3 * time.Hour, 8},    // the exam is late: still wanted
+		{WorkRound{ID: r.ID, Entries: 8, GradesEarly: 8}, 2 * time.Hour, 0}, // the draw not known
+		{WorkRound{ID: r.ID, Entries: 8, GradesEarly: 3, GradesWanted: 2, ExamAt: drawn.Add(2 * time.Hour).Unix(), DrawnAt: drawn.Unix()}, 2 * time.Hour, 2},
+	} {
+		if got := at(c.r, c.after); got != c.want {
+			t.Errorf("%+v at draw+%s: %d machines, want %d", c.r, c.after, got, c.want)
+		}
+	}
+	p.Early = 0
+	if got := at(r, 2*time.Hour); got != 0 {
+		t.Errorf("with --early 0: %d machines", got)
+	}
+}

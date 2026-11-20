@@ -70,12 +70,17 @@ those.
 
 How many it rents: one for each machine at a grade, which takes no other until it is done
 (about 18 minutes on a 3090 at the standard scale), and one more for every `--per-machine`
-(6) scripts a new machine could grade now: `--per-machine 1` gives each its own. A curator
-is run in a minute or two, and the exam its grades wait for is made hours after the draw, so
-the curators want a machine for every four entries to run, and never fewer than two, since
-each entry is run twice, by two accounts. A machine with nothing official to do trains the
-organisers' own students (a few minutes each, on a settled round), so one more for every
-`--per-farm` (4) of those waiting, after the official work (`--per-farm 0`: none).
+(6) scripts a new machine could grade now: `--per-machine 1` gives each its own. A grader
+may take a grade before the round's exam is posted, train the round's baseline and the
+student, and sit the exam once it is: the grades it could take want machines from `--early`
+(45 minutes) before the exam is due, about `--exam-after` (2h12m) after the draw, so that
+they have trained by then and the round settles minutes after the exam (`--early 0`: rent
+them only once it is posted). A curator is run in a minute or two, and the exam its grades
+wait for is made hours after the draw, so the curators want a machine for every four
+entries to run, and never fewer than two, since each entry is run twice, by two accounts. A
+machine with nothing official to do trains the organisers' own students (a few minutes
+each, on a settled round), so one more for every `--per-farm` (4) of those waiting, after
+the official work (`--per-farm 0`: none).
 `--long-farm 600` rents machines that also take the bigger students, held for hours, one
 machine to each. A machine rented for them is chosen for what a student costs on it, not what
 it costs an hour: a 4090 at $0.89 trains one in about half the time of a 3090 at $0.50, so
@@ -121,7 +126,7 @@ Description=Rent GPUs to grade for Stet
 
 [Service]
 EnvironmentFile=%h/.config/stet-runpod/env
-ExecStart=%h/.local/bin/stet-runpod scale --follow --max 20 --max-price 1.10 --max-hourly 12 --daily-budget 25 --per-machine 1
+ExecStart=%h/.local/bin/stet-runpod scale --follow --max 20 --max-price 1.10 --max-hourly 12 --daily-budget 50 --per-machine 1
 Restart=always
 RestartSec=60
 

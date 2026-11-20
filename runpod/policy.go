@@ -21,6 +21,10 @@ import (
 // machines wanted are enough to keep pace with the runners while curators are still to
 // run, and enough to clear the scripts already waiting.
 //
+// A grader can take a grade before the round's exam is posted, train, and sit the exam once
+// it is: the grades it could take want machines --early before the exam is due, so that the
+// round settles minutes after it is posted. Rented sooner, a machine would only wait.
+//
 // An entry waiting for a round has it drawn early only once somebody who runs curators has
 // asked for work. When nobody has, one machine is rented to ask, unless the organisers have
 // paused the rounds: none is drawn then, and it would only wait to stop.
@@ -44,17 +48,20 @@ type Policy struct {
 	LongFarm    bool    // the machines take the organisers' bigger students too, one machine to each
 	MaxHourly   float64 // never rent past this many dollars an hour, all machines together
 	DailyBudget float64 // no new machine once this much has been spent today (UTC); 0: no limit
-	Grace       time.Duration
-	Silence     time.Duration
+	// Rent graders this long before a round's exam is due, ExamAfter its draw (0: only once
+	// it is posted).
+	Early, ExamAfter time.Duration
+	Grace            time.Duration
+	Silence          time.Duration
 }
 
 // target is how many machines the work justifies, before money is counted.
-func (p Policy) target(w *Work) int { return p.targetHolding(w, 0) }
+func (p Policy) target(w *Work) int { return p.targetHolding(w, 0, time.Now()) }
 
 // targetHolding counts too the machines rented now that train a bigger student (held): each
 // is busy with it for hours, and so is none of the machines the students still waiting want.
-func (p Policy) targetHolding(w *Work, held int) int {
-	n := p.official(w)
+func (p Policy) targetHolding(w *Work, held int, now time.Time) int {
+	n := p.official(w, now)
 	if p.PerFarm > 0 {
 		n += (w.FarmWaiting + p.PerFarm - 1) / p.PerFarm
 	}
@@ -69,12 +76,12 @@ func (p Policy) targetHolding(w *Work, held int) int {
 const runsEach, runsPerMachine = 2, 4
 
 // official is how many machines the rounds' own work justifies.
-func (p Policy) official(w *Work) int {
+func (p Policy) official(w *Work, now time.Time) int {
 	per := max(p.PerWorker, 1)
 	if p.Edits {
 		grades, runs := 0, 0
 		for _, r := range w.Rounds {
-			grades += r.GradesWanted
+			grades += r.GradesWanted + p.early(r, now)
 			runs += r.RunsWanted
 		}
 		n := (grades + per - 1) / per
@@ -88,7 +95,7 @@ func (p Policy) official(w *Work) int {
 	}
 	scripts, curators := 0, 0
 	for _, r := range w.Rounds {
-		scripts += r.GradesWanted
+		scripts += r.GradesWanted + p.early(r, now)
 		curators += r.RunsWaiting + r.EditsUnderWay
 	}
 	n := (scripts + per - 1) / per
@@ -96,6 +103,28 @@ func (p Policy) official(w *Work) int {
 		n += int(math.Ceil(p.PerRunner * float64(max(w.Runners, 1))))
 	}
 	return n
+}
+
+// examDue is when a round's exam is expected, about; zero when that is not known.
+func (p Policy) examDue(r WorkRound) time.Time {
+	if r.ExamAt != 0 || r.DrawnAt == 0 || p.ExamAfter <= 0 {
+		return time.Time{}
+	}
+	return time.Unix(r.DrawnAt, 0).Add(p.ExamAfter)
+}
+
+// early is how many of a round's grades want a machine before its exam is posted: those a
+// grader could take now, once the exam is due within --early. A machine's first grade of a
+// round trains the round's baseline and the student before it can sit the exam, a quarter
+// of an hour on a fast card, and the boot and the corpus take a while too: rented then, it
+// has trained by the time the exam is posted, and the round settles minutes after. None
+// when the exam is posted (its grades are wanted then), or when the draw is not known.
+func (p Policy) early(r WorkRound, now time.Time) int {
+	due := p.examDue(r)
+	if p.Early <= 0 || r.GradesEarly <= 0 || due.IsZero() || now.Before(due.Add(-p.Early)) {
+		return 0
+	}
+	return r.GradesEarly
 }
 
 // Worker is one key of the pool, with its pod if it has one and what the server says of it.
@@ -181,7 +210,7 @@ func (p Policy) decide(w *Work, workers []*Worker, spentToday float64, now time.
 			}
 		}
 	}
-	waiting := p.targetHolding(w, held)
+	waiting := p.targetHolding(w, held, now)
 	d := Decision{Target: min(waiting+working, p.MaxWorkers)}
 	free := 0
 	var idle []*Worker

@@ -111,6 +111,7 @@ func (f *fakeRunPod) serve(w http.ResponseWriter, r *http.Request) {
 type fakeStet struct {
 	mu       sync.Mutex
 	work     Work
+	drawnAt  int64             // when the open round was drawn, as GET /api/v1/rounds/{id} says
 	workers  map[string]bool   // public keys the server takes as rented machines
 	signed   []string          // who signed each request
 	vouches  int               // grants it was sent, each with a good signature
@@ -142,6 +143,8 @@ func newFakeStet(t *testing.T) *fakeStet {
 			fmt.Fprintf(w, `{"paused": %d, "paused_by": "stet"}`, f.work.Paused)
 		case "/api/v1/season":
 			io.WriteString(w, `{"site": "https://www.stet.test"}`)
+		case "/api/v1/rounds/s1-o00001":
+			fmt.Fprintf(w, `{"entries": [], "round": {"id": "s1-o00001", "drawn_at": %d}}`, f.drawnAt)
 		case "/api/v1/admin/workers":
 			switch r.Method {
 			case "GET":
@@ -818,5 +821,31 @@ func TestStatusJudgesByTheServicesSettings(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "The work wants 3 machines now (at most 3)") {
 		t.Fatalf("with --max 3 given:\n%s", out.String())
+	}
+}
+
+// Graders are rented --early before a round's exam is due, for the grades they could take
+// then and train for, and not sooner: the round's draw is asked of the round itself.
+func TestGradersAreRentedBeforeTheExam(t *testing.T) {
+	rp, st := newFakeRunPod(t), newFakeStet(t)
+	f, out := testFleet(t, rp, st, 4)
+	f.o.Early, f.o.ExamAfter, f.o.PerWorker = 45*time.Minute, 2*time.Hour+12*time.Minute, 1
+	st.work = Work{Runners: 1, Rounds: []WorkRound{{ID: "s1-o00001", Entries: 3, GradesEarly: 3}}}
+	st.drawnAt = time.Now().Add(-time.Hour).Unix() // the exam is due in 72 minutes
+	if err := tick(context.Background(), f); err != nil {
+		t.Fatal(err)
+	}
+	if len(rp.created) != 0 {
+		t.Fatalf("rented %d machines more than 45 minutes before the exam\n%s", len(rp.created), out)
+	}
+	st.drawnAt = time.Now().Add(-90 * time.Minute).Unix() // due in 42 minutes
+	if err := tick(context.Background(), f); err != nil {
+		t.Fatal(err)
+	}
+	if len(rp.created) != 3 {
+		t.Fatalf("rented %d machines for 3 early grades\n%s", len(rp.created), out)
+	}
+	if !strings.Contains(strings.Join(st.signed, "\n"), "GET /api/v1/rounds/s1-o00001 \n") {
+		t.Fatalf("the round's draw was not asked of the round, unsigned: %v", st.signed)
 	}
 }

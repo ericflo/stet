@@ -139,6 +139,8 @@ func flags(name string, o *Options) *flag.FlagSet {
 	fs.IntVar(&o.PerWorker, "per-machine", 6, "scripts waiting to be graded that justify one more machine")
 	fs.IntVar(&o.PerFarm, "per-farm", 4, "the organisers' students waiting to be trained that justify one more machine (0: rent none for them)")
 	fs.DurationVar(&o.Every, "every", time.Minute, "with scale --follow: how often to look")
+	fs.DurationVar(&o.Early, "early", 45*time.Minute, "rent graders this long before a round's exam is due, so that they have trained by the time it is posted (0: only once it is)")
+	fs.DurationVar(&o.ExamAfter, "exam-after", 2*time.Hour+12*time.Minute, "how long after its draw a round's exam is posted, about: the season's hour of fresh text, an hour to settle, and the minutes to make it")
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), "usage: stet-runpod %s [settings]\n\n", name)
 		fs.PrintDefaults()
