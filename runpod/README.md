@@ -70,7 +70,8 @@ those.
 
 How many it rents: one for every `--per-machine` (6) jobs a new machine could take now,
 counting a curator still to run as two (the run, and a grade of what it writes) and a
-script waiting as one. A machine with nothing official to do trains the organisers'
+script waiting as one. Six suits grades of a few minutes; at the standard scale a grade takes
+about 18 minutes on a 3090, and `--per-machine 1` gives each job a machine. A machine with nothing official to do trains the organisers'
 own students (a few minutes each, on a settled round), so one more for every
 `--per-farm` (4) of those waiting, after the official work (`--per-farm 0`: none).
 `--long-farm 600` rents machines that also take the bigger students, held for hours, one
@@ -114,7 +115,7 @@ Description=Rent GPUs to grade for Stet
 
 [Service]
 EnvironmentFile=%h/.config/stet-runpod/env
-ExecStart=%h/.local/bin/stet-runpod scale --follow --max 5 --max-price 0.25
+ExecStart=%h/.local/bin/stet-runpod scale --follow --max 5 --max-price 0.25 --per-machine 1
 Restart=always
 RestartSec=60
 
