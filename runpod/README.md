@@ -107,7 +107,9 @@ $0.89 an hour then comes before an A40 at $0.59, and an A4000 at $0.17 before bo
 will do: NVIDIA, 12 GB or more (a machine that runs curators needs 10 and gives one 8), on
 a host with the season's floor of 16 GB of memory and 6 vCPUs a GPU, a driver new enough
 for CUDA 13 (the season's PyTorch, 2.15.0, is built only for 13.2), bf16 (nothing older
-than Ampere), and a whole GPU, with an 80 GB disk.
+than Ampere), and a whole GPU, with a 100 GB disk (at 80, a machine that stayed up into
+another round and upgraded found less than the 60 GB a curator run keeps free, and only
+graded).
 `stet-runpod gpus` lists them as they stand. `--gpu "RTX A5000,RTX 4090"` names them
 instead.
 

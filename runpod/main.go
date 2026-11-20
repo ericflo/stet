@@ -120,7 +120,7 @@ func flags(name string, o *Options) *flag.FlagSet {
 	gpus := fs.String("gpu", "", "GPU kinds to rent, in order of preference, comma-separated (default: whatever fits, the fastest first)")
 	fs.BoolVar(&o.Cheapest, "cheapest", false, "rent the cheapest a grade first, not the fastest: a round settles only when its slowest grade is in, so this saves money and takes longer")
 	fs.StringVar(&o.Image, "image", "ubuntu:24.04", "the container image; stet is installed on it when the pod starts")
-	fs.IntVar(&o.Disk, "disk", 80, "container disk, GB: stet and the season's libraries, and the 60 GB a machine that runs curators keeps free")
+	fs.IntVar(&o.Disk, "disk", 100, "container disk, GB: stet and the season's libraries, a round's corpus and assets, and the 60 GB a machine that runs curators keeps free")
 	fs.StringVar(&o.MinCUDA, "min-cuda", "13.0", "the oldest CUDA the host's driver may have: the season's PyTorch is built for CUDA 13")
 	fs.IntVar(&o.MinRAM, "min-ram", 16, "host memory a GPU, GB: the season's floor for a machine that runs curators (a curator is given 12)")
 	fs.IntVar(&o.MinCPU, "min-cpus", 6, "host vCPUs a GPU: the season's floor for a machine that runs curators")
