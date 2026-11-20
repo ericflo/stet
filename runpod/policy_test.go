@@ -203,6 +203,7 @@ func TestMachinesThatRunCuratorsAreRentedForRunsAndGrades(t *testing.T) {
 		{round(0, 0, 2, 0), 1},    // two scripts left
 		{&Work{Waiting: true}, 1}, // an entry waiting, and nobody who runs curators around to have its round drawn
 		{&Work{Waiting: true, Runners: 1}, 0},
+		{&Work{Waiting: true, Paused: 1}, 0}, // the rounds paused: nothing would be drawn for it
 	} {
 		if got := p.target(c.w); got != c.want {
 			t.Errorf("%+v waiting %v runners %d: %d machines, want %d", c.w.Rounds, c.w.Waiting, c.w.Runners, got, c.want)

@@ -22,7 +22,8 @@ import (
 // run, and enough to clear the scripts already waiting.
 //
 // An entry waiting for a round has it drawn early only once somebody who runs curators has
-// asked for work. When nobody has, one machine is rented to ask.
+// asked for work. When nobody has, one machine is rented to ask, unless the organisers have
+// paused the rounds: none is drawn then, and it would only wait to stop.
 //
 // A machine with nothing official to do trains the organisers' students (a few minutes
 // each), so those waiting want machines too, after the official work and under the same
@@ -80,7 +81,7 @@ func (p Policy) official(w *Work) int {
 		if runs > 0 {
 			n += max(runsEach, (runs+runsPerMachine-1)/runsPerMachine)
 		}
-		if len(w.Rounds) == 0 && w.Waiting && w.Runners == 0 {
+		if len(w.Rounds) == 0 && w.Waiting && w.Runners == 0 && w.Paused == 0 {
 			n = 1 // to ask for work, so that the waiting entry's round is drawn
 		}
 		return n
