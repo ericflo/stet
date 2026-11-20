@@ -184,8 +184,8 @@ What is left is in [Rules](RULES.md#what-is-trusted-and-what-is-not).
 1. **The draw and the runs.** Curators run as soon as the round is drawn. The exam does not
    exist yet.
 2. **The examiner.** An organisers' machine (`stet examine --follow`) waits for the harvest
-   window, two hours from the draw, to close, and then three more hours, until every source
-   has published all of it. Then it:
+   window, two hours from the draw, to close, and then one more hour, for the sources that
+   publish late (Common Crawl's news files, edits on Hacker News). Then it:
    - harvests the window's fresh text;
    - builds the round's corpus, measures its languages, and drops the fresh items the
      corpus already holds;
@@ -206,8 +206,8 @@ What is left is in [Rules](RULES.md#what-is-trusted-and-what-is-not).
    hash. Other sources' text is not ours to republish; anyone can check it at the source.
    `stet run --round <id>` replays the round on what was published.
 
-The draw, the runs, the exam five hours on, then about an hour of grades: six to seven hours
-a round. Rounds never overlap. Practice rounds use generated items only, since no fresh text
+The draw, the runs, the exam three hours on, then half an hour or so of grades: three and a
+half to four hours a round. Rounds never overlap. Practice rounds use generated items only, since no fresh text
 was written for them.
 
 ## How it is built

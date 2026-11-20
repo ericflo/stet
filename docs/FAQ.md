@@ -44,8 +44,8 @@ score.
 
 Official runs cost volunteers GPU time, so those are rationed: three entries in play at
 once and six submissions a day. A round is drawn as soon as an entry is waiting and the
-last round has settled, and takes six to seven hours, since its exam is made five hours
-after the draw. So an entry usually has its first score the same day.
+last round has settled, and takes three and a half to four hours, since its exam is made
+three hours after the draw. So an entry usually has its first score the same day.
 
 ## Can my coding agent do this?
 

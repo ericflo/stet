@@ -92,7 +92,7 @@ document numbers and byte ranges. Your machine downloads the round's raw text fr
 Crawl, builds the corpus, fetches the round's exam, trains the fixed student on what the
 script says, has it sit every item, and reports one score per item.
 
-Grade jobs start when the round's exam is posted, about five hours after the draw. At the
+Grade jobs start when the round's exam is posted, a little over three hours after the draw. At the
 official scale a grade is one training run, about 18 minutes on an RTX 3090 or 4070 Ti.
 The first job of a round also downloads the round's raw text (about a gigabyte; 2.5 GB
 once built) and trains on the unedited corpus once, so it takes about twice as long.

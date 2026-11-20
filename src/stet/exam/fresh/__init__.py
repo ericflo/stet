@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -43,6 +44,7 @@ class Doc:
 
 GAP = 0.15  # seconds between requests to one host: the sources are shared, and say so when pressed
 _last: dict[str, float] = {}
+_pace = threading.Lock()  # the harvest reads its sources at once, and some share a host
 
 
 def get_json(url: str, params: dict, tries: int = 6, pause: float = 2.0):
@@ -51,10 +53,11 @@ def get_json(url: str, params: dict, tries: int = 6, pause: float = 2.0):
     host = urllib.parse.urlsplit(url).netloc
     q = urllib.parse.urlencode(params)
     for i in range(tries):
-        wait = _last.get(host, 0) + GAP - time.time()
-        if wait > 0:
+        with _pace:  # this request's turn at the host, a gap after the last one's
+            at = max(time.time(), _last.get(host, 0) + GAP)
+            _last[host] = at
+        if (wait := at - time.time()) > 0:
             time.sleep(wait)
-        _last[host] = time.time()
         try:
             req = urllib.request.Request(f"{url}?{q}", headers={**UA, "Accept-Encoding": "identity"})
             with urllib.request.urlopen(req, timeout=60) as r:

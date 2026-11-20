@@ -127,3 +127,39 @@ def test_items_the_corpus_already_holds_are_found(tmp_path):
     answer = Item(kind="answer", corner="fresh/y/en/-/answer", fmt="dialogue", lang="en", source="t",
                   ctx=quoted + " Why?", cont=" Nothing in the corpus says this, not even close to it, as far as anyone knows.")
     assert seen([copied, new, answer], corpus, load_season("s1")) == {0}  # an answer is checked on its answer, not its question
+
+
+def test_the_harvest_reads_its_sources_at_once(monkeypatch, tmp_path):
+    import threading
+    import time
+
+    from stet.exam.fresh import harvest, wikipedia
+
+    names = ["wikipedia", "wikipedia-added", "wikipedia-talk", *harvest.OTHERS]
+    started, gate = [], threading.Barrier(len(names), timeout=5)  # each waits until every source has begun
+
+    def doc(source, i):
+        return Doc(source=source, id=f"{source}:{i}", url=f"https://example.org/{source}/{i}", lang="en", license="",
+                   published=1_800_000_100, title="", text=f"Fresh text from {source}, number {i}.")
+
+    def source(name, n, delay):
+        def read(*a, **k):
+            started.append(name)
+            gate.wait()
+            time.sleep(delay)
+            if name == "lemmy":
+                raise TimeoutError("an instance did not answer")
+            return [doc(name, i) for i in range(n)]
+        return read
+
+    monkeypatch.setattr(harvest, "SHARES", {"en": 50.0})
+    monkeypatch.setattr(wikipedia, "harvest", source("wikipedia", 2, 0.3))
+    monkeypatch.setattr(wikipedia, "additions", lambda lang, *a, talk=False, **k: source("wikipedia-talk" if talk else "wikipedia-added", 1, 0.2)())
+    monkeypatch.setattr(harvest, "OTHERS", {n: source(n, 1, 0.0) for n in harvest.OTHERS})
+    lines = []
+    meta, _ = harvest.harvest_window(b"seed", 1_800_000_000, 1_800_007_200, tmp_path / "fresh.jsonl", log=lines.append)
+    _, docs = read_snapshot(tmp_path / "fresh.jsonl")
+    assert sorted(started) == sorted(names)  # all at once, or the barrier would have timed out
+    got = collections.Counter(d.source for d in docs)  # the snapshot keeps them in its own order
+    assert got == collections.Counter({"wikipedia": 2, "wikipedia-added": 1, "wikipedia-talk": 1, **{n: 1 for n in harvest.OTHERS if n != "lemmy"}})
+    assert "lemmy" not in meta["sources"] and any("lemmy: TimeoutError" in m for m in lines)

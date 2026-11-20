@@ -85,7 +85,7 @@ verifier who runs curators is around to run it.
 4. **Edit.** Two volunteers each run every curator, in a sandbox, with a time limit. Each
    run writes an edit script.
 5. **Exam.** The round's exam is made after the draw. Fresh text is gathered from the two
-   hours after it, and three hours later, once its sources have published all of it, the
+   hours after it, and an hour later, once the sources that publish late have caught up, the
    organisers' examiner makes the exam and posts it with its hash (see [the exam](#the-exam)).
    The curators have finished running long before.
 6. **Grade.** Other volunteers train the student on what each script says and have it sit
@@ -103,8 +103,8 @@ the last two weeks go first.
 
 Rounds never overlap. If one is still being graded when the next is due, the next is
 drawn at the first ten-minute mark that is at least six minutes after it settles. Since the
-exam is made five hours after the draw, a round takes six to seven hours from draw to
-settlement.
+exam is made three hours after the draw, a round takes three and a half to four hours from
+draw to settlement.
 
 ## The corpus
 

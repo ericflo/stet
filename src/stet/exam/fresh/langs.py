@@ -7,6 +7,7 @@ sha256.
 
 from __future__ import annotations
 
+import threading
 from collections import defaultdict
 
 from ...data import cache_dir, fetch
@@ -17,17 +18,19 @@ MODEL_SHA256 = "8f3472cfe8738a7b6099e8e999c3cbfae0dcd15696aac7d7738a8039db603e83
 SAMPLE = 6000
 READ = 1000  # characters of each sampled document
 _model = None
+_loading = threading.Lock()  # the harvest's sources, read at once, can ask for it together
 
 
 def model():
     global _model
-    if _model is None:
-        import fasttext
+    with _loading:
+        if _model is None:
+            import fasttext
 
-        fasttext.FastText.eprint = lambda *a, **k: None  # it warns about a deprecated API on every load
-        path = fetch([MODEL_URL], MODEL_SHA256, cache_dir() / "models" / "lid.176.ftz", "language identifier", quiet=True, max_bytes=4 << 20)
-        _model = fasttext.load_model(str(path))
-    return _model
+            fasttext.FastText.eprint = lambda *a, **k: None  # it warns about a deprecated API on every load
+            path = fetch([MODEL_URL], MODEL_SHA256, cache_dir() / "models" / "lid.176.ftz", "language identifier", quiet=True, max_bytes=4 << 20)
+            _model = fasttext.load_model(str(path))
+        return _model
 
 
 def shares(corpus, seed: bytes, sample: int = SAMPLE) -> dict[str, float]:

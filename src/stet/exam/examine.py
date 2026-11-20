@@ -18,6 +18,7 @@ from __future__ import annotations
 import base64
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from .farm import pack_items
@@ -82,13 +83,15 @@ def build(rnd, scale, draw_at: int, work: Path, log=print) -> dict:
     window = int(cfg["fresh"]["window_seconds"])
     work.mkdir(parents=True, exist_ok=True)
     snapshot = work / "fresh.jsonl"
-    if not snapshot.exists():
-        harvest_window(rnd.seed, draw_at, draw_at + window, snapshot, log=log)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        corpus = pool.submit(data.corpus, rnd, scale)  # fetched while the sources are read
+        if not snapshot.exists():
+            harvest_window(rnd.seed, draw_at, draw_at + window, snapshot, log=log)
+        corpus = corpus.result()
     import hashlib
 
     snap_sha = hashlib.sha256(snapshot.read_bytes()).hexdigest()
     _, docs = read_snapshot(snapshot)
-    corpus = data.corpus(rnd, scale)
     mix = shares(corpus, rnd.seed)  # every language in proportion to the round's own corpus
     log(f"  the corpus's languages: {', '.join(f'{k} {v:.1f}%' for k, v in list(mix.items())[:8])}, and {max(0, len(mix) - 8)} more")
     fresh = select(docs, rnd.seed, int(cfg["fresh"]["items"]), per_corner=int(cfg["fresh"]["per_corner"]), shares=mix)
