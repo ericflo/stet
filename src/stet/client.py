@@ -830,11 +830,15 @@ def verifiers_running() -> int:
 def _grade_job(job, season, scale, device, key, out, work: Path) -> tuple[dict, dict]:
     import zstandard
 
-    from .pipeline import baseline, grade_round
+    from . import data
+    from .grade import sit_exam
+    from .pipeline import _cached, baseline, baseline_path, grade_round, sit_baseline, train_baseline, train_round
+    from .train import pick_device
 
     rnd = _job_round(season, job, out)
-    fetch_exam(rnd, key)
-    base = baseline(rnd, scale, device, progress=out.progress("baseline"), log=lambda m: out.line("", out.dim("baseline " + m)))
+    if rnd.exam_digest:
+        fetch_exam(rnd, key)
+        base = baseline(rnd, scale, device, progress=out.progress("baseline"), log=lambda m: out.line("", out.dim("baseline " + m)))
     want = job["script"]["sha256"]
     limit = int(season.raw["script"]["max_bytes"])
     # Signed: until its round settles, a script is given only to whoever was handed it to grade.
@@ -848,8 +852,50 @@ def _grade_job(job, season, scale, device, key, out, work: Path) -> tuple[dict, 
     work.mkdir(parents=True, exist_ok=True)
     path = work / "script.jsonl"
     path.write_bytes(raw)
-    result = grade_round(rnd, scale, path, device=device, progress=out.progress("training"), log=lambda m: out.line("", out.dim(m)))
-    return result, base
+    if rnd.exam_digest:
+        result = grade_round(rnd, scale, path, device=device, progress=out.progress("training"), log=lambda m: out.line("", out.dim(m)))
+        return result, base
+    # Handed before the exam is made: both students are trained now, while it is, and sit
+    # it the moment it is posted. The round settles minutes after its exam.
+    device = pick_device(device) if not hasattr(device, "type") else device
+    out.line("", out.dim("the round's exam is not posted yet: training now, and sitting it once it is"))
+    base_t = train_baseline(rnd, scale, device, progress=out.progress("baseline"), log=lambda m: out.line("", out.dim("baseline " + m)))
+    trained = train_round(rnd, scale, path, device=device, progress=out.progress("training"), log=lambda m: out.line("", out.dim(m)))
+    rnd = wait_for_exam(rnd, out)
+    fetch_exam(rnd, key)
+    base = _cached(baseline_path(rnd, scale, device)) or sit_baseline(base_t, rnd, scale)
+    return sit_exam(trained, rnd, scale, data.round_exam(rnd, scale)), base
+
+
+EXAM_POLL = 20  # seconds between looks at whether a round's exam is posted
+
+
+def wait_for_exam(rnd, out):
+    """The round as it is once its exam is posted: the organisers' examiner makes it after
+    the draw, from text published since. Waits as long as that takes."""
+    import dataclasses
+
+    from .spec import SHA256_RE
+
+    said = 0.0
+    while True:
+        try:
+            d = request("GET", f"/api/v1/rounds/{rnd.id}")
+        except ApiError as e:
+            if e.status not in (0, 408, 429) and e.status < 500:
+                raise
+            d = None
+        r = (d or {}).get("round") if isinstance(d, dict) else None
+        if isinstance(r, dict):
+            digest = r.get("exam_digest")
+            if isinstance(digest, str) and SHA256_RE.fullmatch(digest):
+                return dataclasses.replace(rnd, exam_digest=digest)
+            if r.get("status") not in (None, "open"):
+                raise ApiError(409, f"round {rnd.id} ended before its exam was posted")
+        if time.time() - said >= 600:
+            said = time.time()
+            out.line("", out.dim(f"trained; waiting for round {rnd.id}'s exam"))
+        time.sleep(EXAM_POLL)
 
 
 def fetch_exam(rnd, key) -> Path:
@@ -1214,7 +1260,9 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
     out.line("", out.bold(f"stet verify · {key.handle} · {hw.get('gpu', device.type)}"))
     out.line("", out.dim("Grading edit scripts with the fixed trainer. No one else's code runs on this machine." if not args.edits
                          else "Running entrants' curators in the sandbox, and grading."))  # fmt: skip
-    hello = {"harness": __version__, "season": season.id, "season_digest": season.digest, "hardware": hw, "edits": bool(args.edits), "sandbox": sandbox}
+    # early: handed a grade before its round's exam is posted, this verifier trains then, and
+    # sits the exam once it is (_grade_job).
+    hello = {"harness": __version__, "season": season.id, "season_digest": season.digest, "hardware": hw, "edits": bool(args.edits), "sandbox": sandbox, "early": True}
     # The organisers' machines, rented ones too, train students for the organisers when nothing
     # official is waiting (exam/farm.py: finals, measurements). Never before a job.
     farm_ok = bool(((me or {}).get("account") or {}).get("anchor"))

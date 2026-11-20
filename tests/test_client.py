@@ -198,7 +198,7 @@ def loop(monkeypatch):
     key = client.create_key()
     key.handle = "tester"
     key.save()
-    seen = types.SimpleNamespace(claims=[], released=[], reports=[], payloads=[], graded=[], slept=[], forgot=[], interrupt_at=None)
+    seen = types.SimpleNamespace(claims=[], hellos=[], released=[], reports=[], payloads=[], graded=[], slept=[], forgot=[], interrupt_at=None)
 
     def interrupt():
         raise KeyboardInterrupt
@@ -213,6 +213,7 @@ def loop(monkeypatch):
         if path == "/api/v1/me":
             return seen.me
         if path == "/api/v1/jobs/claim":
+            seen.hellos.append(body)
             if not seen.claims:
                 raise Stop
             return {"job": seen.claims.pop(0), **({"runner": seen.runner.pop(0)} if getattr(seen, "runner", None) else {})}
@@ -427,6 +428,58 @@ def test_a_valid_grade_is_reported_and_printed_and_the_verifier_carries_on(loop,
     client.cmd_verify(args)
     err = capsys.readouterr().err
     assert loop.reports == ["/api/v1/jobs/7/result"] * 2 and "exam mean -5.1000" in err and "+0.2000" in err
+
+
+def test_a_grade_handed_before_the_exam_trains_first_and_sits_it_once_posted(monkeypatch, tmp_path):
+    # The exam is made two hours after the draw. A grader handed its script before then
+    # trains both students while it waits, and only sits the exam once it is posted.
+    import hashlib
+    import types
+
+    from stet import cli, data, grade, pipeline
+    from stet.spec import load_season, practice_round
+
+    season = load_season("s1")
+    rnd = practice_round(season, 1)
+    script = b'{"doc": 1}\n'
+    sha = hashlib.sha256(script).hexdigest()
+    digest = "d1" * 32
+    seen = []
+    polls = iter([{"status": "open"}, {"status": "open"}, {"status": "open", "exam_digest": digest}])
+
+    def request(method, path, **kw):
+        if path.startswith("/api/v1/scripts/"):
+            return zstandard.ZstdCompressor().compress(script)
+        assert path == f"/api/v1/rounds/{rnd.id}"
+        seen.append("poll")
+        return {"round": {"id": rnd.id, **next(polls)}}
+
+    monkeypatch.setattr(client, "request", request)
+    monkeypatch.setattr(client, "EXAM_POLL", 0)
+    monkeypatch.setattr(client, "_job_round", lambda season, job, out: rnd)
+    monkeypatch.setattr(client, "fetch_exam", lambda r, key: seen.append(("fetch", r.exam_digest)))
+    monkeypatch.setattr(pipeline, "train_baseline", lambda r, *a, **k: seen.append("train baseline") or "B")
+    monkeypatch.setattr(pipeline, "train_round", lambda r, s, path, **k: seen.append(("train", path.read_bytes())) or "S")
+    monkeypatch.setattr(pipeline, "_cached", lambda path: None)
+    monkeypatch.setattr(pipeline, "baseline_path", lambda r, s, d: tmp_path / "base.json")
+    monkeypatch.setattr(pipeline, "sit_baseline", lambda t, r, s: seen.append(("sit", t, r.exam_digest)) or {"exam": {"mean": -5.3}})
+    monkeypatch.setattr(grade, "sit_exam", lambda t, r, s, exam: seen.append(("sit", t, r.exam_digest)) or {"valid": True})
+    monkeypatch.setattr(data, "round_exam", lambda r, s: [])
+    device = types.SimpleNamespace(type="cuda")
+    result, base = client._grade_job(a_job(script={"sha256": sha}), season, season.scale("nano"), device, None, cli.Out(quiet=True), tmp_path / "work")
+    assert seen == ["train baseline", ("train", script), "poll", "poll", "poll", ("fetch", digest), ("sit", "B", digest), ("sit", "S", digest)]
+    assert result == {"valid": True} and base == {"exam": {"mean": -5.3}}
+
+
+def test_a_grader_says_it_trains_before_the_exam(loop):
+    loop.claims = [a_job()]
+    loop.grade = ({"valid": True, "exam": {"items": 2, "mean": -5.1, "item_scores": [-5.0, -5.2]}},
+                  {"exam": {"items": 2, "mean": -5.3, "item_scores": [-5.2, -5.4]}})
+    loop.report = {"status": "recorded"}
+    args = Args()
+    args.max_jobs = 1
+    client.cmd_verify(args)
+    assert loop.hellos and all(h.get("early") is True for h in loop.hellos)
 
 
 # --- edit jobs -------------------------------------------------------------------------------

@@ -22,7 +22,7 @@ func TestTheSiteReadsInBitsPerByte(t *testing.T) {
 		t.Fatal("the anchor should have run the entry")
 	}
 	// While the round waits for its exam, its page says so.
-	if code, page := w.page("/rounds/" + rid); code != 200 || !strings.Contains(page, "Grading starts when its exam is made") {
+	if code, page := w.page("/rounds/" + rid); code != 200 || !strings.Contains(page, "sit its exam once it is made") {
 		t.Fatalf("the open round does not say it waits for its exam: HTTP %d", code)
 	}
 	w.established("bob", "carol")

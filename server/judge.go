@@ -207,6 +207,10 @@ type Hello struct {
 	Hardware     json.RawMessage `json:"hardware"`
 	Edits        bool            `json:"edits"` // willing and able to run edit jobs in the sandbox
 	Sandbox      string          `json:"sandbox"`
+	// Early says that it trains before the exam: handed a grade before the round's exam is
+	// posted, it trains the student and the round's unedited one, waits for the exam, and
+	// sits it. A verifier that does not say so is handed grades once the exam is there.
+	Early bool `json:"early"`
 }
 
 // hardwareFacts is the part of a hardware description the server reads. All of it is
@@ -486,6 +490,7 @@ type asker struct {
 	est     bool
 	canEdit bool   // it may be handed editors to run
 	gpuMake string // cuda | rocm
+	early   bool   // it trains before the exam, and may be handed a grade before it is posted
 }
 
 // active lists the accounts that are around: those that asked for work a short while ago,
@@ -1013,7 +1018,7 @@ func (j *judge) offers(st *entryState, q *asker, closing bool) []offer {
 		out = append(out, offer{st: st, kind: "edit", score: score, required: true})
 	}
 	for _, sc := range st.Scripts {
-		if !j.mayGrade(st, sc, q.acct) || j.running(st, q.acct) || !examPosted(st.Round) {
+		if !j.mayGrade(st, sc, q.acct) || j.running(st, q.acct) || (!examPosted(st.Round) && !q.early) {
 			continue
 		}
 		v := j.weigh(sc)
@@ -1082,9 +1087,34 @@ func (j *judge) offers(st *entryState, q *asker, closing bool) []offer {
 
 // wanting reports whether a script's score is waiting for another grade that counts: it
 // has none, or only its own writer's, or two that disagree, or one when two runs wrote it.
-func (j *judge) wanting(sc *scriptState) bool {
-	v := j.weigh(sc)
-	return !v.known || v.self || v.tie || (len(sc.Writers) > 1 && len(v.counted) < 2)
+func (j *judge) wanting(sc *scriptState) bool { return j.short(sc) > 0 }
+
+// short is how many more grades that count a script's score is waiting for.
+func (j *judge) short(sc *scriptState) int {
+	switch v := j.weigh(sc); {
+	case len(sc.Writers) > 1 && len(v.counted) < 2:
+		return 2 - len(v.counted)
+	case !v.known || v.self || v.tie:
+		return 1
+	}
+	return 0
+}
+
+// sitting reports whether the grades a script's score waits for are all in the hands of
+// established accounts that took them before the exam was posted: trained, or nearly, and
+// waiting only to sit it.
+func (j *judge) sitting(st *entryState, sc *scriptState) bool {
+	early := 0
+	for _, c := range sc.Live {
+		if !j.est[c.AccountID] || sc.wroteAlone(j.s.Accounts[c.AccountID]) {
+			continue
+		}
+		if c.ClaimedAt >= st.Round.ExamAt {
+			return false // still to train: further grades alongside it hold nothing back
+		}
+		early++
+	}
+	return early >= j.short(sc)
 }
 
 // settleable reports whether an entry could be given a score as it stands: it has a run,
@@ -1115,8 +1145,10 @@ func (j *judge) settleable(st *entryState) bool {
 
 // closing reports whether a round is past handing out grades no score waits for: it could
 // settle now, or every entry has all the grades it waits for, whatever further ones are
-// still under way. A grade handed out after that could only hold the round back, and
-// while it did, the next machine to come free would be handed another to wait for.
+// still under way, or all that is left of them is sitting the exam. A grade handed out
+// after that could only hold the round back: one handed out now trains for many minutes,
+// and while it did, the next machine to come free would be handed another to wait for.
+// Before the exam, a grade handed out has until it is posted to train.
 func (j *judge) closing(states []*entryState) bool {
 	if j.ready(states) {
 		return true
@@ -1126,7 +1158,7 @@ func (j *judge) closing(states []*entryState) bool {
 			return false
 		}
 		for _, sc := range st.Scripts {
-			if j.wanting(sc) {
+			if j.wanting(sc) && !j.sitting(st, sc) {
 				return false
 			}
 		}
@@ -1197,7 +1229,7 @@ func (a *App) jobFor(s *State, c *Claim) *Job {
 
 func (a *App) checkHarness(harness, season, digest string) error {
 	if season != a.season.ID || digest != a.season.Digest || versionLess(harness, a.season.Harness) {
-		return fail(426, "this verifier is out of date (season %s, harness %s is current). Upgrade: curl -fsSL %s/install.sh | sh", a.season.ID, a.season.Harness, a.cfg.BaseURL)
+		return fail(426, "this verifier is out of date (season %s needs harness %s or later). Upgrade: curl -fsSL %s/install.sh | sh", a.season.ID, a.season.Harness, a.cfg.BaseURL)
 	}
 	return nil
 }
@@ -1283,7 +1315,7 @@ func (a *App) claim(ctx context.Context, acctID int64, h *Hello) (*Handed, error
 		var pick *offer
 		best, n := math.MaxInt, 0
 		j := a.newJudge(s)
-		q := &asker{acct: acct, est: j.est[acctID], canEdit: canEdit, gpuMake: hw.gpuMake()}
+		q := &asker{acct: acct, est: j.est[acctID], canEdit: canEdit, gpuMake: hw.gpuMake(), early: h.Early}
 		for _, rd := range openRounds(s) {
 			states := j.states(rd)
 			closing := j.closing(states)

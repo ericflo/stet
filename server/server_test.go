@@ -3468,6 +3468,66 @@ func TestARoundHandsOutNoFurtherGradesOnceItsScoresHaveThem(t *testing.T) {
 	}
 }
 
+// A verifier that trains before the exam is handed a grade as soon as there is a script to
+// grade: it trains while the exam is made, and sits it once it is posted. Its job does not
+// run out while it waits, and once every grade a score waits for is in the hands of such
+// machines, nothing more is handed out: the round settles minutes after its exam.
+func TestAGraderThatTrainsBeforeTheExamIsHandedItsGradeEarly(t *testing.T) {
+	pub, priv := newKey()
+	w := newWorld(t, pub)
+	anchor, alice, bob, carol, dave := w.join("anchor-one", priv), w.join("alice", nil), w.join("bob", nil), w.join("carol", nil), w.join("dave", nil)
+	w.submit(alice, "tidy", "print('v1')")
+	w.established("bob", "carol", "dave")
+	idx := w.drawWithoutExam()
+	w.run(anchor, "{\"doc\": 1}\n")
+	early := func(a *actor) *claimed {
+		h := w.hello(false)
+		h["early"] = true
+		return w.claimWith(a, h)
+	}
+	work := func() WorkRound {
+		var out Work
+		if code := anchor.do("GET", "/api/v1/admin/work", nil, &out); code != 200 || len(out.Rounds) != 1 {
+			t.Fatalf("the work: HTTP %d %+v", code, out)
+		}
+		return out.Rounds[0]
+	}
+	if wr := work(); wr.GradesEarly != 1 || wr.GradesWanted != 0 || wr.ExamAt != 0 {
+		t.Fatalf("before the exam, one grade for a machine that trains early: %+v", wr)
+	}
+	w.idle(carol, false, "a verifier that does not train before the exam waits for it")
+	cb := early(bob)
+	if cb.Job == nil || cb.Job.Kind != "grade" || cb.Job.Round["exam_digest"] != nil {
+		t.Fatalf("a grade before the exam: %+v", cb.Job)
+	}
+	if wr := work(); wr.GradesEarly != 0 || wr.GradesUnderWay != 1 {
+		t.Fatalf("the early grade is under way: %+v", wr)
+	}
+	if code := bob.do("GET", fmt.Sprintf("/api/v1/rounds/%s/exam", roundID(w.app.season.ID, idx)), nil, nil); code != 404 {
+		t.Fatalf("an exam not yet posted: HTTP %d", code)
+	}
+	// However long the exam takes, the job waits for it.
+	w.pass(w.cfg.Lease + time.Hour)
+	if c := early(bob); c.Job == nil || c.Job.ID != cb.Job.ID {
+		t.Fatalf("the job ran out while it waited for the exam: %+v", c.Job)
+	}
+	w.exam(idx)
+	w.pass(w.cfg.Lease - time.Minute)
+	if code := bob.do("GET", fmt.Sprintf("/api/v1/rounds/%s/exam", roundID(w.app.season.ID, idx)), nil, nil); code != 200 {
+		t.Fatalf("the grader could not fetch the exam once it was posted: HTTP %d", code)
+	}
+	// All that is left is sitting it: a machine that comes free now is handed no grade it
+	// would have to train for, however it trains.
+	w.idle(dave, false, "the grade the score waits for was trained before the exam")
+	if c := early(carol); c.Job != nil {
+		t.Fatalf("carol was handed a grade after the exam: %+v", c.Job)
+	}
+	if code, status := w.report(bob, cb, 5.5); code != 200 || status != "settled" {
+		t.Fatalf("the grade trained before the exam: HTTP %d %s", code, status)
+	}
+	w.check()
+}
+
 func TestTwoEstablishedGradesThatDisagreeGetAThird(t *testing.T) {
 	start := func(third bool) (*world, int, *actor, *actor, *actor, *claimed, *claimed) {
 		pub, priv := newKey()

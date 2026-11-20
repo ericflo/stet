@@ -11,7 +11,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from stet.spec import CURRENT_SEASON, HARNESS_VERSION, load_season, official_round, prf_u64
+from stet.spec import CURRENT_SEASON, GRADES_SINCE, load_season, official_round, prf_u64
 
 
 def export(season_id: str = CURRENT_SEASON) -> dict:
@@ -27,7 +27,7 @@ def export(season_id: str = CURRENT_SEASON) -> dict:
         "id": season.id,
         "title": season.title,
         "digest": season.digest,
-        "harness": HARNESS_VERSION,
+        "harness": GRADES_SINCE,  # the oldest stet the server takes work from
         "rules_version": raw["rules_version"],
         "official_scale": season.official_scale,
         "scales": raw["scales"],

@@ -122,6 +122,13 @@ func (a *App) tick(ctx context.Context) {
 		t := now()
 		for _, c := range s.Claims {
 			if c.Status == "claimed" && c.ExpiresAt <= t {
+				if rd := s.Rounds[c.RoundIdx]; c.Kind == "grade" && rd != nil && rd.Status == "open" && !examPosted(rd) {
+					// A grade taken before the exam cannot be finished without it: it waits as
+					// long as the exam does.
+					c.ExpiresAt = t + int64(a.cfg.Lease.Seconds())
+					tx.saveClaim(c)
+					continue
+				}
 				c.Status = "lapsed" // out of time, with no report and no release
 				tx.saveClaim(c)
 				if rd := s.Rounds[c.RoundIdx]; rd != nil && rd.Status == "open" && a.established(s.Accounts[c.AccountID]) {

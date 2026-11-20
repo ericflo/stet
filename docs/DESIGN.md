@@ -192,9 +192,11 @@ What is left is in [Rules](RULES.md#what-is-trusted-and-what-is-not).
    - generates the round's questions from its seed;
    - posts the exam: the items, what each counts toward (pillar, part, language, format and
      kind of task), the items' digest and the languages' shares.
-3. **Grading starts.** A grader fetches the items, checks them against the round's digest,
-   trains the student on a script, and reports one score per item. It reports its own
-   baseline the same way: the unedited corpus, trained once per grader per round.
+3. **Grading.** A grader is handed its script as soon as a curator has written it, and
+   trains the student on it, and its own baseline (the unedited corpus, trained once per
+   grader per round), while the exam is made. Once the exam is posted it fetches the items,
+   checks them against the round's digest, has both students sit them, and reports one
+   score per item.
 4. **The server adds it up.** The round's baseline is the item-by-item mean of the
    established graders' baselines. A grade's score is the exam's aggregate (seven pillars,
    each counting the same) of its item scores less that baseline. The server computes it

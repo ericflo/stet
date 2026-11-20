@@ -127,6 +127,13 @@ func (a *App) postExam(ctx context.Context, idx int, p *ExamPost) (bool, error) 
 		}
 		rd.ExamSHA, rd.ExamAt, rd.ExamTable, rd.Shares, rd.Snapshot, rd.Fresh = p.Digest, now(), p.Table, p.Shares, p.Snapshot, p.Fresh
 		tx.event("exam", map[string]any{"round": roundID(a.season.ID, idx), "items": len(p.Table), "fresh": p.Fresh})
+		// A grade taken before the exam has waited for it: its time to sit it starts now.
+		for _, c := range tx.s.Claims {
+			if c.RoundIdx == idx && c.Kind == "grade" && c.Status == "claimed" && c.ExpiresAt < rd.ExamAt+int64(a.cfg.Lease.Seconds()) {
+				c.ExpiresAt = rd.ExamAt + int64(a.cfg.Lease.Seconds())
+				tx.saveClaim(c)
+			}
+		}
 		a.moved(tx, rd) // the round's clock starts again: its grades start now
 		return nil
 	})

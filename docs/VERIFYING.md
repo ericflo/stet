@@ -92,10 +92,13 @@ document numbers and byte ranges. Your machine downloads the round's raw text fr
 Crawl, builds the corpus, fetches the round's exam, trains the fixed student on what the
 script says, has it sit every item, and reports one score per item.
 
-Grade jobs start when the round's exam is posted, a little over two hours after the draw. At the
-official scale a grade is one training run, about 18 minutes on an RTX 3090 or 4070 Ti.
-The first job of a round also downloads the round's raw text (about a gigabyte; 2.5 GB
-once built) and trains on the unedited corpus once, so it takes about twice as long.
+Grade jobs start as soon as a curator has written a script, well before the round's exam
+is posted (a little over two hours after the draw). The verifier trains then, and sits the
+exam the moment it is posted: the round settles minutes after its exam. At the official
+scale a grade is one training run, about 18 minutes on an RTX 3090 or 4070 Ti. The first
+job of a round also downloads the round's raw text (about a gigabyte; 2.5 GB once built)
+and trains on the unedited corpus once, so it takes about twice as long. A verifier older
+than 0.4.3 is handed grades only once the exam is posted.
 
 Until the round settles, its exam is served only to machines holding a grade job in it,
 signed by their key. It sits in your cache with the round; do not pass it on.

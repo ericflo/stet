@@ -20,14 +20,19 @@ def graded(monkeypatch):
     seen.scale, seen.device = types.SimpleNamespace(name="micro"), types.SimpleNamespace(type="cpu")
     data.round_dir(seen.rnd, seen.scale).mkdir(parents=True)
 
-    def grade(rnd, scale, corpus, exam, script, device=None, progress=None, log=None):
+    def train_script(rnd, scale, corpus, script, device=None, progress=None, log=None):
         assert Path(script).read_text() == "0\n1\n2\n"  # every document, in corpus order
         seen.scripts.append(Path(script).name)
+        return types.SimpleNamespace(device=device)
+
+    def sit_exam(trained, rnd, scale, exam):
         return {"valid": seen.valid, "invalid_reason": None if seen.valid else "ink over budget",
                 "exam": {"items": 2, "mean": -5.3, "item_scores": [-5.2, -5.4]}}
 
-    monkeypatch.setattr(data, "materialize", lambda rnd, scale: ([b"a", b"b", b"c"], []))
-    monkeypatch.setattr(pipeline, "grade", grade)
+    monkeypatch.setattr(data, "corpus", lambda rnd, scale: [b"a", b"b", b"c"])
+    monkeypatch.setattr(data, "round_exam", lambda rnd, scale: [])
+    monkeypatch.setattr(pipeline, "train_script", train_script)
+    monkeypatch.setattr(pipeline, "sit_exam", sit_exam)
     seen.run = lambda: pipeline.baseline(seen.rnd, seen.scale, seen.device)
     seen.files = lambda: sorted(p.name for p in data.round_dir(seen.rnd, seen.scale).iterdir())
     seen.path = data.round_dir(seen.rnd, seen.scale) / f"baseline-{pipeline.HARNESS_VERSION}-cpu-{'ab' * 6}.json"

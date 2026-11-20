@@ -64,8 +64,9 @@ until the first rounds measure the spread between them.
 | The harvest window closes | 1 h |
 | The sources that publish late have caught up | 2 h |
 | The examiner harvests every source at once (about ten minutes), checks the corpus and posts the exam | About 2 h 15 m |
-| Grades: one standard training each, about 18 minutes on a rented RTX 3090 or 4070 Ti, under $0.10 | Half an hour or so, a machine for each |
-| The round settles | About 3 h |
+| Grades: one standard training each, about 18 minutes on a rented RTX 3090 or 4070 Ti, under $0.10, trained while the exam is made | From when the curators have run |
+| Each grader sits the exam on its trained students | Minutes after it is posted |
+| The round settles | About 2 h 20 m |
 
 A large student, for the finals, trains in about an hour on an RTX 4090.
 

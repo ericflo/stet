@@ -30,6 +30,12 @@ type WorkRound struct {
 	// to work at once.
 	GradesWanted   int `json:"grades_wanted"`
 	GradesUnderWay int `json:"grades_under_way"`
+	// GradesEarly counts, before the round's exam is posted, the scripts a score will wait
+	// on that a grader of the organisers' which trains before the exam (stet verify, from
+	// 0.4.3) could be handed now: it trains, waits for the exam, and sits it as soon as it
+	// is posted. ExamAt is when the exam was posted (0: not yet).
+	GradesEarly int   `json:"grades_early"`
+	ExamAt      int64 `json:"exam_at,omitempty"`
 }
 
 // WorkMachine is one of the organisers' accounts, as the judge sees it now.
@@ -71,11 +77,12 @@ func (a *App) work(s *State) Work {
 	j := a.newJudge(s)
 	out := Work{Rounds: []WorkRound{}, Machines: []WorkMachine{}}
 	fresh := &asker{acct: &Account{ID: -1, Anchor: true, Worker: true}, est: true, gpuMake: "cuda"}
+	early := &asker{acct: &Account{ID: -3, Anchor: true, Worker: true}, est: true, gpuMake: "cuda", early: true}
 	runner := &asker{acct: &Account{ID: -2, Anchor: true, Worker: true}, est: true, canEdit: true, gpuMake: "cuda"}
 	for _, rd := range openRounds(s) {
 		states := j.states(rd)
 		closing := j.closing(states)
-		wr := WorkRound{ID: roundID(a.season.ID, rd.Idx), Entries: len(states)}
+		wr := WorkRound{ID: roundID(a.season.ID, rd.Idx), Entries: len(states), ExamAt: rd.ExamAt}
 		for _, st := range states {
 			wr.EditsUnderWay += len(st.LiveEdits)
 			if len(st.LiveEdits) == 0 && j.anyone(st, nil) {
@@ -87,6 +94,15 @@ func (a *App) work(s *State) Work {
 			for _, o := range j.offers(st, fresh, closing) {
 				if o.kind == "grade" && o.required {
 					wr.GradesWanted++
+				}
+			}
+			if !examPosted(rd) {
+				// Every grade a score will wait on: before the exam, one taken alongside
+				// another is not held back, and nothing is gained by taking them in turn.
+				for _, sc := range st.Scripts {
+					if j.mayGrade(st, sc, early.acct) {
+						wr.GradesEarly += max(0, j.short(sc)-len(sc.Live))
+					}
 				}
 			}
 			if j.mayRun(st, runner) {

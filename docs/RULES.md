@@ -88,8 +88,9 @@ verifier who runs curators is around to run it.
    after it, and an hour later, once the sources that publish late have caught up, the
    organisers' examiner makes the exam and posts it with its hash (see [the exam](#the-exam)).
    The curators have finished running long before.
-6. **Grade.** Other volunteers train the student on what each script says and have it sit
-   the exam. Grading runs no entrant code: a script is plain data.
+6. **Grade.** Other volunteers train the student on what each script says, as soon as it
+   is written, and have it sit the exam once it is posted. Grading runs no entrant code: a
+   script is plain data.
 7. **Settle.** A round settles as a whole. Until then every script and every grade is
    sealed. Then each score is published, with every run and every grade behind it,
    whoever made them and whatever they said.
@@ -103,8 +104,8 @@ the last two weeks go first.
 
 Rounds never overlap. If one is still being graded when the next is due, the next is
 drawn at the first ten-minute mark that is at least six minutes after it settles. Since the
-exam is made two hours after the draw, a round takes about three hours from draw to
-settlement.
+exam is made two hours after the draw, and scripts are graded while it is, a round takes
+about two and a half hours from draw to settlement.
 
 ## The corpus
 
@@ -353,8 +354,8 @@ are graded by **verifiers**: anyone who runs `stet verify`.
   for byte, it is nobody's own and either runner may grade it: neither could have made
   it up. Established verifiers who come free while a round is being graded grade its
   scripts again, up to four grades of each, and those count too; but once every score
-  has the grades it waits for, no more are handed out, and the round settles as soon as
-  those already under way are in.
+  has the grades it waits for, or all that is left of them is sitting the exam, no more
+  are handed out, and the round settles as soon as those already under way are in.
 - **The entry's gain is the mean of its two runs.** When they differ by more than 0.09
   bits per byte *(provisional)*, or one failed and the other did not, a third verifier runs the
   curator and the median of the three is the score.

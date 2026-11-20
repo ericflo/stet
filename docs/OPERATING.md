@@ -381,9 +381,10 @@ Set in `apps/stet/deployment.yaml`. The ones that are rules:
 | `STET_SCALE` | the season's | The scale rounds are run at: `standard` |
 
 A full round is 8 + 3 × 3 = 17 entries. Their runs, two of up to twenty minutes each, fit in
-the two hours before the exam. Grading comes after it: one standard training for every
-script graded, about 18 minutes on a 3090-class GPU, and one for each grader's baseline.
-Raise the sizes only when rounds settle well within three hours of their draw.
+the two hours before the exam. Grading trains in them too: one standard training for every
+script graded, about 18 minutes on a 3090-class GPU, and one for each grader's baseline,
+then the exam is sat when it is posted. Raise the sizes only when rounds settle well within
+three hours of their draw.
 
 ## When something is wrong
 

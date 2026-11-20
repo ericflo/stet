@@ -13,7 +13,7 @@ import os
 from pathlib import Path
 
 from . import data
-from .grade import grade
+from .grade import Trained, grade, sit_exam, train_script
 from .runner import EditRun, run_editor
 from .script import write_script
 from .spec import HARNESS_VERSION, Round, Scale
@@ -27,21 +27,37 @@ def baseline(rnd: Round, scale: Scale, device=None, progress=None, log=None) -> 
     the round's raw data.
     """
     device = pick_device(device) if not hasattr(device, "type") else device
-    # A baseline is for the exam it sat: named for it.
-    path = data.round_dir(rnd, scale) / f"baseline-{HARNESS_VERSION}-{device.type}-{(rnd.exam_digest or 'generated')[:12]}.json"
-    cached = _cached(path)
+    cached = _cached(baseline_path(rnd, scale, device))
     if cached is not None:
         return cached
-    corpus, exam = data.materialize(rnd, scale)
+    return sit_baseline(train_baseline(rnd, scale, device, progress=progress, log=log), rnd, scale)
+
+
+def baseline_path(rnd: Round, scale: Scale, device) -> Path:
+    # A baseline is for the exam it sat: named for it.
+    return data.round_dir(rnd, scale) / f"baseline-{HARNESS_VERSION}-{device.type}-{(rnd.exam_digest or 'generated')[:12]}.json"
+
+
+def train_baseline(rnd: Round, scale: Scale, device=None, progress=None, log=None) -> Trained:
+    """The round's unedited student, trained and not yet examined: see baseline."""
+    device = pick_device(device) if not hasattr(device, "type") else device
+    corpus = data.corpus(rnd, scale)
     # Named for this process: two verifiers on one machine share the round's directory.
     script = data.round_dir(rnd, scale) / f"identity-{os.getpid()}.jsonl"
     write_script(script, range(len(corpus)))
     try:
-        result = grade(rnd, scale, corpus, exam, script, device=device, progress=progress, log=log)
+        return train_script(rnd, scale, corpus, script, device=device, progress=progress, log=log)
     finally:
         script.unlink(missing_ok=True)
+
+
+def sit_baseline(trained: Trained, rnd: Round, scale: Scale) -> dict:
+    """The unedited student sits the round's exam (`rnd` as it is now, its exam posted), and
+    the result is kept for the round's other grades on this machine."""
+    result = sit_exam(trained, rnd, scale, data.round_exam(rnd, scale))
     if not result["valid"]:
         raise RuntimeError(f"the baseline for {rnd.id} could not be graded: {result['invalid_reason']}")
+    path = baseline_path(rnd, scale, trained.device)
     # Written whole or not at all: a file cut short by a full disk would otherwise stop
     # every later job of the round.
     tmp = path.with_name(f"{path.name}.tmp{os.getpid()}")
@@ -114,6 +130,11 @@ def grade_round(rnd: Round, scale: Scale, script_path: Path, device=None, progre
     """Score an edit script on a round."""
     corpus, exam = data.materialize(rnd, scale)
     return grade(rnd, scale, corpus, exam, script_path, device=device, progress=progress, log=log)
+
+
+def train_round(rnd: Round, scale: Scale, script_path: Path, device=None, progress=None, log=None) -> Trained:
+    """Train the student an edit script makes, before the round's exam is there to sit."""
+    return train_script(rnd, scale, data.corpus(rnd, scale), script_path, device=device, progress=progress, log=log)
 
 
 def run_round(
