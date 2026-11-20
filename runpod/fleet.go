@@ -462,7 +462,7 @@ func (f *Fleet) spec(k *Key, gpu, cloud, site string) NewPod {
 
 // launch rents up to n machines on keys that have no pod, in the order chosen, within what
 // may be spent an hour. It says what it did as it goes.
-func (f *Fleet) launch(ctx context.Context, v *View, n, long, early int, due time.Time) (int, error) {
+func (f *Fleet) launch(ctx context.Context, v *View, n, long, early, runs int, due time.Time) (int, error) {
 	if n <= 0 {
 		return 0, nil
 	}
@@ -475,17 +475,20 @@ func (f *Fleet) launch(ctx context.Context, v *View, n, long, early int, due tim
 		return 0, err
 	}
 	// The machines for the bigger students first, each chosen for what a student costs on
-	// it; then those for grades taken before an exam, each kind just in time; then the rest,
-	// the fastest first (or with --cheapest, the cheapest a grade).
+	// it; then those for grades taken before an exam, each kind just in time; then those to
+	// run curators, the cheapest a grade, since each holds a grade until the exam once its
+	// runs are done; then the rest, the fastest first (or with --cheapest, the cheapest a
+	// grade).
 	long = min(long, n)
 	early = min(early, n-long)
+	runs = min(runs, n-long-early)
 	rented := 0
 	for _, batch := range []struct {
-		n    int
-		long bool
-		due  time.Time
-	}{{long, true, time.Time{}}, {early, false, due}, {n - long - early, false, time.Time{}}} {
-		got, err := f.launchSome(ctx, v, batch.n, batch.long, batch.due, site, vouched)
+		n           int
+		long, cheap bool
+		due         time.Time
+	}{{long, true, false, time.Time{}}, {early, false, false, due}, {runs, false, true, time.Time{}}, {n - long - early - runs, false, false, time.Time{}}} {
+		got, err := f.launchSome(ctx, v, batch.n, batch.long, batch.cheap, batch.due, site, vouched)
 		rented += got
 		if err != nil {
 			return rented, err
@@ -494,13 +497,16 @@ func (f *Fleet) launch(ctx context.Context, v *View, n, long, early int, due tim
 	return rented, nil
 }
 
-func (f *Fleet) launchSome(ctx context.Context, v *View, n int, long bool, due time.Time, site string, vouched map[string]Vouched) (int, error) {
+func (f *Fleet) launchSome(ctx context.Context, v *View, n int, long, cheap bool, due time.Time, site string, vouched map[string]Vouched) (int, error) {
 	if n <= 0 {
 		return 0, nil
 	}
 	gpus, err := f.choices(ctx, long)
 	if err != nil {
 		return 0, err
+	}
+	if cheap && len(f.o.GPUs) == 0 {
+		byGrade(gpus)
 	}
 	if !due.IsZero() && len(gpus) > 0 {
 		left := due.Sub(f.now())

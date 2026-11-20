@@ -76,23 +76,35 @@ func (p Policy) targetHolding(w *Work, held int, now time.Time) int {
 // and runsPerMachine how many entries to run justify one more machine.
 const runsEach, runsPerMachine = 2, 4
 
+// runners is how many of the machines the rounds' work justifies run curators: one for
+// every runsPerMachine entries to run, and never fewer than runsEach; or one to ask for
+// work, so that a waiting entry's round is drawn. None with --no-edits.
+func (p Policy) runners(w *Work) int {
+	if !p.Edits {
+		return 0
+	}
+	runs := 0
+	for _, r := range w.Rounds {
+		runs += r.RunsWanted
+	}
+	switch {
+	case len(w.Rounds) == 0 && w.Waiting && w.Runners == 0 && w.Paused == 0:
+		return 1 // to ask for work, so that the waiting entry's round is drawn
+	case runs > 0:
+		return max(runsEach, (runs+runsPerMachine-1)/runsPerMachine)
+	}
+	return 0
+}
+
 // official is how many machines the rounds' own work justifies.
 func (p Policy) official(w *Work, now time.Time) int {
 	per := max(p.PerWorker, 1)
 	if p.Edits {
-		grades, runs := 0, 0
+		grades := 0
 		for _, r := range w.Rounds {
 			grades += r.GradesWanted + p.early(r, now)
-			runs += r.RunsWanted
 		}
-		n := (grades + per - 1) / per
-		if runs > 0 {
-			n += max(runsEach, (runs+runsPerMachine-1)/runsPerMachine)
-		}
-		if len(w.Rounds) == 0 && w.Waiting && w.Runners == 0 && w.Paused == 0 {
-			n = 1 // to ask for work, so that the waiting entry's round is drawn
-		}
-		return n
+		return (grades+per-1)/per + p.runners(w)
 	}
 	scripts, curators := 0, 0
 	for _, r := range w.Rounds {
@@ -193,7 +205,10 @@ type Decision struct {
 	// kind just in time to have trained by then.
 	LaunchEarly int
 	ExamDue     time.Time
-	End         []Ending // pods to end now
+	// Of the rest, the machines rented to run curators: the cheapest a grade, since once its
+	// runs are done such a machine takes a grade before the exam and holds it until then.
+	LaunchRuns int
+	End        []Ending // pods to end now
 	// Machines no pod is rented for that the server says still hold a job: ended a moment
 	// after they took it, or stopped partway through. What they hold is handed back.
 	Release []*Worker
@@ -264,6 +279,7 @@ func (p Policy) decide(w *Work, workers []*Worker, spentToday float64, now time.
 		}
 	}
 	d.LaunchEarly = min(d.LaunchEarly, d.Launch-d.LaunchLong)
+	d.LaunchRuns = min(p.runners(w), d.Launch-d.LaunchLong-d.LaunchEarly)
 	sort.SliceStable(d.End, func(i, j int) bool { return d.End[i].Worker.Key.Handle < d.End[j].Worker.Key.Handle })
 	return d
 }

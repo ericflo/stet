@@ -500,13 +500,15 @@ func TestAKeyWhoseHandleIsTakenTakesAnother(t *testing.T) {
 	}
 }
 
-// By default the fastest machine free is rented, in either cloud, and the next fastest when
-// RunPod has none of a kind free: a round settles only once its slowest grade is in.
+// By default the fastest machine free is rented for grades, in either cloud, and the next
+// fastest when RunPod has none of a kind free: a round settles only once its slowest grade
+// is in. Machines to run curators are the cheapest a grade.
 func TestTheFastestMachineIsRentedFirst(t *testing.T) {
 	rp, st := newFakeRunPod(t), newFakeStet(t)
 	f, out := testFleet(t, rp, st, 3)
 	f.o.Cloud = "ANY"
-	st.work = *round(30, 1, 0, 0)
+	f.o.PerWorker = 4
+	st.work = *round(0, 0, 8, 0)
 	if err := tick(context.Background(), f); err != nil {
 		t.Fatal(err)
 	}
@@ -851,5 +853,25 @@ func TestGradersAreRentedBeforeTheExam(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(st.signed, "\n"), "GET /api/v1/rounds/s1-o00001 \n") {
 		t.Fatalf("the round's draw was not asked of the round, unsigned: %v", st.signed)
+	}
+}
+
+// Machines to run curators are rented the cheapest a grade first, even where grades are
+// rented the fastest: once its runs are done, such a machine takes a grade before the exam
+// and holds it until then.
+func TestCuratorsAreRunOnTheCheapestAGrade(t *testing.T) {
+	rp, st := newFakeRunPod(t), newFakeStet(t)
+	f, out := testFleet(t, rp, st, 3)
+	f.o.Cloud, f.o.Edits = "ANY", true
+	st.work = *round(8, 0, 0, 0)
+	if err := tick(context.Background(), f); err != nil {
+		t.Fatal(err)
+	}
+	got := []string{}
+	for _, spec := range rp.created {
+		got = append(got, strings.ToLower(spec.Cloud)+" "+shortGPU(spec.GPU.ID))
+	}
+	if len(got) != 2 || got[0] != "community RTX 3080 Ti" || got[1] != "community RTX 3080 Ti" {
+		t.Fatalf("rented %v\n%s", got, out)
 	}
 }

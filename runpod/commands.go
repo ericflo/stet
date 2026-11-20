@@ -269,7 +269,7 @@ func tick(ctx context.Context, f *Fleet) error {
 	if d.Note != "" && d.Launch < d.Target-d.Live {
 		f.say("%s", d.Note)
 	}
-	_, err = f.launch(ctx, v, d.Launch, d.LaunchLong, d.LaunchEarly, d.ExamDue)
+	_, err = f.launch(ctx, v, d.Launch, d.LaunchLong, d.LaunchEarly, d.LaunchRuns, d.ExamDue)
 	return err
 }
 
@@ -316,7 +316,7 @@ func cmdUp(ctx context.Context, f *Fleet, n int) error {
 	if v.Today >= f.o.DailyBudget && f.o.DailyBudget > 0 {
 		return fmt.Errorf("about $%.2f spent today, and the daily budget is $%.2f", v.Today, f.o.DailyBudget)
 	}
-	got, err := f.launch(ctx, v, n, 0, 0, time.Time{})
+	got, err := f.launch(ctx, v, n, 0, 0, 0, time.Time{})
 	if err == nil && got > 0 {
 		f.say("each stops by itself after %d minutes with nothing to grade", f.o.Idle)
 	}
