@@ -149,6 +149,9 @@ func (a *App) tick(ctx context.Context) {
 // schedule announces the next round, if none is announced: when it will be drawn (and so
 // from which beacon round) and from which crawl.
 func (a *App) schedule(tx *Tx) {
+	if a.cfg.ArchiveSeed != "" { // a finished season: no round comes next
+		return
+	}
 	s := tx.s
 	if crawl := a.savedCrawl(s); s.roundWithStatus("scheduled") == nil && crawl != nil {
 		// The usual time, or the first free place on the grid after it: a slot some round

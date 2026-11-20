@@ -1,0 +1,24 @@
+{{define "body"}}
+<main class="page">
+<div class="page-head">
+  <div class="wrap">
+    <h1>Seasons</h1>
+    <p class="sub">A season fixes the model, the budget and the exam. When one ends, its pages are kept as they stood when it closed.</p>
+  </div>
+</div>
+<div class="wrap">
+  <ol class="rounds-list">
+    <li class="now"><a href="/">
+      <span class="n">{{.Season.Title}}</span>
+      <span class="won"><span class="dot live" aria-hidden="true"></span> running now</span>
+      <span class="when">{{.ScaleID}} scale</span>
+    </a></li>
+    {{range pastSeasons}}<li><a href="/seasons/{{.ID}}/">
+      <span class="n">{{.Title}}</span>
+      <span class="won">{{.About}}<span class="k">{{if .About}} · {{end}}{{.Rounds}} {{plural .Rounds "round" "rounds"}} · {{.Curators}} {{plural .Curators "curator" "curators"}}</span></span>
+      <span class="when">{{date .First}} to {{date .Last}}</span>
+    </a></li>{{end}}
+  </ol>
+</div>
+</main>
+{{end}}

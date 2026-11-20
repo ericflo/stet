@@ -44,6 +44,8 @@ type Site struct {
 	srcMu   sync.Mutex
 	src     map[string]sourceView
 	srcGate chan struct{} // bundles being unpacked for the source viewer at one time
+
+	archives []*archivedSeason // finished seasons, newest first
 }
 
 type docSpec struct{ Slug, File, Title string }
@@ -72,6 +74,10 @@ func newSite(a *App) (*Site, error) {
 		goldmark.WithParserOptions(parser.WithAutoHeadingID()),
 		goldmark.WithRendererOptions(html.WithUnsafe()), // our own documents, not user input
 	)
+	var err error
+	if s.archives, err = loadArchives(); err != nil {
+		return nil, fmt.Errorf("archived seasons: %w", err)
+	}
 	css, _ := webFS.ReadFile("web/static/site.css")
 	js, _ := webFS.ReadFile("web/static/site.js")
 	s.version = fmt.Sprintf("%x", len(css)*31+len(js)*17+int(sumBytes(css)+sumBytes(js))%100000)
@@ -133,6 +139,11 @@ func (s *Site) mount(mux *http.ServeMux) {
 	mux.HandleFunc("GET /enter", s.guide("enter", "Enter the competition", "You compete by writing a curator: a program that edits pretraining data. Test it on your own machine as often as you like, and enter it to be scored on volunteers' GPUs and ranked on the leaderboard."))
 	mux.HandleFunc("GET /verify", s.guide("verify", "Verify scores", "Lend a GPU to the leaderboard: one command retrains a fixed model on entrants' edit scripts. No one else's code runs on your machine, and it keeps itself up to date."))
 	mux.HandleFunc("GET /run", s.guide("run", "Run entries", "Run entrants' curators in a sandbox on a Linux machine with a GPU. What it needs, what the sandbox does, and how to leave it running."))
+	mux.HandleFunc("GET /seasons", s.seasons)
+	mux.HandleFunc("GET /seasons/{season}", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/seasons/"+r.PathValue("season")+"/", http.StatusMovedPermanently)
+	})
+	mux.HandleFunc("GET /seasons/{season}/{rest...}", s.archivePage)
 	mux.HandleFunc("GET /glossary", s.glossary)
 	mux.HandleFunc("GET /u/{handle}", s.account)
 	mux.HandleFunc("GET /docs", func(w http.ResponseWriter, r *http.Request) {
@@ -266,9 +277,16 @@ func plainDuration(d time.Duration) string {
 	}
 }
 
+// frozen is set when the server shows a finished season's records for its archive
+// (STET_ARCHIVE_SEED): a page saved now is read later, so it says when, not how long ago.
+var frozen bool
+
 func ago(ts int64) string {
 	if ts <= 0 {
 		return "never"
+	}
+	if frozen {
+		return "on " + time.Unix(ts, 0).UTC().Format("2 Jan 15:04") + " UTC"
 	}
 	d := now() - ts
 	switch {
@@ -390,6 +408,14 @@ func multText(p *float64, capped bool) string {
 
 func (s *Site) funcs() template.FuncMap {
 	return template.FuncMap{
+		// The finished seasons kept under /seasons/, newest first.
+		"pastSeasons": func() []archiveMeta {
+			out := make([]archiveMeta, 0, len(s.archives))
+			for _, a := range s.archives {
+				out = append(out, a.Meta)
+			}
+			return out
+		},
 		"ago":      ago,
 		"span":     span,
 		"bytes":    humanBytes,

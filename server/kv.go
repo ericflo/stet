@@ -27,6 +27,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -81,6 +82,27 @@ type memKV struct {
 var errDown = errors.New("the test database is down")
 
 func newMemKV() *memKV { return &memKV{data: map[string]json.RawMessage{}} }
+
+// seededMemKV holds a copy of a database's records, read from JSON Lines of key and value.
+func seededMemKV(path string) (*memKV, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	m := newMemKV()
+	for i, line := range bytes.Split(raw, []byte("\n")) {
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue
+		}
+		var it KVItem
+		if err := json.Unmarshal(line, &it); err != nil || it.Key == "" {
+			return nil, fmt.Errorf("line %d is not a key and value", i+1)
+		}
+		m.data[it.Key] = it.Value
+	}
+	m.rev = 1
+	return m, nil
+}
 
 func (m *memKV) Describe() string { return "memory (nothing is kept across restarts)" }
 

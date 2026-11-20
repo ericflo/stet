@@ -59,6 +59,9 @@ type Config struct {
 	GithubMinAgeDays int
 	GithubToken      string // optional: lifts GitHub's limit on how often the server may look up a gist
 	Dev              bool
+	// ArchiveSeed is a copy of a finished season's records (JSON Lines of key and value), to
+	// serve its pages from memory for tools/archive_season.py: nothing is scheduled or kept.
+	ArchiveSeed string
 }
 
 type App struct {
@@ -139,6 +142,7 @@ func loadConfig(season *Season) (Config, error) {
 		GithubMinAgeDays: envInt("STET_GITHUB_MIN_AGE_DAYS", 30),
 		GithubToken:      os.Getenv("STET_GITHUB_TOKEN"),
 		Dev:              dev,
+		ArchiveSeed:      os.Getenv("STET_ARCHIVE_SEED"),
 	}
 	cfg.APIURL = strings.TrimRight(env("STET_API_URL", cfg.BaseURL), "/")
 	for _, h := range strings.Split(os.Getenv("STET_REDIRECT_HOSTS"), ",") {
@@ -192,6 +196,12 @@ func (cfg *Config) check(season *Season) error {
 	if _, ok := season.Scales[cfg.Scale]; !ok {
 		return errors.New("unknown scale " + cfg.Scale)
 	}
+	if cfg.ArchiveSeed != "" {
+		if cfg.DBURL != "" || cfg.S3.Bucket != "" {
+			return errors.New("STET_ARCHIVE_SEED serves a copy: unset STET_DB_URL and STET_S3_BUCKET, so that nothing real is written")
+		}
+		return nil
+	}
 	if cfg.Dev {
 		return nil
 	}
@@ -210,7 +220,14 @@ func (cfg *Config) check(season *Season) error {
 // storage opens the two places things are kept.
 func (cfg *Config) storage(ctx context.Context) (KV, Blobs, error) {
 	var kv KV
-	if cfg.DBURL == "" {
+	if cfg.ArchiveSeed != "" {
+		m, err := seededMemKV(cfg.ArchiveSeed)
+		if err != nil {
+			return nil, nil, fmt.Errorf("STET_ARCHIVE_SEED: %w", err)
+		}
+		frozen = true
+		kv = m
+	} else if cfg.DBURL == "" {
 		slog.Warn("STET_DB_URL is not set: records are kept in memory and lost when the server stops")
 		kv = newMemKV()
 	} else {

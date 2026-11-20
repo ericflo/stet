@@ -298,13 +298,55 @@ file in `src/stet/seasons/`, and the switch is:
 3. The server keeps one season, and rounds and the record are not kept by season, so the
    new one starts on its own database: set `STET_DB_NAME` to a new name (and `STET_SCALE`,
    if the official scale changes) in Epsilon's `apps/stet` manifest, and deploy. The old
-   database stays as it was, for a read-only copy of its site if one is wanted.
+   database stays as it was.
+   Archive the finished season's site from it ([below](#archiving-a-season)), so that its
+   pages stay readable under `/seasons/<id>/`.
 4. Enter the reference curators from the organisers' account, before the first draw:
    `for d in identity english tidy heuristic dclm fineweb2 fineweb-edu; do stet submit examples/$d --yes; done`.
    Three new entries are admitted a round, in the order they were submitted.
 5. Restart the organisers' verifier and the examiner on the new client, and watch the first
    round through: its exam posted (`/api/v1/rounds/<id>` shows `exam_digest`), grades
    arriving, the round settling.
+
+## Archiving a season
+
+The server runs one season. A finished one keeps its site as it stood when it closed: static
+pages under `/seasons/<id>/`, listed at `/seasons` and linked from the footer. Each is one
+file, `server/archive/<id>.tar.zst`, built into the server. Making one takes the season's
+last server build, a copy of its records, and its curators' code:
+
+1. **Its records.** Export the season's database (`stet` for season 0, `stet-<id>` after)
+   as JSON Lines of `{"key", "value"}`: a scan of every key at one revision, with a token
+   that can only read that database. Drop any round that is not settled (one announced and
+   never drawn): the archiver refuses a season with one.
+2. **Its curators' code.** Copy `bundles/<editor id>.tar.zst` for every `editor/*` key from
+   the bucket into `<data>/blobs/bundles/`. Curator pages show their code from these.
+3. **Its server.** Build the season's last server commit in a worktree and run it on the copy,
+   with nothing real at hand: no `STET_DB_URL`, no `STET_S3_*`.
+
+   ```sh
+   STET_ARCHIVE_SEED=export.jsonl STET_DATA_DIR=<data> STET_ADDR=127.0.0.1:18080 \
+   STET_BASE_URL=https://www.stetrun.com STET_API_URL=https://api.stetrun.com \
+   STET_ANCHOR_KEYS=<as in production> STET_DOCS_DIR=<worktree>/docs \
+   STET_AGENTS_FILE=<worktree>/src/stet/templates/AGENTS.md ./stet-server
+   ```
+
+   `STET_ARCHIVE_SEED` reads the records into memory, schedules nothing, and writes times as
+   dates rather than "2d ago". Season 0's build is older than it; its archive was made with
+   the same change applied to a copy.
+4. **The pages.** With the stet CLI's Python (it needs `zstandard`):
+
+   ```sh
+   python tools/archive_season.py --server http://127.0.0.1:18080 --season s1 \
+     --title "Season 1" --live "season 2" --about "One line for /seasons." \
+     --out server/archive/s1.tar.zst
+   ```
+
+   It saves every page it can reach from the home page (rounds, curators with each of their
+   files, accounts, verifiers, glossary, documents), keeps links inside the archive, sends
+   links to the guides to the live site, and leaves the API and downloads as plain text.
+5. Commit the `.tar.zst`, never the export or the bundles: the export holds every account
+   record. The server's tests check every archived page and link.
 
 ## Things only the organisers hold
 

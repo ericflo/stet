@@ -78,7 +78,7 @@
       <div id="beacon"><dt>Beacon</dt><dd><p>{{.Season.Beacon.Name}}: a public source of random numbers run by others, which emits a new value every few seconds. The first value after the draw time picks the round's pages, the exam's generated problems and the model's starting weights. Nobody, organisers included, can know it in advance.</p></dd></div>
       <div id="crawl"><dt>Crawl</dt><dd><p>Common Crawl, a public archive of billions of web pages. Each round draws a few files from its newest crawl, named when the round is announced. Every verifier fetches the pages from Common Crawl itself and checks them against the announcement.</p></dd></div>
       <div id="scale"><dt>Scale</dt><dd><p>The size of everything in a round: how big the model is, how much it reads, how many pages are drawn. Official rounds this season are run at <b>{{.ScaleID}}</b>. Smaller scales exist for quick practice on your own machine.</p></dd></div>
-      <div id="season"><dt>Season</dt><dd><p>A run of rounds under one fixed set of rules, model and way of making the exam. {{.Season.Title}} is the current one.</p></dd></div>
+      <div id="season"><dt>Season</dt><dd><p>A run of rounds under one fixed set of rules, model and way of making the exam. {{.Season.Title}} is the current one.{{if pastSeasons}} Finished ones keep their pages, as they stood when they closed: <a href="/seasons">past seasons</a>.{{end}}</p></dd></div>
     </dl>
   </div>
 </div>

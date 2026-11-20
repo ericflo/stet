@@ -23,6 +23,7 @@
   {{else}}
   <div class="empty"><span class="hand">not yet</span>No round has been scheduled. The first is announced as soon as a crawl is in play.</div>
   {{end}}
+  {{with pastSeasons}}<p class="after">Rounds of earlier seasons: {{range $i, $p := .}}{{if $i}}, {{end}}<a href="/seasons/{{$p.ID}}/rounds">{{$p.Title}}</a>{{end}}.</p>{{end}}
 </div>
 </main>
 {{end}}
