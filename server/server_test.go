@@ -2500,6 +2500,15 @@ func TestADrawNeverReusesASlotAnnouncedForAnotherRound(t *testing.T) {
 	if next := scheduled(); !next.Postponed {
 		t.Fatalf("the draw was not marked as put off: %+v", next)
 	}
+	// Meanwhile its pages say what it waits for, not a countdown to a time it cannot keep.
+	waiting := scheduled()
+	page := "/rounds/" + roundID(w.app.season.ID, waiting.Idx)
+	countdown := fmt.Sprintf(`data-until="%d"`, waiting.DrawAt)
+	for _, path := range []string{page, "/rounds"} {
+		if _, body := w.page(path); !strings.Contains(body, fmt.Sprintf("once round %d is graded", idx)) && !strings.Contains(body, fmt.Sprintf(`round %d</a> is graded`, idx)) || strings.Contains(body, countdown) {
+			t.Errorf("%s, while round %d is graded: no word of the wait, or a countdown", path, idx)
+		}
+	}
 	w.editAll(anchor)
 	if _, status := w.report(anchor, w.claim(anchor, true), 5.5); status != "settled" {
 		t.Fatal(status)
@@ -2515,6 +2524,9 @@ func TestADrawNeverReusesASlotAnnouncedForAnotherRound(t *testing.T) {
 	})
 	if next.Postponed || next.DrawAt > want || next.DrawAt < now()+drawNotice {
 		t.Fatalf("a put-off draw waits %d s after the round settled, not %d s", next.DrawAt-now(), want-now())
+	}
+	if _, body := w.page(page); !strings.Contains(body, fmt.Sprintf(`data-until="%d"`, next.DrawAt)) {
+		t.Error("once the round before settled, the next one's page does not count down to its draw")
 	}
 	w.check()
 }

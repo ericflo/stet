@@ -5,7 +5,8 @@
     <a class="back" href="/rounds">← All rounds</a>
     <h1>Round {{$r.Idx}}</h1>
     <div class="round-state" id="round-state" data-live>
-      {{if eq $r.Status "scheduled"}}<span class="dot wait" aria-hidden="true"></span><span>starts <b data-until="{{$r.DrawAt}}">{{ago $r.DrawAt}}</b> · {{hm $r.DrawAt}} UTC</span>
+      {{if and (eq $r.Status "scheduled") $r.After}}<span class="dot wait" aria-hidden="true"></span><span>starts <b>once <a href="/rounds/{{$r.AfterID}}">round {{$r.After}}</a> is graded</b>, about ten minutes after</span>
+      {{else if eq $r.Status "scheduled"}}<span class="dot wait" aria-hidden="true"></span><span>starts <b data-until="{{$r.DrawAt}}">{{ago $r.DrawAt}}</b> · {{hm $r.DrawAt}} UTC</span>
       {{else if eq $r.Status "open"}}<span class="dot live" aria-hidden="true"></span><span>running · began {{ago $r.DrawnAt}}</span>
       {{else}}<span class="dot done" aria-hidden="true"></span><span>settled {{ago $r.SettledAt}} · {{date $r.SettledAt}}</span>{{end}}
     </div>

@@ -719,10 +719,16 @@ type roundSummary struct {
 	BestGain *float64
 	BestName string
 	BestID   string
+	After    int    // a scheduled round: the round being graded, which it waits for (rounds never overlap)
+	AfterID  string // and that round's id
 }
 
 func (a *App) roundSummary(s *State, r *Round) roundSummary {
 	rs := roundSummary{Round: *r, ID: roundID(a.season.ID, r.Idx)}
+	if open := s.roundWithStatus("open"); r.Status == "scheduled" && open != nil {
+		// Its time is only where it is held: it is drawn once that round settles.
+		rs.After, rs.AfterID = open.Idx, roundID(a.season.ID, open.Idx)
+	}
 	if r.Status != "settled" {
 		// Sealed with the grades: a volunteer has to measure the unedited baseline, not read it.
 		rs.BaselineLoss, rs.BaselineN, rs.Differs = nil, 0, nil

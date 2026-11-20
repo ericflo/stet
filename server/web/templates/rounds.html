@@ -14,7 +14,8 @@
   <ol class="rounds-list" id="rounds" data-live>
     {{range $d.Rounds}}<li{{if ne .Status "settled"}} class="now"{{end}}><a href="/rounds/{{.ID}}">
       <span class="n">Round {{.Idx}}</span>
-      {{if eq .Status "scheduled"}}<span class="won"><span class="dot wait" aria-hidden="true"></span> starts <b data-until="{{.DrawAt}}">{{ago .DrawAt}}</b></span><span class="when">{{hm .DrawAt}} UTC</span>
+      {{if and (eq .Status "scheduled") .After}}<span class="won"><span class="dot wait" aria-hidden="true"></span> starts <b>once round {{.After}} is graded</b></span><span class="when">waiting</span>
+      {{else if eq .Status "scheduled"}}<span class="won"><span class="dot wait" aria-hidden="true"></span> starts <b data-until="{{.DrawAt}}">{{ago .DrawAt}}</b></span><span class="when">{{hm .DrawAt}} UTC</span>
       {{else if eq .Status "open"}}<span class="won"><span class="dot live" aria-hidden="true"></span> running · <b>{{.Edited}} of {{.Entries}}</b> run · scores sealed</span><span class="when">began {{ago .DrawnAt}}</span>
       {{else}}<span class="won">{{if has .BestGain}}<b>{{.BestName}}</b> won with <span class="num">{{gain (ptr .BestGain)}}</span><span class="k"> · {{.Entries}} {{plural .Entries "curator" "curators"}}</span>{{else}}<span class="k">no curator scored · {{.Entries}} {{plural .Entries "entry" "entries"}}</span>{{end}}</span><span class="when">{{ago .SettledAt}}</span>{{end}}
     </a></li>{{end}}
