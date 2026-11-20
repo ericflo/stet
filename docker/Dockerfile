@@ -19,6 +19,7 @@ COPY server/go.mod server/go.sum ./
 RUN go mod download
 COPY server/*.go server/season.json ./
 COPY server/web ./web
+COPY server/archive ./archive
 ARG STET_REVISION=dev
 RUN go build -trimpath -ldflags "-s -w -X main.revision=${STET_REVISION}" -o /out/stet-server .
 
