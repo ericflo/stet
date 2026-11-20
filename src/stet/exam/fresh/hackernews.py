@@ -13,7 +13,8 @@ items go, and so do replies to them, text posted twice, and accounts named as bo
 at most a few comments, so that one big discussion cannot fill the harvest.
 
 Hacker News lets a comment be edited, or deleted, for two hours after it is posted, and the API
-does not say whether it was: a harvest run two hours after the window closes sees the final text.
+does not say whether it was. The harvest runs an hour after the window closes, so a comment from
+late in the window may be harvested as first written, and one deleted since is not.
 
 The helpers below the source (the thread as a question, prose, language) serve the other
 discussion sources too.

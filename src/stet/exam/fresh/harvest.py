@@ -21,14 +21,13 @@ from . import (
 )
 from .select import SHARES
 
-WINDOW = 2 * 3600  # seconds after the draw
+WINDOW = 3600  # seconds after the draw: the season's window_seconds
 # And then this long before the harvest. Every source but two has all of the window at once.
 # Common Crawl's news files are public 1-2 hours after the window closes (5 at worst), and a
 # file that is late leaves the news to those that are not: the harvest keeps PER_SOURCE of the
 # thousands it finds. Hacker News allows edits for two hours, so an item from late in the window
-# can be harvested as first written. Waiting for all of both cost every round two hours more;
-# the season file's settle_seconds (10800) is what season 1 began with.
-SETTLE = 3600
+# can be harvested as first written. Waiting for all of both cost every round two hours more.
+SETTLE = 3600  # the season's settle_seconds
 TARGET = 900  # fresh items a round would like
 ADDED_MIN = 20  # edits a harvest reads at least, per language, for text added to existing articles:
 TALK_EN, TALK_OTHER = 60, 8  # and for comments on talk pages

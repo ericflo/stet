@@ -50,8 +50,8 @@
       "sha256": "ac1c27bc3461c8ccd6c5b5a5814072b79bc834f7694ba35da14021493edd08e5"
     },
     "fresh": {
-      "window_seconds": 7200,
-      "settle_seconds": 10800,
+      "window_seconds": 3600,
+      "settle_seconds": 3600,
       "items": 900,
       "per_corner": 2
     },

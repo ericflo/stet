@@ -31,7 +31,7 @@
   {{else if eq $r.Status "open"}}
   <div class="progress" id="round-progress" data-live>
     {{template "seg" $r}}
-    <p><b>{{$r.Edited}} of {{$r.Entries}}</b> curators run so far. Every score stays sealed until all are done, then they are published at once.{{if not $r.ExamSHA}} Grading starts when its exam is made, from text published in the two hours after the draw.{{end}}</p>
+    <p><b>{{$r.Edited}} of {{$r.Entries}}</b> curators run so far. Every score stays sealed until all are done, then they are published at once.{{if not $r.ExamSHA}} Grading starts when its exam is made, from text published in the hour after the draw.{{end}}</p>
   </div>
   <div class="block">
     <h2>In this round</h2>

@@ -47,7 +47,7 @@ it.
 
 **Nobody can know the exam in advance.** A public exam can be learned, and a secret one needs
 someone trusted to hold it. So each round's exam is made after its draw: human writing
-published in the two hours after it, and questions generated from the round's seed. Nobody
+published in the hour after it, and questions generated from the round's seed. Nobody
 can see it before it exists, the organisers included, and there is nothing to keep secret
 for longer than a round. It is published when the round settles, so every score can be
 checked. Fresh text that the round's corpus already holds is dropped from the exam, since
@@ -184,7 +184,7 @@ What is left is in [Rules](RULES.md#what-is-trusted-and-what-is-not).
 1. **The draw and the runs.** Curators run as soon as the round is drawn. The exam does not
    exist yet.
 2. **The examiner.** An organisers' machine (`stet examine --follow`) waits for the harvest
-   window, two hours from the draw, to close, and then one more hour, for the sources that
+   window, an hour from the draw, to close, and then one more hour, for the sources that
    publish late (Common Crawl's news files, edits on Hacker News). Then it:
    - harvests the window's fresh text;
    - builds the round's corpus, measures its languages, and drops the fresh items the
@@ -206,8 +206,8 @@ What is left is in [Rules](RULES.md#what-is-trusted-and-what-is-not).
    hash. Other sources' text is not ours to republish; anyone can check it at the source.
    `stet run --round <id>` replays the round on what was published.
 
-The draw, the runs, the exam three hours on, then half an hour or so of grades: three and a
-half to four hours a round. Rounds never overlap. Practice rounds use generated items only, since no fresh text
+The draw, the runs, the exam two hours on, then half an hour or so of grades: about three
+hours a round. Rounds never overlap. Practice rounds use generated items only, since no fresh text
 was written for them.
 
 ## How it is built

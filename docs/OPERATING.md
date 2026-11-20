@@ -74,8 +74,8 @@ log says `upgraded to <version>. Starting again.` To do it by hand: `stet upgrad
 ## The examiner
 
 Every official round's exam is made by an organisers' machine running `stet examine
---follow`. Every minute it looks at the open rounds. Three hours after a round's draw (the
-two-hour harvest window, then an hour for the sources that publish late) it harvests the
+--follow`. Every minute it looks at the open rounds. Two hours after a round's draw (the
+one-hour harvest window, then an hour for the sources that publish late) it harvests the
 window's fresh text, builds the round's corpus, drops the fresh items the corpus already
 holds, generates the round's questions, and posts the exam. It reads every source at once,
 and fetches the corpus meanwhile, so the harvest takes as long as its slowest source
@@ -381,9 +381,9 @@ Set in `apps/stet/deployment.yaml`. The ones that are rules:
 | `STET_SCALE` | the season's | The scale rounds are run at: `standard` |
 
 A full round is 8 + 3 × 3 = 17 entries. Their runs, two of up to twenty minutes each, fit in
-the three hours before the exam. Grading comes after it: one standard training for every
+the two hours before the exam. Grading comes after it: one standard training for every
 script graded, about 18 minutes on a 3090-class GPU, and one for each grader's baseline.
-Raise the sizes only when rounds settle well within four hours of their draw.
+Raise the sizes only when rounds settle well within three hours of their draw.
 
 ## When something is wrong
 

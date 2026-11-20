@@ -61,11 +61,11 @@ until the first rounds measure the spread between them.
 |---|---|
 | The draw | 0 |
 | Curators run, two runs each of up to 1,200 seconds | Within the first hour or so, on the machines around |
-| The harvest window closes | 2 h |
-| The sources that publish late have caught up | 3 h |
-| The examiner harvests every source at once (about ten minutes), checks the corpus and posts the exam | About 3 h 15 m |
+| The harvest window closes | 1 h |
+| The sources that publish late have caught up | 2 h |
+| The examiner harvests every source at once (about ten minutes), checks the corpus and posts the exam | About 2 h 15 m |
 | Grades: one standard training each, about 18 minutes on a rented RTX 3090 or 4070 Ti, under $0.10 | Half an hour or so, a machine for each |
-| The round settles | 3½ to 4 h |
+| The round settles | About 3 h |
 
 A large student, for the finals, trains in about an hour on an RTX 4090.
 
@@ -85,6 +85,15 @@ exam, they made 901 items:
 News, social and technical had fewer candidates than their part, and gave the rest to the
 other two. GitHub's comments are left out: about half of those written now come from coding
 agents under people's own accounts.
+
+**One hour is enough.** Round s1-o00003's window (20 November, from 11:40 UTC), harvested
+again with every source read at once: the two hours took 645 seconds and gave 1,592
+documents; its first hour took 629 seconds and gave 1,156. Chosen for an exam, both made 900
+items, in nearly the same parts (discussion 257 and 267, reference 257 and 267, news 143 and
+141, social 126 and 111, technical 118 and 114), the hour in 70 languages to the two hours' 51.
+Each source still gave most of its share in the hour (Hacker News 97 of 150, Lemmy 107,
+Mastodon 83), and the parts are kept equal by the choosing, not by the harvest. So the window
+is an hour from s1-o00004 on, and a round's exam is made two hours after its draw, not three.
 
 ## What a small model can read in twenty minutes
 

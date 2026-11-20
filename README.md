@@ -44,7 +44,7 @@ stet service install      # leave it running: starts with the machine, upgrades 
 - **Draw after commit.** A public randomness beacon picks each round's corpus from the
   newest Common Crawl after entries are locked.
 - **An exam nobody can know.** Each round's exam is made after its draw: human writing
-  published in the two hours after it, and questions generated from its seed. Seven
+  published in the hour after it, and questions generated from its seed. Seven
   capabilities, each counting the same: knowledge, reading, reasoning, code, agents,
   writing and conversation.
 - **Almost no ink.** 99.9% of what the student reads must be copied byte for byte from the

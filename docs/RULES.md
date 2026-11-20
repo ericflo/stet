@@ -8,7 +8,7 @@ will be set.
 
 A small language model, the **student**, is trained on raw web text for a fixed number of
 tokens and then sits an **exam**. The exam is written after the round is drawn: human
-writing published in the two hours after the draw, and questions made from the round's
+writing published in the hour after the draw, and questions made from the round's
 seed. It covers seven things a pretrained model is for, each counting the same. The model
 and the trainer never change. You change one thing: the data. You write a **curator**, a
 program that is handed raw web pages it has never seen and twenty minutes on one GPU. It
@@ -84,8 +84,8 @@ verifier who runs curators is around to run it.
    cannot pick a favourable drand round either.
 4. **Edit.** Two volunteers each run every curator, in a sandbox, with a time limit. Each
    run writes an edit script.
-5. **Exam.** The round's exam is made after the draw. Fresh text is gathered from the two
-   hours after it, and an hour later, once the sources that publish late have caught up, the
+5. **Exam.** The round's exam is made after the draw. Fresh text is gathered from the hour
+   after it, and an hour later, once the sources that publish late have caught up, the
    organisers' examiner makes the exam and posts it with its hash (see [the exam](#the-exam)).
    The curators have finished running long before.
 6. **Grade.** Other volunteers train the student on what each script says and have it sit
@@ -103,8 +103,8 @@ the last two weeks go first.
 
 Rounds never overlap. If one is still being graded when the next is due, the next is
 drawn at the first ten-minute mark that is at least six minutes after it settles. Since the
-exam is made three hours after the draw, a round takes three and a half to four hours from
-draw to settlement.
+exam is made two hours after the draw, a round takes about three hours from draw to
+settlement.
 
 ## The corpus
 
@@ -155,7 +155,7 @@ The exam asks for seven things a pretrained model is for, and each counts the sa
 | Writing | Human writing of every kind, in every language | Fresh: published after the draw; and generated pairs of a right and a wrong sentence |
 | Conversation | Replies in discussions | Fresh: published after the draw |
 
-**Fresh text** is writing published in the two hours after the draw. It is gathered by kind
+**Fresh text** is writing published in the hour after the draw. It is gathered by kind
 of writing, each kind getting an equal part: reference (new and extended Wikipedia
 articles), news (Common Crawl's news crawl), technical (GitHub issues, pull requests and
 release notes), social (public Bluesky and Mastodon posts) and discussion (replies on Hacker
