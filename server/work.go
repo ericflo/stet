@@ -36,6 +36,7 @@ type WorkRound struct {
 	// is posted. ExamAt is when the exam was posted (0: not yet).
 	GradesEarly int   `json:"grades_early"`
 	ExamAt      int64 `json:"exam_at,omitempty"`
+	DrawnAt     int64 `json:"drawn_at"` // the exam is made from the hours after it
 }
 
 // WorkMachine is one of the organisers' accounts, as the judge sees it now.
@@ -82,7 +83,7 @@ func (a *App) work(s *State) Work {
 	for _, rd := range openRounds(s) {
 		states := j.states(rd)
 		closing := j.closing(states)
-		wr := WorkRound{ID: roundID(a.season.ID, rd.Idx), Entries: len(states), ExamAt: rd.ExamAt}
+		wr := WorkRound{ID: roundID(a.season.ID, rd.Idx), Entries: len(states), ExamAt: rd.ExamAt, DrawnAt: rd.DrawnAt}
 		for _, st := range states {
 			wr.EditsUnderWay += len(st.LiveEdits)
 			if len(st.LiveEdits) == 0 && j.anyone(st, nil) {

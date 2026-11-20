@@ -3492,7 +3492,7 @@ func TestAGraderThatTrainsBeforeTheExamIsHandedItsGradeEarly(t *testing.T) {
 		}
 		return out.Rounds[0]
 	}
-	if wr := work(); wr.GradesEarly != 1 || wr.GradesWanted != 0 || wr.ExamAt != 0 {
+	if wr := work(); wr.GradesEarly != 1 || wr.GradesWanted != 0 || wr.ExamAt != 0 || wr.DrawnAt == 0 {
 		t.Fatalf("before the exam, one grade for a machine that trains early: %+v", wr)
 	}
 	w.idle(carol, false, "a verifier that does not train before the exam waits for it")
