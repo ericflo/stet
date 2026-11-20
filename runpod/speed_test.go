@@ -1,8 +1,10 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 // A kind of GPU is known by the longest name its ID holds as whole words.
@@ -89,5 +91,44 @@ func TestMachinesAreRentedByWhatAGradeCosts(t *testing.T) {
 	want := "RTX 3080 Ti, RTX A4500, RTX A4000, RTX 4000 Ada Generation, RTX 4090, L40S, Mystery 1, A40, RTX A6000, RTX PRO 4000 Blackwell, L4"
 	if s := strings.Join(got, ", "); s != want {
 		t.Fatalf("tried in the order %s", s)
+	}
+}
+
+// For a grade taken before an exam, each kind is rented just in time to have trained by
+// then: none before its time, the cheapest a round among those due, and once no kind can be
+// on time, the quickest first.
+func TestGradersAreRentedJustInTime(t *testing.T) {
+	kind := func(id string, price float64) Choice { return Choice{GPU: GPUType{ID: id}, Price: price} }
+	cs := []Choice{
+		kind("NVIDIA RTX A4000", 0.17), kind("NVIDIA GeForce RTX 3080 Ti", 0.18), kind("NVIDIA GeForce RTX 3090", 0.22),
+		kind("NVIDIA RTX 4000 Ada Generation", 0.28), kind("NVIDIA GeForce RTX 5080", 0.39), kind("NVIDIA GeForce RTX 3090", 0.50),
+		kind("NVIDIA GeForce RTX 4090", 0.89), kind("NVIDIA L40S", 1.09), kind("NVIDIA L4", 0.69),
+	}
+	// Leads, with 20 minutes to boot and 36 for a 3090's first grade: L4 100 minutes, the
+	// 4000 Ada 80, the A4000 76, the 3080 Ti 58, the 3090s 56, the 5080 46, the 4090 40, the
+	// L40S 39.
+	at := func(left time.Duration) string {
+		var got []string
+		for _, c := range forExam(cs, left, 20*time.Minute, 36*time.Minute, time.Minute) {
+			got = append(got, fmt.Sprintf("%s $%.2f", shortGPU(c.GPU.ID), c.Price))
+		}
+		return strings.Join(got, ", ")
+	}
+	for _, c := range []struct {
+		left time.Duration
+		want string
+	}{
+		{90 * time.Minute, ""},
+		{80*time.Minute + 30*time.Second, "RTX 4000 Ada Generation $0.28"},
+		{77 * time.Minute, "RTX A4000 $0.17, RTX 4000 Ada Generation $0.28"},
+		{70 * time.Minute, ""},
+		{57 * time.Minute, "RTX 3080 Ti $0.18, RTX 3090 $0.22, RTX 3090 $0.50"},
+		{41 * time.Minute, "RTX 5080 $0.39, RTX 4090 $0.89"}, // the L40S not yet
+		{39 * time.Minute, "RTX 4090 $0.89, L40S $1.09"},
+		{30 * time.Minute, "L40S $1.09, RTX 4090 $0.89, RTX 5080 $0.39, RTX 3090 $0.22, RTX 3090 $0.50, RTX 3080 Ti $0.18, RTX A4000 $0.17, RTX 4000 Ada Generation $0.28, L4 $0.69"},
+	} {
+		if got := at(c.left); got != c.want {
+			t.Errorf("%s before the exam: %q, want %q", c.left, got, c.want)
+		}
 	}
 }

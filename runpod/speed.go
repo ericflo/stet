@@ -4,6 +4,7 @@ import (
 	"math"
 	"sort"
 	"strings"
+	"time"
 	"unicode"
 )
 
@@ -75,6 +76,47 @@ func byPace(cs []Choice) {
 		}
 		return cs[i].Price < cs[j].Price
 	})
+}
+
+// lead is how long before a round's exam a machine of this kind is rented to take one of its
+// grades: its boot, the install and the round's corpus (--boot), and its first grade of the
+// round, the round's baseline and the student: --first-grade on a 3090, the others by their
+// speed, and one of unknown speed as half a 3090.
+func lead(c Choice, boot, first time.Duration) time.Duration {
+	s := speed(c.GPU.ID)
+	if s <= 0 {
+		s = 0.5
+	}
+	return boot + time.Duration(float64(first)/s)
+}
+
+// forExam is the kinds to rent now for grades taken before an exam due in left, in order.
+// Every machine rented for one waits for the exam once it has trained, so what a grade costs
+// on it is its price over the time it is held, and a kind is rented just in time: when its
+// lead is about what is left (one look sooner, or up to five minutes later), the cheapest a
+// round first. A kind whose time has not come would only wait, and is left until it has;
+// one whose time has passed is left while a quicker kind can still be on time. Once none
+// can, the quickest come first.
+func forExam(cs []Choice, left, boot, first, every time.Duration) []Choice {
+	const slack = 5 * time.Minute
+	held := func(c Choice) float64 { return c.Price * lead(c, boot, first).Hours() }
+	quickest := time.Duration(math.MaxInt64)
+	for _, c := range cs {
+		quickest = min(quickest, lead(c, boot, first))
+	}
+	var out []Choice
+	if left+slack < quickest {
+		out = append(out, cs...)
+		sort.SliceStable(out, func(i, j int) bool { return lead(out[i], boot, first) < lead(out[j], boot, first) })
+		return out
+	}
+	for _, c := range cs {
+		if l := lead(c, boot, first); l >= left-every && l <= left+slack {
+			out = append(out, c)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool { return held(out[i]) < held(out[j]) })
+	return out
 }
 
 // byGrade orders the kinds to try (with --cheapest) by what a grade costs on each, its price over its speed:

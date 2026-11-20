@@ -73,9 +73,14 @@ How many it rents: one for each machine at a grade, which takes no other until i
 (6) scripts a new machine could grade now: `--per-machine 1` gives each its own. A grader
 may take a grade before the round's exam is posted, train the round's baseline and the
 student, and sit the exam once it is: the grades it could take want machines from `--early`
-(45 minutes) before the exam is due, about `--exam-after` (2h12m) after the draw, so that
-they have trained by then and the round settles minutes after the exam (`--early 0`: rent
-them only once it is posted). A curator is run in a minute or two, and the exam its grades
+(90 minutes) before the exam is due, about `--exam-after` (2h12m) after the draw, and each
+kind of GPU is rented just in time to have trained by then: `--boot` (20 minutes) to start,
+install and fetch the round's corpus, and `--first-grade` (36 minutes on a 3090, the others
+by their speed) for the baseline and the student. A machine that has trained only waits for
+the exam, so what a grade costs on it is its price over the time it is held, and of the
+kinds due, the cheapest a round comes first: an RTX A4000 at $0.17 an hour, rented 76
+minutes before, costs less than a 4090 at $0.89 rented 40 minutes before. The round settles
+minutes after the exam (`--early 0`: rent them only once it is posted). A curator is run in a minute or two, and the exam its grades
 wait for is made hours after the draw, so the curators want a machine for every four
 entries to run, and never fewer than two, since each entry is run twice, by two accounts. A
 machine with nothing official to do trains the organisers' own students (a few minutes
@@ -128,7 +133,7 @@ Description=Rent GPUs to grade for Stet
 
 [Service]
 EnvironmentFile=%h/.config/stet-runpod/env
-ExecStart=%h/.local/bin/stet-runpod scale --follow --max 20 --max-price 1.10 --max-hourly 12 --daily-budget 50 --per-machine 1
+ExecStart=%h/.local/bin/stet-runpod scale --follow --max 20 --max-price 1.10 --max-hourly 16 --daily-budget 50 --per-machine 1
 Restart=always
 RestartSec=60
 

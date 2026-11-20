@@ -32,6 +32,8 @@ type Fleet struct {
 	out  io.Writer
 	now  func() time.Time
 	keys []*Key // the pool, by handle
+	// What was last said of graders waiting for their time, said again only once it changes.
+	waitSaid string
 }
 
 // --- the pool of keys ---------------------------------------------------------------------------
@@ -460,7 +462,7 @@ func (f *Fleet) spec(k *Key, gpu, cloud, site string) NewPod {
 
 // launch rents up to n machines on keys that have no pod, in the order chosen, within what
 // may be spent an hour. It says what it did as it goes.
-func (f *Fleet) launch(ctx context.Context, v *View, n, long int) (int, error) {
+func (f *Fleet) launch(ctx context.Context, v *View, n, long, early int, due time.Time) (int, error) {
 	if n <= 0 {
 		return 0, nil
 	}
@@ -473,13 +475,17 @@ func (f *Fleet) launch(ctx context.Context, v *View, n, long int) (int, error) {
 		return 0, err
 	}
 	// The machines for the bigger students first, each chosen for what a student costs on
-	// it; then the rest, the fastest first (or with --cheapest, the cheapest a grade).
+	// it; then those for grades taken before an exam, each kind just in time; then the rest,
+	// the fastest first (or with --cheapest, the cheapest a grade).
+	long = min(long, n)
+	early = min(early, n-long)
 	rented := 0
 	for _, batch := range []struct {
 		n    int
 		long bool
-	}{{min(long, n), true}, {n - min(long, n), false}} {
-		got, err := f.launchSome(ctx, v, batch.n, batch.long, site, vouched)
+		due  time.Time
+	}{{long, true, time.Time{}}, {early, false, due}, {n - long - early, false, time.Time{}}} {
+		got, err := f.launchSome(ctx, v, batch.n, batch.long, batch.due, site, vouched)
 		rented += got
 		if err != nil {
 			return rented, err
@@ -488,13 +494,36 @@ func (f *Fleet) launch(ctx context.Context, v *View, n, long int) (int, error) {
 	return rented, nil
 }
 
-func (f *Fleet) launchSome(ctx context.Context, v *View, n int, long bool, site string, vouched map[string]Vouched) (int, error) {
+func (f *Fleet) launchSome(ctx context.Context, v *View, n int, long bool, due time.Time, site string, vouched map[string]Vouched) (int, error) {
 	if n <= 0 {
 		return 0, nil
 	}
 	gpus, err := f.choices(ctx, long)
 	if err != nil {
 		return 0, err
+	}
+	if !due.IsZero() && len(gpus) > 0 {
+		left := due.Sub(f.now())
+		now := forExam(gpus, left, f.o.Boot, f.o.FirstGrade, f.o.Every)
+		if len(now) == 0 {
+			// None of the kinds free is due yet: the next is rented in its time.
+			next := Choice{}
+			for _, c := range gpus {
+				if l := lead(c, f.o.Boot, f.o.FirstGrade); l < left && (next.GPU.ID == "" || l > lead(next, f.o.Boot, f.o.FirstGrade)) {
+					next = c
+				}
+			}
+			msg := fmt.Sprintf("%d graders wanted for the exam due about %s UTC; none of the kinds free is due yet", n, due.UTC().Format("15:04"))
+			if next.GPU.ID != "" {
+				msg += fmt.Sprintf(": the next, %s at $%.2f an hour, from %s UTC", shortGPU(next.GPU.ID), next.Price, due.Add(-lead(next, f.o.Boot, f.o.FirstGrade)).UTC().Format("15:04"))
+			}
+			if msg != f.waitSaid {
+				f.say("%s", msg)
+				f.waitSaid = msg
+			}
+			return 0, nil
+		}
+		gpus = now
 	}
 	if len(gpus) == 0 {
 		f.say("RunPod has no GPU free now that fits (%s cloud%s%s); trying again later", strings.ToLower(f.o.Cloud), f.ceiling(long), map[bool]string{true: ", --gpu " + strings.Join(f.o.GPUs, ","), false: ""}[len(f.o.GPUs) > 0])

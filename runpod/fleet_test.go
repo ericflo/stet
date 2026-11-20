@@ -824,25 +824,29 @@ func TestStatusJudgesByTheServicesSettings(t *testing.T) {
 	}
 }
 
-// Graders are rented --early before a round's exam is due, for the grades they could take
-// then and train for, and not sooner: the round's draw is asked of the round itself.
+// Graders are rented before a round's exam is due, for the grades they could take then and
+// train for: each kind just in time to have trained by the exam, the cheapest a round first,
+// and none sooner. The round's draw is asked of the round itself.
 func TestGradersAreRentedBeforeTheExam(t *testing.T) {
 	rp, st := newFakeRunPod(t), newFakeStet(t)
 	f, out := testFleet(t, rp, st, 4)
-	f.o.Early, f.o.ExamAfter, f.o.PerWorker = 45*time.Minute, 2*time.Hour+12*time.Minute, 1
+	f.o.Early, f.o.ExamAfter, f.o.PerWorker = 90*time.Minute, 2*time.Hour+12*time.Minute, 1
+	f.o.Boot, f.o.FirstGrade = 20*time.Minute, 36*time.Minute
 	st.work = Work{Runners: 1, Rounds: []WorkRound{{ID: "s1-o00001", Entries: 3, GradesEarly: 3}}}
+	// The secure kinds that fit: the 3080 ($0.20) and the A5000 ($0.27), each 0.85 of a 3090,
+	// are rented 62 minutes before the exam; the PRO 4000 ($0.57), 0.8, 65.
 	st.drawnAt = time.Now().Add(-time.Hour).Unix() // the exam is due in 72 minutes
 	if err := tick(context.Background(), f); err != nil {
 		t.Fatal(err)
 	}
-	if len(rp.created) != 0 {
-		t.Fatalf("rented %d machines more than 45 minutes before the exam\n%s", len(rp.created), out)
+	if len(rp.created) != 0 || !strings.Contains(out.String(), "the next, RTX PRO 4000 Blackwell at $0.57 an hour, from ") {
+		t.Fatalf("rented %d machines 72 minutes before the exam\n%s", len(rp.created), out)
 	}
-	st.drawnAt = time.Now().Add(-90 * time.Minute).Unix() // due in 42 minutes
+	st.drawnAt = time.Now().Add(-69 * time.Minute).Unix() // due in 63 minutes
 	if err := tick(context.Background(), f); err != nil {
 		t.Fatal(err)
 	}
-	if len(rp.created) != 3 {
+	if len(rp.created) != 3 || rp.created[0].GPU.ID != "NVIDIA GeForce RTX 3080" || rp.created[2].GPU.ID != "NVIDIA GeForce RTX 3080" {
 		t.Fatalf("rented %d machines for 3 early grades\n%s", len(rp.created), out)
 	}
 	if !strings.Contains(strings.Join(st.signed, "\n"), "GET /api/v1/rounds/s1-o00001 \n") {

@@ -185,7 +185,7 @@ func cmdStatus(ctx context.Context, f *Fleet) error {
 		fmt.Fprintf(f.out, "Round %s: %d entries open · %d runs a new machine could take · %d running · %d scripts to grade · %d being graded\n",
 			r.ID, r.Entries, r.RunsWanted, r.EditsUnderWay, r.GradesWanted, r.GradesUnderWay)
 		if due := f.o.Policy.examDue(r); !due.IsZero() {
-			fmt.Fprintf(f.out, "Exam due about %s UTC (%s): %d grades a grader could take before it, machines rented for them from %s UTC\n",
+			fmt.Fprintf(f.out, "Exam due about %s UTC (%s): %d grades a grader could take before it, machines rented for them from %s UTC, each kind just in time to train by then\n",
 				due.UTC().Format("15:04"), until(now, due), r.GradesEarly, due.Add(-f.o.Early).UTC().Format("15:04"))
 		}
 	}
@@ -269,7 +269,7 @@ func tick(ctx context.Context, f *Fleet) error {
 	if d.Note != "" && d.Launch < d.Target-d.Live {
 		f.say("%s", d.Note)
 	}
-	_, err = f.launch(ctx, v, d.Launch, d.LaunchLong)
+	_, err = f.launch(ctx, v, d.Launch, d.LaunchLong, d.LaunchEarly, d.ExamDue)
 	return err
 }
 
@@ -316,7 +316,7 @@ func cmdUp(ctx context.Context, f *Fleet, n int) error {
 	if v.Today >= f.o.DailyBudget && f.o.DailyBudget > 0 {
 		return fmt.Errorf("about $%.2f spent today, and the daily budget is $%.2f", v.Today, f.o.DailyBudget)
 	}
-	got, err := f.launch(ctx, v, n, 0)
+	got, err := f.launch(ctx, v, n, 0, 0, time.Time{})
 	if err == nil && got > 0 {
 		f.say("each stops by itself after %d minutes with nothing to grade", f.o.Idle)
 	}

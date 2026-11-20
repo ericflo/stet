@@ -22,8 +22,9 @@ import (
 // run, and enough to clear the scripts already waiting.
 //
 // A grader can take a grade before the round's exam is posted, train, and sit the exam once
-// it is: the grades it could take want machines --early before the exam is due, so that the
-// round settles minutes after it is posted. Rented sooner, a machine would only wait.
+// it is: the grades it could take want machines from --early before the exam is due, each
+// kind rented just in time to have trained by then, so that the round settles minutes after
+// it is posted. Rented sooner, a machine would only wait.
 //
 // An entry waiting for a round has it drawn early only once somebody who runs curators has
 // asked for work. When nobody has, one machine is rented to ask, unless the organisers have
@@ -115,10 +116,10 @@ func (p Policy) examDue(r WorkRound) time.Time {
 
 // early is how many of a round's grades want a machine before its exam is posted: those a
 // grader could take now, once the exam is due within --early. A machine's first grade of a
-// round trains the round's baseline and the student before it can sit the exam, a quarter
-// of an hour on a fast card, and the boot and the corpus take a while too: rented then, it
-// has trained by the time the exam is posted, and the round settles minutes after. None
-// when the exam is posted (its grades are wanted then), or when the draw is not known.
+// round trains the round's baseline and the student before it can sit the exam, and the
+// boot and the corpus take a while too: which kind is rented, and when, so that it has
+// trained by the time the exam is posted, is forExam's. None when the exam is posted (its
+// grades are wanted then), or when the draw is not known.
 func (p Policy) early(r WorkRound, now time.Time) int {
 	due := p.examDue(r)
 	if p.Early <= 0 || r.GradesEarly <= 0 || due.IsZero() || now.Before(due.Add(-p.Early)) {
@@ -188,7 +189,11 @@ type Decision struct {
 	// Of those, the machines rented for the organisers' bigger students: chosen for what one
 	// of them costs on it, under --long-max-price.
 	LaunchLong int
-	End        []Ending // pods to end now
+	// Of the rest, the machines rented for grades taken before an exam, due at ExamDue: each
+	// kind just in time to have trained by then.
+	LaunchEarly int
+	ExamDue     time.Time
+	End         []Ending // pods to end now
 	// Machines no pod is rented for that the server says still hold a job: ended a moment
 	// after they took it, or stopped partway through. What they hold is handed back.
 	Release []*Worker
@@ -250,6 +255,15 @@ func (p Policy) decide(w *Work, workers []*Worker, spentToday float64, now time.
 	if p.LongFarm {
 		d.LaunchLong = min(d.Launch, w.FarmLongWaiting)
 	}
+	for _, r := range w.Rounds {
+		if n := p.early(r, now); n > 0 {
+			if due := p.examDue(r); d.ExamDue.IsZero() || due.Before(d.ExamDue) {
+				d.ExamDue = due
+			}
+			d.LaunchEarly += n
+		}
+	}
+	d.LaunchEarly = min(d.LaunchEarly, d.Launch-d.LaunchLong)
 	sort.SliceStable(d.End, func(i, j int) bool { return d.End[i].Worker.Key.Handle < d.End[j].Worker.Key.Handle })
 	return d
 }
