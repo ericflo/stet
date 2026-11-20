@@ -351,7 +351,10 @@ are graded by **verifiers**: anyone who runs `stet verify`.
   round. When two established grades of a script
   differ by more than that, a third is taken. When both runs write the same script, byte
   for byte, it is nobody's own and either runner may grade it: neither could have made
-  it up.
+  it up. Established verifiers who come free while a round is being graded grade its
+  scripts again, up to four grades of each, and those count too; but once every score
+  has the grades it waits for, no more are handed out, and the round settles as soon as
+  those already under way are in.
 - **The entry's gain is the mean of its two runs.** When they differ by more than 0.09
   bits per byte *(provisional)*, or one failed and the other did not, a third verifier runs the
   curator and the median of the three is the score.

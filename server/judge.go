@@ -1060,7 +1060,7 @@ func (j *judge) offers(st *entryState, q *asker, closing bool) []offer {
 			// it is the entry's only script, and one grade of it would be one machine's
 			// word for the whole score. Beyond that an established account replicates,
 			// like anyone.
-			o.required = counting == 0 && (!v.known || v.self || v.tie || (len(sc.Writers) > 1 && len(v.counted) < 2))
+			o.required = counting == 0 && j.wanting(sc)
 			switch spare := j.spare(st, q); {
 			case o.required && spare && j.unspared(st, sc, q.acct):
 				// Somebody who cannot give the entry a run can give it this grade.
@@ -1078,6 +1078,13 @@ func (j *judge) offers(st *entryState, q *asker, closing bool) []offer {
 		}
 	}
 	return out
+}
+
+// wanting reports whether a script's score is waiting for another grade that counts: it
+// has none, or only its own writer's, or two that disagree, or one when two runs wrote it.
+func (j *judge) wanting(sc *scriptState) bool {
+	v := j.weigh(sc)
+	return !v.known || v.self || v.tie || (len(sc.Writers) > 1 && len(v.counted) < 2)
 }
 
 // settleable reports whether an entry could be given a score as it stands: it has a run,
@@ -1104,6 +1111,32 @@ func (j *judge) settleable(st *entryState) bool {
 		}
 	}
 	return len(st.Runs) > 0
+}
+
+// closing reports whether a round is past handing out grades no score waits for: it could
+// settle now, or every entry has all the grades it waits for, whatever further ones are
+// still under way. A grade handed out after that could only hold the round back, and
+// while it did, the next machine to come free would be handed another to wait for.
+func (j *judge) closing(states []*entryState) bool {
+	if j.ready(states) {
+		return true
+	}
+	for _, st := range states {
+		if len(st.LiveEdits) > 0 || !examPosted(st.Round) || len(st.Runs) == 0 {
+			return false
+		}
+		for _, sc := range st.Scripts {
+			if j.wanting(sc) {
+				return false
+			}
+		}
+		for _, run := range st.Runs {
+			if run.Script == "" && !j.vouched(st, run) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // ready reports whether a round has everything it is going to get: every open entry could
@@ -1253,7 +1286,7 @@ func (a *App) claim(ctx context.Context, acctID int64, h *Hello) (*Handed, error
 		q := &asker{acct: acct, est: j.est[acctID], canEdit: canEdit, gpuMake: hw.gpuMake()}
 		for _, rd := range openRounds(s) {
 			states := j.states(rd)
-			closing := j.ready(states)
+			closing := j.closing(states)
 			for _, st := range states {
 				for _, o := range j.offers(st, q, closing) {
 					// Lowest score first; ties at random so that nobody can predict or steer

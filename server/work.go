@@ -74,7 +74,7 @@ func (a *App) work(s *State) Work {
 	runner := &asker{acct: &Account{ID: -2, Anchor: true, Worker: true}, est: true, canEdit: true, gpuMake: "cuda"}
 	for _, rd := range openRounds(s) {
 		states := j.states(rd)
-		closing := j.ready(states)
+		closing := j.closing(states)
 		wr := WorkRound{ID: roundID(a.season.ID, rd.Idx), Entries: len(states)}
 		for _, st := range states {
 			wr.EditsUnderWay += len(st.LiveEdits)

@@ -3439,6 +3439,35 @@ func TestOnlyAnEstablishedAccountOnAMachineUpToTheFloorIsHandedEditors(t *testin
 	w.check()
 }
 
+// A round waits for the grades it has handed out, but once every score has the grades it
+// waits for it hands out no more: each would hold the round back, and while it did, the
+// next machine to come free would be handed another to wait for.
+func TestARoundHandsOutNoFurtherGradesOnceItsScoresHaveThem(t *testing.T) {
+	pub, priv := newKey()
+	w := newWorld(t, pub)
+	anchor, alice, bob, carol, dave := w.join("anchor-one", priv), w.join("alice", nil), w.join("bob", nil), w.join("carol", nil), w.join("dave", nil)
+	w.submit(alice, "tidy", "print('v1')")
+	w.established("bob", "carol", "dave")
+	idx := w.draw()
+	w.run(anchor, "{\"doc\": 1}\n")
+	// Bob's grade is the one the score waits for. Carol, free while he works, takes another.
+	cb, cc := w.claim(bob, false), w.claim(carol, false)
+	if cb.Job == nil || cc.Job == nil || cb.Job.Kind != "grade" || cc.Job.Kind != "grade" {
+		t.Fatalf("two established graders: %+v %+v", cb.Job, cc.Job)
+	}
+	if code, status := w.report(bob, cb, 5.5); code != 200 || status != "pending" {
+		t.Fatalf("the round should wait for the grade carol is making: HTTP %d %s", code, status)
+	}
+	w.idle(dave, false, "the score has the grade it waits for")
+	if code, status := w.report(carol, cc, 5.45); code != 200 || status != "settled" {
+		t.Fatalf("HTTP %d %s", code, status)
+	}
+	w.check()
+	if e := w.entry(idx, "tidy"); len(e.Runs[0].Grades) != 2 {
+		t.Fatalf("the grades behind the score: %+v", e.Runs[0].Grades)
+	}
+}
+
 func TestTwoEstablishedGradesThatDisagreeGetAThird(t *testing.T) {
 	start := func(third bool) (*world, int, *actor, *actor, *actor, *claimed, *claimed) {
 		pub, priv := newKey()
