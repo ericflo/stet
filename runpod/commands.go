@@ -175,7 +175,11 @@ func cmdStatus(ctx context.Context, f *Fleet) error {
 		if w.Rental.Market != "runpod" {
 			card += " (" + marketTitle(w.Rental.Market) + ")"
 		}
-		fmt.Fprintf(f.out, "  %-14s %-8s %-26s $%.2f/h  up %s\n", w.Key.Handle, st, card, w.Rental.Price, now.Sub(w.Rental.Created).Round(time.Minute))
+		note := ""
+		if st == "starting" || st == "stopped" || st == "quiet" || w.Rental.Up == "no" {
+			note = "  · " + w.Rental.Detail // what its market says of it, while it is not at work
+		}
+		fmt.Fprintf(f.out, "  %-14s %-8s %-26s $%.2f/h  up %s%s\n", w.Key.Handle, st, card, w.Rental.Price, now.Sub(w.Rental.Created).Round(time.Minute), note)
 	}
 	if rented == 0 {
 		fmt.Fprintf(f.out, "Nothing rented (%d keys in the pool).\n", len(v.Workers))
@@ -319,10 +323,10 @@ func cmdDown(ctx context.Context, f *Fleet, force bool, handles []string) error 
 				f.say("left %s, which is %s: it stops by itself once there is nothing more for it. --force ends it now, and hands its job back", w.Key.Handle, st)
 				continue
 			}
-			endings = append(endings, Ending{w, "ended by hand, in the middle of a job; it hands the job back"})
+			endings = append(endings, Ending{Worker: w, Why: "ended by hand, in the middle of a job; it hands the job back"})
 			continue
 		}
-		endings = append(endings, Ending{w, "ended by hand"})
+		endings = append(endings, Ending{Worker: w, Why: "ended by hand"})
 	}
 	for h := range want {
 		if !found[h] {

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -208,7 +209,14 @@ type saladGroup struct {
 	Priority     string    `json:"priority"`
 	CreateTime   time.Time `json:"create_time"`
 	CurrentState struct {
-		Status string `json:"status"`
+		Status      string  `json:"status"`
+		Description *string `json:"description"`
+		Counts      struct {
+			Allocating int `json:"allocating_count"`
+			Creating   int `json:"creating_count"`
+			Running    int `json:"running_count"`
+			Stopping   int `json:"stopping_count"`
+		} `json:"instance_status_counts"`
 	} `json:"current_state"`
 	Container struct {
 		Resources struct {
@@ -246,6 +254,21 @@ func (m *saladMarket) Rentals(ctx context.Context) ([]Rental, error) {
 	var rentals []Rental
 	for _, g := range out.Items {
 		r := Rental{Market: "salad", ID: g.Name, Name: g.DisplayName, State: saladState(g.CurrentState.Status), Status: g.CurrentState.Status, Created: g.CreateTime}
+		c := g.CurrentState.Counts
+		switch {
+		case c.Running > 0:
+			r.Up, r.Phase = "yes", "running"
+		case c.Creating > 0:
+			r.Up, r.Phase = "no", "creating: pulling the image"
+		case c.Allocating > 0:
+			r.Up, r.Phase = "no", "allocating: looking for a node"
+		default:
+			r.Up, r.Phase = "no", g.CurrentState.Status
+		}
+		r.Detail = r.Phase
+		if d := g.CurrentState.Description; d != nil && *d != "" {
+			r.Detail += ": " + *d
+		}
 		if cs := g.Container.Resources.GPUClasses; len(cs) > 0 {
 			if c, ok := byID[cs[0]]; ok {
 				r.Card, _ = saladCard(c.Name)
@@ -255,6 +278,15 @@ func (m *saladMarket) Rentals(ctx context.Context) ([]Rental, error) {
 		rentals = append(rentals, r)
 	}
 	return rentals, nil
+}
+
+// Logs are what Salad has said of the container group: its system's log.
+func (m *saladMarket) Logs(ctx context.Context, id string, n int) ([]string, error) {
+	var raw json.RawMessage
+	if _, err := m.a.do(ctx, "GET", m.orgPath()+"/projects/"+url.PathEscape(m.project)+"/containers/"+url.PathEscape(id)+"/system-logs", nil, &raw); err != nil {
+		return nil, err
+	}
+	return lastLines(logLines(raw), n), nil
 }
 
 // End deletes a container group; one already gone is not an error.

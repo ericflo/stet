@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"os"
 	"strings"
 	"time"
@@ -37,8 +38,32 @@ func expectedStart(trust string) float64 {
 
 const startWeight = 4
 
-// startCount is how many machines were seen to start, of those whose start was seen or missed.
-type startCount struct{ started, rented int }
+// startCount is how many machines were seen to start, of those whose start was seen or missed,
+// and why those that did not.
+type startCount struct {
+	started, rented int
+	causes          map[string]int
+}
+
+// failures says why a kind's machines did not start: "2 no container, 1 gone".
+func (c startCount) failures() string {
+	var parts []string
+	for _, cause := range []string{causeNoContainer, causeGone, causeInstall, causeDriver, causeSilent, causeContainer, causeMarketStopped, causeUnknown, "never asked"} {
+		if n := c.causes[cause]; n > 0 {
+			parts = append(parts, fmt.Sprintf("%d %s", n, cause))
+		}
+	}
+	return strings.Join(parts, ", ")
+}
+
+// kind is what was seen of an offer's kind.
+func (s startRates) kind(o Offer) startCount {
+	market := o.Market
+	if market == "" {
+		market = "runpod"
+	}
+	return s.byKind[kindKey(market, o.Card, o.Trust)]
+}
 
 type startRates struct {
 	byKind, byClass map[string]startCount
@@ -77,7 +102,7 @@ func (f *Fleet) startRates() startRates {
 			return // rented before it was kept
 		}
 		started := r.Asked
-		if !started && !r.Gone && end.Sub(r.Start) < graceAtLeast {
+		if !started && r.Cause == "" && !r.Gone && end.Sub(r.Start) < graceAtLeast {
 			return // ended by the fleet before it could be said
 		}
 		for _, k := range []string{kindKey(r.market(), r.GPU, r.Cloud)} {
@@ -85,6 +110,15 @@ func (f *Fleet) startRates() startRates {
 			c.rented++
 			if started {
 				c.started++
+			} else {
+				if c.causes == nil {
+					c.causes = map[string]int{}
+				}
+				cause := r.Cause
+				if cause == "" {
+					cause = "never asked"
+				}
+				c.causes[cause]++
 			}
 			s.byKind[k] = c
 		}

@@ -65,7 +65,11 @@ type Pod struct {
 	} `json:"gpu"`
 	DataCenterID string    `json:"dataCenterId"`
 	CreatedAt    time.Time `json:"createdAt"`
-	SSH          *struct {
+	// Runtime is there once its container has started: how long it has been up, seconds.
+	Runtime *struct {
+		Uptime int `json:"uptime"`
+	} `json:"runtime"`
+	SSH *struct {
 		Direct *struct {
 			Command string `json:"command"`
 		} `json:"direct"`

@@ -32,6 +32,7 @@ func (f *Fleet) listOffers(ctx context.Context, long, every bool) error {
 	if err != nil {
 		return err
 	}
+	rates := f.startRates()
 	what := "What would be rented, the fastest first (the cheapest where they are as fast)"
 	if f.o.Cheapest {
 		what = "What would be rented, by what a grade costs on each"
@@ -77,7 +78,14 @@ func (f *Fleet) listOffers(ctx context.Context, long, every bool) error {
 		}
 		mark := ""
 		if c.Rate > 0 && c.Rate < 0.995 {
-			mark = fmt.Sprintf("  (starts %.0f%%)", 100*c.Rate)
+			mark = fmt.Sprintf("  (starts %.0f%%", 100*c.Rate)
+			if k := rates.kind(c); k.rented > 0 {
+				mark += fmt.Sprintf("; %d of %d seen started", k.started, k.rented)
+				if why := k.failures(); why != "" {
+					mark += ": " + why
+				}
+			}
+			mark += ")"
 		}
 		if !f.armed(c.Market) {
 			mark += "  (not armed)"

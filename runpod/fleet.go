@@ -41,11 +41,13 @@ type Fleet struct {
 	// What was last said of each market whose offers could not be had, said again only
 	// once it changes.
 	offerSaid map[string]string
-	st        *Stet
-	op        *Key // the organisers' own key, for asking what is waiting
-	out       io.Writer
-	now       func() time.Time
-	keys      []*Key // the pool, by handle
+	// What was last seen of each machine rented, to note what changes (seen.go).
+	seen map[string]seenRental
+	st   *Stet
+	op   *Key // the organisers' own key, for asking what is waiting
+	out  io.Writer
+	now  func() time.Time
+	keys []*Key // the pool, by handle
 	// What was last said of graders waiting for their time, said again only once it changes.
 	waitSaid string
 	// What has been seen machines take (calibrate.go): read once, kept when it changes, and
@@ -184,7 +186,10 @@ type podRecord struct {
 	Tracked bool `json:"tracked,omitempty"`
 	Asked   bool `json:"asked,omitempty"`
 	// Gone: the market stopped listing it, or stopped it, without the fleet ending it.
-	Gone   bool      `json:"gone,omitempty"`
+	Gone bool `json:"gone,omitempty"`
+	// Why it ended, as the fleet said it, and the cause when it failed (seen.go).
+	Why    string    `json:"why,omitempty"`
+	Cause  string    `json:"cause,omitempty"`
 	Handle string    `json:"handle"`
 	GPU    string    `json:"gpu"`
 	Cloud  string    `json:"cloud"`
@@ -304,6 +309,23 @@ func (f *Fleet) note(l *ledger, rentals []Rental, answered map[string]bool) erro
 		}
 		if p := listed[key]; p == nil || !p.live() {
 			r.Gone = true
+			gone := Rental{Market: r.market(), ID: r.ID, Card: r.GPU}
+			why := "its market no longer lists it"
+			if p != nil {
+				gone = *p
+				why = "its market has it " + strings.ToLower(p.Status)
+				if p.Detail != "" && p.Detail != strings.ToLower(p.Status) {
+					why += ": " + p.Detail
+				}
+			}
+			if r.Asked {
+				why = "ended by itself, or by its market: " + why
+			} else {
+				r.Cause = causeGone
+				why = "taken away before it asked for work: " + why
+			}
+			r.Why = why
+			f.event(&gone, r.Handle, "gone", why)
 			if err := f.retire(l, key, minTime(now, r.Alive.Add(2*f.o.Every))); err != nil {
 				return err
 			}
@@ -549,6 +571,7 @@ func (f *Fleet) look(ctx context.Context) (*View, error) {
 	}
 	v := &View{Work: work, Ledger: l}
 	asked := false
+	live := map[string]bool{}
 	for _, k := range f.keys {
 		w := &Worker{Key: k, Machine: work.machine(k.Handle)}
 		// The newest machine rented with that key. Ended ones are not listed at all; one that
@@ -564,6 +587,7 @@ func (f *Fleet) look(ctx context.Context) (*View, error) {
 				w.Plan = rec.Grades
 				if !rec.Asked && w.Machine != nil && w.Machine.LastSeen >= w.Rental.Created.Unix() {
 					rec.Asked, asked = true, true
+					f.event(w.Rental, k.Handle, "asked", fmt.Sprintf("first asked for work %s after it was rented", time.Unix(w.Machine.LastSeen, 0).Sub(w.Rental.Created).Round(time.Second)))
 				}
 			}
 			w.Grace, w.Speed = f.grace(w.Rental.Market), f.speedOf(w.Rental.Card)
@@ -575,8 +599,13 @@ func (f *Fleet) look(ctx context.Context) (*View, error) {
 			v.Hourly += w.Rental.Price
 			f.seeStart(w)
 		}
+		if w.Rental != nil {
+			f.watch(w, f.now())
+			live[ledgerKey(w.Rental.Market, w.Rental.ID)] = true
+		}
 		v.Workers = append(v.Workers, w)
 	}
+	f.forget(live)
 	if asked {
 		if err := f.writeLedger(l); err != nil {
 			return nil, err
@@ -1009,6 +1038,7 @@ func (f *Fleet) rent(ctx context.Context, v *View, k *Key, gpus []Offer, site st
 			}
 		}
 		v.Ledger.Pods[ledgerKey(r.Market, r.ID)] = rec
+		f.event(r, k.Handle, "rented", fmt.Sprintf("%s, %s, $%.2f an hour, from offer %s%s", c.Card, c.Trust, r.Price, c.ID, plan))
 		if err := f.writeLedger(v.Ledger); err != nil {
 			return r, err
 		}
@@ -1056,6 +1086,13 @@ func (f *Fleet) end(ctx context.Context, v *View, endings []Ending) error {
 			f.say("could not end %s: there is no key for %s now", e.Worker.Key.Handle, marketTitle(r.Market))
 			continue
 		}
+		why, cause := e.Why, ""
+		if e.Failed {
+			// What became of it is asked before it is gone: its market's word, and its log.
+			var said string
+			cause, said = f.diagnose(ctx, e.Worker)
+			why += ": " + said
+		}
 		if err := m.End(ctx, r.ID); err != nil {
 			// Said, and tried again at the next look; the others are ended meanwhile.
 			f.say("could not end %s on %s: %v", e.Worker.Key.Handle, marketTitle(r.Market), err)
@@ -1064,10 +1101,15 @@ func (f *Fleet) end(ctx context.Context, v *View, endings []Ending) error {
 		if r.live() {
 			v.Hourly -= r.Price
 		}
-		if err := f.retire(v.Ledger, ledgerKey(r.Market, r.ID), f.now()); err != nil {
+		key := ledgerKey(r.Market, r.ID)
+		if rec := v.Ledger.Pods[key]; rec != nil {
+			rec.Why, rec.Cause = why, cause
+		}
+		f.event(r, e.Worker.Key.Handle, "ended", why)
+		if err := f.retire(v.Ledger, key, f.now()); err != nil {
 			return err
 		}
-		f.say("ended %s: %s", e.Worker.Key.Handle, e.Why)
+		f.say("ended %s: %s", e.Worker.Key.Handle, why)
 		e.Worker.Rental = nil
 		// What it held is handed back now: a grade held before an exam is kept for its
 		// machine until then, and an ended machine would keep it from anybody else.

@@ -263,10 +263,12 @@ func (w *Worker) grace(p Policy) time.Duration {
 	return p.Grace
 }
 
-// Ending is a machine to end, and why.
+// Ending is a machine to end, and why. Failed: it never asked for work, or went quiet; what
+// became of it is asked of its market before it is ended.
 type Ending struct {
 	Worker *Worker
 	Why    string
+	Failed bool
 }
 
 // Decision is one look at the work and the machines.
@@ -349,9 +351,9 @@ func (p Policy) decideNext(w *Work, workers []*Worker, spentToday float64, now t
 				d.Release = append(d.Release, wk)
 			}
 		case "stopped":
-			d.End = append(d.End, Ending{wk, "it stopped, or never asked for work"})
+			d.End = append(d.End, Ending{wk, "it stopped, or never asked for work", true})
 		case "quiet":
-			d.End = append(d.End, Ending{wk, fmt.Sprintf("nothing heard from it for %s, and it holds no job", now.Sub(time.Unix(wk.Machine.LastSeen, 0)).Round(time.Minute))})
+			d.End = append(d.End, Ending{wk, fmt.Sprintf("nothing heard from it for %s, and it holds no job", now.Sub(time.Unix(wk.Machine.LastSeen, 0)).Round(time.Minute)), true})
 		default:
 			d.Live++
 			if st == "waiting" || st == "starting" {
@@ -379,7 +381,7 @@ func (p Policy) decideNext(w *Work, workers []*Worker, spentToday float64, now t
 			if kept[wk] {
 				continue
 			}
-			d.End = append(d.End, Ending{wk, "nothing is waiting for it"})
+			d.End = append(d.End, Ending{Worker: wk, Why: "nothing is waiting for it"})
 			d.Live--
 		}
 		return d

@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/url"
 	"strings"
+	"time"
 )
 
 // runpodMarket is RunPod behind the Market interface: the client stet-runpod had, unchanged.
@@ -102,7 +103,30 @@ func podRental(p *Pod) Rental {
 	case "EXITED", "ERROR", "TERMINATED":
 		state = "stopped"
 	}
-	return Rental{Market: "runpod", ID: p.ID, Name: p.Name, Card: p.gpuName(), Price: p.Cost, State: state, Status: p.Status, Created: p.CreatedAt}
+	r := Rental{Market: "runpod", ID: p.ID, Name: p.Name, Card: p.gpuName(), Price: p.Cost, State: state, Status: p.Status, Created: p.CreatedAt}
+	switch {
+	case p.Runtime != nil:
+		r.UpFor = time.Duration(p.Runtime.Uptime) * time.Second
+		r.Up, r.Phase, r.Detail = "yes", "container up", "container up "+r.UpFor.Round(time.Minute).String()
+	case state == "starting" || state == "running":
+		r.Up, r.Phase, r.Detail = "no", "no container yet", "no container yet"
+	default:
+		r.Phase, r.Detail = strings.ToLower(p.Status), strings.ToLower(p.Status)
+	}
+	return r
+}
+
+// Logs are what RunPod and the pod's container have said of it: the last n lines.
+func (m *runpodMarket) Logs(ctx context.Context, id string, n int) ([]string, error) {
+	var lines []string
+	err := m.rp.logs(ctx, id, false, func(l LogLine) {
+		ts := l.TS
+		if len(ts) >= 19 {
+			ts = ts[11:19]
+		}
+		lines = append(lines, ts+"  "+l.Source+": "+l.Line)
+	})
+	return lastLines(lines, n), err
 }
 
 func (m *runpodMarket) End(ctx context.Context, id string) error { return m.rp.terminate(ctx, id) }

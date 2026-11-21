@@ -1,11 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"math"
+	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -167,6 +172,7 @@ type vastInstance struct {
 	ActualStatus   *string `json:"actual_status"`
 	IntendedStatus string  `json:"intended_status"`
 	CurState       string  `json:"cur_state"`
+	StatusMsg      *string `json:"status_msg"`
 	GPUName        string  `json:"gpu_name"`
 	DPHTotal       float64 `json:"dph_total"`
 	StartDate      float64 `json:"start_date"`
@@ -212,8 +218,20 @@ func (m *vastMarket) Rentals(ctx context.Context) ([]Rental, error) {
 			if i.Label != nil {
 				name = *i.Label
 			}
-			all = append(all, Rental{Market: "vast", ID: strconv.FormatInt(i.ID, 10), Name: name, Card: vastCard(i.GPUName),
-				Price: i.DPHTotal, State: state, Status: status, Created: time.Unix(int64(i.StartDate), 0)})
+			r := Rental{Market: "vast", ID: strconv.FormatInt(i.ID, 10), Name: name, Card: vastCard(i.GPUName),
+				Price: i.DPHTotal, State: state, Status: status, Created: time.Unix(int64(i.StartDate), 0)}
+			r.Phase = status
+			if r.Phase == "" {
+				r.Phase = "scheduling"
+			}
+			r.Up = map[bool]string{true: "yes", false: "no"}[status == "running"]
+			if i.StatusMsg != nil {
+				r.Detail = strings.TrimSpace(*i.StatusMsg)
+			}
+			if r.Detail == "" {
+				r.Detail = r.Phase
+			}
+			all = append(all, r)
 		}
 		if out.NextToken == nil || *out.NextToken == "" {
 			return all, nil
@@ -221,6 +239,39 @@ func (m *vastMarket) Rentals(ctx context.Context) ([]Rental, error) {
 		after = *out.NextToken
 	}
 	return all, fmt.Errorf("Vast listed more than 2,500 instances")
+}
+
+// Logs are what the instance's container has said: Vast puts the last n lines where they can be
+// fetched, a moment after it is asked.
+func (m *vastMarket) Logs(ctx context.Context, id string, n int) ([]string, error) {
+	var out struct {
+		ResultURL string `json:"result_url"`
+	}
+	if _, err := m.a.do(ctx, "PUT", "/api/v0/instances/request_logs/"+url.PathEscape(id)+"/", map[string]any{"tail": strconv.Itoa(n)}, &out); err != nil {
+		return nil, err
+	}
+	if out.ResultURL == "" {
+		return nil, errors.New("Vast gave no place to fetch the logs from")
+	}
+	for try := 0; try < 8; try++ {
+		if err := m.a.sleep(ctx, 3*time.Second); err != nil {
+			return nil, err
+		}
+		req, err := http.NewRequestWithContext(ctx, "GET", out.ResultURL, nil)
+		if err != nil {
+			return nil, err
+		}
+		resp, err := m.a.http.Do(req)
+		if err != nil {
+			continue
+		}
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+		resp.Body.Close()
+		if resp.StatusCode == 200 && !bytes.Contains(data, []byte("<Error>")) {
+			return lastLines(strings.Split(strings.TrimRight(string(data), "\n"), "\n"), n), nil
+		}
+	}
+	return nil, errors.New("Vast's logs were not there to fetch")
 }
 
 // End destroys an instance: stopped, its disk would still be billed. One already gone is not

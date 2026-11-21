@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -187,12 +188,14 @@ func (m *liumMarket) Rent(ctx context.Context, o Offer, l Launch) (*Rental, erro
 
 // liumPod is one of the account's pods, of the fields read here.
 type liumPod struct {
-	ID        string   `json:"id"`
-	PodName   string   `json:"pod_name"`
-	GPUName   string   `json:"gpu_name"`
-	Status    string   `json:"status"`
-	Price     *float64 `json:"price"`
-	CreatedAt string   `json:"created_at"` // without a zone: UTC
+	ID          string   `json:"id"`
+	PodName     string   `json:"pod_name"`
+	GPUName     string   `json:"gpu_name"`
+	Status      string   `json:"status"`
+	Price       *float64 `json:"price"`
+	CreatedAt   string   `json:"created_at"`   // without a zone: UTC
+	Phase       *string  `json:"phase"`        // while it is created: "pulling image", "starting container", …
+	NodeOffline bool     `json:"node_offline"` // its node fails its health checks
 }
 
 // liumTime reads Lium's times, which come with or without a zone (UTC when without).
@@ -232,10 +235,36 @@ func (m *liumMarket) Rentals(ctx context.Context) ([]Rental, error) {
 		if p.Price != nil {
 			price = *p.Price
 		}
-		out = append(out, Rental{Market: "lium", ID: p.ID, Name: p.PodName, Card: shortGPU(p.GPUName), Price: price,
-			State: liumState(p.Status), Status: p.Status, Created: liumTime(p.CreatedAt)})
+		r := Rental{Market: "lium", ID: p.ID, Name: p.PodName, Card: shortGPU(p.GPUName), Price: price,
+			State: liumState(p.Status), Status: p.Status, Created: liumTime(p.CreatedAt)}
+		r.Phase = strings.ToLower(p.Status)
+		if p.Phase != nil && *p.Phase != "" {
+			r.Phase += ": " + *p.Phase
+		}
+		r.Up = map[bool]string{true: "yes", false: "no"}[p.Status == "RUNNING"]
+		r.Detail = r.Phase
+		if p.NodeOffline {
+			r.Phase += " (node offline)"
+			r.Detail = r.Phase
+		}
+		out = append(out, r)
 	}
 	return out, nil
+}
+
+// Logs are what Lium has of a pod: its container's, and its own of making it.
+func (m *liumMarket) Logs(ctx context.Context, id string, n int) ([]string, error) {
+	var raw json.RawMessage
+	if _, err := m.a.do(ctx, "GET", "/pods/"+url.PathEscape(id)+"/logs", nil, &raw); err != nil {
+		var pod struct {
+			PodStatus json.RawMessage `json:"pod_status"`
+		}
+		if _, perr := m.a.do(ctx, "GET", "/pods/"+url.PathEscape(id), nil, &pod); perr != nil || len(pod.PodStatus) == 0 {
+			return nil, err
+		}
+		return lastLines(logLines(pod.PodStatus), n), nil
+	}
+	return lastLines(logLines(raw), n), nil
 }
 
 // End deletes a pod; one already gone is not an error.

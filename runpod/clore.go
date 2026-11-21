@@ -288,9 +288,10 @@ func (m *cloreMarket) orders(ctx context.Context) ([]cloreRental, error) {
 		if o.Expired {
 			state = "gone"
 		}
+		status := map[bool]string{true: "expired", false: "active"}[o.Expired]
 		rentals = append(rentals, cloreRental{Rental{Market: "clore", ID: strconv.FormatInt(o.ID, 10), Card: shortGPU(card),
-			Price: o.Price / 24 * (1 + cloreFee), State: state, Status: map[bool]string{true: "expired", false: "active"}[o.Expired],
-			Created: time.Unix(o.CT, 0)}, o.SI})
+			Price: o.Price / 24 * (1 + cloreFee), State: state, Status: status, Created: time.Unix(o.CT, 0),
+			Phase: "order " + status, Detail: "order " + status + " (Clore says no more of it)"}, o.SI})
 	}
 	return rentals, nil
 }

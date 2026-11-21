@@ -24,14 +24,15 @@ import (
 type fakeRunPod struct {
 	mu      sync.Mutex
 	pods    map[string]*Pod
-	noRoom  map[string]bool // GPU kinds it has none of
+	noRoom  map[string]bool     // GPU kinds it has none of
+	logs    map[string][]string // what each pod's container said
 	created []NewPod
 	n       int
 	srv     *httptest.Server
 }
 
 func newFakeRunPod(t *testing.T) *fakeRunPod {
-	f := &fakeRunPod{pods: map[string]*Pod{}, noRoom: map[string]bool{}}
+	f := &fakeRunPod{pods: map[string]*Pod{}, noRoom: map[string]bool{}, logs: map[string][]string{}}
 	f.srv = httptest.NewServer(http.HandlerFunc(f.serve))
 	t.Cleanup(f.srv.Close)
 	return f
@@ -68,6 +69,13 @@ func (f *fakeRunPod) serve(w http.ResponseWriter, r *http.Request) {
 			{"id": "NVIDIA RTX PRO 4000 Blackwell", "name": "RTX PRO 4000", "manufacturer": "NVIDIA", "memory": 24, "price": map[string]any{"secure": 0.57}, "availability": "LOW"},
 			{"id": "AMD Instinct MI300X OAM", "name": "MI300X", "manufacturer": "AMD", "memory": 192, "price": map[string]any{"secure": 0.1}, "availability": "HIGH"},
 		}})
+	case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/pods/") && strings.HasSuffix(r.URL.Path, "/logs"):
+		id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/pods/"), "/logs")
+		w.Header().Set("Content-Type", "text/event-stream")
+		for _, l := range f.logs[id] {
+			raw, _ := json.Marshal(LogLine{Source: "container", Line: l, TS: "2026-11-21T08:00:00Z"})
+			fmt.Fprintf(w, "data: %s\n\n", raw)
+		}
 	case r.Method == "GET" && r.URL.Path == "/pods":
 		var list []Pod
 		for _, p := range f.pods {
@@ -1063,4 +1071,83 @@ func TestGraceIsLearnedPerMarket(t *testing.T) {
 func everyHostStarts(t *testing.T) {
 	startPrior, learnStarts = func(string) float64 { return 1 }, false
 	t.Cleanup(func() { startPrior, learnStarts = expectedStart, true })
+}
+
+// A machine ended for never asking for work is ended with what became of it: its market never
+// started its container, or its container ran and its last words say why. The cause is kept in
+// its record and counted against its kind, and what was seen of it is its story.
+func TestWhyAMachineFailedIsSaidAndKept(t *testing.T) {
+	rp, st := newFakeRunPod(t), newFakeStet(t)
+	f, out := testFleet(t, rp, st, 2)
+	st.work = *round(30, 1, 0, 0)
+	if err := tick(context.Background(), f); err != nil || len(rp.created) != 2 {
+		t.Fatalf("rented %d (%v)", len(rp.created), err)
+	}
+	// pod1 never gets a container; pod2's container runs, and stet cannot be installed. Both
+	// are older than any Grace.
+	long := time.Now().Add(-40 * time.Minute)
+	rp.pods["pod1"].CreatedAt = long
+	rp.pods["pod2"].CreatedAt = long
+	rp.pods["pod2"].Runtime = &struct {
+		Uptime int `json:"uptime"`
+	}{Uptime: 2300}
+	rp.logs["pod2"] = []string{"[stet-worker 08:01:00] installing stet from https://www.stet.test/install.sh",
+		"error: Failed to install: nvidia_cublas: No space left on device (os error 28)",
+		"[stet-worker 08:03:00] the install did not work; trying again"}
+	out.Reset()
+	if err := tick(context.Background(), f); err != nil {
+		t.Fatal(err)
+	}
+	said := out.String()
+	if !strings.Contains(said, "ended stet-rp-01: it stopped, or never asked for work: RunPod never started its container in 40m0s (no container yet)") ||
+		!strings.Contains(said, "ended stet-rp-02: it stopped, or never asked for work: stet could not be installed; last it said: [stet-worker 08:03:00] the install did not work; trying again") {
+		t.Fatalf("said:\n%s", said)
+	}
+	causes := map[string]string{}
+	raw, _ := os.ReadFile(f.spentLog())
+	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+		var r podRecord
+		json.Unmarshal([]byte(line), &r)
+		causes[r.ID] = r.Cause
+	}
+	if causes["pod1"] != causeNoContainer || causes["pod2"] != causeInstall {
+		t.Fatalf("kept causes %v", causes)
+	}
+	if k := f.startRates().kind(Offer{Market: "runpod", Card: "RTX 3080", Trust: "secure"}); k.rented != 2 || k.failures() != "1 no container, 1 install" {
+		t.Fatalf("counted as %+v: %s", k, k.failures())
+	}
+	if _, err := os.Stat(f.logPath("pod2")); err != nil {
+		t.Fatalf("pod2's last words were not kept: %v", err)
+	}
+	out.Reset()
+	if err := cmdMachine(f, "stet-rp-02", 3); err != nil {
+		t.Fatal(err)
+	}
+	story := out.String()
+	for _, want := range []string{"rented    RTX 3080, secure, $0.20 an hour", "phase     container up", "state     stopped", "ended     it stopped, or never asked for work: stet could not be installed", "No space left on device"} {
+		if !strings.Contains(story, want) {
+			t.Fatalf("the story lacks %q:\n%s", want, story)
+		}
+	}
+}
+
+// What a machine last said says why it never asked for work.
+func TestTheCauseIsReadFromWhatTheMachineSaid(t *testing.T) {
+	for want, lines := range map[string][]string{
+		causeDriver:    {"[stet-worker 08:00:01] driver 570.86.10 is older than 580: asking Salad for another machine"},
+		causeInstall:   {"[stet-worker 08:00:01] installing stet from https://x/install.sh", "[stet-worker 08:04:00] stet could not be installed"},
+		causeSilent:    {"[stet-worker 08:00:01] stet 0.4.4", "stet verify · stet-rp-01 · NVIDIA GeForce RTX 3090"},
+		causeContainer: {"start container", "something else"},
+	} {
+		if got := causeOf(lines); got != want {
+			t.Errorf("%q: %s, want %s", lines, got, want)
+		}
+	}
+	got := logLines([]byte(`{"items": [{"event_name": "Pulling image", "event_time": "2026-11-21T08:00:01Z"}, {"event_name": "Image pulled", "event_time": "2026-11-21T08:02:11Z"}]}`))
+	if strings.Join(got, "|") != "08:00:01  Pulling image|08:02:11  Image pulled" {
+		t.Errorf("Salad's system log read as %q", got)
+	}
+	if got := logLines([]byte(`[{"log_text": "Created Docker Container", "received_at": "2026-11-21T07:24:09.728703"}]`)); len(got) != 1 || got[0] != "07:24:09  Created Docker Container" {
+		t.Errorf("Lium's read as %q", got)
+	}
 }

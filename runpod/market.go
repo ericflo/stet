@@ -120,6 +120,73 @@ type Rental struct {
 	State   string  // starting, running, stopped; anything else is the market's own word
 	Status  string  // the market's own word
 	Created time.Time
+	// What the market says of the machine itself, for seeing why one does not start: whether
+	// its container is up ("yes", "no", or "" where the market does not say), its phase in
+	// the market's own words (one that changes only as the machine moves on: "pulling image",
+	// "no container yet"), and more that changes as it goes ("container up 4m").
+	Up     string
+	Phase  string
+	Detail string
+	// How long its container has been up, where the market says: one shorter than at the
+	// last look was started again.
+	UpFor time.Duration
+}
+
+// logger is a market that can say what a machine's container and the market itself have said
+// of it: the last n lines.
+type logger interface {
+	Logs(ctx context.Context, id string, n int) ([]string, error)
+}
+
+// logLines are the lines a market's log answer holds, whatever its shape: strings, or objects
+// with the line in one of a few fields.
+func logLines(data []byte) []string {
+	var v any
+	if json.Unmarshal(data, &v) != nil {
+		return strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	}
+	var out []string
+	var walk func(v any)
+	walk = func(v any) {
+		switch x := v.(type) {
+		case []any:
+			for _, e := range x {
+				walk(e)
+			}
+		case map[string]any:
+			for _, k := range []string{"items", "logs", "entries", "data"} {
+				if inner, ok := x[k]; ok {
+					walk(inner)
+					return
+				}
+			}
+			line := ""
+			for _, k := range []string{"line", "log_text", "message", "msg", "text", "event_name", "log"} {
+				if s, ok := x[k].(string); ok && s != "" {
+					line = s
+					break
+				}
+			}
+			if line == "" {
+				return
+			}
+			for _, k := range []string{"ts", "time", "event_time", "received_at", "created_at", "timestamp"} {
+				if s, ok := x[k].(string); ok && len(s) >= 19 {
+					line = s[11:19] + "  " + line
+					break
+				}
+			}
+			out = append(out, line)
+		case string:
+			out = append(out, strings.Split(x, "\n")...)
+		}
+	}
+	walk(v)
+	return out
+}
+
+func lastLines(lines []string, n int) []string {
+	return lines[max(0, len(lines)-n):]
 }
 
 // live is a machine that is, or is about to be, billed for.

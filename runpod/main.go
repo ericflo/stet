@@ -53,6 +53,9 @@ Vast.ai, Lium, Salad and Clore.ai.
   stet-cloud down [--force] [HANDLE...]
                                  end machines that hold no job; --force ends the rest
                                  too, and their jobs are handed back
+  stet-cloud machine HANDLE [-n N]
+                                 what was seen of the last N machines rented with a key:
+                                 each phase, its work, how it ended and why, its last words
   stet-cloud logs HANDLE [-f]    what a machine on RunPod has said: its install, stet verify
   stet-cloud ssh HANDLE          log in to one on RunPod (rented with --ssh)
   stet-cloud pause | resume      stop drawing rounds, so that the machines turn to the
@@ -397,6 +400,20 @@ func run(args []string, stdout, stderr io.Writer) error {
 			return err
 		}
 		return cmdPause(ctx, f, cmd == "pause")
+	case "machine":
+		last := fs.Int("n", 3, "how many of the latest machines rented with the key")
+		rest, err := parse(fs, args)
+		if err != nil {
+			return err
+		}
+		if len(rest) != 1 {
+			return errors.New("machine takes one key's handle")
+		}
+		f, err := open(o, stdout, false, false)
+		if err != nil {
+			return err
+		}
+		return cmdMachine(f, rest[0], *last)
 	case "logs":
 		follow := fs.Bool("f", false, "keep printing what it says, as it says it")
 		last := fs.Int("n", 60, "how many of its last lines")
