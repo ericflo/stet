@@ -103,8 +103,9 @@ type Stet struct {
 	api  string
 	http *http.Client
 	now  func() time.Time
-	// cli is the stet the server hands out, as it last said (/api/v1/season).
-	cli string
+	// cli is the stet the server hands out, and server the commit it runs, as it last said
+	// (/api/v1/season).
+	cli, server string
 }
 
 func newStet(api string) *Stet {
@@ -427,15 +428,16 @@ func (s *Stet) vouched(ctx context.Context, op *Key) (map[string]Vouched, error)
 // site is the website whose installer a rented machine runs.
 func (s *Stet) site(ctx context.Context) (string, error) {
 	var out struct {
-		Site string `json:"site"`
-		CLI  struct {
+		Site   string `json:"site"`
+		Server string `json:"server"`
+		CLI    struct {
 			Version string `json:"version"`
 		} `json:"cli"`
 	}
 	if err := s.do(ctx, "GET", "/api/v1/season", nil, nil, &out); err != nil {
 		return "", err
 	}
-	s.cli = out.CLI.Version
+	s.cli, s.server = out.CLI.Version, out.Server
 	if out.Site == "" {
 		return "", errors.New("the Stet server did not say where its website is")
 	}

@@ -67,6 +67,7 @@ type lookRecord struct {
 	Error       string                 `json:"error,omitempty"`       // why the look went no further
 	Fleet       string                 `json:"fleet,omitempty"`       // the commit this fleet was built from
 	CLI         string                 `json:"cli,omitempty"`         // the stet the server hands out
+	Server      string                 `json:"server,omitempty"`      // the commit the server runs
 	// Work is all the server said is waiting, as it said it: every round, and every one of the
 	// organisers' machines, what it holds, whether it has trained, and so on.
 	Work json.RawMessage `json:"work,omitempty"`
@@ -150,7 +151,7 @@ func (f *Fleet) endLook(start time.Time, err error) {
 		return
 	}
 	rec.TookMS = f.now().Sub(start).Milliseconds()
-	rec.CLI = f.st.cli
+	rec.CLI, rec.Server = f.st.cli, f.st.server
 	if err != nil {
 		rec.Error = err.Error()
 	}
@@ -458,11 +459,12 @@ func (f *Fleet) roundsSettled(ctx context.Context, w *Work) {
 }
 
 func (f *Fleet) keepRound(ctx context.Context, id string) {
+	f.st.site(ctx) // the builds, as they are now
 	var raw json.RawMessage
 	c, cancel := context.WithTimeout(ctx, 30*time.Second)
 	err := f.st.do(c, "GET", "/api/v1/rounds/"+url.PathEscape(id), nil, nil, &raw)
 	cancel()
-	line := map[string]any{"t": f.now().UTC(), "round": id, "fleet": fleetBuild(), "cli": f.st.cli}
+	line := map[string]any{"t": f.now().UTC(), "round": id, "fleet": fleetBuild(), "cli": f.st.cli, "server": f.st.server}
 	if err != nil {
 		line["error"] = firstLine(err.Error())
 	} else {

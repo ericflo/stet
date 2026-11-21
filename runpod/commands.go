@@ -253,6 +253,7 @@ func tick(ctx context.Context, f *Fleet) (err error) {
 		if got, err := f.choices(ctx, false, false); err == nil {
 			f.keepOffers(got)
 		}
+		f.st.site(ctx) // and the builds the server says it runs and hands out
 	}
 	d := f.o.Policy.decideNext(v.Work, v.Workers, v.Today, f.now(), next)
 	rec.decided(d, next)

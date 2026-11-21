@@ -71,6 +71,9 @@ func TestEachLookIsKept(t *testing.T) {
 	if who["stet"] == 0 || who["runpod"] == 0 {
 		t.Fatalf("calls: %v", who)
 	}
+	if l.Server != "0123456789abcdef0123456789abcdef01234567" || l.CLI != "0.4.6" { // the fleet's commit: test binaries have none
+		t.Fatalf("builds: server %q, cli %q, fleet %q", l.Server, l.CLI, l.Fleet)
+	}
 	if len(l.Said) == 0 || !strings.Contains(strings.Join(l.Said, "\n"), "rented stet-rp-") {
 		t.Fatalf("said: %q", l.Said)
 	}

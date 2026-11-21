@@ -160,7 +160,7 @@ func newFakeStet(t *testing.T) *fakeStet {
 			}
 			fmt.Fprintf(w, `{"paused": %d, "paused_by": "stet"}`, f.work.Paused)
 		case "/api/v1/season":
-			io.WriteString(w, `{"site": "https://www.stet.test"}`)
+			io.WriteString(w, `{"site": "https://www.stet.test", "server": "0123456789abcdef0123456789abcdef01234567", "cli": {"version": "0.4.6"}}`)
 		case "/api/v1/rounds":
 			if f.rounds == "" {
 				w.WriteHeader(404)
