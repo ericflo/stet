@@ -1,0 +1,206 @@
+[
+ {
+  "id": "844eddb2-d0f7-4c8b-b598-5d4ebabbabce",
+  "machine_name": "NVIDIA GeForce RTX 5060 Ti",
+  "price_per_gpu": 0.12,
+  "gpu_count": 1,
+  "available_gpu_count": 1,
+  "min_gpu_count_for_rental": null,
+  "tier": "secure",
+  "frequent_rent_failures": false,
+  "max_cuda_version": 13.1,
+  "specs": {
+   "cpu": {
+    "count": 11
+   },
+   "gpu": {
+    "driver": "595.99.02",
+    "details": [
+     {
+      "name": "NVIDIA GeForce RTX 5060 Ti",
+      "capacity": 16311
+     }
+    ]
+   },
+   "ram": {
+    "total": 32382972.0
+   },
+   "hard_disk": {
+    "free": 339903856
+   }
+  },
+  "location": {
+   "country_code": "US"
+  }
+ },
+ {
+  "id": "e4cb8c0b-1ab2-44dc-bfd4-966361696d84",
+  "machine_name": "NVIDIA RTX A4500",
+  "price_per_gpu": 0.17,
+  "gpu_count": 1,
+  "available_gpu_count": 1,
+  "min_gpu_count_for_rental": null,
+  "tier": "secure",
+  "frequent_rent_failures": false,
+  "max_cuda_version": 13.0,
+  "specs": {
+   "cpu": {
+    "count": 11
+   },
+   "gpu": {
+    "driver": "580.178.04",
+    "details": [
+     {
+      "name": "NVIDIA RTX A4500",
+      "capacity": 20470
+     }
+    ]
+   },
+   "ram": {
+    "total": 32728564.0
+   },
+   "hard_disk": {
+    "free": 167908100
+   }
+  },
+  "location": {
+   "country_code": "US"
+  }
+ },
+ {
+  "id": "02063962-a253-4c85-9e4f-1733751918e7",
+  "machine_name": "NVIDIA RTX A6000",
+  "price_per_gpu": 0.42,
+  "gpu_count": 8,
+  "available_gpu_count": 4,
+  "min_gpu_count_for_rental": 1,
+  "tier": "secure",
+  "frequent_rent_failures": false,
+  "max_cuda_version": 13.1,
+  "specs": {
+   "cpu": {
+    "count": 63
+   },
+   "gpu": {
+    "driver": "595.71.05",
+    "details": [
+     {
+      "name": "NVIDIA RTX A6000",
+      "capacity": 49140
+     }
+    ]
+   },
+   "ram": {
+    "total": 738185616.0
+   },
+   "hard_disk": {
+    "free": 341783532
+   }
+  },
+  "location": {
+   "country_code": "KZ"
+  }
+ },
+ {
+  "id": "8238f069-4cf9-4165-bd44-017541e1017b",
+  "machine_name": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+  "price_per_gpu": 1.7,
+  "gpu_count": 1,
+  "available_gpu_count": 1,
+  "min_gpu_count_for_rental": null,
+  "tier": "spot",
+  "frequent_rent_failures": false,
+  "max_cuda_version": 13.1,
+  "specs": {
+   "cpu": {
+    "count": 15
+   },
+   "gpu": {
+    "driver": "595.91.07",
+    "details": [
+     {
+      "name": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+      "capacity": 97887
+     }
+    ]
+   },
+   "ram": {
+    "total": 148316392.0
+   },
+   "hard_disk": {
+    "free": 286806884
+   }
+  },
+  "location": {
+   "country_code": "US"
+  }
+ },
+ {
+  "id": "5c7566f7-d0c3-4aa9-baf9-dd70b6676111",
+  "machine_name": "NVIDIA RTX A6000",
+  "price_per_gpu": 0.55,
+  "gpu_count": 1,
+  "available_gpu_count": 1,
+  "min_gpu_count_for_rental": null,
+  "tier": "secure",
+  "frequent_rent_failures": false,
+  "max_cuda_version": 13.0,
+  "specs": {
+   "cpu": {
+    "count": 5
+   },
+   "gpu": {
+    "driver": "580.126.09",
+    "details": [
+     {
+      "name": "NVIDIA RTX A6000",
+      "capacity": 49140
+     }
+    ]
+   },
+   "ram": {
+    "total": 24654424.0
+   },
+   "hard_disk": {
+    "free": 193679520
+   }
+  },
+  "location": {
+   "country_code": "US"
+  }
+ },
+ {
+  "id": "d05f4a7a-b577-481a-8c9f-0045f6b06e72",
+  "machine_name": "NVIDIA GeForce RTX 5090",
+  "price_per_gpu": 0.55,
+  "gpu_count": 8,
+  "available_gpu_count": 8,
+  "min_gpu_count_for_rental": 7,
+  "tier": "spot",
+  "frequent_rent_failures": false,
+  "max_cuda_version": 13.1,
+  "specs": {
+   "cpu": {
+    "count": 255
+   },
+   "gpu": {
+    "driver": "615.71.09",
+    "details": [
+     {
+      "name": "NVIDIA GeForce RTX 5090",
+      "capacity": 32607
+     }
+    ]
+   },
+   "ram": {
+    "total": 792510988.0
+   },
+   "hard_disk": {
+    "free": 3561621088
+   }
+  },
+  "location": {
+   "country_code": "FR"
+  }
+ }
+]

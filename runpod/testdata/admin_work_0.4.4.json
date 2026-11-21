@@ -1,0 +1,50 @@
+{
+  "rounds": [
+    {
+      "id": "s1-o00002",
+      "entries": 5,
+      "runs_waiting": 0,
+      "runs_wanted": 5,
+      "edits_under_way": 0,
+      "grades_wanted": 0,
+      "grades_under_way": 4,
+      "grades_early": 1,
+      "drawn_at": 1795244951,
+      "exam_due": 1795252811
+    }
+  ],
+  "runners": 1,
+  "waiting": true,
+  "next_draw_at": 1795263600,
+  "machines": [
+    {
+      "handle": "anchor-one",
+      "last_seen": 1795244951
+    },
+    {
+      "handle": "stet-rp-01",
+      "worker": true,
+      "last_seen": 1795244951,
+      "busy": "grade",
+      "holding": 3,
+      "ready": true,
+      "pass_seconds": 608.1
+    },
+    {
+      "handle": "stet-rp-02",
+      "worker": true,
+      "last_seen": 1795244951,
+      "busy": "grade",
+      "holding": 1
+    },
+    {
+      "handle": "stet-rp-03",
+      "worker": true
+    }
+  ],
+  "farm_waiting": 0,
+  "farm_under_way": 0,
+  "farm_long_waiting": 0,
+  "early_grades_per_machine": 3,
+  "fast_first_seconds": 120
+}

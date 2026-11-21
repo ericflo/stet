@@ -1,18 +1,20 @@
-// Command stet-runpod rents GPUs from RunPod to grade for Stet while the organisers' own
-// machines have more to grade than they can get through, and lets them go when there is
-// nothing to grade.
+// Command stet-cloud rents GPUs to grade for Stet while the organisers' own machines have more
+// to grade than they can get through, and lets them go when there is nothing to grade. It rents
+// from several markets, each through its own API (market.go): RunPod, Vast.ai, Lium, Salad and
+// Clore.ai. It grew out of stet-runpod, and keeps its commands and settings.
 //
 // Each rented machine runs the stet command line, `stet verify`, with a key of its own
 // from a pool kept here. The organisers' own key (--key) vouches for each, by a grant the
 // server keeps: from then on the server hands it work as it would any of the organisers'
 // machines, and gives it nothing else: it administers nothing. Nothing in the
 // server's configuration changes. A machine stops by itself after
-// a while with nothing to do and ends its own pod; stet-runpod rents more when work is
-// waiting, ends what is idle when nothing is, and ends anything that has gone quiet.
+// a while with nothing to do and ends its own machine where the market lets it; stet-cloud
+// rents more when work is waiting, ends what is idle when nothing is, and ends anything that
+// has gone quiet.
 //
 // It is built on its own, apart from the stet command line and the server:
 //
-//	cd runpod && go build -o stet-runpod .
+//	cd runpod && go build -o stet-cloud .
 package main
 
 import (
@@ -25,31 +27,42 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
 )
 
-const usage = `stet-runpod: rent GPUs from RunPod to grade for Stet, as many as the work wants.
+const usage = `stet-cloud: rent GPUs to grade for Stet, as many as the work wants, from RunPod,
+Vast.ai, Lium, Salad and Clore.ai.
 
-  stet-runpod keys [--add N]     the pool of keys the rented machines use; --add makes
+  stet-cloud markets             each market: its key, what is left to spend, whether it is
+                                 armed, and what it has that fits now (renting nothing)
+  stet-cloud markets check M     the same, for one market
+  stet-cloud markets arm M       let machines be rented on a market (--note why);
+                                 markets disarm M: no more there
+  stet-cloud offers [--each]     what would be rented, in order, on every market with a
+                                 key, armed or not (gpus: the same)
+  stet-cloud keys [--add N]      the pool of keys the rented machines use; --add makes
                                  more and vouches for them with the organisers' key
                                  (--vouch: any not vouched for; --revoke HANDLE...)
-  stet-runpod gpus               what would be rented, the fastest first
-  stet-runpod status             what is waiting, what is rented, what it costs
-  stet-runpod scale [--follow]   rent and end machines to match the work (once, or
+  stet-cloud status              what is waiting, what is rented, what it costs
+  stet-cloud scale [--follow]    rent and end machines to match the work (once, or
                                  every minute until stopped)
-  stet-runpod up [N]             rent N machines now, whatever is waiting (default 1)
-  stet-runpod down [--force] [HANDLE...]
+  stet-cloud up [N]              rent N machines now, whatever is waiting (default 1)
+  stet-cloud down [--force] [HANDLE...]
                                  end machines that hold no job; --force ends the rest
                                  too, and their jobs are handed back
-  stet-runpod logs HANDLE [-f]   what a machine has said: its install, stet verify
-  stet-runpod ssh HANDLE         log in to one (rented with --ssh)
-  stet-runpod pause | resume     stop drawing rounds, so that the machines turn to the
+  stet-cloud logs HANDLE [-f]    what a machine on RunPod has said: its install, stet verify
+  stet-cloud ssh HANDLE          log in to one on RunPod (rented with --ssh)
+  stet-cloud pause | resume      stop drawing rounds, so that the machines turn to the
                                  organisers' students, or start again (the round under way finishes)
+  stet-cloud migrate             copy stet-runpod's pool and records over, once
 
-Needs RUNPOD_API_KEY, and the organisers' own stet key (--key), to vouch for machines
-and ask what is waiting.
+The markets' keys are read from ~/.config/stet-cloud/credentials.env (--credentials), and
+the environment over it, at every look; a market without one is off. Nothing is rented on
+a market until it is armed. The organisers' own stet key (--key) vouches for machines and
+asks what is waiting.
 Run any command with -h for its settings.
 `
 
@@ -57,10 +70,16 @@ Run any command with -h for its settings.
 type Options struct {
 	Service      *Service // the settings the service runs with, when status judges by them
 	Home         string
+	Credentials  string // the markets' keys (market.go)
 	API          string
 	RunPodAPI    string
+	VastAPI      string
+	LiumAPI      string
+	SaladAPI     string
+	CloreAPI     string
 	OperatorKey  string
 	Cloud        string
+	Market       string // up and offers: this market alone; up rents there armed or not
 	GPUs         []string
 	Image        string
 	Disk         int
@@ -82,7 +101,7 @@ type Options struct {
 }
 
 func defaultHome() string {
-	if h := os.Getenv("STET_RUNPOD_HOME"); h != "" {
+	if h := os.Getenv("STET_CLOUD_HOME"); h != "" {
 		return h
 	}
 	base := os.Getenv("XDG_CONFIG_HOME")
@@ -90,7 +109,7 @@ func defaultHome() string {
 		home, _ := os.UserHomeDir()
 		base = filepath.Join(home, ".config")
 	}
-	return filepath.Join(base, "stet-runpod")
+	return filepath.Join(base, "stet-cloud")
 }
 
 func defaultOperatorKey() string {
@@ -113,12 +132,19 @@ func envOr(key, def string) string {
 }
 
 func flags(name string, o *Options) *flag.FlagSet {
-	fs := flag.NewFlagSet("stet-runpod "+name, flag.ContinueOnError)
-	fs.StringVar(&o.Home, "home", defaultHome(), "where the pool of keys and the record of spending are kept (STET_RUNPOD_HOME)")
+	fs := flag.NewFlagSet("stet-cloud "+name, flag.ContinueOnError)
+	fs.StringVar(&o.Home, "home", defaultHome(), "where the pool of keys and the record of spending are kept (STET_CLOUD_HOME)")
+	fs.StringVar(&o.Credentials, "credentials", defaultCredentials(), "the markets' keys, KEY=value lines, read at every look (STET_CLOUD_CREDENTIALS)")
 	fs.StringVar(&o.API, "api", envOr("STET_API", "https://api.stetrun.com"), "the Stet API (STET_API)")
 	fs.StringVar(&o.RunPodAPI, "runpod-api", runpodAPI, "RunPod's API")
+	fs.StringVar(&o.VastAPI, "vast-api", vastAPI, "Vast.ai's API")
+	fs.StringVar(&o.LiumAPI, "lium-api", liumAPI, "Lium's API")
+	fs.StringVar(&o.SaladAPI, "salad-api", saladAPI, "Salad's API")
+	fs.StringVar(&o.CloreAPI, "clore-api", cloreAPI, "Clore.ai's API")
 	fs.StringVar(&o.OperatorKey, "key", defaultOperatorKey(), "the organisers' own stet key, to ask what is waiting")
-	fs.StringVar(&o.Cloud, "cloud", "any", "any (the cheapest of both), community (strangers' machines: cheapest, but a host could read a machine's key), or secure (RunPod's data centres)")
+	fs.StringVar(&o.Cloud, "cloud", "any", "RunPod's clouds: any (the cheapest of both), community (strangers' machines: cheapest, but a host could read a machine's key), or secure (RunPod's data centres)")
+	fs.StringVar(&o.Cloud, "runpod-cloud", "any", "the same as --cloud")
+	fs.StringVar(&o.Market, "market", "", "with up or offers: this market alone (runpod, vast, lium, salad, clore); up rents there by hand, armed or not")
 	gpus := fs.String("gpu", "", "GPU kinds to rent, in order of preference, comma-separated (default: whatever fits, the fastest first)")
 	fs.BoolVar(&o.Cheapest, "cheapest", false, "rent the cheapest a grade first, not the fastest: a round settles only when its slowest grade is in, so this saves money and takes longer")
 	fs.StringVar(&o.Image, "image", "ubuntu:24.04", "the container image; stet is installed on it when the pod starts")
@@ -127,9 +153,9 @@ func flags(name string, o *Options) *flag.FlagSet {
 	fs.IntVar(&o.MinRAM, "min-ram", 16, "host memory a GPU, GB: the season's floor for a machine that runs curators (a curator is given 12)")
 	fs.IntVar(&o.MinCPU, "min-cpus", 6, "host vCPUs a GPU: the season's floor for a machine that runs curators")
 	fs.IntVar(&o.MinGPUMemory, "min-gpu-memory", 12, "GPU memory, GB: a curator is given 8, and a machine that runs them needs 10")
-	fs.IntVar(&o.Idle, "idle", 15, "minutes a machine waits with nothing to do before it ends its own pod")
+	fs.IntVar(&o.Idle, "idle", 15, "minutes a machine waits with nothing to do before it ends itself")
 	noEdits := fs.Bool("no-edits", false, "rent machines that only grade, and leave curators to the organisers' own machines")
-	ssh := fs.Bool("ssh", false, "let ~/.ssh/id_ed25519.pub log in to the machines rented (for `stet-runpod ssh`)")
+	ssh := fs.Bool("ssh", false, "let ~/.ssh/id_ed25519.pub log in to the machines rented (for `stet-cloud ssh`)")
 	fs.BoolVar(&o.DryRun, "dry-run", false, "say what would be rented and ended, and do none of it")
 	fs.IntVar(&o.MaxWorkers, "max", 6, "never more machines than this")
 	fs.IntVar(&o.LongMinutes, "long-farm", 0, "rent machines that also take the organisers' bigger students, given up to this many minutes each, and one for each waiting (0: none)")
@@ -145,11 +171,17 @@ func flags(name string, o *Options) *flag.FlagSet {
 	fs.DurationVar(&o.Settle, "settle-within", 15*time.Minute, "with --early: how long after its exam a round may settle; a kind of GPU is rented in time to report by then, and a quicker, dearer one only once the cheaper ones can no longer")
 	fs.DurationVar(&o.ExamAfter, "exam-after", 2*time.Hour+12*time.Minute, "how long after its draw a round's exam is posted, about: the season's hour of fresh text, an hour to settle, and the minutes to make it")
 	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), "usage: stet-runpod %s [settings]\n\n", name)
+		fmt.Fprintf(fs.Output(), "usage: stet-cloud %s [settings]\n\n", name)
 		fs.PrintDefaults()
 	}
 	o.Grace, o.Silence = 25*time.Minute, 20*time.Minute
 	finish := func() error {
+		if o.Market != "" && !slices.Contains(marketOrder, o.Market) {
+			return fmt.Errorf("--market is one of %s, not %q", strings.Join(marketOrder, ", "), o.Market)
+		}
+		if o.Market != "" && !marketOnlyFor[name] {
+			return errors.New("--market is for up and offers alone: what is rented by itself goes by which markets are armed")
+		}
 		o.LongFarm = o.LongMinutes > 0
 		o.Edits = !*noEdits
 		o.Cloud = strings.ToUpper(o.Cloud)
@@ -178,6 +210,9 @@ func flags(name string, o *Options) *flag.FlagSet {
 
 var finishers = map[*flag.FlagSet]func() error{}
 
+// marketOnlyFor are the commands --market is for: renting by hand, and looking.
+var marketOnlyFor = map[string]bool{"up": true, "offers": true, "gpus": true}
+
 // parse reads the settings wherever they are among the words, and returns the rest. Go's
 // flag package stops at the first word that is not a setting, so that `up 2 --dry-run`
 // would rent two machines and take --dry-run for a second number; here it does not.
@@ -193,7 +228,10 @@ func parse(fs *flag.FlagSet, args []string) ([]string, error) {
 		rest = append(rest, fs.Arg(0))
 		args = fs.Args()[1:]
 	}
-	return rest, finishers[fs]()
+	if err := finishers[fs](); err != nil {
+		return nil, err
+	}
+	return rest, nil
 }
 
 func main() {
@@ -201,7 +239,7 @@ func main() {
 		if errors.Is(err, flag.ErrHelp) {
 			os.Exit(0)
 		}
-		fmt.Fprintf(os.Stderr, "stet-runpod: %v\n", err)
+		fmt.Fprintf(os.Stderr, "stet-cloud: %v\n", err)
 		os.Exit(1)
 	}
 }
@@ -214,6 +252,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 	cmd, args := args[0], args[1:]
 	o := &Options{}
 	fs := flags(cmd, o)
+
 	fs.SetOutput(stderr)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -235,19 +274,40 @@ func run(args []string, stdout, stderr io.Writer) error {
 			return err
 		}
 		return cmdKeys(ctx, f, *add, *prefix, *vouch, rest)
-	case "gpus":
+	case "offers", "gpus":
+		each := fs.Bool("each", false, "each machine on its own line, where a market lists each host's")
 		rest, err := parse(fs, args)
 		if err != nil {
 			return err
 		}
-		if len(rest) > 0 && cmd != "up" && cmd != "down" && cmd != "ssh" {
+		if len(rest) > 0 {
 			return fmt.Errorf("%s takes no %q", cmd, rest[0])
 		}
 		f, err := open(o, stdout, true, false)
 		if err != nil {
 			return err
 		}
-		return cmdGPUs(ctx, f)
+		return cmdOffers(ctx, f, *each)
+	case "markets":
+		note := fs.String("note", "", "with arm: why, kept with it")
+		rest, err := parse(fs, args)
+		if err != nil {
+			return err
+		}
+		f, err := open(o, stdout, false, false)
+		if err != nil {
+			return err
+		}
+		return cmdMarkets(ctx, f, rest, *note)
+	case "migrate":
+		rest, err := parse(fs, args)
+		if err != nil {
+			return err
+		}
+		if len(rest) > 0 {
+			return fmt.Errorf("%s takes no %q", cmd, rest[0])
+		}
+		return cmdMigrate(o, stdout)
 	case "status":
 		rest, err := parse(fs, args)
 		if err != nil {
@@ -373,19 +433,28 @@ func run(args []string, stdout, stderr io.Writer) error {
 	return fmt.Errorf("no command %q", cmd)
 }
 
-// open gathers what a command needs: the pool always, RunPod and the organisers' key when
-// asked for.
-func open(o *Options, out io.Writer, runpod, operator bool) (*Fleet, error) {
+// open gathers what a command needs: the pool always, the markets with keys and the
+// organisers' key when asked for. A pool still in stet-runpod's folder is not started afresh
+// beside it: it is copied over first (migrate).
+func open(o *Options, out io.Writer, markets, operator bool) (*Fleet, error) {
 	f := &Fleet{o: o, st: newStet(o.API), out: out, now: time.Now}
 	if err := f.loadKeys(); err != nil {
 		return nil, err
 	}
-	if runpod {
-		key := os.Getenv("RUNPOD_API_KEY")
-		if key == "" {
-			return nil, errors.New("RUNPOD_API_KEY is not set: make a key at https://www.runpod.io/console/user/settings")
+	if operator && len(f.keys) == 0 && filepath.Clean(o.Home) == filepath.Clean(defaultHome()) {
+		if old, _ := filepath.Glob(filepath.Join(oldHome(), "workers", "*.json")); len(old) > 0 && filepath.Clean(oldHome()) != filepath.Clean(o.Home) {
+			return nil, fmt.Errorf("the pool of keys is still stet-runpod's, in %s: `stet-cloud migrate` copies it here when the service moves over; until then, --home %s", oldHome(), oldHome())
 		}
-		f.rp = newRunPod(o.RunPodAPI, key)
+	}
+	if markets {
+		if err := f.refresh(); err != nil {
+			return nil, err
+		}
+		if len(f.markets) == 0 {
+			return nil, fmt.Errorf("no market has a key: put them in %s (RUNPOD_API_KEY, VAST_API_KEY, LIUM_API_KEY, SALAD_API_KEY, CLORE_API_KEY)", o.Credentials)
+		}
+	} else if err := f.refresh(); err != nil {
+		return nil, err
 	}
 	if operator {
 		k, err := loadKey(o.OperatorKey)
@@ -400,7 +469,7 @@ func open(o *Options, out io.Writer, runpod, operator bool) (*Fleet, error) {
 // --- the settings the service runs with ----------------------------------------------------------
 //
 // `scale --follow` keeps the settings it was started with, so that `status` judges the work as
-// the service does: by its own defaults, a bare `stet-runpod status` would say what those
+// the service does: by its own defaults, a bare `stet-cloud status` would say what those
 // would rent and end, not what the service will.
 
 // Service is the settings `scale --follow` was last started with.

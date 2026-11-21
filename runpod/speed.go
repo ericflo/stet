@@ -55,9 +55,9 @@ func alnum(b byte) bool { return b < 128 && (unicode.IsLetter(rune(b)) || unicod
 // byStudent orders the kinds to try for the bigger students by what a student costs on each,
 // its price over its speed, leaning a little to the quicker: of two that cost about the same,
 // the one done sooner comes first. Kinds whose speed is not known come last, cheapest first.
-func byStudent(cs []Choice, speed func(string) float64) {
-	score := func(c Choice) float64 {
-		if s := speed(c.GPU.ID); s > 0 {
+func byStudent(cs []Offer, speed func(string) float64) {
+	score := func(c Offer) float64 {
+		if s := speed(c.Card); s > 0 {
 			return c.Price / math.Pow(s, 1.25)
 		}
 		return math.Inf(1)
@@ -68,9 +68,9 @@ func byStudent(cs []Choice, speed func(string) float64) {
 // byPace orders the kinds to try the fastest first, the cheapest first where they are as
 // fast, and kinds whose speed is not known last, cheapest first: for grades wanted once the
 // exam is posted, which the round waits on.
-func byPace(cs []Choice, speed func(string) float64) {
+func byPace(cs []Offer, speed func(string) float64) {
 	sort.SliceStable(cs, func(i, j int) bool {
-		si, sj := speed(cs[i].GPU.ID), speed(cs[j].GPU.ID)
+		si, sj := speed(cs[i].Card), speed(cs[j].Card)
 		if si != sj {
 			return si > sj
 		}
@@ -78,51 +78,99 @@ func byPace(cs []Choice, speed func(string) float64) {
 	})
 }
 
-// forExam is the kinds to rent now for grades taken before an exam due in left, the
-// cheapest a round first, where lead is how long before it must report a machine of a kind
-// is rented. Every machine rented for one waits for the exam once it has trained, so what a
-// grade costs on it is its price over its lead, and a kind is rented just in time: when
-// renting it now has it report between one look before the exam and settle after it.
-// Sooner, it would only wait; later, the round would. A kind is rented now only if none whose
-// time is still to come would cost less: the cheapest to come is waited for, and once its
-// time has passed, the next. Once no kind can report in time, the quickest come first.
-func forExam(cs []Choice, left, settle, every time.Duration, lead func(Choice) time.Duration) []Choice {
-	cost := func(c Choice) float64 { return c.Price * lead(c).Hours() }
-	var due, later []Choice
+// examPlan is what is known of a kind when it is rented for grades taken before an exam: how
+// long before it is to report its first grade it must be rented (lead), how long it takes to
+// train one more student (pass), and the most grades one machine may hold before the exam
+// (most; 0 or 1 when the server lets a machine hold only one).
+type examPlan struct {
+	lead func(Offer) time.Duration
+	pass func(Offer) time.Duration
+	most int
+}
+
+// extraMargin is how long before the exam a machine must be able to have trained one more
+// student for the server to hand it one.
+const extraMargin = 2 * time.Minute
+
+// grades is how many grades a machine of a kind rented with left to go until the exam takes
+// before it: its first, and one more for each further student it can have trained by two
+// minutes before the exam, up to the most one may hold.
+func (pl examPlan) grades(c Offer, left time.Duration) int {
+	if pl.most <= 1 || pl.pass == nil {
+		return 1
+	}
+	p := pl.pass(c)
+	spare := left - (pl.lead(c) - sitting) - extraMargin
+	if p <= 0 || spare < 0 {
+		return 1
+	}
+	return min(pl.most, 1+int(spare/p))
+}
+
+// full is how long before the exam a kind is best rented: just in time to take the most
+// grades it may. Sooner, it would only wait; later, it would take fewer.
+func (pl examPlan) full(c Offer) time.Duration {
+	if pl.most <= 1 || pl.pass == nil {
+		return pl.lead(c)
+	}
+	return pl.lead(c) - sitting + extraMargin + time.Duration(pl.most-1)*pl.pass(c)
+}
+
+// cost is what a grade costs on a kind rented with left to go: its price for the time it is
+// held, until it reports its last grade, shared among the grades it takes.
+func (pl examPlan) cost(c Offer, left time.Duration) float64 {
+	if pl.most <= 1 || pl.pass == nil {
+		return c.Price * pl.lead(c).Hours()
+	}
+	held := max(left+sitting, pl.lead(c))
+	return c.Price * held.Hours() / float64(pl.grades(c, left))
+}
+
+// forExam is the kinds to rent now for grades taken before an exam due in left, the cheapest a
+// grade first. Every machine rented for one waits for the exam once it has trained, so what a
+// grade costs on it is its price for the time it is held over the grades it takes, and a kind
+// is rented just in time: when renting it now has it take the most grades it may (only one,
+// unless the server lets a machine hold several) and report between one look before the exam
+// and settle after it. Sooner, it would only wait; later, it would take fewer, or the round
+// would wait. A kind is rented now only if none whose time is still to come would cost less: the
+// cheapest to come is waited for, and once its time has passed, the next. Once no kind can
+// report in time, the quickest come first.
+func forExam(cs []Offer, left, settle, every time.Duration, pl examPlan) []Offer {
+	var due, later []Offer
 	for _, c := range cs {
-		switch l := lead(c); {
-		case l < left-every:
+		switch {
+		case pl.full(c) < left-every:
 			later = append(later, c)
-		case l <= left+settle:
+		case pl.lead(c) <= left+settle:
 			due = append(due, c)
 		}
 	}
 	if len(due) == 0 && len(later) == 0 {
 		out := slices.Clone(cs)
-		sort.SliceStable(out, func(i, j int) bool { return lead(out[i]) < lead(out[j]) })
+		sort.SliceStable(out, func(i, j int) bool { return pl.lead(out[i]) < pl.lead(out[j]) })
 		return out
 	}
 	best := math.Inf(1)
 	for _, c := range later {
-		best = min(best, cost(c))
+		best = min(best, pl.cost(c, pl.full(c)))
 	}
-	var out []Choice
+	var out []Offer
 	for _, c := range due {
-		if cost(c) <= best {
+		if pl.cost(c, left) <= best {
 			out = append(out, c)
 		}
 	}
-	sort.SliceStable(out, func(i, j int) bool { return cost(out[i]) < cost(out[j]) })
+	sort.SliceStable(out, func(i, j int) bool { return pl.cost(out[i], left) < pl.cost(out[j], left) })
 	return out
 }
 
 // waitingFor is the kind whose time is still to come that forExam waits for: the cheapest a
-// round of those.
-func waitingFor(cs []Choice, left, every time.Duration, lead func(Choice) time.Duration) (Choice, bool) {
-	var best Choice
+// grade of those, at its time.
+func waitingFor(cs []Offer, left, every time.Duration, pl examPlan) (Offer, bool) {
+	var best Offer
 	found := false
 	for _, c := range cs {
-		if lead(c) < left-every && (!found || c.Price*lead(c).Hours() < best.Price*lead(best).Hours()) {
+		if pl.full(c) < left-every && (!found || pl.cost(c, pl.full(c)) < pl.cost(best, pl.full(best))) {
 			best, found = c, true
 		}
 	}
@@ -132,9 +180,9 @@ func waitingFor(cs []Choice, left, every time.Duration, lead func(Choice) time.D
 // byGrade orders the kinds to try (with --cheapest) by what a grade costs on each, its price over its speed:
 // a grade trains on a fixed number of tokens, so a quicker card holds its machine for less
 // of the hour, and is done sooner. A kind whose speed is not known counts as half a 3090.
-func byGrade(cs []Choice, speed func(string) float64) {
-	score := func(c Choice) float64 {
-		s := speed(c.GPU.ID)
+func byGrade(cs []Offer, speed func(string) float64) {
+	score := func(c Offer) float64 {
+		s := speed(c.Card)
 		if s <= 0 {
 			s = 0.5
 		}

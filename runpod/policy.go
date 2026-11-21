@@ -57,12 +57,16 @@ type Policy struct {
 }
 
 // target is how many machines the work justifies, before money is counted.
-func (p Policy) target(w *Work) int { return p.targetHolding(w, 0, time.Now()) }
+func (p Policy) target(w *Work) int {
+	now := time.Now()
+	return p.targetHolding(w, 0, now, p.earlyWanted(w, now))
+}
 
 // targetHolding counts too the machines rented now that train a bigger student (held): each
 // is busy with it for hours, and so is none of the machines the students still waiting want.
-func (p Policy) targetHolding(w *Work, held int, now time.Time) int {
-	n := p.official(w, now)
+// early is the machines the grades taken before an exam want (earlyMachines).
+func (p Policy) targetHolding(w *Work, held int, now time.Time, early int) int {
+	n := p.official(w, early)
 	if p.PerFarm > 0 {
 		n += (w.FarmWaiting + p.PerFarm - 1) / p.PerFarm
 	}
@@ -96,19 +100,20 @@ func (p Policy) runners(w *Work) int {
 	return 0
 }
 
-// official is how many machines the rounds' own work justifies.
-func (p Policy) official(w *Work, now time.Time) int {
+// official is how many machines the rounds' own work justifies: early is what the grades taken
+// before an exam want, a machine for each grade unless machines take several (earlyMachines).
+func (p Policy) official(w *Work, early int) int {
 	per := max(p.PerWorker, 1)
 	if p.Edits {
-		grades := 0
+		grades := early
 		for _, r := range w.Rounds {
-			grades += r.GradesWanted + p.early(r, now)
+			grades += r.GradesWanted
 		}
 		return (grades+per-1)/per + p.runners(w)
 	}
-	scripts, curators := 0, 0
+	scripts, curators := early, 0
 	for _, r := range w.Rounds {
-		scripts += r.GradesWanted + p.early(r, now)
+		scripts += r.GradesWanted
 		curators += r.RunsWaiting + r.EditsUnderWay
 	}
 	n := (scripts + per - 1) / per
@@ -118,9 +123,15 @@ func (p Policy) official(w *Work, now time.Time) int {
 	return n
 }
 
-// examDue is when a round's exam is expected, about; zero when that is not known.
+// examDue is when a round's exam is expected, about: when the server says it is, or else
+// --exam-after its draw; zero once it is posted, or when that is not known.
 func (p Policy) examDue(r WorkRound) time.Time {
-	if r.ExamAt != 0 || r.DrawnAt == 0 || p.ExamAfter <= 0 {
+	switch {
+	case r.ExamAt != 0:
+		return time.Time{}
+	case r.ExamDue > 0:
+		return time.Unix(r.ExamDue, 0)
+	case r.DrawnAt == 0 || p.ExamAfter <= 0:
 		return time.Time{}
 	}
 	return time.Unix(r.DrawnAt, 0).Add(p.ExamAfter)
@@ -140,28 +151,80 @@ func (p Policy) early(r WorkRound, now time.Time) int {
 	return r.GradesEarly
 }
 
-// Worker is one key of the pool, with its pod if it has one and what the server says of it.
+// earlyWanted is the grades the rounds want taken before their exams now.
+func (p Policy) earlyWanted(w *Work, now time.Time) int {
+	n := 0
+	for _, r := range w.Rounds {
+		n += p.early(r, now)
+	}
+	return n
+}
+
+// earlyMachines is how many machines the grades taken before an exam want: grades is how many
+// are wanted that no machine holds, and each new machine is taken to take next of them (one,
+// unless the server lets a machine hold several before the exam). Machines rented already to
+// take several take theirs first: one that is starting, or waiting, all it was rented for, and
+// one that is grading the rest of them. Those starting or waiting are counted among the
+// machines wanted, as they are among those rented, so that they are not rented again.
+func (p Policy) earlyMachines(grades, next int, workers []*Worker, now time.Time) (machines, renting int) {
+	if grades <= 0 {
+		return 0, 0
+	}
+	next = max(next, 1)
+	idle := 0
+	for _, wk := range workers {
+		if wk.Plan <= 1 {
+			continue
+		}
+		switch wk.state(now, p) {
+		case "grading":
+			holding := 1
+			if wk.Machine != nil {
+				holding = max(wk.Machine.Holding, 1)
+			}
+			grades -= max(0, wk.Plan-holding)
+		case "starting", "waiting":
+			grades -= wk.Plan
+			idle++
+		}
+	}
+	renting = (max(grades, 0) + next - 1) / next
+	return renting + idle, renting
+}
+
+// Worker is one key of the pool, with the machine rented with it if there is one, and what
+// the server says of it.
 type Worker struct {
 	Key     *Key
-	Pod     *Pod
+	Rental  *Rental
 	Machine *Machine
+	// Plan is how many grades it was rented to take before an exam (0 or 1: one).
+	Plan int
+	// Grace is how long it may take to first ask for work (0: the policy's).
+	Grace time.Duration
+	// Silence is how long it may say nothing, holding no job, before it is taken to have gone
+	// quiet (0: the policy's). Where a machine cannot end itself, it waits to be ended once
+	// its stet stops, and says nothing.
+	Silence time.Duration
+	// Speed is its card's, against a 3090 (0: not known).
+	Speed float64
 }
 
 // state says what a machine is doing, for deciding and for showing.
 //
-//	free      no pod
-//	starting  a pod, and stet has not yet asked the server for work from it
+//	free      no machine
+//	starting  a machine, and stet has not yet asked the server for work from it
 //	grading   it holds a grade job
 //	running   it holds a curator to run
 //	training  it trains one of the organisers' students
 //	waiting   it asks for work and has none
 //	quiet     it asked, and then nothing for longer than any job takes without asking
-//	stopped   the pod stopped, or never got going
+//	stopped   the machine stopped, or never got going
 func (w *Worker) state(now time.Time, p Policy) string {
 	switch {
-	case w.Pod == nil:
+	case w.Rental == nil:
 		return "free"
-	case w.Pod.Status == "EXITED" || w.Pod.Status == "ERROR" || w.Pod.Status == "TERMINATED":
+	case w.Rental.State == "stopped":
 		return "stopped"
 	case w.Machine != nil && w.Machine.Busy == "grade":
 		return "grading"
@@ -175,18 +238,32 @@ func (w *Worker) state(now time.Time, p Policy) string {
 		seen = w.Machine.LastSeen
 	}
 	switch {
-	case seen >= w.Pod.CreatedAt.Unix() && now.Sub(time.Unix(seen, 0)) <= p.Silence:
+	case seen >= w.Rental.Created.Unix() && now.Sub(time.Unix(seen, 0)) <= w.silence(p):
 		return "waiting"
-	case seen >= w.Pod.CreatedAt.Unix():
+	case seen >= w.Rental.Created.Unix():
 		return "quiet"
-	case now.Sub(w.Pod.CreatedAt) <= p.Grace:
+	case now.Sub(w.Rental.Created) <= w.grace(p):
 		return "starting"
 	default:
 		return "stopped" // it never asked for work: the install failed, or stet would not start
 	}
 }
 
-// Ending is a pod to end, and why.
+func (w *Worker) silence(p Policy) time.Duration {
+	if w.Silence > 0 {
+		return w.Silence
+	}
+	return p.Silence
+}
+
+func (w *Worker) grace(p Policy) time.Duration {
+	if w.Grace > 0 {
+		return w.Grace
+	}
+	return p.Grace
+}
+
+// Ending is a machine to end, and why.
 type Ending struct {
 	Worker *Worker
 	Why    string
@@ -208,14 +285,43 @@ type Decision struct {
 	// Of the rest, the machines rented to run curators: the cheapest a grade, since once its
 	// runs are done such a machine takes a grade before the exam and holds it until then.
 	LaunchRuns int
-	End        []Ending // pods to end now
-	// Machines no pod is rented for that the server says still hold a job: ended a moment
+	End        []Ending // machines to end now
+	// Keys no machine is rented with that the server says still hold a job: ended a moment
 	// after they took it, or stopped partway through. What they hold is handed back.
 	Release []*Worker
 	Note    string // why fewer are rented than wanted, if they are
 }
 
 func (p Policy) decide(w *Work, workers []*Worker, spentToday float64, now time.Time) Decision {
+	return p.decideNext(w, workers, spentToday, now, 1)
+}
+
+// nearExam says whether an exam is due within five minutes, or was posted within the time
+// the server keeps a grade still wanted for the fastest card free, with grades of its round
+// under way: a fast machine doing nothing is kept then, since one that fails leaves a grade
+// for it. In round 6 an idle 4090 was ended minutes before the exam.
+func (p Policy) nearExam(w *Work, now time.Time) bool {
+	window := max(time.Duration(w.FastFirstSeconds)*time.Second, 2*time.Minute)
+	for _, r := range w.Rounds {
+		if r.GradesUnderWay+r.GradesWanted == 0 {
+			continue
+		}
+		if due := p.examDue(r); !due.IsZero() && due.Sub(now) <= 5*time.Minute {
+			return true
+		}
+		if r.ExamAt != 0 && now.Sub(time.Unix(r.ExamAt, 0)) <= window {
+			return true
+		}
+	}
+	return false
+}
+
+// keptNearExam is how many idle machines are kept near an exam: the fastest two.
+const keptNearExam = 2
+
+// decideNext decides, where a machine rented now for grades taken before an exam is taken to
+// take next of them (forExam's plan for the kind it would rent).
+func (p Policy) decideNext(w *Work, workers []*Worker, spentToday float64, now time.Time, next int) Decision {
 	// A machine at a grade takes no other until it is done, twenty minutes or so at the
 	// standard scale: what is waiting wants machines of its own. One running a curator is
 	// done in a minute or two, and counts among the machines the curators want.
@@ -230,7 +336,8 @@ func (p Policy) decide(w *Work, workers []*Worker, spentToday float64, now time.
 			}
 		}
 	}
-	waiting := p.targetHolding(w, held, now)
+	early, renting := p.earlyMachines(p.earlyWanted(w, now), next, workers, now)
+	waiting := p.targetHolding(w, held, now, early)
 	d := Decision{Target: min(waiting+working, p.MaxWorkers)}
 	free := 0
 	var idle []*Worker
@@ -253,8 +360,25 @@ func (p Policy) decide(w *Work, workers []*Worker, spentToday float64, now time.
 		}
 	}
 	if waiting == 0 {
-		// Nothing is waiting for anybody: a machine doing nothing would only wait to stop.
+		// Nothing is waiting for anybody: a machine doing nothing would only wait to stop. Near
+		// an exam, the fastest that are waiting are kept for a grade a failed machine leaves.
+		kept := map[*Worker]bool{}
+		if p.nearExam(w, now) {
+			var fast []*Worker
+			for _, wk := range idle {
+				if wk.state(now, p) == "waiting" {
+					fast = append(fast, wk)
+				}
+			}
+			sort.SliceStable(fast, func(i, j int) bool { return fast[i].Speed > fast[j].Speed })
+			for _, wk := range fast[:min(len(fast), keptNearExam)] {
+				kept[wk] = true
+			}
+		}
 		for _, wk := range idle {
+			if kept[wk] {
+				continue
+			}
 			d.End = append(d.End, Ending{wk, "nothing is waiting for it"})
 			d.Live--
 		}
@@ -262,7 +386,7 @@ func (p Policy) decide(w *Work, workers []*Worker, spentToday float64, now time.
 	}
 	d.Launch = max(0, min(d.Target, p.MaxWorkers)-d.Live)
 	if d.Launch > free {
-		d.Launch, d.Note = free, fmt.Sprintf("only %d keys are free: make more with `stet-runpod keys --add N`", free)
+		d.Launch, d.Note = free, fmt.Sprintf("only %d keys are free: make more with `stet-cloud keys --add N`", free)
 	}
 	if d.Launch > 0 && p.DailyBudget > 0 && spentToday >= p.DailyBudget {
 		d.Launch, d.Note = 0, fmt.Sprintf("about $%.2f spent today, and the daily budget is $%.2f", spentToday, p.DailyBudget)
@@ -275,10 +399,9 @@ func (p Policy) decide(w *Work, workers []*Worker, spentToday float64, now time.
 			if due := p.examDue(r); d.ExamDue.IsZero() || due.Before(d.ExamDue) {
 				d.ExamDue = due
 			}
-			d.LaunchEarly += n
 		}
 	}
-	d.LaunchEarly = min(d.LaunchEarly, d.Launch-d.LaunchLong)
+	d.LaunchEarly = min(renting, d.Launch-d.LaunchLong)
 	d.LaunchRuns = min(p.runners(w), d.Launch-d.LaunchLong-d.LaunchEarly)
 	sort.SliceStable(d.End, func(i, j int) bool { return d.End[i].Worker.Key.Handle < d.End[j].Worker.Key.Handle })
 	return d

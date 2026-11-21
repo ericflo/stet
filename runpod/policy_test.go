@@ -1,7 +1,9 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -28,13 +30,13 @@ func pool(w *Work, states ...string) []*Worker {
 		switch st {
 		case "free":
 		case "starting":
-			wk.Pod = &Pod{Name: k.Handle, Status: "RUNNING", CreatedAt: t0.Add(-5 * time.Minute)}
+			wk.Rental = &Rental{Name: k.Handle, State: "running", Status: "RUNNING", Created: t0.Add(-5 * time.Minute)}
 		case "never":
-			wk.Pod = &Pod{Name: k.Handle, Status: "RUNNING", CreatedAt: created}
+			wk.Rental = &Rental{Name: k.Handle, State: "running", Status: "RUNNING", Created: created}
 		case "stopped":
-			wk.Pod = &Pod{Name: k.Handle, Status: "EXITED", CreatedAt: created}
+			wk.Rental = &Rental{Name: k.Handle, State: "stopped", Status: "EXITED", Created: created}
 		default:
-			wk.Pod = &Pod{Name: k.Handle, Status: "RUNNING", CreatedAt: created}
+			wk.Rental = &Rental{Name: k.Handle, State: "running", Status: "RUNNING", Created: created}
 			m := Machine{Handle: k.Handle, Worker: true, LastSeen: t0.Add(-time.Minute).Unix()}
 			switch st {
 			case "grading":
@@ -322,7 +324,8 @@ func TestEarlyGradesWantMachinesShortlyBeforeTheExam(t *testing.T) {
 	p.Early, p.ExamAfter = 45*time.Minute, 2*time.Hour+12*time.Minute
 	drawn := time.Unix(1795207805, 0)
 	at := func(r WorkRound, after time.Duration) int {
-		return p.targetHolding(&Work{Runners: 1, Rounds: []WorkRound{r}}, 0, drawn.Add(after))
+		w := &Work{Runners: 1, Rounds: []WorkRound{r}}
+		return p.targetHolding(w, 0, drawn.Add(after), p.earlyWanted(w, drawn.Add(after)))
 	}
 	r := WorkRound{ID: "s1-o00004", Entries: 8, GradesEarly: 8, DrawnAt: drawn.Unix()}
 	for _, c := range []struct {
@@ -344,5 +347,113 @@ func TestEarlyGradesWantMachinesShortlyBeforeTheExam(t *testing.T) {
 	p.Early = 0
 	if got := at(r, 2*time.Hour); got != 0 {
 		t.Errorf("with --early 0: %d machines", got)
+	}
+}
+
+// When a machine may hold several grades before the exam, fewer are rented for them, and those
+// rented already are counted for all they were rented to take.
+func TestMachinesThatTakeSeveralGradesAreFewer(t *testing.T) {
+	p := testPolicy()
+	p.PerWorker, p.MaxWorkers, p.Edits, p.MaxHourly, p.Early = 1, 20, true, 16, 90*time.Minute
+	work := func() *Work {
+		return &Work{EarlyGradesPerMachine: 3, Rounds: []WorkRound{{ID: "s1-o00008", Entries: 12, GradesEarly: 12, ExamDue: t0.Add(time.Hour).Unix()}}}
+	}
+	// Nothing rented: 12 grades, three to a machine, want four.
+	w := work()
+	if d := p.decideNext(w, pool(w, "free", "free", "free", "free", "free", "free"), 0, t0, 3); d.Launch != 4 || d.LaunchEarly != 4 {
+		t.Fatalf("for 12 grades three to a machine: %+v", d)
+	}
+	// With one a machine, as before: six, all the keys there are.
+	w = work()
+	if d := p.decideNext(w, pool(w, "free", "free", "free", "free", "free", "free"), 0, t0, 1); d.Launch != 6 {
+		t.Fatalf("for 12 grades one to a machine: %+v", d)
+	}
+	// Four are starting, each rented for three: nothing more.
+	w = work()
+	ws := pool(w, "starting", "starting", "starting", "starting", "free", "free")
+	for _, wk := range ws[:4] {
+		wk.Plan = 3
+	}
+	if d := p.decideNext(w, ws, 0, t0, 3); d.Launch != 0 || len(d.End) != 0 {
+		t.Fatalf("four starting for three each: %+v", d)
+	}
+	// They hold one each, and will take two more each: nothing more.
+	w = work()
+	w.Rounds[0].GradesEarly, w.Rounds[0].GradesUnderWay = 8, 4
+	ws = pool(w, "grading", "grading", "grading", "grading", "free", "free")
+	for _, wk := range ws[:4] {
+		wk.Plan, wk.Machine.Holding = 3, 1
+	}
+	if d := p.decideNext(w, ws, 0, t0, 3); d.Launch != 0 || len(d.End) != 0 {
+		t.Fatalf("four holding one of three each: %+v", d)
+	}
+	// One was rented late, for one: the two grades it will not take want another machine.
+	ws[3].Plan = 1
+	if d := p.decideNext(w, ws, 0, t0, 3); d.Launch != 1 {
+		t.Fatalf("one rented for one: %+v", d)
+	}
+	// The server's own time for the exam is taken over --exam-after.
+	if due := p.examDue(WorkRound{DrawnAt: t0.Unix(), ExamDue: t0.Add(2 * time.Hour).Unix()}); !due.Equal(t0.Add(2 * time.Hour)) {
+		t.Fatalf("the exam is due %s", due)
+	}
+}
+
+// Near an exam, with grades of its round under way, the fastest two machines doing nothing are
+// kept for a grade one that fails leaves, rather than ended for nothing waiting.
+func TestTheFastestIdleMachinesAreKeptNearAnExam(t *testing.T) {
+	p := testPolicy()
+	p.PerWorker, p.MaxWorkers, p.Edits = 1, 20, true
+	w := &Work{FastFirstSeconds: 120, Rounds: []WorkRound{{ID: "s1-o00008", GradesUnderWay: 6, ExamDue: t0.Add(4 * time.Minute).Unix()}}}
+	ws := pool(w, "waiting", "waiting", "waiting", "grading")
+	ws[0].Speed, ws[1].Speed, ws[2].Speed = 1.0, 2.3, 1.8
+	if d := p.decide(w, ws, 0, t0); handles(d.End) != "stet-rp-01" {
+		t.Fatalf("four minutes before the exam, ended %s", handles(d.End))
+	}
+	// An hour before it, all three are ended, as before.
+	w.Rounds[0].ExamDue = t0.Add(time.Hour).Unix()
+	if d := p.decide(w, ws, 0, t0); handles(d.End) != "stet-rp-01,stet-rp-02,stet-rp-03" {
+		t.Fatalf("an hour before the exam, ended %s", handles(d.End))
+	}
+}
+
+// /admin/work as server 0.4.4 says it (stet-dc's, from a test world): its new fields are read,
+// and two machines holding grades before the exam, one with three and one with one that will
+// take two more, leave no grade wanting another machine.
+func TestTheWorkAsServer044SaysIt(t *testing.T) {
+	raw, err := os.ReadFile("testdata/admin_work_0.4.4.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var w Work
+	if err := json.Unmarshal(raw, &w); err != nil {
+		t.Fatal(err)
+	}
+	r := w.Rounds[0]
+	if w.EarlyGradesPerMachine != 3 || w.FastFirstSeconds != 120 || r.ExamDue != 1795252811 || r.GradesEarly != 1 {
+		t.Fatalf("read as %+v", w)
+	}
+	m1, m2 := w.machine("stet-rp-01"), w.machine("stet-rp-02")
+	if m1.Holding != 3 || !m1.Ready || m1.PassSeconds != 608.1 || m2.Holding != 1 || m2.Ready || m2.PassSeconds != 0 {
+		t.Fatalf("machines read as %+v %+v", m1, m2)
+	}
+	p := testPolicy()
+	p.PerWorker, p.MaxWorkers, p.Edits, p.Early = 1, 20, true, 90*time.Minute
+	now := time.Unix(r.ExamDue, 0).Add(-30 * time.Minute)
+	created := now.Add(-time.Hour)
+	var ws []*Worker
+	for _, h := range []string{"stet-rp-01", "stet-rp-02", "stet-rp-03"} {
+		ws = append(ws, &Worker{Key: &Key{Handle: h}, Machine: w.machine(h)})
+	}
+	for _, wk := range ws[:2] {
+		wk.Rental, wk.Plan = &Rental{Name: wk.Key.Handle, State: "running", Created: created}, 3
+		wk.Machine.LastSeen = now.Unix()
+	}
+	if d := p.decideNext(&w, ws, 0, now, 3); d.LaunchEarly != 0 || len(d.End) != 0 {
+		t.Fatalf("with rp-02 to take two more: %+v", d)
+	}
+	// Were rp-02 rented for one, the grade still wanted would want a machine.
+	ws[1].Plan = 1
+	if d := p.decideNext(&w, ws, 0, now, 3); d.LaunchEarly != 1 {
+		t.Fatalf("with rp-02 rented for one: %+v", d)
 	}
 }

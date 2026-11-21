@@ -229,8 +229,9 @@ func testFleet(t *testing.T, rp *fakeRunPod, st *fakeStet, keys int) (*Fleet, *b
 	o := &Options{Home: t.TempDir(), Cloud: "SECURE", Image: "ubuntu:24.04", Disk: 40, MinCUDA: "13.0", MinRAM: 12, MinCPU: 4, MinGPUMemory: 10, Idle: 10, Every: time.Minute, Policy: testPolicy()}
 	var out bytes.Buffer
 	op, _ := newKey("ericflo-wsl")
-	f := &Fleet{o: o, rp: newRunPod(rp.srv.URL, "rp-key"), st: newStet(st.srv.URL), op: op, out: &out, now: time.Now}
-	f.rp.sleep = func(context.Context, time.Duration) error { return nil }
+	rpc := newRunPod(rp.srv.URL, "rp-key")
+	rpc.sleep = func(context.Context, time.Duration) error { return nil }
+	f := &Fleet{o: o, markets: []Market{newRunPodMarket(rpc, &o.Cloud)}, fixed: true, st: newStet(st.srv.URL), op: op, out: &out, now: time.Now}
 	if _, err := f.addKeys(keys, "stet-rp"); err != nil {
 		t.Fatal(err)
 	}
@@ -539,13 +540,13 @@ func TestTheFastestMachineIsRentedFirst(t *testing.T) {
 	if last := rp.created[len(rp.created)-1]; last.Cloud != "COMMUNITY" || last.GPU.ID != "NVIDIA GeForce RTX 3090 Ti" {
 		t.Fatalf("after the fastest ran out: %+v\n%s", last, out)
 	}
-	gpus, err := f.choices(context.Background(), false)
+	gpus, err := f.choices(context.Background(), false, false)
 	if err != nil || len(gpus) < 3 {
 		t.Fatalf("choices: %+v %v", gpus, err)
 	}
 	for i := 1; i < len(gpus); i++ {
 		a, b := gpus[i-1], gpus[i]
-		if speed(b.GPU.ID) > speed(a.GPU.ID) || speed(b.GPU.ID) == speed(a.GPU.ID) && b.Price < a.Price {
+		if speed(b.Card) > speed(a.Card) || speed(b.Card) == speed(a.Card) && b.Price < a.Price {
 			t.Fatalf("not the fastest first: %+v", gpus)
 		}
 	}
@@ -591,16 +592,16 @@ func TestTheCheapestMachineInEitherCloudIsRented(t *testing.T) {
 		t.Fatal("a machine not rented for bigger students was told to take them")
 	}
 	f.o.LongMinutes = 600
-	if spec := f.spec(&Key{Handle: "stet-rp-09"}, "NVIDIA RTX A5000", "SECURE", "https://www.stet.test"); spec.Env["STET_FARM_MAX_MINUTES"] != "600" {
+	if spec := f.launchFor(&Key{Handle: "stet-rp-09"}, "https://www.stet.test"); spec.Env["STET_FARM_MAX_MINUTES"] != "600" {
 		t.Fatalf("a machine rented for bigger students: %v", spec.Env["STET_FARM_MAX_MINUTES"])
 	}
 	f.o.LongMinutes = 0
-	gpus, err := f.choices(context.Background(), false)
-	if err != nil || len(gpus) < 3 || gpus[0].Price != 0.18 || gpus[0].Cloud != "COMMUNITY" {
+	gpus, err := f.choices(context.Background(), false, false)
+	if err != nil || len(gpus) < 3 || gpus[0].Price != 0.18 || gpus[0].Trust != "community" {
 		t.Fatalf("choices: %+v %v", gpus, err)
 	}
 	for i := 1; i < len(gpus); i++ {
-		if gpus[i].Price/speed(gpus[i].GPU.ID) < gpus[i-1].Price/speed(gpus[i-1].GPU.ID) {
+		if gpus[i].Price/speed(gpus[i].Card) < gpus[i-1].Price/speed(gpus[i-1].Card) {
 			t.Fatalf("not the cheapest a grade first: %+v", gpus)
 		}
 	}
@@ -618,7 +619,7 @@ func TestTheCheapestMachineInEitherCloudIsRented(t *testing.T) {
 	if len(rp.created) != n {
 		t.Fatalf("rented %+v over the ceiling", rp.created[n:])
 	}
-	if gpus, _ := f.choices(context.Background(), false); len(gpus) == 0 || gpus[len(gpus)-1].Price > 0.20 {
+	if gpus, _ := f.choices(context.Background(), false, false); len(gpus) == 0 || gpus[len(gpus)-1].Price > 0.20 {
 		t.Fatalf("choices under a $0.20 ceiling: %+v", gpus)
 	}
 }
@@ -660,7 +661,7 @@ func TestLogsPrintWhatAMachineSaid(t *testing.T) {
 		}
 	}))
 	defer logs.Close()
-	f.rp = newRunPod(logs.URL, "rp-key")
+	f.markets = []Market{newRunPodMarket(newRunPod(logs.URL, "rp-key"), &f.o.Cloud)}
 	out.Reset()
 	if err := cmdLogs(context.Background(), f, "stet-rp-01", false, 2); err != nil {
 		t.Fatal(err)
@@ -693,7 +694,9 @@ func TestPauseAndResumeTheRounds(t *testing.T) {
 
 // A machine ended a moment after it took a job still holds it, as the server sees it, with no
 // pod rented for it: what it holds is handed back on the next look, as the organisers, so that
-// nothing waits out its lease. A rented machine at work keeps its job.
+// nothing waits out its lease. A rented machine at work keeps its job. A machine ended is
+// handed back as it is ended: before an exam the server keeps a grade for the machine that
+// holds it, however long it is dead.
 func TestWhatAnEndedMachineHeldIsHandedBack(t *testing.T) {
 	rp, st := newFakeRunPod(t), newFakeStet(t)
 	f, out := testFleet(t, rp, st, 3)
@@ -703,8 +706,9 @@ func TestWhatAnEndedMachineHeldIsHandedBack(t *testing.T) {
 		t.Fatalf("rented %d machines (%v)", len(rp.created), err)
 	}
 
-	// The round is done: stet-rp-01 grades and is kept, stet-rp-02 waits and is ended, and
-	// stet-rp-03, which no pod is rented for, still holds one of the organisers' students.
+	// The round is done: stet-rp-01 grades and is kept, stet-rp-02 waits and is ended (and
+	// handed back, holding nothing), and stet-rp-03, which no pod is rented for, still holds
+	// one of the organisers' students.
 	st.work = *round(0, 0, 0, 1)
 	now := time.Now().Unix()
 	st.work.Machines = []Machine{
@@ -715,7 +719,7 @@ func TestWhatAnEndedMachineHeldIsHandedBack(t *testing.T) {
 	if err := tick(ctx, f); err != nil {
 		t.Fatal(err)
 	}
-	if len(rp.pods) != 1 || strings.Join(st.released, " ") != "stet-rp-03" {
+	if len(rp.pods) != 1 || strings.Join(st.released, " ") != "stet-rp-02 stet-rp-03" {
 		t.Fatalf("%d pods left, handed back %v:\n%s", len(rp.pods), st.released, out)
 	}
 	if !strings.Contains(out.String(), "handed back what stet-rp-03 held when it was ended: 1 of the organisers' students") {
@@ -730,11 +734,11 @@ func TestWhatAnEndedMachineHeldIsHandedBack(t *testing.T) {
 	if err := tick(ctx, f); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Join(st.released, " ") != "stet-rp-03 stet-rp-02" || !strings.Contains(out.String(), "handed back what stet-rp-02 held when it was ended: 1 job") {
+	if strings.Join(st.released, " ") != "stet-rp-02 stet-rp-03 stet-rp-02" || !strings.Contains(out.String(), "handed back what stet-rp-02 held when it was ended: 1 job") {
 		t.Fatalf("handed back %v:\n%s", st.released, out)
 	}
 	// Nothing is held any more, so nothing more is handed back.
-	if err := tick(ctx, f); err != nil || len(st.released) != 2 {
+	if err := tick(ctx, f); err != nil || len(st.released) != 3 {
 		t.Fatalf("handed back %v (%v)", st.released, err)
 	}
 }
@@ -767,17 +771,17 @@ func TestTheBiggerStudentsGetTheCardThatTrainsOneForLeast(t *testing.T) {
 
 	// Under a lower ceiling for them, the 4090 is not among them.
 	f.o.LongMaxPrice = 0.40
-	gpus, err := f.choices(context.Background(), true)
+	gpus, err := f.choices(context.Background(), true, false)
 	var kinds []string
 	for _, c := range gpus {
-		kinds = append(kinds, shortGPU(c.GPU.ID))
+		kinds = append(kinds, shortGPU(c.Card))
 	}
 	if err != nil || strings.Join(kinds, ", ") != "RTX 3080 Ti, RTX 3090 Ti, RTX 3080, RTX A5000" {
 		t.Fatalf("for the bigger students under $0.40: %v %v", kinds, err)
 	}
 	// And with no ceiling of their own, --max-price's.
 	f.o.LongMaxPrice = 0
-	if gpus, _ := f.choices(context.Background(), true); len(gpus) == 0 || gpus[0].Price > 0.22 {
+	if gpus, _ := f.choices(context.Background(), true, false); len(gpus) == 0 || gpus[0].Price > 0.22 {
 		t.Fatalf("for the bigger students with no ceiling of their own: %+v", gpus)
 	}
 }
@@ -912,17 +916,17 @@ func TestWhatMachinesTakeIsLearned(t *testing.T) {
 	// Seen starting, then asking for work: 3, 4 and 5 minutes, and one seen only once it had.
 	t0 := time.Now().Add(-time.Hour).Truncate(time.Second)
 	for i, took := range []time.Duration{3 * time.Minute, 4 * time.Minute, 5 * time.Minute} {
-		w := &Worker{Pod: &Pod{ID: fmt.Sprintf("pod%d", i), CreatedAt: t0}, Machine: &Machine{}}
+		w := &Worker{Rental: &Rental{ID: fmt.Sprintf("pod%d", i), Created: t0}, Machine: &Machine{}}
 		f.seeStart(w)
 		w.Machine.LastSeen = t0.Add(took).Unix()
 		f.seeStart(w)
 		f.seeStart(w)
 	}
-	f.seeStart(&Worker{Pod: &Pod{ID: "late", CreatedAt: t0}, Machine: &Machine{LastSeen: t0.Add(40 * time.Minute).Unix()}})
+	f.seeStart(&Worker{Rental: &Rental{ID: "late", Created: t0}, Machine: &Machine{LastSeen: t0.Add(40 * time.Minute).Unix()}})
 	if b := f.boot(); b != 5*time.Minute {
 		t.Fatalf("a machine starts in %s: %+v", b, f.cal.Boot)
 	}
-	if l := f.lead(Choice{GPU: GPUType{ID: pro}}); l.Round(time.Second) != 5*time.Minute+2*time.Minute+2*(15*time.Minute+40*time.Second)+time.Minute {
+	if l := f.lead(Offer{Card: pro}); l.Round(time.Second) != 5*time.Minute+2*time.Minute+2*(15*time.Minute+40*time.Second)+time.Minute {
 		t.Fatalf("a PRO 4000's lead: %s", l)
 	}
 	f.calAt = time.Time{}
@@ -933,5 +937,37 @@ func TestWhatMachinesTakeIsLearned(t *testing.T) {
 	}
 	if b := again.boot(); b != 5*time.Minute {
 		t.Fatalf("what was kept of starting: %s", b)
+	}
+}
+
+// With a server that lets a machine hold three grades before the exam and says when the exam
+// is due, the graders are rented to take three each: fewer machines, and none more while
+// those rented are starting.
+func TestGradersTakeSeveralGradesBeforeTheExam(t *testing.T) {
+	rp, st := newFakeRunPod(t), newFakeStet(t)
+	f, out := testFleet(t, rp, st, 4)
+	f.o.Early, f.o.PerWorker, f.o.Settle, f.o.MaxHourly = 2*time.Hour, 1, 15*time.Minute, 16
+	// Nothing seen: the 3080 ($0.20, 0.85 of a 3090) passes in 21 minutes and leads by 53, so it
+	// takes three grades rented 97 minutes before the exam.
+	due := time.Now().Add(97 * time.Minute)
+	st.work = Work{EarlyGradesPerMachine: 3, FastFirstSeconds: 120,
+		Rounds: []WorkRound{{ID: "s1-o00008", Entries: 6, GradesEarly: 6, ExamDue: due.Unix()}}}
+	if err := tick(context.Background(), f); err != nil {
+		t.Fatal(err)
+	}
+	if len(rp.created) != 2 || rp.created[0].GPU.ID != "NVIDIA GeForce RTX 3080" || strings.Count(out.String(), "to take 3 grades before the exam") != 2 {
+		t.Fatalf("rented %d machines for 6 early grades:\n%s", len(rp.created), out)
+	}
+	if strings.Contains(strings.Join(st.signed, "\n"), "GET /api/v1/rounds/s1-o00008") {
+		t.Fatalf("the draw was asked for, though the server said when the exam is due")
+	}
+	l, _ := f.readLedger()
+	for _, r := range l.Pods {
+		if r.Grades != 3 || r.Market != "runpod" {
+			t.Fatalf("recorded as %+v", r)
+		}
+	}
+	if err := tick(context.Background(), f); err != nil || len(rp.created) != 2 {
+		t.Fatalf("rented %d while two were starting for three each (%v):\n%s", len(rp.created), err, out)
 	}
 }

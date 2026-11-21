@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -29,8 +30,15 @@ const passOn3090 = 18 * time.Minute
 // scripts before it trains, and sitting the exam once it has.
 const fetchAndScripts, sitting = 2 * time.Minute, time.Minute
 
-// bootUnseen is how long a machine is taken to start until enough have been seen to say.
+// bootUnseen is how long a machine is taken to start until enough have been seen to say, on
+// each market: Lium's start in seconds, Salad's pull images over people's own connections.
 const bootUnseen = 8 * time.Minute
+
+var bootUnseenOn = map[string]time.Duration{"runpod": bootUnseen, "vast": 8 * time.Minute, "lium": 3 * time.Minute, "clore": 10 * time.Minute, "salad": 20 * time.Minute}
+
+// graceAtLeast is the least a machine is given to first ask for work before it is taken for
+// dead.
+const graceAtLeast = 10 * time.Minute
 
 // Calibration is what has been seen, kept in calibration.json in the home directory.
 type Calibration struct {
@@ -99,30 +107,53 @@ func (f *Fleet) speedOf(id string) float64 {
 	return float64(passOn3090) / float64(p)
 }
 
-// boot is how long a machine takes from being rented to first asking for work: of the
-// latest bootsCounted seen, longer than four in five took.
-func (f *Fleet) boot() time.Duration {
-	b := f.calibration().Boot
-	if len(b) < 3 {
-		return bootUnseen
+// boot is how long a machine on RunPod takes from being rented to first asking for work.
+func (f *Fleet) boot() time.Duration { return f.bootOn("runpod") }
+
+// bootOn is how long a machine on a market takes from being rented to first asking for work:
+// of the latest bootsCounted seen there, longer than four in five took. A sample's pod is
+// known by its key in the record, which is RunPod's pod ID alone, or "market:ID".
+func (f *Fleet) bootOn(market string) time.Duration {
+	if market == "" {
+		market = "runpod"
 	}
 	var m []float64
-	for _, s := range b[max(0, len(b)-bootsCounted):] {
-		m = append(m, s.Minutes)
+	for _, s := range f.calibration().Boot {
+		on := "runpod"
+		if i := strings.Index(s.Pod, ":"); i > 0 {
+			on = s.Pod[:i]
+		}
+		if on == market {
+			m = append(m, s.Minutes)
+		}
 	}
+	if len(m) < 3 {
+		if d, ok := bootUnseenOn[market]; ok {
+			return d
+		}
+		return bootUnseen
+	}
+	m = m[max(0, len(m)-bootsCounted):]
 	sort.Float64s(m)
 	return max(2*time.Minute, time.Duration(m[len(m)*4/5]*float64(time.Minute)))
+}
+
+// grace is how long a machine on a market may take to first ask for work before it is taken
+// for dead and ended: twice what four in five took there, and ten minutes at least. A
+// replacement usually starts sooner than a slow one would have.
+func (f *Fleet) grace(market string) time.Duration {
+	return max(graceAtLeast, 2*f.bootOn(market))
 }
 
 // lead is how long before a machine of this kind is to report a grade it must be rented,
 // for its first grade of a round: to start, fetch the corpus, train the round's baseline and
 // the student, and sit the exam.
-func (f *Fleet) lead(c Choice) time.Duration {
-	p, _ := f.pass(c.GPU.ID)
-	return f.boot() + fetchAndScripts + 2*p + sitting
+func (f *Fleet) lead(c Offer) time.Duration {
+	p, _ := f.pass(c.Card)
+	return f.bootOn(c.Market) + fetchAndScripts + 2*p + sitting
 }
 
-// noteBoot counts how long a pod took to first ask for work, once.
+// noteBoot counts how long a machine took to first ask for work, once.
 func (f *Fleet) noteBoot(pod string, took time.Duration) {
 	cal := f.calibration()
 	for _, s := range cal.Boot {

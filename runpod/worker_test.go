@@ -36,6 +36,8 @@ func newWorkerRun(t *testing.T, stet string) *workerRun {
 	write("curl", `echo "$*" >> "$LOG/curl"
 case "$*" in
   *"-X DELETE"*"Bearer pod-key"*"/v2/pods/pod-123"*) printf 204 ;;
+  *"-X DELETE"*"Bearer container-key"*"console.vast.ai/api/v0/instances/77/"*) printf 200 ;;
+  *"169.254.169.254/v1/reallocate"*) echo reallocated ;;
   *install.sh*) echo 'mkdir -p "$UV_TOOL_BIN_DIR" && cp "$STAND_IN" "$UV_TOOL_BIN_DIR/stet"' ;;
   *) printf 401 ;;
 esac
@@ -180,5 +182,48 @@ esac
 	}
 	if !strings.Contains(string(out), "grading only") || !strings.Contains(w.log("curl"), "-X DELETE") {
 		t.Fatalf("%s", out)
+	}
+}
+
+// On Vast it ends itself with the key Vast gives the instance; on a market that gives none, it
+// waits for stet-cloud to end it, and asks nothing of any market.
+func TestTheWorkerEndsItselfWhereItsMarketLetsIt(t *testing.T) {
+	stand := `case "$1" in --version) echo "stet 0.0.0" ;; verify) echo "$*" >> "$LOG/stet" ;; esac
+`
+	w := newWorkerRun(t, stand)
+	w.env = append(w.env, "STET_MARKET=vast", "CONTAINER_ID=77", "CONTAINER_API_KEY=container-key")
+	out, err := w.cmd().CombinedOutput()
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if !strings.Contains(w.log("curl"), "-X DELETE -H Authorization: Bearer container-key https://console.vast.ai/api/v0/instances/77/") ||
+		!strings.Contains(string(out), "Vast has it; this instance is ending") || strings.Contains(w.log("curl"), "runpod.io") {
+		t.Fatalf("on Vast:\n%s\n%s", w.log("curl"), out)
+	}
+	w = newWorkerRun(t, stand)
+	w.env = append(w.env, "STET_MARKET=lium")
+	out, err = w.cmd().CombinedOutput()
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if strings.Contains(w.log("curl"), "DELETE") || !strings.Contains(string(out), "lium gives it no key to end itself with") || !strings.Contains(w.log("sleep"), "infinity") {
+		t.Fatalf("on Lium:\n%s\n%s", w.log("curl"), out)
+	}
+}
+
+// On Salad, a host whose driver is older than 580 is asked to be moved, and grades nothing.
+func TestOnSaladAnOldDriverAsksForAnotherMachine(t *testing.T) {
+	w := newWorkerRun(t, `case "$1" in --version) echo "stet 0.0.0" ;; verify) echo "$*" >> "$LOG/stet" ;; esac
+`)
+	if err := os.WriteFile(filepath.Join(w.bin, "nvidia-smi"), []byte("#!/bin/bash\necho 570.86.10\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	w.env = append(w.env, "STET_MARKET=salad")
+	out, err := w.cmd().CombinedOutput()
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if !strings.Contains(w.log("curl"), "169.254.169.254/v1/reallocate") || w.log("stet") != "" || !strings.Contains(string(out), "driver 570.86.10 is older than 580") {
+		t.Fatalf("an old driver on Salad:\n%s\n%s", w.log("curl"), out)
 	}
 }

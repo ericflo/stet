@@ -1,0 +1,172 @@
+{
+ "items": [
+  {
+   "gpu_class_type": "community",
+   "id": "ed563892-aacd-40f5-80b7-90c9be6c759b",
+   "is_high_demand": false,
+   "name": "RTX 4090 (24 GB)",
+   "prices": [
+    {
+     "price": "0.440",
+     "priority": "high"
+    },
+    {
+     "price": "0.347",
+     "priority": "medium"
+    },
+    {
+     "price": "0.253",
+     "priority": "low"
+    },
+    {
+     "price": "0.16",
+     "priority": "batch"
+    }
+   ]
+  },
+  {
+   "gpu_class_type": "community",
+   "id": "69071b6c-3d2c-4181-b3ce-de03aec04b9f",
+   "is_high_demand": false,
+   "name": "RTX 3060 (8 GB)",
+   "prices": [
+    {
+     "price": "0.08",
+     "priority": "high"
+    },
+    {
+     "price": "0.063",
+     "priority": "medium"
+    },
+    {
+     "price": "0.047",
+     "priority": "low"
+    },
+    {
+     "price": "0.03",
+     "priority": "batch"
+    }
+   ]
+  },
+  {
+   "gpu_class_type": "community",
+   "id": "65247de0-746f-45c6-8537-650ba613966a",
+   "is_high_demand": false,
+   "name": "RTX 3080 Ti (12 GB)",
+   "prices": [
+    {
+     "price": "0.195",
+     "priority": "high"
+    },
+    {
+     "price": "0.157",
+     "priority": "medium"
+    },
+    {
+     "price": "0.118",
+     "priority": "low"
+    },
+    {
+     "price": "0.08",
+     "priority": "batch"
+    }
+   ]
+  },
+  {
+   "gpu_class_type": "community",
+   "id": "0f60d6f5-642a-44a5-af51-3ac34d7602c1",
+   "is_high_demand": false,
+   "name": "GTX 1650 (4 GB)",
+   "prices": [
+    {
+     "price": "0.02",
+     "priority": "high"
+    },
+    {
+     "price": "0.018",
+     "priority": "medium"
+    },
+    {
+     "price": "0.017",
+     "priority": "low"
+    },
+    {
+     "price": "0.015",
+     "priority": "batch"
+    }
+   ]
+  },
+  {
+   "gpu_class_type": "community",
+   "id": "f51baccc-dc95-40fb-a5d1-6d0ee0db31d2",
+   "is_high_demand": false,
+   "name": "RTX 3060 (12 GB)",
+   "prices": [
+    {
+     "price": "0.08",
+     "priority": "high"
+    },
+    {
+     "price": "0.067",
+     "priority": "medium"
+    },
+    {
+     "price": "0.053",
+     "priority": "low"
+    },
+    {
+     "price": "0.04",
+     "priority": "batch"
+    }
+   ]
+  },
+  {
+   "gpu_class_type": "community",
+   "id": "83ef776e-ce34-4d89-8cf9-81898f1416fa",
+   "is_high_demand": false,
+   "name": "RTX 5090 Laptop (24 GB)",
+   "prices": [
+    {
+     "price": "0.235",
+     "priority": "high"
+    },
+    {
+     "price": "0.19",
+     "priority": "medium"
+    },
+    {
+     "price": "0.145",
+     "priority": "low"
+    },
+    {
+     "price": "0.1",
+     "priority": "batch"
+    }
+   ]
+  },
+  {
+   "gpu_class_type": "community",
+   "id": "91b76f19-cbe4-4ef6-a174-c808e6fdad50",
+   "is_high_demand": false,
+   "name": "AMD RX 7900 XTX (24GB)",
+   "prices": [
+    {
+     "price": "0.168",
+     "priority": "high"
+    },
+    {
+     "price": "0.134",
+     "priority": "medium"
+    },
+    {
+     "price": "0.1",
+     "priority": "low"
+    },
+    {
+     "price": "0.066",
+     "priority": "batch"
+    }
+   ]
+  }
+ ]
+}

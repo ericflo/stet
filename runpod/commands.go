@@ -34,7 +34,7 @@ func cmdKeys(ctx context.Context, f *Fleet, add int, prefix string, vouch bool, 
 		vouch = true
 	}
 	if len(f.keys) == 0 {
-		fmt.Fprintln(f.out, "No keys yet. Make some: stet-runpod keys --add 4")
+		fmt.Fprintln(f.out, "No keys yet. Make some: stet-cloud keys --add 4")
 		return nil
 	}
 	vouched, err := f.st.vouched(ctx, f.op)
@@ -76,7 +76,7 @@ func cmdKeys(ctx context.Context, f *Fleet, add int, prefix string, vouch bool, 
 		fmt.Fprintf(f.out, "  %-14s %s…  %s\n", k.Handle, k.Public[:12], say)
 	}
 	if missing > 0 {
-		fmt.Fprintf(f.out, "\n%d not vouched for: stet-runpod keys --vouch (they are vouched for when first rented, too).\n", missing)
+		fmt.Fprintf(f.out, "\n%d not vouched for: stet-cloud keys --vouch (they are vouched for when first rented, too).\n", missing)
 	}
 	return nil
 }
@@ -98,7 +98,7 @@ func (f *Fleet) revoke(ctx context.Context, handles []string) error {
 		if err := os.Remove(filepath.Join(f.keyDir(), h+".json")); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
-		f.say("took back %s: the server no longer takes it as the organisers', and its key is gone from here. A machine still running with it should be ended: stet-runpod down %s", h, h)
+		f.say("took back %s: the server no longer takes it as the organisers', and its key is gone from here. A machine still running with it should be ended: stet-cloud down %s", h, h)
 	}
 	return nil
 }
@@ -129,51 +129,6 @@ func (f *Fleet) maxPrice(long bool) float64 {
 	return f.o.MaxPrice
 }
 
-func cmdGPUs(ctx context.Context, f *Fleet) error {
-	if err := f.listGPUs(ctx, false); err != nil || !f.o.LongFarm {
-		return err
-	}
-	fmt.Fprintln(f.out)
-	return f.listGPUs(ctx, true)
-}
-
-func (f *Fleet) listGPUs(ctx context.Context, long bool) error {
-	f.calibrate(ctx)
-	gpus, err := f.choices(ctx, long)
-	if err != nil {
-		return err
-	}
-	what := "What would be rented, the fastest first (the cheapest where they are as fast)"
-	if f.o.Cheapest {
-		what = "What would be rented, by what a grade costs on each"
-	}
-	if long {
-		what = "For the organisers' bigger students, by what a student costs on each, the quicker card first where that is about the same"
-	}
-	if len(gpus) == 0 {
-		fmt.Fprintf(f.out, "%s: RunPod has no GPU free now that would do (%s cloud%s).\n", what, strings.ToLower(f.o.Cloud), f.ceiling(long))
-		return nil
-	}
-	fmt.Fprintf(f.out, "%s, in this order (%s cloud%s, CUDA %s or newer, hosts with %d GB and %d vCPUs a GPU):\n\n",
-		what, strings.ToLower(f.o.Cloud), f.ceiling(long), f.o.MinCUDA, f.o.MinRAM, f.o.MinCPU)
-	for _, c := range gpus {
-		fmt.Fprintf(f.out, "  $%.2f/h  %-9s  %-34s %3d GB  %-6s", c.Price, strings.ToLower(c.Cloud), shortGPU(c.GPU.ID), c.GPU.Memory, strings.ToLower(c.GPU.Availability))
-		p, seen := f.pass(c.GPU.ID)
-		how := "about"
-		if seen {
-			how = "seen"
-		}
-		fmt.Fprintf(f.out, "  a pass %s %.0f min (%.1fx a 3090), a round's first grade %.0f min: $%.2f\n",
-			how, p.Minutes(), f.speedOf(c.GPU.ID), f.lead(c).Minutes(), c.Price*f.lead(c).Hours())
-	}
-	started := "until three have been seen to"
-	if len(f.calibration().Boot) >= 3 {
-		started = "as seen"
-	}
-	fmt.Fprintf(f.out, "\nEach is tried in turn until RunPod has a machine of that kind free with room for the rest. A machine is taken to start in %.0f minutes, %s.\n", f.boot().Minutes(), started)
-	return nil
-}
-
 func cmdStatus(ctx context.Context, f *Fleet) error {
 	unlock, err := f.lock(time.Minute)
 	if err != nil {
@@ -185,7 +140,7 @@ func cmdStatus(ctx context.Context, f *Fleet) error {
 		return err
 	}
 	now := f.now()
-	d := f.o.Policy.decide(v.Work, v.Workers, v.Today, now)
+	d := f.o.Policy.decideNext(v.Work, v.Workers, v.Today, now, f.nextGrades(ctx, v.Work))
 	if len(v.Work.Rounds) == 0 {
 		fmt.Fprintln(f.out, "No round is open.")
 	}
@@ -198,7 +153,7 @@ func cmdStatus(ctx context.Context, f *Fleet) error {
 		}
 	}
 	if v.Work.Paused > 0 {
-		fmt.Fprintf(f.out, "Rounds paused since %s UTC: none is drawn (stet-runpod resume)\n", time.Unix(v.Work.Paused, 0).UTC().Format("Jan 2 15:04"))
+		fmt.Fprintf(f.out, "Rounds paused since %s UTC: none is drawn (stet-cloud resume)\n", time.Unix(v.Work.Paused, 0).UTC().Format("Jan 2 15:04"))
 	}
 	if v.Work.NextDrawAt > 0 {
 		at := time.Unix(v.Work.NextDrawAt, 0)
@@ -216,7 +171,11 @@ func cmdStatus(ctx context.Context, f *Fleet) error {
 			continue
 		}
 		rented++
-		fmt.Fprintf(f.out, "  %-14s %-8s %-26s $%.2f/h  up %s\n", w.Key.Handle, st, w.Pod.gpuName(), w.Pod.Cost, now.Sub(w.Pod.CreatedAt).Round(time.Minute))
+		card := w.Rental.Card
+		if w.Rental.Market != "runpod" {
+			card += " (" + marketTitle(w.Rental.Market) + ")"
+		}
+		fmt.Fprintf(f.out, "  %-14s %-8s %-26s $%.2f/h  up %s\n", w.Key.Handle, st, card, w.Rental.Price, now.Sub(w.Rental.Created).Round(time.Minute))
 	}
 	if rented == 0 {
 		fmt.Fprintf(f.out, "Nothing rented (%d keys in the pool).\n", len(v.Workers))
@@ -224,7 +183,7 @@ func cmdStatus(ctx context.Context, f *Fleet) error {
 	fmt.Fprintf(f.out, "\n$%.2f an hour now · about $%.2f today (UTC)\n", v.Hourly, v.Today)
 	fmt.Fprintf(f.out, "The work wants %d machines now (at most %d)", d.Target, f.o.MaxWorkers)
 	if d.Launch > 0 || len(d.End) > 0 {
-		fmt.Fprintf(f.out, ": `stet-runpod scale` would rent %d and end %d", d.Launch, len(d.End))
+		fmt.Fprintf(f.out, ": `stet-cloud scale` would rent %d and end %d", d.Launch, len(d.End))
 	}
 	fmt.Fprintln(f.out, ".")
 	if d.Note != "" {
@@ -270,7 +229,9 @@ func tick(ctx context.Context, f *Fleet) error {
 		return err
 	}
 	f.calibrate(ctx)
-	d := f.o.Policy.decide(v.Work, v.Workers, v.Today, f.now())
+	f.tickOffers = map[bool][]Offer{}
+	defer func() { f.tickOffers = nil }()
+	d := f.o.Policy.decideNext(v.Work, v.Workers, v.Today, f.now(), f.nextGrades(ctx, v.Work))
 	if err := f.end(ctx, v, d.End); err != nil {
 		return err
 	}
@@ -314,7 +275,7 @@ func cmdUp(ctx context.Context, f *Fleet, n int) error {
 	}
 	live := 0
 	for _, w := range v.Workers {
-		if w.Pod != nil && w.Pod.live() {
+		if w.Rental != nil && w.Rental.live() {
 			live++
 		}
 	}
@@ -348,7 +309,7 @@ func cmdDown(ctx context.Context, f *Fleet, force bool, handles []string) error 
 	}
 	var endings []Ending
 	for _, w := range v.Workers {
-		if w.Pod == nil || (len(want) > 0 && !want[w.Key.Handle]) {
+		if w.Rental == nil || (len(want) > 0 && !want[w.Key.Handle]) {
 			continue
 		}
 		found[w.Key.Handle] = true
@@ -365,7 +326,7 @@ func cmdDown(ctx context.Context, f *Fleet, force bool, handles []string) error 
 	}
 	for h := range want {
 		if !found[h] {
-			f.say("%s has no pod", h)
+			f.say("%s has no machine", h)
 		}
 	}
 	if len(endings) == 0 {
@@ -375,7 +336,11 @@ func cmdDown(ctx context.Context, f *Fleet, force bool, handles []string) error 
 }
 
 func cmdSSH(ctx context.Context, f *Fleet, handle string) error {
-	pods, err := f.rp.pods(ctx)
+	rp := f.runpod()
+	if rp == nil {
+		return errors.New("ssh is for machines on RunPod, and there is no key for RunPod")
+	}
+	pods, err := rp.pods(ctx)
 	if err != nil {
 		return err
 	}
@@ -400,7 +365,11 @@ func cmdSSH(ctx context.Context, f *Fleet, handle string) error {
 
 // cmdLogs prints what a machine's pod has said: the last lines, or everything as it comes.
 func cmdLogs(ctx context.Context, f *Fleet, handle string, follow bool, last int) error {
-	pods, err := f.rp.pods(ctx)
+	rp := f.runpod()
+	if rp == nil {
+		return errors.New("logs are for machines on RunPod, and there is no key for RunPod")
+	}
+	pods, err := rp.pods(ctx)
 	if err != nil {
 		return err
 	}
@@ -421,10 +390,10 @@ func cmdLogs(ctx context.Context, f *Fleet, handle string, follow bool, last int
 		fmt.Fprintf(f.out, "%s  %s\n", ts, l.Line)
 	}
 	if follow {
-		return f.rp.logs(ctx, pod.ID, true, show)
+		return rp.logs(ctx, pod.ID, true, show)
 	}
 	var kept []LogLine
-	err = f.rp.logs(ctx, pod.ID, false, func(l LogLine) {
+	err = rp.logs(ctx, pod.ID, false, func(l LogLine) {
 		if kept = append(kept, l); len(kept) > last {
 			kept = kept[1:]
 		}

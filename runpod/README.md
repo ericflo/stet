@@ -10,6 +10,30 @@ stet command line and the server, and uses nothing but Go's standard library.
 cd runpod && go build -o ~/.local/bin/stet-runpod .
 ```
 
+## stet-cloud: the same, over five markets
+
+This code now builds **stet-cloud**: stet-runpod with RunPod behind one `Market` interface
+(`market.go`), beside clients for Vast.ai, Lium, Salad and Clore.ai, each through its own
+API. Its design and plan are in [STET-CLOUD.md](STET-CLOUD.md). Today the other four can
+only be looked at: their offers, the account's machines, and the key. Renting there isn't
+built, and a market can be armed only once it is. With RunPod alone armed, stet-cloud
+decides as stet-runpod did. The service still runs stet-runpod until it switches over.
+
+```sh
+cd runpod && go build -o ~/.local/bin/stet-cloud .
+stet-cloud markets          # each market: key, what is left to spend, armed or not, what fits now
+stet-cloud offers           # what would be rented, in order, every market (unarmed ones marked)
+stet-cloud markets arm vast --note "…"   # only with Eric's approval, once renting there is built
+stet-cloud migrate          # at switch-over: copy stet-runpod's pool and records over, once
+```
+
+The markets' keys are kept in `~/.config/stet-cloud/credentials.env` (mode 600; `KEY=value`
+lines for `RUNPOD_API_KEY`, `VAST_API_KEY`, `LIUM_API_KEY`, `SALAD_API_KEY`, `SALAD_ORG`,
+`SALAD_PROJECT` and `CLORE_API_KEY`). It is read again at every look, and the environment wins
+over it. Which markets are armed is kept in `markets.json`; with none, RunPod alone is.
+Until `migrate`, the pool stays in `~/.config/stet-runpod`: use `--home ~/.config/stet-runpod`
+there.
+
 ## What a rented machine does
 
 It is a RunPod pod running `ubuntu:24.04` and [one script](worker.sh). The script installs
@@ -127,16 +151,18 @@ secure` rents only from RunPod's own data centres. The host of a community machi
 read the key it is given, and anyone holding a worker key can grade as the organisers:
 take back a key that may have leaked (`stet-runpod keys --revoke HANDLE`).
 
-Leaving it running, as a service of your own user:
+Leaving it running, as a service of your own user (stet-cloud, which took over from
+stet-runpod's service):
 
 ```ini
-# ~/.config/systemd/user/stet-runpod.service
+# ~/.config/systemd/user/stet-cloud.service
 [Unit]
-Description=Rent GPUs to grade for Stet
+Description=Stet: rent GPUs to run curators and grade (stet-cloud)
+Wants=network-online.target
+After=network-online.target
 
 [Service]
-EnvironmentFile=%h/.config/stet-runpod/env
-ExecStart=%h/.local/bin/stet-runpod scale --follow --max 20 --max-price 1.10 --max-hourly 16 --daily-budget 50 --per-machine 1
+ExecStart=%h/.local/bin/stet-cloud scale --follow --cloud any --max 20 --max-price 1.10 --max-hourly 16 --daily-budget 50 --per-machine 1
 Restart=always
 RestartSec=60
 
@@ -144,9 +170,11 @@ RestartSec=60
 WantedBy=default.target
 ```
 
-with `RUNPOD_API_KEY=...` in `~/.config/stet-runpod/env` (mode 600), then
-`systemctl --user enable --now stet-runpod`. If it stops, the machines still stop by
-themselves; only renting more stops.
+The markets' keys are in `~/.config/stet-cloud/credentials.env`, which stet-cloud reads itself
+at every look: the unit sets none of them, since a key in the environment would win over the
+file's. `systemctl --user enable --now stet-cloud`. If it stops, the machines on RunPod and
+Vast still stop by themselves; only renting more stops. Only one of stet-runpod and stet-cloud
+may run with a pool: stop and disable the one before starting the other.
 
 ## What it keeps
 

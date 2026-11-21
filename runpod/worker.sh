@@ -1,6 +1,6 @@
-# A machine the organisers rent from RunPod: it installs stet, grades for the leaderboard
-# until nothing is left for it, and then ends its own pod. stet-runpod starts it as the
-# pod's only process (bash -c), with these in its environment:
+# A machine the organisers rent: it installs stet, grades for the leaderboard until nothing
+# is left for it, and then ends itself where its market lets it. stet-cloud starts it as the
+# machine's only process (bash -c), with these in its environment:
 #
 #   STET_WORKER_KEY     the machine's stet key file, base64
 #   STET_API            the Stet API
@@ -9,11 +9,14 @@
 #   STET_WORKER_EDITS   1 to run curators too, in the container sandbox (stet's cage.py)
 #   PUBLIC_KEY          optional (--ssh): a key that may log in, to look around
 #   STET_WORKER_HOME    where it keeps its files: /root, but for the tests
+#   STET_MARKET         where it is rented: runpod (when not set) or vast; elsewhere it
+#                       cannot end itself, and waits for stet-cloud to end it
 #
 # RunPod gives every pod RUNPOD_POD_ID, and RUNPOD_API_KEY: a key that reaches only this
-# pod, which is what it ends itself with. A container whose process exits is started again
-# and billed as before, so this never just exits: it ends the pod, and if RunPod will not
-# have that, it waits for stet-runpod to end it from outside.
+# pod. Vast gives every instance CONTAINER_ID and CONTAINER_API_KEY, the same. That is what
+# it ends itself with. A container whose process exits is started again and billed as
+# before, or its disk is billed until it is destroyed, so this never just exits: it ends
+# itself, and if the market will not have that, it waits for stet-cloud to end it.
 set -u
 home=${STET_WORKER_HOME:-/root}
 opt=${STET_WORKER_OPT:-/opt/stet}
@@ -28,20 +31,30 @@ say() { printf '[stet-worker %s] %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 
 end_pod() {
   touch "$done_mark"
-  say "ending this pod: $1"
-  if ! command -v curl >/dev/null 2>&1; then
-    say "there is no curl to end it with; stet-runpod ends it from outside"
+  market=${STET_MARKET:-runpod}
+  case "$market" in
+    runpod) name=RunPod what=pod url="https://api.runpod.io/v2/pods/${RUNPOD_POD_ID:-none}" key=${RUNPOD_API_KEY:-} ok="204|404" ;;
+    vast) name=Vast what=instance url="https://console.vast.ai/api/v0/instances/${CONTAINER_ID:-none}/" key=${CONTAINER_API_KEY:-} ok="200|404" ;;
+    *) name=$market what=machine url="" key="" ok="" ;;
+  esac
+  say "ending this $what: $1"
+  if [ -z "$url" ]; then
+    say "$name gives it no key to end itself with; stet-cloud ends it from outside"
+    exec sleep infinity
+  fi
+  if ! command -v curl >/dev/null 2>&1 || [ -z "$key" ]; then
+    say "there is no curl, or no key, to end it with; stet-cloud ends it from outside"
     exec sleep infinity
   fi
   tries=0
   while :; do
-    code=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE \
-      -H "Authorization: Bearer ${RUNPOD_API_KEY:-}" "https://api.runpod.io/v2/pods/${RUNPOD_POD_ID:-none}" || true)
-    case "$code" in
-      204|404) say "RunPod has it; this pod is ending"; exec sleep infinity ;;
-    esac
+    code=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE -H "Authorization: Bearer $key" "$url" || true)
+    if printf '%s' "$code" | grep -qxE "$ok"; then
+      say "$name has it; this $what is ending"
+      exec sleep infinity
+    fi
     tries=$((tries + 1))
-    say "RunPod did not end it (HTTP $code); trying again, and stet-runpod ends it from outside meanwhile"
+    say "$name did not end it (HTTP $code); trying again, and stet-cloud ends it from outside meanwhile"
     if [ "$tries" -lt 10 ]; then sleep 60; else sleep 600; fi
   done
 }
@@ -59,6 +72,18 @@ if ! command -v curl >/dev/null 2>&1 || [ -n "${PUBLIC_KEY:-}" ]; then
   done
 fi
 command -v curl >/dev/null 2>&1 || end_pod "curl could not be installed"
+
+# Salad does not say its hosts' drivers. One older than the season's PyTorch needs (580, for
+# CUDA 13) asks Salad for another machine, which starts this again there.
+if [ "${STET_MARKET:-}" = "salad" ] && command -v nvidia-smi >/dev/null 2>&1; then
+  driver=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -n 1)
+  if [ -n "$driver" ] && [ "${driver%%.*}" -lt 580 ] 2>/dev/null; then
+    say "driver $driver is older than 580: asking Salad for another machine"
+    curl -s -X POST http://169.254.169.254/v1/reallocate -H 'Content-Type: application/json' -H 'Metadata: true' \
+      -d "{\"reason\": \"driver $driver is older than 580\"}" >/dev/null || true
+    exec sleep infinity
+  fi
+fi
 
 if [ -n "${PUBLIC_KEY:-}" ] && [ -x /usr/sbin/sshd ]; then
   mkdir -p "$home/.ssh" /run/sshd && chmod 700 "$home/.ssh"

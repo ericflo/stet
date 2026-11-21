@@ -190,6 +190,11 @@ type Work struct {
 	FarmLongWaiting int `json:"farm_long_waiting"`
 	// When the organisers paused the rounds (0: they are not): none is drawn.
 	Paused int64 `json:"paused"`
+	// The most grades one machine may hold before an exam (0 or 1: one), and how long after an
+	// exam is posted a grade still wanted is kept for the fastest card free: the server's own
+	// settings, which the fleet follows.
+	EarlyGradesPerMachine int `json:"early_grades_per_machine,omitempty"`
+	FastFirstSeconds      int `json:"fast_first_seconds,omitempty"`
 }
 
 // WorkRound is what an open round is waiting for.
@@ -207,6 +212,8 @@ type WorkRound struct {
 	GradesEarly int   `json:"grades_early"`
 	ExamAt      int64 `json:"exam_at"`
 	DrawnAt     int64 `json:"drawn_at"`
+	// When the server expects the exam, until it is posted (0: it does not say).
+	ExamDue int64 `json:"exam_due,omitempty"`
 }
 
 // Machine is one of the organisers' accounts as the server sees it.
@@ -216,6 +223,11 @@ type Machine struct {
 	LastSeen int64  `json:"last_seen"`
 	Busy     string `json:"busy"`
 	Long     bool   `json:"long"` // the student it trains is one of the bigger ones, held for hours
+	// The grades it holds; whether all it holds is trained and waits for the exam, so that it
+	// may take another; and how long its latest student took to train, seconds (0: not known).
+	Holding     int     `json:"holding,omitempty"`
+	Ready       bool    `json:"ready,omitempty"`
+	PassSeconds float64 `json:"pass_seconds,omitempty"`
 }
 
 func (w *Work) machine(handle string) *Machine {
@@ -241,7 +253,7 @@ func (s *Stet) work(ctx context.Context, op *Key) (*Work, error) {
 	}
 	for i := range w.Rounds {
 		r := &w.Rounds[i]
-		if r.DrawnAt == 0 && r.ExamAt == 0 && r.GradesEarly > 0 {
+		if r.DrawnAt == 0 && r.ExamAt == 0 && r.ExamDue == 0 && r.GradesEarly > 0 {
 			var out struct {
 				Round struct {
 					DrawnAt int64 `json:"drawn_at"`
