@@ -1335,6 +1335,10 @@ func (s *Site) rounds(w http.ResponseWriter, r *http.Request) {
 	s.render(w, 200, "rounds", s.page(r, "Rounds", "rounds", map[string]any{"Rounds": rows, "Earlier": earlier, "EarlierIdx": earlierIdx}))
 }
 
+// examWindow is how long after a draw the text people publish goes into the round's exam: the
+// season's exam.fresh.window_seconds (src/stet/seasons/s1.json), which the examiner reads.
+const examWindow = 3600
+
 func (s *Site) round(w http.ResponseWriter, r *http.Request) {
 	a := s.app
 	idx, ok := a.parseRoundID(r.PathValue("id"))
@@ -1372,7 +1376,8 @@ func (s *Site) round(w http.ResponseWriter, r *http.Request) {
 	sc := a.season.Scales[rs.Scale]
 	d := map[string]any{"R": rs, "ID": rs.ID, "Entries": entries, "Top": topGain(entries), "Scale": sc, "Tolerance": a.tolerance(),
 		"RunsPerEntry": a.cfg.RunsPerEntry, "Prev": prev, "Next": next,
-		"Expected": expected, "Later": later, "MaxNew": a.cfg.MaxNewPerRound, "QualifyRounds": a.cfg.QualifyRounds, "Work": work}
+		"Expected": expected, "Later": later, "MaxNew": a.cfg.MaxNewPerRound, "QualifyRounds": a.cfg.QualifyRounds, "Work": work,
+		"WindowEnd": rs.DrawnAt + examWindow}
 	// Every run of the round's entries, and every grade of every script they wrote, whatever
 	// it said, is drawn entry by entry: who ran it, what each run wrote, who graded that.
 	runs := 0

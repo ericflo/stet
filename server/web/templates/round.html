@@ -104,6 +104,21 @@
         <div class="cmd"><pre><span class="p">$ </span><span data-copy-text>stet score {{if $d.Example}}{{$d.Example}}{{else}}owner/name{{end}} --round {{$d.ID}}</span></pre><button type="button" data-copy>copy</button></div>
       </div>
     </details>{{end}}
+    <details class="more" id="exam">
+      <summary>{{if $r.ExamSHA}}What its exam was made of{{else}}Its exam{{end}}</summary>
+      <div class="in">
+        <p class="lead">Every round's exam is new, made after the draw, so nobody can know it in advance, the organisers included. Part is text people publish on Wikipedia, news sites, GitHub, Hacker News, Lemmy, Bluesky and Mastodon in the hour after the draw; the rest is problems generated from the round's random seed. Each of its {{len .Season.ExamSources}} capabilities counts the same, and the model is scored on how well it predicts the right text, in bits per byte.</p>
+        {{if eq $r.Status "scheduled"}}<p class="lead">This one does not exist yet. It is made about two hours after the draw: an hour for people to write, and an hour more for late copies and edits to arrive.</p>
+        {{else if not $r.ExamSHA}}<p class="lead">This one is being made now{{with $d.Work}}{{with .ExamDue}}, and is due about {{hm .}} UTC{{end}}{{end}}: it gathers what people published until {{hm $d.WindowEnd}} UTC, and gives late copies and edits an hour more to arrive. Text the round's own pages already hold is left out.</p>
+        {{else}}{{with $r.ExamMix}}<p class="lead"><b>{{comma .Items}} items</b>, posted {{datetime $r.ExamAt}}: {{comma .Fresh}} passages people wrote in the hour after the draw{{if .Langs}}, in {{.Langs}} {{plural .Langs "language" "languages"}}{{end}}, and {{comma (sub .Items .Fresh)}} problems generated from the round's seed.</p>
+        <dl class="kv">{{range .Parts}}{{if .Items}}
+          <dt>{{.Pillar}}</dt><dd>{{comma .Items}} {{plural .Items "item" "items"}}{{if eq .Fresh .Items}} written by people{{else if .Fresh}}: {{comma .Fresh}} written by people, {{comma (sub .Items .Fresh)}} generated{{else}} generated{{end}}</dd>{{end}}{{end}}
+        </dl>
+        {{if .Kinds}}<p class="lead" style="margin-top:14px">What people wrote, by kind: {{range $i, $k := .Kinds}}{{if $i}}, {{end}}{{$k.Kind}} {{comma $k.Items}}{{end}}.</p>{{end}}
+        {{else}}<p class="lead">Posted {{datetime $r.ExamAt}}{{if $r.Fresh}}, with {{comma $r.Fresh}} passages people wrote in the hour after the draw{{end}}.</p>{{end}}
+        <p class="lead">{{if eq $r.Status "settled"}}<a href="/api/v1/rounds/{{$d.ID}}/exam">Download it</a>: the generated problems and Wikipedia's text whole, and for every other site what each item was and where it came from, without the text itself.{{else}}Graders have it now. Everyone else can download it when the round settles.{{end}}</p>{{end}}
+      </div>
+    </details>
     <details class="more"{{if eq $r.Status "scheduled"}} open{{end}}>
       <summary>Where {{if eq $r.Status "scheduled"}}its pages will come{{else}}its pages came{{end}} from</summary>
       <div class="in">

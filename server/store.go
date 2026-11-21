@@ -190,6 +190,8 @@ type Round struct {
 	Snapshot  string             `json:"snapshot_sha256,omitempty"`
 	Fresh     int                `json:"fresh,omitempty"`
 	BaseItems []float64          `json:"baseline_items,omitempty"`
+	// ExamMix is what the exam was made of, kept for good (examMix): its items by capability.
+	ExamMix *ExamMix `json:"exam_mix,omitempty"`
 }
 
 // EntryDetail is the public summary of a settled entry: what the grade its score rests on

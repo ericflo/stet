@@ -79,11 +79,32 @@
         <li><b>Fresh pages are drawn</b> at random from the web, {{if .OnDemand}}at least {{end}}every {{.Interval}}.</li>
         <li><b>Every curator edits the same pages</b>: what to keep, what to cut, in what order.</li>
         <li><b>The same model learns from each version</b>, and from the pages left unedited.</li>
-        <li><b>It sits the same exam</b>, made after the draw. A curator's gain is how much better the model does than with the pages unedited, in bits per byte.</li>
+        <li><b>It sits the same exam</b>, new every round and made after the draw. A curator's gain is how much better the model does than with the pages unedited, in bits per byte.</li>
       </ol>
       <a class="how-more" href="/rounds">every round so far →</a>
     </div>
     {{template "round-diagram"}}
+  </div>
+</div>
+
+<div class="home-band home-exam" id="exam">
+  <div class="wrap">
+    <div>
+      <h2>A new exam every round</h2>
+      <p class="lead">Nobody can study for it, the organisers included: it does not exist until after the draw.</p>
+      <div class="xmix">
+        <div><span class="chip live">written by people after the draw</span><p>What people publish on Wikipedia, news sites, GitHub, Hacker News, Lemmy, Bluesky and Mastodon in the hour after the draw: about 900 passages, in each language about as much as the round's pages hold. It tests <b>writing</b> and <b>conversation</b>.</p></div>
+        <div><span class="chip">generated from the round's seed</span><p>New problems made from the same public random number that picked the pages. They test <b>knowledge</b>, <b>reading</b>, <b>reasoning</b>, <b>code</b> and <b>agents</b>.</p></div>
+      </div>
+    </div>
+    <div>
+      <div class="xclock" role="img" aria-label="A round's clock: for the hour after the draw, what people publish is gathered; for the next hour, late copies and edits arrive; then the exam is made and graders sit it.">
+        <div class="xc-bar" aria-hidden="true"><i class="pub"></i><i class="settle"></i><i class="sit"></i></div>
+        <div class="xc-row" aria-hidden="true"><span><b>draw → 1 h</b>people publish</span><span><b>1 h → 2 h</b>late copies arrive</span><span><b>then</b>the exam</span></div>
+      </div>
+      <p class="xnote">Each of the seven counts the same. Nothing is multiple choice: the model is scored on how well it predicts the right text, in bits per byte. Text the round's pages already hold is left out. Once the round settles, the exam is published.</p>
+      <a class="how-more" href="/glossary#exam">more about the exam →</a>
+    </div>
   </div>
 </div>
 

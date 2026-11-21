@@ -21,7 +21,9 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
+	"sort"
 	"strconv"
+	"strings"
 )
 
 const (
@@ -126,6 +128,7 @@ func (a *App) postExam(ctx context.Context, idx int, p *ExamPost) (bool, error) 
 			return fail(409, "%s changed while its exam was being kept; send it again", roundID(a.season.ID, idx))
 		}
 		rd.ExamSHA, rd.ExamAt, rd.ExamTable, rd.Shares, rd.Snapshot, rd.Fresh = p.Digest, now(), p.Table, p.Shares, p.Snapshot, p.Fresh
+		rd.ExamMix = a.examMix(p.Table)
 		tx.event("exam", map[string]any{"round": roundID(a.season.ID, idx), "items": len(p.Table), "fresh": p.Fresh})
 		// A grade taken before the exam has waited for it: its time to sit it starts now.
 		for _, c := range tx.s.Claims {
@@ -422,4 +425,74 @@ func (a *App) archiveExam(ctx context.Context) {
 			slog.Error("archiving a round's exam scores", "round", idx, "err", err)
 		}
 	}
+}
+
+// ExamMix is what a round's exam was made of, for its page: how many items test each of the
+// season's capabilities, and how many of those are text people published after the draw rather
+// than problems generated from the round's seed; in how many languages people wrote; and how
+// many items each kind of writing gave. Kept after the round settles, when the table it is
+// counted from is not.
+type ExamMix struct {
+	Items int          `json:"items"`
+	Fresh int          `json:"fresh"`
+	Langs int          `json:"languages,omitempty"` // of the text people wrote, programming languages apart
+	Parts []ExamPillar `json:"pillars"`
+	Kinds []ExamKind   `json:"kinds,omitempty"` // of the text people wrote, the most items first
+}
+
+type ExamPillar struct {
+	Pillar string `json:"pillar"`
+	Items  int    `json:"items"`
+	Fresh  int    `json:"fresh,omitempty"`
+}
+
+type ExamKind struct {
+	Kind  string `json:"kind"`
+	Items int    `json:"items"`
+}
+
+// generatedParts are the exam's families of generated problems (FAMILY_PILLAR in
+// src/stet/exam/aggregate.py). Any other part is a kind of writing people published.
+var generatedParts = map[string]bool{"knowledge": true, "context": true, "arith": true, "word": true, "units": true, "algebra": true,
+	"logic": true, "algo": true, "multi": true, "prog": true, "transform": true, "struct": true, "agent": true, "grammar": true}
+
+func (a *App) examMix(table []ItemInfo) *ExamMix {
+	if len(table) == 0 {
+		return nil
+	}
+	m := &ExamMix{Items: len(table)}
+	at := map[string]int{}
+	for _, p := range a.season.ExamSources {
+		at[p] = len(m.Parts)
+		m.Parts = append(m.Parts, ExamPillar{Pillar: p})
+	}
+	langs, kinds := map[string]bool{}, map[string]int{}
+	for _, it := range table {
+		i, ok := at[it.Pillar]
+		if !ok {
+			i, at[it.Pillar] = len(m.Parts), len(m.Parts)
+			m.Parts = append(m.Parts, ExamPillar{Pillar: it.Pillar})
+		}
+		m.Parts[i].Items++
+		if generatedParts[it.Part] {
+			continue
+		}
+		m.Fresh++
+		m.Parts[i].Fresh++
+		kinds[it.Part]++
+		if !strings.HasPrefix(it.Lang, "code") {
+			langs[it.Lang] = true
+		}
+	}
+	m.Langs = len(langs)
+	for k, n := range kinds {
+		m.Kinds = append(m.Kinds, ExamKind{k, n})
+	}
+	sort.Slice(m.Kinds, func(x, y int) bool {
+		if m.Kinds[x].Items != m.Kinds[y].Items {
+			return m.Kinds[x].Items > m.Kinds[y].Items
+		}
+		return m.Kinds[x].Kind < m.Kinds[y].Kind
+	})
+	return m
 }

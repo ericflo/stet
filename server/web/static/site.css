@@ -364,6 +364,26 @@ a.now-card:hover { border-color: var(--ink-3); }
 .how-steps li b { color: var(--ink); }
 .how-steps li::before { content: counter(s); position: absolute; left: 0; top: 0; width: 26px; height: 26px; border-radius: 50%; border: 1.5px solid var(--red); color: var(--red); font-family: var(--display); font-weight: 600; font-size: 14px; display: flex; align-items: center; justify-content: center; }
 .how-more { font-family: var(--mono); font-size: 14px; margin: 4px 0 0 40px; display: inline-block; }
+/* A new exam every round: where it comes from, and a round's clock. */
+.home-exam .wrap { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 56px; align-items: center; }
+.home-exam h2 { font-size: 28px; margin-bottom: 10px; }
+.home-exam .lead { font-size: 18px; color: var(--ink-2); margin: 0 0 22px; }
+.xmix { display: grid; gap: 18px; }
+.xmix p { margin: 6px 0 0; font-size: 16.5px; color: var(--ink-2); line-height: 1.45; }
+.xmix b { color: var(--ink); font-weight: 600; }
+.xclock { font-family: var(--mono); font-size: 12.5px; color: var(--ink-3); }
+.xc-bar, .xc-row { display: grid; grid-template-columns: 4fr 4fr 2fr; gap: 3px; }
+.xc-bar { height: 14px; position: relative; }
+.xc-bar::before { content: ""; position: absolute; left: 0; top: -6px; bottom: -6px; border-left: 2px solid var(--red); }
+.xc-bar i { border-radius: 2px; }
+.xc-bar .pub { background: var(--mark); }
+.xc-bar .settle { background: var(--mark-soft); }
+.xc-bar .sit { background: var(--green); }
+.xc-row { margin-top: 10px; line-height: 1.35; }
+.xc-row span { min-width: 0; }
+.xc-row b { display: block; color: var(--ink-2); font-weight: 500; }
+.xnote { margin: 20px 0 0; font-size: 16px; color: var(--ink-2); line-height: 1.5; }
+.home-exam .how-more { margin-left: 0; }
 
 .rd { display: grid; grid-template-columns: 62px 18px minmax(0, 1fr) 18px 6.4em; column-gap: 8px; row-gap: 12px; align-items: center; font-family: var(--mono); font-size: 12.5px; color: var(--ink-3); }
 .rd .lbl { font-size: 11px; letter-spacing: 0.05em; text-transform: uppercase; color: var(--ink-3); align-self: end; grid-row: 1; line-height: 1.25; }
@@ -755,7 +775,7 @@ svg .focus { fill: var(--mark); stroke: var(--card); stroke-width: 2; pointer-ev
 
 @media (max-width: 920px) {
   body { font-size: 17px; }
-  .hero .wrap, .home-now, .home-how .wrap, .split-head { grid-template-columns: minmax(0, 1fr); gap: 30px; }
+  .hero .wrap, .home-now, .home-how .wrap, .home-exam .wrap, .split-head { grid-template-columns: minmax(0, 1fr); gap: 30px; }
   .split-head .rd { justify-self: start; }
   .galley { transform: none; }
   .grid2, .grid3, .claims { grid-template-columns: minmax(0, 1fr); }
@@ -797,7 +817,7 @@ svg .focus { fill: var(--mark); stroke: var(--card); stroke-width: 2; pointer-ev
   .galley .tally { margin-left: -46px; padding-left: 46px; }
   .line .mark { left: -56px; width: 42px; font-size: 17px; }
   .home-band { padding: 40px 0; }
-  .home-now h2, .home-how h2, .doors-head h2 { font-size: 26px; }
+  .home-now h2, .home-how h2, .home-exam h2, .doors-head h2 { font-size: 26px; }
   .page-head { padding: 26px 0 22px; }
   .page-head h1 { font-size: 38px; }
   .page-head .sub { font-size: 17.5px; }
