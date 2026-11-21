@@ -364,8 +364,8 @@ Set in `apps/stet/deployment.yaml`. The ones that are rules:
 |---|---|---|
 | `STET_LADDER_SIZE` | 8 | Curators that run in every round |
 | `STET_MAX_NEW_PER_ROUND` | 3 | New entries admitted per round |
-| `STET_ROUND_INTERVAL` | 6h | A round is drawn this often whether or not anybody is waiting |
-| `STET_ROUND_MIN_GAP` | 1h | When an entry is waiting and a runner is around, the next round is drawn this long after the last draw at the soonest. `0` turns drawing on demand off |
+| `STET_ROUND_INTERVAL` | 3h | A round is drawn this often whether or not anybody is waiting: the season's cadence, and what it costs a day |
+| `STET_ROUND_MIN_GAP` | 0 | When above 0, a round is also drawn early for a waiting entry, this long after the last draw at the soonest, while a runner is around. `0` keeps to the clock |
 | `STET_ENTRIES_IN_PLAY` | 3 | Entries one person may have waiting or qualifying at once |
 | `STET_SUBMISSIONS_PER_DAY` | 6 | Submissions one person may make in a day |
 | `STET_QUALIFY_ROUNDS` | 3 | Rounds a new entry runs |
@@ -391,7 +391,7 @@ three hours of their draw.
 | Sign | Likely cause | Do |
 |---|---|---|
 | A round stays `open` | Nobody established is verifying, or a verifier is stuck | Check the organisers' unit and its log; look at the verifiers page for who was last seen |
-| A round has no `exam_digest` more than six hours after its draw | The examiner is down, or failed on the round | `systemctl --user status stet-examine` and its log. Started again, it makes the exam; `stet examine --round <id>` does it by hand |
+| A round has no `exam_digest` more than two and a half hours after its draw | The examiner is down, or failed on the round | `systemctl --user status stet-examine` and its log. Started again, it makes the exam; `stet examine --round <id>` does it by hand |
 | The examiner's log says a source failed | The source was away or refused | It is left out of that round's exam and the rest is kept. If one source keeps failing, find out why before the next round |
 | Every entry is marked *run once* | Only one established account is running curators | Expected early in a season. It ends when volunteers are established and pass `--edits` |
 | The log says "this verifier is out of date" | The server was deployed with a newer harness | It upgrades itself within ten minutes. If the log says the upgrade did not work, it says why: run `stet upgrade` by hand |

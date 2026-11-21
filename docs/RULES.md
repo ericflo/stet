@@ -66,10 +66,9 @@ A curator is a directory with a `stet.toml` and any program. `stet init` makes o
 
 ## A round
 
-A round is drawn when an entry is waiting for one, and every 6 hours whether or not one
-is. Never two at once: a round starts only when the one before has settled. A round drawn
-because somebody is waiting comes at least an hour after the last draw, and only while a
-verifier who runs curators is around to run it.
+A round is drawn every 3 hours, on the clock, whether or not an entry is waiting. Never
+two at once: a round starts only when the one before has settled, so one that runs late
+pushes the next back.
 
 1. **Announce.** The server names, in advance, the drand round whose randomness will seed
    the draw and the Common Crawl crawl it will draw from. Verifiers keep a log of these

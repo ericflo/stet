@@ -172,6 +172,7 @@ type Page struct {
 	CLI      string
 	Docs     []docSpec
 	Interval string
+	OnDemand bool    // a round is also drawn early when an entry is waiting (STET_ROUND_MIN_GAP); otherwise only on the clock
 	Github   bool    // entering needs a linked GitHub account
 	Live     NowView // what is happening now, said at the top of every page
 	D        any
@@ -228,7 +229,7 @@ func (s *Site) page(r *http.Request, title, nav string, d any) *Page {
 	return &Page{Live: nv,
 		Title: title, Nav: nav, Path: r.URL.Path, Season: a.season, Scale: a.season.Scales[a.cfg.Scale], ScaleID: a.cfg.Scale,
 		BaseURL: a.cfg.BaseURL, APIURL: a.cfg.APIURL, Version: s.version, Dev: a.cfg.Dev, Now: now(), Wheel: wheel, CLI: version,
-		Docs: s.docList(), Interval: plainDuration(a.cfg.RoundInterval), Github: a.cfg.RequireGithub, D: d,
+		Docs: s.docList(), Interval: plainDuration(a.cfg.RoundInterval), OnDemand: a.cfg.RoundMinGap > 0, Github: a.cfg.RequireGithub, D: d,
 		Desc: "Stet is an open competition to make the best training data for a language model. You enter a curator: a program that cuts, keeps and reorders raw web crawl. The model, the trainer and the budget are fixed. The only thing you can touch is the data.",
 	}
 }

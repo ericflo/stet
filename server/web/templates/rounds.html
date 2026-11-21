@@ -4,7 +4,7 @@
   <div class="wrap split-head">
     <div>
       <h1>Rounds</h1>
-      <p class="sub">A round is one contest. Fresh pages are drawn at random, <b>every curator edits the same pages</b>, and the same model learns from each version and sits the same exam. One round at a time, at least every {{.Interval}}.</p>
+      <p class="sub">A round is one contest. Fresh pages are drawn at random, <b>every curator edits the same pages</b>, and the same model learns from each version and sits the same exam. One round at a time, {{if .OnDemand}}at least {{end}}every {{.Interval}}.</p>
     </div>
     {{template "round-diagram"}}
   </div>

@@ -121,8 +121,8 @@ func loadConfig(season *Season) (Config, error) {
 		DBName:        env("STET_DB_NAME", "stet-"+season.ID), // a new season starts on a database of its own
 		AnchorKeys:    map[string]bool{},
 		Scale:         env("STET_SCALE", season.OfficialScale),
-		RoundInterval: envDuration("STET_ROUND_INTERVAL", 6*time.Hour),
-		RoundMinGap:   envDuration("STET_ROUND_MIN_GAP", time.Hour),
+		RoundInterval: envDuration("STET_ROUND_INTERVAL", 3*time.Hour),
+		RoundMinGap:   envDuration("STET_ROUND_MIN_GAP", 0),
 		// Running an entry and grading its script take about 12 minutes each at the
 		// official scale. A full round is the ladder plus three rounds' worth of newcomers:
 		// 17 entries, a little over three hours of one machine doing everything once, inside
