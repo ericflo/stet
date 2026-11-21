@@ -162,7 +162,7 @@ Wants=network-online.target
 After=network-online.target
 
 [Service]
-ExecStart=%h/.local/bin/stet-cloud scale --follow --cloud any --max 20 --max-price 1.10 --max-hourly 16 --daily-budget 50 --per-machine 1
+ExecStart=%h/.local/bin/stet-cloud scale --follow --cloud any --max 20 --max-price 1.10 --max-hourly 16 --daily-budget 60 --per-machine 1
 Restart=always
 RestartSec=60
 
