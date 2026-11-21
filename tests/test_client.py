@@ -473,6 +473,7 @@ def test_a_grade_handed_before_the_exam_trains_first_and_sits_it_once_posted(mon
 
 
 def test_grades_trained_before_the_exam_share_one_unedited_student(monkeypatch, tmp_path):
+    pytest.importorskip("torch")
     import dataclasses
     import hashlib
     import types
