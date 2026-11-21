@@ -460,3 +460,26 @@ These keep their meaning:
 - A grace learned from machines that started never sees the slow ones, because they were ended first.
 - **Rule:** from 2 minutes before a machine's grace runs out, its log is read each look (where its market keeps one). If it has grown since the last look, with nothing in it saying something didn't work, the machine has up to twice its grace (journal event `slow`). Once its log stops growing, or says it failed, or twice its grace has passed, it's ended as before.
 - **Also:** Vast's search lists an ask the fleet rented a moment earlier, which accounts for some of the `no_such_ask` refusals. As no room, the next offer is tried at once.
+
+## 16. Everything the fleet does, kept (Eric, 2026-11-21)
+
+Eric asked for a log of everything, for seeing later the real costs on every market, the markets' and the server's latency, and where the work stalled; "instrument more deeply so that retroactive analysis can be far more complete", and to backfill what can be.
+
+**Kept from now on**, under `~/.config/stet-cloud/history/` (a file a day where they are large, earlier days gzipped):
+
+- **`looks-DAY.jsonl`**, one line per look (each minute):
+  - all `/admin/work` said, whole: every round, and every one of the organisers' machines (busy, holding, ready, pass seconds, curators and why not, failed, refused, trouble, harness), so each grade's taking, training and reporting, and idle holding, can be read back minute by minute;
+  - the machines by state and by market, and $/h and today's spend;
+  - the decision: machines wanted, to rent (for the bigger students, early grades, curators, the rest), ended (each with why), keys whose jobs were handed back, the exam due, the grades a machine rented now is to take, and what the graders still to come wait for;
+  - each market's offers: how many, how long they took, and the error if any;
+  - each machine tried: handle, what it was for, market, offer, card, price, how long the market took, and what came of it (rented, no room, or the error);
+  - every HTTP request to a market or the server: who, method, path (never the query or headers, where keys are), status, milliseconds, error;
+  - everything the fleet said, the look's error if it went no further, the fleet's commit and the stet the server hands out.
+- **`offers-DAY.jsonl`**: every 10 minutes, each market's offers by card and kind of host (count, cheapest, median, start rate, speed, cost of a grade at the cheapest).
+- **`balances.jsonl`**: each market's account, hourly. RunPod's needs a key that may read the account (the scoped key may not).
+- **`rounds/ID.json`** and **`rounds.jsonl`**: each round, whole, once it has settled.
+- `machines.jsonl`: the "rented" event says what the machine was for, the round, when it was expected to report its last grade, where, and on what CPU; the ledger keeps the same (`for`, `round`, `report`), and so `spent.jsonl` once it ends.
+
+**Also fixed:** a machine is seen starting from the moment it is rented, so one that asks for work before the next look has its boot counted. Lium's first machine asked within 41 s and was never counted, so Lium's grace stayed at 30 min and a dead Lium machine held its place that long in round 10; every market's boots were biased slow the same way.
+
+**Backfill** (`history/backfill/`): the journal since Nov 18, each line classified; each market's billing, where its API gives it; every round from the server; and a machine table joining them.

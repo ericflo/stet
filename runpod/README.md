@@ -186,6 +186,12 @@ In `~/.config/stet-runpod` (`STET_RUNPOD_HOME`):
 | `fleet.json` | The pods rented now, and when each was last seen running |
 | `spent.jsonl` | Every pod that has ended: GPU, dollars an hour, start, end |
 | `curators.json` | Hosts, and CPU models, under the season's floor for running curators this week: none is rented to run them |
+| `machines.jsonl` | Each machine's story, an event a line: rented (for what, which round, when it should report, where, on what CPU), its market's phases, first asked for work, what it did, trouble, how it ended and why |
+| `history/looks-DAY.jsonl` | One line a look (a minute): all `/admin/work` said, the machines by state and market, $/h and today's spend, what the work wanted and what was rented and ended, the plan, every market's offers and how long they took, every machine tried and what came of it, every call to a market or the server timed, everything the fleet said, and the builds. Days before today are gzipped |
+| `history/offers-DAY.jsonl` | Every 10 minutes, what each market offers, by card and kind of host: how many, cheapest, median, and a grade's cost |
+| `history/balances.jsonl` | Each market's account, hourly: what it really spent is what that went down by |
+| `history/rounds/ID.json` | Each round as the server tells it once it has settled, whole; a line each in `history/rounds.jsonl` |
+| `history/backfill/` | What could be put together for before these were kept, from the journal, the markets' own billing and the rounds |
 
 RunPod forgets a pod once it ends and does not say what it cost, so what was spent is
 worked out from these, and is an estimate. RunPod's billing page is the account.

@@ -227,29 +227,45 @@ func until(now, t time.Time) string {
 	return "in " + strings.TrimSuffix(d.String(), "0s")
 }
 
-// tick is one round of scale: look, decide, act.
-func tick(ctx context.Context, f *Fleet) error {
+// tick is one round of scale: look, decide, act. What it saw, decided and did is kept, a line a
+// look (history.go).
+func tick(ctx context.Context, f *Fleet) (err error) {
 	unlock, err := f.lock(time.Minute)
 	if err != nil {
 		return err
 	}
 	defer unlock()
+	start := f.now()
+	rec := f.beginLook()
+	defer func() { f.endLook(start, err) }()
 	v, err := f.look(ctx)
 	if err != nil {
 		return err
 	}
+	rec.seenWork(v, f.o.Policy, f.now())
+	f.roundsSettled(ctx, v.Work)
+	f.keepBalances(ctx)
 	f.calibrate(ctx)
 	f.tickOffers = map[bool][]Offer{}
 	defer func() { f.tickOffers = nil }()
-	d := f.o.Policy.decideNext(v.Work, v.Workers, v.Today, f.now(), f.nextGrades(ctx, v.Work))
+	next := f.nextGrades(ctx, v.Work)
+	if f.offersDue() {
+		if got, err := f.choices(ctx, false, false); err == nil {
+			f.keepOffers(got)
+		}
+	}
+	d := f.o.Policy.decideNext(v.Work, v.Workers, v.Today, f.now(), next)
+	rec.decided(d, next)
+	ended := len(v.Ledger.Pods)
 	if err := f.end(ctx, v, d.End); err != nil {
 		return err
 	}
+	rec.Ended = max(ended-len(v.Ledger.Pods), 0)
 	f.release(ctx, d.Release)
 	if d.Note != "" && d.Launch < d.Target-d.Live {
 		f.say("%s", d.Note)
 	}
-	_, err = f.launch(ctx, v, d.Launch, d.LaunchLong, d.LaunchEarly, d.LaunchRuns, d.ExamDue)
+	rec.Rented, err = f.launch(ctx, v, d.Launch, d.LaunchLong, d.LaunchEarly, d.LaunchRuns, d.ExamDue)
 	return err
 }
 

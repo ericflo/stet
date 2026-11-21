@@ -27,7 +27,7 @@ type RunPod struct {
 }
 
 func newRunPod(base, key string) *RunPod {
-	return &RunPod{base: strings.TrimRight(base, "/"), key: key, http: &http.Client{Timeout: 60 * time.Second}, sleep: sleepCtx}
+	return &RunPod{base: strings.TrimRight(base, "/"), key: key, http: &http.Client{Timeout: 60 * time.Second, Transport: timedFor("runpod")}, sleep: sleepCtx}
 }
 
 func sleepCtx(ctx context.Context, d time.Duration) error {

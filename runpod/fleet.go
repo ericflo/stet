@@ -47,6 +47,14 @@ type Fleet struct {
 	// getting there (seen.go), and those said to be.
 	lastLog  map[string]string
 	slowSaid map[string]bool
+	// The record of the look under way, and when the markets' accounts and offers were last
+	// kept, and the rounds open at the last look (history.go).
+	cur        *lookRecord
+	balancesAt time.Time
+	offersAt   time.Time
+	openRounds map[string]bool
+	// The day whose files before it were last compressed.
+	compressedDay string
 	// probe: tools/cage_check.py, gzipped and base64'd, for a machine rented by stet-cloud
 	// probe: it takes no work, and says whether the sandbox holds (probe.go).
 	probe string
@@ -199,17 +207,22 @@ type podRecord struct {
 	Cause string `json:"cause,omitempty"`
 	// The host it is on and its CPU, where its market says; whether it was rented to run
 	// curators; and, if the server would not hand it any, why (curators.go).
-	Host     string    `json:"host,omitempty"`
-	CPU      string    `json:"cpu,omitempty"`
-	Curators bool      `json:"curators,omitempty"`
-	Refused  string    `json:"refused,omitempty"`
-	Handle   string    `json:"handle"`
-	GPU      string    `json:"gpu"`
-	Cloud    string    `json:"cloud"`
-	Cost     float64   `json:"cost"`
-	Start    time.Time `json:"start"`
-	Alive    time.Time `json:"alive"` // last seen running
-	End      time.Time `json:"end,omitzero"`
+	Host     string `json:"host,omitempty"`
+	CPU      string `json:"cpu,omitempty"`
+	Curators bool   `json:"curators,omitempty"`
+	Refused  string `json:"refused,omitempty"`
+	// What it was rented for (curators, early grades, grades, bigger students), the round, and
+	// when it was expected to report its last grade (history.go).
+	For    string    `json:"for,omitempty"`
+	Round  string    `json:"round,omitempty"`
+	Report time.Time `json:"report,omitzero"`
+	Handle string    `json:"handle"`
+	GPU    string    `json:"gpu"`
+	Cloud  string    `json:"cloud"`
+	Cost   float64   `json:"cost"`
+	Start  time.Time `json:"start"`
+	Alive  time.Time `json:"alive"` // last seen running
+	End    time.Time `json:"end,omitzero"`
 }
 
 func (r *podRecord) market() string {
@@ -772,8 +785,10 @@ func (f *Fleet) choicesNow(ctx context.Context, long, all bool) ([]Offer, error)
 			continue
 		}
 		octx, cancel := context.WithTimeout(ctx, offersWithin)
+		began := f.now()
 		got, err := m.Offers(octx, f.needOn(m))
 		cancel()
+		f.offersSeen(m.Name(), f.now().Sub(began), len(got), err)
 		if err != nil {
 			f.offerErrs[m.Name()] = err
 			continue
@@ -928,8 +943,9 @@ func (f *Fleet) launch(ctx context.Context, v *View, n, long, early, runs int, d
 		n           int
 		long, cheap bool
 		due         time.Time
-	}{{long, true, false, time.Time{}}, {early, false, false, due}, {runs, false, true, time.Time{}}, {n - long - early - runs, false, false, time.Time{}}} {
-		got, err := f.launchSome(ctx, v, batch.n, batch.long, batch.cheap, batch.due, site, vouched)
+		what        string
+	}{{long, true, false, time.Time{}, "bigger students"}, {early, false, false, due, "early grades"}, {runs, false, true, time.Time{}, "curators"}, {n - long - early - runs, false, false, time.Time{}, "grades"}} {
+		got, err := f.launchSome(ctx, v, batch.n, batch.long, batch.cheap, batch.due, site, vouched, batch.what)
 		rented += got
 		if err != nil {
 			return rented, err
@@ -938,7 +954,7 @@ func (f *Fleet) launch(ctx context.Context, v *View, n, long, early, runs int, d
 	return rented, nil
 }
 
-func (f *Fleet) launchSome(ctx context.Context, v *View, n int, long, cheap bool, due time.Time, site string, vouched map[string]Vouched) (int, error) {
+func (f *Fleet) launchSome(ctx context.Context, v *View, n int, long, cheap bool, due time.Time, site string, vouched map[string]Vouched, what string) (int, error) {
 	if n <= 0 {
 		return 0, nil
 	}
@@ -965,6 +981,9 @@ func (f *Fleet) launchSome(ctx context.Context, v *View, n int, long, cheap bool
 		gpus = held
 	}
 	var grades func(Offer) int // how many grades each machine rented is to take before the exam
+	// When each machine rented is expected to report its last grade: its lead, or, rented for
+	// grades before an exam, once it has held them until the exam and sat it.
+	plan := rentPlan{what: what, round: roundFor(v.Work, what, due), report: func(o Offer) time.Time { return f.now().Add(f.lead(o)) }}
 	if !due.IsZero() && len(gpus) > 0 {
 		left := due.Sub(f.now())
 		pl := f.examPlan(v.Work)
@@ -983,10 +1002,14 @@ func (f *Fleet) launchSome(ctx context.Context, v *View, n int, long, cheap bool
 				f.say("%s", msg)
 				f.waitSaid = msg
 			}
+			if f.cur != nil {
+				f.cur.Plan = msg
+			}
 			return 0, nil
 		}
 		gpus = now
 		grades = func(o Offer) int { return pl.grades(o, left) }
+		plan.report = func(o Offer) time.Time { return f.now().Add(max(left+sitting, pl.lead(o))) }
 	}
 	if len(gpus) == 0 {
 		f.say("%s no GPU free now that fits (%s cloud%s%s); trying again later", f.armedHave(), strings.ToLower(f.o.Cloud), f.ceiling(long), map[bool]string{true: ", --gpu " + strings.Join(f.o.GPUs, ","), false: ""}[len(f.o.GPUs) > 0])
@@ -1000,7 +1023,7 @@ func (f *Fleet) launchSome(ctx context.Context, v *View, n int, long, cheap bool
 		if err := f.ready(ctx, w.Key, vouched); err != nil {
 			return rented, err
 		}
-		pod, err := f.rent(ctx, v, w.Key, gpus, site, grades)
+		pod, err := f.rent(ctx, v, w.Key, gpus, site, grades, plan)
 		if err != nil {
 			return rented, err
 		}
@@ -1079,7 +1102,33 @@ func (f *Fleet) ready(ctx context.Context, k *Key, vouched map[string]Vouched) e
 // nil, nil: none could be had within what may be spent.
 // grades, when not nil, is how many grades before an exam a machine of each kind is rented to
 // take, kept in the record.
-func (f *Fleet) rent(ctx context.Context, v *View, k *Key, gpus []Offer, site string, grades func(Offer) int) (*Rental, error) {
+// rentPlan is what a machine is rented for: the work, the round, and when it is expected to
+// report its last grade.
+type rentPlan struct {
+	what, round string
+	report      func(Offer) time.Time
+}
+
+// roundFor is the round a machine rented for what is for: the one whose exam is due, the one
+// with curators to run, or else the first open.
+func roundFor(w *Work, what string, due time.Time) string {
+	if w == nil || len(w.Rounds) == 0 {
+		return ""
+	}
+	for _, r := range w.Rounds {
+		switch {
+		case what == "curators" && r.RunsWanted > 0:
+			return r.ID
+		case what == "early grades" && !due.IsZero() && r.ExamDue == due.Unix():
+			return r.ID
+		case what == "grades" && r.GradesWanted > 0:
+			return r.ID
+		}
+	}
+	return w.Rounds[0].ID
+}
+
+func (f *Fleet) rent(ctx context.Context, v *View, k *Key, gpus []Offer, site string, grades func(Offer) int, plan rentPlan) (*Rental, error) {
 	tried, dearer := 0, 0
 	failed := map[string]bool{} // markets that failed otherwise than with no room, passed over now
 	for _, c := range gpus {
@@ -1113,7 +1162,18 @@ func (f *Fleet) rent(ctx context.Context, v *View, k *Key, gpus []Offer, site st
 			// Grading only, until stet's container sandbox is known to hold there.
 			l.Env["STET_WORKER_EDITS"] = "0"
 		}
+		began := f.now()
 		r, err := m.Rent(ctx, c, l)
+		try := rentTry{Handle: k.Handle, For: plan.what, Market: c.Market, Offer: c.ID, Card: c.Card, Price: c.Price, MS: f.now().Sub(began).Milliseconds(), Outcome: "rented"}
+		switch {
+		case errors.Is(err, errNoRoom):
+			try.Outcome = "no room: " + firstLine(err.Error())
+		case err != nil:
+			try.Outcome = firstLine(err.Error())
+		default:
+			try.ID = r.ID
+		}
+		f.rentSeen(try)
 		if errors.Is(err, errNoRoom) {
 			continue
 		}
@@ -1128,22 +1188,41 @@ func (f *Fleet) rent(ctx context.Context, v *View, k *Key, gpus []Offer, site st
 			cloud = cloudOf(c)
 		}
 		rec := &podRecord{ID: r.ID, Market: r.Market, Handle: k.Handle, GPU: c.Card, Cloud: cloud, Cost: r.Price, Start: f.now(), Alive: f.now(), Tracked: true,
-			Host: c.Host, CPU: c.CPU, Curators: l.Env["STET_WORKER_EDITS"] == "1"}
-		plan := ""
+			Host: c.Host, CPU: c.CPU, Curators: l.Env["STET_WORKER_EDITS"] == "1", For: plan.what, Round: plan.round}
+		if plan.report != nil {
+			rec.Report = plan.report(c)
+		}
+		// Seen from its start: a machine that asks for work before the next look still has its
+		// boot counted (calibrate.go). Lium's first, at 41 s, never was.
+		if f.starting == nil {
+			f.starting = map[string]bool{}
+		}
+		f.starting[ledgerKey(r.Market, r.ID)] = true
+		gradesSaid := ""
 		if grades != nil {
 			if g := grades(c); g > 1 {
-				rec.Grades, plan = g, fmt.Sprintf(", to take %d grades before the exam", g)
+				rec.Grades, gradesSaid = g, fmt.Sprintf(", to take %d grades before the exam", g)
 			}
 		}
 		v.Ledger.Pods[ledgerKey(r.Market, r.ID)] = rec
-		f.event(r, k.Handle, "rented", fmt.Sprintf("%s, %s, $%.2f an hour, from offer %s%s", c.Card, c.Trust, r.Price, c.ID, plan))
+		detail := fmt.Sprintf("%s, %s, $%.2f an hour, from offer %s%s; for %s", c.Card, c.Trust, r.Price, c.ID, gradesSaid, plan.what)
+		if plan.round != "" {
+			detail += " of " + plan.round
+		}
+		if !rec.Report.IsZero() {
+			detail += fmt.Sprintf("; expected to report by %s UTC", rec.Report.UTC().Format("15:04"))
+		}
+		if c.Region != "" || c.CPU != "" {
+			detail += fmt.Sprintf("; in %s on %s", c.Region, c.CPU)
+		}
+		f.event(r, k.Handle, "rented", detail)
 		if err := f.writeLedger(v.Ledger); err != nil {
 			return r, err
 		}
 		if c.Market == "runpod" {
-			f.say("rented %s: %s, %s cloud, $%.2f an hour (pod %s)%s", k.Handle, c.Card, c.Trust, r.Price, r.ID, plan)
+			f.say("rented %s: %s, %s cloud, $%.2f an hour (pod %s)%s", k.Handle, c.Card, c.Trust, r.Price, r.ID, gradesSaid)
 		} else {
-			f.say("rented %s on %s: %s, %s, $%.2f an hour (machine %s)%s", k.Handle, marketTitle(c.Market), c.Card, c.Trust, r.Price, r.ID, plan)
+			f.say("rented %s on %s: %s, %s, $%.2f an hour (machine %s)%s", k.Handle, marketTitle(c.Market), c.Card, c.Trust, r.Price, r.ID, gradesSaid)
 		}
 		return r, nil
 	}
@@ -1254,5 +1333,9 @@ func held(jobs, students int) string {
 }
 
 func (f *Fleet) say(format string, args ...any) {
-	fmt.Fprintf(f.out, "%s  %s\n", f.now().UTC().Format("15:04:05"), fmt.Sprintf(format, args...))
+	msg := fmt.Sprintf(format, args...)
+	fmt.Fprintf(f.out, "%s  %s\n", f.now().UTC().Format("15:04:05"), msg)
+	if f.cur != nil {
+		f.cur.Said = append(f.cur.Said, msg)
+	}
 }

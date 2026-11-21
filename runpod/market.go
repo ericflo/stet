@@ -414,7 +414,7 @@ type api struct {
 
 func newAPI(market, base, header, value string) *api {
 	return &api{market: market, base: strings.TrimRight(base, "/"), header: header, value: value,
-		http: &http.Client{Timeout: 60 * time.Second}, sleep: sleepCtx}
+		http: &http.Client{Timeout: 60 * time.Second, Transport: timedFor(market)}, sleep: sleepCtx}
 }
 
 // APIError is a market saying no.

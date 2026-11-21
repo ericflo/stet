@@ -103,10 +103,12 @@ type Stet struct {
 	api  string
 	http *http.Client
 	now  func() time.Time
+	// cli is the stet the server hands out, as it last said (/api/v1/season).
+	cli string
 }
 
 func newStet(api string) *Stet {
-	return &Stet{api: strings.TrimRight(api, "/"), http: &http.Client{Timeout: 60 * time.Second}, now: time.Now}
+	return &Stet{api: strings.TrimRight(api, "/"), http: &http.Client{Timeout: 60 * time.Second, Transport: timedFor("stet")}, now: time.Now}
 }
 
 // StetError is the server saying no. Its message is written to be shown to a person.
@@ -176,11 +178,13 @@ func (s *Stet) do(ctx context.Context, method, path string, body any, key *Key, 
 
 // Work is what GET /api/v1/admin/work says (server/work.go).
 type Work struct {
-	Rounds     []WorkRound `json:"rounds"`
-	Runners    int         `json:"runners"`
-	Waiting    bool        `json:"waiting"`
-	NextDrawAt int64       `json:"next_draw_at"`
-	Machines   []Machine   `json:"machines"`
+	// Raw is all of it, as it was said: kept a look at a time (history.go).
+	Raw        json.RawMessage `json:"-"`
+	Rounds     []WorkRound     `json:"rounds"`
+	Runners    int             `json:"runners"`
+	Waiting    bool            `json:"waiting"`
+	NextDrawAt int64           `json:"next_draw_at"`
+	Machines   []Machine       `json:"machines"`
 	// The organisers' students, trained by the organisers' machines when they have nothing
 	// official to do: those a machine could be handed now, and those being trained.
 	FarmWaiting  int `json:"farm_waiting"`
@@ -289,7 +293,8 @@ func (w *Work) machine(handle string) *Machine {
 // work asks what is waiting. Only an organisers' own key may.
 func (s *Stet) work(ctx context.Context, op *Key) (*Work, error) {
 	var w Work
-	if err := s.do(ctx, "GET", "/api/v1/admin/work", nil, op, &w); err != nil {
+	var raw json.RawMessage
+	if err := s.do(ctx, "GET", "/api/v1/admin/work", nil, op, &raw); err != nil {
 		if statusOf(err) == 404 {
 			return nil, fmt.Errorf("this Stet server does not say what is waiting (GET /api/v1/admin/work): it is older than this tool")
 		}
@@ -298,6 +303,10 @@ func (s *Stet) work(ctx context.Context, op *Key) (*Work, error) {
 		}
 		return nil, err
 	}
+	if err := json.Unmarshal(raw, &w); err != nil {
+		return nil, err
+	}
+	w.Raw = raw
 	for i := range w.Rounds {
 		r := &w.Rounds[i]
 		if r.DrawnAt == 0 && r.ExamAt == 0 && r.ExamDue == 0 && r.GradesEarly > 0 {
@@ -419,10 +428,14 @@ func (s *Stet) vouched(ctx context.Context, op *Key) (map[string]Vouched, error)
 func (s *Stet) site(ctx context.Context) (string, error) {
 	var out struct {
 		Site string `json:"site"`
+		CLI  struct {
+			Version string `json:"version"`
+		} `json:"cli"`
 	}
 	if err := s.do(ctx, "GET", "/api/v1/season", nil, nil, &out); err != nil {
 		return "", err
 	}
+	s.cli = out.CLI.Version
 	if out.Site == "" {
 		return "", errors.New("the Stet server did not say where its website is")
 	}
