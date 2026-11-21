@@ -909,7 +909,7 @@ func TestHowOftenAKindStartsIsLearned(t *testing.T) {
 	for i, r := range []podRecord{
 		rec("a", "RTX 3080 Ti", "COMMUNITY", false, 25*time.Minute), rec("b", "RTX 3080 Ti", "COMMUNITY", false, 25*time.Minute),
 		rec("c", "RTX 3080 Ti", "COMMUNITY", false, 25*time.Minute), rec("d", "RTX 3080 Ti", "COMMUNITY", true, time.Hour),
-		rec("e", "RTX 5080", "COMMUNITY", false, 3*time.Minute), // ended before it could be said
+		rec("e", "RTX 5080", "COMMUNITY", false, 3*time.Minute), // ended by the fleet before it could be said
 		rec("f", "RTX 4090", "SECURE", true, time.Hour), rec("g", "RTX 4090", "SECURE", true, time.Hour),
 	} {
 		raw, _ := json.Marshal(r)
@@ -929,6 +929,16 @@ func TestHowOftenAKindStartsIsLearned(t *testing.T) {
 	}
 	if r := s.of(Offer{Market: "runpod", Card: "RTX 5080", Trust: "community"}); math.Abs(r-0.5) > 1e-9 {
 		t.Errorf("a community 5080, unseen, starts as the class does: %.3f", r)
+	}
+	// One taken away by its market three minutes in, before it asked, did not start.
+	gone := rec("h", "RTX 5080", "COMMUNITY", false, 3*time.Minute)
+	gone.Gone = true
+	raw, _ := json.Marshal(gone)
+	fh, _ := os.OpenFile(f.spentLog(), os.O_APPEND|os.O_WRONLY, 0o600)
+	fh.Write(append(raw, '\n'))
+	fh.Close()
+	if r := f.startRates().of(Offer{Market: "runpod", Card: "RTX 5080", Trust: "community"}); r >= 0.5 {
+		t.Errorf("a community 5080 taken away before it asked: %.3f", r)
 	}
 	if r := s.of(Offer{Market: "runpod", Card: "RTX 4090", Trust: "secure"}); r <= 0.95 {
 		t.Errorf("a secure 4090, seen to start twice: %.3f", r)
@@ -1051,6 +1061,6 @@ func TestGraceIsLearnedPerMarket(t *testing.T) {
 // everyHostStarts takes every kind of host to start, for a test of how kinds are ordered by
 // price and speed alone.
 func everyHostStarts(t *testing.T) {
-	startPrior = func(string) float64 { return 1 }
-	t.Cleanup(func() { startPrior = expectedStart })
+	startPrior, learnStarts = func(string) float64 { return 1 }, false
+	t.Cleanup(func() { startPrior, learnStarts = expectedStart, true })
 }

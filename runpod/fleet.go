@@ -181,15 +181,17 @@ type podRecord struct {
 	Market string `json:"market,omitempty"` // "": runpod, as stet-runpod kept them
 	Grades int    `json:"grades,omitempty"` // how many grades it was rented to take before an exam (0: one)
 	// Tracked: whether it asked for work is kept (Asked), for how often its kind starts.
-	Tracked bool      `json:"tracked,omitempty"`
-	Asked   bool      `json:"asked,omitempty"`
-	Handle  string    `json:"handle"`
-	GPU     string    `json:"gpu"`
-	Cloud   string    `json:"cloud"`
-	Cost    float64   `json:"cost"`
-	Start   time.Time `json:"start"`
-	Alive   time.Time `json:"alive"` // last seen running
-	End     time.Time `json:"end,omitzero"`
+	Tracked bool `json:"tracked,omitempty"`
+	Asked   bool `json:"asked,omitempty"`
+	// Gone: the market stopped listing it, or stopped it, without the fleet ending it.
+	Gone   bool      `json:"gone,omitempty"`
+	Handle string    `json:"handle"`
+	GPU    string    `json:"gpu"`
+	Cloud  string    `json:"cloud"`
+	Cost   float64   `json:"cost"`
+	Start  time.Time `json:"start"`
+	Alive  time.Time `json:"alive"` // last seen running
+	End    time.Time `json:"end,omitzero"`
 }
 
 func (r *podRecord) market() string {
@@ -301,6 +303,7 @@ func (f *Fleet) note(l *ledger, rentals []Rental, answered map[string]bool) erro
 			continue
 		}
 		if p := listed[key]; p == nil || !p.live() {
+			r.Gone = true
 			if err := f.retire(l, key, minTime(now, r.Alive.Add(2*f.o.Every))); err != nil {
 				return err
 			}

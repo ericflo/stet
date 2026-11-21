@@ -14,7 +14,9 @@ import (
 // work, and none of 8 secure ones failed. So each kind is ranked by its price over how often
 // machines of its kind have started (Offer.Rate). Each machine rented is recorded with whether
 // it ever asked for work (podRecord.Asked). One that lived ten minutes without asking counts as
-// one that did not start; one ended sooner than that is not counted.
+// one that did not start, and so does one its market took away before it asked (Gone: round 7
+// had community pods vanish minutes after they were rented); one the fleet ended sooner is
+// not counted.
 //
 // What a kind has been seen to do is weighed with what is expected of it: first of its class
 // of host (prior), then of its market's hosts of that class, then of the kind itself, each
@@ -60,16 +62,23 @@ func (s startRates) of(o Offer) float64 {
 	return (classRate*startWeight + float64(kind.started)) / float64(startWeight+kind.rented)
 }
 
+// learnStarts says whether starts are counted at all (a test of ordering by price alone turns
+// it off).
+var learnStarts = true
+
 // startRates counts, from the record of machines live and ended, the starts seen.
 func (f *Fleet) startRates() startRates {
 	s := startRates{byKind: map[string]startCount{}, byClass: map[string]startCount{}}
+	if !learnStarts {
+		return s
+	}
 	count := func(r podRecord, end time.Time) {
 		if !r.Tracked {
 			return // rented before it was kept
 		}
 		started := r.Asked
-		if !started && end.Sub(r.Start) < graceAtLeast {
-			return // not long enough to say
+		if !started && !r.Gone && end.Sub(r.Start) < graceAtLeast {
+			return // ended by the fleet before it could be said
 		}
 		for _, k := range []string{kindKey(r.market(), r.GPU, r.Cloud)} {
 			c := s.byKind[k]
