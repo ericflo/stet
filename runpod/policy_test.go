@@ -457,3 +457,32 @@ func TestTheWorkAsServer044SaysIt(t *testing.T) {
 		t.Fatalf("with rp-02 rented for one: %+v", d)
 	}
 }
+
+// A machine waiting for work before the server's window for the exam's early grades opens for
+// its kind, when early grades are all that is wanted, is ended: it would only wait, spending,
+// and another is rented in time. One whose window has opened is kept, and so is one when there
+// is a curator to run.
+func TestAMachineWaitingTooEarlyIsEnded(t *testing.T) {
+	p := testPolicy()
+	p.PerWorker, p.MaxWorkers, p.Edits, p.Early = 1, 20, true, 2*time.Hour
+	work := func() *Work {
+		return &Work{EarlyGradesPerMachine: 3, EarlyWindowSeconds: 600,
+			Rounds: []WorkRound{{ID: "s1-o00009", Entries: 9, GradesEarly: 6, ExamDue: t0.Add(90 * time.Minute).Unix()}}}
+	}
+	w := work()
+	ws := pool(w, "waiting", "waiting", "free", "free")
+	ws[0].Window = t0.Add(40 * time.Minute) // its window opens in 40 minutes
+	ws[1].Window = t0.Add(-time.Minute)     // its has
+	d := p.decideNext(w, ws, 0, t0, 3)
+	if handles(d.End) != "stet-rp-01" || !strings.Contains(d.End[0].Why, "too early") || d.End[0].Failed {
+		t.Fatalf("ended %s (%+v)", handles(d.End), d.End)
+	}
+	// With a curator still to run, nobody is ended for it.
+	w = work()
+	w.Rounds[0].RunsWanted = 2
+	ws = pool(w, "waiting", "free")
+	ws[0].Window = t0.Add(40 * time.Minute)
+	if d := p.decideNext(w, ws, 0, t0, 3); len(d.End) != 0 {
+		t.Fatalf("ended %s with curators to run", handles(d.End))
+	}
+}

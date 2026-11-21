@@ -90,6 +90,20 @@ type examPlan struct {
 	lead func(Offer) time.Duration
 	pass func(Offer) time.Duration
 	most int
+	// window: the server hands a machine its first early grade only once the most grades it
+	// may hold, trained one after another, would end within this of the exam (0: no window).
+	window time.Duration
+}
+
+// first is how long before the exam a machine rented with left to go has its first grade
+// trained: as soon as it can, or, where the server keeps a window, no sooner than the window
+// and the further grades it may take after it allow.
+func (pl examPlan) first(c Offer, left time.Duration) time.Duration {
+	r := left - (pl.lead(c) - sitting)
+	if pl.window > 0 && pl.pass != nil {
+		r = min(r, pl.window+time.Duration(max(pl.most-1, 0))*pl.pass(c))
+	}
+	return r
 }
 
 // extraMargin is how long before the exam a machine must be able to have trained one more
@@ -104,7 +118,7 @@ func (pl examPlan) grades(c Offer, left time.Duration) int {
 		return 1
 	}
 	p := pl.pass(c)
-	spare := left - (pl.lead(c) - sitting) - extraMargin
+	spare := pl.first(c, left) - extraMargin
 	if p <= 0 || spare < 0 {
 		return 1
 	}

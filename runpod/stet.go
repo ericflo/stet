@@ -195,6 +195,9 @@ type Work struct {
 	// settings, which the fleet follows.
 	EarlyGradesPerMachine int `json:"early_grades_per_machine,omitempty"`
 	FastFirstSeconds      int `json:"fast_first_seconds,omitempty"`
+	// The most before an exam a grade taken early may be trained (0: as early as it can): the
+	// server hands a machine an early grade only once it would report within this of the exam.
+	EarlyWindowSeconds int `json:"early_window_seconds,omitempty"`
 }
 
 // WorkRound is what an open round is waiting for.

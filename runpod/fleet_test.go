@@ -1158,3 +1158,29 @@ func TestTheCauseIsReadFromWhatTheMachineSaid(t *testing.T) {
 		t.Errorf("Lium's read as %q", got)
 	}
 }
+
+// A machine that ran a round's curators and waits for work two and a half hours before its exam,
+// when the round wants only grades taken before the exam, is ended; they are rented in their
+// time. (Round 8 kept five $0.89 4090s waiting so, with trained grades, for 85 minutes.)
+func TestACuratorMachineDoneTooEarlyIsEnded(t *testing.T) {
+	rp, st := newFakeRunPod(t), newFakeStet(t)
+	f, out := testFleet(t, rp, st, 2)
+	f.o.Early, f.o.PerWorker, f.o.MaxHourly = 3*time.Hour, 1, 16
+	if err := cmdUp(context.Background(), f, 1); err != nil || len(rp.created) != 1 {
+		t.Fatalf("rented %d (%v)", len(rp.created), err)
+	}
+	// A 3080 (nothing seen: 0.85 of a 3090) takes 95 minutes from being rented to have three
+	// grades trained: with the exam 150 minutes off and a 10-minute window, its kind's time
+	// is 45 minutes off.
+	now := time.Now()
+	st.work = Work{EarlyGradesPerMachine: 3, EarlyWindowSeconds: 600,
+		Rounds:   []WorkRound{{ID: "s1-o00009", Entries: 3, GradesEarly: 3, ExamDue: now.Add(150 * time.Minute).Unix()}},
+		Machines: []Machine{{Handle: "stet-rp-01", Worker: true, LastSeen: now.Add(time.Second).Unix()}}}
+	out.Reset()
+	if err := tick(context.Background(), f); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "ended stet-rp-01: too early for the exam's grades") || len(rp.created) != 1 || len(rp.pods) != 0 {
+		t.Fatalf("rented %d, %d left:\n%s", len(rp.created), len(rp.pods), out)
+	}
+}

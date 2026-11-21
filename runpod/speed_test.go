@@ -191,3 +191,22 @@ func TestAMachineTakesSeveralGradesBeforeTheExam(t *testing.T) {
 		t.Error("one grade a machine is not as it was")
 	}
 }
+
+// With the server's window, a machine rented as early as it likes still has its first grade
+// trained no sooner than the window and the grades after it allow: rented in its time, it
+// takes the most grades, as without the window.
+func TestTheWindowForEarlyGrades(t *testing.T) {
+	lead := func(c Offer) time.Duration { return 24 * time.Minute } // a 4090: 5 to start, 2 to fetch, 2×8, 1 to sit
+	pass := func(c Offer) time.Duration { return 8 * time.Minute }
+	pl := examPlan{lead: lead, pass: pass, most: 3, window: 10 * time.Minute}
+	g := Offer{Card: "RTX 4090", Price: 0.40}
+	if f := pl.first(g, 3*time.Hour); f != 26*time.Minute {
+		t.Errorf("rented three hours before, its first grade is trained %s before the exam, not 26m", f)
+	}
+	if full := pl.full(g); full != 41*time.Minute || pl.grades(g, full) != 3 {
+		t.Errorf("rented in its time (%s), it takes %d grades", full, pl.grades(g, full))
+	}
+	if pl.grades(g, 3*time.Hour) != 3 {
+		t.Errorf("rented three hours before, it takes %d grades", pl.grades(g, 3*time.Hour))
+	}
+}

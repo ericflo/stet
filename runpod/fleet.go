@@ -602,6 +602,18 @@ func (f *Fleet) look(ctx context.Context) (*View, error) {
 			v.Hourly += w.Rental.Price
 			f.seeStart(w)
 		}
+		if window := earlyWindow(work); w.Rental != nil && window > 0 {
+			// The latest a machine of its kind could be rented and still start its grades as
+			// the server's window opens for it: the most it may hold, trained one after another,
+			// ending within the window of the first exam. One waiting for work before then waits
+			// only to spend.
+			if due := f.firstExamDue(work); !due.IsZero() {
+				o := Offer{Market: w.Rental.Market, Card: w.Rental.Card}
+				p, _ := f.pass(o.Card)
+				chain := f.lead(o) - sitting + time.Duration(max(work.EarlyGradesPerMachine-1, 0))*p
+				w.Window = due.Add(-window - chain)
+			}
+		}
 		if w.Rental != nil {
 			f.watch(w, f.now())
 			live[ledgerKey(w.Rental.Market, w.Rental.ID)] = true
@@ -778,14 +790,40 @@ func (f *Fleet) choicesNow(ctx context.Context, long, all bool) ([]Offer, error)
 	return out, nil
 }
 
+// firstExamDue is when the first exam whose grades are wanted before it is due.
+func (f *Fleet) firstExamDue(w *Work) time.Time {
+	var due time.Time
+	for _, r := range w.Rounds {
+		if r.GradesEarly > 0 {
+			if d := f.o.Policy.examDue(r); !d.IsZero() && (due.IsZero() || d.Before(due)) {
+				due = d
+			}
+		}
+	}
+	return due
+}
+
 // examPlan is what forExam knows of each kind: its lead and its pass as learned, and the most
 // grades the server lets one machine hold before an exam.
 func (f *Fleet) examPlan(w *Work) examPlan {
 	pl := examPlan{lead: f.lead, pass: func(c Offer) time.Duration { p, _ := f.pass(c.Card); return p }}
 	if w != nil {
 		pl.most = w.EarlyGradesPerMachine
+		pl.window = earlyWindow(w)
 	}
 	return pl
+}
+
+// earlyWindow is the server's window for early grades: what it says, or, from a server that
+// lets a machine hold several (with the window), its 10 minutes when it does not say.
+func earlyWindow(w *Work) time.Duration {
+	switch {
+	case w.EarlyWindowSeconds > 0:
+		return time.Duration(w.EarlyWindowSeconds) * time.Second
+	case w.EarlyGradesPerMachine > 1:
+		return 10 * time.Minute
+	}
+	return 0
 }
 
 // nextGrades is how many grades before an exam a machine rented now for them is taken to take:

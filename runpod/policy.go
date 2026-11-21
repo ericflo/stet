@@ -166,14 +166,14 @@ func (p Policy) earlyWanted(w *Work, now time.Time) int {
 // take several take theirs first: one that is starting, or waiting, all it was rented for, and
 // one that is grading the rest of them. Those starting or waiting are counted among the
 // machines wanted, as they are among those rented, so that they are not rented again.
-func (p Policy) earlyMachines(grades, next int, workers []*Worker, now time.Time) (machines, renting int) {
+func (p Policy) earlyMachines(grades, next int, workers []*Worker, now time.Time, ending map[*Worker]bool) (machines, renting int) {
 	if grades <= 0 {
 		return 0, 0
 	}
 	next = max(next, 1)
 	idle := 0
 	for _, wk := range workers {
-		if wk.Plan <= 1 {
+		if wk.Plan <= 1 || ending[wk] {
 			continue
 		}
 		switch wk.state(now, p) {
@@ -208,6 +208,31 @@ type Worker struct {
 	Silence time.Duration
 	// Speed is its card's, against a 3090 (0: not known).
 	Speed float64
+	// Window is the latest a machine of its kind could be rented and still be in time for
+	// the first exam's window for early grades (zero: no window): one waiting for work
+	// before then, when nothing else wants it, is ended, and another rented in time.
+	Window time.Time
+}
+
+// tooEarly are the machines waiting for work whose window for the first exam's early grades
+// is still to open, when early grades are all that is wanted: no curator to run, no grade of
+// a posted exam, no student. Each would only wait, spending, until then.
+func (p Policy) tooEarly(w *Work, workers []*Worker, now time.Time) map[*Worker]bool {
+	if p.earlyWanted(w, now) == 0 || w.FarmWaiting > 0 || (p.LongFarm && w.FarmLongWaiting > 0) {
+		return nil
+	}
+	for _, r := range w.Rounds {
+		if r.RunsWanted > 0 || r.GradesWanted > 0 {
+			return nil
+		}
+	}
+	out := map[*Worker]bool{}
+	for _, wk := range workers {
+		if !wk.Window.IsZero() && now.Before(wk.Window) && wk.state(now, p) == "waiting" {
+			out[wk] = true
+		}
+	}
+	return out
 }
 
 // state says what a machine is doing, for deciding and for showing.
@@ -338,7 +363,8 @@ func (p Policy) decideNext(w *Work, workers []*Worker, spentToday float64, now t
 			}
 		}
 	}
-	early, renting := p.earlyMachines(p.earlyWanted(w, now), next, workers, now)
+	ending := p.tooEarly(w, workers, now)
+	early, renting := p.earlyMachines(p.earlyWanted(w, now), next, workers, now, ending)
 	waiting := p.targetHolding(w, held, now, early)
 	d := Decision{Target: min(waiting+working, p.MaxWorkers)}
 	free := 0
@@ -354,6 +380,13 @@ func (p Policy) decideNext(w *Work, workers []*Worker, spentToday float64, now t
 			d.End = append(d.End, Ending{wk, "it stopped, or never asked for work", true})
 		case "quiet":
 			d.End = append(d.End, Ending{wk, fmt.Sprintf("nothing heard from it for %s, and it holds no job", now.Sub(time.Unix(wk.Machine.LastSeen, 0)).Round(time.Minute)), true})
+		case "waiting":
+			if ending[wk] {
+				d.End = append(d.End, Ending{Worker: wk, Why: fmt.Sprintf("too early for the exam's grades: a machine of its kind is rented again in time, from %s UTC", wk.Window.UTC().Format("15:04"))})
+				continue
+			}
+			d.Live++
+			idle = append(idle, wk)
 		default:
 			d.Live++
 			if st == "waiting" || st == "starting" {
