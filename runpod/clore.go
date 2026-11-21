@@ -43,7 +43,7 @@ func (m *cloreMarket) Caps() Caps { return Caps{Rents: true} }
 
 // cloreHours is how long Clore lets an order live, whatever becomes of the fleet: its own
 // backstop.
-const cloreHours = 2
+const cloreHours = 3
 
 // cloreEnvValue is the longest value Clore takes for one variable.
 const cloreEnvValue = 1536

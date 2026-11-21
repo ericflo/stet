@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -557,6 +558,7 @@ func TestTheFastestMachineIsRentedFirst(t *testing.T) {
 func TestTheCheapestMachineInEitherCloudIsRented(t *testing.T) {
 	rp, st := newFakeRunPod(t), newFakeStet(t)
 	f, out := testFleet(t, rp, st, 3)
+	everyHostStarts(t)
 	f.o.Cloud = "ANY"
 	f.o.Cheapest = true
 	st.work = *round(30, 1, 0, 0)
@@ -749,6 +751,7 @@ func TestWhatAnEndedMachineHeldIsHandedBack(t *testing.T) {
 func TestTheBiggerStudentsGetTheCardThatTrainsOneForLeast(t *testing.T) {
 	rp, st := newFakeRunPod(t), newFakeStet(t)
 	f, out := testFleet(t, rp, st, 4)
+	everyHostStarts(t)
 	f.o.Cloud, f.o.MaxPrice, f.o.LongMaxPrice = "ANY", 0.22, 0.90
 	f.o.LongMinutes, f.o.LongFarm, f.o.PerFarm = 600, true, 4
 	rp.noRoom["NVIDIA GeForce RTX 3080 Ti"] = true // a student costs least on it, and it has none free
@@ -885,8 +888,56 @@ func TestCuratorsAreRunOnTheCheapestAGrade(t *testing.T) {
 	for _, spec := range rp.created {
 		got = append(got, strings.ToLower(spec.Cloud)+" "+shortGPU(spec.GPU.ID))
 	}
-	if len(got) != 2 || got[0] != "community RTX 3080 Ti" || got[1] != "community RTX 3080 Ti" {
+	// With nothing seen yet, a community host is taken to start three times in four: the
+	// community 3080 Ti at $0.18 is ranked as $0.24, a grade on it $0.25 against $0.25 on
+	// the secure 3080 at $0.20 (ranked as $0.21), which is a little quicker to come.
+	if len(got) != 2 || got[0] != "secure RTX 3080" || got[1] != "secure RTX 3080" {
 		t.Fatalf("rented %v\n%s", got, out)
+	}
+}
+
+// How often a kind starts is learned from what was rented: its class of host's prior, then
+// its market's hosts of that class, then the kind's own.
+func TestHowOftenAKindStartsIsLearned(t *testing.T) {
+	rp, st := newFakeRunPod(t), newFakeStet(t)
+	f, _ := testFleet(t, rp, st, 1)
+	t0 := time.Now().Add(-3 * time.Hour)
+	rec := func(id, gpu, cloud string, asked bool, lived time.Duration) podRecord {
+		return podRecord{ID: id, Market: "runpod", GPU: gpu, Cloud: cloud, Cost: 0.18, Start: t0, Alive: t0.Add(lived), End: t0.Add(lived), Tracked: true, Asked: asked}
+	}
+	var lines []string
+	for i, r := range []podRecord{
+		rec("a", "RTX 3080 Ti", "COMMUNITY", false, 25*time.Minute), rec("b", "RTX 3080 Ti", "COMMUNITY", false, 25*time.Minute),
+		rec("c", "RTX 3080 Ti", "COMMUNITY", false, 25*time.Minute), rec("d", "RTX 3080 Ti", "COMMUNITY", true, time.Hour),
+		rec("e", "RTX 5080", "COMMUNITY", false, 3*time.Minute), // ended before it could be said
+		rec("f", "RTX 4090", "SECURE", true, time.Hour), rec("g", "RTX 4090", "SECURE", true, time.Hour),
+	} {
+		raw, _ := json.Marshal(r)
+		lines = append(lines, string(raw))
+		_ = i
+	}
+	untracked, _ := json.Marshal(podRecord{ID: "old", Market: "runpod", GPU: "RTX 3080 Ti", Cloud: "COMMUNITY", Start: t0, End: t0.Add(time.Hour)})
+	lines = append(lines, string(untracked))
+	if err := os.WriteFile(f.spentLog(), []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := f.startRates()
+	// RunPod's community: 1 of 4 started, over a prior of 0.75 for 4: 4/8 = 0.5. Its 3080 Ti:
+	// 1 of 4 over 0.5 for 4: 3/8.
+	if r := s.of(Offer{Market: "runpod", Card: "RTX 3080 Ti", Trust: "community"}); math.Abs(r-3.0/8) > 1e-9 {
+		t.Errorf("a community 3080 Ti starts %.3f", r)
+	}
+	if r := s.of(Offer{Market: "runpod", Card: "RTX 5080", Trust: "community"}); math.Abs(r-0.5) > 1e-9 {
+		t.Errorf("a community 5080, unseen, starts as the class does: %.3f", r)
+	}
+	if r := s.of(Offer{Market: "runpod", Card: "RTX 4090", Trust: "secure"}); r <= 0.95 {
+		t.Errorf("a secure 4090, seen to start twice: %.3f", r)
+	}
+	if r := s.of(Offer{Market: "vast", Card: "RTX 4090", Trust: "verified"}); r != 0.9 {
+		t.Errorf("a verified Vast host, unseen: %.3f", r)
+	}
+	if p := (Offer{Price: 0.18, Rate: 3.0 / 8}).rankPrice(); math.Abs(p-0.48) > 1e-9 {
+		t.Errorf("ranked as $%.3f", p)
 	}
 }
 
@@ -978,11 +1029,11 @@ func TestGraceIsLearnedPerMarket(t *testing.T) {
 	rp, st := newFakeRunPod(t), newFakeStet(t)
 	f, _ := testFleet(t, rp, st, 1)
 	f.o.Policy.Grace = 25 * time.Minute
-	if g := f.grace("lium"); g != 25*time.Minute {
-		t.Fatalf("Lium, unseen: %s", g)
+	if g := f.grace("salad"); g != 25*time.Minute {
+		t.Fatalf("Salad, unseen: %s", g)
 	}
-	if g := f.grace("salad"); g != 40*time.Minute {
-		t.Fatalf("Salad, unseen (20 minutes a boot): %s", g)
+	if g := f.grace("clore"); g != 40*time.Minute {
+		t.Fatalf("Clore, unseen (20 minutes a boot): %s", g)
 	}
 	cal := f.calibration()
 	for i, m := range []float64{1.1, 2.4, 3.0, 5.5, 18.3} {
@@ -995,4 +1046,11 @@ func TestGraceIsLearnedPerMarket(t *testing.T) {
 	if g := f.grace("vast"); g != graceAtLeast {
 		t.Fatalf("Vast, seen to start in two minutes: %s", g)
 	}
+}
+
+// everyHostStarts takes every kind of host to start, for a test of how kinds are ordered by
+// price and speed alone.
+func everyHostStarts(t *testing.T) {
+	startPrior = func(string) float64 { return 1 }
+	t.Cleanup(func() { startPrior = expectedStart })
 }

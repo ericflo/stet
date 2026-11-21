@@ -38,11 +38,14 @@ type Fleet struct {
 	offerErrs map[string]error
 	// The offers asked for in this tick, kept for it alone: a tick asks once.
 	tickOffers map[bool][]Offer
-	st         *Stet
-	op         *Key // the organisers' own key, for asking what is waiting
-	out        io.Writer
-	now        func() time.Time
-	keys       []*Key // the pool, by handle
+	// What was last said of each market whose offers could not be had, said again only
+	// once it changes.
+	offerSaid map[string]string
+	st        *Stet
+	op        *Key // the organisers' own key, for asking what is waiting
+	out       io.Writer
+	now       func() time.Time
+	keys      []*Key // the pool, by handle
 	// What was last said of graders waiting for their time, said again only once it changes.
 	waitSaid string
 	// What has been seen machines take (calibrate.go): read once, kept when it changes, and
@@ -174,16 +177,19 @@ func (f *Fleet) lock(wait time.Duration) (func(), error) {
 // seen. These are estimates; each market's billing page is the account.
 
 type podRecord struct {
-	ID     string    `json:"id"`
-	Market string    `json:"market,omitempty"` // "": runpod, as stet-runpod kept them
-	Grades int       `json:"grades,omitempty"` // how many grades it was rented to take before an exam (0: one)
-	Handle string    `json:"handle"`
-	GPU    string    `json:"gpu"`
-	Cloud  string    `json:"cloud"`
-	Cost   float64   `json:"cost"`
-	Start  time.Time `json:"start"`
-	Alive  time.Time `json:"alive"` // last seen running
-	End    time.Time `json:"end,omitzero"`
+	ID     string `json:"id"`
+	Market string `json:"market,omitempty"` // "": runpod, as stet-runpod kept them
+	Grades int    `json:"grades,omitempty"` // how many grades it was rented to take before an exam (0: one)
+	// Tracked: whether it asked for work is kept (Asked), for how often its kind starts.
+	Tracked bool      `json:"tracked,omitempty"`
+	Asked   bool      `json:"asked,omitempty"`
+	Handle  string    `json:"handle"`
+	GPU     string    `json:"gpu"`
+	Cloud   string    `json:"cloud"`
+	Cost    float64   `json:"cost"`
+	Start   time.Time `json:"start"`
+	Alive   time.Time `json:"alive"` // last seen running
+	End     time.Time `json:"end,omitzero"`
 }
 
 func (r *podRecord) market() string {
@@ -284,7 +290,7 @@ func (f *Fleet) note(l *ledger, rentals []Rental, answered map[string]bool) erro
 			key := ledgerKey(p.Market, p.ID)
 			r := l.Pods[key]
 			if r == nil { // rented by another copy of this tool, or by hand
-				r = &podRecord{ID: p.ID, Market: p.Market, Handle: k.Handle, GPU: p.Card, Cost: p.Price, Start: p.Created}
+				r = &podRecord{ID: p.ID, Market: p.Market, Handle: k.Handle, GPU: p.Card, Cost: p.Price, Start: p.Created, Tracked: true}
 				l.Pods[key] = r
 			}
 			r.Alive, r.Cost = now, p.Price
@@ -494,8 +500,11 @@ func (f *Fleet) rentals(ctx context.Context, l *ledger) ([]Rental, map[string]bo
 	for _, m := range f.markets {
 		rs, err := m.Rentals(ctx)
 		if err != nil {
-			if f.armed(m.Name()) || recorded[m.Name()] > 0 {
-				return nil, nil, err
+			// Its machines are taken to be as the record has them, so that their keys are not
+			// rented again; nothing of it is retired until it answers.
+			if recorded[m.Name()] > 0 {
+				f.say("%s did not say what it has rented (%v): its %d machines are taken to be as they were", marketTitle(m.Name()), err, recorded[m.Name()])
+				all = append(all, recordedRentals(l, m.Name())...)
 			}
 			continue
 		}
@@ -503,6 +512,17 @@ func (f *Fleet) rentals(ctx context.Context, l *ledger) ([]Rental, map[string]bo
 		all = append(all, rs...)
 	}
 	return all, answered, nil
+}
+
+// recordedRentals are a market's machines as the record has them, live.
+func recordedRentals(l *ledger, market string) []Rental {
+	var out []Rental
+	for _, r := range l.Pods {
+		if r.market() == market {
+			out = append(out, Rental{Market: market, ID: r.ID, Name: r.Handle, Card: r.GPU, Price: r.Cost, State: "running", Status: "as recorded", Created: r.Start})
+		}
+	}
+	return out
 }
 
 func (f *Fleet) look(ctx context.Context) (*View, error) {
@@ -525,6 +545,7 @@ func (f *Fleet) look(ctx context.Context) (*View, error) {
 		return nil, err
 	}
 	v := &View{Work: work, Ledger: l}
+	asked := false
 	for _, k := range f.keys {
 		w := &Worker{Key: k, Machine: work.machine(k.Handle)}
 		// The newest machine rented with that key. Ended ones are not listed at all; one that
@@ -538,6 +559,9 @@ func (f *Fleet) look(ctx context.Context) (*View, error) {
 		if w.Rental != nil {
 			if rec := l.Pods[ledgerKey(w.Rental.Market, w.Rental.ID)]; rec != nil {
 				w.Plan = rec.Grades
+				if !rec.Asked && w.Machine != nil && w.Machine.LastSeen >= w.Rental.Created.Unix() {
+					rec.Asked, asked = true, true
+				}
 			}
 			w.Grace, w.Speed = f.grace(w.Rental.Market), f.speedOf(w.Rental.Card)
 			if m := f.market(w.Rental.Market); m != nil && !m.Caps().SelfEnd {
@@ -549,6 +573,11 @@ func (f *Fleet) look(ctx context.Context) (*View, error) {
 			f.seeStart(w)
 		}
 		v.Workers = append(v.Workers, w)
+	}
+	if asked {
+		if err := f.writeLedger(l); err != nil {
+			return nil, err
+		}
 	}
 	if v.Today, err = f.spent(l, startOfDay(f.now())); err != nil {
 		return nil, err
@@ -570,6 +599,21 @@ const quietWithoutSelfEnd = 5 * time.Minute
 // need is what every machine rented must have.
 func (f *Fleet) need() Need {
 	return Need{MinGPUMemGB: f.o.MinGPUMemory, MinCPUs: f.o.MinCPU, MinRAMGB: f.o.MinRAM, DiskGB: f.o.Disk, MinCUDA: f.o.MinCUDA}
+}
+
+// graderDisk is the disk a machine that only grades needs, GB: stet and its libraries, and a
+// round's text built (10 GB, says docs/VERIFYING.md), with room to spare. --disk is for
+// those that run curators too, which keep 60 GB free.
+const graderDisk = 25
+
+// needOn is what a machine on a market must have: one where stet's container sandbox is not
+// known to hold only grades, and needs only a grader's disk.
+func (f *Fleet) needOn(m Market) Need {
+	n := f.need()
+	if !m.Caps().Curators {
+		n.DiskGB = min(n.DiskGB, graderDisk)
+	}
+	return n
 }
 
 // fits says whether an offer's GPU can be trusted with a grade, and holds one.
@@ -610,6 +654,26 @@ func (f *Fleet) choicesNow(ctx context.Context, long, all bool) ([]Offer, error)
 	ceiling := f.maxPrice(long)
 	var offers []Offer
 	f.offerErrs = map[string]error{}
+	asked := 0
+	if f.offerSaid == nil {
+		f.offerSaid = map[string]string{}
+	}
+	defer func() {
+		// A market whose offers could not be had is passed over this time, and said once.
+		if !all {
+			for name, err := range f.offerErrs {
+				if msg := fmt.Sprintf("%s's offers could not be had: %v", marketTitle(name), err); msg != f.offerSaid[name] {
+					f.say("%s; renting on the other markets", msg)
+					f.offerSaid[name] = msg
+				}
+			}
+			for name := range f.offerSaid {
+				if f.offerErrs[name] == nil {
+					delete(f.offerSaid, name)
+				}
+			}
+		}
+	}()
 	for _, m := range f.markets {
 		if f.o.Market != "" && m.Name() != f.o.Market {
 			continue
@@ -617,19 +681,26 @@ func (f *Fleet) choicesNow(ctx context.Context, long, all bool) ([]Offer, error)
 		if !all && !f.armed(m.Name()) && !(m.Name() == f.o.Market && m.Caps().Rents) {
 			continue
 		}
-		got, err := m.Offers(ctx, f.need())
+		got, err := m.Offers(ctx, f.needOn(m))
 		if err != nil {
-			if all {
-				f.offerErrs[m.Name()] = err
-				continue
-			}
-			return nil, err
+			f.offerErrs[m.Name()] = err
+			continue
 		}
+		asked++
 		for _, o := range got {
 			if ceiling <= 0 || o.Price <= ceiling+1e-9 {
 				offers = append(offers, o)
 			}
 		}
+	}
+	if asked == 0 && len(f.offerErrs) > 0 && !all {
+		for _, err := range f.offerErrs {
+			return nil, err // no market could say what it has
+		}
+	}
+	rates := f.startRates()
+	for i := range offers {
+		offers[i].Rate = rates.of(offers[i])
 	}
 	sortOffers(offers)
 	var out []Offer
@@ -887,7 +958,11 @@ func (f *Fleet) ready(ctx context.Context, k *Key, vouched map[string]Vouched) e
 // take, kept in the record.
 func (f *Fleet) rent(ctx context.Context, v *View, k *Key, gpus []Offer, site string, grades func(Offer) int) (*Rental, error) {
 	tried, dearer := 0, 0
+	failed := map[string]bool{} // markets that failed otherwise than with no room, passed over now
 	for _, c := range gpus {
+		if failed[c.Market] {
+			continue
+		}
 		price := c.Price
 		if v.Hourly+price > f.o.MaxHourly+1e-9 {
 			dearer++
@@ -904,6 +979,7 @@ func (f *Fleet) rent(ctx context.Context, v *View, k *Key, gpus []Offer, site st
 			return &Rental{Market: c.Market, ID: "dry-run", Name: k.Handle, Card: c.Card, State: "starting", Status: "PROVISIONING", Price: price, Created: f.now()}, nil
 		}
 		l := f.launchFor(k, site)
+		l.Need = f.needOn(m)
 		if l.Env["STET_WORKER_EDITS"] == "1" && !m.Caps().Curators {
 			// Grading only, until stet's container sandbox is known to hold there.
 			l.Env["STET_WORKER_EDITS"] = "0"
@@ -913,14 +989,16 @@ func (f *Fleet) rent(ctx context.Context, v *View, k *Key, gpus []Offer, site st
 			continue
 		}
 		if err != nil {
-			return nil, err
+			f.say("renting %s on %s did not work: %v; trying the other markets", k.Handle, marketTitle(c.Market), err)
+			failed[c.Market] = true
+			continue
 		}
 		v.Hourly += r.Price
 		cloud := c.Trust
 		if c.Market == "runpod" {
 			cloud = cloudOf(c)
 		}
-		rec := &podRecord{ID: r.ID, Market: r.Market, Handle: k.Handle, GPU: c.Card, Cloud: cloud, Cost: r.Price, Start: f.now(), Alive: f.now()}
+		rec := &podRecord{ID: r.ID, Market: r.Market, Handle: k.Handle, GPU: c.Card, Cloud: cloud, Cost: r.Price, Start: f.now(), Alive: f.now(), Tracked: true}
 		plan := ""
 		if grades != nil {
 			if g := grades(c); g > 1 {
@@ -972,10 +1050,13 @@ func (f *Fleet) end(ctx context.Context, v *View, endings []Ending) error {
 		}
 		m := f.market(r.Market)
 		if m == nil {
-			return fmt.Errorf("ending %s: there is no key for %s now", e.Worker.Key.Handle, marketTitle(r.Market))
+			f.say("could not end %s: there is no key for %s now", e.Worker.Key.Handle, marketTitle(r.Market))
+			continue
 		}
 		if err := m.End(ctx, r.ID); err != nil {
-			return fmt.Errorf("ending %s: %w", e.Worker.Key.Handle, err)
+			// Said, and tried again at the next look; the others are ended meanwhile.
+			f.say("could not end %s on %s: %v", e.Worker.Key.Handle, marketTitle(r.Market), err)
+			continue
 		}
 		if r.live() {
 			v.Hourly -= r.Price

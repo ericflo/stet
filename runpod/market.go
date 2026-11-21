@@ -85,6 +85,19 @@ type Offer struct {
 	CUDA     string  // the newest CUDA the host's driver takes, where the market says
 	Trust    string  // the market's word for its hosts: secure, verified, datacenter, community
 	Region   string
+	// Rate is how often a machine of this kind has been seen to start, of those rented (0: not
+	// known, taken as all): what it costs is ranked as its price over this.
+	Rate float64
+}
+
+// rankPrice is what an offer is ranked by: its price, over how often such a machine starts.
+// A $0.18 card that starts one time in three is ranked as $0.54. The hourly limits go by
+// the price itself.
+func (o Offer) rankPrice() float64 {
+	if o.Rate <= 0 {
+		return o.Price
+	}
+	return o.Price / max(o.Rate, 0.2)
 }
 
 // Launch is what a machine is rented with.

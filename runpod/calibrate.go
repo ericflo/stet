@@ -34,7 +34,9 @@ const fetchAndScripts, sitting = 2 * time.Minute, time.Minute
 // each market: Lium's start in seconds, Salad's pull images over people's own connections.
 const bootUnseen = 8 * time.Minute
 
-var bootUnseenOn = map[string]time.Duration{"runpod": bootUnseen, "vast": 8 * time.Minute, "lium": 3 * time.Minute, "clore": 10 * time.Minute, "salad": 20 * time.Minute}
+// The others' are what the smoke test saw (Nov 21): Vast 1¾ minutes, Salad 2, Lium 13, Clore
+// 20, each rounded up.
+var bootUnseenOn = map[string]time.Duration{"runpod": bootUnseen, "vast": 4 * time.Minute, "lium": 15 * time.Minute, "clore": 20 * time.Minute, "salad": 5 * time.Minute}
 
 // graceAtLeast is the least a machine is given to first ask for work before it is taken for
 // dead.

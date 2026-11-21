@@ -56,6 +56,9 @@ func newFakeMarket(t *testing.T, header, value string) *fakeMarket {
 		}
 		a, ok := m.answers[call]
 		if !ok {
+			a, ok = m.answers[r.Method+" *"] // any other path
+		}
+		if !ok {
 			w.WriteHeader(404)
 			return
 		}
@@ -484,8 +487,8 @@ func TestUpRentsOnOneMarketByHand(t *testing.T) {
 	}
 }
 
-// A market not armed that does not answer is passed over; one the record has machines on is
-// not, since its machines could not be told from free keys.
+// A market that does not answer is passed over; its machines in the record are taken to be as
+// they were, so that their keys are not rented again, and none is taken for ended.
 func TestAMarketThatDoesNotAnswerIsPassedOverOnlyWhenNothingIsThere(t *testing.T) {
 	rp, st := newFakeRunPod(t), newFakeStet(t)
 	f, out := testFleet(t, rp, st, 2)
@@ -502,12 +505,19 @@ func TestAMarketThatDoesNotAnswerIsPassedOverOnlyWhenNothingIsThere(t *testing.T
 	if err := f.writeLedger(l); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.look(context.Background()); err == nil {
-		t.Fatal("Clore down, with a machine there in the record: looked as if its key were free")
+	v, err := f.look(context.Background())
+	if err != nil {
+		t.Fatalf("Clore down, with a machine there in the record: %v", err)
+	}
+	if w := v.Workers[0]; w.Rental == nil || w.Rental.ID != "501" || w.state(time.Now(), f.o.Policy) == "free" {
+		t.Fatalf("Clore down: %s's key looked free: %+v", f.keys[0].Handle, w.Rental)
+	}
+	if l, _ := f.readLedger(); l.Pods["clore:501"] == nil {
+		t.Fatal("Clore down: its machine was taken for ended")
 	}
 	// Clore answers again: its order has no name, and is the key's by the record.
 	fm.answers["GET /my_orders"] = `{"orders": [{"id": 501, "price": 4.0, "ct": 1795240000, "expired": false, "specs": {"gpu": "1x NVIDIA GeForce RTX 3090"}}], "code": 0}`
-	v, err := f.look(context.Background())
+	v, err = f.look(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -682,5 +692,43 @@ func TestCloreOrdersAndFindsItsOrder(t *testing.T) {
 	}
 	if err := m.End(context.Background(), "701"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// With Vast armed and cheapest, a rent Vast refuses otherwise than for want of room (its credit
+// gone, say) is said, and the machine is rented on another market; so is it when Vast cannot
+// say what it has at all.
+func TestOneMarketFailingDoesNotStopTheOthers(t *testing.T) {
+	rp, st := newFakeRunPod(t), newFakeStet(t)
+	f, out := testFleet(t, rp, st, 2)
+	fm := newFakeMarket(t, "Authorization", "Bearer vast-key")
+	fm.answers["POST /api/v0/bundles/"] = string(fixture(t, "vast_bundles.json"))
+	fm.answers["GET /api/v1/instances/"] = `{"instances": [], "next_token": null}`
+	fm.answers["PUT *"] = `402 {"success": false, "error": "insufficient_credit", "msg": "not enough credit"}`
+	vast := newVast(fm.srv.URL, "vast-key")
+	vast.a.sleep = func(context.Context, time.Duration) error { return nil }
+	f.markets = append(f.markets, vast)
+	if err := (&Arming{Armed: map[string]Armed{"runpod": {}, "vast": {At: 1}}}).save(f.o.Home); err != nil {
+		t.Fatal(err)
+	}
+	f.o.Cheapest = true
+	st.work = *round(30, 1, 0, 0)
+	if err := tick(context.Background(), f); err != nil {
+		t.Fatal(err)
+	}
+	if len(rp.created) != 2 || !strings.Contains(out.String(), "on Vast.ai did not work") || !strings.Contains(out.String(), "not enough credit") {
+		t.Fatalf("rented %d on RunPod:\n%s", len(rp.created), out)
+	}
+	// Vast cannot say what it has: RunPod's offers are rented all the same.
+	for _, p := range rp.pods {
+		delete(rp.pods, p.ID)
+	}
+	fm.answers["POST /api/v0/bundles/"] = `503 {}`
+	out.Reset()
+	if err := tick(context.Background(), f); err != nil {
+		t.Fatal(err)
+	}
+	if len(rp.created) != 4 || !strings.Contains(out.String(), "Vast.ai's offers could not be had") {
+		t.Fatalf("rented %d on RunPod:\n%s", len(rp.created), out)
 	}
 }

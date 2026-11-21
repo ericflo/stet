@@ -76,8 +76,11 @@ func (f *Fleet) listOffers(ctx context.Context, long, every bool) error {
 			free = fmt.Sprintf("%d free", l.stock)
 		}
 		mark := ""
+		if c.Rate > 0 && c.Rate < 0.995 {
+			mark = fmt.Sprintf("  (starts %.0f%%)", 100*c.Rate)
+		}
 		if !f.armed(c.Market) {
-			mark = "  (not armed)"
+			mark += "  (not armed)"
 		}
 		fmt.Fprintf(f.out, "  $%.2f/h  %-7s %-10s %-30s %3d GB  %-9s", c.Price, c.Market, c.Trust, c.Card, c.MemoryGB, free)
 		p, seen := f.pass(c.Card)
@@ -186,7 +189,7 @@ func (f *Fleet) describeMarket(ctx context.Context, name string) {
 		said += " · renting here is not built yet"
 	}
 	fmt.Fprintf(f.out, "%-9s %s · %s\n", marketTitle(name), said, armed)
-	offers, err := m.Offers(ctx, f.need())
+	offers, err := m.Offers(ctx, f.needOn(m))
 	if err != nil {
 		fmt.Fprintf(f.out, "          its offers could not be had: %v\n", err)
 		return

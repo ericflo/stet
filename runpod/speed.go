@@ -10,13 +10,17 @@ import (
 )
 
 // speeds say roughly how quickly each kind of GPU trains, against an RTX 3090: from
-// published training benchmarks, and the RTX A4000's from the students it trained. A grade
+// published training benchmarks, and the RTX A4000's from the students it trained. The
+// consumer cards the other markets offer most (3060, 4060 Ti, 4070s, 5060 Ti, 5070s) are
+// from the same benchmarks; what grades take on each is learned as they are seen. A grade
 // trains a model as a student does, so they order the kinds tried, where an hour of a quick
 // card can cost less than the hours of a cheap one, and a rough figure does.
 var speeds = map[string]float64{
 	"RTX 3080": 0.85, "RTX 3080 Ti": 0.95, "RTX 3090": 1, "RTX 3090 Ti": 1.1,
 	"RTX 4070 Ti": 0.95, "RTX 4080": 1.3, "RTX 4080 SUPER": 1.35, "RTX 4090": 1.8,
 	"RTX 5080": 1.4, "RTX 5090": 2.5,
+	"RTX 3060": 0.4, "RTX 4060 Ti": 0.55, "RTX 4070": 0.8, "RTX 4070 SUPER": 0.9, "RTX 4070 Ti SUPER": 1.05,
+	"RTX 5060 Ti": 0.6, "RTX 5070": 0.95, "RTX 5070 Ti": 1.15, "A10": 0.8, "A30": 1.1,
 	"RTX A4000": 0.64, "RTX A4500": 0.75, "RTX A5000": 0.85, "RTX A6000": 1, "A40": 0.95,
 	"RTX 2000 Ada": 0.35, "RTX 4000 Ada": 0.6, "RTX 5000 Ada": 1.1, "RTX 6000 Ada": 1.8,
 	"L4": 0.45, "L40": 1.6, "L40S": 1.9,
@@ -58,7 +62,7 @@ func alnum(b byte) bool { return b < 128 && (unicode.IsLetter(rune(b)) || unicod
 func byStudent(cs []Offer, speed func(string) float64) {
 	score := func(c Offer) float64 {
 		if s := speed(c.Card); s > 0 {
-			return c.Price / math.Pow(s, 1.25)
+			return c.rankPrice() / math.Pow(s, 1.25)
 		}
 		return math.Inf(1)
 	}
@@ -74,7 +78,7 @@ func byPace(cs []Offer, speed func(string) float64) {
 		if si != sj {
 			return si > sj
 		}
-		return cs[i].Price < cs[j].Price
+		return cs[i].rankPrice() < cs[j].rankPrice()
 	})
 }
 
@@ -120,10 +124,10 @@ func (pl examPlan) full(c Offer) time.Duration {
 // held, until it reports its last grade, shared among the grades it takes.
 func (pl examPlan) cost(c Offer, left time.Duration) float64 {
 	if pl.most <= 1 || pl.pass == nil {
-		return c.Price * pl.lead(c).Hours()
+		return c.rankPrice() * pl.lead(c).Hours()
 	}
 	held := max(left+sitting, pl.lead(c))
-	return c.Price * held.Hours() / float64(pl.grades(c, left))
+	return c.rankPrice() * held.Hours() / float64(pl.grades(c, left))
 }
 
 // forExam is the kinds to rent now for grades taken before an exam due in left, the cheapest a
@@ -186,7 +190,7 @@ func byGrade(cs []Offer, speed func(string) float64) {
 		if s <= 0 {
 			s = 0.5
 		}
-		return c.Price / s
+		return c.rankPrice() / s
 	}
 	sort.SliceStable(cs, func(i, j int) bool { return score(cs[i]) < score(cs[j]) })
 }
