@@ -96,7 +96,7 @@ func TestAMachineUnderTheFloorTeachesWhereCuratorsMayNotRun(t *testing.T) {
 		t.Helper()
 		l, _ := f.readLedger()
 		rec := l.Pods["vast:"+contract]
-		st.work.Machines = append(st.work.Machines, Machine{Handle: rec.Handle, Worker: true, LastSeen: time.Now().Unix(), Curators: &no, CuratorsWhy: why})
+		st.work.Machines = append(st.work.Machines, Machine{Handle: rec.Handle, Worker: true, LastSeen: time.Now().Unix(), Curators: &no, CuratorsWhy: why, Harness: "0.4.6"})
 		fm.answers["GET /api/v1/instances/"] = `{"instances": [` + strings.Join(instances, ",") + `], "next_token": null}`
 		v, err := f.look(ctx)
 		if err != nil {
@@ -126,7 +126,7 @@ func TestAMachineUnderTheFloorTeachesWhereCuratorsMayNotRun(t *testing.T) {
 	if !strings.Contains(out.String(), "may not run curators: this machine is under the season's floor for running curators: memory 15 GB, floor 16; CPU 95 MB/s, floor 100. It grades only; neither its host nor any AMD EPYC 7452 32-Core Processor is rented to run curators for a week") {
 		t.Fatalf("not said:\n%s", out)
 	}
-	if raw, _ := os.ReadFile(f.eventsPath()); !strings.Contains(string(raw), `"event":"no curators"`) {
+	if raw, _ := os.ReadFile(f.eventsPath()); !strings.Contains(string(raw), `"event":"no curators"`) || !strings.Contains(string(raw), "after it was rented, running stet 0.4.6") {
 		t.Fatalf("not in the journal:\n%s", raw)
 	}
 	// The same CPU elsewhere is not rented for curators either; another is, and none is

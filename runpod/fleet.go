@@ -600,7 +600,11 @@ func (f *Fleet) look(ctx context.Context) (*View, error) {
 				w.Plan = rec.Grades
 				if !rec.Asked && w.Machine != nil && w.Machine.LastSeen >= w.Rental.Created.Unix() {
 					rec.Asked, asked = true, true
-					f.event(w.Rental, k.Handle, "asked", fmt.Sprintf("first asked for work %s after it was rented", time.Unix(w.Machine.LastSeen, 0).Sub(w.Rental.Created).Round(time.Second)))
+					detail := fmt.Sprintf("first asked for work %s after it was rented", time.Unix(w.Machine.LastSeen, 0).Sub(w.Rental.Created).Round(time.Second))
+					if w.Machine.Harness != "" {
+						detail += ", running stet " + w.Machine.Harness
+					}
+					f.event(w.Rental, k.Handle, "asked", detail)
 				}
 				if why, no := w.Machine.refusedCurators(w.Rental.Created); no && rec.Curators {
 					w.NoCurators = why

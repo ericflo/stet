@@ -242,6 +242,8 @@ type Machine struct {
 	Failed  int    `json:"failed,omitempty"`
 	Refused int    `json:"refused,omitempty"`
 	Trouble string `json:"trouble,omitempty"`
+	// The stet it runs, as its last hello said ("": not said).
+	Harness string `json:"harness,omitempty"`
 }
 
 // trouble says what went wrong with the jobs it claimed, as the server counts them ("": none).
