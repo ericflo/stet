@@ -104,16 +104,28 @@ func podRental(p *Pod) Rental {
 		state = "stopped"
 	}
 	r := Rental{Market: "runpod", ID: p.ID, Name: p.Name, Card: p.gpuName(), Price: p.Cost, State: state, Status: p.Status, Created: p.CreatedAt}
+	// Only one pod's own record says whether its container is up (runtime); the list does not.
 	switch {
 	case p.Runtime != nil:
 		r.UpFor = time.Duration(p.Runtime.Uptime) * time.Second
 		r.Up, r.Phase, r.Detail = "yes", "container up", "container up "+r.UpFor.Round(time.Minute).String()
-	case state == "starting" || state == "running":
-		r.Up, r.Phase, r.Detail = "no", "no container yet", "no container yet"
 	default:
 		r.Phase, r.Detail = strings.ToLower(p.Status), strings.ToLower(p.Status)
 	}
 	return r
+}
+
+// inspect is what RunPod says of one pod: its own record says whether its container is up.
+func (m *runpodMarket) inspect(ctx context.Context, id string) (*Rental, error) {
+	var p Pod
+	if _, err := m.rp.do(ctx, "GET", "/pods/"+url.PathEscape(id), nil, &p); err != nil {
+		return nil, err
+	}
+	r := podRental(&p)
+	if p.Runtime == nil && r.live() {
+		r.Up, r.Phase, r.Detail = "no", "no container yet", "no container yet"
+	}
+	return &r, nil
 }
 
 // Logs are what RunPod and the pod's container have said of it: the last n lines.

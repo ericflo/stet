@@ -76,6 +76,13 @@ func (f *fakeRunPod) serve(w http.ResponseWriter, r *http.Request) {
 			raw, _ := json.Marshal(LogLine{Source: "container", Line: l, TS: "2026-11-21T08:00:00Z"})
 			fmt.Fprintf(w, "data: %s\n\n", raw)
 		}
+	case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/pods/") && strings.Count(r.URL.Path, "/") == 2:
+		p := f.pods[strings.TrimPrefix(r.URL.Path, "/pods/")]
+		if p == nil {
+			w.WriteHeader(404)
+			return
+		}
+		json.NewEncoder(w).Encode(p)
 	case r.Method == "GET" && r.URL.Path == "/pods":
 		var list []Pod
 		for _, p := range f.pods {

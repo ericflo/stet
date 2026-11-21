@@ -121,6 +121,11 @@ const (
 	causeUnknown       = "unknown"
 )
 
+// inspector is a market whose record of one machine says more than its list.
+type inspector interface {
+	inspect(ctx context.Context, id string) (*Rental, error)
+}
+
 // workerLine is the last line the worker script said, or else the last line.
 func workerLine(lines []string) string {
 	for i := len(lines) - 1; i >= 0; i-- {
@@ -156,6 +161,13 @@ func causeOf(lines []string) string {
 // market keeps them, are kept in logs/.
 func (f *Fleet) diagnose(ctx context.Context, w *Worker) (cause, said string) {
 	r := w.Rental
+	if in, ok := f.market(r.Market).(inspector); ok {
+		// A market whose list says less than its record of one machine is asked for that.
+		if fresh, err := in.inspect(ctx, r.ID); err == nil {
+			fresh.Name, fresh.Created = r.Name, r.Created
+			r = fresh
+		}
+	}
 	title := marketTitle(r.Market)
 	age := f.now().Sub(r.Created).Round(time.Minute)
 	var lines []string
