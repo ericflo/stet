@@ -184,11 +184,21 @@ func (a *App) schedule(tx *Tx) {
 // only uses up a round number, and that can wait for the usual time. So can the next round
 // when the last two both came to nothing: whatever is wrong, hurrying will not mend it.
 func (a *App) onDemand(tx *Tx) {
-	s := tx.s
+	if r, at := a.earlyDraw(tx.s); r != nil && a.runnerAround(tx.s) {
+		a.reschedule(tx, r, at)
+		slog.Info("draw brought forward: an entry is waiting", "round", roundID(a.season.ID, r.Idx), "at", r.DrawAt)
+	}
+}
+
+// earlyDraw is the scheduled round and the earlier time onDemand would draw it at once
+// somebody who runs curators is around, or nil when it would not bring the draw forward:
+// rounds keep to the clock (RoundMinGap 0), no entry is waiting, a round is open, or the
+// draw is already as early as it can be.
+func (a *App) earlyDraw(s *State) (*Round, int64) {
 	gap := int64(a.cfg.RoundMinGap.Seconds())
 	r := s.roundWithStatus("scheduled")
-	if gap <= 0 || r == nil || r.Crawl == nil || s.Meta.Paused != 0 || s.roundWithStatus("open") != nil || !a.waiting(s) || !a.runnerAround(s) {
-		return
+	if gap <= 0 || r == nil || r.Crawl == nil || s.Meta.Paused != 0 || s.roundWithStatus("open") != nil || !a.waiting(s) {
+		return nil, 0
 	}
 	at, empty := now()+drawNotice, 0
 	for _, rd := range s.roundsDesc(3) {
@@ -205,12 +215,12 @@ func (a *App) onDemand(tx *Tx) {
 		}
 	}
 	if empty >= 2 {
-		return
+		return nil, 0
 	}
 	if at = a.season.nextGrid(at - 1); at < r.DrawAt {
-		a.reschedule(tx, r, at)
-		slog.Info("draw brought forward: an entry is waiting", "round", roundID(a.season.ID, r.Idx), "at", r.DrawAt)
+		return r, at
 	}
+	return nil, 0
 }
 
 // waiting reports whether an entry is waiting for a round: one that has not run, or one

@@ -328,3 +328,46 @@ func TestTheInstallerIsAScriptAShellAcceptsAndClearsUpAfterItself(t *testing.T) 
 		}
 	}
 }
+
+// The work says an entry is waiting only when a runner turning up would bring its round's
+// draw forward: not while a round is open, not once the draw is as early as it can be, and
+// never when rounds keep to the clock. A runner rented for anything else would only wait.
+func TestTheWorkSaysWaitingOnlyWhenARunnerWouldDrawEarly(t *testing.T) {
+	waiting := func(w *world, anchor *actor) bool {
+		t.Helper()
+		w.app.tick(context.Background())
+		var work Work
+		if code := anchor.do("GET", "/api/v1/admin/work", nil, &work); code != 200 {
+			t.Fatalf("HTTP %d", code)
+		}
+		return work.Waiting
+	}
+	w, anchor := demandWorld(t, nil)
+	alice := w.join("alice", nil)
+	if waiting(w, anchor) {
+		t.Fatal("waiting, with no entry")
+	}
+	w.submit(alice, "first", "print(1)")
+	if !waiting(w, anchor) {
+		t.Fatal("not waiting, with an entry and nobody around to run it")
+	}
+	// A runner asks: the draw comes forward, and nothing more is gained by another.
+	w.claim(anchor, true)
+	if waiting(w, anchor) {
+		t.Fatalf("still waiting once the draw was brought forward to %d", w.scheduledAt())
+	}
+	// While its round is open, the next one is not drawn early for anybody.
+	w.draw()
+	w.submit(alice, "second", "print(2)")
+	if waiting(w, anchor) {
+		t.Fatal("waiting while a round is open")
+	}
+
+	// On the clock alone, an entry waiting brings nothing forward.
+	w, anchor = demandWorld(t, func(c *Config) { c.RoundMinGap = 0 })
+	w.submit(w.join("bob", nil), "third", "print(3)")
+	if waiting(w, anchor) {
+		t.Fatal("waiting, with rounds on the clock")
+	}
+	w.check()
+}

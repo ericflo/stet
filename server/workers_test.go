@@ -165,8 +165,8 @@ func TestOnlyARentedMachineRunsCuratorsInTheContainerSandbox(t *testing.T) {
 	w.submit(carol, "trim", "print('v2')")
 	w.established("bob")
 	var work Work
-	if code := anchor.do("GET", "/api/v1/admin/work", nil, &work); code != 200 || !work.Waiting {
-		t.Fatalf("two entries waiting for a round: HTTP %d %+v", code, work)
+	if code := anchor.do("GET", "/api/v1/admin/work", nil, &work); code != 200 || work.Waiting {
+		t.Fatalf("rounds keep to the clock here, so nothing is drawn early for the two entries waiting: HTTP %d %+v", code, work)
 	}
 	w.draw()
 	w.app.cfg.Dev = false // as in production: the sandbox and the floor are required

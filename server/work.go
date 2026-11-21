@@ -82,8 +82,10 @@ type WorkMachine struct {
 type Work struct {
 	Rounds  []WorkRound `json:"rounds"`
 	Runners int         `json:"runners"` // accounts around that may be handed curators to run
-	// Waiting says that an entry is waiting for a round. The next one is drawn early for it
-	// once somebody who runs curators is around.
+	// Waiting says that the next round would be drawn early, for an entry waiting for one,
+	// once somebody who runs curators is around (onDemand). It is false when rounds keep to
+	// the clock (STET_ROUND_MIN_GAP unset), while a round is open, and when the draw is
+	// already as early as it can be: then a runner rented for it would only wait.
 	Waiting    bool          `json:"waiting"`
 	NextDrawAt int64         `json:"next_draw_at,omitempty"`
 	Machines   []WorkMachine `json:"machines"`
@@ -160,7 +162,8 @@ func (a *App) work(s *State) Work {
 		out.NextDrawAt = r.DrawAt
 	}
 	out.Paused = s.Meta.Paused
-	out.Waiting = a.waiting(s)
+	soon, _ := a.earlyDraw(s)
+	out.Waiting = soon != nil
 	out.FarmWaiting, out.FarmUnderWay, out.FarmLongWaiting = farmWaiting(s, now())
 	busy, long := map[int64]string{}, map[int64]bool{}
 	holding, untrained := map[int64]int{}, map[int64]bool{}
