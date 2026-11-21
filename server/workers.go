@@ -137,6 +137,9 @@ func (a *App) apiWorkerRevoke(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"key": key, "revoked": true})
 }
 
+// endedReason is what a job handed back by apiWorkerRelease says.
+const endedReason = "the organisers ended the machine"
+
 // apiWorkerRelease hands back every job a rented machine holds, once the organisers have ended
 // it: a machine ended a moment after it took a job would otherwise hold the job, and the round
 // or an organisers' batch waiting on it, until its lease ran out. The official jobs go back
@@ -161,9 +164,11 @@ func (a *App) apiWorkerRelease(w http.ResponseWriter, r *http.Request) {
 		}
 		handle = acct.Handle
 		t := now()
+		acct.EndedAt = t
+		tx.saveAccount(acct)
 		for _, c := range s.Claims {
 			if c.AccountID == acct.ID && c.live(t) {
-				a.handBack(tx, c)
+				a.handBack(tx, c, endedReason)
 				jobs++
 			}
 		}

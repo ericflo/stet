@@ -58,6 +58,13 @@ type Account struct {
 	// PassSeconds is how long its machine last took to train a grade's student, as it said
 	// when it last asked for work (stet 0.4.4 and later); 0 when it did not say.
 	PassSeconds float64 `json:"pass_seconds,omitempty"`
+	// CuratorsWhy is why it could not be handed curators the last time it asked for work, in
+	// words (curatorsWhy); empty when it could.
+	CuratorsWhy string `json:"curators_why,omitempty"`
+	// EndedAt is when the organisers last released one of their rented machines' keys, which
+	// they do as they end the machine (POST /api/v1/admin/workers/{key}/release): a key moves
+	// from one machine to the next, and what is counted against a machine starts there.
+	EndedAt int64 `json:"ended_at,omitempty"`
 	// Anchor marks an organisers' account. It comes from configuration, never from storage:
 	// the organisers' accounts are named by the people who run the server, and a database
 	// row cannot make one. Such an account starts out established and administers the
@@ -295,6 +302,8 @@ type Claim struct {
 	// TrainedAt is when its holder said it had trained the grade's student and was waiting
 	// only for the round's exam to sit it (stet 0.4.4 and later); 0 until then.
 	TrainedAt int64 `json:"trained_at,omitempty"`
+	// Reason is why its holder handed it back, as it said (released).
+	Reason string `json:"reason,omitempty"`
 }
 
 func (c *Claim) live(t int64) bool { return c.Status == "claimed" && c.ExpiresAt > t }

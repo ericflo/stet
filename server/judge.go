@@ -275,14 +275,37 @@ const memoryAllowanceGB = 1.0
 // meetsFloor reports whether a machine says it is at least the slowest one that may run
 // editors. An editor has a time limit in seconds, so every machine that runs one has to
 // be at least that fast.
-func (a *App) meetsFloor(hardware json.RawMessage) bool {
+func (a *App) meetsFloor(hardware json.RawMessage) bool { return a.shortOfFloor(hardware) == "" }
+
+// shortOfFloor says where a machine falls short of the season's floor for running editors,
+// as it measured itself, e.g. "CPU 95 MB/s, floor 100"; empty if it does not. Organisers'
+// tools read the word CPU in it to tell a host's slow processor from the rest.
+func (a *App) shortOfFloor(hardware json.RawMessage) string {
 	f := a.season.Runner
 	if a.cfg.Dev || (f.GPUTokensPerSecond == 0 && f.CPUMBPerSecond == 0 && f.GPUMemoryGB == 0 && f.MemoryGB == 0 && f.Cores == 0) {
-		return true
+		return ""
 	}
 	b := readHardware(hardware).Bench
-	return b != nil && b.GPUTokensPerSecond >= f.GPUTokensPerSecond && b.CPUMBPerSecond >= f.CPUMBPerSecond &&
-		b.GPUMemoryGB >= f.GPUMemoryGB && b.MemoryGB >= f.MemoryGB-memoryAllowanceGB && b.Cores >= float64(f.Cores)
+	if b == nil {
+		return "it sent no measurement of itself (stet bench)"
+	}
+	var out []string
+	if b.GPUTokensPerSecond < f.GPUTokensPerSecond {
+		out = append(out, fmt.Sprintf("GPU %.0f tokens/s, floor %.0f", b.GPUTokensPerSecond, f.GPUTokensPerSecond))
+	}
+	if b.GPUMemoryGB < f.GPUMemoryGB {
+		out = append(out, fmt.Sprintf("GPU memory %.0f GB, floor %.0f", b.GPUMemoryGB, f.GPUMemoryGB))
+	}
+	if b.CPUMBPerSecond < f.CPUMBPerSecond {
+		out = append(out, fmt.Sprintf("CPU %.0f MB/s, floor %.0f", b.CPUMBPerSecond, f.CPUMBPerSecond))
+	}
+	if b.Cores < float64(f.Cores) {
+		out = append(out, fmt.Sprintf("CPU %.0f cores, floor %d", b.Cores, f.Cores))
+	}
+	if b.MemoryGB < f.MemoryGB-memoryAllowanceGB {
+		out = append(out, fmt.Sprintf("memory %.1f GB, floor %.0f", b.MemoryGB, f.MemoryGB))
+	}
+	return strings.Join(out, "; ")
 }
 
 // runsEditors says whether an account asking for work may be handed editors to run, and
@@ -305,10 +328,33 @@ func (a *App) runsEditors(acct *Account, h *Hello) (bool, string) {
 		return false, "the container sandbox is for the organisers' rented machines; a volunteer's runs curators in bubblewrap"
 	case h.Sandbox != "bwrap" && h.Sandbox != "container" && !a.cfg.Dev:
 		return false, "running curators needs the bubblewrap sandbox"
-	case !a.meetsFloor(h.Hardware):
-		return false, "this machine is slower or smaller than the season's floor for running curators, or sent no measurement of itself: stet bench"
+	}
+	if short := a.shortOfFloor(h.Hardware); short != "" {
+		return false, floorWhy + short
 	}
 	return true, ""
+}
+
+const floorWhy = "this machine is under the season's floor for running curators: "
+
+// curatorsWhy is why a machine that asked for work as h did may not be handed curators, for
+// the organisers' tools (/admin/work): why, if it asked to run them and may not; if it did not
+// ask, where its own measurement of itself falls short of the floor, when it sent one under
+// it, since that is why a verifier declines to ask (stet verify --edits); else that it did
+// not ask. Empty if it may.
+func (a *App) curatorsWhy(canEdit bool, why string, h *Hello) string {
+	switch {
+	case canEdit:
+		return ""
+	case h.Edits:
+		return why
+	}
+	if readHardware(h.Hardware).Bench != nil {
+		if short := a.shortOfFloor(h.Hardware); short != "" {
+			return floorWhy + short
+		}
+	}
+	return "it did not ask to run curators"
 }
 
 // ResultPayload is what a grader reports. Mirrors stet.client.slim_result.
@@ -1299,6 +1345,7 @@ func (a *App) claim(ctx context.Context, acctID int64, h *Hello) (*Handed, error
 			acct.Hardware = json.RawMessage(raw)
 		}
 		acct.LastSeen, acct.RunnerSeen, acct.Backend = now(), 0, hw.gpuMake()
+		acct.CuratorsWhy = clip(a.curatorsWhy(canEdit, why, h), 300)
 		if canEdit {
 			acct.RunnerSeen = now()
 		}
@@ -1427,19 +1474,20 @@ func (a *App) moved(tx *Tx, rd *Round) {
 	tx.saveRound(rd)
 }
 
-func (a *App) release(ctx context.Context, acctID, claimID int64) error {
+func (a *App) release(ctx context.Context, acctID, claimID int64, reason string) error {
 	return a.st.update(ctx, func(tx *Tx) error {
 		if c := tx.s.Claims[claimID]; c != nil && c.AccountID == acctID && c.Status == "claimed" {
-			a.handBack(tx, c)
+			a.handBack(tx, c, reason)
 			a.settleReady(tx) // the round may have been waiting for this job alone
 		}
 		return nil
 	})
 }
 
-// handBack ends a job its holder gives up, so that it may be handed to somebody else.
-func (a *App) handBack(tx *Tx, c *Claim) {
-	c.Status = "released"
+// handBack ends a job its holder gives up, so that it may be handed to somebody else, and
+// keeps why.
+func (a *App) handBack(tx *Tx, c *Claim, reason string) {
+	c.Status, c.Reason = "released", clip(strings.ToValidUTF8(reason, "?"), 300)
 	tx.saveClaim(c)
 	if rd := tx.s.Rounds[c.RoundIdx]; rd != nil && rd.Status == "open" && a.established(tx.s.Accounts[c.AccountID]) {
 		a.moved(tx, rd)

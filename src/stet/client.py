@@ -887,6 +887,8 @@ def _grade_job(job, season, scale, device, key, out, work: Path, bases: dict | N
 
 
 EXAM_POLL = 20  # seconds between looks at whether a round's exam is posted
+# What a verifier says of its own speed when it asks for work (bench.py).
+BENCH_SAID = ("gpu_tokens_per_second", "cpu_mb_per_second", "cores", "memory_gb", "gpu_memory_gb")
 
 
 def exam_now(rnd):
@@ -1330,7 +1332,18 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
                 "  It can still grade: stet verify\n"
             )
             sys.exit(1)
-        hw = {**hw, "bench": {k: measured.get(k) for k in ("gpu_tokens_per_second", "cpu_mb_per_second", "cores", "memory_gb", "gpu_memory_gb")}}
+        hw = {**hw, "bench": {k: measured.get(k) for k in BENCH_SAID}}
+    else:
+        # Not asked for curators, and measured before: said all the same. A machine that runs
+        # `stet verify` because `stet verify --edits` found it under the floor says how far,
+        # which the organisers' tools read to stop renting such machines for curators. Only
+        # said, so nothing that goes wrong reading it stops a grader.
+        try:
+            measured = bench.saved()
+        except Exception:
+            measured = None
+        if measured:
+            hw = {**hw, "bench": {k: measured.get(k) for k in BENCH_SAID}}
     try:
         slot, lock = claim_workdir()  # `lock` is held until this process ends
     except OSError as e:

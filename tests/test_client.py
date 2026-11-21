@@ -530,6 +530,24 @@ def test_a_grader_says_it_trains_before_the_exam(loop):
     assert loop.hellos and all(h.get("early") is True for h in loop.hellos)
 
 
+def test_a_grader_says_how_fast_it_measured_itself_even_when_it_runs_no_curators(loop, monkeypatch):
+    from stet import bench
+
+    loop.claims = [a_job()]
+    loop.report = {"status": "recorded"}
+    args = Args()
+    args.max_jobs = 1
+    client.cmd_verify(args)
+    assert loop.hellos and all(h["edits"] is False and h["hardware"]["bench"] == {k: FAST_MACHINE[k] for k in client.BENCH_SAID} for h in loop.hellos)
+    # Never measured, or the measurement cannot be read: it asks for work all the same.
+    for saved in (lambda *a, **k: None, lambda *a, **k: 1 / 0):
+        monkeypatch.setattr(bench, "saved", saved)
+        loop.hellos.clear()
+        loop.claims = [a_job()]
+        client.cmd_verify(args)
+        assert loop.hellos and all("bench" not in h["hardware"] for h in loop.hellos)
+
+
 def early_loop(loop, monkeypatch, looks):
     """The loop, with grades handed before the exam trained into Pendings (stet 0.4.4), and the
     exam's posting as `looks` says, one look at a time."""

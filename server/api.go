@@ -1269,7 +1269,7 @@ func (a *App) apiRelease(w http.ResponseWriter, r *http.Request) {
 	}
 	json.Unmarshal(body, &req)
 	slog.Info("job released", "job", id, "verifier", acct.Handle, "reason", clip(req.Reason, 300))
-	if err := a.release(r.Context(), acct.ID, id); err != nil {
+	if err := a.release(r.Context(), acct.ID, id, req.Reason); err != nil {
 		writeErr(w, err)
 		return
 	}

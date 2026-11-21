@@ -61,6 +61,19 @@ type WorkMachine struct {
 	// PassSeconds is how long it last took to train a grade's student, as it said when it last
 	// asked for work (stet 0.4.4 and later). Absent until it has graded.
 	PassSeconds float64 `json:"pass_seconds,omitempty"`
+	// Curators says whether it could be handed curators to run, as it last asked for work, and
+	// CuratorsWhy, when it could not, why (curatorsWhy). The word CPU in it names a part of the
+	// floor the machine's processor fell short of.
+	Curators    bool   `json:"curators"`
+	CuratorsWhy string `json:"curators_why,omitempty"`
+	// Failed counts its jobs handed back for something other than stopping, and those it let run
+	// out with no report; Refused those whose result the server would not take; Trouble is the
+	// latest of either, in words. Each counts the jobs it took within the last day and since the
+	// organisers last ended a machine with its key (Account.EndedAt): a key moves from one
+	// rented machine to the next.
+	Failed  int    `json:"failed,omitempty"`
+	Refused int    `json:"refused,omitempty"`
+	Trouble string `json:"trouble,omitempty"`
 }
 
 // Work is the answer to GET /api/v1/admin/work.
@@ -169,10 +182,12 @@ func (a *App) work(s *State) Work {
 			untrained[c.AccountID] = untrained[c.AccountID] || c.Kind != "grade" || c.TrainedAt == 0
 		}
 	}
+	failed, refused, trouble := troubles(s, at)
 	for _, acct := range s.Accounts {
 		if acct.Anchor {
 			out.Machines = append(out.Machines, WorkMachine{Handle: acct.Handle, Worker: acct.Worker, LastSeen: acct.LastSeen, Busy: busy[acct.ID], Long: busy[acct.ID] == "farm" && long[acct.ID],
-				Holding: holding[acct.ID], Ready: holding[acct.ID] > 0 && !untrained[acct.ID], PassSeconds: acct.PassSeconds})
+				Holding: holding[acct.ID], Ready: holding[acct.ID] > 0 && !untrained[acct.ID], PassSeconds: acct.PassSeconds,
+				Curators: acct.RunnerSeen != 0, CuratorsWhy: acct.CuratorsWhy, Failed: failed[acct.ID], Refused: refused[acct.ID], Trouble: trouble[acct.ID]})
 		}
 	}
 	sort.Slice(out.Machines, func(x, y int) bool { return out.Machines[x].Handle < out.Machines[y].Handle })
@@ -187,4 +202,41 @@ func (a *App) apiAdminWork(w http.ResponseWriter, r *http.Request) {
 	var out Work
 	a.st.view(func(s *State) { out = a.work(s) })
 	writeJSON(w, 200, out)
+}
+
+// stopped are the reasons a job is handed back for that say nothing against the machine: it
+// was stopped, the round ended, the organisers ended it, or it did not say (before the server
+// kept reasons).
+var stopped = map[string]bool{"": true, "interrupted": true, "the verifier stopped": true, "the round ended before its exam was posted": true, endedReason: true}
+
+// troubles counts, for each of the organisers' accounts, the jobs it took since its key's
+// last machine was ended (and within a day) that failed or whose result was refused, and says
+// what the latest of them was (WorkMachine).
+func troubles(s *State, t int64) (failed, refused map[int64]int, trouble map[int64]string) {
+	failed, refused, trouble = map[int64]int{}, map[int64]int{}, map[int64]string{}
+	latest := map[int64]int64{}
+	for id, c := range s.Claims {
+		acct := s.Accounts[c.AccountID]
+		if acct == nil || !acct.Anchor || c.ClaimedAt <= acct.EndedAt || c.ClaimedAt < t-86400 {
+			continue
+		}
+		var why string
+		switch {
+		case c.Status == "refused" || (c.Status == "released" && c.Reason == "result refused"):
+			refused[c.AccountID]++
+			why = article(c.Kind) + "'s result was refused"
+		case c.Status == "lapsed":
+			failed[c.AccountID]++
+			why = article(c.Kind) + " ran out with no result, and was not handed back"
+		case c.Status == "released" && !stopped[c.Reason]:
+			failed[c.AccountID]++
+			why = article(c.Kind) + " was handed back: " + c.Reason
+		default:
+			continue
+		}
+		if id > latest[c.AccountID] {
+			latest[c.AccountID], trouble[c.AccountID] = id, clip(why, 200)
+		}
+	}
+	return failed, refused, trouble
 }
