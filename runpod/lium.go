@@ -34,6 +34,10 @@ func (m *liumMarket) Caps() Caps { return Caps{Rents: true} }
 // keep pulled, and whose pull is not billed (a pod is billed from RUNNING).
 const liumImage, liumImageTag = "daturaai/pytorch", "2.12.0-py3.12-cuda13.0.2-devel-ubuntu24.04-dind-lium1"
 
+// liumCommand is the worker as Lium's start command: Lium refuses one with a shell's
+// characters unless it is all one bash -c '…'.
+const liumCommand = `bash -c '` + workerInner + `'`
+
 // liumHours is how long Lium lets a pod live, whatever becomes of the fleet: its own backstop.
 const liumHours = 2
 
@@ -133,7 +137,10 @@ func (m *liumMarket) Rent(ctx context.Context, o Offer, l Launch) (*Rental, erro
 	if key == "" {
 		return nil, errors.New("Lium rents only with an SSH public key: there is none in ~/.ssh")
 	}
-	env := map[string]string{"STET_MARKET": "lium", "STET_WORKER_SCRIPT": base64.StdEncoding.EncodeToString([]byte(l.Script))}
+	// A Lium container's own disk is a few GB, most of it the image's: stet, its libraries
+	// and what it fetches go on the pod's volume, /workspace.
+	env := map[string]string{"STET_MARKET": "lium", "STET_WORKER_SCRIPT": base64.StdEncoding.EncodeToString([]byte(l.Script)),
+		"STET_WORKER_HOME": "/workspace/root", "STET_WORKER_OPT": "/workspace/opt/stet"}
 	for k, v := range l.Env {
 		env[k] = v
 	}
@@ -142,7 +149,7 @@ func (m *liumMarket) Rent(ctx context.Context, o Offer, l Launch) (*Rental, erro
 	}
 	if _, err := m.a.do(ctx, "POST", "/templates", map[string]any{
 		"name": "stet-" + l.Name + "-" + newID()[:8], "docker_image": liumImage, "docker_image_tag": liumImageTag,
-		"category": "PYTORCH", "volumes": []string{}, "environment": env, "startup_commands": workerCommand,
+		"category": "PYTORCH", "volumes": []string{"/workspace"}, "environment": env, "startup_commands": liumCommand,
 		"is_private": true, "one_time_template": true,
 	}, &tpl); err != nil {
 		return nil, fmt.Errorf("Lium's template for %s: %w", l.Name, err)
@@ -180,12 +187,22 @@ func (m *liumMarket) Rent(ctx context.Context, o Offer, l Launch) (*Rental, erro
 
 // liumPod is one of the account's pods, of the fields read here.
 type liumPod struct {
-	ID        string    `json:"id"`
-	PodName   string    `json:"pod_name"`
-	GPUName   string    `json:"gpu_name"`
-	Status    string    `json:"status"`
-	Price     *float64  `json:"price"`
-	CreatedAt time.Time `json:"created_at"`
+	ID        string   `json:"id"`
+	PodName   string   `json:"pod_name"`
+	GPUName   string   `json:"gpu_name"`
+	Status    string   `json:"status"`
+	Price     *float64 `json:"price"`
+	CreatedAt string   `json:"created_at"` // without a zone: UTC
+}
+
+// liumTime reads Lium's times, which come with or without a zone (UTC when without).
+func liumTime(s string) time.Time {
+	for _, layout := range []string{time.RFC3339Nano, "2006-01-02T15:04:05.999999999"} {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t
+		}
+	}
+	return time.Time{}
 }
 
 // liumState is what a pod's status comes to.
@@ -216,7 +233,7 @@ func (m *liumMarket) Rentals(ctx context.Context) ([]Rental, error) {
 			price = *p.Price
 		}
 		out = append(out, Rental{Market: "lium", ID: p.ID, Name: p.PodName, Card: shortGPU(p.GPUName), Price: price,
-			State: liumState(p.Status), Status: p.Status, Created: p.CreatedAt})
+			State: liumState(p.Status), Status: p.Status, Created: liumTime(p.CreatedAt)})
 	}
 	return out, nil
 }

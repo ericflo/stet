@@ -415,6 +415,10 @@ func errorDetail(data []byte) string {
 	if json.Unmarshal(data, &e) == nil {
 		for _, k := range []string{"detail", "msg", "message", "error", "title"} {
 			if s, ok := e[k].(string); ok && s != "" {
+				if v, ok := e["validation_errors"]; ok { // Lium says which fields
+					raw, _ := json.Marshal(v)
+					s += ": " + string(raw)
+				}
 				return s
 			}
 		}

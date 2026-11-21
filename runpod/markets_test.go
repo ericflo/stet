@@ -226,7 +226,7 @@ func TestLiumsOffersAreItsSecureNodesThatFit(t *testing.T) {
 func TestLiumsMachinesAndAccount(t *testing.T) {
 	fm := newFakeMarket(t, "X-API-Key", "lium-key")
 	fm.answers["GET /pods"] = `[
-		{"id": "6b1f0d4e-0000-4000-8000-000000000001", "pod_name": "stet-rp-03", "gpu_name": "NVIDIA GeForce RTX 3090", "status": "RUNNING", "price": 0.16, "created_at": "2026-11-21T06:00:00Z"},
+		{"id": "6b1f0d4e-0000-4000-8000-000000000001", "pod_name": "stet-rp-03", "gpu_name": "NVIDIA GeForce RTX 3090", "status": "RUNNING", "price": 0.16, "created_at": "2026-11-21T06:00:00.126695"},
 		{"id": "6b1f0d4e-0000-4000-8000-000000000002", "pod_name": "stet-rp-04", "gpu_name": "NVIDIA RTX A4500", "status": "PENDING", "price": null, "created_at": "2026-11-21T06:05:00Z"},
 		{"id": "6b1f0d4e-0000-4000-8000-000000000003", "pod_name": "stet-rp-05", "gpu_name": "NVIDIA RTX A4500", "status": "CREATION_FAILED", "price": 0.17, "created_at": "2026-11-21T06:06:00Z"}]`
 	fm.answers["GET /users/me"] = `{"balance": 100.0, "estimated_balance": 100.0, "email_verified": true}`
@@ -239,7 +239,7 @@ func TestLiumsMachinesAndAccount(t *testing.T) {
 	for _, r := range rs {
 		got += fmt.Sprintf("%s %s %s %.2f; ", r.Name, r.Card, r.State, r.Price)
 	}
-	if want := "stet-rp-03 RTX 3090 running 0.16; stet-rp-04 RTX A4500 starting 0.00; stet-rp-05 RTX A4500 stopped 0.17; "; got != want {
+	if want := "stet-rp-03 RTX 3090 running 0.16; stet-rp-04 RTX A4500 starting 0.00; stet-rp-05 RTX A4500 stopped 0.17; "; got != want || !rs[0].Created.Equal(time.Date(2026, 11, 21, 6, 0, 0, 126695000, time.UTC)) {
 		t.Fatalf("rentals: %s", got)
 	}
 	if a, err := m.Check(context.Background()); err != nil || !a.Known || a.Balance != 100 {
@@ -543,8 +543,8 @@ func TestLiumRentsWithATemplateOfItsOwn(t *testing.T) {
 	var raw map[string]any
 	json.Unmarshal([]byte(fm.bodies[0]), &raw)
 	json.Unmarshal([]byte(fm.bodies[0]), &tpl)
-	if raw["docker_image"] != liumImage || raw["startup_commands"] != workerCommand || !tpl.Once || !tpl.Private ||
-		tpl.Env["STET_MARKET"] != "lium" || tpl.Env["STET_API"] != "https://api.stet.test" || tpl.Env["STET_WORKER_SCRIPT"] != "ZWNobyBoaQ==" {
+	if fmt.Sprint(raw["volumes"]) != "[/workspace]" || raw["docker_image"] != liumImage || raw["startup_commands"] != liumCommand || !tpl.Once || !tpl.Private ||
+		tpl.Env["STET_MARKET"] != "lium" || tpl.Env["STET_WORKER_HOME"] != "/workspace/root" || tpl.Env["STET_API"] != "https://api.stet.test" || tpl.Env["STET_WORKER_SCRIPT"] != "ZWNobyBoaQ==" {
 		t.Fatalf("the template: %s", fm.bodies[0])
 	}
 	var rent map[string]any
@@ -577,5 +577,110 @@ func TestTheWorkerCommandStartsTheScriptFromItsEnvironment(t *testing.T) {
 	out, err := c.CombinedOutput()
 	if err != nil || strings.TrimSpace(string(out)) != "started x" {
 		t.Fatalf("%q %v", out, err)
+	}
+}
+
+// Salad rents a container group of one replica on the class offered, at high priority, named
+// after the key's handle with more after it, and the worker as its command.
+func TestSaladRentsAContainerGroupOfOne(t *testing.T) {
+	fm := newFakeMarket(t, "Salad-Api-Key", "salad-key")
+	fm.answers["POST /organizations/stet/projects/fleet/containers"] = `{"name": "x", "current_state": {"status": "pending"}}`
+	m := newSalad(fm.srv.URL, "salad-key", "stet", "fleet")
+	l := Launch{Name: "stet-rp-04", Image: "ubuntu:24.04", Script: "echo hi", Env: map[string]string{"STET_API": "https://api.stet.test"}, Need: testNeed}
+	r, err := m.Rent(context.Background(), Offer{Market: "salad", ID: "ed563892-aacd-40f5-80b7-90c9be6c759b", Card: "RTX 4090", Price: 0.44}, l)
+	if err != nil || r.Name != "stet-rp-04" || !strings.HasPrefix(r.ID, "stet-rp-04-") || len(r.ID) != len("stet-rp-04-")+5 {
+		t.Fatalf("rented %+v (%v)", r, err)
+	}
+	var g struct {
+		Name        string
+		DisplayName string `json:"display_name"`
+		Replicas    int
+		Restart     string `json:"restart_policy"`
+		Container   struct {
+			Image, Priority string
+			Command         []string
+			Env             map[string]string `json:"environment_variables"`
+			Resources       struct {
+				CPU, Memory int
+				GPUClasses  []string `json:"gpu_classes"`
+				Storage     int64    `json:"storage_amount"`
+			}
+		}
+	}
+	json.Unmarshal([]byte(fm.bodies[0]), &g)
+	c := g.Container
+	if g.DisplayName != "stet-rp-04" || g.Replicas != 1 || g.Restart != "never" || c.Priority != "high" || c.Image != "ubuntu:24.04" ||
+		strings.Join(c.Command, "|") != "bash|-c|"+workerInner || c.Env["STET_MARKET"] != "salad" || c.Env["STET_WORKER_SCRIPT"] != "ZWNobyBoaQ==" ||
+		c.Resources.CPU != 6 || c.Resources.Memory != 16384 || c.Resources.GPUClasses[0] != "ed563892-aacd-40f5-80b7-90c9be6c759b" || c.Resources.Storage != 100<<30 {
+		t.Fatalf("asked for %s", fm.bodies[0])
+	}
+	fm.answers["DELETE /organizations/stet/projects/fleet/containers/"+r.ID] = ``
+	if err := m.End(context.Background(), r.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.End(context.Background(), "gone-12345"); err != nil {
+		t.Fatalf("one already gone: %v", err)
+	}
+}
+
+// Clore takes the worker in pieces of its environment no longer than it allows, an order says
+// no ID, so it is found by its server, and an order refused (code 6) is no room.
+func TestCloreOrdersAndFindsItsOrder(t *testing.T) {
+	fm := newFakeMarket(t, "auth", "clore-key")
+	fm.answers["POST /create_order"] = `{"code": 0}`
+	now := time.Now().Unix()
+	fm.answers["GET /my_orders"] = fmt.Sprintf(`{"code": 0, "orders": [
+		{"id": 700, "price": 4.0, "ct": %d, "si": 124838, "expired": true, "specs": {"gpu": "1x NVIDIA GeForce RTX 3090"}},
+		{"id": 701, "price": 4.0, "ct": %d, "si": 124838, "expired": false, "specs": {"gpu": "1x NVIDIA GeForce RTX 3090"}}]}`, now-7200, now)
+	fm.answers["POST /cancel_order"] = `{"code": 0}`
+	m := newClore(fm.srv.URL, "clore-key")
+	m.sleep = func(context.Context, time.Duration) error { return nil }
+	script := strings.Repeat("echo the worker script, at about its length\n", 120)
+	l := Launch{Name: "stet-rp-05", Image: "ubuntu:24.04", Script: script, Env: map[string]string{"STET_API": "https://api.stet.test"}, Need: testNeed}
+	r, err := m.Rent(context.Background(), Offer{Market: "clore", ID: "124838", Card: "RTX 3090", Price: 0.275, Ask: 4.0}, l)
+	if err != nil || r.ID != "701" || r.Name != "stet-rp-05" || r.State != "starting" {
+		t.Fatalf("rented %+v (%v)", r, err)
+	}
+	var o struct {
+		Currency, Image, Type, Command string
+		Server                         int64             `json:"renting_server"`
+		Hours                          int               `json:"rental_hours"`
+		Price                          float64           `json:"required_price"`
+		Env                            map[string]string `json:"env"`
+	}
+	json.Unmarshal([]byte(fm.bodies[0]), &o)
+	joined, parts := "", 0
+	for i := 0; ; i++ {
+		v, ok := o.Env[fmt.Sprintf("STET_WORKER_SCRIPT_%d", i)]
+		if !ok {
+			break
+		}
+		if len(v) > cloreEnvValue {
+			t.Fatalf("a value of %d characters", len(v))
+		}
+		joined, parts = joined+v, parts+1
+	}
+	got, _ := base64.StdEncoding.DecodeString(joined)
+	if o.Currency != "USD-Blockchain" || o.Type != "on-demand" || o.Server != 124838 || o.Hours != cloreHours || o.Price != 4.0 ||
+		string(got) != script || parts < 2 || !strings.Contains(o.Command, "$STET_WORKER_SCRIPT_0$STET_WORKER_SCRIPT_1") || o.Env["STET_MARKET"] != "clore" {
+		t.Fatalf("ordered %s", fm.bodies[0])
+	}
+	// The command puts the pieces back together and runs them.
+	env := []string{"PATH=/usr/bin:/bin"}
+	for k, v := range o.Env {
+		env = append(env, k+"="+v)
+	}
+	dir := t.TempDir()
+	c := exec.Command("sh", "-c", strings.ReplaceAll(strings.ReplaceAll(o.Command, "exec bash", "exec head -c 44"), "/root/", dir+"/"))
+	c.Env = env
+	if out, err := c.CombinedOutput(); err != nil || string(out) != "echo the worker script, at about its length\n" {
+		t.Fatalf("the command ran %q (%v)", out, err)
+	}
+	fm.answers["POST /create_order"] = `{"code": 6, "error": "server_already_rented"}`
+	if _, err := m.Rent(context.Background(), Offer{Market: "clore", ID: "124851", Ask: 7.95}, l); !errors.Is(err, errNoRoom) {
+		t.Fatalf("an order refused: %v", err)
+	}
+	if err := m.End(context.Background(), "701"); err != nil {
+		t.Fatal(err)
 	}
 }

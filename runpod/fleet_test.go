@@ -971,3 +971,28 @@ func TestGradersTakeSeveralGradesBeforeTheExam(t *testing.T) {
 		t.Fatalf("rented %d while two were starting for three each (%v):\n%s", len(rp.created), err, out)
 	}
 }
+
+// Grace: the policy's until a market's machines have been seen to start, then twice what four
+// in five took there, ten minutes at least.
+func TestGraceIsLearnedPerMarket(t *testing.T) {
+	rp, st := newFakeRunPod(t), newFakeStet(t)
+	f, _ := testFleet(t, rp, st, 1)
+	f.o.Policy.Grace = 25 * time.Minute
+	if g := f.grace("lium"); g != 25*time.Minute {
+		t.Fatalf("Lium, unseen: %s", g)
+	}
+	if g := f.grace("salad"); g != 40*time.Minute {
+		t.Fatalf("Salad, unseen (20 minutes a boot): %s", g)
+	}
+	cal := f.calibration()
+	for i, m := range []float64{1.1, 2.4, 3.0, 5.5, 18.3} {
+		cal.Boot = append(cal.Boot, BootSample{Pod: fmt.Sprintf("pod%d", i), Minutes: m})
+	}
+	cal.Boot = append(cal.Boot, BootSample{Pod: "vast:1", Minutes: 1.8}, BootSample{Pod: "vast:2", Minutes: 2.0}, BootSample{Pod: "vast:3", Minutes: 2.2})
+	if g := f.grace("runpod"); g != 2*time.Duration(18.3*float64(time.Minute)) {
+		t.Fatalf("RunPod, seen: %s", g)
+	}
+	if g := f.grace("vast"); g != graceAtLeast {
+		t.Fatalf("Vast, seen to start in two minutes: %s", g)
+	}
+}

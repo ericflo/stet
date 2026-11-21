@@ -388,8 +388,42 @@ These keep their meaning:
 - Machines off RunPod get `STET_WORKER_EDITS=0`, and the curator batch keeps to markets with `Caps.Curators`, until the sandbox is shown to hold there.
 - `up --market M` rents by hand on one market, armed or not; `scale` refuses `--market`.
 
+**Lium, Salad and Clore renting** (built the same morning, tested against fakes, not yet smoke-tested):
+- **Lium:** a one-time private template per machine carries its environment, with the worker script base64'd in `STET_WORKER_SCRIPT`.
+  - Its `startup_commands` (`workerCommand`) unpacks the script and runs it.
+  - The image is Lium's own `daturaai/pytorch:2.12.0-py3.12-cuda13.0.2-devel-ubuntu24.04-dind-lium1`.
+  - The rent is `POST /executors/{id}/rent` with `termination_hours: 2`, `expected_price_per_gpu_hour` (409 means the price rose: try the next) and an `Idempotency-Key`. `user_public_key` is this machine's SSH key.
+  - Offers use `reliable_only=true`.
+- **Salad:** one container group per machine, named `<handle>-<5 random>`, with `display_name` = handle, `replicas: 1`, `restart_policy: never` and priority `high`.
+  - The command is `[bash, -c, workerInner]`.
+  - On a Salad host, `worker.sh` checks the driver itself. Under 580, it asks Salad's in-machine service (`POST 169.254.169.254/v1/reallocate`) to move it.
+- **Clore:** `create_order` (on demand, USD-Blockchain) with `required_price` = the listed price per day, and `rental_hours: 2`.
+  - The env takes at most 1,536 characters a value, so the script is cut into `STET_WORKER_SCRIPT_0..n` and joined again in the command.
+  - Clore returns no order ID: the order is found in `my_orders` by its server, made since it was asked for. Orders are kept 5 s apart.
+  - Code 6 means no room, unless it's about the balance.
+- Lium, Salad and Clore can't end themselves. When a machine there goes quiet (`quietWithoutSelfEnd`, 5 min holding no job), the fleet ends it; each market's backstop covers the rest.
+
 **Smoke test, first try:**
 - Vast 61768181, an RTX 4080 SUPER at $0.22/h, rented 07:04:09 UTC from a separate folder with its own key, `stet-smoke-01`.
 - I ended it 38 s later through the fleet's own `End`; Vast no longer listed it within 14 s. stet-db pointed out that round 7 was still handing out grades, and a vouched smoke key could take one.
 - **Rule:** a smoke machine is a real grader. Rent one only when no round is open (check `/admin/work` first), and tell stet-db the instance ID and times.
+
+**Smoke test, done (07:22–07:49 UTC, rounds paused, separate folder and keys, about $0.18 in all):**
+
+| Market | Card, $/h | Rented → first asked for work | Ended | Cost |
+|---|---|---|---|---|
+| Vast.ai | RTX 4080 SUPER, $0.22 | 1¾ min (container up in 31 s; stet 0.4.3 installed in about 1½ min) | by itself, at its 5 idle minutes, with `CONTAINER_API_KEY` | $0.03 |
+| Salad | RTX 3060 12 GB, $0.08 | about 2 min | by the fleet (`DELETE` the group), once quiet | $0.016 |
+| Lium | RTX 3090, $0.16 | 13 min on this node, after one fix | by the fleet (`DELETE /pods/{id}`) | $0.065 for both tries |
+| Clore.ai | RTX 5080, $0.21 | about 20 min | by the fleet (`cancel_order`) | $0.07 |
+
+**Fixes found by renting:**
+- **Lium:** a template needs a volume (`/workspace`).
+  - The start command must be `bash -c '…'` in single quotes: Lium refuses shell characters otherwise.
+  - `created_at` comes without a zone.
+  - **The container's own disk is 7.5 GB**, most of it the image, so stet's install ran out of space. It now goes on the 28 GB volume (`STET_WORKER_HOME=/workspace/root`, `STET_WORKER_OPT=/workspace/opt/stet`). That is under the 100 GB the need asks for: before Lium is armed, check what a grade needs on disk, or find how to get a bigger volume.
+- **Grace before boots are seen:** with Lium's 3-minute default, the 10-minute floor would have ended its slow first machine before it ever asked for work. A market whose machines all take longer than Grace would then never be seen to start, and would churn. So until 3 boots are seen on a market, its Grace is the policy's 25 min, or twice the default boot if longer.
+- Boot defaults were wrong both ways: Salad was 2 min, not 20; Lium 13 and Clore 20, not 3 and 10. Boot is learned per market as machines are seen.
+
+**Not yet tested on the new markets:** an actual grade (nothing was waiting); curators (grade-only until `tools/cage_check.py` holds there); Salad's driver check on an old driver (this host's was new enough). Each market is armed only with Eric's approval, one at a time (§9 step 5): Vast first.
 

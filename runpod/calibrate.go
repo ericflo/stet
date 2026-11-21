@@ -114,6 +114,20 @@ func (f *Fleet) boot() time.Duration { return f.bootOn("runpod") }
 // of the latest bootsCounted seen there, longer than four in five took. A sample's pod is
 // known by its key in the record, which is RunPod's pod ID alone, or "market:ID".
 func (f *Fleet) bootOn(market string) time.Duration {
+	m := f.bootsOn(market)
+	if len(m) < 3 {
+		if d, ok := bootUnseenOn[market]; ok {
+			return d
+		}
+		return bootUnseen
+	}
+	m = m[max(0, len(m)-bootsCounted):]
+	sort.Float64s(m)
+	return max(2*time.Minute, time.Duration(m[len(m)*4/5]*float64(time.Minute)))
+}
+
+// bootsOn are the minutes machines on a market were seen to take to first ask for work.
+func (f *Fleet) bootsOn(market string) []float64 {
 	if market == "" {
 		market = "runpod"
 	}
@@ -127,21 +141,19 @@ func (f *Fleet) bootOn(market string) time.Duration {
 			m = append(m, s.Minutes)
 		}
 	}
-	if len(m) < 3 {
-		if d, ok := bootUnseenOn[market]; ok {
-			return d
-		}
-		return bootUnseen
-	}
-	m = m[max(0, len(m)-bootsCounted):]
-	sort.Float64s(m)
-	return max(2*time.Minute, time.Duration(m[len(m)*4/5]*float64(time.Minute)))
+	return m
 }
 
 // grace is how long a machine on a market may take to first ask for work before it is taken
 // for dead and ended: twice what four in five took there, and ten minutes at least. A
-// replacement usually starts sooner than a slow one would have.
+// replacement usually starts sooner than a slow one would have. Until three have been seen
+// there, it is the policy's Grace (25 minutes), or twice the boot taken for the market if
+// that is longer: a market whose machines all took longer than a short Grace would have them
+// all ended, and never be seen to start.
 func (f *Fleet) grace(market string) time.Duration {
+	if len(f.bootsOn(market)) < 3 {
+		return max(f.o.Policy.Grace, 2*f.bootOn(market))
+	}
 	return max(graceAtLeast, 2*f.bootOn(market))
 }
 
