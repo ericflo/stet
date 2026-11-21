@@ -1212,11 +1212,15 @@ func TestAMachineStillInstallingIsGivenMoreTime(t *testing.T) {
 		}
 		return out.String()
 	}
-	// Its log is read once it nears the end of its grace, and grows past it.
-	if said := step(g - time.Minute); strings.Contains(said, "ended") {
+	// Its log is read once it nears the end of its grace. Grown in the look before its grace
+	// runs out, it is given more then: what is decided comes seconds after what is seen.
+	if said := step(g - 90*time.Second); strings.Contains(said, "ended") {
 		t.Fatalf("ended before its grace:\n%s", said)
 	}
-	if said := step(g+time.Minute, " Downloaded scipy"); strings.Contains(said, "ended") || !strings.Contains(said, "still getting there") {
+	if said := step(g-30*time.Second, " Downloaded numba"); strings.Contains(said, "ended") || !strings.Contains(said, "still getting there") {
+		t.Fatalf("at the end of its grace, still installing:\n%s", said)
+	}
+	if said := step(g+time.Minute, " Downloaded scipy"); strings.Contains(said, "ended") {
 		t.Fatalf("past its grace, still installing:\n%s", said)
 	}
 	if said := step(g+2*time.Minute, " Downloaded torch"); strings.Contains(said, "ended") || strings.Contains(said, "still getting there") {

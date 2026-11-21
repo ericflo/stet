@@ -153,14 +153,17 @@ func (f *Fleet) stillInstalling(ctx context.Context, w *Worker, now time.Time) b
 		// Not read a look ago (the fleet started since): one more look, to see.
 		return age > g
 	}
-	if prev == cur || age <= g {
+	// Grown since the last look: still getting there. It is given more already in the look
+	// before its grace runs out, since what is decided comes seconds after what is seen: in
+	// round 12 a Vast machine whose log had grown at 9m57s was ended at 10m02s.
+	if prev == cur {
 		return false
 	}
 	if !f.slowSaid[key] {
 		f.slowSaid[key] = true
 		last := workerLine(lines)
-		f.event(r, w.Key.Handle, "slow", fmt.Sprintf("past its grace of %s and still getting there (last it said: %s): given up to %s", g.Round(time.Minute), last, (2*g).Round(time.Minute)))
-		f.say("%s on %s is past its grace of %s, and still getting there: given up to %s (last it said: %s)", w.Key.Handle, marketTitle(r.Market), g.Round(time.Minute), (2 * g).Round(time.Minute), last)
+		f.event(r, w.Key.Handle, "slow", fmt.Sprintf("at the end of its grace of %s and still getting there (last it said: %s): given up to %s", g.Round(time.Minute), last, (2*g).Round(time.Minute)))
+		f.say("%s on %s is at the end of its grace of %s, and still getting there: given up to %s (last it said: %s)", w.Key.Handle, marketTitle(r.Market), g.Round(time.Minute), (2 * g).Round(time.Minute), last)
 	}
 	return true
 }
