@@ -23,10 +23,21 @@ import (
 // and are free, or about to be (all they hold is trained, and sitting the exam takes
 // seconds). The rest wait for those. After that anyone may take them.
 //
-// Both are the organisers' way of finishing a round soon after its exam, and touch only
-// who grades what and when: never how many grades a score wants, or whose count.
+// A machine the organisers rent is paid for by the hour, and one that has trained its grades
+// long before the exam only waits for it. So it is handed a grade before the exam only once
+// that grade, and the further ones it could still take after it up to earlyGradesPerMachine,
+// would keep it busy until no sooner than EarlyWindow before the exam is due (tooEarly). Until
+// then it is handed curators to run, if any, and nothing else, and stet-cloud ends it and rents
+// another of its kind in time. Its pass is its own, or else its GPU's, or else the slowest
+// GPU's seen at the scale: taken too short, a slow card new to the server would be turned
+// away until too late, and its round would wait; taken too long, it only waits a while. With
+// no pass seen at all it is handed grades as before.
+//
+// All of these are the organisers' way of finishing a round soon after its exam, and touch
+// only who grades what and when: never how many grades a score wants, or whose count.
 
 const (
+	earlyFetch            = 120 // seconds: fetching a round's corpus and making the scripts, before a machine's first grade of it
 	earlyGradesPerMachine = 3   // grades one machine may hold before the exam, trained and waiting
 	earlyMargin           = 120 // seconds: fetching a script and setting up, on top of a pass
 	fastFirstSeconds      = 120 // after the exam, how long a grade a score waits for is kept for faster machines
@@ -65,6 +76,35 @@ func (j *judge) more(rd *Round, q *asker, held int, pass float64) bool {
 	due := examDue(j.s, rd)
 	return q.est && q.early && !examPosted(rd) && held < earlyGradesPerMachine && pass > 0 && due > 0 &&
 		float64(j.t)+pass+earlyMargin <= float64(due)
+}
+
+// tooEarly reports whether a machine the organisers rent, holding `held` of this round's
+// grades already (all trained), would be done too soon with one more and the further ones it
+// could take after it: see above. pass is what its hello said; 0 when it did not.
+func (j *judge) tooEarly(rd *Round, q *asker, held int, pass float64) bool {
+	window := j.a.cfg.EarlyWindow.Seconds()
+	if !q.acct.Worker || window <= 0 || examPosted(rd) {
+		return false
+	}
+	due := examDue(j.s, rd)
+	if pass <= 0 {
+		pass = j.passOf(q.acct, rd.Scale)
+	}
+	if math.IsInf(pass, 1) {
+		pass = 0 // a GPU the server has no pass for: the slowest it has
+		for _, p := range j.passes[rd.Scale] {
+			pass = max(pass, p)
+		}
+	}
+	if due == 0 || pass <= 0 {
+		return false
+	}
+	work := pass // the student; the round's own was trained with the first
+	if held == 0 {
+		work = 2*pass + earlyFetch
+	}
+	work += float64(max(0, earlyGradesPerMachine-held-1)) * pass
+	return float64(j.t)+work < float64(due)-window
 }
 
 // fastFirst is what of a round's offers to a machine it may be handed, the first while after

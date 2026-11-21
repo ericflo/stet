@@ -255,3 +255,62 @@ func TestJustAfterTheExamTheGradesAScoreWaitsForGoToTheFastestMachines(t *testin
 	}
 	w.check()
 }
+
+func TestARentedMachineIsHandedGradesOnlyOnceTheyWouldKeepItBusyUntilNearTheExam(t *testing.T) {
+	pub, priv := newKey()
+	w := newWorld(t, pub)
+	w.app.cfg.EarlyWindow = 10 * time.Minute
+	anchor, alice := w.join("anchor-one", priv), w.join("alice", nil)
+	bob, carol, dave := w.rented(anchor, "bob"), w.rented(anchor, "carol"), w.join("dave", nil)
+	w.submit(alice, "one", "print('one')")
+	w.play(anchor, 1, func(string, int) float64 { return 5.5 })
+	w.examAfter(1, 2*time.Hour)
+	for _, name := range []string{"two", "three", "four", "five"} {
+		w.submit(w.join("owner-"+name, nil), name, "print('"+name+"')")
+	}
+	w.established("dave")
+	w.drawWithoutExam()
+	if n := w.editAll(anchor); n != 5 {
+		t.Fatalf("runs: %d", n)
+	}
+	if work := w.work(anchor); work.EarlyWindowSeconds != 600 {
+		t.Fatalf("the window is the server's to say: %+v", work)
+	}
+
+	// The exam is two hours off. Bob's pass is 8 minutes: his first grade and the two he could
+	// take after it would be done 34 minutes from now, long before it. Nothing for him yet.
+	if c := w.waiting(bob, "RTX 4090", 480); c.Job != nil {
+		t.Fatalf("a rented machine that would only wait: %+v", c.Job)
+	}
+	// A rented machine whose GPU has no pass yet is taken to be as slow as the slowest seen:
+	// with nothing slower than Bob's, it waits too. A machine nobody rents by the hour does not.
+	if c := w.waiting(carol, "Mystery GPU", 0); c.Job != nil {
+		t.Fatalf("an unknown GPU, as slow as the slowest seen: %+v", c.Job)
+	}
+	if c := w.waiting(dave, "RTX 4090", 480); c.Job == nil {
+		t.Fatal("a volunteer's machine takes grades as soon as there are any")
+	}
+
+	// A slow card the server has seen (30 minutes a pass) opens the window for one it has not:
+	// its three would take 122 minutes, past the window, so it is handed one at once.
+	w.waiting(w.rented(anchor, "slowpoke"), "RTX 3060", 1800)
+	if c := w.waiting(carol, "Mystery GPU", 0); c.Job == nil {
+		t.Fatal("an unknown GPU, as slow as a 3060")
+	}
+
+	// 43 minutes before the exam the three would end 9 minutes before it: in.
+	w.age(2*time.Hour - 43*time.Minute)
+	b1 := w.waiting(bob, "RTX 4090", 480)
+	if b1.Job == nil || b1.Job.Kind != "grade" {
+		t.Fatalf("bob, his window open: %+v", b1.Job)
+	}
+	// Trained at once (a test's clock stands still): the two left would end 27 minutes early.
+	if c := w.waiting(bob, "RTX 4090", 480, b1); c.Job != nil {
+		t.Fatalf("a second grade that would only wait: %+v", c.Job)
+	}
+	w.age(17 * time.Minute) // 26 minutes before the exam: they would end 10 minutes before it
+	if c := w.waiting(bob, "RTX 4090", 480, b1); c.Job == nil || c.Job.ID == b1.Job.ID {
+		t.Fatalf("bob's second grade, in its window: %+v", c.Job)
+	}
+	w.check()
+}

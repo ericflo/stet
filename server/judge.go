@@ -1367,10 +1367,11 @@ func (a *App) claim(ctx context.Context, acctID int64, h *Hello) (*Handed, error
 			}
 			states := j.states(rd)
 			closing := j.closing(states)
+			early := j.tooEarly(rd, q, held, h.PassSeconds)
 			var offers []offer
 			for _, st := range states {
 				for _, o := range j.offers(st, q, closing) {
-					if held == 0 || (o.kind == "grade" && o.required) {
+					if (held == 0 || (o.kind == "grade" && o.required)) && !(early && o.kind == "grade") {
 						offers = append(offers, o)
 					}
 				}

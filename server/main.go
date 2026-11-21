@@ -39,21 +39,25 @@ type Config struct {
 	DBKey  []byte // the durable-db deployment's signing key
 	S3     S3Config
 
-	AnchorKeys       map[string]bool
-	Scale            string
-	RoundInterval    time.Duration
-	RoundMinGap      time.Duration // a round is drawn this long after the last when an entry is waiting; 0 keeps to the interval alone
-	MaxNewPerRound   int
-	EntriesInPlay    int // entries one person may have waiting or qualifying at once
-	SubmitsPerDay    int // submissions one person may make in a day
-	LadderSize       int
-	QualifyRounds    int // rounds every entry is given
-	RatedRounds      int // rounds before an editor is ranked
-	Lease            time.Duration
-	ReplicaWait      time.Duration // how long a round waits for people who have started, and before giving up what nobody is there to do
-	EstablishAfter   int           // grades that must have agreed before an account's grades count and it may run editors
-	RunsPerEntry     int           // times each entry is run, by different people, before a third is wanted
-	ActiveWindow     time.Duration // how recently a verifier must have asked for work to be counted as around
+	AnchorKeys     map[string]bool
+	Scale          string
+	RoundInterval  time.Duration
+	RoundMinGap    time.Duration // a round is drawn this long after the last when an entry is waiting; 0 keeps to the interval alone
+	MaxNewPerRound int
+	EntriesInPlay  int // entries one person may have waiting or qualifying at once
+	SubmitsPerDay  int // submissions one person may make in a day
+	LadderSize     int
+	QualifyRounds  int // rounds every entry is given
+	RatedRounds    int // rounds before an editor is ranked
+	Lease          time.Duration
+	ReplicaWait    time.Duration // how long a round waits for people who have started, and before giving up what nobody is there to do
+	EstablishAfter int           // grades that must have agreed before an account's grades count and it may run editors
+	RunsPerEntry   int           // times each entry is run, by different people, before a third is wanted
+	ActiveWindow   time.Duration // how recently a verifier must have asked for work to be counted as around
+	// EarlyWindow: a machine the organisers rent is handed a grade before the exam only when
+	// it would have trained it, and the further grades it could take after it, no sooner
+	// than this before the exam is due (pace.go). 0 hands them out as soon as there are any.
+	EarlyWindow      time.Duration
 	FixedCrawl       *Crawl
 	RequireGithub    bool
 	GithubMinAgeDays int
@@ -134,6 +138,7 @@ func loadConfig(season *Season) (Config, error) {
 		QualifyRounds:    envInt("STET_QUALIFY_ROUNDS", 3),
 		RatedRounds:      envInt("STET_RATED_ROUNDS", 3),
 		Lease:            envDuration("STET_LEASE", 3*time.Hour),
+		EarlyWindow:      envDuration("STET_EARLY_WINDOW", 10*time.Minute),
 		ReplicaWait:      envDuration("STET_REPLICA_WAIT", 45*time.Minute),
 		EstablishAfter:   envInt("STET_ESTABLISH_AFTER", 5),
 		RunsPerEntry:     envInt("STET_RUNS_PER_ENTRY", 2),

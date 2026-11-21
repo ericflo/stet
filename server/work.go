@@ -87,6 +87,10 @@ type Work struct {
 	// GradesWanted all the same.
 	EarlyGradesPerMachine int `json:"early_grades_per_machine,omitempty"`
 	FastFirstSeconds      int `json:"fast_first_seconds,omitempty"`
+	// EarlyWindowSeconds: a machine the organisers rent is handed grades before an exam only
+	// once they, and the further ones it could take, would keep it busy until no sooner than
+	// this before the exam is due (pace.go). Absent when that is off.
+	EarlyWindowSeconds int `json:"early_window_seconds,omitempty"`
 }
 
 // work looks at what the open rounds are waiting for, through the judge's own eyes: the
@@ -95,7 +99,8 @@ type Work struct {
 // when it would be given something a score is waiting for.
 func (a *App) work(s *State) Work {
 	j := a.newJudge(s)
-	out := Work{Rounds: []WorkRound{}, Machines: []WorkMachine{}, EarlyGradesPerMachine: earlyGradesPerMachine, FastFirstSeconds: fastFirstSeconds}
+	out := Work{Rounds: []WorkRound{}, Machines: []WorkMachine{}, EarlyGradesPerMachine: earlyGradesPerMachine, FastFirstSeconds: fastFirstSeconds,
+		EarlyWindowSeconds: int(a.cfg.EarlyWindow.Seconds())}
 	fresh := &asker{acct: &Account{ID: -1, Anchor: true, Worker: true}, est: true, gpuMake: "cuda"}
 	early := &asker{acct: &Account{ID: -3, Anchor: true, Worker: true}, est: true, gpuMake: "cuda", early: true}
 	runner := &asker{acct: &Account{ID: -2, Anchor: true, Worker: true}, est: true, canEdit: true, gpuMake: "cuda"}
