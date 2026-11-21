@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -175,7 +174,7 @@ func (m *saladMarket) Offers(ctx context.Context, n Need) ([]Offer, error) {
 // way is looked for by its name.
 func (m *saladMarket) Rent(ctx context.Context, o Offer, l Launch) (*Rental, error) {
 	name := l.Name + "-" + newID()[:5]
-	env := map[string]string{"STET_MARKET": "salad", "STET_WORKER_SCRIPT": base64.StdEncoding.EncodeToString([]byte(l.Script))}
+	env := map[string]string{"STET_MARKET": "salad", "STET_WORKER_SCRIPT": gzipB64(l.Script)}
 	for k, v := range l.Env {
 		env[k] = v
 	}

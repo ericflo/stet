@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -140,7 +139,7 @@ func (m *liumMarket) Rent(ctx context.Context, o Offer, l Launch) (*Rental, erro
 	}
 	// A Lium container's own disk is a few GB, most of it the image's: stet, its libraries
 	// and what it fetches go on the pod's volume, /workspace.
-	env := map[string]string{"STET_MARKET": "lium", "STET_WORKER_SCRIPT": base64.StdEncoding.EncodeToString([]byte(l.Script)),
+	env := map[string]string{"STET_MARKET": "lium", "STET_WORKER_SCRIPT": gzipB64(l.Script),
 		"STET_WORKER_HOME": "/workspace/root", "STET_WORKER_OPT": "/workspace/opt/stet"}
 	for k, v := range l.Env {
 		env[k] = v

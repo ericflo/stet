@@ -555,7 +555,7 @@ func TestLiumRentsWithATemplateOfItsOwn(t *testing.T) {
 	json.Unmarshal([]byte(fm.bodies[0]), &raw)
 	json.Unmarshal([]byte(fm.bodies[0]), &tpl)
 	if fmt.Sprint(raw["volumes"]) != "[/workspace]" || raw["docker_image"] != liumImage || raw["startup_commands"] != liumCommand || !tpl.Once || !tpl.Private ||
-		tpl.Env["STET_MARKET"] != "lium" || tpl.Env["STET_WORKER_HOME"] != "/workspace/root" || tpl.Env["STET_API"] != "https://api.stet.test" || tpl.Env["STET_WORKER_SCRIPT"] != "ZWNobyBoaQ==" {
+		tpl.Env["STET_MARKET"] != "lium" || tpl.Env["STET_WORKER_HOME"] != "/workspace/root" || tpl.Env["STET_API"] != "https://api.stet.test" || tpl.Env["STET_WORKER_SCRIPT"] != gzipB64("echo hi") {
 		t.Fatalf("the template: %s", fm.bodies[0])
 	}
 	var rent map[string]any
@@ -583,7 +583,7 @@ func TestTheWorkerCommandStartsTheScriptFromItsEnvironment(t *testing.T) {
 	dir := t.TempDir()
 	cmd := strings.ReplaceAll(workerCommand, "/root/", dir+"/")
 	c := exec.Command("sh", "-c", cmd)
-	c.Env = []string{"PATH=/usr/bin:/bin", "STET_WORKER_SCRIPT=" + base64.StdEncoding.EncodeToString([]byte("echo started $STET_API"))}
+	c.Env = []string{"PATH=/usr/bin:/bin", "STET_WORKER_SCRIPT=" + gzipB64("echo started $STET_API")}
 	c.Env = append(c.Env, "STET_API=x")
 	out, err := c.CombinedOutput()
 	if err != nil || strings.TrimSpace(string(out)) != "started x" {
@@ -621,7 +621,7 @@ func TestSaladRentsAContainerGroupOfOne(t *testing.T) {
 	json.Unmarshal([]byte(fm.bodies[0]), &g)
 	c := g.Container
 	if g.DisplayName != "stet-rp-04" || g.Replicas != 1 || g.Restart != "never" || c.Priority != "high" || c.Image != "ubuntu:24.04" ||
-		strings.Join(c.Command, "|") != "bash|-c|"+workerInner || c.Env["STET_MARKET"] != "salad" || c.Env["STET_WORKER_SCRIPT"] != "ZWNobyBoaQ==" ||
+		strings.Join(c.Command, "|") != "bash|-c|"+workerInner || c.Env["STET_MARKET"] != "salad" || c.Env["STET_WORKER_SCRIPT"] != gzipB64("echo hi") ||
 		c.Resources.CPU != 6 || c.Resources.Memory != 16384 || c.Resources.GPUClasses[0] != "ed563892-aacd-40f5-80b7-90c9be6c759b" || c.Resources.Storage != 100<<30 {
 		t.Fatalf("asked for %s", fm.bodies[0])
 	}

@@ -525,13 +525,13 @@ func errorDetail(data []byte) string {
 
 // --- shared helpers --------------------------------------------------------------------------------
 
-// workerCommand starts worker.sh from the environment, where it is kept base64'd in
-// STET_WORKER_SCRIPT, on a market whose start command is one line: as the container's only
-// process, which never exits.
+// workerCommand starts worker.sh from the environment, where it is kept gzipped and base64'd in
+// STET_WORKER_SCRIPT (gzipB64: Lium refuses a long value), on a market whose start command is
+// one line: as the container's only process, which never exits.
 const workerCommand = `bash -c "` + workerInner + `"`
 
 // workerInner is what bash -c is given to start it.
-const workerInner = `echo $STET_WORKER_SCRIPT | base64 -d > /root/stet-worker.sh && exec bash /root/stet-worker.sh`
+const workerInner = `echo $STET_WORKER_SCRIPT | base64 -d | gunzip > /root/stet-worker.sh && exec bash /root/stet-worker.sh`
 
 // sshKey is the public key a market that will have one is given: --ssh's, or this machine's
 // own, so that a machine there can be looked into.
