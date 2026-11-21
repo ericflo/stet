@@ -731,6 +731,12 @@ func (f *Fleet) choices(ctx context.Context, long, all bool) ([]Offer, error) {
 	return out, err
 }
 
+// offersWithin is the most a market is waited for to say what it offers, its tries again
+// included. Offers are asked before the machines that failed are ended, and what they held
+// handed back: in round 10 RunPod's catalog took 4 minutes, four tries of a minute, while a
+// machine its host had taken offline held 2 grades.
+var offersWithin = 30 * time.Second
+
 func (f *Fleet) choicesNow(ctx context.Context, long, all bool) ([]Offer, error) {
 	if err := f.refresh(); err != nil {
 		return nil, err
@@ -765,7 +771,9 @@ func (f *Fleet) choicesNow(ctx context.Context, long, all bool) ([]Offer, error)
 		if !all && !f.armed(m.Name()) && !(m.Name() == f.o.Market && m.Caps().Rents) {
 			continue
 		}
-		got, err := m.Offers(ctx, f.needOn(m))
+		octx, cancel := context.WithTimeout(ctx, offersWithin)
+		got, err := m.Offers(octx, f.needOn(m))
+		cancel()
 		if err != nil {
 			f.offerErrs[m.Name()] = err
 			continue

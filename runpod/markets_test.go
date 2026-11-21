@@ -783,3 +783,32 @@ func TestCuratorsRunWhereTheyWereLet(t *testing.T) {
 		t.Fatalf("curators on Vast after they were stopped: %v", err)
 	}
 }
+
+// A market slow to say what it offers is waited for only so long: the others' offers are had,
+// and it is passed over this time.
+func TestASlowMarketIsNotWaitedForLong(t *testing.T) {
+	rp, st := newFakeRunPod(t), newFakeStet(t)
+	f, out := testFleet(t, rp, st, 1)
+	slow := newFakeMarket(t, "Authorization", "Bearer vast-key")
+	slow.srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-time.After(1500 * time.Millisecond):
+		}
+	})
+	f.markets = append(f.markets, newVast(slow.srv.URL, "vast-key"))
+	if err := (&Arming{Armed: map[string]Armed{"runpod": {}, "vast": {At: 1}}}).save(f.o.Home); err != nil {
+		t.Fatal(err)
+	}
+	was := offersWithin
+	offersWithin = 200 * time.Millisecond
+	t.Cleanup(func() { offersWithin = was })
+	start := time.Now()
+	got, err := f.choicesNow(context.Background(), false, false)
+	if took := time.Since(start); err != nil || len(got) == 0 || took > time.Second {
+		t.Fatalf("%d offers in %s (%v)\n%s", len(got), took, err, out)
+	}
+	if f.offerErrs["vast"] == nil {
+		t.Fatal("the slow market was not passed over")
+	}
+}
