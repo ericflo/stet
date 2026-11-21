@@ -191,15 +191,21 @@ type podRecord struct {
 	// Gone: the market stopped listing it, or stopped it, without the fleet ending it.
 	Gone bool `json:"gone,omitempty"`
 	// Why it ended, as the fleet said it, and the cause when it failed (seen.go).
-	Why    string    `json:"why,omitempty"`
-	Cause  string    `json:"cause,omitempty"`
-	Handle string    `json:"handle"`
-	GPU    string    `json:"gpu"`
-	Cloud  string    `json:"cloud"`
-	Cost   float64   `json:"cost"`
-	Start  time.Time `json:"start"`
-	Alive  time.Time `json:"alive"` // last seen running
-	End    time.Time `json:"end,omitzero"`
+	Why   string `json:"why,omitempty"`
+	Cause string `json:"cause,omitempty"`
+	// The host it is on and its CPU, where its market says; whether it was rented to run
+	// curators; and, if the server would not hand it any, why (curators.go).
+	Host     string    `json:"host,omitempty"`
+	CPU      string    `json:"cpu,omitempty"`
+	Curators bool      `json:"curators,omitempty"`
+	Refused  string    `json:"refused,omitempty"`
+	Handle   string    `json:"handle"`
+	GPU      string    `json:"gpu"`
+	Cloud    string    `json:"cloud"`
+	Cost     float64   `json:"cost"`
+	Start    time.Time `json:"start"`
+	Alive    time.Time `json:"alive"` // last seen running
+	End      time.Time `json:"end,omitzero"`
 }
 
 func (r *podRecord) market() string {
@@ -592,6 +598,13 @@ func (f *Fleet) look(ctx context.Context) (*View, error) {
 					rec.Asked, asked = true, true
 					f.event(w.Rental, k.Handle, "asked", fmt.Sprintf("first asked for work %s after it was rented", time.Unix(w.Machine.LastSeen, 0).Sub(w.Rental.Created).Round(time.Second)))
 				}
+				if why, no := w.Machine.refusedCurators(w.Rental.Created); no && rec.Curators {
+					w.NoCurators = why
+					if rec.Refused == "" {
+						rec.Refused, asked = why, true
+						f.noCurators(w.Rental, rec, why)
+					}
+				}
 			}
 			w.Grace, w.Speed = f.grace(w.Rental.Market), f.speedOf(w.Rental.Card)
 			if m := f.market(w.Rental.Market); m != nil && !m.Caps().SelfEnd {
@@ -918,10 +931,15 @@ func (f *Fleet) launchSome(ctx context.Context, v *View, n int, long, cheap bool
 		byGrade(gpus, f.speedOf)
 	}
 	if cheap && f.o.Edits && f.probe == "" {
-		// Machines to run curators, only where stet's container sandbox is known to hold.
+		// Machines to run curators, only where stet's container sandbox is known to hold, and
+		// not on a host or a CPU that was under the season's floor this week.
+		refused, err := f.readRefusals()
+		if err != nil {
+			f.say("where curators may not run is not known (%v): every host is tried", err)
+		}
 		var held []Offer
 		for _, c := range gpus {
-			if f.curators(c.Market) {
+			if _, no := refused.refused(c, f.now()); f.curators(c.Market) && !no {
 				held = append(held, c)
 			}
 		}
@@ -1090,7 +1108,8 @@ func (f *Fleet) rent(ctx context.Context, v *View, k *Key, gpus []Offer, site st
 		if c.Market == "runpod" {
 			cloud = cloudOf(c)
 		}
-		rec := &podRecord{ID: r.ID, Market: r.Market, Handle: k.Handle, GPU: c.Card, Cloud: cloud, Cost: r.Price, Start: f.now(), Alive: f.now(), Tracked: true}
+		rec := &podRecord{ID: r.ID, Market: r.Market, Handle: k.Handle, GPU: c.Card, Cloud: cloud, Cost: r.Price, Start: f.now(), Alive: f.now(), Tracked: true,
+			Host: c.Host, CPU: c.CPU, Curators: l.Env["STET_WORKER_EDITS"] == "1"}
 		plan := ""
 		if grades != nil {
 			if g := grades(c); g > 1 {

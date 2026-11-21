@@ -427,3 +427,29 @@ These keep their meaning:
 
 **Not yet tested on the new markets:** an actual grade (nothing was waiting); curators (grade-only until `tools/cage_check.py` holds there); Salad's driver check on an old driver (this host's was new enough). Each market is armed only with Eric's approval, one at a time (§9 step 5): Vast first.
 
+
+## 15. Curators and the season's floor (round 9, 2026-11-21)
+
+**What happened:**
+- At the 12:20 draw, the fleet rented its two curator machines on the curator markets: a Vast RTX 5080 at $0.22/h (host CPU an AMD EPYC 7K62) and a Clore RTX 5080 at $0.21/h (an Intel Xeon E5-2680 v4).
+- Both asked for work and got none while 8 runs waited.
+- The Vast machine's log said why: `the CPU is slower than the floor (95 MB a second; the floor is 100)`.
+- `stet verify --edits` refuses itself on a machine under the season's floor (`stet bench`: GPU, memory, and a text-processing mix on six processes at once). The worker then grades only.
+- The fleet counted it as a curator machine all the same. It rented the same host again when the first ended itself.
+- At 12:47 curators were turned off on Vast and Clore. RunPod 4090s ran the curators from 12:50, 27 minutes late.
+
+**Why the probes missed it:** `cage_check` proves the sandbox, not the floor. The cheapest hosts on both markets are old server CPUs, and a market's cheapest host is what the fleet rents first.
+
+**The fix, with stet-dc (one batch):**
+- The server says, for each machine in `/admin/work`, whether it could be handed curators as it last asked (`curators`), and if not, why (`curators_why`: the floor's shortfalls, e.g. `CPU 95 MB/s, floor 100`).
+- Client 0.4.5 sends its saved bench on plain `stet verify` too, so a machine that refused itself still says why.
+- The same batch adds `failed`, `refused` and `trouble` per machine: jobs it handed back or let lapse, results the server refused, and the latest one's reason. The counts reset at the fleet's release.
+- **Fleet:** a machine rented with curators allowed that the server says can't run them:
+  - grades only (status: `grades only: …`, journal event `no curators`);
+  - is ended while only curators want machines (no posted grade, no early grade in its window, no student), so a machine that can run them takes its place.
+  - Its host is not rented for curators for a week. Nor is its CPU model, if the shortfall was the CPU's speed (`curators.json`; CPU names compared across markets, so `Xeon® E5-2680 v4` and `Intel(R) Xeon(R) CPU E5-2680 v4 @ 2.40GHz` are the same).
+  - Offers now carry `Host` and `CPU` where the market says: Vast `machine_id` and `cpu_name`, Clore server ID and `specs.cpu`.
+- Vast's 400 `no_such_ask` (an ask gone between search and rent) counts as no room, so the next Vast offer is tried instead of passing over Vast.
+- Failed and refused jobs are journal events (`trouble`) and appear on the status line.
+
+**Order:** server and fleet ship in the same gap between rounds. Curators go back on for Vast and Clore once both are live.

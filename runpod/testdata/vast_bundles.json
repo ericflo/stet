@@ -2,6 +2,8 @@
  "offers": [
   {
    "id": 50121277,
+   "machine_id": 34619,
+   "cpu_name": "Core™ i5-14600KF",
    "gpu_name": "RTX 3060",
    "gpu_ram": 12288,
    "num_gpus": 1,
@@ -22,6 +24,8 @@
   },
   {
    "id": 61536954,
+   "machine_id": 155716,
+   "cpu_name": "AMD Ryzen 5 7600X 6-Core Processor",
    "gpu_name": "RTX 3060",
    "gpu_ram": 12288,
    "num_gpus": 1,
@@ -42,6 +46,8 @@
   },
   {
    "id": 61568486,
+   "machine_id": 155716,
+   "cpu_name": "AMD Ryzen 5 7600X 6-Core Processor",
    "gpu_name": "RTX 3060",
    "gpu_ram": 12288,
    "num_gpus": 1,
@@ -62,6 +68,8 @@
   },
   {
    "id": 52063421,
+   "machine_id": 109235,
+   "cpu_name": "Xeon® E5-2690 v4 ",
    "gpu_name": "RTX 2060",
    "gpu_ram": 12288,
    "num_gpus": 1,
@@ -82,6 +90,8 @@
   },
   {
    "id": 44053844,
+   "machine_id": 157631,
+   "cpu_name": "AMD EPYC 7K62 48-Core Processor",
    "gpu_name": "RTX 5060 Ti",
    "gpu_ram": 16311,
    "num_gpus": 1,
@@ -102,6 +112,8 @@
   },
   {
    "id": 60749257,
+   "machine_id": 42541,
+   "cpu_name": "AMD Ryzen 9 9900X 12-Core Processor",
    "gpu_name": "RTX 4090",
    "gpu_ram": 24564,
    "num_gpus": 1,
@@ -122,6 +134,8 @@
   },
   {
    "id": 48398491,
+   "machine_id": 153491,
+   "cpu_name": "AMD EPYC 7452 32-Core Processor",
    "gpu_name": "RTX 4080S",
    "gpu_ram": 16376,
    "num_gpus": 1,

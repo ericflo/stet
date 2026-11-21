@@ -231,6 +231,48 @@ type Machine struct {
 	Holding     int     `json:"holding,omitempty"`
 	Ready       bool    `json:"ready,omitempty"`
 	PassSeconds float64 `json:"pass_seconds,omitempty"`
+	// Whether, as it last asked, it could be handed curators to run, and if not, why: the
+	// server's reason, or the part of the season's floor its own measurement fell under (nil:
+	// the server does not say).
+	Curators    *bool  `json:"curators,omitempty"`
+	CuratorsWhy string `json:"curators_why,omitempty"`
+	// Of the jobs it claimed since the fleet last released its key (within a day): those it
+	// handed back for want of finishing them, or let lapse; those whose result the server
+	// refused; and the latest one's reason.
+	Failed  int    `json:"failed,omitempty"`
+	Refused int    `json:"refused,omitempty"`
+	Trouble string `json:"trouble,omitempty"`
+}
+
+// trouble says what went wrong with the jobs it claimed, as the server counts them ("": none).
+func (m *Machine) trouble() string {
+	if m == nil || m.Failed+m.Refused == 0 {
+		return ""
+	}
+	var parts []string
+	if m.Failed > 0 {
+		parts = append(parts, fmt.Sprintf("%d handed back or lapsed", m.Failed))
+	}
+	if m.Refused > 0 {
+		parts = append(parts, fmt.Sprintf("%d results refused", m.Refused))
+	}
+	s := strings.Join(parts, ", ")
+	if m.Trouble != "" {
+		s += "; the latest: " + m.Trouble
+	}
+	return s
+}
+
+// refusedCurators says whether the server would not hand a machine rented at created
+// curators to run, as it last asked, and why.
+func (m *Machine) refusedCurators(created time.Time) (string, bool) {
+	if m == nil || m.Curators == nil || *m.Curators || m.LastSeen < created.Unix() {
+		return "", false
+	}
+	if m.CuratorsWhy == "" {
+		return "the server would not hand it curators to run", true
+	}
+	return m.CuratorsWhy, true
 }
 
 func (w *Work) machine(handle string) *Machine {

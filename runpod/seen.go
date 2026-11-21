@@ -52,8 +52,8 @@ func (f *Fleet) event(r *Rental, handle, what, detail string) {
 
 // seenRental is what was last seen of a machine, to say only what changes.
 type seenRental struct {
-	phase, state, work string
-	upFor              time.Duration
+	phase, state, work, trouble string
+	upFor                       time.Duration
 }
 
 // watch notes what changed of a machine since the last look.
@@ -76,6 +76,7 @@ func (f *Fleet) watch(w *Worker, now time.Time) {
 		if w.Machine.Ready {
 			cur.work += ", trained and waiting for the exam"
 		}
+		cur.trouble = w.Machine.trouble()
 	}
 	if cur.phase != "" && (!had || prev.phase != cur.phase) {
 		detail := r.Phase
@@ -92,6 +93,9 @@ func (f *Fleet) watch(w *Worker, now time.Time) {
 	}
 	if cur.work != "" && had && prev.work != cur.work {
 		f.event(r, w.Key.Handle, "work", cur.work)
+	}
+	if cur.trouble != "" && prev.trouble != cur.trouble {
+		f.event(r, w.Key.Handle, "trouble", cur.trouble)
 	}
 	f.seen[key] = cur
 }

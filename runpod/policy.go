@@ -212,6 +212,23 @@ type Worker struct {
 	// the first exam's window for early grades (zero: no window): one waiting for work
 	// before then, when nothing else wants it, is ended, and another rented in time.
 	Window time.Time
+	// NoCurators is why the server would not hand it curators to run, rented to run them
+	// ("": it would, or it was not): it grades only (curators.go).
+	NoCurators string
+}
+
+// gradeFor says whether something other than a curator wants a machine now: a grade of a posted
+// exam, an early grade whose window has opened for its kind, or a student to train.
+func (p Policy) gradeFor(w *Work, wk *Worker, now time.Time) bool {
+	if w.FarmWaiting > 0 || (p.LongFarm && w.FarmLongWaiting > 0) {
+		return true
+	}
+	for _, r := range w.Rounds {
+		if r.GradesWanted > 0 {
+			return true
+		}
+	}
+	return p.earlyWanted(w, now) > 0 && (wk.Window.IsZero() || !now.Before(wk.Window))
 }
 
 // tooEarly are the machines waiting for work whose window for the first exam's early grades
@@ -383,6 +400,12 @@ func (p Policy) decideNext(w *Work, workers []*Worker, spentToday float64, now t
 		case "waiting":
 			if ending[wk] {
 				d.End = append(d.End, Ending{Worker: wk, Why: fmt.Sprintf("too early for the exam's grades: a machine of its kind is rented again in time, from %s UTC", wk.Window.UTC().Format("15:04"))})
+				continue
+			}
+			if wk.NoCurators != "" && p.runners(w) > 0 && !p.gradeFor(w, wk, now) {
+				// Rented to run curators, and it may not: it would only wait, and stand in the
+				// place of one that may.
+				d.End = append(d.End, Ending{Worker: wk, Why: "it may not run curators (" + wk.NoCurators + "), and no grade wants it yet"})
 				continue
 			}
 			d.Live++

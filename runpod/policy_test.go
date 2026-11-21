@@ -486,3 +486,42 @@ func TestAMachineWaitingTooEarlyIsEnded(t *testing.T) {
 		t.Fatalf("ended %s with curators to run", handles(d.End))
 	}
 }
+
+// A machine rented to run curators that may not run them is ended while only curators want
+// machines, so that one that may is rented in its place; a grade it could take keeps it.
+func TestAMachineThatMayNotRunCuratorsMakesWayForOneThatMay(t *testing.T) {
+	p := testPolicy()
+	p.PerWorker, p.MaxWorkers, p.Edits = 1, 20, true
+	work := func() *Work {
+		return &Work{Rounds: []WorkRound{{ID: "s1-o00009", Entries: 8, RunsWanted: 8, RunsWaiting: 8}}}
+	}
+	const why = "under the season's floor for running curators: CPU 95 MB/s, floor 100"
+	w := work()
+	ws := pool(w, "waiting", "running", "free", "free")
+	ws[0].NoCurators = why
+	d := p.decideNext(w, ws, 0, t0, 1)
+	if handles(d.End) != "stet-rp-01" || !strings.Contains(d.End[0].Why, "may not run curators ("+why+")") || d.End[0].Failed {
+		t.Fatalf("ended %s (%+v)", handles(d.End), d.End)
+	}
+	if d.Launch != 1 || d.LaunchRuns != 1 {
+		t.Fatalf("rented %d, %d of them to run curators, in its place", d.Launch, d.LaunchRuns)
+	}
+	// A grade of a posted exam wants it: it is kept, and grades.
+	w = work()
+	w.Rounds[0].GradesWanted = 3
+	ws = pool(w, "waiting", "running", "free", "free")
+	ws[0].NoCurators = why
+	if d := p.decideNext(w, ws, 0, t0, 1); len(d.End) != 0 {
+		t.Fatalf("ended %s with a grade for it", handles(d.End))
+	}
+	// So does an early grade, once its window has opened, and not before.
+	w = work()
+	w.Rounds[0].GradesEarly, w.Rounds[0].ExamDue, w.EarlyGradesPerMachine, w.EarlyWindowSeconds = 6, t0.Add(30*time.Minute).Unix(), 3, 600
+	p.Early = 2 * time.Hour
+	ws = pool(w, "waiting", "waiting", "free")
+	ws[0].NoCurators, ws[1].NoCurators = why, why
+	ws[0].Window, ws[1].Window = t0.Add(-time.Minute), t0.Add(20*time.Minute)
+	if d := p.decideNext(w, ws, 0, t0, 1); handles(d.End) != "stet-rp-02" {
+		t.Fatalf("ended %s", handles(d.End))
+	}
+}

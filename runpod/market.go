@@ -85,6 +85,10 @@ type Offer struct {
 	CUDA     string  // the newest CUDA the host's driver takes, where the market says
 	Trust    string  // the market's word for its hosts: secure, verified, datacenter, community
 	Region   string
+	// The host it is on and its CPU, where the market says: a machine runs curators only on a
+	// CPU at the season's floor, which some hosts' are not (curators.go).
+	Host string
+	CPU  string
 	// Rate is how often a machine of this kind has been seen to start, of those rented (0: not
 	// known, taken as all): what it costs is ranked as its price over this.
 	Rate float64

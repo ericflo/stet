@@ -185,6 +185,7 @@ In `~/.config/stet-runpod` (`STET_RUNPOD_HOME`):
 | `workers/*.json` | The pool's keys, in stet's own key format. Back them up with the rest, or make new ones |
 | `fleet.json` | The pods rented now, and when each was last seen running |
 | `spent.jsonl` | Every pod that has ended: GPU, dollars an hour, start, end |
+| `curators.json` | Hosts, and CPU models, under the season's floor for running curators this week: none is rented to run them |
 
 RunPod forgets a pod once it ends and does not say what it cost, so what was spent is
 worked out from these, and is an estimate. RunPod's billing page is the account.

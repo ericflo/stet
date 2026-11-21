@@ -179,6 +179,12 @@ func cmdStatus(ctx context.Context, f *Fleet) error {
 		if st == "starting" || st == "stopped" || st == "quiet" || w.Rental.Up == "no" {
 			note = "  · " + w.Rental.Detail // what its market says of it, while it is not at work
 		}
+		if w.NoCurators != "" {
+			note += "  · grades only: " + w.NoCurators
+		}
+		if t := w.Machine.trouble(); t != "" && w.Machine.LastSeen >= w.Rental.Created.Unix() {
+			note += "  · " + t
+		}
 		fmt.Fprintf(f.out, "  %-14s %-8s %-26s $%.2f/h  up %s%s\n", w.Key.Handle, st, card, w.Rental.Price, now.Sub(w.Rental.Created).Round(time.Minute), note)
 	}
 	if rented == 0 {

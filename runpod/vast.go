@@ -47,6 +47,8 @@ type vastOffer struct {
 	HostingType  int     `json:"hosting_type"` // 1: a data centre
 	Geolocation  string  `json:"geolocation"`
 	GPUArch      string  `json:"gpu_arch"`
+	MachineID    int64   `json:"machine_id"`
+	CPUName      string  `json:"cpu_name"`
 }
 
 // vastNames are Vast's names for cards whose names elsewhere differ from them.
@@ -56,6 +58,14 @@ var vastNames = map[string]string{
 	"RTX 5000Ada": "RTX 5000 Ada Generation", "RTX 6000Ada": "RTX 6000 Ada Generation",
 	"RTX PRO 6000 WS": "RTX PRO 6000 Blackwell Workstation Edition", "RTX PRO 6000 S": "RTX PRO 6000 Blackwell Server Edition",
 	"RTX PRO 4000": "RTX PRO 4000 Blackwell", "RTX PRO 4500": "RTX PRO 4500 Blackwell", "RTX PRO 5000": "RTX PRO 5000 Blackwell",
+}
+
+// vastHost is the machine an offer is on, as Vast numbers it ("": not said).
+func vastHost(id int64) string {
+	if id <= 0 {
+		return ""
+	}
+	return strconv.FormatInt(id, 10)
 }
 
 func vastCard(name string) string {
@@ -121,6 +131,7 @@ func (m *vastMarket) Offers(ctx context.Context, n Need) ([]Offer, error) {
 			Market: "vast", Card: vastCard(o.GPUName), Model: o.GPUName, Name: o.GPUName, ID: strconv.FormatInt(o.ID, 10),
 			Maker: "NVIDIA", MemoryGB: int(math.Round(o.GPURAM / 1024)), Price: vastPrice(o, n), Stock: 1,
 			CUDA: strconv.FormatFloat(o.CUDAMaxGood, 'f', -1, 64), Trust: trust, Region: o.Geolocation,
+			Host: vastHost(o.MachineID), CPU: strings.TrimSpace(o.CPUName),
 		})
 	}
 	return offers, nil
@@ -151,7 +162,8 @@ func (m *vastMarket) Rent(ctx context.Context, o Offer, l Launch) (*Rental, erro
 			Price: o.Price, State: "starting", Status: "created", Created: time.Now()}, nil
 	case err == nil:
 		return nil, fmt.Errorf("Vast.ai answered %d to a new instance, without one: %s", status, out.Msg)
-	case status == 404 || status == 410:
+	case status == 404 || status == 410 || (status == 400 && strings.Contains(err.Error(), "no_such_ask")):
+		// Gone between the search and the rent: Vast says so with a 400 too.
 		return nil, fmt.Errorf("%w (%v)", errNoRoom, err)
 	case status == 0 || status >= 500:
 		if rs, lerr := m.Rentals(ctx); lerr == nil {
