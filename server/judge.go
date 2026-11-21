@@ -1064,12 +1064,14 @@ func (j *judge) offers(st *entryState, q *asker, closing bool) []offer {
 			// when two disagree. A script that two runs wrote wants two, from two people:
 			// it is the entry's only script, and one grade of it would be one machine's
 			// word for the whole score. Beyond that an established account replicates,
-			// like anyone.
-			o.required = counting == 0 && j.wanting(sc)
+			// like anyone, but only before the exam: a replica taken then trains while the
+			// exam is made, and one taken after it would hold the round for as long as it
+			// trained.
+			o.required = counting < j.short(sc)
 			switch spare := j.spare(st, q); {
 			case o.required && spare && j.unspared(st, sc, q.acct):
 				// Somebody who cannot give the entry a run can give it this grade.
-			case o.required || (!closing && !spare && under < 1+maxReplicas):
+			case o.required || (!examPosted(st.Round) && !spare && under < 1+maxReplicas):
 				out = append(out, o)
 			}
 		default:
@@ -1145,10 +1147,10 @@ func (j *judge) settleable(st *entryState) bool {
 
 // closing reports whether a round is past handing out grades no score waits for: it could
 // settle now, or every entry has all the grades it waits for, whatever further ones are
-// still under way, or all that is left of them is sitting the exam. A grade handed out
-// after that could only hold the round back: one handed out now trains for many minutes,
-// and while it did, the next machine to come free would be handed another to wait for.
-// Before the exam, a grade handed out has until it is posted to train.
+// still under way, or all that is left of them is sitting the exam. An established account
+// is handed no such grade after the exam anyway (offers); past this, nor is anyone else,
+// since the round would settle before it was done. Before the exam, a grade handed out
+// has until it is posted to train.
 func (j *judge) closing(states []*entryState) bool {
 	if j.ready(states) {
 		return true

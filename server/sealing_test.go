@@ -719,18 +719,21 @@ func TestAStrikeNeedsSomethingSolidToBeMeasuredAgainst(t *testing.T) {
 			}
 		}
 		w.established(names...)
-		idx := w.draw()
+		idx := w.drawWithoutExam()
 		w.run(anchor, scriptOne)
+		// They all take the script while the exam is made: after it, a round hands out only
+		// the grades its scores wait for.
 		jobs := map[string]*claimed{}
 		for _, name := range names {
-			if jobs[name] = w.claim(graders[name], false); jobs[name].Job == nil {
+			if jobs[name] = w.claimEarly(graders[name]); jobs[name].Job == nil {
 				t.Fatalf("no grade for %s", name)
 			}
 		}
-		cr := w.claim(rita, false)
+		cr := w.claimEarly(rita)
 		if cr.Job == nil {
 			t.Fatal("no script for a volunteer who is not established to replicate")
 		}
+		w.exam(idx)
 		if code, status := w.report(rita, cr, 5.5); code != 200 {
 			t.Fatal(status)
 		}

@@ -26,18 +26,18 @@ func TestTheSiteReadsInBitsPerByte(t *testing.T) {
 		t.Fatalf("the open round does not say it waits for its exam: HTTP %d", code)
 	}
 	w.established("bob", "carol")
-	if code, msg := w.postExam(anchor, idx, testTable()); code != 200 {
-		t.Fatalf("posting the exam: HTTP %d %s", code, msg)
-	}
-	// Both take the script before either reports; their baselines differ a little.
+	// Both take the script while the exam is made; their baselines differ a little.
 	n := len(testTable())
 	var jobs []*claimed
 	for _, a := range []*actor{bob, carol} {
-		c := w.claim(a, false)
+		c := w.claimEarly(a)
 		if c.Job == nil || c.Job.Kind != "grade" {
 			t.Fatalf("%s has no grade job: %+v", a.handle, c.Job)
 		}
 		jobs = append(jobs, c)
+	}
+	if code, msg := w.postExam(anchor, idx, testTable()); code != 200 {
+		t.Fatalf("posting the exam: HTTP %d %s", code, msg)
 	}
 	for i, a := range []*actor{bob, carol} {
 		if code := a.do("POST", fmt.Sprintf("/api/v1/jobs/%d/result", jobs[i].Job.ID), w.examResult(jobs[i], n, 0.1-0.02*float64(i), -3+0.02*float64(i)), nil); code != 200 {

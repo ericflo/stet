@@ -65,12 +65,24 @@ func TestTheExamIsGradedOnceItIsPostedAndScoredAgainstTheRoundsBaseline(t *testi
 	if code, _ := w.postExam(anchor, idx, bad); code != 400 {
 		t.Fatalf("an exam with a pillar the season does not have: HTTP %d", code)
 	}
+	// A verifier that trains before the exam takes the script while it is made, and carol
+	// takes it too, as a replica.
+	early := w.claimEarly(bob)
+	if early.Job == nil || early.Job.Kind != "grade" || early.Job.Round["exam_digest"] != nil {
+		t.Fatalf("bob should be grading, with no exam yet: %+v", early.Job)
+	}
+	carol := w.join("carol", nil)
+	w.established("carol")
+	ca := w.claimEarly(carol)
+	if ca.Job == nil || ca.Job.Kind != "grade" {
+		t.Fatalf("carol should be grading: %+v", ca.Job)
+	}
 	if code, msg := w.postExam(anchor, idx, table); code != 200 {
 		t.Fatalf("posting the exam: HTTP %d %s", code, msg)
 	}
-	// Grades start: the job carries the exam's digest, and the grader may fetch the exam.
+	// Grades go on: the job now carries the exam's digest, and the grader may fetch the exam.
 	cb := w.claim(bob, false)
-	if cb.Job == nil || cb.Job.Kind != "grade" || cb.Job.Round["exam_digest"] != examSHA {
+	if cb.Job == nil || cb.Job.ID != early.Job.ID || cb.Job.Kind != "grade" || cb.Job.Round["exam_digest"] != examSHA {
 		t.Fatalf("no grade job with the exam's digest: %+v", cb.Job)
 	}
 	if code := bob.do("GET", fmt.Sprintf("/api/v1/rounds/%s/exam", roundID(w.app.season.ID, idx)), nil, nil); code != 200 {
@@ -79,13 +91,6 @@ func TestTheExamIsGradedOnceItIsPostedAndScoredAgainstTheRoundsBaseline(t *testi
 	dave := w.join("dave", nil)
 	if code := dave.do("GET", fmt.Sprintf("/api/v1/rounds/%s/exam", roundID(w.app.season.ID, idx)), nil, nil); code != 403 {
 		t.Fatalf("an account with no grade job fetched the exam: HTTP %d", code)
-	}
-	// Carol takes the script too, before either reports.
-	carol := w.join("carol", nil)
-	w.established("carol")
-	ca := w.claim(carol, false)
-	if ca.Job == nil || ca.Job.Kind != "grade" {
-		t.Fatalf("carol should be grading: %+v", ca.Job)
 	}
 	// A report that is not one score for each item is refused.
 	short := w.examResult(cb, len(table)-1, 0.1, -3)

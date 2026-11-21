@@ -414,6 +414,14 @@ func (w *world) claimWith(a *actor, hello map[string]any) *claimed {
 	return &c
 }
 
+// claimEarly asks for work as a verifier that trains before the exam (stet 0.4.3 and later).
+func (w *world) claimEarly(a *actor) *claimed {
+	w.t.Helper()
+	h := w.hello(false)
+	h["early"] = true
+	return w.claimWith(a, h)
+}
+
 // corpusSHA is the round every test machine builds, and examSHA the digest of the exam every
 // round is given (testExam).
 var corpusSHA, examSHA = strings.Repeat("c0", 32), strings.Repeat("d1", 32)
@@ -3439,10 +3447,11 @@ func TestOnlyAnEstablishedAccountOnAMachineUpToTheFloorIsHandedEditors(t *testin
 	w.check()
 }
 
-// A round waits for the grades it has handed out, but once every score has the grades it
-// waits for it hands out no more: each would hold the round back, and while it did, the
-// next machine to come free would be handed another to wait for.
-func TestARoundHandsOutNoFurtherGradesOnceItsScoresHaveThem(t *testing.T) {
+// After its exam a round hands out only the grades its scores wait for. Any other would
+// hold the round back for as long as it trained, and while it did, the next machine to
+// come free would be handed another to wait for. A script that two runs wrote waits for
+// two grades, and both go out at once.
+func TestAfterItsExamARoundHandsOutOnlyTheGradesItsScoresWaitFor(t *testing.T) {
 	pub, priv := newKey()
 	w := newWorld(t, pub)
 	anchor, alice, bob, carol, dave := w.join("anchor-one", priv), w.join("alice", nil), w.join("bob", nil), w.join("carol", nil), w.join("dave", nil)
@@ -3450,21 +3459,64 @@ func TestARoundHandsOutNoFurtherGradesOnceItsScoresHaveThem(t *testing.T) {
 	w.established("bob", "carol", "dave")
 	idx := w.draw()
 	w.run(anchor, "{\"doc\": 1}\n")
-	// Bob's grade is the one the score waits for. Carol, free while he works, takes another.
-	cb, cc := w.claim(bob, false), w.claim(carol, false)
-	if cb.Job == nil || cc.Job == nil || cb.Job.Kind != "grade" || cc.Job.Kind != "grade" {
-		t.Fatalf("two established graders: %+v %+v", cb.Job, cc.Job)
+	// Bob's grade is the one the score waits for. Carol, free while he works, is handed nothing.
+	cb := w.claim(bob, false)
+	if cb.Job == nil || cb.Job.Kind != "grade" {
+		t.Fatalf("an established grader: %+v", cb.Job)
 	}
-	if code, status := w.report(bob, cb, 5.5); code != 200 || status != "pending" {
-		t.Fatalf("the round should wait for the grade carol is making: HTTP %d %s", code, status)
+	w.idle(carol, false, "the score's grade is under way")
+	if code, status := w.report(bob, cb, 5.5); code != 200 || status != "settled" {
+		t.Fatalf("HTTP %d %s", code, status)
 	}
-	w.idle(dave, false, "the score has the grade it waits for")
-	if code, status := w.report(carol, cc, 5.45); code != 200 || status != "settled" {
+	w.idle(dave, false, "the round has settled")
+	w.check()
+	if e := w.entry(idx, "tidy"); len(e.Runs[0].Grades) != 1 {
+		t.Fatalf("the grades behind the score: %+v", e.Runs[0].Grades)
+	}
+}
+
+func TestBothGradesAScriptTwoRunsWroteWaitsForGoOutAtOnce(t *testing.T) {
+	pub, priv := newKey()
+	w := newWorld(t, pub)
+	anchor, alice, bob, carol, dave, erin, frank := w.join("anchor-one", priv), w.join("alice", nil), w.join("bob", nil), w.join("carol", nil), w.join("dave", nil), w.join("erin", nil), w.join("frank", nil)
+	w.submit(alice, "steady", "print('the same every time')")
+	w.established("bob", "carol", "dave", "erin", "frank")
+	idx := w.draw()
+	cb, cc := w.claim(bob, true), w.claim(carol, true)
+	same := "{\"doc\": 7}\n"
+	w.edit(bob, cb, same)
+	w.edit(carol, cc, same)
+	wanted := func() int {
+		var out Work
+		if code := anchor.do("GET", "/api/v1/admin/work", nil, &out); code != 200 || len(out.Rounds) != 1 {
+			t.Fatalf("the work: HTTP %d %+v", code, out)
+		}
+		return out.Rounds[0].GradesWanted
+	}
+	cd := w.claim(dave, false)
+	if cd.Job == nil || cd.Job.Kind != "grade" {
+		t.Fatalf("the first grade: %+v", cd.Job)
+	}
+	if n := wanted(); n != 1 {
+		t.Fatalf("with one of its two grades under way, the script is still wanted: %d", n)
+	}
+	ce := w.claim(erin, false)
+	if ce.Job == nil || ce.Job.Kind != "grade" || ce.Job.Script.SHA256 != cd.Job.Script.SHA256 {
+		t.Fatalf("the second grade: %+v", ce.Job)
+	}
+	if n := wanted(); n != 0 {
+		t.Fatalf("both grades are under way: %d", n)
+	}
+	w.idle(frank, false, "both grades the score waits for are under way")
+	if code, status := w.report(dave, cd, 5.5); code != 200 || status != "pending" {
+		t.Fatalf("HTTP %d %s", code, status)
+	}
+	if code, status := w.report(erin, ce, 5.5); code != 200 || status != "settled" {
 		t.Fatalf("HTTP %d %s", code, status)
 	}
 	w.check()
-	if e := w.entry(idx, "tidy"); len(e.Runs[0].Grades) != 2 {
-		t.Fatalf("the grades behind the score: %+v", e.Runs[0].Grades)
+	if e := w.entry(idx, "steady"); !e.Confirmed || len(e.Runs[0].Grades) != 2 {
+		t.Fatalf("the entry: %+v", e)
 	}
 }
 
@@ -3480,11 +3532,7 @@ func TestAGraderThatTrainsBeforeTheExamIsHandedItsGradeEarly(t *testing.T) {
 	w.established("bob", "carol", "dave")
 	idx := w.drawWithoutExam()
 	w.run(anchor, "{\"doc\": 1}\n")
-	early := func(a *actor) *claimed {
-		h := w.hello(false)
-		h["early"] = true
-		return w.claimWith(a, h)
-	}
+	early := w.claimEarly
 	work := func() WorkRound {
 		var out Work
 		if code := anchor.do("GET", "/api/v1/admin/work", nil, &out); code != 200 || len(out.Rounds) != 1 {
@@ -3538,12 +3586,15 @@ func TestTwoEstablishedGradesThatDisagreeGetAThird(t *testing.T) {
 		if third {
 			w.idle(dave, false, "no round is open") // a third grader's machine is up
 		}
-		idx := w.draw()
+		idx := w.drawWithoutExam()
 		w.run(anchor, "{\"doc\": 1}\n")
-		cb, cc := w.claim(bob, false), w.claim(carol, false)
+		// Both take the script while the exam is made: the second as a replica, which only a
+		// grade taken before the exam may be.
+		cb, cc := w.claimEarly(bob), w.claimEarly(carol)
 		if cb.Job == nil || cc.Job == nil || cb.Job.Kind != "grade" || cc.Job.Kind != "grade" {
 			t.Fatalf("two established graders: %+v %+v", cb.Job, cc.Job)
 		}
+		w.exam(idx)
 		// With them there, the machine that wrote the script is not asked to grade it.
 		w.idle(anchor, true, "others are there to grade it")
 		return w, idx, bob, carol, dave, cb, cc
