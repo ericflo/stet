@@ -72,13 +72,12 @@ type Options struct {
 	LongMaxPrice float64 // the same, for a machine rented for the organisers' bigger students; 0: MaxPrice
 	LongMinutes  int     // the longest of the organisers' students a machine takes, minutes; 0: the short ones only
 	Cheapest     bool    // rent the cheapest a grade first, not the fastest
-	// For grades taken before an exam: how long a machine takes to start, install stet and
-	// fetch the round's corpus, with some to spare; and its first grade of a round on a 3090.
-	Boot, FirstGrade time.Duration
-	Idle             int
-	SSHKey           string
-	DryRun           bool
-	Every            time.Duration
+	// For grades taken before an exam: how long after it the round may settle.
+	Settle time.Duration
+	Idle   int
+	SSHKey string
+	DryRun bool
+	Every  time.Duration
 	Policy
 }
 
@@ -142,9 +141,8 @@ func flags(name string, o *Options) *flag.FlagSet {
 	fs.IntVar(&o.PerWorker, "per-machine", 6, "scripts waiting to be graded that justify one more machine")
 	fs.IntVar(&o.PerFarm, "per-farm", 4, "the organisers' students waiting to be trained that justify one more machine (0: rent none for them)")
 	fs.DurationVar(&o.Every, "every", time.Minute, "with scale --follow: how often to look")
-	fs.DurationVar(&o.Early, "early", 90*time.Minute, "rent graders for a round's exam from this long before it is due, each kind of GPU just in time to have trained by then, the cheapest a round first (0: only once it is posted)")
-	fs.DurationVar(&o.Boot, "boot", 20*time.Minute, "with --early: how long a machine takes to start, install stet and fetch the round's corpus, with some to spare")
-	fs.DurationVar(&o.FirstGrade, "first-grade", 36*time.Minute, "with --early: a machine's first grade of a round on an RTX 3090, the round's baseline and the student; other kinds by their speed")
+	fs.DurationVar(&o.Early, "early", 90*time.Minute, "rent graders for a round's exam from at most this long before it is due, each kind of GPU just in time, the cheapest a round first (0: only once it is posted)")
+	fs.DurationVar(&o.Settle, "settle-within", 15*time.Minute, "with --early: how long after its exam a round may settle; a kind of GPU is rented in time to report by then, and a quicker, dearer one only once the cheaper ones can no longer")
 	fs.DurationVar(&o.ExamAfter, "exam-after", 2*time.Hour+12*time.Minute, "how long after its draw a round's exam is posted, about: the season's hour of fresh text, an hour to settle, and the minutes to make it")
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), "usage: stet-runpod %s [settings]\n\n", name)

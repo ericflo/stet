@@ -72,35 +72,37 @@ How many it rents: one for each machine at a grade, which takes no other until i
 (about 18 minutes on a 3090 at the standard scale), and one more for every `--per-machine`
 (6) scripts a new machine could grade now: `--per-machine 1` gives each its own. A grader
 may take a grade before the round's exam is posted, train the round's baseline and the
-student, and sit the exam once it is: the grades it could take want machines from `--early`
+student, and sit the exam once it is. The grades it could take want machines from `--early`
 (90 minutes) before the exam is due, about `--exam-after` (2h12m) after the draw, and each
-kind of GPU is rented just in time to have trained by then: `--boot` (20 minutes) to start,
-install and fetch the round's corpus, and `--first-grade` (36 minutes on a 3090, the others
-by their speed) for the baseline and the student. A machine that has trained only waits for
-the exam, so what a grade costs on it is its price over the time it is held, and of the
-kinds due, the cheapest a round comes first: an RTX A4000 at $0.17 an hour, rented 76
-minutes before, costs less than a 4090 at $0.89 rented 40 minutes before. The round settles
-minutes after the exam (`--early 0`: rent them only once it is posted). A curator is run in a minute or two, and the exam its grades
-wait for is made hours after the draw, so the curators want a machine for every four
-entries to run, and never fewer than two, since each entry is run twice, by two accounts. A
-machine with nothing official to do trains the organisers' own students (a few minutes
-each, on a settled round), so one more for every `--per-farm` (4) of those waiting, after
-the official work (`--per-farm 0`: none).
-`--long-farm 600` rents machines that also take the bigger students, held for hours, one
-machine to each. A machine rented for them is chosen for what a student costs on it, not what
-it costs an hour: a 4090 at $0.89 trains one in about half the time of a 3090 at $0.50, so
-the student costs about the same and is done sooner. Where two cost about the same, the
-quicker comes first. `--long-max-price` is the ceiling for those machines (the same as
-`--max-price` if not given); `stet-runpod gpus` shows both orders.
-Never more than `--max` (6), or past `--max-hourly` dollars an hour (3), and nothing new
-once `--daily-budget` is spent. `--max-price` never rents a machine dearer than that, however
-much is waiting: the work waits for a cheap one instead. When an entry is waiting for a round
-and nobody who runs curators is around, one, so that the round is drawn early. It never
-ends a machine that holds a job. It ends at once those doing nothing when nothing at all is
-waiting, and any that went quiet or stopped. The rest stop by themselves. A machine ended
-a moment after it took a job, or that stopped partway through one, still holds it as the
-server sees it: what it holds is handed back on the next look, so nothing waits out its
-lease.
+kind of GPU is rented just in time: so that, rented now, it would report between a minute
+before the exam and `--settle-within` (15 minutes) after it. A machine that has trained
+only waits, so what a grade costs on a kind is its price over the time it is held, and a
+kind is rented only if none still to come would cost less: the cheapest is waited for, and
+a quicker, dearer kind is rented only once the cheaper ones can no longer report in time.
+How long a training pass takes on each kind is learned from the grades of settled rounds
+(each says the GPU that trained, and for how long), and how long a machine takes to start
+from those this service rents; until a kind has been seen, its pass is a 3090's 18 minutes
+over its speed in the table, and a machine is taken to start in 8 minutes. They are kept in
+`calibration.json`, and `stet-runpod gpus` shows them. A curator is run in a minute or two,
+and the exam its grades wait for is made hours after the draw, so the curators want a
+machine for every four entries to run, and never fewer than two, since each entry is run
+twice, by two accounts. A machine with nothing official to do trains the organisers' own
+students (a few minutes each, on a settled round), so one more for every `--per-farm` (4)
+of those waiting, after the official work (`--per-farm 0`: none). `--long-farm 600` rents
+machines that also take the bigger students, held for hours, one machine to each. A machine
+rented for them is chosen for what a student costs on it, not what it costs an hour: a 4090
+at $0.89 trains one in about half the time of a 3090 at $0.50, so the student costs about
+the same and is done sooner. Where two cost about the same, the quicker comes first.
+`--long-max-price` is the ceiling for those machines (the same as `--max-price` if not
+given); `stet-runpod gpus` shows both orders. Never more than `--max` (6), or past
+`--max-hourly` dollars an hour (3), and nothing new once `--daily-budget` is spent.
+`--max-price` never rents a machine dearer than that, however much is waiting: the work
+waits for a cheap one instead. When an entry is waiting for a round and nobody who runs
+curators is around, one, so that the round is drawn early. It never ends a machine that
+holds a job. It ends at once those doing nothing when nothing at all is waiting, and any
+that went quiet or stopped. The rest stop by themselves. A machine ended a moment after it
+took a job, or that stopped partway through one, still holds it as the server sees it: what
+it holds is handed back on the next look, so nothing waits out its lease.
 
 Every machine rented is the fastest that will do, looked up afresh each time: every kind of
 GPU RunPod has free under `--max-price`, in both its clouds, is tried fastest first (the

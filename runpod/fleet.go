@@ -34,6 +34,14 @@ type Fleet struct {
 	keys []*Key // the pool, by handle
 	// What was last said of graders waiting for their time, said again only once it changes.
 	waitSaid string
+	// What has been seen machines take (calibrate.go): read once, kept when it changes, and
+	// the grades of settled rounds counted at most every ten minutes.
+	cal      *Calibration
+	calDirty bool
+	calAt    time.Time
+	calErr   string
+	// Pods seen before they first asked for work, so that how long they took is seen too.
+	starting map[string]bool
 }
 
 // --- the pool of keys ---------------------------------------------------------------------------
@@ -326,6 +334,22 @@ type View struct {
 	Today   float64 // about what has been spent today (UTC)
 }
 
+// seeStart notes how long a pod took to first ask for work, if it was seen before it had.
+func (f *Fleet) seeStart(w *Worker) {
+	if f.starting == nil {
+		f.starting = map[string]bool{}
+	}
+	id := w.Pod.ID
+	if w.Machine == nil || w.Machine.LastSeen < w.Pod.CreatedAt.Unix() {
+		f.starting[id] = true
+		return
+	}
+	if f.starting[id] {
+		delete(f.starting, id)
+		f.noteBoot(id, time.Unix(w.Machine.LastSeen, 0).Sub(w.Pod.CreatedAt))
+	}
+}
+
 func (f *Fleet) look(ctx context.Context) (*View, error) {
 	work, err := f.st.work(ctx, f.op)
 	if err != nil {
@@ -355,6 +379,7 @@ func (f *Fleet) look(ctx context.Context) (*View, error) {
 		}
 		if w.Pod != nil && w.Pod.live() {
 			v.Hourly += w.Pod.Cost
+			f.seeStart(w)
 		}
 		v.Workers = append(v.Workers, w)
 	}
@@ -428,11 +453,11 @@ func (f *Fleet) choices(ctx context.Context, long bool) ([]Choice, error) {
 	}
 	switch {
 	case long:
-		byStudent(out)
+		byStudent(out, f.speedOf)
 	case f.o.Cheapest:
-		byGrade(out)
+		byGrade(out, f.speedOf)
 	default:
-		byPace(out)
+		byPace(out, f.speedOf)
 	}
 	return out, nil
 }
@@ -506,22 +531,17 @@ func (f *Fleet) launchSome(ctx context.Context, v *View, n int, long, cheap bool
 		return 0, err
 	}
 	if cheap && len(f.o.GPUs) == 0 {
-		byGrade(gpus)
+		byGrade(gpus, f.speedOf)
 	}
 	if !due.IsZero() && len(gpus) > 0 {
 		left := due.Sub(f.now())
-		now := forExam(gpus, left, f.o.Boot, f.o.FirstGrade, f.o.Every)
+		now := forExam(gpus, left, f.o.Settle, f.o.Every, f.lead)
 		if len(now) == 0 {
-			// None of the kinds free is due yet: the next is rented in its time.
-			next := Choice{}
-			for _, c := range gpus {
-				if l := lead(c, f.o.Boot, f.o.FirstGrade); l < left && (next.GPU.ID == "" || l > lead(next, f.o.Boot, f.o.FirstGrade)) {
-					next = c
-				}
-			}
-			msg := fmt.Sprintf("%d graders wanted for the exam due about %s UTC; none of the kinds free is due yet", n, due.UTC().Format("15:04"))
-			if next.GPU.ID != "" {
-				msg += fmt.Sprintf(": the next, %s at $%.2f an hour, from %s UTC", shortGPU(next.GPU.ID), next.Price, due.Add(-lead(next, f.o.Boot, f.o.FirstGrade)).UTC().Format("15:04"))
+			// The cheapest a round is still to come: it is rented in its time.
+			msg := fmt.Sprintf("%d graders wanted for the exam due about %s UTC", n, due.UTC().Format("15:04"))
+			if next, ok := waitingFor(gpus, left, f.o.Every, f.lead); ok {
+				msg += fmt.Sprintf(": waiting for the cheapest a round, %s at $%.2f an hour (about $%.2f a grade), from %s UTC",
+					shortGPU(next.GPU.ID), next.Price, next.Price*f.lead(next).Hours(), due.Add(-f.lead(next)).UTC().Format("15:04"))
 			}
 			if msg != f.waitSaid {
 				f.say("%s", msg)

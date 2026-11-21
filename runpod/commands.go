@@ -138,6 +138,7 @@ func cmdGPUs(ctx context.Context, f *Fleet) error {
 }
 
 func (f *Fleet) listGPUs(ctx context.Context, long bool) error {
+	f.calibrate(ctx)
 	gpus, err := f.choices(ctx, long)
 	if err != nil {
 		return err
@@ -156,13 +157,20 @@ func (f *Fleet) listGPUs(ctx context.Context, long bool) error {
 	fmt.Fprintf(f.out, "%s, in this order (%s cloud%s, CUDA %s or newer, hosts with %d GB and %d vCPUs a GPU):\n\n",
 		what, strings.ToLower(f.o.Cloud), f.ceiling(long), f.o.MinCUDA, f.o.MinRAM, f.o.MinCPU)
 	for _, c := range gpus {
-		fmt.Fprintf(f.out, "  $%.2f/h  %-9s  %-34s %3d GB  %s", c.Price, strings.ToLower(c.Cloud), shortGPU(c.GPU.ID), c.GPU.Memory, strings.ToLower(c.GPU.Availability))
-		if s := speed(c.GPU.ID); s > 0 {
-			fmt.Fprintf(f.out, "  %.1fx a 3090: $%.2f for a 3090's hour", s, c.Price/s)
+		fmt.Fprintf(f.out, "  $%.2f/h  %-9s  %-34s %3d GB  %-6s", c.Price, strings.ToLower(c.Cloud), shortGPU(c.GPU.ID), c.GPU.Memory, strings.ToLower(c.GPU.Availability))
+		p, seen := f.pass(c.GPU.ID)
+		how := "about"
+		if seen {
+			how = "seen"
 		}
-		fmt.Fprintln(f.out)
+		fmt.Fprintf(f.out, "  a pass %s %.0f min (%.1fx a 3090), a round's first grade %.0f min: $%.2f\n",
+			how, p.Minutes(), f.speedOf(c.GPU.ID), f.lead(c).Minutes(), c.Price*f.lead(c).Hours())
 	}
-	fmt.Fprintln(f.out, "\nEach is tried in turn until RunPod has a machine of that kind free with room for the rest.")
+	started := "until three have been seen to"
+	if len(f.calibration().Boot) >= 3 {
+		started = "as seen"
+	}
+	fmt.Fprintf(f.out, "\nEach is tried in turn until RunPod has a machine of that kind free with room for the rest. A machine is taken to start in %.0f minutes, %s.\n", f.boot().Minutes(), started)
 	return nil
 }
 
@@ -261,6 +269,7 @@ func tick(ctx context.Context, f *Fleet) error {
 	if err != nil {
 		return err
 	}
+	f.calibrate(ctx)
 	d := f.o.Policy.decide(v.Work, v.Workers, v.Today, f.now())
 	if err := f.end(ctx, v, d.End); err != nil {
 		return err

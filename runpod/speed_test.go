@@ -40,7 +40,7 @@ func TestTheBiggerStudentsAreRentedByWhatAStudentCosts(t *testing.T) {
 		kind("NVIDIA A40", 0.59), kind("NVIDIA L4", 0.69), kind("NVIDIA RTX A6000", 0.69),
 		kind("NVIDIA L40", 0.82), kind("NVIDIA GeForce RTX 4090", 0.89),
 	}
-	byStudent(cs)
+	byStudent(cs, speed)
 	var got []string
 	for _, c := range cs {
 		got = append(got, shortGPU(c.GPU.ID))
@@ -61,7 +61,7 @@ func TestMachinesAreRentedFastestFirst(t *testing.T) {
 		kind("NVIDIA A40", 0.59), kind("NVIDIA L4", 0.69), kind("NVIDIA RTX A6000", 0.69), kind("NVIDIA GeForce RTX 4090", 0.89),
 		kind("NVIDIA L40S", 1.09), kind("NVIDIA RTX 6000 Ada Generation", 1.09),
 	}
-	byPace(cs)
+	byPace(cs, speed)
 	var got []string
 	for _, c := range cs {
 		got = append(got, shortGPU(c.GPU.ID))
@@ -83,7 +83,7 @@ func TestMachinesAreRentedByWhatAGradeCosts(t *testing.T) {
 		kind("NVIDIA A40", 0.59), kind("NVIDIA L4", 0.69), kind("NVIDIA RTX A6000", 0.69), kind("NVIDIA GeForce RTX 4090", 0.89),
 		kind("NVIDIA L40S", 1.09),
 	}
-	byGrade(cs)
+	byGrade(cs, speed)
 	var got []string
 	for _, c := range cs {
 		got = append(got, shortGPU(c.GPU.ID))
@@ -94,9 +94,9 @@ func TestMachinesAreRentedByWhatAGradeCosts(t *testing.T) {
 	}
 }
 
-// For a grade taken before an exam, each kind is rented just in time to have trained by
-// then: none before its time, the cheapest a round among those due, and once no kind can be
-// on time, the quickest first.
+// For a grade taken before an exam, each kind is rented just in time to report between a
+// look before the exam and 15 minutes after: none before its time, none while a kind still to
+// come would cost less a round, and once no kind can be in time, the quickest first.
 func TestGradersAreRentedJustInTime(t *testing.T) {
 	kind := func(id string, price float64) Choice { return Choice{GPU: GPUType{ID: id}, Price: price} }
 	cs := []Choice{
@@ -104,12 +104,17 @@ func TestGradersAreRentedJustInTime(t *testing.T) {
 		kind("NVIDIA RTX 4000 Ada Generation", 0.28), kind("NVIDIA GeForce RTX 5080", 0.39), kind("NVIDIA GeForce RTX 3090", 0.50),
 		kind("NVIDIA GeForce RTX 4090", 0.89), kind("NVIDIA L40S", 1.09), kind("NVIDIA L4", 0.69),
 	}
-	// Leads, with 20 minutes to boot and 36 for a 3090's first grade: L4 100 minutes, the
-	// 4000 Ada 80, the A4000 76, the 3080 Ti 58, the 3090s 56, the 5080 46, the 4090 40, the
-	// L40S 39.
+	// Leads of 11 minutes and two passes of 18 over the speed: L4 91 minutes, the 4000 Ada 71,
+	// the A4000 67, the 3080 Ti 49, the 3090s 47, the 5080 37, the 4090 31, the L40S 30. A
+	// round's grade then costs $0.15 on the 3080 Ti, $0.17 on the cheaper 3090, $0.19 on the
+	// A4000, $0.24 on the 5080, $0.33 on the 4000 Ada, $0.39 on the dearer 3090, $0.46 on the
+	// 4090, $0.54 on the L40S and $1.05 on the L4.
+	lead := func(c Choice) time.Duration {
+		return 11*time.Minute + time.Duration(2*float64(18*time.Minute)/speed(c.GPU.ID))
+	}
 	at := func(left time.Duration) string {
 		var got []string
-		for _, c := range forExam(cs, left, 20*time.Minute, 36*time.Minute, time.Minute) {
+		for _, c := range forExam(cs, left, 15*time.Minute, time.Minute, lead) {
 			got = append(got, fmt.Sprintf("%s $%.2f", shortGPU(c.GPU.ID), c.Price))
 		}
 		return strings.Join(got, ", ")
@@ -118,17 +123,20 @@ func TestGradersAreRentedJustInTime(t *testing.T) {
 		left time.Duration
 		want string
 	}{
-		{90 * time.Minute, ""},
-		{80*time.Minute + 30*time.Second, "RTX 4000 Ada Generation $0.28"},
-		{77 * time.Minute, "RTX A4000 $0.17, RTX 4000 Ada Generation $0.28"},
-		{70 * time.Minute, ""},
-		{57 * time.Minute, "RTX 3080 Ti $0.18, RTX 3090 $0.22, RTX 3090 $0.50"},
-		{41 * time.Minute, "RTX 5080 $0.39, RTX 4090 $0.89"}, // the L40S not yet
-		{39 * time.Minute, "RTX 4090 $0.89, L40S $1.09"},
-		{30 * time.Minute, "L40S $1.09, RTX 4090 $0.89, RTX 5080 $0.39, RTX 3090 $0.22, RTX 3090 $0.50, RTX 3080 Ti $0.18, RTX A4000 $0.17, RTX 4000 Ada Generation $0.28, L4 $0.69"},
+		{90 * time.Minute, ""}, // the L4's time, but cheaper kinds are to come
+		{72 * time.Minute, ""}, // the 4000 Ada's, the same
+		{50 * time.Minute, ""}, // the A4000's has passed, and the 3080 Ti's has not come
+		{49*time.Minute + 30*time.Second, "RTX 3080 Ti $0.18"},
+		{47*time.Minute + 30*time.Second, "RTX 3080 Ti $0.18, RTX 3090 $0.22"},
+		{37 * time.Minute, "RTX 3080 Ti $0.18, RTX 3090 $0.22, RTX 5080 $0.39, RTX 3090 $0.50"},
+		{20 * time.Minute, "RTX 4090 $0.89, L40S $1.09"},
+		{10 * time.Minute, "L40S $1.09, RTX 4090 $0.89, RTX 5080 $0.39, RTX 3090 $0.22, RTX 3090 $0.50, RTX 3080 Ti $0.18, RTX A4000 $0.17, RTX 4000 Ada Generation $0.28, L4 $0.69"},
 	} {
 		if got := at(c.left); got != c.want {
 			t.Errorf("%s before the exam: %q, want %q", c.left, got, c.want)
 		}
+	}
+	if next, ok := waitingFor(cs, 72*time.Minute, time.Minute, lead); !ok || next.Price != 0.18 {
+		t.Errorf("waiting for %+v", next)
 	}
 }

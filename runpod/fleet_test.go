@@ -112,6 +112,8 @@ type fakeStet struct {
 	mu       sync.Mutex
 	work     Work
 	drawnAt  int64             // when the open round was drawn, as GET /api/v1/rounds/{id} says
+	rounds   string            // GET /api/v1/rounds
+	graded   map[string]string // GET /api/v1/rounds/{id} of settled rounds, by id
 	workers  map[string]bool   // public keys the server takes as rented machines
 	signed   []string          // who signed each request
 	vouches  int               // grants it was sent, each with a good signature
@@ -143,6 +145,13 @@ func newFakeStet(t *testing.T) *fakeStet {
 			fmt.Fprintf(w, `{"paused": %d, "paused_by": "stet"}`, f.work.Paused)
 		case "/api/v1/season":
 			io.WriteString(w, `{"site": "https://www.stet.test"}`)
+		case "/api/v1/rounds":
+			if f.rounds == "" {
+				w.WriteHeader(404)
+			}
+			io.WriteString(w, f.rounds)
+		case "/api/v1/rounds/s1-o00009":
+			io.WriteString(w, f.graded["s1-o00009"])
 		case "/api/v1/rounds/s1-o00001":
 			fmt.Fprintf(w, `{"entries": [], "round": {"id": "s1-o00001", "drawn_at": %d}}`, f.drawnAt)
 		case "/api/v1/admin/workers":
@@ -832,19 +841,20 @@ func TestStatusJudgesByTheServicesSettings(t *testing.T) {
 func TestGradersAreRentedBeforeTheExam(t *testing.T) {
 	rp, st := newFakeRunPod(t), newFakeStet(t)
 	f, out := testFleet(t, rp, st, 4)
-	f.o.Early, f.o.ExamAfter, f.o.PerWorker = 90*time.Minute, 2*time.Hour+12*time.Minute, 1
-	f.o.Boot, f.o.FirstGrade = 20*time.Minute, 36*time.Minute
+	f.o.Early, f.o.ExamAfter, f.o.PerWorker, f.o.Settle = 90*time.Minute, 2*time.Hour+12*time.Minute, 1, 15*time.Minute
 	st.work = Work{Runners: 1, Rounds: []WorkRound{{ID: "s1-o00001", Entries: 3, GradesEarly: 3}}}
-	// The secure kinds that fit: the 3080 ($0.20) and the A5000 ($0.27), each 0.85 of a 3090,
-	// are rented 62 minutes before the exam; the PRO 4000 ($0.57), 0.8, 65.
+	// Nothing seen yet: a machine starts in 8 minutes, and with 2 to fetch and script and 1 to
+	// sit the exam, the secure kinds that fit, the 3080 ($0.20) and the A5000 ($0.27), each
+	// 0.85 of a 3090, are rented 53 minutes before they are to report; the PRO 4000 ($0.57),
+	// 0.8, 56.
 	st.drawnAt = time.Now().Add(-time.Hour).Unix() // the exam is due in 72 minutes
 	if err := tick(context.Background(), f); err != nil {
 		t.Fatal(err)
 	}
-	if len(rp.created) != 0 || !strings.Contains(out.String(), "the next, RTX PRO 4000 Blackwell at $0.57 an hour, from ") {
+	if len(rp.created) != 0 || !strings.Contains(out.String(), "waiting for the cheapest a round, RTX 3080 at $0.20 an hour") {
 		t.Fatalf("rented %d machines 72 minutes before the exam\n%s", len(rp.created), out)
 	}
-	st.drawnAt = time.Now().Add(-69 * time.Minute).Unix() // due in 63 minutes
+	st.drawnAt = time.Now().Add(-79 * time.Minute).Unix() // due in 53 minutes
 	if err := tick(context.Background(), f); err != nil {
 		t.Fatal(err)
 	}
@@ -873,5 +883,55 @@ func TestCuratorsAreRunOnTheCheapestAGrade(t *testing.T) {
 	}
 	if len(got) != 2 || got[0] != "community RTX 3080 Ti" || got[1] != "community RTX 3080 Ti" {
 		t.Fatalf("rented %v\n%s", got, out)
+	}
+}
+
+// What a training pass takes on each kind is learned from the grades of settled rounds, each
+// round once, and kept; how long a machine takes to start, from those seen starting.
+func TestWhatMachinesTakeIsLearned(t *testing.T) {
+	rp, st := newFakeRunPod(t), newFakeStet(t)
+	f, out := testFleet(t, rp, st, 1)
+	st.rounds = `{"rounds": [{"id": "s1-o00010", "status": "open", "scale": "standard"}, {"id": "s1-o00009", "status": "settled", "scale": "standard"}]}`
+	st.graded = map[string]string{"s1-o00009": `{"round": {"id": "s1-o00009"}, "entries": [
+		{"detail": {"hardware": {"gpu": "NVIDIA RTX PRO 4000 Blackwell"}, "train": {"seconds": 930}}},
+		{"detail": {"hardware": {"gpu": "NVIDIA RTX PRO 4000 Blackwell"}, "train": {"seconds": 950}}},
+		{"detail": {"hardware": {"gpu": "NVIDIA GeForce RTX 4090"}, "train": {"seconds": 480}}},
+		{"detail": {}}]}`}
+	pro := "NVIDIA RTX PRO 4000 Blackwell"
+	if p, seen := f.pass(pro); seen || p != time.Duration(float64(18*time.Minute)/0.8) {
+		t.Fatalf("before any was seen: %s %v", p, seen)
+	}
+	f.calibrate(context.Background())
+	f.calibrate(context.Background()) // within ten minutes: not asked again
+	if p, seen := f.pass(pro); !seen || p.Round(time.Second) != 15*time.Minute+40*time.Second {
+		t.Fatalf("a pass on the PRO 4000: %s %v\n%s", p, seen, out)
+	}
+	if s := f.speedOf("NVIDIA GeForce RTX 4090"); s != 2.25 {
+		t.Fatalf("a 4090 is %vx a 3090", s)
+	}
+	// Seen starting, then asking for work: 3, 4 and 5 minutes, and one seen only once it had.
+	t0 := time.Now().Add(-time.Hour).Truncate(time.Second)
+	for i, took := range []time.Duration{3 * time.Minute, 4 * time.Minute, 5 * time.Minute} {
+		w := &Worker{Pod: &Pod{ID: fmt.Sprintf("pod%d", i), CreatedAt: t0}, Machine: &Machine{}}
+		f.seeStart(w)
+		w.Machine.LastSeen = t0.Add(took).Unix()
+		f.seeStart(w)
+		f.seeStart(w)
+	}
+	f.seeStart(&Worker{Pod: &Pod{ID: "late", CreatedAt: t0}, Machine: &Machine{LastSeen: t0.Add(40 * time.Minute).Unix()}})
+	if b := f.boot(); b != 5*time.Minute {
+		t.Fatalf("a machine starts in %s: %+v", b, f.cal.Boot)
+	}
+	if l := f.lead(Choice{GPU: GPUType{ID: pro}}); l.Round(time.Second) != 5*time.Minute+2*time.Minute+2*(15*time.Minute+40*time.Second)+time.Minute {
+		t.Fatalf("a PRO 4000's lead: %s", l)
+	}
+	f.calAt = time.Time{}
+	f.calibrate(context.Background()) // keeps it, and counts no round twice
+	again := &Fleet{o: f.o, st: f.st, out: out, now: time.Now}
+	if p, seen := again.pass(pro); !seen || p.Round(time.Second) != 15*time.Minute+40*time.Second || len(again.calibration().Pass["RTX PRO 4000 Blackwell"]) != 2 {
+		t.Fatalf("what was kept: %+v", again.calibration())
+	}
+	if b := again.boot(); b != 5*time.Minute {
+		t.Fatalf("what was kept of starting: %s", b)
 	}
 }
