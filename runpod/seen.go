@@ -107,6 +107,74 @@ func (f *Fleet) forget(live map[string]bool) {
 			delete(f.seen, k)
 		}
 	}
+	for k := range f.lastLog {
+		if !live[k] {
+			delete(f.lastLog, k)
+			delete(f.slowSaid, k)
+		}
+	}
+}
+
+// --- a machine slow to start -------------------------------------------------------------------
+
+// slowLook is how long before the end of its grace a machine's log is first read, to have it as
+// it was a look before.
+const slowLook = 2 * time.Minute
+
+// stillInstalling says whether a machine past its grace that has not asked for work is still
+// getting there: its log has grown since the last look. Such a machine has up to twice its
+// grace. In round 9 two Vast machines were ended at 11 minutes still downloading stet's
+// libraries on a slow connection, where the rest asked within 5; a grace learned from the
+// machines that started never sees those that were ended first. Only where the market keeps a
+// machine's log.
+func (f *Fleet) stillInstalling(ctx context.Context, w *Worker, now time.Time) bool {
+	r := w.Rental
+	key := ledgerKey(r.Market, r.ID)
+	g, age := w.grace(f.o.Policy), now.Sub(r.Created)
+	asked := w.Machine != nil && w.Machine.LastSeen >= r.Created.Unix()
+	lg, ok := f.market(r.Market).(logger)
+	if !ok || asked || r.State == "stopped" || age < g-slowLook || age > 2*g {
+		delete(f.lastLog, key)
+		return false
+	}
+	lctx, cancel := context.WithTimeout(ctx, 45*time.Second)
+	lines, err := lg.Logs(lctx, r.ID, 30)
+	cancel()
+	if err != nil || len(lines) == 0 || failing(lines) {
+		return false
+	}
+	if f.lastLog == nil {
+		f.lastLog, f.slowSaid = map[string]string{}, map[string]bool{}
+	}
+	cur := strings.Join(lines, "\n")
+	prev, had := f.lastLog[key]
+	f.lastLog[key] = cur
+	if !had {
+		// Not read a look ago (the fleet started since): one more look, to see.
+		return age > g
+	}
+	if prev == cur || age <= g {
+		return false
+	}
+	if !f.slowSaid[key] {
+		f.slowSaid[key] = true
+		last := workerLine(lines)
+		f.event(r, w.Key.Handle, "slow", fmt.Sprintf("past its grace of %s and still getting there (last it said: %s): given up to %s", g.Round(time.Minute), last, (2*g).Round(time.Minute)))
+		f.say("%s on %s is past its grace of %s, and still getting there: given up to %s (last it said: %s)", w.Key.Handle, marketTitle(r.Market), g.Round(time.Minute), (2 * g).Round(time.Minute), last)
+	}
+	return true
+}
+
+// failing says whether what a machine said lately is of something that did not work: a log that
+// grows with an install tried again and again is not one getting there.
+func failing(lines []string) bool {
+	all := strings.ToLower(strings.Join(lines, "\n"))
+	for _, s := range []string{"did not work", "could not install", "no space left on device", "older than 580", "error:", "ending this"} {
+		if strings.Contains(all, s) {
+			return true
+		}
+	}
+	return false
 }
 
 // --- why a machine failed ------------------------------------------------------------------------

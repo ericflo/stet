@@ -43,6 +43,10 @@ type Fleet struct {
 	offerSaid map[string]string
 	// What was last seen of each machine rented, to note what changes (seen.go).
 	seen map[string]seenRental
+	// The tail of the log of each machine near the end of its grace, to see whether it is still
+	// getting there (seen.go), and those said to be.
+	lastLog  map[string]string
+	slowSaid map[string]bool
 	// probe: tools/cage_check.py, gzipped and base64'd, for a machine rented by stet-cloud
 	// probe: it takes no work, and says whether the sandbox holds (probe.go).
 	probe string
@@ -609,6 +613,9 @@ func (f *Fleet) look(ctx context.Context) (*View, error) {
 			w.Grace, w.Speed = f.grace(w.Rental.Market), f.speedOf(w.Rental.Card)
 			if m := f.market(w.Rental.Market); m != nil && !m.Caps().SelfEnd {
 				w.Silence = quietWithoutSelfEnd
+			}
+			if f.stillInstalling(ctx, w, f.now()) {
+				w.Grace *= 2
 			}
 		}
 		if w.Rental != nil && w.Rental.live() {

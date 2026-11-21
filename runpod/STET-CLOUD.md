@@ -453,3 +453,10 @@ These keep their meaning:
 - Failed and refused jobs are journal events (`trouble`) and appear on the status line.
 
 **Order:** server and fleet ship in the same gap between rounds. Curators go back on for Vast and Clore once both are live.
+
+**Also in this round: slow installs ended too soon.**
+- Two of the nine Vast graders (stet-rp-17 at 13:13 and stet-rp-11 at 13:59) were ended at 11 minutes for never asking for work. Both were still downloading stet's libraries on a slow connection.
+- The Vast machines that started asked within 1½–5 minutes, so Vast's grace is the 10-minute floor.
+- A grace learned from machines that started never sees the slow ones, because they were ended first.
+- **Rule:** from 2 minutes before a machine's grace runs out, its log is read each look (where its market keeps one). If it has grown since the last look, with nothing in it saying something didn't work, the machine has up to twice its grace (journal event `slow`). Once its log stops growing, or says it failed, or twice its grace has passed, it's ended as before.
+- **Also:** Vast's search lists an ask the fleet rented a moment earlier, which accounts for some of the `no_such_ask` refusals. As no room, the next offer is tried at once.

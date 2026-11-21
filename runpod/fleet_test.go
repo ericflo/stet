@@ -1184,3 +1184,65 @@ func TestACuratorMachineDoneTooEarlyIsEnded(t *testing.T) {
 		t.Fatalf("rented %d, %d left:\n%s", len(rp.created), len(rp.pods), out)
 	}
 }
+
+// A machine past its grace whose log still grows is still getting there, a slow host's install,
+// and has up to twice its grace; one whose log has stopped is ended, as is one past twice it.
+func TestAMachineStillInstallingIsGivenMoreTime(t *testing.T) {
+	rp, st := newFakeRunPod(t), newFakeStet(t)
+	f, out := testFleet(t, rp, st, 1)
+	ctx := context.Background()
+	st.work = *round(30, 1, 0, 0)
+	if err := tick(ctx, f); err != nil || len(rp.created) != 1 {
+		t.Fatalf("rented %d (%v)", len(rp.created), err)
+	}
+	g := f.grace("runpod")
+	id := "pod1"
+	rp.pods[id].Runtime = &struct {
+		Uptime int `json:"uptime"`
+	}{Uptime: 300}
+	install := []string{"[stet-worker 08:01:00] installing stet from https://www.stet.test/install.sh", " Downloaded numpy"}
+	step := func(age time.Duration, lines ...string) string {
+		t.Helper()
+		rp.pods[id].CreatedAt = time.Now().Add(-age)
+		install = append(install, lines...)
+		rp.logs[id] = install
+		out.Reset()
+		if err := tick(ctx, f); err != nil {
+			t.Fatal(err)
+		}
+		return out.String()
+	}
+	// Its log is read once it nears the end of its grace, and grows past it.
+	if said := step(g - time.Minute); strings.Contains(said, "ended") {
+		t.Fatalf("ended before its grace:\n%s", said)
+	}
+	if said := step(g+time.Minute, " Downloaded scipy"); strings.Contains(said, "ended") || !strings.Contains(said, "still getting there") {
+		t.Fatalf("past its grace, still installing:\n%s", said)
+	}
+	if said := step(g+2*time.Minute, " Downloaded torch"); strings.Contains(said, "ended") || strings.Contains(said, "still getting there") {
+		t.Fatalf("said again, or ended:\n%s", said)
+	}
+	// Its log stops: it is ended.
+	if said := step(g + 3*time.Minute); !strings.Contains(said, "ended stet-rp-01: it stopped, or never asked for work") {
+		t.Fatalf("its log stopped:\n%s", said)
+	}
+	if raw, _ := os.ReadFile(f.eventsPath()); !strings.Contains(string(raw), `"event":"slow"`) {
+		t.Fatalf("not in the journal:\n%s", raw)
+	}
+	// Past twice its grace, it is ended however its log grows.
+	if err := tick(ctx, f); err != nil || len(rp.created) != 2 {
+		t.Fatalf("rented %d (%v)", len(rp.created), err)
+	}
+	id = "pod2"
+	rp.pods[id].Runtime = &struct {
+		Uptime int `json:"uptime"`
+	}{Uptime: 300}
+	for _, age := range []time.Duration{g - time.Minute, g + time.Minute, 2*g - time.Minute} {
+		if said := step(age, " Downloaded "+age.String()); strings.Contains(said, "ended") {
+			t.Fatalf("ended at %s, within twice its grace of %s:\n%s", age, g, said)
+		}
+	}
+	if said := step(2*g+time.Minute, " Downloaded b"); !strings.Contains(said, "ended stet-rp-01") {
+		t.Fatalf("past twice its grace:\n%s", said)
+	}
+}
