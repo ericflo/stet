@@ -227,3 +227,38 @@ func TestOnSaladAnOldDriverAsksForAnotherMachine(t *testing.T) {
 		t.Fatalf("an old driver on Salad:\n%s\n%s", w.log("curl"), out)
 	}
 }
+
+// A probe says what the machine is and what stet doctor says, runs the sandbox's check, takes
+// no work, and waits to be ended: in pieces in its environment, as Clore has them.
+func TestAProbeRunsTheSandboxCheckAndTakesNoWork(t *testing.T) {
+	w := newWorkerRun(t, `case "$1" in
+  --version) echo "stet 0.4.4" ;;
+  doctor) echo "container sandbox: ok" ;;
+  verify) echo "verify $*" >> "$LOG/stet" ;;
+esac
+`)
+	// The stand-in's interpreter is bash, so the check here is a bash script.
+	check := gzipB64("echo held  memory\necho every case held\nexit 0\n")
+	env := map[string]string{}
+	splitEnv(env, "STET_PROBE_", check)
+	for k, v := range env {
+		w.env = append(w.env, k+"="+v)
+	}
+	out, err := w.cmd().CombinedOutput()
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	said := string(out)
+	for _, want := range []string{"[probe] machine:", "[probe] kernel:", "[probe] doctor: container sandbox: ok", "[probe] cage: every case held", "[probe] done: cage_check exit 0", "probe finished; waiting to be ended"} {
+		if !strings.Contains(said, want) {
+			t.Fatalf("a probe did not say %q:\n%s", want, said)
+		}
+	}
+	if w.log("stet") != "" || !strings.Contains(w.log("sleep"), "infinity") {
+		t.Fatalf("a probe took work (%q), or did not wait", w.log("stet"))
+	}
+	kept, _ := os.ReadFile(filepath.Join(w.home, "probe.txt"))
+	if !strings.Contains(string(kept), "[probe] cage: every case held") {
+		t.Fatalf("not kept in probe.txt:\n%s", kept)
+	}
+}

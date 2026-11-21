@@ -193,8 +193,9 @@ type liumPod struct {
 	GPUName     string   `json:"gpu_name"`
 	Status      string   `json:"status"`
 	Price       *float64 `json:"price"`
-	CreatedAt   string   `json:"created_at"`   // without a zone: UTC
-	Phase       *string  `json:"phase"`        // while it is created: "pulling image", "starting container", …
+	CreatedAt   string   `json:"created_at"` // without a zone: UTC
+	Phase       *string  `json:"phase"`      // while it is created: "pulling image", "starting container", …
+	SSH         string   `json:"ssh_connect_cmd"`
 	NodeOffline bool     `json:"node_offline"` // its node fails its health checks
 }
 
@@ -250,6 +251,25 @@ func (m *liumMarket) Rentals(ctx context.Context) ([]Rental, error) {
 		out = append(out, r)
 	}
 	return out, nil
+}
+
+// sshTo is where to log in to a pod: "root@host", and the port.
+func (m *liumMarket) sshTo(ctx context.Context, id string) (string, int, error) {
+	var pods []liumPod
+	if _, err := m.a.do(ctx, "GET", "/pods", nil, &pods); err != nil {
+		return "", 0, err
+	}
+	for _, p := range pods {
+		if p.ID == id {
+			var who string
+			var port int
+			if _, err := fmt.Sscanf(p.SSH, "ssh %s -p %d", &who, &port); err == nil {
+				return who, port, nil
+			}
+			return "", 0, fmt.Errorf("Lium gives no way in to it yet (%q)", p.SSH)
+		}
+	}
+	return "", 0, errors.New("Lium does not list it")
 }
 
 // Logs are what Lium has of a pod: its container's, and its own of making it.

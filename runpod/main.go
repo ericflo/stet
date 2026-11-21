@@ -61,6 +61,10 @@ Vast.ai, Lium, Salad and Clore.ai.
   stet-cloud pause | resume      stop drawing rounds, so that the machines turn to the
                                  organisers' students, or start again (the round under way finishes)
   stet-cloud migrate             copy stet-runpod's pool and records over, once
+  stet-cloud probe --market M    rent one machine there that takes no work, and say what it
+                                 is and whether stet's container sandbox holds on it
+                                 (tools/cage_check.py); markets curators M --note: let
+                                 machines there run curators
 
 The markets' keys are read from ~/.config/stet-cloud/credentials.env (--credentials), and
 the environment over it, at every look; a market without one is off. Nothing is rented on
@@ -214,7 +218,7 @@ func flags(name string, o *Options) *flag.FlagSet {
 var finishers = map[*flag.FlagSet]func() error{}
 
 // marketOnlyFor are the commands --market is for: renting by hand, and looking.
-var marketOnlyFor = map[string]bool{"up": true, "offers": true, "gpus": true}
+var marketOnlyFor = map[string]bool{"up": true, "offers": true, "gpus": true, "probe": true}
 
 // parse reads the settings wherever they are among the words, and returns the rest. Go's
 // flag package stops at the first word that is not a setting, so that `up 2 --dry-run`
@@ -292,7 +296,8 @@ func run(args []string, stdout, stderr io.Writer) error {
 		}
 		return cmdOffers(ctx, f, *each)
 	case "markets":
-		note := fs.String("note", "", "with arm: why, kept with it")
+		note := fs.String("note", "", "with arm or curators: why, kept with it")
+		off := fs.Bool("off", false, "with curators: machines there grade only")
 		rest, err := parse(fs, args)
 		if err != nil {
 			return err
@@ -301,7 +306,22 @@ func run(args []string, stdout, stderr io.Writer) error {
 		if err != nil {
 			return err
 		}
-		return cmdMarkets(ctx, f, rest, *note)
+		return cmdMarkets(ctx, f, rest, *note, *off)
+	case "probe":
+		check := fs.String("check", "tools/cage_check.py", "the sandbox's check, tools/cage_check.py in stet's repository")
+		wait := fs.Duration("wait", 50*time.Minute, "how long to wait for what the probe finds")
+		rest, err := parse(fs, args)
+		if err != nil {
+			return err
+		}
+		if len(rest) > 0 || o.Market == "" {
+			return errors.New("probe takes --market and nothing else")
+		}
+		f, err := open(o, stdout, true, true)
+		if err != nil {
+			return err
+		}
+		return cmdProbe(ctx, f, *check, *wait)
 	case "migrate":
 		rest, err := parse(fs, args)
 		if err != nil {

@@ -124,15 +124,15 @@ func (f *Fleet) sayMarketsLeftOut() {
 // cmdMarkets says, for each market, whether a key is found, whether it works, what is left to
 // spend, whether it is armed, and what it has that fits now; or arms or disarms one. Nothing is
 // rented.
-func cmdMarkets(ctx context.Context, f *Fleet, args []string, note string) error {
+func cmdMarkets(ctx context.Context, f *Fleet, args []string, note string, off bool) error {
 	if err := f.refresh(); err != nil {
 		return err
 	}
 	verb, names := "", marketOrder
 	if len(args) > 0 {
 		verb = args[0]
-		if len(args) != 2 || (verb != "check" && verb != "arm" && verb != "disarm") {
-			return errors.New("markets takes nothing, or check, arm or disarm and one market's name")
+		if len(args) != 2 || (verb != "check" && verb != "arm" && verb != "disarm" && verb != "curators") {
+			return errors.New("markets takes nothing, or check, arm, disarm or curators and one market's name")
 		}
 		if !slices.Contains(marketOrder, args[1]) {
 			return fmt.Errorf("there is no market %q: it is one of %s", args[1], strings.Join(marketOrder, ", "))
@@ -142,6 +142,21 @@ func cmdMarkets(ctx context.Context, f *Fleet, args []string, note string) error
 	switch verb {
 	case "arm":
 		return f.arm(ctx, names[0], note)
+	case "curators":
+		if f.arming.Curators == nil {
+			f.arming.Curators = map[string]Armed{}
+		}
+		if off {
+			delete(f.arming.Curators, names[0])
+			f.say("machines on %s grade only from the next look", marketTitle(names[0]))
+		} else {
+			if note == "" {
+				return errors.New("markets curators takes --note: what showed the sandbox holds there")
+			}
+			f.arming.Curators[names[0]] = Armed{At: f.now().Unix(), Note: note}
+			f.say("machines on %s may run curators from the next look, each once it has checked its own sandbox", marketTitle(names[0]))
+		}
+		return f.arming.save(f.o.Home)
 	case "disarm":
 		if !f.armed(names[0]) {
 			f.say("%s is not armed", marketTitle(names[0]))

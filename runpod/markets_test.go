@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -443,14 +444,14 @@ func TestNothingIsRentedOnAMarketNotArmed(t *testing.T) {
 	}
 	// A market with no key cannot be armed; Vast can, once its key works.
 	f.off = map[string]string{"salad": "SALAD_API_KEY is not set"}
-	if err := cmdMarkets(context.Background(), f, []string{"arm", "salad"}, "test"); err == nil || !strings.Contains(err.Error(), "has no key") {
+	if err := cmdMarkets(context.Background(), f, []string{"arm", "salad"}, "test", false); err == nil || !strings.Contains(err.Error(), "has no key") {
 		t.Fatalf("armed Salad: %v", err)
 	}
-	if err := cmdMarkets(context.Background(), f, []string{"arm", "vast"}, "test"); err == nil || !strings.Contains(err.Error(), "key does not work") {
+	if err := cmdMarkets(context.Background(), f, []string{"arm", "vast"}, "test", false); err == nil || !strings.Contains(err.Error(), "key does not work") {
 		t.Fatalf("armed Vast with a key that does not work: %v", err)
 	}
 	fm.answers["GET /api/v0/users/current/"] = `{"credit": 39.66, "can_pay": true}`
-	if err := cmdMarkets(context.Background(), f, []string{"arm", "vast"}, "smoke test passed"); err != nil || !f.armed("vast") {
+	if err := cmdMarkets(context.Background(), f, []string{"arm", "vast"}, "smoke test passed", false); err != nil || !f.armed("vast") {
 		t.Fatalf("armed Vast: %v", err)
 	}
 	if a, err := readArming(f.o.Home); err != nil || a.Armed["vast"].Note != "smoke test passed" || a.Armed["vast"].At == 0 || !f.armed("runpod") {
@@ -670,10 +671,20 @@ func TestCloreOrdersAndFindsItsOrder(t *testing.T) {
 		}
 		joined, parts = joined+v, parts+1
 	}
-	got, _ := base64.StdEncoding.DecodeString(joined)
+	zipped, _ := base64.StdEncoding.DecodeString(joined)
+	zr, err := gzip.NewReader(bytes.NewReader(zipped))
+	if err != nil {
+		t.Fatalf("the script is not gzipped: %v", err)
+	}
+	got, _ := io.ReadAll(zr)
 	if o.Currency != "USD-Blockchain" || o.Type != "on-demand" || o.Server != 124838 || o.Hours != cloreHours || o.Price != 4.0 ||
-		string(got) != script || parts < 2 || !strings.Contains(o.Command, "$STET_WORKER_SCRIPT_0$STET_WORKER_SCRIPT_1") || o.Env["STET_MARKET"] != "clore" {
+		string(got) != script || parts < 1 || !strings.Contains(o.Command, "$STET_WORKER_SCRIPT_0 | base64 -d | gunzip") || o.Env["STET_MARKET"] != "clore" {
 		t.Fatalf("ordered %s", fm.bodies[0])
+	}
+	// A long value is cut into values Clore takes, and put back together by the worker.
+	big := make(map[string]string)
+	if p := splitEnv(big, "STET_PROBE_", strings.Repeat("x", 4000)); len(p) != 3 || len(big["STET_PROBE_0"]) != cloreEnvValue || len(big["STET_PROBE_2"]) != 4000-2*cloreEnvValue {
+		t.Fatalf("cut into %v", p)
 	}
 	// The command puts the pieces back together and runs them.
 	env := []string{"PATH=/usr/bin:/bin"}
@@ -730,5 +741,45 @@ func TestOneMarketFailingDoesNotStopTheOthers(t *testing.T) {
 	}
 	if len(rp.created) != 4 || !strings.Contains(out.String(), "Vast.ai's offers could not be had") {
 		t.Fatalf("rented %d on RunPod:\n%s", len(rp.created), out)
+	}
+}
+
+// Once the sandbox was shown to hold on a market and curators were let run there, its machines
+// are rented to run them, with a curator machine's disk.
+func TestCuratorsRunWhereTheyWereLet(t *testing.T) {
+	rp, st := newFakeRunPod(t), newFakeStet(t)
+	f, _ := testFleet(t, rp, st, 1)
+	fm := newFakeMarket(t, "Authorization", "Bearer vast-key")
+	fm.answers["POST /api/v0/bundles/"] = string(fixture(t, "vast_bundles.json"))
+	fm.answers["GET /api/v1/instances/"] = `{"instances": [], "next_token": null}`
+	fm.answers["PUT *"] = `{"success": true, "new_contract": 9001}`
+	vast := newVast(fm.srv.URL, "vast-key")
+	f.markets = append(f.markets, vast)
+	f.o.Edits, f.o.Disk = true, 100
+	if err := f.refresh(); err != nil {
+		t.Fatal(err)
+	}
+	if f.curators("vast") || f.needOn(vast).DiskGB != graderDisk {
+		t.Fatal("curators on Vast before they were let run there")
+	}
+	f.o.Market = "vast"
+	if err := cmdMarkets(context.Background(), f, []string{"curators", "vast"}, "", false); err == nil {
+		t.Fatal("curators were let run without saying why")
+	}
+	if err := cmdMarkets(context.Background(), f, []string{"curators", "vast"}, "cage_check: every case held on an RTX 4080 SUPER", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.refresh(); err != nil || !f.curators("vast") || f.needOn(vast).DiskGB != 100 {
+		t.Fatalf("curators on Vast once let run there: %v", err)
+	}
+	st.work = Work{Rounds: []WorkRound{{ID: "s1-o00001", RunsWanted: 4, RunsWaiting: 4}}}
+	if err := cmdUp(context.Background(), f, 1); err != nil {
+		t.Fatal(err)
+	}
+	if body := fm.bodies[len(fm.bodies)-1]; !strings.Contains(body, `"STET_WORKER_EDITS":"1"`) || !strings.Contains(body, `"disk":100`) {
+		t.Fatalf("rented on Vast as %s", body)
+	}
+	if err := cmdMarkets(context.Background(), f, []string{"curators", "vast"}, "", true); err != nil || func() bool { f.refresh(); return f.curators("vast") }() {
+		t.Fatalf("curators on Vast after they were stopped: %v", err)
 	}
 }

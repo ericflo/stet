@@ -161,16 +161,22 @@ func logLines(data []byte) []string {
 				}
 			}
 			line := ""
-			for _, k := range []string{"line", "log_text", "message", "msg", "text", "event_name", "log"} {
+			for _, k := range []string{"line", "log_text", "text_log", "message", "msg", "text", "event_name", "log"} {
 				if s, ok := x[k].(string); ok && s != "" {
 					line = s
 					break
 				}
 			}
 			if line == "" {
+				if j, ok := x["json_log"].(map[string]any); ok {
+					raw, _ := json.Marshal(j)
+					line = string(raw)
+				}
+			}
+			if line == "" {
 				return
 			}
-			for _, k := range []string{"ts", "time", "event_time", "received_at", "created_at", "timestamp"} {
+			for _, k := range []string{"ts", "time", "event_time", "received_at", "receive_time", "created_at", "timestamp"} {
 				if s, ok := x[k].(string); ok && len(s) >= 19 {
 					line = s[11:19] + "  " + line
 					break
@@ -292,6 +298,10 @@ func readCredentials(path string) (map[string]string, error) {
 
 type Arming struct {
 	Armed map[string]Armed `json:"armed"`
+	// Curators are the markets, besides RunPod, where stet's container sandbox was shown to
+	// hold (stet-cloud probe), and machines may run curators. Each machine checks its own
+	// sandbox before it takes one, and only grades where it cannot be made.
+	Curators map[string]Armed `json:"curators,omitempty"`
 }
 
 type Armed struct {
@@ -486,7 +496,7 @@ func (a *api) doWith(ctx context.Context, method, path string, headers map[strin
 
 // readOnlyPost is a POST that only asks: Vast's offer search, Salad's availability.
 func (a *api) readOnlyPost(path string) bool {
-	return strings.HasPrefix(path, "/api/v0/bundles") || strings.Contains(path, "/availability/")
+	return strings.HasPrefix(path, "/api/v0/bundles") || strings.Contains(path, "/availability/") || strings.HasSuffix(path, "/log-entries")
 }
 
 // errorDetail is what an error answer says, from whichever field the market puts it in.

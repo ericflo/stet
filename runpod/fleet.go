@@ -43,11 +43,14 @@ type Fleet struct {
 	offerSaid map[string]string
 	// What was last seen of each machine rented, to note what changes (seen.go).
 	seen map[string]seenRental
-	st   *Stet
-	op   *Key // the organisers' own key, for asking what is waiting
-	out  io.Writer
-	now  func() time.Time
-	keys []*Key // the pool, by handle
+	// probe: tools/cage_check.py, gzipped and base64'd, for a machine rented by stet-cloud
+	// probe: it takes no work, and says whether the sandbox holds (probe.go).
+	probe string
+	st    *Stet
+	op    *Key // the organisers' own key, for asking what is waiting
+	out   io.Writer
+	now   func() time.Time
+	keys  []*Key // the pool, by handle
 	// What was last said of graders waiting for their time, said again only once it changes.
 	waitSaid string
 	// What has been seen machines take (calibrate.go): read once, kept when it changes, and
@@ -638,11 +641,24 @@ func (f *Fleet) need() Need {
 // those that run curators too, which keep 60 GB free.
 const graderDisk = 25
 
+// curators says whether machines on a market may run curators: on RunPod, and where a probe
+// showed stet's container sandbox to hold and curators were let run there (markets.json).
+func (f *Fleet) curators(market string) bool {
+	if m := f.market(market); m != nil && m.Caps().Curators {
+		return true
+	}
+	if f.arming != nil {
+		_, ok := f.arming.Curators[market]
+		return ok
+	}
+	return false
+}
+
 // needOn is what a machine on a market must have: one where stet's container sandbox is not
 // known to hold only grades, and needs only a grader's disk.
 func (f *Fleet) needOn(m Market) Need {
 	n := f.need()
-	if !m.Caps().Curators {
+	if !f.curators(m.Name()) {
 		n.DiskGB = min(n.DiskGB, graderDisk)
 	}
 	return n
@@ -863,11 +879,11 @@ func (f *Fleet) launchSome(ctx context.Context, v *View, n int, long, cheap bool
 	if cheap && len(f.o.GPUs) == 0 {
 		byGrade(gpus, f.speedOf)
 	}
-	if cheap && f.o.Edits {
+	if cheap && f.o.Edits && f.probe == "" {
 		// Machines to run curators, only where stet's container sandbox is known to hold.
 		var held []Offer
 		for _, c := range gpus {
-			if m := f.market(c.Market); m != nil && m.Caps().Curators {
+			if f.curators(c.Market) {
 				held = append(held, c)
 			}
 		}
@@ -1012,7 +1028,13 @@ func (f *Fleet) rent(ctx context.Context, v *View, k *Key, gpus []Offer, site st
 		}
 		l := f.launchFor(k, site)
 		l.Need = f.needOn(m)
-		if l.Env["STET_WORKER_EDITS"] == "1" && !m.Caps().Curators {
+		if f.probe != "" {
+			l.Env["STET_PROBE"], l.Env["STET_WORKER_EDITS"] = f.probe, "1"
+			if l.SSHKey == "" && c.Market != "runpod" {
+				l.SSHKey = sshKey(l) // to read what it found, where the market lets a key in
+			}
+		}
+		if l.Env["STET_WORKER_EDITS"] == "1" && !f.curators(c.Market) && f.probe == "" {
 			// Grading only, until stet's container sandbox is known to hold there.
 			l.Env["STET_WORKER_EDITS"] = "0"
 		}

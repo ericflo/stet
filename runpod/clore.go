@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -172,19 +174,35 @@ func (m *cloreMarket) Offers(ctx context.Context, n Need) ([]Offer, error) {
 	return offers, nil
 }
 
-// cloreScript is worker.sh in the environment, base64'd and cut into values Clore takes, and
-// the command that puts it back together and runs it.
+// cloreScript is worker.sh in the environment, gzipped, base64'd and cut into values Clore takes
+// (it takes 1,536 characters a value, 12,288 in all), and the command that puts it back
+// together and runs it.
 func cloreScript(script string) (env map[string]string, command string) {
-	b := base64.StdEncoding.EncodeToString([]byte(script))
 	env = map[string]string{}
+	parts := splitEnv(env, "STET_WORKER_SCRIPT_", gzipB64(script))
+	return env, `bash -c "echo ` + strings.Join(parts, "") + ` | base64 -d | gunzip > /root/stet-worker.sh && exec bash /root/stet-worker.sh"`
+}
+
+// gzipB64 is a text gzipped and base64'd.
+func gzipB64(s string) string {
+	var b bytes.Buffer
+	z, _ := gzip.NewWriterLevel(&b, gzip.BestCompression)
+	z.Write([]byte(s))
+	z.Close()
+	return base64.StdEncoding.EncodeToString(b.Bytes())
+}
+
+// splitEnv puts a long value into the environment in pieces a value Clore takes, named prefix0,
+// prefix1, ..., and says them as $names in order.
+func splitEnv(env map[string]string, prefix, v string) []string {
 	var parts []string
-	for i := 0; len(b) > 0; i++ {
-		n := min(len(b), cloreEnvValue)
-		k := fmt.Sprintf("STET_WORKER_SCRIPT_%d", i)
-		env[k], b = b[:n], b[n:]
+	for i := 0; len(v) > 0; i++ {
+		n := min(len(v), cloreEnvValue)
+		k := fmt.Sprintf("%s%d", prefix, i)
+		env[k], v = v[:n], v[n:]
 		parts = append(parts, "$"+k)
 	}
-	return env, `bash -c "echo ` + strings.Join(parts, "") + ` | base64 -d > /root/stet-worker.sh && exec bash /root/stet-worker.sh"`
+	return parts
 }
 
 // Rent orders a server on demand, paid in USD-Blockchain, at the price it was offered at,
@@ -203,11 +221,20 @@ func (m *cloreMarket) Rent(ctx context.Context, o Offer, l Launch) (*Rental, err
 	env, command := cloreScript(l.Script)
 	env["STET_MARKET"] = "clore"
 	for k, v := range l.Env {
+		if len(v) > cloreEnvValue && strings.HasPrefix(k, "STET_PROBE") {
+			splitEnv(env, k+"_", v) // the worker puts STET_PROBE_0, _1, ... back together
+			continue
+		}
 		env[k] = v
+	}
+	ports := map[string]string{}
+	if l.SSHKey != "" {
+		env["PUBLIC_KEY"] = l.SSHKey // the worker starts sshd for it
+		ports["22"] = "tcp"
 	}
 	body := map[string]any{
 		"currency": cloreCurrency, "image": l.Image, "renting_server": server, "type": "on-demand",
-		"env": env, "command": command, "rental_hours": cloreHours, "ports": map[string]string{},
+		"env": env, "command": command, "rental_hours": cloreHours, "ports": ports,
 	}
 	if o.Ask > 0 {
 		body["required_price"] = o.Ask
@@ -251,6 +278,8 @@ type cloreOrder struct {
 	Specs    struct {
 		GPU string `json:"gpu"`
 	} `json:"specs"`
+	PubCluster []string `json:"pub_cluster"` // the hosts its ports are forwarded on
+	TCPPorts   []string `json:"tcp_ports"`   // "22:10000": the container's port, and where it is
 }
 
 type cloreRental struct {
@@ -294,6 +323,31 @@ func (m *cloreMarket) orders(ctx context.Context) ([]cloreRental, error) {
 			Phase: "order " + status, Detail: "order " + status + " (Clore says no more of it)"}, o.SI})
 	}
 	return rentals, nil
+}
+
+// sshTo is where to log in to an order's container: its port 22, forwarded.
+func (m *cloreMarket) sshTo(ctx context.Context, id string) (string, int, error) {
+	var out struct {
+		Orders []cloreOrder `json:"orders"`
+	}
+	if err := m.do(ctx, "GET", "/my_orders", nil, func(raw []byte) error { return json.Unmarshal(raw, &out) }); err != nil {
+		return "", 0, err
+	}
+	for _, o := range out.Orders {
+		if strconv.FormatInt(o.ID, 10) != id {
+			continue
+		}
+		for _, p := range o.TCPPorts {
+			if in, at, ok := strings.Cut(p, ":"); ok && in == "22" && len(o.PubCluster) > 0 {
+				port, err := strconv.Atoi(at)
+				if err == nil {
+					return "root@" + o.PubCluster[0], port, nil
+				}
+			}
+		}
+		return "", 0, errors.New("Clore forwards no port 22 for it yet")
+	}
+	return "", 0, errors.New("Clore does not list it")
 }
 
 // End cancels an order. One Clore no longer lists as active is gone already, and not an error.

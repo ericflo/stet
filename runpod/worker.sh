@@ -11,6 +11,11 @@
 #   STET_WORKER_HOME    where it keeps its files: /root, but for the tests
 #   STET_MARKET         where it is rented: runpod (when not set) or vast; elsewhere it
 #                       cannot end itself, and waits for stet-cloud to end it
+#   STET_PROBE          optional (stet-cloud probe): tools/cage_check.py, gzipped and base64'd,
+#                       or in pieces STET_PROBE_0, STET_PROBE_1, ... where a market's values
+#                       are short. It then takes no work: it says what this machine is, what
+#                       stet doctor says, and whether the container sandbox holds against a
+#                       curator that wants out, and waits to be ended.
 #
 # RunPod gives every pod RUNPOD_POD_ID, and RUNPOD_API_KEY: a key that reaches only this
 # pod. Vast gives every instance CONTAINER_ID and CONTAINER_API_KEY, the same. That is what
@@ -112,6 +117,31 @@ if ! command -v stet >/dev/null 2>&1; then
 fi
 command -v stet >/dev/null 2>&1 || end_pod "stet could not be installed"
 say "$(stet --version)"
+
+# A probe: what this machine is, and whether stet's container sandbox holds here. Every line
+# it says starts "[probe]", and is kept in $home/probe.txt too.
+if [ -z "${STET_PROBE:-}" ]; then
+  for i in 0 1 2 3 4 5 6 7 8 9; do v="STET_PROBE_$i"; STET_PROBE="${STET_PROBE:-}${!v:-}"; done
+fi
+if [ -n "${STET_PROBE:-}" ]; then
+  probe() { sed -u 's/^/[probe] /' | tee -a "$home/probe.txt"; }
+  {
+    echo "machine: $(nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader 2>&1 | head -n 1)"
+    echo "kernel: $(uname -r); cpus: $(nproc); memory: $(free -g | awk '/^Mem/ {print $2}') GB; disk free: $(df -h "$home" | awk 'NR==2 {print $4}')"
+    echo "landlock: $(cat /sys/kernel/security/lsm 2>/dev/null || echo unknown); cgroup: $(stat -fc %T /sys/fs/cgroup 2>/dev/null)"
+  } | probe
+  stet doctor 2>&1 | sed 's/^/doctor: /' | probe
+  printf '%s' "$STET_PROBE" | base64 -d | gunzip > "$home/cage_check.py" 2>/dev/null
+  py=$(head -n 1 "$(command -v stet)" | sed 's/^#!//')
+  if [ -s "$home/cage_check.py" ] && [ -x "$py" ]; then
+    (cd "$home" && "$py" "$home/cage_check.py" 2>&1) | sed 's/^/cage: /' | probe
+    echo "done: cage_check exit ${PIPESTATUS[0]}" | probe
+  else
+    echo "done: no cage_check to run (python: $py)" | probe
+  fi
+  say "probe finished; waiting to be ended"
+  exec sleep infinity
+fi
 
 # In the background, so that being told to stop (the pod ended from outside) reaches stet,
 # which hands back the job it holds.
