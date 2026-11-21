@@ -153,3 +153,11 @@
   doc.addEventListener("pointerleave", clear);
   window.addEventListener("scroll", clear, { passive: true });
 })();
+
+// A strip of rounds to pick from shows the picked one, however far along it is.
+(function () {
+  document.querySelectorAll(".pick").forEach(function (p) {
+    var on = p.querySelector(".on");
+    if (on && p.scrollWidth > p.clientWidth) p.scrollLeft = on.offsetLeft - p.offsetLeft - (p.clientWidth - on.offsetWidth) / 2;
+  });
+})();

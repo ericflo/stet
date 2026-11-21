@@ -86,7 +86,7 @@
           <div class="step"><span class="k">result</span><span class="v">{{if eq .Status "dropped"}}<span class="reason">set aside: {{.Reason}}</span>{{else}}<span class="chip bad">failed</span> <span class="reason">{{if .Reason}}{{.Reason}}{{else}}it wrote no script{{end}}</span>{{end}}</span></div>
         </div>{{end}}
         {{if and (not .Scripts) (not .Failed)}}<span class="reason">Nobody ran it.</span>{{end}}
-        <a class="go" href="/editors/{{short .EditorID}}">{{.Name}}'s page →</a>
+        {{if .Valid}}<a class="go" href="/editors/{{short .EditorID}}?round={{$r.Idx}}#inside">inside this round →</a> · {{end}}<a class="go" href="/editors/{{short .EditorID}}">{{.Name}}'s page →</a>
       </div>
     </details></li>{{end}}
   </ol>

@@ -45,9 +45,10 @@
   </div>
 
   <div class="block">
-    {{with $d.Latest}}<details class="more">
-      <summary>Inside its latest round <small>round {{.RoundIdx}}</small></summary>
+    {{with $d.Latest}}<details class="more" id="inside"{{if $d.InsideAsked}} open{{end}}>
+      <summary>{{if $d.InsideLatest}}Inside its latest round{{else}}Inside one of its rounds{{end}} <small>round {{.RoundIdx}}</small></summary>
       <div class="in">
+        {{if gt (len $d.Inside) 1}}<nav class="pick" aria-label="Its rounds"><span class="k">round</span>{{range $d.Inside}}<a class="pill{{if eq . $d.Latest.RoundIdx}} on{{end}}" href="?round={{.}}#inside" aria-label="round {{.}}"{{if eq . $d.Latest.RoundIdx}} aria-current="page"{{end}}>{{.}}</a>{{end}}</nav>{{end}}
         {{if .HasStats}}<dl class="stats">
           <div><dt>pages kept</dt><dd>{{pct1 .Script.KeptDocFrac}}<small>of the documents drawn</small></dd></div>
           <div><dt>read</dt><dd>{{f1 .Script.Passes}}×<small>over what it kept</small></dd></div>
@@ -58,6 +59,7 @@
           {{if $d.SourceChart}}<figure class="figure"><h3>Where the gain comes from</h3><p class="how">Its gain on each thing the exam tests, in bits per byte better than unedited. Each counts the same. Right is better.</p><div class="plot">{{$d.SourceChart}}</div></figure>{{end}}
           {{if $d.CurveChart}}<figure class="figure"><h3>The model, learning from it</h3><p class="how">Training loss on its pages. Low here is not the goal; the exam is.</p><div class="plot">{{$d.CurveChart}}</div></figure>{{end}}
         </div>
+        <p class="after"><a class="go" href="/rounds/{{.Round}}#e-{{short .EditorID}}">who ran and graded it in round {{.RoundIdx}} →</a></p>
       </div>
     </details>{{end}}
 

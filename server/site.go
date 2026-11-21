@@ -1198,15 +1198,27 @@ func (s *Site) editor(w http.ResponseWriter, r *http.Request) {
 			d["Rival"] = &race.Rows[0]
 		}
 		d["Race"], d["Holds"] = race, b.RecordID == e.ID
+		// Inside one of its rounds: its latest settled one that it was scored in, or the one
+		// asked for with ?round=, picked from every such round (newest first).
+		asked, _ := strconv.Atoi(r.URL.Query().Get("round"))
+		var inside []int
+		var shown *EntryView
 		for i := range results {
-			if results[i].Settled && results[i].Valid {
-				latest := results[i]
-				d["Latest"] = &latest
-				d["SourceChart"] = gainChart(a.season.ExamSources, latest.BySource) // its gain on each pillar
-				if latest.Train != nil {
-					d["CurveChart"] = curveChart(latest.Train.Curve)
-				}
-				break
+			if !results[i].Settled || !results[i].Valid {
+				continue
+			}
+			inside = append(inside, results[i].RoundIdx)
+			if shown == nil || results[i].RoundIdx == asked {
+				shown = &results[i]
+			}
+		}
+		if shown != nil {
+			d["Inside"], d["InsideLatest"] = inside, shown.RoundIdx == inside[0]
+			d["InsideAsked"] = asked == shown.RoundIdx
+			d["Latest"] = shown
+			d["SourceChart"] = gainChart(a.season.ExamSources, shown.BySource) // its gain on each pillar
+			if shown.Train != nil {
+				d["CurveChart"] = curveChart(shown.Train.Curve)
 			}
 		}
 		if p := st.Editors[e.Parent]; p != nil && p.Public {
