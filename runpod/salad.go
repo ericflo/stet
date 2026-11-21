@@ -284,7 +284,9 @@ func (m *saladMarket) Rentals(ctx context.Context) ([]Rental, error) {
 // Salad's system has said of the group.
 func (m *saladMarket) Logs(ctx context.Context, id string, n int) ([]string, error) {
 	now := m.now().UTC()
-	q := fmt.Sprintf(`resource.type = "container" AND resource.labels.project_name = "%s" AND resource.labels.container_group_name = "%s"`, m.project, id)
+	// Salad refuses this query with the project's name in it too; a group's name is the
+	// organization's alone anyway.
+	q := fmt.Sprintf(`resource.type = "container" AND resource.labels.container_group_name = "%s"`, id)
 	var raw json.RawMessage
 	_, err := m.a.do(ctx, "POST", m.orgPath()+"/log-entries", map[string]any{
 		"query": q, "start_time": now.Add(-6 * time.Hour).Format(time.RFC3339), "end_time": now.Format(time.RFC3339),
