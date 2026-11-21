@@ -196,6 +196,8 @@ footer p { margin: 0; }
 .bar.neg i { background: var(--mark-neg); width: 3px; border-radius: 1px; }
 .bar.zero i { background: var(--ink-3); width: 3px; }
 .bar.fail i { display: none; }
+.bar i.w { left: var(--w, 0%); width: var(--v, 0%); min-width: 0; background: var(--mark-soft); border-radius: 0 5px 5px 0; }
+.bar i:first-child:not(:last-child) { border-radius: 1px 0 0 1px; }
 .bar.fail::before, .bar.fail::after { content: ""; position: absolute; left: 4px; top: -3px; height: 16px; border-left: 2px solid var(--red); transform: rotate(45deg); }
 .bar.fail::after { transform: rotate(-45deg); }
 
@@ -435,6 +437,7 @@ a.now-card:hover { border-color: var(--ink-3); }
 .progress .seg { height: 14px; }
 .progress p { margin: 10px 0 0; font-size: 17px; color: var(--ink-2); }
 .progress p b { color: var(--ink); }
+.progress p.work-sum { font-size: 15.5px; color: var(--ink-3); margin-top: 6px; }
 .waiting { list-style: none; margin: 0; padding: 0; max-width: 640px; }
 .waiting li { display: flex; justify-content: space-between; gap: 16px; padding: 12px 4px; border-bottom: 1px solid var(--rule-2); align-items: baseline; }
 .waiting li:last-child { border-bottom: 0; }

@@ -1505,7 +1505,7 @@ func (a *App) release(ctx context.Context, acctID, claimID int64, reason string)
 // handBack ends a job its holder gives up, so that it may be handed to somebody else, and
 // keeps why.
 func (a *App) handBack(tx *Tx, c *Claim, reason string) {
-	c.Status, c.Reason = "released", clip(strings.ToValidUTF8(reason, "?"), 300)
+	c.Status, c.Reason, c.EndedAt = "released", clip(strings.ToValidUTF8(reason, "?"), 300), now()
 	tx.saveClaim(c)
 	if rd := tx.s.Rounds[c.RoundIdx]; rd != nil && rd.Status == "open" && a.established(tx.s.Accounts[c.AccountID]) {
 		a.moved(tx, rd)
@@ -1654,7 +1654,7 @@ func (a *App) submitScript(ctx context.Context, acctID, claimID int64, p *Script
 		if saw {
 			// It has been handed one of this entry's scripts to grade, so whatever it sends
 			// now could be that script. The job is over, as if it had been handed back.
-			c.Status = "released"
+			c.Status, c.EndedAt = "released", now()
 			tx.saveClaim(c)
 			a.moved(tx, rd)
 			refused = fail(409, "this account has been handed one of this entry's scripts to grade, so a run of the entry from it cannot be taken. The job has been handed back")
@@ -1664,7 +1664,7 @@ func (a *App) submitScript(ctx context.Context, acctID, claimID int64, p *Script
 		if other || (sha == "" && p.ScriptSHA256 != "") {
 			// The first run of a round fixes its corpus. A machine that built another has run
 			// the editor on other documents, and its script would mean nothing here.
-			c.Status = "refused"
+			c.Status, c.EndedAt = "refused", now()
 			tx.saveClaim(c)
 			a.moved(tx, rd)
 			tx.event("established-differ", map[string]any{"round": p.Round, "verifier": acct.Handle, "what": "corpus"})
@@ -1685,7 +1685,7 @@ func (a *App) submitScript(ctx context.Context, acctID, claimID int64, p *Script
 			rd.CorpusSHA = p.CorpusSHA256
 		}
 		a.moved(tx, rd)
-		c.Status = "done"
+		c.Status, c.EndedAt = "done", now()
 		tx.saveClaim(c)
 		// The run is credited to its runner when the entry settles (settleEntry), as a grade
 		// is: a count that moved now would say who ran what while the round is sealed.
@@ -1739,7 +1739,7 @@ func (a *App) editSeconds(run *Run) float64 {
 func expireClaims(tx *Tx, e *Entry) {
 	for _, c := range tx.s.Claims {
 		if c.RoundIdx == e.RoundIdx && c.EditorID == e.EditorID && c.Status == "claimed" {
-			c.Status = "expired"
+			c.Status, c.EndedAt = "expired", now()
 			tx.saveClaim(c)
 		}
 	}
@@ -1900,7 +1900,7 @@ func (a *App) submitResult(ctx context.Context, acctID, claimID int64, p *Result
 		}
 		est := a.established(acct)
 		refuse := func(what string, diff float64, format string, args ...any) error {
-			c.Status = "refused"
+			c.Status, c.EndedAt = "refused", now()
 			tx.saveClaim(c)
 			if est {
 				tx.event("established-differ", map[string]any{"round": p.Round, "verifier": acct.Handle, "what": what})
@@ -1966,7 +1966,7 @@ func (a *App) submitResult(ctx context.Context, acctID, claimID int64, p *Result
 		}
 		tx.newResult(res)
 		a.refreshScores(tx, rd) // the round's baseline, and every grade's score against it
-		c.Status = "done"
+		c.Status, c.EndedAt = "done", now()
 		tx.saveClaim(c)
 		acct.LastSeen = now()
 		tx.saveAccount(acct)
@@ -2201,7 +2201,7 @@ func (a *App) dropScript(tx *Tx, j *judge, st *entryState, sc *scriptState, why 
 		tx.saveResult(r)
 	}
 	for _, c := range sc.Live {
-		c.Status = "expired" // nothing is held against whoever was at work on it
+		c.Status, c.EndedAt = "expired", now() // nothing is held against whoever was at work on it
 		tx.saveClaim(c)
 	}
 	for _, run := range st.Entry.Runs {

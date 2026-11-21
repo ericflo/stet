@@ -172,6 +172,15 @@ func TestPreview(t *testing.T) {
 			}
 		}
 		shift(w, 19*time.Minute)
+		// The organisers' rented machines at work on the rest: a curator being run, grades
+		// training, one handed back.
+		for i, g := range []string{"NVIDIA GeForce RTX 5080", "NVIDIA GeForce RTX 5080", "NVIDIA GeForce RTX 3080 Ti", "NVIDIA GeForce RTX 5080"} {
+			m := &previewActor{actor: w.rented(stet, fmt.Sprintf("stet-rp-%02d", i+1)), gpu: g, edits: i%2 == 0}
+			if c := claimAs(t, w, m); c.Job != nil && i == 3 {
+				m.do("POST", fmt.Sprintf("/api/v1/jobs/%d/release", c.Job.ID), map[string]string{"reason": "interrupted"}, nil)
+			}
+			shift(w, 4*time.Minute)
+		}
 	}
 	serve(t, w, addr)
 }

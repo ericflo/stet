@@ -468,6 +468,7 @@ func (s *Site) funcs() template.FuncMap {
 			return many
 		},
 		"gh":      func(login string) template.URL { return template.URL("https://github.com/" + login) },
+		"dur":     duration,
 		"minutes": func(seconds any) string { return trimZero(fmt.Sprintf("%.1f", float64(toInt(seconds))/60)) },
 		"howlong": func(seconds any) string {
 			n := toInt(seconds)
@@ -1340,6 +1341,7 @@ func (s *Site) round(w http.ResponseWriter, r *http.Request) {
 	var rs *roundSummary
 	var entries []roundEntry
 	var expected, later []expectedRow
+	var work *roundWork
 	prev, next := "", ""
 	a.st.view(func(st *State) {
 		rd := st.Rounds[idx]
@@ -1348,6 +1350,10 @@ func (s *Site) round(w http.ResponseWriter, r *http.Request) {
 		}
 		sum := a.roundSummary(st, rd)
 		rs = &sum
+		if rd.Status == "open" {
+			w := a.roundWork(st, rd, now())
+			work = &w
+		}
 		// The page reads as a ranking: entries with a score, best first, then those that
 		// failed or were not run, whose zero is not a place.
 		entries = a.roundEntries(st, idx)
@@ -1366,7 +1372,7 @@ func (s *Site) round(w http.ResponseWriter, r *http.Request) {
 	sc := a.season.Scales[rs.Scale]
 	d := map[string]any{"R": rs, "ID": rs.ID, "Entries": entries, "Top": topGain(entries), "Scale": sc, "Tolerance": a.tolerance(),
 		"RunsPerEntry": a.cfg.RunsPerEntry, "Prev": prev, "Next": next,
-		"Expected": expected, "Later": later, "MaxNew": a.cfg.MaxNewPerRound, "QualifyRounds": a.cfg.QualifyRounds}
+		"Expected": expected, "Later": later, "MaxNew": a.cfg.MaxNewPerRound, "QualifyRounds": a.cfg.QualifyRounds, "Work": work}
 	// Every run of the round's entries, and every grade of every script they wrote, whatever
 	// it said, is drawn entry by entry: who ran it, what each run wrote, who graded that.
 	runs := 0

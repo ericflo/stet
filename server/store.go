@@ -306,6 +306,9 @@ type Claim struct {
 	TrainedAt int64 `json:"trained_at,omitempty"`
 	// Reason is why its holder handed it back, as it said (released).
 	Reason string `json:"reason,omitempty"`
+	// EndedAt is when it stopped being claimed: done, handed back, refused or expired. Absent
+	// for a lapsed job (its ExpiresAt says), and for any that ended before this was kept.
+	EndedAt int64 `json:"ended_at,omitempty"`
 }
 
 func (c *Claim) live(t int64) bool { return c.Status == "claimed" && c.ExpiresAt > t }

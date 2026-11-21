@@ -28,16 +28,30 @@
   </div>{{end}}
   {{if or $d.Expected $d.Later}}<p class="after">A curator's code is public from the first round it is drawn into. Until then only its name shows here.</p>{{end}}
 
-  {{else if eq $r.Status "open"}}
+  {{else if eq $r.Status "open"}}{{$w := $d.Work}}
   <div class="progress" id="round-progress" data-live>
     {{template "seg" $r}}
-    <p><b>{{$r.Edited}} of {{$r.Entries}}</b> curators run so far. Every score stays sealed until all are done, then they are published at once.{{if not $r.ExamSHA}} Graders train as scripts come in, and sit its exam once it is made, from text published in the hour after the draw.{{end}}</p>
+    <p><b>{{$r.Edited}} of {{$r.Entries}}</b> curators run{{if $w.Graded}} · <b>{{$w.Graded}}</b> {{plural $w.Graded "grade" "grades"}} done{{end}}{{if $w.Training}} · <b>{{$w.Training}}</b> training{{end}}{{if $w.Trained}} · <b>{{$w.Trained}}</b> trained, waiting for the exam{{end}}. Every score stays sealed until all are done.{{if $r.ExamSHA}} The exam was posted {{ago $r.ExamAt}}.{{else}} Graders train as scripts come in, and sit its exam once it is made, from text published in the hour after the draw{{with $w.ExamDue}}: about {{hm .}} UTC{{end}}.{{end}}</p>
+    <p class="work-sum">{{if $w.Machines}}<b>{{$w.Machines}} {{plural $w.Machines "machine" "machines"}}</b> at work on it now: {{range $i, $g := $w.GPUs}}{{if $i}}, {{end}}{{$g.N}} × {{$g.GPU}}{{end}}.{{else}}No machine is at work on it now.{{end}}{{$all := addf $w.Curating (addf $w.Grading $w.Waiting)}}{{if $all}} Machines have spent <b>{{dur $all}}</b> on its jobs{{with $w.Spent}}: {{.}}{{end}}.{{end}}</p>
   </div>
   <div class="block">
     <h2>In this round</h2>
-    <ul class="waiting" id="entries" data-live>
-      {{range $d.Entries}}<li><span><a class="name" href="/editors/{{short .EditorID}}">{{.Name}}</a>{{if gt .Version 1}} <span class="by">v{{.Version}}</span>{{end}}<span class="by">{{.Owner}}</span></span>{{if eq .Stage "editing"}}<span class="chip wait">waiting to be run</span>{{else}}<span class="chip live">run · being graded</span>{{end}}</li>{{end}}
-    </ul>
+    <p class="caption">Each bar is the time machines have spent on a curator's jobs so far, paler where its grades are trained and wait for the exam. Tap one to see its runs and grades.</p>
+    <ol class="ranked work" id="entries" data-live>
+      {{range $d.Entries}}{{$we := index $w.Entries .EditorID}}<li id="w-{{short .EditorID}}"><details class="open-row">
+        <summary class="row opens">
+          <span class="rank"><span class="chip {{$we.Chip}}"></span></span>
+          <span class="who"><span class="name">{{.Name}}</span>{{if gt .Version 1}}<span class="ver">v{{.Version}}</span>{{end}}<span class="by">{{.Owner}} · {{$we.Says}}</span></span>
+          {{$t := addf $we.Busy $we.Waited}}<span class="bar{{if not $t}} zero{{end}}" style="--w:{{f1 $we.BusyPct}}%;--v:{{f1 $we.WaitPct}}%" aria-hidden="true"><i></i>{{if $we.Waited}}<i class="w"></i>{{end}}</span>
+          <span class="val">{{if $t}}{{dur $t}}{{else}}—{{end}}</span>
+        </summary>
+        <div class="behind">
+          <div class="step"><span class="k">runs</span><ul class="grades v">{{range $we.Runs}}{{template "job" .}}{{else}}<li class="none">not handed out yet</li>{{end}}</ul></div>
+          <div class="step"><span class="k">grades</span><ul class="grades v">{{range $we.Grades}}{{template "job" .}}{{else}}<li class="none">none yet: a script is graded once a run has written it</li>{{end}}</ul></div>
+          <a class="go" href="/editors/{{short .EditorID}}">{{.Name}}'s page →</a>
+        </div>
+      </details></li>{{end}}
+    </ol>
   </div>
 
   {{else}}
@@ -118,4 +132,5 @@
 </div>
 </main>
 {{end}}
+{{define "job"}}<li>{{if .GPU}}{{.GPU}}{{else}}a machine{{end}}{{if .Volunteer}} <span class="tag">volunteer</span>{{end}} <span class="chip {{.Chip}}">{{.Word}}</span> <span class="meta">{{if eq .State "waiting"}}trained in {{dur .Busy}}, waiting {{dur .Waited}}{{else if .Live}}{{dur .Busy}} so far{{else if .Busy}}{{dur (addf .Busy .Waited)}}{{if .Waited}}, {{dur .Waited}} of it waiting for the exam{{end}}{{end}}</span></li>{{end}}
 {{define "expected-name"}}{{if .Public}}<a class="name" href="/editors/{{short .EditorID}}">{{.Name}}</a>{{else}}<span class="name">{{.Name}}</span>{{end}}{{if gt .Version 1}} <span class="by">v{{.Version}}</span>{{end}}<span class="by">{{.Owner}}</span>{{end}}
