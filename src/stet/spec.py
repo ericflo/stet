@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from functools import cache
 from importlib import resources
 
-HARNESS_VERSION = "0.4.5"
+HARNESS_VERSION = "0.4.6"
 # The oldest stet whose grades are this one's: the server refuses jobs and results from older
 # ones, and they upgrade. Moved up only when what a grade measures changes, so that a release
 # that changes nothing in a grade does not throw away work under way.

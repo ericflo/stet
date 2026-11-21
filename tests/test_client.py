@@ -1234,6 +1234,30 @@ def test_a_machine_slower_than_the_floor_takes_no_edit_jobs_and_is_told_it_can_g
         client.cmd_verify(args)
     err = capsys.readouterr().err
     assert "cannot run curators for the leaderboard" in err and "slower than the floor" in err and "It can still grade" in err
+    # The `stet verify` that follows on a rented machine says why, so the organisers can see it.
+    loop.claims = [a_job()]
+    loop.report = {"status": "recorded"}
+    args = Args()
+    args.max_jobs = 1
+    client.cmd_verify(args)
+    said = loop.hellos[-1]["curators_declined"]
+    assert "the GPU is slower than the floor" in said and "the GPU has 6 GB of memory" in said
+    # Once a machine runs curators, there is no longer anything to say.
+    monkeypatch.setattr(bench, "saved", lambda *a, **k: FAST_MACHINE)
+    loop.claims = []
+    args.edits = True
+    with pytest.raises(Stop):
+        client.cmd_verify(args)
+    assert client.saved_declined() is None
+
+
+def test_why_a_machine_runs_no_curators_is_kept_for_a_week_and_no_longer(monkeypatch):
+    assert client.saved_declined() is None
+    client.note_declined("the sandbox would not hold: \x1b[2Jno user namespaces")
+    assert client.saved_declined() == "the sandbox would not hold:  [2Jno user namespaces"  # a terminal's codes, made harmless
+    now = client.time.time()
+    monkeypatch.setattr(client.time, "time", lambda: now + client.DECLINED_FOR + 1)
+    assert client.saved_declined() is None
 
 
 def test_a_grader_with_another_pytorch_is_turned_away_before_it_grades(loop, monkeypatch, capsys):

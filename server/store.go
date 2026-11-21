@@ -61,6 +61,8 @@ type Account struct {
 	// CuratorsWhy is why it could not be handed curators the last time it asked for work, in
 	// words (curatorsWhy); empty when it could.
 	CuratorsWhy string `json:"curators_why,omitempty"`
+	// Harness is the stet it said it runs, the last time it asked for work.
+	Harness string `json:"harness,omitempty"`
 	// EndedAt is when the organisers last released one of their rented machines' keys, which
 	// they do as they end the machine (POST /api/v1/admin/workers/{key}/release): a key moves
 	// from one machine to the next, and what is counted against a machine starts there.

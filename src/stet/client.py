@@ -888,7 +888,7 @@ def _grade_job(job, season, scale, device, key, out, work: Path, bases: dict | N
 
 EXAM_POLL = 20  # seconds between looks at whether a round's exam is posted
 # What a verifier says of its own speed when it asks for work (bench.py).
-BENCH_SAID = ("gpu_tokens_per_second", "cpu_mb_per_second", "cores", "memory_gb", "gpu_memory_gb")
+BENCH_SAID = ("gpu_tokens_per_second", "cpu_mb_per_second", "cores", "memory_gb", "gpu_memory_gb", "disk_gb")
 
 
 def exam_now(rnd):
@@ -972,6 +972,41 @@ def _sit(p: Pending, bases: dict, key, scale) -> tuple[dict, dict]:
             raise RuntimeError(f"the unedited student of round {p.rnd.id} is no longer in memory")
         base = sit_baseline(base_t, p.rnd, scale)
     return sit_exam(p.trained, p.rnd, scale, data.round_exam(p.rnd, scale)), base
+
+
+DECLINED_FOR = 7 * 86400  # how long why this machine ran no curators is said: as long as a bench is kept
+
+
+def _declined_path() -> Path:
+    return config_dir() / "curators.json"
+
+
+def note_declined(why: str | None) -> None:
+    """Keep why `stet verify --edits` runs no curators on this machine (None: it runs them), so that
+    a plain `stet verify` after it can tell the server (stet 0.4.6). A rented machine whose
+    curators are refused grades instead, and the organisers' tools read why."""
+    path = _declined_path()
+    tmp = path.with_name(f"{path.name}.tmp{os.getpid()}")
+    try:
+        if why is None:
+            path.unlink(missing_ok=True)
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(json.dumps({"why": clean(why, 300), "at": int(time.time())}))
+        tmp.replace(path)
+    except OSError:
+        pass
+
+
+def saved_declined() -> str | None:
+    """Why `stet verify --edits` last ran no curators here, if it said so lately."""
+    try:
+        d = json.loads(_declined_path().read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(d, dict) or not isinstance(d.get("why"), str) or not isinstance(d.get("at"), int) or time.time() - d["at"] > DECLINED_FOR:
+        return None
+    return d["why"]
 
 
 def _pass_path() -> Path:
@@ -1296,14 +1331,19 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
     sandbox = "none"
     if args.edits:
         sandbox = "none" if args.no_sandbox else (getattr(args, "sandbox", None) or "bwrap")
+
+        def decline(why: str, said: str, code: int = 1):
+            """Run no curators here, and keep why, for the `stet verify` that may follow to say."""
+            note_declined(why)
+            sys.stderr.write(said)
+            sys.exit(code)
+
         if sandbox == "none" and not dev:
-            sys.stderr.write("stet: edit jobs run other people's code, and only ever in the sandbox\n")
-            sys.exit(1)
+            decline("no sandbox was chosen", "stet: edit jobs run other people's code, and only ever in the sandbox\n")
         if sandbox == "bwrap":
             for ok, why in (bwrap_available(), scope_available(), sandbox_selftest()):
                 if not ok:
-                    sys.stderr.write(f"stet: edit jobs run other people's code and need the sandbox: {why}\n")
-                    sys.exit(1)
+                    decline(f"the sandbox would not hold: {why}", f"stet: edit jobs run other people's code and need the sandbox: {why}\n")
         elif sandbox == "container":
             # For a container that runs stet and nothing else, where namespaces cannot be made
             # (cage.py). The server hands curators to it from the organisers' machines only.
@@ -1312,26 +1352,26 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
             for check in (cage_available, lambda: sandbox_selftest("container")):
                 ok, why = check()
                 if not ok:
-                    sys.stderr.write(f"stet: edit jobs run other people's code and need the sandbox: {why}\n")
-                    sys.exit(EXIT_NO_SANDBOX)
+                    decline(f"the sandbox would not hold: {why}", f"stet: edit jobs run other people's code and need the sandbox: {why}\n", EXIT_NO_SANDBOX)
         # A curator may import any of the season's libraries and is promised a machine no
         # slower than the floor. A machine that cannot keep either promise takes no edit jobs.
         if (wrong := env.problems(season)) and not dev:
-            sys.stderr.write("stet: curators are promised the season's Python and libraries, and this machine's differ:\n  " + "\n  ".join(w[:400] for w in wrong)
-                             + "\n  The installer puts it right: curl -fsSL https://www.stetrun.com/install.sh | sh\n")  # fmt: skip
-            sys.exit(1)
+            decline("this machine's Python or libraries differ from the season's: " + "; ".join(wrong),
+                    "stet: curators are promised the season's Python and libraries, and this machine's differ:\n  " + "\n  ".join(w[:400] for w in wrong)
+                    + "\n  The installer puts it right: curl -fsSL https://www.stetrun.com/install.sh | sh\n")  # fmt: skip
         measured = bench.saved()
         if measured is None:
             out.line("", out.dim("measuring this machine's speed (about half a minute; it is kept for a week) ..."))
             measured = bench.measure(season)
             bench.save(measured)
         if (short := bench.shortfalls(season, measured)) and not dev:
-            sys.stderr.write(
+            decline(
+                "; ".join(short),
                 "stet: this machine cannot run curators for the leaderboard: " + "; ".join(short) + ".\n"
                 "  If the GPU or the CPU was busy when that was measured, measure again with nothing else running: stet bench\n"
-                "  It can still grade: stet verify\n"
+                "  It can still grade: stet verify\n",
             )
-            sys.exit(1)
+        note_declined(None)
         hw = {**hw, "bench": {k: measured.get(k) for k in BENCH_SAID}}
     else:
         # Not asked for curators, and measured before: said all the same. A machine that runs
@@ -1356,6 +1396,8 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
     # early: handed a grade before its round's exam is posted, this verifier trains then, and
     # sits the exam once it is (_grade_job).
     hello = {"harness": __version__, "season": season.id, "season_digest": season.digest, "hardware": hw, "edits": bool(args.edits), "sandbox": sandbox, "early": True}
+    if not args.edits and (why := saved_declined()):
+        hello["curators_declined"] = why  # why `stet verify --edits` last ran no curators here (stet 0.4.6)
     # The organisers' machines, rented ones too, train students for the organisers when nothing
     # official is waiting (exam/farm.py: finals, measurements). Never before a job.
     farm_ok = bool(((me or {}).get("account") or {}).get("anchor"))

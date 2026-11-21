@@ -213,6 +213,9 @@ type Hello struct {
 	// posted, it trains the student and the round's unedited one, waits for the exam, and
 	// sits it. A verifier that does not say so is handed grades once the exam is there.
 	Early bool `json:"early"`
+	// CuratorsDeclined is why its last `stet verify --edits` ran no curators on this machine,
+	// in the client's words, said by a verifier that does not ask to run them (stet 0.4.6).
+	CuratorsDeclined string `json:"curators_declined,omitempty"`
 	// Trained lists the grade jobs it holds whose students it has trained, and which wait
 	// only for the exam (stet 0.4.4 and later). It is not handed them again, and while all it
 	// holds are such, it may be handed another grade before the exam (claim).
@@ -236,6 +239,7 @@ type hardwareFacts struct {
 		Cores              float64 `json:"cores"`
 		MemoryGB           float64 `json:"memory_gb"`
 		GPUMemoryGB        float64 `json:"gpu_memory_gb"`
+		DiskGB             float64 `json:"disk_gb"` // free under its cache (stet 0.4.6 and later)
 	} `json:"bench"`
 }
 
@@ -305,6 +309,9 @@ func (a *App) shortOfFloor(hardware json.RawMessage) string {
 	if b.MemoryGB < f.MemoryGB-memoryAllowanceGB {
 		out = append(out, fmt.Sprintf("memory %.1f GB, floor %.0f", b.MemoryGB, f.MemoryGB))
 	}
+	if b.DiskGB > 0 && b.DiskGB < f.DiskGB { // said from stet 0.4.6; checked by the client before
+		out = append(out, fmt.Sprintf("disk %.0f GB free, floor %.0f", b.DiskGB, f.DiskGB))
+	}
 	return strings.Join(out, "; ")
 }
 
@@ -338,10 +345,11 @@ func (a *App) runsEditors(acct *Account, h *Hello) (bool, string) {
 const floorWhy = "this machine is under the season's floor for running curators: "
 
 // curatorsWhy is why a machine that asked for work as h did may not be handed curators, for
-// the organisers' tools (/admin/work): why, if it asked to run them and may not; if it did not
-// ask, where its own measurement of itself falls short of the floor, when it sent one under
-// it, since that is why a verifier declines to ask (stet verify --edits); else that it did
-// not ask. Empty if it may.
+// the organisers' tools (/admin/work). If it asked to run them and may not, why. If it did
+// not ask: where its own measurement of itself falls short of the floor, when it sent one
+// under it, or else that it did not ask; then, after a colon, why it said its last
+// `stet verify --edits` ran none (stet 0.4.6), or what it sent. The server's own words come
+// first, so that the organisers' tools can read the word CPU in them. Empty if it may.
 func (a *App) curatorsWhy(canEdit bool, why string, h *Hello) string {
 	switch {
 	case canEdit:
@@ -349,12 +357,22 @@ func (a *App) curatorsWhy(canEdit bool, why string, h *Hello) string {
 	case h.Edits:
 		return why
 	}
-	if readHardware(h.Hardware).Bench != nil {
-		if short := a.shortOfFloor(h.Hardware); short != "" {
-			return floorWhy + short
+	out, short := "it did not ask to run curators", ""
+	bench := readHardware(h.Hardware).Bench != nil
+	if bench {
+		if short = a.shortOfFloor(h.Hardware); short != "" {
+			out = floorWhy + short
 		}
 	}
-	return "it did not ask to run curators"
+	switch said := clip(strings.ToValidUTF8(h.CuratorsDeclined, "?"), 200); {
+	case said != "":
+		out += ": " + said
+	case !bench:
+		out += ": it sent no measurement of itself"
+	case short == "":
+		out += ": the speeds it sent meet the floor"
+	}
+	return out
 }
 
 // ResultPayload is what a grader reports. Mirrors stet.client.slim_result.
@@ -1345,7 +1363,7 @@ func (a *App) claim(ctx context.Context, acctID int64, h *Hello) (*Handed, error
 			acct.Hardware = json.RawMessage(raw)
 		}
 		acct.LastSeen, acct.RunnerSeen, acct.Backend = now(), 0, hw.gpuMake()
-		acct.CuratorsWhy = clip(a.curatorsWhy(canEdit, why, h), 300)
+		acct.CuratorsWhy, acct.Harness = clip(a.curatorsWhy(canEdit, why, h), 300), clip(strings.ToValidUTF8(h.Harness, "?"), 40)
 		if canEdit {
 			acct.RunnerSeen = now()
 		}

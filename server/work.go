@@ -74,6 +74,8 @@ type WorkMachine struct {
 	Failed  int    `json:"failed,omitempty"`
 	Refused int    `json:"refused,omitempty"`
 	Trouble string `json:"trouble,omitempty"`
+	// Harness is the stet it said it runs, the last time it asked for work.
+	Harness string `json:"harness,omitempty"`
 }
 
 // Work is the answer to GET /api/v1/admin/work.
@@ -187,7 +189,8 @@ func (a *App) work(s *State) Work {
 		if acct.Anchor {
 			out.Machines = append(out.Machines, WorkMachine{Handle: acct.Handle, Worker: acct.Worker, LastSeen: acct.LastSeen, Busy: busy[acct.ID], Long: busy[acct.ID] == "farm" && long[acct.ID],
 				Holding: holding[acct.ID], Ready: holding[acct.ID] > 0 && !untrained[acct.ID], PassSeconds: acct.PassSeconds,
-				Curators: acct.RunnerSeen != 0, CuratorsWhy: acct.CuratorsWhy, Failed: failed[acct.ID], Refused: refused[acct.ID], Trouble: trouble[acct.ID]})
+				Curators: acct.RunnerSeen != 0, CuratorsWhy: acct.CuratorsWhy, Failed: failed[acct.ID], Refused: refused[acct.ID], Trouble: trouble[acct.ID],
+				Harness: acct.Harness})
 		}
 	}
 	sort.Slice(out.Machines, func(x, y int) bool { return out.Machines[x].Handle < out.Machines[y].Handle })

@@ -54,7 +54,26 @@ func TestTheOrganisersSeeWhyAMachineRunsNoCuratorsAndWhichOfItsJobsFailed(t *tes
 	look(false, "floor for running curators: CPU")
 	// It said nothing of its speed.
 	w.claimWith(worker, hello(false, 0))
-	look(false, "it did not ask to run curators")
+	if m := look(false, "it did not ask to run curators: it sent no measurement of itself"); m.Harness != w.app.season.Harness {
+		t.Fatalf("the stet it runs: %+v", m)
+	}
+	// Fast enough, and it says why its stet verify --edits ran none (stet 0.4.6): the client's
+	// words follow the server's own, which come first.
+	h := hello(false, f.CPUMBPerSecond)
+	w.claimWith(worker, h)
+	look(false, "it did not ask to run curators: the speeds it sent meet the floor")
+	h["curators_declined"] = "the sandbox would not hold: no user namespaces"
+	w.claimWith(worker, h)
+	look(false, "it did not ask to run curators: the sandbox would not hold: no user namespaces")
+	h = hello(false, slow)
+	h["curators_declined"] = "the CPU is slower than the floor"
+	w.claimWith(worker, h)
+	look(false, fmt.Sprintf("floor for running curators: CPU %.0f MB/s, floor %.0f: the CPU is slower than the floor", slow, f.CPUMBPerSecond))
+	// Too little disk, said by stet 0.4.6, is short of the floor too.
+	h = hello(true, f.CPUMBPerSecond)
+	h["hardware"].(map[string]any)["bench"].(map[string]any)["disk_gb"] = f.DiskGB - 8
+	w.claimWith(worker, h)
+	look(false, fmt.Sprintf("disk %.0f GB free, floor %.0f", f.DiskGB-8, f.DiskGB))
 	// Up to the floor, in the sandbox: it runs curators.
 	c = w.claimWith(worker, hello(true, f.CPUMBPerSecond))
 	if c.Job == nil || c.Job.Kind != "edit" {
