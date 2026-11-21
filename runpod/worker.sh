@@ -7,6 +7,8 @@
 #   STET_INSTALL        the site's installer
 #   STET_IDLE_MINUTES   how long it waits with nothing to do before it stops
 #   STET_WORKER_EDITS   1 to run curators too, in the container sandbox (stet's cage.py)
+#   STET_WORKER_SANDBOX the sandbox curators are run in: container (when not set), or bwrap
+#                       where the container may make namespaces of its own (Lium's Sysbox)
 #   PUBLIC_KEY          optional (--ssh): a key that may log in, to look around
 #   STET_WORKER_HOME    where it keeps its files: /root, but for the tests
 #   STET_MARKET         where it is rented: runpod (when not set) or vast; elsewhere it
@@ -67,12 +69,18 @@ end_pod() {
 # Started again after it had finished (RunPod restarts a container that stops): finish.
 [ -e "$done_mark" ] && end_pod "it was started again after it had finished"
 
-if ! command -v curl >/dev/null 2>&1 || [ -n "${PUBLIC_KEY:-}" ]; then
-  pkgs="curl ca-certificates"
-  [ -n "${PUBLIC_KEY:-}" ] && pkgs="$pkgs openssh-server"
+# What is to be installed: curl to end itself with; sshd for a key that may log in; and
+# bubblewrap where curators are run in it (STET_WORKER_SANDBOX=bwrap), or for a probe to try.
+pkgs=""
+command -v curl >/dev/null 2>&1 || pkgs="curl ca-certificates"
+[ -n "${PUBLIC_KEY:-}" ] && pkgs="$pkgs openssh-server"
+if { [ "${STET_WORKER_SANDBOX:-container}" = bwrap ] || [ -n "${STET_PROBE:-}${STET_PROBE_0:-}" ]; } && ! command -v bwrap >/dev/null 2>&1; then
+  pkgs="$pkgs bubblewrap"
+fi
+if [ -n "$pkgs" ]; then
   for i in 1 2 3; do
     apt-get update -qq >/dev/null 2>&1 && apt-get install -y -qq --no-install-recommends $pkgs >/dev/null 2>&1 && break
-    say "could not install $pkgs; trying again"
+    say "could not install$pkgs; trying again"
     sleep 20
   done
 fi
@@ -135,7 +143,10 @@ if [ -n "${STET_PROBE:-}" ]; then
   py=$(head -n 1 "$(command -v stet)" | sed 's/^#!//')
   if [ -s "$home/cage_check.py" ] && [ -x "$py" ]; then
     (cd "$home" && "$py" "$home/cage_check.py" 2>&1) | sed 's/^/cage: /' | probe
-    echo "done: cage_check exit ${PIPESTATUS[0]}" | probe
+    rc=${PIPESTATUS[0]}
+    # bubblewrap, the other sandbox: where a container may make namespaces of its own.
+    echo "bwrap: $("$py" -c 'from stet.runner import bwrap_available, scope_available, sandbox_selftest; print(bwrap_available(), scope_available(), sandbox_selftest("bwrap"))' 2>&1 | tail -n 1)" | probe
+    echo "done: cage_check exit $rc" | probe
   else
     echo "done: no cage_check to run (python: $py)" | probe
   fi
@@ -152,7 +163,7 @@ verify() {
 }
 trap 'say "told to stop"; kill -TERM "$child" 2>/dev/null; wait "$child"; touch "$done_mark"; exit 0' TERM INT
 if [ "${STET_WORKER_EDITS:-0}" = "1" ]; then
-  verify --edits --sandbox container
+  verify --edits --sandbox "${STET_WORKER_SANDBOX:-container}"
   rc=$?
   # It stopped for want of work, or could not run curators here at all: the sandbox would
   # not hold, the machine is under the floor. Then it grades, which needs neither.
