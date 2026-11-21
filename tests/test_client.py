@@ -222,7 +222,7 @@ def loop(monkeypatch):
             return {}
         raise AssertionError(f"unexpected request: {method} {path}")
 
-    def grade(job, season, scale, device, key, out, work):
+    def grade(job, season, scale, device, key, out, work, bases=None):
         seen.graded.append(job["id"])
         outcome = seen.grade.pop(0) if isinstance(seen.grade, list) else seen.grade  # a list: one outcome per try
         if isinstance(outcome, Exception):
@@ -472,6 +472,52 @@ def test_a_grade_handed_before_the_exam_trains_first_and_sits_it_once_posted(mon
     assert result == {"valid": True} and base == {"exam": {"mean": -5.3}}
 
 
+def test_grades_trained_before_the_exam_share_one_unedited_student(monkeypatch, tmp_path):
+    import dataclasses
+    import hashlib
+    import types
+
+    from stet import cli, data, grade, pipeline
+    from stet.spec import load_season, practice_round
+
+    season = load_season("s1")
+    rnd = practice_round(season, 1)
+    scripts = [b'{"doc": 1}\n', b'{"doc": 2}\n']
+    seen, cached = [], {}
+
+    def request(method, path, **kw):
+        for sc in scripts:
+            if path == f"/api/v1/scripts/{hashlib.sha256(sc).hexdigest()}":
+                return zstandard.ZstdCompressor().compress(sc)
+        raise AssertionError(path)
+
+    def sit_baseline(t, r, s):
+        seen.append(("sit", t, r.exam_digest))
+        cached["base"] = {"exam": {"mean": -5.3}}
+        return cached["base"]
+
+    monkeypatch.setattr(client, "request", request)
+    monkeypatch.setattr(client, "_job_round", lambda season, job, out: rnd)
+    monkeypatch.setattr(client, "fetch_exam", lambda r, key: seen.append(("fetch", r.exam_digest)))
+    monkeypatch.setattr(pipeline, "train_baseline", lambda r, *a, **k: seen.append("train baseline") or "B")
+    monkeypatch.setattr(pipeline, "train_round", lambda r, s, path, **k: seen.append(("train", path.read_bytes())) or path.read_bytes())
+    monkeypatch.setattr(pipeline, "_cached", lambda path: cached.get("base"))
+    monkeypatch.setattr(pipeline, "baseline_path", lambda r, s, d: tmp_path / "base.json")
+    monkeypatch.setattr(pipeline, "sit_baseline", sit_baseline)
+    monkeypatch.setattr(grade, "sit_exam", lambda t, r, s, exam: seen.append(("sit", t, r.exam_digest)) or {"valid": True})
+    monkeypatch.setattr(data, "round_exam", lambda r, s: [])
+    device, bases, out = types.SimpleNamespace(type="cuda"), {}, cli.Out(quiet=True)
+    waiting = [client._grade_job(a_job(id=n, script={"sha256": hashlib.sha256(sc).hexdigest()}), season, season.scale("nano"), device, None, out, tmp_path / "work", bases=bases)
+               for n, sc in enumerate(scripts)]  # fmt: skip
+    assert all(isinstance(p, client.Pending) for p in waiting) and seen == ["train baseline", ("train", scripts[0]), ("train", scripts[1])]
+    digest = "d1" * 32
+    seen.clear()
+    for p in waiting:
+        p.rnd = dataclasses.replace(p.rnd, exam_digest=digest)
+        assert client._sit(p, bases, None, season.scale("nano")) == ({"valid": True}, {"exam": {"mean": -5.3}})
+    assert seen == [("fetch", digest), ("sit", "B", digest), ("sit", scripts[0], digest), ("fetch", digest), ("sit", scripts[1], digest)]
+
+
 def test_a_grader_says_it_trains_before_the_exam(loop):
     loop.claims = [a_job()]
     loop.grade = ({"valid": True, "exam": {"items": 2, "mean": -5.1, "item_scores": [-5.0, -5.2]}},
@@ -481,6 +527,87 @@ def test_a_grader_says_it_trains_before_the_exam(loop):
     args.max_jobs = 1
     client.cmd_verify(args)
     assert loop.hellos and all(h.get("early") is True for h in loop.hellos)
+
+
+def early_loop(loop, monkeypatch, looks):
+    """The loop, with grades handed before the exam trained into Pendings (stet 0.4.4), and the
+    exam's posting as `looks` says, one look at a time."""
+    import types
+
+    rnd = types.SimpleNamespace(id="s1-o00001", exam_digest="")
+    posted = types.SimpleNamespace(id="s1-o00001", exam_digest="d1" * 32)
+    loop.sat, loop.looks = [], list(looks)
+
+    def grade(job, season, scale, device, key, out, work, bases=None):
+        assert bases is not None
+        loop.graded.append(job["id"])
+        bases.setdefault(rnd.id, "B")
+        return client.Pending(job, rnd, types.SimpleNamespace(result={"train": {"seconds": 600.0}}), device)
+
+    def exam_now(r):
+        return posted if loop.looks.pop(0) else None
+
+    def sit(p, bases, key, scale):
+        assert p.rnd is posted and bases.get(p.rnd.id) == "B"
+        loop.sat.append(p.job["id"])
+        return {"valid": True, "exam": {"items": 2, "mean": -5.1, "item_scores": [-5.0, -5.2]}}, {"exam": {"items": 2, "mean": -5.3, "item_scores": [-5.2, -5.4]}}
+
+    monkeypatch.setattr(client, "_grade_job", grade)
+    monkeypatch.setattr(client, "exam_now", exam_now)
+    monkeypatch.setattr(client, "_sit", sit)
+    return loop
+
+
+def test_trained_grades_wait_for_the_exam_while_the_machine_takes_another(loop, monkeypatch):
+    early_loop(loop, monkeypatch, [False, False, True, True])
+    loop.claims = [a_job(id=1), a_job(id=2), None]
+    loop.report = {"status": "recorded"}
+    with pytest.raises(Stop):
+        client.cmd_verify(Args())
+    # It asks again at once, naming what it has trained and how long a pass took it; with
+    # nothing more for it, it looks at the exam now and then, and sits both once it is posted.
+    assert [h["trained"] for h in loop.hellos] == [[], [1], [1, 2], []]
+    assert "pass_seconds" not in loop.hellos[0] and all(h["pass_seconds"] == 600.0 for h in loop.hellos[1:])
+    assert loop.graded == [1, 2] and loop.sat == [1, 2] and loop.slept == [client.EXAM_POLL]
+    assert loop.reports == ["/api/v1/jobs/1/result", "/api/v1/jobs/2/result"] and not loop.released
+
+
+def test_a_verifier_kept_to_one_job_takes_no_second_while_it_waits(loop, monkeypatch):
+    early_loop(loop, monkeypatch, [False, True])
+    loop.claims = [a_job(id=1)]
+    loop.report = {"status": "recorded"}
+    args = Args()
+    args.max_jobs = 1
+    client.cmd_verify(args)
+    assert len(loop.hellos) == 1 and loop.sat == [1] and loop.reports == ["/api/v1/jobs/1/result"]
+
+
+def test_a_server_that_hands_back_a_trained_grade_is_waited_out(loop, monkeypatch):
+    # A server older than the client hands a verifier the job it holds, trained or not.
+    early_loop(loop, monkeypatch, [False, True])
+    loop.claims = [a_job(id=1), a_job(id=1)]
+    loop.report = {"status": "recorded"}
+    with pytest.raises(Stop):
+        client.cmd_verify(Args())
+    assert loop.graded == [1] and loop.sat == [1] and loop.slept == [client.EXAM_POLL]
+
+
+def test_stopping_hands_back_the_trained_grades_too(loop, monkeypatch):
+    early_loop(loop, monkeypatch, [False, False, False])
+    loop.claims, loop.interrupt_at = [a_job(id=1), a_job(id=2), None], client.EXAM_POLL
+    client.cmd_verify(Args())
+    assert sorted(loop.released) == [("/api/v1/jobs/1/release", "interrupted"), ("/api/v1/jobs/2/release", "interrupted")]
+    assert not loop.sat and not loop.reports
+
+
+def test_the_pass_kept_is_this_machines_at_this_scale(tmp_path):
+    assert client.saved_pass("standard", "RTX 4090") is None
+    client.note_pass("standard", "RTX 4090", {"train": {"seconds": 612.345}})
+    assert client.saved_pass("standard", "RTX 4090") == 612.35
+    assert client.saved_pass("nano", "RTX 4090") is None and client.saved_pass("standard", "RTX 3090") is None
+    for bad in ({}, {"train": {"seconds": "x"}}, {"train": {"seconds": float("nan")}}, {"train": {"seconds": -1}}, {"train": None}):
+        client.note_pass("standard", "RTX 4090", bad)
+    assert client.saved_pass("standard", "RTX 4090") == 612.35
 
 
 # --- edit jobs -------------------------------------------------------------------------------

@@ -29,7 +29,8 @@ says what, if anything, falls short. Run it when the GPU is doing nothing else.
 `stet verify --once` does one job and exits; `--max-jobs 5` does five;
 `--exit-when-idle 15` stops once it has had nothing to do for fifteen minutes, never with a
 job in hand, which suits a GPU rented by the hour. One verifier runs
-per account, and holds one job at a time. For a second GPU, give the second verifier an
+per account, and holds one job at a time, except that grades trained before a round's
+exam wait for it while the verifier takes another. For a second GPU, give the second verifier an
 account of its own: set `STET_CONFIG` to another directory and run `stet login` there.
 
 ### Leaving it running
@@ -98,7 +99,9 @@ exam the moment it is posted: the round settles minutes after its exam. At the o
 scale a grade is one training run, about 18 minutes on an RTX 3090 or 4070 Ti. The first
 job of a round also downloads the round's raw text (about a gigabyte; 2.5 GB once built)
 and trains on the unedited corpus once, so it takes about twice as long. A verifier older
-than 0.4.3 is handed grades only once the exam is posted.
+than 0.4.3 is handed grades only once the exam is posted. From 0.4.4, a verifier whose grade
+is trained and waiting asks for another, which trains in a single pass, and sits them all
+when the exam is posted.
 
 Until the round settles, its exam is served only to machines holding a grade job in it,
 signed by their key. It sits in your cache with the round; do not pass it on.

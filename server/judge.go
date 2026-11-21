@@ -45,9 +45,11 @@ package main
 //     grade is then handed the entry to run, or has a run of it taken: they could hand the
 //     script back as their own. "Nobody" is a person: an account, and any other key of the
 //     same GitHub identity.
-//   - A verifier holds one job at a time. One in the middle of running an entry is handed
-//     nothing else until that job is reported, handed back or out of time, and none of the
-//     entry's scripts goes to another key of theirs meanwhile.
+//   - A verifier holds one job at a time, except that a grade whose student it trained
+//     before the round's exam, and which waits only to sit it, leaves it free to take
+//     another grade (pace.go). One in the middle of running an entry is handed nothing else
+//     until that job is reported, handed back or out of time, and none of the entry's
+//     scripts goes to another key of theirs meanwhile.
 //   - An entry is CLOSED TO RUNS once one of its scripts has been handed to an account that
 //     is not established. Such an account is a key, and keys are free: whoever made it
 //     could be the entry's next runner. So it is handed a script only when the entry has
@@ -211,6 +213,13 @@ type Hello struct {
 	// posted, it trains the student and the round's unedited one, waits for the exam, and
 	// sits it. A verifier that does not say so is handed grades once the exam is there.
 	Early bool `json:"early"`
+	// Trained lists the grade jobs it holds whose students it has trained, and which wait
+	// only for the exam (stet 0.4.4 and later). It is not handed them again, and while all it
+	// holds are such, it may be handed another grade before the exam (claim).
+	Trained []int64 `json:"trained,omitempty"`
+	// PassSeconds is how long this machine last took to train a grade's student, kept on its
+	// disk from its latest grade (stet 0.4.4 and later); 0 until it has graded.
+	PassSeconds float64 `json:"pass_seconds,omitempty"`
 }
 
 // hardwareFacts is the part of a hardware description the server reads. All of it is
@@ -437,17 +446,19 @@ type judge struct {
 	est      map[int64]bool        // established
 	standing map[int64]bool        // has had a grade agree
 	busy     map[int64]bool        // holds a job
+	training map[int64]bool        // holds a job other than a grade it has trained, waiting for the exam
 	resting  map[int64]bool        // let a job run out within the last day
 	differs  map[int64]map[int]int // jobs turned away for building a round differently, by round
 	// quit: accounts that were handed a script of a round and handed it back or let it run
 	// out. One that is not established is handed no more of that round's scripts: asking
 	// and handing back would otherwise show it every script there is.
 	quit   map[int64]map[int]bool
-	around []*asker // found when first asked for
+	around []*asker                      // found when first asked for
+	passes map[string]map[string]float64 // a training pass's seconds, by scale and GPU: worked out when first asked for
 }
 
 func (a *App) newJudge(s *State) *judge {
-	j := &judge{a: a, s: s, t: now(), est: map[int64]bool{}, standing: map[int64]bool{}, busy: map[int64]bool{},
+	j := &judge{a: a, s: s, t: now(), est: map[int64]bool{}, standing: map[int64]bool{}, busy: map[int64]bool{}, training: map[int64]bool{},
 		resting: map[int64]bool{}, differs: map[int64]map[int]int{}, quit: map[int64]map[int]bool{}}
 	for id, acct := range s.Accounts {
 		j.est[id], j.standing[id] = a.established(acct), acct.Agreed > 0
@@ -462,6 +473,7 @@ func (a *App) newJudge(s *State) *judge {
 		switch {
 		case c.live(j.t):
 			j.busy[c.AccountID] = true
+			j.training[c.AccountID] = j.training[c.AccountID] || c.TrainedAt == 0
 		case c.Status == "lapsed" && c.ExpiresAt > j.t-lapseRest:
 			j.resting[c.AccountID] = true
 		case c.Status == "refused":
@@ -1244,6 +1256,9 @@ type Handed struct {
 	Runner map[string]any
 	// Note says why there is no job, when the reason is the account's own.
 	Note string
+	// Retry is how many seconds to wait before asking again, when there is no job and that is
+	// known better than the usual minute.
+	Retry int
 }
 
 // claim hands a verifier its next job, or none if there is nothing it should do right now.
@@ -1287,20 +1302,48 @@ func (a *App) claim(ctx context.Context, acctID int64, h *Hello) (*Handed, error
 		if canEdit {
 			acct.RunnerSeen = now()
 		}
+		// Said with every request, and nothing when it has not graded yet: a key moves from
+		// one rented machine to the next, and the last one's GPU may have been another.
+		acct.PassSeconds = 0
+		if p := h.PassSeconds; finite(p) && p > 0 && p < 86400 {
+			acct.PassSeconds = p
+		}
 		tx.touch(acct)
 
-		// A verifier that restarts picks its unfinished job back up, and holds one job at a
-		// time. An editor it took to run and now cannot (it asks as a machine that does not
-		// run editors) is not swapped for a script: it is handed nothing until that job is
-		// reported, handed back or out of time. A runner in the middle of an entry who could
-		// also ask for scripts would be shown the other run's, and could hand it in as its own.
+		// A verifier that restarts picks its unfinished job back up. An editor it took to run
+		// and now cannot (it asks as a machine that does not run editors) is not swapped for a
+		// script: it is handed nothing until that job is reported, handed back or out of time.
+		// A runner in the middle of an entry who could also ask for scripts would be shown the
+		// other run's, and could hand it in as its own.
+		//
+		// It holds one job at a time, but for grades whose students it has trained before the
+		// round's exam, which wait only to sit it once it is posted (Trained, from stet 0.4.4).
+		// It is not handed those again, and while they are all it holds it may be handed
+		// another grade (more). One it no longer names it lost, and is handed again to train.
+		trained := map[int64]bool{}
+		for _, id := range h.Trained {
+			trained[id] = true
+		}
 		var mine *Claim
+		held := 0
 		for _, c := range s.Claims {
 			if c.AccountID != acctID || !c.live(now()) {
 				continue
 			}
 			if e := s.entry(c.RoundIdx, c.EditorID); e == nil || e.Status != "open" {
 				continue
+			}
+			if c.Kind == "grade" && trained[c.ID] {
+				if c.TrainedAt == 0 {
+					c.TrainedAt = now()
+					tx.saveClaim(c)
+				}
+				held++
+				continue
+			}
+			if c.TrainedAt != 0 {
+				c.TrainedAt = 0
+				tx.saveClaim(c)
 			}
 			if mine == nil || c.ID < mine.ID {
 				mine = c
@@ -1319,19 +1362,32 @@ func (a *App) claim(ctx context.Context, acctID int64, h *Hello) (*Handed, error
 		j := a.newJudge(s)
 		q := &asker{acct: acct, est: j.est[acctID], canEdit: canEdit, gpuMake: hw.gpuMake(), early: h.Early}
 		for _, rd := range openRounds(s) {
+			if held > 0 && !j.more(rd, q, held, h.PassSeconds) {
+				continue
+			}
 			states := j.states(rd)
 			closing := j.closing(states)
+			var offers []offer
 			for _, st := range states {
 				for _, o := range j.offers(st, q, closing) {
-					// Lowest score first; ties at random so that nobody can predict or steer
-					// what they will be given.
-					switch {
-					case o.score < best:
-						best, pick, n = o.score, &o, 1
-					case o.score == best:
-						if n++; rand.IntN(n) == 0 {
-							pick = &o
-						}
+					if held == 0 || (o.kind == "grade" && o.required) {
+						offers = append(offers, o)
+					}
+				}
+			}
+			kept := j.fastFirst(rd, q, offers)
+			if len(kept) < len(offers) {
+				out.Retry = max(5, int(rd.ExamAt+fastFirstSeconds-j.t)) // the grades held back are anyone's then
+			}
+			for _, o := range kept {
+				// Lowest score first; ties at random so that nobody can predict or steer
+				// what they will be given.
+				switch {
+				case o.score < best:
+					best, pick, n = o.score, &o, 1
+				case o.score == best:
+					if n++; rand.IntN(n) == 0 {
+						pick = &o
 					}
 				}
 			}

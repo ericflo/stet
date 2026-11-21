@@ -55,6 +55,9 @@ type Account struct {
 	// the last time it asked, it was not one. Backend is the kind of GPU it had then.
 	RunnerSeen int64  `json:"runner_seen,omitempty"`
 	Backend    string `json:"backend,omitempty"`
+	// PassSeconds is how long its machine last took to train a grade's student, as it said
+	// when it last asked for work (stet 0.4.4 and later); 0 when it did not say.
+	PassSeconds float64 `json:"pass_seconds,omitempty"`
 	// Anchor marks an organisers' account. It comes from configuration, never from storage:
 	// the organisers' accounts are named by the people who run the server, and a database
 	// row cannot make one. Such an account starts out established and administers the
@@ -289,6 +292,9 @@ type Claim struct {
 	// claimed | done | released | refused | expired (the entry settled first) |
 	// lapsed (its time ran out with no report and no release)
 	Status string `json:"status"`
+	// TrainedAt is when its holder said it had trained the grade's student and was waiting
+	// only for the round's exam to sit it (stet 0.4.4 and later); 0 until then.
+	TrainedAt int64 `json:"trained_at,omitempty"`
 }
 
 func (c *Claim) live(t int64) bool { return c.Status == "claimed" && c.ExpiresAt > t }

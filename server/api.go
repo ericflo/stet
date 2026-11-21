@@ -1200,6 +1200,9 @@ func (a *App) apiClaim(w http.ResponseWriter, r *http.Request) {
 	a.st.view(func(s *State) { out["announced"], open = a.announcement(s), len(openRounds(s)) > 0 })
 	if handed.Job == nil {
 		out["retry_after"] = 60
+		if handed.Retry > 0 {
+			out["retry_after"] = min(60, handed.Retry)
+		}
 		out["message"] = "No work right now. Curators to run and scripts to grade appear when a round is drawn."
 		if open {
 			// A verifier is offered each job once, never its own entry, and never a script

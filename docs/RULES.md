@@ -338,7 +338,7 @@ are graded by **verifiers**: anyone who runs `stet verify`.
   two runs are on NVIDIA and AMD when machines of both are asking. Nobody runs their own entry, runs one entry twice, or
   runs an entry after being shown a script of it. Scripts are sealed until the round
   settles, so the second runner cannot copy the first: a script is served only to the
-  verifier handed it to grade, and a verifier holds one job at a time.
+  verifier handed it to grade, and a verifier running an entry holds no other job.
 - **Early on there may be one machine.** While the organisers' verifier is the only
   established one, it runs each entry once and grades it, the entry is marked *run once*,
   and rounds do not wait for people who are not there. Every script is published when the
@@ -353,10 +353,13 @@ are graded by **verifiers**: anyone who runs `stet verify`.
   differ by more than that, a third is taken. When both runs write the same script, byte
   for byte, it is nobody's own and either runner may grade it: neither could have made
   it up. Established verifiers who come free before the exam is posted grade its
-  scripts again while it is made, up to four grades of each, and those count too. After
+  scripts again while it is made, up to four grades of each, and those count too. One
+  that has trained its grade before the exam may take another a score waits for, up to
+  three, while one more training still fits before the exam is due. After
   the exam only the grades a score still waits for are handed out, since any other
-  would hold the round back for as long as it trained, and the round settles as soon as
-  those under way are in.
+  would hold the round back for as long as it trained, and for its first two minutes they
+  go to the fastest machines that are free. The round settles as soon as those under way
+  are in.
 - **The entry's gain is the mean of its two runs.** When they differ by more than 0.09
   bits per byte *(provisional)*, or one failed and the other did not, a third verifier runs the
   curator and the median of the three is the score.

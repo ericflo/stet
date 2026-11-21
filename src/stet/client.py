@@ -827,7 +827,20 @@ def verifiers_running() -> int:
     return held
 
 
-def _grade_job(job, season, scale, device, key, out, work: Path) -> tuple[dict, dict]:
+class Pending:
+    """A grade whose student was trained before its round's exam, waiting to sit it (from stet
+    0.4.4): the job, the round as it was handed, and the student in memory. Meanwhile this
+    machine may be handed another grade, which trains in a single pass: the round's unedited
+    student is trained already."""
+
+    def __init__(self, job: dict, rnd, trained, device):
+        self.job, self.rnd, self.trained, self.device = job, rnd, trained, device
+
+
+def _grade_job(job, season, scale, device, key, out, work: Path, bases: dict | None = None):
+    """A grade job, done: (result, baseline). Handed before the round's exam is posted, it
+    trains now. With `bases`, which keeps each round's unedited student once trained, it is
+    then a Pending, to sit the exam once it is posted (_sit); without, it waits for the exam."""
     import zstandard
 
     from . import data
@@ -859,8 +872,14 @@ def _grade_job(job, season, scale, device, key, out, work: Path) -> tuple[dict, 
     # it the moment it is posted. The round settles minutes after its exam.
     device = pick_device(device) if not hasattr(device, "type") else device
     out.line("", out.dim("the round's exam is not posted yet: training now, and sitting it once it is"))
-    base_t = train_baseline(rnd, scale, device, progress=out.progress("baseline"), log=lambda m: out.line("", out.dim("baseline " + m)))
+    base_t = (bases or {}).get(rnd.id)
+    if base_t is None:
+        base_t = train_baseline(rnd, scale, device, progress=out.progress("baseline"), log=lambda m: out.line("", out.dim("baseline " + m)))
+        if bases is not None:
+            bases[rnd.id] = base_t
     trained = train_round(rnd, scale, path, device=device, progress=out.progress("training"), log=lambda m: out.line("", out.dim(m)))
+    if bases is not None:
+        return Pending(job, rnd, trained, device)
     rnd = wait_for_exam(rnd, out)
     fetch_exam(rnd, key)
     base = _cached(baseline_path(rnd, scale, device)) or sit_baseline(base_t, rnd, scale)
@@ -870,28 +889,35 @@ def _grade_job(job, season, scale, device, key, out, work: Path) -> tuple[dict, 
 EXAM_POLL = 20  # seconds between looks at whether a round's exam is posted
 
 
+def exam_now(rnd):
+    """The round as it is now if its exam has been posted, or None if not yet (or the server
+    could not be asked just now). ApiError 409 if the round ended without one."""
+    import dataclasses
+
+    try:
+        d = request("GET", f"/api/v1/rounds/{rnd.id}")
+    except ApiError as e:
+        if e.status not in (0, 408, 429) and e.status < 500:
+            raise
+        return None
+    r = d.get("round") if isinstance(d, dict) else None
+    if isinstance(r, dict):
+        digest = r.get("exam_digest")
+        if isinstance(digest, str) and SHA256_RE.fullmatch(digest):
+            return dataclasses.replace(rnd, exam_digest=digest)
+        if r.get("status") not in (None, "open"):
+            raise ApiError(409, f"round {rnd.id} ended before its exam was posted")
+    return None
+
+
 def wait_for_exam(rnd, out):
     """The round as it is once its exam is posted: the organisers' examiner makes it after
     the draw, from text published since. Waits as long as that takes."""
-    import dataclasses
-
-    from .spec import SHA256_RE
-
     said = 0.0
     while True:
-        try:
-            d = request("GET", f"/api/v1/rounds/{rnd.id}")
-        except ApiError as e:
-            if e.status not in (0, 408, 429) and e.status < 500:
-                raise
-            d = None
-        r = (d or {}).get("round") if isinstance(d, dict) else None
-        if isinstance(r, dict):
-            digest = r.get("exam_digest")
-            if isinstance(digest, str) and SHA256_RE.fullmatch(digest):
-                return dataclasses.replace(rnd, exam_digest=digest)
-            if r.get("status") not in (None, "open"):
-                raise ApiError(409, f"round {rnd.id} ended before its exam was posted")
+        posted = exam_now(rnd)
+        if posted is not None:
+            return posted
         if time.time() - said >= 600:
             said = time.time()
             out.line("", out.dim(f"trained; waiting for round {rnd.id}'s exam"))
@@ -927,6 +953,60 @@ def fetch_exam(rnd, key) -> Path:
 
 
 EXAM_LIMIT = 64 << 20  # bytes of a round's posted exam, compressed
+
+
+def _sit(p: Pending, bases: dict, key, scale) -> tuple[dict, dict]:
+    """A grade trained before its round's exam sits it, now that it is posted (p.rnd says
+    so): the round's unedited student first, once for all of them, and then this one."""
+    from . import data
+    from .grade import sit_exam
+    from .pipeline import _cached, baseline_path, sit_baseline
+
+    fetch_exam(p.rnd, key)
+    base = _cached(baseline_path(p.rnd, scale, p.device))
+    if base is None:
+        base_t = bases.get(p.rnd.id)
+        if base_t is None or getattr(base_t, "model", True) is None:
+            raise RuntimeError(f"the unedited student of round {p.rnd.id} is no longer in memory")
+        base = sit_baseline(base_t, p.rnd, scale)
+    return sit_exam(p.trained, p.rnd, scale, data.round_exam(p.rnd, scale)), base
+
+
+def _pass_path() -> Path:
+    return config_dir() / "pass.json"
+
+
+def saved_pass(scale: str, gpu) -> float | None:
+    """How long this machine last took to train a grade's student at this scale, in seconds,
+    as kept from its latest grade; None before it has graded. Said with every request for
+    work (stet 0.4.4), so that the server can tell whether one more grade fits before an exam,
+    and which machines are the fastest."""
+    try:
+        d = json.loads(_pass_path().read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(d, dict) or d.get("scale") != scale or d.get("gpu") != gpu:
+        return None
+    x = d.get("seconds")
+    return float(x) if isinstance(x, (int, float)) and not isinstance(x, bool) and 0 < x < 86400 else None
+
+
+def note_pass(scale: str, gpu, result) -> None:
+    """Keep how long the student of a grade just trained took (its result's train.seconds)."""
+    try:
+        x = float(result["train"]["seconds"])
+    except (KeyError, TypeError, ValueError):
+        return
+    if not 0 < x < 86400:
+        return
+    path = _pass_path()
+    tmp = path.with_name(f"{path.name}.tmp{os.getpid()}")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(json.dumps({"scale": scale, "gpu": gpu, "seconds": round(x, 2), "at": int(time.time())}))
+        os.replace(tmp, path)
+    except OSError:
+        tmp.unlink(missing_ok=True)  # it only helps the server plan: without it, one grade at a time
 
 
 MACHINE_ERRNOS = (errno.ENOSPC, errno.EDQUOT, errno.EROFS, errno.EIO, errno.EMFILE, errno.ENFILE, errno.ENOMEM)
@@ -1275,6 +1355,13 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
     idle_for = 0  # seconds spent waiting for work since the last job, for --exit-when-idle
     idle_limit = 60 * max(0, getattr(args, "exit_when_idle", 0) or 0)
     holding: int | None = None  # the job this verifier has taken and has neither reported nor handed back
+    # Grades trained before their round's exam, waiting to sit it, by job (stet 0.4.4): held too,
+    # and named to the server, which may hand this machine another meanwhile. `bases` keeps each
+    # such round's unedited student, trained once for all of them.
+    waiting: dict[int, Pending] = {}
+    bases: dict = {}
+    told_waiting = False
+    scale_name, gpu_name = str(info["scale"]), hw.get("gpu")
     held_until = 0  # when the server stops waiting for that job, if it said
     last_job: int | None = None  # the last job worked on, to tell a new one from the same one again
     leave_held = False  # set on the ways out that must not hand the job back
@@ -1323,14 +1410,54 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
     def handed(back: bool) -> str:
         return "handed it back" if back else "it could not be handed back"
 
+    def let_go(reason: str) -> bool:
+        """Hand back the trained grades waiting for their exam. False if any could not be."""
+        ok = True
+        for jid in list(waiting):
+            if _release(jid, key, reason):
+                del waiting[jid]
+            else:
+                ok = False
+        return ok
+
+    def more_wanted() -> bool:
+        return not args.once and not (args.max_jobs and done + len(waiting) >= args.max_jobs)
+
+    def asking() -> dict:
+        ask = {**hello, "trained": list(waiting)}
+        if (p := saved_pass(scale_name, gpu_name)) is not None:
+            ask["pass_seconds"] = p
+        return ask
+
     try:
         while True:
-            if holding is None:
+            # A grade trained before its round's exam sits it the moment it is posted, and is
+            # reported like any other job: from here it goes through all that follows as if
+            # it had just been handed. Until then this machine asks for another.
+            sit = None
+            if waiting:
+                first = next(iter(waiting.values()))
+                try:
+                    posted = exam_now(first.rnd)
+                except ApiError as e:
+                    gone = [jid for jid, p in waiting.items() if p.rnd.id == first.rnd.id]
+                    out.line("", out.bad(f"{clean(e)}; letting go of the {len(gone)} grade(s) trained for it"))
+                    for jid in gone:
+                        _release(jid, key, "the round ended before its exam was posted")
+                        del waiting[jid]
+                    bases.pop(first.rnd.id, None)
+                    continue
+                if posted is not None:
+                    for p in waiting.values():
+                        if p.rnd.id == posted.id:
+                            p.rnd = posted
+                    sit = waiting.pop(next(iter(waiting)))
+            if holding is None and not waiting and sit is None:
                 upgrader.look()  # never with a job in hand
             try:
-                r = request("POST", "/api/v1/jobs/claim", hello, key=key)
+                r = {} if sit is not None or (waiting and not more_wanted()) else request("POST", "/api/v1/jobs/claim", asking(), key=key)
             except ApiError as e:
-                if e.status == 426 and holding is None:
+                if e.status == 426 and holding is None and not waiting:
                     upgrader.now()  # does not come back if it worked
                     if upgrader.on and upgrade.can()[0] and not args.once:
                         # Too old to be given work, and the upgrade did not go through this
@@ -1347,7 +1474,9 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
                 continue
             if not isinstance(r, dict):
                 r = {}
-            job = r.get("job")
+            job = sit.job if sit is not None else r.get("job")
+            if sit is None and isinstance(job, dict) and job.get("id") in waiting:
+                job = None  # a server older than this client hands back a job it holds: it is trained, and waits
             # Before anything else that can fail: from this answer on, the server counts the
             # job as ours, and whatever stops this verifier must know there is one to hand back.
             if isinstance(job, dict) and isinstance(job.get("id"), int) and not isinstance(job["id"], bool) and 0 < job["id"] < 1 << 62:
@@ -1374,6 +1503,13 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
                 if not told_log:
                     told_log = True
                     out.line("", out.bad(f"could not write down what the server announced for the next draw ({_announcements()}: {clean(e.strerror or e)}). Carrying on without that record."))
+            if not job and waiting:
+                if not told_waiting:
+                    told_waiting = True
+                    out.line("", out.dim(f"{len(waiting)} grade(s) trained, waiting for round {clean(next(iter(waiting.values())).rnd.id, 40)}'s exam; asking meanwhile for another"))
+                time.sleep(EXAM_POLL)
+                continue
+            told_waiting = False
             if not job:
                 if args.once or (args.max_jobs and done >= args.max_jobs):
                     out.line("", clean(r.get("message") or "No work right now."))
@@ -1446,8 +1582,28 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
                 if job["kind"] == "edit":
                     payload = _edit_job(job, season, scale, key, out, work, sandbox, gpu=getattr(device, "index", None) or 0)
                     path = f"/api/v1/jobs/{job_id}/script"
+                elif sit is not None:
+                    result, base = _sit(sit, bases, key, scale)
+                    if not any(p.rnd.id == sit.rnd.id for p in waiting.values()):
+                        bases.pop(sit.rnd.id, None)  # sat, and kept on disk for the round's later grades
+                    payload = slim_result(result, base)
+                    path = f"/api/v1/jobs/{job_id}/result"
                 else:
-                    result, base = _grade_job(job, season, scale, device, key, out, work)
+                    for rid in [rid for rid in bases if rid not in {p.rnd.id for p in waiting.values()} | {job["round"].get("id")}]:
+                        del bases[rid]  # a round nothing waits for any more
+                    got = _grade_job(job, season, scale, device, key, out, work, bases=bases)
+                    if isinstance(got, Pending):
+                        note_pass(scale_name, gpu_name, getattr(got.trained, "result", None))
+                        waiting[job_id] = got
+                        holding = None
+                        remove_tree(work)
+                        failures = waits = 0
+                        tries.pop(job_id, None)
+                        stuck.pop(job_id, None)
+                        out.line("", out.dim("trained; it sits the exam once it is posted"))
+                        continue
+                    result, base = got
+                    note_pass(scale_name, gpu_name, result)
                     payload = slim_result(result, base)
                     path = f"/api/v1/jobs/{job_id}/result"
             except RoundRefused as err:
@@ -1575,10 +1731,10 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
                 return
     except KeyboardInterrupt:
         # Wherever it lands: mid-job, between two tries at one, or while a result is on its way.
-        if holding is None:
+        if holding is None and not waiting:
             raise
         leave_held = True  # said once, here
-        back = hand_back("interrupted")
+        back = (holding is None or hand_back("interrupted")) & let_go("interrupted")
         remove_tree(work)
         out.line("", "Stopped; the job was handed back." if back else "Stopped.")
         return
@@ -1587,9 +1743,10 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
         # entry until its time runs out, and the account is then offered no work for a day.
         # The organisers' machine's is left where it is: started again, it is given the same
         # job, and a job handed back would be one of the entry's few attempts.
-        if holding is not None and not organiser and not leave_held:
-            if _release(holding, key, "the verifier stopped"):
-                out.line("", out.dim("The job in hand was handed back."))
+        if (holding is not None or waiting) and not organiser and not leave_held:
+            n = (holding is not None) + len(waiting)
+            if (holding is None or _release(holding, key, "the verifier stopped")) & let_go("the verifier stopped"):
+                out.line("", out.dim("The job in hand was handed back." if n == 1 else f"The {n} jobs in hand were handed back."))
             else:
                 out.line("", out.bad(still_held()))
 

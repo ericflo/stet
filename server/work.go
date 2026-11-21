@@ -37,6 +37,10 @@ type WorkRound struct {
 	GradesEarly int   `json:"grades_early"`
 	ExamAt      int64 `json:"exam_at,omitempty"`
 	DrawnAt     int64 `json:"drawn_at"` // the exam is made from the hours after it
+	// ExamDue is when the exam is expected, before it is posted: the draw, and the median time
+	// the latest rounds took from their draw to their exam (pace.go). Absent once it is posted,
+	// and before any round has had one.
+	ExamDue int64 `json:"exam_due,omitempty"`
 }
 
 // WorkMachine is one of the organisers' accounts, as the judge sees it now.
@@ -48,6 +52,15 @@ type WorkMachine struct {
 	// The student it trains is one of the bigger ones, held for hours: stet-runpod counts the
 	// machine as one of those it rents for them.
 	Long bool `json:"long,omitempty"`
+	// Holding counts the grade jobs it holds (Busy is "grade" while there is one). Before an
+	// exam a machine may hold up to EarlyGradesPerMachine, trained and waiting for it.
+	Holding int `json:"holding,omitempty"`
+	// Ready says that every grade it holds is trained and waits only for the exam: before the
+	// exam it may be handed another, and after it the grades are sat in seconds.
+	Ready bool `json:"ready,omitempty"`
+	// PassSeconds is how long it last took to train a grade's student, as it said when it last
+	// asked for work (stet 0.4.4 and later). Absent until it has graded.
+	PassSeconds float64 `json:"pass_seconds,omitempty"`
 }
 
 // Work is the answer to GET /api/v1/admin/work.
@@ -68,6 +81,12 @@ type Work struct {
 	FarmLongWaiting int `json:"farm_long_waiting"`
 	// Paused is when the organisers paused the rounds (0: they are not): none is drawn.
 	Paused int64 `json:"paused,omitempty"`
+	// EarlyGradesPerMachine is the most grades one machine may hold before an exam, trained
+	// and waiting for it; FastFirstSeconds how long after an exam is posted the grades scores
+	// wait for are kept for the faster machines around (pace.go). They are counted in
+	// GradesWanted all the same.
+	EarlyGradesPerMachine int `json:"early_grades_per_machine,omitempty"`
+	FastFirstSeconds      int `json:"fast_first_seconds,omitempty"`
 }
 
 // work looks at what the open rounds are waiting for, through the judge's own eyes: the
@@ -76,14 +95,14 @@ type Work struct {
 // when it would be given something a score is waiting for.
 func (a *App) work(s *State) Work {
 	j := a.newJudge(s)
-	out := Work{Rounds: []WorkRound{}, Machines: []WorkMachine{}}
+	out := Work{Rounds: []WorkRound{}, Machines: []WorkMachine{}, EarlyGradesPerMachine: earlyGradesPerMachine, FastFirstSeconds: fastFirstSeconds}
 	fresh := &asker{acct: &Account{ID: -1, Anchor: true, Worker: true}, est: true, gpuMake: "cuda"}
 	early := &asker{acct: &Account{ID: -3, Anchor: true, Worker: true}, est: true, gpuMake: "cuda", early: true}
 	runner := &asker{acct: &Account{ID: -2, Anchor: true, Worker: true}, est: true, canEdit: true, gpuMake: "cuda"}
 	for _, rd := range openRounds(s) {
 		states := j.states(rd)
 		closing := j.closing(states)
-		wr := WorkRound{ID: roundID(a.season.ID, rd.Idx), Entries: len(states), ExamAt: rd.ExamAt, DrawnAt: rd.DrawnAt}
+		wr := WorkRound{ID: roundID(a.season.ID, rd.Idx), Entries: len(states), ExamAt: rd.ExamAt, DrawnAt: rd.DrawnAt, ExamDue: examDue(s, rd)}
 		for _, st := range states {
 			wr.EditsUnderWay += len(st.LiveEdits)
 			if len(st.LiveEdits) == 0 && j.anyone(st, nil) {
@@ -124,6 +143,7 @@ func (a *App) work(s *State) Work {
 	out.Waiting = a.waiting(s)
 	out.FarmWaiting, out.FarmUnderWay, out.FarmLongWaiting = farmWaiting(s, now())
 	busy, long := map[int64]string{}, map[int64]bool{}
+	holding, untrained := map[int64]int{}, map[int64]bool{}
 	// Training one of the organisers' own students counts as at work, so that a rented machine is
 	// not ended partway through one; an official job it holds says so instead.
 	at := now()
@@ -138,11 +158,16 @@ func (a *App) work(s *State) Work {
 	for _, c := range s.Claims {
 		if e := s.entry(c.RoundIdx, c.EditorID); c.live(j.t) && e != nil && e.Status == "open" {
 			busy[c.AccountID] = c.Kind
+			if c.Kind == "grade" {
+				holding[c.AccountID]++
+			}
+			untrained[c.AccountID] = untrained[c.AccountID] || c.Kind != "grade" || c.TrainedAt == 0
 		}
 	}
 	for _, acct := range s.Accounts {
 		if acct.Anchor {
-			out.Machines = append(out.Machines, WorkMachine{Handle: acct.Handle, Worker: acct.Worker, LastSeen: acct.LastSeen, Busy: busy[acct.ID], Long: busy[acct.ID] == "farm" && long[acct.ID]})
+			out.Machines = append(out.Machines, WorkMachine{Handle: acct.Handle, Worker: acct.Worker, LastSeen: acct.LastSeen, Busy: busy[acct.ID], Long: busy[acct.ID] == "farm" && long[acct.ID],
+				Holding: holding[acct.ID], Ready: holding[acct.ID] > 0 && !untrained[acct.ID], PassSeconds: acct.PassSeconds})
 		}
 	}
 	sort.Slice(out.Machines, func(x, y int) bool { return out.Machines[x].Handle < out.Machines[y].Handle })
