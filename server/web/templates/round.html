@@ -15,7 +15,7 @@
 </div>
 <div class="wrap">
   {{if eq $r.Status "scheduled"}}
-  <p class="lead">Nobody knows its pages yet, organisers included. At the draw, a public random number picks them{{with $r.Crawl}} from {{.Crawl}}{{end}}; then every curator in the round gets the same ones.</p>
+  <p class="lead">Nobody knows its training data yet, organisers included. At the draw, a public random number picks it{{with $r.Crawl}} from {{.Crawl}}{{end}}; then every curator in the round gets the same data.</p>
   {{if $d.Expected}}<div class="block">
     <h2>Expected to play</h2>
     <p class="caption"><b>Not entered yet.</b> Curators are entered at the draw. These are the ones it would enter if it were made now; an entry submitted or replaced before then can change that.</p>
@@ -109,7 +109,7 @@
       <div class="in">
         <p class="lead">Every round's exam is new, made after the draw, so nobody can know it in advance, the organisers included. Part is text people publish on Wikipedia, news sites, GitHub, Hacker News, Lemmy, Bluesky and Mastodon in the hour after the draw; the rest is problems generated from the round's random seed. Each of its {{len .Season.ExamSources}} capabilities counts the same, and the model is scored on how well it predicts the right text, in bits per byte.</p>
         {{if eq $r.Status "scheduled"}}<p class="lead">This one does not exist yet. It is made about two hours after the draw: an hour for people to write, and an hour more for late copies and edits to arrive.</p>
-        {{else if not $r.ExamSHA}}<p class="lead">This one is being made now{{with $d.Work}}{{with .ExamDue}}, and is due about {{hm .}} UTC{{end}}{{end}}: it gathers what people published until {{hm $d.WindowEnd}} UTC, and gives late copies and edits an hour more to arrive. Text the round's own pages already hold is left out.</p>
+        {{else if not $r.ExamSHA}}<p class="lead">This one is being made now{{with $d.Work}}{{with .ExamDue}}, and is due about {{hm .}} UTC{{end}}{{end}}: it gathers what people published until {{hm $d.WindowEnd}} UTC, and gives late copies and edits an hour more to arrive. Text already in the round's training data is left out.</p>
         {{else}}{{with $r.ExamMix}}<p class="lead"><b>{{comma .Items}} items</b>, posted {{datetime $r.ExamAt}}: {{comma .Fresh}} passages people wrote in the hour after the draw{{if .Langs}}, in {{.Langs}} {{plural .Langs "language" "languages"}}{{end}}, and {{comma (sub .Items .Fresh)}} problems generated from the round's seed.</p>
         <dl class="kv">{{range .Parts}}{{if .Items}}
           <dt>{{.Pillar}}</dt><dd>{{comma .Items}} {{plural .Items "item" "items"}}{{if eq .Fresh .Items}} written by people{{else if .Fresh}}: {{comma .Fresh}} written by people, {{comma (sub .Items .Fresh)}} generated{{else}} generated{{end}}</dd>{{end}}{{end}}
@@ -120,9 +120,9 @@
       </div>
     </details>
     <details class="more"{{if eq $r.Status "scheduled"}} open{{end}}>
-      <summary>Where {{if eq $r.Status "scheduled"}}its pages will come{{else}}its pages came{{end}} from</summary>
+      <summary>Where {{if eq $r.Status "scheduled"}}its training data will come{{else}}its training data came{{end}} from</summary>
       <div class="in">
-        <p class="lead">Nobody picked them. {{if eq $r.Status "scheduled"}}The time and the crawl are fixed now; the random number comes at the draw.{{else}}Every line below can be checked against sources Stet does not control.{{end}}</p>
+        <p class="lead">Nobody picked it. {{if eq $r.Status "scheduled"}}The time and the crawl are fixed now; the random number comes at the draw.{{else}}Every line below can be checked against sources Stet does not control.{{end}}</p>
         <dl class="kv">
           <dt>Draw time</dt><dd>{{datetime $r.DrawAt}}{{if $d.Slot}}<span class="why">on the season's {{minutes .Season.DrawGrid}}-minute grid, so the time could not be picked to suit anyone</span>{{else}} <span class="tag red">off the grid</span>{{end}}</dd>
           <dt>Random number</dt><dd>{{if $d.BeaconURL}}<a href="{{$d.BeaconURL}}" rel="noopener">{{.Season.Beacon.Name}} #{{$r.DrandRound}}</a>{{else}}{{.Season.Beacon.Name}} #{{$r.DrandRound}}{{end}}<span class="why">a public randomness beacon: the first value it emitted at or after the draw time</span></dd>
@@ -134,11 +134,11 @@
           {{end}}
           {{if $d.SeedInput}}<dt>Seed</dt><dd><code>sha256("{{$d.SeedInput}}")</code><br><code>= {{$r.Seed}}</code><span class="why">picks the files, the order of the pages, the exam's generated problems and the model's starting weights</span></dd>{{end}}
           {{if $d.Shards}}<dt>Files drawn</dt><dd><span class="num" style="font-size:14px">{{range $i, $s := $d.Shards}}{{if $i}}, {{end}}#{{$s}}{{end}}</span><span class="why">positions in the crawl's file list</span></dd>{{end}}
-          {{if $r.CorpusSHA}}<dt>Pages sha256</dt><dd><code>{{$r.CorpusSHA}}</code></dd>{{end}}
+          {{if $r.CorpusSHA}}<dt>Training data sha256</dt><dd><code>{{$r.CorpusSHA}}</code></dd>{{end}}
           {{if $r.ExamSHA}}<dt>Exam sha256</dt><dd><code>{{$r.ExamSHA}}</code><span class="why">the round's exam, made after the draw{{if $r.ExamAt}} and posted {{datetime $r.ExamAt}}{{end}}</span></dd>{{end}}
           <dt>The model</dt><dd>{{$d.Scale.NLayer}} layers × {{$d.Scale.DModel}} wide, reading {{compact $d.Scale.TrainTokens}} tokens<span class="why">the {{$r.Scale}} scale; the same for every curator in the round</span></dd>
         </dl>
-        {{if ne $r.Status "scheduled"}}<p class="lead" style="margin-top:16px">Rebuild these pages yourself, and measure the unedited baseline:</p>
+        {{if ne $r.Status "scheduled"}}<p class="lead" style="margin-top:16px">Rebuild this training data yourself, and measure the unedited baseline:</p>
         <div class="cmd"><pre><span class="p">$ </span><span data-copy-text>stet baseline --round {{$d.ID}} --scale {{$r.Scale}}</span></pre><button type="button" data-copy>copy</button></div>{{end}}
       </div>
     </details>

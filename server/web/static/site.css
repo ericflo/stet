@@ -487,7 +487,7 @@ a.now-card:hover { border-color: var(--ink-3); }
 .grades li.none { color: var(--ink-3); font-style: italic; }
 .grades li .tag { vertical-align: 1px; }
 
-/* Where the pages came from. */
+/* Where the training data came from. */
 .kv { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 0; margin: 0; }
 .kv dt { font-family: var(--mono); font-size: 13px; color: var(--ink-2); font-weight: 500; padding: 11px 22px 11px 0; border-bottom: 1px solid var(--rule-2); white-space: nowrap; }
 .kv dd { margin: 0; padding: 10px 0; border-bottom: 1px solid var(--rule-2); overflow-wrap: anywhere; font-size: 16px; }
