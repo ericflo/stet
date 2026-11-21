@@ -140,11 +140,10 @@ func (m *liumMarket) Rent(ctx context.Context, o Offer, l Launch) (*Rental, erro
 	// A Lium container's own disk is a few GB, most of it the image's: stet, its libraries
 	// and what it fetches go on the pod's volume, /workspace.
 	env := map[string]string{"STET_MARKET": "lium", "STET_WORKER_SCRIPT": gzipB64(l.Script),
-		"STET_WORKER_HOME": "/workspace/root", "STET_WORKER_OPT": "/workspace/opt/stet",
-		// Lium's containers run under Sysbox, which holds a seccomp listener of its own, so
-		// stet's container sandbox cannot be made there; but they may make namespaces, which
-		// is what bubblewrap needs.
-		"STET_WORKER_SANDBOX": "bwrap"}
+		"STET_WORKER_HOME": "/workspace/root", "STET_WORKER_OPT": "/workspace/opt/stet"}
+	// Lium's machines only grade: neither of stet's sandboxes can be made there (probed Nov 21:
+	// Sysbox holds the one seccomp listener the container sandbox needs, and bubblewrap
+	// cannot mount proc, nor have systemd's scope for its limits).
 	for k, v := range l.Env {
 		env[k] = v
 	}
