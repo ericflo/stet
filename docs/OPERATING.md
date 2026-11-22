@@ -515,8 +515,9 @@ systemctl --user restart stet-examine       # the examiner on the new client
 for d in fineweb2 dclm tidy identity english heuristic fineweb-edu mimic; do stet submit examples/$d --yes; done
 ```
 
-and `stet-cloud` is started if it was stopped ([above](#rented-machines)): it asks for work
-with the organisers' key, so it rents nothing before the account is there.
+and `stet-cloud` is started with it if it was stopped ([above](#rented-machines)). It asks
+for work with the organisers' key, so it rents nothing before the account is there, and a
+round drawn with no machine to run its curators comes to nothing.
 
 Nothing after that is waited for or watched. The examiner harvests the newest settled hour
 first, so the first round has its writing ([above](#the-examiner)). Three new entries are
