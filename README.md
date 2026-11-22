@@ -62,8 +62,8 @@ stet service install      # leave it running: starts with the machine, upgrades 
   list of libraries, whoever runs it.
 - **Paired scores.** Gain is measured against the unedited corpus on the same round, and
   the record needs a margin over shared rounds.
-- **Finals decide.** The season's top eight are trained again at a larger size, on two
-  rounds of a crawl published after the board is frozen.
+- **Finals decide.** The season's top eight, and one more drawn by lot, are trained again
+  at a larger size, on two rounds of a crawl published after the board is frozen.
 - **Everything else is public.** Curators, scripts, seeds, every settled round's exam and
   every score on every item of it, the harness.
 
