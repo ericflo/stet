@@ -178,6 +178,98 @@ func TestFourMachinesMeasureARoundsBaselineAndEveryGradeIsScoredAgainstIt(t *tes
 	}
 }
 
+// The first baseline in is no more the round's standard than the next. A machine whose unedited
+// student is far out and that reports first is kept, nobody after it is turned away for
+// differing from it, and once three have measured it is the odd one out: the round's baseline
+// is the median of the others', and every grade is scored against that.
+func TestABaselineThatIsFarOutAndFirstInIsNotTheRoundsStandard(t *testing.T) {
+	w, anchor, idx := toGrade(t, 4)
+	g := w.volunteers("bob", "carol", "dave", "erin")
+	var jobs []*claimed
+	for _, a := range g {
+		jobs = append(jobs, w.asked(a, true))
+	}
+	bases := []float64{7.5, 6.00, 6.02, 5.98} // bob's is 1.5 bits per byte out, and first
+	for i, a := range g {
+		if code, status := w.send(a, jobs[i], 5.9, bases[i]); code != 200 {
+			t.Fatalf("%s's grade, baseline %.2f: HTTP %d %s", a.handle, bases[i], code, status)
+		}
+		w.app.st.view(func(s *State) {
+			rd := s.Rounds[idx]
+			want := map[int]float64{0: 7.5, 1: 6.75, 2: 6.01, 3: 6.0}[i]
+			if rd.BaselineLoss == nil || math.Abs(*rd.BaselineLoss-want) > 1e-9 {
+				t.Fatalf("after %d baselines the round's is %v, not %.2f", i+1, rd.BaselineLoss, want)
+			}
+		})
+	}
+	w.check()
+	var rd struct {
+		Round struct {
+			BaselineLoss float64 `json:"baseline_loss"`
+			Verifiers    int     `json:"baseline_verifiers"`
+		} `json:"round"`
+	}
+	anchor.do("GET", "/api/v1/rounds/"+roundID(w.app.season.ID, idx), nil, &rd)
+	if math.Abs(rd.Round.BaselineLoss-6.0) > 1e-9 || rd.Round.Verifiers != 3 {
+		t.Fatalf("the round's baseline is the median of the three that agree: %+v", rd.Round)
+	}
+	for i := range g {
+		if e := w.entry(idx, jobs[i].Job.Editor.Name); !e.Valid || e.Gain == nil || math.Abs(*e.Gain-0.1) > 1e-9 {
+			t.Fatalf("the script %s graded gained 0.1, and settled at %+v", g[i].handle, e.Gain)
+		}
+	}
+}
+
+// Whichever order they come in, the one that is far out is left out: last in, with two or more
+// to say so, it is turned away as it arrives.
+func TestABaselineThatIsFarOutAndLastInIsTurnedAway(t *testing.T) {
+	w, _, idx := toGrade(t, 4)
+	g := w.volunteers("bob", "carol", "dave", "erin")
+	var jobs []*claimed
+	for _, a := range g {
+		jobs = append(jobs, w.asked(a, true))
+	}
+	// With one other in, a baseline that differs from it is kept: nothing says which is wrong.
+	for i, base := range []float64{6.0, 6.3, 6.02} {
+		if code, status := w.send(g[i], jobs[i], 5.9, base); code != 200 {
+			t.Fatalf("%s's grade, baseline %.2f: HTTP %d %s", g[i].handle, base, code, status)
+		}
+	}
+	if code, msg := w.send(g[3], jobs[3], 5.9, 7.5); code != 409 || !strings.Contains(msg, "baseline") {
+		t.Fatalf("a baseline 1.5 bits per byte from three others': HTTP %d %s", code, msg)
+	}
+	w.app.st.view(func(s *State) {
+		// Carol's was kept as it came, and is left out now that three are in: 6.0 and 6.02 remain.
+		if rd := s.Rounds[idx]; rd.BaselineN != 2 || rd.BaselineLoss == nil || math.Abs(*rd.BaselineLoss-6.01) > 1e-9 {
+			t.Fatalf("the round's baseline: %d machines, %v", rd.BaselineN, rd.BaselineLoss)
+		}
+	})
+	w.check()
+}
+
+func TestMedianItems(t *testing.T) {
+	for _, c := range []struct {
+		rows [][]float64
+		want []float64
+	}{
+		{nil, nil},
+		{[][]float64{{1, 5}}, []float64{1, 5}},
+		{[][]float64{{1, 5}, {3, 1}}, []float64{2, 3}},
+		{[][]float64{{9, 5}, {1, 1}, {2, 7}}, []float64{2, 5}},
+		{[][]float64{{9, 5}, {1, 1}, {2, 7}, {4, 100}}, []float64{3, 6}},
+	} {
+		got := medianItems(c.rows)
+		if len(got) != len(c.want) {
+			t.Fatalf("medianItems(%v) = %v", c.rows, got)
+		}
+		for i := range got {
+			if got[i] != c.want[i] {
+				t.Fatalf("medianItems(%v) = %v, not %v", c.rows, got, c.want)
+			}
+		}
+	}
+}
+
 // A promise is a job's: handed back or run out, it is gone, and the next grader is asked. A
 // machine that was ever asked is asked again, since it may have the student trained.
 func TestABaselineSomebodyWasAskedForAndDidNotSendGoesToTheNextGrader(t *testing.T) {

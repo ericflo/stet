@@ -4,8 +4,8 @@ package main
 // hours of writing the draw's seed picked from the day before (harvest.go), builds the round's
 // items and posts them here (apiExamPost). Grades start then. A grader sits every item
 // and reports each one's score, and, if its job asked, the unedited baseline's (a few machines
-// measure that for the round: see measuring); the round's baseline is the mean, item
-// by item, of the established graders' baselines; and a grade's score is the exam's
+// measure that for the round: see measuring); the round's baseline is the median, item
+// by item, of the established graders' baselines it keeps (baselinesKept); and a grade's score is the exam's
 // aggregate (ExamPlan.ScoreItems, a port of src/stet/exam/aggregate.py) of its item scores less the
 // round's baseline. From there on the judge works as it always has, on that score.
 //
@@ -245,19 +245,24 @@ func checkItems(sc *ExamScore, n int, what string) error {
 	return nil
 }
 
-// meanItems is the item-by-item mean of some item scores.
-func meanItems(rows [][]float64) []float64 {
+// medianItems is the item-by-item median of some item scores: with an even number of them, the
+// mean of the two in the middle. One machine that is far out moves it by nothing once three
+// have measured.
+func medianItems(rows [][]float64) []float64 {
 	if len(rows) == 0 {
 		return nil
 	}
-	out := make([]float64, len(rows[0]))
-	for _, row := range rows {
-		for i, v := range row {
-			out[i] += v
-		}
-	}
+	out, col := make([]float64, len(rows[0])), make([]float64, len(rows))
 	for i := range out {
-		out[i] /= float64(len(rows))
+		for k, row := range rows {
+			col[k] = row[i]
+		}
+		sort.Float64s(col)
+		if m := len(col) / 2; len(col)%2 == 1 {
+			out[i] = col[m]
+		} else {
+			out[i] = (col[m-1] + col[m]) / 2
+		}
 	}
 	return out
 }
@@ -270,10 +275,10 @@ func diffItems(x, base []float64) []float64 {
 	return out
 }
 
-// roundBaselines are the round's baselines that make its own: measured on its corpus and exam,
-// by an account established when it measured (or the organisers'). Whether a measurement
-// counts was settled when it arrived: standing earned as the round settles must not move the
-// round's own baseline.
+// roundBaselines are the round's baselines that may make its own, in the order of their
+// accounts: measured on its corpus and exam, by an account established when it measured (or the
+// organisers'). Whether a measurement counts was settled when it arrived: standing earned as the
+// round settles must not move the round's own baseline.
 func (a *App) roundBaselines(s *State, rd *Round) []*Baseline {
 	var out []*Baseline
 	for _, b := range s.Baselines {
@@ -283,11 +288,49 @@ func (a *App) roundBaselines(s *State, rd *Round) []*Baseline {
 			out = append(out, b)
 		}
 	}
+	sort.Slice(out, func(i, k int) bool { return out[i].AccountID < out[k].AccountID })
 	return out
 }
 
-// baselineDev is how far a grader's baseline is from the round's others (all of them but its
-// own), on the exam's score; ok is false while there are no others.
+// baselineQuorum is how many baselines it takes to say that one of them is the odd one out:
+// with two that differ, nothing says which is wrong.
+const baselineQuorum = 3
+
+// itemsOf are the item scores of some baselines.
+func itemsOf(bs []*Baseline) [][]float64 {
+	rows := make([][]float64, len(bs))
+	for i, b := range bs {
+		rows[i] = b.Items
+	}
+	return rows
+}
+
+// baselinesKept are the round's baselines that make its own. While fewer than three are in,
+// all of them: whichever came first is no more the standard than the next. From three on,
+// those within the tolerance of the median of them all, whatever order they came in. (If none
+// is, they are all kept: there is no telling.)
+func (a *App) baselinesKept(s *State, rd *Round) []*Baseline {
+	all := a.roundBaselines(s, rd)
+	if len(all) < baselineQuorum {
+		return all
+	}
+	mid, tol := medianItems(itemsOf(all)), a.tolerance().Baseline
+	var kept []*Baseline
+	for _, b := range all {
+		if dev, _, err := a.season.Exam.ScoreItems(rd.ExamTable, diffItems(b.Items, mid), rd.Shares); err == nil && within(dev, tol) {
+			kept = append(kept, b)
+		}
+	}
+	if len(kept) == 0 {
+		return all
+	}
+	return kept
+}
+
+// baselineDev is how far a grader's baseline is from the median of the round's baselines, its
+// own among them (the others' and this one, whether or not its account is established), on the
+// exam's score. ok is false while fewer than two others are in: nobody is turned away for
+// differing from one machine, which may be the one that is wrong.
 func (a *App) baselineDev(s *State, rd *Round, acctID int64, items []float64) (dev float64, ok bool) {
 	var rows [][]float64
 	for _, b := range a.roundBaselines(s, rd) {
@@ -295,10 +338,10 @@ func (a *App) baselineDev(s *State, rd *Round, acctID int64, items []float64) (d
 			rows = append(rows, b.Items)
 		}
 	}
-	if len(rows) == 0 || len(items) != len(rd.ExamTable) {
+	if len(rows) < baselineQuorum-1 || len(items) != len(rd.ExamTable) {
 		return 0, false
 	}
-	dev, _, err := a.season.Exam.ScoreItems(rd.ExamTable, diffItems(items, meanItems(rows)), rd.Shares)
+	dev, _, err := a.season.Exam.ScoreItems(rd.ExamTable, diffItems(items, medianItems(append(rows, items))), rd.Shares)
 	return dev, err == nil
 }
 
@@ -315,8 +358,8 @@ func (a *App) baselineAgrees(rd *Round, b *Baseline) bool {
 // --- who measures a round's baseline -----------------------------------------------------------
 //
 // Measuring the unedited corpus costs a grader a whole training pass, as much as the grade
-// itself, and the mean of every grader's measurement is no better a baseline for the round
-// than the mean of a few. So the season says how many machines measure it
+// itself, and every grader's measurement is no better a baseline for the round
+// than a few. So the season says how many machines measure it
 // (baselines.per_round), and each grade job says whether its machine is one of them
 // (Job.Baseline). A machine that is not trains the script's student and nothing else, and
 // its grade is scored against the round's baseline like any other.
@@ -343,7 +386,7 @@ func (j *judge) measuring(rd *Round) map[int64]bool {
 		return who
 	}
 	who := map[int64]bool{}
-	for _, b := range j.a.roundBaselines(j.s, rd) {
+	for _, b := range j.a.baselinesKept(j.s, rd) {
 		if j.a.baselineAgrees(rd, b) {
 			who[b.AccountID] = true
 		}
@@ -384,18 +427,16 @@ func (j *judge) asksBaseline(rd *Round, acct *Account) bool {
 	return j.baselinesWanted(rd) > 0
 }
 
-// refreshScores sets the round's baseline to the mean of its baselines, item by item, and every
-// grade's score to the exam's aggregate of its item scores less that.
+// refreshScores sets the round's baseline to the median of the baselines it keeps
+// (baselinesKept), item by item, and every grade's score to the exam's aggregate of its item
+// scores less that.
 func (a *App) refreshScores(tx *Tx, rd *Round) {
 	s := tx.s
-	var rows [][]float64
-	for _, b := range a.roundBaselines(s, rd) {
-		rows = append(rows, b.Items)
-	}
-	if len(rows) == 0 {
+	kept := a.baselinesKept(s, rd)
+	if len(kept) == 0 {
 		return
 	}
-	base := meanItems(rows)
+	base := medianItems(itemsOf(kept))
 	rd.BaseItems = base
 	mean := 0.0
 	for _, v := range base {
@@ -403,10 +444,18 @@ func (a *App) refreshScores(tx *Tx, rd *Round) {
 	}
 	loss := places5(-mean / float64(len(base))) // the unedited student's mean bits per byte: for the record
 	rd.BaselineLoss = &loss
-	// How many machines measured it, whoever they were.
+	// How many machines measured it, whoever they were: but not one whose measurement the
+	// round left out of its own.
+	out := map[int64]bool{}
+	for _, b := range a.roundBaselines(s, rd) {
+		out[b.AccountID] = true
+	}
+	for _, b := range kept {
+		delete(out, b.AccountID)
+	}
 	rd.BaselineN = 0
 	for _, b := range s.Baselines {
-		if b.RoundIdx == rd.Idx && a.baselineAgrees(rd, b) {
+		if b.RoundIdx == rd.Idx && !out[b.AccountID] && a.baselineAgrees(rd, b) {
 			rd.BaselineN++
 		}
 	}
@@ -445,7 +494,7 @@ type ExamScores struct {
 	Shares     map[string]float64   `json:"languages"`
 	Table      []ItemInfo           `json:"table,omitempty"`       // what each item counts toward
 	Baseline   []float64            `json:"baseline"`              // the round's: the mean, item by item, of BaselineOf's
-	BaselineOf []string             `json:"baseline_of,omitempty"` // the handles whose baselines the round's is the mean of
+	BaselineOf []string             `json:"baseline_of,omitempty"` // the handles whose baselines the round's is the median of
 	Baselines  map[string][]float64 `json:"baselines"`             // by account handle
 	Grades     map[string][]float64 `json:"grades"`                // by result id
 	GradesOf   map[string]GradeOf   `json:"grades_of,omitempty"`   // by result id
@@ -486,7 +535,7 @@ func (a *App) archiveExam(ctx context.Context) {
 				}
 				return strconv.FormatInt(id, 10)
 			}
-			for _, b := range a.roundBaselines(s, rd) {
+			for _, b := range a.baselinesKept(s, rd) {
 				out.BaselineOf = append(out.BaselineOf, handle(b.AccountID))
 			}
 			sort.Strings(out.BaselineOf)

@@ -761,7 +761,7 @@ func (j *judge) view(sc *scriptState, r *Result) *gradeView {
 		return nil
 	}
 	g := &gradeView{r: r, acct: acct, est: j.est[acct.ID], self: sc.wroteAlone(acct)}
-	// Against the round's baseline, the mean of those its graders measured: not this
+	// Against the round's baseline, the median of those its graders measured: not this
 	// grader's own, which it may not have been asked for. A grade has a score once the
 	// round has a baseline (refreshScores).
 	g.base = !r.Valid || r.Score != nil
@@ -2009,8 +2009,9 @@ func (a *App) submitResult(ctx context.Context, acctID, claimID int64, p *Result
 		// Everyone must be looking at the same corpus and exam, and whoever measures the
 		// unedited baseline on them must measure the same one. The round's first run fixes
 		// the corpus, and the exam is the one the organisers posted. A baseline is checked
-		// against the round's other graders' as it arrives; whoever reports before there are
-		// any is checked when the round settles instead.
+		// against the median of the round's graders' as it arrives, once two others are in
+		// (baselineDev); whoever reports before that is kept, and is checked against the
+		// others each time one arrives (baselinesKept) and when the round settles.
 		//
 		// A grade whose job did not ask for the baseline comes without one, and there is
 		// nothing of its own to check it by here. It is scored against the round's baseline

@@ -431,14 +431,19 @@ func TestARunThatWasGivenUpDoesNotUseUpOneOfAnEntrysRuns(t *testing.T) {
 func TestAnEstablishedVerifierTurnedAwayIsListedWithTheRound(t *testing.T) {
 	pub, priv := newKey()
 	w := newWorld(t, pub)
-	anchor, bob := w.join("anchor-one", priv), w.join("bob", nil)
-	w.established("bob")
+	anchor, bob, carol := w.join("anchor-one", priv), w.join("bob", nil), w.join("carol", nil)
+	w.established("bob", "carol")
 	for _, name := range []string{"ref-a", "ref-b"} {
 		w.submit(anchor, name, "print('"+name+"')")
 	}
 	idx := w.draw()
 	w.editAll(anchor)
 	if code, status := w.report(anchor, w.claim(anchor, true), 5.5); code != 200 {
+		t.Fatal(status)
+	}
+	// Nobody is turned away for differing from one machine. Two have measured the round's
+	// before bob does, and agree.
+	if code, status := w.report(carol, w.claim(carol, false), 5.5); code != 200 {
 		t.Fatal(status)
 	}
 	c := w.claim(bob, false)
