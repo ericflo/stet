@@ -814,7 +814,8 @@ What the measurement says about the parts, beyond in and out:
   0.29): every curator's student reads them about as well as the next one's, and the small
   differences do not hold at the large size.
 - **Knowledge counts.** A draft kept it out because its questions come from a public list,
-  which a curator could aim at. The list is 152,405 facts and an exam asks 200 of them; a
+  which a curator could aim at. The list is 16,617 facts, each put in up to ten languages (152,405 sentences), and an
+  exam asks 200 of them; a
   script holds no text of its own, so the only way to aim at them is to keep the pages
   that state such facts, in ten languages. That is curation, and the part passes both
   tests with room.
@@ -959,3 +960,30 @@ teacher's time spent choosing pages and not writing them. Four arms are four cha
 one in eight that one passes with nothing there, so an arm that passes by less than three
 standard errors is trained three more times before anything is built on it. If none passes,
 Season 2 has no written text, and this section says how far each arm fell short.
+
+**Added the same morning, before any arm's student had finished.**
+
+*A fifth arm, `rescue-15`.* The teacher had the time. Five arms are five chances, about one
+in six that one passes with nothing there; the rule for a narrow pass stands.
+
+*What the order of a script is worth.* The control trained on the pilot's machine scores
+0.017 lower on writing than 9.7's `tidy`: five students at −0.000 (from −0.004 to +0.003)
+against three at +0.016 (+0.010 to +0.020), where students of one script differ by 0.003.
+It is not the machine or the code. The unedited script's tokens are the same to the byte,
+and an unedited student trained on the pilot's machine scores +0.004 against 9.7's three,
+inside their spread. It is the script. `tidy` chooses a quarter more than the budget holds
+and shuffles its choice with a fixed seed. 9.7's code and this code choose the same pages
+but for two of 51,764, and a list two shorter is shuffled into a wholly different order: a
+different four fifths of the same pages are trained on, in a different sequence. So the
+noise between students of one script, which is what a round's error bars are made of, says
+nothing of how far a curator's score moves when its script is put in another order. That
+is measured here too: `tidy`'s own lines in two more orders (seeds 1 and 2), two students
+each.
+
+Every arm keeps `tidy`'s order and changes only the pages named, so most of this cancels
+between an arm and the control. Not all of it does: the teacher's text of a page is a fifth
+longer than `tidy`'s lines of it, so an arm's budget is full a little earlier in the script.
+The rule therefore gains a second condition, written before any arm's result: an arm passes
+only if its gain over `tidy` is also larger than the widest gap between two of `tidy`'s
+three orders on this machine. A gain smaller than that is not told apart from an accident
+of order.
