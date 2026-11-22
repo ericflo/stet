@@ -236,3 +236,19 @@ func TestTheSameExamPostedTwiceAtOnceIsPostedOnce(t *testing.T) {
 		}
 	})
 }
+
+// Runners' uploads take a place before their job is looked at, and there are few places. The
+// organisers' exam has its own: with every runner's place taken, a round is still given its exam.
+func TestRunnersUploadsDoNotKeepARoundFromItsExam(t *testing.T) {
+	pub, priv := newKey()
+	w := newWorld(t, pub)
+	anchor := w.join("anchor-one", priv)
+	w.submit(w.join("alice", nil), "tidy", "print('v1')")
+	idx := w.drawWithoutExam()
+	for i := 0; i < cap(w.app.runnerUploads); i++ {
+		w.app.runnerUploads <- struct{}{}
+	}
+	if code, msg := w.postExam(anchor, idx, testTable()); code != 200 {
+		t.Fatalf("the exam, with every runner's place for an upload taken: HTTP %d %s", code, msg)
+	}
+}

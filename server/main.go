@@ -75,9 +75,9 @@ type App struct {
 	boards boardCache
 	site   *Site
 	limits *limiter
-	// One token per large request body in memory: entrants' bundles, and apart from them
-	// the runners' scripts and the organisers' uploads (the rounds' exams).
-	uploads, runnerUploads chan struct{}
+	// One token per large request body in memory: entrants' bundles, the runners' scripts and
+	// the organisers' uploads (the rounds' exams), each apart from the others.
+	uploads, runnerUploads, organiserUploads chan struct{}
 }
 
 func env(key, def string) string {
@@ -277,7 +277,7 @@ func newApp(ctx context.Context, cfg Config, season *Season, kv KV, blobs Blobs)
 	if err != nil {
 		return nil, err
 	}
-	a := &App{cfg: cfg, st: st, season: season, limits: newLimiter(), uploads: make(chan struct{}, 4), runnerUploads: make(chan struct{}, 4)}
+	a := &App{cfg: cfg, st: st, season: season, limits: newLimiter(), uploads: make(chan struct{}, 4), runnerUploads: make(chan struct{}, 4), organiserUploads: make(chan struct{}, 4)}
 	githubToken = cfg.GithubToken
 	a.site, err = newSite(a)
 	return a, err

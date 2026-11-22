@@ -76,7 +76,7 @@ const uploadBytes = 2 << 20
 // counted against the account and given one of the few places for large bodies. A key is
 // public, and naming someone else's must cost them nothing. The place is kept until the
 // handler has finished with the body, and runners have places of their own, so that no
-// amount of entrants' traffic keeps a run's script from arriving.
+// amount of entrants' traffic keeps a run's script from arriving. So have the organisers.
 func (a *App) signedBy(w http.ResponseWriter, r *http.Request, limit int64, mustExist bool, who int) (*Account, string, []byte, error) {
 	key, err := claimedKey(r)
 	if err != nil {
@@ -111,9 +111,15 @@ func (a *App) signedBy(w http.ResponseWriter, r *http.Request, limit int64, must
 		if !a.limits.allow("upload:"+key, 40, 3600) {
 			return nil, "", nil, fail(429, "that is a great many uploads in an hour; try again later")
 		}
+		// The organisers' uploads (a round's exam) have places of their own: a runner's place
+		// is taken before its job is looked at, and runners must not be able to keep a round
+		// from its exam.
 		pool := a.uploads
-		if who != anyone {
+		switch who {
+		case runners:
 			pool = a.runnerUploads
+		case organisers:
+			pool = a.organiserUploads
 		}
 		select {
 		case pool <- struct{}{}:
