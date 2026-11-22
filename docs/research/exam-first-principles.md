@@ -658,3 +658,50 @@ Three wait on a measurement that is running, each with its rule written first:
 - **Promotion of a watched part.** Twenty settled rounds, spread over noise above 1.5, rank
   agreement with the score of at least 0.5. Science abstracts are on this list for a plainer
   reason than the others: no exam has held them yet.
+
+### 9.7 Every part is in the score or off the exam
+
+A first draft of the season kept a *watch list*: parts that every exam asked, whose scores
+were published, and that counted for nothing until twenty rounds had shown what they were
+worth. It is gone. A part that counts for nothing still costs every grade its time and
+every reader a line to understand, and "we will see" is a decision put off. Each part is
+measured before the season starts and is then in the score or off the exam, its generator
+deleted.
+
+**The measurement.** One practice round (`s2-p00000`), its corpus at the micro and the
+standard size. Seven curators that differ in kind: the unedited corpus, `tidy`, `english`,
+the two reference filters that run every round (`fineweb2`, `dclm`), and two red-team
+curators, `scribe` (tidy's selection, and the whole ink allowance spent on worked problems
+in the forms the exam's skills take) and `mimic` (no ink; the pages of the corpus that look
+most like the exam). Each is trained four times at micro and three times at standard, on a
+rented RTX 4090; two trainings of one script differ as two machines do (the initial weights
+moved by one part in a million). Every student sits one candidate exam: every generated
+family of generator version 9, cold and with worked examples first, in eleven languages,
+and about 1,500 passages of writing of every kind the harvest takes (science abstracts
+among them) from three harvested hours, by the corpus's language shares.
+
+**The rule, written before any of these trainings had finished.** For a part, *gain* is
+its mean over items of the unedited students' bits per byte less the student's; *noise* is
+the standard deviation of that between trainings of one script, pooled over the scripts;
+*spread* is the standard deviation of the six edited curators' mean gains.
+
+1. *It tells curators apart.* Spread over noise is at least 1.5 at the standard size. A part
+   on which curators did not differ at all would show about 0.6 here (one over the square
+   root of three trainings), so 1.5 is well clear of nothing.
+2. *It carries.* The order it puts the curators in at micro and at standard agree, at a
+   rank correlation of 0.55 or more. Where trainings at the large size are made, the same
+   between standard and large.
+
+A part that passes both is in the score. A part that fails either is off the exam. The
+thresholds are the ones 9.3 used on the pilot. The few-shot forms, science abstracts, each
+kind of writing and each cold family face the same two tests; nothing is in for its name.
+A skill pillar is the mean of its parts that are in, and a pillar with none is dropped.
+
+3. *Ink does not buy it.* `scribe` is `tidy` plus 16,000 tokens of the exam's own forms. If
+   scribe's score is above tidy's by more than twice the standard error of the difference
+   at the standard size, the exam can be bought with ink, and ink goes to nothing: a script
+   is copies of the crawl and no more. If it is not, ink stays at 16,000 tokens, shown to
+   buy nothing.
+
+`mimic` has no rule of its own. Choosing the pages that most resemble what the exam asks
+is curation, and if it wins, it won by selection.
