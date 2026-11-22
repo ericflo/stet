@@ -3,6 +3,7 @@ and choose with the round's seed."""
 
 from __future__ import annotations
 
+import dataclasses
 import re
 from collections import defaultdict
 
@@ -62,7 +63,24 @@ def _lead(text: str) -> str:
     return (m.group(1) if m else _clip(text, 300)).strip()
 
 
+def crawl_space(text: str) -> str:
+    """White space as the crawl has it: one space between words, one line end between lines.
+
+    Common Crawl's text of a page has an empty line 300 times less often than writing taken
+    from its source, a tab 600 times less often, two spaces together 15 times less often. A
+    student pays some twenty bits for a mark it has never met, so an exam that kept those marks
+    would rank curators by whether their pages happened to hold a few of them, and a script
+    cannot supply what the crawl does not have (docs/research/exam-first-principles.md, 9.9)."""
+    text = re.sub(r"[ \t\u00a0]+", " ", text.replace("\r\n", "\n").replace("\r", "\n"))
+    return re.sub(r" ?\n(?: ?\n)*", "\n", text)
+
+
 def items_of(doc: Doc) -> list[Item]:
+    """A document's items, laid out as the crawl lays out a page."""
+    return [dataclasses.replace(it, text=crawl_space(it.text), ctx=crawl_space(it.ctx), cont=crawl_space(it.cont)) for it in _items_of(doc)]
+
+
+def _items_of(doc: Doc) -> list[Item]:
     lang = lang_of(doc)
     base = f"fresh/{doc.source}/{lang}/{doc.topic or '-'}"
     src = f"{doc.source}:{doc.id}"

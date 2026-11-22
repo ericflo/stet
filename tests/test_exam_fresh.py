@@ -1,12 +1,13 @@
 """Fresh text: parsing what the sources send, turning documents into items, and choosing them."""
 
 import collections
+import dataclasses
 
 import pytest
 
 from stet.exam.aggregate import kind_of
 from stet.exam.fresh import Doc, html_text, read_snapshot, write_snapshot
-from stet.exam.fresh.select import items_of, select
+from stet.exam.fresh.select import crawl_space, items_of, select
 from stet.exam.fresh.wikipedia import added_lines, strip_wikitext
 
 DIFF = """
@@ -56,13 +57,26 @@ def _doc(i, lang="en", source="wikipedia", topic="Q5", question="", title=None):
 def test_documents_become_items_with_corners():
     wiki = items_of(_doc(1))
     assert [it.kind for it in wiki] == ["passage", "answer"]
-    assert wiki[0].corner == "fresh/wikipedia/en/Q5/article" and wiki[1].ctx == "Title 1\n\n"
+    assert wiki[0].corner == "fresh/wikipedia/en/Q5/article" and wiki[1].ctx == "Title 1\n"
     ans = items_of(_doc(2, source="lemmy", topic="rust", question="How do I solve x + 1 = 2?"))
-    assert len(ans) == 1 and ans[0].kind == "answer" and ans[0].ctx.startswith("Title 2\n\nHow do I solve")
+    assert len(ans) == 1 and ans[0].kind == "answer" and ans[0].ctx.startswith("Title 2\nHow do I solve")
     added = items_of(_doc(3, source="wikipedia-added", lang="simple"))
     assert added[0].lang == "en" and added[0].corner.endswith("/added")
     talk = items_of(_doc(4, source="wikipedia-talk", topic="talk", title="Talk:Teddy Hill"))
     assert talk[0].fmt == "dialogue" and talk[0].corner.startswith("fresh/wikipedia-talk/en/talk/") and talk[0].text.startswith("Talk:Teddy Hill\n")
+
+
+def test_fresh_writing_has_the_white_space_of_the_crawl():
+    """The crawl's text of a page has no empty line, no tab and no two spaces together, so the
+    exam's writing has none either: a mark the corpus cannot teach is not asked for."""
+    assert crawl_space("Title\n\nBody  with\ttab and\u00a0nbsp \n\n\n    indented\r\n\r\nend") == "Title\nBody with tab and nbsp\n indented\nend"
+    assert crawl_space("a\n \n \nb") == "a\nb" and crawl_space("") == ""
+    laid = "First paragraph of the page.\n\nSecond\tparagraph,  with a tab.\n\n\n    return x  # code keeps one space of its indent\n"
+    doc = dataclasses.replace(_doc(5, source="lemmy", topic="rust", question="A question\n\nasked in two paragraphs."), text=laid * 3)
+    for it in items_of(doc) + items_of(dataclasses.replace(_doc(6), text=laid * 3)) + items_of(dataclasses.replace(_doc(7, source="github", topic=""), text=laid * 3)):
+        for part in (it.text, it.ctx, it.cont):
+            assert "\n\n" not in part and "\t" not in part and "  " not in part and " \n" not in part, (it.corner, part)
+        assert (it.text or it.cont).startswith(("Title", "First paragraph"))
 
 
 def test_selection_caps_corners_shares_languages_and_is_repeatable():
@@ -117,12 +131,12 @@ def test_prose_with_a_semicolon_is_not_code_and_a_patch_is():
 
 def test_other_sources_become_replies_or_writing():
     reply = items_of(_doc(5, source="hackernews", topic="", question="Ask HN: what do you read?\n\n" + "a " * 2000, title="Ask HN"))
-    assert reply[0].kind == "answer" and reply[0].fmt == "dialogue" and reply[0].ctx.endswith("a\n\n") and len(reply[0].ctx) < 1600
+    assert reply[0].kind == "answer" and reply[0].fmt == "dialogue" and reply[0].ctx.endswith("a\n") and len(reply[0].ctx) < 1600
     assert reply[0].corner.startswith("fresh/hackernews/en/") and reply[0].corner.endswith("/reply")
     import dataclasses
 
     thread = items_of(_doc(7, source="lemmy", topic="rust", question="Ask HN\n\nWhy?", title="Ask HN"))
-    assert thread[0].ctx == "Ask HN\n\nWhy?\n\n"  # the title once, as the thread gives it
+    assert thread[0].ctx == "Ask HN\nWhy?\n"  # the title once, as the thread gives it
     post = items_of(dataclasses.replace(_doc(6, source="bluesky", topic=""), title=""))
     assert post[0].kind == "passage" and post[0].text.startswith("Document number 6") and post[0].corner.endswith("/text")
 
