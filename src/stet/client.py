@@ -1504,6 +1504,11 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
                 ok = False
         return ok
 
+    def forget_base(p: Pending | None) -> None:
+        """Let go of a round's unedited student once no trained grade waits to sit beside it."""
+        if p is not None and not any(q.rnd.id == p.rnd.id for q in waiting.values()):
+            bases.pop(p.rnd.id, None)
+
     def more_wanted() -> bool:
         return not args.once and not (args.max_jobs and done + len(waiting) >= args.max_jobs)
 
@@ -1668,8 +1673,7 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
                     path = f"/api/v1/jobs/{job_id}/script"
                 elif sit is not None:
                     result, base = _sit(sit, bases, key, scale)
-                    if not any(p.rnd.id == sit.rnd.id for p in waiting.values()):
-                        bases.pop(sit.rnd.id, None)  # sat, and kept on disk for the round's later grades
+                    forget_base(sit)  # sat, and kept on disk for the round's later grades
                     payload = slim_result(result, base)
                     path = f"/api/v1/jobs/{job_id}/result"
                 else:
@@ -1704,6 +1708,7 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
                     )
                     sys.exit(1)
                 hand_back(clean(f"round refused: {err}", 300))
+                forget_base(sit)
                 refused[round_id] = 2  # not this session
                 out.line("", out.bad(str(err)))
                 stop_if_once()
@@ -1722,7 +1727,12 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
                     # Kept, not handed back. A job handed back is not free: an entry gets only
                     # a few attempts, and a verifier is offered an entry once. The server
                     # gives this job back to us the next time we ask.
+                    if sit is not None:
+                        # Its student is trained and in memory still: it waits again, and sits
+                        # the exam once that can be fetched, rather than being trained afresh.
+                        waiting[job_id], holding = sit, None
                     stuck[job_id] = waited + patience(f"could not fetch what this job needs ({clean(err)}). Keeping the job", keeping=job_id)
+                forget_base(sit)
                 continue
             except BaseException as err:  # this machine's trouble, not the curator's
                 # A panic in a compiled library is not an Exception. It is a failed job all
@@ -1730,6 +1740,7 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
                 if isinstance(err, (KeyboardInterrupt, SystemExit, GeneratorExit)):
                     raise
                 remove_tree(work)
+                forget_base(sit)  # a grade that failed while sitting is trained afresh if it is tried again, with the exam posted
                 failures += 1
                 tries[job_id] = tries.get(job_id, 0) + 1
                 what = f"could not run this job ({type(err).__name__}: {clean(err)})"

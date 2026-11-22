@@ -699,6 +699,38 @@ def test_a_server_that_hands_back_a_trained_grade_is_waited_out(loop, monkeypatc
     assert loop.graded == [1] and loop.sat == [1] and loop.slept == [client.EXAM_POLL]
 
 
+def test_a_trained_grade_whose_exam_cannot_be_fetched_is_kept_trained_and_sits_it_later(loop, monkeypatch):
+    from stet.data import FetchError
+
+    early_loop(loop, monkeypatch, [False, True, True])
+    sit, fails, bases_seen = client._sit, [FetchError("could not fetch the exam: timed out")], []
+
+    def flaky(p, bases, key, scale):
+        bases_seen.append(bases)
+        if fails:
+            raise fails.pop()
+        return sit(p, bases, key, scale)
+
+    monkeypatch.setattr(client, "_sit", flaky)
+    loop.claims = [a_job(id=1)]
+    loop.report = {"status": "recorded"}
+    args = Args()
+    args.max_jobs = 1
+    client.cmd_verify(args)
+    # Trained once, whatever the network did: the student waits in memory, beside the round's unedited one.
+    assert loop.graded == [1] and loop.sat == [1] and loop.slept == [client.EXAM_POLL, 60] and not loop.released
+    assert loop.reports == ["/api/v1/jobs/1/result"] and bases_seen[-1] == {}  # sat: the unedited student is let go of
+
+    # What will not pass is handed back, and the unedited student that was kept for it is let go of too.
+    early_loop(loop, monkeypatch, [True])
+    fails.append(client.WrongBytes("the round's exam the server sent is not the one the round committed to"))
+    monkeypatch.setattr(client, "_sit", flaky)
+    loop.claims = [a_job(id=2)]
+    with pytest.raises(Stop):
+        client.cmd_verify(Args())
+    assert loop.released[-1][0] == "/api/v1/jobs/2/release" and bases_seen[-1] == {}
+
+
 def test_stopping_hands_back_the_trained_grades_too(loop, monkeypatch):
     early_loop(loop, monkeypatch, [False, False, False])
     loop.claims, loop.interrupt_at = [a_job(id=1), a_job(id=2), None], client.EXAM_POLL
