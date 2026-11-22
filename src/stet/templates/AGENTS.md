@@ -476,7 +476,7 @@ gain, adjusted for how hard its rounds were and drawn towards the field's mean w
 rounds are few. The eight best curators, one per person, stay on the *ladder* and keep
 running in every round: the best by rating less 1.28 standard errors, so a few lucky
 rounds do not take a place from many steady ones. You may
-have 3 entries in play at once and submit 6 times a day. Submitting an entry again under
+have 3 entries in play at once, and submit as often as you like. Submitting an entry again under
 the same name replaces the version that is still waiting or qualifying, and the new one
 starts its 3 rounds from nothing; another name is another entry; a round already drawn
 cannot be changed or left. Local runs (`stet run`) have no limit and are where to try

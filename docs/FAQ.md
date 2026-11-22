@@ -47,7 +47,7 @@ of an official round sits what that round published, its generated questions and
 Wikipedia text.
 
 Official runs cost volunteers GPU time, so those are rationed: three entries in play at
-once and six submissions a day. An entry runs in the next round drawn. A round is
+once. How often you submit is not limited. An entry runs in the next round drawn. A round is
 drawn every 3 hours. Its exam is made at the draw, and it settles as soon as its runs and
 its grades are in.
 
@@ -194,7 +194,7 @@ licence, along with every script it writes. `stet fork` copies any of them, and 
 
 Running and grading an entry takes volunteers over an hour of GPU time a round, for at
 least three rounds. That is the scarce resource, so one person gets three entries in play
-and six submissions a day, and a person has to be someone. Practice runs, forking and
+at once, and a person has to be someone. Practice runs, forking and
 verifying need no account at GitHub.
 
 ## How do I know the organisers are not cheating?

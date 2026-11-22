@@ -1888,17 +1888,24 @@ func TestEnteringNeedsAnEstablishedGithubAccount(t *testing.T) {
 			}
 		}
 	})
-	// The day's submissions are counted for the person, whichever key they use.
-	w.app.st.update(context.Background(), func(tx *Tx) error {
-		for i := 0; i < w.app.cfg.SubmitsPerDay; i++ {
-			tx.saveEditor(&Editor{ID: fmt.Sprintf("%064x", i+1), AccountID: tx.s.byHandle["alice"].ID, Name: "old", Version: i + 1,
-				CreatedAt: now() - 60, Status: "withdrawn", GithubID: 4242})
+	// How often a person submits in a day is not counted: what they have in play at once is.
+	// After a dozen submissions, each under a name of its own, three are waiting.
+	for i := 0; i < 12; i++ {
+		if code := mallory.do("POST", "/api/v1/editors", bundle(t, fmt.Sprintf("again%d", i), fmt.Sprintf("print(%d)", i+2)), &out); code != 201 {
+			t.Fatalf("submission %d of a day was refused: HTTP %d %s", i+1, code, out.Error)
 		}
-		return nil
-	})
-	if code := mallory.do("POST", "/api/v1/editors", bundle(t, "again", "print(2)"), &out); code != 429 {
-		t.Fatalf("a second key got a fresh day of submissions: HTTP %d %s", code, out.Error)
 	}
+	w.app.st.view(func(s *State) {
+		n := 0
+		for _, e := range s.Editors {
+			if e.GithubID == 4242 && (e.Status == "queued" || e.Status == "running") {
+				n++
+			}
+		}
+		if n != w.app.cfg.EntriesInPlay {
+			t.Fatalf("after a dozen submissions one person has %d entries in play, want %d", n, w.app.cfg.EntriesInPlay)
+		}
+	})
 	w.check()
 
 	// Outside development, grades must come from the hardware the season names.

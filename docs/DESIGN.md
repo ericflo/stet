@@ -245,7 +245,7 @@ and decide the table.
 | A verifier copies a grade | Nothing is visible until the round settles |
 | Resubmit the leader for a lucky draw | Four fixed looks, a margin, paired on shared rounds |
 | Organiser picks a good seed | drand, a ten-minute grid, the crawl named in advance, checked by every client |
-| Flood the queue | GitHub-linked accounts, three entries in play, six submissions a day |
+| Flood a round | GitHub-linked accounts, three entries in play for each, and no more than 40 uploads an hour from one key |
 
 What is left is in [Rules](RULES.md#what-is-trusted-and-what-is-not).
 

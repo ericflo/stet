@@ -375,7 +375,7 @@ func (a *App) apiSeason(w http.ResponseWriter, r *http.Request) {
 		"season": a.season.ID, "title": a.season.Title, "digest": a.season.Digest, "harness": a.season.Harness,
 		"rules_version": a.season.RulesVersion, "scale": a.cfg.Scale, "student": a.season.Scales[a.cfg.Scale],
 		"round_interval_seconds": int(a.cfg.RoundInterval.Seconds()), "draw_grid_seconds": a.season.DrawGrid,
-		"round_min_gap_seconds": int(a.cfg.RoundMinGap.Seconds()), "entries_in_play": a.cfg.EntriesInPlay, "submissions_per_day": a.cfg.SubmitsPerDay,
+		"round_min_gap_seconds": int(a.cfg.RoundMinGap.Seconds()), "entries_in_play": a.cfg.EntriesInPlay,
 		"qualify_rounds": a.cfg.QualifyRounds, "rated_rounds": a.cfg.RatedRounds, "ladder_size": a.cfg.LadderSize,
 		"beacon": a.season.Beacon, "pools": a.season.Pools, "tolerance": a.tolerance(), "record": a.season.Record,
 		"grade_devices": a.season.GradeDevices, "site": a.cfg.BaseURL, "api": a.cfg.APIURL,

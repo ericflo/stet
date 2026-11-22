@@ -115,17 +115,9 @@ func (a *App) submit(ctx context.Context, acctID int64, blob []byte) (*Submissio
 			}
 			return fail(409, "these exact files have already been submitted by %s. Fork it and make it your own: stet fork %s", s.owner(existing).Handle, id[:12])
 		}
-		// Counted per person, not per key: a GitHub identity that moves to a new account
-		// takes its day's submissions with it.
-		recent := 0
-		for _, e := range s.Editors {
-			if e.CreatedAt > now()-86400 && (e.AccountID == acctID || (acct.GithubID != 0 && e.GithubID == acct.GithubID)) {
-				recent++
-			}
-		}
-		if recent >= a.cfg.SubmitsPerDay && !acct.Anchor {
-			return fail(429, "that is %d entries in a day, which is the most one person may submit. Each is run and graded on volunteers' machines for at least %d rounds. `stet run` has no limit and uses the same harness: try things there, and submit again tomorrow", recent, a.cfg.QualifyRounds)
-		}
+		// How often a person submits is not counted. What they have waiting or qualifying at
+		// once is (below), and that is what a round costs; a flood of uploads from one key is
+		// turned away before it is stored.
 		return nil
 	}
 	var pre error

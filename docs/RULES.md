@@ -46,8 +46,8 @@ A curator is a directory with a `stet.toml` and any program. `stet init` makes o
   A practice round's exam is the generated skills and, once you have run `stet harvest`,
   the same kinds of recent writing an official exam has. A replay sits what its round published (see [the exam](#the-exam)), so its score
   differs from the round's.
-- Officially you may have 3 entries in play at once, waiting or qualifying, and make 6
-  submissions a day. A new version of an entry (the same name) takes the old version's
+- Officially you may have 3 entries in play at once, waiting or qualifying. How often you
+  submit is not limited. A new version of an entry (the same name) takes the old version's
   place; another name is another entry, and past three the oldest makes way.
 - Entering needs a GitHub account at least 30 days old, linked with `stet login --github`.
   Every entry costs volunteers GPU time, so one person is one entrant: the limits above
@@ -97,9 +97,9 @@ work becomes a score.
 
 Who runs in a round: the ladder (see below), entries still qualifying, and every new entry
 waiting at its draw. A round turns nobody away, and nobody waits behind anybody else. What
-is limited is what one person may have waiting or qualifying at once, and submit in a day
-(below). Rounds do not overlap, so a round with a great many entries takes longer, and the
-next is drawn when it has settled.
+is limited is what one person may have waiting or qualifying at once: three entries, so at
+most three of one person's in a round. Rounds do not overlap, so a round with a great many
+entries takes longer, and the next is drawn when it has settled.
 
 Rounds never overlap. If one is still being graded when the next is due, the next is
 drawn at the first ten-minute mark that is at least six minutes after it settles. A round

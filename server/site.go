@@ -1051,7 +1051,7 @@ func (s *Site) guide(name, title, desc string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		a := s.app
 		d := map[string]any{
-			"InPlay": a.cfg.EntriesInPlay, "PerDay": a.cfg.SubmitsPerDay, "Qualify": a.cfg.QualifyRounds, "Ladder": a.cfg.LadderSize,
+			"InPlay": a.cfg.EntriesInPlay, "Qualify": a.cfg.QualifyRounds, "Ladder": a.cfg.LadderSize,
 			"Establish": a.cfg.EstablishAfter, "GithubDays": a.cfg.GithubMinAgeDays,
 		}
 		a.st.view(func(st *State) { a.nowFacts(st, d) })

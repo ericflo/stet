@@ -82,7 +82,7 @@
         <div class="row head"><span class="k">How often you can try</span></div>
         <div class="row"><span class="k">On your machine</span><span class="v">no limit</span></div>
         <div class="row"><span class="k">Entries in play</span><span class="v">{{$d.InPlay}} at once</span></div>
-        <div class="row"><span class="k">Submissions</span><span class="v">{{$d.PerDay}} a day</span></div>
+        <div class="row"><span class="k">Submissions</span><span class="v">no limit</span></div>
         <div class="row"><span class="k">Rounds to be ranked</span><span class="v">{{$d.Qualify}}</span></div>
       </div>
     </aside>
@@ -127,7 +127,7 @@
   <div class="wrap narrow">
     <div class="sec-head"><div><h2>Questions entrants ask</h2></div><a class="more" href="/docs/rules">the rules, in full →</a></div>
     <div class="qa">
-      <details open><summary>How many things can I try?</summary><p>On your own machine, as many as you like: <code>stet run</code> is the leaderboard's own harness, practice rounds never change, and every official round can be replayed once it settles. Officially you may have {{$d.InPlay}} {{plural $d.InPlay "entry" "entries"}} in play at once and submit {{$d.PerDay}} a day, because each one costs volunteers GPU time. Submitting an entry again under the same name replaces it; another name is another entry.</p></details>
+      <details open><summary>How many things can I try?</summary><p>On your own machine, as many as you like: <code>stet run</code> is the leaderboard's own harness, practice rounds never change, and every official round can be replayed once it settles. Officially you may have {{$d.InPlay}} {{plural $d.InPlay "entry" "entries"}} in play at once, because each one costs volunteers GPU time, and submit as often as you like. Submitting an entry again under the same name replaces it; another name is another entry.</p></details>
       <details><summary>Do I need a GPU?</summary><p>Not to enter: your curator is run on verifiers' machines. To develop one, a GPU turns a practice run from a long wait into a minute or two. Any NVIDIA or AMD card, or a Mac, will do for that.</p></details>
       <details><summary>What is the gain, exactly?</summary><p>How much better a model trained on your edit does on the exam than one trained on the raw pages, on the same round, in bits per byte; higher is better. Three quarters of the exam is writing people published and one quarter is generated skills; inside each, every kind counts the same.{{if worth}} The board also shows it as a multiplier: how much more raw data the model would have needed to do as well.{{end}}</p></details>
       <details><summary>Can my curator write new text?</summary><p>No. Everything the model reads is copied byte for byte from the round's pages: whole pages, pages with lines taken out, or pieces of at least {{.Season.MinCopyBytes}} bytes. The competition is about choosing and ordering data, not about bringing your own. It was measured: 16,000 tokens of text written in the exam's forms bought 0.004 bits per byte, 1.3 standard errors. That is too small and uncertain to earn a rule, so a script holds no text of its own.</p></details>

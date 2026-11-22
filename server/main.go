@@ -44,7 +44,6 @@ type Config struct {
 	RoundInterval  time.Duration
 	RoundMinGap    time.Duration // a round is drawn this long after the last when an entry is waiting; 0 keeps to the interval alone
 	EntriesInPlay  int           // entries one person may have waiting or qualifying at once
-	SubmitsPerDay  int           // submissions one person may make in a day
 	LadderSize     int
 	QualifyRounds  int // rounds every entry is given
 	RatedRounds    int // rounds before an editor is ranked
@@ -127,9 +126,8 @@ func loadConfig(season *Season) (Config, error) {
 		RoundInterval: envDuration("STET_ROUND_INTERVAL", 3*time.Hour),
 		RoundMinGap:   envDuration("STET_ROUND_MIN_GAP", 0),
 		// A round takes every curator waiting at its draw. What bounds it is what one person
-		// may have in play at once and submit in a day; the organisers' own are not counted.
+		// may have in play at once; the organisers' own are not counted.
 		EntriesInPlay:    envInt("STET_ENTRIES_IN_PLAY", 3),
-		SubmitsPerDay:    envInt("STET_SUBMISSIONS_PER_DAY", 6),
 		LadderSize:       envInt("STET_LADDER_SIZE", 8),
 		QualifyRounds:    envInt("STET_QUALIFY_ROUNDS", 3),
 		RatedRounds:      envInt("STET_RATED_ROUNDS", 3),
@@ -259,9 +257,6 @@ func newApp(ctx context.Context, cfg Config, season *Season, kv KV, blobs Blobs)
 	}
 	if cfg.EntriesInPlay < 1 {
 		cfg.EntriesInPlay = 1
-	}
-	if cfg.SubmitsPerDay < 1 {
-		cfg.SubmitsPerDay = 6
 	}
 	if cfg.ActiveWindow <= 0 {
 		cfg.ActiveWindow = 10 * time.Minute
