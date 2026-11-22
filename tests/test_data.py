@@ -65,6 +65,48 @@ def test_build_corpus_shuffles_cuts_and_is_deterministic(tmp_path, monkeypatch):
     assert c.urls != a.urls and sorted(c.urls) == sorted(a.urls)
 
 
+def test_a_corpus_is_the_same_however_many_files_are_read_at_once(tmp_path, monkeypatch):
+    import threading
+
+    shards = [Shard("", 0, f"fake-{k}", "u") for k in range(11)]
+    pages = {s.path: [(f"http://h{k}.test/{i}", f"File {k}, page {i}, says something of its own. " * 4) for i in range(7)] for k, s in enumerate(shards)}
+    reading, most = [0], [0]
+    lock = threading.Lock()
+
+    def read_shard(path, kind):
+        with lock:
+            reading[0] += 1
+            most[0] = max(most[0], reading[0])
+        time.sleep(0.03 if int(path.split("-")[1]) % 3 == 0 else 0.0)  # files finish out of order
+        yield from pages[path]
+        with lock:
+            reading[0] -= 1
+
+    monkeypatch.setattr(data, "round_shards", lambda rnd, scale, quiet=False: shards)
+    monkeypatch.setattr(data, "shard_path", lambda shard, quiet=False: shard.path)
+    monkeypatch.setattr(data, "read_shard", read_shard)
+    rnd, scale = practice_round(SEASON, 0), SEASON.scale("nano")
+    monkeypatch.setattr(data, "BUILD_THREADS", 1)
+    one = data.Corpus(data.build_corpus(rnd, scale, tmp_path / "one", quiet=True))
+    assert most[0] == 1
+    monkeypatch.setattr(data, "BUILD_THREADS", 4)
+    monkeypatch.setattr(data.os, "cpu_count", lambda: 8)
+    four = data.Corpus(data.build_corpus(rnd, scale, tmp_path / "four", quiet=True))
+    assert 1 < most[0] <= 4  # several at once, and never more than asked for
+    assert four.meta["sha256"] == one.meta["sha256"] and four.urls == one.urls and len(one) == 77
+
+    # A file that cannot be read stops the build, and names the file.
+    def broken(path, kind):
+        if path == "fake-6":
+            raise EOFError("cut short")
+        yield from pages[path]
+
+    monkeypatch.setattr(data, "read_shard", broken)
+    with pytest.raises(OSError, match="fake-6 is damaged"):
+        data.build_corpus(rnd, scale, tmp_path / "broken", quiet=True)
+    assert not (tmp_path / "broken").exists()
+
+
 def test_a_verifier_prunes_only_the_rounds_it_fetched_for_grading(tmp_path, monkeypatch):
     from stet.spec import load_season, official_round
 

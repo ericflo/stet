@@ -10,6 +10,7 @@ Corpus layout (language-agnostic, mmap-friendly):
 
 from __future__ import annotations
 
+import collections
 import errno
 import gzip
 import hashlib
@@ -24,6 +25,7 @@ import time
 import unicodedata
 import urllib.request
 import zlib
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -578,6 +580,57 @@ def sentence_starts(text: str, key_bytes: int, min_letters: int):
             yield key
 
 
+# Pool files fetched and read at once while a corpus is built. Fetching waits on the network
+# and unpacking is done outside the interpreter's lock, so a few threads overlap them; more
+# would only press harder on a public host. No more than twice this many files' text is ever
+# in memory.
+BUILD_THREADS = 4
+
+
+def _shard_docs(shard: Shard, kind: str, max_doc: int, quiet: bool) -> list[tuple[str, bytes]]:
+    """One pool file's documents as they go into a corpus: the address and the bytes of each
+    that has any text, cut at the season's cap."""
+    path = shard_path(shard, quiet)
+    out: list[tuple[str, bytes]] = []
+    try:
+        for url, text in read_shard(path, kind):
+            if not text.strip():
+                continue
+            b = text.encode("utf-8", errors="replace")
+            if len(b) > max_doc:
+                b = b[:max_doc].decode("utf-8", errors="ignore").encode("utf-8")
+            out.append((url.replace("\n", " ").replace("\r", " "), b))
+    except (OSError, EOFError, zstandard.ZstdError, zlib.error, ValueError) as e:
+        # A damaged copy, whatever the damage makes the reader say: a stream cut short, a
+        # checksum that fails, a record length that is not a number.
+        Path(path).unlink(missing_ok=True)  # fetch it again next time
+        raise OSError(f"{shard.path} is damaged ({e}); it has been removed from the cache, run again") from None
+    return out
+
+
+def _each_shard(shards: list[Shard], kind: str, max_doc: int, quiet: bool):
+    """Every pool file's documents, in the files' order, read a few files ahead of the caller."""
+    workers = max(1, min(BUILD_THREADS, len(shards), os.cpu_count() or 1))
+    if workers == 1:
+        for shard in shards:
+            yield _shard_docs(shard, kind, max_doc, quiet)
+        return
+    ahead: collections.deque = collections.deque()
+    todo = iter(shards)
+    with ThreadPoolExecutor(workers) as pool:
+        try:
+            while True:
+                while len(ahead) < 2 * workers and (shard := next(todo, None)) is not None:
+                    # Each file's own progress line would write over the others': the caller says one.
+                    ahead.append(pool.submit(_shard_docs, shard, kind, max_doc, True))
+                if not ahead:
+                    break
+                yield ahead.popleft().result()
+        finally:
+            for f in ahead:
+                f.cancel()
+
+
 def build_corpus(rnd: Round, scale: Scale, dest: Path, quiet: bool = False) -> Path:
     """Materialise a round's corpus. Deterministic: same round and scale, same bytes.
 
@@ -602,25 +655,19 @@ def build_corpus(rnd: Round, scale: Scale, dest: Path, quiet: bool = False) -> P
         urls: list[str] = []
         kind = rnd.pool_cfg["kind"]
         shards = round_shards(rnd, scale, quiet)
+        many = len(shards) > 1 and not quiet
+        t0 = time.time()
         with open(tmp / "arrival.bin", "wb") as out:
-            for shard in shards:
-                path = shard_path(shard, quiet)
-                try:
-                    docs = list(read_shard(path, kind))
-                except (OSError, EOFError, zstandard.ZstdError, zlib.error, ValueError) as e:
-                    # A damaged copy, whatever the damage makes the reader say: a stream cut
-                    # short, a checksum that fails, a record length that is not a number.
-                    path.unlink(missing_ok=True)  # fetch it again next time
-                    raise OSError(f"{shard.path} is damaged ({e}); it has been removed from the cache, run again") from None
-                for url, text in docs:
-                    if not text.strip():
-                        continue
-                    b = text.encode("utf-8", errors="replace")
-                    if len(b) > max_doc:
-                        b = b[:max_doc].decode("utf-8", errors="ignore").encode("utf-8")
+            for k, docs in enumerate(_each_shard(shards, kind, max_doc, quiet), 1):
+                for url, b in docs:
                     out.write(b)
                     offsets.append(offsets[-1] + len(b))
-                    urls.append(url.replace("\n", " ").replace("\r", " "))
+                    urls.append(url)
+                if many:
+                    sys.stderr.write(f"\r  fetched and read {k} of {len(shards)} files of the crawl: {offsets[-1] / 1e6:,.0f} MB of pages [{time.time() - t0:.0f}s]")
+                    sys.stderr.flush()
+        if many:
+            sys.stderr.write("\n")
         n = len(urls)
         order = rnd.doc_order(n)
         h = hashlib.sha256()
