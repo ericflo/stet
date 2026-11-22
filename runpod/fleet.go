@@ -47,6 +47,7 @@ type Fleet struct {
 	// getting there (seen.go), and those said to be.
 	lastLog  map[string]string
 	slowSaid map[string]bool
+	logGrew  map[string]time.Duration
 	// The record of the look under way, and when the markets' accounts and offers were last
 	// kept, and the rounds open at the last look (history.go).
 	cur        *lookRecord

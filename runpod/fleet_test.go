@@ -1226,8 +1226,12 @@ func TestAMachineStillInstallingIsGivenMoreTime(t *testing.T) {
 	if said := step(g+2*time.Minute, " Downloaded torch"); strings.Contains(said, "ended") || strings.Contains(said, "still getting there") {
 		t.Fatalf("said again, or ended:\n%s", said)
 	}
-	// Its log stops: it is ended.
-	if said := step(g + 3*time.Minute); !strings.Contains(said, "ended stet-rp-01: it stopped, or never asked for work") {
+	// Its log stops for a look, a large library downloading: it is kept. Stopped for
+	// slowStall, it is ended.
+	if said := step(g + 3*time.Minute); strings.Contains(said, "ended") {
+		t.Fatalf("its log quiet for a look:\n%s", said)
+	}
+	if said := step(g + 2*time.Minute + slowStall + time.Second); !strings.Contains(said, "ended stet-rp-01: it stopped, or never asked for work") {
 		t.Fatalf("its log stopped:\n%s", said)
 	}
 	if raw, _ := os.ReadFile(f.eventsPath()); !strings.Contains(string(raw), `"event":"slow"`) {
