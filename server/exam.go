@@ -132,6 +132,12 @@ func (a *App) postExam(ctx context.Context, idx int, p *ExamPost) (bool, error) 
 		if rd == nil || rd.Status != "open" || (rd.ExamSHA != "" && rd.ExamSHA != p.Digest) {
 			return fail(409, "%s changed while its exam was being kept; send it again", roundID(a.season.ID, idx))
 		}
+		if rd.ExamSHA == p.Digest {
+			// The same exam, posted twice at once: the other post was first, and the round's
+			// clock, its event and its grades' time are that one's.
+			already = true
+			return nil
+		}
 		late, err := a.checkHours(tx.s, rd, p)
 		if err != nil {
 			return err
@@ -152,7 +158,7 @@ func (a *App) postExam(ctx context.Context, idx int, p *ExamPost) (bool, error) 
 		a.moved(tx, rd) // the round's clock starts again: its grades start now
 		return nil
 	})
-	return err == nil, err
+	return err == nil && !already, err
 }
 
 // checkTable refuses a table with a part the season does not name, or one under a pillar the
