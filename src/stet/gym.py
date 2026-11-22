@@ -3,7 +3,7 @@
 One episode is one round. The observation is a raw corpus and a description of the task.
 The action is an edit script. The reward is the gain: how much better the fixed student does
 on the exam after training on your edit than after training on the unedited corpus, in bits
-per byte (the mean over the exam's seven pillars).
+per byte, on the season's exam.
 
     from stet.gym import Env
 

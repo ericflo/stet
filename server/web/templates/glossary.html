@@ -74,7 +74,7 @@
     <h2>Where the training data comes from</h2>
     <p class="intro">Nobody chooses a round's training data, and anyone can check that.</p>
     <dl>
-      <div id="draw"><dt>Draw</dt><dd><p>The moment a round's pages are picked. The time is announced in advance and falls on a fixed {{minutes .Season.DrawGrid}}-minute grid, so it can't be chosen to suit anyone. Entries must be in before it.</p></dd></div>
+      <div id="draw"><dt>Draw</dt><dd><p>The moment a round's pages are picked. The time is announced in advance and falls on a fixed {{minutes .Season.DrawGrid}}-minute grid, so it can't be chosen to suit anyone. An entry made before it runs in that round; one made after it, in the next.</p></dd></div>
       <div id="beacon"><dt>Beacon</dt><dd><p>{{.Season.Beacon.Name}}: a public source of random numbers run by others, which emits a new value every few seconds. The first value after the draw time picks the round's pages, the exam's generated problems and the model's starting weights. Nobody, organisers included, can know it in advance.</p></dd></div>
       <div id="crawl"><dt>Crawl</dt><dd><p>Common Crawl, a public archive of billions of web pages. Each round draws a few files from its newest crawl, named when the round is announced. Every verifier fetches the pages from Common Crawl itself and checks them against the announcement.</p></dd></div>
       <div id="scale"><dt>Scale</dt><dd><p>The size of everything in a round: how big the model is, how much it reads, how many pages are drawn. Official rounds this season are run at <b>{{.ScaleID}}</b>. Smaller scales exist for quick practice on your own machine.</p></dd></div>

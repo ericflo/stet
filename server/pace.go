@@ -7,8 +7,10 @@ import (
 
 // --- several grades before the exam, the fastest machines after it ------------------------------
 //
-// A round's exam is made hours after its draw, and a grade handed out before it trains then
-// and sits the exam the moment it is posted. A machine asked for the round's unedited
+// A round's exam is posted some time after its draw: minutes, now that the examiner picks it
+// from hours of writing harvested and committed beforehand (it was two hours, when the writing
+// was harvested after the draw), and longer if the examiner is late. A grade handed out before
+// it trains then and sits the exam the moment it is posted. A machine asked for the round's unedited
 // baseline (exam.go) trains that student once, with its first grade, and then the script's;
 // every other grade, on any machine, is a single pass, and sitting the exam takes seconds.
 // So a machine that has trained a grade may hold

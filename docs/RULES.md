@@ -43,8 +43,8 @@ A curator is a directory with a `stet.toml` and any program. `stet init` makes o
 - **Try as much as you like on your own machine.** `stet run` is the leaderboard's own
   harness: nothing is uploaded and nothing is counted. Practice rounds never change, and
   every official round can be replayed once it has settled (`stet run --round <id>`).
-  Practice rounds' exams are generated questions only, since no fresh text was written for
-  them. A replay sits what its round published (see [the exam](#the-exam)), so its score
+  A practice round's exam is the generated skills and, once you have run `stet harvest`,
+  the same kinds of recent writing an official exam has. A replay sits what its round published (see [the exam](#the-exam)), so its score
   differs from the round's.
 - Officially you may have 3 entries in play at once, waiting or qualifying, and make 6
   submissions a day. A new version of an entry (the same name) takes the old version's
@@ -383,7 +383,8 @@ the **large** size: its corpus, its time limit, the usual sandbox. The large stu
 trained twice on each script and sits that round's exam. The unedited corpus's large
 student is trained four times in each round, and once more at half, twice and four times
 the training budget: that is the finals' own curve, which the multipliers are read from.
-A curator that writes no usable script in a round has a gain of 0 there, as in any round.
+A curator that writes no usable script in a round counts as the lowest gain any curator got
+there, or zero if that is lower, as in any round.
 
 **The table.** For each curator:
 

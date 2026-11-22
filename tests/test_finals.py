@@ -133,7 +133,7 @@ def test_the_lots_pick_takes_whatever_place_its_gain_earns():
     assert finals.table(last, ROLES, plan=PLAN)["lot"] == {"name": "L", "place": 5, "ahead_of": [], "level_with": []}
 
 
-def test_a_round_with_no_usable_script_is_a_gain_of_0_there():
+def test_a_round_with_no_usable_script_counts_as_the_lowest_gain_there_or_zero():
     rounds = _rounds()
     del rounds[1]["students"]["D"]
     out = finals.table(rounds, ROLES, plan=PLAN)
@@ -142,6 +142,12 @@ def test_a_round_with_no_usable_script_is_a_gain_of_0_there():
     # A 0 by rule is not a measurement: the standard error of a difference is taken from the four
     # that have both rounds, whose half-differences of +2, -2, +2 and 0 thousandths have mean 0.5.
     assert out["se_difference"] == pytest.approx(math.sqrt(2 * (3 * 4e-6 - 4 * 0.0005**2) / 3))
+    # Failing is never better than finishing: where a curator that finished ended below zero,
+    # the one that wrote nothing is put no higher.
+    rounds[1]["students"]["C"] = twice(-0.03)
+    out = finals.table(rounds, ROLES, plan=PLAN)
+    d = next(r for r in out["rows"] if r["name"] == "D")
+    assert d["rounds"] == pytest.approx([0.018, -0.03]) and d["trainings"] == [2, 0]
 
 
 def test_one_round_trained_once_places_by_gain_alone():

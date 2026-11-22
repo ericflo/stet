@@ -82,8 +82,8 @@ def table(rounds: list[dict], roles: dict[str, str], tie: float = TIE, plan=None
     `rounds` has, for each finals round: `table` and `shares` (what each item counts toward, and
     the corpus's languages: aggregate.item_table), `unedited` (the item scores of each training
     of the unedited corpus), `students` (for each curator, those of each training of its script;
-    none for a curator that wrote no usable script there, whose gain in that round is 0 as in
-    any round), and `curve` (for each other multiple of the budget, the unedited trainings
+    none for a curator that wrote no usable script there, whose gain in that round is the
+    lowest any curator got there, or zero if that is lower, as in any round), and `curve` (for each other multiple of the budget, the unedited trainings
     there). `roles` names every curator run: finalist, lot or yardstick.
 
     A curator's gain is the mean of its rounds, and a round's the mean of its trainings there.
@@ -117,7 +117,12 @@ def table(rounds: list[dict], roles: dict[str, str], tie: float = TIE, plan=None
         if r.get("curve"):
             curves.append(measure.curve(r["table"], r["shares"], {1.0: r["unedited"], **r["curve"]}, plan))
     n_rounds = len(rounds)
-    by_round = {n: [measure.mean(c) if c else 0.0 for c in cells[n]] for n in names}
+    by_round: dict[str, list[float]] = {n: [] for n in names}
+    for k in range(n_rounds):
+        finished = {n: measure.mean(cells[n][k]) for n in names if cells[n][k]}
+        lowest = min([0.0, *finished.values()])  # failing is never better than finishing
+        for n in names:
+            by_round[n].append(finished.get(n, lowest))
     gain = {n: measure.mean(by_round[n]) for n in names}
     noise = measure.pooled_sd(c for n in names for c in cells[n])
 

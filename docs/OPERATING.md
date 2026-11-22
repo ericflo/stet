@@ -475,7 +475,9 @@ rollback of the image.
 A season freezes the student, the budgets, the exam and the rules. The next one is a new
 file in `src/stet/seasons/`, and the switch is:
 
-1. Announce it, and finish the current season with its finals.
+1. Announce it, and finish the current season with its finals. (Season 1 had one entrant
+   and was paused after round 14: it has no finals, and Season 2 begins when its change is
+   merged.)
 2. In one commit: `CURRENT_SEASON` and a new `HARNESS_VERSION` in `src/stet/spec.py`;
    `python tools/export_season.py <season> > server/season.json`; the rules in
    `docs/RULES.md`. Then the tests, and push.
@@ -488,9 +490,12 @@ file in `src/stet/seasons/`, and the switch is:
 4. Enter the reference curators from the organisers' account, before the first draw:
    `for d in identity english tidy heuristic dclm fineweb2 fineweb-edu; do stet submit examples/$d --yes; done`.
    Three new entries are admitted a round, in the order they were submitted.
-5. Restart the organisers' verifier and the examiner on the new client, and watch the first
-   round through: its exam posted (`/api/v1/rounds/<id>` shows `exam_digest`), grades
-   arriving, the round settling.
+5. Restart the organisers' verifier and the examiner on the new client. The examiner
+   (`stet examine --follow`) harvests an hour of writing every hour and commits to it, and a
+   round's exam is drawn from the day before its draw: so it runs for a day before the first
+   round is drawn (`GET /api/v1/harvests` lists what it has committed).
+6. Watch the first round through: its exam posted (`/api/v1/rounds/<id>` shows
+   `exam_digest`), grades arriving, the round settling.
 
 ## Archiving a season
 
