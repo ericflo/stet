@@ -1,16 +1,15 @@
 # The rules
 
-Season 1. These are the rules as the server and the harness enforce them. Where a number
+Season 2 (rules version 5). These are the rules as the server and the harness enforce them. Where a number
 is still being measured it says *provisional*, and [Experiments](EXPERIMENTS.md) says how it
 will be set.
 
 ## The idea
 
 A small language model, the **student**, is trained on raw web text for a fixed number of
-tokens and then sits an **exam**. The exam is written after the round is drawn: human
-writing published in the hour after the draw, and questions made from the round's
-seed. It covers seven things a pretrained model is for, each counting the same. The model
-and the trainer never change. You change one thing: the data. You write a **curator**, a
+tokens and then sits an **exam**. The exam is made when the round is drawn: three quarters
+of it is human writing newer than every curator in the round, and one quarter is questions
+made from the round's seed. The model and the trainer never change. You change one thing: the data. You write a **curator**, a
 program that is handed raw web pages it has never seen and twenty minutes on one GPU. It
 answers with an **edit script**: what to keep, what to cut, and in what order to train on
 it. The better the student does on the exam than one trained on the raw pages, the better
@@ -40,7 +39,7 @@ A curator is a directory with a `stet.toml` and any program. `stet init` makes o
   You bundle your own code and nothing else.
 - **It has to run on both makes of GPU.** Curators are run by volunteers, on NVIDIA and on
   AMD. Use the GPU through PyTorch (`device="cuda"` is right on both) and it will. A run
-  that fails scores a gain of 0.
+  that fails is never better than one that finishes: see [the score](#the-score).
 - **Try as much as you like on your own machine.** `stet run` is the leaderboard's own
   harness: nothing is uploaded and nothing is counted. Practice rounds never change, and
   every official round can be replayed once it has settled (`stet run --round <id>`).
@@ -75,7 +74,10 @@ pushes the next back.
    announcements and refuse a round that contradicts what they were told. No draw is
    announced less than six minutes ahead, and a draw that is moved is announced again the
    same way, for a time no round was ever announced for before.
-2. **Commit.** Your curator must be submitted at least 30 seconds before the draw.
+2. **Freeze.** Your curator runs only in rounds drawn at least 26 hours after you submitted
+   it. A round's exam holds writing from the day before its draw, so every curator in a
+   round is older than anything its exam could hold. A new version is a new submission, and
+   waits again.
 3. **Draw.** The seed is `sha256(season, round number, drand round, drand randomness,
    crawl)`. It picks the corpus files, the order of the documents, the exam's generated
    questions and the student's initial weights. Nobody can know or steer any of that beforehand,
@@ -83,12 +85,12 @@ pushes the next back.
    cannot pick a favourable drand round either.
 4. **Edit.** Two volunteers each run every curator, in a sandbox, with a time limit. Each
    run writes an edit script.
-5. **Exam.** The round's exam is made after the draw. Fresh text is gathered from the hour
-   after it, and an hour later, once the sources that publish late have caught up, the
-   organisers' examiner makes the exam and posts it with its hash (see [the exam](#the-exam)).
-   The curators have finished running long before.
+5. **Exam.** The round's exam is made at the draw. The organisers' examiner harvests what
+   people publish, every hour of the clock, and tells the server each harvest's hash as it is
+   made. The draw's seed picks three of the day's hours, and the exam is made from exactly
+   those and posted with its hash (see [the exam](#the-exam)). No round waits for its exam.
 6. **Grade.** Other volunteers train the student on what each script says, as soon as it
-   is written, and have it sit the exam once it is posted. Grading runs no entrant code: a
+   is written, and have it sit the exam. Grading runs no entrant code: a
    script is plain data.
 7. **Settle.** A round settles as a whole. Until then every script and every grade is
    sealed. Then each score is published, with every run and every grade behind it,
@@ -102,9 +104,9 @@ entries. When more than 3 are waiting, entries from people who have graded for o
 the last two weeks go first.
 
 Rounds never overlap. If one is still being graded when the next is due, the next is
-drawn at the first ten-minute mark that is at least six minutes after it settles. Since the
-exam is made two hours after the draw, and scripts are graded while it is, a round takes
-about two and a half hours from draw to settlement.
+drawn at the first ten-minute mark that is at least six minutes after it settles. A round
+takes as long as its curators and its trainings do: about an hour from draw to settlement
+with enough machines. Season 1's rounds took two and a half, two of them waiting for the exam.
 
 ## The corpus
 
@@ -129,12 +131,16 @@ One line per output document. Line order is training order: the trainer does not
 ```
 
 - **Cutting, reordering and repeating are free.**
-- **New text is ink, and there is almost none.** Literal text and copies shorter than 64
-  bytes are ink. The one exception is a whole short document kept on a line of its own.
-  A script may train the student on at most
-  0.1% ink, counted in tokens: 160,000 tokens at the official scale. That is enough for
-  separators and small repairs and nothing else. It is what makes this an editing
-  competition: without it the winning move is to ignore the corpus and ship a dataset.
+- **Deleting lines is free too.** Whole lines of one page, kept in the page's order, are
+  copies however short they are: take out the menu, the cookie banner and the footer and
+  keep the article. Lines cannot be moved, cut short, repeated or mixed with another page's
+  that way.
+- **New text is ink, and there is almost none.** Literal text is ink, and so is any other
+  copy shorter than 64 bytes. The one exception is a whole short document kept on a line of
+  its own. A script may train the student on at most 0.01% ink, counted in tokens: 16,000
+  tokens at the official scale. That is enough for separators and nothing else. It is what
+  makes this an editing competition: without it the winning move is to ignore the corpus
+  and ship a dataset.
 - **The budget cuts both ways.** The stream is cut off at the training budget. A script
   that is shorter is repeated from the top, so keeping less means training on it more
   often.
@@ -143,41 +149,71 @@ One line per output document. Line order is training order: the trainer does not
 
 ## The exam
 
-The exam asks for seven things a pretrained model is for, and each counts the same:
+**Three quarters of the score is writing people published. One quarter is skills.** Inside
+each, every row below counts the same.
 
-| | What it asks | Where it comes from |
-|---|---|---|
-| Knowledge | Facts the web knows, in ten languages | Generated from Wikidata's facts |
-| Reading | Taking an answer, or a new rule, from the context | Generated |
-| Reasoning | Mathematics and logic, in thirteen languages | Generated, and checked |
-| Code | What programs print; reading structured data | Generated, and checked |
-| Agents | What a tool says back, in a session at a shell | Generated |
-| Writing | Human writing of every kind, in every language | Fresh: published after the draw; and generated pairs of a right and a wrong sentence |
-| Conversation | Replies in discussions | Fresh: published after the draw |
+| | | What it asks | Where it comes from |
+|---|---|---|---|
+| Writing (75%) | Reference | Encyclopedia text | New and extended Wikipedia articles |
+| | News | News reports | Common Crawl's news crawl |
+| | Technical | Issues, release notes, patches, questions and answers | GitHub, the kernel's mailing lists, Stack Overflow |
+| | Science | Abstracts, and questions and answers on the sciences | Crossref, Stack Exchange |
+| | Conversation | Posts and replies | Hacker News, Lemmy, forums, Bluesky, Mastodon, Wikipedia's talk pages |
+| Skills (25%) | Agents | What a tool says back, in a session at a shell | Generated |
+| | Reading | Taking an answer, or a new rule, from the context | Generated |
+| | Transformation | Turning text from one form into another | Generated |
+| | Logic | What follows from what is given | Generated |
+| | Grammar | The right sentence of two | Generated |
 
-**Fresh text** is writing published in the hour after the draw. It is gathered by kind
-of writing, each kind getting an equal part: reference (new and extended Wikipedia
-articles), news (Common Crawl's news crawl), technical (GitHub issues, pull requests and
-release notes), social (public Bluesky and Mastodon posts) and discussion (replies on Hacker
-News, Lemmy, GitHub, Wikipedia's talk pages and social sites). Inside a kind, every language
-gets its share of the round's corpus, and the sources take turns. No source needs a key.
+**The writing** is what people published in three hours of the day before the draw. The
+examiner harvests every hour of the clock an hour after it ends, keeping a sample chosen
+with a public random number emitted as the hour ends, and tells the server the harvest's
+hash at once. At the draw, the round's seed picks three of the hours harvested in the 26
+before it. So:
 
-**Generated questions** are made from the round's seed, so nobody can know them before the
-draw either.
+- every curator in the round was submitted before any of that writing existed
+  ([the freeze](#a-round));
+- nobody knows which hours a round will be given until its draw, the organisers included;
+- nobody writing in an hour can tell what the harvest will keep of it;
+- and the organisers cannot make a harvest again to suit a round: its hash was public first.
+
+Inside a kind of writing, every language gets its share of the round's corpus, and the
+sources take turns. No source needs a key or an account. Writing the round's corpus already
+holds is dropped from the exam.
+
+**The skills** are made from the round's seed, so nobody can know them before the draw
+either. Every answer follows from what the item itself shows: there is nothing to know by
+heart.
+
+**Watched.** The exam also asks kinds of question that count for nothing: arithmetic, unit
+conversion, tracing a program, facts and others, each cold and with worked examples shown
+first. Their scores are published part by part with every round. Season 1 counted them,
+and they turned out to say nothing about a curator at this student's size: two trainings of
+the same data disagreed about them more than two curators did. A watched part earns a place
+in the next version of the rules when, over at least twenty settled rounds, curators differ
+on it by more than one and a half times what two trainings of one curator do, and its order
+of curators agrees with the score's (rank correlation 0.5 or better).
 
 **The score of an item** is how likely the student finds the right text, in bits per byte:
-a passage, an answer given its question, or the right sentence of a pair. **The exam's score** is the mean of the seven.
-Inside each, every family of questions (or kind of writing) counts the same, then every
-language by its share of the round's corpus, then every format. A gain on an item is
-clipped to a few robust widths, so that no handful of items decides anything.
+a passage, an answer given its question, or the right sentence of a pair. An item's bits are
+never put over fewer than 16 bytes, so a one-word answer counts for less than a sentence. An
+answer or a passage longer than the student's window is scored whole, a window at a time.
+
+**The exam's score** is three quarters the mean of the kinds of writing and one quarter the
+mean of the skills. A kind missing from a round gives its share to the others of its own
+group. Inside each, every language counts by its share of the round's corpus, then every
+format. No share rests on one or two items: a language or a format with fewer than eight
+items counts in proportion, and a part's small languages are measured together. A gain on
+an item is clipped to a few robust widths, so that no handful of items decides anything.
 
 When the round settles, its exam is published: every generated question and Wikipedia's
 text whole, and for every other source the item's source, its id there and the item's
-hash. Anyone can check those items at the source.
+hash. Anyone can check those items at the source. So is every student's score on every
+item (`/api/v1/rounds/<id>/scores`): anyone can work every gain out again.
 
-**Nobody knows it in advance**, the organisers included: it is written after the draw, and
-its questions are made from the draw's seed. So no exam is kept secret, and none needs to be.
-Until the round settles, its items are served only to the machines grading it.
+**Nobody knows it in advance**, the organisers included. So no exam is kept secret, and
+none needs to be. Until the round settles, its items are served only to the machines
+grading it.
 
 ## The student
 
@@ -253,25 +289,34 @@ where other entries did run, are taken to be the entry's doing, and it stops bei
 
 - **Gain** = how much better your script's student does on the exam than the unedited
   corpus's, on the same round with the same initial weights, in bits per byte. The unedited
-  student's score on each item is the mean of every established grader's own measurement
-  of it. The unedited corpus is every document in the order it was drawn.
+  student is trained four times a round, by four different established graders, and its
+  score on each item is the mean of theirs. The unedited corpus is every document in the
+  order it was drawn.
 - **An entry's gain for a round is taken over its runs**: the mean of two, or the median
   of three. Two runs of a curator that uses neither the clock nor a GPU write the same
   script, and then there is one number.
 - A run with no usable script (nothing written, malformed, over the ink limit, or the
-  curator crashed) scores a gain of 0. A round in which every run failed is **invalid**.
-  A curator with two invalid rounds in its last five stops being run, whether it is
-  qualifying or on the ladder.
-- **Rating** = your mean gain, adjusted for how hard your rounds were. Every entry runs 3
-  rounds and is ranked when it has them. A curator you replace keeps its page and its
-  results but leaves the ranking.
+  curator crashed) has failed. A round in which every run failed is **invalid**, and
+  **counts as the lowest gain any valid entry got in that round, or zero if that is lower**:
+  failing is never the better move. A curator with two invalid rounds in its last five stops
+  being run, whether it is qualifying or on the ladder.
+- **Rating** = your mean gain, adjusted for how hard your rounds were, and drawn towards
+  the field's mean while your rounds are few: after n rounds it has moved n/(n+k) of the way
+  from the field's mean to your own, where k (between 1 and 8) is how many rounds it takes
+  for a curator's own record to say as much as the field does. Every entry runs 3 rounds and
+  is ranked when it has them. A curator you replace keeps its page and its results but
+  leaves the ranking.
+- **Ties are shown as ties.** A curator whose rating is within two standard errors of the
+  one above it shares its place on the board.
 - **Multiplier** = how many times more unedited data the student would have needed to do
   as well. None is shown until that curve has been measured on this exam.
 
 ## The ladder
 
-Eight curators run in every round: the record holder and the best-rated curators, one per
-entrant. That is what lets any two of them be compared on the same data. The numbers in
+Eight curators run in every round: the record holder and the best curators, one per
+entrant, taken in order of **rating less 1.28 standard errors**: what a curator is very
+likely to be at least as good as. Three lucky rounds do not take a place from thirty steady
+ones. That is what lets any two of them be compared on the same data. The numbers in
 this section and the last are what a few machines can run and grade between draws; they
 go up as more people lend a GPU.
 
@@ -283,8 +328,11 @@ may hold one too. That is how you beat your own record.
 The organisers' reference curators are the one exception to "one per entrant": their own
 three (`stet/identity`, `stet/english`, `stet/tidy`) and four that rebuild published recipes
 (`stet/heuristic`, `stet/dclm`, `stet/fineweb-edu`, `stet/fineweb2`). They are yardsticks:
-each holds a place while it ranks in the eight, and they leave as better curators arrive. Any other curator that
-has stopped producing valid scripts leaves the ladder too.
+each holds a place while it ranks in the eight, and they leave as better curators arrive.
+Two of them, `stet/fineweb2` and `stet/dclm`, run in every round and tie the rounds
+together; each of the others runs in one round in eight, in turn, and keeps its rating from
+the rounds it ran. Any other curator that has stopped producing valid scripts leaves the
+ladder too.
 
 ## The record
 
@@ -294,7 +342,7 @@ One curator holds the record. A challenger takes it when all of these hold:
   reaches each of those four counts and at no other time. (When the holder changes, a
   curator that already shares more rounds with the new one is tested once, at the largest
   count it has reached.)
-- its gain over those rounds beats the holder's by more than a **margin** of 0.01 bits per byte
+- its gain over those rounds beats the holder's by more than a **margin** of 0.005 bits per byte
   *(provisional)* in a one-sided paired test, at p < 0.05 split across the four looks.
 
 Every number in the test is a settled gain. The first record of a season goes the same
@@ -346,9 +394,13 @@ are graded by **verifiers**: anyone who runs `stet verify`.
 - **Each script is graded by someone other than the verifier who wrote it.** Its gain is
   the median of the established verifiers' grades, each against the round's unedited
   student. Two honest machines agree to within a small tolerance *(provisional: 0.025 bits
-  per byte)*. A grader's own measurement of the unedited student must agree with the
+  per byte)*. The first four established graders of a round are each asked to train the
+  unedited student as well; the rest are not, and their grades are measured against the
+  mean of those four. (Season 1 trained one on every machine: a third of all its
+  trainings.) A measurement of the unedited student must agree with the
   others' to within 0.04 bits per byte, or its grade is turned away and listed with the
-  round. When two established grades of a script
+  round. A machine that is not yet established always trains its own: that is how it is
+  checked. When two established grades of a script
   differ by more than that, a third is taken. When both runs write the same script, byte
   for byte, it is nobody's own and either runner may grade it: neither could have made
   it up. Established verifiers who come free before the exam is posted grade its
@@ -430,12 +482,14 @@ script with `stet score`.
 - **The first established accounts.** Theirs, and so which grades the first volunteers
   are compared with.
 - **Assigning work at random.** The server chooses who runs and who grades what.
-- **Making each round's exam honestly.** The examiner gathers the fresh text and makes the
-  exam after the draw, by published code, and keeps the harvest's hash with it. Anyone can
-  make the generated questions again from the seed, and check every fresh item against its
-  source once the round settles. What they could do and nobody would see: harvest at a
-  moment that suits a curator, or leave a source out. They tune nothing on a round's exam
-  before it settles, their own reference curators included.
+- **Harvesting honestly.** The examiner harvests every hour by published code and tells
+  the server each harvest's hash before any round can be given it (`/api/v1/harvests`); the
+  draw then picks the hours, so no harvest can be made to suit a round or a curator. Anyone
+  can make the generated questions again from the seed, check which hours the seed picks,
+  and check every fresh item against its source once the round settles. What they could do
+  and nobody would see: leave a source out of an hour's harvest. Their own reference
+  curators are frozen like anyone's, and they tune nothing on a round's exam before it
+  settles.
 - **Training the finals.** The finals' students are trained on the organisers' machines.
   The scripts and the exam are published, so any of them can be trained again.
 - **Choosing when the season closes,** and so which rounds pick the finalists. The close is
