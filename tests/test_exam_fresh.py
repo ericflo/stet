@@ -323,3 +323,57 @@ def test_a_named_server_is_followed_only_to_itself():
                       "file:///etc/passwd"):
         with pytest.raises(fresh.Refused):
             hop.redirect_request(req, None, 302, "Found", {}, elsewhere)
+
+
+def _stamp(t):
+    import time
+
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t))
+
+
+def test_wikidata_failing_keeps_the_articles_without_their_classes(monkeypatch):
+    from stet.exam.fresh import wikipedia
+
+    start, end = 1_800_000_000, 1_800_003_600
+    down = []
+
+    def get_json(url, params, **kw):
+        if "wikidata.org" in url:
+            if down:
+                raise OSError("no answer")
+            return {"entities": {"Q7": {"claims": {"P31": [{"mainsnak": {"datavalue": {"value": {"id": "Q5"}}}}]}}}}
+        if params.get("list") == "recentchanges":
+            return {"query": {"recentchanges": [{"pageid": 1, "timestamp": _stamp(start + 5)}, {"pageid": 2, "timestamp": _stamp(end)}]}}
+        assert params["pageids"] == "1"  # a page made as the window closed is the next window's
+        return {"query": {"pages": {"1": {"pageid": 1, "title": "A river", "extract": "The river runs. " * 40,
+                                          "revisions": [{"revid": 11, "timestamp": _stamp(start + 9)}], "pageprops": {"wikibase_item": "Q7"}}}}}
+
+    monkeypatch.setattr(wikipedia, "get_json", get_json)
+    said = []
+    (doc,) = wikipedia.harvest(start, end, ["en"], log=said.append)
+    assert (doc.id, doc.topic, doc.extra) == ("en:11", "Q5", {"wikidata": "Q7"})
+    down.append(True)
+    (bare,) = wikipedia.harvest(start, end, ["en"], log=said.append)
+    assert bare == dataclasses.replace(doc, topic="") and any("wikipedia classes: OSError" in line for line in said)
+
+
+@pytest.mark.parametrize("talk", [True, False])
+def test_an_edit_made_as_the_window_closes_is_the_next_windows(monkeypatch, talk):
+    from stet.exam.fresh import wikipedia
+
+    start, end = 1_800_000_000, 1_800_003_600
+    row = ('<tr><td colspan="2" class="diff-empty diff-side-deleted"></td><td class="diff-marker" data-marker="+"></td>'
+           '<td class="diff-addedline diff-side-added"><div>' + "The bridge over the river was rebuilt. " * 10 + "</div></td></tr>")
+
+    def get_json(url, params, **kw):
+        if params.get("list") == "recentchanges":
+            assert (params["rcstart"], params["rcend"]) == (_stamp(end), _stamp(start))
+            return {"query": {"recentchanges": [{"pageid": n, "revid": 10 + n, "old_revid": n, "title": f"Page {n}", "timestamp": _stamp(t),
+                                                 "oldlen": 0, "newlen": 5000} for n, t in ((1, end), (2, end - 1), (3, start))]}}
+        if params["action"] == "compare":
+            return {"compare": {"*": row}}
+        return {"query": {"pages": {}}} if "wikipedia.org" in url else {"entities": {}}
+
+    monkeypatch.setattr(wikipedia, "get_json", get_json)
+    docs = wikipedia.additions("en", start, end, 10, None, talk=talk)
+    assert [(d.id, d.published) for d in docs] == [("en:12", end - 1), ("en:13", start)]
