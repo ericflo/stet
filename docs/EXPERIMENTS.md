@@ -220,9 +220,9 @@ all seven reference curators ran in every round. A third of the season's trainin
 baselines, and half was the references.
 
 **What it decided.** Four established graders measure a round's baseline, and its score on
-each item is the mean of theirs: the mean of every grader's is no better a baseline than
-the mean of a few, and it is still several, so that one unsteady training of the unedited
-corpus does not move every gain in the round. Two references, `fineweb2` and `dclm`, run
+each item is the median of theirs: every grader's would be no better a baseline than
+a few, and it is still several, so that one unsteady training of the unedited
+corpus does not move every gain in the round, whichever machine reports first. Two references, `fineweb2` and `dclm`, run
 in every round and tie the rounds together; each of the others runs in one round in eight.
 
 ## What the record rule can tell apart

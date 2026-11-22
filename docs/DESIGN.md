@@ -185,9 +185,9 @@ curators differ from each other. Every score is a difference from the unedited c
 the same round with the same initial weights, ratings are adjusted for which rounds a
 curator happened to get, and the top curators run in every round so that any two of them can
 be compared directly. The unedited corpus trains the least steadily of all, so the round's
-baseline is the mean of four established graders' measurements, item by item. Four and not
-every grader's: each costs a whole training, and the mean of all of them is no better a
-baseline than the mean of a few. The organisers' reference curators are yardsticks, and a
+baseline is the median of four established graders' measurements, item by item, so that one
+machine that is far out moves it by nothing, whichever reported first. Four and not every
+grader's: each costs a whole training, and all of them are no better a baseline than a few. The organisers' reference curators are yardsticks, and a
 yardstick need not run every round: `fineweb2` and `dclm` do, and tie the rounds together,
 and each of the others runs in one round in eight.
 
@@ -273,7 +273,7 @@ What is left is in [Rules](RULES.md#what-is-trusted-and-what-is-not).
    established, are asked to train the unedited corpus as well. Once the exam is posted a
    grader fetches the items, checks them against the round's digest, has its students sit
    them, and reports one score per item.
-5. **The server adds it up.** The round's baseline is the item-by-item mean of the
+5. **The server adds it up.** The round's baseline is the item-by-item median of the
    established graders' baselines. A grade's score is the exam's aggregate (writing three
    quarters, skills one quarter) of its item scores less that baseline. The server computes
    it with a Go port of `src/stet/exam/aggregate.py`, checked against the Python on shared
