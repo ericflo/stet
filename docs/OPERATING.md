@@ -505,7 +505,11 @@ file in `src/stet/seasons/`, and the switch is:
 5. Restart the organisers' verifier and the examiner on the new client. The examiner
    (`stet examine --follow`) harvests an hour of writing every hour and commits to it, and a
    round's exam is drawn from the day before its draw: so it runs for a day before the first
-   round is drawn (`GET /api/v1/harvests` lists what it has committed).
+   round is drawn (`GET /api/v1/harvests` lists what it has committed). A new database is
+   not paused, so hold the first draw for that day: pause the rounds straight after the
+   deploy ([above](#pausing-the-rounds)) and resume a day later. A round drawn with no hours
+   committed is not lost: its exam is made late, from the harvests that follow, and the
+   round says so.
 6. Watch the first round through: its exam posted (`/api/v1/rounds/<id>` shows
    `exam_digest`), grades arriving, the round settling.
 
