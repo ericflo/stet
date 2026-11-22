@@ -130,11 +130,12 @@ So everything the student reads is copied byte for byte from the corpus. This is
 rules out distilling a frontier model into the training data, and it leaves a curator's
 author no way to write the exam's passages in.
 
-A little text of a curator's own was allowed at first: 0.01% of the training tokens, for
-separators. Whether the exam could be bought with it was measured. A curator that spent
-the 16,000 tokens on worked problems in the exam's forms beat the same curator without
-them by 0.01 bits per byte, 2.6 standard errors of the difference. The rule written
-beforehand said that then the allowance goes, and it went.
+A little text of a curator's own was allowed at first: 0.1% of the training tokens, for
+separators. Whether the exam could be bought with a tenth of that was measured. A curator
+that spent 16,000 tokens on worked problems in the exam's forms beat the same curator
+without them by 0.004 bits per byte on the final exam, 1.3 standard errors of the
+difference. That is too small and uncertain to earn a rule, so the allowance went: a
+judgement, not the result of a test.
 
 A copy is at least 64 bytes long, because with enough tiny copies any text can be spelled
 out of the corpus's letters and words. Cleaning a page is always allowed all the same:
@@ -211,9 +212,9 @@ shows gains.
 on 160M tokens: about 18 minutes on an RTX 3090. Smaller students rank curators
 differently: they reward narrow English data, which loses as the student grows
 ([measured](research/exam-first-principles.md#75-scale-rounds-at-the-standard-student-finals-at-the-large-one-decide-the-season)).
-The standard student ranks them as the large one does. Finals train the season's top eight
-at 10 × 640 on 640M tokens and decide the table. The top three are also tried one size up,
-which says whether the next season should move up too.
+The standard student ranks them as the large one does. Finals run the season's top eight,
+and one more drawn by lot from the next eight, on two rounds at 10 × 640 on 640M tokens,
+and decide the table.
 
 ## What could go wrong
 

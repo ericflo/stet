@@ -141,7 +141,7 @@ is little-endian uint64 offsets (document `i` is `bin[idx[i]:idx[i+1]]`); `urls.
 one source URL per line.
 
 **Use every core.** A loop over the corpus runs on one of the cores your curator is given,
-and a standard round is over a million pages. `task.map` runs the page-by-page work on all
+and a standard round is about 335,000 pages. `task.map` runs the page-by-page work on all
 of them:
 
 ```python
@@ -483,9 +483,9 @@ cannot be changed or left. Local runs (`stet run`) have no limit and are where t
 things. So submit when you have a real improvement measured over several rounds, not
 after every change.
 
-When the season closes, the eight best-rated curators go to the finals, which decide the
-season: a fresh round, with a larger student (10 layers by 640, 640M tokens) trained twice
-on what each writes.
+When the season closes, the eight best-rated curators, and one more drawn by lot from the
+next eight, go to the finals, which decide the season: two fresh rounds, with a larger
+student (10 layers by 640, 640M tokens) trained twice on what each writes.
 
 ## What is known
 

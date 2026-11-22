@@ -476,7 +476,7 @@ Bump the harness version whenever a change could alter a corpus, a script's mean
 score, the exam, or what a curator finds when it runs (the library list, the machine it is
 given). Volunteers on the old version are told to upgrade.
 
-**Changing the library list.** The list is `environment` in `src/stet/seasons/s1.json`.
+**Changing the library list.** The list is `environment` in `src/stet/seasons/s2.json`.
 After editing it: `python tools/sync_environment.py` (rewrites the `run` extra in
 `pyproject.toml`), `python tools/export_season.py > server/season.json`, update the list
 in `src/stet/templates/AGENTS.md` (a test compares them), and bump the harness version.
@@ -587,7 +587,7 @@ Set in `apps/stet/deployment.yaml`. The ones that are rules:
 |---|---|---|
 | `STET_LADDER_SIZE` | 8 | Curators that run in every round |
 | `STET_MAX_NEW_PER_ROUND` | 3 | New entries admitted per round |
-| `STET_ROUND_INTERVAL` | 3h | A round is drawn this often whether or not anybody is waiting: the season's cadence, and what it costs a day |
+| `STET_ROUND_INTERVAL` | 3h | A round is drawn this often while a curator is waiting or on the board: the season's cadence, and what it costs a day |
 | `STET_ROUND_MIN_GAP` | 0 | When above 0, a round is also drawn early for a waiting entry, this long after the last draw at the soonest, while a runner is around. `0` keeps to the clock |
 | `STET_EARLY_WINDOW` | 10m | A machine the organisers rent is handed grades before an exam only once they, and the further ones it could take, would keep it busy until no sooner than this before the exam is due; it is not paid to wait. `0` hands them out as soon as there are any |
 | `STET_ENTRIES_IN_PLAY` | 3 | Entries one person may have waiting or qualifying at once |

@@ -65,9 +65,9 @@ A curator is a directory with a `stet.toml` and any program. `stet init` makes o
 
 ## A round
 
-A round is drawn every 3 hours, on the clock, whether or not an entry is waiting. Never
-two at once: a round starts only when the one before has settled, so one that runs late
-pushes the next back.
+A round is drawn every 3 hours, on the clock, when a curator is waiting or on the board.
+Never two at once: a round starts only when the one before has settled, so one that runs
+late pushes the next back.
 
 1. **Announce.** The server names, in advance, the drand round whose randomness will seed
    the draw and the Common Crawl crawl it will draw from. Verifiers keep a log of these
@@ -130,8 +130,9 @@ One line per output document. Line order is training order: the trainer does not
   with text in it (a string among the copies, or a `"t"` key) makes the script
   invalid. That is what makes this an editing competition: with text of its own, the
   winning move is to ignore the corpus and ship a dataset. A little was allowed at first,
-  16,000 tokens at the official scale, and it was measured: written in the exam's forms, it
-  bought 0.01 bits per byte. So there is none.
+  160,000 tokens at the official scale, and a tenth of it was measured: written in the
+  exam's forms, it bought 0.004 bits per byte, 1.3 standard errors. That is too small and
+  uncertain to earn a rule, so there is none.
 - **Cutting, reordering and repeating are free.**
 - **Deleting lines is always allowed.** Whole lines of one page, kept in the page's order,
   are copies however short they are: take out the menu, the cookie banner and the footer
@@ -496,7 +497,7 @@ are graded by **verifiers**: anyone who runs `stet verify`.
   agreed before it waits up to 45 minutes, and for an account with no such grade it does
   not wait.
 - Agreeing about an entry that left the corpus as it was earns no standing. Its score is
-  the unedited student's, which every grader measures anyway. Nor does agreeing that
+  the unedited student's, which four machines a round measure anyway. Nor does agreeing that
   a script is invalid, which is decided before anything is trained.
 - Running curators needs Linux, the sandbox, the season's libraries and a machine at or
   above the floor. Grading needs an NVIDIA (CUDA) or AMD (ROCm) GPU and the season's

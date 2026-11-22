@@ -118,9 +118,10 @@ is below 0.
 
 No. A script is copies of the round's corpus and nothing else, so everything the student
 reads is copied byte for byte. A little text of a curator's own was allowed at first. It
-was measured, and 16,000 tokens of exam-style text bought 0.01 bits per byte: the exam
-could be bought with it. Cleaning a page is always allowed: whole lines of one page, kept
-in order, are copies however short they are. Any other copy is at least 64 bytes long.
+was measured, and 16,000 tokens of exam-style text bought 0.004 bits per byte, 1.3
+standard errors: too small and uncertain to earn a rule, so it was left out. Cleaning a
+page is always allowed: whole lines of one page, kept in order, are copies however short
+they are. Any other copy is at least 64 bytes long.
 
 ## Is the exam secret?
 
@@ -215,10 +216,10 @@ do. Other backends can build, run and submit curators but not grade for the boar
 
 ## What decides the season?
 
-Finals. When the season closes, announced two weeks ahead, the eight best-rated curators are
-run on a fresh round, and a larger student (10 layers by 640, 640M tokens) is trained twice on
-what each writes. Their gain there is the season's table. The top three are also tried one
-size larger still, which says whether the next season's rounds should use a bigger student.
+Finals. When the season closes, announced two weeks ahead, the eight best-rated curators and
+one more drawn by lot from the next eight are run on two fresh rounds, and a larger student
+(10 layers by 640, 640M tokens) is trained twice on what each writes. Their gain there is the
+season's table.
 
 A season freezes the student, the budgets, how the exam is made and the rules, so that scores
 stay comparable.

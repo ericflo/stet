@@ -346,7 +346,6 @@ That machine is about 1.2 times the floor for running curators
 - The unedited corpus's score against training tokens, on this exam: the curve a multiplier
   would be read from.
 - What share the writing should have. The pilot cannot tell two thirds from nine tenths.
-- The finals' check one size up: whether the order holds at about 150M parameters.
 - Why one order of the same pages scored 0.02 above nine others, and whether an order
   like it can be found on purpose.
 - How far a curator's gain moves between two draws of the raw pages for the baseline: four
