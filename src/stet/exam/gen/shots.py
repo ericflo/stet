@@ -1,21 +1,18 @@
 """A family asked few-shot: a few solved examples of a task, then the task.
 
-Asked plainly, arithmetic, unit conversions, algebra, word problems, program tracing and lookups
+Asked plainly, arithmetic, unit conversions, algebra, word problems, small algorithms and lookups
 in structured data order curators no better than chance at any student size: a small student
 cannot do them cold. Shown a few solved examples of the very same kind first, the question is
 another one: can the student pick a pattern up from what is in front of it and carry it on? That
 is learning in context, and a small student trained on good data may show it. Each family asked
-this way is a part of its own (arith-shots beside arith): it is on a season's exam when the
-season names it, and is not generated otherwise.
+this way is a part of its own (arith-shots, made from arith), and the only form the family is
+asked in: it is on a season's exam when the season names it, and is not generated otherwise.
 
 The examples are items of the question's own corner, made by the family's own generator from
 other draws of the seed: they are in exactly the question's format and differ from it in their
 operands only, and none of them is the question. There are three to six of them, fewer when
 more would not fit a student's window. A family whose examples share something long (a table
 several questions are asked of) says so with a function `shared`.
-
-A family that can say what a near miss is (`near_miss`) is also asked as pairs (arith-pairs): the
-same examples and question, once with the right answer and once with one that is nearly right.
 """
 
 from __future__ import annotations
@@ -85,13 +82,11 @@ class Shots:
     module stands: a NAME, corners(), make(). Its corners are the family's under its own name
     (arith-shots/add/small/qa for arith/add/small/qa), so its items are a part of their own."""
 
-    suffix = "shots"
-
-    def __init__(self, base, only=lambda corner: True):
-        self.base, self.NAME, self.only = base, f"{base.NAME}-{self.suffix}", only
+    def __init__(self, base):
+        self.base, self.NAME = base, f"{base.NAME}-shots"
 
     def corners(self) -> list[str]:
-        return [self.NAME + c[len(self.base.NAME):] for c in self.base.corners() if self.only(c)]
+        return [self.NAME + c[len(self.base.NAME):] for c in self.base.corners()]
 
     def of(self, corner: str) -> str:
         """The family's corner a corner of this one asks."""
@@ -101,17 +96,3 @@ class Shots:
         head, shots, ask, sep = examples(self.base, rng, self.of(corner))
         return Item(kind="answer", corner=corner, fmt=ask.fmt, lang=ask.lang, source=f"gen:{self.NAME}",
                     ctx=_before(head, shots, ask, sep), cont=ask.cont)
-
-
-class Pairs(Shots):
-    """The same, as pairs: after the examples and the question, the right answer or a near miss.
-    Both end with the line: without it 6 would always be likelier than 60, which begins with it."""
-
-    suffix = "pairs"
-
-    def make(self, rng: Rng, corner: str) -> Item:
-        head, shots, ask, sep = examples(self.base, rng, self.of(corner))
-        before = _before(head, shots, ask, sep)
-        miss = self.base.near_miss(rng.child("miss"), self.of(corner), ask)
-        return Item(kind="pair", corner=corner, fmt=ask.fmt, lang=ask.lang, source=f"gen:{self.NAME}",
-                    good=f"{before}{ask.cont}\n", bad=f"{before}{miss}\n")

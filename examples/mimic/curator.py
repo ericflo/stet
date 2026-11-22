@@ -3,8 +3,11 @@ what that buys.
 
 The exam is known in outline: writing people published (reference, news, technical,
 conversation) and generated skills (a session at a shell, tool calls and their JSON, reading,
-transformation, logic). mimic keeps the pages of the corpus that look most like those, in any
-language, and writes nothing of its own:
+transformation, logic, grammar, numbers and small programs asked after worked examples, facts).
+mimic keeps the pages of the corpus that look most like the writing and like the forms the
+skills come in (terminals, logs, JSON, code, questions and answers), in any language, and writes
+nothing of its own. It has no mark for worked sums or for facts: it keeps those only where a
+page it marks for something else holds them.
 
   1. Mark every page four times, with regular expressions over its opening and its address:
      how much it looks like a reference article, a news report, technical text (terminals,

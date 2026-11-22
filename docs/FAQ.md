@@ -140,17 +140,18 @@ student's score on every item is published with it.
 There is nothing to fit in advance: a round's writing is newer than every curator in it,
 and its questions come from its seed. What a curator can learn from past rounds is what
 kinds of text matter (news, programs, replies, every language), and keeping more of those
-is choosing good data, which is the point. The exam weighs four kinds of writing and five
+is choosing good data, which is the point. The exam weighs four kinds of writing and eight
 skills, and every language by its share of the crawl, so no one source or kind of text can
 carry a score.
 
 ## Does everything on the exam count?
 
-Yes. The season names every part of the exam, and each was measured before the season
-began. A part is in the score or it is not on the exam at all: nothing on the exam counts
-for nothing. Arithmetic, unit conversion and tracing a program are not asked: a student
-this size cannot do them cold whatever it was trained on, and measured, they ordered
-curators no better than a coin.
+Yes. The season names every part of the exam. Each part was measured before the season; a
+part that did not tell curators apart, or whose order did not hold for a larger student, is
+not on the exam. A part is in the score or it is not on the exam at all: nothing on the exam
+counts for nothing. Arithmetic, units, word problems, algebra, small algorithms and lookups
+in structured data are asked only after a few worked examples of the same task: asked cold,
+a student this size is too near chance for curators to differ.
 
 ## Who runs my code?
 

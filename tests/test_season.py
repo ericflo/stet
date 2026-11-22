@@ -18,8 +18,24 @@ def test_the_season_is_the_exam_at_the_standard_scale():
 
     s1 = load_season()
     assert s1.id == CURRENT_SEASON == "s2" and s1.official_scale == "standard" and "heldout_exam" not in s1.raw
-    assert s1.exam_sources == ["reference", "news", "technical", "conversation", "agents", "reading", "transformation", "logic", "grammar"]
+    assert s1.exam_sources == ["reference", "news", "technical", "conversation",
+                               "agents", "reading", "transformation", "logic", "grammar", "numbers", "programs", "knowledge"]
     assert s1.raw["exam"]["groups"] == {"writing": 0.75, "skills": 0.25} and s1.answer_floor_bytes == 16
+    # What the score is made of, by hand: four kinds of writing and eight skills, and each one's parts.
+    from stet.exam.aggregate import plan_of
+
+    made_of = {
+        "reference": ("writing", ["reference"]), "news": ("writing", ["news"]), "technical": ("writing", ["technical"]),
+        "conversation": ("writing", ["discussion", "social"]),
+        "agents": ("skills", ["agent"]), "reading": ("skills", ["context"]), "transformation": ("skills", ["transform"]),
+        "logic": ("skills", ["logic"]), "grammar": ("skills", ["grammar"]),
+        "numbers": ("skills", ["arith-shots", "units-shots", "word-shots", "algebra-shots"]),
+        "programs": ("skills", ["algo-shots", "struct-shots"]), "knowledge": ("skills", ["knowledge"]),
+    }
+    assert {p: (v["group"], v["parts"]) for p, v in s1.raw["exam"]["pillars"].items()} == made_of
+    weights = plan_of(s1).weights(made_of)
+    assert weights == {p: 0.1875 if group == "writing" else 0.03125 for p, (group, _) in made_of.items()}
+    assert s1.raw["exam"]["more"] == {"agent": 4, "context": 2, "transform": 3, "logic": 2, "grammar": 3} and s1.raw["exam"]["per_corner"] == 2
     assert s1.min_copy_bytes == 64  # the shortest copy a script may hold; of text of its own it holds none
     assert s1.raw["exam"]["generator_version"] == gen.VERSION
     assert len(s1.digest) == 64 and s1.digest == load_season("s2").digest
@@ -206,6 +222,7 @@ def test_a_settled_rounds_published_exam_gives_the_open_items_and_checks_against
 
 
 def test_a_practice_round_sits_writing_once_some_has_been_harvested_here(monkeypatch, tmp_path):
+    pytest.importorskip("torch")  # stet.pipeline imports the trainer
     from stet.exam.fresh import Doc, write_snapshot
     from stet.pipeline import baseline_path
     from stet.spec import practice_round

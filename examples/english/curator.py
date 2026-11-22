@@ -2,8 +2,8 @@
 
 More than half of a raw crawl is not English, and this throws all of it away. The exam does
 not: three quarters of its score is human writing, each language counting by its share of
-the round's corpus, and only the skills quarter is all in English. So this keeps what the
-skills ask for and gives up the writing in every other language, about four tenths of the
+the round's corpus, and most of the skills quarter is asked in the web's main languages too.
+So this gives up the writing and the skills in every other language, about half of the
 score. It is the first thing anyone would try, and a yardstick for what that costs.
 """
 

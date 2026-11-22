@@ -36,20 +36,23 @@ curriculum a real move.
 **The exam measures what pretrained models are for.** Text has no quality of its own: a page
 is worth keeping for what it teaches a model. Three quarters of the score is how well the
 student predicts writing people have just published, in four kinds that count the same:
-reference, news, technical and conversation. One quarter is skills, in five kinds that
-count the same: agents, reading, transformation, logic and grammar. How much each counts is
-a choice of value, so it is declared rather than left to how many items of each there
-happen to be. [The reasoning](research/exam-first-principles.md#9-season-2-november-2026).
+reference, news, technical and conversation. One quarter is skills, in eight kinds that
+count the same: agents, reading, transformation, logic, grammar, numbers, programs and
+knowledge. How much each counts is a choice of value, so it is declared rather than left to
+how many items of each there happen to be. [The reasoning](research/exam-first-principles.md#9-season-2-november-2026).
 
 **Only what tells curators apart is on the exam.** A student this size cannot do arithmetic,
 unit conversion or program tracing cold, whatever it was trained on: on the pilot such
 questions ordered curators no better than a coin, at every size of student. Weight on such a
 part is weight on noise, and every extra training is then spent averaging it away. So the
-season names every part of its exam, and each was measured before the season. A part the
-season does not name is not generated, not harvested and not sat. Nothing on the exam counts
-for nothing: a part is in the score or it is not on the exam at all. On the pilot, the score
-made this way moved a quarter as much between two trainings of one script as a score that
-counted those parts, and agreed better with the large student
+season names every part of its exam, and each part was measured before the season; a part
+that did not tell curators apart, or whose order did not hold for a larger student, is not
+on the exam. Numbers and programs are on it in one form only, after a few worked examples of
+the same task, and tracing a program is not on it at all. A part the season does not name is
+not generated, not harvested and not sat. Nothing on the exam counts for nothing: a part is
+in the score or it is not on the exam at all. On the pilot, the score made this way moved a
+quarter as much between two trainings of one script as a score that counted questions asked
+cold, and agreed better with the large student
 ([measured](EXPERIMENTS.md#how-much-is-noise): the pilot's fresh writing was Wikipedia only).
 
 **The exam is not a slice of the corpus.** On unseen text from the same pool, careful
@@ -90,8 +93,9 @@ them, and none can define the target.
 counts by its share of the round's corpus, in bytes. That is what a curator saves on a byte
 of the web. More weight to English would reward throwing away most of the web; equal weights
 would reward the smallest languages, where a student this size learns little and the score
-is mostly noise. The skills are generated in English only, so English is about 59% of the
-score, though less than half of the crawl. The tokenizer is trained on the crawl alone, so
+is mostly noise. Six of the eight skills are asked in the web's main languages too, each by
+its share; numbers and programs are asked in English. So English is about half of the score,
+and a little less than half of the crawl. The tokenizer is trained on the crawl alone, so
 other languages do not cost the student more than they must.
 
 **Scored by likelihood.** At this size a student's choice between answers is chance, but the

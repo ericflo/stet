@@ -22,7 +22,7 @@
   "key_bytes": 64,
   "min_letters": 38
  },
- "digest": "2ba34538f5346e625d3c652154722363feefb496b0cc57e2f804bc37aedcd884",
+ "digest": "cfe773652dce73f55a9e07762944d58fc8227dd3e66b98963b5d4ad09d57578c",
  "draw_grid_seconds": 600,
  "environment": {
   "also": {
@@ -152,7 +152,14 @@
    "agent",
    "grammar",
    "transform",
-   "context"
+   "context",
+   "knowledge",
+   "arith-shots",
+   "word-shots",
+   "units-shots",
+   "algebra-shots",
+   "algo-shots",
+   "struct-shots"
   ],
   "groups": {
    "skills": 0.25,
@@ -168,7 +175,7 @@
     ]
    },
    {
-    "about": "news published after the draw",
+    "about": "news published in the day before the draw",
     "group": "writing",
     "name": "news",
     "parts": [
@@ -231,6 +238,34 @@
     "parts": [
      "grammar"
     ]
+   },
+   {
+    "about": "arithmetic, units, word problems and algebra, each asked after worked examples",
+    "group": "skills",
+    "name": "numbers",
+    "parts": [
+     "arith-shots",
+     "units-shots",
+     "word-shots",
+     "algebra-shots"
+    ]
+   },
+   {
+    "about": "what an algorithm returns and what structured data holds, each asked after worked examples",
+    "group": "skills",
+    "name": "programs",
+    "parts": [
+     "algo-shots",
+     "struct-shots"
+    ]
+   },
+   {
+    "about": "facts the web knows, in ten languages",
+    "group": "skills",
+    "name": "knowledge",
+    "parts": [
+     "knowledge"
+    ]
    }
   ],
   "small": 8,
@@ -245,7 +280,10 @@
   "reading",
   "transformation",
   "logic",
-  "grammar"
+  "grammar",
+  "numbers",
+  "programs",
+  "knowledge"
  ],
  "grade_devices": [
   "cuda"

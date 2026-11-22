@@ -24,7 +24,6 @@ from ..rng import Rng
 from . import (
     bluesky,
     ccnews,
-    crossref,
     discourse,
     github,
     hackernews,
@@ -60,8 +59,7 @@ def _github(start, end, cap, rng, log):
 # Sources besides Wikipedia. Stack Exchange was tried and left out: in 2026 its whole network is
 # asked about 200 questions a day, four an hour, and without a key it allows 300 requests a day.
 OTHERS = {"ccnews": ccnews.harvest, "github": _github, "hackernews": hackernews.harvest, "lemmy": lemmy.harvest,
-          "bluesky": bluesky.harvest, "mastodon": mastodon.harvest, "discourse": discourse.harvest,
-          "crossref": crossref.harvest, "lore": lore.harvest}
+          "bluesky": bluesky.harvest, "mastodon": mastodon.harvest, "discourse": discourse.harvest, "lore": lore.harvest}
 # What a source's documents are named, where that is not its own name alone. Each name is a kind
 # of writing (aggregate.SOURCE_KIND), and the season names the kinds its exam has: a source is
 # read only when the season names a kind it gives, and only its documents of those kinds are kept.

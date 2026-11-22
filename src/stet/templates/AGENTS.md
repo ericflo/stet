@@ -212,18 +212,23 @@ is skills.** Inside each group, every pillar counts the same:
 | `transformation` | skills | Text turned from one form into another: Markdown to HTML, CSV to JSON, a query's result |
 | `logic` | skills | What follows from what is given |
 | `grammar` | skills | The right sentence of two |
+| `numbers` | skills | Arithmetic, units, word problems and algebra, each after a few worked examples |
+| `programs` | skills | What a small algorithm returns (a list sorted, a letter counted) and what structured data holds (a value in a table or in JSON), each after a few worked examples |
+| `knowledge` | skills | Facts the web knows, in ten languages |
 
 - **The writing is newer than your curator.** It is what people published in three hours
   of the day before the draw, and the draw picks the hours. Your curator was submitted
   before any of it existed (see *Entering*) and has no network when it runs, so there is
   nothing to look up or to fit in advance.
 - **Every language counts by its share of the round's corpus**, inside every kind of
-  writing. More than half of a crawl is not English, and the skills are in English only. So
-  a curator that keeps only English keeps the skills and gives up the writing in every
-  other language: about four tenths of the score. Throwing away every page that is not
-  English is not obviously right.
-- **The skills are made from the round's seed.** Every answer follows from what the item
-  itself shows, so there is nothing to know by heart.
+  writing. More than half of a crawl is not English, and six of the eight skills are asked
+  in the web's main languages too: only `numbers` and `programs` are in English alone. So a
+  curator that keeps only English gives up the writing and the skills in every other
+  language: about half of the score. Throwing away every page that is not English is not
+  obviously right.
+- **The skills are made from the round's seed.** Every answer but a fact follows from what
+  the item itself shows. `knowledge` asks well-known facts (a country's capital, who wrote
+  a book), which the student knows only from pages that say them.
 - **Every item is scored by likelihood**: how likely the student finds the right text, in
   bits per byte. A passage, an answer given its question, or the right sentence of a pair.
   Never by picking a choice. An item's bits are never put over fewer than 16 bytes, so a
@@ -233,8 +238,9 @@ is skills.** Inside each group, every pillar counts the same:
   others of its group. Gains on items are clipped, and a language or a format with fewer
   than eight items counts in proportion. `pillars` shows the weakest.
 - **Everything on the exam counts.** The season names every part of the exam: the pillars
-  above, and nothing else. Each was measured before the season began. Nothing is sat that
-  the score leaves out, so there is no part to ignore.
+  above, and nothing else. Each part was measured before the season; a part that did not
+  tell curators apart, or whose order did not hold for a larger student, is not on the
+  exam. Nothing is sat that the score leaves out, so there is no part to ignore.
 - **A practice round's exam is made the same way** once you have run `stet harvest`: the
   generated items, and writing from the hours you hold, with each language weighed by
   Common Crawl's published shares and anything the round's corpus already holds left out.

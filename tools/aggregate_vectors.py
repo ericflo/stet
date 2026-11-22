@@ -107,7 +107,7 @@ def fresh_items(rng: random.Random) -> list[Item]:
     code and English both."""
     langs_of = {"wikipedia": ["en", "ru", "de", "ja"], "ccnews": ["en", "es", "sw"], "github": ["en", "code:go", "code:python"],
                 "bluesky": ["en", "ja", "pt"], "mastodon": ["de", "en", "eo"], "wikipedia-talk": ["en", "ru"], "hackernews": ["en"],
-                "lemmy": ["en", "de"], "github-comment": ["en", "ru"], "mastodon-reply": ["en", "ja"], "crossref": ["en", "es", "pt"],
+                "lemmy": ["en", "de"], "github-comment": ["en", "ru"], "mastodon-reply": ["en", "ja"],
                 "lore": ["code:c"], "discourse": ["en", "de", "fr"]}
     out = []
     for src in SOURCES:

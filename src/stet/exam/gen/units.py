@@ -24,19 +24,6 @@ def corners() -> list[str]:
     return out + [f"{NAME}/date/{d}" for d in DATES]
 
 
-def near_miss(rng: Rng, corner: str, item: Item) -> str:
-    """A conversion's answer by another conversion's factor (sixty for a thousand), or, where no
-    other factor divides the number, the number unconverted."""
-    _, _, key, way = corner.split("/")
-    f = next(c[3] for c in CONVERSIONS if c[0] == key)
-    others = sorted({c[3] for c in CONVERSIONS} - {f})
-    right = int(item.cont)
-    if way == "up":
-        return f" {right // f * rng.choice(others)}"
-    fits = [g for g in others if right * f % g == 0]
-    return f" {right * f // rng.choice(fits)}" if fits else f" {right * f}"
-
-
 def _date(rng: Rng) -> dt.date:
     return dt.date(rng.between(1900, 2099), 1, 1) + dt.timedelta(days=rng.below(365))
 

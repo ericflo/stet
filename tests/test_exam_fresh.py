@@ -81,10 +81,10 @@ def test_selection_caps_corners_shares_languages_and_is_repeatable():
 def test_only_the_kinds_of_writing_the_season_names_are_selected():
     docs = [_doc(i, topic=f"Q{i}") for i in range(400)]  # reference
     docs += [_doc(1000 + i, source="github", topic=f"r{i}", title=f"Issue {i}") for i in range(400)]  # technical
-    docs += [_doc(2000 + i, source="crossref", topic=f"j{i}", title=f"Paper {i}") for i in range(400)]  # science
+    docs += [_doc(2000 + i, source="ccnews", topic=f"n{i}", title=f"Report {i}") for i in range(400)]  # news
     docs += [_doc(3000 + i, source="radio", topic=f"s{i}", title=f"Show {i}") for i in range(400)]  # a source of no kind: one of its own
-    kinds = collections.Counter(kind_of(it) for it in select(docs, b"seed", 300, {"reference", "technical", "science"}, per_corner=2))
-    assert set(kinds) == {"reference", "technical", "science"} and kinds["science"] == pytest.approx(100, abs=2)  # every kind named, an equal part
+    kinds = collections.Counter(kind_of(it) for it in select(docs, b"seed", 300, {"reference", "technical", "news"}, per_corner=2))
+    assert set(kinds) == {"reference", "technical", "news"} and kinds["news"] == pytest.approx(100, abs=2)  # every kind named, an equal part
     # A kind the season does not name is not on the exam at all, and what it would have had goes to those that are.
     named = select(docs, b"seed", 300, {"reference", "technical"}, per_corner=2)
     kinds = collections.Counter(kind_of(it) for it in named)
@@ -239,9 +239,9 @@ def test_the_harvest_reads_its_sources_at_once(monkeypatch, tmp_path):
     assert got == collections.Counter({"wikipedia": 2, "wikipedia-added": 1, "wikipedia-talk": 1, "bluesky-reply": 1, "mastodon-reply": 1,
                                        **{n: 1 for n in harvest.OTHERS if n != "lemmy"}})
     assert "lemmy" not in meta["sources"] and any("lemmy: TimeoutError" in m for m in lines)
-    # A season that does not name science: Crossref, which gives nothing else, is not asked for anything.
-    meta, got, _ = window(set(SOURCE_KIND.values()) - {"science"}, [n for n in names if n != "crossref"])
-    assert "crossref" not in got and "crossref" not in meta["sources"] and got["ccnews"] == 1
+    # A season that does not name news: the news crawl, which gives nothing else, is not asked for anything.
+    meta, got, _ = window(set(SOURCE_KIND.values()) - {"news"}, [n for n in names if n != "ccnews"])
+    assert "ccnews" not in got and "ccnews" not in meta["sources"] and got["github"] == 1
     # One that names discussion alone: Bluesky and Mastodon are read for their replies, and their posts are not kept.
     meta, got, _ = window({"discussion"}, ["wikipedia-talk", "hackernews", "lemmy", "bluesky", "mastodon", "discourse"])
     assert got == collections.Counter({"wikipedia-talk": 1, "hackernews": 1, "bluesky-reply": 1, "mastodon-reply": 1, "discourse": 1})

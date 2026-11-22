@@ -53,7 +53,7 @@ that the board shows what that buys.
 
 | | What it tries |
 |---|---|
-| `mimic` | To buy the exam by selection: the pages that look most like the exam (terminals, logs, JSON, code, questions and answers, reference, news, threads; any language) fill the budget first, and `tidy`'s selection tops it up only if they run short. |
+| `mimic` | To buy the exam by selection: the pages that look most like the exam's writing and the forms its skills come in (terminals, logs, JSON, code, questions and answers, reference, news, threads; any language) fill the budget first, and `tidy`'s selection tops it up only if they run short. |
 
 If it ever beats `tidy` by more than noise, the exam has a hole, and it is the exam that gets fixed.
 

@@ -5,10 +5,10 @@ the same initial weights.
 
 The season declares what the score is made of (its file's exam.groups and exam.pillars): groups,
 each a fixed share of the score, and in each group pillars that count the same. Season 2 has two
-groups. Writing, three quarters: how well the student predicts human writing published after the
-draw, one pillar for each kind. Skills, one quarter: generated tasks, one pillar for each family
-of generators that passes the season's tests. A pillar that a round's exam does not have gives its
-share to the others of its group, never to the other group.
+groups. Writing, three quarters: how well the student predicts human writing published in the
+day before the draw, one pillar for each kind. Skills, one quarter: generated tasks, each pillar
+a family of generators or a few that ask one kind of thing. A pillar that a round's exam does not
+have gives its share to the others of its group, never to the other group.
 
 Inside a pillar:
 - Each part counts the same. A part is a kind of writing, or a family of generators.
@@ -52,7 +52,6 @@ SOURCE_KIND = {
     "wikipedia": "reference", "wikipedia-added": "reference",
     "ccnews": "news",
     "github": "technical", "lore": "technical",
-    "crossref": "science",
     "bluesky": "social", "mastodon": "social",
     "wikipedia-talk": "discussion", "hackernews": "discussion", "lemmy": "discussion", "github-comment": "discussion",
     "bluesky-reply": "discussion", "mastodon-reply": "discussion", "discourse": "discussion",

@@ -1,14 +1,9 @@
 """The exam: generators that every machine agrees on, answers that are right, and a score
 that rewards breadth."""
 
-import contextlib
 import datetime as dt
-import io
 import json
-import os
 import re
-import shutil
-import subprocess
 
 import pytest
 
@@ -29,6 +24,12 @@ def _every(seed, per_corner=1):
     return gen.generate(seed, per_corner, families=gen.FAMILIES, more=MORE)
 
 
+def _cold(module, per_corner=6):
+    """A family's questions as its own module makes them: what the examples and the question of
+    its few-shot form are (gen/shots.py). No exam asks them this way."""
+    return gen.generate(SEED, per_corner, families=[module])
+
+
 def test_rng_is_pinned_and_in_range():
     # These numbers are what every machine must draw. If they change, every generated exam does.
     r = Rng(SEED, "x")
@@ -45,9 +46,52 @@ def test_a_seed_always_makes_the_same_exam():
     # Pinned: the generated items of a round of the season, from the families its exam names. A
     # change to one of their generators that changes what a seed produces must bump gen.VERSION
     # and this hash, on purpose; so must a change to the parts the season names.
-    assert digest(gen.for_season(SEASON, SEED)) == "74075b87ab743ed0cc839d7f3c24ea0c62da49f83be9f7de04092f3553c1dfbd"
+    assert digest(gen.for_season(SEASON, SEED)) == "14c58f3df45a84c996565e9c8300a489d45f72b460eb13ce9f1bde37ece558da"
     assert digest(gen.for_season(SEASON, SEED)) == digest(gen.for_season(SEASON, SEED))
     assert digest(gen.for_season(SEASON, b"other")) != digest(gen.for_season(SEASON, SEED))
+
+
+# Each part's items for the pinned seed, as the season asks them (two from a corner, and its
+# more): how many, and their digest in order. These are the parts as they were measured before
+# the season, when this copy also made the families that were then taken off the exam.
+MEASURED = {
+    "agent": (304, "dc90a2268e1e758503fdeade54fa8bee6d64599bc7aa3f87bf15c6631f59e608"),
+    "context": (384, "58f875008a565e14306fb7ee2f141052e65ee118b82607f3fca268c37a26f15a"),
+    "transform": (204, "072144f0249b38ba01c16e771f8340b8b343d75eff0ddfa7fade99ed5417a1e1"),
+    "logic": (288, "33959043534361197cdc61434d2ad1e49c2c95930e35697de38c2a7c77ba5ace"),
+    "grammar": (198, "93ef6ec6e0fc435e1181db53f8656c448f20eb6a780e7e9b516c2718b93a73fa"),
+    "knowledge": (200, "4e70f4fe895dd0fe8f82245ac9251443095c3915633c4b8f8e8661f28b52d8bf"),
+    "arith-shots": (192, "404f516779e941e4de0889741854380b3ae86593bb9bb5b770a56d133c85bfa9"),
+    "units-shots": (56, "2a62bf05badf6281ef405a222280e352062cd8c756bf661fcc943621a1061f47"),
+    "word-shots": (48, "16ca9c38687c8dec916e52851235c79973a7994e46d7a02cc8ef4be3ecc356e0"),
+    "algebra-shots": (40, "1601682b8ffa8b5867530511ae69db0e3196d0983942a41be09dd54bc997d538"),
+    "algo-shots": (56, "b2604e9ea7bc0e1c211d9c7b7b555f92013d6f8cd6c3ba9b5bd3382f32ec1b95"),
+    "struct-shots": (72, "4cbdb11158c62930a6f02d67dbb239ad6938f8e1b0953e7d1c845d738b411da0"),
+}
+
+
+def test_each_part_is_the_part_that_was_measured_whatever_else_is_on_the_exam():
+    """The exam that runs is the exam that was measured. A part's items come from its own streams
+    of the seed, so they are pinned part by part: taking a family off the exam, or putting one
+    on, must leave every digest here as it is. One that changes means a generator changed what a
+    seed produces: that is a bump of gen.VERSION, and a part that is no longer the one measured."""
+    from stet.exam.aggregate import part_of
+
+    def by_part(items):
+        got: dict[str, list[Item]] = {}
+        for it in items:
+            got.setdefault(part_of(it), []).append(it)
+        return {part: (len(its), digest(its)) for part, its in got.items()}
+
+    assert int(SEASON.raw["exam"]["per_corner"]) == 2 and gen.VERSION == SEASON.raw["exam"]["generator_version"] == 9
+    assert by_part(gen.for_season(SEASON, SEED)) == MEASURED  # every part the season names, and no other
+    assert sum(n for n, _ in MEASURED.values()) == 2042
+    # The same from every family this copy can make, and from each family made alone.
+    whole = by_part(_every(SEED, per_corner=2))
+    assert {part: whole[part] for part in MEASURED} == MEASURED
+    for fam in gen.FAMILIES:
+        if fam.NAME in MEASURED:
+            assert by_part(gen.generate(SEED, 2, families=[fam], more=MORE)) == {fam.NAME: MEASURED[fam.NAME]}
 
 
 def test_an_agents_answer_follows_from_its_session():
@@ -93,7 +137,7 @@ def test_every_corner_makes_valid_items_of_its_own():
 
 def test_adding_a_family_changes_nothing_else():
     full = _every(SEED)
-    some = gen.generate(SEED, families=[gen.arith, gen.grammar], more=MORE)
+    some = gen.generate(SEED, families=[gen.knowledge, gen.grammar], more=MORE)
     ids = {it.id for it in full}
     assert all(it.id in ids for it in some)
 
@@ -103,7 +147,7 @@ def _all(corner_prefix, n=6):
 
 
 def test_arithmetic_answers_are_right():
-    for it in _all("arith/"):
+    for it in _cold(gen.arith):
         if "/equation" in it.corner:
             expr = it.ctx.removesuffix(" =").replace("^", "**")
             assert re.fullmatch(r"[0-9 +\-*/()%*]+", expr.replace("of", "")), expr
@@ -115,26 +159,8 @@ def test_arithmetic_answers_are_right():
             assert int(it.cont.replace(",", "")) == want, it
 
 
-def test_python_programs_print_what_the_item_says():
-    for it in _all("prog/python/"):
-        code = it.ctx.split("```python\n", 1)[1].split("\n```", 1)[0]
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            exec(code, {})  # code the generator wrote, from its own templates
-        assert out.getvalue().strip() == it.cont.strip(), (code, it.cont)
-
-
-@pytest.mark.skipif(not shutil.which("node"), reason="node is not installed")
-def test_javascript_programs_print_what_the_item_says():
-    items = _all("prog/javascript/", n=3)
-    for it in items:
-        code = it.ctx.split("```javascript\n", 1)[1].split("\n```", 1)[0]
-        out = subprocess.run(["node", "-e", code], capture_output=True, text=True, timeout=20).stdout
-        assert out.strip() == it.cont.strip(), (code, it.cont)
-
-
 def test_algebra_answers_satisfy_their_equations():
-    for it in _all("algebra/"):
+    for it in _cold(gen.algebra):
         kind = it.corner.split("/")[1]
         if kind in ("one-step", "two-step", "both-sides"):
             eq = re.search(r"(?:Solve for x: |If )(.+?)(?:\nAnswer:|, then x =)", it.ctx).group(1)
@@ -144,7 +170,7 @@ def test_algebra_answers_satisfy_their_equations():
 
 
 def test_dates_are_right():
-    for it in _all("units/date/"):
+    for it in [it for it in _cold(gen.units) if it.corner.startswith("units/date/")]:
         kind = it.corner.split("/")[2]
         if kind == "weekday-after":
             start, n = re.search(r"today is (\w+), what day .* in (\d+) days", it.ctx).groups()
@@ -156,7 +182,7 @@ def test_dates_are_right():
 
 
 def test_structured_lookups_are_right():
-    for it in _all("struct/json/"):
+    for it in [it for it in _cold(gen.structured) if it.corner.startswith("struct/json/")]:
         data = json.loads(it.ctx.split("\n\nQ:")[0])
         who, field = re.search(r"What is (.+)'s (\w+)\?", it.ctx).groups()
         row = next(r for r in data["people"] if r["name"] == who)
@@ -276,6 +302,11 @@ def test_the_season_names_every_part_of_its_exam():
     first = next(iter(SEASON.raw["exam"]["pillars"]))
     with pytest.raises(ValueError, match="no generator makes that and no source gives it"):
         plan_of(season_with(lambda exam: exam["pillars"][first]["parts"].append("horoscopes")))
+    # So is one that names a question asked cold: those six are asked after worked examples or not at all.
+    for cold in ("arith", "units", "word", "algebra", "algo", "struct"):
+        assert f"{cold}-shots" in plan.parts
+        with pytest.raises(ValueError, match="no generator makes that and no source gives it"):
+            plan_of(season_with(lambda exam, cold=cold: exam["pillars"][first]["parts"].append(cold)))
     with pytest.raises(ValueError, match="do not fit together"):
         plan_of(season_with(lambda exam: exam["pillars"][first]["parts"].append(exam["pillars"][first]["parts"][0])))
     with pytest.raises(ValueError, match="exam.more"):
@@ -456,34 +487,6 @@ def test_transforms_are_right():
         assert re.sub(r"<[^>]+>", "", it.cont).strip() == said, it
         if it.lang != "en":
             assert all(w in lexicon.NOUNS[it.lang] for w in said.split()), it
-
-
-def test_arithmetic_in_other_languages_is_right():
-    items = _all("multi/")
-    assert {it.lang for it in items} >= {"es", "fr", "de", "ru", "ja", "zh"}
-    for it in items:
-        a, b = (int(x) for x in re.findall(r"\d+", it.ctx.split("\n")[0])[:2])
-        op = it.corner.split("/")[2]
-        assert int(it.cont) == {"add": a + b, "sub": a - b, "mul": a * b}[op], it
-
-
-@pytest.mark.parametrize("lang,tool", [("go", "go"), ("c", "gcc"), ("lua", "lua")])
-def test_programs_in_go_c_and_lua_print_what_the_item_says(lang, tool, tmp_path):
-    if not shutil.which(tool):
-        pytest.skip(f"{tool} is not installed")
-    for i, it in enumerate(_all(f"prog/{lang}/", n=2)):
-        code = it.ctx.split(f"```{lang}\n", 1)[1].split("\n```", 1)[0]
-        src = tmp_path / f"p{i}.{ {'go': 'go', 'c': 'c', 'lua': 'lua'}[lang] }"
-        src.write_text(code)
-        if lang == "go":
-            run = ["go", "run", str(src)]
-        elif lang == "c":
-            subprocess.run(["gcc", "-o", str(tmp_path / f"p{i}"), str(src)], check=True, capture_output=True)
-            run = [str(tmp_path / f"p{i}")]
-        else:
-            run = ["lua", str(src)]
-        out = subprocess.run(run, capture_output=True, text=True, timeout=120).stdout
-        assert out.strip() == it.cont.strip(), (code, it.cont)
 
 
 def test_students_farmed_out_to_the_organisers_machines_add_up_as_training_here_does(corpus, tmp_path, monkeypatch):
@@ -842,9 +845,9 @@ def test_a_few_shot_question_is_shown_solved_examples_of_its_own_corner_and_neve
     from stet.exam.gen import shots
 
     fams = _few_shot()
-    cold = ("arith", "word", "units", "algebra", "prog", "algo", "struct", "multi")  # what a small student cannot do cold
-    assert {f.NAME for f in fams if not isinstance(f, shots.Pairs)} == {f"{name}-shots" for name in cold}
-    assert {f.NAME for f in fams if isinstance(f, shots.Pairs)} == {"arith-pairs", "units-pairs"}
+    cold = ("arith", "word", "units", "algebra", "algo", "struct")  # what a small student cannot do cold
+    assert {f.NAME for f in fams} == {f"{name}-shots" for name in cold}
+    assert not {f.NAME for f in gen.FAMILIES} & set(cold)  # and is not asked cold: the few-shot form is the only one
     root, counts = Rng(SEED, "few"), {}
     for fam in fams:
         base = set(fam.base.corners())
@@ -857,16 +860,13 @@ def test_a_few_shot_question_is_shown_solved_examples_of_its_own_corner_and_neve
             assert len(set(asked)) == len(asked), it  # no example is the question, and none is shown twice
             before = head + "".join(s.ctx + s.cont + sep for s in shown) + ask.ctx
             assert before.count(ask.ctx) == 1 and (it.fmt, it.lang) == (ask.fmt, ask.lang)
-            if it.kind == "answer":
-                assert (it.ctx, it.cont) == (before, ask.cont)
-            else:
-                assert it.good == f"{before}{ask.cont}\n" and it.bad.startswith(before) and it.bad != it.good
+            assert it.kind == "answer" and (it.ctx, it.cont) == (before, ask.cont)
             if not hasattr(fam.base, "shared"):  # each example is a whole question of the family, as it would ask it cold
                 again = [fam.base.make(root.child(corner).child(f"shot{i}"), fam.of(corner)) for i in range(60)]
                 assert all(s in again for s in [*shown, ask])
             counts.setdefault(fam.NAME, []).append(len(shown))
     # three to six examples where they are short; fewer only where more would not fit a small window
-    for name in ("arith-shots", "units-shots", "algebra-shots", "multi-shots", "arith-pairs", "units-pairs"):
+    for name in ("arith-shots", "units-shots", "algebra-shots"):
         assert set(counts[name]) == {3, 4, 5, 6}, name
     assert all(st >= 2 for name in ("word-shots", "algo-shots") for st in [sorted(counts[name])[len(counts[name]) // 2]])
 
@@ -884,35 +884,14 @@ def test_every_generated_item_of_a_round_counts_and_the_server_is_told_which_par
     r = round_score(items, [0.1] * len(items))
     assert r["score"] == pytest.approx(0.1) and set(r["pillars"]) == {row["pillar"] for row in rows}
     assert sum(p["items"] for p in r["pillars"].values()) == r["items"] == len(items)  # every item is in a pillar
-    # A family this copy can make and the season does not name is not in a round, and the score refuses it.
-    for fam in gen.FAMILIES:
-        if fam.NAME not in named:
-            with pytest.raises(ValueError, match="not a part of the season's exam"):
-                item_table(gen.generate(SEED, families=[fam])[:1])
+    # A family this copy can make and the season does not name is not in a round, and the score
+    # refuses it. So it does a question asked cold, which is no family of an exam's at all.
+    for fam in [f for f in gen.FAMILIES if f.NAME not in named] + [gen.arith, gen.word, gen.units, gen.algebra, gen.algo, gen.structured]:
+        with pytest.raises(ValueError, match="not a part of the season's exam"):
+            item_table(gen.generate(SEED, families=[fam])[:1])
     # The server tells generated parts from writing by the season's own list (tools/export_season.py).
     exported = json.loads((Path(__file__).resolve().parents[1] / "server" / "season.json").read_text())["exam"]
     assert set(exported["generated"]) == named
-
-
-def test_a_near_miss_is_near_and_is_wrong():
-    from stet.exam.gen import units
-
-    pairs = [it for it in _every(SEED, per_corner=3) if it.family.endswith("-pairs")]
-    assert {it.family for it in pairs} == {"arith-pairs", "units-pairs"} and all(it.kind == "pair" for it in pairs)
-    for it in pairs:
-        assert it.good.endswith("\n") and it.bad.endswith("\n")  # both end with the line, so neither is the other's beginning
-        cut = len(os.path.commonprefix([it.good, it.bad]))
-        start = max(it.good.rfind(" ", 0, cut), it.good.rfind("\n", 0, cut)) + 1
-        right, wrong = it.good[start:].strip(), it.bad[start:].strip()
-        if it.family == "arith-pairs":  # one digit, one off; the same length, signs and commas
-            assert len(right) == len(wrong) and [abs(int(a) - int(b)) for a, b in zip(right, wrong, strict=True) if a != b] == [1], it
-            assert not (len(wrong.lstrip("-")) > 1 and wrong.lstrip("-")[0] == "0"), it
-        else:  # the same quantity by another conversion's factor, or left unconverted
-            key, way = it.corner.split("/")[2:]
-            f = next(c[3] for c in units.CONVERSIONS if c[0] == key)
-            others = {c[3] for c in units.CONVERSIONS} - {f} | {1}
-            right, wrong = int(right), int(wrong)
-            assert wrong != right and any(wrong * f == right * g if way == "up" else wrong * g == right * f for g in others), it
 
 
 def test_few_shot_questions_fit_a_students_window():
@@ -924,15 +903,13 @@ def test_few_shot_questions_fit_a_students_window():
     enc = load_encoding(season)
     small, official = min(v["ctx"] for v in season.raw["scales"].values()), season.scale(season.official_scale).ctx
     asked = gen.generate(SEED, int(season.raw["exam"]["per_corner"]), families=_few_shot())  # as a round would ask them
-    sized = [(it, len(enc.encode_ordinary(it.ctx + it.cont if it.kind == "answer" else it.good))) for it in asked]
-    assert len(sized) > 800 and all(n <= official for _, n in sized)
+    sized = [(it, len(enc.encode_ordinary(it.ctx + it.cont))) for it in asked]
+    assert len(sized) > 400 and all(it.kind == "answer" and n <= official for it, n in sized)
     over = [it.corner for it, n in sized if n > small]
     # The smallest student's window holds all but a few: the tables of six rows that are longer than it by themselves.
     assert len(over) <= 0.03 * len(sized) and all(c.startswith("struct-shots/") and c.endswith("/6") for c in over), over
-    # A pair is read from its beginning and its answer is at its end: every one must fit whole.
-    assert all(n <= small for it, n in sized if it.kind == "pair")
     # the estimate the generator drops examples by is near the truth where it matters, on long texts
-    assert all(0.8 < shots.cost(it.ctx + it.cont) / 20 / n < 1.25 for it, n in sized if it.kind == "answer" and n > 150)
+    assert all(0.8 < shots.cost(it.ctx + it.cont) / 20 / n < 1.25 for it, n in sized if n > 150)
 
 
 def test_no_item_is_sat_twice_and_an_agents_session_fits_the_students_window():
@@ -946,5 +923,5 @@ def test_no_item_is_sat_twice_and_an_agents_session_fits_the_students_window():
         for it in items:
             if it.source == "gen:agent" and it.kind == "answer":
                 assert len((it.ctx + it.cont).encode()) <= shell.LIMIT, it.corner
-            if it.source == "gen:algebra" and it.kind == "answer":
+            if it.source == "gen:algebra-shots":  # the question, and every example before it
                 assert not re.search(r"(?<![0-9])[01][xy]|\+ -|- -", it.ctx), it.ctx  # x and -x, never 1x or 0x

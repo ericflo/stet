@@ -164,6 +164,9 @@ each, every row below counts the same.
 | | Transformation | Turning text from one form into another | Generated |
 | | Logic | What follows from what is given | Generated |
 | | Grammar | The right sentence of two | Generated |
+| | Numbers | Arithmetic, units, word problems and algebra, each after a few worked examples | Generated |
+| | Programs | What a small algorithm returns (a list sorted, a letter counted) and what structured data holds (a value in a table or in JSON), each after a few worked examples | Generated |
+| | Knowledge | Facts the web knows, in ten languages | Generated: the seed picks from a public list of facts |
 
 **The writing** is what people published in three hours of the day before the draw. The
 examiner harvests every hour of the clock an hour after it ends, keeping a sample chosen
@@ -180,15 +183,18 @@ sources take turns. No source needs a key or an account. Writing the round's cor
 holds is dropped from the exam.
 
 **The skills** are made from the round's seed, so nobody can know them before the draw
-either. Every answer follows from what the item itself shows: there is nothing to know by
-heart.
+either. Every answer but a fact follows from what the item itself shows. The facts are
+well-known ones (a country's capital, who wrote a book), which the seed picks from a public
+list: a student knows them only from pages that say them.
 
 **Everything on the exam counts.** The season names every part of the exam: those in the
-table, and no other. Each was measured before the season began. A part is in the score or it
-is not on the exam at all: nothing is sat that the score leaves out, and nothing on the exam
-counts for nothing. Questions a student this size cannot answer whatever it was trained on
-(arithmetic, unit conversion, tracing a program) are not asked. Season 1 counted them, and
-two trainings of the same data disagreed about them more than two curators did.
+table, and no other. Each part was measured before the season; a part that did not tell
+curators apart, or whose order did not hold for a larger student, is not on the exam. A part
+is in the score or it is not on the exam at all: nothing is sat that the score leaves out,
+and nothing on the exam counts for nothing. Numbers and programs are asked only after a few
+worked examples of the same task. Asked cold, a student this size is too near chance for
+curators to differ: Season 1 counted such questions, and two trainings of the same data
+disagreed about them more than two curators did.
 
 **The score of an item** is how likely the student finds the right text, in bits per byte:
 a passage, an answer given its question, or the right sentence of a pair. An item's bits are

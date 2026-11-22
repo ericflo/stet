@@ -81,7 +81,7 @@
         "parts": [
           "news"
         ],
-        "about": "news published after the draw"
+        "about": "news published in the day before the draw"
       },
       "technical": {
         "group": "writing",
@@ -132,6 +132,31 @@
           "grammar"
         ],
         "about": "telling a well-formed sentence from a broken one"
+      },
+      "numbers": {
+        "group": "skills",
+        "parts": [
+          "arith-shots",
+          "units-shots",
+          "word-shots",
+          "algebra-shots"
+        ],
+        "about": "arithmetic, units, word problems and algebra, each asked after worked examples"
+      },
+      "programs": {
+        "group": "skills",
+        "parts": [
+          "algo-shots",
+          "struct-shots"
+        ],
+        "about": "what an algorithm returns and what structured data holds, each asked after worked examples"
+      },
+      "knowledge": {
+        "group": "skills",
+        "parts": [
+          "knowledge"
+        ],
+        "about": "facts the web knows, in ten languages"
       }
     }
   },

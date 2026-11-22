@@ -4,12 +4,17 @@ FAMILIES is every family this copy can make. Which of them a round's exam has is
 to say: its file names the parts of the exam (exam.pillars), and a family it does not name is
 not generated (for_season). A round's generated exam is a few items from every corner of every
 family the season names, each made from its own stream of the round's seed, so adding a family
-or a corner never changes what the others produce.
+or a corner, or taking one away, never changes what the others produce.
 
 Agent, context, transform, logic and grammar ask in the web's main languages, each language's
 questions in corners of their own (logic/ru/...), so that a language's share of the corpus is its
-share of a skill, as it is of the fresh writing. What a small student cannot do cold can also be
-asked few-shot (shots.py), each of those a family of its own (arith-shots beside arith).
+share of a skill, as it is of the fresh writing. Knowledge asks its facts in ten languages.
+
+Arithmetic, word problems, units, algebra, algorithms and structured data are asked few-shot
+(shots.py): a few solved examples of a task, then the task, each a family of its own
+(arith-shots, made from arith). That is the only form of those six: asked cold, a student this
+small is too near chance for curators to differ. Their modules make the examples and the
+question, and are not families an exam can name.
 """
 
 from __future__ import annotations
@@ -24,8 +29,6 @@ from . import (
     grammar,
     knowledge,
     logic,
-    multi,
-    programs,
     shell,
     shots,
     structured,
@@ -34,12 +37,10 @@ from . import (
     word,
 )
 
-FAMILIES = [arith, word, units, algebra, programs, algo, logic, structured, shell, grammar, transform, multi, context, knowledge]
-# What a small student cannot do cold, asked again after solved examples of the same task; and
-# where a near miss can be told from the right answer, as a pair. Knowledge is not: a fact is
-# known or it is not, and other facts do not help.
-FAMILIES += [shots.Shots(f) for f in (arith, word, units, algebra, programs, algo, structured, multi)]
-FAMILIES += [shots.Pairs(arith), shots.Pairs(units, lambda corner: "/convert/" in corner)]
+FAMILIES = [logic, shell, grammar, transform, context, knowledge]
+# What a small student cannot do cold, asked after solved examples of the same task. Knowledge
+# is not: a fact is known or it is not, and other facts do not help.
+FAMILIES += [shots.Shots(f) for f in (arith, word, units, algebra, algo, structured)]
 VERSION = 9  # bump when any generator changes what a seed produces
 
 
