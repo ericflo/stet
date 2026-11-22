@@ -335,11 +335,11 @@ The organisers' reference curators are the one exception to "one per entrant": t
 three (`stet/identity`, `stet/english`, `stet/tidy`), four that rebuild published recipes
 (`stet/heuristic`, `stet/dclm`, `stet/fineweb-edu`, `stet/fineweb2`), and `stet/mimic`,
 which keeps the pages that look most like the exam and shows what that buys. They are yardsticks:
-each holds a place while it ranks in the eight, and they leave as better curators arrive.
-Two of them, `stet/fineweb2` and `stet/dclm`, run in every round and tie the rounds
-together; each of the others runs in one round in eight, in turn, and keeps its rating from
-the rounds it ran. Any other curator that has stopped producing valid scripts leaves the
-ladder too.
+each holds a place of its own beside the eight, whatever its rating, and takes none from an
+entrant's curator. Two of them, `stet/fineweb2` and `stet/dclm`, run in every round and tie
+the rounds together; each of the others runs in one round in eight, in turn, and keeps its
+rating from the rounds it ran. Any curator but the record holder that has stopped producing
+valid scripts leaves the ladder, a reference too.
 
 ## The record
 
