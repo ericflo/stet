@@ -296,7 +296,9 @@ where other entries did run, are taken to be the entry's doing, and it stops bei
   of three. Two runs of a curator that uses neither the clock nor a GPU write the same
   script, and then there is one number.
 - A run with no usable script (nothing written, malformed, over the ink limit, or the
-  curator crashed) has failed. A round in which every run failed is **invalid**, and
+  curator crashed) has failed. Beside a run that finished, it counts zero, or as the
+  entry's worst finished run when that is below zero. A round in which most runs failed is
+  **invalid**, and
   **counts as the lowest gain any valid entry got in that round, or zero if that is lower**:
   failing is never the better move. A curator with two invalid rounds in its last five stops
   being run, whether it is qualifying or on the ladder.

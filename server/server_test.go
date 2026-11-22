@@ -116,7 +116,7 @@ func TestRatingsAdjustForRoundDifficulty(t *testing.T) {
 	for _, r := range []int{3, 4} {
 		es = append(es, entryRow{RoundIdx: r, EditorID: "late", Gain: 0.6 + diff[r], Valid: true})
 	}
-	rt, _ := fitRatings(es, noiseFloor)
+	rt, _ := fitRatings(es, noiseFloor, 0)
 	if rt["late"].Mean >= rt["old"].Mean {
 		t.Fatal("test is not testing anything")
 	}
@@ -1224,11 +1224,11 @@ func TestAnInvalidEntrySaysNothingAboutItsRound(t *testing.T) {
 			rows = append(rows, entryRow{RoundIdx: r, EditorID: id, Gain: g + d, Valid: true})
 		}
 	}
-	before, _ := fitRatings(rows, noiseFloor)
+	before, _ := fitRatings(rows, noiseFloor, 0)
 	// One more editor times out in round 2, and counts as the round's lowest gain. What it
 	// counts as is its own business.
 	low := gains["a"] + hard[2]
-	after, diff := fitRatings(append(rows, entryRow{RoundIdx: 2, EditorID: "z", Gain: low, Valid: false}), noiseFloor)
+	after, diff := fitRatings(append(rows, entryRow{RoundIdx: 2, EditorID: "z", Gain: low, Valid: false}), noiseFloor, 0)
 	for id := range gains {
 		if math.Abs(before[id].Adjusted-after[id].Adjusted) > 1e-9 {
 			t.Fatalf("%s moved from %.5f to %.5f because someone else's entry was invalid", id, before[id].Adjusted, after[id].Adjusted)
@@ -2732,7 +2732,7 @@ func TestOneEditorsTimeoutMovesNobodyElsesRating(t *testing.T) {
 		es = append(es, entryRow{RoundIdx: r, EditorID: who, Gain: 0.925, Valid: true})
 	}
 	es = append(es, entryRow{RoundIdx: 1, EditorID: "zed", Gain: 0.9, Valid: true}, entryRow{RoundIdx: 2, EditorID: "zed"}, entryRow{RoundIdx: 3, EditorID: "zed", Gain: 0.9, Valid: true})
-	rt, diff := fitRatings(es, noiseFloor)
+	rt, diff := fitRatings(es, noiseFloor, 0)
 	if d := rt["carol"].Adjusted - rt["dave"].Adjusted; math.Abs(d) > 1e-6 {
 		t.Fatalf("carol %v, dave %v: someone else's timeout moved a rating by %v", rt["carol"].Adjusted, rt["dave"].Adjusted, d)
 	}

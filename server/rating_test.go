@@ -32,7 +32,7 @@ func TestARatingIsDrawnTowardsTheFieldsTheMoreTheFewerItsRounds(t *testing.T) {
 		for id, g := range map[string][2]float64{"a": {0.10 - c.d + 0.01, 0.10 - c.d - 0.01}, "b": {0.11, 0.09}, "c": {0.10 + c.d - 0.02, 0.10 + c.d + 0.02}} {
 			es = append(es, entryRow{RoundIdx: 1, EditorID: id, Gain: g[0], Valid: true}, entryRow{RoundIdx: 2, EditorID: id, Gain: g[1], Valid: true})
 		}
-		rt, diff := fitRatings(es, 1)
+		rt, diff := fitRatings(es, 1, 0)
 		if !near(diff[1], 0) || !near(diff[2], 0) {
 			t.Fatalf("d = %v: the rounds are taken to differ: %v", c.d, diff)
 		}
@@ -53,7 +53,7 @@ func TestARatingIsDrawnTowardsTheFieldsTheMoreTheFewerItsRounds(t *testing.T) {
 		wobble := 0.01 * float64(2*(r%2)-1)
 		es = append(es, entryRow{RoundIdx: r, EditorID: "a", Gain: 0.10 + wobble, Valid: true}, entryRow{RoundIdx: r, EditorID: "b", Gain: 0.30 - wobble, Valid: true})
 	}
-	rt, _ := fitRatings(es, 1)
+	rt, _ := fitRatings(es, 1, 0)
 	if se := math.Sqrt(0.0008 / 6 / 8); !near(rt["a"].Shrunk, 0.15) || !near(rt["b"].Shrunk, 0.25) || !near(rt["a"].SE, se) || !near(rt["b"].SE, se) {
 		t.Fatalf("two editors, four rounds each: %+v %+v", *rt["a"], *rt["b"])
 	}
@@ -62,20 +62,29 @@ func TestARatingIsDrawnTowardsTheFieldsTheMoreTheFewerItsRounds(t *testing.T) {
 	// not 0.2. With three rounds the first is 3/7 of the way from it to its own mean, and
 	// with one the second is 1/5.
 	rt, _ = fitRatings([]entryRow{{RoundIdx: 1, EditorID: "long", Valid: true}, {RoundIdx: 2, EditorID: "long", Valid: true}, {RoundIdx: 3, EditorID: "long", Valid: true},
-		{RoundIdx: 1, EditorID: "new", Gain: 0.4, Valid: true}}, 1)
+		{RoundIdx: 1, EditorID: "new", Gain: 0.4, Valid: true}}, 1, 0)
 	if !near(rt["long"].Shrunk, 0.1-0.1*3/7) || !near(rt["new"].Shrunk, 0.1+0.3/5) {
 		t.Fatalf("three rounds and one: %+v %+v", *rt["long"], *rt["new"])
 	}
 
 	// One round each says nothing about how much a round's gain moves: that is then what the
 	// season measured before it began, which the caller gives.
-	rt, _ = fitRatings([]entryRow{{RoundIdx: 1, EditorID: "a", Valid: true}, {RoundIdx: 1, EditorID: "b", Gain: 0.5, Valid: true}}, 0.0005)
+	rt, _ = fitRatings([]entryRow{{RoundIdx: 1, EditorID: "a", Valid: true}, {RoundIdx: 1, EditorID: "b", Gain: 0.5, Valid: true}}, 0.0005, 0)
 	if !near(rt["a"].Shrunk, 0.20) || !near(rt["b"].Shrunk, 0.30) || !near(rt["a"].SE, 0.01) {
 		t.Fatalf("one round each: %+v %+v", *rt["a"], *rt["b"])
+	}
+	// What the season took a round to move by counts beside its own rounds, as so many rounds'
+	// worth: here 6 degrees of freedom at 0.0008/6 and a prior of 2 at 0.0005 make 0.0018/8.
+	rt, _ = fitRatings(es, 0.0005, 2)
+	if se := math.Sqrt(0.0018 / 8 / 8); !near(rt["a"].SE, se) {
+		t.Fatalf("the prior spread, counted as two rounds: ±%v, want ±%v", rt["a"].SE, se)
 	}
 	// The season's file says it for the scales it was measured at, as a spread.
 	if got := (&App{cfg: Config{Scale: "micro"}, season: &Season{Noise: map[string]any{"micro": map[string]any{"gain_sd": 0.02}}}}).roundNoise(); !near(got, 0.0004) {
 		t.Fatalf("the noise the season measured: %v", got)
+	}
+	if got := (&App{cfg: Config{Scale: "micro"}, season: &Season{Noise: map[string]any{"micro": map[string]any{"gain_sd": 0.02, "round_sd": 0.03}}}}).roundNoise(); !near(got, 0.0009) {
+		t.Fatalf("what a round moves by, when the season says: %v", got)
 	}
 	if got := (&App{cfg: Config{Scale: "nano"}, season: &Season{Noise: map[string]any{"micro": map[string]any{"gain_sd": 0.02}}}}).roundNoise(); got != noiseFloor {
 		t.Fatalf("the noise at a scale the season did not measure: %v", got)
@@ -320,4 +329,23 @@ func TestAFailedEntryCountsAsTheLowestGainOfItsRound(t *testing.T) {
 		t.Fatalf("the curator's results: %+v", ed.Results)
 	}
 	w.check()
+}
+
+// A failed run is never better than a finished one inside an entry either: beside a finished
+// run below zero it counts as that run, and beside one above zero as zero.
+func TestAFailedRunStandsAsTheEntrysWorstFinishedRun(t *testing.T) {
+	bad, worse, failed := &Run{Valid: true, Gain: -0.2}, &Run{Valid: true, Gain: -0.3}, &Run{}
+	if got := standIns([]*Run{failed, bad}); got[failed] != bad || len(got) != 1 {
+		t.Fatalf("a failed run beside one at -0.2: %v", got)
+	}
+	if got := standIns([]*Run{bad, failed, worse}); got[failed] != worse {
+		t.Fatalf("a failed run beside two below zero stands as the worse: %v", got)
+	}
+	good := &Run{Valid: true, Gain: 0.2}
+	if got := standIns([]*Run{failed, good}); len(got) != 0 {
+		t.Fatalf("a failed run beside one above zero counts zero: %v", got)
+	}
+	if got := standIns([]*Run{failed, {}}); len(got) != 0 {
+		t.Fatalf("nothing finished: %v", got)
+	}
 }

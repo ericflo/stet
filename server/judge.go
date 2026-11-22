@@ -853,6 +853,29 @@ func middleOf[T any](sorted []T) []T {
 	return sorted[(len(sorted)-1)/2 : len(sorted)/2+1]
 }
 
+// standIns says which finished run stands in for each of an entry's runs that failed: the
+// entry's worst finished run, when that is below zero. A failed run otherwise counts zero,
+// and a curator below zero would halve its loss by failing one run in two. Failing is never
+// better than finishing.
+func standIns(runs []*Run) map[*Run]*Run {
+	var worst *Run
+	for _, run := range runs {
+		if run.Valid && (worst == nil || run.Gain < worst.Gain) {
+			worst = run
+		}
+	}
+	out := map[*Run]*Run{}
+	if worst == nil || worst.Gain >= 0 {
+		return out
+	}
+	for _, run := range runs {
+		if !run.Valid {
+			out[run] = worst
+		}
+	}
+	return out
+}
+
 // pillars is a script's gain on each of the exam's pillars, and on each part that is watched
 // and not counted (watchPrefix): the mean, key by key, over the grades its gain is the
 // median of. With one grade that decides it, or two, those are all of them; of three, it is
@@ -2539,6 +2562,14 @@ func (a *App) settleEntry(tx *Tx, j *judge, st *entryState) {
 	}
 	// The score. With three runs of which two failed, the editor fails more often than
 	// not, and its score is not a measurement.
+	stand := standIns(runs)
+	count := map[*Run]float64{}
+	for i, run := range runs {
+		if stand[run] != nil {
+			gains[i] = stand[run].Gain
+		}
+		count[run] = gains[i]
+	}
 	e.Gain, e.Valid = places5(median(gains)), valid > 0 && 2*valid >= len(runs)
 	if !e.Valid {
 		e.Gain = 0
@@ -2563,7 +2594,7 @@ func (a *App) settleEntry(tx *Tx, j *judge, st *entryState) {
 		return id
 	}
 	sorted := append([]*Run(nil), runs...)
-	sort.SliceStable(sorted, func(x, y int) bool { return sorted[x].Gain < sorted[y].Gain })
+	sort.SliceStable(sorted, func(x, y int) bool { return count[sorted[x]] < count[sorted[y]] })
 	middle := sorted[len(sorted)/2] // of three; with two, the score is between them
 	pair, two := false, false
 	for x, p := range runs {
@@ -2598,12 +2629,17 @@ func (a *App) settleEntry(tx *Tx, j *judge, st *entryState) {
 		}
 		// Its gain on each pillar is made the way its gain is: the mean, pillar by pillar,
 		// over the runs the gain is the median of, of each run's script's. A run that failed
-		// counts zero on every pillar, as it counts zero in the gain. A grade's score is a
-		// fixed weighted sum of its pillars, so these add up to the entry's gain in the same
-		// proportions; one grade's pillars, which this used to be, did not.
+		// counts on every pillar as it counts in the gain: as the run that stands in for it,
+		// or zero (standIns). A grade's score is a fixed weighted sum of its pillars, so these
+		// add up to the entry's gain in the same proportions; one grade's pillars, which this
+		// used to be, did not.
 		per, by := map[*Run]map[string]float64{}, map[string]float64{}
 		for _, run := range runs {
-			if g := scripts[run.Script]; run.Valid && g != nil {
+			of := run
+			if stand[run] != nil {
+				of = stand[run]
+			}
+			if g := scripts[of.Script]; of.Valid && g != nil {
 				per[run] = g.v.pillars()
 				for k := range per[run] {
 					by[k] = 0

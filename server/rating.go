@@ -69,10 +69,12 @@ const (
 // weighted by its rounds. k = s2/tau2 sets one round's noise about an editor's own mean
 // (s2) against how far editors really are from each other (tau2): with k rounds, a rating
 // is midway between the editor's own mean and the field's. s2 is pooled over every editor
-// with two rounds or more; while none has, it is noise, which the caller gives. tau2 is
-// the variance of the adjusted means less what s2 alone would put there. The rating's
-// standard error is sqrt(s2/(n+k)).
-func fitRatings(entries []entryRow, noise float64) (map[string]*Rating, map[int]float64) {
+// with two rounds or more, together with noise: what a round's gain was taken to move by
+// before the season began, counted as prior rounds' worth of evidence. A season's first few
+// rounds say little about their own spread, and would otherwise put a standard error on
+// every rating from two or three numbers. tau2 is the variance of the adjusted means less
+// what s2 alone would put there. The rating's standard error is sqrt(s2/(n+k)).
+func fitRatings(entries []entryRow, noise, prior float64) (map[string]*Rating, map[int]float64) {
 	byEditor := map[string][]entryRow{}
 	byRound := map[int][]entryRow{}
 	for _, e := range entries {
@@ -168,7 +170,7 @@ func fitRatings(entries []entryRow, noise float64) (map[string]*Rating, map[int]
 	field /= float64(rounds)
 	s2 := noise
 	if df > 0 {
-		s2 = ss / float64(df)
+		s2 = (ss + prior*noise) / (float64(df) + prior)
 	}
 	// How far apart editors really are: the variance of their adjusted means, less what the
 	// noise in each mean would put there by itself. With too few editors to say, or nothing
@@ -398,20 +400,27 @@ func settledEntries(s *State) []entryRow {
 }
 
 // roundNoise is the variance of one round's gain to assume until the season's own rounds
-// can say: the square of the spread measured for the scale before the season began
-// (noise.<scale>.gain_sd in its file), or noiseFloor where none was.
+// can say: the square of how far the season's file takes a curator's gain to move from round
+// to round (noise.<scale>.round_sd), or failing that between two trainings (gain_sd), or
+// noiseFloor where neither is given.
 func (a *App) roundNoise() float64 {
 	if m, ok := a.season.Noise[a.cfg.Scale].(map[string]any); ok {
-		if sd, ok := m["gain_sd"].(float64); ok && sd > 0 {
-			return sd * sd
+		for _, key := range []string{"round_sd", "gain_sd"} {
+			if sd, ok := m[key].(float64); ok && sd > 0 {
+				return sd * sd
+			}
 		}
 	}
 	return noiseFloor
 }
 
+// priorRounds is how many rounds' worth of evidence roundNoise counts as, beside the season's
+// own rounds, when the spread of a round's gain is worked out.
+const priorRounds = 8
+
 func (a *App) computeBoard(s *State) *Board {
 	entries := settledEntries(s)
-	ratings, diff := fitRatings(entries, a.roundNoise())
+	ratings, diff := fitRatings(entries, a.roundNoise(), priorRounds)
 	b := &Board{ByID: map[string]*BoardRow{}, Entries: entries, Difficulty: diff}
 	if h := s.holder(); h != nil {
 		b.RecordID = h.EditorID

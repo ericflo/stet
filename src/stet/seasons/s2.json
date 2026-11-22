@@ -382,10 +382,12 @@
   "reference_curves": {},
   "noise": {
     "micro": {
-      "gain_sd": 0.013
+      "gain_sd": 0.013,
+      "round_sd": 0.03
     },
     "standard": {
-      "gain_sd": 0.005
+      "gain_sd": 0.005,
+      "round_sd": 0.015
     }
   },
   "tolerance": {
