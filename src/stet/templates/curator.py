@@ -45,9 +45,11 @@ def looks_written(text: str) -> bool:
 
 def main():
     task = Task.from_env()  # task.corpus, task.train_tokens, task.time_left(), task.info
-    corpus = task.corpus    # len(corpus), corpus.text(i), corpus.raw(i), corpus.size(i), corpus.urls[i]
 
-    keep = [i for i, text in corpus if looks_written(text)]
+    # task.map runs a function over every page, on every core you are given, and hands the
+    # results back in page order. The pages are also at task.corpus: len(corpus),
+    # corpus.text(i), corpus.raw(i), corpus.size(i), corpus.urls[i].
+    keep = [i for i, ok in task.map(lambda i, text: looks_written(text)) if ok]
     random.Random(0).shuffle(keep)
 
     # Write early; you can call task.write again with something better. If you run out of

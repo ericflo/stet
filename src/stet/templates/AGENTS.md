@@ -127,6 +127,8 @@ From Python, `from stet.curator import Task; task = Task.from_env()` gives you:
 - `task.asset("name")`: the path of a model file or directory named in `stet.toml`.
 - `task.device()`: `"cuda"` when there is a GPU PyTorch can use (NVIDIA or AMD), else `"cpu"`.
 - `task.cores`, `task.memory_gb`, `task.gpu_memory_gb`: what this run has been given.
+- `task.map(fn)`: `fn(i, text)` for every page, on every core your curator is given, with
+  `(i, result)` back in page order.
 - `task.write(lines)`: writes the script atomically. Call it early, and again whenever you
   have something better. **If the curator is killed or crashes, the last script it wrote
   still counts.**
@@ -135,6 +137,29 @@ A curator does not have to be Python. Anything that reads those files and writes
 `script.jsonl` works. `docs.bin` is every document's UTF-8 bytes concatenated; `docs.idx`
 is little-endian uint64 offsets (document `i` is `bin[idx[i]:idx[i+1]]`); `urls.txt` has
 one source URL per line.
+
+**Use every core.** A loop over the corpus runs on one of the cores your curator is given,
+and a standard round is over a million pages. `task.map` runs the page-by-page work on all
+of them:
+
+```python
+def keep(i, text):  # in a worker process, once for every page
+    return looks_written(text)
+
+task.write([i for i, ok in task.map(keep) if ok])
+```
+
+Results come back in page order whichever worker finished first, so anything that depends
+on order (which of two copies of a page is kept) is decided in your loop exactly as a plain
+loop decides it, and the script is the same on any number of cores. The workers are forked
+when the loop starts. A model loaded before then is shared by all of them and counted once
+against `task.memory_gb`; one a worker loads for itself is held once per worker. `fn` runs
+in another process, so return what you need instead of changing a global, and return plain
+values (they are pickled). Do not use the GPU in `fn`, and map before PyTorch is loaded
+where you can. `task.map(fn, docs=[...])` goes through only those pages, in that order. If
+`fn` raises, the same exception is raised in your loop; if a worker is killed (the kernel
+does that when the curator is over its memory), `stet.curator.WorkerError` is raised. Keep
+what you hold per page small: it grows with the pool.
 
 ## The edit script
 
