@@ -652,7 +652,8 @@ against, each on principle:
 Three wait on a measurement that is running, each with its rule written first:
 
 - **The pool's size.** As many pages as a curator can read and a verifier can fetch inside the
-  time box on the machines the fleet rents, measured, with a third to spare.
+  time box on the machines the fleet rents, measured, with a third to spare; and only if the
+  larger pool changes what is measured (9.8).
 - **Averaging the student's last weights.** Adopted only if the noise between trainings falls
   by a quarter and spread over noise rises by a fifth at micro, and by 15% each at standard.
 - **Promotion of a watched part.** Twenty settled rounds, spread over noise above 1.5, rank
@@ -705,3 +706,28 @@ A skill pillar is the mean of its parts that are in, and a pillar with none is d
 
 `mimic` has no rule of its own. Choosing the pages that most resemble what the exam asks
 is curation, and if it wins, it won by selection.
+
+### 9.8 The pool
+
+A curator at real scale keeps about one page in eighty. A standard round's pool was 16 files
+of the crawl, six times what the student is trained on, so the most selective script a
+curator could write kept one page in six. A larger pool costs every machine that touches a
+round its download, so it is taken only as far as it fits, and only if it changes the
+measurement.
+
+**What fits**, timed on a rented machine at 1.28 times the season's processor floor, with
+the reference curators reading the pool on the six cores a curator is given (`task.map`):
+at 64 files (24 times the budget, 1.35 million pages, 10.2 GB of text, a 4.1 GB download)
+the corpus is built in 116 seconds and the slowest reference curator finishes in 157 of its
+1,200 seconds. Two rounds on disk are 21 GB of the 60 GB a machine must have free. At 128
+files two rounds are 41 GB, more than two thirds of the disk, so 64 files is the most that
+fits with a third to spare.
+
+**The rule, written before any student was trained on the larger pool.** One standard
+student of each of the seven scripts, made on 64 files of the same practice round, against
+the three of each trained on 16 files, on the same exam. The pool grows to 64 files if the
+spread between the six edited curators' scores is at least a quarter larger on 64 files, or
+if their order differs between the two (a rank correlation below 0.8): either way the small
+pool was hiding something that the real regime would show. If neither, the pool stays at 16
+files, since four times the download would buy nothing. Every size keeps the same ratio of
+pool to budget, so that what is compared across sizes is the same game.
