@@ -41,6 +41,11 @@ type WorkRound struct {
 	// the latest rounds took from their draw to their exam (pace.go). Absent once it is posted,
 	// and before any round has had one.
 	ExamDue int64 `json:"exam_due,omitempty"`
+	// BaselinesWanted counts how many more machines the round would ask to measure its
+	// unedited baseline with their next grade (exam.go): the season's number, less those
+	// that have measured it or hold a grade that asked them to. Such a machine's first
+	// grade of the round is two training passes; any other's is one.
+	BaselinesWanted int `json:"baselines_wanted"`
 }
 
 // WorkMachine is one of the organisers' accounts, as the judge sees it now.
@@ -124,7 +129,8 @@ func (a *App) work(s *State) Work {
 	for _, rd := range openRounds(s) {
 		states := j.states(rd)
 		closing := j.closing(states)
-		wr := WorkRound{ID: roundID(a.season.ID, rd.Idx), Entries: len(states), ExamAt: rd.ExamAt, DrawnAt: rd.DrawnAt, ExamDue: examDue(s, rd)}
+		wr := WorkRound{ID: roundID(a.season.ID, rd.Idx), Entries: len(states), ExamAt: rd.ExamAt, DrawnAt: rd.DrawnAt, ExamDue: examDue(s, rd),
+			BaselinesWanted: j.baselinesWanted(rd)}
 		for _, st := range states {
 			wr.EditsUnderWay += len(st.LiveEdits)
 			if len(st.LiveEdits) == 0 && j.anyone(st, nil) {

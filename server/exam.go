@@ -3,7 +3,8 @@ package main
 // The season's exam. A round's exam is made after its draw: the organisers'
 // examiner harvests the fresh text published in the window after it, builds the round's items
 // and posts them here (apiExamPost). Grades start then. A grader sits every item
-// and reports each one's score, and its own baseline's; the round's baseline is the mean, item
+// and reports each one's score, and, if its job asked, the unedited baseline's (a few machines
+// measure that for the round: see measuring); the round's baseline is the mean, item
 // by item, of the established graders' baselines; and a grade's score is the exam's
 // aggregate (ExamPlan.ScoreItems, a port of src/stet/exam/aggregate.py) of its item scores less the
 // round's baseline. From there on the judge works as it always has, on that score.
@@ -312,6 +313,78 @@ func (a *App) baselineAgrees(rd *Round, b *Baseline) bool {
 	}
 	dev, _, _, err := a.season.Exam.ScoreItems(rd.ExamTable, diffItems(b.Items, rd.BaseItems), rd.Shares)
 	return err == nil && within(dev, a.tolerance().Baseline)
+}
+
+// --- who measures a round's baseline -----------------------------------------------------------
+//
+// Measuring the unedited corpus costs a grader a whole training pass, as much as the grade
+// itself, and the mean of every grader's measurement is no better a baseline for the round
+// than the mean of a few. So the season says how many machines measure it
+// (baselines.per_round), and each grade job says whether its machine is one of them
+// (Job.Baseline). A machine that is not trains the script's student and nothing else, and
+// its grade is scored against the round's baseline like any other.
+//
+//   - A job asks for the baseline while fewer than that many established accounts have
+//     measured the round's and agree with it, or were asked to by a grade job they still
+//     hold (measuring). A job that is handed back, runs out or is turned away takes its
+//     promise with it, and the next job handed out is asked instead.
+//   - An account that has measured the round's, or was ever asked to, is asked again with
+//     every further grade: the measurement is on its disk, and its results keep carrying it.
+//   - An account not yet established is always asked. Its baseline is no part of the
+//     round's, and is how its machine is checked against the others' (baselineDev).
+//   - A round is never scored without one. While it has none and nobody at work on it was
+//     asked for one, an established grade that came without is as good as no grade: the
+//     script waits for another (weigh), and whoever is handed it is asked. If nobody is
+//     there to be, the script is given up like any that nobody was there to grade (giveUp).
+
+// measuring is whose measurement of a round's unedited corpus the round has or is promised:
+// the established accounts whose baseline it holds and agrees with, and those a grade job
+// they still hold asked for one, who have not sent it yet. Before the exam is posted nothing
+// has been sent, and it is the promises alone.
+func (j *judge) measuring(rd *Round) map[int64]bool {
+	if who, ok := j.measures[rd.Idx]; ok {
+		return who
+	}
+	who := map[int64]bool{}
+	for _, b := range j.a.roundBaselines(j.s, rd) {
+		if j.a.baselineAgrees(rd, b) {
+			who[b.AccountID] = true
+		}
+	}
+	for _, c := range j.s.Claims {
+		if c.RoundIdx == rd.Idx && c.Kind == "grade" && c.Baseline && c.live(j.t) && j.est[c.AccountID] &&
+			j.s.Baselines[baselineKey(rd.Idx, c.AccountID)] == nil {
+			who[c.AccountID] = true
+		}
+	}
+	j.measures[rd.Idx] = who
+	return who
+}
+
+// baselineComing reports whether a round has a baseline, or somebody at work on it was asked
+// for one.
+func (j *judge) baselineComing(round int) bool {
+	rd := j.s.Rounds[round]
+	return rd != nil && len(j.measuring(rd)) > 0
+}
+
+// baselinesWanted is how many more machines a round would ask for its baseline, as it stands.
+func (j *judge) baselinesWanted(rd *Round) int {
+	return max(0, j.a.season.Baselines.PerRound-len(j.measuring(rd)))
+}
+
+// asksBaseline says whether a grade job handed to this account now asks its machine for the
+// round's unedited baseline: see above. With no number in the season, every job does.
+func (j *judge) asksBaseline(rd *Round, acct *Account) bool {
+	if j.a.season.Baselines.PerRound <= 0 || !j.est[acct.ID] || j.s.Baselines[baselineKey(rd.Idx, acct.ID)] != nil {
+		return true
+	}
+	for _, c := range j.s.Claims {
+		if c.RoundIdx == rd.Idx && c.AccountID == acct.ID && c.Kind == "grade" && c.Baseline {
+			return true // asked before, whatever came of that job: it may have it trained
+		}
+	}
+	return j.baselinesWanted(rd) > 0
 }
 
 // refreshScores sets the round's baseline to the mean of its baselines, item by item, and every

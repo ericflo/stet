@@ -519,6 +519,93 @@ def test_grades_trained_before_the_exam_share_one_unedited_student(monkeypatch, 
     assert seen == [("fetch", digest), ("sit", "B", digest), ("sit", scripts[0], digest), ("fetch", digest), ("sit", scripts[1], digest)]
 
 
+def test_a_job_asks_for_the_baseline_unless_it_says_it_does_not():
+    # A server from before a few machines measured a round's baseline says nothing, and every
+    # grader measured it then. Only a plain false is taken for one.
+    assert client.wants_baseline(a_job()) and client.wants_baseline(a_job(baseline=True))
+    assert client.wants_baseline(a_job(baseline=None)) and client.wants_baseline(a_job(baseline="false")) and client.wants_baseline(a_job(baseline=0))
+    assert not client.wants_baseline(a_job(baseline=False))
+
+
+def test_a_grade_not_asked_for_the_baseline_trains_and_sits_its_own_student_alone(monkeypatch, tmp_path):
+    # Four machines measure a round's unedited baseline. Any other trains one student for a
+    # grade, not two, and sends what it has on disk for the round: usually nothing.
+    pytest.importorskip("torch")
+    import dataclasses
+    import hashlib
+    import types
+
+    from stet import cli, data, grade, pipeline
+    from stet.spec import load_season, practice_round
+
+    season = load_season("s2")
+    early = practice_round(season, 1)
+    digest = "d1" * 32
+    posted = dataclasses.replace(early, exam_digest=digest)
+    script = b'{"doc": 1}\n'
+    sha = hashlib.sha256(script).hexdigest()
+    seen, cached, rnd = [], {}, {"now": early}
+
+    def unedited(*a, **k):
+        pytest.fail("the unedited corpus was trained on or sat by a machine not asked for it")
+
+    monkeypatch.setattr(client, "request", lambda method, path, **kw: zstandard.ZstdCompressor().compress(script))
+    monkeypatch.setattr(client, "_job_round", lambda season, job, out: rnd["now"])
+    monkeypatch.setattr(client, "fetch_exam", lambda r, key: seen.append(("fetch", r.exam_digest)))
+    for name in ("baseline", "train_baseline", "sit_baseline"):
+        monkeypatch.setattr(pipeline, name, unedited)
+    monkeypatch.setattr(pipeline, "train_round", lambda r, s, path, **k: seen.append(("train", path.read_bytes())) or "S")
+    monkeypatch.setattr(pipeline, "grade_round", lambda r, s, path, **k: seen.append(("grade", path.read_bytes())) or {"valid": True})
+    monkeypatch.setattr(pipeline, "_cached", lambda path: cached.get("base"))
+    monkeypatch.setattr(pipeline, "baseline_path", lambda r, s, d: tmp_path / "base.json")
+    monkeypatch.setattr(grade, "sit_exam", lambda t, r, s, exam: seen.append(("sit", t, r.exam_digest)) or {"valid": True})
+    monkeypatch.setattr(data, "round_exam", lambda r, s: [])
+    device, out, scale = types.SimpleNamespace(type="cuda"), cli.Out(quiet=True), season.scale("nano")
+    job = a_job(script={"sha256": sha}, baseline=False)
+
+    # Before the exam: one pass, and once it is posted one student to sit.
+    bases = {}
+    p = client._grade_job(job, season, scale, device, None, out, tmp_path / "work", bases=bases)
+    assert isinstance(p, client.Pending) and seen == [("train", script)] and bases == {}
+    p.rnd = posted
+    assert client._sit(p, bases, None, scale) == ({"valid": True}, None)
+    assert seen == [("train", script), ("fetch", digest), ("sit", "S", digest)]
+
+    # After it: the same, in one go.
+    seen.clear()
+    rnd["now"] = posted
+    assert client._grade_job(job, season, scale, device, None, out, tmp_path / "work", bases=bases) == ({"valid": True}, None)
+    assert seen == [("fetch", digest), ("grade", script)]
+
+    # A machine that has the round's baseline on disk, from a job that did ask, sends it.
+    cached["base"] = {"valid": True, "exam": {"mean": -5.3}}
+    assert client._grade_job(job, season, scale, device, None, out, tmp_path / "work", bases=bases) == ({"valid": True}, cached["base"])
+    assert client._sit(p, bases, None, scale) == ({"valid": True}, cached["base"])
+
+
+def test_a_grade_with_no_baseline_is_reported_without_one(loop, monkeypatch, capsys):
+    result = {
+        "harness": "0.5.0", "season": "s2", "season_digest": "ee" * 32, "scale": "nano", "corpus_sha256": "c0" * 32, "exam_sha256": "d1" * 32,
+        "script_sha256": SHA, "valid": True, "round": {"id": "s2-o00001"}, "script": {"script_sha256": SHA, "passes": 1.4},
+        "exam": {"items": 2, "mean": -5.1, "item_scores": [-5.0, -5.2]},
+        "train": {"seconds": 30.0, "tokens_per_second": 1e5, "final_train_loss": 5.0, "curve": [[1, 9.0], [50, 6.0]]},
+    }  # fmt: skip
+    base = {"exam": {"items": 2, "mean": -5.3, "item_scores": [-5.2, -5.4]}}
+    monkeypatch.setattr(client, "slim_result", REAL_SLIM_RESULT)
+    loop.claims = [a_job(id=1, baseline=False), a_job(id=2, baseline=True)]
+    loop.grade = [(result, None), (result, base)]
+    loop.report = {"status": "recorded"}
+    args = Args()
+    args.max_jobs = 2
+    client.cmd_verify(args)
+    without, with_one = loop.payloads
+    assert "baseline" not in without and without["exam"] == {"mean": -5.1, "item_scores": [-5.0, -5.2]}
+    assert with_one["baseline"] == {"mean": -5.3, "item_scores": [-5.2, -5.4]}
+    assert {k: v for k, v in with_one.items() if k != "baseline"} == without
+    err = capsys.readouterr().err
+    assert "exam mean -5.1000 · scored against the round's baseline" in err and "baseline -5.3000" in err and "+0.2000" in err
+
+
 def test_a_grader_says_it_trains_before_the_exam(loop):
     loop.claims = [a_job()]
     loop.grade = ({"valid": True, "exam": {"items": 2, "mean": -5.1, "item_scores": [-5.0, -5.2]}},

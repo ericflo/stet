@@ -243,7 +243,8 @@ type Run struct {
 // Grade is one verifier's grade of a script, as published when the round settles.
 type Grade struct {
 	Handle string `json:"by"`
-	// agreed | outlier | disputed | other data | baseline differs | no established grade
+	// agreed | outlier | unresolved | disputed | other data | baseline differs |
+	// no established grade | no baseline (the round never had one to score it against)
 	Verdict     string   `json:"verdict"`
 	Valid       bool     `json:"valid"`          // whether this grader found the script valid
 	Loss        *float64 `json:"loss,omitempty"` // the unedited student's bits per byte less its gain
@@ -311,6 +312,9 @@ type Claim struct {
 	// TrainedAt is when its holder said it had trained the grade's student and was waiting
 	// only for the round's exam to sit it (stet 0.4.4 and later); 0 until then.
 	TrainedAt int64 `json:"trained_at,omitempty"`
+	// Baseline says that this grade job asked its machine for the round's unedited baseline
+	// too (judge.asksBaseline). A job that did not is reported without one.
+	Baseline bool `json:"baseline,omitempty"`
 	// Reason is why its holder handed it back, as it said (released).
 	Reason string `json:"reason,omitempty"`
 	// EndedAt is when it stopped being claimed: done, handed back, refused or expired. Absent

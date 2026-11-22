@@ -385,8 +385,9 @@ type claimed struct {
 			ID   string `json:"id"`
 			Name string `json:"name"`
 		} `json:"editor"`
-		Script *ScriptRef `json:"script"`
-		Run    int        `json:"run"`
+		Script   *ScriptRef `json:"script"`
+		Run      int        `json:"run"`
+		Baseline *bool      `json:"baseline"`
 	} `json:"job"`
 	Runner    map[string]any `json:"runner"`
 	Announced map[string]any `json:"announced"`

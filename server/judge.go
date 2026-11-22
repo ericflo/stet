@@ -7,10 +7,11 @@ package main
 //   - EDIT. A verifier executes the editor in the sandbox and uploads the edit script it
 //     wrote. That is a run. The script is plain data, stored under its sha256.
 //   - GRADE. A verifier downloads a script, trains the fixed student on what it says, sits
-//     it on the round's exam and reports its score on every item, and its own unedited
-//     baseline's the same way. Grading runs no entrant code, and every grader of a script
-//     trains on exactly the same tokens, so their results can be compared directly. The
-//     exam is made after the draw (exam.go): grading starts when it is posted.
+//     it on the round's exam and reports its score on every item, and, when its job asks
+//     for it, the round's unedited baseline's the same way: a few machines measure that
+//     for the whole round (exam.go). Grading runs no entrant code, and every grader of a
+//     script trains on exactly the same tokens, so their results can be compared directly.
+//     The exam is made after the draw (exam.go): grading starts when it is posted.
 //
 // No score depends on one machine, and none on a machine the organisers run. The
 // organisers' accounts start out established, may run their own reference editors, and
@@ -100,7 +101,8 @@ package main
 //   - A run's gain is its script's gain, or nothing if it failed (no script, or an invalid
 //     one). An entry's gain is the median of its runs' gains (the mean of two), in bits per
 //     byte. The round's baseline is the mean, item by item, of what its established graders
-//     measured on the unedited corpus.
+//     measured on the unedited corpus: the season says how many of them are asked to. A
+//     grade is not scored, and settles nothing, until the round has one.
 //   - An entry is CONFIRMED when two people's runs agree and neither rests on a self
 //     grade. Otherwise its score says which it is: run once, runs differed, or graded by
 //     its own runner.
@@ -210,8 +212,9 @@ type Hello struct {
 	Edits        bool            `json:"edits"` // willing and able to run edit jobs in the sandbox
 	Sandbox      string          `json:"sandbox"`
 	// Early says that it trains before the exam: handed a grade before the round's exam is
-	// posted, it trains the student and the round's unedited one, waits for the exam, and
-	// sits it. A verifier that does not say so is handed grades once the exam is there.
+	// posted, it trains the student, and the round's unedited one if the job asks for it,
+	// waits for the exam, and sits it. A verifier that does not say so is handed grades once
+	// the exam is there.
 	Early bool `json:"early"`
 	// CuratorsDeclined is why its last `stet verify --edits` ran no curators on this machine,
 	// in the client's words, said by a verifier that does not ask to run them (stet 0.4.6).
@@ -392,9 +395,11 @@ type ResultPayload struct {
 	Hardware      json.RawMessage `json:"hardware"`
 	StartedAt     int64           `json:"started_at"`
 	FinishedAt    int64           `json:"finished_at"`
-	Baseline      *ExamScore      `json:"baseline"`
-	Exam          *ExamScore      `json:"exam"`
-	Train         *TrainInfo      `json:"train"`
+	// Baseline is the round's unedited student's score, from a machine whose job asked for
+	// it (Job.Baseline), or that had the round's on its disk anyway. Absent otherwise.
+	Baseline *ExamScore `json:"baseline"`
+	Exam     *ExamScore `json:"exam"`
+	Train    *TrainInfo `json:"train"`
 }
 
 // ExamScore is a student's score on the round's exam: one score for each of its items (bits
@@ -516,14 +521,15 @@ type judge struct {
 	// quit: accounts that were handed a script of a round and handed it back or let it run
 	// out. One that is not established is handed no more of that round's scripts: asking
 	// and handing back would otherwise show it every script there is.
-	quit   map[int64]map[int]bool
-	around []*asker                      // found when first asked for
-	passes map[string]map[string]float64 // a training pass's seconds, by scale and GPU: worked out when first asked for
+	quit     map[int64]map[int]bool
+	around   []*asker                      // found when first asked for
+	passes   map[string]map[string]float64 // a training pass's seconds, by scale and GPU: worked out when first asked for
+	measures map[int]map[int64]bool        // whose baseline each round has or is promised (measuring): worked out when first asked for
 }
 
 func (a *App) newJudge(s *State) *judge {
 	j := &judge{a: a, s: s, t: now(), est: map[int64]bool{}, standing: map[int64]bool{}, busy: map[int64]bool{}, training: map[int64]bool{},
-		resting: map[int64]bool{}, differs: map[int64]map[int]int{}, quit: map[int64]map[int]bool{}}
+		resting: map[int64]bool{}, differs: map[int64]map[int]int{}, quit: map[int64]map[int]bool{}, measures: map[int]map[int64]bool{}}
 	for id, acct := range s.Accounts {
 		j.est[id], j.standing[id] = a.established(acct), acct.Agreed > 0
 	}
@@ -755,12 +761,12 @@ func (j *judge) view(sc *scriptState, r *Result) *gradeView {
 		return nil
 	}
 	g := &gradeView{r: r, acct: acct, est: j.est[acct.ID], self: sc.wroteAlone(acct)}
-	if b := j.s.Baselines[baselineKey(r.RoundIdx, r.AccountID)]; b != nil {
-		// Against the round's baseline, the mean of its graders': not this grader's own.
-		g.base = !r.Valid || r.Score != nil
-		if r.Valid && r.Score != nil {
-			g.gain = *r.Score
-		}
+	// Against the round's baseline, the mean of those its graders measured: not this
+	// grader's own, which it may not have been asked for. A grade has a score once the
+	// round has a baseline (refreshScores).
+	g.base = !r.Valid || r.Score != nil
+	if r.Valid && r.Score != nil {
+		g.gain = *r.Score
 	}
 	return g
 }
@@ -770,9 +776,13 @@ type verdict struct {
 	counted []*gradeView // the grades that decide it
 	self    bool         // which are its own writer's, because there are no others
 	known   bool         // there is at least one
-	valid   bool
-	gain    float64
-	tie     bool // two decide it, and they disagree
+	// scored: and each of them has its score against the round's baseline. Until the
+	// baseline somebody was asked for arrives, a grade that counts has none, and gain
+	// says nothing yet: nothing is settled on it, and no two runs are compared by it.
+	scored bool
+	valid  bool
+	gain   float64
+	tie    bool // two decide it, and they disagree
 }
 
 // same reports whether two grades of a script are consistent with honest runs.
@@ -802,6 +812,11 @@ func (j *judge) weigh(sc *scriptState) *verdict {
 	for _, r := range sc.Results {
 		switch g := j.view(sc, r); {
 		case g == nil || !g.est:
+		case !g.base && !j.baselineComing(r.RoundIdx):
+			// It has no score, and as things stand never will: the round has no baseline,
+			// and nobody at work on it was asked for one. So the script wants a grade as if
+			// it had none, and whoever is handed it is asked for the baseline (asksBaseline).
+			// The moment somebody is, this grade counts again, and is scored when theirs comes.
 		case g.self:
 			own = append(own, g)
 		default:
@@ -812,8 +827,10 @@ func (j *judge) weigh(sc *scriptState) *verdict {
 		v.counted, v.self = own, len(own) > 0
 	}
 	v.known = len(v.counted) > 0
+	v.scored = v.known
 	var gains []float64
 	for _, g := range v.counted {
+		v.scored = v.scored && g.base
 		if g.r.Valid {
 			gains = append(gains, g.gain)
 		}
@@ -842,7 +859,7 @@ func (j *judge) runsWanted(st *entryState) int {
 	for _, run := range st.Runs {
 		if run.Script == "" {
 			known = append(known, outcome{failed: true})
-		} else if v := j.weigh(st.byScript[run.Script]); v.known {
+		} else if v := j.weigh(st.byScript[run.Script]); v.scored {
 			known = append(known, outcome{failed: !v.valid, gain: v.gain})
 		}
 	}
@@ -911,7 +928,7 @@ func (j *judge) mayDiffer(st *entryState) bool {
 	same, known := true, true
 	for _, run := range st.Runs {
 		same = same && run.Script == st.Runs[0].Script
-		known = known && (run.Script == "" || j.weigh(st.byScript[run.Script]).known)
+		known = known && (run.Script == "" || j.weigh(st.byScript[run.Script]).scored)
 	}
 	if same {
 		return false
@@ -1198,13 +1215,14 @@ func (j *judge) sitting(st *entryState, sc *scriptState) bool {
 // settleable reports whether an entry could be given a score as it stands: it has a run,
 // nobody is at work on another, every script its runs wrote has a grade that counts and
 // no established account at work on one more, and a run that wrote no script is not one
-// volunteer's word alone.
+// volunteer's word alone. A grade that counts and has no score yet is not one to settle
+// on: the round's baseline, which somebody was asked for, has still to come.
 func (j *judge) settleable(st *entryState) bool {
 	if len(st.LiveEdits) > 0 || !examPosted(st.Round) {
 		return false
 	}
 	for _, sc := range st.Scripts {
-		if !j.weigh(sc).known {
+		if !j.weigh(sc).scored {
 			return false
 		}
 		for _, c := range sc.Live {
@@ -1285,6 +1303,11 @@ type Job struct {
 	Script    *ScriptRef     `json:"script,omitempty"`
 	Run       int            `json:"run,omitempty"` // a grade job: which run of the entry wrote the script
 	ExpiresAt int64          `json:"expires_at"`
+	// Baseline, on a grade job, says whether this machine is to measure the round's unedited
+	// baseline too and send it with the grade (asksBaseline). False: it trains the script's
+	// student alone, and its result carries no baseline. A client that does not know the
+	// field measures it, as every grader did before there was one.
+	Baseline *bool `json:"baseline,omitempty"`
 }
 
 func (a *App) jobFor(s *State, c *Claim) *Job {
@@ -1294,6 +1317,8 @@ func (a *App) jobFor(s *State, c *Claim) *Job {
 		Editor: map[string]any{"id": ed.ID, "name": ed.Name, "version": ed.Version, "owner": s.owner(ed).Handle, "size": ed.Size},
 	}
 	if c.Kind == "grade" {
+		asks := c.Baseline // what the job was told when it was handed out: read again, it says the same
+		job.Baseline = &asks
 		job.Script = &ScriptRef{SHA256: c.Script}
 		for _, run := range s.entry(c.RoundIdx, c.EditorID).Runs {
 			if run.Script == c.Script {
@@ -1475,6 +1500,7 @@ func (a *App) claim(ctx context.Context, acctID int64, h *Hello) (*Handed, error
 			ClaimedAt: now(), ExpiresAt: now() + int64(a.cfg.Lease.Seconds()), Status: "claimed"}
 		if pick.sc != nil {
 			c.Script = pick.sc.SHA
+			c.Baseline = j.asksBaseline(pick.st.Round, acct)
 		}
 		tx.newClaim(c)
 		if q.est {
@@ -1852,8 +1878,12 @@ func (a *App) submitResult(ctx context.Context, acctID, claimID int64, p *Result
 		}
 		return checkItems(sc, len(sc.ItemScores), what)
 	}
-	if err := check(p.Baseline, "baseline"); err != nil {
-		return nil, err
+	// A baseline is sent by a machine whose job asked for one, and may be by any that has
+	// the round's on its disk. Whether this job asked is known with the job, below.
+	if p.Baseline != nil {
+		if err := check(p.Baseline, "baseline"); err != nil {
+			return nil, err
+		}
 	}
 	if p.Valid {
 		if err := check(p.Exam, "exam"); err != nil {
@@ -1890,6 +1920,11 @@ func (a *App) submitResult(ctx context.Context, acctID, claimID int64, p *Result
 		if c.Script == "" || p.ScriptSHA256 != c.Script {
 			return fail(400, "this result is for a different edit script than the one the job named")
 		}
+		if p.Baseline == nil && c.Baseline {
+			// The job asked for the round's baseline: the round may be counting on it, and an
+			// account not yet established is checked by it.
+			return fail(400, "the result has no usable baseline score, and this job asked for the round's unedited baseline")
+		}
 		if !written {
 			return fail(409, "this script was given up before your result arrived. It earns no credit, and it does not count against you")
 		}
@@ -1917,11 +1952,17 @@ func (a *App) submitResult(ctx context.Context, acctID, claimID int64, p *Result
 			a.settleReady(tx) // the round may have been waiting for this job alone
 			return nil
 		}
-		// Everyone must be looking at the same corpus and exam, and must measure the same
-		// unedited baseline on them. The round's first run fixes the corpus, and the exam is
-		// the one the organisers posted. A baseline is checked against the round's other
-		// graders' as it arrives; whoever reports before there are any is checked when the
-		// round settles instead.
+		// Everyone must be looking at the same corpus and exam, and whoever measures the
+		// unedited baseline on them must measure the same one. The round's first run fixes
+		// the corpus, and the exam is the one the organisers posted. A baseline is checked
+		// against the round's other graders' as it arrives; whoever reports before there are
+		// any is checked when the round settles instead.
+		//
+		// A grade whose job did not ask for the baseline comes without one, and there is
+		// nothing of its own to check it by here. It is scored against the round's baseline
+		// like every other, and what holds it to account is what holds them all: the grades
+		// of a script by different people must agree (settleScript), and only an
+		// established account, which earned that by agreeing, is ever not asked.
 		if (rd.CorpusSHA != "" && rd.CorpusSHA != p.CorpusSHA256) || (rd.ExamSHA != "" && rd.ExamSHA != p.ExamSHA256) {
 			return refuse("corpus", 0, "your corpus or exam for %s differs from the round's. This verifier rebuilds its copy once", p.Round)
 		}
@@ -1929,8 +1970,10 @@ func (a *App) submitResult(ctx context.Context, acctID, claimID int64, p *Result
 		if rd.ExamSHA == "" || n == 0 {
 			return fail(409, "%s has no exam yet", p.Round)
 		}
-		if err := checkItems(p.Baseline, n, "baseline"); err != nil {
-			return err
+		if p.Baseline != nil {
+			if err := checkItems(p.Baseline, n, "baseline"); err != nil {
+				return err
+			}
 		}
 		if p.Valid {
 			if err := checkItems(p.Exam, n, "exam"); err != nil {
@@ -1938,15 +1981,19 @@ func (a *App) submitResult(ctx context.Context, acctID, claimID int64, p *Result
 			}
 		}
 		tol := a.tolerance()
-		if dev, ok := a.baselineDev(s, rd, acctID, p.Baseline.ItemScores); ok && !within(dev, tol.Baseline) {
-			return refuse("baseline", places5(dev),
-				"your unedited baseline for %s is further from the round's other graders' than the tolerance of %.2f bits per byte allows, so this machine's setup or arithmetic differs. That is published with the round when it settles; nothing counts against you", p.Round, tol.Baseline)
+		if p.Baseline != nil {
+			if dev, ok := a.baselineDev(s, rd, acctID, p.Baseline.ItemScores); ok && !within(dev, tol.Baseline) {
+				return refuse("baseline", places5(dev),
+					"your unedited baseline for %s is further from the round's other graders' than the tolerance of %.2f bits per byte allows, so this machine's setup or arithmetic differs. That is published with the round when it settles; nothing counts against you", p.Round, tol.Baseline)
+			}
 		}
 
 		// Everything is checked. From here on the change is made.
-		b := &Baseline{RoundIdx: rd.Idx, AccountID: acctID, Loss: places5(-p.Baseline.Mean), Items: p.Baseline.ItemScores,
-			CorpusSHA: p.CorpusSHA256, ExamSHA: p.ExamSHA256, ReceivedAt: now(), Established: est}
-		tx.saveBaseline(b)
+		if p.Baseline != nil {
+			b := &Baseline{RoundIdx: rd.Idx, AccountID: acctID, Loss: places5(-p.Baseline.Mean), Items: p.Baseline.ItemScores,
+				CorpusSHA: p.CorpusSHA256, ExamSHA: p.ExamSHA256, ReceivedAt: now(), Established: est}
+			tx.saveBaseline(b)
+		}
 		if est {
 			rd.CorpusSHA = p.CorpusSHA256
 			a.moved(tx, rd)
@@ -2150,7 +2197,15 @@ func (a *App) giveUp(tx *Tx, j *judge, st *entryState, held bool) bool {
 			counting = counting || j.est[c.AccountID]
 		}
 		if !j.weigh(sc).known && !counting && !j.anyone(st, sc) {
-			a.dropScript(tx, j, st, sc, "nobody else was there to grade it")
+			why := "nobody else was there to grade it"
+			for _, r := range sc.Results {
+				if j.est[r.AccountID] && r.Valid && r.Score == nil {
+					// Graded, by a machine that was not asked for the round's baseline; those
+					// that were never sent one, and nobody was left to be asked.
+					why = "nobody was there to measure the round's unedited baseline, which its grade is scored against"
+				}
+			}
+			a.dropScript(tx, j, st, sc, why)
 			gave = true
 		}
 	}
@@ -2187,8 +2242,9 @@ func counts(e *Entry) bool {
 	return false
 }
 
-// dropScript gives up every run that wrote a script nobody established could grade. What
-// others made of the script is published with the runs, with nothing to compare it with.
+// dropScript gives up every run that wrote a script nobody established could grade, or
+// whose established grades the round never had a baseline to score against. What was made
+// of the script is published with the runs, with nothing to compare it with.
 func (a *App) dropScript(tx *Tx, j *judge, st *entryState, sc *scriptState, why string) {
 	var grades []Grade
 	for _, r := range sc.Results {
@@ -2196,7 +2252,11 @@ func (a *App) dropScript(tx *Tx, j *judge, st *entryState, sc *scriptState, why 
 		if g == nil || r.Verdict != "pending" {
 			continue
 		}
-		grades = append(grades, j.publish(g, "no established grade", false))
+		shown := "no established grade"
+		if g.est && !g.base {
+			shown = "no baseline" // an established grade, and nothing to score it against
+		}
+		grades = append(grades, j.publish(g, shown, false))
 		r.Verdict, r.Summary = "void", nil
 		tx.saveResult(r)
 	}
@@ -2307,8 +2367,8 @@ func (a *App) settleScript(tx *Tx, j *judge, st *entryState, sc *scriptState) *g
 	if !v.valid && out.reason == "" {
 		out.reason = "the script is invalid"
 	}
-	// A script that is the unedited corpus itself scores the round's baseline, and every
-	// grader reports the baseline with every grade. Agreeing about it shows nothing
+	// A script that is the unedited corpus itself scores the round's baseline, which every
+	// grader not yet established reports with every grade. Agreeing about it shows nothing
 	// that was not already shown, so it earns no standing. Nor does agreeing that a script
 	// is invalid: that is decided before anything is trained.
 	plain := !v.valid || math.Abs(v.gain) < 1e-9
@@ -2340,8 +2400,9 @@ func (a *App) settleScript(tx *Tx, j *judge, st *entryState, sc *scriptState) *g
 		case !decides[r] && (r.CorpusSHA != rd.CorpusSHA || r.ExamSHA != rd.ExamSHA):
 			// It graded different data. A setup problem, and no evidence about this script.
 			r.Verdict, shown = "void", "other data"
-		case !decides[r] && !a.baselineAgrees(rd, b):
-			// Its arithmetic differs on the unedited corpus too.
+		case !decides[r] && b != nil && !a.baselineAgrees(rd, b):
+			// Its arithmetic differs on the unedited corpus too. (A grader that was not asked
+			// for the baseline, and sent none, has only its grade to be judged by.)
 			r.Verdict, shown = "void", "baseline differs"
 		case j.agrees(g, v):
 			r.Verdict = "agreed"
