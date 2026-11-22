@@ -414,6 +414,38 @@ def test_an_item_is_never_put_over_fewer_bytes_than_the_floor(student):
     assert floored[2] == pytest.approx(plain[2] * 10 / 16)
 
 
+def test_a_student_whose_loss_is_not_a_number_has_no_valid_grade(student):
+    import json
+    import types
+
+    import torch
+
+    from stet.exam.score import sit
+    from stet.grade import Trained, sit_exam
+
+    model, enc, eot, ctx = student
+    cpu = torch.device("cpu")
+
+    class Overflowed(torch.nn.Module):
+        def __init__(self, value):
+            super().__init__()
+            self.value = value
+
+        def forward(self, x):
+            return torch.full_like(model(x), self.value)
+
+    a = Item(kind="answer", corner="t/a", fmt="math", lang="en", source="t", ctx="What is 2 + 2?\nAnswer:", cont=" 4")
+    pair = Item(kind="pair", corner="t/p", fmt="prose", lang="en", source="t", good="Dogs bark.", bad="Dogs barks.")
+    for value in (float("nan"), float("inf")):
+        with pytest.raises(FloatingPointError, match="not a number"):
+            sit(Overflowed(value), [a, pair], enc, eot, ctx, cpu)
+    season = types.SimpleNamespace(eot=eot, answer_floor_bytes=16)
+    rnd = types.SimpleNamespace(season=season, describe=lambda: {"id": "t"})
+    result = sit_exam(Trained({"valid": False, "invalid_reason": None}, True, Overflowed(float("nan")), enc, cpu), rnd, types.SimpleNamespace(ctx=ctx), [a, pair])
+    assert result["valid"] is False and "not a number" in result["invalid_reason"] and "exam" not in result
+    json.dumps(result, allow_nan=False)  # what is sent is JSON the server will read
+
+
 def test_all_of_a_long_answer_is_scored_and_its_beginning_is_never_cut(student):
     """Season 1 cut an answer that overflowed the window from the left: the question went first, then the answer's own
     beginning, and what was left was still divided by the bytes of all of it."""

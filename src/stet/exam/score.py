@@ -87,7 +87,8 @@ def nll(model, seqs: list[tuple[list[int], int]], device, batch: int = 64) -> li
 
 def sit(model, items: list[Item], enc, eot: int, ctx: int, device, batch: int = 64, floor: int = 1) -> list[float]:
     """The student's score on every item, in order. Higher is better. `floor` is the season's
-    answer_floor_bytes: the fewest bytes an item's bits are put over."""
+    answer_floor_bytes: the fewest bytes an item's bits are put over. FloatingPointError if a
+    score is not a finite number."""
     seqs, spans = sequences(items, enc, eot, ctx)
     losses = nll(model, seqs, device, batch)
     floor = max(1, floor)
@@ -99,4 +100,8 @@ def sit(model, items: list[Item], enc, eot: int, ctx: int, device, batch: int = 
             scores.append(-sum(losses[a:b]) / LN2 / max(floor, len(it.cont.encode())))
         else:
             scores.append((losses[a + 1] - losses[a]) / LN2 / max(floor, len(it.good.encode())))
+    # A student whose arithmetic overflowed has no score: said here, so that no grade is sent with NaN in it.
+    for n, s in enumerate(scores):
+        if not math.isfinite(s):
+            raise FloatingPointError(f"the student's score on exam item {n + 1} of {len(scores)} is not a number ({s})")
     return scores
