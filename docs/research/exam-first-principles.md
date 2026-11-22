@@ -526,7 +526,12 @@ that pass add something the writing does not. So season 2 keeps both.
   of it written by people after every entry in the round was frozen.
 - **Skills:** agents, reading, transformation, logic, grammar: the five generated families that
   pass three tests on the pilot (spread over noise above 1.5, order carried to the large
-  student at 0.55 or better, and not at chance at the official size).
+  student at 0.55 or better, and not at chance at the official size) and whose answers follow
+  from what the item itself shows.
+- **Knowledge passes the same tests narrowly and is watched all the same.** Its questions come
+  from a fixed, public list of facts, so a curator can go looking for the pages that state
+  them: that measures a curator's aim at the list, not its data. What a student knows of the
+  world is measured by the reference and news writing, which nobody can aim at.
 - **Watched:** every other family and every kind of writing the season does not name. They are
   sat in every round, scored and published part by part, and count for nothing. This is where
   7.1's statement of value now lives. A watched part earns a place in the next rules version
