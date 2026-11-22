@@ -1,6 +1,7 @@
-"""The exam: made after each draw, from things nobody can know before it.
+"""The exam: made at each draw, from things nobody can aim at before it.
 
-A round's exam has two halves, and the season names every part of both (`aggregate.py`).
+A round's exam is generated items and fresh ones, and the season names every part of both
+(`aggregate.py`).
 *Generated* items are made from the round's seed by the families of generators in `gen/` that
 the season names: shell sessions, reading in context, text turned from one form into another,
 logic, grammar pairs, numbers and small programs asked after worked examples, facts the web

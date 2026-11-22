@@ -137,12 +137,12 @@ student's score on every item is published with it.
 
 ## Then what stops people overfitting the exam?
 
-There is nothing to fit in advance: a round's writing is newer than every curator in it,
-and its questions come from its seed. What a curator can learn from past rounds is what
-kinds of text matter (news, programs, replies, every language), and keeping more of those
-is choosing good data, which is the point. The exam weighs four kinds of writing and eight
-skills, and every language by its share of the crawl, so no one source or kind of text can
-carry a score.
+There is nothing to fit in advance: a round's writing is three hours of the day before,
+which its draw picks, and its questions come from its seed. What a curator can learn from
+past rounds is what kinds of text matter (news, programs, replies, every language), and
+keeping more of those is choosing good data, which is the point. The exam weighs four kinds
+of writing and eight skills, and every language by its share of the crawl, so no one source
+or kind of text can carry a score.
 
 ## Does everything on the exam count?
 

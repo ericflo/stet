@@ -1,8 +1,8 @@
 package main
 
-// The season's exam. A round's exam is made after its draw: the organisers'
-// examiner harvests the fresh text published in the window after it, builds the round's items
-// and posts them here (apiExamPost). Grades start then. A grader sits every item
+// The season's exam. A round's exam is made at its draw: the organisers' examiner takes the
+// hours of writing the draw's seed picked from the day before (harvest.go), builds the round's
+// items and posts them here (apiExamPost). Grades start then. A grader sits every item
 // and reports each one's score, and, if its job asked, the unedited baseline's (a few machines
 // measure that for the round: see measuring); the round's baseline is the mean, item
 // by item, of the established graders' baselines; and a grade's score is the exam's
@@ -607,11 +607,11 @@ func (a *App) apiScoresGet(w http.ResponseWriter, r *http.Request) {
 	io.Copy(w, f)
 }
 
-// ExamMix is what a round's exam was made of, for its page: how many items test each of the
-// season's capabilities, and how many of those are text people published after the draw rather
-// than problems generated from the round's seed; in how many languages people wrote; and how
-// many items each kind of writing gave. Kept after the round settles, when the table it is
-// counted from is not.
+// ExamMix is what a round's exam was made of, for its page: how many items each of the
+// season's pillars has, and how many of those are text people published in the day before the
+// draw rather than problems generated from the round's seed; in how many languages people
+// wrote; and how many items each kind of writing gave. Kept after the round settles, when the
+// table it is counted from is not.
 type ExamMix struct {
 	Items int          `json:"items"`
 	Fresh int          `json:"fresh"`

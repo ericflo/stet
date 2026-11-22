@@ -33,7 +33,7 @@ CORPUS_TOKENS = {"standard": 400, "large": 1000}  # FakeEnc: a token a word, and
 
 
 def _items() -> list[Item]:
-    """An exam of eighteen: news written after the draw, and generated logic of two sorts."""
+    """An exam of eighteen: news written the day before the draw, and generated logic of two sorts."""
     news = [Item(kind="passage", corner=f"fresh/ccnews/en/-/{i}", fmt="prose", lang="en", source="ccnews:test",
                  text=QUOTED if i == 0 else f"Report number {i} of the day, which no crawl made before it could hold: the council met and adjourned {i} times over.")
             for i in range(6)]

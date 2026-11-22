@@ -132,9 +132,9 @@ tail -f ~/.local/state/stet/examine.log
 stet examine --round s1-o00003      # one round, by hand, once its exam can be made
 ```
 
-**If it stops, grading waits.** Curators still run, but no grade job is handed out until
-the exam is posted, and the timers that give up on missing grades count from then, so
-nothing is lost meanwhile. Started again, it makes the exam of any open round still
+**If it stops, grading waits.** Curators still run and graders still train, but no student
+sits the exam until it is posted, and the timers that give up on missing grades count from
+then, so nothing is lost meanwhile. Started again, it makes the exam of any open round still
 without one. What it harvested is kept, so a second try does not harvest again. Do not
 leave it down for long: Bluesky's relay holds about a day and a half of posts, and a source
 that can no longer give the window is left out of that round's exam. A round it has failed

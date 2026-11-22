@@ -36,7 +36,7 @@ type WorkRound struct {
 	// is posted. ExamAt is when the exam was posted (0: not yet).
 	GradesEarly int   `json:"grades_early"`
 	ExamAt      int64 `json:"exam_at,omitempty"`
-	DrawnAt     int64 `json:"drawn_at"` // the exam is made from the hours after it
+	DrawnAt     int64 `json:"drawn_at"` // the exam is made then, from hours of the day before it
 	// ExamDue is when the exam is expected, before it is posted: the draw, and the median time
 	// the latest rounds took from their draw to their exam (pace.go). Absent once it is posted,
 	// and before any round has had one.

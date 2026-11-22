@@ -1,6 +1,6 @@
 """New Wikipedia articles, in every language edition, created by people (not bots) in the window.
 
-Edits do not count: most of an edited article's text was there before the draw. A new article is
+Edits do not count: most of an edited article's text was there before the window. A new article is
 kept as the revision that was current when it was harvested, and its Wikidata class (what it is
 an instance of: a person, a village, a species) is its topic.
 """

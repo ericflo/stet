@@ -7,7 +7,7 @@ This file is the complete brief. Read all of it before changing anything.
 
 A small language model (the *student*) is trained on raw web text for a fixed number of
 tokens and then sits an exam that is made when the round is drawn: three quarters human
-writing newer than your curator, one quarter generated questions. The model and the
+writing from the day before, one quarter generated questions. The model and the
 trainer are fixed, and so is how the exam is made. **The only thing you control is the
 training data.**
 
@@ -215,10 +215,10 @@ is skills.** Inside each group, every pillar counts the same:
 | `programs` | skills | What a small algorithm returns (a list sorted, a letter counted) and what structured data holds (a value in a table or in JSON), each after a few worked examples |
 | `knowledge` | skills | Facts the web knows, in ten languages |
 
-- **The writing is newer than your curator.** It is what people published in three hours
-  of the day before the draw, and the draw picks the hours. Your curator was submitted
-  before any of it existed (see *Entering*) and has no network when it runs, so there is
-  nothing to look up or to fit in advance.
+- **The writing is newer than the crawl.** It is what people published in three hours
+  of the day before the draw, and the draw picks the hours. The round's corpus was crawled
+  before any of it existed, and your curator has no network when it runs and can add no
+  text of its own, so there is nothing to look up or to fit in advance.
 - **Every language counts by its share of the round's corpus**, inside every kind of
   writing. More than half of a crawl is not English, and six of the eight skills are asked
   in the web's main languages too: only `numbers` and `programs` are in English alone. So a

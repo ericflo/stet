@@ -1,7 +1,7 @@
 """Keeping the round's corpus out of its exam.
 
-The exam is made after the corpus, from text published after the draw, which a crawl made
-before the draw cannot hold. But text can be copied: an addition to an article may quote a page
+The exam's fresh text was published in the day before the draw, which a crawl gathered before
+that day cannot hold. But text can be copied: an addition to an article may quote a page
 the crawl has. So an item whose scored text has a sentence opening that appears anywhere in the
 round's corpus is dropped from the exam.
 

@@ -6,8 +6,8 @@ import (
 )
 
 // A round's page says what its exam was made of: how many items, how many of them people
-// wrote after the draw and in how many languages, and how many each capability has. It is
-// kept once the round settles, when the table it is counted from is not.
+// wrote and in how many languages, and how many each part has. It is kept once the round
+// settles, when the table it is counted from is not.
 func TestARoundsPageSaysWhatItsExamWasMadeOf(t *testing.T) {
 	pub, priv := newKey()
 	w := newWorld(t, pub)
@@ -41,7 +41,7 @@ func TestARoundsPageSaysWhatItsExamWasMadeOf(t *testing.T) {
 		}
 	}
 	if strings.Contains(page, "<dt>agents</dt>") {
-		t.Fatal("a capability with no items is listed")
+		t.Fatal("a part with no items is listed")
 	}
 	// Every item is in a part the season names, so the pillars listed hold the whole exam.
 	listed := 0

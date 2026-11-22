@@ -1,9 +1,10 @@
-"""Fresh text: written and published after a round's draw, so no curator could have known it.
+"""Fresh text: written and published in the day before a round's draw, in hours the draw picks,
+so nobody could have known which of it a round would hold.
 
-A harvest collects documents from openly licensed sources that publish all the time, over a
-window that opens at the draw. Each document keeps an immutable id and a URL that shows it as
+A harvest collects documents from sources that publish all the time and need no key, over one
+hour of the clock (harvest.py). Each document keeps an immutable id and a URL that shows it as
 it was harvested (a revision id, a post id), so anyone can check it against its source. The
-harvest is written as a snapshot whose sha256 the round can commit to.
+harvest is written as a snapshot, and its sha256 is public before any draw that picks it.
 
 The documents are then turned into exam items (passages, and answers given their question),
 placed in corners (source, language, topic), and selected with the round's seed: at most a few

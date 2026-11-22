@@ -195,7 +195,7 @@ type Round struct {
 	HoursLate bool        `json:"exam_hours_late,omitempty"`
 	Fresh     int         `json:"fresh,omitempty"`
 	BaseItems []float64   `json:"baseline_items,omitempty"`
-	// ExamMix is what the exam was made of, kept for good (examMix): its items by capability.
+	// ExamMix is what the exam was made of, kept for good (examMix): its items by pillar.
 	ExamMix *ExamMix `json:"exam_mix,omitempty"`
 }
 

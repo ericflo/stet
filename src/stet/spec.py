@@ -3,7 +3,8 @@
 A *season* freezes everything that must not move while scores are being compared: the
 pools, the exam, the student, the budgets and the rules. A *round* is one draw from a
 season: a corpus, the student's initial weights and the exam's generated questions, all
-derived from a single seed (the exam's fresh text is what was published after the draw).
+derived from a single seed (the exam's fresh text is three hours of the day before the draw,
+which the seed picks).
 Everything here is a pure function of public inputs, so any two parties derive
 byte-identical rounds.
 """

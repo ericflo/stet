@@ -8,8 +8,8 @@ will be set.
 
 A small language model, the **student**, is trained on raw web text for a fixed number of
 tokens and then sits an **exam**. The exam is made when the round is drawn: three quarters
-of it is human writing newer than every curator in the round, and one quarter is questions
-made from the round's seed. The model and the trainer never change. You change one thing: the data. You write a **curator**, a
+of it is human writing from three hours of the day before, which the draw picks, and one
+quarter is questions made from the round's seed. The model and the trainer never change. You change one thing: the data. You write a **curator**, a
 program that is handed raw web pages it has never seen and twenty minutes on one GPU. It
 answers with an **edit script**: what to keep, what to cut, and in what order to train on
 it. The better the student does on the exam than one trained on the raw pages, the better
@@ -88,7 +88,7 @@ pushes the next back.
 5. **Grade.** Other volunteers train the student on what each script says, as soon as it
    is written, and have it sit the exam. Grading runs no entrant code: a
    script is plain data.
-7. **Settle.** A round settles as a whole. Until then every script and every grade is
+6. **Settle.** A round settles as a whole. Until then every script and every grade is
    sealed. Then each score is published, with every run and every grade behind it,
    whoever made them and whatever they said.
 

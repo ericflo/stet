@@ -50,10 +50,10 @@ that did not tell curators apart, or whose order did not hold for a larger stude
 on the exam. Numbers and programs are on it in one form only, after a few worked examples of
 the same task, and tracing a program is not on it at all. A part the season does not name is
 not generated, not harvested and not sat. Nothing on the exam counts for nothing: a part is
-in the score or it is not on the exam at all. On the pilot, the score made this way moved a
-quarter as much between two trainings of one script as a score that counted questions asked
-cold, and agreed better with the large student
-([measured](EXPERIMENTS.md#how-much-is-noise): the pilot's fresh writing was Wikipedia only).
+in the score or it is not on the exam at all. Eight families of generated question were
+asked both cold and after a few worked examples. After the examples, six pass both tests
+(they tell curators apart at the standard size, and keep their order at the large one);
+asked cold, one does ([measured](EXPERIMENTS.md#which-parts-of-the-exam-count)).
 
 **The exam is not a slice of the corpus.** On unseen text from the same pool, careful
 selection barely beats random, because perplexity rewards matching the test distribution.

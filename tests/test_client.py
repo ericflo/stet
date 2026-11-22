@@ -431,8 +431,9 @@ def test_a_valid_grade_is_reported_and_printed_and_the_verifier_carries_on(loop,
 
 
 def test_a_grade_handed_before_the_exam_trains_first_and_sits_it_once_posted(monkeypatch, tmp_path):
-    # The exam is made two hours after the draw. A grader handed its script before then
-    # trains both students while it waits, and only sits the exam once it is posted.
+    # An exam is posted a little after its draw, or later when the examiner is late. A grader
+    # handed its script before then trains both students while it waits, and only sits the exam
+    # once it is posted.
     pytest.importorskip("torch")
     import hashlib
     import types
