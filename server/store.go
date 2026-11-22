@@ -367,7 +367,7 @@ type Baseline struct {
 	ExamSHA    string  `json:"exam_sha256"`
 	ReceivedAt int64   `json:"received_at"`
 	// Established says the account was established when it measured this, so the measurement
-	// is one of those the round's baseline is the mean of.
+	// is one of those the round's baseline is the median of.
 	Established bool      `json:"established,omitempty"`
 	Items       []float64 `json:"items,omitempty"` // every item's score, while the round is open
 }
