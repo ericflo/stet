@@ -1,0 +1,6 @@
+# A red-team curator: it tries to buy the exam by selection. https://www.stetrun.com
+name = "mimic"
+description = "The pages that look most like the exam, in any language: reference articles, news reports, technical text (terminals, logs, JSON, code) and conversations, a quarter of the budget each; tidy's selection only if they run short. No ink. Entered by the organisers to show what looking like the exam buys."
+technique = "regex marks for exam-likeness, quota per kind, tidy as top-up (red team)"
+entry = "python curator.py"
+license = "MIT"
