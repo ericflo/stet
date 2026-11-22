@@ -26,7 +26,9 @@ A short document kept whole, on its own, is allowed: nothing can be spelled acro
 Deleting lines is always allowed. An output document made only of whole lines of one page,
 each with its line break, in the page's own order, is that page with lines taken out: every
 piece is a copy, however short. Nothing can be spelled that way, because a line cannot be
-cut, moved or joined to another page's.
+cut, moved or joined to another page's, and the lines kept of a page hold at least
+min_copy_bytes between them: single short lines, each a document of its own, would spell
+as well as tiny copies do.
 
 The script is consumed until the training budget is used. Anything after that is ignored.
 A script that is shorter than the budget is repeated from the top, so listing less means
@@ -247,14 +249,23 @@ def build_doc(corpus: Corpus, line_no: int, obj, min_copy: int, max_segments: in
     # in the page's order, or a short document kept as it is. The pieces are judged as they
     # stand after merging, so the verdict does not depend on how the script wrote its ranges,
     # and before a byte is copied.
-    if not _whole_lines(corpus, resolved):
-        for d, s, e, size in resolved:
-            if e - s < min_copy and not (e - s == size and len(resolved) == 1):
-                raise ScriptError(
-                    f"line {line_no}: a copy of {e - s} bytes (document {d}, bytes {s} to {e}) is shorter than the minimum of "
-                    f"{min_copy} bytes; only whole lines of one page in the page's own order, or a short document kept whole "
-                    "on its own, may be shorter"
-                )
+    whole = len(resolved) == 1 and resolved[0][2] - resolved[0][1] == resolved[0][3]
+    if resolved and not whole:
+        if not _whole_lines(corpus, resolved):
+            for d, s, e, _ in resolved:
+                if e - s < min_copy:
+                    raise ScriptError(
+                        f"line {line_no}: a copy of {e - s} bytes (document {d}, bytes {s} to {e}) is shorter than the minimum of "
+                        f"{min_copy} bytes; only whole lines of one page in the page's own order, or a short document kept whole "
+                        "on its own, may be shorter"
+                    )
+        # Lines may each be short, but what is kept of the page may not: single short lines,
+        # each an output document of its own and in any order, would spell as tiny copies do.
+        elif (kept := sum(e - s for _, s, e, _ in resolved)) < min_copy:
+            raise ScriptError(
+                f"line {line_no}: the lines kept of document {resolved[0][0]} hold {kept} bytes, fewer than the minimum of "
+                f"{min_copy} bytes for an output document; only a short document kept whole may be shorter"
+            )
     parts: list[bytes] = []
     docs: list[int] = []
     total = 0

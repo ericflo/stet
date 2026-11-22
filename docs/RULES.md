@@ -136,7 +136,8 @@ One line per output document. Line order is training order: the trainer does not
 - **Deleting lines is always allowed.** Whole lines of one page, kept in the page's order,
   are copies however short they are: take out the menu, the cookie banner and the footer
   and keep the article. Lines cannot be moved, cut short, repeated or mixed with another
-  page's that way.
+  page's that way, and what is kept of a page is at least 64 bytes in all: single short
+  lines cannot be strung together to spell something.
 - **Any other copy is at least 64 bytes long.** With enough tiny copies a script could
   spell out any text it liked from the corpus's letters and words, so a shorter copy makes
   the script invalid. Ranges that touch are one copy. The one exception is a whole short

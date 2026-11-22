@@ -142,7 +142,7 @@ def test_a_short_document_kept_whole_is_a_copy_but_only_on_its_own(corpus, enc):
 def test_whole_lines_taken_out_of_a_page_are_copies_however_short(tmp_path, enc):
     from conftest import make_corpus
 
-    page = "Home | About | Contact\nA first line of the article.\nBuy now!\nAnother line.\nShare this\nThe last line"
+    page = "Home | About | Contact\nA first line of the article.\nBuy now!\nAnother line.\nShare this\nThe last line of the article, which ends here"
     c = make_corpus(tmp_path / "lines", [page, "x\ny\nz\n", "A long page of writing, to fill the budget with. " * 40])
     at = [0]
     for line in page.split("\n"):
@@ -151,9 +151,13 @@ def test_whole_lines_taken_out_of_a_page_are_copies_however_short(tmp_path, enc)
     keep = lambda *ks: {"d": 0, "k": [[at[k], at[k + 1]] for k in ks]}  # noqa: E731
     # the article's lines kept, the furniture between them taken out: all copies, though each is under 64 bytes
     b = build_doc(c, 1, keep(1, 3, 5), 64)
-    assert b.data == b"A first line of the article.\nAnother line.\nThe last line" and b.docs == [0, 0, 0] and b.spliced
-    assert build_doc(c, 1, keep(3), 64).data == b"Another line.\n"  # one line of a page is the page with the others taken out
-    assert build_doc(c, 1, {"s": [[1, 0, 2], [1, 4, 6]]}, 64).data == b"x\nz\n"  # written as copies of one page, the same
+    assert b.data == b"A first line of the article.\nAnother line.\nThe last line of the article, which ends here" and b.docs == [0, 0, 0] and b.spliced
+    assert build_doc(c, 1, {"s": [[0, at[1], at[2]], [0, at[5], at[6]]]}, 64).data == b"A first line of the article.\nThe last line of the article, which ends here"  # written as copies of one page, the same
+    # but what is kept of a page is 64 bytes or more: single short lines, each a document of its own, would spell
+    assert refused(c, keep(3)) == "line 1: the lines kept of document 0 hold 14 bytes, fewer than the minimum of 64 bytes for an output document; only a short document kept whole may be shorter"
+    assert refused(c, {"s": [[1, 0, 2], [1, 4, 6]]}).startswith("line 1: the lines kept of document 1 hold 4 bytes")
+    assert refused(c, keep(1, 3)).startswith("line 1: the lines kept of document 0 hold 43 bytes")
+    assert build_doc(c, 1, 1, 64).data == b"x\ny\nz\n"  # a short page kept whole is still a page
     # out of the page's order, the same lines are short copies: lines cannot be moved
     assert refused(c, keep(3, 1)) == f"line 1: a copy of 14 bytes (document 0, bytes {at[3]} to {at[4]}) {TOO_SHORT}"
     # a line cut short, or begun in its middle, is not a line
@@ -166,8 +170,8 @@ def test_whole_lines_taken_out_of_a_page_are_copies_however_short(tmp_path, enc)
     # and text beside a page's lines is text
     assert refused(c, {"s": [[0, at[1], at[2]], "and"]}) == f"line 1: {NO_TEXT}"
     # As a script: every line of it trained on, and every byte of it the pages'.
-    _, stats = run(c, enc, [keep(1, 3, 5), {"d": 1, "k": [[0, 2], [4, 6]]}, 2])
-    assert stats.out_docs == 3 and stats.src_docs == 3 and stats.out_bytes == len(b.data) + 4 + c.size(2)
+    _, stats = run(c, enc, [keep(1, 3, 5), 1, 2])
+    assert stats.out_docs == 3 and stats.src_docs == 3 and stats.out_bytes == len(b.data) + 6 + c.size(2)
     assert stats.to_dict(c)["kept_byte_frac"] == round(stats.out_bytes / c.total_bytes, 6)
 
 

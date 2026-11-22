@@ -182,7 +182,8 @@ does not shuffle.
   page, in the page's order, is a copy however short the lines are: take out the menu, the
   cookie banner and the footer and keep the article. Each range starts at the start of a
   line and ends just after a line break, or at the end of the page. Lines cannot be moved,
-  cut short, repeated or mixed with another page's that way.
+  cut short, repeated or mixed with another page's that way, and the lines kept of a page
+  hold at least 64 bytes between them.
 - **Any other copy is at least `min_copy_bytes` (64) long.** A shorter one makes the run
   invalid: with enough tiny copies a script could spell out any text it liked. Ranges of
   one document that touch are one copy, so three 30-byte ranges end to end are a 90-byte
@@ -272,7 +273,7 @@ documents will do badly on the next.
   to a temporary file and rename it, or a kill can leave half a script.
 - Text of your own anywhere in the script: a string in an `s` line, or a `t` key.
 - A copied range shorter than 64 bytes, unless the line is whole lines of one page in
-  order, or one short document kept whole.
+  order (64 bytes of them or more), or one short document kept whole.
 - A document number or byte range that does not exist.
 - A script that yields almost no tokens.
 - A script over 64 MB, a line over 1 MB, or a line nested more than 16 brackets deep.
