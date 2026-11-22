@@ -147,10 +147,22 @@ def post(exam: dict, key) -> dict:
     return request("POST", f"/api/v1/admin/rounds/{exam['round']}/exam", exam, key=key, timeout=600)
 
 
+KEPT_ITEMS, KEPT_LANGUAGES = "items.jsonl.zst", "languages.json"
+
+
+def keep(exam: dict, work: Path) -> None:
+    """Keep the whole exam and the corpus's languages beside the harvest. Once the round settles
+    the server gives out only the published exam, and the organisers' own measurements of the
+    round (the curve, the audit, the finals: stages.py) sit students on all of it."""
+    (work / KEPT_ITEMS).write_bytes(base64.b64decode(exam["items_file"]))
+    (work / KEPT_LANGUAGES).write_text(json.dumps(exam["languages"]))
+
+
 def examine(rnd, scale, snapshots: list[tuple[int, Path]], work: Path, key, log=print) -> dict:
     """Make a round's exam from its hours' harvests and post it."""
     t0 = time.time()
     exam = build(rnd, scale, snapshots, work, log=log)
+    keep(exam, work)
     out = post(exam, key)
     log(f"  posted {rnd.id}'s exam: {len(exam['table'])} items ({time.time() - t0:.0f}s)")
     return out

@@ -1002,8 +1002,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(fn=cmd_agents)
 
     from . import client
+    from .exam import stages
 
     client.add_commands(sub)
+    stages.add_commands(sub)  # organisers: the unedited curve, the scale audit, the finals
     return ap
 
 
