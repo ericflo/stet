@@ -1201,13 +1201,28 @@ func (a *App) apiRecords(w http.ResponseWriter, r *http.Request) {
 // --- verifying ------------------------------------------------------------------------------
 
 func (a *App) apiClaim(w http.ResponseWriter, r *http.Request) {
-	acct, _, body, err := a.signed(w, r, 1<<16, true)
+	// A new season starts on an empty database, and a verifier left running from the last one
+	// has no account in it. What it acts on is being told to upgrade (426), not to log in
+	// (401), so a signed request from a key with no account is read far enough to say which.
+	// Its signature is checked like any other, and it is handed nothing.
+	acct, _, body, err := a.signed(w, r, 1<<16, false)
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
 	var h Hello
-	if json.Unmarshal(body, &h) != nil {
+	malformed := json.Unmarshal(body, &h) != nil
+	if acct == nil {
+		if !malformed {
+			if err := a.checkHarness(h.Harness, h.Season, h.SeasonDigest); err != nil {
+				writeErr(w, err)
+				return
+			}
+		}
+		writeErr(w, fail(401, "no account for this key; run `stet login`"))
+		return
+	}
+	if malformed {
 		writeErr(w, fail(400, "malformed request"))
 		return
 	}

@@ -3950,3 +3950,39 @@ func TestBeingEstablishedNeedsTheGithubIdentityThatEnteringDoes(t *testing.T) {
 		t.Fatalf("the organisers' account: %+v", me.Verifier)
 	}
 }
+
+// A new season starts on an empty database, so a verifier still running the last season's
+// harness has no account in it. It upgrades itself when it is told to (426) and stops when it
+// is told to log in (401): it is told to upgrade. A current verifier with no account is told
+// to log in, as before, and nothing is said to a request that is not signed by its key.
+func TestAVerifierFromTheLastSeasonWithNoAccountIsToldToUpgrade(t *testing.T) {
+	pub, _ := newKey()
+	w := newWorld(t, pub)
+	_, priv := newKey()
+	old := &actor{t: t, srv: w.srv, priv: priv, pub: hex.EncodeToString(priv.Public().(ed25519.PublicKey)), handle: "old"}
+	var out struct {
+		Error string `json:"error"`
+	}
+	last := w.hello(false)
+	last["season"], last["season_digest"], last["harness"] = "s0", strings.Repeat("0", 64), "0.0.1"
+	if code := old.do("POST", "/api/v1/jobs/claim", last, &out); code != 426 || !strings.Contains(out.Error, "Upgrade") {
+		t.Fatalf("last season's verifier, with no account: HTTP %d %s", code, out.Error)
+	}
+	if code := old.do("POST", "/api/v1/jobs/claim", w.hello(false), &out); code != 401 || !strings.Contains(out.Error, "stet login") {
+		t.Fatalf("this season's verifier, with no account: HTTP %d %s", code, out.Error)
+	}
+	if code := old.do("POST", "/api/v1/jobs/claim", []byte("{"), &out); code != 401 {
+		t.Fatalf("a malformed request from a key with no account: HTTP %d %s", code, out.Error)
+	}
+	// Signed by another key than the one it names: nothing about the season is said.
+	_, other := newKey()
+	forger := &actor{t: t, srv: w.srv, priv: other, pub: old.pub, handle: "forger"}
+	if code := forger.do("POST", "/api/v1/jobs/claim", last, &out); code != 401 || strings.Contains(out.Error, "Upgrade") {
+		t.Fatalf("an old hello under a signature that is not its key's: HTTP %d %s", code, out.Error)
+	}
+	w.app.st.view(func(s *State) {
+		if len(s.Accounts) != 0 || len(s.Claims) != 0 {
+			t.Fatalf("a key with no account was given something: %d accounts, %d jobs", len(s.Accounts), len(s.Claims))
+		}
+	})
+}
