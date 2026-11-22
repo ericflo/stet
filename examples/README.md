@@ -10,11 +10,11 @@ Three of the organisers' own:
 |---|---|
 | `identity` | Nothing. The unedited corpus; gain 0 by definition. |
 | `english` | Keeps documents that look like English prose. |
-| `tidy` | English, deduplicated, boilerplate lines cut, best budget's worth, shuffled. |
+| `tidy` | Pages that read as writing, in any language: deduplicated, boilerplate lines cut, the best budget's worth, shuffled. |
 
 Three quarters of the exam's score is human writing in every language, each by its share of
-the round's corpus, so the two that keep only English give up the writing in every other
-language.
+the round's corpus, so `english`, which keeps only English, gives up the writing in every
+other language. `tidy` asks no page what language it is in.
 
 Each of these `curator.py` files is the same file as `src/stet/editors/<name>.py` (a test keeps them identical).
 
@@ -38,8 +38,8 @@ And two that are not entered, as patterns to build on:
 
 | | What it does |
 |---|---|
-| `reader` | `tidy`'s candidates, then a 135M-parameter language model reads the opening of each and the least and most surprising are dropped. Shows `[[assets]]`, `task.asset`, the GPU through PyTorch, and writing a script early. |
-| `agent` | `tidy`'s candidates; how strictly to filter them is decided by an agent: the pi harness, on Node, driving a 0.6B model served on loopback inside the sandbox. Shows how to bring a harness and a model of your own. Run `./pack.sh` first. |
+| `reader` | English prose with its boilerplate lines cut (the model reads English), then a 135M-parameter language model reads the opening of each and the least and most surprising are dropped. Shows `[[assets]]`, `task.asset`, the GPU through PyTorch, and writing a script early. |
+| `agent` | English prose with its boilerplate lines cut; how strictly to filter it is decided by an agent: the pi harness, on Node, driving a 0.6B model served on loopback inside the sandbox. Shows how to bring a harness and a model of your own. Run `./pack.sh` first. |
 
 ## Red team
 

@@ -5,7 +5,9 @@ A small language model is served inside the sandbox on loopback, and a real agen
 this round's corpus looks like and makes one decision with its tools; the rest of the
 edit is ordinary code. Nothing here needs the network.
 
-  1. Do what `tidy` does and write that script straight away, so there is always one.
+  1. Keep English prose, as `tidy` does for every language, and write that script straight
+     away, so there is always one. (English only to keep the example short: the exam is in
+     every language of the crawl.)
   2. Lay out a small workspace: a few numbers about the round and a few sample pages.
   3. Serve the model named in stet.toml with `transformers serve`, an OpenAI-compatible
      server that understands tool calls.
