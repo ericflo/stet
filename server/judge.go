@@ -525,11 +525,12 @@ type judge struct {
 	around   []*asker                      // found when first asked for
 	passes   map[string]map[string]float64 // a training pass's seconds, by scale and GPU: worked out when first asked for
 	measures map[int]map[int64]bool        // whose baseline each round has or is promised (measuring): worked out when first asked for
+	left     map[int]map[int64]bool        // whose baseline each round leaves out of its own (oddOut): worked out when first asked for
 }
 
 func (a *App) newJudge(s *State) *judge {
 	j := &judge{a: a, s: s, t: now(), est: map[int64]bool{}, standing: map[int64]bool{}, busy: map[int64]bool{}, training: map[int64]bool{},
-		resting: map[int64]bool{}, differs: map[int64]map[int]int{}, quit: map[int64]map[int]bool{}, measures: map[int]map[int64]bool{}}
+		resting: map[int64]bool{}, differs: map[int64]map[int]int{}, quit: map[int64]map[int]bool{}, measures: map[int]map[int64]bool{}, left: map[int]map[int64]bool{}}
 	for id, acct := range s.Accounts {
 		j.est[id], j.standing[id] = a.established(acct), acct.Agreed > 0
 	}
@@ -812,6 +813,9 @@ func (j *judge) weigh(sc *scriptState) *verdict {
 	for _, r := range sc.Results {
 		switch g := j.view(sc, r); {
 		case g == nil || !g.est:
+		case j.oddOut(r):
+			// Its machine's baseline is the odd one out of the round's: the script wants a
+			// grade as if it had none, and this one is set aside when the round settles.
 		case !g.base && !j.baselineComing(r.RoundIdx):
 			// It has no score, and as things stand never will: the round has no baseline,
 			// and nobody at work on it was asked for one. So the script wants a grade as if
@@ -2455,7 +2459,7 @@ func (a *App) settleScript(tx *Tx, j *judge, st *entryState, sc *scriptState) *g
 		case !decides[r] && (r.CorpusSHA != rd.CorpusSHA || r.ExamSHA != rd.ExamSHA):
 			// It graded different data. A setup problem, and no evidence about this script.
 			r.Verdict, shown = "void", "other data"
-		case !decides[r] && b != nil && !a.baselineAgrees(rd, b):
+		case !decides[r] && b != nil && (j.oddOut(r) || !a.baselineAgrees(rd, b)):
 			// Its arithmetic differs on the unedited corpus too. (A grader that was not asked
 			// for the baseline, and sent none, has only its grade to be judged by.)
 			r.Verdict, shown = "void", "baseline differs"

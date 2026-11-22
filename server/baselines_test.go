@@ -202,6 +202,20 @@ func TestABaselineThatIsFarOutAndFirstInIsNotTheRoundsStandard(t *testing.T) {
 			}
 		})
 	}
+	// What bob's machine made of its script is no more to be relied on than its baseline: the
+	// script wants a grade as if it had none, and the round waits for it.
+	w.app.st.view(func(s *State) {
+		if s.Rounds[idx].Status != "open" {
+			t.Fatalf("the round settled on the grade of a machine whose baseline is the odd one out: %s", s.Rounds[idx].Status)
+		}
+	})
+	again := w.asked(g[1], true)
+	if again.Job.Editor.Name != jobs[0].Job.Editor.Name {
+		t.Fatalf("carol was handed %s, not the script bob graded (%s)", again.Job.Editor.Name, jobs[0].Job.Editor.Name)
+	}
+	if code, status := w.send(g[1], again, 5.9, 6.0); code != 200 || status != "settled" {
+		t.Fatalf("carol's grade of the script bob graded: HTTP %d %s", code, status)
+	}
 	w.check()
 	var rd struct {
 		Round struct {
@@ -217,6 +231,15 @@ func TestABaselineThatIsFarOutAndFirstInIsNotTheRoundsStandard(t *testing.T) {
 		if e := w.entry(idx, jobs[i].Job.Editor.Name); !e.Valid || e.Gain == nil || math.Abs(*e.Gain-0.1) > 1e-9 {
 			t.Fatalf("the script %s graded gained 0.1, and settled at %+v", g[i].handle, e.Gain)
 		}
+	}
+	verdict := ""
+	for _, gr := range w.entry(idx, jobs[0].Job.Editor.Name).Runs[0].Grades {
+		if gr.Handle == "bob" {
+			verdict = gr.Verdict
+		}
+	}
+	if b := w.account("bob"); verdict != "baseline differs" || b.Strikes != 0 || b.Agreed != 2*w.cfg.EstablishAfter {
+		t.Fatalf("bob's grade is shown as %q, and counted for or against him: %+v", verdict, b)
 	}
 }
 

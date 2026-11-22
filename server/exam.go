@@ -333,6 +333,33 @@ func (a *App) baselinesKept(s *State, rd *Round) []*Baseline {
 	return kept
 }
 
+// baselinesLeftOut is whose baseline of a round is the odd one out: one that may make the
+// round's (roundBaselines) and that the round does not keep (baselinesKept).
+func (a *App) baselinesLeftOut(s *State, rd *Round) map[int64]bool {
+	out := map[int64]bool{}
+	for _, b := range a.roundBaselines(s, rd) {
+		out[b.AccountID] = true
+	}
+	for _, b := range a.baselinesKept(s, rd) {
+		delete(out, b.AccountID)
+	}
+	return out
+}
+
+// oddOut reports whether a grade is by a machine whose baseline of its round is the odd one
+// out. What such a machine made of a script is no more to be relied on than what it made of
+// the unedited corpus: its grade decides nothing, as if it had been turned away when it came.
+func (j *judge) oddOut(r *Result) bool {
+	out, ok := j.left[r.RoundIdx]
+	if !ok {
+		if rd := j.s.Rounds[r.RoundIdx]; rd != nil {
+			out = j.a.baselinesLeftOut(j.s, rd)
+		}
+		j.left[r.RoundIdx] = out
+	}
+	return out[r.AccountID]
+}
+
 // baselineDev is how far a grader's baseline is from the median of the round's baselines, its
 // own among them (the others' and this one, whether or not its account is established), on the
 // exam's score. ok is false while fewer than two others are in: nobody is turned away for
@@ -452,13 +479,7 @@ func (a *App) refreshScores(tx *Tx, rd *Round) {
 	rd.BaselineLoss = &loss
 	// How many machines measured it, whoever they were: but not one whose measurement the
 	// round left out of its own.
-	out := map[int64]bool{}
-	for _, b := range a.roundBaselines(s, rd) {
-		out[b.AccountID] = true
-	}
-	for _, b := range kept {
-		delete(out, b.AccountID)
-	}
+	out := a.baselinesLeftOut(s, rd)
 	rd.BaselineN = 0
 	for _, b := range s.Baselines {
 		if b.RoundIdx == rd.Idx && !out[b.AccountID] && a.baselineAgrees(rd, b) {
