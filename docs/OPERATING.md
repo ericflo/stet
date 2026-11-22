@@ -74,12 +74,22 @@ log says `upgraded to <version>. Starting again.` To do it by hand: `stet upgrad
 ## The examiner
 
 Every official round's exam is made by an organisers' machine running `stet examine
---follow`. Every minute it looks at the open rounds. Two hours after a round's draw (the
-one-hour harvest window, then an hour for the sources that publish late) it harvests the
-window's fresh text, builds the round's corpus, drops the fresh items the corpus already
-holds, generates the round's questions, and posts the exam. It reads every source at once,
-and fetches the corpus meanwhile, so the harvest takes as long as its slowest source
-(Lemmy, about ten minutes); then the corpus is checked.
+--follow`. It does two things.
+
+- **Every hour it harvests an hour of the clock**: the writing people published in it, once
+  the hour has settled (an hour after it ends, when the sources that publish late have
+  caught up). It keeps the harvest under `~/.cache/stet/examine/hours/` and tells the
+  server its hash at once; `GET /api/v1/harvests` lists them. It reads every source at
+  once, so a harvest takes as long as its slowest source (Lemmy, about ten minutes).
+- **When a round is drawn it makes the round's exam**, within a few minutes. The server
+  gives the round three of the hours harvested in the day before the draw, chosen by the
+  round's seed. The examiner takes exactly those, builds the round's corpus, drops the
+  fresh items the corpus already holds, generates the round's questions, and posts the
+  exam. No round waits for its exam.
+
+So it has to be running for a day before a season's first draw, and a stop of more than a
+day leaves the next round without hours to draw from. Started again, it harvests the
+newest hours first.
 
 What it needs:
 
@@ -87,10 +97,12 @@ What it needs:
   organisers may post an exam;
 - the stet client with the season's libraries, PyTorch among them, and the same version of
   the exam's generators as the season (an older client refuses, and says to upgrade);
-- about 3 GB of disk a round, under `~/.cache/stet/examine/<round>/` and the round's corpus;
+- about 3 GB of disk a round, under `~/.cache/stet/examine/<round>/` and the round's corpus,
+  and the hours it has harvested;
 - the network: Wikipedia, Common Crawl's news crawl, GH Archive, Hacker News, Lemmy,
-  Bluesky's Jetstream and Mastodon, none with a key or an account. A harvest downloads
-  about a gigabyte of news an hour of window.
+  Bluesky's Jetstream, Mastodon, the forums that run Discourse and the kernel's mailing
+  lists, none with a key or an account. A harvest downloads about a gigabyte of news an
+  hour.
 
 Leave it running as a user service, like the verifier. It does not upgrade itself: after
 a deploy that changes the harness, `stet upgrade` and restart it.
@@ -98,7 +110,7 @@ a deploy that changes the harness, `stet upgrade` and restart it.
 ```ini
 # ~/.config/systemd/user/stet-examine.service
 [Unit]
-Description=Stet examiner: makes each official round's exam after its draw
+Description=Stet examiner: harvests every hour, and makes each official round's exam at its draw
 After=network-online.target
 Wants=network-online.target
 
@@ -569,18 +581,20 @@ Set in `apps/stet/deployment.yaml`. The ones that are rules:
 | `STET_DB_NAME` | stet | The database the server keeps its records in: one a season |
 | `STET_SCALE` | the season's | The scale rounds are run at: `standard` |
 
-A full round is 8 + 3 × 3 = 17 entries. Their runs, two of up to twenty minutes each, fit in
-the two hours before the exam. Grading trains in them too: one standard training for every
-script graded, about 18 minutes on a 3090-class GPU, and one for each grader's baseline,
-then the exam is sat when it is posted. Raise the sizes only when rounds settle well within
-three hours of their draw.
+A full round is at most 8 + 3 × 3 = 17 entries, and fewer in most rounds: of the
+organisers' reference curators two run every round and each of the others one round in
+eight. Each entry is run twice, up to twenty minutes a run. Each script is trained once,
+about 18 minutes on a 3090-class GPU and 9 on a 4090, and four machines train the round's
+unedited baseline. The exam is posted a few minutes after the draw, so a student sits it
+as soon as it is trained. Raise the sizes only when rounds settle well before the next
+is due.
 
 ## When something is wrong
 
 | Sign | Likely cause | Do |
 |---|---|---|
 | A round stays `open` | Nobody established is verifying, or a verifier is stuck | Check the organisers' unit and its log; look at the verifiers page for who was last seen |
-| A round has no `exam_digest` more than two and a half hours after its draw | The examiner is down, or failed on the round | `systemctl --user status stet-examine` and its log. Started again, it makes the exam; `stet examine --round <id>` does it by hand |
+| A round has no `exam_digest` half an hour after its draw | The examiner is down, failed on the round, or has not harvested the hours the round was given | `systemctl --user status stet-examine` and its log. Started again, it makes the exam; `stet examine --round <id>` does it by hand |
 | The examiner's log says a source failed | The source was away or refused | It is left out of that round's exam and the rest is kept. If one source keeps failing, find out why before the next round |
 | Every entry is marked *run once* | Only one established account is running curators | Expected early in a season. It ends when volunteers are established and pass `--edits` |
 | The log says "this verifier is out of date" | The server was deployed with a newer harness | It upgrades itself within ten minutes. If the log says the upgrade did not work, it says why: run `stet upgrade` by hand |
