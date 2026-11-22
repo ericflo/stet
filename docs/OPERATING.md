@@ -520,7 +520,8 @@ systemctl --user restart stet-examine       # the examiner on the new client
 for d in fineweb2 dclm tidy identity english heuristic fineweb-edu mimic; do stet submit examples/$d --yes; sleep 2; done
 ```
 
-and `stet-cloud` is started with it if it was stopped ([above](#rented-machines)). It asks
+The loop is run in a checkout of the merged change: the curators in `examples/` are the new
+season's. `stet-cloud` is started with it if it was stopped ([above](#rented-machines)). It asks
 for work with the organisers' key, so it rents nothing before the account is there, and a
 round drawn with no machine to run its curators comes to nothing.
 
