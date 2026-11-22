@@ -256,7 +256,9 @@ published, it will be seen, and it defeats the point.
 
 Full-page text means every language, plus menus, cookie banners, footers, link lists,
 shop listings and spam around the prose. At standard a round's corpus is about 335,000
-documents and 2.5 GB, some six times more text than the budget.
+documents and 2.5 GB, some six times more text than the budget. Micro has the same ratio
+(about 84,000 documents and 630 MB) and the same time for each page, so a curator that
+fits there fits at standard.
 
 Build something that reads the data in front of it. A curator tuned to one round's
 documents will do badly on the next.
@@ -294,7 +296,7 @@ Every run gets the same machine, whatever the volunteer has:
 | Memory | 12 GB |
 | GPU | one, NVIDIA (CUDA) or AMD (ROCm), with 8 GB of its memory |
 | Scratch | `STET_SCRATCH`, 8 GB, held in memory: what you write there comes out of the 12 GB |
-| Time | `time_limit` in `task.json`: 1200 seconds at standard, the official scale (600 seconds at micro), wall-clock |
+| Time | `time_limit` in `task.json`: 1200 seconds at standard, the official scale (300 seconds at micro), wall-clock |
 | Network | none |
 
 - **Write for the slowest machine.** Machines that run curators are at least as fast as a

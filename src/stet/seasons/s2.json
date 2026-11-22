@@ -149,7 +149,7 @@
       "edit_seconds": 120
     },
     "micro": {
-      "corpus_units": 4,
+      "corpus_units": 2,
       "train_tokens": 40000000,
       "n_layer": 6,
       "n_head": 6,
@@ -157,7 +157,7 @@
       "ctx": 512,
       "batch_size": 16,
       "lr": 0.0015,
-      "edit_seconds": 600
+      "edit_seconds": 300
     },
     "standard": {
       "corpus_units": 8,

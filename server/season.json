@@ -22,7 +22,7 @@
   "key_bytes": 64,
   "min_letters": 38
  },
- "digest": "9d359f89f3ff7f57c1804f3954686a268e00c504e0110c14a82b5c982a18e15e",
+ "digest": "74b6a9192d79c432c3e409a7be7684ce34f79e016f78cdcfbf80edc0c29d2e06",
  "draw_grid_seconds": 600,
  "environment": {
   "also": {
@@ -404,10 +404,10 @@
   },
   "micro": {
    "batch_size": 16,
-   "corpus_units": 4,
+   "corpus_units": 2,
    "ctx": 512,
    "d_model": 384,
-   "edit_seconds": 600,
+   "edit_seconds": 300,
    "lr": 0.0015,
    "n_head": 6,
    "n_layer": 6,

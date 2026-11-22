@@ -715,6 +715,18 @@ between **standard and large** alone, at the same 0.55, with one large training 
 curator; micro against standard is reported beside it and decides nothing. (9.8 gives every
 size the same ratio from here on, so that this cannot happen again.)
 
+**The reason given was then checked, and it is only part of the truth.** Every script was
+trained four more times at micro on a pool of 4 files, six times the budget as at standard,
+and sat the same exam. The kinds of writing do agree with standard better on the matched
+pool (discussion 0.66 to 0.77, news 0.60 to 0.83, reference 0.60 to 0.71, technical 0.54 to
+0.71, social 0.89 to 1.00), and the micro score is steadier (0.054 between trainings to
+0.035). But the score's order at micro still agrees with standard's at only 0.43, and agent
+sessions and logic still run the other way (−0.37 and −0.26): `tidy` is last at micro and
+in the middle at standard whichever pool it is given. Most of the disagreement is the micro
+student's own, which is what 7.5 found in season 1, and not the pool's. The amended test
+stands, for that reason and not the one first given: the season's claim is that the order
+at standard holds one size up, and micro is not a size the season scores at.
+
 A part that passes both is in the score. A part that fails either is off the exam. The
 thresholds are the ones 9.3 used on the pilot. The few-shot forms, science abstracts, each
 kind of writing and each cold family face the same two tests; nothing is in for its name.
@@ -762,3 +774,30 @@ if their order differs between the two (a rank correlation below 0.8): either wa
 pool was hiding something that the real regime would show. If neither, the pool stays at 16
 files, since four times the download would buy nothing. Every size keeps the same ratio of
 pool to budget, so that what is compared across sizes is the same game.
+
+**The result: the pool stays at 16 files.** The season's score, in bits per byte gained on
+the unedited corpus (16 files: the mean of three trainings, which differ by 0.005; 64 files:
+one training):
+
+| | mimic | fineweb2 | scribe | tidy | english | dclm | spread |
+|---|---|---|---|---|---|---|---|
+| 16 files | +0.117 | +0.057 | +0.021 | +0.011 | −0.239 | −0.299 | 0.171 |
+| 64 files | +0.121 | +0.060 | −0.040 | −0.050 | −0.234 | −0.177 | 0.135 |
+
+The spread is a fifth smaller on the larger pool, where the rule asked for a quarter larger.
+The order is the same but for the last two changing places, a rank correlation of 0.94,
+where the rule asked for one below 0.8. Neither holds.
+
+Single scores did move, by far more than the noise. `tidy` keeps the pages with the most
+prose in them; with four times the pages to choose from it kept only the most prose-like,
+and its student fell 0.06, two thirds of that on conversation, news and reference writing.
+`dclm` rose 0.12. A larger pool is a different game for some curators. It is not one that
+tells them apart better or puts them in another order, and it would cost every machine
+four times the download. So it is not taken.
+
+Micro's pool was 8 files for 40 million tokens, twelve times its budget. It becomes 4, six
+times like the others, with 300 seconds to edit it in: the same time for each page as at
+standard and large. Measured on it (seven scripts, four trainings each), the micro score is
+steadier, 0.035 between trainings where it was 0.054, and its spread over noise is 4.1
+where it was 2.9; every curator finished inside the 300 seconds. (Nano is a smoke test of
+two files, the least a round can be, and is compared with nothing.)

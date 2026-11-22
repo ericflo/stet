@@ -110,6 +110,7 @@ The newest published Common Crawl crawl at the time of the draw, as full-page te
 language, with menus, cookie banners, footers, shop listings, spam and duplicates
 alongside real prose. A round's corpus is a seeded sample of it: at the official scale
 about 335,000 pages and 2.5 GB, some six times more text than the student is trained on.
+Micro and large rounds have the same ratio, and the same time for each page.
 Your curator has to choose.
 
 Nothing is removed from the corpus for the exam's sake: the exam did not exist yet. Fresh
@@ -211,7 +212,7 @@ grading it.
 | | Layers × width | Context | Training budget | Edit limit |
 |---|---|---|---|---|
 | nano | 4 × 192 | 256 | 8M tokens | 120 s |
-| micro | 6 × 384 | 512 | 40M tokens | 600 s |
+| micro | 6 × 384 | 512 | 40M tokens | 300 s |
 | **standard (official)** | 8 × 512 | 512 | 160M tokens | 1,200 s |
 | large (finals) | 10 × 640 | 512 | 640M tokens | 4,800 s |
 
