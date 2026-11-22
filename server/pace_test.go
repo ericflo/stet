@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-// rented is a machine the organisers rent, as stet-runpod's are: one of theirs, established.
+// rented is a machine the organisers rent, as stet-cloud's are: one of theirs, established.
 func (w *world) rented(anchor *actor, handle string) *actor {
 	w.t.Helper()
 	pub, priv := newKey()

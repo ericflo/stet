@@ -78,7 +78,7 @@ reward, info = env.step(edit_script)  # the gain, in bits per byte
 | `src/stet/` | The harness and CLI (Python); `src/stet/exam/` makes and scores the exam |
 | `server/` | The API and website (Go) |
 | `examples/` | Reference curators, entered by the organisers: `identity`, `english`, `tidy`, and `dclm`, `fineweb-edu`, `heuristic`, `fineweb2` (published recipes, rebuilt). Patterns, not entered: `reader` (a small language model reads the pages); `agent` (an agent harness and a model served in the sandbox) |
-| `runpod/` | `stet-runpod`, for the organisers: rents GPUs from RunPod to grade while volunteers are few (Go, built on its own) |
+| `cloud/` | `stet-cloud`, for the organisers: rents GPUs from Vast.ai, RunPod, Lium, Clore.ai and Salad to run curators and grade while volunteers are few (Go, built on its own) |
 | `docs/` | [Rules](docs/RULES.md), [design](docs/DESIGN.md), [verifying](docs/VERIFYING.md), [experiments](docs/EXPERIMENTS.md), [API](docs/API.md), [FAQ](docs/FAQ.md), [operating](docs/OPERATING.md) |
 
 ## Develop

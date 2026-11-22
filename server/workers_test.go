@@ -200,7 +200,7 @@ func TestOnlyARentedMachineRunsCuratorsInTheContainerSandbox(t *testing.T) {
 	}
 }
 
-// vouch has an organiser vouch for a rented machine's key, as stet-runpod does.
+// vouch has an organiser vouch for a rented machine's key, as stet-cloud does.
 func (w *world) vouch(by *actor, worker ed25519.PublicKey) int {
 	w.t.Helper()
 	key, at := hex.EncodeToString(worker), now()
@@ -303,7 +303,7 @@ func TestAnOrganiserVouchesForARentedMachineWithoutAChangeToTheServer(t *testing
 }
 
 // A rented machine the organisers end a moment after it took a job holds nothing from then on:
-// stet-runpod tells the server it is gone, and the job is handed back as if the machine had
+// stet-cloud tells the server it is gone, and the job is handed back as if the machine had
 // handed it back itself, for another to be given. Only the organisers say so, and only of a
 // machine they vouch for.
 func TestTheJobsOfAMachineTheOrganisersEndedAreHandedBack(t *testing.T) {

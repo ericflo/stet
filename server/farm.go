@@ -112,7 +112,7 @@ func (t *FarmTask) open(at int64) bool {
 	return t.Done == nil && t.Tries < farmTries && (t.Holder == 0 || t.Until <= at)
 }
 
-// farmWaiting counts the tasks a machine could be handed now: for stet-runpod, which rents
+// farmWaiting counts the tasks a machine could be handed now: for stet-cloud, which rents
 // for them when there is nothing official to do.
 func farmWaiting(s *State, at int64) (waiting, underWay, long int) {
 	for _, b := range s.Farm {

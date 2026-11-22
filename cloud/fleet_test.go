@@ -20,7 +20,7 @@ import (
 	"time"
 )
 
-// fakeRunPod is RunPod as far as stet-runpod can tell: a catalog, and pods made and ended.
+// fakeRunPod is RunPod as far as stet-cloud can tell: a catalog, and pods made and ended.
 type fakeRunPod struct {
 	mu      sync.Mutex
 	pods    map[string]*Pod

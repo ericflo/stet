@@ -48,7 +48,7 @@ func TestTheOrganisersStudentsAreTrainedByTheirMachines(t *testing.T) {
 	var work Work
 	anchor.do("GET", "/api/v1/admin/work", nil, &work)
 	if work.FarmWaiting != 2 {
-		t.Fatalf("stet-runpod is told of %d students waiting, not 2", work.FarmWaiting)
+		t.Fatalf("stet-cloud is told of %d students waiting, not 2", work.FarmWaiting)
 	}
 
 	type claimed struct {
@@ -175,7 +175,7 @@ func TestTheOrganisersStudentsAreTrainedByTheirMachines(t *testing.T) {
 	if code := anchor.do("POST", "/api/v1/farm/claim", map[string]any{"max_minutes": 600}, &long); code != 200 || long.Task == nil || long.Task.Batch != bigMade.Batch {
 		t.Fatalf("a machine set aside for long students: HTTP %d %+v", code, long.Task)
 	}
-	// stet-runpod is told which machines train a long one, to count them as rented for those.
+	// stet-cloud is told which machines train a long one, to count them as rented for those.
 	anchor.do("GET", "/api/v1/admin/work", nil, &work)
 	for _, m := range work.Machines {
 		if m.Handle == "anchor-one" && (m.Busy != "farm" || !m.Long) || m.Handle == "rented-one" && m.Long {
