@@ -989,6 +989,8 @@ def _finals_plan(args, season, work: Path, key) -> None:
         own = {}
         for rid in args.rounds:
             rnd, d = settled_round(season, rid)
+            if rnd.id in own:  # however it is spelt: two of one round would pass for the finals' two, and be one
+                raise Stop(f"{rnd.id} is named twice: the finals' rounds are different rounds")
             own[rnd.id] = own_scale(season, d).name
             if plan["rehearsal"]:
                 continue

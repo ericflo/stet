@@ -553,6 +553,10 @@ def test_the_finals_from_the_board_to_the_table(world, capsys):
     with pytest.raises(SystemExit):
         run(world, "finals", "plan", "--rounds", r1)
     assert "the finals are 2 rounds" in capsys.readouterr().err
+    for again in (r1, "s2-o21"):  # one round named twice is not two rounds, however it is spelt
+        with pytest.raises(SystemExit):
+            run(world, "finals", "plan", "--rounds", r1, again)
+        assert f"{r1} is named twice" in capsys.readouterr().err and read(fdir / "plan.json")["rounds"] == []
     assert run(world, "finals", "plan", "--rounds", r1, r2) == 0
     assert read(fdir / "plan.json")["rounds"] == [r1, r2] and read(fdir / "plan.json")["own"] == {r1: "standard", r2: "standard"}
 
