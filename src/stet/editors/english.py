@@ -24,7 +24,8 @@ def looks_english(text: str) -> bool:
 
 
 def edit(task: Task):
-    return [i for i, text in task.corpus if looks_english(text)]
+    # task.map asks every page on every core the curator is given, and answers in page order.
+    return [i for i, ok in task.map(lambda i, text: looks_english(text)) if ok]
 
 
 def main():

@@ -6,8 +6,8 @@
   4. Rank what is left by how much of the page was writing.
   5. Keep the best pages until the training budget is filled once, and shuffle them.
 
-No model, no GPU, a few seconds per shard. It only takes whole lines out of pages, which is
-never ink.
+No model, no GPU, a few seconds per shard, on every core it is given (task.map). It only
+takes whole lines out of pages, which is never ink.
 
 The exam is written in every language of the crawl, each counting by its share of it. So
 nothing here asks what language a page is in: a rule that only English can pass throws away
@@ -81,31 +81,43 @@ def score(size: int, kept: int) -> float:
 
 def edit(task: Task):
     corpus = task.corpus
+
+    def judge(i, text):
+        """In a worker: how many bytes of this page are worth keeping, and a key that is the
+        same for every copy of it. None for a page that is not writing, or too little of it."""
+        if not looks_written(text):
+            return None
+        _, kept = prose_ranges(corpus.raw(i), spaceless(text))
+        if kept < 400:
+            return None
+        return kept, hashlib.blake2b(text[:2000].encode("utf-8", "replace"), digest_size=8).digest()
+
+    def cut(i, text):
+        """In a worker: the lines of this page worth keeping."""
+        return prose_ranges(corpus.raw(i), spaceless(text))[0]
+
     seen: set[bytes] = set()
     scored = []
-    for i, text in corpus:
-        if not looks_written(text):
+    for i, found in task.map(judge):  # in page order: of two copies, the first is the one kept
+        if found is None or found[1] in seen:
             continue
-        ranges, kept = prose_ranges(corpus.raw(i), spaceless(text))
-        if kept < 400:
-            continue
-        key = hashlib.blake2b(text[:2000].encode("utf-8", "replace"), digest_size=8).digest()
-        if key in seen:
-            continue
+        kept, key = found
         seen.add(key)
-        scored.append((score(corpus.size(i), kept), i, ranges, kept))
+        scored.append((score(corpus.size(i), kept), i, kept))
 
     scored.sort(key=lambda t: (-t[0], t[1]))
     budget_bytes = task.train_tokens * BYTES_PER_TOKEN
     chosen = []
     used = 0
-    for _, i, ranges, kept in scored:
+    for _, i, kept in scored:
         if used >= budget_bytes:
             break
-        chosen.append({"d": i, "k": ranges})
+        chosen.append(i)
         used += kept
     random.Random(0).shuffle(chosen)
-    return chosen
+    # Two numbers were kept for every page, and the lines only now, for the pages chosen: a
+    # round's corpus is a million pages, and the lines of all of them are gigabytes.
+    return [{"d": i, "k": ranges} for i, ranges in task.map(cut, docs=chosen)]
 
 
 def main():
