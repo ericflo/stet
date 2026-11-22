@@ -460,9 +460,10 @@ less.
 
 Season 1 fixed the first exam's two faults: nobody can know the exam, and it is not six kinds of
 English prose. It paid for that in steadiness and in compute. Four separate assessments of the
-competition were written from first principles at the end of the season, and every measurement
-below was made on the scale pilot of section 6 (nine curators, three student sizes, repeated
-trainings, every item's score kept), so none of it cost a training.
+competition were written from first principles at the end of the season. The measurements of
+9.1 to 9.5 were made on the scale pilot of section 6 (nine curators, three student sizes,
+repeated trainings, every item's score kept), so none of them cost a training. 9.7 and 9.8
+are a measurement made for the purpose before the season began: 91 trainings on rented GPUs.
 
 The goal they were held to: the order this competition gives curators should be the order
 they would have at real scale, where a selection of 500B tokens is asked to beat 40T raw ones,
@@ -522,23 +523,19 @@ that pass add something the writing does not. So season 2 keeps both.
 - **Two groups with fixed shares: writing three quarters, skills one quarter.** Inside a group
   every pillar counts the same, and a pillar missing from a round gives its share to its own
   group, never to the other.
-- **Writing:** reference, news, technical, conversation (discussion and social). All of it
-  written by people after every entry in the round was frozen. Science abstracts are new to
-  the exam and start on the watch list.
-- **Skills:** agents, reading, transformation, logic, grammar: the five generated families that
-  pass three tests on the pilot (spread over noise above 1.5, order carried to the large
-  student at 0.55 or better, and not at chance at the official size) and whose answers follow
-  from what the item itself shows.
-- **Knowledge passes the same tests narrowly and is watched all the same.** Its questions come
-  from a fixed, public list of facts, so a curator can go looking for the pages that state
-  them: that measures a curator's aim at the list, not its data. What a student knows of the
-  world is measured by the reference and news writing, which nobody can aim at.
-- **Watched:** every other family and every kind of writing the season does not name. They are
-  sat in every round, scored and published part by part, and count for nothing. This is where
-  7.1's statement of value now lives. A watched part earns a place in the next rules version
-  when, over at least twenty settled rounds, its spread over noise is above 1.5 and its order
-  agrees with the counted score's at 0.5 or better; the few-shot forms of the nine families
-  (several worked examples, then the question) start the season there.
+- **Writing:** reference, news, technical, conversation (discussion and social posts). All
+  of it written by people in the day before the draw.
+- **Skills:** agents, reading, transformation, logic, grammar, numbers, programs and
+  knowledge. Numbers is arithmetic, units, word problems and algebra; programs is an
+  algorithm's output and structured data. Both are asked after a few worked examples, the
+  only form in which a student this small can be told apart on them.
+- **Every part earned its place, and nothing else is on the exam.** The pilot chose the two
+  tests: curators spread on a part by at least 1.5 times its noise at the official size, and
+  the order it puts them in holds at the large student at 0.55 or better. 9.7 put every
+  part to them on a measurement made for the purpose, with every kind of writing in it and
+  every generated family asked both cold and after examples. What failed is not sat and
+  its generator is deleted. A draft of the season kept such parts on a *watch list*, sat
+  in every round and counting for nothing; 9.7 says why that went.
 - **An item's bits are never put over fewer than 16 bytes**, and an answer or passage longer
   than the window is scored whole, a window at a time.
 - **No share of the score rests on one or two items.** A language or a format with fewer than
@@ -554,24 +551,26 @@ what 7.2 always said the target was. Season 1's skills were quietly voting the o
 
 Two cautions on the evidence. The pilot's exam held Wikipedia's writing only: new articles,
 additions to old ones, and talk pages. News, technical writing and social posts were not in
-it, and are taken to behave as the same kind of thing: long passages of human text, which is
-where the steadiness comes from. Every item's score is public once a round settles, so each
-part's spread over noise can be worked out as the season runs, and that is where the
-assumption is checked. And with eight curators, most of them English-only filters that the
-writing score nearly ties, rank agreement cannot tell a writing share of 67% from one of 90%.
-The share is a declared value, like 7.1's; what the pilot settles is that the floor and the
-watch list cost no agreement and remove three quarters of the noise.
+it, and were taken to behave as the same kind of thing: long passages of human text, which is
+where the steadiness comes from. 9.7 then measured them, and they do. And with eight
+curators, most of them English-only filters that the writing score nearly ties, rank
+agreement cannot tell a writing share of 67% from one of 90%. The share is a declared value,
+like 7.1's; what the measurements settle is that the floor, and leaving out the parts that
+fail, cost no agreement and remove three quarters of the noise.
 
 ### 9.4 Contamination, closed further
 
 - **The overlap check counted the letters a to z.** A passage in Russian, Japanese, Chinese,
   Arabic or Hindi gave no keys, so nothing in those languages was ever dropped for being in the
   corpus already. Keys now count letters in every script and sentences end at 。！？ too.
-- **Ink falls tenfold**, to one ten-thousandth of the budget (16,000 tokens at the official
-  size). Ink is the only place a curator's own words can enter the training set, and nothing a
-  curator legitimately does needs more.
-- **Deleting lines is never ink.** Whole lines of one page, kept in the page's order, are
-  copies however short. Cleaning a page was the most useful thing ink was being spent on.
+- **A script is copies of the crawl and no more.** Season 1 let a script hold a little text
+  of its own, called ink: 160,000 tokens at the official size. A draft of season 2 cut that
+  tenfold; 9.7 then measured what 16,000 tokens buy when they are aimed at the exam, and
+  ink went to nothing. A copy is at least 64 bytes long, so that text cannot be spelled out
+  of scraps.
+- **Deleting lines is always allowed.** Whole lines of one page, kept in the page's order,
+  are copies however short, as long as 64 bytes of the page are kept. Cleaning a page was
+  the most useful thing ink was being spent on.
 - **The agent family's answers follow from the session shown**, in a project drawn from the
   seed. Season 1's listings could be learned by heart.
 - **The exam's writing is harvested before the draw, and chosen by it.** Season 1 waited two
@@ -587,18 +586,15 @@ watch list cost no agreement and remove three quarters of the noise.
   published. A first draft of the season made every entry wait 26 hours so that none could;
   it was taken out, because the wait cost every entrant a day and bought almost nothing. A
   curator has no network when it runs. The pool it chooses from was crawled before any of the
-  writing existed, and what the pool shares with the exam is dropped from the exam. The one
-  way text gets from an author's hands into the training set is ink, and there are 16,000
-  tokens of it.
-- **A curator cannot write the exam into its script.** The grader holds the ink and the exam:
-  a script whose ink, with 256 bytes either side, has the opening of a sentence of a fresh
-  item is refused. With ink at 16,000 tokens this is a check on a few pages of text, and it
-  is what the freeze was for.
-- **Three more keyless sources.** Forums that run Discourse (31 of them, about 100 replies an
-  hour), the kernel's mailing lists (first versions of patches: code written by people this
-  hour), and Crossref (abstracts of works registered this hour, about 40). Stack Exchange was
-  tried and left out: its whole network is asked about four questions an hour now, and without
-  a key it allows 300 requests a day.
+  writing existed, and what the pool shares with the exam is dropped from the exam. And a
+  script holds no text of its own, so there is no way for anything an author has read to
+  get from the author's hands into the training set.
+- **Two more keyless sources.** Forums that run Discourse (31 of them, about 100 replies an
+  hour) and the kernel's mailing lists (first versions of patches: code written by people this
+  hour). Crossref (abstracts of works registered this hour, about 40) was added and taken
+  out again when science abstracts failed 9.7's test. Stack Exchange was tried and left out:
+  its whole network is asked about four questions an hour now, and without a key it allows
+  300 requests a day.
 
 ### 9.5 The board
 
@@ -644,12 +640,13 @@ against, each on principle:
   reading the markup of a fifteenth. The bandwidth goes to a bigger pool, and deleting lines
   for nothing gives a curator most of what the markup would: it can cut a page's furniture.
 - **A track where a served model rewrites the corpus.** The score would then measure the
-  model that was served. Ink stays small, and a curator's own GPU may write within it.
+  model that was served. A script holds no text at all (9.7), so a curator's own model may
+  choose what the student reads and may write none of it.
 - **A different student.** The student is the measuring instrument; changing it with the exam
   would leave nothing to compare the two seasons by. Its ranking is checked at a larger size
   instead (the finals, and the audit of scale in between).
 
-Three more were put to a measurement, each with its rule written first:
+Four more were put to a measurement, each with its rule written first:
 
 - **The pool's size.** As many pages as a curator can read and a verifier can fetch inside the
   time box on the machines the fleet rents, measured, with a third to spare; and only if the
@@ -666,6 +663,8 @@ Three more were put to a measurement, each with its rule written first:
   jitter of its last steps, which is what an average removes; the trainer stays as it is.
 - **Which parts count.** A draft kept parts that were sat and did not count, to be promoted
   after twenty rounds. 9.7 replaces that with a measurement made before the season.
+- **Ink.** Whether 16,000 tokens of a curator's own text, aimed at the exam, buy it (9.7).
+  They do, and a script now holds none.
 
 ### 9.7 Every part is in the score or off the exam
 
@@ -676,14 +675,15 @@ every reader a line to understand, and "we will see" is a decision put off. Each
 measured before the season starts and is then in the score or off the exam, its generator
 deleted.
 
-**The measurement.** One practice round (`s2-p00000`), its corpus at the micro and the
-standard size. Seven curators that differ in kind: the unedited corpus, `tidy`, `english`,
+**The measurement.** One practice round (`s2-p00000`), its corpus at the micro, the
+standard and the large size. Seven curators that differ in kind: the unedited corpus, `tidy`, `english`,
 the two reference filters that run every round (`fineweb2`, `dclm`), and two red-team
 curators, `scribe` (tidy's selection, and the whole ink allowance spent on worked problems
 in the forms the exam's skills take) and `mimic` (no ink; the pages of the corpus that look
-most like the exam). Each is trained four times at micro and three times at standard, on a
-rented RTX 4090; two trainings of one script differ as two machines do (the initial weights
-moved by one part in a million). Every student sits one candidate exam: every generated
+most like the exam). Each is trained four times at micro, three times at standard and once
+at large, on rented GPUs (RTX 4090s; five of the large students on an RTX 5090); two
+trainings of one script differ as two machines do (the initial weights moved by one part
+in a million). Every student sits one candidate exam: every generated
 family of generator version 9, cold and with worked examples first, in eleven languages,
 and about 1,500 passages of writing of every kind the harvest takes (science abstracts
 among them) from three harvested hours, by the corpus's language shares.
@@ -719,8 +719,8 @@ size the same ratio from here on, so that this cannot happen again.)
 trained four more times at micro on a pool of 4 files, six times the budget as at standard,
 and sat the same exam. The kinds of writing do agree with standard better on the matched
 pool (discussion 0.66 to 0.77, news 0.60 to 0.83, reference 0.60 to 0.71, technical 0.54 to
-0.71, social 0.89 to 1.00), and the micro score is steadier (0.054 between trainings to
-0.035). But the score's order at micro still agrees with standard's at only 0.43, and agent
+0.71, social 0.89 to 1.00), and the micro score is steadier (0.045 between trainings to
+0.030). But the score's order at micro still agrees with standard's at only 0.43, and agent
 sessions and logic still run the other way (−0.37 and −0.26): `tidy` is last at micro and
 in the middle at standard whichever pool it is given. Most of the disagreement is the micro
 student's own, which is what 7.5 found in season 1, and not the pool's. The amended test
@@ -750,6 +750,95 @@ their own.
 `mimic` has no rule of its own. Choosing the pages that most resemble what the exam asks
 is curation, and if it wins, it won by selection.
 
+**The result.** At the standard size, with the order at standard against the order at large
+(six curators, rank correlation):
+
+| Part | Items | Spread over noise | Carries to large | |
+|---|---|---|---|---|
+| News | 283 | 93.4 | 0.83 | in |
+| Reference | 294 | 61.2 | 0.77 | in |
+| Discussion | 294 | 46.6 | 0.77 | in |
+| Social posts | 233 | 38.1 | 1.00 | in |
+| Technical writing and code | 273 | 24.5 | 1.00 | in |
+| Science abstracts | 113 | 19.4 | 0.49 | **out**: does not carry |
+| Logic | 288 | 12.1 | 0.71 | in |
+| Agent sessions | 304 | 5.7 | 1.00 | in |
+| Knowledge | 200 | 5.7 | 0.89 | in |
+| Reading | 384 | 5.4 | 0.94 | in |
+| Grammar | 198 | 4.9 | 0.89 | in |
+| Transformation | 204 | 2.1 | 0.83 | in |
+| Arithmetic, after worked examples | 192 | 3.8 | 0.77 | in |
+| Arithmetic, cold | 192 | 1.6 | 0.03 | out |
+| Arithmetic, as a pair | 192 | 1.4 | 0.09 | out |
+| An algorithm's output, after examples | 56 | 3.8 | 0.94 | in |
+| An algorithm's output, cold | 56 | 3.4 | 0.77 | passes; the other form counts |
+| Word problems, after examples | 48 | 2.6 | 0.94 | in |
+| Word problems, cold | 48 | 1.4 | 0.26 | out |
+| Units, after examples | 56 | 2.3 | 0.83 | in |
+| Units, cold | 56 | 0.8 | 0.94 | out |
+| Units, as a pair | 44 | 1.0 | −0.09 | out |
+| Algebra, after examples | 40 | 1.6 | 0.66 | in |
+| Algebra, cold | 40 | 0.8 | −0.09 | out |
+| Structured data, after examples | 72 | 1.6 | 0.60 | in |
+| Structured data, cold | 72 | 1.6 | −0.09 | out |
+| Running a program, after examples | 84 | 2.4 | 0.54 | **out**: 0.54 is not 0.55 |
+| Running a program, cold | 84 | 0.5 | 0.31 | out |
+| Several steps of arithmetic, cold | 144 | 1.2 | 0.66 | out |
+| Several steps of arithmetic, after examples | 144 | 0.4 | −0.71 | out |
+
+So the score is: **writing**, four pillars (reference, news, technical, and conversation,
+which is discussion and social posts); **skills**, eight (agents, reading, transformation,
+logic, grammar; numbers, which is arithmetic, units, word problems and algebra after worked
+examples; programs, which is an algorithm's output and structured data after worked
+examples; and knowledge). Science abstracts, running a program, several steps of
+arithmetic, every pair form and every cold form of a family that also has examples are off
+the exam and their generators deleted; Crossref is not harvested.
+
+What the measurement says about the parts, beyond in and out:
+
+- **Asked cold, a student this small is too near chance to tell curators apart.** Eight
+  families were asked both ways. With worked examples first, six pass; cold, one does.
+- **Writing is where the signal is.** The five kinds of writing spread curators by 24 to 93
+  times their noise; the best skill by 12. The pilot's assumption that news, technical
+  writing and posts behave as Wikipedia's writing does (9.3) holds: they are the steadiest
+  parts on the exam.
+- **Science abstracts are steady and say little.** Their noise is the smallest of any kind
+  of writing and so is their spread (0.03 bits per byte, where the other kinds have 0.14 to
+  0.29): every curator's student reads them about as well as the next one's, and the small
+  differences do not hold at the large size.
+- **Knowledge counts.** A draft kept it out because its questions come from a public list,
+  which a curator could aim at. The list is 152,405 facts and an exam asks 200 of them; a
+  script holds no text of its own, so the only way to aim at them is to keep the pages
+  that state such facts, in ten languages. That is curation, and the part passes both
+  tests with room.
+
+**The score these parts make**, on the same trainings: 0.0041 bits per byte between two
+trainings of one script at standard, a spread between the six curators of 0.165, forty
+times the noise (the pilot's mix: 0.0052 and 21.7). The six curators stand in the same
+order at standard and at large; with the unedited corpus counted as a seventh, the two
+orders agree at 0.89.
+
+| | mimic | fineweb2 | scribe | tidy | unedited | english | dclm |
+|---|---|---|---|---|---|---|---|
+| standard | +0.108 | +0.053 | +0.012 | +0.006 | 0 | −0.233 | −0.295 |
+| large | +0.079 | +0.044 | −0.013 | −0.030 | 0 | −0.276 | −0.323 |
+
+**Ink goes to nothing, and part of that is a judgement.** `scribe` spent its 16,000 tokens
+on the five skills the draft counted, a fifth on each. On the score as it stood when the
+standard trainings finished it beat `tidy` by 0.0102 bits per byte, 2.6 standard errors:
+by the rule, ink goes. Where the ink worked it worked strongly: 0.10 bits per byte on
+agent sessions (5.6 standard errors) and 0.10 on transformation (3.2); on reading, logic
+and grammar it bought nothing. Then the part list changed. The final score has eight
+skill pillars where the draft had five, three of them forms `scribe` never wrote, so each
+pillar it aimed at weighs less; on that score the same students differ by 0.0061, which
+is 1.8 standard errors and short of two. Read against the final score, the letter of the
+rule would leave ink at 16,000 tokens. It goes all the same, for three reasons. The test
+asked whether text aimed at the exam buys the parts it is aimed at, and it does. Nothing a
+curator does for the data needs ink once deleting lines is free: 16,000 tokens are a
+ten-thousandth of what the student reads, and can matter only where they are aimed. And
+with no text of its own in a script, nothing an author knows can be carried into the
+training set, which is what lets an entry run in the next round drawn with no wait.
+
 ### 9.8 The pool
 
 A curator at real scale keeps about one page in eighty. A standard round's pool was 16 files
@@ -776,13 +865,16 @@ files, since four times the download would buy nothing. Every size keeps the sam
 pool to budget, so that what is compared across sizes is the same game.
 
 **The result: the pool stays at 16 files.** The season's score, in bits per byte gained on
-the unedited corpus (16 files: the mean of three trainings, which differ by 0.005; 64 files:
+the unedited corpus (16 files: the mean of three trainings, which differ by 0.004; 64 files:
 one training):
 
 | | mimic | fineweb2 | scribe | tidy | english | dclm | spread |
 |---|---|---|---|---|---|---|---|
-| 16 files | +0.117 | +0.057 | +0.021 | +0.011 | −0.239 | −0.299 | 0.171 |
-| 64 files | +0.121 | +0.060 | −0.040 | −0.050 | −0.234 | −0.177 | 0.135 |
+| 16 files | +0.108 | +0.053 | +0.012 | +0.006 | −0.233 | −0.295 | 0.165 |
+| 64 files | +0.110 | +0.058 | −0.043 | −0.049 | −0.225 | −0.178 | 0.130 |
+
+(On the score 9.7 ended with. The rule was applied when the standard trainings finished,
+on the score as it then stood: 0.171 and 0.135, and the same two answers.)
 
 The spread is a fifth smaller on the larger pool, where the rule asked for a quarter larger.
 The order is the same but for the last two changing places, a rank correlation of 0.94,
@@ -798,6 +890,6 @@ four times the download. So it is not taken.
 Micro's pool was 8 files for 40 million tokens, twelve times its budget. It becomes 4, six
 times like the others, with 300 seconds to edit it in: the same time for each page as at
 standard and large. Measured on it (seven scripts, four trainings each), the micro score is
-steadier, 0.035 between trainings where it was 0.054, and its spread over noise is 4.1
-where it was 2.9; every curator finished inside the 300 seconds. (Nano is a smoke test of
+steadier, 0.030 between trainings where it was 0.045, and its spread over noise is 4.3
+where it was 3.1; every curator finished inside the 300 seconds. (Nano is a smoke test of
 two files, the least a round can be, and is compared with nothing.)
