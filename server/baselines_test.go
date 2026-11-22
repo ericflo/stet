@@ -18,7 +18,6 @@ func toGrade(t *testing.T, n int) (*world, *actor, int) {
 	pub, priv := newKey()
 	w := newWorld(t, pub)
 	anchor := w.join("anchor-one", priv)
-	w.app.cfg.MaxNewPerRound = n
 	for i := 0; i < n; i++ {
 		name := fmt.Sprintf("entry-%d", i)
 		w.submit(w.join("owner-"+name, nil), name, fmt.Sprintf("print(%d)", i))

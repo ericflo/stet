@@ -334,8 +334,7 @@ func (a *App) resting(b *Board, idx int) map[string]bool {
 
 // selectEntrants decides who runs in round idx: the ladder (so that the best editors always
 // share rounds and can be compared head to head) less the reference editors whose turn it
-// is not (resting), editors still qualifying, and new entries, with people who have graded
-// for others going first.
+// is not (resting), editors still qualifying, and every new entry waiting.
 func (a *App) selectEntrants(s *State, cutoff int64, idx int) []entrant {
 	seen := map[string]bool{}
 	var out []entrant
@@ -367,38 +366,14 @@ func (a *App) selectEntrants(s *State, cutoff int64, idx int) []entrant {
 	for _, e := range qualifying {
 		add(e.ID, "qualifying")
 	}
-	// One person may have several entries waiting. Each person's first goes before anyone's
-	// second, so that nobody fills a round alone while others wait; an entry of theirs that
-	// is already qualifying counts as a turn taken.
+	// Every curator waiting at the draw enters it, in the order they were submitted. A round
+	// turns nobody away: what one person may have waiting or qualifying at once is settled
+	// when an entry is submitted (EntriesInPlay), and rounds never overlap, so a great many
+	// entries make a long round and not a lost one.
 	sort.Slice(queue, func(i, j int) bool {
 		return queue[i].CreatedAt < queue[j].CreatedAt || (queue[i].CreatedAt == queue[j].CreatedAt && queue[i].ID < queue[j].ID)
 	})
-	turns, turn := map[string]int{}, map[string]int{}
-	for _, e := range qualifying {
-		turns[person(e)]++
-	}
 	for _, e := range queue {
-		turn[e.ID] = turns[person(e)]
-		turns[person(e)]++
-	}
-	priority := recentWork(s) // runs and grades for others in the last two weeks
-	sort.SliceStable(queue, func(i, j int) bool {
-		if ti, tj := turn[queue[i].ID], turn[queue[j].ID]; ti != tj {
-			return ti < tj
-		}
-		pi, pj := priority[queue[i].AccountID], priority[queue[j].AccountID]
-		if pi != pj {
-			return pi > pj
-		}
-		if queue[i].CreatedAt != queue[j].CreatedAt {
-			return queue[i].CreatedAt < queue[j].CreatedAt
-		}
-		return queue[i].ID < queue[j].ID
-	})
-	for i, e := range queue {
-		if i >= a.cfg.MaxNewPerRound {
-			break
-		}
 		add(e.ID, "new")
 	}
 	if len(out) == 0 {
@@ -424,7 +399,8 @@ type expectedRow struct {
 }
 
 // expected is what the draw of a scheduled round would do if it were made now: who it would
-// enter, and which queued curators it would leave for a later round. It is not a promise:
+// enter, and which queued curators it would leave for the next round (those submitted in the
+// last seconds before the draw, after its entries close). It is not a promise:
 // an entry submitted, replaced or withdrawn before the draw changes it. Nothing about a
 // curator that has never been drawn is shown but its name and its owner.
 func (a *App) expected(s *State, rd *Round) (in, later []expectedRow) {

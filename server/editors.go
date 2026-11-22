@@ -70,7 +70,6 @@ type Submission struct {
 	Replaced string
 	InPlay   int // how many entries this person now has waiting or qualifying
 	Round    *Round
-	Message  string
 }
 
 // mayEnter says whether an account may submit, and if not, what it should do about it.
@@ -214,15 +213,6 @@ func (a *App) submit(ctx context.Context, acctID int64, blob []byte) (*Submissio
 		tx.event("submit", map[string]any{"editor": id, "name": m.Name, "version": version, "owner": acct.Handle})
 		a.onDemand(tx) // somebody is waiting now: the reply should name the draw they will be in
 		sub.Editor, sub.Round = ed, s.roundWithStatus("scheduled")
-		ahead := 0
-		for _, e := range s.Editors {
-			if e.Status == "queued" && e.CreatedAt < ed.CreatedAt {
-				ahead++
-			}
-		}
-		if ahead >= a.cfg.MaxNewPerRound {
-			sub.Message = "The queue is longer than one round can take, so it may wait a round or two. Entries from people who grade for others go first: `stet verify`."
-		}
 		return nil
 	})
 	if err != nil {

@@ -1400,7 +1400,7 @@ func (s *Site) round(w http.ResponseWriter, r *http.Request) {
 	sc := a.season.Scales[rs.Scale]
 	d := map[string]any{"R": rs, "ID": rs.ID, "Entries": entries, "Top": topGain(entries), "Scale": sc, "Tolerance": a.tolerance(),
 		"RunsPerEntry": a.cfg.RunsPerEntry, "Prev": prev, "Next": next,
-		"Expected": expected, "Later": later, "MaxNew": a.cfg.MaxNewPerRound, "QualifyRounds": a.cfg.QualifyRounds, "Work": work,
+		"Expected": expected, "Later": later, "QualifyRounds": a.cfg.QualifyRounds, "Work": work,
 		"Scores": scores}
 	// Every run of the round's entries, and every grade of every script they wrote, whatever
 	// it said, is drawn entry by entry: who ran it, what each run wrote, who graded that.
@@ -1503,7 +1503,7 @@ func (s *Site) glossary(w http.ResponseWriter, r *http.Request) {
 	p := s.page(r, "Glossary", "glossary", map[string]any{
 		"Tolerance": a.tolerance(), "Margin": a.season.Record.Margin[a.cfg.Scale], "Rule": a.season.Record,
 		"QualifyRounds": a.cfg.QualifyRounds, "RatedRounds": a.cfg.RatedRounds, "LadderSize": a.cfg.LadderSize,
-		"EstablishAfter": a.cfg.EstablishAfter, "RunsPerEntry": a.cfg.RunsPerEntry, "MaxNew": a.cfg.MaxNewPerRound,
+		"EstablishAfter": a.cfg.EstablishAfter, "RunsPerEntry": a.cfg.RunsPerEntry,
 		"MuteAfter": muteAfterStrikes, "MuteDays": muteFor / 86400, "GithubDays": a.cfg.GithubMinAgeDays,
 	})
 	p.Desc = "Every word on the Stet website, in plain language: curator, round, gain, rating, worth, the record, runs, grades, verifiers, and what each label on a score means."

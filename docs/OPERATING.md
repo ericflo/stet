@@ -517,7 +517,7 @@ opened on the organisers' machine, as soon as `/api/v1/season` names it:
 ```sh
 stet upgrade && stet login --handle stet    # the new client, and the organisers' account made again
 systemctl --user restart stet-examine       # the examiner on the new client
-for d in fineweb2 dclm tidy identity english heuristic fineweb-edu mimic; do stet submit examples/$d --yes; sleep 2; done
+for d in fineweb2 dclm tidy identity english heuristic fineweb-edu mimic; do stet submit examples/$d --yes; done
 ```
 
 The loop is run in a checkout of the merged change: the curators in `examples/` are the new
@@ -526,11 +526,10 @@ for work with the organisers' key, so it rents nothing before the account is the
 round drawn with no machine to run its curators comes to nothing.
 
 Nothing after that is waited for or watched. The examiner harvests the newest settled hour
-first, so the first round has its writing ([above](#the-examiner)). Three new entries are
-admitted a round, in the order they were submitted, so the two references that run in every
-round go first. (Entries submitted in the same second are taken in the order of their ids,
-which is why the loop waits between them.) Everyone else makes their account again the same way, with their own
-handle, and an entrant links GitHub again (`stet login --gist <url>`).
+first, so the first round has its writing ([above](#the-examiner)). Every curator waiting at
+a draw enters it, so all the references run in the first round. Everyone else makes their
+account again the same way, with their own handle, and an entrant links GitHub again
+(`stet login --gist <url>`).
 
 The finished season's pages are archived from its database ([below](#archiving-a-season)),
 so that they stay readable under `/seasons/<id>/`. The new season does not touch that
@@ -592,7 +591,6 @@ Set in `apps/stet/deployment.yaml`. The ones that are rules:
 | Variable | Default | Meaning |
 |---|---|---|
 | `STET_LADDER_SIZE` | 8 | Curators that run in every round |
-| `STET_MAX_NEW_PER_ROUND` | 3 | New entries admitted per round |
 | `STET_ROUND_INTERVAL` | 3h | A round is drawn this often while a curator is waiting or on the board: the season's cadence, and what it costs a day |
 | `STET_ROUND_MIN_GAP` | 0 | When above 0, a round is also drawn early for a waiting entry, this long after the last draw at the soonest, while a runner is around. `0` keeps to the clock |
 | `STET_EARLY_WINDOW` | 10m | A machine the organisers rent is handed grades before an exam only once they, and the further ones it could take, would keep it busy until no sooner than this before the exam is due; it is not paid to wait. `0` hands them out as soon as there are any |

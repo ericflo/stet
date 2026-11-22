@@ -675,7 +675,7 @@ func (a *App) apiSubmit(w http.ResponseWriter, r *http.Request) {
 	var out map[string]any
 	a.st.view(func(s *State) {
 		ed := s.Editors[sub.Editor.ID]
-		out = map[string]any{"editor": a.editorJSON(s, ed, board), "url": a.cfg.BaseURL + "/editors/" + ed.ID[:12], "message": sub.Message}
+		out = map[string]any{"editor": a.editorJSON(s, ed, board), "url": a.cfg.BaseURL + "/editors/" + ed.ID[:12]}
 		if sub.Replaced != "" {
 			out["replaced"] = sub.Replaced
 		}
@@ -683,16 +683,10 @@ func (a *App) apiSubmit(w http.ResponseWriter, r *http.Request) {
 			out["in_play"], out["in_play_limit"] = sub.InPlay, a.cfg.EntriesInPlay
 		}
 		if next := s.roundWithStatus("scheduled"); next != nil {
-			// "It enters round X" only when it will: there is room for it, and it is in
-			// time. Otherwise X is the earliest it could be.
-			ahead := 0
-			for _, e := range s.Editors {
-				if e.Status == "queued" && e.ID != ed.ID && e.CreatedAt <= ed.CreatedAt {
-					ahead++
-				}
-			}
+			// "It enters round X" only when it will: it is in time for the draw. Otherwise X
+			// is the earliest it could be.
 			key := "earliest"
-			if ed.Status == "queued" && ahead < a.cfg.MaxNewPerRound && ed.CreatedAt <= next.DrawAt-commitMargin {
+			if ed.Status == "queued" && ed.CreatedAt <= next.DrawAt-commitMargin {
 				key = "enters"
 			}
 			out[key] = map[string]any{"round": roundID(a.season.ID, next.Idx), "draw_at": next.DrawAt}

@@ -263,8 +263,6 @@ the account is offered no work for a day.
 - A place on the [verifier board](/verifiers): grades that agreed, in total and in the
   last two weeks, curators run, your streak, and GPU hours given.
 - Your name on every entry you ran or graded.
-- **Your own entries go first.** When more curators are waiting than a round can take,
-  entries from people who worked for others in the last two weeks run before the rest.
 
 ## If something goes wrong
 

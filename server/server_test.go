@@ -235,7 +235,7 @@ func testConfig(t *testing.T, anchors ...ed25519.PublicKey) Config {
 	cfg := Config{
 		BaseURL: "http://site.test", APIURL: "http://api.test", RedirectHosts: map[string]bool{"bare.test": true},
 		DataDir: t.TempDir(), FilesDir: t.TempDir(), DocsDir: "../docs", AgentsFile: "../src/stet/templates/AGENTS.md", AnchorKeys: map[string]bool{}, Scale: "nano",
-		RoundInterval: 6 * time.Hour, MaxNewPerRound: 8, LadderSize: 10, QualifyRounds: 5, RatedRounds: 3, ReplicaWait: 45 * time.Minute,
+		RoundInterval: 6 * time.Hour, LadderSize: 10, QualifyRounds: 5, RatedRounds: 3, ReplicaWait: 45 * time.Minute,
 		Lease: 3 * time.Hour, FixedCrawl: &Crawl{Crawl: "CC-MAIN-TEST", PathsSHA256: strings.Repeat("ab", 32), NShards: 1000},
 		GithubMinAgeDays: 30, Dev: true, EstablishAfter: 5, RunsPerEntry: 2, ActiveWindow: 10 * time.Minute,
 	}
@@ -2913,14 +2913,30 @@ func TestTheSubmitReplySaysWhichRoundOnlyWhenItKnows(t *testing.T) {
 		}
 		return out
 	}
-	for i := 0; i < w.app.cfg.MaxNewPerRound; i++ {
+	// A round takes everyone waiting at its draw, however many they are.
+	for i := 0; i < 12; i++ {
 		if out := reply(fmt.Sprintf("early%d", i)); out["enters"] == nil || out["earliest"] != nil {
-			t.Fatalf("entry %d, with room in the round: %v", i, out)
+			t.Fatalf("entry %d, in time for the draw: %v", i, out)
 		}
 	}
-	// The round takes no more new entries than that: the next is told the earliest it could be.
+	var in int
+	w.app.st.view(func(s *State) {
+		rd := s.roundWithStatus("scheduled")
+		in = len(w.app.selectEntrants(s, rd.DrawAt, rd.Idx))
+	})
+	if in != 12 {
+		t.Fatalf("the draw would enter %d of the 12 curators waiting", in)
+	}
+	// One submitted in the last seconds before the draw, after its entries have closed, is
+	// told the earliest round it could be in and not that it is in this one.
+	w.app.st.update(context.Background(), func(tx *Tx) error {
+		rd := tx.s.roundWithStatus("scheduled")
+		rd.DrawAt = now() + commitMargin/2
+		tx.saveRound(rd)
+		return nil
+	})
 	if out := reply("late"); out["enters"] != nil || out["earliest"] == nil {
-		t.Fatalf("an entry past the round's room: %v", out)
+		t.Fatalf("an entry after the round's entries closed: %v", out)
 	}
 }
 
@@ -2930,7 +2946,7 @@ func TestTheSubmitReplySaysWhichRoundOnlyWhenItKnows(t *testing.T) {
 func TestARoundNotYetDrawnShowsWhoItWouldEnter(t *testing.T) {
 	pub, priv := newKey()
 	w := newWorld(t, pub)
-	w.app.cfg.MaxNewPerRound, w.app.cfg.QualifyRounds = 1, 3
+	w.app.cfg.QualifyRounds = 3
 	anchor := w.join("anchor-one", priv)
 	a, b, c := w.submit(anchor, "ref-a", "print(1)"), w.submit(anchor, "ref-b", "print(2)"), w.submit(anchor, "ref-c", "print(3)")
 	type row struct {
@@ -2966,13 +2982,29 @@ func TestARoundNotYetDrawnShowsWhoItWouldEnter(t *testing.T) {
 		return rid, page, api.Expected, api.Later
 	}
 
-	// Nothing drawn yet: one new entry a round, so the first waits for this draw and the
-	// others for later ones. Nobody's code is public.
+	// Nothing drawn yet. Every curator waiting enters the draw, however many: all three here.
 	_, page, in, later := look()
+	if len(in) != 3 || in[0].EditorID != a || in[1].EditorID != b || in[2].EditorID != c || in[0].Why != "new" || in[0].Public || len(later) != 0 {
+		t.Fatalf("expected %+v, later %+v", in, later)
+	}
+	if strings.Contains(page, "Queued for the next round") {
+		t.Error("the page says somebody waits for the next round, and nobody does")
+	}
+	// Two of them submitted in the last seconds before the draw, after its entries closed,
+	// wait for the next one. Nobody's code is public.
+	w.app.st.update(context.Background(), func(tx *Tx) error {
+		drawAt := tx.s.roundWithStatus("scheduled").DrawAt
+		for i, id := range []string{b, c} {
+			tx.s.Editors[id].CreatedAt = drawAt - 2 + int64(i)
+			tx.saveEditor(tx.s.Editors[id])
+		}
+		return nil
+	})
+	_, page, in, later = look()
 	if len(in) != 1 || in[0].EditorID != a || in[0].Why != "new" || in[0].Public || len(later) != 2 || later[0].EditorID != b || later[1].EditorID != c {
 		t.Fatalf("expected %+v, later %+v", in, later)
 	}
-	for _, want := range []string{"Expected to play", "Not entered yet", "new · queued", "Queued for a later round", ">ref-b<", ">ref-c<"} {
+	for _, want := range []string{"Expected to play", "Not entered yet", "new · queued", "Queued for the next round", ">ref-b<", ">ref-c<"} {
 		if !strings.Contains(page, want) {
 			t.Errorf("the page does not say %q", want)
 		}
@@ -2983,15 +3015,16 @@ func TestARoundNotYetDrawnShowsWhoItWouldEnter(t *testing.T) {
 		}
 	}
 
-	// After a draw, the curator it entered is qualifying in the next, and public.
+	// After a draw (the test's draw takes every curator waiting as submitted in time), each
+	// curator it entered is qualifying in the next, and public.
 	first := w.drawWithoutExam()
 	_, page, in, later = look()
-	if len(in) != 2 || in[0].EditorID != a || in[0].Why != "qualifying" || in[0].Played != 1 || !in[0].Public ||
-		in[1].EditorID != b || in[1].Why != "new" || len(later) != 1 || later[0].EditorID != c {
+	if len(in) != 3 || in[0].EditorID != a || in[0].Why != "qualifying" || in[0].Played != 1 || !in[0].Public ||
+		in[1].EditorID != b || in[1].Why != "qualifying" || in[2].EditorID != c || len(later) != 0 {
 		t.Fatalf("expected %+v, later %+v", in, later)
 	}
-	if !strings.Contains(page, `href="/editors/`+a[:12]) || !strings.Contains(page, "qualifying · round 2 of 3") || strings.Contains(page, "/editors/"+b[:12]) {
-		t.Error("the page does not link the public curator, say where it is in qualifying, or keeps the rest unlinked")
+	if !strings.Contains(page, `href="/editors/`+a[:12]) || !strings.Contains(page, `href="/editors/`+b[:12]) || !strings.Contains(page, "qualifying · round 2 of 3") {
+		t.Error("the page does not link the curators that are public now, or say where they are in qualifying")
 	}
 	// A round that has been drawn has entries, and nothing expected.
 	if _, page := w.page("/rounds/" + roundID(w.app.season.ID, first)); strings.Contains(page, "Expected to play") {

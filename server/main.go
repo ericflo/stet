@@ -43,9 +43,8 @@ type Config struct {
 	Scale          string
 	RoundInterval  time.Duration
 	RoundMinGap    time.Duration // a round is drawn this long after the last when an entry is waiting; 0 keeps to the interval alone
-	MaxNewPerRound int
-	EntriesInPlay  int // entries one person may have waiting or qualifying at once
-	SubmitsPerDay  int // submissions one person may make in a day
+	EntriesInPlay  int           // entries one person may have waiting or qualifying at once
+	SubmitsPerDay  int           // submissions one person may make in a day
 	LadderSize     int
 	QualifyRounds  int // rounds every entry is given
 	RatedRounds    int // rounds before an editor is ranked
@@ -127,11 +126,8 @@ func loadConfig(season *Season) (Config, error) {
 		Scale:         env("STET_SCALE", season.OfficialScale),
 		RoundInterval: envDuration("STET_ROUND_INTERVAL", 3*time.Hour),
 		RoundMinGap:   envDuration("STET_ROUND_MIN_GAP", 0),
-		// Running an entry and grading its script take about 12 minutes each at the
-		// official scale. A full round is the ladder plus three rounds' worth of newcomers:
-		// 17 entries, a little over three hours of one machine doing everything once, inside
-		// the six between draws. With two machines every entry is run twice in the same time.
-		MaxNewPerRound:   envInt("STET_MAX_NEW_PER_ROUND", 3),
+		// A round takes every curator waiting at its draw. What bounds it is what one person
+		// may have in play at once and submit in a day; the organisers' own are not counted.
 		EntriesInPlay:    envInt("STET_ENTRIES_IN_PLAY", 3),
 		SubmitsPerDay:    envInt("STET_SUBMISSIONS_PER_DAY", 6),
 		LadderSize:       envInt("STET_LADDER_SIZE", 8),

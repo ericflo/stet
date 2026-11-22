@@ -49,10 +49,10 @@ func TestPreview(t *testing.T) {
 	orgPub, orgPriv := newKey()
 	machPub, machPriv := newKey()
 	cfg := testConfig(t, orgPub, machPub)
-	cfg.Scale, cfg.QualifyRounds, cfg.RatedRounds, cfg.LadderSize, cfg.MaxNewPerRound = "micro", 3, 3, 8, 3
+	cfg.Scale, cfg.QualifyRounds, cfg.RatedRounds, cfg.LadderSize = "micro", 3, 3, 8
 	cfg.BaseURL = "https://www.stetrun.com"
 	if state == "stress" {
-		cfg.LadderSize, cfg.MaxNewPerRound = 24, 6
+		cfg.LadderSize = 24
 	}
 	w := startWorld(t, cfg, newMemKV(), dirBlobs{filepath.Join(cfg.DataDir, "blobs")})
 	if state == "empty" {

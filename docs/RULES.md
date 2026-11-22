@@ -95,9 +95,11 @@ late pushes the next back.
 [Running and grading](#running-and-grading) says who those volunteers are and how their
 work becomes a score.
 
-Who runs in a round: the ladder (see below), entries still qualifying, and up to 3 new
-entries. When more than 3 are waiting, entries from people who have graded for others in
-the last two weeks go first.
+Who runs in a round: the ladder (see below), entries still qualifying, and every new entry
+waiting at its draw. A round turns nobody away, and nobody waits behind anybody else. What
+is limited is what one person may have waiting or qualifying at once, and submit in a day
+(below). Rounds do not overlap, so a round with a great many entries takes longer, and the
+next is drawn when it has settled.
 
 Rounds never overlap. If one is still being graded when the next is due, the next is
 drawn at the first ten-minute mark that is at least six minutes after it settles. A round

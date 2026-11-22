@@ -22,8 +22,8 @@
     <ul class="waiting" id="expected">{{range $d.Expected}}<li><span>{{template "expected-name" .}}</span><span class="chip wait">{{if eq .Why "ladder"}}on the ladder{{else if eq .Why "qualifying"}}qualifying · round {{add .Played 1}} of {{$d.QualifyRounds}}{{else}}new · queued{{end}}</span></li>{{end}}</ul>
   </div>{{end}}
   {{with $d.Later}}<div class="block">
-    <h2>Queued for a later round</h2>
-    <p class="caption">A round takes at most {{$d.MaxNew}} new curators, so these wait for a later draw.</p>
+    <h2>Queued for the next round</h2>
+    <p class="caption">Submitted in the last seconds before this draw, after its entries closed. They enter the next one.</p>
     <ul class="waiting" id="later">{{range .}}<li><span>{{template "expected-name" .}}</span><span class="chip wait">queued</span></li>{{end}}</ul>
   </div>{{end}}
   {{if or $d.Expected $d.Later}}<p class="after">A curator's code is public from the first round it is drawn into. Until then only its name shows here.</p>{{end}}

@@ -16,7 +16,7 @@ func demandWorld(t *testing.T, change func(*Config)) (*world, *actor) {
 	t.Helper()
 	pub, priv := newKey()
 	cfg := testConfig(t, pub)
-	cfg.RoundMinGap, cfg.EntriesInPlay, cfg.MaxNewPerRound = time.Hour, 3, 3
+	cfg.RoundMinGap, cfg.EntriesInPlay = time.Hour, 3
 	if change != nil {
 		change(&cfg)
 	}
@@ -160,7 +160,9 @@ func TestOnePersonMayHaveSeveralEntriesInPlay(t *testing.T) {
 	w.check()
 }
 
-func TestEachPersonsFirstEntryGoesBeforeAnyonesSecond(t *testing.T) {
+// A round turns nobody away: one person's three and everybody else's all run in the next draw.
+// What bounds a round is what one person may have in play, settled when an entry is submitted.
+func TestARoundTakesEveryCuratorWaiting(t *testing.T) {
 	w, anchor := demandWorld(t, nil)
 	alice, bob, carol := w.join("alice", nil), w.join("bob", nil), w.join("carol", nil)
 	for _, n := range []string{"alice-1", "alice-2", "alice-3"} {
@@ -184,8 +186,8 @@ func TestEachPersonsFirstEntryGoesBeforeAnyonesSecond(t *testing.T) {
 			owners[s.owner(s.Editors[e.EditorID]).Handle]++
 		}
 	})
-	if owners["alice"] != 1 || owners["bob"] != 1 || owners["carol"] != 1 {
-		t.Fatalf("a round takes three new entries and three people are waiting; it took %v", owners)
+	if owners["alice"] != 3 || owners["bob"] != 1 || owners["carol"] != 1 {
+		t.Fatalf("five curators were waiting, three of them one person's, and the round took %v", owners)
 	}
 	w.check()
 }
