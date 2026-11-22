@@ -1003,3 +1003,46 @@ A pass is credited to the teacher's writing only if the arm also beats its twin 
 than twice the standard error of their difference. If the twin does as well, the gain
 belongs to the pages, which a script of copies can have today, and it is a finding about
 `tidy` and not about writing.
+
+**Added at 11:20 UTC.** By now 22 students are trained: `tidy` five times, three more
+orders of it, three each of `rescue-5` and `rescueraw-5`, two or three of `rewrite-1` and
+`rewrite-5`, two of `rewriteraw-1`, one of `tidy-whole`. Every arm is 0.010 to 0.035
+above `tidy`. Two things found in them change how the rest is run. Both are written here
+before the students they govern have finished.
+
+*The exam asks for a mark the crawl does not have.* The exam's fresh passages hold 3,032
+empty lines in 1,490 items, 1.6 in every 1,000 bytes: a title and its body are joined by
+one, and paragraphs keep theirs. The crawl's pages hold 0.002 in 1,000 bytes (11 pages in
+3,000 have one at all) and `tidy`'s lines hold none. The teacher's text holds 1.8 in 1,000
+bytes. A student that has never seen an empty line pays some twenty bits for each one it
+meets. Regressing each item's gain on what the item holds, `rewrite-1`'s gain over `tidy`
+is 9.2 bits for every empty line, 28,000 of its 39,000 bits; `rescue-5`'s is 9.5 bits a
+line, 29,000 of 45,000. So most of what the arms gained is a mark of layout that the
+teacher's text happens to share with the exam, and a script of copies cannot have it
+because the crawl does not.
+
+That is a fault of the exam and not a use for a teacher. The students' weights were kept,
+so every student sits the exam a second time with its empty lines closed up (each run of
+line ends becomes one), with no training. The rule is applied on both exams, and the
+verdict is the one on the exam with the lines closed, because that is what the exam will
+be. One arm is added to show the mark alone: `layout-1` has no teacher's text; the 396
+pages `rewrite-1` rewrites stand as `tidy` keeps them, with an empty line after every
+line. If the empty line is what the teacher gave, `layout-1` gains on the exam as it was
+about what `rewrite-1` gains there, and nothing on the exam with the lines closed.
+
+*A script's order is worth more than was measured.* Yesterday's `tidy` script, trained on
+this machine, is 0.025 above today's (one student; yesterday's three students of it were
+0.016 above). The two scripts hold the same lines but for four pages, in different orders,
+and build the same text from a line. Seeds 1 and 2 of today's script are within 0.003 of
+it. So three orders agree and a fourth does not, and the second condition of the rule
+(the widest gap between `tidy`'s three orders) was measured too narrow. More orders are
+trained: the pages `tidy` trains on in another order (`tidy-o1`), two more full orders
+(`tidy-s3`, `tidy-s4`), yesterday's script with its trained lines in another order
+(`tidyv1-o1`). The second condition becomes: larger than the widest gap between any two
+orders of `tidy`'s lines trained on this machine, yesterday's script among them. And the
+1% and 5% arms are trained once more in a second order, with `tidy` in that same order as
+their pair (every shared page in the same relative place), so that an arm is compared with
+`tidy` twice, in two orders.
+
+The 15% arms and their twins are trained as registered, once or twice each as the
+machine's hours allow.
