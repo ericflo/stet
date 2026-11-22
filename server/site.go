@@ -771,13 +771,17 @@ func (a *App) roundSummaries(s *State, limit int) []roundSummary {
 
 // standing is the whole board in one list, best rating first: the ranked and those still
 // qualifying together, so whoever is doing best is seen where they stand. A qualifying
-// curator has no rank number; its row says how many rounds it has left.
+// curator has no rank number; its row says how many rounds it has left. One that has never
+// finished a round comes last and is shown no number (Never).
 func standing(groups ...[]*BoardRow) []*BoardRow {
 	var out []*BoardRow
 	for _, rows := range groups {
 		out = append(out, rows...)
 	}
 	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Never() != out[j].Never() {
+			return out[j].Never()
+		}
 		x, y := out[i].Rating, out[j].Rating
 		if (x == nil) != (y == nil) {
 			return x != nil
@@ -785,6 +789,13 @@ func standing(groups ...[]*BoardRow) []*BoardRow {
 		return x != nil && *x > *y
 	})
 	return out
+}
+
+// Never is whether a curator has failed every round it has run. Its rating is then the
+// field's mean with penalties drawn towards it, which measures nothing about the curator:
+// the board shows no number for it.
+func (r *BoardRow) Never() bool {
+	return r.Rounds > 0 && r.Invalid == r.Rounds
 }
 
 // topOf is the longest bar in a list of ratings: every bar in the list is a share of it.

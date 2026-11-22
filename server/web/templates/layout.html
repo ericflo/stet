@@ -71,8 +71,9 @@
   <span class="rank">{{if $r.TiedAt}}={{$r.TiedAt}}{{else if $r.Rank}}{{$r.Rank}}{{else}}–{{end}}</span>
   <span class="who"><span class="name">{{$r.Name}}</span>{{if gt $r.Version 1}}<span class="ver">v{{$r.Version}}</span>{{end}}{{if $r.Record}} <span class="tag red">record</span>{{end}}
     <span class="by">{{$r.Owner}}{{if $r.Organisers}} (organisers){{end}}{{if $r.Provisional}} · <span class="q">unranked, {{$r.Rounds}} of {{.Need}} rounds</span>{{end}}{{if $r.Invalid}} · <span class="neg">failed {{$r.Invalid}} of {{$r.Rounds}}</span>{{end}}</span></span>
-  {{template "bar" (dict "V" (ptr $r.Rating) "Top" .Top "Soft" $r.Provisional)}}
-  <span class="val{{if neg (ptr $r.Rating)}} neg{{end}}">{{gain (ptr $r.Rating)}}</span>
+  {{if $r.Never}}<span class="bar fail" aria-hidden="true"><i></i></span>
+  <span class="val neg">—</span>{{else}}{{template "bar" (dict "V" (ptr $r.Rating) "Top" .Top "Soft" $r.Provisional)}}
+  <span class="val{{if neg (ptr $r.Rating)}} neg{{end}}">{{gain (ptr $r.Rating)}}</span>{{end}}
 </a></li>{{end}}
 
 {{/* A gain as a bar from the left edge. Called with (dict "V" value "Top" the list's

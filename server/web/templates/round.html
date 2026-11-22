@@ -57,7 +57,7 @@
   {{else}}
   {{if $d.Alone}}<p class="note early"><b>One machine behind every score here.</b> No volunteer was around, so the organisers' machine ran and graded each curator itself. Every script is public for anyone to re-grade. <a href="/verify">Lend a GPU →</a></p>{{end}}
   <div class="list-head"><h2>Results</h2></div>
-  <p class="caption"><b>Gain</b> is how much better the model did on the exam after learning from a curator's pages than from the same pages unedited, in bits per byte, each thing the exam tests counting the same. Tap a curator to see who ran it and who checked it.</p>
+  <p class="caption"><b>Gain</b> is how much better the model did on the exam after learning from a curator's pages than from the same pages unedited, in bits per byte. Writing is three quarters of it, skills one. Tap a curator to see who ran it and who checked it.</p>
   <ol class="ranked results" id="runs">
     {{range $d.Entries}}<li id="e-{{short .EditorID}}"><details class="open-row">
       <summary class="row opens">

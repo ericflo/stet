@@ -349,3 +349,23 @@ func TestAFailedRunStandsAsTheEntrysWorstFinishedRun(t *testing.T) {
 		t.Fatalf("nothing finished: %v", got)
 	}
 }
+
+// A curator that has failed every round has no number to show: what its rating would be is
+// the field's mean, with its penalties drawn towards it. It is listed last.
+func TestACuratorThatNeverFinishedIsListedLastWithNoNumber(t *testing.T) {
+	f := func(x float64) *float64 { return &x }
+	good := &BoardRow{Name: "good", Rounds: 3, Rating: f(0.05)}
+	low := &BoardRow{Name: "low", Rounds: 3, Rating: f(0.01)}
+	never := &BoardRow{Name: "never", Rounds: 2, Invalid: 2, Rating: f(0.02), Provisional: true}
+	once := &BoardRow{Name: "once", Rounds: 2, Invalid: 1, Rating: f(0.03), Provisional: true}
+	if never.Never() == false || once.Never() || good.Never() || (&BoardRow{}).Never() {
+		t.Fatal("which curators have never finished a round")
+	}
+	var names []string
+	for _, r := range standing([]*BoardRow{good, low}, []*BoardRow{never, once}) {
+		names = append(names, r.Name)
+	}
+	if got := strings.Join(names, " "); got != "good once low never" {
+		t.Fatalf("the board's order: %s", got)
+	}
+}
