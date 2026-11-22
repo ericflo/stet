@@ -2,7 +2,9 @@
 
 A round's exam has two halves. *Generated* items are made by the generators in `gen/` from the
 round's seed: facts in ten languages, reading in context, arithmetic and word problems,
-programs and what they print, shell sessions, logic, structured lookups, grammar pairs.
+programs and what they print, shell sessions, logic, structured lookups, grammar pairs. The
+skills that count are asked in eleven languages; those that do not are also asked after a few
+solved examples (`gen/shots.py`).
 *Fresh* items are human writing first published after the draw (`fresh/`). Every item belongs
 to a corner (a topic, in a format, for a kind of task, in a language), and a round draws at
 most a few items from any one corner.

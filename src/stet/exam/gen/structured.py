@@ -37,10 +37,27 @@ def _render(fmt: str, rows: list[dict]) -> str:
     raise ValueError(fmt)
 
 
+def _rows(rng: Rng, n: int) -> list[dict]:
+    return [{"name": nm, "age": rng.between(18, 90), "city": rng.choice(PLACES), "score": rng.between(0, 100)} for nm in rng.sample(NAMES, n)]
+
+
+def _ask(corner: str, head: str, who: dict) -> Item:
+    _, fmt, field, _ = corner.split("/")
+    return Item(kind="answer", corner=corner, fmt=FORMATS[fmt], lang="en", source=f"gen:{NAME}",
+                ctx=f"{head}Q: What is {who['name']}'s {field}?\nA:", cont=f" {who[field]}")
+
+
 def make(rng: Rng, corner: str) -> Item:
-    _, fmt, field, n = corner.split("/")
-    names = rng.sample(NAMES, int(n))
-    rows = [{"name": nm, "age": rng.between(18, 90), "city": rng.choice(PLACES), "score": rng.between(0, 100)} for nm in names]
-    who = rng.choice(rows)
-    ctx = f"{_render(fmt, rows)}\n\nQ: What is {who['name']}'s {field}?\nA:"
-    return Item(kind="answer", corner=corner, fmt=FORMATS[fmt], lang="en", source=f"gen:{NAME}", ctx=ctx, cont=f" {who[field]}")
+    _, fmt, _, n = corner.split("/")
+    rows = _rows(rng, int(n))
+    return _ask(corner, f"{_render(fmt, rows)}\n\n", rng.choice(rows))
+
+
+def shared(rng: Rng, corner: str, k: int) -> tuple[str, list[Item], Item, str]:
+    """Asked few-shot (shots.py), the examples are other rows of the question's own table, shown
+    once: the table, up to k questions about other people answered, the question, and what stands
+    between them. A table of three rows has two other people to ask about."""
+    _, fmt, _, n = corner.split("/")
+    rows = _rows(rng, int(n))
+    asked = rng.sample(rows, min(k + 1, len(rows)))
+    return f"{_render(fmt, rows)}\n\n", [_ask(corner, "", who) for who in asked[1:]], _ask(corner, "", asked[0]), "\n"

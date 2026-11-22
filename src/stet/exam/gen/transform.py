@@ -1,5 +1,12 @@
 """Changing one format into another, and reading results off small data: Markdown to HTML, CSV to
-JSON, a SQL query's result, numbers in other notations, identifiers in other cases."""
+JSON, a SQL query's result, numbers in other notations, identifiers in other cases.
+
+A format is the same whatever language is written in it, so nothing here is translated. In each of
+the exam's other languages two conversions are made of that language's own words and names, in its
+own script: Markdown to HTML, and CSV to JSON. The tags and the keys are easy; what has to be
+carried across is the text, so such an item counts as its text's language. The Markdown has no
+sentence around its words outside English, only the words, so no sentence can be wrong.
+"""
 
 from __future__ import annotations
 
@@ -7,16 +14,17 @@ import json
 
 from ..items import Item
 from ..rng import Rng
-from .lexicon import NAMES, PLACES, WORDS
+from .lexicon import CITIES, GIVEN, LANGS, NOUNS, WORDS
 
 NAME = "transform"
 KINDS = {"md-html": "markup", "csv-json": "structured", "sql-select": "code", "sql-count": "code", "sql-sum": "code",
          "roman": "math", "from-roman": "math", "binary": "math", "hex": "math", "thousands": "math",
          "snake-camel": "code", "camel-snake": "code", "title-case": "prose", "json-path": "structured"}
+OTHER_KINDS = ["md-html", "csv-json"]  # in every other language
 
 
 def corners() -> list[str]:
-    return [f"{NAME}/{k}" for k in KINDS]
+    return [f"{NAME}/en/{k}" for k in KINDS] + [f"{NAME}/{lang}/{k}" for lang in LANGS[1:] for k in OTHER_KINDS]
 
 
 def roman(n: int) -> str:
@@ -28,30 +36,40 @@ def roman(n: int) -> str:
     return out
 
 
-def _table(rng: Rng, n: int) -> list[dict]:
-    return [{"name": nm, "city": rng.choice(PLACES), "age": rng.between(18, 80)} for nm in rng.sample(NAMES, n)]
+def _table(rng: Rng, n: int, lang: str = "en") -> list[dict]:
+    return [{"name": nm, "city": rng.choice(CITIES[lang]), "age": rng.between(18, 80)} for nm in rng.sample(GIVEN[lang], n)]
 
 
 def make(rng: Rng, corner: str) -> Item:
-    k = corner.split("/", 1)[1]
+    _, lang, k = corner.split("/")
     fmt = KINDS[k]
     if k == "md-html":
-        words = rng.sample(WORDS, 3)
+        words = rng.sample(NOUNS[lang], 3)
         style = rng.choice(["bold", "italic", "heading", "list", "link"])
-        if style == "bold":
+        if style == "list":
+            md = "\n".join(f"- {w}" for w in words)
+            html = "<ul>\n" + "\n".join(f"<li>{w}</li>" for w in words) + "\n</ul>"
+        elif lang != "en":  # the words alone
+            if style == "bold":
+                md, html = f"**{words[0]}** {words[1]} {words[2]}", f"<p><strong>{words[0]}</strong> {words[1]} {words[2]}</p>"
+            elif style == "italic":
+                md, html = f"{words[0]} *{words[1]}* {words[2]}", f"<p>{words[0]} <em>{words[1]}</em> {words[2]}</p>"
+            elif style == "heading":
+                md, html = f"## {words[0]} {words[1]}", f"<h2>{words[0]} {words[1]}</h2>"
+            else:
+                page = rng.choice(WORDS)
+                md, html = f"[{words[0]}](https://example.org/{page})", f'<p><a href="https://example.org/{page}">{words[0]}</a></p>'
+        elif style == "bold":
             md, html = f"The **{words[0]}** is here.", f"<p>The <strong>{words[0]}</strong> is here.</p>"
         elif style == "italic":
             md, html = f"One *{words[0]}* and one {words[1]}.", f"<p>One <em>{words[0]}</em> and one {words[1]}.</p>"
         elif style == "heading":
             md, html = f"## {words[0].title()} {words[1]}", f"<h2>{words[0].title()} {words[1]}</h2>"
-        elif style == "list":
-            md = "\n".join(f"- {w}" for w in words)
-            html = "<ul>\n" + "\n".join(f"<li>{w}</li>" for w in words) + "\n</ul>"
         else:
             md, html = f"See [{words[0]}](https://example.org/{words[1]}).", f'<p>See <a href="https://example.org/{words[1]}">{words[0]}</a>.</p>'
         ctx, cont = f"Markdown:\n{md}\n\nHTML:\n", html
     elif k == "csv-json":
-        rows = _table(rng, rng.between(1, 3))
+        rows = _table(rng, rng.between(1, 3), lang)
         csv = "name,city,age\n" + "\n".join(f"{r['name']},{r['city']},{r['age']}" for r in rows)
         ctx, cont = f"CSV:\n{csv}\n\nThe same rows as JSON:\n", json.dumps(rows, ensure_ascii=False)
     elif k in ("sql-select", "sql-count", "sql-sum"):
@@ -95,4 +113,4 @@ def make(rng: Rng, corner: str) -> Item:
         cont = f" {json.dumps(rows[i][field], ensure_ascii=False)}"
     else:
         raise ValueError(corner)
-    return Item(kind="answer", corner=corner, fmt=fmt, lang="en", source=f"gen:{NAME}", ctx=ctx, cont=cont)
+    return Item(kind="answer", corner=corner, fmt=fmt, lang=lang, source=f"gen:{NAME}", ctx=ctx, cont=cont)

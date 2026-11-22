@@ -643,10 +643,14 @@ type ExamKind struct {
 	Items int    `json:"items"`
 }
 
-// generatedParts are the exam's families of generated problems (FAMILY_PILLAR in
-// src/stet/exam/aggregate.py). Any other part is a kind of writing people published.
+// generatedParts are the exam's families of generated problems (FAMILIES in
+// src/stet/exam/gen/__init__.py; tests/test_exam.py fails if one is missing here). Any other part
+// is a kind of writing people published.
 var generatedParts = map[string]bool{"knowledge": true, "context": true, "arith": true, "word": true, "units": true, "algebra": true,
-	"logic": true, "algo": true, "multi": true, "prog": true, "transform": true, "struct": true, "agent": true, "grammar": true}
+	"logic": true, "algo": true, "multi": true, "prog": true, "transform": true, "struct": true, "agent": true, "grammar": true,
+	// the same families asked after solved examples of the task, and as pairs with a near miss
+	"arith-shots": true, "word-shots": true, "units-shots": true, "algebra-shots": true, "prog-shots": true, "algo-shots": true,
+	"struct-shots": true, "multi-shots": true, "arith-pairs": true, "units-pairs": true}
 
 func (a *App) examMix(table []ItemInfo) *ExamMix {
 	if len(table) == 0 {

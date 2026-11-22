@@ -5,6 +5,7 @@ import contextlib
 import datetime as dt
 import io
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -35,7 +36,7 @@ def test_rng_is_pinned_and_in_range():
 def test_a_seed_always_makes_the_same_exam():
     # Pinned: a change to any generator that changes what a seed produces must bump gen.VERSION
     # and this hash, on purpose.
-    assert digest(gen.generate(SEED)) == "5909f77e9425284ab1f3eeaa78d3a2f4a0e1ae17864120192bd68b4922c35668"
+    assert digest(gen.generate(SEED)) == "24d846bf4ba72854d175b05a68207db7eaa28fcfd142820b7ebfbac39409a857"
     assert digest(gen.generate(SEED)) == digest(gen.generate(SEED))
     assert digest(gen.generate(b"other")) != digest(gen.generate(SEED))
 
@@ -52,9 +53,12 @@ def test_an_agents_answer_follows_from_its_session():
             if it.kind != "answer":
                 continue
             corner = it.corner.rsplit("/", 1)[1]
+            assert it.lang == it.corner.split("/")[1]
             if corner in ("cat", "head", "grep", "append-cat", "write-read"):
-                for word in re.findall(r"[a-z]{3,}", it.cont.replace("\\n", " ")):  # a tool's result writes a line break as \n
+                for word in re.findall(r"[^\W\d_]{3,}", it.cont.replace("\\n", " ")):  # a tool's result writes a line break as \n
                     assert word in it.ctx, (it.corner, word)
+                if it.lang in ("ru", "ja", "zh"):  # the notes are in the language's own script, and so is what comes back
+                    assert not it.cont.isascii() and "\\u" not in it.ctx + it.cont, it
             if corner in ("ls", "ls-dir", "mkdir-ls", "rm-ls"):
                 for name in re.findall(r"[A-Za-z0-9_.]+", it.cont):
                     assert name in it.ctx or name == "result", (it.corner, name)
@@ -380,7 +384,7 @@ def test_transforms_are_right():
             while rest.startswith(s):
                 back, rest = back + v, rest[len(s):]
         assert back == n and not rest
-    for it in _all("transform/sql"):
+    for it in _all("transform/en/sql"):
         db = sqlite3.connect(":memory:")
         db.execute("CREATE TABLE people (name TEXT, city TEXT, age INTEGER)")
         for line in it.ctx.split("|---|---|---|\n")[1].split("\n\n")[0].splitlines():
@@ -389,9 +393,21 @@ def test_transforms_are_right():
         query = it.ctx.split("\n\n")[-1].split("\nResult:")[0]
         got = [str(r[0]) for r in db.execute(query)]
         assert ", ".join(got) == it.cont.strip(), (query, it.cont)
-    for it in _all("transform/csv-json"):
-        rows = json.loads(it.cont)
-        assert [r["name"] for r in rows] == [ln.split(",")[0] for ln in it.ctx.split("CSV:\n")[1].split("\n\n")[0].splitlines()[1:]]
+    table = [it for it in _all("transform/") if it.corner.endswith("/csv-json")]
+    assert {it.lang for it in table} == set(lexicon.LANGS)
+    for it in table:
+        lines = [ln.split(",") for ln in it.ctx.split("CSV:\n")[1].split("\n\n")[0].splitlines()[1:]]
+        assert json.loads(it.cont) == [{"name": name, "city": city, "age": int(age)} for name, city, age in lines]
+        assert all(name in lexicon.GIVEN[it.lang] and city in lexicon.CITIES[it.lang] for name, city, _ in lines)
+    # Markdown in every language: without its marks, the HTML says what the Markdown says
+    pages = [it for it in _all("transform/") if it.corner.endswith("/md-html")]
+    assert {it.lang for it in pages} == set(lexicon.LANGS)
+    for it in pages:
+        md = it.ctx.split("Markdown:\n")[1].split("\n\nHTML:")[0]
+        said = re.sub(r"^(## |- )", "", re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", md), flags=re.M).replace("*", "")
+        assert re.sub(r"<[^>]+>", "", it.cont).strip() == said, it
+        if it.lang != "en":
+            assert all(w in lexicon.NOUNS[it.lang] for w in said.split()), it
 
 
 def test_arithmetic_in_other_languages_is_right():
@@ -528,11 +544,16 @@ def test_students_farmed_out_to_the_organisers_machines_add_up_as_training_here_
 
 def test_reading_in_context_answers_are_in_the_context_or_follow_from_it():
     items = _all("context/", n=3)
-    assert {it.corner.split("/")[1] for it in items} == {"passage", "two-hop", "rule", "definition"}
+    assert {it.corner.split("/")[2] for it in items} == {"passage", "two-hop", "rule", "definition", "glossary"}
+    assert {it.lang for it in items} == set(lexicon.LANGS)
     for it in items:
-        kind, ans = it.corner.split("/")[1], it.cont.strip().rstrip('".')
-        if kind in ("passage", "two-hop") or it.corner.endswith(("glossary",)):
+        kind, ans = it.corner.split("/")[2], it.cont.strip().rstrip('".」”')
+        assert it.lang == it.corner.split("/")[1]
+        if kind in ("passage", "two-hop", "glossary") or it.corner.endswith(("glossary",)):
             assert ans in it.ctx, it  # read, not remembered
+            if it.corner.endswith("/according"):  # asked in the middle of a sentence, a name keeps its capital
+                asked = it.ctx.split("According to the passage above, ")[1]
+                assert asked.startswith("the ") or asked.split()[0] in it.ctx.split("\n\n")[0], it
         elif it.corner.endswith("affine"):
             pairs = [tuple(int(v) for v in line.split(" -> ")) for line in it.ctx.splitlines()[:-1]]
             (x1, y1), (x2, y2) = pairs[0], pairs[1]
@@ -554,3 +575,311 @@ def test_knowledge_asks_facts_the_web_knows_in_ten_languages():
     for it in items:
         assert it.cont.strip() and it.ctx.strip() != it.cont.strip(), it  # São Tomé is the capital of São Tomé and Príncipe: allowed
         assert it.cont.startswith(" ") != (it.lang in knowledge.NO_SPACE)
+
+
+# --- the skills in the web's languages ----------------------------------------------------------------
+
+
+def _season_exam():
+    from stet.spec import load_season
+
+    return gen.generate(SEED, per_corner=int(load_season().raw["exam"]["per_corner"]))
+
+
+def test_the_skills_that_count_are_asked_in_every_language_and_each_language_is_measured_on_its_own():
+    from collections import Counter
+
+    from stet.exam.aggregate import SMALL
+
+    items = [it for it in _season_exam() if it.family in gen.MORE]
+    n = Counter((it.family, it.lang) for it in items)
+    for fam in gen.MORE:
+        assert {lang for f, lang in n if f == fam} == set(lexicon.LANGS), fam
+        assert all(n[fam, lang] >= SMALL for lang in lexicon.LANGS), (fam, n)  # none so few that it is pooled as "other"
+    assert 2 * 538 <= len(items) <= 3 * 538  # two to three times what the five families had in English alone
+    scripts = {"ru": r"[а-яё]", "ja": r"[぀-ヿ一-鿿]", "zh": r"[一-鿿]"}
+    for it in items:
+        assert it.corner.split("/")[1] == it.lang  # a language's questions are corners of their own
+        text = it.ctx + it.cont + it.good + it.bad
+        assert not re.search(r"\{[a-z_]+\}", text), it  # no sentence with a blank left unfilled
+        if it.lang in scripts:
+            assert re.search(scripts[it.lang], text.lower()), it  # written in the language's own script
+            if it.family != "context" or "/passage/" not in it.corner:  # a town's year and its bridges are numbers
+                assert re.search(scripts[it.lang], (it.cont or it.good).lower()), it  # and so is the answer
+    assert len(items) - len({it.id for it in items}) <= 4  # a round hardly ever asks the same thing twice
+
+
+def test_a_round_asks_its_own_questions_and_a_seed_always_the_same():
+    families = [gen.logic, gen.context, gen.shell, gen.transform, gen.grammar]
+    one, again, other = (gen.generate(seed, per_corner=2, families=families) for seed in (b"one", b"one", b"two"))
+    assert one == again
+    # What is read and what an agent works in are invented for the round: nothing of one round is in the next.
+    asked = lambda items: {it.ctx + it.cont for it in items if it.kind == "answer" and it.family in ("context", "agent")}  # noqa: E731
+    assert len(asked(one)) > 600 and not asked(one) & asked(other)
+
+
+class Steps(Rng):
+    """Not random: 0, 1, 2, ... each taken within its bound. What a generator makes of it depends on
+    its sentences and word lists alone, so it can be written down here and read by someone who
+    knows the language."""
+
+    def __init__(self):
+        self.i = 0
+
+    def child(self, label):
+        return self
+
+    def below(self, n):
+        self.i += 1
+        return (self.i - 1) % n
+
+
+# Read and checked by hand, language by language: an ordering and a "between", a town's river, two
+# facts to join, a glossary, and both grammatical pairs (the acceptable sentence first).
+CHECKED = {
+    'logic/ru/order3-top': ('Глеб старше, чем Егор. Борис старше, чем Глеб. Кто старше всех?\nОтвет:', ' Борис'),
+    'logic/ru/between': ('Анна старше, чем Вера. Вера старше, чем Дарья. Кто младше, чем Анна, но старше, чем Дарья?\nОтвет:', ' Вера'),
+    'context/ru/passage/river': ('Бефокал — это город. Город находится в провинции Браклисту. Через город протекает река Норатир. Город был основан в 1221 году. Число мостов в городе — 34.\n\nВопрос: Какая река протекает через город Бефокал?\nОтвет:', ' Норатир'),
+    'context/ru/two-hop': ('Город Бефокал находится в провинции Браклисту. Ирина живёт в городе Бефокал. Город Норатир находится в провинции Дигуле.\n\nИрина живёт в провинции', ' Браклисту'),
+    'context/ru/glossary': ('В языке Ленорар:\n"камипу" означает "сад".\n"тизудрем" означает "стол".\n"стубефол" означает "дом".\n\nНа этом языке слово "дом" звучит как "', 'стубефол"'),
+    'grammar/ru/agree-sg': ('Врач работает сейчас.', 'Врач работают сейчас.'),
+    'grammar/ru/agree-pl': ('Врачи работают сейчас.', 'Врачи работает сейчас.'),
+    'logic/de/order3-top': ('Dieter ist älter als Felix. Bernd ist älter als Dieter. Wer ist am ältesten?\nAntwort:', ' Bernd'),
+    'logic/de/between': ('Anna ist älter als Clara. Clara ist älter als Emma. Wer ist jünger als Anna, aber älter als Emma?\nAntwort:', ' Clara'),
+    'context/de/passage/river': ('Befokal ist eine Stadt. Die Stadt liegt in der Provinz Braklistu. Durch die Stadt fließt der Fluss Noratir. Die Stadt wurde im Jahr 1221 gegründet. Die Zahl der Brücken in der Stadt beträgt 34.\n\nFrage: Welcher Fluss fließt durch die Stadt Befokal?\nAntwort:', ' Noratir'),
+    'context/de/two-hop': ('Die Stadt Befokal liegt in der Provinz Braklistu. Ingrid wohnt in der Stadt Befokal. Die Stadt Noratir liegt in der Provinz Digule.\n\nIngrid wohnt in der Provinz', ' Braklistu'),
+    'context/de/glossary': ('In der Sprache Lenorar:\n"kamipu" bedeutet "Garten".\n"tizudrem" bedeutet "Tisch".\n"stubefol" bedeutet "Haus".\n\nIn dieser Sprache ist das Wort für "Haus" "', 'stubefol"'),
+    'grammar/de/agree-sg': ('Der Arzt arbeitet jetzt.', 'Der Arzt arbeiten jetzt.'),
+    'grammar/de/agree-pl': ('Die Ärzte arbeiten jetzt.', 'Die Ärzte arbeitet jetzt.'),
+    'logic/ja/order3-top': ('美咲は陽子より年上です。花子は美咲より年上です。一番年上なのは誰ですか？\n答え：', '花子'),
+    'logic/ja/between': ('太郎は健太より年上です。健太は翔太より年上です。太郎より年下で、翔太より年上なのは誰ですか？\n答え：', '健太'),
+    'context/ja/passage/river': ('カキクは町です。この町にはコサシ川が流れています。この町には橋が25本あります。この町は1212年にできました。この町はセソタン県にあります。\n\nカキクという町に流れている川は', 'コサシ川'),
+    'context/ja/two-hop': ('カキク町はセソタン県にあります。浩二はカキク町に住んでいます。コサシ町はツテト県にあります。\n\n浩二が住んでいる県は', 'セソタン県'),
+    'context/ja/glossary': ('ニヌネ語の単語：\n「コサシ」は「庭」という意味です。\n「セソタン」は「机」という意味です。\n「ツテト」は「家」という意味です。\n\nニヌネ語で「家」を意味する単語は「', 'ツテト」'),
+    'grammar/ja/counter': ('太郎は犬を四匹買いました。', '太郎は犬を四台買いました。'),
+    'grammar/ja/exist': ('箱の中に皿があります。', '箱の中に皿をあります。'),
+    'logic/zh/order3-top': ('刘洋比杨磊年纪大。李伟比刘洋年纪大。谁的年纪最大？\n答案：', '李伟'),
+    'logic/zh/between': ('王芳比张敏年纪大。张敏比陈静年纪大。谁比王芳年纪小，但比陈静年纪大？\n答案：', '张敏'),
+    'context/zh/passage/river': ('卡拉莫是一个镇。该镇位于维萨米省。尼塔洛河流经该镇。该镇建于1209年。该镇有22座桥。\n\n问题：流经卡拉莫镇的河叫什么名字？\n答案：', '尼塔洛河'),
+    'context/zh/two-hop': ('尼塔洛镇位于巴里诺省。马超住在卡拉莫镇。卡拉莫镇位于维萨米省。\n\n马超住的省是', '维萨米省'),
+    'context/zh/glossary': ('在达玛索语中：\n“塔洛维”的意思是“花园”。\n“萨米巴”的意思是“桌子”。\n“里诺伦”的意思是“房子”。\n\n在达玛索语中，表示“桌子”的词是“', '萨米巴”'),
+    'grammar/zh/classifier': ('王芳有四匹马。', '王芳有四本马。'),
+    'grammar/zh/negation': ('王芳没有自行车。', '王芳不有自行车。'),
+    'logic/es/order3-top': ('Javier tiene más puntos que Miguel. Carlos tiene más puntos que Javier. ¿Quién tiene más puntos?\nRespuesta:', ' Carlos'),
+    'logic/es/between': ('Ana tiene más puntos que María. María tiene más puntos que Lucía. ¿Quién tiene menos puntos que Ana pero más puntos que Lucía?\nRespuesta:', ' María'),
+    'context/es/passage/river': ('Befokal es una ciudad. La ciudad está en la provincia de Braklistu. Por la ciudad pasa el río Noratir. La ciudad fue fundada en el año 1221. El número de puentes de la ciudad es 34.\n\nPregunta: ¿Qué río pasa por la ciudad de Befokal?\nRespuesta:', ' Noratir'),
+    'context/es/two-hop': ('La ciudad de Befokal está en la provincia de Braklistu. Elena vive en la ciudad de Befokal. La ciudad de Noratir está en la provincia de Digule.\n\nElena vive en la provincia de', ' Braklistu'),
+    'context/es/glossary': ('En el idioma Lenorar:\n"kamipu" significa "jardín".\n"tizudrem" significa "mesa".\n"stubefol" significa "casa".\n\nEn ese idioma, la palabra para "casa" es "', 'stubefol"'),
+    'grammar/es/agree-sg': ('El médico viene ahora.', 'El médico vienen ahora.'),
+    'grammar/es/agree-pl': ('Los médicos vienen ahora.', 'Los médicos viene ahora.'),
+    'logic/fr/order3-top': ('Louis a plus de points que Julien. Pierre a plus de points que Louis. Qui a le plus de points ?\nRéponse :', ' Pierre'),
+    'logic/fr/between': ('Marie a plus de points que Camille. Camille a plus de points que Sophie. Qui a moins de points que Marie mais plus de points que Sophie ?\nRéponse :', ' Camille'),
+    'context/fr/passage/river': ('Befokal est une ville. La ville se trouve dans la province de Braklistu. La rivière Noratir traverse la ville. La ville a été fondée en 1221. Le nombre de ponts de la ville est de 34.\n\nQuestion : Quelle rivière traverse la ville de Befokal ?\nRéponse :', ' Noratir'),
+    'context/fr/two-hop': ('La ville de Befokal se trouve dans la province de Braklistu. Manon habite dans la ville de Befokal. La ville de Noratir se trouve dans la province de Digule.\n\nManon habite dans la province de', ' Braklistu'),
+    'context/fr/glossary': ('Dans la langue Lenorar :\n"kamipu" signifie "jardin".\n"tizudrem" signifie "table".\n"stubefol" signifie "maison".\n\nDans cette langue, le mot pour "maison" est "', 'stubefol"'),
+    'grammar/fr/agree-sg': ('Le médecin travaille maintenant.', 'Le médecin travaillent maintenant.'),
+    'grammar/fr/agree-pl': ('Les médecins travaillent maintenant.', 'Les médecins travaille maintenant.'),
+    'logic/pt/order3-top': ('Pedro tem mais pontos do que Tiago. João tem mais pontos do que Pedro. Quem tem mais pontos?\nResposta:', ' João'),
+    'logic/pt/between': ('Ana tem mais pontos do que Maria. Maria tem mais pontos do que Beatriz. Quem tem mais pontos do que Beatriz, mas menos pontos do que Ana?\nResposta:', ' Maria'),
+    'context/pt/passage/river': ('Befokal é uma cidade. A cidade fica na província de Braklistu. O rio Noratir atravessa a cidade. A cidade foi fundada no ano de 1221. O número de pontes da cidade é 34.\n\nPergunta: Que rio atravessa a cidade de Befokal?\nResposta:', ' Noratir'),
+    'context/pt/two-hop': ('A cidade de Befokal fica na província de Braklistu. Inês mora na cidade de Befokal. A cidade de Noratir fica na província de Digule.\n\nInês mora na província de', ' Braklistu'),
+    'context/pt/glossary': ('Na língua Lenorar:\n"kamipu" significa "jardim".\n"tizudrem" significa "mesa".\n"stubefol" significa "casa".\n\nNessa língua, a palavra para "casa" é "', 'stubefol"'),
+    'grammar/pt/agree-sg': ('O médico chega agora.', 'O médico chegam agora.'),
+    'grammar/pt/agree-pl': ('Os médicos chegam agora.', 'Os médicos chega agora.'),
+    'logic/it/order3-top': ('Sara ha più punti di Chiara. Giulia ha più punti di Sara. Chi ha più punti di tutti?\nRisposta:', ' Giulia'),
+    'logic/it/between': ('Marco ha più punti di Luca. Luca ha più punti di Matteo. Chi ha meno punti di Marco ma più punti di Matteo?\nRisposta:', ' Luca'),
+    'context/it/passage/river': ("Befokal è una città. La città si trova nella provincia di Braklistu. Il fiume Noratir attraversa la città. La città è stata fondata nell'anno 1221. Il numero di ponti della città è 34.\n\nDomanda: Quale fiume attraversa la città di Befokal?\nRisposta:", ' Noratir'),
+    'context/it/two-hop': ('La città di Befokal si trova nella provincia di Braklistu. Stefano abita nella città di Befokal. La città di Noratir si trova nella provincia di Digule.\n\nStefano abita nella provincia di', ' Braklistu'),
+    'context/it/glossary': ('Nella lingua Lenorar:\n"kamipu" significa "giardino".\n"tizudrem" significa "tavolo".\n"stubefol" significa "casa".\n\nIn quella lingua, la parola per "casa" è "', 'stubefol"'),
+    'grammar/it/agree-sg': ('Il medico arriva adesso.', 'Il medico arrivano adesso.'),
+    'grammar/it/agree-pl': ('I medici arrivano adesso.', 'I medici arriva adesso.'),
+    'logic/pl/order3-top': ('Tomasz ma więcej punktów niż Marek. Piotr ma więcej punktów niż Tomasz. Kto ma najwięcej punktów?\nOdpowiedź:', ' Piotr'),
+    'logic/pl/between': ('Anna ma więcej punktów niż Maria. Maria ma więcej punktów niż Katarzyna. Kto ma mniej punktów niż Anna, ale więcej punktów niż Katarzyna?\nOdpowiedź:', ' Maria'),
+    'context/pl/passage/river': ('Befokal to miasto. Miasto leży w prowincji Braklistu. Przez miasto płynie rzeka Noratir. Miasto zostało założone w 1221 roku. Liczba mostów w mieście wynosi 34.\n\nPytanie: Jaka rzeka płynie przez miasto Befokal?\nOdpowiedź:', ' Noratir'),
+    'context/pl/two-hop': ('Miasto Befokal leży w prowincji Braklistu. Ewa mieszka w mieście Befokal. Miasto Noratir leży w prowincji Digule.\n\nEwa mieszka w prowincji', ' Braklistu'),
+    'context/pl/glossary': ('W języku Lenorar:\n"kamipu" znaczy "ogród".\n"tizudrem" znaczy "stół".\n"stubefol" znaczy "dom".\n\nW tym języku słowo "dom" to "', 'stubefol"'),
+    'grammar/pl/agree-sg': ('Lekarz pracuje teraz.', 'Lekarz pracują teraz.'),
+    'grammar/pl/agree-pl': ('Lekarze pracują teraz.', 'Lekarze pracuje teraz.'),
+    'logic/nl/order3-top': ('Bram is ouder dan Thijs. Daan is ouder dan Bram. Wie is het oudst?\nAntwoord:', ' Daan'),
+    'logic/nl/between': ('Anna is ouder dan Sanne. Sanne is ouder dan Lotte. Wie is jonger dan Anna maar ouder dan Lotte?\nAntwoord:', ' Sanne'),
+    'context/nl/passage/river': ('Befokal is een stad. De stad ligt in de provincie Braklistu. Door de stad stroomt de rivier Noratir. De stad werd gesticht in het jaar 1221. Het aantal bruggen in de stad is 34.\n\nVraag: Welke rivier stroomt door de stad Befokal?\nAntwoord:', ' Noratir'),
+    'context/nl/two-hop': ('De stad Befokal ligt in de provincie Braklistu. Sophie woont in de stad Befokal. De stad Noratir ligt in de provincie Digule.\n\nSophie woont in de provincie', ' Braklistu'),
+    'context/nl/glossary': ('In de taal Lenorar:\n"kamipu" betekent "tuin".\n"tizudrem" betekent "tafel".\n"stubefol" betekent "huis".\n\nIn die taal is het woord voor "huis" "', 'stubefol"'),
+    'grammar/nl/agree-sg': ('De dokter werkt nu.', 'De dokter werken nu.'),
+    'grammar/nl/agree-pl': ('De dokters werken nu.', 'De dokters werkt nu.'),
+}
+
+
+def test_each_languages_sentences_are_the_ones_that_were_checked():
+    import hashlib
+
+    from stet.exam.gen import context, grammar, logic
+
+    made = {}
+    for fam in (logic, context, grammar):
+        for corner in fam.corners():
+            if corner in CHECKED:
+                it = fam.make(Steps(), corner)
+                made[corner] = (it.good, it.bad) if it.kind == "pair" else (it.ctx, it.cont)
+    assert made == CHECKED
+    assert {c.split("/")[1] for c in CHECKED} == set(lexicon.LANGS) - {"en"}
+    # Every sentence and word list the languages use, as one hash. If this fails you changed one:
+    # have it read by someone who knows the language, then pin the new hash.
+    tables = [logic.COMPARE, logic.BETWEEN, context.TOLD, grammar.AGREE, grammar.WHEN, grammar.JA_COUNTED, grammar.JA_THINGS, grammar.JA_PLACES,
+              grammar.ZH_COUNTED, grammar.ZH_THINGS, grammar.NUMERALS, lexicon.NOUNS, lexicon.GIVEN, lexicon.CITIES, lexicon.QUESTION,
+              lexicon.ANSWER]
+    assert hashlib.sha256(json.dumps(tables, ensure_ascii=False, sort_keys=True).encode()).hexdigest() == "c701ced696c178905bb46ca05293e43bdf025f3716f8f25185656454d4bad404"
+    # French shortens "de" and "que" before a vowel and Italian may: no name or coined word begins with one
+    vowels = "aeiouyhàâéèêëîïôöùûüAEIOUYHÀÂÉÈÊËÎÏÔÖÙÛÜ"
+    assert not [n for lang in ("fr", "it") for n in lexicon.GIVEN[lang] if n[0] in vowels]
+    r = Rng(SEED, "coined")
+    assert all(lexicon.coin(r, lang)[0] not in vowels + "аеиоу" for lang in ("fr", "it", "ru") for _ in range(300))
+    for lang in lexicon.LANGS:
+        assert len(lexicon.GIVEN[lang]) == len(set(lexicon.GIVEN[lang])) >= 20 and 20 <= len(set(lexicon.NOUNS[lang])) <= 40
+
+
+def test_orderings_in_every_language_have_the_answer_their_facts_give():
+    from stet.exam.gen import logic
+
+    items = [it for it in _all("logic/") if it.lang != "en"]
+    assert {it.lang for it in items} == set(logic.COMPARE) == set(lexicon.LANGS) - {"en"}
+    for it in items:
+        kind = it.corner.split("/")[2]
+        told, ask = it.ctx.split("\n")[0], it.ctx.split("\n")[1]
+        assert ask == lexicon.ANSWER[it.lang] and it.cont == lexicon.gap(it.lang) + it.cont.strip()
+        # who is said to be more than whom, read back out of the sentences by each comparison's own pattern
+        more = set()
+        for fact, _, _ in logic.COMPARE[it.lang]:
+            pattern = re.escape(fact).replace(r"\{a\}", r"(?P<a>\w+)").replace(r"\{b\}", r"(?P<b>\w+)")
+            more |= {(m["a"], m["b"]) for m in re.finditer(pattern, told)}
+        people = {x for pair in more for x in pair}
+        assert len(more) == len(people) - 1 == int(kind[5]) - 1 if kind != "between" else len(more) == 2, it
+        top = [x for x in people if not any(b == x for _, b in more)]
+        bottom = [x for x in people if not any(a == x for a, _ in more)]
+        middle = people - set(top) - set(bottom)
+        want = top if kind.endswith("top") else bottom if kind.endswith("bottom") else sorted(middle)
+        assert len(want) == 1 and it.cont.strip() == want[0], it
+
+
+def test_a_pair_in_another_language_differs_in_the_one_place_that_is_wrong():
+    from stet.exam.gen import grammar
+
+    items = [it for it in _all("grammar/") if it.lang != "en"]
+    assert {it.lang for it in items} == set(grammar.OTHER) == set(lexicon.LANGS) - {"en"}
+    for it in items:
+        if it.lang in grammar.AGREE:  # the same subject and the same ending, and the verb for one beside the verb for many
+            nouns, verbs = grammar.AGREE[it.lang]
+            one = it.corner.endswith("agree-sg")
+            subject = next(n[not one] for n in nouns if it.good.lower().startswith(f"{n[not one].lower()} "))
+            assert it.bad[: len(subject)] == it.good[: len(subject)] and it.good[0].isupper() and it.good[-1] == it.bad[-1] == "."
+            (verb, _, when), (wrong, _, same) = (s[len(subject) + 1 : -1].partition(" ") for s in (it.good, it.bad))
+            assert (verb, wrong) in {(v[not one], v[one]) for v in verbs} and when == same and when in ["", *grammar.WHEN[it.lang]], it
+        else:  # one character: the counting word, or the particle
+            assert len(it.good) == len(it.bad) and sum(a != b for a, b in zip(it.good, it.bad, strict=True)) == 1, it
+    # a verb for one is never also a verb for many, and no subject reads the same for one and many
+    for lang, (nouns, verbs) in grammar.AGREE.items():
+        assert not {v for v, _ in verbs} & {v for _, v in verbs} and all(a != b for a, b in nouns), lang
+    for thing, right, wrong in grammar.JA_COUNTED + grammar.ZH_COUNTED:
+        assert right not in wrong and thing, (thing, right, wrong)
+
+
+# --- what a small student cannot do cold, asked after examples -----------------------------------------
+
+
+def _few_shot():
+    from stet.exam.gen import shots
+
+    return [f for f in gen.FAMILIES if isinstance(f, shots.Shots)]
+
+
+def test_a_few_shot_question_is_shown_solved_examples_of_its_own_corner_and_never_itself():
+    from stet.exam.gen import shots
+
+    fams = _few_shot()
+    cold = {f.NAME for f in gen.FAMILIES} - set(gen.MORE) - {f.NAME for f in fams} - {"knowledge"}
+    assert {f.NAME for f in fams if not isinstance(f, shots.Pairs)} == {f"{name}-shots" for name in cold}  # every watched family but the list of facts
+    assert {f.NAME for f in fams if isinstance(f, shots.Pairs)} == {"arith-pairs", "units-pairs"}
+    root, counts = Rng(SEED, "few"), {}
+    for fam in fams:
+        base = set(fam.base.corners())
+        for corner in fam.corners():
+            head, shown, ask, sep = shots.examples(fam.base, root.child(corner), fam.of(corner))
+            it = fam.make(root.child(corner), corner)
+            assert fam.of(corner) in base and it.corner == corner and it.family == fam.NAME and it.source == f"gen:{fam.NAME}"
+            assert 1 <= len(shown) <= 6 and all(s.corner == ask.corner == fam.of(corner) for s in shown)
+            asked = [s.ctx for s in shown] + [ask.ctx]
+            assert len(set(asked)) == len(asked), it  # no example is the question, and none is shown twice
+            before = head + "".join(s.ctx + s.cont + sep for s in shown) + ask.ctx
+            assert before.count(ask.ctx) == 1 and (it.fmt, it.lang) == (ask.fmt, ask.lang)
+            if it.kind == "answer":
+                assert (it.ctx, it.cont) == (before, ask.cont)
+            else:
+                assert it.good == f"{before}{ask.cont}\n" and it.bad.startswith(before) and it.bad != it.good
+            if not hasattr(fam.base, "shared"):  # each example is a whole question of the family, as it would ask it cold
+                again = [fam.base.make(root.child(corner).child(f"shot{i}"), fam.of(corner)) for i in range(60)]
+                assert all(s in again for s in [*shown, ask])
+            counts.setdefault(fam.NAME, []).append(len(shown))
+    # three to six examples where they are short; fewer only where more would not fit a small window
+    for name in ("arith-shots", "units-shots", "algebra-shots", "multi-shots", "arith-pairs", "units-pairs"):
+        assert set(counts[name]) == {3, 4, 5, 6}, name
+    assert all(st >= 2 for name in ("word-shots", "algo-shots") for st in [sorted(counts[name])[len(counts[name]) // 2]])
+
+
+def test_few_shot_families_are_watched_and_count_for_nothing():
+    items = gen.generate(SEED)
+    few = {f.NAME for f in _few_shot()}
+    rows = item_table(items)
+    assert {row["part"] for row in rows} >= few and {row["pillar"] for row in rows if row["part"] in few} == {"watch"}
+    g = [5.0 if it.family in few else 0.1 for it in items]
+    r = round_score(items, g)
+    assert r["score"] == pytest.approx(0.1) and set(r["pillars"]) == {"agents", "reading", "transformation", "logic", "grammar"}
+    assert few <= set(r["watch"]) and all(r["watch"][name]["score"] == pytest.approx(5.0) for name in few)
+    assert r["counted"] == sum(it.family in gen.MORE for it in items)
+    assert score_from_table(rows, g, None)["watch"]["arith-shots"] == pytest.approx(5.0)
+    # the server tells generated parts from writing by name: it must know every family
+    from pathlib import Path
+
+    go = (Path(__file__).resolve().parents[1] / "server" / "exam.go").read_text()
+    known = set(re.findall(r'"([a-z-]+)": true', go.split("var generatedParts = map[string]bool{")[1].split("}")[0]))
+    assert known == {f.NAME for f in gen.FAMILIES}
+
+
+def test_a_near_miss_is_near_and_is_wrong():
+    from stet.exam.gen import units
+
+    pairs = [it for it in gen.generate(SEED, per_corner=3) if it.family.endswith("-pairs")]
+    assert {it.family for it in pairs} == {"arith-pairs", "units-pairs"} and all(it.kind == "pair" for it in pairs)
+    for it in pairs:
+        assert it.good.endswith("\n") and it.bad.endswith("\n")  # both end with the line, so neither is the other's beginning
+        cut = len(os.path.commonprefix([it.good, it.bad]))
+        start = max(it.good.rfind(" ", 0, cut), it.good.rfind("\n", 0, cut)) + 1
+        right, wrong = it.good[start:].strip(), it.bad[start:].strip()
+        if it.family == "arith-pairs":  # one digit, one off; the same length, signs and commas
+            assert len(right) == len(wrong) and [abs(int(a) - int(b)) for a, b in zip(right, wrong, strict=True) if a != b] == [1], it
+            assert not (len(wrong.lstrip("-")) > 1 and wrong.lstrip("-")[0] == "0"), it
+        else:  # the same quantity by another conversion's factor, or left unconverted
+            key, way = it.corner.split("/")[2:]
+            f = next(c[3] for c in units.CONVERSIONS if c[0] == key)
+            others = {c[3] for c in units.CONVERSIONS} - {f} | {1}
+            right, wrong = int(right), int(wrong)
+            assert wrong != right and any(wrong * f == right * g if way == "up" else wrong * g == right * f for g in others), it
+
+
+def test_few_shot_questions_fit_a_students_window():
+    from stet.exam.gen import shots
+    from stet.spec import load_season
+    from stet.tok import load_encoding
+
+    season = load_season("s2")
+    enc = load_encoding(season)
+    small, official = min(v["ctx"] for v in season.raw["scales"].values()), season.scale(season.official_scale).ctx
+    few = {f.NAME for f in _few_shot()}
+    sized = [(it, len(enc.encode_ordinary(it.ctx + it.cont if it.kind == "answer" else it.good))) for it in _season_exam() if it.family in few]
+    assert len(sized) > 800 and all(n <= official for _, n in sized)
+    over = [it.corner for it, n in sized if n > small]
+    # The smallest student's window holds all but a few: the tables of six rows that are longer than it by themselves.
+    assert len(over) <= 0.03 * len(sized) and all(c.startswith("struct-shots/") and c.endswith("/6") for c in over), over
+    # A pair is read from its beginning and its answer is at its end: every one must fit whole.
+    assert all(n <= small for it, n in sized if it.kind == "pair")
+    # the estimate the generator drops examples by is near the truth where it matters, on long texts
+    assert all(0.8 < shots.cost(it.ctx + it.cont) / 20 / n < 1.25 for it, n in sized if it.kind == "answer" and n > 150)

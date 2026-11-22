@@ -27,6 +27,19 @@ def _digits(rng: Rng, size: str, lo_small=2, hi_small=99) -> int:
     return rng.between(10_000, 999_999)
 
 
+def near_miss(rng: Rng, corner: str, item: Item) -> str:
+    """An item's answer with one digit one off: as near to right as a wrong answer comes."""
+    s = item.cont
+    at = [i for i, ch in enumerate(s) if ch.isdigit()]
+    i = rng.choice(at)
+    was = int(s[i])
+    step = 1 if rng.chance(1, 2) else -1
+    least = 1 if i == at[0] and len(at) > 1 else 0  # a number of several digits does not begin with a zero
+    if not least <= was + step <= 9:
+        step = -step
+    return f"{s[:i]}{was + step}{s[i + 1:]}"
+
+
 def make(rng: Rng, corner: str) -> Item:
     _, op, size, style = corner.split("/")
     commas = style == "words"

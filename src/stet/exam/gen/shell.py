@@ -6,6 +6,13 @@ is asked about it, so what comes back can be worked out and cannot be guessed or
 The project is the round's own: its directories, its files' names and what is in them are drawn
 from the seed, half of the words coined for the purpose (lexicon.coin), so no listing or file is
 the same from one round to the next.
+
+Commands and tool calls are the same in every country, so they are not translated. What differs is
+what the files hold. Beside the English projects there is one for each of the exam's other
+languages, whose notes are written in that language and its script, and the questions asked of it
+are the two whose answer is those notes: a file shown whole after its two halves, and a file read
+back after a line is added. Such an item counts as its notes' language; every other as English,
+for what comes back is file names, paths, counts and log lines.
 """
 
 from __future__ import annotations
@@ -14,7 +21,7 @@ import json
 
 from ..items import Item
 from ..rng import Rng
-from .lexicon import NAMES, PLACES, WORDS, coin
+from .lexicon import LANGS, NAMES, NOUNS, PLACES, WORDS, coin
 
 NAME = "agent"
 COMMANDS = ["ls", "ls-dir", "cat", "wc", "head", "grep", "cd-pwd", "mkdir-ls", "rm-ls", "append-cat"]
@@ -25,18 +32,23 @@ EVENTS = ["started", "stopped", "failed", "retrying", "ok", "timed out", "connec
 
 
 def corners() -> list[str]:
-    out = [f"{NAME}/shell/{c}" for c in COMMANDS] + [f"{NAME}/tools/{c}" for c in TOOLS]
-    return out + [f"{NAME}/shell/session", f"{NAME}/tools/session"]
+    out = [f"{NAME}/en/shell/{c}" for c in COMMANDS] + [f"{NAME}/en/tools/{c}" for c in TOOLS]
+    out += [f"{NAME}/en/shell/session", f"{NAME}/en/tools/session"]
+    for lang in LANGS[1:]:
+        out += [f"{NAME}/{lang}/shell/cat", f"{NAME}/{lang}/tools/write-read"]
+    return out
 
 
-def _word(rng: Rng) -> str:
-    return coin(rng) if rng.chance(1, 2) else rng.choice(WORDS)
+def _word(rng: Rng, lang: str = "en") -> str:
+    """A word, coined half the time. Names of files and projects are always in Latin letters."""
+    return coin(rng, lang) if rng.chance(1, 2) else rng.choice(NOUNS[lang] if lang != "en" else WORDS)
 
 
 class Project:
     """A few directories of small files, and the commands an agent runs in it."""
 
-    def __init__(self, rng: Rng):
+    def __init__(self, rng: Rng, lang: str = "en"):
+        self.lang = lang  # what its notes are written in
         self.user = rng.choice(NAMES).lower()
         self.name = _word(rng)
         self.home = self.cwd = f"/home/{self.user}/{self.name}"
@@ -44,7 +56,7 @@ class Project:
         self.files: dict[str, str] = {}
         self.empty: set[str] = set()  # directories with nothing in them
         self.files[rng.choice(["README.md", "NOTES.md", "TODO.md"])] = f"# {self.name.title()}\n\nA small tool for {_word(rng)} {_word(rng)}s."
-        self.text = self._add(rng, "", ".txt", "\n".join(" ".join(_word(rng) for _ in range(rng.between(2, 4))) for _ in range(rng.between(3, 5))))
+        self.text = self._add(rng, "", ".txt", "\n".join(self.line(rng) for _ in range(rng.between(3, 5))))
         log = []
         for _ in range(rng.between(4, 7)):
             log.append(f"2026-0{rng.between(1, 9)}-1{rng.below(10)} 0{rng.below(10)}:{rng.between(10, 59)}:{rng.between(10, 59)} {rng.choice(LEVELS)} {_word(rng)} {rng.choice(EVENTS)}")
@@ -56,6 +68,10 @@ class Project:
         self.files[f"{dirs[-1]}/{fn}.py"] = f"def {fn}(x):\n    return x * {rng.between(2, 9)}"
         for _ in range(rng.between(0, 2)):
             self._add(rng, rng.choice(dirs), rng.choice([".md", ".txt", ".json", ".sh"]), _word(rng))
+
+    def line(self, rng: Rng) -> str:
+        """A line of the project's notes: a few words, in its language."""
+        return " ".join(_word(rng, self.lang) for _ in range(rng.between(2, 4)))
 
     def _add(self, rng: Rng, d: str, ext: str, content: str) -> str:
         while (path := (f"{d}/" if d else "") + _word(rng) + ext) in self.files:
@@ -106,17 +122,18 @@ def _steps(p: Project, rng: Rng, c: str) -> tuple[list[tuple[str, dict, object]]
         d = rng.choice(p.dirs())
         before = [ls(d)]
         f = f"{d}/{_word(rng)}{rng.choice(['.txt', '.md', '.json'])}"
-        p.files[f] = ""
+        p.files.setdefault(f, "")  # touch leaves a file that is there as it was
         return before + [(f"touch {f}", {"tool": "write_file", "path": f, "content": ""}, "")], ls(d)
     if c == "cat":
-        f = rng.choice(p.shown())
+        f = rng.choice(p.shown()) if p.lang == "en" else p.text
         k = rng.between(1, len(p.files[f].splitlines()) - 1)
         head = (f"head -n {k} {f}", {"tool": "read_file", "path": f, "lines": k}, "\n".join(p.files[f].splitlines()[:k]))
         tail_n = len(p.files[f].splitlines()) - k
         tail = (f"tail -n {tail_n} {f}", {"tool": "read_file", "path": f, "from_line": k + 1}, "\n".join(p.files[f].splitlines()[k:]))
         return [head, tail], cat(f)
     if c in ("append-cat", "write-read"):
-        f, line = rng.choice([p.text, p.log]), " ".join(_word(rng) for _ in range(rng.between(2, 4)))
+        f = rng.choice([p.text, p.log]) if p.lang == "en" else p.text
+        line = p.line(rng)
         before = [cat(f)]
         p.files[f] += "\n" + line
         return before + [(f'echo "{line}" >> {f}', {"tool": "append_file", "path": f, "content": line}, "")], cat(f)
@@ -146,6 +163,11 @@ def _shell(step: tuple[str, dict, object]) -> tuple[str, str]:
     return cmd, res
 
 
+def _json(v) -> str:
+    """As a tool writes it: every script as it is read, not as \\u escapes."""
+    return json.dumps(v, ensure_ascii=False)
+
+
 def _lines(steps, style: str) -> str:
     out = []
     for step in steps:
@@ -153,13 +175,13 @@ def _lines(steps, style: str) -> str:
             cmd, res = _shell(step)
             out.append(f"$ {cmd}\n" + (f"{res}\n" if res else ""))
         else:
-            out.append(json.dumps(step[1]) + "\n" + json.dumps({"result": step[2]}) + "\n")
+            out.append(_json(step[1]) + "\n" + _json({"result": step[2]}) + "\n")
     return "".join(out)
 
 
 def make(rng: Rng, corner: str) -> Item:
-    _, style, c = corner.split("/")
-    p = Project(rng)
+    _, lang, style, c = corner.split("/")
+    p = Project(rng, lang)
     head = f"{p.user}@{p.name}:~/{p.name}\n" if style == "shell" else f"# agent log: {p.name}\n"
     pool = COMMANDS if style == "shell" else TOOLS
     if c == "session":
@@ -176,9 +198,9 @@ def make(rng: Rng, corner: str) -> Item:
     before, ask = _steps(p, rng, c)
     if style == "shell":
         cmd, res = _shell(ask)
-        return Item(kind="answer", corner=corner, fmt="logs", lang="en", source=f"gen:{NAME}",
+        return Item(kind="answer", corner=corner, fmt="logs", lang=lang, source=f"gen:{NAME}",
                     ctx=f"{head}{_lines(aside + before, style)}$ {cmd}\n", cont=res)
-    full = json.dumps({"result": ask[2]})
+    full = _json({"result": ask[2]})
     cut = len('{"result": ')
-    return Item(kind="answer", corner=corner, fmt="structured", lang="en", source=f"gen:{NAME}",
-                ctx=f"{head}{_lines(aside + before, style)}{json.dumps(ask[1])}\n{full[:cut].rstrip()}", cont=" " + full[cut:])
+    return Item(kind="answer", corner=corner, fmt="structured", lang=lang, source=f"gen:{NAME}",
+                ctx=f"{head}{_lines(aside + before, style)}{_json(ask[1])}\n{full[:cut].rstrip()}", cont=" " + full[cut:])

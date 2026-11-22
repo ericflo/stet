@@ -39,7 +39,7 @@
   },
   "exam": {
     "about": "Three quarters fresh human writing published in the day before the draw, one quarter generated skills. Only the parts that have been shown to tell curators apart count; the rest are sat, published and count for nothing. See docs/research/exam-first-principles.md.",
-    "generator_version": 8,
+    "generator_version": 9,
     "per_corner": 2,
     "more": {
       "agent": 4,
