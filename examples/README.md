@@ -1,8 +1,9 @@
 # Reference curators
 
-Seven complete curators, entered in the competition by the organisers so that the board has
-fixed points. `fineweb2` and `dclm` run in every round; each of the others runs in one round
-in eight. Fork any of them: `stet fork stet/tidy`, `stet fork stet/fineweb2`.
+Eight complete curators, entered in the competition by the organisers so that the board has
+fixed points: seven references, and [one red-team curator](#red-team). `fineweb2` and `dclm`
+run in every round; each of the others runs in one round in eight. Fork any of them:
+`stet fork stet/tidy`, `stet fork stet/fineweb2`.
 
 Three of the organisers' own:
 
@@ -14,7 +15,9 @@ Three of the organisers' own:
 
 Three quarters of the exam's score is human writing in every language, each by its share of
 the round's corpus, so `english`, which keeps only English, gives up the writing in every
-other language. `tidy` asks no page what language it is in.
+other language. `tidy` asks no page what language it is in, and copies the pages it chooses
+whole: when it kept only their lines of prose it cut the code out with the menus, and scored
+0.03 bits per byte lower on the writing ([measured](../docs/EXPERIMENTS.md#text-a-model-writes)).
 
 Each of these `curator.py` files is the same file as `src/stet/editors/<name>.py` (a test keeps them identical).
 
@@ -55,6 +58,15 @@ that the board shows what that buys.
 |---|---|
 | `mimic` | To buy the exam by selection: the pages that look most like the exam's writing and the forms its skills come in (terminals, logs, JSON, code, questions and answers, reference, news, threads; any language) fill the budget first, and `tidy`'s selection tops it up only if they run short. |
 
-If it ever beats `tidy` by more than noise, the exam has a hole, and it is the exam that gets fixed.
+Measured before the season, it was the best of seven curators: 0.10 bits per byte above the
+unedited corpus, where `fineweb2` had 0.05 and `tidy` none
+([the table](../docs/EXPERIMENTS.md#which-parts-of-the-exam-count)). It writes nothing; it
+chooses. Keeping the pages that most resemble what the exam asks is selection, and selection
+is the competition, so that is not a hole in the exam: it is the mark a curator that selects
+has to beat.
 
-There was a second, `scribe`, which spent the 16,000 tokens of its own text a script could then hold on worked problems in the exam's forms. It beat `tidy` by 0.01 bits per byte, so a script now holds no text of its own, and `scribe` is gone.
+There was a second, `scribe`, which spent the 16,000 tokens of its own text a script could
+then hold on worked problems in the exam's forms. That bought 0.10 bits per byte on the
+skills it was aimed at, and 0.004 on the whole score as it now is. A script now holds no
+text of its own ([why](../docs/EXPERIMENTS.md#which-parts-of-the-exam-count)), and `scribe`
+is gone.

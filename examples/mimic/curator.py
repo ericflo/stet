@@ -3,7 +3,7 @@ what that buys.
 
 The exam is known in outline: writing people published (reference, news, technical,
 conversation) and generated skills (a session at a shell, tool calls and their JSON, reading,
-transformation, logic, grammar, numbers and small programs asked after worked examples, facts).
+logic, grammar, numbers and small programs asked after worked examples, facts).
 mimic keeps the pages of the corpus that look most like the writing and like the forms the
 skills come in (terminals, logs, JSON, code, questions and answers), in any language, and writes
 nothing of its own. It has no mark for worked sums or for facts: it keeps those only where a
@@ -20,8 +20,12 @@ page it marks for something else holds them.
   5. Shuffle.
 
 No model, no GPU: every kept piece is a run of whole lines at least min_copy_bytes
-long. If this ever beats `tidy` by more than noise, the exam can be bought by looking like
-it, and it is the exam that gets fixed.
+long.
+
+Measured before the season it was the best of seven curators, 0.10 bits per byte above the
+unedited corpus (docs/EXPERIMENTS.md). It writes nothing and only chooses, and choosing the
+pages that most resemble what the exam asks is curation: this is the mark a curator that
+selects has to beat, not a hole in the exam.
 """
 
 import hashlib

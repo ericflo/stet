@@ -332,8 +332,9 @@ running would hold it for ever. Its place is its own, and its owner's best other
 may hold one too. That is how you beat your own record.
 
 The organisers' reference curators are the one exception to "one per entrant": their own
-three (`stet/identity`, `stet/english`, `stet/tidy`) and four that rebuild published recipes
-(`stet/heuristic`, `stet/dclm`, `stet/fineweb-edu`, `stet/fineweb2`). They are yardsticks:
+three (`stet/identity`, `stet/english`, `stet/tidy`), four that rebuild published recipes
+(`stet/heuristic`, `stet/dclm`, `stet/fineweb-edu`, `stet/fineweb2`), and `stet/mimic`,
+which keeps the pages that look most like the exam and shows what that buys. They are yardsticks:
 each holds a place while it ranks in the eight, and they leave as better curators arrive.
 Two of them, `stet/fineweb2` and `stet/dclm`, run in every round and tie the rounds
 together; each of the others runs in one round in eight, in turn, and keeps its rating from

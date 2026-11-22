@@ -439,9 +439,9 @@ The season's table is decided by finals ([the rules](RULES.md#finals)). The comm
 
 What it trains, for n curators (eight finalists, the lot's pick and the yardsticks): in
 each of the two rounds, 2n + 4 large students and the unedited corpus once at ½, 2 and 4
-times the budget. With all seven reference curators on the board that is 72 large
-students, 326 GPU hours at the floor, and 59 for the two curves: 385, or about 85 on 4090s.
-The curators themselves take up to 43 hours on the machine that runs them (two rounds, 16
+times the budget. With all eight of the organisers' curators on the board that is 76 large
+students, 344 GPU hours at the floor, and 59 for the two curves: 403, or about 89 on 4090s.
+The curators themselves take up to 45 hours on the machine that runs them (two rounds, 17
 curators, 4,800 s each), and each large corpus is built first.
 
 Rehearse first. `stet finals plan --rehearsal --scale standard --rounds <round> <round>
@@ -500,7 +500,7 @@ file in `src/stet/seasons/`, and the switch is:
    Archive the finished season's site from it ([below](#archiving-a-season)), so that its
    pages stay readable under `/seasons/<id>/`.
 4. Enter the reference curators from the organisers' account, before the first draw:
-   `for d in identity english tidy heuristic dclm fineweb2 fineweb-edu; do stet submit examples/$d --yes; done`.
+   `for d in identity english tidy heuristic dclm fineweb2 fineweb-edu mimic; do stet submit examples/$d --yes; done`.
    Three new entries are admitted a round, in the order they were submitted.
 5. Restart the organisers' verifier and the examiner on the new client. The examiner
    (`stet examine --follow`) harvests an hour of writing every hour and commits to it, and a

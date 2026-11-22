@@ -489,18 +489,22 @@ on what each writes.
 
 ## What is known
 
-Stet's repository holds the reference curators in `examples/`, all seven entered
-(`stet fork stet/tidy` copies one): `identity`, `english` and `tidy`, and four that rebuild
+Stet's repository holds the organisers' curators in `examples/`, all eight entered
+(`stet fork stet/tidy` copies one): `identity`, `english` and `tidy`; four that rebuild
 published recipes: `dclm`, `fineweb-edu` and `heuristic` (English filters), and `fineweb2`
-(every language, cleaned). Their ratings on the board are where known methods land:
-`fineweb2` and `dclm` run in every round, and each of the others in one round in eight.
+(every language, cleaned); and `mimic`, which keeps the pages that look most like the
+exam. Their ratings on the board are where known methods land: `fineweb2` and `dclm` run
+in every round, and each of the others in one round in eight.
 
-What the organisers' pilot says so far. Its fresh writing was Wikipedia only: news,
-technical writing and posts were not in it.
+What the organisers measured before the season, on one practice round at standard (gains
+over the unedited corpus, in bits per byte):
 
-- **Languages decide a lot.** Under this season's score, the recipe that keeps every
-  language and cleans each (`fineweb2`) was the only curator above the unedited corpus.
-  Every English-only filter was below it.
+- **Choosing what the exam asks for won.** `mimic` writes nothing and keeps the pages that
+  look like reference, news, technical text and conversation: +0.10. That is selection,
+  and it is the mark to beat.
+- **Languages decide a lot.** The recipe that keeps every language and cleans each
+  (`fineweb2`) had +0.05. The two English-only filters measured, `english` and `dclm`, were
+  0.24 and 0.30 below the unedited corpus.
 - **Quality filters trade capabilities.** They help English prose. They cost code and tool
   logs (rules that delete lines with braces delete programs), which `technical` and
   `agents` ask for, and everything not in English.

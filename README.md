@@ -50,6 +50,9 @@ stet service install      # leave it running: starts with the machine, upgrades 
   language by its share of the crawl. One quarter is skills, generated from the round's
   seed. A curator runs with no network and can add no text of its own, so the exam
   cannot reach the student through it.
+- **Only what tells curators apart.** Every part of the exam was measured before the
+  season. A part on which curators differed by less than luck does, or whose order did not
+  hold for a larger student, is not on it: nothing is sat that does not count.
 - **Copies only.** Everything the student reads is copied byte for byte from the round's
   corpus. A script holds no text of its own.
 - **Checked by other people.** Two volunteers run each curator, on NVIDIA and AMD, and
@@ -59,8 +62,8 @@ stet service install      # leave it running: starts with the machine, upgrades 
   list of libraries, whoever runs it.
 - **Paired scores.** Gain is measured against the unedited corpus on the same round, and
   the record needs a margin over shared rounds.
-- **Finals decide.** The season's top eight are trained again at a larger size, on a fresh
-  round.
+- **Finals decide.** The season's top eight are trained again at a larger size, on two
+  rounds of a crawl published after the board is frozen.
 - **Everything else is public.** Curators, scripts, seeds, every settled round's exam and
   every score on every item of it, the harness.
 
@@ -80,9 +83,9 @@ reward, info = env.step(edit_script)  # the gain, in bits per byte
 |---|---|
 | `src/stet/` | The harness and CLI (Python); `src/stet/exam/` makes and scores the exam |
 | `server/` | The API and website (Go) |
-| `examples/` | Reference curators, entered by the organisers: `identity`, `english`, `tidy`, and `dclm`, `fineweb-edu`, `heuristic`, `fineweb2` (published recipes, rebuilt). Patterns, not entered: `reader` (a small language model reads the pages); `agent` (an agent harness and a model served in the sandbox) |
+| `examples/` | Reference curators, entered by the organisers: `identity`, `english`, `tidy`, and `dclm`, `fineweb-edu`, `heuristic`, `fineweb2` (published recipes, rebuilt); and `mimic`, entered to show what choosing the pages most like the exam buys. Patterns, not entered: `reader` (a small language model reads the pages); `agent` (an agent harness and a model served in the sandbox) |
 | `cloud/` | `stet-cloud`, for the organisers: rents GPUs from Vast.ai, RunPod, Lium, Clore.ai and Salad to run curators and grade while volunteers are few (Go, built on its own) |
-| `docs/` | [Rules](docs/RULES.md), [design](docs/DESIGN.md), [verifying](docs/VERIFYING.md), [experiments](docs/EXPERIMENTS.md), [API](docs/API.md), [FAQ](docs/FAQ.md), [operating](docs/OPERATING.md) |
+| `docs/` | [Rules](docs/RULES.md), [design](docs/DESIGN.md), [verifying](docs/VERIFYING.md), [experiments](docs/EXPERIMENTS.md), [API](docs/API.md), [FAQ](docs/FAQ.md), [operating](docs/OPERATING.md), and [the reasoning behind the exam](docs/research/exam-first-principles.md) |
 
 ## Develop
 
