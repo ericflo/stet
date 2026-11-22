@@ -141,7 +141,7 @@ There is nothing to fit in advance: a round's writing is three hours of the day 
 which its draw picks, and its questions come from its seed. What a curator can learn from
 past rounds is what kinds of text matter (news, programs, replies, every language), and
 keeping more of those is choosing good data, which is the point. The exam weighs four kinds
-of writing and eight skills, and every language by its share of the crawl, so no one source
+of writing and seven skills, and every language by its share of the crawl, so no one source
 or kind of text can carry a score.
 
 ## Does everything on the exam count?
@@ -149,9 +149,9 @@ or kind of text can carry a score.
 Yes. The season names every part of the exam. Each part was measured before the season; a
 part that did not tell curators apart, or whose order did not hold for a larger student, is
 not on the exam. A part is in the score or it is not on the exam at all: nothing on the exam
-counts for nothing. Arithmetic, units, word problems, algebra, small algorithms and lookups
-in structured data are asked only after a few worked examples of the same task: asked cold,
-a student this size is too near chance for curators to differ.
+counts for nothing. Arithmetic, units, word problems, algebra and small algorithms are asked
+only after a few worked examples of the same task: asked cold, a student this size is too
+near chance for curators to differ.
 
 ## Who runs my code?
 

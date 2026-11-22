@@ -164,9 +164,12 @@ def report(out: Out, result: dict, base: dict | None, season) -> None:
         m = multiplier(season, result["round"]["kind"], result["scale"], result["gain"])
         if m:
             text += f"   →   {out.bold(format_multiplier(m))} data efficiency"
-        noise = ((season.raw.get("noise") or {}).get(result["scale"]) or {}).get("gain_sd")
-        if noise:
-            text += out.dim(f"   (training again moves this by about ±{noise:.3f})")
+        noise = (season.raw.get("noise") or {}).get(result["scale"]) or {}
+        if noise.get("gain_sd"):
+            note = f"training again moves this by about ±{noise['gain_sd']:.3f}"
+            if noise.get("order_sd"):  # measured: docs/EXPERIMENTS.md, the order of a script
+                note += f", another shuffle of the same pages by about ±{noise['order_sd']:.3f}"
+            text += out.dim(f"   ({note})")
         out.line("gain", text)
 
 

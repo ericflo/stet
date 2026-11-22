@@ -2,12 +2,18 @@
 
   1. Keep pages that read as writing, in whatever language they are written.
   2. Drop exact duplicates.
-  3. Inside each page, cut the lines that look like navigation or boilerplate.
-  4. Rank what is left by how much of the page was writing.
-  5. Keep the best pages until the training budget is filled once, and shuffle them.
+  3. Count how much of each page is writing: the lines long enough to be a sentence, with
+     the end of one in them.
+  4. Rank the pages by that.
+  5. Keep the best pages, whole, until their writing fills the training budget once, and
+     shuffle them.
 
-No model, no GPU, a few seconds per shard, on every core it is given (task.map). It only
-takes whole lines out of pages, which is always allowed.
+No model, no GPU, a few seconds per shard, on every core it is given (task.map).
+
+It copies its pages whole. It used to keep only the lines it counted as writing, and the two
+were trained side by side on the same pages in four orders: whole pages did better each time,
+by 0.03 bits per byte on the exam's writing, nearly all of it on technical writing and code,
+whose lines are not sentences (docs/EXPERIMENTS.md). The lines still say which pages to keep.
 
 The exam is written in every language of the crawl, each counting by its share of it. So
 nothing here asks what language a page is in: a rule that only English can pass throws away
@@ -50,9 +56,10 @@ def spaceless(text: str) -> bool:
 
 
 def prose_ranges(raw: bytes, dense: bool) -> tuple[list[list[int]], int]:
-    """Byte ranges of the lines worth keeping, each a whole line with its line break, and how
-    many bytes they hold. A line is kept when it is long enough to be a sentence and has the
-    end of one in it."""
+    """Byte ranges of the lines that read as writing, each a whole line with its line break,
+    and how many bytes they hold. A line counts when it is long enough to be a sentence and
+    has the end of one in it. tidy ranks pages by the count; the ranges are for a curator that
+    wants the lines themselves ({"d": page, "k": ranges} keeps them and nothing else)."""
     ranges: list[list[int]] = []
     pos = 0
     least = 25 if dense else 60
@@ -83,18 +90,14 @@ def edit(task: Task):
     corpus = task.corpus
 
     def judge(i, text):
-        """In a worker: how many bytes of this page are worth keeping, and a key that is the
-        same for every copy of it. None for a page that is not writing, or too little of it."""
+        """In a worker: how many bytes of this page are writing, and a key that is the same
+        for every copy of it. None for a page that is not writing, or too little of it."""
         if not looks_written(text):
             return None
         _, kept = prose_ranges(corpus.raw(i), spaceless(text))
         if kept < 400:
             return None
         return kept, hashlib.blake2b(text[:2000].encode("utf-8", "replace"), digest_size=8).digest()
-
-    def cut(i, text):
-        """In a worker: the lines of this page worth keeping."""
-        return prose_ranges(corpus.raw(i), spaceless(text))[0]
 
     seen: set[bytes] = set()
     scored = []
@@ -114,10 +117,12 @@ def edit(task: Task):
             break
         chosen.append(i)
         used += kept
+    # The budget was counted in bytes of writing and the pages are copied whole, so these are
+    # more pages than the student reads once: the stream is cut off at the budget, and what
+    # is trained on is a shuffled part of the best pages. (Only as many of the top-ranked
+    # pages as fill the budget did worse, both times it was tried.)
     random.Random(0).shuffle(chosen)
-    # Two numbers were kept for every page, and the lines only now, for the pages chosen: a
-    # round's corpus is a million pages, and the lines of all of them are gigabytes.
-    return [{"d": i, "k": ranges} for i, ranges in task.map(cut, docs=chosen)]
+    return chosen
 
 
 def main():

@@ -37,43 +37,40 @@ def _task(docs, tmp_path, tokens=4096):
     return Task(info, str(corpus.path), str(tmp_path / "out"), str(tmp_path / "scratch"), time.time() + 60), corpus
 
 
-def test_tidy_keeps_writing_in_every_script_and_only_takes_lines_out(tmp_path):
+def test_tidy_keeps_writing_in_every_script_and_copies_its_pages_whole(tmp_path):
     docs = [NAV + EN, NAV + RU, NAV + JA, NAV + AR, NAV + HI, SHOP, TAGS, "short", NAV + EN]
     task, corpus = _task(docs, tmp_path)
     script = tidy.edit(task)
-    kept = {line["d"] for line in script}
-    assert kept == {0, 1, 2, 3, 4}  # every language's page; not the shop, the tags, the stub or the copy
-    for line in script:
-        text = b"".join(corpus.raw(line["d"])[a:b] for a, b in line["k"]).decode()
-        assert "Home | About" not in text and "Copyright" not in text and len(text) > 400
-    # Whole lines of a page in the page's order: every piece is a copy, however short, or the
-    # grader would refuse the script.
+    assert set(script) == {0, 1, 2, 3, 4} and len(script) == 5  # every language's page; not the shop, the tags, the stub or the copy
+    # The pages as they are, menu and all: the lines that read as writing say which pages to
+    # keep, and are not what is kept (cutting them out measured worse, docs/EXPERIMENTS.md).
     path = tmp_path / "script.jsonl"
     write_script(path, script)
     _, stats = materialize(corpus, path, SEASON, SCALE, FakeEnc())
-    assert stats.src_docs == 5 and stats.out_docs == 5
+    assert stats.src_docs == 5 and stats.out_docs == 5 and stats.out_bytes == sum(corpus.size(i) for i in script)
     assert tidy.edit(task) == script  # the same script every time
 
 
-def test_the_short_lines_tidy_keeps_between_cut_ones_are_copies_the_grader_takes(tmp_path):
+def test_the_short_lines_that_read_as_writing_are_copies_the_grader_takes_between_cut_ones(tmp_path):
     # A sentence in Japanese can be a line of fifty bytes. Kept between lines that are cut, each
     # is a copy under the minimum, and allowed: a whole line of its page, in the page's order.
+    # tidy copies pages whole; a curator that wants the lines has them from prose_ranges.
     sentence = "ABCD社はDEFG法をGHIに適用しないとした。\n"
     task, corpus = _task([("メニュー\n" + sentence) * 30, NAV + EN], tmp_path)
-    script = tidy.edit(task)
-    cut = next(line["k"] for line in script if line["d"] == 0)
+    cut, _ = tidy.prose_ranges(corpus.raw(0), dense=True)
+    script = [{"d": 0, "k": cut}, 1]
     assert len(cut) == 30 and {b - a for a, b in cut} == {len(sentence.encode())} and len(sentence.encode()) < SEASON.min_copy_bytes
     path = tmp_path / "script.jsonl"
     write_script(path, script)
     _, stats = materialize(corpus, path, SEASON, SCALE, FakeEnc())  # raises if one of them is not a copy
-    assert stats.out_docs == 2 and stats.out_bytes == 30 * len(sentence.encode()) + len(EN.encode())
+    assert stats.out_docs == 2 and stats.out_bytes == 30 * len(sentence.encode()) + len((NAV + EN).encode())
     # Moved, the same lines are not the page with lines taken out, and the script is refused.
     write_script(path, [{"d": 0, "k": cut[::-1]}, 1])
     with pytest.raises(ScriptError, match=f"line 1: a copy of {len(sentence.encode())} bytes"):
         materialize(corpus, path, SEASON, SCALE, FakeEnc())
 
 
-def test_tidy_cuts_lines_exactly_where_a_page_is_not_valid_text(tmp_path):
+def test_tidy_counts_lines_exactly_where_a_page_is_not_valid_text(tmp_path):
     # A page whose bytes are not all UTF-8: offsets are counted in the page's own bytes.
     corpus = make_corpus(tmp_path / "corpus", ["x"])
     raw = b"Menu \xff\xfe | Home\n" + (EN.encode() + b"\n") * 2 + b"\xff footer"
@@ -87,7 +84,7 @@ def test_tidy_cuts_lines_exactly_where_a_page_is_not_valid_text(tmp_path):
 def test_tidy_fills_the_budget_once_with_the_pages_that_are_most_writing(tmp_path):
     docs = [NAV * 40 + EN, EN * 3, RU * 3, NAV * 40 + RU]
     task, _ = _task(docs, tmp_path, tokens=1200)  # room for two of the clean pages
-    assert {line["d"] for line in tidy.edit(task)} == {1, 2}
+    assert set(tidy.edit(task)) == {1, 2}
 
 
 @pytest.mark.skipif(not curator.FORK, reason="workers are forked, and only on Linux")
@@ -116,8 +113,7 @@ def test_tidy_writes_the_same_script_on_one_core_as_on_four(tmp_path):
     lines = tidy.edit(task)  # and the same again here, in this process
     write_script(tmp_path / "here.jsonl", lines)
     assert (tmp_path / "here.jsonl").read_bytes() == scripts[0]
-    kept = {line["d"] for line in lines}
-    assert kept == set(range(700)) - {600} and all(line["k"][0][0] > 0 for line in lines)  # every page once, without its menu
+    assert sorted(lines) == sorted(set(range(700)) - {600})  # every page once, and of the two copies the first
 
 
 def test_the_starter_keeps_every_language_too(tmp_path):

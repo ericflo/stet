@@ -6,14 +6,14 @@ not generated (for_season). A round's generated exam is a few items from every c
 family the season names, each made from its own stream of the round's seed, so adding a family
 or a corner, or taking one away, never changes what the others produce.
 
-Agent, context, transform, logic and grammar ask in the web's main languages, each language's
+Agent, context, logic and grammar ask in the web's main languages, each language's
 questions in corners of their own (logic/ru/...), so that a language's share of the corpus is its
 share of a skill, as it is of the fresh writing. Knowledge asks its facts in ten languages.
 
-Arithmetic, word problems, units, algebra, algorithms and structured data are asked few-shot
-(shots.py): a few solved examples of a task, then the task, each a family of its own
-(arith-shots, made from arith). That is the only form of those six: asked cold, a student this
-small is too near chance for curators to differ. Their modules make the examples and the
+Arithmetic, word problems, units, algebra and algorithms are asked few-shot (shots.py): a few
+solved examples of a task, then the task, each a family of its own (arith-shots, made from
+arith). That is the only form of those five: asked cold, a student this small is too near
+chance for curators to differ. Their modules make the examples and the
 question, and are not families an exam can name.
 """
 
@@ -31,16 +31,14 @@ from . import (
     logic,
     shell,
     shots,
-    structured,
-    transform,
     units,
     word,
 )
 
-FAMILIES = [logic, shell, grammar, transform, context, knowledge]
+FAMILIES = [logic, shell, grammar, context, knowledge]
 # What a small student cannot do cold, asked after solved examples of the same task. Knowledge
 # is not: a fact is known or it is not, and other facts do not help.
-FAMILIES += [shots.Shots(f) for f in (arith, word, units, algebra, algo, structured)]
+FAMILIES += [shots.Shots(f) for f in (arith, word, units, algebra, algo)]
 VERSION = 9  # bump when any generator changes what a seed produces
 
 

@@ -22,7 +22,7 @@
   "key_bytes": 64,
   "min_letters": 38
  },
- "digest": "cfe773652dce73f55a9e07762944d58fc8227dd3e66b98963b5d4ad09d57578c",
+ "digest": "8e2ba3839dfced8ed0bb5d4040116aea0fec1e2634e54ed93dbc2129254174b9",
  "draw_grid_seconds": 600,
  "environment": {
   "also": {
@@ -151,15 +151,13 @@
    "logic",
    "agent",
    "grammar",
-   "transform",
    "context",
    "knowledge",
    "arith-shots",
    "word-shots",
    "units-shots",
    "algebra-shots",
-   "algo-shots",
-   "struct-shots"
+   "algo-shots"
   ],
   "groups": {
    "skills": 0.25,
@@ -216,14 +214,6 @@
     ]
    },
    {
-    "about": "turning one format into another",
-    "group": "skills",
-    "name": "transformation",
-    "parts": [
-     "transform"
-    ]
-   },
-   {
     "about": "following an argument to its end",
     "group": "skills",
     "name": "logic",
@@ -251,12 +241,11 @@
     ]
    },
    {
-    "about": "what an algorithm returns and what structured data holds, each asked after worked examples",
+    "about": "what a small algorithm returns, asked after worked examples",
     "group": "skills",
     "name": "programs",
     "parts": [
-     "algo-shots",
-     "struct-shots"
+     "algo-shots"
     ]
    },
    {
@@ -278,7 +267,6 @@
   "conversation",
   "agents",
   "reading",
-  "transformation",
   "logic",
   "grammar",
   "numbers",
@@ -305,6 +293,7 @@
   },
   "standard": {
    "gain_sd": 0.005,
+   "order_sd": 0.008,
    "round_sd": 0.015
   }
  },

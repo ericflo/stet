@@ -1,8 +1,7 @@
 """A family asked few-shot: a few solved examples of a task, then the task.
 
-Asked plainly, arithmetic, unit conversions, algebra, word problems, small algorithms and lookups
-in structured data order curators no better than chance at any student size: a small student
-cannot do them cold. Shown a few solved examples of the very same kind first, the question is
+Asked plainly, arithmetic, unit conversions, algebra, word problems and small algorithms order
+curators no better than chance at any student size: a small student cannot do them cold. Shown a few solved examples of the very same kind first, the question is
 another one: can the student pick a pattern up from what is in front of it and carry it on? That
 is learning in context, and a small student trained on good data may show it. Each family asked
 this way is a part of its own (arith-shots, made from arith), and the only form the family is
@@ -11,8 +10,7 @@ asked in: it is on a season's exam when the season names it, and is not generate
 The examples are items of the question's own corner, made by the family's own generator from
 other draws of the seed: they are in exactly the question's format and differ from it in their
 operands only, and none of them is the question. There are three to six of them, fewer when
-more would not fit a student's window. A family whose examples share something long (a table
-several questions are asked of) says so with a function `shared`.
+more would not fit a student's window.
 """
 
 from __future__ import annotations
@@ -52,21 +50,18 @@ def cost(text: str) -> int:
 
 
 def examples(base, rng: Rng, corner: str) -> tuple[str, list[Item], Item, str]:
-    """A question of a family's corner and the solved examples shown before it: what they all
-    share (often nothing), the examples, the question, and what stands between them."""
+    """A question of a family's corner and the solved examples shown before it: what stands
+    before them all (nothing), the examples, the question, and what stands between them."""
     k = rng.between(*SHOTS)
-    if hasattr(base, "shared"):
-        head, shots, ask, sep = base.shared(rng, corner, k)
-    else:
-        head, sep, seen, made = "", SEP, set(), []
-        for i in range(8 * (k + 1)):  # a corner with few questions to ask gives the examples it can
-            it = base.make(rng.child(f"shot{i}"), corner)
-            if it.ctx not in seen:
-                seen.add(it.ctx)
-                made.append(it)
-            if len(made) == k + 1:
-                break
-        ask, shots = made[0], made[1:]
+    head, sep, seen, made = "", SEP, set(), []
+    for i in range(8 * (k + 1)):  # a corner with few questions to ask gives the examples it can
+        it = base.make(rng.child(f"shot{i}"), corner)
+        if it.ctx not in seen:
+            seen.add(it.ctx)
+            made.append(it)
+        if len(made) == k + 1:
+            break
+    ask, shots = made[0], made[1:]
     while len(shots) > 1 and cost(_before(head, shots, ask, sep) + ask.cont) > ROOM:
         shots = shots[1:]
     return head, shots, ask, sep

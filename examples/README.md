@@ -10,7 +10,7 @@ Three of the organisers' own:
 |---|---|
 | `identity` | Nothing. The unedited corpus; gain 0 by definition. |
 | `english` | Keeps documents that look like English prose. |
-| `tidy` | Pages that read as writing, in any language: deduplicated, boilerplate lines cut, the best budget's worth, shuffled. |
+| `tidy` | Pages that read as writing, in any language: deduplicated, ranked by how much of each is sentences, the best kept whole, shuffled. |
 
 Three quarters of the exam's score is human writing in every language, each by its share of
 the round's corpus, so `english`, which keeps only English, gives up the writing in every

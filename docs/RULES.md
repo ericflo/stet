@@ -161,11 +161,10 @@ each, every row below counts the same.
 | | Conversation | Posts and replies | Hacker News, Lemmy, forums, Bluesky, Mastodon, Wikipedia's talk pages |
 | Skills (25%) | Agents | What a tool says back, in a session at a shell | Generated |
 | | Reading | Taking an answer, or a new rule, from the context | Generated |
-| | Transformation | Turning text from one form into another | Generated |
 | | Logic | What follows from what is given | Generated |
 | | Grammar | The right sentence of two | Generated |
 | | Numbers | Arithmetic, units, word problems and algebra, each after a few worked examples | Generated |
-| | Programs | What a small algorithm returns (a list sorted, a letter counted) and what structured data holds (a value in a table or in JSON), each after a few worked examples | Generated |
+| | Programs | What a small algorithm returns (a list sorted, a letter counted), after a few worked examples | Generated |
 | | Knowledge | Facts the web knows, in ten languages | Generated: the seed picks from a public list of facts |
 
 **The writing** is what people published in three hours of the day before the draw. The
@@ -200,6 +199,8 @@ disagreed about them more than two curators did.
 a passage, an answer given its question, or the right sentence of a pair. An item's bits are
 never put over fewer than 16 bytes, so a one-word answer counts for less than a sentence. An
 answer or a passage longer than the student's window is scored whole, a window at a time.
+The exam's writing has the white space of the crawl's own text: one space between words,
+one line end between lines, no empty lines and no tabs.
 
 **The exam's score** is three quarters the mean of the kinds of writing and one quarter the
 mean of the skills. A kind missing from a round gives its share to the others of its own

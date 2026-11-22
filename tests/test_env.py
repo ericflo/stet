@@ -160,7 +160,7 @@ def test_the_documents_and_the_site_name_the_pillars_the_season_names(season):
     """The exam's pillars are written out by hand in the rules, the brief and on the site. When
     the season's list changes, this says where."""
     pillars = season.raw["exam"]["pillars"]
-    count = {4: "four", 8: "eight"}
+    count = {4: "four", 7: "seven", 8: "eight"}
     writing, skills = (count[sum(v["group"] == g for v in pillars.values())] for g in ("writing", "skills"))
     rules, brief, faq, design = (words(n) for n in ("docs/RULES.md", "src/stet/templates/AGENTS.md", "docs/FAQ.md", "docs/DESIGN.md"))
     home, glossary = (words(f"server/web/templates/{n}.html") for n in ("home", "glossary"))

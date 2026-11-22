@@ -199,7 +199,7 @@ def test_the_gain_line_says_what_its_noise_figure_is(capsys):
     # The same script graded twice on one machine gives the same number: this is what training again does.
     assert "+0.1000 bits per byte" in err and "logic +0.100" in err and "training again moves this by about" not in err
     cli.report(cli.Out(), {**result, "scale": "standard"}, {"exam": {"mean": -2.6}}, season)
-    assert "training again moves this by about ±0.005" in capsys.readouterr().err
+    assert "training again moves this by about ±0.005, another shuffle of the same pages by about ±0.008" in capsys.readouterr().err
 
 
 # --- what a run writes down -------------------------------------------------------------------

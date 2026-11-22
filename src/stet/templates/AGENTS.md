@@ -89,6 +89,9 @@ stet clean                    # delete downloaded rounds and model files (fetche
 improvements. Use `--rounds 3` or more and compare mean gains. Training the same script
 again moves its gain by about 0.03 at micro and 0.005 at standard, so on one round a
 difference smaller than twice that is noise. Confirm anything smaller over `--rounds 5`.
+The order of a script is luck of its own: the same pages in another shuffle move a
+standard gain by about 0.008, and once in a while by several times that. So a change that
+also changes the order your pages come in has to beat that, not only the 0.005.
 An exam with no writing in it is less steady: the skills are the noisier part.
 
 **Compare runs made against the same harvest.** A practice round's corpus never changes,
@@ -208,11 +211,10 @@ is skills.** Inside each group, every pillar counts the same:
 | `conversation` | writing | Posts and replies: Hacker News, Lemmy, forums, Bluesky, Mastodon, Wikipedia's talk pages |
 | `agents` | skills | What a tool says back, in a session at a shell |
 | `reading` | skills | An answer, or a new rule, taken from the context |
-| `transformation` | skills | Text turned from one form into another: Markdown to HTML, CSV to JSON, a query's result |
 | `logic` | skills | What follows from what is given |
 | `grammar` | skills | The right sentence of two |
 | `numbers` | skills | Arithmetic, units, word problems and algebra, each after a few worked examples |
-| `programs` | skills | What a small algorithm returns (a list sorted, a letter counted) and what structured data holds (a value in a table or in JSON), each after a few worked examples |
+| `programs` | skills | What a small algorithm returns (a list sorted, a letter counted), after a few worked examples |
 | `knowledge` | skills | Facts the web knows, in ten languages |
 
 - **The writing is newer than the crawl.** It is what people published in three hours
@@ -220,7 +222,7 @@ is skills.** Inside each group, every pillar counts the same:
   before any of it existed, and your curator has no network when it runs and can add no
   text of its own, so there is nothing to look up or to fit in advance.
 - **Every language counts by its share of the round's corpus**, inside every kind of
-  writing. More than half of a crawl is not English, and six of the eight skills are asked
+  writing. More than half of a crawl is not English, and five of the seven skills are asked
   in the web's main languages too: only `numbers` and `programs` are in English alone. So a
   curator that keeps only English gives up the writing and the skills in every other
   language: about half of the score. Throwing away every page that is not English is not
@@ -502,11 +504,13 @@ technical writing and posts were not in it.
 - **Quality filters trade capabilities.** They help English prose. They cost code and tool
   logs (rules that delete lines with braces delete programs), which `technical` and
   `agents` ask for, and everything not in English.
-- **Keep the forms answers come in.** Much of `agents` and `transformation` is whether the
-  student has seen logs, program output, tables and markup at all.
-- **Prose over furniture.** Within a page, keep the text and drop menus, link lists and
-  boilerplate. Whole lines taken out with a range edit (`"k"`) are allowed, however short
-  the lines that are kept.
+- **Keep the forms answers come in.** Much of `agents` and `technical` is whether the
+  student has seen logs, program output, tables and code at all.
+- **Cut lines with care.** `tidy` used to keep only the lines of a page that read as
+  sentences. The same pages copied whole scored 0.03 bits per byte higher on the writing,
+  in four orders out of four: the lines it cut held the code and the lists that
+  `technical` asks for. Whole lines taken out with a range edit (`"k"`) are allowed,
+  however short the lines that are kept; make sure they were not worth keeping.
 - **Repeating costs more as the student grows.** Keeping a small best slice and training on
   it many times pays most for a small student.
 - **Do not train in rank order.** The corpus arrives already shuffled. If you rank

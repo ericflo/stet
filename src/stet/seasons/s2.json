@@ -43,7 +43,6 @@
     "more": {
       "agent": 4,
       "context": 2,
-      "transform": 3,
       "logic": 2,
       "grammar": 3
     },
@@ -112,13 +111,6 @@
         ],
         "about": "reading the context and using what it says"
       },
-      "transformation": {
-        "group": "skills",
-        "parts": [
-          "transform"
-        ],
-        "about": "turning one format into another"
-      },
       "logic": {
         "group": "skills",
         "parts": [
@@ -146,10 +138,9 @@
       "programs": {
         "group": "skills",
         "parts": [
-          "algo-shots",
-          "struct-shots"
+          "algo-shots"
         ],
-        "about": "what an algorithm returns and what structured data holds, each asked after worked examples"
+        "about": "what a small algorithm returns, asked after worked examples"
       },
       "knowledge": {
         "group": "skills",
@@ -411,6 +402,7 @@
     },
     "standard": {
       "gain_sd": 0.005,
+      "order_sd": 0.008,
       "round_sd": 0.015
     }
   },

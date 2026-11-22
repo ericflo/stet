@@ -36,9 +36,8 @@ curriculum a real move.
 **The exam measures what pretrained models are for.** Text has no quality of its own: a page
 is worth keeping for what it teaches a model. Three quarters of the score is how well the
 student predicts writing people have just published, in four kinds that count the same:
-reference, news, technical and conversation. One quarter is skills, in eight kinds that
-count the same: agents, reading, transformation, logic, grammar, numbers, programs and
-knowledge. How much each counts is a choice of value, so it is declared rather than left to
+reference, news, technical and conversation. One quarter is skills, in seven kinds that
+count the same: agents, reading, logic, grammar, numbers, programs and knowledge. How much each counts is a choice of value, so it is declared rather than left to
 how many items of each there happen to be. [The reasoning](research/exam-first-principles.md#9-season-2-november-2026).
 
 **Only what tells curators apart is on the exam.** A student this size cannot do arithmetic,
@@ -53,7 +52,11 @@ not generated, not harvested and not sat. Nothing on the exam counts for nothing
 in the score or it is not on the exam at all. Eight families of generated question were
 asked both cold and after a few worked examples. After the examples, six pass both tests
 (they tell curators apart at the standard size, and keep their order at the large one);
-asked cold, one does ([measured](EXPERIMENTS.md#which-parts-of-the-exam-count)).
+asked cold, one does ([measured](EXPERIMENTS.md#which-parts-of-the-exam-count)). Two parts
+that passed were then taken off, transformation and lookups in structured data: set against
+what another order of one curator's own pages moves them by, and not only against training
+one script twice, curators did not differ on them by enough
+([measured](EXPERIMENTS.md#the-order-of-a-script)).
 
 **The exam is not a slice of the corpus.** On unseen text from the same pool, careful
 selection barely beats random, because perplexity rewards matching the test distribution.
@@ -93,7 +96,7 @@ them, and none can define the target.
 counts by its share of the round's corpus, in bytes. That is what a curator saves on a byte
 of the web. More weight to English would reward throwing away most of the web; equal weights
 would reward the smallest languages, where a student this size learns little and the score
-is mostly noise. Six of the eight skills are asked in the web's main languages too, each by
+is mostly noise. Five of the seven skills are asked in the web's main languages too, each by
 its share; numbers and programs are asked in English. So English is about half of the score,
 and a little less than half of the crawl. The tokenizer is trained on the crawl alone, so
 other languages do not cost the student more than they must.
@@ -105,6 +108,15 @@ given its question, or the right one of two sentences, scored by how likely the 
 it. An item's bits are never put over fewer than 16 bytes: the bits per byte of a one-word
 answer swing by whole bits between two trainings, and would otherwise weigh as much as a
 paragraph's. A text longer than the student's window is scored whole, a window at a time.
+
+**Laid out as the crawl lays out a page.** Common Crawl's text of a page has one space
+between words and one line end between lines. Writing taken from where it was published
+has empty lines between its paragraphs, tabs, runs of spaces: an empty line 300 times as
+often as the crawl has one, a tab 600 times as often. A student pays about twenty bits for
+a mark it has hardly met, so an exam that kept those marks would rank curators by whether
+their scripts happened to hold a few of them, or were put together to make them: by layout
+and not by what the pages teach. The exam's writing is given the crawl's white space before
+it is asked ([measured](EXPERIMENTS.md#text-a-model-writes)).
 
 **The data is drawn after the entries are locked.** The seed comes from drand, a public
 randomness beacon, at a time fixed on a public grid, and the corpus comes from the newest

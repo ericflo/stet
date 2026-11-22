@@ -46,7 +46,7 @@ def test_a_seed_always_makes_the_same_exam():
     # Pinned: the generated items of a round of the season, from the families its exam names. A
     # change to one of their generators that changes what a seed produces must bump gen.VERSION
     # and this hash, on purpose; so must a change to the parts the season names.
-    assert digest(gen.for_season(SEASON, SEED)) == "14c58f3df45a84c996565e9c8300a489d45f72b460eb13ce9f1bde37ece558da"
+    assert digest(gen.for_season(SEASON, SEED)) == "c279ff40ada2ce3546b71fa03de62f2e97e8514f6b2cb951c2136ba85c6662ef"
     assert digest(gen.for_season(SEASON, SEED)) == digest(gen.for_season(SEASON, SEED))
     assert digest(gen.for_season(SEASON, b"other")) != digest(gen.for_season(SEASON, SEED))
 
@@ -57,7 +57,6 @@ def test_a_seed_always_makes_the_same_exam():
 MEASURED = {
     "agent": (304, "dc90a2268e1e758503fdeade54fa8bee6d64599bc7aa3f87bf15c6631f59e608"),
     "context": (384, "58f875008a565e14306fb7ee2f141052e65ee118b82607f3fca268c37a26f15a"),
-    "transform": (204, "072144f0249b38ba01c16e771f8340b8b343d75eff0ddfa7fade99ed5417a1e1"),
     "logic": (288, "33959043534361197cdc61434d2ad1e49c2c95930e35697de38c2a7c77ba5ace"),
     "grammar": (198, "93ef6ec6e0fc435e1181db53f8656c448f20eb6a780e7e9b516c2718b93a73fa"),
     "knowledge": (200, "4e70f4fe895dd0fe8f82245ac9251443095c3915633c4b8f8e8661f28b52d8bf"),
@@ -66,7 +65,6 @@ MEASURED = {
     "word-shots": (48, "16ca9c38687c8dec916e52851235c79973a7994e46d7a02cc8ef4be3ecc356e0"),
     "algebra-shots": (40, "1601682b8ffa8b5867530511ae69db0e3196d0983942a41be09dd54bc997d538"),
     "algo-shots": (56, "b2604e9ea7bc0e1c211d9c7b7b555f92013d6f8cd6c3ba9b5bd3382f32ec1b95"),
-    "struct-shots": (72, "4cbdb11158c62930a6f02d67dbb239ad6938f8e1b0953e7d1c845d738b411da0"),
 }
 
 
@@ -85,7 +83,7 @@ def test_each_part_is_the_part_that_was_measured_whatever_else_is_on_the_exam():
 
     assert int(SEASON.raw["exam"]["per_corner"]) == 2 and gen.VERSION == SEASON.raw["exam"]["generator_version"] == 9
     assert by_part(gen.for_season(SEASON, SEED)) == MEASURED  # every part the season names, and no other
-    assert sum(n for n, _ in MEASURED.values()) == 2042
+    assert sum(n for n, _ in MEASURED.values()) == 1766
     # The same from every family this copy can make, and from each family made alone.
     whole = by_part(_every(SEED, per_corner=2))
     assert {part: whole[part] for part in MEASURED} == MEASURED
@@ -179,14 +177,6 @@ def test_dates_are_right():
             n, month, day, year = re.search(r"What date is (\d+) days after (\w+) (\d+), (\d+)", it.ctx).groups()
             d = dt.date(int(year), lexicon.MONTHS.index(month) + 1, int(day)) + dt.timedelta(days=int(n))
             assert it.cont.strip() == f"{lexicon.MONTHS[d.month - 1]} {d.day}, {d.year}"
-
-
-def test_structured_lookups_are_right():
-    for it in [it for it in _cold(gen.structured) if it.corner.startswith("struct/json/")]:
-        data = json.loads(it.ctx.split("\n\nQ:")[0])
-        who, field = re.search(r"What is (.+)'s (\w+)\?", it.ctx).groups()
-        row = next(r for r in data["people"] if r["name"] == who)
-        assert str(row[field]) == it.cont.strip()
 
 
 def test_items_refuse_to_be_malformed():
@@ -302,8 +292,8 @@ def test_the_season_names_every_part_of_its_exam():
     first = next(iter(SEASON.raw["exam"]["pillars"]))
     with pytest.raises(ValueError, match="no generator makes that and no source gives it"):
         plan_of(season_with(lambda exam: exam["pillars"][first]["parts"].append("horoscopes")))
-    # So is one that names a question asked cold: those six are asked after worked examples or not at all.
-    for cold in ("arith", "units", "word", "algebra", "algo", "struct"):
+    # So is one that names a question asked cold: those five are asked after worked examples or not at all.
+    for cold in ("arith", "units", "word", "algebra", "algo"):
         assert f"{cold}-shots" in plan.parts
         with pytest.raises(ValueError, match="no generator makes that and no source gives it"):
             plan_of(season_with(lambda exam, cold=cold: exam["pillars"][first]["parts"].append(cold)))
@@ -449,44 +439,6 @@ def test_all_of_a_long_answer_is_scored_and_its_beginning_is_never_cut(student):
     # and the score is the bits of all of it over the bytes of all of it
     total = sum(nll(model, seqs, cpu))
     assert sit(model, [it], enc, eot, ctx, cpu)[0] == pytest.approx(-total / 0.6931471805599453 / len(a.encode()), rel=1e-5)
-
-
-def test_transforms_are_right():
-    import sqlite3
-
-    from stet.exam.gen.transform import roman
-
-    for n in (1, 4, 9, 14, 40, 90, 400, 1994, 2026, 3999):
-        back, rest = 0, roman(n)
-        for v, s in ((1000, "M"), (900, "CM"), (500, "D"), (400, "CD"), (100, "C"), (90, "XC"), (50, "L"), (40, "XL"),
-                     (10, "X"), (9, "IX"), (5, "V"), (4, "IV"), (1, "I")):
-            while rest.startswith(s):
-                back, rest = back + v, rest[len(s):]
-        assert back == n and not rest
-    for it in _all("transform/en/sql"):
-        db = sqlite3.connect(":memory:")
-        db.execute("CREATE TABLE people (name TEXT, city TEXT, age INTEGER)")
-        for line in it.ctx.split("|---|---|---|\n")[1].split("\n\n")[0].splitlines():
-            name, city, age = [c.strip() for c in line.strip("| ").split("|")]
-            db.execute("INSERT INTO people VALUES (?, ?, ?)", (name, city, int(age)))
-        query = it.ctx.split("\n\n")[-1].split("\nResult:")[0]
-        got = [str(r[0]) for r in db.execute(query)]
-        assert ", ".join(got) == it.cont.strip(), (query, it.cont)
-    table = [it for it in _all("transform/") if it.corner.endswith("/csv-json")]
-    assert {it.lang for it in table} == set(lexicon.LANGS)
-    for it in table:
-        lines = [ln.split(",") for ln in it.ctx.split("CSV:\n")[1].split("\n\n")[0].splitlines()[1:]]
-        assert json.loads(it.cont) == [{"name": name, "city": city, "age": int(age)} for name, city, age in lines]
-        assert all(name in lexicon.GIVEN[it.lang] and city in lexicon.CITIES[it.lang] for name, city, _ in lines)
-    # Markdown in every language: without its marks, the HTML says what the Markdown says
-    pages = [it for it in _all("transform/") if it.corner.endswith("/md-html")]
-    assert {it.lang for it in pages} == set(lexicon.LANGS)
-    for it in pages:
-        md = it.ctx.split("Markdown:\n")[1].split("\n\nHTML:")[0]
-        said = re.sub(r"^(## |- )", "", re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", md), flags=re.M).replace("*", "")
-        assert re.sub(r"<[^>]+>", "", it.cont).strip() == said, it
-        if it.lang != "en":
-            assert all(w in lexicon.NOUNS[it.lang] for w in said.split()), it
 
 
 def test_students_farmed_out_to_the_organisers_machines_add_up_as_training_here_does(corpus, tmp_path, monkeypatch):
@@ -659,7 +611,7 @@ def test_the_skills_are_asked_in_every_language_and_each_language_is_measured_on
 
 
 def test_a_round_asks_its_own_questions_and_a_seed_always_the_same():
-    families = [gen.logic, gen.context, gen.shell, gen.transform, gen.grammar]
+    families = [gen.logic, gen.context, gen.shell, gen.grammar]
     one, again, other = (gen.generate(seed, per_corner=2, families=families, more=MORE) for seed in (b"one", b"one", b"two"))
     assert one == again
     # What is read and what an agent works in are invented for the round: nothing of one round is in the next.
@@ -845,7 +797,7 @@ def test_a_few_shot_question_is_shown_solved_examples_of_its_own_corner_and_neve
     from stet.exam.gen import shots
 
     fams = _few_shot()
-    cold = ("arith", "word", "units", "algebra", "algo", "struct")  # what a small student cannot do cold
+    cold = ("arith", "word", "units", "algebra", "algo")  # what a small student cannot do cold
     assert {f.NAME for f in fams} == {f"{name}-shots" for name in cold}
     assert not {f.NAME for f in gen.FAMILIES} & set(cold)  # and is not asked cold: the few-shot form is the only one
     root, counts = Rng(SEED, "few"), {}
@@ -861,9 +813,9 @@ def test_a_few_shot_question_is_shown_solved_examples_of_its_own_corner_and_neve
             before = head + "".join(s.ctx + s.cont + sep for s in shown) + ask.ctx
             assert before.count(ask.ctx) == 1 and (it.fmt, it.lang) == (ask.fmt, ask.lang)
             assert it.kind == "answer" and (it.ctx, it.cont) == (before, ask.cont)
-            if not hasattr(fam.base, "shared"):  # each example is a whole question of the family, as it would ask it cold
-                again = [fam.base.make(root.child(corner).child(f"shot{i}"), fam.of(corner)) for i in range(60)]
-                assert all(s in again for s in [*shown, ask])
+            # each example is a whole question of the family, as it would ask it cold
+            again = [fam.base.make(root.child(corner).child(f"shot{i}"), fam.of(corner)) for i in range(60)]
+            assert all(s in again for s in [*shown, ask])
             counts.setdefault(fam.NAME, []).append(len(shown))
     # three to six examples where they are short; fewer only where more would not fit a small window
     for name in ("arith-shots", "units-shots", "algebra-shots"):
@@ -886,7 +838,7 @@ def test_every_generated_item_of_a_round_counts_and_the_server_is_told_which_par
     assert sum(p["items"] for p in r["pillars"].values()) == r["items"] == len(items)  # every item is in a pillar
     # A family this copy can make and the season does not name is not in a round, and the score
     # refuses it. So it does a question asked cold, which is no family of an exam's at all.
-    for fam in [f for f in gen.FAMILIES if f.NAME not in named] + [gen.arith, gen.word, gen.units, gen.algebra, gen.algo, gen.structured]:
+    for fam in [f for f in gen.FAMILIES if f.NAME not in named] + [gen.arith, gen.word, gen.units, gen.algebra, gen.algo]:
         with pytest.raises(ValueError, match="not a part of the season's exam"):
             item_table(gen.generate(SEED, families=[fam])[:1])
     # The server tells generated parts from writing by the season's own list (tools/export_season.py).
@@ -904,10 +856,9 @@ def test_few_shot_questions_fit_a_students_window():
     small, official = min(v["ctx"] for v in season.raw["scales"].values()), season.scale(season.official_scale).ctx
     asked = gen.generate(SEED, int(season.raw["exam"]["per_corner"]), families=_few_shot())  # as a round would ask them
     sized = [(it, len(enc.encode_ordinary(it.ctx + it.cont))) for it in asked]
-    assert len(sized) > 400 and all(it.kind == "answer" and n <= official for it, n in sized)
-    over = [it.corner for it, n in sized if n > small]
-    # The smallest student's window holds all but a few: the tables of six rows that are longer than it by themselves.
-    assert len(over) <= 0.03 * len(sized) and all(c.startswith("struct-shots/") and c.endswith("/6") for c in over), over
+    assert len(sized) > 350 and all(it.kind == "answer" and n <= official for it, n in sized)
+    # and the smallest student's window holds every one of them
+    assert not [it.corner for it, n in sized if n > small]
     # the estimate the generator drops examples by is near the truth where it matters, on long texts
     assert all(0.8 < shots.cost(it.ctx + it.cont) / 20 / n < 1.25 for it, n in sized if n > 150)
 
