@@ -888,10 +888,11 @@ func TestGradersAreRentedBeforeTheExam(t *testing.T) {
 	}
 }
 
-// Machines to run curators are rented the cheapest a grade first, even where grades are
-// rented the fastest: once its runs are done, such a machine takes a grade before the exam
-// and holds it until then.
-func TestCuratorsAreRunOnTheCheapestAGrade(t *testing.T) {
+// Machines to run curators are rented the fastest first, as grades are: with the exam posted
+// at the draw, such a machine's grades are wanted once its runs are done, and the first four
+// to take one also measure the round's baseline. In Season 2's first round two RTX 5070s,
+// rented for curators as the cheapest a grade, trained twice and set its last 35 minutes.
+func TestCuratorsAreRunOnTheFastest(t *testing.T) {
 	rp, st := newFakeRunPod(t), newFakeStet(t)
 	f, out := testFleet(t, rp, st, 3)
 	f.o.Cloud, f.o.Edits = "ANY", true
@@ -903,10 +904,9 @@ func TestCuratorsAreRunOnTheCheapestAGrade(t *testing.T) {
 	for _, spec := range rp.created {
 		got = append(got, strings.ToLower(spec.Cloud)+" "+shortGPU(spec.GPU.ID))
 	}
-	// With nothing seen yet, a community host is taken to start three times in four: the
-	// community 3080 Ti at $0.18 is ranked as $0.24, a grade on it $0.25 against $0.25 on
-	// the secure 3080 at $0.20 (ranked as $0.21), which is a little quicker to come.
-	if len(got) != 2 || got[0] != "secure RTX 3080" || got[1] != "secure RTX 3080" {
+	// The 4090 is the fastest that fits, and its community cloud the cheaper; the secure 3080
+	// would have been the cheapest a grade.
+	if len(got) != 2 || got[0] != "community RTX 4090" || got[1] != "community RTX 4090" {
 		t.Fatalf("rented %v\n%s", got, out)
 	}
 }

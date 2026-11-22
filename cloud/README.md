@@ -137,16 +137,17 @@ that went quiet or stopped. The rest stop by themselves. A machine ended a momen
 took a job, or that stopped partway through one, still holds it as the server sees it: what
 it holds is handed back on the next look, so nothing waits out its lease.
 
-Every machine rented for a grade of a posted exam is the fastest that will do, looked up
-afresh each time: every kind of GPU the markets armed have free under `--max-price` is tried
-fastest first (the cheaper first where two are as fast) until one has a machine with room. A
-kind's price is ranked over how often machines of its kind have started (`startRates`: some
-cheap hosts never do), learned per market, card and class of host. A round settles only once
-its slowest grade is in: a pass is about 8 minutes on a 4090, and 16 on a 3090. Machines to
-run curators are the cheapest a grade instead: in Season 1 each then held a grade until the
-exam, so its speed bought nothing. With the exam posted at the draw, a curator machine's
-grades are wanted as soon as its runs are done, and Season 2's first rounds will show whether
-that order still pays. `--cheapest` rents every machine by what a grade costs, its price over its speed:
+Every machine rented for a grade of a posted exam, or to run curators, is the fastest that
+will do, looked up afresh each time: every kind of GPU the markets armed have free under
+`--max-price` is tried fastest first (the cheaper first where two are as fast) until one has a
+machine with room. A kind's price is ranked over how often machines of its kind have started
+(`startRates`: some cheap hosts never do), learned per market, card and class of host. A round
+settles only once its slowest grade is in: a pass is about 5 minutes on a 5090, 8 on a 4090
+and 17 on a 5070. A machine that runs curators takes grades as soon as its runs are done, and
+the first four to take one also measure the round's baseline, two passes. In Season 1 such a
+machine held a grade until the exam and was rented the cheapest a grade; in Season 2's first
+round two 5070s rented so set its last 35 minutes, for no less a pass than a 5090's (on Vast,
+about $0.04 a pass on either). `--cheapest` rents every machine by what a grade costs, its price over its speed:
 a 4090 at $0.89 an hour then comes before an A40 at $0.59, and an A4000 at $0.17 before
 both. What will do: NVIDIA, 12 GB or more (a machine that runs curators needs 10 and gives
 one 8), on a host with the season's floor of 16 GB of memory and 6 vCPUs a GPU, a driver

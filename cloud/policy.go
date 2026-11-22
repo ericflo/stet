@@ -335,8 +335,8 @@ type Decision struct {
 	// kind just in time to have trained by then.
 	LaunchEarly int
 	ExamDue     time.Time
-	// Of the rest, the machines rented to run curators: the cheapest a grade, since once its
-	// runs are done such a machine takes a grade before the exam and holds it until then.
+	// Of the rest, the machines rented to run curators, where they may run: the fastest first,
+	// as the rest are, since once its runs are done such a machine takes grades the round waits on.
 	LaunchRuns int
 	End        []Ending // machines to end now
 	// Keys no machine is rented with that the server says still hold a job: ended a moment

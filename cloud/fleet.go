@@ -938,20 +938,23 @@ func (f *Fleet) launch(ctx context.Context, v *View, n, long, early, runs int, d
 	}
 	// The machines for the bigger students first, each chosen for what a student costs on
 	// it; then those for grades taken before an exam, each kind just in time; then those to
-	// run curators, the cheapest a grade, since each holds a grade until the exam once its
-	// runs are done; then the rest, the fastest first (or with --cheapest, the cheapest a
-	// grade).
+	// run curators, only where they may run; then the rest. Each is the fastest first (or with
+	// --cheapest, the cheapest a grade): with the exam posted at the draw (Season 2), a curator
+	// machine's grades are wanted as soon as its runs are done, and the first four to take one
+	// also measure the round's baseline, so its speed is the round's. In Season 1 it held a
+	// grade until the exam and was the cheapest a grade; in Season 2's first round two RTX
+	// 5070s rented so set its last 35 minutes, for no less a pass than a 5090's.
 	long = min(long, n)
 	early = min(early, n-long)
 	runs = min(runs, n-long-early)
 	rented := 0
 	for _, batch := range []struct {
-		n           int
-		long, cheap bool
-		due         time.Time
-		what        string
+		n              int
+		long, curators bool
+		due            time.Time
+		what           string
 	}{{long, true, false, time.Time{}, "bigger students"}, {early, false, false, due, "early grades"}, {runs, false, true, time.Time{}, "curators"}, {n - long - early - runs, false, false, time.Time{}, "grades"}} {
-		got, err := f.launchSome(ctx, v, batch.n, batch.long, batch.cheap, batch.due, site, vouched, batch.what)
+		got, err := f.launchSome(ctx, v, batch.n, batch.long, batch.curators, batch.due, site, vouched, batch.what)
 		rented += got
 		if err != nil {
 			return rented, err
@@ -960,7 +963,7 @@ func (f *Fleet) launch(ctx context.Context, v *View, n, long, early, runs int, d
 	return rented, nil
 }
 
-func (f *Fleet) launchSome(ctx context.Context, v *View, n int, long, cheap bool, due time.Time, site string, vouched map[string]Vouched, what string) (int, error) {
+func (f *Fleet) launchSome(ctx context.Context, v *View, n int, long, curators bool, due time.Time, site string, vouched map[string]Vouched, what string) (int, error) {
 	if n <= 0 {
 		return 0, nil
 	}
@@ -968,10 +971,7 @@ func (f *Fleet) launchSome(ctx context.Context, v *View, n int, long, cheap bool
 	if err != nil {
 		return 0, err
 	}
-	if cheap && len(f.o.GPUs) == 0 {
-		byGrade(gpus, f.speedOf)
-	}
-	if cheap && f.o.Edits && f.probe == "" {
+	if curators && f.o.Edits && f.probe == "" {
 		// Machines to run curators, only where stet's container sandbox is known to hold, and
 		// not on a host or a CPU that was under the season's floor this week.
 		refused, err := f.readRefusals()

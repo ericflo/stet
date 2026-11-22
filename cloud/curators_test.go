@@ -66,7 +66,8 @@ func TestAMachineUnderTheFloorTeachesWhereCuratorsMayNotRun(t *testing.T) {
 	fm.answers["POST /api/v0/bundles/"] = string(fixture(t, "vast_bundles.json"))
 	vast := newVast(fm.srv.URL, "vast-key")
 	f.markets = append(f.markets, vast)
-	f.o.Edits, f.o.Disk, f.o.Market = true, 100, "vast"
+	// The cheapest a grade first (--cheapest), so that which host comes next is plain.
+	f.o.Edits, f.o.Disk, f.o.Market, f.o.Cheapest = true, 100, "vast", true
 	if err := cmdMarkets(ctx, f, []string{"curators", "vast"}, "cage_check: every case held", false); err != nil {
 		t.Fatal(err)
 	}
