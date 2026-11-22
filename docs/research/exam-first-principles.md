@@ -693,6 +693,21 @@ the standard deviation of that between trainings of one script, pooled over the 
    rank correlation of 0.55 or more. Where trainings at the large size are made, the same
    between standard and large.
 
+**Amended while the trainings ran, before any curator's large student but tidy's had
+finished.** The second test as first written cannot be read. The micro corpus was 8 files
+for a budget of 40 million tokens, twelve times the budget; the standard one 16 files for
+160 million, six times; the large one 64 files for 640 million, six times. So micro and
+standard did not play the same game: at micro a curator kept one page in twelve and at
+standard one in six, and a curator that keeps only prose lines (`tidy`, and `scribe` with
+it) fed the micro student so narrow a diet that it fell 1.8 bits per byte behind on the
+agent items, where at standard it is 0.17 behind. The first standard trainings showed the
+effect on every part, the kinds of writing among them: it is a property of the two pools,
+not of a part. Standard and large have the same ratio of pool to budget, and the season's
+claim is that the order at standard carries to large. So the second test is the agreement
+between **standard and large** alone, at the same 0.55, with one large training of each
+curator; micro against standard is reported beside it and decides nothing. (9.8 gives every
+size the same ratio from here on, so that this cannot happen again.)
+
 A part that passes both is in the score. A part that fails either is off the exam. The
 thresholds are the ones 9.3 used on the pilot. The few-shot forms, science abstracts, each
 kind of writing and each cold family face the same two tests; nothing is in for its name.
