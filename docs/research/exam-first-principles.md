@@ -972,9 +972,13 @@ against three at +0.016 (+0.010 to +0.020), where students of one script differ 
 It is not the machine or the code. The unedited script's tokens are the same to the byte,
 and an unedited student trained on the pilot's machine scores +0.004 against 9.7's three,
 inside their spread. It is the script. `tidy` chooses a quarter more than the budget holds
-and shuffles its choice with a fixed seed. 9.7's code and this code choose the same pages
-but for two of 51,764, and a list two shorter is shuffled into a wholly different order: a
-different four fifths of the same pages are trained on, in a different sequence. So the
+and shuffles its choice with a fixed seed. 9.7's standard scripts were made a few minutes
+before `tidy`'s test of a page's characters moved into the regular-expression engine, a
+change meant to leave its script as it was. At this size it does not quite: the two choose
+the same pages but for four of 51,764 (made again from both versions on the pilot's
+machine: three pages only in the old script, one only in the new). The same seed then
+shuffles a list two shorter into another order: 160 pages stand in the same place, and of
+the 40,600 pages each trains on, 2,300 are not trained on by the other. So the
 noise between students of one script, which is what a round's error bars are made of, says
 nothing of how far a curator's score moves when its script is put in another order. That
 is measured here too: `tidy`'s own lines in two more orders (seeds 1 and 2), two students
@@ -987,3 +991,15 @@ The rule therefore gains a second condition, written before any arm's result: an
 only if its gain over `tidy` is also larger than the widest gap between two of `tidy`'s
 three orders on this machine. A gain smaller than that is not told apart from an accident
 of order.
+
+**Added at 10:35 UTC, after the first `rescue-5` student and before any other arm's.** That
+student is 0.028 above `tidy` on writing. A rescued page differs from the page it replaces
+in two ways: the teacher wrote it, and it is a kind of page `tidy` never chooses. To tell
+the two apart each rescue arm gets a twin, `rescueraw-5` and `rescueraw-15`: the same pages
+in the same places, copied whole and not rewritten, with `tidy`'s lowest-ranked pages
+removed by as many tokens. The in-place arms have the same twin (`rewriteraw-N`, the whole
+page copied where the teacher's text of it would stand), trained if an in-place arm passes.
+A pass is credited to the teacher's writing only if the arm also beats its twin by more
+than twice the standard error of their difference. If the twin does as well, the gain
+belongs to the pages, which a script of copies can have today, and it is a finding about
+`tidy` and not about writing.
