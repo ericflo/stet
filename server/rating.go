@@ -325,7 +325,7 @@ type BoardRow struct {
 	Provisional bool      `json:"provisional,omitempty"`
 	Record      bool      `json:"record,omitempty"`
 	Ladder      bool      `json:"ladder,omitempty"`
-	Tied        bool      `json:"tied,omitempty"` // too close to the row above to tell apart
+	Tied        bool      `json:"tied,omitempty"` // too close to the row its run of tied rows starts at to tell apart
 	TiedAt      int       `json:"-"`              // the rank its run of tied rows starts at; 0 when it is tied with nobody
 	Organisers  bool      `json:"-"`              // entered by the organisers: a reference curator, a yardstick
 	CreatedAt   int64     `json:"created_at"`
@@ -480,20 +480,20 @@ func (a *App) computeBoard(s *State) *Board {
 	}
 	byRating(b.Rated)
 	byRating(b.Provisional)
-	// Ranks, and ties. A row is tied with the one above when the gap between their ratings
-	// is within two standard errors of that gap: the order of the two could be chance. A
-	// run of tied rows shares the rank it starts at.
+	// Ranks, and ties. A row is tied with the first of the run of tied rows above it when
+	// the gap between their ratings is within two standard errors of that gap: the order of
+	// the two could be chance. A run of tied rows shares the rank it starts at. It is the
+	// run's first row a row is held against, and not the one just above: a long field in
+	// which each is a little behind the last would otherwise all be tied with its best.
+	var first *BoardRow // of the run the row above is in
 	for i, r := range b.Rated {
 		r.Rank = i + 1
-		if i == 0 {
+		if first != nil && *first.Rating-*r.Rating <= 2*math.Sqrt(*first.SE**first.SE+*r.SE**r.SE) {
+			first.TiedAt = first.Rank
+			r.Tied, r.TiedAt = true, first.Rank
 			continue
 		}
-		if above := b.Rated[i-1]; *above.Rating-*r.Rating <= 2*math.Sqrt(*above.SE**above.SE+*r.SE**r.SE) {
-			if above.TiedAt == 0 {
-				above.TiedAt = above.Rank
-			}
-			r.Tied, r.TiedAt = true, above.TiedAt
-		}
+		first = r
 	}
 	// The ladder: the record holder, then the best editor of each person. The organisers'
 	// reference editors are fixed points for everyone and all stay on: the ladder's size is

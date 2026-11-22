@@ -92,7 +92,7 @@ A leaderboard row:
 |---|---|
 | `id`, `name`, `version`, `owner`, `technique` | The curator |
 | `rank` | Place among rated curators |
-| `tied` | Set when its `rating` is too close to the row above's to tell them apart: the gap is within two standard errors of the gap, `2·sqrt(se² + se_above²)`. The site gives a run of tied rows the place it starts at |
+| `tied` | Set when its `rating` is too close to tell apart from that of the first row of the run of tied rows above it: the gap is within two standard errors of the gap, `2·sqrt(se² + se_first²)`. Rows are held against the run's first row, not the row just above, so ties do not chain. The site gives a run of tied rows the place it starts at |
 | `rounds` | Official rounds it has settled |
 | `rating` | In bits per byte. The board is sorted by this. It is `adjusted` drawn towards the field's mean `m` (the mean of every curator's `adjusted`, weighted by its rounds): `m + n/(n+k)·(adjusted − m)` after `n` rounds. `k` is between 1 and 8: the variance of one round's gain about a curator's own mean (`s2`), over the variance between curators' means beyond what `s2` alone would put there. `s2` is pooled over the curators with two rounds or more, together with the square of the season's `noise.<scale>.round_sd`, which counts as eight rounds' worth, so that a season's first rounds do not set it alone. `k` is 4 while fewer than three curators have two rounds, or nothing is left over |
 | `adjusted` | Mean gain adjusted for round difficulty, before that. A round the curator failed in counts as that entry's `counts_as` |

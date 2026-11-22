@@ -313,7 +313,7 @@ where other entries did run, are taken to be the entry's doing, and it stops bei
   is ranked when it has them. A curator you replace keeps its page and its results but
   leaves the ranking.
 - **Ties are shown as ties.** A curator whose rating is within two standard errors of the
-  one above it shares its place on the board.
+  first curator at a place shares that place on the board.
 - **Multiplier** = how many times more unedited data the student would have needed to do
   as well. None is shown until that curve has been measured on this exam.
 

@@ -20,7 +20,7 @@
 
   {{with $row}}
   <dl class="headline">
-    <div><dt>Rank</dt><dd>{{if .Rank}}<b>{{if .TiedAt}}={{.TiedAt}}{{else}}{{.Rank}}{{end}}</b><small>of {{$d.Ranked}} on the leaderboard{{if .TiedAt}}, too close to its neighbour to call{{end}}</small>{{else if .Provisional}}<b class="word">not yet</b><small>{{.Rounds}} of the {{$d.RatedRounds}} rounds it needs to be ranked</small>{{else}}<b class="word">—</b><small>replaced by a newer version</small>{{end}}</dd></div>
+    <div><dt>Rank</dt><dd>{{if .Rank}}<b>{{if .TiedAt}}={{.TiedAt}}{{else}}{{.Rank}}{{end}}</b><small>of {{$d.Ranked}} on the leaderboard{{if .TiedAt}}, a place it shares: too close to call{{end}}</small>{{else if .Provisional}}<b class="word">not yet</b><small>{{.Rounds}} of the {{$d.RatedRounds}} rounds it needs to be ranked</small>{{else}}<b class="word">—</b><small>replaced by a newer version</small>{{end}}</dd></div>
     <div><dt>Rating</dt><dd><b{{if neg (ptr .Rating)}} class="neg"{{end}}>{{gain (ptr .Rating)}}</b><small>its gain a round, on average, held nearer everyone's while its rounds are few{{if has .SE}} (±{{f3 (ptr .SE)}}){{end}}</small></dd></div>
     {{if .Multiplier}}<div><dt>Worth</dt><dd><b>{{mult .Multiplier .Capped}}</b><small>its pages taught the model as much as {{mult .Multiplier .Capped}} as many raw pages</small></dd></div>{{end}}
   </dl>

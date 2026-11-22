@@ -203,13 +203,19 @@ func TestThreeLuckyRoundsDoNotTakeALadderPlaceFromManySteadyOnes(t *testing.T) {
 		t.Fatalf("who the next round would enter: %v", why)
 	}
 
-	// The three are too close to call, and the board says so: each is within two standard
-	// errors of the gap of the one above. The field is not, and its three are level.
-	if best.Tied || !lucky.Tied || !steady.Tied || best.TiedAt != 1 || lucky.TiedAt != 1 || steady.TiedAt != 1 {
-		t.Fatalf("the ties at the top: best %v %d, lucky %v %d, steady %v %d", best.Tied, best.TiedAt, lucky.Tied, lucky.TiedAt, steady.Tied, steady.TiedAt)
+	// The newcomer is too close to the best to call, and the board says so: it is within two
+	// standard errors of the gap. The steady curator is as close as that to the newcomer, the
+	// row above it, and not to the best, which is the one a place at the top is shared with:
+	// it is third. Ties do not chain. The field is far below, and its three are level.
+	if best.Tied || !lucky.Tied || steady.Tied || best.TiedAt != 1 || lucky.TiedAt != 1 || steady.TiedAt != 0 || steady.Rank != 3 {
+		t.Fatalf("the ties at the top: best %v %d, lucky %v %d, steady %v %d (rank %d)", best.Tied, best.TiedAt, lucky.Tied, lucky.TiedAt, steady.Tied, steady.TiedAt, steady.Rank)
 	}
-	if gap, two := *best.Rating-*lucky.Rating, 2*math.Sqrt(*best.SE**best.SE+*lucky.SE**lucky.SE); gap > two {
-		t.Fatalf("lucky is %v behind best, and tied within %v", gap, two)
+	within := func(above, below *BoardRow) bool {
+		return *above.Rating-*below.Rating <= 2*math.Sqrt(*above.SE**above.SE+*below.SE**below.SE)
+	}
+	if !within(best, lucky) || !within(lucky, steady) || within(best, steady) {
+		t.Fatalf("this test is written for a chain: best and lucky too close to call %v, lucky and steady %v, best and steady %v",
+			within(best, lucky), within(lucky, steady), within(best, steady))
 	}
 	for i, name := range []string{"field-a", "field-b", "field-c"} {
 		if r := b.ByID[ids[name]]; r.Rank < 4 || r.TiedAt != 4 || r.Tied != (r.Rank > 4) {
@@ -226,7 +232,7 @@ func TestThreeLuckyRoundsDoNotTakeALadderPlaceFromManySteadyOnes(t *testing.T) {
 	for i, want := range []struct {
 		name string
 		tied any
-	}{{"best", nil}, {"lucky", true}, {"steady", true}} {
+	}{{"best", nil}, {"lucky", true}, {"steady", nil}} {
 		row := lb.Editors[i]
 		if row["name"] != want.name || row["tied"] != want.tied || row["rank"] != float64(i+1) || row["adjusted"] == nil || row["lower"] == nil || row["se"] == nil {
 			t.Fatalf("row %d of the leaderboard: %v", i+1, row)
@@ -243,8 +249,11 @@ func TestThreeLuckyRoundsDoNotTakeALadderPlaceFromManySteadyOnes(t *testing.T) {
 		t.Fatalf("the curator's own JSON: %v", e)
 	}
 	_, page := w.page("/leaderboard")
-	if n := strings.Count(page, `<span class="rank">=1</span>`); n != 3 {
-		t.Fatalf("the leaderboard marks %d curators as level at the top, not 3", n)
+	if n := strings.Count(page, `<span class="rank">=1</span>`); n != 2 {
+		t.Fatalf("the leaderboard marks %d curators as level at the top, not 2", n)
+	}
+	if n := strings.Count(page, `<span class="rank">3</span>`); n != 1 {
+		t.Fatalf("the leaderboard has %d curators third alone, not 1", n)
 	}
 	if n := strings.Count(page, `<span class="rank">=4</span>`); n != 3 {
 		t.Fatalf("the leaderboard marks %d curators as level in fourth place, not 3", n)
@@ -252,8 +261,11 @@ func TestThreeLuckyRoundsDoNotTakeALadderPlaceFromManySteadyOnes(t *testing.T) {
 	if !strings.Contains(page, "means too close to call") {
 		t.Fatal("the leaderboard does not say what = means")
 	}
-	if _, page := w.page("/editors/" + ids["steady"][:12]); !strings.Contains(page, "<b>=1</b>") {
+	if _, page := w.page("/editors/" + ids["lucky"][:12]); !strings.Contains(page, "<b>=1</b>") {
 		t.Fatal("the curator's page does not show its place as level")
+	}
+	if _, page := w.page("/editors/" + ids["steady"][:12]); !strings.Contains(page, "<b>3</b>") {
+		t.Fatal("the page of the curator in third place does not show it there")
 	}
 	w.check()
 }
