@@ -87,7 +87,7 @@ def test_a_grade_reports_every_items_score(monkeypatch):
     from stet import tok
 
     items = [Item(kind="answer", corner="arith/x", fmt="math", lang="en", source="gen:arith", ctx="1 + 1 =", cont=" 2")] * 3
-    stats = types.SimpleNamespace(out_docs=1, out_bytes=1, ink_tokens=0, ink_budget=1, tokens_one_pass=1, passes=1.0,
+    stats = types.SimpleNamespace(out_docs=1, out_bytes=1, ink_tokens=0, ink_budget=1, tokens_one_pass=1, passes=1.0, ink_windows=[],
                                   to_dict=lambda corpus: {"script_sha256": "ab" * 32})
     monkeypatch.setattr(grading, "train", lambda *a: (None, {"tokens": 9, "curve": []}))
     monkeypatch.setattr(grading, "materialize", lambda *a: ([], stats))
@@ -108,6 +108,16 @@ def test_a_grade_reports_every_items_score(monkeypatch):
     result.update(round={"id": rnd.id}, train={"seconds": 1, "curve": []})
     slim = slim_result(result, result)
     assert slim["exam"] == {"mean": -2.0, "item_scores": [-1.0, -2.0, -3.0]} and slim["baseline"] == slim["exam"]
+
+    # A script whose own text holds a passage of the exam is refused: its author wrote the passage in, and published it after.
+    planted = "The river authority approved a new flood barrier for the lower town after three wet winters in a row."
+    fresh = Item(kind="passage", corner="fresh/mastodon/en/-/text", fmt="prose", lang="en", source="mastodon:1", text="Breaking. " + planted)
+    stats.ink_windows = [b"a page's text. " + planted.encode() + b" and more of the page"]
+    result = grading.grade(rnd, s1.scale("micro"), corpus, [items[0], fresh, items[0]], "script.jsonl", device=types.SimpleNamespace(type="cpu"))
+    assert not result["valid"] and "exam" not in result and result["invalid_reason"] == "the script's own text holds 1 of the passages in the round's exam"
+    # The same words in a generated question are no sign of anything: it was made from the seed after the curator ran.
+    made = Item(kind="passage", corner="agent/x", fmt="logs", lang="en", source="gen:agent", text=planted)
+    assert grading.grade(rnd, s1.scale("micro"), corpus, [items[0], made, items[0]], "script.jsonl", device=types.SimpleNamespace(type="cpu"))["valid"]
 
 
 def test_the_examiner_makes_a_rounds_exam_from_its_harvest_and_seed(monkeypatch, tmp_path):

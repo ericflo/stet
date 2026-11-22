@@ -8,7 +8,7 @@ what the script says, and report its score on every item of the round's exam.
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from . import source_digest
 from .data import Corpus, exam_digest
@@ -27,6 +27,7 @@ class Trained:
     model: object = None
     enc: object = None
     device: object = None
+    ink_windows: list = field(default_factory=list)  # the script's own text, for the look at the exam
 
 
 def train_script(rnd: Round, scale: Scale, corpus: Corpus, script_path, device=None, progress=None, log=None) -> Trained:
@@ -63,7 +64,7 @@ def train_script(rnd: Round, scale: Scale, corpus: Corpus, script_path, device=N
         )
         result["script"] = stats.to_dict(corpus)
         model, result["train"] = train(tokens, scale, season, rnd.init_seed, device, progress)
-        return Trained(result, True, model, enc, device)
+        return Trained(result, True, model, enc, device, stats.ink_windows)
     except (ScriptError, FloatingPointError) as e:
         result["invalid_reason"] = str(e)
     return Trained(result, device=device)
@@ -72,10 +73,16 @@ def train_script(rnd: Round, scale: Scale, corpus: Corpus, script_path, device=N
 def sit_exam(trained: Trained, rnd: Round, scale: Scale, exam) -> dict:
     """The trained student sits the round's exam, and the grade is complete. `rnd` is the
     round as it is now: an official round's exam is posted after the student was trained."""
+    from .exam.decontam import written
     from .exam.score import sit
 
     result = trained.result
     result["round"], result["exam_sha256"] = rnd.describe(), exam_digest(exam)
+    if trained.trained and (found := written(exam, trained.ink_windows, rnd.season)):
+        # The curator was frozen before the exam's writing existed, so this is text its author
+        # wrote in and published afterwards. No student of it is scored.
+        trained.trained = False
+        result["invalid_reason"] = f"the script's own text holds {len(found)} of the passages in the round's exam"
     if trained.trained:
         try:
             t1 = time.time()

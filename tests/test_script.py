@@ -110,6 +110,16 @@ def test_deleting_lines_is_never_ink(tmp_path):
     assert build_doc(c, 1, keep(1, 1), 64).ink
 
 
+def test_the_graders_look_gets_every_piece_of_ink_with_what_stands_beside_it(corpus, enc):
+    from stet.script import INK_MARGIN
+
+    tokens, stats = run(corpus, enc, [0, {"s": [[0, 0, 200], "A sentence of the curator's own. ", [0, 200, 400], "And another."]}, {"t": "All ink."}], season=INKY)
+    whole = corpus.raw(0)[:200] + b"A sentence of the curator's own. " + corpus.raw(0)[200:400] + b"And another."
+    assert stats.ink_windows == [whole[: 200 + 33 + INK_MARGIN], whole[-(12 + INK_MARGIN) :], b"All ink."]
+    assert "ink_windows" not in stats.to_dict(corpus)  # for the grader, not for the report
+    assert run(corpus, enc, [0, 1])[1].ink_windows == []
+
+
 def test_adjacent_ranges_merge_so_line_cuts_are_free(corpus):
     # three contiguous 30-byte ranges are one 90-byte copy, not three short ones
     b = build_doc(corpus, 1, {"d": 0, "k": [[0, 30], [30, 60], [60, 90]]}, 64)

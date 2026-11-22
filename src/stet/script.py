@@ -68,6 +68,11 @@ class ScriptError(ValueError):
     """The edit script is malformed or breaks a rule. The run is invalid."""
 
 
+# Bytes kept either side of a piece of ink for the grader's look: more than an overlap key is
+# long, so that a sentence spelled out in several pieces is still read whole.
+INK_MARGIN = 256
+
+
 @dataclass
 class Stats:
     out_docs: int = 0  # output documents consumed in the first pass
@@ -84,13 +89,16 @@ class Stats:
     script_sha256: str = ""
     tokens_sha256: str = ""  # of the exact token array the student trains on
     preview: list[str] = field(default_factory=list)
+    # The curator's own text as the student reads it, each piece with what stands either side
+    # of it: what the grader looks through for the exam's sentences (stet.exam.decontam.written).
+    ink_windows: list[bytes] = field(default_factory=list, repr=False)
 
     @property
     def ink_frac(self) -> float:
         return self.ink_tokens / self.train_tokens if self.train_tokens else 0.0
 
     def to_dict(self, corpus: Corpus | None = None) -> dict:
-        d = {k: v for k, v in self.__dict__.items()}
+        d = {k: v for k, v in self.__dict__.items() if k != "ink_windows"}
         d["ink_frac"] = round(self.ink_frac, 6)
         if corpus is not None:
             d["corpus_docs"] = len(corpus)
@@ -348,6 +356,11 @@ def materialize(
             stats.ink_tokens += ink
             stats.copy_bytes += bd.copied
             seen_docs.update(bd.docs)
+            at = 0
+            for piece in bd.ink:  # in the order they stand in the document
+                at = max(bd.data.find(piece, at), at)
+                stats.ink_windows.append(bd.data[max(0, at - INK_MARGIN) : at + len(piece) + INK_MARGIN])
+                at += len(piece)
             if len(stats.preview) < 5:
                 stats.preview.append(text[:600])
             full = deal(arr)
