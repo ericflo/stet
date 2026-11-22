@@ -20,7 +20,7 @@ import (
 	"time"
 )
 
-// fakeRunPod is RunPod as far as stet-runpod can tell: a catalog, and pods made and ended.
+// fakeRunPod is RunPod as far as stet-cloud can tell: a catalog, and pods made and ended.
 type fakeRunPod struct {
 	mu      sync.Mutex
 	pods    map[string]*Pod
@@ -1212,18 +1212,26 @@ func TestAMachineStillInstallingIsGivenMoreTime(t *testing.T) {
 		}
 		return out.String()
 	}
-	// Its log is read once it nears the end of its grace, and grows past it.
-	if said := step(g - time.Minute); strings.Contains(said, "ended") {
+	// Its log is read once it nears the end of its grace. Grown in the look before its grace
+	// runs out, it is given more then: what is decided comes seconds after what is seen.
+	if said := step(g - 90*time.Second); strings.Contains(said, "ended") {
 		t.Fatalf("ended before its grace:\n%s", said)
 	}
-	if said := step(g+time.Minute, " Downloaded scipy"); strings.Contains(said, "ended") || !strings.Contains(said, "still getting there") {
+	if said := step(g-30*time.Second, " Downloaded numba"); strings.Contains(said, "ended") || !strings.Contains(said, "still getting there") {
+		t.Fatalf("at the end of its grace, still installing:\n%s", said)
+	}
+	if said := step(g+time.Minute, " Downloaded scipy"); strings.Contains(said, "ended") {
 		t.Fatalf("past its grace, still installing:\n%s", said)
 	}
 	if said := step(g+2*time.Minute, " Downloaded torch"); strings.Contains(said, "ended") || strings.Contains(said, "still getting there") {
 		t.Fatalf("said again, or ended:\n%s", said)
 	}
-	// Its log stops: it is ended.
-	if said := step(g + 3*time.Minute); !strings.Contains(said, "ended stet-rp-01: it stopped, or never asked for work") {
+	// Its log stops for a look, a large library downloading: it is kept. Stopped for
+	// slowStall, it is ended.
+	if said := step(g + 3*time.Minute); strings.Contains(said, "ended") {
+		t.Fatalf("its log quiet for a look:\n%s", said)
+	}
+	if said := step(g + 2*time.Minute + slowStall + time.Second); !strings.Contains(said, "ended stet-rp-01: it stopped, or never asked for work") {
 		t.Fatalf("its log stopped:\n%s", said)
 	}
 	if raw, _ := os.ReadFile(f.eventsPath()); !strings.Contains(string(raw), `"event":"slow"`) {

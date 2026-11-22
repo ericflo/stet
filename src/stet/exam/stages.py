@@ -506,7 +506,7 @@ def say_cost(season, rows: list[dict], speed: float = 1.0) -> None:
         say("A faster card takes less, in about the proportion of its `stet bench` to the floor's: --speed 2 shows a card twice the floor.")
     long = max((r["hold_minutes"] for r in rows), default=0)
     if long > 60:
-        say(f"The longest students are held for up to {long} minutes: they go only to machines set aside for them (stet-runpod --long-farm {long}).")
+        say(f"The longest students are held for up to {long} minutes: they go only to machines set aside for them (stet-cloud --long-farm {long}).")
     short = float(floor.get("memory_gb") or 0)
     for r in rows:
         if short and r["memory_gb"] > short - 4:

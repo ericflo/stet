@@ -17,5 +17,5 @@ runs/
 /server/server
 /server/files/
 .dev/
-/runpod/stet-runpod
-/runpod/runpod
+/cloud/stet-cloud
+/cloud/cloud

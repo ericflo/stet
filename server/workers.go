@@ -12,7 +12,7 @@ import (
 //
 // One of the organisers' own keys (STET_ANCHOR_KEYS) vouches for a rented machine's key by
 // signing a grant (WorkerGrant), and the server keeps it. So renting a machine needs no
-// change to the server's configuration: stet-runpod makes a key, vouches for it with the
+// change to the server's configuration: stet-cloud makes a key, vouches for it with the
 // organisers' key it is run with, and the machine is one of the organisers' from then on.
 // Taking the grant back, or the organisers' key that made it out of the configuration,
 // makes it nobody's.

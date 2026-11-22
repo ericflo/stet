@@ -79,7 +79,7 @@ type Account struct {
 }
 
 // WorkerGrant is one of the organisers vouching for a machine they rent by the hour
-// (stet-runpod): an organisers' machine in every rule about who works on what, so one person
+// (stet-cloud): an organisers' machine in every rule about who works on what, so one person
 // with the rest of them, and nothing more. It draws nothing, posts no exam and administers
 // nothing.
 //

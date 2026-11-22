@@ -143,7 +143,7 @@ func (s *Stet) do(ctx context.Context, method, path string, body any, key *Key, 
 		return err
 	}
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "stet-runpod")
+	req.Header.Set("User-Agent", "stet-cloud")
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}

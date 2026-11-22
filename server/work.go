@@ -8,7 +8,7 @@ import (
 // --- what is waiting, for the organisers' machines ----------------------------------------------
 //
 // The organisers rent machines to grade when there is more to grade than their own can get
-// through (stet-runpod), and let them go when there is not. This says how much is waiting
+// through (stet-cloud), and let them go when there is not. This says how much is waiting
 // for such a machine, and which of the organisers' machines are at work, so that one is
 // rented when it is wanted and not otherwise. It names no script, no grade and no loss:
 // counts, which a sealed round's page does not show, and so for the organisers only.
@@ -54,7 +54,7 @@ type WorkMachine struct {
 	Worker   bool   `json:"worker,omitempty"`
 	LastSeen int64  `json:"last_seen,omitempty"`
 	Busy     string `json:"busy,omitempty"` // edit or grade: the job it holds; farm: one of the organisers' own students it trains
-	// The student it trains is one of the bigger ones, held for hours: stet-runpod counts the
+	// The student it trains is one of the bigger ones, held for hours: stet-cloud counts the
 	// machine as one of those it rents for them.
 	Long bool `json:"long,omitempty"`
 	// Holding counts the grade jobs it holds (Busy is "grade" while there is one). Before an

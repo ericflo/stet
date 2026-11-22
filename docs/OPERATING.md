@@ -167,9 +167,10 @@ scripts as soon as somebody else can.
 ## Rented machines
 
 While there are few volunteers, the organisers can rent GPUs by the hour to run curators
-and grade: `stet-runpod` ([its README](../runpod/README.md)) rents them from RunPod when a
-round has work and lets them go when it has none. It is built on its own, from `runpod/`,
-and is not part of the stet command line or the server.
+and grade: `stet-cloud` ([its README](../cloud/README.md)) rents them from five markets
+(Vast.ai, RunPod, Lium, Clore.ai and Salad) when a round has work, and lets them go when it
+has none. It is built on its own, from `cloud/`, and is not part of the stet command line or
+the server.
 
 RunPod's machines are containers that cannot make bubblewrap's namespaces (Docker's
 system-call filter refuses them, and there is no systemd), so a rented machine runs
@@ -185,7 +186,7 @@ ways a curator might, and says what held.
 A host where the container sandbox cannot be made (an old kernel, no Landlock) still
 grades: the machine falls back to `stet verify` without `--edits`.
 
-Each rented machine has a key of its own from a pool kept by `stet-runpod`, and one of the
+Each rented machine has a key of its own from a pool kept by `stet-cloud`, and one of the
 organisers' own keys (in `STET_ANCHOR_KEYS`) **vouches for it**: it signs a grant naming the
 machine's key, and the server keeps the grant (`POST /api/v1/admin/workers`). Nothing in
 the server's configuration changes. The grant is kept with its signature and checked each
@@ -200,27 +201,27 @@ holds, as a volunteer's does.
 
 Setting it up:
 
-1. `stet-runpod keys --add 6`, on a machine that holds an organisers' own key: six keys,
+1. `stet-cloud keys --add 6`, on a machine that holds an organisers' own key: six keys,
    each vouched for with that key and given its account.
-2. `stet-runpod scale --follow` there (it asks the server what is waiting with the same
-   key), or `stet-runpod up 2` to rent two by hand. A key in the pool that nobody has
+2. `stet-cloud scale --follow` there (it asks the server what is waiting with the same
+   key), or `stet-cloud up 2` to rent two by hand. A key in the pool that nobody has
    vouched for is vouched for when it is first rented.
 
 A rented machine installs stet when its pod starts (about two and a half minutes) into
 `/opt/stet`, where the curator's user can read it, keeps its key and cache under `/root`,
 where it cannot, works until it has had nothing to do for fifteen minutes
-(`stet verify --exit-when-idle 15`), and then ends its own pod. `stet-runpod scale` rents
+(`stet verify --exit-when-idle 15`), and then ends its own pod. `stet-cloud scale` rents
 more when a round has curators to run or scripts to grade, ends those doing nothing as
-soon as nothing at all is waiting, and ends any that went quiet. When an entry is waiting
-for a round and nobody who runs curators is around, it rents one, so that the round is
-drawn early as it would be for anyone. It never rents past `--max` machines or
+soon as nothing at all is waiting, and ends any that went quiet. When rounds are drawn on
+demand (`STET_ROUND_MIN_GAP`) and an entry is waiting for one with nobody who runs curators
+around, it rents one, so that the round is drawn early as it would be for anyone. It never rents past `--max` machines or
 `--max-hourly` dollars an hour, never a machine dearer than `--max-price`, and stops
 renting once `--daily-budget` is spent.
 
-Each machine rented is the cheapest that will do at that moment, from either of RunPod's
-clouds (`--cloud any`), and that is nearly always the community one: strangers' machines.
+Each machine rented is the cheapest that will do at that moment, from any of the markets,
+and on RunPod from either of its clouds (`--cloud any`): nearly always strangers' machines.
 The keys are on them while they work, and a host could read one. Anyone holding a worker
-key can grade as the organisers, so a key that may have leaked is taken back (`stet-runpod
+key can grade as the organisers, so a key that may have leaked is taken back (`stet-cloud
 keys --revoke stet-rp-03`, or `DELETE /api/v1/admin/workers/<key>`), and the pool gets a
 new one. `--cloud secure` rents only from RunPod's own data centres, at two or three times
 the price.
@@ -234,7 +235,7 @@ batch ([the API](API.md#the-organisers-farm)); any organisers' machine running
 back how the student did on every item. Nothing here touches a grade, and a student is
 never handed to a machine an official job could use.
 
-`stet-runpod` rents for the farm too, after the official work. With `--long-farm MINUTES`
+`stet-cloud` rents for the farm too, after the official work. With `--long-farm MINUTES`
 the machines it rents also take the bigger students, held for hours (they are told
 `STET_FARM_MAX_MINUTES`), one machine to each. Those machines are chosen for what a
 student costs on them (price over speed, the quicker where that is about the same), under
@@ -261,12 +262,12 @@ What the commands that post to the farm rely on ([the curve and the audit](#the-
 ## Pausing the rounds
 
 When the machines are wanted for something else (finals, a measurement), and nobody else is
-entered, the organisers can pause the rounds: `stet-runpod pause`
+entered, the organisers can pause the rounds: `stet-cloud pause`
 (`POST /api/v1/admin/pause {"paused": true}`, organisers only). No round is drawn while they
 are paused, by the clock, early or by hand; the round under way finishes, exam and all. The
 machines then have nothing official to do and turn to the farm's students, and
-`stet-runpod` rents only for those. The site says the rounds are paused, and the season's
-`next_round` is empty. `stet-runpod resume` starts them again: the next round is drawn at
+`stet-cloud` rents only for those. The site says the rounds are paused, and the season's
+`next_round` is empty. `stet-cloud resume` starts them again: the next round is drawn at
 the next slot on the grid.
 
 ## The curve and the audit
@@ -302,7 +303,7 @@ an hour, a half and a quarter of the floor's time.
 | large at 2× | 1,280M | 9.06 | 740 | 7.2 GB |
 | large at 4× | 2,560M | 18.13 | 1,420 | 14.3 GB |
 
-Rent for the longest hold of what is posted (`stet-runpod --long-farm 1420` for a curve at
+Rent for the longest hold of what is posted (`stet-cloud --long-farm 1420` for a curve at
 large), and give the large student at 4× a machine with more than the floor's 16 GB of
 memory: its tokens alone take 14.
 
@@ -419,7 +420,7 @@ The season's table is decided by finals ([the rules](RULES.md#finals)). The comm
    items that corpus holds, and runs every finalist, the lot's pick and every yardstick on
    it in the sandbox, with the large size's 4,800 s.
 7. **Train the students**: `stet finals farm` posts them and follows them. Rent for them
-   with `stet-runpod --long-farm 1420`.
+   with `stet-cloud --long-farm 1420`.
 8. **The table**: `stet finals table`. It can be run while students are still out: it says
    what is missing and that the table is not final. It writes what is published to
    `finals-<season>/published/`: the plan (the frozen board, the lot's beacon round and its

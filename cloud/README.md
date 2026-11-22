@@ -1,38 +1,30 @@
-# stet-runpod
+# stet-cloud
 
-Rents GPUs from RunPod to run curators and grade for Stet while there is more work than the
-organisers' own machines and the volunteers can get through, and lets them go when there
-is none. For the
+Rents GPUs to run curators and grade for Stet while there is more work than the organisers'
+own machines and the volunteers can get through, and lets them go when there is none. It
+rents single-GPU machines from five markets, each through its own API: **Vast.ai, RunPod,
+Lium, Clore.ai and Salad**, each behind one `Market` interface (`market.go`). For the
 organisers: entrants and volunteers never need it. It is built on its own, apart from the
 stet command line and the server, and uses nothing but Go's standard library.
 
 ```sh
-cd runpod && go build -o ~/.local/bin/stet-runpod .
+cd cloud && go build -o ~/.local/bin/stet-cloud .
 ```
 
-## stet-cloud: the same, over five markets
-
-This code now builds **stet-cloud**: stet-runpod with RunPod behind one `Market` interface
-(`market.go`), beside clients for Vast.ai, Lium, Salad and Clore.ai, each through its own
-API. Its design and plan are in [STET-CLOUD.md](STET-CLOUD.md). Today the other four can
-only be looked at: their offers, the account's machines, and the key. Renting there isn't
-built, and a market can be armed only once it is. With RunPod alone armed, stet-cloud
-decides as stet-runpod did. The service still runs stet-runpod until it switches over.
+It began as stet-runpod, which rented from RunPod alone, and keeps every command and setting
+stet-runpod had. Its design and plan are in [STET-CLOUD.md](STET-CLOUD.md). It has run the
+organisers' fleet as `stet-cloud.service` since 2026-11-21, with all five markets armed.
 
 ```sh
-cd runpod && go build -o ~/.local/bin/stet-cloud .
 stet-cloud markets          # each market: key, what is left to spend, armed or not, what fits now
 stet-cloud offers           # what would be rented, in order, every market (unarmed ones marked)
-stet-cloud markets arm vast --note "…"   # only with Eric's approval, once renting there is built
-stet-cloud migrate          # at switch-over: copy stet-runpod's pool and records over, once
+stet-cloud markets arm vast --note "…"   # only with Eric's approval
 ```
 
 The markets' keys are kept in `~/.config/stet-cloud/credentials.env` (mode 600; `KEY=value`
 lines for `RUNPOD_API_KEY`, `VAST_API_KEY`, `LIUM_API_KEY`, `SALAD_API_KEY`, `SALAD_ORG`,
 `SALAD_PROJECT` and `CLORE_API_KEY`). It is read again at every look, and the environment wins
 over it. Which markets are armed is kept in `markets.json`; with none, RunPod alone is.
-Until `migrate`, the pool stays in `~/.config/stet-runpod`: use `--home ~/.config/stet-runpod`
-there.
 
 ## What a rented machine does
 
@@ -64,25 +56,24 @@ second runs.
 ## Setting up
 
 ```sh
-export RUNPOD_API_KEY=...            # https://www.runpod.io/console/user/settings
-stet-runpod keys --add 6             # six keys, vouched for with your organisers' key
+stet-cloud keys --add 6              # six keys, vouched for with your organisers' key
 ```
 
-Run it where the organisers' key is (`~/.config/stet/key.json`, or `--key`). That is all
-the server needs. `stet-runpod keys` says, for each key, who vouched for it and when it was
+With the markets' keys in `credentials.env` (above), run it where the organisers' key is (`~/.config/stet/key.json`, or `--key`). That is all
+the server needs. `stet-cloud keys` says, for each key, who vouched for it and when it was
 last at work; `--vouch` vouches for any that are not; `--revoke stet-rp-03` takes one back
 and forgets it. A key not vouched for is vouched for when it is first rented.
 
 ## Running it
 
 ```sh
-stet-runpod gpus                     # what would be rented, the fastest first
-stet-runpod status                   # what is waiting, what is rented, what it costs
-stet-runpod scale --follow           # rent and end to match the work, every minute
-stet-runpod up 2                     # or by hand: two now, whatever is waiting
-stet-runpod down                     # end those that hold no job
-stet-runpod pause                    # draw no more rounds: the machines turn to the organisers' students
-stet-runpod resume                   # and start them again
+stet-cloud gpus                      # what would be rented, the fastest first
+stet-cloud status                    # what is waiting, what is rented, what it costs
+stet-cloud scale --follow            # rent and end to match the work, every minute
+stet-cloud up 2                      # or by hand: two now, whatever is waiting
+stet-cloud down                      # end those that hold no job
+stet-cloud pause                     # draw no more rounds: the machines turn to the organisers' students
+stet-cloud resume                    # and start them again
 ```
 
 `status`, `scale`, `up` and `down` ask the server what is waiting
@@ -107,7 +98,7 @@ How long a training pass takes on each kind is learned from the grades of settle
 (each says the GPU that trained, and for how long), and how long a machine takes to start
 from those this service rents; until a kind has been seen, its pass is a 3090's 18 minutes
 over its speed in the table, and a machine is taken to start in 8 minutes. They are kept in
-`calibration.json`, and `stet-runpod gpus` shows them. A curator is run in a minute or two,
+`calibration.json`, and `stet-cloud gpus` shows them. A curator is run in a minute or two,
 and the exam its grades wait for is made hours after the draw, so the curators want a
 machine for every four entries to run, and never fewer than two, since each entry is run
 twice, by two accounts. A machine with nothing official to do trains the organisers' own
@@ -118,11 +109,11 @@ rented for them is chosen for what a student costs on it, not what it costs an h
 at $0.89 trains one in about half the time of a 3090 at $0.50, so the student costs about
 the same and is done sooner. Where two cost about the same, the quicker comes first.
 `--long-max-price` is the ceiling for those machines (the same as `--max-price` if not
-given); `stet-runpod gpus` shows both orders. Never more than `--max` (6), or past
+given); `stet-cloud gpus` shows both orders. Never more than `--max` (6), or past
 `--max-hourly` dollars an hour (3), and nothing new once `--daily-budget` is spent.
 `--max-price` never rents a machine dearer than that, however much is waiting: the work
-waits for a cheap one instead. When an entry is waiting for a round and nobody who runs
-curators is around, one, so that the round is drawn early. It never ends a machine that
+waits for a cheap one instead. When rounds are drawn on demand and an entry is waiting for
+one with nobody who runs curators around, one, so that the round is drawn early. It never ends a machine that
 holds a job. It ends at once those doing nothing when nothing at all is waiting, and any
 that went quiet or stopped. The rest stop by themselves. A machine ended a moment after it
 took a job, or that stopped partway through one, still holds it as the server sees it: what
@@ -142,14 +133,14 @@ one 8), on a host with the season's floor of 16 GB of memory and 6 vCPUs a GPU, 
 new enough for CUDA 13 (the season's PyTorch, 2.15.0, is built only for 13.2), bf16
 (nothing older than Ampere), and a whole GPU, with a 100 GB disk (at 80, a machine that
 stayed up into another round and upgraded found less than the 60 GB a curator run keeps
-free, and only graded). `stet-runpod gpus` lists them as they stand.
+free, and only graded). `stet-cloud gpus` lists them as they stand.
 `--gpu "RTX A5000,RTX 4090"` names them instead.
 
 `--cloud any` (the default) takes the cheaper of RunPod's two clouds, which is nearly
 always the community one: strangers' machines, at a third of the price or less. `--cloud
 secure` rents only from RunPod's own data centres. The host of a community machine could
 read the key it is given, and anyone holding a worker key can grade as the organisers:
-take back a key that may have leaked (`stet-runpod keys --revoke HANDLE`).
+take back a key that may have leaked (`stet-cloud keys --revoke HANDLE`).
 
 Leaving it running, as a service of your own user (stet-cloud, which took over from
 stet-runpod's service):
@@ -178,7 +169,7 @@ may run with a pool: stop and disable the one before starting the other.
 
 ## What it keeps
 
-In `~/.config/stet-runpod` (`STET_RUNPOD_HOME`):
+In `~/.config/stet-cloud` (`STET_CLOUD_HOME`):
 
 | | |
 |---|---|
@@ -196,6 +187,6 @@ In `~/.config/stet-runpod` (`STET_RUNPOD_HOME`):
 RunPod forgets a pod once it ends and does not say what it cost, so what was spent is
 worked out from these, and is an estimate. RunPod's billing page is the account.
 
-`--ssh` lets `~/.ssh/id_ed25519.pub` into the machines it rents; `stet-runpod ssh
-stet-rp-01` logs in to one. `stet-runpod logs stet-rp-01` shows what one has said (`-f`
+`--ssh` lets `~/.ssh/id_ed25519.pub` into the machines it rents; `stet-cloud ssh
+stet-rp-01` logs in to one. `stet-cloud logs stet-rp-01` shows what one has said (`-f`
 follows it).

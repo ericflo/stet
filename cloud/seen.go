@@ -111,6 +111,7 @@ func (f *Fleet) forget(live map[string]bool) {
 		if !live[k] {
 			delete(f.lastLog, k)
 			delete(f.slowSaid, k)
+			delete(f.logGrew, k)
 		}
 	}
 }
@@ -118,8 +119,10 @@ func (f *Fleet) forget(live map[string]bool) {
 // --- a machine slow to start -------------------------------------------------------------------
 
 // slowLook is how long before the end of its grace a machine's log is first read, to have it as
-// it was a look before.
-const slowLook = 2 * time.Minute
+// it was a look before; slowStall, how long its log may then not grow while it is given more:
+// one of the season's large libraries downloads for minutes on a slow connection without a line
+// said (round 13: a Vast machine given more at 10 minutes, ended a look later mid-download).
+const slowLook, slowStall = 2 * time.Minute, 4 * time.Minute
 
 // stillInstalling says whether a machine past its grace that has not asked for work is still
 // getting there: its log has grown since the last look. Such a machine has up to twice its
@@ -135,6 +138,7 @@ func (f *Fleet) stillInstalling(ctx context.Context, w *Worker, now time.Time) b
 	lg, ok := f.market(r.Market).(logger)
 	if !ok || asked || r.State == "stopped" || age < g-slowLook || age > 2*g {
 		delete(f.lastLog, key)
+		delete(f.logGrew, key)
 		return false
 	}
 	lctx, cancel := context.WithTimeout(ctx, 45*time.Second)
@@ -144,7 +148,7 @@ func (f *Fleet) stillInstalling(ctx context.Context, w *Worker, now time.Time) b
 		return false
 	}
 	if f.lastLog == nil {
-		f.lastLog, f.slowSaid = map[string]string{}, map[string]bool{}
+		f.lastLog, f.slowSaid, f.logGrew = map[string]string{}, map[string]bool{}, map[string]time.Duration{}
 	}
 	cur := strings.Join(lines, "\n")
 	prev, had := f.lastLog[key]
@@ -153,14 +157,20 @@ func (f *Fleet) stillInstalling(ctx context.Context, w *Worker, now time.Time) b
 		// Not read a look ago (the fleet started since): one more look, to see.
 		return age > g
 	}
-	if prev == cur || age <= g {
+	// Grown within slowStall: still getting there. It is given more already in the look before
+	// its grace runs out, since what is decided comes seconds after what is seen: in round 12 a
+	// Vast machine whose log had grown at 9m57s was ended at 10m02s.
+	if prev != cur {
+		f.logGrew[key] = age // how old it was when its log last grew
+	}
+	if grew, seen := f.logGrew[key]; !seen || age-grew >= slowStall {
 		return false
 	}
 	if !f.slowSaid[key] {
 		f.slowSaid[key] = true
 		last := workerLine(lines)
-		f.event(r, w.Key.Handle, "slow", fmt.Sprintf("past its grace of %s and still getting there (last it said: %s): given up to %s", g.Round(time.Minute), last, (2*g).Round(time.Minute)))
-		f.say("%s on %s is past its grace of %s, and still getting there: given up to %s (last it said: %s)", w.Key.Handle, marketTitle(r.Market), g.Round(time.Minute), (2 * g).Round(time.Minute), last)
+		f.event(r, w.Key.Handle, "slow", fmt.Sprintf("at the end of its grace of %s and still getting there (last it said: %s): given up to %s", g.Round(time.Minute), last, (2*g).Round(time.Minute)))
+		f.say("%s on %s is at the end of its grace of %s, and still getting there: given up to %s (last it said: %s)", w.Key.Handle, marketTitle(r.Market), g.Round(time.Minute), (2 * g).Round(time.Minute), last)
 	}
 	return true
 }

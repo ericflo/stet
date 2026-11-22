@@ -310,16 +310,16 @@ These keep their meaning:
 - **Salad:** what `restart_policy: never` actually does; the replica quota for a new organization; boot times; whether Landlock works under WSL2.
 - **Clore:** what happens when the container exits (the troubleshooting docs suggest it restarts, hence `sleep infinity`); host kernels; whether `ubuntu:24.04` or `cloreai/jupyter:ubuntu24.04-v2` starts faster.
   - Known: orders use `currency: USD-Blockchain`; fees are the renter's 5% plus $0.10 an order.
-- **Ownership (settled 2026-11-21).** stet-db has handed `runpod/` over. The live 213c753 service and its unit stay exactly as they are until stet-cloud takes over, and stet-db is told before the binary or the unit is replaced, so that its per-round reports don't credit the new fleet's changes to the old one.
+- **Ownership (settled 2026-11-21).** stet-db has handed `runpod/` (now `cloud/`) over. The live 213c753 service and its unit stay exactly as they are until stet-cloud takes over, and stet-db is told before the binary or the unit is replaced, so that its per-round reports don't credit the new fleet's changes to the old one.
 - **Shared checkout:**
   - Run `git log @{u}..HEAD` before any push, and push only commits that are all mine (`git push origin HEAD:main`).
-  - Stage only `runpod/` (stet-dc keeps uncommitted work in `server/`, `src/`, `tests/` and `tools/`).
+  - Stage only `cloud/` (`runpod/` before 2026-11-22; stet-dc keeps uncommitted work in `server/`, `src/`, `tests/` and `tools/`).
   - Run CI's gofmt: `GOTOOLCHAIN=go1.26.11 sh -c '$(go env GOROOT)/bin/gofmt -l .'`.
   - Every push to `main` redeploys the server.
 
 ## 13. What step 2 built, and what it found
 
-**Built** (in `runpod/`, all Go standard library; `go test -race` passes):
+**Built** (in `runpod/`, now `cloud/`, all Go standard library; `go test -race` passes):
 - `market.go`: the `Market` interface (`Offers`, `Rent`, `Rentals`, `End`, `Check`, `Caps`), the credentials file read again at every look (env wins; a file others may read is refused), arming in `markets.json` (RunPod alone by default), and one JSON client for the new markets.
   - The market's machine is called `Rental`, since `Machine` is already the server's account in `/admin/work`.
 - `runpod_market.go`: today's RunPod client, unchanged, behind the interface. `vast.go`, `lium.go`, `salad.go`, `clore.go`: `Offers`, `Rentals` and `Check` work. `Rent` and `End` return "not built", and `Caps.Rents` is false, so none of them can be armed.

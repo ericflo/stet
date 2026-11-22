@@ -4,7 +4,7 @@ The first sandbox (runner.py, bubblewrap) is made of namespaces. Rented GPUs are
 Docker containers that may not make any: no CAP_SYS_ADMIN, and Docker's system-call filter
 refuses unshare(). This one is made of what such a container does let root do, and it is
 for a container that runs stet and nothing else, such as one of the organisers' rented
-machines (stet-runpod). It takes over the container's top-level /editor, /corpus,
+machines (stet-cloud). It takes over the container's top-level /editor, /corpus,
 /assets, /out and /scratch, and empties /tmp and /dev/shm of the curator's files.
 
   Who        The curator runs as a user of its own, with no capabilities and no way to
