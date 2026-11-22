@@ -573,3 +573,80 @@ watch list cost no agreement and remove three quarters of the noise.
   copies however short. Cleaning a page was the most useful thing ink was being spent on.
 - **The agent family's answers follow from the session shown**, in a project drawn from the
   seed. Season 1's listings could be learned by heart.
+- **The exam's writing is harvested before the draw, and chosen by it.** Season 1 waited two
+  hours after a draw for writing published after it. That bought the guarantee that no curator
+  had seen the exam, and cost every round two hours. Season 2 gets the same guarantee the other
+  way round. The examiner harvests every clock hour, and commits each harvest's hash to the
+  server at once, where anyone can read it. A draw's seed picks three of the 26 hours before
+  it; the exam is made from exactly those, and the server refuses one that is not. An entry
+  runs only in rounds drawn 26 hours or more after it was submitted, so everything its exam
+  can hold was written after it was frozen. The examiner cannot choose which hours a round
+  gets, and cannot change an hour after committing it. What still rests on trust is that each
+  harvest is what the sources said: section 7.3's answer stands, many sources, each capped,
+  each harvest seeded by the public beacon.
+- **A curator cannot write the exam into its script.** An author could put a passage in a
+  curator's ink and publish the same passage after the freeze, hoping a harvest takes it. The
+  grader holds both: a script whose ink, with 256 bytes either side, has the opening of a
+  sentence of a fresh item is refused. With ink at 16,000 tokens this is a check on a few
+  pages of text.
+- **Three more keyless sources.** Forums that run Discourse (31 of them, about 100 replies an
+  hour), the kernel's mailing lists (first versions of patches: code written by people this
+  hour), and Crossref (abstracts of works registered this hour, about 40). Stack Exchange was
+  tried and left out: its whole network is asked about four questions an hour now, and without
+  a key it allows 300 requests a day.
+
+### 9.5 The board
+
+A score is one thing and a ranking another. Season 1's exam was noisy, and its board made the
+noise worse in four ways. Each is fixed by a rule that was stated before any round ran.
+
+- **Three lucky rounds outranked thirty steady ones.** A rating is now the adjusted mean drawn
+  towards the field's: `m + n/(n+k) (adjusted - m)`, where k is the noise of one round over the
+  spread between curators, kept between 1 and 8. The ladder takes curators in order of rating
+  less 1.28 standard errors, which is what each is nine times in ten at least as good as.
+  Ratings within two standard errors of the one above share its place.
+- **The first rounds set their own error bars.** With one curator at two rounds, the spread of
+  a round's gain was estimated from two numbers. What the season expects a round to move by
+  now counts beside its own rounds, as eight rounds' worth. Season 1's board gives 0.0195 a
+  round at the standard size (eleven curators, pooled). Between two trainings the pilot's
+  noise fell from 0.0196 to 0.0052, but a round also moves with the pages it draws, which the
+  pilot did not measure. The prior is 0.015: erring high makes early ties more common, which
+  is the safe direction, and after twenty rounds the season's own numbers carry it.
+- **Failing could be the better move.** An entry that failed counted zero, above every curator
+  that finished below the baseline. It counts as the round's lowest valid gain, or zero if
+  that is lower. The same inside an entry: a failed run counts as the entry's worst finished
+  run when that is below zero, so failing one run in two does not halve a loss. Neither is
+  used to work out how hard a round was: a penalty is not a measurement.
+- **Every grader measured the baseline.** That doubled the cost of a first grade and made each
+  score rest on a baseline from one machine. Four established graders measure a round's
+  baseline; every score is taken against the mean of theirs.
+- **Reference curators took a quarter of the ladder's compute.** They are there to tie rounds
+  together and to mark the scale, and two do that: `fineweb2` and `dclm` run every round, each
+  of the others one round in eight.
+
+Every item's score from every grade is public once a round settles. Anyone can recompute a
+round's gains, try another weighting, or measure a part's spread over noise without asking.
+
+### 9.6 What is decided against, and what waits on a number
+
+Season 2 takes everything section 9 found wanting and does it now. Three things are decided
+against, each on principle:
+
+- **Raw HTML as the curator's input.** A page's markup is five to ten times its text. At a
+  fixed download, a curator choosing among more pages has more to work with than one reading
+  the markup of fewer. The bandwidth goes to a bigger pool.
+- **A track where a served model rewrites the corpus.** The score would then measure the
+  model that was served. Ink stays small, and a curator's own GPU may write within it.
+- **A different student.** The student is the measuring instrument; changing it with the exam
+  would leave nothing to compare the two seasons by. Its ranking is checked at a larger size
+  instead (the finals, and the audit of scale in between).
+
+Three wait on a measurement that is running, each with its rule written first:
+
+- **The pool's size.** As many pages as a curator can read and a verifier can fetch inside the
+  time box on the machines the fleet rents, measured, with a third to spare.
+- **Averaging the student's last weights.** Adopted only if the noise between trainings falls
+  by a quarter and spread over noise rises by a fifth at micro, and by 15% each at standard.
+- **Promotion of a watched part.** Twenty settled rounds, spread over noise above 1.5, rank
+  agreement with the score of at least 0.5. Science abstracts are on this list for a plainer
+  reason than the others: no exam has held them yet.
