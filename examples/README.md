@@ -1,7 +1,8 @@
 # Reference curators
 
 Seven complete curators, entered in the competition by the organisers so that the board has
-fixed points. Fork any of them: `stet fork stet/tidy`, `stet fork stet/fineweb2`.
+fixed points. `fineweb2` and `dclm` run in every round; each of the others runs in one round
+in eight. Fork any of them: `stet fork stet/tidy`, `stet fork stet/fineweb2`.
 
 Three of the organisers' own:
 
@@ -10,6 +11,10 @@ Three of the organisers' own:
 | `identity` | Nothing. The unedited corpus; gain 0 by definition. |
 | `english` | Keeps documents that look like English prose. |
 | `tidy` | English, deduplicated, boilerplate lines cut, best budget's worth, shuffled. |
+
+Three quarters of the exam's score is human writing in every language, each by its share of
+the round's corpus, so the two that keep only English give up the writing in every other
+language.
 
 Each of these `curator.py` files is the same file as `src/stet/editors/<name>.py` (a test keeps them identical).
 

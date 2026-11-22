@@ -24,7 +24,7 @@ explanation for a good score unavailable.
 | Student architecture and initial weights | Which documents and spans are kept |
 | Optimiser, schedule, batch size | The order they are trained in |
 | Training budget, counted in tokens | How often anything is repeated |
-| Tokenizer | Small repairs (the ink budget) |
+| Tokenizer | Separators (the ink budget) |
 | How the exam is made and scored | Everything about how the curator decides |
 
 Training is budgeted in tokens, never seconds, so a faster GPU buys nothing there. The trainer
@@ -34,43 +34,70 @@ curriculum a real move.
 ## Decisions, and what they are for
 
 **The exam measures what pretrained models are for.** Text has no quality of its own: a page
-is worth keeping for what it teaches a model. So the exam asks for seven capabilities,
-each counting the same: knowledge, reading, reasoning, code, agents, writing and
-conversation. How much each counts is a choice of value, so it is declared rather than left
-to how many items of each there happen to be. Equal pillars favour no use of a model over
-another. [The reasoning](research/exam-first-principles.md#7-decisions-november-2026).
+is worth keeping for what it teaches a model. Three quarters of the score is how well the
+student predicts writing people have just published, in four kinds that count the same:
+reference, news, technical and conversation. One quarter is skills, in five kinds that
+count the same: agents, reading, transformation, logic and grammar. How much each counts is
+a choice of value, so it is declared rather than left to how many items of each there
+happen to be. [The reasoning](research/exam-first-principles.md#9-season-2-november-2026).
+
+**Only what tells curators apart counts.** A student this size cannot do arithmetic, unit
+conversion or program tracing cold, whatever it was trained on: on the pilot such questions
+ordered curators no better than a coin, at every size of student. Weight on such a part is
+weight on noise, and every extra training is then spent averaging it away. So those parts are
+*watched*: sat and published in every round, and no part of the score. A watched part
+earns a place when, over at least twenty settled rounds, it tells curators apart. A kind
+of writing new to the exam (science abstracts) starts there too. On the pilot, the score
+made this way moved a quarter as much between two trainings of one script as a score that
+counted those parts, and agreed better with the large student
+([measured](EXPERIMENTS.md#how-much-is-noise): the pilot's fresh writing was Wikipedia only).
 
 **The exam is not a slice of the corpus.** On unseen text from the same pool, careful
 selection barely beats random, because perplexity rewards matching the test distribution.
-So the exam comes from elsewhere: writing published after the draw, and questions made for
-it.
+So the exam comes from elsewhere: writing published in the day before the draw, and
+questions made for the round.
 
 **Nobody can know the exam in advance.** A public exam can be learned, and a secret one needs
-someone trusted to hold it. So each round's exam is made after its draw: human writing
-published in the hour after it, and questions generated from the round's seed. Nobody
-can see it before it exists, the organisers included, and there is nothing to keep secret
-for longer than a round. It is published when the round settles, so every score can be
-checked. Fresh text that the round's corpus already holds is dropped from the exam, since
-it is the exam that came second.
+someone trusted to hold it. So each round's exam is made at its draw, from things nobody
+could aim at before it: human writing from three hours of the day before, which the round's
+seed picks, and questions generated from the same seed. Nobody knows it before the draw,
+the organisers included, and there is nothing to keep secret for longer than a round. It is
+published when the round settles, so every score can be checked. Fresh text that the
+round's corpus already holds is dropped from the exam, since it is the exam that came
+second.
+
+**Entries are frozen, so no round waits for its exam.** Writing published after the draw is
+also writing no curator has seen, but a round would wait for it: hours, with the machines
+that have trained standing idle. Freezing the entries gives the same guarantee and no wait.
+An entry runs only in rounds drawn at least 26 hours after it was submitted, and a round's
+writing comes from the 26 hours before its draw, so every entry is older than anything its
+exam could hold. The examiner harvests every hour of the clock an hour after it ends and
+tells the server the harvest's hash at once. So nobody knows which hours a round will be
+given until its draw; nobody writing in an hour can tell what the harvest will keep of it,
+because that is chosen with a public random number emitted as the hour ends; and the
+organisers cannot make a harvest again to suit a round, because its hash was public first.
 
 **Many sources, each capped.** Every source has its own bias: who writes there, about what,
 in which languages. The remedy is not a perfect source but many, chosen by kind of writing
-first (reference, news, technical, social, discussion), each kind an equal part, with the
+first (reference, news, technical, conversation), each kind counting the same, with the
 sources inside a kind taking turns. None needs a key or an account, so anyone can read
 them, and none can define the target.
 
-**Every language, by its share of the crawl.** Inside every pillar, each language counts by
-its share of the round's corpus, in bytes. That is what a curator saves on a byte of the web.
-More weight to English would reward throwing away most of the web; equal weights would reward
-the smallest languages, where a student this size learns little and the score is mostly
-noise. The tokenizer is trained on the crawl alone, so other languages do not cost the
-student more than they must.
+**Every language, by its share of the crawl.** Inside every kind of writing, each language
+counts by its share of the round's corpus, in bytes. That is what a curator saves on a byte
+of the web. More weight to English would reward throwing away most of the web; equal weights
+would reward the smallest languages, where a student this size learns little and the score
+is mostly noise. The skills are generated in English only, so English is about 59% of the
+score, though less than half of the crawl. The tokenizer is trained on the crawl alone, so
+other languages do not cost the student more than they must.
 
 **Scored by likelihood.** At this size a student's choice between answers is chance, but the
 likelihood of the right answer, in bits per byte, still moves, and it is the best-validated
 small-scale predictor of what larger models can do. So every item is a passage, an answer
 given its question, or the right one of two sentences, scored by how likely the student finds
-it.
+it. An item's bits are never put over fewer than 16 bytes: the bits per byte of a one-word
+answer swing by whole bits between two trainings, and would otherwise weigh as much as a
+paragraph's. A text longer than the student's window is scored whole, a window at a time.
 
 **The data is drawn after the entries are locked.** The seed comes from drand, a public
 randomness beacon, at a time fixed on a public grid, and the corpus comes from the newest
@@ -79,10 +106,13 @@ of its files a round gets is unknown until after entries close, so a curator can
 tuned to its sample, and the organisers cannot choose a draw that suits anyone.
 
 **Almost no ink.** If new text were allowed, the winning move would be to ignore the
-corpus and ship a dataset, or to have a large model write one. Ink is capped at 0.1% of
-the training tokens: enough for separators and repairs. Everything else the student reads
-is copied byte for byte from the corpus. This is also what rules out distilling a frontier
-model into the training data.
+corpus and ship a dataset, or to have a large model write one. Ink is capped at 0.01% of
+the training tokens: enough for separators and nothing else. Everything else the student
+reads is copied byte for byte from the corpus. This is also what rules out distilling a
+frontier model into the training data. Cleaning a page needs no ink: whole lines of one
+page, kept in the page's order, are copies however short they are. And since ink is the
+only way a curator's own words reach the student, a script whose own text holds a passage
+of its round's exam is refused.
 
 **Editing and grading are separate.** Only the edit runs an entrant's code. It produces an
 edit script, which is plain data: document numbers and byte ranges. Grading turns a script
@@ -128,7 +158,18 @@ curators differ from each other. Every score is a difference from the unedited c
 the same round with the same initial weights, ratings are adjusted for which rounds a
 curator happened to get, and the top curators run in every round so that any two of them can
 be compared directly. The unedited corpus trains the least steadily of all, so the round's
-baseline is the mean of every established grader's, item by item.
+baseline is the mean of four established graders' measurements, item by item. Four and not
+every grader's: each costs a whole training, and the mean of all of them is no better a
+baseline than the mean of a few. The organisers' reference curators are yardsticks, and a
+yardstick need not run every round: `fineweb2` and `dclm` do, and tie the rounds together,
+and each of the others runs in one round in eight.
+
+**A rating says how sure it is.** A few rounds can be luck. So a rating is drawn towards
+the field's mean while a curator's rounds are few, the ladder is filled in order of rating
+less 1.28 standard errors, and neighbours too close to tell apart share a place on the
+board. Three lucky rounds do not take a place from many steady ones. And failing is never
+better than finishing: a failed entry counts as the lowest gain any valid entry got in its
+round, or zero if that is lower.
 
 **The record is hard to take by luck.** A challenger is tested against the holder at 5, 10,
 20 and 40 shared rounds, and must win by more than a margin set from measured noise.
@@ -141,8 +182,8 @@ training tokens, and that curve has not been measured on this exam. Until it is,
 shows gains.
 
 **Rounds at the standard student; finals at a larger one.** Rounds train an 8 × 512 student
-on 160M tokens: about 18 minutes on an RTX 3090. Smaller students rank curators differently
-on this exam: they reward narrow English data, which loses as the student grows
+on 160M tokens: about 18 minutes on an RTX 3090. Smaller students rank curators
+differently: they reward narrow English data, which loses as the student grows
 ([measured](research/exam-first-principles.md#75-scale-rounds-at-the-standard-student-finals-at-the-large-one-decide-the-season)).
 The standard student ranks them as the large one does. Finals train the season's top eight
 at 10 × 640 on 640M tokens and decide the table. The top three are also tried one size up,
@@ -153,11 +194,13 @@ which says whether the next season should move up too.
 | Attack | What stops it |
 |---|---|
 | Tune a curator to a known corpus | The crawl is public, but which files are drawn is unknown until after commit |
-| Tune a curator to the exam | The exam does not exist until after the draw: text written after it, and questions from its seed |
+| Tune a curator to the exam | Its writing is newer than the curator, which was frozen 26 hours before the draw, and its questions come from the draw's seed |
+| Write a passage into a curator, then publish it where a harvest may take it | What a harvest keeps of an hour is chosen with a random number emitted as the hour ends, and a script whose own text holds a passage of its round's exam is refused |
 | Ship a dataset instead of editing | The ink budget. A model's weights can be large; the text it may add cannot |
-| Have a large model write the data | The same: 0.1% ink, and no network while the curator runs |
-| Curator reads the exam or phones home | There is no exam yet when it runs, and the sandbox has no network |
-| A source, or the organisers, bias the exam | Many sources, each capped, none with a key. The examiner is published code on a fixed window, and the exam is published when the round settles |
+| Have a large model write the data | The same: 0.01% ink, and no network while the curator runs |
+| Curator reads the exam or phones home | The sandbox has no network, and until the round settles the exam goes only to machines grading it |
+| A source, or the organisers, bias the exam | Many sources, each capped, none with a key. The examiner is published code, every harvest's hash is public before the draw that picks from it, and the exam is published when the round settles |
+| Fail on purpose rather than score badly | A failed run counts as the entry's worst finished run when that is below zero, and a failed round as the lowest valid gain in it, or zero if that is lower |
 | A hostile curator attacks the machine running it | Sandbox: no files, no network, no view of the host. Running curators is opt-in, and the guide says what a sandbox cannot promise |
 | A curator swaps its weights after it is checked | Assets are pinned to a commit and named by sha256; every machine checks the hash |
 | A curator takes more than its share of the machine | Cores, memory and scratch are enforced by the kernel. The GPU memory limit is not; lifting it is against the rules and curators are public |
@@ -166,7 +209,7 @@ which says whether the next season should move up too.
 | A runner makes up its script's score | A runner never grades a script that only it wrote |
 | A runner copies the other runner's script | Scripts are sealed until the round settles, and nobody who has been shown one is asked to run that entry |
 | A verifier invents a grade | Compared with the other grades of the same script. Outside the tolerance it is a strike, and it is published |
-| A grader passes the exam on | Until the round settles its items go only to machines grading it, after every curator has run |
+| A grader passes the exam on | Until the round settles its items go only to machines grading it, and a curator has no network to be passed anything |
 | A new account invents grades | Its grades set no score until it is established: five that agreed, and a GitHub identity |
 | Two verifiers agree on a lie | Not caught, if both are established and both are assigned to the entry. Nobody chooses their work, and everything is published and can be re-run |
 | A verifier takes jobs and sits on them | A round waits only for accounts with an agreed grade, and an abandoned job costs a day without work |
@@ -181,36 +224,43 @@ What is left is in [Rules](RULES.md#what-is-trusted-and-what-is-not).
 
 ## A round's exam
 
-1. **The draw and the runs.** Curators run as soon as the round is drawn. The exam does not
-   exist yet.
-2. **The examiner.** An organisers' machine (`stet examine --follow`) waits for the harvest
-   window, an hour from the draw, to close, and then one more hour, for the sources that
-   publish late (Common Crawl's news files, edits on Hacker News). Then it:
-   - harvests the window's fresh text;
+1. **The harvests.** An organisers' machine (`stet examine --follow`) harvests every hour of
+   the clock, an hour after it ends: the hour is for the sources that publish late (Common
+   Crawl's news files, edits on Hacker News). What it keeps of an hour is chosen with the
+   public random number emitted as the hour ends. It tells the server the harvest's
+   sha256 at once, and the server lists them (`/api/v1/harvests`).
+2. **The draw.** The round's seed picks three of the hours that began in the 26 before the
+   draw and whose harvests the server had been told of, and the round names them
+   (`exam_hours`). Curators run as soon as the
+   round is drawn. A round drawn while the server knows of no harvest is given hours once
+   there are some, and says so (`exam_hours_late`).
+3. **The examiner** makes the exam from exactly those hours, at once. It:
    - builds the round's corpus, measures its languages, and drops the fresh items the
      corpus already holds;
    - generates the round's questions from its seed;
    - posts the exam: the items, what each counts toward (pillar, part, language, format and
-     kind of task), the items' digest and the languages' shares.
-3. **Grading.** A grader is handed its script as soon as a curator has written it, and
-   trains the student on it, and its own baseline (the unedited corpus, trained once per
-   grader per round), while the exam is made. Once the exam is posted it fetches the items,
-   checks them against the round's digest, has both students sit them, and reports one
-   score per item.
-4. **The server adds it up.** The round's baseline is the item-by-item mean of the
-   established graders' baselines. A grade's score is the exam's aggregate (seven pillars,
-   each counting the same) of its item scores less that baseline. The server computes it
-   with a Go port of `src/stet/exam/aggregate.py`, checked against the Python on shared
+     kind of task), the items' digest, the languages' shares and the hours it was made
+     from. The server refuses an exam made from any other hours.
+4. **Grading.** A grader is handed its script as soon as a curator has written it, and
+   trains the student on it. Four established graders a round, and every grader not yet
+   established, are asked to train the unedited corpus as well. Once the exam is posted a
+   grader fetches the items, checks them against the round's digest, has its students sit
+   them, and reports one score per item.
+5. **The server adds it up.** The round's baseline is the item-by-item mean of the
+   established graders' baselines. A grade's score is the exam's aggregate (writing three
+   quarters, skills one quarter) of its item scores less that baseline. The server computes
+   it with a Go port of `src/stet/exam/aggregate.py`, checked against the Python on shared
    test vectors (`tools/aggregate_vectors.py`). From there, agreement, settlement, the board
    and the record work on that score.
-5. **Settlement.** The item scores are archived, and the exam is published: the generated
-   items and Wikipedia's text whole, and every other source's items as their source, id and
-   hash. Other sources' text is not ours to republish; anyone can check it at the source.
-   `stet run --round <id>` replays the round on what was published.
+6. **Settlement.** Every item score is published (`/api/v1/rounds/<id>/scores`), and so is
+   the exam: the generated items and Wikipedia's text whole, and every other source's items
+   as their source, id and hash. Other sources' text is not ours to republish; anyone can
+   check it at the source. `stet run --round <id>` replays the round on what was published.
 
-The draw, the runs, the exam two hours on, then half an hour or so of grades: about three
-hours a round. Rounds never overlap. Practice rounds use generated items only, since no fresh text
-was written for them.
+The exam is made at the draw, so a round takes as long as its runs and its grades do.
+Rounds never overlap. A practice round's exam is made the same way, from hours harvested on
+the machine that runs it (`stet harvest`); with none harvested it is the generated items
+alone.
 
 ## How it is built
 

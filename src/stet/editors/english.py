@@ -1,7 +1,10 @@
 """Keep documents that look like English prose; drop the rest. Order unchanged.
 
-The exam is English, and a large share of a raw crawl is not. This is the first thing
-anyone would try, and the first rung of the ladder.
+More than half of a raw crawl is not English, and this throws all of it away. The exam does
+not: three quarters of its score is human writing, each language counting by its share of
+the round's corpus, and only the skills quarter is all in English. So this keeps what the
+skills ask for and gives up the writing in every other language, about four tenths of the
+score. It is the first thing anyone would try, and a yardstick for what that costs.
 """
 
 from stet.curator import Task

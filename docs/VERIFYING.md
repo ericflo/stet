@@ -93,15 +93,15 @@ document numbers and byte ranges. Your machine downloads the round's raw text fr
 Crawl, builds the corpus, fetches the round's exam, trains the fixed student on what the
 script says, has it sit every item, and reports one score per item.
 
-Grade jobs start as soon as a curator has written a script, well before the round's exam
-is posted (a little over two hours after the draw). The verifier trains then, and sits the
-exam the moment it is posted: the round settles minutes after its exam. At the official
+Grade jobs start as soon as a curator has written a script. The round's exam is made at
+its draw, and posted as soon as the examiner has built it. A verifier handed a script
+before then trains at once and sits the exam the moment it is posted; one whose grade is
+trained and waiting asks for another, and sits them all then. At the official
 scale a grade is one training run, about 18 minutes on an RTX 3090 or 4070 Ti. The first
-job of a round also downloads the round's raw text (about a gigabyte; 2.5 GB once built)
-and trains on the unedited corpus once, so it takes about twice as long. A verifier older
-than 0.4.3 is handed grades only once the exam is posted. From 0.4.4, a verifier whose grade
-is trained and waiting asks for another, which trains in a single pass, and sits them all
-when the exam is posted.
+job of a round also downloads the round's raw text (about a gigabyte; 2.5 GB once built).
+Four established machines a round are asked to train on the unedited corpus as well, and
+so is every machine that is not yet established: for them the first job takes about twice
+as long.
 
 Until the round settles, its exam is served only to machines holding a grade job in it,
 signed by their key. It sits in your cache with the round; do not pass it on.
@@ -133,7 +133,7 @@ before it runs, checked against their hashes, and kept in a cache that is trimme
 40 GB and of whatever has gone unused for two weeks
 ([what it keeps on your disk](#what-it-keeps-on-your-disk)). A run takes up to twenty
 minutes at the official scale, plus the download. Runs start as soon as the round is
-drawn, hours before its exam exists.
+drawn.
 
 ### Becoming established
 
@@ -145,8 +145,9 @@ agrees counts towards the 5. `stet whoami` shows where you stand.
 ### What is sent and what is published
 
 With each result your machine sends: the score it measured on every item of the exam,
-and its own baseline's, or the script the curator wrote; hashes of the corpus and exam it
-built; how long the work took and a thinned loss curve; and a description of the machine:
+and its baseline's if the job asked for one, or the script the curator wrote; hashes of
+the corpus and exam it built; how long the work took and a thinned loss curve; and a
+description of the machine:
 GPU name and memory, operating system and processor type, the speeds `stet bench`
 measured, and the versions of Python, PyTorch and the harness.
 
@@ -175,12 +176,12 @@ A verifier does not take the server's word for what a round is.
 
 **Grading is reproducible.** Same script, same corpus, same exam, same initial weights,
 same number of tokens. Two honest machines agree to within a small tolerance
-*(provisional: 0.06 bits per byte at the official scale; see [Experiments](EXPERIMENTS.md))*.
+*(provisional: 0.025 bits per byte at the official scale; see [Experiments](EXPERIMENTS.md))*.
 
 **Every curator is run twice, by different people,** when two are around. A machine is
 handed first an entry whose other run was on the other make of GPU, so the two are on
 NVIDIA and AMD when machines of both are asking. Nobody runs their own entry or runs one
-entry twice. When two runs differ by more than a tolerance *(provisional: 0.09 bits per
+entry twice. When two runs differ by more than a tolerance *(provisional: 0.04 bits per
 byte)*, or one fails, a third person runs it and the middle one counts. Whoever has seen one of an entry's scripts cannot run it, so a
 runner who could give that third run is handed none of them while someone else can grade.
 
@@ -200,10 +201,12 @@ a person who has been shown a script of an entry is never asked to run that entr
 an account that is not established is shown a script only once its entry is closed to
 further runs.
 
-**Everyone proves the round first.** Every grade comes with your baseline for the round:
-the unedited corpus's score on every item. The round's baseline is the item-by-item mean of
-the established graders' own. If your corpus or your exam differs from the round's, or your
-baseline is further from the others' than 0.1 bits per byte, your result is set aside with a
+**The round's baseline is measured four times.** The first four established graders of a
+round are each asked for a baseline with their grade: the unedited corpus's score on every
+item. The round's baseline is the item-by-item mean of theirs, and every grade is measured
+against it, whoever made it. A machine that is not yet established is always asked for its
+own: that is how it is checked. If your corpus or your exam differs from the round's, or your
+baseline is further from the others' than 0.04 bits per byte, your result is set aside with a
 message saying which. That is a broken cache or a different PyTorch, and it does not count
 against you. It is listed on the round's page
 all the same: if honest machines of one kind keep landing there, the tolerance is wrong,
@@ -268,7 +271,7 @@ the account is offered no work for a day.
 | Message | What it means |
 |---|---|
 | "your corpus or exam for ... differs from the round's ..." | A download was cut short or a cache is stale. The verifier drops its copy of the round and rebuilds it once by itself. If it happens twice in a round, it takes no more work from that round. |
-| "your unedited baseline for ... is further from what the round's established graders measured than the tolerance ..." | Your machine trains differently: usually another PyTorch or a CPU fallback. `stet doctor` shows what is in use. The difference is listed on the round's page. |
+| "your unedited baseline for ... is further from the round's other graders' than the tolerance ..." | Your machine trains differently: usually another PyTorch or a CPU fallback. `stet doctor` shows what is in use. The difference is listed on the round's page. |
 | "sealed until the round settles" | Normal. Your run or grade is in, and is compared with everyone else's when the round settles. |
 | "Not given curators to run: ..." | You asked for curators with `--edits` and the server gave its reason: the account is not established yet, has no GitHub account linked, or the machine is under the floor. It grades meanwhile, and is told when that changes. |
 | "this entry settled before your result arrived ..." or "this job ended before your result arrived: the round settled first ..." | The round settled while you were training. No credit, and nothing against you. |

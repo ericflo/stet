@@ -6,7 +6,7 @@ Stet is an open competition to make the best training data. You enter a *curator
 a program that is handed raw web pages it has never seen and twenty minutes on one GPU. It
 decides what to keep, what to cut, and in what order. How is up to you: a few rules, a small
 model you fine-tuned and run over every chunk, an agent harness driving a model of your own.
-A small language model, the student, is trained on the result and sits an exam made after
+A small language model, the student, is trained on the result and sits an exam made when
 the round is drawn. The bigger its gain over a student trained on the raw pages, the better.
 
 [www.stetrun.com](https://www.stetrun.com) · *stet*: the proofreader's mark for "let it stand".
@@ -16,13 +16,16 @@ the round is drawn. The bigger its gain over a student trained on the raw pages,
 ```sh
 curl -fsSL https://www.stetrun.com/install.sh | sh
 stet init my-curator && cd my-curator
+stet harvest              # once: recent human writing for practice exams, no account needed
 stet run                  # edit, train, grade a practice round: a minute or two on a GPU
 stet login --github       # entering needs a GitHub account at least 30 days old
 stet submit
 ```
 
 `stet run` has no limit and uploads nothing: try as many ideas as you like, then submit
-the ones worth volunteers' GPU time. Using a coding agent? Tell it: *Read
+the ones worth volunteers' GPU time. Without `stet harvest` a practice exam has no human
+writing, which is three quarters of an official score. An entry first runs in a round drawn
+at least 26 hours after it was submitted. Using a coding agent? Tell it: *Read
 https://www.stetrun.com/AGENTS.md and enter Stet.* · [How to enter](https://www.stetrun.com/enter)
 
 ## Lend a GPU
@@ -43,11 +46,12 @@ stet service install      # leave it running: starts with the machine, upgrades 
 
 - **Draw after commit.** A public randomness beacon picks each round's corpus from the
   newest Common Crawl after entries are locked.
-- **An exam nobody can know.** Each round's exam is made after its draw: human writing
-  published in the hour after it, and questions generated from its seed. Seven
-  capabilities, each counting the same: knowledge, reading, reasoning, code, agents,
-  writing and conversation.
-- **Almost no ink.** 99.9% of what the student reads must be copied byte for byte from the
+- **An exam nobody can know.** Each round's exam is made at its draw. Three quarters of the
+  score is human writing from three hours of the day before, picked by the draw, in every
+  language by its share of the crawl. One quarter is skills, generated from the round's
+  seed. An entry runs only in rounds drawn at least 26 hours after it was submitted, so it
+  is older than anything its exam could hold.
+- **Almost no ink.** 99.99% of what the student reads must be copied byte for byte from the
   round's corpus.
 - **Checked by other people.** Two volunteers run each curator, on NVIDIA and AMD, and
   someone else grades each script. A score that only one machine stands behind says so,
@@ -58,8 +62,8 @@ stet service install      # leave it running: starts with the machine, upgrades 
   the record needs a margin over shared rounds.
 - **Finals decide.** The season's top eight are trained again at a larger size, on a fresh
   round.
-- **Everything else is public.** Curators, scripts, seeds, every settled round's exam, the
-  harness.
+- **Everything else is public.** Curators, scripts, seeds, every settled round's exam and
+  every score on every item of it, the harness.
 
 ## Train a policy on it
 

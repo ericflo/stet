@@ -37,16 +37,20 @@ mean and its error; and every official round can be replayed once it settles
 (`stet rounds`, then `stet run --round <id>`). To run many trials from a program there
 is `stet.gym`, the same thing as a Python environment.
 
-Practice rounds sit generated questions only: no fresh writing exists for them. A replay of
-an official round sits what that round published, its generated questions and its
-Wikipedia text. Neither shows the whole of an official exam, so both are a guide, not the
-score.
+Run `stet harvest` once before the first `stet run`. It fetches three hours of recent human
+writing from the sources official exams are made from, with no account and no key, and
+every practice round's exam is then made as an official round's is: generated questions,
+and writing from the hours you hold. Without it a practice exam is the generated skills
+alone, a quarter of an official score, and `stet run` says so. `stet harvest --fresh`
+replaces the hours with newly written ones: the check on having tuned to the old. A replay
+of an official round sits what that round published, its generated questions and its
+Wikipedia text.
 
 Official runs cost volunteers GPU time, so those are rationed: three entries in play at
-once and six submissions a day. A round is drawn as soon as an entry is waiting and the
-last round has settled, and takes about two and a half hours: its exam is made two hours
-after the draw, and its scripts are graded while it is. So an entry usually has its first
-score the same day.
+once and six submissions a day. An entry runs only in rounds drawn at least 26 hours after
+it was submitted, so that it is older than any writing its exam could hold. A round is
+drawn every 3 hours. Its exam is made at the draw, and it settles as soon as its runs and
+its grades are in.
 
 ## Can my coding agent do this?
 
@@ -107,34 +111,49 @@ JavaScript harness as one archive that your curator unpacks when it starts.
 
 Yes. Curators are run by volunteers, and each entry is run on both makes when both are
 around. Use the GPU through PyTorch and say `device="cuda"`: that is the right name on
-an AMD GPU too. Nothing in the library list is one maker's alone. A run that fails
-scores a gain of 0 for that run.
+an AMD GPU too. Nothing in the library list is one maker's alone. A run that fails is
+never better than one that finishes: it counts 0, or as your worst finished run when that
+is below 0.
 
 ## Can my curator write new training text?
 
-Almost none: 0.1% of the training tokens. Everything else the student reads must be copied
-byte for byte from the round's corpus. Without that limit the best entry would be a
-dataset written in advance, or by a large model, and the competition would stop being
-about editing.
+Almost none: 0.01% of the training tokens, 16,000 at the official scale. Everything else
+the student reads must be copied byte for byte from the round's corpus. Without that limit
+the best entry would be a dataset written in advance, or by a large model, and the
+competition would stop being about editing. Cleaning a page costs none of it: whole lines
+of one page, kept in order, are copies however short they are.
 
 ## Is the exam secret?
 
-Nobody knows it in advance, the organisers included, because it does not exist yet. Each
-round's exam is made after its draw: human writing published in the hour after it,
-gathered from many sources that need no key, and questions generated from the round's seed.
-Your curator has finished running long before.
+Nobody knows it in advance, the organisers included. Each round's exam is made at its draw.
+Three quarters of the score is human writing from three hours of the day before, which the
+draw picks, gathered from many sources that need no key. One quarter is questions generated
+from the round's seed. Your curator was submitted at least 26 hours before the draw, so it
+is older than all of that writing.
 
 Until the round settles, the exam goes only to the machines grading it. Then it is
 published: the generated questions and Wikipedia's text whole, and every other source's
-items as where they came from and a hash, so anyone can check them at the source.
+items as where they came from and a hash, so anyone can check them at the source. Every
+student's score on every item is published with it.
 
 ## Then what stops people overfitting the exam?
 
-There is nothing to fit in advance: a round's items are written after its curators have run.
-What a curator can learn from past rounds is what kinds of text matter (mathematics,
-programs, replies, every language), and keeping more of those is choosing good data, which
-is the point. The exam weighs seven capabilities equally and every language by its share of
-the crawl, so no one source or kind of text can carry a score.
+There is nothing to fit in advance: a round's writing is newer than every curator in it,
+and its questions come from its seed. What a curator can learn from past rounds is what
+kinds of text matter (news, programs, replies, every language), and keeping more of those
+is choosing good data, which is the point. The exam weighs four kinds of writing and five
+skills, and every language by its share of the crawl, so no one source or kind of text can
+carry a score.
+
+## What is a watched part of the exam?
+
+One that is sat, scored and published with every round and counts for nothing: arithmetic,
+unit conversion, tracing a program, facts and others, and science abstracts. Most are
+questions a student this size cannot do cold whatever it was trained on: measured, they
+ordered curators no better than a coin. Science abstracts are a
+kind of writing new to the exam, and nothing new counts before it is measured. A watched
+part earns a place in the score when, over at least twenty settled rounds, it tells
+curators apart.
 
 ## Who runs my code?
 
@@ -162,8 +181,9 @@ others: they were the first, because someone has to be, and early in a season th
 may be doing most of the work. Once a handful of volunteers are established, they run and
 grade everything among themselves.
 
-Each round's exam is made by the organisers' examiner. If it stops, curators still run,
-and grading waits for the exam, losing nothing meanwhile.
+Each round's exam is made by the organisers' examiner, from the harvests it makes every
+hour. If it stops, curators still run and graders still train, and the trained students
+sit the exam when it is posted.
 
 ## Why is my curator published?
 
@@ -181,9 +201,10 @@ verifying need no account at GitHub.
 ## How do I know the organisers are not cheating?
 
 The corpus is chosen by a public randomness beacon at a time fixed in advance. Each round's
-exam is made after the draw by published code, from text anyone can read, and published when
-the round settles. The trainer, every curator and every script are public. Any score can be
-recomputed with `stet score`. Your curator is run and graded by volunteers, not by the
+exam is made by published code, from text anyone can read: the hash of every hour's harvest
+is public before the draw that picks from it, and the exam and every score on every item
+are published when the round settles. The trainer, every curator and every script are
+public. Any score can be recomputed with `stet score`. Your curator is run and graded by volunteers, not by the
 organisers. What you do have to trust, and whom, is listed, and it is short:
 [what is trusted, and what is not](RULES.md#what-is-trusted-and-what-is-not).
 
