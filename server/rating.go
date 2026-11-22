@@ -9,8 +9,9 @@ package main
 //
 //     gain(editor, round) = skill(editor) + difficulty(round) + noise
 //
-// fitted by least squares. The ladder (the top editors, who run in every round) ties the
-// rounds together, so difficulties are well determined.
+// fitted by least squares. The ladder's editors that run in every round (the entrants' best,
+// and the reference editors the season names) tie the rounds together, so difficulties are
+// well determined.
 
 import (
 	"fmt"
@@ -245,7 +246,7 @@ type BoardRow struct {
 type Board struct {
 	Rated       []*BoardRow          // ranked
 	Provisional []*BoardRow          // fewer than RatedRounds settled rounds
-	Ladder      []*BoardRow          // top editors, one per account: run in every round
+	Ladder      []*BoardRow          // top editors, one per account: run in every round, but for the references that take turns (resting)
 	ByID        map[string]*BoardRow // every editor that has settled at least one round
 	Entries     []entryRow
 	Difficulty  map[int]float64
