@@ -483,3 +483,19 @@ Eric asked for a log of everything, for seeing later the real costs on every mar
 **Also fixed:** a machine is seen starting from the moment it is rented, so one that asks for work before the next look has its boot counted. Lium's first machine asked within 41 s and was never counted, so Lium's grace stayed at 30 min and a dead Lium machine held its place that long in round 10; every market's boots were biased slow the same way.
 
 **Backfill** (`history/backfill/`): the journal since Nov 18, each line classified; each market's billing, where its API gives it; every round from the server; and a machine table joining them.
+
+## 17. Season 2 (merged 2026-11-22, 4ff52af)
+
+Season 2 changes what a round asks of the fleet (stet-89's notice; `src/stet/seasons/s2.json`):
+
+- **The exam is made at the draw**, from hours of the day before already harvested, and posted within a minute or so of it, not about 2h12m after. Nearly every grade is now one of a posted exam, rented for fastest first (`byPace`), and the early grades of §10–§11 are rare.
+- **Baselines on four machines a round** (`baselines.per_round`), not on every machine's first grade. `/admin/work` rounds say `baselines_wanted`: how many more machines the round would ask to measure it.
+- **Fewer runs:** a ladder of eight needs 9 curator runs and 13 trainings, against Season 1's 16 runs and up to 32 trainings. The runner floor, the curator sandbox's limits, `detail.train.seconds` and the install from the site are unchanged.
+
+What the fleet does about it:
+
+- **`lead()` counts two passes only while a round open wants a baseline** (or the server does not say, or none is open, since the next round wants its baselines first). Once none does, a machine rented trains once for its first grade.
+- **A late exam's time is not known.** `examDue` is zero once the exam's time has passed with no exam, so nothing is rented to take its grades early, or kept waiting for them, until it is posted. Before, an overdue exam left `forExam` with no kind in time, and it rented the quickest at any price under `--max-price`, each to hold a trained grade until the exam came: a PR reviewer's finding, confirmed in the code.
+- **`--exam-after` is 5 minutes**, for a server that does not yet say `exam_due` (a new database has no rounds to pace from).
+- The service runs with `--exam-after 5m --early 0` (Eric, 2026-11-22): graders are rented only once an exam is posted.
+- Left for Season 2's first rounds to show, from `history/`: whether curator machines should still be the cheapest a grade (in Season 1 each held a grade until the exam, so its speed bought nothing), and whether grades should still go fastest first.

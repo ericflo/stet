@@ -147,7 +147,7 @@ func cmdStatus(ctx context.Context, f *Fleet) error {
 	for _, r := range v.Work.Rounds {
 		fmt.Fprintf(f.out, "Round %s: %d entries open · %d runs a new machine could take · %d running · %d scripts to grade · %d being graded\n",
 			r.ID, r.Entries, r.RunsWanted, r.EditsUnderWay, r.GradesWanted, r.GradesUnderWay)
-		if due := f.o.Policy.examDue(r); !due.IsZero() {
+		if due := f.o.Policy.examDue(r, now); !due.IsZero() {
 			fmt.Fprintf(f.out, "Exam due about %s UTC (%s): %d grades a grader could take before it, machines rented for them from %s UTC, each kind just in time to train by then\n",
 				due.UTC().Format("15:04"), until(now, due), r.GradesEarly, due.Add(-f.o.Early).UTC().Format("15:04"))
 		}

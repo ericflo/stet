@@ -222,6 +222,10 @@ type WorkRound struct {
 	DrawnAt     int64 `json:"drawn_at"`
 	// When the server expects the exam, until it is posted (0: it does not say).
 	ExamDue int64 `json:"exam_due,omitempty"`
+	// How many more machines the round would ask to measure its unedited baseline with their
+	// next grade, training twice (Season 2: four a round). Nil from a server that does not
+	// say, where every machine's first grade of a round measured it (Season 1).
+	BaselinesWanted *int `json:"baselines_wanted,omitempty"`
 }
 
 // Machine is one of the organisers' accounts as the server sees it.

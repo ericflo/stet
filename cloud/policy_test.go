@@ -315,9 +315,9 @@ func TestBiggerStudentsWantAMachineEach(t *testing.T) {
 	}
 }
 
-// A round's early grades want machines only from --early before its exam is due; once the
-// exam is posted, its grades are wanted as any are, and when the draw is not known, or
-// --early is 0, none is rented ahead.
+// A round's early grades want machines only from --early before its exam is due, until it is
+// due; once the exam is posted, its grades are wanted as any are, and when the draw is not
+// known, when the exam is late, or with --early 0, none is rented ahead.
 func TestEarlyGradesWantMachinesShortlyBeforeTheExam(t *testing.T) {
 	p := testPolicy()
 	p.PerWorker, p.MaxWorkers, p.Edits = 1, 20, true
@@ -336,7 +336,8 @@ func TestEarlyGradesWantMachinesShortlyBeforeTheExam(t *testing.T) {
 		{r, 30 * time.Minute, 0},
 		{r, 86 * time.Minute, 0},
 		{r, 87 * time.Minute, 8}, // 45 minutes before 2h12m
-		{r, 3 * time.Hour, 8},    // the exam is late: still wanted
+		{r, 131 * time.Minute, 8},
+		{r, 3 * time.Hour, 0}, // the exam is late: when it will come is not known, so none is rented ahead
 		{WorkRound{ID: r.ID, Entries: 8, GradesEarly: 8}, 2 * time.Hour, 0}, // the draw not known
 		{WorkRound{ID: r.ID, Entries: 8, GradesEarly: 3, GradesWanted: 2, ExamAt: drawn.Add(2 * time.Hour).Unix(), DrawnAt: drawn.Unix()}, 2 * time.Hour, 2},
 	} {
@@ -393,7 +394,7 @@ func TestMachinesThatTakeSeveralGradesAreFewer(t *testing.T) {
 		t.Fatalf("one rented for one: %+v", d)
 	}
 	// The server's own time for the exam is taken over --exam-after.
-	if due := p.examDue(WorkRound{DrawnAt: t0.Unix(), ExamDue: t0.Add(2 * time.Hour).Unix()}); !due.Equal(t0.Add(2 * time.Hour)) {
+	if due := p.examDue(WorkRound{DrawnAt: t0.Unix(), ExamDue: t0.Add(2 * time.Hour).Unix()}, t0); !due.Equal(t0.Add(2 * time.Hour)) {
 		t.Fatalf("the exam is due %s", due)
 	}
 }

@@ -16,8 +16,10 @@ import (
 
 // --- what the machines have been seen to take ----------------------------------------------------
 //
-// A grade trains twice, the round's baseline on a machine's first grade of the round and then
-// the student, each on the same number of tokens: one training pass. How long a pass takes
+// A grade trains the student on the round's number of tokens: one training pass. A machine
+// asked to measure the round's unedited baseline trains that first, on as many: in Season 1
+// every machine did on its first grade of a round, in Season 2 only four a round do
+// (baselines_wanted in /admin/work). How long a pass takes
 // on each kind of GPU is learned from the grades of settled rounds, which say the GPU that
 // trained and for how long; how long a machine takes to start and first ask for work is
 // learned from the machines this service rents. Until a kind has been seen, its pass is a
@@ -160,11 +162,31 @@ func (f *Fleet) grace(market string) time.Duration {
 }
 
 // lead is how long before a machine of this kind is to report a grade it must be rented,
-// for its first grade of a round: to start, fetch the corpus, train the round's baseline and
-// the student, and sit the exam.
+// for its first grade of a round: to start, fetch the corpus, train the round's baseline
+// while one is wanted, train the student, and sit the exam.
 func (f *Fleet) lead(c Offer) time.Duration {
 	p, _ := f.pass(c.Card)
-	return f.bootOn(c.Market) + fetchAndScripts + 2*p + sitting
+	passes := time.Duration(2)
+	if f.onePass {
+		passes = 1
+	}
+	return f.bootOn(c.Market) + fetchAndScripts + passes*p + sitting
+}
+
+// baselinesWanted says whether a machine rented now may be asked to measure a round's unedited
+// baseline with its first grade, training twice: while a round open wants one, or does not
+// say (every machine did in Season 1), and while none is open, since the next one will want
+// its baselines first.
+func baselinesWanted(w *Work) bool {
+	if w == nil || len(w.Rounds) == 0 {
+		return true
+	}
+	for _, r := range w.Rounds {
+		if r.BaselinesWanted == nil || *r.BaselinesWanted > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // noteBoot counts how long a machine took to first ask for work, once.

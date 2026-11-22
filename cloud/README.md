@@ -28,21 +28,32 @@ over it. Which markets are armed is kept in `markets.json`; with none, RunPod al
 
 ## What a rented machine does
 
-It is a RunPod pod running `ubuntu:24.04` and [one script](worker.sh). The script installs
-stet from the site into `/opt/stet` (about two and a half minutes), writes the machine's
-key under `/root`, and runs `stet verify --edits --sandbox container --exit-when-idle 15`:
-it runs curators and grades, and trains the organisers' students when there is nothing
-official to do, until it has had nothing to do for fifteen minutes, then ends
-its own pod with the key RunPod gives each pod for itself. RunPod restarts a container
-whose process exits, and keeps billing for it, so the script never just exits.
+It is a single-GPU container on one of the markets armed, running `ubuntu:24.04` and [one
+script](worker.sh). The script installs stet from the site into `/opt/stet` (on Lium, under
+`/workspace`, since its container disk is 7.5 GB), writes the machine's key under `/root`, and
+runs `stet verify --edits --sandbox container --exit-when-idle 15`: it runs curators and
+grades, and trains the organisers' students when there is nothing official to do, until it
+has had nothing to do for fifteen minutes. Then it ends itself where its market gives it a key
+for that alone (RunPod a pod's own, Vast an instance's), and elsewhere waits for stet-cloud to
+end it from outside, with the market's own backstop should the fleet be gone: Lium ends a pod
+after `termination_hours`, Clore an order after `rental_hours` (both 3), and a Salad container
+is made never to restart. A market may restart a container whose process exits, and keep
+billing for it, so the script never just exits.
 
-RunPod's containers cannot make bubblewrap's namespaces, so curators run in stet's
+The markets' containers cannot make bubblewrap's namespaces, so curators run in stet's
 container sandbox (`src/stet/cage.py`): a user of the curator's own, which cannot enter
 `/root`; a system-call filter that hands it only TCP sockets bound to the loopback device;
 Landlock, keeping it off the machine's other ports (Docker's DNS resolver among them); and
 the season's limits, by a cgroup where the host allows one and otherwise watched. The rules
 say what differs for a curator. Where it cannot be made (an old kernel, no Landlock) the
-machine only grades. `--no-edits` rents machines that only grade.
+machine only grades. Curators are run on RunPod, and on Vast and Clore where a probe showed
+the sandbox to hold (`stet-cloud probe --market M`; `markets.json` keeps the answer). Lium
+(Sysbox takes the one seccomp listener allowed) and Salad (WSL2 in people's own PCs) only
+grade. stet also refuses curators on a machine under the season's floor (`stet bench`: a CPU
+of 100 MB a second on 6 processes, among others): the server says so in `/admin/work`
+(`curators_why`), the machine is ended to make way, and its host, and its CPU model where the
+CPU fell short, are kept off curators for a week (`curators.json`). `--no-edits` rents
+machines that only grade.
 
 Each machine has a key of its own from a pool kept here, and the organisers' own key
 (`--key`) vouches for each: it signs a grant the server keeps. Nothing in the server's
@@ -85,23 +96,30 @@ those.
 
 How many it rents: one for each machine at a grade, which takes no other until it is done
 (about 18 minutes on a 3090 at the standard scale), and one more for every `--per-machine`
-(6) scripts a new machine could grade now: `--per-machine 1` gives each its own. A grader
-may take a grade before the round's exam is posted, train the round's baseline and the
-student, and sit the exam once it is. The grades it could take want machines from `--early`
-(90 minutes) before the exam is due, about `--exam-after` (2h12m) after the draw, and each
-kind of GPU is rented just in time: so that, rented now, it would report between a minute
-before the exam and `--settle-within` (15 minutes) after it. A machine that has trained
-only waits, so what a grade costs on a kind is its price over the time it is held, and a
-kind is rented only if none still to come would cost less: the cheapest is waited for, and
-a quicker, dearer kind is rented only once the cheaper ones can no longer report in time.
+(6) scripts a new machine could grade now: `--per-machine 1` gives each its own. A grade
+trains the student once; the four machines a round asks to measure its unedited baseline
+(Season 2's `baselines.per_round`, `baselines_wanted` in `/admin/work`) train that first, on
+as many tokens. In Season 2 the exam is made at the draw, from hours of the day before already
+harvested, and posted within a minute or so of it, so nearly every grade is taken once the
+exam is posted, and wants a machine then. A grader may also take a grade before the exam is
+posted and hold it until it is: such grades want machines from `--early` (90 minutes) before
+the exam is due (when the server says, or else `--exam-after`, 5 minutes, after the draw), and
+each kind of GPU is rented just in time, so that, rented now, it would report between a
+minute before the exam and `--settle-within` (15 minutes) after it. A machine that has
+trained only waits, so what a grade costs on a kind is its price over the time it is held,
+and a kind is rented only if none still to come would cost less: the cheapest is waited for,
+and a quicker, dearer kind is rented only once the cheaper ones can no longer report in time.
+An exam past its time is late, and when it will come is not known: nothing is rented to take
+its grades before it, or kept waiting for them, until it is posted. Season 1's exam came
+about 2h12m after the draw, and these early grades were most of its grades; the service now
+runs with `--early 0`, renting graders only once an exam is posted.
 How long a training pass takes on each kind is learned from the grades of settled rounds
 (each says the GPU that trained, and for how long), and how long a machine takes to start
 from those this service rents; until a kind has been seen, its pass is a 3090's 18 minutes
 over its speed in the table, and a machine is taken to start in 8 minutes. They are kept in
-`calibration.json`, and `stet-cloud gpus` shows them. A curator is run in a minute or two,
-and the exam its grades wait for is made hours after the draw, so the curators want a
-machine for every four entries to run, and never fewer than two, since each entry is run
-twice, by two accounts. A machine with nothing official to do trains the organisers' own
+`calibration.json`, and `stet-cloud gpus` shows them. The curators want a machine for every
+four entries to run, and never fewer than two, since each entry is run twice, by two
+accounts. A machine with nothing official to do trains the organisers' own
 students (a few minutes each, on a settled round), so one more for every `--per-farm` (4)
 of those waiting, after the official work (`--per-farm 0`: none). `--long-farm 600` rents
 machines that also take the bigger students, held for hours, one machine to each. A machine
@@ -119,14 +137,16 @@ that went quiet or stopped. The rest stop by themselves. A machine ended a momen
 took a job, or that stopped partway through one, still holds it as the server sees it: what
 it holds is handed back on the next look, so nothing waits out its lease.
 
-Every machine rented is the fastest that will do, looked up afresh each time: every kind of
-GPU RunPod has free under `--max-price`, in both its clouds, is tried fastest first (the
-cheaper first where two are as fast) until one has a machine with room. A round settles
-only once its slowest grade is in, and a machine's first grade of a round trains the
-round's baseline too: about 16 minutes on a 4090, and 52 on an RTX A4000, which costs less
-a grade. Machines to run curators are the cheapest a grade instead: once its runs are done,
-such a machine takes a grade before the exam and holds it until then, so its speed buys
-nothing. `--cheapest` rents every machine by what a grade costs, its price over its speed:
+Every machine rented for a grade of a posted exam is the fastest that will do, looked up
+afresh each time: every kind of GPU the markets armed have free under `--max-price` is tried
+fastest first (the cheaper first where two are as fast) until one has a machine with room. A
+kind's price is ranked over how often machines of its kind have started (`startRates`: some
+cheap hosts never do), learned per market, card and class of host. A round settles only once
+its slowest grade is in: a pass is about 8 minutes on a 4090, and 16 on a 3090. Machines to
+run curators are the cheapest a grade instead: in Season 1 each then held a grade until the
+exam, so its speed bought nothing. With the exam posted at the draw, a curator machine's
+grades are wanted as soon as its runs are done, and Season 2's first rounds will show whether
+that order still pays. `--cheapest` rents every machine by what a grade costs, its price over its speed:
 a 4090 at $0.89 an hour then comes before an A40 at $0.59, and an A4000 at $0.17 before
 both. What will do: NVIDIA, 12 GB or more (a machine that runs curators needs 10 and gives
 one 8), on a host with the season's floor of 16 GB of memory and 6 vCPUs a GPU, a driver
@@ -136,11 +156,12 @@ stayed up into another round and upgraded found less than the 60 GB a curator ru
 free, and only graded). `stet-cloud gpus` lists them as they stand.
 `--gpu "RTX A5000,RTX 4090"` names them instead.
 
-`--cloud any` (the default) takes the cheaper of RunPod's two clouds, which is nearly
-always the community one: strangers' machines, at a third of the price or less. `--cloud
-secure` rents only from RunPod's own data centres. The host of a community machine could
-read the key it is given, and anyone holding a worker key can grade as the organisers:
-take back a key that may have leaked (`stet-cloud keys --revoke HANDLE`).
+`--cloud` is RunPod's: `any` (the default) takes the cheaper of its two clouds, which is
+nearly always the community one, at a third of the price or less, and `secure` only its own
+data centres. It does not narrow the other markets. The hosts on Vast, Lium, Salad and Clore,
+and RunPod's community ones, are strangers' machines: their owner could read the key a
+machine is given, and anyone holding a worker key can grade as the organisers. Take back a
+key that may have leaked (`stet-cloud keys --revoke HANDLE`).
 
 Leaving it running, as a service of your own user (stet-cloud, which took over from
 stet-runpod's service):
@@ -153,7 +174,7 @@ Wants=network-online.target
 After=network-online.target
 
 [Service]
-ExecStart=%h/.local/bin/stet-cloud scale --follow --cloud any --max 20 --max-price 1.10 --max-hourly 16 --daily-budget 60 --per-machine 1
+ExecStart=%h/.local/bin/stet-cloud scale --follow --cloud any --max 20 --max-price 1.10 --max-hourly 16 --daily-budget 60 --per-machine 1 --exam-after 5m --early 0
 Restart=always
 RestartSec=60
 
@@ -164,7 +185,8 @@ WantedBy=default.target
 The markets' keys are in `~/.config/stet-cloud/credentials.env`, which stet-cloud reads itself
 at every look: the unit sets none of them, since a key in the environment would win over the
 file's. `systemctl --user enable --now stet-cloud`. If it stops, the machines on RunPod and
-Vast still stop by themselves; only renting more stops. Only one of stet-runpod and stet-cloud
+Vast still stop by themselves, and those on Lium and Clore at their backstop; only renting
+more stops. Only one of stet-runpod and stet-cloud
 may run with a pool: stop and disable the one before starting the other.
 
 ## What it keeps
@@ -184,8 +206,10 @@ In `~/.config/stet-cloud` (`STET_CLOUD_HOME`):
 | `history/rounds/ID.json` | Each round as the server tells it once it has settled, whole; a line each in `history/rounds.jsonl` |
 | `history/backfill/` | What could be put together for before these were kept, from the journal, the markets' own billing and the rounds |
 
-RunPod forgets a pod once it ends and does not say what it cost, so what was spent is
-worked out from these, and is an estimate. RunPod's billing page is the account.
+What was spent is worked out from the prices rented at, and is an estimate: RunPod forgets a
+pod once it ends and does not say what it cost. What each market really charged is what its
+balance went down by (`history/balances.jsonl`), less what other projects rented with the same
+keys (`history/excluded.jsonl`); each market's billing page is the account.
 
 `--ssh` lets `~/.ssh/id_ed25519.pub` into the machines it rents; `stet-cloud ssh
 stet-rp-01` logs in to one. `stet-cloud logs stet-rp-01` shows what one has said (`-f`

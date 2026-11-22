@@ -74,6 +74,10 @@ type Fleet struct {
 	calErr   string
 	// Pods seen before they first asked for work, so that how long they took is seen too.
 	starting map[string]bool
+	// Whether a machine rented now trains once for its first grade of a round, no round open at
+	// the last look wanting its baseline measured (baselinesWanted): it then trains only the
+	// student.
+	onePass bool
 }
 
 // --- the pool of keys ---------------------------------------------------------------------------
@@ -582,6 +586,7 @@ func (f *Fleet) look(ctx context.Context) (*View, error) {
 	if err != nil {
 		return nil, err
 	}
+	f.onePass = !baselinesWanted(work)
 	if err := f.refresh(); err != nil {
 		return nil, err
 	}
@@ -843,7 +848,7 @@ func (f *Fleet) firstExamDue(w *Work) time.Time {
 	var due time.Time
 	for _, r := range w.Rounds {
 		if r.GradesEarly > 0 {
-			if d := f.o.Policy.examDue(r); !d.IsZero() && (due.IsZero() || d.Before(due)) {
+			if d := f.o.Policy.examDue(r, f.now()); !d.IsZero() && (due.IsZero() || d.Before(due)) {
 				due = d
 			}
 		}
@@ -886,7 +891,7 @@ func (f *Fleet) nextGrades(ctx context.Context, w *Work) int {
 	var due time.Time
 	for _, r := range w.Rounds {
 		if f.o.Policy.early(r, now) > 0 {
-			if d := f.o.Policy.examDue(r); due.IsZero() || d.Before(due) {
+			if d := f.o.Policy.examDue(r, now); due.IsZero() || d.Before(due) {
 				due = d
 			}
 		}

@@ -1254,3 +1254,35 @@ func TestAMachineStillInstallingIsGivenMoreTime(t *testing.T) {
 		t.Fatalf("past twice its grace:\n%s", said)
 	}
 }
+
+// In Season 2 only four machines a round measure its unedited baseline (baselines_wanted):
+// once no round open wants one, a machine rented trains once for its first grade, and its lead
+// counts one pass, not two. A server that does not say, or no round open, counts two.
+func TestOnlyAMachineMeasuringTheBaselineTrainsTwice(t *testing.T) {
+	rp, st := newFakeRunPod(t), newFakeStet(t)
+	f, out := testFleet(t, rp, st, 1)
+	c := Offer{Market: "runpod", Card: "NVIDIA GeForce RTX 4090"}
+	p, _ := f.pass(c.Card)
+	two := f.lead(c)
+	none, four := 0, 4
+	for _, x := range []struct {
+		rounds []WorkRound
+		want   time.Duration
+	}{
+		{nil, two},
+		{[]WorkRound{{ID: "s2-o00001", BaselinesWanted: &four}}, two},
+		{[]WorkRound{{ID: "s1-o00014"}}, two}, // a Season 1 server: it does not say
+		{[]WorkRound{{ID: "s2-o00001", BaselinesWanted: &none}}, two - p},
+		{[]WorkRound{{ID: "s2-o00001", BaselinesWanted: &none}, {ID: "s2-o00002", BaselinesWanted: &four}}, two},
+	} {
+		st.mu.Lock()
+		st.work = Work{Rounds: x.rounds}
+		st.mu.Unlock()
+		if _, err := f.look(context.Background()); err != nil {
+			t.Fatalf("%v\n%s", err, out)
+		}
+		if l := f.lead(c); l != x.want {
+			t.Errorf("%d rounds open: lead %s, want %s", len(x.rounds), l, x.want)
+		}
+	}
+}

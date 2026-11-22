@@ -124,17 +124,26 @@ func (p Policy) official(w *Work, early int) int {
 }
 
 // examDue is when a round's exam is expected, about: when the server says it is, or else
-// --exam-after its draw; zero once it is posted, or when that is not known.
-func (p Policy) examDue(r WorkRound) time.Time {
+// --exam-after its draw. Zero once it is posted, when that is not known, and once that time
+// has passed with no exam: when a late exam will come is not known (in Season 2 it is posted
+// at the draw, and one that is late waits on the examiner), so nothing is rented to take its
+// grades before it, nor kept waiting for them, until it is posted.
+func (p Policy) examDue(r WorkRound, now time.Time) time.Time {
+	var due time.Time
 	switch {
 	case r.ExamAt != 0:
 		return time.Time{}
 	case r.ExamDue > 0:
-		return time.Unix(r.ExamDue, 0)
+		due = time.Unix(r.ExamDue, 0)
 	case r.DrawnAt == 0 || p.ExamAfter <= 0:
 		return time.Time{}
+	default:
+		due = time.Unix(r.DrawnAt, 0).Add(p.ExamAfter)
 	}
-	return time.Unix(r.DrawnAt, 0).Add(p.ExamAfter)
+	if !now.Before(due) {
+		return time.Time{}
+	}
+	return due
 }
 
 // early is how many of a round's grades want a machine before its exam is posted: those a
@@ -144,7 +153,7 @@ func (p Policy) examDue(r WorkRound) time.Time {
 // trained by the time the exam is posted, is forExam's. None when the exam is posted (its
 // grades are wanted then), or when the draw is not known.
 func (p Policy) early(r WorkRound, now time.Time) int {
-	due := p.examDue(r)
+	due := p.examDue(r, now)
 	if p.Early <= 0 || r.GradesEarly <= 0 || due.IsZero() || now.Before(due.Add(-p.Early)) {
 		return 0
 	}
@@ -350,7 +359,7 @@ func (p Policy) nearExam(w *Work, now time.Time) bool {
 		if r.GradesUnderWay+r.GradesWanted == 0 {
 			continue
 		}
-		if due := p.examDue(r); !due.IsZero() && due.Sub(now) <= 5*time.Minute {
+		if due := p.examDue(r, now); !due.IsZero() && due.Sub(now) <= 5*time.Minute {
 			return true
 		}
 		if r.ExamAt != 0 && now.Sub(time.Unix(r.ExamAt, 0)) <= window {
@@ -454,7 +463,7 @@ func (p Policy) decideNext(w *Work, workers []*Worker, spentToday float64, now t
 	}
 	for _, r := range w.Rounds {
 		if n := p.early(r, now); n > 0 {
-			if due := p.examDue(r); d.ExamDue.IsZero() || due.Before(d.ExamDue) {
+			if due := p.examDue(r, now); d.ExamDue.IsZero() || due.Before(d.ExamDue) {
 				d.ExamDue = due
 			}
 		}
