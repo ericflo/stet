@@ -54,7 +54,7 @@ class Shard:
     url: str
 
 
-POLICY_KEYS = ("reference", "reference_curves", "tolerance", "noise", "record", "runner")
+POLICY_KEYS = ("reference", "reference_curves", "tolerance", "noise", "record", "runner", "baselines", "references")
 
 
 @dataclass(frozen=True)
@@ -68,9 +68,10 @@ class Season:
         """Hash of everything in the season that decides a score, pool manifests included.
 
         Left out: the numbers that only say how results are read (tolerances, the record
-        rule, reference curves) and who may run curators (the floor for a runner's
-        machine). Those are the server's to apply and can be re-measured without every
-        verifier having to upgrade.
+        rule, reference curves), who may run curators (the floor for a runner's machine),
+        and how the server spreads a round's work (how many machines measure its unedited
+        baseline, which reference curators run in it). Those are the server's to apply and
+        can be changed without every verifier having to upgrade.
         """
         rules = {k: v for k, v in self.raw.items() if k not in POLICY_KEYS}
         h = hashlib.sha256(json.dumps(rules, sort_keys=True, separators=(",", ":")).encode())

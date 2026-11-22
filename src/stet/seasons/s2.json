@@ -369,6 +369,16 @@
       "large": 0.005
     }
   },
+  "baselines": {
+    "per_round": 4
+  },
+  "references": {
+    "every_round": [
+      "fineweb2",
+      "dclm"
+    ],
+    "one_in": 8
+  },
   "reference_curves": {},
   "noise": {
     "micro": {

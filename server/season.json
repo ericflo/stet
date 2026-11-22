@@ -3,6 +3,9 @@
   "max_bytes": 4294967296,
   "max_files": 32
  },
+ "baselines": {
+  "per_round": 4
+ },
  "beacon": {
   "chain_hash": "52db9ba70e0cc0f6eaf7803dd07447a1f5477735fd3f661792ba94600c84e971",
   "genesis": 1692803367,
@@ -362,6 +365,13 @@
   "note": "The organisers' own verifier, and the machine the experiments in the documents were run on. Editors are run by volunteers' machines too: time yours against the floor in \"runner\" (stet bench), not against this."
  },
  "reference_curves": {},
+ "references": {
+  "every_round": [
+   "fineweb2",
+   "dclm"
+  ],
+  "one_in": 8
+ },
  "rules_version": 5,
  "runner": {
   "cores": 6,

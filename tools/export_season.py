@@ -60,6 +60,9 @@ def export(season_id: str = CURRENT_SEASON) -> dict:
         "tolerance": raw.get("tolerance", {}),
         "noise": raw.get("noise", {}),
         "record": raw["record"],
+        # How the server spreads a round's work: who measures its baseline, which references run.
+        "baselines": raw.get("baselines", {}),
+        "references": raw.get("references", {}),
         "train": raw["train"],
         "tokenizer": {k: raw["tokenizer"][k] for k in ("vocab_size",)},
         "parity": {
