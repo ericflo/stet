@@ -24,25 +24,29 @@ from stet.curator import Task
 # How a sentence ends: in scripts written with spaces, a mark and then a space; in Chinese and
 # Japanese, the mark alone.
 SENTENCE_END = re.compile(r"[.!?…؟۔।][\"')\]”’»]?\s|[。！？｡]")
-SPACELESS = (("぀", "ヿ"), ("一", "鿿"), ("฀", "๿"))  # kana, Chinese characters, Thai
+SPACELESS = re.compile("[぀-ヿ一-鿿฀-๿]")  # kana, Chinese characters, Thai
+# The vowel signs of Hindi, Thai and Arabic are marks and not letters: they count as part of
+# the letters they sit on. (Asking each character in turn is a hundred times slower, and a
+# round's pages are gigabytes.)
+MARKS = "".join(c for c in map(chr, range(0x300, 0x10000)) if unicodedata.category(c)[0] == "M")
+WRITING = re.compile(rf"(?:[^\W\d_]|\s|[{re.escape(MARKS)}])+")  # letters of any script, spaces and marks
 # Rough, under the season's tokenizer, and on the generous side: a stream that runs over the
 # budget is cut off, one that falls short repeats from the top.
 BYTES_PER_TOKEN = 3.7
 
 
 def looks_written(text: str) -> bool:
-    """Mostly letters, of any script, and enough of them to say something. The vowel signs of
-    Hindi, Thai and Arabic are marks and not letters, and count as part of the letters they sit on."""
+    """Mostly letters, of any script, and enough of them to say something."""
     sample = text[:3000]
     if len(sample) < 200:
         return False
-    return sum(c.isalpha() or c.isspace() or unicodedata.category(c)[0] == "M" for c in sample) / len(sample) >= 0.75
+    return len(WRITING.sub("", sample)) <= 0.25 * len(sample)
 
 
 def spaceless(text: str) -> bool:
     """Written without spaces between words, so that a line's length is counted in characters."""
     sample = text[:2000]
-    return sum(1 for c in sample if any(a <= c <= b for a, b in SPACELESS)) > 0.3 * len(sample)
+    return len(SPACELESS.findall(sample)) > 0.3 * len(sample)
 
 
 def prose_ranges(raw: bytes, dense: bool) -> tuple[list[list[int]], int]:
@@ -51,10 +55,14 @@ def prose_ranges(raw: bytes, dense: bool) -> tuple[list[list[int]], int]:
     end of one in it."""
     ranges: list[list[int]] = []
     pos = 0
+    least = 25 if dense else 60
     for line in raw.split(b"\n"):
         n = len(line) + 1  # + the line break
+        if n <= least:  # too few bytes to be that many characters: most of a page's furniture
+            pos += n
+            continue
         body = line.decode("utf-8", "replace").strip()
-        long_enough = len(body) >= 25 if dense else (len(body) >= 60 and body.count(" ") >= 9)
+        long_enough = len(body) >= least and (dense or body.count(" ") >= 9)
         if long_enough and SENTENCE_END.search(body + " "):
             if ranges and ranges[-1][1] == pos:
                 ranges[-1][1] = pos + n

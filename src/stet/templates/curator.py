@@ -23,18 +23,24 @@ away most of what the student is examined on.
 """
 
 import random
+import re
 import unicodedata
 
 from stet.curator import Task
 
+# Letters of any script, spaces, and the marks that sit on letters (the vowel signs of Hindi,
+# Thai and Arabic). A regular expression, because a round's pages are gigabytes and asking
+# each character in turn is a hundred times slower.
+MARKS = "".join(c for c in map(chr, range(0x300, 0x10000)) if unicodedata.category(c)[0] == "M")
+WRITING = re.compile(rf"(?:[^\W\d_]|\s|[{re.escape(MARKS)}])+")
+
 
 def looks_written(text: str) -> bool:
-    """Mostly letters, of any script, and enough of them to say something. The vowel signs of
-    Hindi, Thai and Arabic are marks and not letters, and count as part of the letters they sit on."""
+    """Mostly letters, of any script, and enough of them to say something."""
     sample = text[:3000]
     if len(sample) < 200:
         return False
-    return sum(c.isalpha() or c.isspace() or unicodedata.category(c)[0] == "M" for c in sample) / len(sample) >= 0.75
+    return len(WRITING.sub("", sample)) <= 0.25 * len(sample)
 
 
 def main():
