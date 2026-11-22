@@ -454,12 +454,16 @@ type ExamMix struct {
 	Langs int          `json:"languages,omitempty"` // of the text people wrote, programming languages apart
 	Parts []ExamPillar `json:"pillars"`
 	Kinds []ExamKind   `json:"kinds,omitempty"` // of the text people wrote, the most items first
+	// Watched are the parts that are sat and published and count for nothing, the most items first.
+	Watched []ExamKind `json:"watched,omitempty"`
 }
 
 type ExamPillar struct {
-	Pillar string `json:"pillar"`
-	Items  int    `json:"items"`
-	Fresh  int    `json:"fresh,omitempty"`
+	Pillar string  `json:"pillar"`
+	Group  string  `json:"group,omitempty"`
+	Share  float64 `json:"share,omitempty"` // of the score, among the pillars this exam has
+	Items  int     `json:"items"`
+	Fresh  int     `json:"fresh,omitempty"`
 }
 
 type ExamKind struct {
@@ -476,39 +480,51 @@ func (a *App) examMix(table []ItemInfo) *ExamMix {
 	if len(table) == 0 {
 		return nil
 	}
+	plan := &a.season.Exam
 	m := &ExamMix{Items: len(table)}
 	at := map[string]int{}
-	for _, p := range a.season.ExamSources {
-		at[p] = len(m.Parts)
-		m.Parts = append(m.Parts, ExamPillar{Pillar: p})
+	for _, p := range plan.Pillars {
+		at[p.Name] = len(m.Parts)
+		m.Parts = append(m.Parts, ExamPillar{Pillar: p.Name, Group: p.Group})
 	}
-	langs, kinds := map[string]bool{}, map[string]int{}
+	langs, kinds, watched, present := map[string]bool{}, map[string]int{}, map[string]int{}, map[string]bool{}
 	for _, it := range table {
-		i, ok := at[it.Pillar]
-		if !ok {
-			i, at[it.Pillar] = len(m.Parts), len(m.Parts)
-			m.Parts = append(m.Parts, ExamPillar{Pillar: it.Pillar})
+		fresh := !generatedParts[it.Part] && !strings.Contains(it.Part, "-") // a family's other forms are named family-form
+		if fresh {
+			m.Fresh++
+			kinds[it.Part]++
+			if !strings.HasPrefix(it.Lang, "code") {
+				langs[it.Lang] = true
+			}
 		}
-		m.Parts[i].Items++
-		if generatedParts[it.Part] {
+		i, ok := at[it.Pillar]
+		if !ok { // watched, or a pillar the season does not name: no part of the score
+			watched[it.Part]++
 			continue
 		}
-		m.Fresh++
-		m.Parts[i].Fresh++
-		kinds[it.Part]++
-		if !strings.HasPrefix(it.Lang, "code") {
-			langs[it.Lang] = true
+		present[it.Pillar] = true
+		m.Parts[i].Items++
+		if fresh {
+			m.Parts[i].Fresh++
 		}
+	}
+	for name, share := range plan.weights(present) {
+		m.Parts[at[name]].Share = places5(share)
 	}
 	m.Langs = len(langs)
-	for k, n := range kinds {
-		m.Kinds = append(m.Kinds, ExamKind{k, n})
-	}
-	sort.Slice(m.Kinds, func(x, y int) bool {
-		if m.Kinds[x].Items != m.Kinds[y].Items {
-			return m.Kinds[x].Items > m.Kinds[y].Items
+	byCount := func(counts map[string]int) []ExamKind {
+		var out []ExamKind
+		for k, n := range counts {
+			out = append(out, ExamKind{k, n})
 		}
-		return m.Kinds[x].Kind < m.Kinds[y].Kind
-	})
+		sort.Slice(out, func(x, y int) bool {
+			if out[x].Items != out[y].Items {
+				return out[x].Items > out[y].Items
+			}
+			return out[x].Kind < out[y].Kind
+		})
+		return out
+	}
+	m.Kinds, m.Watched = byCount(kinds), byCount(watched)
 	return m
 }

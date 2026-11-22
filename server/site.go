@@ -450,6 +450,9 @@ func (s *Site) funcs() template.FuncMap {
 		"ordinal":  ordinal,
 		"neg":      func(v float64) bool { return v < 0 },
 		"hm":       func(ts int64) string { return time.Unix(ts, 0).UTC().Format("2 Jan, 15:04") },
+		"hourof":   func(ts int64) string { return time.Unix(ts, 0).UTC().Format("2 Jan 15:04") },
+		"hours":    func(seconds int64) string { return trimZero(fmt.Sprintf("%.1f", float64(seconds)/3600)) },
+		"signed3":  func(v float64) string { return fmt.Sprintf("%+.3f", v) },
 		"dict": func(kv ...any) map[string]any {
 			m := map[string]any{}
 			for i := 0; i+1 < len(kv); i += 2 {
@@ -1217,6 +1220,7 @@ func (s *Site) editor(w http.ResponseWriter, r *http.Request) {
 			d["InsideAsked"] = asked == shown.RoundIdx
 			d["Latest"] = shown
 			d["SourceChart"] = gainChart(a.season.ExamSources, shown.BySource) // its gain on each pillar
+			d["Watched"] = watchedGains(shown.BySource)                        // and on what is sat and counts for nothing
 			if shown.Train != nil {
 				d["CurveChart"] = curveChart(shown.Train.Curve)
 			}
@@ -1347,9 +1351,23 @@ func (s *Site) rounds(w http.ResponseWriter, r *http.Request) {
 	s.render(w, 200, "rounds", s.page(r, "Rounds", "rounds", map[string]any{"Rounds": rows, "Earlier": earlier, "EarlierIdx": earlierIdx}))
 }
 
-// examWindow is how long after a draw the text people publish goes into the round's exam: the
-// season's exam.fresh.window_seconds (src/stet/seasons/s1.json), which the examiner reads.
-const examWindow = 3600
+// WatchedGain is an entry's gain on a part of the exam that counts for nothing.
+type WatchedGain struct {
+	Part string
+	Gain float64
+}
+
+// watchedGains lists an entry's gains on the watched parts, by name.
+func watchedGains(by map[string]float64) []WatchedGain {
+	var out []WatchedGain
+	for k, v := range by {
+		if part, ok := strings.CutPrefix(k, watchPrefix); ok && finite(v) {
+			out = append(out, WatchedGain{part, v})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Part < out[j].Part })
+	return out
+}
 
 func (s *Site) round(w http.ResponseWriter, r *http.Request) {
 	a := s.app
@@ -1389,7 +1407,7 @@ func (s *Site) round(w http.ResponseWriter, r *http.Request) {
 	d := map[string]any{"R": rs, "ID": rs.ID, "Entries": entries, "Top": topGain(entries), "Scale": sc, "Tolerance": a.tolerance(),
 		"RunsPerEntry": a.cfg.RunsPerEntry, "Prev": prev, "Next": next,
 		"Expected": expected, "Later": later, "MaxNew": a.cfg.MaxNewPerRound, "QualifyRounds": a.cfg.QualifyRounds, "Work": work,
-		"WindowEnd": rs.DrawnAt + examWindow}
+	}
 	// Every run of the round's entries, and every grade of every script they wrote, whatever
 	// it said, is drawn entry by entry: who ran it, what each run wrote, who graded that.
 	runs := 0
