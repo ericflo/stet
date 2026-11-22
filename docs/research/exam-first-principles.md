@@ -720,6 +720,15 @@ thresholds are the ones 9.3 used on the pilot. The few-shot forms, science abstr
 kind of writing and each cold family face the same two tests; nothing is in for its name.
 A skill pillar is the mean of its parts that are in, and a pillar with none is dropped.
 
+Also fixed before the standard trainings were complete: a family that is asked cold and
+with worked examples first is one skill asked two ways, so at most one form of it counts,
+the one with the larger spread over noise at standard among those that pass. And the
+families that had no pillar go, if they pass, into three: *numbers* (arithmetic, several
+steps of it, units, word problems, algebra), *programs* (running a program, an algorithm's
+output, structured data) and *knowledge*; beside agents, reading, transformation, logic and
+grammar. Science abstracts, if they pass, are a sixth kind of writing with a pillar of
+their own.
+
 3. *Ink does not buy it.* `scribe` is `tidy` plus 16,000 tokens of the exam's own forms. If
    scribe's score is above tidy's by more than twice the standard error of the difference
    at the standard size, the exam can be bought with ink, and ink goes to nothing: a script
