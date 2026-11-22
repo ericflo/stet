@@ -52,7 +52,7 @@ _pace = threading.Lock()  # the harvest reads its sources at once, and some shar
 
 MAX_BODY = 32 << 20  # bytes of an answer that are read: the largest real one is a small part of this
 MAX_NAMED = 2 << 20  # of an answer from a server its poster named
-NAMED_SECONDS = 30.0  # and the time such an answer is given to arrive in
+NAMED_SECONDS = 60.0  # and the time such an answer is given to arrive in, once it has begun
 _NAMED = re.compile(r"https://([A-Za-z0-9.-]+)(?::\d{1,5})?(?:/[!-~]*)?")
 
 
@@ -128,7 +128,7 @@ def get_json(url: str, params: dict, tries: int = 6, pause: float = 2.0, *, limi
             time.sleep(wait)
         try:
             req = urllib.request.Request(f"{url}?{q}", headers={**UA, "Accept-Encoding": "identity"})
-            with (_named.open(req, timeout=15) if named else urllib.request.urlopen(req, timeout=60)) as r:
+            with (_named.open(req, timeout=60) if named else urllib.request.urlopen(req, timeout=60)) as r:
                 return json.loads(_body(r, limit, NAMED_SECONDS if named else None))
         except Refused:
             raise
