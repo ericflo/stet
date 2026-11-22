@@ -1,7 +1,7 @@
 """A season's finals, as arithmetic: who is in them, the lot, and the table.
 
 The rules are in docs/RULES.md ("Finals"). The rounds choose who is looked at closely: the eight
-best curators on the board, one per person, and one more drawn by lot from the next eight. Each
+best curators on the board by its cautious rating, one per person, and one more drawn by lot from the next eight. Each
 is run on two fresh rounds at the large size, its student trained twice on each script, and the
 table is made from those gains alone.
 
@@ -38,28 +38,43 @@ def person(row: dict) -> str:
 
 
 def slim(row: dict) -> dict:
-    """What the finals keep of a row of the board."""
-    return {k: row.get(k) for k in ("id", "name", "version", "owner", "github", "rank", "rounds", "rating")}
+    """What the finals keep of a row of the board: who it is, where it stood, and the cautious
+    rating it was taken by (`lower`: the rating less 1.28 of its standard errors)."""
+    return {k: row.get(k) for k in ("id", "name", "version", "owner", "github", "rank", "rounds", "rating", "se", "lower")}
+
+
+def cautious(board: list[dict]) -> list[dict]:
+    """The board in the ladder's order: by the lower bound of the rating, best first, and rows
+    level on it in the board's own order (as the server fills the ladder: rating.go)."""
+    unsaid = [r for r in board if r.get("lower") is None]
+    if unsaid:
+        raise ValueError(f"the board gives no cautious rating (lower) for {unsaid[0].get('owner')}/{unsaid[0].get('name')}: the finalists are taken by it")
+    return sorted(board, key=lambda r: -r["lower"])  # a stable sort
 
 
 def choose(board: list[dict], organisers, places: int = PLACES, lot_places: int = LOT_PLACES, lot_rounds: int = LOT_ROUNDS) -> dict:
-    """Who the finals look at, from the board's ranked curators in the board's order.
+    """Who the finals look at, from the board's ranked curators, taken in the ladder's order: by
+    cautious rating (`cautious`), and not by the rating the board itself is ranked by.
 
     The organisers' own curators are yardsticks: all of them are run, and none takes a place or
     counts toward one. Of the rest, each person's best is kept. The first `places` are the
     finalists. The lot is drawn among the next `lot_places` of that same list, the 9th to the
     16th, and only those that have run `lot_rounds` rounds: a curator with fewer is on the board
-    by a round or two of luck."""
+    by a round or two of luck. The lot's pool is listed in the board's order, which is the order
+    its pick is counted in (draw_lot)."""
     organisers = set(organisers)
+    stood = {id(r): i for i, r in enumerate(board)}
+    order = cautious(board)
     yardsticks = [slim(r) for r in board if r.get("owner") in organisers]
     entrants, people = [], set()
-    for r in board:
+    for r in order:
         if r.get("owner") in organisers or person(r) in people:
             continue
         people.add(person(r))
-        entrants.append(slim(r))
+        entrants.append(r)
     pool = [r for r in entrants[places : places + lot_places] if int(r.get("rounds") or 0) >= lot_rounds]
-    return {"finalists": entrants[:places], "pool": pool, "yardsticks": yardsticks}
+    pool.sort(key=lambda r: stood[id(r)])
+    return {"finalists": [slim(r) for r in entrants[:places]], "pool": [slim(r) for r in pool], "yardsticks": yardsticks}
 
 
 def lot_seed(season_id: str, beacon: dict) -> bytes:

@@ -923,7 +923,10 @@ def _freeze(args, season) -> dict:
     # draw, or the newest a round was drawn from. Crawls are named by year and week, so the
     # greatest name is the newest.
     known = [((ask("GET", "/api/v1/season").get("crawl") or {}).get("crawl") or "")] + [r.get("crawl_id") or "" for r in rounds]
-    chosen = finals.choose(board, organisers)
+    try:
+        chosen = finals.choose(board, organisers)
+    except ValueError as e:  # a board without what the finalists are taken by
+        raise Stop(str(e)) from None
     if len(chosen["finalists"]) < 2:
         raise Stop("fewer than two entrants are ranked: there is nobody to hold finals between")
     scale = season.scale(args.scale or finals.SCALE).name
@@ -999,7 +1002,7 @@ def say_finals_plan(plan: dict, season, speed: float = 1.0) -> None:
         + (f", after {plan['frozen_round']}" if plan.get("frozen_round") else ""))
     say("finalists:")
     for i, r in enumerate(plan["finalists"]):
-        say(f"  {i + 1}. {name_of(r)}  (rank {r.get('rank')}, {r.get('rounds')} rounds)")
+        say(f"  {i + 1}. {name_of(r)}  (rank {r.get('rank')}, {r.get('rounds')} rounds" + (f", at least {r['lower']:+.4f}" if r.get("lower") is not None else "") + ")")
     say(f"the lot is drawn among {len(plan['pool'])}: " + (", ".join(name_of(r) for r in plan["pool"]) or "nobody ranked 9th to 16th has run five rounds"))
     lot = plan.get("lot")
     if lot:

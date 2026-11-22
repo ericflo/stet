@@ -469,7 +469,8 @@ def test_an_audit_needs_three_curators_and_starts_at_the_rounds_own_size(world, 
 
 def _board(server: Server) -> None:
     def row(rank, owner, rounds=9):
-        return {"id": _bundle(owner)[0], "name": "c", "version": 1, "owner": owner, "github": owner, "rank": rank, "rounds": rounds, "rating": 1 - rank / 100}
+        return {"id": _bundle(owner)[0], "name": "c", "version": 1, "owner": owner, "github": owner, "rank": rank, "rounds": rounds, "rating": 1 - rank / 100,
+                "se": 0.005, "lower": 1 - rank / 100 - 1.28 * 0.005}
 
     owners = ["f1", "f2", "stet", "f3", "f4", "f5", "f6", "f7", "f8", "q1", "q2", "q3"]
     server.board = [row(i + 1, o, rounds=3 if o == "q3" else 9) for i, o in enumerate(owners)]
@@ -489,6 +490,8 @@ def test_the_finals_from_the_board_to_the_table(world, capsys):
     plan = read(fdir / "plan.json")
     assert [r["owner"] for r in plan["finalists"]] == [f"f{i}" for i in range(1, 9)] and [r["owner"] for r in plan["yardsticks"]] == ["stet"]
     assert [r["owner"] for r in plan["pool"]] == ["q1", "q2"]  # q3 has run three rounds
+    # The frozen board is published with what the finalists were taken by: each row's cautious rating.
+    assert len(plan["board"]) == 12 and all(r["lower"] == pytest.approx(r["rating"] - 1.28 * r["se"]) for r in plan["board"]) and "at least +0.9836" in said
     assert plan["organisers"] == ["stet"] and plan["frozen_round"] == old and now <= plan["frozen_at"] <= now + 60
     assert plan["crawl"] == "CC-MAIN-2026-45"  # the newest there was: adopted for the next draw, though the last round used an older one
     assert "the lot is drawn among 2: q1/c@v1, q2/c@v1" in said and "not drawn yet" in said and "yardsticks, run beside them and given no place: stet/c@v1" in said

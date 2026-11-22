@@ -27,9 +27,11 @@ def twice(gain: float, noise: float = 0.001) -> list[list[float]]:
 UNEDITED = [student(d) for d in (0.003, -0.003, 0.001, -0.001)]  # four trainings whose mean is BASE itself
 
 
-def row(rank: int, owner: str, name: str = "c", rounds: int = 9, github: str | None = None) -> dict:
-    return {"id": f"{rank:064x}", "name": name, "version": 1, "owner": owner, "github": github or owner, "rank": rank, "rounds": rounds, "rating": 1.0 - rank / 100,
-            "mean_gain": 0.01}
+def row(rank: int, owner: str, name: str = "c", rounds: int = 9, github: str | None = None, se: float = 0.0) -> dict:
+    """A row of the board as the server gives it: ranked by rating, with the rating's lower bound beside it."""
+    rating = 1.0 - rank / 100
+    return {"id": f"{rank:064x}", "name": name, "version": 1, "owner": owner, "github": github or owner, "rank": rank, "rounds": rounds, "rating": rating,
+            "se": se, "lower": rating - 1.28 * se, "mean_gain": 0.01}
 
 
 def test_eight_finalists_one_per_person_and_the_lots_pool_is_the_next_eight_with_five_rounds():
@@ -43,9 +45,34 @@ def test_eight_finalists_one_per_person_and_the_lots_pool_is_the_next_eight_with
     # The next eight people are q0, q1, q2 and r0 to r4. q1 has run four rounds, and is not drawn among.
     assert [r["owner"] for r in got["pool"]] == ["q0", "q2", "r0", "r1", "r2", "r3", "r4"]
     assert [r["name"] for r in got["yardsticks"]] == ["reference", "lead"]  # the organisers' own: all run, none placed
-    assert "mean_gain" not in got["finalists"][0] and set(got["finalists"][0]) == {"id", "name", "version", "owner", "github", "rank", "rounds", "rating"}
+    assert "mean_gain" not in got["finalists"][0] and set(got["finalists"][0]) == {"id", "name", "version", "owner", "github", "rank", "rounds", "rating", "se", "lower"}
     few = finals.choose(board[:6], {"stet"})
     assert [r["owner"] for r in few["finalists"]] == ["ann", "bob", "cy"] and few["pool"] == []
+
+
+def test_finalists_are_taken_by_the_cautious_rating_and_not_by_the_rating_the_board_ranks_by():
+    """The rules: the eight best by the cautious rating (the rating less 1.28 standard errors), in
+    the ladder's order. A few lucky rounds at the top of the board do not make a finalist."""
+    board = [row(1, "lucky", rounds=5, se=0.1), row(2, "ann", "wild", se=0.2), row(3, "stet", "reference", se=0.5)]
+    board += [row(4 + i, f"p{i}") for i in range(7)] + [row(11, "ann", "steady")] + [row(12 + i, f"q{i}") for i in range(8)]
+    got = finals.choose(board, {"stet"})
+    # lucky is at least 0.862, between q1 (0.87) and q2 (0.86); ann's wild one at least 0.724, below her steady one.
+    assert [r["owner"] for r in got["finalists"]] == [f"p{i}" for i in range(7)] + ["ann"]
+    assert got["finalists"][7]["name"] == "steady" and got["finalists"][7]["lower"] == pytest.approx(0.89)  # each person's best, by the same measure
+    assert [r["rank"] for r in got["finalists"]] == [4, 5, 6, 7, 8, 9, 10, 11]
+    # The 9th to the 16th in that order are q0, q1, lucky and q2 to q6: q7 is 17th. The lot counts them in the board's order.
+    assert [r["owner"] for r in got["pool"]] == ["lucky"] + [f"q{i}" for i in range(7)]
+    assert got["pool"][0]["lower"] == pytest.approx(0.862) and got["pool"][0]["se"] == 0.1  # what it was taken by is kept, for anyone to check
+    assert [r["name"] for r in got["yardsticks"]] == ["reference"]
+    # Rows level on it stay in the board's order.
+    level = [row(1, "a", se=0.02 / 1.28), row(2, "b", se=0.01 / 1.28), row(3, "c")]
+    for r in level:
+        r["lower"] = 0.97
+    assert [r["owner"] for r in finals.choose(level, set(), places=2)["finalists"]] == ["a", "b"]
+    # A board that does not give it is not guessed at.
+    del board[5]["lower"]
+    with pytest.raises(ValueError, match="no cautious rating"):
+        finals.choose(board, {"stet"})
 
 
 def test_the_lot_is_anyones_to_work_out_from_the_pool_and_the_beacon():
