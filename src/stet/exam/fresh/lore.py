@@ -155,12 +155,35 @@ def _ts(s: str | None) -> int | None:
         return None
 
 
+_ENTRY = re.compile(rb"<entry[\s>].*?</entry>", re.S)
+_FEED = re.compile(rb"\s*(?:<\?xml[^>]*\?>\s*)?(<feed\b[^>]*>)")
+
+
+def _elements(feed: bytes) -> list:
+    """The feed's entries. A feed that is not XML as a whole (one message with a character XML
+    does not allow is enough) gives those of its entries that are, each read on its own."""
+    try:
+        return list(ET.fromstring(feed).iter(f"{_A}entry"))
+    except ET.ParseError:
+        pass
+    head = _FEED.match(feed)
+    if head is None:
+        return []
+    out = []
+    for m in _ENTRY.finditer(feed):
+        try:
+            out += ET.fromstring(head.group(1) + m.group(0) + b"</feed>").iter(f"{_A}entry")
+        except ET.ParseError:
+            continue
+    return out
+
+
 def entries(feed: bytes) -> list[dict]:
     """The feed's messages: subject, sender, date, the archive's URL for each, and its body whole."""
     if b"<entry" not in feed:  # nothing found, or a page past the last
         return []
     out = []
-    for e in ET.fromstring(feed).iter(f"{_A}entry"):
+    for e in _elements(feed):
         link, content, parent = e.find(f"{_A}link"), e.find(f"{_A}content"), e.find(f"{_T}in-reply-to")
         if link is None or not link.get("href"):
             continue
@@ -178,9 +201,10 @@ def _window(get, start: int, end: int, why: Counter) -> list[dict]:
     for n in range(MAX_PAGES):
         if n:
             time.sleep(GAP)
-        got = entries(get(BASE, {"q": query(start, end), "x": "A", **({"o": n * PAGE} if n else {})}))
+        feed = get(BASE, {"q": query(start, end), "x": "A", **({"o": n * PAGE} if n else {})})
+        got = entries(feed)
         out += got
-        if len(got) < PAGE:
+        if len(got) < PAGE and feed.count(b"</entry>") < PAGE:  # a page with messages that could not be read is still a full page
             break
     else:
         why[f"hours with more than {MAX_PAGES * PAGE} messages"] += 1
@@ -282,7 +306,8 @@ def _patch(e: dict, start: int, end: int, why: Counter) -> dict | None:
     body = e["body"].replace("\r\n", "\n")
     sent_for = next((m.group(2) for ln in body.lstrip().split("\n")[:3] if (m := _IN_BODY.match(ln)) and m.group(1) == "From"), "")
     author = _author(e["name"])
-    if sent_for and _author(sent_for.split("<")[0]).lower() != author.lower() and e["email"] not in sent_for.lower():
+    theirs = bool(e["email"]) and e["email"] in sent_for.lower()  # no address is no sign that it is the sender's own
+    if sent_for and _author(sent_for.split("<")[0]).lower() != author.lower() and not theirs:
         return why.update(["sent on for someone else"])
     parts = split(body)
     if parts is None:
@@ -306,7 +331,8 @@ def _patch(e: dict, start: int, end: int, why: Counter) -> dict | None:
         return why.update(["no commit message to speak of"])
     text = f"{message}\n{rest}" if rest.startswith("---") else f"{message}\n\n{rest}"
     if len(text) > MAX_CHARS:
-        text = text[: text.rfind("\n", 0, MAX_CHARS)]
+        cut = text.rfind("\n", 0, MAX_CHARS)
+        text = text[: cut if cut > 0 else MAX_CHARS]  # at a line's end, or where there is none, at the limit
     by_lang: Counter = Counter()
     by_dir: Counter = Counter()
     for path, n in sorted(per.items()):
@@ -337,7 +363,11 @@ def harvest(start: int, end: int, cap: int, rng, log=print) -> list[Doc]:
         return []
     pool, seen = [], set()
     for e in sorted(found, key=lambda e: (e["at"] or 0, e["url"])):  # a patch sent twice is kept as first sent
-        p = _patch(e, start, end, why)
+        try:
+            p = _patch(e, start, end, why)
+        except Exception as err:  # one message that cannot be read does not lose the others
+            why[f"error {type(err).__name__}"] += 1
+            continue
         if p is None:
             continue
         if p["key"] in seen:

@@ -1,5 +1,6 @@
 """lore.kernel.org as a fresh source, against a stand-in for its search feed: no request leaves the machine."""
 
+import collections
 import time
 import urllib.parse
 from xml.sax.saxutils import escape
@@ -177,6 +178,46 @@ def test_an_archive_that_fails_gives_nothing(monkeypatch):
     assert run(log=said.append) == [] and "OSError" in said[0]
     monkeypatch.setattr(lore, "get_atom", lambda url, params, **kw: b"")  # a search that finds nothing
     assert run() == []
+
+
+def test_a_feed_or_a_message_that_cannot_be_read_does_not_lose_the_others(api, monkeypatch):
+    whole = [d.id for d in run()]
+    good = feed(api.mails)
+    assert len(lore.entries(good)) == len(api.mails)
+    bad = mail("vt@x", "[PATCH] block: a form feed", body(900, why=WHY + "\x0b"))
+    broken = feed([bad] + api.mails).replace(b"&#11;", b"\x0b").replace(b"&#x0b;", b"\x0b")
+    assert b"\x0b" in broken
+    with pytest.raises(lore.ET.ParseError):
+        lore.ET.fromstring(broken)
+    assert [e["url"] for e in lore.entries(broken)] == [e["url"] for e in lore.entries(good)]  # all but the one that is not XML
+    assert lore.entries(b"<entry>not a feed at all</entry>") == [] and lore.entries(b"<feed><entry></feed>") == []
+    monkeypatch.setattr(lore, "get_atom", lambda url, params, **kw: broken if not params.get("o") else b"</feed>")
+    assert [d.id for d in run()] == whole
+    # a page cut down by what could not be read is still a full page: the next is asked for
+    monkeypatch.setattr(lore, "PAGE", len(api.mails) + 1)
+    asked = []
+    monkeypatch.setattr(lore, "get_atom", lambda url, params, **kw: (asked.append(params.get("o", 0)), broken if not params.get("o") else b"</feed>")[1])
+    assert [d.id for d in run()] == whole and asked == [0, lore.PAGE]
+    # a subject whose version is a number too long to read
+    api.mails.append(mail("huge@x", f"[PATCH v{'9' * 5000}] block: a version beyond counting", body(901)))
+    monkeypatch.setattr(lore, "PAGE", 200)
+    monkeypatch.setattr(lore, "get_atom", api)
+    said = []
+    assert [d.id for d in run(log=said.append)] == whole and "error ValueError 1" in said[-1]
+
+
+def test_a_text_without_a_line_end_is_cut_at_the_limit_and_no_address_is_not_the_senders_own(api):
+    why = collections.Counter()
+    long = lore.entries(feed([mail("long@x", "[PATCH] block: one long line", body(902, why="x" * (lore.MAX_CHARS + 500)))]))[0]
+    assert len(lore._patch(long, START, END, why)["text"]) == lore.MAX_CHARS
+    usual = lore.entries(feed([mail("usual@x", "[PATCH] block: many lines", body(903, diffs=diff("block/a.c", ["\tx++;"] * 4000)))]))[0]
+    text = lore._patch(usual, START, END, why)["text"]
+    assert lore.MAX_CHARS - 20 < len(text) < lore.MAX_CHARS and text.endswith("\tx++;")  # as before: at a line's end
+    other = body(904, front="From: Bob Ray <bob@example.org>\n\n")
+    for email, kept in (("ann@example.org", False), ("", False), ("bob@example.org", True)):
+        e = lore.entries(feed([mail("fwd@x", "[PATCH] block: another's patch", other, email=email)]))[0]
+        assert (lore._patch(e, START, END, why) is not None) == kept, email
+    assert why["sent on for someone else"] == 2
 
 
 def test_the_choice_is_seeded(api):
