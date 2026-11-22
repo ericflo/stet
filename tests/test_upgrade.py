@@ -156,6 +156,13 @@ def test_an_installer_is_only_fetched_over_tls_and_only_if_it_is_one(monkeypatch
         upgrade.fetch_installer("https://site.test")
     monkeypatch.setattr(upgrade.urllib.request, "urlopen", lambda req, timeout=0: Answer(b"#!/bin/sh\nset -eu\n"))
     assert upgrade.fetch_installer("https://site.test").startswith(b"#!/bin/sh")
+    # plain http is for this machine alone, and a name that only begins like it is another machine
+    for mine in ("http://localhost", "http://localhost:8000/", "http://127.0.0.1:8000"):
+        assert upgrade.fetch_installer(mine).startswith(b"#!/bin/sh")
+    for other in ("http://localhost.attacker.example", "http://127.0.0.1.attacker.example", "http://localhost@attacker.example",
+                  "http://127.0.0.10", "ftp://localhost", "https://", "localhost"):  # fmt: skip
+        with pytest.raises(OSError, match="not https"):
+            upgrade.fetch_installer(other)
 
 
 def test_a_checkout_is_not_something_the_installer_made():
