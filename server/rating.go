@@ -2,15 +2,24 @@ package main
 
 // Ratings, the board and the record.
 //
-// An editor's rating is its mean gain over the rounds it ran in, adjusted for which rounds
-// those happened to be. Some rounds' corpora are easier to improve than others, and editors
-// do not all run in the same rounds, so a plain mean would reward luck of the draw. The
-// model is the simplest one that removes it:
+// An editor's rating starts from its mean gain over the rounds it ran in, adjusted for which
+// rounds those happened to be. Some rounds' corpora are easier to improve than others, and
+// editors do not all run in the same rounds, so a plain mean would reward luck of the draw.
+// The model is the simplest one that removes it:
 //
 //     gain(editor, round) = skill(editor) + difficulty(round) + noise
 //
-// fitted by least squares. The ladder (the top editors, who run in every round) ties the
-// rounds together, so difficulties are well determined.
+// fitted by least squares. The ladder's editors that run in every round (the entrants' best,
+// and the reference editors the season names) tie the rounds together, so difficulties are
+// well determined.
+//
+// A few rounds say little, and three lucky ones would otherwise outrank thirty steady ones.
+// So the adjusted mean is drawn towards the field's, the more the fewer rounds it rests on
+// (fitRatings); the ladder is filled by what each editor has shown it is at least worth, its
+// rating less 1.28 standard errors; and ratings too close to tell apart are marked as tied.
+//
+// An entry that failed counts as the lowest gain any valid entry got in its round, or zero
+// if that is lower (failedGain): failing is never the better move.
 
 import (
 	"fmt"
@@ -19,6 +28,8 @@ import (
 	"sync"
 )
 
+// entryRow is one round as it counts for one editor. Gain is the entry's gain, or for an
+// entry that failed what the round counts as instead (failedGain); Valid says which.
 type entryRow struct {
 	RoundIdx int
 	EditorID string
@@ -28,15 +39,43 @@ type entryRow struct {
 
 type Rating struct {
 	N        int     // settled rounds
-	Mean     float64 // plain mean gain
-	Adjusted float64 // mean gain adjusted for which rounds it happened to run
-	SE       float64
+	Mean     float64 // plain mean of what its rounds count as
+	Adjusted float64 // that, adjusted for which rounds it happened to run
+	Shrunk   float64 // and drawn towards the field's mean: the rating
+	SE       float64 // the rating's standard error
 	Invalid  int
 }
 
-// fitRatings solves the additive model by alternating means. It converges in a handful of
-// passes because the ladder connects the rounds.
-func fitRatings(entries []entryRow) (map[string]*Rating, map[int]float64) {
+const (
+	// How many rounds' worth of the field's mean is in every rating (k in fitRatings): what
+	// the entries say it should be, kept within these, and the usual value while they cannot
+	// say.
+	shrinkMin, shrinkMax, shrinkUsual = 1.0, 8.0, 4.0
+	// The variance of one round's gain to assume while neither the entries nor the season's
+	// file can say: a spread of 0.01 bits per byte.
+	noiseFloor = 0.0001
+	// A rating's lower bound is this many standard errors under it: nine times in ten the
+	// editor is worth at least that.
+	lowerZ = 1.28
+)
+
+// fitRatings solves the additive model by alternating means, which converges in a handful
+// of passes because the ladder connects the rounds, and then draws each editor's adjusted
+// mean towards the field's:
+//
+//	rating = m + n/(n+k) * (adjusted - m)
+//
+// n is the editor's rounds, and m the field's mean: the editors' adjusted means, each
+// weighted by its rounds. k = s2/tau2 sets one round's noise about an editor's own mean
+// (s2) against how far editors really are from each other (tau2): with k rounds, a rating
+// is midway between the editor's own mean and the field's. s2 is pooled over every editor
+// with two measured rounds or more (a failed round is a penalty on its editor's rating, and
+// no reading of the noise), together with noise: what a round's gain was taken to move by
+// before the season began, counted as prior rounds' worth of evidence. A season's first few
+// rounds say little about their own spread, and would otherwise put a standard error on
+// every rating from two or three numbers. tau2 is the variance of the adjusted means less
+// what s2 alone would put there. The rating's standard error is sqrt(s2/(n+k)).
+func fitRatings(entries []entryRow, noise, prior float64) (map[string]*Rating, map[int]float64) {
 	byEditor := map[string][]entryRow{}
 	byRound := map[int][]entryRow{}
 	for _, e := range entries {
@@ -44,10 +83,10 @@ func fitRatings(entries []entryRow) (map[string]*Rating, map[int]float64) {
 		byRound[e.RoundIdx] = append(byRound[e.RoundIdx], e)
 	}
 	// skill is what an editor does in the rounds where it ran: its mean over valid entries
-	// only. It is what explains a round's difficulty. The rating published below counts an
-	// invalid round as zero, but that zero must not be used here: an editor with one
-	// timeout would look much better than its "skill" in its good rounds, those rounds
-	// would be taken for easy ones, and everyone who shared them would be marked down.
+	// only. It is what explains a round's difficulty. The rating published below counts a
+	// failed round as the round's lowest gain, but that must not be used here: it is a
+	// penalty and not a measurement, and taken for one it would make the editor's good
+	// rounds look easy and mark down everyone who shared them.
 	skill := map[string]float64{}
 	diff := map[int]float64{}
 	for i := 0; i < 200; i++ {
@@ -68,8 +107,8 @@ func fitRatings(entries []entryRow) (map[string]*Rating, map[int]float64) {
 		}
 		mean := 0.0
 		for r, es := range byRound {
-			// Only entries that were really measured say anything about the round. An
-			// invalid entry's zero is a penalty, not a reading: counted here, one editor's
+			// Only entries that were really measured say anything about the round. What a
+			// failed entry counts as is a penalty, not a reading: counted here, one editor's
 			// timeout would make the round look hard and lift everyone else in it.
 			s, n := 0.0, 0
 			for _, e := range es {
@@ -92,32 +131,80 @@ func fitRatings(entries []entryRow) (map[string]*Rating, map[int]float64) {
 			break
 		}
 	}
+	// In the order of their ids, so that the sums below come out the same every time.
+	ids := make([]string, 0, len(byEditor))
+	for id := range byEditor {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
 	out := map[string]*Rating{}
-	for id, es := range byEditor {
+	var adjusted []float64
+	ss, df, several := 0.0, 0, 0 // squared residuals, their degrees of freedom, editors with two rounds or more
+	field, rounds := 0.0, 0
+	for _, id := range ids {
+		es := byEditor[id]
 		r := &Rating{N: len(es)}
-		var resid []float64
+		var resid, measured []float64
 		for _, e := range es {
 			r.Mean += e.Gain / float64(len(es))
 			resid = append(resid, e.adjusted(diff))
-			if !e.Valid {
+			if e.Valid {
+				measured = append(measured, e.adjusted(diff))
+			} else {
 				r.Invalid++
 			}
 		}
 		r.Adjusted = mean(resid)
-		if len(resid) >= 2 {
-			r.SE = stddev(resid) / math.Sqrt(float64(len(resid)))
+		// How much a round's gain moves is read from the rounds that were measured, about
+		// their own mean. What a failed round counts as is far from them by design: it marks
+		// its editor's rating down, and counted as noise it would widen everybody's.
+		if len(measured) >= 2 {
+			own := mean(measured)
+			for _, x := range measured {
+				ss += (x - own) * (x - own)
+			}
+			df += len(measured) - 1
 		}
+		if len(resid) >= 2 {
+			several++
+		}
+		adjusted = append(adjusted, r.Adjusted)
+		field += float64(r.N) * r.Adjusted
+		rounds += r.N
 		out[id] = r
+	}
+	if rounds == 0 {
+		return out, diff
+	}
+	field /= float64(rounds)
+	s2 := noise
+	if df > 0 {
+		s2 = (ss + prior*noise) / (float64(df) + prior)
+	}
+	// How far apart editors really are: the variance of their adjusted means, less what the
+	// noise in each mean would put there by itself. With too few editors to say, or nothing
+	// left over, the usual k stands.
+	k := shrinkUsual
+	if several >= 3 {
+		within := 0.0
+		for _, id := range ids {
+			within += s2 / float64(out[id].N) / float64(len(ids))
+		}
+		if sd := stddev(adjusted); sd*sd > within {
+			k = math.Min(shrinkMax, math.Max(shrinkMin, s2/(sd*sd-within)))
+		}
+	}
+	for _, r := range out {
+		n := float64(r.N)
+		r.Shrunk = field + n/(n+k)*(r.Adjusted-field)
+		r.SE = math.Sqrt(s2 / (n + k))
 	}
 	return out, diff
 }
 
-// adjusted is an entry's gain with its round's difficulty taken out. An invalid entry
-// counts as zero whatever the round was like.
+// adjusted is what a round counts as for an editor with the round's difficulty taken out:
+// a failed entry's like any other's.
 func (e entryRow) adjusted(diff map[int]float64) float64 {
-	if !e.Valid {
-		return 0
-	}
 	return e.Gain - diff[e.RoundIdx]
 }
 
@@ -227,16 +314,20 @@ type BoardRow struct {
 	Parent      string    `json:"parent,omitempty"`
 	Status      string    `json:"status"`
 	Rounds      int       `json:"rounds"`
-	Rating      *float64  `json:"rating"`
-	MeanGain    *float64  `json:"mean_gain"`
-	SE          *float64  `json:"se"`
+	Rating      *float64  `json:"rating"`    // the adjusted mean drawn towards the field's: what the board ranks by
+	Adjusted    *float64  `json:"adjusted"`  // the mean gain adjusted for its rounds, before that
+	MeanGain    *float64  `json:"mean_gain"` // the plain mean of what its rounds count as
+	SE          *float64  `json:"se"`        // the rating's standard error
+	Lower       *float64  `json:"lower"`     // the rating less lowerZ standard errors: what the ladder is filled by
 	Multiplier  *float64  `json:"multiplier"`
 	Capped      bool      `json:"capped,omitempty"` // the multiplier is "more than" this: the gain runs off the measured curve
 	Invalid     int       `json:"invalid,omitempty"`
 	Provisional bool      `json:"provisional,omitempty"`
 	Record      bool      `json:"record,omitempty"`
 	Ladder      bool      `json:"ladder,omitempty"`
-	Organisers  bool      `json:"-"` // entered by the organisers: a reference curator, a yardstick
+	Tied        bool      `json:"tied,omitempty"` // too close to the row its run of tied rows starts at to tell apart
+	TiedAt      int       `json:"-"`              // the rank its run of tied rows starts at; 0 when it is tied with nobody
+	Organisers  bool      `json:"organisers"`     // entered by the organisers: a reference curator, a yardstick
 	CreatedAt   int64     `json:"created_at"`
 	AccountID   int64     `json:"-"`
 	Gains       []float64 `json:"-"` // per settled round, oldest first, for sparklines
@@ -245,7 +336,7 @@ type BoardRow struct {
 type Board struct {
 	Rated       []*BoardRow          // ranked
 	Provisional []*BoardRow          // fewer than RatedRounds settled rounds
-	Ladder      []*BoardRow          // top editors, one per account: run in every round
+	Ladder      []*BoardRow          // top editors, one per account: run in every round, but for the references that take turns (resting); see computeBoard
 	ByID        map[string]*BoardRow // every editor that has settled at least one round
 	Entries     []entryRow
 	Difficulty  map[int]float64
@@ -261,16 +352,55 @@ func (a *App) hasMultiplier() bool {
 	return ok
 }
 
-// settledEntries are the entries that count: settled, in a round whose baseline is known.
+// rated reports whether an entry is one the ratings and the record count: settled, run, in
+// a round that has settled with a baseline.
+func (s *State) rated(e *Entry) bool {
+	// Whole rounds only. An entry with no script settles the moment that is known, while
+	// the rest of its round is still sealed; alone, it would stand for the whole round.
+	rd := s.Rounds[e.RoundIdx]
+	return e.Status == "settled" && !e.Void && rd != nil && rd.BaselineLoss != nil && rd.Status == "settled"
+}
+
+// failedGain is what a failed entry counts as in a round: the lowest gain any valid entry
+// got in it, or zero if that is lower, as it is when no entry was valid. A failure that
+// counted as zero, in a round where finishing scored below zero, was the better move.
+func failedGain(s *State, idx int) float64 {
+	low := 0.0
+	for _, e := range s.inRound[idx] {
+		if s.rated(e) && e.Valid && e.Gain < low {
+			low = e.Gain
+		}
+	}
+	return low
+}
+
+// countsAs is what a round counts as for an entry that failed in it, and whether the entry
+// is one: an entry that was not run, or whose round counts for nobody, counts as nothing.
+func countsAs(s *State, e *Entry) (float64, bool) {
+	if e.Valid || !s.rated(e) {
+		return 0, false
+	}
+	return failedGain(s, e.RoundIdx), true
+}
+
+// settledEntries are the entries that count: settled, in a round whose baseline is known. A
+// failed entry's row carries what it counts as, and is still marked as not valid: it says
+// nothing about how hard the round was, or how good the editor is when it works.
 func settledEntries(s *State) []entryRow {
 	var out []entryRow
+	failed := map[int]float64{}
 	for _, e := range s.Entries {
-		// Whole rounds only. An entry with no script settles the moment that is known, while
-		// the rest of its round is still sealed; alone, it would stand for the whole round.
-		if rd := s.Rounds[e.RoundIdx]; e.Status != "settled" || e.Void || rd.BaselineLoss == nil || rd.Status != "settled" {
+		if !s.rated(e) {
 			continue
 		}
-		out = append(out, entryRow{RoundIdx: e.RoundIdx, EditorID: e.EditorID, Gain: e.Gain, Valid: e.Valid})
+		row := entryRow{RoundIdx: e.RoundIdx, EditorID: e.EditorID, Gain: e.Gain, Valid: e.Valid}
+		if !e.Valid {
+			if _, ok := failed[e.RoundIdx]; !ok {
+				failed[e.RoundIdx] = failedGain(s, e.RoundIdx)
+			}
+			row.Gain = failed[e.RoundIdx]
+		}
+		out = append(out, row)
 	}
 	sort.Slice(out, func(i, j int) bool {
 		return out[i].RoundIdx < out[j].RoundIdx || (out[i].RoundIdx == out[j].RoundIdx && out[i].EditorID < out[j].EditorID)
@@ -278,9 +408,28 @@ func settledEntries(s *State) []entryRow {
 	return out
 }
 
+// roundNoise is the variance of one round's gain to assume until the season's own rounds
+// can say: the square of how far the season's file takes a curator's gain to move from round
+// to round (noise.<scale>.round_sd), or failing that between two trainings (gain_sd), or
+// noiseFloor where neither is given.
+func (a *App) roundNoise() float64 {
+	if m, ok := a.season.Noise[a.cfg.Scale].(map[string]any); ok {
+		for _, key := range []string{"round_sd", "gain_sd"} {
+			if sd, ok := m[key].(float64); ok && sd > 0 {
+				return sd * sd
+			}
+		}
+	}
+	return noiseFloor
+}
+
+// priorRounds is how many rounds' worth of evidence roundNoise counts as, beside the season's
+// own rounds, when the spread of a round's gain is worked out.
+const priorRounds = 8
+
 func (a *App) computeBoard(s *State) *Board {
 	entries := settledEntries(s)
-	ratings, diff := fitRatings(entries)
+	ratings, diff := fitRatings(entries, a.roundNoise(), priorRounds)
 	b := &Board{ByID: map[string]*BoardRow{}, Entries: entries, Difficulty: diff}
 	if h := s.holder(); h != nil {
 		b.RecordID = h.EditorID
@@ -294,13 +443,9 @@ func (a *App) computeBoard(s *State) *Board {
 		r := &BoardRow{ID: e.ID, Name: e.Name, Version: e.Version, Owner: owner.Handle, Github: owner.Github, Technique: e.Technique,
 			Description: e.Description, Parent: e.Parent, Status: e.Status, CreatedAt: e.CreatedAt, AccountID: e.AccountID, Organisers: owner.Anchor}
 		r.Rounds, r.Invalid = rt.N, rt.Invalid
-		adj, mg := rt.Adjusted, rt.Mean
-		r.Rating, r.MeanGain = &adj, &mg
-		if rt.N >= 2 {
-			se := rt.SE
-			r.SE = &se
-		}
-		if m, capped, ok := a.season.multiplier(a.curveKey(), adj); ok {
+		rating, adj, mg, se, lower := rt.Shrunk, rt.Adjusted, rt.Mean, rt.SE, rt.Shrunk-lowerZ*rt.SE
+		r.Rating, r.Adjusted, r.MeanGain, r.SE, r.Lower = &rating, &adj, &mg, &se, &lower
+		if m, capped, ok := a.season.multiplier(a.curveKey(), rating); ok {
 			r.Multiplier, r.Capped = &m, capped
 		}
 		r.Record = r.ID == b.RecordID
@@ -335,27 +480,58 @@ func (a *App) computeBoard(s *State) *Board {
 	}
 	byRating(b.Rated)
 	byRating(b.Provisional)
-	// The ladder: the record holder, then the best-rated editor of each person. The
-	// organisers' reference editors are fixed points for everyone and all stay on.
+	// Ranks, and ties. A row is tied with the first of the run of tied rows above it when
+	// the gap between their ratings is within two standard errors of that gap: the order of
+	// the two could be chance. A run of tied rows shares the rank it starts at. It is the
+	// run's first row a row is held against, and not the one just above: a long field in
+	// which each is a little behind the last would otherwise all be tied with its best.
+	var first *BoardRow // of the run the row above is in
+	for i, r := range b.Rated {
+		r.Rank = i + 1
+		if first != nil && *first.Rating-*r.Rating <= 2*math.Sqrt(*first.SE**first.SE+*r.SE**r.SE) {
+			first.TiedAt = first.Rank
+			r.Tied, r.TiedAt = true, first.Rank
+			continue
+		}
+		first = r
+	}
+	// The ladder: the record holder, then the best editor of each person. The organisers'
+	// reference editors are fixed points for everyone and all stay on: the ladder's size is
+	// how many places everyone else's editors take, the holder's among them, and no entrant's
+	// editor takes a reference's.
+	//
+	// Best by the lower bound of its rating, not by the rating: a place on the ladder is a
+	// run in every round, on every verifier's machine, and an editor has to have shown it
+	// is worth one. Three good rounds have not; thirty steady ones a little lower have.
 	//
 	// The holder keeps its place whatever it does. A challenger can only take the record on
 	// rounds it shares with the holder, so a holder that stopped running would hold the
-	// record for ever. One that has started failing scores zero and is soon beaten. Its
-	// place is its own: its owner's best other editor may still take one, which is how a
-	// person improves on their own record.
+	// record for ever. One that has started failing counts as the worst of each round and
+	// is soon beaten. Its place is its own: its owner's best other editor may still take
+	// one, which is how a person improves on their own record.
 	seen := map[string]bool{}
+	taken := 0 // places held by editors that are not the organisers'
 	if h := b.ByID[b.RecordID]; h != nil {
 		h.Ladder = true
 		b.Ladder = append(b.Ladder, h)
+		if !h.Organisers {
+			taken++
+		}
 	}
-	for i, r := range b.Rated {
-		r.Rank = i + 1
-		owner := s.Accounts[r.AccountID]
-		who := person(s.Editors[r.ID])
-		if r.Ladder || r.Status == "withdrawn" || failing(s, r.ID) || len(b.Ladder) >= a.cfg.LadderSize || (seen[who] && (owner == nil || !owner.Anchor)) {
+	byLower := append([]*BoardRow(nil), b.Rated...) // rows level on it stay in the board's order
+	sort.SliceStable(byLower, func(i, j int) bool { return *byLower[i].Lower > *byLower[j].Lower })
+	for _, r := range byLower {
+		if r.Ladder || r.Status == "withdrawn" || failing(s, r.ID) {
 			continue
 		}
-		seen[who] = true
+		if !r.Organisers {
+			who := person(s.Editors[r.ID])
+			if taken >= a.cfg.LadderSize || seen[who] {
+				continue
+			}
+			seen[who] = true
+			taken++
+		}
 		r.Ladder = true
 		b.Ladder = append(b.Ladder, r)
 	}
@@ -408,7 +584,8 @@ func gainsByRound(entries []entryRow, editorID string) map[int]float64 {
 //     alpha divided by the number of looks. The margin is one standard deviation of the
 //     difference between an editor and a trivially different copy of itself, measured.
 //   - Every number in the test is a settled score: the median of established accounts'
-//     grades, which nobody else's grade can move.
+//     grades, which nobody else's grade can move. A round either of them failed in counts
+//     for it as the lowest settled score of that round, or zero (failedGain).
 //
 // The first record goes to the first editor that beats the unedited baseline on the same
 // terms.

@@ -450,6 +450,8 @@ func (s *Site) funcs() template.FuncMap {
 		"ordinal":  ordinal,
 		"neg":      func(v float64) bool { return v < 0 },
 		"hm":       func(ts int64) string { return time.Unix(ts, 0).UTC().Format("2 Jan, 15:04") },
+		"hourof":   func(ts int64) string { return time.Unix(ts, 0).UTC().Format("2 Jan 15:04") },
+		"hours":    func(seconds int64) string { return trimZero(fmt.Sprintf("%.1f", float64(seconds)/3600)) },
 		"dict": func(kv ...any) map[string]any {
 			m := map[string]any{}
 			for i := 0; i+1 < len(kv); i += 2 {
@@ -524,8 +526,6 @@ func clipID(id string, n int) string {
 type ScriptStats struct {
 	KeptDocFrac  float64 `json:"kept_doc_frac"`
 	KeptByteFrac float64 `json:"kept_byte_frac"`
-	InkFrac      float64 `json:"ink_frac"`
-	InkTokens    int64   `json:"ink_tokens"`
 	OutDocs      int64   `json:"out_docs"`
 	SrcDocs      int64   `json:"src_docs"`
 	Passes       float64 `json:"passes"`
@@ -547,7 +547,8 @@ type EntryView struct {
 	Baseline   float64
 	BySource   map[string]float64
 	Reason     string
-	Void       bool // nobody could run it, or check its run; the round does not count for it
+	CountsAs   *float64 // it failed: what the round counts as for it instead of a gain (failedGain)
+	Void       bool     // nobody could run it, or check its run; the round does not count for it
 	Results    int
 	SettledAt  int64
 	Replicas   int         // graders, beyond the first, whose grades agreed
@@ -584,6 +585,9 @@ func (a *App) entryView(s *State, e *Entry) EntryView {
 	v.Stage, v.Settled, v.Valid, v.Gain, v.BySource = "settled", true, e.Valid, e.Gain, e.BySource
 	v.Reason, v.Results, v.SettledAt, v.Void = e.Reason, e.NResults, e.SettledAt, e.Void
 	v.Loss = deref(e.Loss)
+	if as, ok := countsAs(s, e); ok {
+		v.CountsAs = &as
+	}
 	if e.EditedAt > 0 {
 		v.Edit, v.ScriptSHA, v.ScriptSize = e.Edit, e.Script, e.ScriptSize
 	}
@@ -764,13 +768,17 @@ func (a *App) roundSummaries(s *State, limit int) []roundSummary {
 
 // standing is the whole board in one list, best rating first: the ranked and those still
 // qualifying together, so whoever is doing best is seen where they stand. A qualifying
-// curator has no rank number; its row says how many rounds it has left.
+// curator has no rank number; its row says how many rounds it has left. One that has never
+// finished a round comes last and is shown no number (Never).
 func standing(groups ...[]*BoardRow) []*BoardRow {
 	var out []*BoardRow
 	for _, rows := range groups {
 		out = append(out, rows...)
 	}
 	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Never() != out[j].Never() {
+			return out[j].Never()
+		}
 		x, y := out[i].Rating, out[j].Rating
 		if (x == nil) != (y == nil) {
 			return x != nil
@@ -778,6 +786,13 @@ func standing(groups ...[]*BoardRow) []*BoardRow {
 		return x != nil && *x > *y
 	})
 	return out
+}
+
+// Never is whether a curator has failed every round it has run. Its rating is then the
+// field's mean with penalties drawn towards it, which measures nothing about the curator:
+// the board shows no number for it.
+func (r *BoardRow) Never() bool {
+	return r.Rounds > 0 && r.Invalid == r.Rounds
 }
 
 // topOf is the longest bar in a list of ratings: every bar in the list is a share of it.
@@ -1037,7 +1052,7 @@ func (s *Site) guide(name, title, desc string) http.HandlerFunc {
 		a := s.app
 		d := map[string]any{
 			"InPlay": a.cfg.EntriesInPlay, "PerDay": a.cfg.SubmitsPerDay, "Qualify": a.cfg.QualifyRounds, "Ladder": a.cfg.LadderSize,
-			"Establish": a.cfg.EstablishAfter, "GithubDays": a.cfg.GithubMinAgeDays, "CopyFrac": 1 - a.season.InkFrac,
+			"Establish": a.cfg.EstablishAfter, "GithubDays": a.cfg.GithubMinAgeDays,
 		}
 		a.st.view(func(st *State) { a.nowFacts(st, d) })
 		p := s.page(r, title, name, d)
@@ -1347,10 +1362,6 @@ func (s *Site) rounds(w http.ResponseWriter, r *http.Request) {
 	s.render(w, 200, "rounds", s.page(r, "Rounds", "rounds", map[string]any{"Rounds": rows, "Earlier": earlier, "EarlierIdx": earlierIdx}))
 }
 
-// examWindow is how long after a draw the text people publish goes into the round's exam: the
-// season's exam.fresh.window_seconds (src/stet/seasons/s1.json), which the examiner reads.
-const examWindow = 3600
-
 func (s *Site) round(w http.ResponseWriter, r *http.Request) {
 	a := s.app
 	idx, ok := a.parseRoundID(r.PathValue("id"))
@@ -1359,13 +1370,14 @@ func (s *Site) round(w http.ResponseWriter, r *http.Request) {
 	var expected, later []expectedRow
 	var work *roundWork
 	prev, next := "", ""
+	scores := false // every item score behind the round's scores is published
 	a.st.view(func(st *State) {
 		rd := st.Rounds[idx]
 		if !ok || rd == nil {
 			return
 		}
 		sum := a.roundSummary(st, rd)
-		rs = &sum
+		rs, scores = &sum, scoresArchived(rd)
 		if rd.Status == "open" {
 			w := a.roundWork(st, rd, now())
 			work = &w
@@ -1389,7 +1401,7 @@ func (s *Site) round(w http.ResponseWriter, r *http.Request) {
 	d := map[string]any{"R": rs, "ID": rs.ID, "Entries": entries, "Top": topGain(entries), "Scale": sc, "Tolerance": a.tolerance(),
 		"RunsPerEntry": a.cfg.RunsPerEntry, "Prev": prev, "Next": next,
 		"Expected": expected, "Later": later, "MaxNew": a.cfg.MaxNewPerRound, "QualifyRounds": a.cfg.QualifyRounds, "Work": work,
-		"WindowEnd": rs.DrawnAt + examWindow}
+		"Scores": scores}
 	// Every run of the round's entries, and every grade of every script they wrote, whatever
 	// it said, is drawn entry by entry: who ran it, what each run wrote, who graded that.
 	runs := 0
@@ -1492,7 +1504,7 @@ func (s *Site) glossary(w http.ResponseWriter, r *http.Request) {
 		"Tolerance": a.tolerance(), "Margin": a.season.Record.Margin[a.cfg.Scale], "Rule": a.season.Record,
 		"QualifyRounds": a.cfg.QualifyRounds, "RatedRounds": a.cfg.RatedRounds, "LadderSize": a.cfg.LadderSize,
 		"EstablishAfter": a.cfg.EstablishAfter, "RunsPerEntry": a.cfg.RunsPerEntry, "MaxNew": a.cfg.MaxNewPerRound,
-		"MuteAfter": muteAfterStrikes, "MuteDays": muteFor / 86400, "CopyFrac": 1 - a.season.InkFrac, "GithubDays": a.cfg.GithubMinAgeDays,
+		"MuteAfter": muteAfterStrikes, "MuteDays": muteFor / 86400, "GithubDays": a.cfg.GithubMinAgeDays,
 	})
 	p.Desc = "Every word on the Stet website, in plain language: curator, round, gain, rating, worth, the record, runs, grades, verifiers, and what each label on a score means."
 	s.render(w, 200, "glossary", p)

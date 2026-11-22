@@ -116,7 +116,7 @@ func TestRatingsAdjustForRoundDifficulty(t *testing.T) {
 	for _, r := range []int{3, 4} {
 		es = append(es, entryRow{RoundIdx: r, EditorID: "late", Gain: 0.6 + diff[r], Valid: true})
 	}
-	rt, _ := fitRatings(es)
+	rt, _ := fitRatings(es, noiseFloor, 0)
 	if rt["late"].Mean >= rt["old"].Mean {
 		t.Fatal("test is not testing anything")
 	}
@@ -385,8 +385,9 @@ type claimed struct {
 			ID   string `json:"id"`
 			Name string `json:"name"`
 		} `json:"editor"`
-		Script *ScriptRef `json:"script"`
-		Run    int        `json:"run"`
+		Script   *ScriptRef `json:"script"`
+		Run      int        `json:"run"`
+		Baseline *bool      `json:"baseline"`
 	} `json:"job"`
 	Runner    map[string]any `json:"runner"`
 	Announced map[string]any `json:"announced"`
@@ -426,17 +427,14 @@ func (w *world) claimEarly(a *actor) *claimed {
 // round is given (testExam).
 var corpusSHA, examSHA = strings.Repeat("c0", 32), strings.Repeat("d1", 32)
 
-// testTable is a small exam: items in three pillars, two languages.
+// testTable is a small exam: items in two pillars, a skill and a kind of writing, and two languages.
 func testTable() []ItemInfo {
 	var out []ItemInfo
 	for i := 0; i < 12; i++ {
-		out = append(out, ItemInfo{Pillar: "reasoning", Part: "arith", Lang: "en", Stratum: "math/answer"})
+		out = append(out, ItemInfo{Pillar: "logic", Part: "logic", Lang: "en", Stratum: "prose/answer"})
 	}
 	for i := 0; i < 6; i++ {
-		out = append(out, ItemInfo{Pillar: "writing", Part: "reference", Lang: []string{"en", "de"}[i%2], Stratum: "prose/passage"})
-	}
-	for i := 0; i < 4; i++ {
-		out = append(out, ItemInfo{Pillar: "code", Part: "prog", Lang: "code", Stratum: "code/answer"})
+		out = append(out, ItemInfo{Pillar: "reference", Part: "reference", Lang: []string{"en", "de"}[i%2], Stratum: "prose/passage"})
 	}
 	return out
 }
@@ -540,26 +538,28 @@ func (w *world) report(a *actor, c *claimed, loss float64) (int, string) {
 }
 
 type entryJ struct {
-	Editor     string         `json:"editor"`
-	Name       string         `json:"name"`
-	Status     string         `json:"status"`
-	Stage      string         `json:"stage"`
-	Valid      bool           `json:"valid"`
-	Void       bool           `json:"void"`
-	Loss       *float64       `json:"loss"`
-	Gain       *float64       `json:"gain"`
-	Results    int            `json:"results"`
-	Reason     string         `json:"reason"`
-	Script     map[string]any `json:"script"`
-	Edit       map[string]any `json:"edit"`
-	Detail     *EntryDetail   `json:"detail"`
-	Runs       []RunView      `json:"runs"`
-	Dropped    []RunView      `json:"dropped_runs"`
-	NRuns      int            `json:"n_runs"`
-	Confirmed  bool           `json:"confirmed"`
-	OneGrader  bool           `json:"one_grader"`
-	OneRunner  bool           `json:"one_runner"`
-	RunsDiffer bool           `json:"runs_differ"`
+	Editor     string             `json:"editor"`
+	Name       string             `json:"name"`
+	Status     string             `json:"status"`
+	Stage      string             `json:"stage"`
+	Valid      bool               `json:"valid"`
+	Void       bool               `json:"void"`
+	Loss       *float64           `json:"loss"`
+	Gain       *float64           `json:"gain"`
+	CountsAs   *float64           `json:"counts_as"`
+	BySource   map[string]float64 `json:"by_source"`
+	Results    int                `json:"results"`
+	Reason     string             `json:"reason"`
+	Script     map[string]any     `json:"script"`
+	Edit       map[string]any     `json:"edit"`
+	Detail     *EntryDetail       `json:"detail"`
+	Runs       []RunView          `json:"runs"`
+	Dropped    []RunView          `json:"dropped_runs"`
+	NRuns      int                `json:"n_runs"`
+	Confirmed  bool               `json:"confirmed"`
+	OneGrader  bool               `json:"one_grader"`
+	OneRunner  bool               `json:"one_runner"`
+	RunsDiffer bool               `json:"runs_differ"`
 }
 
 func (w *world) entries(a *actor, idx int) []entryJ {
@@ -1221,15 +1221,18 @@ func TestAnInvalidEntrySaysNothingAboutItsRound(t *testing.T) {
 			rows = append(rows, entryRow{RoundIdx: r, EditorID: id, Gain: g + d, Valid: true})
 		}
 	}
-	before, _ := fitRatings(rows)
-	// One more editor times out in round 2. Its zero is its own business.
-	after, _ := fitRatings(append(rows, entryRow{RoundIdx: 2, EditorID: "z", Gain: 0, Valid: false}))
+	before, _ := fitRatings(rows, noiseFloor, 0)
+	// One more editor times out in round 2, and counts as the round's lowest gain. What it
+	// counts as is its own business.
+	low := gains["a"] + hard[2]
+	after, diff := fitRatings(append(rows, entryRow{RoundIdx: 2, EditorID: "z", Gain: low, Valid: false}), noiseFloor, 0)
 	for id := range gains {
 		if math.Abs(before[id].Adjusted-after[id].Adjusted) > 1e-9 {
 			t.Fatalf("%s moved from %.5f to %.5f because someone else's entry was invalid", id, before[id].Adjusted, after[id].Adjusted)
 		}
 	}
-	if z := after["z"]; z.Adjusted != 0 || z.Invalid != 1 {
+	// Its own rating starts from that gain, less the round's difficulty like any other.
+	if z := after["z"]; math.Abs(z.Adjusted-(low-diff[2])) > 1e-9 || z.Invalid != 1 {
 		t.Fatalf("the invalid entry's own rating: %+v", z)
 	}
 }
@@ -1252,6 +1255,11 @@ func TestAFailedEditScoresAsUneditedAndRetiresTheEditor(t *testing.T) {
 		es := w.entries(alice, idx)
 		if es[0].Status != "settled" || es[0].Valid || es[0].Gain == nil || *es[0].Gain != 0 || !strings.Contains(es[0].Reason, "out of time") {
 			t.Fatalf("a failed edit: %+v", es[0])
+		}
+		// Nothing in the round was graded, so it has no baseline and counts in nobody's
+		// rating: the failure counts as nothing there, and is not said to.
+		if es[0].CountsAs != nil {
+			t.Fatalf("a failed entry in a round that counts for nobody is said to count as %v", *es[0].CountsAs)
 		}
 		if c := w.claim(anchor, true); c.Job != nil {
 			t.Fatalf("there is nothing to grade, but the anchor got %+v", c.Job)
@@ -2721,7 +2729,7 @@ func TestOneEditorsTimeoutMovesNobodyElsesRating(t *testing.T) {
 		es = append(es, entryRow{RoundIdx: r, EditorID: who, Gain: 0.925, Valid: true})
 	}
 	es = append(es, entryRow{RoundIdx: 1, EditorID: "zed", Gain: 0.9, Valid: true}, entryRow{RoundIdx: 2, EditorID: "zed"}, entryRow{RoundIdx: 3, EditorID: "zed", Gain: 0.9, Valid: true})
-	rt, diff := fitRatings(es)
+	rt, diff := fitRatings(es, noiseFloor, 0)
 	if d := rt["carol"].Adjusted - rt["dave"].Adjusted; math.Abs(d) > 1e-6 {
 		t.Fatalf("carol %v, dave %v: someone else's timeout moved a rating by %v", rt["carol"].Adjusted, rt["dave"].Adjusted, d)
 	}
@@ -2796,7 +2804,7 @@ func TestAgreeingThatAScriptIsInvalidEarnsNoStanding(t *testing.T) {
 	invalid := func(a *actor) (int, string) {
 		c := w.claim(a, a == anchor)
 		p := w.result(c, 5.5, 6.0)
-		p["valid"], p["invalid_reason"] = false, "the script spends more ink than the round allows"
+		p["valid"], p["invalid_reason"] = false, "line 3: this line holds text; a script is copies of the crawl and holds no text of its own"
 		delete(p, "exam")
 		var ack struct {
 			Status string `json:"status"`
@@ -2814,7 +2822,7 @@ func TestAgreeingThatAScriptIsInvalidEarnsNoStanding(t *testing.T) {
 	w.check()
 	es := w.entries(alice, idx)
 	// A run whose script is invalid is a failed run, and says why.
-	if es[0].Valid || !strings.Contains(es[0].Reason, "more ink") || len(es[0].Runs) != 1 || es[0].Runs[0].Status != "failed" || es[0].Runs[0].Gain != 0 {
+	if es[0].Valid || !strings.Contains(es[0].Reason, "no text of its own") || len(es[0].Runs) != 1 || es[0].Runs[0].Status != "failed" || es[0].Runs[0].Gain != 0 {
 		t.Fatalf("the entry: %+v %+v", es[0], es[0].Runs)
 	}
 	if g := es[0].Runs[0].Grades; len(g) != 2 || g[1].Handle != "bob" || g[1].Verdict != "agreed" || g[1].Valid || g[1].Loss != nil {
@@ -3941,4 +3949,40 @@ func TestBeingEstablishedNeedsTheGithubIdentityThatEnteringDoes(t *testing.T) {
 	if me.Verifier["established"] != true || me.Verifier["needs_github"] != false {
 		t.Fatalf("the organisers' account: %+v", me.Verifier)
 	}
+}
+
+// A new season starts on an empty database, so a verifier still running the last season's
+// harness has no account in it. It upgrades itself when it is told to (426) and stops when it
+// is told to log in (401): it is told to upgrade. A current verifier with no account is told
+// to log in, as before, and nothing is said to a request that is not signed by its key.
+func TestAVerifierFromTheLastSeasonWithNoAccountIsToldToUpgrade(t *testing.T) {
+	pub, _ := newKey()
+	w := newWorld(t, pub)
+	_, priv := newKey()
+	old := &actor{t: t, srv: w.srv, priv: priv, pub: hex.EncodeToString(priv.Public().(ed25519.PublicKey)), handle: "old"}
+	var out struct {
+		Error string `json:"error"`
+	}
+	last := w.hello(false)
+	last["season"], last["season_digest"], last["harness"] = "s0", strings.Repeat("0", 64), "0.0.1"
+	if code := old.do("POST", "/api/v1/jobs/claim", last, &out); code != 426 || !strings.Contains(out.Error, "Upgrade") {
+		t.Fatalf("last season's verifier, with no account: HTTP %d %s", code, out.Error)
+	}
+	if code := old.do("POST", "/api/v1/jobs/claim", w.hello(false), &out); code != 401 || !strings.Contains(out.Error, "stet login") {
+		t.Fatalf("this season's verifier, with no account: HTTP %d %s", code, out.Error)
+	}
+	if code := old.do("POST", "/api/v1/jobs/claim", []byte("{"), &out); code != 401 {
+		t.Fatalf("a malformed request from a key with no account: HTTP %d %s", code, out.Error)
+	}
+	// Signed by another key than the one it names: nothing about the season is said.
+	_, other := newKey()
+	forger := &actor{t: t, srv: w.srv, priv: other, pub: old.pub, handle: "forger"}
+	if code := forger.do("POST", "/api/v1/jobs/claim", last, &out); code != 401 || strings.Contains(out.Error, "Upgrade") {
+		t.Fatalf("an old hello under a signature that is not its key's: HTTP %d %s", code, out.Error)
+	}
+	w.app.st.view(func(s *State) {
+		if len(s.Accounts) != 0 || len(s.Claims) != 0 {
+			t.Fatalf("a key with no account was given something: %d accounts, %d jobs", len(s.Accounts), len(s.Claims))
+		}
+	})
 }

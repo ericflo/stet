@@ -172,7 +172,7 @@ func gainChart(pillars []string, gains map[string]float64) template.HTML {
 	}
 	x := func(v float64) float64 { return left + (v-lo)/(hi-lo)*float64(w-left-right) }
 	var b svg
-	b.open(w, h, "chart", "Gain on each capability, in "+label)
+	b.open(w, h, "chart", "Gain on each part of the exam, in "+label)
 	b.f(`<text x="%d" y="12" text-anchor="start">%s</text>`, left, label)
 	for _, v := range ticks(lo, hi, step) {
 		cls := "grid"

@@ -6,7 +6,8 @@ This file is the complete brief. Read all of it before changing anything.
 ## The task
 
 A small language model (the *student*) is trained on raw web text for a fixed number of
-tokens and then sits an exam that is made after the round is drawn. The model and the
+tokens and then sits an exam that is made when the round is drawn: three quarters human
+writing from the day before, one quarter generated questions. The model and the
 trainer are fixed, and so is how the exam is made. **The only thing you control is the
 training data.**
 
@@ -30,26 +31,34 @@ versions official runs use. `stet doctor` says if anything differs.
 
 Words used below: the *student* is the small model that gets trained. *Bits per byte*
 measure how likely the student finds a text: the fewer bits it needs for each byte, the
-better it knows it. *Ink* is text in the training data that was not copied from the corpus.
-A *verifier* is a volunteer's machine that runs curators or grades their scripts.
+better it knows it. A *verifier* is a volunteer's machine that runs curators or grades their
+scripts.
 
 ## The loop
 
 ```
+stet harvest       # once, before the first run
 stet run --json
 ```
 
-Run it after every change. It runs your curator on a practice round, trains the student,
-sits the exam, and prints one JSON object on stdout. Progress goes to stderr. Exit status
-is 0 for a valid run and 2 for an invalid one.
+**Run `stet harvest` once first.** It fetches three hours of recent human writing from the
+sources official exams are made from: no account, no key, some minutes for each hour. From
+then on every practice round's exam holds writing, as an official round's does. Without it
+a practice round's exam is the generated skills alone, a quarter of the official score:
+`stet run` says so, and the result has `"writing": false`.
+
+Run `stet run --json` after every change. It runs your curator on a practice round, trains
+the student, sits the exam, and prints one JSON object on stdout. Progress goes to stderr.
+Exit status is 0 for a valid run and 2 for an invalid one.
 
 | Field | Meaning |
 |---|---|
 | `valid` | `false` means the run scored as the unedited corpus. Read `invalid_reason`. |
-| `gain` | Your student's exam score less the unedited corpus's, in bits per byte: the mean of the pillars. 0 for an invalid run. **Maximise this.** |
-| `pillars` | The gain in each pillar: `pillars.knowledge`, `pillars.code` and so on. The weakest shows what your data lacks. |
+| `gain` | Your student's exam score less the unedited corpus's, in bits per byte: writing three quarters, skills one quarter. 0 for an invalid run. **Maximise this.** |
+| `pillars` | The gain in each pillar the exam has: `pillars.reference`, `pillars.agents` and so on. The weakest shows what your data lacks. |
+| `writing` | Whether the exam held human writing. `false`: nothing is harvested, and `gain` is the skills alone. |
 | `exam.items`, `exam.mean` | How many items the student sat, and its mean score on them (minus the bits per byte it needed, so nearer 0 is better). `baseline.mean` is the unedited student's. |
-| `script` | What your script did: documents kept, bytes, ink used, passes over the data. |
+| `script` | What your script did: documents kept, bytes, passes over the data. |
 | `edit.seconds`, `edit.time_limit` | How long your curator took, and how long it may. |
 | `edit.log_tail` | The end of your curator's stdout and stderr. |
 
@@ -68,21 +77,33 @@ stet run --time-limit 300     # with a shorter time limit than the scale's
 stet run -v                   # show the curator's output live
 stet score script.jsonl       # grade a script you already have, without running the curator
 stet rounds                   # past official rounds; replay one with --round <id>
-stet score stet/tidy --round s1-o00001    # re-grade a published entry of a settled official round
+stet score stet/tidy --round s2-o00001    # re-grade a published entry of a settled official round
                                           # (stet/tidy@v2 when a round holds two versions)
+stet harvest --hours 6        # hold six hours of writing: more variety between practice rounds
+stet harvest --fresh          # replace what is held with newly written hours
 stet clean                    # delete downloaded rounds and model files (fetched again when needed;
                               # unused ones are deleted after 14 days anyway)
 ```
 
 **Never judge a change on one round.** Rounds differ from each other by more than most
 improvements. Use `--rounds 3` or more and compare mean gains. Training the same script
-again moves its gain by about 0.025 at micro and 0.013 at standard, so on one round a
+again moves its gain by about 0.03 at micro and 0.005 at standard, so on one round a
 difference smaller than twice that is noise. Confirm anything smaller over `--rounds 5`.
+The order of a script is luck of its own: the same pages in another shuffle move a
+standard gain by about 0.008, and once in a while by several times that. So a change that
+also changes the order your pages come in has to beat that, not only the 0.005.
+An exam with no writing in it is less steady: the skills are the noisier part.
+
+**Compare runs made against the same harvest.** A practice round's corpus never changes,
+but its exam's writing is three of the hours you hold, chosen by the round's seed.
+Harvesting more hours, or new ones, changes it, and the round's exam and baseline are made
+again the first time it is run. Many runs against the same hours can fit them:
+`stet harvest --fresh` before you submit is the check.
 
 **Iterate small, confirm at standard.** A nano run takes a minute or two and micro several
 minutes. The competition is scored at standard: your curator's twenty minutes, then about
-18 minutes of training on an RTX 3090. Small students rank curators differently: micro
-rewards narrow English data that loses at standard. Check at standard before you submit.
+18 minutes of training on an RTX 3090. Smaller students rank curators differently from
+larger ones. Check at standard before you submit.
 
 ## What your curator is given
 
@@ -91,7 +112,7 @@ It is started with the `entry` command from `stet.toml`, in the project director
 | Variable | Contents |
 |---|---|
 | `STET_CORPUS` | Directory with the corpus: `docs.bin`, `docs.idx`, `urls.txt`, `meta.json` |
-| `STET_TASK` | Path to `task.json`: budgets, limits, the student's configuration, the exam's pillars (`exam_sources`) |
+| `STET_TASK` | Path to `task.json`: budgets, limits, the student's configuration, the exam's pillars (`exam_pillars`) |
 | `STET_OUT` | Write `script.jsonl` here |
 | `STET_SCRATCH` | A writable directory for temporary files |
 | `STET_ASSETS` | Directory with the model files `stet.toml` names, read-only |
@@ -103,11 +124,13 @@ From Python, `from stet.curator import Task; task = Task.from_env()` gives you:
   `corpus.sizes` (numpy array), `corpus.urls[i]`, and `for i, text in corpus`.
 - `task.train_tokens`: the training budget. English prose is roughly 3 bytes per token, and
   the raw crawl as a whole about 2.7.
-- `task.info`: everything in `task.json`, including `ink_tokens` and `min_copy_bytes`.
+- `task.info`: everything in `task.json`, including `min_copy_bytes`.
 - `task.time_left()`: seconds until the deadline.
 - `task.asset("name")`: the path of a model file or directory named in `stet.toml`.
 - `task.device()`: `"cuda"` when there is a GPU PyTorch can use (NVIDIA or AMD), else `"cpu"`.
 - `task.cores`, `task.memory_gb`, `task.gpu_memory_gb`: what this run has been given.
+- `task.map(fn)`: `fn(i, text)` for every page, on every core your curator is given, with
+  `(i, result)` back in page order.
 - `task.write(lines)`: writes the script atomically. Call it early, and again whenever you
   have something better. **If the curator is killed or crashes, the last script it wrote
   still counts.**
@@ -117,6 +140,29 @@ A curator does not have to be Python. Anything that reads those files and writes
 is little-endian uint64 offsets (document `i` is `bin[idx[i]:idx[i+1]]`); `urls.txt` has
 one source URL per line.
 
+**Use every core.** A loop over the corpus runs on one of the cores your curator is given,
+and a standard round is about 335,000 pages. `task.map` runs the page-by-page work on all
+of them:
+
+```python
+def keep(i, text):  # in a worker process, once for every page
+    return looks_written(text)
+
+task.write([i for i, ok in task.map(keep) if ok])
+```
+
+Results come back in page order whichever worker finished first, so anything that depends
+on order (which of two copies of a page is kept) is decided in your loop exactly as a plain
+loop decides it, and the script is the same on any number of cores. The workers are forked
+when the loop starts. A model loaded before then is shared by all of them and counted once
+against `task.memory_gb`; one a worker loads for itself is held once per worker. `fn` runs
+in another process, so return what you need instead of changing a global, and return plain
+values (they are pickled). Do not use the GPU in `fn`, and map before PyTorch is loaded
+where you can. `task.map(fn, docs=[...])` goes through only those pages, in that order. If
+`fn` raises, the same exception is raised in your loop; if a worker is killed (the kernel
+does that when the curator is over its memory), `stet.curator.WorkerError` is raised. Keep
+what you hold per page small: it grows with the pool.
+
 ## The edit script
 
 JSON Lines. One line is one output document. **Line order is training order.** The trainer
@@ -125,18 +171,27 @@ does not shuffle.
 ```
 123                                          keep document 123 whole
 {"d": 123, "k": [[0, 900], [1200, 2000]]}    keep these byte ranges of document 123, joined
-{"s": [[123, 0, 900], " text ", [7, 40, 400]]}    join copies [doc, start, end] and new text
-{"t": "new text"}                            a document of new text
+{"s": [[123, 0, 900], [7, 40, 400]]}         join copies [doc, start, end] of any documents
 ```
 
+- **A script is copies of the corpus and no more.** It holds no text of your own. A string
+  in an `s` line, or a line with a `t` key (`{"t": "text"}`), makes the run invalid. This
+  is an editing competition: you choose what the student reads, and write none of it.
 - Offsets index the document's UTF-8 bytes. One that lands inside a character is moved
   forward to the next boundary.
 - **Cutting, reordering and repeating are free.**
-- **New text is "ink", and there is almost none.** Literal strings and copies shorter than
-  `min_copy_bytes` (64) are ink. The one exception is a whole short document kept on a
-  line of its own; joined to anything else in an `s` line, it is ink too. A script may train the
-  student on at most `ink_tokens` of it: 0.1% of the budget, 160,000 tokens at standard.
-  Going over makes the run invalid. Plan on spending none: this is an editing competition.
+- **Deleting lines is always allowed.** An output document made only of whole lines of one
+  page, in the page's order, is a copy however short the lines are: take out the menu, the
+  cookie banner and the footer and keep the article. Each range starts at the start of a
+  line and ends just after a line break, or at the end of the page. Lines cannot be moved,
+  cut short, repeated or mixed with another page's that way, and the lines kept of a page
+  hold at least 64 bytes between them.
+- **Any other copy is at least `min_copy_bytes` (64) long.** A shorter one makes the run
+  invalid: with enough tiny copies a script could spell out any text it liked. Ranges of
+  one document that touch are one copy, so three 30-byte ranges end to end are a 90-byte
+  copy. A copy's length is what is left once its offsets have been moved to character
+  boundaries. The one exception is a whole short document kept on a line of its own;
+  joined to anything else in an `s` line, it is too short.
 - **The budget cuts both ways.** The stream is cut off at `train_tokens`. A shorter script
   is repeated from the top until the budget is used, so keeping less means training on it
   more often.
@@ -144,36 +199,53 @@ does not shuffle.
 
 ## The exam
 
-An official round's exam is made after its draw, so nobody can know it in advance, the
-organisers included. It asks for seven things a pretrained model is for, and each counts the
-same:
+An official round's exam is made at its draw, so nobody can know it in advance, the
+organisers included. **Three quarters of the score is writing people published. One quarter
+is skills.** Inside each group, every pillar counts the same:
 
-| Pillar | What the student is asked |
-|---|---|
-| `knowledge` | Facts the web knows, in ten languages |
-| `reading` | An answer, or a new rule, taken from the context |
-| `reasoning` | Mathematics and logic, in thirteen languages |
-| `code` | What programs print; reading structured data |
-| `agents` | What a tool says back, in a session at a shell |
-| `writing` | Human writing published after the draw, of every kind and in every language; and pairs of a right and a wrong sentence |
-| `conversation` | Replies in discussions published after the draw |
+| Pillar | Group | What the student is asked |
+|---|---|---|
+| `reference` | writing | New and extended Wikipedia articles |
+| `news` | writing | News reports, from Common Crawl's news crawl |
+| `technical` | writing | Issues, pull requests, release notes and patches: GitHub, the kernel's mailing lists |
+| `conversation` | writing | Posts and replies: Hacker News, Lemmy, forums, Bluesky, Mastodon, Wikipedia's talk pages |
+| `agents` | skills | What a tool says back, in a session at a shell |
+| `reading` | skills | An answer, or a new rule, taken from the context |
+| `logic` | skills | What follows from what is given |
+| `grammar` | skills | The right sentence of two |
+| `numbers` | skills | Arithmetic, units, word problems and algebra, each after a few worked examples |
+| `programs` | skills | What a small algorithm returns (a list sorted, a letter counted), after a few worked examples |
+| `knowledge` | skills | Facts the web knows, in ten languages |
 
+- **The writing is newer than the crawl.** It is what people published in three hours
+  of the day before the draw, and the draw picks the hours. The round's corpus was crawled
+  before any of it existed, and your curator has no network when it runs and can add no
+  text of its own, so there is nothing to look up or to fit in advance.
+- **Every language counts by its share of the round's corpus**, inside every kind of
+  writing. More than half of a crawl is not English, and five of the seven skills are asked
+  in the web's main languages too: only `numbers` and `programs` are in English alone. So a
+  curator that keeps only English gives up the writing and the skills in every other
+  language: about half of the score. Throwing away every page that is not English is not
+  obviously right.
+- **The skills are made from the round's seed.** Every answer but a fact follows from what
+  the item itself shows. `knowledge` asks well-known facts (a country's capital, who wrote
+  a book), which the student knows only from pages that say them.
 - **Every item is scored by likelihood**: how likely the student finds the right text, in
   bits per byte. A passage, an answer given its question, or the right sentence of a pair.
-  Never by picking a choice.
-- **Every language counts by its share of the round's corpus**, inside every pillar. Most
-  of a crawl is not English. A curator that keeps only English gives up knowledge, reading
-  and writing in every other language.
-- **No one area can carry the rest.** Inside a pillar each family of questions, or kind of
-  writing, counts the same, and gains on items are clipped. `pillars` shows the weakest.
-- **Fresh text** is gathered by kind of writing, each an equal part: reference (Wikipedia),
-  news (Common Crawl's news crawl), technical (GitHub), social (Bluesky, Mastodon) and
-  discussion (Hacker News, Lemmy, GitHub, Wikipedia's talk pages, replies on social sites).
-- **Practice rounds sit generated items only**: no fresh text was written for them. So
-  `stet run` on a practice round shows six pillars, without `conversation`, and its
-  `writing` is only the sentence pairs. Official rounds add the fresh writing. Keep the
-  kinds of text people write and reply to, in every language, even though a practice run
-  cannot show you what they are worth.
+  Never by picking a choice. An item's bits are never put over fewer than 16 bytes, so a
+  one-word answer cannot weigh as much as a paragraph, and a text longer than the
+  student's window is scored whole.
+- **No one area can carry the rest.** A pillar missing from an exam gives its share to the
+  others of its group. Gains on items are clipped, and a language or a format with fewer
+  than eight items counts in proportion. `pillars` shows the weakest.
+- **Everything on the exam counts.** The season names every part of the exam: the pillars
+  above, and nothing else. Each part was measured before the season; a part that did not
+  tell curators apart, or whose order did not hold for a larger student, is not on the
+  exam. Nothing is sat that the score leaves out, so there is no part to ignore.
+- **A practice round's exam is made the same way** once you have run `stet harvest`: the
+  generated items, and writing from the hours you hold, with each language weighed by
+  Common Crawl's published shares and anything the round's corpus already holds left out.
+  With nothing harvested it is the skills alone.
 - A settled official round can be replayed: `stet run --round <id>` sits what the round
   published, its generated items and its Wikipedia text.
 
@@ -183,7 +255,8 @@ published, it will be seen, and it defeats the point.
 ## The data
 
 - **Practice rounds** (`--round 0`, `1`, ...): seeded samples of one pinned Common Crawl
-  crawl, as full-page text. Fixed forever, so results compare across time.
+  crawl, as full-page text. The corpus is fixed forever, so results compare across time
+  while you hold the same harvest.
 - **Official rounds**: the same kind of data from the newest crawl at the time of the draw.
   Which of the crawl's files a round gets is decided by a public randomness beacon after
   entries close, so nobody can know the sample in advance. The crawl itself is public,
@@ -193,7 +266,9 @@ published, it will be seen, and it defeats the point.
 
 Full-page text means every language, plus menus, cookie banners, footers, link lists,
 shop listings and spam around the prose. At standard a round's corpus is about 335,000
-documents and 2.5 GB, some six times more text than the budget.
+documents and 2.5 GB, some six times more text than the budget. Micro has the same ratio
+(about 84,000 documents and 630 MB) and the same time for each page, so a curator that
+fits there fits at standard.
 
 Build something that reads the data in front of it. A curator tuned to one round's
 documents will do badly on the next.
@@ -203,7 +278,9 @@ documents will do badly on the next.
 - No script, or a malformed one. A timeout or crash is fine *if* a script was already
   written. `task.write` replaces the file in one step; if you write it yourself, write
   to a temporary file and rename it, or a kill can leave half a script.
-- More ink than `ink_tokens`. A copied range shorter than 64 bytes counts as ink.
+- Text of your own anywhere in the script: a string in an `s` line, or a `t` key.
+- A copied range shorter than 64 bytes, unless the line is whole lines of one page in
+  order (64 bytes of them or more), or one short document kept whole.
 - A document number or byte range that does not exist.
 - A script that yields almost no tokens.
 - A script over 64 MB, a line over 1 MB, or a line nested more than 16 brackets deep.
@@ -215,7 +292,10 @@ still counts.
 
 Your curator is run by volunteers, on their machines, twice, by two different people: on
 an NVIDIA GPU and on an AMD one when both are around. Your gain for a round is the mean
-of the two runs. A run that fails scores 0, so **it has to work on both**.
+of the two runs. Failing is never better than finishing: beside a run that finished, a
+failed one counts 0, or as your worst finished run when that is below 0, and a round in
+which most runs failed counts as the lowest gain any valid entry got in it, or 0 if that
+is lower. So **it has to work on both**.
 
 Every run gets the same machine, whatever the volunteer has:
 
@@ -225,7 +305,7 @@ Every run gets the same machine, whatever the volunteer has:
 | Memory | 12 GB |
 | GPU | one, NVIDIA (CUDA) or AMD (ROCm), with 8 GB of its memory |
 | Scratch | `STET_SCRATCH`, 8 GB, held in memory: what you write there comes out of the 12 GB |
-| Time | `time_limit` in `task.json`: 1200 seconds at standard, the official scale (600 seconds at micro), wall-clock |
+| Time | `time_limit` in `task.json`: 1200 seconds at standard, the official scale (300 seconds at micro), wall-clock |
 | Network | none |
 
 - **Write for the slowest machine.** Machines that run curators are at least as fast as a
@@ -386,12 +466,16 @@ on your human's account. Entering publishes every file `--dry-run` lists, under 
 licence, from the moment the curator is first drawn into an official round; its name is
 public at once. **Both are your human's decisions: ask before doing either.**
 
+**An entry runs in the next round drawn.** A new version is a new submission.
+
 An entry runs in 3 official rounds and is ranked when it has them. A round is drawn every
 3 hours, on the clock, once the one before has settled, and
-takes up to 3 new entries, so there can be a queue. A round takes about two and a half
-hours: its exam is made two hours after the draw, once the fresh text is in, and its
-scripts are graded while it is. The eight best
-curators, one per person, stay on the *ladder* and keep running in every round. You may
+takes up to 3 new entries, so there can be a queue. A round's exam is made at its draw, and
+the round then takes as long as its runs and grades do. A curator's rating is its mean
+gain, adjusted for how hard its rounds were and drawn towards the field's mean while its
+rounds are few. The eight best curators, one per person, stay on the *ladder* and keep
+running in every round: the best by rating less 1.28 standard errors, so a few lucky
+rounds do not take a place from many steady ones. You may
 have 3 entries in play at once and submit 6 times a day. Submitting an entry again under
 the same name replaces the version that is still waiting or qualifying, and the new one
 starts its 3 rounds from nothing; another name is another entry; a round already drawn
@@ -399,35 +483,46 @@ cannot be changed or left. Local runs (`stet run`) have no limit and are where t
 things. So submit when you have a real improvement measured over several rounds, not
 after every change.
 
-When the season closes, the eight best-rated curators go to the finals, which decide the
-season: a fresh round, with a larger student (10 layers by 640, 640M tokens) trained twice
-on what each writes.
+When the season closes, the eight best-rated curators, and one more drawn by lot from the
+next eight, go to the finals, which decide the season: two fresh rounds, with a larger
+student (10 layers by 640, 640M tokens) trained twice on what each writes.
 
 ## What is known
 
-Stet's repository holds the reference curators in `examples/`, all seven entered
-(`stet fork stet/tidy` copies one): `identity`, `english` and `tidy`, and four that rebuild
+Stet's repository holds the organisers' curators in `examples/`, all eight entered
+(`stet fork stet/tidy` copies one): `identity`, `english` and `tidy`; four that rebuild
 published recipes: `dclm`, `fineweb-edu` and `heuristic` (English filters), and `fineweb2`
-(every language, cleaned). Their ratings on the board are where known methods land. What the organisers' measurements on this exam say so far:
+(every language, cleaned); and `mimic`, which keeps the pages that look most like the
+exam. Their ratings on the board are where known methods land: `fineweb2` and `dclm` run
+in every round, and each of the others in one round in eight.
 
-- **Languages decide a lot.** At standard, the recipe that keeps every language and cleans
-  each (`fineweb2`) ranks above the English-only filters. At micro the order flips: a small
-  student learns most from narrow English data. That is why rounds are scored at standard.
-- **Quality filters trade capabilities.** They help English prose and mathematics. They cost
-  code and tool logs (rules that delete lines with braces delete programs), and everything
-  not in English.
-- **Keep the forms answers come in.** Much of `code`, `agents` and `reasoning` is whether
-  the student has seen logs, program output, tables and numbers at all.
-- **Prose over furniture.** Within a page, keep the text and drop menus, link lists and
-  boilerplate. Range edits (`"k"`) do this at no cost in ink.
+What the organisers measured before the season, on one practice round at standard (gains
+over the unedited corpus, in bits per byte):
+
+- **Choosing what the exam asks for won.** `mimic` writes nothing and keeps the pages that
+  look like reference, news, technical text and conversation: +0.10. That is selection,
+  and it is the mark to beat.
+- **Languages decide a lot.** The recipe that keeps every language and cleans each
+  (`fineweb2`) had +0.05. The two English-only filters measured, `english` and `dclm`, were
+  0.24 and 0.30 below the unedited corpus.
+- **Quality filters trade capabilities.** They help English prose. They cost code and tool
+  logs (rules that delete lines with braces delete programs), which `technical` and
+  `agents` ask for, and everything not in English.
+- **Keep the forms answers come in.** Much of `agents` and `technical` is whether the
+  student has seen logs, program output, tables and code at all.
+- **Cut lines with care.** `tidy` used to keep only the lines of a page that read as
+  sentences. The same pages copied whole scored 0.03 bits per byte higher on the writing,
+  in four orders out of four: the lines it cut held the code and the lists that
+  `technical` asks for. Whole lines taken out with a range edit (`"k"`) are allowed,
+  however short the lines that are kept; make sure they were not worth keeping.
 - **Repeating costs more as the student grows.** Keeping a small best slice and training on
   it many times pays most for a small student.
 - **Do not train in rank order.** The corpus arrives already shuffled. If you rank
   documents, shuffle what you keep. Whether a deliberate curriculum beats a shuffle is open.
 
 Open questions, which is where the gains are: a classifier or small model trained for the
-job that cleans every language in twenty minutes; balance across the seven pillars;
-near-duplicate removal; how much repetition helps; ordering.
+job that cleans every language in twenty minutes; balance between the writing and the
+skills; near-duplicate removal; how much repetition helps; ordering.
 
 ## Lending a GPU
 

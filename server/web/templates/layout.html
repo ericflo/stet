@@ -61,21 +61,28 @@
 {{/* The standings as one list, best first. A curator still qualifying stands where its
      rating puts it, with no rank number and a paler bar. Called with (dict "Rows" rows
      "Top" the longest bar's value "Need" rounds before an entry is ranked). */}}
-{{define "standings"}}{{$top := .Top}}{{$need := .Need}}<ol class="ranked">
-  {{range .Rows}}{{template "standrow" (dict "R" . "Top" $top "Need" $need)}}{{end}}
-</ol>{{end}}
+{{define "standings"}}{{$top := .Top}}{{$need := .Need}}{{$tied := false}}<ol class="ranked">
+  {{range .Rows}}{{if .TiedAt}}{{$tied = true}}{{end}}{{template "standrow" (dict "R" . "Top" $top "Need" $need)}}{{end}}
+</ol>{{if $tied}}<p class="after"><b>=</b> means too close to call: the gap to the first curator at that place is within the ratings' <a class="term" href="/glossary#se">uncertainty</a>.</p>{{end}}{{end}}
 
+{{/* A ranked curator's place: a run of curators too close to tell apart shares the place it
+     starts at, written "=2". */}}
 {{define "standrow"}}{{$r := .R}}<li class="{{if $r.Provisional}}soft{{end}}{{if eq $r.Rank 1}} top{{end}}"><a class="row" href="/editors/{{short $r.ID}}">
-  <span class="rank">{{if $r.Rank}}{{$r.Rank}}{{else}}–{{end}}</span>
+  <span class="rank">{{if $r.TiedAt}}={{$r.TiedAt}}{{else if $r.Rank}}{{$r.Rank}}{{else}}–{{end}}</span>
   <span class="who"><span class="name">{{$r.Name}}</span>{{if gt $r.Version 1}}<span class="ver">v{{$r.Version}}</span>{{end}}{{if $r.Record}} <span class="tag red">record</span>{{end}}
     <span class="by">{{$r.Owner}}{{if $r.Organisers}} (organisers){{end}}{{if $r.Provisional}} · <span class="q">unranked, {{$r.Rounds}} of {{.Need}} rounds</span>{{end}}{{if $r.Invalid}} · <span class="neg">failed {{$r.Invalid}} of {{$r.Rounds}}</span>{{end}}</span></span>
-  {{template "bar" (dict "V" (ptr $r.Rating) "Top" .Top "Soft" $r.Provisional)}}
-  <span class="val{{if neg (ptr $r.Rating)}} neg{{end}}">{{gain (ptr $r.Rating)}}</span>
+  {{if $r.Never}}<span class="bar fail" aria-hidden="true"><i></i></span>
+  <span class="val neg">—</span>{{else}}{{template "bar" (dict "V" (ptr $r.Rating) "Top" .Top "Soft" $r.Provisional)}}
+  <span class="val{{if neg (ptr $r.Rating)}} neg{{end}}">{{gain (ptr $r.Rating)}}</span>{{end}}
 </a></li>{{end}}
 
 {{/* A gain as a bar from the left edge. Called with (dict "V" value "Top" the list's
      longest "Soft" not yet certain "Fail" it failed). */}}
 {{define "bar"}}<span class="bar{{if .Fail}} fail{{else if neg .V}} neg{{else if eq .V 0.0}} zero{{else if .Soft}} soft{{end}}" style="{{barw .V .Top}}" aria-hidden="true"><i></i></span>{{end}}
+
+{{/* What a round counts as for an entry that failed in it, after the word "failed". Called
+     with an EntryView. */}}
+{{define "counts-as"}}{{if has .CountsAs}}: counts as {{if neg (ptr .CountsAs)}}{{gain (ptr .CountsAs)}}, the round's lowest{{else}}zero{{end}}{{end}}{{end}}
 
 {{/* n of m, as filled and empty dots. */}}
 {{define "of"}}<span class="of" aria-hidden="true">{{range pips .N .N .Of}}<i{{if .}} class="on"{{end}}></i>{{end}}</span>{{end}}

@@ -1,11 +1,12 @@
 package main
 
-// The season's exam. A round's exam is made after its draw: the organisers'
-// examiner harvests the fresh text published in the window after it, builds the round's items
-// and posts them here (apiExamPost). Grades start then. A grader sits every item
-// and reports each one's score, and its own baseline's; the round's baseline is the mean, item
-// by item, of the established graders' baselines; and a grade's score is the exam's
-// aggregate (ScoreItems, a port of src/stet/exam/aggregate.py) of its item scores less the
+// The season's exam. A round's exam is made at its draw: the organisers' examiner takes the
+// hours of writing the draw's seed picked from the day before (harvest.go), builds the round's
+// items and posts them here (apiExamPost). Grades start then. A grader sits every item
+// and reports each one's score, and, if its job asked, the unedited baseline's (a few machines
+// measure that for the round: see measuring); the round's baseline is the median, item
+// by item, of the established graders' baselines it keeps (baselinesKept); and a grade's score is the exam's
+// aggregate (ExamPlan.ScoreItems, a port of src/stet/exam/aggregate.py) of its item scores less the
 // round's baseline. From there on the judge works as it always has, on that score.
 //
 // What a round holds of this (the exam's table, the baseline item by item, every grade's item
@@ -16,6 +17,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -60,6 +62,7 @@ type ExamPost struct {
 	Snapshot string             `json:"snapshot_sha256"`
 	Fresh    int                `json:"fresh"`
 	Public   string             `json:"public_file"` // base64 of the zstd JSON lines published when the round settles
+	Hours    []RoundHour        `json:"hours"`       // the harvests its writing was made from: see harvest.go
 }
 
 // apiExamPost: POST /api/v1/admin/rounds/{id}/exam, from the organisers. Posting the same exam
@@ -107,6 +110,8 @@ func (a *App) postExam(ctx context.Context, idx int, p *ExamPost) (bool, error) 
 			err = fail(409, "%s is not open", roundID(a.season.ID, idx))
 		} else if rd.ExamSHA != "" && rd.ExamSHA != p.Digest {
 			err = fail(409, "%s already has its exam", roundID(a.season.ID, idx))
+		} else if !already {
+			_, err = a.checkHours(s, rd, p)
 		}
 	})
 	if err != nil || already {
@@ -127,6 +132,19 @@ func (a *App) postExam(ctx context.Context, idx int, p *ExamPost) (bool, error) 
 		if rd == nil || rd.Status != "open" || (rd.ExamSHA != "" && rd.ExamSHA != p.Digest) {
 			return fail(409, "%s changed while its exam was being kept; send it again", roundID(a.season.ID, idx))
 		}
+		if rd.ExamSHA == p.Digest {
+			// The same exam, posted twice at once: the other post was first, and the round's
+			// clock, its event and its grades' time are that one's.
+			already = true
+			return nil
+		}
+		late, err := a.checkHours(tx.s, rd, p)
+		if err != nil {
+			return err
+		}
+		if late {
+			rd.Hours, rd.HoursLate = p.Hours, true
+		}
 		rd.ExamSHA, rd.ExamAt, rd.ExamTable, rd.Shares, rd.Snapshot, rd.Fresh = p.Digest, now(), p.Table, p.Shares, p.Snapshot, p.Fresh
 		rd.ExamMix = a.examMix(p.Table)
 		tx.event("exam", map[string]any{"round": roundID(a.season.ID, idx), "items": len(p.Table), "fresh": p.Fresh})
@@ -140,18 +158,16 @@ func (a *App) postExam(ctx context.Context, idx int, p *ExamPost) (bool, error) 
 		a.moved(tx, rd) // the round's clock starts again: its grades start now
 		return nil
 	})
-	return err == nil, err
+	return err == nil && !already, err
 }
 
-// checkTable refuses a table that names a pillar the season does not have, or a language share
-// that is not a number.
+// checkTable refuses a table with a part the season does not name, or one under a pillar the
+// season does not put it under, or a language share that is not a number. The weights are the
+// season's; the examiner only says what each item is.
 func (a *App) checkTable(table []ItemInfo, shares map[string]float64) error {
-	pillars := map[string]bool{}
-	for _, p := range a.season.ExamSources {
-		pillars[p] = true
-	}
 	for i, it := range table {
-		if !pillars[it.Pillar] || it.Part == "" || it.Lang == "" || it.Stratum == "" || len(it.Part)+len(it.Lang)+len(it.Stratum) > 200 {
+		if it.Pillar == "" || it.Pillar != a.season.Exam.pillarOf(it.Part) || it.Part == "" || it.Lang == "" || it.Stratum == "" ||
+			len(it.Part)+len(it.Lang)+len(it.Stratum) > 200 {
 			return fail(400, "item %d of the table is not one the season scores", i)
 		}
 	}
@@ -235,19 +251,24 @@ func checkItems(sc *ExamScore, n int, what string) error {
 	return nil
 }
 
-// meanItems is the item-by-item mean of some item scores.
-func meanItems(rows [][]float64) []float64 {
+// medianItems is the item-by-item median of some item scores: with an even number of them, the
+// mean of the two in the middle. One machine that is far out moves it by nothing once three
+// have measured.
+func medianItems(rows [][]float64) []float64 {
 	if len(rows) == 0 {
 		return nil
 	}
-	out := make([]float64, len(rows[0]))
-	for _, row := range rows {
-		for i, v := range row {
-			out[i] += v
-		}
-	}
+	out, col := make([]float64, len(rows[0])), make([]float64, len(rows))
 	for i := range out {
-		out[i] /= float64(len(rows))
+		for k, row := range rows {
+			col[k] = row[i]
+		}
+		sort.Float64s(col)
+		if m := len(col) / 2; len(col)%2 == 1 {
+			out[i] = col[m]
+		} else {
+			out[i] = (col[m-1] + col[m]) / 2
+		}
 	}
 	return out
 }
@@ -260,10 +281,10 @@ func diffItems(x, base []float64) []float64 {
 	return out
 }
 
-// roundBaselines are the round's baselines that make its own: measured on its corpus and exam,
-// by an account established when it measured (or the organisers'). Whether a measurement
-// counts was settled when it arrived: standing earned as the round settles must not move the
-// round's own baseline.
+// roundBaselines are the round's baselines that may make its own, in the order of their
+// accounts: measured on its corpus and exam, by an account established when it measured (or the
+// organisers'). Whether a measurement counts was settled when it arrived: standing earned as the
+// round settles must not move the round's own baseline.
 func (a *App) roundBaselines(s *State, rd *Round) []*Baseline {
 	var out []*Baseline
 	for _, b := range s.Baselines {
@@ -273,11 +294,76 @@ func (a *App) roundBaselines(s *State, rd *Round) []*Baseline {
 			out = append(out, b)
 		}
 	}
+	sort.Slice(out, func(i, k int) bool { return out[i].AccountID < out[k].AccountID })
 	return out
 }
 
-// baselineDev is how far a grader's baseline is from the round's others (all of them but its
-// own), on the exam's score; ok is false while there are no others.
+// baselineQuorum is how many baselines it takes to say that one of them is the odd one out:
+// with two that differ, nothing says which is wrong.
+const baselineQuorum = 3
+
+// itemsOf are the item scores of some baselines.
+func itemsOf(bs []*Baseline) [][]float64 {
+	rows := make([][]float64, len(bs))
+	for i, b := range bs {
+		rows[i] = b.Items
+	}
+	return rows
+}
+
+// baselinesKept are the round's baselines that make its own. While fewer than three are in,
+// all of them: whichever came first is no more the standard than the next. From three on,
+// those within the tolerance of the median of them all, whatever order they came in. (If none
+// is, they are all kept: there is no telling.)
+func (a *App) baselinesKept(s *State, rd *Round) []*Baseline {
+	all := a.roundBaselines(s, rd)
+	if len(all) < baselineQuorum {
+		return all
+	}
+	mid, tol := medianItems(itemsOf(all)), a.tolerance().Baseline
+	var kept []*Baseline
+	for _, b := range all {
+		if dev, _, err := a.season.Exam.ScoreItems(rd.ExamTable, diffItems(b.Items, mid), rd.Shares); err == nil && within(dev, tol) {
+			kept = append(kept, b)
+		}
+	}
+	if len(kept) == 0 {
+		return all
+	}
+	return kept
+}
+
+// baselinesLeftOut is whose baseline of a round is the odd one out: one that may make the
+// round's (roundBaselines) and that the round does not keep (baselinesKept).
+func (a *App) baselinesLeftOut(s *State, rd *Round) map[int64]bool {
+	out := map[int64]bool{}
+	for _, b := range a.roundBaselines(s, rd) {
+		out[b.AccountID] = true
+	}
+	for _, b := range a.baselinesKept(s, rd) {
+		delete(out, b.AccountID)
+	}
+	return out
+}
+
+// oddOut reports whether a grade is by a machine whose baseline of its round is the odd one
+// out. What such a machine made of a script is no more to be relied on than what it made of
+// the unedited corpus: its grade decides nothing, as if it had been turned away when it came.
+func (j *judge) oddOut(r *Result) bool {
+	out, ok := j.left[r.RoundIdx]
+	if !ok {
+		if rd := j.s.Rounds[r.RoundIdx]; rd != nil {
+			out = j.a.baselinesLeftOut(j.s, rd)
+		}
+		j.left[r.RoundIdx] = out
+	}
+	return out[r.AccountID]
+}
+
+// baselineDev is how far a grader's baseline is from the median of the round's baselines, its
+// own among them (the others' and this one, whether or not its account is established), on the
+// exam's score. ok is false while fewer than two others are in: nobody is turned away for
+// differing from one machine, which may be the one that is wrong.
 func (a *App) baselineDev(s *State, rd *Round, acctID int64, items []float64) (dev float64, ok bool) {
 	var rows [][]float64
 	for _, b := range a.roundBaselines(s, rd) {
@@ -285,10 +371,10 @@ func (a *App) baselineDev(s *State, rd *Round, acctID int64, items []float64) (d
 			rows = append(rows, b.Items)
 		}
 	}
-	if len(rows) == 0 || len(items) != len(rd.ExamTable) {
+	if len(rows) < baselineQuorum-1 || len(items) != len(rd.ExamTable) {
 		return 0, false
 	}
-	dev, _, err := ScoreItems(rd.ExamTable, diffItems(items, meanItems(rows)), rd.Shares)
+	dev, _, err := a.season.Exam.ScoreItems(rd.ExamTable, diffItems(items, medianItems(append(rows, items))), rd.Shares)
 	return dev, err == nil
 }
 
@@ -298,22 +384,92 @@ func (a *App) baselineAgrees(rd *Round, b *Baseline) bool {
 	if b == nil || len(rd.BaseItems) == 0 || len(b.Items) != len(rd.BaseItems) || b.ExamSHA != rd.ExamSHA {
 		return false
 	}
-	dev, _, err := ScoreItems(rd.ExamTable, diffItems(b.Items, rd.BaseItems), rd.Shares)
+	dev, _, err := a.season.Exam.ScoreItems(rd.ExamTable, diffItems(b.Items, rd.BaseItems), rd.Shares)
 	return err == nil && within(dev, a.tolerance().Baseline)
 }
 
-// refreshScores sets the round's baseline to the mean of its baselines, item by item, and every
-// grade's score to the exam's aggregate of its item scores less that.
+// --- who measures a round's baseline -----------------------------------------------------------
+//
+// Measuring the unedited corpus costs a grader a whole training pass, as much as the grade
+// itself, and every grader's measurement is no better a baseline for the round
+// than a few. So the season says how many machines measure it
+// (baselines.per_round), and each grade job says whether its machine is one of them
+// (Job.Baseline). A machine that is not trains the script's student and nothing else, and
+// its grade is scored against the round's baseline like any other.
+//
+//   - A job asks for the baseline while fewer than that many established accounts have
+//     measured the round's and agree with it, or were asked to by a grade job they still
+//     hold (measuring). A job that is handed back, runs out or is turned away takes its
+//     promise with it, and the next job handed out is asked instead.
+//   - An account that has measured the round's, or was ever asked to, is asked again with
+//     every further grade: the measurement is on its disk, and its results keep carrying it.
+//   - An account not yet established is always asked. Its baseline is no part of the
+//     round's, and is how its machine is checked against the others' (baselineDev).
+//   - A round is never scored without one. While it has none and nobody at work on it was
+//     asked for one, an established grade that came without is as good as no grade: the
+//     script waits for another (weigh), and whoever is handed it is asked. If nobody is
+//     there to be, the script is given up like any that nobody was there to grade (giveUp).
+
+// measuring is whose measurement of a round's unedited corpus the round has or is promised:
+// the established accounts whose baseline it holds and agrees with, and those a grade job
+// they still hold asked for one, who have not sent it yet. Before the exam is posted nothing
+// has been sent, and it is the promises alone.
+func (j *judge) measuring(rd *Round) map[int64]bool {
+	if who, ok := j.measures[rd.Idx]; ok {
+		return who
+	}
+	who := map[int64]bool{}
+	for _, b := range j.a.baselinesKept(j.s, rd) {
+		if j.a.baselineAgrees(rd, b) {
+			who[b.AccountID] = true
+		}
+	}
+	for _, c := range j.s.Claims {
+		if c.RoundIdx == rd.Idx && c.Kind == "grade" && c.Baseline && c.live(j.t) && j.est[c.AccountID] &&
+			j.s.Baselines[baselineKey(rd.Idx, c.AccountID)] == nil {
+			who[c.AccountID] = true
+		}
+	}
+	j.measures[rd.Idx] = who
+	return who
+}
+
+// baselineComing reports whether a round has a baseline, or somebody at work on it was asked
+// for one.
+func (j *judge) baselineComing(round int) bool {
+	rd := j.s.Rounds[round]
+	return rd != nil && len(j.measuring(rd)) > 0
+}
+
+// baselinesWanted is how many more machines a round would ask for its baseline, as it stands.
+func (j *judge) baselinesWanted(rd *Round) int {
+	return max(0, j.a.season.Baselines.PerRound-len(j.measuring(rd)))
+}
+
+// asksBaseline says whether a grade job handed to this account now asks its machine for the
+// round's unedited baseline: see above. With no number in the season, every job does.
+func (j *judge) asksBaseline(rd *Round, acct *Account) bool {
+	if j.a.season.Baselines.PerRound <= 0 || !j.est[acct.ID] || j.s.Baselines[baselineKey(rd.Idx, acct.ID)] != nil {
+		return true
+	}
+	for _, c := range j.s.Claims {
+		if c.RoundIdx == rd.Idx && c.AccountID == acct.ID && c.Kind == "grade" && c.Baseline {
+			return true // asked before, whatever came of that job: it may have it trained
+		}
+	}
+	return j.baselinesWanted(rd) > 0
+}
+
+// refreshScores sets the round's baseline to the median of the baselines it keeps
+// (baselinesKept), item by item, and every grade's score to the exam's aggregate of its item
+// scores less that.
 func (a *App) refreshScores(tx *Tx, rd *Round) {
 	s := tx.s
-	var rows [][]float64
-	for _, b := range a.roundBaselines(s, rd) {
-		rows = append(rows, b.Items)
-	}
-	if len(rows) == 0 {
+	kept := a.baselinesKept(s, rd)
+	if len(kept) == 0 {
 		return
 	}
-	base := meanItems(rows)
+	base := medianItems(itemsOf(kept))
 	rd.BaseItems = base
 	mean := 0.0
 	for _, v := range base {
@@ -321,10 +477,12 @@ func (a *App) refreshScores(tx *Tx, rd *Round) {
 	}
 	loss := places5(-mean / float64(len(base))) // the unedited student's mean bits per byte: for the record
 	rd.BaselineLoss = &loss
-	// How many machines measured it, whoever they were.
+	// How many machines measured it, whoever they were: but not one whose measurement the
+	// round left out of its own.
+	out := a.baselinesLeftOut(s, rd)
 	rd.BaselineN = 0
 	for _, b := range s.Baselines {
-		if b.RoundIdx == rd.Idx && a.baselineAgrees(rd, b) {
+		if b.RoundIdx == rd.Idx && !out[b.AccountID] && a.baselineAgrees(rd, b) {
 			rd.BaselineN++
 		}
 	}
@@ -334,7 +492,7 @@ func (a *App) refreshScores(tx *Tx, rd *Round) {
 			if !r.Valid || len(r.Items) != len(base) {
 				continue
 			}
-			score, pillars, err := ScoreItems(rd.ExamTable, diffItems(r.Items, base), rd.Shares)
+			score, pillars, err := a.season.Exam.ScoreItems(rd.ExamTable, diffItems(r.Items, base), rd.Shares)
 			if err != nil {
 				continue
 			}
@@ -349,15 +507,35 @@ func (a *App) refreshScores(tx *Tx, rd *Round) {
 	}
 }
 
-// ExamScores is what a settled round's exam came to, item by item: kept in the file store, so
-// that anyone can work every score out again.
+// ExamScores is what a settled round's exam came to, item by item: kept in the file store,
+// and served to anyone (apiScoresGet), so that anyone can work every score out again. The
+// items are in the order of the round's published exam.
+//
+// It says of itself everything that working a score out needs. A grade's score is the
+// season's aggregate (ExamPlan.ScoreItems) of its item scores less the round's baseline,
+// over Table and Shares; GradesOf says whose grade each row is, of which script of which
+// entry, and whether it is one of those its script's gain is the median of.
 type ExamScores struct {
-	Round     string               `json:"round"`
-	Digest    string               `json:"items_digest"`
-	Shares    map[string]float64   `json:"languages"`
-	Baseline  []float64            `json:"baseline"`
-	Baselines map[string][]float64 `json:"baselines"` // by account handle
-	Grades    map[string][]float64 `json:"grades"`    // by result id
+	Round      string               `json:"round"`
+	Digest     string               `json:"items_digest"`
+	Shares     map[string]float64   `json:"languages"`
+	Table      []ItemInfo           `json:"table,omitempty"`       // what each item counts toward
+	Baseline   []float64            `json:"baseline"`              // the round's: the mean, item by item, of BaselineOf's
+	BaselineOf []string             `json:"baseline_of,omitempty"` // the handles whose baselines the round's is the median of
+	Baselines  map[string][]float64 `json:"baselines"`             // by account handle
+	Grades     map[string][]float64 `json:"grades"`                // by result id
+	GradesOf   map[string]GradeOf   `json:"grades_of,omitempty"`   // by result id
+}
+
+// GradeOf says what one grade in a round's item scores is a grade of. A result's id is in no
+// other public record, so without this nobody could tell the rows of Grades apart. A grade
+// that found its script invalid sat no exam, and has no row.
+type GradeOf struct {
+	Editor  string `json:"editor"`            // the entry: its curator's id
+	Script  string `json:"script"`            // sha256 of the script it graded
+	Runs    []int  `json:"runs"`              // the entry's runs that wrote that script, by their n
+	By      string `json:"by"`                // the grader's handle
+	Counted bool   `json:"counted,omitempty"` // the script's gain is the median of these
 }
 
 // archiveExam moves what a round held of its exam to the file store, once it has settled, and
@@ -376,21 +554,41 @@ func (a *App) archiveExam(ctx context.Context) {
 		var out ExamScores
 		a.st.view(func(s *State) {
 			rd := s.Rounds[idx]
-			out = ExamScores{Round: roundID(a.season.ID, idx), Digest: rd.ExamSHA, Shares: rd.Shares, Baseline: rd.BaseItems,
-				Baselines: map[string][]float64{}, Grades: map[string][]float64{}}
+			out = ExamScores{Round: roundID(a.season.ID, idx), Digest: rd.ExamSHA, Shares: rd.Shares, Table: rd.ExamTable, Baseline: rd.BaseItems,
+				Baselines: map[string][]float64{}, Grades: map[string][]float64{}, GradesOf: map[string]GradeOf{}}
+			handle := func(id int64) string {
+				if acct := s.Accounts[id]; acct != nil {
+					return acct.Handle
+				}
+				return strconv.FormatInt(id, 10)
+			}
+			for _, b := range a.baselinesKept(s, rd) {
+				out.BaselineOf = append(out.BaselineOf, handle(b.AccountID))
+			}
+			sort.Strings(out.BaselineOf)
 			for _, b := range s.Baselines {
 				if b.RoundIdx == idx && len(b.Items) > 0 {
-					handle := strconv.FormatInt(b.AccountID, 10)
-					if acct := s.Accounts[b.AccountID]; acct != nil {
-						handle = acct.Handle
-					}
-					out.Baselines[handle] = b.Items
+					out.Baselines[handle(b.AccountID)] = b.Items
 				}
 			}
 			for _, e := range s.inRound[idx] {
+				// Which of the entry's runs wrote each script, and which grades of it decided its
+				// gain, as the entry published them when it settled.
+				wrote, counted := map[string][]int{}, map[string]bool{}
+				for _, run := range e.Runs {
+					if run.Script == "" {
+						continue
+					}
+					wrote[run.Script] = append(wrote[run.Script], run.N)
+					for _, g := range run.Grades {
+						counted[run.Script+"/"+g.Handle] = g.Counted
+					}
+				}
 				for _, r := range s.results(idx, e.EditorID) {
 					if len(r.Items) > 0 {
-						out.Grades[strconv.FormatInt(r.ID, 10)] = r.Items
+						id, by := strconv.FormatInt(r.ID, 10), handle(r.AccountID)
+						out.Grades[id] = r.Items
+						out.GradesOf[id] = GradeOf{Editor: e.EditorID, Script: r.Script, Runs: wrote[r.Script], By: by, Counted: counted[r.Script+"/"+by]}
 					}
 				}
 			}
@@ -427,11 +625,69 @@ func (a *App) archiveExam(ctx context.Context) {
 	}
 }
 
-// ExamMix is what a round's exam was made of, for its page: how many items test each of the
-// season's capabilities, and how many of those are text people published after the draw rather
-// than problems generated from the round's seed; in how many languages people wrote; and how
-// many items each kind of writing gave. Kept after the round settles, when the table it is
-// counted from is not.
+// scoresArchived reports whether a round's item scores are in the file store, to be served:
+// it has settled, and what it held of its exam has been moved there (archiveExam), which is
+// when the round stops holding it.
+func scoresArchived(rd *Round) bool {
+	return rd != nil && rd.Status == "settled" && examPosted(rd) && len(rd.ExamTable) == 0 && len(rd.BaseItems) == 0
+}
+
+// apiScoresGet: GET /api/v1/rounds/{id}/scores. Every item score of a settled round, to
+// anyone (ExamScores): the round's baseline, each grader's baseline, and each grade, with
+// what each item counts toward and whose grade each is. With the round's published exam, it
+// is all that working any of its scores out again takes.
+func (a *App) apiScoresGet(w http.ResponseWriter, r *http.Request) {
+	idx, ok := a.parseRoundID(r.PathValue("id"))
+	if !ok {
+		writeErr(w, fail(404, "no such round"))
+		return
+	}
+	var known, settled, sat, archived bool
+	a.st.view(func(s *State) {
+		rd := s.Rounds[idx]
+		known, settled = rd != nil, rd != nil && rd.Status == "settled"
+		sat, archived = known && examPosted(rd), scoresArchived(rd)
+	})
+	id := roundID(a.season.ID, idx)
+	switch {
+	case !known:
+		writeErr(w, fail(404, "no such round"))
+		return
+	case !settled:
+		writeErr(w, fail(404, "%s has not settled: its item scores are sealed until it does", id))
+		return
+	case !sat:
+		writeErr(w, fail(404, "%s settled before it had an exam, so it has no item scores", id))
+		return
+	case !archived:
+		// Settled a moment ago: its scores are on their way to the file store.
+		writeErr(w, fail(404, "%s has only just settled, and its item scores are not published yet; try again in a minute", id))
+		return
+	}
+	f, size, err := a.st.blobs.Open(r.Context(), a.examBlob(idx, examScores))
+	if errors.Is(err, errNoBlob) {
+		writeErr(w, fail(404, "%s has no item scores published", id))
+		return
+	}
+	if err != nil {
+		slog.Error("reading a round's exam scores", "round", idx, "err", err)
+		writeErr(w, fail(503, "the file store is not answering; try again in a moment"))
+		return
+	}
+	defer f.Close()
+	// It is written once, when the round is archived, and never again. A day, not for ever:
+	// the address names a round, not the file's contents.
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	io.Copy(w, f)
+}
+
+// ExamMix is what a round's exam was made of, for its page: how many items each of the
+// season's pillars has, and how many of those are text people published in the day before the
+// draw rather than problems generated from the round's seed; in how many languages people
+// wrote; and how many items each kind of writing gave. Kept after the round settles, when the
+// table it is counted from is not.
 type ExamMix struct {
 	Items int          `json:"items"`
 	Fresh int          `json:"fresh"`
@@ -441,9 +697,11 @@ type ExamMix struct {
 }
 
 type ExamPillar struct {
-	Pillar string `json:"pillar"`
-	Items  int    `json:"items"`
-	Fresh  int    `json:"fresh,omitempty"`
+	Pillar string  `json:"pillar"`
+	Group  string  `json:"group,omitempty"`
+	Share  float64 `json:"share,omitempty"` // of the score, among the pillars this exam has
+	Items  int     `json:"items"`
+	Fresh  int     `json:"fresh,omitempty"`
 }
 
 type ExamKind struct {
@@ -451,38 +709,42 @@ type ExamKind struct {
 	Items int    `json:"items"`
 }
 
-// generatedParts are the exam's families of generated problems (FAMILY_PILLAR in
-// src/stet/exam/aggregate.py). Any other part is a kind of writing people published.
-var generatedParts = map[string]bool{"knowledge": true, "context": true, "arith": true, "word": true, "units": true, "algebra": true,
-	"logic": true, "algo": true, "multi": true, "prog": true, "transform": true, "struct": true, "agent": true, "grammar": true}
-
+// examMix counts a table the season's exam can have: checkTable has refused any other. A part
+// is a family of generated problems when the season says so (ExamPlan.Generated), and a kind of
+// writing people published otherwise.
 func (a *App) examMix(table []ItemInfo) *ExamMix {
 	if len(table) == 0 {
 		return nil
 	}
+	plan := &a.season.Exam
 	m := &ExamMix{Items: len(table)}
 	at := map[string]int{}
-	for _, p := range a.season.ExamSources {
-		at[p] = len(m.Parts)
-		m.Parts = append(m.Parts, ExamPillar{Pillar: p})
+	for _, p := range plan.Pillars {
+		at[p.Name] = len(m.Parts)
+		m.Parts = append(m.Parts, ExamPillar{Pillar: p.Name, Group: p.Group})
 	}
-	langs, kinds := map[string]bool{}, map[string]int{}
+	langs, kinds, present := map[string]bool{}, map[string]int{}, map[string]bool{}
 	for _, it := range table {
 		i, ok := at[it.Pillar]
 		if !ok {
-			i, at[it.Pillar] = len(m.Parts), len(m.Parts)
-			m.Parts = append(m.Parts, ExamPillar{Pillar: it.Pillar})
+			continue // not a row of the season's exam
 		}
+		fresh := !plan.generated(it.Part)
+		if fresh {
+			m.Fresh++
+			kinds[it.Part]++
+			if !strings.HasPrefix(it.Lang, "code") {
+				langs[it.Lang] = true
+			}
+		}
+		present[it.Pillar] = true
 		m.Parts[i].Items++
-		if generatedParts[it.Part] {
-			continue
+		if fresh {
+			m.Parts[i].Fresh++
 		}
-		m.Fresh++
-		m.Parts[i].Fresh++
-		kinds[it.Part]++
-		if !strings.HasPrefix(it.Lang, "code") {
-			langs[it.Lang] = true
-		}
+	}
+	for name, share := range plan.weights(present) {
+		m.Parts[at[name]].Share = places5(share)
 	}
 	m.Langs = len(langs)
 	for k, n := range kinds {

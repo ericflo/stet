@@ -10,6 +10,7 @@ Corpus layout (language-agnostic, mmap-friendly):
 
 from __future__ import annotations
 
+import collections
 import errno
 import gzip
 import hashlib
@@ -21,8 +22,10 @@ import re
 import shutil
 import sys
 import time
+import unicodedata
 import urllib.request
 import zlib
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -518,7 +521,7 @@ class Corpus:
 # `key_bytes` bytes, and a rolling hash that finds a key anywhere in a document. The exam
 # uses them to drop fresh items that a round's corpus already holds (exam/decontam.py).
 
-SENTENCE_END = re.compile(r"(?<=[.!?]) ")
+SENTENCE_END = re.compile(r"(?<=[.!?…؟۔।]) |(?<=[。！？｡])\s?")  # the second kind is written with no space after
 _HASH_P = 0x9E3779B97F4A7C15  # odd, so it has an inverse modulo 2**64
 _tables: list[np.ndarray] = []
 
@@ -551,15 +554,81 @@ def window_hashes(b: bytes, k: int) -> np.ndarray:
 
 
 def sentence_starts(text: str, key_bytes: int, min_letters: int):
-    """The keys of a passage: the opening of each sentence long enough to be distinctive.
+    """The keys of a passage: the `key_bytes` bytes from where each of its sentences opens, when
+    they are distinctive enough.
 
     Openings that are mostly digits or punctuation (a run of page numbers, a ruled line) are
-    skipped: they would match thousands of unrelated pages.
+    skipped: they would match thousands of unrelated pages. What counts is the bytes that are
+    letters (and the marks written on them), in any script: a key of 64 bytes is 64 Latin letters,
+    about 32 Cyrillic or Arabic ones, about 21 Chinese or Japanese characters. A sentence ends at
+    its full stop, question mark or exclamation mark, whichever script wrote it, with or without a
+    space after. A key runs on into the sentences that follow, so a short sentence has one too.
     """
-    for s in SENTENCE_END.split(" ".join(text.lower().split())):
-        key = s.encode("utf-8", errors="replace")[:key_bytes]
-        if len(key) == key_bytes and sum(97 <= c <= 122 for c in key) >= min_letters:
+    flat = " ".join(text.lower().split())
+    starts = [0] + [m.end() for m in SENTENCE_END.finditer(flat)]
+    seen = set()
+    for at in starts:
+        raw = flat[at : at + key_bytes].encode("utf-8", errors="replace")  # at least key_bytes bytes, if there are that many
+        if len(raw) < key_bytes or at in seen:
+            continue
+        seen.add(at)
+        key, letters = raw[:key_bytes], 0
+        for ch in key.decode("utf-8", errors="ignore"):  # a character the cut splits is not counted
+            if unicodedata.category(ch)[0] in "LM":
+                letters += len(ch.encode("utf-8"))
+        if letters >= min_letters:
             yield key
+
+
+# Pool files fetched and read at once while a corpus is built. Fetching waits on the network
+# and unpacking is done outside the interpreter's lock, so a few threads overlap them; more
+# would only press harder on a public host. No more than twice this many files' text is ever
+# in memory.
+BUILD_THREADS = 4
+
+
+def _shard_docs(shard: Shard, kind: str, max_doc: int, quiet: bool) -> list[tuple[str, bytes]]:
+    """One pool file's documents as they go into a corpus: the address and the bytes of each
+    that has any text, cut at the season's cap."""
+    path = shard_path(shard, quiet)
+    out: list[tuple[str, bytes]] = []
+    try:
+        for url, text in read_shard(path, kind):
+            if not text.strip():
+                continue
+            b = text.encode("utf-8", errors="replace")
+            if len(b) > max_doc:
+                b = b[:max_doc].decode("utf-8", errors="ignore").encode("utf-8")
+            out.append((url.replace("\n", " ").replace("\r", " "), b))
+    except (OSError, EOFError, zstandard.ZstdError, zlib.error, ValueError) as e:
+        # A damaged copy, whatever the damage makes the reader say: a stream cut short, a
+        # checksum that fails, a record length that is not a number.
+        Path(path).unlink(missing_ok=True)  # fetch it again next time
+        raise OSError(f"{shard.path} is damaged ({e}); it has been removed from the cache, run again") from None
+    return out
+
+
+def _each_shard(shards: list[Shard], kind: str, max_doc: int, quiet: bool):
+    """Every pool file's documents, in the files' order, read a few files ahead of the caller."""
+    workers = max(1, min(BUILD_THREADS, len(shards), os.cpu_count() or 1))
+    if workers == 1:
+        for shard in shards:
+            yield _shard_docs(shard, kind, max_doc, quiet)
+        return
+    ahead: collections.deque = collections.deque()
+    todo = iter(shards)
+    with ThreadPoolExecutor(workers) as pool:
+        try:
+            while True:
+                while len(ahead) < 2 * workers and (shard := next(todo, None)) is not None:
+                    # Each file's own progress line would write over the others': the caller says one.
+                    ahead.append(pool.submit(_shard_docs, shard, kind, max_doc, True))
+                if not ahead:
+                    break
+                yield ahead.popleft().result()
+        finally:
+            for f in ahead:
+                f.cancel()
 
 
 def build_corpus(rnd: Round, scale: Scale, dest: Path, quiet: bool = False) -> Path:
@@ -586,25 +655,19 @@ def build_corpus(rnd: Round, scale: Scale, dest: Path, quiet: bool = False) -> P
         urls: list[str] = []
         kind = rnd.pool_cfg["kind"]
         shards = round_shards(rnd, scale, quiet)
+        many = len(shards) > 1 and not quiet
+        t0 = time.time()
         with open(tmp / "arrival.bin", "wb") as out:
-            for shard in shards:
-                path = shard_path(shard, quiet)
-                try:
-                    docs = list(read_shard(path, kind))
-                except (OSError, EOFError, zstandard.ZstdError, zlib.error, ValueError) as e:
-                    # A damaged copy, whatever the damage makes the reader say: a stream cut
-                    # short, a checksum that fails, a record length that is not a number.
-                    path.unlink(missing_ok=True)  # fetch it again next time
-                    raise OSError(f"{shard.path} is damaged ({e}); it has been removed from the cache, run again") from None
-                for url, text in docs:
-                    if not text.strip():
-                        continue
-                    b = text.encode("utf-8", errors="replace")
-                    if len(b) > max_doc:
-                        b = b[:max_doc].decode("utf-8", errors="ignore").encode("utf-8")
+            for k, docs in enumerate(_each_shard(shards, kind, max_doc, quiet), 1):
+                for url, b in docs:
                     out.write(b)
                     offsets.append(offsets[-1] + len(b))
-                    urls.append(url.replace("\n", " ").replace("\r", " "))
+                    urls.append(url)
+                if many:
+                    sys.stderr.write(f"\r  fetched and read {k} of {len(shards)} files of the crawl: {offsets[-1] / 1e6:,.0f} MB of pages [{time.time() - t0:.0f}s]")
+                    sys.stderr.flush()
+        if many:
+            sys.stderr.write("\n")
         n = len(urls)
         order = rnd.doc_order(n)
         h = hashlib.sha256()
@@ -637,9 +700,14 @@ def build_corpus(rnd: Round, scale: Scale, dest: Path, quiet: bool = False) -> P
             # a curator may already be reading its copy. Use that one: replacing it would
             # empty the directory under a program that has it open.
             shutil.rmtree(tmp, ignore_errors=True)
-            return
-        shutil.rmtree(dest, ignore_errors=True)
-        tmp.replace(dest)
+            return dest
+        try:
+            tmp.replace(dest)  # refused if something is there: a directory is never renamed over one with files in it
+        except OSError:
+            if (dest / "meta.json").exists():
+                return dest  # the other verifier's, finished in the moment since the look above
+            shutil.rmtree(dest, ignore_errors=True)  # not a corpus, so nothing is reading it
+            tmp.replace(dest)
         if kind == "cc-wet" and os.environ.get("STET_KEEP_DOWNLOADS") != "1":
             # A round's files are a random handful out of a hundred thousand, and no other
             # round will draw them. The corpus is built; the downloads are dead weight, in a
@@ -683,8 +751,67 @@ def prune_verified(rnd: Round, keep: int = 3) -> int:
 # --- exam ---------------------------------------------------------------------------------
 
 def round_exam(rnd: Round, scale: Scale):
-    """The round's exam: its items (stet.exam), in order."""
+    """The round's exam: its items (stet.exam), in order. A practice round's has the season's
+    fresh writing too once some has been harvested on this machine (`stet harvest`)."""
+    if hours := practice_hours(rnd):
+        return _practice(rnd, scale, hours)
     return _items(rnd)
+
+
+def harvest_dir() -> Path:
+    """Where the hours harvested on this machine for practice are kept: <hour>.jsonl."""
+    return cache_dir() / "harvest"
+
+
+def harvested() -> dict[int, Path]:
+    try:
+        return {int(p.stem): p for p in harvest_dir().iterdir() if p.suffix == ".jsonl" and p.stem.isdigit()}
+    except OSError:
+        return {}
+
+
+def practice_hours(rnd: Round) -> list[tuple[int, Path]]:
+    """The hours a practice round's writing is made from: of those harvested on this machine,
+    as many as an official round is given, chosen by the round's seed as the server chooses an
+    official round's. With none harvested there are none, and the round sits the generated
+    items alone: a quarter of what an official round's score is made of."""
+    if rnd.kind != "practice" or not (held := harvested()):
+        return []
+    from .exam.fresh.harvest import choose_hours
+
+    return [(h, held[h]) for h in choose_hours(rnd.seed, held, int(rnd.season.raw["exam"]["fresh"]["hours"]))]
+
+
+def practice_key(rnd: Round) -> str:
+    """What names the writing a practice round sits here: "" when it sits none. Harvesting more
+    hours changes which a round is given, and then its exam and its baseline are new ones."""
+    from .exam.examine import snapshot_name
+
+    hours = practice_hours(rnd)
+    return snapshot_name([hashlib.sha256(p.read_bytes()).hexdigest() for _, p in hours]) if hours else ""
+
+
+def _practice(rnd: Round, scale: Scale, hours: list[tuple[int, Path]]):
+    """A practice round's exam with writing: made as the examiner makes an official round's,
+    from hours harvested here, and kept beside the round's corpus, under the season's digest
+    and the hours' name: the season says which parts an exam has, so another season's file is
+    another exam."""
+    from .exam.examine import assemble, pack_items
+    from .exam.farm import unpack_items
+
+    path = round_dir(rnd, scale) / f"exam-practice-{rnd.season.digest[:8]}-{practice_key(rnd)[:16]}.jsonl.zst"
+    try:
+        return unpack_items(path.read_bytes())
+    except (OSError, ValueError, zstandard.ZstdError):
+        pass
+    items = assemble(rnd, scale, hours, round_dir(rnd, scale) / "examine", log=lambda m: None, measure=False)[0]
+    tmp = path.with_name(f"{path.name}.tmp{os.getpid()}")
+    try:
+        tmp.write_bytes(pack_items(items))
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+    return items
 
 
 class ExamNotReady(RuntimeError):
@@ -713,7 +840,7 @@ def _items(rnd: Round):
         raise RuntimeError(f"season {rnd.season.id} sets the exam's generators at version {cfg['generator_version']}, "
                            f"this copy of stet has {gen.VERSION}: upgrade stet")
     if rnd.kind != "official":
-        return gen.generate(rnd.seed, per_corner=int(cfg["per_corner"]))
+        return gen.for_season(rnd.season, rnd.seed)
     want = getattr(rnd, "exam_digest", "") or ""
     path = exam_items_path(rnd, want) if want else None
     if path is not None and not path.exists() and exam_public_path(rnd, want).exists():
@@ -730,7 +857,7 @@ def _items(rnd: Round):
     if path is None or not path.exists():
         raise ExamNotReady(f"{rnd.id}: the round's exam has not been posted, or not fetched to this machine")
     raw = zstandard.ZstdDecompressor().decompress(path.read_bytes(), max_output_size=1 << 30)
-    items = [Item.from_dict(json.loads(line)) for line in raw.decode().splitlines() if line]
+    items = [Item.from_dict(json.loads(line)) for line in raw.decode().split("\n") if line]  # not splitlines(): see read_snapshot
     if exam_digest(items) != want:
         path.unlink(missing_ok=True)
         raise ExamNotReady(f"{rnd.id}: the copy of the exam here is not the round's; it has been removed, fetch it again")

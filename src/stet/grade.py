@@ -58,7 +58,7 @@ def train_script(rnd: Round, scale: Scale, corpus: Corpus, script_path, device=N
         t0 = time.time()
         tokens, stats = materialize(corpus, script_path, season, scale, enc)
         log(
-            f"script: {stats.out_docs:,} docs, {stats.out_bytes / 1e6:.1f} MB, ink {stats.ink_tokens:,} of {stats.ink_budget:,} tokens, "
+            f"script: {stats.out_docs:,} docs, {stats.out_bytes / 1e6:.1f} MB, "
             f"{stats.tokens_one_pass:,} tokens per pass x {stats.passes:.2f} passes ({time.time() - t0:.0f}s)"
         )
         result["script"] = stats.to_dict(corpus)
@@ -79,7 +79,7 @@ def sit_exam(trained: Trained, rnd: Round, scale: Scale, exam) -> dict:
     if trained.trained:
         try:
             t1 = time.time()
-            scores = sit(trained.model, exam, trained.enc, rnd.season.eot, scale.ctx, trained.device)
+            scores = sit(trained.model, exam, trained.enc, rnd.season.eot, scale.ctx, trained.device, floor=rnd.season.answer_floor_bytes)
             result["exam"] = {"items": len(exam), "item_scores": [round(x, 6) for x in scores],
                               "mean": round(sum(scores) / max(1, len(scores)), 6), "seconds": round(time.time() - t1, 2)}
             result["valid"] = True

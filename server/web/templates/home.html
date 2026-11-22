@@ -79,7 +79,7 @@
         <li><b>Training data is drawn</b> at random from the web, {{if .OnDemand}}at least {{end}}every {{.Interval}}.</li>
         <li><b>Every curator edits the same data</b>: what to keep, what to cut, in what order.</li>
         <li><b>The same model learns from each version</b>, and from the data left unedited.</li>
-        <li><b>It sits the same exam</b>, new every round and made after the draw. A curator's gain is how much better the model does than with the data unedited, in bits per byte.</li>
+        <li><b>It sits the same exam</b>, new every round and made at the draw. A curator's gain is how much better the model does than with the data unedited, in bits per byte.</li>
       </ol>
       <a class="how-more" href="/rounds">every round so far →</a>
     </div>
@@ -91,18 +91,18 @@
   <div class="wrap">
     <div>
       <h2>A new exam every round</h2>
-      <p class="lead">Nobody can study for it, the organisers included: it does not exist until after the draw.</p>
+      <p class="lead">Nobody can study for it, the organisers included: its writing is newer than the round's training data, and the draw decides which of it is used.</p>
       <div class="xmix">
-        <div><span class="chip live">written by people after the draw</span><p>What people publish on Wikipedia, news sites, GitHub, Hacker News, Lemmy, Bluesky and Mastodon in the hour after the draw: about 900 passages, in each language in proportion to the round's training data. It tests <b>writing</b> and <b>conversation</b>.</p></div>
-        <div><span class="chip">generated from the round's seed</span><p>New problems made from the same public random number that picked the training data. They test <b>knowledge</b>, <b>reading</b>, <b>reasoning</b>, <b>code</b> and <b>agents</b>.</p></div>
+        <div><span class="chip live">three quarters: written by people</span><p>What people published on Wikipedia, news sites, GitHub, mailing lists, forums, Hacker News, Lemmy, Bluesky and Mastodon in three hours of the day before the draw, picked by the draw: about 900 passages, in each language in proportion to the round's training data. Four kinds, each counting the same: <b>reference</b>, <b>news</b>, <b>technical</b> and <b>conversation</b>.</p></div>
+        <div><span class="chip">one quarter: generated from the round's seed</span><p>New problems made from the same public random number that picked the training data. Seven skills, each counting the same: <b>agents</b>, <b>reading</b>, <b>logic</b>, <b>grammar</b>, <b>numbers</b>, <b>programs</b> and <b>knowledge</b>.</p></div>
       </div>
     </div>
     <div>
-      <div class="xclock" role="img" aria-label="A round's clock: only what people publish in the hour after the draw counts; the next hour is a wait for slower sources to make that writing public; then the exam is made and graders sit it.">
-        <div class="xc-bar" aria-hidden="true"><i class="pub"></i><i class="settle"></i><i class="sit"></i></div>
-        <div class="xc-row" aria-hidden="true"><span><b>draw → 1 h</b>people publish</span><span><b>1 h → 2 h</b>a wait for slow sources</span><span><b>then</b>the exam</span></div>
+      <div class="xclock" role="img" aria-label="A round's clock: people publish through the day before the draw and every hour of it is kept; the draw picks three of those hours and the exam is made from them at once.">
+        <div class="xc-bar" aria-hidden="true"><i class="pub"></i><i class="sit"></i></div>
+        <div class="xc-row" aria-hidden="true"><span><b>the day before</b>people publish; every hour is kept</span><span><b>the draw</b>picks three hours</span></div>
       </div>
-      <p class="xnote">Only what is written in the first hour counts. The second is a wait, because some sources make writing public late: Common Crawl's news archive posts an hour's articles one to two hours after. Each of the seven counts the same. Nothing is multiple choice: the model is scored on how well it predicts the right text, in bits per byte. Text already in the round's training data is left out. Once the round settles, the exam is published.</p>
+      <p class="xnote">The exam is ready at the draw: no round waits for it. A curator runs with no network and can add no text of its own, so the exam cannot reach the model through it. Nothing is multiple choice: the model is scored on how well it predicts the right text, in bits per byte. Text already in the round's training data is left out. Once the round settles, the exam is published.</p>
       <a class="how-more" href="/glossary#exam">more about the exam →</a>
     </div>
   </div>

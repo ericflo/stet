@@ -1,5 +1,6 @@
 """The season, and its exam on the grader's side and the examiner's."""
 
+import hashlib
 import json
 import types
 
@@ -16,10 +17,28 @@ def test_the_season_is_the_exam_at_the_standard_scale():
     from stet.spec import CURRENT_SEASON
 
     s1 = load_season()
-    assert s1.id == CURRENT_SEASON == "s1" and s1.official_scale == "standard" and "heldout_exam" not in s1.raw
-    assert s1.exam_sources == ["knowledge", "reading", "reasoning", "code", "agents", "writing", "conversation"]
-    assert s1.raw["exam"]["generator_version"] == gen.VERSION and s1.raw["exam"]["more"] == gen.MORE
-    assert len(s1.digest) == 64 and s1.digest == load_season("s1").digest
+    assert s1.id == CURRENT_SEASON == "s2" and s1.official_scale == "standard" and "heldout_exam" not in s1.raw
+    assert s1.exam_sources == ["reference", "news", "technical", "conversation",
+                               "agents", "reading", "logic", "grammar", "numbers", "programs", "knowledge"]
+    assert s1.raw["exam"]["groups"] == {"writing": 0.75, "skills": 0.25} and s1.answer_floor_bytes == 16
+    # What the score is made of, by hand: four kinds of writing and seven skills, and each one's parts.
+    from stet.exam.aggregate import plan_of
+
+    made_of = {
+        "reference": ("writing", ["reference"]), "news": ("writing", ["news"]), "technical": ("writing", ["technical"]),
+        "conversation": ("writing", ["discussion", "social"]),
+        "agents": ("skills", ["agent"]), "reading": ("skills", ["context"]),
+        "logic": ("skills", ["logic"]), "grammar": ("skills", ["grammar"]),
+        "numbers": ("skills", ["arith-shots", "units-shots", "word-shots", "algebra-shots"]),
+        "programs": ("skills", ["algo-shots"]), "knowledge": ("skills", ["knowledge"]),
+    }
+    assert {p: (v["group"], v["parts"]) for p, v in s1.raw["exam"]["pillars"].items()} == made_of
+    weights = plan_of(s1).weights(made_of)
+    assert weights == pytest.approx({p: 0.1875 if group == "writing" else 0.25 / 7 for p, (group, _) in made_of.items()})
+    assert s1.raw["exam"]["more"] == {"agent": 4, "context": 2, "logic": 2, "grammar": 3} and s1.raw["exam"]["per_corner"] == 2
+    assert s1.min_copy_bytes == 64  # the shortest copy a script may hold; of text of its own it holds none
+    assert s1.raw["exam"]["generator_version"] == gen.VERSION
+    assert len(s1.digest) == 64 and s1.digest == load_season("s2").digest
     # the tokenizer and the facts its knowledge items ask are what the season says
     import hashlib
     from importlib import resources
@@ -31,10 +50,10 @@ def test_the_season_is_the_exam_at_the_standard_scale():
 
 
 def test_a_practice_rounds_exam_is_generated_from_its_seed():
-    s1 = load_season("s1")
+    s1 = load_season("s2")
     rnd = practice_round(s1, 3)
     items = data.round_exam(rnd, s1.scale("micro"))
-    assert isinstance(items, list) and items == gen.generate(rnd.seed, per_corner=2)
+    assert isinstance(items, list) and items == gen.for_season(s1, rnd.seed)
     assert data.exam_digest(items) == digest(items)
 
 
@@ -48,10 +67,10 @@ def _official(s1, exam_digest=""):
 
 
 def test_an_official_rounds_exam_is_the_one_posted_and_nothing_else():
-    s1 = load_season("s1")
+    s1 = load_season("s2")
     with pytest.raises(data.ExamNotReady):
         data.round_exam(_official(s1), s1.scale("standard"))  # not posted yet
-    items = gen.generate(b"posted", per_corner=1)[:20]
+    items = gen.for_season(s1, b"posted")[:20]
     rnd = _official(s1, digest(items))
     with pytest.raises(data.ExamNotReady):
         data.round_exam(rnd, s1.scale("standard"))  # posted, but not fetched here
@@ -70,7 +89,7 @@ def test_an_official_rounds_exam_is_the_one_posted_and_nothing_else():
 def test_a_round_carries_its_exams_digest_through_its_description():
     from stet.spec import round_from_description
 
-    s1 = load_season("s1")
+    s1 = load_season("s2")
     rnd = _official(s1, "ef" * 32)
     again = round_from_description(s1, rnd.describe())
     assert again == rnd and again.exam_digest == "ef" * 32
@@ -84,8 +103,7 @@ def test_a_grade_reports_every_items_score(monkeypatch):
     from stet import tok
 
     items = [Item(kind="answer", corner="arith/x", fmt="math", lang="en", source="gen:arith", ctx="1 + 1 =", cont=" 2")] * 3
-    stats = types.SimpleNamespace(out_docs=1, out_bytes=1, ink_tokens=0, ink_budget=1, tokens_one_pass=1, passes=1.0,
-                                  to_dict=lambda corpus: {"script_sha256": "ab" * 32})
+    stats = types.SimpleNamespace(out_docs=1, out_bytes=1, tokens_one_pass=1, passes=1.0, to_dict=lambda corpus: {"script_sha256": "ab" * 32})
     monkeypatch.setattr(grading, "train", lambda *a: (None, {"tokens": 9, "curve": []}))
     monkeypatch.setattr(grading, "materialize", lambda *a: ([], stats))
     monkeypatch.setattr(grading, "file_sha256", lambda path, limit: "ab" * 32)
@@ -93,8 +111,8 @@ def test_a_grade_reports_every_items_score(monkeypatch):
     monkeypatch.setattr(tok, "load_encoding", lambda season: None)
     import stet.exam.score as score
 
-    monkeypatch.setattr(score, "sit", lambda model, its, enc, eot, ctx, device: [-1.0, -2.0, -3.0])
-    s1 = load_season("s1")
+    monkeypatch.setattr(score, "sit", lambda model, its, enc, eot, ctx, device, floor=1: [-1.0, -2.0, -3.0])
+    s1 = load_season("s2")
     rnd = practice_round(s1, 0)
     corpus = types.SimpleNamespace(meta={"sha256": "c0"})
     result = grading.grade(rnd, s1.scale("micro"), corpus, items, "script.jsonl", device=types.SimpleNamespace(type="cpu"))
@@ -105,6 +123,9 @@ def test_a_grade_reports_every_items_score(monkeypatch):
     result.update(round={"id": rnd.id}, train={"seconds": 1, "curve": []})
     slim = slim_result(result, result)
     assert slim["exam"] == {"mean": -2.0, "item_scores": [-1.0, -2.0, -3.0]} and slim["baseline"] == slim["exam"]
+    # What it says of the script is what the script copied: there is no text of its own to report.
+    assert set(slim["script"]) == {"script_sha256", "tokens_sha256", "script_lines", "out_docs", "out_bytes", "src_docs", "kept_doc_frac",
+                                   "kept_byte_frac", "tokens_one_pass", "passes", "truncated"}  # fmt: skip
 
 
 def test_the_examiner_makes_a_rounds_exam_from_its_harvest_and_seed(monkeypatch, tmp_path):
@@ -115,32 +136,74 @@ def test_the_examiner_makes_a_rounds_exam_from_its_harvest_and_seed(monkeypatch,
     from stet.exam.farm import unpack_items
     from stet.exam.fresh import Doc, write_snapshot
 
-    s1 = load_season("s1")
+    s1 = load_season("s2")
     rnd = _official(s1)
     docs = [Doc(source="wikipedia", id=f"en:{i}", url=f"https://example.org/{i}", lang="en", license="CC BY-SA 4.0",
                 published=1_800_000_000 + i, title=f"Title {i}", text=f"Article number {i} says something new. " * 20, topic=f"Q{i}")
             for i in range(30)]
-    monkeypatch.setattr("stet.exam.fresh.harvest.harvest_window",
-                        lambda seed, start, end, dest, log=print: write_snapshot(docs, dest, {"window": [start, end]}))
+    # Two hours' harvests, with one thread in both: it is one document.
+    hours = [(1_800_003_600, tmp_path / "b.jsonl"), (1_800_000_000, tmp_path / "a.jsonl")]
+    shas = [write_snapshot(docs[14:], hours[0][1], {"window": [hours[0][0], hours[0][0] + 3600]}),
+            write_snapshot(docs[:15], hours[1][1], {"window": [hours[1][0], hours[1][0] + 3600]})]
     monkeypatch.setattr(data, "corpus", lambda rnd, scale: object())
     monkeypatch.setattr("stet.exam.fresh.langs.shares", lambda corpus, seed: {"en": 40.0, "ru": 20.0})
     monkeypatch.setattr("stet.exam.decontam.seen", lambda items, corpus, season, log=print: {0})  # the corpus holds one
-    exam = examine.build(rnd, s1.scale("standard"), 1_800_000_000, tmp_path / "work", log=lambda m: None)
+    exam = examine.build(rnd, s1.scale("standard"), hours, tmp_path / "work", log=lambda m: None)
     items = unpack_items(base64.b64decode(exam["items_file"]))
     assert exam["round"] == rnd.id and exam["items_digest"] == digest(items) and len(exam["table"]) == len(items)
-    assert items[: len(items) - exam["fresh"]] == gen.generate(rnd.seed, per_corner=2)
-    assert 0 < exam["fresh"] < 2 * len(docs) and exam["languages"] == {"en": 40.0, "ru": 20.0} and len(exam["snapshot_sha256"]) == 64
+    assert items[: len(items) - exam["fresh"]] == gen.for_season(s1, rnd.seed)
+    assert 0 < exam["fresh"] < 2 * len(docs) and exam["languages"] == {"en": 40.0, "ru": 20.0}
+    # what it was made from: the hours in their order, and one name for all of them
+    assert exam["hours"] == [{"hour": 1_800_000_000, "sha256": shas[1]}, {"hour": 1_800_003_600, "sha256": shas[0]}]
+    assert exam["snapshot_sha256"] == hashlib.sha256((shas[1] + shas[0]).encode()).hexdigest()
+    assert len({it.source for it in items if not it.source.startswith("gen:")}) <= len(docs)
     # what the server is sent is all it needs to score a grade
     assert score_from_table(exam["table"], [0.1] * len(items), exam["languages"])["score"] == pytest.approx(0.1)
     # made again, it is the same exam
-    assert examine.build(rnd, s1.scale("standard"), 1_800_000_000, tmp_path / "work", log=lambda m: None) == exam
+    assert examine.build(rnd, s1.scale("standard"), hours[::-1], tmp_path / "work", log=lambda m: None) == exam
+    with pytest.raises(ValueError, match="no harvest"):
+        examine.build(rnd, s1.scale("standard"), [], tmp_path / "work", log=lambda m: None)
+
+
+def test_an_hours_harvest_is_chosen_with_the_beacon_and_a_rounds_hours_with_its_seed(monkeypatch, tmp_path):
+    from stet.exam.fresh import harvest
+
+    s2 = load_season("s2")
+    hour = 1_800_000_000 - 1_800_000_000 % 3600
+    seen = {}
+
+    def window(seed, start, end, dest, kinds, log=print):
+        seen.update(seed=seed, start=start, end=end, kinds=set(kinds))
+        return {"window": [start, end], "documents": 0}, "ab" * 32
+
+    monkeypatch.setattr(harvest, "harvest_window", window)
+    meta, sha = harvest.harvest_hour(s2, hour, tmp_path / "h.jsonl", randomness="AB" * 32)
+    number = s2.beacon_round_at(hour + 3600)  # the first beacon once the hour is over: nobody writing in the hour has it
+    assert s2.beacon_time(number) >= hour + 3600 > s2.beacon_time(number - 1)
+    # It is harvested for the parts the season's exam names: the kinds of writing among them, and no other.
+    named = {part for p in s2.raw["exam"]["pillars"].values() for part in p["parts"]}
+    assert seen == {"seed": harvest.hour_seed(s2, hour, number, "ab" * 32), "start": hour, "end": hour + 3600, "kinds": named}
+    assert meta["hour"] == hour and meta["beacon_round"] == number and sha == "ab" * 32
+    assert harvest.hour_seed(s2, hour, number, "ab" * 32) != harvest.hour_seed(s2, hour, number, "cd" * 32)
+    with pytest.raises(ValueError):
+        harvest.harvest_hour(s2, hour + 60, tmp_path / "h.jsonl", randomness="ab" * 32)
+    # an hour is harvested once it has been over for the season's settle time
+    assert harvest.settled(s2, hour + 2 * 3600) == hour and harvest.settled(s2, hour + 2 * 3600 - 1) == hour - 3600
+    # a round's hours: the same for a seed, different for another, never more than there are
+    day = [hour - 3600 * i for i in range(24)]
+    got = harvest.choose_hours(b"seed", day, 3)
+    assert got == sorted(got) and len(got) == 3 and set(got) <= set(day) and got == harvest.choose_hours(b"seed", day[::-1] + day, 3)
+    assert harvest.choose_hours(b"other", day, 3) != got and harvest.choose_hours(b"seed", day[:2], 3) == sorted(day[:2])
+    assert harvest.choose_hours(b"seed", [], 3) == []
+    # the server chooses the same way (server/harvest_test.go has this vector)
+    assert harvest.choose_hours(bytes.fromhex("00" * 32), [3600 * i for i in range(1, 25)], 3) == [3600, 43200, 75600]
 
 
 def test_a_settled_rounds_published_exam_gives_the_open_items_and_checks_against_the_digest():
     from stet.exam.examine import public_items, read_public
 
-    s1 = load_season("s1")
-    generated = gen.generate(b"pub", per_corner=1)[:5]
+    s1 = load_season("s2")
+    generated = gen.for_season(s1, b"pub")[:5]
     wiki = Item(kind="passage", corner="fresh/wikipedia/en/Q5/text", fmt="prose", lang="en", source="wikipedia:en:1", text="An article.")
     news = Item(kind="passage", corner="fresh/ccnews/en/x/text", fmt="prose", lang="en", source="ccnews:<urn:1>", text="A news story.")
     items = generated + [wiki, news]
@@ -156,3 +219,50 @@ def test_a_settled_rounds_published_exam_gives_the_open_items_and_checks_against
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(zstandard.ZstdCompressor().compress(raw))
     assert data.round_exam(rnd, s1.scale("standard")) == generated + [wiki]
+
+
+def test_a_practice_round_sits_writing_once_some_has_been_harvested_here(monkeypatch, tmp_path):
+    pytest.importorskip("torch")  # stet.pipeline imports the trainer
+    from stet.exam.fresh import Doc, write_snapshot
+    from stet.pipeline import baseline_path
+    from stet.spec import practice_round
+
+    monkeypatch.setenv("STET_CACHE", str(tmp_path / "cache"))
+    s2 = load_season("s2")
+    rnd, gym, scale = practice_round(s2, 3), practice_round(s2, 3, "gym"), s2.scale("micro")
+    cpu = type("Device", (), {"type": "cpu"})()
+    generated = gen.for_season(s2, rnd.seed)
+    # Nothing harvested: the generated items alone, as before.
+    assert data.practice_hours(rnd) == [] and data.practice_key(rnd) == "" and data.round_exam(rnd, scale) == generated
+    plain = baseline_path(rnd, scale, cpu)
+    assert plain.name.endswith("-generated.json")
+
+    def hour(h, n0):
+        docs = [Doc(source="wikipedia", id=f"en:{i}", url=f"https://example.org/{i}", lang="en", license="CC BY-SA 4.0", published=h + i,
+                    title=f"Title {i}", text=f"Article number {i} says something new. " * 20, topic=f"Q{i}") for i in range(n0, n0 + 10)]
+        data.harvest_dir().mkdir(parents=True, exist_ok=True)
+        write_snapshot(docs, data.harvest_dir() / f"{h}.jsonl", {"window": [h, h + 3600]})
+
+    for k in range(5):
+        hour(1_800_000_000 + 3600 * k, 10 * k)
+    monkeypatch.setattr(data, "corpus", lambda rnd, scale: object())
+    monkeypatch.setattr("stet.exam.decontam.seen", lambda items, corpus, season, log=print: set())
+    hours = data.practice_hours(rnd)
+    assert len(hours) == 3 and {h for h, _ in hours} < {1_800_000_000 + 3600 * k for k in range(5)}  # as many as an official round's
+    assert hours != data.practice_hours(practice_round(s2, 4)) or hours != data.practice_hours(practice_round(s2, 5))  # by the round's seed
+    exam = data.round_exam(rnd, scale)
+    assert exam[: len(generated)] == generated and len(exam) > len(generated)
+    assert all(it.source.startswith("wikipedia:") for it in exam[len(generated):])
+    # The season's file says what an exam is made of. Under another file the same round has another
+    # exam and another baseline: what is kept here for this one is not taken for it.
+    import dataclasses
+
+    other = practice_round(dataclasses.replace(s2, raw={**s2.raw, "exam": {**s2.raw["exam"], "per_corner": 1}}), 3)
+    assert other.id == rnd.id and len(data.round_exam(other, scale)) < len(exam) and data.round_exam(rnd, scale) == exam
+    assert baseline_path(other, scale, cpu) != baseline_path(rnd, scale, cpu) and s2.digest[:8] in plain.name
+    # Kept beside the round, and named for the hours: the baseline that sat the other exam is not this one's.
+    monkeypatch.setattr("stet.exam.examine.assemble", lambda *a, **k: pytest.fail("made a second time"))
+    assert data.round_exam(rnd, scale) == exam
+    assert baseline_path(rnd, scale, cpu) != plain and data.practice_key(rnd)[:12] in baseline_path(rnd, scale, cpu).name
+    # The gym's rounds are generated from their seeds, whatever is on this machine.
+    assert data.practice_hours(gym) == [] and data.round_exam(gym, scale) == gen.for_season(s2, gym.seed)

@@ -152,3 +152,22 @@ def test_the_documents_give_the_seasons_numbers(season):
     assert f"up to {gib} GiB" in faq and f"{m['gpu_memory_gb']} GB of memory" in faq
     assert f"{m['memory_gb']} GB of memory, one GPU with {m['gpu_memory_gb']} GB of its memory" in verifying and f"{need['disk_gb']} GB of disk" in verifying
     assert f"more than {season.raw['tolerance']['standard']['run']} bits per byte" in rules.replace("by more than", "more than")
+    noise = season.raw["noise"]  # how far training the same script again moves a gain
+    assert f"by about {noise['micro']['gain_sd']} at micro and {noise['standard']['gain_sd']} at standard" in brief
+
+
+def test_the_documents_and_the_site_name_the_pillars_the_season_names(season):
+    """The exam's pillars are written out by hand in the rules, the brief and on the site. When
+    the season's list changes, this says where."""
+    pillars = season.raw["exam"]["pillars"]
+    count = {4: "four", 7: "seven", 8: "eight"}
+    writing, skills = (count[sum(v["group"] == g for v in pillars.values())] for g in ("writing", "skills"))
+    rules, brief, faq, design = (words(n) for n in ("docs/RULES.md", "src/stet/templates/AGENTS.md", "docs/FAQ.md", "docs/DESIGN.md"))
+    home, glossary = (words(f"server/web/templates/{n}.html") for n in ("home", "glossary"))
+    assert f"{writing} kinds of writing and {skills} skills" in faq and f"{writing} kinds that count the same" in design
+    assert f"skills, in {skills} kinds that count the same" in design
+    assert f"{writing.capitalize()} kinds, each counting the same" in home and f"{skills.capitalize()} skills, each counting the same" in home
+    assert f"{writing} kinds of writing (" in glossary and f"and {skills} skills (" in glossary
+    for name, pillar in pillars.items():
+        assert f"| {name.capitalize()} |" in rules and f"| `{name}` | {pillar['group']} |" in brief, name
+        assert f"<b>{name}</b>" in home and name in glossary and name in design, name

@@ -1,14 +1,13 @@
 {
-  "id": "s1",
-  "title": "Season 1",
-  "rules_version": 4,
+  "id": "s2",
+  "title": "Season 2",
+  "rules_version": 5,
   "tokenizer": {
     "file": "s1-vocab.tiktoken",
     "sha256": "7df001af5a4b8eef7f371de7a47427afe95fdc285fa42703fe220e259928e19f",
     "vocab_size": 8192,
     "eot": 8191
   },
-  "ink_frac": 0.001,
   "min_copy_bytes": 64,
   "max_doc_bytes": 262144,
   "pools": {
@@ -38,36 +37,119 @@
     }
   },
   "exam": {
-    "about": "Seven capabilities, each counting the same, measured as the likelihood of fresh human writing published after the draw and of items generated from the round's seed. See docs/research/exam-first-principles.md.",
-    "generator_version": 7,
+    "about": "Three quarters fresh human writing published in the day before the draw, one quarter generated skills. The pillars below name every part of the exam, and each was measured before the season: nothing on the exam counts for nothing. See docs/research/exam-first-principles.md.",
+    "generator_version": 9,
     "per_corner": 2,
     "more": {
       "agent": 4,
-      "context": 2
+      "context": 2,
+      "logic": 2,
+      "grammar": 3
     },
     "facts": {
       "file": "facts-s1.jsonl.zst",
       "sha256": "ac1c27bc3461c8ccd6c5b5a5814072b79bc834f7694ba35da14021493edd08e5"
     },
     "fresh": {
-      "window_seconds": 3600,
       "settle_seconds": 3600,
+      "reach_seconds": 93600,
+      "hours": 3,
       "items": 900,
       "per_corner": 2
     },
+    "answer_floor_bytes": 16,
     "aggregate": {
       "clip": 4.0,
-      "trim": 0.1
+      "trim": 0.1,
+      "small": 8
     },
-    "pillars": [
-      "knowledge",
-      "reading",
-      "reasoning",
-      "code",
-      "agents",
-      "writing",
-      "conversation"
-    ]
+    "groups": {
+      "writing": 0.75,
+      "skills": 0.25
+    },
+    "pillars": {
+      "reference": {
+        "group": "writing",
+        "parts": [
+          "reference"
+        ],
+        "about": "new encyclopedia articles, and what was added to old ones"
+      },
+      "news": {
+        "group": "writing",
+        "parts": [
+          "news"
+        ],
+        "about": "news published in the day before the draw"
+      },
+      "technical": {
+        "group": "writing",
+        "parts": [
+          "technical"
+        ],
+        "about": "technical writing and new code"
+      },
+      "conversation": {
+        "group": "writing",
+        "parts": [
+          "discussion",
+          "social"
+        ],
+        "about": "replies in discussions, and what people post"
+      },
+      "agents": {
+        "group": "skills",
+        "parts": [
+          "agent"
+        ],
+        "about": "an agent at work with a shell and tools"
+      },
+      "reading": {
+        "group": "skills",
+        "parts": [
+          "context"
+        ],
+        "about": "reading the context and using what it says"
+      },
+      "logic": {
+        "group": "skills",
+        "parts": [
+          "logic"
+        ],
+        "about": "following an argument to its end"
+      },
+      "grammar": {
+        "group": "skills",
+        "parts": [
+          "grammar"
+        ],
+        "about": "telling a well-formed sentence from a broken one"
+      },
+      "numbers": {
+        "group": "skills",
+        "parts": [
+          "arith-shots",
+          "units-shots",
+          "word-shots",
+          "algebra-shots"
+        ],
+        "about": "arithmetic, units, word problems and algebra, each asked after worked examples"
+      },
+      "programs": {
+        "group": "skills",
+        "parts": [
+          "algo-shots"
+        ],
+        "about": "what a small algorithm returns, asked after worked examples"
+      },
+      "knowledge": {
+        "group": "skills",
+        "parts": [
+          "knowledge"
+        ],
+        "about": "facts the web knows, in ten languages"
+      }
+    }
   },
   "scales": {
     "nano": {
@@ -82,7 +164,7 @@
       "edit_seconds": 120
     },
     "micro": {
-      "corpus_units": 4,
+      "corpus_units": 2,
       "train_tokens": 40000000,
       "n_layer": 6,
       "n_head": 6,
@@ -90,7 +172,7 @@
       "ctx": 512,
       "batch_size": 16,
       "lr": 0.0015,
-      "edit_seconds": 600
+      "edit_seconds": 300
     },
     "standard": {
       "corpus_units": 8,
@@ -297,18 +379,31 @@
     "alpha": 0.05,
     "margin": {
       "nano": 0.03,
-      "micro": 0.02,
-      "standard": 0.01,
-      "large": 0.01
+      "micro": 0.015,
+      "standard": 0.005,
+      "large": 0.005
     }
+  },
+  "baselines": {
+    "per_round": 4
+  },
+  "references": {
+    "every_round": [
+      "fineweb2",
+      "dclm"
+    ],
+    "one_in": 8
   },
   "reference_curves": {},
   "noise": {
     "micro": {
-      "gain_sd": 0.025
+      "gain_sd": 0.03,
+      "round_sd": 0.03
     },
     "standard": {
-      "gain_sd": 0.013
+      "gain_sd": 0.005,
+      "order_sd": 0.008,
+      "round_sd": 0.015
     }
   },
   "tolerance": {
@@ -318,19 +413,19 @@
       "run": 0.15
     },
     "micro": {
-      "grade": 0.1,
-      "baseline": 0.15,
-      "run": 0.12
+      "grade": 0.15,
+      "baseline": 0.2,
+      "run": 0.15
     },
     "standard": {
-      "grade": 0.06,
-      "baseline": 0.1,
-      "run": 0.09
+      "grade": 0.025,
+      "baseline": 0.04,
+      "run": 0.04
     },
     "large": {
-      "grade": 0.04,
-      "baseline": 0.06,
-      "run": 0.06
+      "grade": 0.02,
+      "baseline": 0.03,
+      "run": 0.03
     }
   }
 }

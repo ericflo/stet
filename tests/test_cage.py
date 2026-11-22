@@ -112,3 +112,40 @@ def test_what_listens_on_this_machine_is_kept_from_the_curator(tmp_path, monkeyp
     monkeypatch.setattr(cage, "Path", FakePath)
     # Docker's resolver behind 127.0.0.11, and sshd; not a connection that is merely established.
     assert cage.listening_ports() == {0xA93F, 22}
+
+
+def test_memory_shared_by_a_curators_processes_is_counted_once_where_the_kernel_says_whose_it_is(monkeypatch):
+    # Eight workers forked from one parent share its pages until they write to them. Added up as resident memory
+    # that is nine copies, and an honest curator would be stopped for memory it does not hold.
+    monkeypatch.setattr(cage, "_container_memory", lambda: None)
+    monkeypatch.setattr(cage, "pids", lambda: list(range(100, 109)))
+    monkeypatch.setattr(cage, "_status_bytes", lambda pid, fields: 4 << 30)
+    monkeypatch.setattr(cage, "_pss_bytes", lambda pid: (4 << 30) // 9)
+    assert (4 << 30) - 9 <= cage.memory_in_use() <= 4 << 30
+    # A process whose maps cannot be read is counted as before, and the others by their share.
+    monkeypatch.setattr(cage, "_pss_bytes", lambda pid: None if pid == 100 else (4 << 30) // 9)
+    assert cage.memory_in_use() == (4 << 30) + 8 * ((4 << 30) // 9)
+    monkeypatch.setattr(cage, "_pss_bytes", lambda pid: None)
+    assert cage.memory_in_use() == 9 * (4 << 30)
+
+
+def test_a_processs_share_of_memory_is_read_from_the_kernel_or_not_at_all(monkeypatch):
+    import builtins
+    import io
+
+    real, files = builtins.open, {}
+
+    def fake(path, *a, **k):
+        if str(path).startswith("/proc/"):
+            if files.get(str(path)) is None:
+                raise PermissionError(errno.EACCES, "not yours to read")
+            return io.StringIO(files[str(path)])
+        return real(path, *a, **k)
+
+    monkeypatch.setattr(builtins, "open", fake)
+    files["/proc/7/smaps_rollup"] = "00400000-7ffd1000 ---p 00000000 00:00 0 [rollup]\nRss: 9000 kB\nPss: 5000 kB\nPss_Anon: 3000 kB\nPss_File: 1500 kB\nPss_Shmem: 500 kB\n"
+    assert cage._pss_bytes(7) == 3500 << 10
+    files["/proc/8/smaps_rollup"] = "00400000-7ffd1000 ---p 00000000 00:00 0 [rollup]\nRss: 9000 kB\nPss: 5000 kB\n"  # a kernel before 5.4
+    assert cage._pss_bytes(8) is None and cage._pss_bytes(9) is None
+    files["/proc/8/status"] = "Name:\tpython\nRssAnon:\t    4000 kB\nRssFile:\t    1000 kB\nRssShmem:\t     600 kB\n"
+    assert cage._held_bytes(7) == 3500 << 10 and cage._held_bytes(8) == 4600 << 10 and cage._held_bytes(9) == 0

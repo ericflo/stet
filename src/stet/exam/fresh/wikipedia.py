@@ -1,6 +1,6 @@
 """New Wikipedia articles, in every language edition, created by people (not bots) in the window.
 
-Edits do not count: most of an edited article's text was there before the draw. A new article is
+Edits do not count: most of an edited article's text was there before the window. A new article is
 kept as the revision that was current when it was harvested, and its Wikidata class (what it is
 an instance of: a person, a village, a species) is its topic.
 """
@@ -110,7 +110,11 @@ def harvest(start: int, end: int, langs: list[str] | None = None, log=print) -> 
                 pending.append((lang, p, rev, text, created))
         except Exception as e:  # one language's API failing does not stop the harvest
             log(f"  wikipedia {lang}: {type(e).__name__}: {e}")
-    classes = _classes(sorted({p.get("pageprops", {}).get("wikibase_item") for _, p, *_ in pending} - {None}))
+    try:
+        classes = _classes(sorted({p.get("pageprops", {}).get("wikibase_item") for _, p, *_ in pending} - {None}))
+    except Exception as e:  # Wikidata failing does not lose the articles: they are kept without their classes
+        log(f"  wikipedia classes: {type(e).__name__}: {e}")
+        classes = {}
     for lang, p, rev, text, created in pending:
         q = p.get("pageprops", {}).get("wikibase_item", "")
         docs.append(Doc(source="wikipedia", id=f"{lang}:{rev['revid']}", lang=lang, license=LICENSE, published=created,
@@ -212,8 +216,9 @@ def additions(lang: str, start: int, end: int, cap: int, rng, log=print, talk: b
     edits = []
     while True:
         d = get_json(api, params)
-        edits += [rc for rc in d.get("query", {}).get("recentchanges", [])
-                  if rc.get("newlen", 0) - rc.get("oldlen", 0) >= (TALK_MIN_BYTES if talk else ADD_MIN_BYTES) and "mw-reverted" not in rc.get("tags", [])]
+        edits += [rc for rc in d.get("query", {}).get("recentchanges", [])  # the API's range takes in both of its ends: the window does not
+                  if rc.get("newlen", 0) - rc.get("oldlen", 0) >= (TALK_MIN_BYTES if talk else ADD_MIN_BYTES) and "mw-reverted" not in rc.get("tags", [])
+                  and start <= _ts(rc["timestamp"]) < end]
         if "continue" not in d or len(edits) > 20 * cap:
             break
         params.update(d["continue"])

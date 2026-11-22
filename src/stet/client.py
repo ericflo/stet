@@ -132,38 +132,44 @@ def need_key() -> Key:
 # --- rounds ---------------------------------------------------------------------------------
 
 
-def verify_beacon(season, beacon: dict) -> None:
-    """Check a round's randomness against drand itself, not against what the server says.
-
-    A relay that cannot be reached, or whose answer cannot be read as this round's beacon
-    (not JSON, an error object, fields missing or that do not add up), has said nothing,
-    and the next relay is asked. The round is refused (ValueError) only when a relay
-    returns a well-formed beacon for this round whose randomness is not the server's. If
-    no relay gives a readable answer, that is a download that failed (FetchError), to be
-    waited out like any other: it says nothing against the round.
-    """
+def beacon_randomness(season, number: int) -> str:
+    """A beacon round's randomness, from drand itself: the first relay to give a well-formed
+    answer for this round. A relay that cannot be reached, or whose answer cannot be read as this
+    round's beacon (not JSON, an error object, fields missing or that do not add up), has said
+    nothing, and the next is asked. If none gives a readable answer, that is a download that
+    failed (FetchError), to be waited out like any other."""
     cfg = season.raw["beacon"]
-    number = int(beacon["round"])
     last: Exception | None = None
     for relay in cfg["relays"]:
-        url = f"{relay}/{cfg['chain_hash']}/public/{number}"
+        url = f"{relay}/{cfg['chain_hash']}/public/{int(number)}"
         try:
             req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
             with urllib.request.urlopen(req, timeout=20) as r:
                 got = json.loads(r.read(1 << 16))
             randomness = str(got["randomness"]).lower()
-            if int(got["round"]) != number or hashlib.sha256(bytes.fromhex(got["signature"])).hexdigest() != randomness:
+            if int(got["round"]) != int(number) or hashlib.sha256(bytes.fromhex(got["signature"])).hexdigest() != randomness:
                 raise ValueError("the beacon it returned does not add up")
         except Exception as e:  # this relay has told us nothing; try the next
             last = e
             continue
-        if randomness != str(beacon["randomness"]).lower():
-            raise ValueError(
-                f"round randomness does not match drand round {number}: the server says "
-                f"{str(beacon['randomness'])[:16]}…, drand says {randomness[:16]}…"
-            )
-        return
+        return randomness
     raise FetchError(f"no drand relay gave a readable answer about round {number}, so the round's randomness could not be checked ({last})")
+
+
+def verify_beacon(season, beacon: dict) -> None:
+    """Check a round's randomness against drand itself, not against what the server says.
+
+    The round is refused (ValueError) only when a relay returns a well-formed beacon for this
+    round whose randomness is not the server's. If no relay gives a readable answer
+    (FetchError), that says nothing against the round.
+    """
+    number = int(beacon["round"])
+    randomness = beacon_randomness(season, number)
+    if randomness != str(beacon["randomness"]).lower():
+        raise ValueError(
+            f"round randomness does not match drand round {number}: the server says "
+            f"{str(beacon['randomness'])[:16]}…, drand says {randomness[:16]}…"
+        )
 
 
 def round_from_api(season, description: dict):
@@ -394,8 +400,16 @@ def cmd_submit(args):
         return
     key = need_key()
     runs = sorted((project.path / ".stet" / "runs").glob("*/result.json"))
-    if not any(json.loads(p.read_text()).get("valid") for p in runs[-5:]):
-        sys.stderr.write("warning: no recent valid `stet run` for this project. A curator that fails scores a gain of 0.\n")
+
+    def ran_valid(p: Path) -> bool:
+        try:  # a result cut short or written over is no valid run, and no reason not to submit
+            said = json.loads(p.read_text())
+        except (OSError, ValueError):
+            return False
+        return isinstance(said, dict) and bool(said.get("valid"))
+
+    if not any(ran_valid(p) for p in runs[-5:]):
+        sys.stderr.write("warning: no recent valid `stet run` for this project. A curator that fails counts as the lowest gain in its round.\n")
     if not args.yes:
         if not sys.stdin.isatty():
             sys.stderr.write("stet: pass --yes to submit without a prompt\n")
@@ -558,17 +572,20 @@ def cmd_fork(args):
 # that script; only established accounts that asked to run curators are given those.
 
 
-def slim_result(result: dict, base: dict) -> dict:
-    """What a grader reports: everything needed to judge the run, nothing bulky."""
+def slim_result(result: dict, base: dict | None) -> dict:
+    """What a grader reports: everything needed to judge the run, nothing bulky. `base` is
+    this machine's unedited baseline for the round, or None when its job did not ask for one
+    and none is on disk: the grade is scored against the round's, which other machines measure."""
     keys = ("harness", "harness_sha256", "season", "season_digest", "scale", "corpus_sha256", "exam_sha256", "script_sha256",
             "valid", "invalid_reason", "hardware", "started_at", "finished_at")  # fmt: skip
     out = {k: result.get(k) for k in keys}
     out["round"] = result["round"]["id"]
     # Every item's score: the server makes the round's score from them.
-    out["baseline"] = {"mean": base["exam"]["mean"], "item_scores": base["exam"]["item_scores"]}
+    if base is not None:
+        out["baseline"] = {"mean": base["exam"]["mean"], "item_scores": base["exam"]["item_scores"]}
     if result.get("valid"):
         s = result["script"]
-        out["script"] = {k: s.get(k) for k in ("script_sha256", "tokens_sha256", "script_lines", "out_docs", "out_bytes", "src_docs", "ink_tokens", "ink_frac", "kept_doc_frac", "kept_byte_frac", "tokens_one_pass", "passes", "truncated")}
+        out["script"] = {k: s.get(k) for k in ("script_sha256", "tokens_sha256", "script_lines", "out_docs", "out_bytes", "src_docs", "kept_doc_frac", "kept_byte_frac", "tokens_one_pass", "passes", "truncated")}
         out["exam"] = {"mean": result["exam"]["mean"], "item_scores": result["exam"]["item_scores"]}
         t = result["train"]
         out["train"] = {k: t.get(k) for k in ("seconds", "tokens_per_second", "final_train_loss", "init_sha256", "precision")}
@@ -831,16 +848,26 @@ class Pending:
     """A grade whose student was trained before its round's exam, waiting to sit it (from stet
     0.4.4): the job, the round as it was handed, and the student in memory. Meanwhile this
     machine may be handed another grade, which trains in a single pass: the round's unedited
-    student is trained already."""
+    student, if this machine was asked for it, is trained already."""
 
     def __init__(self, job: dict, rnd, trained, device):
         self.job, self.rnd, self.trained, self.device = job, rnd, trained, device
 
 
+def wants_baseline(job: dict) -> bool:
+    """Whether a grade job asks this machine for the round's unedited baseline too. The server
+    asks a few machines a round (`baseline` on the job); the rest train the script's student
+    alone. A job that does not say, from a server older than that, asks: every grader did."""
+    return job.get("baseline") is not False
+
+
 def _grade_job(job, season, scale, device, key, out, work: Path, bases: dict | None = None):
     """A grade job, done: (result, baseline). Handed before the round's exam is posted, it
     trains now. With `bases`, which keeps each round's unedited student once trained, it is
-    then a Pending, to sit the exam once it is posted (_sit); without, it waits for the exam."""
+    then a Pending, to sit the exam once it is posted (_sit); without, it waits for the exam.
+
+    The baseline is None when the job did not ask for it (wants_baseline) and this machine
+    has none for the round on disk: the unedited corpus is then neither trained on nor sat."""
     import zstandard
 
     from . import data
@@ -849,9 +876,14 @@ def _grade_job(job, season, scale, device, key, out, work: Path, bases: dict | N
     from .train import pick_device
 
     rnd = _job_round(season, job, out)
+    asked = wants_baseline(job)
     if rnd.exam_digest:
         fetch_exam(rnd, key)
-        base = baseline(rnd, scale, device, progress=out.progress("baseline"), log=lambda m: out.line("", out.dim("baseline " + m)))
+        if asked:
+            base = baseline(rnd, scale, device, progress=out.progress("baseline"), log=lambda m: out.line("", out.dim("baseline " + m)))
+        else:
+            # What an earlier job of the round measured here is still this machine's to send.
+            base = _cached(baseline_path(rnd, scale, device if hasattr(device, "type") else pick_device(device)))
     want = job["script"]["sha256"]
     limit = int(season.raw["script"]["max_bytes"])
     # Signed: until its round settles, a script is given only to whoever was handed it to grade.
@@ -868,12 +900,13 @@ def _grade_job(job, season, scale, device, key, out, work: Path, bases: dict | N
     if rnd.exam_digest:
         result = grade_round(rnd, scale, path, device=device, progress=out.progress("training"), log=lambda m: out.line("", out.dim(m)))
         return result, base
-    # Handed before the exam is made: both students are trained now, while it is, and sit
-    # it the moment it is posted. The round settles minutes after its exam.
+    # Handed before the exam is made: the student, and the unedited one if the job asks for
+    # it, are trained now, while it is, and sit it the moment it is posted. The round settles
+    # minutes after its exam.
     device = pick_device(device) if not hasattr(device, "type") else device
     out.line("", out.dim("the round's exam is not posted yet: training now, and sitting it once it is"))
     base_t = (bases or {}).get(rnd.id)
-    if base_t is None:
+    if base_t is None and asked:
         base_t = train_baseline(rnd, scale, device, progress=out.progress("baseline"), log=lambda m: out.line("", out.dim("baseline " + m)))
         if bases is not None:
             bases[rnd.id] = base_t
@@ -882,7 +915,9 @@ def _grade_job(job, season, scale, device, key, out, work: Path, bases: dict | N
         return Pending(job, rnd, trained, device)
     rnd = wait_for_exam(rnd, out)
     fetch_exam(rnd, key)
-    base = _cached(baseline_path(rnd, scale, device)) or sit_baseline(base_t, rnd, scale)
+    base = _cached(baseline_path(rnd, scale, device))
+    if base is None and asked:
+        base = sit_baseline(base_t, rnd, scale)
     return sit_exam(trained, rnd, scale, data.round_exam(rnd, scale)), base
 
 
@@ -942,7 +977,7 @@ def fetch_exam(rnd, key) -> Path:
     blob = request("GET", f"/api/v1/rounds/{rnd.id}/exam", key=key, raw=True, timeout=600, limit=EXAM_LIMIT)
     try:
         raw = zstandard.ZstdDecompressor().decompress(blob, max_output_size=1 << 30)
-        items = [Item.from_dict(json.loads(line)) for line in raw.decode().splitlines() if line]
+        items = [Item.from_dict(json.loads(line)) for line in raw.decode().split("\n") if line]
     except (zstandard.ZstdError, ValueError, TypeError, KeyError) as e:
         raise WrongBytes(f"the round's exam the server sent cannot be read ({clean(e)})") from None
     if digest(items) != rnd.exam_digest:
@@ -957,16 +992,18 @@ def fetch_exam(rnd, key) -> Path:
 EXAM_LIMIT = 64 << 20  # bytes of a round's posted exam, compressed
 
 
-def _sit(p: Pending, bases: dict, key, scale) -> tuple[dict, dict]:
+def _sit(p: Pending, bases: dict, key, scale) -> tuple[dict, dict | None]:
     """A grade trained before its round's exam sits it, now that it is posted (p.rnd says
-    so): the round's unedited student first, once for all of them, and then this one."""
+    so): the round's unedited student first, once for all of them, and then this one. A job
+    that did not ask for the baseline sits its own student alone, and carries the baseline
+    only if this machine has the round's on disk."""
     from . import data
     from .grade import sit_exam
     from .pipeline import _cached, baseline_path, sit_baseline
 
     fetch_exam(p.rnd, key)
     base = _cached(baseline_path(p.rnd, scale, p.device))
-    if base is None:
+    if base is None and wants_baseline(p.job):
         base_t = bases.get(p.rnd.id)
         if base_t is None or getattr(base_t, "model", True) is None:
             raise RuntimeError(f"the unedited student of round {p.rnd.id} is no longer in memory")
@@ -1475,6 +1512,11 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
                 ok = False
         return ok
 
+    def forget_base(p: Pending | None) -> None:
+        """Let go of a round's unedited student once no trained grade waits to sit beside it."""
+        if p is not None and not any(q.rnd.id == p.rnd.id for q in waiting.values()):
+            bases.pop(p.rnd.id, None)
+
     def more_wanted() -> bool:
         return not args.once and not (args.max_jobs and done + len(waiting) >= args.max_jobs)
 
@@ -1639,8 +1681,7 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
                     path = f"/api/v1/jobs/{job_id}/script"
                 elif sit is not None:
                     result, base = _sit(sit, bases, key, scale)
-                    if not any(p.rnd.id == sit.rnd.id for p in waiting.values()):
-                        bases.pop(sit.rnd.id, None)  # sat, and kept on disk for the round's later grades
+                    forget_base(sit)  # sat, and kept on disk for the round's later grades
                     payload = slim_result(result, base)
                     path = f"/api/v1/jobs/{job_id}/result"
                 else:
@@ -1675,6 +1716,7 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
                     )
                     sys.exit(1)
                 hand_back(clean(f"round refused: {err}", 300))
+                forget_base(sit)
                 refused[round_id] = 2  # not this session
                 out.line("", out.bad(str(err)))
                 stop_if_once()
@@ -1693,7 +1735,12 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
                     # Kept, not handed back. A job handed back is not free: an entry gets only
                     # a few attempts, and a verifier is offered an entry once. The server
                     # gives this job back to us the next time we ask.
+                    if sit is not None:
+                        # Its student is trained and in memory still: it waits again, and sits
+                        # the exam once that can be fetched, rather than being trained afresh.
+                        waiting[job_id], holding = sit, None
                     stuck[job_id] = waited + patience(f"could not fetch what this job needs ({clean(err)}). Keeping the job", keeping=job_id)
+                forget_base(sit)
                 continue
             except BaseException as err:  # this machine's trouble, not the curator's
                 # A panic in a compiled library is not an Exception. It is a failed job all
@@ -1701,6 +1748,7 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
                 if isinstance(err, (KeyboardInterrupt, SystemExit, GeneratorExit)):
                     raise
                 remove_tree(work)
+                forget_base(sit)  # a grade that failed while sitting is trained afresh if it is tried again, with the exam posted
                 failures += 1
                 tries[job_id] = tries.get(job_id, 0) + 1
                 what = f"could not run this job ({type(err).__name__}: {clean(err)})"
@@ -1775,8 +1823,12 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
             elif result["valid"]:
                 # Item scores are log-likelihoods, higher is better. This is their plain mean; the
                 # round's score is the server's, made from every item by the exam's aggregate.
-                mean, b = result["exam"]["mean"], base["exam"]["mean"]
-                out.line("result", f"exam mean {mean:.4f} · baseline {b:.4f} · {out.bold(f'{mean - b:+.4f}')}")
+                mean = result["exam"]["mean"]
+                if base is not None:
+                    b = base["exam"]["mean"]
+                    out.line("result", f"exam mean {mean:.4f} · baseline {b:.4f} · {out.bold(f'{mean - b:+.4f}')}")
+                else:
+                    out.line("result", f"exam mean {mean:.4f} · scored against the round's baseline, which other machines measure")
             else:
                 out.line("result", f"invalid: {clean(result['invalid_reason'])}")
             if ack:

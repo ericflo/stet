@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"slices"
 	"sort"
 	"time"
 )
@@ -45,6 +46,12 @@ func (r *Round) description(s *Season) map[string]any {
 		d["moved_from"] = r.Was
 	}
 	if r.Status != "scheduled" {
+		if len(r.Hours) > 0 {
+			d["exam_hours"] = r.Hours
+			if r.HoursLate {
+				d["exam_hours_late"] = true
+			}
+		}
 		d["seed"] = r.Seed
 		d["beacon"] = map[string]any{"round": r.DrandRound, "randomness": r.Randomness}
 		d["drawn_at"] = r.DrawnAt
@@ -289,10 +296,47 @@ type entrant struct {
 	Why      string // ladder | qualifying | new
 }
 
-// selectEntrants decides who runs in a round: the ladder (so that the best editors always
-// share rounds and can be compared head to head), editors still qualifying, and new
-// entries, with people who have graded for others going first.
-func (a *App) selectEntrants(s *State, cutoff int64) []entrant {
+// resting is which of the ladder's editors sit round idx out. The organisers' reference
+// editors are yardsticks, and every one of them in every round was half of all the training
+// a season did. So the few the season names (references.every_round) run in every round,
+// as the ladder does: they are what ties the rounds' difficulties together. Each of the
+// others takes one round in references.one_in, and they take different ones: the k-th of
+// them, in the order they were entered, runs in the rounds where idx+k is a multiple of it.
+//
+// It is the draw that leaves them out, not the board (computeBoard): a reference that rests
+// keeps its place on the ladder, and its rating is from the rounds it ran. A round it sat
+// out is no entry of its, so nothing that counts an editor's rounds or its failures
+// (roundsRun, failing) ever sees one. The record holder never rests, whoever entered it: the
+// record changes hands only on rounds shared with it. Nor does an editor still in its
+// qualifying rounds, which selectEntrants enters for that reason whatever the ladder says.
+func (a *App) resting(b *Board, idx int) map[string]bool {
+	rule := a.season.References
+	out := map[string]bool{}
+	if rule.OneIn < 2 {
+		return out
+	}
+	var turns []*BoardRow
+	for _, row := range b.Ladder {
+		if row.Organisers && row.ID != b.RecordID && !slices.Contains(rule.EveryRound, row.Name) {
+			turns = append(turns, row)
+		}
+	}
+	sort.Slice(turns, func(i, j int) bool {
+		return turns[i].CreatedAt < turns[j].CreatedAt || (turns[i].CreatedAt == turns[j].CreatedAt && turns[i].ID < turns[j].ID)
+	})
+	for k, row := range turns {
+		if (idx+k)%rule.OneIn != 0 {
+			out[row.ID] = true
+		}
+	}
+	return out
+}
+
+// selectEntrants decides who runs in round idx: the ladder (so that the best editors always
+// share rounds and can be compared head to head) less the reference editors whose turn it
+// is not (resting), editors still qualifying, and new entries, with people who have graded
+// for others going first.
+func (a *App) selectEntrants(s *State, cutoff int64, idx int) []entrant {
 	seen := map[string]bool{}
 	var out []entrant
 	add := func(id, why string) {
@@ -301,8 +345,12 @@ func (a *App) selectEntrants(s *State, cutoff int64) []entrant {
 			out = append(out, entrant{id, why})
 		}
 	}
-	for _, row := range a.computeBoard(s).Ladder {
-		add(row.ID, "ladder")
+	board := a.computeBoard(s)
+	rest := a.resting(board, idx)
+	for _, row := range board.Ladder {
+		if !rest[row.ID] {
+			add(row.ID, "ladder")
+		}
 	}
 	var qualifying, queue []*Editor
 	for _, e := range s.Editors {
@@ -353,6 +401,13 @@ func (a *App) selectEntrants(s *State, cutoff int64) []entrant {
 		}
 		add(e.ID, "new")
 	}
+	if len(out) == 0 {
+		// Nobody but references whose turn it is not. A round with no entrant is not drawn,
+		// and it keeps its number until it is, so their turn would never come: they all run.
+		for _, row := range board.Ladder {
+			add(row.ID, "ladder")
+		}
+	}
 	return out
 }
 
@@ -380,7 +435,7 @@ func (a *App) expected(s *State, rd *Round) (in, later []expectedRow) {
 		return expectedRow{EditorID: ed.ID, Name: ed.Name, Version: ed.Version, Owner: s.owner(ed).Handle, Why: why, Public: ed.Public}
 	}
 	chosen := map[string]bool{}
-	for _, e := range a.selectEntrants(s, rd.DrawAt) {
+	for _, e := range a.selectEntrants(s, rd.DrawAt, rd.Idx) {
 		ed := s.Editors[e.EditorID]
 		if ed == nil {
 			continue
@@ -464,7 +519,7 @@ func (a *App) maybeDraw(ctx context.Context, force bool) error {
 			a.reschedule(tx, cur, a.laterSlot())
 			tx.saveRound(cur)
 			problem = errors.New("the previous round is still being graded")
-		case len(a.selectEntrants(s, r.DrawAt)) == 0:
+		case len(a.selectEntrants(s, r.DrawAt, r.Idx)) == 0:
 			a.reschedule(tx, cur, a.laterSlot())
 			problem = errors.New("no curators are waiting to run")
 		case r.Crawl == nil:
@@ -499,7 +554,7 @@ func (a *App) maybeDraw(ctx context.Context, force bool) error {
 		if cur == nil || cur.Status != "scheduled" || cur.DrandRound != r.DrandRound || cur.Crawl == nil {
 			return errors.New("the round changed while it was being drawn")
 		}
-		entrants := a.selectEntrants(s, cur.DrawAt)
+		entrants := a.selectEntrants(s, cur.DrawAt, cur.Idx)
 		if len(entrants) == 0 {
 			a.reschedule(tx, cur, a.laterSlot())
 			problem = errors.New("no curators are waiting to run")
@@ -508,6 +563,7 @@ func (a *App) maybeDraw(ctx context.Context, force bool) error {
 		// The crawl is the one announced with the round, never one chosen now.
 		cur.Status, cur.Randomness, cur.DrawnAt, cur.ActiveAt = "open", randomness, now(), now()
 		cur.Seed = hexOf(officialSeed(a.season.ID, cur.Idx, cur.DrandRound, randomness, *cur.Crawl))
+		cur.Hours = a.roundHours(s, cur) // the writing its exam is made from: see harvest.go
 		tx.saveRound(cur)
 		for _, e := range entrants {
 			tx.saveEntry(&Entry{RoundIdx: cur.Idx, EditorID: e.EditorID, Status: "open"})

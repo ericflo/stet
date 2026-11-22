@@ -18,6 +18,18 @@ def _signed(n: int) -> str:
     return f"+ {n}" if n >= 0 else f"- {-n}"
 
 
+def _term(a: int, var: str = "x") -> str:
+    """A coefficient and its variable as they are written: x and -x, never 1x."""
+    return var if a == 1 else f"-{var}" if a == -1 else f"{a}{var}"
+
+
+def _plus(a: int, var: str) -> str:
+    """A later term with its sign: "+ 3x", "- x"; nothing at all for 0x."""
+    if a == 0:
+        return ""
+    return f" {'+' if a > 0 else '-'} {_term(abs(a), var)}"
+
+
 def _nz(rng: Rng, lo: int, hi: int) -> int:
     while True:
         v = rng.between(lo, hi)
@@ -55,25 +67,25 @@ def make(rng: Rng, corner: str) -> Item:
         eq, ans = f"x {_signed(b)} = {x + b}", x
     elif kind == "two-step":
         x, a, b = rng.between(-15, 25), _nz(rng, -9, 12), rng.between(-30, 30)
-        eq, ans = f"{a}x {_signed(b)} = {a * x + b}", x
+        eq, ans = f"{_term(a)} {_signed(b)} = {a * x + b}", x
     elif kind == "both-sides":
         x, a, c = rng.between(-12, 15), rng.between(2, 12), rng.between(-6, 1)
         b = rng.between(-20, 20)
         d = a * x + b - c * x
-        eq, ans = f"{a}x {_signed(b)} = {c}x {_signed(d)}", x
+        eq, ans = f"{_term(a)} {_signed(b)} = " + (f"{_term(c)} {_signed(d)}" if c else f"{d}"), x
     elif kind == "evaluate":
         a, b, c, x = rng.between(1, 6), rng.between(-9, 9), rng.between(-9, 9), rng.between(-6, 8)
         val = a * x * x + b * x + c
-        ctx = (f"Let f(x) = {a}x^2 {_signed(b)}x {_signed(c)}. What is f({x})?\nAnswer:" if style == "solve"
-               else f"If f(x) = {a}x^2 {_signed(b)}x {_signed(c)}, then f({x}) =")
+        fx = f"{_term(a, 'x^2')}{_plus(b, 'x')} {_signed(c)}"
+        ctx = f"Let f(x) = {fx}. What is f({x})?\nAnswer:" if style == "solve" else f"If f(x) = {fx}, then f({x}) ="
         return Item(kind="answer", corner=corner, fmt="math", lang="en", source=f"gen:{NAME}", ctx=ctx, cont=f" {val}")
     elif kind == "system":
         x, y = rng.between(-9, 12), rng.between(-9, 12)
         a, b, c, d = rng.between(1, 5), rng.between(1, 5), rng.between(1, 5), _nz(rng, -5, 5)
         if a * d == b * c:
             d = d + 1 if d != -1 else 2
-        ctx = (f"Solve the system: {a}x + {b}y = {a * x + b * y} and {c}x {_signed(d)}y = {c * x + d * y}.\nAnswer:" if style == "solve"
-               else f"If {a}x + {b}y = {a * x + b * y} and {c}x {_signed(d)}y = {c * x + d * y}, then")
+        one, two = f"{_term(a)}{_plus(b, 'y')} = {a * x + b * y}", f"{_term(c)}{_plus(d, 'y')} = {c * x + d * y}"
+        ctx = f"Solve the system: {one} and {two}.\nAnswer:" if style == "solve" else f"If {one} and {two}, then"
         return Item(kind="answer", corner=corner, fmt="math", lang="en", source=f"gen:{NAME}", ctx=ctx, cont=f" x = {x}, y = {y}")
     else:
         raise ValueError(corner)

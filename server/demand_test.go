@@ -276,6 +276,34 @@ func TestEachWayOfTakingPartHasAPageOfItsOwn(t *testing.T) {
 	}
 }
 
+// A script is copies of the round's pages and no more. The pages an entrant reads say so,
+// with the season's shortest copy, and promise no allowance of text of a curator's own.
+func TestThePagesSayAScriptOnlyCopies(t *testing.T) {
+	w, _ := demandWorld(t, nil)
+	for path, want := range map[string][]string{
+		"/enter":    {"none: a script only copies", "pieces of at least 64 bytes", "so a script holds no text of its own"},
+		"/glossary": {"copied byte for byte from the round's pages, and a script holds no text of its own"},
+	} {
+		code, body := w.page(path)
+		if code != 200 {
+			t.Fatalf("%s: HTTP %d", path, code)
+		}
+		for _, s := range want {
+			if !strings.Contains(body, s) && !strings.Contains(body, html.EscapeString(s)) {
+				t.Errorf("%s does not say %q", path, s)
+			}
+		}
+		for _, old := range []string{"Almost none", "99.99%", "<no value>"} {
+			if strings.Contains(body, old) {
+				t.Errorf("%s still says %q", path, old)
+			}
+		}
+	}
+	if w.app.season.MinCopyBytes != 64 {
+		t.Fatalf("the season's shortest copy is %d bytes", w.app.season.MinCopyBytes)
+	}
+}
+
 // While the organisers' machines are the only established ones, every score is one
 // machine's word, and the site says so where a visitor will see it. It stops saying so
 // when an established volunteer has been around.
@@ -348,8 +376,11 @@ func TestTheWorkSaysWaitingOnlyWhenARunnerWouldDrawEarly(t *testing.T) {
 		t.Fatal("waiting, with no entry")
 	}
 	w.submit(alice, "first", "print(1)")
-	if !waiting(w, anchor) {
-		t.Fatal("not waiting, with an entry and nobody around to run it")
+	// In the last minutes before the usual draw there is nothing left to bring forward: the
+	// draw is already at the first mark on the grid that leaves verifiers their notice.
+	room := w.app.season.nextGrid(now()+drawNotice-1) < w.scheduledAt()
+	if got := waiting(w, anchor); got != room {
+		t.Fatalf("waiting is %v with an entry and nobody around to run it, and the draw %ds off", got, w.scheduledAt()-now())
 	}
 	// A runner asks: the draw comes forward, and nothing more is gained by another.
 	w.claim(anchor, true)

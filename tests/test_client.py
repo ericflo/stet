@@ -123,7 +123,7 @@ SHA = "ab" * 32
 
 
 def a_job(**over):
-    job = {"id": 7, "kind": "grade", "round": {"id": "s1-o00001"}, "editor": {"id": SHA, "name": "tidy", "version": 1}, "script": {"sha256": SHA}}
+    job = {"id": 7, "kind": "grade", "round": {"id": "s2-o00001"}, "editor": {"id": SHA, "name": "tidy", "version": 1}, "script": {"sha256": SHA}}
     return {**job, **over}
 
 
@@ -131,7 +131,7 @@ def a_job(**over):
     "bad",
     [
         {"id": "../../../../home/victim"}, {"id": "/home/victim"}, {"id": "7"}, {"id": True}, {"id": 7.0}, {"id": -1}, {"id": None},
-        {"kind": "shell"}, {"round": "s1-o00001"}, {"editor": None}, {"script": {"sha256": "../" + SHA}}, {"script": {"sha256": SHA.upper()}},
+        {"kind": "shell"}, {"round": "s2-o00001"}, {"editor": None}, {"script": {"sha256": "../" + SHA}}, {"script": {"sha256": SHA.upper()}},
         {"kind": "edit", "editor": {"id": SHA + "/../x"}}, {"kind": "edit", "editor": {"id": 5}},
     ],
 )  # fmt: skip
@@ -175,7 +175,7 @@ class Args:
     once = False
     max_jobs = 0
     device = "cpu"
-    season = "s1"
+    season = "s2"
     edits = False
     no_sandbox = False
     any_device = True
@@ -277,12 +277,12 @@ def test_a_job_with_a_path_for_an_id_touches_nothing(loop, tmp_path):
 
 
 def test_a_refused_result_is_not_trained_again_and_again(loop, capsys):
-    loop.claims = [a_job(id=n) for n in (1, 2, 3, 4)] + [a_job(id=5, round={"id": "s1-o00002"})]
-    loop.report = client.ApiError(409, "your corpus for s1-o00001 differs from the round's")
+    loop.claims = [a_job(id=n) for n in (1, 2, 3, 4)] + [a_job(id=5, round={"id": "s2-o00002"})]
+    loop.report = client.ApiError(409, "your corpus for s2-o00001 differs from the round's")
     with pytest.raises(Stop):
         client.cmd_verify(Args())
     # Once more from a clean copy of the round, in case this machine's copy was at fault; then no more of that round.
-    assert loop.graded == [1, 2, 5] and loop.forgot == ["s1-o00001", "s1-o00002"]
+    assert loop.graded == [1, 2, 5] and loop.forgot == ["s2-o00001", "s2-o00002"]
     assert [p for p, _ in loop.released] == [f"/api/v1/jobs/{n}/release" for n in (1, 2, 3, 4, 5)]
     assert "differs from the round's" in capsys.readouterr().err
 
@@ -431,8 +431,9 @@ def test_a_valid_grade_is_reported_and_printed_and_the_verifier_carries_on(loop,
 
 
 def test_a_grade_handed_before_the_exam_trains_first_and_sits_it_once_posted(monkeypatch, tmp_path):
-    # The exam is made two hours after the draw. A grader handed its script before then
-    # trains both students while it waits, and only sits the exam once it is posted.
+    # An exam is posted a little after its draw, or later when the examiner is late. A grader
+    # handed its script before then trains both students while it waits, and only sits the exam
+    # once it is posted.
     pytest.importorskip("torch")
     import hashlib
     import types
@@ -440,7 +441,7 @@ def test_a_grade_handed_before_the_exam_trains_first_and_sits_it_once_posted(mon
     from stet import cli, data, grade, pipeline
     from stet.spec import load_season, practice_round
 
-    season = load_season("s1")
+    season = load_season("s2")
     rnd = practice_round(season, 1)
     script = b'{"doc": 1}\n'
     sha = hashlib.sha256(script).hexdigest()
@@ -481,7 +482,7 @@ def test_grades_trained_before_the_exam_share_one_unedited_student(monkeypatch, 
     from stet import cli, data, grade, pipeline
     from stet.spec import load_season, practice_round
 
-    season = load_season("s1")
+    season = load_season("s2")
     rnd = practice_round(season, 1)
     scripts = [b'{"doc": 1}\n', b'{"doc": 2}\n']
     seen, cached = [], {}
@@ -519,6 +520,93 @@ def test_grades_trained_before_the_exam_share_one_unedited_student(monkeypatch, 
     assert seen == [("fetch", digest), ("sit", "B", digest), ("sit", scripts[0], digest), ("fetch", digest), ("sit", scripts[1], digest)]
 
 
+def test_a_job_asks_for_the_baseline_unless_it_says_it_does_not():
+    # A server from before a few machines measured a round's baseline says nothing, and every
+    # grader measured it then. Only a plain false is taken for one.
+    assert client.wants_baseline(a_job()) and client.wants_baseline(a_job(baseline=True))
+    assert client.wants_baseline(a_job(baseline=None)) and client.wants_baseline(a_job(baseline="false")) and client.wants_baseline(a_job(baseline=0))
+    assert not client.wants_baseline(a_job(baseline=False))
+
+
+def test_a_grade_not_asked_for_the_baseline_trains_and_sits_its_own_student_alone(monkeypatch, tmp_path):
+    # Four machines measure a round's unedited baseline. Any other trains one student for a
+    # grade, not two, and sends what it has on disk for the round: usually nothing.
+    pytest.importorskip("torch")
+    import dataclasses
+    import hashlib
+    import types
+
+    from stet import cli, data, grade, pipeline
+    from stet.spec import load_season, practice_round
+
+    season = load_season("s2")
+    early = practice_round(season, 1)
+    digest = "d1" * 32
+    posted = dataclasses.replace(early, exam_digest=digest)
+    script = b'{"doc": 1}\n'
+    sha = hashlib.sha256(script).hexdigest()
+    seen, cached, rnd = [], {}, {"now": early}
+
+    def unedited(*a, **k):
+        pytest.fail("the unedited corpus was trained on or sat by a machine not asked for it")
+
+    monkeypatch.setattr(client, "request", lambda method, path, **kw: zstandard.ZstdCompressor().compress(script))
+    monkeypatch.setattr(client, "_job_round", lambda season, job, out: rnd["now"])
+    monkeypatch.setattr(client, "fetch_exam", lambda r, key: seen.append(("fetch", r.exam_digest)))
+    for name in ("baseline", "train_baseline", "sit_baseline"):
+        monkeypatch.setattr(pipeline, name, unedited)
+    monkeypatch.setattr(pipeline, "train_round", lambda r, s, path, **k: seen.append(("train", path.read_bytes())) or "S")
+    monkeypatch.setattr(pipeline, "grade_round", lambda r, s, path, **k: seen.append(("grade", path.read_bytes())) or {"valid": True})
+    monkeypatch.setattr(pipeline, "_cached", lambda path: cached.get("base"))
+    monkeypatch.setattr(pipeline, "baseline_path", lambda r, s, d: tmp_path / "base.json")
+    monkeypatch.setattr(grade, "sit_exam", lambda t, r, s, exam: seen.append(("sit", t, r.exam_digest)) or {"valid": True})
+    monkeypatch.setattr(data, "round_exam", lambda r, s: [])
+    device, out, scale = types.SimpleNamespace(type="cuda"), cli.Out(quiet=True), season.scale("nano")
+    job = a_job(script={"sha256": sha}, baseline=False)
+
+    # Before the exam: one pass, and once it is posted one student to sit.
+    bases = {}
+    p = client._grade_job(job, season, scale, device, None, out, tmp_path / "work", bases=bases)
+    assert isinstance(p, client.Pending) and seen == [("train", script)] and bases == {}
+    p.rnd = posted
+    assert client._sit(p, bases, None, scale) == ({"valid": True}, None)
+    assert seen == [("train", script), ("fetch", digest), ("sit", "S", digest)]
+
+    # After it: the same, in one go.
+    seen.clear()
+    rnd["now"] = posted
+    assert client._grade_job(job, season, scale, device, None, out, tmp_path / "work", bases=bases) == ({"valid": True}, None)
+    assert seen == [("fetch", digest), ("grade", script)]
+
+    # A machine that has the round's baseline on disk, from a job that did ask, sends it.
+    cached["base"] = {"valid": True, "exam": {"mean": -5.3}}
+    assert client._grade_job(job, season, scale, device, None, out, tmp_path / "work", bases=bases) == ({"valid": True}, cached["base"])
+    assert client._sit(p, bases, None, scale) == ({"valid": True}, cached["base"])
+
+
+def test_a_grade_with_no_baseline_is_reported_without_one(loop, monkeypatch, capsys):
+    result = {
+        "harness": "0.5.0", "season": "s2", "season_digest": "ee" * 32, "scale": "nano", "corpus_sha256": "c0" * 32, "exam_sha256": "d1" * 32,
+        "script_sha256": SHA, "valid": True, "round": {"id": "s2-o00001"}, "script": {"script_sha256": SHA, "passes": 1.4},
+        "exam": {"items": 2, "mean": -5.1, "item_scores": [-5.0, -5.2]},
+        "train": {"seconds": 30.0, "tokens_per_second": 1e5, "final_train_loss": 5.0, "curve": [[1, 9.0], [50, 6.0]]},
+    }  # fmt: skip
+    base = {"exam": {"items": 2, "mean": -5.3, "item_scores": [-5.2, -5.4]}}
+    monkeypatch.setattr(client, "slim_result", REAL_SLIM_RESULT)
+    loop.claims = [a_job(id=1, baseline=False), a_job(id=2, baseline=True)]
+    loop.grade = [(result, None), (result, base)]
+    loop.report = {"status": "recorded"}
+    args = Args()
+    args.max_jobs = 2
+    client.cmd_verify(args)
+    without, with_one = loop.payloads
+    assert "baseline" not in without and without["exam"] == {"mean": -5.1, "item_scores": [-5.0, -5.2]}
+    assert with_one["baseline"] == {"mean": -5.3, "item_scores": [-5.2, -5.4]}
+    assert {k: v for k, v in with_one.items() if k != "baseline"} == without
+    err = capsys.readouterr().err
+    assert "exam mean -5.1000 · scored against the round's baseline" in err and "baseline -5.3000" in err and "+0.2000" in err
+
+
 def test_a_grader_says_it_trains_before_the_exam(loop):
     loop.claims = [a_job()]
     loop.grade = ({"valid": True, "exam": {"items": 2, "mean": -5.1, "item_scores": [-5.0, -5.2]}},
@@ -553,8 +641,8 @@ def early_loop(loop, monkeypatch, looks):
     exam's posting as `looks` says, one look at a time."""
     import types
 
-    rnd = types.SimpleNamespace(id="s1-o00001", exam_digest="")
-    posted = types.SimpleNamespace(id="s1-o00001", exam_digest="d1" * 32)
+    rnd = types.SimpleNamespace(id="s2-o00001", exam_digest="")
+    posted = types.SimpleNamespace(id="s2-o00001", exam_digest="d1" * 32)
     loop.sat, loop.looks = [], list(looks)
 
     def grade(job, season, scale, device, key, out, work, bases=None):
@@ -611,6 +699,38 @@ def test_a_server_that_hands_back_a_trained_grade_is_waited_out(loop, monkeypatc
     assert loop.graded == [1] and loop.sat == [1] and loop.slept == [client.EXAM_POLL]
 
 
+def test_a_trained_grade_whose_exam_cannot_be_fetched_is_kept_trained_and_sits_it_later(loop, monkeypatch):
+    from stet.data import FetchError
+
+    early_loop(loop, monkeypatch, [False, True, True])
+    sit, fails, bases_seen = client._sit, [FetchError("could not fetch the exam: timed out")], []
+
+    def flaky(p, bases, key, scale):
+        bases_seen.append(bases)
+        if fails:
+            raise fails.pop()
+        return sit(p, bases, key, scale)
+
+    monkeypatch.setattr(client, "_sit", flaky)
+    loop.claims = [a_job(id=1)]
+    loop.report = {"status": "recorded"}
+    args = Args()
+    args.max_jobs = 1
+    client.cmd_verify(args)
+    # Trained once, whatever the network did: the student waits in memory, beside the round's unedited one.
+    assert loop.graded == [1] and loop.sat == [1] and loop.slept == [client.EXAM_POLL, 60] and not loop.released
+    assert loop.reports == ["/api/v1/jobs/1/result"] and bases_seen[-1] == {}  # sat: the unedited student is let go of
+
+    # What will not pass is handed back, and the unedited student that was kept for it is let go of too.
+    early_loop(loop, monkeypatch, [True])
+    fails.append(client.WrongBytes("the round's exam the server sent is not the one the round committed to"))
+    monkeypatch.setattr(client, "_sit", flaky)
+    loop.claims = [a_job(id=2)]
+    with pytest.raises(Stop):
+        client.cmd_verify(Args())
+    assert loop.released[-1][0] == "/api/v1/jobs/2/release" and bases_seen[-1] == {}
+
+
 def test_stopping_hands_back_the_trained_grades_too(loop, monkeypatch):
     early_loop(loop, monkeypatch, [False, False, False])
     loop.claims, loop.interrupt_at = [a_job(id=1), a_job(id=2), None], client.EXAM_POLL
@@ -641,10 +761,10 @@ def edit(monkeypatch, tmp_path):
     from stet import cli, data
     from stet.spec import load_season
 
-    season = load_season("s1")
+    season = load_season("s2")
     state = types.SimpleNamespace(blob=b"")
     monkeypatch.setattr(client, "request", lambda *a, **k: state.blob)
-    monkeypatch.setattr(client, "_job_round", lambda season, job, out: types.SimpleNamespace(id="s1-o00001"))
+    monkeypatch.setattr(client, "_job_round", lambda season, job, out: types.SimpleNamespace(id="s2-o00001"))
     monkeypatch.setattr(data, "corpus", lambda rnd, scale: types.SimpleNamespace(meta={"sha256": "c0"}))
 
     def run(blob: bytes, sandbox: str = "bwrap", editor_id: str | None = None):
@@ -701,7 +821,7 @@ def test_a_bundle_that_cannot_be_loaded_is_the_entrants_failure_and_is_reported(
     for blob, why in ((b"not a bundle", "zstd"), (bomb, "more than 1 MB"), (no_manifest, "no stet.toml"), (bad_manifest, "not valid TOML")):
         payload = edit(blob)
         assert payload["edit"]["status"] == "error" and why in payload["edit"]["reason"] and payload["script_sha256"] is None
-        assert payload["round"] == "s1-o00001" and payload["corpus_sha256"] == "c0"  # a report the server accepts, not a release
+        assert payload["round"] == "s2-o00001" and payload["corpus_sha256"] == "c0"  # a report the server accepts, not a release
 
 
 def test_a_machine_that_cannot_unpack_a_bundle_hands_the_job_back(edit, monkeypatch):
@@ -731,16 +851,16 @@ def draws():
 
     from stet.spec import load_season
 
-    season = load_season("s1")
+    season = load_season("s2")
     grid = int(season.raw["draw_grid_seconds"])
     now = 1_900_000_000 // grid * grid + 100
     slots = [season.beacon_round_at((now // grid + n) * grid) for n in (1, 2, 3)]
     assert all(season.draw_slot(s) is not None for s in slots)
 
-    def said(slot, crawl="CC-MAIN-2026-40", id="s1-o00009"):
+    def said(slot, crawl="CC-MAIN-2026-40", id="s2-o00009"):
         return {"id": id, "drand_round": slot, "crawl": {"crawl": crawl, "paths_sha256": "66" * 32}}
 
-    def drawn(slot, crawl="CC-MAIN-2026-40", id="s1-o00009"):
+    def drawn(slot, crawl="CC-MAIN-2026-40", id="s2-o00009"):
         return types.SimpleNamespace(kind="official", id=id, beacon={"round": slot}, crawl={"crawl": crawl, "paths_sha256": "66" * 32})
 
     return types.SimpleNamespace(season=season, now=now, slots=slots, said=said, drawn=drawn, log=lambda: json.loads(client._announcements().read_text()))
@@ -755,8 +875,8 @@ def test_a_round_must_be_the_one_that_was_announced_before_its_beacon(draws):
     client.remember_announcement(season, draws.said(slot, "CC-MAIN-2026-41"), now=at + 5)
     assert draws.log()[str(slot)]["crawl"] == "CC-MAIN-2026-40" and draws.log()[str(slot)]["changed"] == 1
     client.check_announcement(season, draws.drawn(slot))
-    for other in (draws.drawn(slot, "CC-MAIN-2026-41"), draws.drawn(slot, id="s1-o00010")):
-        with pytest.raises(client.RoundRefused, match="was announced as s1-o00009 on CC-MAIN-2026-40"):
+    for other in (draws.drawn(slot, "CC-MAIN-2026-41"), draws.drawn(slot, id="s2-o00010")):
+        with pytest.raises(client.RoundRefused, match="was announced as s2-o00009 on CC-MAIN-2026-40"):
             client.check_announcement(season, other)
 
 
@@ -784,21 +904,21 @@ def test_a_draw_nobody_announced_is_said_out_loud(draws):
     client.check_announcement(season, draws.drawn(draws.slots[1]), warn=said.append)
     assert not said  # this verifier has heard of no draws at all: it has nothing to go on, and says nothing
     client.remember_announcement(season, draws.said(draws.slots[0]), now=now)
-    client.check_announcement(season, draws.drawn(draws.slots[1], id="s1-o00010"), warn=said.append)
-    assert len(said) == 1 and "was not told of the draw of round s1-o00010" in said[0] and "s1-o00009" in said[0]
+    client.check_announcement(season, draws.drawn(draws.slots[1], id="s2-o00010"), warn=said.append)
+    assert len(said) == 1 and "was not told of the draw of round s2-o00010" in said[0] and "s2-o00009" in said[0]
     client.check_announcement(season, draws.drawn(draws.slots[0]), warn=said.append)
     assert len(said) == 1
     # The round it was told of, drawn at another time: say that, not "the last it heard of was this one".
-    client.check_announcement(season, draws.drawn(draws.slots[1], id="s1-o00009"), warn=said.append)
-    assert len(said) == 2 and "was told that round s1-o00009 would be drawn at" in said[1] and "cannot vouch" in said[1]
+    client.check_announcement(season, draws.drawn(draws.slots[1], id="s2-o00009"), warn=said.append)
+    assert len(said) == 2 and "was told that round s2-o00009 would be drawn at" in said[1] and "cannot vouch" in said[1]
 
 
 def test_a_damaged_record_is_set_aside_not_forgotten(draws, capsys):
     path = client._announcements()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text('{"123": {"id": "s1-o0')
+    path.write_text('{"123": {"id": "s2-o0')
     client.remember_announcement(draws.season, draws.said(draws.slots[0]), now=draws.now)
-    assert path.with_name("announced.json.damaged").read_text() == '{"123": {"id": "s1-o0'
+    assert path.with_name("announced.json.damaged").read_text() == '{"123": {"id": "s2-o0'
     assert list(draws.log()) == [str(draws.slots[0])] and "could not be read" in capsys.readouterr().err
 
 
@@ -884,6 +1004,32 @@ def test_submit_shows_every_file_it_would_publish_before_it_sends_anything(monke
     assert "notes/todo.txt" in err and ".env  (its name starts with a dot)" in err and "--yes" in err
 
 
+def test_submit_takes_a_run_whose_result_cannot_be_read_as_no_valid_run(monkeypatch, tmp_path, capsys):
+    from test_project import make
+
+    p = make(tmp_path, {})
+    key = client.create_key()
+    key.handle = "tester"
+    key.save()
+    args = SubmitArgs(p.path)
+    args.dry_run = False
+    monkeypatch.setattr("sys.stdin", open(os.devnull))
+    runs = p.path / ".stet" / "runs"
+    for n, body in enumerate((b'{"valid": tr', b"", b"\xff\xfe", b"[1, 2]", b"null")):  # cut short, empty, not text, not a result
+        (runs / f"r{n}").mkdir(parents=True)
+        (runs / f"r{n}" / "result.json").write_bytes(body)
+    with pytest.raises(SystemExit):
+        client.cmd_submit(args)  # stops for want of --yes, having said so, and not on the files
+    err = capsys.readouterr().err
+    assert "no recent valid `stet run`" in err and "--yes" in err
+    (runs / "r9").mkdir()
+    (runs / "r9" / "result.json").write_text('{"valid": true}')
+    with pytest.raises(SystemExit):
+        client.cmd_submit(args)
+    err = capsys.readouterr().err
+    assert "no recent valid" not in err and "--yes" in err
+
+
 def test_a_round_that_does_not_hold_up_is_refused_and_a_warning_is_given_once(draws, monkeypatch):
     import types
 
@@ -893,14 +1039,14 @@ def test_a_round_that_does_not_hold_up_is_refused_and_a_warning_is_given_once(dr
     out = types.SimpleNamespace(line=lambda label, text: lines.append(text), bad=str)
     monkeypatch.setattr(data, "mark_verified", lambda rnd: None)
     monkeypatch.setattr(data, "prune_verified", lambda rnd: None)
-    monkeypatch.setattr(client, "round_from_api", lambda season, d: draws.drawn(draws.slots[1], id="s1-o00011"))
+    monkeypatch.setattr(client, "round_from_api", lambda season, d: draws.drawn(draws.slots[1], id="s2-o00011"))
     client.remember_announcement(draws.season, draws.said(draws.slots[0]), now=draws.now)
     for _ in range(3):  # three jobs from one round
-        assert client._job_round(draws.season, {"round": {}}, out).id == "s1-o00011"
+        assert client._job_round(draws.season, {"round": {}}, out).id == "s2-o00011"
     assert len(lines) == 1 and "was not told" in lines[0]
 
     def lies(season, d):
-        raise ValueError("round s1-o00011: the seed does not follow from the beacon and the crawl")
+        raise ValueError("round s2-o00011: the seed does not follow from the beacon and the crawl")
 
     monkeypatch.setattr(client, "round_from_api", lies)
     with pytest.raises(client.RoundRefused, match="does not follow"):
@@ -920,7 +1066,7 @@ def test_a_relay_that_cannot_be_read_has_said_nothing(monkeypatch):
     from stet.data import FetchError
     from stet.spec import load_season
 
-    season = load_season("s1")
+    season = load_season("s2")
     relays = season.raw["beacon"]["relays"]
     good = a_beacon(1234)
     beacon = {"round": 1234, "randomness": good["randomness"].upper()}
@@ -978,7 +1124,7 @@ def test_the_organisers_machine_stops_with_the_job_in_hand_when_it_cannot_vouch_
     # Handing the job back would spend one of the few attempts an entry gets, and going on
     # to take and hand back the round's other jobs would void every entry in it.
     anchor.claims = [a_job(id=1), a_job(id=2)]
-    anchor.grade = client.RoundRefused("round s1-o00001: the seed does not follow from the beacon and the crawl")
+    anchor.grade = client.RoundRefused("round s2-o00001: the seed does not follow from the beacon and the crawl")
     with pytest.raises(SystemExit) as e:
         client.cmd_verify(AnchorArgs())
     assert e.value.code == 1 and anchor.graded == [1] and not anchor.released and len(anchor.claims) == 1
@@ -988,7 +1134,7 @@ def test_the_organisers_machine_stops_with_the_job_in_hand_when_it_cannot_vouch_
     # A volunteer hands it back and takes no more of that round this session, whether or
     # not it runs curators.
     anchor.me = {"account": {"handle": "tester"}, "verifier": {"established": True}}
-    anchor.claims, anchor.graded[:] = [a_job(id=3), a_job(id=4), a_job(id=5, round={"id": "s1-o00002"})], []
+    anchor.claims, anchor.graded[:] = [a_job(id=3), a_job(id=4), a_job(id=5, round={"id": "s2-o00002"})], []
     anchor.grade = [client.RoundRefused("the seed does not follow"), None]
     with pytest.raises(Stop):
         client.cmd_verify(AnchorArgs())
@@ -1052,13 +1198,13 @@ def test_a_refusal_heard_on_the_second_try_is_still_a_refusal(loop):
     loop.report = client.ApiError(409, "this job was already refused")
     with pytest.raises(Stop):
         client.cmd_verify(Args())
-    assert loop.graded == [1, 2] and loop.forgot == ["s1-o00001"]
+    assert loop.graded == [1, 2] and loop.forgot == ["s2-o00001"]
     for late in ("this job was already released", "this entry already has that grade", "this job ended before your result arrived: its time ran out"):
-        loop.claims, loop.report = [a_job(id=n, round={"id": "s1-o00005"}) for n in (4, 5, 6)], client.ApiError(409, late)
+        loop.claims, loop.report = [a_job(id=n, round={"id": "s2-o00005"}) for n in (4, 5, 6)], client.ApiError(409, late)
         loop.graded[:] = []
         with pytest.raises(Stop):
             client.cmd_verify(Args())
-        assert loop.graded == [4, 5, 6] and loop.forgot == ["s1-o00001"]
+        assert loop.graded == [4, 5, 6] and loop.forgot == ["s2-o00001"]
 
 
 def test_a_hand_back_the_server_never_heard_is_not_called_one(loop, monkeypatch, capsys):
@@ -1198,8 +1344,8 @@ def test_submit_says_which_round_only_when_the_server_expects_it_there(monkeypat
     args.dry_run, args.yes = False, True
     editor = {"name": "a-curator", "version": 1, "id": "ab" * 32}
     for reply, said, unsaid in (
-        ({"enters": {"round": "s1-o00002", "draw_at": 0}}, "It enters round s1-o00002.", "earliest"),
-        ({"earliest": {"round": "s1-o00002", "draw_at": 0}, "message": "The queue is longer than one round can take."}, "The earliest round it can enter is s1-o00002.", "It enters"),
+        ({"enters": {"round": "s2-o00002", "draw_at": 0}}, "It enters round s2-o00002.", "earliest"),
+        ({"earliest": {"round": "s2-o00002", "draw_at": 0}, "message": "The queue is longer than one round can take."}, "The earliest round it can enter is s2-o00002.", "It enters"),
         ({}, "Submitted a-curator v1", "round"),
     ):
         monkeypatch.setattr(client, "request", lambda *a, reply=reply, **k: {"editor": editor, "url": "http://x/editors/abab", **reply})
@@ -1267,7 +1413,7 @@ def test_a_grader_with_another_pytorch_is_turned_away_before_it_grades(loop, mon
     from stet.spec import load_season
 
     monkeypatch.setattr(Args, "any_device", False, raising=False)
-    monkeypatch.setitem(load_season("s1").raw, "grade_devices", ["cuda", "cpu"])  # the test machine's device counts, so the check is reached
+    monkeypatch.setitem(load_season("s2").raw, "grade_devices", ["cuda", "cpu"])  # the test machine's device counts, so the check is reached
     loop.claims = [a_job()]
     with pytest.raises(SystemExit):
         client.cmd_verify(Args())

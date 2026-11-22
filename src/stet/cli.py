@@ -107,7 +107,7 @@ def need_torch():
 
 
 def resolve_round(args, offset: int = 0):
-    """--round accepts 3 (practice round 3), g3 (gym round 3), or a full id like s1-o00012."""
+    """--round accepts 3 (practice round 3), g3 (gym round 3), or a full id like s2-o00012."""
     import re
 
     from .spec import load_season, parse_round_id, practice_round
@@ -151,7 +151,7 @@ def report(out: Out, result: dict, base: dict | None, season) -> None:
     out.line(
         "script",
         f"{s['out_docs']:,} documents from {s['src_docs']:,} sources ({100 * s['kept_doc_frac']:.1f}% of the corpus) · "
-        f"{s['out_bytes'] / 1e6:.1f} MB · ink {s['ink_tokens']:,}/{s['ink_budget']:,} tokens · {s['passes']:.2f} passes"
+        f"{s['out_bytes'] / 1e6:.1f} MB · {s['passes']:.2f} passes"
         + (" · truncated at the budget" if s["truncated"] else ""),
     )
     t = result["train"]
@@ -160,13 +160,16 @@ def report(out: Out, result: dict, base: dict | None, season) -> None:
     out.line("exam", f"{e['items']:,} items · mean {e['mean']:.4f} bits per byte" + (f"   baseline {base['exam']['mean']:.4f}" if base else ""))
     if base and "gain" in result:
         out.line("", "          " + " · ".join(f"{k} {v:+.3f}" for k, v in (result.get("pillars") or {}).items()))
-        text = out.bold(f"{result['gain']:+.4f}") + " bits per byte, the mean of the seven above"
+        text = out.bold(f"{result['gain']:+.4f}") + " bits per byte: writing three quarters, skills one, of those above"
         m = multiplier(season, result["round"]["kind"], result["scale"], result["gain"])
         if m:
             text += f"   →   {out.bold(format_multiplier(m))} data efficiency"
-        noise = ((season.raw.get("noise") or {}).get(result["scale"]) or {}).get("gain_sd")
-        if noise:
-            text += out.dim(f"   (training again moves this by about ±{noise:.3f})")
+        noise = (season.raw.get("noise") or {}).get(result["scale"]) or {}
+        if noise.get("gain_sd"):
+            note = f"training again moves this by about ±{noise['gain_sd']:.3f}"
+            if noise.get("order_sd"):  # measured: docs/EXPERIMENTS.md, the order of a script
+                note += f", another shuffle of the same pages by about ±{noise['order_sd']:.3f}"
+            text += out.dim(f"   ({note})")
         out.line("gain", text)
 
 
@@ -305,9 +308,13 @@ def cmd_run(args):
                 remove_tree(bundle)
         result["editor"] = {"name": project.name}
         base = _with_baseline(result, rnd, scale, device, out, args.no_baseline)
+        result["writing"] = _has_writing(rnd)
         (work / "result.json").write_text(json.dumps(result, indent=1))
         report(out, result, base, season)
         _edit_time_line(out, result, season)
+        if not result["writing"]:
+            out.line("note", "no writing in this round's exam, which is three quarters of an official round's score. "
+                             "`stet harvest` fetches some, once, and needs no account.")
         out.line("saved", str((work / "result.json").relative_to(Path.cwd()) if work.is_relative_to(Path.cwd()) else work / "result.json"))
         results.append(result)
     if len(results) == 1:
@@ -442,20 +449,226 @@ def cmd_baseline(args):
 
 
 def cmd_examine(args):
-    """The organisers' examiner: make an official round's exam once its harvest window has
-    closed and its sources have settled, and post it. It trains nothing."""
+    """The organisers' examiner: harvest every hour of the clock as it settles, and make each
+    official round's exam at its draw from the hours the draw chose."""
     if args.follow:
         return _examine_follow(args)
     if not args.round:
-        die("name a round (--round s1-o00003), or --follow")
-    _examine_one(args, args.round)
+        die("name a round, or pass --follow")
+    try:
+        _examine_one(args, args.round)
+    except _NotYet as e:
+        die(str(e))
+
+
+def _has_writing(rnd) -> bool:
+    """Whether the exam a round sits here has the season's fresh writing in it. An official
+    round's always has; a practice round's has once some has been harvested (`stet harvest`)."""
+    from . import data
+
+    return rnd.kind == "official" or bool(data.practice_hours(rnd))
+
+
+def cmd_harvest(args):
+    """Fetch a few hours of the season's fresh writing to this machine, from the sources an
+    official round's exam is made from, so that practice rounds sit what official rounds sit."""
+    import shutil
+
+    from . import data
+    from .exam.aggregate import SOURCE_KIND
+    from .exam.fresh import harvest, read_snapshot
+    from .exam.fresh.harvest import HOUR, settled
+    from .spec import load_season
+
+    out = Out(quiet=args.quiet)
+    season = load_season(args.season)
+    dest = data.harvest_dir()
+    if args.fresh:
+        shutil.rmtree(dest, ignore_errors=True)
+    dest.mkdir(parents=True, exist_ok=True)
+    held = data.harvested()
+    want = max(0, args.hours - len(held))
+    # Spread over the day before, so that it is not all written while one part of the world was awake.
+    last, step = settled(season, time.time()), max(1, 24 // max(1, args.hours)) * HOUR
+    hours = [h for h in (last - i * step for i in range(24 * HOUR // step)) if h not in held][:want]
+    if hours:
+        out.line("", f"harvesting {len(hours)} hour{'s' if len(hours) != 1 else ''} of writing: some minutes each, and no account or key is needed")
+    for hour in hours:
+        out.line("", out.bold(_hour_name(hour)))
+        part = dest / f"{hour}.part"  # under its own name only once it is whole
+        try:
+            harvest.harvest_hour(season, hour, part, log=lambda m: out.line("", out.dim(m)))
+        except Exception as e:
+            part.unlink(missing_ok=True)
+            out.line("", f"{_hour_name(hour)} could not be harvested: {e}")
+            continue
+        part.replace(dest / f"{hour}.jsonl")
+    held = data.harvested()
+    for hour in sorted(held):
+        kinds: dict[str, int] = {}
+        for d in read_snapshot(held[hour])[1]:
+            kind = SOURCE_KIND.get(d.source, d.source)
+            kinds[kind] = kinds.get(kind, 0) + 1
+        out.line("", f"{_hour_name(hour)}: " + (", ".join(f"{k} {n}" for k, n in sorted(kinds.items())) or "nothing"))
+    if not held:
+        die("no hour could be harvested: is this machine online?")
+    out.line("", f"{len(held)} hour{'s' if len(held) != 1 else ''} held in {dest}. Practice rounds now sit writing from "
+                 f"{min(len(held), int(season.raw['exam']['fresh']['hours']))} of them, chosen by each round's seed.")
+    if hours:
+        out.line("", out.dim("A practice round's exam and baseline are made again the first time it is run."))
+
+
+def _hours_dir() -> Path:
+    from .data import cache_dir
+
+    return cache_dir() / "examine" / "hours"
+
+
+def _hour_name(hour: int) -> str:
+    return time.strftime("%Y-%m-%d %H:00 UTC", time.gmtime(hour))
+
+
+def _harvest_due(season, now: float, skip=()) -> int | None:
+    """The newest settled hour a round could still be given that this machine has not harvested.
+    Newest first: after a stop, the hours the sources still hold whole come before the old ones."""
+    from .exam.fresh.harvest import HOUR, settled
+
+    last = settled(season, now)
+    first = int(now) - int(season.raw["exam"]["fresh"]["reach_seconds"])
+    for hour in range(last, first - 1, -HOUR):
+        if hour >= first and hour not in skip and not (_hours_dir() / f"{hour}.jsonl").exists():
+            return hour
+    return None
+
+
+HARVEST_FLOOR = 3  # of Wikipedia, Common Crawl's news, GitHub, the kernel's lists, Hacker News, Lemmy, Bluesky, Mastodon, Discourse
+
+
+def _harvest_one(season, hour: int, key, log) -> dict:
+    """Harvest an hour and tell the server its hash, at once: a round drawn later can be given it."""
+    from .exam.fresh import read_snapshot
+    from .exam.fresh.harvest import harvest_hour
+
+    dest = _hours_dir() / f"{hour}.jsonl"
+    part = dest.with_name(f"{hour}.part.jsonl")  # under its own name only once it is whole
+    meta, sha = harvest_hour(season, hour, part, log=log)
+    # Read back whole before it has its name. A file that cannot be read is not a harvest, and
+    # nor is what this machine gathered while it was cut off: the server takes one harvest of an
+    # hour and no second, so one that fewer than three of the places asked gave anything to is
+    # not kept, and the hour is tried again.
+    gave = {d.source.split("-")[0] for d in read_snapshot(part)[1]}
+    if len(gave) < HARVEST_FLOOR:
+        part.unlink(missing_ok=True)
+        raise RuntimeError(f"only {len(gave)} of the places asked gave any writing ({', '.join(sorted(gave)) or 'none'}): is this machine online?")
+    part.replace(dest)
+    return _commit_hour(hour, dest, key) if key else {"hour": hour, "sha256": sha, "documents": meta.get("documents")}
+
+
+def _commit_hour(hour: int, path: Path, key) -> dict:
+    import hashlib
+
+    from .client import request
+    from .exam.fresh import read_snapshot
+
+    meta, docs = read_snapshot(path)
+    body = {"hour": hour, "sha256": hashlib.sha256(path.read_bytes()).hexdigest(), "documents": len(docs),
+            "sources": {k: v for k, v in (meta.get("sources") or {}).items() if isinstance(v, int)}}
+    request("POST", "/api/v1/admin/harvests", body, key=key, timeout=120)
+    return body
+
+
+def _commit_missed(season, key, now: float) -> list[int]:
+    """Tell the server of every hour held here that it has not been told of. A harvest is told
+    of as soon as it is made, but the server may have been restarting just then, and an hour the
+    server never hears of is never given to a round."""
+    from .client import request
+
+    first = int(now) - int(season.raw["exam"]["fresh"]["reach_seconds"])
+    held = sorted(int(p.stem) for p in _hours_dir().glob("*.jsonl") if p.stem.isdigit() and int(p.stem) >= first)
+    if not held:
+        return []
+    known = {int(h["hour"]) for h in request("GET", "/api/v1/harvests?limit=72").get("harvests") or []}
+    told = []
+    for hour in held:
+        if hour not in known:
+            _commit_hour(hour, _hours_dir() / f"{hour}.jsonl", key)
+            told.append(hour)
+    return told
+
+
+def _harvest_follow(season, key, out, stop) -> None:
+    """Every hour, as soon as it has settled. Runs beside the exams, so that a round drawn while
+    an hour is being read does not wait for it."""
+    from .exam.fresh.harvest import HOUR
+
+    keep = int(season.raw["exam"]["fresh"]["reach_seconds"]) + 7 * 86400
+    failed: dict[int, int] = {}
+    again: dict[int, float] = {}  # when an hour that failed is tried next
+    looked = 0.0
+    while not stop.is_set():
+        if key and time.time() - looked >= 120:
+            looked = time.time()
+            try:
+                for hour in _commit_missed(season, key, looked):
+                    out.line("", f"told the server of {_hour_name(hour)}, harvested earlier")
+            except (Exception, SystemExit) as e:  # looked at again in two minutes
+                out.line("", out.dim(f"the server could not be told of the hours held here ({e})"))
+        hour = _harvest_due(season, time.time(), skip=[h for h, t in again.items() if time.time() < t])
+        if hour is None:
+            stop.wait(30)
+            continue
+        try:
+            got = _harvest_one(season, hour, key, lambda m: out.line("", out.dim(m)))
+            out.line("", f"harvested {_hour_name(hour)}: {got['documents']} documents ({got['sha256'][:12]})")
+        except (Exception, SystemExit) as e:  # tried again later, and meanwhile it does not hold up the others
+            n = failed[hour] = failed.get(hour, 0) + 1
+            again[hour] = time.time() + _again_in(n + 1)
+            out.line("", out.bad(f"harvest of {_hour_name(hour)}: {e}") + out.dim(f" (try {n}; again in {_again_in(n + 1)}s)"))
+            stop.wait(30)
+        for old in _hours_dir().glob("*.jsonl"):  # a round's exam can be made again for a week
+            if old.stem.isdigit() and int(old.stem) + HOUR < time.time() - keep:
+                old.unlink(missing_ok=True)
+
+
+def _round_hours(season, d: dict, seed: bytes) -> tuple[list[tuple[int, Path]], bool]:
+    """The harvests a round's exam is made from, and whether they were chosen late. The server
+    chose them at the draw from those it had been told of (the round's `exam_hours`). If it had
+    been told of none, they are chosen now, the same way, from those this machine holds."""
+    import hashlib
+
+    from .exam.fresh.harvest import choose_hours
+
+    named = d.get("exam_hours") or []
+    late = not named
+    if late:
+        first = int(d["draw_at"]) - int(season.raw["exam"]["fresh"]["reach_seconds"])
+        held = [int(p.stem) for p in _hours_dir().glob("*.jsonl") if p.stem.isdigit() and int(p.stem) >= first]
+        named = [{"hour": h} for h in choose_hours(seed, held, int(season.raw["exam"]["fresh"]["hours"]))]
+    out = []
+    for x in named:
+        path = _hours_dir() / f"{int(x['hour'])}.jsonl"
+        if not path.exists():
+            raise RuntimeError(f"the harvest of {_hour_name(int(x['hour']))} is not on this machine")
+        if x.get("sha256") and hashlib.sha256(path.read_bytes()).hexdigest() != x["sha256"]:
+            raise RuntimeError(f"the harvest of {_hour_name(int(x['hour']))} on this machine is not the one the server was told of")
+        out.append((int(x["hour"]), path))
+    return out, late
+
+
+class _NotYet(Exception):
+    """A round's exam cannot be made yet, and nothing is wrong: the harvest it needs is on its way."""
+
+
+def _again_in(tries: int) -> int:
+    """How long the examiner leaves a round whose exam failed: 20 seconds, then twice as long
+    each time, to ten minutes. It never gives a round up: an open round with no exam settles nothing."""
+    return min(600, 20 * 2 ** min(tries - 1, 5))
 
 
 def _examine_one(args, round_id: str) -> None:
     from .client import fetch_round, need_key, request
     from .data import cache_dir
     from .exam.examine import examine
-    from .exam.fresh.harvest import SETTLE
     from .spec import load_season, parse_round_id
 
     season = load_season(args.season)
@@ -464,30 +677,38 @@ def _examine_one(args, round_id: str) -> None:
         die("only an official round has an exam to make")
     rnd = fetch_round(season, index)
     d = request("GET", f"/api/v1/rounds/{rnd.id}")["round"]
-    draw_at, window = int(d["draw_at"]), int(season.raw["exam"]["fresh"]["window_seconds"])
-    if time.time() < draw_at + window + SETTLE:
-        die(f"{rnd.id}'s exam can be made from {time.strftime('%H:%M UTC', time.gmtime(draw_at + window + SETTLE))}")
+    out = Out(quiet=args.quiet)
     if d.get("exam_digest"):
-        out = Out(quiet=args.quiet)
         out.line("", f"{rnd.id} has its exam already ({d['exam_digest'][:12]})")
         return
-    out = Out(quiet=args.quiet)
+    key = need_key()
+    snapshots, late = _round_hours(season, d, rnd.seed)
+    if not snapshots:
+        raise _NotYet(f"{rnd.id} has no harvest to make its exam from yet: none of the hours it could be given has been harvested")
     out.line("", out.bold(f"stet examine · {rnd.id} · {d.get('scale')}"))
     log = lambda m: out.line("", out.dim(m))  # noqa: E731
-    examine(rnd, season.scale(d.get("scale") or season.official_scale), draw_at, cache_dir() / "examine" / rnd.id, need_key(), log=log)
+    log(f"  its writing: {', '.join(_hour_name(h) for h, _ in snapshots)}" + (", chosen after the draw: the server had been told of no harvest" if late else ""))
+    if late:
+        for hour, path in snapshots:
+            _commit_hour(hour, path, key)
+    examine(rnd, season.scale(d.get("scale") or season.official_scale), snapshots, cache_dir() / "examine" / rnd.id, key, log=log)
 
 
 def _examine_follow(args) -> None:
-    """Every open round, as soon as its exam can be made."""
-    from .client import request
-    from .exam.fresh.harvest import SETTLE
+    """Every hour's harvest as it settles, and every open round's exam as soon as it is drawn."""
+    import threading
+
+    from .client import need_key, request
     from .spec import load_season
 
     season = load_season(args.season)
-    window = int(season.raw["exam"]["fresh"]["window_seconds"])
     out = Out(quiet=args.quiet)
     out.line("", out.bold("stet examine --follow"))
+    stop = threading.Event()
+    threading.Thread(target=_harvest_follow, args=(season, need_key(), out, stop), daemon=True).start()
     failed: dict[str, int] = {}
+    again: dict[str, float] = {}  # when a round whose exam failed is tried next
+    waiting: set[str] = set()
     while True:
         try:
             rounds = request("GET", "/api/v1/rounds?limit=20").get("rounds") or []
@@ -495,16 +716,19 @@ def _examine_follow(args) -> None:
             out.line("", out.dim(f"the server did not answer ({e}); trying again in a minute"))
             rounds = []
         for x in sorted(rounds, key=lambda x: x["id"]):
-            if x.get("status") != "open" or x.get("exam_digest") or failed.get(x["id"], 0) >= 5:
-                continue
-            if time.time() < int(x.get("draw_at") or 0) + window + SETTLE:
+            if x.get("status") != "open" or x.get("exam_digest") or time.time() < again.get(x["id"], 0):
                 continue
             try:
                 _examine_one(args, x["id"])
-            except (Exception, SystemExit) as e:  # tried again in a minute, five times at most
-                failed[x["id"]] = failed.get(x["id"], 0) + 1
-                out.line("", out.bad(f"{x['id']}: {e}"))
-        time.sleep(60)
+            except _NotYet as e:  # said once, and looked at again every time round
+                if x["id"] not in waiting:
+                    waiting.add(x["id"])
+                    out.line("", out.dim(str(e)))
+            except (Exception, SystemExit) as e:  # tried again, less and less often, for as long as the round is open
+                n = failed[x["id"]] = failed.get(x["id"], 0) + 1
+                again[x["id"]] = time.time() + _again_in(n)
+                out.line("", out.bad(f"{x['id']}: {e}") + out.dim(f" (try {n}; again in {_again_in(n)}s)"))
+        time.sleep(20)
 
 
 def cmd_fetch(args):
@@ -757,7 +981,7 @@ def cmd_agents(args):
 
 
 def add_round_args(p, default_round="0"):
-    p.add_argument("--round", default=default_round, help="3 = practice round 3, g3 = gym round 3, or a round id like s1-o00012 (default: 0)")
+    p.add_argument("--round", default=default_round, help="3 = practice round 3, g3 = gym round 3, or a round id like s2-o00012 (default: 0)")
     p.add_argument("--scale", default=None, help="nano, micro or standard (default: nano)")
     p.add_argument("--season", default=CURRENT_SEASON, help=argparse.SUPPRESS)
     p.add_argument("--device", default=None, help="torch device (default: best available)")
@@ -813,9 +1037,16 @@ def build_parser() -> argparse.ArgumentParser:
     add_round_args(p)
     p.set_defaults(fn=cmd_baseline)
 
-    p = sub.add_parser("examine", help=argparse.SUPPRESS)  # organisers: make each official round's exam after its draw
+    p = sub.add_parser("harvest", help="fetch recent human writing, so that practice rounds sit what official rounds sit")
+    p.add_argument("--hours", type=int, default=3, help="how many hours of writing to hold, spread over the last day (default 3)")
+    p.add_argument("--fresh", action="store_true", help="replace what is held with newly written hours: a check on what you tuned against the old ones")
+    p.add_argument("--season", default=CURRENT_SEASON, help=argparse.SUPPRESS)
+    p.add_argument("--quiet", action="store_true", help=argparse.SUPPRESS)
+    p.set_defaults(fn=cmd_harvest)
+
+    p = sub.add_parser("examine", help=argparse.SUPPRESS)  # organisers: harvest each hour, and make each official round's exam at its draw
     p.add_argument("--round", help="the official round (default with --follow: every open one)")
-    p.add_argument("--follow", action="store_true", help="every open round, as soon as its exam can be made")
+    p.add_argument("--follow", action="store_true", help="every hour as it settles, and every open round as soon as it is drawn")
     p.add_argument("--season", default=CURRENT_SEASON, help=argparse.SUPPRESS)
     p.add_argument("--quiet", action="store_true", help=argparse.SUPPRESS)
     p.set_defaults(fn=cmd_examine)
@@ -835,8 +1066,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(fn=cmd_agents)
 
     from . import client
+    from .exam import stages
 
     client.add_commands(sub)
+    stages.add_commands(sub)  # organisers: the unedited curve, the scale audit, the finals
     return ap
 
 

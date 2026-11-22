@@ -12,7 +12,7 @@ import pytest
 from stet import data
 from stet.spec import Shard, load_season, practice_round
 
-SEASON = load_season("s1")
+SEASON = load_season("s2")
 
 
 def test_window_hashes_are_position_independent_and_pinned():
@@ -63,23 +63,75 @@ def test_build_corpus_shuffles_cuts_and_is_deterministic(tmp_path, monkeypatch):
     assert b.meta["sha256"] == a.meta["sha256"] and b.urls == a.urls
     c = data.Corpus(data.build_corpus(practice_round(SEASON, 1), scale, tmp_path / "c", quiet=True))
     assert c.urls != a.urls and sorted(c.urls) == sorted(a.urls)
+    # Built again where a finished corpus already is (another verifier's, perhaps with a curator reading it):
+    # that one is kept as it is, and it is what the caller is given.
+    inode = (tmp_path / "a" / "docs.bin").stat().st_ino
+    assert data.build_corpus(rnd, scale, tmp_path / "a", quiet=True) == tmp_path / "a"
+    assert (tmp_path / "a" / "docs.bin").stat().st_ino == inode and [p.name for p in tmp_path.iterdir() if ".tmp" in p.name] == []
+    # What is there but is no corpus is replaced.
+    (tmp_path / "d").mkdir()
+    (tmp_path / "d" / "docs.bin").write_bytes(b"half")
+    d = data.Corpus(data.build_corpus(rnd, scale, tmp_path / "d", quiet=True))
+    assert d.meta["sha256"] == a.meta["sha256"]
+
+
+def test_a_corpus_is_the_same_however_many_files_are_read_at_once(tmp_path, monkeypatch):
+    import threading
+
+    shards = [Shard("", 0, f"fake-{k}", "u") for k in range(11)]
+    pages = {s.path: [(f"http://h{k}.test/{i}", f"File {k}, page {i}, says something of its own. " * 4) for i in range(7)] for k, s in enumerate(shards)}
+    reading, most = [0], [0]
+    lock = threading.Lock()
+
+    def read_shard(path, kind):
+        with lock:
+            reading[0] += 1
+            most[0] = max(most[0], reading[0])
+        time.sleep(0.03 if int(path.split("-")[1]) % 3 == 0 else 0.0)  # files finish out of order
+        yield from pages[path]
+        with lock:
+            reading[0] -= 1
+
+    monkeypatch.setattr(data, "round_shards", lambda rnd, scale, quiet=False: shards)
+    monkeypatch.setattr(data, "shard_path", lambda shard, quiet=False: shard.path)
+    monkeypatch.setattr(data, "read_shard", read_shard)
+    rnd, scale = practice_round(SEASON, 0), SEASON.scale("nano")
+    monkeypatch.setattr(data, "BUILD_THREADS", 1)
+    one = data.Corpus(data.build_corpus(rnd, scale, tmp_path / "one", quiet=True))
+    assert most[0] == 1
+    monkeypatch.setattr(data, "BUILD_THREADS", 4)
+    monkeypatch.setattr(data.os, "cpu_count", lambda: 8)
+    four = data.Corpus(data.build_corpus(rnd, scale, tmp_path / "four", quiet=True))
+    assert 1 < most[0] <= 4  # several at once, and never more than asked for
+    assert four.meta["sha256"] == one.meta["sha256"] and four.urls == one.urls and len(one) == 77
+
+    # A file that cannot be read stops the build, and names the file.
+    def broken(path, kind):
+        if path == "fake-6":
+            raise EOFError("cut short")
+        yield from pages[path]
+
+    monkeypatch.setattr(data, "read_shard", broken)
+    with pytest.raises(OSError, match="fake-6 is damaged"):
+        data.build_corpus(rnd, scale, tmp_path / "broken", quiet=True)
+    assert not (tmp_path / "broken").exists()
 
 
 def test_a_verifier_prunes_only_the_rounds_it_fetched_for_grading(tmp_path, monkeypatch):
     from stet.spec import load_season, official_round
 
     monkeypatch.setenv("STET_CACHE", str(tmp_path))
-    season = load_season("s1")
+    season = load_season("s2")
     crawl = {"crawl": "CC-MAIN-2026-01", "paths_sha256": "ab" * 32, "n_shards": 10}
     rounds = [official_round(season, i, {"round": 600 * i, "randomness": "cd" * 32}, crawl) for i in range(1, 8)]
     for r in rounds:
         data.mark_verified(r)
         (data.cache_dir() / "rounds" / r.id / "docs.bin").write_bytes(b"x" * 100)
-    mine = data.cache_dir() / "rounds" / "s1-o00002"
+    mine = data.cache_dir() / "rounds" / "s2-o00002"
     (mine / ".verified").unlink()  # the user fetched this one themselves
     assert data.prune_verified(rounds[-1]) == 300  # rounds 1, 3 and 4 go; 2 is theirs; 5, 6 and 7 are recent
     left = sorted(p.name for p in (data.cache_dir() / "rounds").iterdir())
-    assert left == ["s1-o00002", "s1-o00005", "s1-o00006", "s1-o00007"]
+    assert left == ["s2-o00002", "s2-o00005", "s2-o00006", "s2-o00007"]
 
 
 class Endless:
@@ -334,7 +386,7 @@ def test_a_round_that_is_set_aside_stays_readable_to_whoever_has_it_open_and_is_
 
     from stet import data
 
-    d = data.cache_dir() / "rounds" / "s1-o00009" / "micro"
+    d = data.cache_dir() / "rounds" / "s2-o00009" / "micro"
     (d / "corpus-v3").mkdir(parents=True)
     (d / "corpus-v3" / "docs.bin").write_bytes(b"what a curator is reading")
     held = os.open(d / "corpus-v3", os.O_RDONLY)  # as a sandbox holds the directory it was given

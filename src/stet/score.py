@@ -11,6 +11,11 @@ measured once per season and published with it. Until a season's curve is measur
 no multiplier. It is never
 extrapolated: beyond the end of the measured curve it is reported as "more than" the last
 measured point.
+
+Only differences along the curve are read, so the level it is written at is free. Season 2's
+curves are written as minus the gain of each unedited student over the one trained on the
+budget itself (`stet curve`, exam/measure.py): 0 at 1x, positive below it, negative above. A
+curator's gain is then looked up among gains measured the way it was, by the season's score.
 """
 
 from __future__ import annotations
@@ -32,8 +37,14 @@ def multiplier(season: Season, kind: str, scale: str, gain: float) -> tuple[floa
     `capped` means the gain runs off the end of the measured curve and the true multiplier
     is beyond the value returned.
     """
-    curve = reference_curve(season, kind, scale)
-    if not curve or len(curve) < 2:
+    return read_off(reference_curve(season, kind, scale), gain)
+
+
+def read_off(curve: list[tuple[float, float]] | None, gain: float) -> tuple[float, bool] | None:
+    """A gain read off a curve of (multiple of the budget, loss) points, as `multiplier` does:
+    for a curve that is not the season's own, such as the one a season's finals measure."""
+    curve = sorted((float(m), float(v)) for m, v in curve or [])
+    if len(curve) < 2:
         return None
     base = dict(curve).get(1.0)
     if base is None:

@@ -30,6 +30,10 @@ from .spec import Season
 
 GPU_SECONDS = 4.0
 CPU_ROUNDS = 6
+# The model of the GPU measurement. Named here because the floor's tokens a second mean
+# nothing without it: what a student's training takes on the floor is worked out from both
+# (exam/measure.py).
+GPU_MODEL = {"width": 768, "layers": 12, "heads": 12, "vocab": 32768, "batch": 32, "length": 256}
 WORDS = re.compile(r"[A-Za-z']+")
 # Used when a season says nothing about who may run curators.
 # A machine sold with 16 GB reports about 15.5 of it: firmware and the kernel keep some back.
@@ -52,7 +56,7 @@ def gpu_rate(seconds: float = GPU_SECONDS) -> float:
 
     if not torch.cuda.is_available():
         return 0.0
-    width, layers, heads, vocab, batch, length = 768, 12, 12, 32768, 32, 256
+    width, layers, heads, vocab, batch, length = (GPU_MODEL[k] for k in ("width", "layers", "heads", "vocab", "batch", "length"))
 
     class Block(nn.Module):
         def __init__(self):

@@ -76,7 +76,7 @@ const uploadBytes = 2 << 20
 // counted against the account and given one of the few places for large bodies. A key is
 // public, and naming someone else's must cost them nothing. The place is kept until the
 // handler has finished with the body, and runners have places of their own, so that no
-// amount of entrants' traffic keeps a run's script from arriving.
+// amount of entrants' traffic keeps a run's script from arriving. So have the organisers.
 func (a *App) signedBy(w http.ResponseWriter, r *http.Request, limit int64, mustExist bool, who int) (*Account, string, []byte, error) {
 	key, err := claimedKey(r)
 	if err != nil {
@@ -111,9 +111,15 @@ func (a *App) signedBy(w http.ResponseWriter, r *http.Request, limit int64, must
 		if !a.limits.allow("upload:"+key, 40, 3600) {
 			return nil, "", nil, fail(429, "that is a great many uploads in an hour; try again later")
 		}
+		// The organisers' uploads (a round's exam) have places of their own: a runner's place
+		// is taken before its job is looked at, and runners must not be able to keep a round
+		// from its exam.
 		pool := a.uploads
-		if who != anyone {
+		switch who {
+		case runners:
 			pool = a.runnerUploads
+		case organisers:
+			pool = a.organiserUploads
 		}
 		select {
 		case pool <- struct{}{}:
@@ -233,6 +239,7 @@ func (a *App) mountAPI(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/rounds", a.apiRounds)
 	mux.HandleFunc("GET /api/v1/rounds/{id}", a.apiRound)
 	mux.HandleFunc("GET /api/v1/rounds/{id}/exam", a.apiExamGet)
+	mux.HandleFunc("GET /api/v1/rounds/{id}/scores", a.apiScoresGet)
 	mux.HandleFunc("POST /api/v1/admin/rounds/{id}/exam", a.apiExamPost)
 	mux.HandleFunc("GET /api/v1/leaderboard", a.apiLeaderboard)
 	mux.HandleFunc("GET /api/v1/verifiers", a.apiVerifiers)
@@ -255,6 +262,8 @@ func (a *App) mountAPI(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/admin/accounts/{handle}", a.apiAdminAccount)
 	mux.HandleFunc("GET /api/v1/admin/work", a.apiAdminWork)
 	mux.HandleFunc("GET /api/v1/admin/workers", a.apiWorkers)
+	mux.HandleFunc("POST /api/v1/admin/harvests", a.apiHarvestPost)
+	mux.HandleFunc("GET /api/v1/harvests", a.apiHarvests)
 	mux.HandleFunc("POST /api/v1/admin/workers", a.apiWorkerGrant)
 	mux.HandleFunc("DELETE /api/v1/admin/workers/{key}", a.apiWorkerRevoke)
 	mux.HandleFunc("POST /api/v1/admin/workers/{key}/release", a.apiWorkerRelease)
@@ -365,7 +374,6 @@ func (a *App) apiSeason(w http.ResponseWriter, r *http.Request) {
 	out := map[string]any{
 		"season": a.season.ID, "title": a.season.Title, "digest": a.season.Digest, "harness": a.season.Harness,
 		"rules_version": a.season.RulesVersion, "scale": a.cfg.Scale, "student": a.season.Scales[a.cfg.Scale],
-		"ink_frac": a.season.InkFrac, "ink_tokens": a.season.InkTokens[a.cfg.Scale],
 		"round_interval_seconds": int(a.cfg.RoundInterval.Seconds()), "draw_grid_seconds": a.season.DrawGrid,
 		"round_min_gap_seconds": int(a.cfg.RoundMinGap.Seconds()), "entries_in_play": a.cfg.EntriesInPlay, "submissions_per_day": a.cfg.SubmitsPerDay,
 		"qualify_rounds": a.cfg.QualifyRounds, "rated_rounds": a.cfg.RatedRounds, "ladder_size": a.cfg.LadderSize,
@@ -614,7 +622,11 @@ func (a *App) apiMe(w http.ResponseWriter, r *http.Request) {
 			es := s.ofEditor[e.ID]
 			for i := len(es) - 1; i >= 0; i-- {
 				if !sealed(s, es[i]) {
-					j["last"] = map[string]any{"round": roundID(a.season.ID, es[i].RoundIdx), "gain": places5(es[i].Gain), "valid": es[i].Valid}
+					last := map[string]any{"round": roundID(a.season.ID, es[i].RoundIdx), "gain": places5(es[i].Gain), "valid": es[i].Valid}
+					if as, ok := countsAs(s, es[i]); ok {
+						last["counts_as"] = places5(as)
+					}
+					j["last"] = last
 					break
 				}
 			}
@@ -636,7 +648,11 @@ func (a *App) editorJSON(s *State, e *Editor, b *Board) map[string]any {
 	}
 	if row := b.ByID[e.ID]; row != nil {
 		j["rounds"], j["rating"], j["mean_gain"], j["se"] = row.Rounds, places5p(row.Rating), places5p(row.MeanGain), places5p(row.SE)
+		j["adjusted"], j["lower"] = places5p(row.Adjusted), places5p(row.Lower)
 		j["multiplier"], j["capped"], j["provisional"], j["record"], j["ladder"] = row.Multiplier, row.Capped, row.Provisional, row.Record, row.Ladder
+		if row.Tied {
+			j["tied"] = true
+		}
 		if row.Rank > 0 {
 			j["rank"] = row.Rank
 		}
@@ -828,6 +844,11 @@ func (a *App) entryJSON(s *State, e *Entry) map[string]any {
 		if e.Void {
 			j["void"] = true
 		}
+		// It scored nothing, and what the round counts as for it is not nothing: the lowest
+		// gain of the round's valid entries, or zero if that is lower.
+		if as, ok := countsAs(s, e); ok {
+			j["counts_as"] = places5(as)
+		}
 	}
 	if e.Detail != nil {
 		j["detail"] = e.Detail
@@ -846,6 +867,10 @@ func entriesOfRound(s *State, idx int) []*Entry {
 		}
 		if sealed(s, es[i]) {
 			return es[i].EditorID < es[j].EditorID
+		}
+		// An entry that failed is below every entry that did not, whatever those scored.
+		if es[i].Valid != es[j].Valid {
+			return es[i].Valid
 		}
 		if es[i].Gain != es[j].Gain {
 			return es[i].Gain > es[j].Gain
@@ -1010,6 +1035,10 @@ func (a *App) roundJSON(s *State, r *Round) map[string]any {
 	if r.SettledAt > 0 {
 		j["settled_at"] = r.SettledAt
 	}
+	// Every item score behind the round's scores, once it has been put where it is served from.
+	if scoresArchived(r) {
+		j["scores"] = a.cfg.APIURL + "/api/v1/rounds/" + roundID(a.season.ID, r.Idx) + "/scores"
+	}
 	return j
 }
 
@@ -1076,6 +1105,7 @@ func (a *App) apiLeaderboard(w http.ResponseWriter, r *http.Request) {
 		for i, r := range rows {
 			c := *r
 			c.Rating, c.MeanGain, c.SE, c.Multiplier = places5p(r.Rating), places5p(r.MeanGain), places5p(r.SE), places5p(r.Multiplier)
+			c.Adjusted, c.Lower = places5p(r.Adjusted), places5p(r.Lower)
 			out[i] = &c
 		}
 		return out
@@ -1177,13 +1207,28 @@ func (a *App) apiRecords(w http.ResponseWriter, r *http.Request) {
 // --- verifying ------------------------------------------------------------------------------
 
 func (a *App) apiClaim(w http.ResponseWriter, r *http.Request) {
-	acct, _, body, err := a.signed(w, r, 1<<16, true)
+	// A new season starts on an empty database, and a verifier left running from the last one
+	// has no account in it. What it acts on is being told to upgrade (426), not to log in
+	// (401), so a signed request from a key with no account is read far enough to say which.
+	// Its signature is checked like any other, and it is handed nothing.
+	acct, _, body, err := a.signed(w, r, 1<<16, false)
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
 	var h Hello
-	if json.Unmarshal(body, &h) != nil {
+	malformed := json.Unmarshal(body, &h) != nil
+	if acct == nil {
+		if !malformed {
+			if err := a.checkHarness(h.Harness, h.Season, h.SeasonDigest); err != nil {
+				writeErr(w, err)
+				return
+			}
+		}
+		writeErr(w, fail(401, "no account for this key; run `stet login`"))
+		return
+	}
+	if malformed {
 		writeErr(w, fail(400, "malformed request"))
 		return
 	}

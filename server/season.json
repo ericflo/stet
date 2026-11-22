@@ -3,6 +3,9 @@
   "max_bytes": 4294967296,
   "max_files": 32
  },
+ "baselines": {
+  "per_round": 4
+ },
  "beacon": {
   "chain_hash": "52db9ba70e0cc0f6eaf7803dd07447a1f5477735fd3f661792ba94600c84e971",
   "genesis": 1692803367,
@@ -19,7 +22,7 @@
   "key_bytes": 64,
   "min_letters": 38
  },
- "digest": "bd1bb39f6aab3ebfa9521faa8d29c78e498c868eaf7987c4c216ac1ec74fa7a2",
+ "digest": "8e2ba3839dfced8ed0bb5d4040116aea0fec1e2634e54ed93dbc2129254174b9",
  "draw_grid_seconds": 600,
  "environment": {
   "also": {
@@ -136,27 +139,145 @@
    "nvidia_windows": "https://download.pytorch.org/whl/cu132"
   }
  },
+ "exam": {
+  "answer_floor_bytes": 16,
+  "clip": 4.0,
+  "fresh": {
+   "hours": 3,
+   "reach_seconds": 93600,
+   "settle_seconds": 3600
+  },
+  "generated": [
+   "logic",
+   "agent",
+   "grammar",
+   "context",
+   "knowledge",
+   "arith-shots",
+   "word-shots",
+   "units-shots",
+   "algebra-shots",
+   "algo-shots"
+  ],
+  "groups": {
+   "skills": 0.25,
+   "writing": 0.75
+  },
+  "pillars": [
+   {
+    "about": "new encyclopedia articles, and what was added to old ones",
+    "group": "writing",
+    "name": "reference",
+    "parts": [
+     "reference"
+    ]
+   },
+   {
+    "about": "news published in the day before the draw",
+    "group": "writing",
+    "name": "news",
+    "parts": [
+     "news"
+    ]
+   },
+   {
+    "about": "technical writing and new code",
+    "group": "writing",
+    "name": "technical",
+    "parts": [
+     "technical"
+    ]
+   },
+   {
+    "about": "replies in discussions, and what people post",
+    "group": "writing",
+    "name": "conversation",
+    "parts": [
+     "discussion",
+     "social"
+    ]
+   },
+   {
+    "about": "an agent at work with a shell and tools",
+    "group": "skills",
+    "name": "agents",
+    "parts": [
+     "agent"
+    ]
+   },
+   {
+    "about": "reading the context and using what it says",
+    "group": "skills",
+    "name": "reading",
+    "parts": [
+     "context"
+    ]
+   },
+   {
+    "about": "following an argument to its end",
+    "group": "skills",
+    "name": "logic",
+    "parts": [
+     "logic"
+    ]
+   },
+   {
+    "about": "telling a well-formed sentence from a broken one",
+    "group": "skills",
+    "name": "grammar",
+    "parts": [
+     "grammar"
+    ]
+   },
+   {
+    "about": "arithmetic, units, word problems and algebra, each asked after worked examples",
+    "group": "skills",
+    "name": "numbers",
+    "parts": [
+     "arith-shots",
+     "units-shots",
+     "word-shots",
+     "algebra-shots"
+    ]
+   },
+   {
+    "about": "what a small algorithm returns, asked after worked examples",
+    "group": "skills",
+    "name": "programs",
+    "parts": [
+     "algo-shots"
+    ]
+   },
+   {
+    "about": "facts the web knows, in ten languages",
+    "group": "skills",
+    "name": "knowledge",
+    "parts": [
+     "knowledge"
+    ]
+   }
+  ],
+  "small": 8,
+  "trim": 0.1
+ },
  "exam_sources": [
-  "knowledge",
-  "reading",
-  "reasoning",
-  "code",
+  "reference",
+  "news",
+  "technical",
+  "conversation",
   "agents",
-  "writing",
-  "conversation"
+  "reading",
+  "logic",
+  "grammar",
+  "numbers",
+  "programs",
+  "knowledge"
  ],
  "grade_devices": [
   "cuda"
  ],
- "harness": "0.4.2",
- "id": "s1",
- "ink_frac": 0.001,
- "ink_tokens": {
-  "large": 640000,
-  "micro": 40000,
-  "nano": 8000,
-  "standard": 160000
- },
+ "harness": "0.5.0",
+ "id": "s2",
  "machine": {
   "cores": 6,
   "gpu_memory_gb": 8,
@@ -167,10 +288,13 @@
  "min_copy_bytes": 64,
  "noise": {
   "micro": {
-   "gain_sd": 0.025
+   "gain_sd": 0.03,
+   "round_sd": 0.03
   },
   "standard": {
-   "gain_sd": 0.013
+   "gain_sd": 0.005,
+   "order_sd": 0.008,
+   "round_sd": 0.015
   }
  },
  "official_scale": "standard",
@@ -192,37 +316,37 @@
   "index": 7,
   "order": [
    6,
-   2,
-   4,
-   1,
    8,
-   5,
-   0,
-   7,
-   3,
-   11,
    9,
-   10
+   1,
+   7,
+   10,
+   2,
+   11,
+   3,
+   4,
+   0,
+   5
   ],
   "prf": "9091049708302675390",
-  "seed": "e5c6c0fc9312d995921a4954ef3ee758e177c0eed62a25b2553dacc9810e19e2",
+  "seed": "f707928f7ecf1441a13e9265c3ac83a54cc81b10b6978fbc514185691f1e048d",
   "shards": [
-   46396,
-   64116,
-   29255,
-   75128,
-   93774,
-   97957,
-   267,
-   75599,
-   31702,
-   17330,
-   38494,
-   58354,
-   32198,
-   64460,
-   53049,
-   60904
+   77952,
+   25826,
+   5681,
+   39758,
+   20934,
+   71325,
+   7304,
+   82346,
+   45873,
+   16559,
+   65010,
+   42016,
+   98687,
+   35133,
+   89827,
+   62505
   ]
  },
  "pools": {
@@ -259,10 +383,10 @@
    40
   ],
   "margin": {
-   "large": 0.01,
-   "micro": 0.02,
+   "large": 0.005,
+   "micro": 0.015,
    "nano": 0.03,
-   "standard": 0.01
+   "standard": 0.005
   }
  },
  "reference": {
@@ -270,7 +394,14 @@
   "note": "The organisers' own verifier, and the machine the experiments in the documents were run on. Editors are run by volunteers' machines too: time yours against the floor in \"runner\" (stet bench), not against this."
  },
  "reference_curves": {},
- "rules_version": 4,
+ "references": {
+  "every_round": [
+   "fineweb2",
+   "dclm"
+  ],
+  "one_in": 8
+ },
+ "rules_version": 5,
  "runner": {
   "cores": 6,
   "cpu_mb_per_second": 100,
@@ -293,10 +424,10 @@
   },
   "micro": {
    "batch_size": 16,
-   "corpus_units": 4,
+   "corpus_units": 2,
    "ctx": 512,
    "d_model": 384,
-   "edit_seconds": 600,
+   "edit_seconds": 300,
    "lr": 0.0015,
    "n_head": 6,
    "n_layer": 6,
@@ -331,20 +462,20 @@
   "max_out_doc_bytes": 1048576,
   "max_segments": 20000
  },
- "title": "Season 1",
+ "title": "Season 2",
  "tokenizer": {
   "vocab_size": 8192
  },
  "tolerance": {
   "large": {
-   "baseline": 0.06,
-   "grade": 0.04,
-   "run": 0.06
+   "baseline": 0.03,
+   "grade": 0.02,
+   "run": 0.03
   },
   "micro": {
-   "baseline": 0.15,
-   "grade": 0.1,
-   "run": 0.12
+   "baseline": 0.2,
+   "grade": 0.15,
+   "run": 0.15
   },
   "nano": {
    "baseline": 0.2,
@@ -352,9 +483,9 @@
    "run": 0.15
   },
   "standard": {
-   "baseline": 0.1,
-   "grade": 0.06,
-   "run": 0.09
+   "baseline": 0.04,
+   "grade": 0.025,
+   "run": 0.04
   }
  },
  "train": {

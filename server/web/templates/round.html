@@ -31,7 +31,7 @@
   {{else if eq $r.Status "open"}}{{$w := $d.Work}}
   <div class="progress" id="round-progress" data-live>
     {{template "seg" $r}}
-    <p><b>{{$r.Edited}} of {{$r.Entries}}</b> curators run{{if $w.Graded}} · <b>{{$w.Graded}}</b> {{plural $w.Graded "grade" "grades"}} done{{end}}{{if $w.Training}} · <b>{{$w.Training}}</b> training{{end}}{{if $w.Trained}} · <b>{{$w.Trained}}</b> trained, waiting for the exam{{end}}. Every score stays sealed until all are done.{{if $r.ExamSHA}} The exam was posted {{ago $r.ExamAt}}.{{else}} Graders train as scripts come in, and sit its exam once it is made, from text published in the hour after the draw{{with $w.ExamDue}}: about {{hm .}} UTC{{end}}.{{end}}</p>
+    <p><b>{{$r.Edited}} of {{$r.Entries}}</b> curators run{{if $w.Graded}} · <b>{{$w.Graded}}</b> {{plural $w.Graded "grade" "grades"}} done{{end}}{{if $w.Training}} · <b>{{$w.Training}}</b> training{{end}}{{if $w.Trained}} · <b>{{$w.Trained}}</b> trained, waiting for the exam{{end}}. Every score stays sealed until all are done.{{if $r.ExamSHA}} The exam was posted {{ago $r.ExamAt}}.{{else}} Graders train as scripts come in, and sit its exam once it is made{{with $w.ExamDue}}: about {{hm .}} UTC{{end}}.{{end}}</p>
     <p class="work-sum">{{if $w.Machines}}<b>{{$w.Machines}} {{plural $w.Machines "machine" "machines"}}</b> at work on it now: {{range $i, $g := $w.GPUs}}{{if $i}}, {{end}}{{$g.N}} × {{$g.GPU}}{{end}}.{{else}}No machine is at work on it now.{{end}}{{$all := addf $w.Curating (addf $w.Grading $w.Waiting)}}{{if $all}} Machines have spent <b>{{dur $all}}</b> on its jobs{{with $w.Spent}}: {{.}}{{end}}.{{end}}</p>
   </div>
   <div class="block">
@@ -57,15 +57,15 @@
   {{else}}
   {{if $d.Alone}}<p class="note early"><b>One machine behind every score here.</b> No volunteer was around, so the organisers' machine ran and graded each curator itself. Every script is public for anyone to re-grade. <a href="/verify">Lend a GPU →</a></p>{{end}}
   <div class="list-head"><h2>Results</h2></div>
-  <p class="caption"><b>Gain</b> is how much better the model did on the exam after learning from a curator's pages than from the same pages unedited, in bits per byte, each thing the exam tests counting the same. Tap a curator to see who ran it and who checked it.</p>
+  <p class="caption"><b>Gain</b> is how much better the model did on the exam after learning from a curator's pages than from the same pages unedited, in bits per byte. Writing is three quarters of it, skills one. Tap a curator to see who ran it and who checked it.</p>
   <ol class="ranked results" id="runs">
     {{range $d.Entries}}<li id="e-{{short .EditorID}}"><details class="open-row">
       <summary class="row opens">
         <span class="rank">{{if .Place}}{{.Place}}{{else}}–{{end}}</span>
         <span class="who"><span class="name">{{.Name}}</span>{{if gt .Version 1}}<span class="ver">v{{.Version}}</span>{{end}}
-          <span class="by">{{.Owner}}{{if not .Valid}} · <span class="neg">{{if .Void}}not run{{else}}failed{{end}}</span>{{else if not (or $d.Alone $d.Same)}} · {{template "sure" .EntryView}}{{end}}{{if .Together}} <span class="tag red">disputed</span>{{end}}{{if .Disputed}} <span class="tag red">{{.Disputed}} differed</span>{{end}}</span></span>
+          <span class="by">{{.Owner}}{{if not .Valid}} · <span class="neg">{{if .Void}}not run{{else}}failed{{end}}</span>{{template "counts-as" .EntryView}}{{else if not (or $d.Alone $d.Same)}} · {{template "sure" .EntryView}}{{end}}{{if .Together}} <span class="tag red">disputed</span>{{end}}{{if .Disputed}} <span class="tag red">{{.Disputed}} differed</span>{{end}}</span></span>
         {{if .Valid}}{{template "bar" (dict "V" .Gain "Top" $d.Top)}}{{else if not .Void}}{{template "bar" (dict "V" 0.0 "Top" $d.Top "Fail" true)}}{{else}}<span class="bar" aria-hidden="true"></span>{{end}}
-        <span class="val{{if and .Valid (lt .Gain 0.0)}} neg{{end}}">{{if .Valid}}{{gain .Gain}}{{else if .Void}}—{{else}}0.000{{end}}</span>
+        <span class="val{{if and .Valid (lt .Gain 0.0)}} neg{{end}}">{{if .Valid}}{{gain .Gain}}{{else}}—{{end}}</span>
       </summary>
       <div class="behind">
         <div class="sure-line">{{if $d.Alone}}{{template "sure" .EntryView}}{{end}}<span class="says">{{(trust .EntryView).Says}}{{if and .Valid (gt .NRuns 1)}} The score is the {{if gt .NRuns 2}}median{{else}}mean{{end}} of {{.NRuns}} runs.{{end}}</span></div>
@@ -100,6 +100,7 @@
       <div class="in">
         <p class="lead">A <b>run</b> is one verifier's machine running a curator on the round's pages, in a sandbox with no network, for up to {{howlong .Scale.EditSeconds}}. It writes an edit script: plain data saying which pieces to keep, in what order.{{if gt $d.RunsPerEntry 1}} Each curator is run by {{$d.RunsPerEntry}} different people when that many are around; runs within {{f2 $d.Tolerance.Run}} bits per byte of each other confirm each other.{{end}}</p>
         <p class="lead">A <b>grade</b> is a verifier training the model on a script and sitting it on the round's exam. A grade within {{f2 $d.Tolerance.Grade}} bits per byte of the script's gain agrees; the gain is the median of the grades marked <i>counted</i>.</p>
+        {{if $d.Scores}}<p class="lead">Every one of these numbers can be worked out again: <a href="/api/v1/rounds/{{$d.ID}}/scores">download every grader's score on every item of the exam</a>.</p>{{end}}
         <p class="lead">Re-grade any of them yourself:</p>
         <div class="cmd"><pre><span class="p">$ </span><span data-copy-text>stet score {{if $d.Example}}{{$d.Example}}{{else}}owner/name{{end}} --round {{$d.ID}}</span></pre><button type="button" data-copy>copy</button></div>
       </div>
@@ -107,15 +108,14 @@
     <details class="more" id="exam">
       <summary>{{if $r.ExamSHA}}What its exam was made of{{else}}Its exam{{end}}</summary>
       <div class="in">
-        <p class="lead">Every round's exam is new, made after the draw, so nobody can know it in advance, the organisers included. Part is text people publish on Wikipedia, news sites, GitHub, Hacker News, Lemmy, Bluesky and Mastodon in the hour after the draw; the rest is problems generated from the round's random seed. Each of its {{len .Season.ExamSources}} capabilities counts the same, and the model is scored on how well it predicts the right text, in bits per byte.</p>
-        {{if eq $r.Status "scheduled"}}<p class="lead">This one does not exist yet. It is made about two hours after the draw: an hour for people to write, then an hour's wait, because some sources make writing public late: Common Crawl's news archive posts an hour's articles one to two hours after. Nothing written after the first hour counts.</p>
-        {{else if not $r.ExamSHA}}<p class="lead">This one is being made now{{with $d.Work}}{{with .ExamDue}}, and is due about {{hm .}} UTC{{end}}{{end}}: it takes only what people published before {{hm $d.WindowEnd}} UTC, and waits an hour more, because some sources make writing public late: Common Crawl's news archive posts an hour's articles one to two hours after. Text already in the round's training data is left out.</p>
-        {{else}}{{with $r.ExamMix}}<p class="lead"><b>{{comma .Items}} items</b>, posted {{datetime $r.ExamAt}}: {{comma .Fresh}} passages people wrote in the hour after the draw{{if .Langs}}, in {{.Langs}} {{plural .Langs "language" "languages"}}{{end}}, and {{comma (sub .Items .Fresh)}} problems generated from the round's seed.</p>
+        <p class="lead">Every round's exam is new, made at the draw, so nobody can know it in advance, the organisers included. Three quarters of the score is writing people published in three hours of the day before, picked by the draw; the round's training data was gathered before any of it was written. One quarter is problems generated from the round's random seed. The model is scored on how well it predicts the right text, in bits per byte.</p>
+        {{if eq $r.Status "scheduled"}}<p class="lead">This one does not exist yet. It is made at the draw, from three of the hours of writing harvested by then.</p>
+        {{else if not $r.ExamSHA}}<p class="lead">This one is being made now{{with $d.Work}}{{with .ExamDue}}, and is due about {{hm .}} UTC{{end}}{{end}}{{if $r.Hours}}, from what people published in the hours from {{range $i, $h := $r.Hours}}{{if $i}} · {{end}}{{hourof $h.Hour}}{{end}} UTC{{end}}. Text already in the round's training data is left out.</p>
+        {{else}}{{with $r.ExamMix}}<p class="lead"><b>{{comma .Items}} items</b>, posted {{datetime $r.ExamAt}}: {{comma .Fresh}} passages people wrote{{if $r.Hours}} in the hours from {{range $i, $h := $r.Hours}}{{if $i}} · {{end}}{{hourof $h.Hour}}{{end}} UTC{{if $r.HoursLate}} (chosen after the draw: nothing had been harvested by then){{end}}{{end}}{{if .Langs}}, in {{.Langs}} {{plural .Langs "language" "languages"}}{{end}}, and {{comma (sub .Items .Fresh)}} problems generated from the round's seed.</p>
         <dl class="kv">{{range .Parts}}{{if .Items}}
-          <dt>{{.Pillar}}</dt><dd>{{comma .Items}} {{plural .Items "item" "items"}}{{if eq .Fresh .Items}} written by people{{else if .Fresh}}: {{comma .Fresh}} written by people, {{comma (sub .Items .Fresh)}} generated{{else}} generated{{end}}</dd>{{end}}{{end}}
+          <dt>{{.Pillar}}</dt><dd>{{comma .Items}} {{if .Fresh}}written by people{{else}}generated{{end}}{{if .Share}}<span class="why">{{pct1 .Share}} of the score</span>{{end}}</dd>{{end}}{{end}}
         </dl>
-        {{if .Kinds}}<p class="lead" style="margin-top:14px">What people wrote, by kind: {{range $i, $k := .Kinds}}{{if $i}}, {{end}}{{$k.Kind}} {{comma $k.Items}}{{end}}.</p>{{end}}
-        {{else}}<p class="lead">Posted {{datetime $r.ExamAt}}{{if $r.Fresh}}, with {{comma $r.Fresh}} passages people wrote in the hour after the draw{{end}}.</p>{{end}}
+        {{else}}<p class="lead">Posted {{datetime $r.ExamAt}}{{if $r.Fresh}}, with {{comma $r.Fresh}} passages people wrote{{end}}.</p>{{end}}
         <p class="lead">{{if eq $r.Status "settled"}}<a href="/api/v1/rounds/{{$d.ID}}/exam">Download it</a>: the generated problems and Wikipedia's text whole, and for every other site what each item was and where it came from, without the text itself.{{else}}Graders have it now. Everyone else can download it when the round settles.{{end}}</p>{{end}}
       </div>
     </details>
@@ -135,7 +135,7 @@
           {{if $d.SeedInput}}<dt>Seed</dt><dd><code>sha256("{{$d.SeedInput}}")</code><br><code>= {{$r.Seed}}</code><span class="why">picks the files, the order of the pages, the exam's generated problems and the model's starting weights</span></dd>{{end}}
           {{if $d.Shards}}<dt>Files drawn</dt><dd><span class="num" style="font-size:14px">{{range $i, $s := $d.Shards}}{{if $i}}, {{end}}#{{$s}}{{end}}</span><span class="why">positions in the crawl's file list</span></dd>{{end}}
           {{if $r.CorpusSHA}}<dt>Training data sha256</dt><dd><code>{{$r.CorpusSHA}}</code></dd>{{end}}
-          {{if $r.ExamSHA}}<dt>Exam sha256</dt><dd><code>{{$r.ExamSHA}}</code><span class="why">the round's exam, made after the draw{{if $r.ExamAt}} and posted {{datetime $r.ExamAt}}{{end}}</span></dd>{{end}}
+          {{if $r.ExamSHA}}<dt>Exam sha256</dt><dd><code>{{$r.ExamSHA}}</code><span class="why">the round's exam, made at the draw{{if $r.ExamAt}} and posted {{datetime $r.ExamAt}}{{end}}</span></dd>{{end}}
           <dt>The model</dt><dd>{{$d.Scale.NLayer}} layers × {{$d.Scale.DModel}} wide, reading {{compact $d.Scale.TrainTokens}} tokens<span class="why">the {{$r.Scale}} scale; the same for every curator in the round</span></dd>
         </dl>
         {{if ne $r.Status "scheduled"}}<p class="lead" style="margin-top:16px">Rebuild this training data yourself, and measure the unedited baseline:</p>

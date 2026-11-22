@@ -16,7 +16,7 @@ From Gopher (Rae et al., 2021) and RefinedWeb (Penedo et al., 2023), applied to 
 Pages are kept in a fixed random order until the training budget is filled once. It is a
 reference, not an entry to beat: large models trained on data made like this beat raw crawl
 text and lose to classifier-filtered data, and an exam is checked by whether it agrees.
-Every cut is at least min_copy_bytes, so it spends no ink.
+Every piece it keeps is at least min_copy_bytes long, as a copy has to be.
 """
 
 import hashlib
@@ -35,17 +35,24 @@ LID_MIN = 0.65  # RefinedWeb's and FineWeb's threshold for English
 _lid = None
 
 
-def looks_english(task, text: str) -> bool:
-    """English, as the published recipes decide it: fastText language identification, the
-    English score at least 0.65 (Meta's model, facebook/fasttext-language-identification)."""
+def lid(task):
+    """Meta's language identification model (facebook/fasttext-language-identification), loaded
+    the first time it is asked for. Ask before task.map starts its workers and they share the
+    one copy; left to load it themselves, each would hold a gigabyte of its own."""
     global _lid
     if _lid is None:
         import fasttext
 
         _lid = fasttext.load_model(str(task.asset("lid/model.bin")))
+    return _lid
+
+
+def looks_english(task, text: str) -> bool:
+    """English, as the published recipes decide it: fastText language identification, the
+    English score at least 0.65."""
     if len(text) < 200:
         return False
-    labels, probs = _lid.predict(" ".join(text[:2000].split()))
+    labels, probs = lid(task).predict(" ".join(text[:2000].split()))
     return labels[0] == "__label__eng_Latn" and float(probs[0]) >= LID_MIN
 
 
@@ -108,22 +115,29 @@ def gopher_repetition(text: str) -> bool:
 def edit(task: Task):
     corpus = task.corpus
     min_copy = int(task.info.get("min_copy_bytes", 64))
-    seen: set[bytes] = set()
-    chosen = []
-    for i, text in corpus:
+    lid(task)  # loaded before task.map starts its workers, so that they share it
+
+    def judge(i, text):
+        """In a worker: for a page that passes, a key (the same for every copy of what is kept
+        of it) and the byte ranges to keep."""
         if not looks_english(task, text):
-            continue
+            return None
         ranges, kept = c4_lines(text, min_copy)
         if not ranges or kept.count(". ") + kept.count("! ") + kept.count("? ") < 2:  # C4: at least three sentences
-            continue
+            return None
         if not (gopher_quality(kept) and gopher_repetition(kept)):
-            continue
-        key = hashlib.blake2b(kept.encode("utf-8", "replace"), digest_size=8).digest()
-        if key in seen:
-            continue
-        seen.add(key)
+            return None
         size = corpus.size(i)
         ranges = [[a, min(b, size)] for a, b in ranges if a < size and min(b, size) - a >= min_copy]
+        return hashlib.blake2b(kept.encode("utf-8", "replace"), digest_size=8).digest(), ranges
+
+    seen: set[bytes] = set()
+    chosen = []
+    for i, found in task.map(judge):  # in page order: of two copies, the first is the one kept
+        if found is None or found[0] in seen:
+            continue
+        key, ranges = found
+        seen.add(key)
         if ranges:
             chosen.append(({"d": i, "k": ranges}, sum(b - a for a, b in ranges)))
     random.Random(0).shuffle(chosen)

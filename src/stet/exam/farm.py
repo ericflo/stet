@@ -41,7 +41,7 @@ def unpack_items(blob: bytes, limit: int = 256 << 20) -> list[Item]:
         raw = r.read(limit + 1)
     if len(raw) > limit:
         raise ValueError("a batch's items are too large")
-    return [Item.from_dict(json.loads(line)) for line in raw.decode().splitlines() if line.strip()]
+    return [Item.from_dict(json.loads(line)) for line in raw.decode().split("\n") if line.strip()]
 
 
 # --- a machine of the organisers', training one ---------------------------------------------------
@@ -58,6 +58,18 @@ def scale_of(season, name: str, spec: dict | None):
     if unknown:
         raise ValueError(f"a scale this harness does not know how to build: {sorted(unknown)}")
     return dataclasses.replace(base, name=name, **{k: type(getattr(base, k))(v) for k, v in spec.items()})
+
+
+def corpus_scale(season, scale):
+    """The scale whose corpus a student trains on. A round's corpus follows from the round and
+    from how many units of the crawl a scale takes, and is kept under the scale's name. A scale
+    built from a spec has a name of its own (the unedited curve's other budgets: standard-x2),
+    and would fetch and build the same corpus again under it: it reads the corpus of the
+    season's scale of that many units instead."""
+    for name in season.raw["scales"]:
+        if season.scale(name).corpus_units == scale.corpus_units:
+            return season.scale(name)
+    return scale
 
 
 def _fetch_script(sha: str, season, dest: Path, key=None) -> Path:
@@ -128,7 +140,7 @@ def work_one(task: dict, season, key, device, log=print) -> None:
         items = unpack_items(request("GET", f"/api/v1/farm/batches/{task['batch']}/items", key=key, raw=True, timeout=600, limit=64 << 20))
         if len(items) != task["items"] or digest(items) != task["items_digest"]:
             raise ValueError("the batch's items do not match their digest")
-        corpus = _corpus(data, rnd, scale, log)
+        corpus = _corpus(data, rnd, corpus_scale(season, scale) if task.get("scale_spec") else scale, log)
         enc = load_encoding(season)
         t0 = time.time()
         with tempfile.TemporaryDirectory(prefix="stet-farm-") as tmp:
@@ -141,7 +153,7 @@ def work_one(task: dict, season, key, device, log=print) -> None:
         body = dict(meta)
         body["reason"] = body.pop("invalid_reason", "")
         if model is not None:
-            body["item_scores"] = [round(s, 6) for s in sit(model, items, enc, season.eot, scale.ctx, device)]
+            body["item_scores"] = [round(s, 6) for s in sit(model, items, enc, season.eot, scale.ctx, device, floor=season.answer_floor_bytes)]
             del model
         release_gpu_memory()
         try:
@@ -251,7 +263,9 @@ def post_batch(rnd, scale, items: list[Item], scripts: list[str], key, spec: dic
     body = {"round": rnd.index, "scale": scale.name, "items_digest": digest(items), "items": len(items), "generator_version": VERSION,
             "scripts": scripts, "items_file": base64.b64encode(pack_items(items)).decode()}
     if spec:
-        body["scale_spec"], body["lease"] = spec, lease
+        body["scale_spec"] = spec
+    if lease:  # a student held longer than the server's usual three quarters of an hour: one of the season's bigger scales, too
+        body["lease"] = lease
     return request("POST", "/api/v1/admin/farm/batches", body, key=key, timeout=600)["batch"]
 
 

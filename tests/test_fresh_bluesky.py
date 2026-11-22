@@ -4,10 +4,13 @@ seeded choice that comes out the same every time. No test touches the network.""
 import base64
 import bisect
 import collections
+import io
 import json
+import urllib.error
 
 import pytest
 
+from stet.exam import fresh
 from stet.exam.fresh import bluesky
 from stet.exam.fresh.bluesky import (
     CLOSE,
@@ -327,7 +330,8 @@ class Network:
         labels = [{"val": "!no-unauthenticated"}] if author_no(did) % 11 == 4 else []
         return {"uri": uri, "cid": f"bafy{n}", "author": {"did": did, "labels": labels}, "labels": [], "record": {"text": "..."}}
 
-    def get_json(self, url, params, tries=6, pause=2.0):
+    def get_json(self, url, params, tries=6, pause=2.0, limit=None, named=False):
+        assert named == url.startswith("https://pds.test/")  # only a server an author named is asked with care
         self.requests[url.split("/xrpc/")[-1]] += 1
         if url.endswith("app.bsky.feed.getPosts"):
             uris = [v for k, v in params if k == "uris"]
@@ -437,3 +441,62 @@ def test_events_are_read_as_plain_json_from_the_cursor(monkeypatch):
     assert [next(events), next(events)] == [{"time_us": 5}, {"time_us": 6}]
     with pytest.raises(ConnectionError):
         next(events)
+
+
+# --- a server an author names is asked only at a public https address ----------------------------------
+
+
+class Answer(io.BytesIO):
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        self.close()
+
+
+def wire(monkeypatch, endpoint, resolves):
+    """Bluesky's own servers do not know the author; the directory says their server is endpoint."""
+    asked = []
+
+    def urlopen(req, timeout=None):
+        if req.host == "bsky.social":
+            raise urllib.error.HTTPError(req.full_url, 400, "RepoNotFound", {}, None)
+        assert req.host == "plc.directory", req.full_url
+        return Answer(json.dumps({"service": [{"id": "#atproto_pds", "serviceEndpoint": endpoint}]}).encode())
+
+    def named(req, timeout=None):
+        asked.append(req.full_url)
+        return Answer(json.dumps({"collections": ["app.bsky.feed.post"]}).encode())
+
+    monkeypatch.setattr(fresh, "GAP", 0)
+    monkeypatch.setattr(fresh.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(fresh._named, "open", named)
+    monkeypatch.setattr(fresh.socket, "getaddrinfo", lambda host, port, **kw: [(2, 1, 6, "", (a, port)) for a in resolves])
+    monkeypatch.setattr(bluesky, "_unreachable", set())
+    return asked
+
+
+@pytest.mark.parametrize("endpoint, resolves", [
+    ("http://pds.example", ["93.184.216.34"]), ("file:///etc/passwd", []), ("https://localhost:8080", ["127.0.0.1"]),
+    ("https://127.0.0.1", ["127.0.0.1"]), ("https://pds.example", ["10.0.0.5"]), ("https://pds.example", ["169.254.169.254"]),
+    ("https://pds.example", ["93.184.216.34", "192.168.1.1"]), ("https://pds.example", ["::1"]), ("https://pds.example", ["fe80::1%eth0"]),
+    ("https://pds.example", ["::ffff:10.0.0.5"]), ("https://pds.example", ["240.0.0.1"]), ("https://pds.example", ["0.0.0.0"]),
+    ("https://pds.example", []), ("https://pds.example@127.0.0.1", ["93.184.216.34"]), ("https://[::1]", ["::1"]),
+    ({"uri": "https://pds.example"}, ["93.184.216.34"]),
+])
+def test_a_server_that_is_not_at_a_public_https_address_is_not_asked(monkeypatch, endpoint, resolves):
+    asked = wire(monkeypatch, endpoint, resolves)
+    assert bluesky.refuses_ai("did:plc:someone") is True  # could not be asked: treated as having said no
+    assert asked == []
+
+
+def test_a_server_at_a_public_https_address_is_asked(monkeypatch):
+    asked = wire(monkeypatch, "https://pds.example/", ["93.184.216.34", "2606:2800:220:1::1"])
+    assert bluesky.refuses_ai("did:plc:someone") is False
+    assert asked == ["https://pds.example/xrpc/com.atproto.repo.describeRepo?repo=did%3Aplc%3Asomeone"]
+
+
+def test_an_author_whose_did_names_this_machine_is_not_asked(monkeypatch):
+    asked = wire(monkeypatch, "https://pds.example", ["127.0.0.1"])
+    assert bluesky.refuses_ai("did:web:localhost%3A8080") is True and bluesky.refuses_ai("did:web:intranet.example") is True
+    assert asked == []

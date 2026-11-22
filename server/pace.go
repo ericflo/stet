@@ -7,10 +7,13 @@ import (
 
 // --- several grades before the exam, the fastest machines after it ------------------------------
 //
-// A round's exam is made hours after its draw, and a grade handed out before it trains then
-// and sits the exam the moment it is posted. A grade trains the round's unedited student
-// once on each machine and then the script's: a machine that has trained one grade trains
-// the next in a single pass, and sitting the exam takes seconds. So such a machine may hold
+// A round's exam is posted some time after its draw: minutes, now that the examiner picks it
+// from hours of writing harvested and committed beforehand (it was two hours, when the writing
+// was harvested after the draw), and longer if the examiner is late. A grade handed out before
+// it trains then and sits the exam the moment it is posted. A machine asked for the round's unedited
+// baseline (exam.go) trains that student once, with its first grade, and then the script's;
+// every other grade, on any machine, is a single pass, and sitting the exam takes seconds.
+// So a machine that has trained a grade may hold
 // more than one: while every grade it holds is trained and waits only for the exam, it is
 // handed one more a score waits for (never a replica), up to earlyGradesPerMachine, as long
 // as a pass on it, and a margin, still fits before the exam is due. A slow machine that
@@ -99,9 +102,12 @@ func (j *judge) tooEarly(rd *Round, q *asker, held int, pass float64) bool {
 	if due == 0 || pass <= 0 {
 		return false
 	}
-	work := pass // the student; the round's own was trained with the first
+	work := pass // the student; the round's unedited one, if it was asked for, was trained with the first
 	if held == 0 {
-		work = 2*pass + earlyFetch
+		work = pass + earlyFetch
+		if j.asksBaseline(rd, q.acct) {
+			work += pass
+		}
 	}
 	work += float64(max(0, earlyGradesPerMachine-held-1)) * pass
 	return float64(j.t)+work < float64(due)-window

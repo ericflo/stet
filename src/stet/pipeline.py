@@ -34,8 +34,11 @@ def baseline(rnd: Round, scale: Scale, device=None, progress=None, log=None) -> 
 
 
 def baseline_path(rnd: Round, scale: Scale, device) -> Path:
-    # A baseline is for the exam it sat: named for it.
-    return data.round_dir(rnd, scale) / f"baseline-{HARNESS_VERSION}-{device.type}-{(rnd.exam_digest or 'generated')[:12]}.json"
+    # A baseline is for the exam it sat: named for it. An official round's exam has a digest. A
+    # practice round's is made here, of the parts the season names and the hours held here, so
+    # it is named for the season and the hours: a season that names other parts is another exam.
+    exam = rnd.exam_digest[:12] if rnd.exam_digest else f"{rnd.season.digest[:8]}-{(data.practice_key(rnd) or 'generated')[:12]}"
+    return data.round_dir(rnd, scale) / f"baseline-{HARNESS_VERSION}-{device.type}-{exam}.json"
 
 
 def train_baseline(rnd: Round, scale: Scale, device=None, progress=None, log=None) -> Trained:

@@ -3,7 +3,7 @@
 One episode is one round. The observation is a raw corpus and a description of the task.
 The action is an edit script. The reward is the gain: how much better the fixed student does
 on the exam after training on your edit than after training on the unedited corpus, in bits
-per byte (the mean over the exam's seven pillars).
+per byte, on the season's exam.
 
     from stet.gym import Env
 
@@ -19,8 +19,9 @@ being tested on data, and a kind of data, it has never seen. Rounds are pure fun
 many rounds as there are non-negative integers.
 
 A gym round's exam is its generated questions: they follow from its seed, so a policy could
-compute them. In the competition nobody can, since the exam is made after the draw and half of
-it is fresh writing. A policy that peeks will score well in the gym and nowhere else.
+compute them. In the competition nobody can, since the exam is made at the draw and three
+quarters of its score is fresh writing. A policy that peeks will score well in the gym and
+nowhere else.
 """
 
 from __future__ import annotations

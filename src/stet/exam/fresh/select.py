@@ -3,6 +3,7 @@ and choose with the round's seed."""
 
 from __future__ import annotations
 
+import dataclasses
 import re
 from collections import defaultdict
 
@@ -46,10 +47,13 @@ def _clip(text: str, n: int) -> str:
 
 
 def _codeish(text: str) -> bool:
+    """Whether most of a text's lines read as code or a patch. A line of code is short: a
+    paragraph of prose is one long line, and a semicolon or an equals sign in it says nothing."""
     lines = [ln for ln in text.splitlines() if ln.strip()]
     if not lines:
         return False
-    code = sum(1 for ln in lines if re.search(r"[{};=]|^\s{4}|\)\s*$|^\s*(def|class|import|return|if|for)\b", ln))
+    code = sum(1 for ln in lines if len(ln) <= 200 and re.search(
+        r"[{};=]|^\s{4}|\)\s*$|^\s*(def|class|import|return|if|for)\b|^(diff |@@ |\+\+\+ |--- |[+-]\s)", ln))
     return code / len(lines) > 0.35
 
 
@@ -59,7 +63,24 @@ def _lead(text: str) -> str:
     return (m.group(1) if m else _clip(text, 300)).strip()
 
 
+def crawl_space(text: str) -> str:
+    """White space as the crawl has it: one space between words, one line end between lines.
+
+    Common Crawl's text of a page has an empty line 300 times less often than writing taken
+    from its source, a tab 600 times less often, two spaces together 15 times less often. A
+    student pays some twenty bits for a mark it has never met, so an exam that kept those marks
+    would rank curators by whether their pages happened to hold a few of them, and a script
+    cannot supply what the crawl does not have (docs/research/exam-first-principles.md, 9.9)."""
+    text = re.sub(r"[ \t\u00a0]+", " ", text.replace("\r\n", "\n").replace("\r", "\n"))
+    return re.sub(r" ?\n(?: ?\n)*", "\n", text)
+
+
 def items_of(doc: Doc) -> list[Item]:
+    """A document's items, laid out as the crawl lays out a page."""
+    return [dataclasses.replace(it, text=crawl_space(it.text), ctx=crawl_space(it.ctx), cont=crawl_space(it.cont)) for it in _items_of(doc)]
+
+
+def _items_of(doc: Doc) -> list[Item]:
     lang = lang_of(doc)
     base = f"fresh/{doc.source}/{lang}/{doc.topic or '-'}"
     src = f"{doc.source}:{doc.id}"
@@ -151,10 +172,11 @@ def _select_kind(items: list[Item], rng, n: int, per_corner: int, shares: dict, 
     return chosen
 
 
-def select(docs: list[Doc], seed: bytes, n: int, per_corner: int = 2, shares: dict | None = None) -> list[Item]:
-    """About n items: each kind of writing an equal part (a kind without enough candidates gives
-    what it leaves to the others), languages inside each kind by their share of the web, sources
-    inside each language in turn, and at most per_corner from any corner."""
+def select(docs: list[Doc], seed: bytes, n: int, kinds, per_corner: int = 2, shares: dict | None = None) -> list[Item]:
+    """About n items of the kinds of writing the season names (`kinds`: its parts; a document of
+    any other kind is passed over). Each kind an equal part (a kind without enough candidates
+    gives what it leaves to the others), languages inside each kind by their share of the web,
+    sources inside each language in turn, and at most per_corner from any corner."""
     from ..aggregate import kind_of
 
     shares = shares or SHARES
@@ -162,7 +184,8 @@ def select(docs: list[Doc], seed: bytes, n: int, per_corner: int = 2, shares: di
     by_kind: dict[str, list[Item]] = defaultdict(list)
     for d in sorted(docs, key=lambda d: (d.source, d.id)):
         for it in items_of(d):
-            by_kind[kind_of(it)].append(it)
+            if kind_of(it) in kinds:
+                by_kind[kind_of(it)].append(it)
     used: dict[str, int] = defaultdict(int)
     chosen: dict[str, list[Item]] = {k: [] for k in by_kind}
     left = sorted(by_kind)

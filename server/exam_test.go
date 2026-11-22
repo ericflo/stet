@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"math"
@@ -65,6 +66,12 @@ func TestTheExamIsGradedOnceItIsPostedAndScoredAgainstTheRoundsBaseline(t *testi
 	if code, _ := w.postExam(anchor, idx, bad); code != 400 {
 		t.Fatalf("an exam with a pillar the season does not have: HTTP %d", code)
 	}
+	// Nor one with an item of a part the season does not name: nothing is sat that is not scored.
+	bad = append([]ItemInfo(nil), table...)
+	bad[0].Part = "riddles"
+	if code, _ := w.postExam(anchor, idx, bad); code != 400 {
+		t.Fatalf("an exam with a part the season does not name: HTTP %d", code)
+	}
 	// A verifier that trains before the exam takes the script while it is made, and carol
 	// takes it too, as a replica.
 	early := w.claimEarly(bob)
@@ -123,7 +130,7 @@ func TestTheExamIsGradedOnceItIsPostedAndScoredAgainstTheRoundsBaseline(t *testi
 		for i := range gains {
 			gains[i] = (-2.9 - float64(i%3)*0.01) - base[i]
 		}
-		want, _, _ = ScoreItems(table, gains, rd.Shares)
+		want, _, _ = w.app.season.Exam.ScoreItems(table, gains, rd.Shares)
 	})
 	if e.Gain == nil || math.Abs(*e.Gain-places5(want)) > 1e-4 {
 		t.Fatalf("the entry's gain is %v, want %.5f", e.Gain, want)
@@ -160,4 +167,88 @@ func TestTheExamIsGradedOnceItIsPostedAndScoredAgainstTheRoundsBaseline(t *testi
 		t.Fatalf("the round's exam is kept under %s, not under its season", key)
 	}
 	w.check()
+}
+
+// postingBlobs is a file store that does something the first time a file is kept in it.
+type postingBlobs struct {
+	Blobs
+	first func()
+}
+
+func (b *postingBlobs) Put(ctx context.Context, key string, data []byte, kind string) error {
+	if do := b.first; do != nil {
+		b.first = nil
+		do()
+	}
+	return b.Blobs.Put(ctx, key, data, kind)
+}
+
+// The examiner's post is retried, and two of the same exam can be under way at once: both find
+// the round without one, and both keep its files. The second to finish changes nothing: the
+// round's clock and its grades' time started with the first, and one exam is announced.
+func TestTheSameExamPostedTwiceAtOnceIsPostedOnce(t *testing.T) {
+	pub, priv := newKey()
+	w := newWorld(t, pub)
+	anchor := w.join("anchor-one", priv)
+	w.submit(w.join("alice", nil), "tidy", "print('v1')")
+	idx := w.drawWithoutExam()
+	w.run(anchor, scriptOne)
+	ctx := context.Background()
+	raw, _ := json.Marshal(testExam(testTable()))
+	var p, q ExamPost
+	json.Unmarshal(raw, &p)
+	json.Unmarshal(raw, &q)
+	var first bool
+	var at int64
+	cache := w.app.st.blobs
+	inner := cache.Blobs
+	// While the one post keeps its files, the other is made and finishes, a while ago.
+	cache.Blobs = &postingBlobs{Blobs: inner, first: func() {
+		var err error
+		if first, err = w.app.postExam(ctx, idx, &q); err != nil {
+			t.Errorf("the post that finished first: %v", err)
+		}
+		w.app.st.update(ctx, func(tx *Tx) error {
+			rd := tx.s.Rounds[idx]
+			rd.ExamAt -= 600
+			at = rd.ExamAt
+			tx.saveRound(rd)
+			return nil
+		})
+	}}
+	second, err := w.app.postExam(ctx, idx, &p)
+	cache.Blobs = inner
+	if err != nil || !first || second {
+		t.Fatalf("two posts of one exam: the first new: %v, the second new: %v, %v", first, second, err)
+	}
+	w.app.st.view(func(s *State) {
+		if rd := s.Rounds[idx]; rd.ExamAt != at || rd.ExamSHA != examSHA {
+			t.Fatalf("the second post moved the round's exam: at %d, not %d", rd.ExamAt, at)
+		}
+		n := 0
+		for _, ev := range s.Events {
+			if ev.Kind == "exam" {
+				n++
+			}
+		}
+		if n != 1 {
+			t.Fatalf("one exam was announced %d times", n)
+		}
+	})
+}
+
+// Runners' uploads take a place before their job is looked at, and there are few places. The
+// organisers' exam has its own: with every runner's place taken, a round is still given its exam.
+func TestRunnersUploadsDoNotKeepARoundFromItsExam(t *testing.T) {
+	pub, priv := newKey()
+	w := newWorld(t, pub)
+	anchor := w.join("anchor-one", priv)
+	w.submit(w.join("alice", nil), "tidy", "print('v1')")
+	idx := w.drawWithoutExam()
+	for i := 0; i < cap(w.app.runnerUploads); i++ {
+		w.app.runnerUploads <- struct{}{}
+	}
+	if code, msg := w.postExam(anchor, idx, testTable()); code != 200 {
+		t.Fatalf("the exam, with every runner's place for an upload taken: HTTP %d %s", code, msg)
+	}
 }

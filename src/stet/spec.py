@@ -3,7 +3,8 @@
 A *season* freezes everything that must not move while scores are being compared: the
 pools, the exam, the student, the budgets and the rules. A *round* is one draw from a
 season: a corpus, the student's initial weights and the exam's generated questions, all
-derived from a single seed (the exam's fresh text is what was published after the draw).
+derived from a single seed (the exam's fresh text is three hours of the day before the draw,
+which the seed picks).
 Everything here is a pure function of public inputs, so any two parties derive
 byte-identical rounds.
 """
@@ -18,14 +19,14 @@ from dataclasses import dataclass, field
 from functools import cache
 from importlib import resources
 
-HARNESS_VERSION = "0.4.6"
+HARNESS_VERSION = "0.5.0"
 # The oldest stet whose grades are this one's: the server refuses jobs and results from older
 # ones, and they upgrade. Moved up only when what a grade measures changes, so that a release
 # that changes nothing in a grade does not throw away work under way.
-GRADES_SINCE = "0.4.2"
+GRADES_SINCE = "0.5.0"
 # The season the competition is in: what every command means when it names none. Changing it is
 # the switch from one season to the next (see docs/OPERATING.md).
-CURRENT_SEASON = "s1"
+CURRENT_SEASON = "s2"
 
 
 @dataclass(frozen=True)
@@ -54,7 +55,7 @@ class Shard:
     url: str
 
 
-POLICY_KEYS = ("reference", "reference_curves", "tolerance", "noise", "record", "runner")
+POLICY_KEYS = ("reference", "reference_curves", "tolerance", "noise", "record", "runner", "baselines", "references")
 
 
 @dataclass(frozen=True)
@@ -68,9 +69,10 @@ class Season:
         """Hash of everything in the season that decides a score, pool manifests included.
 
         Left out: the numbers that only say how results are read (tolerances, the record
-        rule, reference curves) and who may run curators (the floor for a runner's
-        machine). Those are the server's to apply and can be re-measured without every
-        verifier having to upgrade.
+        rule, reference curves), who may run curators (the floor for a runner's machine),
+        and how the server spreads a round's work (how many machines measure its unedited
+        baseline, which reference curators run in it). Those are the server's to apply and
+        can be changed without every verifier having to upgrade.
         """
         rules = {k: v for k, v in self.raw.items() if k not in POLICY_KEYS}
         h = hashlib.sha256(json.dumps(rules, sort_keys=True, separators=(",", ":")).encode())
@@ -82,15 +84,8 @@ class Season:
         return h.hexdigest()
 
     @property
-    def ink_frac(self) -> float:
-        return float(self.raw["ink_frac"])
-
-    def ink_tokens(self, scale: Scale) -> int:
-        """How many of the tokens the student trains on may be the curator's own text."""
-        return int(self.ink_frac * scale.train_tokens)
-
-    @property
     def min_copy_bytes(self) -> int:
+        """The shortest copy a script may hold. See stet.script for the two exceptions."""
         return int(self.raw["min_copy_bytes"])
 
     @property
@@ -107,8 +102,14 @@ class Season:
 
     @property
     def exam_sources(self) -> list[str]:
-        """What the exam reports on: its pillars."""
+        """What the exam reports on: its pillars, in the order they are shown."""
         return list(self.raw["exam"]["pillars"])
+
+    @property
+    def answer_floor_bytes(self) -> int:
+        """The shortest an answer is taken to be when its bits are put over its bytes: a one-word
+        answer does not count as much as a sentence."""
+        return int(self.raw["exam"].get("answer_floor_bytes", 1))
 
     @property
     def official_scale(self) -> str:
@@ -310,5 +311,5 @@ def round_from_description(season: Season, d: dict) -> Round:
 def parse_round_id(round_id: str) -> tuple[str, str, int]:
     m = ROUND_ID_RE.fullmatch(round_id)
     if not m:
-        raise ValueError(f"{round_id[:40]!r} is not a round id (they look like s1-o00012)")
+        raise ValueError(f"{round_id[:40]!r} is not a round id (they look like s2-o00012)")
     return m.group(1), {"p": "practice", "g": "gym", "o": "official"}[m.group(2)], int(m.group(3))

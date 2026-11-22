@@ -1,7 +1,9 @@
 """A small language model reads the candidates: how to use model weights in a curator.
 
-  1. Do what `tidy` does: English prose, duplicates dropped, boilerplate lines cut, a crude
-     quality score. Write that script straight away, so there is always one to fall back on.
+  1. Keep English prose, as `tidy` does for every language: duplicates dropped, boilerplate
+     lines cut, a crude quality score. Write that script straight away, so there is always
+     one to fall back on. (English only because the model below reads English. The exam is
+     in every language of the crawl, so an entry would bring a reader that is too.)
   2. Load a small language model (SmolLM2-135M, named in stet.toml and fetched before the
      clock starts) and have it read the opening of each candidate, best candidates first.
   3. Drop the candidates the model finds most predictable (templates, repetition) and
@@ -65,7 +67,7 @@ def prose_ranges(text: str, min_copy: int = 64) -> tuple[list[list[int]], int]:
             else:
                 ranges.append([pos, pos + n])
         pos += n
-    # A kept run shorter than min_copy bytes would be charged as ink. Drop those.
+    # A copy has to be at least min_copy bytes long, or the script is invalid. Drop shorter runs.
     ranges = [r for r in ranges if r[1] - r[0] >= min_copy + 4]
     return ranges, sum(b - a for a, b in ranges)
 

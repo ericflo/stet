@@ -11,12 +11,15 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from stet.exam import gen
+from stet.exam.aggregate import plan_of
 from stet.spec import CURRENT_SEASON, GRADES_SINCE, load_season, official_round, prf_u64
 
 
 def export(season_id: str = CURRENT_SEASON) -> dict:
     season = load_season(season_id)
     raw = season.raw
+    plan = plan_of(season)  # which refuses a season whose exam names what nothing makes
     # A fixed example, so the server's tests can prove it derives seeds exactly as the harness does.
     beacon = {"round": 123456, "randomness": "ab" * 32}
     crawl = {"crawl": "CC-MAIN-2026-43", "paths_sha256": "cd" * 32, "n_shards": 100000}
@@ -31,13 +34,22 @@ def export(season_id: str = CURRENT_SEASON) -> dict:
         "rules_version": raw["rules_version"],
         "official_scale": season.official_scale,
         "scales": raw["scales"],
-        "ink_frac": season.ink_frac,
-        "ink_tokens": {name: season.ink_tokens(season.scale(name)) for name in raw["scales"]},
         "min_copy_bytes": season.min_copy_bytes,
         "max_doc_bytes": season.max_doc_bytes,
         "script": raw["script"],
         "decontam": raw["decontam"],
         "exam_sources": season.exam_sources,
+        # What the score is made of: server/aggregate.go scores every round from this.
+        "exam": {
+            "groups": raw["exam"]["groups"],
+            "pillars": [{"name": p, "group": v["group"], "parts": v["parts"], "about": v["about"]} for p, v in raw["exam"]["pillars"].items()],
+            # Which of those parts are families of generated problems; every other part is a kind of writing.
+            "generated": [f.NAME for f in gen.named(plan.parts)],
+            "clip": raw["exam"]["aggregate"]["clip"], "trim": raw["exam"]["aggregate"]["trim"], "small": raw["exam"]["aggregate"]["small"],
+            "answer_floor_bytes": season.answer_floor_bytes,
+            # How the exam's writing is taken from the hours the examiner harvests: server/harvest.go.
+            "fresh": {k: int(raw["exam"]["fresh"][k]) for k in ("settle_seconds", "reach_seconds", "hours")},
+        },
         "beacon": raw["beacon"],
         "draw_grid_seconds": raw["draw_grid_seconds"],
         "pools": {k: {f: v for f, v in pool.items() if f != "manifest"} for k, pool in raw["pools"].items()},
@@ -51,6 +63,9 @@ def export(season_id: str = CURRENT_SEASON) -> dict:
         "tolerance": raw.get("tolerance", {}),
         "noise": raw.get("noise", {}),
         "record": raw["record"],
+        # How the server spreads a round's work: who measures its baseline, which references run.
+        "baselines": raw.get("baselines", {}),
+        "references": raw.get("references", {}),
         "train": raw["train"],
         "tokenizer": {k: raw["tokenizer"][k] for k in ("vocab_size",)},
         "parity": {

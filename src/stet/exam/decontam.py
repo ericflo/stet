@@ -1,12 +1,16 @@
 """Keeping the round's corpus out of its exam.
 
-The exam is made after the corpus, from text published after the draw, which a crawl made
-before the draw cannot hold. But text can be copied: an addition to an article may quote a page
+The exam's fresh text was published in the day before the draw, which a crawl gathered before
+that day cannot hold. But text can be copied: an addition to an article may quote a page
 the crawl has. So an item whose scored text has a sentence opening that appears anywhere in the
 round's corpus is dropped from the exam.
 
 Openings are normalised (lowercase, runs of whitespace collapsed) and cut to the season's key
 length, keeping only those with enough letters to be distinctive (`decontam` in the season).
+
+There is no other way in. A script is copies of the round's corpus and holds no text of its
+own (stet.script), so nothing an author has seen published, or means to publish, can be
+written into one.
 """
 
 from __future__ import annotations

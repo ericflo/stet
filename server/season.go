@@ -92,6 +92,18 @@ type Environment struct {
 	Linux      []string          `json:"linux_x86_64_only"`
 }
 
+// BaselineRule is how many machines measure a round's unedited baseline. See judge.asksBaseline.
+type BaselineRule struct {
+	PerRound int `json:"per_round"` // 0: every grader measures it
+}
+
+// ReferenceRule is which of the organisers' reference editors run in every round, by name,
+// and how often each of the others takes a turn. See App.resting.
+type ReferenceRule struct {
+	EveryRound []string `json:"every_round"`
+	OneIn      int      `json:"one_in"` // under 2: they all run in every round
+}
+
 // RecordRule is how the record changes hands. See checkRecord.
 type RecordRule struct {
 	Looks  []int              `json:"looks"`
@@ -107,12 +119,11 @@ type Season struct {
 	RulesVersion  int                     `json:"rules_version"`
 	OfficialScale string                  `json:"official_scale"`
 	Scales        map[string]Scale        `json:"scales"`
-	InkFrac       float64                 `json:"ink_frac"`
-	InkTokens     map[string]int          `json:"ink_tokens"`
 	MinCopyBytes  int                     `json:"min_copy_bytes"`
 	MaxDocBytes   int                     `json:"max_doc_bytes"`
 	Script        ScriptLimits            `json:"script"`
-	ExamSources   []string                `json:"exam_sources"` // the exam's pillars, each counting the same: see exam.go
+	ExamSources   []string                `json:"exam_sources"` // the exam's pillars, in the order they are shown
+	Exam          ExamPlan                `json:"exam"`         // what the score is made of: see aggregate.go
 	Beacon        Beacon                  `json:"beacon"`
 	DrawGrid      int64                   `json:"draw_grid_seconds"`
 	Pools         map[string]Pool         `json:"pools"`
@@ -122,6 +133,8 @@ type Season struct {
 	Tolerance     map[string]Tolerance    `json:"tolerance"`
 	Noise         map[string]any          `json:"noise"`
 	Record        RecordRule              `json:"record"`
+	Baselines     BaselineRule            `json:"baselines"`
+	References    ReferenceRule           `json:"references"`
 	Parity        json.RawMessage         `json:"parity"`
 	Train         map[string]float64      `json:"train"`
 	Tokenizer     map[string]int          `json:"tokenizer"`

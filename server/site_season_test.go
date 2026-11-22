@@ -51,7 +51,7 @@ func TestTheSiteReadsInBitsPerByte(t *testing.T) {
 	// The entry's gain on each pillar, as the exam's aggregate gives it.
 	w.app.st.update(t.Context(), func(tx *Tx) error {
 		for _, e := range tx.s.inRound[idx] {
-			e.BySource = map[string]float64{"reasoning": 0.12, "writing": -0.03, "code": 0.05}
+			e.BySource = map[string]float64{"logic": 0.12, "reference": -0.03, "agents": 0.05}
 			tx.saveEntry(e)
 		}
 		return nil
@@ -76,9 +76,9 @@ func TestTheSiteReadsInBitsPerByte(t *testing.T) {
 		got[path] = page
 	}
 	for path, want := range map[string][]string{
-		"/glossary":      {"Made for each round after its draw", "7 capabilities, each counting the same", `id="bits"`, "no worth is shown"},
-		"/enter":         {"Practice rounds use the generated problems only", "Nobody can know it in advance"},
-		"/rounds/" + rid: {"bits per byte better on the exam", "the round's exam, made after the draw", "exam's generated problems"},
+		"/glossary":      {"Made for each round at its draw", "Three quarters of the score is writing people published", "once you have run <code>stet harvest</code>", "everything on the exam counts", `id="bits"`, "no worth is shown"},
+		"/enter":         {"A practice round sits the same kinds of writing", "Nobody can know it in advance"},
+		"/rounds/" + rid: {"bits per byte better on the exam", "the round's exam, made at the draw", "exam's generated problems"},
 		// The gain on each pillar, from zero; the training loss in bits too; no worth without a curve.
 		"/editors/" + id[:12]: {"bits per byte better than unedited", `class="bar neg"`, "training loss, bits per token", "on the exam"},
 	} {

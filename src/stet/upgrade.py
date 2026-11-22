@@ -26,6 +26,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -126,7 +127,13 @@ def has_torch() -> bool:
 
 
 def fetch_installer(site: str) -> bytes:
-    if not (site.startswith("https://") or site.startswith("http://127.0.0.1") or site.startswith("http://localhost")):
+    # The host is compared whole: "http://localhost.example" and "http://127.0.0.1@example" are not this machine.
+    try:
+        at = urllib.parse.urlsplit(site)
+        scheme, host = at.scheme, at.hostname
+    except ValueError:
+        scheme, host = "", None
+    if not (scheme == "https" and host) and not (scheme == "http" and host in ("localhost", "127.0.0.1")):
         raise OSError(f"will not fetch an installer from {site!r}: not https")
     from .client import USER_AGENT
 
