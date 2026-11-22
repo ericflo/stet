@@ -359,16 +359,61 @@ be. [Experiments](EXPERIMENTS.md#what-the-record-rule-can-tell-apart) has the nu
 
 ## Finals
 
-The season's final table is decided by finals. When the season closes, the eight best-rated
-curators are each run on a fresh round, and the **large** student is trained on what they
-write, twice each, and sits that round's exam. The table is their gain there, against the
-unedited corpus's large student (trained four times). Rounds pick the finalists; finals decide.
-The finals' students are trained on the organisers' machines, and every script and the
-round's exam are published, so anyone can train any of them again.
+The season's final table is decided by finals. Rounds choose who is looked at closely;
+finals decide.
 
-The three best are also tried one size up, a student of about 150 million parameters. That
-decides nothing this season: it says whether the next season's rounds should use a larger
-student.
+**Who.** Entries close when the finals are announced. When the season closes, the board is
+frozen as it stands.
+
+- The **eight finalists** are the eight best curators on the board by its cautious rating,
+  in the ladder's order, one per person: each person's best.
+- **One more is drawn by lot** from the curators ranked 9th to 16th in that same order that
+  have run at least five rounds. It is run with the finalists and takes whatever place its
+  gain earns. The lot is there to check the rounds: they only choose who is looked at
+  closely, and a curator they passed over may be as good as one they chose. If the lot's
+  pick places ahead of finalists, the season's report says so. Its result is published
+  either way.
+- The organisers' reference curators are run beside them as **yardsticks**. They are given
+  no place and count toward nobody's.
+
+The lot is drawn from one round of the drand beacon, named before it is emitted: the pick
+is number `u mod n` of the `n` curators in the lot, in the board's order and counting from
+0. Here `seed` is the 32 bytes of `sha256("stet|<season>|finals|lot|<drand round>|<randomness>")`,
+and `u` is the first eight bytes of `sha256(seed + "|lot|0")` as a big-endian number. The
+frozen board and the beacon round are published, so anyone works out the same pick.
+
+**On what.** Two finals rounds, drawn like any round from drand rounds announced
+beforehand, on the newest Common Crawl crawl **published after the board was frozen**.
+Entries closed before that, so no curator in the finals was written by anyone who had seen
+that crawl.
+
+**How.** Every finalist, the lot's pick and every yardstick is run on each finals round at
+the **large** size: its corpus, its time limit, the usual sandbox. The large student is
+trained twice on each script and sits that round's exam. The unedited corpus's large
+student is trained four times in each round, and once more at half, twice and four times
+the training budget: that is the finals' own curve, which the multipliers are read from.
+A curator that writes no usable script in a round has a gain of 0 there, as in any round.
+
+**The table.** For each curator:
+
+- its **gain**: the mean of its two rounds, each the mean of its two trainings, against
+  the mean of that round's four unedited students;
+- the **standard error** of that gain, from how far its two rounds differ and never less
+  than the noise between two trainings of one script allows;
+- its **multiplier**, read from the finals' own curve.
+
+Places go by gain, from the top. Two curators whose gains differ by less than two
+standard errors of the difference are **tied, and share the place**: a curator shares a
+place with the first curator at it unless it is two standard errors or more behind that
+one, and the next place counts everyone above it (1, 1, 3). The standard error of a
+difference is taken from all the placed curators together: how far their gains moved
+against each other from one round to the other. With two rounds, one pair alone says
+almost nothing about that.
+
+**What is published.** The frozen board, the beacon rounds, every script, both exams as a
+settled round's is published, and every student's score on every item, the unedited ones
+and the curve's included. The students are trained on the organisers' machines; with what
+is published anyone can train any of them again.
 
 ## Running and grading
 
