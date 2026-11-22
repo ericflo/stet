@@ -18,6 +18,11 @@ other language. `tidy` asks no page what language it is in.
 
 Each of these `curator.py` files is the same file as `src/stet/editors/<name>.py` (a test keeps them identical).
 
+`english`, `tidy` and the four below read the corpus on every core a curator is given, with
+`task.map`: the page-by-page work in worker processes, and whatever depends on the order of
+the pages decided in the loop that reads their results. `fineweb2` also writes a script
+before its slowest step, so that there is one if time runs out.
+
 And four that rebuild published recipes, so the board shows where what is already known lands.
 On English benchmarks, large models trained on data made the first two ways beat data made
 the third way, which beats raw crawl text; the fourth keeps every language
