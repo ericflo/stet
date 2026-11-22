@@ -649,16 +649,23 @@ against, each on principle:
   would leave nothing to compare the two seasons by. Its ranking is checked at a larger size
   instead (the finals, and the audit of scale in between).
 
-Three wait on a measurement that is running, each with its rule written first:
+Three more were put to a measurement, each with its rule written first:
 
 - **The pool's size.** As many pages as a curator can read and a verifier can fetch inside the
   time box on the machines the fleet rents, measured, with a third to spare; and only if the
   larger pool changes what is measured (9.8).
-- **Averaging the student's last weights.** Adopted only if the noise between trainings falls
-  by a quarter and spread over noise rises by a fifth at micro, and by 15% each at standard.
-- **Promotion of a watched part.** Twenty settled rounds, spread over noise above 1.5, rank
-  agreement with the score of at least 0.5. Science abstracts are on this list for a plainer
-  reason than the others: no exam has held them yet.
+- **Averaging the student's last weights: not adopted.** The rule was that the noise between
+  trainings fall by a quarter and spread over noise rise by a fifth at micro, and by 15% each
+  at standard. Six ways of averaging (an exponential average over 0.5%, 2% and 5% of the
+  steps; the plain mean of the last 5%, 10% and 20%) were carried through every training
+  of 9.7 and sat the same exam. At micro, seven scripts trained four times each, the
+  season's score had a noise of 0.0575 bits per byte between trainings with the last
+  weights and between 0.0584 and 0.0613 with an average: every one is noisier, by 1.5% to
+  6.5%, and every one lowers spread over noise (2.74 with the last weights, 2.55 to 2.66
+  with an average). None changes the curators' order. The student's noise is not the
+  jitter of its last steps, which is what an average removes; the trainer stays as it is.
+- **Which parts count.** A draft kept parts that were sat and did not count, to be promoted
+  after twenty rounds. 9.7 replaces that with a measurement made before the season.
 
 ### 9.7 Every part is in the score or off the exam
 
