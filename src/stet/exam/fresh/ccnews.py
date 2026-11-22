@@ -48,6 +48,7 @@ MIN_LANG_P = 0.5  # fastText's confidence in the article's language
 SKEW = 900  # seconds a page's publication time may be after it was fetched: the clocks differ
 MAX_RECORD = 8 << 20  # bytes of a record, decompressed; a larger one is passed over
 MAX_HTML = 2 << 20  # characters of a page that are read
+MAX_INFLATED = 64 << 20  # bytes a page stored compressed may unpack to: one that unpacks to more is left out
 READ_LANG = 1000  # characters of an article its language is guessed from
 FETCH_WAITS = (60, 120, 240, 480)  # the data host says "slow down" when many machines fetch at once
 NAME = re.compile(r"CC-NEWS-(\d{14})-(\d{5})\.warc\.gz$")
@@ -254,8 +255,11 @@ def html_of(block: bytes) -> str | None:
     enc = headers.get("content-encoding", "identity").lower()  # the crawler stores pages decoded
     if enc in ("gzip", "x-gzip", "deflate"):
         try:
-            body = zlib.decompress(body, 47 if "gzip" in enc else 15)
+            d = zlib.decompressobj(47 if "gzip" in enc else 15)
+            body = d.decompress(body, MAX_INFLATED + 1)
         except zlib.error:
+            return None
+        if len(body) > MAX_INFLATED or not d.eof:  # a few bytes can be written to unpack to any size; or cut short
             return None
     elif enc not in ("", "identity", "none"):
         return None

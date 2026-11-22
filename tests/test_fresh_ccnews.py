@@ -103,6 +103,27 @@ def test_html_responses_only():
     assert ccnews.html_of(b"not http at all") is None
 
 
+def test_a_page_stored_compressed_is_unpacked_only_so_far(monkeypatch):
+    page = "<p>" + "river " * 500 + "</p>"
+
+    def stored(body: bytes, enc: str = "gzip") -> bytes:
+        return f"HTTP/1.1 200 OK\r\ncontent-type: text/html\r\ncontent-encoding: {enc}\r\n\r\n".encode() + body
+
+    assert ccnews.html_of(stored(gzip.compress(page.encode()))) == page
+    assert ccnews.html_of(stored(zlib.compress(page.encode()), "deflate")) == page
+    assert ccnews.html_of(stored(gzip.compress(page.encode()) + b"trailing")) == page
+    assert ccnews.html_of(stored(gzip.compress(page.encode())[:-20])) is None  # cut short
+    assert ccnews.html_of(stored(b"not gzip")) is None
+    bomb = gzip.compress(b"\0" * (8 << 20))
+    assert len(bomb) < 10_000
+    monkeypatch.setattr(ccnews, "MAX_INFLATED", 1 << 20)
+    assert ccnews.html_of(stored(bomb)) is None  # a few bytes that unpack to megabytes
+    monkeypatch.setattr(ccnews, "MAX_INFLATED", len(page))
+    assert ccnews.html_of(stored(gzip.compress(page.encode()))) == page
+    monkeypatch.setattr(ccnews, "MAX_INFLATED", len(page) - 1)
+    assert ccnews.html_of(stored(gzip.compress(page.encode()))) is None
+
+
 def test_times_are_exact_only_with_a_zone():
     t = calendar.timegm((2026, 11, 19, 10, 23, 0, 0, 0, 0))
     for s in ("2026-11-19T10:23:00Z", "2026-11-19T13:23:00+03:00", "2026-11-19T13:23:00+0300", "2026-11-19T05:23:00.123-05:00",
