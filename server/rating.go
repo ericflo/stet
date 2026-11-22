@@ -487,7 +487,9 @@ func (a *App) computeBoard(s *State) *Board {
 		}
 	}
 	// The ladder: the record holder, then the best editor of each person. The organisers'
-	// reference editors are fixed points for everyone and all stay on.
+	// reference editors are fixed points for everyone and all stay on: the ladder's size is
+	// how many places everyone else's editors take, the holder's among them, and no entrant's
+	// editor takes a reference's.
 	//
 	// Best by the lower bound of its rating, not by the rating: a place on the ladder is a
 	// run in every round, on every verifier's machine, and an editor has to have shown it
@@ -499,19 +501,28 @@ func (a *App) computeBoard(s *State) *Board {
 	// is soon beaten. Its place is its own: its owner's best other editor may still take
 	// one, which is how a person improves on their own record.
 	seen := map[string]bool{}
+	taken := 0 // places held by editors that are not the organisers'
 	if h := b.ByID[b.RecordID]; h != nil {
 		h.Ladder = true
 		b.Ladder = append(b.Ladder, h)
+		if !h.Organisers {
+			taken++
+		}
 	}
 	byLower := append([]*BoardRow(nil), b.Rated...) // rows level on it stay in the board's order
 	sort.SliceStable(byLower, func(i, j int) bool { return *byLower[i].Lower > *byLower[j].Lower })
 	for _, r := range byLower {
-		owner := s.Accounts[r.AccountID]
-		who := person(s.Editors[r.ID])
-		if r.Ladder || r.Status == "withdrawn" || failing(s, r.ID) || len(b.Ladder) >= a.cfg.LadderSize || (seen[who] && (owner == nil || !owner.Anchor)) {
+		if r.Ladder || r.Status == "withdrawn" || failing(s, r.ID) {
 			continue
 		}
-		seen[who] = true
+		if !r.Organisers {
+			who := person(s.Editors[r.ID])
+			if taken >= a.cfg.LadderSize || seen[who] {
+				continue
+			}
+			seen[who] = true
+			taken++
+		}
 		r.Ladder = true
 		b.Ladder = append(b.Ladder, r)
 	}

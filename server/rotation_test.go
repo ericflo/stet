@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"path/filepath"
 	"sort"
 	"testing"
 )
@@ -234,6 +235,72 @@ func TestReferencesAloneDoNotWaitForATurnThatCannotCome(t *testing.T) {
 	}
 	if both != one-2 {
 		t.Fatalf("of %d rounds, %d were nobody's turn", one, both)
+	}
+	w.check()
+}
+
+// The ladder's size is how many places the entrants' curators take. The organisers' reference
+// curators all stay on beside them, however many entrants' curators have shown they are worth
+// more: the ones the season names go on tying the rounds together, and the others keep the
+// turns they had.
+func TestEntrantsCuratorsDoNotTakeTheReferencesPlacesOnTheLadder(t *testing.T) {
+	pub, priv := newKey()
+	cfg := testConfig(t, pub)
+	cfg.LadderSize = 2
+	w := startWorld(t, cfg, newMemKV(), dirBlobs{filepath.Join(cfg.DataDir, "blobs")})
+	anchor := w.join("anchor-one", priv)
+	every := []string{w.submit(anchor, "fineweb2", "print('fineweb2')"), w.submit(anchor, "dclm", "print('dclm')")}
+	turn := w.submit(anchor, "ref-a", "print('ref-a')")
+	mine := map[string]string{}
+	for _, name := range []string{"first", "second", "third"} {
+		mine[name] = w.submit(w.join("owner-of-"+name, nil), name, "print('"+name+"')")
+	}
+	// Every entrant's curator is better than every reference in every round, and none beats
+	// the unedited data: nobody takes the record, and a place on the ladder with it.
+	loss := func(name string, _ int) float64 {
+		switch name {
+		case "first":
+			return 6.10
+		case "second":
+			return 6.12
+		case "third":
+			return 6.14
+		}
+		return 6.30
+	}
+	qualify, one := w.app.cfg.QualifyRounds, w.app.season.References.OneIn
+	w.rounds(anchor, qualify, loss)
+	b := w.app.board()
+	if b.RecordID != "" || len(b.Rated) != 6 {
+		t.Fatalf("this test is written for six ranked curators and no record: %d ranked, record %q", len(b.Rated), b.RecordID)
+	}
+	for _, id := range append(append([]string(nil), every...), turn) {
+		if row := b.ByID[id]; !row.Ladder || !(*row.Lower < *b.ByID[mine["third"]].Lower) {
+			t.Fatalf("the reference %s (at least %v): on the ladder %v, below every entrant's curator %v", row.Name, *row.Lower, row.Ladder, *row.Lower < *b.ByID[mine["third"]].Lower)
+		}
+	}
+	if len(b.Ladder) != 5 || !b.ByID[mine["first"]].Ladder || !b.ByID[mine["second"]].Ladder || b.ByID[mine["third"]].Ladder {
+		t.Fatalf("a ladder of two places and three references has %d curators: first %v, second %v, third %v", len(b.Ladder),
+			b.ByID[mine["first"]].Ladder, b.ByID[mine["second"]].Ladder, b.ByID[mine["third"]].Ladder)
+	}
+
+	w.rounds(anchor, one, loss)
+	ran := map[string]int{}
+	for idx := qualify + 1; idx <= qualify+one; idx++ {
+		in := w.ranIn(idx)
+		for id := range in {
+			ran[id]++
+		}
+		if !in[every[0]] || !in[every[1]] {
+			t.Fatalf("round %d left out a reference that runs in every round: %v", idx, in)
+		}
+		if due := idx%one == 0; in[turn] != due {
+			t.Fatalf("round %d: the one reference that takes turns ran: %v, and its turn says %v", idx, in[turn], due)
+		}
+	}
+	if ran[mine["first"]] != one || ran[mine["second"]] != one || ran[mine["third"]] != 0 || ran[turn] != 1 {
+		t.Fatalf("over %d rounds: first ran %d times, second %d, third %d, the reference that takes turns %d", one,
+			ran[mine["first"]], ran[mine["second"]], ran[mine["third"]], ran[turn])
 	}
 	w.check()
 }
