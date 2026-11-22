@@ -66,7 +66,6 @@ class Server:
     def __init__(self):
         self.rounds: dict[str, dict] = {}
         self.board: list[dict] = []
-        self.verifiers: list[dict] = []
         self.scripts: dict[str, bytes] = {}  # the rounds' own, and those sent to the farm
         self.sent: list[str] = []  # scripts sent to the farm, in order
         self.batches: dict[str, dict] = {}
@@ -121,8 +120,6 @@ class Server:
             return {"season": SEASON.id, "crawl": {"crawl": self.adopted, "paths_sha256": "cd" * 32, "n_shards": 100_000}}
         if path == "/api/v1/leaderboard":
             return {"editors": self.board}
-        if path == "/api/v1/verifiers":
-            return {"verifiers": self.verifiers}
         if path.startswith("/api/v1/editors/"):
             owner = next(r["owner"] for r in self.board + [e for d in self.rounds.values() for e in d["entries"]] if r.get("id", r.get("editor")) == path.split("/")[4])
             return _bundle(owner)[1]
@@ -470,11 +467,10 @@ def test_an_audit_needs_three_curators_and_starts_at_the_rounds_own_size(world, 
 def _board(server: Server) -> None:
     def row(rank, owner, rounds=9):
         return {"id": _bundle(owner)[0], "name": "c", "version": 1, "owner": owner, "github": owner, "rank": rank, "rounds": rounds, "rating": 1 - rank / 100,
-                "se": 0.005, "lower": 1 - rank / 100 - 1.28 * 0.005}
+                "se": 0.005, "lower": 1 - rank / 100 - 1.28 * 0.005, "organisers": owner == "stet"}
 
     owners = ["f1", "f2", "stet", "f3", "f4", "f5", "f6", "f7", "f8", "q1", "q2", "q3"]
     server.board = [row(i + 1, o, rounds=3 if o == "q3" else 9) for i, o in enumerate(owners)]
-    server.verifiers = [{"handle": "stet", "trusted": True, "anchor": True}, {"handle": "stet-rented-1", "trusted": True, "worker": True}, {"handle": "volunteer"}]
     server.gains["large"] = {"f1": 0.08, "f2": 0.07, "f3": 0.06, "f4": 0.05, "f5": 0.04, "f6": 0.03, "f7": 0.02, "f8": 0.019, "q1": 0.055, "q2": 0.055, "stet": 0.045}
 
 
@@ -610,9 +606,10 @@ def test_a_rehearsal_is_kept_apart_and_says_what_it_is(world, capsys):
     with pytest.raises(SystemExit):
         run(world, "finals", "plan", "--scale", "standard")
     assert "another size is for a rehearsal" in capsys.readouterr().err and not (world.out / "finals-s2").exists()
-    # Any settled round will do, at any size, with a beacon round that has been emitted already; the organisers named by hand.
+    # Any settled round will do, at any size, with a beacon round that has been emitted already. An account named by hand
+    # is the organisers' as well as those the board marks: f1's curator is a yardstick beside stet's.
     lot = SEASON.beacon_round_at(int(time.time()) - 3600)
-    assert run(world, "finals", "plan", "--rehearsal", "--scale", "standard", "--organisers", "stet,f1", "--rounds", rid, "--lot-beacon", f"{lot}:{'ab' * 32}") == 0
+    assert run(world, "finals", "plan", "--rehearsal", "--scale", "standard", "--organisers", "f1", "--rounds", rid, "--lot-beacon", f"{lot}:{'ab' * 32}") == 0
     plan = read(world.out / "finals-s2-rehearsal" / "plan.json")
     assert plan["rehearsal"] and plan["scale"] == "standard" and plan["rounds"] == [rid] and [r["owner"] for r in plan["yardsticks"]] == ["f1", "stet"]
     assert [r["owner"] for r in plan["finalists"]] == ["f2", "f3", "f4", "f5", "f6", "f7", "f8", "q1"] and [r["owner"] for r in plan["pool"]] == ["q2"]
@@ -626,6 +623,28 @@ def test_a_rehearsal_is_kept_apart_and_says_what_it_is(world, capsys):
     out = read(world.out / "finals-s2-rehearsal" / "table.json")
     assert out["rehearsal"] and out["complete"] and out["lot"]["name"] == "q2/c@v1" and "a rehearsal, not the finals" in capsys.readouterr().err
     assert [r["name"] for r in out["rows"] if r["role"] == "yardstick"] == ["f1/c@v1", "stet/c@v1"] and len(out["rows"]) == 11
+
+
+def test_the_organisers_curators_are_those_the_board_marks_and_the_list_of_verifiers_is_not_asked(world, capsys):
+    """The list of verifiers is cut at 200 rows, and the organisers' accounts sort last on it: the
+    fake server here has no such list at all, and would fail the test if it were asked for."""
+    server = world.server
+    _board(server)
+    server.add_round(7, _items())
+    server.board[0]["owner"], server.board[0]["organisers"] = "stet-two", True  # a second account of theirs, top of the board
+    assert run(world, "finals", "plan", "--rehearsal") == 0
+    plan = read(world.out / "finals-s2-rehearsal" / "plan.json")
+    assert plan["organisers"] == ["stet", "stet-two"] and [r["owner"] for r in plan["yardsticks"]] == ["stet-two", "stet"]
+    assert [r["owner"] for r in plan["finalists"]] == ["f2", "f3", "f4", "f5", "f6", "f7", "f8", "q1"]  # none of them theirs
+    capsys.readouterr()
+    # A board that does not say (an older server's) is not guessed at: the accounts are named, or nothing is planned.
+    for r in server.board:
+        del r["organisers"]
+    with pytest.raises(SystemExit):
+        run(world, "finals", "plan")
+    assert "does not say which curators are the organisers' own" in capsys.readouterr().err and not (world.out / "finals-s2").exists()
+    assert run(world, "finals", "plan", "--organisers", "stet,stet-two") == 0
+    assert [r["owner"] for r in read(world.out / "finals-s2" / "plan.json")["yardsticks"]] == ["stet-two", "stet"]
 
 
 def test_the_lot_is_not_drawn_from_a_beacon_round_that_has_not_been_emitted():

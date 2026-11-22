@@ -327,7 +327,7 @@ type BoardRow struct {
 	Ladder      bool      `json:"ladder,omitempty"`
 	Tied        bool      `json:"tied,omitempty"` // too close to the row its run of tied rows starts at to tell apart
 	TiedAt      int       `json:"-"`              // the rank its run of tied rows starts at; 0 when it is tied with nobody
-	Organisers  bool      `json:"-"`              // entered by the organisers: a reference curator, a yardstick
+	Organisers  bool      `json:"organisers"`     // entered by the organisers: a reference curator, a yardstick
 	CreatedAt   int64     `json:"created_at"`
 	AccountID   int64     `json:"-"`
 	Gains       []float64 `json:"-"` // per settled round, oldest first, for sparklines

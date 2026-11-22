@@ -913,11 +913,15 @@ def finals_dir(work: Path, season, rehearsal: bool = False) -> Path:
 def _freeze(args, season) -> dict:
     """The board as it stands, and who it sends to the finals."""
     board = ask("GET", "/api/v1/leaderboard").get("editors") or []
+    # Whose curators are the organisers' own is said on each row of the board. It is not worked out
+    # from the list of verifiers: that list is cut at 200, most work first, and the organisers'
+    # accounts are counted as having done none, so with enough volunteers they are not on it.
     organisers = set(args.organisers or [])
-    if not organisers:
-        organisers = {v["handle"] for v in ask("GET", "/api/v1/verifiers").get("verifiers") or [] if (v.get("trusted") or v.get("anchor")) and not v.get("worker")}
-    if not organisers:
-        raise Stop("the server names no organisers' account, so their curators cannot be told from entrants': name them with --organisers")
+    if all(isinstance(r.get("organisers"), bool) for r in board):
+        organisers |= {r["owner"] for r in board if r["organisers"]}
+    elif not organisers:
+        raise Stop("the server's board does not say which curators are the organisers' own, so they cannot be told from entrants': "
+                   "name the organisers' accounts with --organisers")
     rounds = ask("GET", "/api/v1/rounds?limit=30").get("rounds") or []
     # The newest crawl anyone could have seen by now: the one the server has adopted for its next
     # draw, or the newest a round was drawn from. Crawls are named by year and week, so the
@@ -1271,7 +1275,7 @@ def add_commands(sub) -> None:
 
     p = sub.add_parser("finals", help=argparse.SUPPRESS)  # organisers: the season's finals
     p.add_argument("stage", choices=["plan", "scripts", "farm", "table"])
-    p.add_argument("--organisers", type=_names, help="plan: the organisers' handles, whose curators are yardsticks (default: as the server marks them)")
+    p.add_argument("--organisers", type=_names, help="plan: the organisers' handles, whose curators are yardsticks (as well as those the server's board marks as theirs)")
     p.add_argument("--lot-beacon", metavar="ROUND[:RANDOMNESS]", help="plan: draw the lot from this drand round (its value is fetched from drand unless given)")
     p.add_argument("--draws", type=int, nargs="+", metavar="DRAND_ROUND", help="plan: the drand rounds announced for the finals' draws")
     p.add_argument("--rounds", nargs="+", metavar="ROUND", help="plan: the finals' rounds, once they have settled")
