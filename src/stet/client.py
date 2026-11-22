@@ -401,7 +401,7 @@ def cmd_submit(args):
     key = need_key()
     runs = sorted((project.path / ".stet" / "runs").glob("*/result.json"))
     if not any(json.loads(p.read_text()).get("valid") for p in runs[-5:]):
-        sys.stderr.write("warning: no recent valid `stet run` for this project. A curator that fails scores a gain of 0.\n")
+        sys.stderr.write("warning: no recent valid `stet run` for this project. A curator that fails counts as the lowest gain in its round.\n")
     if not args.yes:
         if not sys.stdin.isatty():
             sys.stderr.write("stet: pass --yes to submit without a prompt\n")

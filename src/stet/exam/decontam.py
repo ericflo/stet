@@ -8,10 +8,10 @@ round's corpus is dropped from the exam.
 Openings are normalised (lowercase, runs of whitespace collapsed) and cut to the season's key
 length, keeping only those with enough letters to be distinctive (`decontam` in the season).
 
-The other way in is the curator's own text. A curator is frozen before any of its round's exam
-was written, but its author could write a passage into it and publish the same passage
-afterwards, hoping the harvest takes it. So a script whose own text holds a sentence opening of
-a fresh item is refused (`written`): the grader has both in hand.
+The other way in is the curator's own text. An author could put a passage they have seen
+published into a curator, or write one in and publish it afterwards, hoping a harvest takes
+it. So a script whose own text holds a sentence opening of a fresh item is refused
+(`written`): the grader has both in hand.
 """
 
 from __future__ import annotations

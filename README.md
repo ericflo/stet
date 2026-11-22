@@ -24,8 +24,7 @@ stet submit
 
 `stet run` has no limit and uploads nothing: try as many ideas as you like, then submit
 the ones worth volunteers' GPU time. Without `stet harvest` a practice exam has no human
-writing, which is three quarters of an official score. An entry first runs in a round drawn
-at least 26 hours after it was submitted. Using a coding agent? Tell it: *Read
+writing, which is three quarters of an official score. Using a coding agent? Tell it: *Read
 https://www.stetrun.com/AGENTS.md and enter Stet.* · [How to enter](https://www.stetrun.com/enter)
 
 ## Lend a GPU
@@ -49,8 +48,8 @@ stet service install      # leave it running: starts with the machine, upgrades 
 - **An exam nobody can know.** Each round's exam is made at its draw. Three quarters of the
   score is human writing from three hours of the day before, picked by the draw, in every
   language by its share of the crawl. One quarter is skills, generated from the round's
-  seed. An entry runs only in rounds drawn at least 26 hours after it was submitted, so it
-  is older than anything its exam could hold.
+  seed. A curator runs with no network and can add next to no text of its own, so the exam
+  cannot reach the student through it.
 - **Almost no ink.** 99.99% of what the student reads must be copied byte for byte from the
   round's corpus.
 - **Checked by other people.** Two volunteers run each curator, on NVIDIA and AMD, and

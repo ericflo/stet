@@ -5,8 +5,6 @@ From season 2 the examiner harvests every hour of the clock as soon as it has se
 or not a round wants it, and posts each harvest's hash to the server at once. A round's exam is
 made at its draw from a few of the day's hours, chosen by the draw. Nobody can aim at them:
 
-- an entry runs in a round only if it was frozen before the earliest hour the round could be
-  given, so no entry has seen any of the text, as before;
 - which hours a round gets follows from its seed, which nobody has before the draw;
 - what a harvest keeps of an hour follows from the hour's own seed, a public random number
   emitted when the hour ends, so nobody writing in that hour can tell what will be kept;

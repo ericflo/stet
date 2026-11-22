@@ -137,8 +137,8 @@ that publish late. Its exam was posted about 2 h 15 m after the draw and its rou
 at about 2 h 20 m, while the machines that had trained sat idle.
 
 **What it decided.** The harvest moved before the draw: every hour of the clock is
-harvested an hour after it ends, an entry runs only in rounds drawn at least 26 hours after
-it was submitted, and no round waits for its exam.
+harvested an hour after it ends, a draw picks three of the 26 before it, and no round waits
+for its exam.
 
 ## What a harvest gives
 

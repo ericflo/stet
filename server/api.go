@@ -687,7 +687,7 @@ func (a *App) apiSubmit(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			key := "earliest"
-			if ed.Status == "queued" && ahead < a.cfg.MaxNewPerRound && ed.CreatedAt <= next.DrawAt-a.freeze() {
+			if ed.Status == "queued" && ahead < a.cfg.MaxNewPerRound && ed.CreatedAt <= next.DrawAt-commitMargin {
 				key = "enters"
 			}
 			out[key] = map[string]any{"round": roundID(a.season.ID, next.Idx), "draw_at": next.DrawAt}

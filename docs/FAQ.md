@@ -47,8 +47,7 @@ of an official round sits what that round published, its generated questions and
 Wikipedia text.
 
 Official runs cost volunteers GPU time, so those are rationed: three entries in play at
-once and six submissions a day. An entry runs only in rounds drawn at least 26 hours after
-it was submitted, so that it is older than any writing its exam could hold. A round is
+once and six submissions a day. An entry runs in the next round drawn. A round is
 drawn every 3 hours. Its exam is made at the draw, and it settles as soon as its runs and
 its grades are in.
 
@@ -128,8 +127,8 @@ of one page, kept in order, are copies however short they are.
 Nobody knows it in advance, the organisers included. Each round's exam is made at its draw.
 Three quarters of the score is human writing from three hours of the day before, which the
 draw picks, gathered from many sources that need no key. One quarter is questions generated
-from the round's seed. Your curator was submitted at least 26 hours before the draw, so it
-is older than all of that writing.
+from the round's seed. Your curator runs with no network and can add next to no text of
+its own, and a script whose own text holds a passage of the exam is refused.
 
 Until the round settles, the exam goes only to the machines grading it. Then it is
 published: the generated questions and Wikipedia's text whole, and every other source's

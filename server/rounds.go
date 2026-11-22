@@ -357,7 +357,7 @@ func (a *App) selectEntrants(s *State, cutoff int64, idx int) []entrant {
 		switch {
 		case e.Status == "running" && roundsRun(s, e.ID) < a.cfg.QualifyRounds:
 			qualifying = append(qualifying, e)
-		case e.Status == "queued" && e.CreatedAt <= cutoff-a.freeze():
+		case e.Status == "queued" && e.CreatedAt <= cutoff-commitMargin:
 			queue = append(queue, e)
 		}
 	}

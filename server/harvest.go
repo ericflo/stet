@@ -19,11 +19,14 @@ import (
 // draw the server gives the round a few of the day's hours, chosen by the round's seed, and the
 // examiner makes the exam from exactly those. What keeps anyone from aiming at it:
 //
-//   - an entry runs in a round only if it was frozen before the earliest hour the round could
-//     be given (freeze), so no entry has seen any of the text;
 //   - the hours follow from the seed, which nobody has before the draw;
 //   - each harvest's hash was here before the draw, so a harvest cannot be made again to suit
-//     a round.
+//     a round;
+//   - a curator runs with no network and may add a few thousand tokens of its own, and a
+//     script whose own text holds a passage of the exam is refused by the grader.
+//
+// An entry may be submitted after the writing its exam will hold was published. That is let
+// be: it would have to carry the text in, and the last point is what stops that.
 
 const (
 	harvestHour  = 3600            // a harvest is an hour of the clock
@@ -47,16 +50,6 @@ type RoundHour struct {
 }
 
 func harvestKey(hour int64) string { return fmt.Sprintf("harvest/%012d", hour) }
-
-// freeze is how long before a round's draw an entry must have been submitted to run in it:
-// the season's reach, so that the entry is older than every hour the round's exam could be
-// made from. A server run for development admits entries at once.
-func (a *App) freeze() int64 {
-	if f := int64(a.cfg.Freeze.Seconds()); f > commitMargin {
-		return f
-	}
-	return commitMargin
-}
 
 // chooseHours gives the k of the hours whose sha256 with the round's seed is smallest, in the
 // hours' order. stet.exam.fresh.harvest.choose_hours is the same rule, for anyone to check with.

@@ -79,8 +79,8 @@ def sit_exam(trained: Trained, rnd: Round, scale: Scale, exam) -> dict:
     result = trained.result
     result["round"], result["exam_sha256"] = rnd.describe(), exam_digest(exam)
     if trained.trained and (found := written(exam, trained.ink_windows, rnd.season)):
-        # The curator was frozen before the exam's writing existed, so this is text its author
-        # wrote in and published afterwards. No student of it is scored.
+        # The exam's writing reached the training set through the curator's own text: carried
+        # in by its author, or written in and published afterwards. No student of it is scored.
         trained.trained = False
         result["invalid_reason"] = f"the script's own text holds {len(found)} of the passages in the round's exam"
     if trained.trained:

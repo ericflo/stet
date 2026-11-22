@@ -66,12 +66,15 @@ published when the round settles, so every score can be checked. Fresh text that
 round's corpus already holds is dropped from the exam, since it is the exam that came
 second.
 
-**Entries are frozen, so no round waits for its exam.** Writing published after the draw is
-also writing no curator has seen, but a round would wait for it: hours, with the machines
-that have trained standing idle. Freezing the entries gives the same guarantee and no wait.
-An entry runs only in rounds drawn at least 26 hours after it was submitted, and a round's
-writing comes from the 26 hours before its draw, so every entry is older than anything its
-exam could hold. The examiner harvests every hour of the clock an hour after it ends and
+**The exam's writing is from the day before the draw, so no round waits for its exam.**
+Writing published after the draw is writing no curator's author has seen, but a round would
+wait for it: hours, with the machines that have trained standing idle. So a round's writing
+comes from the 26 hours before its draw, and an entry may be newer than some of it. That is
+let be. A curator runs with no network; the only text it can bring is its ink, 16,000 tokens
+at the standard size; and the grader refuses a script whose ink holds a passage of the exam.
+What is left to an author who reads the day's writing is to guess which three hours the draw
+will pick and which few hundred passages of them, and then to find pages like them in a
+crawl gathered before any of it was written. The examiner harvests every hour of the clock an hour after it ends and
 tells the server the harvest's hash at once. So nobody knows which hours a round will be
 given until its draw; nobody writing in an hour can tell what the harvest will keep of it,
 because that is chosen with a public random number emitted as the hour ends; and the
@@ -194,7 +197,7 @@ which says whether the next season should move up too.
 | Attack | What stops it |
 |---|---|
 | Tune a curator to a known corpus | The crawl is public, but which files are drawn is unknown until after commit |
-| Tune a curator to the exam | Its writing is newer than the curator, which was frozen 26 hours before the draw, and its questions come from the draw's seed |
+| Tune a curator to the exam | Its writing is three hours of the day before, picked by the draw, and its questions come from the draw's seed; a curator can carry in next to no text, and what it carries is checked against the exam |
 | Write a passage into a curator, then publish it where a harvest may take it | What a harvest keeps of an hour is chosen with a random number emitted as the hour ends, and a script whose own text holds a passage of its round's exam is refused |
 | Ship a dataset instead of editing | The ink budget. A model's weights can be large; the text it may add cannot |
 | Have a large model write the data | The same: 0.01% ink, and no network while the curator runs |

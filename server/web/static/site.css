@@ -372,12 +372,11 @@ a.now-card:hover { border-color: var(--ink-3); }
 .xmix p { margin: 6px 0 0; font-size: 16.5px; color: var(--ink-2); line-height: 1.45; }
 .xmix b { color: var(--ink); font-weight: 600; }
 .xclock { font-family: var(--mono); font-size: 12.5px; color: var(--ink-3); }
-.xc-bar, .xc-row { display: grid; grid-template-columns: 3fr 5fr 3fr; gap: 3px; }
+.xc-bar, .xc-row { display: grid; grid-template-columns: 8fr 3fr; gap: 3px; }
 .xc-bar { height: 14px; }
 .xc-bar i { border-radius: 2px; }
 /* The day before the draw, with the three hours the draw picks marked in it. */
 .xc-bar .pub { background: linear-gradient(90deg, var(--mark-soft) 0 14%, var(--mark) 14% 19%, var(--mark-soft) 19% 49%, var(--mark) 49% 54%, var(--mark-soft) 54% 80%, var(--mark) 80% 85%, var(--mark-soft) 85%); }
-.xc-bar .settle { background: var(--line, var(--mark-soft)); }
 .xc-bar .sit { background: var(--green); position: relative; }
 .xc-bar .sit::before { content: ""; position: absolute; left: -3px; top: -6px; bottom: -6px; border-left: 2px solid var(--red); } /* the draw */
 .xc-row { margin-top: 10px; line-height: 1.35; }

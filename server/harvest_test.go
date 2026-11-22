@@ -5,7 +5,6 @@ import (
 	"reflect"
 	"strings"
 	"testing"
-	"time"
 )
 
 // The rule that gives a round its hours is the harness's too (stet.exam.fresh.harvest.choose_hours,
@@ -152,48 +151,6 @@ func TestARoundDrawnWithNoHarvestTakesHoursChosenLate(t *testing.T) {
 		t.Fatalf("the round's hours, chosen late: %+v late=%v", rd.Hours, rd.HoursLate)
 	}
 	w.check()
-}
-
-// An entry runs only in rounds drawn at least the season's reach after it was submitted: every
-// hour such a round's exam could be made from began after the entry was frozen.
-func TestAnEntryWaitsOutTheSeasonsReachBeforeItsFirstRound(t *testing.T) {
-	pub, priv := newKey()
-	cfg := testConfig(t, pub)
-	cfg.Freeze = time.Duration(loadSeason().Exam.Fresh.Reach) * time.Second
-	w := startWorld(t, cfg, newMemKV(), dirBlobs{cfg.DataDir + "/blobs"})
-	anchor := w.join("anchor-one", priv)
-	id := w.submit(anchor, "ref-a", "print(1)")
-	draw := now() + 3600
-	young := func() bool {
-		var in bool
-		w.app.st.view(func(s *State) {
-			for _, e := range w.app.selectEntrants(s, draw, 1) {
-				in = in || e.EditorID == id
-			}
-		})
-		return in
-	}
-	if young() {
-		t.Fatal("an entry submitted an hour before a draw runs in it")
-	}
-	w.app.st.update(t.Context(), func(tx *Tx) error {
-		ed := tx.s.Editors[id]
-		ed.CreatedAt = draw - cfg.Freeze.Milliseconds()/1000 + 1
-		tx.saveEditor(ed)
-		return nil
-	})
-	if young() {
-		t.Fatal("an entry a second short of the reach runs")
-	}
-	w.app.st.update(t.Context(), func(tx *Tx) error {
-		ed := tx.s.Editors[id]
-		ed.CreatedAt = draw - cfg.Freeze.Milliseconds()/1000
-		tx.saveEditor(ed)
-		return nil
-	})
-	if !young() {
-		t.Fatal("an entry as old as the reach does not run")
-	}
 }
 
 // postExamFrom posts a round's exam as made from the given hours' harvests.

@@ -575,21 +575,25 @@ watch list cost no agreement and remove three quarters of the noise.
 - **The agent family's answers follow from the session shown**, in a project drawn from the
   seed. Season 1's listings could be learned by heart.
 - **The exam's writing is harvested before the draw, and chosen by it.** Season 1 waited two
-  hours after a draw for writing published after it. That bought the guarantee that no curator
-  had seen the exam, and cost every round two hours. Season 2 gets the same guarantee the other
-  way round. The examiner harvests every clock hour, and commits each harvest's hash to the
-  server at once, where anyone can read it. A draw's seed picks three of the 26 hours before
-  it; the exam is made from exactly those, and the server refuses one that is not. An entry
-  runs only in rounds drawn 26 hours or more after it was submitted, so everything its exam
-  can hold was written after it was frozen. The examiner cannot choose which hours a round
-  gets, and cannot change an hour after committing it. What still rests on trust is that each
-  harvest is what the sources said: section 7.3's answer stands, many sources, each capped,
-  each harvest seeded by the public beacon.
-- **A curator cannot write the exam into its script.** An author could put a passage in a
-  curator's ink and publish the same passage after the freeze, hoping a harvest takes it. The
-  grader holds both: a script whose ink, with 256 bytes either side, has the opening of a
-  sentence of a fresh item is refused. With ink at 16,000 tokens this is a check on a few
-  pages of text.
+  hours after a draw for writing published after it. That bought the guarantee that no curator's
+  author had seen the exam, and cost every round two hours. Season 2 takes the writing from
+  before the draw. The examiner harvests every clock hour, and commits each harvest's hash to
+  the server at once, where anyone can read it. A draw's seed picks three of the 26 hours
+  before it; the exam is made from exactly those, and the server refuses one that is not. The
+  examiner cannot choose which hours a round gets, and cannot change an hour after committing
+  it. What still rests on trust is that each harvest is what the sources said: section 7.3's
+  answer stands, many sources, each capped, each harvest seeded by the public beacon.
+- **No freeze on entries.** An entry may be submitted after some of its exam's writing was
+  published. A first draft of the season made every entry wait 26 hours so that none could;
+  it was taken out, because the wait cost every entrant a day and bought almost nothing. A
+  curator has no network when it runs. The pool it chooses from was crawled before any of the
+  writing existed, and what the pool shares with the exam is dropped from the exam. The one
+  way text gets from an author's hands into the training set is ink, and there are 16,000
+  tokens of it.
+- **A curator cannot write the exam into its script.** The grader holds the ink and the exam:
+  a script whose ink, with 256 bytes either side, has the opening of a sentence of a fresh
+  item is refused. With ink at 16,000 tokens this is a check on a few pages of text, and it
+  is what the freeze was for.
 - **Three more keyless sources.** Forums that run Discourse (31 of them, about 100 replies an
   hour), the kernel's mailing lists (first versions of patches: code written by people this
   hour), and Crossref (abstracts of works registered this hour, about 40). Stack Exchange was

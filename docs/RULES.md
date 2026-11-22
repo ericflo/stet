@@ -74,22 +74,18 @@ pushes the next back.
    announcements and refuse a round that contradicts what they were told. No draw is
    announced less than six minutes ahead, and a draw that is moved is announced again the
    same way, for a time no round was ever announced for before.
-2. **Freeze.** Your curator runs only in rounds drawn at least 26 hours after you submitted
-   it. A round's exam holds writing from the day before its draw, so every curator in a
-   round is older than anything its exam could hold. A new version is a new submission, and
-   waits again.
-3. **Draw.** The seed is `sha256(season, round number, drand round, drand randomness,
+2. **Draw.** The seed is `sha256(season, round number, drand round, drand randomness,
    crawl)`. It picks the corpus files, the order of the documents, the exam's generated
    questions and the student's initial weights. Nobody can know or steer any of that beforehand,
    organisers included. Draws happen only at fixed ten-minute marks, so the organisers
    cannot pick a favourable drand round either.
-4. **Edit.** Two volunteers each run every curator, in a sandbox, with a time limit. Each
+3. **Edit.** Two volunteers each run every curator, in a sandbox, with a time limit. Each
    run writes an edit script.
-5. **Exam.** The round's exam is made at the draw. The organisers' examiner harvests what
+4. **Exam.** The round's exam is made at the draw. The organisers' examiner harvests what
    people publish, every hour of the clock, and tells the server each harvest's hash as it is
    made. The draw's seed picks three of the day's hours, and the exam is made from exactly
    those and posted with its hash (see [the exam](#the-exam)). No round waits for its exam.
-6. **Grade.** Other volunteers train the student on what each script says, as soon as it
+5. **Grade.** Other volunteers train the student on what each script says, as soon as it
    is written, and have it sit the exam. Grading runs no entrant code: a
    script is plain data.
 7. **Settle.** A round settles as a whole. Until then every script and every grade is
@@ -170,8 +166,6 @@ with a public random number emitted as the hour ends, and tells the server the h
 hash at once. At the draw, the round's seed picks three of the hours harvested in the 26
 before it. So:
 
-- every curator in the round was submitted before any of that writing existed
-  ([the freeze](#a-round));
 - nobody knows which hours a round will be given until its draw, the organisers included;
 - nobody writing in an hour can tell what the harvest will keep of it;
 - and the organisers cannot make a harvest again to suit a round: its hash was public first.
@@ -534,9 +528,8 @@ script with `stet score`.
   draw then picks the hours, so no harvest can be made to suit a round or a curator. Anyone
   can make the generated questions again from the seed, check which hours the seed picks,
   and check every fresh item against its source once the round settles. What they could do
-  and nobody would see: leave a source out of an hour's harvest. Their own reference
-  curators are frozen like anyone's, and they tune nothing on a round's exam before it
-  settles.
+  and nobody would see: leave a source out of an hour's harvest. They tune nothing of their
+  own reference curators on a round's exam before it settles.
 - **Training the finals.** The finals' students are trained on the organisers' machines.
   The scripts and the exam are published, so any of them can be trained again.
 - **Choosing when the season closes,** and so which rounds pick the finalists. The close is
