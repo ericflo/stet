@@ -87,9 +87,11 @@ Every official round's exam is made by an organisers' machine running `stet exam
   fresh items the corpus already holds, generates the round's questions, and posts the
   exam. No round waits for its exam.
 
-So it has to be running for a day before a season's first draw, and a stop of more than a
-day leaves the next round without hours to draw from. Started again, it harvests the
-newest hours first.
+Started, when a season opens or after a stop, it harvests the newest settled hour first and
+works back through the day before. A round drawn meanwhile is given the hours committed by
+its draw. One drawn before any was committed takes its exam from the first that follow, and
+its page says they were chosen after the draw. So no round waits for the examiner to have
+run for a day.
 
 What it needs:
 
@@ -129,7 +131,7 @@ WantedBy=default.target
 ```sh
 systemctl --user daemon-reload && systemctl --user enable --now stet-examine
 tail -f ~/.local/state/stet/examine.log
-stet examine --round s1-o00003      # one round, by hand, once its exam can be made
+stet examine --round s2-o00003      # one round, by hand, once its exam can be made
 ```
 
 **If it stops, grading waits.** Curators still run and graders still train, but no student
@@ -485,33 +487,45 @@ rollback of the image.
 ## A new season
 
 A season freezes the student, the budgets, the exam and the rules. The next one is a new
-file in `src/stet/seasons/`, and the switch is:
+file in `src/stet/seasons/` and one change: `CURRENT_SEASON` and a new `HARNESS_VERSION` in
+`src/stet/spec.py`; `python tools/export_season.py <season> > server/season.json`; the rules
+in `docs/RULES.md`.
 
-1. Announce it, and finish the current season with its finals. (Season 1 had one entrant
-   and was paused after round 14: it has no finals, and Season 2 begins when its change is
-   merged.)
-2. In one commit: `CURRENT_SEASON` and a new `HARNESS_VERSION` in `src/stet/spec.py`;
-   `python tools/export_season.py <season> > server/season.json`; the rules in
-   `docs/RULES.md`. Then the tests, and push.
-3. The server keeps one season, and rounds and the record are not kept by season, so the
-   new one starts on its own database: set `STET_DB_NAME` to a new name (and `STET_SCALE`,
-   if the official scale changes) in Epsilon's `apps/stet` manifest, and deploy. The old
-   database stays as it was.
-   Archive the finished season's site from it ([below](#archiving-a-season)), so that its
-   pages stay readable under `/seasons/<id>/`.
-4. Enter the reference curators from the organisers' account, before the first draw:
-   `for d in identity english tidy heuristic dclm fineweb2 fineweb-edu mimic; do stet submit examples/$d --yes; done`.
-   Three new entries are admitted a round, in the order they were submitted.
-5. Restart the organisers' verifier and the examiner on the new client. The examiner
-   (`stet examine --follow`) harvests an hour of writing every hour and commits to it, and a
-   round's exam is drawn from the day before its draw: so it runs for a day before the first
-   round is drawn (`GET /api/v1/harvests` lists what it has committed). A new database is
-   not paused, so hold the first draw for that day: pause the rounds straight after the
-   deploy ([above](#pausing-the-rounds)) and resume a day later. A round drawn with no hours
-   committed is not lost: its exam is made late, from the harvests that follow, and the
-   round says so.
-6. Watch the first round through: its exam posted (`/api/v1/rounds/<id>` shows
-   `exam_digest`), grades arriving, the round settling.
+**Merging that change is the switch.** A season with entrants has had its finals by then
+([above](#finals)), and no round is open ([Deploying](#deploying)). Season 1 had one entrant
+and no finals.
+
+The deploy does the server's part by itself:
+
+- The server keeps one season, and rounds and the record are not kept by season, so the new
+  one runs on a database of its own, `stet-<season>`, which the server makes when it first
+  starts. The old season's database stays as it was. The bucket's files are named by their
+  season or by their hash, so the seasons share it.
+- The site hands out the new client, and the server refuses the old one. Every machine
+  rented from then on installs the new one.
+- Rounds are not paused, and a round is drawn at the usual time once a curator is waiting
+  to run, not before.
+
+A new database has no accounts, and the examiner does not upgrade itself. So the season is
+opened on the organisers' machine, as soon as `/api/v1/season` names it:
+
+```sh
+stet upgrade && stet login --handle stet    # the new client, and the organisers' account made again
+systemctl --user restart stet-examine       # the examiner on the new client
+for d in fineweb2 dclm tidy identity english heuristic fineweb-edu mimic; do stet submit examples/$d --yes; done
+```
+
+and `stet-cloud` is started if it was stopped ([above](#rented-machines)): it asks for work
+with the organisers' key, so it rents nothing before the account is there.
+
+Nothing after that is waited for or watched. The examiner harvests the newest settled hour
+first, so the first round has its writing ([above](#the-examiner)). Three new entries are
+admitted a round, in the order they were submitted: the two references that run in every
+round go first. Everyone else makes their account again the same way, with their own
+handle, and an entrant links GitHub again (`stet login --gist`).
+
+The finished season's pages are archived from its database ([below](#archiving-a-season)),
+so that they stay readable under `/seasons/<id>/`. The new season does not wait for that.
 
 ## Archiving a season
 
@@ -582,7 +596,7 @@ Set in `apps/stet/deployment.yaml`. The ones that are rules:
 | `STET_RUNS_PER_ENTRY` | 2 | Different people who run each entry (a third when two differ) |
 | `STET_ACTIVE_WINDOW` | 10m | How recently a verifier must have asked for work to be waited for |
 | `STET_REPLICA_WAIT` | 45m | How long a round waits for verifiers still at work, and for someone to grade a script nobody else is there for |
-| `STET_DB_NAME` | stet | The database the server keeps its records in: one a season |
+| `STET_DB_NAME` | `stet-<season>` | The database the server keeps its records in: one a season, made when the server first starts on it |
 | `STET_SCALE` | the season's | The scale rounds are run at: `standard` |
 
 A full round is at most 8 + 3 × 3 = 17 entries, and fewer in most rounds: of the

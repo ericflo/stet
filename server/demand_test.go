@@ -376,8 +376,11 @@ func TestTheWorkSaysWaitingOnlyWhenARunnerWouldDrawEarly(t *testing.T) {
 		t.Fatal("waiting, with no entry")
 	}
 	w.submit(alice, "first", "print(1)")
-	if !waiting(w, anchor) {
-		t.Fatal("not waiting, with an entry and nobody around to run it")
+	// In the last minutes before the usual draw there is nothing left to bring forward: the
+	// draw is already at the first mark on the grid that leaves verifiers their notice.
+	room := w.app.season.nextGrid(now()+drawNotice-1) < w.scheduledAt()
+	if got := waiting(w, anchor); got != room {
+		t.Fatalf("waiting is %v with an entry and nobody around to run it, and the draw %ds off", got, w.scheduledAt()-now())
 	}
 	// A runner asks: the draw comes forward, and nothing more is gained by another.
 	w.claim(anchor, true)
