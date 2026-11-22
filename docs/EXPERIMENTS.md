@@ -87,18 +87,19 @@ family, asked cold and again after a few worked examples.
 |---|---|---|---|
 | News, reference, discussion, social posts, technical writing | 24 to 93 | 0.77 to 1.00 | in |
 | Science abstracts | 19 | 0.49 | out |
-| Logic, agent sessions, knowledge, reading, grammar, transformation | 2.1 to 12 | 0.71 to 1.00 | in |
-| Arithmetic, units, word problems, algebra, an algorithm's output, structured data: after worked examples | 1.6 to 3.8 | 0.60 to 0.94 | in |
+| Logic, agent sessions, knowledge, reading, grammar | 4.9 to 12 | 0.71 to 1.00 | in |
+| Arithmetic, units, word problems, algebra, an algorithm's output: after worked examples | 1.6 to 3.8 | 0.66 to 0.94 | in |
+| Transformation; structured data after worked examples | 2.1; 1.6 | 0.83; 0.60 | passed here, then out: [the order of a script](#the-order-of-a-script) |
 | The same six asked cold | 0.8 to 3.4 | −0.09 to 0.94 | out (one passes; its other form counts) |
 | Running a program; several steps of arithmetic; answers offered as a pair | 0.4 to 2.4 | −0.71 to 0.66 | out |
 
-The score those parts make has a noise of 0.0041 bits per byte between two trainings of
-one script at standard, and the six curators spread by forty times that. They stand in
-the same order at standard and at large.
+The score the final parts make has a noise of 0.0036 bits per byte between two trainings
+of one script at standard, and the six curators spread by forty-five times that. They
+stand in the same order at standard and at large.
 
 **What it decided.** The exam is four kinds of writing (reference, news, technical,
-conversation) and eight skills (agents, reading, transformation, logic, grammar, numbers,
-programs, knowledge). A part that failed is not on the exam, and its generator or its
+conversation) and seven skills (agents, reading, logic, grammar, numbers, programs,
+knowledge). A part that failed is not on the exam, and its generator or its
 source is deleted: nothing is sat that does not count. The season takes two trainings of
 one script to differ by 0.005 at standard and 0.03 at micro (`noise` in its file). At the
 official scale two grades of a script must agree within 0.025, a measurement of the
@@ -110,11 +111,15 @@ compared: every round's page publishes each grade's difference from the others.
 was `tidy` plus the 16,000 tokens of its own text a script could then hold, spent on
 worked problems in the forms of five skills. Where that worked it bought 0.10 bits per
 byte (agent sessions and transformation, 5.6 and 3.2 standard errors); on the score as it
-stood it beat `tidy` by 0.010, 2.6 standard errors. (On the final score, where those
-skills weigh less, the same students differ by 0.006, 1.8 standard errors.)
+stood it beat `tidy` by 0.010, 2.6 standard errors. On the final score, where
+transformation is gone and agent sessions weigh less, the same students differ by 0.004,
+1.3 standard errors.
 
 **What it decided.** A script holds no text of its own: it is copies of the crawl and no
-more.
+more. That is partly a judgement: by the letter of the test, on the final score, the text
+bought too little to count. It bought the parts it was aimed at, nothing a curator does
+for the data needs it, and [text written for the purpose](#text-a-model-writes) taught no
+more than the pages it was written from.
 
 **Is the pool a curator chooses from big enough?** A standard round's pool is 16 files of
 the crawl, six times what the student reads. One student of each script was trained on a
@@ -135,6 +140,78 @@ by 1.5% to 6.5%, where the rule asked for a quarter less.
 **Micro still does not order curators as standard does.** Even on a pool of the same
 ratio, the micro and standard scores agree at only 0.43 (seven scripts). Practice at
 micro is for finding mistakes; a curator is compared at standard.
+
+## Text a model writes
+
+Would text that a small open model writes from the round's own pages teach the student
+more than the pages do? One practice round at standard, 69 students on rented GPUs
+([research](research/exam-first-principles.md#99-text-a-model-writes-a-pilot), with the
+rule written first). A fixed 4-billion-parameter model rewrote pages of `tidy`'s script in
+its own words, for 1%, 5% and 15% of what the student reads; in two more arms it wrote up
+pages `tidy` had not chosen, in place of `tidy`'s weakest. Every arm had a twin with the
+same pages in the same places, copied and not rewritten, and every pair was trained in up
+to three orders.
+
+| On the exam's writing, over thirteen pairs | The model's text less a copy of the same pages | Pairs where the model's text is ahead |
+|---|---|---|
+| The exam as it was | +0.008 | 12 |
+| Empty lines closed | −0.005 | 4 |
+| White space as the crawl has it | −0.002 | 5 |
+
+The first row is not the model's writing. The exam's passages held an empty line every 500
+bytes, tabs, and runs of spaces: the sources' own layout. Common Crawl's text has none of
+them (an empty line once in 140,000 bytes), so a student had hardly seen one, and each cost
+about twenty bits. The model writes paragraphs with an empty line between them. An arm
+with no model's text at all, only an empty line put after every line of 396 pages, gained
+half of what the 1% arm did.
+
+**What it decided.** Two things.
+
+- **No text a model writes.** With the layout taken out, rewritten pages are level with
+  their copies or below them, and worse as the dose grows (0.006 to 0.018 below at 15% in
+  place). No arm cleared the rule on the corrected exam.
+- **The exam's writing has the crawl's white space.** One space between words, one line end
+  between lines, no tabs. `tidy`, which had cut pages to their prose lines and so never
+  showed a student an empty line, was being marked 0.02 down for it.
+
+**`tidy` copies its pages whole.** The twins showed it, and four orders confirmed it: the
+pages `tidy` chooses, copied whole, beat `tidy`'s lines of them by 0.018 to 0.034 on the
+writing, every time. Nearly all of it is technical writing and code, whose lines are not
+sentences. And the starter (`stet init`) keeps 93% of pages, so it scores as the raw pages
+do; the site said it beat them, and no longer does.
+
+## The order of a script
+
+A script's order is the curator's to choose, and most shuffle. The pilot above trained
+one curator's pages in many orders: `tidy`'s lines ten ways, the same pages whole four
+ways, and the raw pages four ways. One student each.
+
+| The standard score, sd | bits per byte |
+|---|---|
+| Between two trainings of one script | 0.0037 |
+| Between two orders of `tidy`'s lines (ten) | 0.0084 |
+| The same without the one order that stands apart (nine) | 0.0052 |
+| Between two orders of `tidy`'s pages whole (four) | 0.0056 |
+| Between four draws of the raw pages | 0.019 |
+
+Nine of the ten orders of `tidy` agree about as two trainings do. One, the order a
+harness of a day earlier happened to give, is 0.02 better, and loses it when its lines
+are shuffled again. Why is not known. The raw pages vary far more: a student reads a
+sixth of them, and which sixth is worth up to 0.04.
+
+**What it decided.**
+
+- **The noise a part must clear is this one.** A round gives a curator one script. Set
+  against the spread between arrangements of one curator's pages, and not between
+  trainings of one script, two parts no longer told curators apart by 1.5 times the
+  noise: transformation (1.3) and structured data (0.8). Both are off the exam. Every
+  kind of writing still passes by 20 or more, but for technical writing (3.5, or 8.9
+  without one draw of raw pages); the other skills by 1.6 to 6.2.
+- **A practice run prints both numbers**, and the curator's brief says that a change which
+  also changes the order has to beat 0.008, not 0.005.
+- **The baseline stays four trainings of the crawl's own order.** A lucky baseline moves
+  every curator in the round alike, and the board fits each round's difficulty and takes
+  that out. It does move the gain a single round shows.
 
 ## Where a round's training went
 
@@ -270,4 +347,8 @@ That machine is about 1.2 times the floor for running curators
   would be read from.
 - What share the writing should have. The pilot cannot tell two thirds from nine tenths.
 - The finals' check one size up: whether the order holds at about 150M parameters.
+- Why one order of the same pages scored 0.02 above nine others, and whether an order
+  like it can be found on purpose.
+- How far a curator's gain moves between two draws of the raw pages for the baseline: four
+  draws is all there is.
 - How long a round takes from draw to settlement, now that it does not wait for its exam.

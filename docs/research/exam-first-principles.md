@@ -525,10 +525,11 @@ that pass add something the writing does not. So season 2 keeps both.
   group, never to the other.
 - **Writing:** reference, news, technical, conversation (discussion and social posts). All
   of it written by people in the day before the draw.
-- **Skills:** agents, reading, transformation, logic, grammar, numbers, programs and
-  knowledge. Numbers is arithmetic, units, word problems and algebra; programs is an
-  algorithm's output and structured data. Both are asked after a few worked examples, the
-  only form in which a student this small can be told apart on them.
+- **Skills:** agents, reading, logic, grammar, numbers, programs and knowledge. Numbers is
+  arithmetic, units, word problems and algebra; programs is an algorithm's output. Both are
+  asked after a few worked examples, the only form in which a student this small can be
+  told apart on them. (Transformation and structured data passed 9.7's tests and were
+  taken off by 9.10, which set them against a harder noise.)
 - **Every part earned its place, and nothing else is on the exam.** The pilot chose the two
   tests: curators spread on a part by at least 1.5 times its noise at the official size, and
   the order it puts them in holds at the large student at 0.55 or better. 9.7 put every
@@ -799,7 +800,8 @@ logic, grammar; numbers, which is arithmetic, units, word problems and algebra a
 examples; programs, which is an algorithm's output and structured data after worked
 examples; and knowledge). Science abstracts, running a program, several steps of
 arithmetic, every pair form and every cold form of a family that also has examples are off
-the exam and their generators deleted; Crossref is not harvested.
+the exam and their generators deleted; Crossref is not harvested. (9.10 takes two more
+off, transformation and structured data, and gives the score's numbers without them.)
 
 What the measurement says about the parts, beyond in and out:
 
@@ -1046,3 +1048,240 @@ their pair (every shared page in the same relative place), so that an arm is com
 
 The 15% arms and their twins are trained as registered, once or twice each as the
 machine's hours allow.
+
+**The result (22 November, 12:30 UTC).** 69 students, trained on one machine of seven RTX
+4090s rented for 2 hours 47 minutes, $7.80. No arm passes, and Season 2 has no written
+text. The pilot found two other things on the way, and 9.10 acts on them: the exam's
+writing was laid out in a way no page of the crawl is, and a script's order is worth more
+than the noise between two trainings of it.
+
+*What was not run as written.* `tidy-s4` was never trained. `tidy-s1` and `tidy-s2` have one
+student each, not two, and `rewriteraw-1` two, not three. The 15% arms have two students in
+the first order and one in a second. A third order was trained for `rewrite-1`, `rescue-5`,
+`rescue-15` and their twins, which nothing above asked for. The exam the verdict is read on
+went a step past the one registered: not only its empty lines closed, but all of its white
+space as the crawl has it (9.10); both are given. On the two corrected exams the unedited
+student is the one trained on the pilot's machine, since 9.7's weights were not kept. And
+the pilot's own weights were left on the machine but for one student, the link being too
+slow to fetch them, so none of this can be sat again.
+
+*The marks.* For every 1,000 bytes, the exam's fresh writing and the crawl's pages hold:
+
+| | The exam's writing | The crawl's pages | |
+|---|---|---|---|
+| Empty lines | 1.97 | 0.007 | 300 times |
+| Tabs | 0.37 | 0.001 | 600 times |
+| No-break spaces | 0.072 | 0.001 | 58 times |
+| Two spaces together | 0.106 | 0.007 | 15 times |
+| Lines that begin with a space | 0.44 | 0.10 | 4 times |
+
+(An empty line here is a line with nothing or only spaces in it. The 0.002 and 1.6 above
+counted two line ends with nothing between them.) The exam's sources give paragraphs,
+indented code and tables as their authors typed them; Common Crawl's text has every run of
+white space folded to one space or one line end.
+
+*The teacher's text against a copy of the same pages.* Writing, in bits per byte: an arm
+less `tidy` in the same order, for the first, second and third order it was trained in; its
+twin the same; and the teacher's text less the twin, in standard errors of that difference.
+On the exam with its white space as the crawl's:
+
+| Arm | The teacher's text | The same pages copied whole | The teacher's less the copy |
+|---|---|---|---|
+| `rewrite-1` | +0.013, −0.010, +0.018 | +0.005, −0.013, +0.008 | +0.008 (2.9), +0.003 (0.6), +0.011 (2.6) |
+| `rewrite-5` | +0.007, −0.001 | +0.017, +0.002 | −0.010 (−4.2), −0.003 (−0.8) |
+| `rewrite-15` | +0.014, −0.000 | +0.020, +0.017 | −0.006 (−2.0), −0.018 (−4.3) |
+| `rescue-5` | +0.012, +0.001, +0.008 | +0.017, +0.000, +0.013 | −0.005 (−2.1), +0.001 (0.3), −0.005 (−1.2) |
+| `rescue-15` | +0.021, +0.003, +0.025 | +0.022, +0.010, +0.022 | −0.001 (−0.3), −0.008 (−1.8), +0.003 (0.7) |
+
+Over the thirteen pairs the teacher's text is 0.002 below its copy, and above it in five.
+On the exam as registered, with only the empty lines closed, it is 0.005 below and above in
+four. On the exam as it was, it is 0.008 above and above in twelve of thirteen.
+
+*The rule.* Three conditions: above `tidy` by twice the standard error; above it by more
+than the widest gap between two arrangements of `tidy`'s own lines; and above its twin by
+twice the standard error. The widest gap is 0.029 on the exam as it was, 0.024 with the
+empty lines closed, 0.023 with the crawl's white space.
+
+- *On the exam as it was*, two arms pass all three: `rewrite-15` in the first order (+0.031
+  over `tidy`, +0.008 over its twin, 2.5 standard errors) and `rewrite-1` in the third
+  (+0.032, and +0.021 over its twin, 4.7). Had the exam been left as it was, this section
+  would be proposing a track for written text.
+- *With the empty lines closed*, the exam the verdict was registered on, only `rescue-15`
+  clears the widest gap (+0.027 and +0.028 in two orders of three), and its twin is 0.008
+  to 0.016 *above* it. By the rule the gain is the pages', not the writing's.
+- *With the crawl's white space*, only `rescue-15` clears it, once (+0.025), and its twin is
+  level (+0.003, 0.7 standard errors).
+
+`layout-1`, which has no teacher's text and an empty line after every line of 396 pages,
+gains 0.013 over `tidy` on the exam as it was, half of what `rewrite-1` gains there in the
+same order (0.026), and 0.004 and 0.001 on the two corrected exams. The prediction was "about
+what `rewrite-1` gains"; it is half, and the rest of `rewrite-1`'s lead also goes when the
+marks do.
+
+*How far each arm fell short.* One dose is ahead of its copy on the corrected exam: at 1%
+the teacher's text is above its twin in all three orders, by 0.003 to 0.011. At 5% and at
+15% the rewritten pages are below their copies in all four pairs, by 0.003 to 0.018. A gain
+that is there at the smallest dose and turns to a loss as the dose grows is what a mark
+does (a little of it teaches all there is to learn) and not what better writing does. What
+mark is left after the white space is not known; it is worth about 0.007, and no arm built
+on it clears the gap between two orders of `tidy`. The rescued pages, rewritten, do about
+as well as the same pages copied (six pairs: −0.005, +0.001, −0.005, −0.001, −0.008,
++0.003). So the teacher's time bought nothing that copying the page does not, and
+at 15% in place it cost 0.006 to 0.018.
+
+*What the twins found instead.* The twins hold no written text: they are `tidy` with some
+pages copied whole, in place of its lines of them or of its lowest-ranked pages. They beat
+`tidy` in the same order in twelve of thirteen comparisons, by up to 0.022. That is the rule's other branch, "a finding about
+`tidy` and not about writing", and 9.10 follows it.
+
+*The order of a script.* Ten arrangements of `tidy`'s lines, one student each but the first
+(five), writing on the exam with the crawl's white space:
+
+| `tidy` | seed 1 | seed 2 | seed 3 | trained lines reordered | keyed order 1 | keyed order 2 | less one page | yesterday's trained lines reordered | yesterday's script |
+|---|---|---|---|---|---|---|---|---|---|
+| +0.019 | +0.021 | +0.021 | +0.026 | +0.023 | +0.027 | +0.018 | +0.022 | +0.019 | +0.041 |
+
+Nine of them differ from each other as two trainings of one script do (0.0032 against
+0.0029). Yesterday's order stands 0.019 above their mean, six times that, and falls back
+among the others when its trained lines are put in another order. So what was written above on the
+morning of the pilot, that the control fell 0.017 "because of the script", was right that it
+is the order and wrong in what it suggested: most orders agree, and one does not. Why that
+one is better is not known. It is not its pages (the same lines reordered are ordinary),
+not the code that builds a script (old and new build the same text and the same tokens),
+not a damaged page it holds (taking the one garbled page out moves nothing), not a spike in
+the training loss, and not what the student read last (it survives averaging the last
+weights).
+
+The data, every script and the teacher's text are kept in
+`/home/ericflo/stet-measurements/s2-decision/pilot` (1.4 GB): each student's score on every
+item of each of the three exams, the 53 scripts, the teacher's 232 blocks of answers, the
+code as it ran, and `tables.txt`.
+
+### 9.10 What the pilot changed
+
+Written on 22 November 2026, after 9.9's result. Each of these is a change to the season
+made on the pilot's evidence, which was gathered for another question; each says what it
+rests on.
+
+**The exam's writing is laid out as the crawl lays out a page.** Before an item is made
+from a harvested document, every run of spaces, tabs and no-break spaces becomes one space
+and every run of line ends, with or without spaces between them, one line end
+(`crawl_space`, in `exam/fresh/select.py`). Nothing a student is asked to predict in a
+passage is now a mark its training text cannot hold. The cost is that indented code on the
+exam loses its indentation, as it does in every page of the crawl.
+
+What the fault did while it was there: a student paid about twenty bits for an empty line
+it had never seen, and a curator's place depended on whether its script happened to show
+the student one. A script that cut pages to their lines of prose never did, and `tidy`'s
+writing score rises by 0.023 against the unedited corpus's when the marks go (−0.004 to
++0.019). A script of copies could also have made empty lines on purpose, by joining two
+pieces at a line end, and bought about what `layout-1` did. The generated items are left
+as they are: closing the empty lines in their contexts moved no skill pillar by more than
+0.002.
+
+9.7's students sat the exam as it was, and their weights were not kept. Its verdicts on the
+kinds of writing stand, since those passed by 24 to 93 times the noise and the fault is
+worth 0.02. Its table of the six curators would move for the two that cut lines (`tidy`
+and `scribe`, up by about 0.02 against the others); by that estimate no two curators
+change places.
+
+**Two parts that passed 9.7 are taken off: transformation, and lookups in structured
+data.** 9.7's noise was the spread between trainings of one script. A round gives a curator
+one script, and the order that script happens to be in is luck of the same kind (9.9), so
+the noise a part has to clear is the spread between trainings of one curator's pages in
+different arrangements. The pilot has eighteen of those in three groups (`tidy`'s lines ten
+ways, the same pages whole four ways, the raw pages four ways), which gives the spread
+within a group fifteen degrees of freedom. 9.7's rule, unchanged but for that noise, on
+9.7's spreads between the six curators:
+
+| Part | Spread over the noise between trainings of one script | Spread over the noise between arrangements | |
+|---|---|---|---|
+| News | 93 | 47 | in |
+| Discussion; social posts | 47; 38 | 29; 20 | in |
+| Reference | 61 | 25 | in |
+| Technical writing and code | 25 | 3.5 | in |
+| Logic | 12 | 6.2 | in |
+| Reading | 5.4 | 5.5 | in |
+| Agent sessions | 5.7 | 4.0 | in |
+| Knowledge | 5.7 | 3.3 | in |
+| Grammar | 4.9 | 3.2 | in |
+| An algorithm's output, after examples | 3.8 | 2.3 | in |
+| Arithmetic; word problems; algebra; units, after examples | 3.8; 2.6; 1.6; 2.3 | 1.9; 1.8; 1.7; 1.6 | in |
+| Transformation | 2.1 | 1.3 | **out** |
+| Structured data, after examples | 1.6 | 0.8 | **out** |
+
+On transformation one script in another order moves by 0.062 bits per byte, and the six
+curators stand 0.081 apart: taking the luck out of that spread leaves curators about as far
+apart as one of them is from itself. On structured data they are closer than that. Both
+generators are deleted. Technical writing's 3.5 is one raw-page arrangement that scored
+0.15 above the other three; without the raw pages it is 8.9.
+
+This is a rule's verdict changed after its results were in, and it is said here as that.
+The change takes parts off and puts none on; the threshold is the one written before; what
+changed is the noise, to the one a round really has. With that noise a part on which
+curators did not differ would show about 0.9 where 9.7 reckoned 0.6, so 1.5 is less clear
+of nothing than it was meant to be, and the four parts of *numbers* pass narrowly.
+
+The score is now four kinds of writing and seven skills (agents, reading, logic, grammar,
+numbers, programs, knowledge), programs being an algorithm's output alone. On 9.7's
+students: 0.0036 between two trainings of one script; the six curators 0.165 apart; in the
+same order at standard and at large, and with the unedited corpus as a seventh the two
+orders agree at 0.89.
+
+| | mimic | fineweb2 | scribe | tidy | unedited | english | dclm |
+|---|---|---|---|---|---|---|---|
+| standard | +0.100 | +0.050 | +0.006 | +0.002 | 0 | −0.239 | −0.301 |
+| large | +0.077 | +0.045 | −0.017 | −0.025 | 0 | −0.280 | −0.326 |
+
+Between two arrangements of one curator's pages the score moves by 0.008 (0.0084 over
+`tidy`'s ten, 0.0056 over the whole pages' four), twice what training again does, so the
+six curators are about twenty of those apart and not forty-five. The season's file carries
+both numbers (`noise.standard.gain_sd` and `order_sd`), and a practice run prints both.
+
+*Ink, read again.* Transformation was one of the two skills `scribe`'s text bought. On
+this score `scribe` is above `tidy` by 0.0040, 1.3 standard errors, where 9.7 gave 1.8 on
+the score before this and 2.6 on the one it was aimed at. Those standard errors are of the
+noise between trainings of one script; the two scripts share their order, so the order's
+luck is mostly common to them, but not wholly. So that a script holds no text of its own
+rests on 9.7's three reasons and on 9.9, which found that text written for the purpose
+teaches no more than the pages it was written from; it does not rest on the letter of
+9.7's third test.
+
+**`tidy` copies its pages whole.** `tidy` kept only the lines of a page that read as
+sentences. The same pages in the same order, each copied whole, were trained in four
+orders against `tidy` in the same four:
+
+| | first order | keyed order 1 | keyed order 2 | seed 1 |
+|---|---|---|---|---|
+| Writing, whole pages less `tidy`'s lines | +0.025 | +0.018 | +0.029 | +0.034 |
+| The score, the same | +0.025 | +0.021 | +0.032 | +0.035 |
+
+Nearly all of it is technical writing and code (−0.13 for the lines, −0.03 for the pages,
+against the unedited corpus): a line of code is not a sentence, and `tidy` cut it. On
+reference and news the lines are 0.003 ahead, and on conversation 0.009 behind. Two things
+tried beside it did worse than `tidy` as it now is: only as many of its top-ranked pages as
+fill the budget, whole (0.011 and 0.014 lower on writing in two orders), and the same of
+its lines (0.015 lower in one). `tidy` chooses a quarter more than the budget holds, and
+the student reads a shuffled part of that.
+
+**The starter is not said to beat the raw pages.** Its test for a page that reads as
+writing keeps 314,649 of the round's 337,313 pages, so its script is the raw pages in a
+shuffle. Three shuffles of it scored −0.008, +0.002 and +0.034 against the crawl's own
+order. The site said it "already beats the raw pages"; it now says that it runs, and that
+the gain is the entrant's to find.
+
+**Those three shuffles are the largest thing the pilot found and did not look for.** A
+student reads a sixth of the raw pages. Which sixth, and in what order, is worth up to 0.04
+bits per byte, more than `tidy`'s whole gain over them, and a round measures every curator
+against one such draw: its four
+baseline trainings are four trainings of the crawl's pages in the crawl's order. The four
+are not changed into four orders. A lucky or unlucky baseline moves every curator of the
+round by the same amount, and the board fits a difficulty to each round and takes exactly
+that out (`fitRatings` in `server/rating.go`), so no curator's place depends on it. What it does move is the gain a
+round's page shows, and "worth N times the raw data" read from one round. That is a reason
+to read both over many rounds, and the site's glossary says so under *gain*.
+
+**What is still not known.** Why one order of `tidy`'s lines is 0.02 better than nine
+others, and whether a curator could find such an order on purpose. If one could, ordering
+would be worth more than most filters measured here, and it is allowed: a script's order
+is the curator's. And what mark, if any, the teacher's text still shares with the exam.
