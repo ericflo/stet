@@ -2804,7 +2804,7 @@ func TestAgreeingThatAScriptIsInvalidEarnsNoStanding(t *testing.T) {
 	invalid := func(a *actor) (int, string) {
 		c := w.claim(a, a == anchor)
 		p := w.result(c, 5.5, 6.0)
-		p["valid"], p["invalid_reason"] = false, "the script spends more ink than the round allows"
+		p["valid"], p["invalid_reason"] = false, "line 3: this line holds text; a script is copies of the crawl and holds no text of its own"
 		delete(p, "exam")
 		var ack struct {
 			Status string `json:"status"`
@@ -2822,7 +2822,7 @@ func TestAgreeingThatAScriptIsInvalidEarnsNoStanding(t *testing.T) {
 	w.check()
 	es := w.entries(alice, idx)
 	// A run whose script is invalid is a failed run, and says why.
-	if es[0].Valid || !strings.Contains(es[0].Reason, "more ink") || len(es[0].Runs) != 1 || es[0].Runs[0].Status != "failed" || es[0].Runs[0].Gain != 0 {
+	if es[0].Valid || !strings.Contains(es[0].Reason, "no text of its own") || len(es[0].Runs) != 1 || es[0].Runs[0].Status != "failed" || es[0].Runs[0].Gain != 0 {
 		t.Fatalf("the entry: %+v %+v", es[0], es[0].Runs)
 	}
 	if g := es[0].Runs[0].Grades; len(g) != 2 || g[1].Handle != "bob" || g[1].Verdict != "agreed" || g[1].Valid || g[1].Loss != nil {

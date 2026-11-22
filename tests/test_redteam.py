@@ -1,6 +1,9 @@
-"""The red-team curators: built to buy the exam rather than to curate, and entered so that the
-board shows what that buys. scribe spends the ink allowance on problems in the exam's forms;
-mimic keeps the pages that look like the exam."""
+"""The red-team curator: built to buy the exam rather than to curate, and entered so that the
+board shows what that buys. mimic keeps the pages that look like the exam.
+
+There was a second, scribe, which spent an allowance of the curator's own text on problems in
+the exam's forms. It bought the exam, so the allowance went, and scribe with it: a script is
+copies of the crawl and no more."""
 
 import dataclasses
 import importlib.util
@@ -16,16 +19,13 @@ from stet.curator import Task
 from stet.project import load_project
 from stet.runner import run_editor, task_info
 from stet.script import materialize, write_script
-from stet.spec import Season, load_season, practice_round
+from stet.spec import load_season, practice_round
 from stet.tok import load_encoding
 
 ROOT = Path(__file__).resolve().parents[1]
 SEASON = load_season("s2")
-ENC = load_encoding(SEASON)  # the season's own: ink is counted in its tokens
+ENC = load_encoding(SEASON)  # the season's own
 SCALE = dataclasses.replace(SEASON.scale("nano"), train_tokens=2048, ctx=64, batch_size=4)
-# The real ink allowance is a ten-thousandth of the training budget: nothing at a toy scale. As
-# in test_script.py, the accounting is tested in a season that allows more.
-INKY = Season(id=SEASON.id, title=SEASON.title, raw={**SEASON.raw, "ink_frac": 0.05})
 
 SHELL = (
     "user@box:~/project$ ls\nREADME.md  notes.txt  src\n$ cat notes.txt\nfirst line of the notes\nsecond line of the notes\n"
@@ -64,10 +64,10 @@ def pages(tmp_path):
     return make_corpus(tmp_path / "pages", [prose(k) for k in range(6)] + [SHELL, QA, MENU])
 
 
-# --- both ---------------------------------------------------------------------------------------
+# --- a red-team curator ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(("name", "buys_with"), [("scribe", "ink"), ("mimic", "selection")])
+@pytest.mark.parametrize(("name", "buys_with"), [("mimic", "selection")])
 def test_a_red_team_curator_is_a_whole_project_that_says_what_it_is(name, buys_with):
     root = ROOT / "examples" / name
     project = load_project(root)
@@ -81,97 +81,22 @@ def test_a_red_team_curator_is_a_whole_project_that_says_what_it_is(name, buys_w
     assert "stet.editors" not in source and "stet.exam" not in source
 
 
-@pytest.mark.parametrize("name", ["scribe", "mimic"])
+@pytest.mark.parametrize("name", ["mimic"])
 def test_it_runs_as_entered_and_writes_a_script_the_grader_accepts(name, pages, tmp_path):
     project = tmp_path / name
     project.mkdir()
     for file in ("curator.py", "stet.toml"):
         shutil.copy(ROOT / "examples" / name / file, project / file)
-    run = run_editor(project, "python curator.py", pages, practice_round(INKY, 0), SCALE, tmp_path / "work", 60)
+    run = run_editor(project, "python curator.py", pages, practice_round(SEASON, 0), SCALE, tmp_path / "work", 60)
     assert run.status == "ok", run.log_tail
-    _, stats = materialize(pages, run.script, INKY, SCALE, ENC)
-    assert stats.out_docs > 0 and stats.ink_tokens <= stats.ink_budget
+    _, stats = materialize(pages, run.script, SEASON, SCALE, ENC)  # raises if a line holds text, or a copy too short to be one
+    assert stats.out_docs > 0
     # The same script twice, and in another process: nothing in it depends on the clock or on a hash's seed.
     module = curator(name)
-    lines = module.edit(task_for(pages, tmp_path, INKY))
-    assert lines == module.edit(task_for(pages, tmp_path, INKY))
+    lines = module.edit(task_for(pages, tmp_path))
+    assert lines == module.edit(task_for(pages, tmp_path))
     write_script(tmp_path / "again.jsonl", lines)
     assert (tmp_path / "again.jsonl").read_bytes() == run.script.read_bytes()
-
-
-# --- scribe: ink ----------------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("train_tokens", [512, 2048, 4096, 16384])
-def test_scribe_spends_its_ink_and_never_more(train_tokens, tmp_path):
-    # Twelve pages are about 3,600 tokens. tidy keeps a budget's worth of them or all twelve, so
-    # the script is trained on once and a part, or four times over: and its ink with it, every
-    # time. The allowance is for the tokens trained on, repeats included.
-    corpus = make_corpus(tmp_path / "prose", [prose(k) for k in range(12)])
-    scale = dataclasses.replace(SCALE, train_tokens=train_tokens)
-    scribe = curator("scribe")
-    lines = scribe.edit(task_for(corpus, tmp_path, INKY, scale))
-    stats = graded(corpus, lines, INKY, scale)  # raises if the ink is over the allowance
-    assert stats.ink_budget == train_tokens // 20 and (stats.passes > 4) == (train_tokens == 16384)
-    assert 0.9 * stats.ink_budget <= stats.ink_tokens <= stats.ink_budget
-    # Without the ink it is tidy's script, line for line.
-    tidy = curator("tidy").edit(task_for(corpus, tmp_path, INKY, scale))
-    assert [line for line in lines if "t" not in line] == tidy and all(set(line) == {"t"} for line in lines if "t" in line)
-
-
-def test_scribe_keeps_its_ink_inside_the_budget_when_the_script_runs_over(tmp_path):
-    # Pages full of numbers are more tokens than tidy allows for, so its script is longer than
-    # the budget and the end of it is never trained on. Ink put there would be ink not spent.
-    page = lambda k: f"Home | About\nPart {k} of the accounts. " + "In 1987 the mill sold 2453 of the 9812 sacks that the town had, and 317 for the bridge. " * 12  # noqa: E731
-    corpus = make_corpus(tmp_path / "numbers", [page(k) for k in range(40)])
-    scale = dataclasses.replace(SCALE, train_tokens=8192)
-    lines = curator("scribe").edit(task_for(corpus, tmp_path, INKY, scale))
-    stats = graded(corpus, lines, INKY, scale)
-    assert stats.truncated and stats.passes == 1.0 and stats.out_docs < len(lines)
-    assert 0.9 * stats.ink_budget <= stats.ink_tokens <= stats.ink_budget
-
-
-def test_scribe_spends_nothing_where_there_is_no_allowance(corpus, pages, tmp_path):
-    scribe, tidy = curator("scribe"), curator("tidy")
-    for c in (corpus, pages):  # the real season at a toy scale: the allowance rounds to zero
-        task = task_for(c, tmp_path)
-        assert task.info["ink_tokens"] == 0 and scribe.edit(task) == tidy.edit(task)
-        assert graded(c, scribe.edit(task)).ink_tokens == 0
-
-
-def test_scribe_counts_ink_as_the_grader_does(pages, tmp_path, capsys):
-    scribe = curator("scribe")
-    for train_tokens in (1024, 8192):
-        scale = dataclasses.replace(SCALE, train_tokens=train_tokens)
-        lines = scribe.edit(task_for(pages, tmp_path, INKY, scale))
-        stats = graded(pages, lines, INKY, scale)
-        assert f"{stats.ink_tokens:,} of {stats.ink_budget:,} tokens of ink" in capsys.readouterr().err
-
-
-def test_scribe_writes_every_skill_and_none_of_an_exams_items():
-    from stet.exam import gen
-
-    scribe = curator("scribe")
-    count = lambda texts: [len(tokens) for tokens in ENC.encode_ordinary_batch(texts)]  # noqa: E731
-    allowance = SEASON.ink_tokens(SEASON.scale("standard"))
-    problems = scribe.write_ink(allowance, count)
-    spent = sum(cost for _, cost in problems)
-    assert 0.999 * allowance <= spent <= allowance and [cost for _, cost in problems] == count([text for text, _ in problems])
-    assert problems == scribe.write_ink(allowance, count)  # its own seed, so the same every time
-    ink = "\n\n".join(text for text, _ in problems)
-    for form in ("$ ls", '{"tool": "list_dir", "path": "."}', "Q: ", "According to the passage above", " -> ", "SELECT name FROM people", "in Roman numerals is", "Evaluate: ", "Who is the ", "Nobody has ever "):
-        assert form in ink, form
-    # It writes in the exam's forms and cannot know a round's items. One of a few words can come
-    # out the same by chance (there are 256 boolean expressions, and "There are many geese here."
-    # is in both vocabularies); one long enough to be a quotation under the rules cannot, and
-    # those are most of the exam's skills.
-    skills = {part for pillar in SEASON.raw["exam"]["pillars"].values() if pillar["group"] == "skills" for part in pillar["parts"]}
-    for seed in (b"a round", b"another round", b"a third"):
-        items = gen.for_season(SEASON, seed)
-        long = [(it.family, text) for it in items if len((text := it.text or it.ctx + it.cont or it.good).encode()) >= SEASON.min_copy_bytes]
-        asked = [it for it in items if it.family in skills]
-        assert len(asked) > 500 and sum(family in skills for family, _ in long) > 0.7 * len(asked)
-        assert not [text for _, text in long if text in ink]
 
 
 # --- mimic: selection -----------------------------------------------------------------------------
@@ -196,14 +121,14 @@ def test_mimic_marks_what_looks_like_the_exam():
     assert ranges == [[len(menu), len(menu) + len(SHELL) - len(last)]] and kept == len(SHELL) - len(last)
 
 
-def test_mimic_fills_the_budget_with_exam_like_pages_first_and_uses_no_ink(pages, tmp_path):
+def test_mimic_fills_the_budget_with_exam_like_pages_first_and_only_copies(pages, tmp_path):
     mimic = curator("mimic")
     shell, qa, menu = 6, 7, 8
 
     def kept(train_tokens):
         scale = dataclasses.replace(SCALE, train_tokens=train_tokens)
         lines = mimic.edit(task_for(pages, tmp_path, scale=scale))
-        assert graded(pages, lines, scale=scale).ink_tokens == 0  # the real season at a toy scale allows none at all
+        assert graded(pages, lines, scale=scale).out_docs  # the grader takes it: every piece is a copy long enough to be one
         return [line["d"] for line in lines]
 
     assert sorted(kept(256)) == [shell, qa]  # a budget they fill: nothing else

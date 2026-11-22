@@ -119,8 +119,6 @@ type Season struct {
 	RulesVersion  int                     `json:"rules_version"`
 	OfficialScale string                  `json:"official_scale"`
 	Scales        map[string]Scale        `json:"scales"`
-	InkFrac       float64                 `json:"ink_frac"`
-	InkTokens     map[string]int          `json:"ink_tokens"`
 	MinCopyBytes  int                     `json:"min_copy_bytes"`
 	MaxDocBytes   int                     `json:"max_doc_bytes"`
 	Script        ScriptLimits            `json:"script"`

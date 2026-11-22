@@ -11,7 +11,7 @@ published (mlfoundations/fasttext-oh-eli5):
 
 It is a reference, not an entry to beat. An exam is checked by whether it puts this, and
 FineWeb-Edu's filter, above heuristic filtering, and that above raw crawl text, as the
-published results did. Whole pages only, so it spends no ink.
+published results did. Whole pages only: every line of its script is a page as it is.
 """
 
 import hashlib

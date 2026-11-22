@@ -151,7 +151,7 @@ def report(out: Out, result: dict, base: dict | None, season) -> None:
     out.line(
         "script",
         f"{s['out_docs']:,} documents from {s['src_docs']:,} sources ({100 * s['kept_doc_frac']:.1f}% of the corpus) · "
-        f"{s['out_bytes'] / 1e6:.1f} MB · ink {s['ink_tokens']:,}/{s['ink_budget']:,} tokens · {s['passes']:.2f} passes"
+        f"{s['out_bytes'] / 1e6:.1f} MB · {s['passes']:.2f} passes"
         + (" · truncated at the budget" if s["truncated"] else ""),
     )
     t = result["train"]

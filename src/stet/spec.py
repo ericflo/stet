@@ -83,15 +83,8 @@ class Season:
         return h.hexdigest()
 
     @property
-    def ink_frac(self) -> float:
-        return float(self.raw["ink_frac"])
-
-    def ink_tokens(self, scale: Scale) -> int:
-        """How many of the tokens the student trains on may be the curator's own text."""
-        return int(self.ink_frac * scale.train_tokens)
-
-    @property
     def min_copy_bytes(self) -> int:
+        """The shortest copy a script may hold. See stet.script for the two exceptions."""
         return int(self.raw["min_copy_bytes"])
 
     @property

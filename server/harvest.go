@@ -22,8 +22,8 @@ import (
 //   - the hours follow from the seed, which nobody has before the draw;
 //   - each harvest's hash was here before the draw, so a harvest cannot be made again to suit
 //     a round;
-//   - a curator runs with no network and may add a few thousand tokens of its own, and a
-//     script whose own text holds a passage of the exam is refused by the grader.
+//   - a curator runs with no network, and its script is copies of the round's pages: it
+//     holds no text of its own.
 //
 // An entry may be submitted after the writing its exam will hold was published. That is let
 // be: it would have to carry the text in, and the last point is what stops that.

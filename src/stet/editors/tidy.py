@@ -7,7 +7,7 @@
   5. Keep the best pages until the training budget is filled once, and shuffle them.
 
 No model, no GPU, a few seconds per shard, on every core it is given (task.map). It only
-takes whole lines out of pages, which is never ink.
+takes whole lines out of pages, which is always allowed.
 
 The exam is written in every language of the crawl, each counting by its share of it. So
 nothing here asks what language a page is in: a rule that only English can pass throws away

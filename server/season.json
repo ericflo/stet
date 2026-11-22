@@ -22,7 +22,7 @@
   "key_bytes": 64,
   "min_letters": 38
  },
- "digest": "74b6a9192d79c432c3e409a7be7684ce34f79e016f78cdcfbf80edc0c29d2e06",
+ "digest": "2ba34538f5346e625d3c652154722363feefb496b0cc57e2f804bc37aedcd884",
  "draw_grid_seconds": 600,
  "environment": {
   "also": {
@@ -252,13 +252,6 @@
  ],
  "harness": "0.5.0",
  "id": "s2",
- "ink_frac": 0.0001,
- "ink_tokens": {
-  "large": 64000,
-  "micro": 4000,
-  "nano": 800,
-  "standard": 16000
- },
  "machine": {
   "cores": 6,
   "gpu_memory_gb": 8,

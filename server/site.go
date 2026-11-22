@@ -526,8 +526,6 @@ func clipID(id string, n int) string {
 type ScriptStats struct {
 	KeptDocFrac  float64 `json:"kept_doc_frac"`
 	KeptByteFrac float64 `json:"kept_byte_frac"`
-	InkFrac      float64 `json:"ink_frac"`
-	InkTokens    int64   `json:"ink_tokens"`
 	OutDocs      int64   `json:"out_docs"`
 	SrcDocs      int64   `json:"src_docs"`
 	Passes       float64 `json:"passes"`
@@ -1054,7 +1052,7 @@ func (s *Site) guide(name, title, desc string) http.HandlerFunc {
 		a := s.app
 		d := map[string]any{
 			"InPlay": a.cfg.EntriesInPlay, "PerDay": a.cfg.SubmitsPerDay, "Qualify": a.cfg.QualifyRounds, "Ladder": a.cfg.LadderSize,
-			"Establish": a.cfg.EstablishAfter, "GithubDays": a.cfg.GithubMinAgeDays, "CopyFrac": 1 - a.season.InkFrac,
+			"Establish": a.cfg.EstablishAfter, "GithubDays": a.cfg.GithubMinAgeDays,
 		}
 		a.st.view(func(st *State) { a.nowFacts(st, d) })
 		p := s.page(r, title, name, d)
@@ -1506,7 +1504,7 @@ func (s *Site) glossary(w http.ResponseWriter, r *http.Request) {
 		"Tolerance": a.tolerance(), "Margin": a.season.Record.Margin[a.cfg.Scale], "Rule": a.season.Record,
 		"QualifyRounds": a.cfg.QualifyRounds, "RatedRounds": a.cfg.RatedRounds, "LadderSize": a.cfg.LadderSize,
 		"EstablishAfter": a.cfg.EstablishAfter, "RunsPerEntry": a.cfg.RunsPerEntry, "MaxNew": a.cfg.MaxNewPerRound,
-		"MuteAfter": muteAfterStrikes, "MuteDays": muteFor / 86400, "CopyFrac": 1 - a.season.InkFrac, "GithubDays": a.cfg.GithubMinAgeDays,
+		"MuteAfter": muteAfterStrikes, "MuteDays": muteFor / 86400, "GithubDays": a.cfg.GithubMinAgeDays,
 	})
 	p.Desc = "Every word on the Stet website, in plain language: curator, round, gain, rating, worth, the record, runs, grades, verifiers, and what each label on a score means."
 	s.render(w, 200, "glossary", p)

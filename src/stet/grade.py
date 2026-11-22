@@ -8,7 +8,7 @@ what the script says, and report its score on every item of the round's exam.
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from . import source_digest
 from .data import Corpus, exam_digest
@@ -27,7 +27,6 @@ class Trained:
     model: object = None
     enc: object = None
     device: object = None
-    ink_windows: list = field(default_factory=list)  # the script's own text, for the look at the exam
 
 
 def train_script(rnd: Round, scale: Scale, corpus: Corpus, script_path, device=None, progress=None, log=None) -> Trained:
@@ -59,12 +58,12 @@ def train_script(rnd: Round, scale: Scale, corpus: Corpus, script_path, device=N
         t0 = time.time()
         tokens, stats = materialize(corpus, script_path, season, scale, enc)
         log(
-            f"script: {stats.out_docs:,} docs, {stats.out_bytes / 1e6:.1f} MB, ink {stats.ink_tokens:,} of {stats.ink_budget:,} tokens, "
+            f"script: {stats.out_docs:,} docs, {stats.out_bytes / 1e6:.1f} MB, "
             f"{stats.tokens_one_pass:,} tokens per pass x {stats.passes:.2f} passes ({time.time() - t0:.0f}s)"
         )
         result["script"] = stats.to_dict(corpus)
         model, result["train"] = train(tokens, scale, season, rnd.init_seed, device, progress)
-        return Trained(result, True, model, enc, device, stats.ink_windows)
+        return Trained(result, True, model, enc, device)
     except (ScriptError, FloatingPointError) as e:
         result["invalid_reason"] = str(e)
     return Trained(result, device=device)
@@ -73,16 +72,10 @@ def train_script(rnd: Round, scale: Scale, corpus: Corpus, script_path, device=N
 def sit_exam(trained: Trained, rnd: Round, scale: Scale, exam) -> dict:
     """The trained student sits the round's exam, and the grade is complete. `rnd` is the
     round as it is now: an official round's exam is posted after the student was trained."""
-    from .exam.decontam import written
     from .exam.score import sit
 
     result = trained.result
     result["round"], result["exam_sha256"] = rnd.describe(), exam_digest(exam)
-    if trained.trained and (found := written(exam, trained.ink_windows, rnd.season)):
-        # The exam's writing reached the training set through the curator's own text: carried
-        # in by its author, or written in and published afterwards. No student of it is scored.
-        trained.trained = False
-        result["invalid_reason"] = f"the script's own text holds {len(found)} of the passages in the round's exam"
     if trained.trained:
         try:
             t1 = time.time()

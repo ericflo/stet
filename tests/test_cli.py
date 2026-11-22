@@ -190,7 +190,7 @@ def test_the_gain_line_says_what_its_noise_figure_is(capsys):
     season = load_season("s2")
     result = {
         "round": {"id": "s2-p00000", "kind": "practice"}, "scale": "nano", "valid": True,
-        "script": {"out_docs": 1, "src_docs": 1, "kept_doc_frac": 0.1, "out_bytes": 10, "ink_tokens": 0, "ink_budget": 8000, "passes": 1.0, "truncated": False},
+        "script": {"out_docs": 1, "src_docs": 1, "kept_doc_frac": 0.1, "out_bytes": 10, "passes": 1.0, "truncated": False},
         "train": {"tokens": 10, "seconds": 1.0, "tokens_per_second": 10, "final_train_loss": 3.0},
         "exam": {"items": 3, "mean": -2.5, "item_scores": [-2.4, -2.5, -2.6]}, "gain": 0.1, "pillars": {"logic": 0.1},
     }  # fmt: skip
@@ -210,7 +210,7 @@ def test_an_invalid_run_has_a_gain_of_nothing_written_down(monkeypatch):
     result = {"valid": False, "invalid_reason": "the curator produced no script (timeout)"}
     assert cli._with_baseline(result, None, None, None, out, skip=True) is None and result["gain"] == 0.0
     monkeypatch.setitem(sys.modules, "stet.pipeline", types.SimpleNamespace(baseline=lambda *a, **k: {"exam": {"mean": -5.3, "item_scores": [-5.3]}}))
-    result = {"valid": False, "invalid_reason": "ink over budget"}
+    result = {"valid": False, "invalid_reason": "line 3: this line holds text; a script is copies of the crawl and holds no text of its own"}
     cli._with_baseline(result, None, None, None, out, skip=False)
     assert result["gain"] == 0.0 and result["baseline"]["mean"] == -5.3
 

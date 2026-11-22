@@ -271,8 +271,6 @@ def task_info(rnd: Round, scale: Scale, time_limit: float, machine: dict | None 
         "kind": rnd.kind,
         "scale": scale.name,
         "train_tokens": scale.train_tokens,
-        "ink_tokens": season.ink_tokens(scale),
-        "ink_frac": season.ink_frac,
         "min_copy_bytes": season.min_copy_bytes,
         "time_limit": time_limit,
         "student": {

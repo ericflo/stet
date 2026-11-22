@@ -34,8 +34,6 @@ def export(season_id: str = CURRENT_SEASON) -> dict:
         "rules_version": raw["rules_version"],
         "official_scale": season.official_scale,
         "scales": raw["scales"],
-        "ink_frac": season.ink_frac,
-        "ink_tokens": {name: season.ink_tokens(season.scale(name)) for name in raw["scales"]},
         "min_copy_bytes": season.min_copy_bytes,
         "max_doc_bytes": season.max_doc_bytes,
         "script": raw["script"],

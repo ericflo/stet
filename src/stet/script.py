@@ -6,24 +6,27 @@ the order the student is trained in. A line is one of:
     123                               keep document 123 whole
     {"d": 123}                        the same
     {"d": 123, "k": [[0, 900], ...]}  keep these byte ranges of document 123, in this order
-    {"s": [[123, 0, 900], "text"]}    any mix of copies [doc, start, end] and literal text
-    {"t": "text"}                     a new document made only of literal text
+    {"s": [[123, 0, 900], ...]}       join copies [doc, start, end], of any documents
 
 A line may nest lists and objects at most 16 deep (the forms above need three). A line
 nested deeper is invalid.
 
-Cuts, reordering and repetition are free. Ink is scarce: literal text, and copies too short
-to be honest quotations, are charged against a small ink budget counted in tokens. Byte
-offsets are into the document's UTF-8 bytes and are snapped forward to a character boundary.
+A script is copies of the crawl and holds no text of its own. A line with text in it (a
+string among the copies of "s", or a "t" key, as in {"t": "text"}) is invalid. Cuts,
+reordering and repetition are free. Byte offsets are into the document's UTF-8 bytes and
+are snapped forward to a character boundary.
 
-Why short copies are ink: with enough tiny copies you can spell out any text you like from
-the corpus's letters and words, which would make the ink limit meaningless. (A short
-document kept whole, on its own, is not ink: nothing can be spelled across documents.)
+A copy is at least the season's min_copy_bytes long: long enough to be an honest quotation.
+Why: with enough tiny copies you can spell out any text you like from the corpus's letters
+and words, and the script would hold text of its own after all. A line with a shorter copy
+is invalid, with two exceptions.
 
-Deleting lines is never ink. An output document made only of whole lines of one page, each
-with its line break, in the page's own order, is that page with lines taken out: every piece
-is a copy, however short. Nothing can be spelled that way, because a line cannot be cut, moved
-or joined to another page's.
+A short document kept whole, on its own, is allowed: nothing can be spelled across documents.
+
+Deleting lines is always allowed. An output document made only of whole lines of one page,
+each with its line break, in the page's own order, is that page with lines taken out: every
+piece is a copy, however short. Nothing can be spelled that way, because a line cannot be
+cut, moved or joined to another page's.
 
 The script is consumed until the training budget is used. Anything after that is ignored.
 A script that is shorter than the budget is repeated from the top, so listing less means
@@ -68,18 +71,10 @@ class ScriptError(ValueError):
     """The edit script is malformed or breaks a rule. The run is invalid."""
 
 
-# Bytes kept either side of a piece of ink for the grader's look: more than an overlap key is
-# long, so that a sentence spelled out in several pieces is still read whole.
-INK_MARGIN = 256
-
-
 @dataclass
 class Stats:
     out_docs: int = 0  # output documents consumed in the first pass
-    out_bytes: int = 0
-    copy_bytes: int = 0
-    ink_tokens: int = 0  # the curator's own text among the tokens trained on, repeats included
-    ink_budget: int = 0
+    out_bytes: int = 0  # every one of them copied from the corpus
     src_docs: int = 0  # distinct source documents drawn from
     script_lines: int = 0  # lines in the script (may exceed out_docs if truncated)
     tokens_one_pass: int = 0
@@ -89,22 +84,14 @@ class Stats:
     script_sha256: str = ""
     tokens_sha256: str = ""  # of the exact token array the student trains on
     preview: list[str] = field(default_factory=list)
-    # The curator's own text as the student reads it, each piece with what stands either side
-    # of it: what the grader looks through for the exam's sentences (stet.exam.decontam.written).
-    ink_windows: list[bytes] = field(default_factory=list, repr=False)
-
-    @property
-    def ink_frac(self) -> float:
-        return self.ink_tokens / self.train_tokens if self.train_tokens else 0.0
 
     def to_dict(self, corpus: Corpus | None = None) -> dict:
-        d = {k: v for k, v in self.__dict__.items() if k != "ink_windows"}
-        d["ink_frac"] = round(self.ink_frac, 6)
+        d = dict(self.__dict__)
         if corpus is not None:
             d["corpus_docs"] = len(corpus)
             d["corpus_bytes"] = corpus.total_bytes
             d["kept_doc_frac"] = round(self.src_docs / max(1, len(corpus)), 6)
-            d["kept_byte_frac"] = round(self.copy_bytes / max(1, corpus.total_bytes), 6)
+            d["kept_byte_frac"] = round(self.out_bytes / max(1, corpus.total_bytes), 6)
         return d
 
 
@@ -164,22 +151,25 @@ def _snap(buf, pos: int, end: int) -> int:
     return pos
 
 
+def _no_text(line_no: int) -> ScriptError:
+    return ScriptError(f"line {line_no}: this line holds text; a script is copies of the crawl and holds no text of its own")
+
+
 def _segments(line_no: int, obj, max_segments: int) -> list:
-    """Normalise one script line to a list of [doc, start, end|None] and str."""
+    """Normalise one script line to a list of its pieces, each of which should be a copy:
+    [doc, start, end|None]."""
     if isinstance(obj, bool):
         raise ScriptError(f"line {line_no}: expected a document, got a boolean")
     if isinstance(obj, int):
         return [[obj, 0, None]]
     if not isinstance(obj, dict):
         raise ScriptError(f"line {line_no}: expected an integer or an object")
+    if "t" in obj:
+        raise _no_text(line_no)  # the key a document of the curator's own text was once written under
     if "s" in obj:
         segs = obj["s"]
         if not isinstance(segs, list):
             raise ScriptError(f"line {line_no}: \"s\" must be a list")
-    elif "t" in obj:
-        if not isinstance(obj["t"], str):
-            raise ScriptError(f"line {line_no}: \"t\" must be a string")
-        segs = [obj["t"]]
     elif "d" in obj:
         d = obj["d"]
         if "k" not in obj:
@@ -193,7 +183,7 @@ def _segments(line_no: int, obj, max_segments: int) -> list:
                 raise ScriptError(f"line {line_no}: each range in \"k\" must be [start, end]")
             segs.append([d, r[0], r[1]])
     else:
-        raise ScriptError(f"line {line_no}: object needs one of \"d\", \"s\" or \"t\"")
+        raise ScriptError(f"line {line_no}: object needs \"d\" or \"s\"")
     if len(segs) > max_segments:
         raise ScriptError(f"line {line_no}: {len(segs)} segments in one document; the limit is {max_segments}")
     return segs
@@ -201,9 +191,7 @@ def _segments(line_no: int, obj, max_segments: int) -> list:
 
 @dataclass
 class Built:
-    data: bytes
-    ink: list[bytes]  # the pieces charged as ink
-    copied: int
+    data: bytes  # the output document: every byte of it copied from the corpus
     docs: list[int]
     spliced: bool  # more than one piece: joins can form text that is in no source document
 
@@ -211,7 +199,7 @@ class Built:
 def _whole_lines(corpus: Corpus, resolved: list) -> bool:
     """Whether the pieces are whole lines of one page, each with its line break, in the page's
     own order: the page with lines taken out, and nothing else."""
-    if not resolved or any(isinstance(seg, str) for seg in resolved):
+    if not resolved:
         return False
     d = resolved[0][0]
     lo, at = int(corpus.idx[d]), 0
@@ -225,20 +213,16 @@ def _whole_lines(corpus: Corpus, resolved: list) -> bool:
 
 
 def build_doc(corpus: Corpus, line_no: int, obj, min_copy: int, max_segments: int = 20000, max_out: int = 1 << 20) -> Built:
-    """Resolve one script line against the corpus."""
+    """Resolve one script line against the corpus: the output document it makes.
+
+    A line that holds text, or a copy too short to be a quotation, is a ScriptError."""
     n = len(corpus)
-    parts: list[bytes] = []
-    ink: list[bytes] = []
-    copied = 0
-    docs: list[int] = []
     # Resolve and merge copies that are contiguous in the source, so that keeping lines
-    # 1, 2 and 3 as three ranges costs the same as keeping them as one.
+    # 1, 2 and 3 as three ranges is the same as keeping them as one.
     resolved: list = []
     for seg in _segments(line_no, obj, max_segments):
         if isinstance(seg, str):
-            if seg:
-                resolved.append(seg)
-            continue
+            raise _no_text(line_no)  # even an empty one: a piece is a copy or the line is invalid
         if not (isinstance(seg, list) and len(seg) == 3):
             raise ScriptError(f"line {line_no}: a copy must be [doc, start, end]")
         d, s, e = seg
@@ -255,31 +239,33 @@ def build_doc(corpus: Corpus, line_no: int, obj, min_copy: int, max_segments: in
         e = _snap(corpus.bin, lo + e, hi) - lo
         if e <= s:
             continue
-        if resolved and isinstance(resolved[-1], list) and resolved[-1][0] == d and resolved[-1][2] == s:
+        if resolved and resolved[-1][0] == d and resolved[-1][2] == s:
             resolved[-1][2] = e
         else:
             resolved.append([d, s, e, size])
+    # Every piece is long enough to be a quotation, unless the line is whole lines of one page
+    # in the page's order, or a short document kept as it is. The pieces are judged as they
+    # stand after merging, so the verdict does not depend on how the script wrote its ranges,
+    # and before a byte is copied.
+    if not _whole_lines(corpus, resolved):
+        for d, s, e, size in resolved:
+            if e - s < min_copy and not (e - s == size and len(resolved) == 1):
+                raise ScriptError(
+                    f"line {line_no}: a copy of {e - s} bytes (document {d}, bytes {s} to {e}) is shorter than the minimum of "
+                    f"{min_copy} bytes; only whole lines of one page in the page's own order, or a short document kept whole "
+                    "on its own, may be shorter"
+                )
+    parts: list[bytes] = []
+    docs: list[int] = []
     total = 0
-    lines = _whole_lines(corpus, resolved)
-    for seg in resolved:
-        if isinstance(seg, str):
-            b = seg.encode("utf-8", errors="replace")
-            parts.append(b)
-            ink.append(b)
-        else:
-            d, s, e, size = seg
-            lo = int(corpus.idx[d])
-            b = corpus.bin[lo + s : lo + e]
-            parts.append(b)
-            docs.append(d)
-            if len(b) >= min_copy or lines or (len(b) == size and len(resolved) == 1):
-                copied += len(b)  # long enough to be a quotation, whole lines, or a short document kept as it is
-            else:
-                ink.append(b)
-        total += len(b)
+    for d, s, e, _ in resolved:
+        lo = int(corpus.idx[d])
+        parts.append(corpus.bin[lo + s : lo + e])
+        docs.append(d)
+        total += e - s
         if total > max_out:
             raise ScriptError(f"line {line_no}: the output document is over {max_out:,} bytes")
-    return Built(b"".join(parts), ink, copied, docs, len(resolved) > 1)
+    return Built(b"".join(parts), docs, len(resolved) > 1)
 
 
 def materialize(
@@ -306,7 +292,7 @@ def materialize(
     eot = season.eot
     lanes = scale.batch_size
     lane_len = scale.steps * scale.ctx + 1
-    stats = Stats(ink_budget=season.ink_tokens(scale), train_tokens=lanes * lane_len)
+    stats = Stats(train_tokens=lanes * lane_len)
     min_copy = season.min_copy_bytes
     seen_docs: set[int] = set()
     batch: list[tuple[int, Built]] = []  # built, waiting to be tokenised
@@ -315,7 +301,6 @@ def materialize(
     closed = False  # the budget is full and the window it filled in has ended
     digest = hashlib.sha256()
     first_pass: list[np.ndarray] = []
-    first_ink: list[int] = []
     lane_chunks: list[list[np.ndarray]] = [[] for _ in range(lanes)]
     heap = [(0, b) for b in range(lanes)]  # (tokens so far, lane); ties go to the lowest lane
     total = 0
@@ -333,15 +318,11 @@ def materialize(
         if not batch:
             return
         texts = [bd.data.decode("utf-8", errors="replace") for _, bd in batch]
-        ink_texts = [piece.decode("utf-8", errors="replace") for _, bd in batch for piece in bd.ink]
         try:
-            ink_toks = encode_batch(enc, ink_texts) if ink_texts else []
             text_toks = encode_batch(enc, texts)
         except Unreadable:
             raise ScriptError("the tokenizer cannot read one of this script's documents, even with its whitespace cut short") from None
-        ink_lens = iter([len(t) for t in ink_toks])
         for (_, bd), text, toks in zip(batch, texts, text_toks, strict=True):
-            ink = sum(next(ink_lens) for _ in bd.ink)
             if full:
                 stats.truncated = True  # the budget ran out part-way through this batch
                 break
@@ -349,18 +330,10 @@ def materialize(
             arr[0] = eot
             arr[1:] = toks
             first_pass.append(arr)
-            first_ink.append(ink)
             total += len(arr)
             stats.out_docs += 1
             stats.out_bytes += len(bd.data)
-            stats.ink_tokens += ink
-            stats.copy_bytes += bd.copied
             seen_docs.update(bd.docs)
-            at = 0
-            for piece in bd.ink:  # in the order they stand in the document
-                at = max(bd.data.find(piece, at), at)
-                stats.ink_windows.append(bd.data[max(0, at - INK_MARGIN) : at + len(piece) + INK_MARGIN])
-                at += len(piece)
             if len(stats.preview) < 5:
                 stats.preview.append(text[:600])
             full = deal(arr)
@@ -422,16 +395,9 @@ def materialize(
         raise ScriptError(f"the script yields only {total} tokens; it needs at least {2 * scale.ctx}")
     i = 0
     while not full:  # a short script is dealt again from the top
-        j = i % len(first_pass)
-        full = deal(first_pass[j])
-        stats.ink_tokens += first_ink[j]
+        full = deal(first_pass[i % len(first_pass)])
         i += 1
     stats.passes = round(1.0 + i / len(first_pass), 4) if i else 1.0
-    if stats.ink_tokens > stats.ink_budget:
-        raise ScriptError(
-            f"ink over budget: {stats.ink_tokens:,} of the tokens trained on are new text or copies shorter than "
-            f"{min_copy} bytes; the limit is {stats.ink_budget:,} ({100 * season.ink_frac:g}% of the training budget)"
-        )
     tokens = np.empty((lanes, lane_len), dtype=np.uint16)
     for b in range(lanes):
         tokens[b] = np.concatenate(lane_chunks[b])[:lane_len]

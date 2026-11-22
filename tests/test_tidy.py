@@ -14,7 +14,7 @@ from stet import curator
 from stet.curator import Task
 from stet.editors import tidy
 from stet.runner import run_editor
-from stet.script import materialize, write_script
+from stet.script import ScriptError, materialize, write_script
 from stet.spec import load_season, practice_round
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -46,12 +46,31 @@ def test_tidy_keeps_writing_in_every_script_and_only_takes_lines_out(tmp_path):
     for line in script:
         text = b"".join(corpus.raw(line["d"])[a:b] for a, b in line["k"]).decode()
         assert "Home | About" not in text and "Copyright" not in text and len(text) > 400
-    # Whole lines of a page in the page's order: not a byte of ink, where the season allows none.
+    # Whole lines of a page in the page's order: every piece is a copy, however short, or the
+    # grader would refuse the script.
     path = tmp_path / "script.jsonl"
     write_script(path, script)
     _, stats = materialize(corpus, path, SEASON, SCALE, FakeEnc())
-    assert stats.ink_tokens == 0 and stats.src_docs == 5 and stats.out_docs == 5
+    assert stats.src_docs == 5 and stats.out_docs == 5
     assert tidy.edit(task) == script  # the same script every time
+
+
+def test_the_short_lines_tidy_keeps_between_cut_ones_are_copies_the_grader_takes(tmp_path):
+    # A sentence in Japanese can be a line of fifty bytes. Kept between lines that are cut, each
+    # is a copy under the minimum, and allowed: a whole line of its page, in the page's order.
+    sentence = "ABCD社はDEFG法をGHIに適用しないとした。\n"
+    task, corpus = _task([("メニュー\n" + sentence) * 30, NAV + EN], tmp_path)
+    script = tidy.edit(task)
+    cut = next(line["k"] for line in script if line["d"] == 0)
+    assert len(cut) == 30 and {b - a for a, b in cut} == {len(sentence.encode())} and len(sentence.encode()) < SEASON.min_copy_bytes
+    path = tmp_path / "script.jsonl"
+    write_script(path, script)
+    _, stats = materialize(corpus, path, SEASON, SCALE, FakeEnc())  # raises if one of them is not a copy
+    assert stats.out_docs == 2 and stats.out_bytes == 30 * len(sentence.encode()) + len(EN.encode())
+    # Moved, the same lines are not the page with lines taken out, and the script is refused.
+    write_script(path, [{"d": 0, "k": cut[::-1]}, 1])
+    with pytest.raises(ScriptError, match=f"line 1: a copy of {len(sentence.encode())} bytes"):
+        materialize(corpus, path, SEASON, SCALE, FakeEnc())
 
 
 def test_tidy_cuts_lines_exactly_where_a_page_is_not_valid_text(tmp_path):

@@ -116,19 +116,19 @@ is below 0.
 
 ## Can my curator write new training text?
 
-Almost none: 0.01% of the training tokens, 16,000 at the official scale. Everything else
-the student reads must be copied byte for byte from the round's corpus. Without that limit
-the best entry would be a dataset written in advance, or by a large model, and the
-competition would stop being about editing. Cleaning a page costs none of it: whole lines
-of one page, kept in order, are copies however short they are.
+No. A script is copies of the round's corpus and nothing else, so everything the student
+reads is copied byte for byte. A little text of a curator's own was allowed at first. It
+was measured, and 16,000 tokens of exam-style text bought 0.01 bits per byte: the exam
+could be bought with it. Cleaning a page is always allowed: whole lines of one page, kept
+in order, are copies however short they are. Any other copy is at least 64 bytes long.
 
 ## Is the exam secret?
 
 Nobody knows it in advance, the organisers included. Each round's exam is made at its draw.
 Three quarters of the score is human writing from three hours of the day before, which the
 draw picks, gathered from many sources that need no key. One quarter is questions generated
-from the round's seed. Your curator runs with no network and can add next to no text of
-its own, and a script whose own text holds a passage of the exam is refused.
+from the round's seed. Your curator runs with no network and can add no text of its own:
+a script is copies of the round's corpus and nothing else.
 
 Until the round settles, the exam goes only to the machines grading it. Then it is
 published: the generated questions and Wikipedia's text whole, and every other source's

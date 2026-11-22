@@ -16,7 +16,7 @@ without spaces:
   4. Exact duplicates dropped, then near duplicates (MinHash on 5-grams, Jaccard 0.8).
 
 Pages that pass are kept in a fixed random order until the training budget is filled once.
-Whole pages only, so it spends no ink.
+Whole pages only: every line of its script is a page as it is.
 
 It writes a script twice: when every page has been through the rules and the exact duplicates
 are out, and again when the near duplicates are. The first is there if time runs out during

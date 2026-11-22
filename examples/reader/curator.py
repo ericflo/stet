@@ -67,7 +67,7 @@ def prose_ranges(text: str, min_copy: int = 64) -> tuple[list[list[int]], int]:
             else:
                 ranges.append([pos, pos + n])
         pos += n
-    # A kept run shorter than min_copy bytes would be charged as ink. Drop those.
+    # A copy has to be at least min_copy bytes long, or the script is invalid. Drop shorter runs.
     ranges = [r for r in ranges if r[1] - r[0] >= min_copy + 4]
     return ranges, sum(b - a for a, b in ranges)
 

@@ -16,7 +16,7 @@ language, and writes nothing of its own:
   4. Only if the budget is still not full, top it up with what `tidy` would have kept.
   5. Shuffle.
 
-No model, no GPU, no ink: every kept piece is a run of whole lines at least min_copy_bytes
+No model, no GPU: every kept piece is a run of whole lines at least min_copy_bytes
 long. If this ever beats `tidy` by more than noise, the exam can be bought by looking like
 it, and it is the exam that gets fixed.
 """
@@ -239,8 +239,9 @@ def content_ranges(raw: bytes, min_copy: int = 64) -> tuple[list[list[int]], int
         else:
             gap += 1
         pos += n
-    # No ink: a run shorter than min_copy bytes would be charged, and so would one that began
-    # inside a character, since its start would be moved. The last line may have no line break.
+    # Copies only, each long enough to be one: a run shorter than min_copy bytes would make
+    # the script invalid, and so could one that began inside a character, since its start
+    # would be moved. The last line may have no line break.
     size = len(raw)
     ranges = [[a, min(b, size)] for a, b in ranges if min(b, size) - a >= min_copy and (raw[a] & 0xC0) != 0x80]
     return ranges, sum(b - a for a, b in ranges)

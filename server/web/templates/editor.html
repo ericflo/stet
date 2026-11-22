@@ -52,7 +52,6 @@
         {{if .HasStats}}<dl class="stats">
           <div><dt>pages kept</dt><dd>{{pct1 .Script.KeptDocFrac}}<small>of the documents drawn</small></dd></div>
           <div><dt>read</dt><dd>{{f1 .Script.Passes}}×<small>over what it kept</small></dd></div>
-          <div><dt>its own words</dt><dd>{{pct1 .Script.InkFrac}}<small>of tokens not copied</small></dd></div>
           <div><dt>on the exam</dt><dd>{{f3 .Loss}}<small>bits per byte, against {{f3 .Baseline}} unedited</small></dd></div>
         </dl>{{end}}
         <div class="grid2">

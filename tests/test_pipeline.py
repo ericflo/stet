@@ -26,7 +26,7 @@ def graded(monkeypatch):
         return types.SimpleNamespace(device=device)
 
     def sit_exam(trained, rnd, scale, exam):
-        return {"valid": seen.valid, "invalid_reason": None if seen.valid else "ink over budget",
+        return {"valid": seen.valid, "invalid_reason": None if seen.valid else "line 2: not valid JSON",
                 "exam": {"items": 2, "mean": -5.3, "item_scores": [-5.2, -5.4]}}
 
     monkeypatch.setattr(data, "corpus", lambda rnd, scale: [b"a", b"b", b"c"])

@@ -246,10 +246,6 @@ class Task:
     def train_tokens(self) -> int:
         return int(self.info["train_tokens"])
 
-    @property
-    def ink_frac(self) -> float:
-        return float(self.info["ink_frac"])
-
     def time_left(self) -> float:
         return self.deadline - time.time()
 

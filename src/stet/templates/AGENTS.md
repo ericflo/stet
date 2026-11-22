@@ -31,8 +31,8 @@ versions official runs use. `stet doctor` says if anything differs.
 
 Words used below: the *student* is the small model that gets trained. *Bits per byte*
 measure how likely the student finds a text: the fewer bits it needs for each byte, the
-better it knows it. *Ink* is text in the training data that was not copied from the corpus.
-A *verifier* is a volunteer's machine that runs curators or grades their scripts.
+better it knows it. A *verifier* is a volunteer's machine that runs curators or grades their
+scripts.
 
 ## The loop
 
@@ -58,7 +58,7 @@ Exit status is 0 for a valid run and 2 for an invalid one.
 | `pillars` | The gain in each pillar the exam has: `pillars.reference`, `pillars.agents` and so on. The weakest shows what your data lacks. |
 | `writing` | Whether the exam held human writing. `false`: nothing is harvested, and `gain` is the skills alone. |
 | `exam.items`, `exam.mean` | How many items the student sat, and its mean score on them (minus the bits per byte it needed, so nearer 0 is better). `baseline.mean` is the unedited student's. |
-| `script` | What your script did: documents kept, bytes, ink used, passes over the data. |
+| `script` | What your script did: documents kept, bytes, passes over the data. |
 | `edit.seconds`, `edit.time_limit` | How long your curator took, and how long it may. |
 | `edit.log_tail` | The end of your curator's stdout and stderr. |
 
@@ -122,7 +122,7 @@ From Python, `from stet.curator import Task; task = Task.from_env()` gives you:
   `corpus.sizes` (numpy array), `corpus.urls[i]`, and `for i, text in corpus`.
 - `task.train_tokens`: the training budget. English prose is roughly 3 bytes per token, and
   the raw crawl as a whole about 2.7.
-- `task.info`: everything in `task.json`, including `ink_tokens` and `min_copy_bytes`.
+- `task.info`: everything in `task.json`, including `min_copy_bytes`.
 - `task.time_left()`: seconds until the deadline.
 - `task.asset("name")`: the path of a model file or directory named in `stet.toml`.
 - `task.device()`: `"cuda"` when there is a GPU PyTorch can use (NVIDIA or AMD), else `"cpu"`.
@@ -169,24 +169,26 @@ does not shuffle.
 ```
 123                                          keep document 123 whole
 {"d": 123, "k": [[0, 900], [1200, 2000]]}    keep these byte ranges of document 123, joined
-{"s": [[123, 0, 900], " text ", [7, 40, 400]]}    join copies [doc, start, end] and new text
-{"t": "new text"}                            a document of new text
+{"s": [[123, 0, 900], [7, 40, 400]]}         join copies [doc, start, end] of any documents
 ```
 
+- **A script is copies of the corpus and no more.** It holds no text of your own. A string
+  in an `s` line, or a line with a `t` key (`{"t": "text"}`), makes the run invalid. This
+  is an editing competition: you choose what the student reads, and write none of it.
 - Offsets index the document's UTF-8 bytes. One that lands inside a character is moved
   forward to the next boundary.
 - **Cutting, reordering and repeating are free.**
-- **Deleting lines is free too.** An output document made only of whole lines of one page,
-  in the page's order, is a copy however short the lines are: take out the menu, the cookie
-  banner and the footer and keep the article. Each range starts at the start of a line and
-  ends just after a line break, or at the end of the page. Lines cannot be moved, cut
-  short, repeated or mixed with another page's that way.
-- **New text is "ink", and there is almost none.** Literal strings are ink, and so is any
-  other copy shorter than `min_copy_bytes` (64). The one exception is a whole short
-  document kept on a line of its own; joined to anything else in an `s` line, it is ink
-  too. A script may train the student on at most `ink_tokens` of it: 0.01% of the budget,
-  16,000 tokens at standard, counted again each time the script is repeated. Going over
-  makes the run invalid. Plan on spending none: this is an editing competition.
+- **Deleting lines is always allowed.** An output document made only of whole lines of one
+  page, in the page's order, is a copy however short the lines are: take out the menu, the
+  cookie banner and the footer and keep the article. Each range starts at the start of a
+  line and ends just after a line break, or at the end of the page. Lines cannot be moved,
+  cut short, repeated or mixed with another page's that way.
+- **Any other copy is at least `min_copy_bytes` (64) long.** A shorter one makes the run
+  invalid: with enough tiny copies a script could spell out any text it liked. Ranges of
+  one document that touch are one copy, so three 30-byte ranges end to end are a 90-byte
+  copy. A copy's length is what is left once its offsets have been moved to character
+  boundaries. The one exception is a whole short document kept on a line of its own;
+  joined to anything else in an `s` line, it is too short.
 - **The budget cuts both ways.** The stream is cut off at `train_tokens`. A shorter script
   is repeated from the top until the budget is used, so keeping less means training on it
   more often.
@@ -268,10 +270,9 @@ documents will do badly on the next.
 - No script, or a malformed one. A timeout or crash is fine *if* a script was already
   written. `task.write` replaces the file in one step; if you write it yourself, write
   to a temporary file and rename it, or a kill can leave half a script.
-- More ink than `ink_tokens`. A copied range shorter than 64 bytes counts as ink, unless
-  it is whole lines of one page in order.
-- A passage of the round's exam in your own text: the opening of a sentence of its fresh
-  writing, in ink or completed by the copies on either side of it.
+- Text of your own anywhere in the script: a string in an `s` line, or a `t` key.
+- A copied range shorter than 64 bytes, unless the line is whole lines of one page in
+  order, or one short document kept whole.
 - A document number or byte range that does not exist.
 - A script that yields almost no tokens.
 - A script over 64 MB, a line over 1 MB, or a line nested more than 16 brackets deep.
@@ -498,7 +499,7 @@ technical writing and posts were not in it.
 - **Keep the forms answers come in.** Much of `agents` and `transformation` is whether the
   student has seen logs, program output, tables and markup at all.
 - **Prose over furniture.** Within a page, keep the text and drop menus, link lists and
-  boilerplate. Whole lines taken out with a range edit (`"k"`) cost no ink, however short
+  boilerplate. Whole lines taken out with a range edit (`"k"`) are allowed, however short
   the lines that are kept.
 - **Repeating costs more as the student grows.** Keeping a small best slice and training on
   it many times pays most for a small student.

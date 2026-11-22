@@ -10,7 +10,8 @@ knowledge and reasoning benchmarks. This curator uses that classifier, as publis
      value, in a fixed random order until time is nearly up; a page not reached is not kept.
   3. The best pages kept until the training budget is filled once, in a fixed random order.
 
-It is a reference, not an entry to beat. Whole pages only, so it spends no ink.
+It is a reference, not an entry to beat. Whole pages only: every line of its script is a
+page as it is.
 """
 
 import hashlib

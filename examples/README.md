@@ -48,12 +48,13 @@ And two that are not entered, as patterns to build on:
 
 ## Red team
 
-And two that try to buy the exam instead of curating well, entered by the organisers so that
-the board shows what that buys.
+And one that tries to buy the exam instead of curating well, entered by the organisers so
+that the board shows what that buys.
 
 | | What it tries |
 |---|---|
-| `scribe` | To buy the exam with ink: `tidy`'s selection, and the whole ink allowance spent on worked problems of its own in the forms the exam's skills take (a session at a shell, a tool call and its result, a question on a passage, a transformation, a logic puzzle, the right sentence of a pair). |
-| `mimic` | To buy the exam by selection, with no ink: the pages that look most like the exam (terminals, logs, JSON, code, questions and answers, reference, news, threads; any language) fill the budget first, and `tidy`'s selection tops it up only if they run short. |
+| `mimic` | To buy the exam by selection: the pages that look most like the exam (terminals, logs, JSON, code, questions and answers, reference, news, threads; any language) fill the budget first, and `tidy`'s selection tops it up only if they run short. |
 
-If either ever beats `tidy` by more than noise, the exam has a hole, and it is the exam that gets fixed.
+If it ever beats `tidy` by more than noise, the exam has a hole, and it is the exam that gets fixed.
+
+There was a second, `scribe`, which spent the 16,000 tokens of its own text a script could then hold on worked problems in the exam's forms. It beat `tidy` by 0.01 bits per byte, so a script now holds no text of its own, and `scribe` is gone.

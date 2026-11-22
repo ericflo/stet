@@ -106,7 +106,7 @@ class Server:
         else:
             said = json.loads(self.scripts[script])
             if said.get("breaks"):
-                return {"by": "rented-one", "valid": False, "reason": "ink over budget"}, None
+                return {"by": "rented-one", "valid": False, "reason": "line 3: this line holds text"}, None
             gain = self.gains[size][said["curator"]] + (0.001, -0.001)[(k - 1) % 2]
         return done, [round(0.5 + 0.01 * i + gain, 6) for i in range(len(batch["items"]))]
 
@@ -427,7 +427,7 @@ def test_the_audit_trains_a_round_at_two_sizes_and_says_whether_the_order_carrie
     # The score and each pillar of the exam, and nothing else: every item sat is in one of them.
     assert set(rep["measures"]) == {"score", "pillar:news", "pillar:logic"} and all(set(m) == {"sizes", "carried"} for m in rep["measures"].values())
     assert rep["measures"]["pillar:logic"]["carried"] == {"standard>large": pytest.approx(0.8)}
-    assert rep["left_out"] == {"e5/c@v1": "it wrote no script at large", "e6/c@v1": "its large script breaks a rule: ink over budget",
+    assert rep["left_out"] == {"e5/c@v1": "it wrote no script at large", "e6/c@v1": "its large script breaks a rule: line 3: this line holds text",
                                "e7/c@v1": "its large script keeps the corpus as it is: it is the unedited student"}
     assert rep["unedited"] == {"standard": 4, "large": 4} and rep["trainings"]["large"]["e1/c@v1"] == 2
     assert "The order of curators carried from standard to large at +0.80" in said and "left out: e5/c@v1: it wrote no script at large" in said

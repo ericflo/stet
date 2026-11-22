@@ -8,14 +8,14 @@ output document, in the order the student should be trained on them.
 
     123                               keep document 123 whole
     {"d": 123, "k": [[0, 900]]}       keep byte ranges of document 123
-    {"s": [[123, 0, 900], "text"]}    join copies, with a little text of your own
-    {"t": "text"}                     a new document
+    {"s": [[123, 0, 900], [7, 40, 400]]}   join copies [doc, start, end] of any documents
 
-Deleting, reordering and repeating are free, and so is taking whole lines out of a page. Your
-own text, and pieces shorter than 64 bytes that are not whole lines, are "ink":
-task.info["ink_tokens"] of it per round, which is very little. The stream is cut off at the
-training budget (task.train_tokens) and repeated from the top if it is shorter, so keeping
-less means training on it more often.
+A script is copies of the pages and holds no text of your own: a line with text in it makes
+the script invalid. Deleting, reordering and repeating are free, and taking whole lines out
+of a page is always allowed. Any other piece must be at least task.info["min_copy_bytes"]
+(64) bytes long, or the script is invalid. The stream is cut off at the training budget
+(task.train_tokens) and repeated from the top if it is shorter, so keeping less means
+training on it more often.
 
 The exam is three quarters writing people published this week, in every language of the
 crawl by its share of it, and one quarter generated skills. Keeping one language only throws

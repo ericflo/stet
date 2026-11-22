@@ -48,10 +48,10 @@ stet service install      # leave it running: starts with the machine, upgrades 
 - **An exam nobody can know.** Each round's exam is made at its draw. Three quarters of the
   score is human writing from three hours of the day before, picked by the draw, in every
   language by its share of the crawl. One quarter is skills, generated from the round's
-  seed. A curator runs with no network and can add next to no text of its own, so the exam
+  seed. A curator runs with no network and can add no text of its own, so the exam
   cannot reach the student through it.
-- **Almost no ink.** 99.99% of what the student reads must be copied byte for byte from the
-  round's corpus.
+- **Copies only.** Everything the student reads is copied byte for byte from the round's
+  corpus. A script holds no text of its own.
 - **Checked by other people.** Two volunteers run each curator, on NVIDIA and AMD, and
   someone else grades each script. A score that only one machine stands behind says so,
   and no score needs the organisers' machines to run or grade anything.

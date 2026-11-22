@@ -123,21 +123,24 @@ One line per output document. Line order is training order: the trainer does not
 ```
 123                                   keep document 123 whole
 {"d": 123, "k": [[0, 900]]}           keep byte ranges of document 123
-{"s": [[123, 0, 900], "text"]}        join copies [doc, start, end] and new text
-{"t": "text"}                         a document of new text
+{"s": [[123, 0, 900], [7, 40, 400]]}  join copies [doc, start, end] of any documents
 ```
 
+- **A script is copies of the crawl and no more.** It holds no text of its own: a line
+  with text in it (a string among the copies, or a `"t"` key) makes the script
+  invalid. That is what makes this an editing competition: with text of its own, the
+  winning move is to ignore the corpus and ship a dataset. A little was allowed at first,
+  16,000 tokens at the official scale, and it was measured: written in the exam's forms, it
+  bought 0.01 bits per byte. So there is none.
 - **Cutting, reordering and repeating are free.**
-- **Deleting lines is free too.** Whole lines of one page, kept in the page's order, are
-  copies however short they are: take out the menu, the cookie banner and the footer and
-  keep the article. Lines cannot be moved, cut short, repeated or mixed with another page's
-  that way.
-- **New text is ink, and there is almost none.** Literal text is ink, and so is any other
-  copy shorter than 64 bytes. The one exception is a whole short document kept on a line of
-  its own. A script may train the student on at most 0.01% ink, counted in tokens: 16,000
-  tokens at the official scale. That is enough for separators and nothing else. It is what
-  makes this an editing competition: without it the winning move is to ignore the corpus
-  and ship a dataset.
+- **Deleting lines is always allowed.** Whole lines of one page, kept in the page's order,
+  are copies however short they are: take out the menu, the cookie banner and the footer
+  and keep the article. Lines cannot be moved, cut short, repeated or mixed with another
+  page's that way.
+- **Any other copy is at least 64 bytes long.** With enough tiny copies a script could
+  spell out any text it liked from the corpus's letters and words, so a shorter copy makes
+  the script invalid. Ranges that touch are one copy. The one exception is a whole short
+  document kept on a line of its own.
 - **The budget cuts both ways.** The stream is cut off at the training budget. A script
   that is shorter is repeated from the top, so keeping less means training on it more
   often.
@@ -287,8 +290,9 @@ where other entries did run, are taken to be the entry's doing, and it stops bei
 - **An entry's gain for a round is taken over its runs**: the mean of two, or the median
   of three. Two runs of a curator that uses neither the clock nor a GPU write the same
   script, and then there is one number.
-- A run with no usable script (nothing written, malformed, over the ink limit, or the
-  curator crashed) has failed. Beside a run that finished, it counts zero, or as the
+- A run with no usable script (nothing written, malformed, text of its own or too short a
+  copy in it, or the curator crashed) has failed. Beside a run that finished, it counts
+  zero, or as the
   entry's worst finished run when that is below zero. A round in which most runs failed is
   **invalid**, and
   **counts as the lowest gain any valid entry got in that round, or zero if that is lower**:

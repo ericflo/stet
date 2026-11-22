@@ -577,7 +577,7 @@ def slim_result(result: dict, base: dict | None) -> dict:
         out["baseline"] = {"mean": base["exam"]["mean"], "item_scores": base["exam"]["item_scores"]}
     if result.get("valid"):
         s = result["script"]
-        out["script"] = {k: s.get(k) for k in ("script_sha256", "tokens_sha256", "script_lines", "out_docs", "out_bytes", "src_docs", "ink_tokens", "ink_frac", "kept_doc_frac", "kept_byte_frac", "tokens_one_pass", "passes", "truncated")}
+        out["script"] = {k: s.get(k) for k in ("script_sha256", "tokens_sha256", "script_lines", "out_docs", "out_bytes", "src_docs", "kept_doc_frac", "kept_byte_frac", "tokens_one_pass", "passes", "truncated")}
         out["exam"] = {"mean": result["exam"]["mean"], "item_scores": result["exam"]["item_scores"]}
         t = result["train"]
         out["train"] = {k: t.get(k) for k in ("seconds", "tokens_per_second", "final_train_loss", "init_sha256", "precision")}

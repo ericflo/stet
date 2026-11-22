@@ -24,7 +24,7 @@ explanation for a good score unavailable.
 | Student architecture and initial weights | Which documents and spans are kept |
 | Optimiser, schedule, batch size | The order they are trained in |
 | Training budget, counted in tokens | How often anything is repeated |
-| Tokenizer | Separators (the ink budget) |
+| Tokenizer | Which copies are joined into one document |
 | How the exam is made and scored | Everything about how the curator decides |
 
 Training is budgeted in tokens, never seconds, so a faster GPU buys nothing there. The trainer
@@ -70,8 +70,8 @@ second.
 Writing published after the draw is writing no curator's author has seen, but a round would
 wait for it: hours, with the machines that have trained standing idle. So a round's writing
 comes from the 26 hours before its draw, and an entry may be newer than some of it. That is
-let be. A curator runs with no network; the only text it can bring is its ink, 16,000 tokens
-at the standard size; and the grader refuses a script whose ink holds a passage of the exam.
+let be. A curator runs with no network, and it can bring no text: a script is copies of the
+crawl and no more.
 What is left to an author who reads the day's writing is to guess which three hours the draw
 will pick and which few hundred passages of them, and then to find pages like them in a
 crawl gathered before any of it was written. The examiner harvests every hour of the clock an hour after it ends and
@@ -108,14 +108,21 @@ Common Crawl. The crawl itself is public, and billions of pages long. Which few 
 of its files a round gets is unknown until after entries close, so a curator cannot be
 tuned to its sample, and the organisers cannot choose a draw that suits anyone.
 
-**Almost no ink.** If new text were allowed, the winning move would be to ignore the
-corpus and ship a dataset, or to have a large model write one. Ink is capped at 0.01% of
-the training tokens: enough for separators and nothing else. Everything else the student
-reads is copied byte for byte from the corpus. This is also what rules out distilling a
-frontier model into the training data. Cleaning a page needs no ink: whole lines of one
-page, kept in the page's order, are copies however short they are. And since ink is the
-only way a curator's own words reach the student, a script whose own text holds a passage
-of its round's exam is refused.
+**A script is copies of the crawl and no more.** If new text were allowed, the winning
+move would be to ignore the corpus and ship a dataset, or to have a large model write one.
+So everything the student reads is copied byte for byte from the corpus. This is also what
+rules out distilling a frontier model into the training data, and it leaves a curator's
+author no way to write the exam's passages in.
+
+A little text of a curator's own was allowed at first: 0.01% of the training tokens, for
+separators. Whether the exam could be bought with it was measured. A curator that spent
+the 16,000 tokens on worked problems in the exam's forms beat the same curator without
+them by 0.01 bits per byte, 2.6 standard errors of the difference. The rule written
+beforehand said that then the allowance goes, and it went.
+
+A copy is at least 64 bytes long, because with enough tiny copies any text can be spelled
+out of the corpus's letters and words. Cleaning a page is always allowed all the same:
+whole lines of one page, kept in the page's order, are copies however short they are.
 
 **Editing and grading are separate.** Only the edit runs an entrant's code. It produces an
 edit script, which is plain data: document numbers and byte ranges. Grading turns a script
@@ -126,8 +133,8 @@ safely: a stranger's GPU never runs a stranger's program.
 a program that reads text well is a model. So a curator names its weights (up to 4 GiB,
 public files pinned by hash) and they are in place when it starts, and it gets a GPU
 through PyTorch and a fixed list of libraries at exact versions. What it does not get is
-a way to turn a big model into training text: the ink limit sees to that. A model here
-can only choose and arrange what the crawl already says.
+a way to turn a big model into training text: a script holds no text of its own. A model
+here can only choose and arrange what the crawl already says.
 
 **Every curator gets the same machine.** Volunteers' machines differ, and an edit limit in
 seconds means something only if the machine is known. So the sandbox gives every curator
@@ -197,10 +204,10 @@ which says whether the next season should move up too.
 | Attack | What stops it |
 |---|---|
 | Tune a curator to a known corpus | The crawl is public, but which files are drawn is unknown until after commit |
-| Tune a curator to the exam | Its writing is three hours of the day before, picked by the draw, and its questions come from the draw's seed; a curator can carry in next to no text, and what it carries is checked against the exam |
-| Write a passage into a curator, then publish it where a harvest may take it | What a harvest keeps of an hour is chosen with a random number emitted as the hour ends, and a script whose own text holds a passage of its round's exam is refused |
-| Ship a dataset instead of editing | The ink budget. A model's weights can be large; the text it may add cannot |
-| Have a large model write the data | The same: 0.01% ink, and no network while the curator runs |
+| Tune a curator to the exam | Its writing is three hours of the day before, picked by the draw, and its questions come from the draw's seed; a curator can carry in no text: its script is copies of the crawl |
+| Write a passage into a curator, then publish it where a harvest may take it | A script holds no text of its own, so a curator has nowhere to put the passage. And what a harvest keeps of an hour is chosen with a random number emitted as the hour ends |
+| Ship a dataset instead of editing | A script is copies of the crawl and no more. A model's weights can be large; it may add no text at all |
+| Have a large model write the data | The same: no text of its own, and no network while the curator runs |
 | Curator reads the exam or phones home | The sandbox has no network, and until the round settles the exam goes only to machines grading it |
 | A source, or the organisers, bias the exam | Many sources, each capped, none with a key. The examiner is published code, every harvest's hash is public before the draw that picks from it, and the exam is published when the round settles |
 | Fail on purpose rather than score badly | A failed run counts as the entry's worst finished run when that is below zero, and a failed round as the lowest valid gain in it, or zero if that is lower |

@@ -308,7 +308,7 @@ func reportAs(t *testing.T, w *world, a *previewActor, c *claimed, loss, base fl
 		"harness": w.app.season.Harness, "season": w.app.season.ID, "season_digest": w.app.season.Digest,
 		"round": c.Job.Round["id"], "scale": c.Job.Scale, "corpus_sha256": corpusSHA, "exam_sha256": examSHA,
 		"script_sha256": c.Job.Script.SHA256, "valid": true, "hardware": map[string]any{"gpu": a.gpu, "device": "cuda", "backend": backendOf(a.gpu)},
-		"script":     map[string]any{"script_sha256": c.Job.Script.SHA256, "kept_doc_frac": kept, "kept_byte_frac": kept * 0.8, "passes": 1.0, "out_docs": 1200, "ink_frac": 0.0},
+		"script":     map[string]any{"script_sha256": c.Job.Script.SHA256, "kept_doc_frac": kept, "kept_byte_frac": kept * 0.8, "passes": 1.0, "out_docs": 1200},
 		"baseline":   map[string]any{"mean": -base, "item_scores": baseline},
 		"exam":       map[string]any{"mean": -loss, "item_scores": exam},
 		"train":      map[string]any{"seconds": 410.0, "tokens_per_second": 100000.0, "final_train_loss": 3.5 + loss - base, "curve": curve},

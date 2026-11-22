@@ -16,7 +16,7 @@ From Gopher (Rae et al., 2021) and RefinedWeb (Penedo et al., 2023), applied to 
 Pages are kept in a fixed random order until the training budget is filled once. It is a
 reference, not an entry to beat: large models trained on data made like this beat raw crawl
 text and lose to classifier-filtered data, and an exam is checked by whether it agrees.
-Every cut is at least min_copy_bytes, so it spends no ink.
+Every piece it keeps is at least min_copy_bytes long, as a copy has to be.
 """
 
 import hashlib

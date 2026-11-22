@@ -1,6 +1,0 @@
-# A red-team curator: it tries to buy the exam with ink. https://www.stetrun.com
-name = "scribe"
-description = "tidy's selection, and the whole ink allowance spent on worked problems written in the forms the exam's skills take: shell sessions, tool calls, questions answered from a passage, transformations, logic, sentences. Entered by the organisers to show what ink buys."
-technique = "tidy + the ink allowance spent on exam-form problems of its own (red team)"
-entry = "python curator.py"
-license = "MIT"
