@@ -184,7 +184,7 @@ def world(tmp_path, monkeypatch):
     odd: dict[str, str] = {}  # curators that do something other than write a script: owner -> what
 
     def edit(bundle, entry, rnd, scale, work, sandbox="none", time_limit=None, gpu=0, **kw):
-        owner = bundle.parent.name.split("-")[0]
+        owner = bundle.parent.name.split(".")[0]
         ran.append((owner, rnd.id, scale.name, sandbox, time_limit, kw["limits"]))
         if odd.get(owner) in ("nothing", f"nothing in {rnd.id}"):
             return EditRun("no_script", 3.0, time_limit, 0, None, "", sandbox, reason="the curator wrote no script")
@@ -401,8 +401,8 @@ def test_the_audit_trains_a_round_at_two_sizes_and_says_whether_the_order_carrie
     assert [(r[0], r[2], r[3], r[4], r[5]) for r in world.ran] == [(f"e{i}", "large", "bwrap", 120.0, {"required": True}) for i in range(1, 8)]
     assert "large: 6 of 7 curators wrote a script" in said and "1 of the exam's items are in the large corpus" in said
     scripts = world.out / rid / "large" / "scripts"
-    assert read(scripts / "e5-c-v1.json")["status"] == "no_script" and not (scripts / "e5-c-v1.jsonl").exists()
-    assert json.loads((scripts / "e1-c-v1.jsonl").read_text()) == {"curator": "e1", "size": "large", "round": rid}
+    assert read(scripts / "e5.c.v1.json")["status"] == "no_script" and not (scripts / "e5.c.v1.jsonl").exists()
+    assert json.loads((scripts / "e1.c.v1.jsonl").read_text()) == {"curator": "e1", "size": "large", "round": rid}
     assert read(world.out / rid / "large" / "corpus.json")["tokens"] == 1000
     assert not any((scripts / "runs").iterdir())  # nothing of a curator's run is kept but its script
     assert run(world, "audit", "scripts", rid) == 0 and len(world.ran) == 7  # run again, it runs nobody again
@@ -410,7 +410,7 @@ def test_the_audit_trains_a_round_at_two_sizes_and_says_whether_the_order_carrie
     assert run(world, "audit", "farm", rid) == 0
     said = capsys.readouterr().err
     own = {o: _official_script(o)[0] for o in ("e1", "e2", "e3", "e4", "e6")}
-    made = {o: hashlib.sha256((scripts / f"{o}-c-v1.jsonl").read_bytes()).hexdigest() for o in ("e1", "e2", "e3", "e4", "e6")}
+    made = {o: hashlib.sha256((scripts / f"{o}.c.v1.jsonl").read_bytes()).hexdigest() for o in ("e1", "e2", "e3", "e4", "e6")}
     # A curator with no script one size up (e5), or one that keeps the corpus as it is (e7), is trained at neither size.
     assert world.server.tasks("standard") == sorted(["unedited", "unedited#2", "unedited#3", "unedited#4"] + [r for s in own.values() for r in (s, f"{s}#2")])
     assert world.server.tasks("large") == sorted(["unedited", "unedited#2", "unedited#3", "unedited#4"] + [r for s in made.values() for r in (s, f"{s}#2")])
@@ -465,6 +465,19 @@ def test_an_audit_needs_three_curators_and_starts_at_the_rounds_own_size(world, 
     assert run(world, "audit", "report", rid) == 0
     rep = read(world.out / rid / "audit-report.json")
     assert rep["sizes"] == ["standard"] and rep["items"] == 18 and rep["measures"]["score"]["carried"] == {} and len(rep["curators"]) == 4
+
+
+def test_no_two_curators_share_a_label_and_so_a_kept_script():
+    """A label is the file a curator's script is kept under. Hyphens are in handles and in names,
+    so a label joined by them was one for foo-bar/baz and foo/bar-baz."""
+    a, b = {"owner": "foo-bar", "name": "baz", "version": 1}, {"owner": "foo", "name": "bar-baz", "version": 1}
+    assert (stages.label_of(a), stages.label_of(b)) == ("foo-bar.baz.v1", "foo.bar-baz.v1")
+    # Nor a name that ends as a version does, with another's version.
+    assert stages.label_of({"owner": "foo", "name": "bar-v1", "version": 2}) == "foo.bar-v1.v2" != stages.label_of({"owner": "foo", "name": "bar", "version": 12})
+    handles = ["a-b", "a", "b-c", "ab", "a-b-c", "c", "b"]
+    curators = [{"owner": o, "name": n, "version": v} for o in handles for n in handles for v in (1, 2, 11)]
+    assert len({stages.label_of(c) for c in curators}) == len(curators)
+    assert all(re.fullmatch(r"[a-z0-9-]+\.[a-z0-9-]+\.v[0-9]+", stages.label_of(c)) for c in curators)  # still a name to read, and a file's
 
 
 # --- the finals ------------------------------------------------------------------------------------
@@ -553,7 +566,7 @@ def test_the_finals_from_the_board_to_the_table(world, capsys):
     assert f"{r1} · large: 10 of 10 curators wrote a script" in said and f"{r2} · large: 9 of 10 curators wrote a script" in said
 
     # The farm: f2's students of the first round are slow to come back, and the table says it is not final.
-    f2 = hashlib.sha256((world.out / r1 / "large" / "scripts" / "f2-c-v1.jsonl").read_bytes()).hexdigest()
+    f2 = hashlib.sha256((world.out / r1 / "large" / "scripts" / "f2.c.v1.jsonl").read_bytes()).hexdigest()
     server.asleep = {f2, f"{f2}#2"}
     assert run(world, "finals", "farm", "--no-wait") == 0
     said = capsys.readouterr().err

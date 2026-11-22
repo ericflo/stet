@@ -255,8 +255,11 @@ def exam_at(rnd_id: str, items: list[Item], sizes: list[str], own: str, work: Pa
 
 
 def label_of(e: dict) -> str:
-    """A curator as a file name."""
-    return re.sub(r"[^a-z0-9.]+", "-", f"{e.get('owner')}-{e.get('name')}-v{e.get('version')}".lower()).strip("-")
+    """A curator as a file name: its owner, its name and its version, with a full stop between
+    them. A handle and a name are lowercase letters, digits and hyphens (the server's handleRe
+    and editorNameRe), so no two curators share one: joined by hyphens, foo-bar/baz and
+    foo/bar-baz did, and one was given the script kept for the other."""
+    return ".".join(re.sub(r"[^a-z0-9]+", "-", str(part).lower()).strip("-") for part in (e.get("owner"), e.get("name"), f"v{e.get('version')}"))
 
 
 def name_of(e: dict) -> str:
