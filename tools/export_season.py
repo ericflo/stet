@@ -11,12 +11,15 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from stet.exam import gen
+from stet.exam.aggregate import plan_of
 from stet.spec import CURRENT_SEASON, GRADES_SINCE, load_season, official_round, prf_u64
 
 
 def export(season_id: str = CURRENT_SEASON) -> dict:
     season = load_season(season_id)
     raw = season.raw
+    plan = plan_of(season)  # which refuses a season whose exam names what nothing makes
     # A fixed example, so the server's tests can prove it derives seeds exactly as the harness does.
     beacon = {"round": 123456, "randomness": "ab" * 32}
     crawl = {"crawl": "CC-MAIN-2026-43", "paths_sha256": "cd" * 32, "n_shards": 100000}
@@ -42,6 +45,8 @@ def export(season_id: str = CURRENT_SEASON) -> dict:
         "exam": {
             "groups": raw["exam"]["groups"],
             "pillars": [{"name": p, "group": v["group"], "parts": v["parts"], "about": v["about"]} for p, v in raw["exam"]["pillars"].items()],
+            # Which of those parts are families of generated problems; every other part is a kind of writing.
+            "generated": [f.NAME for f in gen.named(plan.parts)],
             "clip": raw["exam"]["aggregate"]["clip"], "trim": raw["exam"]["aggregate"]["trim"], "small": raw["exam"]["aggregate"]["small"],
             "answer_floor_bytes": season.answer_floor_bytes,
             # How the exam's writing is taken from the hours the examiner harvests: server/harvest.go.

@@ -144,15 +144,13 @@ is choosing good data, which is the point. The exam weighs four kinds of writing
 skills, and every language by its share of the crawl, so no one source or kind of text can
 carry a score.
 
-## What is a watched part of the exam?
+## Does everything on the exam count?
 
-One that is sat, scored and published with every round and counts for nothing: arithmetic,
-unit conversion, tracing a program, facts and others, and science abstracts. Most are
-questions a student this size cannot do cold whatever it was trained on: measured, they
-ordered curators no better than a coin. Science abstracts are a
-kind of writing new to the exam, and nothing new counts before it is measured. A watched
-part earns a place in the score when, over at least twenty settled rounds, it tells
-curators apart.
+Yes. The season names every part of the exam, and each was measured before the season
+began. A part is in the score or it is not on the exam at all: nothing on the exam counts
+for nothing. Arithmetic, unit conversion and tracing a program are not asked: a student
+this size cannot do them cold whatever it was trained on, and measured, they ordered
+curators no better than a coin.
 
 ## Who runs my code?
 

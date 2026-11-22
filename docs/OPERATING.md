@@ -344,16 +344,15 @@ better is said to be one, and cannot be read as a multiplier: average more round
 
 ### The scale audit
 
-The audit trains a settled round again, at its own size and one size up, and asks two
-things: whether the order of curators at the rounds' size carries to the finals' size, and
-whether a watched part of the exam has earned a place in the score.
+The audit trains a settled round again, at its own size and one size up, and asks whether
+the order of curators at the rounds' size carries to the finals' size.
 
 ```sh
 stet audit plan s2-o00012       # the round's entries, the sizes, the trainings, the GPU hours
 stet audit scripts s2-o00012    # build the corpora here, and run each curator on the larger one in the sandbox
 stet audit farm s2-o00012       # post the students at both sizes, and follow them
 stet audit report s2-o00012     # collect them and add up
-stet audit report --over s2-o00012 s2-o00015 s2-o00019    # every round audited so far, with the verdicts
+stet audit report --over s2-o00012 s2-o00015 s2-o00019    # every round audited so far, as one
 ```
 
 `plan` takes `--entries` (only these curators), `--sizes`, `--trainings` (2 of each script)
@@ -367,22 +366,20 @@ corpus as it is, is left out of the comparison and named.
 
 With N curators an audit is 2N + 4 trainings at each size: for eight, 12.5 GPU hours at
 standard and 90.6 at large at the floor, and up to 10.7 hours of curators on the machine
-that makes the scripts. `--sizes standard` audits a round at its own size alone, for the
-watched parts: `scripts` then only builds the round's corpus, no curator is run, and the
-12.5 hours are all of it.
+that makes the scripts. `--sizes standard` audits a round at its own size alone, for its
+noise and spread there: `scripts` then only builds the round's corpus, no curator is run,
+and the 12.5 hours are all of it.
 
-For the counted score, each pillar and each watched part, the report gives:
+For the score and each pillar, the report gives:
 
 - the **noise**: how far two trainings of one script differ;
 - the **spread**: how far the curators differ, and the spread over the noise, at each size;
 - how far the order at one size **carried** to the next (rank agreement: 1 is the same
-  order, 0 none);
-- for a watched part, how far its order agrees **with the counted score's**.
+  order, 0 none).
 
-A watched part earns a place when, over 20 settled rounds or more, its spread is more than
-1.5 times its noise and its order agrees with the counted score's at 0.5 or better, both
-at the rounds' own size. `--over` pools the rounds and gives the verdict on each; with
-fewer than 20 it says how many there are and whether the part is passing so far.
+One round has a handful of curators, so its rank agreement is rough. `--over` gives the
+rounds audited so far as one: noise and spread pooled over the rounds, and the rank
+agreement averaged, with how many rounds each rests on.
 
 ## Finals
 

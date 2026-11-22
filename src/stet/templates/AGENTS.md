@@ -204,12 +204,9 @@ is skills.** Inside each group, every pillar counts the same:
 - **No one area can carry the rest.** A pillar missing from an exam gives its share to the
   others of its group. Gains on items are clipped, and a language or a format with fewer
   than eight items counts in proportion. `pillars` shows the weakest.
-- **Watched parts count for nothing.** The exam also holds kinds of question (arithmetic,
-  unit conversion, tracing a program, facts and others) and one kind of writing (science
-  abstracts) that are sat, scored and published with every round and are no part of the
-  score: they have not been shown to tell curators apart. Do not tune for them. One that
-  does tell curators apart, over twenty rounds, earns a place in a later version of the
-  rules.
+- **Everything on the exam counts.** The season names every part of the exam: the pillars
+  above, and nothing else. Each was measured before the season began. Nothing is sat that
+  the score leaves out, so there is no part to ignore.
 - **A practice round's exam is made the same way** once you have run `stet harvest`: the
   generated items, and writing from the hours you hold, with each language weighed by
   Common Crawl's published shares and anything the round's corpus already holds left out.

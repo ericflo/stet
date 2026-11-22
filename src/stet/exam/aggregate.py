@@ -21,9 +21,9 @@ Inside a pillar:
 - A language or a format with fewer than SMALL items counts in proportion to how many it has, so
   that no share of the score rests on one or two items.
 
-Generated families and kinds of writing the season does not name are *watched*: sat, scored and
-published every round, and they count for nothing. A family earns its place in a later season's
-score on that record.
+The season names every part. A family of generators it does not name is not generated, a kind
+of writing it does not name is not harvested or selected, and an item of such a part is an error
+here: nothing on the exam counts for nothing.
 
 So no generator, source or language weighs more than its declared share. A curator that gains
 hugely in one place and loses everywhere else gets little; one that gains a little everywhere
@@ -42,15 +42,15 @@ from .items import Item
 CLIP = 4.0  # robust widths
 TRIM = 0.1  # from each end, within a stratum
 SMALL = 8  # items a language or a format needs, in a part, to count in full
-WATCH = "watch"  # the pillar of what is sat and not counted
 OTHER_LANG = "other"  # a part's small languages, measured together
 
-# Fresh text: the kind of writing each source gives. A source not listed is a kind of its own, and
-# a kind the season does not name is watched.
+# Fresh text: the kind of writing each source gives, for every source a harvester can give
+# (fresh/harvest.py). A source not listed is a kind of its own. A kind the season does not name
+# is no part of the exam: its sources are not harvested and its documents are not selected
+# (fresh/select.py).
 SOURCE_KIND = {
-    "wikipedia": "reference", "wikipedia-added": "reference", "wikivoyage": "reference",
-    "wikinews": "news", "ccnews": "news",
-    "wikibooks": "instructional", "wikiversity": "instructional",
+    "wikipedia": "reference", "wikipedia-added": "reference",
+    "ccnews": "news",
     "github": "technical", "lore": "technical",
     "crossref": "science",
     "bluesky": "social", "mastodon": "social",
@@ -72,7 +72,10 @@ class Plan:
     small: int = SMALL
 
     def pillar_of(self, part: str) -> str:
-        return self.parts.get(part, WATCH)
+        """The pillar a part counts in. A part the season does not name is not on the exam."""
+        if part not in self.parts:
+            raise ValueError(f"{part!r} is not a part of the season's exam")
+        return self.parts[part]
 
     def weights(self, present) -> dict[str, float]:
         """Each pillar's share of the score, among the pillars an exam has."""
@@ -86,14 +89,26 @@ class Plan:
 
 
 def plan_of(season) -> Plan:
+    """The season's plan, from its file (exam.groups, exam.pillars, exam.aggregate). The file is
+    the one list of what is on the exam, so it is held to what this copy can make: every part it
+    names is a family of generators (gen.FAMILIES) or a kind of writing a source gives
+    (SOURCE_KIND), and only a generated part it names is given more items (exam.more)."""
+    from .gen import FAMILIES
+
     cfg = season.raw["exam"]
     pillars = {p: v["group"] for p, v in cfg["pillars"].items()}
+    named = [part for v in cfg["pillars"].values() for part in v["parts"]]
     parts = {part: p for p, v in cfg["pillars"].items() for part in v["parts"]}
     agg = cfg.get("aggregate", {})
     plan = Plan(groups={g: float(s) for g, s in cfg["groups"].items()}, pillars=pillars, parts=parts,
                 clip=float(agg.get("clip", CLIP)), trim=float(agg.get("trim", TRIM)), small=int(agg.get("small", SMALL)))
-    if set(pillars.values()) != set(plan.groups) or WATCH in pillars or abs(sum(plan.groups.values()) - 1) > 1e-9:
-        raise ValueError(f"season {season.id}: the exam's groups and pillars do not fit together")
+    if set(pillars.values()) != set(plan.groups) or len(named) != len(parts) or abs(sum(plan.groups.values()) - 1) > 1e-9:
+        raise ValueError(f"season {season.id}: the exam's groups, pillars and parts do not fit together")
+    families = {f.NAME for f in FAMILIES}
+    if unknown := sorted(set(parts) - families - set(SOURCE_KIND.values())):
+        raise ValueError(f"season {season.id}: the exam names {', '.join(unknown)}: no generator makes that and no source gives it")
+    if stray := sorted(set(cfg.get("more", {})) - (set(parts) & families)):
+        raise ValueError(f"season {season.id}: exam.more gives more items to {', '.join(stray)}, which the exam does not name as a generated part")
     return plan
 
 
@@ -118,10 +133,14 @@ def is_generated(it: Item) -> bool:
     return it.source.startswith("gen:")
 
 
+def source_kind(source: str) -> str:
+    """The kind of writing a source gives."""
+    return SOURCE_KIND.get(source, source)
+
+
 def kind_of(it: Item) -> str:
     """A fresh item's kind of writing."""
-    src = it.source.split(":", 1)[0]
-    return SOURCE_KIND.get(src, src)
+    return source_kind(it.source.split(":", 1)[0])
 
 
 def part_of(it: Item) -> str:
@@ -134,9 +153,10 @@ def lang_group(it: Item) -> str:
 
 
 def item_table(items: list[Item], plan: Plan | None = None) -> list[dict]:
-    """All the score needs to know of each item: its pillar ("watch" when it does not count), its
-    part (a family, or a kind of writing), its language (programming languages as one) and its
-    stratum. The server scores a round from this table and the gains alone (server/aggregate.go)."""
+    """All the score needs to know of each item: its pillar, its part (a family, or a kind of
+    writing), its language (programming languages as one) and its stratum. The server scores a
+    round from this table and the gains alone (server/aggregate.go). An item of a part the season
+    does not name is refused: it should not be on the exam."""
     plan = plan or current_plan()
     rows = []
     for it in items:
@@ -227,7 +247,7 @@ def _part(pairs: list[Pair], plan: Plan, shares) -> float:
 
 
 def _parts(pairs: list[Pair], plan: Plan, shares) -> dict[str, dict]:
-    """Every pillar an exam has ("watch" among them): its score, its items and its parts."""
+    """Every pillar an exam has: its score, its items and its parts."""
     tree: dict[str, dict[str, list[Pair]]] = defaultdict(lambda: defaultdict(list))
     for row, g in pairs:
         tree[row["pillar"]][row["part"]].append((row, g))
@@ -246,30 +266,27 @@ def _score(pillars: dict[str, dict], plan: Plan) -> float:
 
 def _check(table: list[dict], plan: Plan):
     for row in table:
-        if row["pillar"] != WATCH and row["pillar"] not in plan.pillars:
-            raise ValueError(f"{row['pillar']!r} is not one of the season's pillars")
+        if plan.pillar_of(row["part"]) != row["pillar"]:
+            raise ValueError(f"the season's exam has no part {row['part']!r} in a pillar {row['pillar']!r}")
 
 
 def score_from_table(table: list[dict], item_gains: list[float], shares: dict[str, float] | None, plan: Plan | None = None) -> dict:
-    """The round's score, each pillar's, and each watched part's, unrounded, from item_table and
-    the gains alone: what round_score gives, by the same code, and what the server computes. The
-    server is always given the round's shares (and refuses none); here None or {} means the
-    published SHARES."""
+    """The round's score and each pillar's, unrounded, from item_table and the gains alone: what
+    round_score gives, by the same code, and what the server computes. A row whose part the
+    season does not name, or names under another pillar, is refused. The server is always given
+    the round's shares (and refuses none); here None or {} means the published SHARES."""
     plan = plan or current_plan()
     if len(table) != len(item_gains):
         raise ValueError("one gain per item")
     _check(table, plan)
-    counted = [(row, g) for row, g in zip(table, item_gains, strict=True) if row["pillar"] != WATCH]
-    watched = [({**row, "pillar": row["part"]}, g) for row, g in zip(table, item_gains, strict=True) if row["pillar"] == WATCH]
-    pillars = _parts(counted, plan, shares)
-    return {"score": _score(pillars, plan), "pillars": {p: v["score"] for p, v in pillars.items()},
-            "watch": {p: v["score"] for p, v in _parts(watched, plan, shares).items()}}
+    pillars = _parts(list(zip(table, item_gains, strict=True)), plan, shares)
+    return {"score": _score(pillars, plan), "pillars": {p: v["score"] for p, v in pillars.items()}}
 
 
 def round_score(items: list[Item], item_gains: list[float], shares: dict[str, float] | None = None, plan: Plan | None = None) -> dict:
-    """The round's score and what it is made of: each pillar with its share and its parts, what is
-    watched and not counted, the generated and fresh items each scored the same way on their own,
-    the fresh items' languages, and every family's plain mean."""
+    """The round's score and what it is made of: each pillar with its share and its parts, the
+    generated and fresh items each scored the same way on their own, the fresh items' languages,
+    and every family's plain mean. An item of a part the season does not name is refused."""
     plan = plan or current_plan()
     if len(items) != len(item_gains):
         raise ValueError("one gain per item")
@@ -278,25 +295,22 @@ def round_score(items: list[Item], item_gains: list[float], shares: dict[str, fl
     fam: dict[str, list[float]] = defaultdict(list)
     for it, g in zip(items, item_gains, strict=True):
         fam[it.family].append(g)
-    counted = [p for p in pairs if p[0]["pillar"] != WATCH]
-    watched = [({**row, "pillar": row["part"]}, g) for row, g in pairs if row["pillar"] == WATCH]
-    pillars = _parts(counted, plan, shares)
+    pillars = _parts(pairs, plan, shares)
     weights = plan.weights(pillars)
-    out: dict = {"units": "bits per byte", "items": len(items), "counted": len(counted),
+    out: dict = {"units": "bits per byte", "items": len(items),
                  "corners": len({it.corner for it in items}), "score": _score(pillars, plan),
                  "pillars": {p: {"score": round(pillars[p]["score"], 5), "items": pillars[p]["items"], "parts": pillars[p]["parts"],
                                  "group": plan.pillars[p], "weight": round(weights[p], 5)} for p in plan.pillars if p in pillars},
-                 "watch": {p: {"score": round(v["score"], 5), "items": v["items"]} for p, v in _parts(watched, plan, shares).items()},
                  "strata": {}, "generated": None, "fresh": None}
-    gen = [p for it, p in zip(items, pairs, strict=True) if is_generated(it) and p[0]["pillar"] != WATCH]
-    fresh = [p for it, p in zip(items, pairs, strict=True) if not is_generated(it) and p[0]["pillar"] != WATCH]
+    gen = [p for it, p in zip(items, pairs, strict=True) if is_generated(it)]
+    fresh = [p for it, p in zip(items, pairs, strict=True) if not is_generated(it)]
     if gen:
         out["generated"] = {"score": _score(_parts(gen, plan, shares), plan), "items": len(gen)}
         out["strata"] = {k: round(v, 5) for k, v in _balanced(gen, plan)[1].items()}
     if fresh:
         by_lang: dict[str, list[Pair]] = defaultdict(list)
         for it, p in zip(items, pairs, strict=True):
-            if not is_generated(it) and p[0]["pillar"] != WATCH:
+            if not is_generated(it):
                 by_lang[it.lang].append(p)
         cell, weight = language_cells({k: len(v) for k, v in by_lang.items()}, shares, plan.small)
         out["fresh"] = {"score": _score(_parts(fresh, plan, shares), plan), "items": len(fresh),

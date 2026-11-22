@@ -18,7 +18,7 @@ import (
 // which takes half beside natural languages; inside a language each stratum (format/kind)
 // counts the same, each a trimmed mean of gains clipped to a few robust widths. A language or
 // a stratum with fewer than the season's "small" items counts in proportion to how many it has.
-// Items whose pillar is "watch" are scored part by part and count for nothing.
+// The season names every part: an item of any other part is not scored, it is refused.
 //
 // To give the harness's floating point, not just its arithmetic, everything is added in the
 // order the harness adds it, with the compensated sum Python's sum() does, and no product is
@@ -26,14 +26,11 @@ import (
 // (tools/aggregate_vectors.py writes it).
 
 const (
-	otherShare  = 0.05    // the share of a language the round's shares leave out
-	codeLang    = "code"  // every programming language, as one language
-	otherLang   = "other" // a part's small languages, measured together
-	watchPillar = "watch" // sat and published, and counted for nothing
+	otherShare = 0.05    // the share of a language the round's shares leave out
+	codeLang   = "code"  // every programming language, as one language
+	otherLang  = "other" // a part's small languages, measured together
 )
 
-// ExamPlan is what a season's score is made of: exam.groups, exam.pillars and exam.aggregate of
-// its file, as tools/export_season.py writes them.
 // FreshPlan is how the season takes an exam's writing from the hours the examiner harvests.
 type FreshPlan struct {
 	Settle int64 `json:"settle_seconds"` // an hour is harvested this long after it ends
@@ -41,14 +38,17 @@ type FreshPlan struct {
 	Hours  int   `json:"hours"`          // and this many of them
 }
 
+// ExamPlan is what a season's score is made of: exam.groups, exam.pillars and exam.aggregate of
+// its file, as tools/export_season.py writes them. The pillars name every part of the exam.
 type ExamPlan struct {
-	Groups  map[string]float64 `json:"groups"`  // each group's share of the score
-	Pillars []PlanPillar       `json:"pillars"` // in the order they are shown
-	Clip    float64            `json:"clip"`    // robust widths
-	Trim    float64            `json:"trim"`    // from each end, within a stratum
-	Small   int                `json:"small"`   // items a language or a stratum needs to count in full
-	Floor   int                `json:"answer_floor_bytes"`
-	Fresh   FreshPlan          `json:"fresh"`
+	Groups    map[string]float64 `json:"groups"`    // each group's share of the score
+	Pillars   []PlanPillar       `json:"pillars"`   // in the order they are shown
+	Generated []string           `json:"generated"` // the parts that are families of generated problems; the others are kinds of writing
+	Clip      float64            `json:"clip"`      // robust widths
+	Trim      float64            `json:"trim"`      // from each end, within a stratum
+	Small     int                `json:"small"`     // items a language or a stratum needs to count in full
+	Floor     int                `json:"answer_floor_bytes"`
+	Fresh     FreshPlan          `json:"fresh"`
 }
 
 type PlanPillar struct {
@@ -58,7 +58,8 @@ type PlanPillar struct {
 	About string   `json:"about"`
 }
 
-// pillarOf is the pillar a part belongs to, or "watch".
+// pillarOf is the pillar a part belongs to, or "" for a part the season does not name: one
+// that is not on the exam.
 func (p *ExamPlan) pillarOf(part string) string {
 	for _, pl := range p.Pillars {
 		for _, x := range pl.Parts {
@@ -67,7 +68,17 @@ func (p *ExamPlan) pillarOf(part string) string {
 			}
 		}
 	}
-	return watchPillar
+	return ""
+}
+
+// generated reports whether a part is a family of generated problems, not a kind of writing.
+func (p *ExamPlan) generated(part string) bool {
+	for _, x := range p.Generated {
+		if x == part {
+			return true
+		}
+	}
+	return false
 }
 
 // weights is each pillar's share of the score, among the pillars an exam has: its group's
@@ -107,39 +118,34 @@ type ItemInfo struct {
 	Stratum string `json:"stratum"`
 }
 
-// ScoreItems is a round's score on its exam, each of its pillars' scores and each watched
-// part's, from its items, a gain per item (in order), and the round's shares of languages
-// (lang -> percent; a language left out, or with no share above zero, gets otherShare). The
-// harness falls back to a published table of shares when it is given none; the server is
-// always given the round's, and refuses to score without them.
-func (p *ExamPlan) ScoreItems(items []ItemInfo, gains []float64, shares map[string]float64) (score float64, pillars, watch map[string]float64, err error) {
+// ScoreItems is a round's score on its exam and each of its pillars' scores, from its items,
+// a gain per item (in order), and the round's shares of languages (lang -> percent; a language
+// left out, or with no share above zero, gets otherShare). An item whose part the season does
+// not name, or names under another pillar, is refused. The harness falls back to a published
+// table of shares when it is given none; the server is always given the round's, and refuses
+// to score without them.
+func (p *ExamPlan) ScoreItems(items []ItemInfo, gains []float64, shares map[string]float64) (score float64, pillars map[string]float64, err error) {
 	if len(items) != len(gains) {
-		return 0, nil, nil, errors.New("one gain per item")
+		return 0, nil, errors.New("one gain per item")
 	}
 	if len(items) == 0 {
-		return 0, nil, nil, errors.New("no items to score")
+		return 0, nil, errors.New("no items to score")
 	}
 	if len(shares) == 0 {
-		return 0, nil, nil, errors.New("no shares of languages to weigh the items by")
+		return 0, nil, errors.New("no shares of languages to weigh the items by")
 	}
-	known := map[string]bool{watchPillar: true}
+	under := map[string]string{} // each part's pillar
 	for _, pl := range p.Pillars {
-		known[pl.Name] = true
-	}
-	var counted, watched []int
-	for i, it := range items {
-		if !known[it.Pillar] {
-			return 0, nil, nil, errors.New("an item of a pillar the season does not have")
-		}
-		if it.Pillar == watchPillar {
-			watched = append(watched, i)
-		} else {
-			counted = append(counted, i)
+		for _, part := range pl.Parts {
+			under[part] = pl.Name
 		}
 	}
-	pillars = p.pillarScores(items, gains, counted, shares, func(i int) string { return items[i].Pillar })
-	// A watched part is scored as a pillar of its own would be.
-	watch = p.pillarScores(items, gains, watched, shares, func(i int) string { return items[i].Part })
+	for _, it := range items {
+		if pillar, ok := under[it.Part]; !ok || pillar != it.Pillar {
+			return 0, nil, errors.New("an item of a part the season's exam does not have")
+		}
+	}
+	pillars = p.pillarScores(items, gains, shares)
 	present := make(map[string]bool, len(pillars))
 	for name := range pillars {
 		present[name] = true
@@ -154,12 +160,16 @@ func (p *ExamPlan) ScoreItems(items []ItemInfo, gains []float64, shares map[stri
 	for i, name := range names {
 		terms[i] = float64(w[name] * pillars[name])
 	}
-	return pySum(terms), pillars, watch, nil
+	return pySum(terms), pillars, nil
 }
 
-// pillarScores is each pillar's score among some items: the mean of its parts.
-func (p *ExamPlan) pillarScores(items []ItemInfo, gains []float64, idx []int, shares map[string]float64, pillar func(int) string) map[string]float64 {
-	names, byPillar := groupInOrder(idx, pillar)
+// pillarScores is each pillar's score: the mean of its parts.
+func (p *ExamPlan) pillarScores(items []ItemInfo, gains []float64, shares map[string]float64) map[string]float64 {
+	idx := make([]int, len(items))
+	for i := range idx {
+		idx[i] = i
+	}
+	names, byPillar := groupInOrder(idx, func(i int) string { return items[i].Pillar })
 	out := make(map[string]float64, len(names))
 	for _, name := range names {
 		parts, byPart := groupInOrder(byPillar[name], func(i int) string { return items[i].Part })

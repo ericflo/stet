@@ -50,7 +50,7 @@ A settled entry:
 | `runs` | Each run: see below |
 | `dropped_runs` | Runs that count for nothing because nobody else was there to check them, in the same shape with `status` `dropped` and a `reason` |
 | `script`, `edit` | Those of the run whose gain is nearest the entry's, for anything that wants one script |
-| `by_source` | The gain on each pillar, made as `gain` is: the mean, pillar by pillar, over the runs `gain` is the median of (the middle run of three, both of two; a failed run counts on every pillar as it does in `gain`: 0, or as the run that stands in for it), of each run's script's, which is the mean over the grades that script's gain is the median of. A grade's score is a fixed weighted sum of its pillars' scores (the season's `exam`), so the same sum of these is `gain`, to rounding. Keys that begin `watch:` are parts that are scored and count for nothing |
+| `by_source` | The gain on each pillar, made as `gain` is: the mean, pillar by pillar, over the runs `gain` is the median of (the middle run of three, both of two; a failed run counts on every pillar as it does in `gain`: 0, or as the run that stands in for it), of each run's script's, which is the mean over the grades that script's gain is the median of. A grade's score is a fixed weighted sum of its pillars' scores (the season's `exam`), so the same sum of these is `gain`, to rounding |
 | `void`, `reason` | A round that does not count for the entry, and why; or why it is invalid |
 | `detail` | `verifiers` (whose grades the score is made of, then everyone else whose grade agreed), `disputed` (grades that differed), `disputed_together` (two established accounts graded one of its scripts, disagreed, and nobody was there to break the tie), and `script`, `train`, `hardware` from the grade nearest the score |
 
@@ -113,7 +113,7 @@ list of numbers has one score for each item of the round's exam, in the order of
 | Field | |
 |---|---|
 | `round`, `items_digest` | The round, and its exam's digest |
-| `table` | What each item counts toward: its `pillar` (`watch` when it counts for nothing), `part`, `lang` and `stratum` |
+| `table` | What each item counts toward: its `pillar`, its `part` of that pillar (both as the season's `exam` names them), `lang` and `stratum` |
 | `languages` | The percent of the round's corpus in each language, which weighs the items |
 | `baseline` | The unedited student's score on each item: the mean of the baselines of the graders named in `baseline_of` |
 | `baselines` | Every baseline measured for the round, by its grader's handle. Only some graders are asked for one: a grade job says whether (`baseline`, [below](#jobs)) |

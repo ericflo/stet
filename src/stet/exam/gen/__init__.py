@@ -1,13 +1,15 @@
 """Generated families. Each module has a NAME, a list of corners, and make(rng, corner) -> Item.
 
-A round's generated exam is one item (or a few) from every corner of every family, each made
-from its own stream of the round's seed, so adding a family or a corner never changes what
-the others produce.
+FAMILIES is every family this copy can make. Which of them a round's exam has is the season's
+to say: its file names the parts of the exam (exam.pillars), and a family it does not name is
+not generated (for_season). A round's generated exam is a few items from every corner of every
+family the season names, each made from its own stream of the round's seed, so adding a family
+or a corner never changes what the others produce.
 
-The five families that count (MORE) ask in the web's main languages, each language's questions in
-corners of their own (logic/ru/...), so that a language's share of the corpus is its share of a
-skill, as it is of the fresh writing. The families that do not count are also asked few-shot
-(shots.py), each as a family of its own that is watched beside it.
+Agent, context, transform, logic and grammar ask in the web's main languages, each language's
+questions in corners of their own (logic/ru/...), so that a language's share of the corpus is its
+share of a skill, as it is of the fresh writing. What a small student cannot do cold can also be
+asked few-shot (shots.py), each of those a family of its own (arith-shots beside arith).
 """
 
 from __future__ import annotations
@@ -39,23 +41,28 @@ FAMILIES = [arith, word, units, algebra, programs, algo, logic, structured, shel
 FAMILIES += [shots.Shots(f) for f in (arith, word, units, algebra, programs, algo, structured, multi)]
 FAMILIES += [shots.Pairs(arith), shots.Pairs(units, lambda corner: "/convert/" in corner)]
 VERSION = 9  # bump when any generator changes what a seed produces
-# The families that count in the season's score make more items from each corner, so that each
-# rests on enough of them. The rest are watched: one round's worth is plenty.
-MORE = {"agent": 4, "context": 2, "transform": 3, "logic": 2, "grammar": 3}
 
 
 def all_corners() -> list[str]:
     return [c for fam in FAMILIES for c in fam.corners()]
 
 
-def generate(seed: bytes | str, per_corner: int = 1, families=None) -> list[Item]:
-    """Every corner's items for a seed: per_corner of each (more for the families in MORE), in a fixed order."""
+def named(parts) -> list:
+    """The families among the parts a season names, in FAMILIES' order."""
+    parts = set(parts)
+    return [fam for fam in FAMILIES if fam.NAME in parts]
+
+
+def generate(seed: bytes | str, per_corner: int = 1, *, families, more: dict[str, int] | None = None) -> list[Item]:
+    """These families' items for a seed, in a fixed order: per_corner from every corner, and
+    more[name] times that from a family named in `more`."""
     root = Rng(seed, f"exam/v{VERSION}")
+    more = more or {}
     out: list[Item] = []
     had: set[str] = set()
-    for fam in families or FAMILIES:
+    for fam in families:
         for corner in fam.corners():
-            for i in range(per_corner * MORE.get(fam.NAME, 1)):
+            for i in range(per_corner * int(more.get(fam.NAME, 1))):
                 it = fam.make(root.child(f"{corner}#{i}"), corner)
                 # A corner with few things to say can say one of them twice. An item sat twice
                 # counts twice: draw again, a few times, for one the exam does not have yet.
@@ -66,3 +73,12 @@ def generate(seed: bytes | str, per_corner: int = 1, families=None) -> list[Item
                 had.add(it.id)
                 out.append(it)
     return out
+
+
+def for_season(season, seed: bytes | str) -> list[Item]:
+    """A round's generated items: the families the season's exam names and no other, exam.per_corner
+    from every corner, and more from the families the season says rest on more (exam.more)."""
+    from ..aggregate import plan_of
+
+    cfg = season.raw["exam"]
+    return generate(seed, int(cfg["per_corner"]), families=named(plan_of(season).parts), more=cfg.get("more"))

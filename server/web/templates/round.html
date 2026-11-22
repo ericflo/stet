@@ -115,7 +115,6 @@
         <dl class="kv">{{range .Parts}}{{if .Items}}
           <dt>{{.Pillar}}</dt><dd>{{comma .Items}} {{if .Fresh}}written by people{{else}}generated{{end}}{{if .Share}}<span class="why">{{pct1 .Share}} of the score</span>{{end}}</dd>{{end}}{{end}}
         </dl>
-        {{if .Watched}}<p class="lead" style="margin-top:14px">Sat and published, counting for nothing: {{range $i, $k := .Watched}}{{if $i}}, {{end}}{{$k.Kind}} {{comma $k.Items}}{{end}}. <a href="/glossary#watched">Why?</a></p>{{end}}
         {{else}}<p class="lead">Posted {{datetime $r.ExamAt}}{{if $r.Fresh}}, with {{comma $r.Fresh}} passages people wrote{{end}}.</p>{{end}}
         <p class="lead">{{if eq $r.Status "settled"}}<a href="/api/v1/rounds/{{$d.ID}}/exam">Download it</a>: the generated problems and Wikipedia's text whole, and for every other site what each item was and where it came from, without the text itself.{{else}}Graders have it now. Everyone else can download it when the round settles.{{end}}</p>{{end}}
       </div>

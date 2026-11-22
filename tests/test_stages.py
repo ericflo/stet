@@ -33,13 +33,13 @@ CORPUS_TOKENS = {"standard": 400, "large": 1000}  # FakeEnc: a token a word, and
 
 
 def _items() -> list[Item]:
-    """An exam of eighteen: news written after the draw, generated logic, and a part nobody counts."""
+    """An exam of eighteen: news written after the draw, and generated logic of two sorts."""
     news = [Item(kind="passage", corner=f"fresh/ccnews/en/-/{i}", fmt="prose", lang="en", source="ccnews:test",
                  text=QUOTED if i == 0 else f"Report number {i} of the day, which no crawl made before it could hold: the council met and adjourned {i} times over.")
             for i in range(6)]
-    logic = [Item(kind="answer", corner=f"logic/chain/{i}", fmt="prose", lang="en", source="gen:logic", ctx=f"If {i} then", cont=f" {i + 1}.") for i in range(6)]
-    watched = [Item(kind="answer", corner=f"zzwatched/x/{i}", fmt="prose", lang="en", source="gen:zzwatched", ctx=f"Q{i}", cont=f" A{i}.") for i in range(6)]
-    return news + logic + watched
+    chains = [Item(kind="answer", corner=f"logic/chain/{i}", fmt="prose", lang="en", source="gen:logic", ctx=f"If {i} then", cont=f" {i + 1}.") for i in range(6)]
+    orders = [Item(kind="answer", corner=f"logic/order/{i}", fmt="prose", lang="en", source="gen:logic", ctx=f"Q{i}", cont=f" A{i}.") for i in range(6)]
+    return news + chains + orders
 
 
 def _slot(t: int) -> tuple[int, int]:
@@ -103,14 +103,12 @@ class Server:
         done = {"by": "rented-one", "hardware": "a made-up card", "valid": True, "kept_doc_frac": min(1.0, tokens / CORPUS_TOKENS[size]), "train_seconds": 12.5}
         if script == farm.UNEDITED:
             gain = self.curve[multiple] if multiple else (0.002, -0.002, 0.001, -0.001)[(k - 1) % 4]
-            watched = gain
         else:
             said = json.loads(self.scripts[script])
             if said.get("breaks"):
                 return {"by": "rented-one", "valid": False, "reason": "ink over budget"}, None
-            level = self.gains[size][said["curator"]]
-            gain, watched = level + (0.001, -0.001)[(k - 1) % 2], 2 * level + (0.001, -0.001)[(k - 1) % 2]
-        return done, [round(0.5 + 0.01 * i + (watched if it.corner.startswith("zzwatched/") else gain), 6) for i, it in enumerate(batch["items"])]
+            gain = self.gains[size][said["curator"]] + (0.001, -0.001)[(k - 1) % 2]
+        return done, [round(0.5 + 0.01 * i + gain, 6) for i in range(len(batch["items"]))]
 
     def request(self, method, path, body=None, key=None, raw=False, timeout=0, limit=0):
         if path.startswith("/api/v1/rounds/"):
@@ -426,20 +424,22 @@ def test_the_audit_trains_a_round_at_two_sizes_and_says_whether_the_order_carrie
     score = rep["measures"]["score"]
     assert score["carried"] == {"standard>large": pytest.approx(0.8)}
     assert score["sizes"]["standard"]["noise"] == pytest.approx(0.001 * 2**0.5) and score["sizes"]["large"]["spread"] == pytest.approx(0.02 * (5 / 3) ** 0.5)
-    watched = rep["measures"]["watch:zzwatched"]
-    assert watched["with_score"] == pytest.approx(1.0) and watched["passes"] is True
+    # The score and each pillar of the exam, and nothing else: every item sat is in one of them.
+    assert set(rep["measures"]) == {"score", "pillar:news", "pillar:logic"} and all(set(m) == {"sizes", "carried"} for m in rep["measures"].values())
+    assert rep["measures"]["pillar:logic"]["carried"] == {"standard>large": pytest.approx(0.8)}
     assert rep["left_out"] == {"e5/c@v1": "it wrote no script at large", "e6/c@v1": "its large script breaks a rule: ink over budget",
                                "e7/c@v1": "its large script keeps the corpus as it is: it is the unedited student"}
     assert rep["unedited"] == {"standard": 4, "large": 4} and rep["trainings"]["large"]["e1/c@v1"] == 2
     assert "The order of curators carried from standard to large at +0.80" in said and "left out: e5/c@v1: it wrote no script at large" in said
-    assert "watched: zzwatched" in said and "(1 left out: a bigger corpus holds them)" in said
+    assert "logic" in said and "(1 left out: a bigger corpus holds them)" in said and "stet audit report --over" in said
 
-    # Pooled over the rounds audited so far: one round is far from the twenty the rule asks for.
+    # The rounds audited so far as one: a round has too few curators for its order to say much alone.
     assert run(world, "audit", "report", "--over", rid, "s2-o00099") == 0
     said = capsys.readouterr().err
     over = read(world.out / "audit-over.json")
-    assert over["over"] == [rid] and over["measures"]["watch:zzwatched"]["verdict"] == "too few rounds: 1 of 20, passing so far"
-    assert "no audit report yet for: s2-o00099" in said and "too few rounds: 1 of 20" in said
+    assert over["over"] == [rid] and over["rounds"] == 1 and set(over["measures"]) == set(rep["measures"])
+    assert over["measures"]["score"]["carried"] == {"standard>large": {"rounds": 1, "mean": pytest.approx(0.8)}}
+    assert "no audit report yet for: s2-o00099" in said and f"rounds audited, 1: {rid}" in said and "standard to large +0.80 (1)" in said
     # With what was collected, the report needs no server.
     world.server.forgetful = True
     assert run(world, "audit", "report", rid, "--offline") == 0 and read(world.out / rid / "audit-report.json")["measures"] == rep["measures"]

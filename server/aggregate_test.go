@@ -18,7 +18,6 @@ type aggregateVectors struct {
 		Gains   []float64          `json:"gains"`
 		Score   float64            `json:"score"`
 		Pillars map[string]float64 `json:"pillars"`
-		Watch   map[string]float64 `json:"watch"`
 	} `json:"cases"`
 }
 
@@ -52,20 +51,9 @@ func TestTheScoreItemsIsTheHarnesss(t *testing.T) {
 				t.Fatalf("%s: the harness puts %s under %s, the server under %s", c.Name, it.Part, it.Pillar, plan.pillarOf(it.Part))
 			}
 		}
-		score, pillars, watch, err := plan.ScoreItems(items, c.Gains, c.Shares)
+		score, pillars, err := plan.ScoreItems(items, c.Gains, c.Shares)
 		if err != nil {
 			t.Fatalf("%s: %v", c.Name, err)
-		}
-		if len(watch) != len(c.Watch) {
-			t.Errorf("%s: watched %v, the harness %v", c.Name, watch, c.Watch)
-		}
-		for part, want := range c.Watch {
-			got, ok := watch[part]
-			d := math.Abs(got - want)
-			worst = math.Max(worst, d)
-			if !ok || !(d <= tol) {
-				t.Errorf("%s: watched %s %.17g, the harness %.17g", c.Name, part, got, want)
-			}
 		}
 		d := math.Abs(score - c.Score)
 		worst = math.Max(worst, d)
@@ -104,21 +92,20 @@ func TestLanguagesWeighByTheRoundsShares(t *testing.T) {
 	add("code", "code/passage", plan.Small, 10)
 	add("sw", "prose/passage", 1, 100) // sw and ru are small: one cell, "other", of two items
 	add("ru", "prose/passage", 1, 1000)
-	score, pillars, watch, err := plan.ScoreItems(items, gains, map[string]float64{"en": 0.85, "ru": -1})
+	score, pillars, err := plan.ScoreItems(items, gains, map[string]float64{"en": 0.85, "ru": -1})
 	if err != nil {
 		t.Fatal(err)
 	}
 	// en 0.85 in full; sw and ru 0.05 each, together, a quarter counted (2 of 8 items): halved, beside code's half
 	other := 0.1 * 2 / float64(plan.Small)
 	want := 0.5*(0.85*1+other*550)/(0.85+other) + 0.5*10
-	if math.Abs(score-want) > 1e-12 || math.Abs(pillars["technical"]-want) > 1e-12 || len(watch) != 0 {
+	if math.Abs(score-want) > 1e-12 || math.Abs(pillars["technical"]-want) > 1e-12 || len(pillars) != 1 {
 		t.Fatalf("score %v, pillars %v, want %v", score, pillars, want)
 	}
 }
 
-// A group's share is the season's, whatever the exam has of it; what is watched is scored and
-// does not count.
-func TestGroupsKeepTheirSharesAndWatchedPartsDoNotCount(t *testing.T) {
+// A group's share is the season's, whatever the exam has of it.
+func TestGroupsKeepTheirShares(t *testing.T) {
 	plan := &loadSeason().Exam
 	var items []ItemInfo
 	var gains []float64
@@ -131,17 +118,29 @@ func TestGroupsKeepTheirSharesAndWatchedPartsDoNotCount(t *testing.T) {
 	add("reference", "reference", 0.4)
 	add("news", "news", 0.2)
 	add("agents", "agent", -1)
-	add("watch", "arith", 50)
-	score, pillars, watch, err := plan.ScoreItems(items, gains, map[string]float64{"en": 43})
+	score, pillars, err := plan.ScoreItems(items, gains, map[string]float64{"en": 43})
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := plan.Groups["writing"]*(0.4+0.2)/2 + plan.Groups["skills"]*-1
-	if math.Abs(score-want) > 1e-12 || len(pillars) != 3 || watch["arith"] != 50 {
-		t.Fatalf("score %v (want %v), pillars %v, watched %v", score, want, pillars, watch)
+	if math.Abs(score-want) > 1e-12 || len(pillars) != 3 {
+		t.Fatalf("score %v (want %v), pillars %v", score, want, pillars)
 	}
-	if plan.pillarOf("arith") != watchPillar || plan.pillarOf("agent") != "agents" || plan.pillarOf("social") != "conversation" {
+	if plan.pillarOf("agent") != "agents" || plan.pillarOf("social") != "conversation" || plan.pillarOf("no such part") != "" {
 		t.Fatal("the season's parts are not under its pillars")
+	}
+}
+
+// The season says which of its parts are generated, and every one of them is a part it names.
+func TestTheSeasonsGeneratedPartsAreParts(t *testing.T) {
+	plan := &loadSeason().Exam
+	if len(plan.Generated) == 0 {
+		t.Fatal("the season names no generated part")
+	}
+	for _, part := range plan.Generated {
+		if plan.pillarOf(part) == "" {
+			t.Errorf("%s is generated, and is no part of the exam", part)
+		}
 	}
 }
 
@@ -151,12 +150,20 @@ func TestTheScoreItemsRefusesWhatItCannotScore(t *testing.T) {
 	one := []ItemInfo{{"logic", "logic", "en", "prose/answer"}}
 	shares := map[string]float64{"en": 43}
 	for name, call := range map[string]func() error{
-		"more gains than items": func() error { _, _, _, err := plan.ScoreItems(one, []float64{0.1, 0.2}, shares); return err },
-		"no gains":              func() error { _, _, _, err := plan.ScoreItems(one, nil, shares); return err },
-		"no items":              func() error { _, _, _, err := plan.ScoreItems(nil, nil, shares); return err },
-		"no shares":             func() error { _, _, _, err := plan.ScoreItems(one, []float64{0.1}, nil); return err },
+		"more gains than items": func() error { _, _, err := plan.ScoreItems(one, []float64{0.1, 0.2}, shares); return err },
+		"no gains":              func() error { _, _, err := plan.ScoreItems(one, nil, shares); return err },
+		"no items":              func() error { _, _, err := plan.ScoreItems(nil, nil, shares); return err },
+		"no shares":             func() error { _, _, err := plan.ScoreItems(one, []float64{0.1}, nil); return err },
 		"a pillar the season does not have": func() error {
-			_, _, _, err := plan.ScoreItems([]ItemInfo{{"reasoning", "arith", "en", "math/answer"}}, []float64{0.1}, shares)
+			_, _, err := plan.ScoreItems([]ItemInfo{{"reasoning", "logic", "en", "prose/answer"}}, []float64{0.1}, shares)
+			return err
+		},
+		"a part the season does not name": func() error {
+			_, _, err := plan.ScoreItems([]ItemInfo{{"logic", "riddles", "en", "prose/answer"}}, []float64{0.1}, shares)
+			return err
+		},
+		"a part under another part's pillar": func() error {
+			_, _, err := plan.ScoreItems([]ItemInfo{{"logic", "agent", "en", "logs/answer"}}, []float64{0.1}, shares)
 			return err
 		},
 	} {
@@ -165,7 +172,7 @@ func TestTheScoreItemsRefusesWhatItCannotScore(t *testing.T) {
 		}
 	}
 	// One item, alone in its stratum and its language: an eighth of a full cell, and all there is.
-	if s, p, _, err := plan.ScoreItems(one, []float64{0.25}, shares); err != nil || s != 0.25 || p["logic"] != 0.25 {
+	if s, p, err := plan.ScoreItems(one, []float64{0.25}, shares); err != nil || s != 0.25 || p["logic"] != 0.25 {
 		t.Fatalf("one item: %v %v %v", s, p, err)
 	}
 }

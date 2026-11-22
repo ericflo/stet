@@ -4,9 +4,9 @@ Asked plainly, arithmetic, unit conversions, algebra, word problems, program tra
 in structured data order curators no better than chance at any student size: a small student
 cannot do them cold. Shown a few solved examples of the very same kind first, the question is
 another one: can the student pick a pattern up from what is in front of it and carry it on? That
-is learning in context, and a small student trained on good data may show it. Season 2 watches to
-find out. Each family asked this way is a part of its own (arith-shots beside arith), so it is
-sat, scored and published every round, and counts for nothing until a season names it.
+is learning in context, and a small student trained on good data may show it. Each family asked
+this way is a part of its own (arith-shots beside arith): it is on a season's exam when the
+season names it, and is not generated otherwise.
 
 The examples are items of the question's own corner, made by the family's own generator from
 other draws of the seed: they are in exactly the question's format and differ from it in their

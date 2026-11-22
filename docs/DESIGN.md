@@ -41,13 +41,13 @@ count the same: agents, reading, transformation, logic and grammar. How much eac
 a choice of value, so it is declared rather than left to how many items of each there
 happen to be. [The reasoning](research/exam-first-principles.md#9-season-2-november-2026).
 
-**Only what tells curators apart counts.** A student this size cannot do arithmetic, unit
-conversion or program tracing cold, whatever it was trained on: on the pilot such questions
-ordered curators no better than a coin, at every size of student. Weight on such a part is
-weight on noise, and every extra training is then spent averaging it away. So those parts are
-*watched*: sat and published in every round, and no part of the score. A watched part
-earns a place when, over at least twenty settled rounds, it tells curators apart. A kind
-of writing new to the exam (science abstracts) starts there too. On the pilot, the score
+**Only what tells curators apart is on the exam.** A student this size cannot do arithmetic,
+unit conversion or program tracing cold, whatever it was trained on: on the pilot such
+questions ordered curators no better than a coin, at every size of student. Weight on such a
+part is weight on noise, and every extra training is then spent averaging it away. So the
+season names every part of its exam, and each was measured before the season. A part the
+season does not name is not generated, not harvested and not sat. Nothing on the exam counts
+for nothing: a part is in the score or it is not on the exam at all. On the pilot, the score
 made this way moved a quarter as much between two trainings of one script as a score that
 counted those parts, and agreed better with the large student
 ([measured](EXPERIMENTS.md#how-much-is-noise): the pilot's fresh writing was Wikipedia only).

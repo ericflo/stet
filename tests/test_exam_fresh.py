@@ -68,8 +68,8 @@ def test_documents_become_items_with_corners():
 def test_selection_caps_corners_shares_languages_and_is_repeatable():
     docs = [_doc(i, topic=f"Q{i % 7}") for i in range(200)] + [_doc(1000 + i, lang="de", topic=f"Q{i}") for i in range(50)]
     docs += [_doc(2000 + i, lang="kaa", topic="Q5") for i in range(40)]
-    a = select(docs, b"seed", 60, per_corner=2)
-    assert select(docs, b"seed", 60, per_corner=2) == a != select(docs, b"other", 60, per_corner=2)
+    a = select(docs, b"seed", 60, {"reference"}, per_corner=2)
+    assert select(docs, b"seed", 60, {"reference"}, per_corner=2) == a != select(docs, b"other", 60, {"reference"}, per_corner=2)
     assert len(a) <= 60
     corners = collections.Counter(it.corner for it in a)
     assert max(corners.values()) <= 2
@@ -78,17 +78,33 @@ def test_selection_caps_corners_shares_languages_and_is_repeatable():
     assert langs["en"] == 28 and langs["kaa"] <= 4 and langs["de"] > 0
 
 
-def test_a_watched_kind_of_writing_gets_a_few_items_and_the_rest_go_to_those_that_count():
-    from stet.exam.aggregate import kind_of
-    from stet.exam.fresh.select import WATCHED
-
+def test_only_the_kinds_of_writing_the_season_names_are_selected():
     docs = [_doc(i, topic=f"Q{i}") for i in range(400)]  # reference
     docs += [_doc(1000 + i, source="github", topic=f"r{i}", title=f"Issue {i}") for i in range(400)]  # technical
     docs += [_doc(2000 + i, source="crossref", topic=f"j{i}", title=f"Paper {i}") for i in range(400)]  # science
-    kinds = collections.Counter(kind_of(it) for it in select(docs, b"seed", 300, per_corner=2))
-    assert kinds["science"] == pytest.approx(100, abs=2)  # every kind an equal part, when none is named as watched
-    kinds = collections.Counter(kind_of(it) for it in select(docs, b"seed", 300, per_corner=2, watched={"science", "instructional"}))
-    assert kinds["science"] == WATCHED and kinds["reference"] == pytest.approx(120, abs=2) and kinds["technical"] == pytest.approx(120, abs=2)
+    docs += [_doc(3000 + i, source="radio", topic=f"s{i}", title=f"Show {i}") for i in range(400)]  # a source of no kind: one of its own
+    kinds = collections.Counter(kind_of(it) for it in select(docs, b"seed", 300, {"reference", "technical", "science"}, per_corner=2))
+    assert set(kinds) == {"reference", "technical", "science"} and kinds["science"] == pytest.approx(100, abs=2)  # every kind named, an equal part
+    # A kind the season does not name is not on the exam at all, and what it would have had goes to those that are.
+    named = select(docs, b"seed", 300, {"reference", "technical"}, per_corner=2)
+    kinds = collections.Counter(kind_of(it) for it in named)
+    assert set(kinds) == {"reference", "technical"} and kinds["reference"] == pytest.approx(150, abs=2) and len(named) == 300
+    # The documents of a kind that is not named change nothing for the others.
+    assert named == select([d for d in docs if d.source in ("wikipedia", "github")], b"seed", 300, {"reference", "technical"}, per_corner=2)
+    assert select(docs, b"seed", 300, set(), per_corner=2) == []
+
+
+def test_the_season_names_kinds_of_writing_that_sources_give():
+    """Every kind of writing the season's exam names has a source that is harvested for it, and
+    every source the harvest can give is of a kind the season could name."""
+    from stet.exam.aggregate import SOURCE_KIND, current_plan
+    from stet.exam.fresh import harvest
+    from stet.exam.gen import FAMILIES
+
+    given = ["wikipedia", "wikipedia-added", "wikipedia-talk", *(s for name in harvest.OTHERS for s in harvest.gives(name))]
+    assert set(given) <= set(SOURCE_KIND) and {SOURCE_KIND[s] for s in given} == set(SOURCE_KIND.values())
+    writing = set(current_plan().parts) - {f.NAME for f in FAMILIES}
+    assert writing and writing <= {SOURCE_KIND[s] for s in given}
 
 
 def test_prose_with_a_semicolon_is_not_code_and_a_patch_is():
@@ -116,14 +132,15 @@ def test_each_kind_of_writing_gets_its_part_and_sources_take_turns():
     docs += [_doc(1000 + i, source="github", topic=f"r{i}", title=f"Issue {i}") for i in range(300)]  # technical: plenty
     docs += [_doc(2000 + i, source="hackernews", topic="", question="Why?", title=f"Story {i}") for i in range(300)]
     docs += [_doc(3000 + i, source="lemmy", topic=f"c{i}", question="Why?", title=f"Post {i}") for i in range(10)]
-    a = select(docs, b"seed", 90, per_corner=2)
+    kinds = {"reference", "technical", "discussion"}
+    a = select(docs, b"seed", 90, kinds, per_corner=2)
     by_kind = collections.Counter(kind_of(it) for it in a)
     assert by_kind == {"reference": 30, "technical": 30, "discussion": 30}
     # in discussion, Lemmy's ten replies all come in before Hacker News fills the rest
     disc = collections.Counter(it.source.split(":")[0] for it in a if kind_of(it) == "discussion")
     assert disc["lemmy"] == 10 and disc["hackernews"] == 20
     # a kind that runs short gives what it leaves to the others
-    b = select(docs[:300] + docs[-10:], b"seed", 60, per_corner=2)
+    b = select(docs[:300] + docs[-10:], b"seed", 60, kinds, per_corner=2)
     assert collections.Counter(kind_of(it) for it in b) == {"reference": 50, "discussion": 10}
 
 
@@ -183,10 +200,11 @@ def test_the_harvest_reads_its_sources_at_once(monkeypatch, tmp_path):
     import threading
     import time
 
+    from stet.exam.aggregate import SOURCE_KIND
     from stet.exam.fresh import harvest, wikipedia
 
-    names = ["wikipedia", "wikipedia-added", "wikipedia-talk", *harvest.OTHERS]
-    started, gate = [], threading.Barrier(len(names), timeout=5)  # each waits until every source has begun
+    names =["wikipedia", "wikipedia-added", "wikipedia-talk", *harvest.OTHERS]
+    started, gate = [], [None]
 
     def doc(source, i):
         return Doc(source=source, id=f"{source}:{i}", url=f"https://example.org/{source}/{i}", lang="en", license="",
@@ -195,21 +213,36 @@ def test_the_harvest_reads_its_sources_at_once(monkeypatch, tmp_path):
     def source(name, n, delay):
         def read(*a, **k):
             started.append(name)
-            gate.wait()
+            gate[0].wait()
             time.sleep(delay)
             if name == "lemmy":
                 raise TimeoutError("an instance did not answer")
-            return [doc(name, i) for i in range(n)]
+            return [doc(under, i) for under in harvest.gives(name) for i in range(n)]  # a post and a reply, where a source gives both
         return read
 
     monkeypatch.setattr(harvest, "SHARES", {"en": 50.0})
     monkeypatch.setattr(wikipedia, "harvest", source("wikipedia", 2, 0.3))
     monkeypatch.setattr(wikipedia, "additions", lambda lang, *a, talk=False, **k: source("wikipedia-talk" if talk else "wikipedia-added", 1, 0.2)())
     monkeypatch.setattr(harvest, "OTHERS", {n: source(n, 1, 0.0) for n in harvest.OTHERS})
-    lines = []
-    meta, _ = harvest.harvest_window(b"seed", 1_800_000_000, 1_800_007_200, tmp_path / "fresh.jsonl", log=lines.append)
-    _, docs = read_snapshot(tmp_path / "fresh.jsonl")
-    assert sorted(started) == sorted(names)  # all at once, or the barrier would have timed out
-    got = collections.Counter(d.source for d in docs)  # the snapshot keeps them in its own order
-    assert got == collections.Counter({"wikipedia": 2, "wikipedia-added": 1, "wikipedia-talk": 1, **{n: 1 for n in harvest.OTHERS if n != "lemmy"}})
+
+    def window(kinds, read):
+        """Harvest the kinds of writing a season names; `read` is the sources that must be read for them."""
+        started.clear()
+        gate[0] = threading.Barrier(len(read), timeout=5)  # each waits until every source has begun
+        lines = []
+        meta, _ = harvest.harvest_window(b"seed", 1_800_000_000, 1_800_007_200, tmp_path / "fresh.jsonl", kinds, log=lines.append)
+        assert sorted(started) == sorted(read)  # all at once, or the barrier would have timed out; and no other source at all
+        return meta, collections.Counter(d.source for d in read_snapshot(tmp_path / "fresh.jsonl")[1]), lines  # the snapshot keeps them in its own order
+
+    # Every kind of writing there is: every source is read.
+    meta, got, lines = window(set(SOURCE_KIND.values()), names)
+    assert got == collections.Counter({"wikipedia": 2, "wikipedia-added": 1, "wikipedia-talk": 1, "bluesky-reply": 1, "mastodon-reply": 1,
+                                       **{n: 1 for n in harvest.OTHERS if n != "lemmy"}})
     assert "lemmy" not in meta["sources"] and any("lemmy: TimeoutError" in m for m in lines)
+    # A season that does not name science: Crossref, which gives nothing else, is not asked for anything.
+    meta, got, _ = window(set(SOURCE_KIND.values()) - {"science"}, [n for n in names if n != "crossref"])
+    assert "crossref" not in got and "crossref" not in meta["sources"] and got["ccnews"] == 1
+    # One that names discussion alone: Bluesky and Mastodon are read for their replies, and their posts are not kept.
+    meta, got, _ = window({"discussion"}, ["wikipedia-talk", "hackernews", "lemmy", "bluesky", "mastodon", "discourse"])
+    assert got == collections.Counter({"wikipedia-talk": 1, "hackernews": 1, "bluesky-reply": 1, "mastodon-reply": 1, "discourse": 1})
+    assert meta["sources"] == {"wikipedia": "all", "hackernews": 1, "bluesky": 1, "mastodon": 1, "discourse": 1} and meta["documents"] == 5

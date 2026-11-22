@@ -788,11 +788,13 @@ def practice_key(rnd: Round) -> str:
 
 def _practice(rnd: Round, scale: Scale, hours: list[tuple[int, Path]]):
     """A practice round's exam with writing: made as the examiner makes an official round's,
-    from hours harvested here, and kept beside the round's corpus."""
+    from hours harvested here, and kept beside the round's corpus, under the season's digest
+    and the hours' name: the season says which parts an exam has, so another season's file is
+    another exam."""
     from .exam.examine import assemble, pack_items
     from .exam.farm import unpack_items
 
-    path = round_dir(rnd, scale) / f"exam-practice-{practice_key(rnd)[:16]}.jsonl.zst"
+    path = round_dir(rnd, scale) / f"exam-practice-{rnd.season.digest[:8]}-{practice_key(rnd)[:16]}.jsonl.zst"
     try:
         return unpack_items(path.read_bytes())
     except (OSError, ValueError, zstandard.ZstdError):
@@ -833,7 +835,7 @@ def _items(rnd: Round):
         raise RuntimeError(f"season {rnd.season.id} sets the exam's generators at version {cfg['generator_version']}, "
                            f"this copy of stet has {gen.VERSION}: upgrade stet")
     if rnd.kind != "official":
-        return gen.generate(rnd.seed, per_corner=int(cfg["per_corner"]))
+        return gen.for_season(rnd.season, rnd.seed)
     want = getattr(rnd, "exam_digest", "") or ""
     path = exam_items_path(rnd, want) if want else None
     if path is not None and not path.exists() and exam_public_path(rnd, want).exists():

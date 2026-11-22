@@ -65,6 +65,12 @@ func TestTheExamIsGradedOnceItIsPostedAndScoredAgainstTheRoundsBaseline(t *testi
 	if code, _ := w.postExam(anchor, idx, bad); code != 400 {
 		t.Fatalf("an exam with a pillar the season does not have: HTTP %d", code)
 	}
+	// Nor one with an item of a part the season does not name: nothing is sat that is not scored.
+	bad = append([]ItemInfo(nil), table...)
+	bad[0].Part = "riddles"
+	if code, _ := w.postExam(anchor, idx, bad); code != 400 {
+		t.Fatalf("an exam with a part the season does not name: HTTP %d", code)
+	}
 	// A verifier that trains before the exam takes the script while it is made, and carol
 	// takes it too, as a replica.
 	early := w.claimEarly(bob)
@@ -123,7 +129,7 @@ func TestTheExamIsGradedOnceItIsPostedAndScoredAgainstTheRoundsBaseline(t *testi
 		for i := range gains {
 			gains[i] = (-2.9 - float64(i%3)*0.01) - base[i]
 		}
-		want, _, _, _ = w.app.season.Exam.ScoreItems(table, gains, rd.Shares)
+		want, _, _ = w.app.season.Exam.ScoreItems(table, gains, rd.Shares)
 	})
 	if e.Gain == nil || math.Abs(*e.Gain-places5(want)) > 1e-4 {
 		t.Fatalf("the entry's gain is %v, want %.5f", e.Gain, want)

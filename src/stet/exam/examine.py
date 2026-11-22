@@ -99,11 +99,10 @@ def assemble(rnd, scale, snapshots: list[tuple[int, Path]], work: Path, log=prin
     if measure:
         mix = shares(corpus, rnd.seed)  # every language in proportion to the round's own corpus
         log(f"  the corpus's languages: {', '.join(f'{k} {v:.1f}%' for k, v in list(mix.items())[:8])}, and {max(0, len(mix) - 8)} more")
-    from .aggregate import SOURCE_KIND, WATCH, plan_of
+    from .aggregate import plan_of
 
-    plan = plan_of(season)
-    watched = {k for k in set(SOURCE_KIND.values()) if plan.pillar_of(k) == WATCH}  # kinds of writing that count for nothing
-    fresh = select(docs, rnd.seed, int(cfg["fresh"]["items"]), per_corner=int(cfg["fresh"]["per_corner"]), shares=mix, watched=watched)
+    # Only the kinds of writing the season names: a document of any other kind is not on the exam.
+    fresh = select(docs, rnd.seed, int(cfg["fresh"]["items"]), plan_of(season).parts, per_corner=int(cfg["fresh"]["per_corner"]), shares=mix)
     mark = work / f"seen-{digest(fresh)[:12]}.json"
     if mark.exists():
         dropped = set(json.loads(mark.read_text()))
@@ -113,7 +112,7 @@ def assemble(rnd, scale, snapshots: list[tuple[int, Path]], work: Path, log=prin
     if dropped:
         log(f"  {len(dropped)} fresh items are in the round's corpus already, and are dropped")
     fresh = [it for i, it in enumerate(fresh) if i not in dropped]
-    items: list[Item] = gen.generate(rnd.seed, per_corner=int(cfg["per_corner"])) + fresh
+    items: list[Item] = gen.for_season(season, rnd.seed) + fresh
     log(f"  the exam: {len(items)} items, {len(fresh)} of them fresh")
     return items, len(fresh), mix, shas
 

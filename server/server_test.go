@@ -427,7 +427,7 @@ func (w *world) claimEarly(a *actor) *claimed {
 // round is given (testExam).
 var corpusSHA, examSHA = strings.Repeat("c0", 32), strings.Repeat("d1", 32)
 
-// testTable is a small exam: items in three pillars, two languages.
+// testTable is a small exam: items in two pillars, a skill and a kind of writing, and two languages.
 func testTable() []ItemInfo {
 	var out []ItemInfo
 	for i := 0; i < 12; i++ {
@@ -435,9 +435,6 @@ func testTable() []ItemInfo {
 	}
 	for i := 0; i < 6; i++ {
 		out = append(out, ItemInfo{Pillar: "reference", Part: "reference", Lang: []string{"en", "de"}[i%2], Stratum: "prose/passage"})
-	}
-	for i := 0; i < 4; i++ {
-		out = append(out, ItemInfo{Pillar: "watch", Part: "prog", Lang: "code", Stratum: "code/answer"})
 	}
 	return out
 }

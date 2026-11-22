@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """Test vectors for the server's copy of the exam's score (server/aggregate.go): item tables,
-gains and language shares, and the score, the pillars and the watched parts the harness gives them,
-under the current season's plan (its exam.groups and exam.pillars).
+gains and language shares, and the score and the pillars the harness gives them, under the
+current season's plan (its exam.groups and exam.pillars).
 
     python tools/aggregate_vectors.py
 
 writes server/testdata/aggregate_vectors.json. The server's tests check it gives the same to within
 1e-9, and tests/test_aggregate_vectors.py fails if the committed file is not what this writes now.
+
+Every case is made of the parts the season names, whichever they are: no part is named here, so
+when the season's list changes the file is written again and nothing here is edited.
 """
 
 from __future__ import annotations
@@ -19,15 +22,17 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from stet.exam import gen
-from stet.exam.aggregate import SOURCE_KIND, item_table, round_score, score_from_table
+from stet.exam.aggregate import SOURCE_KIND, current_plan, item_table, round_score, score_from_table
 from stet.exam.fresh.select import SHARES
 from stet.exam.items import FORMATS, KINDS, Item
+from stet.spec import load_season
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "server" / "testdata" / "aggregate_vectors.json"
 SEED = 20261119
-FAMILIES = sorted(f.NAME for f in gen.FAMILIES)
-SOURCES = sorted(SOURCE_KIND) + ["forum", "radio"]  # the last two not listed: each a kind of its own
+PLAN = current_plan()
+FAMILIES = sorted(f.NAME for f in gen.named(PLAN.parts))  # the generated parts the season names
+SOURCES = sorted(s for s, kind in SOURCE_KIND.items() if kind in PLAN.parts)  # every source of a kind of writing it names
 NATURAL = ["en", "ru", "de", "ja", "zh", "fr", "es", "pt", "sw", "yo", "eo", "nan"]  # the last four not in SHARES
 CODE_LANGS = ["code:python", "code:go", "code:lua", "code:javascript"]
 STYLES = ("normal", "outliers", "ties", "heavy")
@@ -41,6 +46,16 @@ def item(part: str, lang: str, fmt: str = "prose", kind: str = "answer", n: int 
         corner, source = f"fresh/{part}/{lang}/{n}", f"{part}:{n}"
     say = {"passage": {"text": "Text."}, "answer": {"ctx": "Q:", "cont": " A"}, "pair": {"good": "Good.", "bad": "Bad."}}
     return Item(kind=kind, corner=corner, fmt=fmt, lang=lang, source=source, **say[kind])
+
+
+def family(i: int) -> str:
+    """One of the season's generated parts, whichever they are; a source, should it name none."""
+    return (FAMILIES or SOURCES)[i % len(FAMILIES or SOURCES)]
+
+
+def source(i: int) -> str:
+    """One of the sources of the season's kinds of writing; a family, should it name none."""
+    return (SOURCES or FAMILIES)[i % len(SOURCES or FAMILIES)]
 
 
 def draw_gains(rng: random.Random, n: int, style: str) -> list[float]:
@@ -74,7 +89,8 @@ def draw_shares(rng: random.Random, langs) -> dict[str, float]:
 def random_case(rng: random.Random) -> tuple[list[Item], list[float], dict[str, float]]:
     """A few parts, each in a few languages (sometimes code beside them) and strata, of every size."""
     items: list[Item] = []
-    for part in rng.sample(FAMILIES + SOURCES, rng.randint(1, 8)):
+    parts = FAMILIES + SOURCES
+    for part in rng.sample(parts, rng.randint(1, min(8, len(parts)))):
         langs = rng.sample(NATURAL, rng.randint(1, 4))
         if rng.random() < 0.3:
             langs += rng.sample(CODE_LANGS, rng.randint(1, 2))
@@ -87,15 +103,15 @@ def random_case(rng: random.Random) -> tuple[list[Item], list[float], dict[str, 
 
 
 def fresh_items(rng: random.Random) -> list[Item]:
-    """Fresh items of several sources and languages, technical writing in code and English both."""
-    plan = {"wikipedia": ["en", "ru", "de", "ja"], "wikinews": ["en", "fr"], "ccnews": ["en", "es", "sw"],
-            "wikibooks": ["en", "pt"], "github": ["en", "code:go", "code:python"], "bluesky": ["en", "ja", "pt"],
-            "mastodon": ["de", "en", "eo"], "wikipedia-talk": ["en", "ru"], "hackernews": ["en"], "lemmy": ["en", "de"],
-            "github-comment": ["en", "ru"], "mastodon-reply": ["en", "ja"], "forum": ["zh", "nan"],
-            "crossref": ["en", "es", "pt"], "stackexchange": ["en"], "stackoverflow": ["en", "code:python"], "lore": ["code:c"],
-            "discourse": ["en", "de", "fr"]}
+    """Fresh items of every source the season's exam has, in several languages, technical writing in
+    code and English both."""
+    langs_of = {"wikipedia": ["en", "ru", "de", "ja"], "ccnews": ["en", "es", "sw"], "github": ["en", "code:go", "code:python"],
+                "bluesky": ["en", "ja", "pt"], "mastodon": ["de", "en", "eo"], "wikipedia-talk": ["en", "ru"], "hackernews": ["en"],
+                "lemmy": ["en", "de"], "github-comment": ["en", "ru"], "mastodon-reply": ["en", "ja"], "crossref": ["en", "es", "pt"],
+                "lore": ["code:c"], "discourse": ["en", "de", "fr"]}
     out = []
-    for src, langs in plan.items():
+    for src in SOURCES:
+        langs = langs_of.get(src, ["en", "zh", "nan"])
         for _ in range(rng.randint(3, 40)):
             fmt = rng.choice(("prose", "dialogue", "code")) if src in ("github", "github-comment") else rng.choice(("prose", "dialogue"))
             out.append(item(src, rng.choice(langs), fmt, rng.choice(("passage", "answer")), len(out)))
@@ -104,49 +120,51 @@ def fresh_items(rng: random.Random) -> list[Item]:
 
 def edge_cases(rng: random.Random):
     """(name, items, gains, shares): each the place where a port would most likely go wrong."""
-    one = [item("arith", "en", "math")]
+    one = [item(family(0), "en", "math")]
     yield "one item", one, [0.25], {"en": 43.0}
-    many = [item("arith", "en", "math", n=i) for i in range(12)] + [item("grammar", "en", "prose", "pair")]
+    many = [item(family(0), "en", "math", n=i) for i in range(12)] + [item(family(1), "en", "prose", "pair")]
     yield "a pillar of one item", many, draw_gains(rng, 13, "normal"), {"en": 43.0}
-    mixed = ([item("prog", "code:python", "code", n=i) for i in range(6)] + [item("prog", "code:go", "code", n=i) for i in range(3)]
-             + [item("prog", "en", "prose", n=i) for i in range(4)] + [item("prog", "ru", "prose", n=i) for i in range(2)]
-             + [item("prog", "sw", "prose")])
+    mixed = ([item(family(2), "code:python", "code", n=i) for i in range(6)] + [item(family(2), "code:go", "code", n=i) for i in range(3)]
+             + [item(family(2), "en", "prose", n=i) for i in range(4)] + [item(family(2), "ru", "prose", n=i) for i in range(2)]
+             + [item(family(2), "sw", "prose")])
     rng.shuffle(mixed)
     yield "a part mixing code and natural languages", mixed, draw_gains(rng, len(mixed), "normal"), {"en": 43.0, "ru": 6.2}
-    code = [item("prog", rng.choice(CODE_LANGS), "code", n=i) for i in range(9)] + [item("struct", "en", "structured", n=i) for i in range(4)]
+    code = [item(family(2), rng.choice(CODE_LANGS), "code", n=i) for i in range(9)] + [item(family(3), "en", "structured", n=i) for i in range(4)]
     yield "code alone in a part", code, draw_gains(rng, len(code), "outliers"), {"en": 43.0}
-    absent = [item("wikipedia", lang, "prose", "passage", i) for i, lang in enumerate(["sw", "yo", "eo", "sw", "en", "yo", "eo", "en"])]
+    absent = [item(source(0), lang, "prose", "passage", i) for i, lang in enumerate(["sw", "yo", "eo", "sw", "en", "yo", "eo", "en"])]
     yield "languages absent from the shares", absent, draw_gains(rng, len(absent), "normal"), {"en": 40.0, "de": 5.6}
-    zero = [item("ccnews", lang, "prose", "passage", i) for i, lang in enumerate(["en", "ru", "de", "fr"] * 3)]
+    zero = [item(source(1), lang, "prose", "passage", i) for i, lang in enumerate(["en", "ru", "de", "fr"] * 3)]
     yield "zero and negative shares", zero, draw_gains(rng, len(zero), "normal"), {"en": 0.0, "ru": -3.0, "de": 5.0, "fr": 0.001}
-    flat = [item("units", "en", "math", n=i) for i in range(8)] + [item("units", "en", "table", n=i) for i in range(3)]
+    flat = [item(family(4), "en", "math", n=i) for i in range(8)] + [item(family(4), "en", "table", n=i) for i in range(3)]
     yield "no spread to clip by", flat, [0.1] * 7 + [5.0] + [0.2] * 3, {"en": 43.0}
-    far = [item("logic", "en", "prose", n=i) for i in range(23)]
+    far = [item(family(3), "en", "prose", n=i) for i in range(23)]
     yield "outliers clipped", far, draw_gains(rng, 20, "normal") + [40.0, -25.0, 12.5], {"en": 43.0}
-    edges = [item("algo", "en", fmt, n=i) for fmt, size in zip(FORMATS, (9, 10, 11, 19, 20, 21, 29, 30, 31, 59, 61), strict=True)
+    edges = [item(family(1), "en", fmt, n=i) for fmt, size in zip(FORMATS, (9, 10, 11, 19, 20, 21, 29, 30, 31, 59, 61), strict=True)
              for i in range(size)]
     yield "trims at their edges", edges, draw_gains(rng, len(edges), "heavy"), {"en": 43.0}
-    tiny = [item(rng.choice(("word", "multi")), rng.choice(("en", "de")), rng.choice(FORMATS), rng.choice(KINDS), i) for i in range(14)]
+    tiny = [item(family(rng.randrange(2)), rng.choice(("en", "de")), rng.choice(FORMATS), rng.choice(KINDS), i) for i in range(14)]
     yield "strata of one and two", tiny, draw_gains(rng, len(tiny), "outliers"), {"en": 43.0, "de": 5.6}
-    tied = [item(rng.choice(FAMILIES), rng.choice(NATURAL), rng.choice(FORMATS), "answer", i) for i in range(40)]
+    tied = [item(rng.choice(FAMILIES + SOURCES), rng.choice(NATURAL), rng.choice(FORMATS), "answer", i) for i in range(40)]
     yield "all the same", tied, [0.125] * 40, {"en": 43.0, "ja": 5.0}
     kinds = [item(src, rng.choice(NATURAL), "dialogue", "passage", i) for i, src in enumerate(SOURCES)]
-    yield "every kind of writing", kinds, draw_gains(rng, len(kinds), "normal"), {"en": 43.0, "ru": 6.2, "ja": 5.0}
-    small = [item("wikipedia", lang, "prose", "passage", i) for i, lang in enumerate(["en"] * 10 + ["ru"] * 8 + ["de"] * 7 + ["sw"] * 3 + ["yo"] * 2)]
+    if kinds:
+        yield "every source of writing", kinds, draw_gains(rng, len(kinds), "normal"), {"en": 43.0, "ru": 6.2, "ja": 5.0}
+    small = [item(source(0), lang, "prose", "passage", i) for i, lang in enumerate(["en"] * 10 + ["ru"] * 8 + ["de"] * 7 + ["sw"] * 3 + ["yo"] * 2)]
     yield "small languages measured together", small, draw_gains(rng, len(small), "normal"), {"en": 43.0, "ru": 6.2, "de": 5.6, "sw": 0.2}
-    lone = [item("ccnews", "en", "prose", "passage", i) for i in range(20)] + [item("ccnews", "nan", "prose", "passage", 99)]
+    lone = [item(source(1), "en", "prose", "passage", i) for i in range(20)] + [item(source(1), "nan", "prose", "passage", 99)]
     yield "one item of a small language", lone, draw_gains(rng, len(lone), "outliers"), {"en": 43.0}
-    named = [item("lemmy", "other", "dialogue", "answer", i) for i in range(9)] + [item("lemmy", "eo", "dialogue", "answer", i) for i in range(3)]
+    named = [item(source(2), "other", "dialogue", "answer", i) for i in range(9)] + [item(source(2), "eo", "dialogue", "answer", i) for i in range(3)]
     yield "a language called other beside the pooled ones", named, draw_gains(rng, len(named), "normal"), {"en": 43.0, "other": 1.5}
-    watched = [item("arith", "en", "math", n=i) for i in range(9)] + [item("knowledge", lang, "prose", n=i) for i, lang in enumerate(["en", "ru", "ja"] * 4)]
-    yield "only watched items", watched, draw_gains(rng, len(watched), "normal"), {"en": 43.0, "ru": 6.2}
-    skills = [item("agent", "en", "logs", n=i) for i in range(12)] + [item("logic", "en", "prose", n=i) for i in range(5)]
-    yield "one group alone", skills, draw_gains(rng, len(skills), "normal"), {"en": 43.0}
-    thin = [item("github", "en", "prose", "passage", i) for i in range(10)] + [item("github", "code:go", "code", "passage", i) for i in range(3)]
+    # Each group by itself, its first pillar and its last: the group that is not there gives its share away.
+    for group in PLAN.groups:
+        ends = [next(p for p in FAMILIES + SOURCES if PLAN.pillar_of(SOURCE_KIND.get(p, p)) == pillar)
+                for pillar, g in PLAN.pillars.items() if g == group]
+        alone = [item(ends[0], "en", "logs", n=i) for i in range(12)] + [item(ends[-1], "en", "prose", n=i) for i in range(5)]
+        yield f"one group alone: {group}", alone, draw_gains(rng, len(alone), "normal"), {"en": 43.0}
+    thin = [item(source(3), "en", "prose", "passage", i) for i in range(10)] + [item(source(3), "code:go", "code", "passage", i) for i in range(3)]
     yield "a few items of code beside prose", thin, draw_gains(rng, len(thin), "normal"), {"en": 43.0}
-    both = ([item("wikipedia", "en", "prose", "passage", i) for i in range(9)] + [item("agent", "en", "logs", n=i) for i in range(9)]
-            + [item("units", "en", "math", n=i) for i in range(9)] + [item("radio", "en", "prose", "passage", i) for i in range(4)])
-    yield "counted and watched together", both, draw_gains(rng, len(both), "heavy"), {"en": 43.0}
+    both = [item(part, "en", "prose", "passage", i) for part in (family(0), source(0), family(1), source(4)) for i in range(9)]
+    yield "generated and written together", both, draw_gains(rng, len(both), "heavy"), {"en": 43.0}
 
 
 def build() -> dict:
@@ -157,8 +175,8 @@ def build() -> dict:
     for i in range(22):
         name = f"random {i + 1}"
         cases.append((name, name, *random_case(rng)))
-    # A round's own items: every generator's, and fresh text beside them, in the round's order.
-    items = gen.generate(b"vectors", per_corner=2) + fresh_items(rng)
+    # A round's own items: the season's generated families, and fresh text beside them, in the round's order.
+    items = gen.for_season(load_season(), b"vectors") + fresh_items(rng)
     rng.shuffle(items)
     langs = [it.lang for it in items]
     for i, (style, shares) in enumerate((("normal", dict(SHARES)), ("outliers", dict(SHARES)), ("normal", draw_shares(rng, langs)),
@@ -171,12 +189,10 @@ def build() -> dict:
     for name, table, items, g, shares in cases:
         rows = item_table(items)
         r, s = round_score(items, g, shares=shares), score_from_table(rows, g, shares)
-        if (s["score"] != r["score"] or {p: round(v, 5) for p, v in s["pillars"].items()} != {p: v["score"] for p, v in r["pillars"].items()}
-                or {p: round(v, 5) for p, v in s["watch"].items()} != {p: v["score"] for p, v in r["watch"].items()}):
+        if s["score"] != r["score"] or {p: round(v, 5) for p, v in s["pillars"].items()} != {p: v["score"] for p, v in r["pillars"].items()}:
             raise AssertionError(f"{name}: the table's score is not round_score's")
         out["tables"].setdefault(table, rows)
-        out["cases"].append({"name": name, "table": table, "shares": shares, "gains": g, "score": r["score"], "pillars": s["pillars"],
-                             "watch": s["watch"]})
+        out["cases"].append({"name": name, "table": table, "shares": shares, "gains": g, "score": r["score"], "pillars": s["pillars"]})
     return out
 
 

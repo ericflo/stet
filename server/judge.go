@@ -876,11 +876,10 @@ func standIns(runs []*Run) map[*Run]*Run {
 	return out
 }
 
-// pillars is a script's gain on each of the exam's pillars, and on each part that is watched
-// and not counted (watchPrefix): the mean, key by key, over the grades its gain is the
-// median of. With one grade that decides it, or two, those are all of them; of three, it is
-// the middle one, so that a grade the median went against moves the pillars no more than
-// it moves the gain.
+// pillars is a script's gain on each of the exam's pillars: the mean, pillar by pillar, over
+// the grades its gain is the median of. With one grade that decides it, or two, those are all
+// of them; of three, it is the middle one, so that a grade the median went against moves the
+// pillars no more than it moves the gain.
 func (v *verdict) pillars() map[string]float64 {
 	var valid []*gradeView
 	for _, g := range v.counted {

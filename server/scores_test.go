@@ -14,9 +14,9 @@ import (
 // pillarResult is a grade whose student gains this much on every item of each of testTable's
 // parts, over a baseline of -6 on every item. The exam's aggregate of a gain that is the same
 // on every item of a pillar is that gain for the pillar.
-func (w *world) pillarResult(c *claimed, logic, reference, prog float64) map[string]any {
+func (w *world) pillarResult(c *claimed, logic, reference float64) map[string]any {
 	p := w.result(c, 5, 6)
-	gains := map[string]float64{"logic": logic, "reference": reference, "prog": prog}
+	gains := map[string]float64{"logic": logic, "reference": reference}
 	var scores []float64
 	sum := 0.0
 	for _, it := range testTable() {
@@ -69,13 +69,13 @@ func runTwiceGradedTwice(t *testing.T) (*world, int, string) {
 		var p map[string]any
 		switch {
 		case j.c.Job.Script.SHA256 == shaOf(one) && first:
-			p = w.pillarResult(j.c, 0.40, 0.60, 0.10)
+			p = w.pillarResult(j.c, 0.40, 0.60)
 		case j.c.Job.Script.SHA256 == shaOf(one):
-			p = w.pillarResult(j.c, 0.60, 0.50, 0.30)
+			p = w.pillarResult(j.c, 0.60, 0.50)
 		case first:
-			p = w.pillarResult(j.c, 0.20, 0.70, 0.20)
+			p = w.pillarResult(j.c, 0.20, 0.70)
 		default:
-			p = w.pillarResult(j.c, 0.50, 0.58, 0.40)
+			p = w.pillarResult(j.c, 0.50, 0.58)
 		}
 		var ack struct {
 			Status string `json:"status"`
@@ -107,7 +107,7 @@ func TestAnEntrysPillarsAreMadeOfTheGradesItsGainIsMadeOf(t *testing.T) {
 		}
 	}
 	// On each pillar, the mean over its two runs of the mean over the run's two grades.
-	want := map[string]float64{"logic": (0.40 + 0.60 + 0.20 + 0.50) / 4, "reference": (0.60 + 0.50 + 0.70 + 0.58) / 4, "watch:prog": (0.10 + 0.30 + 0.20 + 0.40) / 4}
+	want := map[string]float64{"logic": (0.40 + 0.60 + 0.20 + 0.50) / 4, "reference": (0.60 + 0.50 + 0.70 + 0.58) / 4}
 	if len(e.BySource) != len(want) {
 		t.Fatalf("the entry's pillars: %v", e.BySource)
 	}
@@ -116,15 +116,12 @@ func TestAnEntrysPillarsAreMadeOfTheGradesItsGainIsMadeOf(t *testing.T) {
 			t.Fatalf("the entry's gain on %s is %v, want %v", k, e.BySource[k], x)
 		}
 	}
-	// Weighed as the season's exam weighs its pillars, they come to the entry's gain. What is
-	// watched counts for nothing.
+	// Weighed as the season's exam weighs its pillars, they come to the entry's gain.
 	plan := w.app.season.Exam
 	sum := func(by map[string]float64) float64 {
 		present := map[string]bool{}
 		for k := range by {
-			if !strings.HasPrefix(k, watchPrefix) {
-				present[k] = true
-			}
+			present[k] = true
 		}
 		total := 0.0
 		for k, share := range plan.weights(present) {
@@ -214,7 +211,7 @@ func TestASettledRoundsItemScoresAreAnyones(t *testing.T) {
 		if of.Editor != id || !of.Counted || len(of.Runs) != 1 || (of.Script != shaOf("{\"doc\": 1}\n") && of.Script != shaOf("{\"doc\": 2}\n")) {
 			t.Fatalf("grade %s is described as %+v", gid, of)
 		}
-		score, _, _, err := w.app.season.Exam.ScoreItems(file.Table, diffItems(file.Grades[gid], file.Baseline), file.Shares)
+		score, _, err := w.app.season.Exam.ScoreItems(file.Table, diffItems(file.Grades[gid], file.Baseline), file.Shares)
 		if err != nil {
 			t.Fatal(err)
 		}

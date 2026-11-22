@@ -178,15 +178,12 @@ holds is dropped from the exam.
 either. Every answer follows from what the item itself shows: there is nothing to know by
 heart.
 
-**Watched.** The exam also holds parts that count for nothing: kinds of question
-(arithmetic, unit conversion, tracing a program, facts and others, each cold and with worked
-examples shown first), and kinds of writing new to the exam (science abstracts, from
-Crossref). Their scores are published part by part with every round. Season 1 counted them,
-and they turned out to say nothing about a curator at this student's size: two trainings of
-the same data disagreed about them more than two curators did. A watched part earns a place
-in the next version of the rules when, over at least twenty settled rounds, curators differ
-on it by more than one and a half times what two trainings of one curator do, and its order
-of curators agrees with the score's (rank correlation 0.5 or better).
+**Everything on the exam counts.** The season names every part of the exam: those in the
+table, and no other. Each was measured before the season began. A part is in the score or it
+is not on the exam at all: nothing is sat that the score leaves out, and nothing on the exam
+counts for nothing. Questions a student this size cannot answer whatever it was trained on
+(arithmetic, unit conversion, tracing a program) are not asked. Season 1 counted them, and
+two trainings of the same data disagreed about them more than two curators did.
 
 **The score of an item** is how likely the student finds the right text, in bits per byte:
 a passage, an answer given its question, or the right sentence of a pair. An item's bits are

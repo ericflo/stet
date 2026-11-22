@@ -155,13 +155,9 @@ func (a *App) postExam(ctx context.Context, idx int, p *ExamPost) (bool, error) 
 	return err == nil, err
 }
 
-// watchPrefix names a watched part among a grade's pillars ("watch:arith"): scored and
-// published, and no part of the score.
-const watchPrefix = watchPillar + ":"
-
-// checkTable refuses a table that puts a part under a pillar the season does not put it under
-// (a part the season does not name is watched, and nothing else), or a language share that is
-// not a number. The weights are the season's; the examiner only says what each item is.
+// checkTable refuses a table with a part the season does not name, or one under a pillar the
+// season does not put it under, or a language share that is not a number. The weights are the
+// season's; the examiner only says what each item is.
 func (a *App) checkTable(table []ItemInfo, shares map[string]float64) error {
 	for i, it := range table {
 		if it.Pillar == "" || it.Pillar != a.season.Exam.pillarOf(it.Part) || it.Part == "" || it.Lang == "" || it.Stratum == "" ||
@@ -302,7 +298,7 @@ func (a *App) baselineDev(s *State, rd *Round, acctID int64, items []float64) (d
 	if len(rows) == 0 || len(items) != len(rd.ExamTable) {
 		return 0, false
 	}
-	dev, _, _, err := a.season.Exam.ScoreItems(rd.ExamTable, diffItems(items, meanItems(rows)), rd.Shares)
+	dev, _, err := a.season.Exam.ScoreItems(rd.ExamTable, diffItems(items, meanItems(rows)), rd.Shares)
 	return dev, err == nil
 }
 
@@ -312,7 +308,7 @@ func (a *App) baselineAgrees(rd *Round, b *Baseline) bool {
 	if b == nil || len(rd.BaseItems) == 0 || len(b.Items) != len(rd.BaseItems) || b.ExamSHA != rd.ExamSHA {
 		return false
 	}
-	dev, _, _, err := a.season.Exam.ScoreItems(rd.ExamTable, diffItems(b.Items, rd.BaseItems), rd.Shares)
+	dev, _, err := a.season.Exam.ScoreItems(rd.ExamTable, diffItems(b.Items, rd.BaseItems), rd.Shares)
 	return err == nil && within(dev, a.tolerance().Baseline)
 }
 
@@ -420,17 +416,13 @@ func (a *App) refreshScores(tx *Tx, rd *Round) {
 			if !r.Valid || len(r.Items) != len(base) {
 				continue
 			}
-			score, pillars, watch, err := a.season.Exam.ScoreItems(rd.ExamTable, diffItems(r.Items, base), rd.Shares)
+			score, pillars, err := a.season.Exam.ScoreItems(rd.ExamTable, diffItems(r.Items, base), rd.Shares)
 			if err != nil {
 				continue
 			}
 			score = places5(score)
 			for k, v := range pillars {
 				pillars[k] = places5(v)
-			}
-			// What is watched and not counted is kept beside the pillars, under its own names.
-			for k, v := range watch {
-				pillars[watchPrefix+k] = places5(v)
 			}
 			r.Score, r.BySource = &score, pillars
 			r.Loss = places5(loss - score)
@@ -626,8 +618,6 @@ type ExamMix struct {
 	Langs int          `json:"languages,omitempty"` // of the text people wrote, programming languages apart
 	Parts []ExamPillar `json:"pillars"`
 	Kinds []ExamKind   `json:"kinds,omitempty"` // of the text people wrote, the most items first
-	// Watched are the parts that are sat and published and count for nothing, the most items first.
-	Watched []ExamKind `json:"watched,omitempty"`
 }
 
 type ExamPillar struct {
@@ -643,15 +633,9 @@ type ExamKind struct {
 	Items int    `json:"items"`
 }
 
-// generatedParts are the exam's families of generated problems (FAMILIES in
-// src/stet/exam/gen/__init__.py; tests/test_exam.py fails if one is missing here). Any other part
-// is a kind of writing people published.
-var generatedParts = map[string]bool{"knowledge": true, "context": true, "arith": true, "word": true, "units": true, "algebra": true,
-	"logic": true, "algo": true, "multi": true, "prog": true, "transform": true, "struct": true, "agent": true, "grammar": true,
-	// the same families asked after solved examples of the task, and as pairs with a near miss
-	"arith-shots": true, "word-shots": true, "units-shots": true, "algebra-shots": true, "prog-shots": true, "algo-shots": true,
-	"struct-shots": true, "multi-shots": true, "arith-pairs": true, "units-pairs": true}
-
+// examMix counts a table the season's exam can have: checkTable has refused any other. A part
+// is a family of generated problems when the season says so (ExamPlan.Generated), and a kind of
+// writing people published otherwise.
 func (a *App) examMix(table []ItemInfo) *ExamMix {
 	if len(table) == 0 {
 		return nil
@@ -663,20 +647,19 @@ func (a *App) examMix(table []ItemInfo) *ExamMix {
 		at[p.Name] = len(m.Parts)
 		m.Parts = append(m.Parts, ExamPillar{Pillar: p.Name, Group: p.Group})
 	}
-	langs, kinds, watched, present := map[string]bool{}, map[string]int{}, map[string]int{}, map[string]bool{}
+	langs, kinds, present := map[string]bool{}, map[string]int{}, map[string]bool{}
 	for _, it := range table {
-		fresh := !generatedParts[it.Part] && !strings.Contains(it.Part, "-") // a family's other forms are named family-form
+		i, ok := at[it.Pillar]
+		if !ok {
+			continue // not a row of the season's exam
+		}
+		fresh := !plan.generated(it.Part)
 		if fresh {
 			m.Fresh++
 			kinds[it.Part]++
 			if !strings.HasPrefix(it.Lang, "code") {
 				langs[it.Lang] = true
 			}
-		}
-		i, ok := at[it.Pillar]
-		if !ok { // watched, or a pillar the season does not name: no part of the score
-			watched[it.Part]++
-			continue
 		}
 		present[it.Pillar] = true
 		m.Parts[i].Items++
@@ -688,19 +671,14 @@ func (a *App) examMix(table []ItemInfo) *ExamMix {
 		m.Parts[at[name]].Share = places5(share)
 	}
 	m.Langs = len(langs)
-	byCount := func(counts map[string]int) []ExamKind {
-		var out []ExamKind
-		for k, n := range counts {
-			out = append(out, ExamKind{k, n})
-		}
-		sort.Slice(out, func(x, y int) bool {
-			if out[x].Items != out[y].Items {
-				return out[x].Items > out[y].Items
-			}
-			return out[x].Kind < out[y].Kind
-		})
-		return out
+	for k, n := range kinds {
+		m.Kinds = append(m.Kinds, ExamKind{k, n})
 	}
-	m.Kinds, m.Watched = byCount(kinds), byCount(watched)
+	sort.Slice(m.Kinds, func(x, y int) bool {
+		if m.Kinds[x].Items != m.Kinds[y].Items {
+			return m.Kinds[x].Items > m.Kinds[y].Items
+		}
+		return m.Kinds[x].Kind < m.Kinds[y].Kind
+	})
 	return m
 }

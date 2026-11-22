@@ -22,7 +22,7 @@
   "key_bytes": 64,
   "min_letters": 38
  },
- "digest": "04dc4fe665fb912e747b06260ac66f0f7055ceed8e9a6f8a1f3ae792cd5456be",
+ "digest": "9d359f89f3ff7f57c1804f3954686a268e00c504e0110c14a82b5c982a18e15e",
  "draw_grid_seconds": 600,
  "environment": {
   "also": {
@@ -147,6 +147,13 @@
    "reach_seconds": 93600,
    "settle_seconds": 3600
   },
+  "generated": [
+   "logic",
+   "agent",
+   "grammar",
+   "transform",
+   "context"
+  ],
   "groups": {
    "skills": 0.25,
    "writing": 0.75

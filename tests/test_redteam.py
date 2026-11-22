@@ -164,13 +164,13 @@ def test_scribe_writes_every_skill_and_none_of_an_exams_items():
     # It writes in the exam's forms and cannot know a round's items. One of a few words can come
     # out the same by chance (there are 256 boolean expressions, and "There are many geese here."
     # is in both vocabularies); one long enough to be a quotation under the rules cannot, and
-    # those are most of the skills that count.
+    # those are most of the exam's skills.
     skills = {part for pillar in SEASON.raw["exam"]["pillars"].values() if pillar["group"] == "skills" for part in pillar["parts"]}
     for seed in (b"a round", b"another round", b"a third"):
-        items = gen.generate(seed, per_corner=int(SEASON.raw["exam"]["per_corner"]))
+        items = gen.for_season(SEASON, seed)
         long = [(it.family, text) for it in items if len((text := it.text or it.ctx + it.cont or it.good).encode()) >= SEASON.min_copy_bytes]
-        counted = [it for it in items if it.family in skills]
-        assert len(counted) > 500 and sum(family in skills for family, _ in long) > 0.7 * len(counted)
+        asked = [it for it in items if it.family in skills]
+        assert len(asked) > 500 and sum(family in skills for family, _ in long) > 0.7 * len(asked)
         assert not [text for _, text in long if text in ink]
 
 

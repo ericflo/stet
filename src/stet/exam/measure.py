@@ -11,10 +11,10 @@ those gains against the multiple, 0 at 1x by construction. Written into the seas
 [multiple, minus the gain], it is what score.multiplier and the server read a curator's gain off.
 
 **The scale audit.** A settled round is trained again one size up, and the question is whether
-its curators kept their order. For the counted score, each pillar and each watched part: how far
-curators differ (spread) against how far two trainings of one script do (noise) at each size,
-and the rank agreement between the sizes. For a watched part also its agreement with the counted
-score: with the first, the season's test for counting it in the next rules.
+its curators kept their order. For the score and each pillar: how far curators differ (spread)
+against how far two trainings of one script do (noise) at each size, and the rank agreement
+between the sizes. One round has a handful of curators, so its rank agreement is rough: several
+rounds' audits are pooled (`pool`) for a number worth reading.
 
 **What a training costs.** The season names the slowest GPU that may run curators. What a
 student's training takes there follows from the student's shape and budget, so a plan can say
@@ -31,15 +31,8 @@ import math
 from .. import bench
 from .aggregate import gains, score_from_table
 
-SCORE = "score"  # the counted score, among the things a gain is reported on
-PILLAR, WATCH = "pillar:", "watch:"  # and the others: "pillar:news", "watch:arith"
-
-# A watched part earns a place in the next rules version when, over at least this many settled
-# rounds, its spread over noise is above the first number and its order of curators agrees with
-# the counted score's at the second or better (docs/research/exam-first-principles.md, 9.3).
-PROMOTE_SPREAD_OVER_NOISE = 1.5
-PROMOTE_WITH_SCORE = 0.5
-PROMOTE_ROUNDS = 20
+SCORE = "score"  # the round's score, among the things a gain is reported on
+PILLAR = "pillar:"  # and the others, each pillar: "pillar:news"
 
 
 # --- small statistics ------------------------------------------------------------------------------
@@ -116,13 +109,10 @@ def mean_items(trainings: list[list[float]]) -> list[float]:
 
 
 def scores_of(table: list[dict], item_gains: list[float], shares, plan=None) -> dict[str, float]:
-    """One student's gain on everything the season reports: the counted score, each pillar
-    ("pillar:news") and each watched part ("watch:arith")."""
+    """One student's gain on everything the season reports: the score, and each pillar
+    ("pillar:news")."""
     agg = score_from_table(table, item_gains, shares, plan)
-    out = {SCORE: agg["score"]}
-    out.update({PILLAR + p: v for p, v in agg["pillars"].items()})
-    out.update({WATCH + p: v for p, v in agg["watch"].items()})
-    return out
+    return {SCORE: agg["score"], **{PILLAR + p: v for p, v in agg["pillars"].items()}}
 
 
 # --- the unedited curve ----------------------------------------------------------------------------
@@ -233,10 +223,8 @@ def size_stats(table: list[dict], shares, unedited: list[list[float]], curators:
 
 def audit(sizes: dict[str, dict]) -> dict:
     """A round at several sizes of student, the rounds' own first (each from size_stats). For
-    each thing reported: its noise and spread at every size, whether the order of curators
-    carried from each size to the next (`carried`), and for a watched part its agreement with the
-    counted score at the rounds' own size (`with_score`) and whether this round alone would pass
-    the season's test for counting it."""
+    each thing reported: its noise and spread at every size, and whether the order of curators
+    carried from each size to the next (`carried`)."""
     names = list(sizes)
     own = sizes[names[0]]
     out: dict = {"sizes": names, "measures": {}, "curators": {}}
@@ -245,9 +233,6 @@ def audit(sizes: dict[str, dict]) -> dict:
         for a, b in zip(names, names[1:], strict=False):
             if m in sizes[a]["gains"] and m in sizes[b]["gains"]:
                 row["carried"][f"{a}>{b}"] = spearman(sizes[a]["gains"][m], sizes[b]["gains"][m])
-        if m.startswith(WATCH):
-            row["with_score"] = spearman(own["gains"][m], own["gains"][SCORE])
-            row["passes"] = passes_test(row["sizes"][names[0]]["spread_over_noise"], row["with_score"])
         out["measures"][m] = row
     for s in names:
         for name, g in sizes[s]["gains"].get(SCORE, {}).items():
@@ -255,46 +240,23 @@ def audit(sizes: dict[str, dict]) -> dict:
     return out
 
 
-def passes_test(spread_over_noise, with_score) -> bool | None:
-    """The season's test for a watched part, on the numbers of one round or of many pooled.
-    None when either number could not be measured."""
-    if spread_over_noise is None or with_score is None:
-        return None
-    return spread_over_noise > PROMOTE_SPREAD_OVER_NOISE and with_score >= PROMOTE_WITH_SCORE
-
-
 def pool(reports: list[dict]) -> dict:
-    """Several rounds' audits as one. Noise and spread are pooled as variances; rank agreements
-    are averaged. A watched part gets the season's verdict: it earns a place when at least
-    PROMOTE_ROUNDS rounds measured it and the pooled numbers pass, and until there are that many
-    rounds the verdict is that there are too few."""
+    """Several rounds' audits as one, for the score and each pillar. Noise and spread are pooled
+    as variances; rank agreements are averaged."""
     out: dict = {"rounds": len(reports), "measures": {}}
     order: list[str] = []
     for r in reports:
         order += [m for m in r["measures"] if m not in order]
     for m in order:
-        have = [(r["sizes"][0], r["measures"][m]) for r in reports if m in r["measures"]]
+        have = [r["measures"][m] for r in reports if m in r["measures"]]
         row: dict = {"rounds": len(have), "sizes": {}, "carried": {}}
-        for size in dict.fromkeys(s for _, h in have for s in h["sizes"]):
-            got = [h["sizes"][size] for _, h in have if size in h["sizes"] and h["sizes"][size]["noise"] and h["sizes"][size]["spread"] is not None]
+        for size in dict.fromkeys(s for h in have for s in h["sizes"]):
+            got = [h["sizes"][size] for h in have if size in h["sizes"] and h["sizes"][size]["noise"] and h["sizes"][size]["spread"] is not None]
             noise, spread = rms(g["noise"] for g in got), rms(g["spread"] for g in got)
             row["sizes"][size] = {"rounds": len(got), "noise": noise, "spread": spread, "spread_over_noise": spread / noise if noise else None}
-        for pair in dict.fromkeys(p for _, h in have for p in h["carried"]):
-            got = [h["carried"][pair] for _, h in have if h["carried"].get(pair) is not None]
+        for pair in dict.fromkeys(p for h in have for p in h["carried"]):
+            got = [h["carried"][pair] for h in have if h["carried"].get(pair) is not None]
             row["carried"][pair] = {"rounds": len(got), "mean": mean(got) if got else None}
-        if m.startswith(WATCH):
-            # The test is about the size rounds are run at: each round's own.
-            whole = [(h["sizes"][own], h["with_score"]) for own, h in have
-                     if h["sizes"].get(own, {}).get("noise") and h["sizes"][own]["spread"] is not None and h.get("with_score") is not None]
-            noise, spread = rms(s["noise"] for s, _ in whole), rms(s["spread"] for s, _ in whole)
-            row["measured"] = len(whole)
-            row["spread_over_noise"] = spread / noise if noise else None
-            row["with_score"] = mean(w for _, w in whole) if whole else None
-            passed = passes_test(row["spread_over_noise"], row["with_score"])
-            if len(whole) < PROMOTE_ROUNDS:
-                row["verdict"] = f"too few rounds: {len(whole)} of {PROMOTE_ROUNDS}" + ("" if passed is None else ", passing so far" if passed else ", not passing so far")
-            else:
-                row["verdict"] = "earns a place" if passed else "stays watched"
         out["measures"][m] = row
     return out
 

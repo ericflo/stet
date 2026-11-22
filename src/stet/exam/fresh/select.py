@@ -154,15 +154,11 @@ def _select_kind(items: list[Item], rng, n: int, per_corner: int, shares: dict, 
     return chosen
 
 
-WATCHED = 60  # items of a kind of writing that counts for nothing: enough to say whether it should
-
-
-def select(docs: list[Doc], seed: bytes, n: int, per_corner: int = 2, shares: dict | None = None, watched=()) -> list[Item]:
-    """About n items: each kind of writing an equal part (a kind without enough candidates gives
-    what it leaves to the others), languages inside each kind by their share of the web, sources
-    inside each language in turn, and at most per_corner from any corner. A kind named in
-    `watched` is no part of the score: it is given WATCHED items at most, and the rest of n goes
-    to the kinds that count."""
+def select(docs: list[Doc], seed: bytes, n: int, kinds, per_corner: int = 2, shares: dict | None = None) -> list[Item]:
+    """About n items of the kinds of writing the season names (`kinds`: its parts; a document of
+    any other kind is passed over). Each kind an equal part (a kind without enough candidates
+    gives what it leaves to the others), languages inside each kind by their share of the web,
+    sources inside each language in turn, and at most per_corner from any corner."""
     from ..aggregate import kind_of
 
     shares = shares or SHARES
@@ -170,12 +166,11 @@ def select(docs: list[Doc], seed: bytes, n: int, per_corner: int = 2, shares: di
     by_kind: dict[str, list[Item]] = defaultdict(list)
     for d in sorted(docs, key=lambda d: (d.source, d.id)):
         for it in items_of(d):
-            by_kind[kind_of(it)].append(it)
+            if kind_of(it) in kinds:
+                by_kind[kind_of(it)].append(it)
     used: dict[str, int] = defaultdict(int)
     chosen: dict[str, list[Item]] = {k: [] for k in by_kind}
-    for k in sorted(set(watched) & set(by_kind)):
-        chosen[k] = _select_kind(by_kind[k], rng.child(f"{k}/watched"), WATCHED, per_corner, shares, used)
-    left = sorted(set(by_kind) - set(watched))
+    left = sorted(by_kind)
     while left and (want := n - sum(map(len, chosen.values()))) > 0:
         part = max(1, want // len(left))
         for k in list(left):

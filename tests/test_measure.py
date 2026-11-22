@@ -1,8 +1,8 @@
 """The organisers' measurements as arithmetic (exam/measure.py): the unedited curve, the scale
 audit and what a training costs, on students whose scores are made up so that the answers are known.
 
-Every student here scores a fixed amount more than the unedited one on every counted item, so its
-gain under the season's score is that amount, whatever the score is made of."""
+Every student here scores a fixed amount more than the unedited one on every item of a pillar, so
+its gain on the pillar is that amount, and on the season's score when it is the same on both."""
 
 import dataclasses
 import json
@@ -18,28 +18,29 @@ from stet.spec import Scale, load_season
 
 PLAN = Plan(groups={"writing": 0.75, "skills": 0.25}, pillars={"news": "writing", "logic": "skills"}, parts={"news": "news", "logic": "logic"})
 SHARES = {"en": 100.0}
-# Ten items of news and ten of logic, which count, and ten each of two parts that are only watched.
-TABLE = [{"pillar": p, "part": part, "lang": "en", "stratum": "prose/passage"}
-         for p, part in (("news", "news"), ("logic", "logic"), ("watch", "arith"), ("watch", "morph")) for _ in range(10)]
+# Ten items of news and ten of logic: the two pillars of a small season.
+TABLE = [{"pillar": part, "part": part, "lang": "en", "stratum": "prose/passage"} for part in ("news", "logic") for _ in range(10)]
 BASE = [0.5 + 0.01 * i for i in range(len(TABLE))]
 
 
-def student(gain: float, arith: float = 0.0, morph: float = 0.0) -> list[float]:
-    """A student's score on every item: `gain` over the unedited one on what counts, and what it is given on each watched part."""
-    return [b + {"arith": arith, "morph": morph}.get(row["part"], gain) for b, row in zip(BASE, TABLE, strict=True)]
+def student(gain: float, logic: float | None = None) -> list[float]:
+    """A student's score on every item: `gain` over the unedited one, and on the logic `logic` where that is given."""
+    return [b + (logic if logic is not None and row["part"] == "logic" else gain) for b, row in zip(BASE, TABLE, strict=True)]
 
 
-def twice(gain: float, noise: float = 0.001, **watched) -> list[list[float]]:
+def twice(gain: float, noise: float = 0.001, logic: float | None = None) -> list[list[float]]:
     """Two trainings of one script: `noise` either side of its gain, on everything."""
-    return [student(gain + d, **{k: v + d for k, v in watched.items()}) for d in (noise, -noise)]
+    return [student(gain + d, None if logic is None else logic + d) for d in (noise, -noise)]
 
 
-UNEDITED = [student(d, d, d) for d in (0.002, -0.002)]  # two trainings whose mean is BASE itself
+UNEDITED = [student(d) for d in (0.002, -0.002)]  # two trainings whose mean is BASE itself
 
 
-def test_a_gain_is_reported_on_the_score_each_pillar_and_each_watched_part():
-    got = measure.scores_of(TABLE, [s - b for s, b in zip(student(0.03, arith=0.01, morph=-0.02), BASE, strict=True)], SHARES, PLAN)
-    assert got == pytest.approx({"score": 0.03, "pillar:news": 0.03, "pillar:logic": 0.03, "watch:arith": 0.01, "watch:morph": -0.02})
+def test_a_gain_is_reported_on_the_score_and_each_pillar():
+    got = measure.scores_of(TABLE, [s - b for s, b in zip(student(0.03, logic=0.01), BASE, strict=True)], SHARES, PLAN)
+    assert got == pytest.approx({"score": 0.75 * 0.03 + 0.25 * 0.01, "pillar:news": 0.03, "pillar:logic": 0.01})
+    with pytest.raises(ValueError, match="not a part of the season's exam"):  # nothing is measured that the season does not name
+        measure.scores_of([*TABLE, {**TABLE[0], "part": "arith"}], [0.0] * (len(TABLE) + 1), SHARES, PLAN)
 
 
 def test_the_curve_is_each_budgets_gain_over_the_1x_student_and_is_0_there():
@@ -145,69 +146,51 @@ def test_noise_is_between_trainings_of_one_script_and_spread_between_curators():
 
 
 def _sizes(large_order=("a", "b", "d", "c")) -> dict:
-    """Four curators at two sizes. At the rounds' own size they stand a, b, c, d from the worst;
-    one size up, as `large_order` has them. The watched part "arith" orders them as the score
-    does and spreads them well; "morph" has them backwards."""
+    """Four curators at two sizes. At the rounds' own size they stand a, b, c, d from the worst on
+    both pillars; one size up, as `large_order` has them on the news, and the other way round on
+    the logic."""
     gain = {"a": 0.01, "b": 0.02, "c": 0.03, "d": 0.04}
-    standard = {n: twice(g, arith=2 * g, morph=-g) for n, g in gain.items()}
-    large = {n: twice(0.02 * (i + 1), noise=0.002, arith=0.04 * (i + 1), morph=-0.01 * (i + 1)) for i, n in enumerate(large_order)}
+    standard = {n: twice(g) for n, g in gain.items()}
+    large = {n: twice(0.02 * (i + 1), noise=0.002, logic=0.02 * (4 - i)) for i, n in enumerate(large_order)}
     return {"standard": measure.size_stats(TABLE, SHARES, UNEDITED, standard, PLAN), "large": measure.size_stats(TABLE, SHARES, UNEDITED, large, PLAN)}
 
 
 def test_the_audit_says_whether_the_order_carried_to_the_next_size():
     rep = measure.audit(_sizes())
-    assert rep["sizes"] == ["standard", "large"]
+    assert rep["sizes"] == ["standard", "large"] and set(rep["measures"]) == {"score", "pillar:news", "pillar:logic"}
     s = rep["measures"]["score"]
-    assert s["carried"] == {"standard>large": pytest.approx(0.8)}  # c and d changed places
+    assert set(s) == {"sizes", "carried"} and s["carried"] == {"standard>large": pytest.approx(0.8)}  # c and d changed places
     assert s["sizes"]["standard"]["spread_over_noise"] == pytest.approx(math.sqrt(5 / 3) * 0.01 / (0.001 * math.sqrt(2)))
     assert s["sizes"]["large"]["noise"] == pytest.approx(0.002 * math.sqrt(2))
-    assert "with_score" not in s and "passes" not in s  # the test is for watched parts
-    assert rep["curators"]["d"] == {"standard": pytest.approx(0.04), "large": pytest.approx(0.06)}
-    arith, morph = rep["measures"]["watch:arith"], rep["measures"]["watch:morph"]
-    assert arith["with_score"] == pytest.approx(1.0) and arith["passes"] is True
-    assert morph["with_score"] == pytest.approx(-1.0) and morph["passes"] is False  # it spreads curators, but not as the score does
-    assert morph["carried"] == {"standard>large": pytest.approx(0.8)}
+    assert rep["curators"]["d"] == {"standard": pytest.approx(0.04), "large": pytest.approx(0.75 * 0.06 + 0.25 * 0.04)}
+    # Each pillar has its own answer: the news carried as the score did, and the logic turned over.
+    assert rep["measures"]["pillar:news"]["carried"] == {"standard>large": pytest.approx(0.8)}
+    assert rep["measures"]["pillar:logic"]["carried"] == {"standard>large": pytest.approx(-0.8)}
     assert measure.audit(_sizes(("a", "b", "c", "d")))["measures"]["score"]["carried"] == {"standard>large": pytest.approx(1.0)}
-
-
-def test_the_seasons_test_for_a_watched_part():
-    assert measure.passes_test(1.6, 0.5) is True
-    assert measure.passes_test(1.5, 0.9) is False  # above 1.5, not at it
-    assert measure.passes_test(3.0, 0.49) is False
-    assert measure.passes_test(None, 0.9) is None and measure.passes_test(2.0, None) is None
-
-
-def test_a_watched_part_earns_a_place_only_over_twenty_rounds():
-    one = {**measure.audit(_sizes()), "round": "s2-o00001"}
-    nineteen = measure.pool([one] * 19)
-    assert nineteen["rounds"] == 19
-    assert nineteen["measures"]["watch:arith"]["verdict"] == "too few rounds: 19 of 20, passing so far"
-    assert nineteen["measures"]["watch:morph"]["verdict"] == "too few rounds: 19 of 20, not passing so far"
-    twenty = measure.pool([one] * 20)
-    arith, morph, s = twenty["measures"]["watch:arith"], twenty["measures"]["watch:morph"], twenty["measures"]["score"]
-    assert arith["verdict"] == "earns a place" and arith["measured"] == 20 and arith["with_score"] == pytest.approx(1.0)
-    assert arith["spread_over_noise"] == pytest.approx(one["measures"]["watch:arith"]["sizes"]["standard"]["spread_over_noise"])
-    assert morph["verdict"] == "stays watched"
-    assert "verdict" not in s and s["carried"]["standard>large"] == {"rounds": 20, "mean": pytest.approx(0.8)}
-    assert s["sizes"]["large"]["spread_over_noise"] == pytest.approx(one["measures"]["score"]["sizes"]["large"]["spread_over_noise"])
 
 
 def test_pooled_rounds_weigh_noise_and_spread_as_variances_and_average_rank_agreement():
     a = {**measure.audit(_sizes()), "round": "s2-o00001"}
     b = {**measure.audit(_sizes(("a", "b", "c", "d"))), "round": "s2-o00002"}
-    # A round where the part was too noisy to tell curators apart: it counts against it.
+    # A round whose trainings were far noisier, audited at its own size alone.
     gain = {"a": 0.01, "b": 0.02, "c": 0.03, "d": 0.04}
-    noisy = {n: [student(g, arith=2 * g + d) for d in (0.1, -0.1)] for n, g in gain.items()}
+    noisy = {n: [student(g + d) for d in (0.1, -0.1)] for n, g in gain.items()}
     c = {**measure.audit({"standard": measure.size_stats(TABLE, SHARES, UNEDITED, noisy, PLAN)}), "round": "s2-o00003"}
     got = measure.pool([a, b, c])
-    assert got["measures"]["score"]["carried"]["standard>large"] == {"rounds": 2, "mean": pytest.approx(0.9)}
-    arith = got["measures"]["watch:arith"]
+    assert got["rounds"] == 3 and set(got["measures"]) == {"score", "pillar:news", "pillar:logic"}
+    s = got["measures"]["score"]
+    assert set(s) == {"rounds", "sizes", "carried"} and s["rounds"] == 3
+    assert s["carried"]["standard>large"] == {"rounds": 2, "mean": pytest.approx(0.9)}  # 0.8 and 1.0: one round's is rough, several rounds' less so
     quiet, loud = 0.001 * math.sqrt(2), 0.1 * math.sqrt(2)
-    spread = 2 * math.sqrt(5 / 3) * 0.01
-    assert arith["measured"] == 3 and arith["spread_over_noise"] == pytest.approx(spread / math.sqrt((2 * quiet**2 + loud**2) / 3))
-    assert arith["spread_over_noise"] < measure.PROMOTE_SPREAD_OVER_NOISE < a["measures"]["watch:arith"]["sizes"]["standard"]["spread_over_noise"]
-    assert arith["verdict"] == "too few rounds: 3 of 20, not passing so far"
-    assert got["measures"]["score"]["sizes"]["large"]["rounds"] == 2  # the third round was audited at its own size only
+    noise, spread = math.sqrt((2 * quiet**2 + loud**2) / 3), math.sqrt(5 / 3) * 0.01
+    assert s["sizes"]["standard"] == {"rounds": 3, "noise": pytest.approx(noise), "spread": pytest.approx(spread), "spread_over_noise": pytest.approx(spread / noise)}
+    assert s["sizes"]["standard"]["spread_over_noise"] < 1 < a["measures"]["score"]["sizes"]["standard"]["spread_over_noise"]  # the noisy round counts against it
+    assert s["sizes"]["large"]["rounds"] == 2  # the third round was audited at its own size only
+    assert got["measures"]["pillar:logic"]["carried"]["standard>large"] == {"rounds": 2, "mean": pytest.approx(-0.9)}
+    # Twenty rounds the same are one of them, as far as the pooled numbers go.
+    many = measure.pool([a] * 20)["measures"]["score"]
+    assert many["carried"]["standard>large"] == {"rounds": 20, "mean": pytest.approx(0.8)}
+    assert many["sizes"]["large"]["spread_over_noise"] == pytest.approx(a["measures"]["score"]["sizes"]["large"]["spread_over_noise"])
 
 
 def _season(tokens_per_second: int = 80_000, vocab: int = 8192):

@@ -11,6 +11,7 @@ import pytest
 
 from stet.exam import gen
 from stet.exam.aggregate import item_table, round_score, score_from_table
+from stet.spec import load_season
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 
@@ -18,7 +19,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 def _same(table_score: dict, full: dict) -> None:
     assert table_score["score"] == full["score"]
     assert {p: round(v, 5) for p, v in table_score["pillars"].items()} == {p: v["score"] for p, v in full["pillars"].items()}
-    assert {p: round(v, 5) for p, v in table_score["watch"].items()} == {p: v["score"] for p, v in full["watch"].items()}
 
 
 def test_the_score_from_the_table_is_round_scores():
@@ -29,7 +29,7 @@ def test_the_score_from_the_table_is_round_scores():
         for sh in (shares, None):
             _same(score_from_table(item_table(items), g, sh), round_score(items, g, shares=sh))
     rng = random.Random(7)
-    items = gen.generate(b"table", per_corner=1) + fresh_items(rng)
+    items = gen.for_season(load_season(), b"table") + fresh_items(rng)
     for style in ("normal", "outliers", "ties", "heavy"):
         g = draw_gains(rng, len(items), style)
         shares = draw_shares(rng, [it.lang for it in items])

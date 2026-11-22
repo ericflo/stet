@@ -765,7 +765,7 @@ def _rho(v) -> str:
 
 
 def _measure_name(m: str) -> str:
-    return "the counted score" if m == measure.SCORE else m.removeprefix(measure.PILLAR) if m.startswith(measure.PILLAR) else "watched: " + m.removeprefix(measure.WATCH)
+    return "the score" if m == measure.SCORE else m.removeprefix(measure.PILLAR)
 
 
 def say_audit(rep: dict) -> None:
@@ -788,12 +788,10 @@ def say_audit(rep: dict) -> None:
             st = row["sizes"].get(s) or {}
             cells += ["" if st.get("noise") is None else f"{st['noise']:.4f}", "" if st.get("spread") is None else f"{st['spread']:.4f}", _ratio(st.get("spread_over_noise"))]
         cells += [_rho(v) for v in row["carried"].values()] or [""] * (len(sizes) - 1)
-        cells += [_rho(row.get("with_score")), {True: "passes", False: "does not pass", None: ""}[row.get("passes")] if m.startswith(measure.WATCH) else ""]
         rows.append(cells)
-    head = [""] + [c for s in sizes for c in (f"{s} noise", "spread", "over noise")] + [f"carried to {s}" for s in sizes[1:]] + ["with the score", "this round"]
-    say(table(rows, head, right=tuple(range(1, len(head) - 1))))
-    say(f"A watched part earns a place over {measure.PROMOTE_ROUNDS} rounds or more (stet audit report --over <rounds>): spread over noise above "
-        f"{measure.PROMOTE_SPREAD_OVER_NOISE:g}, and its order agreeing with the counted score's at {measure.PROMOTE_WITH_SCORE:g} or better.")
+    head = [""] + [c for s in sizes for c in (f"{s} noise", "spread", "over noise")] + [f"carried to {s}" for s in sizes[1:]]
+    say(table(rows, head, right=tuple(range(1, len(head)))))
+    say("One round's order rests on a few curators. Every round audited, as one: stet audit report --over <rounds>.")
 
 
 def _audit_report(args, season, work: Path, key) -> None:
@@ -843,6 +841,9 @@ def _audit_report(args, season, work: Path, key) -> None:
 
 
 def _audit_over(rounds: list[str], work: Path) -> None:
+    """Several rounds' audit reports as one. A round has a handful of curators, and the rank
+    agreement of a handful says little: over the rounds, the score's and each pillar's spread
+    over noise is pooled, and how far the order carried between sizes is averaged."""
     from ..client import table
 
     reports, missing = [], []
@@ -861,8 +862,8 @@ def _audit_over(rounds: list[str], work: Path) -> None:
     for m, row in pooled["measures"].items():
         sizes = " · ".join(f"{s} {_ratio(st['spread_over_noise'])}" for s, st in row["sizes"].items())
         carried = " · ".join(f"{p.replace('>', ' to ')} {_rho(c['mean'])} ({c['rounds']})" for p, c in row["carried"].items())
-        rows.append([_measure_name(m), str(row["rounds"]), sizes, carried, _rho(row.get("with_score")), row.get("verdict", "")])
-    say(table(rows, ["", "rounds", "spread over noise", "order carried (rounds)", "with the score", "verdict"], right=(1,)))
+        rows.append([_measure_name(m), str(row["rounds"]), sizes, carried])
+    say(table(rows, ["", "rounds", "spread over noise", "order carried (rounds)"], right=(1,)))
 
 
 def cmd_audit(args):
@@ -1261,7 +1262,7 @@ def add_commands(sub) -> None:
     p.add_argument("--trainings", type=int, default=2, help="plan: trainings of each script at each size (default: 2)")
     p.add_argument("--baselines", type=int, default=farm.BASELINES, help=f"plan: trainings of the unedited corpus at each size (default: {farm.BASELINES})")
     p.add_argument("--entries", type=_names, help="plan: only these curators (owner/name@vN), instead of every entry of the round")
-    p.add_argument("--over", nargs="+", metavar="ROUND", help="report: pool the reports of these rounds, with the verdict on each watched part")
+    p.add_argument("--over", nargs="+", metavar="ROUND", help="report: the reports of these rounds as one, for the score and each pillar")
     common(p, scripts=True)
     p.set_defaults(fn=_stopping(cmd_audit))
 
