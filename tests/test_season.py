@@ -209,3 +209,42 @@ def test_a_settled_rounds_published_exam_gives_the_open_items_and_checks_against
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(zstandard.ZstdCompressor().compress(raw))
     assert data.round_exam(rnd, s1.scale("standard")) == generated + [wiki]
+
+
+def test_a_practice_round_sits_writing_once_some_has_been_harvested_here(monkeypatch, tmp_path):
+    from stet.exam.fresh import Doc, write_snapshot
+    from stet.pipeline import baseline_path
+    from stet.spec import practice_round
+
+    monkeypatch.setenv("STET_CACHE", str(tmp_path / "cache"))
+    s2 = load_season("s2")
+    rnd, gym, scale = practice_round(s2, 3), practice_round(s2, 3, "gym"), s2.scale("micro")
+    cpu = type("Device", (), {"type": "cpu"})()
+    generated = gen.generate(rnd.seed, per_corner=2)
+    # Nothing harvested: the generated items alone, as before.
+    assert data.practice_hours(rnd) == [] and data.practice_key(rnd) == "" and data.round_exam(rnd, scale) == generated
+    plain = baseline_path(rnd, scale, cpu)
+    assert plain.name.endswith("-generated.json")
+
+    def hour(h, n0):
+        docs = [Doc(source="wikipedia", id=f"en:{i}", url=f"https://example.org/{i}", lang="en", license="CC BY-SA 4.0", published=h + i,
+                    title=f"Title {i}", text=f"Article number {i} says something new. " * 20, topic=f"Q{i}") for i in range(n0, n0 + 10)]
+        data.harvest_dir().mkdir(parents=True, exist_ok=True)
+        write_snapshot(docs, data.harvest_dir() / f"{h}.jsonl", {"window": [h, h + 3600]})
+
+    for k in range(5):
+        hour(1_800_000_000 + 3600 * k, 10 * k)
+    monkeypatch.setattr(data, "corpus", lambda rnd, scale: object())
+    monkeypatch.setattr("stet.exam.decontam.seen", lambda items, corpus, season, log=print: set())
+    hours = data.practice_hours(rnd)
+    assert len(hours) == 3 and {h for h, _ in hours} < {1_800_000_000 + 3600 * k for k in range(5)}  # as many as an official round's
+    assert hours != data.practice_hours(practice_round(s2, 4)) or hours != data.practice_hours(practice_round(s2, 5))  # by the round's seed
+    exam = data.round_exam(rnd, scale)
+    assert exam[: len(generated)] == generated and len(exam) > len(generated)
+    assert all(it.source.startswith("wikipedia:") for it in exam[len(generated):])
+    # Kept beside the round, and named for the hours: the baseline that sat the other exam is not this one's.
+    monkeypatch.setattr("stet.exam.examine.assemble", lambda *a, **k: pytest.fail("made a second time"))
+    assert data.round_exam(rnd, scale) == exam
+    assert baseline_path(rnd, scale, cpu) != plain and data.practice_key(rnd)[:12] in baseline_path(rnd, scale, cpu).name
+    # The gym's rounds are generated from their seeds, whatever is on this machine.
+    assert data.practice_hours(gym) == [] and data.round_exam(gym, scale) == gen.generate(gym.seed, per_corner=2)

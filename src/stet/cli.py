@@ -305,9 +305,13 @@ def cmd_run(args):
                 remove_tree(bundle)
         result["editor"] = {"name": project.name}
         base = _with_baseline(result, rnd, scale, device, out, args.no_baseline)
+        result["writing"] = _has_writing(rnd)
         (work / "result.json").write_text(json.dumps(result, indent=1))
         report(out, result, base, season)
         _edit_time_line(out, result, season)
+        if not result["writing"]:
+            out.line("note", "no writing in this round's exam, which is three quarters of an official round's score. "
+                             "`stet harvest` fetches some, once, and needs no account.")
         out.line("saved", str((work / "result.json").relative_to(Path.cwd()) if work.is_relative_to(Path.cwd()) else work / "result.json"))
         results.append(result)
     if len(results) == 1:
@@ -449,6 +453,63 @@ def cmd_examine(args):
     if not args.round:
         die("name a round, or pass --follow")
     _examine_one(args, args.round)
+
+
+def _has_writing(rnd) -> bool:
+    """Whether the exam a round sits here has the season's fresh writing in it. An official
+    round's always has; a practice round's has once some has been harvested (`stet harvest`)."""
+    from . import data
+
+    return rnd.kind == "official" or bool(data.practice_hours(rnd))
+
+
+def cmd_harvest(args):
+    """Fetch a few hours of the season's fresh writing to this machine, from the sources an
+    official round's exam is made from, so that practice rounds sit what official rounds sit."""
+    import shutil
+
+    from . import data
+    from .exam.aggregate import SOURCE_KIND
+    from .exam.fresh import harvest, read_snapshot
+    from .exam.fresh.harvest import HOUR, settled
+    from .spec import load_season
+
+    out = Out(quiet=args.quiet)
+    season = load_season(args.season)
+    dest = data.harvest_dir()
+    if args.fresh:
+        shutil.rmtree(dest, ignore_errors=True)
+    dest.mkdir(parents=True, exist_ok=True)
+    held = data.harvested()
+    want = max(0, args.hours - len(held))
+    # Spread over the day before, so that it is not all written while one part of the world was awake.
+    last, step = settled(season, time.time()), max(1, 24 // max(1, args.hours)) * HOUR
+    hours = [h for h in (last - i * step for i in range(24 * HOUR // step)) if h not in held][:want]
+    if hours:
+        out.line("", f"harvesting {len(hours)} hour{'s' if len(hours) != 1 else ''} of writing: some minutes each, and no account or key is needed")
+    for hour in hours:
+        out.line("", out.bold(_hour_name(hour)))
+        part = dest / f"{hour}.part"  # under its own name only once it is whole
+        try:
+            harvest.harvest_hour(season, hour, part, log=lambda m: out.line("", out.dim(m)))
+        except Exception as e:
+            part.unlink(missing_ok=True)
+            out.line("", f"{_hour_name(hour)} could not be harvested: {e}")
+            continue
+        part.replace(dest / f"{hour}.jsonl")
+    held = data.harvested()
+    for hour in sorted(held):
+        kinds: dict[str, int] = {}
+        for d in read_snapshot(held[hour])[1]:
+            kind = SOURCE_KIND.get(d.source, d.source)
+            kinds[kind] = kinds.get(kind, 0) + 1
+        out.line(_hour_name(hour), ", ".join(f"{k} {n}" for k, n in sorted(kinds.items())) or "nothing")
+    if not held:
+        die("no hour could be harvested: is this machine online?")
+    out.line("", f"{len(held)} hour{'s' if len(held) != 1 else ''} held in {dest}. Practice rounds now sit writing from "
+                 f"{min(len(held), int(season.raw['exam']['fresh']['hours']))} of them, chosen by each round's seed.")
+    if hours:
+        out.line("", out.dim("A practice round's exam and baseline are made again the first time it is run."))
 
 
 def _hours_dir() -> Path:
@@ -911,6 +972,13 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("baseline", help="score the unedited corpus for a round")
     add_round_args(p)
     p.set_defaults(fn=cmd_baseline)
+
+    p = sub.add_parser("harvest", help="fetch recent human writing, so that practice rounds sit what official rounds sit")
+    p.add_argument("--hours", type=int, default=3, help="how many hours of writing to hold, spread over the last day (default 3)")
+    p.add_argument("--fresh", action="store_true", help="replace what is held with newly written hours: a check on what you tuned against the old ones")
+    p.add_argument("--season", default=CURRENT_SEASON, help=argparse.SUPPRESS)
+    p.add_argument("--quiet", action="store_true", help=argparse.SUPPRESS)
+    p.set_defaults(fn=cmd_harvest)
 
     p = sub.add_parser("examine", help=argparse.SUPPRESS)  # organisers: harvest each hour, and make each official round's exam at its draw
     p.add_argument("--round", help="the official round (default with --follow: every open one)")

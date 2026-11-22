@@ -254,3 +254,44 @@ def test_the_examiner_harvests_the_newest_settled_hour_first_and_makes_an_exam_f
     got, late = cli._round_hours(season, {"draw_at": now}, b"seed")
     held = [int(p.stem) for p in hours.glob("*.jsonl") if int(p.stem) >= now - reach]
     assert late and [h for h, _ in got] == choose_hours(b"seed", held, season.raw["exam"]["fresh"]["hours"]) and len(got) == 3
+
+
+def test_harvest_holds_hours_spread_over_the_last_day_and_only_asks_for_what_is_missing(monkeypatch, tmp_path, capsys):
+    from stet import cli, data
+    from stet.exam.fresh import Doc, harvest, write_snapshot
+
+    monkeypatch.setenv("STET_CACHE", str(tmp_path))
+    now = 1_800_000_000 + 30 * 3600 + 120
+    monkeypatch.setattr(cli.time, "time", lambda: now)
+    asked = []
+
+    def fake(season, hour, dest, randomness=None, log=print):
+        asked.append(hour)
+        if hour == broken:
+            raise OSError("the beacon is out of reach")
+        docs = [Doc(source=src, id=f"{hour}:{i}", url="https://example.org/", lang="en", license="", published=hour, title="T", text="Words. " * 30)
+                for src in ("wikipedia", "github") for i in range(3)]
+        return {"documents": len(docs)}, write_snapshot(docs, dest, {"window": [hour, hour + 3600]})
+
+    monkeypatch.setattr(harvest, "harvest_hour", fake)
+    broken = None
+    cli.main(["harvest"])
+    from stet.spec import CURRENT_SEASON, load_season
+
+    last = harvest.settled(load_season(CURRENT_SEASON), now)
+    assert asked == [last, last - 8 * 3600, last - 16 * 3600] and sorted(data.harvested()) == sorted(asked)
+    text = "".join(capsys.readouterr())
+    assert "reference 3, technical 3" in text and "3 hours held" in text
+    # Asked again, it has what it wants; asked for more, it fetches only those.
+    asked.clear()
+    cli.main(["harvest"])
+    assert asked == []
+    broken = last - 4 * 3600
+    cli.main(["harvest", "--hours", "6"])
+    assert broken in asked and broken not in data.harvested() and len(data.harvested()) == 5 and not list(data.harvest_dir().glob("*.part"))
+    assert "could not be harvested" in "".join(capsys.readouterr())
+    # --fresh starts again.
+    asked.clear()
+    broken = None
+    cli.main(["harvest", "--fresh", "--hours", "1"])
+    assert asked == [last] and sorted(data.harvested()) == [last]

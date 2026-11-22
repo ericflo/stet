@@ -64,19 +64,20 @@ def read_public(raw: bytes, want: str) -> list[Item]:
     return kept
 
 
-def build(rnd, scale, snapshots: list[tuple[int, Path]], work: Path, log=print) -> dict:
-    """The round's exam, as the server takes it, from the harvests of its hours: (hour, the
-    snapshot's path), any order. Kept under work, so that a second try costs nothing it does
-    not have to."""
+def assemble(rnd, scale, snapshots: list[tuple[int, Path]], work: Path, log=print, measure: bool = True):
+    """A round's exam from the harvests of its hours, (hour, the snapshot's path) in any order:
+    its items, how many of them are fresh, the languages' shares, and each hour's sha256 in the
+    hours' order. An official round's languages are measured on its own corpus; a practice
+    round's (measure=False) are the published table's. Kept under work, so that a second try
+    costs nothing it does not have to."""
     import hashlib
 
     from .. import data
     from . import gen
-    from .aggregate import item_table
     from .decontam import seen
     from .fresh import read_snapshot
     from .fresh.langs import shares
-    from .fresh.select import select
+    from .fresh.select import SHARES, select
 
     season = rnd.season
     cfg = season.raw["exam"]
@@ -93,11 +94,11 @@ def build(rnd, scale, snapshots: list[tuple[int, Path]], work: Path, log=print) 
             if (d.source, d.id) not in had:  # a thread that runs over two hours is one document
                 had.add((d.source, d.id))
                 docs.append(d)
-    # The hours' hashes in the hours' order, hashed: one name for what the exam was made from.
-    snap_sha = hashlib.sha256("".join(shas).encode()).hexdigest()
     corpus = data.corpus(rnd, scale)
-    mix = shares(corpus, rnd.seed)  # every language in proportion to the round's own corpus
-    log(f"  the corpus's languages: {', '.join(f'{k} {v:.1f}%' for k, v in list(mix.items())[:8])}, and {max(0, len(mix) - 8)} more")
+    mix = dict(SHARES)
+    if measure:
+        mix = shares(corpus, rnd.seed)  # every language in proportion to the round's own corpus
+        log(f"  the corpus's languages: {', '.join(f'{k} {v:.1f}%' for k, v in list(mix.items())[:8])}, and {max(0, len(mix) - 8)} more")
     from .aggregate import SOURCE_KIND, WATCH, plan_of
 
     plan = plan_of(season)
@@ -114,12 +115,29 @@ def build(rnd, scale, snapshots: list[tuple[int, Path]], work: Path, log=print) 
     fresh = [it for i, it in enumerate(fresh) if i not in dropped]
     items: list[Item] = gen.generate(rnd.seed, per_corner=int(cfg["per_corner"])) + fresh
     log(f"  the exam: {len(items)} items, {len(fresh)} of them fresh")
+    return items, len(fresh), mix, shas
+
+
+def snapshot_name(shas: list[str]) -> str:
+    """One name for what an exam was made from: its hours' hashes in the hours' order, hashed."""
+    import hashlib
+
+    return hashlib.sha256("".join(shas).encode()).hexdigest()
+
+
+def build(rnd, scale, snapshots: list[tuple[int, Path]], work: Path, log=print) -> dict:
+    """The round's exam, as the server takes it, from the harvests of its hours."""
     import zstandard
+
+    from .aggregate import item_table
+
+    snapshots = sorted(snapshots)
+    items, fresh, mix, shas = assemble(rnd, scale, snapshots, work, log=log)
 
     public = "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in public_items(items)).encode()
     return {"round": rnd.id, "items_digest": digest(items), "items_file": base64.b64encode(pack_items(items)).decode(),
             "public_file": base64.b64encode(zstandard.ZstdCompressor(level=10).compress(public)).decode(),
-            "table": item_table(items), "languages": dict(list(mix.items())[:500]), "snapshot_sha256": snap_sha, "fresh": len(fresh),
+            "table": item_table(items), "languages": dict(list(mix.items())[:500]), "snapshot_sha256": snapshot_name(shas), "fresh": fresh,
             "hours": [{"hour": h, "sha256": sha} for (h, _), sha in zip(snapshots, shas, strict=True)]}
 
 

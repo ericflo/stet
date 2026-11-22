@@ -35,7 +35,7 @@ def baseline(rnd: Round, scale: Scale, device=None, progress=None, log=None) -> 
 
 def baseline_path(rnd: Round, scale: Scale, device) -> Path:
     # A baseline is for the exam it sat: named for it.
-    return data.round_dir(rnd, scale) / f"baseline-{HARNESS_VERSION}-{device.type}-{(rnd.exam_digest or 'generated')[:12]}.json"
+    return data.round_dir(rnd, scale) / f"baseline-{HARNESS_VERSION}-{device.type}-{(rnd.exam_digest or data.practice_key(rnd) or 'generated')[:12]}.json"
 
 
 def train_baseline(rnd: Round, scale: Scale, device=None, progress=None, log=None) -> Trained:

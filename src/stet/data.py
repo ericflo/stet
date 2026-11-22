@@ -699,8 +699,65 @@ def prune_verified(rnd: Round, keep: int = 3) -> int:
 # --- exam ---------------------------------------------------------------------------------
 
 def round_exam(rnd: Round, scale: Scale):
-    """The round's exam: its items (stet.exam), in order."""
+    """The round's exam: its items (stet.exam), in order. A practice round's has the season's
+    fresh writing too once some has been harvested on this machine (`stet harvest`)."""
+    if hours := practice_hours(rnd):
+        return _practice(rnd, scale, hours)
     return _items(rnd)
+
+
+def harvest_dir() -> Path:
+    """Where the hours harvested on this machine for practice are kept: <hour>.jsonl."""
+    return cache_dir() / "harvest"
+
+
+def harvested() -> dict[int, Path]:
+    try:
+        return {int(p.stem): p for p in harvest_dir().iterdir() if p.suffix == ".jsonl" and p.stem.isdigit()}
+    except OSError:
+        return {}
+
+
+def practice_hours(rnd: Round) -> list[tuple[int, Path]]:
+    """The hours a practice round's writing is made from: of those harvested on this machine,
+    as many as an official round is given, chosen by the round's seed as the server chooses an
+    official round's. With none harvested there are none, and the round sits the generated
+    items alone: a quarter of what an official round's score is made of."""
+    if rnd.kind != "practice" or not (held := harvested()):
+        return []
+    from .exam.fresh.harvest import choose_hours
+
+    return [(h, held[h]) for h in choose_hours(rnd.seed, held, int(rnd.season.raw["exam"]["fresh"]["hours"]))]
+
+
+def practice_key(rnd: Round) -> str:
+    """What names the writing a practice round sits here: "" when it sits none. Harvesting more
+    hours changes which a round is given, and then its exam and its baseline are new ones."""
+    from .exam.examine import snapshot_name
+
+    hours = practice_hours(rnd)
+    return snapshot_name([hashlib.sha256(p.read_bytes()).hexdigest() for _, p in hours]) if hours else ""
+
+
+def _practice(rnd: Round, scale: Scale, hours: list[tuple[int, Path]]):
+    """A practice round's exam with writing: made as the examiner makes an official round's,
+    from hours harvested here, and kept beside the round's corpus."""
+    from .exam.examine import assemble, pack_items
+    from .exam.farm import unpack_items
+
+    path = round_dir(rnd, scale) / f"exam-practice-{practice_key(rnd)[:16]}.jsonl.zst"
+    try:
+        return unpack_items(path.read_bytes())
+    except (OSError, ValueError, zstandard.ZstdError):
+        pass
+    items = assemble(rnd, scale, hours, round_dir(rnd, scale) / "examine", log=lambda m: None, measure=False)[0]
+    tmp = path.with_name(f"{path.name}.tmp{os.getpid()}")
+    try:
+        tmp.write_bytes(pack_items(items))
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+    return items
 
 
 class ExamNotReady(RuntimeError):
