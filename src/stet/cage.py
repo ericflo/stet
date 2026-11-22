@@ -764,18 +764,40 @@ def _status_bytes(pid: int, fields: tuple[str, ...]) -> int:
     return total
 
 
+def _pss_bytes(pid: int) -> int | None:
+    """A process's share of its anonymous and shared memory, a page that n processes share
+    counted as one n-th of a page in each, or None where the kernel will not say."""
+    total, said = 0, False
+    try:
+        with open(f"/proc/{pid}/smaps_rollup") as f:
+            for line in f:
+                if line.startswith(("Pss_Anon:", "Pss_Shmem:")):
+                    total += int(line.split()[1]) << 10
+                    said = True
+    except (OSError, ValueError, IndexError):
+        return None
+    return total if said else None
+
+
+def _held_bytes(pid: int) -> int:
+    share = _pss_bytes(pid)
+    return _status_bytes(pid, ("RssAnon", "RssShmem")) if share is None else share
+
+
 def memory_in_use() -> int:
     """About what the curator holds of this machine's memory.
 
-    Root here may not read another user's memory maps, so the curator's pages are counted
-    from outside: the container's own count of anonymous and shared memory, less what the
-    harness's processes hold (their own, which root may read). Where the container's count
-    cannot be read, the curator's processes' resident anonymous and shared memory is added
-    up instead, which counts a page twice where two processes share it after a fork.
+    Root here may not always read another user's memory maps, so the curator's pages are
+    counted from outside: the container's own count of anonymous and shared memory, less what
+    the harness's processes hold (their own, which root may read). Where the container's
+    count cannot be read, each of the curator's processes' share of its anonymous and shared
+    memory is added up instead, which counts a page once however many of them share it after
+    a fork. Only for a process whose maps cannot be read is its resident memory taken, which
+    counts such a page in every process that has it.
     """
     whole = _container_memory()
     if whole is None:
-        return sum(_status_bytes(pid, ("RssAnon", "RssShmem")) for pid in pids())
+        return sum(_held_bytes(pid) for pid in pids())
     harness = 0
     mine = set(pids())
     for d in os.listdir("/proc"):
