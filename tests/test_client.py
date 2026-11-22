@@ -1004,6 +1004,32 @@ def test_submit_shows_every_file_it_would_publish_before_it_sends_anything(monke
     assert "notes/todo.txt" in err and ".env  (its name starts with a dot)" in err and "--yes" in err
 
 
+def test_submit_takes_a_run_whose_result_cannot_be_read_as_no_valid_run(monkeypatch, tmp_path, capsys):
+    from test_project import make
+
+    p = make(tmp_path, {})
+    key = client.create_key()
+    key.handle = "tester"
+    key.save()
+    args = SubmitArgs(p.path)
+    args.dry_run = False
+    monkeypatch.setattr("sys.stdin", open(os.devnull))
+    runs = p.path / ".stet" / "runs"
+    for n, body in enumerate((b'{"valid": tr', b"", b"\xff\xfe", b"[1, 2]", b"null")):  # cut short, empty, not text, not a result
+        (runs / f"r{n}").mkdir(parents=True)
+        (runs / f"r{n}" / "result.json").write_bytes(body)
+    with pytest.raises(SystemExit):
+        client.cmd_submit(args)  # stops for want of --yes, having said so, and not on the files
+    err = capsys.readouterr().err
+    assert "no recent valid `stet run`" in err and "--yes" in err
+    (runs / "r9").mkdir()
+    (runs / "r9" / "result.json").write_text('{"valid": true}')
+    with pytest.raises(SystemExit):
+        client.cmd_submit(args)
+    err = capsys.readouterr().err
+    assert "no recent valid" not in err and "--yes" in err
+
+
 def test_a_round_that_does_not_hold_up_is_refused_and_a_warning_is_given_once(draws, monkeypatch):
     import types
 

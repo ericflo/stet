@@ -400,7 +400,15 @@ def cmd_submit(args):
         return
     key = need_key()
     runs = sorted((project.path / ".stet" / "runs").glob("*/result.json"))
-    if not any(json.loads(p.read_text()).get("valid") for p in runs[-5:]):
+
+    def ran_valid(p: Path) -> bool:
+        try:  # a result cut short or written over is no valid run, and no reason not to submit
+            said = json.loads(p.read_text())
+        except (OSError, ValueError):
+            return False
+        return isinstance(said, dict) and bool(said.get("valid"))
+
+    if not any(ran_valid(p) for p in runs[-5:]):
         sys.stderr.write("warning: no recent valid `stet run` for this project. A curator that fails counts as the lowest gain in its round.\n")
     if not args.yes:
         if not sys.stdin.isatty():
