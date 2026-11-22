@@ -52,8 +52,17 @@ def generate(seed: bytes | str, per_corner: int = 1, families=None) -> list[Item
     """Every corner's items for a seed: per_corner of each (more for the families in MORE), in a fixed order."""
     root = Rng(seed, f"exam/v{VERSION}")
     out: list[Item] = []
+    had: set[str] = set()
     for fam in families or FAMILIES:
         for corner in fam.corners():
             for i in range(per_corner * MORE.get(fam.NAME, 1)):
-                out.append(fam.make(root.child(f"{corner}#{i}"), corner))
+                it = fam.make(root.child(f"{corner}#{i}"), corner)
+                # A corner with few things to say can say one of them twice. An item sat twice
+                # counts twice: draw again, a few times, for one the exam does not have yet.
+                for again in range(1, 9):
+                    if it.id not in had:
+                        break
+                    it = fam.make(root.child(f"{corner}#{i}/again{again}"), corner)
+                had.add(it.id)
+                out.append(it)
     return out

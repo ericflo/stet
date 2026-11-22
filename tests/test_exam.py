@@ -36,7 +36,7 @@ def test_rng_is_pinned_and_in_range():
 def test_a_seed_always_makes_the_same_exam():
     # Pinned: a change to any generator that changes what a seed produces must bump gen.VERSION
     # and this hash, on purpose.
-    assert digest(gen.generate(SEED)) == "24d846bf4ba72854d175b05a68207db7eaa28fcfd142820b7ebfbac39409a857"
+    assert digest(gen.generate(SEED)) == "69d84437be7ac49e24fd3920b143e654b0aa16834cd1fc34b7e0e5c68588f56c"
     assert digest(gen.generate(SEED)) == digest(gen.generate(SEED))
     assert digest(gen.generate(b"other")) != digest(gen.generate(SEED))
 
@@ -883,3 +883,18 @@ def test_few_shot_questions_fit_a_students_window():
     assert all(n <= small for it, n in sized if it.kind == "pair")
     # the estimate the generator drops examples by is near the truth where it matters, on long texts
     assert all(0.8 < shots.cost(it.ctx + it.cont) / 20 / n < 1.25 for it, n in sized if it.kind == "answer" and n > 150)
+
+
+def test_no_item_is_sat_twice_and_an_agents_session_fits_the_students_window():
+    import re
+
+    from stet.exam.gen import shell
+
+    for k in range(1, 6):
+        items = gen.generate(bytes([k]) * 32, per_corner=2)
+        assert len({it.id for it in items}) == len(items)  # a corner with little to say draws again
+        for it in items:
+            if it.source == "gen:agent" and it.kind == "answer":
+                assert len((it.ctx + it.cont).encode()) <= shell.LIMIT, it.corner
+            if it.source == "gen:algebra" and it.kind == "answer":
+                assert not re.search(r"(?<![0-9])[01][xy]|\+ -|- -", it.ctx), it.ctx  # x and -x, never 1x or 0x

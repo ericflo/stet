@@ -179,7 +179,24 @@ def _lines(steps, style: str) -> str:
     return "".join(out)
 
 
+# An answer's session and the answer together, in bytes. The student reads 512 tokens at a
+# time, and a session it cannot see the start of may ask for what it was never shown. These
+# sessions come to 0.71 tokens a byte at most, so 640 bytes is under the window with room.
+LIMIT = 640
+
+
 def make(rng: Rng, corner: str) -> Item:
+    """One item for a corner: the first of a few draws that fits the student's window, the
+    later ones without the aside."""
+    it = _make(rng, corner, True)
+    for again in range(1, 7):
+        if it.kind != "answer" or len((it.ctx + it.cont).encode()) <= LIMIT:
+            break
+        it = _make(rng.child(f"shorter{again}"), corner, again < 2)
+    return it
+
+
+def _make(rng: Rng, corner: str, asides: bool) -> Item:
     _, lang, style, c = corner.split("/")
     p = Project(rng, lang)
     head = f"{p.user}@{p.name}:~/{p.name}\n" if style == "shell" else f"# agent log: {p.name}\n"
@@ -192,7 +209,7 @@ def make(rng: Rng, corner: str) -> Item:
         return Item(kind="passage", corner=corner, fmt="logs", lang="en", source=f"gen:{NAME}", text=(head + _lines(steps, style)).rstrip("\n"))
     # Something else first, half the time, so that the answer is not always in the line before.
     aside = []
-    if rng.chance(1, 2):
+    if rng.chance(1, 2) and asides:
         b, a = _steps(p, rng, rng.choice([k for k in ("wc", "head", "grep") if k != c]))
         aside = b + [a]
     before, ask = _steps(p, rng, c)
