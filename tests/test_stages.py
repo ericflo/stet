@@ -274,6 +274,12 @@ def test_a_round_whose_exam_is_not_here_stops_with_where_it_is(world, capsys, tm
     with pytest.raises(SystemExit):
         run(world, "curve", rid)
     assert "its whole exam is not on this machine" in capsys.readouterr().err and not world.server.posts
+    # A round of the season before, of which the examiner kept its harvest only: an exam is not made again from one.
+    (made / "fresh.jsonl").write_text("")
+    with pytest.raises(SystemExit):
+        run(world, "curve", rid)
+    said = capsys.readouterr().err
+    assert "kept its harvest here" in said and "name them with --items and --shares" in said and "Traceback" not in said and not world.server.posts
     # Brought from the examiner's machine as files: taken when they are the round's exam, refused when they are not.
     (tmp_path / "languages.json").write_text(json.dumps({"en": 100.0}))
     (tmp_path / "other.jsonl").write_text("".join(json.dumps(it.to_dict()) + "\n" for it in items[1:]))

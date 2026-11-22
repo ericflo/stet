@@ -135,14 +135,15 @@ def _items_of(blob: bytes) -> list[Item]:
     return [Item.from_dict(json.loads(line)) for line in blob.decode().split("\n") if line.strip()]
 
 
-def whole_exam(rnd, scale, work: Path, draw_at: int = 0, items_file=None, shares_file=None, log=say) -> tuple[list[Item], dict]:
+def whole_exam(rnd, work: Path, items_file=None, shares_file=None) -> tuple[list[Item], dict]:
     """A settled round's whole exam and the languages of its corpus, as its score used them.
 
     The server gives out a settled round's published exam only, which leaves out the text of
     most of the writing. The whole one is where it was made: the examiner keeps it beside its
-    harvest, and for a round examined before it did, the same exam is made again from that
-    harvest (which builds the round's corpus here). Found once, it is kept under `work`.
-    Whatever its source, it must hash to the digest the round committed to."""
+    harvest. A round examined before it did (Season 1's) has only the harvest there, and its
+    exam is not made again from that: its items and languages are brought as files. Found
+    once, it is kept under `work`. Whatever its source, it must hash to the digest the round
+    committed to."""
     from ..data import cache_dir
     from . import examine
 
@@ -153,12 +154,9 @@ def whole_exam(rnd, scale, work: Path, draw_at: int = 0, items_file=None, shares
             items, shares = _items_of(Path(items_file).read_bytes()), _read(Path(shares_file))
         elif (made / examine.KEPT_ITEMS).exists() and (made / examine.KEPT_LANGUAGES).exists():
             items, shares = _items_of((made / examine.KEPT_ITEMS).read_bytes()), _read(made / examine.KEPT_LANGUAGES)
-        elif (made / "fresh.jsonl").exists() and draw_at:
-            import base64
-
-            log(f"{rnd.id}: making its exam again from the examiner's harvest")
-            exam = examine.build(rnd, scale, draw_at, made, log=log)
-            items, shares = _items_of(base64.b64decode(exam["items_file"])), exam["languages"]
+        elif (made / "fresh.jsonl").exists():
+            raise Stop(f"{rnd.id}: the examiner kept its harvest here ({made}) but not its whole exam, as it did before Season 2, and an exam is "
+                       "not made again from a harvest: bring its items and languages here and name them with --items and --shares")
         else:
             raise Stop(f"{rnd.id}: its whole exam is not on this machine. It is kept where the round was examined ({made}): "
                        "run this there, or bring its items and languages here and name them with --items and --shares")
@@ -611,7 +609,7 @@ def cmd_curve(args):
                     "whether it reached the end is read from the training itself.")
         if args.plan:
             continue
-        items, shares = whole_exam(rnd, own, work, int((d.get("round") or {}).get("draw_at") or 0), args.items, args.shares)
+        items, shares = whole_exam(rnd, work, args.items, args.shares)
         if scale.name != own.name:
             check_exam(rnd, scale, items, work)
         sat = exam_at(rnd.id, items, [scale.name], own.name, work)
@@ -701,9 +699,9 @@ def _audit(work: Path, round_id: str) -> dict:
 
 def _audit_scripts(args, season, work: Path, key) -> None:
     plan = _audit(work, args.round)
-    rnd, d = settled_round(season, plan["round"])
+    rnd, _ = settled_round(season, plan["round"])
     own = plan["sizes"][0]
-    items, _ = whole_exam(rnd, season.scale(own), work, int((d.get("round") or {}).get("draw_at") or 0), args.items, args.shares)
+    items, _ = whole_exam(rnd, work, args.items, args.shares)
     for size in plan["sizes"]:
         scale = season.scale(size)
         prepare(rnd, scale, work)
@@ -1048,9 +1046,9 @@ def _finals_scripts(args, season, work: Path, key) -> None:
     plan, _ = _finals(args, work, season)
     scale = season.scale(plan["scale"])
     for rid in plan["rounds"]:
-        rnd, d = settled_round(season, rid)
+        rnd, _ = settled_round(season, rid)
         own = season.scale(plan["own"][rid])
-        items, _ = whole_exam(rnd, own, work, int((d.get("round") or {}).get("draw_at") or 0), args.items, args.shares)
+        items, _ = whole_exam(rnd, work, args.items, args.shares)
         prepare(rnd, scale, work)
         if scale.name != own.name:
             check_exam(rnd, scale, items, work)
