@@ -2,6 +2,8 @@
 
 import collections
 import dataclasses
+import io
+import json
 
 import pytest
 
@@ -272,3 +274,52 @@ def test_a_snapshot_is_read_back_whole_whatever_line_breaks_its_text_holds(tmp_p
     meta, back = read_snapshot(tmp_path / "a.jsonl")
     assert meta == {"window": [0, 3600]}
     assert [d.text for d in back] == [odd, "plain"]
+
+
+class _Answer(io.BytesIO):
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        self.close()
+
+
+def test_an_answer_is_read_only_so_far(monkeypatch):
+    from stet.exam import fresh
+
+    calls = []
+    body = json.dumps({"text": "x" * 1000}).encode()
+
+    def urlopen(req, timeout=None):
+        calls.append(req.full_url)
+        return _Answer(body)
+
+    monkeypatch.setattr(fresh, "GAP", 0)
+    monkeypatch.setattr(fresh.urllib.request, "urlopen", urlopen)
+    assert fresh.get_json("https://api.example/x", {"a": 1}) == json.loads(body)
+    assert fresh.get_json("https://api.example/x", {}, limit=len(body)) == json.loads(body)
+    with pytest.raises(fresh.Refused, match="larger than"):
+        fresh.get_json("https://api.example/x", {}, limit=len(body) - 1)
+    assert len(calls) == 3  # an answer that is too large is not asked for again
+    monkeypatch.setattr(fresh._named, "open", urlopen)
+    monkeypatch.setattr(fresh.socket, "getaddrinfo", lambda host, port, **kw: [(2, 1, 6, "", ("93.184.216.34", port))])
+    assert fresh.get_json("https://pds.example/x", {}, named=True) == json.loads(body)
+    with pytest.raises(fresh.Refused, match="larger than"):
+        fresh.get_json("https://pds.example/x", {}, limit=100, named=True)
+    monkeypatch.setattr(fresh, "NAMED_SECONDS", -1.0)
+    with pytest.raises(fresh.Refused, match="still arriving"):
+        fresh.get_json("https://pds.example/x", {}, named=True)
+
+
+def test_a_named_server_is_followed_only_to_itself():
+    import urllib.request
+
+    from stet.exam import fresh
+
+    req = urllib.request.Request("https://pds.example/xrpc/a")
+    hop = fresh._SameHost()
+    assert hop.redirect_request(req, None, 302, "Found", {}, "https://pds.example/xrpc/b").full_url == "https://pds.example/xrpc/b"
+    for elsewhere in ("https://other.example/xrpc/a", "http://pds.example/xrpc/a", "https://127.0.0.1/", "https://pds.example:8443/",
+                      "file:///etc/passwd"):
+        with pytest.raises(fresh.Refused):
+            hop.redirect_request(req, None, 302, "Found", {}, elsewhere)

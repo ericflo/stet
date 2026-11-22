@@ -34,7 +34,7 @@ from collections import Counter, defaultdict, deque
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from . import UA, Doc, get_json
+from . import MAX_NAMED, UA, Doc, get_json
 from .select import OTHER, SHARES
 
 JETSTREAMS = ("jetstream2.us-east.bsky.network", "jetstream1.us-east.bsky.network",
@@ -470,14 +470,28 @@ def says_no(value) -> bool:
     return False
 
 
+def _endpoint(services) -> str:
+    """The server a DID document says holds the account's records. The document is its author's."""
+    pds = next(s["serviceEndpoint"] for s in services if s.get("id", "").endswith("#atproto_pds"))
+    if not isinstance(pds, str):
+        raise ValueError("a server's address that is not text")
+    return pds.rstrip("/")
+
+
+def _named(url: str, params: dict):
+    """An answer from a server an author named: asked only at a public https address, never
+    followed to another host, and read only so far (get_json's named)."""
+    return get_json(url, params, tries=2, limit=MAX_NAMED, named=True)
+
+
 def _pds(did: str) -> str:
     if did.startswith("did:plc:"):
-        doc = get_json(f"{PLC}/{did}", {}, tries=2)
+        doc = get_json(f"{PLC}/{did}", {}, tries=2, limit=MAX_NAMED)
     elif did.startswith("did:web:"):
-        doc = get_json(f"https://{did.removeprefix('did:web:')}/.well-known/did.json", {}, tries=2)
+        doc = _named(f"https://{did.removeprefix('did:web:')}/.well-known/did.json", {})
     else:
         raise ValueError(f"cannot resolve {did}")
-    return next(s["serviceEndpoint"] for s in doc.get("service", []) if s.get("id", "").endswith("#atproto_pds"))
+    return _endpoint(doc.get("service", []))
 
 
 _unreachable: set[str] = set()  # servers that failed once: their other authors are not tried again
@@ -485,20 +499,21 @@ _unreachable: set[str] = set()  # servers that failed once: their other authors 
 
 def refuses_ai(did: str) -> bool:
     """Whether the author has said no to AI use of their posts in an AI-preference record. An
-    author whose records cannot be read is treated as having said no."""
+    author whose records cannot be read is treated as having said no: so is one whose server is
+    not at a public https address, which is not asked."""
     pds = ""
     try:
         try:
-            repo = get_json(f"{ENTRYWAY}/com.atproto.repo.describeRepo", {"repo": did}, tries=2)
-            pds = next(s["serviceEndpoint"] for s in repo["didDoc"]["service"] if s.get("id", "").endswith("#atproto_pds"))
+            repo = get_json(f"{ENTRYWAY}/com.atproto.repo.describeRepo", {"repo": did}, tries=2, limit=MAX_NAMED)
+            pds = _endpoint(repo["didDoc"]["service"])
         except Exception:  # an account on a server of its own: find that server
-            pds = _pds(did).rstrip("/")
+            pds = _pds(did)
             if pds in _unreachable:
                 return True
-            repo = get_json(f"{pds}/xrpc/com.atproto.repo.describeRepo", {"repo": did}, tries=2)
+            repo = _named(f"{pds}/xrpc/com.atproto.repo.describeRepo", {"repo": did})
         for col in AI_PREFS:
             if col in repo.get("collections", []):
-                rec = get_json(f"{pds.rstrip('/')}/xrpc/com.atproto.repo.getRecord", {"repo": did, "collection": col, "rkey": "self"}, tries=2)
+                rec = _named(f"{pds}/xrpc/com.atproto.repo.getRecord", {"repo": did, "collection": col, "rkey": "self"})
                 if says_no(rec.get("value")):
                     return True
         return False
