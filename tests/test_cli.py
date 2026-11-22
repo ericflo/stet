@@ -213,3 +213,44 @@ def test_an_invalid_run_has_a_gain_of_nothing_written_down(monkeypatch):
     result = {"valid": False, "invalid_reason": "ink over budget"}
     cli._with_baseline(result, None, None, None, out, skip=False)
     assert result["gain"] == 0.0 and result["baseline"]["mean"] == -5.3
+
+
+# --- the examiner ---------------------------------------------------------------------------------
+
+
+def test_the_examiner_harvests_the_newest_settled_hour_first_and_makes_an_exam_from_the_hours_the_server_chose(monkeypatch, tmp_path):
+    import hashlib
+
+    from stet.exam.fresh.harvest import choose_hours
+    from stet.spec import load_season
+
+    monkeypatch.setenv("STET_CACHE", str(tmp_path))
+    season = load_season("s2")
+    now = 1_800_000_000 + 1234
+    last = (now - 2 * 3600) - (now - 2 * 3600) % 3600  # ended an hour ago at least
+    assert cli._harvest_due(season, now) == last
+    hours = cli._hours_dir()
+    hours.mkdir(parents=True)
+    (hours / f"{last}.jsonl").write_text("{}\n")
+    assert cli._harvest_due(season, now) == last - 3600  # then the one before
+    assert cli._harvest_due(season, now, skip=[last - 3600]) == last - 7200  # an hour that will not come is passed over
+    reach = season.raw["exam"]["fresh"]["reach_seconds"]
+    for h in range(last, now - reach - 3600, -3600):
+        (hours / f"{h}.jsonl").write_text(f"{{}}\n{h}\n")
+    assert cli._harvest_due(season, now) is None  # nothing a round could still be given is missing
+
+    def sha(h):
+        return hashlib.sha256((hours / f"{h}.jsonl").read_bytes()).hexdigest()
+
+    # The server named the round's hours at its draw: those are used, and checked against what it was told.
+    d = {"draw_at": now, "exam_hours": [{"hour": last, "sha256": sha(last)}, {"hour": last - 7200, "sha256": sha(last - 7200)}]}
+    assert cli._round_hours(season, d, b"seed") == ([(last, hours / f"{last}.jsonl"), (last - 7200, hours / f"{last - 7200}.jsonl")], False)
+    d["exam_hours"][0]["sha256"] = "00" * 32
+    with pytest.raises(RuntimeError, match="not the one the server was told of"):
+        cli._round_hours(season, d, b"seed")
+    with pytest.raises(RuntimeError, match="not on this machine"):
+        cli._round_hours(season, {"draw_at": now, "exam_hours": [{"hour": last + 36000, "sha256": "00" * 32}]}, b"seed")
+    # It had been told of none: they are chosen now, by the same rule, from what this machine holds of the round's day.
+    got, late = cli._round_hours(season, {"draw_at": now}, b"seed")
+    held = [int(p.stem) for p in hours.glob("*.jsonl") if int(p.stem) >= now - reach]
+    assert late and [h for h, _ in got] == choose_hours(b"seed", held, season.raw["exam"]["fresh"]["hours"]) and len(got) == 3

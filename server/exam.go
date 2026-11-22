@@ -60,6 +60,7 @@ type ExamPost struct {
 	Snapshot string             `json:"snapshot_sha256"`
 	Fresh    int                `json:"fresh"`
 	Public   string             `json:"public_file"` // base64 of the zstd JSON lines published when the round settles
+	Hours    []RoundHour        `json:"hours"`       // the harvests its writing was made from: see harvest.go
 }
 
 // apiExamPost: POST /api/v1/admin/rounds/{id}/exam, from the organisers. Posting the same exam
@@ -107,6 +108,8 @@ func (a *App) postExam(ctx context.Context, idx int, p *ExamPost) (bool, error) 
 			err = fail(409, "%s is not open", roundID(a.season.ID, idx))
 		} else if rd.ExamSHA != "" && rd.ExamSHA != p.Digest {
 			err = fail(409, "%s already has its exam", roundID(a.season.ID, idx))
+		} else if !already {
+			_, err = a.checkHours(s, rd, p)
 		}
 	})
 	if err != nil || already {
@@ -126,6 +129,13 @@ func (a *App) postExam(ctx context.Context, idx int, p *ExamPost) (bool, error) 
 		rd := tx.s.Rounds[idx]
 		if rd == nil || rd.Status != "open" || (rd.ExamSHA != "" && rd.ExamSHA != p.Digest) {
 			return fail(409, "%s changed while its exam was being kept; send it again", roundID(a.season.ID, idx))
+		}
+		late, err := a.checkHours(tx.s, rd, p)
+		if err != nil {
+			return err
+		}
+		if late {
+			rd.Hours, rd.HoursLate = p.Hours, true
 		}
 		rd.ExamSHA, rd.ExamAt, rd.ExamTable, rd.Shares, rd.Snapshot, rd.Fresh = p.Digest, now(), p.Table, p.Shares, p.Snapshot, p.Fresh
 		rd.ExamMix = a.examMix(p.Table)

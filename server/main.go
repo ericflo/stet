@@ -53,7 +53,10 @@ type Config struct {
 	ReplicaWait    time.Duration // how long a round waits for people who have started, and before giving up what nobody is there to do
 	EstablishAfter int           // grades that must have agreed before an account's grades count and it may run editors
 	RunsPerEntry   int           // times each entry is run, by different people, before a third is wanted
-	ActiveWindow   time.Duration // how recently a verifier must have asked for work to be counted as around
+	// Freeze is how long before a round's draw an entry must have been submitted to run in it:
+	// the season's reach, so that it is older than any writing the round's exam could hold.
+	Freeze       time.Duration
+	ActiveWindow time.Duration // how recently a verifier must have asked for work to be counted as around
 	// EarlyWindow: a machine the organisers rent is handed a grade before the exam only when
 	// it would have trained it, and the further grades it could take after it, no sooner
 	// than this before the exam is due (pace.go). 0 hands them out as soon as there are any.
@@ -142,6 +145,7 @@ func loadConfig(season *Season) (Config, error) {
 		ReplicaWait:      envDuration("STET_REPLICA_WAIT", 45*time.Minute),
 		EstablishAfter:   envInt("STET_ESTABLISH_AFTER", 5),
 		RunsPerEntry:     envInt("STET_RUNS_PER_ENTRY", 2),
+		Freeze:           time.Duration(season.Exam.Fresh.Reach) * time.Second,
 		ActiveWindow:     envDuration("STET_ACTIVE_WINDOW", 10*time.Minute),
 		RequireGithub:    envBool("STET_REQUIRE_GITHUB", !dev),
 		GithubMinAgeDays: envInt("STET_GITHUB_MIN_AGE_DAYS", 30),
@@ -150,6 +154,9 @@ func loadConfig(season *Season) (Config, error) {
 		ArchiveSeed:      os.Getenv("STET_ARCHIVE_SEED"),
 	}
 	cfg.APIURL = strings.TrimRight(env("STET_API_URL", cfg.BaseURL), "/")
+	if dev {
+		cfg.Freeze = 0 // a server run for development admits an entry at the next draw
+	}
 	for _, h := range strings.Split(os.Getenv("STET_REDIRECT_HOSTS"), ",") {
 		if h = strings.ToLower(strings.TrimSpace(h)); h != "" {
 			cfg.RedirectHosts[h] = true

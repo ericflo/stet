@@ -45,6 +45,12 @@ func (r *Round) description(s *Season) map[string]any {
 		d["moved_from"] = r.Was
 	}
 	if r.Status != "scheduled" {
+		if len(r.Hours) > 0 {
+			d["exam_hours"] = r.Hours
+			if r.HoursLate {
+				d["exam_hours_late"] = true
+			}
+		}
 		d["seed"] = r.Seed
 		d["beacon"] = map[string]any{"round": r.DrandRound, "randomness": r.Randomness}
 		d["drawn_at"] = r.DrawnAt
@@ -309,7 +315,7 @@ func (a *App) selectEntrants(s *State, cutoff int64) []entrant {
 		switch {
 		case e.Status == "running" && roundsRun(s, e.ID) < a.cfg.QualifyRounds:
 			qualifying = append(qualifying, e)
-		case e.Status == "queued" && e.CreatedAt <= cutoff-commitMargin:
+		case e.Status == "queued" && e.CreatedAt <= cutoff-a.freeze():
 			queue = append(queue, e)
 		}
 	}
@@ -508,6 +514,7 @@ func (a *App) maybeDraw(ctx context.Context, force bool) error {
 		// The crawl is the one announced with the round, never one chosen now.
 		cur.Status, cur.Randomness, cur.DrawnAt, cur.ActiveAt = "open", randomness, now(), now()
 		cur.Seed = hexOf(officialSeed(a.season.ID, cur.Idx, cur.DrandRound, randomness, *cur.Crawl))
+		cur.Hours = a.roundHours(s, cur) // the writing its exam is made from: see harvest.go
 		tx.saveRound(cur)
 		for _, e := range entrants {
 			tx.saveEntry(&Entry{RoundIdx: cur.Idx, EditorID: e.EditorID, Status: "open"})

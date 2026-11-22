@@ -44,6 +44,8 @@ def export(season_id: str = CURRENT_SEASON) -> dict:
             "pillars": [{"name": p, "group": v["group"], "parts": v["parts"], "about": v["about"]} for p, v in raw["exam"]["pillars"].items()],
             "clip": raw["exam"]["aggregate"]["clip"], "trim": raw["exam"]["aggregate"]["trim"], "small": raw["exam"]["aggregate"]["small"],
             "answer_floor_bytes": season.answer_floor_bytes,
+            # How the exam's writing is taken from the hours the examiner harvests: server/harvest.go.
+            "fresh": {k: int(raw["exam"]["fresh"][k]) for k in ("settle_seconds", "reach_seconds", "hours")},
         },
         "beacon": raw["beacon"],
         "draw_grid_seconds": raw["draw_grid_seconds"],

@@ -255,6 +255,8 @@ func (a *App) mountAPI(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/admin/accounts/{handle}", a.apiAdminAccount)
 	mux.HandleFunc("GET /api/v1/admin/work", a.apiAdminWork)
 	mux.HandleFunc("GET /api/v1/admin/workers", a.apiWorkers)
+	mux.HandleFunc("POST /api/v1/admin/harvests", a.apiHarvestPost)
+	mux.HandleFunc("GET /api/v1/harvests", a.apiHarvests)
 	mux.HandleFunc("POST /api/v1/admin/workers", a.apiWorkerGrant)
 	mux.HandleFunc("DELETE /api/v1/admin/workers/{key}", a.apiWorkerRevoke)
 	mux.HandleFunc("POST /api/v1/admin/workers/{key}/release", a.apiWorkerRelease)
@@ -676,7 +678,7 @@ func (a *App) apiSubmit(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			key := "earliest"
-			if ed.Status == "queued" && ahead < a.cfg.MaxNewPerRound && ed.CreatedAt <= next.DrawAt-commitMargin {
+			if ed.Status == "queued" && ahead < a.cfg.MaxNewPerRound && ed.CreatedAt <= next.DrawAt-a.freeze() {
 				key = "enters"
 			}
 			out[key] = map[string]any{"round": roundID(a.season.ID, next.Idx), "draw_at": next.DrawAt}

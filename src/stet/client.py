@@ -132,38 +132,44 @@ def need_key() -> Key:
 # --- rounds ---------------------------------------------------------------------------------
 
 
-def verify_beacon(season, beacon: dict) -> None:
-    """Check a round's randomness against drand itself, not against what the server says.
-
-    A relay that cannot be reached, or whose answer cannot be read as this round's beacon
-    (not JSON, an error object, fields missing or that do not add up), has said nothing,
-    and the next relay is asked. The round is refused (ValueError) only when a relay
-    returns a well-formed beacon for this round whose randomness is not the server's. If
-    no relay gives a readable answer, that is a download that failed (FetchError), to be
-    waited out like any other: it says nothing against the round.
-    """
+def beacon_randomness(season, number: int) -> str:
+    """A beacon round's randomness, from drand itself: the first relay to give a well-formed
+    answer for this round. A relay that cannot be reached, or whose answer cannot be read as this
+    round's beacon (not JSON, an error object, fields missing or that do not add up), has said
+    nothing, and the next is asked. If none gives a readable answer, that is a download that
+    failed (FetchError), to be waited out like any other."""
     cfg = season.raw["beacon"]
-    number = int(beacon["round"])
     last: Exception | None = None
     for relay in cfg["relays"]:
-        url = f"{relay}/{cfg['chain_hash']}/public/{number}"
+        url = f"{relay}/{cfg['chain_hash']}/public/{int(number)}"
         try:
             req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
             with urllib.request.urlopen(req, timeout=20) as r:
                 got = json.loads(r.read(1 << 16))
             randomness = str(got["randomness"]).lower()
-            if int(got["round"]) != number or hashlib.sha256(bytes.fromhex(got["signature"])).hexdigest() != randomness:
+            if int(got["round"]) != int(number) or hashlib.sha256(bytes.fromhex(got["signature"])).hexdigest() != randomness:
                 raise ValueError("the beacon it returned does not add up")
         except Exception as e:  # this relay has told us nothing; try the next
             last = e
             continue
-        if randomness != str(beacon["randomness"]).lower():
-            raise ValueError(
-                f"round randomness does not match drand round {number}: the server says "
-                f"{str(beacon['randomness'])[:16]}…, drand says {randomness[:16]}…"
-            )
-        return
+        return randomness
     raise FetchError(f"no drand relay gave a readable answer about round {number}, so the round's randomness could not be checked ({last})")
+
+
+def verify_beacon(season, beacon: dict) -> None:
+    """Check a round's randomness against drand itself, not against what the server says.
+
+    The round is refused (ValueError) only when a relay returns a well-formed beacon for this
+    round whose randomness is not the server's. If no relay gives a readable answer
+    (FetchError), that says nothing against the round.
+    """
+    number = int(beacon["round"])
+    randomness = beacon_randomness(season, number)
+    if randomness != str(beacon["randomness"]).lower():
+        raise ValueError(
+            f"round randomness does not match drand round {number}: the server says "
+            f"{str(beacon['randomness'])[:16]}…, drand says {randomness[:16]}…"
+        )
 
 
 def round_from_api(season, description: dict):

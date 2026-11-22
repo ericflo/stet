@@ -34,6 +34,13 @@ const (
 
 // ExamPlan is what a season's score is made of: exam.groups, exam.pillars and exam.aggregate of
 // its file, as tools/export_season.py writes them.
+// FreshPlan is how the season takes an exam's writing from the hours the examiner harvests.
+type FreshPlan struct {
+	Settle int64 `json:"settle_seconds"` // an hour is harvested this long after it ends
+	Reach  int64 `json:"reach_seconds"`  // a round is given hours that began no longer than this before its draw
+	Hours  int   `json:"hours"`          // and this many of them
+}
+
 type ExamPlan struct {
 	Groups  map[string]float64 `json:"groups"`  // each group's share of the score
 	Pillars []PlanPillar       `json:"pillars"` // in the order they are shown
@@ -41,6 +48,7 @@ type ExamPlan struct {
 	Trim    float64            `json:"trim"`    // from each end, within a stratum
 	Small   int                `json:"small"`   // items a language or a stratum needs to count in full
 	Floor   int                `json:"answer_floor_bytes"`
+	Fresh   FreshPlan          `json:"fresh"`
 }
 
 type PlanPillar struct {

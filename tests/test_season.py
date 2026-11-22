@@ -1,5 +1,6 @@
 """The season, and its exam on the grader's side and the examiner's."""
 
+import hashlib
 import json
 import types
 
@@ -122,20 +123,60 @@ def test_the_examiner_makes_a_rounds_exam_from_its_harvest_and_seed(monkeypatch,
     docs = [Doc(source="wikipedia", id=f"en:{i}", url=f"https://example.org/{i}", lang="en", license="CC BY-SA 4.0",
                 published=1_800_000_000 + i, title=f"Title {i}", text=f"Article number {i} says something new. " * 20, topic=f"Q{i}")
             for i in range(30)]
-    monkeypatch.setattr("stet.exam.fresh.harvest.harvest_window",
-                        lambda seed, start, end, dest, log=print: write_snapshot(docs, dest, {"window": [start, end]}))
+    # Two hours' harvests, with one thread in both: it is one document.
+    hours = [(1_800_003_600, tmp_path / "b.jsonl"), (1_800_000_000, tmp_path / "a.jsonl")]
+    shas = [write_snapshot(docs[14:], hours[0][1], {"window": [hours[0][0], hours[0][0] + 3600]}),
+            write_snapshot(docs[:15], hours[1][1], {"window": [hours[1][0], hours[1][0] + 3600]})]
     monkeypatch.setattr(data, "corpus", lambda rnd, scale: object())
     monkeypatch.setattr("stet.exam.fresh.langs.shares", lambda corpus, seed: {"en": 40.0, "ru": 20.0})
     monkeypatch.setattr("stet.exam.decontam.seen", lambda items, corpus, season, log=print: {0})  # the corpus holds one
-    exam = examine.build(rnd, s1.scale("standard"), 1_800_000_000, tmp_path / "work", log=lambda m: None)
+    exam = examine.build(rnd, s1.scale("standard"), hours, tmp_path / "work", log=lambda m: None)
     items = unpack_items(base64.b64decode(exam["items_file"]))
     assert exam["round"] == rnd.id and exam["items_digest"] == digest(items) and len(exam["table"]) == len(items)
     assert items[: len(items) - exam["fresh"]] == gen.generate(rnd.seed, per_corner=2)
-    assert 0 < exam["fresh"] < 2 * len(docs) and exam["languages"] == {"en": 40.0, "ru": 20.0} and len(exam["snapshot_sha256"]) == 64
+    assert 0 < exam["fresh"] < 2 * len(docs) and exam["languages"] == {"en": 40.0, "ru": 20.0}
+    # what it was made from: the hours in their order, and one name for all of them
+    assert exam["hours"] == [{"hour": 1_800_000_000, "sha256": shas[1]}, {"hour": 1_800_003_600, "sha256": shas[0]}]
+    assert exam["snapshot_sha256"] == hashlib.sha256((shas[1] + shas[0]).encode()).hexdigest()
+    assert len({it.source for it in items if not it.source.startswith("gen:")}) <= len(docs)
     # what the server is sent is all it needs to score a grade
     assert score_from_table(exam["table"], [0.1] * len(items), exam["languages"])["score"] == pytest.approx(0.1)
     # made again, it is the same exam
-    assert examine.build(rnd, s1.scale("standard"), 1_800_000_000, tmp_path / "work", log=lambda m: None) == exam
+    assert examine.build(rnd, s1.scale("standard"), hours[::-1], tmp_path / "work", log=lambda m: None) == exam
+    with pytest.raises(ValueError, match="no harvest"):
+        examine.build(rnd, s1.scale("standard"), [], tmp_path / "work", log=lambda m: None)
+
+
+def test_an_hours_harvest_is_chosen_with_the_beacon_and_a_rounds_hours_with_its_seed(monkeypatch, tmp_path):
+    from stet.exam.fresh import harvest
+
+    s2 = load_season("s2")
+    hour = 1_800_000_000 - 1_800_000_000 % 3600
+    seen = {}
+
+    def window(seed, start, end, dest, log=print):
+        seen.update(seed=seed, start=start, end=end)
+        return {"window": [start, end], "documents": 0}, "ab" * 32
+
+    monkeypatch.setattr(harvest, "harvest_window", window)
+    meta, sha = harvest.harvest_hour(s2, hour, tmp_path / "h.jsonl", randomness="AB" * 32)
+    number = s2.beacon_round_at(hour + 3600)  # the first beacon once the hour is over: nobody writing in the hour has it
+    assert s2.beacon_time(number) >= hour + 3600 > s2.beacon_time(number - 1)
+    assert seen == {"seed": harvest.hour_seed(s2, hour, number, "ab" * 32), "start": hour, "end": hour + 3600}
+    assert meta["hour"] == hour and meta["beacon_round"] == number and sha == "ab" * 32
+    assert harvest.hour_seed(s2, hour, number, "ab" * 32) != harvest.hour_seed(s2, hour, number, "cd" * 32)
+    with pytest.raises(ValueError):
+        harvest.harvest_hour(s2, hour + 60, tmp_path / "h.jsonl", randomness="ab" * 32)
+    # an hour is harvested once it has been over for the season's settle time
+    assert harvest.settled(s2, hour + 2 * 3600) == hour and harvest.settled(s2, hour + 2 * 3600 - 1) == hour - 3600
+    # a round's hours: the same for a seed, different for another, never more than there are
+    day = [hour - 3600 * i for i in range(24)]
+    got = harvest.choose_hours(b"seed", day, 3)
+    assert got == sorted(got) and len(got) == 3 and set(got) <= set(day) and got == harvest.choose_hours(b"seed", day[::-1] + day, 3)
+    assert harvest.choose_hours(b"other", day, 3) != got and harvest.choose_hours(b"seed", day[:2], 3) == sorted(day[:2])
+    assert harvest.choose_hours(b"seed", [], 3) == []
+    # the server chooses the same way (server/harvest_test.go has this vector)
+    assert harvest.choose_hours(bytes.fromhex("00" * 32), [3600 * i for i in range(1, 25)], 3) == [3600, 43200, 75600]
 
 
 def test_a_settled_rounds_published_exam_gives_the_open_items_and_checks_against_the_digest():

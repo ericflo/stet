@@ -19,7 +19,7 @@
   "key_bytes": 64,
   "min_letters": 38
  },
- "digest": "e919af465ef6e4e50cb583b3aae32520305dc29bceee74c4a3e11a80ea976d6c",
+ "digest": "3ab42d4952a635ffdd763fb2779c1c15742e5da92d6849ae13900f2d97c0258c",
  "draw_grid_seconds": 600,
  "environment": {
   "also": {
@@ -139,6 +139,11 @@
  "exam": {
   "answer_floor_bytes": 16,
   "clip": 4.0,
+  "fresh": {
+   "hours": 3,
+   "reach_seconds": 93600,
+   "settle_seconds": 3600
+  },
   "groups": {
    "skills": 0.25,
    "writing": 0.75

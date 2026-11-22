@@ -1,7 +1,22 @@
-"""A round's harvest: everything the sources published in the window after its draw."""
+"""The harvest: what the sources published, an hour of the clock at a time.
+
+Season 1 harvested the hour after each draw, and every round then waited two hours for its exam.
+From season 2 the examiner harvests every hour of the clock as soon as it has settled, whether
+or not a round wants it, and posts each harvest's hash to the server at once. A round's exam is
+made at its draw from a few of the day's hours, chosen by the draw. Nobody can aim at them:
+
+- an entry runs in a round only if it was frozen before the earliest hour the round could be
+  given, so no entry has seen any of the text, as before;
+- which hours a round gets follows from its seed, which nobody has before the draw;
+- what a harvest keeps of an hour follows from the hour's own seed, a public random number
+  emitted when the hour ends, so nobody writing in that hour can tell what will be kept;
+- and each harvest's hash is with the server before the draw, so the organisers cannot make a
+  harvest again to suit a round.
+"""
 
 from __future__ import annotations
 
+import hashlib
 import math
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -21,12 +36,12 @@ from . import (
 )
 from .select import SHARES
 
-WINDOW = 3600  # seconds after the draw: the season's window_seconds
-# And then this long before the harvest. Every source but two has all of the window at once.
-# Common Crawl's news files are public 1-2 hours after the window closes (5 at worst), and a
+HOUR = 3600  # a harvest is an hour of the clock: [hour, hour + HOUR), hour a multiple of HOUR
+# An hour is harvested this long after it ends. Every source but two has all of it at once.
+# Common Crawl's news files are public 1-2 hours after the hour closes (5 at worst), and a
 # file that is late leaves the news to those that are not: the harvest keeps PER_SOURCE of the
-# thousands it finds. Hacker News allows edits for two hours, so an item from late in the window
-# can be harvested as first written. Waiting for all of both cost every round two hours more.
+# thousands it finds. Hacker News allows edits for two hours, so an item from late in the hour
+# can be harvested as first written.
 SETTLE = 3600  # the season's settle_seconds
 TARGET = 900  # fresh items a round would like
 ADDED_MIN = 20  # edits a harvest reads at least, per language, for text added to existing articles:
@@ -106,3 +121,39 @@ def harvest_window(seed: bytes, start: int, end: int, dest: Path, langs: list[st
 
 def load(dest: Path):
     return read_snapshot(dest)
+
+
+# --- an hour of the clock ---------------------------------------------------------------------
+
+
+def settled(season, now: float) -> int:
+    """The latest hour that can be harvested at `now`: it ended at least the season's settle ago."""
+    t = int(now) - int(season.raw["exam"]["fresh"]["settle_seconds"]) - HOUR
+    return t - t % HOUR
+
+
+def hour_seed(season, hour: int, beacon_round: int, randomness: str) -> bytes:
+    """What an hour's harvest is chosen with: the public random number emitted as the hour ends."""
+    return hashlib.sha256(f"stet|{season.id}|harvest|{int(hour)}|{int(beacon_round)}|{randomness.lower()}".encode()).digest()
+
+
+def harvest_hour(season, hour: int, dest: Path, randomness: str | None = None, log=print) -> tuple[dict, str]:
+    """Harvest the hour [hour, hour + HOUR) into a snapshot at dest: (metadata, sha256). The
+    random number is the first the beacon emits at or after the hour's end, read from the beacon
+    itself unless it is given."""
+    if hour % HOUR:
+        raise ValueError("a harvest is an hour of the clock")
+    number = season.beacon_round_at(hour + HOUR)
+    if randomness is None:
+        from ...client import beacon_randomness
+
+        randomness = beacon_randomness(season, number)
+    meta, sha = harvest_window(hour_seed(season, hour, number, randomness), hour, hour + HOUR, dest, log=log)
+    return {**meta, "hour": hour, "beacon_round": number}, sha
+
+
+def choose_hours(seed: bytes, hours, k: int) -> list[int]:
+    """The hours a round's exam is made from: of those it could be given, the k whose sha256 with
+    the round's seed is smallest. The server chooses them the same way at the draw."""
+    order = sorted(set(int(h) for h in hours), key=lambda h: hashlib.sha256(seed + f"|fresh/hour|{h}".encode()).digest())
+    return sorted(order[: max(0, k)])

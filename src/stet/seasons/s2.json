@@ -53,8 +53,9 @@
       "sha256": "ac1c27bc3461c8ccd6c5b5a5814072b79bc834f7694ba35da14021493edd08e5"
     },
     "fresh": {
-      "window_seconds": 3600,
       "settle_seconds": 3600,
+      "reach_seconds": 93600,
+      "hours": 3,
       "items": 900,
       "per_corner": 2
     },

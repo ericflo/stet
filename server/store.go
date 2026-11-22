@@ -188,8 +188,13 @@ type Round struct {
 	ExamTable []ItemInfo         `json:"exam_table,omitempty"`
 	Shares    map[string]float64 `json:"languages,omitempty"`
 	Snapshot  string             `json:"snapshot_sha256,omitempty"`
-	Fresh     int                `json:"fresh,omitempty"`
-	BaseItems []float64          `json:"baseline_items,omitempty"`
+	// Hours are the harvests the exam's writing is made from: chosen by the seed at the draw,
+	// from those the server had been told of. HoursLate says it had been told of none, and they
+	// were chosen once the examiner had some.
+	Hours     []RoundHour `json:"exam_hours,omitempty"`
+	HoursLate bool        `json:"exam_hours_late,omitempty"`
+	Fresh     int         `json:"fresh,omitempty"`
+	BaseItems []float64   `json:"baseline_items,omitempty"`
 	// ExamMix is what the exam was made of, kept for good (examMix): its items by capability.
 	ExamMix *ExamMix `json:"exam_mix,omitempty"`
 }
@@ -439,6 +444,7 @@ const (
 var loadScans = []KVScan{
 	{Prefix: "account/"}, {Prefix: "editor/"}, {Prefix: "round/"}, {Prefix: "entry/"}, {Prefix: "claim/"},
 	{Prefix: "result/"}, {Prefix: "baseline/"}, {Prefix: "record/"}, {Prefix: "look/"}, {Prefix: "meta/"}, {Prefix: "farm/"}, {Prefix: "worker/"},
+	{Prefix: "harvest/"},
 	{Prefix: "event/", Reverse: true, Limit: eventsKept},
 }
 
@@ -456,6 +462,7 @@ type State struct {
 	Looks     map[string]*Look
 	Farm      map[string]*FarmBatch   // the organisers' own students, farmed out to their machines
 	Workers   map[string]*WorkerGrant // the machines the organisers rent, by public key
+	Harvests  map[int64]*Harvest      // the hours of writing the examiner has harvested, by hour
 	Events    []*Event                // oldest first; only the most recent are kept in memory
 	Meta      Meta
 	Crawl     *SavedCrawl
@@ -472,7 +479,7 @@ func newState() *State {
 	return &State{
 		Accounts: map[int64]*Account{}, Editors: map[string]*Editor{}, Rounds: map[int]*Round{}, Entries: map[string]*Entry{},
 		Claims: map[int64]*Claim{}, Results: map[int64]*Result{}, Baselines: map[string]*Baseline{}, Looks: map[string]*Look{},
-		Farm: map[string]*FarmBatch{}, Workers: map[string]*WorkerGrant{},
+		Farm: map[string]*FarmBatch{}, Workers: map[string]*WorkerGrant{}, Harvests: map[int64]*Harvest{},
 		Meta:     Meta{NextAccount: 1, NextClaim: 1, NextResult: 1, NextEvent: 1},
 		byPubkey: map[string]*Account{}, byHandle: map[string]*Account{}, inRound: map[int][]*Entry{}, ofEditor: map[string][]*Entry{},
 		resultsOf: map[string][]*Result{}, ownedBy: map[int64][]*Editor{},
@@ -628,6 +635,12 @@ func (s *State) decode(it KVItem) error {
 		}
 		g.check()
 		s.Workers[g.Key] = g
+	case "harvest":
+		h := &Harvest{}
+		if err := into(h); err != nil {
+			return err
+		}
+		s.Harvests[h.Hour] = h
 	case "event":
 		e := &Event{}
 		if err := into(e); err != nil {
@@ -976,6 +989,9 @@ func (st *Store) audit(ctx context.Context) error {
 	}
 	for k, g := range st.s.Workers {
 		mem[workerKey(k)] = g
+	}
+	for hour, h := range st.s.Harvests {
+		mem[harvestKey(hour)] = h
 	}
 	for _, e := range st.s.Events {
 		mem[eventKey(e.ID)] = e
