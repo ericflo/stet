@@ -21,6 +21,7 @@ import re
 import shutil
 import sys
 import time
+import unicodedata
 import urllib.request
 import zlib
 from pathlib import Path
@@ -518,7 +519,7 @@ class Corpus:
 # `key_bytes` bytes, and a rolling hash that finds a key anywhere in a document. The exam
 # uses them to drop fresh items that a round's corpus already holds (exam/decontam.py).
 
-SENTENCE_END = re.compile(r"(?<=[.!?]) ")
+SENTENCE_END = re.compile(r"(?<=[.!?…؟۔।]) |(?<=[。！？｡])\s?")  # the second kind is written with no space after
 _HASH_P = 0x9E3779B97F4A7C15  # odd, so it has an inverse modulo 2**64
 _tables: list[np.ndarray] = []
 
@@ -551,14 +552,29 @@ def window_hashes(b: bytes, k: int) -> np.ndarray:
 
 
 def sentence_starts(text: str, key_bytes: int, min_letters: int):
-    """The keys of a passage: the opening of each sentence long enough to be distinctive.
+    """The keys of a passage: the `key_bytes` bytes from where each of its sentences opens, when
+    they are distinctive enough.
 
     Openings that are mostly digits or punctuation (a run of page numbers, a ruled line) are
-    skipped: they would match thousands of unrelated pages.
+    skipped: they would match thousands of unrelated pages. What counts is the bytes that are
+    letters (and the marks written on them), in any script: a key of 64 bytes is 64 Latin letters,
+    about 32 Cyrillic or Arabic ones, about 21 Chinese or Japanese characters. A sentence ends at
+    its full stop, question mark or exclamation mark, whichever script wrote it, with or without a
+    space after. A key runs on into the sentences that follow, so a short sentence has one too.
     """
-    for s in SENTENCE_END.split(" ".join(text.lower().split())):
-        key = s.encode("utf-8", errors="replace")[:key_bytes]
-        if len(key) == key_bytes and sum(97 <= c <= 122 for c in key) >= min_letters:
+    flat = " ".join(text.lower().split())
+    starts = [0] + [m.end() for m in SENTENCE_END.finditer(flat)]
+    seen = set()
+    for at in starts:
+        raw = flat[at : at + key_bytes].encode("utf-8", errors="replace")  # at least key_bytes bytes, if there are that many
+        if len(raw) < key_bytes or at in seen:
+            continue
+        seen.add(at)
+        key, letters = raw[:key_bytes], 0
+        for ch in key.decode("utf-8", errors="ignore"):  # a character the cut splits is not counted
+            if unicodedata.category(ch)[0] in "LM":
+                letters += len(ch.encode("utf-8"))
+        if letters >= min_letters:
             yield key
 
 

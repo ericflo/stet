@@ -1,14 +1,14 @@
 {
-  "id": "s1",
-  "title": "Season 1",
-  "rules_version": 4,
+  "id": "s2",
+  "title": "Season 2",
+  "rules_version": 5,
   "tokenizer": {
     "file": "s1-vocab.tiktoken",
     "sha256": "7df001af5a4b8eef7f371de7a47427afe95fdc285fa42703fe220e259928e19f",
     "vocab_size": 8192,
     "eot": 8191
   },
-  "ink_frac": 0.001,
+  "ink_frac": 0.0001,
   "min_copy_bytes": 64,
   "max_doc_bytes": 262144,
   "pools": {
@@ -38,12 +38,15 @@
     }
   },
   "exam": {
-    "about": "Seven capabilities, each counting the same, measured as the likelihood of fresh human writing published after the draw and of items generated from the round's seed. See docs/research/exam-first-principles.md.",
-    "generator_version": 7,
+    "about": "Three quarters fresh human writing published after the draw, one quarter generated skills. Only the generated families that pass the season's tests count; the rest are sat, published and count for nothing. See docs/research/exam-first-principles.md.",
+    "generator_version": 8,
     "per_corner": 2,
     "more": {
       "agent": 4,
-      "context": 2
+      "context": 2,
+      "transform": 3,
+      "logic": 2,
+      "grammar": 3
     },
     "facts": {
       "file": "facts-s1.jsonl.zst",
@@ -55,19 +58,89 @@
       "items": 900,
       "per_corner": 2
     },
+    "answer_floor_bytes": 16,
     "aggregate": {
       "clip": 4.0,
-      "trim": 0.1
+      "trim": 0.1,
+      "small": 8
     },
-    "pillars": [
-      "knowledge",
-      "reading",
-      "reasoning",
-      "code",
-      "agents",
-      "writing",
-      "conversation"
-    ]
+    "groups": {
+      "writing": 0.75,
+      "skills": 0.25
+    },
+    "pillars": {
+      "reference": {
+        "group": "writing",
+        "parts": [
+          "reference"
+        ],
+        "about": "new encyclopedia articles, and what was added to old ones"
+      },
+      "news": {
+        "group": "writing",
+        "parts": [
+          "news"
+        ],
+        "about": "news published after the draw"
+      },
+      "technical": {
+        "group": "writing",
+        "parts": [
+          "technical"
+        ],
+        "about": "technical writing and new code"
+      },
+      "science": {
+        "group": "writing",
+        "parts": [
+          "science"
+        ],
+        "about": "science and mathematics, as people write and ask about them"
+      },
+      "conversation": {
+        "group": "writing",
+        "parts": [
+          "discussion",
+          "social"
+        ],
+        "about": "replies in discussions, and what people post"
+      },
+      "agents": {
+        "group": "skills",
+        "parts": [
+          "agent"
+        ],
+        "about": "an agent at work with a shell and tools"
+      },
+      "reading": {
+        "group": "skills",
+        "parts": [
+          "context"
+        ],
+        "about": "reading the context and using what it says"
+      },
+      "transformation": {
+        "group": "skills",
+        "parts": [
+          "transform"
+        ],
+        "about": "turning one format into another"
+      },
+      "logic": {
+        "group": "skills",
+        "parts": [
+          "logic"
+        ],
+        "about": "following an argument to its end"
+      },
+      "grammar": {
+        "group": "skills",
+        "parts": [
+          "grammar"
+        ],
+        "about": "telling a well-formed sentence from a broken one"
+      }
+    }
   },
   "scales": {
     "nano": {
@@ -297,18 +370,18 @@
     "alpha": 0.05,
     "margin": {
       "nano": 0.03,
-      "micro": 0.02,
-      "standard": 0.01,
-      "large": 0.01
+      "micro": 0.015,
+      "standard": 0.005,
+      "large": 0.005
     }
   },
   "reference_curves": {},
   "noise": {
     "micro": {
-      "gain_sd": 0.025
+      "gain_sd": 0.013
     },
     "standard": {
-      "gain_sd": 0.013
+      "gain_sd": 0.005
     }
   },
   "tolerance": {
@@ -318,19 +391,19 @@
       "run": 0.15
     },
     "micro": {
-      "grade": 0.1,
-      "baseline": 0.15,
-      "run": 0.12
+      "grade": 0.06,
+      "baseline": 0.08,
+      "run": 0.08
     },
     "standard": {
-      "grade": 0.06,
-      "baseline": 0.1,
-      "run": 0.09
+      "grade": 0.025,
+      "baseline": 0.04,
+      "run": 0.04
     },
     "large": {
-      "grade": 0.04,
-      "baseline": 0.06,
-      "run": 0.06
+      "grade": 0.02,
+      "baseline": 0.03,
+      "run": 0.03
     }
   }
 }

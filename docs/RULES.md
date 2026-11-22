@@ -345,9 +345,9 @@ are graded by **verifiers**: anyone who runs `stet verify`.
   from the first round a second established verifier is around for.
 - **Each script is graded by someone other than the verifier who wrote it.** Its gain is
   the median of the established verifiers' grades, each against the round's unedited
-  student. Two honest machines agree to within a small tolerance *(provisional: 0.06 bits
+  student. Two honest machines agree to within a small tolerance *(provisional: 0.025 bits
   per byte)*. A grader's own measurement of the unedited student must agree with the
-  others' to within 0.1 bits per byte, or its grade is turned away and listed with the
+  others' to within 0.04 bits per byte, or its grade is turned away and listed with the
   round. When two established grades of a script
   differ by more than that, a third is taken. When both runs write the same script, byte
   for byte, it is nobody's own and either runner may grade it: neither could have made
@@ -359,7 +359,7 @@ are graded by **verifiers**: anyone who runs `stet verify`.
   would hold the round back for as long as it trained, and for its first two minutes they
   go to the fastest machines that are free. The round settles as soon as those under way
   are in.
-- **The entry's gain is the mean of its two runs.** When they differ by more than 0.09
+- **The entry's gain is the mean of its two runs.** When they differ by more than 0.04
   bits per byte *(provisional)*, or one failed and the other did not, a third verifier runs the
   curator and the median of the three is the score.
 - **A round does not wait for people who are not there.** If nobody who is around (at

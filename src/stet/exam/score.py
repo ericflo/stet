@@ -6,6 +6,16 @@
 
 Nothing is decided by picking a choice: at the official scale a student's choices are near
 chance, while the likelihood of the right answer moves a long way.
+
+The bytes are never taken to be fewer than the season's floor (16 in season 2). An answer of one
+or two tokens is one or two draws of the student's luck; put over its three or four bytes it
+would swing as far as a whole sentence does, and the exam's short answers were most of what
+differed between two trainings of one script.
+
+All of an item is scored, whatever its length. A passage longer than the student's window is
+read a window at a time. So is an answer: its context is cut from the left to leave it room
+(never to less than half a window, when there is that much), and what does not fit is read on in
+further windows.
 """
 
 from __future__ import annotations
@@ -19,7 +29,7 @@ LN2 = math.log(2)
 
 def sequences(items: list[Item], enc, eot: int, ctx: int) -> tuple[list[tuple[list[int], int]], list[tuple[int, int]]]:
     """Token sequences to score, each (ids, first scored position), and for each item the slice
-    of sequences that belong to it. A sequence longer than the window is cut from the left."""
+    of sequences that belong to it. Every token of a passage and of an answer is scored once."""
     seqs: list[tuple[list[int], int]] = []
     spans: list[tuple[int, int]] = []
     for it in items:
@@ -30,11 +40,12 @@ def sequences(items: list[Item], enc, eot: int, ctx: int) -> tuple[list[tuple[li
                 seqs.append((ids[i : i + ctx + 1], 1))
         elif it.kind == "answer":
             a, b = [eot] + enc.encode_ordinary(it.ctx), enc.encode_ordinary(it.cont)
-            ids, first = a + b, len(a)
-            if len(ids) > ctx + 1:
-                cut = len(ids) - (ctx + 1)
-                ids, first = ids[cut:], max(1, first - cut)
-            seqs.append((ids, first))
+            room = ctx + 1
+            keep = len(a) if len(a) + len(b) <= room else min(len(a), max(room - len(b), room // 2))
+            head = b[: room - keep]
+            seqs.append((a[len(a) - keep :] + head, keep))
+            for i in range(len(head) - 1, len(b) - 1, ctx):  # the rest of an answer too long for one window
+                seqs.append((b[i : i + ctx + 1], 1))
         else:
             for s in (it.good, it.bad):
                 seqs.append(([eot] + enc.encode_ordinary(s)[:ctx], 1))
@@ -74,16 +85,18 @@ def nll(model, seqs: list[tuple[list[int], int]], device, batch: int = 64) -> li
     return out
 
 
-def sit(model, items: list[Item], enc, eot: int, ctx: int, device, batch: int = 64) -> list[float]:
-    """The student's score on every item, in order. Higher is better."""
+def sit(model, items: list[Item], enc, eot: int, ctx: int, device, batch: int = 64, floor: int = 1) -> list[float]:
+    """The student's score on every item, in order. Higher is better. `floor` is the season's
+    answer_floor_bytes: the fewest bytes an item's bits are put over."""
     seqs, spans = sequences(items, enc, eot, ctx)
     losses = nll(model, seqs, device, batch)
+    floor = max(1, floor)
     scores = []
     for it, (a, b) in zip(items, spans, strict=True):
         if it.kind == "passage":
-            scores.append(-sum(losses[a:b]) / LN2 / max(1, len(it.text.encode())))
+            scores.append(-sum(losses[a:b]) / LN2 / max(floor, len(it.text.encode())))
         elif it.kind == "answer":
-            scores.append(-losses[a] / LN2 / max(1, len(it.cont.encode())))
+            scores.append(-sum(losses[a:b]) / LN2 / max(floor, len(it.cont.encode())))
         else:
-            scores.append((losses[a + 1] - losses[a]) / LN2 / max(1, len(it.good.encode())))
+            scores.append((losses[a + 1] - losses[a]) / LN2 / max(floor, len(it.good.encode())))
     return scores

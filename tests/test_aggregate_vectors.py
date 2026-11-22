@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 def _same(table_score: dict, full: dict) -> None:
     assert table_score["score"] == full["score"]
     assert {p: round(v, 5) for p, v in table_score["pillars"].items()} == {p: v["score"] for p, v in full["pillars"].items()}
+    assert {p: round(v, 5) for p, v in table_score["watch"].items()} == {p: v["score"] for p, v in full["watch"].items()}
 
 
 def test_the_score_from_the_table_is_round_scores():

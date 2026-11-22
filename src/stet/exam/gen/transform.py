@@ -41,7 +41,7 @@ def make(rng: Rng, corner: str) -> Item:
         if style == "bold":
             md, html = f"The **{words[0]}** is here.", f"<p>The <strong>{words[0]}</strong> is here.</p>"
         elif style == "italic":
-            md, html = f"An *{words[0]}* and a {words[1]}.", f"<p>An <em>{words[0]}</em> and a {words[1]}.</p>"
+            md, html = f"One *{words[0]}* and one {words[1]}.", f"<p>One <em>{words[0]}</em> and one {words[1]}.</p>"
         elif style == "heading":
             md, html = f"## {words[0].title()} {words[1]}", f"<h2>{words[0].title()} {words[1]}</h2>"
         elif style == "list":

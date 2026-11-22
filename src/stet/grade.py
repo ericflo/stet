@@ -79,7 +79,7 @@ def sit_exam(trained: Trained, rnd: Round, scale: Scale, exam) -> dict:
     if trained.trained:
         try:
             t1 = time.time()
-            scores = sit(trained.model, exam, trained.enc, rnd.season.eot, scale.ctx, trained.device)
+            scores = sit(trained.model, exam, trained.enc, rnd.season.eot, scale.ctx, trained.device, floor=rnd.season.answer_floor_bytes)
             result["exam"] = {"items": len(exam), "item_scores": [round(x, 6) for x in scores],
                               "mean": round(sum(scores) / max(1, len(scores)), 6), "seconds": round(time.time() - t1, 2)}
             result["valid"] = True

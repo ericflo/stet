@@ -27,10 +27,10 @@ from . import (
 )
 
 FAMILIES = [arith, word, units, algebra, programs, algo, logic, structured, shell, grammar, transform, multi, context, knowledge]
-VERSION = 7  # bump when any generator changes what a seed produces
-# Families that are a pillar (or most of one) on few corners make more items from each, so that
-# every pillar rests on enough of them.
-MORE = {"agent": 4, "context": 2}
+VERSION = 8  # bump when any generator changes what a seed produces
+# The families that count in the season's score make more items from each corner, so that each
+# rests on enough of them. The rest are watched: one round's worth is plenty.
+MORE = {"agent": 4, "context": 2, "transform": 3, "logic": 2, "grammar": 3}
 
 
 def all_corners() -> list[str]:

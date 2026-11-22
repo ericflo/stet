@@ -5,7 +5,7 @@ package main
 // and posts them here (apiExamPost). Grades start then. A grader sits every item
 // and reports each one's score, and its own baseline's; the round's baseline is the mean, item
 // by item, of the established graders' baselines; and a grade's score is the exam's
-// aggregate (ScoreItems, a port of src/stet/exam/aggregate.py) of its item scores less the
+// aggregate (ExamPlan.ScoreItems, a port of src/stet/exam/aggregate.py) of its item scores less the
 // round's baseline. From there on the judge works as it always has, on that score.
 //
 // What a round holds of this (the exam's table, the baseline item by item, every grade's item
@@ -143,15 +143,17 @@ func (a *App) postExam(ctx context.Context, idx int, p *ExamPost) (bool, error) 
 	return err == nil, err
 }
 
-// checkTable refuses a table that names a pillar the season does not have, or a language share
-// that is not a number.
+// watchPrefix names a watched part among a grade's pillars ("watch:arith"): scored and
+// published, and no part of the score.
+const watchPrefix = watchPillar + ":"
+
+// checkTable refuses a table that puts a part under a pillar the season does not put it under
+// (a part the season does not name is watched, and nothing else), or a language share that is
+// not a number. The weights are the season's; the examiner only says what each item is.
 func (a *App) checkTable(table []ItemInfo, shares map[string]float64) error {
-	pillars := map[string]bool{}
-	for _, p := range a.season.ExamSources {
-		pillars[p] = true
-	}
 	for i, it := range table {
-		if !pillars[it.Pillar] || it.Part == "" || it.Lang == "" || it.Stratum == "" || len(it.Part)+len(it.Lang)+len(it.Stratum) > 200 {
+		if it.Pillar == "" || it.Pillar != a.season.Exam.pillarOf(it.Part) || it.Part == "" || it.Lang == "" || it.Stratum == "" ||
+			len(it.Part)+len(it.Lang)+len(it.Stratum) > 200 {
 			return fail(400, "item %d of the table is not one the season scores", i)
 		}
 	}
@@ -288,7 +290,7 @@ func (a *App) baselineDev(s *State, rd *Round, acctID int64, items []float64) (d
 	if len(rows) == 0 || len(items) != len(rd.ExamTable) {
 		return 0, false
 	}
-	dev, _, err := ScoreItems(rd.ExamTable, diffItems(items, meanItems(rows)), rd.Shares)
+	dev, _, _, err := a.season.Exam.ScoreItems(rd.ExamTable, diffItems(items, meanItems(rows)), rd.Shares)
 	return dev, err == nil
 }
 
@@ -298,7 +300,7 @@ func (a *App) baselineAgrees(rd *Round, b *Baseline) bool {
 	if b == nil || len(rd.BaseItems) == 0 || len(b.Items) != len(rd.BaseItems) || b.ExamSHA != rd.ExamSHA {
 		return false
 	}
-	dev, _, err := ScoreItems(rd.ExamTable, diffItems(b.Items, rd.BaseItems), rd.Shares)
+	dev, _, _, err := a.season.Exam.ScoreItems(rd.ExamTable, diffItems(b.Items, rd.BaseItems), rd.Shares)
 	return err == nil && within(dev, a.tolerance().Baseline)
 }
 
@@ -334,13 +336,17 @@ func (a *App) refreshScores(tx *Tx, rd *Round) {
 			if !r.Valid || len(r.Items) != len(base) {
 				continue
 			}
-			score, pillars, err := ScoreItems(rd.ExamTable, diffItems(r.Items, base), rd.Shares)
+			score, pillars, watch, err := a.season.Exam.ScoreItems(rd.ExamTable, diffItems(r.Items, base), rd.Shares)
 			if err != nil {
 				continue
 			}
 			score = places5(score)
 			for k, v := range pillars {
 				pillars[k] = places5(v)
+			}
+			// What is watched and not counted is kept beside the pillars, under its own names.
+			for k, v := range watch {
+				pillars[watchPrefix+k] = places5(v)
 			}
 			r.Score, r.BySource = &score, pillars
 			r.Loss = places5(loss - score)

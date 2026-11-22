@@ -68,7 +68,7 @@ stet run --time-limit 300     # with a shorter time limit than the scale's
 stet run -v                   # show the curator's output live
 stet score script.jsonl       # grade a script you already have, without running the curator
 stet rounds                   # past official rounds; replay one with --round <id>
-stet score stet/tidy --round s1-o00001    # re-grade a published entry of a settled official round
+stet score stet/tidy --round s2-o00001    # re-grade a published entry of a settled official round
                                           # (stet/tidy@v2 when a round holds two versions)
 stet clean                    # delete downloaded rounds and model files (fetched again when needed;
                               # unused ones are deleted after 14 days anyway)

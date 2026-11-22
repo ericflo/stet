@@ -107,7 +107,7 @@ def need_torch():
 
 
 def resolve_round(args, offset: int = 0):
-    """--round accepts 3 (practice round 3), g3 (gym round 3), or a full id like s1-o00012."""
+    """--round accepts 3 (practice round 3), g3 (gym round 3), or a full id like s2-o00012."""
     import re
 
     from .spec import load_season, parse_round_id, practice_round
@@ -160,7 +160,7 @@ def report(out: Out, result: dict, base: dict | None, season) -> None:
     out.line("exam", f"{e['items']:,} items · mean {e['mean']:.4f} bits per byte" + (f"   baseline {base['exam']['mean']:.4f}" if base else ""))
     if base and "gain" in result:
         out.line("", "          " + " · ".join(f"{k} {v:+.3f}" for k, v in (result.get("pillars") or {}).items()))
-        text = out.bold(f"{result['gain']:+.4f}") + " bits per byte, the mean of the seven above"
+        text = out.bold(f"{result['gain']:+.4f}") + " bits per byte: writing three quarters, skills one, of those above"
         m = multiplier(season, result["round"]["kind"], result["scale"], result["gain"])
         if m:
             text += f"   →   {out.bold(format_multiplier(m))} data efficiency"
@@ -447,7 +447,7 @@ def cmd_examine(args):
     if args.follow:
         return _examine_follow(args)
     if not args.round:
-        die("name a round (--round s1-o00003), or --follow")
+        die("name a round (--round s2-o00003), or --follow")
     _examine_one(args, args.round)
 
 
@@ -757,7 +757,7 @@ def cmd_agents(args):
 
 
 def add_round_args(p, default_round="0"):
-    p.add_argument("--round", default=default_round, help="3 = practice round 3, g3 = gym round 3, or a round id like s1-o00012 (default: 0)")
+    p.add_argument("--round", default=default_round, help="3 = practice round 3, g3 = gym round 3, or a round id like s2-o00012 (default: 0)")
     p.add_argument("--scale", default=None, help="nano, micro or standard (default: nano)")
     p.add_argument("--season", default=CURRENT_SEASON, help=argparse.SUPPRESS)
     p.add_argument("--device", default=None, help="torch device (default: best available)")

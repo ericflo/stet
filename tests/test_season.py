@@ -16,10 +16,12 @@ def test_the_season_is_the_exam_at_the_standard_scale():
     from stet.spec import CURRENT_SEASON
 
     s1 = load_season()
-    assert s1.id == CURRENT_SEASON == "s1" and s1.official_scale == "standard" and "heldout_exam" not in s1.raw
-    assert s1.exam_sources == ["knowledge", "reading", "reasoning", "code", "agents", "writing", "conversation"]
+    assert s1.id == CURRENT_SEASON == "s2" and s1.official_scale == "standard" and "heldout_exam" not in s1.raw
+    assert s1.exam_sources == ["reference", "news", "technical", "science", "conversation", "agents", "reading", "transformation", "logic", "grammar"]
+    assert s1.raw["exam"]["groups"] == {"writing": 0.75, "skills": 0.25} and s1.answer_floor_bytes == 16
+    assert s1.ink_tokens(s1.scale("standard")) == 16_000
     assert s1.raw["exam"]["generator_version"] == gen.VERSION and s1.raw["exam"]["more"] == gen.MORE
-    assert len(s1.digest) == 64 and s1.digest == load_season("s1").digest
+    assert len(s1.digest) == 64 and s1.digest == load_season("s2").digest
     # the tokenizer and the facts its knowledge items ask are what the season says
     import hashlib
     from importlib import resources
@@ -31,7 +33,7 @@ def test_the_season_is_the_exam_at_the_standard_scale():
 
 
 def test_a_practice_rounds_exam_is_generated_from_its_seed():
-    s1 = load_season("s1")
+    s1 = load_season("s2")
     rnd = practice_round(s1, 3)
     items = data.round_exam(rnd, s1.scale("micro"))
     assert isinstance(items, list) and items == gen.generate(rnd.seed, per_corner=2)
@@ -48,7 +50,7 @@ def _official(s1, exam_digest=""):
 
 
 def test_an_official_rounds_exam_is_the_one_posted_and_nothing_else():
-    s1 = load_season("s1")
+    s1 = load_season("s2")
     with pytest.raises(data.ExamNotReady):
         data.round_exam(_official(s1), s1.scale("standard"))  # not posted yet
     items = gen.generate(b"posted", per_corner=1)[:20]
@@ -70,7 +72,7 @@ def test_an_official_rounds_exam_is_the_one_posted_and_nothing_else():
 def test_a_round_carries_its_exams_digest_through_its_description():
     from stet.spec import round_from_description
 
-    s1 = load_season("s1")
+    s1 = load_season("s2")
     rnd = _official(s1, "ef" * 32)
     again = round_from_description(s1, rnd.describe())
     assert again == rnd and again.exam_digest == "ef" * 32
@@ -93,8 +95,8 @@ def test_a_grade_reports_every_items_score(monkeypatch):
     monkeypatch.setattr(tok, "load_encoding", lambda season: None)
     import stet.exam.score as score
 
-    monkeypatch.setattr(score, "sit", lambda model, its, enc, eot, ctx, device: [-1.0, -2.0, -3.0])
-    s1 = load_season("s1")
+    monkeypatch.setattr(score, "sit", lambda model, its, enc, eot, ctx, device, floor=1: [-1.0, -2.0, -3.0])
+    s1 = load_season("s2")
     rnd = practice_round(s1, 0)
     corpus = types.SimpleNamespace(meta={"sha256": "c0"})
     result = grading.grade(rnd, s1.scale("micro"), corpus, items, "script.jsonl", device=types.SimpleNamespace(type="cpu"))
@@ -115,7 +117,7 @@ def test_the_examiner_makes_a_rounds_exam_from_its_harvest_and_seed(monkeypatch,
     from stet.exam.farm import unpack_items
     from stet.exam.fresh import Doc, write_snapshot
 
-    s1 = load_season("s1")
+    s1 = load_season("s2")
     rnd = _official(s1)
     docs = [Doc(source="wikipedia", id=f"en:{i}", url=f"https://example.org/{i}", lang="en", license="CC BY-SA 4.0",
                 published=1_800_000_000 + i, title=f"Title {i}", text=f"Article number {i} says something new. " * 20, topic=f"Q{i}")
@@ -139,7 +141,7 @@ def test_the_examiner_makes_a_rounds_exam_from_its_harvest_and_seed(monkeypatch,
 def test_a_settled_rounds_published_exam_gives_the_open_items_and_checks_against_the_digest():
     from stet.exam.examine import public_items, read_public
 
-    s1 = load_season("s1")
+    s1 = load_season("s2")
     generated = gen.generate(b"pub", per_corner=1)[:5]
     wiki = Item(kind="passage", corner="fresh/wikipedia/en/Q5/text", fmt="prose", lang="en", source="wikipedia:en:1", text="An article.")
     news = Item(kind="passage", corner="fresh/ccnews/en/x/text", fmt="prose", lang="en", source="ccnews:<urn:1>", text="A news story.")

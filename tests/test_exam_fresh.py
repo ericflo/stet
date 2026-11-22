@@ -126,7 +126,34 @@ def test_items_the_corpus_already_holds_are_found(tmp_path):
                text="An entirely different passage that nobody has published before this very moment, about otters.")
     answer = Item(kind="answer", corner="fresh/y/en/-/answer", fmt="dialogue", lang="en", source="t",
                   ctx=quoted + " Why?", cont=" Nothing in the corpus says this, not even close to it, as far as anyone knows.")
-    assert seen([copied, new, answer], corpus, load_season("s1")) == {0}  # an answer is checked on its answer, not its question
+    assert seen([copied, new, answer], corpus, load_season("s2")) == {0}  # an answer is checked on its answer, not its question
+
+
+def test_copied_text_is_found_in_every_script(tmp_path):
+    """Season 1 counted the letters a to z, so a passage in Russian, Japanese, Chinese, Arabic or Hindi gave no keys at all."""
+    from conftest import make_corpus
+
+    from stet.data import sentence_starts
+    from stet.exam.decontam import seen
+    from stet.exam.items import Item
+    from stet.spec import load_season
+
+    quotes = {
+        "ru": "Городской совет утвердил строительство новой плотины в нижней части города после трёх дождливых зим подряд.",
+        "ja": "市議会は三年続いた雨の多い冬を受けて、下町に新しい防潮堤を建設する計画を承認した。工事は来年の春に始まる。",
+        "zh": "在连续三个多雨的冬季之后，市议会批准了在下城区修建一座新的防洪堤的计划。工程将于明年春天开始。",
+        "ar": "وافق مجلس المدينة على بناء حاجز جديد للفيضانات في الجزء السفلي من المدينة بعد ثلاثة فصول شتاء ممطرة متتالية.",
+        "hi": "नगर परिषद ने लगातार तीन बरसाती सर्दियों के बाद निचले शहर में एक नए बाढ़ अवरोध के निर्माण को मंजूरी दी।",
+    }
+    corpus = make_corpus(tmp_path / "c", [f"Menu | Home\n{q} More text." for q in quotes.values()] + ["Nothing to see."])
+    copied = [Item(kind="passage", corner=f"fresh/x/{lang}/-/added", fmt="prose", lang=lang, source="t", text=q) for lang, q in quotes.items()]
+    fresh = Item(kind="passage", corner="fresh/x/ja/-/added", fmt="prose", lang="ja", source="t",
+                 text="誰もまだ公開したことのない、まったく別の文章である。川獺についての話で、どこにも書かれていない内容だ。")
+    assert seen(copied + [fresh], corpus, load_season("s2")) == set(range(len(quotes)))
+    # a short sentence has a key too: the key runs on into what follows it
+    assert len(list(sentence_starts("短い文。" + quotes["ja"], 64, 38))) >= 2
+    # and digits, rules and punctuation are still no key at all
+    assert not list(sentence_starts("1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30. ---------- ==========", 64, 38))
 
 
 def test_the_harvest_reads_its_sources_at_once(monkeypatch, tmp_path):

@@ -18,14 +18,14 @@ from dataclasses import dataclass, field
 from functools import cache
 from importlib import resources
 
-HARNESS_VERSION = "0.4.6"
+HARNESS_VERSION = "0.5.0"
 # The oldest stet whose grades are this one's: the server refuses jobs and results from older
 # ones, and they upgrade. Moved up only when what a grade measures changes, so that a release
 # that changes nothing in a grade does not throw away work under way.
-GRADES_SINCE = "0.4.2"
+GRADES_SINCE = "0.5.0"
 # The season the competition is in: what every command means when it names none. Changing it is
 # the switch from one season to the next (see docs/OPERATING.md).
-CURRENT_SEASON = "s1"
+CURRENT_SEASON = "s2"
 
 
 @dataclass(frozen=True)
@@ -107,8 +107,14 @@ class Season:
 
     @property
     def exam_sources(self) -> list[str]:
-        """What the exam reports on: its pillars."""
+        """What the exam reports on: its pillars, in the order they are shown."""
         return list(self.raw["exam"]["pillars"])
+
+    @property
+    def answer_floor_bytes(self) -> int:
+        """The shortest an answer is taken to be when its bits are put over its bytes: a one-word
+        answer does not count as much as a sentence."""
+        return int(self.raw["exam"].get("answer_floor_bytes", 1))
 
     @property
     def official_scale(self) -> str:
@@ -310,5 +316,5 @@ def round_from_description(season: Season, d: dict) -> Round:
 def parse_round_id(round_id: str) -> tuple[str, str, int]:
     m = ROUND_ID_RE.fullmatch(round_id)
     if not m:
-        raise ValueError(f"{round_id[:40]!r} is not a round id (they look like s1-o00012)")
+        raise ValueError(f"{round_id[:40]!r} is not a round id (they look like s2-o00012)")
     return m.group(1), {"p": "practice", "g": "gym", "o": "official"}[m.group(2)], int(m.group(3))

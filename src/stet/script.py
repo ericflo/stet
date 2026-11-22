@@ -20,6 +20,11 @@ Why short copies are ink: with enough tiny copies you can spell out any text you
 the corpus's letters and words, which would make the ink limit meaningless. (A short
 document kept whole, on its own, is not ink: nothing can be spelled across documents.)
 
+Deleting lines is never ink. An output document made only of whole lines of one page, each
+with its line break, in the page's own order, is that page with lines taken out: every piece
+is a copy, however short. Nothing can be spelled that way, because a line cannot be cut, moved
+or joined to another page's.
+
 The script is consumed until the training budget is used. Anything after that is ignored.
 A script that is shorter than the budget is repeated from the top, so listing less means
 training on it more often.
@@ -195,6 +200,22 @@ class Built:
     spliced: bool  # more than one piece: joins can form text that is in no source document
 
 
+def _whole_lines(corpus: Corpus, resolved: list) -> bool:
+    """Whether the pieces are whole lines of one page, each with its line break, in the page's
+    own order: the page with lines taken out, and nothing else."""
+    if not resolved or any(isinstance(seg, str) for seg in resolved):
+        return False
+    d = resolved[0][0]
+    lo, at = int(corpus.idx[d]), 0
+    for dd, s, e, size in resolved:
+        if dd != d or s < at:
+            return False
+        if (s and corpus.bin[lo + s - 1] != 10) or (e != size and corpus.bin[lo + e - 1] != 10):
+            return False
+        at = e
+    return True
+
+
 def build_doc(corpus: Corpus, line_no: int, obj, min_copy: int, max_segments: int = 20000, max_out: int = 1 << 20) -> Built:
     """Resolve one script line against the corpus."""
     n = len(corpus)
@@ -231,6 +252,7 @@ def build_doc(corpus: Corpus, line_no: int, obj, min_copy: int, max_segments: in
         else:
             resolved.append([d, s, e, size])
     total = 0
+    lines = _whole_lines(corpus, resolved)
     for seg in resolved:
         if isinstance(seg, str):
             b = seg.encode("utf-8", errors="replace")
@@ -242,8 +264,8 @@ def build_doc(corpus: Corpus, line_no: int, obj, min_copy: int, max_segments: in
             b = corpus.bin[lo + s : lo + e]
             parts.append(b)
             docs.append(d)
-            if len(b) >= min_copy or (len(b) == size and len(resolved) == 1):
-                copied += len(b)  # long enough to be a quotation, or a short document kept as it is
+            if len(b) >= min_copy or lines or (len(b) == size and len(resolved) == 1):
+                copied += len(b)  # long enough to be a quotation, whole lines, or a short document kept as it is
             else:
                 ink.append(b)
         total += len(b)

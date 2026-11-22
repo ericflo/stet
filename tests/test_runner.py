@@ -10,7 +10,7 @@ from stet.runner import bwrap_available, collect_script, run_editor, scope_avail
 from stet.script import ScriptError
 from stet.spec import load_season, practice_round
 
-SEASON = load_season("s1")
+SEASON = load_season("s2")
 SCALE = dataclasses.replace(SEASON.scale("nano"), train_tokens=512, ctx=64, batch_size=4)
 RND = practice_round(SEASON, 0)
 

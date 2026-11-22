@@ -23,11 +23,11 @@ def test_prf_is_stable():
 
 
 def test_practice_rounds_are_web_text_from_a_pinned_crawl():
-    season = load_season("s1")
+    season = load_season("s2")
     scale = season.scale("micro")
     a, b = practice_round(season, 0), practice_round(season, 1)
     cfg = a.pool_cfg
-    assert a.id == "s1-p00000" and cfg["kind"] == "cc-wet" and cfg["crawl"] == "CC-MAIN-2026-43"
+    assert a.id == "s2-p00000" and cfg["kind"] == "cc-wet" and cfg["crawl"] == "CC-MAIN-2026-43"
     n = cfg["n_shards"]
     assert a.shard_indices(scale, n) == practice_round(season, 0).shard_indices(scale, n)
     assert a.shard_indices(scale, n) != b.shard_indices(scale, n)
@@ -35,27 +35,27 @@ def test_practice_rounds_are_web_text_from_a_pinned_crawl():
 
 
 def test_gym_rounds_are_a_different_dataset():
-    season = load_season("s1")
+    season = load_season("s2")
     g = practice_round(season, 0, "gym")
-    assert g.id == "s1-g00000" and g.pool_cfg["kind"] == "dclm" and len(season.pool("gym")) == 1024
+    assert g.id == "s2-g00000" and g.pool_cfg["kind"] == "dclm" and len(season.pool("gym")) == 1024
     assert g.seed != practice_round(season, 0).seed
-    assert parse_round_id("s1-g00012") == ("s1", "gym", 12)
+    assert parse_round_id("s2-g00012") == ("s2", "gym", 12)
     assert round_from_description(season, g.describe()).seed == g.seed
 
 
 def test_official_rounds_depend_on_the_beacon_and_the_crawl():
-    season = load_season("s1")
+    season = load_season("s2")
     x = official_round(season, 3, {"round": 100, "randomness": "ab" * 32}, CRAWL)
     y = official_round(season, 3, {"round": 100, "randomness": "cd" * 32}, CRAWL)
     z = official_round(season, 3, {"round": 100, "randomness": "ab" * 32}, {**CRAWL, "crawl": "CC-MAIN-2026-39"})
-    assert len({x.seed, y.seed, z.seed}) == 3 and x.id == "s1-o00003"
+    assert len({x.seed, y.seed, z.seed}) == 3 and x.id == "s2-o00003"
     assert x.pool_cfg["kind"] == "cc-wet" and x.pool_cfg["crawl"] == "CC-MAIN-2026-99"
     scale = season.scale("micro")
     assert len(x.shard_indices(scale, CRAWL["n_shards"])) == scale.corpus_units * x.pool_cfg["shards_per_unit"]
 
 
 def test_a_round_description_cannot_lie_about_its_seed():
-    season = load_season("s1")
+    season = load_season("s2")
     x = official_round(season, 3, {"round": 100, "randomness": "ab" * 32}, CRAWL)
     d = x.describe()
     assert round_from_description(season, d).seed == x.seed
@@ -65,7 +65,7 @@ def test_a_round_description_cannot_lie_about_its_seed():
 
 
 def test_the_corpus_order_is_a_seeded_shuffle():
-    season = load_season("s1")
+    season = load_season("s2")
     a = practice_round(season, 0)
     order = a.doc_order(1000)
     assert sorted(order) == list(range(1000)) and order != list(range(1000))
@@ -78,7 +78,7 @@ def test_the_corpus_order_is_a_seeded_shuffle():
 
 def test_an_official_round_is_built_only_from_values_of_the_expected_shape():
     # A crawl id from the server goes into the seed, a URL and a file name in the cache.
-    season = load_season("s1")
+    season = load_season("s2")
     beacon = {"round": 100, "randomness": "ab" * 32}
     for crawl in ("../../../etc/passwd", "CC-MAIN-2026-99/../x", "CC-MAIN-2026-99\n", "CC-MAIN-2026-099", "cc-main-2026-99", ""):
         with pytest.raises(ValueError):
@@ -93,7 +93,7 @@ def test_an_official_round_is_built_only_from_values_of_the_expected_shape():
 
 
 def test_a_round_id_is_a_round_id_and_nothing_else():
-    assert parse_round_id("s1-o00012") == ("s1", "official", 12) and parse_round_id("s1-p3") == ("s1", "practice", 3) and parse_round_id("s1-g00000")[1] == "gym"
-    for junk in ("s1-o00012/../../x", "../s1-o00012", "s1-x00012", "s1-o", "S1-o00012", "s1-o00012\n", "s1-o-1", "s1", ""):
+    assert parse_round_id("s2-o00012") == ("s2", "official", 12) and parse_round_id("s2-p3") == ("s2", "practice", 3) and parse_round_id("s2-g00000")[1] == "gym"
+    for junk in ("s2-o00012/../../x", "../s2-o00012", "s1-x00012", "s1-o", "S1-o00012", "s2-o00012\n", "s1-o-1", "s2", ""):
         with pytest.raises(ValueError):
             parse_round_id(junk)

@@ -7,10 +7,10 @@ import pytest
 from stet.script import ScriptError, build_doc, file_sha256, materialize, open_script, write_script
 from stet.spec import Season, load_season
 
-SEASON = load_season("s1")
+SEASON = load_season("s2")
 EOT = SEASON.eot
 SCALE = dataclasses.replace(SEASON.scale("nano"), train_tokens=512, ctx=64, batch_size=4)
-# The real ink budget is a thousandth of the training budget: zero at this toy scale. Tests
+# The real ink budget is a ten-thousandth of the training budget: zero at this toy scale. Tests
 # of the accounting use a season that allows a tenth.
 INKY = Season(id=SEASON.id, title=SEASON.title, raw={**SEASON.raw, "ink_frac": 0.1})
 
@@ -85,6 +85,31 @@ def test_short_copies_are_ink_but_whole_short_docs_are_free(corpus):
     assert sum(map(len, b.ink)) == 10 and b.copied == 0
 
 
+def test_deleting_lines_is_never_ink(tmp_path):
+    from conftest import make_corpus
+
+    page = "Home | About | Contact\nA first line of the article.\nBuy now!\nAnother line.\nShare this\nThe last line"
+    c = make_corpus(tmp_path / "lines", [page, "x\ny\nz\n"])
+    at = [0]
+    for line in page.split("\n"):
+        at.append(at[-1] + len(line) + 1)
+    at[-1] -= 1  # the last line has no line break
+    keep = lambda *ks: {"d": 0, "k": [[at[k], at[k + 1]] for k in ks]}  # noqa: E731
+    # the article's lines kept, the furniture between them taken out: all copies, though each is under 64 bytes
+    b = build_doc(c, 1, keep(1, 3, 5), 64)
+    assert b.ink == [] and b.data == b"A first line of the article.\nAnother line.\nThe last line" and b.copied == len(b.data)
+    # out of the page's order, the same lines are short copies again: lines cannot be moved
+    assert sum(map(len, build_doc(c, 1, keep(3, 1), 64).ink)) > 0
+    # a line cut short, or begun in its middle, is not a line
+    assert build_doc(c, 1, {"d": 0, "k": [[at[1], at[2] - 1], [at[3], at[4]]]}, 64).ink
+    assert build_doc(c, 1, {"d": 0, "k": [[at[1] + 2, at[2]], [at[3], at[4]]]}, 64).ink
+    # lines of two pages, or lines beside text of the curator's own, are not one page with lines taken out
+    assert build_doc(c, 1, {"s": [[0, at[1], at[2]], [1, 0, 2]]}, 64).ink
+    assert len(build_doc(c, 1, {"s": [[0, at[1], at[2]], "and"]}, 64).ink) == 2
+    # nor is a line said twice
+    assert build_doc(c, 1, keep(1, 1), 64).ink
+
+
 def test_adjacent_ranges_merge_so_line_cuts_are_free(corpus):
     # three contiguous 30-byte ranges are one 90-byte copy, not three short ones
     b = build_doc(corpus, 1, {"d": 0, "k": [[0, 30], [30, 60], [60, 90]]}, 64)
@@ -98,7 +123,7 @@ def test_offsets_snap_to_character_boundaries(corpus):
 
 
 def test_the_real_season_allows_almost_no_ink(corpus, enc):
-    assert SEASON.ink_tokens(SEASON.scale("micro")) == 40_000  # a thousandth of 40M
+    assert SEASON.ink_tokens(SEASON.scale("micro")) == 4_000 and SEASON.ink_tokens(SEASON.scale("standard")) == 16_000  # a ten-thousandth
     with pytest.raises(ScriptError, match="ink over budget"):
         run(corpus, enc, [0, {"t": "one two three"}])  # the toy scale's budget rounds to zero
     _, stats = run(corpus, enc, [0, 3])  # cuts and whole copies need none

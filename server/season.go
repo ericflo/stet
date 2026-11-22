@@ -112,7 +112,8 @@ type Season struct {
 	MinCopyBytes  int                     `json:"min_copy_bytes"`
 	MaxDocBytes   int                     `json:"max_doc_bytes"`
 	Script        ScriptLimits            `json:"script"`
-	ExamSources   []string                `json:"exam_sources"` // the exam's pillars, each counting the same: see exam.go
+	ExamSources   []string                `json:"exam_sources"` // the exam's pillars, in the order they are shown
+	Exam          ExamPlan                `json:"exam"`         // what the score is made of: see aggregate.go
 	Beacon        Beacon                  `json:"beacon"`
 	DrawGrid      int64                   `json:"draw_grid_seconds"`
 	Pools         map[string]Pool         `json:"pools"`

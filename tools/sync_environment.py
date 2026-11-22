@@ -7,7 +7,7 @@ pyproject.toml is written out from the season, not kept by hand:
     python tools/sync_environment.py          rewrite pyproject.toml
     python tools/sync_environment.py --check  exit 1 if it is out of date (the tests do this)
 
-To change a library: edit "environment" in src/stet/seasons/s1.json (both "packages", what
+To change a library: edit "environment" in src/stet/seasons/s2.json (both "packages", what
 curators are promised, and "also", what those bring with them), run this, and bump the
 harness version: a curator may behave differently under the new one.
 """
@@ -35,7 +35,7 @@ def render(env: dict) -> str:
 
 
 def main() -> int:
-    env = json.loads((ROOT / "src/stet/seasons/s1.json").read_text())["environment"]
+    env = json.loads((ROOT / "src/stet/seasons/s2.json").read_text())["environment"]
     path = ROOT / "pyproject.toml"
     text = path.read_text()
     block = re.compile(re.escape(BEGIN) + r".*?" + re.escape(END), re.S)

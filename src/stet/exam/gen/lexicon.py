@@ -1,4 +1,18 @@
-"""Words the generators draw from. Names come from many places, so no one culture's text is favoured."""
+"""Words the generators draw from. Names come from many places, so no one culture's text is favoured.
+
+The lists are short and public, so a word from them can be learned by heart. Where an answer
+should rest on reading the question and nothing else, a generator coins its words from the seed.
+"""
+
+_ONSET = ["b", "d", "f", "g", "k", "l", "m", "n", "p", "r", "s", "t", "v", "z", "br", "dr", "kl", "pl", "st", "tr"]
+_VOWEL = ["a", "e", "i", "o", "u"]
+_CODA = ["", "", "", "n", "r", "s", "l", "k", "m"]
+
+
+def coin(rng) -> str:
+    """A word nobody has written: two or three syllables that can be said, from the seed."""
+    return "".join(rng.choice(_ONSET) + rng.choice(_VOWEL) for _ in range(rng.between(2, 3))) + rng.choice(_CODA)
+
 
 NAMES = [
     "Amara", "Bilal", "Chen", "Dara", "Elif", "Farah", "Goran", "Hana", "Ines", "Jomo", "Kaito", "Lena", "Mateo", "Nadia",

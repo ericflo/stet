@@ -12,7 +12,7 @@ import pytest
 from stet import data
 from stet.spec import Shard, load_season, practice_round
 
-SEASON = load_season("s1")
+SEASON = load_season("s2")
 
 
 def test_window_hashes_are_position_independent_and_pinned():
@@ -69,17 +69,17 @@ def test_a_verifier_prunes_only_the_rounds_it_fetched_for_grading(tmp_path, monk
     from stet.spec import load_season, official_round
 
     monkeypatch.setenv("STET_CACHE", str(tmp_path))
-    season = load_season("s1")
+    season = load_season("s2")
     crawl = {"crawl": "CC-MAIN-2026-01", "paths_sha256": "ab" * 32, "n_shards": 10}
     rounds = [official_round(season, i, {"round": 600 * i, "randomness": "cd" * 32}, crawl) for i in range(1, 8)]
     for r in rounds:
         data.mark_verified(r)
         (data.cache_dir() / "rounds" / r.id / "docs.bin").write_bytes(b"x" * 100)
-    mine = data.cache_dir() / "rounds" / "s1-o00002"
+    mine = data.cache_dir() / "rounds" / "s2-o00002"
     (mine / ".verified").unlink()  # the user fetched this one themselves
     assert data.prune_verified(rounds[-1]) == 300  # rounds 1, 3 and 4 go; 2 is theirs; 5, 6 and 7 are recent
     left = sorted(p.name for p in (data.cache_dir() / "rounds").iterdir())
-    assert left == ["s1-o00002", "s1-o00005", "s1-o00006", "s1-o00007"]
+    assert left == ["s2-o00002", "s2-o00005", "s2-o00006", "s2-o00007"]
 
 
 class Endless:
@@ -334,7 +334,7 @@ def test_a_round_that_is_set_aside_stays_readable_to_whoever_has_it_open_and_is_
 
     from stet import data
 
-    d = data.cache_dir() / "rounds" / "s1-o00009" / "micro"
+    d = data.cache_dir() / "rounds" / "s2-o00009" / "micro"
     (d / "corpus-v3").mkdir(parents=True)
     (d / "corpus-v3" / "docs.bin").write_bytes(b"what a curator is reading")
     held = os.open(d / "corpus-v3", os.O_RDONLY)  # as a sandbox holds the directory it was given

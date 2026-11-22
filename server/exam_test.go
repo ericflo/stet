@@ -123,7 +123,7 @@ func TestTheExamIsGradedOnceItIsPostedAndScoredAgainstTheRoundsBaseline(t *testi
 		for i := range gains {
 			gains[i] = (-2.9 - float64(i%3)*0.01) - base[i]
 		}
-		want, _, _ = ScoreItems(table, gains, rd.Shares)
+		want, _, _, _ = w.app.season.Exam.ScoreItems(table, gains, rd.Shares)
 	})
 	if e.Gain == nil || math.Abs(*e.Gain-places5(want)) > 1e-4 {
 		t.Fatalf("the entry's gain is %v, want %.5f", e.Gain, want)

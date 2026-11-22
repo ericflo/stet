@@ -38,6 +38,13 @@ def export(season_id: str = CURRENT_SEASON) -> dict:
         "script": raw["script"],
         "decontam": raw["decontam"],
         "exam_sources": season.exam_sources,
+        # What the score is made of: server/aggregate.go scores every round from this.
+        "exam": {
+            "groups": raw["exam"]["groups"],
+            "pillars": [{"name": p, "group": v["group"], "parts": v["parts"], "about": v["about"]} for p, v in raw["exam"]["pillars"].items()],
+            "clip": raw["exam"]["aggregate"]["clip"], "trim": raw["exam"]["aggregate"]["trim"], "small": raw["exam"]["aggregate"]["small"],
+            "answer_floor_bytes": season.answer_floor_bytes,
+        },
         "beacon": raw["beacon"],
         "draw_grid_seconds": raw["draw_grid_seconds"],
         "pools": {k: {f: v for f, v in pool.items() if f != "manifest"} for k, pool in raw["pools"].items()},

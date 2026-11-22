@@ -11,7 +11,7 @@ from stet import cli
 
 class Args:
     round = "0"
-    season = "s1"
+    season = "s2"
     scale = None
     device = "cpu"
     rounds = 1
@@ -80,9 +80,9 @@ def _score_setup(monkeypatch, tmp_path, entries, blobs):
         return blobs[path.rsplit("/", 1)[1]]
 
     monkeypatch.setattr(client, "request", request)
-    official = types.SimpleNamespace(kind="official", id="s1-o00001")
-    practice = types.SimpleNamespace(kind="practice", id="s1-p00000")
-    return load_season("s1"), official, practice, raw, sha, packed, asked
+    official = types.SimpleNamespace(kind="official", id="s2-o00001")
+    practice = types.SimpleNamespace(kind="practice", id="s2-p00000")
+    return load_season("s2"), official, practice, raw, sha, packed, asked
 
 
 def test_score_takes_a_file_a_compressed_file_a_hash_or_an_entry(monkeypatch, tmp_path):
@@ -105,7 +105,7 @@ def test_score_takes_a_file_a_compressed_file_a_hash_or_an_entry(monkeypatch, tm
     assert cli.script_file(sha.upper(), season, official).read_bytes() == raw
     assert cli.script_file("tidy", season, official).read_bytes() == raw
     assert cli.script_file("stet/tidy", season, official).read_bytes() == raw
-    assert asked.count("/api/v1/rounds/s1-o00001") == 2
+    assert asked.count("/api/v1/rounds/s2-o00001") == 2
 
 
 def test_score_refuses_a_script_that_is_not_the_one_asked_for(monkeypatch, tmp_path, capsys):
@@ -173,7 +173,7 @@ def test_score_tells_two_versions_of_one_editor_apart(monkeypatch, tmp_path, cap
             cli.script_file(ref, season, official)
         err = capsys.readouterr().err
         # It names each with its version, and the command that picks one.
-        assert "more than one entry called 'prose'" in err and "alice/prose@v1, alice/prose@v2" in err and "stet score alice/prose@v1 --round s1-o00001" in err
+        assert "more than one entry called 'prose'" in err and "alice/prose@v1, alice/prose@v2" in err and "stet score alice/prose@v1 --round s2-o00001" in err
         assert ("bob/prose@v7" in err) == (ref == "prose") and "carol" not in err
     with pytest.raises(SystemExit):
         cli.script_file("alice/prose@v9", season, official)
@@ -187,19 +187,19 @@ def test_score_tells_two_versions_of_one_editor_apart(monkeypatch, tmp_path, cap
 def test_the_gain_line_says_what_its_noise_figure_is(capsys):
     from stet.spec import load_season
 
-    season = load_season("s1")
+    season = load_season("s2")
     result = {
-        "round": {"id": "s1-p00000", "kind": "practice"}, "scale": "nano", "valid": True,
+        "round": {"id": "s2-p00000", "kind": "practice"}, "scale": "nano", "valid": True,
         "script": {"out_docs": 1, "src_docs": 1, "kept_doc_frac": 0.1, "out_bytes": 10, "ink_tokens": 0, "ink_budget": 8000, "passes": 1.0, "truncated": False},
         "train": {"tokens": 10, "seconds": 1.0, "tokens_per_second": 10, "final_train_loss": 3.0},
-        "exam": {"items": 3, "mean": -2.5, "item_scores": [-2.4, -2.5, -2.6]}, "gain": 0.1, "pillars": {"reasoning": 0.1},
+        "exam": {"items": 3, "mean": -2.5, "item_scores": [-2.4, -2.5, -2.6]}, "gain": 0.1, "pillars": {"logic": 0.1},
     }  # fmt: skip
     cli.report(cli.Out(), result, {"exam": {"mean": -2.6}}, season)
     err = capsys.readouterr().err
     # The same script graded twice on one machine gives the same number: this is what training again does.
-    assert "+0.1000 bits per byte" in err and "reasoning +0.100" in err and "training again moves this by about" not in err
+    assert "+0.1000 bits per byte" in err and "logic +0.100" in err and "training again moves this by about" not in err
     cli.report(cli.Out(), {**result, "scale": "standard"}, {"exam": {"mean": -2.6}}, season)
-    assert "training again moves this by about ±0.013" in capsys.readouterr().err
+    assert "training again moves this by about ±0.005" in capsys.readouterr().err
 
 
 # --- what a run writes down -------------------------------------------------------------------
