@@ -620,9 +620,10 @@ noise worse in four ways. Each is fixed by a rule that was stated before any rou
 - **Every grader measured the baseline.** That doubled the cost of a first grade and made each
   score rest on a baseline from one machine. Four established graders measure a round's
   baseline; every score is taken against the mean of theirs.
-- **Reference curators took a quarter of the ladder's compute.** They are there to tie rounds
-  together and to mark the scale, and two do that: `fineweb2` and `dclm` run every round, each
-  of the others one round in eight.
+- **Reference curators held six of the ladder's eight places**, and ran every round. They are
+  there to tie rounds together and to mark the scale, and two do that: `fineweb2` and `dclm`
+  run every round, each of the others one round in eight. That is two and a half runs a round
+  where there were six.
 
 Every item's score from every grade is public once a round settles. Anyone can recompute a
 round's gains, try another weighting, or measure a part's spread over noise without asking.
