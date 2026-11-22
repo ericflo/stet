@@ -133,6 +133,26 @@ def test_the_sandbox_caps_memory(corpus, tmp_path):
 
 needs_sandbox = pytest.mark.skipif(sys.platform != "linux" or not bwrap_available()[0], reason="needs bubblewrap")
 
+FILL_SCRATCH = """
+import time
+with open("/scratch/big", "wb") as f:
+    f.write(bytes(4 << 20))
+time.sleep(60)
+"""
+
+
+@needs_sandbox
+def test_a_scratch_directory_on_disk_is_watched_whatever_else_was_applied(corpus, tmp_path, monkeypatch):
+    # Where no cgroup can be had the sandbox's scratch is a directory on disk. Cores are pinned
+    # all the same, and that some limit was applied does not mean scratch is in bounded memory.
+    from stet import runner
+
+    monkeypatch.setattr(runner, "scope_limits", lambda: (False, "no systemd here", False))
+    monkeypatch.setattr(runner, "SCRATCH_LIMIT_BYTES", 1 << 20)
+    run = run_editor(editor(tmp_path, FILL_SCRATCH), "python curator.py", corpus, RND, SCALE, tmp_path / "work", 40, sandbox="bwrap", limits={"cores": 1})
+    assert run.limits.get("cores") == 1 and "memory_gb" not in run.limits
+    assert run.status == "error" and "scratch" in run.reason and run.seconds < 30
+
 
 def test_a_bad_entry_command_is_the_editors_error(corpus, tmp_path):
     bundle = editor(tmp_path, WRITE_ALL)

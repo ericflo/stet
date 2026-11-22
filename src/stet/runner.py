@@ -786,6 +786,7 @@ def run_editor(
         env.update({k: os.environ[k] for k in ("CUDA_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES") if k in os.environ})
 
     cg = None
+    scratch_in_memory = False  # true only where the sandbox mounts /scratch as a tmpfs
     if caged:
         cg = cage.cgroup(limits, len(cpus))
         ooms = cage.oom_kills(cg)
@@ -808,7 +809,8 @@ def run_editor(
         if not scoped and limits["required"]:
             raise HarnessError(f"cannot limit the sandbox's memory and processes: {why}")
         scratch_bytes = int(limits["scratch_gb"]) << 30
-        cmd = bwrap_command(bundle, corpus.path.resolve(), out_dir, None if scoped else scratch_dir, pkg_dir, etc_dir, scratch_bytes, assets)
+        scratch_in_memory = scoped  # only where a cgroup bounds the memory it would be
+        cmd = bwrap_command(bundle, corpus.path.resolve(), out_dir, None if scratch_in_memory else scratch_dir, pkg_dir, etc_dir, scratch_bytes, assets)
         popen_env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin")}
         if scoped:
             for k in ("XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"):
@@ -829,7 +831,7 @@ def run_editor(
         cmd = argv
         popen_env = env
         cwd = str(bundle)
-    scratch_on_disk = caged or not inside or not applied  # otherwise it is memory, and the cgroup bounds it
+    scratch_on_disk = not scratch_in_memory  # otherwise it is memory, and the cgroup bounds it
     scratch_cap = int(limits["scratch_gb"]) << 30 if caged else SCRATCH_LIMIT_BYTES
 
     log_path = work / "editor.log"
