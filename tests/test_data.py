@@ -63,6 +63,16 @@ def test_build_corpus_shuffles_cuts_and_is_deterministic(tmp_path, monkeypatch):
     assert b.meta["sha256"] == a.meta["sha256"] and b.urls == a.urls
     c = data.Corpus(data.build_corpus(practice_round(SEASON, 1), scale, tmp_path / "c", quiet=True))
     assert c.urls != a.urls and sorted(c.urls) == sorted(a.urls)
+    # Built again where a finished corpus already is (another verifier's, perhaps with a curator reading it):
+    # that one is kept as it is, and it is what the caller is given.
+    inode = (tmp_path / "a" / "docs.bin").stat().st_ino
+    assert data.build_corpus(rnd, scale, tmp_path / "a", quiet=True) == tmp_path / "a"
+    assert (tmp_path / "a" / "docs.bin").stat().st_ino == inode and [p.name for p in tmp_path.iterdir() if ".tmp" in p.name] == []
+    # What is there but is no corpus is replaced.
+    (tmp_path / "d").mkdir()
+    (tmp_path / "d" / "docs.bin").write_bytes(b"half")
+    d = data.Corpus(data.build_corpus(rnd, scale, tmp_path / "d", quiet=True))
+    assert d.meta["sha256"] == a.meta["sha256"]
 
 
 def test_a_corpus_is_the_same_however_many_files_are_read_at_once(tmp_path, monkeypatch):

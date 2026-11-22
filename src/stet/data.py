@@ -700,9 +700,14 @@ def build_corpus(rnd: Round, scale: Scale, dest: Path, quiet: bool = False) -> P
             # a curator may already be reading its copy. Use that one: replacing it would
             # empty the directory under a program that has it open.
             shutil.rmtree(tmp, ignore_errors=True)
-            return
-        shutil.rmtree(dest, ignore_errors=True)
-        tmp.replace(dest)
+            return dest
+        try:
+            tmp.replace(dest)  # refused if something is there: a directory is never renamed over one with files in it
+        except OSError:
+            if (dest / "meta.json").exists():
+                return dest  # the other verifier's, finished in the moment since the look above
+            shutil.rmtree(dest, ignore_errors=True)  # not a corpus, so nothing is reading it
+            tmp.replace(dest)
         if kind == "cc-wet" and os.environ.get("STET_KEEP_DOWNLOADS") != "1":
             # A round's files are a random handful out of a hundred thousand, and no other
             # round will draw them. The corpus is built; the downloads are dead weight, in a
