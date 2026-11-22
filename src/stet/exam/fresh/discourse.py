@@ -184,13 +184,14 @@ def _prose(s: str) -> str:
     s = _INLINE.sub(hold, s)
     s = _BB_URL.sub(r"\1", _BB_IMG.sub("", s))
     s = _TAG.sub("", _BREAK.sub("\n", _BB.sub("", s)))
-    return _HELD.sub(lambda m: held[int(m.group(1))], _EMOJI.sub("", md_text(s)))
+    return _HELD.sub(lambda m: held[int(m.group(1))] if len(m.group(1)) < 9 and int(m.group(1)) < len(held) else "",
+                     _EMOJI.sub("", md_text(s)))
 
 
 def raw_text(raw: str, code: bool = True) -> str:
     """A post's Markdown as plain text, roughly as it reads on the page, without what it quotes
     (quoted posts, quoted lines). Code blocks are kept as they were written; without code, they go."""
-    t = (raw or "").replace("\r\n", "\n").replace("\r", "\n")
+    t = (raw or "").replace("\x00", "").replace("\r\n", "\n").replace("\r", "\n")  # no NULs: _prose marks what it holds with them
     for _ in range(20):  # quotes inside quotes
         t, n = _QUOTE.subn("\n", t)
         if not n:
@@ -329,26 +330,29 @@ def harvest(start: int, end: int, cap: int, rng, log=print, forums: tuple[str, .
     caches: dict[str, dict] = {}
     for site in forums:
         seen = caches.setdefault(site, {})
+        mine, keys = [], set()  # the forum's own candidates and texts: kept once all of its posts are read
         try:
             posts = _listing(site, start, end, seen, why)
-        except Exception as e:  # one forum failing does not stop the harvest
+            posts = [p for p in sorted(posts, key=lambda p: p["id"]) if _fit(p, end, why)]
+            shared = _shared([raw_text(p.get("raw") or "", code=False) for p in posts])
+            for p in posts:
+                own = _without(raw_text(p.get("raw") or "", code=False), shared)
+                if prose_chars(own) < MIN_CHARS:
+                    why["short"] += 1
+                    continue
+                text = _without(raw_text(p.get("raw") or ""), shared)
+                key = hashlib.sha256(" ".join(text.split()).lower().encode()).hexdigest()
+                if key in seen_text or key in keys:
+                    why["posted twice"] += 1
+                    continue
+                keys.add(key)
+                mine.append((site, p, text, own))
+        except Exception as e:  # one forum failing, or sending what cannot be read, does not stop the harvest
             log(f"  discourse {site}: {type(e).__name__}: {e}")
             del caches[site]
             continue
-        posts = [p for p in sorted(posts, key=lambda p: p["id"]) if _fit(p, end, why)]
-        shared = _shared([raw_text(p.get("raw") or "", code=False) for p in posts])
-        for p in posts:
-            own = _without(raw_text(p.get("raw") or "", code=False), shared)
-            if prose_chars(own) < MIN_CHARS:
-                why["short"] += 1
-                continue
-            text = _without(raw_text(p.get("raw") or ""), shared)
-            key = hashlib.sha256(" ".join(text.split()).lower().encode()).hexdigest()
-            if key in seen_text:
-                why["posted twice"] += 1
-                continue
-            seen_text.add(key)
-            cands.append((site, p, text, own))
+        seen_text |= keys
+        cands += mine
     cands.sort(key=lambda c: (c[0], c[1]["id"]))
     rng.shuffle(cands)
     docs: list[Doc] = []

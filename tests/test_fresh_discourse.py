@@ -196,6 +196,28 @@ def test_a_forum_that_fails_is_left_out(api):
     assert [d.id for d in run(forums=(SLOW,))] == [d.id for d in docs]
 
 
+def test_a_post_with_the_marks_the_reader_uses_inside_it_is_read(api):
+    for raw in ("Held \x005\x00 and `code` and \x000\x00 here.", "\x00" + "9" * 5000 + "\x00 and `code`", "\x00-1\x00 `a` \x001\x00"):
+        assert "\x00" not in discourse.raw_text(raw) and "code" in discourse.raw_text(raw + " `code`")
+    assert discourse.raw_text("Held \x005\x00 and `code` and \x000\x00 here.") == "Held 5 and code and 0 here."
+    assert discourse._prose("Held \x005\x00 and `code` and \x000\x00 here.") == "Held  and code and code here."
+    api.sites["nul.example"] = [post(i, START + i, i, 1, say(f"Marked \x00{i + 3}\x00 `x` post {i},"), f"Marked {i}") for i in range(1, 4)]
+    docs = run(forums=("nul.example", SLOW))
+    assert sum(d.extra["site"] == "nul.example" for d in docs) == 3 and not any("\x00" in d.text for d in docs)
+    assert any(d.extra["site"] == SLOW for d in docs)  # and the other forums with it
+
+
+@pytest.mark.parametrize("bad", [{"raw": 5}, {"raw": ["a list"]}, {"username": 7}, {"user_id": "seven"}, {"created_at": "yesterday"},
+                                 {"id": "one"}, {"version": 2, "updated_at": 12}])
+def test_a_forum_that_sends_what_cannot_be_read_is_left_out_and_the_others_kept(api, bad):
+    api.sites["odd.example"] = [post(i, START + i, i, 1, say(f"Said twice, {i % 2}"), f"Odd {i}") for i in range(1, 5)]
+    api.sites["odd.example"][2].update(bad)
+    said = []
+    docs = run(forums=(SLOW, "odd.example", DE), log=said.append)
+    assert {d.extra["site"] for d in docs} == {SLOW, DE} and any("odd.example" in line for line in said)
+    assert [d.id for d in docs] == [d.id for d in run(forums=(SLOW, DE))]  # as if the forum had not answered
+
+
 def test_the_choice_is_seeded(api):
     a = run(forums=(SLOW, BUSY, DE), cap=12)
     assert len(a) == 12 and [d.id for d in run(forums=(SLOW, BUSY, DE), cap=12)] == [d.id for d in a]
