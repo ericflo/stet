@@ -1,91 +1,93 @@
 """An afternoon of heuristics: the baseline a serious entry should beat.
 
-  1. Keep English prose.
+  1. Keep pages that read as writing, in whatever language they are written.
   2. Drop exact duplicates.
-  3. Inside each document, cut lines that look like navigation or boilerplate.
-  4. Rank what is left by a crude "is this explanatory prose" score.
-  5. Keep the best documents until the training budget is filled once, and shuffle them.
+  3. Inside each page, cut the lines that look like navigation or boilerplate.
+  4. Rank what is left by how much of the page was writing.
+  5. Keep the best pages until the training budget is filled once, and shuffle them.
 
-No model, no GPU, a few seconds per shard. Everything here is a cut of at least
-min_copy_bytes, so it spends no ink.
+No model, no GPU, a few seconds per shard. It only takes whole lines out of pages, which is
+never ink.
+
+The exam is written in every language of the crawl, each counting by its share of it. So
+nothing here asks what language a page is in: a rule that only English can pass throws away
+more than half of what the student is examined on.
 """
 
 import hashlib
 import random
 import re
+import unicodedata
 
 from stet.curator import Task
 
-SENTENCE_END = re.compile(r"[.!?][\"')\]]?\s")
-STOPWORDS = (" the ", " of ", " and ", " to ", " in ", " is ", " that ", " for ")
-# Rough, for English prose under the season tokenizer, and on the generous side: a stream
-# that runs over the budget is cut off, one that falls short repeats from the top.
+# How a sentence ends: in scripts written with spaces, a mark and then a space; in Chinese and
+# Japanese, the mark alone.
+SENTENCE_END = re.compile(r"[.!?…؟۔।][\"')\]”’»]?\s|[。！？｡]")
+SPACELESS = (("぀", "ヿ"), ("一", "鿿"), ("฀", "๿"))  # kana, Chinese characters, Thai
+# Rough, under the season's tokenizer, and on the generous side: a stream that runs over the
+# budget is cut off, one that falls short repeats from the top.
 BYTES_PER_TOKEN = 3.7
 
 
-def looks_english(text: str) -> bool:
+def looks_written(text: str) -> bool:
+    """Mostly letters, of any script, and enough of them to say something. The vowel signs of
+    Hindi, Thai and Arabic are marks and not letters, and count as part of the letters they sit on."""
     sample = text[:3000]
     if len(sample) < 200:
         return False
-    letters = sum(c.isascii() and (c.isalpha() or c == " ") for c in sample)
-    if letters / len(sample) < 0.75:
-        return False
-    low = sample.lower()
-    return sum(low.count(w) for w in STOPWORDS) >= max(4, len(sample) // 300)
+    return sum(c.isalpha() or c.isspace() or unicodedata.category(c)[0] == "M" for c in sample) / len(sample) >= 0.75
 
 
-def prose_ranges(text: str, min_copy: int = 64) -> tuple[list[list[int]], int]:
-    """Byte ranges of the lines worth keeping, and how many bytes they hold."""
+def spaceless(text: str) -> bool:
+    """Written without spaces between words, so that a line's length is counted in characters."""
+    sample = text[:2000]
+    return sum(1 for c in sample if any(a <= c <= b for a, b in SPACELESS)) > 0.3 * len(sample)
+
+
+def prose_ranges(raw: bytes, dense: bool) -> tuple[list[list[int]], int]:
+    """Byte ranges of the lines worth keeping, each a whole line with its line break, and how
+    many bytes they hold. A line is kept when it is long enough to be a sentence and has the
+    end of one in it."""
     ranges: list[list[int]] = []
     pos = 0
-    for line in text.split("\n"):
-        n = len(line.encode("utf-8")) + 1  # + the newline
-        body = line.strip()
-        words = body.count(" ") + 1
-        is_prose = len(body) >= 60 and words >= 10 and (SENTENCE_END.search(body + " ") is not None)
-        if is_prose:
+    for line in raw.split(b"\n"):
+        n = len(line) + 1  # + the line break
+        body = line.decode("utf-8", "replace").strip()
+        long_enough = len(body) >= 25 if dense else (len(body) >= 60 and body.count(" ") >= 9)
+        if long_enough and SENTENCE_END.search(body + " "):
             if ranges and ranges[-1][1] == pos:
                 ranges[-1][1] = pos + n
             else:
                 ranges.append([pos, pos + n])
         pos += n
-    # A kept run shorter than min_copy bytes would be charged as ink. Drop those.
-    ranges = [r for r in ranges if r[1] - r[0] >= min_copy + 4]
+    if ranges and ranges[-1][1] > len(raw):  # the last line may have no line break
+        ranges[-1][1] = len(raw)
     return ranges, sum(b - a for a, b in ranges)
 
 
-def score(text: str, kept: int) -> float:
-    """Higher is better. Rewards documents that are mostly prose and long enough to say something."""
-    total = max(1, len(text.encode("utf-8")))
-    density = kept / total
-    length = min(1.0, kept / 3000)
-    low = text[:4000].lower()
-    explains = sum(low.count(w) for w in (" because ", " therefore ", " however ", " for example ", " which ", " whereas "))
-    sells = sum(low.count(w) for w in (" buy ", " price", " shipping", " cart", " sale", " click ", " subscribe", " cookies"))
-    return density * 1.0 + length * 1.0 + min(explains, 8) * 0.08 - min(sells, 8) * 0.1
+def score(size: int, kept: int) -> float:
+    """Higher is better: a page that is mostly writing, and long enough to say something."""
+    return kept / max(1, size) + min(1.0, kept / 3000)
 
 
 def edit(task: Task):
     corpus = task.corpus
-    min_copy = int(task.info.get("min_copy_bytes", 64))
     seen: set[bytes] = set()
     scored = []
     for i, text in corpus:
-        if not looks_english(text):
+        if not looks_written(text):
             continue
-        ranges, kept = prose_ranges(text, min_copy)
+        ranges, kept = prose_ranges(corpus.raw(i), spaceless(text))
         if kept < 400:
             continue
         key = hashlib.blake2b(text[:2000].encode("utf-8", "replace"), digest_size=8).digest()
         if key in seen:
             continue
         seen.add(key)
-        size = corpus.size(i)
-        # Clamp to the document: the last line may not end in a newline.
-        ranges = [[a, min(b, size)] for a, b in ranges if a < size and min(b, size) - a >= min_copy]
-        scored.append((score(text, kept), i, ranges, kept))
+        scored.append((score(corpus.size(i), kept), i, ranges, kept))
 
-    scored.sort(key=lambda t: -t[0])
+    scored.sort(key=lambda t: (-t[0], t[1]))
     budget_bytes = task.train_tokens * BYTES_PER_TOKEN
     chosen = []
     used = 0

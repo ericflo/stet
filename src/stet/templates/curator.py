@@ -1,45 +1,47 @@
-"""A starter curator. Keep English prose, drop the rest, shuffle. Make it better.
+"""A starter curator. Keep pages that read as writing, drop the rest, shuffle. Make it better.
 
-Run it:      stet run
+Run it:      stet run        (once, first: stet harvest, so that practice rounds sit real writing)
 Submit it:   stet submit
 
-You are given a corpus of raw web documents and a time limit. Write an edit script: one
-line per output document, in the order the student should be trained on them.
+You are given a corpus of raw web pages and a time limit. Write an edit script: one line per
+output document, in the order the student should be trained on them.
 
     123                               keep document 123 whole
     {"d": 123, "k": [[0, 900]]}       keep byte ranges of document 123
     {"s": [[123, 0, 900], "text"]}    join copies, with a little text of your own
     {"t": "text"}                     a new document
 
-Deleting, reordering and repeating are free. Your own text, and copies shorter than 64
-bytes, are "ink": task.info["ink_tokens"] of it per round, which is very little. The stream is cut off at the training budget
-(task.train_tokens) and repeated from the top if it is shorter, so keeping less means
-training on it more often.
+Deleting, reordering and repeating are free, and so is taking whole lines out of a page. Your
+own text, and pieces shorter than 64 bytes that are not whole lines, are "ink":
+task.info["ink_tokens"] of it per round, which is very little. The stream is cut off at the
+training budget (task.train_tokens) and repeated from the top if it is shorter, so keeping
+less means training on it more often.
+
+The exam is three quarters writing people published this week, in every language of the
+crawl by its share of it, and one quarter generated skills. Keeping one language only throws
+away most of what the student is examined on.
 """
 
 import random
+import unicodedata
 
 from stet.curator import Task
 
-STOPWORDS = (" the ", " of ", " and ", " to ", " in ", " is ", " that ", " for ")
 
-
-def looks_english(text: str) -> bool:
+def looks_written(text: str) -> bool:
+    """Mostly letters, of any script, and enough of them to say something. The vowel signs of
+    Hindi, Thai and Arabic are marks and not letters, and count as part of the letters they sit on."""
     sample = text[:3000]
     if len(sample) < 200:
         return False
-    letters = sum(c.isascii() and (c.isalpha() or c == " ") for c in sample)
-    if letters / len(sample) < 0.75:
-        return False
-    low = sample.lower()
-    return sum(low.count(w) for w in STOPWORDS) >= max(4, len(sample) // 300)
+    return sum(c.isalpha() or c.isspace() or unicodedata.category(c)[0] == "M" for c in sample) / len(sample) >= 0.75
 
 
 def main():
     task = Task.from_env()  # task.corpus, task.train_tokens, task.time_left(), task.info
     corpus = task.corpus    # len(corpus), corpus.text(i), corpus.raw(i), corpus.size(i), corpus.urls[i]
 
-    keep = [i for i, text in corpus if looks_english(text)]
+    keep = [i for i, text in corpus if looks_written(text)]
     random.Random(0).shuffle(keep)
 
     # Write early; you can call task.write again with something better. If you run out of

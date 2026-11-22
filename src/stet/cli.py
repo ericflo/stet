@@ -503,7 +503,7 @@ def cmd_harvest(args):
         for d in read_snapshot(held[hour])[1]:
             kind = SOURCE_KIND.get(d.source, d.source)
             kinds[kind] = kinds.get(kind, 0) + 1
-        out.line(_hour_name(hour), ", ".join(f"{k} {n}" for k, n in sorted(kinds.items())) or "nothing")
+        out.line("", f"{_hour_name(hour)}: " + (", ".join(f"{k} {n}" for k, n in sorted(kinds.items())) or "nothing"))
     if not held:
         die("no hour could be harvested: is this machine online?")
     out.line("", f"{len(held)} hour{'s' if len(held) != 1 else ''} held in {dest}. Practice rounds now sit writing from "
