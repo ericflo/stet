@@ -152,6 +152,8 @@ def test_the_documents_give_the_seasons_numbers(season):
     assert f"up to {gib} GiB" in faq and f"{m['gpu_memory_gb']} GB of memory" in faq
     assert f"{m['memory_gb']} GB of memory, one GPU with {m['gpu_memory_gb']} GB of its memory" in verifying and f"{need['disk_gb']} GB of disk" in verifying
     assert f"more than {season.raw['tolerance']['standard']['run']} bits per byte" in rules.replace("by more than", "more than")
+    noise = season.raw["noise"]  # how far training the same script again moves a gain
+    assert f"by about {noise['micro']['gain_sd']} at micro and {noise['standard']['gain_sd']} at standard" in brief
 
 
 def test_the_documents_and_the_site_name_the_pillars_the_season_names(season):

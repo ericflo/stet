@@ -87,10 +87,9 @@ stet clean                    # delete downloaded rounds and model files (fetche
 
 **Never judge a change on one round.** Rounds differ from each other by more than most
 improvements. Use `--rounds 3` or more and compare mean gains. Training the same script
-again moves its gain by about 0.013 at micro and 0.005 at standard, so on one round a
+again moves its gain by about 0.03 at micro and 0.005 at standard, so on one round a
 difference smaller than twice that is noise. Confirm anything smaller over `--rounds 5`.
-Those two figures come from a pilot whose fresh writing was Wikipedia only. An exam with no
-writing in it is less steady: the skills are the noisier part.
+An exam with no writing in it is less steady: the skills are the noisier part.
 
 **Compare runs made against the same harvest.** A practice round's corpus never changes,
 but its exam's writing is three of the hours you hold, chosen by the round's seed.

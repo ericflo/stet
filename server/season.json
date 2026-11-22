@@ -300,7 +300,7 @@
  "min_copy_bytes": 64,
  "noise": {
   "micro": {
-   "gain_sd": 0.013,
+   "gain_sd": 0.03,
    "round_sd": 0.03
   },
   "standard": {
@@ -484,9 +484,9 @@
    "run": 0.03
   },
   "micro": {
-   "baseline": 0.08,
-   "grade": 0.06,
-   "run": 0.08
+   "baseline": 0.2,
+   "grade": 0.15,
+   "run": 0.15
   },
   "nano": {
    "baseline": 0.2,

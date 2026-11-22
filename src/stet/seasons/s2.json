@@ -406,7 +406,7 @@
   "reference_curves": {},
   "noise": {
     "micro": {
-      "gain_sd": 0.013,
+      "gain_sd": 0.03,
       "round_sd": 0.03
     },
     "standard": {
@@ -421,9 +421,9 @@
       "run": 0.15
     },
     "micro": {
-      "grade": 0.06,
-      "baseline": 0.08,
-      "run": 0.08
+      "grade": 0.15,
+      "baseline": 0.2,
+      "run": 0.15
     },
     "standard": {
       "grade": 0.025,
