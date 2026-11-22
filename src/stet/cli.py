@@ -541,6 +541,9 @@ def _harvest_due(season, now: float, skip=()) -> int | None:
     return None
 
 
+HARVEST_FLOOR = 3  # of Wikipedia, Common Crawl's news, GitHub, the kernel's lists, Hacker News, Lemmy, Bluesky, Mastodon, Discourse
+
+
 def _harvest_one(season, hour: int, key, log) -> dict:
     """Harvest an hour and tell the server its hash, at once: a round drawn later can be given it."""
     from .exam.fresh import read_snapshot
@@ -549,7 +552,14 @@ def _harvest_one(season, hour: int, key, log) -> dict:
     dest = _hours_dir() / f"{hour}.jsonl"
     part = dest.with_name(f"{hour}.part.jsonl")  # under its own name only once it is whole
     meta, sha = harvest_hour(season, hour, part, log=log)
-    read_snapshot(part)  # read back whole before it has its name: a file that cannot be read is not a harvest
+    # Read back whole before it has its name. A file that cannot be read is not a harvest, and
+    # nor is what this machine gathered while it was cut off: the server takes one harvest of an
+    # hour and no second, so one that fewer than three of the places asked gave anything to is
+    # not kept, and the hour is tried again.
+    gave = {d.source.split("-")[0] for d in read_snapshot(part)[1]}
+    if len(gave) < HARVEST_FLOOR:
+        part.unlink(missing_ok=True)
+        raise RuntimeError(f"only {len(gave)} of the places asked gave any writing ({', '.join(sorted(gave)) or 'none'}): is this machine online?")
     part.replace(dest)
     return _commit_hour(hour, dest, key) if key else {"hour": hour, "sha256": sha, "documents": meta.get("documents")}
 
@@ -593,6 +603,7 @@ def _harvest_follow(season, key, out, stop) -> None:
 
     keep = int(season.raw["exam"]["fresh"]["reach_seconds"]) + 7 * 86400
     failed: dict[int, int] = {}
+    again: dict[int, float] = {}  # when an hour that failed is tried next
     looked = 0.0
     while not stop.is_set():
         if key and time.time() - looked >= 120:
@@ -602,16 +613,17 @@ def _harvest_follow(season, key, out, stop) -> None:
                     out.line("", f"told the server of {_hour_name(hour)}, harvested earlier")
             except (Exception, SystemExit) as e:  # looked at again in two minutes
                 out.line("", out.dim(f"the server could not be told of the hours held here ({e})"))
-        hour = _harvest_due(season, time.time(), skip=[h for h, n in failed.items() if n >= 3])
+        hour = _harvest_due(season, time.time(), skip=[h for h, t in again.items() if time.time() < t])
         if hour is None:
             stop.wait(30)
             continue
         try:
             got = _harvest_one(season, hour, key, lambda m: out.line("", out.dim(m)))
             out.line("", f"harvested {_hour_name(hour)}: {got['documents']} documents ({got['sha256'][:12]})")
-        except (Exception, SystemExit) as e:  # tried three times; an hour that will not come does not hold up the others
-            failed[hour] = failed.get(hour, 0) + 1
-            out.line("", out.bad(f"harvest of {_hour_name(hour)}: {e}"))
+        except (Exception, SystemExit) as e:  # tried again later, and meanwhile it does not hold up the others
+            n = failed[hour] = failed.get(hour, 0) + 1
+            again[hour] = time.time() + _again_in(n + 1)
+            out.line("", out.bad(f"harvest of {_hour_name(hour)}: {e}") + out.dim(f" (try {n}; again in {_again_in(n + 1)}s)"))
             stop.wait(30)
         for old in _hours_dir().glob("*.jsonl"):  # a round's exam can be made again for a week
             if old.stem.isdigit() and int(old.stem) + HOUR < time.time() - keep:

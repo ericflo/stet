@@ -146,7 +146,9 @@ told of when it was harvested, because the server was restarting, is told of wit
 minutes of its answering again.
 
 A source that fails during a harvest is left out of that round, and the rest is kept. The
-log names it.
+log names it. A harvest that fewer than three of the places asked gave anything to is not
+kept: the machine was cut off, most likely, and the server takes one harvest of an hour and
+no second. The hour is tried again, less and less often, and the other hours meanwhile.
 
 It also keeps each round's whole exam beside the harvest (`items.jsonl.zst` and
 `languages.json` under `~/.cache/stet/examine/<round>/`), with the text of the sources that
@@ -527,7 +529,7 @@ first, so the first round has its writing ([above](#the-examiner)). Three new en
 admitted a round, in the order they were submitted, so the two references that run in every
 round go first. (Entries submitted in the same second are taken in the order of their ids,
 which is why the loop waits between them.) Everyone else makes their account again the same way, with their own
-handle, and an entrant links GitHub again (`stet login --gist`).
+handle, and an entrant links GitHub again (`stet login --gist <url>`).
 
 The finished season's pages are archived from its database ([below](#archiving-a-season)),
 so that they stay readable under `/seasons/<id>/`. The new season does not wait for that.

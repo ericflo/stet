@@ -328,3 +328,34 @@ def test_an_hour_the_server_was_not_told_of_is_told_of_later(monkeypatch, tmp_pa
     assert cli._commit_missed(season, object(), now) == sorted([hours[0], hours[2]])
     assert told == [(h, f"{h}.jsonl") for h in sorted([hours[0], hours[2]])]
     assert asked == [("GET", "/api/v1/harvests?limit=72")]
+
+
+def test_a_harvest_made_while_cut_off_is_not_kept_or_told_of(monkeypatch, tmp_path):
+    import pytest
+
+    from stet import cli
+    from stet.exam.fresh import Doc, harvest, write_snapshot
+    from stet.spec import load_season
+
+    season = load_season("s2")
+    monkeypatch.setattr(cli, "_hours_dir", lambda: tmp_path)
+    told = []
+    monkeypatch.setattr(cli, "_commit_hour", lambda hour, path, key: told.append(hour) or {"hour": hour, "sha256": "0" * 64, "documents": 0})
+    one = dict(url="https://example.org/x", lang="en", license="CC0", published=1, title="t", text="words")
+
+    def gives(sources):
+        def harvest_hour(season, hour, dest, log=print):
+            docs = [Doc(source=s, id=str(i), **one) for i, s in enumerate(sources)]
+            return {"documents": len(docs)}, write_snapshot(docs, dest, {"window": [hour, hour + 3600]})
+
+        monkeypatch.setattr(harvest, "harvest_hour", harvest_hour)
+
+    hour = 1_800_000_000 - 1_800_000_000 % 3600
+    for cut_off in ([], ["wikipedia", "wikipedia-talk", "wikipedia-added"], ["wikipedia", "ccnews"]):
+        gives(cut_off)
+        with pytest.raises(RuntimeError, match="is this machine online"):
+            cli._harvest_one(season, hour, object(), print)
+        assert not list(tmp_path.glob("*.jsonl")) and not told  # nothing kept, so the hour is harvested again
+    gives(["wikipedia", "ccnews", "hackernews", "bluesky-reply"])
+    assert cli._harvest_one(season, hour, object(), print)["hour"] == hour
+    assert told == [hour] and (tmp_path / f"{hour}.jsonl").exists()
