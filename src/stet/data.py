@@ -852,7 +852,7 @@ def _items(rnd: Round):
     if path is None or not path.exists():
         raise ExamNotReady(f"{rnd.id}: the round's exam has not been posted, or not fetched to this machine")
     raw = zstandard.ZstdDecompressor().decompress(path.read_bytes(), max_output_size=1 << 30)
-    items = [Item.from_dict(json.loads(line)) for line in raw.decode().splitlines() if line]
+    items = [Item.from_dict(json.loads(line)) for line in raw.decode().split("\n") if line]  # not splitlines(): see read_snapshot
     if exam_digest(items) != want:
         path.unlink(missing_ok=True)
         raise ExamNotReady(f"{rnd.id}: the copy of the exam here is not the round's; it has been removed, fetch it again")

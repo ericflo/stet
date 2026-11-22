@@ -455,7 +455,10 @@ def cmd_examine(args):
         return _examine_follow(args)
     if not args.round:
         die("name a round, or pass --follow")
-    _examine_one(args, args.round)
+    try:
+        _examine_one(args, args.round)
+    except _NotYet as e:
+        die(str(e))
 
 
 def _has_writing(rnd) -> bool:
@@ -540,11 +543,13 @@ def _harvest_due(season, now: float, skip=()) -> int | None:
 
 def _harvest_one(season, hour: int, key, log) -> dict:
     """Harvest an hour and tell the server its hash, at once: a round drawn later can be given it."""
+    from .exam.fresh import read_snapshot
     from .exam.fresh.harvest import harvest_hour
 
     dest = _hours_dir() / f"{hour}.jsonl"
     part = dest.with_name(f"{hour}.part.jsonl")  # under its own name only once it is whole
     meta, sha = harvest_hour(season, hour, part, log=log)
+    read_snapshot(part)  # read back whole before it has its name: a file that cannot be read is not a harvest
     part.replace(dest)
     return _commit_hour(hour, dest, key) if key else {"hour": hour, "sha256": sha, "documents": meta.get("documents")}
 
@@ -562,6 +567,25 @@ def _commit_hour(hour: int, path: Path, key) -> dict:
     return body
 
 
+def _commit_missed(season, key, now: float) -> list[int]:
+    """Tell the server of every hour held here that it has not been told of. A harvest is told
+    of as soon as it is made, but the server may have been restarting just then, and an hour the
+    server never hears of is never given to a round."""
+    from .client import request
+
+    first = int(now) - int(season.raw["exam"]["fresh"]["reach_seconds"])
+    held = sorted(int(p.stem) for p in _hours_dir().glob("*.jsonl") if p.stem.isdigit() and int(p.stem) >= first)
+    if not held:
+        return []
+    known = {int(h["hour"]) for h in request("GET", "/api/v1/harvests?limit=72").get("harvests") or []}
+    told = []
+    for hour in held:
+        if hour not in known:
+            _commit_hour(hour, _hours_dir() / f"{hour}.jsonl", key)
+            told.append(hour)
+    return told
+
+
 def _harvest_follow(season, key, out, stop) -> None:
     """Every hour, as soon as it has settled. Runs beside the exams, so that a round drawn while
     an hour is being read does not wait for it."""
@@ -569,7 +593,15 @@ def _harvest_follow(season, key, out, stop) -> None:
 
     keep = int(season.raw["exam"]["fresh"]["reach_seconds"]) + 7 * 86400
     failed: dict[int, int] = {}
+    looked = 0.0
     while not stop.is_set():
+        if key and time.time() - looked >= 120:
+            looked = time.time()
+            try:
+                for hour in _commit_missed(season, key, looked):
+                    out.line("", f"told the server of {_hour_name(hour)}, harvested earlier")
+            except (Exception, SystemExit) as e:  # looked at again in two minutes
+                out.line("", out.dim(f"the server could not be told of the hours held here ({e})"))
         hour = _harvest_due(season, time.time(), skip=[h for h, n in failed.items() if n >= 3])
         if hour is None:
             stop.wait(30)
@@ -611,6 +643,16 @@ def _round_hours(season, d: dict, seed: bytes) -> tuple[list[tuple[int, Path]], 
     return out, late
 
 
+class _NotYet(Exception):
+    """A round's exam cannot be made yet, and nothing is wrong: the harvest it needs is on its way."""
+
+
+def _again_in(tries: int) -> int:
+    """How long the examiner leaves a round whose exam failed: 20 seconds, then twice as long
+    each time, to ten minutes. It never gives a round up: an open round with no exam settles nothing."""
+    return min(600, 20 * 2 ** min(tries - 1, 5))
+
+
 def _examine_one(args, round_id: str) -> None:
     from .client import fetch_round, need_key, request
     from .data import cache_dir
@@ -630,7 +672,7 @@ def _examine_one(args, round_id: str) -> None:
     key = need_key()
     snapshots, late = _round_hours(season, d, rnd.seed)
     if not snapshots:
-        die(f"{rnd.id} has no harvest to make its exam from yet: none of the hours it could be given has been harvested")
+        raise _NotYet(f"{rnd.id} has no harvest to make its exam from yet: none of the hours it could be given has been harvested")
     out.line("", out.bold(f"stet examine · {rnd.id} · {d.get('scale')}"))
     log = lambda m: out.line("", out.dim(m))  # noqa: E731
     log(f"  its writing: {', '.join(_hour_name(h) for h, _ in snapshots)}" + (", chosen after the draw: the server had been told of no harvest" if late else ""))
@@ -653,6 +695,8 @@ def _examine_follow(args) -> None:
     stop = threading.Event()
     threading.Thread(target=_harvest_follow, args=(season, need_key(), out, stop), daemon=True).start()
     failed: dict[str, int] = {}
+    again: dict[str, float] = {}  # when a round whose exam failed is tried next
+    waiting: set[str] = set()
     while True:
         try:
             rounds = request("GET", "/api/v1/rounds?limit=20").get("rounds") or []
@@ -660,13 +704,18 @@ def _examine_follow(args) -> None:
             out.line("", out.dim(f"the server did not answer ({e}); trying again in a minute"))
             rounds = []
         for x in sorted(rounds, key=lambda x: x["id"]):
-            if x.get("status") != "open" or x.get("exam_digest") or failed.get(x["id"], 0) >= 20:
+            if x.get("status") != "open" or x.get("exam_digest") or time.time() < again.get(x["id"], 0):
                 continue
             try:
                 _examine_one(args, x["id"])
-            except (Exception, SystemExit) as e:  # tried again in a moment: a harvest may be on its way
-                failed[x["id"]] = failed.get(x["id"], 0) + 1
-                out.line("", out.bad(f"{x['id']}: {e}"))
+            except _NotYet as e:  # said once, and looked at again every time round
+                if x["id"] not in waiting:
+                    waiting.add(x["id"])
+                    out.line("", out.dim(str(e)))
+            except (Exception, SystemExit) as e:  # tried again, less and less often, for as long as the round is open
+                n = failed[x["id"]] = failed.get(x["id"], 0) + 1
+                again[x["id"]] = time.time() + _again_in(n)
+                out.line("", out.bad(f"{x['id']}: {e}") + out.dim(f" (try {n}; again in {_again_in(n)}s)"))
         time.sleep(20)
 
 

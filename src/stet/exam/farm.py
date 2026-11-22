@@ -41,7 +41,7 @@ def unpack_items(blob: bytes, limit: int = 256 << 20) -> list[Item]:
         raw = r.read(limit + 1)
     if len(raw) > limit:
         raise ValueError("a batch's items are too large")
-    return [Item.from_dict(json.loads(line)) for line in raw.decode().splitlines() if line.strip()]
+    return [Item.from_dict(json.loads(line)) for line in raw.decode().split("\n") if line.strip()]
 
 
 # --- a machine of the organisers', training one ---------------------------------------------------

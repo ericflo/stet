@@ -132,7 +132,7 @@ def own_scale(season, d: dict):
 def _items_of(blob: bytes) -> list[Item]:
     if blob[:4] == b"\x28\xb5\x2f\xfd":  # zstd, as the examiner keeps them
         return farm.unpack_items(blob)
-    return [Item.from_dict(json.loads(line)) for line in blob.decode().splitlines() if line.strip()]
+    return [Item.from_dict(json.loads(line)) for line in blob.decode().split("\n") if line.strip()]
 
 
 def whole_exam(rnd, scale, work: Path, draw_at: int = 0, items_file=None, shares_file=None, log=say) -> tuple[list[Item], dict]:

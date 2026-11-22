@@ -969,7 +969,7 @@ def fetch_exam(rnd, key) -> Path:
     blob = request("GET", f"/api/v1/rounds/{rnd.id}/exam", key=key, raw=True, timeout=600, limit=EXAM_LIMIT)
     try:
         raw = zstandard.ZstdDecompressor().decompress(blob, max_output_size=1 << 30)
-        items = [Item.from_dict(json.loads(line)) for line in raw.decode().splitlines() if line]
+        items = [Item.from_dict(json.loads(line)) for line in raw.decode().split("\n") if line]
     except (zstandard.ZstdError, ValueError, TypeError, KeyError) as e:
         raise WrongBytes(f"the round's exam the server sent cannot be read ({clean(e)})") from None
     if digest(items) != rnd.exam_digest:

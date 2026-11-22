@@ -260,3 +260,15 @@ def test_the_harvest_reads_its_sources_at_once(monkeypatch, tmp_path):
     meta, got, _ = window({"discussion"}, ["wikipedia-talk", "hackernews", "lemmy", "bluesky", "mastodon", "discourse"])
     assert got == collections.Counter({"wikipedia-talk": 1, "hackernews": 1, "bluesky-reply": 1, "mastodon-reply": 1, "discourse": 1})
     assert meta["sources"] == {"wikipedia": "all", "hackernews": 1, "bluesky": 1, "mastodon": 1, "discourse": 1} and meta["documents"] == 5
+
+
+def test_a_snapshot_is_read_back_whole_whatever_line_breaks_its_text_holds(tmp_path):
+    # json writes U+2028, U+2029 and U+0085 as they are, and str.splitlines() cuts at each:
+    # one post holding one would have made the whole hour's harvest unreadable.
+    odd = "one\u2028two\u2029three\u0085four\x1cfive\r\nsix"
+    one = dict(url="https://example.org/x", lang="en", license="CC0", published=1, title="t")
+    docs = [Doc(source="bluesky", id="a", text=odd, **one), Doc(source="wikipedia", id="b", text="plain", **one)]
+    write_snapshot(docs, tmp_path / "a.jsonl", {"window": [0, 3600]})
+    meta, back = read_snapshot(tmp_path / "a.jsonl")
+    assert meta == {"window": [0, 3600]}
+    assert [d.text for d in back] == [odd, "plain"]

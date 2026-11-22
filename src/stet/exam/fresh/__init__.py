@@ -113,5 +113,7 @@ def write_snapshot(docs: list[Doc], path: Path, meta: dict) -> str:
 
 
 def read_snapshot(path: Path) -> tuple[dict, list[Doc]]:
-    lines = path.read_text().splitlines()
+    # Cut at the newline write_snapshot wrote and at nothing else. A document's text may hold
+    # U+2028, U+2029 or U+0085, which json writes as they are and str.splitlines() cuts at.
+    lines = [x for x in path.read_bytes().decode().split("\n") if x]
     return json.loads(lines[0]), [Doc(**json.loads(x)) for x in lines[1:]]

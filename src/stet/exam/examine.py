@@ -49,7 +49,7 @@ def read_public(raw: bytes, want: str) -> list[Item]:
 
     h = hashlib.sha256()
     kept = []
-    for line in raw.decode().splitlines():
+    for line in raw.decode().split("\n"):  # the newline the exam was written with, and no other break
         if not line:
             continue
         row = json.loads(line)

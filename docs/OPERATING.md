@@ -139,8 +139,11 @@ sits the exam until it is posted, and the timers that give up on missing grades 
 then, so nothing is lost meanwhile. Started again, it makes the exam of any open round still
 without one. What it harvested is kept, so a second try does not harvest again. Do not
 leave it down for long: Bluesky's relay holds about a day and a half of posts, and a source
-that can no longer give the window is left out of that round's exam. A round it has failed
-five times is left alone until it is restarted; the log says why.
+that can no longer give the window is left out of that round's exam. A round whose exam it
+fails to make is tried again for as long as the round is open: after 20 seconds, then twice
+as long each time, to ten minutes. The log says why each time. An hour the server was not
+told of when it was harvested, because the server was restarting, is told of within two
+minutes of its answering again.
 
 A source that fails during a harvest is left out of that round, and the rest is kept. The
 log names it.

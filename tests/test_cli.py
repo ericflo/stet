@@ -295,3 +295,36 @@ def test_harvest_holds_hours_spread_over_the_last_day_and_only_asks_for_what_is_
     broken = None
     cli.main(["harvest", "--fresh", "--hours", "1"])
     assert asked == [last] and sorted(data.harvested()) == [last]
+
+
+def test_the_examiner_never_gives_a_round_up_and_tries_less_often(monkeypatch):
+    from stet import cli
+
+    waits = [cli._again_in(n) for n in range(1, 40)]
+    assert waits[:6] == [20, 40, 80, 160, 320, 600]
+    assert max(waits) == 600 and waits == sorted(waits)  # ten minutes at most, for as long as the round is open
+
+
+def test_an_hour_the_server_was_not_told_of_is_told_of_later(monkeypatch, tmp_path):
+    from stet import cli, client
+    from stet.spec import load_season
+
+    season = load_season("s2")
+    monkeypatch.setattr(cli, "_hours_dir", lambda: tmp_path)
+    now = 1_800_000_000
+    hours = [now - now % 3600 - 3600 * i for i in (2, 3, 4)]
+    for h in hours:
+        (tmp_path / f"{h}.jsonl").write_text("{}\n")
+    (tmp_path / f"{hours[0] - 40 * 3600}.jsonl").write_text("{}\n")  # too old for any round still to come
+    (tmp_path / f"{hours[0] + 3600}.part.jsonl").write_text("")  # one being written
+    asked, told = [], []
+
+    def request(method, path, body=None, **kw):
+        asked.append((method, path))
+        return {"harvests": [{"hour": hours[1], "sha256": "0" * 64}]}
+
+    monkeypatch.setattr(client, "request", request)
+    monkeypatch.setattr(cli, "_commit_hour", lambda hour, path, key: told.append((hour, path.name)))
+    assert cli._commit_missed(season, object(), now) == sorted([hours[0], hours[2]])
+    assert told == [(h, f"{h}.jsonl") for h in sorted([hours[0], hours[2]])]
+    assert asked == [("GET", "/api/v1/harvests?limit=72")]
