@@ -91,6 +91,36 @@ func TestARatingIsDrawnTowardsTheFieldsTheMoreTheFewerItsRounds(t *testing.T) {
 	}
 }
 
+// A failed round marks its own curator down, and says nothing about how much a round's gain
+// moves: nobody else's standard error is any wider for it.
+func TestAFailedRoundIsAPenaltyAndNotNoise(t *testing.T) {
+	// Two editors, so that k is the usual 4 whatever the ratings are. Six rounds, in which
+	// they wobble by a thousandth of a bit; in the last, b fails, and counts as zero.
+	var without []entryRow
+	for r := 1; r <= 6; r++ {
+		wobble := 0.001 * float64(2*(r%2)-1)
+		without = append(without, entryRow{RoundIdx: r, EditorID: "a", Gain: 0.10 + wobble, Valid: true})
+		if r < 6 {
+			without = append(without, entryRow{RoundIdx: r, EditorID: "b", Gain: 0.08 - wobble, Valid: true})
+		}
+	}
+	with := append(append([]entryRow(nil), without...), entryRow{RoundIdx: 6, EditorID: "b", Gain: 0, Valid: false})
+	for _, prior := range []float64{0, priorRounds} {
+		clean, _ := fitRatings(without, noiseFloor, prior)
+		failed, _ := fitRatings(with, noiseFloor, prior)
+		if math.Abs(failed["a"].SE-clean["a"].SE) > 1e-12 {
+			t.Fatalf("prior %v: b's failed round moved a's standard error from %v to %v", prior, clean["a"].SE, failed["a"].SE)
+		}
+		// The noise is the same, and b's rating rests on one round more.
+		if want := clean["b"].SE * math.Sqrt((5+shrinkUsual)/(6+shrinkUsual)); math.Abs(failed["b"].SE-want) > 1e-12 {
+			t.Fatalf("prior %v: b's standard error with its failed round is %v, want %v", prior, failed["b"].SE, want)
+		}
+		if b := failed["b"]; b.N != 6 || b.Invalid != 1 || !(b.Adjusted < clean["b"].Adjusted-0.01 && b.Shrunk < clean["b"].Shrunk) {
+			t.Fatalf("prior %v: the failed round was not held against b: %+v, and without it %+v", prior, *b, *clean["b"])
+		}
+	}
+}
+
 // A place on the ladder goes to what a curator has shown it is at least worth. Three rounds
 // with a better mean than sixteen steady ones stand higher on the board, are marked as too
 // close to call, and do not take the place.

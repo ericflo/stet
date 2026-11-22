@@ -69,7 +69,8 @@ const (
 // weighted by its rounds. k = s2/tau2 sets one round's noise about an editor's own mean
 // (s2) against how far editors really are from each other (tau2): with k rounds, a rating
 // is midway between the editor's own mean and the field's. s2 is pooled over every editor
-// with two rounds or more, together with noise: what a round's gain was taken to move by
+// with two measured rounds or more (a failed round is a penalty on its editor's rating, and
+// no reading of the noise), together with noise: what a round's gain was taken to move by
 // before the season began, counted as prior rounds' worth of evidence. A season's first few
 // rounds say little about their own spread, and would otherwise put a standard error on
 // every rating from two or three numbers. tau2 is the variance of the adjusted means less
@@ -143,20 +144,28 @@ func fitRatings(entries []entryRow, noise, prior float64) (map[string]*Rating, m
 	for _, id := range ids {
 		es := byEditor[id]
 		r := &Rating{N: len(es)}
-		var resid []float64
+		var resid, measured []float64
 		for _, e := range es {
 			r.Mean += e.Gain / float64(len(es))
 			resid = append(resid, e.adjusted(diff))
-			if !e.Valid {
+			if e.Valid {
+				measured = append(measured, e.adjusted(diff))
+			} else {
 				r.Invalid++
 			}
 		}
 		r.Adjusted = mean(resid)
-		if len(resid) >= 2 {
-			for _, x := range resid {
-				ss += (x - r.Adjusted) * (x - r.Adjusted)
+		// How much a round's gain moves is read from the rounds that were measured, about
+		// their own mean. What a failed round counts as is far from them by design: it marks
+		// its editor's rating down, and counted as noise it would widen everybody's.
+		if len(measured) >= 2 {
+			own := mean(measured)
+			for _, x := range measured {
+				ss += (x - own) * (x - own)
 			}
-			df += len(resid) - 1
+			df += len(measured) - 1
+		}
+		if len(resid) >= 2 {
 			several++
 		}
 		adjusted = append(adjusted, r.Adjusted)
