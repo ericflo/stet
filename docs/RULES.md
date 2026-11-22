@@ -156,8 +156,7 @@ each, every row below counts the same.
 |---|---|---|---|
 | Writing (75%) | Reference | Encyclopedia text | New and extended Wikipedia articles |
 | | News | News reports | Common Crawl's news crawl |
-| | Technical | Issues, release notes, patches, questions and answers | GitHub, the kernel's mailing lists, Stack Overflow |
-| | Science | Abstracts, and questions and answers on the sciences | Crossref, Stack Exchange |
+| | Technical | Issues, pull requests, release notes, patches | GitHub, the kernel's mailing lists |
 | | Conversation | Posts and replies | Hacker News, Lemmy, forums, Bluesky, Mastodon, Wikipedia's talk pages |
 | Skills (25%) | Agents | What a tool says back, in a session at a shell | Generated |
 | | Reading | Taking an answer, or a new rule, from the context | Generated |
@@ -185,9 +184,10 @@ holds is dropped from the exam.
 either. Every answer follows from what the item itself shows: there is nothing to know by
 heart.
 
-**Watched.** The exam also asks kinds of question that count for nothing: arithmetic, unit
-conversion, tracing a program, facts and others, each cold and with worked examples shown
-first. Their scores are published part by part with every round. Season 1 counted them,
+**Watched.** The exam also holds parts that count for nothing: kinds of question
+(arithmetic, unit conversion, tracing a program, facts and others, each cold and with worked
+examples shown first), and kinds of writing new to the exam (science abstracts, from
+Crossref). Their scores are published part by part with every round. Season 1 counted them,
 and they turned out to say nothing about a curator at this student's size: two trainings of
 the same data disagreed about them more than two curators did. A watched part earns a place
 in the next version of the rules when, over at least twenty settled rounds, curators differ

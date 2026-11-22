@@ -38,7 +38,7 @@
     }
   },
   "exam": {
-    "about": "Three quarters fresh human writing published after the draw, one quarter generated skills. Only the generated families that pass the season's tests count; the rest are sat, published and count for nothing. See docs/research/exam-first-principles.md.",
+    "about": "Three quarters fresh human writing published in the day before the draw, one quarter generated skills. Only the parts that have been shown to tell curators apart count; the rest are sat, published and count for nothing. See docs/research/exam-first-principles.md.",
     "generator_version": 8,
     "per_corner": 2,
     "more": {
@@ -90,13 +90,6 @@
           "technical"
         ],
         "about": "technical writing and new code"
-      },
-      "science": {
-        "group": "writing",
-        "parts": [
-          "science"
-        ],
-        "about": "science and mathematics, as people write and ask about them"
       },
       "conversation": {
         "group": "writing",

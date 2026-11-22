@@ -46,10 +46,13 @@ def _clip(text: str, n: int) -> str:
 
 
 def _codeish(text: str) -> bool:
+    """Whether most of a text's lines read as code or a patch. A line of code is short: a
+    paragraph of prose is one long line, and a semicolon or an equals sign in it says nothing."""
     lines = [ln for ln in text.splitlines() if ln.strip()]
     if not lines:
         return False
-    code = sum(1 for ln in lines if re.search(r"[{};=]|^\s{4}|\)\s*$|^\s*(def|class|import|return|if|for)\b", ln))
+    code = sum(1 for ln in lines if len(ln) <= 200 and re.search(
+        r"[{};=]|^\s{4}|\)\s*$|^\s*(def|class|import|return|if|for)\b|^(diff |@@ |\+\+\+ |--- |[+-]\s)", ln))
     return code / len(lines) > 0.35
 
 
@@ -151,10 +154,15 @@ def _select_kind(items: list[Item], rng, n: int, per_corner: int, shares: dict, 
     return chosen
 
 
-def select(docs: list[Doc], seed: bytes, n: int, per_corner: int = 2, shares: dict | None = None) -> list[Item]:
+WATCHED = 60  # items of a kind of writing that counts for nothing: enough to say whether it should
+
+
+def select(docs: list[Doc], seed: bytes, n: int, per_corner: int = 2, shares: dict | None = None, watched=()) -> list[Item]:
     """About n items: each kind of writing an equal part (a kind without enough candidates gives
     what it leaves to the others), languages inside each kind by their share of the web, sources
-    inside each language in turn, and at most per_corner from any corner."""
+    inside each language in turn, and at most per_corner from any corner. A kind named in
+    `watched` is no part of the score: it is given WATCHED items at most, and the rest of n goes
+    to the kinds that count."""
     from ..aggregate import kind_of
 
     shares = shares or SHARES
@@ -165,7 +173,9 @@ def select(docs: list[Doc], seed: bytes, n: int, per_corner: int = 2, shares: di
             by_kind[kind_of(it)].append(it)
     used: dict[str, int] = defaultdict(int)
     chosen: dict[str, list[Item]] = {k: [] for k in by_kind}
-    left = sorted(by_kind)
+    for k in sorted(set(watched) & set(by_kind)):
+        chosen[k] = _select_kind(by_kind[k], rng.child(f"{k}/watched"), WATCHED, per_corner, shares, used)
+    left = sorted(set(by_kind) - set(watched))
     while left and (want := n - sum(map(len, chosen.values()))) > 0:
         part = max(1, want // len(left))
         for k in list(left):

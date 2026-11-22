@@ -56,7 +56,7 @@
           <div><dt>on the exam</dt><dd>{{f3 .Loss}}<small>bits per byte, against {{f3 .Baseline}} unedited</small></dd></div>
         </dl>{{end}}
         <div class="grid2">
-          {{if $d.SourceChart}}<figure class="figure"><h3>Where the gain comes from</h3><p class="how">Its gain on each part of the exam, in bits per byte better than unedited. The five kinds of writing are three quarters of the score, the five skills one quarter. Right is better.</p><div class="plot">{{$d.SourceChart}}</div>{{if $d.Watched}}<p class="how">Watched, counting for nothing: {{range $i, $k := $d.Watched}}{{if $i}}, {{end}}{{$k.Part}} {{signed3 $k.Gain}}{{end}}. <a href="/glossary#watched">Why?</a></p>{{end}}</figure>{{end}}
+          {{if $d.SourceChart}}<figure class="figure"><h3>Where the gain comes from</h3><p class="how">Its gain on each part of the exam, in bits per byte better than unedited. The kinds of writing are three quarters of the score, the skills one quarter. Right is better.</p><div class="plot">{{$d.SourceChart}}</div>{{if $d.Watched}}<p class="how">Watched, counting for nothing: {{range $i, $k := $d.Watched}}{{if $i}}, {{end}}{{$k.Part}} {{signed3 $k.Gain}}{{end}}. <a href="/glossary#watched">Why?</a></p>{{end}}</figure>{{end}}
           {{if $d.CurveChart}}<figure class="figure"><h3>The model, learning from it</h3><p class="how">Training loss on its pages. Low here is not the goal; the exam is.</p><div class="plot">{{$d.CurveChart}}</div></figure>{{end}}
         </div>
         <p class="after"><a class="go" href="/rounds/{{.Round}}#e-{{short .EditorID}}">who ran and graded it in round {{.RoundIdx}} →</a></p>

@@ -2,6 +2,8 @@
 
 import collections
 
+import pytest
+
 from stet.exam.aggregate import kind_of
 from stet.exam.fresh import Doc, html_text, read_snapshot, write_snapshot
 from stet.exam.fresh.select import items_of, select
@@ -74,6 +76,27 @@ def test_selection_caps_corners_shares_languages_and_is_repeatable():
     langs = collections.Counter(it.lang for it in a)
     # English has 14 corners (7 topics x 2 kinds), so at most 28 items; a bulk-writing language gets its small share
     assert langs["en"] == 28 and langs["kaa"] <= 4 and langs["de"] > 0
+
+
+def test_a_watched_kind_of_writing_gets_a_few_items_and_the_rest_go_to_those_that_count():
+    from stet.exam.aggregate import kind_of
+    from stet.exam.fresh.select import WATCHED
+
+    docs = [_doc(i, topic=f"Q{i}") for i in range(400)]  # reference
+    docs += [_doc(1000 + i, source="github", topic=f"r{i}", title=f"Issue {i}") for i in range(400)]  # technical
+    docs += [_doc(2000 + i, source="crossref", topic=f"j{i}", title=f"Paper {i}") for i in range(400)]  # science
+    kinds = collections.Counter(kind_of(it) for it in select(docs, b"seed", 300, per_corner=2))
+    assert kinds["science"] == pytest.approx(100, abs=2)  # every kind an equal part, when none is named as watched
+    kinds = collections.Counter(kind_of(it) for it in select(docs, b"seed", 300, per_corner=2, watched={"science", "instructional"}))
+    assert kinds["science"] == WATCHED and kinds["reference"] == pytest.approx(120, abs=2) and kinds["technical"] == pytest.approx(120, abs=2)
+
+
+def test_prose_with_a_semicolon_is_not_code_and_a_patch_is():
+    from stet.exam.fresh.select import _codeish
+
+    abstract = "We study the effect of x on y; the results (n = 40) hold in three cohorts. " * 6
+    patch = "Fix the off-by-one in the ring buffer.\n\n--- a/kernel/ring.c\n+++ b/kernel/ring.c\n@@ -10,7 +10,7 @@\n-\tif (head > size)\n+\tif (head >= size)\n \t\treturn -EINVAL;\n"
+    assert not _codeish(abstract) and _codeish(patch) and _codeish("x = 1\nfor i in range(3):\n    print(i)\n")
 
 
 def test_other_sources_become_replies_or_writing():

@@ -18,7 +18,7 @@ def test_the_season_is_the_exam_at_the_standard_scale():
 
     s1 = load_season()
     assert s1.id == CURRENT_SEASON == "s2" and s1.official_scale == "standard" and "heldout_exam" not in s1.raw
-    assert s1.exam_sources == ["reference", "news", "technical", "science", "conversation", "agents", "reading", "transformation", "logic", "grammar"]
+    assert s1.exam_sources == ["reference", "news", "technical", "conversation", "agents", "reading", "transformation", "logic", "grammar"]
     assert s1.raw["exam"]["groups"] == {"writing": 0.75, "skills": 0.25} and s1.answer_floor_bytes == 16
     assert s1.ink_tokens(s1.scale("standard")) == 16_000
     assert s1.raw["exam"]["generator_version"] == gen.VERSION and s1.raw["exam"]["more"] == gen.MORE

@@ -98,7 +98,11 @@ def build(rnd, scale, snapshots: list[tuple[int, Path]], work: Path, log=print) 
     corpus = data.corpus(rnd, scale)
     mix = shares(corpus, rnd.seed)  # every language in proportion to the round's own corpus
     log(f"  the corpus's languages: {', '.join(f'{k} {v:.1f}%' for k, v in list(mix.items())[:8])}, and {max(0, len(mix) - 8)} more")
-    fresh = select(docs, rnd.seed, int(cfg["fresh"]["items"]), per_corner=int(cfg["fresh"]["per_corner"]), shares=mix)
+    from .aggregate import SOURCE_KIND, WATCH, plan_of
+
+    plan = plan_of(season)
+    watched = {k for k in set(SOURCE_KIND.values()) if plan.pillar_of(k) == WATCH}  # kinds of writing that count for nothing
+    fresh = select(docs, rnd.seed, int(cfg["fresh"]["items"]), per_corner=int(cfg["fresh"]["per_corner"]), shares=mix, watched=watched)
     mark = work / f"seen-{digest(fresh)[:12]}.json"
     if mark.exists():
         dropped = set(json.loads(mark.read_text()))

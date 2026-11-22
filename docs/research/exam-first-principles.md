@@ -522,8 +522,9 @@ that pass add something the writing does not. So season 2 keeps both.
 - **Two groups with fixed shares: writing three quarters, skills one quarter.** Inside a group
   every pillar counts the same, and a pillar missing from a round gives its share to its own
   group, never to the other.
-- **Writing:** reference, news, technical, science, conversation (discussion and social). All
-  of it written by people after every entry in the round was frozen.
+- **Writing:** reference, news, technical, conversation (discussion and social). All of it
+  written by people after every entry in the round was frozen. Science abstracts are new to
+  the exam and start on the watch list.
 - **Skills:** agents, reading, transformation, logic, grammar: the five generated families that
   pass three tests on the pilot (spread over noise above 1.5, order carried to the large
   student at 0.55 or better, and not at chance at the official size) and whose answers follow
@@ -551,7 +552,11 @@ this one. On the pilot, the multilingual reference filter is the only curator ab
 unedited corpus, and every English-only filter is 0.18 to 0.38 bits per byte below it. That is
 what 7.2 always said the target was. Season 1's skills were quietly voting the other way.
 
-One caution on the evidence: with eight curators, most of them English-only filters that the
+Two cautions on the evidence. The pilot's exam held Wikipedia's writing only: new articles,
+additions to old ones, and talk pages. News, technical writing and social posts were not in
+it, and are taken to behave as the same kind of thing: long passages of human text, which is
+where the steadiness comes from. Season 2 publishes every part's spread over noise as it
+runs (`stet exam audit --over`), and that is where the assumption is checked. And with eight curators, most of them English-only filters that the
 writing score nearly ties, rank agreement cannot tell a writing share of 67% from one of 90%.
 The share is a declared value, like 7.1's; what the pilot settles is that the floor and the
 watch list cost no agreement and remove three quarters of the noise.

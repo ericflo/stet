@@ -19,7 +19,7 @@
   "key_bytes": 64,
   "min_letters": 38
  },
- "digest": "3ab42d4952a635ffdd763fb2779c1c15742e5da92d6849ae13900f2d97c0258c",
+ "digest": "6933de8396adfb3b1619b1eb7e558ddd41b8104640e94948e6fa265333c677bb",
  "draw_grid_seconds": 600,
  "environment": {
   "also": {
@@ -174,14 +174,6 @@
     ]
    },
    {
-    "about": "science and mathematics, as people write and ask about them",
-    "group": "writing",
-    "name": "science",
-    "parts": [
-     "science"
-    ]
-   },
-   {
     "about": "replies in discussions, and what people post",
     "group": "writing",
     "name": "conversation",
@@ -238,7 +230,6 @@
   "reference",
   "news",
   "technical",
-  "science",
   "conversation",
   "agents",
   "reading",

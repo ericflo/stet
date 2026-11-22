@@ -223,10 +223,11 @@ def test_every_family_and_source_has_a_place():
     plan = current_plan()
     counted = {f.NAME for f in FAMILIES if plan.pillar_of(f.NAME) != WATCH}
     assert counted == {"agent", "context", "transform", "logic", "grammar"} == set(MORE)  # the families that count make more items
-    assert {plan.pillar_of(k) for k in set(SOURCE_KIND.values()) - {"instructional"}} == {"reference", "news", "technical", "science", "conversation"}
-    assert plan.pillar_of("instructional") == WATCH and plan.pillar_of("radio") == WATCH
+    assert {plan.pillar_of(k) for k in set(SOURCE_KIND.values()) - {"instructional", "science"}} == {"reference", "news", "technical", "conversation"}
+    # A kind of writing the season has not measured yet is sat and counts for nothing, like a family of problems.
+    assert plan.pillar_of("science") == WATCH and plan.pillar_of("instructional") == WATCH and plan.pillar_of("radio") == WATCH
     w = plan.weights(plan.pillars)
-    assert sum(w.values()) == pytest.approx(1.0) and w["reference"] == pytest.approx(0.15) and w["logic"] == pytest.approx(0.05)
+    assert sum(w.values()) == pytest.approx(1.0) and w["reference"] == pytest.approx(0.1875) and w["logic"] == pytest.approx(0.05)
 
 
 def test_inside_a_pillar_each_part_counts_the_same():

@@ -26,9 +26,12 @@ from ..rng import Rng
 from . import (
     bluesky,
     ccnews,
+    crossref,
+    discourse,
     github,
     hackernews,
     lemmy,
+    lore,
     mastodon,
     read_snapshot,
     wikipedia,
@@ -57,8 +60,11 @@ def _github(start, end, cap, rng, log):
 
 
 # Sources besides Wikipedia, each with the kind of writing it gives (see aggregate.SOURCE_KIND).
+# Stack Exchange was tried and left out: in 2026 its whole network is asked about 200 questions a
+# day, four an hour, and without a key it allows 300 requests a day.
 OTHERS = {"ccnews": ccnews.harvest, "github": _github, "hackernews": hackernews.harvest, "lemmy": lemmy.harvest,
-          "bluesky": bluesky.harvest, "mastodon": mastodon.harvest}
+          "bluesky": bluesky.harvest, "mastodon": mastodon.harvest, "discourse": discourse.harvest,
+          "crossref": crossref.harvest, "lore": lore.harvest}
 
 
 def added_cap(lang: str) -> int:
