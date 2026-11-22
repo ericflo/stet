@@ -4,7 +4,8 @@ Stet exists to find the best pretraining data there is. This note asks what an e
 be to point the competition at that, and what that means for Stet. It was written while the
 first season's exam (six kinds of English prose, a fixed public pack) was the score, and the
 exam proposed to replace it (here, "the new exam") was being trained and measured beside
-it. Section 7 is what was decided; it is season 1's exam.
+it. Section 7 is what was decided; it is season 1's exam. Section 9 is what season 1 taught and
+what season 2 does about it.
 
 ## The answer, in one paragraph
 
@@ -454,3 +455,111 @@ less.
   Fresh text is not all human writing any more, and no keyless signal tells the two apart.
 - Some kinds of writing have no keyless source that publishes all the time: how-to writing,
   government and legal text, fiction.
+
+## 9. Season 2 (November 2026)
+
+Season 1 fixed the first exam's two faults: nobody can know the exam, and it is not six kinds of
+English prose. It paid for that in steadiness and in compute. Four separate assessments of the
+competition were written from first principles at the end of the season, and every measurement
+below was made on the scale pilot of section 6 (nine curators, three student sizes, repeated
+trainings, every item's score kept), so none of it cost a training.
+
+The goal they were held to: the order this competition gives curators should be the order
+they would have at real scale, where a selection of 500B tokens is asked to beat 40T raw ones,
+and it should be found with as few trainings as possible.
+
+### 9.1 What was wrong with the score
+
+Section 7.1 gave seven capabilities the same weight and said of a pillar whose order does not
+carry over that it "gets more items or a bigger student, not less weight. Its weight is a
+statement of value." The pilot shows where that goes wrong. Item by item, at the official size:
+
+| part | items | spread over noise | order carries to the large student |
+|---|---|---|---|
+| discussion (fresh) | 74 | 23.5 | 0.95 |
+| reference (fresh) | 729 | 16.3 | 0.88 |
+| agent | 32 | 4.5 | 0.90 |
+| transform | 28 | 3.4 | 0.90 |
+| grammar | 26 | 2.2 | 0.81 |
+| context | 72 | 1.6 | 0.71 |
+| logic | 44 | 1.6 | 0.57 |
+| knowledge | 200 | 2.1 | 0.57 |
+| algorithms, algebra, word problems | | 1.6 to 2.6 | 0.17 to 0.43 |
+| arithmetic, multi-step, units, structure, programs | | 0.8 to 1.8 | at chance at every size |
+
+Nine of the fourteen generated families order curators no better than a coin at any size we
+can train. A student of this size cannot do them cold, whatever it was trained on. Their weight
+was not a statement of value: it was three sevenths of the score given to noise, and the noise
+is what every extra training in season 1 was spent averaging away.
+
+Two faults in the arithmetic made it worse:
+
+- **A one-byte answer weighed as much as a paragraph.** Bits per byte of " 4" is all of an
+  item's score, and it swings by whole bits between two trainings.
+- **A long answer was cut from the left.** When a question and its answer overflowed the
+  window, the answer's own beginning went, and what was left was divided by all of its bytes.
+
+### 9.2 The rule, fixed before the numbers
+
+*Adopt the aggregate with the best spread over noise at the official size, provided its rank
+agreement with the large student is no lower than season 1's; within 5%, the simpler one.*
+
+| aggregate | noise | spread over noise | agrees with large |
+|---|---|---|---|
+| season 1 | 0.0196 | 3.4 | 0.90 |
+| pooled bits in a stratum | 0.0157 | 4.0 | 0.95 |
+| square-root weights | 0.0172 | 3.8 | 0.98 |
+| 16-byte floor | 0.0097 | 6.0 | 0.90 |
+| fresh text only | 0.0049 | 28.0 | 0.88 |
+| generated only | 0.0225 | 2.8 | 0.93 |
+| **season 2: floor, 3/4 writing, 1/4 the skills that pass, small languages pooled** | **0.0052** | **21.7** | **0.95** |
+
+Fresh text alone is the steadiest, and it carries a little less well than the mix: the skills
+that pass add something the writing does not. So season 2 keeps both.
+
+### 9.3 What season 2's score is
+
+- **Two groups with fixed shares: writing three quarters, skills one quarter.** Inside a group
+  every pillar counts the same, and a pillar missing from a round gives its share to its own
+  group, never to the other.
+- **Writing:** reference, news, technical, science, conversation (discussion and social). All
+  of it written by people after every entry in the round was frozen.
+- **Skills:** agents, reading, transformation, logic, grammar: the five generated families that
+  pass three tests on the pilot (spread over noise above 1.5, order carried to the large
+  student at 0.55 or better, and not at chance at the official size).
+- **Watched:** every other family and every kind of writing the season does not name. They are
+  sat in every round, scored and published part by part, and count for nothing. This is where
+  7.1's statement of value now lives. A watched part earns a place in the next rules version
+  when, over at least twenty settled rounds, its spread over noise is above 1.5 and its order
+  agrees with the counted score's at 0.5 or better; the few-shot forms of the nine families
+  (several worked examples, then the question) start the season there.
+- **An item's bits are never put over fewer than 16 bytes**, and an answer or passage longer
+  than the window is scored whole, a window at a time.
+- **No share of the score rests on one or two items.** A language or a format with fewer than
+  eight items in a part counts in proportion, and a part's small languages are measured
+  together as one.
+
+The price is stated plainly: under this score a curator that keeps only English loses. Skills
+were English only and writing is in every language, and the two ordered the pilot's curators
+in opposite directions; English held 76% of season 1's exam weight and holds about 59% of
+this one. On the pilot, the multilingual reference filter is the only curator above the
+unedited corpus, and every English-only filter is 0.18 to 0.38 bits per byte below it. That is
+what 7.2 always said the target was. Season 1's skills were quietly voting the other way.
+
+One caution on the evidence: with eight curators, most of them English-only filters that the
+writing score nearly ties, rank agreement cannot tell a writing share of 67% from one of 90%.
+The share is a declared value, like 7.1's; what the pilot settles is that the floor and the
+watch list cost no agreement and remove three quarters of the noise.
+
+### 9.4 Contamination, closed further
+
+- **The overlap check counted the letters a to z.** A passage in Russian, Japanese, Chinese,
+  Arabic or Hindi gave no keys, so nothing in those languages was ever dropped for being in the
+  corpus already. Keys now count letters in every script and sentences end at 。！？ too.
+- **Ink falls tenfold**, to one ten-thousandth of the budget (16,000 tokens at the official
+  size). Ink is the only place a curator's own words can enter the training set, and nothing a
+  curator legitimately does needs more.
+- **Deleting lines is never ink.** Whole lines of one page, kept in the page's order, are
+  copies however short. Cleaning a page was the most useful thing ink was being spent on.
+- **The agent family's answers follow from the session shown**, in a project drawn from the
+  seed. Season 1's listings could be learned by heart.
