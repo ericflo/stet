@@ -533,7 +533,10 @@ which is why the loop waits between them.) Everyone else makes their account aga
 handle, and an entrant links GitHub again (`stet login --gist <url>`).
 
 The finished season's pages are archived from its database ([below](#archiving-a-season)),
-so that they stay readable under `/seasons/<id>/`. The new season does not wait for that.
+so that they stay readable under `/seasons/<id>/`. The new season does not touch that
+database, but make the archive at once: from the moment the new season is deployed until
+the archive is, the finished season is on no page of the site, neither `/seasons` nor the
+foot of `/rounds`. Season 1 was off the site that way until its archive was deployed.
 
 ## Archiving a season
 
