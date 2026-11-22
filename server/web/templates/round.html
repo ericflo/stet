@@ -63,9 +63,9 @@
       <summary class="row opens">
         <span class="rank">{{if .Place}}{{.Place}}{{else}}–{{end}}</span>
         <span class="who"><span class="name">{{.Name}}</span>{{if gt .Version 1}}<span class="ver">v{{.Version}}</span>{{end}}
-          <span class="by">{{.Owner}}{{if not .Valid}} · <span class="neg">{{if .Void}}not run{{else}}failed{{end}}</span>{{else if not (or $d.Alone $d.Same)}} · {{template "sure" .EntryView}}{{end}}{{if .Together}} <span class="tag red">disputed</span>{{end}}{{if .Disputed}} <span class="tag red">{{.Disputed}} differed</span>{{end}}</span></span>
+          <span class="by">{{.Owner}}{{if not .Valid}} · <span class="neg">{{if .Void}}not run{{else}}failed{{end}}</span>{{template "counts-as" .EntryView}}{{else if not (or $d.Alone $d.Same)}} · {{template "sure" .EntryView}}{{end}}{{if .Together}} <span class="tag red">disputed</span>{{end}}{{if .Disputed}} <span class="tag red">{{.Disputed}} differed</span>{{end}}</span></span>
         {{if .Valid}}{{template "bar" (dict "V" .Gain "Top" $d.Top)}}{{else if not .Void}}{{template "bar" (dict "V" 0.0 "Top" $d.Top "Fail" true)}}{{else}}<span class="bar" aria-hidden="true"></span>{{end}}
-        <span class="val{{if and .Valid (lt .Gain 0.0)}} neg{{end}}">{{if .Valid}}{{gain .Gain}}{{else if .Void}}—{{else}}0.000{{end}}</span>
+        <span class="val{{if and .Valid (lt .Gain 0.0)}} neg{{end}}">{{if .Valid}}{{gain .Gain}}{{else}}—{{end}}</span>
       </summary>
       <div class="behind">
         <div class="sure-line">{{if $d.Alone}}{{template "sure" .EntryView}}{{end}}<span class="says">{{(trust .EntryView).Says}}{{if and .Valid (gt .NRuns 1)}} The score is the {{if gt .NRuns 2}}median{{else}}mean{{end}} of {{.NRuns}} runs.{{end}}</span></div>
@@ -100,6 +100,7 @@
       <div class="in">
         <p class="lead">A <b>run</b> is one verifier's machine running a curator on the round's pages, in a sandbox with no network, for up to {{howlong .Scale.EditSeconds}}. It writes an edit script: plain data saying which pieces to keep, in what order.{{if gt $d.RunsPerEntry 1}} Each curator is run by {{$d.RunsPerEntry}} different people when that many are around; runs within {{f2 $d.Tolerance.Run}} bits per byte of each other confirm each other.{{end}}</p>
         <p class="lead">A <b>grade</b> is a verifier training the model on a script and sitting it on the round's exam. A grade within {{f2 $d.Tolerance.Grade}} bits per byte of the script's gain agrees; the gain is the median of the grades marked <i>counted</i>.</p>
+        {{if $d.Scores}}<p class="lead">Every one of these numbers can be worked out again: <a href="/api/v1/rounds/{{$d.ID}}/scores">download every grader's score on every item of the exam</a>.</p>{{end}}
         <p class="lead">Re-grade any of them yourself:</p>
         <div class="cmd"><pre><span class="p">$ </span><span data-copy-text>stet score {{if $d.Example}}{{$d.Example}}{{else}}owner/name{{end}} --round {{$d.ID}}</span></pre><button type="button" data-copy>copy</button></div>
       </div>

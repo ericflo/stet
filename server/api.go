@@ -233,6 +233,7 @@ func (a *App) mountAPI(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/rounds", a.apiRounds)
 	mux.HandleFunc("GET /api/v1/rounds/{id}", a.apiRound)
 	mux.HandleFunc("GET /api/v1/rounds/{id}/exam", a.apiExamGet)
+	mux.HandleFunc("GET /api/v1/rounds/{id}/scores", a.apiScoresGet)
 	mux.HandleFunc("POST /api/v1/admin/rounds/{id}/exam", a.apiExamPost)
 	mux.HandleFunc("GET /api/v1/leaderboard", a.apiLeaderboard)
 	mux.HandleFunc("GET /api/v1/verifiers", a.apiVerifiers)
@@ -616,7 +617,11 @@ func (a *App) apiMe(w http.ResponseWriter, r *http.Request) {
 			es := s.ofEditor[e.ID]
 			for i := len(es) - 1; i >= 0; i-- {
 				if !sealed(s, es[i]) {
-					j["last"] = map[string]any{"round": roundID(a.season.ID, es[i].RoundIdx), "gain": places5(es[i].Gain), "valid": es[i].Valid}
+					last := map[string]any{"round": roundID(a.season.ID, es[i].RoundIdx), "gain": places5(es[i].Gain), "valid": es[i].Valid}
+					if as, ok := countsAs(s, es[i]); ok {
+						last["counts_as"] = places5(as)
+					}
+					j["last"] = last
 					break
 				}
 			}
@@ -638,7 +643,11 @@ func (a *App) editorJSON(s *State, e *Editor, b *Board) map[string]any {
 	}
 	if row := b.ByID[e.ID]; row != nil {
 		j["rounds"], j["rating"], j["mean_gain"], j["se"] = row.Rounds, places5p(row.Rating), places5p(row.MeanGain), places5p(row.SE)
+		j["adjusted"], j["lower"] = places5p(row.Adjusted), places5p(row.Lower)
 		j["multiplier"], j["capped"], j["provisional"], j["record"], j["ladder"] = row.Multiplier, row.Capped, row.Provisional, row.Record, row.Ladder
+		if row.Tied {
+			j["tied"] = true
+		}
 		if row.Rank > 0 {
 			j["rank"] = row.Rank
 		}
@@ -830,6 +839,11 @@ func (a *App) entryJSON(s *State, e *Entry) map[string]any {
 		if e.Void {
 			j["void"] = true
 		}
+		// It scored nothing, and what the round counts as for it is not nothing: the lowest
+		// gain of the round's valid entries, or zero if that is lower.
+		if as, ok := countsAs(s, e); ok {
+			j["counts_as"] = places5(as)
+		}
 	}
 	if e.Detail != nil {
 		j["detail"] = e.Detail
@@ -848,6 +862,10 @@ func entriesOfRound(s *State, idx int) []*Entry {
 		}
 		if sealed(s, es[i]) {
 			return es[i].EditorID < es[j].EditorID
+		}
+		// An entry that failed is below every entry that did not, whatever those scored.
+		if es[i].Valid != es[j].Valid {
+			return es[i].Valid
 		}
 		if es[i].Gain != es[j].Gain {
 			return es[i].Gain > es[j].Gain
@@ -1012,6 +1030,10 @@ func (a *App) roundJSON(s *State, r *Round) map[string]any {
 	if r.SettledAt > 0 {
 		j["settled_at"] = r.SettledAt
 	}
+	// Every item score behind the round's scores, once it has been put where it is served from.
+	if scoresArchived(r) {
+		j["scores"] = a.cfg.APIURL + "/api/v1/rounds/" + roundID(a.season.ID, r.Idx) + "/scores"
+	}
 	return j
 }
 
@@ -1078,6 +1100,7 @@ func (a *App) apiLeaderboard(w http.ResponseWriter, r *http.Request) {
 		for i, r := range rows {
 			c := *r
 			c.Rating, c.MeanGain, c.SE, c.Multiplier = places5p(r.Rating), places5p(r.MeanGain), places5p(r.SE), places5p(r.Multiplier)
+			c.Adjusted, c.Lower = places5p(r.Adjusted), places5p(r.Lower)
 			out[i] = &c
 		}
 		return out

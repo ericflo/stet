@@ -116,7 +116,7 @@ func TestRatingsAdjustForRoundDifficulty(t *testing.T) {
 	for _, r := range []int{3, 4} {
 		es = append(es, entryRow{RoundIdx: r, EditorID: "late", Gain: 0.6 + diff[r], Valid: true})
 	}
-	rt, _ := fitRatings(es)
+	rt, _ := fitRatings(es, noiseFloor)
 	if rt["late"].Mean >= rt["old"].Mean {
 		t.Fatal("test is not testing anything")
 	}
@@ -541,26 +541,28 @@ func (w *world) report(a *actor, c *claimed, loss float64) (int, string) {
 }
 
 type entryJ struct {
-	Editor     string         `json:"editor"`
-	Name       string         `json:"name"`
-	Status     string         `json:"status"`
-	Stage      string         `json:"stage"`
-	Valid      bool           `json:"valid"`
-	Void       bool           `json:"void"`
-	Loss       *float64       `json:"loss"`
-	Gain       *float64       `json:"gain"`
-	Results    int            `json:"results"`
-	Reason     string         `json:"reason"`
-	Script     map[string]any `json:"script"`
-	Edit       map[string]any `json:"edit"`
-	Detail     *EntryDetail   `json:"detail"`
-	Runs       []RunView      `json:"runs"`
-	Dropped    []RunView      `json:"dropped_runs"`
-	NRuns      int            `json:"n_runs"`
-	Confirmed  bool           `json:"confirmed"`
-	OneGrader  bool           `json:"one_grader"`
-	OneRunner  bool           `json:"one_runner"`
-	RunsDiffer bool           `json:"runs_differ"`
+	Editor     string             `json:"editor"`
+	Name       string             `json:"name"`
+	Status     string             `json:"status"`
+	Stage      string             `json:"stage"`
+	Valid      bool               `json:"valid"`
+	Void       bool               `json:"void"`
+	Loss       *float64           `json:"loss"`
+	Gain       *float64           `json:"gain"`
+	CountsAs   *float64           `json:"counts_as"`
+	BySource   map[string]float64 `json:"by_source"`
+	Results    int                `json:"results"`
+	Reason     string             `json:"reason"`
+	Script     map[string]any     `json:"script"`
+	Edit       map[string]any     `json:"edit"`
+	Detail     *EntryDetail       `json:"detail"`
+	Runs       []RunView          `json:"runs"`
+	Dropped    []RunView          `json:"dropped_runs"`
+	NRuns      int                `json:"n_runs"`
+	Confirmed  bool               `json:"confirmed"`
+	OneGrader  bool               `json:"one_grader"`
+	OneRunner  bool               `json:"one_runner"`
+	RunsDiffer bool               `json:"runs_differ"`
 }
 
 func (w *world) entries(a *actor, idx int) []entryJ {
@@ -1222,15 +1224,18 @@ func TestAnInvalidEntrySaysNothingAboutItsRound(t *testing.T) {
 			rows = append(rows, entryRow{RoundIdx: r, EditorID: id, Gain: g + d, Valid: true})
 		}
 	}
-	before, _ := fitRatings(rows)
-	// One more editor times out in round 2. Its zero is its own business.
-	after, _ := fitRatings(append(rows, entryRow{RoundIdx: 2, EditorID: "z", Gain: 0, Valid: false}))
+	before, _ := fitRatings(rows, noiseFloor)
+	// One more editor times out in round 2, and counts as the round's lowest gain. What it
+	// counts as is its own business.
+	low := gains["a"] + hard[2]
+	after, diff := fitRatings(append(rows, entryRow{RoundIdx: 2, EditorID: "z", Gain: low, Valid: false}), noiseFloor)
 	for id := range gains {
 		if math.Abs(before[id].Adjusted-after[id].Adjusted) > 1e-9 {
 			t.Fatalf("%s moved from %.5f to %.5f because someone else's entry was invalid", id, before[id].Adjusted, after[id].Adjusted)
 		}
 	}
-	if z := after["z"]; z.Adjusted != 0 || z.Invalid != 1 {
+	// Its own rating starts from that gain, less the round's difficulty like any other.
+	if z := after["z"]; math.Abs(z.Adjusted-(low-diff[2])) > 1e-9 || z.Invalid != 1 {
 		t.Fatalf("the invalid entry's own rating: %+v", z)
 	}
 }
@@ -1253,6 +1258,11 @@ func TestAFailedEditScoresAsUneditedAndRetiresTheEditor(t *testing.T) {
 		es := w.entries(alice, idx)
 		if es[0].Status != "settled" || es[0].Valid || es[0].Gain == nil || *es[0].Gain != 0 || !strings.Contains(es[0].Reason, "out of time") {
 			t.Fatalf("a failed edit: %+v", es[0])
+		}
+		// Nothing in the round was graded, so it has no baseline and counts in nobody's
+		// rating: the failure counts as nothing there, and is not said to.
+		if es[0].CountsAs != nil {
+			t.Fatalf("a failed entry in a round that counts for nobody is said to count as %v", *es[0].CountsAs)
 		}
 		if c := w.claim(anchor, true); c.Job != nil {
 			t.Fatalf("there is nothing to grade, but the anchor got %+v", c.Job)
@@ -2722,7 +2732,7 @@ func TestOneEditorsTimeoutMovesNobodyElsesRating(t *testing.T) {
 		es = append(es, entryRow{RoundIdx: r, EditorID: who, Gain: 0.925, Valid: true})
 	}
 	es = append(es, entryRow{RoundIdx: 1, EditorID: "zed", Gain: 0.9, Valid: true}, entryRow{RoundIdx: 2, EditorID: "zed"}, entryRow{RoundIdx: 3, EditorID: "zed", Gain: 0.9, Valid: true})
-	rt, diff := fitRatings(es)
+	rt, diff := fitRatings(es, noiseFloor)
 	if d := rt["carol"].Adjusted - rt["dave"].Adjusted; math.Abs(d) > 1e-6 {
 		t.Fatalf("carol %v, dave %v: someone else's timeout moved a rating by %v", rt["carol"].Adjusted, rt["dave"].Adjusted, d)
 	}

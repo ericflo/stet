@@ -21,8 +21,9 @@ No key needed.
 | `GET /api/v1/season` | The season: student, budgets, tolerances, the record rule, the next and open rounds, the current CLI version, the `unit` scores are in, and `has_multiplier` (false until the multiplier's curve is measured); and what a curator is promised: its `machine`, the floor for machines that run it (`runner`), the limits on `assets`, and the `environment` (Python and every library, with versions) |
 | `GET /api/v1/leaderboard` | `editors` (ranked) and `provisional` (fewer than `rated_rounds` rounds) |
 | `GET /api/v1/rounds?limit=30` | Recent rounds, newest first, and `next`: what the next draw is committed to |
-| `GET /api/v1/rounds/{id}` | One round with its entries. A round id looks like `s1-o00012`. Once the round's exam is posted it has `exam_digest` and `exam_at`. Before its draw a round has no entries; it has `expected`, the curators the draw would enter if it were made now, and `later`, the queued ones it would leave for a later round. Neither is a promise. Of the organisers' reference curators on the ladder, `expected` has those the season runs in every round (`references.every_round`) and those whose turn this round is: each of the rest runs in one round in `references.one_in` (8), and is in neither list. Each row has `editor_id`, `name`, `version`, `owner`, `why` (`ladder`, `qualifying` with `played` rounds so far, `new`, or `later`) and `public`, whether its code is public yet |
+| `GET /api/v1/rounds/{id}` | One round with its entries, those with a score first, best first, then those that failed. A round id looks like `s2-o00012`. Once it is drawn it has `exam_hours`, the harvests its exam's writing is made from (`hour`, `sha256`), with `exam_hours_late` when they were chosen after the draw. Once the round's exam is posted it has `exam_digest` and `exam_at`, and once it has settled and its item scores are published, `scores`: their address. Before its draw a round has no entries; it has `expected`, the curators the draw would enter if it were made now, and `later`, the queued ones it would leave for a later round. Neither is a promise. Of the organisers' reference curators on the ladder, `expected` has those the season runs in every round (`references.every_round`) and those whose turn this round is: each of the rest runs in one round in `references.one_in` (8), and is in neither list. Each row has `editor_id`, `name`, `version`, `owner`, `why` (`ladder`, `qualifying` with `played` rounds so far, `new`, or `later`) and `public`, whether its code is public yet |
 | `GET /api/v1/rounds/{id}/exam` | The round's exam, zstd-compressed JSON Lines. Once the round has settled, to anyone: the generated items and Wikipedia's text whole, and every other item as its source, id, kind, format and language, with `withheld` set. The items' ids, in order, hash to `exam_digest`. Before that, the whole exam, only to a request signed by an account holding a grade job in the round, or by the organisers: `403` otherwise, `404` before it is posted |
+| `GET /api/v1/rounds/{id}/scores` | Every item score of a settled round, as JSON, to anyone: see [below](#a-rounds-item-scores). `404` until the round has settled and its scores are published, a minute or so after |
 | `GET /api/v1/editors/{ref}` | One curator. `ref` is an id, the first 8 or more characters of one (the oldest curator that fits), or `handle/name` with the slash written `%2F` |
 | `GET /api/v1/editors/{ref}/bundle` | The curator's files (`.tar.zst`), once it is public |
 | `GET /api/v1/scripts/{sha256}` | An edit script, zstd-compressed JSON Lines. Public once a round that holds it has settled. Before that it is sealed: `403`, unless the request is signed by the account that holds the script as a grade job |
@@ -39,6 +40,7 @@ A settled entry:
 | Field | |
 |---|---|
 | `valid`, `gain`, `loss` | The score. `gain` is taken over the entry's runs: the mean of two, the median of three, a failed run counting 0. `loss` is the unedited student's mean bits per byte less the gain |
+| `counts_as` | Only on an entry that failed (`valid` false, `gain` 0, not `void`): what the round counts as for it in its rating and against the record. It is the lowest `gain` of the round's valid entries, or 0 if that is lower |
 | `n_runs` | How many runs the score is made of |
 | `confirmed` | Two different people's runs agree, to within the season's tolerance for runs, neither rests on a grade by its own runner, and more than one account's grades decide them |
 | `one_grader` | Its runs agree, and one person's grades decide them all: nobody else was there to grade. The organisers' machines count as one person |
@@ -46,7 +48,8 @@ A settled entry:
 | `runs_differ` | It was run more than once and no two runs agree |
 | `runs` | Each run: see below |
 | `dropped_runs` | Runs that count for nothing because nobody else was there to check them, in the same shape with `status` `dropped` and a `reason` |
-| `script`, `edit`, `by_source` | Those of the run whose gain is nearest the entry's, for anything that wants one script. `by_source` is the gain in each pillar |
+| `script`, `edit` | Those of the run whose gain is nearest the entry's, for anything that wants one script |
+| `by_source` | The gain on each pillar, made as `gain` is: the mean, pillar by pillar, over the runs `gain` is the median of (the middle run of three, both of two; a failed run counts 0 on every pillar), of each run's script's, which is the mean over the grades that script's gain is the median of. A grade's score is a fixed weighted sum of its pillars' scores (the season's `exam`), so the same sum of these is `gain`, to rounding. Keys that begin `watch:` are parts that are scored and count for nothing |
 | `void`, `reason` | A round that does not count for the entry, and why; or why it is invalid |
 | `detail` | `verifiers` (whose grades the score is made of, then everyone else whose grade agreed), `disputed` (grades that differed), `disputed_together` (two established accounts graded one of its scripts, disagreed, and nobody was there to break the tie), and `script`, `train`, `hardware` from the grade nearest the score |
 
@@ -88,11 +91,37 @@ A leaderboard row:
 |---|---|
 | `id`, `name`, `version`, `owner`, `technique` | The curator |
 | `rank` | Place among rated curators |
+| `tied` | Set when its `rating` is too close to the row above's to tell them apart: the gap is within two standard errors of the gap, `2·sqrt(se² + se_above²)`. The site gives a run of tied rows the place it starts at |
 | `rounds` | Official rounds it has settled |
-| `rating` | Mean gain adjusted for round difficulty, in bits per byte. The board is sorted by this |
-| `mean_gain`, `se` | Plain mean gain and its standard error |
+| `rating` | In bits per byte. The board is sorted by this. It is `adjusted` drawn towards the field's mean `m` (the mean of every curator's `adjusted`, weighted by its rounds): `m + n/(n+k)·(adjusted − m)` after `n` rounds. `k` is between 1 and 8: the variance of one round's gain about a curator's own mean, pooled over the curators with two rounds or more (`s2`), over the variance between curators' means beyond what `s2` alone would put there. It is 4 while fewer than three curators have two rounds, or nothing is left over |
+| `adjusted` | Mean gain adjusted for round difficulty, before that. A round the curator failed in counts as that entry's `counts_as` |
+| `mean_gain` | The plain mean of the same numbers |
+| `se` | The rating's standard error, `sqrt(s2/(n+k))` |
+| `lower` | `rating − 1.28·se`. The ladder is filled in order of this, not of `rating` |
 | `multiplier`, `capped` | Null until the multiplier's curve has been measured on this exam |
 | `record`, `ladder`, `provisional` | Flags |
+
+`GET /api/v1/editors/{ref}` gives a curator the same fields.
+
+### A round's item scores
+
+`GET /api/v1/rounds/{id}/scores` is what every score of a settled round is made of. Each
+list of numbers has one score for each item of the round's exam, in the order of
+`GET /api/v1/rounds/{id}/exam`.
+
+| Field | |
+|---|---|
+| `round`, `items_digest` | The round, and its exam's digest |
+| `table` | What each item counts toward: its `pillar` (`watch` when it counts for nothing), `part`, `lang` and `stratum` |
+| `languages` | The percent of the round's corpus in each language, which weighs the items |
+| `baseline` | The unedited student's score on each item: the mean of the baselines of the graders named in `baseline_of` |
+| `baselines` | Every grader's own baseline, by handle |
+| `grades` | Every grade's score on each item, by an id |
+| `grades_of` | For each of those ids, what it is a grade of: `editor` (the entry), `script` (its sha256), `runs` (the `n` of the entry's runs that wrote that script), `by` (the grader's handle), and `counted` when it is one of the grades the script's gain is the median of. A grade that found its script invalid sat no exam and is not listed |
+
+A grade's `gain` is the season's aggregate (`score_from_table` in the harness, over `table`
+and `languages`) of its item scores less `baseline`, item by item. A script's gain is the
+median of its `counted` grades' gains, and an entry's the median of its runs'.
 
 ## Signing
 

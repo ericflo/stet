@@ -844,6 +844,38 @@ func (j *judge) weigh(sc *scriptState) *verdict {
 	return v
 }
 
+// middleOf is the part of a sorted list that its median is made of: the middle one of an
+// odd number, the middle two of an even one.
+func middleOf[T any](sorted []T) []T {
+	if len(sorted) == 0 {
+		return nil
+	}
+	return sorted[(len(sorted)-1)/2 : len(sorted)/2+1]
+}
+
+// pillars is a script's gain on each of the exam's pillars, and on each part that is watched
+// and not counted (watchPrefix): the mean, key by key, over the grades its gain is the
+// median of. With one grade that decides it, or two, those are all of them; of three, it is
+// the middle one, so that a grade the median went against moves the pillars no more than
+// it moves the gain.
+func (v *verdict) pillars() map[string]float64 {
+	var valid []*gradeView
+	for _, g := range v.counted {
+		if g.r.Valid {
+			valid = append(valid, g)
+		}
+	}
+	sort.SliceStable(valid, func(x, y int) bool { return valid[x].gain < valid[y].gain })
+	made := middleOf(valid)
+	out := map[string]float64{}
+	for _, g := range made {
+		for k, x := range g.r.BySource {
+			out[k] += x / float64(len(made))
+		}
+	}
+	return out
+}
+
 // runsWanted is how many runs an entry should have: the usual number, and one more when
 // two of those it has are known to differ.
 func (j *judge) runsWanted(st *entryState) int {
@@ -2561,11 +2593,32 @@ func (a *App) settleEntry(tx *Tx, j *judge, st *entryState) {
 	e.Script, e.ScriptSize, e.Edit, e.EditedAt, e.EditedBy = rep.Script, rep.ScriptSize, rep.Edit, rep.At, rep.By
 	e.Loss, e.BySource, e.Reason = nil, nil, ""
 	if e.Valid {
-		if g := scripts[rep.Script]; g != nil && g.best != nil {
-			e.BySource = g.best.BySource
-			if g.summary != nil {
-				detail.Script, detail.Hardware, detail.Train = g.summary.Script, g.summary.Hardware, g.summary.Train
+		if g := scripts[rep.Script]; g != nil && g.best != nil && g.summary != nil {
+			detail.Script, detail.Hardware, detail.Train = g.summary.Script, g.summary.Hardware, g.summary.Train
+		}
+		// Its gain on each pillar is made the way its gain is: the mean, pillar by pillar,
+		// over the runs the gain is the median of, of each run's script's. A run that failed
+		// counts zero on every pillar, as it counts zero in the gain. A grade's score is a
+		// fixed weighted sum of its pillars, so these add up to the entry's gain in the same
+		// proportions; one grade's pillars, which this used to be, did not.
+		per, by := map[*Run]map[string]float64{}, map[string]float64{}
+		for _, run := range runs {
+			if g := scripts[run.Script]; run.Valid && g != nil {
+				per[run] = g.v.pillars()
+				for k := range per[run] {
+					by[k] = 0
+				}
 			}
+		}
+		made := middleOf(sorted)
+		for k := range by {
+			for _, run := range made {
+				by[k] += per[run][k]
+			}
+			by[k] = places5(by[k] / float64(len(made)))
+		}
+		if len(by) > 0 {
+			e.BySource = by
 		}
 		if rd.BaselineLoss != nil {
 			loss := places5(*rd.BaselineLoss - e.Gain)

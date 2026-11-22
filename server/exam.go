@@ -17,6 +17,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -438,15 +439,35 @@ func (a *App) refreshScores(tx *Tx, rd *Round) {
 	}
 }
 
-// ExamScores is what a settled round's exam came to, item by item: kept in the file store, so
-// that anyone can work every score out again.
+// ExamScores is what a settled round's exam came to, item by item: kept in the file store,
+// and served to anyone (apiScoresGet), so that anyone can work every score out again. The
+// items are in the order of the round's published exam.
+//
+// It says of itself everything that working a score out needs. A grade's score is the
+// season's aggregate (ExamPlan.ScoreItems) of its item scores less the round's baseline,
+// over Table and Shares; GradesOf says whose grade each row is, of which script of which
+// entry, and whether it is one of those its script's gain is the median of.
 type ExamScores struct {
-	Round     string               `json:"round"`
-	Digest    string               `json:"items_digest"`
-	Shares    map[string]float64   `json:"languages"`
-	Baseline  []float64            `json:"baseline"`
-	Baselines map[string][]float64 `json:"baselines"` // by account handle
-	Grades    map[string][]float64 `json:"grades"`    // by result id
+	Round      string               `json:"round"`
+	Digest     string               `json:"items_digest"`
+	Shares     map[string]float64   `json:"languages"`
+	Table      []ItemInfo           `json:"table,omitempty"`       // what each item counts toward
+	Baseline   []float64            `json:"baseline"`              // the round's: the mean, item by item, of BaselineOf's
+	BaselineOf []string             `json:"baseline_of,omitempty"` // the handles whose baselines the round's is the mean of
+	Baselines  map[string][]float64 `json:"baselines"`             // by account handle
+	Grades     map[string][]float64 `json:"grades"`                // by result id
+	GradesOf   map[string]GradeOf   `json:"grades_of,omitempty"`   // by result id
+}
+
+// GradeOf says what one grade in a round's item scores is a grade of. A result's id is in no
+// other public record, so without this nobody could tell the rows of Grades apart. A grade
+// that found its script invalid sat no exam, and has no row.
+type GradeOf struct {
+	Editor  string `json:"editor"`            // the entry: its curator's id
+	Script  string `json:"script"`            // sha256 of the script it graded
+	Runs    []int  `json:"runs"`              // the entry's runs that wrote that script, by their n
+	By      string `json:"by"`                // the grader's handle
+	Counted bool   `json:"counted,omitempty"` // the script's gain is the median of these
 }
 
 // archiveExam moves what a round held of its exam to the file store, once it has settled, and
@@ -465,21 +486,41 @@ func (a *App) archiveExam(ctx context.Context) {
 		var out ExamScores
 		a.st.view(func(s *State) {
 			rd := s.Rounds[idx]
-			out = ExamScores{Round: roundID(a.season.ID, idx), Digest: rd.ExamSHA, Shares: rd.Shares, Baseline: rd.BaseItems,
-				Baselines: map[string][]float64{}, Grades: map[string][]float64{}}
+			out = ExamScores{Round: roundID(a.season.ID, idx), Digest: rd.ExamSHA, Shares: rd.Shares, Table: rd.ExamTable, Baseline: rd.BaseItems,
+				Baselines: map[string][]float64{}, Grades: map[string][]float64{}, GradesOf: map[string]GradeOf{}}
+			handle := func(id int64) string {
+				if acct := s.Accounts[id]; acct != nil {
+					return acct.Handle
+				}
+				return strconv.FormatInt(id, 10)
+			}
+			for _, b := range a.roundBaselines(s, rd) {
+				out.BaselineOf = append(out.BaselineOf, handle(b.AccountID))
+			}
+			sort.Strings(out.BaselineOf)
 			for _, b := range s.Baselines {
 				if b.RoundIdx == idx && len(b.Items) > 0 {
-					handle := strconv.FormatInt(b.AccountID, 10)
-					if acct := s.Accounts[b.AccountID]; acct != nil {
-						handle = acct.Handle
-					}
-					out.Baselines[handle] = b.Items
+					out.Baselines[handle(b.AccountID)] = b.Items
 				}
 			}
 			for _, e := range s.inRound[idx] {
+				// Which of the entry's runs wrote each script, and which grades of it decided its
+				// gain, as the entry published them when it settled.
+				wrote, counted := map[string][]int{}, map[string]bool{}
+				for _, run := range e.Runs {
+					if run.Script == "" {
+						continue
+					}
+					wrote[run.Script] = append(wrote[run.Script], run.N)
+					for _, g := range run.Grades {
+						counted[run.Script+"/"+g.Handle] = g.Counted
+					}
+				}
 				for _, r := range s.results(idx, e.EditorID) {
 					if len(r.Items) > 0 {
-						out.Grades[strconv.FormatInt(r.ID, 10)] = r.Items
+						id, by := strconv.FormatInt(r.ID, 10), handle(r.AccountID)
+						out.Grades[id] = r.Items
+						out.GradesOf[id] = GradeOf{Editor: e.EditorID, Script: r.Script, Runs: wrote[r.Script], By: by, Counted: counted[r.Script+"/"+by]}
 					}
 				}
 			}
@@ -514,6 +555,64 @@ func (a *App) archiveExam(ctx context.Context) {
 			slog.Error("archiving a round's exam scores", "round", idx, "err", err)
 		}
 	}
+}
+
+// scoresArchived reports whether a round's item scores are in the file store, to be served:
+// it has settled, and what it held of its exam has been moved there (archiveExam), which is
+// when the round stops holding it.
+func scoresArchived(rd *Round) bool {
+	return rd != nil && rd.Status == "settled" && examPosted(rd) && len(rd.ExamTable) == 0 && len(rd.BaseItems) == 0
+}
+
+// apiScoresGet: GET /api/v1/rounds/{id}/scores. Every item score of a settled round, to
+// anyone (ExamScores): the round's baseline, each grader's baseline, and each grade, with
+// what each item counts toward and whose grade each is. With the round's published exam, it
+// is all that working any of its scores out again takes.
+func (a *App) apiScoresGet(w http.ResponseWriter, r *http.Request) {
+	idx, ok := a.parseRoundID(r.PathValue("id"))
+	if !ok {
+		writeErr(w, fail(404, "no such round"))
+		return
+	}
+	var known, settled, sat, archived bool
+	a.st.view(func(s *State) {
+		rd := s.Rounds[idx]
+		known, settled = rd != nil, rd != nil && rd.Status == "settled"
+		sat, archived = known && examPosted(rd), scoresArchived(rd)
+	})
+	id := roundID(a.season.ID, idx)
+	switch {
+	case !known:
+		writeErr(w, fail(404, "no such round"))
+		return
+	case !settled:
+		writeErr(w, fail(404, "%s has not settled: its item scores are sealed until it does", id))
+		return
+	case !sat:
+		writeErr(w, fail(404, "%s settled before it had an exam, so it has no item scores", id))
+		return
+	case !archived:
+		// Settled a moment ago: its scores are on their way to the file store.
+		writeErr(w, fail(404, "%s has only just settled, and its item scores are not published yet; try again in a minute", id))
+		return
+	}
+	f, size, err := a.st.blobs.Open(r.Context(), a.examBlob(idx, examScores))
+	if errors.Is(err, errNoBlob) {
+		writeErr(w, fail(404, "%s has no item scores published", id))
+		return
+	}
+	if err != nil {
+		slog.Error("reading a round's exam scores", "round", idx, "err", err)
+		writeErr(w, fail(503, "the file store is not answering; try again in a moment"))
+		return
+	}
+	defer f.Close()
+	// It is written once, when the round is archived, and never again. A day, not for ever:
+	// the address names a round, not the file's contents.
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	io.Copy(w, f)
 }
 
 // ExamMix is what a round's exam was made of, for its page: how many items test each of the

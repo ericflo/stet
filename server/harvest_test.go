@@ -167,7 +167,7 @@ func TestAnEntryWaitsOutTheSeasonsReachBeforeItsFirstRound(t *testing.T) {
 	young := func() bool {
 		var in bool
 		w.app.st.view(func(s *State) {
-			for _, e := range w.app.selectEntrants(s, draw) {
+			for _, e := range w.app.selectEntrants(s, draw, 1) {
 				in = in || e.EditorID == id
 			}
 		})

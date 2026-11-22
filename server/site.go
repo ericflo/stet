@@ -550,7 +550,8 @@ type EntryView struct {
 	Baseline   float64
 	BySource   map[string]float64
 	Reason     string
-	Void       bool // nobody could run it, or check its run; the round does not count for it
+	CountsAs   *float64 // it failed: what the round counts as for it instead of a gain (failedGain)
+	Void       bool     // nobody could run it, or check its run; the round does not count for it
 	Results    int
 	SettledAt  int64
 	Replicas   int         // graders, beyond the first, whose grades agreed
@@ -587,6 +588,9 @@ func (a *App) entryView(s *State, e *Entry) EntryView {
 	v.Stage, v.Settled, v.Valid, v.Gain, v.BySource = "settled", true, e.Valid, e.Gain, e.BySource
 	v.Reason, v.Results, v.SettledAt, v.Void = e.Reason, e.NResults, e.SettledAt, e.Void
 	v.Loss = deref(e.Loss)
+	if as, ok := countsAs(s, e); ok {
+		v.CountsAs = &as
+	}
 	if e.EditedAt > 0 {
 		v.Edit, v.ScriptSHA, v.ScriptSize = e.Edit, e.Script, e.ScriptSize
 	}
@@ -1377,13 +1381,14 @@ func (s *Site) round(w http.ResponseWriter, r *http.Request) {
 	var expected, later []expectedRow
 	var work *roundWork
 	prev, next := "", ""
+	scores := false // every item score behind the round's scores is published
 	a.st.view(func(st *State) {
 		rd := st.Rounds[idx]
 		if !ok || rd == nil {
 			return
 		}
 		sum := a.roundSummary(st, rd)
-		rs = &sum
+		rs, scores = &sum, scoresArchived(rd)
 		if rd.Status == "open" {
 			w := a.roundWork(st, rd, now())
 			work = &w
@@ -1407,7 +1412,7 @@ func (s *Site) round(w http.ResponseWriter, r *http.Request) {
 	d := map[string]any{"R": rs, "ID": rs.ID, "Entries": entries, "Top": topGain(entries), "Scale": sc, "Tolerance": a.tolerance(),
 		"RunsPerEntry": a.cfg.RunsPerEntry, "Prev": prev, "Next": next,
 		"Expected": expected, "Later": later, "MaxNew": a.cfg.MaxNewPerRound, "QualifyRounds": a.cfg.QualifyRounds, "Work": work,
-	}
+		"Scores": scores}
 	// Every run of the round's entries, and every grade of every script they wrote, whatever
 	// it said, is drawn entry by entry: who ran it, what each run wrote, who graded that.
 	runs := 0

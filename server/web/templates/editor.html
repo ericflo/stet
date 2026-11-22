@@ -20,8 +20,8 @@
 
   {{with $row}}
   <dl class="headline">
-    <div><dt>Rank</dt><dd>{{if .Rank}}<b>{{.Rank}}</b><small>of {{$d.Ranked}} on the leaderboard</small>{{else if .Provisional}}<b class="word">not yet</b><small>{{.Rounds}} of the {{$d.RatedRounds}} rounds it needs to be ranked</small>{{else}}<b class="word">—</b><small>replaced by a newer version</small>{{end}}</dd></div>
-    <div><dt>Rating</dt><dd><b{{if neg (ptr .Rating)}} class="neg"{{end}}>{{gain (ptr .Rating)}}</b><small>its gain a round, on average{{if has .SE}} (±{{f3 (ptr .SE)}}){{end}}</small></dd></div>
+    <div><dt>Rank</dt><dd>{{if .Rank}}<b>{{if .TiedAt}}={{.TiedAt}}{{else}}{{.Rank}}{{end}}</b><small>of {{$d.Ranked}} on the leaderboard{{if .TiedAt}}, too close to its neighbour to call{{end}}</small>{{else if .Provisional}}<b class="word">not yet</b><small>{{.Rounds}} of the {{$d.RatedRounds}} rounds it needs to be ranked</small>{{else}}<b class="word">—</b><small>replaced by a newer version</small>{{end}}</dd></div>
+    <div><dt>Rating</dt><dd><b{{if neg (ptr .Rating)}} class="neg"{{end}}>{{gain (ptr .Rating)}}</b><small>its gain a round, on average, held nearer everyone's while its rounds are few{{if has .SE}} (±{{f3 (ptr .SE)}}){{end}}</small></dd></div>
     {{if .Multiplier}}<div><dt>Worth</dt><dd><b>{{mult .Multiplier .Capped}}</b><small>its pages taught the model as much as {{mult .Multiplier .Capped}} as many raw pages</small></dd></div>{{end}}
   </dl>
   {{if $d.Holds}}<p class="vs-line"><b>It holds the record.</b>{{with $d.Rival}} Nearest to taking it: <b>{{.Name}}</b>, {{if gt .Mean 0.0}}ahead by <span class="num">{{gain .Mean}}</span>{{else}}behind by <span class="num">{{gain .Mean}}</span>{{end}} a round over {{.Shared}} shared {{plural .Shared "round" "rounds"}}.{{end}} <a class="go" href="/record">the race →</a></p>
@@ -35,8 +35,8 @@
     <ol class="ranked played">
       {{range $d.Played}}<li><a class="row" href="/rounds/{{.Round}}#e-{{short .EditorID}}">
         <span class="rn">Round {{.RoundIdx}}</span>
-        <span class="place">{{if not .Settled}}<span class="chip live">being run</span>{{else if .Place}}<b>{{ordinal .Place}}</b> of {{.Of}}{{else if .Void}}not run{{else}}<span class="neg">failed</span>{{if .Reason}} <span class="reason">{{.Reason}}</span>{{end}}{{end}}{{if .Settled}} <span class="trust">{{(trust .EntryView).Label}}</span>{{end}}</span>
-        <span class="val{{if and .Valid (lt .Gain 0.0)}} neg{{end}}">{{if not .Settled}}<small>sealed</small>{{else if .Valid}}{{gain .Gain}}{{else if .Void}}—{{else}}0.000{{end}}</span>
+        <span class="place">{{if not .Settled}}<span class="chip live">being run</span>{{else if .Place}}<b>{{ordinal .Place}}</b> of {{.Of}}{{else if .Void}}not run{{else}}<span class="neg">failed</span>{{template "counts-as" .EntryView}}{{if .Reason}} <span class="reason">{{.Reason}}</span>{{end}}{{end}}{{if .Settled}} <span class="trust">{{(trust .EntryView).Label}}</span>{{end}}</span>
+        <span class="val{{if and .Valid (lt .Gain 0.0)}} neg{{end}}">{{if not .Settled}}<small>sealed</small>{{else if .Valid}}{{gain .Gain}}{{else}}—{{end}}</span>
       </a></li>{{end}}
     </ol>
     {{else}}
