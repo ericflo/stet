@@ -415,6 +415,7 @@ def test_an_item_is_never_put_over_fewer_bytes_than_the_floor(student):
 
 
 def test_a_student_whose_loss_is_not_a_number_has_no_valid_grade(student):
+    pytest.importorskip("torch")
     import json
     import types
 
