@@ -633,9 +633,11 @@ round's gains, try another weighting, or measure a part's spread over noise with
 Season 2 takes everything section 9 found wanting and does it now. Three things are decided
 against, each on principle:
 
-- **Raw HTML as the curator's input.** A page's markup is five to ten times its text. At a
-  fixed download, a curator choosing among more pages has more to work with than one reading
-  the markup of fewer. The bandwidth goes to a bigger pool.
+- **Raw HTML as the curator's input.** A crawl's pages with their markup are fifteen times the
+  size of their text (CC-MAIN-2026-43: about 960 MB a file against 65 MB). At a fixed
+  download, a curator choosing among fifteen times the pages has more to work with than one
+  reading the markup of a fifteenth. The bandwidth goes to a bigger pool, and deleting lines
+  for nothing gives a curator most of what the markup would: it can cut a page's furniture.
 - **A track where a served model rewrites the corpus.** The score would then measure the
   model that was served. Ink stays small, and a curator's own GPU may write within it.
 - **A different student.** The student is the measuring instrument; changing it with the exam
