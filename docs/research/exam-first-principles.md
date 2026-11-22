@@ -631,7 +631,7 @@ round's gains, try another weighting, or measure a part's spread over noise with
 
 ### 9.6 What is decided against, and what waits on a number
 
-Season 2 takes everything section 9 found wanting and does it now. Three things are decided
+Season 2 takes everything section 9 found wanting and does it now. Two things are decided
 against, each on principle:
 
 - **Raw HTML as the curator's input.** A crawl's pages with their markup are fifteen times the
@@ -639,14 +639,11 @@ against, each on principle:
   download, a curator choosing among fifteen times the pages has more to work with than one
   reading the markup of a fifteenth. The bandwidth goes to a bigger pool, and deleting lines
   for nothing gives a curator most of what the markup would: it can cut a page's furniture.
-- **A track where a served model rewrites the corpus.** The score would then measure the
-  model that was served. A script holds no text at all (9.7), so a curator's own model may
-  choose what the student reads and may write none of it.
 - **A different student.** The student is the measuring instrument; changing it with the exam
   would leave nothing to compare the two seasons by. Its ranking is checked at a larger size
   instead (the finals, and the audit of scale in between).
 
-Four more were put to a measurement, each with its rule written first:
+Five more were put to a measurement, each with its rule written first:
 
 - **The pool's size.** As many pages as a curator can read and a verifier can fetch inside the
   time box on the machines the fleet rents, measured, with a third to spare; and only if the
@@ -665,6 +662,16 @@ Four more were put to a measurement, each with its rule written first:
   after twenty rounds. 9.7 replaces that with a measurement made before the season.
 - **Ink.** Whether 16,000 tokens of a curator's own text, aimed at the exam, buy it (9.7).
   They do, and a script now holds none.
+- **Text a model writes.** Two of the four assessments ask for a second track in which one
+  fixed open model, served by the harness, rewrites pages or writes new ones, on a budget of
+  10% to 15% of the training tokens. A third asks for a pilot of it at 0.1%, 1% and 5%, beside
+  a curator that only selects. An earlier draft of this note called such a track decided
+  against on principle, because the score would measure the model that was served. That was
+  wrong. If the model is fixed and the same for everyone, what differs between two curators
+  is what they have it write, and that is curation. What stands against it in a round is
+  something else: a teacher's time on every curator's machine, text whose style can be known
+  in advance, and that nobody had measured whether it teaches this student anything. 9.9
+  measures that.
 
 ### 9.7 Every part is in the score or off the exam
 
@@ -893,3 +900,62 @@ standard and large. Measured on it (seven scripts, four trainings each), the mic
 steadier, 0.030 between trainings where it was 0.045, and its spread over noise is 4.3
 where it was 3.1; every curator finished inside the 300 seconds. (Nano is a smoke test of
 two files, the least a round can be, and is compared with nothing.)
+
+### 9.9 Text a model writes: a pilot
+
+Written on 22 November 2026, after the teacher's first pages were read and before any
+student of the pilot was trained.
+
+**The question.** A script in a round is copies of the crawl (9.7). Does text that one fixed,
+small, open model writes from the round's own pages teach the student more about fresh human
+writing than the pages a selecting curator had already chosen?
+
+**The setting.** Practice round `s2-p00000` at standard, the corpus of 9.7 (337,313 pages),
+and the candidate exam of 9.7, sat whole. The code is the code 9.7 measured, from before a
+script lost its text, with the allowance for a curator's own text raised on the pilot's
+machine. The parent of every arm is `tidy`'s script, made again there. It is two lines
+shorter than the one 9.7 trained (51,762 lines), so the control is trained again on the same
+machine, five times, and 9.7's three `tidy` students are only looked at beside it.
+
+**The teacher.** `Qwen/Qwen3-4B-Instruct-2507` (Apache 2.0, downloaded with no key), in
+16-bit floats, at temperature 0.7, top-p 0.8, top-k 20, one fixed seed. It is given a page
+3,500 bytes at a time and told to write the page's content anew in the page's language, in
+its own words, in full sentences; to tell everything the page tells and add nothing; to
+leave out menus, links and advertisements; and to answer `EMPTY` where there is nothing but
+those. A first instruction ("rewrite it as clear writing, keep every fact") was dropped
+after its first 384 answers were read: the model gave the page back nearly letter for letter,
+menus and all, and a copy tests nothing. No student had been trained on either.
+
+**The arms.** The dose is the share of the tokens trained on that the teacher wrote.
+
+- `rewrite-1`, `rewrite-5`, `rewrite-15`: pages of `tidy`'s script that are trained on, taken
+  in one seeded order, so that each arm holds the one below it. The teacher is given the
+  whole page, not only the lines `tidy` kept. Its text stands in the script where `tidy`'s
+  lines of that page stood.
+- `rescue-5`: pages `tidy` did not choose, that pass its own test for looking written, of
+  1,500 to 12,000 bytes, of which its rule keeps less than three tenths, no two with the same
+  opening (40,583 pages, 140 MB). The teacher's text of them, in a seeded order, takes the
+  place of the lowest-ranked pages `tidy` trained on, token for token, spread through the
+  script.
+
+The teacher runs on rented GPUs by the hour. If it has not written 15% by the time the
+students must start, the largest arm is the largest dose it has written, and is named for
+it. A piece of a page that is cut off at the teacher's limit of 2,048 tokens spoils its
+page: an in-place page then keeps `tidy`'s lines, and a rescued one is not used.
+
+Three students of each arm, with the starts of 9.7 (the first as it is, the others moved by
+one part in a million). Text with no page behind it, a larger teacher, and a teacher tuned
+for the task are not tested.
+
+**The score.** The four kinds of fresh writing, a quarter each: reference, news, technical,
+conversation. The skills are left out of the rule, because text can be written to a
+generated format and 9.7 showed that it pays; the whole score is given beside it.
+
+**The rule.** The noise is the spread between students of one script, pooled over the
+pilot's five scripts. An arm passes if its mean is above `tidy`'s by more than twice the
+standard error of that difference. If an arm passes, a second track for written text is
+worth designing, and its first step is the control two of the assessments ask for: the
+teacher's time spent choosing pages and not writing them. Four arms are four chances, about
+one in eight that one passes with nothing there, so an arm that passes by less than three
+standard errors is trained three more times before anything is built on it. If none passes,
+Season 2 has no written text, and this section says how far each arm fell short.
