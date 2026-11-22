@@ -512,7 +512,7 @@ opened on the organisers' machine, as soon as `/api/v1/season` names it:
 ```sh
 stet upgrade && stet login --handle stet    # the new client, and the organisers' account made again
 systemctl --user restart stet-examine       # the examiner on the new client
-for d in fineweb2 dclm tidy identity english heuristic fineweb-edu mimic; do stet submit examples/$d --yes; done
+for d in fineweb2 dclm tidy identity english heuristic fineweb-edu mimic; do stet submit examples/$d --yes; sleep 2; done
 ```
 
 and `stet-cloud` is started with it if it was stopped ([above](#rented-machines)). It asks
@@ -521,8 +521,9 @@ round drawn with no machine to run its curators comes to nothing.
 
 Nothing after that is waited for or watched. The examiner harvests the newest settled hour
 first, so the first round has its writing ([above](#the-examiner)). Three new entries are
-admitted a round, in the order they were submitted: the two references that run in every
-round go first. Everyone else makes their account again the same way, with their own
+admitted a round, in the order they were submitted, so the two references that run in every
+round go first. (Entries submitted in the same second are taken in the order of their ids,
+which is why the loop waits between them.) Everyone else makes their account again the same way, with their own
 handle, and an entrant links GitHub again (`stet login --gist`).
 
 The finished season's pages are archived from its database ([below](#archiving-a-season)),
