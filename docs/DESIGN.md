@@ -191,10 +191,11 @@ grader's: each costs a whole training, and all of them are no better a baseline 
 yardstick need not run every round: `fineweb2` and `dclm` do, and tie the rounds together,
 and each of the others runs in one round in eight.
 
-**A rating says how sure it is.** A few rounds can be luck. So a rating is drawn towards
-the field's mean while a curator's rounds are few, the ladder is filled in order of rating
-less 1.28 standard errors, and neighbours too close to tell apart share a place on the
-board. Three lucky rounds do not take a place from many steady ones. And failing is never
+**A rating says how sure it is.** A few rounds can be luck. So a rating, which is a
+curator's own mean gain and nothing else, carries a standard error that is wide while its
+rounds are few; the ladder is filled in order of rating less 1.28 standard errors; and
+neighbours too close to tell apart share a place on the board. Three lucky rounds do not
+take a place from many steady ones. And failing is never
 better than finishing: a failed entry counts as the lowest gain any valid entry got in its
 round, or zero if that is lower.
 

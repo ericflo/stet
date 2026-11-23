@@ -309,12 +309,11 @@ where other entries did run, are taken to be the entry's doing, and it stops bei
   **counts as the lowest gain any valid entry got in that round, or zero if that is lower**:
   failing is never the better move. A curator with two invalid rounds in its last five stops
   being run, whether it is qualifying or on the ladder.
-- **Rating** = your mean gain, adjusted for how hard your rounds were, and drawn towards
-  the field's mean while your rounds are few: after n rounds it has moved n/(n+k) of the way
-  from the field's mean to your own, where k (between 1 and 8) is how many rounds it takes
-  for a curator's own record to say as much as the field does. Every entry runs 3 rounds and
-  is ranked when it has them. A curator you replace keeps its page and its results but
-  leaves the ranking.
+- **Rating** = your mean gain, adjusted for how hard your rounds were. Nothing else is in
+  it: who else is on the board does not move it. Beside it is its **±**, the rating's
+  standard error, which is wide while your rounds are few and narrows with each one. Every
+  entry runs 3 rounds and is ranked when it has them. A curator you replace keeps its page
+  and its results but leaves the ranking.
 - **Ties are shown as ties.** A curator whose rating is within two standard errors of the
   first curator at a place shares that place on the board.
 - **Multiplier** = how many times more unedited data the student would have needed to do

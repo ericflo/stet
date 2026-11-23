@@ -472,8 +472,8 @@ An entry runs in 3 official rounds and is ranked when it has them. A round is dr
 3 hours, on the clock, once the one before has settled, and
 takes every entry waiting at its draw: there is no queue. A round's exam is made at its draw, and
 the round then takes as long as its runs and grades do. A curator's rating is its mean
-gain, adjusted for how hard its rounds were and drawn towards the field's mean while its
-rounds are few. The eight best curators, one per person, stay on the *ladder* and keep
+gain, adjusted for how hard its rounds were; its ± is wide while its rounds are few. The
+eight best curators, one per person, stay on the *ladder* and keep
 running in every round: the best by rating less 1.28 standard errors, so a few lucky
 rounds do not take a place from many steady ones. You may
 have 3 entries in play at once, and submit as often as you like. Submitting an entry again under

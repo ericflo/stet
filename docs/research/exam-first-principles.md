@@ -607,6 +607,15 @@ noise worse in four ways. Each is fixed by a rule that was stated before any rou
   spread between curators, kept between 1 and 8. The ladder takes curators in order of rating
   less 1.28 standard errors, which is what each is nine times in ten at least as good as.
   Ratings within two standard errors of the one above share its place.
+
+  *Changed after round 2, on 23 November.* The pull towards the field's mean was taken out: a
+  rating is the adjusted mean alone, and its standard error `sqrt(s2/n)`. The field's mean is
+  set by whoever is on the board, and half of the organisers' references are far below the
+  unedited pages. After two rounds it stood at -0.113 and k at its floor of 1, so three new
+  curators that had each gained about 0.07 in their one round were rated -0.02, under
+  references they had beaten in it. The ladder's order and the shared places already do what
+  the pull was for: at this season's round noise (a spread of 0.0136), three rounds have to
+  beat thirty steady ones by 0.007 to take a ladder place from them.
 - **The first rounds set their own error bars.** With one curator at two rounds, the spread of
   a round's gain was estimated from two numbers. What the season expects a round to move by
   now counts beside its own rounds, as eight rounds' worth. Season 1's board gives 0.0195 a

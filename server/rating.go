@@ -13,10 +13,18 @@ package main
 // and the reference editors the season names) tie the rounds together, so difficulties are
 // well determined.
 //
-// A few rounds say little, and three lucky ones would otherwise outrank thirty steady ones.
-// So the adjusted mean is drawn towards the field's, the more the fewer rounds it rests on
-// (fitRatings); the ladder is filled by what each editor has shown it is at least worth, its
-// rating less 1.28 standard errors; and ratings too close to tell apart are marked as tied.
+// That adjusted mean is the rating, and nothing else is in it: what an editor's rating says is
+// what its own rounds said. A few rounds say little, and three lucky ones would otherwise take
+// a place from thirty steady ones. So every rating has a standard error, wider the fewer rounds
+// it rests on (fitRatings); the ladder is filled by what each editor has shown it is at least
+// worth, its rating less 1.28 standard errors; and ratings too close to tell apart are marked
+// as tied.
+//
+// The rating was once drawn towards the mean of every editor on the board as well, by as much
+// as one round's worth. That mean is set by whoever happens to be on the board, the organisers'
+// weakest reference editors among them: in Season 2's second round it stood at -0.11, and
+// three new editors that had each gained 0.07 were shown at -0.02, below editors they had
+// beaten. The standard error already says how little one round is worth.
 //
 // An entry that failed counts as the lowest gain any valid entry got in its round, or zero
 // if that is lower (failedGain): failing is never the better move.
@@ -40,17 +48,12 @@ type entryRow struct {
 type Rating struct {
 	N        int     // settled rounds
 	Mean     float64 // plain mean of what its rounds count as
-	Adjusted float64 // that, adjusted for which rounds it happened to run
-	Shrunk   float64 // and drawn towards the field's mean: the rating
+	Adjusted float64 // that, adjusted for which rounds it happened to run: the rating
 	SE       float64 // the rating's standard error
 	Invalid  int
 }
 
 const (
-	// How many rounds' worth of the field's mean is in every rating (k in fitRatings): what
-	// the entries say it should be, kept within these, and the usual value while they cannot
-	// say.
-	shrinkMin, shrinkMax, shrinkUsual = 1.0, 8.0, 4.0
 	// The variance of one round's gain to assume while neither the entries nor the season's
 	// file can say: a spread of 0.01 bits per byte.
 	noiseFloor = 0.0001
@@ -60,21 +63,15 @@ const (
 )
 
 // fitRatings solves the additive model by alternating means, which converges in a handful
-// of passes because the ladder connects the rounds, and then draws each editor's adjusted
-// mean towards the field's:
+// of passes because the ladder connects the rounds. An editor's rating is its adjusted mean,
+// and the rating's standard error is sqrt(s2/n) over its n rounds.
 //
-//	rating = m + n/(n+k) * (adjusted - m)
-//
-// n is the editor's rounds, and m the field's mean: the editors' adjusted means, each
-// weighted by its rounds. k = s2/tau2 sets one round's noise about an editor's own mean
-// (s2) against how far editors really are from each other (tau2): with k rounds, a rating
-// is midway between the editor's own mean and the field's. s2 is pooled over every editor
-// with two measured rounds or more (a failed round is a penalty on its editor's rating, and
-// no reading of the noise), together with noise: what a round's gain was taken to move by
+// s2 is how much one round's gain moves about an editor's own mean. It is pooled over every
+// editor with two measured rounds or more (a failed round is a penalty on its editor's rating,
+// and no reading of the noise), together with noise: what a round's gain was taken to move by
 // before the season began, counted as prior rounds' worth of evidence. A season's first few
 // rounds say little about their own spread, and would otherwise put a standard error on
-// every rating from two or three numbers. tau2 is the variance of the adjusted means less
-// what s2 alone would put there. The rating's standard error is sqrt(s2/(n+k)).
+// every rating from two or three numbers.
 func fitRatings(entries []entryRow, noise, prior float64) (map[string]*Rating, map[int]float64) {
 	byEditor := map[string][]entryRow{}
 	byRound := map[int][]entryRow{}
@@ -138,9 +135,7 @@ func fitRatings(entries []entryRow, noise, prior float64) (map[string]*Rating, m
 	}
 	sort.Strings(ids)
 	out := map[string]*Rating{}
-	var adjusted []float64
-	ss, df, several := 0.0, 0, 0 // squared residuals, their degrees of freedom, editors with two rounds or more
-	field, rounds := 0.0, 0
+	ss, df := 0.0, 0 // squared residuals, and their degrees of freedom
 	for _, id := range ids {
 		es := byEditor[id]
 		r := &Rating{N: len(es)}
@@ -165,39 +160,14 @@ func fitRatings(entries []entryRow, noise, prior float64) (map[string]*Rating, m
 			}
 			df += len(measured) - 1
 		}
-		if len(resid) >= 2 {
-			several++
-		}
-		adjusted = append(adjusted, r.Adjusted)
-		field += float64(r.N) * r.Adjusted
-		rounds += r.N
 		out[id] = r
 	}
-	if rounds == 0 {
-		return out, diff
-	}
-	field /= float64(rounds)
 	s2 := noise
 	if df > 0 {
 		s2 = (ss + prior*noise) / (float64(df) + prior)
 	}
-	// How far apart editors really are: the variance of their adjusted means, less what the
-	// noise in each mean would put there by itself. With too few editors to say, or nothing
-	// left over, the usual k stands.
-	k := shrinkUsual
-	if several >= 3 {
-		within := 0.0
-		for _, id := range ids {
-			within += s2 / float64(out[id].N) / float64(len(ids))
-		}
-		if sd := stddev(adjusted); sd*sd > within {
-			k = math.Min(shrinkMax, math.Max(shrinkMin, s2/(sd*sd-within)))
-		}
-	}
 	for _, r := range out {
-		n := float64(r.N)
-		r.Shrunk = field + n/(n+k)*(r.Adjusted-field)
-		r.SE = math.Sqrt(s2 / (n + k))
+		r.SE = math.Sqrt(s2 / float64(r.N))
 	}
 	return out, diff
 }
@@ -314,8 +284,8 @@ type BoardRow struct {
 	Parent      string    `json:"parent,omitempty"`
 	Status      string    `json:"status"`
 	Rounds      int       `json:"rounds"`
-	Rating      *float64  `json:"rating"`    // the adjusted mean drawn towards the field's: what the board ranks by
-	Adjusted    *float64  `json:"adjusted"`  // the mean gain adjusted for its rounds, before that
+	Rating      *float64  `json:"rating"`    // the mean gain adjusted for its rounds: what the board ranks by
+	Adjusted    *float64  `json:"adjusted"`  // the same number, under the name it had when the rating was something more
 	MeanGain    *float64  `json:"mean_gain"` // the plain mean of what its rounds count as
 	SE          *float64  `json:"se"`        // the rating's standard error
 	Lower       *float64  `json:"lower"`     // the rating less lowerZ standard errors: what the ladder is filled by
@@ -443,7 +413,7 @@ func (a *App) computeBoard(s *State) *Board {
 		r := &BoardRow{ID: e.ID, Name: e.Name, Version: e.Version, Owner: owner.Handle, Github: owner.Github, Technique: e.Technique,
 			Description: e.Description, Parent: e.Parent, Status: e.Status, CreatedAt: e.CreatedAt, AccountID: e.AccountID, Organisers: owner.Anchor}
 		r.Rounds, r.Invalid = rt.N, rt.Invalid
-		rating, adj, mg, se, lower := rt.Shrunk, rt.Adjusted, rt.Mean, rt.SE, rt.Shrunk-lowerZ*rt.SE
+		rating, adj, mg, se, lower := rt.Adjusted, rt.Adjusted, rt.Mean, rt.SE, rt.Adjusted-lowerZ*rt.SE
 		r.Rating, r.Adjusted, r.MeanGain, r.SE, r.Lower = &rating, &adj, &mg, &se, &lower
 		if m, capped, ok := a.season.multiplier(a.curveKey(), rating); ok {
 			r.Multiplier, r.Capped = &m, capped
