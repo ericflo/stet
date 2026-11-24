@@ -73,6 +73,9 @@ func (a *App) nextSlot(after int64) int64 {
 		return a.season.nextGrid(after)
 	}
 	iv := int64(a.cfg.RoundInterval.Seconds())
+	if iv <= 0 {
+		return a.season.nextGrid(after)
+	}
 	return (after/iv + 1) * iv
 }
 
@@ -170,18 +173,26 @@ func (a *App) tick(ctx context.Context) {
 	a.st.flush(bounded)
 }
 
+const emptyBackoff = 3 * time.Hour // retry cadence after two consecutive rounds settled with no baseline
+
 // demandSlot is the earliest grid moment an on-demand draw may take, respecting drawNotice
 // and RoundMinGap (when set), and reports whether the last two drawn rounds both came to
-// nothing (in which case hurrying will not mend whatever is wrong).
+// nothing. In fixed-clock mode that holds back early draws so the fixed schedule retries; in
+// on-demand-only mode it backs off for emptyBackoff so a transient outage neither spins GPUs
+// nor deadlocks automatic draws forever.
 func (a *App) demandSlot(s *State) (at int64, blocked bool) {
 	gap := int64(a.cfg.RoundMinGap.Seconds())
 	at, empty := now()+drawNotice, 0
+	var lastEmpty int64
 	for _, rd := range s.roundsDesc(3) {
 		if rd.DrawnAt == 0 {
 			continue // the scheduled round itself
 		}
 		if empty >= 0 && rd.Status == "settled" && rd.BaselineLoss == nil {
 			empty++ // nothing in it could be graded
+			if done := max(rd.SettledAt, rd.DrawnAt); done > lastEmpty {
+				lastEmpty = done
+			}
 		} else {
 			empty = -1 << 30
 		}
@@ -190,7 +201,12 @@ func (a *App) demandSlot(s *State) (at int64, blocked bool) {
 		}
 	}
 	if empty >= 2 {
-		return 0, true
+		if !a.onDemandOnly() {
+			return 0, true
+		}
+		if retry := lastEmpty + int64(emptyBackoff.Seconds()); now() < retry {
+			return 0, true
+		}
 	}
 	return a.season.nextGrid(at - 1), false
 }

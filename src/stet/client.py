@@ -1361,9 +1361,14 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
     from . import bench, env
 
     dev = os.environ.get("STET_DEV") == "1"
-    # Every grade is trained by the same PyTorch. A different version is a different trainer.
-    if (wrong := env.problems(season, only=("torch",))) and not dev and not args.any_device:
-        sys.stderr.write(f"stet: grading for the leaderboard uses the season's PyTorch, and this machine's is {'; '.join(wrong)}.\n  The installer puts it right: curl -fsSL https://www.stetrun.com/install.sh | sh\n")
+    # Every grade is trained by the season's pinned grading stack (PyTorch, plus Transformers/safetensors for HF students).
+    grade_pkgs = env.grade_packages(season)
+    if (wrong := env.problems(season, only=grade_pkgs)) and not dev and not args.any_device:
+        sys.stderr.write(
+            f"stet: grading for the leaderboard uses the season's grading libraries ({', '.join(grade_pkgs)}), "
+            f"and this machine's differ: {'; '.join(wrong)}.\n"
+            "  The installer puts it right: curl -fsSL https://www.stetrun.com/install.sh | sh\n"
+        )
         sys.exit(1)
     sandbox = "none"
     if args.edits:

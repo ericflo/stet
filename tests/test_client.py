@@ -1408,16 +1408,27 @@ def test_why_a_machine_runs_no_curators_is_kept_for_a_week_and_no_longer(monkeyp
 
 def test_a_grader_with_another_pytorch_is_turned_away_before_it_grades(loop, monkeypatch, capsys):
     from stet import env
-
-    monkeypatch.setattr(env, "problems", lambda season, only=None: ["a different version: torch 2.9.0 (the season's is 2.15.0)"] if only == ("torch",) else [])
     from stet.spec import load_season
 
+    s2 = load_season("s2")
+    monkeypatch.setattr(env, "problems", lambda season, only=None: ["a different version: torch 2.9.0 (the season's is 2.15.0)"] if only == env.grade_packages(season) else [])
     monkeypatch.setattr(Args, "any_device", False, raising=False)
-    monkeypatch.setitem(load_season("s2").raw, "grade_devices", ["cuda", "cpu"])  # the test machine's device counts, so the check is reached
+    monkeypatch.setitem(s2.raw, "grade_devices", ["cuda", "cpu"])  # the test machine's device counts, so the check is reached
     loop.claims = [a_job()]
     with pytest.raises(SystemExit):
         client.cmd_verify(Args())
-    assert "the season's PyTorch" in capsys.readouterr().err and not loop.graded
+    assert "grading libraries" in capsys.readouterr().err and not loop.graded
+
+    # Season 3 grading requires transformers and safetensors as well as torch.
+    s3 = load_season("s3")
+    assert set(env.grade_packages(s3)) >= {"torch", "transformers", "safetensors"}
+    monkeypatch.setattr(env, "problems", lambda season, only=None: ["not installed: transformers"] if only and "transformers" in only else [])
+    monkeypatch.setitem(s3.raw, "grade_devices", ["cuda", "cpu"])
+    args_s3 = Args()
+    args_s3.season = "s3"
+    with pytest.raises(SystemExit):
+        client.cmd_verify(args_s3)
+    assert "not installed: transformers" in capsys.readouterr().err and not loop.graded
 
 
 def test_an_account_is_told_where_it_stands():

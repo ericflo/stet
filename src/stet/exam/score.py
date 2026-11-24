@@ -79,12 +79,31 @@ def nll(model, seqs: list[tuple[list[int], int]], device, batch: int = 32) -> li
     out = [0.0] * len(seqs)
     order = sorted(range(len(seqs)), key=lambda i: len(seqs[i][0]))
     model.eval()
-    # Keep activation memory bounded when evaluating large-vocab HF models (e.g. 151k vocab at ctx=1024).
+    # Keep activation and logits memory well below the 16 GiB grader floor for large-vocab
+    # models (e.g. Qwen3's 151,936 vocab at ctx=1024): pack batches by padded token count
+    # (matching micro_batch=2 * ctx=1024 = 2,048 tokens) and compute FP32 CE only over scored
+    # positions in bounded chunks.
     vocab = getattr(getattr(model, "config", None), "vocab_size", 0) or 0
-    if vocab >= 65536:
-        batch = min(batch, 8)
-    for j in range(0, len(order), batch):
-        idx = order[j : j + batch]
+    large_vocab = vocab >= 65536
+    max_padded_tokens = 2048
+    ce_chunk = 512
+
+    batches: list[list[int]] = []
+    if large_vocab:
+        cur: list[int] = []
+        for i in order:
+            seq_t = max(1, len(seqs[i][0]) - 1)
+            if cur and (len(cur) >= batch or (len(cur) + 1) * seq_t > max_padded_tokens):
+                batches.append(cur)
+                cur = []
+            cur.append(i)
+        if cur:
+            batches.append(cur)
+    else:
+        for j in range(0, len(order), batch):
+            batches.append(order[j : j + batch])
+
+    for idx in batches:
         T = max(len(seqs[i][0]) for i in idx) - 1
         if T <= 0:
             continue
@@ -106,9 +125,20 @@ def nll(model, seqs: list[tuple[list[int], int]], device, batch: int = 32) -> li
             else:
                 raw = model(x)
             logits = raw.logits if hasattr(raw, "logits") else raw
-        loss = F.cross_entropy(logits.float().transpose(1, 2), y, ignore_index=-100, reduction="none").sum(1)
-        for r, i in enumerate(idx):
-            out[i] = float(loss[r])
+            if large_vocab or logits.size(-1) >= 65536:
+                row_idx, pos_idx = (y != -100).nonzero(as_tuple=True)
+                loss = torch.zeros(len(idx), dtype=torch.float32, device=device)
+                n_scored = int(row_idx.numel())
+                for start in range(0, n_scored, ce_chunk):
+                    r_sl = row_idx[start : start + ce_chunk]
+                    p_sl = pos_idx[start : start + ce_chunk]
+                    sub_loss = F.cross_entropy(logits[r_sl, p_sl].float(), y[r_sl, p_sl], reduction="none")
+                    loss.index_add_(0, r_sl, sub_loss)
+            else:
+                loss = F.cross_entropy(logits.float().transpose(1, 2), y, ignore_index=-100, reduction="none").sum(1)
+            for r, i in enumerate(idx):
+                out[i] = float(loss[r])
+            del raw, logits, loss
     return out
 
 

@@ -34,13 +34,22 @@ def lines(env: dict) -> list[str]:
     return out
 
 
+def train_lines(env: dict) -> list[str]:
+    pkgs = {**env["also"], **env["packages"]}
+    names = env.get("grade_packages") or ["torch"]
+    return [f'    "{name}=={pkgs[name]}",' for name in sorted(names) if name in pkgs]
+
+
 def cuda_lines(env: dict) -> list[str]:
     pkgs = env["packages"]
     return [f'    "{name}=={pkgs[name]}; sys_platform == \'linux\' and platform_machine == \'x86_64\'",' for name in sorted(env.get("cuda_linux_only") or []) if name in pkgs]
 
 
 def render(env: dict) -> str:
-    parts = [BEGIN + "run = [\n" + "\n".join(lines(env)) + "\n]\n"]
+    parts = [
+        BEGIN + "train = [\n" + "\n".join(train_lines(env)) + "\n]\n",
+        "run = [\n" + "\n".join(lines(env)) + "\n]\n",
+    ]
     if extra := cuda_lines(env):
         parts.append("cuda = [\n" + "\n".join(extra) + "\n]\n")
     return "".join(parts) + END

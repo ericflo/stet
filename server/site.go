@@ -1757,13 +1757,9 @@ else
     if [ "$EXTRAS" = "run" ] || ! "$@" "stet-cli[run] @ $WHEEL"; then
       say ""
       say "The full set of curator libraries could not be installed on this machine."
-      say "Installing stet with PyTorch alone: enough to grade, and to run curators that"
-      say "need nothing else. 'stet doctor' will say what is missing."
-      set -- uv tool install --force --python "$PY" --with "torch=={{.Torch}}"
-      if [ -n "$INDEX" ]; then
-        set -- "$@" --index "$INDEX" --index-strategy unsafe-best-match
-      fi
-      "$@" "stet-cli @ $WHEEL"
+      say "Installing stet with the grading libraries (PyTorch and Transformers): enough to grade,"
+      say "and to run curators that need nothing else. 'stet doctor' will say what is missing."
+      "$@" "stet-cli[train] @ $WHEEL"
     fi
   fi
 fi
@@ -1812,8 +1808,8 @@ if ($env:STET_LIGHT -eq "1" -or $env:STET_NO_TORCH -eq "1") {
   if ($index) { $more = @("--index", $index, "--index-strategy", "unsafe-best-match") }
   uv tool install --force --python $py --constraints $constraints @more "stet-cli[run] @ $wheel"
   if ($LASTEXITCODE -ne 0) {
-    Write-Host "The full set of curator libraries could not be installed here. Installing stet with PyTorch alone."
-    uv tool install --force --python $py --with "torch=={{.Torch}}" @more "stet-cli @ $wheel"
+    Write-Host "The full set of curator libraries could not be installed here. Installing stet with the grading libraries (PyTorch and Transformers)."
+    uv tool install --force --python $py --constraints $constraints @more "stet-cli[train] @ $wheel"
   }
 }
 

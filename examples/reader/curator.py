@@ -186,6 +186,25 @@ def _expected_from_logprobs(logprobs: dict[int, float], digit_ids: dict[int, int
     return round(sum(d * w for d, w in weights) / z, 2)
 
 
+def _extract_logprobs(step_lps) -> dict[int, float]:
+    """Read token -> logprob float from a vLLM step logprobs dict (vLLM Logprob dataclass or float)."""
+    if not step_lps:
+        return {}
+    out: dict[int, float] = {}
+    for tid, entry in step_lps.items():
+        val = entry.logprob if hasattr(entry, "logprob") else float(entry)
+        out[int(tid)] = float(val)
+    return out
+
+
+def _build_prompt_ids(tok, head: str, max_prompt_tokens: int, prefix_ids: list[int], suffix_ids: list[int]) -> list[int]:
+    """Build a token-bounded prompt that always keeps RUBRIC_PREFIX intact (for prefix caching)
+    and never truncates RUBRIC_SUFFIX ('Rating (1-5):')."""
+    body_budget = max(1, max_prompt_tokens - len(prefix_ids) - len(suffix_ids))
+    body_ids = tok.encode(head, add_special_tokens=False)[:body_budget]
+    return prefix_ids + body_ids + suffix_ids
+
+
 def _score_vllm(task: Task, where: str, cands: list[tuple[float, int, int, str]], scores: dict[int, float]) -> bool:
     """Fast path on NVIDIA Linux using vLLM with automatic prefix caching."""
     import torch
@@ -200,7 +219,7 @@ def _score_vllm(task: Task, where: str, cands: list[tuple[float, int, int, str]]
     llm = LLM(
         model=where,
         dtype="bfloat16",
-        max_model_len=MAX_PROMPT_TOKENS + 8,
+        max_model_len=MAX_PROMPT_TOKENS + 16,
         gpu_memory_utilization=0.75,
         enable_prefix_caching=True,
         enforce_eager=False,
@@ -208,7 +227,17 @@ def _score_vllm(task: Task, where: str, cands: list[tuple[float, int, int, str]]
     )
     tok = llm.get_tokenizer()
     digit_ids = _digit_token_ids(tok)
-    params = SamplingParams(max_tokens=1, temperature=0.0, logprobs=20)
+    prefix_ids = list(tok.encode(RUBRIC_PREFIX, add_special_tokens=True))
+    suffix_ids = list(tok.encode(RUBRIC_SUFFIX, add_special_tokens=False))
+    try:
+        params = SamplingParams(
+            max_tokens=1,
+            temperature=0.0,
+            logprobs=None,
+            logprob_token_ids=sorted(digit_ids.values()),
+        )
+    except TypeError:
+        params = SamplingParams(max_tokens=1, temperature=0.0, logprobs=20)
     print(f"vLLM loaded Qwen3-0.6B, {task.time_left():.0f}s left", file=sys.stderr)
 
     batch_size = 512
@@ -216,11 +245,14 @@ def _score_vllm(task: Task, where: str, cands: list[tuple[float, int, int, str]]
         if task.time_left() < RESERVE_SECONDS:
             return True
         part = cands[start : start + batch_size]
-        prompts = [f"{RUBRIC_PREFIX}{head}{RUBRIC_SUFFIX}" for _, _, _, head in part]
+        prompts = [
+            {"prompt_token_ids": _build_prompt_ids(tok, head, MAX_PROMPT_TOKENS, prefix_ids, suffix_ids)}
+            for _, _, _, head in part
+        ]
         outputs = llm.generate(prompts, params, use_tqdm=False)
         for (_, doc_id, _, _), out in zip(part, outputs, strict=True):
             step_lps = out.outputs[0].logprobs[0] if out.outputs and out.outputs[0].logprobs else {}
-            lps = {tid: getattr(entry, "logprob", float(entry)) for tid, entry in step_lps.items()}
+            lps = _extract_logprobs(step_lps)
             scores[doc_id] = _expected_from_logprobs(lps, digit_ids)
         print(f"vLLM rated {len(scores):,} / {len(cands):,}, {task.time_left():.0f}s left", file=sys.stderr)
     return True
@@ -242,6 +274,8 @@ def _score_transformers(task: Task, where: str, cands: list[tuple[float, int, in
     digits = sorted(digit_ids)
     digit_tensor = torch.tensor([digit_ids[d] for d in digits], device=device, dtype=torch.long)
     digit_vals = torch.tensor([float(d) for d in digits], device=device, dtype=torch.float32)
+    prefix_ids = list(tok.encode(RUBRIC_PREFIX, add_special_tokens=True))
+    suffix_ids = list(tok.encode(RUBRIC_SUFFIX, add_special_tokens=False))
     print(f"transformers loaded Qwen3-0.6B on {device}, {task.time_left():.0f}s left", file=sys.stderr)
 
     batch_size = 32 if device == "cuda" else 8
@@ -249,8 +283,7 @@ def _score_transformers(task: Task, where: str, cands: list[tuple[float, int, in
     with torch.inference_mode():
         for start in range(0, len(cands), chunk):
             part = cands[start : start + chunk]
-            prompts = [f"{RUBRIC_PREFIX}{head}{RUBRIC_SUFFIX}" for _, _, _, head in part]
-            enc = tok(prompts, truncation=True, max_length=MAX_PROMPT_TOKENS)["input_ids"]
+            enc = [_build_prompt_ids(tok, head, MAX_PROMPT_TOKENS, prefix_ids, suffix_ids) for _, _, _, head in part]
             order = sorted(range(len(part)), key=lambda j: (len(enc[j]), part[j][1]))
             for b in range(0, len(order), batch_size):
                 if task.time_left() < RESERVE_SECONDS:

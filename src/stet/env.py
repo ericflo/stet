@@ -102,6 +102,16 @@ def promised(season: Season) -> dict[str, str]:
     return dict(env.get("packages") or {})
 
 
+def grade_packages(season: Season) -> tuple[str, ...]:
+    """The pinned libraries required to train and grade students for this season."""
+    env = season.raw.get("environment") or {}
+    if explicit := env.get("grade_packages"):
+        return tuple(explicit)
+    if (season.raw.get("student") or {}).get("kind") == "hf_topreset":
+        return ("safetensors", "torch", "transformers")
+    return ("torch",)
+
+
 def summary(season: Season) -> str:
     """One line for `stet doctor`."""
     env = season.raw.get("environment") or {}

@@ -216,11 +216,11 @@ def _with_baseline(result: dict, rnd, scale, device, out: Out, skip: bool):
     # The gain is the exam's aggregate of the item-by-item differences, with the languages
     # weighed by the published table (a round's own corpus is measured only for official rounds).
     from . import data
-    from .exam.aggregate import gains, round_score
+    from .exam.aggregate import gains, plan_of, round_score
 
     result["baseline"] = {"mean": base["exam"]["mean"]}
     if result["valid"]:
-        agg = round_score(data.round_exam(rnd, scale), gains(result["exam"]["item_scores"], base["exam"]["item_scores"]))
+        agg = round_score(data.round_exam(rnd, scale), gains(result["exam"]["item_scores"], base["exam"]["item_scores"]), plan=plan_of(rnd.season))
         result["gain"] = round(agg["score"], 5)
         result["pillars"] = {k: v["score"] for k, v in agg["pillars"].items()}
     return base

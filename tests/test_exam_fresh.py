@@ -185,6 +185,33 @@ def test_items_the_corpus_already_holds_are_found(tmp_path):
     assert seen([copied, new, answer], corpus, load_season("s2")) == {0}  # an answer is checked on its answer, not its question
 
 
+def test_choice_items_are_decontaminated_on_wrong_distractors_too(tmp_path):
+    from conftest import make_corpus
+
+    from stet.exam.decontam import seen
+    from stet.exam.items import Item
+    from stet.spec import load_season
+
+    s3 = load_season("s3")
+    ctx = "Opening context about regional alpine geology and glacial erosion that is completely fresh."
+    right = "Fresh continuation explaining moraine formation across the eastern valley floor in late autumn."
+    wrong_hit = "The river authority approved a new flood barrier for the lower town after three wet winters in a row."
+    wrong_clean = "An entirely separate continuation about maritime trade routes during the early seventeenth century."
+    choice = Item(
+        kind="choice", corner="fresh/ccnews/en/-/cont-mc", fmt="prose", lang="en", source="ccnews:1",
+        ctx=ctx, cont=right, wrongs=(wrong_hit, wrong_clean),
+    )
+    # Wrong-only overlap must drop the item because familiarity with a distractor biases the margin.
+    c_wrong = make_corpus(tmp_path / "wrong", ["Header\n" + wrong_hit + " Extra words."])
+    assert seen([choice], c_wrong, s3) == {0}
+    # Right-only overlap also drops the item.
+    c_right = make_corpus(tmp_path / "right", ["Header\n" + right + " Extra words."])
+    assert seen([choice], c_right, s3) == {0}
+    # Unseen context, right, and wrongs survive.
+    c_clean = make_corpus(tmp_path / "clean", ["Unrelated page about baking sourdough bread at home."])
+    assert seen([choice], c_clean, s3) == set()
+
+
 def test_copied_text_is_found_in_every_script(tmp_path):
     """Season 1 counted the letters a to z, so a passage in Russian, Japanese, Chinese, Arabic or Hindi gave no keys at all."""
     from conftest import make_corpus

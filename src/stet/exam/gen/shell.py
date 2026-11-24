@@ -185,11 +185,12 @@ def _lines(steps, style: str) -> str:
 LIMIT = 640
 
 
-def make(rng: Rng, corner: str) -> Item:
+def make(rng: Rng, corner: str, *, version: int = 10) -> Item:
     """One item for a corner: the first of a few draws that fits the student's window, the
-    later ones without the aside."""
+    later ones without the aside. Version 9 (Season 2) kept 6 retries; version 10+ retries up to 31."""
     it = _make(rng, corner, True)
-    for again in range(1, 32):
+    tries = 7 if version < 10 else 32
+    for again in range(1, tries):
         if it.kind != "answer" or len((it.ctx + it.cont).encode()) <= LIMIT:
             break
         it = _make(rng.child(f"shorter{again}"), corner, again < 2)

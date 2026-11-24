@@ -93,6 +93,7 @@ type Environment struct {
 	Also       map[string]string `json:"also"` // what those bring with them, pinned too
 	Linux      []string          `json:"linux_x86_64_only"`
 	CUDALinux  []string          `json:"cuda_linux_only,omitempty"`
+	Grade      []string          `json:"grade_packages,omitempty"`
 }
 
 // BaselineRule is how many machines measure a round's unedited baseline. See judge.asksBaseline.

@@ -18,14 +18,14 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# torch is needed to train and grade. It is optional so that `stet submit`, `stet status`
-# and friends work on a machine with no GPU stack, and so you choose your own build
-# (CUDA, ROCm, MPS, CPU) from https://pytorch.org/get-started/locally/
-train = ["torch>=2.4"]
-# What an editor may import, at exactly these versions on every machine that runs editors,
-# so that a program behaves the same wherever it is run. PyTorch is in the list; which
-# build of it (NVIDIA or AMD) is chosen by the wheel index the installer is given.
+# Pinned grading (`train`), full curator (`run`), and NVIDIA Linux (`cuda`) extras.
+# Kept optional so `stet submit`, `stet status` and friends work without a GPU stack.
 # --- written by tools/sync_environment.py; do not edit by hand ---
+train = [
+    "safetensors==0.8.0",
+    "torch==2.14.0",
+    "transformers==5.22.2",
+]
 run = [
     "accelerate==1.16.0",
     "annotated-doc==0.0.7",

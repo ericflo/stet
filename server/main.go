@@ -218,8 +218,9 @@ func (cfg *Config) check(season *Season) error {
 	if cfg.Dev {
 		return nil
 	}
-	if iv := int64(cfg.RoundInterval.Seconds()); season.DrawGrid <= 0 || (iv != 0 && (iv < season.DrawGrid || iv%season.DrawGrid != 0)) {
-		return fmt.Errorf("the round interval must be 0 (on demand) or a multiple of the season's draw grid (%d seconds)", season.DrawGrid)
+	grid := time.Duration(season.DrawGrid) * time.Second
+	if season.DrawGrid <= 0 || (cfg.RoundInterval != 0 && (cfg.RoundInterval < grid || cfg.RoundInterval%grid != 0)) {
+		return fmt.Errorf("the round interval must be 0 (on demand) or a whole multiple of the season's draw grid (%d seconds)", season.DrawGrid)
 	}
 	if cfg.DBURL == "" {
 		return errors.New("STET_DB_URL is not set: outside development the records must live in durable-db")

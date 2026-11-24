@@ -23,10 +23,16 @@ from ..data import normalise, sentence_starts, window_hashes
 from .items import Item
 
 
-def scored_text(it: Item) -> str:
+def scored_texts(it: Item) -> list[str]:
+    """Every independent text span whose familiarity in the training corpus would bias this item's score."""
     if it.kind == "choice":
-        return f"{it.ctx}\n{it.cont}"
-    return {"passage": it.text, "answer": it.cont}.get(it.kind, "")
+        return [t for t in (it.ctx, it.cont, *it.wrongs) if t]
+    t = {"passage": it.text, "answer": it.cont}.get(it.kind, "")
+    return [t] if t else []
+
+
+def scored_text(it: Item) -> str:
+    return "\n".join(scored_texts(it))
 
 
 def seen(items: list[Item], corpus, season, log=None) -> set[int]:
@@ -35,8 +41,9 @@ def seen(items: list[Item], corpus, season, log=None) -> set[int]:
     k, need = int(cfg["key_bytes"]), int(cfg["min_letters"])
     owners: dict[int, list[int]] = defaultdict(list)
     for i, it in enumerate(items):
-        for key in sentence_starts(scored_text(it), k, need):
-            owners[int(window_hashes(key, k)[0])].append(i)
+        for text in scored_texts(it):
+            for key in sentence_starts(text, k, need):
+                owners[int(window_hashes(key, k)[0])].append(i)
     if not owners:
         return set()
     keys = np.array(sorted(owners), dtype=np.uint64)

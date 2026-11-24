@@ -46,7 +46,7 @@ def test_a_seed_always_makes_the_same_exam():
     # Pinned: the generated items of a round of the season, from the families its exam names. A
     # change to one of their generators that changes what a seed produces must bump gen.VERSION
     # and this hash, on purpose; so must a change to the parts the season names.
-    assert digest(gen.for_season(SEASON, SEED)) == "048c4f2fd0fb9f268395942ddadb5092ba24b1c21bb9150c1ade81a8a4ddf7e3"
+    assert digest(gen.for_season(SEASON, SEED)) == "250574009adbfac750ac73b4b1c47cfaee29d4121971f8098117276b25ba519e"
     assert digest(gen.for_season(SEASON, SEED)) == digest(gen.for_season(SEASON, SEED))
     assert digest(gen.for_season(SEASON, b"other")) != digest(gen.for_season(SEASON, SEED))
 
@@ -59,7 +59,7 @@ MEASURED = {
     "context": (384, "2672777846b47fc705f5e3a988d4ae3ae075592e1e0b4d69b1ed2188ea8e0ce3"),
     "logic-mc": (288, "0a6ed27da432712e0a1081366cd2cc54c72e1b47315f1a5a507ca7760657b0d1"),
     "grammar": (198, "f65db2784e54c429a236370262dd654d89b4fd0c963ee30c0278e3ded772e9b6"),
-    "knowledge-mc": (200, "6599bc802a50419ca3fc193283c2e91f398e1cc12658c13a3729bb7efecc4804"),
+    "knowledge-mc": (200, "1e25c4b0b8c4bdc808c68cc315df3ef18abfe90f0822f01cfc65ad84b75f91cc"),
     "arith-shots": (192, "06065801f2520776773aee5998ab3762bc2285f1d0bcdea4746b48638f624b86"),
     "units-shots": (56, "4e47d7651c5353994f37c35ea5deae56b0f898e7b44493050f4b29154cce792d"),
     "word-shots": (48, "afb9d841a596a4de112b1f93958fd13aa7b35e44d374158710051a2283b13157"),

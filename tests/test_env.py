@@ -57,13 +57,25 @@ def test_what_differs_is_said_in_words(season, monkeypatch):
     assert "not installed: scipy" in said[1] and f"transformers 4.40.0 (the season's is {want['packages']['transformers']})" in said[2]
 
 
-def test_grading_needs_pytorch_to_match_and_nothing_else(season, monkeypatch):
+def test_grading_needs_the_seasons_grading_stack_to_match(season, monkeypatch):
     want = env.expected(season)
-    have(monkeypatch, {"torch": want["packages"]["torch"] + "+cu132"})
+    grade_pkgs = env.grade_packages(season)
+    assert set(grade_pkgs) == {"safetensors", "torch", "transformers"}
+    have(monkeypatch, {
+        "torch": want["packages"]["torch"] + "+cu132",
+        "transformers": want["packages"]["transformers"],
+        "safetensors": want["packages"]["safetensors"],
+    })
     monkeypatch.setattr(sys, "version_info", type("V", (), {"major": 3, "minor": 11})())
-    assert env.problems(season, only=("torch",)) == []
-    have(monkeypatch, {"torch": "2.9.0"})
-    assert env.problems(season, only=("torch",)) == [f"a different version: torch 2.9.0 (the season's is {want['packages']['torch']})"]
+    assert env.problems(season, only=grade_pkgs) == []
+    # Missing transformers is caught before taking grading work.
+    have(monkeypatch, {"torch": want["packages"]["torch"] + "+cu132", "safetensors": want["packages"]["safetensors"]})
+    assert env.problems(season, only=grade_pkgs) == ["not installed: transformers"]
+    # Wrong PyTorch version is caught too.
+    have(monkeypatch, {"torch": "2.9.0", "transformers": want["packages"]["transformers"], "safetensors": want["packages"]["safetensors"]})
+    assert env.problems(season, only=grade_pkgs) == [f"a different version: torch 2.9.0 (the season's is {want['packages']['torch']})"]
+    # Season 2 needed PyTorch alone.
+    assert env.grade_packages(load_season("s2")) == ("torch",)
 
 
 def test_a_library_built_for_one_platform_is_not_asked_of_another(season, monkeypatch):

@@ -64,13 +64,13 @@ def generate(
     for fam in families:
         for corner in fam.corners():
             for i in range(per_corner * int(more.get(fam.NAME, 1))):
-                it = fam.make(root.child(f"{corner}#{i}"), corner)
+                it = fam.make(root.child(f"{corner}#{i}"), corner, version=version) if fam is shell else fam.make(root.child(f"{corner}#{i}"), corner)
                 # A corner with few things to say can say one of them twice. An item sat twice
                 # counts twice: draw again, a few times, for one the exam does not have yet.
                 for again in range(1, 9):
                     if it.id not in had:
                         break
-                    it = fam.make(root.child(f"{corner}#{i}/again{again}"), corner)
+                    it = fam.make(root.child(f"{corner}#{i}/again{again}"), corner, version=version) if fam is shell else fam.make(root.child(f"{corner}#{i}/again{again}"), corner)
                 had.add(it.id)
                 out.append(it)
     return out

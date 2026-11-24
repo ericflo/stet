@@ -68,7 +68,7 @@
       "base_url": "https://data.commoncrawl.org/",
       "paths": "crawl-data/{crawl}/wet.paths.gz",
       "shards_per_unit": 2,
-      "about": "The newest published Common Crawl crawl at the time of the draw: full-page text (WET), every language, streamed until the training budget is full."
+      "about": "The newest published Common Crawl crawl at the time of the draw: a fixed 24-shard full-page text (WET) sample at standard scale (~3.8 GB raw text, every language); scripts shorter than the training budget repeat from the top."
     }
   },
   "exam": {
@@ -288,6 +288,11 @@
     "cuda_linux_only": [
       "liger-kernel",
       "vllm"
+    ],
+    "grade_packages": [
+      "safetensors",
+      "torch",
+      "transformers"
     ],
     "packages": {
       "accelerate": "1.16.0",

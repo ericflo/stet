@@ -497,3 +497,121 @@ func TestOnDemandOnlyDrawsOnlyWhenEntriesWait(t *testing.T) {
 	})
 	w.check()
 }
+
+// After two consecutive rounds settle with no baseline, on-demand-only mode holds off for
+// emptyBackoff so a transient outage does not spin GPUs, then recovers automatically once
+// the backoff expires rather than deadlocking until manual intervention.
+func TestOnDemandOnlyRecoversAfterTwoEmptyRoundsBackoff(t *testing.T) {
+	w, anchor := demandWorld(t, func(c *Config) {
+		c.RoundInterval = 0
+		c.RoundMinGap = 0
+	})
+	alice := w.join("alice", nil)
+	ctx := context.Background()
+	work := func() Work {
+		t.Helper()
+		var out Work
+		if code := anchor.do("GET", "/api/v1/admin/work", nil, &out); code != 200 {
+			t.Fatalf("HTTP %d", code)
+		}
+		return out
+	}
+
+	// Seed two settled rounds with no baseline, finishing 10 minutes ago.
+	t0 := now()
+	w.app.st.update(ctx, func(tx *Tx) error {
+		for i := 1; i <= 2; i++ {
+			rd := &Round{
+				Idx: i, Status: "settled", Scale: w.cfg.Scale,
+				DrawAt: t0 - 3600 + int64(i*600), DrawnAt: t0 - 3600 + int64(i*600),
+				SettledAt: t0 - 600 + int64((i-2)*600),
+				Crawl:     w.cfg.FixedCrawl,
+			}
+			tx.saveRound(rd)
+		}
+		return nil
+	})
+	w.submit(alice, "retry-me", "print(1)")
+
+	// During the backoff window: neither fleet demand nor scheduling fires even with a runner.
+	w.claim(anchor, true)
+	w.app.tick(ctx)
+	if wk := work(); wk.Waiting {
+		t.Fatal("work.Waiting is true during empty-round backoff")
+	}
+	if at := w.scheduledAt(); at != 0 {
+		t.Fatalf("round scheduled at %d during empty-round backoff", at)
+	}
+
+	// Once emptyBackoff passes: fleet demand flips true (before runner asks again), and when
+	// a runner arrives, the recovery round is scheduled cleanly on the grid.
+	shift := int64((emptyBackoff + time.Minute).Seconds())
+	w.app.st.update(ctx, func(tx *Tx) error {
+		for _, r := range tx.s.Rounds {
+			r.DrawAt -= shift
+			r.DrawnAt -= shift
+			r.SettledAt -= shift
+			tx.saveRound(r)
+		}
+		return nil
+	})
+	w.pass(emptyBackoff + time.Minute)
+	if wk := work(); !wk.Waiting {
+		t.Fatal("work.Waiting stayed false after empty-round backoff expired")
+	}
+	if at := w.scheduledAt(); at != 0 {
+		t.Fatalf("scheduled at %d before a runner came back after backoff", at)
+	}
+	w.claim(anchor, true)
+	w.app.tick(ctx)
+	if at := w.scheduledAt(); at == 0 {
+		t.Fatal("recovery round was not scheduled once backoff expired and a runner arrived")
+	}
+	w.check()
+}
+
+// Positive subsecond round intervals must be rejected rather than truncating to 0s and
+// causing integer division by zero in nextSlot.
+func TestConfigRejectsSubsecondAndNonGridRoundIntervals(t *testing.T) {
+	season := loadSeason()
+	base := Config{
+		Scale:         season.OfficialScale,
+		DBURL:         "https://db.test",
+		S3:            S3Config{Bucket: "b", Endpoint: "https://s3.test", KeyID: "k", Secret: "s"},
+		RoundInterval: 0,
+	}
+	for _, ok := range []time.Duration{0, time.Duration(season.DrawGrid) * time.Second, 3 * time.Hour} {
+		c := base
+		c.RoundInterval = ok
+		if err := c.check(season); err != nil {
+			t.Errorf("RoundInterval %v unexpectedly rejected: %v", ok, err)
+		}
+	}
+	for _, bad := range []time.Duration{500 * time.Millisecond, 300 * time.Second, time.Duration(season.DrawGrid)*time.Second + 500*time.Millisecond, -10 * time.Minute} {
+		c := base
+		c.RoundInterval = bad
+		if err := c.check(season); err == nil {
+			t.Errorf("RoundInterval %v unexpectedly accepted", bad)
+		}
+	}
+}
+
+func TestInstallerFallbacksUsePinnedTrainExtra(t *testing.T) {
+	w, _ := demandWorld(t, nil)
+	w.app.cfg.FilesDir = t.TempDir()
+	if err := os.WriteFile(filepath.Join(w.app.cfg.FilesDir, "stet_cli-9.9.9-py3-none-any.whl"), []byte("a wheel"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"/install.sh", "/install.ps1"} {
+		code, body := w.page(path)
+		if code != 200 {
+			t.Fatalf("%s: HTTP %d", path, code)
+		}
+		if !strings.Contains(body, "stet-cli[train]") {
+			t.Errorf("%s does not install stet-cli[train] in its grading-only fallback", path)
+		}
+		if strings.Contains(body, `--with "torch==`) {
+			t.Errorf("%s still falls back to PyTorch alone without Transformers", path)
+		}
+	}
+}

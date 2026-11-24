@@ -342,8 +342,8 @@ class Task:
         write_script(self.out / "script.jsonl", lines)
 
     def stream(self, start: int = 0) -> Iterator[tuple[int, str]]:
-        """Stream (doc_index, text) in seeded corpus order so a curator can stop as soon as its
-        training budget is full (stream-until-full)."""
+        """Yield (doc_index, text) in seeded order across the round's corpus so a curator can stop
+        as soon as it has selected enough text for its training budget."""
         corpus = self.corpus
         for i in range(start, len(corpus)):
             yield i, corpus.text(i)

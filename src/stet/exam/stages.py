@@ -571,13 +571,13 @@ def say_curve(title: str, points: list[dict], key: str) -> None:
         sys.stdout.flush()
 
 
-def curve_of(rnd_id: str, scale, points: list[dict], sat: list[Item], shares: dict, work: Path) -> dict | None:
+def curve_of(rnd_id: str, scale, points: list[dict], sat: list[Item], shares: dict, work: Path, plan=None) -> dict | None:
     """A round's curve from the students that are back, or None while there is no 1x student."""
     got = {p["multiple"]: (batch_dir(rnd_id, p["scale"].name, sat, work), p) for p in points}
     each = {m: scores(b, UNEDITED) for m, (b, _) in got.items()}
     if not each.get(1.0):
         return None
-    out = measure.curve(item_table(sat), shares, {m: v for m, v in each.items() if v})
+    out = measure.curve(item_table(sat, plan=plan), shares, {m: v for m, v in each.items() if v}, plan=plan)
     for row in out:
         bdir, p = got[row["multiple"]]
         row.update(tokens=p["scale"].train_tokens, passes=p["passes"], repeats=read_twice(p["passes"], bdir),
@@ -623,7 +623,9 @@ def cmd_curve(args):
             batches.append((bdir, {UNEDITED: p["trainings"]}))
         say(f"{rnd.id}: {sum(p['trainings'] for p in points)} students of the unedited corpus, sitting {len(sat):,} items")
         follow(batches, key, wait=not args.no_wait)
-        out = curve_of(rnd.id, scale, points, sat, shares, work)
+        from .aggregate import plan_of
+
+        out = curve_of(rnd.id, scale, points, sat, shares, work, plan=plan_of(season))
         if out is None:
             say(f"{rnd.id}: no 1x student is back yet, and the curve is measured from it. Run this again later.")
             continue
@@ -808,7 +810,9 @@ def _audit_report(args, season, work: Path, key) -> None:
                 collect(bdir, key)
             except ApiError as e:
                 say(f"the server could not be asked for what is new ({e}); this is what was collected before")
-    table_, stats, why = item_table(sat), {}, {}
+    from .aggregate import plan_of
+
+    table_, stats, why = item_table(sat, plan=plan_of(season)), {}, {}
     for scale, bdir, _, _, who in batches:
         unedited = scores(bdir, UNEDITED)
         if not unedited:
@@ -1187,7 +1191,9 @@ def _finals_table(args, season, work: Path, key) -> None:
                 notes.setdefault("curve", []).append(f"{b['round']}: the student at {multiple_text(p['multiple'])} read some of the corpus twice, and is no point of the curve")
             else:
                 curve[p["multiple"]] = got
-        rounds.append({"round": b["round"], "table": item_table(b["sat"]), "shares": b["shares"], "unedited": unedited, "students": students, "curve": curve})
+        from .aggregate import plan_of
+
+        rounds.append({"round": b["round"], "table": item_table(b["sat"], plan=plan_of(season)), "shares": b["shares"], "unedited": unedited, "students": students, "curve": curve})
         # What is published of a round: its exam as a settled round's is, and how every student did on every item.
         pub = fdir / "published" / b["round"]
         _write(pub / "scores.json", {"round": b["round"], "scale": plan["scale"], "items": [it.id for it in b["sat"]], "left_out": b["whole"] - len(b["sat"]),
