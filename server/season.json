@@ -22,7 +22,7 @@
   "key_bytes": 64,
   "min_letters": 38
  },
- "digest": "f42589a4ae170141ca745a9212fa0f3bc061fad326f823755ad335f58031a7f0",
+ "digest": "4f9abecea1d25885089c3e93dfc109737c687055d02e84a2ffd5352a291045dc",
  "draw_grid_seconds": 600,
  "environment": {
   "also": {
@@ -159,11 +159,11 @@
    "settle_seconds": 3600
   },
   "generated": [
-   "logic-mc",
+   "logic",
    "agent",
    "grammar",
    "context",
-   "knowledge-mc",
+   "knowledge-even",
    "arith-shots",
    "word-shots",
    "units-shots",
@@ -176,7 +176,7 @@
   },
   "pillars": [
    {
-    "about": "fresh encyclopedia articles: real next sentence minus same-source distractor",
+    "about": "fresh encyclopedia articles: same continuation under the real opening vs same-source wrong openings",
     "group": "comprehension",
     "name": "reference",
     "parts": [
@@ -184,7 +184,7 @@
     ]
    },
    {
-    "about": "fresh news published in the day before the draw: real continuation minus same-source distractor",
+    "about": "fresh news published in the day before the draw: same continuation under the real opening vs same-source wrong openings",
     "group": "comprehension",
     "name": "news",
     "parts": [
@@ -192,7 +192,7 @@
     ]
    },
    {
-    "about": "fresh issues, patches and technical writing: real continuation minus same-source distractor",
+    "about": "fresh issues, patches and technical writing: same continuation under the real opening vs same-source wrong openings",
     "group": "comprehension",
     "name": "technical",
     "parts": [
@@ -200,7 +200,7 @@
     ]
    },
    {
-    "about": "fresh replies and posts: real reply minus same-source distractor",
+    "about": "fresh replies and posts: same continuation under the real opening vs same-source wrong openings",
     "group": "comprehension",
     "name": "conversation",
     "parts": [
@@ -225,11 +225,11 @@
     ]
    },
    {
-    "about": "following an argument to its end, scored contrastively against the other entities",
+    "about": "following an argument to its end",
     "group": "skills",
     "name": "logic",
     "parts": [
-     "logic-mc"
+     "logic"
     ]
    },
    {
@@ -260,11 +260,11 @@
     ]
    },
    {
-    "about": "facts the web knows in ten languages, scored contrastively against same-relation distractors",
+    "about": "facts the web knows in ten languages, disjoint from the SFT probe",
     "group": "skills",
     "name": "knowledge",
     "parts": [
-     "knowledge-mc"
+     "knowledge-even"
     ]
    }
   ],
@@ -427,6 +427,7 @@
   "disk_gb": 80,
   "gpu_memory_gb": 23,
   "gpu_tokens_per_second": 120000,
+  "grade_gpu_memory_gb": 15,
   "memory_gb": 24
  },
  "scales": {
@@ -437,7 +438,7 @@
    "d_model": 1024,
    "edit_seconds": 4800,
    "lr": 0.0006,
-   "micro_batch": 2,
+   "micro_batch": 4,
    "n_head": 16,
    "n_layer": 28,
    "sft_steps": 64,
@@ -449,12 +450,13 @@
    "ctx": 1024,
    "d_model": 1024,
    "edit_seconds": 300,
-   "lr": 0.001,
-   "micro_batch": 2,
+   "lr": 0.0006,
+   "micro_batch": 4,
    "n_head": 16,
    "n_layer": 28,
    "sft_steps": 32,
-   "train_tokens": 8388608
+   "train_tokens": 8388608,
+   "warmup_steps": 24
   },
   "nano": {
    "batch_size": 32,
@@ -462,12 +464,13 @@
    "ctx": 1024,
    "d_model": 1024,
    "edit_seconds": 120,
-   "lr": 0.001,
-   "micro_batch": 2,
+   "lr": 0.0003,
+   "micro_batch": 4,
    "n_head": 16,
    "n_layer": 28,
    "sft_steps": 16,
-   "train_tokens": 1048576
+   "train_tokens": 1048576,
+   "warmup_steps": 10
   },
   "standard": {
    "batch_size": 32,
@@ -476,7 +479,7 @@
    "d_model": 1024,
    "edit_seconds": 1200,
    "lr": 0.001,
-   "micro_batch": 2,
+   "micro_batch": 4,
    "n_head": 16,
    "n_layer": 28,
    "sft_steps": 64,

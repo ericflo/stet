@@ -27,7 +27,7 @@ def env(corpus, monkeypatch):
 
     base = {"exam": {"items": 2, "mean": -5.0, "item_scores": [-5.0, -5.0]}}
     items = [Item(kind="answer", corner="agent/shell/ls", fmt="logs", lang="en", source="gen:agent", ctx="$ ls\na  b\n$ rm a\n$ ls\n", cont="b"),
-             Item(kind="choice", corner="logic-mc/x", fmt="prose", lang="en", source="gen:logic-mc", ctx="All cats purr. Tom is a cat. Does Tom purr?", cont=" Yes", wrongs=(" No",))]
+             Item(kind="answer", corner="logic/x", fmt="prose", lang="en", source="gen:logic", ctx="All cats purr. Tom is a cat. Does Tom purr?", cont=" Yes")]
     monkeypatch.setattr(data, "corpus", lambda rnd, scale, quiet=False: corpus)
     monkeypatch.setattr(data, "materialize", lambda rnd, scale, quiet=False: (corpus, items))
     monkeypatch.setattr(gym, "baseline", lambda rnd, scale, device: base)

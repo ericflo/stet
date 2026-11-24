@@ -262,3 +262,58 @@ esac
 		t.Fatalf("not kept in probe.txt:\n%s", kept)
 	}
 }
+
+// On a minimal root apt container without gcc, worker.sh installs gcc, g++ and libc6-dev for
+// Triton/vLLM/FLA JIT kernels, and ends the pod loudly if gcc still cannot be installed.
+func TestWorkerInstallsCompilerPackagesAndFailsLoudlyIfMissing(t *testing.T) {
+	runWithApt := func(aptBody string) (string, string, string) {
+		w := newWorkerRun(t, `case "$1" in --version) echo "stet 0.0.0" ;; verify) echo "$*" >> "$LOG/stet" ;; esac`)
+		// Minimal PATH containing only our fake tools + basic coreutils directory without gcc.
+		shim := filepath.Join(w.dir, "shim")
+		os.MkdirAll(shim, 0o755)
+		for _, tool := range []string{"bash", "sh", "mkdir", "chmod", "touch", "date", "printf", "grep", "cat", "cp", "base64", "stat", "sed", "head", "awk", "df", "free", "nproc", "uname"} {
+			if p, err := exec.LookPath(tool); err == nil {
+				os.Symlink(p, filepath.Join(shim, tool))
+			}
+		}
+		writeShim := func(name, body string) {
+			if err := os.WriteFile(filepath.Join(w.bin, name), []byte("#!/bin/bash\n"+body), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		writeShim("id", `echo 0`)
+		writeShim("apt-get", aptBody)
+		for i, e := range w.env {
+			if strings.HasPrefix(e, "PATH=") {
+				w.env[i] = "PATH=" + w.bin + ":" + shim
+			}
+		}
+		out, err := w.cmd().CombinedOutput()
+		if err != nil {
+			t.Fatalf("%v\n%s", err, out)
+		}
+		return string(out), w.log("apt"), w.log("stet")
+	}
+
+	// Success case: apt-get installs gcc, g++, libc6-dev and creates a working gcc binary.
+	out, aptLog, stetLog := runWithApt(`echo "$*" >> "$LOG/apt"
+if [ "$1" = "install" ]; then
+  printf '#!/bin/sh\nexit 0\n' > "$LOG/bin/gcc" && chmod +x "$LOG/bin/gcc"
+fi
+exit 0`)
+	for _, pkg := range []string{"gcc", "g++", "libc6-dev"} {
+		if !strings.Contains(aptLog, pkg) {
+			t.Fatalf("apt-get install did not request %q:\n%s\n%s", pkg, aptLog, out)
+		}
+	}
+	if !strings.Contains(stetLog, "verify") {
+		t.Fatalf("expected stet verify to run once gcc installed:\n%s", out)
+	}
+
+	// Failure case: apt-get fails (even though curl exists); worker must end_pod loudly instead
+	// of continuing without a compiler.
+	outFail, _, stetFail := runWithApt(`echo "$*" >> "$LOG/apt"; exit 1`)
+	if stetFail != "" || !strings.Contains(outFail, "gcc could not be installed") {
+		t.Fatalf("expected loud failure when gcc install fails; stet=%q\nout=%s", stetFail, outFail)
+	}
+}

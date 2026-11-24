@@ -198,9 +198,10 @@ func TestMachinesThatRunCuratorsAreRentedForRunsAndGrades(t *testing.T) {
 		want int
 	}{
 		{&Work{}, 0},
-		{round(36, 0, 0, 0), 8},   // a round starting: 36 entries, four to a machine, at most 8
+		{round(36, 0, 0, 0), 8},   // a round starting: 36 entries, two to a machine, at most 8
 		{round(3, 0, 0, 0), 2},    // three: each is run twice, by two machines
-		{round(5, 2, 1, 4), 3},    // five entries (two machines) and a script
+		{round(5, 2, 1, 4), 4},    // five entries (three machines at runsPerMachine=2) and a script
+		{round(8, 0, 0, 0), 4},    // eight entries: four curator machines (2 waves instead of 4)
 		{round(0, 3, 0, 5), 0},    // all under way: nothing more for a new machine
 		{round(0, 0, 2, 0), 1},    // two scripts left
 		{&Work{Waiting: true}, 1}, // an entry waiting, and nobody who runs curators around to have its round drawn
@@ -236,7 +237,7 @@ func TestTheFarmsStudentsWantMachinesToo(t *testing.T) {
 		{&Work{FarmWaiting: 1}, 1},
 		{&Work{FarmWaiting: 9}, 3},
 		{&Work{FarmUnderWay: 5}, 0},         // all being trained already
-		{withFarm(round(5, 0, 1, 0), 9), 6}, // 3 for the round's five entries and its script, 3 for the students
+		{withFarm(round(5, 0, 1, 0), 9), 7}, // 4 for the round's five entries and its script, 3 for the students
 		{withFarm(round(36, 0, 0, 0), 9), 8},
 	} {
 		if got := p.target(c.w); got != c.want {
@@ -494,7 +495,7 @@ func TestAMachineThatMayNotRunCuratorsMakesWayForOneThatMay(t *testing.T) {
 	p := testPolicy()
 	p.PerWorker, p.MaxWorkers, p.Edits = 1, 20, true
 	work := func() *Work {
-		return &Work{Rounds: []WorkRound{{ID: "s1-o00009", Entries: 8, RunsWanted: 8, RunsWaiting: 8}}}
+		return &Work{Rounds: []WorkRound{{ID: "s1-o00009", Entries: 4, RunsWanted: 4, RunsWaiting: 4}}}
 	}
 	const why = "under the season's floor for running curators: CPU 95 MB/s, floor 100"
 	w := work()
@@ -527,9 +528,11 @@ func TestAMachineThatMayNotRunCuratorsMakesWayForOneThatMay(t *testing.T) {
 	}
 }
 
-// During the 6-16m notice before an on-demand scheduled draw, up to keptNearDraw warm runners
-// are kept alive (so the runner that triggered the draw isn't killed before the draw fires),
-// while extra idle GPUs wind down immediately; once no draw is scheduled (quiet), all GPUs end.
+// During the 6-16m notice before an on-demand scheduled draw, up to keptNearDraw warm curator-capable
+// runners are kept alive (so the runner that triggered the draw isn't killed before the draw fires),
+// while extra idle GPUs and grade-only machines wind down immediately; draws far in the future (>20m)
+// or quiet/paused periods end all idle GPUs; and a trigger runner checking in right before the next
+// draw is scheduled (w.Waiting && w.Runners > 0) is also kept alive.
 func TestWarmRunnersAreKeptAcrossImminentDrawNoticeAndEndedWhenQuiet(t *testing.T) {
 	p := testPolicy()
 	p.Edits, p.MaxWorkers = true, 6
@@ -539,8 +542,33 @@ func TestWarmRunnersAreKeptAcrossImminentDrawNoticeAndEndedWhenQuiet(t *testing.
 	if d := p.decide(w, ws, 0, t0); handles(d.End) != "stet-rp-01" {
 		t.Fatalf("10m before scheduled draw, want only slowest extra ended; ended %s", handles(d.End))
 	}
+	// A grade-only machine must NEVER be kept warm for a draw, even if it is the fastest.
+	ws[1].GradeOnly = true
+	if d := p.decide(w, ws, 0, t0); handles(d.End) != "stet-rp-02" {
+		t.Fatalf("grade-only machine must not be kept warm near draw; ended %s", handles(d.End))
+	}
+	ws[1].GradeOnly = false
+	// A draw outside the 20m keep-alive window (e.g. 40m away) must NOT keep idle GPUs warm.
+	w.NextDrawAt = t0.Add(40 * time.Minute).Unix()
+	if d := p.decide(w, ws, 0, t0); handles(d.End) != "stet-rp-01,stet-rp-02,stet-rp-03" {
+		t.Fatalf("40m before draw, want all idle GPUs ended; ended %s", handles(d.End))
+	}
+	// During the brief gap between a trigger runner asking for work (Runners==1) and NextDrawAt
+	// appearing (Waiting==true, NextDrawAt==0), keep the trigger runner alive.
+	w.NextDrawAt, w.Waiting, w.Runners = 0, true, 1
+	wsGap := pool(w, "waiting", "free")
+	if d := p.decide(w, wsGap, 0, t0); len(d.End) != 0 {
+		t.Fatalf("trigger runner killed during Waiting&&Runners>0 gap: ended %s", handles(d.End))
+	}
+	// If only a grade-only machine is idle when w.Waiting&&Runners==0, end it and rent a curator runner.
+	w.NextDrawAt, w.Waiting, w.Runners = 0, true, 0
+	wsGrade := pool(w, "waiting", "free")
+	wsGrade[0].GradeOnly = true
+	if d := p.decide(w, wsGrade, 0, t0); handles(d.End) != "stet-rp-01" || d.LaunchRuns != 1 {
+		t.Fatalf("grade-only machine should make way for draw-trigger runner: end=%s launchRuns=%d", handles(d.End), d.LaunchRuns)
+	}
 	// Once no draw is scheduled (NextDrawAt == 0, quiet), all idle GPUs end immediately.
-	w.NextDrawAt = 0
+	w.NextDrawAt, w.Waiting, w.Runners = 0, false, 1
 	if d := p.decide(w, ws, 0, t0); handles(d.End) != "stet-rp-01,stet-rp-02,stet-rp-03" {
 		t.Fatalf("when quiet, want all idle GPUs ended; ended %s", handles(d.End))
 	}

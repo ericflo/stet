@@ -35,7 +35,7 @@ from . import (
     word,
 )
 
-FAMILIES = [logic, logic.LogicMC, shell, grammar, context, knowledge, knowledge.KnowledgeMC]
+FAMILIES = [logic, shell, grammar, context, knowledge, knowledge.KnowledgeEven]
 # What a small student cannot do cold, asked after solved examples of the same task. Knowledge
 # is not: a fact is known or it is not, and other facts do not help.
 FAMILIES += [shots.Shots(f) for f in (arith, word, units, algebra, algo)]

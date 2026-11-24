@@ -769,6 +769,8 @@ def run_editor(
         "NUMBA_CACHE_DIR": "/scratch/numba" if inside else str(scratch_dir / "numba"),
         "TRITON_CACHE_DIR": "/scratch/triton" if inside else str(scratch_dir / "triton"),
         "VLLM_CACHE_ROOT": "/scratch/vllm" if inside else str(scratch_dir / "vllm"),
+        "VLLM_ENABLE_V1_MULTIPROCESSING": "0",
+        "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
         "TORCHINDUCTOR_CACHE_DIR": "/scratch/inductor" if inside else str(scratch_dir / "inductor"),
         **OFFLINE_ENV,
         **paths,

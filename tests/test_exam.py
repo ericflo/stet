@@ -46,7 +46,7 @@ def test_a_seed_always_makes_the_same_exam():
     # Pinned: the generated items of a round of the season, from the families its exam names. A
     # change to one of their generators that changes what a seed produces must bump gen.VERSION
     # and this hash, on purpose; so must a change to the parts the season names.
-    assert digest(gen.for_season(SEASON, SEED)) == "250574009adbfac750ac73b4b1c47cfaee29d4121971f8098117276b25ba519e"
+    assert digest(gen.for_season(SEASON, SEED)) == "ebfb640ff2343c1b1adda85a9664d349b73c9305d3934581353409ba15e1b342"
     assert digest(gen.for_season(SEASON, SEED)) == digest(gen.for_season(SEASON, SEED))
     assert digest(gen.for_season(SEASON, b"other")) != digest(gen.for_season(SEASON, SEED))
 
@@ -57,9 +57,9 @@ def test_a_seed_always_makes_the_same_exam():
 MEASURED = {
     "agent": (304, "3773646221decae4eecc1d753555ab1ed4b3dbca2005de127a2a658e86837d71"),
     "context": (384, "2672777846b47fc705f5e3a988d4ae3ae075592e1e0b4d69b1ed2188ea8e0ce3"),
-    "logic-mc": (288, "0a6ed27da432712e0a1081366cd2cc54c72e1b47315f1a5a507ca7760657b0d1"),
+    "logic": (288, "335c14d50e0f9f897b37f7665478855d19da7e605dc68b3159e5faf2016088c7"),
     "grammar": (198, "f65db2784e54c429a236370262dd654d89b4fd0c963ee30c0278e3ded772e9b6"),
-    "knowledge-mc": (200, "1e25c4b0b8c4bdc808c68cc315df3ef18abfe90f0822f01cfc65ad84b75f91cc"),
+    "knowledge-even": (200, "e078bacbf93e03582c035adfa125ba28b5961b9f2fa6011569868f1b9a413960"),
     "arith-shots": (192, "06065801f2520776773aee5998ab3762bc2285f1d0bcdea4746b48638f624b86"),
     "units-shots": (56, "4e47d7651c5353994f37c35ea5deae56b0f898e7b44493050f4b29154cce792d"),
     "word-shots": (48, "afb9d841a596a4de112b1f93958fd13aa7b35e44d374158710051a2283b13157"),
@@ -221,7 +221,7 @@ def test_comprehension_and_skills_are_equal_halves_and_breadth_wins():
 
 def test_a_pillar_the_exam_lacks_gives_its_share_to_its_own_group():
     news, agent, logic = (_many(10, "prose", "passage", "fresh/ccnews/en", 0.4, source="ccnews:1"), _many(10, "logs", "answer", "agent", -0.2),
-                          _many(10, "prose", "answer", "logic-mc", 0.2))
+                          _many(10, "prose", "answer", "logic", 0.2))
     ref = _many(10, "prose", "passage", "fresh/wikipedia/en", 0.0, source="wikipedia:1")
     # one kind of comprehension or two, comprehension is half; one skill or two, skills are half
     assert round_score(*_exam(news, ref, agent))["score"] == pytest.approx(0.5 * 0.2 + 0.5 * -0.2)

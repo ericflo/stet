@@ -17,20 +17,26 @@ PAT_STR = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}++| ?\p{N}++| ?[^\s\p{L}\p{N}]++|\s++$
 
 
 class _HFEncoding:
-    """Thin adapter exposing tiktoken's encode_ordinary / encode_ordinary_batch over HF `tokenizers`."""
+    """Thin adapter exposing tiktoken's encode_ordinary / encode_ordinary_batch over HF `tokenizers`.
 
-    def __init__(self, tok, name: str):
-        self._tok = tok
+    Uses a plain tokenizer with `added_tokens` cleared for encoding so literal strings like
+    `<|endoftext|>`, `<|im_start|>`, and `<tool_call>` in web pages are tokenized as ordinary
+    text rather than turning into control tokens (matching tiktoken's `encode_ordinary`).
+    """
+
+    def __init__(self, enc_tok, dec_tok, name: str):
+        self._enc = enc_tok
+        self._dec = dec_tok
         self.name = name
 
     def encode_ordinary(self, text: str) -> list[int]:
-        return self._tok.encode(text, add_special_tokens=False).ids
+        return self._enc.encode(text, add_special_tokens=False).ids
 
     def encode_ordinary_batch(self, texts: list[str]) -> list[list[int]]:
-        return [enc.ids for enc in self._tok.encode_batch(texts, add_special_tokens=False)]
+        return [enc.ids for enc in self._enc.encode_batch(texts, add_special_tokens=False)]
 
     def decode(self, ids: list[int]) -> str:
-        return self._tok.decode(ids, skip_special_tokens=False)
+        return self._dec.decode(ids, skip_special_tokens=False)
 
 
 def _hf_model_dir(repo: str, revision: str):
@@ -44,6 +50,8 @@ def _hf_model_dir(repo: str, revision: str):
 def load_encoding(season: Season):
     cfg = season.raw["tokenizer"]
     if cfg.get("kind") == "hf":
+        import json
+
         from tokenizers import Tokenizer
 
         from .data import fetch
@@ -55,8 +63,12 @@ def load_encoding(season: Season):
             dest,
             label=f"{cfg['repo']}/{cfg['file']}",
             max_bytes=int(cfg.get("size") or (64 << 20)) + (1 << 20),
+            verify=True,
         )
-        return _HFEncoding(Tokenizer.from_file(str(path)), name=f"stet-{season.id}")
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        plain_tok = Tokenizer.from_str(json.dumps({**raw, "added_tokens": []}))
+        full_tok = Tokenizer.from_file(str(path))
+        return _HFEncoding(plain_tok, full_tok, name=f"stet-{season.id}")
 
     import tiktoken
 

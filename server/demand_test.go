@@ -476,8 +476,13 @@ func TestOnDemandOnlyDrawsOnlyWhenEntriesWait(t *testing.T) {
 	}
 
 	// Manual admin draw still works even when no round is scheduled yet (e.g., an entry sits
-	// queued while no runner is around).
+	// queued while no runner is around): advance past ActiveWindow so submit() does not
+	// auto-schedule, verifying we actually hit bringForward's unscheduled branch.
+	w.pass(2 * w.cfg.ActiveWindow)
 	w.submit(alice, "second", "print(2)")
+	if at := w.scheduledAt(); at != 0 {
+		t.Fatalf("expected no scheduled round without a runner, got %d", at)
+	}
 	w.app.st.update(ctx, func(tx *Tx) error {
 		for _, e := range tx.s.Editors {
 			if e.Name == "second" {
@@ -498,9 +503,9 @@ func TestOnDemandOnlyDrawsOnlyWhenEntriesWait(t *testing.T) {
 	w.check()
 }
 
-// After two consecutive rounds settle with no baseline, on-demand-only mode holds off for
-// emptyBackoff so a transient outage does not spin GPUs, then recovers automatically once
-// the backoff expires rather than deadlocking until manual intervention.
+// After two consecutive rounds settle with no baseline (even preceded by an earlier good
+// round), on-demand-only mode holds off for emptyBackoff so a transient outage does not spin
+// GPUs, then recovers automatically once the backoff expires rather than deadlocking.
 func TestOnDemandOnlyRecoversAfterTwoEmptyRoundsBackoff(t *testing.T) {
 	w, anchor := demandWorld(t, func(c *Config) {
 		c.RoundInterval = 0
@@ -517,14 +522,21 @@ func TestOnDemandOnlyRecoversAfterTwoEmptyRoundsBackoff(t *testing.T) {
 		return out
 	}
 
-	// Seed two settled rounds with no baseline, finishing 10 minutes ago.
+	// Seed [good, empty, empty] (three rounds: the good round 1 MUST NOT reset the streak of
+	// two consecutive trailing empty rounds 2 and 3!).
 	t0 := now()
+	goodLoss := 2.5
 	w.app.st.update(ctx, func(tx *Tx) error {
-		for i := 1; i <= 2; i++ {
+		tx.saveRound(&Round{
+			Idx: 1, Status: "settled", Scale: w.cfg.Scale,
+			DrawAt: t0 - 7200, DrawnAt: t0 - 7200, SettledAt: t0 - 5400,
+			BaselineLoss: &goodLoss, BaselineN: 1, Crawl: w.cfg.FixedCrawl,
+		})
+		for i := 2; i <= 3; i++ {
 			rd := &Round{
 				Idx: i, Status: "settled", Scale: w.cfg.Scale,
-				DrawAt: t0 - 3600 + int64(i*600), DrawnAt: t0 - 3600 + int64(i*600),
-				SettledAt: t0 - 600 + int64((i-2)*600),
+				DrawAt: t0 - 3600 + int64((i-1)*600), DrawnAt: t0 - 3600 + int64((i-1)*600),
+				SettledAt: t0 - 600 + int64((i-3)*600),
 				Crawl:     w.cfg.FixedCrawl,
 			}
 			tx.saveRound(rd)
@@ -537,10 +549,10 @@ func TestOnDemandOnlyRecoversAfterTwoEmptyRoundsBackoff(t *testing.T) {
 	w.claim(anchor, true)
 	w.app.tick(ctx)
 	if wk := work(); wk.Waiting {
-		t.Fatal("work.Waiting is true during empty-round backoff")
+		t.Fatal("work.Waiting is true during empty-round backoff after [good, empty, empty]")
 	}
 	if at := w.scheduledAt(); at != 0 {
-		t.Fatalf("round scheduled at %d during empty-round backoff", at)
+		t.Fatalf("round scheduled at %d during empty-round backoff after [good, empty, empty]", at)
 	}
 
 	// Once emptyBackoff passes: fleet demand flips true (before runner asks again), and when
@@ -563,9 +575,132 @@ func TestOnDemandOnlyRecoversAfterTwoEmptyRoundsBackoff(t *testing.T) {
 		t.Fatalf("scheduled at %d before a runner came back after backoff", at)
 	}
 	w.claim(anchor, true)
-	w.app.tick(ctx)
 	if at := w.scheduledAt(); at == 0 {
-		t.Fatal("recovery round was not scheduled once backoff expired and a runner arrived")
+		t.Fatal("recovery round was not scheduled atomically when runner arrived after backoff")
+	}
+	w.check()
+}
+
+// Regression tests for Season 3 on-demand-only edge cases:
+//  1. Sole waiting entrant leaves (withdraws or resubmits inside commitMargin) before draw:
+//     no ladder-only round is drawn.
+//  2. Pause spanning a scheduled draw: resuming immediately recovers on the next grid slot
+//     (not an hour later).
+//  3. Submitting while the fleet is at zero returns a clear on-demand message.
+func TestOnDemandOnlyEdgeCasesWithdrawPauseAndSubmitMessage(t *testing.T) {
+	w, anchor := demandWorld(t, func(c *Config) {
+		c.RoundInterval = 0
+		c.RoundMinGap = 0
+	})
+	alice := w.join("alice", nil)
+	ctx := context.Background()
+
+	// 1. Submit while fleet is at zero: response carries an on-demand message.
+	var subOut struct {
+		Message string `json:"message"`
+	}
+	if code := alice.do("POST", "/api/v1/editors", bundle(t, "solo", "print(1)"), &subOut); code != 201 {
+		t.Fatalf("HTTP %d", code)
+	}
+	if !strings.Contains(subOut.Message, "on demand") {
+		t.Fatalf("expected on-demand submit message with zero fleet, got %q", subOut.Message)
+	}
+
+	// Seed a ladder entry (reference) so selectEntrants is non-empty even without Alice.
+	w.submit(anchor, "ref", "print('ref')")
+	w.app.st.update(ctx, func(tx *Tx) error {
+		for _, e := range tx.s.Editors {
+			if e.Name == "ref" {
+				e.Status = "retired"
+				tx.saveEditor(e)
+			}
+		}
+		return nil
+	})
+
+	// Runner arrives: Round 1 schedules atomically on claim.
+	w.claim(anchor, true)
+	draw1 := w.scheduledAt()
+	if draw1 == 0 {
+		t.Fatal("round did not schedule when runner checked in")
+	}
+
+	// 2. Alice resubmits inside the last commitMargin seconds before draw1: the old version is
+	// withdrawn, the new version misses draw1's commit cutoff, so maybeDraw must NOT draw a
+	// ladder-only round and instead reschedules for Alice's new version.
+	w.submit(alice, "solo", "print(2)")
+	w.app.st.update(ctx, func(tx *Tx) error {
+		r := tx.s.roundWithStatus("scheduled")
+		r.DrawAt = now() - 5
+		r.DrandRound = w.app.season.Beacon.drandRoundAt(r.DrawAt)
+		tx.saveRound(r)
+		for _, e := range tx.s.Editors {
+			if e.Name == "solo" && e.Status == "queued" {
+				e.CreatedAt = r.DrawAt - 5 // inside commitMargin
+				tx.saveEditor(e)
+			}
+		}
+		return nil
+	})
+	if err := w.app.maybeDraw(ctx, false); err == nil {
+		t.Fatal("maybeDraw drew a round even though sole waiting entrant missed commitMargin")
+	}
+	if at := w.scheduledAt(); at <= now() {
+		t.Fatalf("expected reschedule to future grid slot for resubmitted entry, got %d", at)
+	}
+
+	// 3. Sole waiting entrant withdraws completely before draw: maybeDraw unschedules cleanly.
+	w.app.st.update(ctx, func(tx *Tx) error {
+		for _, e := range tx.s.Editors {
+			if e.Name == "solo" {
+				e.Status = "withdrawn"
+				tx.saveEditor(e)
+			}
+		}
+		r := tx.s.roundWithStatus("scheduled")
+		r.DrawAt = now() - 5
+		r.DrandRound = w.app.season.Beacon.drandRoundAt(r.DrawAt)
+		tx.saveRound(r)
+		return nil
+	})
+	if err := w.app.maybeDraw(ctx, false); err == nil {
+		t.Fatal("maybeDraw drew a ladder-only round after sole waiting entrant withdrew")
+	}
+	if at := w.scheduledAt(); at != 0 {
+		t.Fatalf("expected scheduled round to be unscheduled when nobody waits, got %d", at)
+	}
+
+	// 4. Pause spanning a scheduled draw: unschedules while paused; resuming with a waiting
+	// entry and no runner immediately reports work.Waiting = true (not pushed 1 hour out).
+	w.submit(alice, "after-pause", "print(3)")
+	w.claim(anchor, true)
+	if w.scheduledAt() == 0 {
+		t.Fatal("expected round scheduled before pause")
+	}
+	if code := anchor.do("POST", "/api/v1/admin/pause", map[string]bool{"paused": true}, nil); code != 200 {
+		t.Fatalf("pause HTTP %d", code)
+	}
+	w.app.st.update(ctx, func(tx *Tx) error {
+		r := tx.s.roundWithStatus("scheduled")
+		r.DrawAt = now() - 5
+		r.DrandRound = w.app.season.Beacon.drandRoundAt(r.DrawAt)
+		tx.saveRound(r)
+		return nil
+	})
+	w.app.maybeDraw(ctx, false)
+	if at := w.scheduledAt(); at != 0 {
+		t.Fatalf("paused draw in on-demand-only mode should unschedule instead of moving +1h, got %d", at)
+	}
+	w.pass(2 * w.cfg.ActiveWindow) // fleet went to zero while paused
+	if code := anchor.do("POST", "/api/v1/admin/pause", map[string]bool{"paused": false}, nil); code != 200 {
+		t.Fatalf("resume HTTP %d", code)
+	}
+	var wk Work
+	if code := anchor.do("GET", "/api/v1/admin/work", nil, &wk); code != 200 {
+		t.Fatalf("work HTTP %d", code)
+	}
+	if !wk.Waiting {
+		t.Fatal("after resuming from a pause spanning a draw, work.Waiting must be true")
 	}
 	w.check()
 }

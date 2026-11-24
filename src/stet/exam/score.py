@@ -1,20 +1,23 @@
-"""Sitting the exam: one number per item, higher is better.
+"""Sitting the exam: one number per item, in bits per byte, higher is better.
 
   passage  minus the bits per byte of the passage
   answer   minus the bits per byte of the right answer, given its context (with floor bytes)
   pair     the bits by which the good sentence is preferred, per byte of the good sentence
-  choice   discriminative per-token log-probability margin (bits per token):
-           log2 P_tok(right | ctx) - max_{w in wrongs} log2 P_tok(w | ctx).
-           Surface style matching lifts right and wrong options together, giving zero gain.
+  context  twin-context comprehension (bits per byte of the continuation):
+           (mean_{w in wrongs} nll(cont | w) - nll(cont | ctx)) / LN2 / max(floor, bytes(cont)).
+           Scores the exact same continuation under its real opening vs matched wrong openings
+           from other documents of the same source and language, so unconditional passage ease,
+           surface style matching, and document-start bias cancel identically, while a uniform
+           model scores 0 (no extreme-value penalty).
 
 The bytes are never taken to be fewer than the season's floor (16). An answer of one
 or two tokens is one or two draws of the student's luck; put over its three or four bytes it
 would swing as far as a whole sentence does.
 
 All of an item is scored, whatever its length. A passage longer than the student's window is
-read a window at a time. So is an answer or choice continuation: its context is cut from the
-left to leave it room (never to less than half a window, when there is that much), and what
-does not fit is read on in further windows.
+read a window at a time. So is an answer: its context is cut from the left to leave it room
+(never to less than half a window, when there is that much), and what does not fit is read on
+in further windows.
 """
 
 from __future__ import annotations
@@ -54,16 +57,16 @@ def sequences(items: list[Item], enc, eot: int, ctx: int) -> tuple[list[tuple[li
         elif it.kind == "answer":
             a, b = [eot] + encode_one(enc, it.ctx), encode_one(enc, it.cont)
             _append_conditioned(seqs, a, b, ctx)
-        elif it.kind == "choice":
-            a = [eot] + encode_one(enc, it.ctx)
-            # One or more windows for each option (right first, then every wrong); record each
-            # option's boundary implicitly via single-window cap for choices (options are <= 400 chars).
-            for opt in (it.cont, *it.wrongs):
-                b = encode_one(enc, opt)
-                room = ctx + 1
-                keep = len(a) if len(a) + len(b) <= room else min(len(a), max(room - len(b), room // 2))
-                head = b[: max(1, room - keep)] if b else []
-                seqs.append((a[len(a) - keep :] + head, keep))
+        elif it.kind == "context":
+            b = encode_one(enc, it.cont)
+            # Cap continuation to at most half a window so the real context and every wrong
+            # context always score the exact same continuation tokens.
+            b_scored = b[: max(1, (ctx + 1) // 2)] if b else []
+            max_ctx = max(1, ctx + 1 - len(b_scored))
+            for c_str in (it.ctx, *it.wrongs):
+                a = [eot] + encode_one(enc, c_str)
+                keep = min(len(a), max_ctx)
+                seqs.append((a[len(a) - keep :] + b_scored, keep))
         else:
             for s in (it.good, it.bad):
                 seqs.append(([eot] + encode_one(enc, s)[:ctx], 1))
@@ -155,14 +158,11 @@ def sit(model, items: list[Item], enc, eot: int, ctx: int, device, batch: int = 
             scores.append(-sum(losses[a:b]) / LN2 / max(floor, len(it.text.encode())))
         elif it.kind == "answer":
             scores.append(-sum(losses[a:b]) / LN2 / max(floor, len(it.cont.encode())))
-        elif it.kind == "choice":
-            # Per-token log2 probability margin: right minus best wrong distractor.
-            lps = []
-            for k in range(a, b):
-                ids, first = seqs[k]
-                ntok = max(1, len(ids) - first)
-                lps.append(-losses[k] / LN2 / ntok)
-            scores.append(lps[0] - max(lps[1:]))
+        elif it.kind == "context":
+            # Extra bits per byte saved on the exact same continuation by its real context vs
+            # the mean of matched wrong contexts from the same source and language.
+            mean_wrong = sum(losses[a + 1 : b]) / max(1, b - a - 1)
+            scores.append((mean_wrong - losses[a]) / LN2 / max(floor, len(it.cont.encode())))
         else:
             scores.append((losses[a + 1] - losses[a]) / LN2 / max(floor, len(it.good.encode())))
     # A student whose arithmetic overflowed has no score: said here, so that no grade is sent with NaN in it.

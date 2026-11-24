@@ -37,8 +37,8 @@ def _items() -> list[Item]:
     news = [Item(kind="passage", corner=f"fresh/ccnews/en/-/{i}", fmt="prose", lang="en", source="ccnews:test",
                  text=QUOTED if i == 0 else f"Report number {i} of the day, which no crawl made before it could hold: the council met and adjourned {i} times over.")
             for i in range(6)]
-    chains = [Item(kind="choice", corner=f"logic-mc/chain/{i}", fmt="prose", lang="en", source="gen:logic-mc", ctx=f"If {i} then", cont=f" {i + 1}.", wrongs=(f" {i + 2}.",)) for i in range(6)]
-    orders = [Item(kind="choice", corner=f"logic-mc/order/{i}", fmt="prose", lang="en", source="gen:logic-mc", ctx=f"Q{i}", cont=f" A{i}.", wrongs=(f" B{i}.",)) for i in range(6)]
+    chains = [Item(kind="answer", corner=f"logic/chain/{i}", fmt="prose", lang="en", source="gen:logic", ctx=f"If {i} then", cont=f" {i + 1}.") for i in range(6)]
+    orders = [Item(kind="answer", corner=f"logic/order/{i}", fmt="prose", lang="en", source="gen:logic", ctx=f"Q{i}", cont=f" A{i}.") for i in range(6)]
     return news + chains + orders
 
 

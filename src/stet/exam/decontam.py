@@ -25,7 +25,7 @@ from .items import Item
 
 def scored_texts(it: Item) -> list[str]:
     """Every independent text span whose familiarity in the training corpus would bias this item's score."""
-    if it.kind == "choice":
+    if it.kind == "context":
         return [t for t in (it.ctx, it.cont, *it.wrongs) if t]
     t = {"passage": it.text, "answer": it.cont}.get(it.kind, "")
     return [t] if t else []

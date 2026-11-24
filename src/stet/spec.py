@@ -43,6 +43,7 @@ class Scale:
     edit_seconds: int
     micro_batch: int = 0  # 0: same as batch_size (no gradient accumulation)
     sft_steps: int = 0  # 0: no post-pretraining SFT probe
+    warmup_steps: int = 0  # 0: derive from season warmup_frac (Season 1-2 default)
 
     @property
     def steps(self) -> int:

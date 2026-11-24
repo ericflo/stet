@@ -14,7 +14,7 @@ from .rng import Rng
 
 
 def _odd_knowledge(rng: Rng, corner: str) -> tuple[str, str]:
-    """A factual QA pair from the odd-parity Wikidata split (disjoint from knowledge-mc's even split)."""
+    """A factual QA pair from the odd-parity Wikidata split (disjoint from knowledge-even's even split)."""
     _, lang, fact = corner.split("/")
     pool, lang = knowledge.split_pool(fact, lang, parity=1)
     s, o = rng.choice(pool)

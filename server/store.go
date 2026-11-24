@@ -413,6 +413,9 @@ type Meta struct {
 	// the round under way finishes. 0: not paused.
 	Paused   int64  `json:"paused,omitempty"`
 	PausedBy string `json:"paused_by,omitempty"`
+	// UsedSlots remembers beacon rounds that were once announced for an un-drawn scheduled
+	// round later unscheduled in on-demand-only mode, so announcedSlots never reuses them.
+	UsedSlots []int64 `json:"used_slots,omitempty"`
 }
 
 type SavedCrawl struct {
@@ -746,6 +749,23 @@ func (tx *Tx) saveEditor(e *Editor) {
 func (tx *Tx) saveRound(r *Round) {
 	tx.s.Rounds[r.Idx] = r
 	tx.put(roundKey(r.Idx), r)
+}
+
+func (tx *Tx) dropRound(r *Round) {
+	if r == nil {
+		return
+	}
+	slots := append(tx.s.Meta.UsedSlots, r.Was...)
+	if r.DrandRound > 0 {
+		slots = append(slots, r.DrandRound)
+	}
+	if len(slots) > 128 {
+		slots = slots[len(slots)-128:]
+	}
+	tx.s.Meta.UsedSlots = slots
+	tx.put(metaKey, &tx.s.Meta)
+	delete(tx.s.Rounds, r.Idx)
+	tx.put(roundKey(r.Idx), nil)
 }
 
 func (tx *Tx) saveEntry(e *Entry) {

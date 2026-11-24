@@ -81,7 +81,7 @@ def _n_params(model: torch.nn.Module) -> int:
 
 
 def _fetch_hf_student(cfg: dict):
-    """Fetch pinned HF student files into the local cache, verifying every file's sha256."""
+    """Fetch pinned HF student files into the local cache, verifying every file's sha256 on every load."""
     from .data import fetch
 
     model_dir = _hf_model_dir(cfg["repo"], cfg["revision"])
@@ -94,13 +94,79 @@ def _fetch_hf_student(cfg: dict):
             dest,
             label=f"{cfg['repo']}/{f['path']}",
             max_bytes=int(f["size"]) + (1 << 20),
+            verify=True,
         )
     return model_dir
 
 
+def _set_activation_checkpointing(model: torch.nn.Module, enabled: bool) -> None:
+    if enabled:
+        if hasattr(model, "activation_checkpointing_enable"):
+            model.activation_checkpointing_enable(activation_checkpointing_kwargs={"use_reentrant": False})
+        elif hasattr(model, "gradient_checkpointing_enable"):
+            model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+    else:
+        if hasattr(model, "activation_checkpointing_disable"):
+            model.activation_checkpointing_disable()
+        elif hasattr(model, "gradient_checkpointing_disable"):
+            model.gradient_checkpointing_disable()
+
+
+def _ce_loss(logits: torch.Tensor, targets: torch.Tensor, *, ignore_index: int = -100) -> torch.Tensor:
+    """FP32 cross-entropy that avoids materialising a multi-gigabyte FP32 logits tensor on
+    large-vocabulary models by computing row-by-row over the micro-batch."""
+    if logits.ndim == 3 and logits.size(-1) >= 65536 and logits.size(0) > 1:
+        if ignore_index == -100 and (targets == ignore_index).any():
+            num = logits.new_zeros((), dtype=torch.float32)
+            den = 0
+            for r in range(logits.size(0)):
+                valid = int((targets[r] != ignore_index).sum().item())
+                if valid > 0:
+                    num = num + F.cross_entropy(logits[r].float(), targets[r], ignore_index=ignore_index, reduction="sum")
+                    den += valid
+            return num / max(1, den)
+        return sum(F.cross_entropy(logits[r].float(), targets[r], ignore_index=ignore_index) for r in range(logits.size(0))) / logits.size(0)
+    return F.cross_entropy(logits.float().view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=ignore_index)
+
+
+def _backward_chunked_head(
+    model: torch.nn.Module, x: torch.Tensor, y: torch.Tensor, scale_div: float, device: torch.device
+) -> torch.Tensor:
+    """Exact FP32 cross-entropy with row-chunked lm_head projection so large-vocab models
+    (e.g. Qwen3's 151,936-token head) never materialize a multi-gigabyte logits tensor.
+
+    Mathematically equivalent to computing full-batch logits and FP32 cross-entropy (including
+    when `lm_head.weight` is tied to `model.embed_tokens.weight`), while cutting peak VRAM by
+    >1 GiB and allowing `micro_batch=4` under 14 GiB reserved VRAM on 16 GB GPUs.
+    """
+    inner = getattr(model, "model", None)
+    lm_head = getattr(model, "lm_head", None)
+    vocab = int(getattr(getattr(model, "config", None), "vocab_size", 0) or 0)
+    if inner is not None and lm_head is not None and vocab >= 65536 and x.size(0) > 1:
+        with _autocast(device):
+            h = inner(x).last_hidden_state
+        h_leaf = h.detach().requires_grad_(True)
+        mb = h.size(0)
+        total_loss = h.new_zeros((), dtype=torch.float32)
+        for r in range(mb):
+            with _autocast(device):
+                logits_r = lm_head(h_leaf[r])
+            loss_r = F.cross_entropy(logits_r.float(), y[r]) / (mb * scale_div)
+            loss_r.backward()
+            total_loss = total_loss + loss_r.detach()
+        h.backward(h_leaf.grad)
+        return total_loss
+    with _autocast(device):
+        logits = _forward_logits(model, x)
+    loss = _ce_loss(logits, y) / scale_div
+    loss.backward()
+    return loss.detach()
+
+
 def _reset_top_layers(model: torch.nn.Module, reset_frac: float, init_seed: int) -> None:
-    """Deterministically re-initialize the upper `reset_frac` transformer blocks on CPU."""
-    layers = getattr(getattr(model, "model", None), "layers", None)
+    """Deterministically re-initialize the upper `reset_frac` transformer blocks and final norm on CPU."""
+    inner = getattr(model, "model", None)
+    layers = getattr(inner, "layers", None)
     if layers is None or reset_frac <= 0:
         return
     n = len(layers)
@@ -117,6 +183,13 @@ def _reset_top_layers(model: torch.nn.Module, reset_frac: float, init_seed: int)
                     m.weight.fill_(1.0)
                     if getattr(m, "bias", None) is not None:
                         m.bias.zero_()
+        # Reset the final RMSNorm too (Qwen3's pretrained final norm has mean ~3.8, max ~15.3;
+        # leaving it unreset amplifies initial random top-layer logits and causes early spikes).
+        final_norm = getattr(inner, "norm", None)
+        if final_norm is not None and getattr(final_norm, "weight", None) is not None:
+            final_norm.weight.fill_(1.0)
+            if getattr(final_norm, "bias", None) is not None:
+                final_norm.bias.zero_()
 
 
 def build_model(scale: Scale, season: Season, init_seed: int, device: torch.device) -> torch.nn.Module:
@@ -128,23 +201,28 @@ def build_model(scale: Scale, season: Season, init_seed: int, device: torch.devi
         from transformers import AutoModelForCausalLM
 
         model_dir = _fetch_hf_student(student)
-        # Load on CPU in fp32/bf16 so top-half reset is bit-identical across machines.
+        # Keep fp32 master weights on every device so AdamW, RMSNorm gains, weight decay, and
+        # the low-LR SFT probe update cleanly without bf16 rounding loss; bf16 is used only in
+        # autocast during forward/backward. Activation checkpointing keeps peak VRAM under 14 GiB.
         model = AutoModelForCausalLM.from_pretrained(
             str(model_dir),
             local_files_only=True,
-            dtype=torch.bfloat16 if device.type == "cuda" else torch.float32,
+            dtype=torch.float32,
             attn_implementation="sdpa",
         )
         model.config.use_cache = False
         _reset_top_layers(model, float(student.get("reset_frac", 0.5)), init_seed)
+        if device.type == "cuda":
+            _set_activation_checkpointing(model, True)
         return model.to(device)
     # Season 1-2: Initialise on the CPU so the starting weights are bit-identical on every machine.
     model = GPT(scale.n_layer, scale.n_head, scale.d_model, scale.ctx, season.vocab_size)
     return model.to(device)
 
 
-def lr_at(step: int, steps: int, peak: float, warmup_frac: float, final_frac: float) -> float:
-    warm = max(1, min(8, steps // 4), int(steps * warmup_frac))
+def lr_at(step: int, steps: int, peak: float, warmup_frac: float, final_frac: float, warmup_steps: int = 0) -> float:
+    warm = int(warmup_steps) if warmup_steps > 0 else max(1, min(8, steps // 4), int(steps * warmup_frac))
+    warm = max(1, min(warm, steps))
     if step < warm:
         return peak * (step + 1) / warm
     t = (step - warm) / max(1, steps - warm)
@@ -240,7 +318,7 @@ def run_sft_probe(
             x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
             with _autocast(device):
                 logits = _forward_logits(model, x)
-            loss = F.cross_entropy(logits.float().view(-1, logits.size(-1)), y.reshape(-1), ignore_index=-100) / accum
+            loss = _ce_loss(logits, y, ignore_index=-100) / accum
             loss.backward()
             step_loss += float(loss.detach())
         if not math.isfinite(step_loss):
@@ -248,6 +326,7 @@ def run_sft_probe(
         torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
         opt.step()
         last_loss = step_loss
+    model.zero_grad(set_to_none=True)
     if device.type == "cuda":
         torch.cuda.synchronize()
     del opt
@@ -294,7 +373,7 @@ def train(
     for step in range(steps):
         a = step * scale.ctx
         for g in opt.param_groups:
-            g["lr"] = lr_at(step, scale.steps, scale.lr, cfg["warmup_frac"], cfg["final_lr_frac"])
+            g["lr"] = lr_at(step, scale.steps, scale.lr, cfg["warmup_frac"], cfg["final_lr_frac"], scale.warmup_steps)
         opt.zero_grad(set_to_none=True)
         step_loss = torch.zeros((), device=device)
         for m in range(accum):
@@ -302,11 +381,7 @@ def train(
             chunk = torch.from_numpy(tokens[lo:hi, a : a + scale.ctx + 1].astype(np.int64)).to(device, non_blocking=True)
             x = chunk[:, :-1]
             y = chunk[:, 1:]
-            with _autocast(device):
-                logits = _forward_logits(model, x)
-            loss = F.cross_entropy(logits.float().view(-1, logits.size(-1)), y.reshape(-1)) / accum
-            loss.backward()
-            step_loss += loss.detach()
+            step_loss += _backward_chunked_head(model, x, y, accum, device)
         torch.nn.utils.clip_grad_norm_(model.parameters(), cfg["grad_clip"])
         opt.step()
         acc += step_loss
@@ -320,9 +395,12 @@ def train(
             acc_n = 0
             if progress:
                 progress(step + 1, steps, mean, time.time() - t0)
+    model.zero_grad(set_to_none=True)
     if device.type == "cuda":
         torch.cuda.synchronize()
     del opt
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
     pretrain_seconds = time.time() - t0
 
     sft_info = {}
@@ -332,6 +410,11 @@ def train(
 
             enc = load_encoding(season)
         sft_info = run_sft_probe(model, season, scale, enc, sft_seed if sft_seed is not None else init_seed, device)
+    _set_activation_checkpointing(model, False)
+    model.zero_grad(set_to_none=True)
+    model.eval()
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
 
     seconds = time.time() - t0
     info = {

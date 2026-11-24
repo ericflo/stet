@@ -160,7 +160,7 @@ there.
 With one established machine, every entry is run once and graded by the machine that ran
 it, and marked *run once*. Rounds do not wait for a second person who is not there, so
 the board fills at the speed of that one machine: a run of up to twenty minutes and a
-grade of about 18 minutes on a 3090-class GPU, an entry a round. The scripts are published
+grade of about 31 minutes on an RTX 5090 (~42 minutes on an RTX 4090), an entry a round. The scripts are published
 when the round settles, so every one of those scores can be re-run by anyone later.
 
 More of the organisers' machines help in one of two ways, and `STET_RUNS_PER_ENTRY`
@@ -228,8 +228,8 @@ Setting it up:
 
 A rented machine installs stet when its pod starts (about two and a half minutes) into
 `/opt/stet`, where the curator's user can read it, keeps its key and cache under `/root`,
-where it cannot, works until it has had nothing to do for fifteen minutes
-(`stet verify --exit-when-idle 15`), and then ends its own pod. `stet-cloud scale` rents
+where it cannot, works until it has had nothing to do for twenty minutes
+(`stet verify --exit-when-idle 20`), and then ends its own pod. `stet-cloud scale` rents
 more when a round has curators to run or scripts to grade, ends those doing nothing as
 soon as nothing at all is waiting, and ends any that went quiet. When rounds are drawn on
 demand (`STET_ROUND_MIN_GAP`) and an entry is waiting for one with nobody who runs curators
@@ -478,7 +478,7 @@ Bump the harness version whenever a change could alter a corpus, a script's mean
 score, the exam, or what a curator finds when it runs (the library list, the machine it is
 given). Volunteers on the old version are told to upgrade.
 
-**Changing the library list.** The list is `environment` in `src/stet/seasons/s2.json`.
+**Changing the library list.** The list is `environment` in `src/stet/seasons/s3.json`.
 After editing it: `python tools/sync_environment.py` (rewrites the `run` extra in
 `pyproject.toml`), `python tools/export_season.py > server/season.json`, update the list
 in `src/stet/templates/AGENTS.md` (a test compares them), and bump the harness version.
@@ -609,9 +609,9 @@ Set in `apps/stet/deployment.yaml`. The ones that are rules:
 
 A full round is at most 8 + 3 × 3 = 17 entries, and fewer in most rounds: of the
 organisers' reference curators two run every round and each of the others one round in
-eight. Each entry is run twice, up to twenty minutes a run. Each script is trained once,
-about 18 minutes on a 3090-class GPU and 9 on a 4090, and four machines train the round's
-unedited baseline. The exam is posted a few minutes after the draw, so a student sits it
+eight. Each entry is run twice, up to twenty minutes a run. Each script is trained once
+(`Qwen3-0.6B-Base` top-half reset on 32.8M tokens + 64-step SFT probe), about 31 minutes
+on an RTX 5090 (~42 minutes on an RTX 4090), and up to four machines train the round's unedited baseline. The exam is posted a few minutes after the draw, so a student sits it
 as soon as it is trained. Raise the sizes only when rounds settle well before the next
 is due.
 

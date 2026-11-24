@@ -34,14 +34,15 @@ curriculum a real move.
 ## Decisions, and what they are for
 
 **The exam measures what pretrained models are for.** Text has no quality of its own: a page
-is worth keeping for what it teaches a model. Half of the score is fresh contrastive
-comprehension (`Right − Wrong` against length-matched distractors from the exact same source
-and language), in four kinds that count the same: reference, news, technical and
-conversation. Half is skills, in seven kinds that count the same: agents, reading, logic,
-grammar, numbers, programs and knowledge. There is zero raw web perplexity: comparing real
-continuations against same-source wrong continuations cancels out surface formatting and
-style mimicry. How much each counts is a choice of value, so it is declared rather than left
-to how many items of each there happen to be.
+is worth keeping for what it teaches a model. Half of the score is fresh twin-context
+comprehension (each continuation scored under its real opening minus the mean of three
+length-matched wrong openings from the exact same source and language, in bits per byte), in
+four kinds that count the same: reference, news, technical and conversation. Half is skills,
+in seven kinds that count the same: agents, reading, logic, grammar, numbers, programs and
+knowledge. There is zero raw web perplexity: because the exact same continuation is scored
+under real vs wrong openings, surface formatting and style mimicry cancel identically. How
+much each counts is a choice of value, so it is declared rather than left to how many items
+of each there happen to be.
 
 **Only what tells curators apart is on the exam.** A student this size cannot do arithmetic,
 unit conversion or program tracing cold, whatever it was trained on: on the pilot such
@@ -101,8 +102,8 @@ of the web. More weight to English would reward throwing away most of the web; e
 would reward the smallest languages, where a student this size learns little and the score
 is mostly noise. Five of the seven skills are asked in the web's main languages too, each by
 its share; numbers and programs are asked in English. So English is about half of the score,
-and a little less than half of the crawl. The tokenizer is trained on the crawl alone, so
-other languages do not cost the student more than they must.
+and a little less than half of the crawl. Season 3 uses Qwen3's 151,936-token multilingual
+tokenizer, covering 100+ languages and code without penalising non-Latin scripts.
 
 **Scored by likelihood.** At this size a student's choice between answers is chance, but the
 likelihood of the right answer, in bits per byte, still moves, and it is the best-validated
@@ -150,7 +151,7 @@ into a score with the harness alone. That split is what lets anyone re-grade any
 safely: a stranger's GPU never runs a stranger's program.
 
 **A curator may be a small language model.** The interesting curators read the text, and
-a program that reads text well is a model. So a curator names its weights (up to 4 GiB,
+a program that reads text well is a model. So a curator names its weights (up to 10 GiB,
 public files pinned by hash) and they are in place when it starts, and it gets a GPU
 through PyTorch and a fixed list of libraries at exact versions. What it does not get is
 a way to turn a big model into training text: a script holds no text of its own. A model
@@ -191,7 +192,7 @@ be compared directly. The unedited corpus trains the least steadily of all, so t
 baseline is the median of four established graders' measurements, item by item, so that one
 machine that is far out moves it by nothing, whichever reported first. Four and not every
 grader's: each costs a whole training, and all of them are no better a baseline than a few. The organisers' reference curators are yardsticks, and a
-yardstick need not run every round: `fineweb2` and `dclm` do, and tie the rounds together,
+yardstick need not run every round: `fineweb2` and `reader` do, and tie the rounds together,
 and each of the others runs in one round in eight.
 
 **A rating says how sure it is.** A few rounds can be luck. So a rating, which is a
@@ -212,13 +213,16 @@ byte, but it has to be read off a measured curve of the unedited corpus's score 
 training tokens, and that curve has not been measured on this exam. Until it is, the board
 shows gains.
 
-**Rounds at the standard student; finals at a larger one.** Rounds train an 8 × 512 student
-on 160M tokens: about 18 minutes on an RTX 3090. Smaller students rank curators
-differently: they reward narrow English data, which loses as the student grows
+**Rounds at the standard student; finals at a larger budget.** Season 3 rounds train
+`Qwen3-0.6B-Base` (28 × 1024, upper half of layers reset from the round's seed) on 32.8M
+tokens plus a 64-step disjoint SFT probe: about 31 minutes on an RTX 5090 (~42 minutes on
+an RTX 4090). Smaller
+budgets rank curators differently: they reward narrow data, which loses as the student sees
+more tokens
 ([measured](research/exam-first-principles.md#75-scale-rounds-at-the-standard-student-finals-at-the-large-one-decide-the-season)).
-The standard student ranks them as the large one does. Finals run the season's top eight,
-and one more drawn by lot from the next eight, on two rounds at 10 × 640 on 640M tokens,
-and decide the table.
+Finals run the season's top eight, and one more drawn by lot from the next eight, on two
+rounds at 131M tokens (4× the official budget) plus the 64-step SFT probe, and decide the
+table.
 
 ## What could go wrong
 
@@ -278,8 +282,8 @@ What is left is in [Rules](RULES.md#what-is-trusted-and-what-is-not).
    grader fetches the items, checks them against the round's digest, has its students sit
    them, and reports one score per item.
 5. **The server adds it up.** The round's baseline is the item-by-item median of the
-   established graders' baselines. A grade's score is the exam's aggregate (writing three
-   quarters, skills one quarter) of its item scores less that baseline. The server computes
+   established graders' baselines. A grade's score is the exam's aggregate (comprehension
+   half, skills half) of its item scores less that baseline. The server computes
    it with a Go port of `src/stet/exam/aggregate.py`, checked against the Python on shared
    test vectors (`tools/aggregate_vectors.py`). From there, agreement, settlement, the board
    and the record work on that score.

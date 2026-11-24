@@ -48,7 +48,7 @@ def item(part: str, lang: str, fmt: str = "prose", kind: str = "answer", n: int 
         "passage": {"text": "Text."},
         "answer": {"ctx": "Q:", "cont": " A"},
         "pair": {"good": "Good.", "bad": "Bad."},
-        "choice": {"ctx": "Q:", "cont": " A", "wrongs": (" B", " C")},
+        "context": {"ctx": "Opening one.", "cont": " Continuation.", "wrongs": ("Other opening.", "Third opening.")},
     }
     return Item(kind=kind, corner=corner, fmt=fmt, lang=lang, source=source, **say[kind])
 

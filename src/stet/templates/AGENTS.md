@@ -8,7 +8,7 @@ This file is the complete brief. Read all of it before changing anything.
 A fixed 0.6B-class language model (the *student*: `Qwen/Qwen3-0.6B-Base` with its top half
 of layers reset from the round's seed) is trained on raw web text for a fixed number of
 tokens, run through a short fixed multilingual fine-tuning probe, and then sits an exam that
-is made when the round is drawn: half fresh contrastive comprehension from the day before,
+is made when the round is drawn: half fresh twin-context comprehension from the day before,
 half generated multilingual skills. The model, the trainer, the probe and how the exam is
 made are fixed. **The only thing you control is the training data.**
 
@@ -44,7 +44,7 @@ stet run --json
 
 **Run `stet harvest` once first.** It fetches three hours of recent human writing from the
 sources official exams are made from: no account, no key, some minutes for each hour. From
-then on every practice round's exam holds contrastive comprehension items, as an official
+then on every practice round's exam holds twin-context comprehension items, as an official
 round's does. Without it a practice round's exam is the generated skills alone, half of the
 official score: `stet run` says so, and the result has `"writing": false`.
 
@@ -88,10 +88,11 @@ stet clean                    # delete downloaded rounds and model files (fetche
 
 **Never judge a change on one round.** Rounds differ from each other by more than most
 improvements. Use `--rounds 3` or more and compare mean gains. Training the same script
-again moves its gain by about 0.02 at micro and 0.007 at standard, so on one round a
+again moves its gain by about 0.02 at micro and 0.007 at standard (provisional; two
+independent standard seeds on `s3-p00000` differed by 0.0037), so on one round a
 difference smaller than twice that is noise. Confirm anything smaller over `--rounds 5`.
 The order of a script matters too: the trainer does not shuffle, and the same pages in
-another order can move a standard gain by about 0.008.
+another order can move a standard gain.
 An exam with no writing in it is less steady: the skills are the noisier part.
 
 **Compare runs made against the same harvest.** A practice round's corpus never changes,
@@ -102,8 +103,8 @@ them: `stet harvest --fresh` before you submit is the check.
 
 **Iterate small, confirm at standard.** A nano run takes a few minutes and micro under ten.
 The competition is scored at standard: your curator's twenty minutes on a 24 GB+ GPU, then
-about 20–30 minutes of training on an RTX 5090/4090 (32.8M tokens + 64-step SFT probe).
-Check at standard before you submit.
+about 31 minutes of training on an RTX 5090 (~42 minutes on an RTX 4090) for 32.8M tokens
+plus the 64-step SFT probe. Check at standard before you submit.
 
 ## What your curator is given
 
@@ -141,7 +142,7 @@ is little-endian uint64 offsets (document `i` is `bin[idx[i]:idx[i+1]]`); `urls.
 one source URL per line.
 
 **Use every core.** A loop over the corpus runs on one of the cores your curator is given,
-and a standard round is about 335,000 pages. `task.map` runs the page-by-page work on all
+and a standard round is about 500,000 pages. `task.map` runs the page-by-page work on all
 of them:
 
 ```python
@@ -200,23 +201,24 @@ does not shuffle.
 ## The exam
 
 An official round's exam is made at its draw, so nobody can know it in advance, the
-organisers included. **Half of the score is fresh contrastive comprehension (`Right − Wrong`)
-from writing people published. Half is generated multilingual skills.** There is zero raw
-web perplexity. Inside each group, every pillar counts the same:
+organisers included. **Half of the score is fresh twin-context comprehension from writing
+people published. Half is generated multilingual skills.** There is zero raw web perplexity,
+and every part is measured in unified **bits per byte**. Inside each group, every pillar
+counts the same:
 
 | Pillar | Group | What the student is asked |
 |---|---|---|
-| `reference` | comprehension | Real vs wrong continuation of new Wikipedia articles (same source & language) |
-| `news` | comprehension | Real vs wrong continuation of fresh news reports (same source & language) |
-| `technical` | comprehension | Real vs wrong continuation of GitHub issues, PRs, releases and patches |
-| `conversation` | comprehension | Real vs wrong continuation of Hacker News, Lemmy, forums, Bluesky, Mastodon, talk pages |
+| `reference` | comprehension | Same continuation under real vs wrong openings of new Wikipedia articles (same source & language) |
+| `news` | comprehension | Same continuation under real vs wrong openings of fresh news reports (same source & language) |
+| `technical` | comprehension | Same continuation under real vs wrong openings of GitHub issues, PRs, releases and patches |
+| `conversation` | comprehension | Same continuation under real vs wrong openings of Hacker News, Lemmy, forums, Bluesky, Mastodon, talk pages |
 | `agents` | skills | What a tool says back, in a session at a shell |
 | `reading` | skills | An answer, or a new rule, taken from the context |
-| `logic` | skills | What follows from what is given, scored contrastively against other entities |
+| `logic` | skills | What follows from what is given |
 | `grammar` | skills | The right sentence of two |
 | `numbers` | skills | Arithmetic, units, word problems and algebra, each after a few worked examples |
 | `programs` | skills | What a small algorithm returns (a list sorted, a letter counted), after a few worked examples |
-| `knowledge` | skills | Facts the web knows in ten languages, scored contrastively against same-relation distractors |
+| `knowledge` | skills | Facts the web knows in ten languages (strictly disjoint from the SFT probe) |
 
 - **The writing is newer than the crawl.** It is what people published in three hours
   of the day before the draw, and the draw picks the hours. The round's corpus was crawled
@@ -231,14 +233,17 @@ web perplexity. Inside each group, every pillar counts the same:
 - **The skills are made from the round's seed.** Every answer but a fact follows from what
   the item itself shows. `knowledge` asks well-known facts (a country's capital, who wrote
   a book), which the student knows only from pages that say them.
-- **Scored contrastively or by answer likelihood, never raw web perplexity.** Fresh
-  comprehension items (`reference`, `news`, `technical`, `conversation`), `logic`, and
-  `knowledge` are scored by `margin_tok = log2 P(right) / tok − max_w log2 P(wrong_w) / tok`
-  against length-matched wrong continuations from the exact same source and language.
-  Because right and wrong share the same surface style, mimicking formatting or vocabulary
-  cancels out; only actual understanding moves the margin. Skill answer items (`agents`,
-  `reading`, `numbers`, `programs`) score the answer likelihood in bits per byte (floored
-  at 16 bytes), and `grammar` scores the right sentence minus the broken one.
+- **Scored by twin-context comprehension or answer likelihood, never raw web perplexity.**
+  Fresh comprehension items (`reference`, `news`, `technical`, `conversation`) split each
+  document cleanly on a sentence or paragraph boundary and score the exact same continuation
+  under its real opening minus the mean of three length-matched wrong openings from the
+  exact same source, language, and boundary class, in bits per byte:
+  `(mean_w nll(cont | wrong_w) − nll(cont | ctx)) / (ln 2 · max(16, bytes(cont)))`.
+  Because the exact same continuation is scored under both, unconditional passage ease and
+  surface style mimicry cancel identically; only genuine contextual understanding moves the
+  score. Skill items (`agents`, `reading`, `logic`, `numbers`, `programs`, `knowledge`) score
+  right-answer likelihood in bits per byte (floored at 16 bytes), and `grammar` scores the
+  right sentence minus the broken one.
 - **No one area can carry the rest.** A pillar missing from an exam gives its share to the
   others of its group. Gains on items are clipped, and a language or a format with fewer
   than eight items counts in proportion. `pillars` shows the weakest.
@@ -270,10 +275,13 @@ published, it will be seen, and it defeats the point.
 
 Full-page text means every language, plus menus, cookie banners, footers, link lists,
 shop listings and spam around the prose. At standard a round's corpus is 12 units (24
-Common Crawl WET shards, about 500,000 documents and 3.6 GB, roughly 1.1B tokens — ~34×
-the 32.8M-token student budget). That high ratio makes real selective curation (3–10% keep
-rates) possible without repetition. You do not need to read every page: `task.stream()` lets
-you stream lazily and stop once you have filled the budget.
+Common Crawl WET shards, about 500,000 documents and 3.8 GB, roughly 1.1B tokens — ~35×
+the 32.8M-token student budget). That ~35× pool lets CPU-speed filters (rules, fastText,
+small encoders) select a 3–10% slice without repetition, while neural curators (`vLLM` with
+0.6B–0.8B models) can prefilter and then rate tens to hundreds of thousands of candidate
+excerpts inside twenty minutes (`examples/reader` rates all ~145,000 prefiltered excerpts
+on `s3-p00000`). You do not need to read every page: `task.stream()` lets you stream
+lazily and stop once you have filled the budget.
 
 Build something that reads the data in front of it. A curator tuned to one round's
 documents will do badly on the next.
@@ -429,8 +437,8 @@ what it starts may start more. Three shapes people build, all inside the rules:
 
 What the machine gives a harness:
 
-- **Processes.** Start as many as you like: they share the 6 cores, the 12 GB and the
-  clock, and all of them are stopped when the curator's time is up.
+- **Processes.** Start as many as you like: they share the 6 cores, the 20 GB of memory
+  and the clock, and all of them are stopped when the curator's time is up.
 - **Loopback.** There is no network, but `127.0.0.1` works. Serve a model there and point
   the harness at it:
   `python -m transformers.cli.transformers serve /assets/<model> --host 127.0.0.1 --port <port>`
@@ -444,14 +452,13 @@ What the machine gives a harness:
   exams; publish the weights on Hugging Face; name them in `[[assets]]`. See *Model
   weights*.
 
-What decides the design is time. At standard the corpus is about 2.5 GB and the limit is
-1,200 seconds on a machine that may be no faster than the floor. On that machine,
-roughly: a 20M-parameter encoder reads 670,000 tokens a second, a 150M-parameter one
-76,000, a 135M-parameter language model 65,000, a 0.6B one 16,000. So a small classifier
-can read the opening of every document; a 0.6B model can read about 2% of the corpus:
-say, the opening of the tens of thousands of documents that cheaper code liked best.
-Generating is far slower than reading: an agent's turn takes seconds. An agent can decide
-how a round should be handled; it cannot visit every page.
+What decides the design is time. At standard the corpus is about 3.8 GB (~500,000 pages)
+and the limit is 1,200 seconds on a 24 GB+ GPU at or above the floor. A fastText classifier
+or 20M-parameter encoder can scan every document; with `vLLM` prefix caching on a 0.6B–0.8B
+model (like `Qwen3-0.6B`), batched scoring handles tens to hundreds of thousands of candidate
+excerpts inside twenty minutes (see `examples/reader`). Generating multi-turn completions is
+much slower than single-token scoring: an agent can decide how a round should be handled,
+while a batched scorer visits the candidate pool.
 
 An agent is not deterministic, and each entry is run twice, by two people. Keep a script
 on disk before the agent starts, give every step a time limit from `task.time_left()`,
@@ -507,15 +514,23 @@ stet/reader` or `stet fork stet/fineweb2` copies one): `identity`, `english`, `t
 multilingual quality rater). `fineweb2` and `reader` run in every round, and each of the
 others in one round in eight.
 
-What the organisers measured before the season, on one practice round at standard (gains
+What earlier seasons and the Season 3 `s3-p00000` standard-scale rehearsal showed (gains
 over the unedited corpus, in bits per byte):
 
-- **Choosing what the exam asks for won.** `mimic` writes nothing and keeps the pages that
-  look like reference, news, technical text and conversation: +0.10. That is selection,
-  and it is the mark to beat.
-- **Languages decide a lot.** The recipe that keeps every language and cleans each
-  (`fineweb2`) had +0.05. The two English-only filters measured, `english` and `dclm`, were
-  0.24 and 0.30 below the unedited corpus.
+- **Surface mimicry no longer buys the exam.** In Season 2's raw-perplexity exam, `mimic`
+  scored +0.10 by matching surface formatting and vocabulary of the exam's sources, beating
+  `fineweb2` (+0.05). Under Season 3's twin-context comprehension + skills exam, surface
+  style cancels out: on `s3-p00000` at standard scale, `mimic` dropped to `+0.0017` overall
+  (`+0.0130` comprehension, `-0.0095` skills), beaten cleanly by both `reader` (`+0.0103`:
+  `+0.0147` comprehension, `+0.0059` skills) and `fineweb2` (`+0.0090`: `+0.0202`
+  comprehension, `-0.0022` skills).
+- **Neural scoring beats heuristics on the same candidates.** Turning off the 0.6B model in
+  `reader` (keeping its exact prefilter fallback) dropped `s3-p00000` from `+0.0103` to
+  `-0.0350` (`+0.0453` bpb lift from the 0.6B neural scorer alone).
+- **Languages decide a lot.** Keeping every language and cleaning each (`fineweb2`,
+  `reader`) beats English-only corpora, which give up half the exam's non-English weight
+  (English-only DataDecide corpora scored `+0.051` to `+0.064` on English items yet
+  `-0.016` to `-0.041` on the full multilingual exam).
 - **Quality filters trade capabilities.** They help English prose. They cost code and tool
   logs (rules that delete lines with braces delete programs), which `technical` and
   `agents` ask for, and everything not in English.

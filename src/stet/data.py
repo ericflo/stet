@@ -305,9 +305,19 @@ def sweep_stale(directory: Path, pattern: str, now: float | None = None) -> int:
 
 
 def fetch(
-    urls: list[str], sha256: str, dest: Path, label: str = "", quiet: bool = False, max_bytes: int = FETCH_LIMIT_BYTES, gzipped: bool = False
+    urls: list[str],
+    sha256: str,
+    dest: Path,
+    label: str = "",
+    quiet: bool = False,
+    max_bytes: int = FETCH_LIMIT_BYTES,
+    gzipped: bool = False,
+    verify: bool = False,
 ) -> Path:
     """Download to `dest` unless it is already there, verifying the content hash.
+
+    With `verify=True` and a non-empty `sha256`, an existing cached file is also checked against
+    `sha256` on every load (raising `Mismatch` and removing the damaged copy if it differs).
 
     Stops at `max_bytes`: the hash is only known at the end, and a host that never stops
     sending must not fill the disk first.
@@ -316,6 +326,11 @@ def fetch(
     of its gzip stream before it is kept, so that a copy in the cache is a whole one.
     """
     if dest.exists():
+        if verify and sha256:
+            got = _sha256_file(dest)
+            if got != sha256:
+                dest.unlink(missing_ok=True)
+                raise Mismatch(f"cached {label or dest.name} sha256 mismatch: got {got}, want {sha256}")
         return dest
     dest.parent.mkdir(parents=True, exist_ok=True)
     last_err: Exception | None = None

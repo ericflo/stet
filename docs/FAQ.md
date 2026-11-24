@@ -22,10 +22,11 @@ gains in bits per byte.
 
 ## Do I need a big GPU?
 
-No. A practice run at nano scale takes a couple of minutes on a laptop-class GPU. The
-official scale, standard, trains for about 18 minutes on an RTX 3090 or 4070 Ti, and it
-wants a GPU with 12 GB or more. `stet doctor` tells you what your machine can do. Running
-other people's curators for the leaderboard asks for more, a mid-range desktop card;
+No. A practice run at nano scale takes a couple of minutes on a modern GPU. The
+official scale, standard, trains `Qwen3-0.6B-Base` (top half reset) on 32.8M tokens plus a
+64-step SFT probe — about 31 minutes on an RTX 5090 (~42 minutes on an RTX 4090) — and wants a GPU with 16 GB or
+more (24 GB+ to run curators). `stet doctor` tells you what your machine can do. Running
+other people's curators for the leaderboard asks for a 24 GB+ GPU at or above the floor;
 `stet bench` measures yours.
 
 ## How many things can I try?
@@ -41,7 +42,7 @@ Run `stet harvest` once before the first `stet run`. It fetches three hours of r
 writing from the sources official exams are made from, with no account and no key, and
 every practice round's exam is then made as an official round's is: generated questions,
 and writing from the hours you hold. Without it a practice exam is the generated skills
-alone, a quarter of an official score, and `stet run` says so. `stet harvest --fresh`
+alone, half of an official score, and `stet run` says so. `stet harvest --fresh`
 replaces the hours with newly written ones: the check on having tuned to the old. A replay
 of an official round sits what that round published, its generated questions and its
 Wikipedia text.
@@ -70,7 +71,7 @@ precision. `stet asset add <owner>/<repository>` does it. Your curator gets one 
 22 GB of memory, PyTorch, `vllm`, `flash-linear-attention`, `liger-kernel` and
 `transformers`, and twenty minutes for the whole corpus.
 
-Twenty minutes is the real limit. A standard round's corpus is 3.6 GB (~34× the student
+Twenty minutes is the real limit. A standard round's corpus is 3.8 GB (~35× the student
 budget), so a model does not need to read every byte: combine cheap multilingual filters
 with batched `vLLM` scoring. `examples/reader` is a working curator that does this with
 `Qwen3-0.6B`.
@@ -83,10 +84,10 @@ except published exams. Publish the weights in a public Hugging Face repository,
 however you choose: a classifier over every chunk, a tagger that marks the lines to cut, a
 scorer that ranks candidates.
 
-Budget by reading speed. On the slowest machine that runs curators, a 20M-parameter
-encoder reads about 670,000 tokens a second and a 0.6B language model about 16,000; a
-standard round's corpus is about 2.5 GB and the limit is 1,200 seconds. So a small model
-can see some of every document, and a larger one only what cheaper code sends it.
+Budget by reading speed. On a 24 GB+ GPU at or above the floor, a small encoder or fastText
+prefilter can scan every document of the ~3.8 GB standard corpus inside the 1,200-second
+limit, and a 0.6B–0.8B model served via `vLLM` can score tens to hundreds of thousands of
+candidate excerpts (see `examples/reader`).
 
 ## Can my curator be an agent?
 
@@ -112,7 +113,9 @@ JavaScript harness as one archive that your curator unpacks when it starts.
 
 Yes. Curators are run by volunteers, and each entry is run on both makes when both are
 around. Use the GPU through PyTorch and say `device="cuda"`: that is the right name on
-an AMD GPU too. Nothing in the library list is one maker's alone. A run that fails is
+an AMD GPU too. `vllm` and `liger-kernel` are preinstalled on NVIDIA Linux runners, so if
+you use them include a clean PyTorch/`transformers` fallback (see `examples/reader`) for
+AMD ROCm runners. A run that fails is
 never better than one that finishes: it counts 0, or as your worst finished run when that
 is below 0.
 
@@ -128,9 +131,10 @@ they are. Any other copy is at least 64 bytes long.
 ## Is the exam secret?
 
 Nobody knows it in advance, the organisers included. Each round's exam is made at its draw.
-Half of the score is fresh contrastive comprehension (`Right − Wrong`) from three hours of
-writing people published the day before, which the draw picks, gathered from many sources
-that need no key. Half is questions generated from the round's seed. Your curator runs with
+Half of the score is fresh twin-context comprehension from three hours of writing people
+published the day before, which the draw picks, gathered from many sources that need no key
+(each continuation is scored under its real opening minus wrong openings from the same source
+and language). Half is questions generated from the round's seed. Your curator runs with
 no network and can add no text of its own: a script is copies of the round's corpus and
 nothing else.
 
@@ -146,8 +150,8 @@ which its draw picks, and its questions come from its seed. What a curator can l
 past rounds is what kinds of text matter (news, programs, replies, every language), and
 keeping more of those is choosing good data, which is the point. The exam weighs four
 comprehension kinds and seven skills, and every language by its share of the crawl, so no
-one source or kind of text can carry a score — and contrastive scoring cancels out surface
-style mimicry.
+one source or kind of text can carry a score — and twin-context scoring cancels out surface
+style mimicry identically.
 
 ## Does everything on the exam count?
 
@@ -221,9 +225,10 @@ do. Other backends can build, run and submit curators but not grade for the boar
 ## What decides the season?
 
 Finals. When the season closes, announced two weeks ahead, the eight best-rated curators and
-one more drawn by lot from the next eight are run on two fresh rounds, and a larger student
-(10 layers by 640, 640M tokens) is trained twice on what each writes. Their gain there is the
-season's table.
+one more drawn by lot from the next eight are run on two fresh rounds, and the student
+(`Qwen3-0.6B-Base`, top half reset) is trained twice on each script at the `large` budget
+(131M tokens + 64-step SFT probe, 4× the official budget). Their gain there is the season's
+table.
 
 A season freezes the student, the budgets, how the exam is made and the rules, so that scores
 stay comparable.

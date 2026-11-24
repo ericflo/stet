@@ -905,13 +905,25 @@ def _grade_job(job, season, scale, device, key, out, work: Path, bases: dict | N
     # minutes after its exam.
     device = pick_device(device) if not hasattr(device, "type") else device
     out.line("", out.dim("the round's exam is not posted yet: training now, and sitting it once it is"))
+    def _offload_cpu(t):
+        """Move a held early-grade student off the GPU while waiting for the exam, so subsequent
+        trainings on a 16 GB grader never share VRAM with held baselines or pending students."""
+        if t is not None and getattr(t, "model", None) is not None and getattr(device, "type", "") == "cuda":
+            import torch
+
+            t.model.zero_grad(set_to_none=True)
+            t.model.to("cpu")
+            torch.cuda.empty_cache()
+
     base_t = (bases or {}).get(rnd.id)
     if base_t is None and asked:
         base_t = train_baseline(rnd, scale, device, progress=out.progress("baseline"), log=lambda m: out.line("", out.dim("baseline " + m)))
+        _offload_cpu(base_t)
         if bases is not None:
             bases[rnd.id] = base_t
     trained = train_round(rnd, scale, path, device=device, progress=out.progress("training"), log=lambda m: out.line("", out.dim(m)))
     if bases is not None:
+        _offload_cpu(trained)
         return Pending(job, rnd, trained, device)
     rnd = wait_for_exam(rnd, out)
     fetch_exam(rnd, key)
@@ -1361,6 +1373,15 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
     from . import bench, env
 
     dev = os.environ.get("STET_DEV") == "1"
+    min_grade_vram = float((season.raw.get("runner") or {}).get("grade_gpu_memory_gb") or 0)
+    if min_grade_vram > 0 and device.type == "cuda" and not dev and not args.any_device:
+        have_vram = float(hw.get("vram_gb") or 0)
+        if have_vram < min_grade_vram:
+            sys.stderr.write(
+                f"stet: grading for {season.title} needs a GPU with at least {min_grade_vram:g} GB of memory "
+                f"(this GPU reports {have_vram:.1f} GB).\n"
+            )
+            sys.exit(1)
     # Every grade is trained by the season's pinned grading stack (PyTorch, plus Transformers/safetensors for HF students).
     grade_pkgs = env.grade_packages(season)
     if (wrong := env.problems(season, only=grade_pkgs)) and not dev and not args.any_device:

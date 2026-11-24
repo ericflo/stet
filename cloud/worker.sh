@@ -73,9 +73,11 @@ end_pod() {
 # minimal Ubuntu containers; sshd for a key that may log in; and bubblewrap where curators are
 # run in it (STET_WORKER_SANDBOX=bwrap), or for a probe to try.
 pkgs=""
+need_gcc=0
 command -v curl >/dev/null 2>&1 || pkgs="curl ca-certificates"
 if [ "$(id -u)" = "0" ] && command -v apt-get >/dev/null 2>&1 && ! command -v gcc >/dev/null 2>&1; then
   pkgs="$pkgs gcc g++ libc6-dev"
+  need_gcc=1
 fi
 [ -n "${PUBLIC_KEY:-}" ] && pkgs="$pkgs openssh-server"
 if { [ "${STET_WORKER_SANDBOX:-container}" = bwrap ] || [ -n "${STET_PROBE:-}${STET_PROBE_0:-}" ]; } && ! command -v bwrap >/dev/null 2>&1; then
@@ -89,6 +91,9 @@ if [ -n "$pkgs" ]; then
   done
 fi
 command -v curl >/dev/null 2>&1 || end_pod "curl could not be installed"
+if [ "$need_gcc" = "1" ] && ! command -v gcc >/dev/null 2>&1; then
+  end_pod "gcc could not be installed"
+fi
 
 # Salad does not say its hosts' drivers. One older than the season's PyTorch needs (580, for
 # CUDA 13) asks Salad for another machine, which starts this again there.

@@ -9,8 +9,9 @@ will be set.
 A fixed 0.6B-class language model, the **student** (`Qwen/Qwen3-0.6B-Base` with its top half
 of layers reset from the round's seed), is trained on raw web text for a fixed number of
 tokens, run through a short fixed multilingual fine-tuning probe, and then sits an **exam**.
-The exam is made when the round is drawn: half of it is fresh contrastive comprehension
-(`Right − Wrong`) from three hours of the day before, which the draw picks, and half is
+The exam is made when the round is drawn: half of it is fresh twin-context comprehension
+from three hours of the day before, which the draw picks (the same continuation scored under
+its real opening minus wrong openings from the exact same source and language), and half is
 generated multilingual skills from the round's seed. There is zero raw web perplexity. The
 model, the trainer, and the probe never change. You change one thing: the data. You write a
 **curator**, a program that is handed raw web pages it has never seen and twenty minutes on
@@ -115,9 +116,9 @@ with enough machines. Season 1's rounds took two and a half, two of them waiting
 The newest published Common Crawl crawl at the time of the draw, as full-page text: every
 language, with menus, cookie banners, footers, shop listings, spam and duplicates
 alongside real prose. A round's corpus is a seeded sample of it: at the official scale
-about 335,000 pages and 2.5 GB, some six times more text than the student is trained on.
-Micro and large rounds have the same ratio, and the same time for each page.
-Your curator has to choose.
+about 500,000 pages and 3.8 GB (~1.1B tokens), roughly 34× more text than the 32.8M-token
+student budget. Micro and large rounds keep a similar excess of raw text over the student
+budget. Your curator has to choose.
 
 Nothing is removed from the corpus for the exam's sake: the exam did not exist yet. Fresh
 text that the corpus happens to hold already is dropped from the exam instead.
@@ -157,23 +158,23 @@ One line per output document. Line order is training order: the trainer does not
 
 ## The exam
 
-**Half of the score is fresh contrastive comprehension (`Right − Wrong`) from writing people
-published. Half is generated multilingual skills.** There is zero raw web perplexity. Inside
-each, every row below counts the same.
+**Half of the score is fresh twin-context comprehension from writing people published. Half
+is generated multilingual skills.** There is zero raw web perplexity. Every part is measured
+in unified **bits per byte**. Inside each group, every row below counts the same.
 
 | | | What it asks | Where it comes from |
 |---|---|---|---|
-| Comprehension (50%) | Reference | Real vs wrong continuation of encyclopedia articles (same source & language) | New and extended Wikipedia articles |
-| | News | Real vs wrong continuation of fresh news reports (same source & language) | Common Crawl's news crawl |
-| | Technical | Real vs wrong continuation of issues, PRs, release notes and patches | GitHub, the kernel's mailing lists |
-| | Conversation | Real vs wrong continuation of posts and replies | Hacker News, Lemmy, forums, Bluesky, Mastodon, Wikipedia's talk pages |
+| Comprehension (50%) | Reference | Same continuation under real vs wrong openings of encyclopedia articles (same source & language) | New and extended Wikipedia articles |
+| | News | Same continuation under real vs wrong openings of fresh news reports (same source & language) | Common Crawl's news crawl |
+| | Technical | Same continuation under real vs wrong openings of issues, PRs, release notes and patches | GitHub, the kernel's mailing lists |
+| | Conversation | Same continuation under real vs wrong openings of posts and replies | Hacker News, Lemmy, forums, Bluesky, Mastodon, Wikipedia's talk pages |
 | Skills (50%) | Agents | What a tool says back, in a session at a shell | Generated |
 | | Reading | Taking an answer, or a new rule, from the context | Generated |
-| | Logic | What follows from what is given, scored contrastively against other entities | Generated |
+| | Logic | What follows from what is given | Generated |
 | | Grammar | The right sentence of two | Generated |
 | | Numbers | Arithmetic, units, word problems and algebra, each after a few worked examples | Generated |
 | | Programs | What a small algorithm returns (a list sorted, a letter counted), after a few worked examples | Generated |
-| | Knowledge | Facts the web knows in ten languages, scored contrastively against same-relation distractors | Generated: the seed picks from a public list of facts |
+| | Knowledge | Facts the web knows in ten languages (strictly disjoint from the SFT probe) | Generated: the seed picks from a public list of facts |
 
 **The writing** is what people published in three hours of the day before the draw. The
 examiner harvests every hour of the clock an hour after it ends, keeping a sample chosen
@@ -203,12 +204,17 @@ worked examples of the same task. Asked cold, a student this size is too near ch
 curators to differ: Season 1 counted such questions, and two trainings of the same data
 disagreed about them more than two curators did.
 
-**The score of an item** is how likely the student finds the right text, in bits per byte:
-a passage, an answer given its question, or the right sentence of a pair. An item's bits are
-never put over fewer than 16 bytes, so a one-word answer counts for less than a sentence. An
-answer or a passage longer than the student's window is scored whole, a window at a time.
-The exam's writing has the white space of the crawl's own text: one space between words,
-one line end between lines, no empty lines and no tabs.
+**The score of an item** is measured in **bits per byte** everywhere:
+- on fresh comprehension (`kind="context"`), each article is split cleanly on a sentence or
+  paragraph boundary into an opening and a continuation, and the exact same continuation is
+  scored under its real opening minus the mean of three length-matched wrong openings from
+  the exact same source, language, and boundary class — so surface style and unconditional
+  passage ease cancel identically;
+- on generated skills (`kind="answer"` and `grammar` pairs), how likely the student finds the
+  right answer given its question (or the right sentence minus the broken one).
+An item's bits are never put over fewer than 16 bytes, so a one-word answer counts for less
+than a sentence. The exam's writing has the white space of the crawl's own text: one space
+between words, one line end between lines, no empty lines and no tabs.
 
 **The exam's score** is half the mean of the comprehension kinds and half the mean of the
 skills. A kind missing from a round gives its share to the others of its own group. Inside
@@ -230,7 +236,7 @@ grading it.
 
 | | Architecture | Context | Training budget | Edit limit | SFT probe |
 |---|---|---|---|---|---|
-| nano | `Qwen3-0.6B-Base` (28 × 1024, top half reset) | 1024 | 2.1M tokens | 120 s | 16 steps |
+| nano | `Qwen3-0.6B-Base` (28 × 1024, top half reset) | 1024 | 1.0M tokens | 120 s | 16 steps |
 | micro | `Qwen3-0.6B-Base` (28 × 1024, top half reset) | 1024 | 8.4M tokens | 300 s | 32 steps |
 | **standard (official)** | `Qwen3-0.6B-Base` (28 × 1024, top half reset) | 1024 | 32.8M tokens | 1,200 s | 64 steps |
 | large (finals) | `Qwen3-0.6B-Base` (28 × 1024, top half reset) | 1024 | 131M tokens | 4,800 s | 64 steps |
@@ -284,7 +290,7 @@ Curators are run on volunteers' machines, which differ. What a curator is given 
 
   | | bubblewrap | the container sandbox |
   |---|---|---|
-  | Scratch space | in memory, part of the 12 GB | on disk, 8 GB, apart from the 12 GB |
+  | Scratch space | in memory, part of the 20 GB | on disk, 12 GB, apart from the 20 GB |
   | Loopback | TCP and UDP | TCP only, to ports 1024 and up |
   | The machine's other processes | not visible | listed in `/proc`, not readable |
   | `/tmp`, `/dev/shm` | the curator's own, 2 GB each | the machine's, 2 GB each, emptied of the curator's files after it |
@@ -455,12 +461,12 @@ are graded by **verifiers**: anyone who runs `stet verify`.
   from the first round a second established verifier is around for.
 - **Each script is graded by someone other than the verifier who wrote it.** Its gain is
   the median of the established verifiers' grades, each against the round's unedited
-  student. Two honest machines agree to within a small tolerance *(provisional: 0.025 bits
+  student. Two honest machines agree to within a small tolerance *(provisional: 0.03 bits
   per byte)*. The first four established graders of a round are each asked to train the
   unedited student as well; the rest are not, and their grades are measured against the
   mean of those four. (Season 1 trained one on every machine: a third of all its
   trainings.) A measurement of the unedited student must agree with the
-  others' to within 0.04 bits per byte, or its grade is turned away and listed with the
+  others' to within 0.05 bits per byte, or its grade is turned away and listed with the
   round. A machine that is not yet established always trains its own: that is how it is
   checked. When two established grades of a script
   differ by more than that, a third is taken. When both runs write the same script, byte

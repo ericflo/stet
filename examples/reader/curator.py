@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import os
 import random
 import re
 import sys
@@ -37,10 +38,12 @@ from stet.curator import Task
 BYTES_PER_TOKEN = 3.5  # conservative multilingual estimate under Qwen3's 151k tokenizer
 HEAD_CHARS = 900  # excerpt read by the 0.6B quality rater
 MAX_PROMPT_TOKENS = 288
-RESERVE_SECONDS = 35
-CANDIDATE_OVERPROVISION = 3.0  # score up to 3x the budget in candidate bytes
+RESERVE_SECONDS = 45
+CANDIDATE_OVERPROVISION = 15.0  # score up to 15x budget (most/all prefiltered docs) within time_left()
 
 # Prompt shared across every document so vLLM automatic prefix caching caches it once.
+# Trailing space in RUBRIC_SUFFIX is critical: without it Qwen3 predicts token ' ' (id 220)
+# next with 99.95% probability instead of a rating digit '1'..'5'.
 RUBRIC_PREFIX = (
     "Rate the educational, factual, technical, or reasoning value of the following web "
     "document (in any language) for pretraining a language model on a scale from 1 (spam, "
@@ -48,7 +51,7 @@ RUBRIC_PREFIX = (
     "prose, technical documentation, code, or analysis).\n"
     "Answer with a single digit: 1, 2, 3, 4, or 5.\n\nDocument:\n"
 )
-RUBRIC_SUFFIX = "\n\nRating (1-5):"
+RUBRIC_SUFFIX = "\n\nRating (1-5): "
 
 MARKS = "".join(c for c in map(chr, range(0x300, 0x10000)) if unicodedata.category(c)[0] == "M")
 WRITING = re.compile(rf"(?:[^\W\d_]|\s|[{re.escape(MARKS)}])+")
@@ -100,7 +103,7 @@ def collect_candidates(task: Task) -> list[tuple[float, int, int, str]]:
         seen.add(key)
         kept.append((prior, i, size, head))
     kept.sort(key=lambda t: (-t[0], t[1]))
-    # Cap candidates to ~3x the byte budget (with a sensible minimum for small scales).
+    # Cap candidates to CANDIDATE_OVERPROVISION × the byte budget (with a sensible minimum for small scales).
     out: list[tuple[float, int, int, str]] = []
     total = 0
     cap = max(target_bytes, 2_000_000)
@@ -206,56 +209,69 @@ def _build_prompt_ids(tok, head: str, max_prompt_tokens: int, prefix_ids: list[i
 
 
 def _score_vllm(task: Task, where: str, cands: list[tuple[float, int, int, str]], scores: dict[int, float]) -> bool:
-    """Fast path on NVIDIA Linux using vLLM with automatic prefix caching."""
+    """Fast path on NVIDIA Linux using vLLM with automatic prefix caching.
+
+    Returns True if vLLM scored candidates, or False so the caller can fall back to
+    `_score_transformers` if vLLM is absent or fails to initialise.
+    """
     import torch
 
     if task.device() != "cuda" or getattr(torch.version, "hip", None):
         return False
+    # Run vLLM's V1 EngineCore in-process so CUDA initialized by task.device() (and Stet's
+    # per-process GPU memory cap) works cleanly without fork/spawn subprocess issues.
+    os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
     try:
         from vllm import LLM, SamplingParams
     except Exception:
         return False
 
-    llm = LLM(
-        model=where,
-        dtype="bfloat16",
-        max_model_len=MAX_PROMPT_TOKENS + 16,
-        gpu_memory_utilization=0.75,
-        enable_prefix_caching=True,
-        enforce_eager=False,
-        disable_log_stats=True,
-    )
-    tok = llm.get_tokenizer()
-    digit_ids = _digit_token_ids(tok)
-    prefix_ids = list(tok.encode(RUBRIC_PREFIX, add_special_tokens=True))
-    suffix_ids = list(tok.encode(RUBRIC_SUFFIX, add_special_tokens=False))
     try:
-        params = SamplingParams(
-            max_tokens=1,
-            temperature=0.0,
-            logprobs=None,
-            logprob_token_ids=sorted(digit_ids.values()),
+        llm = LLM(
+            model=where,
+            dtype="bfloat16",
+            max_model_len=MAX_PROMPT_TOKENS + 16,
+            gpu_memory_utilization=0.65,
+            enable_prefix_caching=True,
+            enforce_eager=False,
+            disable_log_stats=True,
         )
-    except TypeError:
-        params = SamplingParams(max_tokens=1, temperature=0.0, logprobs=20)
-    print(f"vLLM loaded Qwen3-0.6B, {task.time_left():.0f}s left", file=sys.stderr)
+        tok = llm.get_tokenizer()
+        digit_ids = _digit_token_ids(tok)
+        prefix_ids = list(tok.encode(RUBRIC_PREFIX, add_special_tokens=True))
+        suffix_ids = list(tok.encode(RUBRIC_SUFFIX, add_special_tokens=False))
+        try:
+            params = SamplingParams(
+                max_tokens=1,
+                temperature=0.0,
+                logprobs=None,
+                logprob_token_ids=sorted(digit_ids.values()),
+            )
+        except TypeError:
+            params = SamplingParams(max_tokens=1, temperature=0.0, logprobs=20)
+        print(f"vLLM loaded Qwen3-0.6B, {task.time_left():.0f}s left", file=sys.stderr)
 
-    batch_size = 512
-    for start in range(0, len(cands), batch_size):
-        if task.time_left() < RESERVE_SECONDS:
-            return True
-        part = cands[start : start + batch_size]
-        prompts = [
-            {"prompt_token_ids": _build_prompt_ids(tok, head, MAX_PROMPT_TOKENS, prefix_ids, suffix_ids)}
-            for _, _, _, head in part
-        ]
-        outputs = llm.generate(prompts, params, use_tqdm=False)
-        for (_, doc_id, _, _), out in zip(part, outputs, strict=True):
-            step_lps = out.outputs[0].logprobs[0] if out.outputs and out.outputs[0].logprobs else {}
-            lps = _extract_logprobs(step_lps)
-            scores[doc_id] = _expected_from_logprobs(lps, digit_ids)
-        print(f"vLLM rated {len(scores):,} / {len(cands):,}, {task.time_left():.0f}s left", file=sys.stderr)
-    return True
+        batch_size = 512
+        for start in range(0, len(cands), batch_size):
+            if task.time_left() < RESERVE_SECONDS:
+                return bool(scores)
+            part = cands[start : start + batch_size]
+            prompts = [
+                {"prompt_token_ids": _build_prompt_ids(tok, head, MAX_PROMPT_TOKENS, prefix_ids, suffix_ids)}
+                for _, _, _, head in part
+            ]
+            outputs = llm.generate(prompts, params, use_tqdm=False)
+            for (_, doc_id, _, _), out in zip(part, outputs, strict=True):
+                step_lps = out.outputs[0].logprobs[0] if out.outputs and out.outputs[0].logprobs else {}
+                lps = _extract_logprobs(step_lps)
+                scores[doc_id] = _expected_from_logprobs(lps, digit_ids)
+            if len(scores) % (batch_size * 10) == 0 or len(scores) == len(cands):
+                print(f"vLLM rated {len(scores):,} / {len(cands):,}, {task.time_left():.0f}s left", file=sys.stderr)
+        return bool(scores)
+    except Exception as exc:
+        print(f"vLLM unavailable ({exc}); falling back to transformers", file=sys.stderr)
+        return bool(scores)
 
 
 def _score_transformers(task: Task, where: str, cands: list[tuple[float, int, int, str]], scores: dict[int, float]) -> None:
@@ -320,6 +336,14 @@ def main():
         print(f"reader model error (keeping fallback): {exc}", file=sys.stderr)
     finally:
         if scores:
+            vals = sorted(scores.values())
+            n = len(vals)
+            mean = sum(vals) / n
+            print(
+                f"rated {n:,} docs: mean={mean:.2f} min={vals[0]:.2f} p25={vals[n // 4]:.2f} "
+                f"p50={vals[n // 2]:.2f} p75={vals[(3 * n) // 4]:.2f} max={vals[-1]:.2f}",
+                file=sys.stderr,
+            )
             task.write(build_script(task, cands, scores))
 
 

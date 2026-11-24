@@ -690,6 +690,16 @@ func (a *App) apiSubmit(w http.ResponseWriter, r *http.Request) {
 				key = "enters"
 			}
 			out[key] = map[string]any{"round": roundID(a.season.ID, next.Idx), "draw_at": next.DrawAt}
+		} else if a.onDemandOnly() {
+			switch {
+			case s.Meta.Paused != 0:
+				out["message"] = "Rounds are paused; your entry will run once they resume."
+			case s.roundWithStatus("open") != nil:
+				open := s.roundWithStatus("open")
+				out["message"] = fmt.Sprintf("Round %s is still being graded; the next round will be drawn once it settles.", roundID(a.season.ID, open.Idx))
+			default:
+				out["message"] = "No round is scheduled yet; one will be drawn on demand once a runner comes online (usually within 15-20 minutes)."
+			}
 		}
 	})
 	writeJSON(w, 201, out)
@@ -1369,6 +1379,10 @@ func (a *App) apiAdminPause(w http.ResponseWriter, r *http.Request) {
 		case !*req.Paused && m.Paused != 0:
 			m.Paused, m.PausedBy = 0, ""
 			tx.event("resume", map[string]any{"by": acct.Handle})
+			tx.put(metaKey, m)
+			a.onDemand(tx)
+			out = *m
+			return nil
 		}
 		tx.put(metaKey, m)
 		out = *m

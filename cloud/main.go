@@ -162,7 +162,7 @@ func flags(name string, o *Options) *flag.FlagSet {
 	fs.IntVar(&o.MinCPU, "min-cpus", 6, "host vCPUs a GPU: the season's floor for a machine that runs curators")
 	fs.IntVar(&o.MinGPUMemory, "min-gpu-memory", 16, "GPU memory, GB: floor for grading the Season 3 0.6B student")
 	fs.IntVar(&o.MinCuratorGPUMemory, "min-curator-gpu-memory", 24, "GPU memory, GB: floor for machines rented to run curators (a curator is given 22)")
-	fs.IntVar(&o.Idle, "idle", 15, "minutes a machine waits with nothing to do before it ends itself")
+	fs.IntVar(&o.Idle, "idle", 20, "minutes a machine waits with nothing to do before it ends itself")
 	noEdits := fs.Bool("no-edits", false, "rent machines that only grade, and leave curators to the organisers' own machines")
 	ssh := fs.Bool("ssh", false, "let ~/.ssh/id_ed25519.pub log in to the machines rented (for `stet-cloud ssh`)")
 	fs.BoolVar(&o.DryRun, "dry-run", false, "say what would be rented and ended, and do none of it")

@@ -21,7 +21,7 @@ def test_the_season_is_the_exam_at_the_standard_scale():
     assert s3.exam_sources == ["reference", "news", "technical", "conversation",
                                "agents", "reading", "logic", "grammar", "numbers", "programs", "knowledge"]
     assert s3.raw["exam"]["groups"] == {"comprehension": 0.5, "skills": 0.5} and s3.answer_floor_bytes == 16
-    assert s3.raw["exam"]["fresh"]["mode"] == "contrastive"
+    assert s3.raw["exam"]["fresh"]["mode"] == "context"
     # What the score is made of, by hand: four comprehension kinds and seven skills, and each one's parts.
     from stet.exam.aggregate import plan_of
 
@@ -29,14 +29,14 @@ def test_the_season_is_the_exam_at_the_standard_scale():
         "reference": ("comprehension", ["reference"]), "news": ("comprehension", ["news"]), "technical": ("comprehension", ["technical"]),
         "conversation": ("comprehension", ["discussion", "social"]),
         "agents": ("skills", ["agent"]), "reading": ("skills", ["context"]),
-        "logic": ("skills", ["logic-mc"]), "grammar": ("skills", ["grammar"]),
+        "logic": ("skills", ["logic"]), "grammar": ("skills", ["grammar"]),
         "numbers": ("skills", ["arith-shots", "units-shots", "word-shots", "algebra-shots"]),
-        "programs": ("skills", ["algo-shots"]), "knowledge": ("skills", ["knowledge-mc"]),
+        "programs": ("skills", ["algo-shots"]), "knowledge": ("skills", ["knowledge-even"]),
     }
     assert {p: (v["group"], v["parts"]) for p, v in s3.raw["exam"]["pillars"].items()} == made_of
     weights = plan_of(s3).weights(made_of)
     assert weights == pytest.approx({p: 0.125 if group == "comprehension" else 0.5 / 7 for p, (group, _) in made_of.items()})
-    assert s3.raw["exam"]["more"] == {"agent": 4, "context": 2, "logic-mc": 2, "grammar": 3} and s3.raw["exam"]["per_corner"] == 2
+    assert s3.raw["exam"]["more"] == {"agent": 4, "context": 2, "logic": 2, "grammar": 3} and s3.raw["exam"]["per_corner"] == 2
     assert s3.min_copy_bytes == 64  # the shortest copy a script may hold; of text of its own it holds none
     assert s3.raw["exam"]["generator_version"] == gen.VERSION
     assert len(s3.digest) == 64 and s3.digest == load_season("s3").digest

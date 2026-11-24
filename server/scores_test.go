@@ -16,7 +16,7 @@ import (
 // on every item of a pillar is that gain for the pillar.
 func (w *world) pillarResult(c *claimed, logic, reference float64) map[string]any {
 	p := w.result(c, 5, 6)
-	gains := map[string]float64{"logic-mc": logic, "reference": reference}
+	gains := map[string]float64{"logic": logic, "reference": reference}
 	var scores []float64
 	sum := 0.0
 	for _, it := range testTable() {

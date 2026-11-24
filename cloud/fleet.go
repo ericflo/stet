@@ -632,6 +632,12 @@ func (f *Fleet) look(ctx context.Context) (*View, error) {
 						f.noCurators(w.Rental, rec, why)
 					}
 				}
+				if !rec.Curators {
+					w.GradeOnly = true
+				}
+			}
+			if w.NoCurators != "" || (w.Machine != nil && w.Machine.Curators != nil && !*w.Machine.Curators && w.Machine.LastSeen >= w.Rental.Created.Unix()) {
+				w.GradeOnly = true
 			}
 			w.Grace, w.Speed = f.grace(w.Rental.Market), f.speedOf(w.Rental.Card)
 			if m := f.market(w.Rental.Market); m != nil && !m.Caps().SelfEnd {
@@ -1167,9 +1173,11 @@ func (f *Fleet) rent(ctx context.Context, v *View, k *Key, gpus []Offer, site st
 				l.SSHKey = sshKey(l) // to read what it found, where the market lets a key in
 			}
 		}
-		if l.Env["STET_WORKER_EDITS"] == "1" && !f.curators(c.Market) && f.probe == "" {
-			// Grading only, until stet's container sandbox is known to hold there.
-			l.Env["STET_WORKER_EDITS"] = "0"
+		if l.Env["STET_WORKER_EDITS"] == "1" && f.probe == "" {
+			if !f.curators(c.Market) || (f.o.MinCuratorGPUMemory > 0 && c.MemoryGB < f.o.MinCuratorGPUMemory) {
+				// Grading only: sandbox not verified on this market, or GPU under the curator VRAM floor.
+				l.Env["STET_WORKER_EDITS"] = "0"
+			}
 		}
 		began := f.now()
 		r, err := m.Rent(ctx, c, l)

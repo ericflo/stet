@@ -182,19 +182,21 @@ const emptyBackoff = 3 * time.Hour // retry cadence after two consecutive rounds
 // nor deadlocks automatic draws forever.
 func (a *App) demandSlot(s *State) (at int64, blocked bool) {
 	gap := int64(a.cfg.RoundMinGap.Seconds())
-	at, empty := now()+drawNotice, 0
+	at, empty, streakDone := now()+drawNotice, 0, false
 	var lastEmpty int64
 	for _, rd := range s.roundsDesc(3) {
 		if rd.DrawnAt == 0 {
 			continue // the scheduled round itself
 		}
-		if empty >= 0 && rd.Status == "settled" && rd.BaselineLoss == nil {
-			empty++ // nothing in it could be graded
-			if done := max(rd.SettledAt, rd.DrawnAt); done > lastEmpty {
-				lastEmpty = done
+		if !streakDone {
+			if rd.Status == "settled" && rd.BaselineLoss == nil {
+				empty++ // nothing in it could be graded
+				if done := max(rd.SettledAt, rd.DrawnAt); done > lastEmpty {
+					lastEmpty = done
+				}
+			} else {
+				streakDone = true
 			}
-		} else {
-			empty = -1 << 30
 		}
 		if gap > 0 && rd.DrawnAt+gap > at {
 			at = rd.DrawnAt + gap
@@ -332,6 +334,9 @@ func announcedSlots(s *State, except *Round) map[int64]bool {
 		for _, was := range r.Was {
 			taken[was] = true
 		}
+	}
+	for _, slot := range s.Meta.UsedSlots {
+		taken[slot] = true
 	}
 	return taken
 }
@@ -546,6 +551,15 @@ func (a *App) bringForward(ctx context.Context) (*Round, error) {
 	return &out, err
 }
 
+func hasWaitingEntrant(entrants []entrant) bool {
+	for _, e := range entrants {
+		if e.Why == "new" || e.Why == "qualifying" {
+			return true
+		}
+	}
+	return false
+}
+
 // maybeDraw draws the scheduled round if its time has come.
 func (a *App) maybeDraw(ctx context.Context, force bool) error {
 	var r Round
@@ -563,9 +577,10 @@ func (a *App) maybeDraw(ctx context.Context, force bool) error {
 		switch {
 		case !due:
 		case s.Meta.Paused != 0:
-			// The organisers have paused the rounds: the slot passes, as when nobody is waiting.
+			// The organisers have paused the rounds: in on-demand-only mode unschedule the passed
+			// slot cleanly so resuming draws at the next grid mark; on a clock, move to laterSlot.
 			if a.onDemandOnly() {
-				a.reschedule(tx, cur, a.season.nextGrid(now()+3600))
+				tx.dropRound(cur)
 			} else {
 				a.reschedule(tx, cur, a.laterSlot())
 			}
@@ -580,9 +595,22 @@ func (a *App) maybeDraw(ctx context.Context, force bool) error {
 			problem = errors.New("the previous round is still being graded")
 		case len(a.selectEntrants(s, r.DrawAt, r.Idx)) == 0:
 			if a.onDemandOnly() {
-				a.reschedule(tx, cur, a.season.nextGrid(now()+3600))
+				if a.waiting(s) {
+					a.reschedule(tx, cur, a.season.nextGrid(now()+drawNotice))
+				} else {
+					tx.dropRound(cur)
+				}
 			} else {
 				a.reschedule(tx, cur, a.laterSlot())
+			}
+			problem = errors.New("no curators are waiting to run")
+		case a.onDemandOnly() && !force && !hasWaitingEntrant(a.selectEntrants(s, r.DrawAt, r.Idx)):
+			// In on-demand-only mode do not draw a round for the ladder alone if the sole waiting
+			// entry withdrew or resubmitted inside the last commitMargin seconds.
+			if a.waiting(s) {
+				a.reschedule(tx, cur, a.season.nextGrid(now()+drawNotice))
+			} else {
+				tx.dropRound(cur)
 			}
 			problem = errors.New("no curators are waiting to run")
 		case r.Crawl == nil:
@@ -619,7 +647,20 @@ func (a *App) maybeDraw(ctx context.Context, force bool) error {
 		}
 		entrants := a.selectEntrants(s, cur.DrawAt, cur.Idx)
 		if len(entrants) == 0 {
-			a.reschedule(tx, cur, a.laterSlot())
+			if a.onDemandOnly() {
+				tx.dropRound(cur)
+			} else {
+				a.reschedule(tx, cur, a.laterSlot())
+			}
+			problem = errors.New("no curators are waiting to run")
+			return nil
+		}
+		if a.onDemandOnly() && !force && !hasWaitingEntrant(entrants) {
+			if a.waiting(s) {
+				a.reschedule(tx, cur, a.season.nextGrid(now()+drawNotice))
+			} else {
+				tx.dropRound(cur)
+			}
 			problem = errors.New("no curators are waiting to run")
 			return nil
 		}

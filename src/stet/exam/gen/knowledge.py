@@ -100,7 +100,7 @@ def _qid_parity(qid: str) -> int:
 
 def split_pool_with_ids(fact: str, lang: str, parity: int) -> tuple[list[tuple[str, str, str]], str]:
     """Split a (fact, lang) pool deterministically by canonical Wikidata subject Q-ID parity:
-    0 = exam pool (knowledge-mc), 1 = disjoint SFT probe pool (zero cross-language fact overlap)."""
+    0 = exam pool (knowledge-even), 1 = disjoint SFT probe pool (zero cross-language fact overlap)."""
     full = facts_with_ids().get((fact, lang))
     if not full:
         lang = "en"
@@ -111,45 +111,36 @@ def split_pool_with_ids(fact: str, lang: str, parity: int) -> tuple[list[tuple[s
 
 def split_pool(fact: str, lang: str, parity: int) -> tuple[list[tuple[str, str]], str]:
     """Split a (fact, lang) pool deterministically by canonical Wikidata subject Q-ID parity:
-    0 = exam pool (knowledge-mc), 1 = disjoint SFT probe pool (zero cross-language fact overlap)."""
+    0 = exam pool (knowledge-even), 1 = disjoint SFT probe pool (zero cross-language fact overlap)."""
     part, lang = split_pool_with_ids(fact, lang, parity)
     return [(s, o) for _, s, o in part], lang
 
 
-class KnowledgeMC:
-    """Contrastive factual knowledge: right answer vs 3 same-relation, same-language distractors.
+class KnowledgeEven:
+    """Factual knowledge scored by right-answer likelihood (bits per byte) on the even-parity
+    canonical Wikidata subject Q-ID split — completely disjoint across all 10 languages from the
+    odd-parity split used by the post-pretraining SFT probe."""
 
-    Uses the even-parity split of Wikidata facts (disjoint from the SFT probe's odd-parity split).
-    """
-
-    NAME = "knowledge-mc"
+    NAME = "knowledge-even"
 
     @staticmethod
     def corners() -> list[str]:
-        return [f"{KnowledgeMC.NAME}/{lang}/{fact}" for fact in TEMPLATES for lang in LANGS]
+        return [f"{KnowledgeEven.NAME}/{lang}/{fact}" for fact in TEMPLATES for lang in LANGS]
 
     @staticmethod
     def make(rng: Rng, corner: str) -> Item:
         _, lang, fact = corner.split("/")
         pool, lang = split_pool(fact, lang, parity=0)
         s, o = rng.choice(pool)
-        fmt_o = (lambda v: str(int(v))) if fact == "birthyear" else (lambda v: v)
-        right_val = fmt_o(o)
-        # Draw 3 distinct wrong answers from the exact same relation and language.
-        other_vals = sorted({fmt_o(o2) for _, o2 in pool if fmt_o(o2) != right_val})
-        if len(other_vals) < 3:
-            full = facts().get((fact, lang)) or facts()[(fact, "en")]
-            other_vals = sorted({fmt_o(o2) for _, o2 in full if fmt_o(o2) != right_val})
-        wrongs_raw = rng.sample(other_vals, min(3, len(other_vals)))
-        prefix = "" if lang in NO_SPACE else " "
+        if fact == "birthyear":
+            o = str(int(o))
         ctx = TEMPLATES[fact][lang].format(s=s)
         return Item(
-            kind="choice",
+            kind="answer",
             corner=corner,
             fmt="prose",
             lang=lang,
-            source=f"gen:{KnowledgeMC.NAME}",
+            source=f"gen:{KnowledgeEven.NAME}",
             ctx=ctx,
-            cont=f"{prefix}{right_val}",
-            wrongs=tuple(f"{prefix}{w}" for w in wrongs_raw),
+            cont=o if lang in NO_SPACE else f" {o}",
         )

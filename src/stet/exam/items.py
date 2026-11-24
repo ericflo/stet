@@ -6,24 +6,24 @@ import hashlib
 import json
 from dataclasses import asdict, dataclass
 
-KINDS = ("passage", "answer", "pair", "choice")
+KINDS = ("passage", "answer", "pair", "context")
 # Formats an item can be in. A round is balanced across formats and kinds of task.
 FORMATS = ("prose", "code", "dialogue", "table", "list", "math", "logs", "markup", "transcript", "verse", "structured")
 
 
 @dataclass(frozen=True)
 class Item:
-    kind: str  # passage | answer | pair | choice
+    kind: str  # passage | answer | pair | context
     corner: str  # the finest unit: family/sub-kind/style..., at most a few items a round
     fmt: str  # one of FORMATS
     lang: str  # "en", "de", ..., or "code:python" for code
     source: str  # "gen:<generator>" or a fresh source's name
     text: str = ""  # passage
-    ctx: str = ""  # answer / choice: what the student is given
-    cont: str = ""  # answer / choice: the right answer or continuation, scored
+    ctx: str = ""  # answer / context: what the student is given
+    cont: str = ""  # answer / context: the right answer or continuation, scored
     good: str = ""  # pair: the acceptable sentence
     bad: str = ""  # pair: its unacceptable twin
-    wrongs: tuple[str, ...] = ()  # choice: wrong alternatives from the same source / relation
+    wrongs: tuple[str, ...] = ()  # context: matched wrong contexts from other documents of the same source & language
 
     def __post_init__(self):
         if isinstance(self.wrongs, list):
@@ -38,11 +38,11 @@ class Item:
             raise ValueError("an answer item needs a context and an answer")
         if self.kind == "pair" and not (self.good and self.bad and self.good != self.bad):
             raise ValueError("a pair item needs two different sentences")
-        if self.kind == "choice":
+        if self.kind == "context":
             if not (self.ctx and self.cont and self.wrongs):
-                raise ValueError("a choice item needs a context, a right answer, and wrong alternatives")
-            if any((not w) or w == self.cont for w in self.wrongs):
-                raise ValueError("every wrong alternative must be non-empty and differ from the right answer")
+                raise ValueError("a context item needs a context, a continuation, and wrong contexts")
+            if any((not w) or w == self.ctx for w in self.wrongs):
+                raise ValueError("every wrong context must be non-empty and differ from the real context")
 
     @property
     def family(self) -> str:

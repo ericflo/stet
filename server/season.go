@@ -28,6 +28,7 @@ type Scale struct {
 	BatchSize          int     `json:"batch_size"`
 	MicroBatch         int     `json:"micro_batch,omitempty"`
 	LR                 float64 `json:"lr"`
+	WarmupSteps        int     `json:"warmup_steps,omitempty"`
 	ExamItemsPerSource int     `json:"exam_items_per_source"`
 	EditSeconds        int     `json:"edit_seconds"`
 	SFTSteps           int     `json:"sft_steps,omitempty"`
@@ -80,6 +81,7 @@ type RunnerFloor struct {
 	GPUTokensPerSecond float64 `json:"gpu_tokens_per_second"`
 	CPUMBPerSecond     float64 `json:"cpu_mb_per_second"`
 	GPUMemoryGB        float64 `json:"gpu_memory_gb"`
+	GradeGPUMemoryGB   float64 `json:"grade_gpu_memory_gb,omitempty"`
 	MemoryGB           float64 `json:"memory_gb"`
 	Cores              int     `json:"cores"`
 	DiskGB             float64 `json:"disk_gb"`

@@ -25,8 +25,9 @@ import (
 // learned from the machines this service rents. Until a kind has been seen, its pass is a
 // 3090's over its speed in the table (speed.go).
 
-// passOn3090 is a training pass on an RTX 3090 at the standard scale (Season 3 Qwen3-0.6B-Base).
-const passOn3090 = 40 * time.Minute
+// passOn3090 is a training pass on an RTX 3090 at the standard scale (Season 3 Qwen3-0.6B-Base,
+// FP32 master weights + activation checkpointing: measured ~31 min on RTX 5090 at speed 2.5).
+const passOn3090 = 75 * time.Minute
 
 // Between booting and training, and after: fetching the round's corpus and making the two
 // scripts before it trains, and sitting the exam once it has.
@@ -46,6 +47,10 @@ const graceAtLeast = 10 * time.Minute
 
 // Calibration is what has been seen, kept in calibration.json in the home directory.
 type Calibration struct {
+	// Season is the season id Pass and Rounds belong to (e.g. "s3"). When the active season
+	// changes, Pass and Rounds are reset so an earlier season's pass times never rank cards
+	// or set lead times for the new student; Boot is kept across seasons.
+	Season string `json:"season,omitempty"`
 	// Rounds are the settled rounds whose grades are counted in Pass.
 	Rounds []string `json:"rounds"`
 	// Pass is the minutes a training pass took, by kind (as shortGPU names it), the latest last.
@@ -93,10 +98,26 @@ func (f *Fleet) saveCalibration() error {
 	return os.Rename(tmp, f.calibrationPath())
 }
 
-// pass is how long a training pass takes on a kind, and whether that was seen.
+// roundSeason returns the season prefix of a round id ("s3" for "s3-o00001"), or "".
+func roundSeason(id string) string {
+	s, _, ok := strings.Cut(id, "-")
+	if !ok {
+		return ""
+	}
+	return s
+}
+
+// pass is how long a training pass takes on a kind, and whether that was seen in the active season.
 func (f *Fleet) pass(id string) (time.Duration, bool) {
-	if seen := f.calibration().Pass[shortGPU(id)]; len(seen) > 0 {
-		return time.Duration(median(seen) * float64(time.Minute)), true
+	cal := f.calibration()
+	active := ""
+	if f.st != nil {
+		active = f.st.season
+	}
+	if active == "" || cal.Season == active {
+		if seen := cal.Pass[shortGPU(id)]; len(seen) > 0 {
+			return time.Duration(median(seen) * float64(time.Minute)), true
+		}
 	}
 	s := speed(id)
 	if s <= 0 {
@@ -236,9 +257,22 @@ func (f *Fleet) countGrades(ctx context.Context) error {
 		return err
 	}
 	cal := f.calibration()
+	season := f.st.seasonID(ctx)
+	if season == "" && len(list.Rounds) > 0 {
+		season = roundSeason(list.Rounds[0].ID)
+	}
+	if season != "" && cal.Season != season {
+		cal.Season = season
+		cal.Rounds = nil
+		cal.Pass = map[string][]float64{}
+		f.calDirty = true
+	}
 	slices.Reverse(list.Rounds) // the oldest first, so that the latest grades are last
 	for _, r := range list.Rounds {
 		if r.Status != "settled" || r.Scale != "standard" || slices.Contains(cal.Rounds, r.ID) {
+			continue
+		}
+		if season != "" && roundSeason(r.ID) != season {
 			continue
 		}
 		var round struct {

@@ -169,9 +169,11 @@ func (a *App) work(s *State) Work {
 	}
 	out.Paused = s.Meta.Paused
 	if a.onDemandOnly() {
-		_, blocked := a.demandSlot(s)
-		out.Waiting = s.Meta.Paused == 0 && s.roundWithStatus("open") == nil && s.roundWithStatus("scheduled") == nil &&
-			a.savedCrawl(s) != nil && a.waiting(s) && !blocked
+		at, blocked := a.demandSlot(s)
+		sched := s.roundWithStatus("scheduled")
+		out.Waiting = s.Meta.Paused == 0 && s.roundWithStatus("open") == nil &&
+			a.savedCrawl(s) != nil && a.waiting(s) && !blocked &&
+			(sched == nil || at < sched.DrawAt)
 	} else {
 		soon, _ := a.earlyDraw(s)
 		out.Waiting = soon != nil

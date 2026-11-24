@@ -22,13 +22,15 @@ import (
 
 // fakeRunPod is RunPod as far as stet-cloud can tell: a catalog, and pods made and ended.
 type fakeRunPod struct {
-	mu      sync.Mutex
-	pods    map[string]*Pod
-	noRoom  map[string]bool     // GPU kinds it has none of
-	logs    map[string][]string // what each pod's container said
-	created []NewPod
-	n       int
-	srv     *httptest.Server
+	mu             sync.Mutex
+	pods           map[string]*Pod
+	noRoom         map[string]bool     // GPU kinds it has none of
+	logs           map[string][]string // what each pod's container said
+	extraCommunity []map[string]any    // extra community offers for a single test
+	extraPrices    map[string]float64  // hourly prices for extraCommunity
+	created        []NewPod
+	n              int
+	srv            *httptest.Server
 }
 
 func newFakeRunPod(t *testing.T) *fakeRunPod {
@@ -52,12 +54,14 @@ func (f *fakeRunPod) serve(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if r.URL.Query().Get("cloud") == "COMMUNITY" {
-			json.NewEncoder(w).Encode(map[string]any{"gpus": []map[string]any{
+			gpus := []map[string]any{
 				{"id": "NVIDIA GeForce RTX 3080 Ti", "name": "RTX 3080 Ti", "manufacturer": "NVIDIA", "memory": 12, "price": map[string]any{"community": 0.18}, "availability": "LOW"},
 				{"id": "NVIDIA RTX A5000", "name": "RTX A5000", "manufacturer": "NVIDIA", "memory": 24, "price": map[string]any{"community": 0.16}, "availability": "NONE"},
 				{"id": "NVIDIA GeForce RTX 3090 Ti", "name": "RTX 3090 Ti", "manufacturer": "NVIDIA", "memory": 24, "price": map[string]any{"community": 0.27}, "availability": "LOW"},
 				{"id": "NVIDIA GeForce RTX 4090", "name": "RTX 4090", "manufacturer": "NVIDIA", "memory": 24, "price": map[string]any{"community": 0.45}, "availability": "LOW"},
-			}})
+			}
+			gpus = append(gpus, f.extraCommunity...)
+			json.NewEncoder(w).Encode(map[string]any{"gpus": gpus})
 			return
 		}
 		json.NewEncoder(w).Encode(map[string]any{"gpus": []map[string]any{
@@ -101,6 +105,9 @@ func (f *fakeRunPod) serve(w http.ResponseWriter, r *http.Request) {
 		f.n++
 		price := map[string]float64{"NVIDIA RTX A5000": 0.27, "NVIDIA GeForce RTX 3080": 0.2, "NVIDIA RTX PRO 4000 Blackwell": 0.57,
 			"NVIDIA GeForce RTX 3080 Ti": 0.18, "NVIDIA GeForce RTX 3090 Ti": 0.27}[spec.GPU.ID]
+		if p2, ok := f.extraPrices[spec.GPU.ID]; ok {
+			price = p2
+		}
 		p := &Pod{ID: fmt.Sprintf("pod%d", f.n), Name: spec.Name, Status: "RUNNING", Cost: price, CreatedAt: time.Now()}
 		p.GPU = &struct {
 			ID     string `json:"id"`
@@ -863,20 +870,20 @@ func TestStatusJudgesByTheServicesSettings(t *testing.T) {
 func TestGradersAreRentedBeforeTheExam(t *testing.T) {
 	rp, st := newFakeRunPod(t), newFakeStet(t)
 	f, out := testFleet(t, rp, st, 4)
-	f.o.Early, f.o.ExamAfter, f.o.PerWorker, f.o.Settle = 3*time.Hour, 3*time.Hour, 1, 15*time.Minute
+	f.o.Early, f.o.ExamAfter, f.o.PerWorker, f.o.Settle = 4*time.Hour, 4*time.Hour, 1, 15*time.Minute
 	st.work = Work{Runners: 1, Rounds: []WorkRound{{ID: "s1-o00001", Entries: 3, GradesEarly: 3}}}
 	// Nothing seen yet: a machine starts in 8 minutes, and with 2 to fetch and script and 1 to
 	// sit the exam, the secure kinds that fit, the 3080 ($0.20) and the A5000 ($0.27), each
-	// 0.85 of a 3090 (47m/pass), are rented 105 minutes before they are to report; the PRO 4000 ($0.57),
-	// 0.8, 111.
-	st.drawnAt = time.Now().Add(-55 * time.Minute).Unix() // the exam is due in 125 minutes
+	// 0.85 of a 3090 (88m/pass), are rented 187 minutes before they are to report; the PRO 4000 ($0.57),
+	// 0.8, 199.
+	st.drawnAt = time.Now().Add(-30 * time.Minute).Unix() // the exam is due in 210 minutes
 	if err := tick(context.Background(), f); err != nil {
 		t.Fatal(err)
 	}
 	if len(rp.created) != 0 || !strings.Contains(out.String(), "waiting for the cheapest a round, RTX 3080 at $0.20 an hour") {
-		t.Fatalf("rented %d machines 125 minutes before the exam\n%s", len(rp.created), out)
+		t.Fatalf("rented %d machines 210 minutes before the exam\n%s", len(rp.created), out)
 	}
-	st.drawnAt = time.Now().Add(-75 * time.Minute).Unix() // due in 105 minutes
+	st.drawnAt = time.Now().Add(-55 * time.Minute).Unix() // due in 185 minutes
 	if err := tick(context.Background(), f); err != nil {
 		t.Fatal(err)
 	}
@@ -896,7 +903,7 @@ func TestCuratorsAreRunOnTheFastest(t *testing.T) {
 	rp, st := newFakeRunPod(t), newFakeStet(t)
 	f, out := testFleet(t, rp, st, 3)
 	f.o.Cloud, f.o.Edits = "ANY", true
-	st.work = *round(8, 0, 0, 0)
+	st.work = *round(4, 0, 0, 0)
 	if err := tick(context.Background(), f); err != nil {
 		t.Fatal(err)
 	}
@@ -912,12 +919,19 @@ func TestCuratorsAreRunOnTheFastest(t *testing.T) {
 }
 
 // Season 3 curators require 24 GB+ VRAM (--min-curator-gpu-memory) while grading allows 16 GB+
-// (--min-gpu-memory).
+// (--min-gpu-memory). Verify both halves: curator launches skip the cheap 16 GB card, while
+// grade launches DO rent the 16 GB card (and start it grade-only with STET_WORKER_EDITS=0).
 func TestCuratorRunsRequire24GBVRAMWhileGradingAllowsSmaller(t *testing.T) {
 	rp, st := newFakeRunPod(t), newFakeStet(t)
-	f, out := testFleet(t, rp, st, 2)
-	f.o.Cloud, f.o.Edits, f.o.MinGPUMemory, f.o.MinCuratorGPUMemory = "COMMUNITY", true, 12, 24
-	f.o.Cheapest = true // would pick 12 GB RTX 3080 Ti ($0.18) if not filtered for curators
+	rp.extraCommunity = []map[string]any{
+		// 16 GB card priced at $0.14/hr (speed 0.6 -> $0.233/grade, cheaper per grade than $0.27 RTX 3090 Ti).
+		{"id": "NVIDIA RTX 4000 Ada", "name": "RTX 4000 Ada", "manufacturer": "NVIDIA", "memory": 16, "price": map[string]any{"community": 0.14}, "availability": "LOW"},
+	}
+	rp.extraPrices = map[string]float64{"NVIDIA RTX 4000 Ada": 0.14}
+	f, out := testFleet(t, rp, st, 4)
+	everyHostStarts(t)
+	f.o.Cloud, f.o.Edits, f.o.MinGPUMemory, f.o.MinCuratorGPUMemory = "COMMUNITY", true, 16, 24
+	f.o.Cheapest = true // would pick 16 GB RTX 4000 Ada ($0.14) if not filtered for curators
 	st.work = *round(4, 0, 0, 0)
 	if err := tick(context.Background(), f); err != nil {
 		t.Fatal(err)
@@ -926,9 +940,78 @@ func TestCuratorRunsRequire24GBVRAMWhileGradingAllowsSmaller(t *testing.T) {
 		t.Fatalf("rented %d\n%s", len(rp.created), out)
 	}
 	for _, spec := range rp.created {
-		if spec.GPU.ID == "NVIDIA GeForce RTX 3080 Ti" {
-			t.Fatalf("rented 12 GB card %s for curator runs despite MinCuratorGPUMemory=24", spec.GPU.ID)
+		if spec.GPU.ID == "NVIDIA RTX 4000 Ada" || spec.GPU.ID == "NVIDIA GeForce RTX 3080 Ti" {
+			t.Fatalf("rented <24 GB card %s for curator runs despite MinCuratorGPUMemory=24", spec.GPU.ID)
 		}
+	}
+	// Now request grades only (no curator runs): must pick the cheaper 16 GB RTX 4000 Ada and
+	// launch it with STET_WORKER_EDITS=0 so it is tracked as grade-only!
+	for _, p := range rp.pods {
+		delete(rp.pods, p.ID)
+	}
+	before := len(rp.created)
+	st.work = *round(0, 0, 4, 0)
+	if err := tick(context.Background(), f); err != nil {
+		t.Fatal(err)
+	}
+	if len(rp.created) != before+1 {
+		t.Fatalf("expected 1 grade machine rented, got %d\n%s", len(rp.created)-before, out)
+	}
+	if got := rp.created[before]; got.GPU.ID != "NVIDIA RTX 4000 Ada" || got.Env["STET_WORKER_EDITS"] != "0" {
+		t.Fatalf("grade machine: gpu=%s edits=%q, want 16 GB RTX 4000 Ada with STET_WORKER_EDITS=0", got.GPU.ID, got.Env["STET_WORKER_EDITS"])
+	}
+}
+
+// Calibration pass times are scoped per season: Season 2's shorter passes must not outrank
+// Season 3 cards or distort Season 3 lead times.
+func TestCalibrationResetsPassTimesOnNewSeason(t *testing.T) {
+	rp, st := newFakeRunPod(t), newFakeStet(t)
+	f, _ := testFleet(t, rp, st, 1)
+	// Seed a legacy Season 2 calibration.json (short 3090=18m, 4090=8m passes, plus boot times).
+	seed := Calibration{
+		Rounds: []string{"s2-o00001"},
+		Pass:   map[string][]float64{"RTX 3090": {18.0}, "RTX 4090": {8.0}},
+		Boot:   []BootSample{{Pod: "pod1", Minutes: 3.0}, {Pod: "pod2", Minutes: 4.0}, {Pod: "pod3", Minutes: 5.0}},
+	}
+	raw, _ := json.Marshal(seed)
+	if err := os.WriteFile(f.calibrationPath(), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Server is now on Season 3 with one settled Season 3 round on RTX 5090 (21m pass).
+	st.rounds = `{"rounds": [{"id": "s3-o00001", "status": "settled", "scale": "standard"}]}`
+	st.graded = map[string]string{
+		"s3-o00001": `{"round": {"id": "s3-o00001"}, "entries": [{"detail": {"hardware": {"gpu": "NVIDIA GeForce RTX 5090"}, "train": {"seconds": 1260}}}]}`,
+	}
+	// Override fakeStet route for /api/v1/rounds/s3-o00001 via direct season id check.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/season":
+			io.WriteString(w, `{"season": "s3", "site": "https://www.stet.test"}`)
+		case "/api/v1/rounds":
+			io.WriteString(w, st.rounds)
+		case "/api/v1/rounds/s3-o00001":
+			io.WriteString(w, st.graded["s3-o00001"])
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer srv.Close()
+	f.st = newStet(srv.URL)
+	f.calibrate(context.Background())
+
+	// Season 2's 3090 (18m) and 4090 (8m) must be cleared; 5090 (21m) must now rank faster than
+	// both unseen 4090 and unseen 3090! And Boot samples are preserved.
+	p5090, seen5090 := f.pass("NVIDIA GeForce RTX 5090")
+	p4090, seen4090 := f.pass("NVIDIA GeForce RTX 4090")
+	p3090, seen3090 := f.pass("NVIDIA GeForce RTX 3090")
+	if !seen5090 || seen4090 || seen3090 {
+		t.Fatalf("seen flags: 5090=%v 4090=%v 3090=%v", seen5090, seen4090, seen3090)
+	}
+	if p5090 >= p4090 || p5090 >= p3090 {
+		t.Fatalf("Season 2 pass leaked: 5090=%s 4090=%s 3090=%s", p5090, p4090, p3090)
+	}
+	if f.boot() != 5*time.Minute {
+		t.Fatalf("boot samples should survive season rollover, got %s", f.boot())
 	}
 }
 
@@ -1043,10 +1126,10 @@ func TestWhatMachinesTakeIsLearned(t *testing.T) {
 func TestGradersTakeSeveralGradesBeforeTheExam(t *testing.T) {
 	rp, st := newFakeRunPod(t), newFakeStet(t)
 	f, out := testFleet(t, rp, st, 4)
-	f.o.Early, f.o.PerWorker, f.o.Settle, f.o.MaxHourly = 4*time.Hour, 1, 15*time.Minute, 16
-	// Nothing seen: the 3080 ($0.20, 0.85 of a 3090) passes in 47 minutes and leads by 105, so it
-	// takes three grades rented 201 minutes before the exam.
-	due := time.Now().Add(201 * time.Minute)
+	f.o.Early, f.o.PerWorker, f.o.Settle, f.o.MaxHourly = 7*time.Hour, 1, 15*time.Minute, 16
+	// Nothing seen: the 3080 ($0.20, 0.85 of a 3090) passes in 88 minutes and leads by 187, so it
+	// takes three grades rented 365 minutes before the exam.
+	due := time.Now().Add(365 * time.Minute)
 	st.work = Work{EarlyGradesPerMachine: 3, FastFirstSeconds: 120,
 		Rounds: []WorkRound{{ID: "s1-o00008", Entries: 6, GradesEarly: 6, ExamDue: due.Unix()}}}
 	if err := tick(context.Background(), f); err != nil {
@@ -1186,16 +1269,16 @@ func TestTheCauseIsReadFromWhatTheMachineSaid(t *testing.T) {
 func TestACuratorMachineDoneTooEarlyIsEnded(t *testing.T) {
 	rp, st := newFakeRunPod(t), newFakeStet(t)
 	f, out := testFleet(t, rp, st, 2)
-	f.o.Early, f.o.PerWorker, f.o.MaxHourly = 5*time.Hour, 1, 16
+	f.o.Early, f.o.PerWorker, f.o.MaxHourly = 8*time.Hour, 1, 16
 	if err := cmdUp(context.Background(), f, 1); err != nil || len(rp.created) != 1 {
 		t.Fatalf("rented %d (%v)", len(rp.created), err)
 	}
-	// A 3080 (nothing seen: 0.85 of a 3090) takes ~200 minutes from being rented to have three
-	// grades trained: with the exam 270 minutes off and a 10-minute window, its kind's time
-	// is 60 minutes off.
+	// A 3080 (nothing seen: 0.85 of a 3090) takes ~365 minutes from being rented to have three
+	// grades trained: with the exam 430 minutes off and a 10-minute window, its kind's time
+	// is ~55 minutes off.
 	now := time.Now()
 	st.work = Work{EarlyGradesPerMachine: 3, EarlyWindowSeconds: 600,
-		Rounds:   []WorkRound{{ID: "s1-o00009", Entries: 3, GradesEarly: 3, ExamDue: now.Add(270 * time.Minute).Unix()}},
+		Rounds:   []WorkRound{{ID: "s1-o00009", Entries: 3, GradesEarly: 3, ExamDue: now.Add(430 * time.Minute).Unix()}},
 		Machines: []Machine{{Handle: "stet-rp-01", Worker: true, LastSeen: now.Add(time.Second).Unix()}}}
 	out.Reset()
 	if err := tick(context.Background(), f); err != nil {

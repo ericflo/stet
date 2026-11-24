@@ -72,13 +72,13 @@
     }
   },
   "exam": {
-    "about": "Zero raw web-text perplexity. Half fresh same-source contrastive continuation across every crawl language published in the day before the draw, half seeded multilingual procedural skills, all sat after a fixed 64-step disjoint multilingual SFT probe.",
+    "about": "Zero raw web-text perplexity. Half fresh twin-context comprehension across every crawl language published in the day before the draw (same continuation scored under its real opening vs same-source wrong openings, in bits per byte), half seeded multilingual procedural skills, all sat after a scale-fixed disjoint multilingual SFT probe.",
     "generator_version": 10,
     "per_corner": 2,
     "more": {
       "agent": 4,
       "context": 2,
-      "logic-mc": 2,
+      "logic": 2,
       "grammar": 3
     },
     "facts": {
@@ -86,7 +86,7 @@
       "sha256": "ac1c27bc3461c8ccd6c5b5a5814072b79bc834f7694ba35da14021493edd08e5"
     },
     "fresh": {
-      "mode": "contrastive",
+      "mode": "context",
       "settle_seconds": 3600,
       "reach_seconds": 93600,
       "hours": 3,
@@ -109,21 +109,21 @@
         "parts": [
           "reference"
         ],
-        "about": "fresh encyclopedia articles: real next sentence minus same-source distractor"
+        "about": "fresh encyclopedia articles: same continuation under the real opening vs same-source wrong openings"
       },
       "news": {
         "group": "comprehension",
         "parts": [
           "news"
         ],
-        "about": "fresh news published in the day before the draw: real continuation minus same-source distractor"
+        "about": "fresh news published in the day before the draw: same continuation under the real opening vs same-source wrong openings"
       },
       "technical": {
         "group": "comprehension",
         "parts": [
           "technical"
         ],
-        "about": "fresh issues, patches and technical writing: real continuation minus same-source distractor"
+        "about": "fresh issues, patches and technical writing: same continuation under the real opening vs same-source wrong openings"
       },
       "conversation": {
         "group": "comprehension",
@@ -131,7 +131,7 @@
           "discussion",
           "social"
         ],
-        "about": "fresh replies and posts: real reply minus same-source distractor"
+        "about": "fresh replies and posts: same continuation under the real opening vs same-source wrong openings"
       },
       "agents": {
         "group": "skills",
@@ -150,9 +150,9 @@
       "logic": {
         "group": "skills",
         "parts": [
-          "logic-mc"
+          "logic"
         ],
-        "about": "following an argument to its end, scored contrastively against the other entities"
+        "about": "following an argument to its end"
       },
       "grammar": {
         "group": "skills",
@@ -181,9 +181,9 @@
       "knowledge": {
         "group": "skills",
         "parts": [
-          "knowledge-mc"
+          "knowledge-even"
         ],
-        "about": "facts the web knows in ten languages, scored contrastively against same-relation distractors"
+        "about": "facts the web knows in ten languages, disjoint from the SFT probe"
       }
     }
   },
@@ -196,8 +196,9 @@
       "d_model": 1024,
       "ctx": 1024,
       "batch_size": 32,
-      "micro_batch": 2,
-      "lr": 0.001,
+      "micro_batch": 4,
+      "lr": 0.0003,
+      "warmup_steps": 10,
       "edit_seconds": 120,
       "sft_steps": 16
     },
@@ -209,8 +210,9 @@
       "d_model": 1024,
       "ctx": 1024,
       "batch_size": 32,
-      "micro_batch": 2,
-      "lr": 0.001,
+      "micro_batch": 4,
+      "lr": 0.0006,
+      "warmup_steps": 24,
       "edit_seconds": 300,
       "sft_steps": 32
     },
@@ -222,7 +224,7 @@
       "d_model": 1024,
       "ctx": 1024,
       "batch_size": 32,
-      "micro_batch": 2,
+      "micro_batch": 4,
       "lr": 0.001,
       "edit_seconds": 1200,
       "sft_steps": 64
@@ -235,7 +237,7 @@
       "d_model": 1024,
       "ctx": 1024,
       "batch_size": 32,
-      "micro_batch": 2,
+      "micro_batch": 4,
       "lr": 0.0006,
       "edit_seconds": 4800,
       "sft_steps": 64
@@ -416,6 +418,7 @@
     "gpu_tokens_per_second": 120000,
     "cpu_mb_per_second": 100,
     "gpu_memory_gb": 23,
+    "grade_gpu_memory_gb": 15,
     "memory_gb": 24,
     "cores": 6,
     "disk_gb": 80

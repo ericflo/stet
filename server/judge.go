@@ -1457,6 +1457,9 @@ func (a *App) claim(ctx context.Context, acctID int64, h *Hello) (*Handed, error
 			acct.PassSeconds = p
 		}
 		tx.touch(acct)
+		if canEdit && a.established(acct) {
+			a.onDemand(tx)
+		}
 
 		// A verifier that restarts picks its unfinished job back up. An editor it took to run
 		// and now cannot (it asks as a machine that does not run editors) is not swapped for a

@@ -77,8 +77,10 @@ func (p Policy) targetHolding(w *Work, held int, now time.Time, early int) int {
 }
 
 // runsEach is how many times the season runs an entry's curator, each by another account,
-// and runsPerMachine how many entries to run justify one more machine.
-const runsEach, runsPerMachine = 2, 4
+// and runsPerMachine how many entries to run justify one more machine. Season 3 neural
+// curators can take up to 20 minutes each, so one machine per two entries keeps waves fast
+// under the --max cap.
+const runsEach, runsPerMachine = 2, 2
 
 // runners is how many of the machines the rounds' work justifies run curators: one for
 // every runsPerMachine entries to run, and never fewer than runsEach; or one to ask for
@@ -224,6 +226,10 @@ type Worker struct {
 	// NoCurators is why the server would not hand it curators to run, rented to run them
 	// ("": it would, or it was not): it grades only (curators.go).
 	NoCurators string
+	// GradeOnly is true for a machine that cannot run curators (rented on a grade-only market
+	// or a GPU below --min-curator-gpu-memory, or refused by the server): never kept warm for
+	// draws and never counted in place of a curator runner.
+	GradeOnly bool
 }
 
 // gradeFor says whether something other than a curator wants a machine now: a grade of a posted
@@ -373,11 +379,17 @@ func (p Policy) nearExam(w *Work, now time.Time) bool {
 const keptNearExam = 2
 
 // nearDraw says whether an on-demand round is already scheduled to draw shortly (within the
-// draw notice window) while no round is open yet: keep up to keptNearDraw warm runners alive
-// across the 6-16 minute notice so a runner rented for w.Waiting is not killed right before
-// the draw it triggered, and consecutive back-to-back rounds don't churn rentals.
+// draw notice window) while no round is open yet, or a waiting entry is about to be scheduled
+// by a runner that just checked in: keep up to keptNearDraw warm curator-capable runners alive
+// so the trigger runner is never killed before the draw fires.
 func (p Policy) nearDraw(w *Work, now time.Time) bool {
-	if !p.Edits || len(w.Rounds) != 0 || w.Paused != 0 || w.NextDrawAt <= 0 {
+	if !p.Edits || len(w.Rounds) != 0 || w.Paused != 0 {
+		return false
+	}
+	if w.Waiting && w.Runners > 0 {
+		return true
+	}
+	if w.NextDrawAt <= 0 {
 		return false
 	}
 	at := time.Unix(w.NextDrawAt, 0)
@@ -425,15 +437,23 @@ func (p Policy) decideNext(w *Work, workers []*Worker, spentToday float64, now t
 				d.End = append(d.End, Ending{Worker: wk, Why: fmt.Sprintf("too early for the exam's grades: a machine of its kind is rented again in time, from %s UTC", wk.Window.UTC().Format("15:04"))})
 				continue
 			}
-			if wk.NoCurators != "" && p.runners(w) > 0 && !p.gradeFor(w, wk, now) {
-				// Rented to run curators, and it may not: it would only wait, and stand in the
-				// place of one that may.
-				d.End = append(d.End, Ending{Worker: wk, Why: "it may not run curators (" + wk.NoCurators + "), and no grade wants it yet"})
+			if (wk.NoCurators != "" || wk.GradeOnly) && p.runners(w) > 0 && !p.gradeFor(w, wk, now) {
+				// Cannot run curators, and only curators (or a draw trigger) want machines: end it
+				// so a curator-capable machine is rented in its place.
+				why := "it grades only, and no grade wants it yet"
+				if wk.NoCurators != "" {
+					why = "it may not run curators (" + wk.NoCurators + "), and no grade wants it yet"
+				}
+				d.End = append(d.End, Ending{Worker: wk, Why: why})
 				continue
 			}
 			d.Live++
 			idle = append(idle, wk)
 		default:
+			if st == "starting" && wk.GradeOnly && p.runners(w) > 0 && !p.gradeFor(w, wk, now) {
+				d.End = append(d.End, Ending{Worker: wk, Why: "it grades only, and no grade wants it yet"})
+				continue
+			}
 			d.Live++
 			if st == "waiting" || st == "starting" {
 				idle = append(idle, wk)
@@ -460,7 +480,7 @@ func (p Policy) decideNext(w *Work, workers []*Worker, spentToday float64, now t
 		} else if p.nearDraw(w, now) {
 			var warm []*Worker
 			for _, wk := range idle {
-				if wk.NoCurators == "" {
+				if wk.NoCurators == "" && !wk.GradeOnly {
 					warm = append(warm, wk)
 				}
 			}

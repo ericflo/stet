@@ -19,7 +19,7 @@ There are two kinds of work, and you choose whether to take the second.
 | | Grading | Running curators (`--edits`) |
 |---|---|---|
 | What runs on your machine | the fixed trainer, on plain data | entrants' programs, in a sandbox |
-| Needs | an NVIDIA (CUDA) or AMD (ROCm) GPU (16 GB+ VRAM), the season's PyTorch, 10 GB of disk | also Linux, bubblewrap, the season's libraries, a 24 GB+ GPU machine at or above the floor, 80 GB of disk |
+| Needs | an NVIDIA (CUDA) or AMD (ROCm) GPU (16 GB+ VRAM), the season's PyTorch and Transformers, 25 GB of disk | also Linux, bubblewrap, the season's libraries, a 24 GB+ GPU machine at or above the floor, 80 GB of disk |
 | Who is given it | anyone | accounts that are established (below) |
 
 The installer brings Python 3.13, PyTorch in the build for your GPU, and the season's
@@ -97,8 +97,10 @@ Grade jobs start as soon as a curator has written a script. The round's exam is 
 its draw, and posted as soon as the examiner has built it. A verifier handed a script
 before then trains at once and sits the exam the moment it is posted; one whose grade is
 trained and waiting asks for another, and sits them all then. At the official
-scale a grade is one training run, about 18 minutes on an RTX 3090 or 4070 Ti. The first
-job of a round also downloads the round's raw text (about a gigabyte; 2.5 GB once built).
+scale a grade is one training run (`Qwen3-0.6B-Base` top-half reset on 32.8M tokens plus a
+64-step SFT probe), about 31 minutes on an RTX 5090 (~42 minutes on an RTX 4090). The first job of a round also
+downloads the round's raw text (about 1.5 GB compressed; ~3.8 GB once built) and caches the
+pinned student weights (~1.2 GB).
 Four established machines a round are asked to train on the unedited corpus as well, and
 so is every machine that is not yet established: for them the first job takes about twice
 as long.
@@ -176,12 +178,12 @@ A verifier does not take the server's word for what a round is.
 
 **Grading is reproducible.** Same script, same corpus, same exam, same initial weights,
 same number of tokens. Two honest machines agree to within a small tolerance
-*(provisional: 0.025 bits per byte at the official scale; see [Experiments](EXPERIMENTS.md))*.
+*(provisional: 0.03 bits per byte at the official scale; see [Experiments](EXPERIMENTS.md))*.
 
 **Every curator is run twice, by different people,** when two are around. A machine is
 handed first an entry whose other run was on the other make of GPU, so the two are on
 NVIDIA and AMD when machines of both are asking. Nobody runs their own entry or runs one
-entry twice. When two runs differ by more than a tolerance *(provisional: 0.04 bits per
+entry twice. When two runs differ by more than a tolerance *(provisional: 0.05 bits per
 byte)*, or one fails, a third person runs it and the middle one counts. Whoever has seen one of an entry's scripts cannot run it, so a
 runner who could give that third run is handed none of them while someone else can grade.
 
@@ -206,7 +208,7 @@ round are each asked for a baseline with their grade: the unedited corpus's scor
 item. The round's baseline is the item-by-item mean of theirs, and every grade is measured
 against it, whoever made it. A machine that is not yet established is always asked for its
 own: that is how it is checked. If your corpus or your exam differs from the round's, or your
-baseline is further from the others' than 0.04 bits per byte, your result is set aside with a
+baseline is further from the others' than 0.05 bits per byte, your result is set aside with a
 message saying which. That is a broken cache or a different PyTorch, and it does not count
 against you. It is listed on the round's page
 all the same: if honest machines of one kind keep landing there, the tolerance is wrong,

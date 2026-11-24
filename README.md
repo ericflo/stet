@@ -24,7 +24,7 @@ stet submit
 
 `stet run` has no limit and uploads nothing: try as many ideas as you like, then submit
 the ones worth volunteers' GPU time. Without `stet harvest` a practice exam has no fresh
-contrastive comprehension, which is half of an official score. Using a coding agent? Tell it: *Read
+twin-context comprehension, which is half of an official score. Using a coding agent? Tell it: *Read
 https://www.stetrun.com/AGENTS.md and enter Stet.* · [How to enter](https://www.stetrun.com/enter)
 
 ## Lend a GPU
@@ -46,11 +46,13 @@ stet service install      # leave it running: starts with the machine, upgrades 
 - **Draw after commit.** A public randomness beacon picks each round's corpus from the
   newest Common Crawl after entries are locked.
 - **An exam nobody can know.** Each round's exam is made at its draw. Half of the
-  score is fresh contrastive comprehension (`Right − Wrong` against matched distractors from
-  the same source and language) from three hours of the day before, picked by the draw, in every
+  score is fresh twin-context comprehension (the exact same continuation scored under its
+  real opening minus three length-matched wrong openings from the same source and language,
+  in bits per byte) from three hours of the day before, picked by the draw, in every
   language by its share of the crawl. Half is multilingual procedural skills, generated from the round's
-  seed. Every student sits the exam after a fixed 64-step disjoint SFT probe. A curator runs with no
-  network and can add no text of its own, so the exam cannot reach the student through it.
+  seed. Every student sits the exam after a scale-fixed disjoint SFT probe (64 steps at official
+  standard scale). A curator runs with no network and can add no text of its own, so the exam
+  cannot reach the student through it.
 - **Only what tells curators apart.** Every part of the exam was measured before the
   season. Zero raw web-text perplexity: surface style matching cancels out, and nothing is sat that does not count.
 - **Copies only.** Everything the student reads is copied byte for byte from the round's
@@ -84,7 +86,7 @@ reward, info = env.step(edit_script)  # the gain, in bits per byte
 |---|---|
 | `src/stet/` | The harness and CLI (Python); `src/stet/exam/` makes and scores the exam |
 | `server/` | The API and website (Go) |
-| `examples/` | Reference curators, entered by the organisers: `identity`, `english`, `tidy`, `reader` (a 0.6B multilingual vLLM quality rater), and `dclm`, `fineweb-edu`, `heuristic`, `fineweb2` (published recipes, rebuilt); plus `mimic`, entered to show that choosing pages by surface style alone no longer buys the contrastive exam. Pattern, not entered: `agent` (an agent harness and a model served in the sandbox) |
+| `examples/` | Reference curators, entered by the organisers: `identity`, `english`, `tidy`, `reader` (a 0.6B multilingual vLLM quality rater), and `dclm`, `fineweb-edu`, `heuristic`, `fineweb2` (published recipes, rebuilt); plus `mimic`, entered to show that choosing pages by surface style alone no longer buys the twin-context exam. Pattern, not entered: `agent` (an agent harness and a model served in the sandbox) |
 | `cloud/` | `stet-cloud`, for the organisers: rents GPUs from Vast.ai, RunPod, Lium, Clore.ai and Salad to run curators and grade while volunteers are few (Go, built on its own) |
 | `docs/` | [Rules](docs/RULES.md), [design](docs/DESIGN.md), [verifying](docs/VERIFYING.md), [experiments](docs/EXPERIMENTS.md), [API](docs/API.md), [FAQ](docs/FAQ.md), [operating](docs/OPERATING.md), and [the reasoning behind the exam](docs/research/exam-first-principles.md) |
 

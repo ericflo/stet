@@ -77,7 +77,7 @@ def assemble(rnd, scale, snapshots: list[tuple[int, Path]], work: Path, log=prin
     from .decontam import seen
     from .fresh import read_snapshot
     from .fresh.langs import shares
-    from .fresh.select import SHARES, select, select_contrastive
+    from .fresh.select import SHARES, select, select_context
 
     season = rnd.season
     cfg = season.raw["exam"]
@@ -102,7 +102,7 @@ def assemble(rnd, scale, snapshots: list[tuple[int, Path]], work: Path, log=prin
     from .aggregate import plan_of
 
     # Only the kinds of writing the season names: a document of any other kind is not on the exam.
-    chooser = select_contrastive if cfg["fresh"].get("mode") == "contrastive" else select
+    chooser = select_context if cfg["fresh"].get("mode") == "context" else select
     fresh = chooser(docs, rnd.seed, int(cfg["fresh"]["items"]), plan_of(season).parts, per_corner=int(cfg["fresh"]["per_corner"]), shares=mix)
     mark = work / f"seen-{digest(fresh)[:12]}.json"
     if mark.exists():

@@ -78,6 +78,12 @@ def sit_exam(trained: Trained, rnd: Round, scale: Scale, exam) -> dict:
     result["round"], result["exam_sha256"] = rnd.describe(), exam_digest(exam)
     if trained.trained:
         try:
+            import torch
+
+            if trained.model is not None and trained.device is not None and getattr(trained.device, "type", "") == "cuda":
+                first_param = next(trained.model.parameters(), None)
+                if first_param is not None and first_param.device.type != "cuda":
+                    trained.model.to(trained.device)
             t1 = time.time()
             scores = sit(trained.model, exam, trained.enc, rnd.season.eot, scale.ctx, trained.device, floor=rnd.season.answer_floor_bytes)
             result["exam"] = {"items": len(exam), "item_scores": [round(x, 6) for x in scores],
@@ -86,6 +92,10 @@ def sit_exam(trained: Trained, rnd: Round, scale: Scale, exam) -> dict:
         except FloatingPointError as e:
             result["invalid_reason"] = str(e)
     trained.model = None  # the student is done with; its memory goes back
+    if trained.device is not None and getattr(trained.device, "type", "") == "cuda":
+        import torch
+
+        torch.cuda.empty_cache()
     result["finished_at"] = int(time.time())
     return result
 

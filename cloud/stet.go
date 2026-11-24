@@ -103,9 +103,9 @@ type Stet struct {
 	api  string
 	http *http.Client
 	now  func() time.Time
-	// cli is the stet the server hands out, and server the commit it runs, as it last said
-	// (/api/v1/season).
-	cli, server string
+	// cli is the stet the server hands out, server the commit it runs, and season the active
+	// season id, as it last said (/api/v1/season).
+	cli, server, season string
 }
 
 func newStet(api string) *Stet {
@@ -432,6 +432,7 @@ func (s *Stet) vouched(ctx context.Context, op *Key) (map[string]Vouched, error)
 // site is the website whose installer a rented machine runs.
 func (s *Stet) site(ctx context.Context) (string, error) {
 	var out struct {
+		Season string `json:"season"`
 		Site   string `json:"site"`
 		Server string `json:"server"`
 		CLI    struct {
@@ -441,9 +442,23 @@ func (s *Stet) site(ctx context.Context) (string, error) {
 	if err := s.do(ctx, "GET", "/api/v1/season", nil, nil, &out); err != nil {
 		return "", err
 	}
-	s.cli, s.server = out.CLI.Version, out.Server
+	s.cli, s.server, s.season = out.CLI.Version, out.Server, out.Season
 	if out.Site == "" {
 		return "", errors.New("the Stet server did not say where its website is")
 	}
 	return strings.TrimRight(out.Site, "/"), nil
+}
+
+// seasonID asks /api/v1/season for the active season id once (empty if an older server omits it).
+func (s *Stet) seasonID(ctx context.Context) string {
+	if s.season != "" {
+		return s.season
+	}
+	var out struct {
+		Season string `json:"season"`
+	}
+	if s.do(ctx, "GET", "/api/v1/season", nil, nil, &out) == nil && out.Season != "" {
+		s.season = out.Season
+	}
+	return s.season
 }

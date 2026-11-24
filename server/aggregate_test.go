@@ -147,7 +147,7 @@ func TestTheSeasonsGeneratedPartsAreParts(t *testing.T) {
 // What cannot be scored is refused, not scored as nothing.
 func TestTheScoreItemsRefusesWhatItCannotScore(t *testing.T) {
 	plan := &loadSeason().Exam
-	one := []ItemInfo{{"logic", "logic-mc", "en", "prose/choice"}}
+	one := []ItemInfo{{"logic", "logic", "en", "prose/answer"}}
 	shares := map[string]float64{"en": 43}
 	for name, call := range map[string]func() error{
 		"more gains than items": func() error { _, _, err := plan.ScoreItems(one, []float64{0.1, 0.2}, shares); return err },
@@ -155,7 +155,7 @@ func TestTheScoreItemsRefusesWhatItCannotScore(t *testing.T) {
 		"no items":              func() error { _, _, err := plan.ScoreItems(nil, nil, shares); return err },
 		"no shares":             func() error { _, _, err := plan.ScoreItems(one, []float64{0.1}, nil); return err },
 		"a pillar the season does not have": func() error {
-			_, _, err := plan.ScoreItems([]ItemInfo{{"reasoning", "logic-mc", "en", "prose/choice"}}, []float64{0.1}, shares)
+			_, _, err := plan.ScoreItems([]ItemInfo{{"reasoning", "logic", "en", "prose/answer"}}, []float64{0.1}, shares)
 			return err
 		},
 		"a part the season does not name": func() error {
