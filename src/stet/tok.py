@@ -16,6 +16,21 @@ from .spec import Season
 PAT_STR = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}++| ?\p{N}++| ?[^\s\p{L}\p{N}]++|\s++$|\s+(?!\S)|\s"""
 
 
+def _gpt2_unicode_to_byte() -> dict[str, int]:
+    bs = list(range(ord("!"), ord("~") + 1)) + list(range(ord("¡"), ord("¬") + 1)) + list(range(ord("®"), ord("ÿ") + 1))
+    cs = bs[:]
+    n = 0
+    for b in range(256):
+        if b not in bs:
+            bs.append(b)
+            cs.append(256 + n)
+            n += 1
+    return {chr(c): b for b, c in zip(bs, cs, strict=True)}
+
+
+_BYTE_DECODER = _gpt2_unicode_to_byte()
+
+
 class _HFEncoding:
     """Thin adapter exposing tiktoken's encode_ordinary / encode_ordinary_batch over HF `tokenizers`.
 
@@ -37,6 +52,31 @@ class _HFEncoding:
 
     def decode(self, ids: list[int]) -> str:
         return self._dec.decode(ids, skip_special_tokens=False)
+
+    def decode_bytes(self, ids: list[int]) -> bytes:
+        """Recover exact UTF-8 byte length of a ByteLevel BPE token slice without U+FFFD inflation."""
+        out = bytearray()
+        for tid in ids:
+            tok = self._dec.id_to_token(int(tid))
+            if tok is None:
+                return self.decode(ids).encode("utf-8")
+            for ch in tok:
+                b = _BYTE_DECODER.get(ch)
+                if b is None:
+                    return self.decode(ids).encode("utf-8")
+                out.append(b)
+        return bytes(out)
+
+
+def decoded_byte_len(enc, scored_ids: list[int], full_text: str, full_ids: list[int]) -> int:
+    """Exact UTF-8 byte length of `scored_ids` (a prefix of `full_ids` encoding `full_text`)."""
+    if len(scored_ids) >= len(full_ids):
+        return len(full_text.encode("utf-8"))
+    if hasattr(enc, "decode_bytes"):
+        return len(enc.decode_bytes(scored_ids))
+    if hasattr(enc, "decode"):
+        return len(enc.decode(scored_ids).encode("utf-8"))
+    return max(1, round(len(full_text.encode("utf-8")) * len(scored_ids) / max(1, len(full_ids))))
 
 
 def _hf_model_dir(repo: str, revision: str):

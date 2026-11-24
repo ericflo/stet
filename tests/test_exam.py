@@ -46,7 +46,7 @@ def test_a_seed_always_makes_the_same_exam():
     # Pinned: the generated items of a round of the season, from the families its exam names. A
     # change to one of their generators that changes what a seed produces must bump gen.VERSION
     # and this hash, on purpose; so must a change to the parts the season names.
-    assert digest(gen.for_season(SEASON, SEED)) == "ebfb640ff2343c1b1adda85a9664d349b73c9305d3934581353409ba15e1b342"
+    assert digest(gen.for_season(SEASON, SEED)) == "2da8c03e93a79be3e4427aa4c04ae9de62b9d001288e6a567849529e2842b09b"
     assert digest(gen.for_season(SEASON, SEED)) == digest(gen.for_season(SEASON, SEED))
     assert digest(gen.for_season(SEASON, b"other")) != digest(gen.for_season(SEASON, SEED))
 
@@ -55,16 +55,16 @@ def test_a_seed_always_makes_the_same_exam():
 # more): how many, and their digest in order. These are the parts as they were measured before
 # the season, when this copy also made the families that were then taken off the exam.
 MEASURED = {
-    "agent": (304, "3773646221decae4eecc1d753555ab1ed4b3dbca2005de127a2a658e86837d71"),
-    "context": (384, "2672777846b47fc705f5e3a988d4ae3ae075592e1e0b4d69b1ed2188ea8e0ce3"),
-    "logic": (288, "335c14d50e0f9f897b37f7665478855d19da7e605dc68b3159e5faf2016088c7"),
-    "grammar": (198, "f65db2784e54c429a236370262dd654d89b4fd0c963ee30c0278e3ded772e9b6"),
-    "knowledge-even": (200, "e078bacbf93e03582c035adfa125ba28b5961b9f2fa6011569868f1b9a413960"),
-    "arith-shots": (192, "06065801f2520776773aee5998ab3762bc2285f1d0bcdea4746b48638f624b86"),
-    "units-shots": (56, "4e47d7651c5353994f37c35ea5deae56b0f898e7b44493050f4b29154cce792d"),
-    "word-shots": (48, "afb9d841a596a4de112b1f93958fd13aa7b35e44d374158710051a2283b13157"),
-    "algebra-shots": (40, "b4fd7864b9f5b409f3ba8f4483460656b619b9cff9f1e66dcd68eaabdc413d3c"),
-    "algo-shots": (56, "1a2726672066fbb1188c7a24b056dc92649fc5fe696d0d18ec23014eb9d3c128"),
+    "agent": (304, "4ef2d7e0cae34c3c99682bee62c48ab8e33a8c429c4bd4e1d7d811df3f73b9c5"),
+    "context": (384, "b761ed2b258c32735ef2aa948eeea1d6d37c02a2bfa7526eaa82489366c798d9"),
+    "logic": (288, "72b636f37708c2ede30ed26f8ae8983bc8c53df9f995ff9898f2170c3888abda"),
+    "grammar": (198, "674584325b677ea6c6e693e8ad3287d0d6e8e31d57e98f3f5d511dd7d9d9c9e3"),
+    "knowledge-even": (200, "77b8eb1b075ecbade0ee7069e810d6b7bd8c4c8aa62a65ac79c70d81b8ad9ef6"),
+    "arith-shots": (192, "d2db4f0e6ec310566d8b8c19813e0bba4cf84c44a80d83ad22d291975756381d"),
+    "units-shots": (56, "8b971daab4727860c7de0d97b9dde7b9f2448da7624b96f11713ad895debed75"),
+    "word-shots": (48, "1f8b5a9ad4e2c5b1e655886e2a8c0477333fc5dcc76c53e87c812b96a35c8827"),
+    "algebra-shots": (40, "155ec098521ecf06b0c96d7cb5aea1161e352e534a0a5025166ae7e4c3f75511"),
+    "algo-shots": (56, "399159a21ecccadc573094d69533cf9078b9ef8f1e5a528dc91af2e96e0dfe8d"),
 }
 
 
@@ -81,7 +81,7 @@ def test_each_part_is_the_part_that_was_measured_whatever_else_is_on_the_exam():
             got.setdefault(part_of(it), []).append(it)
         return {part: (len(its), digest(its)) for part, its in got.items()}
 
-    assert int(SEASON.raw["exam"]["per_corner"]) == 2 and gen.VERSION == SEASON.raw["exam"]["generator_version"] == 10
+    assert int(SEASON.raw["exam"]["per_corner"]) == 2 and gen.VERSION == SEASON.raw["exam"]["generator_version"] == 11
     assert by_part(gen.for_season(SEASON, SEED)) == MEASURED  # every part the season names, and no other
     assert sum(n for n, _ in MEASURED.values()) == 1766
     # The same from every family this copy can make, and from each family made alone.
@@ -906,6 +906,7 @@ def test_no_item_is_sat_twice_and_an_agents_session_fits_the_students_window():
         assert len({it.id for it in items}) == len(items)  # a corner with little to say draws again
         for it in items:
             if it.source == "gen:agent" and it.kind == "answer":
-                assert len((it.ctx + it.cont).encode()) <= shell.LIMIT, it.corner
+                limit = shell.SESSION_LIMIT if it.corner.endswith("/session") else shell.LIMIT
+                assert len((it.ctx + it.cont).encode()) <= limit, it.corner
             if it.source == "gen:algebra-shots":  # the question, and every example before it
                 assert not re.search(r"(?<![0-9])[01][xy]|\+ -|- -", it.ctx), it.ctx  # x and -x, never 1x or 0x

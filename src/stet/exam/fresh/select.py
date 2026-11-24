@@ -208,15 +208,51 @@ CONTEXT_CONT_MIN = 30
 CONTEXT_CONT_MAX = 400
 CONTEXT_WRONGS = 3
 
-_SENT_SPLIT = re.compile(r"(?<=[.!?…؟۔।]) +|(?<=[。！？｡])\s*")
+# Prose boundaries: sentence-ending punctuation followed by either a space or a paragraph newline
+# (crawl_space normalizes runs of spaces to " " and runs of newlines to "\n"), plus CJK punctuation.
+_PROSE_SEP = re.compile(r"(?<=[.!?…؟۔।])([ \n])|(?<=[。！？｡])([ \n]?)")
+
+
+def _prose_segments(body: str) -> tuple[list[str], list[str]]:
+    """Split prose into (segments, separators) preserving the actual separator (' ', '\\n', or '')."""
+    parts: list[str] = []
+    seps: list[str] = []
+    pos = 0
+    prev_sep = ""
+    for m in _PROSE_SEP.finditer(body):
+        seg = body[pos : m.start()].strip()
+        sep = m.group(1) if m.group(1) is not None else m.group(2)
+        if seg:
+            if parts:
+                seps.append(prev_sep)
+            parts.append(seg)
+            prev_sep = sep
+        pos = m.end()
+    tail = body[pos:].strip()
+    if tail:
+        if parts:
+            seps.append(prev_sep)
+        parts.append(tail)
+    return parts, seps
+
+
+def _join_with_seps(parts: list[str], seps: list[str]) -> str:
+    if not parts:
+        return ""
+    out = [parts[0]]
+    for sep, p in zip(seps, parts[1:], strict=True):
+        out.append(sep)
+        out.append(p)
+    return "".join(out)
 
 
 def _split_continuation(doc: Doc) -> tuple[str, str, str, str] | None:
-    """Split a harvested document into (corner, fmt, ctx, cont) at a clean sentence or line break.
+    """Split a harvested document into (corner, fmt, ctx, cont) at a clean sentence or paragraph break.
 
-    Places space separators at the start of `cont` (never at the end of `ctx`) and newline
-    separators at the end of `ctx` so `encode(ctx) + encode(cont)` matches running-text BPE
-    tokenization without charging a boundary penalty to the first continuation token.
+    Preserves the document's actual boundary separator: space separators go at the start of `cont`
+    (never at the end of `ctx`), newline separators go at the end of `ctx`, and CJK no-space breaks
+    add no extra space, so `encode(ctx) + encode(cont)` matches running-text BPE tokenization
+    without charging a boundary penalty to the first continuation token.
     Returns None when the document has no clean sentence/line boundary or is too short.
     """
     lang = lang_of(doc)
@@ -237,30 +273,38 @@ def _split_continuation(doc: Doc) -> tuple[str, str, str, str] | None:
     title = crawl_space(doc.title).strip() if doc.title else ""
     fmt = "dialogue" if doc.source == "wikipedia-talk" else ("code" if _codeish(body) else "prose")
 
-    # Require a real sentence (or line for code/dialogue) boundary; never cut mid-sentence.
-    parts = [p.strip() for p in (body.split("\n") if fmt in ("code", "dialogue") else _SENT_SPLIT.split(body)) if p.strip()]
+    # Require a real sentence/paragraph (or line for code/dialogue) boundary; never cut mid-sentence.
+    if fmt in ("code", "dialogue"):
+        parts = [p.strip() for p in body.split("\n") if p.strip()]
+        seps = ["\n"] * max(0, len(parts) - 1)
+    else:
+        parts, seps = _prose_segments(body)
     if len(parts) < 2:
         return None
-    sep = "\n" if fmt in ("code", "dialogue") else ("" if lang in ("ja", "zh", "th") else " ")
-    head_parts = [parts[0]]
-    idx = 1
-    while idx < len(parts) - 1 and len(sep.join(head_parts)) < 240:
-        head_parts.append(parts[idx])
-        idx += 1
-    head_text = _clip(sep.join(head_parts), CONTEXT_CTX_MAX)
-    tail_parts = [parts[idx]]
-    idx += 1
-    while idx < len(parts) and len(sep.join(tail_parts)) < 120 and len(sep.join([*tail_parts, parts[idx]])) <= CONTEXT_CONT_MAX:
-        tail_parts.append(parts[idx])
-        idx += 1
-    tail_text = _clip(sep.join(tail_parts), CONTEXT_CONT_MAX)
+
+    split_idx = 1
+    while split_idx < len(parts) - 1 and len(_join_with_seps(parts[:split_idx], seps[: split_idx - 1])) < 240:
+        split_idx += 1
+    head_raw = _join_with_seps(parts[:split_idx], seps[: split_idx - 1])
+    # Trim long openings from the left (_tail) so the end of `head_text` stays on the real boundary.
+    head_text = _tail(head_raw, CONTEXT_CTX_MAX) if len(head_raw) > CONTEXT_CTX_MAX else head_raw
+    boundary_sep = seps[split_idx - 1]
+
+    end_idx = split_idx + 1
+    while (
+        end_idx < len(parts)
+        and len(_join_with_seps(parts[split_idx:end_idx], seps[split_idx : end_idx - 1])) < 120
+        and len(_join_with_seps(parts[split_idx : end_idx + 1], seps[split_idx:end_idx])) <= CONTEXT_CONT_MAX
+    ):
+        end_idx += 1
+    tail_text = _clip(_join_with_seps(parts[split_idx:end_idx], seps[split_idx : end_idx - 1]), CONTEXT_CONT_MAX)
 
     if len(head_text) < 40 or len(tail_text) < CONTEXT_CONT_MIN or head_text == tail_text:
         return None
     base_ctx = f"{title}\n{head_text}" if title else head_text
-    if sep == "\n":
+    if boundary_sep == "\n":
         ctx, cont = base_ctx + "\n", tail_text
-    elif sep == " ":
+    elif boundary_sep == " ":
         ctx, cont = base_ctx, " " + tail_text
     else:
         ctx, cont = base_ctx, tail_text

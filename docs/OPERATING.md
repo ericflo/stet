@@ -305,26 +305,25 @@ examiner's `~/.cache/stet/examine/<round>/` and pass them as `--items` and `--sh
 is checked against the round's `exam_digest` either way.
 
 What a training costs, on the slowest GPU that may run curators. These are worked out from
-the season's floor (`runner.gpu_tokens_per_second`, 80,000 in `stet bench`) and the
-arithmetic of each student, not measured; every plan prints them for what it is about to
-train, and `--speed N` shows them for a card N times the floor. Rented cards are quicker:
-a 3090 trains the standard student in about 18 minutes and a 4090 the large one in about
-an hour, a half and a quarter of the floor's time.
+the season's floor (`runner.gpu_tokens_per_second`, 120,000 in `stet bench`) and the
+arithmetic of each student (`measure.train_seconds` / `hold_seconds`), not measured; every
+plan prints them for what it is about to train, and `--speed N` shows them for a card N times
+the floor. Rented cards are quicker: an RTX 5090 trains the Season 3 standard student in
+about 31 minutes and an RTX 4090 in about 42 minutes.
 
 | student | tokens | GPU hours, one training | held (minutes) | memory for its tokens |
 |---|---|---|---|---|
-| standard at ½× | 80M | 0.31 | 45 | 0.4 GB |
-| standard | 160M | 0.62 | 45 | 0.9 GB |
-| standard at 2× | 320M | 1.25 | 155 | 1.8 GB |
-| standard at 4× | 640M | 2.50 | 250 | 3.6 GB |
-| large at ½× | 320M | 2.27 | 230 | 1.8 GB |
-| large | 640M | 4.53 | 400 | 3.6 GB |
-| large at 2× | 1,280M | 9.06 | 740 | 7.2 GB |
-| large at 4× | 2,560M | 18.13 | 1,420 | 14.3 GB |
+| standard at ½× | 16.4M | 0.72 | 45 | 0.09 GB |
+| standard | 32.8M | 1.44 | 170 | 0.18 GB |
+| standard at 2× | 65.5M | 2.88 | 280 | 0.37 GB |
+| standard at 4× | 131.1M | 5.75 | 495 | 0.73 GB |
+| large at ½× | 65.5M | 2.88 | 280 | 0.37 GB |
+| large | 131.1M | 5.75 | 495 | 0.73 GB |
+| large at 2× | 262.1M | 11.51 | 925 | 1.46 GB |
+| large at 4× | 524.3M | 23.01 | 1,440 | 2.93 GB |
 
-Rent for the longest hold of what is posted (`stet-cloud --long-farm 1420` for a curve at
-large), and give the large student at 4× a machine with more than the floor's 16 GB of
-memory: its tokens alone take 14.
+Rent for the longest hold of what is posted (`stet-cloud --long-farm 1440` for a curve at
+large, matching the 24-hour `large-x4` lease cap).
 
 ### The unedited curve
 
@@ -436,7 +435,7 @@ The season's table is decided by finals ([the rules](RULES.md#finals)). The comm
    items that corpus holds, and runs every finalist, the lot's pick and every yardstick on
    it in the sandbox, with the large size's 4,800 s.
 7. **Train the students**: `stet finals farm` posts them and follows them. Rent for them
-   with `stet-cloud --long-farm 1420`.
+   with `stet-cloud --long-farm 1440`.
 8. **The table**: `stet finals table`. It can be run while students are still out: it says
    what is missing and that the table is not final. It writes what is published to
    `finals-<season>/published/`: the plan (the frozen board, the lot's beacon round and its

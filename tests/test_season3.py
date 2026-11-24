@@ -792,3 +792,128 @@ def test_season2_practice_replay_aggregates_with_s2_plan_in_cli_and_gym(corpus, 
     e.reset(0)
     reward, info = e.step([0])
     assert reward == pytest.approx(0.2) and info["gain_by_pillar"] == {"agents": pytest.approx(0.3), "logic": pytest.approx(0.1)}
+
+
+def test_season3_has_no_passage_items_and_sessions_are_conditional_answers():
+    """Item 1 (P1): Season 3 v11 converts agent/*/session to conditional kind='answer' so zero
+    whole-transcript passage items remain in the Season 3 exam, while Season 2 v9 stays frozen."""
+    from stet.exam.aggregate import part_of, stratum_key
+
+    s3 = load_season("s3")
+    rnd = practice_round(s3, 0)
+    items = gen.for_season(s3, rnd.seed)
+    assert all(it.kind != "passage" for it in items)
+    sessions = [it for it in items if it.corner.endswith("/session")]
+    assert len(sessions) == 16
+    assert all(it.kind == "answer" and it.ctx and it.cont for it in sessions)
+    assert {stratum_key(it) for it in items if part_of(it) == "agent" and it.lang == "en"} == {
+        "logs/answer",
+        "structured/answer",
+    }
+
+
+def test_sft_probe_excludes_exact_scored_exam_questions_including_booleans():
+    """Item 2 (P2): Even small finite generators like 3-term Booleans (which previously collided on
+    s3-p00004 and s3-p00031) must never overlap between the round's SFT probe and scored exam."""
+    s3 = load_season("s3")
+    for seed_i in (0, 4, 31):
+        rnd = practice_round(s3, seed_i)
+        exam_pairs = {(it.ctx, it.cont) for it in gen.for_season(s3, rnd.seed) if it.kind == "answer"}
+        probe = sft.build_sft_examples(rnd.seed, n=256, season=s3)
+        assert len(probe) == 256
+        assert not (set(probe) & exam_pairs), f"overlap on s3-p{seed_i:05d}: {set(probe) & exam_pairs}"
+
+
+def test_context_scoring_normalizes_by_scored_prefix_bytes_when_truncated(monkeypatch):
+    """Item 3 (P2): When a long multilingual continuation exceeds the half-window token cap,
+    twin-context scoring must divide by the byte length of the scored prefix, not the full text."""
+    from stet.exam import score as exam_score
+
+    # 1 char = 1 token mock encoding where each char is 3 UTF-8 bytes (Santali / Ol Chiki style).
+    class ThreeByteCharEnc:
+        def encode_ordinary(self, text: str) -> list[int]:
+            return [ord(ch) for ch in text]
+
+        def decode_bytes(self, ids: list[int]) -> bytes:
+            return "".join(chr(i) for i in ids).encode("utf-8")
+
+    # ctx=16 -> max continuation tokens = (16 + 1) // 2 = 8 tokens = 24 bytes (full cont is 20 chars = 60 bytes).
+    full_cont = "ᱥ" * 20
+    it = Item(
+        kind="context",
+        corner="fresh/wikipedia/sat/-/article-ctx",
+        fmt="prose",
+        lang="sat",
+        source="wikipedia:1",
+        ctx="Title\nOpening sentence.",
+        cont=full_cont,
+        wrongs=("Other\nWrong opening.",),
+    )
+    # Stub nll so wrong - real = LN2 * 24 nats -> should equal exactly 1.0 bit per scored byte (24 bytes),
+    # NOT 24 / 60 = 0.4 bits per full-continuation byte!
+    monkeypatch.setattr(exam_score, "nll", lambda model, seqs, device, batch=32: [10.0, 10.0 + exam_score.LN2 * 24.0])
+    got = exam_score.sit(None, [it], ThreeByteCharEnc(), eot=0, ctx=16, device=None, floor=1)
+    assert got[0] == pytest.approx(1.0)
+
+
+def test_prose_paragraph_boundaries_accepted_and_separator_preserved():
+    """Item 4 (P2): Sentence-ending punctuation followed by a paragraph newline must be accepted as
+    a clean prose split and preserve '\\n' at the end of ctx (with no synthetic leading space on cont)."""
+    from stet.exam.fresh import Doc
+    from stet.exam.fresh.select import _split_continuation
+
+    doc_nl = Doc(
+        source="wikipedia-added",
+        id="p1",
+        lang="en",
+        url="https://example.invalid/p1",
+        license="CC-BY-SA",
+        published=0,
+        title="Example",
+        text=(
+            "First paragraph has one long sentence describing the subject in sufficient detail.\n"
+            "Second paragraph continues the explanation with additional context and facts."
+        ),
+    )
+    res_nl = _split_continuation(doc_nl)
+    assert res_nl is not None
+    _, fmt, ctx, cont = res_nl
+    assert fmt == "prose"
+    assert ctx.endswith(".\n")
+    assert cont.startswith("Second paragraph") and not cont.startswith(" ")
+
+    doc_sp = Doc(
+        source="wikipedia-added",
+        id="p2",
+        lang="en",
+        url="https://example.invalid/p2",
+        license="CC-BY-SA",
+        published=0,
+        title="Example",
+        text=(
+            "First sentence has enough detail to exceed the opening minimum length cleanly. "
+            "Second sentence continues on the same line after a regular space."
+        ),
+    )
+    res_sp = _split_continuation(doc_sp)
+    assert res_sp is not None
+    _, fmt2, ctx2, cont2 = res_sp
+    assert fmt2 == "prose"
+    assert ctx2.endswith(".") and not ctx2.endswith(" ")
+    assert cont2.startswith(" Second sentence")
+
+
+def test_reader_vllm_memory_utilization_respects_sandbox_allowance_on_large_gpus():
+    """Item 7 (P2): On 48 GiB and 80 GiB GPUs, vLLM's gpu_memory_utilization must stay inside
+    Season 3's 22 GiB sandbox allowance rather than requesting 0.65 * physical VRAM."""
+    root = ROOT / "examples" / "reader"
+    spec = importlib.util.spec_from_file_location("reader_util_test", root / "curator.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    for total_gb in (24.0, 32.0, 48.0, 80.0):
+        util = mod._vllm_gpu_memory_utilization(22.0, total_gb)
+        assert 0.1 <= util <= 0.65
+        assert util * total_gb <= 20.1, f"on {total_gb} GiB GPU, util={util} requests {util * total_gb:.1f} GiB > 20 GiB"
+    assert mod._vllm_gpu_memory_utilization(22.0, 48.0) < 0.45
+    assert mod._vllm_gpu_memory_utilization(0.0, 48.0) == pytest.approx(0.65)

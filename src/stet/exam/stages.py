@@ -812,7 +812,8 @@ def _audit_report(args, season, work: Path, key) -> None:
                 say(f"the server could not be asked for what is new ({e}); this is what was collected before")
     from .aggregate import plan_of
 
-    table_, stats, why = item_table(sat, plan=plan_of(season)), {}, {}
+    plan_ = plan_of(season)
+    table_, stats, why = item_table(sat, plan=plan_), {}, {}
     for scale, bdir, _, _, who in batches:
         unedited = scores(bdir, UNEDITED)
         if not unedited:
@@ -836,7 +837,7 @@ def _audit_report(args, season, work: Path, key) -> None:
     # An order is compared between sizes, so a curator counts where it has a student at every size.
     for scale, *_ in batches:
         curators, unedited = stats[scale.name]
-        stats[scale.name] = measure.size_stats(table_, shares, unedited, {n: s for n, s in curators.items() if n not in left_out})
+        stats[scale.name] = measure.size_stats(table_, shares, unedited, {n: s for n, s in curators.items() if n not in left_out}, plan=plan_)
     rep = measure.audit(stats)
     whole = len(_items_of((work / plan["round"] / "exam.jsonl.zst").read_bytes()))
     rep.update(round=plan["round"], exam_digest=plan["exam_digest"], items=len(sat), items_digest=digest(sat), dropped=whole - len(sat), left_out=left_out,
@@ -1200,7 +1201,9 @@ def _finals_table(args, season, work: Path, key) -> None:
                                      "languages": b["shares"], "unedited": unedited, "students": students, "scripts": {w["name"]: b["who"][w["name"]] for w in runs},
                                      "curve": {multiple_text(m): v for m, v in curve.items()}})
         (pub / "exam.jsonl").write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in public_items(b["sat"])))
-    out = finals.table(rounds, {w["name"]: w["role"] for w in runs if w["name"] not in waiting})
+    from .aggregate import plan_of
+
+    out = finals.table(rounds, {w["name"]: w["role"] for w in runs if w["name"] not in waiting}, plan=plan_of(season))
     for r in out["rows"]:
         if notes.get(r["name"]):
             r["note"] = "; ".join(notes[r["name"]])

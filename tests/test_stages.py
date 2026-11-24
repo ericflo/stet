@@ -673,3 +673,38 @@ def test_the_organisers_curators_are_those_the_board_marks_and_the_list_of_verif
 def test_the_lot_is_not_drawn_from_a_beacon_round_that_has_not_been_emitted():
     with pytest.raises(stages.Stop, match="the lot is drawn after that"):
         stages.fetch_beacon(SEASON, SEASON.beacon_round_at(int(time.time()) + 3600))  # and no relay is asked
+
+
+def test_season2_audit_and_finals_pass_s2_plan_with_knowledge_part(tmp_path):
+    """Item 8 (P2): Season 2 uses part 'knowledge' (Season 3 uses 'knowledge-even'); audit and
+    finals aggregation must pass plan_of(season) so Season 2 tables do not raise ValueError."""
+    from stet.exam import finals, measure
+    from stet.exam.aggregate import item_table, plan_of
+
+    s2 = load_season("s2")
+    plan_s2 = plan_of(s2)
+    items = [
+        Item(kind="answer", corner="knowledge/en/capital", fmt="prose", lang="en", source="gen:knowledge", ctx="Capital of France?", cont=" Paris"),
+        Item(kind="passage", corner="fresh/ccnews/en/0", fmt="prose", lang="en", source="ccnews:1", text="Fresh news article text."),
+    ]
+    tbl = item_table(items, plan=plan_s2)
+    shares = {"en": 100.0}
+    uned = [[-3.0, -3.0], [-3.0, -3.0]]
+    curators = {"a": [[-2.9, -2.9], [-2.9, -2.9]], "b": [[-2.8, -2.8], [-2.8, -2.8]], "c": [[-2.7, -2.7], [-2.7, -2.7]]}
+
+    # Audit path (measure.size_stats with explicit s2 plan).
+    st = measure.size_stats(tbl, shares, uned, curators, plan=plan_s2)
+    assert set(st["measures"]) == {"score", "pillar:knowledge", "pillar:news"}
+    assert st["gains"]["score"]["c"] == pytest.approx(0.3)
+
+    # Finals path (finals.table with explicit s2 plan).
+    rounds = [{"round": "s2-o00001", "table": tbl, "shares": shares, "unedited": uned, "students": curators, "curve": {}}]
+    out = finals.table(rounds, {"a": "finalist", "b": "finalist", "c": "finalist"}, plan=plan_s2)
+    assert [r["name"] for r in out["rows"]] == ["c", "b", "a"]
+
+    # Confirm stages.py actually passes plan=plan_of(season) in both _audit_report and _finals_table.
+    from pathlib import Path
+
+    src = Path(stages.__file__).read_text()
+    assert "measure.size_stats(" in src and "plan=plan_" in src
+    assert "finals.table(" in src and "plan=plan_of(season)" in src

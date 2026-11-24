@@ -270,7 +270,7 @@ def run_sft_probe(
     grad_clip = float(season.train_cfg.get("grad_clip", 1.0))
     eot = season.eot
 
-    examples = build_sft_examples(seed_bytes, n=n_ex)
+    examples = build_sft_examples(seed_bytes, n=n_ex, season=season)
     encoded: list[tuple[list[int], int]] = []
     for prompt, comp in examples:
         a = [eot] + encode_one(enc, prompt)

@@ -73,7 +73,7 @@
   },
   "exam": {
     "about": "Zero raw web-text perplexity. Half fresh twin-context comprehension across every crawl language published in the day before the draw (same continuation scored under its real opening vs same-source wrong openings, in bits per byte), half seeded multilingual procedural skills, all sat after a scale-fixed disjoint multilingual SFT probe.",
-    "generator_version": 10,
+    "generator_version": 11,
     "per_corner": 2,
     "more": {
       "agent": 4,

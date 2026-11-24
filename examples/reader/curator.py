@@ -208,6 +208,21 @@ def _build_prompt_ids(tok, head: str, max_prompt_tokens: int, prefix_ids: list[i
     return prefix_ids + body_ids + suffix_ids
 
 
+def _vllm_gpu_memory_utilization(allow_gb: float, total_gb: float, *, headroom_gb: float = 2.0, cap: float = 0.65) -> float:
+    """Compute vLLM's gpu_memory_utilization from the sandbox allowance and physical VRAM.
+
+    vLLM reserves `gpu_memory_utilization * total_device_vram`, so a fixed 0.65 requests 31.2 GiB
+    on a 48 GiB GPU and exceeds Season 3's 22 GiB sandbox allowance. Capping by `(allow_gb - headroom)
+    / total_gb` keeps vLLM comfortably inside the sandbox budget on every card size (24..80+ GiB).
+    """
+    if total_gb <= 0:
+        return cap
+    if allow_gb > 0:
+        budget = max(1.0, min(allow_gb - headroom_gb, total_gb * cap))
+        return round(max(0.1, min(cap, budget / total_gb)), 3)
+    return cap
+
+
 def _score_vllm(task: Task, where: str, cands: list[tuple[float, int, int, str]], scores: dict[int, float]) -> bool:
     """Fast path on NVIDIA Linux using vLLM with automatic prefix caching.
 
@@ -228,11 +243,16 @@ def _score_vllm(task: Task, where: str, cands: list[tuple[float, int, int, str]]
         return False
 
     try:
+        try:
+            total_gb = torch.cuda.mem_get_info()[1] / (1 << 30)
+        except Exception:
+            total_gb = 0.0
+        util = _vllm_gpu_memory_utilization(float(getattr(task, "gpu_memory_gb", 0.0) or 0.0), total_gb)
         llm = LLM(
             model=where,
             dtype="bfloat16",
             max_model_len=MAX_PROMPT_TOKENS + 16,
-            gpu_memory_utilization=0.65,
+            gpu_memory_utilization=util,
             enable_prefix_caching=True,
             enforce_eager=False,
             disable_log_stats=True,

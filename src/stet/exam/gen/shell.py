@@ -1,5 +1,7 @@
 """An agent at work: shell sessions and JSON tool calls in a small simulated project, with the
-results worked out here. The student predicts what comes back, or reads a whole session.
+results worked out here. The student predicts what comes back (in Season 1-2, session corners
+read a whole transcript; from generator version 11 / Season 3, every corner including multi-step
+sessions asks for the conditional output of the final command or tool call).
 
 Every answer follows from the session so far: a file is listed, shown or written before anything
 is asked about it, so what comes back can be worked out and cannot be guessed or learned by heart.
@@ -180,34 +182,71 @@ def _lines(steps, style: str) -> str:
 
 
 # An answer's session and the answer together, in bytes. The student reads 512 tokens at a
-# time, and a session it cannot see the start of may ask for what it was never shown. These
-# sessions come to 0.71 tokens a byte at most, so 640 bytes is under the window with room.
+# time (1024 in Season 3), and a session it cannot see the start of may ask for what it was
+# never shown. Single-task sessions come to 0.71 tokens a byte at most, so 640 bytes fits 512
+# tokens with room; multi-step Season 3 sessions cap at 1,400 bytes to fit the 1,024-token window.
 LIMIT = 640
+SESSION_LIMIT = 1400
 
 
-def make(rng: Rng, corner: str, *, version: int = 10) -> Item:
+def make(rng: Rng, corner: str, *, version: int = 11) -> Item:
     """One item for a corner: the first of a few draws that fits the student's window, the
-    later ones without the aside. Version 9 (Season 2) kept 6 retries; version 10+ retries up to 31."""
-    it = _make(rng, corner, True)
+    later ones without the aside. Version 9 (Season 2) kept 6 retries; version 10+ retries up to 31.
+    Version 11+ (Season 3) scores multi-step session corners as conditional answers."""
+    it = _make(rng, corner, True, version=version)
     tries = 7 if version < 10 else 32
+    limit = SESSION_LIMIT if corner.endswith("/session") and version >= 11 else LIMIT
     for again in range(1, tries):
-        if it.kind != "answer" or len((it.ctx + it.cont).encode()) <= LIMIT:
+        if it.kind != "answer" or len((it.ctx + it.cont).encode()) <= limit:
             break
-        it = _make(rng.child(f"shorter{again}"), corner, again < 2)
+        it = _make(rng.child(f"shorter{again}"), corner, again < 2, version=version)
     return it
 
 
-def _make(rng: Rng, corner: str, asides: bool) -> Item:
+def _make(rng: Rng, corner: str, asides: bool, *, version: int = 11) -> Item:
     _, lang, style, c = corner.split("/")
     p = Project(rng, lang)
     head = f"{p.user}@{p.name}:~/{p.name}\n" if style == "shell" else f"# agent log: {p.name}\n"
     pool = COMMANDS if style == "shell" else TOOLS
     if c == "session":
+        chosen = rng.sample(pool, 3)
         steps = []
-        for k in rng.sample(pool, 3):
+        for k in chosen[:-1]:
             before, ask = _steps(p, rng, k)
             steps += before + [ask]
-        return Item(kind="passage", corner=corner, fmt="logs", lang="en", source=f"gen:{NAME}", text=(head + _lines(steps, style)).rstrip("\n"))
+        last_before, last_ask = _steps(p, rng, chosen[-1])
+        if version < 11:
+            return Item(
+                kind="passage",
+                corner=corner,
+                fmt="logs",
+                lang="en",
+                source=f"gen:{NAME}",
+                text=(head + _lines(steps + last_before + [last_ask], style)).rstrip("\n"),
+            )
+        prior = steps + last_before
+        if style == "shell":
+            cmd, res = _shell(last_ask)
+            return Item(
+                kind="answer",
+                corner=corner,
+                fmt="logs",
+                lang="en",
+                source=f"gen:{NAME}",
+                ctx=f"{head}{_lines(prior, style)}$ {cmd}\n",
+                cont=res,
+            )
+        full = _json({"result": last_ask[2]})
+        cut = len('{"result": ')
+        return Item(
+            kind="answer",
+            corner=corner,
+            fmt="structured",
+            lang="en",
+            source=f"gen:{NAME}",
+            ctx=f"{head}{_lines(prior, style)}{_json(last_ask[1])}\n{full[:cut].rstrip()}",
+            cont=" " + full[cut:],
+        )
     # Something else first, half the time, so that the answer is not always in the line before.
     aside = []
     if rng.chance(1, 2) and asides:

@@ -551,9 +551,16 @@ func (a *App) bringForward(ctx context.Context) (*Round, error) {
 	return &out, err
 }
 
-func hasWaitingEntrant(entrants []entrant) bool {
-	for _, e := range entrants {
-		if e.Why == "new" || e.Why == "qualifying" {
+// hasEligibleWaiting reports whether any editor eligible for a draw at cutoff is waiting
+// to start (queued before cutoff - commitMargin) or still finishing its qualifying rounds
+// (running with fewer than QualifyRounds completed), independent of whether it already holds
+// a place on the ladder (e.g. when RatedRounds < QualifyRounds).
+func (a *App) hasEligibleWaiting(s *State, cutoff int64) bool {
+	for _, e := range s.Editors {
+		switch {
+		case e.Status == "running" && roundsRun(s, e.ID) < a.cfg.QualifyRounds:
+			return true
+		case e.Status == "queued" && e.CreatedAt <= cutoff-commitMargin:
 			return true
 		}
 	}
@@ -604,7 +611,7 @@ func (a *App) maybeDraw(ctx context.Context, force bool) error {
 				a.reschedule(tx, cur, a.laterSlot())
 			}
 			problem = errors.New("no curators are waiting to run")
-		case a.onDemandOnly() && !force && !hasWaitingEntrant(a.selectEntrants(s, r.DrawAt, r.Idx)):
+		case a.onDemandOnly() && !force && !a.hasEligibleWaiting(s, r.DrawAt):
 			// In on-demand-only mode do not draw a round for the ladder alone if the sole waiting
 			// entry withdrew or resubmitted inside the last commitMargin seconds.
 			if a.waiting(s) {
@@ -648,14 +655,18 @@ func (a *App) maybeDraw(ctx context.Context, force bool) error {
 		entrants := a.selectEntrants(s, cur.DrawAt, cur.Idx)
 		if len(entrants) == 0 {
 			if a.onDemandOnly() {
-				tx.dropRound(cur)
+				if a.waiting(s) {
+					a.reschedule(tx, cur, a.season.nextGrid(now()+drawNotice))
+				} else {
+					tx.dropRound(cur)
+				}
 			} else {
 				a.reschedule(tx, cur, a.laterSlot())
 			}
 			problem = errors.New("no curators are waiting to run")
 			return nil
 		}
-		if a.onDemandOnly() && !force && !hasWaitingEntrant(entrants) {
+		if a.onDemandOnly() && !force && !a.hasEligibleWaiting(s, cur.DrawAt) {
 			if a.waiting(s) {
 				a.reschedule(tx, cur, a.season.nextGrid(now()+drawNotice))
 			} else {

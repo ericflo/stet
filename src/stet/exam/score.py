@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import math
 
-from ..tok import encode_one
+from ..tok import decoded_byte_len, encode_one
 from .items import Item
 
 LN2 = math.log(2)
@@ -160,9 +160,19 @@ def sit(model, items: list[Item], enc, eot: int, ctx: int, device, batch: int = 
             scores.append(-sum(losses[a:b]) / LN2 / max(floor, len(it.cont.encode())))
         elif it.kind == "context":
             # Extra bits per byte saved on the exact same continuation by its real context vs
-            # the mean of matched wrong contexts from the same source and language.
+            # the mean of matched wrong contexts from the same source and language. Normalize
+            # by the byte length of the scored prefix (which equals len(cont.encode()) whenever
+            # the continuation fits inside the half-window token cap).
             mean_wrong = sum(losses[a + 1 : b]) / max(1, b - a - 1)
-            scores.append((mean_wrong - losses[a]) / LN2 / max(floor, len(it.cont.encode())))
+            ids_a, first_a = seqs[a]
+            scored_ids = ids_a[first_a:]
+            max_cont = max(1, (ctx + 1) // 2)
+            if len(scored_ids) < max_cont:
+                cont_bytes = len(it.cont.encode())
+            else:
+                full_ids = encode_one(enc, it.cont)
+                cont_bytes = decoded_byte_len(enc, scored_ids, it.cont, full_ids)
+            scores.append((mean_wrong - losses[a]) / LN2 / max(floor, cont_bytes))
         else:
             scores.append((losses[a + 1] - losses[a]) / LN2 / max(floor, len(it.good.encode())))
     # A student whose arithmetic overflowed has no score: said here, so that no grade is sent with NaN in it.

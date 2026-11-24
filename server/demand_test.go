@@ -750,3 +750,101 @@ func TestInstallerFallbacksUsePinnedTrainExtra(t *testing.T) {
 		}
 	}
 }
+
+// A curator that reaches the ladder before finishing its qualifying rounds (RatedRounds <
+// QualifyRounds) is deduplicated under the "ladder" label by selectEntrants. On the ordinary
+// due-draw path in on-demand-only mode, maybeDraw must check eligibility from editor state
+// rather than the display label, so the curator still gets its remaining qualifying rounds.
+func TestOnDemandDrawsQualifyingCuratorAlreadyOnLadder(t *testing.T) {
+	w, anchor := demandWorld(t, func(c *Config) {
+		c.RoundInterval = 0
+		c.RoundMinGap = 0
+		c.RatedRounds = 1
+		c.QualifyRounds = 3
+	})
+	alice := w.join("alice", nil)
+	edID := w.submit(alice, "fast-ladder", "print(1)")
+	w.claim(anchor, true)
+	makeDue := func() {
+		t.Helper()
+		w.app.st.update(context.Background(), func(tx *Tx) error {
+			r := tx.s.roundWithStatus("scheduled")
+			if r == nil {
+				t.Fatal("expected a scheduled round")
+			}
+			r.DrawAt = now() - 5
+			r.DrandRound = w.app.season.Beacon.drandRoundAt(r.DrawAt)
+			tx.saveRound(r)
+			for _, e := range tx.s.Editors {
+				if e.Status == "queued" && e.CreatedAt > r.DrawAt-commitMargin {
+					e.CreatedAt = r.DrawAt - commitMargin - 10
+					tx.saveEditor(e)
+				}
+			}
+			return nil
+		})
+	}
+
+	makeDue()
+	// Draw and settle round 1 via the ordinary due-draw path (force=false).
+	ctx := context.Background()
+	if err := w.app.maybeDraw(ctx, false); err != nil {
+		t.Fatalf("round 1 ordinary draw: %v", err)
+	}
+	openIdx := func() (idx int) {
+		w.app.st.view(func(s *State) {
+			if r := s.roundWithStatus("open"); r != nil {
+				idx = r.Idx
+			}
+		})
+		return idx
+	}
+	r1 := openIdx()
+	if r1 == 0 {
+		t.Fatal("round 1 did not open")
+	}
+	w.exam(r1)
+	for step := 0; step < 10; step++ {
+		c := w.claim(anchor, true)
+		if c.Job == nil {
+			break
+		}
+		if c.Job.Kind == "edit" {
+			if code, status := w.edit(anchor, c, "{\"d\": 0}\n"); code != 200 {
+				t.Fatalf("edit HTTP %d %s", code, status)
+			}
+		} else if code, status := w.report(anchor, c, 3.0); code != 200 {
+			t.Fatalf("report HTTP %d %s", code, status)
+		}
+	}
+	if w.settled(r1) != 1 {
+		t.Fatalf("round 1 did not settle (settled=%d)", w.settled(r1))
+	}
+
+	// Verify the curator is already on the ladder after 1 round AND still waiting for rounds 2..3.
+	var onLadder, hasWaiting bool
+	w.app.st.view(func(s *State) {
+		b := w.app.computeBoard(s)
+		for _, row := range b.Ladder {
+			if row.ID == edID {
+				onLadder = true
+			}
+		}
+		hasWaiting = w.app.waiting(s)
+	})
+	if !onLadder || !hasWaiting {
+		t.Fatalf("expected curator on ladder and still qualifying: onLadder=%v waiting=%v", onLadder, hasWaiting)
+	}
+
+	// Advance past round 2's scheduled draw and invoke the ordinary due-draw path (force=false).
+	w.claim(anchor, true)
+	makeDue()
+	if err := w.app.maybeDraw(ctx, false); err != nil {
+		t.Fatalf("round 2 ordinary due draw must not stall for a qualifying curator already on the ladder: %v", err)
+	}
+	r2 := openIdx()
+	if r2 <= r1 {
+		t.Fatalf("round 2 did not open (got %d, r1=%d)", r2, r1)
+	}
+	w.check()
+}
