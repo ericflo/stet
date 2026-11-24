@@ -526,3 +526,27 @@ func TestAMachineThatMayNotRunCuratorsMakesWayForOneThatMay(t *testing.T) {
 		t.Fatalf("ended %s", handles(d.End))
 	}
 }
+
+// During the 6-16m notice before an on-demand scheduled draw, up to keptNearDraw warm runners
+// are kept alive (so the runner that triggered the draw isn't killed before the draw fires),
+// while extra idle GPUs wind down immediately; once no draw is scheduled (quiet), all GPUs end.
+func TestWarmRunnersAreKeptAcrossImminentDrawNoticeAndEndedWhenQuiet(t *testing.T) {
+	p := testPolicy()
+	p.Edits, p.MaxWorkers = true, 6
+	w := &Work{Runners: 1, NextDrawAt: t0.Add(10 * time.Minute).Unix()}
+	ws := pool(w, "waiting", "waiting", "waiting", "free")
+	ws[0].Speed, ws[1].Speed, ws[2].Speed = 1.0, 2.5, 1.8
+	if d := p.decide(w, ws, 0, t0); handles(d.End) != "stet-rp-01" {
+		t.Fatalf("10m before scheduled draw, want only slowest extra ended; ended %s", handles(d.End))
+	}
+	// Once no draw is scheduled (NextDrawAt == 0, quiet), all idle GPUs end immediately.
+	w.NextDrawAt = 0
+	if d := p.decide(w, ws, 0, t0); handles(d.End) != "stet-rp-01,stet-rp-02,stet-rp-03" {
+		t.Fatalf("when quiet, want all idle GPUs ended; ended %s", handles(d.End))
+	}
+	// If rounds are paused, even an imminent draw keeps nobody.
+	w.NextDrawAt, w.Paused = t0.Add(10*time.Minute).Unix(), t0.Unix()
+	if d := p.decide(w, ws, 0, t0); handles(d.End) != "stet-rp-01,stet-rp-02,stet-rp-03" {
+		t.Fatalf("when paused, want all idle GPUs ended; ended %s", handles(d.End))
+	}
+}

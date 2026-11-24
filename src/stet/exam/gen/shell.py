@@ -189,7 +189,7 @@ def make(rng: Rng, corner: str) -> Item:
     """One item for a corner: the first of a few draws that fits the student's window, the
     later ones without the aside."""
     it = _make(rng, corner, True)
-    for again in range(1, 7):
+    for again in range(1, 32):
         if it.kind != "answer" or len((it.ctx + it.cont).encode()) <= LIMIT:
             break
         it = _make(rng.child(f"shorter{again}"), corner, again < 2)

@@ -1,6 +1,6 @@
 {
  "assets": {
-  "max_bytes": 4294967296,
+  "max_bytes": 10737418240,
   "max_files": 32
  },
  "baselines": {
@@ -22,19 +22,20 @@
   "key_bytes": 64,
   "min_letters": 38
  },
- "digest": "8e2ba3839dfced8ed0bb5d4040116aea0fec1e2634e54ed93dbc2129254174b9",
+ "digest": "4e30fe99fecd4db8203b9cac7f349085772185b3bb7bcad164a6315237e01aaa",
  "draw_grid_seconds": 600,
  "environment": {
   "also": {
-   "annotated-doc": "0.0.6",
+   "annotated-doc": "0.0.7",
    "annotated-types": "0.8.0",
    "anyio": "4.16.0",
-   "certifi": "2026.10.23",
-   "charset-normalizer": "3.5.2",
+   "certifi": "2026.11.20",
+   "charset-normalizer": "3.5.3",
    "click": "8.5.1",
-   "cloudpickle": "3.1.2",
+   "cloudpickle": "3.1.3",
    "defusedxml": "0.7.1",
-   "filelock": "4.2.11",
+   "filelock": "4.3.1",
+   "fla-core": "0.6.0",
    "flatbuffers": "25.12.19",
    "fsspec": "2026.9.0",
    "h11": "0.16.0",
@@ -44,40 +45,42 @@
    "huggingface-hub": "2.4.0",
    "idna": "3.20",
    "jiter": "0.19.0",
-   "llvmlite": "0.50.0",
+   "llvmlite": "0.47.0",
    "markdown-it-py": "4.3.0",
    "markupsafe": "3.0.4",
    "mdurl": "0.1.2",
    "mpmath": "1.3.0",
    "narwhals": "2.29.0",
    "nodejs-wheel-binaries": "24.19.0",
-   "opentelemetry-api": "1.45.2",
-   "packaging": "26.3",
+   "packaging": "26.4",
    "polars-runtime-32": "2.1.0",
-   "pybind11": "3.1.0",
-   "pydantic": "2.14.3",
-   "pydantic-core": "2.50.4",
+   "pydantic": "2.14.4",
+   "pydantic-core": "2.50.5",
    "pygments": "2.21.0",
    "python-dateutil": "4.0.0",
-   "pyyaml": "6.0.3",
+   "pyyaml": "6.0.4",
    "requests": "2.34.2",
    "rich": "15.0.0",
-   "setuptools": "84.2.1",
+   "setuptools": "80.10.2",
    "shellingham": "1.5.4",
-   "smart-open": "9.0.4",
+   "smart-open": "10.0.0",
    "sniffio": "1.3.1",
    "starlette": "1.10.0",
    "sympy": "1.14.0",
    "threadpoolctl": "3.8.0",
    "truststore": "0.10.5",
-   "typer": "0.29.1",
+   "typer": "0.29.2",
    "typing-extensions": "4.16.0",
    "typing-inspection": "0.4.5",
    "tzdata": "2026.6",
    "urllib3": "2.8.0",
-   "wcwidth": "0.9.4",
+   "wcwidth": "0.9.5",
    "wrapt": "2.5.2"
   },
+  "cuda_linux_only": [
+   "liger-kernel",
+   "vllm"
+  ],
   "linux_x86_64_only": [
    "fasttext-numpy2"
   ],
@@ -88,13 +91,15 @@
    "einops": "0.8.2",
    "emoji": "2.16.0",
    "faiss-cpu": "1.16.0",
-   "fastapi": "0.163.2",
+   "fastapi": "0.136.3",
    "fasttext-numpy2": "0.10.4",
    "fasttext-predict": "0.9.2.4",
+   "flash-linear-attention": "0.6.0",
    "ftfy": "6.3.1",
    "gensim": "4.4.0",
    "jinja2": "3.1.6",
    "joblib": "1.6.0",
+   "liger-kernel": "0.8.5",
    "lightgbm": "4.7.0",
    "lingua-language-detector": "2.2.0",
    "mmh3": "5.3.1",
@@ -102,10 +107,10 @@
    "networkx": "3.7",
    "nltk": "3.10.4",
    "nodejs-wheel": "24.19.0",
-   "numba": "0.68.1",
-   "numpy": "2.5.5",
+   "numba": "0.65.0",
+   "numpy": "2.4.6",
    "onnxruntime": "1.32.0",
-   "openai": "3.53.0",
+   "openai": "3.58.0",
    "orjson": "3.13.0",
    "pandas": "3.1.1",
    "peft": "0.21.3",
@@ -124,11 +129,12 @@
    "sentencepiece": "0.2.3",
    "tiktoken": "0.14.0",
    "tokenizers": "0.23.3",
-   "torch": "2.15.0",
+   "torch": "2.14.0",
    "tqdm": "4.70.1",
-   "transformers": "5.23.0",
+   "transformers": "5.22.2",
    "unidecode": "1.4.0",
    "uvicorn": "0.54.0",
+   "vllm": "0.34.0",
    "xgboost": "3.4.1",
    "xxhash": "4.1.0",
    "zstandard": "0.25.0"
@@ -148,11 +154,11 @@
    "settle_seconds": 3600
   },
   "generated": [
-   "logic",
+   "logic-mc",
    "agent",
    "grammar",
    "context",
-   "knowledge",
+   "knowledge-mc",
    "arith-shots",
    "word-shots",
    "units-shots",
@@ -160,37 +166,37 @@
    "algo-shots"
   ],
   "groups": {
-   "skills": 0.25,
-   "writing": 0.75
+   "comprehension": 0.5,
+   "skills": 0.5
   },
   "pillars": [
    {
-    "about": "new encyclopedia articles, and what was added to old ones",
-    "group": "writing",
+    "about": "fresh encyclopedia articles: real next sentence minus same-source distractor",
+    "group": "comprehension",
     "name": "reference",
     "parts": [
      "reference"
     ]
    },
    {
-    "about": "news published in the day before the draw",
-    "group": "writing",
+    "about": "fresh news published in the day before the draw: real continuation minus same-source distractor",
+    "group": "comprehension",
     "name": "news",
     "parts": [
      "news"
     ]
    },
    {
-    "about": "technical writing and new code",
-    "group": "writing",
+    "about": "fresh issues, patches and technical writing: real continuation minus same-source distractor",
+    "group": "comprehension",
     "name": "technical",
     "parts": [
      "technical"
     ]
    },
    {
-    "about": "replies in discussions, and what people post",
-    "group": "writing",
+    "about": "fresh replies and posts: real reply minus same-source distractor",
+    "group": "comprehension",
     "name": "conversation",
     "parts": [
      "discussion",
@@ -214,11 +220,11 @@
     ]
    },
    {
-    "about": "following an argument to its end",
+    "about": "following an argument to its end, scored contrastively against the other entities",
     "group": "skills",
     "name": "logic",
     "parts": [
-     "logic"
+     "logic-mc"
     ]
    },
    {
@@ -249,11 +255,11 @@
     ]
    },
    {
-    "about": "facts the web knows, in ten languages",
+    "about": "facts the web knows in ten languages, scored contrastively against same-relation distractors",
     "group": "skills",
     "name": "knowledge",
     "parts": [
-     "knowledge"
+     "knowledge-mc"
     ]
    }
   ],
@@ -276,23 +282,23 @@
  "grade_devices": [
   "cuda"
  ],
- "harness": "0.5.0",
- "id": "s2",
+ "harness": "0.6.0",
+ "id": "s3",
  "machine": {
   "cores": 6,
-  "gpu_memory_gb": 8,
-  "memory_gb": 12,
-  "scratch_gb": 8
+  "gpu_memory_gb": 22,
+  "memory_gb": 20,
+  "scratch_gb": 12
  },
  "max_doc_bytes": 262144,
  "min_copy_bytes": 64,
  "noise": {
   "micro": {
-   "gain_sd": 0.03,
-   "round_sd": 0.03
+   "gain_sd": 0.02,
+   "round_sd": 0.025
   },
   "standard": {
-   "gain_sd": 0.005,
+   "gain_sd": 0.007,
    "order_sd": 0.008,
    "round_sd": 0.015
   }
@@ -315,38 +321,46 @@
   },
   "index": 7,
   "order": [
-   6,
-   8,
-   9,
-   1,
-   7,
-   10,
-   2,
-   11,
-   3,
-   4,
    0,
-   5
+   5,
+   4,
+   10,
+   8,
+   2,
+   6,
+   9,
+   7,
+   11,
+   1,
+   3
   ],
   "prf": "9091049708302675390",
-  "seed": "f707928f7ecf1441a13e9265c3ac83a54cc81b10b6978fbc514185691f1e048d",
+  "seed": "0e4b35ddc2943163e4b404006b16052e5e612e67189cd6fc345e3118b6087206",
   "shards": [
-   77952,
-   25826,
-   5681,
-   39758,
-   20934,
-   71325,
-   7304,
-   82346,
-   45873,
-   16559,
-   65010,
-   42016,
-   98687,
-   35133,
-   89827,
-   62505
+   96052,
+   894,
+   11638,
+   80942,
+   83696,
+   42216,
+   38553,
+   67672,
+   59097,
+   45668,
+   35112,
+   43326,
+   43341,
+   174,
+   633,
+   54126,
+   12316,
+   58535,
+   3280,
+   1662,
+   80338,
+   51512,
+   78408,
+   58737
   ]
  },
  "pools": {
@@ -357,14 +371,14 @@
    "shards_per_unit": 1
   },
   "official": {
-   "about": "The newest published Common Crawl crawl at the time of the draw: full-page text (WET), every language.",
+   "about": "The newest published Common Crawl crawl at the time of the draw: full-page text (WET), every language, streamed until the training budget is full.",
    "base_url": "https://data.commoncrawl.org/",
    "kind": "cc-wet",
    "paths": "crawl-data/{crawl}/wet.paths.gz",
    "shards_per_unit": 2
   },
   "practice": {
-   "about": "One pinned Common Crawl crawl, full-page text (WET). The same kind of data as official rounds, with fixed public seeds.",
+   "about": "One pinned Common Crawl crawl, full-page text (WET), every language as crawled. The same kind of data as official rounds, with fixed public seeds.",
    "base_url": "https://data.commoncrawl.org/",
    "crawl": "CC-MAIN-2026-43",
    "kind": "cc-wet",
@@ -390,70 +404,78 @@
   }
  },
  "reference": {
-  "anchor": "AMD Ryzen AI Max+ 395 (16 cores), Radeon 8060S, 128 GB unified memory, ROCm",
-  "note": "The organisers' own verifier, and the machine the experiments in the documents were run on. Editors are run by volunteers' machines too: time yours against the floor in \"runner\" (stet bench), not against this."
+  "anchor": "NVIDIA RTX 5090 (32 GB VRAM) / RTX 4090 (24 GB VRAM), CUDA",
+  "note": "Season 3 curators run on 24 GB+ GPUs with vLLM, flash-linear-attention and liger-kernel so 0.6B-class curation models are the floor; 16 GB+ GPUs can grade. Time your curator against the floor in \"runner\" (stet bench)."
  },
  "reference_curves": {},
  "references": {
   "every_round": [
    "fineweb2",
-   "dclm"
+   "reader"
   ],
   "one_in": 8
  },
- "rules_version": 5,
+ "rules_version": 6,
  "runner": {
   "cores": 6,
   "cpu_mb_per_second": 100,
-  "disk_gb": 60,
-  "gpu_memory_gb": 10,
-  "gpu_tokens_per_second": 80000,
-  "memory_gb": 16
+  "disk_gb": 80,
+  "gpu_memory_gb": 23,
+  "gpu_tokens_per_second": 120000,
+  "memory_gb": 24
  },
  "scales": {
   "large": {
    "batch_size": 32,
-   "corpus_units": 32,
-   "ctx": 512,
-   "d_model": 640,
+   "corpus_units": 24,
+   "ctx": 1024,
+   "d_model": 1024,
    "edit_seconds": 4800,
-   "lr": 0.0008,
-   "n_head": 10,
-   "n_layer": 10,
-   "train_tokens": 640000000
+   "lr": 0.0006,
+   "micro_batch": 2,
+   "n_head": 16,
+   "n_layer": 28,
+   "sft_steps": 64,
+   "train_tokens": 131072000
   },
   "micro": {
-   "batch_size": 16,
-   "corpus_units": 2,
-   "ctx": 512,
-   "d_model": 384,
+   "batch_size": 32,
+   "corpus_units": 4,
+   "ctx": 1024,
+   "d_model": 1024,
    "edit_seconds": 300,
-   "lr": 0.0015,
-   "n_head": 6,
-   "n_layer": 6,
-   "train_tokens": 40000000
+   "lr": 0.001,
+   "micro_batch": 2,
+   "n_head": 16,
+   "n_layer": 28,
+   "sft_steps": 32,
+   "train_tokens": 8388608
   },
   "nano": {
-   "batch_size": 16,
+   "batch_size": 32,
    "corpus_units": 1,
-   "ctx": 256,
-   "d_model": 192,
+   "ctx": 1024,
+   "d_model": 1024,
    "edit_seconds": 120,
-   "lr": 0.002,
-   "n_head": 4,
-   "n_layer": 4,
-   "train_tokens": 8000000
+   "lr": 0.001,
+   "micro_batch": 2,
+   "n_head": 16,
+   "n_layer": 28,
+   "sft_steps": 16,
+   "train_tokens": 1048576
   },
   "standard": {
    "batch_size": 32,
-   "corpus_units": 8,
-   "ctx": 512,
-   "d_model": 512,
+   "corpus_units": 12,
+   "ctx": 1024,
+   "d_model": 1024,
    "edit_seconds": 1200,
    "lr": 0.001,
-   "n_head": 8,
-   "n_layer": 8,
-   "train_tokens": 160000000
+   "micro_batch": 2,
+   "n_head": 16,
+   "n_layer": 28,
+   "sft_steps": 64,
+   "train_tokens": 32768000
   }
  },
  "script": {
@@ -462,15 +484,31 @@
   "max_out_doc_bytes": 1048576,
   "max_segments": 20000
  },
- "title": "Season 2",
+ "sft": {
+  "batch_size": 16,
+  "ctx": 512,
+  "examples": 256,
+  "final_lr_frac": 0.1,
+  "lr": 0.0001,
+  "micro_batch": 4,
+  "warmup_steps": 4,
+  "weight_decay": 0.01
+ },
+ "student": {
+  "kind": "hf_topreset",
+  "repo": "Qwen/Qwen3-0.6B-Base",
+  "reset_frac": 0.5,
+  "revision": "da87bfb608c14b7cf20ba1ce41287e8de496c0cd"
+ },
+ "title": "Season 3",
  "tokenizer": {
-  "vocab_size": 8192
+  "vocab_size": 151936
  },
  "tolerance": {
   "large": {
-   "baseline": 0.03,
-   "grade": 0.02,
-   "run": 0.03
+   "baseline": 0.04,
+   "grade": 0.025,
+   "run": 0.04
   },
   "micro": {
    "baseline": 0.2,
@@ -483,9 +521,9 @@
    "run": 0.15
   },
   "standard": {
-   "baseline": 0.04,
-   "grade": 0.025,
-   "run": 0.04
+   "baseline": 0.05,
+   "grade": 0.03,
+   "run": 0.05
   }
  },
  "train": {
@@ -493,7 +531,7 @@
   "beta2": 0.95,
   "final_lr_frac": 0.05,
   "grad_clip": 1.0,
-  "warmup_frac": 0.03,
+  "warmup_frac": 0.05,
   "weight_decay": 0.1
  }
 }

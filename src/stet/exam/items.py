@@ -6,25 +6,28 @@ import hashlib
 import json
 from dataclasses import asdict, dataclass
 
-KINDS = ("passage", "answer", "pair")
+KINDS = ("passage", "answer", "pair", "choice")
 # Formats an item can be in. A round is balanced across formats and kinds of task.
 FORMATS = ("prose", "code", "dialogue", "table", "list", "math", "logs", "markup", "transcript", "verse", "structured")
 
 
 @dataclass(frozen=True)
 class Item:
-    kind: str  # passage | answer | pair
+    kind: str  # passage | answer | pair | choice
     corner: str  # the finest unit: family/sub-kind/style..., at most a few items a round
     fmt: str  # one of FORMATS
     lang: str  # "en", "de", ..., or "code:python" for code
     source: str  # "gen:<generator>" or a fresh source's name
     text: str = ""  # passage
-    ctx: str = ""  # answer: what the student is given
-    cont: str = ""  # answer: the right answer, scored
+    ctx: str = ""  # answer / choice: what the student is given
+    cont: str = ""  # answer / choice: the right answer or continuation, scored
     good: str = ""  # pair: the acceptable sentence
     bad: str = ""  # pair: its unacceptable twin
+    wrongs: tuple[str, ...] = ()  # choice: wrong alternatives from the same source / relation
 
     def __post_init__(self):
+        if isinstance(self.wrongs, list):
+            object.__setattr__(self, "wrongs", tuple(self.wrongs))
         if self.kind not in KINDS:
             raise ValueError(f"unknown kind {self.kind!r}")
         if self.fmt not in FORMATS:
@@ -35,6 +38,11 @@ class Item:
             raise ValueError("an answer item needs a context and an answer")
         if self.kind == "pair" and not (self.good and self.bad and self.good != self.bad):
             raise ValueError("a pair item needs two different sentences")
+        if self.kind == "choice":
+            if not (self.ctx and self.cont and self.wrongs):
+                raise ValueError("a choice item needs a context, a right answer, and wrong alternatives")
+            if any((not w) or w == self.cont for w in self.wrongs):
+                raise ValueError("every wrong alternative must be non-empty and differ from the right answer")
 
     @property
     def family(self) -> str:
@@ -47,11 +55,22 @@ class Item:
         return (self.fmt, self.kind)
 
     def to_dict(self) -> dict:
-        return {k: v for k, v in asdict(self).items() if v != ""}
+        out = {}
+        for k, v in asdict(self).items():
+            if v == "" or v == ():
+                continue
+            out[k] = list(v) if isinstance(v, tuple) else v
+        return out
 
     @classmethod
     def from_dict(cls, d: dict) -> Item:
-        return cls(**{k: d.get(k, "") for k in cls.__dataclass_fields__})
+        kwargs = {}
+        for k in cls.__dataclass_fields__:
+            if k == "wrongs":
+                kwargs[k] = tuple(d.get(k) or ())
+            else:
+                kwargs[k] = d.get(k, "")
+        return cls(**kwargs)
 
     @property
     def id(self) -> str:

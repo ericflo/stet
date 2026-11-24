@@ -80,7 +80,7 @@ def test_the_floor_is_a_machine_people_have(season):
     need, machine = bench.floor(season), season.raw["machine"]
     # What a curator is given has to fit inside the smallest machine that runs curators.
     assert machine["cores"] <= need["cores"] and machine["memory_gb"] < need["memory_gb"] and machine["gpu_memory_gb"] < need["gpu_memory_gb"]
-    assert need["gpu_memory_gb"] <= 12 and need["memory_gb"] <= 32 and need["cores"] <= 8  # an ordinary desktop with a mid-range card
+    assert need["gpu_memory_gb"] <= 24 and need["memory_gb"] <= 32 and need["cores"] <= 8  # 24 GB GPU floor for 0.6B curators
     assert season.raw["assets"]["max_bytes"] <= machine["gpu_memory_gb"] * 2**30  # what may be named fits where it will be loaded
 
 
@@ -148,7 +148,7 @@ def test_the_documents_give_the_seasons_numbers(season):
         assert f"| CPU | {m['cores']} cores |" in doc and f"| Memory | {m['memory_gb']} GB |" in doc
         assert f"with {m['gpu_memory_gb']} GB of its memory" in doc and f"{m['scratch_gb']} GB" in doc
         assert f"{a['max_files']} files and {gib} GiB" in doc
-    assert f"| 40M tokens | {micro} s |" in rules and f"{micro} seconds at micro" in brief
+    assert f"| 8.4M tokens | {micro} s |" in rules and f"{micro} seconds at micro" in brief
     assert f"up to {gib} GiB" in faq and f"{m['gpu_memory_gb']} GB of memory" in faq
     assert f"{m['memory_gb']} GB of memory, one GPU with {m['gpu_memory_gb']} GB of its memory" in verifying and f"{need['disk_gb']} GB of disk" in verifying
     assert f"more than {season.raw['tolerance']['standard']['run']} bits per byte" in rules.replace("by more than", "more than")
@@ -161,13 +161,13 @@ def test_the_documents_and_the_site_name_the_pillars_the_season_names(season):
     the season's list changes, this says where."""
     pillars = season.raw["exam"]["pillars"]
     count = {4: "four", 7: "seven", 8: "eight"}
-    writing, skills = (count[sum(v["group"] == g for v in pillars.values())] for g in ("writing", "skills"))
+    comp, skills = (count[sum(v["group"] == g for v in pillars.values())] for g in ("comprehension", "skills"))
     rules, brief, faq, design = (words(n) for n in ("docs/RULES.md", "src/stet/templates/AGENTS.md", "docs/FAQ.md", "docs/DESIGN.md"))
     home, glossary = (words(f"server/web/templates/{n}.html") for n in ("home", "glossary"))
-    assert f"{writing} kinds of writing and {skills} skills" in faq and f"{writing} kinds that count the same" in design
+    assert f"{comp} comprehension kinds and {skills} skills" in faq and f"{comp} kinds that count the same" in design
     assert f"skills, in {skills} kinds that count the same" in design
-    assert f"{writing.capitalize()} kinds, each counting the same" in home and f"{skills.capitalize()} skills, each counting the same" in home
-    assert f"{writing} kinds of writing (" in glossary and f"and {skills} skills (" in glossary
+    assert f"{comp.capitalize()} kinds, each counting the same" in home and f"{skills.capitalize()} skills, each counting the same" in home
+    assert f"{comp} comprehension kinds (" in glossary and f"and {skills} skills (" in glossary
     for name, pillar in pillars.items():
         assert f"| {name.capitalize()} |" in rules and f"| `{name}` | {pillar['group']} |" in brief, name
         assert f"<b>{name}</b>" in home and name in glossary and name in design, name

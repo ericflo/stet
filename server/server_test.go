@@ -431,10 +431,10 @@ var corpusSHA, examSHA = strings.Repeat("c0", 32), strings.Repeat("d1", 32)
 func testTable() []ItemInfo {
 	var out []ItemInfo
 	for i := 0; i < 12; i++ {
-		out = append(out, ItemInfo{Pillar: "logic", Part: "logic", Lang: "en", Stratum: "prose/answer"})
+		out = append(out, ItemInfo{Pillar: "logic", Part: "logic-mc", Lang: "en", Stratum: "prose/choice"})
 	}
 	for i := 0; i < 6; i++ {
-		out = append(out, ItemInfo{Pillar: "reference", Part: "reference", Lang: []string{"en", "de"}[i%2], Stratum: "prose/passage"})
+		out = append(out, ItemInfo{Pillar: "reference", Part: "reference", Lang: []string{"en", "de"}[i%2], Stratum: "prose/choice"})
 	}
 	return out
 }

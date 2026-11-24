@@ -499,4 +499,14 @@ What the fleet does about it:
 - **`--exam-after` is 5 minutes**, for a server that does not yet say `exam_due` (a new database has no rounds to pace from).
 - The service runs with `--exam-after 5m --early 0` (Eric, 2026-11-22): graders are rented only once an exam is posted.
 - **Round s2-o00001** (stet-db): drawn 21:00, exam posted 21:03:41, curators done about 21:13, settled 21:46:38 (46.6 min), $1.57 on 16 Vast machines. Its tail was two RTX 5070s rented for curators, the cheapest a grade, that took baselines: two passes of about 1,000 s each. A pass cost about the same on Vast's 5070, 5080 and 5090 ($0.041–0.046), so the cheaper card saved nothing; on 5090s alone it would have settled in about 28 min.
-- So **curator machines are rented the fastest first too** (Eric, 2026-11-22), among the hosts where curators may run. `--cheapest` still rents every machine the cheapest a grade.
+- So **curator machines are rented the fastest first too** (Eric, 2026-11-22), among the hosts where curators may run. `--cheapest` still rents every machine by what a grade costs.
+
+## 18. Season 3 (2026-11-24)
+
+Season 3 moves to `Qwen/Qwen3-0.6B-Base` (top-half reset + 64-step disjoint SFT probe), 24 GB curator sandboxes with `vLLM`/`FLA`/`Liger`, and dynamic on-demand-only rounds:
+
+- **Hard 6-GPU cap (`--max 6`, `--max-hourly 4`):** rounds draw only when entries are waiting (`STET_ROUND_INTERVAL=0`), chaining back-to-back until every waiting/qualifying entry finishes, and winding down straight to **0 GPUs** when quiet.
+- **Warm keep-alive across imminent draws (`nearDraw`, `keptNearDraw = 2`):** when a round is scheduled within 20 minutes (`next_draw_at`), up to 2 idle curator machines are kept warm instead of being killed during the 6–16 minute draw notice window; once nothing is waiting or scheduled (`next_draw_at == 0`), every idle machine is ended immediately.
+- **24 GB curator floor vs 16 GB+ grader floor:** `--min-curator-gpu-memory 24` filters curator-capable offers (for the 22 GB sandbox), while `--min-gpu-memory 16` still allows 16 GB cards to grade `Qwen3-0.6B-Base` (`~12.7 GB` VRAM at `micro_batch=2`). `--min-ram` rises to 24 GB.
+- **Longer passes & 6h safety backstops:** default `passOn3090` rises from 18 min to 40 min (`~21m` on 5090, `~30m` on 4090); Lium `termination_hours` and Clore `rental_hours` rise from 3 to 6 hours so warm workers cycle through back-to-back rounds without mid-grade cutoffs.
+- **Compiler toolchain in `worker.sh`:** installs `gcc g++ libc6-dev` when missing so Triton, vLLM, and FLA kernels compile cleanly inside containers.

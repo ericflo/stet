@@ -29,14 +29,15 @@ over it. Which markets are armed is kept in `markets.json`; with none, RunPod al
 ## What a rented machine does
 
 It is a single-GPU container on one of the markets armed, running `ubuntu:24.04` and [one
-script](worker.sh). The script installs stet from the site into `/opt/stet` (on Lium, under
+script](worker.sh). The script ensures `gcc`/`g++`/`libc6-dev` are present (for Triton/vLLM/FLA
+JIT kernels), installs stet from the site into `/opt/stet` (on Lium, under
 `/workspace`, since its container disk is 7.5 GB), writes the machine's key under `/root`, and
 runs `stet verify --edits --sandbox container --exit-when-idle 15`: it runs curators and
 grades, and trains the organisers' students when there is nothing official to do, until it
 has had nothing to do for fifteen minutes. Then it ends itself where its market gives it a key
 for that alone (RunPod a pod's own, Vast an instance's), and elsewhere waits for stet-cloud to
 end it from outside, with the market's own backstop should the fleet be gone: Lium ends a pod
-after `termination_hours`, Clore an order after `rental_hours` (both 3), and a Salad container
+after `termination_hours`, Clore an order after `rental_hours` (both 6), and a Salad container
 is made never to restart. A market may restart a container whose process exits, and keep
 billing for it, so the script never just exits.
 
@@ -95,11 +96,11 @@ service would rent and end is what the service will; settings given to it are ta
 those.
 
 How many it rents: one for each machine at a grade, which takes no other until it is done
-(about 18 minutes on a 3090 at the standard scale), and one more for every `--per-machine`
+(about 40 minutes on a 3090, ~30 on a 4090, ~21 on a 5090 at the standard scale), and one more for every `--per-machine`
 (6) scripts a new machine could grade now: `--per-machine 1` gives each its own. A grade
 trains the student once; the four machines a round asks to measure its unedited baseline
-(Season 2's `baselines.per_round`, `baselines_wanted` in `/admin/work`) train that first, on
-as many tokens. In Season 2 the exam is made at the draw, from hours of the day before already
+(Season 3's `baselines.per_round`, `baselines_wanted` in `/admin/work`) train that first, on
+as many tokens. In Season 3 the exam is made at the draw, from hours of the day before already
 harvested, and posted within a minute or so of it, so nearly every grade is taken once the
 exam is posted, and wants a machine then. A grader may also take a grade before the exam is
 posted and hold it until it is: such grades want machines from `--early` (90 minutes) before
@@ -115,7 +116,7 @@ about 2h12m after the draw, and these early grades were most of its grades; the 
 runs with `--early 0`, renting graders only once an exam is posted.
 How long a training pass takes on each kind is learned from the grades of settled rounds
 (each says the GPU that trained, and for how long), and how long a machine takes to start
-from those this service rents; until a kind has been seen, its pass is a 3090's 18 minutes
+from those this service rents; until a kind has been seen, its pass is a 3090's 40 minutes
 over its speed in the table, and a machine is taken to start in 8 minutes. They are kept in
 `calibration.json`, and `stet-cloud gpus` shows them. The curators want a machine for every
 four entries to run, and never fewer than two, since each entry is run twice, by two
@@ -128,10 +129,13 @@ at $0.89 trains one in about half the time of a 3090 at $0.50, so the student co
 the same and is done sooner. Where two cost about the same, the quicker comes first.
 `--long-max-price` is the ceiling for those machines (the same as `--max-price` if not
 given); `stet-cloud gpus` shows both orders. Never more than `--max` (6), or past
-`--max-hourly` dollars an hour (3), and nothing new once `--daily-budget` is spent.
+`--max-hourly` dollars an hour (4), and nothing new once `--daily-budget` is spent.
 `--max-price` never rents a machine dearer than that, however much is waiting: the work
-waits for a cheap one instead. When rounds are drawn on demand and an entry is waiting for
-one with nobody who runs curators around, one, so that the round is drawn early. It never ends a machine that
+waits for a cheap one instead. In Season 3's on-demand-only mode, rounds draw only when
+entries are waiting: when an entry waits with nobody who runs curators around, one 24 GB+
+machine is rented to trigger the draw; up to two warm machines are kept across the short
+6–16 minute draw notice window (`next_draw_at`), and when nothing is waiting or scheduled
+all idle machines are ended immediately down to **0 GPUs**. It never ends a machine that
 holds a job. It ends at once those doing nothing when nothing at all is waiting, and any
 that went quiet or stopped. The rest stop by themselves. A machine ended a moment after it
 took a job, or that stopped partway through one, still holds it as the server sees it: what
@@ -142,19 +146,13 @@ will do, looked up afresh each time: every kind of GPU the markets armed have fr
 `--max-price` is tried fastest first (the cheaper first where two are as fast) until one has a
 machine with room. A kind's price is ranked over how often machines of its kind have started
 (`startRates`: some cheap hosts never do), learned per market, card and class of host. A round
-settles only once its slowest grade is in: a pass is about 5 minutes on a 5090, 8 on a 4090
-and 17 on a 5070. A machine that runs curators takes grades as soon as its runs are done, and
-the first four to take one also measure the round's baseline, two passes. In Season 1 such a
-machine held a grade until the exam and was rented the cheapest a grade; in Season 2's first
-round two 5070s rented so set its last 35 minutes, for no less a pass than a 5090's (on Vast,
-about $0.04 a pass on either). `--cheapest` rents every machine by what a grade costs, its price over its speed:
-a 4090 at $0.89 an hour then comes before an A40 at $0.59, and an A4000 at $0.17 before
-both. What will do: NVIDIA, 12 GB or more (a machine that runs curators needs 10 and gives
-one 8), on a host with the season's floor of 16 GB of memory and 6 vCPUs a GPU, a driver
-new enough for CUDA 13 (the season's PyTorch, 2.15.0, is built only for 13.2), bf16
-(nothing older than Ampere), and a whole GPU, with a 100 GB disk (at 80, a machine that
-stayed up into another round and upgraded found less than the 60 GB a curator run keeps
-free, and only graded). `stet-cloud gpus` lists them as they stand.
+settles only once its slowest grade is in: a Season 3 `Qwen3-0.6B-Base` pass is about 21 minutes
+on a 5090, 30 on a 4090 and 40 on a 3090. A machine that runs curators takes grades as soon as its runs are done, and
+the first four to take one also measure the round's baseline, two passes. `--cheapest` rents every machine by what a grade costs, its price over its speed.
+What will do: NVIDIA, `--min-gpu-memory` 16 GB or more for grading (`--min-curator-gpu-memory` 24 GB
+or more for running curators, which receive 22 GB VRAM inside the sandbox), on a host with the season's floor of 24 GB of memory (`--min-ram`) and 6 vCPUs a GPU, a driver
+new enough for CUDA 13 (the season's PyTorch, 2.14.0, is built for CUDA 13), bf16
+(nothing older than Ampere), and a whole GPU, with a 100 GB disk (above the 80 GB runner floor). `stet-cloud gpus` lists them as they stand.
 `--gpu "RTX A5000,RTX 4090"` names them instead.
 
 `--cloud` is RunPod's: `any` (the default) takes the cheaper of its two clouds, which is
@@ -175,7 +173,7 @@ Wants=network-online.target
 After=network-online.target
 
 [Service]
-ExecStart=%h/.local/bin/stet-cloud scale --follow --cloud any --max 20 --max-price 1.10 --max-hourly 16 --daily-budget 60 --per-machine 1 --exam-after 5m --early 0
+ExecStart=%h/.local/bin/stet-cloud scale --follow --cloud any --max 6 --max-price 1.10 --max-hourly 4 --daily-budget 60 --per-machine 1 --exam-after 5m --early 0
 Restart=always
 RestartSec=60
 

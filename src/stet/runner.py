@@ -90,7 +90,16 @@ GPU_FREE_SHARE = 0.95
 DEFAULT_LIMITS = {"memory_gb": 48, "tasks": 4096, "scratch_gb": 16, "cores": 0, "gpu_memory_gb": 0, "required": False}
 # Inside the sandbox nothing can be downloaded. Libraries that would try are told so, and
 # fail at once with a message instead of waiting on a network that is not there.
-OFFLINE_ENV = {"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1", "HF_DATASETS_OFFLINE": "1", "HF_HUB_DISABLE_TELEMETRY": "1"}
+OFFLINE_ENV = {
+    "HF_HUB_OFFLINE": "1",
+    "TRANSFORMERS_OFFLINE": "1",
+    "HF_DATASETS_OFFLINE": "1",
+    "HF_HUB_DISABLE_TELEMETRY": "1",
+    "VLLM_NO_USAGE_STATS": "1",
+    "VLLM_USAGE_STATS_SERVER": "0",
+    "VLLM_LOGGING_LEVEL": "WARNING",
+    "VLLM_HOST_IP": "127.0.0.1",
+}
 
 
 def machine_limits(season) -> dict:
@@ -279,8 +288,15 @@ def task_info(rnd: Round, scale: Scale, time_limit: float, machine: dict | None 
             "d_model": scale.d_model,
             "ctx": scale.ctx,
             "batch_size": scale.batch_size,
+            "micro_batch": scale.micro_batch or scale.batch_size,
+            "sft_steps": scale.sft_steps,
             "lr": scale.lr,
             "vocab_size": season.vocab_size,
+            **(
+                {"kind": season.raw["student"]["kind"], "repo": season.raw["student"]["repo"], "reset_frac": season.raw["student"].get("reset_frac", 0.0)}
+                if "student" in season.raw
+                else {}
+            ),
             **season.train_cfg,
         },
         "exam_pillars": season.exam_sources,
@@ -751,6 +767,9 @@ def run_editor(
         "TMPDIR": "/tmp" if inside else str(scratch_dir),
         "HF_HOME": "/scratch/hf" if inside else str(scratch_dir / "hf"),
         "NUMBA_CACHE_DIR": "/scratch/numba" if inside else str(scratch_dir / "numba"),
+        "TRITON_CACHE_DIR": "/scratch/triton" if inside else str(scratch_dir / "triton"),
+        "VLLM_CACHE_ROOT": "/scratch/vllm" if inside else str(scratch_dir / "vllm"),
+        "TORCHINDUCTOR_CACHE_DIR": "/scratch/inductor" if inside else str(scratch_dir / "inductor"),
         **OFFLINE_ENV,
         **paths,
     }

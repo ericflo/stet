@@ -46,7 +46,7 @@ def test_a_seed_always_makes_the_same_exam():
     # Pinned: the generated items of a round of the season, from the families its exam names. A
     # change to one of their generators that changes what a seed produces must bump gen.VERSION
     # and this hash, on purpose; so must a change to the parts the season names.
-    assert digest(gen.for_season(SEASON, SEED)) == "c279ff40ada2ce3546b71fa03de62f2e97e8514f6b2cb951c2136ba85c6662ef"
+    assert digest(gen.for_season(SEASON, SEED)) == "048c4f2fd0fb9f268395942ddadb5092ba24b1c21bb9150c1ade81a8a4ddf7e3"
     assert digest(gen.for_season(SEASON, SEED)) == digest(gen.for_season(SEASON, SEED))
     assert digest(gen.for_season(SEASON, b"other")) != digest(gen.for_season(SEASON, SEED))
 
@@ -55,16 +55,16 @@ def test_a_seed_always_makes_the_same_exam():
 # more): how many, and their digest in order. These are the parts as they were measured before
 # the season, when this copy also made the families that were then taken off the exam.
 MEASURED = {
-    "agent": (304, "dc90a2268e1e758503fdeade54fa8bee6d64599bc7aa3f87bf15c6631f59e608"),
-    "context": (384, "58f875008a565e14306fb7ee2f141052e65ee118b82607f3fca268c37a26f15a"),
-    "logic": (288, "33959043534361197cdc61434d2ad1e49c2c95930e35697de38c2a7c77ba5ace"),
-    "grammar": (198, "93ef6ec6e0fc435e1181db53f8656c448f20eb6a780e7e9b516c2718b93a73fa"),
-    "knowledge": (200, "4e70f4fe895dd0fe8f82245ac9251443095c3915633c4b8f8e8661f28b52d8bf"),
-    "arith-shots": (192, "404f516779e941e4de0889741854380b3ae86593bb9bb5b770a56d133c85bfa9"),
-    "units-shots": (56, "2a62bf05badf6281ef405a222280e352062cd8c756bf661fcc943621a1061f47"),
-    "word-shots": (48, "16ca9c38687c8dec916e52851235c79973a7994e46d7a02cc8ef4be3ecc356e0"),
-    "algebra-shots": (40, "1601682b8ffa8b5867530511ae69db0e3196d0983942a41be09dd54bc997d538"),
-    "algo-shots": (56, "b2604e9ea7bc0e1c211d9c7b7b555f92013d6f8cd6c3ba9b5bd3382f32ec1b95"),
+    "agent": (304, "3773646221decae4eecc1d753555ab1ed4b3dbca2005de127a2a658e86837d71"),
+    "context": (384, "2672777846b47fc705f5e3a988d4ae3ae075592e1e0b4d69b1ed2188ea8e0ce3"),
+    "logic-mc": (288, "0a6ed27da432712e0a1081366cd2cc54c72e1b47315f1a5a507ca7760657b0d1"),
+    "grammar": (198, "f65db2784e54c429a236370262dd654d89b4fd0c963ee30c0278e3ded772e9b6"),
+    "knowledge-mc": (200, "6599bc802a50419ca3fc193283c2e91f398e1cc12658c13a3729bb7efecc4804"),
+    "arith-shots": (192, "06065801f2520776773aee5998ab3762bc2285f1d0bcdea4746b48638f624b86"),
+    "units-shots": (56, "4e47d7651c5353994f37c35ea5deae56b0f898e7b44493050f4b29154cce792d"),
+    "word-shots": (48, "afb9d841a596a4de112b1f93958fd13aa7b35e44d374158710051a2283b13157"),
+    "algebra-shots": (40, "b4fd7864b9f5b409f3ba8f4483460656b619b9cff9f1e66dcd68eaabdc413d3c"),
+    "algo-shots": (56, "1a2726672066fbb1188c7a24b056dc92649fc5fe696d0d18ec23014eb9d3c128"),
 }
 
 
@@ -81,7 +81,7 @@ def test_each_part_is_the_part_that_was_measured_whatever_else_is_on_the_exam():
             got.setdefault(part_of(it), []).append(it)
         return {part: (len(its), digest(its)) for part, its in got.items()}
 
-    assert int(SEASON.raw["exam"]["per_corner"]) == 2 and gen.VERSION == SEASON.raw["exam"]["generator_version"] == 9
+    assert int(SEASON.raw["exam"]["per_corner"]) == 2 and gen.VERSION == SEASON.raw["exam"]["generator_version"] == 10
     assert by_part(gen.for_season(SEASON, SEED)) == MEASURED  # every part the season names, and no other
     assert sum(n for n, _ in MEASURED.values()) == 1766
     # The same from every family this copy can make, and from each family made alone.
@@ -207,12 +207,12 @@ def _exam(*groups):
     return items, g
 
 
-def test_writing_is_three_quarters_and_skills_one_and_breadth_wins():
-    # news (writing) gains 0.4 and the agent family (skills) loses 0.2: three quarters and one quarter
+def test_comprehension_and_skills_are_equal_halves_and_breadth_wins():
+    # news (comprehension) gains 0.4 and the agent family (skills) loses 0.2: half and half
     items, g = _exam(_many(10, "prose", "passage", "fresh/ccnews/en", 0.4, source="ccnews:1"), _many(10, "logs", "answer", "agent", -0.2))
     r = round_score(items, g)
-    assert r["score"] == pytest.approx(0.75 * 0.4 + 0.25 * -0.2)
-    assert r["pillars"]["news"]["weight"] == 0.75 and r["pillars"]["agents"] == {"score": -0.2, "items": 10, "parts": {"agent": -0.2}, "group": "skills", "weight": 0.25}
+    assert r["score"] == pytest.approx(0.5 * 0.4 + 0.5 * -0.2)
+    assert r["pillars"]["news"]["weight"] == 0.5 and r["pillars"]["agents"] == {"score": -0.2, "items": 10, "parts": {"agent": -0.2}, "group": "skills", "weight": 0.5}
     assert r["generated"]["score"] == pytest.approx(-0.2) and r["fresh"]["score"] == pytest.approx(0.4)
     # a curator that gains hugely on two items and loses on the rest scores below one that gains a little everywhere
     items = [_item("logs", "answer", f"agent/{i}") for i in range(40)]
@@ -221,12 +221,12 @@ def test_writing_is_three_quarters_and_skills_one_and_breadth_wins():
 
 def test_a_pillar_the_exam_lacks_gives_its_share_to_its_own_group():
     news, agent, logic = (_many(10, "prose", "passage", "fresh/ccnews/en", 0.4, source="ccnews:1"), _many(10, "logs", "answer", "agent", -0.2),
-                          _many(10, "prose", "answer", "logic", 0.2))
+                          _many(10, "prose", "answer", "logic-mc", 0.2))
     ref = _many(10, "prose", "passage", "fresh/wikipedia/en", 0.0, source="wikipedia:1")
-    # one kind of writing or two, writing is three quarters; one skill or two, skills are a quarter
-    assert round_score(*_exam(news, ref, agent))["score"] == pytest.approx(0.75 * 0.2 + 0.25 * -0.2)
-    assert round_score(*_exam(news, agent, logic))["score"] == pytest.approx(0.75 * 0.4 + 0.25 * 0.0)
-    # with no skills at all the writing is the whole score
+    # one kind of comprehension or two, comprehension is half; one skill or two, skills are half
+    assert round_score(*_exam(news, ref, agent))["score"] == pytest.approx(0.5 * 0.2 + 0.5 * -0.2)
+    assert round_score(*_exam(news, agent, logic))["score"] == pytest.approx(0.5 * 0.4 + 0.5 * 0.0)
+    # with no skills at all comprehension is the whole score
     assert round_score(*_exam(news, ref))["score"] == pytest.approx(0.2)
 
 

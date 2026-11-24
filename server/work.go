@@ -168,8 +168,14 @@ func (a *App) work(s *State) Work {
 		out.NextDrawAt = r.DrawAt
 	}
 	out.Paused = s.Meta.Paused
-	soon, _ := a.earlyDraw(s)
-	out.Waiting = soon != nil
+	if a.onDemandOnly() {
+		_, blocked := a.demandSlot(s)
+		out.Waiting = s.Meta.Paused == 0 && s.roundWithStatus("open") == nil && s.roundWithStatus("scheduled") == nil &&
+			a.savedCrawl(s) != nil && a.waiting(s) && !blocked
+	} else {
+		soon, _ := a.earlyDraw(s)
+		out.Waiting = soon != nil
+	}
 	out.FarmWaiting, out.FarmUnderWay, out.FarmLongWaiting = farmWaiting(s, now())
 	busy, long := map[int64]string{}, map[int64]bool{}
 	holding, untrained := map[int64]int{}, map[int64]bool{}

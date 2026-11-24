@@ -62,9 +62,16 @@ func (r *Round) description(s *Season) map[string]any {
 	return d
 }
 
+// onDemandOnly reports whether rounds are drawn only when an entry is waiting (RoundInterval 0),
+// with no idle rounds on a fixed clock.
+func (a *App) onDemandOnly() bool { return a.cfg.RoundInterval == 0 }
+
 // nextSlot is the next scheduled draw time after a moment: a multiple of the round
 // interval, which is itself a multiple of the season's grid.
 func (a *App) nextSlot(after int64) int64 {
+	if a.onDemandOnly() {
+		return a.season.nextGrid(after)
+	}
 	iv := int64(a.cfg.RoundInterval.Seconds())
 	return (after/iv + 1) * iv
 }
@@ -73,6 +80,9 @@ func (a *App) nextSlot(after int64) int64 {
 // when that is less than the notice away, the first place on the grid that is not. No
 // draw is ever announced with less than drawNotice to go.
 func (a *App) laterSlot() int64 {
+	if a.onDemandOnly() {
+		return a.season.nextGrid(now() + drawNotice)
+	}
 	at := a.nextSlot(now())
 	if at < now()+drawNotice {
 		at = a.season.nextGrid(now() + drawNotice)
@@ -160,22 +170,67 @@ func (a *App) tick(ctx context.Context) {
 	a.st.flush(bounded)
 }
 
+// demandSlot is the earliest grid moment an on-demand draw may take, respecting drawNotice
+// and RoundMinGap (when set), and reports whether the last two drawn rounds both came to
+// nothing (in which case hurrying will not mend whatever is wrong).
+func (a *App) demandSlot(s *State) (at int64, blocked bool) {
+	gap := int64(a.cfg.RoundMinGap.Seconds())
+	at, empty := now()+drawNotice, 0
+	for _, rd := range s.roundsDesc(3) {
+		if rd.DrawnAt == 0 {
+			continue // the scheduled round itself
+		}
+		if empty >= 0 && rd.Status == "settled" && rd.BaselineLoss == nil {
+			empty++ // nothing in it could be graded
+		} else {
+			empty = -1 << 30
+		}
+		if gap > 0 && rd.DrawnAt+gap > at {
+			at = rd.DrawnAt + gap
+		}
+	}
+	if empty >= 2 {
+		return 0, true
+	}
+	return a.season.nextGrid(at - 1), false
+}
+
 // schedule announces the next round, if none is announced: when it will be drawn (and so
-// from which beacon round) and from which crawl.
+// from which beacon round) and from which crawl. In on-demand-only mode (RoundInterval 0),
+// a round is announced only once the previous round has settled, an entry is waiting, and
+// somebody who runs curators is around.
 func (a *App) schedule(tx *Tx) {
 	if a.cfg.ArchiveSeed != "" { // a finished season: no round comes next
 		return
 	}
 	s := tx.s
-	if crawl := a.savedCrawl(s); s.roundWithStatus("scheduled") == nil && crawl != nil {
-		// The usual time, or the first free place on the grid after it: a slot some round
-		// was once announced for costs the next round ten minutes, not a whole interval.
-		taken := announcedSlots(s, nil)
-		at := a.laterSlot()
-		for taken[a.season.Beacon.drandRoundAt(at)] {
-			at = a.season.nextGrid(at)
+	crawl := a.savedCrawl(s)
+	if s.roundWithStatus("scheduled") != nil || crawl == nil {
+		return
+	}
+	var at int64
+	if a.onDemandOnly() {
+		if s.Meta.Paused != 0 || s.roundWithStatus("open") != nil || !a.waiting(s) || !a.runnerAround(s) {
+			return
 		}
-		tx.saveRound(&Round{Idx: s.maxRound() + 1, Status: "scheduled", Scale: a.cfg.Scale, DrawAt: at, DrandRound: a.season.Beacon.drandRoundAt(at), Crawl: crawl})
+		slot, blocked := a.demandSlot(s)
+		if blocked {
+			return
+		}
+		at = slot
+	} else {
+		at = a.laterSlot()
+	}
+	// The usual time, or the first free place on the grid after it: a slot some round
+	// was once announced for costs the next round ten minutes, not a whole interval.
+	taken := announcedSlots(s, nil)
+	for taken[a.season.Beacon.drandRoundAt(at)] {
+		at = a.season.nextGrid(at)
+	}
+	rd := &Round{Idx: s.maxRound() + 1, Status: "scheduled", Scale: a.cfg.Scale, DrawAt: at, DrandRound: a.season.Beacon.drandRoundAt(at), Crawl: crawl}
+	tx.saveRound(rd)
+	if a.onDemandOnly() {
+		slog.Info("round scheduled on demand: an entry is waiting", "round", roundID(a.season.ID, rd.Idx), "at", rd.DrawAt)
 	}
 }
 
@@ -191,6 +246,16 @@ func (a *App) schedule(tx *Tx) {
 // only uses up a round number, and that can wait for the usual time. So can the next round
 // when the last two both came to nothing: whatever is wrong, hurrying will not mend it.
 func (a *App) onDemand(tx *Tx) {
+	if a.onDemandOnly() {
+		a.schedule(tx)
+		if r := tx.s.roundWithStatus("scheduled"); r != nil && tx.s.Meta.Paused == 0 && tx.s.roundWithStatus("open") == nil && a.waiting(tx.s) && a.runnerAround(tx.s) {
+			if at, blocked := a.demandSlot(tx.s); !blocked && at < r.DrawAt {
+				a.reschedule(tx, r, at)
+				slog.Info("draw brought forward: an entry is waiting", "round", roundID(a.season.ID, r.Idx), "at", r.DrawAt)
+			}
+		}
+		return
+	}
 	if r, at := a.earlyDraw(tx.s); r != nil && a.runnerAround(tx.s) {
 		a.reschedule(tx, r, at)
 		slog.Info("draw brought forward: an entry is waiting", "round", roundID(a.season.ID, r.Idx), "at", r.DrawAt)
@@ -207,24 +272,11 @@ func (a *App) earlyDraw(s *State) (*Round, int64) {
 	if gap <= 0 || r == nil || r.Crawl == nil || s.Meta.Paused != 0 || s.roundWithStatus("open") != nil || !a.waiting(s) {
 		return nil, 0
 	}
-	at, empty := now()+drawNotice, 0
-	for _, rd := range s.roundsDesc(3) {
-		if rd.DrawnAt == 0 {
-			continue // the scheduled round itself
-		}
-		if empty >= 0 && rd.Status == "settled" && rd.BaselineLoss == nil {
-			empty++ // nothing in it could be graded
-		} else {
-			empty = -1 << 30
-		}
-		if rd.DrawnAt+gap > at {
-			at = rd.DrawnAt + gap
-		}
-	}
-	if empty >= 2 {
+	at, blocked := a.demandSlot(s)
+	if blocked {
 		return nil, 0
 	}
-	if at = a.season.nextGrid(at - 1); at < r.DrawAt {
+	if at < r.DrawAt {
 		return r, at
 	}
 	return nil, 0
@@ -444,10 +496,6 @@ func (a *App) expected(s *State, rd *Round) (in, later []expectedRow) {
 func (a *App) bringForward(ctx context.Context) (*Round, error) {
 	var out Round
 	err := a.st.update(ctx, func(tx *Tx) error {
-		r := tx.s.roundWithStatus("scheduled")
-		if r == nil {
-			return fail(409, "no round is scheduled")
-		}
 		if tx.s.Meta.Paused != 0 {
 			return fail(409, "the rounds are paused; resume them first")
 		}
@@ -457,6 +505,21 @@ func (a *App) bringForward(ctx context.Context) (*Round, error) {
 		at := a.season.nextGrid(now() + drawNotice)
 		if a.cfg.Dev {
 			at = now()
+		}
+		r := tx.s.roundWithStatus("scheduled")
+		if r == nil {
+			crawl := a.savedCrawl(tx.s)
+			if !a.onDemandOnly() || crawl == nil {
+				return fail(409, "no round is scheduled")
+			}
+			taken := announcedSlots(tx.s, nil)
+			for taken[a.season.Beacon.drandRoundAt(at)] {
+				at = a.season.nextGrid(at)
+			}
+			r = &Round{Idx: tx.s.maxRound() + 1, Status: "scheduled", Scale: a.cfg.Scale, DrawAt: at, DrandRound: a.season.Beacon.drandRoundAt(at), Crawl: crawl}
+			tx.saveRound(r)
+			out = *r
+			return nil
 		}
 		if at < r.DrawAt || a.cfg.Dev {
 			a.reschedule(tx, r, at)
@@ -485,7 +548,11 @@ func (a *App) maybeDraw(ctx context.Context, force bool) error {
 		case !due:
 		case s.Meta.Paused != 0:
 			// The organisers have paused the rounds: the slot passes, as when nobody is waiting.
-			a.reschedule(tx, cur, a.laterSlot())
+			if a.onDemandOnly() {
+				a.reschedule(tx, cur, a.season.nextGrid(now()+3600))
+			} else {
+				a.reschedule(tx, cur, a.laterSlot())
+			}
 			problem = errors.New("the organisers have paused the rounds")
 		case s.roundWithStatus("open") != nil:
 			// Grading of the previous round is still under way. Rounds never overlap, so
@@ -496,7 +563,11 @@ func (a *App) maybeDraw(ctx context.Context, force bool) error {
 			tx.saveRound(cur)
 			problem = errors.New("the previous round is still being graded")
 		case len(a.selectEntrants(s, r.DrawAt, r.Idx)) == 0:
-			a.reschedule(tx, cur, a.laterSlot())
+			if a.onDemandOnly() {
+				a.reschedule(tx, cur, a.season.nextGrid(now()+3600))
+			} else {
+				a.reschedule(tx, cur, a.laterSlot())
+			}
 			problem = errors.New("no curators are waiting to run")
 		case r.Crawl == nil:
 			problem = errors.New("the round has no crawl")
@@ -620,6 +691,9 @@ func (a *App) settleRounds(tx *Tx) {
 				a.reschedule(tx, next, at)
 			}
 			tx.saveRound(next) // reschedule keeps the slot it has when no earlier one is free
+		}
+		if a.onDemandOnly() {
+			a.schedule(tx)
 		}
 	}
 }

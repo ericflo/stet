@@ -340,3 +340,10 @@ class Task:
         """Write the edit script (atomically; safe to call more than once)."""
         self.out.mkdir(parents=True, exist_ok=True)
         write_script(self.out / "script.jsonl", lines)
+
+    def stream(self, start: int = 0) -> Iterator[tuple[int, str]]:
+        """Stream (doc_index, text) in seeded corpus order so a curator can stop as soon as its
+        training budget is full (stream-until-full)."""
+        corpus = self.corpus
+        for i in range(start, len(corpus)):
+            yield i, corpus.text(i)

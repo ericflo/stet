@@ -1,13 +1,12 @@
-"""The season tokenizer: a small byte-level BPE, loaded into tiktoken for speed.
-
-A season ships its own vocabulary (see tools/train_tokenizer.py for why it is small).
-Nothing here touches the network.
+"""The season tokenizer: either a bundled tiktoken byte-level BPE (s1/s2) or a pinned
+Hugging Face fast tokenizer (`tokenizers`, s3+).
 """
 
 from __future__ import annotations
 
 import base64
 import hashlib
+import re
 from functools import cache
 from importlib import resources
 
@@ -17,11 +16,50 @@ from .spec import Season
 PAT_STR = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}++| ?\p{N}++| ?[^\s\p{L}\p{N}]++|\s++$|\s+(?!\S)|\s"""
 
 
+class _HFEncoding:
+    """Thin adapter exposing tiktoken's encode_ordinary / encode_ordinary_batch over HF `tokenizers`."""
+
+    def __init__(self, tok, name: str):
+        self._tok = tok
+        self.name = name
+
+    def encode_ordinary(self, text: str) -> list[int]:
+        return self._tok.encode(text, add_special_tokens=False).ids
+
+    def encode_ordinary_batch(self, texts: list[str]) -> list[list[int]]:
+        return [enc.ids for enc in self._tok.encode_batch(texts, add_special_tokens=False)]
+
+    def decode(self, ids: list[int]) -> str:
+        return self._tok.decode(ids, skip_special_tokens=False)
+
+
+def _hf_model_dir(repo: str, revision: str):
+    from .data import cache_dir
+
+    slug = re.sub(r"[^a-zA-Z0-9._-]+", "--", repo).strip("-")
+    return cache_dir() / "models" / slug / revision
+
+
 @cache
 def load_encoding(season: Season):
+    cfg = season.raw["tokenizer"]
+    if cfg.get("kind") == "hf":
+        from tokenizers import Tokenizer
+
+        from .data import fetch
+
+        dest = _hf_model_dir(cfg["repo"], cfg["revision"]) / cfg["file"]
+        path = fetch(
+            [cfg["url"]],
+            cfg["sha256"],
+            dest,
+            label=f"{cfg['repo']}/{cfg['file']}",
+            max_bytes=int(cfg.get("size") or (64 << 20)) + (1 << 20),
+        )
+        return _HFEncoding(Tokenizer.from_file(str(path)), name=f"stet-{season.id}")
+
     import tiktoken
 
-    cfg = season.raw["tokenizer"]
     blob = resources.files("stet.seasons").joinpath(cfg["file"]).read_bytes()
     if hashlib.sha256(blob).hexdigest() != cfg["sha256"]:
         raise RuntimeError(f"tokenizer file {cfg['file']} does not match the season's sha256")
@@ -57,8 +95,6 @@ def _panicked(e: BaseException) -> bool:
 
 
 def encode_one(enc, text: str) -> list[int]:
-    import re
-
     try:
         return enc.encode_ordinary(text)
     except BaseException as e:
@@ -82,4 +118,3 @@ def encode_batch(enc, texts: list[str]) -> list[list[int]]:
         if not _panicked(e):
             raise
     return [encode_one(enc, t) for t in texts]
-

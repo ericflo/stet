@@ -4,7 +4,7 @@
   <div class="wrap split-head">
     <div>
       <h1>Rounds</h1>
-      <p class="sub">A round is one contest. Training data is drawn at random, <b>every curator edits the same data</b>, and the same model learns from each version and sits the same exam. One round at a time, {{if .OnDemand}}at least {{end}}every {{.Interval}}.</p>
+      <p class="sub">A round is one contest. Training data is drawn at random, <b>every curator edits the same data</b>, and the same model learns from each version and sits the same exam. One round at a time, {{if .OnDemandOnly}}drawn on demand whenever a curator is waiting{{else}}{{if .OnDemand}}at least {{end}}every {{.Interval}}{{end}}.</p>
     </div>
     {{template "round-diagram"}}
   </div>
@@ -22,7 +22,7 @@
   </ol>
   {{if $d.Earlier}}<p class="after">The latest {{len $d.Rounds}} rounds. Older ones keep their pages: <a href="/rounds/{{$d.Earlier}}">round {{$d.EarlierIdx}}</a> and back from there.</p>{{end}}
   {{else}}
-  <div class="empty"><span class="hand">not yet</span>No round has been scheduled. The first is announced as soon as a crawl is in play.</div>
+  <div class="empty"><span class="hand">not yet</span>{{if .OnDemandOnly}}No round has been scheduled yet. Rounds are drawn on demand whenever a curator is waiting.{{else}}No round has been scheduled. The first is announced as soon as a crawl is in play.{{end}}</div>
   {{end}}
   {{with pastSeasons}}<p class="after">Rounds of earlier seasons: {{range $i, $p := .}}{{if $i}}, {{end}}<a href="/seasons/{{$p.ID}}/rounds">{{$p.Title}}</a>{{end}}.</p>{{end}}
 </div>

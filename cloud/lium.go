@@ -39,7 +39,7 @@ const liumImage, liumImageTag = "daturaai/pytorch", "2.12.0-py3.12-cuda13.0.2-de
 const liumCommand = `bash -c '` + workerInner + `'`
 
 // liumHours is how long Lium lets a pod live, whatever becomes of the fleet: its own backstop.
-const liumHours = 3
+const liumHours = 6
 
 // liumExecutor is one node, of the fields read here. Memory and disk are in kB.
 type liumExecutor struct {

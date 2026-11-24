@@ -50,11 +50,11 @@ func TestReferenceCuratorsTakeTurnsAndTheNamedOnesRunEveryRound(t *testing.T) {
 	pub, priv := newKey()
 	w := newWorld(t, pub)
 	rule := w.app.season.References
-	if rule.OneIn != 8 || len(rule.EveryRound) != 2 || rule.EveryRound[0] != "fineweb2" || rule.EveryRound[1] != "dclm" {
-		t.Fatalf("this test is written for fineweb2 and dclm in every round and the rest one in 8: %+v", rule)
+	if rule.OneIn != 8 || len(rule.EveryRound) != 2 || rule.EveryRound[0] != "fineweb2" || rule.EveryRound[1] != "reader" {
+		t.Fatalf("this test is written for fineweb2 and reader in every round and the rest one in 8: %+v", rule)
 	}
 	anchor, alice := w.join("anchor-one", priv), w.join("alice", nil)
-	every := []string{w.submit(anchor, "fineweb2", "print('fineweb2')"), w.submit(anchor, "dclm", "print('dclm')")}
+	every := []string{w.submit(anchor, "fineweb2", "print('fineweb2')"), w.submit(anchor, "reader", "print('reader')")}
 	var turns []string
 	for _, name := range []string{"ref-a", "ref-b", "ref-c", "ref-d", "ref-e"} {
 		turns = append(turns, w.submit(anchor, name, "print('"+name+"')"))
@@ -249,7 +249,7 @@ func TestEntrantsCuratorsDoNotTakeTheReferencesPlacesOnTheLadder(t *testing.T) {
 	cfg.LadderSize = 2
 	w := startWorld(t, cfg, newMemKV(), dirBlobs{filepath.Join(cfg.DataDir, "blobs")})
 	anchor := w.join("anchor-one", priv)
-	every := []string{w.submit(anchor, "fineweb2", "print('fineweb2')"), w.submit(anchor, "dclm", "print('dclm')")}
+	every := []string{w.submit(anchor, "fineweb2", "print('fineweb2')"), w.submit(anchor, "reader", "print('reader')")}
 	turn := w.submit(anchor, "ref-a", "print('ref-a')")
 	mine := map[string]string{}
 	for _, name := range []string{"first", "second", "third"} {

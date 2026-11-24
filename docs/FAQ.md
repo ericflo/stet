@@ -47,9 +47,10 @@ of an official round sits what that round published, its generated questions and
 Wikipedia text.
 
 Official runs cost volunteers GPU time, so those are rationed: three entries in play at
-once. How often you submit is not limited. An entry runs in the next round drawn. A round is
-drawn every 3 hours. Its exam is made at the draw, and it settles as soon as its runs and
-its grades are in.
+once. How often you submit is not limited. An entry runs in the next round drawn. Rounds are
+drawn **on demand** whenever an entry is waiting and the previous round has settled, staying
+quiet between submissions. Each round's exam is made at the draw, and it settles as soon as
+its runs and its grades are in.
 
 ## Can my coding agent do this?
 
@@ -64,14 +65,15 @@ published.
 ## Can my curator use a language model?
 
 Yes. Name its weights in `stet.toml` and they are in place when your curator starts: up to
-4 GiB of public files on Hugging Face, which is room for a model of a billion or two
-parameters at half precision. `stet asset add <owner>/<repository>` does it. Your curator
-gets one GPU with 8 GB of memory, PyTorch and transformers, and twenty minutes for the whole
-corpus.
+10 GiB of public files on Hugging Face, which is room for 0.6B–4B parameter models at half
+precision. `stet asset add <owner>/<repository>` does it. Your curator gets one GPU with
+22 GB of memory, PyTorch, `vllm`, `flash-linear-attention`, `liger-kernel` and
+`transformers`, and twenty minutes for the whole corpus.
 
-Twenty minutes is the real limit. A round's corpus is about six times what the student can
-read, so a model cannot read all of every page: spend it where cheaper tests cannot
-decide. `examples/reader` is a working curator that does this with a 135M-parameter model.
+Twenty minutes is the real limit. A standard round's corpus is 3.6 GB (~34× the student
+budget), so a model does not need to read every byte: combine cheap multilingual filters
+with batched `vLLM` scoring. `examples/reader` is a working curator that does this with
+`Qwen3-0.6B`.
 
 ## Can I fine-tune a model for this and run it over the data?
 
@@ -126,10 +128,11 @@ they are. Any other copy is at least 64 bytes long.
 ## Is the exam secret?
 
 Nobody knows it in advance, the organisers included. Each round's exam is made at its draw.
-Three quarters of the score is human writing from three hours of the day before, which the
-draw picks, gathered from many sources that need no key. One quarter is questions generated
-from the round's seed. Your curator runs with no network and can add no text of its own:
-a script is copies of the round's corpus and nothing else.
+Half of the score is fresh contrastive comprehension (`Right − Wrong`) from three hours of
+writing people published the day before, which the draw picks, gathered from many sources
+that need no key. Half is questions generated from the round's seed. Your curator runs with
+no network and can add no text of its own: a script is copies of the round's corpus and
+nothing else.
 
 Until the round settles, the exam goes only to the machines grading it. Then it is
 published: the generated questions and Wikipedia's text whole, and every other source's
@@ -141,9 +144,10 @@ student's score on every item is published with it.
 There is nothing to fit in advance: a round's writing is three hours of the day before,
 which its draw picks, and its questions come from its seed. What a curator can learn from
 past rounds is what kinds of text matter (news, programs, replies, every language), and
-keeping more of those is choosing good data, which is the point. The exam weighs four kinds
-of writing and seven skills, and every language by its share of the crawl, so no one source
-or kind of text can carry a score.
+keeping more of those is choosing good data, which is the point. The exam weighs four
+comprehension kinds and seven skills, and every language by its share of the crawl, so no
+one source or kind of text can carry a score — and contrastive scoring cancels out surface
+style mimicry.
 
 ## Does everything on the exam count?
 

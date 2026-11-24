@@ -19,20 +19,20 @@ from dataclasses import dataclass, field
 from functools import cache
 from importlib import resources
 
-HARNESS_VERSION = "0.5.0"
+HARNESS_VERSION = "0.6.0"
 # The oldest stet whose grades are this one's: the server refuses jobs and results from older
 # ones, and they upgrade. Moved up only when what a grade measures changes, so that a release
 # that changes nothing in a grade does not throw away work under way.
-GRADES_SINCE = "0.5.0"
+GRADES_SINCE = "0.6.0"
 # The season the competition is in: what every command means when it names none. Changing it is
 # the switch from one season to the next (see docs/OPERATING.md).
-CURRENT_SEASON = "s2"
+CURRENT_SEASON = "s3"
 
 
 @dataclass(frozen=True)
 class Scale:
     name: str
-    corpus_units: int  # corpus size, in units of roughly 350 MB of raw text
+    corpus_units: int  # corpus size, in units of roughly 300-350 MB of raw text
     train_tokens: int
     n_layer: int
     n_head: int
@@ -41,6 +41,8 @@ class Scale:
     batch_size: int
     lr: float
     edit_seconds: int
+    micro_batch: int = 0  # 0: same as batch_size (no gradient accumulation)
+    sft_steps: int = 0  # 0: no post-pretraining SFT probe
 
     @property
     def steps(self) -> int:
@@ -76,7 +78,15 @@ class Season:
         """
         rules = {k: v for k, v in self.raw.items() if k not in POLICY_KEYS}
         h = hashlib.sha256(json.dumps(rules, sort_keys=True, separators=(",", ":")).encode())
-        h.update(resources.files("stet.seasons").joinpath(self.raw["tokenizer"]["file"]).read_bytes())
+        tok_cfg = self.raw["tokenizer"]
+        if tok_cfg.get("kind") == "hf":
+            # External HF tokenizer pinned by sha256 in rules (verified on download in tok.py).
+            h.update(bytes.fromhex(tok_cfg["sha256"]))
+        else:
+            h.update(resources.files("stet.seasons").joinpath(tok_cfg["file"]).read_bytes())
+        # Pinned base student files (if the season starts from a pretrained checkpoint).
+        for f in (self.raw.get("student") or {}).get("files") or []:
+            h.update(bytes.fromhex(f["sha256"]))
         # the facts its knowledge items ask
         h.update(resources.files("stet.exam").joinpath("data", self.raw["exam"]["facts"]["file"]).read_bytes())
         for s in self.pool("gym"):

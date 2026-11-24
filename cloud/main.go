@@ -75,29 +75,30 @@ Run any command with -h for its settings.
 
 // Options are the settings every command shares.
 type Options struct {
-	Service      *Service // the settings the service runs with, when status judges by them
-	Home         string
-	Credentials  string // the markets' keys (market.go)
-	API          string
-	RunPodAPI    string
-	VastAPI      string
-	LiumAPI      string
-	SaladAPI     string
-	CloreAPI     string
-	OperatorKey  string
-	Cloud        string
-	Market       string // up and offers: this market alone; up rents there armed or not
-	GPUs         []string
-	Image        string
-	Disk         int
-	MinCUDA      string
-	MinRAM       int
-	MinCPU       int
-	MinGPUMemory int
-	MaxPrice     float64 // dollars an hour for one machine; 0: any
-	LongMaxPrice float64 // the same, for a machine rented for the organisers' bigger students; 0: MaxPrice
-	LongMinutes  int     // the longest of the organisers' students a machine takes, minutes; 0: the short ones only
-	Cheapest     bool    // rent the cheapest a grade first, not the fastest
+	Service             *Service // the settings the service runs with, when status judges by them
+	Home                string
+	Credentials         string // the markets' keys (market.go)
+	API                 string
+	RunPodAPI           string
+	VastAPI             string
+	LiumAPI             string
+	SaladAPI            string
+	CloreAPI            string
+	OperatorKey         string
+	Cloud               string
+	Market              string // up and offers: this market alone; up rents there armed or not
+	GPUs                []string
+	Image               string
+	Disk                int
+	MinCUDA             string
+	MinRAM              int
+	MinCPU              int
+	MinGPUMemory        int
+	MinCuratorGPUMemory int
+	MaxPrice            float64 // dollars an hour for one machine; 0: any
+	LongMaxPrice        float64 // the same, for a machine rented for the organisers' bigger students; 0: MaxPrice
+	LongMinutes         int     // the longest of the organisers' students a machine takes, minutes; 0: the short ones only
+	Cheapest            bool    // rent the cheapest a grade first, not the fastest
 	// For grades taken before an exam: how long after it the round may settle.
 	Settle time.Duration
 	Idle   int
@@ -157,9 +158,10 @@ func flags(name string, o *Options) *flag.FlagSet {
 	fs.StringVar(&o.Image, "image", "ubuntu:24.04", "the container image; stet is installed on it when the pod starts")
 	fs.IntVar(&o.Disk, "disk", 100, "container disk, GB: stet and the season's libraries, a round's corpus and assets, and the 60 GB a machine that runs curators keeps free")
 	fs.StringVar(&o.MinCUDA, "min-cuda", "13.0", "the oldest CUDA the host's driver may have: the season's PyTorch is built for CUDA 13")
-	fs.IntVar(&o.MinRAM, "min-ram", 16, "host memory a GPU, GB: the season's floor for a machine that runs curators (a curator is given 12)")
+	fs.IntVar(&o.MinRAM, "min-ram", 24, "host memory a GPU, GB: the season's floor for a machine that runs curators (a curator is given 20)")
 	fs.IntVar(&o.MinCPU, "min-cpus", 6, "host vCPUs a GPU: the season's floor for a machine that runs curators")
-	fs.IntVar(&o.MinGPUMemory, "min-gpu-memory", 12, "GPU memory, GB: a curator is given 8, and a machine that runs them needs 10")
+	fs.IntVar(&o.MinGPUMemory, "min-gpu-memory", 16, "GPU memory, GB: floor for grading the Season 3 0.6B student")
+	fs.IntVar(&o.MinCuratorGPUMemory, "min-curator-gpu-memory", 24, "GPU memory, GB: floor for machines rented to run curators (a curator is given 22)")
 	fs.IntVar(&o.Idle, "idle", 15, "minutes a machine waits with nothing to do before it ends itself")
 	noEdits := fs.Bool("no-edits", false, "rent machines that only grade, and leave curators to the organisers' own machines")
 	ssh := fs.Bool("ssh", false, "let ~/.ssh/id_ed25519.pub log in to the machines rented (for `stet-cloud ssh`)")
@@ -168,7 +170,7 @@ func flags(name string, o *Options) *flag.FlagSet {
 	fs.IntVar(&o.LongMinutes, "long-farm", 0, "rent machines that also take the organisers' bigger students, given up to this many minutes each, and one for each waiting (0: none)")
 	fs.Float64Var(&o.MaxPrice, "max-price", 0, "never rent a machine that costs more than this many dollars an hour, however much work is waiting (0: any)")
 	fs.Float64Var(&o.LongMaxPrice, "long-max-price", 0, "the same, for a machine rented for the organisers' bigger students, which is chosen for what a student costs on it rather than its price (0: --max-price)")
-	fs.Float64Var(&o.MaxHourly, "max-hourly", 3, "never rent past this many dollars an hour, all machines together")
+	fs.Float64Var(&o.MaxHourly, "max-hourly", 4, "never rent past this many dollars an hour, all machines together")
 	fs.Float64Var(&o.DailyBudget, "daily-budget", 0, "rent nothing more once about this many dollars have been spent today, UTC (0: no limit)")
 	fs.Float64Var(&o.PerRunner, "per-runner", 2, "with --no-edits: machines that keep pace with one of the organisers' machines running curators")
 	fs.IntVar(&o.PerWorker, "per-machine", 6, "scripts waiting to be graded that justify one more machine")

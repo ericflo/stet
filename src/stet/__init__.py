@@ -6,7 +6,7 @@ __all__ = ["__version__", "source_digest"]
 
 # The files that decide a score. Their combined hash goes into every result, so that when
 # two machines disagree the first question ("were they running the same code?") is answered.
-SCORING_SOURCES = ("spec.py", "data.py", "script.py", "tok.py", "model.py", "train.py", "grade.py", "exam/items.py", "exam/score.py")
+SCORING_SOURCES = ("spec.py", "data.py", "script.py", "tok.py", "model.py", "train.py", "grade.py", "exam/items.py", "exam/score.py", "exam/sft.py")
 _digest = None
 
 

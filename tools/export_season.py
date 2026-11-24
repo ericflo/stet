@@ -67,6 +67,8 @@ def export(season_id: str = CURRENT_SEASON) -> dict:
         "baselines": raw.get("baselines", {}),
         "references": raw.get("references", {}),
         "train": raw["train"],
+        "student": {k: raw["student"][k] for k in ("kind", "repo", "revision", "reset_frac") if k in raw["student"]} if "student" in raw else {},
+        "sft": raw.get("sft", {}),
         "tokenizer": {k: raw["tokenizer"][k] for k in ("vocab_size",)},
         "parity": {
             "index": 7, "beacon": beacon, "crawl": crawl, "seed": rnd.seed.hex(),

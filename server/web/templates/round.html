@@ -57,7 +57,7 @@
   {{else}}
   {{if $d.Alone}}<p class="note early"><b>One machine behind every score here.</b> No volunteer was around, so the organisers' machine ran and graded each curator itself. Every script is public for anyone to re-grade. <a href="/verify">Lend a GPU →</a></p>{{end}}
   <div class="list-head"><h2>Results</h2></div>
-  <p class="caption"><b>Gain</b> is how much better the model did on the exam after learning from a curator's pages than from the same pages unedited, in bits per byte. Writing is three quarters of it, skills one. Tap a curator to see who ran it and who checked it.</p>
+  <p class="caption"><b>Gain</b> is how much better the model did on the exam after learning from a curator's pages than from the same pages unedited, in bits per byte. Contrastive comprehension is half of it, skills half. Tap a curator to see who ran it and who checked it.</p>
   <ol class="ranked results" id="runs">
     {{range $d.Entries}}<li id="e-{{short .EditorID}}"><details class="open-row">
       <summary class="row opens">
@@ -108,7 +108,7 @@
     <details class="more" id="exam">
       <summary>{{if $r.ExamSHA}}What its exam was made of{{else}}Its exam{{end}}</summary>
       <div class="in">
-        <p class="lead">Every round's exam is new, made at the draw, so nobody can know it in advance, the organisers included. Three quarters of the score is writing people published in three hours of the day before, picked by the draw; the round's training data was gathered before any of it was written. One quarter is problems generated from the round's random seed. The model is scored on how well it predicts the right text, in bits per byte.</p>
+        <p class="lead">Every round's exam is new, made at the draw, so nobody can know it in advance, the organisers included. Half of the score is fresh contrastive comprehension from three hours of writing people published the day before, picked by the draw (real continuation minus matched wrong continuations from the same source and language); the round's training data was gathered before any of it was written. Half is problems generated from the round's random seed.</p>
         {{if eq $r.Status "scheduled"}}<p class="lead">This one does not exist yet. It is made at the draw, from three of the hours of writing harvested by then.</p>
         {{else if not $r.ExamSHA}}<p class="lead">This one is being made now{{with $d.Work}}{{with .ExamDue}}, and is due about {{hm .}} UTC{{end}}{{end}}{{if $r.Hours}}, from what people published in the hours from {{range $i, $h := $r.Hours}}{{if $i}} · {{end}}{{hourof $h.Hour}}{{end}} UTC{{end}}. Text already in the round's training data is left out.</p>
         {{else}}{{with $r.ExamMix}}<p class="lead"><b>{{comma .Items}} items</b>, posted {{datetime $r.ExamAt}}: {{comma .Fresh}} passages people wrote{{if $r.Hours}} in the hours from {{range $i, $h := $r.Hours}}{{if $i}} · {{end}}{{hourof $h.Hour}}{{end}} UTC{{if $r.HoursLate}} (chosen after the draw: nothing had been harvested by then){{end}}{{end}}{{if .Langs}}, in {{.Langs}} {{plural .Langs "language" "languages"}}{{end}}, and {{comma (sub .Items .Fresh)}} problems generated from the round's seed.</p>
@@ -136,7 +136,7 @@
           {{if $d.Shards}}<dt>Files drawn</dt><dd><span class="num" style="font-size:14px">{{range $i, $s := $d.Shards}}{{if $i}}, {{end}}#{{$s}}{{end}}</span><span class="why">positions in the crawl's file list</span></dd>{{end}}
           {{if $r.CorpusSHA}}<dt>Training data sha256</dt><dd><code>{{$r.CorpusSHA}}</code></dd>{{end}}
           {{if $r.ExamSHA}}<dt>Exam sha256</dt><dd><code>{{$r.ExamSHA}}</code><span class="why">the round's exam, made at the draw{{if $r.ExamAt}} and posted {{datetime $r.ExamAt}}{{end}}</span></dd>{{end}}
-          <dt>The model</dt><dd>{{$d.Scale.NLayer}} layers × {{$d.Scale.DModel}} wide, reading {{compact $d.Scale.TrainTokens}} tokens<span class="why">the {{$r.Scale}} scale; the same for every curator in the round</span></dd>
+          <dt>The model</dt><dd>{{$d.Scale.NLayer}} layers × {{$d.Scale.DModel}} wide, reading {{compact $d.Scale.TrainTokens}} tokens{{if $d.Scale.SFTSteps}} + {{$d.Scale.SFTSteps}}-step SFT probe{{end}}<span class="why">the {{$r.Scale}} scale; the same for every curator in the round</span></dd>
         </dl>
         {{if ne $r.Status "scheduled"}}<p class="lead" style="margin-top:16px">Rebuild this training data yourself, and measure the unedited baseline:</p>
         <div class="cmd"><pre><span class="p">$ </span><span data-copy-text>stet baseline --round {{$d.ID}} --scale {{$r.Scale}}</span></pre><button type="button" data-copy>copy</button></div>{{end}}

@@ -66,6 +66,7 @@ SET_ASIDE_FOR = 3 * 3600  # seconds a set-aside round is kept: longer than any j
 CACHE_KINDS = (
     ("rounds", "built rounds"),
     ("pool", "downloaded crawl files"),
+    ("models", "base student weights"),
     ("assets", "curators' model files"),
     ("verify", "a verifier's working files"),
     ("scripts", "edit scripts"),
@@ -836,7 +837,7 @@ def _items(rnd: Round):
     from .exam.items import Item
 
     cfg = rnd.season.raw["exam"]
-    if gen.VERSION != int(cfg["generator_version"]):
+    if int(cfg["generator_version"]) > gen.VERSION:
         raise RuntimeError(f"season {rnd.season.id} sets the exam's generators at version {cfg['generator_version']}, "
                            f"this copy of stet has {gen.VERSION}: upgrade stet")
     if rnd.kind != "official":

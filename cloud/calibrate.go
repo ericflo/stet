@@ -25,8 +25,8 @@ import (
 // learned from the machines this service rents. Until a kind has been seen, its pass is a
 // 3090's over its speed in the table (speed.go).
 
-// passOn3090 is a training pass on an RTX 3090 at the standard scale.
-const passOn3090 = 18 * time.Minute
+// passOn3090 is a training pass on an RTX 3090 at the standard scale (Season 3 Qwen3-0.6B-Base).
+const passOn3090 = 40 * time.Minute
 
 // Between booting and training, and after: fetching the round's corpus and making the two
 // scripts before it trains, and sitting the exam once it has.

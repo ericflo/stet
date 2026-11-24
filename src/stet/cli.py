@@ -160,7 +160,11 @@ def report(out: Out, result: dict, base: dict | None, season) -> None:
     out.line("exam", f"{e['items']:,} items · mean {e['mean']:.4f} bits per byte" + (f"   baseline {base['exam']['mean']:.4f}" if base else ""))
     if base and "gain" in result:
         out.line("", "          " + " · ".join(f"{k} {v:+.3f}" for k, v in (result.get("pillars") or {}).items()))
-        text = out.bold(f"{result['gain']:+.4f}") + " bits per byte: writing three quarters, skills one, of those above"
+        groups = (season.raw.get("exam") or {}).get("groups") or {}
+        if "comprehension" in groups:
+            text = out.bold(f"{result['gain']:+.4f}") + " (half fresh contrastive comprehension, half skills, of those above)"
+        else:
+            text = out.bold(f"{result['gain']:+.4f}") + " bits per byte: writing three quarters, skills one, of those above"
         m = multiplier(season, result["round"]["kind"], result["scale"], result["gain"])
         if m:
             text += f"   →   {out.bold(format_multiplier(m))} data efficiency"
@@ -313,7 +317,7 @@ def cmd_run(args):
         report(out, result, base, season)
         _edit_time_line(out, result, season)
         if not result["writing"]:
-            out.line("note", "no writing in this round's exam, which is three quarters of an official round's score. "
+            out.line("note", "no fresh contrastive comprehension in this round's exam, which is half of an official round's score. "
                              "`stet harvest` fetches some, once, and needs no account.")
         out.line("saved", str((work / "result.json").relative_to(Path.cwd()) if work.is_relative_to(Path.cwd()) else work / "result.json"))
         results.append(result)

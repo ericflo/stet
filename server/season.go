@@ -26,9 +26,11 @@ type Scale struct {
 	DModel             int     `json:"d_model"`
 	Ctx                int     `json:"ctx"`
 	BatchSize          int     `json:"batch_size"`
+	MicroBatch         int     `json:"micro_batch,omitempty"`
 	LR                 float64 `json:"lr"`
 	ExamItemsPerSource int     `json:"exam_items_per_source"`
 	EditSeconds        int     `json:"edit_seconds"`
+	SFTSteps           int     `json:"sft_steps,omitempty"`
 }
 
 type Beacon struct {
@@ -90,6 +92,7 @@ type Environment struct {
 	Packages   map[string]string `json:"packages"`
 	Also       map[string]string `json:"also"` // what those bring with them, pinned too
 	Linux      []string          `json:"linux_x86_64_only"`
+	CUDALinux  []string          `json:"cuda_linux_only,omitempty"`
 }
 
 // BaselineRule is how many machines measure a round's unedited baseline. See judge.asksBaseline.
@@ -137,6 +140,8 @@ type Season struct {
 	References    ReferenceRule           `json:"references"`
 	Parity        json.RawMessage         `json:"parity"`
 	Train         map[string]float64      `json:"train"`
+	Student       map[string]any          `json:"student,omitempty"`
+	SFT           map[string]any          `json:"sft,omitempty"`
 	Tokenizer     map[string]int          `json:"tokenizer"`
 	Assets        AssetLimits             `json:"assets"`
 	Machine       Machine                 `json:"machine"`

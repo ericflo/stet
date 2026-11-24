@@ -19,7 +19,7 @@ There are two kinds of work, and you choose whether to take the second.
 | | Grading | Running curators (`--edits`) |
 |---|---|---|
 | What runs on your machine | the fixed trainer, on plain data | entrants' programs, in a sandbox |
-| Needs | an NVIDIA (CUDA) or AMD (ROCm) GPU, the season's PyTorch, 10 GB of disk | also Linux, bubblewrap, the season's libraries, a machine at or above the floor, 60 GB of disk |
+| Needs | an NVIDIA (CUDA) or AMD (ROCm) GPU (16 GB+ VRAM), the season's PyTorch, 10 GB of disk | also Linux, bubblewrap, the season's libraries, a 24 GB+ GPU machine at or above the floor, 80 GB of disk |
 | Who is given it | anyone | accounts that are established (below) |
 
 The installer brings Python 3.13, PyTorch in the build for your GPU, and the season's
@@ -116,7 +116,7 @@ pass. Each one runs in a sandbox:
   named, all read-only, and scratch space held in memory;
 - not your machine's name, other processes or hardware serial numbers. It can see the
   path of the directories it was given, and so the name of the account `stet` runs as;
-- six cores, 12 GB of memory, one GPU with 8 GB of its memory, and the time limit, after
+- six cores, 20 GB of memory, one GPU with 22 GB of its memory, and the time limit, after
   which it is killed.
 
 `stet verify --edits` tests the sandbox before it takes any work and will not start
@@ -128,7 +128,7 @@ what any of this contains. Curators are public code from accounts tied to a GitH
 identity, which is a deterrent and not a guarantee. Run curators on a machine you could
 reinstall without loss.
 
-A curator may name model files, up to 4 GiB an entry. They are fetched from Hugging Face
+A curator may name model files, up to 10 GiB an entry. They are fetched from Hugging Face
 before it runs, checked against their hashes, and kept in a cache that is trimmed at
 40 GB and of whatever has gone unused for two weeks
 ([what it keeps on your disk](#what-it-keeps-on-your-disk)). A run takes up to twenty

@@ -404,3 +404,96 @@ func TestTheWorkSaysWaitingOnlyWhenARunnerWouldDrawEarly(t *testing.T) {
 	}
 	w.check()
 }
+
+// In on-demand-only mode (RoundInterval == 0), no idle round is scheduled while nothing is
+// waiting; submitting lights up work.Waiting so stet-cloud spins up a runner; once a runner
+// arrives the round is scheduled, rounds chain back-to-back until every entry has qualified,
+// and once nothing is waiting no further round is scheduled.
+func TestOnDemandOnlyDrawsOnlyWhenEntriesWait(t *testing.T) {
+	w, anchor := demandWorld(t, func(c *Config) {
+		c.RoundInterval = 0
+		c.RoundMinGap = 0
+		c.QualifyRounds = 2
+	})
+	alice := w.join("alice", nil)
+	ctx := context.Background()
+	work := func() Work {
+		t.Helper()
+		var out Work
+		if code := anchor.do("GET", "/api/v1/admin/work", nil, &out); code != 200 {
+			t.Fatalf("HTTP %d", code)
+		}
+		return out
+	}
+
+	// Quiet start: no round scheduled, nothing waiting.
+	w.app.tick(ctx)
+	if at := w.scheduledAt(); at != 0 {
+		t.Fatalf("with nobody waiting in on-demand-only mode, round scheduled at %d", at)
+	}
+	if wk := work(); wk.Waiting || wk.NextDrawAt != 0 {
+		t.Fatalf("quiet start: waiting=%v next_draw_at=%d", wk.Waiting, wk.NextDrawAt)
+	}
+
+	// Alice submits with no runner around: still no round scheduled, but work.Waiting flips true.
+	w.submit(alice, "first", "print(1)")
+	w.app.tick(ctx)
+	if at := w.scheduledAt(); at != 0 {
+		t.Fatalf("scheduled at %d before any runner asked for work", at)
+	}
+	if wk := work(); !wk.Waiting {
+		t.Fatal("work.Waiting is false when an entry waits with no runner in on-demand-only mode")
+	}
+
+	// Runner arrives and asks for work: tick schedules Round 1 on the grid with drawNotice.
+	w.claim(anchor, true)
+	w.app.tick(ctx)
+	at := w.scheduledAt()
+	grid := w.app.season.DrawGrid
+	if at == 0 || at < now()+drawNotice-2 || at > now()+drawNotice+grid || at%grid != 0 {
+		t.Fatalf("on-demand-only round scheduled at %d (in %ds), want in [%d, %d] on grid %d", at, at-now(), drawNotice, drawNotice+grid, grid)
+	}
+	if wk := work(); wk.Waiting || wk.NextDrawAt != at {
+		t.Fatalf("once scheduled: waiting=%v next_draw_at=%d (want %d)", wk.Waiting, wk.NextDrawAt, at)
+	}
+
+	// Round 1 plays and settles: Alice still has 1 of 2 qualifying rounds left, so Round 2 is
+	// scheduled immediately on settle!
+	loss := func(string, int) float64 { return 3.0 }
+	w.play(anchor, 1, loss)
+	if at2 := w.scheduledAt(); at2 == 0 {
+		t.Fatal("Round 2 was not scheduled after Round 1 settled while Alice still qualifies")
+	}
+
+	// Round 2 plays and settles: Alice has completed QualifyRounds, so no Round 3 is scheduled!
+	w.play(anchor, 1, loss)
+	w.app.tick(ctx)
+	if at3 := w.scheduledAt(); at3 != 0 {
+		t.Fatalf("Round 3 was scheduled at %d after all qualifying rounds finished", at3)
+	}
+	if wk := work(); wk.Waiting || wk.NextDrawAt != 0 {
+		t.Fatalf("after qualifying finished: waiting=%v next_draw_at=%d", wk.Waiting, wk.NextDrawAt)
+	}
+
+	// Manual admin draw still works even when no round is scheduled yet (e.g., an entry sits
+	// queued while no runner is around).
+	w.submit(alice, "second", "print(2)")
+	w.app.st.update(ctx, func(tx *Tx) error {
+		for _, e := range tx.s.Editors {
+			if e.Name == "second" {
+				e.CreatedAt -= 60
+				tx.saveEditor(e)
+			}
+		}
+		return nil
+	})
+	if code := anchor.do("POST", "/api/v1/admin/draw", map[string]any{}, nil); code != 200 {
+		t.Fatalf("manual draw in on-demand-only mode: HTTP %d", code)
+	}
+	w.app.st.view(func(s *State) {
+		if s.roundWithStatus("open") == nil {
+			t.Fatal("manual draw did not open a round in dev mode")
+		}
+	})
+	w.check()
+}

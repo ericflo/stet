@@ -980,6 +980,9 @@ func (f *Fleet) launchSome(ctx context.Context, v *View, n int, long, curators b
 		}
 		var held []Offer
 		for _, c := range gpus {
+			if f.o.MinCuratorGPUMemory > 0 && c.MemoryGB < f.o.MinCuratorGPUMemory {
+				continue
+			}
 			if _, no := refused.refused(c, f.now()); f.curators(c.Market) && !no {
 				held = append(held, c)
 			}

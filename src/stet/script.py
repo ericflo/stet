@@ -301,6 +301,8 @@ def materialize(
     max_segments = int(limits["max_segments"])
     max_out = int(limits["max_out_doc_bytes"])
     eot = season.eot
+    tok_dtype = np.uint16 if season.vocab_size <= 65535 else np.uint32
+    tok_endian = "<u2" if tok_dtype is np.uint16 else "<u4"
     lanes = scale.batch_size
     lane_len = scale.steps * scale.ctx + 1
     stats = Stats(train_tokens=lanes * lane_len)
@@ -337,7 +339,7 @@ def materialize(
             if full:
                 stats.truncated = True  # the budget ran out part-way through this batch
                 break
-            arr = np.empty(len(toks) + 1, dtype=np.uint16)
+            arr = np.empty(len(toks) + 1, dtype=tok_dtype)
             arr[0] = eot
             arr[1:] = toks
             first_pass.append(arr)
@@ -409,10 +411,10 @@ def materialize(
         full = deal(first_pass[i % len(first_pass)])
         i += 1
     stats.passes = round(1.0 + i / len(first_pass), 4) if i else 1.0
-    tokens = np.empty((lanes, lane_len), dtype=np.uint16)
+    tokens = np.empty((lanes, lane_len), dtype=tok_dtype)
     for b in range(lanes):
         tokens[b] = np.concatenate(lane_chunks[b])[:lane_len]
-    stats.tokens_sha256 = hashlib.sha256(tokens.astype("<u2", copy=False).tobytes()).hexdigest()
+    stats.tokens_sha256 = hashlib.sha256(tokens.astype(tok_endian, copy=False).tobytes()).hexdigest()
     return tokens, stats
 
 

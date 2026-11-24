@@ -44,7 +44,12 @@ def item(part: str, lang: str, fmt: str = "prose", kind: str = "answer", n: int 
         corner, source = f"{part}/{n}", f"gen:{part}"
     else:
         corner, source = f"fresh/{part}/{lang}/{n}", f"{part}:{n}"
-    say = {"passage": {"text": "Text."}, "answer": {"ctx": "Q:", "cont": " A"}, "pair": {"good": "Good.", "bad": "Bad."}}
+    say = {
+        "passage": {"text": "Text."},
+        "answer": {"ctx": "Q:", "cont": " A"},
+        "pair": {"good": "Good.", "bad": "Bad."},
+        "choice": {"ctx": "Q:", "cont": " A", "wrongs": (" B", " C")},
+    }
     return Item(kind=kind, corner=corner, fmt=fmt, lang=lang, source=source, **say[kind])
 
 

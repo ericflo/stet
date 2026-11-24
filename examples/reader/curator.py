@@ -1,186 +1,293 @@
-"""A small language model reads the candidates: how to use model weights in a curator.
+"""A multilingual 0.6B language model reads and rates the corpus: Season 3 reference neural curator.
 
-  1. Keep English prose, as `tidy` does for every language: duplicates dropped, boilerplate
-     lines cut, a crude quality score. Write that script straight away, so there is always
-     one to fall back on. (English only because the model below reads English. The exam is
-     in every language of the crawl, so an entry would bring a reader that is too.)
-  2. Load a small language model (SmolLM2-135M, named in stet.toml and fetched before the
-     clock starts) and have it read the opening of each candidate, best candidates first.
-  3. Drop the candidates the model finds most predictable (templates, repetition) and
-     least predictable (lists, fragments, noise). Fill the budget from what is left.
+  1. Prefilter across ALL languages (never English-only) using lightweight line/script rules
+     and exact deduplication across all available CPU cores (`task.map`), keeping whole
+     documents so code, tables, lists and multilingual prose stay intact. Write a valid
+     fallback script straight away before loading the GPU model.
+  2. Score candidate openings with Qwen/Qwen3-0.6B (pinned in stet.toml) on a 1-to-5
+     educational/reasoning quality rubric by reading the next-token probability distribution
+     over digits '1'..'5' (expected rating).
+     - On NVIDIA Linux, uses `vllm.LLM` with automatic prefix caching for high throughput.
+     - On AMD ROCm, macOS, or when `vllm` is absent, falls back cleanly to batched PyTorch
+       `transformers` inference.
+  3. Fill the training token budget with the highest-rated documents (keeping a balanced
+     floor of quality and respecting `task.time_left()`), ordered as a gentle curriculum:
+     lower-scored kept documents earlier, highest-scored documents in the final LR cooldown
+     window (the Season 3 trainer does not shuffle).
 
-This is a starting point, not a strong entry: zero-shot, a small model's opinion of a page
-is about as good as `tidy`'s heuristics. Fork it and bring a better reader.
+What to copy from it for your own neural curator:
 
-What to copy from it, whatever your model is:
-
-  - Ask for the GPU with task.device(). It is "cuda" on NVIDIA and AMD alike.
-  - Load from task.asset(...). Nothing can be downloaded while the curator runs.
-  - Half precision, and batches sorted by length: the time limit is on the slowest machine
-    that runs curators, and `stet bench` says how yours compares.
-  - Watch task.time_left() and write the script before it runs out. A script written
-    earlier still counts if this one never is.
-  - Two machines will not give the same numbers to the last digit. Round what the model
-    says before sorting or thresholding on it, and break ties by document index, so that
-    a different GPU does not mean a different dataset.
+  - Never drop non-English pages: the exam weighs every language by its share of the crawl.
+  - Round model scores before sorting and break ties by document index so NVIDIA and AMD
+    runs write consistent datasets.
+  - Write a fallback script early and watch `task.time_left()` with a safety margin.
 """
 
+from __future__ import annotations
+
 import hashlib
+import math
 import random
 import re
 import sys
+import unicodedata
 
 from stet.curator import Task
 
-SENTENCE_END = re.compile(r"[.!?][\"')\]]?\s")
-STOPWORDS = (" the ", " of ", " and ", " to ", " in ", " is ", " that ", " for ")
-BYTES_PER_TOKEN = 3.7  # English prose under the season tokenizer, on the generous side
-HEAD_BYTES = 800  # how much of each candidate the model reads
-MAX_TOKENS = 128
-BATCH = 64
-DROP_LOW, DROP_HIGH = 0.08, 0.20  # the share of candidates dropped at each end
-RESERVE_SECONDS = 25  # stop reading this long before the limit, to write the script
+BYTES_PER_TOKEN = 3.5  # conservative multilingual estimate under Qwen3's 151k tokenizer
+HEAD_CHARS = 900  # excerpt read by the 0.6B quality rater
+MAX_PROMPT_TOKENS = 288
+RESERVE_SECONDS = 35
+CANDIDATE_OVERPROVISION = 3.0  # score up to 3x the budget in candidate bytes
+
+# Prompt shared across every document so vLLM automatic prefix caching caches it once.
+RUBRIC_PREFIX = (
+    "Rate the educational, factual, technical, or reasoning value of the following web "
+    "document (in any language) for pretraining a language model on a scale from 1 (spam, "
+    "boilerplate, navigation, ads, or gibberish) to 5 (clear, informative, well-written "
+    "prose, technical documentation, code, or analysis).\n"
+    "Answer with a single digit: 1, 2, 3, 4, or 5.\n\nDocument:\n"
+)
+RUBRIC_SUFFIX = "\n\nRating (1-5):"
+
+MARKS = "".join(c for c in map(chr, range(0x300, 0x10000)) if unicodedata.category(c)[0] == "M")
+WRITING = re.compile(rf"(?:[^\W\d_]|\s|[{re.escape(MARKS)}])+")
+SENTENCE_END = re.compile(r"[.!?…؟۔।][\"')\]”’»]?\s|[。！？｡]|[{};]\n")
 
 
-def looks_english(text: str) -> bool:
+def _prefilter(i: int, text: str):
+    """Cheap multilingual pass run in parallel across CPU cores."""
+    n_chars = len(text)
+    if n_chars < 280 or n_chars > 400_000:
+        return None
     sample = text[:3000]
-    if len(sample) < 200:
-        return False
-    letters = sum(c.isascii() and (c.isalpha() or c == " ") for c in sample)
-    if letters / len(sample) < 0.75:
-        return False
-    low = sample.lower()
-    return sum(low.count(w) for w in STOPWORDS) >= max(4, len(sample) // 300)
+    non_writing = len(WRITING.sub("", sample)) / max(1, len(sample))
+    # Allow code/technical pages (more punctuation) as well as prose of any script,
+    # while rejecting pure symbol garbage and link dumps.
+    if non_writing > 0.45:
+        return None
+    lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
+    if len(lines) < 3:
+        return None
+    short_frac = sum(len(ln) <= 25 for ln in lines) / len(lines)
+    if short_frac > 0.72:
+        return None
+    if not SENTENCE_END.search(sample + " "):
+        return None
+    raw = text.encode("utf-8", "replace")
+    key = hashlib.blake2b(raw[:4096], digest_size=8).digest()
+    # Simple heuristic prior to pick which candidates the 0.6B model reads first.
+    uniq_lines = len(set(lines)) / len(lines)
+    prior = round(uniq_lines + min(1.0, len(raw) / 4000) - short_frac, 3)
+    head = text[:HEAD_CHARS].strip()
+    return prior, key, len(raw), head
 
 
-def prose_ranges(text: str, min_copy: int = 64) -> tuple[list[list[int]], int]:
-    """Byte ranges of the lines worth keeping, and how many bytes they hold."""
-    ranges: list[list[int]] = []
-    pos = 0
-    for line in text.split("\n"):
-        n = len(line.encode("utf-8")) + 1  # + the newline
-        body = line.strip()
-        words = body.count(" ") + 1
-        if len(body) >= 60 and words >= 10 and (SENTENCE_END.search(body + " ") is not None):
-            if ranges and ranges[-1][1] == pos:
-                ranges[-1][1] = pos + n
-            else:
-                ranges.append([pos, pos + n])
-        pos += n
-    # A copy has to be at least min_copy bytes long, or the script is invalid. Drop shorter runs.
-    ranges = [r for r in ranges if r[1] - r[0] >= min_copy + 4]
-    return ranges, sum(b - a for a, b in ranges)
-
-
-def score(text: str, kept: int) -> float:
-    """Higher is better. Rewards documents that are mostly prose and long enough to say something."""
-    total = max(1, len(text.encode("utf-8")))
-    density = kept / total
-    length = min(1.0, kept / 3000)
-    low = text[:4000].lower()
-    explains = sum(low.count(w) for w in (" because ", " therefore ", " however ", " for example ", " which ", " whereas "))
-    sells = sum(low.count(w) for w in (" buy ", " price", " shipping", " cart", " sale", " click ", " subscribe", " cookies"))
-    return density * 1.0 + length * 1.0 + min(explains, 8) * 0.08 - min(sells, 8) * 0.1
-
-
-def candidates(task: Task) -> list[tuple[float, int, list[list[int]], int, str]]:
-    """(score, document, kept ranges, kept bytes, the opening of the kept text), best first."""
-    corpus = task.corpus
-    min_copy = int(task.info.get("min_copy_bytes", 64))
+def collect_candidates(task: Task) -> list[tuple[float, int, int, str]]:
+    """Return (prior, doc_id, size_bytes, excerpt) deduplicated across all languages."""
+    budget_bytes = task.train_tokens * BYTES_PER_TOKEN
+    target_bytes = budget_bytes * CANDIDATE_OVERPROVISION
     seen: set[bytes] = set()
-    out = []
-    for i, text in corpus:
-        if not looks_english(text):
+    kept: list[tuple[float, int, int, str]] = []
+    for i, res in task.map(_prefilter):
+        if task.time_left() < RESERVE_SECONDS * 2:
+            break
+        if res is None:
             continue
-        ranges, kept = prose_ranges(text, min_copy)
-        if kept < 400:
-            continue
-        key = hashlib.blake2b(text[:2000].encode("utf-8", "replace"), digest_size=8).digest()
+        prior, key, size, head = res
         if key in seen:
             continue
         seen.add(key)
-        size = corpus.size(i)
-        ranges = [[a, min(b, size)] for a, b in ranges if a < size and min(b, size) - a >= min_copy]
-        raw = text.encode("utf-8")
-        head = b"".join(raw[a:b] for a, b in ranges)[:HEAD_BYTES].decode("utf-8", "ignore")
-        out.append((score(text, kept), i, ranges, kept, head))
-    out.sort(key=lambda t: (-t[0], t[1]))
+        kept.append((prior, i, size, head))
+    kept.sort(key=lambda t: (-t[0], t[1]))
+    # Cap candidates to ~3x the byte budget (with a sensible minimum for small scales).
+    out: list[tuple[float, int, int, str]] = []
+    total = 0
+    cap = max(target_bytes, 2_000_000)
+    for item in kept:
+        out.append(item)
+        total += item[2]
+        if total >= cap:
+            break
     return out
 
 
-def choose(task: Task, cands, surprise: dict[int, float]) -> list[dict]:
-    """Fill the budget in score order, skipping what the model put at either extreme.
-    A candidate the model never got to is kept: no opinion is not a bad one."""
-    read = sorted(surprise.values())
-    low = read[int(len(read) * DROP_LOW)] if read else float("-inf")
-    high = read[min(len(read) - 1, int(len(read) * (1 - DROP_HIGH)))] if read else float("inf")
+def build_script(task: Task, cands: list[tuple[float, int, int, str]], scores: dict[int, float]) -> list[int]:
+    """Select documents up to the token budget; order higher-rated documents last (cooldown)."""
     budget_bytes = task.train_tokens * BYTES_PER_TOKEN
-    chosen, used = [], 0
-    for _, i, ranges, kept, _ in cands:
+    if not scores:
+        # Fallback before GPU scoring: shuffled high-prior multilingual docs.
+        chosen: list[int] = []
+        used = 0
+        for _, doc_id, size, _ in cands:
+            if used >= budget_bytes:
+                break
+            chosen.append(doc_id)
+            used += size
+        random.Random(0).shuffle(chosen)
+        return chosen
+
+    ranked = sorted(
+        [(scores[doc_id], prior, doc_id, size) for prior, doc_id, size, _ in cands if doc_id in scores],
+        key=lambda t: (-t[0], -t[1], t[2]),
+    )
+    selected: list[tuple[float, int]] = []
+    used = 0
+    for q, _, doc_id, size in ranked:
         if used >= budget_bytes:
             break
-        s = surprise.get(i)
-        if s is not None and not (low <= s <= high):
-            continue
-        chosen.append({"d": i, "k": ranges})
-        used += kept
-    random.Random(0).shuffle(chosen)
-    return chosen
+        selected.append((q, doc_id))
+        used += size
+    if used < budget_bytes:
+        picked = {doc_id for _, doc_id in selected}
+        for _, doc_id, size, _ in cands:
+            if used >= budget_bytes:
+                break
+            if doc_id not in picked:
+                selected.append((2.5, doc_id))
+                used += size
+    # Curriculum ordering: split into 4 quality bands, shuffle inside each band, and place
+    # the highest-rated band last so the student sees the cleanest text during LR cooldown.
+    selected.sort(key=lambda t: (t[0], t[1]))
+    n = len(selected)
+    if n <= 8:
+        return [doc_id for _, doc_id in selected]
+    rng = random.Random(0)
+    out: list[int] = []
+    bands = 4
+    for b in range(bands):
+        lo = (b * n) // bands
+        hi = ((b + 1) * n) // bands
+        chunk = [doc_id for _, doc_id in selected[lo:hi]]
+        rng.shuffle(chunk)
+        out.extend(chunk)
+    return out
 
 
-def read_candidates(task: Task, cands, surprise: dict[int, float]) -> None:
-    """Fill `surprise` with the model's mean loss per token on each candidate's opening,
-    best candidates first, until they are all read or time is nearly up."""
+def _digit_token_ids(tok) -> dict[int, int]:
+    """Map rating digits 1..5 to their single-token IDs."""
+    mapping: dict[int, int] = {}
+    for digit in range(1, 6):
+        ids = tok.encode(str(digit), add_special_tokens=False)
+        if ids:
+            mapping[digit] = int(ids[-1])
+    return mapping
+
+
+def _expected_from_logprobs(logprobs: dict[int, float], digit_ids: dict[int, int]) -> float:
+    vals = [(d, logprobs[tid]) for d, tid in digit_ids.items() if tid in logprobs]
+    if not vals:
+        return 3.0
+    m = max(lp for _, lp in vals)
+    weights = [(d, math.exp(lp - m)) for d, lp in vals]
+    z = sum(w for _, w in weights)
+    if z <= 0:
+        return 3.0
+    return round(sum(d * w for d, w in weights) / z, 2)
+
+
+def _score_vllm(task: Task, where: str, cands: list[tuple[float, int, int, str]], scores: dict[int, float]) -> bool:
+    """Fast path on NVIDIA Linux using vLLM with automatic prefix caching."""
+    import torch
+
+    if task.device() != "cuda" or getattr(torch.version, "hip", None):
+        return False
+    try:
+        from vllm import LLM, SamplingParams
+    except Exception:
+        return False
+
+    llm = LLM(
+        model=where,
+        dtype="bfloat16",
+        max_model_len=MAX_PROMPT_TOKENS + 8,
+        gpu_memory_utilization=0.75,
+        enable_prefix_caching=True,
+        enforce_eager=False,
+        disable_log_stats=True,
+    )
+    tok = llm.get_tokenizer()
+    digit_ids = _digit_token_ids(tok)
+    params = SamplingParams(max_tokens=1, temperature=0.0, logprobs=20)
+    print(f"vLLM loaded Qwen3-0.6B, {task.time_left():.0f}s left", file=sys.stderr)
+
+    batch_size = 512
+    for start in range(0, len(cands), batch_size):
+        if task.time_left() < RESERVE_SECONDS:
+            return True
+        part = cands[start : start + batch_size]
+        prompts = [f"{RUBRIC_PREFIX}{head}{RUBRIC_SUFFIX}" for _, _, _, head in part]
+        outputs = llm.generate(prompts, params, use_tqdm=False)
+        for (_, doc_id, _, _), out in zip(part, outputs, strict=True):
+            step_lps = out.outputs[0].logprobs[0] if out.outputs and out.outputs[0].logprobs else {}
+            lps = {tid: getattr(entry, "logprob", float(entry)) for tid, entry in step_lps.items()}
+            scores[doc_id] = _expected_from_logprobs(lps, digit_ids)
+        print(f"vLLM rated {len(scores):,} / {len(cands):,}, {task.time_left():.0f}s left", file=sys.stderr)
+    return True
+
+
+def _score_transformers(task: Task, where: str, cands: list[tuple[float, int, int, str]], scores: dict[int, float]) -> None:
+    """Portable batched PyTorch/transformers path (AMD ROCm, macOS, or NVIDIA fallback)."""
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     device = task.device()
-    where = task.asset("smollm2-135m")
     tok = AutoTokenizer.from_pretrained(where)
-    tok.padding_side = "right"
+    tok.padding_side = "left"
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
-    model = AutoModelForCausalLM.from_pretrained(where, dtype=torch.float16 if device == "cuda" else torch.float32).to(device).eval()
-    print(f"model loaded on {device}, {task.time_left():.0f}s left", file=sys.stderr)
-    chunk = BATCH * 32  # sort this many by length at a time: similar lengths share a batch
+    dtype = torch.bfloat16 if device == "cuda" else torch.float32
+    model = AutoModelForCausalLM.from_pretrained(where, dtype=dtype).to(device).eval()
+    digit_ids = _digit_token_ids(tok)
+    digits = sorted(digit_ids)
+    digit_tensor = torch.tensor([digit_ids[d] for d in digits], device=device, dtype=torch.long)
+    digit_vals = torch.tensor([float(d) for d in digits], device=device, dtype=torch.float32)
+    print(f"transformers loaded Qwen3-0.6B on {device}, {task.time_left():.0f}s left", file=sys.stderr)
+
+    batch_size = 32 if device == "cuda" else 8
+    chunk = batch_size * 16
     with torch.inference_mode():
         for start in range(0, len(cands), chunk):
             part = cands[start : start + chunk]
-            enc = tok([c[4] for c in part], truncation=True, max_length=MAX_TOKENS)["input_ids"]
+            prompts = [f"{RUBRIC_PREFIX}{head}{RUBRIC_SUFFIX}" for _, _, _, head in part]
+            enc = tok(prompts, truncation=True, max_length=MAX_PROMPT_TOKENS)["input_ids"]
             order = sorted(range(len(part)), key=lambda j: (len(enc[j]), part[j][1]))
-            for b in range(0, len(order), BATCH):
+            for b in range(0, len(order), batch_size):
                 if task.time_left() < RESERVE_SECONDS:
                     return
-                rows = [j for j in order[b : b + BATCH] if len(enc[j]) >= 8]
-                if not rows:
-                    continue
+                rows = order[b : b + batch_size]
                 width = max(len(enc[j]) for j in rows)
                 ids = torch.full((len(rows), width), tok.pad_token_id, dtype=torch.long)
-                mask = torch.zeros((len(rows), width), dtype=torch.bool)
+                mask = torch.zeros((len(rows), width), dtype=torch.long)
                 for r, j in enumerate(rows):
-                    ids[r, : len(enc[j])] = torch.tensor(enc[j])
-                    mask[r, : len(enc[j])] = True
+                    seq = enc[j]
+                    ids[r, width - len(seq) :] = torch.tensor(seq, dtype=torch.long)
+                    mask[r, width - len(seq) :] = 1
                 ids, mask = ids.to(device), mask.to(device)
-                logits = model(input_ids=ids, attention_mask=mask).logits[:, :-1].float()
-                loss = torch.nn.functional.cross_entropy(logits.transpose(1, 2), ids[:, 1:], reduction="none")
-                keep = mask[:, 1:]
-                mean = (loss * keep).sum(1) / keep.sum(1)
+                logits = model(input_ids=ids, attention_mask=mask).logits[:, -1, :].float()
+                d_logits = logits.index_select(1, digit_tensor)
+                probs = torch.softmax(d_logits, dim=-1)
+                exp = (probs * digit_vals).sum(dim=-1).tolist()
                 for r, j in enumerate(rows):
-                    surprise[part[j][1]] = round(float(mean[r]), 2)  # two places: the same on any GPU
-            print(f"read {len(surprise):,} of {len(cands):,}, {task.time_left():.0f}s left", file=sys.stderr)
+                    scores[part[j][1]] = round(float(exp[r]), 2)
+            print(f"rated {len(scores):,} / {len(cands):,}, {task.time_left():.0f}s left", file=sys.stderr)
 
 
 def main():
     task = Task.from_env()
-    cands = candidates(task)
-    task.write(choose(task, cands, {}))  # the fallback: exactly what tidy would write
+    cands = collect_candidates(task)
+    task.write(build_script(task, cands, {}))  # immediate multilingual fallback
     print(f"{len(cands):,} candidates, {task.time_left():.0f}s left", file=sys.stderr)
-    surprise: dict[int, float] = {}
+    scores: dict[int, float] = {}
     try:
-        read_candidates(task, cands, surprise)
+        where = str(task.asset("qwen3-0.6b"))
+        if not _score_vllm(task, where, cands, scores):
+            _score_transformers(task, where, cands, scores)
+    except Exception as exc:
+        print(f"reader model error (keeping fallback): {exc}", file=sys.stderr)
     finally:
-        if surprise:
-            task.write(choose(task, cands, surprise))
+        if scores:
+            task.write(build_script(task, cands, scores))
 
 
 if __name__ == "__main__":

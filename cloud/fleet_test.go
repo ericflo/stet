@@ -863,20 +863,20 @@ func TestStatusJudgesByTheServicesSettings(t *testing.T) {
 func TestGradersAreRentedBeforeTheExam(t *testing.T) {
 	rp, st := newFakeRunPod(t), newFakeStet(t)
 	f, out := testFleet(t, rp, st, 4)
-	f.o.Early, f.o.ExamAfter, f.o.PerWorker, f.o.Settle = 90*time.Minute, 2*time.Hour+12*time.Minute, 1, 15*time.Minute
+	f.o.Early, f.o.ExamAfter, f.o.PerWorker, f.o.Settle = 3*time.Hour, 3*time.Hour, 1, 15*time.Minute
 	st.work = Work{Runners: 1, Rounds: []WorkRound{{ID: "s1-o00001", Entries: 3, GradesEarly: 3}}}
 	// Nothing seen yet: a machine starts in 8 minutes, and with 2 to fetch and script and 1 to
 	// sit the exam, the secure kinds that fit, the 3080 ($0.20) and the A5000 ($0.27), each
-	// 0.85 of a 3090, are rented 53 minutes before they are to report; the PRO 4000 ($0.57),
-	// 0.8, 56.
-	st.drawnAt = time.Now().Add(-time.Hour).Unix() // the exam is due in 72 minutes
+	// 0.85 of a 3090 (47m/pass), are rented 105 minutes before they are to report; the PRO 4000 ($0.57),
+	// 0.8, 111.
+	st.drawnAt = time.Now().Add(-55 * time.Minute).Unix() // the exam is due in 125 minutes
 	if err := tick(context.Background(), f); err != nil {
 		t.Fatal(err)
 	}
 	if len(rp.created) != 0 || !strings.Contains(out.String(), "waiting for the cheapest a round, RTX 3080 at $0.20 an hour") {
-		t.Fatalf("rented %d machines 72 minutes before the exam\n%s", len(rp.created), out)
+		t.Fatalf("rented %d machines 125 minutes before the exam\n%s", len(rp.created), out)
 	}
-	st.drawnAt = time.Now().Add(-79 * time.Minute).Unix() // due in 53 minutes
+	st.drawnAt = time.Now().Add(-75 * time.Minute).Unix() // due in 105 minutes
 	if err := tick(context.Background(), f); err != nil {
 		t.Fatal(err)
 	}
@@ -908,6 +908,27 @@ func TestCuratorsAreRunOnTheFastest(t *testing.T) {
 	// would have been the cheapest a grade.
 	if len(got) != 2 || got[0] != "community RTX 4090" || got[1] != "community RTX 4090" {
 		t.Fatalf("rented %v\n%s", got, out)
+	}
+}
+
+// Season 3 curators require 24 GB+ VRAM (--min-curator-gpu-memory) while grading allows 16 GB+
+// (--min-gpu-memory).
+func TestCuratorRunsRequire24GBVRAMWhileGradingAllowsSmaller(t *testing.T) {
+	rp, st := newFakeRunPod(t), newFakeStet(t)
+	f, out := testFleet(t, rp, st, 2)
+	f.o.Cloud, f.o.Edits, f.o.MinGPUMemory, f.o.MinCuratorGPUMemory = "COMMUNITY", true, 12, 24
+	f.o.Cheapest = true // would pick 12 GB RTX 3080 Ti ($0.18) if not filtered for curators
+	st.work = *round(4, 0, 0, 0)
+	if err := tick(context.Background(), f); err != nil {
+		t.Fatal(err)
+	}
+	if len(rp.created) != 2 {
+		t.Fatalf("rented %d\n%s", len(rp.created), out)
+	}
+	for _, spec := range rp.created {
+		if spec.GPU.ID == "NVIDIA GeForce RTX 3080 Ti" {
+			t.Fatalf("rented 12 GB card %s for curator runs despite MinCuratorGPUMemory=24", spec.GPU.ID)
+		}
 	}
 }
 
@@ -978,7 +999,7 @@ func TestWhatMachinesTakeIsLearned(t *testing.T) {
 		{"detail": {"hardware": {"gpu": "NVIDIA GeForce RTX 4090"}, "train": {"seconds": 480}}},
 		{"detail": {}}]}`}
 	pro := "NVIDIA RTX PRO 4000 Blackwell"
-	if p, seen := f.pass(pro); seen || p != time.Duration(float64(18*time.Minute)/0.8) {
+	if p, seen := f.pass(pro); seen || p != time.Duration(float64(passOn3090)/0.8) {
 		t.Fatalf("before any was seen: %s %v", p, seen)
 	}
 	f.calibrate(context.Background())
@@ -986,7 +1007,7 @@ func TestWhatMachinesTakeIsLearned(t *testing.T) {
 	if p, seen := f.pass(pro); !seen || p.Round(time.Second) != 15*time.Minute+40*time.Second {
 		t.Fatalf("a pass on the PRO 4000: %s %v\n%s", p, seen, out)
 	}
-	if s := f.speedOf("NVIDIA GeForce RTX 4090"); s != 2.25 {
+	if s := f.speedOf("NVIDIA GeForce RTX 4090"); s != float64(passOn3090)/float64(8*time.Minute) {
 		t.Fatalf("a 4090 is %vx a 3090", s)
 	}
 	// Seen starting, then asking for work: 3, 4 and 5 minutes, and one seen only once it had.
@@ -1022,10 +1043,10 @@ func TestWhatMachinesTakeIsLearned(t *testing.T) {
 func TestGradersTakeSeveralGradesBeforeTheExam(t *testing.T) {
 	rp, st := newFakeRunPod(t), newFakeStet(t)
 	f, out := testFleet(t, rp, st, 4)
-	f.o.Early, f.o.PerWorker, f.o.Settle, f.o.MaxHourly = 2*time.Hour, 1, 15*time.Minute, 16
-	// Nothing seen: the 3080 ($0.20, 0.85 of a 3090) passes in 21 minutes and leads by 53, so it
-	// takes three grades rented 97 minutes before the exam.
-	due := time.Now().Add(97 * time.Minute)
+	f.o.Early, f.o.PerWorker, f.o.Settle, f.o.MaxHourly = 4*time.Hour, 1, 15*time.Minute, 16
+	// Nothing seen: the 3080 ($0.20, 0.85 of a 3090) passes in 47 minutes and leads by 105, so it
+	// takes three grades rented 201 minutes before the exam.
+	due := time.Now().Add(201 * time.Minute)
 	st.work = Work{EarlyGradesPerMachine: 3, FastFirstSeconds: 120,
 		Rounds: []WorkRound{{ID: "s1-o00008", Entries: 6, GradesEarly: 6, ExamDue: due.Unix()}}}
 	if err := tick(context.Background(), f); err != nil {
@@ -1165,16 +1186,16 @@ func TestTheCauseIsReadFromWhatTheMachineSaid(t *testing.T) {
 func TestACuratorMachineDoneTooEarlyIsEnded(t *testing.T) {
 	rp, st := newFakeRunPod(t), newFakeStet(t)
 	f, out := testFleet(t, rp, st, 2)
-	f.o.Early, f.o.PerWorker, f.o.MaxHourly = 3*time.Hour, 1, 16
+	f.o.Early, f.o.PerWorker, f.o.MaxHourly = 5*time.Hour, 1, 16
 	if err := cmdUp(context.Background(), f, 1); err != nil || len(rp.created) != 1 {
 		t.Fatalf("rented %d (%v)", len(rp.created), err)
 	}
-	// A 3080 (nothing seen: 0.85 of a 3090) takes 95 minutes from being rented to have three
-	// grades trained: with the exam 150 minutes off and a 10-minute window, its kind's time
-	// is 45 minutes off.
+	// A 3080 (nothing seen: 0.85 of a 3090) takes ~200 minutes from being rented to have three
+	// grades trained: with the exam 270 minutes off and a 10-minute window, its kind's time
+	// is 60 minutes off.
 	now := time.Now()
 	st.work = Work{EarlyGradesPerMachine: 3, EarlyWindowSeconds: 600,
-		Rounds:   []WorkRound{{ID: "s1-o00009", Entries: 3, GradesEarly: 3, ExamDue: now.Add(150 * time.Minute).Unix()}},
+		Rounds:   []WorkRound{{ID: "s1-o00009", Entries: 3, GradesEarly: 3, ExamDue: now.Add(270 * time.Minute).Unix()}},
 		Machines: []Machine{{Handle: "stet-rp-01", Worker: true, LastSeen: now.Add(time.Second).Unix()}}}
 	out.Reset()
 	if err := tick(context.Background(), f); err != nil {

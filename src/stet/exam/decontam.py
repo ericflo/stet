@@ -24,6 +24,8 @@ from .items import Item
 
 
 def scored_text(it: Item) -> str:
+    if it.kind == "choice":
+        return f"{it.ctx}\n{it.cont}"
     return {"passage": it.text, "answer": it.cont}.get(it.kind, "")
 
 

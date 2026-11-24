@@ -517,7 +517,7 @@ opened on the organisers' machine, as soon as `/api/v1/season` names it:
 ```sh
 stet upgrade && stet login --handle stet    # the new client, and the organisers' account made again
 systemctl --user restart stet-examine       # the examiner on the new client
-for d in fineweb2 dclm tidy identity english heuristic fineweb-edu mimic; do stet submit examples/$d --yes; done
+for d in fineweb2 reader dclm tidy identity english heuristic fineweb-edu mimic; do stet submit examples/$d --yes; done
 ```
 
 The loop is run in a checkout of the merged change: the curators in `examples/` are the new
@@ -591,8 +591,8 @@ Set in `apps/stet/deployment.yaml`. The ones that are rules:
 | Variable | Default | Meaning |
 |---|---|---|
 | `STET_LADDER_SIZE` | 8 | Curators that run in every round |
-| `STET_ROUND_INTERVAL` | 3h | A round is drawn this often while a curator is waiting or on the board: the season's cadence, and what it costs a day |
-| `STET_ROUND_MIN_GAP` | 0 | When above 0, a round is also drawn early for a waiting entry, this long after the last draw at the soonest, while a runner is around. `0` keeps to the clock |
+| `STET_ROUND_INTERVAL` | 0 | `0` draws rounds on demand whenever an entry is waiting (no idle clock rounds). Set a multiple of the draw grid (e.g. `3h`) for fixed-clock rounds |
+| `STET_ROUND_MIN_GAP` | 0 | Minimum gap between consecutive on-demand draws (`0` chains back-to-back as soon as the previous round settles) |
 | `STET_EARLY_WINDOW` | 10m | A machine the organisers rent is handed grades before an exam only once they, and the further ones it could take, would keep it busy until no sooner than this before the exam is due; it is not paid to wait. `0` hands them out as soon as there are any |
 | `STET_ENTRIES_IN_PLAY` | 3 | Entries one person may have waiting or qualifying at once |
 | `STET_QUALIFY_ROUNDS` | 3 | Rounds a new entry runs |

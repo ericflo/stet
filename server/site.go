@@ -156,26 +156,27 @@ func (s *Site) mount(mux *http.ServeMux) {
 // --- rendering ------------------------------------------------------------------------------
 
 type Page struct {
-	Title    string
-	Desc     string
-	Nav      string
-	Path     string
-	Season   *Season
-	Scale    Scale
-	ScaleID  string
-	BaseURL  string
-	APIURL   string
-	Version  string
-	Dev      bool
-	Now      int64
-	Wheel    string
-	CLI      string
-	Docs     []docSpec
-	Interval string
-	OnDemand bool    // a round is also drawn early when an entry is waiting (STET_ROUND_MIN_GAP); otherwise only on the clock
-	Github   bool    // entering needs a linked GitHub account
-	Live     NowView // what is happening now, said at the top of every page
-	D        any
+	Title        string
+	Desc         string
+	Nav          string
+	Path         string
+	Season       *Season
+	Scale        Scale
+	ScaleID      string
+	BaseURL      string
+	APIURL       string
+	Version      string
+	Dev          bool
+	Now          int64
+	Wheel        string
+	CLI          string
+	Docs         []docSpec
+	Interval     string
+	OnDemand     bool    // a round is also drawn early when an entry is waiting (STET_ROUND_MIN_GAP) or on-demand-only (STET_ROUND_INTERVAL=0)
+	OnDemandOnly bool    // rounds are drawn only when an entry is waiting (STET_ROUND_INTERVAL=0); no fixed-clock draws
+	Github       bool    // entering needs a linked GitHub account
+	Live         NowView // what is happening now, said at the top of every page
+	D            any
 }
 
 // NowView is what is happening at this moment, said at the top of every page: the round
@@ -229,7 +230,7 @@ func (s *Site) page(r *http.Request, title, nav string, d any) *Page {
 	return &Page{Live: nv,
 		Title: title, Nav: nav, Path: r.URL.Path, Season: a.season, Scale: a.season.Scales[a.cfg.Scale], ScaleID: a.cfg.Scale,
 		BaseURL: a.cfg.BaseURL, APIURL: a.cfg.APIURL, Version: s.version, Dev: a.cfg.Dev, Now: now(), Wheel: wheel, CLI: version,
-		Docs: s.docList(), Interval: plainDuration(a.cfg.RoundInterval), OnDemand: a.cfg.RoundMinGap > 0, Github: a.cfg.RequireGithub, D: d,
+		Docs: s.docList(), Interval: plainDuration(a.cfg.RoundInterval), OnDemand: a.cfg.RoundInterval == 0 || a.cfg.RoundMinGap > 0, OnDemandOnly: a.cfg.RoundInterval == 0, Github: a.cfg.RequireGithub, D: d,
 		Desc: "Stet is an open competition to make the best training data for a language model. You enter a curator: a program that cuts, keeps and reorders raw web crawl. The model, the trainer and the budget are fixed. The only thing you can touch is the data.",
 	}
 }
@@ -261,6 +262,8 @@ func (s *Site) notFound(w http.ResponseWriter, r *http.Request, what string) {
 
 func plainDuration(d time.Duration) string {
 	switch {
+	case d <= 0:
+		return "on demand"
 	case d%(24*time.Hour) == 0 && d >= 24*time.Hour:
 		n := int(d / (24 * time.Hour))
 		if n == 1 {
@@ -1690,15 +1693,29 @@ if [ "${STET_LIGHT:-}" = "1" ] || [ "${STET_NO_TORCH:-}" = "1" ]; then
   say "Installing stet (light: no PyTorch, no libraries)..."
   uv tool install --force --python "$PY" "stet-cli @ $WHEEL"
 else
-  # Which build of PyTorch. With an NVIDIA GPU, the default one. With an AMD GPU and no
-  # NVIDIA one, the ROCm build. On a Mac the default build uses Metal.
+  # Which build of PyTorch, and which extras. With an NVIDIA GPU on Linux x86_64, the default
+  # CUDA build and the cuda extra (vLLM, Liger). With an AMD GPU and no NVIDIA one, the ROCm
+  # build without CUDA-only extras. On a Mac the default build uses Metal.
   INDEX="${STET_TORCH_INDEX:-}"
-  if [ -z "$INDEX" ] && [ "$(uname -s)" = "Linux" ]; then
+  EXTRAS="run"
+  if [ "$(uname -s)" = "Linux" ]; then
     VENDORS="$(cat /sys/class/drm/card*/device/vendor 2>/dev/null || true)"
+    HAS_NVIDIA=0
     case "$VENDORS" in
-      *0x10de*) ;;
-      *0x1002*) INDEX="{{.AMDIndex}}"; say "AMD GPU found: taking the ROCm build of PyTorch." ;;
+      *0x10de*) HAS_NVIDIA=1 ;;
     esac
+    if [ "$HAS_NVIDIA" = "0" ] && command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
+      HAS_NVIDIA=1
+    fi
+    if [ "$HAS_NVIDIA" = "1" ]; then
+      if [ "$(uname -m)" = "x86_64" ]; then
+        EXTRAS="run,cuda"
+      fi
+    elif [ -z "$INDEX" ]; then
+      case "$VENDORS" in
+        *0x1002*) INDEX="{{.AMDIndex}}"; say "AMD GPU found: taking the ROCm build of PyTorch." ;;
+      esac
+    fi
   fi
   TMP="$(mktemp -d)"
   PRE=""
@@ -1720,7 +1737,7 @@ else
     if [ -n "$INDEX" ]; then
       set -- "$@" --index "$INDEX" --index-strategy unsafe-best-match
     fi
-    if ! "$@" "stet-cli[run] @ $WHEEL"; then
+    if ! "$@" "stet-cli[$EXTRAS] @ $WHEEL"; then
       rm -rf "$PRE"
       say "The new version could not be fetched whole. Nothing was changed."
       exit 1
@@ -1732,16 +1749,22 @@ else
   if [ -n "$INDEX" ]; then
     set -- "$@" --index "$INDEX" --index-strategy unsafe-best-match
   fi
-  if ! "$@" "stet-cli[run] @ $WHEEL"; then
-    say ""
-    say "The full set of curator libraries could not be installed on this machine."
-    say "Installing stet with PyTorch alone: enough to grade, and to run curators that"
-    say "need nothing else. 'stet doctor' will say what is missing."
-    set -- uv tool install --force --python "$PY" --with "torch=={{.Torch}}"
-    if [ -n "$INDEX" ]; then
-      set -- "$@" --index "$INDEX" --index-strategy unsafe-best-match
+  if ! "$@" "stet-cli[$EXTRAS] @ $WHEEL"; then
+    if [ "$EXTRAS" != "run" ]; then
+      say ""
+      say "The CUDA-accelerated extras could not be installed; retrying with the portable library set..."
     fi
-    "$@" "stet-cli @ $WHEEL"
+    if [ "$EXTRAS" = "run" ] || ! "$@" "stet-cli[run] @ $WHEEL"; then
+      say ""
+      say "The full set of curator libraries could not be installed on this machine."
+      say "Installing stet with PyTorch alone: enough to grade, and to run curators that"
+      say "need nothing else. 'stet doctor' will say what is missing."
+      set -- uv tool install --force --python "$PY" --with "torch=={{.Torch}}"
+      if [ -n "$INDEX" ]; then
+        set -- "$@" --index "$INDEX" --index-strategy unsafe-best-match
+      fi
+      "$@" "stet-cli @ $WHEEL"
+    fi
   fi
 fi
 
@@ -1807,6 +1830,9 @@ func (s *Site) constraints(w http.ResponseWriter, r *http.Request) {
 	env := s.app.season.Environment
 	only := map[string]bool{}
 	for _, name := range env.Linux {
+		only[name] = true
+	}
+	for _, name := range env.CUDALinux {
 		only[name] = true
 	}
 	var lines []string

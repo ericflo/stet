@@ -372,6 +372,20 @@ func (p Policy) nearExam(w *Work, now time.Time) bool {
 // keptNearExam is how many idle machines are kept near an exam: the fastest two.
 const keptNearExam = 2
 
+// nearDraw says whether an on-demand round is already scheduled to draw shortly (within the
+// draw notice window) while no round is open yet: keep up to keptNearDraw warm runners alive
+// across the 6-16 minute notice so a runner rented for w.Waiting is not killed right before
+// the draw it triggered, and consecutive back-to-back rounds don't churn rentals.
+func (p Policy) nearDraw(w *Work, now time.Time) bool {
+	if !p.Edits || len(w.Rounds) != 0 || w.Paused != 0 || w.NextDrawAt <= 0 {
+		return false
+	}
+	at := time.Unix(w.NextDrawAt, 0)
+	return at.After(now.Add(-2*time.Minute)) && at.Sub(now) <= 20*time.Minute
+}
+
+const keptNearDraw = 2
+
 // decideNext decides, where a machine rented now for grades taken before an exam is taken to
 // take next of them (forExam's plan for the kind it would rent).
 func (p Policy) decideNext(w *Work, workers []*Worker, spentToday float64, now time.Time, next int) Decision {
@@ -429,6 +443,8 @@ func (p Policy) decideNext(w *Work, workers []*Worker, spentToday float64, now t
 	if waiting == 0 {
 		// Nothing is waiting for anybody: a machine doing nothing would only wait to stop. Near
 		// an exam, the fastest that are waiting are kept for a grade a failed machine leaves.
+		// Near an imminent scheduled draw (e.g., during the 6-16m on-demand notice window), up
+		// to keptNearDraw warm runners are kept so the draw starts without cold-boot churn.
 		kept := map[*Worker]bool{}
 		if p.nearExam(w, now) {
 			var fast []*Worker
@@ -439,6 +455,23 @@ func (p Policy) decideNext(w *Work, workers []*Worker, spentToday float64, now t
 			}
 			sort.SliceStable(fast, func(i, j int) bool { return fast[i].Speed > fast[j].Speed })
 			for _, wk := range fast[:min(len(fast), keptNearExam)] {
+				kept[wk] = true
+			}
+		} else if p.nearDraw(w, now) {
+			var warm []*Worker
+			for _, wk := range idle {
+				if wk.NoCurators == "" {
+					warm = append(warm, wk)
+				}
+			}
+			sort.SliceStable(warm, func(i, j int) bool {
+				wi, wj := warm[i].state(now, p) == "waiting", warm[j].state(now, p) == "waiting"
+				if wi != wj {
+					return wi
+				}
+				return warm[i].Speed > warm[j].Speed
+			})
+			for _, wk := range warm[:min(len(warm), keptNearDraw)] {
 				kept[wk] = true
 			}
 		}

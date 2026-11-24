@@ -77,11 +77,11 @@ def assemble(rnd, scale, snapshots: list[tuple[int, Path]], work: Path, log=prin
     from .decontam import seen
     from .fresh import read_snapshot
     from .fresh.langs import shares
-    from .fresh.select import SHARES, select
+    from .fresh.select import SHARES, select, select_contrastive
 
     season = rnd.season
     cfg = season.raw["exam"]
-    if gen.VERSION != int(cfg["generator_version"]):
+    if int(cfg["generator_version"]) > gen.VERSION:
         raise RuntimeError(f"season {season.id} sets the generators at version {cfg['generator_version']}, this copy has {gen.VERSION}: upgrade stet")
     if not snapshots:
         raise ValueError(f"{rnd.id} has no harvest to make its exam from")
@@ -102,7 +102,8 @@ def assemble(rnd, scale, snapshots: list[tuple[int, Path]], work: Path, log=prin
     from .aggregate import plan_of
 
     # Only the kinds of writing the season names: a document of any other kind is not on the exam.
-    fresh = select(docs, rnd.seed, int(cfg["fresh"]["items"]), plan_of(season).parts, per_corner=int(cfg["fresh"]["per_corner"]), shares=mix)
+    chooser = select_contrastive if cfg["fresh"].get("mode") == "contrastive" else select
+    fresh = chooser(docs, rnd.seed, int(cfg["fresh"]["items"]), plan_of(season).parts, per_corner=int(cfg["fresh"]["per_corner"]), shares=mix)
     mark = work / f"seen-{digest(fresh)[:12]}.json"
     if mark.exists():
         dropped = set(json.loads(mark.read_text()))
@@ -128,7 +129,7 @@ def build(rnd, scale, snapshots: list[tuple[int, Path]], work: Path, log=print) 
     """The round's exam, as the server takes it, from the harvests of its hours."""
     import zstandard
 
-    from .aggregate import item_table
+    from .aggregate import item_table, plan_of
 
     snapshots = sorted(snapshots)
     items, fresh, mix, shas = assemble(rnd, scale, snapshots, work, log=log)
@@ -136,7 +137,7 @@ def build(rnd, scale, snapshots: list[tuple[int, Path]], work: Path, log=print) 
     public = "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in public_items(items)).encode()
     return {"round": rnd.id, "items_digest": digest(items), "items_file": base64.b64encode(pack_items(items)).decode(),
             "public_file": base64.b64encode(zstandard.ZstdCompressor(level=10).compress(public)).decode(),
-            "table": item_table(items), "languages": dict(list(mix.items())[:500]), "snapshot_sha256": snapshot_name(shas), "fresh": fresh,
+            "table": item_table(items, plan_of(rnd.season)), "languages": dict(list(mix.items())[:500]), "snapshot_sha256": snapshot_name(shas), "fresh": fresh,
             "hours": [{"hour": h, "sha256": sha} for (h, _), sha in zip(snapshots, shas, strict=True)]}
 
 

@@ -5,11 +5,12 @@ This file is the complete brief. Read all of it before changing anything.
 
 ## The task
 
-A small language model (the *student*) is trained on raw web text for a fixed number of
-tokens and then sits an exam that is made when the round is drawn: three quarters human
-writing from the day before, one quarter generated questions. The model and the
-trainer are fixed, and so is how the exam is made. **The only thing you control is the
-training data.**
+A fixed 0.6B-class language model (the *student*: `Qwen/Qwen3-0.6B-Base` with its top half
+of layers reset from the round's seed) is trained on raw web text for a fixed number of
+tokens, run through a short fixed multilingual fine-tuning probe, and then sits an exam that
+is made when the round is drawn: half fresh contrastive comprehension from the day before,
+half generated multilingual skills. The model, the trainer, the probe and how the exam is
+made are fixed. **The only thing you control is the training data.**
 
 Your curator is a program. It is handed a pile of raw web pages it has never seen and a time
 limit, and it writes an *edit script*: which documents, or parts of documents, the student
@@ -43,9 +44,9 @@ stet run --json
 
 **Run `stet harvest` once first.** It fetches three hours of recent human writing from the
 sources official exams are made from: no account, no key, some minutes for each hour. From
-then on every practice round's exam holds writing, as an official round's does. Without it
-a practice round's exam is the generated skills alone, a quarter of the official score:
-`stet run` says so, and the result has `"writing": false`.
+then on every practice round's exam holds contrastive comprehension items, as an official
+round's does. Without it a practice round's exam is the generated skills alone, half of the
+official score: `stet run` says so, and the result has `"writing": false`.
 
 Run `stet run --json` after every change. It runs your curator on a practice round, trains
 the student, sits the exam, and prints one JSON object on stdout. Progress goes to stderr.
@@ -54,7 +55,7 @@ Exit status is 0 for a valid run and 2 for an invalid one.
 | Field | Meaning |
 |---|---|
 | `valid` | `false` means the run scored as the unedited corpus. Read `invalid_reason`. |
-| `gain` | Your student's exam score less the unedited corpus's, in bits per byte: writing three quarters, skills one quarter. 0 for an invalid run. **Maximise this.** |
+| `gain` | Your student's exam score less the unedited corpus's, in bits per byte: comprehension half, skills half. 0 for an invalid run. **Maximise this.** |
 | `pillars` | The gain in each pillar the exam has: `pillars.reference`, `pillars.agents` and so on. The weakest shows what your data lacks. |
 | `writing` | Whether the exam held human writing. `false`: nothing is harvested, and `gain` is the skills alone. |
 | `exam.items`, `exam.mean` | How many items the student sat, and its mean score on them (minus the bits per byte it needed, so nearer 0 is better). `baseline.mean` is the unedited student's. |
@@ -77,7 +78,7 @@ stet run --time-limit 300     # with a shorter time limit than the scale's
 stet run -v                   # show the curator's output live
 stet score script.jsonl       # grade a script you already have, without running the curator
 stet rounds                   # past official rounds; replay one with --round <id>
-stet score stet/tidy --round s2-o00001    # re-grade a published entry of a settled official round
+stet score stet/tidy --round s3-o00001    # re-grade a published entry of a settled official round
                                           # (stet/tidy@v2 when a round holds two versions)
 stet harvest --hours 6        # hold six hours of writing: more variety between practice rounds
 stet harvest --fresh          # replace what is held with newly written hours
@@ -87,23 +88,22 @@ stet clean                    # delete downloaded rounds and model files (fetche
 
 **Never judge a change on one round.** Rounds differ from each other by more than most
 improvements. Use `--rounds 3` or more and compare mean gains. Training the same script
-again moves its gain by about 0.03 at micro and 0.005 at standard, so on one round a
+again moves its gain by about 0.02 at micro and 0.007 at standard, so on one round a
 difference smaller than twice that is noise. Confirm anything smaller over `--rounds 5`.
-The order of a script is luck of its own: the same pages in another shuffle move a
-standard gain by about 0.008, and once in a while by several times that. So a change that
-also changes the order your pages come in has to beat that, not only the 0.005.
+The order of a script matters too: the trainer does not shuffle, and the same pages in
+another order can move a standard gain by about 0.008.
 An exam with no writing in it is less steady: the skills are the noisier part.
 
 **Compare runs made against the same harvest.** A practice round's corpus never changes,
-but its exam's writing is three of the hours you hold, chosen by the round's seed.
-Harvesting more hours, or new ones, changes it, and the round's exam and baseline are made
-again the first time it is run. Many runs against the same hours can fit them:
-`stet harvest --fresh` before you submit is the check.
+but its exam's comprehension items come from three of the hours you hold, chosen by the
+round's seed. Harvesting more hours, or new ones, changes it, and the round's exam and
+baseline are made again the first time it is run. Many runs against the same hours can fit
+them: `stet harvest --fresh` before you submit is the check.
 
-**Iterate small, confirm at standard.** A nano run takes a minute or two and micro several
-minutes. The competition is scored at standard: your curator's twenty minutes, then about
-18 minutes of training on an RTX 3090. Smaller students rank curators differently from
-larger ones. Check at standard before you submit.
+**Iterate small, confirm at standard.** A nano run takes a few minutes and micro under ten.
+The competition is scored at standard: your curator's twenty minutes on a 24 GB+ GPU, then
+about 20–30 minutes of training on an RTX 5090/4090 (32.8M tokens + 64-step SFT probe).
+Check at standard before you submit.
 
 ## What your curator is given
 
@@ -200,22 +200,23 @@ does not shuffle.
 ## The exam
 
 An official round's exam is made at its draw, so nobody can know it in advance, the
-organisers included. **Three quarters of the score is writing people published. One quarter
-is skills.** Inside each group, every pillar counts the same:
+organisers included. **Half of the score is fresh contrastive comprehension (`Right − Wrong`)
+from writing people published. Half is generated multilingual skills.** There is zero raw
+web perplexity. Inside each group, every pillar counts the same:
 
 | Pillar | Group | What the student is asked |
 |---|---|---|
-| `reference` | writing | New and extended Wikipedia articles |
-| `news` | writing | News reports, from Common Crawl's news crawl |
-| `technical` | writing | Issues, pull requests, release notes and patches: GitHub, the kernel's mailing lists |
-| `conversation` | writing | Posts and replies: Hacker News, Lemmy, forums, Bluesky, Mastodon, Wikipedia's talk pages |
+| `reference` | comprehension | Real vs wrong continuation of new Wikipedia articles (same source & language) |
+| `news` | comprehension | Real vs wrong continuation of fresh news reports (same source & language) |
+| `technical` | comprehension | Real vs wrong continuation of GitHub issues, PRs, releases and patches |
+| `conversation` | comprehension | Real vs wrong continuation of Hacker News, Lemmy, forums, Bluesky, Mastodon, talk pages |
 | `agents` | skills | What a tool says back, in a session at a shell |
 | `reading` | skills | An answer, or a new rule, taken from the context |
-| `logic` | skills | What follows from what is given |
+| `logic` | skills | What follows from what is given, scored contrastively against other entities |
 | `grammar` | skills | The right sentence of two |
 | `numbers` | skills | Arithmetic, units, word problems and algebra, each after a few worked examples |
 | `programs` | skills | What a small algorithm returns (a list sorted, a letter counted), after a few worked examples |
-| `knowledge` | skills | Facts the web knows, in ten languages |
+| `knowledge` | skills | Facts the web knows in ten languages, scored contrastively against same-relation distractors |
 
 - **The writing is newer than the crawl.** It is what people published in three hours
   of the day before the draw, and the draw picks the hours. The round's corpus was crawled
@@ -230,11 +231,14 @@ is skills.** Inside each group, every pillar counts the same:
 - **The skills are made from the round's seed.** Every answer but a fact follows from what
   the item itself shows. `knowledge` asks well-known facts (a country's capital, who wrote
   a book), which the student knows only from pages that say them.
-- **Every item is scored by likelihood**: how likely the student finds the right text, in
-  bits per byte. A passage, an answer given its question, or the right sentence of a pair.
-  Never by picking a choice. An item's bits are never put over fewer than 16 bytes, so a
-  one-word answer cannot weigh as much as a paragraph, and a text longer than the
-  student's window is scored whole.
+- **Scored contrastively or by answer likelihood, never raw web perplexity.** Fresh
+  comprehension items (`reference`, `news`, `technical`, `conversation`), `logic`, and
+  `knowledge` are scored by `margin_tok = log2 P(right) / tok − max_w log2 P(wrong_w) / tok`
+  against length-matched wrong continuations from the exact same source and language.
+  Because right and wrong share the same surface style, mimicking formatting or vocabulary
+  cancels out; only actual understanding moves the margin. Skill answer items (`agents`,
+  `reading`, `numbers`, `programs`) score the answer likelihood in bits per byte (floored
+  at 16 bytes), and `grammar` scores the right sentence minus the broken one.
 - **No one area can carry the rest.** A pillar missing from an exam gives its share to the
   others of its group. Gains on items are clipped, and a language or a format with fewer
   than eight items counts in proportion. `pillars` shows the weakest.
@@ -265,10 +269,11 @@ published, it will be seen, and it defeats the point.
   that a curator is not tuned to one crawl, and for training policies. See `stet.gym`.
 
 Full-page text means every language, plus menus, cookie banners, footers, link lists,
-shop listings and spam around the prose. At standard a round's corpus is about 335,000
-documents and 2.5 GB, some six times more text than the budget. Micro has the same ratio
-(about 84,000 documents and 630 MB) and the same time for each page, so a curator that
-fits there fits at standard.
+shop listings and spam around the prose. At standard a round's corpus is 12 units (24
+Common Crawl WET shards, about 500,000 documents and 3.6 GB, roughly 1.1B tokens — ~34×
+the 32.8M-token student budget). That high ratio makes real selective curation (3–10% keep
+rates) possible without repetition. You do not need to read every page: `task.stream()` lets
+you stream lazily and stop once you have filled the budget.
 
 Build something that reads the data in front of it. A curator tuned to one round's
 documents will do badly on the next.
@@ -302,9 +307,9 @@ Every run gets the same machine, whatever the volunteer has:
 | | |
 |---|---|
 | CPU | 6 cores |
-| Memory | 12 GB |
-| GPU | one, NVIDIA (CUDA) or AMD (ROCm), with 8 GB of its memory |
-| Scratch | `STET_SCRATCH`, 8 GB, held in memory: what you write there comes out of the 12 GB |
+| Memory | 20 GB |
+| GPU | one, NVIDIA (CUDA) or AMD (ROCm), with 22 GB of its memory |
+| Scratch | `STET_SCRATCH`, 12 GB, held in memory: what you write there comes out of the 20 GB |
 | Time | `time_limit` in `task.json`: 1200 seconds at standard, the official scale (300 seconds at micro), wall-clock |
 | Network | none |
 
@@ -313,12 +318,13 @@ Every run gets the same machine, whatever the volunteer has:
   fast, your curator has to finish in half the limit here. Better: make it *anytime*.
   Write a script early, improve it while `task.time_left()` allows, and stop with a
   margin. A killed curator keeps the last script it wrote.
-- **GPU work goes through PyTorch.** `device = task.device()`, or `"cuda"`: that name is
-  right on AMD too. Do not import anything that exists for one maker only (CUDA-only
-  kernels, `bitsandbytes`, TensorRT, flash-attention builds). Half precision
-  (`torch.float16`) works on both. Results differ in the last decimal places between
-  makes, so round scores before you threshold or sort on them, and break ties by
-  document number.
+- **GPU work goes through PyTorch, vLLM, or flash-linear-attention.** `device = task.device()`,
+  or `"cuda"`: that name is right on AMD too. `vllm` and `liger-kernel` are preinstalled on
+  NVIDIA Linux runners (all cloud runners and NVIDIA volunteers); if you import `vllm` or
+  `liger-kernel`, include a clean PyTorch/`transformers` fallback (see `examples/reader`) so
+  your curator also runs on AMD ROCm machines. `flash-linear-attention` (`fla`) and
+  bfloat16/float16 work on both. Results differ in the last decimal places between makes, so
+  round scores before you threshold or sort on them, and break ties by document number.
 - **A read-only file system.** Writable: `STET_OUT`, `STET_SCRATCH` and `/tmp` (2 GB,
   where `TMPDIR` points). No home directory.
 - **Two sandboxes.** Volunteers run curators in bubblewrap; the organisers' rented machines,
@@ -341,29 +347,34 @@ freely; do not bundle them. Anything else goes in your project: pure Python as i
 JavaScript as an archive (see *Your own harness*).
 
 ```
-accelerate 1.16.0                networkx 3.7           regex 2026.11.15
-bm25s 0.3.16                     nltk 3.10.4            safetensors 0.8.0
-datasketch 2.0.0                 nodejs-wheel 24.19.0   scikit-learn 1.9.1
-einops 0.8.2                     numba 0.68.1           scipy 1.18.1
-emoji 2.16.0                     numpy 2.5.5            sentence-transformers 6.3.0
-faiss-cpu 1.16.0                 onnxruntime 1.32.0     sentencepiece 0.2.3
-fastapi 0.163.2                  openai 3.53.0          tiktoken 0.14.0
-fasttext-numpy2 0.10.4           orjson 3.13.0          tokenizers 0.23.3
-fasttext-predict 0.9.2.4         pandas 3.1.1           torch 2.15.0
-ftfy 6.3.1                       peft 0.21.3            tqdm 4.70.1
-gensim 4.4.0                     polars 2.1.0           transformers 5.23.0
-jinja2 3.1.6                     protobuf 7.36.2        unidecode 1.4.0
-joblib 1.6.0                     psutil 7.2.2           uvicorn 0.54.0
-lightgbm 4.7.0                   py3langid 0.4.0        xgboost 3.4.1
-lingua-language-detector 2.2.0   pyahocorasick 2.3.1    xxhash 4.1.0
-mmh3 5.3.1                       pyarrow 26.0.1         zstandard 0.25.0
-model2vec 0.10.0                 rapidfuzz 3.14.6
+accelerate 1.16.0                model2vec 0.10.0       regex 2026.11.15
+bm25s 0.3.16                     networkx 3.7           safetensors 0.8.0
+datasketch 2.0.0                 nltk 3.10.4            scikit-learn 1.9.1
+einops 0.8.2                     nodejs-wheel 24.19.0   scipy 1.18.1
+emoji 2.16.0                     numba 0.65.0           sentence-transformers 6.3.0
+faiss-cpu 1.16.0                 numpy 2.4.6            sentencepiece 0.2.3
+fastapi 0.136.3                  onnxruntime 1.32.0     tiktoken 0.14.0
+fasttext-numpy2 0.10.4           openai 3.58.0          tokenizers 0.23.3
+fasttext-predict 0.9.2.4         orjson 3.13.0          torch 2.14.0
+flash-linear-attention 0.6.0     pandas 3.1.1           tqdm 4.70.1
+ftfy 6.3.1                       peft 0.21.3            transformers 5.22.2
+gensim 4.4.0                     polars 2.1.0           unidecode 1.4.0
+jinja2 3.1.6                     protobuf 7.36.2        uvicorn 0.54.0
+joblib 1.6.0                     psutil 7.2.2           vllm 0.34.0
+liger-kernel 0.8.5               py3langid 0.4.0        xgboost 3.4.1
+lightgbm 4.7.0                   pyahocorasick 2.3.1    xxhash 4.1.0
+lingua-language-detector 2.2.0   pyarrow 26.0.1         zstandard 0.25.0
+mmh3 5.3.1                       rapidfuzz 3.14.6
 ```
 
 `faiss` and `onnxruntime` are the CPU builds. `nltk` comes without its data files; name
 any you need as assets. `import fasttext` works on Linux; `fasttext-predict` is the
-loader that is there on every platform. `nodejs-wheel` is Node.js 24: `node` is on the
-`PATH`. `fastapi`, `uvicorn` and `openai` are what serving a model to a harness needs.
+loader that is there on every platform. `vllm` and `liger-kernel` are installed on NVIDIA
+Linux machines (`cuda` extra); provide a `transformers` fallback for AMD ROCm runners (see
+`examples/reader`). `flash-linear-attention` (`fla`) provides fast Triton kernels for
+linear-attention/DeltaNet/hybrid models (`Qwen3.5`, `LFM2.5`). `nodejs-wheel` is Node.js 24:
+`node` is on the `PATH`. `fastapi`, `uvicorn` and `openai` are what serving a model to a
+harness needs.
 
 ### Model weights
 
@@ -384,7 +395,7 @@ tok = AutoTokenizer.from_pretrained(path)
 model = AutoModelForCausalLM.from_pretrained(path, dtype=torch.float16).to(task.device()).eval()
 ```
 
-- Up to 32 files and 4 GiB in all. Each is a public file on Hugging Face, pinned to a
+- Up to 32 files and 10 GiB in all. Each is a public file on Hugging Face, pinned to a
   commit and named by its sha256; the server checks every one when you submit. A gated or
   private repository will not do: volunteers have no login to give.
 - `--include "*.safetensors" --include "*.json"` picks files; `--revision` picks a commit.
@@ -392,10 +403,11 @@ model = AutoModelForCausalLM.from_pretrained(path, dtype=torch.float16).to(task.
   fails.
 - Your own fine-tuned model is welcome: upload it to a public repository and add it.
   Train it on anything except published exams.
-- 8 GB of GPU memory holds a model of a billion or two parameters at half precision with
-  room to run it. Twenty minutes is the tighter limit: at standard the corpus is about
-  335,000 documents, so decide cheaply which of them, and how much of each, the model reads.
-  `examples/reader` is a complete curator built this way.
+- 22 GB of GPU memory comfortably holds 0.6B–4B models at bf16/fp16 with `vLLM` prefix
+  caching and KV cache headroom. With `vLLM`, a 0.6B–0.8B model (like `Qwen3-0.6B`,
+  `Qwen3.5-0.8B`, or `LFM2.5-350M`) can score hundreds of thousands of candidate excerpts
+  inside the twenty-minute limit! `examples/reader` is a complete `vLLM` curator built this
+  way.
 
 Curators may not carry per-document knowledge of official data: hash lists, precomputed
 labels, or tables keyed by host or URL built from the crawl. Models trained on other data
@@ -468,10 +480,10 @@ public at once. **Both are your human's decisions: ask before doing either.**
 
 **An entry runs in the next round drawn.** A new version is a new submission.
 
-An entry runs in 3 official rounds and is ranked when it has them. A round is drawn every
-3 hours, on the clock, once the one before has settled, and
-takes every entry waiting at its draw: there is no queue. A round's exam is made at its draw, and
-the round then takes as long as its runs and grades do. A curator's rating is its mean
+An entry runs in 3 official rounds and is ranked when it has them. Rounds are drawn **on
+demand** whenever an entry is waiting (or still qualifying) and the previous round has
+settled — there are no idle clock rounds between submissions. A round's exam is made at its
+draw, and the round takes as long as its runs and grades do. A curator's rating is its mean
 gain, adjusted for how hard its rounds were; its ± is wide while its rounds are few. The
 eight best curators, one per person, stay on the *ladder* and keep
 running in every round: the best by rating less 1.28 standard errors, so a few lucky
@@ -484,17 +496,16 @@ things. So submit when you have a real improvement measured over several rounds,
 after every change.
 
 When the season closes, the eight best-rated curators, and one more drawn by lot from the
-next eight, go to the finals, which decide the season: two fresh rounds, with a larger
-student (10 layers by 640, 640M tokens) trained twice on what each writes.
+next eight, go to the finals, which decide the season: two fresh rounds, with the larger
+budget (`large`: 131M tokens) trained twice on what each writes.
 
 ## What is known
 
-Stet's repository holds the organisers' curators in `examples/`, all eight entered
-(`stet fork stet/tidy` copies one): `identity`, `english` and `tidy`; four that rebuild
-published recipes: `dclm`, `fineweb-edu` and `heuristic` (English filters), and `fineweb2`
-(every language, cleaned); and `mimic`, which keeps the pages that look most like the
-exam. Their ratings on the board are where known methods land: `fineweb2` and `dclm` run
-in every round, and each of the others in one round in eight.
+Stet's repository holds the organisers' reference curators in `examples/` (`stet fork
+stet/reader` or `stet fork stet/fineweb2` copies one): `identity`, `english`, `tidy`,
+`heuristic`, `dclm`, `fineweb-edu`, `fineweb2`, `mimic`, and `reader` (a 0.6B `vLLM`
+multilingual quality rater). `fineweb2` and `reader` run in every round, and each of the
+others in one round in eight.
 
 What the organisers measured before the season, on one practice round at standard (gains
 over the unedited corpus, in bits per byte):

@@ -198,3 +198,152 @@ def select(docs: list[Doc], seed: bytes, n: int, kinds, per_corner: int = 2, sha
             if len(got) < part:
                 left.remove(k)
     return [it for k in sorted(chosen) for it in chosen[k]]
+
+
+# --- Season 3: same-source contrastive continuation (zero raw web perplexity) --------------------
+
+CONTRASTIVE_CTX_MIN = 80
+CONTRASTIVE_CTX_MAX = 1200
+CONTRASTIVE_CONT_MIN = 30
+CONTRASTIVE_CONT_MAX = 400
+CONTRASTIVE_WRONGS = 3
+
+_SENT_SPLIT = re.compile(r"(?<=[.!?…؟۔।]) +|(?<=[。！？｡])\s*")
+
+
+def _split_continuation(doc: Doc) -> tuple[str, str, str, str] | None:
+    """Split a harvested document into (corner, fmt, ctx, cont) for contrastive continuation.
+
+    Returns None when the document is too short to form a meaningful opening + continuation.
+    """
+    lang = lang_of(doc)
+    base = f"fresh/{doc.source}/{lang}/{doc.topic or '-'}"
+    bucket = doc.topic or str(hash_title(doc.title or doc.id) % 64)
+    if doc.question:
+        fmt = "code" if _codeish(doc.text) else "dialogue"
+        head = f"{doc.title}\n" if doc.title and not doc.question.startswith(doc.title) else ""
+        ctx = crawl_space(f"{head}{_tail(doc.question, QUESTION_CHARS)}") + "\n"
+        cont = crawl_space(_clip(doc.text, CONTRASTIVE_CONT_MAX))
+        if len(ctx) < 20 or len(cont) < CONTRASTIVE_CONT_MIN:
+            return None
+        return f"fresh/{doc.source}/{lang}/{bucket}/reply-mc", fmt, ctx, cont
+
+    body = crawl_space(doc.text).strip()
+    if len(body) < CONTRASTIVE_CTX_MIN + CONTRASTIVE_CONT_MIN:
+        return None
+    title = crawl_space(doc.title).strip() if doc.title else ""
+    fmt = "dialogue" if doc.source == "wikipedia-talk" else ("code" if _codeish(body) else "prose")
+
+    # Split into sentences (or lines for code/dialogue) so the cut never lands mid-word or mid-sentence.
+    parts = [p.strip() for p in (body.split("\n") if fmt in ("code", "dialogue") else _SENT_SPLIT.split(body)) if p.strip()]
+    if len(parts) < 2:
+        # Fallback: split cleanly on a space or newline near the midpoint of the opening.
+        mid = min(max(len(body) // 2, CONTRASTIVE_CTX_MIN), CONTRASTIVE_CTX_MAX)
+        cut = body.rfind(" ", CONTRASTIVE_CTX_MIN // 2, mid)
+        if cut < 0:
+            cut = mid
+        head_text, tail_text = body[:cut].strip(), _clip(body[cut:].strip(), CONTRASTIVE_CONT_MAX)
+        sep = "\n" if fmt in ("code", "dialogue") else (" " if body[cut : cut + 1] == " " else "")
+    else:
+        sep = "\n" if fmt in ("code", "dialogue") else ("" if lang in ("ja", "zh", "th") else " ")
+        head_parts = [parts[0]]
+        idx = 1
+        while idx < len(parts) - 1 and len(sep.join(head_parts)) < 240:
+            head_parts.append(parts[idx])
+            idx += 1
+        head_text = _clip(sep.join(head_parts), CONTRASTIVE_CTX_MAX)
+        tail_parts = [parts[idx]]
+        idx += 1
+        while idx < len(parts) and len(sep.join(tail_parts)) < 120 and len(sep.join([*tail_parts, parts[idx]])) <= CONTRASTIVE_CONT_MAX:
+            tail_parts.append(parts[idx])
+            idx += 1
+        tail_text = _clip(sep.join(tail_parts), CONTRASTIVE_CONT_MAX)
+
+    if len(head_text) < 40 or len(tail_text) < CONTRASTIVE_CONT_MIN or head_text == tail_text:
+        return None
+    ctx = (f"{title}\n{head_text}" if title else head_text) + (sep if sep else "")
+    if doc.source == "wikipedia":
+        corner = f"{base}/article-mc"
+    elif doc.source == "wikipedia-added":
+        corner = f"{base}/added-mc"
+    elif doc.source == "wikipedia-talk":
+        corner = f"{base}/{abs(hash_title(doc.title)) % 64}/talk-mc"
+    else:
+        corner = f"fresh/{doc.source}/{lang}/{bucket}/cont-mc"
+    return corner, fmt, ctx, tail_text
+
+
+def select_contrastive(docs: list[Doc], seed: bytes, n: int, kinds, per_corner: int = 2, shares: dict | None = None) -> list[Item]:
+    """Build same-source, same-language contrastive continuation items (`kind="choice"`).
+
+    For every harvested document whose kind of writing is named by the season, split it into an
+    opening (`ctx`) and real continuation (`cont`), then draw up to 3 length-matched wrong
+    continuations from OTHER documents in the EXACT SAME `(source, lang)` group. Surface style
+    matching lifts right and wrong equally and nets zero gain.
+    """
+    from ..aggregate import kind_of, source_kind
+
+    shares = shares or SHARES
+    rng = Rng(seed, "fresh/select-mc")
+
+    # 1. Split every eligible document and group by (source, lang).
+    ordered = sorted(docs, key=lambda d: (d.source, d.id))
+    by_group: dict[tuple[str, str], list[tuple[Doc, str, str, str, str]]] = defaultdict(list)
+    for d in ordered:
+        if source_kind(d.source) not in kinds:
+            continue
+        split = _split_continuation(d)
+        if split is None:
+            continue
+        corner, fmt, ctx, cont = split
+        by_group[(d.source, lang_of(d))].append((d, corner, fmt, ctx, cont))
+
+    # 2. Pair each candidate with length-matched wrong continuations from OTHER docs in the same (source, lang).
+    by_kind: dict[str, list[Item]] = defaultdict(list)
+    for (src, lang), group in sorted(by_group.items()):
+        if len(group) < 2:
+            continue
+        # Pool of unique (doc_id, cont, byte_len) within this exact (source, lang).
+        pool = [(d.id, cont, len(cont.encode("utf-8"))) for d, _, _, _, cont in group]
+        for d, corner, fmt, ctx, cont in group:
+            target_len = len(cont.encode("utf-8"))
+            others = [(did, c, abs(bl - target_len)) for did, c, bl in pool if did != d.id and c != cont]
+            if not others:
+                continue
+            # Sort by closeness in byte length, then deterministically sample from the closest band.
+            others.sort(key=lambda x: (x[2], x[0]))
+            band = others[: max(CONTRASTIVE_WRONGS * 4, 12)]
+            sub_rng = Rng(seed, f"fresh/wrong/{src}/{lang}/{d.id}")
+            sub_rng.shuffle(band)
+            wrongs: list[str] = []
+            seen_w: set[str] = set()
+            for _, c, _ in band:
+                if c not in seen_w:
+                    seen_w.add(c)
+                    wrongs.append(c)
+                    if len(wrongs) >= CONTRASTIVE_WRONGS:
+                        break
+            if not wrongs:
+                continue
+            it = Item(kind="choice", corner=corner, fmt=fmt, lang=lang, source=f"{d.source}:{d.id}", ctx=ctx, cont=cont, wrongs=tuple(wrongs))
+            by_kind[kind_of(it)].append(it)
+
+    # 3. Select across kinds, languages, sources, and corners exactly as select() does.
+    used: dict[str, int] = defaultdict(int)
+    chosen: dict[str, list[Item]] = {k: [] for k in by_kind}
+    left = sorted(by_kind)
+    while left and (want := n - sum(map(len, chosen.values()))) > 0:
+        part = max(1, want // len(left))
+        for k in list(left):
+            got = _select_kind(
+                [it for it in by_kind[k] if used[it.corner] < per_corner and it not in set(chosen[k])],
+                rng.child(f"{k}/{len(chosen[k])}"),
+                part,
+                per_corner,
+                shares,
+                used,
+            )
+            chosen[k] += got
+            if len(got) < part:
+                left.remove(k)
+    return [it for k in sorted(chosen) for it in chosen[k]]

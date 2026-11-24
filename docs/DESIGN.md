@@ -34,11 +34,14 @@ curriculum a real move.
 ## Decisions, and what they are for
 
 **The exam measures what pretrained models are for.** Text has no quality of its own: a page
-is worth keeping for what it teaches a model. Three quarters of the score is how well the
-student predicts writing people have just published, in four kinds that count the same:
-reference, news, technical and conversation. One quarter is skills, in seven kinds that
-count the same: agents, reading, logic, grammar, numbers, programs and knowledge. How much each counts is a choice of value, so it is declared rather than left to
-how many items of each there happen to be. [The reasoning](research/exam-first-principles.md#9-season-2-november-2026).
+is worth keeping for what it teaches a model. Half of the score is fresh contrastive
+comprehension (`Right − Wrong` against length-matched distractors from the exact same source
+and language), in four kinds that count the same: reference, news, technical and
+conversation. Half is skills, in seven kinds that count the same: agents, reading, logic,
+grammar, numbers, programs and knowledge. There is zero raw web perplexity: comparing real
+continuations against same-source wrong continuations cancels out surface formatting and
+style mimicry. How much each counts is a choice of value, so it is declared rather than left
+to how many items of each there happen to be.
 
 **Only what tells curators apart is on the exam.** A student this size cannot do arithmetic,
 unit conversion or program tracing cold, whatever it was trained on: on the pilot such

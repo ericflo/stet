@@ -62,7 +62,7 @@ def train_script(rnd: Round, scale: Scale, corpus: Corpus, script_path, device=N
             f"{stats.tokens_one_pass:,} tokens per pass x {stats.passes:.2f} passes ({time.time() - t0:.0f}s)"
         )
         result["script"] = stats.to_dict(corpus)
-        model, result["train"] = train(tokens, scale, season, rnd.init_seed, device, progress)
+        model, result["train"] = train(tokens, scale, season, rnd.init_seed, device, progress, sft_seed=rnd.seed, enc=enc)
         return Trained(result, True, model, enc, device)
     except (ScriptError, FloatingPointError) as e:
         result["invalid_reason"] = str(e)

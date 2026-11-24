@@ -16,7 +16,7 @@ import (
 // on every item of a pillar is that gain for the pillar.
 func (w *world) pillarResult(c *claimed, logic, reference float64) map[string]any {
 	p := w.result(c, 5, 6)
-	gains := map[string]float64{"logic": logic, "reference": reference}
+	gains := map[string]float64{"logic-mc": logic, "reference": reference}
 	var scores []float64
 	sum := 0.0
 	for _, it := range testTable() {
@@ -31,10 +31,10 @@ func (w *world) pillarResult(c *claimed, logic, reference float64) map[string]an
 // scripts, each graded by two more: four grades, no two alike on the exam's pillars. It
 // returns the round and the entry's id.
 //
-// A pillar of testTable in the skills counts a quarter and one in the writing three quarters,
-// so the grades of the first script come to 0.25(0.40) + 0.75(0.60) = 0.55 and 0.25(0.60) +
-// 0.75(0.50) = 0.525, and the script to 0.5375; those of the second to 0.575 and 0.56, and it
-// to 0.5675. The entry's gain is the mean of its two runs': 0.5525.
+// A pillar of testTable in skills counts half and one in comprehension counts half,
+// so the grades of the first script come to 0.50(0.40) + 0.50(0.60) = 0.50 and 0.50(0.60) +
+// 0.50(0.50) = 0.55, and the script to 0.525; those of the second to 0.45 and 0.54, and it
+// to 0.495. The entry's gain is the mean of its two runs': 0.51.
 func runTwiceGradedTwice(t *testing.T) (*world, int, string) {
 	t.Helper()
 	w := newWorld(t)
@@ -98,7 +98,7 @@ func runTwiceGradedTwice(t *testing.T) (*world, int, string) {
 func TestAnEntrysPillarsAreMadeOfTheGradesItsGainIsMadeOf(t *testing.T) {
 	w, idx, id := runTwiceGradedTwice(t)
 	e := w.entry(idx, "tidy")
-	if !e.Valid || e.NRuns != 2 || e.Gain == nil || math.Abs(*e.Gain-0.5525) > 1e-9 {
+	if !e.Valid || e.NRuns != 2 || e.Gain == nil || math.Abs(*e.Gain-0.51) > 1e-9 {
 		t.Fatalf("the entry: %+v", e)
 	}
 	for _, r := range e.Runs {
@@ -225,7 +225,7 @@ func TestASettledRoundsItemScoresAreAnyones(t *testing.T) {
 		gains = append(gains, median(grades))
 	}
 	e := w.entry(idx, "tidy")
-	if got := median(gains); len(gains) != 2 || math.Abs(got-*e.Gain) > 2e-5 || math.Abs(got-0.5525) > 2e-5 {
+	if got := median(gains); len(gains) != 2 || math.Abs(got-*e.Gain) > 2e-5 || math.Abs(got-0.51) > 2e-5 {
 		t.Fatalf("worked out again from the round's item scores the entry's gain is %v, and the round published %v", got, *e.Gain)
 	}
 	// Each grade is told apart by who gave it, of which script.

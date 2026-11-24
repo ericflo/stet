@@ -1,19 +1,22 @@
 # The rules
 
-Season 2 (rules version 5). These are the rules as the server and the harness enforce them. Where a number
+Season 3 (rules version 6). These are the rules as the server and the harness enforce them. Where a number
 is still being measured it says *provisional*, and [Experiments](EXPERIMENTS.md) says how it
 will be set.
 
 ## The idea
 
-A small language model, the **student**, is trained on raw web text for a fixed number of
-tokens and then sits an **exam**. The exam is made when the round is drawn: three quarters
-of it is human writing from three hours of the day before, which the draw picks, and one
-quarter is questions made from the round's seed. The model and the trainer never change. You change one thing: the data. You write a **curator**, a
-program that is handed raw web pages it has never seen and twenty minutes on one GPU. It
-answers with an **edit script**: what to keep, what to cut, and in what order to train on
-it. The better the student does on the exam than one trained on the raw pages, the better
-the curator.
+A fixed 0.6B-class language model, the **student** (`Qwen/Qwen3-0.6B-Base` with its top half
+of layers reset from the round's seed), is trained on raw web text for a fixed number of
+tokens, run through a short fixed multilingual fine-tuning probe, and then sits an **exam**.
+The exam is made when the round is drawn: half of it is fresh contrastive comprehension
+(`Right − Wrong`) from three hours of the day before, which the draw picks, and half is
+generated multilingual skills from the round's seed. There is zero raw web perplexity. The
+model, the trainer, and the probe never change. You change one thing: the data. You write a
+**curator**, a program that is handed raw web pages it has never seen and twenty minutes on
+one 24 GB+ GPU. It answers with an **edit script**: what to keep, what to cut, and in what
+order to train on it. The better the student does on the exam than one trained on the raw
+pages, the better the curator.
 
 ## What you enter
 
@@ -30,13 +33,13 @@ A curator is a directory with a `stet.toml` and any program. `stet init` makes o
   `__pycache__/`, `runs/`, compiled Python and symbolic links are never packed;
   `stet submit --dry-run` lists exactly what is.
 - **Model weights go by reference.** A curator may use a model of its own: up to 32 files
-  and 4 GiB in all, named in `stet.toml` as `[[assets]]`. Each is a public file on Hugging
+  and 10 GiB in all, named in `stet.toml` as `[[assets]]`. Each is a public file on Hugging
   Face, pinned to a commit and named by its sha256. `stet asset add <owner>/<repository>`
   writes the tables. The files are fetched before the clock starts and are in place,
   read-only, when the curator runs. Nothing can be downloaded while it runs.
-- **Libraries are provided.** PyTorch, transformers, scikit-learn and some forty-five
-  others, and Node.js, at exact versions: see [the curator's machine](#the-curators-machine).
-  You bundle your own code and nothing else.
+- **Libraries are provided.** PyTorch, transformers, vLLM, flash-linear-attention,
+  liger-kernel, scikit-learn and nearly fifty others, plus Node.js, at exact versions: see
+  [the curator's machine](#the-curators-machine). You bundle your own code and nothing else.
 - **It has to run on both makes of GPU.** Curators are run by volunteers, on NVIDIA and on
   AMD. Use the GPU through PyTorch (`device="cuda"` is right on both) and it will. A run
   that fails is never better than one that finishes: see [the score](#the-score).
@@ -65,9 +68,10 @@ A curator is a directory with a `stet.toml` and any program. `stet init` makes o
 
 ## A round
 
-A round is drawn every 3 hours, on the clock, when a curator is waiting or on the board.
-Never two at once: a round starts only when the one before has settled, so one that runs
-late pushes the next back.
+Rounds are drawn **on demand** whenever a curator is waiting (or still qualifying) and a
+runner is around, with no idle clock rounds between submissions. Never two at once: a round
+starts only once the one before has settled, and the fleet scales down to zero whenever
+nothing is waiting.
 
 1. **Announce.** The server names, in advance, the drand round whose randomness will seed
    the draw and the Common Crawl crawl it will draw from. Verifiers keep a log of these
@@ -153,22 +157,23 @@ One line per output document. Line order is training order: the trainer does not
 
 ## The exam
 
-**Three quarters of the score is writing people published. One quarter is skills.** Inside
+**Half of the score is fresh contrastive comprehension (`Right − Wrong`) from writing people
+published. Half is generated multilingual skills.** There is zero raw web perplexity. Inside
 each, every row below counts the same.
 
 | | | What it asks | Where it comes from |
 |---|---|---|---|
-| Writing (75%) | Reference | Encyclopedia text | New and extended Wikipedia articles |
-| | News | News reports | Common Crawl's news crawl |
-| | Technical | Issues, pull requests, release notes, patches | GitHub, the kernel's mailing lists |
-| | Conversation | Posts and replies | Hacker News, Lemmy, forums, Bluesky, Mastodon, Wikipedia's talk pages |
-| Skills (25%) | Agents | What a tool says back, in a session at a shell | Generated |
+| Comprehension (50%) | Reference | Real vs wrong continuation of encyclopedia articles (same source & language) | New and extended Wikipedia articles |
+| | News | Real vs wrong continuation of fresh news reports (same source & language) | Common Crawl's news crawl |
+| | Technical | Real vs wrong continuation of issues, PRs, release notes and patches | GitHub, the kernel's mailing lists |
+| | Conversation | Real vs wrong continuation of posts and replies | Hacker News, Lemmy, forums, Bluesky, Mastodon, Wikipedia's talk pages |
+| Skills (50%) | Agents | What a tool says back, in a session at a shell | Generated |
 | | Reading | Taking an answer, or a new rule, from the context | Generated |
-| | Logic | What follows from what is given | Generated |
+| | Logic | What follows from what is given, scored contrastively against other entities | Generated |
 | | Grammar | The right sentence of two | Generated |
 | | Numbers | Arithmetic, units, word problems and algebra, each after a few worked examples | Generated |
 | | Programs | What a small algorithm returns (a list sorted, a letter counted), after a few worked examples | Generated |
-| | Knowledge | Facts the web knows, in ten languages | Generated: the seed picks from a public list of facts |
+| | Knowledge | Facts the web knows in ten languages, scored contrastively against same-relation distractors | Generated: the seed picks from a public list of facts |
 
 **The writing** is what people published in three hours of the day before the draw. The
 examiner harvests every hour of the clock an hour after it ends, keeping a sample chosen
@@ -205,12 +210,12 @@ answer or a passage longer than the student's window is scored whole, a window a
 The exam's writing has the white space of the crawl's own text: one space between words,
 one line end between lines, no empty lines and no tabs.
 
-**The exam's score** is three quarters the mean of the kinds of writing and one quarter the
-mean of the skills. A kind missing from a round gives its share to the others of its own
-group. Inside each, every language counts by its share of the round's corpus, then every
-format. No share rests on one or two items: a language or a format with fewer than eight
-items counts in proportion, and a part's small languages are measured together. A gain on
-an item is clipped to a few robust widths, so that no handful of items decides anything.
+**The exam's score** is half the mean of the comprehension kinds and half the mean of the
+skills. A kind missing from a round gives its share to the others of its own group. Inside
+each, every language counts by its share of the round's corpus, then every format. No share
+rests on one or two items: a language or a format with fewer than eight items counts in
+proportion, and a part's small languages are measured together. A gain on an item is clipped
+to a few robust widths, so that no handful of items decides anything.
 
 When the round settles, its exam is published: every generated question and Wikipedia's
 text whole, and for every other source the item's source, its id there and the item's
@@ -223,17 +228,19 @@ grading it.
 
 ## The student
 
-| | Layers × width | Context | Training budget | Edit limit |
-|---|---|---|---|---|
-| nano | 4 × 192 | 256 | 8M tokens | 120 s |
-| micro | 6 × 384 | 512 | 40M tokens | 300 s |
-| **standard (official)** | 8 × 512 | 512 | 160M tokens | 1,200 s |
-| large (finals) | 10 × 640 | 512 | 640M tokens | 4,800 s |
+| | Architecture | Context | Training budget | Edit limit | SFT probe |
+|---|---|---|---|---|---|
+| nano | `Qwen3-0.6B-Base` (28 × 1024, top half reset) | 1024 | 2.1M tokens | 120 s | 16 steps |
+| micro | `Qwen3-0.6B-Base` (28 × 1024, top half reset) | 1024 | 8.4M tokens | 300 s | 32 steps |
+| **standard (official)** | `Qwen3-0.6B-Base` (28 × 1024, top half reset) | 1024 | 32.8M tokens | 1,200 s | 64 steps |
+| large (finals) | `Qwen3-0.6B-Base` (28 × 1024, top half reset) | 1024 | 131M tokens | 4,800 s | 64 steps |
 
-An ordinary GPT with an 8,192-token vocabulary trained on the crawl alone, AdamW, warm-up and
-cosine decay. Training is counted in tokens, never seconds, so every machine does the same
-work. Rounds use the standard student because the smaller ones rank curators differently
-from the larger ones: [the measurements](research/exam-first-principles.md#75-scale-rounds-at-the-standard-student-finals-at-the-large-one-decide-the-season).
+Pinned `Qwen/Qwen3-0.6B-Base` weights (151,936-token multilingual vocabulary) with its upper
+half of transformer layers deterministically re-initialized from the round's seed, trained
+without shuffling in the curator's exact script order using AdamW with cosine decay, then
+given a short fixed disjoint multilingual fine-tuning probe (zero overlap with the exam) so
+the student's acquired representations read out cleanly on comprehension and skill tasks.
+Training is counted in tokens, never seconds, so every machine does the same work.
 
 ## The curator's machine
 
@@ -242,9 +249,9 @@ Curators are run on volunteers' machines, which differ. What a curator is given 
 | | |
 |---|---|
 | CPU | 6 cores |
-| Memory | 12 GB |
-| GPU | one, NVIDIA or AMD, with 8 GB of its memory |
-| Scratch space | 8 GB at `/scratch`, held in memory, so it comes out of the 12 |
+| Memory | 20 GB |
+| GPU | one, NVIDIA or AMD, with 22 GB of its memory |
+| Scratch space | 12 GB at `/scratch`, held in memory, so it comes out of the 20 |
 | Network | none, but loopback (`127.0.0.1`) works between the curator's own processes |
 | Software | Python 3.13, Node.js 24 and the season's libraries |
 
@@ -335,10 +342,10 @@ may hold one too. That is how you beat your own record.
 
 The organisers' reference curators are the one exception to "one per entrant": their own
 three (`stet/identity`, `stet/english`, `stet/tidy`), four that rebuild published recipes
-(`stet/heuristic`, `stet/dclm`, `stet/fineweb-edu`, `stet/fineweb2`), and `stet/mimic`,
-which keeps the pages that look most like the exam and shows what that buys. They are yardsticks:
+(`stet/heuristic`, `stet/dclm`, `stet/fineweb-edu`, `stet/fineweb2`), `stet/mimic`, and
+`stet/reader` (a 0.6B `vLLM` multilingual quality rater). They are yardsticks:
 each holds a place of its own beside the eight, whatever its rating, and takes none from an
-entrant's curator. Two of them, `stet/fineweb2` and `stet/dclm`, run in every round and tie
+entrant's curator. Two of them, `stet/fineweb2` and `stet/reader`, run in every round and tie
 the rounds together; each of the others runs in one round in eight, in turn, and keeps its
 rating from the rounds it ran. Any curator but the record holder that has stopped producing
 valid scripts leaves the ladder, a reference too.
@@ -466,7 +473,7 @@ are graded by **verifiers**: anyone who runs `stet verify`.
   would hold the round back for as long as it trained, and for its first two minutes they
   go to the fastest machines that are free. The round settles as soon as those under way
   are in.
-- **The entry's gain is the mean of its two runs.** When they differ by more than 0.04
+- **The entry's gain is the mean of its two runs.** When they differ by more than 0.05
   bits per byte *(provisional)*, or one failed and the other did not, a third verifier runs the
   curator and the median of the three is the score.
 - **A round does not wait for people who are not there.** If nobody who is around (at

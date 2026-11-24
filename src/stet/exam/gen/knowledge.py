@@ -83,3 +83,59 @@ def make(rng: Rng, corner: str) -> Item:
     ctx = TEMPLATES[fact][lang].format(s=s)
     return Item(kind="answer", corner=corner, fmt="prose", lang=lang, source=f"gen:{NAME}", ctx=ctx,
                 cont=o if lang in NO_SPACE else f" {o}")
+
+
+def _subject_parity(subject: str) -> int:
+    import hashlib
+
+    return hashlib.sha256(subject.encode("utf-8")).digest()[0] & 1
+
+
+def split_pool(fact: str, lang: str, parity: int) -> tuple[list[tuple[str, str]], str]:
+    """Split a (fact, lang) pool deterministically by subject hash parity:
+    0 = exam pool (knowledge-mc), 1 = disjoint SFT probe pool (zero factual overlap)."""
+    full = facts().get((fact, lang))
+    if not full:
+        lang = "en"
+        full = facts()[(fact, "en")]
+    part = [(s, o) for s, o in full if _subject_parity(s) == parity]
+    return (part if len(part) >= 4 else full), lang
+
+
+class KnowledgeMC:
+    """Contrastive factual knowledge: right answer vs 3 same-relation, same-language distractors.
+
+    Uses the even-parity split of Wikidata facts (disjoint from the SFT probe's odd-parity split).
+    """
+
+    NAME = "knowledge-mc"
+
+    @staticmethod
+    def corners() -> list[str]:
+        return [f"{KnowledgeMC.NAME}/{lang}/{fact}" for fact in TEMPLATES for lang in LANGS]
+
+    @staticmethod
+    def make(rng: Rng, corner: str) -> Item:
+        _, lang, fact = corner.split("/")
+        pool, lang = split_pool(fact, lang, parity=0)
+        s, o = rng.choice(pool)
+        fmt_o = (lambda v: str(int(v))) if fact == "birthyear" else (lambda v: v)
+        right_val = fmt_o(o)
+        # Draw 3 distinct wrong answers from the exact same relation and language.
+        other_vals = sorted({fmt_o(o2) for _, o2 in pool if fmt_o(o2) != right_val})
+        if len(other_vals) < 3:
+            full = facts().get((fact, lang)) or facts()[(fact, "en")]
+            other_vals = sorted({fmt_o(o2) for _, o2 in full if fmt_o(o2) != right_val})
+        wrongs_raw = rng.sample(other_vals, min(3, len(other_vals)))
+        prefix = "" if lang in NO_SPACE else " "
+        ctx = TEMPLATES[fact][lang].format(s=s)
+        return Item(
+            kind="choice",
+            corner=corner,
+            fmt="prose",
+            lang=lang,
+            source=f"gen:{KnowledgeMC.NAME}",
+            ctx=ctx,
+            cont=f"{prefix}{right_val}",
+            wrongs=tuple(f"{prefix}{w}" for w in wrongs_raw),
+        )
