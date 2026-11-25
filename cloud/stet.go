@@ -195,6 +195,11 @@ type Work struct {
 	FarmLongWaiting int `json:"farm_long_waiting"`
 	// When the organisers paused the rounds (0: they are not): none is drawn.
 	Paused int64 `json:"paused"`
+	// BackoffUntil is when on-demand automatic draws will resume after two empty rounds.
+	BackoffUntil int64 `json:"backoff_until,omitempty"`
+	// LeaseSeconds is the server's job lease (STET_LEASE), so the fleet refuses GPUs too slow
+	// to finish a two-pass baseline grade inside it.
+	LeaseSeconds int `json:"lease_seconds,omitempty"`
 	// The most grades one machine may hold before an exam (0 or 1: one), and how long after an
 	// exam is posted a grade still wanted is kept for the fastest card free: the server's own
 	// settings, which the fleet follows.

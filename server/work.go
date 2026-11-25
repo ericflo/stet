@@ -103,6 +103,12 @@ type Work struct {
 	FarmLongWaiting int `json:"farm_long_waiting"`
 	// Paused is when the organisers paused the rounds (0: they are not): none is drawn.
 	Paused int64 `json:"paused,omitempty"`
+	// BackoffUntil is when on-demand automatic draws will resume after two consecutive
+	// rounds settled with no baseline (0: not backed off).
+	BackoffUntil int64 `json:"backoff_until,omitempty"`
+	// LeaseSeconds is the server's job lease (STET_LEASE), so the fleet can refuse GPUs
+	// too slow to finish a two-pass baseline grade inside it.
+	LeaseSeconds int `json:"lease_seconds,omitempty"`
 	// EarlyGradesPerMachine is the most grades one machine may hold before an exam, trained
 	// and waiting for it; FastFirstSeconds how long after an exam is posted the grades scores
 	// wait for are kept for the faster machines around (pace.go). They are counted in
@@ -122,7 +128,7 @@ type Work struct {
 func (a *App) work(s *State) Work {
 	j := a.newJudge(s)
 	out := Work{Rounds: []WorkRound{}, Machines: []WorkMachine{}, EarlyGradesPerMachine: earlyGradesPerMachine, FastFirstSeconds: fastFirstSeconds,
-		EarlyWindowSeconds: int(a.cfg.EarlyWindow.Seconds())}
+		EarlyWindowSeconds: int(a.cfg.EarlyWindow.Seconds()), LeaseSeconds: int(a.cfg.Lease.Seconds())}
 	fresh := &asker{acct: &Account{ID: -1, Anchor: true, Worker: true}, est: true, gpuMake: "cuda"}
 	early := &asker{acct: &Account{ID: -3, Anchor: true, Worker: true}, est: true, gpuMake: "cuda", early: true}
 	runner := &asker{acct: &Account{ID: -2, Anchor: true, Worker: true}, est: true, canEdit: true, gpuMake: "cuda"}
@@ -168,6 +174,7 @@ func (a *App) work(s *State) Work {
 		out.NextDrawAt = r.DrawAt
 	}
 	out.Paused = s.Meta.Paused
+	out.BackoffUntil = a.backoffUntil(s)
 	if a.onDemandOnly() {
 		at, blocked := a.demandSlot(s)
 		sched := s.roundWithStatus("scheduled")

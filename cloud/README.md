@@ -32,9 +32,9 @@ It is a single-GPU container on one of the markets armed, running `ubuntu:24.04`
 script](worker.sh). The script ensures `gcc`/`g++`/`libc6-dev` are present (for Triton/vLLM/FLA
 JIT kernels), installs stet from the site into `/opt/stet` (on Lium, under
 `/workspace`, since its container disk is 7.5 GB), writes the machine's key under `/root`, and
-runs `stet verify --edits --sandbox container --exit-when-idle 15`: it runs curators and
+runs `stet verify --edits --sandbox container --exit-when-idle 20`: it runs curators and
 grades, and trains the organisers' students when there is nothing official to do, until it
-has had nothing to do for fifteen minutes. Then it ends itself where its market gives it a key
+has had nothing to do for twenty minutes. Then it ends itself where its market gives it a key
 for that alone (RunPod a pod's own, Vast an instance's), and elsewhere waits for stet-cloud to
 end it from outside, with the market's own backstop should the fleet be gone: Lium ends a pod
 after `termination_hours`, Clore an order after `rental_hours` (both 6), and a Salad container
@@ -96,7 +96,7 @@ service would rent and end is what the service will; settings given to it are ta
 those.
 
 How many it rents: one for each machine at a grade, which takes no other until it is done
-(about 40 minutes on a 3090, ~30 on a 4090, ~21 on a 5090 at the standard scale), and one more for every `--per-machine`
+(about 75 minutes on a 3090, ~42 on a 4090, ~31 on a 5090 at the standard scale), and one more for every `--per-machine`
 (6) scripts a new machine could grade now: `--per-machine 1` gives each its own. A grade
 trains the student once; the four machines a round asks to measure its unedited baseline
 (Season 3's `baselines.per_round`, `baselines_wanted` in `/admin/work`) train that first, on
@@ -116,10 +116,10 @@ about 2h12m after the draw, and these early grades were most of its grades; the 
 runs with `--early 0`, renting graders only once an exam is posted.
 How long a training pass takes on each kind is learned from the grades of settled rounds
 (each says the GPU that trained, and for how long), and how long a machine takes to start
-from those this service rents; until a kind has been seen, its pass is a 3090's 40 minutes
+from those this service rents; until a kind has been seen, its pass is a 3090's 75 minutes
 over its speed in the table, and a machine is taken to start in 8 minutes. They are kept in
 `calibration.json`, and `stet-cloud gpus` shows them. The curators want a machine for every
-four entries to run, and never fewer than two, since each entry is run twice, by two
+two entries to run, and never fewer than two, since each entry is run twice, by two
 accounts. A machine with nothing official to do trains the organisers' own
 students (a few minutes each, on a settled round), so one more for every `--per-farm` (4)
 of those waiting, after the official work (`--per-farm 0`: none). `--long-farm 600` rents
@@ -146,13 +146,16 @@ will do, looked up afresh each time: every kind of GPU the markets armed have fr
 `--max-price` is tried fastest first (the cheaper first where two are as fast) until one has a
 machine with room. A kind's price is ranked over how often machines of its kind have started
 (`startRates`: some cheap hosts never do), learned per market, card and class of host. A round
-settles only once its slowest grade is in: a Season 3 `Qwen3-0.6B-Base` pass is about 21 minutes
-on a 5090, 30 on a 4090 and 40 on a 3090. A machine that runs curators takes grades as soon as its runs are done, and
+settles only once its slowest grade is in: a Season 3 `Qwen3-0.6B-Base` pass (with deterministic CUDA kernels) is about 35 minutes
+on a 5090, 47 on a 4090 and 85 on a 3090. A machine that runs curators takes grades as soon as its runs are done, and
 the first four to take one also measure the round's baseline, two passes. `--cheapest` rents every machine by what a grade costs, its price over its speed.
 What will do: NVIDIA, `--min-gpu-memory` 16 GB or more for grading (`--min-curator-gpu-memory` 24 GB
-or more for running curators, which receive 22 GB VRAM inside the sandbox), on a host with the season's floor of 24 GB of memory (`--min-ram`) and 6 vCPUs a GPU, a driver
+or more for running curators, which receive 22 GB VRAM inside the sandbox; unfilled 24 GB curator
+slots fall back to 16 GB+ graders whenever grades or farm tasks are waiting), fast enough to finish
+a two-pass baseline inside the server's 5-hour job lease (with a 30-minute margin, filtering out
+slow cards like RTX 3060, RTX 4060 Ti, and L4), on a host with the season's floor of 24 GB of memory (`--min-ram`) and 6 vCPUs a GPU, a driver
 new enough for CUDA 13 (the season's PyTorch, 2.14.0, is built for CUDA 13), bf16
-(nothing older than Ampere), and a whole GPU, with a 100 GB disk (above the 80 GB runner floor). `stet-cloud gpus` lists them as they stand.
+(nothing older than Ampere), and a whole GPU, with a 120 GB disk for curator machines (above the 80 GB runner floor; 35 GB for grader-only machines). `stet-cloud gpus` lists them as they stand.
 `--gpu "RTX A5000,RTX 4090"` names them instead.
 
 `--cloud` is RunPod's: `any` (the default) takes the cheaper of its two clouds, which is

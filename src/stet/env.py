@@ -47,7 +47,9 @@ def expected(season: Season) -> dict:
     if not (sys.platform == "linux" and platform.machine() in ("x86_64", "AMD64")):
         for name in env.get("linux_x86_64_only") or []:
             packages.pop(name, None)
-    if not is_nvidia_linux():
+    if is_nvidia_linux():
+        packages.update(env.get("also_cuda") or {})
+    else:
         for name in env.get("cuda_linux_only") or []:
             packages.pop(name, None)
     return {"python": str(env.get("python") or ""), "packages": packages}

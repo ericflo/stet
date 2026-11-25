@@ -28,7 +28,7 @@
           <h3>Score it on your own machine</h3>
           <p>Once, fetch three hours of recent writing for practice exams to use. A few minutes, and no account.</p>
           <div class="cmd"><pre><span class="p">$ </span><span data-copy-text>stet harvest</span></pre><button type="button" data-copy>copy</button></div>
-          <p>Then this runs your curator on a practice round, trains the model on what it kept, sits the exam and prints your <b>gain</b>. A minute or two on a GPU.</p>
+          <p>Then this runs your curator on a practice round, trains the model on what it kept, sits the exam and prints your <b>gain</b>. A couple of minutes on a 16 GB+ GPU at <code>nano</code> (about 35 minutes on an RTX 5090 at <code>standard</code>).</p>
           <div class="cmd"><pre><span class="p">$ </span><span data-copy-text>stet run</span></pre><button type="button" data-copy>copy</button></div>
         </li>
         <li>
@@ -67,13 +67,13 @@
     <aside class="stack side">
       <div class="panel">
         <div class="row head"><span class="k">You need</span></div>
-        <div class="row"><span class="v l">A computer. A GPU makes local runs quick: NVIDIA, AMD or a Mac.</span></div>
+        <div class="row"><span class="v l">A 16 GB+ GPU for local practice runs (NVIDIA, AMD, or a Mac with 16+ GB unified memory; CPU takes hours because every scale trains the 0.6B student).</span></div>
         {{if .Github}}<div class="row"><span class="v l">A GitHub account, {{$d.GithubDays}}+ days old, to submit. Not to practise.</span></div>{{end}}
-        <div class="row"><span class="v l">Nothing else. Official runs happen on verifiers' machines, not yours.</span></div>
+        <div class="row"><span class="v l">No local GPU is needed just to submit: official runs happen on verifiers' machines, not yours.</span></div>
       </div>
       <div class="panel" data-live>
         <div class="row head"><span class="k">Right now</span></div>
-        <div class="row"><span class="k">Next round</span><span class="v">{{if $d.Open}}one is running{{else}}{{with $d.Next}}<span data-until="{{.DrawAt}}">{{ago .DrawAt}}</span>{{else}}{{if $d.Paused}}paused{{else if $.OnDemandOnly}}on demand (starts on submit){{else}}not scheduled{{end}}{{end}}{{end}}</span></div>
+        <div class="row"><span class="k">Next round</span><span class="v">{{if $d.Open}}one is running{{else}}{{with $d.Next}}<span data-until="{{.DrawAt}}">{{ago .DrawAt}}</span>{{else}}{{if $d.Paused}}paused{{else if $d.BackoffUntil}}backed off until {{hm $d.BackoffUntil}} UTC{{else if $.OnDemandOnly}}on demand (starts on submit){{else}}not scheduled{{end}}{{end}}{{end}}</span></div>
         <div class="row"><span class="k">Waiting to run</span><span class="v">{{$d.Queued}} {{plural $d.Queued "entry" "entries"}}</span></div>
         <div class="row"><span class="k">Running curators, last hour</span><span class="v">{{$d.Runners}} {{plural $d.Runners "machine" "machines"}}</span></div>
         <div class="row"><span class="k">To beat</span><span class="v">{{with $d.Record}}{{gain .Rating}} bits per byte · <a href="/editors/{{short .EditorID}}">{{.Name}}</a>{{else}}nobody yet{{end}}</span></div>
@@ -128,7 +128,7 @@
     <div class="sec-head"><div><h2>Questions entrants ask</h2></div><a class="more" href="/docs/rules">the rules, in full →</a></div>
     <div class="qa">
       <details open><summary>How many things can I try?</summary><p>On your own machine, as many as you like: <code>stet run</code> is the leaderboard's own harness, practice rounds never change, and every official round can be replayed once it settles. Officially you may have {{$d.InPlay}} {{plural $d.InPlay "entry" "entries"}} in play at once, because each one costs volunteers GPU time, and submit as often as you like. Submitting an entry again under the same name replaces it; another name is another entry.</p></details>
-      <details><summary>Do I need a GPU?</summary><p>Not to enter: your curator is run on verifiers' machines. To develop one, a GPU turns a practice run from a long wait into a minute or two. Any NVIDIA or AMD card, or a Mac, will do for that.</p></details>
+      <details><summary>Do I need a GPU?</summary><p>Not just to submit: official runs happen on verifiers' machines. To run and test locally, you want a 16 GB+ GPU (NVIDIA, AMD, or a Mac with 16+ GB unified memory): every scale trains the same 0.6B student (~11.8 GiB peak), taking a couple of minutes at <code>nano</code> and ~35 minutes on an RTX 5090 at <code>standard</code>. On CPU alone, even <code>nano</code> takes hours.</p></details>
       <details><summary>What is the gain, exactly?</summary><p>How much better a model trained on your edit does on the exam than one trained on the raw pages, on the same round, in bits per byte; higher is better. Half of the exam is fresh twin-context comprehension (how much better the real opening predicts the continuation than wrong openings from the same source and language) and half is generated multilingual skills; inside each, every kind counts the same.{{if worth}} The board also shows it as a multiplier: how much more raw data the model would have needed to do as well.{{end}}</p></details>
       <details><summary>Can my curator write new text?</summary><p>No. Everything the model reads is copied byte for byte from the round's pages: whole pages, pages with lines taken out, or pieces of at least {{.Season.MinCopyBytes}} bytes. The competition is about choosing and ordering data, not about bringing your own. It was measured: 16,000 tokens of text written in the exam's forms bought 0.004 bits per byte, 1.3 standard errors. That is too small and uncertain to earn a rule, so a script holds no text of its own.</p></details>
       <details><summary>Is the exam secret?</summary><p>Nobody can know it in advance, the organisers included. Each round's exam is made at its draw: from text people published in three hours of the day before, picked by the draw, and from problems generated from the round's own random seed. A curator runs with no network and can add no text of its own, so the exam cannot reach the model through it. A practice round sits the same kinds of writing once you have run <code>stet harvest</code>.</p></details>

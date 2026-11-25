@@ -22,12 +22,12 @@ gains in bits per byte.
 
 ## Do I need a big GPU?
 
-No. A practice run at nano scale takes a couple of minutes on a modern GPU. The
-official scale, standard, trains `Qwen3-0.6B-Base` (top half reset) on 32.8M tokens plus a
-64-step SFT probe — about 31 minutes on an RTX 5090 (~42 minutes on an RTX 4090) — and wants a GPU with 16 GB or
-more (24 GB+ to run curators). `stet doctor` tells you what your machine can do. Running
-other people's curators for the leaderboard asks for a 24 GB+ GPU at or above the floor;
-`stet bench` measures yours.
+You need a GPU with 16 GB or more of VRAM to train the `Qwen3-0.6B-Base` student (24 GB+
+to run curators). A practice run at nano scale takes a couple of minutes, and micro under
+ten. The official scale, standard, trains `Qwen3-0.6B-Base` (top half reset) on 32.8M
+tokens plus a short SFT probe — about 35 minutes on an RTX 5090 (~47 minutes on an RTX 4090).
+`stet doctor` tells you what your machine can do. Running other people's curators for the
+leaderboard asks for a 24 GB+ GPU at or above the floor; `stet bench` measures yours.
 
 ## How many things can I try?
 
@@ -155,12 +155,12 @@ style mimicry identically.
 
 ## Does everything on the exam count?
 
-Yes. The season names every part of the exam. Each part was measured before the season; a
-part that did not tell curators apart, or whose order did not hold for a larger student, is
-not on the exam. A part is in the score or it is not on the exam at all: nothing on the exam
-counts for nothing. Arithmetic, units, word problems, algebra and small algorithms are asked
-only after a few worked examples of the same task: asked cold, a student this size is too
-near chance for curators to differ.
+Yes. The season names every part of the exam. Each part is validated before the season for
+multi-seed stability, resistance to surface style mimicry, and agreement with published
+pretraining recipes. A part is in the score or it is not on the exam at all: nothing on the
+exam counts for nothing. Arithmetic, units, word problems, algebra and small algorithms are
+asked only after a few worked examples of the same task: asked cold, a student this size is
+too near chance for curators to differ.
 
 ## Who runs my code?
 
@@ -227,7 +227,7 @@ do. Other backends can build, run and submit curators but not grade for the boar
 Finals. When the season closes, announced two weeks ahead, the eight best-rated curators and
 one more drawn by lot from the next eight are run on two fresh rounds, and the student
 (`Qwen3-0.6B-Base`, top half reset) is trained twice on each script at the `large` budget
-(131M tokens + 64-step SFT probe, 4× the official budget). Their gain there is the season's
+(131M tokens + 32-step SFT probe, 4× the official budget). Their gain there is the season's
 table.
 
 A season freezes the student, the budgets, how the exam is made and the rules, so that scores

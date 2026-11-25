@@ -67,7 +67,9 @@ func TestAMachineUnderTheFloorTeachesWhereCuratorsMayNotRun(t *testing.T) {
 	vast := newVast(fm.srv.URL, "vast-key")
 	f.markets = append(f.markets, vast)
 	// The cheapest a grade first (--cheapest), so that which host comes next is plain.
-	f.o.Edits, f.o.Disk, f.o.Market, f.o.Cheapest = true, 100, "vast", true
+	// The Season 1 vast_bundles.json fixture relies on two RTX 3060 offers on distinct hosts;
+	// widen the lease to match Season 1's shorter pass so those 3060s remain eligible.
+	f.o.Edits, f.o.Disk, f.o.Market, f.o.Cheapest, f.lease = true, 100, "vast", true, 8*time.Hour
 	if err := cmdMarkets(ctx, f, []string{"curators", "vast"}, "cage_check: every case held", false); err != nil {
 		t.Fatal(err)
 	}

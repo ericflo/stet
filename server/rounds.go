@@ -175,6 +175,41 @@ func (a *App) tick(ctx context.Context) {
 
 const emptyBackoff = 3 * time.Hour // retry cadence after two consecutive rounds settled with no baseline
 
+// emptyStreak returns how many consecutive latest drawn rounds settled with no baseline, and
+// when the latest of them finished.
+func emptyStreak(s *State) (empty int, lastEmpty int64) {
+	for _, rd := range s.roundsDesc(3) {
+		if rd.DrawnAt == 0 {
+			continue // the scheduled round itself
+		}
+		if rd.Status == "settled" && rd.BaselineLoss == nil {
+			empty++
+			if done := max(rd.SettledAt, rd.DrawnAt); done > lastEmpty {
+				lastEmpty = done
+			}
+		} else {
+			break
+		}
+	}
+	return empty, lastEmpty
+}
+
+// backoffUntil reports when on-demand automatic draws will resume after two consecutive
+// rounds settled with no baseline, or 0 when draws are not backed off.
+func (a *App) backoffUntil(s *State) int64 {
+	if !a.onDemandOnly() {
+		return 0
+	}
+	empty, lastEmpty := emptyStreak(s)
+	if empty < 2 {
+		return 0
+	}
+	if retry := lastEmpty + int64(emptyBackoff.Seconds()); now() < retry {
+		return retry
+	}
+	return 0
+}
+
 // demandSlot is the earliest grid moment an on-demand draw may take, respecting drawNotice
 // and RoundMinGap (when set), and reports whether the last two drawn rounds both came to
 // nothing. In fixed-clock mode that holds back early draws so the fixed schedule retries; in
@@ -182,26 +217,16 @@ const emptyBackoff = 3 * time.Hour // retry cadence after two consecutive rounds
 // nor deadlocks automatic draws forever.
 func (a *App) demandSlot(s *State) (at int64, blocked bool) {
 	gap := int64(a.cfg.RoundMinGap.Seconds())
-	at, empty, streakDone := now()+drawNotice, 0, false
-	var lastEmpty int64
+	at = now() + drawNotice
 	for _, rd := range s.roundsDesc(3) {
 		if rd.DrawnAt == 0 {
 			continue // the scheduled round itself
-		}
-		if !streakDone {
-			if rd.Status == "settled" && rd.BaselineLoss == nil {
-				empty++ // nothing in it could be graded
-				if done := max(rd.SettledAt, rd.DrawnAt); done > lastEmpty {
-					lastEmpty = done
-				}
-			} else {
-				streakDone = true
-			}
 		}
 		if gap > 0 && rd.DrawnAt+gap > at {
 			at = rd.DrawnAt + gap
 		}
 	}
+	empty, lastEmpty := emptyStreak(s)
 	if empty >= 2 {
 		if !a.onDemandOnly() {
 			return 0, true
@@ -211,6 +236,18 @@ func (a *App) demandSlot(s *State) (at int64, blocked bool) {
 		}
 	}
 	return a.season.nextGrid(at - 1), false
+}
+
+// takePendingWas consumes any moved_from trail left by a previously dropped scheduled round
+// for this round index so the public audit trail survives on-demand unscheduling.
+func takePendingWas(tx *Tx) []int64 {
+	if len(tx.s.Meta.PendingWas) == 0 {
+		return nil
+	}
+	was := append([]int64(nil), tx.s.Meta.PendingWas...)
+	tx.s.Meta.PendingWas = nil
+	tx.put(metaKey, &tx.s.Meta)
+	return was
 }
 
 // schedule announces the next round, if none is announced: when it will be drawn (and so
@@ -245,7 +282,7 @@ func (a *App) schedule(tx *Tx) {
 	for taken[a.season.Beacon.drandRoundAt(at)] {
 		at = a.season.nextGrid(at)
 	}
-	rd := &Round{Idx: s.maxRound() + 1, Status: "scheduled", Scale: a.cfg.Scale, DrawAt: at, DrandRound: a.season.Beacon.drandRoundAt(at), Crawl: crawl}
+	rd := &Round{Idx: s.maxRound() + 1, Status: "scheduled", Scale: a.cfg.Scale, DrawAt: at, DrandRound: a.season.Beacon.drandRoundAt(at), Crawl: crawl, Was: takePendingWas(tx)}
 	tx.saveRound(rd)
 	if a.onDemandOnly() {
 		slog.Info("round scheduled on demand: an entry is waiting", "round", roundID(a.season.ID, rd.Idx), "at", rd.DrawAt)
@@ -537,13 +574,16 @@ func (a *App) bringForward(ctx context.Context) (*Round, error) {
 			for taken[a.season.Beacon.drandRoundAt(at)] {
 				at = a.season.nextGrid(at)
 			}
-			r = &Round{Idx: tx.s.maxRound() + 1, Status: "scheduled", Scale: a.cfg.Scale, DrawAt: at, DrandRound: a.season.Beacon.drandRoundAt(at), Crawl: crawl}
+			r = &Round{Idx: tx.s.maxRound() + 1, Status: "scheduled", Scale: a.cfg.Scale, DrawAt: at, DrandRound: a.season.Beacon.drandRoundAt(at), Crawl: crawl, Was: takePendingWas(tx), Manual: true}
 			tx.saveRound(r)
 			out = *r
 			return nil
 		}
+		r.Manual = true
 		if at < r.DrawAt || a.cfg.Dev {
 			a.reschedule(tx, r, at)
+		} else {
+			tx.saveRound(r)
 		}
 		out = *r
 		return nil
@@ -611,7 +651,7 @@ func (a *App) maybeDraw(ctx context.Context, force bool) error {
 				a.reschedule(tx, cur, a.laterSlot())
 			}
 			problem = errors.New("no curators are waiting to run")
-		case a.onDemandOnly() && !force && !a.hasEligibleWaiting(s, r.DrawAt):
+		case a.onDemandOnly() && !force && !cur.Manual && !a.hasEligibleWaiting(s, r.DrawAt):
 			// In on-demand-only mode do not draw a round for the ladder alone if the sole waiting
 			// entry withdrew or resubmitted inside the last commitMargin seconds.
 			if a.waiting(s) {
@@ -666,7 +706,7 @@ func (a *App) maybeDraw(ctx context.Context, force bool) error {
 			problem = errors.New("no curators are waiting to run")
 			return nil
 		}
-		if a.onDemandOnly() && !force && !a.hasEligibleWaiting(s, cur.DrawAt) {
+		if a.onDemandOnly() && !force && !cur.Manual && !a.hasEligibleWaiting(s, cur.DrawAt) {
 			if a.waiting(s) {
 				a.reschedule(tx, cur, a.season.nextGrid(now()+drawNotice))
 			} else {

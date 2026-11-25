@@ -38,8 +38,9 @@ A curator is a directory with a `stet.toml` and any program. `stet init` makes o
   Face, pinned to a commit and named by its sha256. `stet asset add <owner>/<repository>`
   writes the tables. The files are fetched before the clock starts and are in place,
   read-only, when the curator runs. Nothing can be downloaded while it runs.
-- **Libraries are provided.** PyTorch, transformers, vLLM, flash-linear-attention,
-  liger-kernel, scikit-learn and nearly fifty others, plus Node.js, at exact versions: see
+- **Libraries are provided.** PyTorch, transformers, flash-linear-attention, scikit-learn and
+  nearly fifty others, plus Node.js, at exact versions on every machine (`vLLM` and
+  `liger-kernel` are also preinstalled on NVIDIA Linux runners): see
   [the curator's machine](#the-curators-machine). You bundle your own code and nothing else.
 - **It has to run on both makes of GPU.** Curators are run by volunteers, on NVIDIA and on
   AMD. Use the GPU through PyTorch (`device="cuda"` is right on both) and it will. A run
@@ -108,8 +109,10 @@ entries takes longer, and the next is drawn when it has settled.
 
 Rounds never overlap. If one is still being graded when the next is due, the next is
 drawn at the first ten-minute mark that is at least six minutes after it settles. A round
-takes as long as its curators and its trainings do: about an hour from draw to settlement
-with enough machines. Season 1's rounds took two and a half, two of them waiting for the exam.
+takes as long as its curators and its trainings do: typically 2.5 to 4.0 hours from draw
+to settlement on a 6-GPU fleet (each standard training takes ~35 minutes on an RTX 5090
+or ~47 minutes on an RTX 4090, and baseline graders train two passes). Season 1's rounds
+took two and a half hours, two of them waiting for the exam.
 
 ## The corpus
 
@@ -196,8 +199,8 @@ well-known ones (a country's capital, who wrote a book), which the seed picks fr
 list: a student knows them only from pages that say them.
 
 **Everything on the exam counts.** The season names every part of the exam: those in the
-table, and no other. Each part was measured before the season; a part that did not tell
-curators apart, or whose order did not hold for a larger student, is not on the exam. A part
+table, and no other. Each part is validated before the season for multi-seed stability,
+resistance to surface style mimicry, and agreement with published pretraining recipes. A part
 is in the score or it is not on the exam at all: nothing is sat that the score leaves out,
 and nothing on the exam counts for nothing. Numbers and programs are asked only after a few
 worked examples of the same task. Asked cold, a student this size is too near chance for
@@ -207,7 +210,7 @@ disagreed about them more than two curators did.
 **The score of an item** is measured in **bits per byte** everywhere:
 - on fresh comprehension (`kind="context"`), each article is split cleanly on a sentence or
   paragraph boundary into an opening and a continuation, and the exact same continuation is
-  scored under its real opening minus the mean of three length-matched wrong openings from
+  scored under its real opening minus the mean of up to three length-matched wrong openings from
   the exact same source, language, and boundary class — so surface style and unconditional
   passage ease cancel identically;
 - on generated skills (`kind="answer"` and `grammar` pairs), how likely the student finds the
@@ -236,16 +239,16 @@ grading it.
 
 | | Architecture | Context | Training budget | Edit limit | SFT probe |
 |---|---|---|---|---|---|
-| nano | `Qwen3-0.6B-Base` (28 × 1024, top half reset) | 1024 | 1.0M tokens | 120 s | 16 steps |
-| micro | `Qwen3-0.6B-Base` (28 × 1024, top half reset) | 1024 | 8.4M tokens | 300 s | 32 steps |
-| **standard (official)** | `Qwen3-0.6B-Base` (28 × 1024, top half reset) | 1024 | 32.8M tokens | 1,200 s | 64 steps |
-| large (finals) | `Qwen3-0.6B-Base` (28 × 1024, top half reset) | 1024 | 131M tokens | 4,800 s | 64 steps |
+| nano | `Qwen3-0.6B-Base` (28 × 1024, top half reset) | 1024 | 1.0M tokens | 120 s | 8 steps |
+| micro | `Qwen3-0.6B-Base` (28 × 1024, top half reset) | 1024 | 8.4M tokens | 300 s | 16 steps |
+| **standard (official)** | `Qwen3-0.6B-Base` (28 × 1024, top half reset) | 1024 | 32.8M tokens | 1,200 s | 32 steps |
+| large (finals) | `Qwen3-0.6B-Base` (28 × 1024, top half reset) | 1024 | 131M tokens | 4,800 s | 32 steps |
 
 Pinned `Qwen/Qwen3-0.6B-Base` weights (151,936-token multilingual vocabulary) with its upper
 half of transformer layers deterministically re-initialized from the round's seed, trained
 without shuffling in the curator's exact script order using AdamW with cosine decay, then
-given a short fixed disjoint multilingual fine-tuning probe (zero overlap with the exam) so
-the student's acquired representations read out cleanly on comprehension and skill tasks.
+given a short fixed multilingual fine-tuning probe (disjoint from the exam's knowledge
+facts, with every scored exam question and worked shot excluded) so the student's acquired representations read out cleanly on comprehension and skill tasks.
 Training is counted in tokens, never seconds, so every machine does the same work.
 
 ## The curator's machine
@@ -309,7 +312,7 @@ where other entries did run, are taken to be the entry's doing, and it stops bei
 - **Gain** = how much better your script's student does on the exam than the unedited
   corpus's, on the same round with the same initial weights, in bits per byte. The unedited
   student is trained four times a round, by four different established graders, and its
-  score on each item is the mean of theirs. The unedited corpus is every document in the
+  score on each item is the median of theirs. The unedited corpus is every document in the
   order it was drawn.
 - **An entry's gain for a round is taken over its runs**: the mean of two, or the median
   of three. Two runs of a curator that uses neither the clock nor a GPU write the same
@@ -464,7 +467,7 @@ are graded by **verifiers**: anyone who runs `stet verify`.
   student. Two honest machines agree to within a small tolerance *(provisional: 0.03 bits
   per byte)*. The first four established graders of a round are each asked to train the
   unedited student as well; the rest are not, and their grades are measured against the
-  mean of those four. (Season 1 trained one on every machine: a third of all its
+  median of those four. (Season 1 trained one on every machine: a third of all its
   trainings.) A measurement of the unedited student must agree with the
   others' to within 0.05 bits per byte, or its grade is turned away and listed with the
   round. A machine that is not yet established always trains its own: that is how it is
@@ -507,7 +510,7 @@ are graded by **verifiers**: anyone who runs `stet verify`.
   grade it is published as unresolved and counts against nobody.
 - A verifier whose job runs out of time unreported is offered no work for a day. A round
   waits for an established verifier that holds a job until the job is reported, handed
-  back or out of time, which is three hours at most. For anyone else whose grades have
+  back or out of time, which is five hours at most. For anyone else whose grades have
   agreed before it waits up to 45 minutes, and for an account with no such grade it does
   not wait.
 - Agreeing about an entry that left the corpus as it was earns no standing. Its score is

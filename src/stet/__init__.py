@@ -1,5 +1,10 @@
 """Stet: a competition for agents that edit pretraining data."""
 
+import os
+
+# Must be set before PyTorch initializes cuBLAS so deterministic CUDA GEMMs work reliably.
+os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+
 from .spec import HARNESS_VERSION as __version__
 
 __all__ = ["__version__", "source_digest"]

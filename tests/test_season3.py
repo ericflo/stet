@@ -563,13 +563,17 @@ def test_hf_tokenizer_encodes_control_tokens_as_ordinary_text_and_verifies_sha25
 def test_cuda_linux_only_packages_filtered_on_non_nvidia(monkeypatch):
     s3 = load_season("s3")
     cuda_only = set(s3.raw["environment"]["cuda_linux_only"])
+    also_cuda = set((s3.raw["environment"].get("also_cuda") or {}).keys())
     assert {"vllm", "liger-kernel"} <= cuda_only
+    assert also_cuda and "triton" in also_cuda
 
     monkeypatch.setattr(env, "is_nvidia_linux", lambda: True)
-    assert cuda_only <= set(env.expected(s3)["packages"])
+    nvidia_pkgs = set(env.expected(s3)["packages"])
+    assert (cuda_only | also_cuda) <= nvidia_pkgs
 
     monkeypatch.setattr(env, "is_nvidia_linux", lambda: False)
-    assert not (cuda_only & set(env.expected(s3)["packages"]))
+    non_nvidia_pkgs = set(env.expected(s3)["packages"])
+    assert not ((cuda_only | also_cuda) & non_nvidia_pkgs)
 
 
 def test_reader_example_pins_qwen3_06b_trailing_space_and_vllm_fallback(monkeypatch):
@@ -583,13 +587,15 @@ def test_reader_example_pins_qwen3_06b_trailing_space_and_vllm_fallback(monkeypa
     src = (root / "curator.py").read_text()
     compile(src, "examples/reader/curator.py", "exec")
     main_src = src[src.index("def main()") :]
-    assert main_src.index("task.write(") < main_src.index("_score_vllm(")
+    assert "task.write(" not in main_src[: main_src.index("_score_vllm(")]
+    assert "raise RuntimeError" in main_src
 
-    # Load module and verify trailing-space rubric fix, overprovision/reserve, and vLLM failure fallback.
+    # Load module and verify trailing-space rubric fix, overprovision/reserve, BYTES_PER_TOKEN, and vLLM failure fallback.
     spec = importlib.util.spec_from_file_location("reader_curator_fallback_test", root / "curator.py")
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     assert mod.RUBRIC_SUFFIX.endswith(": "), "RUBRIC_SUFFIX must end with trailing space so next token is digit 1..5"
+    assert mod.BYTES_PER_TOKEN >= 4.0
     assert mod.CANDIDATE_OVERPROVISION >= 10.0 and mod.RESERVE_SECONDS >= 45
     assert 'VLLM_WORKER_MULTIPROC_METHOD' in src
     assert 'VLLM_WORKER_MULTIPROC_METHOD' in (ROOT / "src" / "stet" / "runner.py").read_text()
@@ -687,7 +693,13 @@ def test_reader_vllm_bounds_long_multilingual_prompts_and_handles_logprob_datacl
     monkeypatch.setitem(sys.modules, "vllm", fake_vllm)
     monkeypatch.setattr(torch.version, "hip", None, raising=False)
 
-    fake_task = types.SimpleNamespace(device=lambda: "cuda", time_left=lambda: 600.0)
+    written: list[list[int]] = []
+    fake_task = types.SimpleNamespace(
+        device=lambda: "cuda",
+        time_left=lambda: 600.0,
+        train_tokens=5000,
+        write=lambda lines: written.append(list(lines)),
+    )
     cands = [
         (1.0, 0, 2000, "日本語の長文ドキュメントです。" * 80),
         (0.9, 1, 1800, "Длинный русский текст с множеством слов. " * 40),
@@ -697,7 +709,7 @@ def test_reader_vllm_bounds_long_multilingual_prompts_and_handles_logprob_datacl
     assert mod._score_vllm(fake_task, "/fake/model", cands, scores) is True
     assert len(scores) == len(cands)
     assert all(1.0 <= v <= 5.0 for v in scores.values())
-    assert seen_calls
+    assert seen_calls and written
 
 
 def test_large_vocab_exam_scoring_matches_full_ce_and_uses_token_budget_batches():
@@ -819,8 +831,8 @@ def test_sft_probe_excludes_exact_scored_exam_questions_including_booleans():
     for seed_i in (0, 4, 31):
         rnd = practice_round(s3, seed_i)
         exam_pairs = {(it.ctx, it.cont) for it in gen.for_season(s3, rnd.seed) if it.kind == "answer"}
-        probe = sft.build_sft_examples(rnd.seed, n=256, season=s3)
-        assert len(probe) == 256
+        probe = sft.build_sft_examples(rnd.seed, n=512, season=s3)
+        assert len(probe) == 512
         assert not (set(probe) & exam_pairs), f"overlap on s3-p{seed_i:05d}: {set(probe) & exam_pairs}"
 
 
@@ -917,3 +929,354 @@ def test_reader_vllm_memory_utilization_respects_sandbox_allowance_on_large_gpus
         assert util * total_gb <= 20.1, f"on {total_gb} GiB GPU, util={util} requests {util * total_gb:.1f} GiB > 20 GiB"
     assert mod._vllm_gpu_memory_utilization(22.0, 48.0) < 0.45
     assert mod._vllm_gpu_memory_utilization(0.0, 48.0) == pytest.approx(0.65)
+
+
+def test_real_bpe_tokenizer_encodes_control_tokens_as_ordinary_text(monkeypatch, tmp_path):
+    """Non-renumbered real byte-level BPE tokenizer test (matching Qwen3's BPE structure):
+    literal <|endoftext|>, <|im_start|>, and <tool_call> in web text must never produce
+    special/control token IDs and must round-trip identically."""
+    pytest.importorskip("tokenizers")
+    from tokenizers import Tokenizer, decoders, models, pre_tokenizers, trainers
+
+    from stet import tok
+
+    bpe = Tokenizer(models.BPE())
+    bpe.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
+    bpe.decoder = decoders.ByteLevel()
+    trainer = trainers.BpeTrainer(
+        vocab_size=512,
+        min_frequency=1,
+        initial_alphabet=pre_tokenizers.ByteLevel.alphabet(),
+    )
+    bpe.train_from_iterator(
+        ["Hello world! <|endoftext|> <|im_start|> <tool_call> plain web text\n" * 4],
+        trainer=trainer,
+    )
+    raw = json.loads(bpe.to_str())
+    raw["added_tokens"] = [
+        {"id": 151643, "content": "<|endoftext|>", "single_word": False, "lstrip": False, "rstrip": False, "normalized": False, "special": True},
+        {"id": 151644, "content": "<|im_start|>", "single_word": False, "lstrip": False, "rstrip": False, "normalized": False, "special": True},
+        {"id": 151657, "content": "<tool_call>", "single_word": False, "lstrip": False, "rstrip": False, "normalized": False, "special": False},
+    ]
+    tok_bytes = json.dumps(raw).encode()
+    tok_sha = hashlib.sha256(tok_bytes).hexdigest()
+
+    monkeypatch.setenv("STET_CACHE", str(tmp_path / "cache"))
+    tok.load_encoding.cache_clear()
+    tok_dir = tok._hf_model_dir("test/bpe-tok", "rev1")
+    tok_dir.mkdir(parents=True, exist_ok=True)
+    (tok_dir / "tokenizer.json").write_bytes(tok_bytes)
+
+    s3 = load_season("s3")
+    fake_season = dataclasses.replace(
+        s3,
+        raw={
+            **s3.raw,
+            "tokenizer": {
+                "kind": "hf",
+                "repo": "test/bpe-tok",
+                "revision": "rev1",
+                "file": "tokenizer.json",
+                "url": "https://example.invalid/tokenizer.json",
+                "sha256": tok_sha,
+                "size": len(tok_bytes),
+                "vocab_size": 151936,
+                "eot": 151643,
+            },
+        },
+    )
+    enc = tok.load_encoding(fake_season)
+    sample = "Web page quoting <|endoftext|>, <|im_start|>, and <tool_call> literally."
+    ids = enc.encode_ordinary(sample)
+    assert enc.encode_ordinary_batch([sample])[0] == ids
+    for forbidden in (151643, 151644, 151657):
+        assert forbidden not in ids
+    assert enc.decode(ids) == sample
+
+
+def test_select_context_blocks_reply_chain_continuation_leak():
+    """In conversation threads, a later reply whose opening (question) is an earlier post's
+    continuation (text) must never be paired as a wrong opening for that earlier post."""
+    shared_reply = (
+        "Switching to an immutable event log eliminated every race condition in our nightly rebuilds "
+        "and cut tail latency in half across all regions."
+    )
+    docs = [
+        Doc(
+            source="hackernews",
+            id="hn:parent",
+            url="https://news.ycombinator.com/item?id=1",
+            lang="en",
+            license="public",
+            published=1_800_000_000,
+            title="Thread A",
+            question="We spent two quarters chasing intermittent cache corruption across regional read replicas.",
+            text=shared_reply,
+            topic="hn:1",
+        ),
+        Doc(
+            source="hackernews",
+            id="hn:child_reply",
+            url="https://news.ycombinator.com/item?id=2",
+            lang="en",
+            license="public",
+            published=1_800_000_001,
+            title="Thread A",
+            question=shared_reply,
+            text="Have you benchmarked compaction overhead when log segments grow past a few gigabytes?",
+            topic="hn:2",
+        ),
+        Doc(
+            source="hackernews",
+            id="hn:unrelated",
+            url="https://news.ycombinator.com/item?id=3",
+            lang="en",
+            license="public",
+            published=1_800_000_002,
+            title="Thread B",
+            question="PostgreSQL logical replication slots require careful monitoring whenever downstream consumers fall behind.",
+            text="Otherwise WAL segments accumulate on primary storage until disk alerts wake up the on-call engineer.",
+            topic="hn:3",
+        ),
+    ]
+    items = select_context(docs, b"reply-leak-seed", 10, {"discussion", "conversation"}, shares={"en": 100.0})
+    parent_items = [it for it in items if it.source == "hackernews:hn:parent"]
+    assert parent_items, "expected parent doc to produce a context item"
+    for it in parent_items:
+        for w in it.wrongs:
+            assert it.cont.strip() not in w
+            assert "immutable event log" not in w
+
+
+def test_sft_probe_blocks_fewshot_final_question_and_worked_shot_collisions():
+    """SFT probe must never share a few-shot final question or worked-shot Q+A with any exam item."""
+    s3 = load_season("s3")
+    for seed_i in (0, 4, 31):
+        rnd = practice_round(s3, seed_i)
+        exam_items = [it for it in gen.for_season(s3, rnd.seed) if it.kind == "answer"]
+        exam_tails = {(sft._tail_question(it.ctx), it.cont.strip()) for it in exam_items}
+        probe = sft.build_sft_examples(rnd.seed, n=512, season=s3)
+        for p, c in probe:
+            assert (sft._tail_question(p), c.strip()) not in exam_tails
+            for block in p.split("\n\n")[:-1]:
+                if "\n" in block:
+                    q, a = block.rsplit("\n", 1)
+                    if ":" in a:
+                        prefix, ans = a.rsplit(":", 1)
+                        assert (q + "\n" + prefix + ":", ans.strip()) not in exam_tails
+
+
+def test_reader_fails_loudly_on_model_error_without_writing_unrated_fallback(monkeypatch, tmp_path):
+    """If both vLLM and transformers fail to load, examples/reader must raise RuntimeError and
+    leave no unrated fallback script.jsonl on disk."""
+    from conftest import make_corpus
+
+    root = ROOT / "examples" / "reader"
+    spec = importlib.util.spec_from_file_location("reader_fail_loud_test", root / "curator.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    corp_dir = tmp_path / "corpus"
+    make_corpus(
+        corp_dir,
+        [
+            "Clean well-written paragraph explaining distributed consensus algorithms in clear detail. " * 8
+            for _ in range(6)
+        ],
+    )
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    assets_dir = tmp_path / "assets"
+    (assets_dir / "qwen3-0.6b").mkdir(parents=True)
+    task_json = tmp_path / "task.json"
+    task_json.write_text(
+        json.dumps(
+            {
+                "train_tokens": 2048,
+                "cores": 1,
+                "memory_gb": 16,
+                "gpu_memory_gb": 22,
+                "min_copy_bytes": 64,
+                "assets": {"qwen3-0.6b": str(assets_dir / "qwen3-0.6b")},
+            }
+        )
+    )
+    monkeypatch.setenv("STET_CORPUS", str(corp_dir))
+    monkeypatch.setenv("STET_TASK", str(task_json))
+    monkeypatch.setenv("STET_OUT", str(out_dir))
+    monkeypatch.setenv("STET_ASSETS", str(assets_dir))
+    monkeypatch.setenv("STET_DEADLINE", "4102444800")
+
+    monkeypatch.setattr(mod, "_score_vllm", lambda task, where, cands, scores: False)
+
+    def broken_tf(task, where, cands, scores):
+        raise RuntimeError("simulated model load failure")
+
+    monkeypatch.setattr(mod, "_score_transformers", broken_tf)
+    with pytest.raises(RuntimeError, match="simulated model load failure"):
+        mod.main()
+    assert not (out_dir / "script.jsonl").exists()
+
+    # Even if transformers returns cleanly having rated zero documents, main() must fail loudly.
+    monkeypatch.setattr(mod, "_score_transformers", lambda task, where, cands, scores: None)
+    with pytest.raises(RuntimeError, match="rated zero candidates"):
+        mod.main()
+    assert not (out_dir / "script.jsonl").exists()
+
+
+def test_trainer_sft_prompt_mask_cuda_ckpt_vram_gate_and_early_offload(monkeypatch, tmp_path):
+    """Verify SFT prompt-token masking (-100 on prompt, loss only on completion), activation
+    checkpointing enable/disable, 16 GB VRAM verifier gate, and CPU offload of held early students."""
+    torch = pytest.importorskip("torch")
+    from stet import client
+    from stet import train as tr
+
+    # 1. SFT prompt mask: mutating logits on prompt positions must not change _ce_loss, while
+    #    mutating logits on completion positions must change _ce_loss.
+    s3 = load_season("s3")
+    logits = torch.zeros((2, 6, 32), dtype=torch.float32)
+    targets = torch.tensor([[-100, -100, -100, 5, 6, 7], [-100, -100, 4, 5, -100, -100]], dtype=torch.long)
+    base_loss = float(tr._ce_loss(logits, targets, ignore_index=-100))
+    mut_prompt = logits.clone()
+    mut_prompt[0, :3, :] = 10.0
+    mut_prompt[1, :2, :] = -10.0
+    assert float(tr._ce_loss(mut_prompt, targets, ignore_index=-100)) == pytest.approx(base_loss, abs=1e-6)
+    mut_comp = logits.clone()
+    mut_comp[0, 3, 5] = 8.0
+    assert float(tr._ce_loss(mut_comp, targets, ignore_index=-100)) < base_loss - 0.1
+
+    # 2. Activation checkpointing toggle helper calls enable(use_reentrant=False) and disable().
+    calls: list[tuple[str, dict]] = []
+
+    class CkptProbe(torch.nn.Module):
+        def activation_checkpointing_enable(self, **kwargs):
+            calls.append(("enable", kwargs))
+
+        def activation_checkpointing_disable(self):
+            calls.append(("disable", {}))
+
+    probe = CkptProbe()
+    tr._set_activation_checkpointing(probe, True)
+    tr._set_activation_checkpointing(probe, False)
+    assert calls == [("enable", {"activation_checkpointing_kwargs": {"use_reentrant": False}}), ("disable", {})]
+
+    # 3. 16 GB VRAM gate in _verify rejects a 12 GB CUDA GPU for Season 3.
+    monkeypatch.delenv("STET_DEV", raising=False)
+    monkeypatch.setattr(client, "need_key", lambda: types.SimpleNamespace(handle="v", public="0" * 64, private="0" * 64))
+    monkeypatch.setattr(client, "request", lambda method, path, **kw: {"scale": "standard"})
+    monkeypatch.setattr(tr, "pick_device", lambda dev=None: types.SimpleNamespace(type="cuda"))
+    monkeypatch.setattr(tr, "hardware_info", lambda dev: {"device": "cuda", "gpu": "RTX 3060", "vram_gb": 12.0, "backend": "cuda"})
+    args = types.SimpleNamespace(
+        season="s3",
+        device="cuda",
+        any_device=False,
+        edits=False,
+        no_sandbox=False,
+        once=True,
+        max_jobs=1,
+        exit_when_idle=0,
+        no_upgrade=True,
+    )
+    with pytest.raises(SystemExit) as exc:
+        client._verify(args)
+    assert exc.value.code == 1
+
+    # 4. Early-grade CPU offload moves held student off GPU while waiting for the exam.
+    import zstandard
+
+    from stet import pipeline
+
+    moved: list[str] = []
+
+    class FakeModel:
+        def zero_grad(self, set_to_none=True):
+            moved.append("zero_grad")
+
+        def to(self, dev):
+            moved.append(f"to:{dev}")
+            return self
+
+    script_bytes = b"0\n"
+    script_sha = hashlib.sha256(script_bytes).hexdigest()
+    script_zst = zstandard.ZstdCompressor().compress(script_bytes)
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: moved.append("empty_cache"))
+    monkeypatch.setattr(pipeline, "train_baseline", lambda rnd, scale, dev, **kw: types.SimpleNamespace(model=FakeModel()))
+    monkeypatch.setattr(pipeline, "train_round", lambda rnd, scale, path, **kw: types.SimpleNamespace(model=FakeModel()))
+    monkeypatch.setattr(client, "request", lambda method, path, **kw: script_zst)
+    rnd = practice_round(s3, 0)
+    rnd_no_exam = dataclasses.replace(rnd, exam_digest=None)
+    monkeypatch.setattr(client, "_job_round", lambda season, job, out: rnd_no_exam)
+    bases: dict = {}
+    out = types.SimpleNamespace(line=lambda *a, **kw: None, dim=lambda s: s, progress=lambda *a: None)
+    pending = client._grade_job(
+        {"id": 1, "scale": "nano", "round": rnd.id, "script": {"sha256": script_sha}, "baseline": True},
+        s3,
+        s3.scale("nano"),
+        types.SimpleNamespace(type="cuda"),
+        types.SimpleNamespace(),
+        out,
+        tmp_path / "work",
+        bases=bases,
+    )
+    assert isinstance(pending, client.Pending)
+    assert rnd.id in bases
+    assert moved.count("to:cpu") == 2 and moved.count("empty_cache") == 2
+
+    # 5. Restoring a held early-grade student moves it back to the grading device before sitting the exam.
+    from stet import grade as gr
+
+    restored: list[object] = []
+
+    class RestoreModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.w = torch.nn.Parameter(torch.zeros(1))
+
+        def to(self, dev):
+            restored.append(dev)
+            return self
+
+    monkeypatch.setattr("stet.exam.score.sit", lambda model, items, enc, eot, ctx, device, floor=16: [-1.0] * len(items))
+    fake_cuda = types.SimpleNamespace(type="cuda")
+    held = gr.Trained(result={}, trained=True, model=RestoreModel(), enc=types.SimpleNamespace(), device=fake_cuda)
+    gr.sit_exam(held, rnd, s3.scale("nano"), [Item(kind="answer", corner="logic/x", fmt="prose", lang="en", source="g", ctx="Q", cont="A")])
+    assert restored == [fake_cuda], "sit_exam did not move CPU-offloaded student back onto its CUDA device"
+
+    # 6. Large-vocab SFT _ce_loss averages by valid completion tokens (not unweighted row means).
+    big_logits = torch.zeros((2, 4, 65536), dtype=torch.float32)
+    big_logits[0, 3, 1] = 10.0  # row 0 has 1 valid token with near-0 loss
+    big_logits[1, :, 2] = -10.0  # row 1 has 4 valid tokens with higher loss
+    big_targets = torch.tensor([[-100, -100, -100, 1], [2, 2, 2, 2]], dtype=torch.long)
+    got_big = float(tr._ce_loss(big_logits, big_targets, ignore_index=-100))
+    ref_big = float(torch.nn.functional.cross_entropy(big_logits.view(-1, 65536), big_targets.reshape(-1), ignore_index=-100))
+    assert got_big == pytest.approx(ref_big, rel=1e-5, abs=1e-5)
+
+    # 7. build_model loads FP32 master weights and enables activation checkpointing on CUDA.
+    import transformers
+
+    cuda_loaded: list[tuple[object, bool]] = []
+
+    class FakeCudaLM(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.config = types.SimpleNamespace(use_cache=True)
+            self.ckpt = False
+
+        def activation_checkpointing_enable(self, **kw):
+            self.ckpt = True
+
+        def to(self, dev):
+            cuda_loaded.append((dev, self.ckpt))
+            return self
+
+    seen_cuda_dtypes: list = []
+    monkeypatch.setattr(tr, "_fetch_hf_student", lambda cfg: tmp_path)
+    monkeypatch.setattr(
+        transformers.AutoModelForCausalLM,
+        "from_pretrained",
+        staticmethod(lambda path, *, local_files_only=False, dtype=None, attn_implementation=None: (seen_cuda_dtypes.append(dtype), FakeCudaLM())[1]),
+    )
+    monkeypatch.setattr(torch.cuda, "manual_seed_all", lambda seed: None)
+    tr.build_model(s3.scale("nano"), s3, init_seed=7, device=types.SimpleNamespace(type="cuda"))
+    assert seen_cuda_dtypes == [torch.float32]
+    assert cuda_loaded and cuda_loaded[0][1] is True

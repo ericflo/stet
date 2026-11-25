@@ -1097,6 +1097,7 @@ func (a *App) nowFacts(st *State, d map[string]any) {
 	}
 	d["Active"], d["GPUHours"], d["Runners"], d["Queued"] = active, gpuHours, runners, queued
 	d["Paused"] = st.Meta.Paused != 0
+	d["BackoffUntil"] = a.backoffUntil(st)
 	if next := st.roundWithStatus("scheduled"); next != nil && st.Meta.Paused == 0 {
 		c := *next
 		d["Next"] = &c
@@ -1367,7 +1368,16 @@ func (s *Site) rounds(w http.ResponseWriter, r *http.Request) {
 
 func (s *Site) round(w http.ResponseWriter, r *http.Request) {
 	a := s.app
-	idx, ok := a.parseRoundID(r.PathValue("id"))
+	rawID := r.PathValue("id")
+	idx, ok := a.parseRoundID(rawID)
+	if !ok {
+		if m := roundIDRe.FindStringSubmatch(rawID); m != nil && m[1] != a.season.ID {
+			if arch := s.archived(m[1]); arch != nil && arch.pages["rounds/"+rawID] != nil {
+				http.Redirect(w, r, "/seasons/"+m[1]+"/rounds/"+rawID, http.StatusMovedPermanently)
+				return
+			}
+		}
+	}
 	var rs *roundSummary
 	var entries []roundEntry
 	var expected, later []expectedRow

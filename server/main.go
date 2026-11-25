@@ -145,7 +145,7 @@ func loadConfig(season *Season) (Config, error) {
 		LadderSize:       envInt("STET_LADDER_SIZE", 8),
 		QualifyRounds:    envInt("STET_QUALIFY_ROUNDS", 3),
 		RatedRounds:      envInt("STET_RATED_ROUNDS", 3),
-		Lease:            envDuration("STET_LEASE", 3*time.Hour),
+		Lease:            envDuration("STET_LEASE", 5*time.Hour),
 		EarlyWindow:      envDuration("STET_EARLY_WINDOW", 10*time.Minute),
 		ReplicaWait:      envDuration("STET_REPLICA_WAIT", 45*time.Minute),
 		EstablishAfter:   envInt("STET_ESTABLISH_AFTER", 5),

@@ -2,16 +2,18 @@
 
   1. Prefilter across ALL languages (never English-only) using lightweight line/script rules
      and exact deduplication across all available CPU cores (`task.map`), keeping whole
-     documents so code, tables, lists and multilingual prose stay intact. Write a valid
-     fallback script straight away before loading the GPU model.
+     documents so code, tables, lists and multilingual prose stay intact.
   2. Score candidate openings with Qwen/Qwen3-0.6B (pinned in stet.toml) on a 1-to-5
      educational/reasoning quality rubric by reading the next-token probability distribution
      over digits '1'..'5' (expected rating).
      - On NVIDIA Linux, uses `vllm.LLM` with automatic prefix caching for high throughput.
      - On AMD ROCm, macOS, or when `vllm` is absent, falls back cleanly to batched PyTorch
        `transformers` inference.
-  3. Fill the training token budget with the highest-rated documents (keeping a balanced
-     floor of quality and respecting `task.time_left()`), ordered as a gentle curriculum:
+     - Never silently writes an unrated fallback script: writes periodic neural-scored
+       checkpoints once scoring starts, and exits non-zero if the model fails to rate any
+       documents.
+  3. Fill the training token budget (with enough byte margin so the trainer does not wrap
+     back to the start) with the highest-rated documents, ordered as a gentle curriculum:
      lower-scored kept documents earlier, highest-scored documents in the final LR cooldown
      window (the Season 3 trainer does not shuffle).
 
@@ -20,7 +22,8 @@ What to copy from it for your own neural curator:
   - Never drop non-English pages: the exam weighs every language by its share of the crawl.
   - Round model scores before sorting and break ties by document index so NVIDIA and AMD
     runs write consistent datasets.
-  - Write a fallback script early and watch `task.time_left()` with a safety margin.
+  - Checkpoint neural scores periodically as `task.time_left()` shrinks, and fail loudly if
+    the model cannot load rather than silently submitting an unrated fallback.
 """
 
 from __future__ import annotations
@@ -35,7 +38,7 @@ import unicodedata
 
 from stet.curator import Task
 
-BYTES_PER_TOKEN = 3.5  # conservative multilingual estimate under Qwen3's 151k tokenizer
+BYTES_PER_TOKEN = 4.0  # generous multilingual margin (~3.74 measured on rated pages) so training never wraps back to lowest-rated docs
 HEAD_CHARS = 900  # excerpt read by the 0.6B quality rater
 MAX_PROMPT_TOKENS = 288
 RESERVE_SECONDS = 45
@@ -287,6 +290,7 @@ def _score_vllm(task: Task, where: str, cands: list[tuple[float, int, int, str]]
                 lps = _extract_logprobs(step_lps)
                 scores[doc_id] = _expected_from_logprobs(lps, digit_ids)
             if len(scores) % (batch_size * 10) == 0 or len(scores) == len(cands):
+                task.write(build_script(task, cands, scores))
                 print(f"vLLM rated {len(scores):,} / {len(cands):,}, {task.time_left():.0f}s left", file=sys.stderr)
         return bool(scores)
     except Exception as exc:
@@ -339,32 +343,30 @@ def _score_transformers(task: Task, where: str, cands: list[tuple[float, int, in
                 exp = (probs * digit_vals).sum(dim=-1).tolist()
                 for r, j in enumerate(rows):
                     scores[part[j][1]] = round(float(exp[r]), 2)
+            if scores:
+                task.write(build_script(task, cands, scores))
             print(f"rated {len(scores):,} / {len(cands):,}, {task.time_left():.0f}s left", file=sys.stderr)
 
 
 def main():
     task = Task.from_env()
     cands = collect_candidates(task)
-    task.write(build_script(task, cands, {}))  # immediate multilingual fallback
     print(f"{len(cands):,} candidates, {task.time_left():.0f}s left", file=sys.stderr)
     scores: dict[int, float] = {}
-    try:
-        where = str(task.asset("qwen3-0.6b"))
-        if not _score_vllm(task, where, cands, scores):
-            _score_transformers(task, where, cands, scores)
-    except Exception as exc:
-        print(f"reader model error (keeping fallback): {exc}", file=sys.stderr)
-    finally:
-        if scores:
-            vals = sorted(scores.values())
-            n = len(vals)
-            mean = sum(vals) / n
-            print(
-                f"rated {n:,} docs: mean={mean:.2f} min={vals[0]:.2f} p25={vals[n // 4]:.2f} "
-                f"p50={vals[n // 2]:.2f} p75={vals[(3 * n) // 4]:.2f} max={vals[-1]:.2f}",
-                file=sys.stderr,
-            )
-            task.write(build_script(task, cands, scores))
+    where = str(task.asset("qwen3-0.6b"))
+    if not _score_vllm(task, where, cands, scores):
+        _score_transformers(task, where, cands, scores)
+    if not scores:
+        raise RuntimeError("reader model rated zero candidates; refusing to emit an unrated fallback script")
+    vals = sorted(scores.values())
+    n = len(vals)
+    mean = sum(vals) / n
+    print(
+        f"rated {n:,} docs: mean={mean:.2f} min={vals[0]:.2f} p25={vals[n // 4]:.2f} "
+        f"p50={vals[n // 2]:.2f} p75={vals[(3 * n) // 4]:.2f} max={vals[-1]:.2f}",
+        file=sys.stderr,
+    )
+    task.write(build_script(task, cands, scores))
 
 
 if __name__ == "__main__":

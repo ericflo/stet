@@ -870,20 +870,20 @@ func TestStatusJudgesByTheServicesSettings(t *testing.T) {
 func TestGradersAreRentedBeforeTheExam(t *testing.T) {
 	rp, st := newFakeRunPod(t), newFakeStet(t)
 	f, out := testFleet(t, rp, st, 4)
-	f.o.Early, f.o.ExamAfter, f.o.PerWorker, f.o.Settle = 4*time.Hour, 4*time.Hour, 1, 15*time.Minute
+	f.o.Early, f.o.ExamAfter, f.o.PerWorker, f.o.Settle = 5*time.Hour, 5*time.Hour, 1, 15*time.Minute
 	st.work = Work{Runners: 1, Rounds: []WorkRound{{ID: "s1-o00001", Entries: 3, GradesEarly: 3}}}
 	// Nothing seen yet: a machine starts in 8 minutes, and with 2 to fetch and script and 1 to
 	// sit the exam, the secure kinds that fit, the 3080 ($0.20) and the A5000 ($0.27), each
-	// 0.85 of a 3090 (88m/pass), are rented 187 minutes before they are to report; the PRO 4000 ($0.57),
-	// 0.8, 199.
-	st.drawnAt = time.Now().Add(-30 * time.Minute).Unix() // the exam is due in 210 minutes
+	// 0.85 of a 3090 (100m/pass), are rented 211 minutes before they are to report; the PRO 4000 ($0.57),
+	// 0.8, 223.
+	st.drawnAt = time.Now().Add(-30 * time.Minute).Unix() // the exam is due in 270 minutes
 	if err := tick(context.Background(), f); err != nil {
 		t.Fatal(err)
 	}
 	if len(rp.created) != 0 || !strings.Contains(out.String(), "waiting for the cheapest a round, RTX 3080 at $0.20 an hour") {
-		t.Fatalf("rented %d machines 210 minutes before the exam\n%s", len(rp.created), out)
+		t.Fatalf("rented %d machines 270 minutes before the exam\n%s", len(rp.created), out)
 	}
-	st.drawnAt = time.Now().Add(-55 * time.Minute).Unix() // due in 185 minutes
+	st.drawnAt = time.Now().Add(-95 * time.Minute).Unix() // due in 205 minutes
 	if err := tick(context.Background(), f); err != nil {
 		t.Fatal(err)
 	}
@@ -924,14 +924,14 @@ func TestCuratorsAreRunOnTheFastest(t *testing.T) {
 func TestCuratorRunsRequire24GBVRAMWhileGradingAllowsSmaller(t *testing.T) {
 	rp, st := newFakeRunPod(t), newFakeStet(t)
 	rp.extraCommunity = []map[string]any{
-		// 16 GB card priced at $0.14/hr (speed 0.6 -> $0.233/grade, cheaper per grade than $0.27 RTX 3090 Ti).
-		{"id": "NVIDIA RTX 4000 Ada", "name": "RTX 4000 Ada", "manufacturer": "NVIDIA", "memory": 16, "price": map[string]any{"community": 0.14}, "availability": "LOW"},
+		// 16 GB card priced at $0.25/hr (speed 1.3 -> $0.192/grade, cheaper per grade than $0.27 RTX 3090 Ti).
+		{"id": "NVIDIA GeForce RTX 4080", "name": "RTX 4080", "manufacturer": "NVIDIA", "memory": 16, "price": map[string]any{"community": 0.25}, "availability": "LOW"},
 	}
-	rp.extraPrices = map[string]float64{"NVIDIA RTX 4000 Ada": 0.14}
+	rp.extraPrices = map[string]float64{"NVIDIA GeForce RTX 4080": 0.25}
 	f, out := testFleet(t, rp, st, 4)
 	everyHostStarts(t)
 	f.o.Cloud, f.o.Edits, f.o.MinGPUMemory, f.o.MinCuratorGPUMemory = "COMMUNITY", true, 16, 24
-	f.o.Cheapest = true // would pick 16 GB RTX 4000 Ada ($0.14) if not filtered for curators
+	f.o.Cheapest = true // would pick 16 GB RTX 4080 ($0.25) if not filtered for curators
 	st.work = *round(4, 0, 0, 0)
 	if err := tick(context.Background(), f); err != nil {
 		t.Fatal(err)
@@ -940,11 +940,11 @@ func TestCuratorRunsRequire24GBVRAMWhileGradingAllowsSmaller(t *testing.T) {
 		t.Fatalf("rented %d\n%s", len(rp.created), out)
 	}
 	for _, spec := range rp.created {
-		if spec.GPU.ID == "NVIDIA RTX 4000 Ada" || spec.GPU.ID == "NVIDIA GeForce RTX 3080 Ti" {
+		if spec.GPU.ID == "NVIDIA GeForce RTX 4080" || spec.GPU.ID == "NVIDIA GeForce RTX 3080 Ti" {
 			t.Fatalf("rented <24 GB card %s for curator runs despite MinCuratorGPUMemory=24", spec.GPU.ID)
 		}
 	}
-	// Now request grades only (no curator runs): must pick the cheaper 16 GB RTX 4000 Ada and
+	// Now request grades only (no curator runs): must pick the cheaper 16 GB RTX 4080 and
 	// launch it with STET_WORKER_EDITS=0 so it is tracked as grade-only!
 	for _, p := range rp.pods {
 		delete(rp.pods, p.ID)
@@ -957,8 +957,8 @@ func TestCuratorRunsRequire24GBVRAMWhileGradingAllowsSmaller(t *testing.T) {
 	if len(rp.created) != before+1 {
 		t.Fatalf("expected 1 grade machine rented, got %d\n%s", len(rp.created)-before, out)
 	}
-	if got := rp.created[before]; got.GPU.ID != "NVIDIA RTX 4000 Ada" || got.Env["STET_WORKER_EDITS"] != "0" {
-		t.Fatalf("grade machine: gpu=%s edits=%q, want 16 GB RTX 4000 Ada with STET_WORKER_EDITS=0", got.GPU.ID, got.Env["STET_WORKER_EDITS"])
+	if got := rp.created[before]; got.GPU.ID != "NVIDIA GeForce RTX 4080" || got.Env["STET_WORKER_EDITS"] != "0" {
+		t.Fatalf("grade machine: gpu=%s edits=%q, want 16 GB RTX 4080 with STET_WORKER_EDITS=0", got.GPU.ID, got.Env["STET_WORKER_EDITS"])
 	}
 }
 
@@ -1126,10 +1126,10 @@ func TestWhatMachinesTakeIsLearned(t *testing.T) {
 func TestGradersTakeSeveralGradesBeforeTheExam(t *testing.T) {
 	rp, st := newFakeRunPod(t), newFakeStet(t)
 	f, out := testFleet(t, rp, st, 4)
-	f.o.Early, f.o.PerWorker, f.o.Settle, f.o.MaxHourly = 7*time.Hour, 1, 15*time.Minute, 16
-	// Nothing seen: the 3080 ($0.20, 0.85 of a 3090) passes in 88 minutes and leads by 187, so it
-	// takes three grades rented 365 minutes before the exam.
-	due := time.Now().Add(365 * time.Minute)
+	f.o.Early, f.o.PerWorker, f.o.Settle, f.o.MaxHourly = 8*time.Hour, 1, 15*time.Minute, 16
+	// Nothing seen: the 3080 ($0.20, 0.85 of a 3090) passes in 100 minutes and leads by 211, so it
+	// takes three grades rented 412 minutes before the exam.
+	due := time.Now().Add(412*time.Minute + 30*time.Second)
 	st.work = Work{EarlyGradesPerMachine: 3, FastFirstSeconds: 120,
 		Rounds: []WorkRound{{ID: "s1-o00008", Entries: 6, GradesEarly: 6, ExamDue: due.Unix()}}}
 	if err := tick(context.Background(), f); err != nil {
@@ -1388,5 +1388,135 @@ func TestOnlyAMachineMeasuringTheBaselineTrainsTwice(t *testing.T) {
 		if l := f.lead(c); l != x.want {
 			t.Errorf("%d rounds open: lead %s, want %s", len(x.rounds), l, x.want)
 		}
+	}
+}
+
+// fits rejects slow GPUs whose two-pass baseline grade plus margin exceeds the server's lease,
+// while accepting faster cards that finish comfortably inside the lease.
+func TestFitsDropsCardsTooSlowForLease(t *testing.T) {
+	rp, st := newFakeRunPod(t), newFakeStet(t)
+	f, _ := testFleet(t, rp, st, 1)
+	f.o.MinGPUMemory = 16
+	f.lease = 5 * time.Hour
+
+	for _, slow := range []Offer{
+		{Maker: "NVIDIA", MemoryGB: 16, Model: "NVIDIA GeForce RTX 4060 Ti", Card: "RTX 4060 Ti"},
+		{Maker: "NVIDIA", MemoryGB: 16, Model: "NVIDIA GeForce RTX 5060 Ti", Card: "RTX 5060 Ti"},
+		{Maker: "NVIDIA", MemoryGB: 24, Model: "NVIDIA L4", Card: "L4"},
+		{Maker: "NVIDIA", MemoryGB: 16, Model: "NVIDIA RTX 2000 Ada", Card: "RTX 2000 Ada"},
+		{Maker: "NVIDIA", MemoryGB: 24, Model: "NVIDIA Mystery Card", Card: "Mystery Card"},
+	} {
+		if f.fits(slow) {
+			t.Errorf("fits(%s) = true under 5h lease, want false", slow.Card)
+		}
+	}
+	for _, fast := range []Offer{
+		{Maker: "NVIDIA", MemoryGB: 16, Model: "NVIDIA RTX A4000", Card: "RTX A4000"},
+		{Maker: "NVIDIA", MemoryGB: 16, Model: "NVIDIA GeForce RTX 4080 SUPER", Card: "RTX 4080 SUPER"},
+		{Maker: "NVIDIA", MemoryGB: 24, Model: "NVIDIA GeForce RTX 3090", Card: "RTX 3090"},
+		{Maker: "NVIDIA", MemoryGB: 24, Model: "NVIDIA GeForce RTX 4090", Card: "RTX 4090"},
+		{Maker: "NVIDIA", MemoryGB: 32, Model: "NVIDIA GeForce RTX 5090", Card: "RTX 5090"},
+	} {
+		if !f.fits(fast) {
+			t.Errorf("fits(%s) = false under 5h lease, want true", fast.Card)
+		}
+	}
+}
+
+// A 16 GB machine rented for grading is marked GradeOnly=true before it ever checks in, and
+// calibration samples from an earlier season (s2) are ignored once the active season is s3.
+func Test16GBRentalMarkedGradeOnlyAndSeasonGuardIgnoresS2Calibration(t *testing.T) {
+	rp, st := newFakeRunPod(t), newFakeStet(t)
+	f, _ := testFleet(t, rp, st, 2)
+	f.o.MinGPUMemory = 16
+	f.o.MinCuratorGPUMemory = 24
+	f.o.Edits = true
+	// Seed a Season 2 calibration (15 min 4090 pass) and point the fleet at Season 3.
+	f.cal = &Calibration{Season: "s2", Rounds: []string{"s2-o00001"}, Pass: map[string][]float64{"RTX 4090": {15}}}
+	f.st.season = "s3"
+	gotPass, seen := f.pass("NVIDIA GeForce RTX 4090")
+	wantPass := time.Duration(float64(passOn3090) / speed("RTX 4090"))
+	if seen || gotPass != wantPass {
+		t.Fatalf("s3 pass(4090) = %s (seen=%v), want default %s (seen=false)", gotPass, seen, wantPass)
+	}
+	// Rent a 16 GB machine for grading (Curators=false in ledger); even with Machine == nil,
+	// look() must mark Worker.GradeOnly == true so policy never counts it as a curator runner.
+	rp.noRoom["NVIDIA GeForce RTX 4090"] = true
+	rp.noRoom["NVIDIA GeForce RTX 3090 Ti"] = true
+	rp.extraCommunity = []map[string]any{
+		{"id": "NVIDIA GeForce RTX 4080 SUPER", "name": "RTX 4080 SUPER", "manufacturer": "NVIDIA", "memory": 16, "price": map[string]any{"community": 0.25}, "availability": "HIGH"},
+	}
+	rp.extraPrices = map[string]float64{"NVIDIA GeForce RTX 4080 SUPER": 0.25}
+	f.o.Cloud = "COMMUNITY"
+	st.work = Work{Rounds: []WorkRound{{ID: "s3-o00001", GradesWanted: 4}}}
+	v, err := f.look(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n, err := f.launch(context.Background(), v, 1, 0, 0, 0, time.Time{}); err != nil || n != 1 {
+		t.Fatalf("launch 16GB grader: n=%d err=%v", n, err)
+	}
+	v2, err := f.look(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, w := range v2.Workers {
+		if w.Rental != nil {
+			found = true
+			if w.Rental.Card != "RTX 4080 SUPER" {
+				t.Fatalf("expected 16 GB RTX 4080 SUPER, got %s", w.Rental.Card)
+			}
+			if w.Machine != nil {
+				t.Fatalf("expected Machine == nil before check-in, got %+v", w.Machine)
+			}
+			if !w.GradeOnly {
+				t.Fatal("16 GB grader rental was not marked GradeOnly=true before check-in")
+			}
+		}
+	}
+	if !found {
+		t.Fatal("rented 16 GB worker missing from view")
+	}
+}
+
+// When 24 GB curator GPUs are unavailable, unfilled curator slots fall back to 16 GB graders if
+// and only if grades or farm tasks are actually waiting.
+func TestUnfilled24GBCuratorSlotsFallBackTo16GBGradersOnlyWhenGradesWait(t *testing.T) {
+	rp, st := newFakeRunPod(t), newFakeStet(t)
+	f, _ := testFleet(t, rp, st, 4)
+	f.o.Cloud = "COMMUNITY"
+	f.o.Edits = true
+	f.o.MinGPUMemory = 16
+	f.o.MinCuratorGPUMemory = 24
+	f.o.PerWorker = 2
+	// Disable every 24 GB GPU on RunPod community, leaving only a 16 GB RTX 4080 SUPER.
+	rp.noRoom["NVIDIA GeForce RTX 3090 Ti"] = true
+	rp.noRoom["NVIDIA GeForce RTX 4090"] = true
+	rp.noRoom["NVIDIA RTX A5000"] = true
+	rp.extraCommunity = []map[string]any{
+		{"id": "NVIDIA GeForce RTX 4080 SUPER", "name": "RTX 4080 SUPER", "manufacturer": "NVIDIA", "memory": 16, "price": map[string]any{"community": 0.25}, "availability": "HIGH"},
+	}
+	rp.extraPrices = map[string]float64{"NVIDIA GeForce RTX 4080 SUPER": 0.25}
+	ctx := context.Background()
+
+	// Case 1: Only curator runs waiting (0 grades, 0 farm) -> do NOT waste slots on 16 GB graders.
+	st.work = Work{Rounds: []WorkRound{{ID: "s3-o00001", RunsWanted: 4, GradesWanted: 0}}}
+	v, err := f.look(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := f.launch(ctx, v, 2, 0, 0, 2, time.Time{}); err != nil || got != 0 {
+		t.Fatalf("with 0 grades waiting: rented %d (%v), want 0", got, err)
+	}
+
+	// Case 2: Both runs and grades waiting -> unfilled 24 GB curator slots pass to 16 GB graders!
+	st.work = Work{Rounds: []WorkRound{{ID: "s3-o00001", RunsWanted: 4, GradesWanted: 6}}}
+	v, err = f.look(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := f.launch(ctx, v, 2, 0, 0, 2, time.Time{}); err != nil || got != 2 {
+		t.Fatalf("with 6 grades waiting and no 24GB GPUs: rented %d (%v), want 2 16GB graders", got, err)
 	}
 }

@@ -319,6 +319,21 @@ def _split_continuation(doc: Doc) -> tuple[str, str, str, str] | None:
     return corner, fmt, ctx, cont
 
 
+def _cont_leaks_into(cont: str, wrong_ctx: str) -> bool:
+    """True when a candidate wrong opening contains the scored continuation (for example, in a
+    reply chain where one document's reply is another document's parent context)."""
+    c = cont.strip()
+    if not c:
+        return False
+    if c in wrong_ctx:
+        return True
+    if len(c) >= 32:
+        mid = (len(c) - 32) // 2
+        if c[:32] in wrong_ctx or c[-32:] in wrong_ctx or c[mid : mid + 32] in wrong_ctx:
+            return True
+    return False
+
+
 def select_context(docs: list[Doc], seed: bytes, n: int, kinds, per_corner: int = 2, shares: dict | None = None) -> list[Item]:
     """Build same-source, same-language twin-context comprehension items (`kind="context"`).
 
@@ -353,7 +368,12 @@ def select_context(docs: list[Doc], seed: bytes, n: int, kinds, per_corner: int 
         pool = [(d.id, ctx, len(ctx.encode("utf-8"))) for d, _, _, ctx, _ in group]
         for d, corner, fmt, ctx, cont in group:
             target_len = len(ctx.encode("utf-8"))
-            others = [(did, c, abs(bl - target_len)) for did, c, bl in pool if did != d.id and c != ctx]
+            ctx_s = ctx.strip()
+            others = [
+                (did, c, abs(bl - target_len))
+                for did, c, bl in pool
+                if did != d.id and c != ctx and not _cont_leaks_into(cont, c) and ctx_s not in c and c.strip() not in ctx
+            ]
             if not others:
                 continue
             others.sort(key=lambda x: (x[2], x[0]))

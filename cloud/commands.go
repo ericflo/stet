@@ -155,6 +155,10 @@ func cmdStatus(ctx context.Context, f *Fleet) error {
 	if v.Work.Paused > 0 {
 		fmt.Fprintf(f.out, "Rounds paused since %s UTC: none is drawn (stet-cloud resume)\n", time.Unix(v.Work.Paused, 0).UTC().Format("Jan 2 15:04"))
 	}
+	if v.Work.BackoffUntil > 0 {
+		at := time.Unix(v.Work.BackoffUntil, 0)
+		fmt.Fprintf(f.out, "Automatic draws backed off until %s UTC (%s) after two empty rounds (`stet draw` overrides)\n", at.UTC().Format("15:04"), until(now, at))
+	}
 	if v.Work.NextDrawAt > 0 {
 		at := time.Unix(v.Work.NextDrawAt, 0)
 		fmt.Fprintf(f.out, "Next draw %s UTC (%s)\n", at.UTC().Format("15:04"), until(now, at))

@@ -53,6 +53,8 @@
         <span class="head"><span class="dot" aria-hidden="true"></span>quiet</span>
         {{if $d.Paused}}<h3>Rounds paused</h3>
         <p>The organisers have paused the rounds. No round is drawn until they resume them, and the standings so far stand.</p>
+        {{else if $d.BackoffUntil}}<h3>Draws backed off</h3>
+        <p>Automatic draws are held back until {{hm $d.BackoffUntil}} UTC after two consecutive empty rounds.</p>
         {{else}}<h3>No round scheduled</h3>
         <p>{{if $.OnDemandOnly}}Rounds are drawn on demand whenever a curator is waiting, and stay quiet between submissions.{{else if $.OnDemand}}One is drawn as soon as a curator is waiting, and every {{$.Interval}} regardless.{{else}}One is drawn every {{$.Interval}}, on the clock.{{end}}</p>{{end}}
       </div>
@@ -93,7 +95,7 @@
       <h2>A new exam every round</h2>
       <p class="lead">Nobody can study for it, the organisers included: its writing is newer than the round's training data, and the draw decides which of it is used.</p>
       <div class="xmix">
-        <div><span class="chip live">half: fresh twin-context comprehension</span><p>What people published on Wikipedia, news sites, GitHub, mailing lists, forums, Hacker News, Lemmy, Bluesky and Mastodon in three hours of the day before the draw, picked by the draw. Each passage is split cleanly in half and the same continuation is scored under its real opening versus three length-matched wrong openings from the same source and language, cancelling out surface style. Four kinds, each counting the same: <b>reference</b>, <b>news</b>, <b>technical</b> and <b>conversation</b>.</p></div>
+        <div><span class="chip live">half: fresh twin-context comprehension</span><p>What people published on Wikipedia, news sites, GitHub, mailing lists, forums, Hacker News, Lemmy, Bluesky and Mastodon in three hours of the day before the draw, picked by the draw. Each passage is split cleanly on a sentence or paragraph boundary and the same continuation is scored under its real opening versus up to three length-matched wrong openings from the same source and language, cancelling out surface style. Four kinds, each counting the same: <b>reference</b>, <b>news</b>, <b>technical</b> and <b>conversation</b>.</p></div>
         <div><span class="chip">half: generated multilingual skills</span><p>New problems made from the same public random number that picked the training data. Seven skills, each counting the same: <b>agents</b>, <b>reading</b>, <b>logic</b>, <b>grammar</b>, <b>numbers</b>, <b>programs</b> and <b>knowledge</b>.</p></div>
       </div>
     </div>

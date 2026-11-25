@@ -1922,6 +1922,22 @@ func clipJSON(raw json.RawMessage, limit int) json.RawMessage {
 	return raw
 }
 
+func scriptTokensSHA(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var s struct {
+		TokensSHA256 string `json:"tokens_sha256"`
+	}
+	if json.Unmarshal(raw, &s) != nil {
+		return ""
+	}
+	if sha256Re.MatchString(s.TokensSHA256) {
+		return s.TokensSHA256
+	}
+	return ""
+}
+
 func (a *App) submitResult(ctx context.Context, acctID, claimID int64, p *ResultPayload) (*Ack, error) {
 	if err := a.checkHarness(p.Harness, p.Season, p.SeasonDigest); err != nil {
 		return nil, err
@@ -2028,6 +2044,21 @@ func (a *App) submitResult(ctx context.Context, acctID, claimID int64, p *Result
 		if (rd.CorpusSHA != "" && rd.CorpusSHA != p.CorpusSHA256) || (rd.ExamSHA != "" && rd.ExamSHA != p.ExamSHA256) {
 			return refuse("corpus", 0, "your corpus or exam for %s differs from the round's. This verifier rebuilds its copy once", p.Round)
 		}
+		initSHA := ""
+		if p.Train != nil && sha256Re.MatchString(p.Train.InitSHA256) {
+			initSHA = p.Train.InitSHA256
+		}
+		tokensSHA := scriptTokensSHA(p.Script)
+		if p.Valid && initSHA != "" && rd.InitSHA != "" && rd.InitSHA != initSHA {
+			return refuse("init", 0, "your initial weights hash for %s differs from the round's. Check your student model cache and harness version", p.Round)
+		}
+		if p.Valid && tokensSHA != "" {
+			for _, prev := range s.results(rd.Idx, e.EditorID) {
+				if prev.Script == c.Script && prev.Valid && prev.TokensSHA != "" && a.established(s.Accounts[prev.AccountID]) && prev.TokensSHA != tokensSHA {
+					return refuse("tokens", 0, "your tokenized training stream for this script in %s differs from established graders'", p.Round)
+				}
+			}
+		}
 		n := len(rd.ExamTable)
 		if rd.ExamSHA == "" || n == 0 {
 			return fail(409, "%s has no exam yet", p.Round)
@@ -2058,6 +2089,9 @@ func (a *App) submitResult(ctx context.Context, acctID, claimID int64, p *Result
 		}
 		if est {
 			rd.CorpusSHA = p.CorpusSHA256
+			if p.Valid && initSHA != "" && rd.InitSHA == "" {
+				rd.InitSHA = initSHA
+			}
 			a.moved(tx, rd)
 		}
 		// GPU time is what the grader says, but never more than the job was out for. It
@@ -2067,7 +2101,7 @@ func (a *App) submitResult(ctx context.Context, acctID, claimID int64, p *Result
 			seconds = 0
 		}
 		res := &Result{ClaimID: claimID, RoundIdx: rd.Idx, EditorID: e.EditorID, AccountID: acctID, Script: c.Script, ReceivedAt: now(),
-			Valid: p.Valid, CorpusSHA: p.CorpusSHA256, ExamSHA: p.ExamSHA256, Seconds: seconds, Verdict: "pending",
+			Valid: p.Valid, CorpusSHA: p.CorpusSHA256, ExamSHA: p.ExamSHA256, InitSHA: initSHA, TokensSHA: tokensSHA, Seconds: seconds, Verdict: "pending",
 			InvalidReason: clip(strings.ToValidUTF8(p.InvalidReason, "?"), 300),
 			Summary:       &ResultSummary{Script: clipJSON(p.Script, 16<<10), Hardware: clipJSON(p.Hardware, 2000), Train: p.Train}}
 		if p.Valid {
@@ -2441,6 +2475,10 @@ func (a *App) settleScript(tx *Tx, j *judge, st *entryState, sc *scriptState) *g
 	for _, g := range v.counted {
 		solid = solid || (!v.tie && g.acct.Anchor)
 	}
+	bestTokens := ""
+	if out.best != nil {
+		bestTokens = out.best.TokensSHA
+	}
 	ref := map[string]any{"round": roundID(a.season.ID, rd.Idx), "editor": st.Entry.EditorID}
 	for _, r := range sc.Results {
 		g := j.view(sc, r)
@@ -2459,7 +2497,9 @@ func (a *App) settleScript(tx *Tx, j *judge, st *entryState, sc *scriptState) *g
 			// Two established accounts, two answers, and nobody to say which is right.
 			r.Verdict, shown = "disputed", "disputed"
 			g.acct.GPUSeconds += r.Seconds
-		case !decides[r] && (r.CorpusSHA != rd.CorpusSHA || r.ExamSHA != rd.ExamSHA):
+		case !decides[r] && (r.CorpusSHA != rd.CorpusSHA || r.ExamSHA != rd.ExamSHA ||
+			(r.InitSHA != "" && rd.InitSHA != "" && r.InitSHA != rd.InitSHA) ||
+			(r.TokensSHA != "" && bestTokens != "" && r.TokensSHA != bestTokens)):
 			// It graded different data. A setup problem, and no evidence about this script.
 			r.Verdict, shown = "void", "other data"
 		case !decides[r] && b != nil && (j.oddOut(r) || !a.baselineAgrees(rd, b)):

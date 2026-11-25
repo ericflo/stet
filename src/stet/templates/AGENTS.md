@@ -27,7 +27,8 @@ stet init my-curator && cd my-curator                 # a working starter curato
 ```
 
 The installer brings its own Python 3.13, PyTorch in the build for this machine's GPU
-(NVIDIA or AMD on Linux, Metal on a Mac), and every library a curator may import, at the
+(NVIDIA or AMD on Linux, Metal on a Mac — note `faiss-cpu` prebuilt wheels require macOS 15+
+on Apple Silicon), and every library a curator may import, at the
 versions official runs use. `stet doctor` says if anything differs.
 
 Words used below: the *student* is the small model that gets trained. *Bits per byte*
@@ -88,8 +89,8 @@ stet clean                    # delete downloaded rounds and model files (fetche
 
 **Never judge a change on one round.** Rounds differ from each other by more than most
 improvements. Use `--rounds 3` or more and compare mean gains. Training the same script
-again moves its gain by about 0.02 at micro and 0.007 at standard (provisional; two
-independent standard seeds on `s3-p00000` differed by 0.0037), so on one round a
+again moves its gain by about 0.02 at micro and 0.004 at standard (provisional; four
+independent deterministic standard runs of the unedited corpus on `s3-p00000` had sd 0.0019), so on one round a
 difference smaller than twice that is noise. Confirm anything smaller over `--rounds 5`.
 The order of a script matters too: the trainer does not shuffle, and the same pages in
 another order can move a standard gain.
@@ -103,8 +104,8 @@ them: `stet harvest --fresh` before you submit is the check.
 
 **Iterate small, confirm at standard.** A nano run takes a few minutes and micro under ten.
 The competition is scored at standard: your curator's twenty minutes on a 24 GB+ GPU, then
-about 31 minutes of training on an RTX 5090 (~42 minutes on an RTX 4090) for 32.8M tokens
-plus the 64-step SFT probe. Check at standard before you submit.
+about 35 minutes of training on an RTX 5090 (~47 minutes on an RTX 4090) for 32.8M tokens
+plus the 32-step SFT probe. Check at standard before you submit.
 
 ## What your curator is given
 
@@ -123,8 +124,8 @@ From Python, `from stet.curator import Task; task = Task.from_env()` gives you:
 
 - `task.corpus`: `len(corpus)`, `corpus.text(i)`, `corpus.raw(i)` (bytes), `corpus.size(i)`,
   `corpus.sizes` (numpy array), `corpus.urls[i]`, and `for i, text in corpus`.
-- `task.train_tokens`: the training budget. English prose is roughly 3 bytes per token, and
-  the raw crawl as a whole about 2.7.
+- `task.train_tokens`: the training budget. Under Qwen3's tokenizer, English prose is
+  roughly 3.8 bytes per token, and the raw crawl as a whole about 3.4.
 - `task.info`: everything in `task.json`, including `min_copy_bytes`.
 - `task.time_left()`: seconds until the deadline.
 - `task.asset("name")`: the path of a model file or directory named in `stet.toml`.
@@ -236,7 +237,7 @@ counts the same:
 - **Scored by twin-context comprehension or answer likelihood, never raw web perplexity.**
   Fresh comprehension items (`reference`, `news`, `technical`, `conversation`) split each
   document cleanly on a sentence or paragraph boundary and score the exact same continuation
-  under its real opening minus the mean of three length-matched wrong openings from the
+  under its real opening minus the mean of up to three length-matched wrong openings from the
   exact same source, language, and boundary class, in bits per byte:
   `(mean_w nll(cont | wrong_w) − nll(cont | ctx)) / (ln 2 · max(16, bytes(cont)))`.
   Because the exact same continuation is scored under both, unconditional passage ease and
@@ -248,9 +249,9 @@ counts the same:
   others of its group. Gains on items are clipped, and a language or a format with fewer
   than eight items counts in proportion. `pillars` shows the weakest.
 - **Everything on the exam counts.** The season names every part of the exam: the pillars
-  above, and nothing else. Each part was measured before the season; a part that did not
-  tell curators apart, or whose order did not hold for a larger student, is not on the
-  exam. Nothing is sat that the score leaves out, so there is no part to ignore.
+  above, and nothing else. Each part is validated before the season for multi-seed stability,
+  anti-mimicry resistance, and agreement with published pretraining recipes. Nothing is sat
+  that the score leaves out, so there is no part to ignore.
 - **A practice round's exam is made the same way** once you have run `stet harvest`: the
   generated items, and writing from the hours you hold, with each language weighed by
   Common Crawl's published shares and anything the round's corpus already holds left out.
@@ -330,7 +331,11 @@ Every run gets the same machine, whatever the volunteer has:
   or `"cuda"`: that name is right on AMD too. `vllm` and `liger-kernel` are preinstalled on
   NVIDIA Linux runners (all cloud runners and NVIDIA volunteers); if you import `vllm` or
   `liger-kernel`, include a clean PyTorch/`transformers` fallback (see `examples/reader`) so
-  your curator also runs on AMD ROCm machines. `flash-linear-attention` (`fla`) and
+  your curator also runs on AMD ROCm machines. When using `vLLM`, always cap
+  `gpu_memory_utilization` below `task.gpu_memory_gb` (for example
+  `min(0.85, (task.gpu_memory_gb - 2.0) / total_vram_gb)`, as `examples/reader` does), because
+  `vLLM` runs its engine in a subprocess outside PyTorch's in-process memory cap and may OOM
+  or exceed the 22 GB sandbox budget otherwise. `flash-linear-attention` (`fla`) and
   bfloat16/float16 work on both. Results differ in the last decimal places between makes, so
   round scores before you threshold or sort on them, and break ties by document number.
 - **A read-only file system.** Writable: `STET_OUT`, `STET_SCRATCH` and `/tmp` (2 GB,
@@ -514,23 +519,23 @@ stet/reader` or `stet fork stet/fineweb2` copies one): `identity`, `english`, `t
 multilingual quality rater). `fineweb2` and `reader` run in every round, and each of the
 others in one round in eight.
 
-What earlier seasons and the Season 3 `s3-p00000` standard-scale rehearsal showed (gains
+What earlier seasons and the Season 3 `s3-p00000` standard-scale rehearsals showed (gains
 over the unedited corpus, in bits per byte):
 
 - **Surface mimicry no longer buys the exam.** In Season 2's raw-perplexity exam, `mimic`
   scored +0.10 by matching surface formatting and vocabulary of the exam's sources, beating
   `fineweb2` (+0.05). Under Season 3's twin-context comprehension + skills exam, surface
-  style cancels out: on `s3-p00000` at standard scale, `mimic` dropped to `+0.0017` overall
-  (`+0.0130` comprehension, `-0.0095` skills), beaten cleanly by both `reader` (`+0.0103`:
-  `+0.0147` comprehension, `+0.0059` skills) and `fineweb2` (`+0.0090`: `+0.0202`
-  comprehension, `-0.0022` skills).
+  style cancels out: `mimic` dropped to `+0.0017` overall (`+0.0130` comprehension,
+  `-0.0095` skills on the initial `v10` rehearsal), whereas on the exact 11-pillar `v11` exam
+  with the 1-epoch SFT probe (two seeds each against a 4-run unedited median), `reader`
+  averaged `+0.0110` (`+0.0146` comprehension, `+0.0074` skills; `passes = 1.00`) and
+  `fineweb2` averaged `+0.0075` (`+0.0123` comprehension, `+0.0027` skills).
 - **Neural scoring beats heuristics on the same candidates.** Turning off the 0.6B model in
-  `reader` (keeping its exact prefilter fallback) dropped `s3-p00000` from `+0.0103` to
-  `-0.0350` (`+0.0453` bpb lift from the 0.6B neural scorer alone).
+  `reader` (keeping its exact prefilter fallback) dropped `s3-p00000` by `-0.045` bpb.
 - **Languages decide a lot.** Keeping every language and cleaning each (`fineweb2`,
   `reader`) beats English-only corpora, which give up half the exam's non-English weight
-  (English-only DataDecide corpora scored `+0.051` to `+0.064` on English items yet
-  `-0.016` to `-0.041` on the full multilingual exam).
+  (across 4 independent seeds each, English-only DataDecide corpora scored `+0.035` to
+  `+0.056` on English items yet `-0.036` to `-0.074` on the full multilingual exam).
 - **Quality filters trade capabilities.** They help English prose. They cost code and tool
   logs (rules that delete lines with braces delete programs), which `technical` and
   `agents` ask for, and everything not in English.

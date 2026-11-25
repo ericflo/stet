@@ -26,8 +26,8 @@ import (
 // 3090's over its speed in the table (speed.go).
 
 // passOn3090 is a training pass on an RTX 3090 at the standard scale (Season 3 Qwen3-0.6B-Base,
-// FP32 master weights + activation checkpointing: measured ~31 min on RTX 5090 at speed 2.5).
-const passOn3090 = 75 * time.Minute
+// deterministic FP32 master weights + activation checkpointing: measured ~35 min on RTX 5090 at speed 2.5).
+const passOn3090 = 85 * time.Minute
 
 // Between booting and training, and after: fetching the round's corpus and making the two
 // scripts before it trains, and sitting the exam once it has.

@@ -14,9 +14,13 @@ before sitting the exam.
 
 from __future__ import annotations
 
+import contextlib
 import math
+import os
 import platform
 import time
+
+os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 
 import numpy as np
 import torch
@@ -56,6 +60,28 @@ def _autocast(device: torch.device):
     if device.type == "cuda":
         return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
     return torch.autocast(device_type="cpu", enabled=False)
+
+
+@contextlib.contextmanager
+def _deterministic_cuda(enabled: bool):
+    """Run Season 3 CUDA training with deterministic FlashAttention/cuBLAS kernels so
+    identical inputs on the same GPU model produce bit-for-bit identical weights."""
+    if not enabled:
+        yield
+        return
+    prev_det = torch.are_deterministic_algorithms_enabled()
+    prev_warn = torch.is_deterministic_algorithms_warn_only_enabled()
+    prev_cudnn_det = torch.backends.cudnn.deterministic
+    prev_cudnn_bench = torch.backends.cudnn.benchmark
+    try:
+        torch.use_deterministic_algorithms(True, warn_only=bool(getattr(torch.version, "hip", None)))
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+        yield
+    finally:
+        torch.use_deterministic_algorithms(prev_det, warn_only=prev_warn)
+        torch.backends.cudnn.deterministic = prev_cudnn_det
+        torch.backends.cudnn.benchmark = prev_cudnn_bench
 
 
 def precision(device: torch.device) -> str:
@@ -347,74 +373,76 @@ def train(
     """Train the student for exactly the budget. Row b of `tokens` is lane b; step t reads
     columns [t * ctx, (t + 1) * ctx] of every lane. Nothing is shuffled."""
     cfg = season.train_cfg
-    torch.set_float32_matmul_precision("high")
-    model = build_model(scale, season, init_seed, device)
-    init_sha256 = weights_sha256(model)
-    decay = [p for p in model.parameters() if p.requires_grad and p.dim() >= 2]
-    no_decay = [p for p in model.parameters() if p.requires_grad and p.dim() < 2]
-    opt = torch.optim.AdamW(
-        [{"params": decay, "weight_decay": cfg["weight_decay"]}, {"params": no_decay, "weight_decay": 0.0}],
-        lr=scale.lr,
-        betas=(cfg["beta1"], cfg["beta2"]),
-        fused=device.type == "cuda",
-    )
-    steps = scale.steps if max_steps is None else min(scale.steps, max_steps)
-    per_step = scale.batch_size * scale.ctx
-    assert tokens.shape == (scale.batch_size, scale.steps * scale.ctx + 1), "tokens do not match the training budget"
-    mb = scale.micro_batch if scale.micro_batch > 0 else scale.batch_size
-    assert scale.batch_size % mb == 0, f"batch_size {scale.batch_size} must be divisible by micro_batch {mb}"
-    accum = scale.batch_size // mb
-    log_every = max(1, steps // 200)
-    curve: list[list[float]] = []
-    acc = torch.zeros((), device=device)
-    acc_n = 0
-    model.train()
-    t0 = time.time()
-    for step in range(steps):
-        a = step * scale.ctx
-        for g in opt.param_groups:
-            g["lr"] = lr_at(step, scale.steps, scale.lr, cfg["warmup_frac"], cfg["final_lr_frac"], scale.warmup_steps)
-        opt.zero_grad(set_to_none=True)
-        step_loss = torch.zeros((), device=device)
-        for m in range(accum):
-            lo, hi = m * mb, (m + 1) * mb
-            chunk = torch.from_numpy(tokens[lo:hi, a : a + scale.ctx + 1].astype(np.int64)).to(device, non_blocking=True)
-            x = chunk[:, :-1]
-            y = chunk[:, 1:]
-            step_loss += _backward_chunked_head(model, x, y, accum, device)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), cfg["grad_clip"])
-        opt.step()
-        acc += step_loss
-        acc_n += 1
-        if (step + 1) % log_every == 0 or step + 1 == steps:
-            mean = float(acc / acc_n)
-            if not math.isfinite(mean):
-                raise FloatingPointError(f"training diverged at step {step + 1}")
-            curve.append([step + 1, round(mean, 4)])
-            acc.zero_()
-            acc_n = 0
-            if progress:
-                progress(step + 1, steps, mean, time.time() - t0)
-    model.zero_grad(set_to_none=True)
-    if device.type == "cuda":
-        torch.cuda.synchronize()
-    del opt
-    if device.type == "cuda":
-        torch.cuda.empty_cache()
-    pretrain_seconds = time.time() - t0
+    use_det = (season.raw.get("student") or {}).get("kind") == "hf_topreset" and device.type == "cuda"
+    with _deterministic_cuda(use_det):
+        torch.set_float32_matmul_precision("high")
+        model = build_model(scale, season, init_seed, device)
+        init_sha256 = weights_sha256(model)
+        decay = [p for p in model.parameters() if p.requires_grad and p.dim() >= 2]
+        no_decay = [p for p in model.parameters() if p.requires_grad and p.dim() < 2]
+        opt = torch.optim.AdamW(
+            [{"params": decay, "weight_decay": cfg["weight_decay"]}, {"params": no_decay, "weight_decay": 0.0}],
+            lr=scale.lr,
+            betas=(cfg["beta1"], cfg["beta2"]),
+            fused=device.type == "cuda",
+        )
+        steps = scale.steps if max_steps is None else min(scale.steps, max_steps)
+        per_step = scale.batch_size * scale.ctx
+        assert tokens.shape == (scale.batch_size, scale.steps * scale.ctx + 1), "tokens do not match the training budget"
+        mb = scale.micro_batch if scale.micro_batch > 0 else scale.batch_size
+        assert scale.batch_size % mb == 0, f"batch_size {scale.batch_size} must be divisible by micro_batch {mb}"
+        accum = scale.batch_size // mb
+        log_every = max(1, steps // 200)
+        curve: list[list[float]] = []
+        acc = torch.zeros((), device=device)
+        acc_n = 0
+        model.train()
+        t0 = time.time()
+        for step in range(steps):
+            a = step * scale.ctx
+            for g in opt.param_groups:
+                g["lr"] = lr_at(step, scale.steps, scale.lr, cfg["warmup_frac"], cfg["final_lr_frac"], scale.warmup_steps)
+            opt.zero_grad(set_to_none=True)
+            step_loss = torch.zeros((), device=device)
+            for m in range(accum):
+                lo, hi = m * mb, (m + 1) * mb
+                chunk = torch.from_numpy(tokens[lo:hi, a : a + scale.ctx + 1].astype(np.int64)).to(device, non_blocking=True)
+                x = chunk[:, :-1]
+                y = chunk[:, 1:]
+                step_loss += _backward_chunked_head(model, x, y, accum, device)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), cfg["grad_clip"])
+            opt.step()
+            acc += step_loss
+            acc_n += 1
+            if (step + 1) % log_every == 0 or step + 1 == steps:
+                mean = float(acc / acc_n)
+                if not math.isfinite(mean):
+                    raise FloatingPointError(f"training diverged at step {step + 1}")
+                curve.append([step + 1, round(mean, 4)])
+                acc.zero_()
+                acc_n = 0
+                if progress:
+                    progress(step + 1, steps, mean, time.time() - t0)
+        model.zero_grad(set_to_none=True)
+        if device.type == "cuda":
+            torch.cuda.synchronize()
+        del opt
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+        pretrain_seconds = time.time() - t0
 
-    sft_info = {}
-    if max_steps is None and scale.sft_steps > 0 and season.raw.get("sft"):
-        if enc is None:
-            from .tok import load_encoding
+        sft_info = {}
+        if max_steps is None and scale.sft_steps > 0 and season.raw.get("sft"):
+            if enc is None:
+                from .tok import load_encoding
 
-            enc = load_encoding(season)
-        sft_info = run_sft_probe(model, season, scale, enc, sft_seed if sft_seed is not None else init_seed, device)
-    _set_activation_checkpointing(model, False)
-    model.zero_grad(set_to_none=True)
-    model.eval()
-    if device.type == "cuda":
-        torch.cuda.empty_cache()
+                enc = load_encoding(season)
+            sft_info = run_sft_probe(model, season, scale, enc, sft_seed if sft_seed is not None else init_seed, device)
+        _set_activation_checkpointing(model, False)
+        model.zero_grad(set_to_none=True)
+        model.eval()
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
 
     seconds = time.time() - t0
     info = {

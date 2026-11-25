@@ -98,7 +98,7 @@ its draw, and posted as soon as the examiner has built it. A verifier handed a s
 before then trains at once and sits the exam the moment it is posted; one whose grade is
 trained and waiting asks for another, and sits them all then. At the official
 scale a grade is one training run (`Qwen3-0.6B-Base` top-half reset on 32.8M tokens plus a
-64-step SFT probe), about 31 minutes on an RTX 5090 (~42 minutes on an RTX 4090). The first job of a round also
+32-step SFT probe), about 35 minutes on an RTX 5090 (~47 minutes on an RTX 4090). The first job of a round also
 downloads the round's raw text (about 1.5 GB compressed; ~3.8 GB once built) and caches the
 pinned student weights (~1.2 GB).
 Four established machines a round are asked to train on the unedited corpus as well, and
@@ -205,7 +205,7 @@ further runs.
 
 **The round's baseline is measured four times.** The first four established graders of a
 round are each asked for a baseline with their grade: the unedited corpus's score on every
-item. The round's baseline is the item-by-item mean of theirs, and every grade is measured
+item. The round's baseline is the item-by-item median of theirs, and every grade is measured
 against it, whoever made it. A machine that is not yet established is always asked for its
 own: that is how it is checked. If your corpus or your exam differs from the round's, or your
 baseline is further from the others' than 0.05 bits per byte, your result is set aside with a
@@ -250,7 +250,7 @@ It does not wait for people who are not there. If nobody who is at work on a job
 asked for one in the last ten minutes, could give an entry its second run, the entry
 settles with one. If a
 verifier is part-way through a job, the round waits for them: for an established
-verifier until the job is reported, handed back or out of time (three hours at most), and
+verifier until the job is reported, handed back or out of time (five hours at most), and
 for anyone else up to 45 minutes, and only if a grade of theirs has agreed before. A key
 costs nothing, and one that could hold a round back just by taking a job would. So until your first grade has
 agreed, start early in a round. A grade that arrives after the round has settled earns

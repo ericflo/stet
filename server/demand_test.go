@@ -848,3 +848,284 @@ func TestOnDemandDrawsQualifyingCuratorAlreadyOnLadder(t *testing.T) {
 	}
 	w.check()
 }
+
+// In production (Dev=false) with on-demand-only mode, an organiser's `stet draw` (Manual=true)
+// must actually open the scheduled round when due, even if only the ladder is present and no
+// qualifying/queued entry is waiting.
+func TestOrganiserDrawOverridesLadderAloneInProduction(t *testing.T) {
+	w, anchor := demandWorld(t, func(c *Config) {
+		c.RoundInterval = 0
+		c.RoundMinGap = 0
+		c.QualifyRounds = 1
+		c.RatedRounds = 1
+	})
+	alice := w.join("alice", nil)
+	ctx := context.Background()
+	// Play 1 round so alice's entry graduates onto the ladder and nobody is waiting anymore.
+	w.submit(alice, "ladder-grad", "print(1)")
+	w.claim(anchor, true)
+	w.play(anchor, 1, func(string, int) float64 { return 3.0 })
+	w.app.cfg.Dev = false // switch to production mode before calling POST /api/v1/admin/draw
+	w.app.st.view(func(s *State) {
+		if w.app.waiting(s) {
+			t.Fatal("expected nobody waiting after QualifyRounds=1 finished")
+		}
+	})
+	if at := w.scheduledAt(); at != 0 {
+		t.Fatalf("expected no scheduled round when nobody waits, got %d", at)
+	}
+	if code := anchor.do("POST", "/api/v1/admin/draw", map[string]any{}, nil); code != 200 {
+		t.Fatalf("organiser POST /api/v1/admin/draw in production: HTTP %d", code)
+	}
+	var manual bool
+	w.app.st.update(ctx, func(tx *Tx) error {
+		r := tx.s.roundWithStatus("scheduled")
+		if r == nil {
+			t.Fatal("manual draw did not schedule a round in production")
+		}
+		manual = r.Manual
+		r.DrawAt = now() - 5
+		r.DrandRound = w.app.season.Beacon.drandRoundAt(r.DrawAt)
+		tx.saveRound(r)
+		return nil
+	})
+	if !manual {
+		t.Fatal("manual draw did not set Round.Manual = true")
+	}
+	if err := w.app.maybeDraw(ctx, false); err != nil {
+		t.Fatalf("production due draw of Manual=true round failed: %v", err)
+	}
+	w.app.st.view(func(s *State) {
+		if s.roundWithStatus("open") == nil {
+			t.Fatal("Manual=true round did not open on ordinary due draw in production")
+		}
+	})
+	w.check()
+}
+
+// Empty-round backoff triggers at exactly two trailing empty rounds (not one), lasts emptyBackoff
+// (3h), is exposed on /api/v1/season, /api/v1/admin/work, submit replies, and the home page; and
+// dropping a scheduled round persists both Meta.UsedSlots (surviving KV reload) and Meta.PendingWas
+// (so moved_from carries onto the next scheduled round).
+func TestEmptyBackoffStreakSurfacesAndDropPreservesUsedSlotsAndPendingWas(t *testing.T) {
+	pub, priv := newKey()
+	cfg := testConfig(t, pub)
+	cfg.RoundInterval = 0
+	cfg.RoundMinGap = 0
+	kv := newMemKV()
+	w := startWorld(t, cfg, kv, dirBlobs{filepath.Join(cfg.DataDir, "blobs")})
+	anchor := w.join("anchor-one", priv)
+	alice := w.join("alice", nil)
+	ctx := context.Background()
+
+	// 1. Streak off-by-one: a single empty round must NOT trigger backoff.
+	t0 := now()
+	w.app.st.update(ctx, func(tx *Tx) error {
+		tx.saveRound(&Round{
+			Idx: 1, Status: "settled", Scale: w.cfg.Scale,
+			DrawAt: t0 - 1200, DrawnAt: t0 - 1200, SettledAt: t0 - 600,
+			Crawl: w.cfg.FixedCrawl,
+		})
+		return nil
+	})
+	w.app.st.view(func(s *State) {
+		if until := w.app.backoffUntil(s); until != 0 {
+			t.Fatalf("single empty round triggered backoffUntil=%d", until)
+		}
+	})
+
+	// 2. Two trailing empty rounds trigger an exact emptyBackoff (3h) window surfaced everywhere.
+	w.app.st.update(ctx, func(tx *Tx) error {
+		tx.saveRound(&Round{
+			Idx: 2, Status: "settled", Scale: w.cfg.Scale,
+			DrawAt: t0 - 500, DrawnAt: t0 - 500, SettledAt: t0 - 300,
+			Crawl: w.cfg.FixedCrawl,
+		})
+		return nil
+	})
+	wantRetry := (t0 - 300) + int64(emptyBackoff.Seconds())
+	var season map[string]any
+	if code := alice.do("GET", "/api/v1/season", nil, &season); code != 200 {
+		t.Fatalf("/api/v1/season HTTP %d", code)
+	}
+	if got, _ := season["backoff_until"].(float64); int64(got) != wantRetry {
+		t.Fatalf("/api/v1/season backoff_until=%v, want %d", season["backoff_until"], wantRetry)
+	}
+	var wk Work
+	if code := anchor.do("GET", "/api/v1/admin/work", nil, &wk); code != 200 {
+		t.Fatalf("/api/v1/admin/work HTTP %d", code)
+	}
+	if wk.BackoffUntil != wantRetry || wk.LeaseSeconds != int(w.cfg.Lease.Seconds()) {
+		t.Fatalf("/api/v1/admin/work backoff_until=%d lease_seconds=%d, want %d and %d",
+			wk.BackoffUntil, wk.LeaseSeconds, wantRetry, int(w.cfg.Lease.Seconds()))
+	}
+	var subOut struct {
+		Message string `json:"message"`
+	}
+	if code := alice.do("POST", "/api/v1/editors", bundle(t, "queued-during-backoff", "print(1)"), &subOut); code != 201 {
+		t.Fatalf("submit HTTP %d", code)
+	}
+	if !strings.Contains(subOut.Message, "Automatic draws are backed off until") || !strings.Contains(subOut.Message, "stet draw") {
+		t.Fatalf("submit message during backoff did not explain backoff: %q", subOut.Message)
+	}
+	if code, home := w.page("/"); code != 200 || !strings.Contains(home, "Draws backed off") || !strings.Contains(home, "Automatic draws are held back until") {
+		t.Fatalf("home page during backoff (HTTP %d) did not show backoff notice", code)
+	}
+
+	// 3. Drop a scheduled round, reload Store from KV, and verify UsedSlots & PendingWas survived.
+	shift := int64((emptyBackoff + time.Minute).Seconds())
+	w.app.st.update(ctx, func(tx *Tx) error {
+		for _, r := range tx.s.Rounds {
+			r.DrawAt -= shift
+			r.DrawnAt -= shift
+			r.SettledAt -= shift
+			tx.saveRound(r)
+		}
+		return nil
+	})
+	w.claim(anchor, true)
+	var droppedSlot int64
+	w.app.st.update(ctx, func(tx *Tx) error {
+		r := tx.s.roundWithStatus("scheduled")
+		if r == nil {
+			t.Fatal("expected scheduled round before drop")
+		}
+		droppedSlot = r.DrandRound
+		tx.dropRound(r)
+		return nil
+	})
+	reloaded, err := openStore(ctx, kv, dirBlobs{filepath.Join(cfg.DataDir, "blobs")}, map[string]bool{hexOf(pub): true})
+	if err != nil {
+		t.Fatalf("reopen store from KV: %v", err)
+	}
+	var hasUsed, hasPending bool
+	reloaded.view(func(s *State) {
+		for _, sl := range s.Meta.UsedSlots {
+			if sl == droppedSlot {
+				hasUsed = true
+			}
+		}
+		for _, sl := range s.Meta.PendingWas {
+			if sl == droppedSlot {
+				hasPending = true
+			}
+		}
+	})
+	if !hasUsed || !hasPending {
+		t.Fatalf("after KV reload: UsedSlots has %d=%v, PendingWas has %d=%v", droppedSlot, hasUsed, droppedSlot, hasPending)
+	}
+	// Scheduling the next round must skip droppedSlot and inherit droppedSlot into Round.Was (moved_from).
+	w.app.st.update(ctx, func(tx *Tx) error {
+		w.app.schedule(tx)
+		return nil
+	})
+	w.app.st.view(func(s *State) {
+		r := s.roundWithStatus("scheduled")
+		if r == nil {
+			t.Fatal("expected rescheduled round after drop")
+		}
+		if r.DrandRound == droppedSlot {
+			t.Fatalf("rescheduled round reused dropped drand slot %d", droppedSlot)
+		}
+		foundWas := false
+		for _, sl := range r.Was {
+			if sl == droppedSlot {
+				foundWas = true
+			}
+		}
+		if !foundWas {
+			t.Fatalf("rescheduled round lost dropped slot %d in Was=%v", droppedSlot, r.Was)
+		}
+		if len(s.Meta.PendingWas) != 0 {
+			t.Fatalf("PendingWas not cleared after consumption: %v", s.Meta.PendingWas)
+		}
+	})
+	w.check()
+}
+
+// In on-demand-only mode: /admin/work Waiting is false while paused or while a round is open;
+// resuming with a runner around schedules immediately; and the second ladder-alone guard inside
+// maybeDraw's post-beacon transaction blocks a draw if the sole waiting entrant leaves mid-beacon.
+func TestOnDemandWaitingGuardsResumeAndMidBeaconWithdraw(t *testing.T) {
+	w, anchor := demandWorld(t, func(c *Config) {
+		c.RoundInterval = 0
+		c.RoundMinGap = 0
+	})
+	alice := w.join("alice", nil)
+	ctx := context.Background()
+	w.submit(alice, "only-entrant", "print(1)")
+	// Seed a retired ladder reference so selectEntrants stays non-empty if Alice withdraws.
+	w.submit(anchor, "ref-only", "print('ref')")
+	w.app.st.update(ctx, func(tx *Tx) error {
+		for _, e := range tx.s.Editors {
+			if e.Name == "ref-only" {
+				e.Status = "retired"
+				tx.saveEditor(e)
+			}
+		}
+		return nil
+	})
+
+	// 1. Waiting must be false while paused.
+	if code := anchor.do("POST", "/api/v1/admin/pause", map[string]bool{"paused": true}, nil); code != 200 {
+		t.Fatalf("pause HTTP %d", code)
+	}
+	var wk Work
+	if code := anchor.do("GET", "/api/v1/admin/work", nil, &wk); code != 200 || wk.Waiting {
+		t.Fatalf("while paused: HTTP %d waiting=%v (want false)", code, wk.Waiting)
+	}
+
+	// 2. Resuming with an active runner schedules immediately without needing tick().
+	w.claim(anchor, true)
+	if code := anchor.do("POST", "/api/v1/admin/pause", map[string]bool{"paused": false}, nil); code != 200 {
+		t.Fatalf("resume HTTP %d", code)
+	}
+	if at := w.scheduledAt(); at == 0 {
+		t.Fatal("resuming with an active runner did not schedule immediately")
+	}
+
+	// 3. Second ladder-alone guard: withdraw Alice during the beacon fetch between tx1 and tx2.
+	w.app.st.update(ctx, func(tx *Tx) error {
+		r := tx.s.roundWithStatus("scheduled")
+		r.DrawAt = now() - 5
+		r.DrandRound = w.app.season.Beacon.drandRoundAt(r.DrawAt)
+		tx.saveRound(r)
+		for _, e := range tx.s.Editors {
+			if e.Name == "only-entrant" {
+				e.CreatedAt = r.DrawAt - commitMargin - 10
+				tx.saveEditor(e)
+			}
+		}
+		return nil
+	})
+	origBeacon := beaconSource
+	t.Cleanup(func() { beaconSource = origBeacon })
+	beaconSource = func(c context.Context, b Beacon, round int64) (string, error) {
+		_ = w.app.st.update(c, func(tx *Tx) error {
+			for _, e := range tx.s.Editors {
+				if e.Name == "only-entrant" {
+					e.Status = "withdrawn"
+					tx.saveEditor(e)
+				}
+			}
+			return nil
+		})
+		return origBeacon(c, b, round)
+	}
+	if err := w.app.maybeDraw(ctx, false); err == nil {
+		t.Fatal("maybeDraw opened a ladder-only round even though sole waiting entrant withdrew mid-beacon")
+	}
+	if at := w.scheduledAt(); at != 0 {
+		t.Fatalf("post-beacon guard did not drop scheduled round, still at %d", at)
+	}
+	beaconSource = origBeacon
+
+	// 4. Waiting must also be false while a round is open.
+	w.submit(alice, "fresh-one", "print(2)")
+	w.draw()
+	w.submit(alice, "second-while-open", "print(3)")
+	if code := anchor.do("GET", "/api/v1/admin/work", nil, &wk); code != 200 || wk.Waiting {
+		t.Fatalf("while a round is open: HTTP %d waiting=%v (want false)", code, wk.Waiting)
+	}
+	w.check()
+}

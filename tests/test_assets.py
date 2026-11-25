@@ -222,7 +222,8 @@ def test_the_example_that_uses_a_model_names_files_the_season_allows(season):
     compile(source, "curator.py", "exec")
     assert 'task.asset("qwen3-0.6b")' in source and "task.device()" in source
     main = source[source.index("def main()") :]
-    assert main.index("task.write(") < main.index("_score_vllm(")  # a script is written before the model is even loaded
+    assert "task.write(" not in main[: main.index("_score_vllm(")]  # no silent unrated fallback before model runs
+    assert "raise RuntimeError" in main and "task.write(" in main
 
 
 # --- when a file cannot be had ------------------------------------------------------------------

@@ -242,6 +242,80 @@ func TestABaselineThatIsFarOutAndFirstInIsNotTheRoundsStandard(t *testing.T) {
 	}
 }
 
+// The server compares train.init_sha256 across the round and script.tokens_sha256 across grades
+// of the same script, refusing mismatches with HTTP 409 and listing them in Round.Differs.
+func TestServerComparesInitSHA256AndTokensSHA256(t *testing.T) {
+	pub, priv := newKey()
+	w := newWorld(t, pub)
+	anchor := w.join("anchor-one", priv)
+	w.submit(w.join("owner-entry", nil), "entry-0", "print(0)")
+	idx := w.draw()
+	// Two established runners write the identical script so the script asks for two established grades.
+	erin := w.volunteers("erin")[0]
+	for _, r := range []*actor{anchor, erin} {
+		c := w.claim(r, true)
+		if c.Job == nil || c.Job.Kind != "edit" {
+			t.Fatalf("%s did not get edit job: %+v", r.handle, c.Job)
+		}
+		if code, msg := w.edit(r, c, "{\"d\": 0}\n"); code != 200 {
+			t.Fatalf("%s edit failed: HTTP %d %s", r.handle, code, msg)
+		}
+	}
+	g := w.volunteers("bob", "carol", "dave", "frank")
+
+	initA := strings.Repeat("a", 64)
+	initB := strings.Repeat("b", 64)
+	tokA := strings.Repeat("1", 64)
+	tokB := strings.Repeat("2", 64)
+
+	sendWith := func(a *actor, c *claimed, initSHA, tokSHA string) (int, string) {
+		t.Helper()
+		p := w.result(c, 5.5, 6.0)
+		p["train"] = map[string]any{"init_sha256": initSHA, "precision": "bf16", "seconds": 10.0}
+		p["script"] = map[string]any{"tokens_sha256": tokSHA}
+		var ack struct {
+			Status string `json:"status"`
+			Error  string `json:"error"`
+		}
+		code := a.do("POST", fmt.Sprintf("/api/v1/jobs/%d/result", c.Job.ID), p, &ack)
+		if code != 200 {
+			return code, ack.Error
+		}
+		return code, ack.Status
+	}
+
+	c1 := w.asked(g[0], true)
+	if code, st := sendWith(g[0], c1, initA, tokA); code != 200 {
+		t.Fatalf("first grade with initA/tokA failed: HTTP %d %s", code, st)
+	}
+	c2 := w.asked(g[1], true)
+	if code, msg := sendWith(g[1], c2, initB, tokA); code != 409 || !strings.Contains(msg, "initial weights") {
+		t.Fatalf("mismatched init_sha256: HTTP %d %q, want 409 mentioning initial weights", code, msg)
+	}
+	c3 := w.asked(g[2], true)
+	if code, msg := sendWith(g[2], c3, initA, tokB); code != 409 || !strings.Contains(msg, "tokenized training stream") {
+		t.Fatalf("mismatched tokens_sha256: HTTP %d %q, want 409 mentioning tokenized training stream", code, msg)
+	}
+	c4 := w.asked(g[3], true)
+	if code, st := sendWith(g[3], c4, initA, tokA); code != 200 {
+		t.Fatalf("matching second grade failed: HTTP %d %s", code, st)
+	}
+	w.pass(w.cfg.ReplicaWait + time.Minute)
+	if w.settled(idx) != 1 {
+		t.Fatal("round did not settle")
+	}
+
+	var differs []Differ
+	w.app.st.view(func(s *State) { differs = s.Rounds[idx].Differs })
+	if len(differs) != 2 || differs[0].What != "init" || differs[1].What != "tokens" {
+		t.Fatalf("expected [init, tokens] in Round.Differs, got %+v", differs)
+	}
+	if code, page := w.page("/rounds/" + roundID(w.app.season.ID, idx)); code != 200 ||
+		!strings.Contains(page, "initial weights differed") || !strings.Contains(page, "tokenized script differed") {
+		t.Fatalf("round page (HTTP %d) did not render init/tokens differ labels", code)
+	}
+}
+
 // Whichever order they come in, the one that is far out is left out: last in, with two or more
 // to say so, it is turned away as it arrives.
 func TestABaselineThatIsFarOutAndLastInIsTurnedAway(t *testing.T) {

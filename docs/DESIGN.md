@@ -215,13 +215,13 @@ shows gains.
 
 **Rounds at the standard student; finals at a larger budget.** Season 3 rounds train
 `Qwen3-0.6B-Base` (28 × 1024, upper half of layers reset from the round's seed) on 32.8M
-tokens plus a 64-step disjoint SFT probe: about 31 minutes on an RTX 5090 (~42 minutes on
+tokens plus a 32-step disjoint SFT probe: about 35 minutes on an RTX 5090 (~47 minutes on
 an RTX 4090). Smaller
 budgets rank curators differently: they reward narrow data, which loses as the student sees
 more tokens
 ([measured](research/exam-first-principles.md#75-scale-rounds-at-the-standard-student-finals-at-the-large-one-decide-the-season)).
 Finals run the season's top eight, and one more drawn by lot from the next eight, on two
-rounds at 131M tokens (4× the official budget) plus the 64-step SFT probe, and decide the
+rounds at 131M tokens (4× the official budget) plus the 32-step SFT probe, and decide the
 table.
 
 ## What could go wrong

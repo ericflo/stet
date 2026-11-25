@@ -97,14 +97,15 @@ The score the final parts make has a noise of 0.0036 bits per byte between two t
 of one script at standard, and the six curators spread by forty-five times that. They
 stand in the same order at standard and at large.
 
-**What it decided.** The exam is four kinds of writing (reference, news, technical,
+**What it decided (Season 2).** The exam is four kinds of writing (reference, news, technical,
 conversation) and seven skills (agents, reading, logic, grammar, numbers, programs,
 knowledge). A part that failed is not on the exam, and its generator or its
-source is deleted: nothing is sat that does not count. The season takes two trainings of
-one script to differ by 0.005 at standard and 0.03 at micro (`noise` in its file). At the
-official scale two grades of a script must agree within 0.025, a measurement of the
-unedited baseline within 0.04 of the others', and two runs within 0.04. All three
-tolerances are *provisional* until grades from many machines, of both makes, can be
+source is deleted: nothing is sat that does not count. Season 2's 39M student took two trainings of
+one script to differ by 0.005 at standard and 0.03 at micro (`noise` in `s2.json`), with
+provisional official tolerances of 0.025 (grade), 0.04 (baseline), and 0.04 (run). Season 3
+uses `Qwen3-0.6B-Base` (top half reset) on twin-context comprehension + skills; its own
+noise figures and tolerances live in `src/stet/seasons/s3.json` and the Season 3 validation
+report. All tolerances remain *provisional* until grades from many machines, of both makes, can be
 compared: every round's page publishes each grade's difference from the others.
 
 **Can the exam be bought with a curator's own text?** One of the two attackers, `scribe`,

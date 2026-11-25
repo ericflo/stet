@@ -17,7 +17,7 @@ the round is drawn. The bigger its gain over a student trained on the raw pages,
 curl -fsSL https://www.stetrun.com/install.sh | sh
 stet init my-curator && cd my-curator
 stet harvest              # once: recent human writing for practice exams, no account needed
-stet run                  # edit, train, grade a practice round: a minute or two on a GPU
+stet run                  # edit, train, grade a practice round (16 GB+ GPU; ~5–10 min micro, ~31–42 min standard)
 stet login --github       # entering needs a GitHub account at least 30 days old
 stet submit
 ```
@@ -47,22 +47,23 @@ stet service install      # leave it running: starts with the machine, upgrades 
   newest Common Crawl after entries are locked.
 - **An exam nobody can know.** Each round's exam is made at its draw. Half of the
   score is fresh twin-context comprehension (the exact same continuation scored under its
-  real opening minus three length-matched wrong openings from the same source and language,
+  real opening minus up to three length-matched wrong openings from the same source and language,
   in bits per byte) from three hours of the day before, picked by the draw, in every
   language by its share of the crawl. Half is multilingual procedural skills, generated from the round's
-  seed. Every student sits the exam after a scale-fixed disjoint SFT probe (64 steps at official
+  seed. Every student sits the exam after a scale-fixed multilingual SFT probe (1 epoch / 32 steps at official
   standard scale). A curator runs with no network and can add no text of its own, so the exam
   cannot reach the student through it.
-- **Only what tells curators apart.** Every part of the exam was measured before the
-  season. Zero raw web-text perplexity: surface style matching cancels out, and nothing is sat that does not count.
+- **Only what tells curators apart.** Every part of the exam is validated before the season for
+  multi-seed stability, resistance to style mimicry, and agreement with published pretraining recipes.
+  Zero raw web-text perplexity: surface style matching cancels out, and nothing is sat that does not count.
 - **Copies only.** Everything the student reads is copied byte for byte from the round's
   corpus. A script holds no text of its own.
 - **Checked by other people.** Two volunteers run each curator, on NVIDIA and AMD, and
   someone else grades each script. A score that only one machine stands behind says so,
   and no score needs the organisers' machines to run or grade anything.
 - **The same machine for every curator.** Six cores, 20 GB of RAM, 22 GB of GPU memory,
-  up to 10 GB of pinned model weights, and a fixed list of libraries (`vLLM`, `flash-linear-attention`,
-  `liger-kernel`, `transformers`, PyTorch), whoever runs it.
+  up to 10 GB of pinned model weights, and a fixed list of libraries (`flash-linear-attention`,
+  `transformers`, PyTorch, plus `vLLM` and `liger-kernel` on NVIDIA Linux), whoever runs it.
 - **Paired scores.** Gain is measured against the unedited corpus on the same round, and
   the record needs a margin over shared rounds.
 - **Finals decide.** The season's top eight, and one more drawn by lot, are trained again

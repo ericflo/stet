@@ -398,6 +398,9 @@ func (a *App) apiSeason(w http.ResponseWriter, r *http.Request) {
 		if s.Meta.Paused != 0 {
 			out["paused"] = s.Meta.Paused
 		}
+		if until := a.backoffUntil(s); until > 0 {
+			out["backoff_until"] = until
+		}
 		if open := s.roundWithStatus("open"); open != nil {
 			out["open_round"] = open.description(a.season)
 		}
@@ -697,6 +700,10 @@ func (a *App) apiSubmit(w http.ResponseWriter, r *http.Request) {
 			case s.roundWithStatus("open") != nil:
 				open := s.roundWithStatus("open")
 				out["message"] = fmt.Sprintf("Round %s is still being graded; the next round will be drawn once it settles.", roundID(a.season.ID, open.Idx))
+			case a.backoffUntil(s) > 0:
+				until := a.backoffUntil(s)
+				out["backoff_until"] = until
+				out["message"] = fmt.Sprintf("Automatic draws are backed off until %s UTC after two empty rounds; your entry will run then (or sooner if an organiser runs `stet draw`).", time.Unix(until, 0).UTC().Format("15:04"))
 			default:
 				out["message"] = "No round is scheduled yet; one will be drawn on demand once a runner comes online (usually within 15-20 minutes)."
 			}

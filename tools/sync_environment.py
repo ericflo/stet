@@ -42,7 +42,12 @@ def train_lines(env: dict) -> list[str]:
 
 def cuda_lines(env: dict) -> list[str]:
     pkgs = env["packages"]
-    return [f'    "{name}=={pkgs[name]}; sys_platform == \'linux\' and platform_machine == \'x86_64\'",' for name in sorted(env.get("cuda_linux_only") or []) if name in pkgs]
+    cuda_pkgs = {name: pkgs[name] for name in (env.get("cuda_linux_only") or []) if name in pkgs}
+    cuda_pkgs.update(env.get("also_cuda") or {})
+    return [
+        f'    "{name}=={version}; sys_platform == \'linux\' and platform_machine == \'x86_64\'",'
+        for name, version in sorted(cuda_pkgs.items())
+    ]
 
 
 def render(env: dict) -> str:

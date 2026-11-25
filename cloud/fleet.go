@@ -78,6 +78,8 @@ type Fleet struct {
 	// the last look wanting its baseline measured (baselinesWanted): it then trains only the
 	// student.
 	onePass bool
+	// lease is the server's job lease from /admin/work (defaults to defaultLease when absent).
+	lease time.Duration
 }
 
 // --- the pool of keys ---------------------------------------------------------------------------
@@ -587,6 +589,9 @@ func (f *Fleet) look(ctx context.Context) (*View, error) {
 		return nil, err
 	}
 	f.onePass = !baselinesWanted(work)
+	if work.LeaseSeconds > 0 {
+		f.lease = time.Duration(work.LeaseSeconds) * time.Second
+	}
 	if err := f.refresh(); err != nil {
 		return nil, err
 	}
@@ -697,10 +702,19 @@ func (f *Fleet) need() Need {
 	return Need{MinGPUMemGB: f.o.MinGPUMemory, MinCPUs: f.o.MinCPU, MinRAMGB: f.o.MinRAM, DiskGB: f.o.Disk, MinCUDA: f.o.MinCUDA}
 }
 
-// graderDisk is the disk a machine that only grades needs, GB: stet and its libraries, and a
-// round's text built (10 GB, says docs/VERIFYING.md), with room to spare. --disk is for
-// those that run curators too, which keep 60 GB free.
-const graderDisk = 25
+// graderDisk is the disk a machine that only grades needs, GB: stet and its libraries (~5.4 GB),
+// student weights (~1.2 GB), and a round's corpus (~4.8 GB), with headroom for uv cache and
+// multiple cached rounds. --disk (default 120 GB) is for machines that run curators too, which
+// keep 80 GB free.
+const graderDisk = 35
+
+// defaultLease is the assumed server job lease (STET_LEASE) when /admin/work omits lease_seconds,
+// and leaseMargin is the headroom kept for corpus download, SFT probe, and exam sitting on top of
+// two training passes (baseline + candidate).
+const (
+	defaultLease = 5 * time.Hour
+	leaseMargin  = 30 * time.Minute
+)
 
 // curators says whether machines on a market may run curators: on RunPod, and where a probe
 // showed stet's container sandbox to hold and curators were let run there (markets.json).
@@ -725,9 +739,18 @@ func (f *Fleet) needOn(m Market) Need {
 	return n
 }
 
-// fits says whether an offer's GPU can be trusted with a grade, and holds one.
+// fits says whether an offer's GPU can be trusted with a grade, holds one, and is fast enough to
+// finish a two-pass baseline grade inside the server's job lease.
 func (f *Fleet) fits(c Offer) bool {
-	return c.Maker == "NVIDIA" && c.MemoryGB >= f.o.MinGPUMemory && !unfitGPU.MatchString(c.Model)
+	if c.Maker != "NVIDIA" || c.MemoryGB < f.o.MinGPUMemory || unfitGPU.MatchString(c.Model) {
+		return false
+	}
+	lease := f.lease
+	if lease <= 0 {
+		lease = defaultLease
+	}
+	p, _ := f.pass(c.Card)
+	return 2*p+leaseMargin <= lease
 }
 
 // offerName is an offer's card, with its market where that is not RunPod.
@@ -953,20 +976,40 @@ func (f *Fleet) launch(ctx context.Context, v *View, n, long, early, runs int, d
 	long = min(long, n)
 	early = min(early, n-long)
 	runs = min(runs, n-long-early)
+	grades := n - long - early - runs
 	rented := 0
 	for _, batch := range []struct {
 		n              int
 		long, curators bool
 		due            time.Time
 		what           string
-	}{{long, true, false, time.Time{}, "bigger students"}, {early, false, false, due, "early grades"}, {runs, false, true, time.Time{}, "curators"}, {n - long - early - runs, false, false, time.Time{}, "grades"}} {
+	}{{long, true, false, time.Time{}, "bigger students"}, {early, false, false, due, "early grades"}, {runs, false, true, time.Time{}, "curators"}} {
 		got, err := f.launchSome(ctx, v, batch.n, batch.long, batch.curators, batch.due, site, vouched, batch.what)
 		rented += got
 		if err != nil {
 			return rented, err
 		}
+		if batch.curators && got < batch.n && v.Work != nil {
+			// When 24 GB curator GPUs are scarce, pass unfilled curator slots to 16 GB+ graders
+			// if grades or farm tasks are actually waiting, rather than leaving those slots idle.
+			extraWant := 0
+			per := max(f.o.PerWorker, 1)
+			gradesWaiting := 0
+			for _, r := range v.Work.Rounds {
+				gradesWaiting += r.GradesWanted
+			}
+			extraWant += (gradesWaiting + per - 1) / per
+			if f.o.PerFarm > 0 {
+				extraWant += (v.Work.FarmWaiting + f.o.PerFarm - 1) / f.o.PerFarm
+			}
+			if spare := min(batch.n-got, max(0, extraWant-grades)); spare > 0 {
+				grades += spare
+			}
+		}
 	}
-	return rented, nil
+	got, err := f.launchSome(ctx, v, grades, false, false, time.Time{}, site, vouched, "grades")
+	rented += got
+	return rented, err
 }
 
 func (f *Fleet) launchSome(ctx context.Context, v *View, n int, long, curators bool, due time.Time, site string, vouched map[string]Vouched, what string) (int, error) {
