@@ -22,12 +22,14 @@ gains in bits per byte.
 
 ## Do I need a big GPU?
 
-You need a GPU with 16 GB or more of VRAM to train the `Qwen3-0.6B-Base` student (24 GB+
-to run curators). A practice run at nano scale takes a couple of minutes, and micro under
-ten. The official scale, standard, trains `Qwen3-0.6B-Base` (top half reset) on 32.8M
-tokens plus a short SFT probe — about 35 minutes on an RTX 5090 (~47 minutes on an RTX 4090).
-`stet doctor` tells you what your machine can do. Running other people's curators for the
-leaderboard asks for a 24 GB+ GPU at or above the floor; `stet bench` measures yours.
+You need a GPU with 12 GB or more of VRAM to train and grade the `ERNIE-4.5-0.3B-Base-PT`
+student (peak VRAM ≤10 GiB with frozen lower layers; 24 GB+ to run curators). A practice run
+at nano scale takes under a minute, and micro a few minutes. The official scale, standard,
+trains `ERNIE-4.5-0.3B-Base-PT` (bottom half frozen, top half reset) on 65.5M tokens plus a
+32-step SFT probe — about 20 minutes on an RTX 5090 (~29 minutes on an RTX 4090, ~52 minutes
+on an RTX 3090). `stet doctor` tells you what your machine can do. Running other people's
+curators for the leaderboard asks for a 24 GB+ GPU at or above the floor; `stet bench`
+measures yours.
 
 ## How many things can I try?
 
@@ -38,14 +40,13 @@ mean and its error; and every official round can be replayed once it settles
 (`stet rounds`, then `stet run --round <id>`). To run many trials from a program there
 is `stet.gym`, the same thing as a Python environment.
 
-Run `stet harvest` once before the first `stet run`. It fetches three hours of recent human
-writing from the sources official exams are made from, with no account and no key, and
-every practice round's exam is then made as an official round's is: generated questions,
-and writing from the hours you hold. Without it a practice exam is the generated skills
-alone, half of an official score, and `stet run` says so. `stet harvest --fresh`
-replaces the hours with newly written ones: the check on having tuned to the old. A replay
-of an official round sits what that round published, its generated questions and its
-Wikipedia text.
+Run `stet harvest` once before the first `stet run` if you want fresh local writing. It
+fetches three hours of recent human writing from the sources official exams are made from,
+with no account and no key. Without it, a practice round sits the bundled openly-licensed
+CC-BY-SA Wikipedia practice pack (both twin-context comprehension and reasoning) so `stet run`
+works out of the box. `stet harvest --fresh` replaces the hours with newly written ones: the
+check on having tuned to the old. A replay of an official round sits what that round
+published (openly licensed Wikipedia items whole).
 
 Official runs cost volunteers GPU time, so those are rationed: three entries in play at
 once. How often you submit is not limited. An entry runs in the next round drawn. Rounds are
@@ -71,10 +72,10 @@ precision. `stet asset add <owner>/<repository>` does it. Your curator gets one 
 22 GB of memory, PyTorch, `vllm`, `flash-linear-attention`, `liger-kernel` and
 `transformers`, and twenty minutes for the whole corpus.
 
-Twenty minutes is the real limit. A standard round's corpus is 3.8 GB (~35× the student
-budget), so a model does not need to read every byte: combine cheap multilingual filters
-with batched `vLLM` scoring. `examples/reader` is a working curator that does this with
-`Qwen3-0.6B`.
+Twenty minutes is the real limit. A standard round's corpus is 3.8 GB (~17× the 65.5M-token
+student budget), so a model does not need to read every byte: combine cheap multilingual
+filters with batched `vLLM` scoring. `examples/reader` is a working curator that does this
+with `Qwen3-0.6B` and per-language quantile normalization.
 
 ## Can I fine-tune a model for this and run it over the data?
 
@@ -130,37 +131,37 @@ they are. Any other copy is at least 64 bytes long.
 
 ## Is the exam secret?
 
-Nobody knows it in advance, the organisers included. Each round's exam is made at its draw.
-Half of the score is fresh twin-context comprehension from three hours of writing people
-published the day before, which the draw picks, gathered from many sources that need no key
-(each continuation is scored under its real opening minus wrong openings from the same source
-and language). Half is questions generated from the round's seed. Your curator runs with
-no network and can add no text of its own: a script is copies of the round's corpus and
-nothing else.
+Nobody knows it in advance, the organisers included. Each round's exam is 100% fresh and made
+at its draw, with zero static benchmarks and zero synthetic templates. Half of the score is
+fresh twin-context comprehension from three hours of writing people published the day before,
+which the draw picks, gathered from many sources that need no key (each continuation is
+scored under its real opening minus wrong openings from the same source and language). Half
+is fresh harvest-derived reasoning (`explain`, `infer`, `synthesis`) built deterministically
+from those exact same three hours. Your curator runs with no network and can add no text of
+its own: a script is copies of the round's corpus and nothing else.
 
 Until the round settles, the exam goes only to the machines grading it. Then it is
-published: the generated questions and Wikipedia's text whole, and every other source's
-items as where they came from and a hash, so anyone can check them at the source. Every
-student's score on every item is published with it.
+published: openly licensed Wikipedia items whole, and every other source's items as where
+they came from and a hash, so anyone can check them at the source. Every student's score on
+every item is published with it.
 
 ## Then what stops people overfitting the exam?
 
-There is nothing to fit in advance: a round's writing is three hours of the day before,
-which its draw picks, and its questions come from its seed. What a curator can learn from
-past rounds is what kinds of text matter (news, programs, replies, every language), and
-keeping more of those is choosing good data, which is the point. The exam weighs four
-comprehension kinds and seven skills, and every language by its share of the crawl, so no
-one source or kind of text can carry a score — and twin-context scoring cancels out surface
-style mimicry identically.
+There is nothing to fit in advance: both halves of a round's exam come from three hours of
+writing published the day before, which its draw picks. What a curator can learn from past
+rounds is what kinds of text teach a model well (reference, news, technical writing,
+conversation, clear explanations across every language), and keeping more of those is
+choosing good data, which is the point. The exam weighs four comprehension kinds and three
+reasoning kinds, and every language by its share of the crawl, so no one source or kind of
+text can carry a score — twin-context scoring cancels out surface style mimicry identically,
+and declarative `synthesis` (zero Q/A punctuation) defeats QA-spam.
 
 ## Does everything on the exam count?
 
 Yes. The season names every part of the exam. Each part is validated before the season for
-multi-seed stability, resistance to surface style mimicry, and agreement with published
-pretraining recipes. A part is in the score or it is not on the exam at all: nothing on the
-exam counts for nothing. Arithmetic, units, word problems, algebra and small algorithms are
-asked only after a few worked examples of the same task: asked cold, a student this size is
-too near chance for curators to differ.
+multi-seed stability, resistance to surface style mimicry and QA-spam, and agreement with 1B
+pretraining rankings (DataDecide). A part is in the score or it is not on the exam at all:
+nothing on the exam counts for nothing.
 
 ## Who runs my code?
 
@@ -226,9 +227,9 @@ do. Other backends can build, run and submit curators but not grade for the boar
 
 Finals. When the season closes, announced two weeks ahead, the eight best-rated curators and
 one more drawn by lot from the next eight are run on two fresh rounds, and the student
-(`Qwen3-0.6B-Base`, top half reset) is trained twice on each script at the `large` budget
-(131M tokens + 32-step SFT probe, 4× the official budget). Their gain there is the season's
-table.
+(`ERNIE-4.5-0.3B-Base-PT`, bottom half frozen, top half reset) is trained twice on each script
+at the `large` budget (131M tokens + 32-step SFT probe, 2× the official budget). Their gain
+there is the season's table.
 
 A season freezes the student, the budgets, how the exam is made and the rules, so that scores
 stay comparable.

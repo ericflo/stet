@@ -22,7 +22,7 @@
   "key_bytes": 64,
   "min_letters": 38
  },
- "digest": "c7e5b0fb8a08071f29f189aef443c1264fa591f9e097c3cbe745fa7e33aaacf1",
+ "digest": "d0cbb848f9e5475d65fb2cbd401135c0d1a6997656879c97319c0ea837fabd6e",
  "draw_grid_seconds": 600,
  "environment": {
   "also": {
@@ -302,21 +302,10 @@
    "reach_seconds": 93600,
    "settle_seconds": 3600
   },
-  "generated": [
-   "logic",
-   "agent",
-   "grammar",
-   "context",
-   "knowledge-even",
-   "arith-shots",
-   "word-shots",
-   "units-shots",
-   "algebra-shots",
-   "algo-shots"
-  ],
+  "generated": [],
   "groups": {
    "comprehension": 0.5,
-   "skills": 0.5
+   "reasoning": 0.5
   },
   "pillars": [
    {
@@ -353,62 +342,27 @@
     ]
    },
    {
-    "about": "an agent at work with a shell and tools",
-    "group": "skills",
-    "name": "agents",
+    "about": "fresh harvest-derived multi-sentence causal and mechanism explanations in the excerpt's own language",
+    "group": "reasoning",
+    "name": "explain",
     "parts": [
-     "agent"
+     "explain"
     ]
    },
    {
-    "about": "reading the context and using what it says",
-    "group": "skills",
-    "name": "reading",
+    "about": "fresh harvest-derived analytical synthesis of implications and trade-offs in the excerpt's own language",
+    "group": "reasoning",
+    "name": "infer",
     "parts": [
-     "context"
+     "infer"
     ]
    },
    {
-    "about": "following an argument to its end",
-    "group": "skills",
-    "name": "logic",
+    "about": "fresh harvest-derived declarative prose synthesis of the excerpt's main point and rationale (zero Q/A syntax)",
+    "group": "reasoning",
+    "name": "synthesis",
     "parts": [
-     "logic"
-    ]
-   },
-   {
-    "about": "telling a well-formed sentence from a broken one",
-    "group": "skills",
-    "name": "grammar",
-    "parts": [
-     "grammar"
-    ]
-   },
-   {
-    "about": "arithmetic, units, word problems and algebra, each asked after worked examples",
-    "group": "skills",
-    "name": "numbers",
-    "parts": [
-     "arith-shots",
-     "units-shots",
-     "word-shots",
-     "algebra-shots"
-    ]
-   },
-   {
-    "about": "what a small algorithm returns, asked after worked examples",
-    "group": "skills",
-    "name": "programs",
-    "parts": [
-     "algo-shots"
-    ]
-   },
-   {
-    "about": "facts the web knows in ten languages, disjoint from the SFT probe",
-    "group": "skills",
-    "name": "knowledge",
-    "parts": [
-     "knowledge-even"
+     "synthesis"
     ]
    }
   ],
@@ -420,13 +374,9 @@
   "news",
   "technical",
   "conversation",
-  "agents",
-  "reading",
-  "logic",
-  "grammar",
-  "numbers",
-  "programs",
-  "knowledge"
+  "explain",
+  "infer",
+  "synthesis"
  ],
  "grade_devices": [
   "cuda"
@@ -554,7 +504,7 @@
  },
  "reference": {
   "anchor": "NVIDIA RTX 5090 (32 GB VRAM) / RTX 4090 (24 GB VRAM), CUDA",
-  "note": "Season 3 curators run on 24 GB+ GPUs with vLLM, flash-linear-attention and liger-kernel so 0.6B-class curation models are the floor; 16 GB+ GPUs can grade. Time your curator against the floor in \"runner\" (stet bench)."
+  "note": "Season 3 curators run on 24 GB+ GPUs with vLLM, flash-linear-attention and liger-kernel so 0.6B-class curation models are the floor; 12 GB+ GPUs can grade ERNIE-4.5-0.3B (<=10 GiB VRAM, ~20 min/pass on RTX 5090). Time your curator against the floor in \"runner\" (stet bench)."
  },
  "reference_curves": {},
  "references": {
@@ -564,14 +514,14 @@
   ],
   "one_in": 8
  },
- "rules_version": 6,
+ "rules_version": 7,
  "runner": {
   "cores": 6,
   "cpu_mb_per_second": 100,
   "disk_gb": 80,
   "gpu_memory_gb": 23,
   "gpu_tokens_per_second": 120000,
-  "grade_gpu_memory_gb": 15,
+  "grade_gpu_memory_gb": 11,
   "memory_gb": 24
  },
  "scales": {
@@ -581,10 +531,10 @@
    "ctx": 1024,
    "d_model": 1024,
    "edit_seconds": 4800,
-   "lr": 0.0006,
-   "micro_batch": 4,
+   "lr": 0.0008,
+   "micro_batch": 8,
    "n_head": 16,
-   "n_layer": 28,
+   "n_layer": 18,
    "sft_steps": 32,
    "train_tokens": 131072000
   },
@@ -594,10 +544,10 @@
    "ctx": 1024,
    "d_model": 1024,
    "edit_seconds": 300,
-   "lr": 0.0006,
-   "micro_batch": 4,
+   "lr": 0.0008,
+   "micro_batch": 8,
    "n_head": 16,
-   "n_layer": 28,
+   "n_layer": 18,
    "sft_steps": 16,
    "train_tokens": 8388608,
    "warmup_steps": 24
@@ -608,10 +558,10 @@
    "ctx": 1024,
    "d_model": 1024,
    "edit_seconds": 120,
-   "lr": 0.0003,
-   "micro_batch": 4,
+   "lr": 0.0005,
+   "micro_batch": 8,
    "n_head": 16,
-   "n_layer": 28,
+   "n_layer": 18,
    "sft_steps": 8,
    "train_tokens": 1048576,
    "warmup_steps": 10
@@ -623,11 +573,11 @@
    "d_model": 1024,
    "edit_seconds": 1200,
    "lr": 0.001,
-   "micro_batch": 4,
+   "micro_batch": 8,
    "n_head": 16,
-   "n_layer": 28,
+   "n_layer": 18,
    "sft_steps": 32,
-   "train_tokens": 32768000
+   "train_tokens": 65536000
   }
  },
  "script": {
@@ -643,18 +593,21 @@
   "final_lr_frac": 0.1,
   "lr": 5e-05,
   "micro_batch": 4,
+  "pack": "s3-sft-ml.jsonl.zst",
+  "pack_sha256": "daac3ac660155b24c66c37c83a242c3e82eea88d9532482e55e2730ad4926d35",
   "warmup_steps": 4,
   "weight_decay": 0.01
  },
  "student": {
+  "freeze_bottom": true,
   "kind": "hf_topreset",
-  "repo": "Qwen/Qwen3-0.6B-Base",
+  "repo": "baidu/ERNIE-4.5-0.3B-Base-PT",
   "reset_frac": 0.5,
-  "revision": "da87bfb608c14b7cf20ba1ce41287e8de496c0cd"
+  "revision": "2d64320bf1b5b97f19a7eccf221fedb57e7ec02a"
  },
  "title": "Season 3",
  "tokenizer": {
-  "vocab_size": 151936
+  "vocab_size": 103424
  },
  "tolerance": {
   "large": {

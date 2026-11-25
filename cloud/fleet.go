@@ -990,7 +990,7 @@ func (f *Fleet) launch(ctx context.Context, v *View, n, long, early, runs int, d
 			return rented, err
 		}
 		if batch.curators && got < batch.n && v.Work != nil {
-			// When 24 GB curator GPUs are scarce, pass unfilled curator slots to 16 GB+ graders
+			// When 24 GB curator GPUs are scarce, pass unfilled curator slots to 12 GB+ graders
 			// if grades or farm tasks are actually waiting, rather than leaving those slots idle.
 			extraWant := 0
 			per := max(f.o.PerWorker, 1)

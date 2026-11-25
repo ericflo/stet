@@ -33,13 +33,15 @@ CORPUS_TOKENS = {"standard": 400, "large": 1000}  # FakeEnc: a token a word, and
 
 
 def _items() -> list[Item]:
-    """An exam of eighteen: news written the day before the draw, and generated logic of two sorts."""
-    news = [Item(kind="passage", corner=f"fresh/ccnews/en/-/{i}", fmt="prose", lang="en", source="ccnews:test",
-                 text=QUOTED if i == 0 else f"Report number {i} of the day, which no crawl made before it could hold: the council met and adjourned {i} times over.")
+    """An exam of eighteen: news written the day before the draw, and fresh reasoning of two sorts."""
+    news = [Item(kind="context", corner=f"fresh/ccnews/en/-/{i}", fmt="prose", lang="en", source="ccnews:test",
+                 ctx=QUOTED if i == 0 else f"Opening number {i} of the day, which no crawl made before it could hold.",
+                 cont=f" The council met and adjourned {i} times over.",
+                 wrongs=(f"Unrelated news opening number {i} from another wire report.",))
             for i in range(6)]
-    chains = [Item(kind="answer", corner=f"logic/chain/{i}", fmt="prose", lang="en", source="gen:logic", ctx=f"If {i} then", cont=f" {i + 1}.") for i in range(6)]
-    orders = [Item(kind="answer", corner=f"logic/order/{i}", fmt="prose", lang="en", source="gen:logic", ctx=f"Q{i}", cont=f" A{i}.") for i in range(6)]
-    return news + chains + orders
+    explains = [Item(kind="answer", corner=f"fresh/explain/en/{i}", fmt="prose", lang="en", source=f"explain:wikipedia:test:{i}", ctx=f"If {i} then", cont=f" {i + 1}.") for i in range(6)]
+    infers = [Item(kind="answer", corner=f"fresh/infer/en/{i}", fmt="prose", lang="en", source=f"infer:wikipedia:test:{i}", ctx=f"Q{i}", cont=f" A{i}.") for i in range(6)]
+    return news + explains + infers
 
 
 def _slot(t: int) -> tuple[int, int]:
@@ -428,13 +430,13 @@ def test_the_audit_trains_a_round_at_two_sizes_and_says_whether_the_order_carrie
     assert score["carried"] == {"standard>large": pytest.approx(0.8)}
     assert score["sizes"]["standard"]["noise"] == pytest.approx(0.001 * 2**0.5) and score["sizes"]["large"]["spread"] == pytest.approx(0.02 * (5 / 3) ** 0.5)
     # The score and each pillar of the exam, and nothing else: every item sat is in one of them.
-    assert set(rep["measures"]) == {"score", "pillar:news", "pillar:logic"} and all(set(m) == {"sizes", "carried"} for m in rep["measures"].values())
-    assert rep["measures"]["pillar:logic"]["carried"] == {"standard>large": pytest.approx(0.8)}
+    assert set(rep["measures"]) == {"score", "pillar:news", "pillar:explain", "pillar:infer"} and all(set(m) == {"sizes", "carried"} for m in rep["measures"].values())
+    assert rep["measures"]["pillar:explain"]["carried"] == {"standard>large": pytest.approx(0.8)}
     assert rep["left_out"] == {"e5/c@v1": "it wrote no script at large", "e6/c@v1": "its large script breaks a rule: line 3: this line holds text",
                                "e7/c@v1": "its large script keeps the corpus as it is: it is the unedited student"}
     assert rep["unedited"] == {"standard": 4, "large": 4} and rep["trainings"]["large"]["e1/c@v1"] == 2
     assert "The order of curators carried from standard to large at +0.80" in said and "left out: e5/c@v1: it wrote no script at large" in said
-    assert "logic" in said and "(1 left out: a bigger corpus holds them)" in said and "stet audit report --over" in said
+    assert "explain" in said and "(1 left out: a bigger corpus holds them)" in said and "stet audit report --over" in said
 
     # The rounds audited so far as one: a round has too few curators for its order to say much alone.
     assert run(world, "audit", "report", "--over", rid, "s3-o00099") == 0

@@ -1,23 +1,25 @@
 # The rules
 
-Season 3 (rules version 6). These are the rules as the server and the harness enforce them. Where a number
+Season 3 (rules version 7). These are the rules as the server and the harness enforce them. Where a number
 is still being measured it says *provisional*, and [Experiments](EXPERIMENTS.md) says how it
 will be set.
 
 ## The idea
 
-A fixed 0.6B-class language model, the **student** (`Qwen/Qwen3-0.6B-Base` with its top half
-of layers reset from the round's seed), is trained on raw web text for a fixed number of
-tokens, run through a short fixed multilingual fine-tuning probe, and then sits an **exam**.
-The exam is made when the round is drawn: half of it is fresh twin-context comprehension
-from three hours of the day before, which the draw picks (the same continuation scored under
-its real opening minus wrong openings from the exact same source and language), and half is
-generated multilingual skills from the round's seed. There is zero raw web perplexity. The
-model, the trainer, and the probe never change. You change one thing: the data. You write a
-**curator**, a program that is handed raw web pages it has never seen and twenty minutes on
-one 24 GB+ GPU. It answers with an **edit script**: what to keep, what to cut, and in what
-order to train on it. The better the student does on the exam than one trained on the raw
-pages, the better the curator.
+A fixed 0.3B language model, the **student** (`baidu/ERNIE-4.5-0.3B-Base-PT`, 18 × 1024, with
+its embeddings and lower half of layers frozen and its upper half reset from the round's
+seed), is trained on raw web text for a fixed number of tokens (65.5M at official `standard`
+scale), run through a short fixed multilingual fine-tuning probe, and then sits a 100%-fresh
+**exam**. The exam is made when the round is drawn: half of it is fresh twin-context
+comprehension from three hours of the day before, which the draw picks (the same continuation
+scored under its real opening minus wrong openings from the exact same source and language),
+and half is fresh deterministic harvest-derived reasoning (`explain`, `infer`, `synthesis`)
+from those same three hours. There are zero static benchmarks, zero synthetic templates, and
+zero raw web perplexity. The model, the trainer, and the probe never change. You change one
+thing: the data. You write a **curator**, a program that is handed raw web pages it has never
+seen and twenty minutes on one 24 GB+ GPU. It answers with an **edit script**: what to keep,
+what to cut, and in what order to train on it. The better the student does on the exam than
+one trained on the raw pages, the better the curator.
 
 ## What you enter
 
@@ -48,7 +50,8 @@ A curator is a directory with a `stet.toml` and any program. `stet init` makes o
 - **Try as much as you like on your own machine.** `stet run` is the leaderboard's own
   harness: nothing is uploaded and nothing is counted. Practice rounds never change, and
   every official round can be replayed once it has settled (`stet run --round <id>`).
-  A practice round's exam is the generated skills and, once you have run `stet harvest`,
+  A practice round's exam uses an openly licensed CC-BY-SA Wikipedia practice pack out of the
+  box (both twin-context comprehension and reasoning) and, once you have run `stet harvest`,
   the same kinds of recent writing an official exam has. A replay sits what its round published (see [the exam](#the-exam)), so its score
   differs from the round's.
 - Officially you may have 3 entries in play at once, waiting or qualifying. How often you
@@ -81,8 +84,8 @@ nothing is waiting.
    announced less than six minutes ahead, and a draw that is moved is announced again the
    same way, for a time no round was ever announced for before.
 2. **Draw.** The seed is `sha256(season, round number, drand round, drand randomness,
-   crawl)`. It picks the corpus files, the order of the documents, the exam's generated
-   questions and the student's initial weights. Nobody can know or steer any of that beforehand,
+   crawl)`. It picks the corpus files, the order of the documents, which three fresh hours
+   make the exam, and the student's initial weights. Nobody can know or steer any of that beforehand,
    organisers included. Draws happen only at fixed ten-minute marks, so the organisers
    cannot pick a favourable drand round either.
 3. **Edit.** Two volunteers each run every curator, in a sandbox, with a time limit. Each
@@ -109,17 +112,17 @@ entries takes longer, and the next is drawn when it has settled.
 
 Rounds never overlap. If one is still being graded when the next is due, the next is
 drawn at the first ten-minute mark that is at least six minutes after it settles. A round
-takes as long as its curators and its trainings do: typically 2.5 to 4.0 hours from draw
-to settlement on a 6-GPU fleet (each standard training takes ~35 minutes on an RTX 5090
-or ~47 minutes on an RTX 4090, and baseline graders train two passes). Season 1's rounds
-took two and a half hours, two of them waiting for the exam.
+takes as long as its curators and its trainings do: typically 1.5 to 2.5 hours from draw
+to settlement on a 6-GPU fleet (each standard training takes ~20 minutes on an RTX 5090,
+~29 minutes on an RTX 4090, or ~52 minutes on an RTX 3090, and baseline graders train two
+passes). Season 1's rounds took two and a half hours, two of them waiting for the exam.
 
 ## The corpus
 
 The newest published Common Crawl crawl at the time of the draw, as full-page text: every
 language, with menus, cookie banners, footers, shop listings, spam and duplicates
 alongside real prose. A round's corpus is a seeded sample of it: at the official scale
-about 500,000 pages and 3.8 GB (~1.1B tokens), roughly 34× more text than the 32.8M-token
+about 500,000 pages and 3.8 GB (~1.1B tokens), roughly 17× more text than the 65.5M-token
 student budget. Micro and large rounds keep a similar excess of raw text over the student
 budget. Your curator has to choose.
 
@@ -161,9 +164,10 @@ One line per output document. Line order is training order: the trainer does not
 
 ## The exam
 
-**Half of the score is fresh twin-context comprehension from writing people published. Half
-is generated multilingual skills.** There is zero raw web perplexity. Every part is measured
-in unified **bits per byte**. Inside each group, every row below counts the same.
+**100% fresh. Half of the score is fresh twin-context comprehension from writing people
+published. Half is fresh harvest-derived reasoning from those exact same three hours.** There
+are zero static benchmarks, zero synthetic templates, and zero raw web perplexity. Every part
+is measured in unified **bits per byte**. Inside each group, every row below counts the same.
 
 | | | What it asks | Where it comes from |
 |---|---|---|---|
@@ -171,13 +175,9 @@ in unified **bits per byte**. Inside each group, every row below counts the same
 | | News | Same continuation under real vs wrong openings of fresh news reports (same source & language) | Common Crawl's news crawl |
 | | Technical | Same continuation under real vs wrong openings of issues, PRs, release notes and patches | GitHub, the kernel's mailing lists |
 | | Conversation | Same continuation under real vs wrong openings of posts and replies | Hacker News, Lemmy, forums, Bluesky, Mastodon, Wikipedia's talk pages |
-| Skills (50%) | Agents | What a tool says back, in a session at a shell | Generated |
-| | Reading | Taking an answer, or a new rule, from the context | Generated |
-| | Logic | What follows from what is given | Generated |
-| | Grammar | The right sentence of two | Generated |
-| | Numbers | Arithmetic, units, word problems and algebra, each after a few worked examples | Generated |
-| | Programs | What a small algorithm returns (a list sorted, a letter counted), after a few worked examples | Generated |
-| | Knowledge | Facts the web knows in ten languages (strictly disjoint from the SFT probe) | Generated: the seed picks from a public list of facts |
+| Reasoning (50%) | Explain | Multi-sentence causal and mechanism explanation in the excerpt's own language | Deterministic (`temp=0`, pinned `Qwen3-8B`) synthesis from the same 3 fresh hours |
+| | Infer | Multi-sentence analytical implications and trade-offs in the excerpt's own language | Deterministic synthesis from the same 3 fresh hours |
+| | Synthesis | Declarative prose synthesis of the excerpt's main point and rationale (zero Q/A syntax) | Deterministic synthesis from the same 3 fresh hours |
 
 **The writing** is what people published in three hours of the day before the draw. The
 examiner harvests every hour of the clock an hour after it ends, keeping a sample chosen
@@ -193,19 +193,17 @@ Inside a kind of writing, every language gets its share of the round's corpus, a
 sources take turns. No source needs a key or an account. Writing the round's corpus already
 holds is dropped from the exam.
 
-**The skills** are made from the round's seed, so nobody can know them before the draw
-either. Every answer but a fact follows from what the item itself shows. The facts are
-well-known ones (a country's capital, who wrote a book), which the seed picks from a public
-list: a student knows them only from pages that say them.
+**The reasoning items** (`explain`, `infer`, `synthesis`) are derived deterministically from
+a stratified sample of those exact same three fresh hours at the draw using pinned greedy
+decoding (`Qwen/Qwen3-8B`, `temperature=0`), six varied natural wrappers (`synthesis` has no
+`?` or `Q:/A:` markers), and a `<50%` 5-gram verbatim-copying filter. Any item whose excerpt
+or response matches the round's training corpus is dropped.
 
 **Everything on the exam counts.** The season names every part of the exam: those in the
 table, and no other. Each part is validated before the season for multi-seed stability,
-resistance to surface style mimicry, and agreement with published pretraining recipes. A part
-is in the score or it is not on the exam at all: nothing is sat that the score leaves out,
-and nothing on the exam counts for nothing. Numbers and programs are asked only after a few
-worked examples of the same task. Asked cold, a student this size is too near chance for
-curators to differ: Season 1 counted such questions, and two trainings of the same data
-disagreed about them more than two curators did.
+resistance to surface style mimicry and QA-spam, and agreement with 1B pretraining rankings
+(DataDecide). A part is in the score or it is not on the exam at all: nothing is sat that
+the score leaves out, and nothing on the exam counts for nothing.
 
 **The score of an item** is measured in **bits per byte** everywhere:
 - on fresh comprehension (`kind="context"`), each article is split cleanly on a sentence or
@@ -213,23 +211,23 @@ disagreed about them more than two curators did.
   scored under its real opening minus the mean of up to three length-matched wrong openings from
   the exact same source, language, and boundary class — so surface style and unconditional
   passage ease cancel identically;
-- on generated skills (`kind="answer"` and `grammar` pairs), how likely the student finds the
-  right answer given its question (or the right sentence minus the broken one).
-An item's bits are never put over fewer than 16 bytes, so a one-word answer counts for less
-than a sentence. The exam's writing has the white space of the crawl's own text: one space
+- on fresh harvest-derived reasoning (`kind="answer"`), how likely the student finds the
+  multi-sentence explanation, inference, or synthesis given the excerpt and prompt.
+An item's bits are never put over fewer than 16 bytes, so a short answer never dominates a
+paragraph. The exam's writing has the white space of the crawl's own text: one space
 between words, one line end between lines, no empty lines and no tabs.
 
 **The exam's score** is half the mean of the comprehension kinds and half the mean of the
-skills. A kind missing from a round gives its share to the others of its own group. Inside
-each, every language counts by its share of the round's corpus, then every format. No share
-rests on one or two items: a language or a format with fewer than eight items counts in
+reasoning kinds. A kind missing from a round gives its share to the others of its own group.
+Inside each, every language counts by its share of the round's corpus, then every format. No
+share rests on one or two items: a language or a format with fewer than eight items counts in
 proportion, and a part's small languages are measured together. A gain on an item is clipped
 to a few robust widths, so that no handful of items decides anything.
 
-When the round settles, its exam is published: every generated question and Wikipedia's
-text whole, and for every other source the item's source, its id there and the item's
-hash. Anyone can check those items at the source. So is every student's score on every
-item (`/api/v1/rounds/<id>/scores`): anyone can work every gain out again.
+When the round settles, its exam is published: openly licensed Wikipedia items whole, and for
+every other source the item's source, its id there and the item's hash. Anyone can check
+those items at the source. So is every student's score on every item
+(`/api/v1/rounds/<id>/scores`): anyone can work every gain out again.
 
 **Nobody knows it in advance**, the organisers included. So no exam is kept secret, and
 none needs to be. Until the round settles, its items are served only to the machines
@@ -239,16 +237,18 @@ grading it.
 
 | | Architecture | Context | Training budget | Edit limit | SFT probe |
 |---|---|---|---|---|---|
-| nano | `Qwen3-0.6B-Base` (28 × 1024, top half reset) | 1024 | 1.0M tokens | 120 s | 8 steps |
-| micro | `Qwen3-0.6B-Base` (28 × 1024, top half reset) | 1024 | 8.4M tokens | 300 s | 16 steps |
-| **standard (official)** | `Qwen3-0.6B-Base` (28 × 1024, top half reset) | 1024 | 32.8M tokens | 1,200 s | 32 steps |
-| large (finals) | `Qwen3-0.6B-Base` (28 × 1024, top half reset) | 1024 | 131M tokens | 4,800 s | 32 steps |
+| nano | `ERNIE-4.5-0.3B-Base-PT` (18 × 1024, bottom half frozen, top half reset) | 1024 | 1.0M tokens | 120 s | 8 steps |
+| micro | `ERNIE-4.5-0.3B-Base-PT` (18 × 1024, bottom half frozen, top half reset) | 1024 | 8.4M tokens | 300 s | 16 steps |
+| **standard (official)** | `ERNIE-4.5-0.3B-Base-PT` (18 × 1024, bottom half frozen, top half reset) | 1024 | 65.5M tokens | 1,200 s | 32 steps |
+| large (finals) | `ERNIE-4.5-0.3B-Base-PT` (18 × 1024, bottom half frozen, top half reset) | 1024 | 131M tokens | 4,800 s | 32 steps |
 
-Pinned `Qwen/Qwen3-0.6B-Base` weights (151,936-token multilingual vocabulary) with its upper
-half of transformer layers deterministically re-initialized from the round's seed, trained
-without shuffling in the curator's exact script order using AdamW with cosine decay, then
-given a short fixed multilingual fine-tuning probe (disjoint from the exam's knowledge
-facts, with every scored exam question and worked shot excluded) so the student's acquired representations read out cleanly on comprehension and skill tasks.
+Pinned `baidu/ERNIE-4.5-0.3B-Base-PT` weights (Apache 2.0, 103,424-token multilingual
+vocabulary) with its embeddings and lower 9 transformer layers frozen and its upper 9 layers
+deterministically re-initialized from the round's seed (`127.4M` trainable parameters; peak
+grading VRAM ≤10 GiB, fitting 12 GB+ GPUs). Trained without shuffling in the curator's exact
+script order using AdamW with cosine decay, then given a short fixed 1-epoch multilingual
+fine-tuning probe (512 open, commercial-permissive examples across 11 languages) so the
+student's acquired representations read out cleanly on comprehension and reasoning tasks.
 Training is counted in tokens, never seconds, so every machine does the same work.
 
 ## The curator's machine

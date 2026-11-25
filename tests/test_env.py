@@ -172,14 +172,14 @@ def test_the_documents_and_the_site_name_the_pillars_the_season_names(season):
     """The exam's pillars are written out by hand in the rules, the brief and on the site. When
     the season's list changes, this says where."""
     pillars = season.raw["exam"]["pillars"]
-    count = {4: "four", 7: "seven", 8: "eight"}
-    comp, skills = (count[sum(v["group"] == g for v in pillars.values())] for g in ("comprehension", "skills"))
+    count = {3: "three", 4: "four", 7: "seven", 8: "eight"}
+    comp, reas = (count[sum(v["group"] == g for v in pillars.values())] for g in ("comprehension", "reasoning"))
     rules, brief, faq, design = (words(n) for n in ("docs/RULES.md", "src/stet/templates/AGENTS.md", "docs/FAQ.md", "docs/DESIGN.md"))
     home, glossary = (words(f"server/web/templates/{n}.html") for n in ("home", "glossary"))
-    assert f"{comp} comprehension kinds and {skills} skills" in faq and f"{comp} kinds that count the same" in design
-    assert f"skills, in {skills} kinds that count the same" in design
-    assert f"{comp.capitalize()} kinds, each counting the same" in home and f"{skills.capitalize()} skills, each counting the same" in home
-    assert f"{comp} comprehension kinds (" in glossary and f"and {skills} skills (" in glossary
+    assert f"{comp} comprehension kinds and {reas} reasoning kinds" in faq and f"{comp} kinds that count the same" in design
+    assert f"reasoning, in {reas} kinds that count the same" in design
+    assert f"{comp.capitalize()} kinds, each counting the same" in home and f"{reas.capitalize()} reasoning kinds, each counting the same" in home
+    assert f"{comp} comprehension kinds (" in glossary and f"and {reas} reasoning kinds (" in glossary
     for name, pillar in pillars.items():
         assert f"| {name.capitalize()} |" in rules and f"| `{name}` | {pillar['group']} |" in brief, name
         assert f"<b>{name}</b>" in home and name in glossary and name in design, name

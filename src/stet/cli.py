@@ -161,7 +161,9 @@ def report(out: Out, result: dict, base: dict | None, season) -> None:
     if base and "gain" in result:
         out.line("", "          " + " · ".join(f"{k} {v:+.3f}" for k, v in (result.get("pillars") or {}).items()))
         groups = (season.raw.get("exam") or {}).get("groups") or {}
-        if "comprehension" in groups:
+        if "comprehension" in groups and "reasoning" in groups:
+            text = out.bold(f"{result['gain']:+.4f}") + " (fresh twin-context comprehension and reasoning, of those above)"
+        elif "comprehension" in groups:
             text = out.bold(f"{result['gain']:+.4f}") + " (fresh twin-context comprehension and skills, of those above)"
         else:
             text = out.bold(f"{result['gain']:+.4f}") + " bits per byte: writing three quarters, skills one, of those above"

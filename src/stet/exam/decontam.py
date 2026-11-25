@@ -25,8 +25,14 @@ from .items import Item
 
 def scored_texts(it: Item) -> list[str]:
     """Every independent text span whose familiarity in the training corpus would bias this item's score."""
+    from .aggregate import REASONING_KINDS
+
     if it.kind == "context":
         return [t for t in (it.ctx, it.cont, *it.wrongs) if t]
+    if it.kind == "answer" and it.source.split(":", 1)[0] in REASONING_KINDS:
+        # Fresh harvest-derived reasoning items embed an excerpt in `ctx`; drop the item if
+        # either the source excerpt or the response appears in the round's training corpus.
+        return [t for t in (it.ctx, it.cont) if t]
     t = {"passage": it.text, "answer": it.cont}.get(it.kind, "")
     return [t] if t else []
 

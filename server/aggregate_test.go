@@ -117,26 +117,24 @@ func TestGroupsKeepTheirShares(t *testing.T) {
 	}
 	add("reference", "reference", 0.4)
 	add("news", "news", 0.2)
-	add("agents", "agent", -1)
+	add("explain", "explain", -1)
 	score, pillars, err := plan.ScoreItems(items, gains, map[string]float64{"en": 43})
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := plan.Groups["comprehension"]*(0.4+0.2)/2 + plan.Groups["skills"]*-1
+	want := plan.Groups["comprehension"]*(0.4+0.2)/2 + plan.Groups["reasoning"]*-1
 	if math.Abs(score-want) > 1e-12 || len(pillars) != 3 {
 		t.Fatalf("score %v (want %v), pillars %v", score, want, pillars)
 	}
-	if plan.pillarOf("agent") != "agents" || plan.pillarOf("social") != "conversation" || plan.pillarOf("no such part") != "" {
+	if plan.pillarOf("explain") != "explain" || plan.pillarOf("social") != "conversation" || plan.pillarOf("no such part") != "" {
 		t.Fatal("the season's parts are not under its pillars")
 	}
 }
 
-// The season says which of its parts are generated, and every one of them is a part it names.
+// The season says which of its parts are generated, and every one of them is a part it names
+// (Season 3 is 100% fresh so Generated is empty).
 func TestTheSeasonsGeneratedPartsAreParts(t *testing.T) {
 	plan := &loadSeason().Exam
-	if len(plan.Generated) == 0 {
-		t.Fatal("the season names no generated part")
-	}
 	for _, part := range plan.Generated {
 		if plan.pillarOf(part) == "" {
 			t.Errorf("%s is generated, and is no part of the exam", part)
@@ -147,7 +145,7 @@ func TestTheSeasonsGeneratedPartsAreParts(t *testing.T) {
 // What cannot be scored is refused, not scored as nothing.
 func TestTheScoreItemsRefusesWhatItCannotScore(t *testing.T) {
 	plan := &loadSeason().Exam
-	one := []ItemInfo{{"logic", "logic", "en", "prose/answer"}}
+	one := []ItemInfo{{"explain", "explain", "en", "prose/answer"}}
 	shares := map[string]float64{"en": 43}
 	for name, call := range map[string]func() error{
 		"more gains than items": func() error { _, _, err := plan.ScoreItems(one, []float64{0.1, 0.2}, shares); return err },
@@ -155,15 +153,15 @@ func TestTheScoreItemsRefusesWhatItCannotScore(t *testing.T) {
 		"no items":              func() error { _, _, err := plan.ScoreItems(nil, nil, shares); return err },
 		"no shares":             func() error { _, _, err := plan.ScoreItems(one, []float64{0.1}, nil); return err },
 		"a pillar the season does not have": func() error {
-			_, _, err := plan.ScoreItems([]ItemInfo{{"reasoning", "logic", "en", "prose/answer"}}, []float64{0.1}, shares)
+			_, _, err := plan.ScoreItems([]ItemInfo{{"skills", "explain", "en", "prose/answer"}}, []float64{0.1}, shares)
 			return err
 		},
 		"a part the season does not name": func() error {
-			_, _, err := plan.ScoreItems([]ItemInfo{{"logic", "riddles", "en", "prose/answer"}}, []float64{0.1}, shares)
+			_, _, err := plan.ScoreItems([]ItemInfo{{"explain", "riddles", "en", "prose/answer"}}, []float64{0.1}, shares)
 			return err
 		},
 		"a part under another part's pillar": func() error {
-			_, _, err := plan.ScoreItems([]ItemInfo{{"logic", "agent", "en", "logs/answer"}}, []float64{0.1}, shares)
+			_, _, err := plan.ScoreItems([]ItemInfo{{"explain", "infer", "en", "prose/answer"}}, []float64{0.1}, shares)
 			return err
 		},
 	} {
@@ -172,7 +170,7 @@ func TestTheScoreItemsRefusesWhatItCannotScore(t *testing.T) {
 		}
 	}
 	// One item, alone in its stratum and its language: an eighth of a full cell, and all there is.
-	if s, p, err := plan.ScoreItems(one, []float64{0.25}, shares); err != nil || s != 0.25 || p["logic"] != 0.25 {
+	if s, p, err := plan.ScoreItems(one, []float64{0.25}, shares); err != nil || s != 0.25 || p["explain"] != 0.25 {
 		t.Fatalf("one item: %v %v %v", s, p, err)
 	}
 }

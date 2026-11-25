@@ -61,6 +61,47 @@ WRITING = re.compile(rf"(?:[^\W\d_]|\s|[{re.escape(MARKS)}])+")
 SENTENCE_END = re.compile(r"[.!?…؟۔।][\"')\]”’»]?\s|[。！？｡]|[{};]\n")
 
 
+def _detect_script_group(text: str) -> str:
+    """Fast, zero-dependency language/script bucket so English-prompted quality scores are
+    quantile-normalized within each script/language family rather than starving CJK/Cyrillic/Arabic."""
+    sample = text[:1200]
+    counts: dict[str, int] = {}
+    for ch in sample:
+        o = ord(ch)
+        if 0x0041 <= o <= 0x024F:
+            counts["latin"] = counts.get("latin", 0) + 1
+        elif 0x0400 <= o <= 0x052F:
+            counts["cyrillic"] = counts.get("cyrillic", 0) + 1
+        elif 0x0600 <= o <= 0x06FF or 0x0750 <= o <= 0x077F:
+            counts["arabic"] = counts.get("arabic", 0) + 1
+        elif 0xAC00 <= o <= 0xD7AF or 0x1100 <= o <= 0x11FF:
+            counts["hangul"] = counts.get("hangul", 0) + 1
+        elif 0x3040 <= o <= 0x30FF:
+            counts["kana"] = counts.get("kana", 0) + 1
+        elif 0x4E00 <= o <= 0x9FFF:
+            counts["han"] = counts.get("han", 0) + 1
+        elif 0x0900 <= o <= 0x097F:
+            counts["devanagari"] = counts.get("devanagari", 0) + 1
+        elif 0x0E00 <= o <= 0x0E7F:
+            counts["thai"] = counts.get("thai", 0) + 1
+        elif 0x0590 <= o <= 0x05FF:
+            counts["hebrew"] = counts.get("hebrew", 0) + 1
+        elif 0x0370 <= o <= 0x03FF:
+            counts["greek"] = counts.get("greek", 0) + 1
+    if not counts:
+        return "other"
+    # Japanese contains both kana and han; recognize kana presence as Japanese so it doesn't merge into Chinese.
+    if counts.get("kana", 0) >= 8:
+        return "ja"
+    top = max(counts.items(), key=lambda kv: kv[1])[0]
+    if top == "latin":
+        low = " " + sample.lower() + " "
+        if sum(low.count(w) for w in (" the ", " and ", " of ", " to ", " in ")) >= 4:
+            return "en"
+        return "latin_other"
+    return top
+
+
 def _prefilter(i: int, text: str):
     """Cheap multilingual pass run in parallel across CPU cores."""
     n_chars = len(text)
@@ -86,28 +127,29 @@ def _prefilter(i: int, text: str):
     uniq_lines = len(set(lines)) / len(lines)
     prior = round(uniq_lines + min(1.0, len(raw) / 4000) - short_frac, 3)
     head = text[:HEAD_CHARS].strip()
-    return prior, key, len(raw), head
+    lang_grp = _detect_script_group(sample)
+    return prior, key, len(raw), head, lang_grp
 
 
-def collect_candidates(task: Task) -> list[tuple[float, int, int, str]]:
-    """Return (prior, doc_id, size_bytes, excerpt) deduplicated across all languages."""
+def collect_candidates(task: Task) -> list[tuple[float, int, int, str, str]]:
+    """Return (prior, doc_id, size_bytes, excerpt, lang_group) deduplicated across all languages."""
     budget_bytes = task.train_tokens * BYTES_PER_TOKEN
     target_bytes = budget_bytes * CANDIDATE_OVERPROVISION
     seen: set[bytes] = set()
-    kept: list[tuple[float, int, int, str]] = []
+    kept: list[tuple[float, int, int, str, str]] = []
     for i, res in task.map(_prefilter):
         if task.time_left() < RESERVE_SECONDS * 2:
             break
         if res is None:
             continue
-        prior, key, size, head = res
+        prior, key, size, head, lang_grp = res
         if key in seen:
             continue
         seen.add(key)
-        kept.append((prior, i, size, head))
+        kept.append((prior, i, size, head, lang_grp))
     kept.sort(key=lambda t: (-t[0], t[1]))
     # Cap candidates to CANDIDATE_OVERPROVISION × the byte budget (with a sensible minimum for small scales).
-    out: list[tuple[float, int, int, str]] = []
+    out: list[tuple[float, int, int, str, str]] = []
     total = 0
     cap = max(target_bytes, 2_000_000)
     for item in kept:
@@ -118,14 +160,55 @@ def collect_candidates(task: Task) -> list[tuple[float, int, int, str]]:
     return out
 
 
-def build_script(task: Task, cands: list[tuple[float, int, int, str]], scores: dict[int, float]) -> list[int]:
+def _cand_lang(rec: tuple) -> str:
+    return rec[4] if len(rec) >= 5 else _detect_script_group(rec[3])
+
+
+def _quantile_normalize_by_lang(
+    cands: list[tuple], scores: dict[int, float]
+) -> dict[int, float]:
+    """Convert raw 1-5 ratings into within-language percentile ranks [0, 1] so English-rubric
+    score shifts in Qwen3-0.6B never starve Korean, Russian, Arabic, or Japanese during selection
+    and cooldown curriculum ordering."""
+    by_grp: dict[str, list[tuple[float, float, int]]] = {}
+    all_items: list[tuple[float, float, int]] = []
+    for rec in cands:
+        prior, doc_id = rec[0], rec[1]
+        if doc_id not in scores:
+            continue
+        lang_grp = _cand_lang(rec)
+        item = (scores[doc_id], prior, doc_id)
+        by_grp.setdefault(lang_grp, []).append(item)
+        all_items.append(item)
+    if not all_items:
+        return {}
+    # Global percentile fallback for very small buckets (<20 rated docs)
+    all_items.sort(key=lambda t: (t[0], t[1], -t[2]))
+    n_all = len(all_items)
+    global_q = {doc_id: (idx + 0.5) / n_all for idx, (_, _, doc_id) in enumerate(all_items)}
+
+    norm: dict[int, float] = {}
+    for recs in by_grp.values():
+        n = len(recs)
+        if n < 20:
+            for _, _, doc_id in recs:
+                norm[doc_id] = round(global_q[doc_id], 4)
+            continue
+        recs.sort(key=lambda t: (t[0], t[1], -t[2]))
+        for idx, (_, _, doc_id) in enumerate(recs):
+            norm[doc_id] = round((idx + 0.5) / n, 4)
+    return norm
+
+
+def build_script(task: Task, cands: list[tuple], scores: dict[int, float]) -> list[int]:
     """Select documents up to the token budget; order higher-rated documents last (cooldown)."""
     budget_bytes = task.train_tokens * BYTES_PER_TOKEN
     if not scores:
         # Fallback before GPU scoring: shuffled high-prior multilingual docs.
         chosen: list[int] = []
         used = 0
-        for _, doc_id, size, _ in cands:
+        for rec in cands:
+            doc_id, size = rec[1], rec[2]
             if used >= budget_bytes:
                 break
             chosen.append(doc_id)
@@ -133,38 +216,41 @@ def build_script(task: Task, cands: list[tuple[float, int, int, str]], scores: d
         random.Random(0).shuffle(chosen)
         return chosen
 
+    q_scores = _quantile_normalize_by_lang(cands, scores)
     ranked = sorted(
-        [(scores[doc_id], prior, doc_id, size) for prior, doc_id, size, _ in cands if doc_id in scores],
-        key=lambda t: (-t[0], -t[1], t[2]),
+        [(q_scores[rec[1]], scores[rec[1]], rec[0], rec[1], rec[2]) for rec in cands if rec[1] in q_scores],
+        key=lambda t: (-t[0], -t[1], -t[2], t[3]),
     )
-    selected: list[tuple[float, int]] = []
+    selected: list[tuple[float, float, int]] = []
     used = 0
-    for q, _, doc_id, size in ranked:
+    for q, _, prior, doc_id, size in ranked:
         if used >= budget_bytes:
             break
-        selected.append((q, doc_id))
+        selected.append((q, prior, doc_id))
         used += size
     if used < budget_bytes:
-        picked = {doc_id for _, doc_id in selected}
-        for _, doc_id, size, _ in cands:
+        picked = {doc_id for _, _, doc_id in selected}
+        for rec in cands:
+            prior, doc_id, size = rec[0], rec[1], rec[2]
             if used >= budget_bytes:
                 break
             if doc_id not in picked:
-                selected.append((2.5, doc_id))
+                selected.append((0.5, prior, doc_id))
                 used += size
-    # Curriculum ordering: split into 4 quality bands, shuffle inside each band, and place
-    # the highest-rated band last so the student sees the cleanest text during LR cooldown.
-    selected.sort(key=lambda t: (t[0], t[1]))
+    # Curriculum ordering: split into 4 quality bands (balanced across every language thanks to
+    # per-language quantile normalization), shuffle inside each band, and place the highest-rated
+    # band last so the student sees the cleanest multilingual text during LR cooldown.
+    selected.sort(key=lambda t: (t[0], t[1], t[2]))
     n = len(selected)
     if n <= 8:
-        return [doc_id for _, doc_id in selected]
+        return [doc_id for _, _, doc_id in selected]
     rng = random.Random(0)
     out: list[int] = []
     bands = 4
     for b in range(bands):
         lo = (b * n) // bands
         hi = ((b + 1) * n) // bands
-        chunk = [doc_id for _, doc_id in selected[lo:hi]]
+        chunk = [doc_id for _, _, doc_id in selected[lo:hi]]
         rng.shuffle(chunk)
         out.extend(chunk)
     return out
@@ -226,7 +312,7 @@ def _vllm_gpu_memory_utilization(allow_gb: float, total_gb: float, *, headroom_g
     return cap
 
 
-def _score_vllm(task: Task, where: str, cands: list[tuple[float, int, int, str]], scores: dict[int, float]) -> bool:
+def _score_vllm(task: Task, where: str, cands: list[tuple[float, int, int, str, str]], scores: dict[int, float]) -> bool:
     """Fast path on NVIDIA Linux using vLLM with automatic prefix caching.
 
     Returns True if vLLM scored candidates, or False so the caller can fall back to
@@ -281,11 +367,12 @@ def _score_vllm(task: Task, where: str, cands: list[tuple[float, int, int, str]]
                 return bool(scores)
             part = cands[start : start + batch_size]
             prompts = [
-                {"prompt_token_ids": _build_prompt_ids(tok, head, MAX_PROMPT_TOKENS, prefix_ids, suffix_ids)}
-                for _, _, _, head in part
+                {"prompt_token_ids": _build_prompt_ids(tok, rec[3], MAX_PROMPT_TOKENS, prefix_ids, suffix_ids)}
+                for rec in part
             ]
             outputs = llm.generate(prompts, params, use_tqdm=False)
-            for (_, doc_id, _, _), out in zip(part, outputs, strict=True):
+            for rec, out in zip(part, outputs, strict=True):
+                doc_id = rec[1]
                 step_lps = out.outputs[0].logprobs[0] if out.outputs and out.outputs[0].logprobs else {}
                 lps = _extract_logprobs(step_lps)
                 scores[doc_id] = _expected_from_logprobs(lps, digit_ids)
@@ -298,7 +385,7 @@ def _score_vllm(task: Task, where: str, cands: list[tuple[float, int, int, str]]
         return bool(scores)
 
 
-def _score_transformers(task: Task, where: str, cands: list[tuple[float, int, int, str]], scores: dict[int, float]) -> None:
+def _score_transformers(task: Task, where: str, cands: list[tuple[float, int, int, str, str]], scores: dict[int, float]) -> None:
     """Portable batched PyTorch/transformers path (AMD ROCm, macOS, or NVIDIA fallback)."""
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -323,7 +410,7 @@ def _score_transformers(task: Task, where: str, cands: list[tuple[float, int, in
     with torch.inference_mode():
         for start in range(0, len(cands), chunk):
             part = cands[start : start + chunk]
-            enc = [_build_prompt_ids(tok, head, MAX_PROMPT_TOKENS, prefix_ids, suffix_ids) for _, _, _, head in part]
+            enc = [_build_prompt_ids(tok, rec[3], MAX_PROMPT_TOKENS, prefix_ids, suffix_ids) for rec in part]
             order = sorted(range(len(part)), key=lambda j: (len(enc[j]), part[j][1]))
             for b in range(0, len(order), batch_size):
                 if task.time_left() < RESERVE_SECONDS:

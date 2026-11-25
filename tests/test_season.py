@@ -18,37 +18,36 @@ def test_the_season_is_the_exam_at_the_standard_scale():
 
     s3 = load_season()
     assert s3.id == CURRENT_SEASON == "s3" and s3.official_scale == "standard" and "heldout_exam" not in s3.raw
-    assert s3.exam_sources == ["reference", "news", "technical", "conversation",
-                               "agents", "reading", "logic", "grammar", "numbers", "programs", "knowledge"]
-    assert s3.raw["exam"]["groups"] == {"comprehension": 0.5, "skills": 0.5} and s3.answer_floor_bytes == 16
+    assert s3.exam_sources == ["reference", "news", "technical", "conversation", "explain", "infer", "synthesis"]
+    assert s3.raw["exam"]["groups"] == {"comprehension": 0.5, "reasoning": 0.5} and s3.answer_floor_bytes == 16
     assert s3.raw["exam"]["fresh"]["mode"] == "context"
-    # What the score is made of, by hand: four comprehension kinds and seven skills, and each one's parts.
+    # What the score is made of, by hand: four comprehension kinds and three reasoning kinds.
     from stet.exam.aggregate import plan_of
 
     made_of = {
         "reference": ("comprehension", ["reference"]), "news": ("comprehension", ["news"]), "technical": ("comprehension", ["technical"]),
         "conversation": ("comprehension", ["discussion", "social"]),
-        "agents": ("skills", ["agent"]), "reading": ("skills", ["context"]),
-        "logic": ("skills", ["logic"]), "grammar": ("skills", ["grammar"]),
-        "numbers": ("skills", ["arith-shots", "units-shots", "word-shots", "algebra-shots"]),
-        "programs": ("skills", ["algo-shots"]), "knowledge": ("skills", ["knowledge-even"]),
+        "explain": ("reasoning", ["explain"]), "infer": ("reasoning", ["infer"]), "synthesis": ("reasoning", ["synthesis"]),
     }
     assert {p: (v["group"], v["parts"]) for p, v in s3.raw["exam"]["pillars"].items()} == made_of
     weights = plan_of(s3).weights(made_of)
-    assert weights == pytest.approx({p: 0.125 if group == "comprehension" else 0.5 / 7 for p, (group, _) in made_of.items()})
-    assert s3.raw["exam"]["more"] == {"agent": 4, "context": 2, "logic": 2, "grammar": 3} and s3.raw["exam"]["per_corner"] == 2
+    assert weights == pytest.approx({p: 0.125 if group == "comprehension" else 0.5 / 3 for p, (group, _) in made_of.items()})
+    assert s3.raw["exam"]["more"] == {} and s3.raw["exam"]["per_corner"] == 0
     assert s3.min_copy_bytes == 64  # the shortest copy a script may hold; of text of its own it holds none
     assert s3.raw["exam"]["generator_version"] == gen.VERSION
     assert len(s3.digest) == 64 and s3.digest == load_season("s3").digest
-    # the pinned HF student/tokenizer hashes are present and valid sha256 digests, and facts hash matches disk
+    # The pinned HF student/tokenizer hashes, SFT pack, and practice pack hashes all match disk.
     import hashlib
     from importlib import resources
 
     assert s3.raw["tokenizer"]["kind"] == "hf" and len(s3.raw["tokenizer"]["sha256"]) == 64
     assert s3.raw["student"]["kind"] == "hf_topreset" and s3.raw["student"]["reset_frac"] == 0.5
+    assert s3.raw["student"]["freeze_bottom"] is True
     assert all(len(f["sha256"]) == 64 for f in s3.raw["student"]["files"])
-    facts = resources.files("stet.exam").joinpath("data", s3.raw["exam"]["facts"]["file"]).read_bytes()
-    assert hashlib.sha256(facts).hexdigest() == s3.raw["exam"]["facts"]["sha256"]
+    sft_pack = resources.files("stet.exam").joinpath("data", s3.raw["sft"]["pack"]).read_bytes()
+    assert hashlib.sha256(sft_pack).hexdigest() == s3.raw["sft"]["pack_sha256"]
+    prac_pack = resources.files("stet.exam").joinpath("data", s3.raw["exam"]["practice_pack"]["file"]).read_bytes()
+    assert hashlib.sha256(prac_pack).hexdigest() == s3.raw["exam"]["practice_pack"]["sha256"]
     # Season 2's bundled tokenizer still checks out for archival / replay compatibility.
     s2 = load_season("s2")
     tok = resources.files("stet.seasons").joinpath(s2.raw["tokenizer"]["file"]).read_bytes()

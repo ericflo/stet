@@ -160,7 +160,7 @@ func flags(name string, o *Options) *flag.FlagSet {
 	fs.StringVar(&o.MinCUDA, "min-cuda", "13.0", "the oldest CUDA the host's driver may have: the season's PyTorch is built for CUDA 13")
 	fs.IntVar(&o.MinRAM, "min-ram", 24, "host memory a GPU, GB: the season's floor for a machine that runs curators (a curator is given 20)")
 	fs.IntVar(&o.MinCPU, "min-cpus", 6, "host vCPUs a GPU: the season's floor for a machine that runs curators")
-	fs.IntVar(&o.MinGPUMemory, "min-gpu-memory", 16, "GPU memory, GB: floor for grading the Season 3 0.6B student")
+	fs.IntVar(&o.MinGPUMemory, "min-gpu-memory", 12, "GPU memory, GB: floor for grading the Season 3 ERNIE-4.5-0.3B student (<=10 GiB VRAM)")
 	fs.IntVar(&o.MinCuratorGPUMemory, "min-curator-gpu-memory", 24, "GPU memory, GB: floor for machines rented to run curators (a curator is given 22)")
 	fs.IntVar(&o.Idle, "idle", 20, "minutes a machine waits with nothing to do before it ends itself")
 	noEdits := fs.Bool("no-edits", false, "rent machines that only grade, and leave curators to the organisers' own machines")

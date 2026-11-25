@@ -25,9 +25,9 @@ import (
 // learned from the machines this service rents. Until a kind has been seen, its pass is a
 // 3090's over its speed in the table (speed.go).
 
-// passOn3090 is a training pass on an RTX 3090 at the standard scale (Season 3 Qwen3-0.6B-Base,
-// deterministic FP32 master weights + activation checkpointing: measured ~35 min on RTX 5090 at speed 2.5).
-const passOn3090 = 85 * time.Minute
+// passOn3090 is a training pass on an RTX 3090 at the standard scale (Season 3 ERNIE-4.5-0.3B-Base-PT,
+// frozen embeddings + bottom 9 layers, 65.5M tokens: measured 51.5 min on RTX 3090, 20.3 min on RTX 5090 at speed 2.5).
+const passOn3090 = 52 * time.Minute
 
 // Between booting and training, and after: fetching the round's corpus and making the two
 // scripts before it trains, and sitting the exam once it has.

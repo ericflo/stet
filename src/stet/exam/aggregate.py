@@ -56,6 +56,8 @@ SOURCE_KIND = {
     "wikipedia-talk": "discussion", "hackernews": "discussion", "lemmy": "discussion", "github-comment": "discussion",
     "bluesky-reply": "discussion", "mastodon-reply": "discussion", "discourse": "discussion",
 }
+# Fresh harvest-derived comprehension & reasoning kinds (Season 3+, exam/fresh/reason.py).
+REASONING_KINDS = ("explain", "infer", "synthesis")
 CODE = "code"  # every programming language, as one language
 
 
@@ -104,7 +106,7 @@ def plan_of(season) -> Plan:
     if set(pillars.values()) != set(plan.groups) or len(named) != len(parts) or abs(sum(plan.groups.values()) - 1) > 1e-9:
         raise ValueError(f"season {season.id}: the exam's groups, pillars and parts do not fit together")
     families = {f.NAME for f in FAMILIES}
-    if unknown := sorted(set(parts) - families - set(SOURCE_KIND.values())):
+    if unknown := sorted(set(parts) - families - set(SOURCE_KIND.values()) - set(REASONING_KINDS)):
         raise ValueError(f"season {season.id}: the exam names {', '.join(unknown)}: no generator makes that and no source gives it")
     if stray := sorted(set(cfg.get("more", {})) - (set(parts) & families)):
         raise ValueError(f"season {season.id}: exam.more gives more items to {', '.join(stray)}, which the exam does not name as a generated part")

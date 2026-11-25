@@ -17,14 +17,15 @@ the round is drawn. The bigger its gain over a student trained on the raw pages,
 curl -fsSL https://www.stetrun.com/install.sh | sh
 stet init my-curator && cd my-curator
 stet harvest              # once: recent human writing for practice exams, no account needed
-stet run                  # edit, train, grade a practice round (16 GB+ GPU; ~5–10 min micro, ~31–42 min standard)
+stet run                  # edit, train, grade a practice round (12 GB+ GPU; ~1–4 min nano/micro, ~20–29 min standard)
 stet login --github       # entering needs a GitHub account at least 30 days old
 stet submit
 ```
 
 `stet run` has no limit and uploads nothing: try as many ideas as you like, then submit
-the ones worth volunteers' GPU time. Without `stet harvest` a practice exam has no fresh
-twin-context comprehension, which is half of an official score. Using a coding agent? Tell it: *Read
+the ones worth volunteers' GPU time. Out of the box, practice rounds sit a bundled
+openly-licensed CC-BY-SA Wikipedia practice pack (both twin-context comprehension and
+reasoning); run `stet harvest` for fresh local hours. Using a coding agent? Tell it: *Read
 https://www.stetrun.com/AGENTS.md and enter Stet.* · [How to enter](https://www.stetrun.com/enter)
 
 ## Lend a GPU
@@ -45,14 +46,17 @@ stet service install      # leave it running: starts with the machine, upgrades 
 
 - **Draw after commit.** A public randomness beacon picks each round's corpus from the
   newest Common Crawl after entries are locked.
-- **An exam nobody can know.** Each round's exam is made at its draw. Half of the
-  score is fresh twin-context comprehension (the exact same continuation scored under its
-  real opening minus up to three length-matched wrong openings from the same source and language,
-  in bits per byte) from three hours of the day before, picked by the draw, in every
-  language by its share of the crawl. Half is multilingual procedural skills, generated from the round's
-  seed. Every student sits the exam after a scale-fixed multilingual SFT probe (1 epoch / 32 steps at official
-  standard scale). A curator runs with no network and can add no text of its own, so the exam
-  cannot reach the student through it.
+- **An exam nobody can know.** Each round's exam is **100% fresh** and made at its draw,
+  with zero static benchmarks, zero synthetic templates, and zero raw web perplexity. Half of
+  the score is fresh twin-context comprehension (the exact same continuation scored under its
+  real opening minus up to three length-matched wrong openings from the same source and
+  language, in bits per byte) from three hours of the day before, picked by the draw, in every
+  language by its share of the crawl. Half is fresh deterministic harvest-derived reasoning
+  (`explain`, `infer`, `synthesis` derived at `temp=0` from those exact same three hours with
+  varied wrappers and an anti-copying filter). Every student (`ERNIE-4.5-0.3B`, bottom half
+  frozen, 65.5M tokens, ≤10 GiB VRAM so 12 GB+ GPUs can grade) sits the exam after a fixed
+  1-epoch commercial-permissive multilingual SFT probe. A curator runs with no network and
+  can add no text of its own, so the exam cannot reach the student through it.
 - **Only what tells curators apart.** Every part of the exam is validated before the season for
   multi-seed stability, resistance to style mimicry, and agreement with published pretraining recipes.
   Zero raw web-text perplexity: surface style matching cancels out, and nothing is sat that does not count.

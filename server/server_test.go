@@ -431,7 +431,7 @@ var corpusSHA, examSHA = strings.Repeat("c0", 32), strings.Repeat("d1", 32)
 func testTable() []ItemInfo {
 	var out []ItemInfo
 	for i := 0; i < 12; i++ {
-		out = append(out, ItemInfo{Pillar: "logic", Part: "logic", Lang: "en", Stratum: "prose/answer"})
+		out = append(out, ItemInfo{Pillar: "explain", Part: "explain", Lang: "en", Stratum: "prose/answer"})
 	}
 	for i := 0; i < 6; i++ {
 		out = append(out, ItemInfo{Pillar: "reference", Part: "reference", Lang: []string{"en", "de"}[i%2], Stratum: "prose/context"})
@@ -448,7 +448,7 @@ func testExam(table []ItemInfo) map[string]any {
 	return map[string]any{
 		"items_digest": examSHA, "items_file": base64.StdEncoding.EncodeToString(file), "table": table,
 		"public_file": base64.StdEncoding.EncodeToString(public),
-		"languages":   map[string]float64{"en": 60, "de": 40}, "fresh": 6,
+		"languages":   map[string]float64{"en": 60, "de": 40}, "fresh": len(table),
 	}
 }
 

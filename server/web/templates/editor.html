@@ -55,7 +55,7 @@
           <div><dt>on the exam</dt><dd>{{f3 .Loss}}<small>bits per byte, against {{f3 .Baseline}} unedited</small></dd></div>
         </dl>{{end}}
         <div class="grid2">
-          {{if $d.SourceChart}}<figure class="figure"><h3>Where the gain comes from</h3><p class="how">Its gain on each part of the exam, in bits per byte better than unedited. Twin-context comprehension is half of the score, the skills half. Right is better.</p><div class="plot">{{$d.SourceChart}}</div></figure>{{end}}
+          {{if $d.SourceChart}}<figure class="figure"><h3>Where the gain comes from</h3><p class="how">Its gain on each part of the exam, in bits per byte better than unedited. Fresh twin-context comprehension is half of the score, fresh harvest-derived reasoning half. Right is better.</p><div class="plot">{{$d.SourceChart}}</div></figure>{{end}}
           {{if $d.CurveChart}}<figure class="figure"><h3>The model, learning from it</h3><p class="how">Training loss on its pages. Low here is not the goal; the exam is.</p><div class="plot">{{$d.CurveChart}}</div></figure>{{end}}
         </div>
         <p class="after"><a class="go" href="/rounds/{{.Round}}#e-{{short .EditorID}}">who ran and graded it in round {{.RoundIdx}} →</a></p>

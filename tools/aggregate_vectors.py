@@ -22,7 +22,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from stet.exam import gen
-from stet.exam.aggregate import SOURCE_KIND, current_plan, item_table, round_score, score_from_table
+from stet.exam.aggregate import REASONING_KINDS, SOURCE_KIND, current_plan, item_table, round_score, score_from_table
 from stet.exam.fresh.select import SHARES
 from stet.exam.items import FORMATS, KINDS, Item
 from stet.spec import load_season
@@ -32,7 +32,10 @@ OUT = ROOT / "server" / "testdata" / "aggregate_vectors.json"
 SEED = 20261119
 PLAN = current_plan()
 FAMILIES = sorted(f.NAME for f in gen.named(PLAN.parts))  # the generated parts the season names
-SOURCES = sorted(s for s, kind in SOURCE_KIND.items() if kind in PLAN.parts)  # every source of a kind of writing it names
+SOURCES = sorted(
+    [s for s, kind in SOURCE_KIND.items() if kind in PLAN.parts]
+    + [r for r in REASONING_KINDS if r in PLAN.parts]
+)  # every fresh writing & reasoning source the season names
 NATURAL = ["en", "ru", "de", "ja", "zh", "fr", "es", "pt", "sw", "yo", "eo", "nan"]  # the last four not in SHARES
 CODE_LANGS = ["code:python", "code:go", "code:lua", "code:javascript"]
 STYLES = ("normal", "outliers", "ties", "heavy")

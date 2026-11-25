@@ -46,7 +46,7 @@ And two neural patterns (`reader` runs every round as the neural anchor; `agent`
 
 | | What it does |
 |---|---|
-| `reader` | Multilingual prefilter and exact dedup across all CPU cores (`task.map`), then `Qwen/Qwen3-0.6B` scores candidate openings on a 1–5 educational/reasoning rubric using `vLLM` prefix caching on NVIDIA (or batched `transformers` on AMD/macOS), writing periodic neural-scored checkpoints and failing loudly if the model cannot run, before ordering kept pages as a gentle curriculum. Shows `[[assets]]`, `task.asset`, `vLLM` (with `gpu_memory_utilization` capped to `task.gpu_memory_gb`), curriculum ordering, and checkpointing neural progress. |
+| `reader` | Multilingual prefilter and exact dedup across all CPU cores (`task.map`), then `Qwen/Qwen3-0.6B` scores candidate openings on a 1–5 educational/reasoning rubric using `vLLM` prefix caching on NVIDIA (or batched `transformers` on AMD/macOS), applies per-language/script quantile normalization so English-rubric score shifts never starve Korean/Russian/Arabic/Japanese, writes periodic neural-scored checkpoints and fails loudly if the model cannot run, before ordering kept pages as a 4-band curriculum. Shows `[[assets]]`, `task.asset`, `vLLM` (with `gpu_memory_utilization` capped to `task.gpu_memory_gb`), quantile normalization, curriculum ordering, and checkpointing neural progress. |
 | `agent` | English prose with its boilerplate lines cut; how strictly to filter it is decided by an agent: the pi harness, on Node, driving a 0.6B model served on loopback inside the sandbox. Shows how to bring a harness and a model of your own. Run `./pack.sh` first. |
 
 ## Red team
@@ -58,7 +58,7 @@ that the board shows whether style mimicry works.
 |---|---|
 | `mimic` | To game the exam by surface form: the pages that look most like the exam's sources and formats (terminals, logs, JSON, code, questions and answers, reference, news, threads; any language) fill the budget first, and `tidy`'s selection tops it up only if they run short. |
 
-In Season 2's raw-perplexity exam, `mimic` beat every other reference curator (+0.10 bpb over raw crawl, ahead of `fineweb2`'s +0.05) simply by matching the exam's surface style. Season 3 replaced raw perplexity with same-source twin-context comprehension and multilingual skills after a fixed SFT probe, so surface style lifts both real and wrong openings equally and `mimic` falls behind real quality curation.
+In Season 2's raw-perplexity exam, `mimic` beat every other reference curator (+0.10 bpb over raw crawl, ahead of `fineweb2`'s +0.05) simply by matching the exam's surface style. Season 3 replaced raw perplexity with 100%-fresh same-source twin-context comprehension and harvest-derived reasoning (`explain`, `infer`, `synthesis`) after a fixed multilingual SFT probe, so surface style lifts both real and wrong openings equally and `mimic` falls behind real quality curation.
 
 There was a second, `scribe`, which spent the 16,000 tokens of its own text a script could
 then hold on worked problems in the exam's forms. That bought 0.10 bits per byte on the

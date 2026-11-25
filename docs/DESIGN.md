@@ -34,15 +34,18 @@ curriculum a real move.
 ## Decisions, and what they are for
 
 **The exam measures what pretrained models are for.** Text has no quality of its own: a page
-is worth keeping for what it teaches a model. Half of the score is fresh twin-context
-comprehension (each continuation scored under its real opening minus the mean of three
-length-matched wrong openings from the exact same source and language, in bits per byte), in
-four kinds that count the same: reference, news, technical and conversation. Half is skills,
-in seven kinds that count the same: agents, reading, logic, grammar, numbers, programs and
-knowledge. There is zero raw web perplexity: because the exact same continuation is scored
-under real vs wrong openings, surface formatting and style mimicry cancel identically. How
-much each counts is a choice of value, so it is declared rather than left to how many items
-of each there happen to be.
+is worth keeping for what it teaches a model. Season 3's exam is 100% fresh with zero static
+benchmarks, zero synthetic templates, and zero raw web perplexity. Half of the score is fresh
+twin-context comprehension (each continuation scored under its real opening minus the mean of
+three length-matched wrong openings from the exact same source and language, in bits per
+byte), in four kinds that count the same: reference, news, technical and conversation. Half
+is fresh harvest-derived reasoning, in three kinds that count the same: explain, infer and
+synthesis — multi-sentence explanations, inferences, and declarative prose syntheses derived
+deterministically from those same three fresh hours with varied natural wrappers and a strict
+anti-copying filter. Because twin-context scores the exact same continuation under real vs
+wrong openings and synthesis uses zero Q/A punctuation, surface formatting, style mimicry,
+and QA-spam fail. How much each counts is a choice of value, so it is declared rather than
+left to how many items of each there happen to be.
 
 **Only what tells curators apart is on the exam.** A student this size cannot do arithmetic,
 unit conversion or program tracing cold, whatever it was trained on: on the pilot such
@@ -96,14 +99,12 @@ first (reference, news, technical, conversation), each kind counting the same, w
 sources inside a kind taking turns. None needs a key or an account, so anyone can read
 them, and none can define the target.
 
-**Every language, by its share of the crawl.** Inside every kind of writing, each language
-counts by its share of the round's corpus, in bytes. That is what a curator saves on a byte
-of the web. More weight to English would reward throwing away most of the web; equal weights
-would reward the smallest languages, where a student this size learns little and the score
-is mostly noise. Five of the seven skills are asked in the web's main languages too, each by
-its share; numbers and programs are asked in English. So English is about half of the score,
-and a little less than half of the crawl. Season 3 uses Qwen3's 151,936-token multilingual
-tokenizer, covering 100+ languages and code without penalising non-Latin scripts.
+**Every language, by its share of the crawl.** Inside every kind of comprehension and
+reasoning, each language counts by its share of the round's corpus, in bytes. That is what a
+curator saves on a byte of the web. More weight to English would reward throwing away most of
+the web; equal weights would reward the smallest languages, where a student this size learns
+little and the score is mostly noise. Season 3 uses ERNIE-4.5's 103,424-token multilingual
+tokenizer (SentencePiece BPE with ByteFallback), covering 100+ languages and code cleanly.
 
 **Scored by likelihood.** At this size a student's choice between answers is chance, but the
 likelihood of the right answer, in bits per byte, still moves, and it is the best-validated
@@ -214,15 +215,14 @@ training tokens, and that curve has not been measured on this exam. Until it is,
 shows gains.
 
 **Rounds at the standard student; finals at a larger budget.** Season 3 rounds train
-`Qwen3-0.6B-Base` (28 × 1024, upper half of layers reset from the round's seed) on 32.8M
-tokens plus a 32-step disjoint SFT probe: about 35 minutes on an RTX 5090 (~47 minutes on
-an RTX 4090). Smaller
+`baidu/ERNIE-4.5-0.3B-Base-PT` (18 × 1024, embeddings and lower 9 layers frozen, upper 9
+layers reset from the round's seed) on 65.5M tokens plus a 32-step commercial-permissive
+multilingual SFT probe: about 20 minutes on an RTX 5090 (~29 minutes on an RTX 4090, ~52
+minutes on an RTX 3090), using ≤10 GiB VRAM so 12 GB+ volunteer cards can grade. Smaller
 budgets rank curators differently: they reward narrow data, which loses as the student sees
-more tokens
-([measured](research/exam-first-principles.md#75-scale-rounds-at-the-standard-student-finals-at-the-large-one-decide-the-season)).
-Finals run the season's top eight, and one more drawn by lot from the next eight, on two
-rounds at 131M tokens (4× the official budget) plus the 32-step SFT probe, and decide the
-table.
+more tokens. Finals run the season's top eight, and one more drawn by lot from the next
+eight, on two rounds at 131M tokens (2× the official budget) plus the 32-step SFT probe, and
+decide the table.
 
 ## What could go wrong
 
@@ -270,9 +270,9 @@ What is left is in [Rules](RULES.md#what-is-trusted-and-what-is-not).
    round is drawn. A round drawn while the server knows of no harvest is given hours once
    there are some, and says so (`exam_hours_late`).
 3. **The examiner** makes the exam from exactly those hours, at once. It:
-   - builds the round's corpus, measures its languages, and drops the fresh items the
-     corpus already holds;
-   - generates the round's questions from its seed;
+   - builds the round's corpus, measures its languages, selects fresh twin-context
+     comprehension items, derives deterministic `explain`/`infer`/`synthesis` reasoning items
+     from those same three hours, and drops any item whose text the corpus already holds;
    - posts the exam: the items, what each counts toward (pillar, part, language, format and
      kind of task), the items' digest, the languages' shares and the hours it was made
      from. The server refuses an exam made from any other hours.
@@ -283,19 +283,19 @@ What is left is in [Rules](RULES.md#what-is-trusted-and-what-is-not).
    them, and reports one score per item.
 5. **The server adds it up.** The round's baseline is the item-by-item median of the
    established graders' baselines. A grade's score is the exam's aggregate (comprehension
-   half, skills half) of its item scores less that baseline. The server computes
+   half, reasoning half) of its item scores less that baseline. The server computes
    it with a Go port of `src/stet/exam/aggregate.py`, checked against the Python on shared
    test vectors (`tools/aggregate_vectors.py`). From there, agreement, settlement, the board
    and the record work on that score.
 6. **Settlement.** Every item score is published (`/api/v1/rounds/<id>/scores`), and so is
-   the exam: the generated items and Wikipedia's text whole, and every other source's items
+   the exam: openly licensed Wikipedia items whole, and every other source's items
    as their source, id and hash. Other sources' text is not ours to republish; anyone can
    check it at the source. `stet run --round <id>` replays the round on what was published.
 
 The exam is made at the draw, so a round takes as long as its runs and its grades do.
-Rounds never overlap. A practice round's exam is made the same way, from hours harvested on
-the machine that runs it (`stet harvest`); with none harvested it is the generated items
-alone.
+Rounds never overlap. A practice round sits the bundled CC-BY-SA Wikipedia practice pack out
+of the box, or fresh twin-context writing from hours harvested on the machine that runs it
+(`stet harvest`).
 
 ## How it is built
 

@@ -308,19 +308,21 @@ What a training costs, on the slowest GPU that may run curators. These are worke
 the season's floor (`runner.gpu_tokens_per_second`, 120,000 in `stet bench`) and the
 arithmetic of each student (`measure.train_seconds` / `hold_seconds`), not measured; every
 plan prints them for what it is about to train, and `--speed N` shows them for a card N times
-the floor. Rented cards are quicker: an RTX 5090 trains the Season 3 standard student in
-about 35 minutes and an RTX 4090 in about 47 minutes.
+the floor. Rented cards are quicker: an RTX 5090 trains the Season 3 standard student
+(`ERNIE-4.5-0.3B-Base-PT`, bottom half frozen, 65.5M tokens) in about 20 minutes, an RTX 4090
+in about 29 minutes, and an RTX 3090 in about 52 minutes (≤10 GiB peak VRAM, fitting 12 GB+
+GPUs).
 
 | student | tokens | GPU hours, one training | held (minutes) | memory for its tokens |
 |---|---|---|---|---|
-| standard at ½× | 16.4M | 0.72 | 45 | 0.09 GB |
-| standard | 32.8M | 1.44 | 170 | 0.18 GB |
-| standard at 2× | 65.5M | 2.88 | 280 | 0.37 GB |
-| standard at 4× | 131.1M | 5.75 | 495 | 0.73 GB |
-| large at ½× | 65.5M | 2.88 | 280 | 0.37 GB |
-| large | 131.1M | 5.75 | 495 | 0.73 GB |
-| large at 2× | 262.1M | 11.51 | 925 | 1.46 GB |
-| large at 4× | 524.3M | 23.01 | 1,440 | 2.93 GB |
+| standard at ½× | 32.8M | 0.43 | 45 | 0.18 GB |
+| standard | 65.5M | 0.87 | 120 | 0.37 GB |
+| standard at 2× | 131.1M | 1.73 | 220 | 0.73 GB |
+| standard at 4× | 262.1M | 3.47 | 420 | 1.46 GB |
+| large at ½× | 65.5M | 0.87 | 120 | 0.37 GB |
+| large | 131.1M | 1.73 | 220 | 0.73 GB |
+| large at 2× | 262.1M | 3.47 | 420 | 1.46 GB |
+| large at 4× | 524.3M | 6.93 | 820 | 2.93 GB |
 
 Rent for the longest hold of what is posted (`stet-cloud scale --follow --long-farm 1440` for a curve at
 large, matching the 24-hour `large-x4` lease cap).
@@ -593,7 +595,7 @@ Set in `apps/stet/deployment.yaml`. The ones that are rules:
 | `STET_LADDER_SIZE` | 8 | Curators that run in every round |
 | `STET_ROUND_INTERVAL` | 0 | `0` draws rounds on demand whenever an entry is waiting (no idle clock rounds). After an empty round where nothing ran, automatic retries back off for 3 hours (`backoff_until` in `/api/v1/season`, `/api/v1/admin/work`, and submit replies); `stet draw` overrides the backoff. Set a multiple of the draw grid (e.g. `3h`) for fixed-clock rounds |
 | `STET_ROUND_MIN_GAP` | 0 | Minimum gap between consecutive on-demand draws (`0` chains back-to-back as soon as the previous round settles) |
-| `STET_LEASE` | `5h` | Maximum time an established verifier may hold an edit or grade job before it is given up on (fits two baseline passes plus margin on a 16 GB+ GPU) |
+| `STET_LEASE` | `5h` | Maximum time an established verifier may hold an edit or grade job before it is given up on (fits two baseline passes plus margin on a 12 GB+ GPU) |
 | `STET_EARLY_WINDOW` | 10m | A machine the organisers rent is handed grades before an exam only once they, and the further ones it could take, would keep it busy until no sooner than this before the exam is due; it is not paid to wait. `0` hands them out as soon as there are any |
 | `STET_ENTRIES_IN_PLAY` | 3 | Entries one person may have waiting or qualifying at once |
 | `STET_QUALIFY_ROUNDS` | 3 | Rounds a new entry runs |
@@ -611,11 +613,12 @@ Set in `apps/stet/deployment.yaml`. The ones that are rules:
 A round draws the ladder (up to 8 entrants, plus 2 every-round references and 1 rotating
 reference) together with **every** waiting or qualifying entry, with no cap per round (each
 person is capped at 3 entries in play at once). Each entry is run twice, up to twenty minutes
-a run. Each script is trained once (`Qwen3-0.6B-Base` top-half reset on 32.8M tokens plus the
-SFT probe), about 35 minutes on an RTX 5090 (~47 minutes on an RTX 4090), and up to four
-machines train the round's unedited baseline (two passes). On a 6-GPU fleet a typical round
-takes about 2.5 to 4.0 hours from draw to settlement (~$5.80–$10.00). The exam is posted a few
-minutes after the draw, so a student sits it as soon as it is trained.
+a run. Each script is trained once (`ERNIE-4.5-0.3B-Base-PT`, bottom half frozen, top half
+reset, on 65.5M tokens plus the 32-step SFT probe), about 20 minutes on an RTX 5090 (~29
+minutes on an RTX 4090, ~52 minutes on an RTX 3090), and up to four machines train the
+round's unedited baseline (two passes). On a 6-GPU fleet a typical round takes about 1.5 to
+2.5 hours from draw to settlement (~$3.50–$6.00). The exam is posted a few minutes after the
+draw, so a student sits it as soon as it is trained.
 
 ## When something is wrong
 

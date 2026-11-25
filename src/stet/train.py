@@ -5,11 +5,12 @@ work, in exactly the same order, on exactly the tokens the edit script produced.
 no shuffling here. The order of the stream is the curator's to choose.
 
 Season 1-2 train a small GPT from random weights. Season 3 starts from a pinned
-multilingual base model (Qwen/Qwen3-0.6B-Base), deterministically re-initializes the upper
-half of its transformer layers from the round's seed on CPU, trains unshuffled on the
-curator's stream using fixed micro-batch gradient accumulation (so 16 GB+ and 32 GB+ GPUs
-execute identical math), and runs a short standardized disjoint multilingual SFT probe
-before sitting the exam.
+multilingual base model (baidu/ERNIE-4.5-0.3B-Base-PT), freezes the embeddings and lower
+half of its transformer layers, deterministically re-initializes the upper half from the
+round's seed on CPU, trains unshuffled on the curator's stream using fixed micro-batch
+gradient accumulation with row-chunked lm_head projection (so 12 GB+ and 32 GB+ GPUs
+execute identical math under 10 GiB VRAM), and runs a brief standardized disjoint
+multilingual SFT probe before sitting the exam.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ import platform
 import time
 
 os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 import numpy as np
 import torch
@@ -159,11 +161,11 @@ def _backward_chunked_head(
     model: torch.nn.Module, x: torch.Tensor, y: torch.Tensor, scale_div: float, device: torch.device
 ) -> torch.Tensor:
     """Exact FP32 cross-entropy with row-chunked lm_head projection so large-vocab models
-    (e.g. Qwen3's 151,936-token head) never materialize a multi-gigabyte logits tensor.
+    (e.g. ERNIE-4.5's 103,424-token head) never materialize a multi-gigabyte logits tensor.
 
     Mathematically equivalent to computing full-batch logits and FP32 cross-entropy (including
-    when `lm_head.weight` is tied to `model.embed_tokens.weight`), while cutting peak VRAM by
-    >1 GiB and allowing `micro_batch=4` under 14 GiB reserved VRAM on 16 GB GPUs.
+    when `lm_head.weight` is tied to `model.embed_tokens.weight`), while keeping peak VRAM
+    under 10 GiB on 12 GB+ volunteer GPUs.
     """
     inner = getattr(model, "model", None)
     lm_head = getattr(model, "lm_head", None)
@@ -189,8 +191,15 @@ def _backward_chunked_head(
     return loss.detach()
 
 
-def _reset_top_layers(model: torch.nn.Module, reset_frac: float, init_seed: int) -> None:
-    """Deterministically re-initialize the upper `reset_frac` transformer blocks and final norm on CPU."""
+def _reset_top_layers(
+    model: torch.nn.Module, reset_frac: float, init_seed: int, *, freeze_bottom: bool = False
+) -> None:
+    """Deterministically re-initialize the upper `reset_frac` transformer blocks and final norm on CPU.
+
+    When `freeze_bottom=True`, also freeze embeddings, tied `lm_head`, and the lower pretrained
+    layers so autograd skips activation storage and backward passes for the frozen prefix (1.8x
+    faster training and <=10 GiB peak VRAM without activation checkpointing).
+    """
     inner = getattr(model, "model", None)
     layers = getattr(inner, "layers", None)
     if layers is None or reset_frac <= 0:
@@ -209,13 +218,24 @@ def _reset_top_layers(model: torch.nn.Module, reset_frac: float, init_seed: int)
                     m.weight.fill_(1.0)
                     if getattr(m, "bias", None) is not None:
                         m.bias.zero_()
-        # Reset the final RMSNorm too (Qwen3's pretrained final norm has mean ~3.8, max ~15.3;
-        # leaving it unreset amplifies initial random top-layer logits and causes early spikes).
+        # Reset the final RMSNorm too so pretrained norm gains don't amplify initial random logits.
         final_norm = getattr(inner, "norm", None)
         if final_norm is not None and getattr(final_norm, "weight", None) is not None:
             final_norm.weight.fill_(1.0)
             if getattr(final_norm, "bias", None) is not None:
                 final_norm.bias.zero_()
+        if freeze_bottom:
+            emb = getattr(inner, "embed_tokens", None)
+            if emb is not None:
+                for p in emb.parameters():
+                    p.requires_grad_(False)
+            lm_head = getattr(model, "lm_head", None)
+            if lm_head is not None:
+                for p in lm_head.parameters():
+                    p.requires_grad_(False)
+            for layer in layers[:start]:
+                for p in layer.parameters():
+                    p.requires_grad_(False)
 
 
 def build_model(scale: Scale, season: Season, init_seed: int, device: torch.device) -> torch.nn.Module:
@@ -229,7 +249,7 @@ def build_model(scale: Scale, season: Season, init_seed: int, device: torch.devi
         model_dir = _fetch_hf_student(student)
         # Keep fp32 master weights on every device so AdamW, RMSNorm gains, weight decay, and
         # the low-LR SFT probe update cleanly without bf16 rounding loss; bf16 is used only in
-        # autocast during forward/backward. Activation checkpointing keeps peak VRAM under 14 GiB.
+        # autocast during forward/backward.
         model = AutoModelForCausalLM.from_pretrained(
             str(model_dir),
             local_files_only=True,
@@ -237,8 +257,9 @@ def build_model(scale: Scale, season: Season, init_seed: int, device: torch.devi
             attn_implementation="sdpa",
         )
         model.config.use_cache = False
-        _reset_top_layers(model, float(student.get("reset_frac", 0.5)), init_seed)
-        if device.type == "cuda":
+        freeze_bottom = bool(student.get("freeze_bottom", False))
+        _reset_top_layers(model, float(student.get("reset_frac", 0.5)), init_seed, freeze_bottom=freeze_bottom)
+        if device.type == "cuda" and not freeze_bottom:
             _set_activation_checkpointing(model, True)
         return model.to(device)
     # Season 1-2: Initialise on the CPU so the starting weights are bit-identical on every machine.
@@ -342,9 +363,26 @@ def run_sft_probe(
                 tgt[: max(0, first - 1)] = -100
                 y[r, : len(ids) - 1] = tgt
             x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
-            with _autocast(device):
-                logits = _forward_logits(model, x)
-            loss = _ce_loss(logits, y, ignore_index=-100) / accum
+            inner = getattr(model, "model", None)
+            lm_head = getattr(model, "lm_head", None)
+            vocab = int(getattr(getattr(model, "config", None), "vocab_size", 0) or 0)
+            if inner is not None and lm_head is not None and vocab >= 65536:
+                # Project only valid completion tokens through lm_head so SFT never materializes
+                # full (mb, T, V) logits (keeps peak reserved VRAM <= 10 GiB on 12 GB GPUs).
+                with _autocast(device):
+                    out = inner(x)
+                    h = out.last_hidden_state if hasattr(out, "last_hidden_state") else out[0]
+                mask = y != -100
+                den = int(mask.sum().item())
+                if den <= 0:
+                    continue
+                with _autocast(device):
+                    logits_sel = lm_head(h[mask])
+                loss = F.cross_entropy(logits_sel.float(), y[mask], reduction="sum") / (den * accum)
+            else:
+                with _autocast(device):
+                    logits = _forward_logits(model, x)
+                loss = _ce_loss(logits, y, ignore_index=-100) / accum
             loss.backward()
             step_loss += float(loss.detach())
         if not math.isfinite(step_loss):

@@ -140,26 +140,17 @@ def test_knowledge_even_and_sft_probe_have_zero_fact_overlap():
     assert all_exam_qids and all_sft_qids
     assert all_exam_qids.isdisjoint(all_sft_qids)  # zero cross-language entity leakage
 
-    # Verify concrete s3-p00000 exam and SFT probe share zero canonical Wikidata subject Q-IDs across all languages.
+    # Verify bundled s3-sft-ml.jsonl.zst loads 512 deterministic commercial-permissive pairs across 11 languages.
     s3 = load_season("s3")
     rnd = practice_round(s3, 0)
-    exam_items = [it for it in gen.for_season(s3, rnd.seed) if it.corner.startswith("knowledge-even/")]
-    assert exam_items and all(it.kind == "answer" and not it.wrongs for it in exam_items)
-    exam_prompt_qids: dict[str, set[str]] = {}
-    sft_prompt_qids: dict[str, set[str]] = {}
-    for fact in TEMPLATES:
-        for lang in LANGS:
-            for qid, subj, _ in split_pool_with_ids(fact, lang, parity=0)[0]:
-                exam_prompt_qids.setdefault(TEMPLATES[fact][lang].format(s=subj), set()).add(qid)
-            for qid, subj, _ in split_pool_with_ids(fact, lang, parity=1)[0]:
-                sft_prompt_qids.setdefault(TEMPLATES[fact][lang].format(s=subj), set()).add(qid)
-    seen_exam_qids = {q for it in exam_items for q in exam_prompt_qids.get(it.ctx, ())}
-    pairs = sft.build_sft_examples(rnd.seed, n=256)
-    seen_sft_qids = {q for p, _ in pairs for q in sft_prompt_qids.get(p, ())}
-    assert seen_exam_qids and seen_sft_qids
-    assert seen_exam_qids.isdisjoint(seen_sft_qids)
+    assert gen.for_season(s3, rnd.seed) == []
+    s3_pairs = sft.build_sft_examples(rnd.seed, n=512, season=s3)
+    assert len(s3_pairs) == 512
+    assert s3_pairs == sft.build_sft_examples(rnd.seed, n=512, season=s3)
+    assert s3_pairs != sft.build_sft_examples(b"other-seed", n=512, season=s3)
+    assert all(isinstance(p, str) and isinstance(c, str) and p and c for p, c in s3_pairs)
 
-    # SFT probe generates deterministic multilingual (prompt, completion) pairs without exam access.
+    # Synthetic fallback SFT generator (used when no pack is set) remains deterministic and disjoint from knowledge-even.
     p64 = sft.build_sft_examples(b"round-seed", n=64)
     assert len(p64) == 64
     assert p64 == sft.build_sft_examples(b"round-seed", n=64)
@@ -167,24 +158,30 @@ def test_knowledge_even_and_sft_probe_have_zero_fact_overlap():
     assert all(isinstance(p, str) and isinstance(c, str) and p and c for p, c in p64)
 
 
-def test_s3_generated_exam_uses_right_answer_logic_and_knowledge_even():
+def test_s3_is_100pct_fresh_and_offline_practice_pack_has_both_groups():
+    from stet.exam.aggregate import plan_of, round_score
+    from stet.exam.fresh.reason import load_practice_pack
+
     s3 = load_season("s3")
-    items = gen.for_season(s3, b"s3-test-seed")
-    parts = {it.corner.split("/", 1)[0] for it in items}
-    assert "logic" in parts and "knowledge-even" in parts
-    assert "logic-mc" not in parts and "knowledge-mc" not in parts
-    for it in items:
-        part = it.corner.split("/", 1)[0]
-        if part in ("logic", "knowledge-even"):
-            assert it.kind == "answer" and not it.wrongs
+    assert gen.for_season(s3, b"s3-test-seed") == []
+    pack = load_practice_pack(s3, b"s3-test-seed")
+    assert len(pack) == 509
+    assert pack == load_practice_pack(s3, b"s3-test-seed")
+    assert pack != load_practice_pack(s3, b"other-seed")
+    assert all(it.kind in ("context", "answer") for it in pack)
+    assert not any(it.kind == "passage" for it in pack)
+    # Scores cleanly under Season 3's 50/50 comprehension + reasoning plan.
+    agg = round_score(pack, [0.05] * len(pack), plan=plan_of(s3))
+    assert agg["score"] == pytest.approx(0.05)
+    assert {"reference", "explain", "infer", "synthesis"} <= set(agg["pillars"])
 
 
 def test_uint32_script_materialization_preserves_large_vocab_token_ids(tmp_path):
-    """Qwen3's 151,936 vocab exceeds uint16 (65535); materialize must use uint32 without wraparound."""
+    """ERNIE-4.5's 103,424 vocab exceeds uint16 (65535); materialize must use uint32 without wraparound."""
     from conftest import make_corpus
 
     class BigVocabEnc:
-        n_vocab = 151_936
+        n_vocab = 103_424
 
         def encode_ordinary(self, text: str) -> list[int]:
             return [70_000 + ord(c) for c in text]
@@ -200,8 +197,8 @@ def test_uint32_script_materialization_preserves_large_vocab_token_ids(tmp_path)
     tokens, stats = materialize(corpus, script, s3, tiny, enc=BigVocabEnc())
     assert tokens.dtype == np.uint32
     assert tokens.shape == (2, 16 * 16 + 1)
-    assert int(tokens.max()) == s3.eot == 151_643
-    assert int(tokens[0, 0]) == s3.eot
+    assert int(tokens.max()) == 70_000 + ord("w")
+    assert int(tokens[0, 0]) == s3.eot == 2
     assert int(tokens[0, 1]) == 70_000 + ord("H")
     assert stats.out_docs == 2
 
@@ -806,19 +803,22 @@ def test_season2_practice_replay_aggregates_with_s2_plan_in_cli_and_gym(corpus, 
     assert reward == pytest.approx(0.2) and info["gain_by_pillar"] == {"agents": pytest.approx(0.3), "logic": pytest.approx(0.1)}
 
 
-def test_season3_has_no_passage_items_and_sessions_are_conditional_answers():
-    """Item 1 (P1): Season 3 v11 converts agent/*/session to conditional kind='answer' so zero
-    whole-transcript passage items remain in the Season 3 exam, while Season 2 v9 stays frozen."""
+def test_season3_has_no_passage_items_and_v11_sessions_are_conditional_answers():
+    """v11 shell sessions are conditional kind='answer', and Season 3's offline practice pack
+    has zero whole-transcript passage items while Season 2 v9 stays frozen."""
     from stet.exam.aggregate import part_of, stratum_key
+    from stet.exam.fresh.reason import load_practice_pack
+    from stet.exam.gen import shell
 
     s3 = load_season("s3")
-    rnd = practice_round(s3, 0)
-    items = gen.for_season(s3, rnd.seed)
-    assert all(it.kind != "passage" for it in items)
-    sessions = [it for it in items if it.corner.endswith("/session")]
+    pack = load_practice_pack(s3, b"s3-pack-seed")
+    assert all(it.kind != "passage" for it in pack)
+    v11_agent = gen.generate(b"seed-v11", per_corner=2, families=[shell], more={"agent": 4})
+    assert all(it.kind != "passage" for it in v11_agent)
+    sessions = [it for it in v11_agent if it.corner.endswith("/session")]
     assert len(sessions) == 16
     assert all(it.kind == "answer" and it.ctx and it.cont for it in sessions)
-    assert {stratum_key(it) for it in items if part_of(it) == "agent" and it.lang == "en"} == {
+    assert {stratum_key(it) for it in v11_agent if part_of(it) == "agent" and it.lang == "en"} == {
         "logs/answer",
         "structured/answer",
     }
@@ -1251,7 +1251,8 @@ def test_trainer_sft_prompt_mask_cuda_ckpt_vram_gate_and_early_offload(monkeypat
     ref_big = float(torch.nn.functional.cross_entropy(big_logits.view(-1, 65536), big_targets.reshape(-1), ignore_index=-100))
     assert got_big == pytest.approx(ref_big, rel=1e-5, abs=1e-5)
 
-    # 7. build_model loads FP32 master weights and enables activation checkpointing on CUDA.
+    # 7. build_model loads FP32 master weights, disables activation checkpointing when
+    # freeze_bottom=True (Season 3 ERNIE-4.5-0.3B), and enables it when freeze_bottom=False.
     import transformers
 
     cuda_loaded: list[tuple[object, bool]] = []
@@ -1279,4 +1280,222 @@ def test_trainer_sft_prompt_mask_cuda_ckpt_vram_gate_and_early_offload(monkeypat
     monkeypatch.setattr(torch.cuda, "manual_seed_all", lambda seed: None)
     tr.build_model(s3.scale("nano"), s3, init_seed=7, device=types.SimpleNamespace(type="cuda"))
     assert seen_cuda_dtypes == [torch.float32]
+    assert cuda_loaded and cuda_loaded[0][1] is False  # freeze_bottom=True skips redundant checkpointing
+
+    unfrozen_s3 = dataclasses.replace(s3, raw={**s3.raw, "student": {**s3.raw["student"], "freeze_bottom": False}})
+    cuda_loaded.clear()
+    tr.build_model(unfrozen_s3.scale("nano"), unfrozen_s3, init_seed=7, device=types.SimpleNamespace(type="cuda"))
     assert cuda_loaded and cuda_loaded[0][1] is True
+
+
+def test_reason_module_selection_wrappers_anti_copy_and_decontam(tmp_path):
+    """Season 3 fresh reasoning (Exam C v2): deterministic selection, zero-Q/A synthesis wrappers,
+    angle-bracket cleaning, <50% 5-gram verbatim-copy rejection, and excerpt+response decontam."""
+    from conftest import make_corpus
+
+    from stet.exam.decontam import seen
+    from stet.exam.fresh import Doc
+    from stet.exam.fresh.reason import (
+        _clean_angle,
+        ngram_overlap,
+        parse_generated_items,
+        select_source_docs,
+        wrap_prompt,
+    )
+
+    # 1. Deterministic selection stratified across kinds & languages (order-independent).
+    docs = [
+        Doc(
+            source="wikipedia" if i % 2 == 0 else "ccnews",
+            id=f"d{i}",
+            url=f"https://example.org/{i}",
+            lang="en" if i % 3 != 0 else "de",
+            license="CC BY-SA 4.0",
+            published=1_800_000_000 + i,
+            title=f"Topic {i}",
+            text=f"Detailed historical and technical passage number {i} explaining mechanisms and causes. " * 8,
+            topic=f"T{i}",
+        )
+        for i in range(40)
+    ]
+    sel1 = select_source_docs(docs, b"seed-reason", target=12, shares={"en": 60.0, "de": 40.0})
+    sel2 = select_source_docs(docs[::-1], b"seed-reason", target=12, shares={"en": 60.0, "de": 40.0})
+    assert len(sel1) == 12 and [d["id"] for d in sel1] == [d["id"] for d in sel2]
+    assert {d["lang"] for d in sel1} == {"en", "de"}
+
+    # 2. Synthesis wrappers contain zero question marks or Q:/A: syntax.
+    for w_idx in range(12):
+        p_syn = wrap_prompt("A short factual excerpt about solar panels.", "The passage explains why.", "synthesis", w_idx)
+        assert "?" not in p_syn and "Q:" not in p_syn and "A:" not in p_syn
+
+    # 3. Angle-bracket cleaner + 5-gram overlap filter + parser.
+    assert _clean_angle("<Why did it fail?>") == "Why did it fail?"
+    assert _clean_angle("<<Response text>>") == "Response text"
+    excerpt = (
+        "The municipal grid operators installed lithium-iron-phosphate storage banks across four substations "
+        "in order to absorb midday solar generation surges and stabilize evening peak voltage levels without "
+        "relying on diesel peaking turbines."
+    )
+    assert ngram_overlap(excerpt, excerpt) > 0.9
+    good_ans = (
+        "Adding battery storage lets utility engineers capture surplus afternoon photovoltaic output and discharge it "
+        "during high-demand twilight hours, keeping voltage stable while avoiding fossil-fuel backup generators."
+    )
+    assert ngram_overlap(good_ans, excerpt) < 0.2
+    selected_rows = [
+        {"source": "wikipedia:en:1", "id": "en:1", "lang": "en", "text": excerpt, "task_type": "explain", "wrapper_id": 0},
+        {"source": "wikipedia:en:2", "id": "en:2", "lang": "en", "text": excerpt, "task_type": "infer", "wrapper_id": 1},
+        {"source": "wikipedia:en:3", "id": "en:3", "lang": "en", "text": excerpt, "task_type": "synthesis", "wrapper_id": 2},
+    ]
+    raw_gens = [
+        f" <Why were the storage banks added across substations?>\nRESPONSE: {good_ans}",
+        f" What operational trade-off arises here?\nRESPONSE: {excerpt}",  # verbatim copy -> rejected!
+        f" The passage summarizes the rationale behind the grid upgrade?\nRESPONSE: {good_ans}",  # '?' stripped on synthesis!
+    ]
+    parsed, dropped = parse_generated_items(selected_rows, raw_gens, max_ngram_overlap=0.5)
+    parts_got = [it.source.split(":", 1)[0] for it in parsed]
+    assert parts_got == ["explain", "synthesis"] and dropped.get("verbatim_copy") == 1
+    assert all("<" not in it.ctx and ">" not in it.ctx for it in parsed)
+    assert all("?" not in it.ctx and "Q:" not in it.ctx for it in parsed if it.source.startswith("synthesis:"))
+
+    # 4. Decontamination checks BOTH excerpt (`ctx`) and response (`cont`) for reasoning items.
+    s3 = load_season("s3")
+    corpus_exc = make_corpus(tmp_path / "c_exc", ["Header\n" + excerpt + " Footer"])
+    corpus_ans = make_corpus(tmp_path / "c_ans", ["Header\n" + good_ans + " Footer"])
+    corpus_clean = make_corpus(tmp_path / "c_clean", ["Completely unrelated article about marine sponges."])
+    assert seen(parsed, corpus_exc, s3) == {0, 1}
+    assert seen(parsed, corpus_ans, s3) == {0, 1}
+    assert seen(parsed, corpus_clean, s3) == set()
+
+
+def test_ernie_byte_fallback_decode_bytes_and_freeze_bottom_and_chunked_equiv(tmp_path):
+    """Verify SentencePiece Metaspace+ByteFallback decode_bytes, freeze_bottom freezing & weight
+    immutability, and exact numerical equivalence of chunked lm_head in eval nll + SFT probe."""
+    torch = pytest.importorskip("torch")
+    import torch.nn.functional as F
+
+    from stet import tok
+    from stet import train as tr
+    from stet.exam import score as exam_score
+
+    # 1. SentencePiece Metaspace + ByteFallback exact byte decoding on truncated multi-byte UTF-8.
+    class FakeSPDec:
+        def __init__(self, vocab):
+            self._v = vocab
+
+        def id_to_token(self, tid):
+            return self._v.get(tid)
+
+        def decode(self, ids, skip_special_tokens=False):
+            return ""
+
+    # " hi 😀" where 😀 is UTF-8 F0 9F 98 80; truncated after first 2 bytes of emoji!
+    sp_enc = tok._HFEncoding(
+        None,
+        FakeSPDec({10: "\u2581hi", 11: "\u2581", 12: "<0xF0>", 13: "<0x9F>"}),
+        name="fake-ernie",
+        byte_fallback=True,
+    )
+    assert sp_enc.decode_bytes([10, 11, 12, 13]) == b" hi \xf0\x9f"
+    assert len(sp_enc.decode_bytes([10, 11, 12, 13])) == 6  # no U+FFFD 3-byte inflation!
+
+    # 2. freeze_bottom freezes embed_tokens, lm_head, and bottom half of layers while top half trains.
+    class TinyLayer(torch.nn.Module):
+        def __init__(self, d):
+            super().__init__()
+            self.lin = torch.nn.Linear(d, d)
+
+        def forward(self, x):
+            return x + self.lin(x)
+
+    class TinyInner(torch.nn.Module):
+        def __init__(self, v, d, n):
+            super().__init__()
+            self.embed_tokens = torch.nn.Embedding(v, d)
+            self.layers = torch.nn.ModuleList([TinyLayer(d) for _ in range(n)])
+            self.norm = torch.nn.LayerNorm(d)
+
+        def forward(self, x):
+            h = self.embed_tokens(x)
+            for lyr in self.layers:
+                h = lyr(h)
+            return types.SimpleNamespace(last_hidden_state=self.norm(h))
+
+    class TinyHFModel(torch.nn.Module):
+        def __init__(self, v=65536, d=8, n=4):
+            super().__init__()
+            self.config = types.SimpleNamespace(vocab_size=v)
+            self.model = TinyInner(v, d, n)
+            self.lm_head = torch.nn.Linear(d, v, bias=False)
+            self.lm_head.weight = self.model.embed_tokens.weight  # tied like ERNIE-4.5
+
+        def forward(self, x):
+            return types.SimpleNamespace(logits=self.lm_head(self.model(x).last_hidden_state))
+
+    torch.manual_seed(0)
+    m = TinyHFModel(v=65536, d=8, n=4)
+    emb_before = m.model.embed_tokens.weight.detach().clone()
+    bot_before = m.model.layers[0].lin.weight.detach().clone()
+    tr._reset_top_layers(m, 0.5, init_seed=42, freeze_bottom=True)
+    assert not m.model.embed_tokens.weight.requires_grad
+    assert not m.lm_head.weight.requires_grad
+    assert all(not p.requires_grad for p in m.model.layers[:2].parameters())
+    assert all(p.requires_grad for p in m.model.layers[2:].parameters())
+
+    # 3. Chunked nll on large-vocab HF model matches naive full-logits CE to <1e-5.
+    m.eval()
+    seqs = [([10, 20, 30, 40, 50, 60], 3), ([5, 15, 25, 35, 45], 2)]
+    got = exam_score.nll(m, seqs, device=torch.device("cpu"), batch=2)
+    with torch.no_grad():
+        for idx, (ids, first) in enumerate(seqs):
+            x = torch.tensor([ids[:-1]], dtype=torch.long)
+            y = torch.tensor([ids[1:]], dtype=torch.long)
+            y[0, : first - 1] = -100
+            logits = m(x).logits.float()
+            ref = float(F.cross_entropy(logits.transpose(1, 2), y, ignore_index=-100, reduction="none").sum())
+            assert got[idx] == pytest.approx(ref, rel=1e-5, abs=1e-5)
+
+    # 4. After one optimizer step on frozen model, frozen weights stay bit-identical while top layer updates.
+    m.train()
+    opt = torch.optim.AdamW([p for p in m.parameters() if p.requires_grad], lr=1e-2)
+    x = torch.randint(0, 100, (2, 6))
+    y = torch.randint(0, 100, (2, 6))
+    tr._backward_chunked_head(m, x, y, 1.0, torch.device("cpu"))
+    opt.step()
+    assert torch.equal(m.model.embed_tokens.weight, emb_before)
+    assert torch.equal(m.model.layers[0].lin.weight, bot_before)
+
+
+def test_reader_per_language_quantile_normalization_prevents_non_english_starvation():
+    """Verify examples/reader per-language quantile normalization prevents English-biased 1-5
+    scores from starving Korean, Arabic, Russian, and Japanese during selection & cooldown."""
+    root = ROOT / "examples" / "reader"
+    spec = importlib.util.spec_from_file_location("reader_quantile_test", root / "curator.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    assert mod._detect_script_group("The quick brown fox and the dog of the hill in winter.") == "en"
+    assert mod._detect_script_group("한국어 문서를 테스트하고 있습니다. 품질 평가 예시입니다.") == "hangul"
+    assert mod._detect_script_group("日本語のテスト文章です。ひらがなとカタカナと漢字。") == "ja"
+    assert mod._detect_script_group("Русский текст для проверки качества данных.") == "cyrillic"
+    assert mod._detect_script_group("هذا نص عربي لاختبار التوازن بين اللغات المختلفة.") == "arabic"
+
+    # Build 30 English docs rated 4.0..5.0 and 30 Korean docs rated 1.5..2.5 (biased English judge!).
+    cands = []
+    scores = {}
+    for i in range(30):
+        cands.append((0.9, i, 1000, "The English technical article and the analysis of systems in detail.", "en"))
+        scores[i] = round(4.0 + i / 30.0, 2)
+    for i in range(30):
+        doc_id = 100 + i
+        cands.append((0.9, doc_id, 1000, "한국어 기술 문서와 과학 분석 예제입니다.", "hangul"))
+        scores[doc_id] = round(1.5 + i / 30.0, 2)
+
+    fake_task = types.SimpleNamespace(train_tokens=5000)  # 20,000 bytes -> picks 20 of 60 docs
+    selected = mod.build_script(fake_task, cands, scores)
+    en_kept = sum(1 for d in selected if d < 100)
+    ko_kept = sum(1 for d in selected if d >= 100)
+    assert en_kept == 10 and ko_kept == 10, f"expected balanced 10/10, got en={en_kept} ko={ko_kept}"
+    # Cooldown band (last 25%) also contains both English and Korean top-quantile docs!
+    last_band = selected[-5:]
+    assert any(d < 100 for d in last_band) and any(d >= 100 for d in last_band)

@@ -874,8 +874,8 @@ func TestGradersAreRentedBeforeTheExam(t *testing.T) {
 	st.work = Work{Runners: 1, Rounds: []WorkRound{{ID: "s1-o00001", Entries: 3, GradesEarly: 3}}}
 	// Nothing seen yet: a machine starts in 8 minutes, and with 2 to fetch and script and 1 to
 	// sit the exam, the secure kinds that fit, the 3080 ($0.20) and the A5000 ($0.27), each
-	// 0.85 of a 3090 (100m/pass), are rented 211 minutes before they are to report; the PRO 4000 ($0.57),
-	// 0.8, 223.
+	// 0.85 of a 3090 (61.2m/pass with passOn3090=52m), are rented 133 minutes before they are
+	// to report; the PRO 4000 ($0.57), 0.8, 141.
 	st.drawnAt = time.Now().Add(-30 * time.Minute).Unix() // the exam is due in 270 minutes
 	if err := tick(context.Background(), f); err != nil {
 		t.Fatal(err)
@@ -883,7 +883,7 @@ func TestGradersAreRentedBeforeTheExam(t *testing.T) {
 	if len(rp.created) != 0 || !strings.Contains(out.String(), "waiting for the cheapest a round, RTX 3080 at $0.20 an hour") {
 		t.Fatalf("rented %d machines 270 minutes before the exam\n%s", len(rp.created), out)
 	}
-	st.drawnAt = time.Now().Add(-95 * time.Minute).Unix() // due in 205 minutes
+	st.drawnAt = time.Now().Add(-175 * time.Minute).Unix() // due in 125 minutes
 	if err := tick(context.Background(), f); err != nil {
 		t.Fatal(err)
 	}
@@ -1127,9 +1127,9 @@ func TestGradersTakeSeveralGradesBeforeTheExam(t *testing.T) {
 	rp, st := newFakeRunPod(t), newFakeStet(t)
 	f, out := testFleet(t, rp, st, 4)
 	f.o.Early, f.o.PerWorker, f.o.Settle, f.o.MaxHourly = 8*time.Hour, 1, 15*time.Minute, 16
-	// Nothing seen: the 3080 ($0.20, 0.85 of a 3090) passes in 100 minutes and leads by 211, so it
-	// takes three grades rented 412 minutes before the exam.
-	due := time.Now().Add(412*time.Minute + 30*time.Second)
+	// Nothing seen: the 3080 ($0.20, 0.85 of a 3090) passes in 61.2 minutes and leads by 133.4, so it
+	// takes three grades rented 256.7 minutes before the exam.
+	due := time.Now().Add(257*time.Minute + 30*time.Second)
 	st.work = Work{EarlyGradesPerMachine: 3, FastFirstSeconds: 120,
 		Rounds: []WorkRound{{ID: "s1-o00008", Entries: 6, GradesEarly: 6, ExamDue: due.Unix()}}}
 	if err := tick(context.Background(), f); err != nil {
@@ -1396,21 +1396,23 @@ func TestOnlyAMachineMeasuringTheBaselineTrainsTwice(t *testing.T) {
 func TestFitsDropsCardsTooSlowForLease(t *testing.T) {
 	rp, st := newFakeRunPod(t), newFakeStet(t)
 	f, _ := testFleet(t, rp, st, 1)
-	f.o.MinGPUMemory = 16
+	f.o.MinGPUMemory = 12
 	f.lease = 5 * time.Hour
 
+	// With passOn3090=52m, cards slower than ~0.40x a 3090 (e.g. RTX 2000 Ada at 0.35x) exceed
+	// a 5h lease on a 2-pass baseline plus margin; cards >=0.40x (even RTX 3060 12 GB!) fit.
 	for _, slow := range []Offer{
-		{Maker: "NVIDIA", MemoryGB: 16, Model: "NVIDIA GeForce RTX 4060 Ti", Card: "RTX 4060 Ti"},
-		{Maker: "NVIDIA", MemoryGB: 16, Model: "NVIDIA GeForce RTX 5060 Ti", Card: "RTX 5060 Ti"},
-		{Maker: "NVIDIA", MemoryGB: 24, Model: "NVIDIA L4", Card: "L4"},
 		{Maker: "NVIDIA", MemoryGB: 16, Model: "NVIDIA RTX 2000 Ada", Card: "RTX 2000 Ada"},
-		{Maker: "NVIDIA", MemoryGB: 24, Model: "NVIDIA Mystery Card", Card: "Mystery Card"},
 	} {
 		if f.fits(slow) {
 			t.Errorf("fits(%s) = true under 5h lease, want false", slow.Card)
 		}
 	}
 	for _, fast := range []Offer{
+		{Maker: "NVIDIA", MemoryGB: 12, Model: "NVIDIA GeForce RTX 3060", Card: "RTX 3060"},
+		{Maker: "NVIDIA", MemoryGB: 16, Model: "NVIDIA GeForce RTX 4060 Ti", Card: "RTX 4060 Ti"},
+		{Maker: "NVIDIA", MemoryGB: 16, Model: "NVIDIA GeForce RTX 5060 Ti", Card: "RTX 5060 Ti"},
+		{Maker: "NVIDIA", MemoryGB: 24, Model: "NVIDIA L4", Card: "L4"},
 		{Maker: "NVIDIA", MemoryGB: 16, Model: "NVIDIA RTX A4000", Card: "RTX A4000"},
 		{Maker: "NVIDIA", MemoryGB: 16, Model: "NVIDIA GeForce RTX 4080 SUPER", Card: "RTX 4080 SUPER"},
 		{Maker: "NVIDIA", MemoryGB: 24, Model: "NVIDIA GeForce RTX 3090", Card: "RTX 3090"},

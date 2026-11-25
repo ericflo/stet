@@ -34,15 +34,16 @@ _BYTE_DECODER = _gpt2_unicode_to_byte()
 class _HFEncoding:
     """Thin adapter exposing tiktoken's encode_ordinary / encode_ordinary_batch over HF `tokenizers`.
 
-    Uses a plain tokenizer with `added_tokens` cleared for encoding so literal strings like
-    `<|endoftext|>`, `<|im_start|>`, and `<tool_call>` in web pages are tokenized as ordinary
-    text rather than turning into control tokens (matching tiktoken's `encode_ordinary`).
+    Uses a plain tokenizer with special `added_tokens` cleared for encoding so literal strings like
+    `<|endoftext|>`, `</s>`, `<|im_start|>`, and `<tool_call>` in web pages are tokenized as
+    ordinary text rather than turning into control tokens (matching tiktoken's `encode_ordinary`).
     """
 
-    def __init__(self, enc_tok, dec_tok, name: str):
+    def __init__(self, enc_tok, dec_tok, name: str, *, byte_fallback: bool = False):
         self._enc = enc_tok
         self._dec = dec_tok
         self.name = name
+        self._byte_fallback = byte_fallback
 
     def encode_ordinary(self, text: str) -> list[int]:
         return self._enc.encode(text, add_special_tokens=False).ids
@@ -54,8 +55,25 @@ class _HFEncoding:
         return self._dec.decode(ids, skip_special_tokens=False)
 
     def decode_bytes(self, ids: list[int]) -> bytes:
-        """Recover exact UTF-8 byte length of a ByteLevel BPE token slice without U+FFFD inflation."""
+        """Recover exact UTF-8 byte length of a token slice without U+FFFD inflation.
+
+        Handles both GPT-2 ByteLevel BPE (Qwen3) and SentencePiece Metaspace + ByteFallback
+        (`<0xNN>` + `▁` -> space, ERNIE-4.5).
+        """
         out = bytearray()
+        if self._byte_fallback:
+            for tid in ids:
+                tok = self._dec.id_to_token(int(tid))
+                if tok is None:
+                    return self.decode(ids).encode("utf-8")
+                if len(tok) == 6 and tok.startswith("<0x") and tok.endswith(">"):
+                    try:
+                        out.append(int(tok[3:5], 16))
+                        continue
+                    except ValueError:
+                        pass
+                out.extend(tok.replace("\u2581", " ").encode("utf-8"))
+            return bytes(out)
         for tid in ids:
             tok = self._dec.id_to_token(int(tid))
             if tok is None:
@@ -106,9 +124,16 @@ def load_encoding(season: Season):
             verify=True,
         )
         raw = json.loads(path.read_text(encoding="utf-8"))
+        # Strip every added token so literal control strings in web text (whether marked
+        # special like `<|endoftext|>`/`</s>` or non-special like `<tool_call>`) encode as
+        # ordinary text; ERNIE's digit tokens `0`..`9` are already in `model.vocab`.
         plain_tok = Tokenizer.from_str(json.dumps({**raw, "added_tokens": []}))
         full_tok = Tokenizer.from_file(str(path))
-        return _HFEncoding(plain_tok, full_tok, name=f"stet-{season.id}")
+        dec_cfg = raw.get("decoder") or {}
+        byte_fallback = dec_cfg.get("type") == "ByteFallback" or any(
+            d.get("type") == "ByteFallback" for d in (dec_cfg.get("decoders") or [])
+        )
+        return _HFEncoding(plain_tok, full_tok, name=f"stet-{season.id}", byte_fallback=byte_fallback)
 
     import tiktoken
 

@@ -19,7 +19,7 @@ There are two kinds of work, and you choose whether to take the second.
 | | Grading | Running curators (`--edits`) |
 |---|---|---|
 | What runs on your machine | the fixed trainer, on plain data | entrants' programs, in a sandbox |
-| Needs | an NVIDIA (CUDA) or AMD (ROCm) GPU (16 GB+ VRAM), the season's PyTorch and Transformers, 25 GB of disk | also Linux, bubblewrap, the season's libraries, a 24 GB+ GPU machine at or above the floor, 80 GB of disk |
+| Needs | an NVIDIA (CUDA) or AMD (ROCm) GPU (12 GB+ VRAM; ≤10 GiB peak), the season's PyTorch and Transformers, 25 GB of disk | also Linux, bubblewrap, the season's libraries, a 24 GB+ GPU machine at or above the floor, 80 GB of disk |
 | Who is given it | anyone | accounts that are established (below) |
 
 The installer brings Python 3.13, PyTorch in the build for your GPU, and the season's
@@ -97,10 +97,11 @@ Grade jobs start as soon as a curator has written a script. The round's exam is 
 its draw, and posted as soon as the examiner has built it. A verifier handed a script
 before then trains at once and sits the exam the moment it is posted; one whose grade is
 trained and waiting asks for another, and sits them all then. At the official
-scale a grade is one training run (`Qwen3-0.6B-Base` top-half reset on 32.8M tokens plus a
-32-step SFT probe), about 35 minutes on an RTX 5090 (~47 minutes on an RTX 4090). The first job of a round also
-downloads the round's raw text (about 1.5 GB compressed; ~3.8 GB once built) and caches the
-pinned student weights (~1.2 GB).
+scale a grade is one training run (`ERNIE-4.5-0.3B-Base-PT`, bottom half frozen, top half
+reset, on 65.5M tokens plus a 32-step SFT probe), about 20 minutes on an RTX 5090 (~29
+minutes on an RTX 4090, ~52 minutes on an RTX 3090), using ≤10 GiB VRAM so 12 GB+ cards can
+grade. The first job of a round also downloads the round's raw text (about 1.5 GB compressed;
+~3.8 GB once built) and caches the pinned student weights (~0.7 GB).
 Four established machines a round are asked to train on the unedited corpus as well, and
 so is every machine that is not yet established: for them the first job takes about twice
 as long.

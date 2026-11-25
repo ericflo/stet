@@ -26,8 +26,8 @@ def env(corpus, monkeypatch):
         }  # fmt: skip
 
     base = {"exam": {"items": 2, "mean": -5.0, "item_scores": [-5.0, -5.0]}}
-    items = [Item(kind="answer", corner="agent/shell/ls", fmt="logs", lang="en", source="gen:agent", ctx="$ ls\na  b\n$ rm a\n$ ls\n", cont="b"),
-             Item(kind="answer", corner="logic/x", fmt="prose", lang="en", source="gen:logic", ctx="All cats purr. Tom is a cat. Does Tom purr?", cont=" Yes")]
+    items = [Item(kind="answer", corner="fresh/explain/en/0", fmt="prose", lang="en", source="explain:1", ctx="Excerpt.\nExplain why.\n", cont="Because it changed."),
+             Item(kind="answer", corner="fresh/infer/en/0", fmt="prose", lang="en", source="infer:1", ctx="Excerpt.\nWhat follows?\n", cont="It reduces latency.")]
     monkeypatch.setattr(data, "corpus", lambda rnd, scale, quiet=False: corpus)
     monkeypatch.setattr(data, "materialize", lambda rnd, scale, quiet=False: (corpus, items))
     monkeypatch.setattr(gym, "baseline", lambda rnd, scale, device: base)
@@ -45,7 +45,7 @@ def test_an_episode_is_a_round_and_the_reward_is_the_gain(env):
     reward, info = env.step([0, 3])
     assert env.seen["lines"] == ["0", "3"]
     assert reward == pytest.approx(0.2) and info["valid"] and info["baseline_mean"] == -5.0
-    assert info["gain_by_pillar"] == {"agents": pytest.approx(0.4), "logic": pytest.approx(0.0)}
+    assert info["gain_by_pillar"] == {"explain": pytest.approx(0.4), "infer": pytest.approx(0.0)}
     # The same round can be stepped again to compare another edit of the same corpus.
     assert env.step([0])[0] == pytest.approx(0.1)
 

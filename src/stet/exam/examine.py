@@ -26,7 +26,11 @@ from .items import Item, digest
 
 # Sources whose text is openly licensed, and is published with a settled round as it is. Every
 # other source's items are published as their source, id and hash.
-OPEN = ("gen:", "wikipedia:", "wikipedia-added:", "wikipedia-talk:")
+OPEN = (
+    "gen:",
+    "wikipedia:", "wikipedia-added:", "wikipedia-talk:",
+    "explain:wikipedia", "infer:wikipedia", "synthesis:wikipedia",
+)
 
 
 def public_items(items: list[Item]) -> list[dict]:
@@ -64,7 +68,7 @@ def read_public(raw: bytes, want: str) -> list[Item]:
     return kept
 
 
-def assemble(rnd, scale, snapshots: list[tuple[int, Path]], work: Path, log=print, measure: bool = True):
+def assemble(rnd, scale, snapshots: list[tuple[int, Path]], work: Path, log=print, measure: bool = True, synthesize: bool = True):
     """A round's exam from the harvests of its hours, (hour, the snapshot's path) in any order:
     its items, how many of them are fresh, the languages' shares, and each hour's sha256 in the
     hours' order. An official round's languages are measured on its own corpus; a practice
@@ -75,13 +79,15 @@ def assemble(rnd, scale, snapshots: list[tuple[int, Path]], work: Path, log=prin
     from .. import data
     from . import gen
     from .decontam import seen
+    from .farm import unpack_items
     from .fresh import read_snapshot
     from .fresh.langs import shares
+    from .fresh.reason import synthesize_reasoning
     from .fresh.select import SHARES, select, select_context
 
     season = rnd.season
     cfg = season.raw["exam"]
-    if int(cfg["generator_version"]) > gen.VERSION:
+    if int(cfg.get("generator_version", 0)) > gen.VERSION:
         raise RuntimeError(f"season {season.id} sets the generators at version {cfg['generator_version']}, this copy has {gen.VERSION}: upgrade stet")
     if not snapshots:
         raise ValueError(f"{rnd.id} has no harvest to make its exam from")
@@ -104,6 +110,23 @@ def assemble(rnd, scale, snapshots: list[tuple[int, Path]], work: Path, log=prin
     # Only the kinds of writing the season names: a document of any other kind is not on the exam.
     chooser = select_context if cfg["fresh"].get("mode") == "context" else select
     fresh = chooser(docs, rnd.seed, int(cfg["fresh"]["items"]), plan_of(season).parts, per_corner=int(cfg["fresh"]["per_corner"]), shares=mix)
+
+    # Fresh harvest-derived comprehension & reasoning (Season 3 Exam C v2): deterministic greedy
+    # synthesis cached under `work` by snapshot + seed so retries cost zero GPU work.
+    if r_cfg := cfg.get("reasoning"):
+        rcache = work / f"reasoning-{snapshot_name(shas)[:12]}-{rnd.seed.hex()[:8]}.jsonl.zst"
+        if rcache.exists():
+            reasoning = unpack_items(rcache.read_bytes())
+            log(f"  reasoning items: {len(reasoning)} loaded from cache")
+        elif synthesize:
+            reasoning = synthesize_reasoning(docs, rnd.seed, r_cfg, shares=mix, log=log)
+            if not reasoning:
+                raise RuntimeError(f"{rnd.id}: reasoning synthesis produced zero items")
+            rcache.write_bytes(pack_items(reasoning))
+        else:
+            reasoning = []
+        fresh = fresh + reasoning
+
     mark = work / f"seen-{digest(fresh)[:12]}.json"
     if mark.exists():
         dropped = set(json.loads(mark.read_text()))
@@ -113,7 +136,8 @@ def assemble(rnd, scale, snapshots: list[tuple[int, Path]], work: Path, log=prin
     if dropped:
         log(f"  {len(dropped)} fresh items are in the round's corpus already, and are dropped")
     fresh = [it for i, it in enumerate(fresh) if i not in dropped]
-    items: list[Item] = gen.for_season(season, rnd.seed) + fresh
+    generated = gen.for_season(season, rnd.seed) if int(cfg.get("per_corner", 0)) > 0 else []
+    items: list[Item] = generated + fresh
     log(f"  the exam: {len(items)} items, {len(fresh)} of them fresh")
     return items, len(fresh), mix, shas
 

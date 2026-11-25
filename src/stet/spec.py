@@ -88,8 +88,13 @@ class Season:
         # Pinned base student files (if the season starts from a pretrained checkpoint).
         for f in (self.raw.get("student") or {}).get("files") or []:
             h.update(bytes.fromhex(f["sha256"]))
-        # the facts its knowledge items ask
-        h.update(resources.files("stet.exam").joinpath("data", self.raw["exam"]["facts"]["file"]).read_bytes())
+        # Pinned SFT probe pack (if the season bundles a fixed multilingual SFT probe).
+        sft_cfg = self.raw.get("sft") or {}
+        if sft_cfg.get("pack"):
+            h.update(resources.files("stet.exam").joinpath("data", sft_cfg["pack"]).read_bytes())
+        # the facts its knowledge items ask (when the season uses generated knowledge items)
+        if facts_cfg := (self.raw.get("exam") or {}).get("facts"):
+            h.update(resources.files("stet.exam").joinpath("data", facts_cfg["file"]).read_bytes())
         for s in self.pool("gym"):
             h.update(bytes.fromhex(s.sha256))
         return h.hexdigest()

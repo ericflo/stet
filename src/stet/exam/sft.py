@@ -9,8 +9,27 @@ of Wikidata facts so there is zero overlap with any exam item.
 
 from __future__ import annotations
 
+import hashlib
+import json
+from importlib import resources
+
+from ..spec import prf_u64
 from .gen import algebra, algo, arith, context, knowledge, logic, shell, shots, units, word
 from .rng import Rng
+
+
+def _load_sft_pack(pack_file: str, want_sha: str, seed: bytes | str) -> list[tuple[str, str]]:
+    """Load a bundled, sha256-pinned multilingual SFT probe pack in deterministic seeded order."""
+    import zstandard
+
+    blob = resources.files("stet.exam").joinpath("data", pack_file).read_bytes()
+    if want_sha and hashlib.sha256(blob).hexdigest() != want_sha:
+        raise RuntimeError(f"SFT pack {pack_file} does not match the season's sha256")
+    raw = zstandard.ZstdDecompressor().decompress(blob, max_output_size=32 << 20).decode("utf-8")
+    rows = [json.loads(ln) for ln in raw.split("\n") if ln]
+    seed_b = seed if isinstance(seed, bytes) else str(seed).encode()
+    order = sorted(range(len(rows)), key=lambda i: (prf_u64(seed_b, "sft-pack", i), i))
+    return [(rows[i]["prompt"], rows[i]["comp"]) for i in order if rows[i].get("prompt") and rows[i].get("comp")]
 
 
 def _odd_knowledge(rng: Rng, corner: str) -> tuple[str, str]:
@@ -59,6 +78,24 @@ def build_sft_examples(
     blocked_exact: set[tuple[str, str]] = set(raw_exclude)
     blocked_tail: set[tuple[str, str]] = {(_tail_question(p), c.strip()) for p, c in raw_exclude}
     blocked_qa: set[str] = {f"{_tail_question(p)}{c}".strip() for p, c in raw_exclude}
+
+    # Season 3+: use the pinned commercial-permissive multilingual SFT dev/train pack when named.
+    sft_cfg = (season.raw.get("sft") or {}) if season is not None else {}
+    if pack_file := sft_cfg.get("pack"):
+        packed = _load_sft_pack(pack_file, str(sft_cfg.get("pack_sha256") or ""), seed)
+        out_p: list[tuple[str, str]] = []
+        seen_p: set[tuple[str, str]] = set()
+        for pair in packed:
+            if pair in seen_p or pair in blocked_exact:
+                continue
+            blocks = [b.strip() for b in pair[0].split("\n\n")]
+            if (blocks[-1], pair[1].strip()) in blocked_tail:
+                continue
+            seen_p.add(pair)
+            out_p.append(pair)
+            if len(out_p) >= n:
+                break
+        return out_p
 
     rng = Rng(seed, "sft-probe/v1")
     buckets: list[tuple[str, list[str], object]] = [

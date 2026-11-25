@@ -5,12 +5,14 @@ This file is the complete brief. Read all of it before changing anything.
 
 ## The task
 
-A fixed 0.6B-class language model (the *student*: `Qwen/Qwen3-0.6B-Base` with its top half
-of layers reset from the round's seed) is trained on raw web text for a fixed number of
-tokens, run through a short fixed multilingual fine-tuning probe, and then sits an exam that
-is made when the round is drawn: half fresh twin-context comprehension from the day before,
-half generated multilingual skills. The model, the trainer, the probe and how the exam is
-made are fixed. **The only thing you control is the training data.**
+A fixed 0.3B language model (the *student*: `baidu/ERNIE-4.5-0.3B-Base-PT`, 18 × 1024, with
+its embeddings and lower half of layers frozen and its upper half reset from the round's
+seed) is trained on raw web text for a fixed number of tokens (65.5M at official `standard`
+scale), run through a short fixed multilingual fine-tuning probe, and then sits a 100%-fresh
+exam made when the round is drawn: half fresh twin-context comprehension from three hours of
+the day before, half fresh harvest-derived multi-sentence reasoning from those same three
+hours. The model, the trainer, the probe and how the exam is made are fixed. **The only thing
+you control is the training data.**
 
 Your curator is a program. It is handed a pile of raw web pages it has never seen and a time
 limit, and it writes an *edit script*: which documents, or parts of documents, the student
@@ -45,9 +47,9 @@ stet run --json
 
 **Run `stet harvest` once first.** It fetches three hours of recent human writing from the
 sources official exams are made from: no account, no key, some minutes for each hour. From
-then on every practice round's exam holds twin-context comprehension items, as an official
-round's does. Without it a practice round's exam is the generated skills alone, half of the
-official score: `stet run` says so, and the result has `"writing": false`.
+then on every practice round's exam holds fresh twin-context comprehension items from the
+hours you hold. Without it a practice round uses the bundled openly-licensed CC-BY-SA
+Wikipedia practice pack (both twin-context comprehension and reasoning).
 
 Run `stet run --json` after every change. It runs your curator on a practice round, trains
 the student, sits the exam, and prints one JSON object on stdout. Progress goes to stderr.
@@ -56,9 +58,9 @@ Exit status is 0 for a valid run and 2 for an invalid one.
 | Field | Meaning |
 |---|---|
 | `valid` | `false` means the run scored as the unedited corpus. Read `invalid_reason`. |
-| `gain` | Your student's exam score less the unedited corpus's, in bits per byte: comprehension half, skills half. 0 for an invalid run. **Maximise this.** |
-| `pillars` | The gain in each pillar the exam has: `pillars.reference`, `pillars.agents` and so on. The weakest shows what your data lacks. |
-| `writing` | Whether the exam held human writing. `false`: nothing is harvested, and `gain` is the skills alone. |
+| `gain` | Your student's exam score less the unedited corpus's, in bits per byte: comprehension half, reasoning half. 0 for an invalid run. **Maximise this.** |
+| `pillars` | The gain in each pillar the exam has: `pillars.reference`, `pillars.explain` and so on. The weakest shows what your data lacks. |
+| `writing` | Whether the exam held fresh harvested writing (or the bundled CC-BY-SA practice pack). |
 | `exam.items`, `exam.mean` | How many items the student sat, and its mean score on them (minus the bits per byte it needed, so nearer 0 is better). `baseline.mean` is the unedited student's. |
 | `script` | What your script did: documents kept, bytes, passes over the data. |
 | `edit.seconds`, `edit.time_limit` | How long your curator took, and how long it may. |
@@ -89,23 +91,23 @@ stet clean                    # delete downloaded rounds and model files (fetche
 
 **Never judge a change on one round.** Rounds differ from each other by more than most
 improvements. Use `--rounds 3` or more and compare mean gains. Training the same script
-again moves its gain by about 0.02 at micro and 0.004 at standard (provisional; four
-independent deterministic standard runs of the unedited corpus on `s3-p00000` had sd 0.0019), so on one round a
-difference smaller than twice that is noise. Confirm anything smaller over `--rounds 5`.
-The order of a script matters too: the trainer does not shuffle, and the same pages in
-another order can move a standard gain.
-An exam with no writing in it is less steady: the skills are the noisier part.
+again moves its gain by about 0.02 at micro and 0.004 at standard (provisional; repeated
+deterministic standard runs of the unedited corpus on `s3-p00000` had sd `0.0004` on the full
+exam), so on one round a difference smaller than twice that is noise. Confirm anything smaller
+over `--rounds 5`. The order of a script matters too: the trainer does not shuffle, and the
+same pages in another order can move a standard gain.
 
 **Compare runs made against the same harvest.** A practice round's corpus never changes,
-but its exam's comprehension items come from three of the hours you hold, chosen by the
+but its exam's fresh comprehension items come from three of the hours you hold, chosen by the
 round's seed. Harvesting more hours, or new ones, changes it, and the round's exam and
 baseline are made again the first time it is run. Many runs against the same hours can fit
 them: `stet harvest --fresh` before you submit is the check.
 
-**Iterate small, confirm at standard.** A nano run takes a few minutes and micro under ten.
-The competition is scored at standard: your curator's twenty minutes on a 24 GB+ GPU, then
-about 35 minutes of training on an RTX 5090 (~47 minutes on an RTX 4090) for 32.8M tokens
-plus the 32-step SFT probe. Check at standard before you submit.
+**Iterate small, confirm at standard.** A nano run takes under a minute and micro a few
+minutes on any 12 GB+ GPU (peak VRAM ≤10 GiB). The competition is scored at standard: your
+curator's twenty minutes on a 24 GB+ GPU, then about 20 minutes of training on an RTX 5090
+(~29 minutes on an RTX 4090, ~52 minutes on an RTX 3090) for 65.5M tokens plus the 32-step
+SFT probe. Check at standard before you submit.
 
 ## What your curator is given
 
@@ -124,8 +126,9 @@ From Python, `from stet.curator import Task; task = Task.from_env()` gives you:
 
 - `task.corpus`: `len(corpus)`, `corpus.text(i)`, `corpus.raw(i)` (bytes), `corpus.size(i)`,
   `corpus.sizes` (numpy array), `corpus.urls[i]`, and `for i, text in corpus`.
-- `task.train_tokens`: the training budget. Under Qwen3's tokenizer, English prose is
-  roughly 3.8 bytes per token, and the raw crawl as a whole about 3.4.
+- `task.train_tokens`: the training budget (65,536,000 at `standard`). Under ERNIE-4.5's
+  103,424-token multilingual tokenizer, English prose is roughly 3.8 bytes per token, and the
+  raw crawl as a whole about 3.4.
 - `task.info`: everything in `task.json`, including `min_copy_bytes`.
 - `task.time_left()`: seconds until the deadline.
 - `task.asset("name")`: the path of a model file or directory named in `stet.toml`.
@@ -201,39 +204,37 @@ does not shuffle.
 
 ## The exam
 
-An official round's exam is made at its draw, so nobody can know it in advance, the
-organisers included. **Half of the score is fresh twin-context comprehension from writing
-people published. Half is generated multilingual skills.** There is zero raw web perplexity,
-and every part is measured in unified **bits per byte**. Inside each group, every pillar
-counts the same:
+An official round's exam is **100% fresh** and made at its draw, so nobody can know it in
+advance, the organisers included. There are zero static benchmarks, zero synthetic templates,
+and zero raw web perplexity. **Half of the score is fresh twin-context comprehension from
+writing people published. Half is fresh harvest-derived multi-sentence reasoning from those
+exact same three hours.** Every part is measured in unified **bits per byte**. Inside each
+group, every pillar counts the same:
 
 | Pillar | Group | What the student is asked |
 |---|---|---|
 | `reference` | comprehension | Same continuation under real vs wrong openings of new Wikipedia articles (same source & language) |
 | `news` | comprehension | Same continuation under real vs wrong openings of fresh news reports (same source & language) |
-| `technical` | comprehension | Same continuation under real vs wrong openings of GitHub issues, PRs, releases and patches |
+| `technical` | comprehension | Same continuation under real vs wrong openings of GitHub issues, PRs, release notes and patches |
 | `conversation` | comprehension | Same continuation under real vs wrong openings of Hacker News, Lemmy, forums, Bluesky, Mastodon, talk pages |
-| `agents` | skills | What a tool says back, in a session at a shell |
-| `reading` | skills | An answer, or a new rule, taken from the context |
-| `logic` | skills | What follows from what is given |
-| `grammar` | skills | The right sentence of two |
-| `numbers` | skills | Arithmetic, units, word problems and algebra, each after a few worked examples |
-| `programs` | skills | What a small algorithm returns (a list sorted, a letter counted), after a few worked examples |
-| `knowledge` | skills | Facts the web knows in ten languages (strictly disjoint from the SFT probe) |
+| `explain` | reasoning | Multi-sentence causal or mechanism explanation derived from a fresh harvested excerpt (in its own language) |
+| `infer` | reasoning | Multi-sentence analytical inference of implications or trade-offs derived from a fresh harvested excerpt |
+| `synthesis` | reasoning | Declarative prose synthesis of a fresh harvested excerpt's main point and rationale (zero Q/A punctuation) |
 
-- **The writing is newer than the crawl.** It is what people published in three hours
-  of the day before the draw, and the draw picks the hours. The round's corpus was crawled
-  before any of it existed, and your curator has no network when it runs and can add no
-  text of its own, so there is nothing to look up or to fit in advance.
-- **Every language counts by its share of the round's corpus**, inside every kind of
-  writing. More than half of a crawl is not English, and five of the seven skills are asked
-  in the web's main languages too: only `numbers` and `programs` are in English alone. So a
-  curator that keeps only English gives up the writing and the skills in every other
-  language: about half of the score. Throwing away every page that is not English is not
-  obviously right.
-- **The skills are made from the round's seed.** Every answer but a fact follows from what
-  the item itself shows. `knowledge` asks well-known facts (a country's capital, who wrote
-  a book), which the student knows only from pages that say them.
+- **100% newer than the crawl.** Both halves come from what people published in three hours
+  of the day before the draw, picked by the draw. The round's corpus was crawled before any
+  of it existed, and your curator has no network when it runs and can add no text of its own,
+  so there is nothing to look up or to fit in advance.
+- **Every language counts by its share of the round's corpus**, across BOTH comprehension and
+  reasoning. More than half of a crawl is not English, so a curator that keeps only English
+  (or scores non-English pages lower on an English-biased rubric) gives up roughly half the
+  exam.
+- **Harvest-derived reasoning is deterministic and anti-gaming.** At the draw, the examiner
+  derives multi-sentence `explain`, `infer`, and `synthesis` items from the same three fresh
+  hours using pinned greedy (`temperature=0`) decoding (`Qwen/Qwen3-8B`), six varied natural
+  prompt wrappers (`synthesis` uses zero `?` or `Q:/A:` syntax so QA-spam cannot game it),
+  and a `<50%` 5-gram verbatim-copying filter. Both the source excerpt and the response are
+  decontaminated against the round's training corpus.
 - **Scored by twin-context comprehension or answer likelihood, never raw web perplexity.**
   Fresh comprehension items (`reference`, `news`, `technical`, `conversation`) split each
   document cleanly on a sentence or paragraph boundary and score the exact same continuation
@@ -242,22 +243,22 @@ counts the same:
   `(mean_w nll(cont | wrong_w) − nll(cont | ctx)) / (ln 2 · max(16, bytes(cont)))`.
   Because the exact same continuation is scored under both, unconditional passage ease and
   surface style mimicry cancel identically; only genuine contextual understanding moves the
-  score. Skill items (`agents`, `reading`, `logic`, `numbers`, `programs`, `knowledge`) score
-  right-answer likelihood in bits per byte (floored at 16 bytes), and `grammar` scores the
-  right sentence minus the broken one.
+  score. Reasoning items (`explain`, `infer`, `synthesis`) score multi-sentence response
+  likelihood in bits per byte (floored at 16 bytes) after the fixed 1-epoch multilingual SFT
+  probe.
 - **No one area can carry the rest.** A pillar missing from an exam gives its share to the
   others of its group. Gains on items are clipped, and a language or a format with fewer
   than eight items counts in proportion. `pillars` shows the weakest.
 - **Everything on the exam counts.** The season names every part of the exam: the pillars
   above, and nothing else. Each part is validated before the season for multi-seed stability,
-  anti-mimicry resistance, and agreement with published pretraining recipes. Nothing is sat
-  that the score leaves out, so there is no part to ignore.
-- **A practice round's exam is made the same way** once you have run `stet harvest`: the
-  generated items, and writing from the hours you hold, with each language weighed by
-  Common Crawl's published shares and anything the round's corpus already holds left out.
-  With nothing harvested it is the skills alone.
+  DataDecide 1B pretraining ranking agreement, and adversarial resistance (QA-spam, splice-QA,
+  surface mimicry, and over-filtering). Nothing is sat that the score leaves out.
+- **Practice rounds work out of the box.** Without harvested hours, `stet run` sits a bundled
+  openly-licensed CC-BY-SA Wikipedia practice pack (both twin-context comprehension and
+  reasoning); once you run `stet harvest`, practice rounds sit fresh twin-context writing
+  from the hours you hold.
 - A settled official round can be replayed: `stet run --round <id>` sits what the round
-  published, its generated items and its Wikipedia text.
+  published (openly licensed Wikipedia items whole).
 
 Do not put published exam text in your curator, or train a model on it. Curators are
 published, it will be seen, and it defeats the point.
@@ -276,9 +277,9 @@ published, it will be seen, and it defeats the point.
 
 Full-page text means every language, plus menus, cookie banners, footers, link lists,
 shop listings and spam around the prose. At standard a round's corpus is 12 units (24
-Common Crawl WET shards, about 500,000 documents and 3.8 GB, roughly 1.1B tokens — ~35×
-the 32.8M-token student budget). That ~35× pool lets CPU-speed filters (rules, fastText,
-small encoders) select a 3–10% slice without repetition, while neural curators (`vLLM` with
+Common Crawl WET shards, about 500,000 documents and 3.8 GB, roughly 1.1B tokens — ~17×
+the 65.5M-token student budget). That ~17× pool lets CPU-speed filters (rules, fastText,
+small encoders) select a 6–15% slice without repetition, while neural curators (`vLLM` with
 0.6B–0.8B models) can prefilter and then rate tens to hundreds of thousands of candidate
 excerpts inside twenty minutes (`examples/reader` rates all ~145,000 prefiltered excerpts
 on `s3-p00000`). You do not need to read every page: `task.stream()` lets you stream
@@ -519,41 +520,40 @@ stet/reader` or `stet fork stet/fineweb2` copies one): `identity`, `english`, `t
 multilingual quality rater). `fineweb2` and `reader` run in every round, and each of the
 others in one round in eight.
 
-What earlier seasons and the Season 3 `s3-p00000` standard-scale rehearsals showed (gains
-over the unedited corpus, in bits per byte):
+What earlier seasons and the Season 3 validation experiments showed (gains over the unedited
+corpus, in bits per byte):
 
-- **Surface mimicry no longer buys the exam.** In Season 2's raw-perplexity exam, `mimic`
-  scored +0.10 by matching surface formatting and vocabulary of the exam's sources, beating
-  `fineweb2` (+0.05). Under Season 3's twin-context comprehension + skills exam, surface
-  style cancels out: `mimic` dropped to `+0.0017` overall (`+0.0130` comprehension,
-  `-0.0095` skills on the initial `v10` rehearsal), whereas on the exact 11-pillar `v11` exam
-  with the 1-epoch SFT probe (two seeds each against a 4-run unedited median), `reader`
-  averaged `+0.0110` (`+0.0146` comprehension, `+0.0074` skills; `passes = 1.00`) and
-  `fineweb2` averaged `+0.0075` (`+0.0123` comprehension, `+0.0027` skills).
-- **Neural scoring beats heuristics on the same candidates.** Turning off the 0.6B model in
-  `reader` (keeping its exact prefilter fallback) dropped `s3-p00000` by `-0.045` bpb.
-- **Languages decide a lot.** Keeping every language and cleaning each (`fineweb2`,
-  `reader`) beats English-only corpora, which give up half the exam's non-English weight
-  (across 4 independent seeds each, English-only DataDecide corpora scored `+0.035` to
-  `+0.056` on English items yet `-0.036` to `-0.074` on the full multilingual exam).
-- **Quality filters trade capabilities.** They help English prose. They cost code and tool
-  logs (rules that delete lines with braces delete programs), which `technical` and
-  `agents` ask for, and everything not in English.
-- **Keep the forms answers come in.** Much of `agents` and `technical` is whether the
-  student has seen logs, program output, tables and code at all.
+- **Surface mimicry and QA-spam no longer buy the exam.** In Season 2's raw-perplexity exam,
+  `mimic` beat `fineweb2` (+0.10 vs +0.05) by matching surface style. Under Season 3's
+  100%-fresh twin-context comprehension + harvest-derived reasoning exam (`ERNIE-4.5-0.3B`
+  frozen bottom half, 65.5M tokens + 1-epoch SFT probe), `fineweb2` (`+0.0255`, SNR `64×`
+  against unedited sd `0.0004`) decisively beats `mimic` (`+0.0217`), QA-spam (`+0.0044`),
+  English-only (`-0.0508`), spliced Q&A (`-0.0558`), and extreme over-filtering (`-0.5011`).
+- **Agreement with 1B pretraining.** Across all 12 published DataDecide recipes (Dolma,
+  DCLM, FineWeb-Edu, C4, etc.), the Season 3 student + 100%-fresh exam cleared 81.8%
+  pairwise agreement with 1B-parameter 100B-token downstream accuracy (`93.5%` on pairs ≥2pt
+  apart, Spearman `ρ = +0.832`, exact Top-4 match).
+- **Balance every language — watch out for English-rubric bias.** Keeping every language and
+  cleaning each (`fineweb2`, `reader`) beats English-only corpora by >0.07 bpb. When using an
+  English-prompted LLM judge (like `examples/reader`), normalize scores per language/script
+  quantile before selecting and ordering documents — raw 1–5 scores from English rubrics
+  underrate Korean, Russian, and Arabic and starve them during selection and LR cooldown!
+- **Quality filters trade capabilities.** They help prose. They can cost code and technical
+  text (rules that delete lines with braces delete programs), which `technical` asks for, and
+  everything not in English.
 - **Cut lines with care.** `tidy` used to keep only the lines of a page that read as
   sentences. The same pages copied whole scored 0.03 bits per byte higher on the writing,
   in four orders out of four: the lines it cut held the code and the lists that
   `technical` asks for. Whole lines taken out with a range edit (`"k"`) are allowed,
   however short the lines that are kept; make sure they were not worth keeping.
-- **Repeating costs more as the student grows.** Keeping a small best slice and training on
-  it many times pays most for a small student.
-- **Do not train in rank order.** The corpus arrives already shuffled. If you rank
-  documents, shuffle what you keep. Whether a deliberate curriculum beats a shuffle is open.
+- **Repeating costs more as the student grows.** Keeping a tiny slice and repeating it dozens
+  of times collapses generalization (`adv_overfilter`: `-0.5011` bpb at 65.5M tokens).
+- **Do not train in raw rank order.** The corpus arrives already shuffled. If you rank
+  documents, shuffle inside quality bands (a gentle curriculum) or shuffle what you keep.
 
 Open questions, which is where the gains are: a classifier or small model trained for the
-job that cleans every language in twenty minutes; balance between the writing and the
-skills; near-duplicate removal; how much repetition helps; ordering.
+job that cleans every language fairly in twenty minutes; balancing prose, technical/code,
+and reasoning text; near-duplicate removal; how much repetition helps; curriculum ordering.
 
 ## Lending a GPU
 

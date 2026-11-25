@@ -14,9 +14,9 @@ import (
 // pillarResult is a grade whose student gains this much on every item of each of testTable's
 // parts, over a baseline of -6 on every item. The exam's aggregate of a gain that is the same
 // on every item of a pillar is that gain for the pillar.
-func (w *world) pillarResult(c *claimed, logic, reference float64) map[string]any {
+func (w *world) pillarResult(c *claimed, explain, reference float64) map[string]any {
 	p := w.result(c, 5, 6)
-	gains := map[string]float64{"logic": logic, "reference": reference}
+	gains := map[string]float64{"explain": explain, "reference": reference}
 	var scores []float64
 	sum := 0.0
 	for _, it := range testTable() {
@@ -107,7 +107,7 @@ func TestAnEntrysPillarsAreMadeOfTheGradesItsGainIsMadeOf(t *testing.T) {
 		}
 	}
 	// On each pillar, the mean over its two runs of the mean over the run's two grades.
-	want := map[string]float64{"logic": (0.40 + 0.60 + 0.20 + 0.50) / 4, "reference": (0.60 + 0.50 + 0.70 + 0.58) / 4}
+	want := map[string]float64{"explain": (0.40 + 0.60 + 0.20 + 0.50) / 4, "reference": (0.60 + 0.50 + 0.70 + 0.58) / 4}
 	if len(e.BySource) != len(want) {
 		t.Fatalf("the entry's pillars: %v", e.BySource)
 	}
@@ -139,7 +139,7 @@ func TestAnEntrysPillarsAreMadeOfTheGradesItsGainIsMadeOf(t *testing.T) {
 			t.Fatalf("the entry has %d grades", len(rs))
 		}
 		for _, r := range rs {
-			if math.Abs(sum(r.BySource)-*e.Gain) < 1e-3 || math.Abs(r.BySource["logic"]-e.BySource["logic"]) < 1e-3 {
+			if math.Abs(sum(r.BySource)-*e.Gain) < 1e-3 || math.Abs(r.BySource["explain"]-e.BySource["explain"]) < 1e-3 {
 				t.Fatalf("this test is not testing anything: one grade's pillars are the entry's: %v", r.BySource)
 			}
 		}

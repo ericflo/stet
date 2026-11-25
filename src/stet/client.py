@@ -907,7 +907,7 @@ def _grade_job(job, season, scale, device, key, out, work: Path, bases: dict | N
     out.line("", out.dim("the round's exam is not posted yet: training now, and sitting it once it is"))
     def _offload_cpu(t):
         """Move a held early-grade student off the GPU while waiting for the exam, so subsequent
-        trainings on a 16 GB grader never share VRAM with held baselines or pending students."""
+        trainings on a 12 GB grader never share VRAM with held baselines or pending students."""
         if t is not None and getattr(t, "model", None) is not None and getattr(device, "type", "") == "cuda":
             import torch
 

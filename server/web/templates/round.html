@@ -57,7 +57,7 @@
   {{else}}
   {{if $d.Alone}}<p class="note early"><b>One machine behind every score here.</b> No volunteer was around, so the organisers' machine ran and graded each curator itself. Every script is public for anyone to re-grade. <a href="/verify">Lend a GPU →</a></p>{{end}}
   <div class="list-head"><h2>Results</h2></div>
-  <p class="caption"><b>Gain</b> is how much better the model did on the exam after learning from a curator's pages than from the same pages unedited, in bits per byte. Twin-context comprehension is half of it, skills half. Tap a curator to see who ran it and who checked it.</p>
+  <p class="caption"><b>Gain</b> is how much better the model did on the exam after learning from a curator's pages than from the same pages unedited, in bits per byte. Fresh twin-context comprehension is half of it, fresh harvest-derived reasoning half. Tap a curator to see who ran it and who checked it.</p>
   <ol class="ranked results" id="runs">
     {{range $d.Entries}}<li id="e-{{short .EditorID}}"><details class="open-row">
       <summary class="row opens">
@@ -108,15 +108,16 @@
     <details class="more" id="exam">
       <summary>{{if $r.ExamSHA}}What its exam was made of{{else}}Its exam{{end}}</summary>
       <div class="in">
-        <p class="lead">Every round's exam is new, made at the draw, so nobody can know it in advance, the organisers included. Half of the score is fresh twin-context comprehension from three hours of writing people published the day before, picked by the draw (the same continuation scored under its real opening minus length-matched wrong openings from the same source and language, in bits per byte); the round's training data was gathered before any of it was written. Half is problems generated from the round's random seed.</p>
+        <p class="lead">Every round's exam is 100% fresh and made at the draw, so nobody can know it in advance, the organisers included. Half of the score is fresh twin-context comprehension from three hours of writing people published the day before, picked by the draw (the same continuation scored under its real opening minus length-matched wrong openings from the same source and language, in bits per byte); half is fresh comprehension and reasoning items (explain, infer, synthesis) derived deterministically from those same three hours. The round's training data was gathered before any of it was written.</p>
         {{if eq $r.Status "scheduled"}}<p class="lead">This one does not exist yet. It is made at the draw, from three of the hours of writing harvested by then.</p>
         {{else if not $r.ExamSHA}}<p class="lead">This one is being made now{{with $d.Work}}{{with .ExamDue}}, and is due about {{hm .}} UTC{{end}}{{end}}{{if $r.Hours}}, from what people published in the hours from {{range $i, $h := $r.Hours}}{{if $i}} · {{end}}{{hourof $h.Hour}}{{end}} UTC{{end}}. Text already in the round's training data is left out.</p>
-        {{else}}{{with $r.ExamMix}}<p class="lead"><b>{{comma .Items}} items</b>, posted {{datetime $r.ExamAt}}: {{comma .Fresh}} passages people wrote{{if $r.Hours}} in the hours from {{range $i, $h := $r.Hours}}{{if $i}} · {{end}}{{hourof $h.Hour}}{{end}} UTC{{if $r.HoursLate}} (chosen after the draw: nothing had been harvested by then){{end}}{{end}}{{if .Langs}}, in {{.Langs}} {{plural .Langs "language" "languages"}}{{end}}, and {{comma (sub .Items .Fresh)}} problems generated from the round's seed.</p>
-        <dl class="kv">{{range .Parts}}{{if .Items}}
-          <dt>{{.Pillar}}</dt><dd>{{comma .Items}} {{if .Fresh}}written by people{{else}}generated{{end}}{{if .Share}}<span class="why">{{pct1 .Share}} of the score</span>{{end}}</dd>{{end}}{{end}}
+        {{else}}{{with $r.ExamMix}}{{if gt (sub .Items .Fresh) 0}}<p class="lead"><b>{{comma .Items}} items</b>, posted {{datetime $r.ExamAt}}: {{comma .Fresh}} passages people wrote{{if $r.Hours}} in the hours from {{range $i, $h := $r.Hours}}{{if $i}} · {{end}}{{hourof $h.Hour}}{{end}} UTC{{if $r.HoursLate}} (chosen after the draw: nothing had been harvested by then){{end}}{{end}}{{if .Langs}}, in {{.Langs}} {{plural .Langs "language" "languages"}}{{end}}, and {{comma (sub .Items .Fresh)}} problems generated from the round's seed.</p>
+        {{else}}<p class="lead"><b>{{comma .Items}} items</b>, posted {{datetime $r.ExamAt}}: all {{comma .Fresh}} built from writing people published{{if $r.Hours}} in the hours from {{range $i, $h := $r.Hours}}{{if $i}} · {{end}}{{hourof $h.Hour}}{{end}} UTC{{if $r.HoursLate}} (chosen after the draw: nothing had been harvested by then){{end}}{{end}}{{if .Langs}}, in {{.Langs}} {{plural .Langs "language" "languages"}}{{end}} (twin-context comprehension and harvest-derived reasoning).</p>
+        {{end}}<dl class="kv">{{range .Parts}}{{if .Items}}
+          <dt>{{.Pillar}}</dt><dd>{{comma .Items}} {{if eq .Group "reasoning"}}harvest-derived reasoning{{else if .Fresh}}written by people{{else}}generated{{end}}{{if .Share}}<span class="why">{{pct1 .Share}} of the score</span>{{end}}</dd>{{end}}{{end}}
         </dl>
         {{else}}<p class="lead">Posted {{datetime $r.ExamAt}}{{if $r.Fresh}}, with {{comma $r.Fresh}} passages people wrote{{end}}.</p>{{end}}
-        <p class="lead">{{if eq $r.Status "settled"}}<a href="/api/v1/rounds/{{$d.ID}}/exam">Download it</a>: the generated problems and Wikipedia's text whole, and for every other site what each item was and where it came from, without the text itself.{{else}}Graders have it now. Everyone else can download it when the round settles.{{end}}</p>{{end}}
+        <p class="lead">{{if eq $r.Status "settled"}}<a href="/api/v1/rounds/{{$d.ID}}/exam">Download it</a>: openly licensed Wikipedia items whole, and for every other site what each item was and where it came from, without the text itself.{{else}}Graders have it now. Everyone else can download it when the round settles.{{end}}</p>{{end}}
       </div>
     </details>
     <details class="more"{{if eq $r.Status "scheduled"}} open{{end}}>
@@ -132,7 +133,7 @@
           <dt>Crawl</dt><dd>{{.Crawl}}<span class="why">{{comma .NShards}} files of Common Crawl, named when the round was announced</span></dd>
           <dt>File list sha256</dt><dd><code>{{.PathsSHA256}}</code></dd>
           {{end}}
-          {{if $d.SeedInput}}<dt>Seed</dt><dd><code>sha256("{{$d.SeedInput}}")</code><br><code>= {{$r.Seed}}</code><span class="why">picks the files, the order of the pages, the exam's generated problems and the model's starting weights</span></dd>{{end}}
+          {{if $d.SeedInput}}<dt>Seed</dt><dd><code>sha256("{{$d.SeedInput}}")</code><br><code>= {{$r.Seed}}</code><span class="why">picks the files, the order of the pages, which fresh hours make the exam, and the model's starting weights</span></dd>{{end}}
           {{if $d.Shards}}<dt>Files drawn</dt><dd><span class="num" style="font-size:14px">{{range $i, $s := $d.Shards}}{{if $i}}, {{end}}#{{$s}}{{end}}</span><span class="why">positions in the crawl's file list</span></dd>{{end}}
           {{if $r.CorpusSHA}}<dt>Training data sha256</dt><dd><code>{{$r.CorpusSHA}}</code></dd>{{end}}
           {{if $r.ExamSHA}}<dt>Exam sha256</dt><dd><code>{{$r.ExamSHA}}</code><span class="why">the round's exam, made at the draw{{if $r.ExamAt}} and posted {{datetime $r.ExamAt}}{{end}}</span></dd>{{end}}

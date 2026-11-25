@@ -1,39 +1,42 @@
 {
   "id": "s3",
   "title": "Season 3",
-  "rules_version": 6,
+  "rules_version": 7,
   "tokenizer": {
     "kind": "hf",
-    "repo": "Qwen/Qwen3-0.6B-Base",
-    "revision": "da87bfb608c14b7cf20ba1ce41287e8de496c0cd",
+    "repo": "baidu/ERNIE-4.5-0.3B-Base-PT",
+    "revision": "2d64320bf1b5b97f19a7eccf221fedb57e7ec02a",
     "file": "tokenizer.json",
-    "url": "https://huggingface.co/Qwen/Qwen3-0.6B-Base/resolve/da87bfb608c14b7cf20ba1ce41287e8de496c0cd/tokenizer.json",
-    "sha256": "c0382117ea329cdf097041132f6d735924b697924d6f6fc3945713e96ce87539",
-    "size": 7031645,
-    "vocab_size": 151936,
-    "eot": 151643
+    "url": "https://huggingface.co/baidu/ERNIE-4.5-0.3B-Base-PT/resolve/2d64320bf1b5b97f19a7eccf221fedb57e7ec02a/tokenizer.json",
+    "sha256": "4e5b4d49475d27c7ef7a61eea2d675f9cc013e91e3ddb5e06d964f5027c1814a",
+    "size": 11185815,
+    "vocab_size": 103424,
+    "eot": 2
   },
   "student": {
     "kind": "hf_topreset",
-    "repo": "Qwen/Qwen3-0.6B-Base",
-    "revision": "da87bfb608c14b7cf20ba1ce41287e8de496c0cd",
+    "repo": "baidu/ERNIE-4.5-0.3B-Base-PT",
+    "revision": "2d64320bf1b5b97f19a7eccf221fedb57e7ec02a",
     "reset_frac": 0.5,
+    "freeze_bottom": true,
     "files": [
       {
         "path": "config.json",
-        "url": "https://huggingface.co/Qwen/Qwen3-0.6B-Base/resolve/da87bfb608c14b7cf20ba1ce41287e8de496c0cd/config.json",
-        "sha256": "504a6b58c4271583724e66584b6b7698aea18450209df6b2f7582df0e89cee59",
-        "size": 727
+        "url": "https://huggingface.co/baidu/ERNIE-4.5-0.3B-Base-PT/resolve/2d64320bf1b5b97f19a7eccf221fedb57e7ec02a/config.json",
+        "sha256": "5918624eab9c56ba3552672a97481bd2743abf2567611caca758df1939935a56",
+        "size": 633
       },
       {
         "path": "model.safetensors",
-        "url": "https://huggingface.co/Qwen/Qwen3-0.6B-Base/resolve/da87bfb608c14b7cf20ba1ce41287e8de496c0cd/model.safetensors",
-        "sha256": "cd2a512003e2f9f3cd3c32a9c3573f820bb28c940f73c57b1ddaa983d9223eba",
-        "size": 1192135096
+        "url": "https://huggingface.co/baidu/ERNIE-4.5-0.3B-Base-PT/resolve/2d64320bf1b5b97f19a7eccf221fedb57e7ec02a/model.safetensors",
+        "sha256": "462780a8c6abe17ceea889b9a4d65bd6bd5f264be012864be8858bda8ed285bd",
+        "size": 721514672
       }
     ]
   },
   "sft": {
+    "pack": "s3-sft-ml.jsonl.zst",
+    "pack_sha256": "daac3ac660155b24c66c37c83a242c3e82eea88d9532482e55e2730ad4926d35",
     "examples": 512,
     "batch_size": 16,
     "micro_batch": 4,
@@ -72,19 +75,10 @@
     }
   },
   "exam": {
-    "about": "Zero raw web-text perplexity. Half fresh twin-context comprehension across every crawl language published in the day before the draw (same continuation scored under its real opening vs same-source wrong openings, in bits per byte), half seeded multilingual procedural skills, all sat after a scale-fixed disjoint multilingual SFT probe.",
+    "about": "100% fresh, zero static benchmarks, zero synthetic templates, zero raw web-text perplexity. Half fresh twin-context comprehension across every crawl language published in the day before the draw (same continuation scored under its real opening vs same-source wrong openings, in bits per byte), half fresh deterministic harvest-derived multi-sentence reasoning (explain, infer, synthesis generated at temp=0 by Qwen3-8B from the same fresh harvests with diverse wrappers and an anti-copying filter), all sat after a brief disjoint multilingual SFT probe.",
     "generator_version": 11,
-    "per_corner": 2,
-    "more": {
-      "agent": 4,
-      "context": 2,
-      "logic": 2,
-      "grammar": 3
-    },
-    "facts": {
-      "file": "facts-s1.jsonl.zst",
-      "sha256": "ac1c27bc3461c8ccd6c5b5a5814072b79bc834f7694ba35da14021493edd08e5"
-    },
+    "per_corner": 0,
+    "more": {},
     "fresh": {
       "mode": "context",
       "settle_seconds": 3600,
@@ -92,6 +86,16 @@
       "hours": 3,
       "items": 900,
       "per_corner": 2
+    },
+    "reasoning": {
+      "model": "Qwen/Qwen3-8B",
+      "revision": "b968826d9c46dd6066d109eabc6255188de91218",
+      "items": 640,
+      "max_ngram_overlap": 0.5
+    },
+    "practice_pack": {
+      "file": "s3-practice.jsonl.zst",
+      "sha256": "d265e1beb865c556164c62850b34d63f9326d9f3806f5c7735b59609793f9334"
     },
     "answer_floor_bytes": 16,
     "aggregate": {
@@ -101,7 +105,7 @@
     },
     "groups": {
       "comprehension": 0.5,
-      "skills": 0.5
+      "reasoning": 0.5
     },
     "pillars": {
       "reference": {
@@ -133,57 +137,26 @@
         ],
         "about": "fresh replies and posts: same continuation under the real opening vs same-source wrong openings"
       },
-      "agents": {
-        "group": "skills",
+      "explain": {
+        "group": "reasoning",
         "parts": [
-          "agent"
+          "explain"
         ],
-        "about": "an agent at work with a shell and tools"
+        "about": "fresh harvest-derived multi-sentence causal and mechanism explanations in the excerpt's own language"
       },
-      "reading": {
-        "group": "skills",
+      "infer": {
+        "group": "reasoning",
         "parts": [
-          "context"
+          "infer"
         ],
-        "about": "reading the context and using what it says"
+        "about": "fresh harvest-derived analytical synthesis of implications and trade-offs in the excerpt's own language"
       },
-      "logic": {
-        "group": "skills",
+      "synthesis": {
+        "group": "reasoning",
         "parts": [
-          "logic"
+          "synthesis"
         ],
-        "about": "following an argument to its end"
-      },
-      "grammar": {
-        "group": "skills",
-        "parts": [
-          "grammar"
-        ],
-        "about": "telling a well-formed sentence from a broken one"
-      },
-      "numbers": {
-        "group": "skills",
-        "parts": [
-          "arith-shots",
-          "units-shots",
-          "word-shots",
-          "algebra-shots"
-        ],
-        "about": "arithmetic, units, word problems and algebra, each asked after worked examples"
-      },
-      "programs": {
-        "group": "skills",
-        "parts": [
-          "algo-shots"
-        ],
-        "about": "what a small algorithm returns, asked after worked examples"
-      },
-      "knowledge": {
-        "group": "skills",
-        "parts": [
-          "knowledge-even"
-        ],
-        "about": "facts the web knows in ten languages, disjoint from the SFT probe"
+        "about": "fresh harvest-derived declarative prose synthesis of the excerpt's main point and rationale (zero Q/A syntax)"
       }
     }
   },
@@ -191,13 +164,13 @@
     "nano": {
       "corpus_units": 1,
       "train_tokens": 1048576,
-      "n_layer": 28,
+      "n_layer": 18,
       "n_head": 16,
       "d_model": 1024,
       "ctx": 1024,
       "batch_size": 32,
-      "micro_batch": 4,
-      "lr": 0.0003,
+      "micro_batch": 8,
+      "lr": 0.0005,
       "warmup_steps": 10,
       "edit_seconds": 120,
       "sft_steps": 8
@@ -205,26 +178,26 @@
     "micro": {
       "corpus_units": 4,
       "train_tokens": 8388608,
-      "n_layer": 28,
+      "n_layer": 18,
       "n_head": 16,
       "d_model": 1024,
       "ctx": 1024,
       "batch_size": 32,
-      "micro_batch": 4,
-      "lr": 0.0006,
+      "micro_batch": 8,
+      "lr": 0.0008,
       "warmup_steps": 24,
       "edit_seconds": 300,
       "sft_steps": 16
     },
     "standard": {
       "corpus_units": 12,
-      "train_tokens": 32768000,
-      "n_layer": 28,
+      "train_tokens": 65536000,
+      "n_layer": 18,
       "n_head": 16,
       "d_model": 1024,
       "ctx": 1024,
       "batch_size": 32,
-      "micro_batch": 4,
+      "micro_batch": 8,
       "lr": 0.001,
       "edit_seconds": 1200,
       "sft_steps": 32
@@ -232,13 +205,13 @@
     "large": {
       "corpus_units": 24,
       "train_tokens": 131072000,
-      "n_layer": 28,
+      "n_layer": 18,
       "n_head": 16,
       "d_model": 1024,
       "ctx": 1024,
       "batch_size": 32,
-      "micro_batch": 4,
-      "lr": 0.0006,
+      "micro_batch": 8,
+      "lr": 0.0008,
       "edit_seconds": 4800,
       "sft_steps": 32
     }
@@ -254,7 +227,7 @@
   },
   "reference": {
     "anchor": "NVIDIA RTX 5090 (32 GB VRAM) / RTX 4090 (24 GB VRAM), CUDA",
-    "note": "Season 3 curators run on 24 GB+ GPUs with vLLM, flash-linear-attention and liger-kernel so 0.6B-class curation models are the floor; 16 GB+ GPUs can grade. Time your curator against the floor in \"runner\" (stet bench)."
+    "note": "Season 3 curators run on 24 GB+ GPUs with vLLM, flash-linear-attention and liger-kernel so 0.6B-class curation models are the floor; 12 GB+ GPUs can grade ERNIE-4.5-0.3B (<=10 GiB VRAM, ~20 min/pass on RTX 5090). Time your curator against the floor in \"runner\" (stet bench)."
   },
   "beacon": {
     "name": "drand quicknet",
@@ -562,7 +535,7 @@
     "gpu_tokens_per_second": 120000,
     "cpu_mb_per_second": 100,
     "gpu_memory_gb": 23,
-    "grade_gpu_memory_gb": 15,
+    "grade_gpu_memory_gb": 11,
     "memory_gb": 24,
     "cores": 6,
     "disk_gb": 80

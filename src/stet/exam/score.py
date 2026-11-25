@@ -122,6 +122,34 @@ def nll(model, seqs: list[tuple[list[int], int]], device, batch: int = 32) -> li
             y[r, : len(ids) - 1] = tgt
         x, y = x.to(device), y.to(device)
         with torch.no_grad():
+            inner = getattr(model, "model", None)
+            lm_head = getattr(model, "lm_head", None)
+            if large_vocab and inner is not None and lm_head is not None:
+                # Project only scored positions through lm_head in bounded chunks so evaluation
+                # never materializes full (B, T, V) logits (keeps reserved VRAM <= 10 GiB on 12 GB GPUs).
+                if device.type == "cuda":
+                    with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                        raw = inner(x)
+                else:
+                    raw = inner(x)
+                h = raw.last_hidden_state if hasattr(raw, "last_hidden_state") else raw[0]
+                row_idx, pos_idx = (y != -100).nonzero(as_tuple=True)
+                loss = torch.zeros(len(idx), dtype=torch.float32, device=device)
+                n_scored = int(row_idx.numel())
+                for start in range(0, n_scored, ce_chunk):
+                    r_sl = row_idx[start : start + ce_chunk]
+                    p_sl = pos_idx[start : start + ce_chunk]
+                    if device.type == "cuda":
+                        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                            logits_sl = lm_head(h[r_sl, p_sl])
+                    else:
+                        logits_sl = lm_head(h[r_sl, p_sl])
+                    sub_loss = F.cross_entropy(logits_sl.float(), y[r_sl, p_sl], reduction="none")
+                    loss.index_add_(0, r_sl, sub_loss)
+                for r, i in enumerate(idx):
+                    out[i] = float(loss[r])
+                del raw, h, loss
+                continue
             if device.type == "cuda":
                 with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                     raw = model(x)

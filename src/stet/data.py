@@ -814,13 +814,15 @@ def _practice(rnd: Round, scale: Scale, hours: list[tuple[int, Path]]):
     another exam."""
     from .exam.examine import assemble, pack_items
     from .exam.farm import unpack_items
+    from .exam.fresh.reason import can_synthesize_locally
 
     path = round_dir(rnd, scale) / f"exam-practice-{rnd.season.digest[:8]}-{practice_key(rnd)[:16]}.jsonl.zst"
     try:
         return unpack_items(path.read_bytes())
     except (OSError, ValueError, zstandard.ZstdError):
         pass
-    items = assemble(rnd, scale, hours, round_dir(rnd, scale) / "examine", log=lambda m: None, measure=False)[0]
+    synth = bool(os.environ.get("STET_SYNTHESIZE_PRACTICE")) and can_synthesize_locally()
+    items = assemble(rnd, scale, hours, round_dir(rnd, scale) / "examine", log=lambda m: None, measure=False, synthesize=synth)[0]
     tmp = path.with_name(f"{path.name}.tmp{os.getpid()}")
     try:
         tmp.write_bytes(pack_items(items))
@@ -852,11 +854,17 @@ def _items(rnd: Round):
     from .exam.items import Item
 
     cfg = rnd.season.raw["exam"]
-    if int(cfg["generator_version"]) > gen.VERSION:
+    if int(cfg.get("generator_version", 0)) > gen.VERSION:
         raise RuntimeError(f"season {rnd.season.id} sets the exam's generators at version {cfg['generator_version']}, "
                            f"this copy of stet has {gen.VERSION}: upgrade stet")
     if rnd.kind != "official":
-        return gen.for_season(rnd.season, rnd.seed)
+        if int(cfg.get("per_corner", 0)) > 0:
+            generated = gen.for_season(rnd.season, rnd.seed)
+            if generated:
+                return generated
+        from .exam.fresh.reason import load_practice_pack
+
+        return load_practice_pack(rnd.season, rnd.seed)
     want = getattr(rnd, "exam_digest", "") or ""
     path = exam_items_path(rnd, want) if want else None
     if path is not None and not path.exists() and exam_public_path(rnd, want).exists():

@@ -113,13 +113,13 @@ def test_only_the_kinds_of_writing_the_season_names_are_selected():
 def test_the_season_names_kinds_of_writing_that_sources_give():
     """Every kind of writing the season's exam names has a source that is harvested for it, and
     every source the harvest can give is of a kind the season could name."""
-    from stet.exam.aggregate import SOURCE_KIND, current_plan
+    from stet.exam.aggregate import REASONING_KINDS, SOURCE_KIND, current_plan
     from stet.exam.fresh import harvest
     from stet.exam.gen import FAMILIES
 
     given = ["wikipedia", "wikipedia-added", "wikipedia-talk", *(s for name in harvest.OTHERS for s in harvest.gives(name))]
     assert set(given) <= set(SOURCE_KIND) and {SOURCE_KIND[s] for s in given} == set(SOURCE_KIND.values())
-    writing = set(current_plan().parts) - {f.NAME for f in FAMILIES}
+    writing = set(current_plan().parts) - {f.NAME for f in FAMILIES} - set(REASONING_KINDS)
     assert writing and writing <= {SOURCE_KIND[s] for s in given}
 
 
