@@ -13,9 +13,10 @@ Three of the organisers' own:
 | `english` | Keeps documents that look like English prose. |
 | `tidy` | Pages that read as writing, in any language: deduplicated, ranked by how much of each is sentences, the best kept whole, shuffled. |
 
-Half of the exam's score is fresh twin-context comprehension in every language, each by its share of
-the round's corpus, so `english`, which keeps only English, gives up comprehension in every
-other language. `tidy` asks no page what language it is in, and copies the pages it chooses
+The exam's official score is 100% fresh harvest-derived reasoning in every language, each by
+its share of the round's corpus (with four fresh human-written twin-context comprehension kinds
+shown alongside at 0% weight for diagnostics), so `english`, which keeps only English, gives up
+most of the exam. `tidy` asks no page what language it is in, and copies the pages it chooses
 whole: when it kept only their lines of prose it cut the code out with the menus, and scored
 0.03 bits per byte lower on the writing ([measured](../docs/EXPERIMENTS.md#text-a-model-writes)).
 
@@ -58,7 +59,7 @@ that the board shows whether style mimicry works.
 |---|---|
 | `mimic` | To game the exam by surface form: the pages that look most like the exam's sources and formats (terminals, logs, JSON, code, questions and answers, reference, news, threads; any language) fill the budget first, and `tidy`'s selection tops it up only if they run short. |
 
-In Season 2's raw-perplexity exam, `mimic` beat every other reference curator (+0.10 bpb over raw crawl, ahead of `fineweb2`'s +0.05) simply by matching the exam's surface style. Season 3 replaced raw perplexity with 100%-fresh same-source twin-context comprehension and harvest-derived reasoning (`explain`, `infer`, `synthesis`) after a fixed multilingual SFT probe, so surface style lifts both real and wrong openings equally and `mimic` falls behind real quality curation.
+In Season 2's raw-perplexity exam, `mimic` beat every other reference curator (+0.10 bpb over raw crawl, ahead of `fineweb2`'s +0.05) simply by matching the exam's surface style. Season 3 replaced raw perplexity with 100%-fresh harvest-derived reasoning (`explain`, `infer`, `synthesis`) after a fixed multilingual SFT probe — with same-source human-written twin-context comprehension shown alongside at 0% weight for diagnostics — and `mimic` trails `fineweb2` at ~74–79% of its gain.
 
 There was a second, `scribe`, which spent the 16,000 tokens of its own text a script could
 then hold on worked problems in the exam's forms. That bought 0.10 bits per byte on the

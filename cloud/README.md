@@ -96,7 +96,7 @@ service would rent and end is what the service will; settings given to it are ta
 those.
 
 How many it rents: one for each machine at a grade, which takes no other until it is done
-(about 52 minutes on a 3090, ~29 on a 4090, ~20 on a 5090 at the standard scale), and one more for every `--per-machine`
+(about 55 minutes on a 3090, ~30 on a 4090, ~20 on a 5090 at the standard scale), and one more for every `--per-machine`
 (6) scripts a new machine could grade now: `--per-machine 1` gives each its own. A grade
 trains the student once; the two machines a round asks to measure its unedited baseline
 (Season 3's `baselines.per_round = 2`, `baselines_wanted` in `/admin/work`) train that first, on
@@ -116,7 +116,7 @@ about 2h12m after the draw, and these early grades were most of its grades; the 
 runs with `--early 0`, renting graders only once an exam is posted.
 How long a training pass takes on each kind is learned from the grades of settled rounds
 (each says the GPU that trained, and for how long), and how long a machine takes to start
-from those this service rents; until a kind has been seen, its pass is a 3090's 52 minutes
+from those this service rents; until a kind has been seen, its pass is a 3090's 55 minutes
 over its speed in the table, and a machine is taken to start in 8 minutes. They are kept in
 `calibration.json`, and `stet-cloud gpus` shows them. The curators want a machine for every
 two entries to run, and never fewer than two, since each entry is run twice, by two
@@ -147,7 +147,7 @@ will do, looked up afresh each time: every kind of GPU the markets armed have fr
 machine with room. A kind's price is ranked over how often machines of its kind have started
 (`startRates`: some cheap hosts never do), learned per market, card and class of host. A round
 settles only once its slowest grade is in: a Season 3 `ERNIE-4.5-0.3B-Base-PT` pass (frozen bottom half, 65.5M tokens, deterministic CUDA kernels) is about 20 minutes
-on a 5090, 29 on a 4090 and 52 on a 3090. A machine that runs curators takes grades as soon as its runs are done, and
+on a 5090, 30 on a 4090 and 55 on a 3090. A machine that runs curators takes grades as soon as its runs are done, and
 the first two to take one also measure the round's baseline, two passes. `--cheapest` rents every machine by what a grade costs, its price over its speed.
 What will do: NVIDIA, `--min-gpu-memory` 12 GB or more for grading (peak grading VRAM is ≤10 GiB; `--min-curator-gpu-memory` 24 GB
 or more for running curators, which receive 22 GB VRAM inside the sandbox; unfilled 24 GB curator

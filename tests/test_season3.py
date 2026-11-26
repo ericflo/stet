@@ -1701,7 +1701,7 @@ def test_examine_enforces_min_pillar_items_and_regenerates_corrupt_cache(tmp_pat
 
     calls = {"n": 0}
 
-    def fake_synth(d, seed, cfg, shares=None, log=print):
+    def fake_synth(d, seed, cfg, shares=None, log=print, drops_path=None):
         calls["n"] += 1
         return [
             Item(
@@ -2184,7 +2184,7 @@ def test_review7_practice_synthesis_on_then_off_ignores_reasoning_cache(monkeypa
             for i in range(4)
         ]
 
-    def fake_synth(docs_in, seed, r_cfg, shares=None, log=None):
+    def fake_synth(docs_in, seed, r_cfg, shares=None, log=None, drops_path=None):
         return [
             Item(kind="answer", corner=f"{kind}/en/wikipedia", fmt="prose", lang="en",
                  source=f"{kind}:wikipedia:w{i}", ctx=f"Excerpt {i}\nQ?", cont=f" Answer {i}.")
@@ -2249,3 +2249,260 @@ def test_review7_prompt_language_and_foreign_script_leak_filter():
     assert kept_sources == {"explain:ccnews:ar-clean", "explain:wikipedia:ja-clean"}, (kept_sources, dropped)
     assert dropped.get("wrong_prompt_lang") == 3, dropped
     assert dropped.get("wrong_lang") == 1, dropped
+
+
+def test_review8_training_divergence_retries_once_then_raises_training_error(monkeypatch, tmp_path):
+    """Review 8 Finding 3: a FloatingPointError in train() retries once on the same machine; if it
+    recovers on attempt 2, grading succeeds; if it fails twice, raises TrainingError (NOT valid=False).
+    ScriptError still returns valid=False immediately without retrying or training."""
+    from stet import grade
+    from stet.script import ScriptError
+
+    s3 = load_season("s3")
+    rnd = practice_round(s3, 0)
+    scale = s3.scale("nano")
+    corpus = types.SimpleNamespace(meta={"sha256": "a" * 64})
+    script_path = tmp_path / "script.jsonl"
+    script_path.write_text("0\n")
+
+    fake_stats = types.SimpleNamespace(
+        out_docs=1, out_bytes=100, tokens_one_pass=100, passes=1.0,
+        to_dict=lambda c: {"script_sha256": "1" * 64, "tokens_sha256": "2" * 64, "out_docs": 1},
+    )
+    monkeypatch.setattr("stet.tok.load_encoding", lambda s: object())
+    monkeypatch.setattr(grade, "materialize", lambda c, p, s, sc, e: ("toks", fake_stats))
+    monkeypatch.setattr(grade, "hardware_info", lambda d: {"device": "cpu"})
+
+    # 1. Transient divergence on attempt 1 recovers on attempt 2!
+    calls = {"n": 0}
+
+    def flaky_train(*a, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise FloatingPointError("SFT probe diverged at step 2")
+        return object(), {"seconds": 1.0, "init_sha256": "3" * 64}
+
+    monkeypatch.setattr(grade, "train", flaky_train)
+    logs = []
+    dev = types.SimpleNamespace(type="cpu")
+    trained = grade.train_script(rnd, scale, corpus, script_path, device=dev, log=logs.append)
+    assert trained.trained is True and calls["n"] == 2
+    assert any("retrying once" in m for m in logs)
+
+    # 2. Persistent divergence across both attempts raises TrainingError (never valid=False).
+    calls["n"] = 0
+
+    def always_diverges(*a, **kw):
+        calls["n"] += 1
+        raise FloatingPointError("SFT probe diverged at step 2")
+
+    monkeypatch.setattr(grade, "train", always_diverges)
+    with pytest.raises(grade.TrainingError, match="training failed after retry"):
+        grade.train_script(rnd, scale, corpus, script_path, device=dev, log=lambda m: None)
+    assert calls["n"] == 2
+
+    # 3. Genuine ScriptError is decided BEFORE training, never retries, returns valid=False.
+    calls["n"] = 0
+    monkeypatch.setattr(grade, "materialize", lambda *a, **kw: (_ for _ in ()).throw(ScriptError("line 1: bad")))
+    tr_bad = grade.train_script(rnd, scale, corpus, script_path, device=dev)
+    assert tr_bad.trained is False and tr_bad.result["valid"] is False and "line 1: bad" in tr_bad.result["invalid_reason"]
+    assert calls["n"] == 0
+
+
+def test_review8_grade_hardware_backend_check():
+    """Review 8 Finding 4: grade_backends distinguishes NVIDIA CUDA from AMD ROCm when device=='cuda'."""
+    from stet.client import grade_hardware_ok, grade_hardware_requirement
+
+    s_cuda_only = types.SimpleNamespace(raw={"grade_devices": ["cuda"], "grade_backends": ["cuda"]})
+    assert grade_hardware_ok(s_cuda_only, "cuda", "cuda") is True
+    assert grade_hardware_ok(s_cuda_only, "cuda", "rocm") is False
+    assert grade_hardware_ok(s_cuda_only, "cuda", None) is False
+    assert grade_hardware_ok(s_cuda_only, "cpu", None) is False
+    assert grade_hardware_requirement(s_cuda_only) == "an NVIDIA (CUDA) GPU"
+
+    s_both = types.SimpleNamespace(raw={"grade_devices": ["cuda"], "grade_backends": ["cuda", "rocm"]})
+    assert grade_hardware_ok(s_both, "cuda", "cuda") is True
+    assert grade_hardware_ok(s_both, "cuda", "rocm") is True
+    assert grade_hardware_requirement(s_both) == "an NVIDIA (CUDA) or AMD (ROCm) GPU"
+
+    s_legacy = types.SimpleNamespace(raw={"grade_devices": ["cuda", "cpu"]})
+    assert grade_hardware_ok(s_legacy, "cuda", "rocm") is True
+    assert grade_hardware_ok(s_legacy, "cpu", None) is True
+
+
+def test_review8_reasoning_drops_saved_partial_keep_rate_and_cache_reuse(monkeypatch, tmp_path):
+    """Review 8 Smaller items 2, 3, 4:
+    - Dropped reasoning drafts are saved as JSONL beside the kept cache.
+    - When one reasoning kind falls below min_keep_rate while others pass, only the bad kind is
+      omitted instead of throwing away the whole build and spinning for 6 hours.
+    - When ALL kinds fail min_keep_rate, FatalExamError is raised (not retried endlessly).
+    - _reasoning_cache_usable reuses a valid cache where >=1 reasoning pillar meets min_pillar_items."""
+    from stet.exam import examine
+    from stet.exam.fresh import Doc, reason
+
+    docs = [
+        Doc(
+            source="ccnews", id=f"d-{i}", url=f"https://example.org/{i}", lang="en", license="ccnews",
+            published=1_800_000_000 + i, title=f"Story {i}",
+            text=f"Detailed article {i} examining agricultural irrigation sensors, reservoir telemetry, and seasonal rainfall patterns across valleys. " * 4,
+            topic="",
+        )
+        for i in range(60)
+    ]
+    monkeypatch.setattr(reason, "_load_teacher_tokenizer", lambda *a, **k: None)
+
+    # 1. Partial failure: explain fails completely, infer & synthesis pass cleanly.
+    def fake_gen_partial(prompts, *a, **k):
+        out = []
+        for p in prompts:
+            if "why/how explanation question" in p:
+                out.append("...\nRESPONSE: bad")
+            else:
+                out.append(
+                    "Telemetry networks improve regional irrigation planning across seasonal droughts.\n"
+                    "RESPONSE: Coordinated reservoir gauges and soil probes let district engineers adjust canal releases before crops suffer water stress."
+                )
+        return out
+
+    monkeypatch.setattr(reason, "_generate_local_gpu", fake_gen_partial)
+    drops_file = tmp_path / "reasoning-drops.jsonl"
+    cfg = {"model": "Qwen/Qwen3-8B", "revision": "rev", "items": 60, "min_keep_rate": 0.5}
+    kept = reason.synthesize_reasoning(docs, b"partial-seed", cfg, log=lambda _: None, drops_path=drops_file)
+    kinds_kept = {it.source.split(":", 1)[0] for it in kept}
+    assert "explain" not in kinds_kept and kinds_kept == {"infer", "synthesis"}
+    assert drops_file.exists()
+    drop_rows = [json.loads(ln) for ln in drops_file.read_text().splitlines() if ln]
+    assert len(drop_rows) >= 15 and all(r["task_type"] == "explain" and r["reason"] == "prompt_len" for r in drop_rows)
+
+    # _reasoning_cache_usable MUST accept this cache (2 of 3 pillars >= 20, 1 omitted)!
+    s3 = load_season("s3")
+    assert examine._reasoning_cache_usable(kept, s3) is True
+
+    # 2. All kinds fail -> FatalExamError (non-retryable) AND drops file still written!
+    monkeypatch.setattr(reason, "_generate_local_gpu", lambda prompts, *a, **k: ["...\nRESPONSE: bad" for _ in prompts])
+    drops_all = tmp_path / "reasoning-drops-all.jsonl"
+    with pytest.raises(reason.FatalExamError, match="every kind"):
+        reason.synthesize_reasoning(docs, b"all-bad-seed", cfg, log=lambda _: None, drops_path=drops_all)
+    assert len([ln for ln in drops_all.read_text().splitlines() if ln]) == 60
+
+
+def test_review8_official_replay_public_subset_disclosure(monkeypatch, tmp_path, capsys):
+    """Review 8 Smaller item 6: replaying a settled official round from exam-public-*.jsonl.zst
+    discloses how many items were sat vs withheld so users understand why the gain differs from the board."""
+    import zstandard
+
+    from stet import cli, data
+    from stet.exam import examine
+    from stet.exam.items import Item, digest
+    from stet.spec import official_round
+
+    monkeypatch.setenv("STET_CACHE", str(tmp_path))
+    s3 = load_season("s3")
+    rnd = official_round(
+        s3, 1,
+        {"round": 123456, "randomness": "ab" * 32},
+        {"crawl": "CC-MAIN-2026-43", "paths_sha256": "cd" * 32, "n_shards": 100000},
+    )
+    wiki = Item(kind="answer", corner="explain/en/wikipedia", fmt="prose", lang="en", source="explain:wikipedia:w1", ctx="Ex1\nQ1?\n", cont="Answer one.")
+    news = Item(kind="answer", corner="explain/en/ccnews", fmt="prose", lang="en", source="explain:ccnews:n1", ctx="Ex2\nQ2?\n", cont="Answer two.")
+    all_items = [wiki, news]
+    dig = digest(all_items)
+    rnd = dataclasses.replace(rnd, exam_digest=dig)
+
+    pub_raw = "".join(json.dumps(r) + "\n" for r in examine.public_items(all_items)).encode()
+    pub_path = data.exam_public_path(rnd, dig)
+    pub_path.parent.mkdir(parents=True, exist_ok=True)
+    pub_path.write_bytes(zstandard.ZstdCompressor().compress(pub_raw))
+
+    meta = data.round_exam_meta(rnd)
+    assert meta == {"public_subset": True, "public_items": 1, "total_items": 2, "withheld_items": 1}
+
+    out = cli.Out(quiet=False)
+    res = {
+        "valid": True,
+        "round": {"kind": "official"},
+        "scale": "standard",
+        "script": {"out_docs": 10, "src_docs": 20, "kept_doc_frac": 0.5, "out_bytes": 1_000_000, "passes": 1.0, "truncated": False},
+        "train": {"tokens": 1000, "seconds": 10, "tokens_per_second": 100, "final_train_loss": 2.5},
+        "exam": {"items": 1, "mean": -2.0},
+        "exam_subset": meta,
+        "gain": 0.05,
+        "pillars": {"explain": 0.05},
+    }
+    base = {"exam": {"mean": -2.05}}
+    cli.report(out, res, base, s3)
+    err = capsys.readouterr().err
+    assert "1 of 2 items (public subset; 1 third-party items withheld)" in err
+    assert "official board score uses all 2 items" in err
+
+
+def test_review8_reasoning_only_score_diagnostic_comprehension_and_source_cap(monkeypatch, tmp_path):
+    """Review 8 Finding 1 + Smaller item 1 + practice-with-harvest:
+    - Season 3 scores 100% fresh reasoning (explain/infer/synthesis, 1/3 each), with comprehension at 0% diagnostic weight.
+    - `select_context` caps any single source inside a kind when >= 2 sources exist, and `code_share=0.15` caps code in technical.
+    - `_practice()` with harvested hours and synthesize=False appends bundled practice_pack reasoning items so local practice never scores 0.0.
+    """
+    from collections import Counter
+
+    from stet import data
+    from stet.exam import aggregate
+    from stet.exam.fresh import Doc
+    from stet.exam.fresh import select as fresh_select
+    from stet.spec import practice_round
+
+    s3 = load_season("s3")
+    plan = aggregate.plan_of(s3)
+    assert plan.groups == {"comprehension": 0.0, "reasoning": 1.0}
+    assert plan.code_share == pytest.approx(0.15)
+    assert s3.raw["grade_backends"] == ["cuda"]
+    assert s3.raw["tolerance"]["standard"] == {"grade": 0.012, "baseline": 0.015, "run": 0.015}
+
+    # Single-source cap inside select_context: 100 bluesky docs + 20 mastodon docs in "social"
+    # With 2 sources and n=40, bluesky is capped at 20 (50%) while mastodon fills the other 20.
+    docs = []
+    for i in range(60):
+        docs.append(
+            Doc(
+                source="bluesky", id=f"b{i}", url=f"https://bsky.app/{i}", lang="en", license="bluesky",
+                published=1_800_000_000 + i, title=f"Blue {i}",
+                text=f"First complete analytical sentence about observation {i} with distinct details and enough characters to split cleanly. "
+                     f"Second distinct continuation sentence {i} providing a clear follow-up statement with plenty of context.",
+                topic=f"tb{i}",
+            )
+        )
+    for i in range(30):
+        docs.append(
+            Doc(
+                source="mastodon", id=f"m{i}", url=f"https://masto.social/{i}", lang="en", license="mastodon",
+                published=1_800_000_000 + i, title=f"Masto {i}",
+                text=f"Opening remark on federated publishing system topic {i} written cleanly with multiple clauses for context. "
+                     f"Continuation remark {i} describing the community response and follow-up outcomes in detail.",
+                topic=f"tm{i}",
+            )
+        )
+    chosen = fresh_select.select_context(docs, b"cap-seed", 40, {"social"}, per_corner=2, shares={"en": 100.0})
+    assert len(chosen) == 40
+    by_src = Counter(it.source.split(":", 1)[0] for it in chosen)
+    assert by_src["bluesky"] == 20 and by_src["mastodon"] == 20
+
+    # Local practice with harvested hours (synthesize=False) still includes bundled reasoning items
+    # so `stet run` after `stet harvest` never scores 0.0!
+    monkeypatch.setenv("STET_CACHE", str(tmp_path))
+    monkeypatch.delenv("STET_SYNTHESIZE_PRACTICE", raising=False)
+    rnd = practice_round(s3, 0)
+    scale = s3.scale("nano")
+    # Mock assemble() to return comprehension-only items (as synthesize=False does)
+    fake_comp = [
+        Item(kind="context", corner="fresh/wikipedia/en/a", fmt="prose", lang="en", source="wikipedia:1",
+             ctx="Alpha opening.", cont=" Alpha continuation.", wrongs=("Beta opening.",))
+    ]
+    from stet.exam import examine
+
+    monkeypatch.setattr(examine, "assemble", lambda *a, **k: (fake_comp, 1, {"en": 100.0}, ["abc"]))
+    hpath = tmp_path / "1800000000.jsonl"
+    hpath.write_text("{}\n")
+    items = data._practice(rnd, scale, [(1800000000, hpath)])
+    parts = {aggregate.part_of(it) for it in items}
+    assert "reference" in parts
+    assert {"explain", "infer", "synthesis"} <= parts
+

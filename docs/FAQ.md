@@ -26,7 +26,7 @@ You need a GPU with 12 GB or more of VRAM to train and grade the `ERNIE-4.5-0.3B
 student (peak VRAM ≤10 GiB with frozen lower layers; 24 GB+ to run curators). A practice run
 at nano scale takes under a minute, and micro a few minutes. The official scale, standard,
 trains `ERNIE-4.5-0.3B-Base-PT` (bottom half frozen, top half reset) on 65.5M tokens plus a
-32-step SFT probe — about 20 minutes on an RTX 5090 (~29 minutes on an RTX 4090, ~52 minutes
+32-step SFT probe — about 20 minutes on an RTX 5090 (~30 minutes on an RTX 4090, ~55 minutes
 on an RTX 3090). `stet doctor` tells you what your machine can do. Running other people's
 curators for the leaderboard asks for a 24 GB+ GPU at or above the floor; `stet bench`
 measures yours.
@@ -42,11 +42,15 @@ is `stet.gym`, the same thing as a Python environment.
 
 Run `stet harvest` once before the first `stet run` if you want fresh local writing. It
 fetches three hours of recent human writing from the sources official exams are made from,
-with no account and no key. Without it, a practice round sits the bundled openly-licensed
-CC-BY-SA Wikipedia practice pack (both twin-context comprehension and reasoning) so `stet run`
-works out of the box. `stet harvest --fresh` replaces the hours with newly written ones: the
-check on having tuned to the old. A replay of an official round sits what that round
-published (openly licensed Wikipedia items whole).
+with no account and no key, and combines those fresh diagnostic twin-context items with the
+bundled CC-BY-SA reasoning items so local practice scores on the exact 100%-reasoning metric
+(set `STET_SYNTHESIZE_PRACTICE=1` on an 18 GB+ GPU to synthesize fresh local reasoning too).
+Without `stet harvest`, a practice round sits the bundled openly-licensed CC-BY-SA Wikipedia
+practice pack (both reasoning and diagnostic twin-context) so `stet run` works out of the box.
+`stet harvest --fresh` replaces the hours with newly written ones. A replay of an official
+round sits what that round published (openly licensed Wikipedia items whole; the output
+explicitly reports how many items were sat versus the full round total when third-party items
+are withheld).
 
 Official runs cost volunteers GPU time, so those are rationed: three entries in play at
 once. How often you submit is not limited. An entry runs in the next round drawn. Rounds are
@@ -112,11 +116,11 @@ JavaScript harness as one archive that your curator unpacks when it starts.
 
 ## Does it have to work on both NVIDIA and AMD?
 
-Yes. Curators are run by volunteers, and each entry is run on both makes when both are
-around. Use the GPU through PyTorch and say `device="cuda"`: that is the right name on
-an AMD GPU too. `vllm` and `liger-kernel` are preinstalled on NVIDIA Linux runners, so if
-you use them include a clean PyTorch/`transformers` fallback (see `examples/reader`) for
-AMD ROCm runners. A run that fails is
+Official Season 3 verifiers (both graders and curator runners) run on NVIDIA CUDA Linux
+machines (`grade_backends: ["cuda"]`), where `vllm` and `liger-kernel` are preinstalled
+alongside PyTorch. AMD ROCm and Apple Silicon remain supported for local practice (`stet run`),
+so using the GPU through PyTorch with `device="cuda"` and including a clean `transformers`
+fallback (see `examples/reader`) lets anyone test locally on AMD too. A run that fails is
 never better than one that finishes: it counts 0, or as your worst finished run when that
 is below 0.
 
@@ -132,14 +136,15 @@ they are. Any other copy is at least 64 bytes long.
 ## Is the exam secret?
 
 Nobody knows it in advance, the organisers included. Each round's exam is 100% fresh and made
-at its draw, with zero static benchmarks and zero synthetic templates. Half of the score is
-fresh twin-context comprehension from three hours of writing people published the day before,
-which the draw picks, gathered from many sources that need no key (each continuation is
-scored under its real opening minus wrong openings from the same source and language). Half
-is fresh harvest-derived reasoning (`explain`, `infer`, `synthesis`) written once at the draw
-by the pinned teacher model (`temperature=0`) from those exact same three hours and published
-in full at settlement. Your curator runs with no network and can add no text of
-its own: a script is copies of the round's corpus and nothing else.
+at its draw, with zero static benchmarks and zero synthetic templates. The official score is
+**100% fresh harvest-derived reasoning** (`explain`, `infer`, `synthesis`, one-third each)
+written once at the draw by the pinned teacher model (`Qwen/Qwen3-8B@b968826d`,
+`temperature=0`) from three hours of writing people published the day before, picked by the
+draw, and published in full at settlement. Four fresh human-written twin-context comprehension
+kinds from those exact same three hours are sat and shown beside each entry's score at `0%`
+weight as published diagnostic telemetry until a human-written measure passes DataDecide. Your
+curator runs with no network and can add no text of its own: a script is copies of the round's
+corpus and nothing else.
 
 Until the round settles, the exam goes only to the machines grading it. Then it is
 published: openly licensed Wikipedia items whole, the teacher's prompts, responses, wrapper IDs,
@@ -150,21 +155,22 @@ every item is published with it.
 
 ## Then what stops people overfitting the exam?
 
-There is nothing to fit in advance: both halves of a round's exam come from three hours of
-writing published the day before, which its draw picks. What a curator can learn from past
-rounds is what kinds of text teach a model well (reference, news, technical writing,
-conversation, clear explanations across every language), and keeping more of those is
-choosing good data, which is the point. The exam weighs four comprehension kinds and three
-reasoning kinds, and every language by its share of the crawl, so no one source or kind of
-text can carry a score — a context-insensitive surface-style mimic scores zero on twin-context comprehension,
-and declarative `synthesis` (zero Q/A punctuation) resists synthetic Q/A-splicing.
+There is nothing to fit in advance: every round's exam comes from three hours of writing
+published the day before, which its draw picks. What a curator can learn from past rounds is
+what kinds of text teach a model well across every language by its share of the crawl. Known
+caveats and empirical adversary tests — including CCNet-head perplexity pruning (`adv_ppl_*`),
+which beats heuristic `fineweb2` on both reasoning and human-written comprehension across
+independent scorer families, and `FineWeb-Edu`'s systematic lead on DataDecide — are
+documented openly in [Experiments](EXPERIMENTS.md).
 
 ## Does everything on the exam count?
 
-Yes. The season names every part of the exam. Each part is validated before the season for
-multi-seed stability, resistance to surface style mimicry and QA-spam, and agreement with 1B
-pretraining rankings (DataDecide). A part is in the score or it is not on the exam at all:
-nothing on the exam counts for nothing.
+Only the validated parts decide the official score. In Season 3, the three fresh reasoning
+kinds (`explain`, `infer`, `synthesis`) carry **100% of the score**; the four fresh
+human-written twin-context comprehension kinds are sat and displayed beside each entry's score
+at **0% weight** as diagnostic telemetry until a human-written measure clears the DataDecide
+known-answer check. Every item sat is named in the season file and published in full (subject
+to third-party excerpt licensing).
 
 ## Who runs my code?
 
@@ -219,12 +225,17 @@ public. Any score can be recomputed with `stet score`. Your curator is run and g
 organisers. What you do have to trust, and whom, is listed, and it is short:
 [what is trusted, and what is not](RULES.md#what-is-trusted-and-what-is-not).
 
-## Why are grades limited to NVIDIA and AMD GPUs?
+## Why are official grades limited to NVIDIA GPUs?
 
-Two machines must get the same number for the same script, to within a small tolerance.
-CUDA and ROCm builds of PyTorch are expected to, and every grade is published with its
-difference from the others of the same script, so the first weeks will show whether they
-do. Other backends can build, run and submit curators but not grade for the board.
+Two machines must get the same number for the same script, to within a tight tolerance
+(`0.012` bits per byte at Season 3's official scale). We cross-verified bit-identical
+`init_sha256` and `tokens_sha256` and ≤`0.0037 bpb` score agreement across NVIDIA RTX 5090
+(Blackwell), RTX 4090 (Ada), and RTX 3090 (Ampere) at full 65.5M-token scale, so Season 3 sets
+`grade_backends: ["cuda"]`. AMD ROCm Flash Attention backward is non-deterministic and takes
+~3.4 hours per standard pass, so AMD ROCm (and Apple Silicon) remain supported for local
+practice runs (`stet run`) and running the `$0/round` examiner, while official Season 3
+verifying (grading and, since runners must earn 5 agreed official grades first, running
+curators) runs on NVIDIA CUDA.
 
 ## What decides the season?
 

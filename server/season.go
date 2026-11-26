@@ -134,6 +134,7 @@ type Season struct {
 	DrawGrid      int64                   `json:"draw_grid_seconds"`
 	Pools         map[string]Pool         `json:"pools"`
 	GradeDevices  []string                `json:"grade_devices"`
+	GradeBackends []string                `json:"grade_backends,omitempty"`
 	Reference     map[string]any          `json:"reference"`
 	Curves        map[string][][2]float64 `json:"reference_curves"`
 	Tolerance     map[string]Tolerance    `json:"tolerance"`
@@ -168,6 +169,30 @@ func (s *Season) gradesOn(device string) bool {
 		}
 	}
 	return false
+}
+
+// gradesOnHardware reports whether a machine's device and GPU backend (cuda vs rocm) may grade
+// officially for this season. When grade_backends is empty, any backend on an allowed device counts.
+func (s *Season) gradesOnHardware(hw hardwareFacts) bool {
+	if !s.gradesOn(hw.Device) {
+		return false
+	}
+	if hw.Device == "cuda" && len(s.GradeBackends) > 0 {
+		for _, b := range s.GradeBackends {
+			if b == hw.Backend {
+				return true
+			}
+		}
+		return false
+	}
+	return true
+}
+
+func (s *Season) gradeHardwareRequirement() string {
+	if len(s.GradeBackends) == 1 && s.GradeBackends[0] == "cuda" {
+		return "an NVIDIA (CUDA) GPU"
+	}
+	return "an NVIDIA (CUDA) or AMD (ROCm) GPU"
 }
 
 // Crawl identifies the published Common Crawl crawl an official corpus is drawn from.

@@ -439,22 +439,50 @@ func (s *Site) funcs() template.FuncMap {
 		"gain":     func(v float64) string { return signed(v, 3) },
 		"ptr":      deref,
 		"has":      func(p *float64) bool { return p != nil },
-		"mult":     multText,
-		"pct":      func(v float64) string { return fmt.Sprintf("%.0f%%", 100*v) },
-		"pct1":     func(v float64) string { return trimZero(fmt.Sprintf("%.1f", 100*v)) + "%" },
-		"add":      func(a, b int) int { return a + b },
-		"sub":      func(a, b int) int { return a - b },
-		"min":      func(a, b int) int { return min(a, b) },
-		"addf":     func(a, b float64) float64 { return a + b },
-		"trust":    trustOf,
-		"pips":     pips,
-		"barw":     barWidth,
-		"halfw":    halfWidth,
-		"ordinal":  ordinal,
-		"neg":      func(v float64) bool { return v < 0 },
-		"hm":       func(ts int64) string { return time.Unix(ts, 0).UTC().Format("2 Jan, 15:04") },
-		"hourof":   func(ts int64) string { return time.Unix(ts, 0).UTC().Format("2 Jan 15:04") },
-		"hours":    func(seconds int64) string { return trimZero(fmt.Sprintf("%.1f", float64(seconds)/3600)) },
+		"hasPillar": func(m map[string]float64, k string) bool {
+			if m == nil {
+				return false
+			}
+			_, ok := m[k]
+			return ok
+		},
+		"hasGroupPillars": func(pillars []PlanPillar, groups map[string]float64, m map[string]float64, scored bool) bool {
+			if m == nil {
+				return false
+			}
+			for _, pl := range pillars {
+				isScored := groups[pl.Group] > 0
+				if isScored == scored {
+					if _, ok := m[pl.Name]; ok {
+						return true
+					}
+				}
+			}
+			return false
+		},
+		"pillarGain": func(m map[string]float64, k string) float64 {
+			if m == nil {
+				return 0
+			}
+			return m[k]
+		},
+		"groupWeight": func(groups map[string]float64, g string) float64 { return groups[g] },
+		"mult":        multText,
+		"pct":         func(v float64) string { return fmt.Sprintf("%.0f%%", 100*v) },
+		"pct1":        func(v float64) string { return trimZero(fmt.Sprintf("%.1f", 100*v)) + "%" },
+		"add":         func(a, b int) int { return a + b },
+		"sub":         func(a, b int) int { return a - b },
+		"min":         func(a, b int) int { return min(a, b) },
+		"addf":        func(a, b float64) float64 { return a + b },
+		"trust":       trustOf,
+		"pips":        pips,
+		"barw":        barWidth,
+		"halfw":       halfWidth,
+		"ordinal":     ordinal,
+		"neg":         func(v float64) bool { return v < 0 },
+		"hm":          func(ts int64) string { return time.Unix(ts, 0).UTC().Format("2 Jan, 15:04") },
+		"hourof":      func(ts int64) string { return time.Unix(ts, 0).UTC().Format("2 Jan 15:04") },
+		"hours":       func(seconds int64) string { return trimZero(fmt.Sprintf("%.1f", float64(seconds)/3600)) },
 		"dict": func(kv ...any) map[string]any {
 			m := map[string]any{}
 			for i := 0; i+1 < len(kv); i += 2 {
@@ -624,7 +652,16 @@ func trustOf(e EntryView) trustView {
 	case !e.Settled:
 		return trustView{0, "sealed", "Who ran it and what they measured are published when the round settles."}
 	case e.Void || e.NRuns == 0:
+		if strings.Contains(strings.ToLower(e.Reason), "training failed") {
+			return trustView{0, "training failed", "The training failed on the machines that tried to grade it, so this round does not count for it."}
+		}
 		return trustView{0, "not run", "Nobody could run it, or check a run of it, so this round does not count for it."}
+	case !e.Valid && (strings.Contains(strings.ToLower(e.Reason), "diverg") || strings.Contains(strings.ToLower(e.Reason), "training failed")):
+		return trustView{0, "training failed", "The training failed."}
+	case !e.Valid && e.ScriptSHA != "" && e.NRuns > 1:
+		return trustView{0, "failed on every run", fmt.Sprintf("All %d machines that ran it wrote an edit script that broke a rule.", e.NRuns)}
+	case !e.Valid && e.ScriptSHA != "":
+		return trustView{0, "failed", "The edit script it wrote broke a rule."}
 	case !e.Valid && e.NRuns > 1:
 		return trustView{0, "failed on every run", fmt.Sprintf("All %d machines that ran it got no usable edit script from it.", e.NRuns)}
 	case !e.Valid:

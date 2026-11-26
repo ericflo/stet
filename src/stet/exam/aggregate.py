@@ -13,9 +13,9 @@ have gives its share to the others of its group, never to the other group.
 Inside a pillar:
 - Each part counts the same. A part is a kind of writing, or a family of generators.
 - Inside a part, each language counts by its share of the round's own corpus (programming
-  languages count together as one, and beside natural languages take half). A natural language
-  with fewer than SMALL items in the part is measured together with the part's other small ones,
-  as "other", with their shares together.
+  languages count together as one, and beside natural languages take `code_share`: 0.5 in
+  Season 2, 0.15 in Season 3). A natural language with fewer than SMALL items in the part is
+  measured together with the part's other small ones, as "other", with their shares together.
 - Inside a language, formats and kinds of task count the same, each a trimmed mean of its clipped
   gains.
 - A language or a format with fewer than SMALL items counts in proportion to how many it has, so
@@ -23,7 +23,8 @@ Inside a pillar:
 
 The season names every part. A family of generators it does not name is not generated, a kind
 of writing it does not name is not harvested or selected, and an item of such a part is an error
-here: nothing on the exam counts for nothing.
+here. A group declared with `0.0` weight is scored per pillar for diagnostics without entering
+the headline score.
 
 So no generator, source or language weighs more than its declared share. A curator that gains
 hugely in one place and loses everywhere else gets little; one that gains a little everywhere
@@ -65,13 +66,14 @@ CODE = "code"  # every programming language, as one language
 class Plan:
     """What a season's score is made of."""
 
-    groups: dict[str, float]  # each group's share of the score
+    groups: dict[str, float]  # each group's share of the score (0.0 for diagnostic-only groups)
     pillars: dict[str, str]  # each pillar's group, in the order they are shown
     parts: dict[str, str]  # each part's pillar
     clip: float = CLIP
     trim: float = TRIM
     small: int = SMALL
     weight_other_by_share: bool = False
+    code_share: float = 0.5
 
     def pillar_of(self, part: str) -> str:
         """The pillar a part counts in. A part the season does not name is not on the exam."""
@@ -87,6 +89,8 @@ class Plan:
             if p in present:
                 by_group[g].append(p)
         total = sum(self.groups[g] for g in by_group)
+        if total <= 0:
+            return {p: 0.0 for ps in by_group.values() for p in ps}
         return {p: self.groups[g] / total / len(ps) for g, ps in by_group.items() for p in ps}
 
 
@@ -104,8 +108,15 @@ def plan_of(season) -> Plan:
     agg = cfg.get("aggregate", {})
     plan = Plan(groups={g: float(s) for g, s in cfg["groups"].items()}, pillars=pillars, parts=parts,
                 clip=float(agg.get("clip", CLIP)), trim=float(agg.get("trim", TRIM)), small=int(agg.get("small", SMALL)),
-                weight_other_by_share=bool(agg.get("weight_other_by_share", False)))
-    if set(pillars.values()) != set(plan.groups) or len(named) != len(parts) or abs(sum(plan.groups.values()) - 1) > 1e-9:
+                weight_other_by_share=bool(agg.get("weight_other_by_share", False)),
+                code_share=float(agg.get("code_share", 0.5)))
+    if (
+        set(pillars.values()) != set(plan.groups)
+        or len(named) != len(parts)
+        or any(w < 0 for w in plan.groups.values())
+        or abs(sum(plan.groups.values()) - 1) > 1e-9
+        or not (0.0 <= plan.code_share <= 1.0)
+    ):
         raise ValueError(f"season {season.id}: the exam's groups, pillars and parts do not fit together")
     families = {f.NAME for f in FAMILIES}
     if unknown := sorted(set(parts) - families - set(SOURCE_KIND.values()) - set(REASONING_KINDS)):
@@ -193,14 +204,19 @@ def _share(lang: str, shares: dict[str, float]) -> float:
     return max(float(shares.get(lang, OTHER)), 0.0) or OTHER
 
 
-def language_cells(counts: dict[str, int], shares: dict[str, float] | None = None, small: int = SMALL) -> tuple[dict[str, str], dict[str, float]]:
+def language_cells(
+    counts: dict[str, int],
+    shares: dict[str, float] | None = None,
+    small: int = SMALL,
+    code_share: float = 0.5,
+) -> tuple[dict[str, str], dict[str, float]]:
     """Where each language of a part is measured, and each cell's weight.
 
     counts is how many items each language has in the part. A natural language with at least
     `small` is a cell of its own; the others share the cell "other". A cell's weight is its share
     of the round's own corpus (the published table when that was not measured), a pooled cell's
     the sum of its languages', and a cell with fewer than `small` items counts in proportion.
-    Programming languages together, beside natural languages, take half."""
+    Programming languages together, beside natural languages, take `code_share` (0.5 by default)."""
     from .fresh.select import SHARES
 
     shares = shares or SHARES
@@ -218,7 +234,7 @@ def language_cells(counts: dict[str, int], shares: dict[str, float] | None = Non
         cell[CODE] = CODE
         if not out:
             return cell, {CODE: 1.0}
-        half = 0.5 * min(counts[CODE], small) / small
+        half = code_share * min(counts[CODE], small) / small
         out = {c: v * (1 - half) for c, v in out.items()}
         out[CODE] = half
     return cell, out
@@ -260,7 +276,7 @@ def _part(pairs: list[Pair], plan: Plan, shares) -> float:
     counts: dict[str, int] = defaultdict(int)
     for row, _ in pairs:
         counts[row["lang"]] += 1
-    cell, w = language_cells(counts, shares, plan.small)
+    cell, w = language_cells(counts, shares, plan.small, plan.code_share)
     cells: dict[str, list[Pair]] = defaultdict(list)
     for row, g in pairs:
         cells[cell[row["lang"]]].append((row, g))
@@ -337,7 +353,7 @@ def round_score(items: list[Item], item_gains: list[float], shares: dict[str, fl
         for it, p in zip(items, pairs, strict=True):
             if not is_generated(it):
                 by_lang[it.lang].append(p)
-        cell, weight = language_cells({k: len(v) for k, v in by_lang.items()}, shares, plan.small)
+        cell, weight = language_cells({k: len(v) for k, v in by_lang.items()}, shares, plan.small, plan.code_share)
         out["fresh"] = {"score": _score(_parts(fresh, plan, shares), plan), "items": len(fresh),
                         "languages": {lang: {"cell": cell[lang], "weight": round(weight[cell[lang]], 5),
                                              "score": round(_balanced(p, plan)[0], 5), "items": len(p)}

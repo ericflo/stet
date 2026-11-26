@@ -29,6 +29,15 @@ GRADES_SINCE = "0.6.0"
 CURRENT_SEASON = "s3"
 
 
+class TrainingError(RuntimeError):
+    """Training or scoring diverged numerically (non-finite loss or score).
+
+    A numerical divergence is the grader's failure, not a script rule violation: the grader
+    retries once on the same machine and, if it still fails, hands the job back so another
+    machine grades the script before anything is held against the entry.
+    """
+
+
 @dataclass(frozen=True)
 class Scale:
     name: str

@@ -47,6 +47,7 @@ def export(season_id: str = CURRENT_SEASON) -> dict:
             "generated": [f.NAME for f in gen.named(plan.parts)],
             "clip": raw["exam"]["aggregate"]["clip"], "trim": raw["exam"]["aggregate"]["trim"], "small": raw["exam"]["aggregate"]["small"],
             "weight_other_by_share": bool(raw["exam"]["aggregate"].get("weight_other_by_share", False)),
+            **({"code_share": float(raw["exam"]["aggregate"]["code_share"])} if "code_share" in raw["exam"]["aggregate"] else {}),
             "answer_floor_bytes": season.answer_floor_bytes,
             "min_pillar_items": int(raw["exam"].get("min_pillar_items", 0)),
             # How the exam's writing is taken from the hours the examiner harvests: server/harvest.go.
@@ -56,6 +57,7 @@ def export(season_id: str = CURRENT_SEASON) -> dict:
         "draw_grid_seconds": raw["draw_grid_seconds"],
         "pools": {k: {f: v for f, v in pool.items() if f != "manifest"} for k, pool in raw["pools"].items()},
         "grade_devices": raw["grade_devices"],
+        **({"grade_backends": raw["grade_backends"]} if raw.get("grade_backends") else {}),
         "environment": raw.get("environment", {}),
         "assets": raw.get("assets", {}),
         "machine": raw.get("machine", {}),

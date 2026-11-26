@@ -3,8 +3,11 @@
 Pretraining data that builds latent reasoning, reading, multilingual, and tool-use circuits
 responds strongly to a brief fixed supervised fine-tuning probe; shallow style mimicry does not.
 Every verifier runs the exact same deterministic probe derived solely from the round's seed
-(before the official exam is even posted), using a disjoint RNG domain and the odd-parity split
-of Wikidata facts so there is zero overlap with any exam item.
+(before the official exam is even posted). In Season 3, the probe loads the bundled, sha256-pinned
+commercial-permissive multilingual SFT pack (`s3-sft-ml.jsonl.zst`, 512 examples from Dolly-15k
+and Aya/COHERE-permissive multilingual instruction splits), ordered deterministically from the
+round's seed with zero overlap with any scored exam item. Earlier/unpacked configurations fall back
+to disjoint generated examples (using a separate RNG domain and the odd-parity Wikidata split).
 """
 
 from __future__ import annotations
@@ -57,12 +60,10 @@ def build_sft_examples(
 ) -> list[tuple[str, str]]:
     """Return `n` deterministic, disjoint multilingual (prompt, completion) SFT probe pairs.
 
-    Balanced across reading comprehension (11 languages), deductive logic (11 languages),
-    shell/tool use (11 languages), odd-parity factual knowledge (10 languages), and
-    quantitative/program reasoning. Excludes every generated exam `(ctx, cont)` pair and
-    every final-question `(tail_question(ctx), cont.strip())` (including inside few-shot
-    worked examples) for the same round seed so no scored exam question can appear in the
-    SFT probe.
+    In Season 3+, draws from the season's sha256-pinned `sft.pack` (`s3-sft-ml.jsonl.zst`) in
+    seeded order; when no pack is configured, falls back to generated multilingual reading, logic,
+    shell, odd-parity factual knowledge, and quantitative tasks. Always excludes any scored exam
+    `(ctx, cont)` pair and tail question so no exam question can appear in the SFT probe.
     """
     if exclude is None:
         if season is None:

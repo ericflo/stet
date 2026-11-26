@@ -206,16 +206,17 @@ def _exam(*groups):
     return items, g
 
 
-def test_comprehension_and_reasoning_are_equal_halves_and_breadth_wins():
-    # news (comprehension) gains 0.4 and explain (reasoning) loses 0.2: half and half
+def test_reasoning_is_the_score_comprehension_is_diagnostic_and_breadth_wins():
+    # news (comprehension, 0% weight diagnostic) gains 0.4 and explain (reasoning, 100% weight) loses 0.2
     items, g = _exam(
         _many(10, "prose", "context", "fresh/ccnews/en", 0.4, source="ccnews:1"),
         _many(10, "prose", "answer", "fresh/explain/en", -0.2, source="explain:1"),
     )
     r = round_score(items, g)
-    assert r["score"] == pytest.approx(0.5 * 0.4 + 0.5 * -0.2)
-    assert r["pillars"]["news"]["weight"] == 0.5 and r["pillars"]["explain"] == {"score": -0.2, "items": 10, "parts": {"explain": -0.2}, "group": "reasoning", "weight": 0.5}
-    assert r["generated"] is None and r["fresh"]["score"] == pytest.approx(0.1)
+    assert r["score"] == pytest.approx(-0.2)
+    assert r["pillars"]["news"]["weight"] == 0.0 and r["pillars"]["news"]["score"] == pytest.approx(0.4)
+    assert r["pillars"]["explain"] == {"score": -0.2, "items": 10, "parts": {"explain": -0.2}, "group": "reasoning", "weight": 1.0}
+    assert r["generated"] is None and r["fresh"]["score"] == pytest.approx(-0.2)
     # a curator that gains hugely on two items and loses on the rest scores below one that gains a little everywhere
     items = [_item("prose", "answer", f"fresh/explain/en/{i}", source="explain:1") for i in range(40)]
     assert round_score(items, [0.05] * 40)["score"] > round_score(items, [5.0, 5.0] + [-0.02] * 38)["score"]
@@ -226,29 +227,30 @@ def test_a_pillar_the_exam_lacks_gives_its_share_to_its_own_group():
     explain = _many(10, "prose", "answer", "fresh/explain/en", -0.2, source="explain:1")
     infer = _many(10, "prose", "answer", "fresh/infer/en", 0.2, source="infer:1")
     ref = _many(10, "prose", "context", "fresh/wikipedia/en", 0.0, source="wikipedia:1")
-    # one kind of comprehension or two, comprehension is half; one reasoning kind or two, reasoning is half
-    assert round_score(*_exam(news, ref, explain))["score"] == pytest.approx(0.5 * 0.2 + 0.5 * -0.2)
-    assert round_score(*_exam(news, explain, infer))["score"] == pytest.approx(0.5 * 0.4 + 0.5 * 0.0)
-    # with no reasoning at all comprehension is the whole score
-    assert round_score(*_exam(news, ref))["score"] == pytest.approx(0.2)
+    # comprehension is diagnostic (0%); one reasoning kind takes 100%, two split 50/50
+    assert round_score(*_exam(news, ref, explain))["score"] == pytest.approx(-0.2)
+    assert round_score(*_exam(news, explain, infer))["score"] == pytest.approx(0.0)
+    # diagnostic-only items score 0.0 safely without division by zero, while reporting each pillar's own score
+    diag = round_score(*_exam(news, ref))
+    assert diag["score"] == pytest.approx(0.0)
+    assert diag["pillars"]["news"]["score"] == pytest.approx(0.4) and diag["pillars"]["reference"]["score"] == pytest.approx(0.0)
 
 
 def test_an_item_of_a_part_the_season_does_not_name_is_refused():
-    news = _many(10, "prose", "passage", "fresh/ccnews/en", 0.1, source="ccnews:1")
-    rows = item_table(news[0])
-    assert round_score(*news)["score"] == pytest.approx(0.1) and round_score(*news)["items"] == 10
-    # Nothing is sat and left unscored. A family the season does not name and a source it has no
-    # kind of writing for are each an error, not a part of the exam that counts for nothing.
+    explain = _many(10, "prose", "answer", "fresh/explain/en", 0.1, source="explain:1")
+    rows = item_table(explain[0])
+    assert round_score(*explain)["score"] == pytest.approx(0.1) and round_score(*explain)["items"] == 10
+    # A family the season does not name and a source it has no kind of writing for are each refused.
     for stray in (_many(3, "math", "answer", "riddles", 9.0), _many(3, "prose", "passage", "fresh/radio/en", -9.0, source="radio:1")):
         with pytest.raises(ValueError, match="not a part of the season's exam"):
-            round_score(*_exam(news, stray))
+            round_score(*_exam(explain, stray))
         with pytest.raises(ValueError, match="not a part of the season's exam"):
             item_table(stray[0])
     # And so is a row of the table with a part the season does not name, or a part under a pillar that is not its own.
     with pytest.raises(ValueError, match="not a part of the season's exam"):
         score_from_table([{**rows[0], "part": "riddles"}], [0.1], None)
-    with pytest.raises(ValueError, match="no part 'news' in a pillar 'reasoning'"):
-        score_from_table([{**rows[0], "pillar": "reasoning"}], [0.1], None)
+    with pytest.raises(ValueError, match="no part 'explain' in a pillar 'reference'"):
+        score_from_table([{**rows[0], "pillar": "reference"}], [0.1], None)
 
 
 def test_the_season_names_every_part_of_its_exam():
@@ -319,13 +321,13 @@ def test_inside_a_pillar_each_part_counts_the_same():
 def test_languages_count_by_the_corpus_inside_a_kind_of_writing():
     # A few English items must not outweigh many passages in other languages, and each language
     # counts by its share of the corpus.
-    items = ([_item("prose", "passage", f"fresh/wikipedia/ru/{i}", lang="ru", source="wikipedia:1") for i in range(30)]
-             + [_item("prose", "passage", f"fresh/wikipedia/en/{i}", lang="en", source="wikipedia:2") for i in range(10)])
+    items = ([_item("prose", "answer", f"fresh/explain/ru/{i}", lang="ru", source="explain:1") for i in range(30)]
+             + [_item("prose", "answer", f"fresh/explain/en/{i}", lang="en", source="explain:2") for i in range(10)])
     g = [-0.5] * 30 + [0.5] * 10
     r = round_score(items, g, shares={"en": 60.0, "ru": 40.0})
     assert r["fresh"]["languages"]["ru"]["weight"] == pytest.approx(0.4)
     assert r["score"] == pytest.approx(0.6 * 0.5 + 0.4 * -0.5) and r["generated"] is None
-    assert set(r["pillars"]) == {"reference"} and r["pillars"]["reference"]["parts"] == {"reference": pytest.approx(0.1)}
+    assert set(r["pillars"]) == {"explain"} and r["pillars"]["explain"]["parts"] == {"explain": pytest.approx(0.1)}
     # the same items, weighed by a corpus that is mostly Russian: this curator loses
     assert round_score(items, g, shares={"en": 20.0, "ru": 80.0})["score"] < 0
 
@@ -338,8 +340,8 @@ def test_small_languages_are_measured_together_and_few_items_count_for_less():
     assert cell == {"en": "en", "ru": "ru", "sw": "other", "yo": "other"}
     assert w == pytest.approx({"en": 50 / 63, "ru": 10 / 63, "other": 3 / 63})
     # so one item in a language the corpus is full of cannot carry that language's whole share
-    items = ([_item("prose", "passage", f"fresh/wikipedia/en/{i}", source="wikipedia:1") for i in range(16)]
-             + [_item("prose", "passage", "fresh/wikipedia/ru/0", lang="ru", source="wikipedia:2")])
+    items = ([_item("prose", "answer", f"fresh/explain/en/{i}", source="explain:1") for i in range(16)]
+             + [_item("prose", "answer", "fresh/explain/ru/0", lang="ru", source="explain:2")])
     r = round_score(items, [0.0] * 16 + [8.0], shares={"en": 50.0, "ru": 50.0})
     assert r["score"] == pytest.approx(8.0 * (50 / 8) / (50 + 50 / 8))  # an eighth of its share, not half the score
     # formats too: a format with one item beside one with eight counts an eighth as much
@@ -351,10 +353,12 @@ def test_programming_languages_count_together():
     items = [_item("code", "passage", f"fresh/lore/c/{i}", lang="code:c", source="lore:1") for i in range(10)] + \
         [_item("code", "passage", f"fresh/lore/rust/{i}", lang="code:rust", source="lore:2") for i in range(2)]
     r = round_score(items, [0.1] * 10 + [0.5] * 2)
-    assert r["score"] == pytest.approx((0.1 * 9 + 0.5) / 10)  # one pool, trimmed by one at each end
-    # beside prose, code is half of technical writing
+    assert r["pillars"]["technical"]["score"] == pytest.approx((0.1 * 9 + 0.5) / 10)  # one pool, trimmed by one at each end
+    # beside prose, code takes Season 3's capped code_share (0.15) of diagnostic technical writing
     prose = [_item("prose", "passage", f"fresh/github/en/{i}", source="github:1") for i in range(8)]
-    assert round_score(items + prose, [0.1] * 10 + [0.5] * 2 + [0.3] * 8)["score"] == pytest.approx((0.14 + 0.3) / 2)
+    r2 = round_score(items + prose, [0.1] * 10 + [0.5] * 2 + [0.3] * 8)
+    assert r2["pillars"]["technical"]["score"] == pytest.approx(0.15 * 0.14 + 0.85 * 0.3)
+    assert r2["score"] == pytest.approx(0.0)  # diagnostic group has 0% weight in overall score
 
 
 def test_trimmed_mean_and_gains():
@@ -421,13 +425,12 @@ def test_an_item_is_never_put_over_fewer_bytes_than_the_floor(student):
 
 def test_a_student_whose_loss_is_not_a_number_has_no_valid_grade(student):
     pytest.importorskip("torch")
-    import json
     import types
 
     import torch
 
     from stet.exam.score import sit
-    from stet.grade import Trained, sit_exam
+    from stet.grade import Trained, TrainingError, sit_exam
 
     model, enc, eot, ctx = student
     cpu = torch.device("cpu")
@@ -447,9 +450,8 @@ def test_a_student_whose_loss_is_not_a_number_has_no_valid_grade(student):
             sit(Overflowed(value), [a, pair], enc, eot, ctx, cpu)
     season = types.SimpleNamespace(eot=eot, answer_floor_bytes=16)
     rnd = types.SimpleNamespace(season=season, describe=lambda: {"id": "t"})
-    result = sit_exam(Trained({"valid": False, "invalid_reason": None}, True, Overflowed(float("nan")), enc, cpu), rnd, types.SimpleNamespace(ctx=ctx), [a, pair])
-    assert result["valid"] is False and "not a number" in result["invalid_reason"] and "exam" not in result
-    json.dumps(result, allow_nan=False)  # what is sent is JSON the server will read
+    with pytest.raises(TrainingError, match="not a number"):
+        sit_exam(Trained({"valid": False, "invalid_reason": None}, True, Overflowed(float("nan")), enc, cpu), rnd, types.SimpleNamespace(ctx=ctx), [a, pair])
 
 
 def test_all_of_a_long_answer_is_scored_and_its_beginning_is_never_cut(student):

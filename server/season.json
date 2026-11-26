@@ -22,7 +22,7 @@
   "key_bytes": 64,
   "min_letters": 38
  },
- "digest": "53272bfe794df8e89b276babb8541688f350a19dd6fe7a200508b742d7ff1773",
+ "digest": "7006d6f0e2bbea2f8e61f3afe780f6f8e0be24a60e66b164bbdd3715960fdc46",
  "draw_grid_seconds": 600,
  "environment": {
   "also": {
@@ -297,6 +297,7 @@
  "exam": {
   "answer_floor_bytes": 16,
   "clip": 4.0,
+  "code_share": 0.15,
   "fresh": {
    "hours": 3,
    "reach_seconds": 93600,
@@ -304,8 +305,8 @@
   },
   "generated": [],
   "groups": {
-   "comprehension": 0.5,
-   "reasoning": 0.5
+   "comprehension": 0.0,
+   "reasoning": 1.0
   },
   "min_pillar_items": 20,
   "pillars": [
@@ -379,6 +380,9 @@
   "explain",
   "infer",
   "synthesis"
+ ],
+ "grade_backends": [
+  "cuda"
  ],
  "grade_devices": [
   "cuda"
@@ -613,9 +617,9 @@
  },
  "tolerance": {
   "large": {
-   "baseline": 0.04,
-   "grade": 0.025,
-   "run": 0.04
+   "baseline": 0.015,
+   "grade": 0.012,
+   "run": 0.015
   },
   "micro": {
    "baseline": 0.2,
@@ -628,9 +632,9 @@
    "run": 0.15
   },
   "standard": {
-   "baseline": 0.05,
-   "grade": 0.03,
-   "run": 0.05
+   "baseline": 0.015,
+   "grade": 0.012,
+   "run": 0.015
   }
  },
  "train": {

@@ -157,13 +157,24 @@ def report(out: Out, result: dict, base: dict | None, season) -> None:
     t = result["train"]
     out.line("training", f"{t['tokens']:,} tokens in {t['seconds']:.0f}s ({t['tokens_per_second']:,} tok/s) · final train loss {t['final_train_loss']:.3f}")
     e = result["exam"]
-    out.line("exam", f"{e['items']:,} items · mean {e['mean']:.4f} bits per byte" + (f"   baseline {base['exam']['mean']:.4f}" if base else ""))
+    subset = result.get("exam_subset") or {}
+    if subset.get("public_subset") and subset.get("total_items"):
+        item_desc = (
+            f"{e['items']:,} of {subset['total_items']:,} items "
+            f"(public subset; {subset['withheld_items']:,} third-party items withheld)"
+        )
+    else:
+        item_desc = f"{e['items']:,} items"
+    out.line("exam", f"{item_desc} · mean {e['mean']:.4f} bits per byte" + (f"   baseline {base['exam']['mean']:.4f}" if base else ""))
     if base and "gain" in result:
         out.line("", "          " + " · ".join(f"{k} {v:+.3f}" for k, v in (result.get("pillars") or {}).items()))
         groups = (season.raw.get("exam") or {}).get("groups") or {}
-        if "comprehension" in groups and "reasoning" in groups:
+        scored_groups = {g for g, w in groups.items() if float(w) > 0}
+        if "comprehension" in scored_groups and "reasoning" in scored_groups:
             text = out.bold(f"{result['gain']:+.4f}") + " (fresh twin-context comprehension and reasoning, of those above)"
-        elif "comprehension" in groups:
+        elif "reasoning" in scored_groups and "comprehension" not in scored_groups:
+            text = out.bold(f"{result['gain']:+.4f}") + " (fresh harvest-derived reasoning, 100% of score; human-written comprehension shown at 0%)"
+        elif "comprehension" in scored_groups:
             text = out.bold(f"{result['gain']:+.4f}") + " (fresh twin-context comprehension and skills, of those above)"
         else:
             text = out.bold(f"{result['gain']:+.4f}") + " bits per byte: writing three quarters, skills one, of those above"
@@ -177,6 +188,12 @@ def report(out: Out, result: dict, base: dict | None, season) -> None:
                 note += f", another shuffle of the same pages by about ±{noise['order_sd']:.3f}"
             text += out.dim(f"   ({note})")
         out.line("gain", text)
+        if subset.get("public_subset") and subset.get("total_items"):
+            out.line(
+                "note",
+                f"replayed on the {subset['public_items']:,} openly licensed items of {subset['total_items']:,}; "
+                f"the official board score uses all {subset['total_items']:,} items, so this gain differs from the board.",
+            )
 
 
 # --- commands -------------------------------------------------------------------------------
@@ -208,7 +225,12 @@ def cmd_init(args):
 
 
 def _with_baseline(result: dict, rnd, scale, device, out: Out, skip: bool):
-    if not result["valid"]:
+    from . import data
+
+    if result["valid"]:
+        if subset := data.round_exam_meta(rnd):
+            result["exam_subset"] = subset
+    else:
         result["gain"] = 0.0  # by the rules, and so that whatever reads the JSON finds a number there
     if skip:
         return None
@@ -217,7 +239,6 @@ def _with_baseline(result: dict, rnd, scale, device, out: Out, skip: bool):
     base = baseline(rnd, scale, device, progress=out.progress("baseline"), log=lambda m: out.line("", out.dim("baseline " + m)))
     # The gain is the exam's aggregate of the item-by-item differences, with the languages
     # weighed by the published table (a round's own corpus is measured only for official rounds).
-    from . import data
     from .exam.aggregate import gains, plan_of, round_score
 
     result["baseline"] = {"mean": base["exam"]["mean"]}
@@ -228,15 +249,16 @@ def _with_baseline(result: dict, rnd, scale, device, out: Out, skip: bool):
         result["gain"] = round(agg["score"], 5)
         result["pillars"] = {k: v["score"] for k, v in agg["pillars"].items()}
         present_groups = {plan.pillars[p] for p in agg["pillars"]}
-        missing_groups = [g for g in plan.groups if g not in present_groups]
+        missing_groups = [g for g, w in plan.groups.items() if w > 0 and g not in present_groups]
         if missing_groups:
             result["partial_exam"] = missing_groups
-            out.line(
-                "note",
-                f"partial practice exam: missing {', '.join(missing_groups)} "
-                "(set STET_SYNTHESIZE_PRACTICE=1 with an 18 GB+ GPU or STET_EXAMINER_LLM_URL, "
-                "or practice without local harvested hours to sit the full bundled practice pack)",
-            )
+            if rnd.kind == "practice":
+                out.line(
+                    "note",
+                    f"partial practice exam: missing {', '.join(missing_groups)} "
+                    "(set STET_SYNTHESIZE_PRACTICE=1 with an 18 GB+ GPU or STET_EXAMINER_LLM_URL, "
+                    "or practice without local harvested hours to sit the full bundled practice pack)",
+                )
     return base
 
 
@@ -331,8 +353,11 @@ def cmd_run(args):
         report(out, result, base, season)
         _edit_time_line(out, result, season)
         if not result["writing"]:
-            out.line("note", "no fresh twin-context comprehension in this round's exam, which is half of an official round's score. "
-                             "`stet harvest` fetches some, once, and needs no account.")
+            if season.raw.get("exam", {}).get("practice_pack"):
+                out.line("note", "using bundled CC-BY-SA practice pack (reasoning + diagnostic comprehension); "
+                                 "`stet harvest` adds fresh local hours, once, and needs no account.")
+            else:
+                out.line("note", "no fresh writing in this round's exam. `stet harvest` fetches some, once, and needs no account.")
         out.line("saved", str((work / "result.json").relative_to(Path.cwd()) if work.is_relative_to(Path.cwd()) else work / "result.json"))
         results.append(result)
     if len(results) == 1:
@@ -460,7 +485,18 @@ def cmd_baseline(args):
     season, scale, rnd = resolve_round(args)
     base = baseline(rnd, scale, pick_device(args.device), progress=out.progress("training"), log=lambda m: out.line("", out.dim(m)))
     out.line("round", f"{rnd.id} · {scale.name}")
-    out.line("baseline", out.bold(f"{base['exam']['mean']:.4f}") + f" bits per byte, the mean over {base['exam']['items']:,} items")
+    from . import data as stet_data
+
+    subset = stet_data.round_exam_meta(rnd)
+    if subset.get("public_subset") and subset.get("total_items"):
+        base["exam_subset"] = subset
+        item_desc = (
+            f"{subset['public_items']:,} of {subset['total_items']:,} items "
+            f"(public subset; {subset['withheld_items']:,} third-party items withheld)"
+        )
+    else:
+        item_desc = f"{base['exam']['items']:,} items"
+    out.line("baseline", out.bold(f"{base['exam']['mean']:.4f}") + f" bits per byte, the mean over {item_desc}")
     if args.json:
         json.dump(base, sys.stdout, indent=1)
         sys.stdout.write("\n")
@@ -717,16 +753,19 @@ def _examine_follow(args) -> None:
     import threading
 
     from .client import need_key, request
+    from .exam.examine import FatalExamError
     from .spec import load_season
 
     season = load_season(args.season)
     out = Out(quiet=args.quiet)
     out.line("", out.bold("stet examine --follow"))
+    key = need_key()
     stop = threading.Event()
-    threading.Thread(target=_harvest_follow, args=(season, need_key(), out, stop), daemon=True).start()
+    threading.Thread(target=_harvest_follow, args=(season, key, out, stop), daemon=True).start()
     failed: dict[str, int] = {}
     again: dict[str, float] = {}  # when a round whose exam failed is tried next
     waiting: set[str] = set()
+    abandoned: set[str] = set()  # rounds that hit a deterministic FatalExamError and should not retry
     while True:
         try:
             rounds = request("GET", "/api/v1/rounds?limit=20").get("rounds") or []
@@ -734,7 +773,7 @@ def _examine_follow(args) -> None:
             out.line("", out.dim(f"the server did not answer ({e}); trying again in a minute"))
             rounds = []
         for x in sorted(rounds, key=lambda x: x["id"]):
-            if x.get("status") != "open" or x.get("exam_digest") or time.time() < again.get(x["id"], 0):
+            if x.get("status") != "open" or x.get("exam_digest") or x["id"] in abandoned or time.time() < again.get(x["id"], 0):
                 continue
             try:
                 _examine_one(args, x["id"])
@@ -742,6 +781,16 @@ def _examine_follow(args) -> None:
                 if x["id"] not in waiting:
                     waiting.add(x["id"])
                     out.line("", out.dim(str(e)))
+            except FatalExamError as e:
+                # Deterministic synthesis/coverage failure: retrying temp=0 on the same harvests
+                # would repeat the same 20-minute build until timeout. Cancel the round cleanly now.
+                out.line("", out.bad(f"{x['id']}: {e}; cancelling round rather than retrying identical inputs"))
+                try:
+                    request("POST", f"/api/v1/admin/rounds/{x['id']}/cancel", {"reason": str(e)[:280]}, key=key, timeout=60)
+                    abandoned.add(x["id"])
+                except Exception as ce:
+                    out.line("", out.bad(f"{x['id']}: cancel failed ({ce}); will not retry exam automatically"))
+                    abandoned.add(x["id"])
             except (Exception, SystemExit) as e:  # tried again, less and less often, for as long as the round is open
                 n = failed[x["id"]] = failed.get(x["id"], 0) + 1
                 again[x["id"]] = time.time() + _again_in(n)
@@ -799,7 +848,6 @@ def cmd_doctor(args):
 
     out = Out()
     season = load_season()
-    grade_devices = season.raw.get("grade_devices", ["cuda"])
     rows: list[tuple[str, str, str]] = []
     rows.append((OK, "stet", f"{__version__} on Python {sys.version.split()[0]} ({sys.platform})"))
     try:
@@ -817,10 +865,12 @@ def cmd_doctor(args):
             rows.append((WARN, "gpu", f"this machine has {maker} GPU, but this PyTorch build ({torch.__version__}) cannot use it; training will run on {dev.type}.\n" + TORCH_HELP))
         else:
             rows.append((WARN, "gpu", f"no CUDA or ROCm GPU; training will run on {dev.type} (fine for --scale nano)"))
-        if dev.type in grade_devices:
+        from .client import grade_hardware_ok, grade_hardware_requirement
+
+        if grade_hardware_ok(season, dev.type, hw.get("backend")):
             rows.append((OK, "verify", "this machine can grade for the leaderboard: `stet verify`"))
         else:
-            rows.append((WARN, "verify", "official grading needs an NVIDIA or AMD GPU, so every grade uses the same arithmetic"))
+            rows.append((WARN, "verify", f"official grading needs {grade_hardware_requirement(season)}, so every grade uses the same arithmetic"))
     except ImportError:
         rows.append((WARN, "torch", "not installed: `stet run` and `stet verify` need it.\n" + TORCH_HELP))
     ok, why = bwrap_available() if sys.platform == "linux" else (False, "")
@@ -890,8 +940,10 @@ def cmd_bench(args):
     short = bench.shortfalls(season, m)
     out.line("", "")
     if short:
+        from .client import grade_hardware_requirement
+
         out.line("", "This machine cannot run curators for the leaderboard: " + "; ".join(short) + ".")
-        out.line("", "It can still grade (`stet verify`) if it has an NVIDIA or AMD GPU, and run your own curator (`stet run`).")
+        out.line("", f"It can still grade (`stet verify`) if it has {grade_hardware_requirement(season)}, and run your own curator (`stet run`).")
     else:
         out.line("", "This machine is fast enough to run curators for the leaderboard: `stet verify --edits`, on Linux.")
     if args.json:
@@ -1102,6 +1154,7 @@ def main(argv=None):
     from .data import ExamNotReady
     from .project import ProjectError
     from .runner import HarnessError
+    from .spec import TrainingError
 
     try:
         return args.fn(args) or 0
@@ -1109,7 +1162,7 @@ def main(argv=None):
         die("interrupted", 130)
     except ApiError as e:
         die(str(e))
-    except (OSError, HarnessError, ExamNotReady, ProjectError, AssetError, Unavailable) as e:
+    except (OSError, HarnessError, TrainingError, ExamNotReady, ProjectError, AssetError, Unavailable) as e:
         die(str(e))
 
 

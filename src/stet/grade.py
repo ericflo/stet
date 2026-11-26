@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from . import source_digest
 from .data import Corpus, exam_digest
 from .script import ScriptError, file_sha256, materialize
-from .spec import HARNESS_VERSION, Round, Scale
+from .spec import HARNESS_VERSION, Round, Scale, TrainingError
 from .train import hardware_info, pick_device, train
 
 
@@ -32,7 +32,9 @@ class Trained:
 def train_script(rnd: Round, scale: Scale, corpus: Corpus, script_path, device=None, progress=None, log=None) -> Trained:
     """Apply the script and train the student for the budget: all of grading but the exam.
 
-    Never raises on a bad script: the result will say `valid: false` and why."""
+    Never raises on a bad script (`ScriptError`): the result will say `valid: false` and why,
+    decided before anything is trained. If training diverges (`FloatingPointError`), retries
+    once from fresh weights on the same machine and raises `TrainingError` if it fails again."""
     from .tok import load_encoding
 
     log = log or (lambda msg: None)
@@ -62,11 +64,35 @@ def train_script(rnd: Round, scale: Scale, corpus: Corpus, script_path, device=N
             f"{stats.tokens_one_pass:,} tokens per pass x {stats.passes:.2f} passes ({time.time() - t0:.0f}s)"
         )
         result["script"] = stats.to_dict(corpus)
-        model, result["train"] = train(tokens, scale, season, rnd.init_seed, device, progress, sft_seed=rnd.seed, enc=enc)
-        return Trained(result, True, model, enc, device)
-    except (ScriptError, FloatingPointError) as e:
+    except ScriptError as e:
         result["invalid_reason"] = str(e)
-    return Trained(result, device=device)
+        return Trained(result, device=device)
+
+    last_msg = ""
+    for attempt in range(2):
+        diverged = False
+        try:
+            model, result["train"] = train(tokens, scale, season, rnd.init_seed, device, progress, sft_seed=rnd.seed, enc=enc)
+            return Trained(result, True, model, enc, device)
+        except FloatingPointError as e:
+            diverged = True
+            last_msg = str(e)
+            if e.__traceback__ is not None:
+                import traceback
+
+                traceback.clear_frames(e.__traceback__)
+                e.__traceback__ = None
+        if diverged:
+            if getattr(device, "type", "") == "cuda":
+                import gc
+
+                import torch
+
+                gc.collect()
+                torch.cuda.empty_cache()
+            if attempt == 0:
+                log(f"training diverged ({last_msg}); retrying once from fresh weights")
+    raise TrainingError(f"the training failed after retry: {last_msg}") from None
 
 
 def sit_exam(trained: Trained, rnd: Round, scale: Scale, exam) -> dict:
@@ -76,26 +102,35 @@ def sit_exam(trained: Trained, rnd: Round, scale: Scale, exam) -> dict:
 
     result = trained.result
     result["round"], result["exam_sha256"] = rnd.describe(), exam_digest(exam)
-    if trained.trained:
-        try:
-            import torch
-
+    try:
+        if trained.trained:
             if trained.model is not None and trained.device is not None and getattr(trained.device, "type", "") == "cuda":
                 first_param = next(trained.model.parameters(), None)
                 if first_param is not None and first_param.device.type != "cuda":
                     trained.model.to(trained.device)
             t1 = time.time()
-            scores = sit(trained.model, exam, trained.enc, rnd.season.eot, scale.ctx, trained.device, floor=rnd.season.answer_floor_bytes)
+            try:
+                scores = sit(trained.model, exam, trained.enc, rnd.season.eot, scale.ctx, trained.device, floor=rnd.season.answer_floor_bytes)
+            except FloatingPointError as e:
+                msg = str(e)
+                if e.__traceback__ is not None:
+                    import traceback
+
+                    traceback.clear_frames(e.__traceback__)
+                    e.__traceback__ = None
+                raise TrainingError(f"the training failed while sitting the exam: {msg}") from None
             result["exam"] = {"items": len(exam), "item_scores": [round(x, 6) for x in scores],
                               "mean": round(sum(scores) / max(1, len(scores)), 6), "seconds": round(time.time() - t1, 2)}
             result["valid"] = True
-        except FloatingPointError as e:
-            result["invalid_reason"] = str(e)
-    trained.model = None  # the student is done with; its memory goes back
-    if trained.device is not None and getattr(trained.device, "type", "") == "cuda":
-        import torch
+    finally:
+        trained.model = None  # the student is done with; its memory goes back
+        if trained.device is not None and getattr(trained.device, "type", "") == "cuda":
+            import gc
 
-        torch.cuda.empty_cache()
+            import torch
+
+            gc.collect()
+            torch.cuda.empty_cache()
     result["finished_at"] = int(time.time())
     return result
 

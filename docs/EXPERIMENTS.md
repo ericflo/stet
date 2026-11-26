@@ -104,12 +104,12 @@ source is deleted: nothing is sat that does not count. Season 2's 39M student to
 one script to differ by 0.005 at standard and 0.03 at micro (`noise` in `s2.json`), with
 provisional official tolerances of 0.025 (grade), 0.04 (baseline), and 0.04 (run). Season 3
 uses `baidu/ERNIE-4.5-0.3B-Base-PT` (bottom half frozen, top half reset, 65.5M tokens +
-1-epoch multilingual SFT probe) on a 100%-fresh exam (twin-context comprehension +
-harvest-derived multi-sentence reasoning); its own noise figures, tolerances, DataDecide 1B
-agreement, and adversarial red-team measurements live in `src/stet/seasons/s3.json` and the
-Season 3 validation report. All tolerances remain *provisional* until grades from many
-machines, of both makes, can be compared: every round's page publishes each grade's
-difference from the others.
+1-epoch multilingual SFT probe) on a 100%-fresh exam (100% harvest-derived multi-sentence
+reasoning scored; 4 human-written twin-context kinds sat at 0% weight as diagnostics); its
+own noise figures, calibrated NVIDIA CUDA tolerances (`0.012` grade, `0.015` baseline,
+`0.015` run), DataDecide 1B agreement, and adversarial red-team measurements live in
+`src/stet/seasons/s3.json` and the Season 3 validation sections below. Every round's page
+publishes each grade's difference from the others.
 
 **Can the exam be bought with a curator's own text?** One of the two attackers, `scribe`,
 was `tidy` plus the 16,000 tokens of its own text a script could then hold, spent on
@@ -356,11 +356,11 @@ both the student and the exam from first principles and verified the exact live 
 1. **Frozen bottom-half `baidu/ERNIE-4.5-0.3B-Base-PT` at `65.5M` tokens (12-recipe DataDecide 1B sweep).**
    Freezing the tied embedding/head (`vocab = 103,424`) and lower 9 layers while resetting the
    upper 9 layers (`127.4M` trainable parameters) lets the student train on **2× more tokens
-   (`65.5M`)** in **nearly half the time** (`19.7–20.1 min` per pass on RTX 5090, `~29 min` on 4090,
-   `~52 min` on 3090) and **`8.90 GiB` allocated / `9.33 GiB` reserved VRAM** across training,
+   (`65.5M`)** in **nearly half the time** (`19.7–20.1 min` per pass on RTX 5090, `~30 min` on 4090,
+   `~55 min` on 3090) and **`8.90 GiB` allocated / `9.33 GiB` reserved VRAM** across training,
    SFT, and exam sitting (lowering the volunteer grading floor to **12 GB**; independently
    reproduced on AMD Radeon 8060S ROCm 7.14 at `9.43 GiB` reserved matching NVIDIA's `init_sha256`).
-2. **Live official 100%-fresh 7-pillar exam (`50%` twin-context comprehension + `50%` harvest-derived reasoning).**
+2. **Live official 100%-fresh 7-pillar exam (evaluated initially at `50%` twin-context comprehension + `50%` harvest-derived reasoning before stage 4 moved comprehension to `0%` diagnostic).**
    Running unmodified `stet.exam.examine.build()` on a brand-new official draw (`s3-o00001`,
    `507,785` CC-MAIN-2026-43 docs) and 3 fresh Nov 25 harvest hours (`1795622400`, `1795626000`,
    `1795629600`, `0/0` overlap with `s3-practice.jsonl.zst`) produced **`1,370` fresh items**
@@ -419,8 +419,9 @@ both the student and the exam from first principles and verified the exact live 
 | `adv_overfilter` (top-3% narrow keep) | `−0.54270` | **`−0.51935`** | `−0.02921` | `−1.00948` | Obliterated |
 
 **What it decided.** Season 3 ships `baidu/ERNIE-4.5-0.3B-Base-PT` (`freeze_bottom: true`,
-`65.5M` tokens, 1-epoch commercial-permissive multilingual SFT probe) with the 100%-fresh 7-pillar
-`comprehension` + `reasoning` exam (`rules_version: 7`, `weight_other_by_share: true`,
+`65.5M` tokens, 1-epoch commercial-permissive multilingual SFT probe) with the 100%-fresh exam
+(100% fresh reasoning scored after stage 4 below, 4 human-written comprehension kinds at `0%`
+diagnostic; `rules_version: 7`, `weight_other_by_share: true`, `code_share: 0.15`,
 `min_pillar_items: 20` with sparse-pillar omission and `STET_EXAM_TIMEOUT = 6h` +
 `POST /api/v1/admin/rounds/{id}/cancel`, `baselines.per_round = 2`),
 a **12 GB** volunteer grading floor, **24 GB+** neural curator sandboxes, and on-demand rounds (`$0/day` idle).
@@ -487,20 +488,106 @@ GPU scoring)*.
        exam-specific language-mix exploitation; estimating a bound requires toggling reweighting on/off
        over the same filtered pool across multiple independently held-out draws and training seeds.
 
+4. **Pre-launch exam decomposition, perplexity-pruning adversary gate, cross-card hardware parity, and round cost (`r8_gate`).**
+   Before opening Season 3, four empirical gates audited the shipped exam and hardware fleet:
+   - **Half-by-half decomposition (why Season 3 scores `reasoning = 1.0`, `comprehension = 0.0` diagnostic):**
+     Re-scoring Draw 1 and Draw 2 with each half alone proved that the human-written twin-context
+     half carried 50% of the declared weight but supplied only `3%–12%` of `fineweb2`'s actual
+     gain, scored at or below chance on DataDecide (`24/66` on Draw 1, `34/66` on Draw 2, putting
+     the 11th-of-12 over-filtered recipe first/second), could not separate `adv_qa_spam`
+     (`+0.0028` / `+0.0034`) from `fineweb2`/`reader`, had cross-card noise (`5090 vs 4090 =
+     0.0027–0.0037 bpb`) larger than `fineweb2`'s entire gain (`+0.0007–+0.0017 bpb`), and
+     scored `english` (zero non-English training data) higher than `fineweb2` even on non-English
+     items (`+0.0088 / +0.0046` vs `+0.0013–+0.0035`) because subtracting wrong openings cancels
+     fluency while the frozen lower half of `ERNIE-4.5-0.3B` already reads every language.
+     By contrast, the **model-written reasoning half alone** (`explain`, `infer`, `synthesis`):
+     - scores **`49/66` (Draw 1) and `46/66` (Draw 2), mean `47.5/66`** on DataDecide (matching or
+       beating the 50/50 mix's `47.0/66`);
+     - increases `fineweb2` signal-to-noise from `14–17×` to **`24–55×`** (`+0.0373 / +0.0542`
+       vs 2-seed diff `0.0006–0.0012`);
+     - places `adv_qa_spam` strictly below unedited (`−0.00034` on Phase 9);
+     - strongly penalizes missing languages (`english = −0.162 / −0.182`).
+     Season 3 therefore sets `groups = {"reasoning": 1.0, "comprehension": 0.0}` (with `code_share = 0.15`
+     and per-source caps inside `select_context` so LKML never dominates even diagnostic `technical`),
+     showing the four human-written kinds on the round and curator pages beside the score as
+     0%-weight diagnostic telemetry until a human-written measure clears DataDecide.
+   - **Perplexity-pruning / model-predictable prose adversaries (`adv_ppl_qwen06b` & `adv_ppl_ernie03b`,
+     2× RTX 5090, Draw B `s3-o00003`, 65.5M tokens):**
+     We built two pure lowest-perplexity curators on `reader._prefilter`'s `75,565` deduplicated
+     multilingual docs with **zero quality rubric**, matching `fineweb2`'s exact per-language byte
+     mix (`~21.9k` unique docs = bottom `~29%` NLL/byte, `passes = 1.0`): one scored by
+     `Qwen/Qwen3-0.6B` (same family as teacher `Qwen3-8B`) and a cross-family control scored by
+     `baidu/ERNIE-4.5-0.3B-Base-PT` (independent Baidu weights).
+
+| Curator (all Draw B crawl, 65.5M tok, vs Draw B `unedited`) | Draw B Reasoning (official S3) | Draw B Comp (0% diag) | Draw B 50/50 | Phase 9 Reasoning (official S3) | Phase 9 Comp (0% diag) |
+|---|---:|---:|---:|---:|---:|
+| **`adv_ppl_qwen06b`** (lowest `Qwen3-0.6B` NLL/byte) | **`+0.07418`** (+37%) | **`+0.00726`** (4.2×) | `+0.04072` | **`+0.05664`** (+40%) | **`+0.00497`** (7.3×) |
+| **`adv_ppl_ernie03b`** (lowest `ERNIE-4.5-0.3B` NLL/byte) | **`+0.07247`** (+34%) | **`+0.00867`** (5.0×) | `+0.04057` | **`+0.05363`** (+32%) | **`+0.00521`** (7.7×) |
+| `adv_exam_lang_mix` (`reader._prefilter` random) | `+0.06027` | `+0.00358` | `+0.03193` | `+0.04433` | `+0.00158` |
+| `fineweb2` (heuristic-only, no neural filter) | `+0.05417` | `+0.00173` | `+0.02795` | `+0.04051` | `+0.00068` |
+| `adv_tiny_lang_boost` | `+0.01763` | `−0.00012` | `+0.00876` | `+0.01067` | `−0.00382` |
+
+     **Honest diagnosis (both sides of this result):**
+     1. *Not Qwen3 teacher-family overfitting:* `ERNIE-4.5-0.3B` overlapped `Qwen3-0.6B` on `79.3%`
+        of selected documents, beat `Qwen3-0.6B` on `explain` (`+0.02077` vs `+0.02020`),
+        human-written `technical` (`+0.0154` vs `+0.0064`), and Phase 9 English reasoning
+        (`+0.06534` vs `+0.06455`), and **both** crushed `fineweb2` by `4.2×–7.7×` on 100%
+        human-written twin-context comprehension (where unconditional style cancels identically).
+        Keeping the lowest-PPL `~29%` of deduplicated Gopher-filtered Common Crawl is literally
+        **CCNet-head / perplexity pruning** (Wenzek et al. 2019; Marion et al. 2023; Ankner et al.
+        2024), which drops garbled web scrapes and increases `.edu/.gov/.ac/.org` share
+        (`8.2% → 9.0–9.4%`, `pmc.ncbi.nlm.nih.gov` `8 → 18`, `med.stanford.edu` `5 → 14`).
+     2. *Real Season 3 caveat:* uncapped lowest-PPL with zero quality judgment **also** increases
+        privacy/TOS/copyright boilerplate (`3.0% → 4.6%`) and AI-SEO phrase density (`1.3% → 2.5%`),
+        lowers lexical diversity (`TTR 0.713 → 0.676`), and puts PHP deprecation logs and AI
+        listicles in its extreme bottom tail — yet beats both `fineweb2` (`+32–40%`) and `reader`
+        v2 (`+0.0381`, whose zero-shot 0.6B rubric ratings collapsed to `[2.57, 2.81]`). On Phase 9
+        English reasoning, `FineWeb-Edu` (`+0.10562`) and `DCLM-qc-10p` (`+0.08705`) still lead
+        generic English Common Crawl (`ml_english` `+0.08008`), showing strong quality classifiers
+        retain headroom above generic low-PPL filtering. Entrants should treat CCNet-style
+        perplexity pruning as an established, strong neural baseline on NLL exams.
+   - **Cross-card hardware parity (`5090` vs `4090` vs `3090` at `standard` 65.5M tokens; `5090` vs `AMD 8060S` at `nano`/`micro`):**
+     Training the exact archived `fineweb2.jsonl` (`tokens_sha256 = 232c6bee572bc914...`) from the
+     exact Draw B seed produced **bit-identical `init_sha256` (`5bd1d5ce4547697e...`) and
+     `tokens_sha256`** across all four GPUs:
+
+| Hardware pair & scale | Runtime (`standard`) | Draw B Reasoning `|da−db|` / `|direct|` | Phase 9 Reasoning `|da−db|` / `|direct|` | Draw B 50/50 `|direct|` | Phase 9 50/50 `|direct|` |
+|---|---:|---:|---:|---:|---:|
+| **RTX 5090 (Blackwell) vs RTX 4090 (Ada)**, `standard` | `1,172s` / `1,803s` | `0.00205` / `0.00138` | **`0.00374`** / `0.00329` | `0.00255` | `0.00273` |
+| **RTX 5090 (Blackwell) vs RTX 3090 (Ampere)**, `standard` | `1,172s` / `3,313s` | `0.00179` / `0.00162` | `0.00367` / **`0.00340`** | `0.00162` | `0.00205` |
+| **RTX 4090 (Ada) vs RTX 3090 (Ampere)**, `standard` | `1,803s` / `3,313s` | `0.00027` / `0.00005` | `0.00008` / `0.00022` | `0.00072` | `0.00070` |
+| RTX 5090 vs AMD Radeon 8060S (ROCm 7.14), `nano` / `micro` | `~3.4h` est. `standard` | `0.00155` / `0.00099` | `0.00156` / `0.00122` | `0.00075` / `0.00062` | `0.00080` / `0.00100` |
+
+     **What it decided:** Official Season 3 tolerances are calibrated to `~3.2–4.4×` the maximum
+     measured cross-architecture NVIDIA diff (`0.00374` grade / `0.00340` baseline):
+     **`grade = 0.012`, `baseline = 0.015`, `run = 0.015`** (down from provisional `0.03 / 0.05 /
+     0.05`, catching real drift at `22%–30%` of `fineweb2`'s `+0.041–+0.054` reasoning gain).
+     Because AMD ROCm Flash Attention backward is non-deterministic, takes `~3.4h` per standard
+     pass, and experienced a 1-in-6 transient `FloatingPointError` divergence under card contention,
+     Season 3 restricts official verifying (grading and, since runners must earn 5 agreed official
+     grades first, running curators) to NVIDIA CUDA (`grade_backends: ["cuda"]`), while
+     retaining AMD ROCm for local practice (`stet run`) and the `$0/round` production examiner.
+   - **Per-round compute & cost vs Season 2:**
+     At `standard` scale (`65.5M` tokens), one grading pass takes `~19.5 min` on an RTX 5090
+     (`~$0.15` at `$0.45/h`), `~30 min` on an RTX 4090 (`~$0.22` at `$0.43/h`), or `~55 min` on an
+     RTX 3090 (`~$0.20` at `$0.22/h`), versus `$0.041–$0.046` per training in Season 2. A typical
+     10-script Season 3 round runs 12 trainings (`10` scripts + `2` baselines) = **`~$1.80` of
+     grading compute** (vs `~$0.55` in Season 2) plus curator runs and boot overhead (**`~$3–$5`
+     all-in per round**, ~`2.5–3×` Season 2's `$1.57–$2.16`, while on-demand draws keep idle days
+     at `$0/day` and the local AMD examiner costs `$0/round`).
+
 ## Still to measure
 
 - Exam-specific language-mix sensitivity with controlled prefiltering: compare reweighting on vs off
   on the **same** filtered pool across multiple independently held-out draws and training seeds.
-
-- How far two curators' gains differ from round to round: what the record's margin should
-  be set from.
-- Grades of the same scripts on NVIDIA and AMD machines: whether the tolerances hold across
-  makes. The data arrives by itself, on every round's page.
+- A human-written comprehension signal that passes DataDecide and responds to non-English training
+  data (the four twin-context kinds stay at `0%` weight beside the score until one does).
+- How far two curators' gains differ from round to round on the 100%-reasoning score: what the
+  record's margin should be set from.
+- Grades of the same scripts across additional NVIDIA GPU generations (e.g. L40S, RTX 3080/4070)
+  and whether the calibrated `0.012 / 0.015` tolerances hold in live rounds.
 - The unedited corpus's score against training tokens, on this exam: the curve a multiplier
   would be read from.
-- What share the writing should have. The pilot cannot tell two thirds from nine tenths.
 - Why one order of the same pages scored 0.02 above nine others, and whether an order
   like it can be found on purpose.
-- How far a curator's gain moves between two draws of the raw pages for the baseline: four
-  draws is all there is.
-- How long a round takes from draw to settlement, now that it does not wait for its exam.
+- How long a round takes from draw to settlement with `--exam-after 25m`.

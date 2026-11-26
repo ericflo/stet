@@ -1298,11 +1298,15 @@ func (j *judge) offers(st *entryState, q *asker, closing bool) []offer {
 func (j *judge) wanting(sc *scriptState) bool { return j.short(sc) > 0 }
 
 // short is how many more grades that count a script's score is waiting for.
+// A single invalid report also asks for a second established grader when one is around, so no
+// single machine's fault can fail an entry unconfirmed.
 func (j *judge) short(sc *scriptState) int {
 	switch v := j.weigh(sc); {
 	case len(sc.Writers) > 1 && len(v.counted) < 2:
 		return 2 - len(v.counted)
 	case !v.known || v.self || v.tie:
+		return 1
+	case !v.valid && len(v.counted) < 2:
 		return 1
 	}
 	return 0
@@ -1468,8 +1472,8 @@ func (a *App) claim(ctx context.Context, acctID int64, h *Hello) (*Handed, error
 	if err := a.checkHarness(h.Harness, h.Season, h.SeasonDigest); err != nil {
 		return nil, err
 	}
-	if !a.cfg.Dev && !a.season.gradesOn(deviceOf(h.Hardware)) {
-		return nil, fail(400, "grading for the leaderboard needs an NVIDIA (CUDA) or AMD (ROCm) GPU, so that every grade uses the same arithmetic")
+	if !a.cfg.Dev && !a.season.gradesOnHardware(readHardware(h.Hardware)) {
+		return nil, fail(400, "grading for the leaderboard needs %s, so that every grade uses the same arithmetic", a.season.gradeHardwareRequirement())
 	}
 	out := &Handed{}
 	err := a.st.update(ctx, func(tx *Tx) error {
@@ -2000,8 +2004,8 @@ func (a *App) submitResult(ctx context.Context, acctID, claimID int64, p *Result
 	if !sha256Re.MatchString(p.CorpusSHA256) || !sha256Re.MatchString(p.ExamSHA256) {
 		return nil, fail(400, "the result does not say which corpus and exam it used")
 	}
-	if !a.cfg.Dev && !a.season.gradesOn(deviceOf(p.Hardware)) {
-		return nil, fail(400, "grades for the leaderboard must come from an NVIDIA (CUDA) or AMD (ROCm) GPU")
+	if !a.cfg.Dev && !a.season.gradesOnHardware(readHardware(p.Hardware)) {
+		return nil, fail(400, "grades for the leaderboard must come from %s", a.season.gradeHardwareRequirement())
 	}
 	// One score for every item: how many the round has is checked against the round below.
 	check := func(sc *ExamScore, what string) error {
@@ -2165,7 +2169,7 @@ func (a *App) submitResult(ctx context.Context, acctID, claimID int64, p *Result
 		if p.Baseline != nil {
 			if dev, ok := a.baselineDev(s, rd, acctID, p.Baseline.ItemScores); ok && !within(dev, tol.Baseline) {
 				return refuse("baseline", places5(dev),
-					"your unedited baseline for %s is further from the round's other graders' than the tolerance of %.2f bits per byte allows, so this machine's setup or arithmetic differs. That is published with the round when it settles; nothing counts against you", p.Round, tol.Baseline)
+					"your unedited baseline for %s is further from the round's other graders' than the tolerance of %.3f bits per byte allows, so this machine's setup or arithmetic differs. That is published with the round when it settles; nothing counts against you", p.Round, tol.Baseline)
 			}
 		}
 
@@ -2424,7 +2428,14 @@ func (a *App) giveUp(tx *Tx, j *judge, st *entryState, held bool) bool {
 		}
 	}
 	if gave && !counts(e) {
-		a.voidEntry(tx, e, "no second verifier was there to check this entry's run; the round does not count for it", true)
+		why := "no second verifier was there to check this entry's run; the round does not count for it"
+		for _, run := range e.Runs {
+			if run.Dropped && strings.Contains(strings.ToLower(run.Reason), "training failed") {
+				why = "the training failed on the machines that tried to grade this entry; the round does not count for it"
+				break
+			}
+		}
+		a.voidEntry(tx, e, why, true)
 	}
 	return gave
 }
@@ -2512,18 +2523,36 @@ func (a *App) abandonStuck(tx *Tx) {
 				continue
 			}
 			gave := false
+			trainFailed := false
 			for _, sc := range st.Scripts {
 				counting := false
 				for _, c := range sc.Live {
 					counting = counting || j.est[c.AccountID]
 				}
 				if !j.weigh(sc).known && !counting && sc.Tries >= maxGradeAttempts {
-					a.dropScript(tx, j, st, sc, fmt.Sprintf("the verifiers could not grade this script in %d attempts", maxGradeAttempts))
+					scTrainFail := false
+					for _, c := range tx.s.Claims {
+						if c.RoundIdx == rd.Idx && c.EditorID == e.EditorID && c.Kind == "grade" && c.Script == sc.SHA &&
+							c.Status == "released" && strings.Contains(strings.ToLower(c.Reason), "training failed") {
+							scTrainFail = true
+							break
+						}
+					}
+					why := fmt.Sprintf("the verifiers could not grade this script in %d attempts", maxGradeAttempts)
+					if scTrainFail {
+						why = fmt.Sprintf("the training failed in %d attempts", maxGradeAttempts)
+						trainFailed = true
+					}
+					a.dropScript(tx, j, st, sc, why)
 					gave = true
 				}
 			}
 			if gave && !counts(e) {
-				a.voidEntry(tx, e, fmt.Sprintf("the verifiers could not grade this entry's script in %d attempts; the round does not count for it", maxGradeAttempts), false)
+				why := fmt.Sprintf("the verifiers could not grade this entry's script in %d attempts; the round does not count for it", maxGradeAttempts)
+				if trainFailed {
+					why = fmt.Sprintf("the training failed on this entry's script in %d attempts; the round does not count for it", maxGradeAttempts)
+				}
+				a.voidEntry(tx, e, why, trainFailed)
 			}
 		}
 	}

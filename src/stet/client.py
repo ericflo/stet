@@ -1370,10 +1370,28 @@ def cmd_verify(args):
             lock.close()
 
 
+def grade_hardware_ok(season, device_type: str, backend: str | None) -> bool:
+    """Whether this device and GPU backend may grade officially for `season`."""
+    allowed_devices = season.raw.get("grade_devices", ["cuda"])
+    if device_type not in allowed_devices:
+        return False
+    allowed_backends = season.raw.get("grade_backends") or []
+    if device_type == "cuda" and allowed_backends:
+        return backend in allowed_backends
+    return True
+
+
+def grade_hardware_requirement(season) -> str:
+    backends = season.raw.get("grade_backends") or []
+    if backends == ["cuda"]:
+        return "an NVIDIA (CUDA) GPU"
+    return "an NVIDIA (CUDA) or AMD (ROCm) GPU"
+
+
 def _verify(args, organiser: bool = False, me: dict | None = None):
     from .cli import Out
     from .runner import bwrap_available, remove_tree, sandbox_selftest, scope_available
-    from .spec import load_season
+    from .spec import TrainingError, load_season
     from .train import hardware_info, pick_device
 
     out = Out()
@@ -1389,10 +1407,10 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
     scale = season.scale(info["scale"])
     device = pick_device(args.device)
     hw = hardware_info(device)
-    allowed = season.raw.get("grade_devices", ["cuda"])
-    if device.type not in allowed and not args.any_device:
+    if not grade_hardware_ok(season, device.type, hw.get("backend")) and not args.any_device:
+        need = grade_hardware_requirement(season)
         sys.stderr.write(
-            "stet: grading for the leaderboard needs an NVIDIA (CUDA) or AMD (ROCm) GPU, so that every grade is\n"
+            f"stet: grading for the leaderboard needs {need}, so that every grade is\n"
             "  computed with the same arithmetic. You can still build, run and submit curators on this machine.\n"
         )
         sys.exit(1)
@@ -1793,6 +1811,21 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
                         waiting[job_id], holding = sit, None
                     stuck[job_id] = waited + patience(f"could not fetch what this job needs ({clean(err)}). Keeping the job", keeping=job_id)
                 forget_base(sit)
+                continue
+            except TrainingError as err:
+                # Numerical divergence is the grader's failure, not a script rule violation.
+                # train_script already retried once on this machine; hand the job back now so
+                # a second machine grades the script before anything is held against the entry.
+                remove_tree(work)
+                forget_base(sit)
+                failures += 1
+                back = hand_back(clean(f"training failed: {err}", 300))
+                tries.pop(job_id, None)
+                out.line("", out.bad(f"training failed ({clean(err)}); {handed(back)}"))
+                if args.once or failures >= STOP_AFTER_FAILURES:
+                    sys.stderr.write("stet: stopping, because training keeps failing on this machine. `stet doctor` checks the setup.\n")
+                    sys.exit(1)
+                time.sleep(30)
                 continue
             except BaseException as err:  # this machine's trouble, not the curator's
                 # A panic in a compiled library is not an Exception. It is a failed job all

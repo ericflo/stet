@@ -35,36 +35,34 @@ curriculum a real move.
 
 **The exam measures what pretrained models are for.** Text has no quality of its own: a page
 is worth keeping for what it teaches a model. Season 3's exam is 100% fresh with zero static
-benchmarks, zero synthetic templates, and zero raw web perplexity. Half of the score is fresh
-twin-context comprehension (each continuation scored under its real opening minus the mean of
-three length-matched wrong openings from the exact same source and language, in bits per
-byte), in four kinds that count the same: reference, news, technical and conversation. Half
-is fresh harvest-derived reasoning, in three kinds that count the same: explain, infer and
-synthesis — multi-sentence explanations, inferences, and declarative prose syntheses written
-once at the draw by the pinned teacher model (`temperature=0`) from those same three fresh
-hours with varied natural wrappers and a strict anti-copying filter, and published in full at
-settlement. Because twin-context scores the exact same continuation under real vs
-wrong openings and synthesis uses zero Q/A punctuation, surface formatting, style mimicry,
-and QA-spam fail. How much each counts is a choice of value, so it is declared rather than
-left to how many items of each there happen to be.
+benchmarks, zero synthetic templates, and zero raw web perplexity. The official score is
+**100% fresh harvest-derived reasoning**, in three kinds that count one-third each: `explain`,
+`infer` and `synthesis` — multi-sentence explanations, inferences, and declarative prose
+syntheses written once at the draw by the pinned teacher model (`Qwen/Qwen3-8B@b968826d`,
+`temperature=0`) from three hours of writing people published the day before, with varied
+natural wrappers and a strict anti-copying filter, and published in full at settlement. Four
+fresh human-written twin-context comprehension kinds (`reference`, `news`, `technical`,
+`conversation`, scoring each continuation under its real opening minus up to three
+length-matched wrong openings from the same source and language) from those same three hours
+are sat and shown beside each entry's score at **0% weight** as published diagnostics until a
+human-written measure passes DataDecide (pre-season validation showed twin-context scored at
+chance on DataDecide and could not detect missing non-English training data; see
+[Experiments](EXPERIMENTS.md)). How much each counts is a choice of value, so it is declared
+rather than left to how many items of each there happen to be.
 
-**Only what tells curators apart is on the exam.** A student this size cannot do arithmetic,
-unit conversion or program tracing cold, whatever it was trained on: on the pilot such
+**Only validated parts decide the score.** A student this size cannot do arithmetic,
+unit conversion or program tracing cold, whatever it was trained on: on the Season 2 pilot such
 questions ordered curators no better than a coin, at every size of student. Weight on such a
 part is weight on noise, and every extra training is then spent averaging it away. So the
-season names every part of its exam, and each part was measured before the season; a part
-that did not tell curators apart, or whose order did not hold for a larger student, is not
-on the exam. Numbers and programs are on it in one form only, after a few worked examples of
-the same task, and tracing a program is not on it at all. A part the season does not name is
-not generated, not harvested and not sat. Nothing on the exam counts for nothing: a part is
-in the score or it is not on the exam at all. Eight families of generated question were
-asked both cold and after a few worked examples. After the examples, six pass both tests
-(they tell curators apart at the standard size, and keep their order at the large one);
-asked cold, one does ([measured](EXPERIMENTS.md#which-parts-of-the-exam-count)). Two parts
-that passed were then taken off, transformation and lookups in structured data: set against
-what another order of one curator's own pages moves them by, and not only against training
-one script twice, curators did not differ on them by enough
-([measured](EXPERIMENTS.md#the-order-of-a-script)).
+season names every part of its exam, and each part is measured before the season. In Season 2,
+any part that failed pre-season validation was dropped from the exam completely (leaving four
+kinds of writing and seven worked-example skills; transformation and structured data were
+removed after measuring script-order variance in
+[Experiments](EXPERIMENTS.md#the-order-of-a-script)). In Season 3, the three fresh reasoning
+kinds passed DataDecide validation and carry **100% of the official score**, while the four
+fresh human-written twin-context comprehension kinds remain on the exam at **0% weight** as
+published diagnostic telemetry until a human-written measure clears DataDecide. A part the
+season does not name is never generated, harvested, or sat.
 
 **The exam is not a slice of the corpus.** On unseen text from the same pool, careful
 selection barely beats random, because perplexity rewards matching the test distribution.
@@ -220,8 +218,8 @@ shows gains.
 **Rounds at the standard student; finals at a larger budget.** Season 3 rounds train
 `baidu/ERNIE-4.5-0.3B-Base-PT` (18 × 1024, embeddings and lower 9 layers frozen, upper 9
 layers reset from the round's seed) on 65.5M tokens plus a 32-step commercial-permissive
-multilingual SFT probe: about 20 minutes on an RTX 5090 (~29 minutes on an RTX 4090, ~52
-minutes on an RTX 3090), using ≤10 GiB VRAM so 12 GB+ volunteer cards can grade. Smaller
+multilingual SFT probe: about 20 minutes on an RTX 5090 (~30 minutes on an RTX 4090, ~55
+minutes on an RTX 3090), using ≤10 GiB VRAM so 12 GB+ NVIDIA volunteer cards can grade. Smaller
 budgets rank curators differently: they reward narrow data, which loses as the student sees
 more tokens. Finals run the season's top eight, and one more drawn by lot from the next
 eight, on two rounds at 131M tokens (2× the official budget) plus the 32-step SFT probe, and
@@ -290,9 +288,10 @@ What is left is in [Rules](RULES.md#what-is-trusted-and-what-is-not).
    exam is posted a grader fetches the items, checks them against the round's digest, has its
    students sit them, and reports one score per item.
 5. **The server adds it up.** The round's baseline is the item-by-item median of the
-   established graders' baselines. A grade's score is the exam's aggregate (comprehension
-   half, reasoning half, with crawl-share weighting inside the pooled `"other"` small-language
-   cell) of its item scores less that baseline. The server computes
+   established graders' baselines. A grade's score is the exam's aggregate (100% fresh
+   reasoning across `explain`/`infer`/`synthesis` with crawl-share weighting inside the pooled
+   `"other"` small-language cell, plus the four 0%-weight diagnostic comprehension pillars
+   computed and displayed beside it) of its item scores less that baseline. The server computes
    it with a Go port of `src/stet/exam/aggregate.py`, checked against the Python on shared
    test vectors (`tools/aggregate_vectors.py`). From there, agreement, settlement, the board
    and the record work on that score.

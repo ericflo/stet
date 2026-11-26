@@ -28,6 +28,7 @@ from collections import Counter
 from pathlib import Path
 
 from .farm import pack_items
+from .fresh.reason import FatalExamError
 from .items import Item, digest
 
 
@@ -67,18 +68,24 @@ def _filter_pillar_support(items: list[Item], season, rnd_id: str, log=print) ->
             log(f"  omitting under-supported pillars (<{min_items} items; share goes to group): {detail}")
     remaining = _pillar_counts(items, plan)
     empty_groups = [
-        g for g in plan.groups if not any(remaining.get(p, 0) > 0 for p, pg in plan.pillars.items() if pg == g)
+        g
+        for g, w in plan.groups.items()
+        if w > 0 and not any(remaining.get(p, 0) > 0 for p, pg in plan.pillars.items() if pg == g)
     ]
     if empty_groups:
         detail = ", ".join(f"{p}={counts.get(p, 0)}" for p in plan.pillars)
-        raise RuntimeError(
+        raise FatalExamError(
             f"{rnd_id}: exam group(s) {', '.join(empty_groups)} have no pillars meeting minimum of {min_items} items ({detail})"
         )
     return items
 
 
 def _reasoning_cache_usable(reasoning: list[Item], season) -> bool:
-    """Whether a cached reasoning synthesis result is complete enough to reuse."""
+    """Whether a cached reasoning synthesis result is complete enough to reuse.
+
+    Matches `_filter_pillar_support`: a synthesis where at least one reasoning pillar meets
+    `min_pillar_items` is valid to reuse (a legitimately short kind is omitted rather than
+    discarding the entire 20-minute build on restart)."""
     from .aggregate import REASONING_KINDS, plan_of
 
     if not reasoning:
@@ -89,7 +96,7 @@ def _reasoning_cache_usable(reasoning: list[Item], season) -> bool:
     plan = plan_of(season)
     counts = _pillar_counts(reasoning, plan)
     r_pillars = [plan.pillar_of(k) for k in REASONING_KINDS if k in plan.parts]
-    return all(counts.get(p, 0) >= min_items for p in set(r_pillars))
+    return any(counts.get(p, 0) >= min_items for p in set(r_pillars))
 
 
 def _round_init_sha256(rnd, scale) -> str:
@@ -190,15 +197,18 @@ def rebuild_withheld_reasoning(row: dict, excerpt: str) -> Item:
     return it
 
 
-def read_public(raw: bytes, want: str) -> list[Item]:
-    """The items of a published exam that it gives whole, checked against the round's digest."""
+def read_public_info(raw: bytes, want: str) -> tuple[list[Item], int]:
+    """The items of a published exam that it gives whole, plus the total row count (including
+    withheld third-party items), checked against the round's digest."""
     import hashlib
 
     h = hashlib.sha256()
     kept = []
+    total = 0
     for line in raw.decode().split("\n"):  # the newline the exam was written with, and no other break
         if not line:
             continue
+        total += 1
         row = json.loads(line)
         if row.get("withheld"):
             h.update(str(row["id"]).encode())
@@ -208,7 +218,12 @@ def read_public(raw: bytes, want: str) -> list[Item]:
             kept.append(it)
     if h.hexdigest() != want:
         raise ValueError("the published exam does not hash to the round's exam digest")
-    return kept
+    return kept, total
+
+
+def read_public(raw: bytes, want: str) -> list[Item]:
+    """The items of a published exam that it gives whole, checked against the round's digest."""
+    return read_public_info(raw, want)[0]
 
 
 def assemble(
@@ -270,7 +285,9 @@ def assemble(
     # retries cost zero GPU work and partial/interrupted cache files are automatically regenerated.
     if synthesize and (r_cfg := cfg.get("reasoning")):
         rcfg_sig = hashlib.sha256(json.dumps(r_cfg, sort_keys=True).encode()).hexdigest()[:8]
-        rcache = work / f"reasoning-{snapshot_name(shas)[:12]}-{rnd.seed.hex()[:8]}-{rcfg_sig}.jsonl.zst"
+        cache_stem = f"{snapshot_name(shas)[:12]}-{rnd.seed.hex()[:8]}-{rcfg_sig}"
+        rcache = work / f"reasoning-{cache_stem}.jsonl.zst"
+        rdrops = work / f"reasoning-drops-{cache_stem}.jsonl"
         reasoning: list[Item] = []
         loaded = False
         if rcache.exists():
@@ -287,9 +304,9 @@ def assemble(
                 log("  reasoning cache unreadable; regenerating")
                 rcache.unlink(missing_ok=True)
         if not loaded:
-            reasoning = synthesize_reasoning(docs, rnd.seed, r_cfg, shares=mix, log=log)
+            reasoning = synthesize_reasoning(docs, rnd.seed, r_cfg, shares=mix, log=log, drops_path=rdrops)
             if not reasoning:
-                raise RuntimeError(f"{rnd.id}: reasoning synthesis produced zero items")
+                raise FatalExamError(f"{rnd.id}: reasoning synthesis produced zero items")
             _atomic_write_bytes(rcache, pack_items(reasoning))
         fresh = fresh + reasoning
 

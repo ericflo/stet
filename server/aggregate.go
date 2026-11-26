@@ -15,10 +15,12 @@ import (
 // to the others of its group. Inside a pillar each part (a family of generators, or a kind of
 // writing) counts the same; inside a part each language counts by its share of the round's
 // corpus, the small ones measured together as "other", programming languages together as one,
-// which takes half beside natural languages; inside a language each stratum (format/kind)
-// counts the same, each a trimmed mean of gains clipped to a few robust widths. A language or
-// a stratum with fewer than the season's "small" items counts in proportion to how many it has.
-// The season names every part: an item of any other part is not scored, it is refused.
+// taking code_share beside natural languages (default 0.5; 0.15 in Season 3); inside a language
+// each stratum (format/kind) counts the same, each a trimmed mean of gains clipped to a few
+// robust widths. A language or a stratum with fewer than the season's "small" items counts in
+// proportion to how many it has. The season names every part: an item of any other part is not
+// scored, it is refused. A group declared with 0.0 weight is scored per pillar for diagnostics
+// without entering the headline score.
 //
 // To give the harness's floating point, not just its arithmetic, everything is added in the
 // order the harness adds it, with the compensated sum Python's sum() does, and no product is
@@ -48,9 +50,17 @@ type ExamPlan struct {
 	Trim               float64            `json:"trim"`      // from each end, within a stratum
 	Small              int                `json:"small"`     // items a language or a stratum needs to count in full
 	WeightOtherByShare bool               `json:"weight_other_by_share,omitempty"`
+	CodeShare          *float64           `json:"code_share,omitempty"` // share given to code beside natural languages (default 0.5)
 	Floor              int                `json:"answer_floor_bytes"`
 	MinPillarItems     int                `json:"min_pillar_items,omitempty"`
 	Fresh              FreshPlan          `json:"fresh"`
+}
+
+func (p *ExamPlan) codeShare() float64 {
+	if p.CodeShare != nil {
+		return *p.CodeShare
+	}
+	return 0.5
 }
 
 type PlanPillar struct {
@@ -104,6 +114,14 @@ func (p *ExamPlan) weights(present map[string]bool) map[string]float64 {
 	}
 	total := pySum(shares)
 	out := map[string]float64{}
+	if total <= 0 {
+		for _, g := range groups {
+			for _, name := range byGroup[g] {
+				out[name] = 0.0
+			}
+		}
+		return out
+	}
 	for _, g := range groups {
 		for _, name := range byGroup[g] {
 			out[name] = p.Groups[g] / total / float64(len(byGroup[g]))
@@ -209,7 +227,7 @@ func (p *ExamPlan) part(items []ItemInfo, gains []float64, idx []int, shares map
 	for lang, ix := range byLang {
 		counts[lang] = len(ix)
 	}
-	cell, w := languageCells(counts, shares, p.Small)
+	cell, w := languageCells(counts, shares, p.Small, p.codeShare())
 	names, byCell := groupInOrder(idx, func(i int) string { return cell[items[i].Lang] })
 	sort.Strings(names)
 	terms := make([]float64, len(names))
@@ -227,8 +245,8 @@ func (p *ExamPlan) part(items []ItemInfo, gains []float64, idx []int, shares map
 // natural language with at least `small` items is a cell of its own; the others share the cell
 // "other". A cell's weight is its share of the round's corpus, a pooled cell's the sum of its
 // languages', and a cell with fewer than `small` items counts in proportion. Programming
-// languages together, beside natural languages, take half (in proportion, when they are few).
-func languageCells(counts map[string]int, shares map[string]float64, small int) (cell map[string]string, weight map[string]float64) {
+// languages together, beside natural languages, take codeShare (in proportion, when they are few).
+func languageCells(counts map[string]int, shares map[string]float64, small int, codeShare float64) (cell map[string]string, weight map[string]float64) {
 	var natural []string
 	for lang := range counts {
 		if lang != codeLang {
@@ -282,7 +300,7 @@ func languageCells(counts map[string]int, shares map[string]float64, small int) 
 		if len(weight) == 0 {
 			return cell, map[string]float64{codeLang: 1.0}
 		}
-		half := 0.5 * float64(min(k, small)) / float64(small)
+		half := codeShare * float64(min(k, small)) / float64(small)
 		for c, v := range weight {
 			weight[c] = float64(v * (1 - half))
 		}

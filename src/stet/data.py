@@ -846,6 +846,15 @@ def _practice(rnd: Round, scale: Scale, hours: list[tuple[int, Path]]):
         synthesize=synth,
         check_coverage=False,
     )[0]
+    if not synth and rnd.season.raw["exam"].get("reasoning") and rnd.season.raw["exam"].get("practice_pack"):
+        from .exam.aggregate import REASONING_KINDS, part_of
+        from .exam.fresh.reason import load_practice_pack
+
+        pack = load_practice_pack(rnd.season, rnd.seed)
+        reas = [it for it in pack if part_of(it) in REASONING_KINDS]
+        if reas:
+            items = list(items) + reas
+    path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f"{path.name}.tmp{os.getpid()}")
     try:
         tmp.write_bytes(pack_items(items))
@@ -914,6 +923,35 @@ def round_shares(rnd: Round) -> dict[str, float] | None:
         if isinstance(k, str) and isinstance(v, (int, float)) and v >= 0.0:
             out[k] = float(v)
     return out or None
+
+
+def round_exam_meta(rnd: Round) -> dict:
+    """Metadata about the local copy of an official round's exam, including whether local replay
+    is sitting only the openly licensed public subset of a settled round's exam."""
+    if rnd.kind != "official":
+        return {}
+    want = getattr(rnd, "exam_digest", "") or ""
+    if not want:
+        return {}
+    full = exam_items_path(rnd, want)
+    pub = exam_public_path(rnd, want)
+    if full.exists() or not pub.exists():
+        return {}
+    from .exam.examine import read_public_info
+
+    try:
+        raw = zstandard.ZstdDecompressor().decompress(pub.read_bytes(), max_output_size=1 << 30)
+        kept, total = read_public_info(raw, want)
+    except (OSError, ValueError, zstandard.ZstdError):
+        return {}
+    if total > len(kept):
+        return {
+            "public_subset": True,
+            "public_items": len(kept),
+            "total_items": total,
+            "withheld_items": total - len(kept),
+        }
+    return {}
 
 
 def _items(rnd: Round):

@@ -17,9 +17,11 @@ of a page is always allowed. Any other piece must be at least task.info["min_cop
 (task.train_tokens) and repeated from the top if it is shorter, so keeping less means
 training on it more often.
 
-The exam is half fresh twin-context comprehension from writing people published the day
-before the draw, in every language of the crawl by its share of it, and half generated
-skills. Keeping one language only throws away most of what the student is examined on.
+The official score is 100% fresh harvest-derived reasoning (explain, infer, synthesis) from
+three hours of writing people published the day before the draw, in every language of the crawl
+by its share of it (with four fresh human-written twin-context comprehension kinds shown beside
+it at 0% weight for diagnostics). Keeping one language only throws away most of what the
+student is examined on.
 """
 
 import random

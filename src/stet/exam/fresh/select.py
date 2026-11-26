@@ -138,37 +138,67 @@ def _interleave(items: list[Item], rng) -> list[Item]:
     return out
 
 
-def _select_kind(items: list[Item], rng, n: int, per_corner: int, shares: dict, used: dict[str, int]) -> list[Item]:
+def _select_kind(
+    items: list[Item],
+    rng,
+    n: int,
+    per_corner: int,
+    shares: dict,
+    used: dict[str, int],
+    *,
+    max_source_frac: float | None = None,
+) -> list[Item]:
     """About n items of one kind of writing, shared among languages by their share of the web; a
-    language without enough candidates gives its unused share to the others."""
+    language without enough candidates gives its unused share to the others. When `max_source_frac`
+    is set and at least two distinct sources exist in `items`, caps any single source in the first
+    pass so one noisy or narrow source cannot dominate the kind."""
     by_lang: dict[str, list[Item]] = defaultdict(list)
+    sources_seen: set[str] = set()
     for it in items:
         by_lang[it.lang].append(it)
+        sources_seen.add(it.source.split(":", 1)[0])
     for lang in sorted(by_lang):
         by_lang[lang] = _interleave(by_lang[lang], rng.child(lang))
-    weight = {lang: shares.get(lang, OTHER) for lang in by_lang}
+
+    src_cap: int | None = None
+    if max_source_frac is not None and len(sources_seen) >= 2 and n > 0:
+        frac = min(max_source_frac, 0.4) if len(sources_seen) >= 3 else max_source_frac
+        src_cap = max(1, int(n * frac))
+
     chosen: list[Item] = []
-    pos = {lang: 0 for lang in by_lang}
-    want = n
-    while want > 0 and weight:
-        total = sum(weight.values())
-        quota = {lang: max(1, round(want * w / total)) for lang, w in weight.items()}
-        got = 0
-        for lang in sorted(weight, key=lambda x: (-weight[x], x)):
-            q = quota[lang]
-            while q > 0 and pos[lang] < len(by_lang[lang]) and got < want:
-                it = by_lang[lang][pos[lang]]
-                pos[lang] += 1
-                if used[it.corner] < per_corner:
+    chosen_ids: set[int] = set()
+    src_used: dict[str, int] = defaultdict(int)
+    for enforce_cap in ([True, False] if src_cap is not None else [False]):
+        want = n - len(chosen)
+        if want <= 0:
+            break
+        weight = {lang: shares.get(lang, OTHER) for lang in by_lang}
+        pos = {lang: 0 for lang in by_lang}
+        while want > 0 and weight:
+            total = sum(weight.values())
+            quota = {lang: max(1, round(want * w / total)) for lang, w in weight.items()}
+            got = 0
+            for lang in sorted(weight, key=lambda x: (-weight[x], x)):
+                q = quota[lang]
+                while q > 0 and pos[lang] < len(by_lang[lang]) and got < want:
+                    it = by_lang[lang][pos[lang]]
+                    pos[lang] += 1
+                    if id(it) in chosen_ids or used[it.corner] >= per_corner:
+                        continue
+                    src = it.source.split(":", 1)[0]
+                    if enforce_cap and src_cap is not None and src_used[src] >= src_cap:
+                        continue
                     used[it.corner] += 1
+                    src_used[src] += 1
+                    chosen_ids.add(id(it))
                     chosen.append(it)
                     q -= 1
                     got += 1
-            if pos[lang] >= len(by_lang[lang]):
-                weight.pop(lang)
-        if got == 0:
-            break
-        want -= got
+                if pos[lang] >= len(by_lang[lang]):
+                    weight.pop(lang)
+            if got == 0:
+                break
+            want -= got
     return chosen
 
 
@@ -407,6 +437,7 @@ def select_context(docs: list[Doc], seed: bytes, n: int, kinds, per_corner: int 
                 per_corner,
                 shares,
                 used,
+                max_source_frac=0.5,
             )
             chosen[k] += got
             if len(got) < part:

@@ -17,7 +17,7 @@ the round is drawn. The bigger its gain over a student trained on the raw pages,
 curl -fsSL https://www.stetrun.com/install.sh | sh
 stet init my-curator && cd my-curator
 stet harvest              # once: recent human writing for practice exams, no account needed
-stet run                  # edit, train, grade a practice round (12 GB+ GPU; ~1–4 min nano/micro, ~20–29 min standard)
+stet run                  # edit, train, grade a practice round (12 GB+ GPU; ~1–4 min nano/micro, ~20–30 min standard)
 stet login --github       # entering needs a GitHub account at least 30 days old
 stet submit
 ```
@@ -47,25 +47,30 @@ stet service install      # leave it running: starts with the machine, upgrades 
 - **Draw after commit.** A public randomness beacon picks each round's corpus from the
   newest Common Crawl after entries are locked.
 - **An exam nobody can know.** Each round's exam is **100% fresh** and made at its draw,
-  with zero static benchmarks, zero synthetic templates, and zero raw web perplexity. Half of
-  the score is fresh twin-context comprehension (the exact same continuation scored under its
-  real opening minus up to three length-matched wrong openings from the same source and
-  language, in bits per byte) from three hours of the day before, picked by the draw, in every
-  language by its share of the crawl. Half is fresh harvest-derived reasoning
-  (`explain`, `infer`, `synthesis` written once at the draw at `temp=0` by the pinned teacher
-  model from those exact same three hours with varied wrappers, an anti-copying filter, and
-  published in full at settlement). Every student (`ERNIE-4.5-0.3B`, bottom half
-  frozen, 65.5M tokens, ≤10 GiB VRAM so 12 GB+ GPUs can grade) sits the exam after a fixed
-  1-epoch commercial-permissive multilingual SFT probe. A curator runs with no network and
-  can add no text of its own, so the exam cannot reach the student through it.
-- **Only what tells curators apart.** Every part of the exam is validated before the season for
-  multi-seed stability, resistance to style mimicry, and agreement with published pretraining recipes.
-  Zero raw web-text perplexity: a context-insensitive surface-style predictor scores zero on twin-context comprehension, and nothing is sat that does not count.
+  with zero static benchmarks, zero synthetic templates, and zero raw web perplexity. The
+  official score is **100% fresh harvest-derived reasoning** (`explain`, `infer`, `synthesis`,
+  one-third each, written once at the draw at `temp=0` by pinned `Qwen/Qwen3-8B` from three
+  hours of the day before, picked by the draw, weighted by every language's share of the crawl,
+  with varied wrappers and an anti-copying filter, and published in full at settlement). Four
+  fresh human-written twin-context comprehension kinds from those same three hours are sat and
+  shown beside the score at `0%` weight as published diagnostics until a human-written measure
+  passes DataDecide. Every student (`ERNIE-4.5-0.3B`, bottom half frozen, 65.5M tokens, ≤10 GiB
+  VRAM so 12 GB+ NVIDIA GPUs can grade) sits the exam after a fixed 1-epoch commercial-permissive
+  multilingual SFT probe. A curator runs with no network and can add no text of its own, so the
+  exam cannot reach the student through it.
+- **Only what tells curators apart.** The scored exam is validated before the season for
+  multi-seed stability, resistance to QA-spam and over-filtering, and agreement with published
+  1B pretraining rankings (DataDecide: 49/66 and 46/66 across two independent draws); parts
+  that did not clear DataDecide (the four human-written twin-context kinds) carry `0%` weight
+  and are shown only as diagnostics. See [Experiments](docs/EXPERIMENTS.md) for all validation
+  numbers, including known biases and perplexity-pruning baselines.
 - **Copies only.** Everything the student reads is copied byte for byte from the round's
   corpus. A script holds no text of its own.
-- **Checked by other people.** Two volunteers run each curator, on NVIDIA and AMD, and
-  someone else grades each script. A score that only one machine stands behind says so,
-  and no score needs the organisers' machines to run or grade anything.
+- **Checked by other people.** Two volunteers run each curator, and
+  someone else grades each script (official Season 3 verifying runs on NVIDIA CUDA GPUs,
+  cross-verified across RTX 5090, 4090 and 3090; AMD ROCm and Apple Silicon remain supported
+  for local practice). A score that only one machine stands behind says so, and no score needs the
+  organisers' machines to run or grade anything.
 - **The same machine for every curator.** Six cores, 20 GB of RAM, 22 GB of GPU memory,
   up to 10 GB of pinned model weights, and a fixed list of libraries (`flash-linear-attention`,
   `transformers`, PyTorch, plus `vLLM` and `liger-kernel` on NVIDIA Linux), whoever runs it.
@@ -92,7 +97,7 @@ reward, info = env.step(edit_script)  # the gain, in bits per byte
 |---|---|
 | `src/stet/` | The harness and CLI (Python); `src/stet/exam/` makes and scores the exam |
 | `server/` | The API and website (Go) |
-| `examples/` | Reference curators, entered by the organisers: `identity`, `english`, `tidy`, `reader` (a 0.6B multilingual vLLM quality rater), and `dclm`, `fineweb-edu`, `heuristic`, `fineweb2` (published recipes, rebuilt); plus `mimic`, entered to show that choosing pages by surface style alone no longer buys the twin-context exam. Pattern, not entered: `agent` (an agent harness and a model served in the sandbox) |
+| `examples/` | Reference curators, entered by the organisers: `identity`, `english`, `tidy`, `reader` (a 0.6B multilingual vLLM quality rater), and `dclm`, `fineweb-edu`, `heuristic`, `fineweb2` (published recipes, rebuilt); plus `mimic`, a regex/URL selection yardstick (~74–79% of `fineweb2` on Season 3's exam). Pattern, not entered: `agent` (an agent harness and a model served in the sandbox) |
 | `cloud/` | `stet-cloud`, for the organisers: rents GPUs from Vast.ai, RunPod, Lium, Clore.ai and Salad to run curators and grade while volunteers are few (Go, built on its own) |
 | `docs/` | [Rules](docs/RULES.md), [design](docs/DESIGN.md), [verifying](docs/VERIFYING.md), [experiments](docs/EXPERIMENTS.md), [API](docs/API.md), [FAQ](docs/FAQ.md), [operating](docs/OPERATING.md), and [the reasoning behind the exam](docs/research/exam-first-principles.md) |
 

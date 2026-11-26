@@ -75,32 +75,47 @@ func TestTheScoreItemsIsTheHarnesss(t *testing.T) {
 	t.Logf("%d cases, the largest difference from the harness %.3g", len(v.Cases), worst)
 }
 
-// Programming languages take half of a part beside natural languages, which share the rest by
+// Programming languages take code_share of a part beside natural languages, which share the rest by
 // the round's shares; a language without a share, or with none above zero, gets otherShare; and
 // languages with too few items are measured together.
 func TestLanguagesWeighByTheRoundsShares(t *testing.T) {
 	plan := &loadSeason().Exam
 	var items []ItemInfo
 	var gains []float64
-	add := func(lang, stratum string, n int, g float64) {
+	add := func(pillar, part, lang, stratum string, n int, g float64) {
 		for i := 0; i < n; i++ {
-			items = append(items, ItemInfo{"technical", "technical", lang, stratum})
+			items = append(items, ItemInfo{pillar, part, lang, stratum})
 			gains = append(gains, g)
 		}
 	}
-	add("en", "prose/passage", plan.Small, 1)
-	add("code", "code/passage", plan.Small, 10)
-	add("sw", "prose/passage", 1, 100) // sw and ru are small: one cell, "other", of two items
-	add("ru", "prose/passage", 1, 1000)
+	add("technical", "technical", "en", "prose/passage", plan.Small, 1)
+	add("technical", "technical", "code", "code/passage", plan.Small, 10)
+	add("technical", "technical", "sw", "prose/passage", 1, 100) // sw and ru are small: one cell, "other", of two items
+	add("technical", "technical", "ru", "prose/passage", 1, 1000)
 	score, pillars, err := plan.ScoreItems(items, gains, map[string]float64{"en": 0.85, "ru": -1})
 	if err != nil {
 		t.Fatal(err)
 	}
-	// en 0.85 in full; sw and ru 0.05 each, together, a quarter counted (2 of 8 items): halved, beside code's half
+	// en 0.85 in full; sw and ru 0.05 each, together, a quarter counted (2 of 8 items); beside code's codeShare
+	cs := plan.codeShare()
 	other := 0.1 * 2 / float64(plan.Small)
-	want := 0.5*(0.85*1+other*550)/(0.85+other) + 0.5*10
-	if math.Abs(score-want) > 1e-12 || math.Abs(pillars["technical"]-want) > 1e-12 || len(pillars) != 1 {
-		t.Fatalf("score %v, pillars %v, want %v", score, pillars, want)
+	wantTech := (1-cs)*(0.85*1+other*550)/(0.85+other) + cs*10
+	// technical is in the 0%-weight diagnostic comprehension group, so score is 0 while its pillar score matches wantTech.
+	if math.Abs(score) > 1e-12 || math.Abs(pillars["technical"]-wantTech) > 1e-12 || len(pillars) != 1 {
+		t.Fatalf("score %v, pillars %v, want technical=%v", score, pillars, wantTech)
+	}
+	// And on a scored reasoning pillar, score equals the pillar's language-weighted aggregate directly.
+	items, gains = nil, nil
+	add("explain", "explain", "en", "prose/answer", plan.Small, 1)
+	add("explain", "explain", "sw", "prose/answer", 1, 100)
+	add("explain", "explain", "ru", "prose/answer", 1, 1000)
+	score, pillars, err = plan.ScoreItems(items, gains, map[string]float64{"en": 0.85, "ru": -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantExp := (0.85*1 + other*550) / (0.85 + other)
+	if math.Abs(score-wantExp) > 1e-12 || math.Abs(pillars["explain"]-wantExp) > 1e-12 {
+		t.Fatalf("explain score %v, pillars %v, want %v", score, pillars, wantExp)
 	}
 }
 

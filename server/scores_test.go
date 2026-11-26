@@ -34,10 +34,9 @@ func (w *world) pillarResult(c *claimed, explain, reference float64) map[string]
 // scripts, each graded by two more: four grades, no two alike on the exam's pillars. It
 // returns the round and the entry's id.
 //
-// A pillar of testTable in skills counts half and one in comprehension counts half,
-// so the grades of the first script come to 0.50(0.40) + 0.50(0.60) = 0.50 and 0.50(0.60) +
-// 0.50(0.50) = 0.55, and the script to 0.525; those of the second to 0.45 and 0.54, and it
-// to 0.495. The entry's gain is the mean of its two runs': 0.51.
+// Reasoning carries 100% of the score and comprehension is 0%-weight diagnostic telemetry,
+// so the grades of the first script come to 0.50 and 0.55 (script 0.525) and those of the
+// second to 0.45 and 0.54 (script 0.495). The entry's gain is the mean of its two runs': 0.51.
 func runTwiceGradedTwice(t *testing.T) (*world, int, string) {
 	t.Helper()
 	w := newWorld(t)
@@ -72,13 +71,13 @@ func runTwiceGradedTwice(t *testing.T) (*world, int, string) {
 		var p map[string]any
 		switch {
 		case j.c.Job.Script.SHA256 == shaOf(one) && first:
-			p = w.pillarResult(j.c, 0.40, 0.60)
+			p = w.pillarResult(j.c, 0.50, 0.60)
 		case j.c.Job.Script.SHA256 == shaOf(one):
-			p = w.pillarResult(j.c, 0.60, 0.50)
+			p = w.pillarResult(j.c, 0.55, 0.50)
 		case first:
-			p = w.pillarResult(j.c, 0.20, 0.70)
+			p = w.pillarResult(j.c, 0.45, 0.70)
 		default:
-			p = w.pillarResult(j.c, 0.50, 0.58)
+			p = w.pillarResult(j.c, 0.54, 0.58)
 		}
 		var ack struct {
 			Status string `json:"status"`
@@ -110,7 +109,7 @@ func TestAnEntrysPillarsAreMadeOfTheGradesItsGainIsMadeOf(t *testing.T) {
 		}
 	}
 	// On each pillar, the mean over its two runs of the mean over the run's two grades.
-	reas := (0.40 + 0.60 + 0.20 + 0.50) / 4
+	reas := (0.50 + 0.55 + 0.45 + 0.54) / 4
 	comp := (0.60 + 0.50 + 0.70 + 0.58) / 4
 	want := map[string]float64{
 		"reference": comp, "news": comp, "technical": comp, "conversation": comp,

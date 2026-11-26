@@ -11,6 +11,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -373,9 +374,13 @@ func TestOmittedPillarIsAcceptedAndMissingGroupIsRefused(t *testing.T) {
 				t.Fatalf("omitted news pillar should have 0 items and 0 share, got %+v", p)
 			}
 		case "reference", "technical", "conversation":
-			want := 0.50 / 3.0
+			if p.Share != 0 {
+				t.Fatalf("diagnostic comprehension pillar %s share = %.4f, want 0.0000", p.Pillar, p.Share)
+			}
+		case "explain", "infer", "synthesis":
+			want := 1.0 / 3.0
 			if math.Abs(p.Share-want) > 1e-4 {
-				t.Fatalf("remaining comprehension pillar %s share = %.4f, want %.4f", p.Pillar, p.Share, want)
+				t.Fatalf("scored reasoning pillar %s share = %.4f, want %.4f", p.Pillar, p.Share, want)
 			}
 		}
 	}
@@ -437,11 +442,171 @@ func TestAdminCancelRoundAndExamTimeoutAutoCancel(t *testing.T) {
 	})
 	w.check()
 
-	// 3) Once an exam is posted, admin cancel is refused with 409.
+	// 3) Once an exam is posted — and even after a baseline and grade have been submitted on
+	//    one entry while another entry keeps the round open — admin cancel without force is
+	//    refused with 409, while {"force": true} cancels cleanly, dropping all round baselines
+	//    and voiding every entry unattended so refreshScores cannot resurrect a phantom baseline.
+	bob := w.join("bob", nil)
+	carol := w.join("carol", nil)
+	w.established("bob")
+	edID2 := w.submit(carol, "tidy-two", "print(2)")
 	idx3 := w.draw()
 	rid3 := roundID(w.app.season.ID, idx3)
+	if w.editAll(anchor) != 2 {
+		t.Fatal("anchor should have run both entries in round 3")
+	}
+	cb := w.claim(bob, false)
+	if cb.Job == nil || cb.Job.Kind != "grade" {
+		t.Fatalf("bob should get grade job in round 3, got %+v", cb.Job)
+	}
+	res := w.result(cb, 5.5, 6.0)
+	if code := bob.do("POST", fmt.Sprintf("/api/v1/jobs/%d/result", cb.Job.ID), res, &ack); code != 200 {
+		t.Fatalf("bob grade+baseline in round 3: HTTP %d %v", code, ack)
+	}
+	w.app.st.view(func(s *State) {
+		if s.Rounds[idx3].Status != "open" {
+			t.Fatalf("round 3 should still be open with entry 2 ungraded, got %s", s.Rounds[idx3].Status)
+		}
+		nBase := 0
+		for _, b := range s.Baselines {
+			if b.RoundIdx == idx3 {
+				nBase++
+			}
+		}
+		if nBase == 0 {
+			t.Fatal("expected baseline to be recorded before force-cancel")
+		}
+	})
 	if code := anchor.do("POST", "/api/v1/admin/rounds/"+rid3+"/cancel", nil, nil); code != 409 {
-		t.Fatalf("cancelling a round that already has its exam: HTTP %d, want 409", code)
+		t.Fatalf("cancelling a round that already has its exam without force: HTTP %d, want 409", code)
+	}
+	if code := anchor.do("POST", "/api/v1/admin/rounds/"+rid3+"/cancel", map[string]any{"reason": "examiner library mismatch", "force": true}, &ack); code != 200 {
+		t.Fatalf("force-cancelling an examined round: HTTP %d %v", code, ack)
+	}
+	w.app.st.view(func(s *State) {
+		rd := s.Rounds[idx3]
+		if rd.Status != "settled" || rd.BaselineLoss != nil {
+			t.Fatalf("force-cancelled round state: status=%s baseline=%v", rd.Status, rd.BaselineLoss)
+		}
+		nBase := 0
+		for _, b := range s.Baselines {
+			if b.RoundIdx == idx3 {
+				nBase++
+			}
+		}
+		if nBase != 0 {
+			t.Fatalf("force-cancelled round kept %d baselines", nBase)
+		}
+		for _, en := range s.inRound[idx3] {
+			if !en.Void || !en.Unattended || en.Valid || en.Loss != nil || en.Gain != 0 {
+				t.Fatalf("force-cancelled entry should be void+unattended with cleared scores: %+v", en)
+			}
+		}
+		if failing(s, edID) || roundsRun(s, edID) != 0 || failing(s, edID2) || roundsRun(s, edID2) != 0 {
+			t.Fatalf("force-cancelled round held against entries: ed1=(%v,%d) ed2=(%v,%d)", failing(s, edID), roundsRun(s, edID), failing(s, edID2), roundsRun(s, edID2))
+		}
+	})
+	w.check()
+}
+
+// Review 8 Finding 3: a single invalid grade asks a second established grader before failing the
+// entry, and a script that fails training across attempts is voided unattended with "training failed"
+// wording instead of claiming the curator wrote no usable edit script.
+func TestSingleInvalidGradeSeeksSecondOpinionAndTrainingFailedWording(t *testing.T) {
+	pub, priv := newKey()
+	w := newWorld(t, pub)
+	anchor := w.join("anchor-one", priv)
+	bob := w.join("bob", nil)
+	carol := w.join("carol", nil)
+	alice := w.join("alice", nil)
+	w.established("bob")
+	w.established("carol")
+	w.submit(alice, "tidy", "print(1)")
+	idx := w.draw()
+	w.run(anchor, scriptOne)
+
+	// Bob reports invalid (e.g. older client reporting a fault). Because carol is also active
+	// and established, the server must NOT settle invalid on bob's word alone!
+	carolID := w.account("carol").ID
+	w.app.st.update(context.Background(), func(tx *Tx) error {
+		tx.s.Accounts[carolID].LastSeen = now()
+		return nil
+	})
+	cb := w.claim(bob, false)
+	if cb.Job == nil || cb.Job.Kind != "grade" {
+		t.Fatalf("bob should get grade job, got %+v", cb.Job)
+	}
+	inv := w.result(cb, 5.5, 6.0)
+	inv["valid"], inv["invalid_reason"] = false, "SFT probe diverged at step 2"
+	delete(inv, "exam")
+	var ack map[string]any
+	if code := bob.do("POST", fmt.Sprintf("/api/v1/jobs/%d/result", cb.Job.ID), inv, &ack); code != 200 {
+		t.Fatalf("bob invalid report: HTTP %d %v", code, ack)
+	}
+	if w.settled(idx) != 0 {
+		t.Fatal("round settled invalid on a single grader's report while a second established grader was active")
+	}
+
+	// Carol gets offered the script as a required second grade!
+	cc := w.claim(carol, false)
+	if cc.Job == nil || cc.Job.Kind != "grade" {
+		t.Fatalf("carol should be offered second grade after single invalid report, got %+v", cc.Job)
+	}
+
+	// Check trustOf wording distinguishes training failure vs script rule violation vs no script.
+	if tv := trustOf(EntryView{Settled: true, Void: true, Reason: "the training failed on this entry's script in 5 attempts"}); !strings.Contains(strings.ToLower(tv.Says), "training failed") {
+		t.Fatalf("void training failed trustOf = %+v", tv)
+	}
+	if tv := trustOf(EntryView{Settled: true, Valid: false, NRuns: 1, ScriptSHA: strings.Repeat("a", 64), Reason: "SFT probe diverged at step 2"}); !strings.Contains(strings.ToLower(tv.Says), "training failed") {
+		t.Fatalf("diverged trustOf = %+v", tv)
+	}
+	if tv := trustOf(EntryView{Settled: true, Valid: false, NRuns: 1, ScriptSHA: strings.Repeat("a", 64), Reason: "line 3: bad"}); !strings.Contains(strings.ToLower(tv.Says), "broke a rule") {
+		t.Fatalf("script rule error trustOf = %+v", tv)
+	}
+	if tv := trustOf(EntryView{Settled: true, Valid: false, NRuns: 1, ScriptSHA: "", Reason: "timeout"}); !strings.Contains(strings.ToLower(tv.Says), "no usable edit script") {
+		t.Fatalf("no script trustOf = %+v", tv)
+	}
+}
+
+// Review 8 Finding 4: grade_backends distinguishes NVIDIA CUDA from AMD ROCm when device=="cuda".
+func TestGradeBackendsEnforcement(t *testing.T) {
+	s := &Season{GradeDevices: []string{"cuda"}, GradeBackends: []string{"cuda"}}
+	if !s.gradesOnHardware(hardwareFacts{Device: "cuda", Backend: "cuda"}) {
+		t.Fatal("NVIDIA cuda should be accepted")
+	}
+	if s.gradesOnHardware(hardwareFacts{Device: "cuda", Backend: "rocm"}) {
+		t.Fatal("AMD rocm should be rejected when grade_backends is [cuda]")
+	}
+	if s.gradesOnHardware(hardwareFacts{Device: "cuda", Backend: ""}) {
+		t.Fatal("missing backend should be rejected when grade_backends is [cuda]")
+	}
+	if !strings.Contains(s.gradeHardwareRequirement(), "NVIDIA (CUDA)") || strings.Contains(s.gradeHardwareRequirement(), "AMD") {
+		t.Fatalf("unexpected requirement text: %q", s.gradeHardwareRequirement())
+	}
+
+	// End-to-end HTTP check with Dev=false: claim rejects AMD ROCm with 400 and accepts NVIDIA CUDA.
+	pub, priv := newKey()
+	cfg := testConfig(t, pub)
+	cfg.Dev = false
+	w := startWorld(t, cfg, newMemKV(), dirBlobs{filepath.Join(cfg.DataDir, "blobs")})
+	rocm := w.join("rocm-vol", nil)
+	cuda := w.join("cuda-vol", nil)
+	_ = priv
+	hello := func(backend string) map[string]any {
+		return map[string]any{
+			"harness":       w.app.season.Harness,
+			"season":        w.app.season.ID,
+			"season_digest": w.app.season.Digest,
+			"hardware":      map[string]any{"device": "cuda", "backend": backend, "gpu": "Test GPU"},
+		}
+	}
+	var errResp map[string]any
+	if code := rocm.do("POST", "/api/v1/jobs/claim", hello("rocm"), &errResp); code != 400 || !strings.Contains(fmt.Sprint(errResp["error"]), "NVIDIA (CUDA)") {
+		t.Fatalf("Dev=false ROCm claim: HTTP %d %v, want 400 mentioning NVIDIA (CUDA)", code, errResp)
+	}
+	var okResp map[string]any
+	if code := cuda.do("POST", "/api/v1/jobs/claim", hello("cuda"), &okResp); code != 200 {
+		t.Fatalf("Dev=false CUDA claim: HTTP %d %v, want 200", code, okResp)
 	}
 }
 

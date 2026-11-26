@@ -207,8 +207,8 @@ func (a *App) checkTable(table []ItemInfo, shares map[string]float64) error {
 		}
 		sort.Strings(groups)
 		for _, g := range groups {
-			if groupCounts[g] == 0 {
-				return fail(400, "exam group %q has 0 items; every declared group must be represented", g)
+			if a.season.Exam.Groups[g] > 0 && groupCounts[g] == 0 {
+				return fail(400, "exam group %q has 0 items; every scored group must be represented", g)
 			}
 		}
 	}
@@ -236,9 +236,6 @@ func (a *App) cancelRound(tx *Tx, rd *Round, why string) {
 		why = "the round's exam could not be built; nothing is held against any entry"
 	}
 	for _, e := range tx.s.inRound[rd.Idx] {
-		if e.Status != "open" {
-			continue
-		}
 		for _, run := range e.Runs {
 			if !run.Dropped {
 				run.Dropped = true
@@ -248,6 +245,7 @@ func (a *App) cancelRound(tx *Tx, rd *Round, why string) {
 			}
 			run.Owed = false
 		}
+		e.Loss, e.Gain, e.BySource, e.Detail = nil, 0, nil, nil
 		a.voidEntry(tx, e, why, true)
 	}
 	for _, c := range tx.s.Claims {
@@ -255,6 +253,19 @@ func (a *App) cancelRound(tx *Tx, rd *Round, why string) {
 			c.Status, c.EndedAt = "expired", now()
 			tx.saveClaim(c)
 		}
+	}
+	var dropBases []*Baseline
+	for _, b := range tx.s.Baselines {
+		if b.RoundIdx == rd.Idx {
+			dropBases = append(dropBases, b)
+		}
+	}
+	for _, b := range dropBases {
+		tx.dropBaseline(b)
+	}
+	if len(rd.BaseItems) > 0 || rd.BaselineLoss != nil || rd.BaselineN != 0 {
+		rd.BaseItems, rd.BaselineLoss, rd.BaselineN = nil, nil, 0
+		tx.saveRound(rd)
 	}
 	tx.event("cancel", map[string]any{"round": roundID(a.season.ID, rd.Idx), "reason": why, "at": now()})
 	if len(tx.s.inRound[rd.Idx]) == 0 {
@@ -264,8 +275,8 @@ func (a *App) cancelRound(tx *Tx, rd *Round, why string) {
 }
 
 // apiRoundCancel: POST /api/v1/admin/rounds/{id}/cancel, from the organisers. Cancels an open
-// round that has no exam yet, voiding all entries as unattended so nothing counts against any
-// curator and the next round can be drawn. Refused once an exam has been posted.
+// round, voiding all entries as unattended so nothing counts against any curator and the next
+// round can be drawn. Once an exam has been posted, requires {"force": true}.
 func (a *App) apiRoundCancel(w http.ResponseWriter, r *http.Request) {
 	_, _, body, err := a.signedBy(w, r, 1<<16, true, organisers)
 	if err != nil {
@@ -279,6 +290,7 @@ func (a *App) apiRoundCancel(w http.ResponseWriter, r *http.Request) {
 	}
 	var req struct {
 		Reason string `json:"reason"`
+		Force  bool   `json:"force"`
 	}
 	if len(body) > 0 {
 		json.Unmarshal(body, &req)
@@ -288,8 +300,8 @@ func (a *App) apiRoundCancel(w http.ResponseWriter, r *http.Request) {
 		if rd == nil || rd.Status != "open" {
 			return fail(409, "%s is not open", roundID(a.season.ID, idx))
 		}
-		if examPosted(rd) {
-			return fail(409, "%s already has its exam", roundID(a.season.ID, idx))
+		if examPosted(rd) && !req.Force {
+			return fail(409, "%s already has its exam; pass {\"force\": true} to cancel an examined round", roundID(a.season.ID, idx))
 		}
 		a.cancelRound(tx, rd, req.Reason)
 		a.settleRounds(tx)

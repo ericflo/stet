@@ -76,7 +76,7 @@ func TestTheSiteReadsInBitsPerByte(t *testing.T) {
 		got[path] = page
 	}
 	for path, want := range map[string][]string{
-		"/glossary":      {"100% fresh and made for each round at its draw", "Half of the score is fresh twin-context comprehension from writing people published", "<code>stet harvest</code>", "Everything on the exam counts", `id="bits"`, "no worth is shown"},
+		"/glossary":      {"100% fresh and made for each round at its draw", "100% fresh harvest-derived reasoning", "<code>stet harvest</code>", "0% weight", `id="bits"`, "no worth is shown"},
 		"/enter":         {"openly licensed CC-BY-SA practice pack", "Nobody can know it in advance"},
 		"/rounds/" + rid: {"bits per byte better on the exam", "the round's exam, made at the draw", "which fresh hours make the exam"},
 		// The gain on each pillar, from zero; the training loss in bits too; no worth without a curve.

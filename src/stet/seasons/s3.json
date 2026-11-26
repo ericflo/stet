@@ -75,7 +75,7 @@
     }
   },
   "exam": {
-    "about": "100% fresh, zero static benchmarks, zero synthetic templates, zero raw web-text perplexity. Half fresh twin-context comprehension across every crawl language published in the day before the draw (same continuation scored under its real opening vs same-source wrong openings, in bits per byte), half fresh harvest-derived multi-sentence reasoning (explain, infer, synthesis written once at the draw at temp=0 by pinned Qwen/Qwen3-8B from the same fresh harvests with diverse wrappers and an anti-copying filter, and published in full at settlement), all sat after a brief disjoint multilingual SFT probe.",
+    "about": "100% fresh, zero static benchmarks, zero synthetic templates, zero raw web-text perplexity. The official score is 100% fresh harvest-derived multi-sentence reasoning (explain, infer, synthesis — one-third each, written once at the draw at temp=0 by pinned Qwen/Qwen3-8B from three fresh hours of the day before, with varied wrappers and an anti-copying filter, and published in full at settlement), all sat after a brief disjoint multilingual SFT probe. Four fresh human-written twin-context comprehension kinds (reference, news, technical, conversation) from those same three hours are sat alongside at 0% score weight as published diagnostic telemetry until a human-written measure passes DataDecide.",
     "generator_version": 11,
     "per_corner": 0,
     "more": {},
@@ -108,11 +108,12 @@
       "clip": 4.0,
       "trim": 0.1,
       "small": 8,
-      "weight_other_by_share": true
+      "weight_other_by_share": true,
+      "code_share": 0.15
     },
     "groups": {
-      "comprehension": 0.5,
-      "reasoning": 0.5
+      "comprehension": 0.0,
+      "reasoning": 1.0
     },
     "pillars": {
       "reference": {
@@ -550,6 +551,9 @@
   "grade_devices": [
     "cuda"
   ],
+  "grade_backends": [
+    "cuda"
+  ],
   "draw_grid_seconds": 600,
   "record": {
     "looks": [
@@ -600,14 +604,14 @@
       "run": 0.15
     },
     "standard": {
-      "grade": 0.03,
-      "baseline": 0.05,
-      "run": 0.05
+      "grade": 0.012,
+      "baseline": 0.015,
+      "run": 0.015
     },
     "large": {
-      "grade": 0.025,
-      "baseline": 0.04,
-      "run": 0.04
+      "grade": 0.012,
+      "baseline": 0.015,
+      "run": 0.015
     }
   }
 }

@@ -19,9 +19,11 @@ def test_the_season_is_the_exam_at_the_standard_scale():
     s3 = load_season()
     assert s3.id == CURRENT_SEASON == "s3" and s3.official_scale == "standard" and "heldout_exam" not in s3.raw
     assert s3.exam_sources == ["reference", "news", "technical", "conversation", "explain", "infer", "synthesis"]
-    assert s3.raw["exam"]["groups"] == {"comprehension": 0.5, "reasoning": 0.5} and s3.answer_floor_bytes == 16
+    assert s3.raw["exam"]["groups"] == {"comprehension": 0.0, "reasoning": 1.0} and s3.answer_floor_bytes == 16
     assert s3.raw["exam"]["fresh"]["mode"] == "context"
-    # What the score is made of, by hand: four comprehension kinds and three reasoning kinds.
+    assert s3.raw["grade_backends"] == ["cuda"]
+    assert s3.raw["tolerance"]["standard"] == {"grade": 0.012, "baseline": 0.015, "run": 0.015}
+    # What the score is made of: three scored reasoning kinds (100% of score) and four 0%-weight diagnostic comprehension kinds.
     from stet.exam.aggregate import plan_of
 
     made_of = {
@@ -31,7 +33,7 @@ def test_the_season_is_the_exam_at_the_standard_scale():
     }
     assert {p: (v["group"], v["parts"]) for p, v in s3.raw["exam"]["pillars"].items()} == made_of
     weights = plan_of(s3).weights(made_of)
-    assert weights == pytest.approx({p: 0.125 if group == "comprehension" else 0.5 / 3 for p, (group, _) in made_of.items()})
+    assert weights == pytest.approx({p: 0.0 if group == "comprehension" else 1.0 / 3 for p, (group, _) in made_of.items()})
     assert s3.raw["exam"]["more"] == {} and s3.raw["exam"]["per_corner"] == 0
     assert s3.min_copy_bytes == 64  # the shortest copy a script may hold; of text of its own it holds none
     assert s3.raw["exam"]["generator_version"] == gen.VERSION

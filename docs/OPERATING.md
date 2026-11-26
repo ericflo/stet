@@ -104,7 +104,8 @@ What it needs:
   the exam's generators as the season (an older client refuses, and says to upgrade);
 - **Production Season 3 examiner hardware (`Qwen/Qwen3-8B@b968826d`, greedy `temperature=0`):**
   in production, `stet-examine.service` runs directly on the organisers' **AMD Radeon 8060S**
-  workstation (`124 GiB` unified VRAM, pinned `PyTorch 2.15.0+rocm7.14` / `transformers 5.23.0`)
+  workstation (`124 GiB` unified VRAM; measured on `PyTorch 2.15.0+rocm7.14` / `transformers 5.23.0`;
+  at Season 3 cut-over run `stet upgrade && stet doctor` so the examiner pins the season's versions)
   at **$0/round** — measured across two full cold official draws at **`23.8–24.5 min`**
   draw-to-publication (`~68s` CC shard fetch + `1,213–1,223s` 640-draft synthesis + decontam +
   authoritative CPU `init_sha256`, matching NVIDIA RTX 5090 CUDA 13 `init_sha256` bit-for-bit,
@@ -178,7 +179,7 @@ there.
 With one established machine, every entry is run once and graded by the machine that ran
 it, and marked *run once*. Rounds do not wait for a second person who is not there, so
 the board fills at the speed of that one machine: a run of up to twenty minutes and a
-grade of about 35 minutes on an RTX 5090 (~47 minutes on an RTX 4090), an entry a round. The scripts are published
+grade of about 20 minutes on an RTX 5090 (~30 minutes on an RTX 4090, ~55 minutes on an RTX 3090), an entry a round. The scripts are published
 when the round settles, so every one of those scores can be re-run by anyone later.
 
 More of the organisers' machines help in one of two ways, and `STET_RUNS_PER_ENTRY`
@@ -328,7 +329,7 @@ arithmetic of each student (`measure.train_seconds` / `hold_seconds`), not measu
 plan prints them for what it is about to train, and `--speed N` shows them for a card N times
 the floor. Rented cards are quicker: an RTX 5090 trains the Season 3 standard student
 (`ERNIE-4.5-0.3B-Base-PT`, bottom half frozen, 65.5M tokens) in about 20 minutes, an RTX 4090
-in about 29 minutes, and an RTX 3090 in about 52 minutes (≤10 GiB peak VRAM, fitting 12 GB+
+in about 30 minutes, and an RTX 3090 in about 55 minutes (≤10 GiB peak VRAM, fitting 12 GB+
 GPUs).
 
 | student | tokens | GPU hours, one training | held (minutes) | memory for its tokens |
@@ -531,12 +532,23 @@ The deploy does the server's part by itself:
 - Rounds are not paused, and a round is drawn at the usual time once a curator is waiting
   to run, not before.
 
-A new database has no accounts, and the examiner does not upgrade itself. So the season is
-opened on the organisers' machine, as soon as `/api/v1/season` names it:
+A new database has no accounts, the examiner does not upgrade itself, and existing systemd
+unit flags override new CLI defaults. So the season is opened on the organisers' machine, as
+soon as `/api/v1/season` names it:
 
 ```sh
+# 1. Upgrade the CLI and pin the examiner's libraries to the season's versions (so init_sha256 matches graders):
 stet upgrade && stet login --handle stet    # the new client, and the organisers' account made again
-systemctl --user restart stet-examine       # the examiner on the new client
+stet doctor                                 # verify torch/transformers match s3.json
+
+# 2. Rebuild stet-cloud and update ~/.config/systemd/user/stet-cloud.service flags
+#    (replace Season 2's --max 8 --max-hourly 16 --exam-after 5m with Season 3's 6, 4, 25m):
+(cd cloud && go build -o ~/.local/bin/stet-cloud .)
+sed -i 's/--max 8/--max 6/; s/--max-hourly 16/--max-hourly 4/; s/--exam-after 5m/--exam-after 25m/' ~/.config/systemd/user/stet-cloud.service
+systemctl --user daemon-reload
+systemctl --user restart stet-examine stet-cloud
+
+# 3. Enter the Season 3 reference curators:
 for d in fineweb2 reader dclm tidy identity english heuristic fineweb-edu mimic; do stet submit examples/$d --yes; done
 ```
 
@@ -614,7 +626,7 @@ Set in `apps/stet/deployment.yaml`. The ones that are rules:
 | `STET_ROUND_INTERVAL` | 0 | `0` draws rounds on demand whenever an entry is waiting (no idle clock rounds). After an empty round where nothing ran, automatic retries back off for 3 hours (`backoff_until` in `/api/v1/season`, `/api/v1/admin/work`, and submit replies); `stet draw` overrides the backoff. Set a multiple of the draw grid (e.g. `3h`) for fixed-clock rounds |
 | `STET_ROUND_MIN_GAP` | 0 | Minimum gap between consecutive on-demand draws (`0` chains back-to-back as soon as the previous round settles) |
 | `STET_LEASE` | `5h` | Maximum time an established verifier may hold an edit or grade job before it is given up on (fits two baseline passes plus margin on a 12 GB+ GPU) |
-| `STET_EXAM_TIMEOUT` | `6h` | Maximum time an open round waits for its exam before automatically cancelling cleanly (`unattended=true`, `baseline_loss=null`, nothing held against any entry, unblocking the next draw). Set `0` to disable. Organisers can also cancel an un-examined round immediately via `POST /api/v1/admin/rounds/{id}/cancel` |
+| `STET_EXAM_TIMEOUT` | `6h` | Maximum time an open round waits for its exam before automatically cancelling cleanly (`unattended=true`, `baseline_loss=null`, nothing held against any entry, unblocking the next draw). Set `0` to disable. Organisers can also cancel an open round immediately via `POST /api/v1/admin/rounds/{id}/cancel` (pass `{"force": true}` if an exam was already posted) |
 | `STET_EARLY_WINDOW` | 10m | A machine the organisers rent is handed grades before an exam only once they, and the further ones it could take, would keep it busy until no sooner than this before the exam is due; it is not paid to wait. `0` hands them out as soon as there are any |
 | `STET_ENTRIES_IN_PLAY` | 3 | Entries one person may have waiting or qualifying at once |
 | `STET_QUALIFY_ROUNDS` | 3 | Rounds a new entry runs |
@@ -633,10 +645,10 @@ A round draws the ladder (up to 8 entrants, plus 2 every-round references and 1 
 reference) together with **every** waiting or qualifying entry, with no cap per round (each
 person is capped at 3 entries in play at once). Each entry is run twice, up to twenty minutes
 a run. Each script is trained once (`ERNIE-4.5-0.3B-Base-PT`, bottom half frozen, top half
-reset, on 65.5M tokens plus the 32-step SFT probe), about 20 minutes on an RTX 5090 (~29
-minutes on an RTX 4090, ~52 minutes on an RTX 3090), and two established machines train the
+reset, on 65.5M tokens plus the 32-step SFT probe), about 20 minutes on an RTX 5090 (~30
+minutes on an RTX 4090, ~55 minutes on an RTX 3090), and two established machines train the
 round's unedited baseline (`baselines.per_round = 2`, two passes). On a 6-GPU fleet a typical round takes about 1.5 to
-2.5 hours from draw to settlement (~$3.50–$6.00). The exam is posted ~20–30 minutes after the
+2.5 hours from draw to settlement (~$3–$5). The exam is posted ~20–30 minutes after the
 draw on the local AMD Radeon 8060S examiner while curators run, so trained students sit it immediately.
 
 ## When something is wrong
@@ -644,7 +656,7 @@ draw on the local AMD Radeon 8060S examiner while curators run, so trained stude
 | Sign | Likely cause | Do |
 |---|---|---|
 | A round stays `open` | Nobody established is verifying, or a verifier is stuck | Check the organisers' unit and its log; look at the verifiers page for who was last seen |
-| A round has no `exam_digest` an hour after its draw | The examiner is down, failed on the round, or an entire exam group had zero surviving items | `systemctl --user status stet-examine` and its log. Started again, it makes the exam; `stet examine --round <id>` does it by hand. If the round's exam genuinely cannot be built, cancel it cleanly with `POST /api/v1/admin/rounds/{id}/cancel` (or wait for `STET_EXAM_TIMEOUT`, default `6h`): all entries are voided unattended with nothing held against them |
+| A round has no `exam_digest` an hour after its draw | The examiner is down, failed on the round, or an entire exam group had zero surviving items | `systemctl --user status stet-examine` and its log. Started again, it makes the exam; `stet examine --round <id>` does it by hand. Deterministic synthesis/coverage failures (`FatalExamError`) auto-cancel the round immediately rather than retrying for hours. If needed, cancel manually with `POST /api/v1/admin/rounds/{id}/cancel` (pass `{"force": true}` if an exam was already posted, e.g., after an examiner library mismatch) |
 | The examiner's log says a source failed | The source was away or refused | It is left out of that round's exam and the rest is kept. If one source keeps failing, find out why before the next round |
 | Every entry is marked *run once* | Only one established account is running curators | Expected early in a season. It ends when volunteers are established and pass `--edits` |
 | The log says "this verifier is out of date" | The server was deployed with a newer harness | It upgrades itself within ten minutes. If the log says the upgrade did not work, it says why: run `stet upgrade` by hand |
@@ -654,9 +666,9 @@ draw on the local AMD Radeon 8060S examiner while curators run, so trained stude
 | The site says "back in a moment" | The server cannot reach durable-db | It recovers by itself; alert `StetDBUnavailable` fires meanwhile |
 | An entry is "not run" | Verifiers failed to run it three times, or to grade a script five times, or one volunteer ran it and nobody else was there to grade it | Read the round page and the log. The round is void for that entry. Three such rounds in a row, with other entries running, and it stops being drawn |
 | Every entry of a round is "not run" | The machines doing the work were in trouble (disk, network, GPU) | Nothing is held against any curator for a round in which nothing ran |
-| An entry is marked *runs differed* | Two people's runs of one curator scored further apart than the run tolerance and nobody was there for a third | Look at the two scripts. A curator that depends on the GPU's make or the machine's speed does this honestly; the tolerance is provisional until there are enough such pairs to measure it |
-| An entry shows a dispute, or the log has a `disputed` event | Two established grades of one script disagreed and nobody was there for a third | Grade the script again (`stet score <hash> --round <id>`). If the two share nothing but a GPU type, the grade tolerance is too tight for it: the round pages have the differences |
-| Many verifiers listed as "turned away" on round pages | Their unedited baseline is out of tolerance on some GPU type | The same: the tolerance is a guess until this is measured |
+| An entry is marked *runs differed* | Two people's runs of one curator scored further apart than the run tolerance (`0.015` bpb) and nobody was there for a third | Look at the two scripts. A curator that depends on the machine's speed or non-deterministic GPU rounding can do this honestly; check whether the tolerance holds on live rounds |
+| An entry shows a dispute, or the log has a `disputed` event | Two established grades of one script disagreed beyond the `0.012` bpb grade tolerance and nobody was there for a third | Grade the script again (`stet score <hash> --round <id>`). If the two share nothing but a GPU generation, check the round pages' published differences |
+| Many verifiers listed as "turned away" on round pages | Their unedited baseline is further than `0.015` bpb from the round's baseline on some GPU type | Check the round pages' published differences; Season 3 tolerances were calibrated on RTX 5090 / 4090 / 3090 and may need adjustment if a new NVIDIA architecture drifts further |
 | An entry's submission is refused over an asset | The file is not at that commit, is not public, or its hash or size is not what `stet.toml` says | The message names the file. `stet asset add` again writes the right tables |
 | Runs fail with "has not been fetched" or a download error | Hugging Face is away, or an entry's repository was removed after it was submitted | The job is kept and retried, then handed back. A repository that has gone for good makes the entry fail everywhere: its owner resubmits |
 | The log repeats "Stopping with the job still held" | It cannot vouch for a round, or cannot deliver a result | Read the line before it. A result that will not deliver is the server or its bucket. A round it will not vouch for needs a person: compare the round's beacon with drand's before anything else |

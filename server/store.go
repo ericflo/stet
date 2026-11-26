@@ -834,6 +834,12 @@ func (tx *Tx) saveBaseline(b *Baseline) {
 	tx.put(k, b)
 }
 
+func (tx *Tx) dropBaseline(b *Baseline) {
+	k := baselineKey(b.RoundIdx, b.AccountID)
+	delete(tx.s.Baselines, k)
+	tx.put(k, nil)
+}
+
 func (tx *Tx) addRecord(r *Record) {
 	tx.s.Records = append(tx.s.Records, r)
 	tx.put(recordKey(r.N), r)

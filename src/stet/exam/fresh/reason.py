@@ -609,22 +609,43 @@ def apply_token_budget(
     return out
 
 
-def parse_generated_items(
+class FatalExamError(RuntimeError):
+    """A deterministic exam-synthesis failure that retrying the same inputs will not fix."""
+
+
+def parse_generated_items_detailed(
     selected: list[dict],
     generations: list[str],
     *,
     max_ngram_overlap: float = 0.50,
     check_lang: bool = True,
-) -> tuple[list[Item], dict[str, int]]:
-    """Deterministically parse and filter raw teacher generations into `Item` objects."""
+) -> tuple[list[Item], dict[str, int], list[dict]]:
+    """Deterministically parse and filter raw teacher generations into `Item` objects,
+    returning `(kept_items, drop_counts, drop_records)` so every dropped draft is auditable."""
     items: list[Item] = []
     dropped: Counter[str] = Counter()
+    drop_records: list[dict] = []
+
+    def _drop(reason: str, d: dict, raw_gen: str, pr: str = "", resp: str = "", excerpt: str = "") -> None:
+        dropped[reason] += 1
+        drop_records.append({
+            "reason": reason,
+            "task_type": d.get("task_type", ""),
+            "source": d.get("source", ""),
+            "id": str(d.get("id") or ""),
+            "lang": d.get("lang", ""),
+            "prompt": pr,
+            "response": resp,
+            "raw": (raw_gen or "")[:1200],
+            "excerpt": (excerpt or d.get("excerpt") or "")[:400],
+        })
+
     for d, gen_txt in zip(selected, generations, strict=True):
         raw = ("PROMPT: " + (gen_txt or "")).strip()
         if "</think>" in raw:
             raw = raw.split("</think>", 1)[1].strip()
         if "RESPONSE:" not in raw:
-            dropped["no_response_tag"] += 1
+            _drop("no_response_tag", d, gen_txt)
             continue
         p_part, r_part = raw.split("RESPONSE:", 1)
         pr_raw = p_part.replace("PROMPT:", "", 1).strip().strip('"').strip()
@@ -636,7 +657,7 @@ def parse_generated_items(
         pr = _clean_angle(pr)
         resp = _clean_angle(resp)
         if "\ufffd" in pr or "\ufffd" in resp or "\ufffd" in d.get("excerpt", ""):
-            dropped["broken_utf8"] += 1
+            _drop("broken_utf8", d, gen_txt, pr, resp)
             continue
         is_cjk = d["lang"] in CJK_LANGS
         min_pr = 6 if is_cjk else 10
@@ -646,18 +667,18 @@ def parse_generated_items(
             or pr.startswith("...")
             or pr.lower().startswith(ECHO_PROMPT_PREFIX)
         ):
-            dropped["prompt_len"] += 1
+            _drop("prompt_len", d, gen_txt, pr, resp)
             continue
         min_bytes = 48 if is_cjk else 70
         resp_b = len(resp.encode("utf-8"))
         if not (min_bytes <= resp_b <= 1200):
-            dropped["resp_len"] += 1
+            _drop("resp_len", d, gen_txt, pr, resp)
             continue
         if resp.lower().startswith(BAD_PREFIX):
-            dropped["meta_chatter"] += 1
+            _drop("meta_chatter", d, gen_txt, pr, resp)
             continue
         if not _SENTENCE_END_RE.search(resp):
-            dropped["truncated_sentence"] += 1
+            _drop("truncated_sentence", d, gen_txt, pr, resp)
             continue
         if d["task_type"] == "synthesis" and ("?" in pr or "？" in pr or "؟" in pr):
             # Enforce zero-question syntax on synthesis lead-ins
@@ -665,16 +686,16 @@ def parse_generated_items(
         excerpt = d.get("excerpt") or bound_excerpt(d["text"])
         if check_lang:
             if not _prompt_matches_language(pr, excerpt, d["lang"]):
-                dropped["wrong_prompt_lang"] += 1
+                _drop("wrong_prompt_lang", d, gen_txt, pr, resp, excerpt)
                 continue
             if not _response_matches_language(resp, excerpt, d["lang"]):
-                dropped["wrong_lang"] += 1
+                _drop("wrong_lang", d, gen_txt, pr, resp, excerpt)
                 continue
         if ngram_overlap(resp, excerpt, n=5) > max_ngram_overlap:
-            dropped["verbatim_copy"] += 1
+            _drop("verbatim_copy", d, gen_txt, pr, resp, excerpt)
             continue
         if ngram_overlap(resp, pr, n=5) > max_ngram_overlap:
-            dropped["prompt_copy"] += 1
+            _drop("prompt_copy", d, gen_txt, pr, resp, excerpt)
             continue
         ctx_str = wrap_prompt(excerpt, pr, d["task_type"], d["wrapper_id"])
         cont = resp if ctx_str.endswith((" ", "\n")) else f" {resp}"
@@ -694,7 +715,21 @@ def parse_generated_items(
                 cont=cont,
             )
         )
-    return items, dict(dropped)
+    return items, dict(dropped), drop_records
+
+
+def parse_generated_items(
+    selected: list[dict],
+    generations: list[str],
+    *,
+    max_ngram_overlap: float = 0.50,
+    check_lang: bool = True,
+) -> tuple[list[Item], dict[str, int]]:
+    """Deterministically parse and filter raw teacher generations into `Item` objects."""
+    items, dropped, _ = parse_generated_items_detailed(
+        selected, generations, max_ngram_overlap=max_ngram_overlap, check_lang=check_lang
+    )
+    return items, dropped
 
 
 def _load_teacher_tokenizer(repo: str, rev: str, *, required: bool = True):
@@ -908,8 +943,17 @@ def synthesize_reasoning(
     *,
     shares: dict[str, float] | None = None,
     log=print,
+    drops_path=None,
 ) -> list[Item]:
-    """Synthesize fresh multilingual `explain`, `infer`, and `synthesis` items from harvested docs."""
+    """Synthesize fresh multilingual `explain`, `infer`, and `synthesis` items from harvested docs.
+
+    Saves every dropped draft beside the kept items when `drops_path` is provided. If one or two
+    reasoning kinds fall below `min_keep_rate`, omits only those kinds (so the remaining kinds are
+    still cached and scored, matching `_filter_pillar_support`). Raises `FatalExamError` only when
+    no reasoning kind survives, so `stet examine --follow` cancels the round immediately rather than
+    repeating an identical temp=0 synthesis for hours."""
+    from pathlib import Path
+
     target = int(cfg.get("items", 640))
     max_ov = float(cfg.get("max_ngram_overlap", 0.50))
     repo = str(cfg.get("model", "Qwen/Qwen3-8B"))
@@ -934,19 +978,40 @@ def synthesize_reasoning(
         )
     else:
         gens = _generate_local_gpu(prompts, repo, rev, max_new_tokens=max_new, log=log)
-    items, dropped = parse_generated_items(selected, gens, max_ngram_overlap=max_ov)
+    items, dropped, drop_records = parse_generated_items_detailed(selected, gens, max_ngram_overlap=max_ov)
+    if drops_path is not None:
+        dp = Path(drops_path)
+        dp.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dp.with_name(f"{dp.name}.tmp{os.getpid()}")
+        try:
+            payload = "".join(json.dumps(rec, ensure_ascii=False) + "\n" for rec in drop_records).encode("utf-8")
+            tmp.write_bytes(payload)
+            os.replace(tmp, dp)
+        finally:
+            tmp.unlink(missing_ok=True)
     attempted = Counter(d["task_type"] for d in selected)
     counts = Counter(it.source.split(":", 1)[0] for it in items)
     log(f"  reasoning items: {len(items)} kept of {len(selected)} ({dict(counts)}, attempted={dict(attempted)}, dropped={dropped})")
     if min_keep_rate > 0:
-        bad = [
-            f"{k}={counts.get(k, 0)}/{n} ({100 * counts.get(k, 0) / n:.0f}%)"
-            for k, n in sorted(attempted.items())
+        bad_kinds = {
+            k
+            for k, n in attempted.items()
             if n >= 10 and counts.get(k, 0) / n < min_keep_rate
-        ]
-        if bad:
-            raise RuntimeError(
-                f"reasoning synthesis keep rate fell below {100 * min_keep_rate:.0f}% ({', '.join(bad)}; dropped={dropped})"
+        }
+        if bad_kinds:
+            bad_desc = [
+                f"{k}={counts.get(k, 0)}/{attempted[k]} ({100 * counts.get(k, 0) / attempted[k]:.0f}%)"
+                for k in sorted(bad_kinds)
+            ]
+            items = [it for it in items if it.source.split(":", 1)[0] not in bad_kinds]
+            if not items:
+                raise FatalExamError(
+                    f"reasoning synthesis keep rate fell below {100 * min_keep_rate:.0f}% on every kind "
+                    f"({', '.join(bad_desc)}; dropped={dropped})"
+                )
+            log(
+                f"  omitting reasoning kind(s) below {100 * min_keep_rate:.0f}% keep rate "
+                f"(share goes to remaining reasoning kinds): {', '.join(bad_desc)}"
             )
     return items
 

@@ -1622,3 +1622,21 @@ def test_a_rented_machine_hands_its_job_back(loop, monkeypatch):
     with pytest.raises(Stop):
         client.cmd_verify(Args())
     assert loop.released == [("/api/v1/jobs/8/release", "the verifier stopped")]
+
+
+def test_training_divergence_releases_grade_job_instead_of_failing_entry(loop, capsys):
+    """Review 8 Finding 3: a persistent TrainingError from train_script/sit_exam releases the
+    grade job with a 'training failed' reason so another machine grades it, rather than
+    reporting valid=False against the entry."""
+    from stet.spec import TrainingError
+
+    loop.claims = [a_job(id=19)]
+    loop.grade = TrainingError("the training failed after retry: SFT probe diverged at step 2")
+    with pytest.raises(Stop):
+        client.cmd_verify(Args())
+    assert not loop.reports
+    assert len(loop.released) == 1
+    path, reason = loop.released[0]
+    assert path == "/api/v1/jobs/19/release"
+    assert "training failed" in reason and "SFT probe diverged" in reason
+    assert "training failed" in capsys.readouterr().err

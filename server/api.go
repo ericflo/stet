@@ -391,6 +391,9 @@ func (a *App) apiSeason(w http.ResponseWriter, r *http.Request) {
 		"machine": a.season.Machine, "runner": a.season.Runner, "assets": a.season.Assets,
 		"environment": map[string]any{"python": a.season.Environment.Python, "packages": a.season.Environment.Packages},
 	}
+	if len(a.season.GradeBackends) > 0 {
+		out["grade_backends"] = a.season.GradeBackends
+	}
 	if name, version := a.site.wheel(); name != "" {
 		out["cli"] = map[string]any{"version": version, "wheel": a.cfg.APIURL + "/files/" + name}
 	}
