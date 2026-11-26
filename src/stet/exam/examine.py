@@ -18,11 +18,78 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import time
+from collections import Counter
 from pathlib import Path
 
 from .farm import pack_items
 from .items import Item, digest
+
+
+def _atomic_write_bytes(path: Path, payload: bytes) -> None:
+    tmp = path.with_name(f"{path.name}.tmp{os.getpid()}")
+    try:
+        tmp.write_bytes(payload)
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def _pillar_counts(items: list[Item], plan) -> Counter[str]:
+    from .aggregate import part_of
+
+    counts: Counter[str] = Counter()
+    for it in items:
+        counts[plan.pillar_of(part_of(it))] += 1
+    return counts
+
+
+def _check_pillar_support(items: list[Item], season, rnd_id: str) -> None:
+    """Refuse to publish an official exam where any declared pillar falls below `min_pillar_items`."""
+    from .aggregate import plan_of
+
+    min_items = int((season.raw.get("exam") or {}).get("min_pillar_items", 0))
+    if min_items <= 0:
+        return
+    plan = plan_of(season)
+    counts = _pillar_counts(items, plan)
+    short = [(p, counts.get(p, 0)) for p in plan.pillars if counts.get(p, 0) < min_items]
+    if short:
+        detail = ", ".join(f"{p}={n}" for p, n in short)
+        raise RuntimeError(f"{rnd_id}: exam pillars below minimum of {min_items} items after filtering ({detail})")
+
+
+def _reasoning_cache_usable(reasoning: list[Item], season) -> bool:
+    """Whether a cached reasoning synthesis result is complete enough to reuse."""
+    from .aggregate import REASONING_KINDS, plan_of
+
+    if not reasoning:
+        return False
+    min_items = int((season.raw.get("exam") or {}).get("min_pillar_items", 0))
+    if min_items <= 0:
+        return True
+    plan = plan_of(season)
+    counts = _pillar_counts(reasoning, plan)
+    r_pillars = [plan.pillar_of(k) for k in REASONING_KINDS if k in plan.parts]
+    return all(counts.get(p, 0) >= min_items for p in set(r_pillars))
+
+
+def _round_init_sha256(rnd, scale) -> str:
+    """Authoritative round initial weights SHA-256 on CPU when the season has a pinned student and torch is installed."""
+    if not rnd.season.raw.get("student"):
+        return ""
+    try:
+        import torch
+
+        from ..train import build_model, weights_sha256
+
+        model = build_model(scale, rnd.season, rnd.init_seed, torch.device("cpu"))
+        sha = weights_sha256(model)
+        del model
+        return sha
+    except Exception:
+        return ""
 
 # Sources whose text is openly licensed, and is published with a settled round as it is. Every
 # other source's items are published as their source, id and hash.
@@ -68,13 +135,24 @@ def read_public(raw: bytes, want: str) -> list[Item]:
     return kept
 
 
-def assemble(rnd, scale, snapshots: list[tuple[int, Path]], work: Path, log=print, measure: bool = True, synthesize: bool = True):
+def assemble(
+    rnd,
+    scale,
+    snapshots: list[tuple[int, Path]],
+    work: Path,
+    log=print,
+    measure: bool = True,
+    synthesize: bool = True,
+    check_coverage: bool | None = None,
+):
     """A round's exam from the harvests of its hours, (hour, the snapshot's path) in any order:
     its items, how many of them are fresh, the languages' shares, and each hour's sha256 in the
     hours' order. An official round's languages are measured on its own corpus; a practice
     round's (measure=False) are the published table's. Kept under work, so that a second try
     costs nothing it does not have to."""
     import hashlib
+
+    import zstandard
 
     from .. import data
     from . import gen
@@ -112,32 +190,52 @@ def assemble(rnd, scale, snapshots: list[tuple[int, Path]], work: Path, log=prin
     fresh = chooser(docs, rnd.seed, int(cfg["fresh"]["items"]), plan_of(season).parts, per_corner=int(cfg["fresh"]["per_corner"]), shares=mix)
 
     # Fresh harvest-derived comprehension & reasoning (Season 3 Exam C v2): deterministic greedy
-    # synthesis cached under `work` by snapshot + seed so retries cost zero GPU work.
+    # synthesis cached atomically under `work` by snapshot + seed + reasoning config digest so
+    # retries cost zero GPU work and partial/interrupted cache files are automatically regenerated.
     if r_cfg := cfg.get("reasoning"):
-        rcache = work / f"reasoning-{snapshot_name(shas)[:12]}-{rnd.seed.hex()[:8]}.jsonl.zst"
+        rcfg_sig = hashlib.sha256(json.dumps(r_cfg, sort_keys=True).encode()).hexdigest()[:8]
+        rcache = work / f"reasoning-{snapshot_name(shas)[:12]}-{rnd.seed.hex()[:8]}-{rcfg_sig}.jsonl.zst"
+        reasoning: list[Item] = []
+        loaded = False
         if rcache.exists():
-            reasoning = unpack_items(rcache.read_bytes())
-            log(f"  reasoning items: {len(reasoning)} loaded from cache")
-        elif synthesize:
+            try:
+                cached = unpack_items(rcache.read_bytes())
+                if _reasoning_cache_usable(cached, season):
+                    reasoning = cached
+                    loaded = True
+                    log(f"  reasoning items: {len(reasoning)} loaded from cache")
+                else:
+                    log("  reasoning cache incomplete; regenerating")
+                    rcache.unlink(missing_ok=True)
+            except (OSError, ValueError, zstandard.ZstdError):
+                log("  reasoning cache unreadable; regenerating")
+                rcache.unlink(missing_ok=True)
+        if not loaded and synthesize:
             reasoning = synthesize_reasoning(docs, rnd.seed, r_cfg, shares=mix, log=log)
             if not reasoning:
                 raise RuntimeError(f"{rnd.id}: reasoning synthesis produced zero items")
-            rcache.write_bytes(pack_items(reasoning))
-        else:
-            reasoning = []
+            _atomic_write_bytes(rcache, pack_items(reasoning))
         fresh = fresh + reasoning
 
     mark = work / f"seen-{digest(fresh)[:12]}.json"
     if mark.exists():
-        dropped = set(json.loads(mark.read_text()))
+        try:
+            dropped = set(json.loads(mark.read_text()))
+        except (OSError, ValueError):
+            mark.unlink(missing_ok=True)
+            dropped = seen(fresh, corpus, season, log=log)
+            _atomic_write_bytes(mark, json.dumps(sorted(dropped)).encode())
     else:
         dropped = seen(fresh, corpus, season, log=log)
-        mark.write_text(json.dumps(sorted(dropped)))
+        _atomic_write_bytes(mark, json.dumps(sorted(dropped)).encode())
     if dropped:
         log(f"  {len(dropped)} fresh items are in the round's corpus already, and are dropped")
     fresh = [it for i, it in enumerate(fresh) if i not in dropped]
     generated = gen.for_season(season, rnd.seed) if int(cfg.get("per_corner", 0)) > 0 else []
     items: list[Item] = generated + fresh
+    enforce = bool(synthesize and getattr(rnd, "kind", "") == "official") if check_coverage is None else bool(check_coverage)
+    if enforce:
+        _check_pillar_support(items, season, rnd.id)
     log(f"  the exam: {len(items)} items, {len(fresh)} of them fresh")
     return items, len(fresh), mix, shas
 
@@ -156,13 +254,23 @@ def build(rnd, scale, snapshots: list[tuple[int, Path]], work: Path, log=print) 
     from .aggregate import item_table, plan_of
 
     snapshots = sorted(snapshots)
-    items, fresh, mix, shas = assemble(rnd, scale, snapshots, work, log=log)
+    items, fresh, mix, shas = assemble(rnd, scale, snapshots, work, log=log, check_coverage=True)
 
     public = "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in public_items(items)).encode()
-    return {"round": rnd.id, "items_digest": digest(items), "items_file": base64.b64encode(pack_items(items)).decode(),
-            "public_file": base64.b64encode(zstandard.ZstdCompressor(level=10).compress(public)).decode(),
-            "table": item_table(items, plan_of(rnd.season)), "languages": dict(list(mix.items())[:500]), "snapshot_sha256": snapshot_name(shas), "fresh": fresh,
-            "hours": [{"hour": h, "sha256": sha} for (h, _), sha in zip(snapshots, shas, strict=True)]}
+    out = {
+        "round": rnd.id,
+        "items_digest": digest(items),
+        "items_file": base64.b64encode(pack_items(items)).decode(),
+        "public_file": base64.b64encode(zstandard.ZstdCompressor(level=10).compress(public)).decode(),
+        "table": item_table(items, plan_of(rnd.season)),
+        "languages": dict(list(mix.items())[:500]),
+        "snapshot_sha256": snapshot_name(shas),
+        "fresh": fresh,
+        "hours": [{"hour": h, "sha256": sha} for (h, _), sha in zip(snapshots, shas, strict=True)],
+    }
+    if init_sha := _round_init_sha256(rnd, scale):
+        out["init_sha256"] = init_sha
+    return out
 
 
 def post(exam: dict, key) -> dict:

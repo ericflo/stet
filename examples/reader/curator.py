@@ -34,15 +34,15 @@ import os
 import random
 import re
 import sys
-import unicodedata
+from collections import Counter
 
 from stet.curator import Task
 
-BYTES_PER_TOKEN = 4.0  # generous multilingual margin (~3.74 measured on rated pages) so training never wraps back to lowest-rated docs
+BYTES_PER_TOKEN = 3.75  # matches clean multilingual ERNIE density (~3.55 B/tok) so materialize finishes inside Band 2 without wrapping
 HEAD_CHARS = 900  # excerpt read by the 0.6B quality rater
 MAX_PROMPT_TOKENS = 288
 RESERVE_SECONDS = 45
-CANDIDATE_OVERPROVISION = 15.0  # score up to 15x budget (most/all prefiltered docs) within time_left()
+CANDIDATE_OVERPROVISION = 12.0  # rate up to 12x budget (all/most clean multilingual docs) within time_left()
 
 # Prompt shared across every document so vLLM automatic prefix caching caches it once.
 # Trailing space in RUBRIC_SUFFIX is critical: without it Qwen3 predicts token ' ' (id 220)
@@ -56,14 +56,17 @@ RUBRIC_PREFIX = (
 )
 RUBRIC_SUFFIX = "\n\nRating (1-5): "
 
-MARKS = "".join(c for c in map(chr, range(0x300, 0x10000)) if unicodedata.category(c)[0] == "M")
-WRITING = re.compile(rf"(?:[^\W\d_]|\s|[{re.escape(MARKS)}])+")
-SENTENCE_END = re.compile(r"[.!?…؟۔।][\"')\]”’»]?\s|[。！？｡]|[{};]\n")
+ENDS = tuple(".!?\"'”’)»。！？…؟।")
+SPACELESS = re.compile("[\u3040-\u30ff\u4e00-\u9fff\u0e00-\u0e7f]")
+
+try:
+    import py3langid as _langid
+except Exception:  # pragma: no cover - minimal no-run env fallback
+    _langid = None
 
 
 def _detect_script_group(text: str) -> str:
-    """Fast, zero-dependency language/script bucket so English-prompted quality scores are
-    quantile-normalized within each script/language family rather than starving CJK/Cyrillic/Arabic."""
+    """Fast, zero-dependency language/script bucket used as fallback when py3langid is absent."""
     sample = text[:1200]
     counts: dict[str, int] = {}
     for ch in sample:
@@ -102,37 +105,90 @@ def _detect_script_group(text: str) -> str:
     return top
 
 
+def _detect_lang(text: str) -> str:
+    """Fast per-language identifier (ISO 639-1) so languages sharing a script (fa/ar, uk/ru,
+    pl/de/fr/es/en) are each quantile-normalized independently rather than starved by script peers."""
+    if _langid is not None:
+        try:
+            lang, _ = _langid.classify(text[:800])
+            if lang:
+                return str(lang)
+        except Exception:
+            pass
+    return _detect_script_group(text)
+
+
+def _spaceless(text: str) -> bool:
+    sample = text[:2000]
+    return bool(sample) and len(SPACELESS.findall(sample)) > len(sample) * 0.3
+
+
+def _units(text: str) -> list[str]:
+    """Words, or character bigrams for spaceless scripts (CJK/Thai)."""
+    if _spaceless(text):
+        chars = "".join(text.split())
+        return [chars[i : i + 2] for i in range(0, len(chars), 2)]
+    return text.split()
+
+
+def _quality_and_repetition(text: str, words: list[str], lines: list[str]) -> bool:
+    """Multilingual Gopher + FineWeb quality, repetition, and line filters so the 0.6B neural
+    rater focuses its GPU budget on clean prose/technical pages rather than nav menus or spam."""
+    n_words = len(words)
+    if not 50 <= n_words <= 100_000:
+        return False
+    mean_len = sum(map(len, words)) / n_words
+    if not 1.5 <= mean_len <= 12.0:
+        return False
+    if (text.count("#") + text.count("...") + text.count("…")) / n_words > 0.1:
+        return False
+    n_lines = len(lines)
+    if sum(ln.startswith(("•", "-", "*", "·")) for ln in lines) / n_lines > 0.9:
+        return False
+    if sum(1 for w in words if w[0].isalpha() or any(c.isalpha() for c in w)) / n_words < 0.6:
+        return False
+    if sum(ln.endswith(ENDS) for ln in lines) / n_lines < 0.12:
+        return False
+    if sum(len(ln) <= 30 for ln in lines) / n_lines > 0.67:
+        return False
+    # Repetition checks (Gopher)
+    line_counts = Counter(lines)
+    dup_lines = [ln for ln in lines if line_counts[ln] > 1]
+    if len(dup_lines) / n_lines > 0.3 or sum(len(ln) for ln in dup_lines) / max(1, len(text)) > 0.2:
+        return False
+    paras = [p for p in text.split("\n\n") if p.strip()]
+    if len(paras) > 1 and sum(c - 1 for c in Counter(paras).values()) / len(paras) > 0.3:
+        return False
+    for n, most in ((2, 0.20), (3, 0.18), (4, 0.16)):
+        if n_words > n:
+            gram, count = Counter(zip(*(words[k:] for k in range(n)), strict=False)).most_common(1)[0]
+            if count > 1 and count * sum(len(w) for w in gram) / max(1, len(text)) > most:
+                return False
+    return True
+
+
 def _prefilter(i: int, text: str):
-    """Cheap multilingual pass run in parallel across CPU cores."""
-    n_chars = len(text)
-    if n_chars < 280 or n_chars > 400_000:
-        return None
-    sample = text[:3000]
-    non_writing = len(WRITING.sub("", sample)) / max(1, len(sample))
-    # Allow code/technical pages (more punctuation) as well as prose of any script,
-    # while rejecting pure symbol garbage and link dumps.
-    if non_writing > 0.45:
+    """Multilingual quality + repetition + exact-dedup + language-id pass run across CPU cores."""
+    if len(text) > 400_000:
         return None
     lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
-    if len(lines) < 3:
+    if len(lines) < 2:
         return None
-    short_frac = sum(len(ln) <= 25 for ln in lines) / len(lines)
-    if short_frac > 0.72:
-        return None
-    if not SENTENCE_END.search(sample + " "):
+    words = _units(text)
+    if not words or not _quality_and_repetition(text, words, lines):
         return None
     raw = text.encode("utf-8", "replace")
-    key = hashlib.blake2b(raw[:4096], digest_size=8).digest()
-    # Simple heuristic prior to pick which candidates the 0.6B model reads first.
+    key = hashlib.blake2b(raw, digest_size=8).digest()
+    short_frac = sum(len(ln) <= 30 for ln in lines) / len(lines)
     uniq_lines = len(set(lines)) / len(lines)
     prior = round(uniq_lines + min(1.0, len(raw) / 4000) - short_frac, 3)
     head = text[:HEAD_CHARS].strip()
-    lang_grp = _detect_script_group(sample)
+    lang_grp = _detect_lang(text)
     return prior, key, len(raw), head, lang_grp
 
 
 def collect_candidates(task: Task) -> list[tuple[float, int, int, str, str]]:
-    """Return (prior, doc_id, size_bytes, excerpt, lang_group) deduplicated across all languages."""
+    """Return (prior, doc_id, size_bytes, excerpt, lang) deduplicated across all languages."""
     budget_bytes = task.train_tokens * BYTES_PER_TOKEN
     target_bytes = budget_bytes * CANDIDATE_OVERPROVISION
     seen: set[bytes] = set()
@@ -147,8 +203,9 @@ def collect_candidates(task: Task) -> list[tuple[float, int, int, str, str]]:
             continue
         seen.add(key)
         kept.append((prior, i, size, head, lang_grp))
-    kept.sort(key=lambda t: (-t[0], t[1]))
-    # Cap candidates to CANDIDATE_OVERPROVISION × the byte budget (with a sensible minimum for small scales).
+    # Shuffle clean pages deterministically before any overprovision cap so capping never biases
+    # against shorter-character scripts (CJK/Thai/etc.) when clean volume exceeds target_bytes.
+    random.Random(0).shuffle(kept)
     out: list[tuple[float, int, int, str, str]] = []
     total = 0
     cap = max(target_bytes, 2_000_000)
@@ -161,7 +218,7 @@ def collect_candidates(task: Task) -> list[tuple[float, int, int, str, str]]:
 
 
 def _cand_lang(rec: tuple) -> str:
-    return rec[4] if len(rec) >= 5 else _detect_script_group(rec[3])
+    return rec[4] if len(rec) >= 5 else _detect_lang(rec[3])
 
 
 def _quantile_normalize_by_lang(
@@ -218,14 +275,22 @@ def build_script(task: Task, cands: list[tuple], scores: dict[int, float]) -> li
 
     q_scores = _quantile_normalize_by_lang(cands, scores)
     ranked = sorted(
-        [(q_scores[rec[1]], scores[rec[1]], rec[0], rec[1], rec[2]) for rec in cands if rec[1] in q_scores],
+        [(q_scores[rec[1]], scores[rec[1]], rec[0], rec[1], rec[2], rec[3]) for rec in cands if rec[1] in q_scores],
         key=lambda t: (-t[0], -t[1], -t[2], t[3]),
     )
     selected: list[tuple[float, float, int]] = []
+    seen_openings: set[bytes] = set()
     used = 0
-    for q, _, prior, doc_id, size in ranked:
+    for q, _, prior, doc_id, size, head in ranked:
         if used >= budget_bytes:
             break
+        # Drop templated near-duplicate pages sharing the same normalized opening (~40 words).
+        op_words = head.lower().split()[:40]
+        if len(op_words) >= 12:
+            op_key = hashlib.blake2b(" ".join(op_words).encode("utf-8", "replace"), digest_size=8).digest()
+            if op_key in seen_openings:
+                continue
+            seen_openings.add(op_key)
         selected.append((q, prior, doc_id))
         used += size
     if used < budget_bytes:
@@ -237,16 +302,17 @@ def build_script(task: Task, cands: list[tuple], scores: dict[int, float]) -> li
             if doc_id not in picked:
                 selected.append((0.5, prior, doc_id))
                 used += size
-    # Curriculum ordering: split into 4 quality bands (balanced across every language thanks to
-    # per-language quantile normalization), shuffle inside each band, and place the highest-rated
-    # band last so the student sees the cleanest multilingual text during LR cooldown.
+    # Curriculum ordering: split into 3 quality bands (balanced across every language via per-language
+    # quantile normalization) and shuffle inside each band. With BYTES_PER_TOKEN=3.75 vs ~3.55 B/tok
+    # actual multilingual density, stet.script.materialize() finishes squarely inside the shuffled top
+    # third (Band 2) at passes=1.000 — zero wrap back to Band 0 and zero elite-tail truncation.
     selected.sort(key=lambda t: (t[0], t[1], t[2]))
     n = len(selected)
     if n <= 8:
         return [doc_id for _, _, doc_id in selected]
     rng = random.Random(0)
     out: list[int] = []
-    bands = 4
+    bands = 3
     for b in range(bands):
         lo = (b * n) // bands
         hi = ((b + 1) * n) // bands

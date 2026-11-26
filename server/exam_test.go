@@ -72,6 +72,14 @@ func TestTheExamIsGradedOnceItIsPostedAndScoredAgainstTheRoundsBaseline(t *testi
 	if code, _ := w.postExam(anchor, idx, bad); code != 400 {
 		t.Fatalf("an exam with a part the season does not name: HTTP %d", code)
 	}
+	// Nor one where any pillar falls below the season's minimum item support (min_pillar_items=20).
+	sparse := []ItemInfo{
+		{Pillar: "reference", Part: "reference", Lang: "en", Stratum: "prose/context"},
+		{Pillar: "explain", Part: "explain", Lang: "en", Stratum: "prose/answer"},
+	}
+	if code, msg := w.postExam(anchor, idx, sparse); code != 400 || !strings.Contains(msg, "minimum") {
+		t.Fatalf("a sparse exam with 1 reasoning item: HTTP %d %q, want 400 mentioning minimum", code, msg)
+	}
 	// A verifier that trains before the exam takes the script while it is made, and carol
 	// takes it too, as a replica.
 	early := w.claimEarly(bob)
@@ -250,5 +258,52 @@ func TestRunnersUploadsDoNotKeepARoundFromItsExam(t *testing.T) {
 	}
 	if code, msg := w.postExam(anchor, idx, testTable()); code != 200 {
 		t.Fatalf("the exam, with every runner's place for an upload taken: HTTP %d %s", code, msg)
+	}
+}
+
+// When the examiner posts an authoritative init_sha256 with the round's exam, rd.InitSHA is
+// locked immediately so even the very first grader is verified against it (409 on mismatch).
+func TestAuthoritativeExamInitSHALocksRound(t *testing.T) {
+	pub, priv := newKey()
+	w := newWorld(t, pub)
+	anchor := w.join("anchor-one", priv)
+	bob := w.join("bob", nil)
+	w.established("bob")
+	w.submit(anchor, "ref-a", "print(1)")
+	idx := w.drawWithoutExam()
+	if w.editAll(anchor) != 1 {
+		t.Fatal("anchor should have run entry")
+	}
+	wantInit := strings.Repeat("a", 64)
+	post := testExam(testTable())
+	post["init_sha256"] = wantInit
+	var body map[string]any
+	if code := anchor.do("POST", fmt.Sprintf("/api/v1/admin/rounds/%s/exam", roundID(w.app.season.ID, idx)), post, &body); code != 200 {
+		t.Fatalf("post exam with init_sha256: HTTP %d %v", code, body)
+	}
+	w.app.st.view(func(s *State) {
+		if got := s.Rounds[idx].InitSHA; got != wantInit {
+			t.Fatalf("rd.InitSHA = %q, want %q", got, wantInit)
+		}
+	})
+	cb := w.claim(bob, false)
+	if cb.Job == nil || cb.Job.Kind != "grade" {
+		t.Fatalf("expected grade job, got %+v", cb.Job)
+	}
+	bad := w.examResult(cb, len(testTable()), 0.1, -3)
+	bad["train"].(map[string]any)["init_sha256"] = strings.Repeat("b", 64)
+	if code := bob.do("POST", fmt.Sprintf("/api/v1/jobs/%d/result", cb.Job.ID), bad, nil); code != 409 {
+		t.Fatalf("bad init_sha256 against authoritative exam lock: HTTP %d, want 409", code)
+	}
+	carol := w.join("carol", nil)
+	w.established("carol")
+	cc := w.claim(carol, false)
+	if cc.Job == nil || cc.Job.Kind != "grade" {
+		t.Fatalf("expected grade job for carol, got %+v", cc.Job)
+	}
+	good := w.examResult(cc, len(testTable()), 0.1, -3)
+	good["train"].(map[string]any)["init_sha256"] = wantInit
+	if code := carol.do("POST", fmt.Sprintf("/api/v1/jobs/%d/result", cc.Job.ID), good, nil); code != 200 {
+		t.Fatalf("matching init_sha256 against authoritative exam lock: HTTP %d, want 200", code)
 	}
 }

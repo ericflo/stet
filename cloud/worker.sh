@@ -70,17 +70,22 @@ end_pod() {
 [ -e "$done_mark" ] && end_pod "it was started again after it had finished"
 
 # What is to be installed: curl to end itself with; gcc/g++ for Triton/vLLM/FLA JIT kernels on
-# minimal Ubuntu containers; sshd for a key that may log in; and bubblewrap where curators are
-# run in it (STET_WORKER_SANDBOX=bwrap), or for a probe to try.
+# curator/probe containers (grade-only machines run pure SDPA PyTorch and skip the curator stack);
+# sshd for a key that may log in; and bubblewrap where curators are run in it or for a probe.
+is_probe=0
+if [ -n "${STET_PROBE:-}${STET_PROBE_0:-}" ]; then is_probe=1; fi
+is_curator=0
+if [ "${STET_WORKER_EDITS:-0}" = "1" ] || [ "$is_probe" = "1" ]; then is_curator=1; fi
+
 pkgs=""
 need_gcc=0
 command -v curl >/dev/null 2>&1 || pkgs="curl ca-certificates"
-if [ "$(id -u)" = "0" ] && command -v apt-get >/dev/null 2>&1 && ! command -v gcc >/dev/null 2>&1; then
+if [ "$is_curator" = "1" ] && [ "$(id -u)" = "0" ] && command -v apt-get >/dev/null 2>&1 && ! command -v gcc >/dev/null 2>&1; then
   pkgs="$pkgs gcc g++ libc6-dev"
   need_gcc=1
 fi
 [ -n "${PUBLIC_KEY:-}" ] && pkgs="$pkgs openssh-server"
-if { [ "${STET_WORKER_SANDBOX:-container}" = bwrap ] || [ -n "${STET_PROBE:-}${STET_PROBE_0:-}" ]; } && ! command -v bwrap >/dev/null 2>&1; then
+if { [ "${STET_WORKER_SANDBOX:-container}" = bwrap ] || [ "$is_probe" = "1" ]; } && ! command -v bwrap >/dev/null 2>&1; then
   pkgs="$pkgs bubblewrap"
 fi
 if [ -n "$pkgs" ]; then
@@ -123,7 +128,12 @@ unset STET_WORKER_KEY
 umask 022
 
 if ! command -v stet >/dev/null 2>&1; then
-  say "installing stet from ${STET_INSTALL}"
+  if [ "$is_curator" = "0" ]; then
+    export STET_GRADE_ONLY=1
+    say "installing grade-only stet from ${STET_INSTALL}"
+  else
+    say "installing stet from ${STET_INSTALL}"
+  fi
   for i in 1 2 3; do
     if command -v uv >/dev/null 2>&1 || curl -LsSf https://astral.sh/uv/install.sh | sh >/dev/null 2>&1; then
       curl -fsSL "$STET_INSTALL" | sh && break

@@ -791,6 +791,14 @@ func (j *judge) same(x, y *gradeView) bool {
 	if x.r.Valid != y.r.Valid {
 		return false
 	}
+	if x.r.Valid {
+		if x.r.InitSHA != "" && y.r.InitSHA != "" && x.r.InitSHA != y.r.InitSHA {
+			return false
+		}
+		if x.r.TokensSHA != "" && y.r.TokensSHA != "" && x.r.TokensSHA != y.r.TokensSHA {
+			return false
+		}
+	}
 	return !x.r.Valid || within(x.gain-y.gain, j.a.tolerance().Grade)
 }
 
@@ -811,8 +819,12 @@ func (j *judge) weigh(sc *scriptState) *verdict {
 	v := &verdict{}
 	var own []*gradeView
 	for _, r := range sc.Results {
+		rd := j.s.Rounds[r.RoundIdx]
 		switch g := j.view(sc, r); {
 		case g == nil || !g.est:
+		case r.Valid && rd != nil && rd.InitSHA != "" && r.InitSHA != "" && r.InitSHA != rd.InitSHA:
+			// Graded from different initial student weights than the round's agreed init: set aside
+			// so it cannot decide the script and is voided as "other data" at settlement.
 		case j.oddOut(r):
 			// Its machine's baseline is the odd one out of the round's: the script wants a
 			// grade as if it had none, and this one is set aside when the round settles.
@@ -2049,12 +2061,29 @@ func (a *App) submitResult(ctx context.Context, acctID, claimID int64, p *Result
 			initSHA = p.Train.InitSHA256
 		}
 		tokensSHA := scriptTokensSHA(p.Script)
+		if p.Valid && len(a.season.Student) > 0 {
+			if initSHA == "" {
+				return fail(400, "valid grades for %s must report a 64-hex train.init_sha256", a.season.ID)
+			}
+			if tokensSHA == "" {
+				return fail(400, "valid grades for %s must report a 64-hex script.tokens_sha256", a.season.ID)
+			}
+		}
 		if p.Valid && initSHA != "" && rd.InitSHA != "" && rd.InitSHA != initSHA {
 			return refuse("init", 0, "your initial weights hash for %s differs from the round's. Check your student model cache and harness version", p.Round)
 		}
 		if p.Valid && tokensSHA != "" {
+			tokVotes := map[string]map[int64]bool{}
 			for _, prev := range s.results(rd.Idx, e.EditorID) {
-				if prev.Script == c.Script && prev.Valid && prev.TokensSHA != "" && a.established(s.Accounts[prev.AccountID]) && prev.TokensSHA != tokensSHA {
+				if prev.Script == c.Script && prev.Valid && prev.TokensSHA != "" && a.established(s.Accounts[prev.AccountID]) {
+					if tokVotes[prev.TokensSHA] == nil {
+						tokVotes[prev.TokensSHA] = map[int64]bool{}
+					}
+					tokVotes[prev.TokensSHA][prev.AccountID] = true
+				}
+			}
+			for agreedTok, voters := range tokVotes {
+				if len(voters) >= 2 && agreedTok != tokensSHA {
 					return refuse("tokens", 0, "your tokenized training stream for this script in %s differs from established graders'", p.Round)
 				}
 			}
@@ -2090,7 +2119,18 @@ func (a *App) submitResult(ctx context.Context, acctID, claimID int64, p *Result
 		if est {
 			rd.CorpusSHA = p.CorpusSHA256
 			if p.Valid && initSHA != "" && rd.InitSHA == "" {
-				rd.InitSHA = initSHA
+				// Require agreement from at least two independent established accounts before
+				// locking rd.InitSHA (unless the examiner already posted it authoritatively),
+				// so one honest machine with a bad first result cannot poison the whole round.
+				voters := map[int64]bool{acctID: true}
+				for _, r := range s.Results {
+					if r.RoundIdx == rd.Idx && r.Valid && r.InitSHA == initSHA && a.established(s.Accounts[r.AccountID]) {
+						voters[r.AccountID] = true
+					}
+				}
+				if len(voters) >= 2 {
+					rd.InitSHA = initSHA
+				}
 			}
 			a.moved(tx, rd)
 		}

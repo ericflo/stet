@@ -16,7 +16,10 @@ import (
 // on every item of a pillar is that gain for the pillar.
 func (w *world) pillarResult(c *claimed, explain, reference float64) map[string]any {
 	p := w.result(c, 5, 6)
-	gains := map[string]float64{"explain": explain, "reference": reference}
+	gains := map[string]float64{
+		"explain": explain, "infer": explain, "synthesis": explain,
+		"reference": reference, "news": reference, "technical": reference, "discussion": reference,
+	}
 	var scores []float64
 	sum := 0.0
 	for _, it := range testTable() {
@@ -107,7 +110,12 @@ func TestAnEntrysPillarsAreMadeOfTheGradesItsGainIsMadeOf(t *testing.T) {
 		}
 	}
 	// On each pillar, the mean over its two runs of the mean over the run's two grades.
-	want := map[string]float64{"explain": (0.40 + 0.60 + 0.20 + 0.50) / 4, "reference": (0.60 + 0.50 + 0.70 + 0.58) / 4}
+	reas := (0.40 + 0.60 + 0.20 + 0.50) / 4
+	comp := (0.60 + 0.50 + 0.70 + 0.58) / 4
+	want := map[string]float64{
+		"reference": comp, "news": comp, "technical": comp, "conversation": comp,
+		"explain": reas, "infer": reas, "synthesis": reas,
+	}
 	if len(e.BySource) != len(want) {
 		t.Fatalf("the entry's pillars: %v", e.BySource)
 	}

@@ -24,6 +24,10 @@ import (
 //go:embed worker.sh
 var workerScript string
 
+type offerKey struct {
+	long, curators bool
+}
+
 // Fleet is the pool of keys, the machines rented with them, and what has been spent.
 type Fleet struct {
 	o *Options
@@ -36,8 +40,8 @@ type Fleet struct {
 	arming   *Arming
 	// Why each market's offers could not be had, the last time every market was asked.
 	offerErrs map[string]error
-	// The offers asked for in this tick, kept for it alone: a tick asks once.
-	tickOffers map[bool][]Offer
+	// The offers asked for in this tick, kept for it alone: a tick asks once per role.
+	tickOffers map[offerKey][]Offer
 	// What was last said of each market whose offers could not be had, said again only
 	// once it changes.
 	offerSaid map[string]string
@@ -729,14 +733,22 @@ func (f *Fleet) curators(market string) bool {
 	return false
 }
 
-// needOn is what a machine on a market must have: one where stet's container sandbox is not
-// known to hold only grades, and needs only a grader's disk.
-func (f *Fleet) needOn(m Market) Need {
+// needFor is what a machine on a market must have for its role: grade-only rentals (or markets
+// where stet's container sandbox is not known to hold) need only a grader's disk (35 GB) and
+// grading VRAM floor; curator rentals need the full curator disk and curator VRAM floor.
+func (f *Fleet) needFor(m Market, curators bool) Need {
 	n := f.need()
-	if !f.curators(m.Name()) {
+	if !curators || !f.curators(m.Name()) {
 		n.DiskGB = min(n.DiskGB, graderDisk)
+	} else if f.o.MinCuratorGPUMemory > 0 {
+		n.MinGPUMemGB = max(n.MinGPUMemGB, f.o.MinCuratorGPUMemory)
 	}
 	return n
+}
+
+// needOn is the curator-capable market requirement (or grader disk where curators cannot run).
+func (f *Fleet) needOn(m Market) Need {
+	return f.needFor(m, true)
 }
 
 // fits says whether an offer's GPU can be trusted with a grade, holds one, and is fast enough to
@@ -769,12 +781,17 @@ func offerName(o Offer) string {
 // under --long-max-price. With all, a market whose offers cannot be had is passed over and
 // why is kept in offerErrs; otherwise that is an error.
 func (f *Fleet) choices(ctx context.Context, long, all bool) ([]Offer, error) {
-	if got, ok := f.tickOffers[long]; ok && !all {
+	return f.choicesFor(ctx, long, false, all)
+}
+
+func (f *Fleet) choicesFor(ctx context.Context, long, curators, all bool) ([]Offer, error) {
+	key := offerKey{long: long, curators: curators}
+	if got, ok := f.tickOffers[key]; ok && !all {
 		return slices.Clone(got), nil
 	}
-	out, err := f.choicesNow(ctx, long, all)
+	out, err := f.choicesNowFor(ctx, long, curators, all)
 	if err == nil && !all && f.tickOffers != nil {
-		f.tickOffers[long] = slices.Clone(out)
+		f.tickOffers[key] = slices.Clone(out)
 	}
 	return out, err
 }
@@ -786,6 +803,10 @@ func (f *Fleet) choices(ctx context.Context, long, all bool) ([]Offer, error) {
 var offersWithin = 30 * time.Second
 
 func (f *Fleet) choicesNow(ctx context.Context, long, all bool) ([]Offer, error) {
+	return f.choicesNowFor(ctx, long, false, all)
+}
+
+func (f *Fleet) choicesNowFor(ctx context.Context, long, curators, all bool) ([]Offer, error) {
 	if err := f.refresh(); err != nil {
 		return nil, err
 	}
@@ -821,7 +842,7 @@ func (f *Fleet) choicesNow(ctx context.Context, long, all bool) ([]Offer, error)
 		}
 		octx, cancel := context.WithTimeout(ctx, offersWithin)
 		began := f.now()
-		got, err := m.Offers(octx, f.needOn(m))
+		got, err := m.Offers(octx, f.needFor(m, curators || f.probe != ""))
 		cancel()
 		f.offersSeen(m.Name(), f.now().Sub(began), len(got), err)
 		if err != nil {
@@ -1016,11 +1037,12 @@ func (f *Fleet) launchSome(ctx context.Context, v *View, n int, long, curators b
 	if n <= 0 {
 		return 0, nil
 	}
-	gpus, err := f.choices(ctx, long, false)
+	wantCurators := curators && f.o.Edits && f.probe == ""
+	gpus, err := f.choicesFor(ctx, long, wantCurators, false)
 	if err != nil {
 		return 0, err
 	}
-	if curators && f.o.Edits && f.probe == "" {
+	if wantCurators {
 		// Machines to run curators, only where stet's container sandbox is known to hold, and
 		// not on a host or a CPU that was under the season's floor this week.
 		refused, err := f.readRefusals()
@@ -1081,7 +1103,7 @@ func (f *Fleet) launchSome(ctx context.Context, v *View, n int, long, curators b
 		if err := f.ready(ctx, w.Key, vouched); err != nil {
 			return rented, err
 		}
-		pod, err := f.rent(ctx, v, w.Key, gpus, site, grades, plan)
+		pod, err := f.rent(ctx, v, w.Key, gpus, site, grades, plan, wantCurators)
 		if err != nil {
 			return rented, err
 		}
@@ -1186,7 +1208,7 @@ func roundFor(w *Work, what string, due time.Time) string {
 	return w.Rounds[0].ID
 }
 
-func (f *Fleet) rent(ctx context.Context, v *View, k *Key, gpus []Offer, site string, grades func(Offer) int, plan rentPlan) (*Rental, error) {
+func (f *Fleet) rent(ctx context.Context, v *View, k *Key, gpus []Offer, site string, grades func(Offer) int, plan rentPlan, curators bool) (*Rental, error) {
 	tried, dearer := 0, 0
 	failed := map[string]bool{} // markets that failed otherwise than with no room, passed over now
 	for _, c := range gpus {
@@ -1209,16 +1231,18 @@ func (f *Fleet) rent(ctx context.Context, v *View, k *Key, gpus []Offer, site st
 			return &Rental{Market: c.Market, ID: "dry-run", Name: k.Handle, Card: c.Card, State: "starting", Status: "PROVISIONING", Price: price, Created: f.now()}, nil
 		}
 		l := f.launchFor(k, site)
-		l.Need = f.needOn(m)
+		asCurator := curators && f.o.Edits && f.curators(c.Market) && (f.o.MinCuratorGPUMemory <= 0 || c.MemoryGB >= f.o.MinCuratorGPUMemory)
 		if f.probe != "" {
+			l.Need = f.needFor(m, true)
 			l.Env["STET_PROBE"], l.Env["STET_WORKER_EDITS"] = f.probe, "1"
 			if l.SSHKey == "" && c.Market != "runpod" {
 				l.SSHKey = sshKey(l) // to read what it found, where the market lets a key in
 			}
-		}
-		if l.Env["STET_WORKER_EDITS"] == "1" && f.probe == "" {
-			if !f.curators(c.Market) || (f.o.MinCuratorGPUMemory > 0 && c.MemoryGB < f.o.MinCuratorGPUMemory) {
-				// Grading only: sandbox not verified on this market, or GPU under the curator VRAM floor.
+		} else {
+			l.Need = f.needFor(m, asCurator)
+			if asCurator {
+				l.Env["STET_WORKER_EDITS"] = "1"
+			} else {
 				l.Env["STET_WORKER_EDITS"] = "0"
 			}
 		}

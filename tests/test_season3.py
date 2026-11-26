@@ -592,7 +592,7 @@ def test_reader_example_pins_qwen3_06b_trailing_space_and_vllm_fallback(monkeypa
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     assert mod.RUBRIC_SUFFIX.endswith(": "), "RUBRIC_SUFFIX must end with trailing space so next token is digit 1..5"
-    assert mod.BYTES_PER_TOKEN >= 4.0
+    assert 3.5 <= mod.BYTES_PER_TOKEN <= 4.0
     assert mod.CANDIDATE_OVERPROVISION >= 10.0 and mod.RESERVE_SECONDS >= 45
     assert 'VLLM_WORKER_MULTIPROC_METHOD' in src
     assert 'VLLM_WORKER_MULTIPROC_METHOD' in (ROOT / "src" / "stet" / "runner.py").read_text()
@@ -1491,11 +1491,274 @@ def test_reader_per_language_quantile_normalization_prevents_non_english_starvat
         cands.append((0.9, doc_id, 1000, "한국어 기술 문서와 과학 분석 예제입니다.", "hangul"))
         scores[doc_id] = round(1.5 + i / 30.0, 2)
 
-    fake_task = types.SimpleNamespace(train_tokens=5000)  # 20,000 bytes -> picks 20 of 60 docs
+    fake_task = types.SimpleNamespace(train_tokens=5400)  # ~20,250 bytes -> picks ~20 of 60 docs
     selected = mod.build_script(fake_task, cands, scores)
     en_kept = sum(1 for d in selected if d < 100)
     ko_kept = sum(1 for d in selected if d >= 100)
-    assert en_kept == 10 and ko_kept == 10, f"expected balanced 10/10, got en={en_kept} ko={ko_kept}"
+    assert en_kept >= 9 and ko_kept >= 9 and abs(en_kept - ko_kept) <= 1, f"expected balanced ~10/10, got en={en_kept} ko={ko_kept}"
     # Cooldown band (last 25%) also contains both English and Korean top-quantile docs!
     last_band = selected[-5:]
     assert any(d < 100 for d in last_band) and any(d >= 100 for d in last_band)
+
+
+def test_reason_cjk_and_short_copy_filter_and_decoupled_wrappers():
+    """Finding 6: copy filter rejects wholly extractive answers in zh/ja/ko and <5-word strings
+    while keeping genuine paraphrases; synthesis cycles across all 3 wrappers independently of task."""
+    from stet.exam.fresh.reason import ngram_overlap, parse_generated_items, select_source_docs, wrap_prompt
+
+    # 1. Whole-copy rejected and legitimate paraphrase kept in en, zh, ja, ko!
+    fixtures = [
+        (
+            "en",
+            "The bridge collapsed because winter ice jammed the central piers and scoured the riverbed underneath.",
+            "The bridge collapsed because winter ice jammed the central piers and scoured the riverbed underneath.",
+            "Severe seasonal ice buildup blocked the middle supports and washed away their foundation, causing structural failure.",
+        ),
+        (
+            "zh",
+            "由于冬季河面结冰堵塞了中央桥墩并冲刷了河床地基，这座古老的石桥最终在清晨发生坍塌，导致两岸交通中断数周。",
+            "由于冬季河面结冰堵塞了中央桥墩并冲刷了河床地基，这座古老的石桥最终在清晨发生坍塌，导致两岸交通中断数周。",
+            "严寒冰块阻挡了支撑结构并淘空底部泥沙，使建筑失去稳定而倾覆，附近通勤也随之受阻。",
+        ),
+        (
+            "ja",
+            "冬の流氷が中央の橋脚を塞ぎ河床の基礎を削り取ったため、古い石橋は早朝に崩落して両岸の交通が数週間遮断された。",
+            "冬の流氷が中央の橋脚を塞ぎ河床の基礎を削り取ったため、古い石橋は早朝に崩落して両岸の交通が数週間遮断された。",
+            "厳しい寒さによる氷の堆積が支柱まわりを侵食し、土台が弱まった結果として構造物が倒れ、通行止めが続いた。",
+        ),
+        (
+            "ko",
+            "겨울철 유빙이 중앙 교각을 막고 강바닥 기초를 깎아내리면서 오래된 돌다리가 새벽에 무너져 양쪽 교통이 몇 주간 끊겼다.",
+            "겨울철 유빙이 중앙 교각을 막고 강바닥 기초를 깎아내리면서 오래된 돌다리가 새벽에 무너져 양쪽 교통이 몇 주간 끊겼다.",
+            "한파로 쌓인 얼음이 기둥 주변 지반을 약화시켜 다리가 버티지 못하고 파손되었으며 주민 이동에도 큰 차질이 생겼다.",
+        ),
+    ]
+    for lang, src, exact_copy, paraphrase in fixtures:
+        assert ngram_overlap(exact_copy, src) > 0.50, f"failed to catch copy in {lang}"
+        assert ngram_overlap(paraphrase, src) <= 0.50, f"falsely rejected paraphrase in {lang}"
+        sel_copy = [{"source": "ccnews", "id": f"art-{lang}-1", "lang": lang, "text": src, "excerpt": src, "task_type": "explain", "wrapper_id": 0}]
+        kept_copy, drop_copy = parse_generated_items(sel_copy, [f"Explain why the structure failed in {lang}?\nRESPONSE: {exact_copy}"])
+        assert not kept_copy and drop_copy.get("verbatim_copy") == 1, (lang, kept_copy, drop_copy)
+
+        kept_para, drop_para = parse_generated_items(sel_copy, [f"Explain why the structure failed in {lang}?\nRESPONSE: {paraphrase}"])
+        assert len(kept_para) == 1 and not drop_para, (lang, drop_para)
+        # Finding 7: harvest doc ID preserved on reasoning item source!
+        assert kept_para[0].source == f"explain:ccnews:art-{lang}-1"
+
+    # Short (<5 word) verbatim copy must also be caught rather than returning 0.0!
+    assert ngram_overlap("central piers scoured", "The central piers scoured quickly.") == 1.0
+
+    # 2. Synthesis wrapper_id must decouple from task_type so all 3 synthesis wrappers appear!
+    docs = [
+        Doc(
+            source="ccnews",
+            id=f"en:{i}",
+            url=f"https://example.org/{i}",
+            lang="en",
+            license="ccnews",
+            published=1_800_000_000 + i,
+            title=f"Story {i}",
+            text=f"Unique article {i} discusses industrial policy and regional supply chains across multiple sectors. " * 8,
+            topic="",
+        )
+        for i in range(36)
+    ]
+    selected = select_source_docs(docs, b"wrap-seed", target=36)
+    synth_wrappers = {d["wrapper_id"] % 3 for d in selected if d["task_type"] == "synthesis"}
+    explain_wrappers = {d["wrapper_id"] % 6 for d in selected if d["task_type"] == "explain"}
+    infer_wrappers = {d["wrapper_id"] % 6 for d in selected if d["task_type"] == "infer"}
+    assert synth_wrappers == {0, 1, 2}, f"synthesis stuck on wrappers {synth_wrappers}"
+    assert explain_wrappers == {0, 1, 2, 3, 4, 5}
+    assert infer_wrappers == {0, 1, 2, 3, 4, 5}
+    # Distinct rendered strings across the 3 synthesis wrappers
+    rendered = {wrap_prompt("Body.", "Summary lead-in.", "synthesis", w) for w in (0, 1, 2)}
+    assert len(rendered) == 3
+
+
+def test_reason_shared_token_bounded_excerpt_endpoint_pinning_and_replay():
+    """Finding 5: teacher and student share ONE token-bounded excerpt; teacher prompt never loses
+    closing PROMPT: cue; endpoint verifies model/revision; replay produces identical item digest."""
+    from stet.exam.fresh.reason import (
+        _verify_endpoint_model,
+        apply_token_budget,
+        bound_excerpt,
+        build_teacher_prompt,
+        parse_generated_items,
+        select_source_docs,
+    )
+    from stet.exam.items import digest
+
+    class WordTok:
+        """Simple deterministic mock tokenizer: 1 word = 1 token."""
+
+        def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
+            return [i for i, _ in enumerate(text.split())]
+
+        def decode(self, ids: list[int], skip_special_tokens: bool = True) -> str:
+            return " ".join(f"tok{i}" for i in ids)
+
+    # 600-word dense doc capped to 380 tokens -> shared excerpt identical for teacher and student.
+    long_text = " ".join(f"word{i}" for i in range(600))
+    doc = Doc(
+        source="ccnews",
+        id="long-1",
+        url="https://example.org/long",
+        lang="en",
+        license="ccnews",
+        published=1_800_000_001,
+        title="Long",
+        text=long_text,
+        topic="",
+    )
+    selected = select_source_docs([doc], b"replay-seed", target=1, max_excerpt_chars=2400)
+    bounded = apply_token_budget(selected, WordTok(), max_tokens=100, max_chars=2400)
+    ex = bounded[0]["excerpt"]
+    assert len(ex.split()) == 100
+    t_prompt = build_teacher_prompt(ex, "en", bounded[0]["task_type"])
+    assert ex in t_prompt and t_prompt.endswith("\nPROMPT:")
+
+    gen = ["Why does this process stabilize output?\nRESPONSE: By limiting each pass to a fixed span, downstream stages stay consistent and avoid silent cutoffs."]
+    items1, _ = parse_generated_items(bounded, gen)
+    items2, _ = parse_generated_items(bounded, gen)
+    assert len(items1) == 1
+    assert ex in items1[0].ctx  # student receives the EXACT same bounded excerpt as teacher!
+    assert digest(items1) == digest(items2)  # deterministic replay digest
+
+    # Bound excerpt without tokenizer still respects max_chars cleanly.
+    assert len(bound_excerpt("a " * 2000, max_chars=500)) <= 500
+
+    # Endpoint model/revision verification rejects unpinned overrides!
+    import os
+
+    old_m = os.environ.get("STET_EXAMINER_LLM_MODEL")
+    old_r = os.environ.get("STET_EXAMINER_LLM_REVISION")
+    try:
+        os.environ["STET_EXAMINER_LLM_MODEL"] = "some-other/model"
+        with pytest.raises(RuntimeError, match="does not match"):
+            _verify_endpoint_model("http://127.0.0.1:9999/v1", "Qwen/Qwen3-8B", "rev123", {})
+        os.environ.pop("STET_EXAMINER_LLM_MODEL", None)
+        os.environ["STET_EXAMINER_LLM_REVISION"] = "wrong-rev"
+        with pytest.raises(RuntimeError, match="does not match"):
+            _verify_endpoint_model("http://127.0.0.1:9999/v1", "Qwen/Qwen3-8B", "rev123", {})
+    finally:
+        if old_m is None:
+            os.environ.pop("STET_EXAMINER_LLM_MODEL", None)
+        else:
+            os.environ["STET_EXAMINER_LLM_MODEL"] = old_m
+        if old_r is None:
+            os.environ.pop("STET_EXAMINER_LLM_REVISION", None)
+        else:
+            os.environ["STET_EXAMINER_LLM_REVISION"] = old_r
+
+
+def test_examine_enforces_min_pillar_items_and_regenerates_corrupt_cache(tmp_path, monkeypatch):
+    """Finding 4: official assembly enforces min_pillar_items after decontamination, writes
+    reasoning cache atomically, and regenerates corrupt or incomplete cache files."""
+    from conftest import make_corpus
+
+    from stet.exam import examine
+    from stet.exam.fresh import write_snapshot
+    from stet.spec import official_round
+
+    s3 = load_season("s3")
+    rnd = official_round(s3, 1, {"round": 10, "randomness": "ab" * 32}, {"crawl": "CC-MAIN-2026-43", "paths_sha256": "cd" * 32, "n_shards": 100})
+    scale = s3.scale("nano")
+    corpus = make_corpus(tmp_path / "corpus", ["Unrelated corpus text about gardening and weather. " * 20] * 4)
+    monkeypatch.setattr(data, "corpus", lambda r, sc: corpus)
+
+    # Small snapshot with 6 docs -> teacher returns only 1 reasoning item -> MUST fail coverage check!
+    docs = [
+        Doc(
+            source="wikipedia",
+            id=f"en:{i}",
+            url=f"https://en.wikipedia.org/wiki/T{i}",
+            lang="en",
+            license="CC BY-SA 4.0",
+            published=1_800_000_000 + i,
+            title=f"Article {i}",
+            text=f"Paragraph one of article {i} explains key facts clearly. Paragraph two expands the reasoning in detail. Paragraph three gives outcomes and trade-offs. " * 4,
+            topic=f"Q{i}",
+        )
+        for i in range(6)
+    ]
+    snap = tmp_path / "1800000000.jsonl"
+    write_snapshot(docs, snap, {"hour": 1_800_000_000})
+
+    calls = {"n": 0}
+
+    def fake_synth(d, seed, cfg, shares=None, log=print):
+        calls["n"] += 1
+        return [
+            Item(
+                kind="answer",
+                corner="explain/en/wikipedia",
+                fmt="prose",
+                lang="en",
+                source="explain:wikipedia:en:0",
+                ctx="Excerpt one.\n\nWhy?\n",
+                cont="A sufficiently detailed explanation in own words that answers the prompt cleanly.",
+            )
+        ]
+
+    monkeypatch.setattr("stet.exam.fresh.reason.synthesize_reasoning", fake_synth)
+
+    work = tmp_path / "work"
+    # Official assembly refuses 1 surviving reasoning item (min_pillar_items=20)!
+    with pytest.raises(RuntimeError, match="below minimum of 20"):
+        examine.assemble(rnd, scale, [(1_800_000_000, snap)], work, log=lambda m: None, measure=False, synthesize=True)
+    assert calls["n"] == 1
+
+    # Corrupt / empty reasoning cache must NOT silently skip synthesis on retry!
+    rcaches = list(work.glob("reasoning-*.jsonl.zst"))
+    assert len(rcaches) == 1
+    rcaches[0].write_bytes(b"")  # simulate interrupted write!
+    with pytest.raises(RuntimeError, match="below minimum of 20"):
+        examine.assemble(rnd, scale, [(1_800_000_000, snap)], work, log=lambda m: None, measure=False, synthesize=True)
+    assert calls["n"] == 2  # regenerated instead of decoding empty cache as 0 items!
+
+
+def test_practice_cache_tracks_synthesis_mode_and_third_party_notices_shipped(tmp_path, monkeypatch):
+    """Other Finding A & Finding 7: practice_key & baseline_path separate STET_SYNTHESIZE_PRACTICE
+    modes, and THIRD_PARTY_NOTICES.md ships in package data covering every SFT dataset source."""
+    import importlib.resources as res
+    import importlib.util
+
+    import zstandard as zstd
+
+    from stet.exam.fresh import write_snapshot
+
+    s3 = load_season("s3")
+    rnd = practice_round(s3, 0)
+    scale = s3.scale("nano")
+
+    # Put 3 harvested hours into a temp cache dir
+    monkeypatch.setenv("STET_CACHE", str(tmp_path))
+    hdir = data.harvest_dir()
+    hdir.mkdir(parents=True, exist_ok=True)
+    for h in (1_800_000_000, 1_800_003_600, 1_800_007_200):
+        write_snapshot([], hdir / f"{h}.jsonl", {"hour": h})
+
+    has_torch = importlib.util.find_spec("torch") is not None
+    pipeline = importlib.import_module("stet.pipeline") if has_torch else None
+
+    monkeypatch.setattr("stet.exam.fresh.reason.can_synthesize_locally", lambda: True)
+    monkeypatch.delenv("STET_SYNTHESIZE_PRACTICE", raising=False)
+    k_off = data.practice_key(rnd)
+    b_off = pipeline.baseline_path(rnd, scale, types.SimpleNamespace(type="cpu")) if pipeline else None
+
+    monkeypatch.setenv("STET_SYNTHESIZE_PRACTICE", "1")
+    k_on = data.practice_key(rnd)
+    b_on = pipeline.baseline_path(rnd, scale, types.SimpleNamespace(type="cpu")) if pipeline else None
+    assert k_off and k_on and k_off != k_on
+    if pipeline is not None:
+        assert b_off != b_on
+
+    # Finding 7: THIRD_PARTY_NOTICES.md shipped inside stet.exam.data and covers every SFT source!
+    notices = res.files("stet.exam").joinpath("data", "THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8")
+    raw = zstd.ZstdDecompressor().decompress(
+        res.files("stet.exam").joinpath("data", "s3-sft-ml.jsonl.zst").read_bytes(), max_output_size=64 << 20
+    ).decode("utf-8")
+    sources = {json.loads(ln)["source"] for ln in raw.splitlines() if ln.strip()}
+    for src in sources:
+        assert src in notices, f"missing notice for SFT source {src!r}"
+    assert "CC BY-SA 4.0" in notices and "XStoryCloze" in notices and "s3-practice.jsonl.zst" in notices

@@ -91,8 +91,13 @@
       "model": "Qwen/Qwen3-8B",
       "revision": "b968826d9c46dd6066d109eabc6255188de91218",
       "items": 640,
-      "max_ngram_overlap": 0.5
+      "max_ngram_overlap": 0.5,
+      "max_excerpt_tokens": 380,
+      "max_excerpt_chars": 1200,
+      "max_new_tokens": 240,
+      "temperature": 0.0
     },
+    "min_pillar_items": 20,
     "practice_pack": {
       "file": "s3-practice.jsonl.zst",
       "sha256": "d265e1beb865c556164c62850b34d63f9326d9f3806f5c7735b59609793f9334"

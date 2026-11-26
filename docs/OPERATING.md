@@ -99,6 +99,12 @@ What it needs:
   organisers may post an exam;
 - the stet client with the season's libraries, PyTorch among them, and the same version of
   the exam's generators as the season (an older client refuses, and says to upgrade);
+- **for Season 3 reasoning synthesis (`Qwen/Qwen3-8B@b968826d`, greedy `temperature=0`):**
+  either a local CUDA GPU with **18 GB+ VRAM** (e.g. RTX 3090 / 4090 / 5090 — ~16 GB bf16
+  weights + KV cache) OR an OpenAI-compatible `/v1/completions` server set via
+  `STET_EXAMINER_LLM_URL` (and optional `STET_EXAMINER_LLM_KEY`) serving the exact pinned
+  model & revision (`stet` verifies `/v1/models` before generating and refuses model or
+  revision mismatches);
 - about 3 GB of disk a round, under `~/.cache/stet/examine/<round>/` and the round's corpus,
   and the hours it has harvested;
 - the network: Wikipedia, Common Crawl's news crawl, GH Archive, Hacker News, Lemmy,
@@ -117,6 +123,9 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
+# Either run on a host with an 18 GB+ CUDA GPU, or point at a pinned Qwen3-8B endpoint:
+# Environment=STET_EXAMINER_LLM_URL=http://127.0.0.1:8000/v1
+# Environment=STET_EXAMINER_LLM_KEY=...
 ExecStart=%h/.local/bin/stet examine --follow
 Environment=PYTHONUNBUFFERED=1
 Restart=always

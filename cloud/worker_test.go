@@ -263,11 +263,13 @@ esac
 	}
 }
 
-// On a minimal root apt container without gcc, worker.sh installs gcc, g++ and libc6-dev for
-// Triton/vLLM/FLA JIT kernels, and ends the pod loudly if gcc still cannot be installed.
+// On a minimal root apt container without gcc, a curator worker (STET_WORKER_EDITS=1) installs
+// gcc, g++ and libc6-dev for Triton/vLLM/FLA JIT kernels and ends the pod loudly if gcc fails,
+// whereas a grade-only worker (STET_WORKER_EDITS=0) skips gcc and sets STET_GRADE_ONLY=1.
 func TestWorkerInstallsCompilerPackagesAndFailsLoudlyIfMissing(t *testing.T) {
-	runWithApt := func(aptBody string) (string, string, string) {
+	runWithApt := func(aptBody string, edits string) (string, string, string) {
 		w := newWorkerRun(t, `case "$1" in --version) echo "stet 0.0.0" ;; verify) echo "$*" >> "$LOG/stet" ;; esac`)
+		w.env = append(w.env, "STET_WORKER_EDITS="+edits)
 		// Minimal PATH containing only our fake tools + basic coreutils directory without gcc.
 		shim := filepath.Join(w.dir, "shim")
 		os.MkdirAll(shim, 0o755)
@@ -295,12 +297,12 @@ func TestWorkerInstallsCompilerPackagesAndFailsLoudlyIfMissing(t *testing.T) {
 		return string(out), w.log("apt"), w.log("stet")
 	}
 
-	// Success case: apt-get installs gcc, g++, libc6-dev and creates a working gcc binary.
+	// Curator success case: apt-get installs gcc, g++, libc6-dev and creates a working gcc binary.
 	out, aptLog, stetLog := runWithApt(`echo "$*" >> "$LOG/apt"
 if [ "$1" = "install" ]; then
   printf '#!/bin/sh\nexit 0\n' > "$LOG/bin/gcc" && chmod +x "$LOG/bin/gcc"
 fi
-exit 0`)
+exit 0`, "1")
 	for _, pkg := range []string{"gcc", "g++", "libc6-dev"} {
 		if !strings.Contains(aptLog, pkg) {
 			t.Fatalf("apt-get install did not request %q:\n%s\n%s", pkg, aptLog, out)
@@ -310,10 +312,16 @@ exit 0`)
 		t.Fatalf("expected stet verify to run once gcc installed:\n%s", out)
 	}
 
-	// Failure case: apt-get fails (even though curl exists); worker must end_pod loudly instead
-	// of continuing without a compiler.
-	outFail, _, stetFail := runWithApt(`echo "$*" >> "$LOG/apt"; exit 1`)
+	// Curator failure case: apt-get fails (even though curl exists); worker must end_pod loudly
+	// instead of continuing without a compiler.
+	outFail, _, stetFail := runWithApt(`echo "$*" >> "$LOG/apt"; exit 1`, "1")
 	if stetFail != "" || !strings.Contains(outFail, "gcc could not be installed") {
 		t.Fatalf("expected loud failure when gcc install fails; stet=%q\nout=%s", stetFail, outFail)
+	}
+
+	// Grade-only case: skips gcc installation completely and uses the lean grade-only installer.
+	outGrade, aptGrade, stetGrade := runWithApt(`echo "$*" >> "$LOG/apt"; exit 1`, "0")
+	if aptGrade != "" || !strings.Contains(outGrade, "installing grade-only stet") || !strings.Contains(stetGrade, "verify") {
+		t.Fatalf("grade-only worker should skip gcc and run verify; apt=%q stet=%q\nout=%s", aptGrade, stetGrade, outGrade)
 	}
 }

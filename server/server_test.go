@@ -427,14 +427,24 @@ func (w *world) claimEarly(a *actor) *claimed {
 // round is given (testExam).
 var corpusSHA, examSHA = strings.Repeat("c0", 32), strings.Repeat("d1", 32)
 
-// testTable is a small exam: items in two pillars, a skill and a kind of writing, and two languages.
+// testTable is a valid full-coverage Season 3 exam: 20 items in each of the 7 pillars
+// (meeting min_pillar_items=20) across en and de.
 func testTable() []ItemInfo {
 	var out []ItemInfo
-	for i := 0; i < 12; i++ {
-		out = append(out, ItemInfo{Pillar: "explain", Part: "explain", Lang: "en", Stratum: "prose/answer"})
-	}
-	for i := 0; i < 6; i++ {
-		out = append(out, ItemInfo{Pillar: "reference", Part: "reference", Lang: []string{"en", "de"}[i%2], Stratum: "prose/context"})
+	for _, spec := range []struct {
+		pillar, part, stratum string
+	}{
+		{"reference", "reference", "prose/context"},
+		{"news", "news", "prose/context"},
+		{"technical", "technical", "prose/context"},
+		{"conversation", "discussion", "dialogue/context"},
+		{"explain", "explain", "prose/answer"},
+		{"infer", "infer", "prose/answer"},
+		{"synthesis", "synthesis", "prose/answer"},
+	} {
+		for i := 0; i < 20; i++ {
+			out = append(out, ItemInfo{Pillar: spec.pillar, Part: spec.part, Lang: []string{"en", "de"}[i%2], Stratum: spec.stratum})
+		}
 	}
 	return out
 }
@@ -513,13 +523,14 @@ func (w *world) edit(a *actor, c *claimed, script string) (int, string) {
 // -baseline: the exam's aggregate of a gain that is the same on every item is that gain, so
 // against a round whose baseline is baseline, its gain is baseline - loss.
 func (w *world) result(c *claimed, loss, baseline float64) map[string]any {
+	tokSum := sha256.Sum256([]byte("tokens:" + c.Job.Script.SHA256))
 	return map[string]any{
 		"harness": w.app.season.Harness, "season": w.app.season.ID, "season_digest": w.app.season.Digest,
 		"round": c.Job.Round["id"], "scale": c.Job.Scale, "corpus_sha256": corpusSHA, "exam_sha256": examSHA,
 		"script_sha256": c.Job.Script.SHA256, "valid": true, "hardware": map[string]any{"gpu": "Test GPU", "device": "cuda"},
-		"script":   map[string]any{"script_sha256": c.Job.Script.SHA256, "kept_doc_frac": 0.1, "kept_byte_frac": 0.08, "passes": 1.4, "out_docs": 1200},
+		"script":   map[string]any{"script_sha256": c.Job.Script.SHA256, "tokens_sha256": hex.EncodeToString(tokSum[:]), "kept_doc_frac": 0.1, "kept_byte_frac": 0.08, "passes": 1.4, "out_docs": 1200},
 		"baseline": itemScores(-baseline), "exam": itemScores(-loss),
-		"train":      map[string]any{"seconds": 30.0, "tokens_per_second": 100000.0, "final_train_loss": 5.0, "curve": [][]float64{{1, 9}, {50, 6}, {100, 5.5}, {150, 5.2}}},
+		"train":      map[string]any{"init_sha256": strings.Repeat("a1", 32), "seconds": 30.0, "tokens_per_second": 100000.0, "final_train_loss": 5.0, "curve": [][]float64{{1, 9}, {50, 6}, {100, 5.5}, {150, 5.2}}},
 		"started_at": time.Now().Unix() - 60, "finished_at": time.Now().Unix(),
 	}
 }

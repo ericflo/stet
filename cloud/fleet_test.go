@@ -1521,4 +1521,17 @@ func TestUnfilled24GBCuratorSlotsFallBackTo16GBGradersOnlyWhenGradesWait(t *test
 	if got, err := f.launch(ctx, v, 2, 0, 0, 2, time.Time{}); err != nil || got != 2 {
 		t.Fatalf("with 6 grades waiting and no 24GB GPUs: rented %d (%v), want 2 16GB graders", got, err)
 	}
+	// Every grade-only rental must request only graderDisk (35 GB), NOT the 120 GB curator disk,
+	// and explicitly disable STET_WORKER_EDITS so worker.sh installs lean STET_GRADE_ONLY=1!
+	for _, pod := range rp.created {
+		if pod.Disk != graderDisk {
+			t.Fatalf("grade-only pod requested %d GB disk, want %d GB", pod.Disk, graderDisk)
+		}
+		if pod.Env["STET_WORKER_EDITS"] != "0" {
+			t.Fatalf("grade-only pod has STET_WORKER_EDITS=%q, want 0", pod.Env["STET_WORKER_EDITS"])
+		}
+	}
+	if !strings.Contains(workerScript, "STET_GRADE_ONLY=1") {
+		t.Fatal("worker.sh does not set STET_GRADE_ONLY=1 for grade-only workers")
+	}
 }

@@ -61,8 +61,9 @@ type ExamPost struct {
 	Shares   map[string]float64 `json:"languages"` // percent of the round's corpus in each language
 	Snapshot string             `json:"snapshot_sha256"`
 	Fresh    int                `json:"fresh"`
-	Public   string             `json:"public_file"` // base64 of the zstd JSON lines published when the round settles
-	Hours    []RoundHour        `json:"hours"`       // the harvests its writing was made from: see harvest.go
+	Public   string             `json:"public_file"`           // base64 of the zstd JSON lines published when the round settles
+	Hours    []RoundHour        `json:"hours"`                 // the harvests its writing was made from: see harvest.go
+	InitSHA  string             `json:"init_sha256,omitempty"` // optional authoritative initial weights sha256 from the examiner
 }
 
 // apiExamPost: POST /api/v1/admin/rounds/{id}/exam, from the organisers. Posting the same exam
@@ -96,7 +97,7 @@ func (a *App) postExam(ctx context.Context, idx int, p *ExamPost) (bool, error) 
 	file, err := base64.StdEncoding.DecodeString(p.File)
 	public, perr := base64.StdEncoding.DecodeString(p.Public)
 	if err != nil || perr != nil || len(public) == 0 || len(public) > examFileMax || len(file) == 0 || len(file) > examFileMax || !sha256Re.MatchString(p.Digest) || len(p.Table) == 0 ||
-		len(p.Table) > examItemMax || (p.Snapshot != "" && !sha256Re.MatchString(p.Snapshot)) || p.Fresh < 0 || p.Fresh > len(p.Table) {
+		len(p.Table) > examItemMax || (p.Snapshot != "" && !sha256Re.MatchString(p.Snapshot)) || (p.InitSHA != "" && !sha256Re.MatchString(p.InitSHA)) || p.Fresh < 0 || p.Fresh > len(p.Table) {
 		return false, fail(400, "the exam does not add up")
 	}
 	if err := a.checkTable(p.Table, p.Shares); err != nil {
@@ -146,6 +147,9 @@ func (a *App) postExam(ctx context.Context, idx int, p *ExamPost) (bool, error) 
 			rd.Hours, rd.HoursLate = p.Hours, true
 		}
 		rd.ExamSHA, rd.ExamAt, rd.ExamTable, rd.Shares, rd.Snapshot, rd.Fresh = p.Digest, now(), p.Table, p.Shares, p.Snapshot, p.Fresh
+		if p.InitSHA != "" && rd.InitSHA == "" {
+			rd.InitSHA = p.InitSHA
+		}
 		rd.ExamMix = a.examMix(p.Table)
 		tx.event("exam", map[string]any{"round": roundID(a.season.ID, idx), "items": len(p.Table), "fresh": p.Fresh})
 		// A grade taken before the exam has waited for it: its time to sit it starts now.
@@ -165,10 +169,19 @@ func (a *App) postExam(ctx context.Context, idx int, p *ExamPost) (bool, error) 
 // season does not put it under, or a language share that is not a number. The weights are the
 // season's; the examiner only says what each item is.
 func (a *App) checkTable(table []ItemInfo, shares map[string]float64) error {
+	counts := map[string]int{}
 	for i, it := range table {
 		if it.Pillar == "" || it.Pillar != a.season.Exam.pillarOf(it.Part) || it.Part == "" || it.Lang == "" || it.Stratum == "" ||
 			len(it.Part)+len(it.Lang)+len(it.Stratum) > 200 {
 			return fail(400, "item %d of the table is not one the season scores", i)
+		}
+		counts[it.Pillar]++
+	}
+	if minP := a.season.Exam.MinPillarItems; minP > 0 {
+		for _, pl := range a.season.Exam.Pillars {
+			if counts[pl.Name] < minP {
+				return fail(400, "exam pillar %q has %d items, fewer than the season's minimum of %d", pl.Name, counts[pl.Name], minP)
+			}
 		}
 	}
 	if len(shares) == 0 || len(shares) > 1000 {

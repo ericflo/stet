@@ -250,7 +250,7 @@ func tick(ctx context.Context, f *Fleet) (err error) {
 	f.roundsSettled(ctx, v.Work)
 	f.keepBalances(ctx)
 	f.calibrate(ctx)
-	f.tickOffers = map[bool][]Offer{}
+	f.tickOffers = map[offerKey][]Offer{}
 	defer func() { f.tickOffers = nil }()
 	next := f.nextGrades(ctx, v.Work)
 	if f.offersDue() {
@@ -317,7 +317,20 @@ func cmdUp(ctx context.Context, f *Fleet, n int) error {
 	if v.Today >= f.o.DailyBudget && f.o.DailyBudget > 0 {
 		return fmt.Errorf("about $%.2f spent today, and the daily budget is $%.2f", v.Today, f.o.DailyBudget)
 	}
-	got, err := f.launch(ctx, v, n, 0, 0, 0, time.Time{})
+	runs := 0
+	if f.o.Edits {
+		if v.Work == nil {
+			runs = n
+		} else {
+			for _, r := range v.Work.Rounds {
+				if r.RunsWanted > 0 || r.RunsWaiting > 0 {
+					runs = n
+					break
+				}
+			}
+		}
+	}
+	got, err := f.launch(ctx, v, n, 0, 0, runs, time.Time{})
 	if err == nil && got > 0 {
 		f.say("each stops by itself after %d minutes with nothing to grade", f.o.Idle)
 	}

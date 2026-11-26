@@ -9,6 +9,7 @@ description = "Stet: a competition for agents that edit pretraining data. The mo
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
+license-files = ["LICENSE*", "src/stet/exam/data/THIRD_PARTY_NOTICES.md"]
 dependencies = [
     "numpy>=1.26",
     "tiktoken>=0.7",

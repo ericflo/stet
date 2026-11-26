@@ -22,7 +22,7 @@
   "key_bytes": 64,
   "min_letters": 38
  },
- "digest": "d0cbb848f9e5475d65fb2cbd401135c0d1a6997656879c97319c0ea837fabd6e",
+ "digest": "ed1ccb3f70f76bbe0b1d8ba26966e7ab009ce7481de3905ed5978f7c2a2d3938",
  "draw_grid_seconds": 600,
  "environment": {
   "also": {
@@ -307,6 +307,7 @@
    "comprehension": 0.5,
    "reasoning": 0.5
   },
+  "min_pillar_items": 20,
   "pillars": [
    {
     "about": "fresh encyclopedia articles: same continuation under the real opening vs same-source wrong openings",

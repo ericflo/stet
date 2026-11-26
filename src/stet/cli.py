@@ -222,9 +222,20 @@ def _with_baseline(result: dict, rnd, scale, device, out: Out, skip: bool):
 
     result["baseline"] = {"mean": base["exam"]["mean"]}
     if result["valid"]:
-        agg = round_score(data.round_exam(rnd, scale), gains(result["exam"]["item_scores"], base["exam"]["item_scores"]), plan=plan_of(rnd.season))
+        plan = plan_of(rnd.season)
+        agg = round_score(data.round_exam(rnd, scale), gains(result["exam"]["item_scores"], base["exam"]["item_scores"]), plan=plan)
         result["gain"] = round(agg["score"], 5)
         result["pillars"] = {k: v["score"] for k, v in agg["pillars"].items()}
+        present_groups = {plan.pillars[p] for p in agg["pillars"]}
+        missing_groups = [g for g in plan.groups if g not in present_groups]
+        if missing_groups:
+            result["partial_exam"] = missing_groups
+            out.line(
+                "note",
+                f"partial practice exam: missing {', '.join(missing_groups)} "
+                "(set STET_SYNTHESIZE_PRACTICE=1 with an 18 GB+ GPU or STET_EXAMINER_LLM_URL, "
+                "or practice without local harvested hours to sit the full bundled practice pack)",
+            )
     return base
 
 

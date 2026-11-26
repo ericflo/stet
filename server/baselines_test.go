@@ -242,26 +242,51 @@ func TestABaselineThatIsFarOutAndFirstInIsNotTheRoundsStandard(t *testing.T) {
 	}
 }
 
-// The server compares train.init_sha256 across the round and script.tokens_sha256 across grades
-// of the same script, refusing mismatches with HTTP 409 and listing them in Round.Differs.
+// The server requires train.init_sha256 and script.tokens_sha256 on valid Season 3 grades,
+// refuses to let a single bad first grade poison Round.InitSHA, locks consensus once two
+// independent established graders agree, refuses subsequent mismatches with HTTP 409, and
+// voids earlier bad-init grades as "other data" at settlement.
 func TestServerComparesInitSHA256AndTokensSHA256(t *testing.T) {
 	pub, priv := newKey()
 	w := newWorld(t, pub)
 	anchor := w.join("anchor-one", priv)
-	w.submit(w.join("owner-entry", nil), "entry-0", "print(0)")
+	owner := w.join("owner-entry", nil)
+	owner2 := w.join("owner-entry-2", nil)
+	w.submit(owner, "entry-0", "print(0)")
+	w.submit(owner2, "entry-1", "print(1)") // left unedited until after 409 checks so round stays open
 	idx := w.draw()
-	// Two established runners write the identical script so the script asks for two established grades.
-	erin := w.volunteers("erin")[0]
-	for _, r := range []*actor{anchor, erin} {
+	// Confirm entry A with two matching edit scripts while holding entry B's edit replicas in flight
+	// so every grade claim goes to entry A and the round stays open through the post-consensus 409 checks.
+	g := w.volunteers("bob", "carol", "dave", "frank", "grace", "heidi", "erin")
+	erin, heidi := g[6], g[5]
+	cEdit0 := w.claim(anchor, true)
+	if cEdit0.Job == nil || cEdit0.Job.Kind != "edit" {
+		t.Fatalf("anchor did not get edit job 0: %+v", cEdit0.Job)
+	}
+	if code, msg := w.edit(anchor, cEdit0, "{\"d\": 0}\n"); code != 200 {
+		t.Fatalf("anchor edit 0 failed: HTTP %d %s", code, msg)
+	}
+	entryA := cEdit0.Job.Editor
+	var heldJobs []struct {
+		a *actor
+		c *claimed
+	}
+	for _, r := range []*actor{anchor, erin, heidi} {
 		c := w.claim(r, true)
 		if c.Job == nil || c.Job.Kind != "edit" {
 			t.Fatalf("%s did not get edit job: %+v", r.handle, c.Job)
 		}
-		if code, msg := w.edit(r, c, "{\"d\": 0}\n"); code != 200 {
-			t.Fatalf("%s edit failed: HTTP %d %s", r.handle, code, msg)
+		if c.Job.Editor == entryA {
+			if code, msg := w.edit(r, c, "{\"d\": 0}\n"); code != 200 {
+				t.Fatalf("%s confirm edit failed: HTTP %d %s", r.handle, code, msg)
+			}
+			break
 		}
+		heldJobs = append(heldJobs, struct {
+			a *actor
+			c *claimed
+		}{r, c})
 	}
-	g := w.volunteers("bob", "carol", "dave", "frank")
 
 	initA := strings.Repeat("a", 64)
 	initB := strings.Repeat("b", 64)
@@ -271,8 +296,15 @@ func TestServerComparesInitSHA256AndTokensSHA256(t *testing.T) {
 	sendWith := func(a *actor, c *claimed, initSHA, tokSHA string) (int, string) {
 		t.Helper()
 		p := w.result(c, 5.5, 6.0)
-		p["train"] = map[string]any{"init_sha256": initSHA, "precision": "bf16", "seconds": 10.0}
-		p["script"] = map[string]any{"tokens_sha256": tokSHA}
+		tr := map[string]any{"precision": "bf16", "seconds": 10.0}
+		if initSHA != "" {
+			tr["init_sha256"] = initSHA
+		}
+		sc := map[string]any{"script_sha256": c.Job.Script.SHA256}
+		if tokSHA != "" {
+			sc["tokens_sha256"] = tokSHA
+		}
+		p["train"], p["script"] = tr, sc
 		var ack struct {
 			Status string `json:"status"`
 			Error  string `json:"error"`
@@ -284,29 +316,96 @@ func TestServerComparesInitSHA256AndTokensSHA256(t *testing.T) {
 		return code, ack.Status
 	}
 
-	c1 := w.asked(g[0], true)
-	if code, st := sendWith(g[0], c1, initA, tokA); code != 200 {
-		t.Fatalf("first grade with initA/tokA failed: HTTP %d %s", code, st)
+	// Established bob & carol claim the two initial grade replicas; unestablished ivan
+	// claims a verification grade on the same script.
+	ivan, judy := w.join("ivan", nil), w.join("judy", nil)
+	cBad := w.asked(g[0], true)
+	c1 := w.asked(g[1], true)
+	c3 := w.asked(ivan, true)
+
+	// Missing either integrity digest on a valid Season 3 grade is refused with HTTP 400.
+	if code, msg := sendWith(g[0], cBad, "", tokA); code != 400 || !strings.Contains(msg, "init_sha256") {
+		t.Fatalf("missing init_sha256: HTTP %d %q, want 400", code, msg)
 	}
-	c2 := w.asked(g[1], true)
-	if code, msg := sendWith(g[1], c2, initB, tokA); code != 409 || !strings.Contains(msg, "initial weights") {
+	if code, msg := sendWith(g[0], cBad, initA, ""); code != 400 || !strings.Contains(msg, "tokens_sha256") {
+		t.Fatalf("missing tokens_sha256: HTTP %d %q, want 400", code, msg)
+	}
+
+	// First grader (bob) reports a bad initB: accepted initially without locking rd.InitSHA,
+	// so honest peers reporting initA are NOT poisoned!
+	if code, st := sendWith(g[0], cBad, initB, tokA); code != 200 {
+		t.Fatalf("first grade with initB failed: HTTP %d %s", code, st)
+	}
+	w.app.st.view(func(s *State) {
+		if s.Rounds[idx].InitSHA != "" {
+			t.Fatalf("single grader prematurely locked Round.InitSHA to %q", s.Rounds[idx].InitSHA)
+		}
+	})
+
+	// Second grader (carol) reports honest initA -> init_sha256 differs from bob's initB, so
+	// judge.same() treats them as a tie and automatically asks a third established grader (dave)!
+	if code, st := sendWith(g[1], c1, initA, tokA); code != 200 {
+		t.Fatalf("first honest grade failed: HTTP %d %s", code, st)
+	}
+	c2 := w.asked(g[2], true)
+	if code, st := sendWith(g[2], c2, initA, tokA); code != 200 {
+		t.Fatalf("second honest grade failed: HTTP %d %s", code, st)
+	}
+	w.app.st.view(func(s *State) {
+		if s.Rounds[idx].InitSHA != initA {
+			t.Fatalf("two agreeing graders did not lock Round.InitSHA: got %q, want %q", s.Rounds[idx].InitSHA, initA)
+		}
+	})
+
+	// Subsequent mismatches on init_sha256 or tokens_sha256 are refused with HTTP 409.
+	if code, msg := sendWith(ivan, c3, initB, tokA); code != 409 || !strings.Contains(msg, "initial weights") {
 		t.Fatalf("mismatched init_sha256: HTTP %d %q, want 409 mentioning initial weights", code, msg)
 	}
-	c3 := w.asked(g[2], true)
-	if code, msg := sendWith(g[2], c3, initA, tokB); code != 409 || !strings.Contains(msg, "tokenized training stream") {
+	c4 := w.asked(judy, true)
+	if code, msg := sendWith(judy, c4, initA, tokB); code != 409 || !strings.Contains(msg, "tokenized training stream") {
 		t.Fatalf("mismatched tokens_sha256: HTTP %d %q, want 409 mentioning tokenized training stream", code, msg)
 	}
-	c4 := w.asked(g[3], true)
-	if code, st := sendWith(g[3], c4, initA, tokA); code != 200 {
-		t.Fatalf("matching second grade failed: HTTP %d %s", code, st)
+
+	// Finish the second entry honestly so the round settles cleanly.
+	for _, h := range heldJobs {
+		if code, msg := w.edit(h.a, h.c, "{\"d\": 1}\n"); code != 200 {
+			t.Fatalf("%s held edit failed: HTTP %d %s", h.a.handle, code, msg)
+		}
 	}
+	if len(heldJobs) == 1 {
+		c := w.claim(heidi, true)
+		if c.Job == nil || c.Job.Kind != "edit" {
+			t.Fatalf("heidi did not get remaining edit job: %+v", c.Job)
+		}
+		if code, msg := w.edit(heidi, c, "{\"d\": 1}\n"); code != 200 {
+			t.Fatalf("heidi remaining edit failed: HTTP %d %s", code, msg)
+		}
+	}
+	if code, st := sendWith(g[3], w.claim(g[3], false), initA, tokA); code != 200 {
+		t.Fatalf("frank grade on second entry failed: HTTP %d %s", code, st)
+	}
+	if code, st := sendWith(g[4], w.claim(g[4], false), initA, tokA); code != 200 {
+		t.Fatalf("grace grade on second entry failed: HTTP %d %s", code, st)
+	}
+
 	w.pass(w.cfg.ReplicaWait + time.Minute)
-	if w.settled(idx) != 1 {
-		t.Fatal("round did not settle")
+	if w.settled(idx) != 2 {
+		t.Fatalf("round settled %d entries, want 2", w.settled(idx))
 	}
 
 	var differs []Differ
-	w.app.st.view(func(s *State) { differs = s.Rounds[idx].Differs })
+	var bobVerdict string
+	w.app.st.view(func(s *State) {
+		differs = s.Rounds[idx].Differs
+		for _, r := range s.Results {
+			if r.RoundIdx == idx && s.Accounts[r.AccountID].Handle == "bob" {
+				bobVerdict = r.Verdict
+			}
+		}
+	})
+	if bobVerdict != "void" {
+		t.Fatalf("bob's bad-init first grade should be voided at settlement, got verdict=%q", bobVerdict)
+	}
 	if len(differs) != 2 || differs[0].What != "init" || differs[1].What != "tokens" {
 		t.Fatalf("expected [init, tokens] in Round.Differs, got %+v", differs)
 	}

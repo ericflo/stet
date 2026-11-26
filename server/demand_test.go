@@ -349,6 +349,9 @@ func TestTheInstallerIsAScriptAShellAcceptsAndClearsUpAfterItself(t *testing.T) 
 		if err != nil {
 			continue
 		}
+		if !strings.Contains(body, `STET_GRADE_ONLY`) || !strings.Contains(body, `EXTRAS="train"`) {
+			t.Fatalf("/install.sh missing STET_GRADE_ONLY lean train extra path")
+		}
 		path := filepath.Join(t.TempDir(), "install.sh")
 		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 			t.Fatal(err)

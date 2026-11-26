@@ -47,6 +47,7 @@ def export(season_id: str = CURRENT_SEASON) -> dict:
             "generated": [f.NAME for f in gen.named(plan.parts)],
             "clip": raw["exam"]["aggregate"]["clip"], "trim": raw["exam"]["aggregate"]["trim"], "small": raw["exam"]["aggregate"]["small"],
             "answer_floor_bytes": season.answer_floor_bytes,
+            "min_pillar_items": int(raw["exam"].get("min_pillar_items", 0)),
             # How the exam's writing is taken from the hours the examiner harvests: server/harvest.go.
             "fresh": {k: int(raw["exam"]["fresh"][k]) for k in ("settle_seconds", "reach_seconds", "hours")},
         },

@@ -1681,6 +1681,8 @@ const installShTmpl = `#!/bin/sh
 #
 #   STET_LIGHT=1         only what "stet submit", "stet status" and friends need: no
 #                        PyTorch and no libraries. Seconds to install, and megabytes.
+#   STET_GRADE_ONLY=1    only what "stet verify" needs to grade scripts (PyTorch, Transformers,
+#                        Safetensors): skips curator libraries and CUDA-only extras (vLLM, Liger).
 #   STET_TORCH_INDEX=... take PyTorch from this wheel index, not the one chosen below.
 #   STET_UPGRADE=1       replacing an install: fetch everything before touching it.
 #                        "stet upgrade", and a running "stet verify", set this.
@@ -1703,11 +1705,15 @@ if [ "${STET_LIGHT:-}" = "1" ] || [ "${STET_NO_TORCH:-}" = "1" ]; then
   say "Installing stet (light: no PyTorch, no libraries)..."
   uv tool install --force --python "$PY" "stet-cli @ $WHEEL"
 else
-  # Which build of PyTorch, and which extras. With an NVIDIA GPU on Linux x86_64, the default
-  # CUDA build and the cuda extra (vLLM, Liger). With an AMD GPU and no NVIDIA one, the ROCm
-  # build without CUDA-only extras. On a Mac the default build uses Metal.
+  # Which build of PyTorch, and which extras. Grade-only machines install only the lean "train"
+  # extra (torch, transformers, safetensors). Full curator machines on NVIDIA Linux x86_64 also
+  # install the "cuda" extra (vLLM, Liger). With an AMD GPU and no NVIDIA one, the ROCm build.
   INDEX="${STET_TORCH_INDEX:-}"
-  EXTRAS="run"
+  if [ "${STET_GRADE_ONLY:-}" = "1" ]; then
+    EXTRAS="train"
+  else
+    EXTRAS="run"
+  fi
   if [ "$(uname -s)" = "Linux" ]; then
     VENDORS="$(cat /sys/class/drm/card*/device/vendor 2>/dev/null || true)"
     HAS_NVIDIA=0
@@ -1718,7 +1724,7 @@ else
       HAS_NVIDIA=1
     fi
     if [ "$HAS_NVIDIA" = "1" ]; then
-      if [ "$(uname -m)" = "x86_64" ]; then
+      if [ "${STET_GRADE_ONLY:-}" != "1" ] && [ "$(uname -m)" = "x86_64" ]; then
         EXTRAS="run,cuda"
       fi
     elif [ -z "$INDEX" ]; then

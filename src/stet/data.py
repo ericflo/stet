@@ -798,31 +798,54 @@ def practice_hours(rnd: Round) -> list[tuple[int, Path]]:
     return [(h, held[h]) for h in choose_hours(rnd.seed, held, int(rnd.season.raw["exam"]["fresh"]["hours"]))]
 
 
+def practice_synthesize(rnd: Round) -> bool:
+    """Whether a local practice round with harvested hours synthesizes fresh reasoning items."""
+    if rnd.kind != "practice" or not rnd.season.raw["exam"].get("reasoning"):
+        return False
+    from .exam.fresh.reason import can_synthesize_locally
+
+    return bool(os.environ.get("STET_SYNTHESIZE_PRACTICE")) and can_synthesize_locally()
+
+
 def practice_key(rnd: Round) -> str:
-    """What names the writing a practice round sits here: "" when it sits none. Harvesting more
-    hours changes which a round is given, and then its exam and its baseline are new ones."""
+    """What names the writing (and synthesis mode) a practice round sits here: "" when it sits none.
+    Harvesting more hours or toggling `STET_SYNTHESIZE_PRACTICE` yields a distinct exam and baseline cache."""
     from .exam.examine import snapshot_name
 
     hours = practice_hours(rnd)
-    return snapshot_name([hashlib.sha256(p.read_bytes()).hexdigest() for _, p in hours]) if hours else ""
+    if not hours:
+        return ""
+    base = snapshot_name([hashlib.sha256(p.read_bytes()).hexdigest() for _, p in hours])
+    if rnd.season.raw["exam"].get("reasoning"):
+        mode = "synth" if practice_synthesize(rnd) else "nosynth"
+        return hashlib.sha256(f"{base}:{mode}".encode()).hexdigest()
+    return base
 
 
 def _practice(rnd: Round, scale: Scale, hours: list[tuple[int, Path]]):
     """A practice round's exam with writing: made as the examiner makes an official round's,
     from hours harvested here, and kept beside the round's corpus, under the season's digest
-    and the hours' name: the season says which parts an exam has, so another season's file is
-    another exam."""
+    and the resolved exam mode/hours key: the season says which parts an exam has, so another
+    season's or synthesis mode's file is another exam."""
     from .exam.examine import assemble, pack_items
     from .exam.farm import unpack_items
-    from .exam.fresh.reason import can_synthesize_locally
 
+    synth = practice_synthesize(rnd)
     path = round_dir(rnd, scale) / f"exam-practice-{rnd.season.digest[:8]}-{practice_key(rnd)[:16]}.jsonl.zst"
     try:
         return unpack_items(path.read_bytes())
     except (OSError, ValueError, zstandard.ZstdError):
         pass
-    synth = bool(os.environ.get("STET_SYNTHESIZE_PRACTICE")) and can_synthesize_locally()
-    items = assemble(rnd, scale, hours, round_dir(rnd, scale) / "examine", log=lambda m: None, measure=False, synthesize=synth)[0]
+    items = assemble(
+        rnd,
+        scale,
+        hours,
+        round_dir(rnd, scale) / "examine",
+        log=lambda m: None,
+        measure=False,
+        synthesize=synth,
+        check_coverage=False,
+    )[0]
     tmp = path.with_name(f"{path.name}.tmp{os.getpid()}")
     try:
         tmp.write_bytes(pack_items(items))
