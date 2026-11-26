@@ -8,23 +8,27 @@ multi-sentence prose reasoning tasks in each document's own language:
   - infer     : multi-detail analytical implication or trade-off synthesis (2-3 sentences)
   - synthesis : declarative lead-in + 2-3 sentence prose synthesis (ZERO '?' or Q:/A: syntax)
 
-Every item is written once at the draw by the pinned Apache-2.0 teacher (`Qwen/Qwen3-8B` at
-greedy `temperature = 0`), receives one shared token-bounded excerpt given identically to both
-teacher and student (reserving headroom so the teacher's closing `PROMPT: ` cue is never
-truncated), wraps prompts across diverse natural templates (independent of task type), preserves
-the immutable harvest document ID (`<task>:<source>:<doc_id>`), checks response language and
-sentence completion, filters verbatim copying from both excerpt and lead-in across whitespace and
-CJK/spaceless scripts, and publishes the teacher's lead-in and answer for every item at settlement.
+Every item is written once at the draw by the pinned Apache-2.0 teacher
+(`thinkingmachines/Inkling-2-Mini` with `reasoning_effort="low"` at greedy `temperature = 0`),
+receives one shared token-bounded excerpt given identically to both teacher and student
+(reserving headroom so closing instructions are never truncated), wraps prompts across diverse
+natural templates (independent of task type), preserves the immutable harvest document ID
+(`<task>:<source>:<doc_id>`), checks response language and sentence completion, filters
+verbatim copying from both excerpt and lead-in across whitespace and CJK/spaceless scripts,
+and publishes the teacher's lead-in and answer for every item at settlement.
 """
 
 from __future__ import annotations
 
+import concurrent.futures as cf
 import gc
 import hashlib
 import json
 import os
 import re
+import threading
 import time
+import urllib.error
 import urllib.request
 from collections import Counter, defaultdict
 from importlib import resources
@@ -47,9 +51,12 @@ ECHO_PROMPT_PREFIX = (
 CJK_LANGS = frozenset({"zh", "ja", "ko"})
 TASK_TYPES = ("explain", "infer", "synthesis")
 
+DEFAULT_TEACHER_MODEL = "thinkingmachines/Inkling-2-Mini"
+DEFAULT_TEACHER_REV = "c9d028302cd0f035fdf8e7e91f089a4ce94d2195"
+DEFAULT_REASONING_EFFORT = "low"
 DEFAULT_MAX_EXCERPT_TOKENS = 380
 DEFAULT_MAX_EXCERPT_CHARS = 1200
-DEFAULT_MAX_NEW_TOKENS = 320
+DEFAULT_MAX_NEW_TOKENS = 1536
 DEFAULT_MIN_KEEP_RATE = 0.50
 TEACHER_MAX_PROMPT_TOKENS = 1400
 
@@ -62,6 +69,15 @@ _SPACELESS_RE = re.compile(
 )
 _NON_WORD_RE = re.compile(r"[\W_]+", re.UNICODE)
 _SENTENCE_END_RE = re.compile(r"[.!?。！？…؟۔।][\"'”’»)\]}」』】]*$")
+_CONTROL_TOKEN_RE = re.compile(r"<think>|</think>|<\||\|>", re.IGNORECASE)
+_INKLING_STOP_TOKENS = (
+    "<|end_message|>",
+    "<|im_end|>",
+    "<|content_thinking|>",
+    "<|content_invoke_tool_json|>",
+    "<|message_",
+    "<|content_",
+)
 
 # Close language equivalence clusters accepted by the response language verifier.
 _LANG_CLUSTERS = (
@@ -394,11 +410,13 @@ def _clean_angle(text: str) -> str:
     return s
 
 
-def build_teacher_prompt(excerpt: str, lang: str, task_type: str) -> str:
-    """Build the teacher prompt from the already-bounded shared `excerpt`.
+def build_user_instruction(excerpt: str, lang: str, task_type: str) -> str:
+    """Build the user instruction message from the already-bounded shared `excerpt`.
 
     Uses explicit two-line field descriptions with ZERO literal `...` placeholders (so the
-    teacher never echoes `PROMPT: ...`) and ends with `PROMPT: ` to begin generation directly.
+    teacher never echoes `PROMPT: ...`). Used directly for `/v1/chat/completions` teachers
+    (such as `thinkingmachines/Inkling-2-Mini`) and wrapped by `build_teacher_prompt` for
+    legacy `/v1/completions` teachers.
     """
     if task_type == "explain":
         inst = (
@@ -427,7 +445,13 @@ def build_teacher_prompt(excerpt: str, lang: str, task_type: str) -> str:
             f"do not copy sentences from the excerpt, never write placeholder ellipses or angle brackets, and finish the last "
             f"sentence with proper punctuation)."
         )
-    return f"<|im_start|>user\n{inst}\n\nExcerpt:\n{excerpt}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\nPROMPT: "
+    return f"{inst}\n\nExcerpt:\n{excerpt}"
+
+
+def build_teacher_prompt(excerpt: str, lang: str, task_type: str) -> str:
+    """Build a raw ChatML completion prompt ending with `PROMPT: ` (for `/v1/completions` teachers)."""
+    user_msg = build_user_instruction(excerpt, lang, task_type)
+    return f"<|im_start|>user\n{user_msg}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\nPROMPT: "
 
 
 def _source_bucket(source: str) -> str:
@@ -651,13 +675,26 @@ def parse_generated_items_detailed(
         pr_raw = p_part.replace("PROMPT:", "", 1).strip().strip('"').strip()
         pr = " ".join(ln.strip() for ln in pr_raw.splitlines() if ln.strip()).strip()
         resp = " ".join(ln.strip() for ln in r_part.strip().splitlines() if ln.strip()).strip()
-        for stop_tok in ("<|im_end|>", "PROMPT:", "Excerpt:"):
+        for stop_tok in (
+            "<|im_end|>",
+            "<|end_message|>",
+            "<|content_thinking|>",
+            "<|content_invoke_tool_json|>",
+            "PROMPT:",
+            "Excerpt:",
+        ):
             if stop_tok in resp:
                 resp = resp.split(stop_tok, 1)[0].strip()
         pr = _clean_angle(pr)
         resp = _clean_angle(resp)
         if "\ufffd" in pr or "\ufffd" in resp or "\ufffd" in d.get("excerpt", ""):
             _drop("broken_utf8", d, gen_txt, pr, resp)
+            continue
+        if _CONTROL_TOKEN_RE.search(pr) or _CONTROL_TOKEN_RE.search(resp):
+            _drop("control_token", d, gen_txt, pr, resp)
+            continue
+        if "prompt:" in pr.lower() or pr.lower().startswith(BAD_PREFIX):
+            _drop("meta_chatter", d, gen_txt, pr, resp)
             continue
         is_cjk = d["lang"] in CJK_LANGS
         min_pr = 6 if is_cjk else 10
@@ -763,6 +800,60 @@ def _entry_revision(entry: dict) -> str:
     return ""
 
 
+def _base_v1_url(url: str) -> str:
+    """Normalize an OpenAI-compatible base URL (with or without `/v1`, `/completions`, or
+    `/chat/completions`) to its `.../v1` base URL."""
+    base = url.strip().rstrip("/")
+    for suffix in ("/chat/completions", "/completions"):
+        if base.endswith(suffix):
+            base = base[: -len(suffix)]
+            break
+    return base if base.endswith("/v1") else f"{base}/v1"
+
+
+def _resolve_reasoning_api(cfg: dict) -> str:
+    """Resolve the reasoning synthesis API mode (`'chat'` or `'completions'`) consistently across
+    `synthesize_reasoning` and `can_synthesize_locally`."""
+    repo = str(cfg.get("model", DEFAULT_TEACHER_MODEL))
+    if "api" in cfg and cfg["api"] is not None:
+        api = str(cfg["api"]).strip().lower()
+    else:
+        api = "chat" if (cfg.get("reasoning_effort") or repo == DEFAULT_TEACHER_MODEL) else "completions"
+    if api not in ("chat", "completions"):
+        raise ValueError(f"unsupported reasoning api {api!r}; expected 'chat' or 'completions'")
+    return api
+
+
+def _normalize_chat_output(text: str) -> str:
+    """Normalize a `/v1/chat/completions` assistant `content` string for `parse_generated_items_detailed`
+    (which prepends `'PROMPT: '`).
+
+    Extracts `<|content_text|>` ahead of `</think>`, truncates at any trailing chat/Inkling
+    control token, rejects unclosed thinking/control tokens, and requires the remaining output
+    to begin with `PROMPT:` so raw chain-of-thought preamble (e.g. if `--reasoning-parser` was
+    omitted) can never leak into a published exam item.
+    """
+    s = (text or "").strip()
+    if not s:
+        return ""
+    if "<|content_text|>" in s:
+        s = s.rsplit("<|content_text|>", 1)[1].strip()
+    elif "</think>" in s:
+        s = s.rsplit("</think>", 1)[1].strip()
+    cut = len(s)
+    for stop_tok in _INKLING_STOP_TOKENS:
+        pos = s.find(stop_tok)
+        if pos != -1 and pos < cut:
+            cut = pos
+    s = s[:cut].strip()
+    if _CONTROL_TOKEN_RE.search(s):
+        return ""
+    m = re.match(r"^\s*PROMPT\s*:\s*", s, flags=re.IGNORECASE)
+    if not m:
+        return ""
+    return s[m.end() :]
+
+
 def _verify_endpoint_model(url: str, repo: str, rev: str, headers: dict[str, str]) -> str:
     """Verify the configured OpenAI-compatible endpoint serves the season's pinned model & revision.
 
@@ -779,10 +870,7 @@ def _verify_endpoint_model(url: str, repo: str, rev: str, headers: dict[str, str
             f"STET_EXAMINER_LLM_MODEL={override!r} does not match the season's pinned reasoning teacher "
             f"{repo!r} (revision {rev})"
         )
-    base = url.rstrip("/")
-    if base.endswith("/completions"):
-        base = base[: -len("/completions")]
-    models_url = f"{base}/models" if base.endswith("/v1") else f"{base}/v1/models"
+    models_url = f"{_base_v1_url(url)}/models"
     req = urllib.request.Request(models_url, headers=headers, method="GET")
     try:
         with urllib.request.urlopen(req, timeout=30) as r:
@@ -848,9 +936,7 @@ def _generate_via_endpoint(
     log=print,
 ) -> list[str]:
     """Generate greedily via an OpenAI-compatible `/v1/completions` server (e.g. vLLM)."""
-    endpoint = url.rstrip("/")
-    if not endpoint.endswith("/completions"):
-        endpoint = endpoint + ("/completions" if endpoint.endswith("/v1") else "/v1/completions")
+    endpoint = f"{_base_v1_url(url)}/completions"
     headers = {"Content-Type": "application/json"}
     if api_key := os.environ.get("STET_EXAMINER_LLM_KEY"):
         headers["Authorization"] = f"Bearer {api_key}"
@@ -875,6 +961,137 @@ def _generate_via_endpoint(
         choices = sorted(data["choices"], key=lambda c: int(c.get("index", 0)))
         outs.extend(c.get("text", "") for c in choices)
     log(f"  reasoning synthesis via {endpoint} ({model_name}): {len(outs)} drafts in {time.time() - t0:.1f}s")
+    return outs
+
+
+def _generate_via_chat_endpoint(
+    user_msgs: list[str],
+    url: str,
+    repo: str,
+    rev: str,
+    *,
+    max_new_tokens: int = DEFAULT_MAX_NEW_TOKENS,
+    temperature: float = 0.0,
+    reasoning_effort: str | None = DEFAULT_REASONING_EFFORT,
+    max_workers: int = 24,
+    log=print,
+) -> list[str]:
+    """Generate via an OpenAI-compatible `/v1/chat/completions` server (e.g. vLLM serving
+    `thinkingmachines/Inkling-2-Mini` with `--reasoning-parser inkling`).
+
+    Sends concurrent requests while preserving input order and failing loudly with retryable
+    `RuntimeError` (never silently substituting empty strings) if the server errors out.
+    """
+    endpoint = f"{_base_v1_url(url)}/chat/completions"
+    headers = {"Content-Type": "application/json"}
+    if api_key := os.environ.get("STET_EXAMINER_LLM_KEY"):
+        headers["Authorization"] = f"Bearer {api_key}"
+    model_name = _verify_endpoint_model(url, repo, rev, headers)
+    effort = str(reasoning_effort).strip() if reasoning_effort is not None else ""
+    abort = threading.Event()
+    err_lock = threading.Lock()
+    first_err: list[Exception] = []
+
+    def _record_abort(exc: Exception) -> Exception:
+        with err_lock:
+            if not first_err:
+                first_err.append(exc)
+        abort.set()
+        return exc
+
+    def _one(idx_msg: tuple[int, str]) -> str:
+        idx, user_msg = idx_msg
+        if abort.is_set():
+            raise RuntimeError("aborted after earlier reasoning synthesis failure")
+        payload: dict = {
+            "model": model_name,
+            "messages": [{"role": "user", "content": user_msg}],
+            "temperature": float(temperature),
+            "top_p": 1.0,
+            "seed": 0,
+            "max_tokens": int(max_new_tokens),
+        }
+        if effort:
+            payload["reasoning_effort"] = effort
+            payload["chat_template_kwargs"] = {"reasoning_effort": effort}
+        raw = json.dumps(payload).encode("utf-8")
+        last_exc: Exception | None = None
+        for attempt in range(4):
+            if abort.is_set():
+                raise RuntimeError("aborted after earlier reasoning synthesis failure")
+            try:
+                req = urllib.request.Request(endpoint, data=raw, headers=headers, method="POST")
+                with urllib.request.urlopen(req, timeout=180) as r:
+                    data = json.loads(r.read())
+                choices = data.get("choices") if isinstance(data, dict) else None
+                if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+                    raise _record_abort(RuntimeError(f"invalid chat completions response for draft {idx}: missing choices"))
+                msg = choices[0].get("message")
+                if not isinstance(msg, dict):
+                    raise _record_abort(RuntimeError(f"invalid chat completions response for draft {idx}: missing message"))
+                content = msg.get("content")
+                if content is None:
+                    content = ""
+                elif not isinstance(content, str):
+                    raise _record_abort(
+                        RuntimeError(f"invalid chat completions content type for draft {idx}: {type(content).__name__}")
+                    )
+                return _normalize_chat_output(content)
+            except urllib.error.HTTPError as exc:
+                err_body = ""
+                try:
+                    err_body = exc.read(300).decode("utf-8", "replace").strip()
+                except Exception:
+                    pass
+                finally:
+                    try:
+                        exc.close()
+                    except Exception:
+                        pass
+                detail = f"HTTP {exc.code}: {err_body}" if err_body else f"HTTP {exc.code}: {exc.reason}"
+                # Non-retryable 4xx (except 408 timeout / 429 rate-limit): fail fast across all workers.
+                if 400 <= exc.code < 500 and exc.code not in (408, 429):
+                    raise _record_abort(
+                        RuntimeError(
+                            f"reasoning chat synthesis rejected draft {idx} at {endpoint} ({model_name}): {detail}"
+                        )
+                    ) from exc
+                last_exc = RuntimeError(detail)
+                if attempt < 3:
+                    abort.wait(2.0 * (attempt + 1))
+            except Exception as exc:
+                if abort.is_set():
+                    raise
+                last_exc = exc
+                if attempt < 3:
+                    abort.wait(2.0 * (attempt + 1))
+        raise _record_abort(
+            RuntimeError(f"reasoning chat synthesis failed on draft {idx} at {endpoint} ({model_name}): {last_exc}")
+        ) from last_exc
+
+    t0 = time.time()
+    workers = max(1, min(int(max_workers), len(user_msgs)))
+    outs = [""] * len(user_msgs)
+    ex = cf.ThreadPoolExecutor(max_workers=workers)
+    try:
+        fut_to_idx = {ex.submit(_one, pair): pair[0] for pair in enumerate(user_msgs)}
+        for fut in cf.as_completed(fut_to_idx):
+            outs[fut_to_idx[fut]] = fut.result()
+    except BaseException:
+        abort.set()
+        ex.shutdown(wait=True, cancel_futures=True)
+        with err_lock:
+            root = first_err[0] if first_err else None
+        if root is not None:
+            raise root from None
+        raise
+    else:
+        ex.shutdown(wait=True)
+    eff_note = f", effort={effort}" if effort else ""
+    log(
+        f"  reasoning synthesis via {endpoint} ({model_name}{eff_note}): "
+        f"{len(outs)} drafts in {time.time() - t0:.1f}s"
+    )
     return outs
 
 
@@ -971,8 +1188,8 @@ def _generate_local_gpu(
 
     if not torch.cuda.is_available():
         raise RuntimeError(
-            "synthesizing Season 3 reasoning exam items requires a CUDA/ROCm GPU (18 GB+) "
-            "or STET_EXAMINER_LLM_URL pointing at a Qwen3-8B server"
+            f"synthesizing Season 3 reasoning exam items requires a CUDA/ROCm GPU (18 GB+) "
+            f"or STET_EXAMINER_LLM_URL pointing at a pinned {repo}@{rev} server"
         )
     t0 = time.time()
     snapshot_download(repo, revision=rev)
@@ -1013,8 +1230,10 @@ def synthesize_reasoning(
 
     target = int(cfg.get("items", 640))
     max_ov = float(cfg.get("max_ngram_overlap", 0.50))
-    repo = str(cfg.get("model", "Qwen/Qwen3-8B"))
-    rev = str(cfg.get("revision", "b968826d9c46dd6066d109eabc6255188de91218"))
+    repo = str(cfg.get("model", DEFAULT_TEACHER_MODEL))
+    rev = str(cfg.get("revision", DEFAULT_TEACHER_REV))
+    api = _resolve_reasoning_api(cfg)
+    reasoning_effort = cfg.get("reasoning_effort", DEFAULT_REASONING_EFFORT if api == "chat" else None)
     max_ex_toks = int(cfg.get("max_excerpt_tokens", DEFAULT_MAX_EXCERPT_TOKENS))
     max_ex_chars = int(cfg.get("max_excerpt_chars", DEFAULT_MAX_EXCERPT_CHARS))
     max_new = int(cfg.get("max_new_tokens", DEFAULT_MAX_NEW_TOKENS))
@@ -1024,17 +1243,38 @@ def synthesize_reasoning(
     selected = select_source_docs(docs, seed, target=target, shares=shares, max_excerpt_chars=max_ex_chars)
     if not selected:
         return []
+    url = os.environ.get("STET_EXAMINER_LLM_URL", "").strip()
+    if api == "chat" and not url:
+        raise RuntimeError(
+            f"synthesizing reasoning items with {repo}@{rev} (api='chat') requires "
+            f"STET_EXAMINER_LLM_URL pointing at an OpenAI-compatible /v1/chat/completions server "
+            f"(e.g. vllm serve {repo} --revision {rev} --served-model-name {repo}@{rev} "
+            f"--reasoning-parser inkling --max-model-len 4096)"
+        )
     # Bound every document's excerpt ONCE with the pinned teacher tokenizer so both teacher and
-    # student see the exact same excerpt and no teacher prompt can ever overflow or lose `PROMPT: `.
+    # student see the exact same excerpt and no teacher prompt can ever overflow.
     tok = _load_teacher_tokenizer(repo, rev, required=True)
     selected = apply_token_budget(selected, tok, max_tokens=max_ex_toks, max_chars=max_ex_chars)
-    prompts = [build_teacher_prompt(d["excerpt"], d["lang"], d["task_type"]) for d in selected]
-    if url := os.environ.get("STET_EXAMINER_LLM_URL"):
-        gens = _generate_via_endpoint(
-            prompts, url, repo, rev, max_new_tokens=max_new, temperature=temp, log=log
+    if api == "chat":
+        user_msgs = [build_user_instruction(d["excerpt"], d["lang"], d["task_type"]) for d in selected]
+        gens = _generate_via_chat_endpoint(
+            user_msgs,
+            url,
+            repo,
+            rev,
+            max_new_tokens=max_new,
+            temperature=temp,
+            reasoning_effort=reasoning_effort,
+            log=log,
         )
     else:
-        gens = _generate_local_gpu(prompts, repo, rev, max_new_tokens=max_new, log=log)
+        prompts = [build_teacher_prompt(d["excerpt"], d["lang"], d["task_type"]) for d in selected]
+        if url:
+            gens = _generate_via_endpoint(
+                prompts, url, repo, rev, max_new_tokens=max_new, temperature=temp, log=log
+            )
+        else:
+            gens = _generate_local_gpu(prompts, repo, rev, max_new_tokens=max_new, log=log)
     items, dropped, drop_records = parse_generated_items_detailed(selected, gens, max_ngram_overlap=max_ov)
     if drops_path is not None:
         dp = Path(drops_path)
@@ -1073,10 +1313,21 @@ def synthesize_reasoning(
     return items
 
 
-def can_synthesize_locally() -> bool:
-    """Whether this machine can synthesize fresh reasoning items (GPU or configured endpoint)."""
-    if os.environ.get("STET_EXAMINER_LLM_URL"):
+def can_synthesize_locally(season=None) -> bool:
+    """Whether this machine can synthesize fresh reasoning items for `season` (configured endpoint
+    or, for legacy local-transformers seasons, an 18 GB+ CUDA/ROCm GPU)."""
+    if os.environ.get("STET_EXAMINER_LLM_URL", "").strip():
         return True
+    try:
+        if season is None:
+            from ...spec import load_season
+
+            season = load_season()
+        rcfg = (season.raw.get("exam") or {}).get("reasoning") or {}
+        if _resolve_reasoning_api(rcfg) == "chat":
+            return False
+    except Exception:
+        pass
     try:
         import torch
 

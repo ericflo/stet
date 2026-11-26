@@ -75,7 +75,7 @@
     }
   },
   "exam": {
-    "about": "100% fresh, zero static benchmarks, zero synthetic templates, zero raw web-text perplexity. The official score is 100% fresh harvest-derived multi-sentence reasoning (explain, infer, synthesis — one-third each, written once at the draw at temp=0 by pinned Qwen/Qwen3-8B from three fresh hours of the day before, with varied wrappers and an anti-copying filter, and published in full at settlement), all sat after a brief disjoint multilingual SFT probe. Four fresh human-written twin-context comprehension kinds (reference, news, technical, conversation) from those same three hours are sat alongside at 0% score weight as published diagnostic telemetry until a human-written measure passes DataDecide.",
+    "about": "100% fresh, zero static benchmarks, zero synthetic templates, zero raw web-text perplexity. The official score is 100% fresh harvest-derived multi-sentence reasoning (explain, infer, synthesis — one-third each, written once at the draw at temp=0 by pinned thinkingmachines/Inkling-2-Mini with reasoning_effort=low from three fresh hours of the day before, with varied wrappers and an anti-copying filter, and published in full at settlement), all sat after a brief disjoint multilingual SFT probe. Four fresh human-written twin-context comprehension kinds (reference, news, technical, conversation) from those same three hours are sat alongside at 0% score weight as published diagnostic telemetry until a human-written measure passes DataDecide.",
     "generator_version": 11,
     "per_corner": 0,
     "more": {},
@@ -88,13 +88,15 @@
       "per_corner": 2
     },
     "reasoning": {
-      "model": "Qwen/Qwen3-8B",
-      "revision": "b968826d9c46dd6066d109eabc6255188de91218",
+      "model": "thinkingmachines/Inkling-2-Mini",
+      "revision": "c9d028302cd0f035fdf8e7e91f089a4ce94d2195",
+      "api": "chat",
+      "reasoning_effort": "low",
       "items": 640,
       "max_ngram_overlap": 0.5,
       "max_excerpt_tokens": 380,
       "max_excerpt_chars": 1200,
-      "max_new_tokens": 320,
+      "max_new_tokens": 1536,
       "min_keep_rate": 0.5,
       "temperature": 0.0
     },

@@ -804,7 +804,7 @@ def practice_synthesize(rnd: Round) -> bool:
         return False
     from .exam.fresh.reason import can_synthesize_locally
 
-    return bool(os.environ.get("STET_SYNTHESIZE_PRACTICE")) and can_synthesize_locally()
+    return bool(os.environ.get("STET_SYNTHESIZE_PRACTICE")) and can_synthesize_locally(rnd.season)
 
 
 def practice_key(rnd: Round) -> str:

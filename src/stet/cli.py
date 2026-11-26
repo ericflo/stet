@@ -264,7 +264,7 @@ def _with_baseline(result: dict, rnd, scale, device, out: Out, skip: bool):
                 out.line(
                     "note",
                     f"partial practice exam: missing {', '.join(missing_groups)} "
-                    "(set STET_SYNTHESIZE_PRACTICE=1 with an 18 GB+ GPU or STET_EXAMINER_LLM_URL, "
+                    "(set STET_SYNTHESIZE_PRACTICE=1 with STET_EXAMINER_LLM_URL pointing at the pinned teacher server, "
                     "or practice without local harvested hours to sit the full bundled practice pack)",
                 )
     return base

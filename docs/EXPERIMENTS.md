@@ -588,8 +588,53 @@ GPU scoring)*.
      DataDecide 1B agreement `49/66 & 46/66`, `11/11` filtered-vs-unfiltered separation, `fineweb2`
      beating `mimic` by `2×` on Draw B, strong penalty on monolingual `english` and synthetic
      `adv_splice_qa`) and its known caveats (educational-prose lean toward `FineWeb-Edu` and strong
-     CCNet-head low-PPL scores). Designing an exam/student pair whose *between-curator* separation
-     is predominantly excerpt-grounded remains a key Season 4 target.
+     CCNet-head low-PPL scores) — motivating the head-to-head teacher benchmark below.
+   - **Teacher model head-to-head (`Qwen/Qwen3-8B` vs `Qwen/Qwen3.5-9B` vs `thinkingmachines/Inkling-2-Mini`,
+     4× RTX 5090, official CUDA `standard` 65.5M tokens, exact Draw B 640 docs & `decontam.seen()` parity):**
+     To test whether a newer Apache-2.0 teacher fixes `Qwen3-8B`'s `FineWeb-Edu` textbook lean and
+     `adv_ppl_qwen06b` perplexity-pruning edge, we synthesized Draw B (`s3-o00003`) reasoning exams
+     from the **exact same 640 Draw B source documents across 43 languages** with `Qwen/Qwen3.5-9B`
+     (`c2022362`, both `enable_thinking=False` and `enable_thinking=True`) and
+     `thinkingmachines/Inkling-2-Mini` (`c9d02830`, both `reasoning_effort="none"` and
+     `reasoning_effort="low"`), applied exact `stet.exam.decontam.seen()` against the Draw B corpus,
+     and evaluated **16 official CUDA `standard` (`65.5M`-token) `ERNIE-4.5-0.3B` students**
+     (4 multilingual/adversarial streams + all 12 DataDecide 1B recipes, all bit-identical
+     `init_sha256 = 5bd1d5ce4547697e...`) on every exam under both original (`orig`) and
+     within-`(lang, task)` rotated excerpts (`rot`). (`Qwen/Qwen3.5-9B` with `enable_thinking=True`
+     has no `reasoning_effort` knob and burned `>2,048` CoT tokens per 2-sentence item even under
+     official anti-loop sampling `temp=0.6, presence_penalty=1.5`, yielding `0/640` kept drafts.)
+
+| Teacher (exact same 640 Draw B docs) | Synth Wall Time | Kept / 640 (Post-Decontam) | Langs | DD 1B Pairs (`orig` / `rot`) | DD 1B `2pt+` (`orig` / `rot`) | DD 1B `ρ` (`orig`) | 3% Trap | `FineWeb-Edu` Rank *(true `#7`)* | Predicted Top-1 *(1B Shortfall)* |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| `Qwen/Qwen3-8B` (prior S3) | `1213s` *(AMD 8060S)* | `617` (`96.4%` → `611`) | `39` | `54/66` / `51/66` | `30/31` / `26/31` | `+0.7762` | `#11/12` | `#1/12` (`+0.0198`) | `fineweb-edu` (`+1.95pp`) |
+| `Qwen/Qwen3.5-9B` (`nothink`) | `58.6s` *(1× 5090)* | `612` (`95.6%` → `606`) | `42` | `58/66` / `51/66` | `31/31` / `28/31` | `+0.8392` | `#11/12` | `#1/12` (`+0.0072`) | `fineweb-edu` (`+1.95pp`) |
+| `Inkling-2-Mini` (`effort="none"`, `t=0.6`) | `246.6s` *(2× 5090)* | `621` (`97.0%` → `614`) | `40` | `55/66` / `49/66` | `30/31` / `27/31` | `+0.8042` | `#11/12` | `#7/12` (`−0.0067`) | `dclm-baseline-qc-7p-fw2` (`+0.14pp`) |
+| **`Inkling-2-Mini` (`effort="low"`, `t=0.0`)** | `562.2s` *(1× 5090)* | **`626` (`97.8%` → `617`)** | `41` | **`58/66`** / `52/66` | **`31/31`** / `27/31` | **`+0.8601`** | **`#11/12`** | **`#8/12`** (`−0.0083`) | **`dclm-baseline-qc-20p` (`0.00pp`)** |
+
+| Teacher (43-lang Draw B ML + adversarial + rotated control) | `fineweb2` | `adv_ppl_qwen06b` (`%` of `fw2`) | `mimic` (`%` of `fw2`) | `fw2 − adv` | Abs Drop on Rot (`u / fw2`) | `adv − fw2` (`orig` → `rot`) | Per-Pillar DD `exp/inf/syn /66` |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `Qwen/Qwen3-8B` | `+0.05424` | `+0.07458` (`137.5%`) | `+0.02692` (`49.6%`) | `−0.02034` | `+0.139 / +0.136` | `+0.02034 → +0.01930` (`94.9%`) | `48 / 48 / 50` |
+| `Qwen/Qwen3.5-9B` (`nothink`) | `+0.05332` | `+0.06525` (`122.4%`) | `+0.03155` (`59.2%`) | `−0.01193` | `+0.148 / +0.141` | `+0.01193 → +0.00695` (`58.2%`) | `54 / 52 / 50` |
+| `Inkling-2-Mini` (`effort="none"`) | `+0.04955` | `+0.05248` (`105.9%`) | `+0.02743` (`55.4%`) | `−0.00293` | `+0.139 / +0.134` | `+0.00293 → −0.00037` | `55 / 50 / 52` |
+| **`Inkling-2-Mini` (`effort="low"`)** | `+0.04710` | **`+0.04820` (`102.3%`)** | `+0.02922` (`62.0%`) | **`−0.00110`** | **`+0.211 / +0.205` (+51.2% / +50.2%)** | **`+0.00110 → −0.00143`** | **`58 / 54 / 50`** |
+
+     **What it decided:** Season 3 switches its pinned reasoning teacher to
+     **`thinkingmachines/Inkling-2-Mini@c9d02830`** (`api: "chat"`, `reasoning_effort: "low"`,
+     `max_new_tokens: 1536`, `temperature: 0.0`), served via vLLM (`/v1/chat/completions` with
+     `--reasoning-parser inkling`, `~$0.10/round` on a 1× RTX 5090):
+     1. *Eliminates `FineWeb-Edu` textbook bias:* drops `FineWeb-Edu` from `#1` (both Qwen
+        teachers) to `#8` (right beside its true `#7` 1B OLMES rank) and selects the **exact
+        true `#1` recipe (`dclm-baseline-qc-20p`, `0.00pp` shortfall)** with `58/66` (`87.9%`),
+        `31/31` (`100%`) on `2pt+`, and `ρ = +0.8601`.
+     2. *Slashes Qwen-family perplexity-pruning bias by `94.6%`:* shrinks `adv_ppl_qwen06b −
+        fineweb2` from `+0.02034` (`137.5%`) to `+0.00110` (`102.3%`, practically tied with
+        heuristic `fineweb2`, and flipping to `−0.00143` under excerpt rotation).
+     3. *Deeper excerpt grounding & real ranking sensitivity:* raises absolute excerpt-rotation
+        drop by `+51.2%` on `unedited` (`+0.1394 → +0.2109 bpb`) and `+50.2%` on `fineweb2`
+        (`+0.1365 → +0.2049 bpb`), and across every teacher rotating excerpts drops
+        DataDecide 1B ordering by `4.5–10.6pp` (`58/66 → 52/66`, `31/31 → 27/31` on
+        `Inkling-2-Mini`), though `fineweb2 − unedited` on 43-language Draw B still retains
+        `110.1%` under rotation so full between-curator excerpt grounding remains a Season 4 goal.
    - **Cross-card hardware parity (`5090` vs `4090` vs `3090` at `standard` 65.5M tokens; `5090` vs `AMD 8060S` at `nano`/`micro`; final pooled-trim `code_share = 0.15` scorer):**
      Training the exact archived `fineweb2.jsonl` from the Draw B seed produced **bit-identical
      `init_sha256` (`5bd1d5ce4547697e...`) across all four GPUs** and **bit-identical
@@ -613,15 +658,16 @@ GPU scoring)*.
      pass, and experienced a 1-in-6 transient `FloatingPointError` divergence under card contention,
      Season 3 restricts official verifying (grading and, since runners must earn 5 agreed official
      grades first, running curators) to NVIDIA CUDA (`grade_backends: ["cuda"]`), while
-     retaining AMD ROCm for local practice (`stet run`) and the `$0/round` production examiner.
+     retaining AMD ROCm for local practice (`stet run`).
    - **Per-round compute & cost vs Season 2:**
      At `standard` scale (`65.5M` tokens), one grading pass takes `~19.5 min` on an RTX 5090
      (`~$0.15` at `$0.45/h`), `~30 min` on an RTX 4090 (`~$0.22` at `$0.43/h`), or `~55 min` on an
      RTX 3090 (`~$0.20` at `$0.22/h`), versus `$0.041–$0.046` per training in Season 2. A typical
      10-script Season 3 round runs 12 trainings (`10` scripts + `2` baselines) = **`~$1.80` of
-     grading compute** (vs `~$0.55` in Season 2) plus curator runs and boot overhead (**`~$3–$5`
-     all-in per round**, ~`2.5–3×` Season 2's `$1.57–$2.16`, while on-demand draws keep idle days
-     at `$0/day` and the local AMD examiner costs `$0/round`).
+     grading compute** (vs `~$0.55` in Season 2) plus `~$0.10/round` for the 1× RTX 5090
+     `Inkling-2-Mini` examiner (`~10 min` at `$0.60/h`) and curator runs/boot overhead
+     (**`~$3–$5` all-in per round**, ~`2.5–3×` Season 2's `$1.57–$2.16`, while on-demand draws
+     keep idle days at `$0/day`).
 
 ## Still to measure
 

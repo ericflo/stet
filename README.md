@@ -49,21 +49,23 @@ stet service install      # leave it running: starts with the machine, upgrades 
 - **An exam nobody can know.** Each round's exam is **100% fresh** and made at its draw,
   with zero static benchmarks, zero synthetic templates, and zero raw web perplexity. The
   official score is **100% fresh harvest-derived reasoning** (`explain`, `infer`, `synthesis`,
-  one-third each, written once at the draw at `temp=0` by pinned `Qwen/Qwen3-8B` from three
-  hours of the day before, picked by the draw, weighted by every language's share of the crawl,
-  with varied wrappers and an anti-copying filter, and published in full at settlement). Four
-  fresh human-written twin-context comprehension kinds from those same three hours are sat and
-  shown beside the score at `0%` weight as published diagnostics until a human-written measure
-  passes DataDecide. Every student (`ERNIE-4.5-0.3B`, bottom half frozen, 65.5M tokens, ≤10 GiB
-  VRAM so 12 GB+ NVIDIA GPUs can grade) sits the exam after a fixed 1-epoch commercial-permissive
-  multilingual SFT probe. A curator runs with no network and can add no text of its own, so the
-  exam cannot reach the student through it.
+  one-third each, written once at the draw at `temp=0` by pinned `thinkingmachines/Inkling-2-Mini`
+  with `reasoning_effort=low` from three hours of the day before, picked by the draw, weighted by
+  every language's share of the crawl, with varied wrappers and an anti-copying filter, and
+  published in full at settlement). Four fresh human-written twin-context comprehension kinds from
+  those same three hours are sat and shown beside the score at `0%` weight as published
+  diagnostics until a human-written measure passes DataDecide. Every student (`ERNIE-4.5-0.3B`,
+  bottom half frozen, 65.5M tokens, ≤10 GiB VRAM so 12 GB+ NVIDIA GPUs can grade) sits the exam
+  after a fixed 1-epoch commercial-permissive multilingual SFT probe. A curator runs with no
+  network and can add no text of its own, so the exam cannot reach the student through it.
 - **Only what tells curators apart.** The scored exam is validated before the season for
   multi-seed stability, resistance to QA-spam and over-filtering, and agreement with published
-  1B pretraining rankings (DataDecide: 49/66 and 46/66 across two independent draws); parts
+  1B pretraining rankings (DataDecide 1B with `Inkling-2-Mini`: **`58/66` (`87.9%`), `31/31`
+  (`100%`) on `2pt+` pairs, Spearman `ρ = +0.860`, exact `#1` recipe `dclm-baseline-qc-20p`
+  (`0.00pp` shortfall)**; earlier 2-draw `Qwen3-8B` baseline: `49/66` and `46/66`); parts
   that did not clear DataDecide (the four human-written twin-context kinds) carry `0%` weight
   and are shown only as diagnostics. See [Experiments](docs/EXPERIMENTS.md) for all validation
-  numbers, including known biases and perplexity-pruning baselines.
+  numbers, including the head-to-head teacher comparison and perplexity-pruning baselines.
 - **Copies only.** Everything the student reads is copied byte for byte from the round's
   corpus. A script holds no text of its own.
 - **Checked by other people.** Two volunteers run each curator, and

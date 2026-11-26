@@ -12,8 +12,8 @@ seed), is trained on raw web text for a fixed number of tokens (65.5M at officia
 scale), run through a short fixed multilingual fine-tuning probe, and then sits a 100%-fresh
 **exam**. The exam is made right after the round is drawn: the official score is 100% fresh
 harvest-derived reasoning (`explain`, `infer`, `synthesis`, one-third each) written once at
-the draw by the season's pinned teacher model (`Qwen/Qwen3-8B@b968826d`, `temperature=0`)
-from three hours of writing people published the day before, which the draw picks, and
+the draw by the season's pinned teacher model (`thinkingmachines/Inkling-2-Mini@c9d02830`,
+`reasoning_effort=low`, `temperature=0`) from three hours of writing people published the day before, which the draw picks, and
 published in full at settlement. Four fresh human-written twin-context comprehension kinds
 from those same three hours are sat and shown beside each entry's score at `0%` weight as
 published diagnostic telemetry. There are zero static benchmarks, zero synthetic templates, and
@@ -94,8 +94,8 @@ nothing is waiting.
    cannot pick a favourable drand round either.
 3. **Edit.** Two volunteers each run every curator, in a sandbox, with a time limit. Each
    run writes an edit script.
-4. **Exam.** The round's exam is built right after the draw (typically ~20–30 minutes on
-   the organisers' examiner, while curators run and graders can begin training). The organisers'
+4. **Exam.** The round's exam is built right after the draw (typically ~11–13 minutes using
+   the organisers' `Inkling-2-Mini` examiner, while curators run and graders can begin training). The organisers'
    examiner harvests what people publish, every hour of the clock, and tells the server each
    harvest's hash as it is made. The draw's seed picks three of the day's hours, and the exam
    is made from exactly those and posted with its hash (see [the exam](#the-exam)). If an
@@ -182,7 +182,7 @@ Inside each group, every row below counts the same.
 
 | | | What it asks | Where it comes from |
 |---|---|---|---|
-| **Reasoning (100% of score)** | Explain | Multi-sentence causal and mechanism explanation in the excerpt's own language | Written once at draw (`temp=0`, pinned `Qwen/Qwen3-8B@b968826d`) from the 3 fresh hours; published in full at settlement |
+| **Reasoning (100% of score)** | Explain | Multi-sentence causal and mechanism explanation in the excerpt's own language | Written once at draw (`temp=0`, `effort=low`, pinned `thinkingmachines/Inkling-2-Mini@c9d02830`) from the 3 fresh hours; published in full at settlement |
 | | Infer | Multi-sentence analytical implications and trade-offs in the excerpt's own language | Written once at draw from the 3 fresh hours; published in full at settlement |
 | | Synthesis | Declarative prose synthesis of the excerpt's main point and rationale (zero Q/A syntax) | Written once at draw from the 3 fresh hours; published in full at settlement |
 | **Comprehension (0% diagnostic)** | Reference | Same continuation under real vs wrong openings of encyclopedia articles (same source & language) | New and extended Wikipedia articles |
@@ -206,7 +206,7 @@ holds is dropped from the exam.
 
 **The reasoning items** (`explain`, `infer`, `synthesis`) are written once at the draw from
 a stratified sample of those exact same three fresh hours by the season's pinned teacher model
-(`Qwen/Qwen3-8B@b968826d`, greedy `temperature=0`), using six varied natural wrappers (`synthesis`
+(`thinkingmachines/Inkling-2-Mini@c9d02830`, `reasoning_effort=low`, greedy `temperature=0`), using six varied natural wrappers (`synthesis`
 has no `?` or `Q:/A:` markers), a `<50%` 5-gram verbatim-copying filter against both the excerpt
 and the prompt lead-in, and response language/completeness checks. Because floating-point GPU
 inference at `temperature=0` is not guaranteed bit-reproducible across different hardware or batch
@@ -218,15 +218,17 @@ or response matches the round's training corpus is dropped.
 the table, and no other. Before the season, every part is validated for multi-seed stability,
 resistance to QA-spam and over-filtering, and agreement with 1B pretraining rankings
 (DataDecide). In Season 3, the combined three-pillar reasoning score (`explain`, `infer`,
-`synthesis`) cleared DataDecide across two independent draws (`49/66` on Draw 1, `46/66` on
-Draw 2, `47/66` 2-draw combined; per-pillar: `explain` `49/66` & `52/66`, `infer` `47/66` &
-`47/66`, `synthesis` `45/66` on Draw 1 with 80 English items vs `34/66` on Draw 2 where a
-pre-fix placeholder bug left only 8 English items — fixed before launch, giving 47 English
-synthesis items on Draw B) and carries **100% of the official score**, while the four
-human-written twin-context pillars (`24/66` and `34/66`, and blind to missing non-English
-training data) carry **0% weight** and are sat and published alongside the score purely as
-diagnostic telemetry until a human-written measure passes DataDecide (see
-[Experiments](EXPERIMENTS.md)).
+`synthesis`) cleared DataDecide across two independent draws with the initial `Qwen3-8B` baseline
+(`49/66` on Draw 1, `46/66` on Draw 2, `54/66` on Draw B), and switching to the pinned
+`thinkingmachines/Inkling-2-Mini` (`reasoning_effort=low`) teacher raised Draw B DataDecide
+agreement to **`58/66` (`87.9%`), `31/31` (`100.0%`) on `2pt+` pairs, Spearman `ρ = +0.8601`,
+exact `#1` recipe `dclm-baseline-qc-20p` (`0.00pp` shortfall)** (per-pillar: `explain 58/66`,
+`infer 54/66`, `synthesis 50/66`), while dropping `FineWeb-Edu` from `#1` to `#8` (true `#7`) and
+slashing `adv_ppl_qwen06b`'s margin over `fineweb2` by `94.6%`. The three reasoning pillars carry
+**100% of the official score**, while the four human-written twin-context pillars (`24/66` and
+`34/66`, and blind to missing non-English training data) carry **0% weight** and are sat and
+published alongside the score purely as diagnostic telemetry until a human-written measure passes
+DataDecide (see [Experiments](EXPERIMENTS.md)).
 
 **The score of an item** is measured in **bits per byte** everywhere:
 - on fresh comprehension (`kind="context"`), each article is split cleanly on a sentence or
@@ -237,9 +239,9 @@ diagnostic telemetry until a human-written measure passes DataDecide (see
 - on fresh harvest-derived reasoning (`kind="answer"`), how likely the student finds the
   multi-sentence explanation, inference, or synthesis given the excerpt and prompt (see
   [Experiments](EXPERIMENTS.md) for the rotated-excerpt control showing that while absolute NLL
-  depends strongly on the excerpt [`~0.14 bpb`], between-curator differences at `65.5M` tokens on
-  frozen-bottom `ERNIE-4.5-0.3B` are driven primarily by prompt-conditioned multilingual
-  answer-prose modeling).
+  depends strongly on the excerpt (`~0.21 bpb` under `Inkling-2-Mini`, `~0.14 bpb` under the
+  prior `Qwen3-8B` baseline), between-curator differences at `65.5M` tokens on frozen-bottom
+  `ERNIE-4.5-0.3B` remain heavily driven by prompt-conditioned multilingual answer-prose modeling).
 An item's bits are never put over fewer than 16 bytes, so a short answer never dominates a
 paragraph. The exam's writing has the white space of the crawl's own text: one space
 between words, one line end between lines, no empty lines and no tabs.
@@ -609,7 +611,7 @@ script with `stet score`.
   code and tells the server each harvest's hash before any round can be given it
   (`/api/v1/harvests`); the draw then picks the hours, so no harvest can be made to suit a round
   or a curator. For the scored reasoning items, the examiner runs the pinned teacher model
-  (`Qwen/Qwen3-8B@b968826d`, `temperature=0`) once at the draw; because GPU generation is not
+  (`thinkingmachines/Inkling-2-Mini@c9d02830`, `reasoning_effort=low`, `temperature=0`) once at the draw; because GPU generation is not
   guaranteed bit-reproducible across different hardware or batch sizes, every generated teacher
   prompt, response, wrapper ID, and source-excerpt hash is published in full when the round
   settles, alongside the exact `items_digest` every grader sat. Anyone can check which hours the

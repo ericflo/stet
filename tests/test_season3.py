@@ -1756,7 +1756,7 @@ def test_practice_cache_tracks_synthesis_mode_and_third_party_notices_shipped(tm
     has_torch = importlib.util.find_spec("torch") is not None
     pipeline = importlib.import_module("stet.pipeline") if has_torch else None
 
-    monkeypatch.setattr("stet.exam.fresh.reason.can_synthesize_locally", lambda: True)
+    monkeypatch.setattr("stet.exam.fresh.reason.can_synthesize_locally", lambda *a, **k: True)
     monkeypatch.delenv("STET_SYNTHESIZE_PRACTICE", raising=False)
     k_off = data.practice_key(rnd)
     b_off = pipeline.baseline_path(rnd, scale, types.SimpleNamespace(type="cpu")) if pipeline else None
@@ -2785,5 +2785,279 @@ def test_review9_remote_examiner_requires_verified_revision(monkeypatch):
     mock_models(None)
     with pytest.raises(RuntimeError, match=r"serves \[\]"):
         reason._verify_endpoint_model("http://127.0.0.1:8000/v1", repo, rev, {})
+
+
+def test_inkling2_chat_teacher_config_and_endpoint(monkeypatch):
+    """Season 3 pins thinkingmachines/Inkling-2-Mini (api='chat', reasoning_effort='low',
+    max_new_tokens=1536, temperature=0.0), normalizes URLs & chat outputs without leaking CoT or
+    control tokens, fails fast on 4xx & aborts workers on error, and requires STET_EXAMINER_LLM_URL."""
+    import io
+    import re
+    import threading
+    import urllib.error
+    import urllib.request
+
+    from stet.exam.fresh import reason
+
+    s3 = load_season("s3")
+    rcfg = s3.raw["exam"]["reasoning"]
+    assert rcfg["model"] == "thinkingmachines/Inkling-2-Mini"
+    assert rcfg["revision"] == "c9d028302cd0f035fdf8e7e91f089a4ce94d2195"
+    assert rcfg["api"] == "chat"
+    assert rcfg["reasoning_effort"] == "low"
+    assert rcfg["max_new_tokens"] == 1536
+    assert rcfg["temperature"] == 0.0
+
+    # THIRD_PARTY_NOTICES.md credits Inkling-2-Mini under Apache License 2.0.
+    notices = (Path(__file__).resolve().parents[1] / "src/stet/exam/data/THIRD_PARTY_NOTICES.md").read_text()
+    assert "thinkingmachines/Inkling-2-Mini" in notices and "Apache License 2.0" in notices
+
+    # 1. URL normalization handles whitespace, bare host, /v1, /v1/completions, and /v1/chat/completions.
+    for raw_url in (
+        "  http://127.0.0.1:8000  ",
+        "http://127.0.0.1:8000/",
+        "http://127.0.0.1:8000/v1",
+        "http://127.0.0.1:8000/v1/completions",
+        "http://127.0.0.1:8000/v1/chat/completions",
+    ):
+        assert reason._base_v1_url(raw_url) == "http://127.0.0.1:8000/v1"
+
+    # 2. Chat output normalization: strips valid wrappers & trailing Inkling blocks, and REJECTS
+    #    any unclosed CoT, remaining control tokens, or raw preamble before PROMPT:.
+    assert reason._normalize_chat_output("  PROMPT: Why?\nRESPONSE: Because.") == "Why?\nRESPONSE: Because."
+    assert reason._normalize_chat_output("<think>secret</think>\nPROMPT: Why?\nRESPONSE: Because.") == "Why?\nRESPONSE: Because."
+    assert (
+        reason._normalize_chat_output(
+            "<|content_thinking|>draft<|content_text|>PROMPT: Why?\nRESPONSE: Because.<|content_thinking|>more"
+        )
+        == "Why?\nRESPONSE: Because."
+    )
+    assert (
+        reason._normalize_chat_output(
+            "<|content_text|>PROMPT: Why?\nRESPONSE: Because.<|content_invoke_tool_json|>{}"
+        )
+        == "Why?\nRESPONSE: Because."
+    )
+    # `<|content_text|>` takes precedence over `</think>`, and any remaining `<think>`/`</think>` is rejected cleanly.
+    assert reason._normalize_chat_output("<think>unclosed PROMPT: Why?\nRESPONSE: Because.") == ""
+    assert reason._normalize_chat_output("<|content_thinking|>unclosed PROMPT: Why?\nRESPONSE: Because.") == ""
+    assert reason._normalize_chat_output("Let me think carefully first. PROMPT: Why?\nRESPONSE: Because.") == ""
+    assert reason._normalize_chat_output("<|content_text|>PROMPT: Why?\nRESPONSE: See </think> tag.") == ""
+    assert reason._normalize_chat_output("") == ""
+
+    # Parser-level defense-in-depth rejects control tokens and CoT preamble in `pr`/`resp`.
+    sample_doc = [{
+        "source": "ccnews", "id": "guard-1", "lang": "en", "task_type": "explain", "wrapper_id": 0,
+        "text": "Municipal battery storage networks stabilize winter peak grid demand across suburban substations.",
+        "excerpt": "Municipal battery storage networks stabilize winter peak grid demand across suburban substations.",
+    }]
+    kept_g, drops_g, _ = reason.parse_generated_items_detailed(
+        sample_doc,
+        ["Here is a question: PROMPT: Why?\nRESPONSE: Batteries absorb sudden spikes cleanly across regional grids every winter season."],
+    )
+    assert kept_g == [] and drops_g == {"meta_chatter": 1}
+    kept_c, drops_c, _ = reason.parse_generated_items_detailed(
+        sample_doc,
+        ["Why do batteries help?\nRESPONSE: They absorb spikes cleanly <|mystery_tok|> across regional grids every winter season."],
+    )
+    assert kept_c == [] and drops_c == {"control_token": 1}
+
+    # 3. can_synthesize_locally(season) honors passed season and requires STET_EXAMINER_LLM_URL for chat API.
+    monkeypatch.delenv("STET_EXAMINER_LLM_URL", raising=False)
+    assert reason.can_synthesize_locally(s3) is False
+    assert reason.can_synthesize_locally() is False
+    monkeypatch.setenv("STET_EXAMINER_LLM_URL", "http://127.0.0.1:8000/v1")
+    assert reason.can_synthesize_locally(s3) is True
+
+    # 4. synthesize_reasoning(api='chat') checks STET_EXAMINER_LLM_URL BEFORE loading tokenizer!
+    monkeypatch.delenv("STET_EXAMINER_LLM_URL", raising=False)
+    monkeypatch.setattr(
+        reason,
+        "_load_teacher_tokenizer",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("tokenizer must not be loaded before URL check")),
+    )
+    docs = [
+        Doc(
+            source="ccnews",
+            id=f"ink-{i}",
+            url=f"https://example.org/ink/{i}",
+            lang="en",
+            license="ccnews",
+            published=1_800_000_000 + i,
+            title=f"Story {i}",
+            text=f"Detailed report {i} analyzing municipal battery storage grids, peak load shaving, and winter tariff resilience across districts. " * 4,
+            topic="",
+        )
+        for i in range(6)
+    ]
+    with pytest.raises(RuntimeError, match="STET_EXAMINER_LLM_URL") as exc_info:
+        reason.synthesize_reasoning(docs, b"ink-seed", dict(rcfg, items=6), log=lambda _: None)
+    assert not isinstance(exc_info.value, reason.FatalExamError)
+
+    # 5. Unsupported api value fails loudly with ValueError.
+    with pytest.raises(ValueError, match="unsupported reasoning api"):
+        reason.synthesize_reasoning(docs, b"ink-seed", {**rcfg, "api": "bogus"}, log=lambda _: None)
+
+    # 6. End-to-end mocked /v1/chat/completions: verifies pinned model, sends reasoning_effort="low",
+    #    ignores reasoning_content (never leaks CoT), preserves order, and retries transient error once.
+    monkeypatch.setattr(reason, "_load_teacher_tokenizer", lambda *a, **k: None)
+    repo = rcfg["model"]
+    rev = rcfg["revision"]
+    qualified = f"{repo}@{rev}"
+    lock = threading.Lock()
+    seen_payloads: list[dict] = []
+    chat_calls = {"n": 0}
+
+    class _Resp(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def fake_urlopen(req, timeout=30):
+        url = req.full_url
+        if url.endswith("/v1/models"):
+            return _Resp(json.dumps({"data": [{"id": qualified}]}).encode())
+        assert url == "http://127.0.0.1:8000/v1/chat/completions"
+        body = json.loads(req.data.decode("utf-8"))
+        with lock:
+            seen_payloads.append(body)
+            chat_calls["n"] += 1
+            call_no = chat_calls["n"]
+        if call_no == 1:
+            raise OSError("transient blip")
+        content_in = body["messages"][0]["content"]
+        m = re.search(r"Detailed report (\d+)", content_in)
+        tag = m.group(1) if m else "0"
+        is_syn = "declarative topic sentence" in content_in
+        prompt_line = (
+            f"Municipal battery storage networks stabilize winter grid demand in report {tag}."
+            if is_syn
+            else f"How do municipal battery grids stabilize winter peak demand in report {tag}?"
+        )
+        reply = {
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "reasoning_content": "INTERNAL_COT_SECRET_DO_NOT_LEAK",
+                        "content": f"PROMPT: {prompt_line}\nRESPONSE: Storing off-peak energy lets utilities absorb sudden winter spikes without firing costly backup turbines in case {tag}. Lower reserve margins reduce tariff volatility for households.",
+                    },
+                }
+            ]
+        }
+        return _Resp(json.dumps(reply).encode())
+
+    monkeypatch.setenv("STET_EXAMINER_LLM_URL", "http://127.0.0.1:8000/v1/chat/completions")
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(reason.time, "sleep", lambda _: None)
+
+    kept = reason.synthesize_reasoning(docs, b"ink-seed-ok", {**rcfg, "items": 6}, log=lambda _: None)
+    assert len(kept) == 6
+    assert len(seen_payloads) == 7  # 6 drafts + 1 transient retry
+    for p in seen_payloads:
+        assert p["model"] == qualified
+        assert p["reasoning_effort"] == "low"
+        assert p["chat_template_kwargs"] == {"reasoning_effort": "low"}
+        assert p["temperature"] == 0.0
+        assert p["max_tokens"] == 1536
+        assert p["seed"] == 0
+    for it in kept:
+        assert "INTERNAL_COT_SECRET_DO_NOT_LEAK" not in it.ctx
+        assert "INTERNAL_COT_SECRET_DO_NOT_LEAK" not in it.cont
+        doc_num = it.source.rsplit("-", 1)[-1]
+        assert f"case {doc_num}." in it.cont
+
+    # 7. reasoning_effort=None omits effort keys, and `content: null` returns "" (cleanly dropped, no crash).
+    null_payloads: list[dict] = []
+
+    def null_content_urlopen(req, timeout=30):
+        if req.full_url.endswith("/v1/models"):
+            return _Resp(json.dumps({"data": [{"id": qualified}]}).encode())
+        null_payloads.append(json.loads(req.data.decode("utf-8")))
+        return _Resp(json.dumps({"choices": [{"message": {"role": "assistant", "content": None, "reasoning_content": "thought"}}]}).encode())
+
+    monkeypatch.setattr(urllib.request, "urlopen", null_content_urlopen)
+    outs_null = reason._generate_via_chat_endpoint(
+        ["hello"], "http://127.0.0.1:8000/v1", repo, rev, reasoning_effort=None, log=lambda _: None
+    )
+    assert outs_null == [""]
+    assert "reasoning_effort" not in null_payloads[0] and "chat_template_kwargs" not in null_payloads[0]
+
+    # 8. HTTP 400 fails fast with ZERO retries and surfaces the server error body.
+    http400_calls = {"n": 0}
+
+    def http400_urlopen(req, timeout=30):
+        if req.full_url.endswith("/v1/models"):
+            return _Resp(json.dumps({"data": [{"id": qualified}]}).encode())
+        with lock:
+            http400_calls["n"] += 1
+        raise urllib.error.HTTPError(req.full_url, 400, "Bad Request", {}, io.BytesIO(b'{"error": "bad reasoning_effort"}'))
+
+    monkeypatch.setattr(urllib.request, "urlopen", http400_urlopen)
+    with pytest.raises(RuntimeError, match="bad reasoning_effort") as exc_400:
+        reason._generate_via_chat_endpoint(
+            ["draft1", "draft2", "draft3"], "http://127.0.0.1:8000/v1", repo, rev, max_workers=1, log=lambda _: None
+        )
+    assert not isinstance(exc_400.value, reason.FatalExamError)
+    assert http400_calls["n"] == 1  # zero retries AND remaining drafts aborted immediately!
+
+    # 8b. Multi-worker concurrency (max_workers=2): draft 1's real HTTP 400 surfaces even if draft 0
+    #     is sleeping in retry backoff (never masked by the synthetic abort message).
+    d0_sleeping = threading.Event()
+
+    def race_urlopen(req, timeout=30):
+        if req.full_url.endswith("/v1/models"):
+            return _Resp(json.dumps({"data": [{"id": qualified}]}).encode())
+        msg_in = json.loads(req.data.decode("utf-8"))["messages"][0]["content"]
+        if msg_in == "slow-draft-0":
+            d0_sleeping.set()
+            raise OSError("transient draft-0 blip")
+        d0_sleeping.wait(timeout=2.0)
+        raise urllib.error.HTTPError(req.full_url, 400, "Bad Request", {}, io.BytesIO(b"root-cause-400"))
+
+    monkeypatch.setattr(urllib.request, "urlopen", race_urlopen)
+    with pytest.raises(RuntimeError, match="root-cause-400") as exc_race:
+        reason._generate_via_chat_endpoint(
+            ["slow-draft-0", "fail-draft-1", "queued-draft-2"],
+            "http://127.0.0.1:8000/v1",
+            repo,
+            rev,
+            max_workers=2,
+            log=lambda _: None,
+        )
+    assert not isinstance(exc_race.value, reason.FatalExamError)
+
+    # 9. Malformed /v1/chat/completions responses fail fast with retryable RuntimeError.
+    for bad_body, match in (
+        ({"choices": []}, "missing choices"),
+        ({"choices": [{}]}, "missing message"),
+        ({"choices": [{"message": {"content": 123}}]}, "content type"),
+    ):
+        monkeypatch.setattr(
+            urllib.request,
+            "urlopen",
+            lambda req, timeout=30, b=bad_body: _Resp(
+                json.dumps({"data": [{"id": qualified}]} if req.full_url.endswith("/v1/models") else b).encode()
+            ),
+        )
+        with pytest.raises(RuntimeError, match=match) as exc_bad:
+            reason._generate_via_chat_endpoint(["draft"], "http://127.0.0.1:8000/v1", repo, rev, log=lambda _: None)
+        assert not isinstance(exc_bad.value, reason.FatalExamError)
+
+    # 10. Persistent transient network failure raises retryable RuntimeError (NEVER FatalExamError).
+    def failing_urlopen(req, timeout=30):
+        if req.full_url.endswith("/v1/models"):
+            return _Resp(json.dumps({"data": [{"id": qualified}]}).encode())
+        raise OSError("server down")
+
+    monkeypatch.setattr(urllib.request, "urlopen", failing_urlopen)
+    monkeypatch.setattr(threading.Event, "wait", lambda self, timeout=None: self.is_set())
+    with pytest.raises(RuntimeError, match="reasoning chat synthesis failed") as exc_fail:
+        reason.synthesize_reasoning(docs[:1], b"ink-seed-fail", {**rcfg, "items": 1}, log=lambda _: None)
+    assert not isinstance(exc_fail.value, reason.FatalExamError)
+
 
 

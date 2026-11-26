@@ -44,7 +44,7 @@ Run `stet harvest` once before the first `stet run` if you want fresh local writ
 fetches three hours of recent human writing from the sources official exams are made from,
 with no account and no key, and combines those fresh diagnostic twin-context items with the
 bundled CC-BY-SA reasoning items so local practice scores on the exact 100%-reasoning metric
-(set `STET_SYNTHESIZE_PRACTICE=1` on an 18 GB+ GPU to synthesize fresh local reasoning too).
+(set `STET_SYNTHESIZE_PRACTICE=1` with `STET_EXAMINER_LLM_URL` pointing at a pinned teacher endpoint to synthesize fresh local reasoning too).
 Without `stet harvest`, a practice round sits the bundled openly-licensed CC-BY-SA Wikipedia
 practice pack (both reasoning and diagnostic twin-context) so `stet run` works out of the box.
 `stet harvest --fresh` replaces the hours with newly written ones. A replay of an official
@@ -138,8 +138,8 @@ they are. Any other copy is at least 64 bytes long.
 Nobody knows it in advance, the organisers included. Each round's exam is 100% fresh and made
 at its draw, with zero static benchmarks and zero synthetic templates. The official score is
 **100% fresh harvest-derived reasoning** (`explain`, `infer`, `synthesis`, one-third each)
-written once at the draw by the pinned teacher model (`Qwen/Qwen3-8B@b968826d`,
-`temperature=0`) from three hours of writing people published the day before, picked by the
+written once at the draw by the pinned teacher model (`thinkingmachines/Inkling-2-Mini@c9d02830`,
+`reasoning_effort=low`, `temperature=0`) from three hours of writing people published the day before, picked by the
 draw, and published in full at settlement. Four fresh human-written twin-context comprehension
 kinds from those exact same three hours are sat and shown beside each entry's score at `0%`
 weight as published diagnostic telemetry until a human-written measure passes DataDecide. Your
@@ -158,10 +158,11 @@ every item is published with it.
 There is nothing to fit in advance: every round's exam comes from three hours of writing
 published the day before, which its draw picks. What a curator can learn from past rounds is
 what kinds of text teach a model well across every language by its share of the crawl. Known
-caveats and empirical adversary tests — including CCNet-head perplexity pruning (`adv_ppl_*`),
-which beats heuristic `fineweb2` on both reasoning and human-written comprehension across
-independent scorer families, and `FineWeb-Edu`'s systematic lead on DataDecide — are
-documented openly in [Experiments](EXPERIMENTS.md).
+caveats and empirical adversary tests — including the head-to-head teacher benchmark showing how
+switching from `Qwen3-8B` to `Inkling-2-Mini` (`reasoning_effort=low`) eliminated `FineWeb-Edu`'s
+`#1` lead on DataDecide (`#1 → #8`, exact `#1` recipe `dclm-baseline-qc-20p`) and shrank
+`adv_ppl_qwen06b`'s margin over `fineweb2` by `94.6%` (`137.5% → 102.3%`) — are documented openly
+in [Experiments](EXPERIMENTS.md).
 
 ## Does everything on the exam count?
 
@@ -233,7 +234,7 @@ Two machines must get the same number for the same script, to within a tight tol
 (Blackwell), RTX 4090 (Ada), and RTX 3090 (Ampere) at full 65.5M-token scale, so Season 3 sets
 `grade_backends: ["cuda"]`. AMD ROCm Flash Attention backward is non-deterministic and takes
 ~3.4 hours per standard pass, so AMD ROCm (and Apple Silicon) remain supported for local
-practice runs (`stet run`) and running the `$0/round` examiner, while official Season 3
+practice runs (`stet run`), while official Season 3
 verifying (grading and, since runners must earn 5 agreed official grades first, running
 curators) runs on NVIDIA CUDA.
 

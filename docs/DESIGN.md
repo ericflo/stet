@@ -38,8 +38,8 @@ is worth keeping for what it teaches a model. Season 3's exam is 100% fresh with
 benchmarks, zero synthetic templates, and zero raw web perplexity. The official score is
 **100% fresh harvest-derived reasoning**, in three kinds that count one-third each: `explain`,
 `infer` and `synthesis` — multi-sentence explanations, inferences, and declarative prose
-syntheses written once at the draw by the pinned teacher model (`Qwen/Qwen3-8B@b968826d`,
-`temperature=0`) from three hours of writing people published the day before, with varied
+syntheses written once at the draw by the pinned teacher model (`thinkingmachines/Inkling-2-Mini@c9d02830`,
+`reasoning_effort=low`, `temperature=0`) from three hours of writing people published the day before, with varied
 natural wrappers and a strict anti-copying filter, and published in full at settlement. Four
 fresh human-written twin-context comprehension kinds (`reference`, `news`, `technical`,
 `conversation`, scoring each continuation under its real opening minus up to three
@@ -270,12 +270,13 @@ What is left is in [Rules](RULES.md#what-is-trusted-and-what-is-not).
    (`exam_hours`). Curators run as soon as the
    round is drawn. A round drawn while the server knows of no harvest is given hours once
    there are some, and says so (`exam_hours_late`).
-3. **The examiner** makes the exam from exactly those hours right after the draw (~20–30 minutes
-   on the organisers' AMD Radeon 8060S workstation). It:
+3. **The examiner** makes the exam from exactly those hours right after the draw (~10–15 minutes
+   using a 1× RTX 5090 vLLM server). It:
    - builds the round's corpus, measures its languages, selects fresh twin-context
      comprehension items, writes `explain`/`infer`/`synthesis` reasoning items once at the draw
-     with the pinned teacher model (`Qwen/Qwen3-8B@b968826d`, `temperature=0`) from those same
-     three hours, and drops any item whose text the corpus already holds;
+     with the pinned teacher model (`thinkingmachines/Inkling-2-Mini@c9d02830`,
+     `reasoning_effort=low`, `temperature=0`) from those same three hours, and drops any item whose
+     text the corpus already holds;
    - drops any pillar below `min_pillar_items = 20` (redistributing its share within its group;
      refusing only if an entire group has zero surviving items), computes the authoritative
      initial student weights hash (`init_sha256`), and posts the exam: the items, what each

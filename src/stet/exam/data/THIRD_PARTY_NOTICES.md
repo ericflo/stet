@@ -46,8 +46,9 @@ fresh harvest hours are present on disk. Official competition rounds never use t
 
 ---
 
-## 3. Referenced Runtime Models (Downloaded at Runtime, Not Bundled in Wheel)
+## 3. Referenced Models (Not Bundled in Wheel)
 
-- **`baidu/ERNIE-4.5-0.3B-Base-PT`** (Season 3 student & tokenizer): **Apache License 2.0** — https://huggingface.co/baidu/ERNIE-4.5-0.3B-Base-PT
-- **`Qwen/Qwen3-8B`** (Season 3 official examiner reasoning teacher): **Apache License 2.0** — https://huggingface.co/Qwen/Qwen3-8B
-- **`Qwen/Qwen3-0.6B`** (`examples/reader` reference curator): **Apache License 2.0** — https://huggingface.co/Qwen/Qwen3-0.6B
+- **`baidu/ERNIE-4.5-0.3B-Base-PT`** (Season 3 runtime student & tokenizer): **Apache License 2.0** — https://huggingface.co/baidu/ERNIE-4.5-0.3B-Base-PT
+- **`thinkingmachines/Inkling-2-Mini`** (Season 3 official runtime examiner reasoning teacher): **Apache License 2.0** — https://huggingface.co/thinkingmachines/Inkling-2-Mini
+- **`Qwen/Qwen3-0.6B`** (`examples/reader` runtime reference curator): **Apache License 2.0** — https://huggingface.co/Qwen/Qwen3-0.6B
+- **`Qwen/Qwen3-8B`** (offline build-time generator of the bundled `s3-practice.jsonl.zst` practice pack; not downloaded at runtime): **Apache License 2.0** — https://huggingface.co/Qwen/Qwen3-8B

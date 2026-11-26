@@ -101,7 +101,7 @@ How many it rents: one for each machine at a grade, which takes no other until i
 trains the student once; the two machines a round asks to measure its unedited baseline
 (Season 3's `baselines.per_round = 2`, `baselines_wanted` in `/admin/work`) train that first, on
 as many tokens. In Season 3 the exam is built right after the draw from hours of the day before already
-harvested (~20–30 minutes on the organisers' AMD Radeon 8060S examiner), so nearly every grade is taken once the
+harvested (~11–13 minutes using a 1× RTX 5090 `Inkling-2-Mini` vLLM endpoint, within `--exam-after 25m`), so nearly every grade is taken once the
 exam is posted, and wants a machine then. A grader may also take a grade before the exam is
 posted and hold it until it is: such grades want machines from `--early` (90 minutes) before
 the exam is due (when the server says, or else `--exam-after`, 25 minutes, after the draw), and
