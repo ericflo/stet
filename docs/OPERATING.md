@@ -112,9 +112,14 @@ What it needs:
   and matching `stet-cloud`'s `--exam-after 25m` default while curators run in parallel). Any
   local 18 GB+ CUDA/ROCm GPU (~16 GB bf16 weights + KV cache) or an OpenAI-compatible
   `/v1/completions` server set via `STET_EXAMINER_LLM_URL` (and optional `STET_EXAMINER_LLM_KEY`)
-  serving the exact pinned model & revision also works (`stet` verifies `/v1/models` returns a
-  non-empty list matching model and revision before generating and fails loudly on mismatch or
-  tokenizer load failure);
+  serving the exact pinned model & revision also works: `stet` verifies `/v1/models` returns a
+  non-empty list whose entry proves the season's pinned revision — either via a
+  revision-qualified model ID (e.g., vLLM `--served-model-name Qwen/Qwen3-8B@b968826d...`) or
+  explicit matching revision metadata (`revision`/`model_revision`/`commit`/`snapshots/<rev>` in
+  `root`), rejecting bare `Qwen/Qwen3-8B` without verified revision and failing loudly on
+  mismatch or tokenizer load failure. Under `stet examine --follow`, transient network failures
+  when posting `POST /cancel` for an unbuildable exam are retried on subsequent polls without
+  re-running the exam build;
 - about 3 GB of disk a round, under `~/.cache/stet/examine/<round>/` and the round's corpus,
   and the hours it has harvested;
 - the network: Wikipedia, Common Crawl's news crawl, GH Archive, Hacker News, Lemmy,

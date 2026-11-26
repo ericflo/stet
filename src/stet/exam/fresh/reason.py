@@ -748,8 +748,28 @@ def _load_teacher_tokenizer(repo: str, rev: str, *, required: bool = True):
         return None
 
 
+def _entry_revision(entry: dict) -> str:
+    """Extract an endpoint-reported revision/commit string from a `/v1/models` entry, if present."""
+    for key in ("revision", "model_revision", "commit", "sha", "hf_revision"):
+        val = entry.get(key)
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+    meta = entry.get("meta")
+    if isinstance(meta, dict):
+        for key in ("revision", "model_revision", "commit", "sha", "hf_revision"):
+            val = meta.get(key)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+    return ""
+
+
 def _verify_endpoint_model(url: str, repo: str, rev: str, headers: dict[str, str]) -> str:
-    """Verify the configured OpenAI-compatible endpoint serves the season's pinned model & revision."""
+    """Verify the configured OpenAI-compatible endpoint serves the season's pinned model & revision.
+
+    Requires either a revision-qualified model ID (`<repo>@<rev>`, e.g. via vLLM's
+    `--served-model-name`) or explicit matching revision metadata on the `/v1/models` entry, so
+    a bare model name cannot silently mask an unpinned or stale deployment.
+    """
     override = os.environ.get("STET_EXAMINER_LLM_MODEL", "").strip()
     pinned_rev = os.environ.get("STET_EXAMINER_LLM_REVISION", "").strip()
     if pinned_rev and pinned_rev != rev:
@@ -771,13 +791,50 @@ def _verify_endpoint_model(url: str, repo: str, rev: str, headers: dict[str, str
         raise RuntimeError(
             f"could not verify reasoning endpoint model at {models_url} (expected {repo}@{rev}): {exc}"
         ) from exc
-    served = {str(m.get("id", "")) for m in payload.get("data", []) if isinstance(m, dict) and m.get("id")}
-    want = override or (f"{repo}@{rev}" if f"{repo}@{rev}" in served else repo)
-    if not served or want not in served:
-        raise RuntimeError(
-            f"reasoning endpoint {models_url} serves {sorted(served)}, which does not include pinned model {want!r}"
-        )
-    return want
+    raw_data = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(raw_data, list):
+        raw_data = []
+    entries = [m for m in raw_data if isinstance(m, dict) and m.get("id")]
+    served = {str(m["id"]): m for m in entries}
+    if not served:
+        raise RuntimeError(f"reasoning endpoint {models_url} serves [] (expected pinned model {repo}@{rev})")
+
+    snap_pat = re.compile(rf"(?:^|[\\/])snapshots[\\/]{re.escape(rev)}(?:$|[\\/])")
+    qualified = f"{repo}@{rev}"
+
+    def _is_verified(mid: str, entry: dict) -> bool:
+        rep_rev = _entry_revision(entry)
+        if rep_rev and rep_rev != rev:
+            return False
+        if mid == qualified:
+            return True
+        if mid == repo:
+            if rep_rev == rev:
+                return True
+            root = str(entry.get("root") or "")
+            return bool(snap_pat.search(root))
+        return False
+
+    candidates = [override] if override else [qualified, repo]
+    for cand in candidates:
+        if cand in served and _is_verified(cand, served[cand]):
+            return cand
+    for cand in candidates:
+        if cand in served:
+            rep_rev = _entry_revision(served[cand])
+            if rep_rev and rep_rev != rev:
+                raise RuntimeError(
+                    f"reasoning endpoint {models_url} reports revision {rep_rev!r} for {cand!r}, "
+                    f"expected pinned revision {rev!r}"
+                )
+            raise RuntimeError(
+                f"reasoning endpoint {models_url} advertises bare model id {cand!r} without verified revision {rev!r}; "
+                f"serve it with --served-model-name {qualified} or expose matching revision metadata in /v1/models"
+            )
+    raise RuntimeError(
+        f"reasoning endpoint {models_url} serves {sorted(served)}, which does not include pinned model "
+        f"{(override or qualified)!r}"
+    )
 
 
 def _generate_via_endpoint(

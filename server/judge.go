@@ -853,9 +853,13 @@ func (j *judge) weigh(sc *scriptState) *verdict {
 		v.counted, v.self = own, len(own) > 0
 	}
 	tokCounts := map[string]int{}
+	validCount := 0
 	for _, g := range v.counted {
-		if g.r.Valid && g.r.TokensSHA != "" {
-			tokCounts[g.r.TokensSHA]++
+		if g.r.Valid {
+			validCount++
+			if g.r.TokensSHA != "" {
+				tokCounts[g.r.TokensSHA]++
+			}
 		}
 	}
 	if len(tokCounts) == 1 {
@@ -881,7 +885,9 @@ func (j *judge) weigh(sc *scriptState) *verdict {
 				}
 			}
 			v.counted = kept
-		} else {
+		} else if 2*validCount > len(v.counted) {
+			// Only a tokenized-stream tie when valid grades would otherwise carry the script;
+			// if invalid grades already hold a majority, the script settles invalid cleanly.
 			v.tokensTie = true
 		}
 	}
@@ -895,7 +901,9 @@ func (j *judge) weigh(sc *scriptState) *verdict {
 		}
 	}
 	// Most of them must find it valid. As many for as against is not enough.
-	if v.valid = 2*len(gains) > len(v.counted); v.valid {
+	// An unresolved tokenized-stream tie (v.tokensTie) means verifiers disagreed on what token
+	// stream the script produced, so it never yields a valid rated gain.
+	if v.valid = !v.tokensTie && 2*len(gains) > len(v.counted); v.valid {
 		v.gain = median(gains)
 	}
 	v.tie = v.tokensTie || (len(v.counted) == 2 && !j.same(v.counted[0], v.counted[1]))
@@ -1198,11 +1206,12 @@ func (j *judge) someoneElse(st *entryState, sc *scriptState, not *Account) bool 
 
 // offer is a job an account could be handed.
 type offer struct {
-	st       *entryState
-	kind     string       // edit | grade
-	sc       *scriptState // a grade job's script
-	score    int          // lowest first
-	required bool         // a score is waiting for it
+	st          *entryState
+	kind        string       // edit | grade
+	sc          *scriptState // a grade job's script
+	score       int          // lowest first
+	required    bool         // a score is waiting for it
+	baselineTie bool         // required solely to supply a tie-breaking round baseline
 }
 
 // offers lists the jobs on an entry that an account could be handed now. With closing, only
@@ -1269,11 +1278,14 @@ func (j *judge) offers(st *entryState, q *asker, closing bool) []offer {
 			// A script wants one grade that counts and is not its own writer's, and a third
 			// when two disagree. A script that two runs wrote wants two, from two people:
 			// it is the entry's only script, and one grade of it would be one machine's
-			// word for the whole score. Beyond that an established account replicates,
-			// like anyone, but only before the exam: a replica taken then trains while the
-			// exam is made, and one taken after it would hold the round for as long as it
-			// trained.
-			o.required = counting < j.short(sc)
+			// word for the whole score. When the round's unedited baselines disagree beyond
+			// tolerance, any established grader that has not yet measured the baseline is
+			// also required to supply a tie-breaking baseline even if ordinary grading is done.
+			needsBase := j.a.baselineDisputed(j.s, st.Round) && !j.baselineTieLive(st.Round) &&
+				j.s.Baselines[baselineKey(st.Round.Idx, q.acct.ID)] == nil
+			ordinary := counting < j.short(sc)
+			o.required = ordinary || needsBase
+			o.baselineTie = !ordinary && needsBase
 			switch spare := j.spare(st, q); {
 			case o.required && spare && j.unspared(st, sc, q.acct):
 				// Somebody who cannot give the entry a run can give it this grade.
@@ -1335,7 +1347,7 @@ func (j *judge) sitting(st *entryState, sc *scriptState) bool {
 // volunteer's word alone. A grade that counts and has no score yet is not one to settle
 // on: the round's baseline, which somebody was asked for, has still to come.
 func (j *judge) settleable(st *entryState) bool {
-	if len(st.LiveEdits) > 0 || !examPosted(st.Round) {
+	if len(st.LiveEdits) > 0 || !examPosted(st.Round) || j.a.baselineDisputed(j.s, st.Round) {
 		return false
 	}
 	for _, sc := range st.Scripts {
@@ -2303,6 +2315,41 @@ func (a *App) settleRound(tx *Tx, rd *Round) {
 	}
 	// What nobody is there to do is given up, once the round has waited its while.
 	if t >= max(rd.ActiveAt, rd.DrawnAt)+wait {
+		// Check unresolved disputed baselines BEFORE giveUp so a 3-way baseline split (where
+		// two baselines are oddOut and their scripts lack non-oddOut grades) closes the entire
+		// round uniformly as disputed-baseline rather than dropping individual entries via giveUp.
+		if len(states) > 0 && a.baselineDisputed(s, rd) {
+			if j.baselineTieLive(rd) {
+				return
+			}
+			canResolve := false
+			for _, c := range s.Claims {
+				if c.RoundIdx == rd.Idx && c.live(t) && j.est[c.AccountID] {
+					canResolve = true
+					break
+				}
+			}
+			if !canResolve {
+				for _, q := range j.active() {
+					if !q.est || s.Baselines[baselineKey(rd.Idx, q.acct.ID)] != nil {
+						continue
+					}
+					for _, st := range states {
+						if len(j.offers(st, q, true)) > 0 {
+							canResolve = true
+							break
+						}
+					}
+					if canResolve {
+						break
+					}
+				}
+			}
+			if !canResolve {
+				a.closeDisputedBaselineRound(tx, j, rd, states)
+			}
+			return
+		}
 		// An entry nobody has run waits for somebody to come, unless other entries' scores
 		// are waiting behind it, or somebody who runs editors is here and it is not theirs to
 		// run: then it is the round that would wait, for ever, and no later one be drawn.
@@ -2600,7 +2647,9 @@ func (a *App) settleScript(tx *Tx, j *judge, st *entryState, sc *scriptState) *g
 			out.reason = g.r.InvalidReason
 		}
 	}
-	if !v.valid && out.reason == "" {
+	if v.tokensTie {
+		out.reason = "verifiers disagreed on the script's tokenized stream"
+	} else if !v.valid && out.reason == "" {
 		out.reason = "the script is invalid"
 	}
 	// A script that is the unedited corpus itself scores the round's baseline, which every
@@ -2644,6 +2693,11 @@ func (a *App) settleScript(tx *Tx, j *judge, st *entryState, sc *scriptState) *g
 			// Its arithmetic differs on the unedited corpus too. (A grader that was not asked
 			// for the baseline, and sent none, has only its grade to be judged by.)
 			r.Verdict, shown = "void", "baseline differs"
+		case v.tokensTie:
+			// Established accounts disagreed on the script's tokenized stream, so non-deciding
+			// grades cannot agree or disagree with an unresolved verdict.
+			r.Verdict, shown = "disputed", "disputed"
+			g.acct.GPUSeconds += r.Seconds
 		case j.agrees(g, v):
 			r.Verdict = "agreed"
 			if plain || v.tie {
@@ -2701,7 +2755,7 @@ func (a *App) settleEntry(tx *Tx, j *judge, st *entryState) {
 	detail := &EntryDetail{Verifiers: []string{}, Audited: len(st.Scripts) > 0}
 	var runs []*Run
 	var gains []float64
-	valid, self := 0, false
+	valid, self, tokensDisputed := 0, false, false
 	for _, run := range e.Runs {
 		if run.Dropped {
 			continue
@@ -2718,6 +2772,20 @@ func (a *App) settleEntry(tx *Tx, j *judge, st *entryState) {
 				}
 				run.Reason = fmt.Sprintf("the curator produced no script (%s)", status)
 			}
+		} else if g.v.tokensTie {
+			// Verifiers disagreed on the script's tokenized training stream with no majority;
+			// drop this run cleanly (preserving its disputed grades) without penalizing the curator.
+			tokensDisputed = true
+			run.Grades, run.Self = g.grades, g.v.self
+			run.Dropped = true
+			run.Reason = "verifiers disagreed on the script's tokenized stream"
+			if by := tx.s.Accounts[run.By]; by != nil && run.Owed {
+				by.Runs++
+				by.GPUSeconds += a.editSeconds(run)
+				tx.saveAccount(by)
+			}
+			run.Owed = false
+			continue
 		} else {
 			run.Grades, run.Self = g.grades, g.v.self
 			self = self || g.v.self
@@ -2731,6 +2799,16 @@ func (a *App) settleEntry(tx *Tx, j *judge, st *entryState) {
 		runs = append(runs, run)
 		gains = append(gains, run.Gain)
 	}
+	// If dropping a tokens-disputed run leaves a lone unvouched non-anchor failed edit, drop
+	// that failed run too so a curator is never rated invalid on one volunteer's unvouched word.
+	if tokensDisputed && len(runs) == 1 && runs[0].Script == "" {
+		if by := tx.s.Accounts[runs[0].By]; by == nil || !by.Anchor {
+			runs[0].Dropped = true
+			runs[0].Reason = "no confirmed run remained to vouch for this failed edit"
+			runs[0].Owed = false
+			runs, gains = nil, nil
+		}
+	}
 	// Each run that counts is credited to whoever made it, now that it is public. (A run
 	// recorded by an older server was credited when it arrived, and is not owed.)
 	for _, run := range runs {
@@ -2741,7 +2819,35 @@ func (a *App) settleEntry(tx *Tx, j *judge, st *entryState) {
 		}
 		run.Owed = false
 	}
-	if len(runs) == 0 { // not reached: a round is settled only when every entry has a run
+	if len(runs) == 0 {
+		if tokensDisputed {
+			named := map[string]bool{}
+			for _, k := range []int{0, 1} {
+				for _, sc := range st.Scripts {
+					if !scripts[sc.SHA].v.tokensTie {
+						continue
+					}
+					for _, h := range scripts[sc.SHA].names[k] {
+						if !named[h] {
+							named[h] = true
+							detail.Verifiers = append(detail.Verifiers, h)
+						}
+					}
+				}
+			}
+			for _, sc := range st.Scripts {
+				if !scripts[sc.SHA].v.tokensTie {
+					continue
+				}
+				detail.Disputed += scripts[sc.SHA].outliers
+				detail.DisputedTogether = detail.DisputedTogether || scripts[sc.SHA].v.tie
+			}
+			e.Void, e.Unattended, e.NRuns, e.NResults = true, true, 0, len(detail.Verifiers)
+			a.settleInvalid(tx, e, "verifiers disagreed on the script's tokenized stream; the round does not count for it", detail)
+			a.moved(tx, rd)
+			tx.event("abandoned", map[string]any{"round": roundID(a.season.ID, e.RoundIdx), "editor": e.EditorID, "at": now()})
+			return
+		}
 		a.voidEntry(tx, e, "no verifier ran this entry; the round does not count for it", true)
 		return
 	}
@@ -2853,10 +2959,21 @@ func (a *App) settleEntry(tx *Tx, j *judge, st *entryState) {
 			}
 		}
 	}
-	// Who graded it: those whose grades are the score, then everyone else who agreed.
+	// Who graded it: those whose grades are the score, then everyone else who agreed (only over
+	// scripts that back surviving runs, so dropped tokens-disputed runs never leak into detail).
+	keptScripts := map[string]bool{}
+	for _, run := range runs {
+		if run.Script != "" {
+			keptScripts[run.Script] = true
+		}
+	}
+	detail.Audited = len(keptScripts) > 0
 	named := map[string]bool{}
 	for _, k := range []int{0, 1} {
 		for _, sc := range st.Scripts {
+			if !keptScripts[sc.SHA] {
+				continue
+			}
 			for _, h := range scripts[sc.SHA].names[k] {
 				if !named[h] {
 					named[h] = true
@@ -2866,6 +2983,9 @@ func (a *App) settleEntry(tx *Tx, j *judge, st *entryState) {
 		}
 	}
 	for _, sc := range st.Scripts {
+		if !keptScripts[sc.SHA] {
+			continue
+		}
 		detail.Disputed += scripts[sc.SHA].outliers
 		detail.DisputedTogether = detail.DisputedTogether || scripts[sc.SHA].v.tie
 	}
@@ -2875,6 +2995,81 @@ func (a *App) settleEntry(tx *Tx, j *judge, st *entryState) {
 	if !e.Valid {
 		a.afterInvalid(tx, e.EditorID)
 	}
+}
+
+// closeDisputedBaselineRound closes a round whose established baselines disagreed beyond
+// tolerance and could not be resolved before ReplicaWait elapsed: every open entry is voided
+// unattended (no curator penalty, unrated, ineligible for ratings or records), all pending
+// grades are published as disputed with zero verifier credit/strikes and nil gain, and the
+// disputed midpoint baseline and per-result midpoint scores are cleared in storage.
+func (a *App) closeDisputedBaselineRound(tx *Tx, j *judge, rd *Round, states []*entryState) {
+	const whyRun = "verifiers disagreed on the round's unedited baseline"
+	const whyEntry = "verifiers disagreed on the round's unedited baseline; the round does not count for any entry"
+	for _, st := range states {
+		e := st.Entry
+		if e.Status != "open" {
+			continue
+		}
+		detail := &EntryDetail{Verifiers: []string{}, DisputedTogether: true, Audited: len(st.Scripts) > 0}
+		named := map[string]bool{}
+		byScript := map[string][]Grade{}
+		for _, sc := range st.Scripts {
+			var grades []Grade
+			for _, r := range sc.Results {
+				g := j.view(sc, r)
+				if g == nil || r.Verdict != "pending" {
+					continue
+				}
+				// Clear any interim score computed against the uncorroborated midpoint baseline
+				// before saving and publishing so no midpoint gain is ever persisted or displayed.
+				r.Score, r.BySource = nil, nil
+				if r.Valid && len(r.Items) > 0 {
+					mean := 0.0
+					for _, v := range r.Items {
+						mean += v
+					}
+					r.Loss = places5(-mean / float64(len(r.Items)))
+				}
+				g.base, g.gain = false, 0
+				r.Verdict, r.Summary = "disputed", nil
+				g.acct.GPUSeconds += r.Seconds
+				tx.saveAccount(g.acct)
+				tx.saveResult(r)
+				if !named[g.acct.Handle] {
+					named[g.acct.Handle] = true
+					detail.Verifiers = append(detail.Verifiers, g.acct.Handle)
+				}
+				grades = append(grades, j.publish(g, "disputed", false))
+			}
+			byScript[sc.SHA] = grades
+		}
+		for _, run := range e.Runs {
+			if !run.Dropped {
+				run.Dropped, run.Reason = true, whyRun
+				if grades, ok := byScript[run.Script]; ok {
+					run.Grades = grades
+				}
+				if by := tx.s.Accounts[run.By]; by != nil && run.Owed {
+					by.Runs++
+					by.GPUSeconds += a.editSeconds(run)
+					tx.saveAccount(by)
+				}
+				run.Owed = false
+			}
+		}
+		e.Void, e.Unattended, e.NRuns, e.NResults = true, true, 0, len(detail.Verifiers)
+		a.settleInvalid(tx, e, whyEntry, detail)
+		tx.event("abandoned", map[string]any{"round": roundID(a.season.ID, e.RoundIdx), "editor": e.EditorID, "at": now()})
+	}
+	for _, c := range tx.s.Claims {
+		if c.RoundIdx == rd.Idx && c.Status == "claimed" {
+			c.Status, c.EndedAt = "expired", now()
+			tx.saveClaim(c)
+		}
+	}
+	rd.BaseItems, rd.BaselineLoss, rd.BaselineN = nil, nil, 0
+	tx.saveRound(rd)
+	tx.event("disputed", map[string]any{"round": roundID(a.season.ID, rd.Idx), "reason": "baseline"})
 }
 
 // regain recomputes every settled entry's loss in a round from the round's current

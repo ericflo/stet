@@ -192,9 +192,18 @@ def round_from_api(season, description: dict):
 
 
 def fetch_round(season, index: int):
+    from .spec import CURRENT_SEASON
+
+    rid = f"{season.id}-o{index:05d}"
     try:
-        d = request("GET", f"/api/v1/rounds/{season.id}-o{index:05d}")
+        d = request("GET", f"/api/v1/rounds/{rid}")
     except ApiError as e:
+        if e.status == 404 and season.id != CURRENT_SEASON:
+            sys.stderr.write(
+                f"stet: round {rid} belongs to historical season {season.id}; "
+                f"its live API artifacts are not available from this server (which serves {CURRENT_SEASON})\n"
+            )
+            sys.exit(1)
         sys.stderr.write(f"stet: {e}\n")
         sys.exit(1)
     if not d["round"].get("seed"):
@@ -908,8 +917,12 @@ def _grade_job(job, season, scale, device, key, out, work: Path, bases: dict | N
         if asked:
             base = baseline(rnd, scale, device, progress=out.progress("baseline"), log=lambda m: out.line("", out.dim("baseline " + m)))
         else:
-            # What an earlier job of the round measured here is still this machine's to send.
-            base = _cached(baseline_path(rnd, scale, device if hasattr(device, "type") else pick_device(device)))
+            # What an earlier job of the round measured here is still this machine's to send,
+            # provided it sat the exact full exam digest.
+            dev = device if hasattr(device, "type") else pick_device(device)
+            base = _cached(baseline_path(rnd, scale, dev))
+            if base is not None and base.get("exam_sha256") and base.get("exam_sha256") != rnd.exam_digest:
+                base = None
     want = job["script"]["sha256"]
     limit = int(season.raw["script"]["max_bytes"])
     # Signed: until its round settles, a script is given only to whoever was handed it to grade.
@@ -954,6 +967,8 @@ def _grade_job(job, season, scale, device, key, out, work: Path, bases: dict | N
     rnd = wait_for_exam(rnd, out)
     fetch_exam(rnd, key)
     base = _cached(baseline_path(rnd, scale, device))
+    if base is not None and base.get("exam_sha256") and rnd.exam_digest and base.get("exam_sha256") != rnd.exam_digest:
+        base = None
     if base is None and asked:
         base = sit_baseline(base_t, rnd, scale)
     return sit_exam(trained, rnd, scale, data.round_exam(rnd, scale)), base
@@ -1041,6 +1056,8 @@ def _sit(p: Pending, bases: dict, key, scale) -> tuple[dict, dict | None]:
 
     fetch_exam(p.rnd, key)
     base = _cached(baseline_path(p.rnd, scale, p.device))
+    if base is not None and base.get("exam_sha256") and p.rnd.exam_digest and base.get("exam_sha256") != p.rnd.exam_digest:
+        base = None
     if base is None and wants_baseline(p.job):
         base_t = bases.get(p.rnd.id)
         if base_t is None or getattr(base_t, "model", True) is None:

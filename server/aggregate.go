@@ -318,8 +318,8 @@ func langShare(lang string, shares map[string]float64) float64 {
 }
 
 // balanced is a language cell's score: its strata, in sorted order, each a trimmed mean of
-// its clipped gains (or crawl-share weighted mean of clipped gains inside the pooled "other"
-// cell), with equal weight; one with fewer than `small` items in proportion.
+// its clipped gains (or crawl-share weighted trimmed mean of clipped gains inside the pooled
+// "other" cell), with equal weight; one with fewer than `small` items in proportion.
 func (p *ExamPlan) balanced(items []ItemInfo, gains []float64, idx []int, poolShares map[string]float64) float64 {
 	strata, byStratum := groupInOrder(idx, func(i int) string { return items[i].Stratum })
 	sort.Strings(strata)
@@ -336,14 +336,11 @@ func (p *ExamPlan) balanced(items []ItemInfo, gains []float64, idx []int, poolSh
 		if poolShares == nil {
 			mean = trimmedMean(cl, p.Trim)
 		} else {
-			num := make([]float64, len(sidx))
-			den := make([]float64, len(sidx))
+			ws := make([]float64, len(sidx))
 			for k, i := range sidx {
-				w := langShare(items[i].Lang, poolShares)
-				num[k] = float64(w * cl[k])
-				den[k] = w
+				ws[k] = langShare(items[i].Lang, poolShares)
 			}
-			mean = pySum(num) / pySum(den)
+			mean = weightedTrimmedMean(cl, ws, p.Trim)
 		}
 		w := min(len(vals), p.Small)
 		total += w
@@ -380,6 +377,56 @@ func clipped(vals []float64, k float64) []float64 {
 		}
 	}
 	return out
+}
+
+// weightedTrimmedMean cuts `trim` of the total weight from each tail of the values sorted
+// ascending, matching weighted_trimmed_mean in src/stet/exam/aggregate.py.
+func weightedTrimmedMean(vals, weights []float64, trim float64) float64 {
+	n := len(vals)
+	totalW := pySum(weights)
+	plain := func() float64 {
+		num := make([]float64, n)
+		for i := range vals {
+			num[i] = float64(weights[i] * vals[i])
+		}
+		return pySum(num) / totalW
+	}
+	if n < 3 || trim <= 0 || trim >= 0.5 || totalW <= 0 {
+		return plain()
+	}
+	lo, hi := float64(totalW*trim), float64(totalW*(1.0-trim))
+	if hi <= lo {
+		return plain()
+	}
+	type pair struct{ v, w float64 }
+	pairs := make([]pair, n)
+	for i := range vals {
+		pairs[i] = pair{vals[i], weights[i]}
+	}
+	sort.SliceStable(pairs, func(i, j int) bool { return pairs[i].v < pairs[j].v })
+	cum := 0.0
+	var num, den []float64
+	for _, p := range pairs {
+		nxt := cum + p.w
+		top := nxt
+		if hi < top {
+			top = hi
+		}
+		bot := cum
+		if lo > bot {
+			bot = lo
+		}
+		if kept := top - bot; kept > 0.0 {
+			num = append(num, float64(kept*p.v))
+			den = append(den, kept)
+		}
+		cum = nxt
+	}
+	denSum := pySum(den)
+	if denSum <= 0.0 {
+		return plain()
+	}
+	return pySum(num) / denSum
 }
 
 // trimmedMean is the mean of the values with int(n*trim) cut from each end.

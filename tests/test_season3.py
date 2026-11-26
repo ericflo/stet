@@ -2506,3 +2506,284 @@ def test_review8_reasoning_only_score_diagnostic_comprehension_and_source_cap(mo
     assert "reference" in parts
     assert {"explain", "infer", "synthesis"} <= parts
 
+
+def test_review9_explicit_season_round_resolution(monkeypatch, capsys):
+    """Review 9 P2 #1: full round IDs (s2-p00000, s2-o00003) honor their encoded season,
+    reject conflicting --season flags, and report clearly when historical official artifacts are unavailable."""
+    from types import SimpleNamespace
+
+    from stet import cli, client
+
+    # Practice ID with explicit s2 season resolves to s2-p00000, not s3-p00000.
+    args_p = SimpleNamespace(round="s2-p00000", season=None, scale=None)
+    season, scale, rnd = cli.resolve_round(args_p)
+    assert season.id == "s2" and rnd.id == "s2-p00000" and scale.name == "nano"
+
+    # Plain numeric round still defaults to CURRENT_SEASON (s3).
+    args_def = SimpleNamespace(round="0", season=None, scale=None)
+    season_d, _, rnd_d = cli.resolve_round(args_def)
+    assert season_d.id == "s3" and rnd_d.id == "s3-p00000"
+
+    # Conflicting explicit --season is rejected.
+    args_bad = SimpleNamespace(round="s2-p00000", season="s3", scale=None)
+    with pytest.raises(SystemExit):
+        cli.resolve_round(args_bad)
+    assert "conflicts with --season" in capsys.readouterr().err
+
+    # Official ID s2-o00003 queries s2-o00003 (not s3-o00003) and reports historical unavailability on 404.
+    seen_paths = []
+
+    def fake_request(method, path, *a, **k):
+        seen_paths.append(path)
+        raise client.ApiError(404, "no such round")
+
+    monkeypatch.setattr(client, "request", fake_request)
+    args_o = SimpleNamespace(round="s2-o00003", season=None, scale=None)
+    with pytest.raises(SystemExit):
+        cli.resolve_round(args_o)
+    assert seen_paths == ["/api/v1/rounds/s2-o00003"]
+    err = capsys.readouterr().err
+    assert "s2-o00003" in err and "historical season s2" in err
+
+
+def test_review9_public_and_full_exam_baseline_cache_isolation(monkeypatch, tmp_path):
+    """Review 9 P2 #2: public-subset replay and full official exam never share a baseline cache entry
+    in either transition (public -> full or full -> public)."""
+    import json
+    from types import SimpleNamespace
+
+    import zstandard as zstd
+
+    from stet import cli, data, pipeline
+    from stet.exam.examine import public_items
+    from stet.exam.items import digest as items_digest
+    from stet.spec import official_round
+
+    monkeypatch.setenv("STET_CACHE", str(tmp_path))
+    s3 = load_season("s3")
+    scale = s3.scale("nano")
+    p = s3.raw["pools"]["practice"]
+    crawl = {"crawl": p["crawl"], "paths_sha256": p["paths_sha256"], "n_shards": int(p["n_shards"])}
+    full_items = [
+        Item(kind="context", corner="fresh/wikipedia/en/a", fmt="prose", lang="en", source="wikipedia:1",
+             ctx="Alpha open.", cont=" Alpha cont.", wrongs=("Beta open.",)),
+        Item(kind="context", corner="fresh/ccnews/en/b", fmt="prose", lang="en", source="ccnews:2",
+             ctx="News open.", cont=" News cont.", wrongs=("Other news open.",)),
+    ]
+    full_sha = items_digest(full_items)
+    rnd = official_round(s3, 7, {"round": 900007, "randomness": "77" * 32}, crawl)
+    rnd = type(rnd)(**{**rnd.__dict__, "exam_digest": full_sha})
+
+    pub_raw = "\n".join(json.dumps(r, ensure_ascii=False) for r in public_items(full_items)).encode()
+    full_raw = "\n".join(json.dumps(it.to_dict(), ensure_ascii=False) for it in full_items).encode()
+    comp = zstd.ZstdCompressor()
+    pub_path = data.exam_public_path(rnd, full_sha)
+    full_path = data.exam_items_path(rnd, full_sha)
+    pub_path.parent.mkdir(parents=True, exist_ok=True)
+    pub_path.write_bytes(comp.compress(pub_raw))
+
+    dev = SimpleNamespace(type="cpu")
+    sit_calls = []
+
+    def fake_train(r, sc, d, **kw):
+        return SimpleNamespace(device=dev)
+
+    def fake_sit(trained, r, sc, exam):
+        sha = items_digest(exam)
+        sit_calls.append((len(exam), sha))
+        return {
+            "valid": True,
+            "exam_sha256": sha,
+            "exam": {"items": len(exam), "mean": -2.0 - 0.1 * len(exam), "item_scores": [-2.0] * len(exam)},
+        }
+
+    monkeypatch.setattr(pipeline, "train_baseline", fake_train)
+    monkeypatch.setattr(pipeline, "sit_exam", fake_sit)
+
+    # 1. Public subset only -> sits 1 item and caches under `-public.json`.
+    b_pub = pipeline.baseline(rnd, scale, dev)
+    assert b_pub["exam"]["items"] == 1 and b_pub["exam_sha256"] != full_sha
+    assert len(sit_calls) == 1
+
+    # 2. Full exam arrives -> MUST miss public cache and sit all 2 items!
+    full_path.write_bytes(comp.compress(full_raw))
+    b_full = pipeline.baseline(rnd, scale, dev)
+    assert b_full["exam"]["items"] == 2 and b_full["exam_sha256"] == full_sha
+    assert len(sit_calls) == 2
+
+    # 3. Reverse transition (full exam removed, public subset remains) -> returns 1-item public baseline,
+    #    NOT the 2-item full baseline!
+    full_path.unlink()
+    b_pub2 = pipeline.baseline(rnd, scale, dev)
+    assert b_pub2["exam"]["items"] == 1 and b_pub2["exam_sha256"] != full_sha
+    assert len(sit_calls) == 2  # cache hit on the separate public baseline file!
+
+    # 4. Even if someone manually puts a wrong-digest file at a baseline path, _cached rejects it.
+    wrong_path = pipeline.baseline_path(rnd, scale, dev, exam_sha=full_sha)
+    assert pipeline._cached(wrong_path, want_exam_sha="0" * 64) is None
+    assert pipeline._cached(wrong_path, want_exam_sha=full_sha, want_items=99) is None
+    assert pipeline._cached(wrong_path, want_exam_sha=full_sha, want_items=2) is not None
+    assert cli._has_writing(rnd)
+
+
+def test_review9_pooled_languages_apply_tail_trim():
+    """Review 9 P2 #3: pooled small languages apply the configured 10% tail trim consistently
+    with single languages (equal-weight 19 zeros + one +0.1 -> 0.0) without letting tiny
+    micro-languages crowd out larger pooled languages."""
+    from stet.exam.aggregate import plan_of, round_score
+
+    s3 = load_season("s3")
+    plan = plan_of(s3)
+    single = [Item(kind="answer", corner=f"fresh/explain/en/{i}", fmt="prose", lang="en", source=f"explain:{i}", ctx="Q", cont="A") for i in range(20)]
+    pooled = [
+        Item(kind="answer", corner=f"fresh/explain/{lang}/{i}", fmt="prose", lang=lang, source=f"explain:{i}", ctx="Q", cont="A")
+        for i, lang in enumerate(["ca"] * 5 + ["sw"] * 5 + ["yo"] * 5 + ["eo"] * 5)
+    ]
+    gains = [0.0] * 19 + [0.1]
+    s_single = round_score(single, gains, shares={"en": 100.0}, plan=plan)["score"]
+    s_pooled = round_score(pooled, gains, shares={"ca": 1.0, "sw": 1.0, "yo": 1.0, "eo": 1.0}, plan=plan)["score"]
+    assert s_single == pytest.approx(0.0, abs=1e-12)
+    assert s_pooled == pytest.approx(0.0, abs=1e-12)
+
+    # Skewed weights: 18 tiny micro-language items (-0.4) must NOT crowd out 2 heavy ja items (+0.2).
+    skewed = (
+        [Item(kind="answer", corner=f"fresh/explain/ky/{i}", fmt="prose", lang="ky", source=f"explain:ky:{i}", ctx="Q", cont="A") for i in range(6)]
+        + [Item(kind="answer", corner=f"fresh/explain/yo/{i}", fmt="prose", lang="yo", source=f"explain:yo:{i}", ctx="Q", cont="A") for i in range(6)]
+        + [Item(kind="answer", corner=f"fresh/explain/eo/{i}", fmt="prose", lang="eo", source=f"explain:eo:{i}", ctx="Q", cont="A") for i in range(6)]
+        + [Item(kind="answer", corner=f"fresh/explain/ja/{i}", fmt="prose", lang="ja", source=f"explain:ja:{i}", ctx="Q", cont="A") for i in range(2)]
+    )
+    skewed_gains = [-0.4] * 18 + [0.2] * 2
+    s_skew = round_score(skewed, skewed_gains, shares={"ky": 0.01, "yo": 0.01, "eo": 0.01, "ja": 5.53}, plan=plan)["score"]
+    assert s_skew > 0.15, f"heavy pooled language ja should survive tail trim, got {s_skew}"
+
+
+def test_review9_examine_follow_retries_transient_cancel_without_rebuilding(monkeypatch):
+    """Review 9 P2 #4: a transient cancel POST failure after FatalExamError retains the reason
+    and retries cancellation on subsequent polls without re-running the expensive exam build."""
+    from types import SimpleNamespace
+
+    from stet import cli, client
+    from stet.exam.examine import FatalExamError
+
+    build_calls = []
+    cancel_calls = []
+    polls = [0]
+
+    class _StopLoop(BaseException):
+        pass
+
+    def fake_request(method, path, body=None, **kw):
+        if method == "GET" and path.startswith("/api/v1/rounds"):
+            polls[0] += 1
+            if polls[0] > 3:
+                raise _StopLoop()
+            return {"rounds": [{"id": "s3-o00001", "status": "open", "exam_digest": ""}]}
+        if method == "POST" and path == "/api/v1/admin/rounds/s3-o00001/cancel":
+            cancel_calls.append(body)
+            if len(cancel_calls) == 1:
+                raise OSError("temporary network outage")
+            return {"cancelled": True}
+        raise AssertionError(f"unexpected request {method} {path}")
+
+    def fake_examine_one(args, rid):
+        build_calls.append(rid)
+        raise FatalExamError("all reasoning kinds below min_keep_rate")
+
+    monkeypatch.setattr(client, "need_key", lambda: SimpleNamespace())
+    monkeypatch.setattr(client, "request", fake_request)
+    monkeypatch.setattr(cli, "_examine_one", fake_examine_one)
+    monkeypatch.setattr(cli, "_harvest_follow", lambda *a, **k: None)
+    monkeypatch.setattr(cli.time, "sleep", lambda _: None)
+
+    args = SimpleNamespace(season="s3", quiet=True)
+    with pytest.raises(_StopLoop):
+        cli._examine_follow(args)
+
+    assert build_calls == ["s3-o00001"], f"exam build must run only once, got {build_calls}"
+    assert len(cancel_calls) == 2, f"cancel must be retried after transient failure, got {cancel_calls}"
+    assert "min_keep_rate" in cancel_calls[1]["reason"]
+
+
+def test_review9_remote_examiner_requires_verified_revision(monkeypatch):
+    """Review 9 P2 #5: remote `/v1/models` check rejects bare `Qwen/Qwen3-8B` without a
+    revision-qualified model ID or verified revision metadata."""
+    import io
+    import json
+    import urllib.request
+
+    from stet.exam.fresh import reason
+
+    repo = "Qwen/Qwen3-8B"
+    rev = "b968826d9c46dd6066d109eabc6255188de91218"
+
+    def mock_models(data_list):
+        body = json.dumps({"data": data_list}).encode()
+
+        class _Resp(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout=30: _Resp(body))
+
+    monkeypatch.delenv("STET_EXAMINER_LLM_MODEL", raising=False)
+    monkeypatch.delenv("STET_EXAMINER_LLM_REVISION", raising=False)
+
+    # 1. Bare model ID without revision metadata MUST be rejected.
+    mock_models([{"id": repo}])
+    with pytest.raises(RuntimeError, match="without verified revision"):
+        reason._verify_endpoint_model("http://127.0.0.1:8000/v1", repo, rev, {})
+
+    # 2. Even with STET_EXAMINER_LLM_MODEL=Qwen/Qwen3-8B, bare ID without metadata MUST be rejected.
+    monkeypatch.setenv("STET_EXAMINER_LLM_MODEL", repo)
+    with pytest.raises(RuntimeError, match="without verified revision"):
+        reason._verify_endpoint_model("http://127.0.0.1:8000/v1", repo, rev, {})
+    monkeypatch.delenv("STET_EXAMINER_LLM_MODEL", raising=False)
+
+    # 3. Bare model ID with WRONG revision metadata MUST be rejected.
+    mock_models([{"id": repo, "revision": "0000000000000000"}])
+    with pytest.raises(RuntimeError, match="reports revision"):
+        reason._verify_endpoint_model("http://127.0.0.1:8000/v1", repo, rev, {})
+
+    # 4. Revision-qualified deployment ID (`--served-model-name repo@rev`) is ACCEPTED.
+    mock_models([{"id": f"{repo}@{rev}"}])
+    assert reason._verify_endpoint_model("http://127.0.0.1:8000/v1", repo, rev, {}) == f"{repo}@{rev}"
+
+    # 5. Bare model ID with explicit matching revision metadata is ACCEPTED.
+    mock_models([{"id": repo, "revision": rev}])
+    assert reason._verify_endpoint_model("http://127.0.0.1:8000/v1", repo, rev, {}) == repo
+
+    # 6. Bare model ID with pinned HF snapshot path in `root` is ACCEPTED.
+    mock_models([{"id": repo, "root": f"/root/.cache/huggingface/hub/models--Qwen--Qwen3-8B/snapshots/{rev}"}])
+    assert reason._verify_endpoint_model("http://127.0.0.1:8000/v1", repo, rev, {}) == repo
+
+    # 7. Gate 4 hardening: conflicting explicit revision cannot be bypassed by matching `root`.
+    mock_models([{"id": repo, "revision": "deadbeef", "root": f"/cache/snapshots/{rev}"}])
+    with pytest.raises(RuntimeError, match="reports revision"):
+        reason._verify_endpoint_model("http://127.0.0.1:8000/v1", repo, rev, {})
+
+    # 8. Prefix-colliding `snapshots/<rev>extra` in `root` MUST be rejected.
+    mock_models([{"id": repo, "root": f"/cache/snapshots/{rev}extra"}])
+    with pytest.raises(RuntimeError, match="without verified revision"):
+        reason._verify_endpoint_model("http://127.0.0.1:8000/v1", repo, rev, {})
+
+    # 9. Revision-qualified ID with conflicting revision metadata MUST report revision mismatch.
+    mock_models([{"id": f"{repo}@{rev}", "revision": "deadbeef"}])
+    with pytest.raises(RuntimeError, match="reports revision"):
+        reason._verify_endpoint_model("http://127.0.0.1:8000/v1", repo, rev, {})
+
+    # 10. STET_EXAMINER_LLM_MODEL=repo@rev when endpoint only serves verified bare repo reports missing ID.
+    monkeypatch.setenv("STET_EXAMINER_LLM_MODEL", f"{repo}@{rev}")
+    mock_models([{"id": repo, "revision": rev}])
+    with pytest.raises(RuntimeError, match="does not include pinned model"):
+        reason._verify_endpoint_model("http://127.0.0.1:8000/v1", repo, rev, {})
+    monkeypatch.delenv("STET_EXAMINER_LLM_MODEL", raising=False)
+
+    # 11. `"data": null` raises RuntimeError cleanly rather than TypeError.
+    mock_models(None)
+    with pytest.raises(RuntimeError, match=r"serves \[\]"):
+        reason._verify_endpoint_model("http://127.0.0.1:8000/v1", repo, rev, {})
+
+

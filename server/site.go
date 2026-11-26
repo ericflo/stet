@@ -652,8 +652,12 @@ func trustOf(e EntryView) trustView {
 	case !e.Settled:
 		return trustView{0, "sealed", "Who ran it and what they measured are published when the round settles."}
 	case e.Void || e.NRuns == 0:
-		if strings.Contains(strings.ToLower(e.Reason), "training failed") {
+		low := strings.ToLower(e.Reason)
+		if strings.Contains(low, "training failed") {
 			return trustView{0, "training failed", "The training failed on the machines that tried to grade it, so this round does not count for it."}
+		}
+		if strings.Contains(low, "disagreed") {
+			return trustView{0, "disputed", "Verifiers disagreed on the measurement, so this round does not count for it."}
 		}
 		return trustView{0, "not run", "Nobody could run it, or check a run of it, so this round does not count for it."}
 	case !e.Valid && (strings.Contains(strings.ToLower(e.Reason), "diverg") || strings.Contains(strings.ToLower(e.Reason), "training failed")):

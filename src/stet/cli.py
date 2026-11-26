@@ -110,19 +110,27 @@ def resolve_round(args, offset: int = 0):
     """--round accepts 3 (practice round 3), g3 (gym round 3), or a full id like s2-o00012."""
     import re
 
-    from .spec import load_season, parse_round_id, practice_round
+    from .spec import CURRENT_SEASON, load_season, parse_round_id, practice_round
 
-    season = load_season(args.season)
+    explicit_season = getattr(args, "season", None)
     r = str(args.round)
     try:
         m = re.fullmatch(r"([pg]?)(\d+)", r)
         if m:
+            season = load_season(explicit_season or CURRENT_SEASON)
             kind, index = {"": "practice", "p": "practice", "g": "gym"}[m.group(1)], int(m.group(2))
         else:
             try:
-                _, kind, index = parse_round_id(r)
+                parsed_season, kind, index = parse_round_id(r)
             except Exception:
-                die(f"cannot parse round {r!r}; use 3 (practice), g3 (gym), or an id like {season.id}-o00003")
+                default_s = explicit_season or CURRENT_SEASON
+                die(f"cannot parse round {r!r}; use 3 (practice), g3 (gym), or an id like {default_s}-o00003")
+            if explicit_season and explicit_season != parsed_season:
+                die(f"round {r!r} belongs to season {parsed_season!r}, which conflicts with --season {explicit_season!r}")
+            try:
+                season = load_season(parsed_season)
+            except (FileNotFoundError, ValueError) as e:
+                die(f"season {parsed_season!r} for round {r!r} is not available: {e}")
         if kind == "official":
             from .client import fetch_round
 
@@ -488,7 +496,12 @@ def cmd_baseline(args):
     from . import data as stet_data
 
     subset = stet_data.round_exam_meta(rnd)
-    if subset.get("public_subset") and subset.get("total_items"):
+    if (
+        subset.get("public_subset")
+        and subset.get("total_items")
+        and base.get("exam_sha256") != rnd.exam_digest
+        and base["exam"].get("items") == subset.get("public_items")
+    ):
         base["exam_subset"] = subset
         item_desc = (
             f"{subset['public_items']:,} of {subset['total_items']:,} items "
@@ -752,7 +765,7 @@ def _examine_follow(args) -> None:
     """Every hour's harvest as it settles, and every open round's exam as soon as it is drawn."""
     import threading
 
-    from .client import need_key, request
+    from .client import ApiError, need_key, request
     from .exam.examine import FatalExamError
     from .spec import load_season
 
@@ -765,7 +778,8 @@ def _examine_follow(args) -> None:
     failed: dict[str, int] = {}
     again: dict[str, float] = {}  # when a round whose exam failed is tried next
     waiting: set[str] = set()
-    abandoned: set[str] = set()  # rounds that hit a deterministic FatalExamError and should not retry
+    abandoned: set[str] = set()  # rounds cancelled/closed after a deterministic FatalExamError
+    pending_cancel: dict[str, str] = {}  # round_id -> reason for unacknowledged FatalExamError cancels
     while True:
         try:
             rounds = request("GET", "/api/v1/rounds?limit=20").get("rounds") or []
@@ -773,28 +787,56 @@ def _examine_follow(args) -> None:
             out.line("", out.dim(f"the server did not answer ({e}); trying again in a minute"))
             rounds = []
         for x in sorted(rounds, key=lambda x: x["id"]):
-            if x.get("status") != "open" or x.get("exam_digest") or x["id"] in abandoned or time.time() < again.get(x["id"], 0):
+            rid = x["id"]
+            if x.get("status") != "open" or x.get("exam_digest"):
+                pending_cancel.pop(rid, None)
+                continue
+            if rid in abandoned or time.time() < again.get(rid, 0):
+                continue
+            if rid in pending_cancel:
+                try:
+                    request("POST", f"/api/v1/admin/rounds/{rid}/cancel", {"reason": pending_cancel[rid][:280]}, key=key, timeout=60)
+                    pending_cancel.pop(rid, None)
+                    abandoned.add(rid)
+                    out.line("", out.dim(f"{rid}: round cancelled after retry"))
+                except ApiError as ce:
+                    if ce.status in (404, 409):
+                        pending_cancel.pop(rid, None)
+                        abandoned.add(rid)
+                    else:
+                        out.line("", out.bad(f"{rid}: cancel retry failed ({ce}); will retry on next poll"))
+                except Exception as ce:
+                    out.line("", out.bad(f"{rid}: cancel retry failed ({ce}); will retry on next poll"))
                 continue
             try:
-                _examine_one(args, x["id"])
+                _examine_one(args, rid)
             except _NotYet as e:  # said once, and looked at again every time round
-                if x["id"] not in waiting:
-                    waiting.add(x["id"])
+                if rid not in waiting:
+                    waiting.add(rid)
                     out.line("", out.dim(str(e)))
             except FatalExamError as e:
                 # Deterministic synthesis/coverage failure: retrying temp=0 on the same harvests
-                # would repeat the same 20-minute build until timeout. Cancel the round cleanly now.
-                out.line("", out.bad(f"{x['id']}: {e}; cancelling round rather than retrying identical inputs"))
+                # would repeat the same 20-minute build until timeout. Cancel the round cleanly now,
+                # and if the cancel request transiently fails, retain the reason and retry cancelling
+                # without repeating the build.
+                reason = str(e)
+                out.line("", out.bad(f"{rid}: {reason}; cancelling round rather than retrying identical inputs"))
                 try:
-                    request("POST", f"/api/v1/admin/rounds/{x['id']}/cancel", {"reason": str(e)[:280]}, key=key, timeout=60)
-                    abandoned.add(x["id"])
+                    request("POST", f"/api/v1/admin/rounds/{rid}/cancel", {"reason": reason[:280]}, key=key, timeout=60)
+                    abandoned.add(rid)
+                except ApiError as ce:
+                    if ce.status in (404, 409):
+                        abandoned.add(rid)
+                    else:
+                        pending_cancel[rid] = reason
+                        out.line("", out.bad(f"{rid}: cancel failed ({ce}); will retry cancellation without rebuilding exam"))
                 except Exception as ce:
-                    out.line("", out.bad(f"{x['id']}: cancel failed ({ce}); will not retry exam automatically"))
-                    abandoned.add(x["id"])
+                    pending_cancel[rid] = reason
+                    out.line("", out.bad(f"{rid}: cancel failed ({ce}); will retry cancellation without rebuilding exam"))
             except (Exception, SystemExit) as e:  # tried again, less and less often, for as long as the round is open
-                n = failed[x["id"]] = failed.get(x["id"], 0) + 1
-                again[x["id"]] = time.time() + _again_in(n)
-                out.line("", out.bad(f"{x['id']}: {e}") + out.dim(f" (try {n}; again in {_again_in(n)}s)"))
+                n = failed[rid] = failed.get(rid, 0) + 1
+                again[rid] = time.time() + _again_in(n)
+                out.line("", out.bad(f"{rid}: {e}") + out.dim(f" (try {n}; again in {_again_in(n)}s)"))
         time.sleep(20)
 
 
@@ -1051,9 +1093,9 @@ def cmd_agents(args):
 
 
 def add_round_args(p, default_round="0"):
-    p.add_argument("--round", default=default_round, help="3 = practice round 3, g3 = gym round 3, or a round id like s2-o00012 (default: 0)")
+    p.add_argument("--round", default=default_round, help="3 = practice round 3, g3 = gym round 3, or a round id like s3-o00012 (default: 0)")
     p.add_argument("--scale", default=None, help="nano, micro or standard (default: nano)")
-    p.add_argument("--season", default=CURRENT_SEASON, help=argparse.SUPPRESS)
+    p.add_argument("--season", default=None, help=argparse.SUPPRESS)
     p.add_argument("--device", default=None, help="torch device (default: best available)")
     p.add_argument("--json", action="store_true", help="print the result as JSON on stdout")
     p.add_argument("-q", "--quiet", action="store_true")

@@ -243,13 +243,45 @@ def language_cells(
 Pair = tuple[dict, float]  # an item's row of item_table, and its gain
 
 
+def weighted_trimmed_mean(values: list[float], weights: list[float], trim: float = TRIM) -> float:
+    """Weighted trimmed mean cutting `trim` of the total weight from each tail.
+
+    Sorting by value groups identical values into contiguous weight blocks, so the trimmed
+    result is completely invariant to tie order, reduces identically to `trimmed_mean` when
+    weights are equal and `n * trim` is an integer, and prevents tiny-weight micro-languages
+    from crowding out a heavier pooled language at the tail.
+    """
+    n = len(values)
+    total_w = sum(weights)
+    if n < 3 or trim <= 0 or trim >= 0.5 or total_w <= 0:
+        return sum(w * x for w, x in zip(weights, values, strict=True)) / total_w
+    lo, hi = total_w * trim, total_w * (1.0 - trim)
+    if hi <= lo:
+        return sum(w * x for w, x in zip(weights, values, strict=True)) / total_w
+    pairs = sorted(zip(values, weights, strict=True), key=lambda p: p[0])
+    cum = 0.0
+    num = []
+    den = []
+    for val, w in pairs:
+        nxt = cum + w
+        kept = min(nxt, hi) - max(cum, lo)
+        if kept > 0.0:
+            num.append(kept * val)
+            den.append(kept)
+        cum = nxt
+    den_sum = sum(den)
+    if den_sum <= 0.0:
+        return sum(w * x for w, x in zip(weights, values, strict=True)) / total_w
+    return sum(num) / den_sum
+
+
 def _balanced(
     pairs: list[Pair], plan: Plan, item_weights: list[float] | None = None
 ) -> tuple[float, dict[str, float]]:
     """Formats and kinds of task with equal weight, each a trimmed mean of its clipped gains; one
     with fewer than `small` items in proportion to how many it has. When `item_weights` is given
     (the pooled small-language cell 'other'), each item's clipped gain is weighted by its
-    language's crawl share so tiny languages never outweigh larger pooled languages."""
+    language's crawl share with the same `plan.trim` weight-tail trim."""
     by: dict[str, list[float]] = defaultdict(list)
     by_w: dict[str, list[float]] = defaultdict(list)
     for idx, (row, g) in enumerate(pairs):
@@ -263,8 +295,7 @@ def _balanced(
         if item_weights is None:
             strata[k] = trimmed_mean(cl, plan.trim)
         else:
-            ws = by_w[k]
-            strata[k] = sum(w * x for w, x in zip(ws, cl, strict=True)) / sum(ws)
+            strata[k] = weighted_trimmed_mean(cl, by_w[k], plan.trim)
     w = {k: min(len(by[k]), plan.small) for k in strata}
     return sum(w[k] * strata[k] for k in strata) / sum(w.values()), strata
 

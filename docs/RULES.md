@@ -217,11 +217,15 @@ or response matches the round's training corpus is dropped.
 **Only validated parts decide the score.** The season names every part of the exam: those in
 the table, and no other. Before the season, every part is validated for multi-seed stability,
 resistance to QA-spam and over-filtering, and agreement with 1B pretraining rankings
-(DataDecide). In Season 3, the three fresh reasoning pillars (`explain`, `infer`, `synthesis`)
-passed DataDecide (`49/66` and `46/66`, mean `47.5/66`) and carry **100% of the official
-score**, while the four human-written twin-context pillars (`24/66` and `34/66`, and blind to
-missing non-English training data) carry **0% weight** and are sat and published alongside the
-score purely as diagnostic telemetry until a human-written measure passes DataDecide (see
+(DataDecide). In Season 3, the combined three-pillar reasoning score (`explain`, `infer`,
+`synthesis`) cleared DataDecide across two independent draws (`49/66` on Draw 1, `46/66` on
+Draw 2, `47/66` 2-draw combined; per-pillar: `explain` `49/66` & `52/66`, `infer` `47/66` &
+`47/66`, `synthesis` `45/66` on Draw 1 with 80 English items vs `34/66` on Draw 2 where a
+pre-fix placeholder bug left only 8 English items — fixed before launch, giving 47 English
+synthesis items on Draw B) and carries **100% of the official score**, while the four
+human-written twin-context pillars (`24/66` and `34/66`, and blind to missing non-English
+training data) carry **0% weight** and are sat and published alongside the score purely as
+diagnostic telemetry until a human-written measure passes DataDecide (see
 [Experiments](EXPERIMENTS.md)).
 
 **The score of an item** is measured in **bits per byte** everywhere:
@@ -231,7 +235,11 @@ score purely as diagnostic telemetry until a human-written measure passes DataDe
   the exact same source, language, and boundary class — so surface style and unconditional
   passage ease cancel identically;
 - on fresh harvest-derived reasoning (`kind="answer"`), how likely the student finds the
-  multi-sentence explanation, inference, or synthesis given the excerpt and prompt.
+  multi-sentence explanation, inference, or synthesis given the excerpt and prompt (see
+  [Experiments](EXPERIMENTS.md) for the rotated-excerpt control showing that while absolute NLL
+  depends strongly on the excerpt [`~0.14 bpb`], between-curator differences at `65.5M` tokens on
+  frozen-bottom `ERNIE-4.5-0.3B` are driven primarily by prompt-conditioned multilingual
+  answer-prose modeling).
 An item's bits are never put over fewer than 16 bytes, so a short answer never dominates a
 paragraph. The exam's writing has the white space of the crawl's own text: one space
 between words, one line end between lines, no empty lines and no tabs.
@@ -247,9 +255,9 @@ own group (the round page lists omitted kinds); an exam is refused only if a sco
 Inside each kind, every language counts by its share of the round's corpus, then every format.
 No share rests on one or two items: a language or a format with fewer than eight items counts in
 proportion, and a part's small languages are pooled into `"other"` with each item weighted by
-its own language's crawl share (so tiny micro-languages cannot outweigh larger pooled languages
-such as Japanese or Chinese). A gain on an item is clipped to a few robust widths, so that no
-handful of items decides anything.
+its own language's crawl share and trimmed symmetrically on the same 10% weight tails as major
+languages (so neither tiny micro-languages nor single extreme outliers can sway the pooled cell).
+A gain on an item is clipped to a few robust widths, so that no handful of items decides anything.
 
 When the round settles, its exam is published: openly licensed Wikipedia items whole, the
 organisers' generated teacher prompt, answer, wrapper ID, and source-excerpt hash for every
@@ -493,15 +501,21 @@ are graded by **verifiers**: anyone who runs `stet verify`.
 - **Each script is graded by someone other than the verifier who wrote it.** Its gain is
   the median of the established verifiers' grades, each against the round's unedited
   student. Two honest NVIDIA machines agree to within a small tolerance *(calibrated at
-  0.012 bits per byte from RTX 5090 / 4090 / 3090 cross-architecture runs; see
+  0.012 bits per byte from `standard`-scale RTX 5090 / 4090 / 3090 cross-architecture runs,
+  with `large` tolerances extrapolated from `standard`; see
   [Experiments](EXPERIMENTS.md))*. The first two established graders of a round
   (`baselines.per_round = 2`) are each asked to train the unedited student as well; the rest
   are not, and their grades are measured against the median of theirs. (Season 1 trained one
   on every machine: a third of all its trainings.) A measurement of the unedited student must
   agree with the others' to within 0.015 bits per byte, or its grade is turned away and
-  listed with the round. A machine that is not yet established always trains its own: that is
+  listed with the round; if two baselines disagree so far that neither agrees with their
+  midpoint, the round requests a third independent baseline and closes unrated (no curator
+  penalty) if unresolved. A machine that is not yet established always trains its own: that is
   how it is checked. When two established grades of a script differ by more than the grade
-  tolerance, a third is taken. When both runs write the same script, byte for byte, it is
+  tolerance, or disagree on the script's tokenized stream digest (`tokens_sha256`), a deciding
+  grade is taken; if a tokenized-stream disagreement remains unresolved without a majority
+  when time runs out, the entry closes unrated (`void`, no curator penalty). When both runs
+  write the same script, byte for byte, it is
   nobody's own and either runner may grade it: neither could have made it up. Established
   verifiers who come free before the exam is posted grade its scripts again while it is made,
   up to four grades of each, and those count too. One that has trained its grade before the

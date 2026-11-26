@@ -255,10 +255,11 @@ Inside each group, every pillar counts the same:
   format with fewer than eight items counts in proportion. `pillars` shows every scored and
   diagnostic pillar.
 - **Only validated parts decide the score.** The season names every part of the exam: the
-  pillars above, and nothing else. The three reasoning pillars passed DataDecide 1B ranking
-  validation (`49/66` and `46/66` across two draws) and carry `100%` of the official score; the
-  four human-written twin-context kinds carry `0%` weight and stay visible as published
-  diagnostics until a human-written measure clears DataDecide.
+  pillars above, and nothing else. The combined three-pillar reasoning score cleared DataDecide
+  1B ranking validation (`49/66` and `46/66` across two draws; see `docs/EXPERIMENTS.md` for
+  per-pillar figures) and carries `100%` of the official score; the four human-written
+  twin-context kinds carry `0%` weight and stay visible as published diagnostics until a
+  human-written measure clears DataDecide.
 - **Practice rounds work out of the box.** Without harvested hours, `stet run` sits a bundled
   openly-licensed CC-BY-SA Wikipedia practice pack (both scored reasoning and diagnostic
   twin-context comprehension); once you run `stet harvest`, practice rounds sit fresh
@@ -534,23 +535,29 @@ corpus on Season 3's 100%-reasoning score, in bits per byte):
 - **Surface mimicry and QA-spam no longer buy the exam.** In Season 2's raw-perplexity exam,
   `mimic` beat `fineweb2` (+0.10 vs +0.05) by matching surface style. Under Season 3's
   100%-fresh harvest-derived reasoning exam (`ERNIE-4.5-0.3B` frozen bottom half, 65.5M tokens
-  + 1-epoch SFT probe), `fineweb2` (`+0.0373` on Phase 9 / `+0.0542` on Draw B) and `reader`
-  v2 (`+0.0381` on Phase 9) beat `mimic` (`+0.0291`, ~74–79% of `fineweb2`), QA-spam
-  (`-0.0003`), spliced Q&A (`-0.0685`), English-only (`-0.1823`), and extreme over-filtering
-  (`-1.0095`).
+  + 1-epoch SFT probe; final pooled-trim scorer), `fineweb2` (`+0.0369` on Phase 9 / `+0.0542`
+  on Draw B) and `reader` v2 (`+0.0383` on Phase 9) beat `mimic` (`+0.0311`, ~84% of
+  `fineweb2`), QA-spam (`+0.0020`, ~18–19× below `fineweb2`/`reader` v2), spliced Q&A
+  (`-0.0678`), English-only (`-0.1850`), and extreme over-filtering (`-0.9867`).
 - **CCNet-head perplexity pruning is a strong neural baseline.** Filtering Gopher-cleaned
   multilingual Common Crawl to the lowest-perplexity ~29% of documents (matching the crawl's
-  language mix) scored `+0.0742` (Qwen3-0.6B scorer) and `+0.0725` (independent ERNIE-4.5-0.3B
-  scorer) on Draw B reasoning (`+0.0566` / `+0.0536` on Phase 9) — +32–40% above heuristic
-  `fineweb2`, and 4.2×–7.7× above `fineweb2` on the 0%-weight human-written diagnostics too.
-  However, uncapped lowest-PPL also admits boilerplate/TOS and AI-SEO prose; on English
-  DataDecide recipes, strong quality classifiers (`FineWeb-Edu` `+0.1056`, `DCLM-qc-10p`
-  `+0.0871`) retain clear headroom above generic web filtering.
-- **Agreement with 1B pretraining.** Across all 12 published DataDecide recipes (English subset),
-  Season 3's scored reasoning exam cleared `49/66` and `46/66` pairwise agreement (mean `47.5/66`,
-  `11/11` filtered-vs-unfiltered pairs right, 3% overfiltering trap `#11/12`) across two
-  independent draws; see `docs/EXPERIMENTS.md` for full numbers, including the known
-  educational-prose lean favoring `FineWeb-Edu`.
+  language mix) scored `+0.0746` (Qwen3-0.6B scorer) and `+0.0739` (independent ERNIE-4.5-0.3B
+  scorer) on Draw B reasoning (`+0.0562` / `+0.0551` on Phase 9) — +36–41% above heuristic
+  `fineweb2`, and 1.7×–3.0× above `fineweb2` on the 0%-weight `code_share=0.15` human-written
+  diagnostics too. However, uncapped lowest-PPL also admits boilerplate/TOS and AI-SEO prose;
+  on English DataDecide recipes, strong quality classifiers (`FineWeb-Edu` `+0.1056`,
+  `DCLM-qc-10p` `+0.0871`) retain clear headroom above generic web filtering.
+- **Agreement with 1B pretraining & what the exam actually rewards.** Across all 12 published
+  DataDecide recipes (English subset), Season 3's scored reasoning exam cleared `49/66` and
+  `46/66` pairwise agreement (`47/66` 2-draw combined, `11/11` filtered-vs-unfiltered pairs
+  right, 3% overfiltering trap `#12/12` and `#11/12`) across two independent draws. A 4× RTX
+  5090 `standard`-scale rotated-excerpt control (`docs/EXPERIMENTS.md`) showed that while every
+  student uses the source excerpt in absolute terms (`~0.14 bpb` worse when excerpts are rotated),
+  `80%–109%` of between-curator gain survives excerpt rotation or removal on frozen-bottom
+  `ERNIE-4.5-0.3B` at `65.5M` tokens — meaning gains primarily reflect clean multilingual
+  explanatory/analytical prose modeling rather than excerpt-grounded deduction (explaining both
+  the educational-prose lean favoring `FineWeb-Edu` and why `fineweb2`, `reader`, and CCNet-head
+  low-PPL outperform `mimic`, `adv_qa_spam`, and `adv_splice_qa`).
 - **Balance every language — watch out for English-rubric bias.** Keeping every language and
   cleaning each (`fineweb2`, `reader`) beats English-only corpora by >0.20 bpb on reasoning.
   When using an English-prompted LLM judge (like `examples/reader`), normalize scores per
@@ -566,7 +573,7 @@ corpus on Season 3's 100%-reasoning score, in bits per byte):
   out with a range edit (`"k"`) are allowed, however short the lines that are kept; make sure
   they were not worth keeping.
 - **Repeating costs more as the student grows.** Keeping a tiny slice and repeating it dozens
-  of times collapses generalization (`adv_overfilter`: `-1.0095` bpb on reasoning at 65.5M tokens).
+  of times collapses generalization (`adv_overfilter`: `-0.9867` bpb on reasoning at 65.5M tokens).
 - **Do not train in raw rank order.** The corpus arrives already shuffled. If you rank
   documents, shuffle inside quality bands (a gentle curriculum) or shuffle what you keep.
 

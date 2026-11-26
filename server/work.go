@@ -137,6 +137,7 @@ func (a *App) work(s *State) Work {
 		closing := j.closing(states)
 		wr := WorkRound{ID: roundID(a.season.ID, rd.Idx), Entries: len(states), ExamAt: rd.ExamAt, DrawnAt: rd.DrawnAt, ExamDue: examDue(s, rd),
 			BaselinesWanted: j.baselinesWanted(rd)}
+		tieBreakOffer := false
 		for _, st := range states {
 			wr.EditsUnderWay += len(st.LiveEdits)
 			if len(st.LiveEdits) == 0 && j.anyone(st, nil) {
@@ -147,7 +148,11 @@ func (a *App) work(s *State) Work {
 			}
 			for _, o := range j.offers(st, fresh, closing) {
 				if o.kind == "grade" && o.required {
-					wr.GradesWanted++
+					if o.baselineTie {
+						tieBreakOffer = true
+					} else {
+						wr.GradesWanted++
+					}
 				}
 			}
 			if !examPosted(rd) {
@@ -162,6 +167,9 @@ func (a *App) work(s *State) Work {
 			if j.mayRun(st, runner) {
 				wr.RunsWanted++
 			}
+		}
+		if wr.GradesWanted == 0 && wr.BaselinesWanted > 0 && tieBreakOffer {
+			wr.GradesWanted = 1
 		}
 		out.Rounds = append(out.Rounds, wr)
 	}

@@ -138,6 +138,358 @@ func TestSeason3DefaultTwoBaselinesPerRound(t *testing.T) {
 	}
 }
 
+// Review 9 P1 #2: when Season 3's two baseline graders disagree beyond tolerance (e.g. 6.00 vs
+// 6.08 against 0.015 tol), zero verifiers agree with the 6.04 midpoint. The server must NOT settle
+// rated against 6.04: it requests a third independent baseline even when all ordinary grading jobs
+// are complete, resolves cleanly if one arrives, and closes the round unrated (with zero curator
+// penalty and BaselineLoss == nil) if the disagreement cannot be resolved before ReplicaWait.
+func TestDisputedTwoBaselinesRequestsThirdAndResolvesOrClosesUnrated(t *testing.T) {
+	t.Run("resolves_with_third_baseline", func(t *testing.T) {
+		w, anchor, idx := toGrade(t, 3)
+		w.app.season.Tolerance[w.cfg.Scale] = Tolerance{Grade: 0.012, Baseline: 0.015, Run: 0.015}
+		g := w.volunteers("bob", "carol", "dave", "erin")
+		c0 := w.asked(g[0], true)
+		c1 := w.asked(g[1], true)
+		c2 := w.asked(g[2], false)
+		if code, status := w.send(g[2], c2, 5.5, 0); code != 200 || status != "pending" {
+			t.Fatalf("dave's grade: HTTP %d %s", code, status)
+		}
+		if code, status := w.send(g[0], c0, 5.6, 6.00); code != 200 || status != "pending" {
+			t.Fatalf("bob's grade: HTTP %d %s", code, status)
+		}
+		// Carol reports 6.08: midpoint is 6.04 (0.04 > 0.015 from BOTH bob and carol -> 0 agree!).
+		if code, status := w.send(g[1], c1, 5.6, 6.08); code != 200 || status != "pending" {
+			t.Fatalf("carol's disagreeing baseline must NOT settle round: HTTP %d %s", code, status)
+		}
+		w.app.st.view(func(s *State) {
+			rd := s.Rounds[idx]
+			if rd.Status != "open" || rd.BaselineN != 0 || !w.app.baselineDisputed(s, rd) {
+				t.Fatalf("disputed 2-baseline round state: status=%s baseN=%d disputed=%v", rd.Status, rd.BaselineN, w.app.baselineDisputed(s, rd))
+			}
+		})
+		if wk := w.work(anchor).Rounds[0]; wk.BaselinesWanted == 0 || wk.GradesWanted != 1 {
+			t.Fatalf("work must request exactly 1 tie-breaking baseline grade (not N scripts): %+v", wk)
+		}
+		// Erin (4th established verifier) claims: must be handed a required grade job asking for baseline!
+		c3 := w.asked(g[3], true)
+		erinLoss := 5.6
+		if c3.Job.Editor.Name == c2.Job.Editor.Name {
+			erinLoss = 5.5
+		}
+		if code, status := w.send(g[3], c3, erinLoss, 6.01); code != 200 {
+			t.Fatalf("erin's tie-breaking baseline (6.01): HTTP %d %s", code, status)
+		}
+		// Now bob (6.00) and erin (6.01) agree at 6.005, while carol (6.08) is oddOut.
+		// If erin did not already grade carol's script, bob re-grades it and settles the round.
+		if c3.Job.Editor.Name != c1.Job.Editor.Name {
+			cRegrade := w.claim(g[0], false)
+			if cRegrade.Job == nil || cRegrade.Job.Editor.Name != c1.Job.Editor.Name {
+				t.Fatalf("expected bob to re-grade carol's oddOut script (%s), got %+v", c1.Job.Editor.Name, cRegrade.Job)
+			}
+			if code, status := w.send(g[0], cRegrade, 5.6, 6.00); code != 200 || status != "settled" {
+				t.Fatalf("bob's re-grade of carol's script: HTTP %d %s", code, status)
+			}
+		}
+		w.check()
+		w.app.st.view(func(s *State) {
+			rd := s.Rounds[idx]
+			if rd.Status != "settled" || rd.BaselineLoss == nil || math.Abs(*rd.BaselineLoss-6.005) > 1e-6 || rd.BaselineN != 2 {
+				t.Fatalf("resolved round baseline: status=%s loss=%v n=%d", rd.Status, rd.BaselineLoss, rd.BaselineN)
+			}
+			for _, en := range s.inRound[idx] {
+				if !s.rated(en) || !en.Valid {
+					t.Fatalf("resolved round entry should be rated & valid: %+v", en)
+				}
+			}
+		})
+	})
+
+	t.Run("closes_unrated_when_unresolved", func(t *testing.T) {
+		w, _, idx := toGrade(t, 3)
+		w.app.season.Tolerance[w.cfg.Scale] = Tolerance{Grade: 0.012, Baseline: 0.015, Run: 0.015}
+		g := w.volunteers("bob", "carol", "dave")
+		beforeAgreed := map[string]int{}
+		for _, a := range g {
+			beforeAgreed[a.handle] = w.account(a.handle).Agreed
+		}
+		c0 := w.asked(g[0], true)
+		c1 := w.asked(g[1], true)
+		c2 := w.asked(g[2], false)
+		if code, _ := w.send(g[2], c2, 5.5, 0); code != 200 {
+			t.Fatalf("dave's grade: HTTP %d", code)
+		}
+		if code, _ := w.send(g[0], c0, 5.6, 6.00); code != 200 {
+			t.Fatalf("bob's grade: HTTP %d", code)
+		}
+		if code, status := w.send(g[1], c1, 5.6, 6.08); code != 200 || status != "pending" {
+			t.Fatalf("carol's disagreeing baseline must keep round open: HTTP %d %s", code, status)
+		}
+		// Nobody comes forward with a 3rd baseline: advance past ReplicaWait so the round closes unrated.
+		w.pass(w.cfg.ReplicaWait + time.Minute)
+		w.app.st.view(func(s *State) {
+			rd := s.Rounds[idx]
+			if rd.Status != "settled" || rd.BaselineLoss != nil || rd.BaselineN != 0 {
+				t.Fatalf("unresolved disputed-baseline round must settle with nil baseline: status=%s loss=%v n=%d", rd.Status, rd.BaselineLoss, rd.BaselineN)
+			}
+			for _, en := range s.inRound[idx] {
+				if s.rated(en) || !en.Void || !en.Unattended || en.Valid || en.Gain != 0 {
+					t.Fatalf("unresolved baseline entry must be void+unattended+unrated: %+v", en)
+				}
+				if failing(s, en.EditorID) || roundsRun(s, en.EditorID) != 0 {
+					t.Fatalf("unresolved baseline round held against curator: failing=%v roundsRun=%d", failing(s, en.EditorID), roundsRun(s, en.EditorID))
+				}
+				if en.Detail == nil || len(en.Detail.Verifiers) == 0 || en.NResults == 0 {
+					t.Fatalf("unresolved baseline entry should record verifiers in detail: %+v", en.Detail)
+				}
+				for _, run := range en.Runs {
+					for _, gr := range run.Grades {
+						if gr.Verdict != "disputed" || gr.Gain != nil {
+							t.Fatalf("unresolved baseline grade must be disputed with nil gain (no midpoint gain): %+v", gr)
+						}
+					}
+				}
+				for _, r := range s.results(idx, en.EditorID) {
+					if r.Score != nil || len(r.BySource) > 0 {
+						t.Fatalf("unresolved baseline result kept midpoint score in DB: score=%v bySource=%v", r.Score, r.BySource)
+					}
+				}
+			}
+		})
+		if b := w.app.board(); b.RecordID != "" || len(b.Entries) != 0 {
+			t.Fatalf("unresolved baseline round leaked into board/record: record=%q entries=%d", b.RecordID, len(b.Entries))
+		}
+		for _, a := range g {
+			acct := w.account(a.handle)
+			if acct.Agreed != beforeAgreed[a.handle] || acct.Strikes != 0 {
+				t.Fatalf("grader %s got credit or strike on unresolved baseline round: %+v", a.handle, acct)
+			}
+		}
+		if code, page := w.page("/rounds/" + roundID(w.app.season.ID, idx)); code != 200 || !strings.Contains(strings.ToLower(page), "disputed") {
+			t.Fatalf("round page for disputed baseline: HTTP %d", code)
+		}
+		w.check()
+	})
+
+	t.Run("three_way_baseline_disagreement_closes_uniformly", func(t *testing.T) {
+		w, _, idx := toGrade(t, 3)
+		w.app.season.Tolerance[w.cfg.Scale] = Tolerance{Grade: 0.012, Baseline: 0.015, Run: 0.015}
+		g := w.volunteers("bob", "carol", "erin")
+		c0 := w.asked(g[0], true)
+		c1 := w.asked(g[1], true)
+		if code, _ := w.send(g[0], c0, 5.6, 6.00); code != 200 {
+			t.Fatalf("bob's grade: HTTP %d", code)
+		}
+		if code, _ := w.send(g[1], c1, 5.6, 6.08); code != 200 {
+			t.Fatalf("carol's grade: HTTP %d", code)
+		}
+		// Erin supplies a 3rd baseline at 6.04: median(6.00, 6.04, 6.08) = 6.04, so only 1
+		// baseline agrees within 0.015 (bob and carol are both oddOut -> still disputed!).
+		c2 := w.asked(g[2], true)
+		if code, status := w.send(g[2], c2, 5.6, 6.04); code != 200 || status != "pending" {
+			t.Fatalf("erin's 3-way-splitting baseline must keep round open: HTTP %d %s", code, status)
+		}
+		w.pass(w.cfg.ReplicaWait + time.Minute)
+		w.app.st.view(func(s *State) {
+			rd := s.Rounds[idx]
+			if rd.Status != "settled" || rd.BaselineLoss != nil || rd.BaselineN != 0 {
+				t.Fatalf("3-way disputed baseline round: status=%s loss=%v n=%d", rd.Status, rd.BaselineLoss, rd.BaselineN)
+			}
+			for _, en := range s.inRound[idx] {
+				if !en.Void || !en.Unattended || en.Valid || !strings.Contains(en.Reason, "disagreed on the round's unedited baseline") {
+					t.Fatalf("entry %s must close uniformly as disputed baseline (not giveUp): %+v", en.EditorID, en)
+				}
+				for _, run := range en.Runs {
+					for _, gr := range run.Grades {
+						if gr.Verdict != "disputed" || gr.Gain != nil {
+							t.Fatalf("3-way disputed baseline grade leaked midpoint gain: %+v", gr)
+						}
+					}
+				}
+				for _, r := range s.results(idx, en.EditorID) {
+					if r.Score != nil || len(r.BySource) > 0 {
+						t.Fatalf("3-way disputed baseline result kept score in DB: %+v", r)
+					}
+				}
+			}
+		})
+		w.check()
+	})
+}
+
+// Gate 4 regression coverage for tokens_sha256 tie interactions with failed runs, second valid runs,
+// and strict invalid majorities.
+func TestTokensTieEdgeCases(t *testing.T) {
+	t.Run("unvouched_failed_edit_plus_tokens_tie_voids_unattended", func(t *testing.T) {
+		pub, priv := newKey()
+		w := newWorld(t, pub)
+		w.cfg.RunsPerEntry = 2
+		_ = w.join("anchor-one", priv)
+		runners := w.volunteers("run-a", "run-b")
+		graders := w.volunteers("gr1", "gr2")
+		w.submit(w.join("owner-0", nil), "entry-0", "print(0)")
+		idx := w.drawWithoutExam()
+
+		// Volunteer run-a writes a valid script; volunteer run-b reports a failed edit.
+		cA := w.claim(runners[0], true)
+		if cA.Job == nil || cA.Job.Kind != "edit" {
+			t.Fatalf("run-a edit claim: %+v", cA.Job)
+		}
+		if code, _ := w.edit(runners[0], cA, "0\n1\n2\n"); code != 200 {
+			t.Fatalf("run-a script: HTTP %d", code)
+		}
+		cB := w.claim(runners[1], true)
+		if cB.Job == nil || cB.Job.Kind != "edit" {
+			t.Fatalf("run-b edit claim: %+v", cB.Job)
+		}
+		if code, _ := w.edit(runners[1], cB, ""); code != 200 {
+			t.Fatalf("run-b failed edit: HTTP %d", code)
+		}
+		g1 := w.claimEarly(graders[0])
+		g2 := w.claimEarly(graders[1])
+		w.exam(idx)
+
+		// Two established graders disagree on tokens_sha256 for run-a's script.
+		p1 := w.result(g1, 5.5, 6.0)
+		p1["script"].(map[string]any)["tokens_sha256"] = strings.Repeat("a", 64)
+		p2 := w.result(g2, 5.5, 6.0)
+		p2["script"].(map[string]any)["tokens_sha256"] = strings.Repeat("b", 64)
+		if code := graders[0].do("POST", fmt.Sprintf("/api/v1/jobs/%d/result", g1.Job.ID), p1, nil); code != 200 {
+			t.Fatalf("g1 grade: HTTP %d", code)
+		}
+		if code := graders[1].do("POST", fmt.Sprintf("/api/v1/jobs/%d/result", g2.Job.ID), p2, nil); code != 200 {
+			t.Fatalf("g2 grade: HTTP %d", code)
+		}
+
+		// Time runs out unresolved: dropping run-a must NOT leave volunteer run-b's failed edit
+		// as a rated invalid entry that penalizes the curator.
+		w.pass(w.cfg.ReplicaWait + time.Minute)
+		w.app.st.view(func(s *State) {
+			en := s.inRound[idx][0]
+			if en.Status != "settled" || !en.Void || !en.Unattended || en.Valid || s.rated(en) {
+				t.Fatalf("expected void+unattended entry, got %+v", en)
+			}
+			if failing(s, en.EditorID) || roundsRun(s, en.EditorID) != 0 {
+				t.Fatalf("curator penalized by unvouched failed edit after tokens tie: failing=%v roundsRun=%d", failing(s, en.EditorID), roundsRun(s, en.EditorID))
+			}
+		})
+		w.check()
+	})
+
+	t.Run("valid_run_not_polluted_by_dropped_tokens_tie_run", func(t *testing.T) {
+		pub, priv := newKey()
+		w := newWorld(t, pub)
+		w.cfg.RunsPerEntry = 2
+		_ = w.join("anchor-one", priv)
+		runners := w.volunteers("run-a", "run-b")
+		graders := w.volunteers("gr1", "gr2", "gr3")
+		w.submit(w.join("owner-0", nil), "entry-0", "print(0)")
+		idx := w.drawWithoutExam()
+
+		// Run 1 posts S1; claim 2 early grades on S1 before Run 2 posts S2 so S1 deterministically
+		// gets g1 & g2 (conflicting tokens_sha256) and S2 gets g3 (clean grade).
+		cA := w.claim(runners[0], true)
+		if code, _ := w.edit(runners[0], cA, "0\n1\n"); code != 200 {
+			t.Fatalf("run-a script: HTTP %d", code)
+		}
+		g1 := w.claimEarly(graders[0])
+		g2 := w.claimEarly(graders[1])
+		cB := w.claim(runners[1], true)
+		if code, _ := w.edit(runners[1], cB, "2\n3\n"); code != 200 {
+			t.Fatalf("run-b script: HTTP %d", code)
+		}
+		g3 := w.claimEarly(graders[2])
+		if g3.Job == nil || g3.Job.Script.SHA256 == g1.Job.Script.SHA256 {
+			t.Fatalf("expected g3 to grade S2, got %+v", g3.Job)
+		}
+		w.exam(idx)
+
+		p1 := w.result(g1, 5.5, 6.0)
+		p1["script"].(map[string]any)["tokens_sha256"] = strings.Repeat("a", 64)
+		p2 := w.result(g2, 5.5, 6.0)
+		p2["script"].(map[string]any)["tokens_sha256"] = strings.Repeat("b", 64)
+		p3 := w.result(g3, 5.4, 6.0)
+		p3["script"].(map[string]any)["tokens_sha256"] = strings.Repeat("c", 64)
+		for i, pair := range []struct {
+			a *actor
+			c *claimed
+			p map[string]any
+		}{{graders[0], g1, p1}, {graders[1], g2, p2}, {graders[2], g3, p3}} {
+			if code := pair.a.do("POST", fmt.Sprintf("/api/v1/jobs/%d/result", pair.c.Job.ID), pair.p, nil); code != 200 {
+				t.Fatalf("grade %d: HTTP %d", i, code)
+			}
+		}
+		w.pass(w.cfg.ReplicaWait + time.Minute)
+		w.app.st.view(func(s *State) {
+			en := s.inRound[idx][0]
+			if en.Status != "settled" || !en.Valid || en.Void || en.NRuns != 1 {
+				t.Fatalf("expected valid 1-run entry from S2, got %+v", en)
+			}
+			if en.Detail == nil || en.Detail.DisputedTogether || len(en.Detail.Verifiers) != 1 || en.Detail.Verifiers[0] != "gr3" {
+				t.Fatalf("dropped tokens-tie run leaked into valid entry detail: %+v", en.Detail)
+			}
+		})
+		w.check()
+	})
+
+	t.Run("invalid_majority_beats_tokens_tie", func(t *testing.T) {
+		pub, priv := newKey()
+		w := newWorld(t, pub)
+		_ = w.join("anchor-one", priv)
+		g := w.volunteers("gr1", "gr2", "gr3", "gr4", "gr5")
+		w.submit(w.join("owner-0", nil), "entry-0", "print(0)")
+		idx := w.drawWithoutExam()
+		cEdit := w.claim(g[0], true)
+		if cEdit.Job == nil || cEdit.Job.Kind != "edit" {
+			t.Fatalf("edit claim: %+v", cEdit.Job)
+		}
+		if code, _ := w.edit(g[0], cEdit, "0\n1\n"); code != 200 {
+			t.Fatalf("script: HTTP %d", code)
+		}
+		// Claim 4 early grades (max early replicas = 1 + maxReplicas = 4) before posting exam.
+		graders := g[1:]
+		var cs []*claimed
+		for _, a := range graders {
+			c := w.claimEarly(a)
+			if c.Job == nil || c.Job.Kind != "grade" {
+				t.Fatalf("early grade claim for %s: %+v", a.handle, c.Job)
+			}
+			cs = append(cs, c)
+		}
+		w.exam(idx)
+		// First 2 valid with conflicting tokens_sha256 (tokA, tokB), next 2 invalid:
+		// after 3 grades (2 valid vs 1 invalid), valid still carries 2*2 > 3 so tokensTie holds;
+		// after 4th grade (2 valid vs 2 invalid), valid no longer has strict majority -> rated invalid!
+		for i, a := range graders {
+			var p map[string]any
+			if i < 2 {
+				p = w.result(cs[i], 5.5, 6.0)
+				if i == 0 {
+					p["script"].(map[string]any)["tokens_sha256"] = strings.Repeat("a", 64)
+				} else {
+					p["script"].(map[string]any)["tokens_sha256"] = strings.Repeat("b", 64)
+				}
+			} else {
+				p = w.result(cs[i], 5.5, 6.0)
+				p["valid"] = false
+				p["invalid_reason"] = "bad script syntax"
+				delete(p, "exam")
+				delete(p, "baseline")
+			}
+			if code := a.do("POST", fmt.Sprintf("/api/v1/jobs/%d/result", cs[i].Job.ID), p, nil); code != 200 {
+				t.Fatalf("grader %d result: HTTP %d", i, code)
+			}
+		}
+		w.pass(w.cfg.ReplicaWait + time.Minute)
+		w.app.st.view(func(s *State) {
+			en := s.inRound[idx][0]
+			if en.Status != "settled" || en.Void || en.Valid {
+				t.Fatalf("non-majority valid with tokens disagreement must settle rated invalid (not void tokensTie): %+v", en)
+			}
+		})
+		w.check()
+	})
+}
+
 // Season 1 had every grader train the round's unedited student, and a third of all training
 // was that. Four machines' measurements make a round's baseline as well as forty: the first
 // four established graders are asked for it, and the fifth trains the script's student alone.
@@ -928,10 +1280,16 @@ func TestTokensDigestResolvedBeforeMedianAndCredit(t *testing.T) {
 					t.Fatal("disputed A,B,C round did not settle after ReplicaWait")
 				}
 				e := w.entry(idx, "entry-0")
+				if !e.Void || e.Valid || (e.Gain != nil && *e.Gain != 0) {
+					t.Fatalf("unresolved A,B,C digest must close unrated/void with zero gain: void=%v valid=%v gain=%v", e.Void, e.Valid, e.Gain)
+				}
 				if e.Detail == nil || !e.Detail.DisputedTogether {
 					t.Fatalf("A,B,C entry should be marked DisputedTogether: %+v", e.Detail)
 				}
-				for _, gr := range e.Runs[0].Grades {
+				if len(e.Dropped) != 2 || len(e.Dropped[0].Grades) != 3 || len(e.Dropped[1].Grades) != 3 {
+					t.Fatalf("A,B,C dropped runs should preserve all 3 disputed grades: %+v", e.Dropped)
+				}
+				for _, gr := range e.Dropped[0].Grades {
 					if gr.Verdict != "disputed" {
 						t.Fatalf("A,B,C grade %s verdict = %q, want disputed", gr.Handle, gr.Verdict)
 					}
@@ -940,6 +1298,22 @@ func TestTokensDigestResolvedBeforeMedianAndCredit(t *testing.T) {
 					if got := w.account(a.handle).Agreed; got != beforeAgreed[a.handle] {
 						t.Fatalf("A,B,C grader %s earned Agreed credit (%d -> %d)", a.handle, beforeAgreed[a.handle], got)
 					}
+				}
+				// Verify the unresolved digest entry is NOT rated, NOT penalized, and NOT record-eligible.
+				w.app.st.view(func(s *State) {
+					en := s.inRound[idx][0]
+					if s.rated(en) {
+						t.Fatalf("unresolved A,B,C entry must not be rated: %+v", en)
+					}
+					if !en.Void || !en.Unattended || en.Valid || en.Gain != 0 {
+						t.Fatalf("unresolved A,B,C state entry should be void+unattended: %+v", en)
+					}
+					if failing(s, en.EditorID) || roundsRun(s, en.EditorID) != 0 {
+						t.Fatalf("unresolved A,B,C entry held against curator: failing=%v roundsRun=%d", failing(s, en.EditorID), roundsRun(s, en.EditorID))
+					}
+				})
+				if b := w.app.board(); b.RecordID != "" || len(b.Entries) != 0 {
+					t.Fatalf("unresolved A,B,C entry leaked into board/record: record=%q entries=%d", b.RecordID, len(b.Entries))
 				}
 				w.check()
 				return

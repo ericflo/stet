@@ -372,26 +372,19 @@ both the student and the exam from first principles and verified the exact live 
    passing public round-trip and replay determinism checks and matching every CUDA student's
    `init_sha256` bit-for-bit.
    - **DataDecide 1B (12 recipes vs `dolma1_7`, ONE pinned `macro.parquet` 1B truth table):**
-     - **Draw 1 (`prod_gate`, `s0`, English subset):** `46/66` (`69.7%`, perm one-sided `p = 0.0426`),
-       `2pt+ = 25/31` (`80.6%`), Spearman `ρ = +0.566` (`p = 0.0548`), `11/11` filtered-vs-unfiltered
-       pairs right, 3% trap `#11/12`.
-     - **Draw 2 (`live_gate`, `s1`, brand-new live official exam, English subset):** **`48/66` (`72.7%`,
-       perm one-sided `p = 0.0225`)**, **`2pt+ = 26/31` (`83.9%`)**, **`ρ = +0.594` (`p = 0.0415`)**,
-       `11/11` filtered-vs-unfiltered pairs right, 3% trap `#11/12`.
-     - **2-Draw Independent Mean (`Draw 1 + Draw 2`, English subset):** **`47/66` (`71.2%`, perm
-       one-sided `p = 0.0314`)**, **`2pt+ = 26/31` (`83.9%`)**, **`ρ = +0.580` (`p = 0.0479`)**,
-       3% trap `#11/12`. *(On the full multilingual exam, English-only DataDecide recipes score
-       `28/66`, `28/66`, `30/66` [Draw 1 / Draw 2 / 2-draw mean] under the pre-Review #6 unweighted
-       `"other"`-pool scorer, and **`27/66` (`ρ = −0.238`), `37/66` (`ρ = +0.084`), `34/66`
-       (`ρ = −0.042`)** under the shipping `weight_other_by_share=true` Season 3 scorer, because
-       strict English-only DCLM-QC filters regress against `dolma1_7` on the non-English crawl;
-       the English-subset totals `46/66`, `48/66`, `47/66` are identical under both scorers.)*
+     - **Official Season 3 reasoning (`explain`, `infer`, `synthesis`, English subset):**
+       - **Draw 1 (`prod_gate`, `s0`, `80 / 80 / 80` EN items):** **`49/66` (`74.2%`)**, `2pt+ = 26/31` (`83.9%`), Spearman `ρ = +0.636`, `11/11` filtered-vs-unfiltered pairs right, 3% trap `#12/12`. Per-pillar: `explain = 49/66` (`ρ = +0.678`), `infer = 47/66` (`ρ = +0.629`), **`synthesis = 45/66` (`68.2%`, `ρ = +0.517`)**.
+       - **Draw 2 (`live_gate`, `s1`, brand-new live official exam, `54 / 54 / 8` EN items):** **`46/66` (`69.7%`)**, `2pt+ = 24/31` (`77.4%`), Spearman `ρ = +0.531`, `11/11` filtered-vs-unfiltered pairs right, 3% trap `#11/12`. Per-pillar: `explain = 52/66` (`ρ = +0.762`), `infer = 47/66` (`ρ = +0.524`), **`synthesis = 34/66` (`51.5%`, `ρ = +0.042`, trap `#10/12`)** — Draw 2 was built before the `synthesis` `PROMPT: ...` placeholder fix and had only **`8` English `synthesis` items** (post-fix Draw B has `47` English `synthesis` items, matching `explain = 48` and `infer = 48`).
+       - **2-Draw Independent Mean (`Draw 1 + Draw 2`, English subset):** **`47/66` (`71.2%`)**, `ρ = +0.587` (per-pillar 2-draw means: `explain = 51/66` `ρ = +0.706`, `infer = 48/66` `ρ = +0.580`, `synthesis = 37/66` `ρ = +0.224`).
+     - **Historical 50/50 & 0%-weight comprehension reference (English subset):** the pre-stage-4 50/50 mix scored `46/66` (`ρ = +0.566`, perm `p = 0.0426`), `48/66` (`ρ = +0.594`, `p = 0.0225`), and `47/66` (`ρ = +0.580`, `p = 0.0314`), while 0%-weight twin-context comprehension alone scored **`24/66` (`ρ = −0.301`, trap `#1/12`)** on Draw 1, **`34/66` (`ρ = +0.035`, trap `#2/12`)** on Draw 2, and `30/66` (`ρ = −0.112`) 2-draw mean. *(On the full 74-language exam, English-only DataDecide recipes score **`27/66` (`ρ = −0.238`), `37/66` (`ρ = +0.049`), `33/66` (`ρ = −0.049`)** under the final Season 3 scorer, because strict English-only DCLM-QC filters regress against `dolma1_7` on the non-English crawl; English-subset figures are invariant to `"other"`-pool changes.)*
      - **Honest bias diagnosis (not draw noise):** Draw 1 and Draw 2 correlate at **`ρ = +0.94`**
        (`60/66` pairs) with each other, which means the gap from DataDecide's 1B truth table is a
        **systematic lean**, not sampling noise that averages out across rounds. Both draws reliably
-       separate filtered from unfiltered recipes (`11/11`) and catch severe overfiltering (`#11/12`),
-       but both place `FineWeb-Edu` (`#7/12` in 1B macro, `1.95 pp` below `#1`) at `#1` by ~2× the
-       runner-up (`+0.0205` vs `+0.0097` on Draw 1, `+0.0248` vs `+0.0153` on Draw 2) because the
+       separate filtered from unfiltered recipes (`11/11`) and catch severe overfiltering (`#12/12`
+       on Draw 1, `#11/12` on Draw 2), but both place `FineWeb-Edu` (`#7/12` in 1B macro, `1.95 pp`
+       below `#1`) at `#1` by ~2× the runner-up (`+0.0356` vs `+0.0163` on Draw 1 and `+0.0414` vs
+       `+0.0244` on Draw 2 under official 100% reasoning; `+0.0205` vs `+0.0097` and `+0.0248` vs
+       `+0.0153` on historical 50/50) because the
        teacher's explanatory prose over-rewards educational/textbook style; among the top-8 recipes
        within 2 pp of each other, shipped-exam ordering is near chance (`16/28` and `17/28`,
        `ρ ≈ +0.2`). *(An earlier historical prototype sweep `sweep10` reached `55/66 = 83.3%`,
@@ -402,33 +395,38 @@ both the student and the exam from first principles and verified the exact live 
      `trainable_sha256` (`4c949103d67fc83d`) across GPU 4 and GPU 5 (`max_item_diff = 2.0e-6`).
    - **Live official exam gauntlet (100% unmodified `stet.pipeline.edit_round` + `stet.script.materialize`
      + `round_score`; raw 2-seed unedited mean diff = `0.0004 bpb`, paired item-bootstrap SE ≈
-     `±0.0010 bpb`).** Both the historical pre-Review #6 scorer (`weight_other_by_share=false`)
-     and the **shipping Season 3 scorer (`weight_other_by_share=true`)** on the exact same saved
-     Phase 9 item score arrays and 2-seed unedited baseline are shown side by side:
+     `±0.0010 bpb`).** Every row below is scored under the **final frozen Season 3 scorer**
+     (`groups = {"reasoning": 1.0, "comprehension": 0.0}`, `weight_other_by_share = true`,
+     `trim = 0.10` applied consistently inside pooled `"other"` via `weighted_trimmed_mean`,
+     `code_share = 0.15`) on the archived Phase 9 (`s3-o00001`) item score arrays against both
+     the 2-seed `unedited` average and same-seed `unedited_s0`, alongside the historical
+     pre-Review #6 50/50 score for reference:
 
-| Curator (all via `stet.script.materialize`) | Pre-Review #6 scorer (bpb) | **Shipping S3 scorer (bpb)** | Shipping Comp | Shipping Reas | Notes |
-|---|---:|---:|---:|---:|---|
-| **`fineweb2` (2-seed)** | `+0.01911` | **`+0.02056`** | **`+0.00379`** | `+0.03733` | Positive on all 7 pillars (`s0=+0.02010`, `s1=+0.02102`, diff `0.00092`) |
-| **`reader` v2 (shipped, 2-seed)** | `+0.01922` | **`+0.01993`** | `+0.00178` | **`+0.03808`** | `vllm` `259.1s/1200s` *(unsandboxed host cores)*, `py3langid` per-lang quantile, `80` langs (`s0=+0.01916`, `s1=+0.02070`, diff `0.00154`) |
-| `mimic` | `+0.00740` | **`+0.01527`** | `+0.00141` | `+0.02912` | Rises under crawl-weighted `"other"` pool; still `~0.0053 bpb` below `fineweb2` |
-| `reader` v1 *(pre-fix diagnosis, 2-seed)* | `−0.00340` | **`+0.00348`** | `+0.00120` | `+0.00575` | Exposed `BYTES_PER_TOKEN=4.0` top-band truncation + coarse script buckets |
-| `adv_qa_spam` (Q/A-heavy pages) | `−0.00630` | **`+0.00153`** | `+0.00339` | `−0.00034` | **Crosses slightly above unedited** under shipping scorer (`+0.00339` comp, `−0.00034` reas; `13×` below `fineweb2` / `reader` v2) |
-| `unedited` (2-seed baseline) | `0.00000` | **`0.00000`** | `0.00000` | `0.00000` | Baseline (2-seed raw mean diff `0.0004 bpb`) |
-| `adv_splice_qa` (synthetic Q/A splices) | `−0.03480` | **`−0.03696`** | `−0.00538` | `−0.06854` | Crushed below unedited |
-| `english` (English-only filter) | `−0.08510` | **`−0.08671`** | `+0.00884` | `−0.18226` | Monolingual collapse penalized |
-| `adv_overfilter` (top-3% narrow keep) | `−0.54270` | **`−0.51935`** | `−0.02921` | `−1.00948` | Obliterated |
+| Curator (all via `stet.script.materialize`) | **Final S3 Official (Reas, vs 2-seed avg)** | **Final S3 (vs same-seed `s0`)** | Final Comp (0% diag, `code=0.15`) | Final 50/50 (ref) | Pre-R6 50/50 (hist) | Notes |
+|---|---:|---:|---:|---:|---:|---|
+| **`reader` v2 (shipped, 2-seed)** | **`+0.03833`** | **`+0.03834`** | `+0.00238` | `+0.02035` | `+0.01922` | `vllm` `259.1s/1200s` *(unsandboxed host cores)*, `py3langid` per-lang quantile, `80` langs (`s0=+0.03786`, `s1=+0.03904`, diff `0.00118`) |
+| **`fineweb2` (2-seed)** | **`+0.03689`** | **`+0.03682`** | **`+0.00383`** | `+0.02036` | `+0.01911` | Positive on all 7 pillars (`s0=+0.03652`, `s1=+0.03728`, diff `0.00075`) |
+| `mimic` (`s0`) | **`+0.03110`** | **`+0.03052`** | `+0.00165` | `+0.01638` | `+0.00740` | `~0.0058–0.0072 bpb` below `fineweb2` / `reader` v2 |
+| `reader` v1 *(pre-fix diagnosis, 2-seed)* | **`+0.01056`** | **`+0.01055`** | `+0.00154` | `+0.00605` | `−0.00340` | Exposed `BYTES_PER_TOKEN=4.0` top-band truncation + coarse script buckets |
+| `adv_qa_spam` (`s0`, Q/A-heavy pages) | **`+0.00197`** | **`+0.00215`** | `+0.00414` | `+0.00306` | `−0.00630` | Small gain near noise (`~18–19×` below `fineweb2`/`reader` v2; `explain −0.0004`, `infer −0.0030`, `synthesis +0.0093` on only 8 EN items; Phase 8 Draw 1: `+0.00195` vs avg / `+0.00338` vs `s0`; pre-pooled-trim Phase 9 was `−0.00034` vs avg / `−0.00015` vs `s0`, Phase 8 `+0.00348` vs `s0`) |
+| `unedited` (2-seed baseline) | **`0.00000`** | **`0.00000`** | `0.00000` | `0.00000` | `0.00000` | Baseline (2-seed raw mean diff `0.0004 bpb`) |
+| `adv_splice_qa` (`s0`, synthetic splices) | **`−0.06778`** | **`−0.06794`** | `−0.00404` | `−0.03591` | `−0.03480` | Crushed below unedited (Phase 8 Draw 1: `−0.08293`) |
+| `english` (`s0`, English-only filter) | **`−0.18500`** | **`−0.18483`** | `+0.00873` | `−0.08813` | `−0.08510` | Monolingual collapse penalized (Phase 8 Draw 1: `−0.16282`) |
+| `adv_overfilter` (`s0`, top-3% keep) | **`−0.98669`** | **`−0.98669`** | `−0.02594` | `−0.50631` | `−0.54270` | Obliterated (Phase 8 Draw 1: `−1.01696`) |
 
 **What it decided.** Season 3 ships `baidu/ERNIE-4.5-0.3B-Base-PT` (`freeze_bottom: true`,
 `65.5M` tokens, 1-epoch commercial-permissive multilingual SFT probe) with the 100%-fresh exam
 (100% fresh reasoning scored after stage 4 below, 4 human-written comprehension kinds at `0%`
-diagnostic; `rules_version: 7`, `weight_other_by_share: true`, `code_share: 0.15`,
-`min_pillar_items: 20` with sparse-pillar omission and `STET_EXAM_TIMEOUT = 6h` +
-`POST /api/v1/admin/rounds/{id}/cancel`, `baselines.per_round = 2`),
-a **12 GB** volunteer grading floor, **24 GB+** neural curator sandboxes, and on-demand rounds (`$0/day` idle).
+diagnostic; `rules_version: 7`, `weight_other_by_share: true` with symmetric `10%` weight-tail
+trimming inside pooled `"other"`, `code_share: 0.15`, `min_pillar_items: 20` with sparse-pillar
+omission and `STET_EXAM_TIMEOUT = 6h` + `POST /api/v1/admin/rounds/{id}/cancel`,
+`baselines.per_round = 2`), a **12 GB** volunteer grading floor, **24 GB+** neural curator
+sandboxes, and on-demand rounds (`$0/day` idle).
 Running unmodified `stet.pipeline.edit_round` + `stet.script.materialize` caught and fixed two real
 bugs in `examples/reader/curator.py` (`BYTES_PER_TOKEN=4.0` truncating the top 3,634 Band-3 docs
-and coarse 10-script buckets starving `fa`, `pl`, `uk`), jumping `reader` from `+0.00348` to
-**`+0.01993 bpb`** under the shipping scorer (`−0.00340 → +0.01922` under the historical scorer;
+and coarse 10-script buckets starving `fa`, `pl`, `uk`), jumping `reader` from `+0.01056` to
+**`+0.03833 bpb`** on the final Season 3 official reasoning score (`+0.00605 → +0.02035` on 50/50,
+`−0.00340 → +0.01922` under the historical scorer;
 `fa −0.150 → +0.0168`, `pl −0.081 → +0.0410`, `uk −0.030 → +0.0398`, `zh −0.018 → +0.0002`,
 `ja −0.011 → −0.0014`, `ko −0.029 → −0.0184`) in `259.1s / 1,200s` on `vllm==0.34.0`
 *(unsandboxed host cores; standalone 6-core `taskset -c 0-5` benchmark on `s3-p00000`'s `507,387` docs
@@ -473,14 +471,15 @@ GPU scoring)*.
      - Local AMD Radeon 8060S (`ROCm 7.14`, `PyTorch 2.15.0`) `init_sha256` (`5bd1d5ce4547697e...`)
        matched **4/4 NVIDIA RTX 5090 (`CUDA 13`, `PyTorch 2.14.0`) graders bit-for-bit**.
      - **`adv_tiny_lang_boost` (`32.5%` `<0.5%`-crawl small languages):** on Phase 9's exam (`s3-o00001`),
-       crawl-share weighting inside `"other"` cut its score from **`+0.01256` (old unweighted) to
-       `+0.00342` (`−0.00914 bpb`)**, `6×` below `fineweb2` (`+0.02060`); on Draw B (`s3-o00003`),
-       it scored **`+0.00876`** vs `fineweb2` **`+0.02795`** (`3.2×` below), confirming the small-language
-       `"other"`-pool exploit is closed.
+       under the final Season 3 reasoning scorer (`weight_other_by_share=true` + pooled 10% trim),
+       it scores **`+0.00854`** vs `fineweb2` **`+0.03989`** (`4.7×` below; on 50/50 it fell from
+       `+0.01256` unweighted to `+0.00361`, `6×` below `fineweb2`'s `+0.02172`); on Draw B
+       (`s3-o00003`), it scores **`+0.01644`** vs `fineweb2` **`+0.05423`** (`3.3×` below; 50/50
+       `+0.00793` vs `+0.02838`), confirming the small-language `"other"`-pool exploit is closed.
      - **`adv_exam_lang_mix` (clean deduplicated pool resampled to Draw B's exam item counts):** scored
-       **`+0.03193`** vs `fineweb2` `+0.02795` (`+0.0040`) on matched Draw B and **`+0.02296`** vs
-       `+0.02060` (`+0.0024`) on unmatched Phase 9 (`s3-o00001`), an **observed single-seed point
-       difference of `+0.0016 bpb`** between the matched and unmatched draws. Because
+       **`+0.06046`** vs `fineweb2` `+0.05423` (`+0.00623`) on matched Draw B and **`+0.04632`** vs
+       `+0.03989` (`+0.00643`) on unmatched Phase 9 (`s3-o00001`) on the final official reasoning
+       score (50/50: `+0.03218` vs `+0.02838` on Draw B, `+0.02476` vs `+0.02172` on Phase 9). Because
        `adv_exam_lang_mix` and `fineweb2` also differed in prefiltering and deduplication (using
        `reader`'s CJK-aware prefilter restored `ja` from `1.99% → 3.59%`, lifting `ja` by
        `+0.0259 bpb`, alongside mild temperature upsampling of `1%–5%` major languages over `<0.5%`
@@ -491,48 +490,54 @@ GPU scoring)*.
 4. **Pre-launch exam decomposition, perplexity-pruning adversary gate, cross-card hardware parity, and round cost (`r8_gate`).**
    Before opening Season 3, four empirical gates audited the shipped exam and hardware fleet:
    - **Half-by-half decomposition (why Season 3 scores `reasoning = 1.0`, `comprehension = 0.0` diagnostic):**
-     Re-scoring Draw 1 and Draw 2 with each half alone proved that the human-written twin-context
-     half carried 50% of the declared weight but supplied only `3%–12%` of `fineweb2`'s actual
-     gain, scored at or below chance on DataDecide (`24/66` on Draw 1, `34/66` on Draw 2, putting
-     the 11th-of-12 over-filtered recipe first/second), could not separate `adv_qa_spam`
-     (`+0.0028` / `+0.0034`) from `fineweb2`/`reader`, had cross-card noise (`5090 vs 4090 =
-     0.0027–0.0037 bpb`) larger than `fineweb2`'s entire gain (`+0.0007–+0.0017 bpb`), and
-     scored `english` (zero non-English training data) higher than `fineweb2` even on non-English
-     items (`+0.0088 / +0.0046` vs `+0.0013–+0.0035`) because subtracting wrong openings cancels
-     fluency while the frozen lower half of `ERNIE-4.5-0.3B` already reads every language.
+     Re-scoring Draw 1 and Draw 2 under the final frozen Season 3 scorer (`code_share = 0.15`,
+     pooled 10% tail trim) with each half alone proved that the human-written twin-context half
+     carried 50% of the declared weight but supplied only `~8%–10%` of `fineweb2`'s actual gain
+     (`+0.00368` / `+0.00383` vs `+0.04147` / `+0.03689`), scored at or below chance on DataDecide
+     (`24/66` on Draw 1, `34/66` on Draw 2, putting the 11th-of-12 over-filtered recipe first/second),
+     could not separate `adv_qa_spam` (`+0.00292` / `+0.00414`) from `fineweb2`/`reader`, had
+     cross-card noise (`5090 vs 4090 = 0.00201 bpb` on Draw B) comparable to `fineweb2`'s entire
+     gain (`+0.00252` on Draw B), and scored `english` (zero non-English training data) higher
+     than `fineweb2` (`+0.01179` / `+0.00873` vs `+0.00368` / `+0.00383`) because subtracting
+     wrong openings cancels fluency while the frozen lower half of `ERNIE-4.5-0.3B` already reads
+     every language.
      By contrast, the **model-written reasoning half alone** (`explain`, `infer`, `synthesis`):
-     - scores **`49/66` (Draw 1) and `46/66` (Draw 2), mean `47.5/66`** on DataDecide (matching or
-       beating the 50/50 mix's `47.0/66`);
-     - increases `fineweb2` signal-to-noise from `14–17×` to **`24–55×`** (`+0.0373 / +0.0542`
-       vs 2-seed diff `0.0006–0.0012`);
-     - places `adv_qa_spam` strictly below unedited (`−0.00034` on Phase 9);
-     - strongly penalizes missing languages (`english = −0.162 / −0.182`).
+     - scores **`49/66` (Draw 1) and `46/66` (Draw 2), `47/66` 2-draw combined** on DataDecide
+       (per-pillar: `explain 49/66 & 52/66`, `infer 47/66 & 47/66`, `synthesis 45/66` on Draw 1
+       with 80 EN items vs `34/66` on Draw 2 with only 8 pre-fix EN items);
+     - increases `fineweb2` signal-to-noise from `14–17×` to **`24–55×`** (`+0.0369` Phase 9 /
+       `+0.0542` Draw B vs 2-seed diff `0.0008`);
+     - keeps `adv_qa_spam` near unedited (`+0.00195` Draw 1 / `+0.00197` Draw 2 vs 2-seed avg;
+       `+0.00338` / `+0.00215` vs same-seed `s0` — `~18–21×` below `fineweb2`/`reader` v2;
+       pre-pooled-trim Phase 9 was `−0.00034` vs avg / `−0.00015` vs `s0`);
+     - strongly penalizes missing languages (`english = −0.1628 / −0.1850`).
      Season 3 therefore sets `groups = {"reasoning": 1.0, "comprehension": 0.0}` (with `code_share = 0.15`
      and per-source caps inside `select_context` so LKML never dominates even diagnostic `technical`),
      showing the four human-written kinds on the round and curator pages beside the score as
      0%-weight diagnostic telemetry until a human-written measure clears DataDecide.
    - **Perplexity-pruning / model-predictable prose adversaries (`adv_ppl_qwen06b` & `adv_ppl_ernie03b`,
-     2× RTX 5090, Draw B `s3-o00003`, 65.5M tokens):**
+     2× RTX 5090, Draw B `s3-o00003`, 65.5M tokens; scored under final frozen `code_share = 0.15` + pooled-trim scorer):**
      We built two pure lowest-perplexity curators on `reader._prefilter`'s `75,565` deduplicated
      multilingual docs with **zero quality rubric**, matching `fineweb2`'s exact per-language byte
      mix (`~21.9k` unique docs = bottom `~29%` NLL/byte, `passes = 1.0`): one scored by
      `Qwen/Qwen3-0.6B` (same family as teacher `Qwen3-8B`) and a cross-family control scored by
      `baidu/ERNIE-4.5-0.3B-Base-PT` (independent Baidu weights).
 
-| Curator (all Draw B crawl, 65.5M tok, vs Draw B `unedited`) | Draw B Reasoning (official S3) | Draw B Comp (0% diag) | Draw B 50/50 | Phase 9 Reasoning (official S3) | Phase 9 Comp (0% diag) |
+| Curator (all Draw B crawl, 65.5M tok, vs Draw B `unedited`) | Draw B Reasoning (official S3) | Draw B Comp (0% diag, `code=0.15`) | Draw B 50/50 | Phase 9 Reasoning (official S3) | Phase 9 Comp (0% diag, `code=0.15`) |
 |---|---:|---:|---:|---:|---:|
-| **`adv_ppl_qwen06b`** (lowest `Qwen3-0.6B` NLL/byte) | **`+0.07418`** (+37%) | **`+0.00726`** (4.2×) | `+0.04072` | **`+0.05664`** (+40%) | **`+0.00497`** (7.3×) |
-| **`adv_ppl_ernie03b`** (lowest `ERNIE-4.5-0.3B` NLL/byte) | **`+0.07247`** (+34%) | **`+0.00867`** (5.0×) | `+0.04057` | **`+0.05363`** (+32%) | **`+0.00521`** (7.7×) |
-| `adv_exam_lang_mix` (`reader._prefilter` random) | `+0.06027` | `+0.00358` | `+0.03193` | `+0.04433` | `+0.00158` |
-| `fineweb2` (heuristic-only, no neural filter) | `+0.05417` | `+0.00173` | `+0.02795` | `+0.04051` | `+0.00068` |
-| `adv_tiny_lang_boost` | `+0.01763` | `−0.00012` | `+0.00876` | `+0.01067` | `−0.00382` |
+| **`adv_ppl_qwen06b`** (lowest `Qwen3-0.6B` NLL/byte) | **`+0.07457`** (+37.5%) | **`+0.00761`** (3.02×) | `+0.04109` | **`+0.05619`** (+40.8%) | **`+0.00668`** (1.89×) |
+| **`adv_ppl_ernie03b`** (lowest `ERNIE-4.5-0.3B` NLL/byte) | **`+0.07388`** (+36.2%) | **`+0.00727`** (2.89×) | `+0.04057` | **`+0.05507`** (+38.1%) | **`+0.00606`** (1.71×) |
+| `adv_exam_lang_mix` (`reader._prefilter` random) | `+0.06046` | `+0.00390` | `+0.03218` | `+0.04632` | `+0.00319` |
+| `fineweb2` (heuristic-only, no neural filter) | `+0.05423` | `+0.00252` | `+0.02838` | `+0.03989` | `+0.00354` |
+| `adv_tiny_lang_boost` | `+0.01644` | `−0.00057` | `+0.00793` | `+0.00854` | `−0.00131` |
 
      **Honest diagnosis (both sides of this result):**
      1. *Not Qwen3 teacher-family overfitting:* `ERNIE-4.5-0.3B` overlapped `Qwen3-0.6B` on `79.3%`
-        of selected documents, beat `Qwen3-0.6B` on `explain` (`+0.02077` vs `+0.02020`),
-        human-written `technical` (`+0.0154` vs `+0.0064`), and Phase 9 English reasoning
-        (`+0.06534` vs `+0.06455`), and **both** crushed `fineweb2` by `4.2×–7.7×` on 100%
-        human-written twin-context comprehension (where unconditional style cancels identically).
+        of selected documents, beat `Qwen3-0.6B` on Draw B `explain` (`+0.07042` vs `+0.06839`),
+        human-written `technical` (`+0.01017` vs `+0.00746`), and Phase 9 English reasoning
+        (`+0.06534` vs `+0.06455`), and **both** beat `fineweb2` by `1.71×–3.02×` on 100%
+        human-written twin-context comprehension under the final `code_share = 0.15` pooled-trim
+        scorer (where unconditional style cancels identically).
         Keeping the lowest-PPL `~29%` of deduplicated Gopher-filtered Common Crawl is literally
         **CCNet-head / perplexity pruning** (Wenzek et al. 2019; Marion et al. 2023; Ankner et al.
         2024), which drops garbled web scrapes and increases `.edu/.gov/.ac/.org` share
@@ -540,28 +545,70 @@ GPU scoring)*.
      2. *Real Season 3 caveat:* uncapped lowest-PPL with zero quality judgment **also** increases
         privacy/TOS/copyright boilerplate (`3.0% → 4.6%`) and AI-SEO phrase density (`1.3% → 2.5%`),
         lowers lexical diversity (`TTR 0.713 → 0.676`), and puts PHP deprecation logs and AI
-        listicles in its extreme bottom tail — yet beats both `fineweb2` (`+32–40%`) and `reader`
-        v2 (`+0.0381`, whose zero-shot 0.6B rubric ratings collapsed to `[2.57, 2.81]`). On Phase 9
+        listicles in its extreme bottom tail — yet beats both `fineweb2` (`+36–41%`) and `reader`
+        v2 (`+0.0383`, whose zero-shot 0.6B rubric ratings collapsed to `[2.57, 2.81]`). On Phase 9
         English reasoning, `FineWeb-Edu` (`+0.10562`) and `DCLM-qc-10p` (`+0.08705`) still lead
         generic English Common Crawl (`ml_english` `+0.08008`), showing strong quality classifiers
         retain headroom above generic low-PPL filtering. Entrants should treat CCNet-style
         perplexity pruning as an established, strong neural baseline on NLL exams.
-   - **Cross-card hardware parity (`5090` vs `4090` vs `3090` at `standard` 65.5M tokens; `5090` vs `AMD 8060S` at `nano`/`micro`):**
-     Training the exact archived `fineweb2.jsonl` (`tokens_sha256 = 232c6bee572bc914...`) from the
-     exact Draw B seed produced **bit-identical `init_sha256` (`5bd1d5ce4547697e...`) and
-     `tokens_sha256`** across all four GPUs:
+   - **Rotated-excerpt & prompt-only control (`r9_excerpt`, 4× RTX 5090, official CUDA `standard` 65.5M tokens):**
+     To test whether between-curator gains on the 100%-reasoning score reflect excerpt-grounded
+     reading comprehension or primarily prompt-conditioned modeling of the teacher's answer prose,
+     we trained four Draw B `standard` students in parallel (`unedited`, `fineweb2`,
+     `adv_ppl_qwen06b`, and Draw B `mimic`; bit-identical `init_sha256 = 5bd1d5ce4547697e...`,
+     reproducing archived `fineweb2` `+0.05423 / +0.03989` and `adv_ppl_qwen06b`
+     `+0.07457 / +0.05619` bit-for-bit) and evaluated every student on both Draw B (`s3-o00003`,
+     `573/611` reasoning items rotated across `48` `(lang, task)` groups and `17` languages) and
+     Phase 9 (`s3-o00001`, `399/472` rotated across `68` groups and `32` languages) under three
+     conditions: **original** (`orig`), **rotated excerpt** within `(lang, task)` sorted by
+     `Item.id` (`rot`, keeping prompt, wrapper, and target answer identical), and **prompt-only**
+     with empty excerpt (`empty`):
+
+| Curator pair (65.5M CUDA `standard`, final S3 scorer, all reasoning items) | Draw B `orig` | Draw B `rot` (`%` of `orig`) | Draw B `empty` (`%`) | Draw B rot-only `orig − rot` | Phase 9 `orig` | Phase 9 `rot` (`%` of `orig`) | Phase 9 `empty` (`%`) | Phase 9 rot-only `orig − rot` |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| **`fineweb2 − unedited`** | `+0.05423` | `+0.05593` (`103.1%`) | `+0.05685` (`104.8%`) | `−0.00113` (`−2.1%`) | `+0.03989` | `+0.04349` (`109.0%`) | `+0.04462` (`111.8%`) | `−0.00316` (`−7.7%`) |
+| **`adv_ppl_qwen06b − unedited`** | `+0.07457` | `+0.07523` (`100.9%`) | `+0.07907` (`106.0%`) | `+0.00057` (`+0.8%`) | `+0.05619` | `+0.05756` (`102.4%`) | `+0.05964` (`106.1%`) | `−0.00085` (`−1.5%`) |
+| **`mimic − unedited`** | `+0.02691` | `+0.02893` (`107.5%`) | `+0.02904` (`107.9%`) | `−0.00203` (`−6.7%`) | `+0.02906` | `+0.02930` (`100.8%`) | `+0.03025` (`104.1%`) | `−0.00096` (`−3.0%`) |
+| **`adv_ppl_qwen06b − fineweb2`** | `+0.02086` | `+0.01945` (`93.3%`) | `+0.02229` (`106.9%`) | `+0.00176` (`+8.4%`) | `+0.01575` | `+0.01263` (`80.2%`) | `+0.01368` (`86.9%`) | `+0.00302` (`+17.9%`) |
+| **`fineweb2 − mimic`** | `+0.02862` | `+0.02865` (`100.1%`) | `+0.02916` (`101.9%`) | `+0.00072` (`+3.0%`) | `+0.01335` | `+0.01635` (`122.4%`) | `+0.01569` (`117.5%`) | `−0.00248` (`−22.9%`) |
+
+     **Candid scientific readout:** Every individual student strongly uses the source excerpt in
+     absolute terms — rotating the excerpt worsens mean reasoning score by `0.136–0.139 bpb` on
+     Draw B (`unedited: −1.1276 → −1.2671`, `fineweb2: −1.0682 → −1.2047`, `adv_ppl_qwen06b:
+     −1.0431 → −1.1812`, `mimic: −1.1077 → −1.2451`) and `0.140–0.144 bpb` on Phase 9, while
+     deleting the excerpt (`empty`) worsens mean score by `0.128–0.140 bpb`. **However, virtually
+     all (`100.8%–109.0%` vs `unedited`, `80.2%–93.3%` for `adv_ppl_qwen06b − fineweb2`, and
+     `100.1%–122.4%` for `fineweb2 − mimic`) of the between-curator gain survives both excerpt
+     rotation and complete excerpt removal** (on the rotated-only subset, excerpt-conditioned
+     `orig − rot` differences are near zero: `−0.003` to `+0.003 bpb`). Because the frozen lower
+     9 layers of `ERNIE-4.5-0.3B-Base-PT` already supply roughly equal in-context excerpt copying
+     across curators, Season 3's official score at `65.5M` tokens empirically functions primarily
+     as a **fresh multilingual prompt-conditioned answer-prose likelihood metric** rather than
+     excerpt-grounded deduction. That mechanism directly explains both its strengths (strong
+     DataDecide 1B agreement `49/66 & 46/66`, `11/11` filtered-vs-unfiltered separation, `fineweb2`
+     beating `mimic` by `2×` on Draw B, strong penalty on monolingual `english` and synthetic
+     `adv_splice_qa`) and its known caveats (educational-prose lean toward `FineWeb-Edu` and strong
+     CCNet-head low-PPL scores). Designing an exam/student pair whose *between-curator* separation
+     is predominantly excerpt-grounded remains a key Season 4 target.
+   - **Cross-card hardware parity (`5090` vs `4090` vs `3090` at `standard` 65.5M tokens; `5090` vs `AMD 8060S` at `nano`/`micro`; final pooled-trim `code_share = 0.15` scorer):**
+     Training the exact archived `fineweb2.jsonl` from the Draw B seed produced **bit-identical
+     `init_sha256` (`5bd1d5ce4547697e...`) across all four GPUs** and **bit-identical
+     `tokens_sha256` at each matched scale** (`232c6bee572bc914...` across RTX 5090 / 4090 / 3090
+     at `standard`, `96cb181c1abcd108...` across RTX 5090 vs AMD 8060S at `nano`, and
+     `0e548cd8bb6780a6...` across RTX 5090 vs AMD 8060S at `micro`):
 
 | Hardware pair & scale | Runtime (`standard`) | Draw B Reasoning `|da−db|` / `|direct|` | Phase 9 Reasoning `|da−db|` / `|direct|` | Draw B 50/50 `|direct|` | Phase 9 50/50 `|direct|` |
 |---|---:|---:|---:|---:|---:|
-| **RTX 5090 (Blackwell) vs RTX 4090 (Ada)**, `standard` | `1,172s` / `1,803s` | `0.00205` / `0.00138` | **`0.00374`** / `0.00329` | `0.00255` | `0.00273` |
-| **RTX 5090 (Blackwell) vs RTX 3090 (Ampere)**, `standard` | `1,172s` / `3,313s` | `0.00179` / `0.00162` | `0.00367` / **`0.00340`** | `0.00162` | `0.00205` |
-| **RTX 4090 (Ada) vs RTX 3090 (Ampere)**, `standard` | `1,803s` / `3,313s` | `0.00027` / `0.00005` | `0.00008` / `0.00022` | `0.00072` | `0.00070` |
-| RTX 5090 vs AMD Radeon 8060S (ROCm 7.14), `nano` / `micro` | `~3.4h` est. `standard` | `0.00155` / `0.00099` | `0.00156` / `0.00122` | `0.00075` / `0.00062` | `0.00080` / `0.00100` |
+| **RTX 5090 (Blackwell) vs RTX 4090 (Ada)**, `standard` | `1,172s` / `1,803s` | `0.00169` / `0.00131` | `0.00397` / `0.00338` | `0.00166` | `0.00192` |
+| **RTX 5090 (Blackwell) vs RTX 3090 (Ampere)**, `standard` | `1,172s` / `3,313s` | `0.00133` / `0.00161` | **`0.00449`** / **`0.00362`** | `0.00163` | `0.00152` |
+| **RTX 4090 (Ada) vs RTX 3090 (Ampere)**, `standard` | `1,803s` / `3,313s` | `0.00036` / `0.00002` | `0.00052` / `0.00019` | `0.00000` | `0.00069` |
+| RTX 5090 vs AMD Radeon 8060S (ROCm 7.14), `nano` / `micro` | `~3.4h` est. `standard` | `0.00154` / `0.00095` | `0.00156` / `0.00125` | `0.00075` / `0.00072` | `0.00080` / `0.00110` |
 
-     **What it decided:** Official Season 3 tolerances are calibrated to `~3.2–4.4×` the maximum
-     measured cross-architecture NVIDIA diff (`0.00374` grade / `0.00340` baseline):
+     **What it decided:** Official Season 3 `standard` tolerances are calibrated to `~2.7–4.1×`
+     the maximum measured cross-architecture NVIDIA diff (`0.00449` grade / `0.00362` baseline):
      **`grade = 0.012`, `baseline = 0.015`, `run = 0.015`** (down from provisional `0.03 / 0.05 /
-     0.05`, catching real drift at `22%–30%` of `fineweb2`'s `+0.041–+0.054` reasoning gain).
+     0.05`, catching real drift at `22%–30%` of `fineweb2`'s `+0.040–+0.054` reasoning gain);
+     `large` tolerances (`0.012 / 0.015 / 0.015`) are extrapolated from `standard`.
      Because AMD ROCm Flash Attention backward is non-deterministic, takes `~3.4h` per standard
      pass, and experienced a 1-in-6 transient `FloatingPointError` divergence under card contention,
      Season 3 restricts official verifying (grading and, since runners must earn 5 agreed official
@@ -578,6 +625,10 @@ GPU scoring)*.
 
 ## Still to measure
 
+- An exam and student setup whose **between-curator** gain is driven primarily by excerpt-grounded
+  deduction rather than prompt-conditioned answer-prose modeling (see the `r9_excerpt`
+  rotated-excerpt control above, where `80%–109%` of between-curator separation survived excerpt
+  rotation/removal on frozen-bottom `ERNIE-4.5-0.3B` at `65.5M` tokens).
 - Exam-specific language-mix sensitivity with controlled prefiltering: compare reweighting on vs off
   on the **same** filtered pool across multiple independently held-out draws and training seeds.
 - A human-written comprehension signal that passes DataDecide and responds to non-English training

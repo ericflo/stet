@@ -612,6 +612,42 @@ func (j *judge) measuring(rd *Round) map[int64]bool {
 	return who
 }
 
+// baselineDisputed reports whether a round has two or more established baselines whose
+// measurements disagree so far that fewer than two agree within tolerance of the kept median.
+// A round with a disputed baseline must request another independent baseline rather than
+// settling on an uncorroborated midpoint, and closes unrated if the disagreement cannot be
+// resolved.
+func (a *App) baselineDisputed(s *State, rd *Round) bool {
+	all := a.roundBaselines(s, rd)
+	if len(all) < 2 {
+		return false
+	}
+	kept := a.baselinesKept(s, rd)
+	if len(kept) < 2 {
+		return true
+	}
+	mid, tol := medianItems(itemsOf(kept)), a.tolerance().Baseline
+	agreed := 0
+	for _, b := range kept {
+		if dev, _, err := a.season.Exam.ScoreItems(rd.ExamTable, diffItems(b.Items, mid), rd.Shares); err == nil && within(dev, tol) {
+			agreed++
+		}
+	}
+	return agreed < 2
+}
+
+// baselineTieLive reports whether an established account without a baseline for this round
+// currently holds a live grade job that asks for one.
+func (j *judge) baselineTieLive(rd *Round) bool {
+	for _, c := range j.s.Claims {
+		if c.RoundIdx == rd.Idx && c.Kind == "grade" && c.Baseline && c.live(j.t) && j.est[c.AccountID] &&
+			j.s.Baselines[baselineKey(rd.Idx, c.AccountID)] == nil {
+			return true
+		}
+	}
+	return false
+}
+
 // baselineComing reports whether a round has a baseline, or somebody at work on it was asked
 // for one.
 func (j *judge) baselineComing(round int) bool {
@@ -621,7 +657,11 @@ func (j *judge) baselineComing(round int) bool {
 
 // baselinesWanted is how many more machines a round would ask for its baseline, as it stands.
 func (j *judge) baselinesWanted(rd *Round) int {
-	return max(0, j.a.season.Baselines.PerRound-len(j.measuring(rd)))
+	want := max(0, j.a.season.Baselines.PerRound-len(j.measuring(rd)))
+	if want == 0 && j.a.baselineDisputed(j.s, rd) && !j.baselineTieLive(rd) {
+		want = 1
+	}
+	return want
 }
 
 // asksBaseline says whether a grade job handed to this account now asks its machine for the
@@ -643,17 +683,31 @@ func (j *judge) asksBaseline(rd *Round, acct *Account) bool {
 // scores less that.
 func (a *App) refreshScores(tx *Tx, rd *Round) {
 	s := tx.s
+	hasOpen := false
+	for _, e := range s.inRound[rd.Idx] {
+		if e.Status == "open" {
+			hasOpen = true
+			break
+		}
+	}
 	kept := a.baselinesKept(s, rd)
-	if len(kept) == 0 {
+	if len(kept) == 0 || (!hasOpen && a.baselineDisputed(s, rd)) {
 		if len(rd.BaseItems) > 0 || rd.BaselineLoss != nil || rd.BaselineN != 0 {
 			rd.BaseItems, rd.BaselineLoss, rd.BaselineN = nil, nil, 0
 			tx.saveRound(rd)
-			for _, e := range s.inRound[rd.Idx] {
-				for _, r := range s.results(rd.Idx, e.EditorID) {
-					if r.Score != nil || len(r.BySource) > 0 {
-						r.Score, r.BySource = nil, nil
-						tx.saveResult(r)
+		}
+		for _, e := range s.inRound[rd.Idx] {
+			for _, r := range s.results(rd.Idx, e.EditorID) {
+				if r.Score != nil || len(r.BySource) > 0 {
+					r.Score, r.BySource = nil, nil
+					if r.Valid && len(r.Items) > 0 {
+						mean := 0.0
+						for _, v := range r.Items {
+							mean += v
+						}
+						r.Loss = places5(-mean / float64(len(r.Items)))
 					}
+					tx.saveResult(r)
 				}
 			}
 		}

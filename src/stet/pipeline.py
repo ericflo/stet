@@ -20,6 +20,19 @@ from .spec import HARNESS_VERSION, Round, Scale
 from .train import pick_device
 
 
+def _exam_cache_identity(rnd: Round, scale: Scale) -> tuple[str | None, int | None, bool]:
+    """Return `(exam_sha, n_items, is_public_subset)` for the exact exam items `round_exam` will sit."""
+    try:
+        exam = data.round_exam(rnd, scale)
+    except Exception:
+        return (rnd.exam_digest or None), None, False
+    if not exam:
+        return (rnd.exam_digest or None), None, False
+    actual_sha = data.exam_digest(exam)
+    is_pub = bool(rnd.kind == "official" and rnd.exam_digest and actual_sha != rnd.exam_digest)
+    return actual_sha, len(exam), is_pub
+
+
 def baseline(rnd: Round, scale: Scale, device=None, progress=None, log=None) -> dict:
     """The unedited corpus's result for a round: every document, in corpus order. Cached.
 
@@ -27,18 +40,33 @@ def baseline(rnd: Round, scale: Scale, device=None, progress=None, log=None) -> 
     the round's raw data.
     """
     device = pick_device(device) if not hasattr(device, "type") else device
-    cached = _cached(baseline_path(rnd, scale, device))
+    want_sha, want_n, is_pub = _exam_cache_identity(rnd, scale)
+    path = baseline_path(rnd, scale, device, exam_sha=want_sha, public_subset=is_pub)
+    cached = _cached(path, want_exam_sha=want_sha, want_items=want_n)
     if cached is not None:
         return cached
     return sit_baseline(train_baseline(rnd, scale, device, progress=progress, log=log), rnd, scale)
 
 
-def baseline_path(rnd: Round, scale: Scale, device) -> Path:
-    # A baseline is for the exam it sat: named for it. An official round's exam has a digest. A
-    # practice round's is made here, of the parts the season names and the hours held here, so
-    # it is named for the season and the hours: a season that names other parts is another exam.
-    exam = rnd.exam_digest[:12] if rnd.exam_digest else f"{rnd.season.digest[:8]}-{(data.practice_key(rnd) or 'generated')[:12]}"
-    return data.round_dir(rnd, scale) / f"baseline-{HARNESS_VERSION}-{device.type}-{exam}.json"
+def baseline_path(
+    rnd: Round,
+    scale: Scale,
+    device,
+    *,
+    exam_sha: str | None = None,
+    public_subset: bool = False,
+) -> Path:
+    # A baseline is for the exact exam it sat: named for it. An official round's full exam uses
+    # rnd.exam_digest[:12]; a public-subset replay uses the subset's own digest with `-public` so
+    # public-subset and full-exam caches never collide. A practice round's is named for the season
+    # and harvested hours.
+    if rnd.exam_digest:
+        tag = (exam_sha or rnd.exam_digest)[:12]
+        if public_subset or (exam_sha and exam_sha != rnd.exam_digest):
+            tag = f"{tag}-public"
+    else:
+        tag = f"{rnd.season.digest[:8]}-{(data.practice_key(rnd) or 'generated')[:12]}"
+    return data.round_dir(rnd, scale) / f"baseline-{HARNESS_VERSION}-{device.type}-{tag}.json"
 
 
 def train_baseline(rnd: Round, scale: Scale, device=None, progress=None, log=None) -> Trained:
@@ -57,10 +85,14 @@ def train_baseline(rnd: Round, scale: Scale, device=None, progress=None, log=Non
 def sit_baseline(trained: Trained, rnd: Round, scale: Scale) -> dict:
     """The unedited student sits the round's exam (`rnd` as it is now, its exam posted), and
     the result is kept for the round's other grades on this machine."""
-    result = sit_exam(trained, rnd, scale, data.round_exam(rnd, scale))
+    exam = data.round_exam(rnd, scale)
+    result = sit_exam(trained, rnd, scale, exam)
     if not result["valid"]:
         raise RuntimeError(f"the baseline for {rnd.id} could not be graded: {result['invalid_reason']}")
-    path = baseline_path(rnd, scale, trained.device)
+    actual_sha = result.get("exam_sha256") or (data.exam_digest(exam) if exam else (rnd.exam_digest or None))
+    is_pub = bool(rnd.kind == "official" and rnd.exam_digest and actual_sha and actual_sha != rnd.exam_digest)
+    path = baseline_path(rnd, scale, trained.device, exam_sha=actual_sha, public_subset=is_pub)
+    path.parent.mkdir(parents=True, exist_ok=True)
     # Written whole or not at all: a file cut short by a full disk would otherwise stop
     # every later job of the round.
     tmp = path.with_name(f"{path.name}.tmp{os.getpid()}")
@@ -74,14 +106,23 @@ def sit_baseline(trained: Trained, rnd: Round, scale: Scale) -> dict:
     return result
 
 
-def _cached(path: Path) -> dict | None:
-    """A baseline saved earlier, or None if there is none that can be used. A file that
-    cannot be read is as good as no file: the baseline is measured again and it is replaced."""
+def _cached(path: Path, *, want_exam_sha: str | None = None, want_items: int | None = None) -> dict | None:
+    """A baseline saved earlier, or None if there is none that matches the exact exam items
+    being sat. A file that cannot be read or sat a different item set is treated as a cache miss."""
     try:
         cached = json.loads(path.read_text())
     except (OSError, ValueError):
         return None
     if not isinstance(cached, dict) or not cached.get("valid") or not isinstance(cached.get("exam"), dict):
+        return None
+    if want_exam_sha:
+        got_sha = cached.get("exam_sha256")
+        if want_items is not None:
+            if got_sha != want_exam_sha:
+                return None
+        elif got_sha and got_sha != want_exam_sha:
+            return None
+    if want_items is not None and cached["exam"].get("items") != want_items:
         return None
     return cached
 

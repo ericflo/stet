@@ -229,7 +229,7 @@ organisers. What you do have to trust, and whom, is listed, and it is short:
 
 Two machines must get the same number for the same script, to within a tight tolerance
 (`0.012` bits per byte at Season 3's official scale). We cross-verified bit-identical
-`init_sha256` and `tokens_sha256` and ≤`0.0037 bpb` score agreement across NVIDIA RTX 5090
+`init_sha256` and `tokens_sha256` and ≤`0.0045 bpb` score agreement across NVIDIA RTX 5090
 (Blackwell), RTX 4090 (Ada), and RTX 3090 (Ampere) at full 65.5M-token scale, so Season 3 sets
 `grade_backends: ["cuda"]`. AMD ROCm Flash Attention backward is non-deterministic and takes
 ~3.4 hours per standard pass, so AMD ROCm (and Apple Silicon) remain supported for local
