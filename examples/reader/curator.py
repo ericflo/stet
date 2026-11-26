@@ -448,7 +448,7 @@ def _score_vllm(task: Task, where: str, cands: list[tuple[float, int, int, str, 
         return bool(scores)
     except Exception as exc:
         print(f"vLLM unavailable ({exc}); falling back to transformers", file=sys.stderr)
-        return bool(scores)
+        return False
 
 
 def _score_transformers(task: Task, where: str, cands: list[tuple[float, int, int, str, str]], scores: dict[int, float]) -> None:
@@ -456,6 +456,9 @@ def _score_transformers(task: Task, where: str, cands: list[tuple[float, int, in
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
+    remaining = [rec for rec in cands if rec[1] not in scores]
+    if not remaining:
+        return
     device = task.device()
     tok = AutoTokenizer.from_pretrained(where)
     tok.padding_side = "left"
@@ -474,8 +477,8 @@ def _score_transformers(task: Task, where: str, cands: list[tuple[float, int, in
     batch_size = 32 if device == "cuda" else 8
     chunk = batch_size * 16
     with torch.inference_mode():
-        for start in range(0, len(cands), chunk):
-            part = cands[start : start + chunk]
+        for start in range(0, len(remaining), chunk):
+            part = remaining[start : start + chunk]
             enc = [_build_prompt_ids(tok, rec[3], MAX_PROMPT_TOKENS, prefix_ids, suffix_ids) for rec in part]
             order = sorted(range(len(part)), key=lambda j: (len(enc[j]), part[j][1]))
             for b in range(0, len(order), batch_size):

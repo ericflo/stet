@@ -2224,6 +2224,9 @@ func (a *App) settleRound(tx *Tx, rd *Round) {
 	j := a.newJudge(s)
 	states := j.states(rd)
 	if !examPosted(rd) {
+		if a.cfg.ExamTimeout > 0 && t >= rd.DrawnAt+int64(a.cfg.ExamTimeout.Seconds()) {
+			a.cancelRound(tx, rd, "the round's exam could not be built in time; nothing is held against any entry")
+		}
 		return // the round waits for its exam, which is made after the draw: nothing is given up meanwhile
 	}
 	// What nobody is there to do is given up, once the round has waited its while.

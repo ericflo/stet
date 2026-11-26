@@ -81,11 +81,14 @@ Every official round's exam is made by an organisers' machine running `stet exam
   caught up). It keeps the harvest under `~/.cache/stet/examine/hours/` and tells the
   server its hash at once; `GET /api/v1/harvests` lists them. It reads every source at
   once, so a harvest takes as long as its slowest source (Lemmy, about ten minutes).
-- **When a round is drawn it makes the round's exam**, within a few minutes. The server
-  gives the round three of the hours harvested in the day before the draw, chosen by the
-  round's seed. The examiner takes exactly those, builds the round's corpus, drops the
-  fresh items the corpus already holds, generates the round's questions, and posts the
-  exam. No round waits for its exam.
+- **When a round is drawn it makes the round's exam**, right after the draw (~24 minutes
+  measured cold on the organisers' AMD Radeon 8060S examiner). The server gives the round three of the hours
+  harvested in the day before the draw, chosen by the round's seed. The examiner takes exactly
+  those, builds the round's corpus, drops fresh items the corpus already holds, writes the
+  reasoning items once with the pinned teacher model (`Qwen/Qwen3-8B@b968826d`, `temperature=0`),
+  drops any pillar below `min_pillar_items=20` (refusing only if an entire group is empty),
+  computes the authoritative initial student weights hash (`init_sha256`), and posts the exam.
+  Curators run and graders can begin training in parallel while the exam is built.
 
 Started, when a season opens or after a stop, it harvests the newest settled hour first and
 works back through the day before. A round drawn meanwhile is given the hours committed by
@@ -99,12 +102,18 @@ What it needs:
   organisers may post an exam;
 - the stet client with the season's libraries, PyTorch among them, and the same version of
   the exam's generators as the season (an older client refuses, and says to upgrade);
-- **for Season 3 reasoning synthesis (`Qwen/Qwen3-8B@b968826d`, greedy `temperature=0`):**
-  either a local CUDA GPU with **18 GB+ VRAM** (e.g. RTX 3090 / 4090 / 5090 — ~16 GB bf16
-  weights + KV cache) OR an OpenAI-compatible `/v1/completions` server set via
-  `STET_EXAMINER_LLM_URL` (and optional `STET_EXAMINER_LLM_KEY`) serving the exact pinned
-  model & revision (`stet` verifies `/v1/models` before generating and refuses model or
-  revision mismatches);
+- **Production Season 3 examiner hardware (`Qwen/Qwen3-8B@b968826d`, greedy `temperature=0`):**
+  in production, `stet-examine.service` runs directly on the organisers' **AMD Radeon 8060S**
+  workstation (`124 GiB` unified VRAM, pinned `PyTorch 2.15.0+rocm7.14` / `transformers 5.23.0`)
+  at **$0/round** — measured across two full cold official draws at **`23.8–24.5 min`**
+  draw-to-publication (`~68s` CC shard fetch + `1,213–1,223s` 640-draft synthesis + decontam +
+  authoritative CPU `init_sha256`, matching NVIDIA RTX 5090 CUDA 13 `init_sha256` bit-for-bit,
+  and matching `stet-cloud`'s `--exam-after 25m` default while curators run in parallel). Any
+  local 18 GB+ CUDA/ROCm GPU (~16 GB bf16 weights + KV cache) or an OpenAI-compatible
+  `/v1/completions` server set via `STET_EXAMINER_LLM_URL` (and optional `STET_EXAMINER_LLM_KEY`)
+  serving the exact pinned model & revision also works (`stet` verifies `/v1/models` returns a
+  non-empty list matching model and revision before generating and fails loudly on mismatch or
+  tokenizer load failure);
 - about 3 GB of disk a round, under `~/.cache/stet/examine/<round>/` and the round's corpus,
   and the hours it has harvested;
 - the network: Wikipedia, Common Crawl's news crawl, GH Archive, Hacker News, Lemmy,
@@ -605,6 +614,7 @@ Set in `apps/stet/deployment.yaml`. The ones that are rules:
 | `STET_ROUND_INTERVAL` | 0 | `0` draws rounds on demand whenever an entry is waiting (no idle clock rounds). After an empty round where nothing ran, automatic retries back off for 3 hours (`backoff_until` in `/api/v1/season`, `/api/v1/admin/work`, and submit replies); `stet draw` overrides the backoff. Set a multiple of the draw grid (e.g. `3h`) for fixed-clock rounds |
 | `STET_ROUND_MIN_GAP` | 0 | Minimum gap between consecutive on-demand draws (`0` chains back-to-back as soon as the previous round settles) |
 | `STET_LEASE` | `5h` | Maximum time an established verifier may hold an edit or grade job before it is given up on (fits two baseline passes plus margin on a 12 GB+ GPU) |
+| `STET_EXAM_TIMEOUT` | `6h` | Maximum time an open round waits for its exam before automatically cancelling cleanly (`unattended=true`, `baseline_loss=null`, nothing held against any entry, unblocking the next draw). Set `0` to disable. Organisers can also cancel an un-examined round immediately via `POST /api/v1/admin/rounds/{id}/cancel` |
 | `STET_EARLY_WINDOW` | 10m | A machine the organisers rent is handed grades before an exam only once they, and the further ones it could take, would keep it busy until no sooner than this before the exam is due; it is not paid to wait. `0` hands them out as soon as there are any |
 | `STET_ENTRIES_IN_PLAY` | 3 | Entries one person may have waiting or qualifying at once |
 | `STET_QUALIFY_ROUNDS` | 3 | Rounds a new entry runs |
@@ -624,17 +634,17 @@ reference) together with **every** waiting or qualifying entry, with no cap per 
 person is capped at 3 entries in play at once). Each entry is run twice, up to twenty minutes
 a run. Each script is trained once (`ERNIE-4.5-0.3B-Base-PT`, bottom half frozen, top half
 reset, on 65.5M tokens plus the 32-step SFT probe), about 20 minutes on an RTX 5090 (~29
-minutes on an RTX 4090, ~52 minutes on an RTX 3090), and up to four machines train the
-round's unedited baseline (two passes). On a 6-GPU fleet a typical round takes about 1.5 to
-2.5 hours from draw to settlement (~$3.50–$6.00). The exam is posted a few minutes after the
-draw, so a student sits it as soon as it is trained.
+minutes on an RTX 4090, ~52 minutes on an RTX 3090), and two established machines train the
+round's unedited baseline (`baselines.per_round = 2`, two passes). On a 6-GPU fleet a typical round takes about 1.5 to
+2.5 hours from draw to settlement (~$3.50–$6.00). The exam is posted ~20–30 minutes after the
+draw on the local AMD Radeon 8060S examiner while curators run, so trained students sit it immediately.
 
 ## When something is wrong
 
 | Sign | Likely cause | Do |
 |---|---|---|
 | A round stays `open` | Nobody established is verifying, or a verifier is stuck | Check the organisers' unit and its log; look at the verifiers page for who was last seen |
-| A round has no `exam_digest` half an hour after its draw | The examiner is down, failed on the round, or has not harvested the hours the round was given | `systemctl --user status stet-examine` and its log. Started again, it makes the exam; `stet examine --round <id>` does it by hand |
+| A round has no `exam_digest` an hour after its draw | The examiner is down, failed on the round, or an entire exam group had zero surviving items | `systemctl --user status stet-examine` and its log. Started again, it makes the exam; `stet examine --round <id>` does it by hand. If the round's exam genuinely cannot be built, cancel it cleanly with `POST /api/v1/admin/rounds/{id}/cancel` (or wait for `STET_EXAM_TIMEOUT`, default `6h`): all entries are voided unattended with nothing held against them |
 | The examiner's log says a source failed | The source was away or refused | It is left out of that round's exam and the rest is kept. If one source keeps failing, find out why before the next round |
 | Every entry is marked *run once* | Only one established account is running curators | Expected early in a season. It ends when volunteers are established and pass `--edits` |
 | The log says "this verifier is out of date" | The server was deployed with a newer harness | It upgrades itself within ten minutes. If the log says the upgrade did not work, it says why: run `stet upgrade` by hand |

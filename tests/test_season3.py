@@ -1615,7 +1615,7 @@ def test_reason_shared_token_bounded_excerpt_endpoint_pinning_and_replay():
     ex = bounded[0]["excerpt"]
     assert len(ex.split()) == 100
     t_prompt = build_teacher_prompt(ex, "en", bounded[0]["task_type"])
-    assert ex in t_prompt and t_prompt.endswith("\nPROMPT:")
+    assert ex in t_prompt and t_prompt.endswith("\nPROMPT: ") and "PROMPT: ..." not in t_prompt
 
     gen = ["Why does this process stabilize output?\nRESPONSE: By limiting each pass to a fixed span, downstream stages stay consistent and avoid silent cutoffs."]
     items1, _ = parse_generated_items(bounded, gen)
@@ -1703,8 +1703,8 @@ def test_examine_enforces_min_pillar_items_and_regenerates_corrupt_cache(tmp_pat
     monkeypatch.setattr("stet.exam.fresh.reason.synthesize_reasoning", fake_synth)
 
     work = tmp_path / "work"
-    # Official assembly refuses 1 surviving reasoning item (min_pillar_items=20)!
-    with pytest.raises(RuntimeError, match="below minimum of 20"):
+    # Official assembly drops sparse explain (1 < 20), leaving reasoning group empty -> fails loudly!
+    with pytest.raises(RuntimeError, match="have no pillars meeting minimum of 20"):
         examine.assemble(rnd, scale, [(1_800_000_000, snap)], work, log=lambda m: None, measure=False, synthesize=True)
     assert calls["n"] == 1
 
@@ -1712,7 +1712,7 @@ def test_examine_enforces_min_pillar_items_and_regenerates_corrupt_cache(tmp_pat
     rcaches = list(work.glob("reasoning-*.jsonl.zst"))
     assert len(rcaches) == 1
     rcaches[0].write_bytes(b"")  # simulate interrupted write!
-    with pytest.raises(RuntimeError, match="below minimum of 20"):
+    with pytest.raises(RuntimeError, match="have no pillars meeting minimum of 20"):
         examine.assemble(rnd, scale, [(1_800_000_000, snap)], work, log=lambda m: None, measure=False, synthesize=True)
     assert calls["n"] == 2  # regenerated instead of decoding empty cache as 0 items!
 
@@ -1762,3 +1762,300 @@ def test_practice_cache_tracks_synthesis_mode_and_third_party_notices_shipped(tm
     for src in sources:
         assert src in notices, f"missing notice for SFT source {src!r}"
     assert "CC BY-SA 4.0" in notices and "XStoryCloze" in notices and "s3-practice.jsonl.zst" in notices
+
+
+def test_review6_filter_pillar_support_omits_sparse_pillar_and_refuses_empty_group():
+    """Review 6 Finding 1: drop sparse/missing pillars (such as news=0) cleanly so their share
+    goes to the rest of their group, and refuse ONLY when an entire declared group is empty."""
+    from stet.exam import examine
+
+    s3 = load_season("s3")
+    items: list[Item] = []
+    # Full reference, technical, conversation, explain, infer, synthesis (>=20 each); sparse news (5 < 20)
+    for src, corner, kind in [
+        ("wikipedia:en:0", "fresh/reference/en", "context"),
+        ("github:0", "fresh/technical/en", "context"),
+        ("hackernews:0", "fresh/conversation/en", "context"),
+    ]:
+        for i in range(20):
+            items.append(Item(kind=kind, corner=corner, fmt="prose", lang="en", source=f"{src}:{i}", ctx=f"Open {i}.", cont=f" Cont {i}.", wrongs=("Wrong A.", "Wrong B.")))
+    for i in range(5):
+        items.append(Item(kind="context", corner="fresh/news/en", fmt="prose", lang="en", source=f"ccnews:n{i}", ctx=f"News {i}.", cont=f" End {i}.", wrongs=("Wrong N.",)))
+    for rkind in ("explain", "infer", "synthesis"):
+        for i in range(20):
+            items.append(Item(kind="answer", corner=f"{rkind}/en/wikipedia", fmt="prose", lang="en", source=f"{rkind}:wikipedia:en:{i}", ctx=f"Ex {i}.\n\nLead {i}.\n", cont=f"Answer {i} explains mechanism thoroughly."))
+
+    logs: list[str] = []
+    kept = examine._filter_pillar_support(items, s3, "s3-o00001", logs.append)
+    assert all(not it.source.startswith("ccnews:") for it in kept)
+    assert len(kept) == 120
+    assert any("omitting under-supported pillars" in m and "news=5" in m for m in logs)
+
+    # Removing every reasoning item leaves the reasoning group empty -> must refuse!
+    comp_only = [it for it in kept if it.kind == "context"]
+    with pytest.raises(RuntimeError, match="exam group\\(s\\) reasoning have no pillars meeting minimum of 20"):
+        examine._filter_pillar_support(comp_only, s3, "s3-o00001", lambda _: None)
+
+
+def test_review6_teacher_prompt_parser_quality_and_min_keep_rate(monkeypatch):
+    """Review 6 Findings 2 & 8: remove '...' placeholders, reject instruction echoes, prompt-copying
+    answers, U+FFFD, mid-sentence truncations, wrong-language responses, and enforce min_keep_rate."""
+    from stet.exam.fresh import reason
+
+    # Prompts for all 3 task types must not contain literal '...' placeholder
+    for task in ("explain", "infer", "synthesis"):
+        p = reason.build_teacher_prompt("A real article discussing climate adaptation and urban grids.", "en", task)
+        assert "PROMPT: ..." not in p and "RESPONSE: ..." not in p
+        assert p.endswith("\nPROMPT: ")
+
+    src_en = "Municipal transit agencies replaced diesel fleets with battery buses after depot chargers reduced overnight peak demand."
+    doc_en = {"source": "ccnews", "id": "en-1", "lang": "en", "text": src_en, "excerpt": src_en, "task_type": "synthesis", "wrapper_id": 0}
+
+    bad_cases = [
+        ("placeholder", "...\nRESPONSE: Upgraded charging depots allowed municipal fleets to switch smoothly to electric vehicles."),
+        ("echo", "Write one plain declarative lead-in sentence for this excerpt.\nRESPONSE: Upgraded charging depots allowed municipal fleets to switch smoothly to electric vehicles."),
+        ("prompt_copy", "Upgraded charging depots let transit fleets replace diesel vehicles across the city.\nRESPONSE: Upgraded charging depots let transit fleets replace diesel vehicles across the city without disruption."),
+        ("bad_utf8", "Summary of the fleet transition.\nRESPONSE: Upgraded charging depots allowed electric\ufffd fleets to cut overnight loads."),
+        ("truncated", "Summary of the fleet transition.\nRESPONSE: Upgraded charging depots allowed municipal fleets to transition smoothly to battery buses while reducing"),
+        ("wrong_script", "Summary of the fleet transition.\nRESPONSE: Ночные зарядные станции позволили городским автопаркам плавно перейти с дизельных автобусов на электрические."),
+    ]
+    if reason._langid is not None:
+        bad_cases.append(
+            ("wrong_lang", "Summary of the fleet transition.\nRESPONSE: Los depósitos de carga nocturna permitieron a las agencias municipales sustituir autobuses diésel por vehículos eléctricos con menor coste energético.")
+        )
+    for label, raw_out in bad_cases:
+        kept, drops = reason.parse_generated_items([doc_en], [raw_out])
+        assert not kept, f"{label} should have been rejected, got {kept}"
+        assert sum(drops.values()) == 1, (label, drops)
+
+    # Valid non-English CJK + Cyrillic responses with script-native sentence terminators pass!
+    src_ja = "新しい鉄道網の整備により、地方都市から首都圏への通勤時間が大幅に短縮され、沿線の人口増加が続いている。"
+    doc_ja = {"source": "wikipedia", "id": "ja-1", "lang": "ja", "text": src_ja, "excerpt": src_ja, "task_type": "explain", "wrapper_id": 1}
+    ok_ja = "鉄道の高速化が沿線地域の人口動態に与えた影響を説明してください。\nRESPONSE: 移動に要する時間が減ったことで都市部での就労と郊外での居住を両立しやすくなり、移住者が増える結果につながった。"
+    kept_ja, drops_ja = reason.parse_generated_items([doc_ja], [ok_ja])
+    assert len(kept_ja) == 1 and not drops_ja, drops_ja
+
+    # min_keep_rate enforcement fails loudly when any reasoning kind keeps <50% of drafts!
+    docs = [
+        Doc(
+            source="ccnews",
+            id=f"d-{i}",
+            url=f"https://example.org/{i}",
+            lang="en",
+            license="ccnews",
+            published=1_800_000_000 + i,
+            title=f"Story {i}",
+            text=f"Detailed article {i} examining agricultural irrigation sensors, reservoir telemetry, and seasonal rainfall patterns across valleys. " * 4,
+            topic="",
+        )
+        for i in range(45)
+    ]
+    monkeypatch.setattr(reason, "_load_teacher_tokenizer", lambda *a, **k: None)
+    monkeypatch.setattr(
+        reason,
+        "_generate_local_gpu",
+        lambda prompts, *a, **k: ["...\nRESPONSE: bad" for _ in prompts],
+    )
+    cfg = {"model": "Qwen/Qwen3-8B", "revision": "rev", "items": 45, "min_keep_rate": 0.5}
+    with pytest.raises(RuntimeError, match="keep rate"):
+        reason.synthesize_reasoning(docs, b"keep-rate-seed", cfg, log=lambda _: None)
+
+
+def test_review6_withheld_reasoning_published_and_reconstructible_and_fail_loud(monkeypatch):
+    """Review 6 Finding 3: split_wrapped_ctx is a lossless inverse of all 9 wrappers; public_items
+    publishes teacher prompt+cont+wrapper_id+excerpt_sha256 for withheld reasoning items;
+    rebuild_withheld_reasoning verifies exact Item.id; tokenizer & empty /v1/models fail loudly."""
+    from stet.exam import examine
+    from stet.exam.fresh import reason
+
+    excerpt = "Researchers measured glacier retreat across twelve valleys using radar altimetry.\nSecond paragraph details seasonal melt rates."
+    prompt = "Why did melt rates accelerate after 2022?"
+    cont = "Warmer summer nights prevented surface refreezing, allowing meltwater to lubricate basal ice flow."
+
+    # 1. Lossless round-trip across ALL 6 explain/infer wrappers + ALL 3 synthesis wrappers!
+    for task, n_wrap in (("explain", 6), ("infer", 6), ("synthesis", 3)):
+        for wid in range(n_wrap):
+            ctx = reason.wrap_prompt(excerpt, prompt, task, wid)
+            got_ex, got_pr, got_wid = reason.split_wrapped_ctx(ctx, task)
+            assert got_ex == excerpt and got_pr == prompt and got_wid == wid, (task, wid, got_ex, got_pr, got_wid)
+
+    # 2. public_items publishes teacher text for non-OPEN reasoning items, and rebuild reproduces exact id!
+    item = Item(
+        kind="answer",
+        corner="explain/en/ccnews",
+        fmt="prose",
+        lang="en",
+        source="explain:ccnews:story-42",
+        ctx=reason.wrap_prompt(excerpt, prompt, "explain", 2),
+        cont=cont,
+    )
+    pub = examine.public_items([item])
+    assert len(pub) == 1
+    row = pub[0]
+    assert row["withheld"] is True and row["withheld_excerpt"] is True
+    assert row["prompt"] == prompt and row["cont"] == cont and row["wrapper_id"] == 2
+    assert row["excerpt_sha256"] == hashlib.sha256(excerpt.encode("utf-8")).hexdigest()
+    assert row["excerpt_chars"] == len(excerpt)
+    assert excerpt not in json.dumps(row)  # third-party excerpt itself stays withheld!
+
+    rebuilt = examine.rebuild_withheld_reasoning(row, excerpt)
+    assert rebuilt == item and rebuilt.id == item.id
+    with pytest.raises(ValueError, match="excerpt sha256 mismatch"):
+        examine.rebuild_withheld_reasoning(row, excerpt + " tampered")
+
+    # 3. _load_teacher_tokenizer fails loudly when transformers is missing or fails to load pinned tokenizer.
+    if importlib.util.find_spec("transformers") is not None:
+        import transformers as _tf
+
+        monkeypatch.setattr(_tf.AutoTokenizer, "from_pretrained", lambda *a, **k: (_ for _ in ()).throw(OSError("offline")))
+    with pytest.raises(RuntimeError, match="could not load pinned reasoning teacher tokenizer"):
+        reason._load_teacher_tokenizer("Qwen/Qwen3-8B", "rev", required=True)
+
+    # 4. _verify_endpoint_model rejects empty /v1/models list!
+    class EmptyModelsResp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return b'{"data": []}'
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda *a, **k: EmptyModelsResp())
+    with pytest.raises(RuntimeError, match=r"serves \[\]"):
+        reason._verify_endpoint_model("http://127.0.0.1:9999/v1", "Qwen/Qwen3-8B", "rev", {})
+
+
+def test_review6_crawl_share_weighted_other_pool_and_source_selection():
+    """Review 6 Findings 6 & 7: weighted 'other' pool prevents tiny micro-languages from outweighing
+    larger pooled languages (ja/zh); select_source_docs enforces major-lang floor >=27, drops <0.05%
+    micro-langs when major langs exist, and collapses Wikipedia variants into one bucket."""
+    from stet.exam.aggregate import round_score
+    from stet.exam.fresh.reason import select_source_docs
+
+    # 1. Weighted 'other' pool: ja (5.53%) + zh (4.54%) at +0.20 vs 5 tiny langs (0.01-0.05%) at -0.40
+    #    Under unweighted mean the 10 tiny items would drag 'other' strongly negative; under crawl-share
+    #    weighting ja+zh hold >98% of the 'other' weight so 'other' stays near +0.19!
+    shares = {"en": 42.0, "ja": 5.53, "zh": 4.54, "ca": 0.05, "ky": 0.01, "sw": 0.03}
+    items = (
+        [Item(kind="answer", corner="explain/en/wiki", fmt="prose", lang="en", source=f"explain:wikipedia:en:{i}", ctx=f"E{i}", cont=f"A{i}") for i in range(12)]
+        + [Item(kind="answer", corner="explain/ja/wiki", fmt="prose", lang="ja", source=f"explain:wikipedia:ja:{i}", ctx=f"J{i}", cont=f"A{i}") for i in range(6)]
+        + [Item(kind="answer", corner="explain/zh/wiki", fmt="prose", lang="zh", source=f"explain:wikipedia:zh:{i}", ctx=f"Z{i}", cont=f"A{i}") for i in range(6)]
+        + [Item(kind="answer", corner=f"explain/{lg}/wiki", fmt="prose", lang=lg, source=f"explain:wikipedia:{lg}:{i}", ctx=f"T{lg}{i}", cont=f"A{i}") for lg in ("ca", "ky", "sw", "yo", "eo") for i in range(2)]
+    )
+    gains = [0.0] * 12 + [0.20] * 6 + [0.20] * 6 + [-0.40] * 10
+    res = round_score(items, gains, shares=shares)
+    # With ja (5.53%) + zh (4.54%) holding ~98% of the pooled "other" weight (vs 0.19% for 5 tiny
+    # langs), "other" stays strongly positive (~+0.19) so overall explain score is > +0.03 rather
+    # than being dragged negative by the 10 tiny-language items!
+    assert res["score"] > 0.03, f"tiny languages drowned out ja/zh in 'other': {res}"
+
+    # 2. select_source_docs: major langs (>=1%) get >=27 docs, <0.05% micro-langs excluded, wiki variants collapsed!
+    docs: list[Doc] = []
+    # 50 docs each in en (42%), ja (5.5%), zh (4.5%), plus 20 each in 10 micro-langs (0.01%)
+    # and split across wikipedia, wikipedia-added, wikipedia-talk, ccnews, github, discourse
+    sources_en = ["wikipedia", "wikipedia-added", "wikipedia-talk", "ccnews", "github", "discourse"]
+    for i in range(180):
+        src = sources_en[i % len(sources_en)]
+        docs.append(Doc(source=src, id=f"en-{i}", url=f"https://example.org/en/{i}", lang="en", license="CC BY-SA 4.0", published=1_800_000_000 + i, title=f"EN {i}", text=f"English technical document number {i} covering protocols and architecture details. " * 6, topic=""))
+    for lg in ("ja", "zh"):
+        for i in range(40):
+            docs.append(Doc(source="wikipedia", id=f"{lg}-{i}", url=f"https://example.org/{lg}/{i}", lang=lg, license="CC BY-SA 4.0", published=1_800_000_000 + i, title=f"{lg} {i}", text=f"Long multilingual passage {lg} {i} explaining mechanisms and context in depth. " * 6, topic=""))
+    for lg in ("ky", "tt", "eu", "gl", "nn", "af"):
+        for i in range(15):
+            docs.append(Doc(source="wikipedia", id=f"{lg}-{i}", url=f"https://example.org/{lg}/{i}", lang=lg, license="CC BY-SA 4.0", published=1_800_000_000 + i, title=f"{lg} {i}", text=f"Micro language passage {lg} {i} discussing regional history and infrastructure. " * 6, topic=""))
+
+    sel = select_source_docs(docs, b"lang-quota-seed", target=160, shares={"en": 42.0, "ja": 5.5, "zh": 4.5, "ky": 0.01, "tt": 0.01, "eu": 0.02, "gl": 0.02, "nn": 0.01, "af": 0.01})
+    by_lang: dict[str, int] = {}
+    en_wiki = 0
+    en_non_wiki = 0
+    for d in sel:
+        by_lang[d["lang"]] = by_lang.get(d["lang"], 0) + 1
+        if d["lang"] == "en":
+            if d["source"].startswith("wikipedia"):
+                en_wiki += 1
+            else:
+                en_non_wiki += 1
+    assert by_lang.get("ja", 0) >= 27 and by_lang.get("zh", 0) >= 27, by_lang
+    assert all(by_lang.get(lg, 0) == 0 for lg in ("ky", "tt", "eu", "gl", "nn", "af")), by_lang
+    # Collapsed Wikipedia bucket must take ~1/4 of English docs (<=35%), NOT 3/6 (50%)!
+    assert en_wiki <= en_non_wiki * 0.55, f"Wikipedia variants still dominated English selection: wiki={en_wiki}, non_wiki={en_non_wiki}"
+
+
+def test_review6_reader_vllm_partial_exception_falls_back_to_transformers(monkeypatch):
+    """Review 6 Smaller Point 1: if _score_vllm raises mid-batch after scoring some docs, it must
+    return False (not True) so main() invokes _score_transformers on the remaining unrated docs."""
+    torch = pytest.importorskip("torch")
+
+    root = ROOT / "examples" / "reader"
+    spec = importlib.util.spec_from_file_location("reader_partial_fallback_test", root / "curator.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    @dataclasses.dataclass
+    class FakeLogprob:
+        logprob: float
+
+    class FakeTok:
+        def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
+            return [ord(ch) for ch in text[:16]]
+
+    class FlakyLLM:
+        def __init__(self, **kwargs):
+            self.calls = 0
+
+        def get_tokenizer(self):
+            return FakeTok()
+
+        def generate(self, prompts, params, use_tqdm=False):
+            self.calls += 1
+            if self.calls == 1:
+                lps = {tid: FakeLogprob(logprob=-0.1 * (i + 1)) for i, tid in enumerate(params.logprob_token_ids)}
+                return [types.SimpleNamespace(outputs=[types.SimpleNamespace(logprobs=[lps])]) for _ in prompts]
+            raise RuntimeError("transient CUDA failure on batch 2")
+
+    class FakeSamplingParams:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    monkeypatch.setitem(sys.modules, "vllm", types.SimpleNamespace(LLM=FlakyLLM, SamplingParams=FakeSamplingParams))
+    monkeypatch.setattr(torch.version, "hip", None, raising=False)
+
+    fake_task = types.SimpleNamespace(device=lambda: "cuda", time_left=lambda: 600.0, train_tokens=2000, write=lambda lines: None)
+    # 520 candidates -> batch 1 scores 512 docs, batch 2 raises -> must return False while keeping the 512 scores!
+    cands = [(1.0, i, 200, f"Sample document {i} with clear prose.", "en") for i in range(520)]
+    scores: dict[int, float] = {}
+    ok = mod._score_vllm(fake_task, "/fake/model", cands, scores)
+    assert ok is False, "partial mid-batch vLLM crash must return False so transformers finishes the rest"
+    assert len(scores) == 512 and 0 in scores and 511 in scores and 512 not in scores
+
+
+def test_review6_authoritative_init_sha256_matches_build_model(monkeypatch):
+    """Review 6 Smaller Point 6: examine._round_init_sha256 is deterministic and matches
+    train.build_model + train.weights_sha256 for the same round seed."""
+    torch = pytest.importorskip("torch")
+    from stet import train as tr
+    from stet.exam import examine
+
+    class TinyStudent(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.w = torch.nn.Parameter(torch.zeros(4, 4))
+
+    def fake_build(scale, season, init_seed=None, device=None):
+        g = torch.Generator().manual_seed(int(init_seed or 0))
+        m = TinyStudent()
+        with torch.no_grad():
+            m.w.copy_(torch.randn(4, 4, generator=g))
+        return m
+
+    monkeypatch.setattr(tr, "build_model", fake_build)
+    s3 = load_season("s3")
+    rnd = practice_round(s3, 0)
+    scale = s3.scale("nano")
+
+    h1 = examine._round_init_sha256(rnd, scale)
+    h2 = examine._round_init_sha256(rnd, scale)
+    expected = tr.weights_sha256(fake_build(scale, s3, rnd.init_seed, torch.device("cpu")))
+    assert h1 == h2 == expected and len(h1) == 64

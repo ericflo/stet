@@ -159,6 +159,10 @@ def edge_cases(rng: random.Random):
         yield "every source of writing", kinds, draw_gains(rng, len(kinds), "normal"), {"en": 43.0, "ru": 6.2, "ja": 5.0}
     small = [item(source(0), lang, "prose", "passage", i) for i, lang in enumerate(["en"] * 10 + ["ru"] * 8 + ["de"] * 7 + ["sw"] * 3 + ["yo"] * 2)]
     yield "small languages measured together", small, draw_gains(rng, len(small), "normal"), {"en": 43.0, "ru": 6.2, "de": 5.6, "sw": 0.2}
+    skewed_langs = ["en"] * 12 + ["ja"] * 6 + ["zh"] * 6 + ["ca"] * 2 + ["ky"] * 2 + ["yo"] * 2 + ["eo"] * 2 + ["sw"] * 2
+    skewed = [item(source(0), lang, "prose", "answer", i) for i, lang in enumerate(skewed_langs)]
+    skewed_gains = ([0.05] * 12 + [0.20] * 6 + [0.18] * 6 + [-0.40] * 2 + [-0.35] * 2 + [-0.30] * 2 + [-0.25] * 2 + [-0.20] * 2)
+    yield "skewed small languages weighted by crawl share", skewed, skewed_gains, {"en": 42.0, "ja": 5.53, "zh": 4.54, "ca": 0.14, "ky": 0.01, "sw": 0.03}
     lone = [item(source(1), "en", "prose", "passage", i) for i in range(20)] + [item(source(1), "nan", "prose", "passage", 99)]
     yield "one item of a small language", lone, draw_gains(rng, len(lone), "outliers"), {"en": 43.0}
     named = [item(source(2), "other", "dialogue", "answer", i) for i in range(9)] + [item(source(2), "eo", "dialogue", "answer", i) for i in range(3)]

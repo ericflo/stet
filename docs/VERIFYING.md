@@ -102,7 +102,7 @@ reset, on 65.5M tokens plus a 32-step SFT probe), about 20 minutes on an RTX 509
 minutes on an RTX 4090, ~52 minutes on an RTX 3090), using ≤10 GiB VRAM so 12 GB+ cards can
 grade. The first job of a round also downloads the round's raw text (about 1.5 GB compressed;
 ~3.8 GB once built) and caches the pinned student weights (~0.7 GB).
-Four established machines a round are asked to train on the unedited corpus as well, and
+Two established machines a round (`baselines.per_round = 2`) are asked to train on the unedited corpus as well, and
 so is every machine that is not yet established: for them the first job takes about twice
 as long.
 
@@ -204,8 +204,8 @@ a person who has been shown a script of an entry is never asked to run that entr
 an account that is not established is shown a script only once its entry is closed to
 further runs.
 
-**The round's baseline is measured four times.** The first four established graders of a
-round are each asked for a baseline with their grade: the unedited corpus's score on every
+**The round's baseline is measured twice.** The first two established graders of a
+round (`baselines.per_round = 2`) are each asked for a baseline with their grade: the unedited corpus's score on every
 item. The round's baseline is the item-by-item median of theirs, and every grade is measured
 against it, whoever made it. A machine that is not yet established is always asked for its
 own: that is how it is checked. If your corpus or your exam differs from the round's, or your

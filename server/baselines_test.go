@@ -105,15 +105,45 @@ func (w *world) lapse(cs ...*claimed) {
 	})
 }
 
+// Season 3 sets baselines.per_round = 2: deterministic student init + corpus means two
+// established verifiers cross-check the unedited baseline while saving two trainings per round.
+func TestSeason3DefaultTwoBaselinesPerRound(t *testing.T) {
+	w, anchor, idx := toGrade(t, 3)
+	if w.app.season.Baselines.PerRound != 2 {
+		t.Fatalf("expected Season 3 default baselines.per_round == 2, got %d", w.app.season.Baselines.PerRound)
+	}
+	g := w.volunteers("bob", "carol", "dave")
+	if n := w.wanted(anchor); n != 2 {
+		t.Fatalf("a round nobody has graded wants its two baselines: %d", n)
+	}
+	c0 := w.asked(g[0], true)
+	c1 := w.asked(g[1], true)
+	c2 := w.asked(g[2], false)
+	if n := w.wanted(anchor); n != 0 {
+		t.Fatalf("after 2 promises the round should want 0 more, got %d", n)
+	}
+	if code, status := w.send(g[2], c2, 5.5, 0); code != 200 || status != "pending" {
+		t.Fatalf("dave's grade without baseline: HTTP %d %s", code, status)
+	}
+	if code, status := w.send(g[0], c0, 5.6, 6.00); code != 200 || status != "pending" {
+		t.Fatalf("bob's grade: HTTP %d %s", code, status)
+	}
+	if code, status := w.send(g[1], c1, 5.6, 6.02); code != 200 || status != "settled" {
+		t.Fatalf("carol's grade: HTTP %d %s", code, status)
+	}
+	w.check()
+	if e := w.entry(idx, c2.Job.Editor.Name); !e.Valid || e.Gain == nil || math.Abs(*e.Gain-0.51) > 1e-9 {
+		t.Fatalf("dave's grade against 2-machine baseline (6.01): %+v", e)
+	}
+}
+
 // Season 1 had every grader train the round's unedited student, and a third of all training
 // was that. Four machines' measurements make a round's baseline as well as forty: the first
 // four established graders are asked for it, and the fifth trains the script's student alone.
 // Its grade comes without a baseline and is scored against the mean of the four.
 func TestFourMachinesMeasureARoundsBaselineAndEveryGradeIsScoredAgainstIt(t *testing.T) {
 	w, anchor, idx := toGrade(t, 5)
-	if w.app.season.Baselines.PerRound != 4 {
-		t.Fatalf("the season asks %d machines for a round's baseline; this test is written for 4", w.app.season.Baselines.PerRound)
-	}
+	w.app.season.Baselines.PerRound = 4
 	g := w.volunteers("bob", "carol", "dave", "erin", "frank")
 	if n := w.wanted(anchor); n != 4 {
 		t.Fatalf("a round nobody has graded wants its four baselines: %d", n)
@@ -183,6 +213,7 @@ func TestFourMachinesMeasureARoundsBaselineAndEveryGradeIsScoredAgainstIt(t *tes
 // is the median of the others', and every grade is scored against that.
 func TestABaselineThatIsFarOutAndFirstInIsNotTheRoundsStandard(t *testing.T) {
 	w, anchor, idx := toGrade(t, 4)
+	w.app.season.Baselines.PerRound = 4
 	g := w.volunteers("bob", "carol", "dave", "erin")
 	var jobs []*claimed
 	for _, a := range g {
@@ -249,6 +280,7 @@ func TestABaselineThatIsFarOutAndFirstInIsNotTheRoundsStandard(t *testing.T) {
 func TestServerComparesInitSHA256AndTokensSHA256(t *testing.T) {
 	pub, priv := newKey()
 	w := newWorld(t, pub)
+	w.app.season.Baselines.PerRound = 4
 	anchor := w.join("anchor-one", priv)
 	owner := w.join("owner-entry", nil)
 	owner2 := w.join("owner-entry-2", nil)
@@ -419,6 +451,7 @@ func TestServerComparesInitSHA256AndTokensSHA256(t *testing.T) {
 // to say so, it is turned away as it arrives.
 func TestABaselineThatIsFarOutAndLastInIsTurnedAway(t *testing.T) {
 	w, _, idx := toGrade(t, 4)
+	w.app.season.Baselines.PerRound = 4
 	g := w.volunteers("bob", "carol", "dave", "erin")
 	var jobs []*claimed
 	for _, a := range g {
@@ -469,6 +502,7 @@ func TestMedianItems(t *testing.T) {
 // machine that was ever asked is asked again, since it may have the student trained.
 func TestABaselineSomebodyWasAskedForAndDidNotSendGoesToTheNextGrader(t *testing.T) {
 	w, anchor, _ := toGrade(t, 8)
+	w.app.season.Baselines.PerRound = 4
 	g := w.volunteers("bob", "carol", "dave", "erin", "frank", "gina", "harry")
 	bob, carol, dave, erin, frank, gina, harry := g[0], g[1], g[2], g[3], g[4], g[5], g[6]
 	w.asked(bob, true)
@@ -522,6 +556,7 @@ func TestABaselineSomebodyWasAskedForAndDidNotSendGoesToTheNextGrader(t *testing
 // checked against the others', and is no part of the round's, so it is not one of the four.
 func TestAVerifierNotYetEstablishedAlwaysMeasuresTheBaselineAndIsNotOneOfTheFour(t *testing.T) {
 	w, anchor, idx := toGrade(t, 6)
+	w.app.season.Baselines.PerRound = 4
 	nina, olga := w.join("nina", nil), w.join("olga", nil)
 	w.standing("olga") // one grade that agreed: no newcomer, and not established
 	g := w.volunteers("bob", "carol", "dave", "erin", "frank")
@@ -600,6 +635,7 @@ func TestARoundWithOneGraderStillSettles(t *testing.T) {
 // the next grade job handed out, whoever takes it, asks for the baseline.
 func TestARoundWhoseBaselineNeverCameAsksTheNextGraderForIt(t *testing.T) {
 	w, anchor, idx := toGrade(t, 5)
+	w.app.season.Baselines.PerRound = 4
 	g := w.volunteers("bob", "carol", "dave", "erin", "frank")
 	frank := g[4]
 	var four []*claimed
@@ -640,6 +676,7 @@ func TestARoundWhoseBaselineNeverCameAsksTheNextGraderForIt(t *testing.T) {
 // none, and whoever comes next is asked for the baseline whichever script they are handed.
 func TestAGradeWithNoBaselineIsNotLeftAsTheRoundsOnlyWord(t *testing.T) {
 	w, anchor, idx := toGrade(t, 5)
+	w.app.season.Baselines.PerRound = 4
 	g := w.volunteers("bob", "carol", "dave", "erin", "frank", "gina")
 	frank, gina := g[4], g[5]
 	var four []*claimed
@@ -695,6 +732,7 @@ func TestAGradeWithNoBaselineIsNotLeftAsTheRoundsOnlyWord(t *testing.T) {
 // grade: its entries are void, which is held against none of them.
 func TestARoundNobodyIsLeftToMeasureIsGivenUpNotScoredAgainstNothing(t *testing.T) {
 	w, _, idx := toGrade(t, 5)
+	w.app.season.Baselines.PerRound = 4
 	g := w.volunteers("bob", "carol", "dave", "erin", "frank")
 	var four []*claimed
 	for _, a := range g[:4] {
@@ -739,6 +777,7 @@ func TestARoundNobodyIsLeftToMeasureIsGivenUpNotScoredAgainstNothing(t *testing.
 func TestARentedMachineNotAskedForTheBaselineHasAPassLessToDo(t *testing.T) {
 	pub, priv := newKey()
 	w := newWorld(t, pub)
+	w.app.season.Baselines.PerRound = 4
 	w.app.cfg.EarlyWindow = 10 * time.Minute
 	anchor, alice := w.join("anchor-one", priv), w.join("alice", nil)
 	w.submit(alice, "one", "print('one')")

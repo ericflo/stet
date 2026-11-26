@@ -75,7 +75,7 @@
     }
   },
   "exam": {
-    "about": "100% fresh, zero static benchmarks, zero synthetic templates, zero raw web-text perplexity. Half fresh twin-context comprehension across every crawl language published in the day before the draw (same continuation scored under its real opening vs same-source wrong openings, in bits per byte), half fresh deterministic harvest-derived multi-sentence reasoning (explain, infer, synthesis generated at temp=0 by Qwen3-8B from the same fresh harvests with diverse wrappers and an anti-copying filter), all sat after a brief disjoint multilingual SFT probe.",
+    "about": "100% fresh, zero static benchmarks, zero synthetic templates, zero raw web-text perplexity. Half fresh twin-context comprehension across every crawl language published in the day before the draw (same continuation scored under its real opening vs same-source wrong openings, in bits per byte), half fresh harvest-derived multi-sentence reasoning (explain, infer, synthesis written once at the draw at temp=0 by pinned Qwen/Qwen3-8B from the same fresh harvests with diverse wrappers and an anti-copying filter, and published in full at settlement), all sat after a brief disjoint multilingual SFT probe.",
     "generator_version": 11,
     "per_corner": 0,
     "more": {},
@@ -94,7 +94,8 @@
       "max_ngram_overlap": 0.5,
       "max_excerpt_tokens": 380,
       "max_excerpt_chars": 1200,
-      "max_new_tokens": 240,
+      "max_new_tokens": 320,
+      "min_keep_rate": 0.5,
       "temperature": 0.0
     },
     "min_pillar_items": 20,
@@ -565,7 +566,7 @@
     }
   },
   "baselines": {
-    "per_round": 4
+    "per_round": 2
   },
   "references": {
     "every_round": [

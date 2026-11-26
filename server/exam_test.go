@@ -307,3 +307,135 @@ func TestAuthoritativeExamInitSHALocksRound(t *testing.T) {
 		t.Fatalf("matching init_sha256 against authoritative exam lock: HTTP %d, want 200", code)
 	}
 }
+
+// Per RULES.md, a pillar that falls below min_pillar_items (such as a news=0 draw) is omitted
+// cleanly and its share goes to the rest of its group; the round page shows it as omitted.
+// Refusing an exam happens only when a present pillar is sparse (<min_pillar_items) or an
+// entire declared group has zero items.
+func TestOmittedPillarIsAcceptedAndMissingGroupIsRefused(t *testing.T) {
+	pub, priv := newKey()
+	w := newWorld(t, pub)
+	anchor := w.join("anchor-one", priv)
+	w.submit(anchor, "ref-a", "print(1)")
+	idx := w.drawWithoutExam()
+
+	// Missing an entire declared group ("reasoning") is refused.
+	noReasoning := []ItemInfo{}
+	for _, it := range testTable() {
+		if it.Pillar == "reference" || it.Pillar == "news" || it.Pillar == "technical" || it.Pillar == "conversation" {
+			noReasoning = append(noReasoning, it)
+		}
+	}
+	if code, msg := w.postExam(anchor, idx, noReasoning); code != 400 || !strings.Contains(msg, "group") {
+		t.Fatalf("exam missing entire reasoning group: HTTP %d %q, want 400 mentioning group", code, msg)
+	}
+
+	// Sparse present pillar (news has 5 items < 20) is refused.
+	sparseNews := []ItemInfo{}
+	newsSeen := 0
+	for _, it := range testTable() {
+		if it.Pillar == "news" {
+			newsSeen++
+			if newsSeen > 5 {
+				continue
+			}
+		}
+		sparseNews = append(sparseNews, it)
+	}
+	if code, msg := w.postExam(anchor, idx, sparseNews); code != 400 || !strings.Contains(msg, "minimum") {
+		t.Fatalf("exam with 5 news items: HTTP %d %q, want 400 mentioning minimum", code, msg)
+	}
+
+	// Omitting news completely (0 items) while the rest of comprehension & reasoning are full succeeds!
+	noNews := []ItemInfo{}
+	for _, it := range testTable() {
+		if it.Pillar != "news" {
+			noNews = append(noNews, it)
+		}
+	}
+	if code, msg := w.postExam(anchor, idx, noNews); code != 200 {
+		t.Fatalf("exam omitting news cleanly: HTTP %d %s, want 200", code, msg)
+	}
+	var mix *ExamMix
+	w.app.st.view(func(s *State) { mix = s.Rounds[idx].ExamMix })
+	if mix == nil {
+		t.Fatal("missing ExamMix")
+	}
+	for _, p := range mix.Parts {
+		switch p.Pillar {
+		case "news":
+			if p.Items != 0 || p.Share != 0 {
+				t.Fatalf("omitted news pillar should have 0 items and 0 share, got %+v", p)
+			}
+		case "reference", "technical", "conversation":
+			want := 0.50 / 3.0
+			if math.Abs(p.Share-want) > 1e-4 {
+				t.Fatalf("remaining comprehension pillar %s share = %.4f, want %.4f", p.Pillar, p.Share, want)
+			}
+		}
+	}
+	rid := roundID(w.app.season.ID, idx)
+	if code, page := w.page("/rounds/" + rid); code != 200 || !strings.Contains(page, `<dt>news</dt><dd>omitted`) {
+		t.Fatalf("round page (HTTP %d) did not render omitted news pillar", code)
+	}
+	w.check()
+}
+
+// Organisers can cancel an un-examined round cleanly via POST /api/v1/admin/rounds/{id}/cancel
+// with nothing held against any entry, and once an exam is posted cancellation is refused.
+func TestAdminCancelRoundAndExamTimeoutAutoCancel(t *testing.T) {
+	pub, priv := newKey()
+	w := newWorld(t, pub)
+	anchor := w.join("anchor-one", priv)
+	alice := w.join("alice", nil)
+	edID := w.submit(alice, "tidy", "print(1)")
+
+	// 1) Manual organiser cancel before exam is posted.
+	idx := w.drawWithoutExam()
+	rid := roundID(w.app.season.ID, idx)
+	if w.editAll(anchor) != 1 {
+		t.Fatal("anchor should have run entry")
+	}
+	if code := alice.do("POST", "/api/v1/admin/rounds/"+rid+"/cancel", nil, nil); code != 403 {
+		t.Fatalf("non-organiser cancel: HTTP %d, want 403", code)
+	}
+	var ack map[string]any
+	if code := anchor.do("POST", "/api/v1/admin/rounds/"+rid+"/cancel", map[string]string{"reason": "harvest outage"}, &ack); code != 200 {
+		t.Fatalf("organiser cancel: HTTP %d %v", code, ack)
+	}
+	w.app.st.view(func(s *State) {
+		rd := s.Rounds[idx]
+		if rd.Status != "settled" || rd.BaselineLoss != nil {
+			t.Fatalf("cancelled round state: status=%s baseline=%v", rd.Status, rd.BaselineLoss)
+		}
+		if failing(s, edID) || roundsRun(s, edID) != 0 {
+			t.Fatalf("cancelled round held against entry: failing=%v roundsRun=%d", failing(s, edID), roundsRun(s, edID))
+		}
+		en := s.inRound[idx][0]
+		if !en.Void || !en.Unattended || en.Valid {
+			t.Fatalf("cancelled entry should be void+unattended: %+v", en)
+		}
+	})
+	w.check()
+
+	// 2) Automatic safety-valve cancellation when ExamTimeout elapses with no exam posted.
+	idx2 := w.drawWithoutExam()
+	w.pass(w.cfg.ExamTimeout + time.Minute)
+	w.app.st.view(func(s *State) {
+		rd := s.Rounds[idx2]
+		if rd.Status != "settled" || rd.BaselineLoss != nil {
+			t.Fatalf("timed-out un-examined round should auto-cancel cleanly: status=%s baseline=%v", rd.Status, rd.BaselineLoss)
+		}
+		if failing(s, edID) || roundsRun(s, edID) != 0 {
+			t.Fatalf("timed-out round held against entry: failing=%v roundsRun=%d", failing(s, edID), roundsRun(s, edID))
+		}
+	})
+	w.check()
+
+	// 3) Once an exam is posted, admin cancel is refused with 409.
+	idx3 := w.draw()
+	rid3 := roundID(w.app.season.ID, idx3)
+	if code := anchor.do("POST", "/api/v1/admin/rounds/"+rid3+"/cancel", nil, nil); code != 409 {
+		t.Fatalf("cancelling a round that already has its exam: HTTP %d, want 409", code)
+	}
+}

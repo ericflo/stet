@@ -51,9 +51,10 @@ stet service install      # leave it running: starts with the machine, upgrades 
   the score is fresh twin-context comprehension (the exact same continuation scored under its
   real opening minus up to three length-matched wrong openings from the same source and
   language, in bits per byte) from three hours of the day before, picked by the draw, in every
-  language by its share of the crawl. Half is fresh deterministic harvest-derived reasoning
-  (`explain`, `infer`, `synthesis` derived at `temp=0` from those exact same three hours with
-  varied wrappers and an anti-copying filter). Every student (`ERNIE-4.5-0.3B`, bottom half
+  language by its share of the crawl. Half is fresh harvest-derived reasoning
+  (`explain`, `infer`, `synthesis` written once at the draw at `temp=0` by the pinned teacher
+  model from those exact same three hours with varied wrappers, an anti-copying filter, and
+  published in full at settlement). Every student (`ERNIE-4.5-0.3B`, bottom half
   frozen, 65.5M tokens, ≤10 GiB VRAM so 12 GB+ GPUs can grade) sits the exam after a fixed
   1-epoch commercial-permissive multilingual SFT probe. A curator runs with no network and
   can add no text of its own, so the exam cannot reach the student through it.

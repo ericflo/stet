@@ -98,13 +98,13 @@ those.
 How many it rents: one for each machine at a grade, which takes no other until it is done
 (about 52 minutes on a 3090, ~29 on a 4090, ~20 on a 5090 at the standard scale), and one more for every `--per-machine`
 (6) scripts a new machine could grade now: `--per-machine 1` gives each its own. A grade
-trains the student once; the four machines a round asks to measure its unedited baseline
-(Season 3's `baselines.per_round`, `baselines_wanted` in `/admin/work`) train that first, on
-as many tokens. In Season 3 the exam is made at the draw, from hours of the day before already
-harvested, and posted within a minute or so of it, so nearly every grade is taken once the
+trains the student once; the two machines a round asks to measure its unedited baseline
+(Season 3's `baselines.per_round = 2`, `baselines_wanted` in `/admin/work`) train that first, on
+as many tokens. In Season 3 the exam is built right after the draw from hours of the day before already
+harvested (~20–30 minutes on the organisers' AMD Radeon 8060S examiner), so nearly every grade is taken once the
 exam is posted, and wants a machine then. A grader may also take a grade before the exam is
 posted and hold it until it is: such grades want machines from `--early` (90 minutes) before
-the exam is due (when the server says, or else `--exam-after`, 5 minutes, after the draw), and
+the exam is due (when the server says, or else `--exam-after`, 25 minutes, after the draw), and
 each kind of GPU is rented just in time, so that, rented now, it would report between a
 minute before the exam and `--settle-within` (15 minutes) after it. A machine that has
 trained only waits, so what a grade costs on a kind is its price over the time it is held,
@@ -148,7 +148,7 @@ machine with room. A kind's price is ranked over how often machines of its kind 
 (`startRates`: some cheap hosts never do), learned per market, card and class of host. A round
 settles only once its slowest grade is in: a Season 3 `ERNIE-4.5-0.3B-Base-PT` pass (frozen bottom half, 65.5M tokens, deterministic CUDA kernels) is about 20 minutes
 on a 5090, 29 on a 4090 and 52 on a 3090. A machine that runs curators takes grades as soon as its runs are done, and
-the first four to take one also measure the round's baseline, two passes. `--cheapest` rents every machine by what a grade costs, its price over its speed.
+the first two to take one also measure the round's baseline, two passes. `--cheapest` rents every machine by what a grade costs, its price over its speed.
 What will do: NVIDIA, `--min-gpu-memory` 12 GB or more for grading (peak grading VRAM is ≤10 GiB; `--min-curator-gpu-memory` 24 GB
 or more for running curators, which receive 22 GB VRAM inside the sandbox; unfilled 24 GB curator
 slots fall back to 12 GB+ graders whenever grades or farm tasks are waiting), fast enough to finish
@@ -175,7 +175,7 @@ Wants=network-online.target
 After=network-online.target
 
 [Service]
-ExecStart=%h/.local/bin/stet-cloud scale --follow --cloud any --max 6 --max-price 1.10 --max-hourly 4 --daily-budget 60 --per-machine 1 --exam-after 5m --early 0
+ExecStart=%h/.local/bin/stet-cloud scale --follow --cloud any --max 6 --max-price 1.10 --max-hourly 4 --daily-budget 60 --per-machine 1 --exam-after 25m --early 0
 Restart=always
 RestartSec=60
 

@@ -10,11 +10,12 @@ A fixed 0.3B language model, the **student** (`baidu/ERNIE-4.5-0.3B-Base-PT`, 18
 its embeddings and lower half of layers frozen and its upper half reset from the round's
 seed), is trained on raw web text for a fixed number of tokens (65.5M at official `standard`
 scale), run through a short fixed multilingual fine-tuning probe, and then sits a 100%-fresh
-**exam**. The exam is made when the round is drawn: half of it is fresh twin-context
+**exam**. The exam is made right after the round is drawn: half of it is fresh twin-context
 comprehension from three hours of the day before, which the draw picks (the same continuation
 scored under its real opening minus wrong openings from the exact same source and language),
-and half is fresh deterministic harvest-derived reasoning (`explain`, `infer`, `synthesis`)
-from those same three hours. There are zero static benchmarks, zero synthetic templates, and
+and half is fresh harvest-derived reasoning (`explain`, `infer`, `synthesis`) written once at
+the draw by the season's pinned teacher model (`temperature=0`) from those same three hours
+and published in full at settlement. There are zero static benchmarks, zero synthetic templates, and
 zero raw web perplexity. The model, the trainer, and the probe never change. You change one
 thing: the data. You write a **curator**, a program that is handed raw web pages it has never
 seen and twenty minutes on one 24 GB+ GPU. It answers with an **edit script**: what to keep,
@@ -90,10 +91,14 @@ nothing is waiting.
    cannot pick a favourable drand round either.
 3. **Edit.** Two volunteers each run every curator, in a sandbox, with a time limit. Each
    run writes an edit script.
-4. **Exam.** The round's exam is made at the draw. The organisers' examiner harvests what
-   people publish, every hour of the clock, and tells the server each harvest's hash as it is
-   made. The draw's seed picks three of the day's hours, and the exam is made from exactly
-   those and posted with its hash (see [the exam](#the-exam)). No round waits for its exam.
+4. **Exam.** The round's exam is built right after the draw (typically ~20–30 minutes on
+   the organisers' examiner, while curators run and graders can begin training). The organisers'
+   examiner harvests what people publish, every hour of the clock, and tells the server each
+   harvest's hash as it is made. The draw's seed picks three of the day's hours, and the exam
+   is made from exactly those and posted with its hash (see [the exam](#the-exam)). If an
+   un-examined round cannot have its exam built (for instance during an extended source outage),
+   the organisers can cancel it (`POST /api/v1/admin/rounds/{id}/cancel`) and the server
+   auto-cancels it after `STET_EXAM_TIMEOUT` (default `6h`) with nothing held against any entry.
 5. **Grade.** Other volunteers train the student on what each script says, as soon as it
    is written, and have it sit the exam. Grading runs no entrant code: a
    script is plain data.
@@ -175,9 +180,9 @@ is measured in unified **bits per byte**. Inside each group, every row below cou
 | | News | Same continuation under real vs wrong openings of fresh news reports (same source & language) | Common Crawl's news crawl |
 | | Technical | Same continuation under real vs wrong openings of issues, PRs, release notes and patches | GitHub, the kernel's mailing lists |
 | | Conversation | Same continuation under real vs wrong openings of posts and replies | Hacker News, Lemmy, forums, Bluesky, Mastodon, Wikipedia's talk pages |
-| Reasoning (50%) | Explain | Multi-sentence causal and mechanism explanation in the excerpt's own language | Deterministic (`temp=0`, pinned `Qwen3-8B`) synthesis from the same 3 fresh hours |
-| | Infer | Multi-sentence analytical implications and trade-offs in the excerpt's own language | Deterministic synthesis from the same 3 fresh hours |
-| | Synthesis | Declarative prose synthesis of the excerpt's main point and rationale (zero Q/A syntax) | Deterministic synthesis from the same 3 fresh hours |
+| Reasoning (50%) | Explain | Multi-sentence causal and mechanism explanation in the excerpt's own language | Written once at draw (`temp=0`, pinned `Qwen/Qwen3-8B@b968826d`) from the same 3 fresh hours; published in full at settlement |
+| | Infer | Multi-sentence analytical implications and trade-offs in the excerpt's own language | Written once at draw from the same 3 fresh hours; published in full at settlement |
+| | Synthesis | Declarative prose synthesis of the excerpt's main point and rationale (zero Q/A syntax) | Written once at draw from the same 3 fresh hours; published in full at settlement |
 
 **The writing** is what people published in three hours of the day before the draw. The
 examiner harvests every hour of the clock an hour after it ends, keeping a sample chosen
@@ -193,10 +198,14 @@ Inside a kind of writing, every language gets its share of the round's corpus, a
 sources take turns. No source needs a key or an account. Writing the round's corpus already
 holds is dropped from the exam.
 
-**The reasoning items** (`explain`, `infer`, `synthesis`) are derived deterministically from
-a stratified sample of those exact same three fresh hours at the draw using pinned greedy
-decoding (`Qwen/Qwen3-8B`, `temperature=0`), six varied natural wrappers (`synthesis` has no
-`?` or `Q:/A:` markers), and a `<50%` 5-gram verbatim-copying filter. Any item whose excerpt
+**The reasoning items** (`explain`, `infer`, `synthesis`) are written once at the draw from
+a stratified sample of those exact same three fresh hours by the season's pinned teacher model
+(`Qwen/Qwen3-8B@b968826d`, greedy `temperature=0`), using six varied natural wrappers (`synthesis`
+has no `?` or `Q:/A:` markers), a `<50%` 5-gram verbatim-copying filter against both the excerpt
+and the prompt lead-in, and response language/completeness checks. Because floating-point GPU
+inference at `temperature=0` is not guaranteed bit-reproducible across different hardware or batch
+sizes, the examiner publishes the exact generated teacher prompt, response, wrapper ID, and
+source-excerpt SHA-256 for every reasoning item when the round settles. Any item whose excerpt
 or response matches the round's training corpus is dropped.
 
 **Everything on the exam counts.** The season names every part of the exam: those in the
@@ -218,15 +227,23 @@ paragraph. The exam's writing has the white space of the crawl's own text: one s
 between words, one line end between lines, no empty lines and no tabs.
 
 **The exam's score** is half the mean of the comprehension kinds and half the mean of the
-reasoning kinds. A kind missing from a round gives its share to the others of its own group.
-Inside each, every language counts by its share of the round's corpus, then every format. No
-share rests on one or two items: a language or a format with fewer than eight items counts in
-proportion, and a part's small languages are measured together. A gain on an item is clipped
-to a few robust widths, so that no handful of items decides anything.
+reasoning kinds. Any kind that has fewer than the season's minimum (`min_pillar_items = 20`)
+items after decontamination is omitted from that round and its share goes to the remaining
+kinds of its own group (the round page lists omitted kinds); an exam is refused only if an
+entire group (comprehension or reasoning) has zero surviving items.
+Inside each kind, every language counts by its share of the round's corpus, then every format.
+No share rests on one or two items: a language or a format with fewer than eight items counts in
+proportion, and a part's small languages are pooled into `"other"` with each item weighted by
+its own language's crawl share (so tiny micro-languages cannot outweigh larger pooled languages
+such as Japanese or Chinese). A gain on an item is clipped to a few robust widths, so that no
+handful of items decides anything.
 
-When the round settles, its exam is published: openly licensed Wikipedia items whole, and for
-every other source the item's source, its id there and the item's hash. Anyone can check
-those items at the source. So is every student's score on every item
+When the round settles, its exam is published: openly licensed Wikipedia items whole, the
+organisers' generated teacher prompt, answer, wrapper ID, and source-excerpt hash for every
+reasoning item (withholding only third-party source excerpts, so anyone who fetches the source
+excerpt can reconstruct and verify the exact `Item.id`), and for every other comprehension
+source the item's source, its id there and the item's hash. Anyone can check those items at
+the source. So is every student's score on every item
 (`/api/v1/rounds/<id>/scores`): anyone can work every gain out again.
 
 **Nobody knows it in advance**, the organisers included. So no exam is kept secret, and
@@ -311,9 +328,9 @@ where other entries did run, are taken to be the entry's doing, and it stops bei
 
 - **Gain** = how much better your script's student does on the exam than the unedited
   corpus's, on the same round with the same initial weights, in bits per byte. The unedited
-  student is trained four times a round, by four different established graders, and its
-  score on each item is the median of theirs. The unedited corpus is every document in the
-  order it was drawn.
+  student is trained twice a round (`baselines.per_round = 2`), by two different established
+  graders, and its score on each item is the median of theirs. The unedited corpus is every
+  document in the order it was drawn.
 - **An entry's gain for a round is taken over its runs**: the mean of two, or the median
   of three. Two runs of a curator that uses neither the clock nor a GPU write the same
   script, and then there is one number.
@@ -465,10 +482,10 @@ are graded by **verifiers**: anyone who runs `stet verify`.
 - **Each script is graded by someone other than the verifier who wrote it.** Its gain is
   the median of the established verifiers' grades, each against the round's unedited
   student. Two honest machines agree to within a small tolerance *(provisional: 0.03 bits
-  per byte)*. The first four established graders of a round are each asked to train the
-  unedited student as well; the rest are not, and their grades are measured against the
-  median of those four. (Season 1 trained one on every machine: a third of all its
-  trainings.) A measurement of the unedited student must agree with the
+  per byte)*. The first two established graders of a round (`baselines.per_round = 2`) are
+  each asked to train the unedited student as well; the rest are not, and their grades are
+  measured against the median of theirs. (Season 1 trained one on every machine: a third of
+  all its trainings.) A measurement of the unedited student must agree with the
   others' to within 0.05 bits per byte, or its grade is turned away and listed with the
   round. A machine that is not yet established always trains its own: that is how it is
   checked. When two established grades of a script
@@ -514,7 +531,7 @@ are graded by **verifiers**: anyone who runs `stet verify`.
   agreed before it waits up to 45 minutes, and for an account with no such grade it does
   not wait.
 - Agreeing about an entry that left the corpus as it was earns no standing. Its score is
-  the unedited student's, which four machines a round measure anyway. Nor does agreeing that
+  the unedited student's, which two machines a round measure anyway. Nor does agreeing that
   a script is invalid, which is decided before anything is trained.
 - Running curators needs Linux, the sandbox, the season's libraries and a machine at or
   above the floor. Grading needs an NVIDIA (CUDA) or AMD (ROCm) GPU and the season's
@@ -553,13 +570,18 @@ script with `stet score`.
 - **The first established accounts.** Theirs, and so which grades the first volunteers
   are compared with.
 - **Assigning work at random.** The server chooses who runs and who grades what.
-- **Harvesting honestly.** The examiner harvests every hour by published code and tells
-  the server each harvest's hash before any round can be given it (`/api/v1/harvests`); the
-  draw then picks the hours, so no harvest can be made to suit a round or a curator. Anyone
-  can make the generated questions again from the seed, check which hours the seed picks,
-  and check every fresh item against its source once the round settles. What they could do
-  and nobody would see: leave a source out of an hour's harvest. They tune nothing of their
-  own reference curators on a round's exam before it settles.
+- **Harvesting and building the exam honestly.** The examiner harvests every hour by published
+  code and tells the server each harvest's hash before any round can be given it
+  (`/api/v1/harvests`); the draw then picks the hours, so no harvest can be made to suit a round
+  or a curator. For the reasoning half, the examiner runs the pinned teacher model
+  (`Qwen/Qwen3-8B@b968826d`, `temperature=0`) once at the draw; because GPU generation is not
+  guaranteed bit-reproducible across different hardware or batch sizes, every generated teacher
+  prompt, response, wrapper ID, and source-excerpt hash is published in full when the round
+  settles, alongside the exact `items_digest` every grader sat. Anyone can check which hours the
+  seed picks, audit every published teacher prompt and response, and check every fresh item
+  against its source once the round settles. What the organisers could do and nobody would see:
+  leave a source out of an hour's harvest. They tune nothing of their own reference curators on
+  a round's exam before it settles.
 - **Training the finals.** The finals' students are trained on the organisers' machines.
   The scripts and the exam are published, so any of them can be trained again.
 - **Choosing when the season closes,** and so which rounds pick the finalists. The close is
@@ -570,6 +592,5 @@ script with `stet score`.
   after seeing its beacon value. Every round's page lists the draws it was announced for
   and left, and verifiers keep their own record of what they were told.
 
-They are not trusted with the seed, the corpus, the generated questions, the arithmetic,
-running your curator or grading it. All of those are done by other people or can be checked by
-anyone.
+They are not trusted with the seed, the corpus, the arithmetic, running your curator or
+grading it. All of those are done by other people or can be checked by anyone.

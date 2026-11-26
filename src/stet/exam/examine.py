@@ -5,13 +5,17 @@ a round's draw the server names the hours the round's seed chose, and the examin
 
 1. puts those hours' harvests together;
 2. builds the round's corpus and measures its languages;
-3. chooses the fresh items, and drops those the corpus already holds;
-4. generates the other items from the round's seed;
-5. posts them to the server, with what each counts toward.
+3. chooses the fresh twin-context passages and writes the reasoning items once with the pinned
+   teacher model, then drops any item whose text the corpus already holds;
+4. omits any pillar that falls below `min_pillar_items` (its share goes to the rest of its
+   group, refusing only when an entire half is missing);
+5. posts the exam to the server, with what each item counts toward.
 
-Grades start then. Everything here is a pure function of public inputs and the harvests, whose
-sha256s were posted before the draw: anyone can make the same exam again from the same
-snapshots.
+Grades start then. Human-written twin-context items are derived deterministically from the
+committed hourly harvests; model-written reasoning items are written once at the draw and
+published in full at settlement (teacher lead-in and answer for every item, plus full excerpt for
+openly licensed sources) so anyone can inspect every item and verify its digest against the
+round's committed `exam_digest`.
 """
 
 from __future__ import annotations
@@ -45,19 +49,32 @@ def _pillar_counts(items: list[Item], plan) -> Counter[str]:
     return counts
 
 
-def _check_pillar_support(items: list[Item], season, rnd_id: str) -> None:
-    """Refuse to publish an official exam where any declared pillar falls below `min_pillar_items`."""
-    from .aggregate import plan_of
+def _filter_pillar_support(items: list[Item], season, rnd_id: str, log=print) -> list[Item]:
+    """Drop any pillar below `min_pillar_items` so its share transfers cleanly to the rest of its
+    group (matching RULES.md), and refuse only when an entire declared group has zero items left."""
+    from .aggregate import part_of, plan_of
 
     min_items = int((season.raw.get("exam") or {}).get("min_pillar_items", 0))
-    if min_items <= 0:
-        return
     plan = plan_of(season)
     counts = _pillar_counts(items, plan)
-    short = [(p, counts.get(p, 0)) for p in plan.pillars if counts.get(p, 0) < min_items]
-    if short:
-        detail = ", ".join(f"{p}={n}" for p, n in short)
-        raise RuntimeError(f"{rnd_id}: exam pillars below minimum of {min_items} items after filtering ({detail})")
+    omitted: list[tuple[str, int]] = []
+    if min_items > 0:
+        under = {p for p in plan.pillars if counts.get(p, 0) < min_items}
+        if under:
+            omitted = [(p, counts.get(p, 0)) for p in plan.pillars if p in under]
+            items = [it for it in items if plan.pillar_of(part_of(it)) not in under]
+            detail = ", ".join(f"{p}={n}" for p, n in omitted)
+            log(f"  omitting under-supported pillars (<{min_items} items; share goes to group): {detail}")
+    remaining = _pillar_counts(items, plan)
+    empty_groups = [
+        g for g in plan.groups if not any(remaining.get(p, 0) > 0 for p, pg in plan.pillars.items() if pg == g)
+    ]
+    if empty_groups:
+        detail = ", ".join(f"{p}={counts.get(p, 0)}" for p in plan.pillars)
+        raise RuntimeError(
+            f"{rnd_id}: exam group(s) {', '.join(empty_groups)} have no pillars meeting minimum of {min_items} items ({detail})"
+        )
+    return items
 
 
 def _reasoning_cache_usable(reasoning: list[Item], season) -> bool:
@@ -92,26 +109,85 @@ def _round_init_sha256(rnd, scale) -> str:
         return ""
 
 # Sources whose text is openly licensed, and is published with a settled round as it is. Every
-# other source's items are published as their source, id and hash.
+# other source's items withhold the third-party source excerpt while still publishing the
+# organisers' own generated teacher lead-in and answer for every model-written reasoning item.
 OPEN = (
     "gen:",
     "wikipedia:", "wikipedia-added:", "wikipedia-talk:",
     "explain:wikipedia", "infer:wikipedia", "synthesis:wikipedia",
 )
+REASONING_PREFIXES = ("explain:", "infer:", "synthesis:")
 
 
 def public_items(items: list[Item]) -> list[dict]:
-    """A settled round's exam as it is published: the generated items and the openly licensed
-    fresh text whole, every other item as what it was (source, kind, format, language, corner)
-    and its id. The ids, in order, hash to the round's exam digest, so the published file can be
-    checked against it."""
+    """A settled round's exam as it is published:
+    - generated items and openly licensed Wikipedia items whole;
+    - third-party model-written reasoning items with the organisers' own generated lead-in (`prompt`),
+      answer (`cont`), `wrapper_id`, and `excerpt_sha256` published in full (withholding only the
+      third-party excerpt);
+    - third-party human-written items as their metadata and item id.
+
+    Every row's id, in order, hashes to the round's exam digest, so anyone can check the published
+    file against `exam_digest` and rebuild any withheld reasoning item from its source excerpt."""
+    import hashlib
+
+    from .fresh.reason import split_wrapped_ctx
+
     out = []
     for it in items:
         if it.source.startswith(OPEN):
             out.append(it.to_dict())
+        elif it.source.startswith(REASONING_PREFIXES):
+            task_type = it.source.split(":", 1)[0]
+            row = {
+                "withheld": True,
+                "id": it.id,
+                "source": it.source,
+                "kind": it.kind,
+                "fmt": it.fmt,
+                "lang": it.lang,
+                "corner": it.corner,
+                "cont": it.cont,
+            }
+            if split := split_wrapped_ctx(it.ctx, task_type):
+                excerpt, prompt_line, wrapper_id = split
+                row["withheld_excerpt"] = True
+                row["prompt"] = prompt_line
+                row["wrapper_id"] = wrapper_id
+                row["excerpt_sha256"] = hashlib.sha256(excerpt.encode("utf-8")).hexdigest()
+                row["excerpt_chars"] = len(excerpt)
+            out.append(row)
         else:
             out.append({"withheld": True, "id": it.id, "source": it.source, "kind": it.kind, "fmt": it.fmt, "lang": it.lang, "corner": it.corner})
     return out
+
+
+def rebuild_withheld_reasoning(row: dict, excerpt: str) -> Item:
+    """Reconstruct a settled non-Wikipedia reasoning item from its published teacher text and
+    source excerpt, verifying both `excerpt_sha256` and the exact item `id`."""
+    import hashlib
+
+    from .fresh.reason import wrap_prompt
+
+    if "prompt" not in row or "cont" not in row or "wrapper_id" not in row:
+        raise ValueError("published row does not carry withheld reasoning fields")
+    got_sha = hashlib.sha256(excerpt.encode("utf-8")).hexdigest()
+    if row.get("excerpt_sha256") and got_sha != row["excerpt_sha256"]:
+        raise ValueError(f"excerpt sha256 mismatch: got {got_sha}, want {row['excerpt_sha256']}")
+    task_type = str(row["source"]).split(":", 1)[0]
+    ctx = wrap_prompt(excerpt, str(row["prompt"]), task_type, int(row["wrapper_id"]))
+    it = Item(
+        kind=str(row["kind"]),
+        corner=str(row["corner"]),
+        fmt=str(row["fmt"]),
+        lang=str(row["lang"]),
+        source=str(row["source"]),
+        ctx=ctx,
+        cont=str(row["cont"]),
+    )
+    if it.id != row["id"]:
+        raise ValueError(f"rebuilt item id {it.id} does not match published id {row['id']}")
+    return it
 
 
 def read_public(raw: bytes, want: str) -> list[Item]:
@@ -235,9 +311,12 @@ def assemble(
     items: list[Item] = generated + fresh
     enforce = bool(synthesize and getattr(rnd, "kind", "") == "official") if check_coverage is None else bool(check_coverage)
     if enforce:
-        _check_pillar_support(items, season, rnd.id)
-    log(f"  the exam: {len(items)} items, {len(fresh)} of them fresh")
-    return items, len(fresh), mix, shas
+        items = _filter_pillar_support(items, season, rnd.id, log=log)
+        fresh_n = sum(1 for it in items if not it.source.startswith("gen:"))
+    else:
+        fresh_n = len(fresh)
+    log(f"  the exam: {len(items)} items, {fresh_n} of them fresh")
+    return items, fresh_n, mix, shas
 
 
 def snapshot_name(shas: list[str]) -> str:

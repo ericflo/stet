@@ -178,7 +178,7 @@ func flags(name string, o *Options) *flag.FlagSet {
 	fs.DurationVar(&o.Every, "every", time.Minute, "with scale --follow: how often to look")
 	fs.DurationVar(&o.Early, "early", 90*time.Minute, "rent graders for a round's exam from at most this long before it is due, each kind of GPU just in time, the cheapest a round first (0: only once it is posted)")
 	fs.DurationVar(&o.Settle, "settle-within", 15*time.Minute, "with --early: how long after its exam a round may settle; a kind of GPU is rented in time to report by then, and a quicker, dearer one only once the cheaper ones can no longer")
-	fs.DurationVar(&o.ExamAfter, "exam-after", 5*time.Minute, "how long after its draw a round's exam is posted, about, when the server does not say: in Season 2 the exam is made at the draw from hours of the day before, already harvested")
+	fs.DurationVar(&o.ExamAfter, "exam-after", 25*time.Minute, "how long after its draw a round's exam is posted, about, when the server does not say: in Season 3 the exam is built right after the draw (~20-25 minutes on the organisers' examiner) from hours of the day before")
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), "usage: stet-cloud %s [settings]\n\n", name)
 		fs.PrintDefaults()

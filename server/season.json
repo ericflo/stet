@@ -4,7 +4,7 @@
   "max_files": 32
  },
  "baselines": {
-  "per_round": 4
+  "per_round": 2
  },
  "beacon": {
   "chain_hash": "52db9ba70e0cc0f6eaf7803dd07447a1f5477735fd3f661792ba94600c84e971",
@@ -22,7 +22,7 @@
   "key_bytes": 64,
   "min_letters": 38
  },
- "digest": "ed1ccb3f70f76bbe0b1d8ba26966e7ab009ce7481de3905ed5978f7c2a2d3938",
+ "digest": "14de18aa8d58f787f282c9559a277d8737dfe3910c16c781f7d32057e6c3fd28",
  "draw_grid_seconds": 600,
  "environment": {
   "also": {

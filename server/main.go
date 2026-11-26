@@ -48,6 +48,7 @@ type Config struct {
 	QualifyRounds  int // rounds every entry is given
 	RatedRounds    int // rounds before an editor is ranked
 	Lease          time.Duration
+	ExamTimeout    time.Duration // how long an open round waits for its exam before cancelling cleanly with nothing held against entries (0 disables)
 	ReplicaWait    time.Duration // how long a round waits for people who have started, and before giving up what nobody is there to do
 	EstablishAfter int           // grades that must have agreed before an account's grades count and it may run editors
 	RunsPerEntry   int           // times each entry is run, by different people, before a third is wanted
@@ -146,6 +147,7 @@ func loadConfig(season *Season) (Config, error) {
 		QualifyRounds:    envInt("STET_QUALIFY_ROUNDS", 3),
 		RatedRounds:      envInt("STET_RATED_ROUNDS", 3),
 		Lease:            envDuration("STET_LEASE", 5*time.Hour),
+		ExamTimeout:      envDurationAllowZero("STET_EXAM_TIMEOUT", 6*time.Hour),
 		EarlyWindow:      envDuration("STET_EARLY_WINDOW", 10*time.Minute),
 		ReplicaWait:      envDuration("STET_REPLICA_WAIT", 45*time.Minute),
 		EstablishAfter:   envInt("STET_ESTABLISH_AFTER", 5),

@@ -259,6 +259,7 @@ func TestJustAfterTheExamTheGradesAScoreWaitsForGoToTheFastestMachines(t *testin
 func TestARentedMachineIsHandedGradesOnlyOnceTheyWouldKeepItBusyUntilNearTheExam(t *testing.T) {
 	pub, priv := newKey()
 	w := newWorld(t, pub)
+	w.app.season.Baselines.PerRound = 4
 	w.app.cfg.EarlyWindow = 10 * time.Minute
 	anchor, alice := w.join("anchor-one", priv), w.join("alice", nil)
 	bob, carol, dave := w.rented(anchor, "bob"), w.rented(anchor, "carol"), w.join("dave", nil)

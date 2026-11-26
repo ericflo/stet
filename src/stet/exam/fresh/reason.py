@@ -1,19 +1,20 @@
 """Fresh harvest-derived comprehension & reasoning synthesis (Season 3 Exam C v2).
 
 From the round's harvested fresh documents (the same three hours of writing published the day
-before the draw that feed twin-context comprehension), deterministically synthesizes three
-orthogonal open-ended multi-sentence prose reasoning tasks in each document's own language:
+before the draw that feed twin-context comprehension), writes three orthogonal open-ended
+multi-sentence prose reasoning tasks in each document's own language:
 
   - explain   : why/how causal or mechanism explanation (2-3 sentences, own words)
   - infer     : multi-detail analytical implication or trade-off synthesis (2-3 sentences)
   - synthesis : declarative lead-in + 2-3 sentence prose synthesis (ZERO '?' or Q:/A: syntax)
 
-Every item is generated with greedy decoding (temperature=0) by a pinned Apache-2.0 teacher
-(`Qwen/Qwen3-8B`), receives one shared token-bounded excerpt given identically to both teacher
-and student (reserving headroom so the teacher's closing `PROMPT:` cue is never truncated),
-wraps prompts across diverse natural templates (independent of task type), preserves the
-immutable harvest document ID (`<task>:<source>:<doc_id>`), and filters verbatim copying across
-both whitespace-delimited and CJK/spaceless scripts.
+Every item is written once at the draw by the pinned Apache-2.0 teacher (`Qwen/Qwen3-8B` at
+greedy `temperature = 0`), receives one shared token-bounded excerpt given identically to both
+teacher and student (reserving headroom so the teacher's closing `PROMPT: ` cue is never
+truncated), wraps prompts across diverse natural templates (independent of task type), preserves
+the immutable harvest document ID (`<task>:<source>:<doc_id>`), checks response language and
+sentence completion, filters verbatim copying from both excerpt and lead-in across whitespace and
+CJK/spaceless scripts, and publishes the teacher's lead-in and answer for every item at settlement.
 """
 
 from __future__ import annotations
@@ -34,12 +35,22 @@ from . import Doc
 from .select import SHARES
 
 BAD_PREFIX = ("here is", "sure,", "based on the excerpt", "certainly", "below is")
+ECHO_PROMPT_PREFIX = (
+    "write a ",
+    "write one ",
+    "write two ",
+    "read the excerpt",
+    "prompt:",
+    "response:",
+    "output strictly",
+)
 CJK_LANGS = frozenset({"zh", "ja", "ko"})
 TASK_TYPES = ("explain", "infer", "synthesis")
 
 DEFAULT_MAX_EXCERPT_TOKENS = 380
 DEFAULT_MAX_EXCERPT_CHARS = 1200
-DEFAULT_MAX_NEW_TOKENS = 240
+DEFAULT_MAX_NEW_TOKENS = 320
+DEFAULT_MIN_KEEP_RATE = 0.50
 TEACHER_MAX_PROMPT_TOKENS = 1400
 
 # Sources whose text is prose/discussion/documentation suitable for natural-language reasoning.
@@ -50,6 +61,24 @@ _SPACELESS_RE = re.compile(
     r"\u0e00-\u0eff\u1000-\u109f\u1780-\u17ff]"
 )
 _NON_WORD_RE = re.compile(r"[\W_]+", re.UNICODE)
+_SENTENCE_END_RE = re.compile(r"[.!?。！？…؟۔।][\"'”’»)\]}」』】]*$")
+
+# Close language equivalence clusters accepted by the response language verifier.
+_LANG_CLUSTERS = (
+    frozenset({"no", "nb", "nn"}),
+    frozenset({"hr", "sr", "bs", "sh"}),
+    frozenset({"id", "ms"}),
+    frozenset({"zh", "zh-cn", "zh-tw", "zh-hans", "zh-hant"}),
+    frozenset({"pt", "gl"}),
+)
+
+try:
+    import py3langid as _langid
+
+    _LANGID_SUPPORTED = frozenset(lang for lang, _ in _langid.rank("hello"))
+except Exception:  # pragma: no cover - optional dependency outside stet[run]
+    _langid = None
+    _LANGID_SUPPORTED = frozenset()
 
 
 def _norm_compact(text: str) -> str:
@@ -62,6 +91,87 @@ def _is_spaceless_script(text: str) -> bool:
         return False
     hits = len(_SPACELESS_RE.findall(text))
     return hits / len(non_ws) >= 0.25
+
+
+def _dominant_script(text: str) -> str:
+    """Coarse dominant writing script for zero-dependency language/script sanity checks."""
+    counts: dict[str, int] = {}
+    for ch in text[:1500]:
+        o = ord(ch)
+        if 0x0041 <= o <= 0x024F or 0x1E00 <= o <= 0x1EFF:
+            s = "latin"
+        elif 0x0400 <= o <= 0x052F:
+            s = "cyrillic"
+        elif 0x0600 <= o <= 0x06FF or 0x0750 <= o <= 0x077F:
+            s = "arabic"
+        elif 0x0900 <= o <= 0x097F:
+            s = "devanagari"
+        elif 0x0980 <= o <= 0x09FF:
+            s = "bengali"
+        elif 0x0E00 <= o <= 0x0E7F:
+            s = "thai"
+        elif 0x0590 <= o <= 0x05FF:
+            s = "hebrew"
+        elif 0x0370 <= o <= 0x03FF:
+            s = "greek"
+        elif 0xAC00 <= o <= 0xD7AF or 0x1100 <= o <= 0x11FF:
+            s = "hangul"
+        elif 0x3040 <= o <= 0x30FF:
+            s = "kana"
+        elif 0x4E00 <= o <= 0x9FFF or 0x3400 <= o <= 0x4DBF:
+            s = "han"
+        elif 0x10A0 <= o <= 0x10FF:
+            s = "georgian"
+        elif 0x0530 <= o <= 0x058F:
+            s = "armenian"
+        else:
+            continue
+        counts[s] = counts.get(s, 0) + 1
+    if not counts:
+        return ""
+    if counts.get("kana", 0) >= 6:
+        return "ja"
+    top, n = max(counts.items(), key=lambda kv: kv[1])
+    if n < 8:
+        return ""
+    return top
+
+
+def _langs_compatible(want: str, got: str) -> bool:
+    w = want.lower().split("-", 1)[0]
+    g = got.lower().split("-", 1)[0]
+    if w == g:
+        return True
+    return any(w in cl and g in cl for cl in _LANG_CLUSTERS)
+
+
+def _response_matches_language(resp: str, excerpt: str, lang: str) -> bool:
+    """Verify the teacher's answer stays in the excerpt's language/script (catches English or
+    neighboring-language fallback on smaller languages)."""
+    ex_script = _dominant_script(excerpt)
+    re_script = _dominant_script(resp)
+    if ex_script and re_script:
+        if ex_script == "ja":
+            if re_script not in ("ja", "han"):
+                return False
+        elif ex_script == "han":
+            if re_script not in ("han", "ja"):
+                return False
+        elif ex_script != re_script:
+            return False
+
+    if _langid is not None and len(resp) >= 35:
+        try:
+            det, _ = _langid.classify(resp)
+        except Exception:
+            det = ""
+        if det:
+            base_lang = lang.lower().split("-", 1)[0]
+            if base_lang != "en" and det == "en":
+                return False
+            if base_lang in _LANGID_SUPPORTED and not _langs_compatible(base_lang, det):
+                return False
+    return True
 
 
 def _char_shingle_overlap(ans_compact: str, src_compact: str, k: int) -> float:
@@ -116,7 +226,7 @@ def bound_excerpt(
     First bounds by `max_chars` (preferring a whitespace boundary when present), then—when the
     pinned teacher tokenizer `tok` is supplied—caps at `max_tokens` teacher tokens so even dense
     non-Latin/CJK/Thai scripts stay well below `TEACHER_MAX_PROMPT_TOKENS` with full headroom
-    reserved for the instruction and closing `PROMPT:` cue.
+    reserved for the instruction and closing `PROMPT: ` cue.
     """
     s = (text or "").strip()
     if len(s) > max_chars:
@@ -162,6 +272,47 @@ def wrap_prompt(excerpt: str, prompt_line: str, task_type: str, wrapper_id: int)
     return f"{excerpt}\n\n• {prompt_line}\n"
 
 
+def split_wrapped_ctx(ctx: str, task_type: str) -> tuple[str, str, int] | None:
+    """Invert `wrap_prompt()` cleanly so `public_items()` can publish the teacher's prompt line
+    and wrapper_id while withholding only a third-party source excerpt."""
+    if task_type == "synthesis":
+        if "\n\n---\n" in ctx:
+            ex, pr = ctx.rsplit("\n\n---\n", 1)
+            w_id = 1
+        elif ctx.endswith(" ") and "\n\n" in ctx[:-1]:
+            ex, pr = ctx[:-1].rsplit("\n\n", 1)
+            w_id = 2
+        elif "\n\n" in ctx:
+            ex, pr = ctx.rsplit("\n\n", 1)
+            w_id = 0
+        else:
+            return None
+    else:
+        if ctx.startswith("Context:\n") and ctx.endswith("\n") and "\n\n" in ctx[9:-1]:
+            ex, pr = ctx[9:-1].rsplit("\n\n", 1)
+            w_id = 4
+        elif "\n\n---\n" in ctx and ctx.endswith("\n\n"):
+            ex, pr = ctx[:-2].rsplit("\n\n---\n", 1)
+            w_id = 1
+        elif "\n\n• " in ctx and ctx.endswith("\n"):
+            ex, pr = ctx[:-1].rsplit("\n\n• ", 1)
+            w_id = 5
+        elif ctx.endswith(" ") and "\n\n" in ctx[:-1]:
+            ex, pr = ctx[:-1].rsplit("\n\n", 1)
+            w_id = 3
+        elif ctx.endswith("\n\n") and "\n\n" in ctx[:-2]:
+            pr, ex = ctx[:-2].split("\n\n", 1)
+            w_id = 2
+        elif ctx.endswith("\n") and "\n\n" in ctx[:-1]:
+            ex, pr = ctx[:-1].rsplit("\n\n", 1)
+            w_id = 0
+        else:
+            return None
+    if wrap_prompt(ex, pr, task_type, w_id) != ctx:
+        return None
+    return ex, pr, w_id
+
+
 def _clean_angle(text: str) -> str:
     """Strip accidental literal `<...>` wrappers if the teacher echoed placeholder brackets."""
     s = text.strip()
@@ -171,30 +322,48 @@ def _clean_angle(text: str) -> str:
 
 
 def build_teacher_prompt(excerpt: str, lang: str, task_type: str) -> str:
-    """Build the teacher prompt from the already-bounded shared `excerpt`."""
+    """Build the teacher prompt from the already-bounded shared `excerpt`.
+
+    Uses explicit two-line field descriptions with ZERO literal `...` placeholders (so the
+    teacher never echoes `PROMPT: ...`) and ends with `PROMPT: ` to begin generation directly.
+    """
     if task_type == "explain":
         inst = (
-            f"Read the excerpt below (language: {lang}). Write ONE substantive why/how explanation prompt and a clear "
-            f"2-to-3 sentence prose answer in the SAME language ({lang}). The answer must explain the cause, mechanism, or "
-            f"reasoning in your own words (do NOT copy sentences verbatim; do NOT give a 1-word answer). "
-            f"Do not add preamble or angle brackets. Output strictly:\nPROMPT: ...\nRESPONSE: ..."
+            f"Read the excerpt below (language: {lang}). Write two lines in the SAME language ({lang}). "
+            f"Line 1 must start with 'PROMPT: ' followed by one substantive why/how explanation question about the excerpt. "
+            f"Line 2 must start with 'RESPONSE: ' followed by a complete 2-to-3 sentence prose answer explaining the cause, "
+            f"mechanism, or reasoning in your own words (no verbatim copying from the excerpt or the question, no ellipses "
+            f"placeholders, no angle brackets, and finish the last sentence with proper punctuation)."
         )
     elif task_type == "infer":
         inst = (
-            f"Read the excerpt below (language: {lang}). Write ONE analytical prompt that requires synthesizing multiple "
-            f"details or inferring a practical implication/trade-off from the excerpt, followed by a clear 2-to-3 sentence "
-            f"prose response in the SAME language ({lang}). Paraphrase in natural prose (no verbatim copying, no meta-commentary, "
-            f"no angle brackets). Output strictly:\nPROMPT: ...\nRESPONSE: ..."
+            f"Read the excerpt below (language: {lang}). Write two lines in the SAME language ({lang}). "
+            f"Line 1 must start with 'PROMPT: ' followed by one analytical question requiring synthesis of multiple details "
+            f"or inferring a practical implication or trade-off from the excerpt. "
+            f"Line 2 must start with 'RESPONSE: ' followed by a complete 2-to-3 sentence prose answer in your own words "
+            f"(no verbatim copying from the excerpt or the question, no ellipses placeholders, no angle brackets, and finish "
+            f"the last sentence with proper punctuation)."
         )
     else:  # synthesis
         inst = (
-            f"Read the excerpt below (language: {lang}). Write ONE concise natural declarative lead-in sentence "
-            f"(10-25 words, NOT a question, no question mark, no 'Q:'/'A:') that introduces a 2-to-3 sentence synthesis "
-            f"of the excerpt's main point and underlying rationale, followed by that 2-to-3 sentence prose synthesis, "
-            f"all in the SAME language ({lang}). Use your own words (no verbatim copying, no angle brackets). "
-            f"Output strictly:\nPROMPT: ...\nRESPONSE: ..."
+            f"Read the excerpt below (language: {lang}). Write two lines in the SAME language ({lang}). "
+            f"Line 1 must start with 'PROMPT: ' followed by one concrete declarative topic sentence (10 to 25 words, NOT a "
+            f"question, no question mark, no Q/A labels, never echoing these instructions) that introduces the subject of the "
+            f"excerpt. Line 2 must start with 'RESPONSE: ' followed by a complete 2-to-3 sentence prose synthesis explaining "
+            f"the excerpt's main point and underlying rationale in your own words (do not repeat the topic sentence verbatim, "
+            f"do not copy sentences from the excerpt, never write placeholder ellipses or angle brackets, and finish the last "
+            f"sentence with proper punctuation)."
         )
-    return f"<|im_start|>user\n{inst}\n\nExcerpt:\n{excerpt}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\nPROMPT:"
+    return f"<|im_start|>user\n{inst}\n\nExcerpt:\n{excerpt}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\nPROMPT: "
+
+
+def _source_bucket(source: str) -> str:
+    """Group Wikipedia variants into one round-robin bucket so Wikipedia does not take 3x turns
+    against non-Wikipedia sources when other sources are present in the same language."""
+    base = source.split(":", 1)[0]
+    if base.startswith("wikipedia"):
+        return "wikipedia"
+    return base
 
 
 def select_source_docs(
@@ -204,8 +373,19 @@ def select_source_docs(
     shares: dict[str, float] | None = None,
     *,
     max_excerpt_chars: int = DEFAULT_MAX_EXCERPT_CHARS,
+    min_lang_share: float = 0.05,
+    major_lang_share: float = 1.0,
+    major_lang_floor: int = 27,
 ) -> list[dict]:
-    """Deterministically pick ~`target` diverse fresh harvest docs stratified by language & source."""
+    """Deterministically pick ~`target` fresh harvest docs aligned with the round's corpus shares.
+
+    - Allocates quotas strictly in proportion to crawl shares (English capped at <=38%), never
+      inflating tiny micro-languages with a fixed floor.
+    - Ensures every major crawl language (`share >= 1.0%`) with available docs receives at least
+      `major_lang_floor` (27 = 9 per reasoning kind) docs so each major language clears `SMALL=8`
+      per kind rather than falling into the pooled small-language bucket.
+    - Round-robins across source families with Wikipedia variants grouped as one bucket.
+    """
     shares = shares or SHARES
     by_lang: dict[str, list[Doc]] = defaultdict(list)
     seen_prefix: set[str] = set()
@@ -216,7 +396,8 @@ def select_source_docs(
         if not lang or lang.startswith(SKIP_LANG_PREFIXES):
             continue
         txt = (d.text or "").strip()
-        if not (450 <= len(txt) <= 6000):
+        min_len = 180 if lang in CJK_LANGS else 450
+        if not (min_len <= len(txt) <= 6000) or "\ufffd" in txt:
             continue
         key = txt[:160].lower()
         if key in seen_prefix:
@@ -227,23 +408,74 @@ def select_source_docs(
     if not by_lang:
         return []
 
-    # Allocate quotas proportional to crawl share, capped so English takes at most ~38%
-    # and every language with available docs gets meaningful coverage.
-    langs = sorted(by_lang)
-    raw_w = {lang: max(float(shares.get(lang, 0.25)), 0.25) for lang in langs}
-    if "en" in raw_w and len(langs) > 1:
+    # Exclude micro-languages (< min_lang_share% of the crawl) when larger languages are available,
+    # so teacher slots go to real crawl languages rather than 1-doc Wikipedia micro-editions that
+    # the teacher often answers in English or a neighboring language.
+    eligible = [lang for lang in sorted(by_lang) if float(shares.get(lang, 0.0)) >= min_lang_share]
+    if not eligible or sum(len(by_lang[lang]) for lang in eligible) < min(target, 30):
+        eligible = sorted(by_lang)
+
+    raw_w = {lang: max(float(shares.get(lang, 0.05)), 0.01) for lang in eligible}
+    if "en" in raw_w and len(eligible) > 1:
         others = sum(v for k, v in raw_w.items() if k != "en")
-        raw_w["en"] = min(raw_w["en"], others * 0.62)
-    tot_w = sum(raw_w.values())
-    quotas = {lang: min(len(by_lang[lang]), max(12, round(target * raw_w[lang] / max(tot_w, 1e-9)))) for lang in langs}
+        raw_w["en"] = min(raw_w["en"], others * 0.62)  # <= ~38.3% English
+
+    # Exact crawl-share quota allocation with a `major_lang_floor` (27 = 9/kind) floor for major
+    # crawl languages (`share >= 1.0%`), filled iteratively to `target` without truncating majors.
+    quotas: dict[str, int] = {lang: 0 for lang in eligible}
+    cap_of = {lang: len(by_lang[lang]) for lang in eligible}
+    total_avail = sum(cap_of.values())
+    want_total = min(target, total_avail)
+
+    # Pass 1: reserve `major_lang_floor` for major languages (ordered by crawl share desc),
+    # scaling the floor down cleanly if `want_total` is smaller than `len(majors) * floor`.
+    majors = sorted(
+        [lang for lang in eligible if float(shares.get(lang, 0.0)) >= major_lang_share],
+        key=lambda k: (-float(shares.get(k, 0.0)), k),
+    )
+    eff_floor = min(major_lang_floor, want_total // max(1, len(majors))) if majors else 0
+    used = 0
+    for lang in majors:
+        give = min(cap_of[lang], eff_floor, want_total - used)
+        quotas[lang] = give
+        used += give
+
+    # Pass 2: distribute remaining budget proportionally to crawl share across all eligible languages.
+    while used < want_total:
+        rem_langs = [lang for lang in eligible if quotas[lang] < cap_of[lang]]
+        if not rem_langs:
+            break
+        rem_need = want_total - used
+        rem_w = sum(raw_w[lang] for lang in rem_langs)
+        added = 0
+        fracs: list[tuple[float, str]] = []
+        for lang in rem_langs:
+            exact = rem_need * raw_w[lang] / max(rem_w, 1e-12)
+            whole = min(cap_of[lang] - quotas[lang], int(exact))
+            quotas[lang] += whole
+            added += whole
+            if quotas[lang] < cap_of[lang]:
+                fracs.append((exact - whole, lang))
+        used += added
+        if used < want_total and fracs:
+            fracs.sort(key=lambda t: (-t[0], t[1]))
+            for _, lang in fracs:
+                if used >= want_total:
+                    break
+                if quotas[lang] < cap_of[lang]:
+                    quotas[lang] += 1
+                    used += 1
+        elif added == 0:
+            break
 
     selected_docs: list[Doc] = []
-    for lang in langs:
-        pool = by_lang[lang]
-        by_src: dict[str, list[Doc]] = defaultdict(list)
-        for d in pool:
-            by_src[d.source.split(":", 1)[0]].append(d)
+    for lang in eligible:
         cap = quotas[lang]
+        if cap <= 0:
+            continue
+        by_src: dict[str, list[Doc]] = defaultdict(list)
+        for d in by_lang[lang]:
+            by_src[_source_bucket(d.source)].append(d)
         picked: list[Doc] = []
         src_keys = sorted(by_src)
         while len(picked) < cap and src_keys:
@@ -256,9 +488,8 @@ def select_source_docs(
             src_keys = nxt
         selected_docs.extend(picked)
 
-    # Trim or keep in deterministic seeded order
+    # Deterministic order across all selected docs (already bounded to <= target).
     selected_docs.sort(key=lambda d: (prf_u64(seed, f"reason-pick/{d.source}/{d.id}", 0), d.source, d.id))
-    selected_docs = selected_docs[:target]
 
     lang_idx: dict[str, int] = defaultdict(int)
     task_idx: dict[tuple[str, str], int] = defaultdict(int)
@@ -266,7 +497,7 @@ def select_source_docs(
     for d in selected_docs:
         k = lang_idx[d.lang]
         lang_idx[d.lang] += 1
-        # Seeded per-language starting offset so languages with only 1-2 docs spread evenly across
+        # Seeded per-language starting offset so smaller languages spread evenly across
         # explain, infer, and synthesis instead of piling up in explain.
         offset = prf_u64(seed, f"reason-task-off/{d.lang}", 0) % len(TASK_TYPES)
         ttype = TASK_TYPES[(offset + k) % len(TASK_TYPES)]
@@ -310,50 +541,70 @@ def parse_generated_items(
     generations: list[str],
     *,
     max_ngram_overlap: float = 0.50,
+    check_lang: bool = True,
 ) -> tuple[list[Item], dict[str, int]]:
     """Deterministically parse and filter raw teacher generations into `Item` objects."""
     items: list[Item] = []
     dropped: Counter[str] = Counter()
     for d, gen_txt in zip(selected, generations, strict=True):
-        raw = ("PROMPT:" + (gen_txt or "")).strip()
+        raw = ("PROMPT: " + (gen_txt or "")).strip()
         if "</think>" in raw:
             raw = raw.split("</think>", 1)[1].strip()
         if "RESPONSE:" not in raw:
             dropped["no_response_tag"] += 1
             continue
         p_part, r_part = raw.split("RESPONSE:", 1)
-        pr = _clean_angle(p_part.replace("PROMPT:", "", 1).strip().strip('"').strip())
+        pr_raw = p_part.replace("PROMPT:", "", 1).strip().strip('"').strip()
+        pr = " ".join(ln.strip() for ln in pr_raw.splitlines() if ln.strip()).strip()
         resp = " ".join(ln.strip() for ln in r_part.strip().splitlines() if ln.strip()).strip()
         for stop_tok in ("<|im_end|>", "PROMPT:", "Excerpt:"):
             if stop_tok in resp:
                 resp = resp.split(stop_tok, 1)[0].strip()
+        pr = _clean_angle(pr)
         resp = _clean_angle(resp)
+        if "\ufffd" in pr or "\ufffd" in resp or "\ufffd" in d.get("excerpt", ""):
+            dropped["broken_utf8"] += 1
+            continue
         is_cjk = d["lang"] in CJK_LANGS
         min_pr = 6 if is_cjk else 10
-        if not (min_pr <= len(pr) <= 450):
+        if (
+            not (min_pr <= len(pr) <= 450)
+            or not pr.strip(" .…-:")
+            or pr.startswith("...")
+            or pr.lower().startswith(ECHO_PROMPT_PREFIX)
+        ):
             dropped["prompt_len"] += 1
             continue
         min_bytes = 48 if is_cjk else 70
         resp_b = len(resp.encode("utf-8"))
-        if not (min_bytes <= resp_b <= 900):
+        if not (min_bytes <= resp_b <= 1200):
             dropped["resp_len"] += 1
             continue
         if resp.lower().startswith(BAD_PREFIX):
             dropped["meta_chatter"] += 1
             continue
+        if not _SENTENCE_END_RE.search(resp):
+            dropped["truncated_sentence"] += 1
+            continue
         if d["task_type"] == "synthesis" and ("?" in pr or "？" in pr or "؟" in pr):
             # Enforce zero-question syntax on synthesis lead-ins
             pr = pr.rstrip("?？؟").strip() + "."
         excerpt = d.get("excerpt") or bound_excerpt(d["text"])
+        if check_lang and not _response_matches_language(resp, excerpt, d["lang"]):
+            dropped["wrong_lang"] += 1
+            continue
         if ngram_overlap(resp, excerpt, n=5) > max_ngram_overlap:
             dropped["verbatim_copy"] += 1
+            continue
+        if ngram_overlap(resp, pr, n=5) > max_ngram_overlap:
+            dropped["prompt_copy"] += 1
             continue
         ctx_str = wrap_prompt(excerpt, pr, d["task_type"], d["wrapper_id"])
         cont = resp if ctx_str.endswith((" ", "\n")) else f" {resp}"
         src_prefix = d["source"].split(":", 1)[0]
         doc_id = str(d.get("id") or "").strip()
         # Preserve the immutable harvest document ID (matching fresh/select.py's `<source>:<id>`)
-        # so withheld reasoning items remain replayable and auditable under the published rules.
+        # so withheld reasoning items remain auditable under the published rules.
         full_src = f"{d['task_type']}:{d['source']}:{doc_id}" if doc_id else f"{d['task_type']}:{d['source']}"
         items.append(
             Item(
@@ -369,7 +620,7 @@ def parse_generated_items(
     return items, dict(dropped)
 
 
-def _load_teacher_tokenizer(repo: str, rev: str):
+def _load_teacher_tokenizer(repo: str, rev: str, *, required: bool = True):
     """Load the pinned teacher tokenizer (without requiring PyTorch) for exact shared excerpt bounding."""
     try:
         from huggingface_hub import hf_hub_download
@@ -377,7 +628,11 @@ def _load_teacher_tokenizer(repo: str, rev: str):
 
         tok_path = hf_hub_download(repo, "tokenizer.json", revision=rev)
         return Tokenizer.from_file(tok_path)
-    except Exception:
+    except Exception as exc:
+        if required:
+            raise RuntimeError(
+                f"could not load pinned reasoning teacher tokenizer {repo}@{rev}: {exc}"
+            ) from exc
         return None
 
 
@@ -404,9 +659,9 @@ def _verify_endpoint_model(url: str, repo: str, rev: str, headers: dict[str, str
         raise RuntimeError(
             f"could not verify reasoning endpoint model at {models_url} (expected {repo}@{rev}): {exc}"
         ) from exc
-    served = {str(m.get("id", "")) for m in payload.get("data", []) if isinstance(m, dict)}
+    served = {str(m.get("id", "")) for m in payload.get("data", []) if isinstance(m, dict) and m.get("id")}
     want = override or (f"{repo}@{rev}" if f"{repo}@{rev}" in served else repo)
-    if served and want not in served:
+    if not served or want not in served:
         raise RuntimeError(
             f"reasoning endpoint {models_url} serves {sorted(served)}, which does not include pinned model {want!r}"
         )
@@ -423,7 +678,7 @@ def _generate_via_endpoint(
     temperature: float = 0.0,
     log=print,
 ) -> list[str]:
-    """Generate deterministically via an OpenAI-compatible `/v1/completions` server (e.g. vLLM)."""
+    """Generate greedily via an OpenAI-compatible `/v1/completions` server (e.g. vLLM)."""
     endpoint = url.rstrip("/")
     if not endpoint.endswith("/completions"):
         endpoint = endpoint + ("/completions" if endpoint.endswith("/v1") else "/v1/completions")
@@ -481,33 +736,50 @@ def _gen_shard_local(args_tuple):
                 "refusing to truncate closing instructions"
             )
         tail = tok.decode(ids[-8:], skip_special_tokens=False)
-        if not pr.endswith("PROMPT:") or not tail.endswith("PROMPT:"):
+        if not pr.endswith("PROMPT: ") or not tail.endswith("PROMPT: "):
             raise RuntimeError(f"teacher prompt {i} lost its closing PROMPT: cue (tail={tail!r})")
 
     order = sorted(range(len(shard_prompts)), key=lambda i: len(shard_prompts[i]))
     raw_outs = [""] * len(shard_prompts)
     bs = 16
+
+    def _run_batch(mdl, idxs: list[int]) -> None:
+        enc = tok(
+            [shard_prompts[i] for i in idxs],
+            return_tensors="pt",
+            padding=True,
+            truncation=False,
+        ).to(device)
+        in_len = enc["input_ids"].shape[1]
+        gen_ids = mdl.generate(
+            **enc,
+            max_new_tokens=int(max_new_tokens),
+            do_sample=False,
+            temperature=None,
+            top_p=None,
+            top_k=None,
+            pad_token_id=tok.pad_token_id,
+        )
+        for row, orig_i in enumerate(idxs):
+            raw_outs[orig_i] = tok.decode(gen_ids[row, in_len:], skip_special_tokens=True)
+        del enc, gen_ids
+
     with torch.inference_mode():
-        for b0 in range(0, len(order), bs):
-            idxs = order[b0 : b0 + bs]
-            enc = tok(
-                [shard_prompts[i] for i in idxs],
-                return_tensors="pt",
-                padding=True,
-                truncation=False,
-            ).to(device)
-            in_len = enc["input_ids"].shape[1]
-            gen_ids = model.generate(
-                **enc,
-                max_new_tokens=int(max_new_tokens),
-                do_sample=False,
-                temperature=None,
-                top_p=None,
-                top_k=None,
-                pad_token_id=tok.pad_token_id,
-            )
-            for row, orig_i in enumerate(idxs):
-                raw_outs[orig_i] = tok.decode(gen_ids[row, in_len:], skip_special_tokens=True)
+        pos = 0
+        while pos < len(order):
+            idxs = order[pos : pos + bs]
+            try:
+                _run_batch(model, idxs)
+                pos += len(idxs)
+            except torch.OutOfMemoryError:
+                gc.collect()
+                torch.cuda.empty_cache()
+                if len(idxs) <= 1:
+                    raise
+                bs = max(1, len(idxs) // 2)
+                continue
+            if (pos // max(1, bs)) % 4 == 0:
+                torch.cuda.empty_cache()
     del model
     gc.collect()
     torch.cuda.empty_cache()
@@ -522,7 +794,7 @@ def _generate_local_gpu(
     max_new_tokens: int = DEFAULT_MAX_NEW_TOKENS,
     log=print,
 ) -> list[str]:
-    """Deterministic greedy generation on local CUDA GPU(s) via pinned `transformers` SDPA."""
+    """Greedy generation on local GPU(s) (NVIDIA CUDA or AMD ROCm) via pinned `transformers` SDPA."""
     import multiprocessing as mp
 
     import torch
@@ -530,8 +802,8 @@ def _generate_local_gpu(
 
     if not torch.cuda.is_available():
         raise RuntimeError(
-            "synthesizing Season 3 reasoning exam items requires a CUDA GPU (18 GB+) "
-            "or STET_EXAMINER_LLM_URL pointing at a deterministic Qwen3-8B server"
+            "synthesizing Season 3 reasoning exam items requires a CUDA/ROCm GPU (18 GB+) "
+            "or STET_EXAMINER_LLM_URL pointing at a Qwen3-8B server"
         )
     t0 = time.time()
     snapshot_download(repo, revision=rev)
@@ -568,16 +840,16 @@ def synthesize_reasoning(
     max_ex_toks = int(cfg.get("max_excerpt_tokens", DEFAULT_MAX_EXCERPT_TOKENS))
     max_ex_chars = int(cfg.get("max_excerpt_chars", DEFAULT_MAX_EXCERPT_CHARS))
     max_new = int(cfg.get("max_new_tokens", DEFAULT_MAX_NEW_TOKENS))
+    min_keep_rate = float(cfg.get("min_keep_rate", DEFAULT_MIN_KEEP_RATE))
     temp = float(cfg.get("temperature", 0.0))
 
     selected = select_source_docs(docs, seed, target=target, shares=shares, max_excerpt_chars=max_ex_chars)
     if not selected:
         return []
     # Bound every document's excerpt ONCE with the pinned teacher tokenizer so both teacher and
-    # student see the exact same excerpt and no teacher prompt can ever overflow or lose `PROMPT:`.
-    tok = _load_teacher_tokenizer(repo, rev)
-    if tok is not None:
-        selected = apply_token_budget(selected, tok, max_tokens=max_ex_toks, max_chars=max_ex_chars)
+    # student see the exact same excerpt and no teacher prompt can ever overflow or lose `PROMPT: `.
+    tok = _load_teacher_tokenizer(repo, rev, required=True)
+    selected = apply_token_budget(selected, tok, max_tokens=max_ex_toks, max_chars=max_ex_chars)
     prompts = [build_teacher_prompt(d["excerpt"], d["lang"], d["task_type"]) for d in selected]
     if url := os.environ.get("STET_EXAMINER_LLM_URL"):
         gens = _generate_via_endpoint(
@@ -586,8 +858,19 @@ def synthesize_reasoning(
     else:
         gens = _generate_local_gpu(prompts, repo, rev, max_new_tokens=max_new, log=log)
     items, dropped = parse_generated_items(selected, gens, max_ngram_overlap=max_ov)
+    attempted = Counter(d["task_type"] for d in selected)
     counts = Counter(it.source.split(":", 1)[0] for it in items)
-    log(f"  reasoning items: {len(items)} kept of {len(selected)} ({dict(counts)}, dropped={dropped})")
+    log(f"  reasoning items: {len(items)} kept of {len(selected)} ({dict(counts)}, attempted={dict(attempted)}, dropped={dropped})")
+    if min_keep_rate > 0:
+        bad = [
+            f"{k}={counts.get(k, 0)}/{n} ({100 * counts.get(k, 0) / n:.0f}%)"
+            for k, n in sorted(attempted.items())
+            if n >= 10 and counts.get(k, 0) / n < min_keep_rate
+        ]
+        if bad:
+            raise RuntimeError(
+                f"reasoning synthesis keep rate fell below {100 * min_keep_rate:.0f}% ({', '.join(bad)}; dropped={dropped})"
+            )
     return items
 
 

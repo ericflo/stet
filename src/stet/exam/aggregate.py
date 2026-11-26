@@ -225,18 +225,36 @@ def language_cells(counts: dict[str, int], shares: dict[str, float] | None = Non
 Pair = tuple[dict, float]  # an item's row of item_table, and its gain
 
 
-def _balanced(pairs: list[Pair], plan: Plan) -> tuple[float, dict[str, float]]:
+def _balanced(
+    pairs: list[Pair], plan: Plan, item_weights: list[float] | None = None
+) -> tuple[float, dict[str, float]]:
     """Formats and kinds of task with equal weight, each a trimmed mean of its clipped gains; one
-    with fewer than `small` items in proportion to how many it has."""
+    with fewer than `small` items in proportion to how many it has. When `item_weights` is given
+    (the pooled small-language cell 'other'), each item's clipped gain is weighted by its
+    language's crawl share so tiny languages never outweigh larger pooled languages."""
     by: dict[str, list[float]] = defaultdict(list)
-    for row, g in pairs:
-        by[row["stratum"]].append(g)
-    strata = {k: trimmed_mean(_clip(v, plan.clip), plan.trim) for k, v in sorted(by.items())}
+    by_w: dict[str, list[float]] = defaultdict(list)
+    for idx, (row, g) in enumerate(pairs):
+        st_key = row["stratum"]
+        by[st_key].append(g)
+        if item_weights is not None:
+            by_w[st_key].append(item_weights[idx])
+    strata: dict[str, float] = {}
+    for k, v in sorted(by.items()):
+        cl = _clip(v, plan.clip)
+        if item_weights is None:
+            strata[k] = trimmed_mean(cl, plan.trim)
+        else:
+            ws = by_w[k]
+            strata[k] = sum(w * x for w, x in zip(ws, cl, strict=True)) / sum(ws)
     w = {k: min(len(by[k]), plan.small) for k in strata}
     return sum(w[k] * strata[k] for k in strata) / sum(w.values()), strata
 
 
 def _part(pairs: list[Pair], plan: Plan, shares) -> float:
+    from .fresh.select import SHARES
+
+    shares = shares or SHARES
     counts: dict[str, int] = defaultdict(int)
     for row, _ in pairs:
         counts[row["lang"]] += 1
@@ -244,7 +262,11 @@ def _part(pairs: list[Pair], plan: Plan, shares) -> float:
     cells: dict[str, list[Pair]] = defaultdict(list)
     for row, g in pairs:
         cells[cell[row["lang"]]].append((row, g))
-    return sum(w[c] * _balanced(cells[c], plan)[0] for c in sorted(cells))
+    total = 0.0
+    for c in sorted(cells):
+        iw = [_share(row["lang"], shares) for row, _ in cells[c]] if c == OTHER_LANG else None
+        total += w[c] * _balanced(cells[c], plan, iw)[0]
+    return total
 
 
 def _parts(pairs: list[Pair], plan: Plan, shares) -> dict[str, dict]:

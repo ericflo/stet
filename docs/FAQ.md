@@ -136,12 +136,15 @@ at its draw, with zero static benchmarks and zero synthetic templates. Half of t
 fresh twin-context comprehension from three hours of writing people published the day before,
 which the draw picks, gathered from many sources that need no key (each continuation is
 scored under its real opening minus wrong openings from the same source and language). Half
-is fresh harvest-derived reasoning (`explain`, `infer`, `synthesis`) built deterministically
-from those exact same three hours. Your curator runs with no network and can add no text of
+is fresh harvest-derived reasoning (`explain`, `infer`, `synthesis`) written once at the draw
+by the pinned teacher model (`temperature=0`) from those exact same three hours and published
+in full at settlement. Your curator runs with no network and can add no text of
 its own: a script is copies of the round's corpus and nothing else.
 
 Until the round settles, the exam goes only to the machines grading it. Then it is
-published: openly licensed Wikipedia items whole, and every other source's items as where
+published: openly licensed Wikipedia items whole, the teacher's prompts, responses, wrapper IDs,
+and source-excerpt hashes for every reasoning item (withholding only third-party source
+excerpts), and every other comprehension source's items as where
 they came from and a hash, so anyone can check them at the source. Every student's score on
 every item is published with it.
 

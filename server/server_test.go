@@ -236,7 +236,7 @@ func testConfig(t *testing.T, anchors ...ed25519.PublicKey) Config {
 		BaseURL: "http://site.test", APIURL: "http://api.test", RedirectHosts: map[string]bool{"bare.test": true},
 		DataDir: t.TempDir(), FilesDir: t.TempDir(), DocsDir: "../docs", AgentsFile: "../src/stet/templates/AGENTS.md", AnchorKeys: map[string]bool{}, Scale: "nano",
 		RoundInterval: 6 * time.Hour, LadderSize: 10, QualifyRounds: 5, RatedRounds: 3, ReplicaWait: 45 * time.Minute,
-		Lease: 3 * time.Hour, FixedCrawl: &Crawl{Crawl: "CC-MAIN-TEST", PathsSHA256: strings.Repeat("ab", 32), NShards: 1000},
+		Lease: 3 * time.Hour, ExamTimeout: 6 * time.Hour, FixedCrawl: &Crawl{Crawl: "CC-MAIN-TEST", PathsSHA256: strings.Repeat("ab", 32), NShards: 1000},
 		GithubMinAgeDays: 30, Dev: true, EstablishAfter: 5, RunsPerEntry: 2, ActiveWindow: 10 * time.Minute,
 	}
 	for _, k := range anchors {

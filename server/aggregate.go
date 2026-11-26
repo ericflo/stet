@@ -200,7 +200,8 @@ func groupInOrder(idx []int, key func(int) string) ([]string, map[string][]int) 
 }
 
 // part is a part's score: each language cell's balanced score by its weight, added in the
-// cells' sorted order.
+// cells' sorted order. Inside the pooled small-language cell "other", each item is weighted by
+// its language's crawl share.
 func (p *ExamPlan) part(items []ItemInfo, gains []float64, idx []int, shares map[string]float64) float64 {
 	_, byLang := groupInOrder(idx, func(i int) string { return items[i].Lang })
 	counts := make(map[string]int, len(byLang))
@@ -212,7 +213,11 @@ func (p *ExamPlan) part(items []ItemInfo, gains []float64, idx []int, shares map
 	sort.Strings(names)
 	terms := make([]float64, len(names))
 	for j, c := range names {
-		terms[j] = float64(w[c] * p.balanced(items, gains, byCell[c]))
+		var iw map[string]float64
+		if c == otherLang {
+			iw = shares
+		}
+		terms[j] = float64(w[c] * p.balanced(items, gains, byCell[c], iw))
 	}
 	return pySum(terms)
 }
@@ -285,21 +290,45 @@ func languageCells(counts map[string]int, shares map[string]float64, small int) 
 	return cell, weight
 }
 
+func langShare(lang string, shares map[string]float64) float64 {
+	s, ok := shares[lang]
+	if !ok || s <= 0 {
+		return otherShare
+	}
+	return s
+}
+
 // balanced is a language cell's score: its strata, in sorted order, each a trimmed mean of
-// its clipped gains, with equal weight; one with fewer than `small` items in proportion.
-func (p *ExamPlan) balanced(items []ItemInfo, gains []float64, idx []int) float64 {
+// its clipped gains (or crawl-share weighted mean of clipped gains inside the pooled "other"
+// cell), with equal weight; one with fewer than `small` items in proportion.
+func (p *ExamPlan) balanced(items []ItemInfo, gains []float64, idx []int, poolShares map[string]float64) float64 {
 	strata, byStratum := groupInOrder(idx, func(i int) string { return items[i].Stratum })
 	sort.Strings(strata)
 	terms := make([]float64, len(strata))
 	total := 0
 	for j, s := range strata {
-		vals := make([]float64, len(byStratum[s]))
-		for k, i := range byStratum[s] {
+		sidx := byStratum[s]
+		vals := make([]float64, len(sidx))
+		for k, i := range sidx {
 			vals[k] = gains[i]
+		}
+		cl := clipped(vals, p.Clip)
+		var mean float64
+		if poolShares == nil {
+			mean = trimmedMean(cl, p.Trim)
+		} else {
+			num := make([]float64, len(sidx))
+			den := make([]float64, len(sidx))
+			for k, i := range sidx {
+				w := langShare(items[i].Lang, poolShares)
+				num[k] = float64(w * cl[k])
+				den[k] = w
+			}
+			mean = pySum(num) / pySum(den)
 		}
 		w := min(len(vals), p.Small)
 		total += w
-		terms[j] = float64(float64(w) * trimmedMean(clipped(vals, p.Clip), p.Trim))
+		terms[j] = float64(float64(w) * mean)
 	}
 	return pySum(terms) / float64(total)
 }

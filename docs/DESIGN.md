@@ -40,9 +40,10 @@ twin-context comprehension (each continuation scored under its real opening minu
 three length-matched wrong openings from the exact same source and language, in bits per
 byte), in four kinds that count the same: reference, news, technical and conversation. Half
 is fresh harvest-derived reasoning, in three kinds that count the same: explain, infer and
-synthesis — multi-sentence explanations, inferences, and declarative prose syntheses derived
-deterministically from those same three fresh hours with varied natural wrappers and a strict
-anti-copying filter. Because twin-context scores the exact same continuation under real vs
+synthesis — multi-sentence explanations, inferences, and declarative prose syntheses written
+once at the draw by the pinned teacher model (`temperature=0`) from those same three fresh
+hours with varied natural wrappers and a strict anti-copying filter, and published in full at
+settlement. Because twin-context scores the exact same continuation under real vs
 wrong openings and synthesis uses zero Q/A punctuation, surface formatting, style mimicry,
 and QA-spam fail. How much each counts is a choice of value, so it is declared rather than
 left to how many items of each there happen to be.
@@ -73,9 +74,11 @@ questions made for the round.
 **Nobody can know the exam in advance.** A public exam can be learned, and a secret one needs
 someone trusted to hold it. So each round's exam is made at its draw, from things nobody
 could aim at before it: human writing from three hours of the day before, which the round's
-seed picks, and questions generated from the same seed. Nobody knows it before the draw,
+seed picks, and fresh reasoning items written once at the draw from those same three hours. Nobody knows it before the draw,
 the organisers included, and there is nothing to keep secret for longer than a round. It is
-published when the round settles, so every score can be checked. Fresh text that the
+published when the round settles (openly licensed Wikipedia items whole, the teacher's prompts
+and responses for every reasoning item, and source IDs + hashes for third-party sites), so
+every score can be checked. Fresh text that the
 round's corpus already holds is dropped from the exam, since it is the exam that came
 second.
 
@@ -189,10 +192,10 @@ people ran and agreed on is marked *confirmed*.
 curators differ from each other. Every score is a difference from the unedited corpus on
 the same round with the same initial weights, ratings are adjusted for which rounds a
 curator happened to get, and the top curators run in every round so that any two of them can
-be compared directly. The unedited corpus trains the least steadily of all, so the round's
-baseline is the median of four established graders' measurements, item by item, so that one
-machine that is far out moves it by nothing, whichever reported first. Four and not every
-grader's: each costs a whole training, and all of them are no better a baseline than a few. The organisers' reference curators are yardsticks, and a
+be compared directly. With Season 3's deterministic student init and corpus, two established
+graders measure the round's baseline (`baselines.per_round = 2`), and the round's baseline is
+the median of theirs, item by item. Two and not every grader's: each costs a whole training,
+and all of them are no better a baseline than a cross-checked pair. The organisers' reference curators are yardsticks, and a
 yardstick need not run every round: `fineweb2` and `reader` do, and tie the rounds together,
 and each of the others runs in one round in eight.
 
@@ -229,7 +232,7 @@ decide the table.
 | Attack | What stops it |
 |---|---|
 | Tune a curator to a known corpus | The crawl is public, but which files are drawn is unknown until after commit |
-| Tune a curator to the exam | Its writing is three hours of the day before, picked by the draw, and its questions come from the draw's seed; a curator can carry in no text: its script is copies of the crawl |
+| Tune a curator to the exam | Both halves come from three hours of the day before, picked by the draw, with reasoning written once at the draw; a curator can carry in no text: its script is copies of the crawl |
 | Write a passage into a curator, then publish it where a harvest may take it | A script holds no text of its own, so a curator has nowhere to put the passage. And what a harvest keeps of an hour is chosen with a random number emitted as the hour ends |
 | Ship a dataset instead of editing | A script is copies of the crawl and no more. A model's weights can be large; it may add no text at all |
 | Have a large model write the data | The same: no text of its own, and no network while the curator runs |
@@ -269,30 +272,40 @@ What is left is in [Rules](RULES.md#what-is-trusted-and-what-is-not).
    (`exam_hours`). Curators run as soon as the
    round is drawn. A round drawn while the server knows of no harvest is given hours once
    there are some, and says so (`exam_hours_late`).
-3. **The examiner** makes the exam from exactly those hours, at once. It:
+3. **The examiner** makes the exam from exactly those hours right after the draw (~20–30 minutes
+   on the organisers' AMD Radeon 8060S workstation). It:
    - builds the round's corpus, measures its languages, selects fresh twin-context
-     comprehension items, derives deterministic `explain`/`infer`/`synthesis` reasoning items
-     from those same three hours, and drops any item whose text the corpus already holds;
-   - posts the exam: the items, what each counts toward (pillar, part, language, format and
-     kind of task), the items' digest, the languages' shares and the hours it was made
-     from. The server refuses an exam made from any other hours.
+     comprehension items, writes `explain`/`infer`/`synthesis` reasoning items once at the draw
+     with the pinned teacher model (`Qwen/Qwen3-8B@b968826d`, `temperature=0`) from those same
+     three hours, and drops any item whose text the corpus already holds;
+   - drops any pillar below `min_pillar_items = 20` (redistributing its share within its group;
+     refusing only if an entire group has zero surviving items), computes the authoritative
+     initial student weights hash (`init_sha256`), and posts the exam: the items, what each
+     counts toward (pillar, part, language, format and kind of task), the items' digest, the
+     languages' shares and the hours it was made from. The server refuses an exam made from any
+     other hours.
 4. **Grading.** A grader is handed its script as soon as a curator has written it, and
-   trains the student on it. Four established graders a round, and every grader not yet
-   established, are asked to train the unedited corpus as well. Once the exam is posted a
-   grader fetches the items, checks them against the round's digest, has its students sit
-   them, and reports one score per item.
+   trains the student on it. Two established graders a round (`baselines.per_round = 2`), and
+   every grader not yet established, are asked to train the unedited corpus as well. Once the
+   exam is posted a grader fetches the items, checks them against the round's digest, has its
+   students sit them, and reports one score per item.
 5. **The server adds it up.** The round's baseline is the item-by-item median of the
    established graders' baselines. A grade's score is the exam's aggregate (comprehension
-   half, reasoning half) of its item scores less that baseline. The server computes
+   half, reasoning half, with crawl-share weighting inside the pooled `"other"` small-language
+   cell) of its item scores less that baseline. The server computes
    it with a Go port of `src/stet/exam/aggregate.py`, checked against the Python on shared
    test vectors (`tools/aggregate_vectors.py`). From there, agreement, settlement, the board
    and the record work on that score.
 6. **Settlement.** Every item score is published (`/api/v1/rounds/<id>/scores`), and so is
-   the exam: openly licensed Wikipedia items whole, and every other source's items
-   as their source, id and hash. Other sources' text is not ours to republish; anyone can
-   check it at the source. `stet run --round <id>` replays the round on what was published.
+   the exam: openly licensed Wikipedia items whole, the organisers' generated teacher prompt,
+   response, wrapper ID, and source-excerpt SHA-256 for every reasoning item (withholding only
+   third-party source excerpts), and every other comprehension source's items as their source,
+   id and hash. Other sources' text is not ours to republish; anyone can check it at the
+   source and verify every reasoning item's exact `Item.id`. `stet run --round <id>` replays the
+   round on what was published.
 
-The exam is made at the draw, so a round takes as long as its runs and its grades do.
+The exam is built right after the draw while curators run and graders can begin training, so a
+round takes little longer than its runs and its grades do.
 Rounds never overlap. A practice round sits the bundled CC-BY-SA Wikipedia practice pack out
 of the box, or fresh twin-context writing from hours harvested on the machine that runs it
 (`stet harvest`).

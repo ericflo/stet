@@ -166,21 +166,43 @@ func (a *App) postExam(ctx context.Context, idx int, p *ExamPost) (bool, error) 
 }
 
 // checkTable refuses a table with a part the season does not name, or one under a pillar the
-// season does not put it under, or a language share that is not a number. The weights are the
-// season's; the examiner only says what each item is.
+// season does not put it under, or a language share that is not a number. A pillar with zero
+// items is allowed (its share goes to the remaining pillars in its group, per RULES.md), while
+// a pillar that is present with fewer than min_pillar_items or a declared group with zero items
+// is refused. The weights are the season's; the examiner only says what each item is.
 func (a *App) checkTable(table []ItemInfo, shares map[string]float64) error {
 	counts := map[string]int{}
+	groupOf := map[string]string{}
+	for _, pl := range a.season.Exam.Pillars {
+		groupOf[pl.Name] = pl.Group
+	}
+	groupCounts := map[string]int{}
 	for i, it := range table {
 		if it.Pillar == "" || it.Pillar != a.season.Exam.pillarOf(it.Part) || it.Part == "" || it.Lang == "" || it.Stratum == "" ||
 			len(it.Part)+len(it.Lang)+len(it.Stratum) > 200 {
 			return fail(400, "item %d of the table is not one the season scores", i)
 		}
 		counts[it.Pillar]++
+		if g := groupOf[it.Pillar]; g != "" {
+			groupCounts[g]++
+		}
 	}
 	if minP := a.season.Exam.MinPillarItems; minP > 0 {
 		for _, pl := range a.season.Exam.Pillars {
-			if counts[pl.Name] < minP {
+			if counts[pl.Name] > 0 && counts[pl.Name] < minP {
 				return fail(400, "exam pillar %q has %d items, fewer than the season's minimum of %d", pl.Name, counts[pl.Name], minP)
+			}
+		}
+	}
+	if len(a.season.Exam.Groups) > 0 {
+		groups := make([]string, 0, len(a.season.Exam.Groups))
+		for g := range a.season.Exam.Groups {
+			groups = append(groups, g)
+		}
+		sort.Strings(groups)
+		for _, g := range groups {
+			if groupCounts[g] == 0 {
+				return fail(400, "exam group %q has 0 items; every declared group must be represented", g)
 			}
 		}
 	}
@@ -193,6 +215,85 @@ func (a *App) checkTable(table []ItemInfo, shares map[string]float64) error {
 		}
 	}
 	return nil
+}
+
+// cancelRound voids every open entry of a round whose exam could not be built, with nothing
+// held against any entry (unattended=true), expires all outstanding claims on the round, and
+// emits a public cancel event. Callers run settleRounds(tx) afterwards so the round settles
+// cleanly with BaselineLoss == nil and unblocks the next draw.
+func (a *App) cancelRound(tx *Tx, rd *Round, why string) {
+	if rd == nil || rd.Status != "open" {
+		return
+	}
+	why = clip(strings.TrimSpace(why), 300)
+	if why == "" {
+		why = "the round's exam could not be built; nothing is held against any entry"
+	}
+	for _, e := range tx.s.inRound[rd.Idx] {
+		if e.Status != "open" {
+			continue
+		}
+		for _, run := range e.Runs {
+			if !run.Dropped {
+				run.Dropped = true
+				if run.Reason == "" {
+					run.Reason = why
+				}
+			}
+			run.Owed = false
+		}
+		a.voidEntry(tx, e, why, true)
+	}
+	for _, c := range tx.s.Claims {
+		if c.RoundIdx == rd.Idx && c.Status == "claimed" {
+			c.Status, c.EndedAt = "expired", now()
+			tx.saveClaim(c)
+		}
+	}
+	tx.event("cancel", map[string]any{"round": roundID(a.season.ID, rd.Idx), "reason": why, "at": now()})
+	if len(tx.s.inRound[rd.Idx]) == 0 {
+		rd.Status, rd.SettledAt = "settled", now()
+		tx.saveRound(rd)
+	}
+}
+
+// apiRoundCancel: POST /api/v1/admin/rounds/{id}/cancel, from the organisers. Cancels an open
+// round that has no exam yet, voiding all entries as unattended so nothing counts against any
+// curator and the next round can be drawn. Refused once an exam has been posted.
+func (a *App) apiRoundCancel(w http.ResponseWriter, r *http.Request) {
+	_, _, body, err := a.signedBy(w, r, 1<<16, true, organisers)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	idx, ok := a.parseRoundID(r.PathValue("id"))
+	if !ok {
+		writeErr(w, fail(404, "no such round"))
+		return
+	}
+	var req struct {
+		Reason string `json:"reason"`
+	}
+	if len(body) > 0 {
+		json.Unmarshal(body, &req)
+	}
+	err = a.st.update(r.Context(), func(tx *Tx) error {
+		rd := tx.s.Rounds[idx]
+		if rd == nil || rd.Status != "open" {
+			return fail(409, "%s is not open", roundID(a.season.ID, idx))
+		}
+		if examPosted(rd) {
+			return fail(409, "%s already has its exam", roundID(a.season.ID, idx))
+		}
+		a.cancelRound(tx, rd, req.Reason)
+		a.settleRounds(tx)
+		return nil
+	})
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, 200, map[string]any{"round": roundID(a.season.ID, idx), "status": "settled", "cancelled": true})
 }
 
 // apiExamGet: GET /api/v1/rounds/{id}/exam. Once a round settles, its published exam, to anyone:
