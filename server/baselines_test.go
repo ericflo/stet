@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math"
 	"strings"
@@ -331,6 +332,9 @@ func TestServerComparesInitSHA256AndTokensSHA256(t *testing.T) {
 		tr := map[string]any{"precision": "bf16", "seconds": 10.0}
 		if initSHA != "" {
 			tr["init_sha256"] = initSHA
+			p["baseline"].(map[string]any)["init_sha256"] = initSHA
+		} else {
+			delete(p["baseline"].(map[string]any), "init_sha256")
 		}
 		sc := map[string]any{"script_sha256": c.Job.Script.SHA256}
 		if tokSHA != "" {
@@ -815,4 +819,412 @@ func TestARentedMachineNotAskedForTheBaselineHasAPassLessToDo(t *testing.T) {
 		t.Fatalf("the fifth machine, asked for the baseline in the first's place: %+v", c.Job)
 	}
 	w.check()
+}
+
+// Review 7 Finding 1: when established graders disagree on script.tokens_sha256, the server must
+// resolve the token digest BEFORE computing the median gain, picking the representative summary,
+// and crediting verifiers — across arrival orders (A,B,A; B,A,A; A,A,B) and 3 distinct digests (A,B,C).
+func TestTokensDigestResolvedBeforeMedianAndCredit(t *testing.T) {
+	initA := strings.Repeat("a", 64)
+	tokA := strings.Repeat("1", 64)
+	tokB := strings.Repeat("2", 64)
+	tokC := strings.Repeat("3", 64)
+
+	setupTwoRun := func(t *testing.T, postExam bool) (*world, *actor, int) {
+		t.Helper()
+		pub, priv := newKey()
+		w := newWorld(t, pub)
+		anchor := w.join("anchor-one", priv)
+		runner := w.join("runner-two", nil)
+		w.established("runner-two")
+		w.submit(w.join("alice", nil), "entry-0", "print(0)")
+		idx := w.drawWithoutExam()
+		cEdit1 := w.claim(anchor, true)
+		if code, msg := w.edit(anchor, cEdit1, "{\"d\": 0}\n"); code != 200 {
+			t.Fatalf("anchor edit: HTTP %d %s", code, msg)
+		}
+		cEdit2 := w.claim(runner, true)
+		if code, msg := w.edit(runner, cEdit2, "{\"d\": 0}\n"); code != 200 {
+			t.Fatalf("runner edit: HTTP %d %s", code, msg)
+		}
+		if postExam {
+			if code, msg := w.postExam(anchor, idx, testTable()); code != 200 {
+				t.Fatalf("postExam: HTTP %d %s", code, msg)
+			}
+		}
+		return w, anchor, idx
+	}
+
+	runOrder := func(t *testing.T, name string, seq []struct {
+		tok  string
+		gain float64
+	}, wantDisputed bool) {
+		t.Helper()
+		t.Run(name, func(t *testing.T) {
+			w, _, idx := setupTwoRun(t, true)
+			g := w.volunteers("bob", "carol", "dave")
+			beforeAgreed := map[string]int{}
+			for _, a := range g {
+				beforeAgreed[a.handle] = w.account(a.handle).Agreed
+			}
+
+			sendTok := func(a *actor, c *claimed, tok string, gain float64) (int, string) {
+				t.Helper()
+				base := 6.0
+				p := w.result(c, base-gain, base)
+				if c.Job.Baseline != nil && !*c.Job.Baseline {
+					delete(p, "baseline")
+				} else {
+					p["baseline"].(map[string]any)["init_sha256"] = initA
+				}
+				p["train"].(map[string]any)["init_sha256"] = initA
+				p["script"].(map[string]any)["tokens_sha256"] = tok
+				var ack struct {
+					Status string `json:"status"`
+					Error  string `json:"error"`
+				}
+				code := a.do("POST", fmt.Sprintf("/api/v1/jobs/%d/result", c.Job.ID), p, &ack)
+				if code != 200 {
+					return code, ack.Error
+				}
+				return code, ack.Status
+			}
+
+			// Claim first two grades so the script does not settle before the second arrives.
+			c0 := w.claim(g[0], false)
+			c1 := w.claim(g[1], false)
+			if c0.Job == nil || c1.Job == nil {
+				t.Fatalf("expected two initial grade claims, got %+v %+v", c0.Job, c1.Job)
+			}
+			if code, msg := sendTok(g[0], c0, seq[0].tok, seq[0].gain); code != 200 {
+				t.Fatalf("grade 0 failed: HTTP %d %s", code, msg)
+			}
+			if code, msg := sendTok(g[1], c1, seq[1].tok, seq[1].gain); code != 200 {
+				t.Fatalf("grade 1 failed: HTTP %d %s", code, msg)
+			}
+
+			// For A,B,A / B,A,A / A,B,C the first two disagree on TokensSHA -> tie triggers 3rd claim!
+			c2 := w.claim(g[2], false)
+			if c2.Job == nil {
+				t.Fatalf("expected third grade claim to break tokens_sha256 disagreement")
+			}
+			if code, msg := sendTok(g[2], c2, seq[2].tok, seq[2].gain); code != 200 {
+				t.Fatalf("grade 2 failed: HTTP %d %s", code, msg)
+			}
+
+			if wantDisputed {
+				// With 3 distinct digests (A,B,C), verdict must remain tied and request a 4th grader!
+				w.app.st.view(func(s *State) {
+					j := w.app.newJudge(s)
+					st := j.states(s.Rounds[idx])[0]
+					sc := st.Scripts[0]
+					v := j.weigh(sc)
+					if !v.tie || !v.tokensTie || j.short(sc) != 1 {
+						t.Fatalf("3 distinct digests (A,B,C): tie=%v tokensTie=%v short=%d, want true/true/1", v.tie, v.tokensTie, j.short(sc))
+					}
+				})
+				w.pass(w.cfg.ReplicaWait + time.Minute)
+				if w.settled(idx) != 1 {
+					t.Fatal("disputed A,B,C round did not settle after ReplicaWait")
+				}
+				e := w.entry(idx, "entry-0")
+				if e.Detail == nil || !e.Detail.DisputedTogether {
+					t.Fatalf("A,B,C entry should be marked DisputedTogether: %+v", e.Detail)
+				}
+				for _, gr := range e.Runs[0].Grades {
+					if gr.Verdict != "disputed" {
+						t.Fatalf("A,B,C grade %s verdict = %q, want disputed", gr.Handle, gr.Verdict)
+					}
+				}
+				for _, a := range g {
+					if got := w.account(a.handle).Agreed; got != beforeAgreed[a.handle] {
+						t.Fatalf("A,B,C grader %s earned Agreed credit (%d -> %d)", a.handle, beforeAgreed[a.handle], got)
+					}
+				}
+				w.check()
+				return
+			}
+
+			w.pass(w.cfg.ReplicaWait + time.Minute)
+			if w.settled(idx) != 1 {
+				t.Fatal("round did not settle")
+			}
+			e := w.entry(idx, "entry-0")
+			if e.Gain == nil || math.Abs(*e.Gain-0.020) > 1e-4 {
+				t.Fatalf("%s: entry gain = %v, want 0.02000 (stream A median, NOT 0.029 from minority B)", name, e.Gain)
+			}
+			if e.Detail == nil || e.Detail.DisputedTogether {
+				t.Fatalf("%s: unexpected detail: %+v", name, e.Detail)
+			}
+			var repScript struct {
+				TokensSHA256 string `json:"tokens_sha256"`
+			}
+			json.Unmarshal(e.Detail.Script, &repScript)
+			if repScript.TokensSHA256 != tokA {
+				t.Fatalf("%s: representative script tokens_sha256 = %q, want winning %q", name, repScript.TokensSHA256, tokA)
+			}
+			byHandle := map[string]Grade{}
+			for _, gr := range e.Runs[0].Grades {
+				byHandle[gr.Handle] = gr
+			}
+			for i, a := range g {
+				gr := byHandle[a.handle]
+				if seq[i].tok == tokA {
+					if !gr.Counted || gr.Verdict != "agreed" {
+						t.Fatalf("%s: majority grader %s got counted=%v verdict=%q, want true/agreed", name, a.handle, gr.Counted, gr.Verdict)
+					}
+					if got := w.account(a.handle).Agreed; got != beforeAgreed[a.handle]+1 {
+						t.Fatalf("%s: majority grader %s Agreed=%d, want %d", name, a.handle, got, beforeAgreed[a.handle]+1)
+					}
+				} else {
+					if gr.Counted || gr.Verdict != "other data" {
+						t.Fatalf("%s: minority grader %s got counted=%v verdict=%q, want false/other data", name, a.handle, gr.Counted, gr.Verdict)
+					}
+					if got := w.account(a.handle).Agreed; got != beforeAgreed[a.handle] {
+						t.Fatalf("%s: minority grader %s earned Agreed credit (%d -> %d)", name, a.handle, beforeAgreed[a.handle], got)
+					}
+				}
+			}
+			w.check()
+		})
+	}
+
+	runOrder(t, "A_B_A", []struct {
+		tok  string
+		gain float64
+	}{{tokA, 0.010}, {tokB, 0.029}, {tokA, 0.030}}, false)
+
+	runOrder(t, "B_A_A", []struct {
+		tok  string
+		gain float64
+	}{{tokB, 0.029}, {tokA, 0.010}, {tokA, 0.030}}, false)
+
+	runOrder(t, "A_B_C_three_distinct", []struct {
+		tok  string
+		gain float64
+	}{{tokA, 0.010}, {tokB, 0.029}, {tokC, 0.030}}, true)
+
+	// Arrival order A, A, B: admission check refuses B with HTTP 409, AND judge.weigh on an
+	// A, A, B fixture directly resolves to stream A (gain 0.020) excluding B.
+	t.Run("A_A_B", func(t *testing.T) {
+		w, anchor, idx := setupTwoRun(t, false)
+		g := w.volunteers("bob", "carol", "dave")
+		// All three claim early before the exam is posted so all three hold live grade claims.
+		c0, c1, c2 := w.claimEarly(g[0]), w.claimEarly(g[1]), w.claimEarly(g[2])
+		if c0.Job == nil || c1.Job == nil || c2.Job == nil {
+			t.Fatalf("expected three early grade claims: %+v %+v %+v", c0.Job, c1.Job, c2.Job)
+		}
+		if code, msg := w.postExam(anchor, idx, testTable()); code != 200 {
+			t.Fatalf("postExam: HTTP %d %s", code, msg)
+		}
+		send := func(a *actor, c *claimed, tok string, gain float64) int {
+			p := w.result(c, 6.0-gain, 6.0)
+			if c.Job.Baseline != nil && !*c.Job.Baseline {
+				delete(p, "baseline")
+			} else {
+				p["baseline"].(map[string]any)["init_sha256"] = initA
+			}
+			p["train"].(map[string]any)["init_sha256"] = initA
+			p["script"].(map[string]any)["tokens_sha256"] = tok
+			return a.do("POST", fmt.Sprintf("/api/v1/jobs/%d/result", c.Job.ID), p, nil)
+		}
+		if code := send(g[0], c0, tokA, 0.010); code != 200 {
+			t.Fatalf("A1: HTTP %d", code)
+		}
+		if code := send(g[1], c1, tokA, 0.030); code != 200 {
+			t.Fatalf("A2: HTTP %d", code)
+		}
+		// Direct judge.weigh check with A, A, B already in state BEFORE dave's 409 settles the round:
+		w.app.st.view(func(s *State) {
+			j := w.app.newJudge(s)
+			st := j.states(s.Rounds[idx])[0]
+			sc := st.Scripts[0]
+			orig := sc.Results
+			sc.Results = append(append([]*Result(nil), orig...), &Result{
+				ID: 999, RoundIdx: idx, EditorID: st.Entry.EditorID, AccountID: w.account("dave").ID,
+				Script: sc.SHA, Valid: true, InitSHA: initA, TokensSHA: tokB, Verdict: "pending",
+				Score: func() *float64 { x := 0.029; return &x }(),
+			})
+			sc.verdict = nil
+			v := j.weigh(sc)
+			if v.tokensSHA != tokA || len(v.counted) != 2 || math.Abs(v.gain-0.020) > 1e-9 || v.tie {
+				t.Fatalf("A,A,B direct weigh: tokens=%q counted=%d gain=%.5f tie=%v, want A/2/0.020/false", v.tokensSHA, len(v.counted), v.gain, v.tie)
+			}
+		})
+		if code := send(g[2], c2, tokB, 0.029); code != 409 {
+			t.Fatalf("late B after A,A: HTTP %d, want 409", code)
+		}
+	})
+}
+
+// Review 7 Finding 2: when the examiner omits init_sha256, an established grader with the wrong
+// initialization cannot poison the round baseline. Its baseline carries its own InitSHA, is
+// excluded once rd.InitSHA locks, triggers a replacement baseline request, and every entry's
+// gain is scored purely against baselines matching the agreed InitSHA.
+func TestBadInitBaselineIsFilteredAndReplacedWhenExaminerOmitsInit(t *testing.T) {
+	initA := strings.Repeat("a", 64)
+	initB := strings.Repeat("b", 64)
+	tokA := strings.Repeat("1", 64)
+
+	setupNoInitExam := func(t *testing.T, perRound int) (*world, *actor, int) {
+		t.Helper()
+		pub, priv := newKey()
+		w := newWorld(t, pub)
+		if perRound > 0 {
+			w.app.season.Baselines.PerRound = perRound
+		}
+		anchor := w.join("anchor-one", priv)
+		runner := w.join("runner-two", nil)
+		w.established("runner-two")
+		w.submit(w.join("alice", nil), "entry-0", "print(0)")
+		idx := w.drawWithoutExam()
+		c1 := w.claim(anchor, true)
+		if code, msg := w.edit(anchor, c1, "{\"d\": 0}\n"); code != 200 {
+			t.Fatalf("anchor edit: HTTP %d %s", code, msg)
+		}
+		c2 := w.claim(runner, true)
+		if code, msg := w.edit(runner, c2, "{\"d\": 0}\n"); code != 200 {
+			t.Fatalf("runner edit: HTTP %d %s", code, msg)
+		}
+		// Examiner omits init_sha256 (fallback path when examiner CPU check fails).
+		post := testExam(testTable())
+		delete(post, "init_sha256")
+		if code := anchor.do("POST", fmt.Sprintf("/api/v1/admin/rounds/%s/exam", roundID(w.app.season.ID, idx)), post, nil); code != 200 {
+			t.Fatalf("post exam without init_sha256: HTTP %d", code)
+		}
+		return w, anchor, idx
+	}
+
+	t.Run("conflicting_baselines_request_replacement_and_exclude_wrong_init", func(t *testing.T) {
+		w, _, idx := setupNoInitExam(t, 2) // Season 3 default: Baselines.PerRound == 2
+
+		g := w.volunteers("bob", "carol", "dave", "erin")
+		sendGrade := func(a *actor, c *claimed, initSHA, baseInitSHA string, loss, base float64) (int, string) {
+			t.Helper()
+			p := w.result(c, loss, base)
+			p["train"].(map[string]any)["init_sha256"] = initSHA
+			p["script"].(map[string]any)["tokens_sha256"] = tokA
+			if base == 0 {
+				delete(p, "baseline")
+			} else if baseInitSHA != "" {
+				p["baseline"].(map[string]any)["init_sha256"] = baseInitSHA
+			}
+			var ack struct {
+				Status string `json:"status"`
+				Error  string `json:"error"`
+			}
+			code := a.do("POST", fmt.Sprintf("/api/v1/jobs/%d/result", c.Job.ID), p, &ack)
+			if code != 200 {
+				return code, ack.Error
+			}
+			return code, ack.Status
+		}
+
+		// Bob (wrong initB) submits baseline = 5.0 (loss), exam = 4.9 -> gain +0.10 on initB.
+		cb := w.asked(g[0], true)
+		// Inconsistent baseline.init_sha256 vs train.init_sha256 is refused with HTTP 400.
+		if code, msg := sendGrade(g[0], cb, initB, initA, 4.9, 5.0); code != 400 {
+			t.Fatalf("mismatched baseline vs train init_sha256: HTTP %d %q, want 400", code, msg)
+		}
+		if code, st := sendGrade(g[0], cb, initB, initB, 4.9, 5.0); code != 200 {
+			t.Fatalf("bob bad-init grade: HTTP %d %s", code, st)
+		}
+
+		// Carol (honest initA) submits numerically different baseline = 6.0, exam = 5.8 -> gain +0.20 on initA.
+		cc := w.asked(g[1], true)
+		if code, st := sendGrade(g[1], cc, initA, initA, 5.8, 6.0); code != 200 {
+			t.Fatalf("carol honest grade: HTTP %d %s", code, st)
+		}
+
+		// Both PerRound=2 slots have stored baselines, YET they conflict on InitSHA (initB vs initA)!
+		// So the 3rd established grader (dave) breaking the tie MUST be asked for a replacement baseline!
+		cd := w.asked(g[2], true)
+		if code, st := sendGrade(g[2], cd, initA, initA, 5.8, 6.0); code != 200 {
+			t.Fatalf("dave replacement baseline + tie-break grade: HTTP %d %s", code, st)
+		}
+
+		w.pass(w.cfg.ReplicaWait + time.Minute)
+		if w.settled(idx) != 1 {
+			t.Fatal("round did not settle")
+		}
+		w.app.st.view(func(s *State) {
+			rd := s.Rounds[idx]
+			if rd.InitSHA != initA {
+				t.Fatalf("rd.InitSHA = %q, want %q", rd.InitSHA, initA)
+			}
+			if rd.BaselineLoss == nil || math.Abs(*rd.BaselineLoss-6.0) > 1e-4 {
+				t.Fatalf("rd.BaselineLoss = %v, want 6.0 (bob's 5.0 initB baseline must be excluded)", rd.BaselineLoss)
+			}
+			if rd.BaselineN != 2 {
+				t.Fatalf("rd.BaselineN = %d, want 2 (carol + dave)", rd.BaselineN)
+			}
+		})
+		e := w.entry(idx, "entry-0")
+		if e.Gain == nil || math.Abs(*e.Gain-0.20) > 1e-4 {
+			t.Fatalf("entry gain = %v, want +0.20 (NOT shifted by bob's 5.0 baseline)", e.Gain)
+		}
+		for _, gr := range e.Runs[0].Grades {
+			if gr.Handle == "bob" && (gr.Counted || gr.Verdict != "other data") {
+				t.Fatalf("bob's bad-init grade should be set aside as other data: %+v", gr)
+			}
+		}
+		w.check()
+	})
+
+	t.Run("sole_bad_init_baseline_is_wiped_and_replaced_after_init_locks", func(t *testing.T) {
+		w, _, idx := setupNoInitExam(t, 1)
+		g := w.volunteers("bob", "carol", "dave", "erin", "frank")
+		send := func(a *actor, c *claimed, initSHA string, loss, base float64) int {
+			p := w.result(c, loss, base)
+			p["train"].(map[string]any)["init_sha256"] = initSHA
+			p["script"].(map[string]any)["tokens_sha256"] = tokA
+			if base == 0 {
+				delete(p, "baseline")
+			} else {
+				p["baseline"].(map[string]any)["init_sha256"] = initSHA
+			}
+			return a.do("POST", fmt.Sprintf("/api/v1/jobs/%d/result", c.Job.ID), p, nil)
+		}
+		// Bob submits the ONLY baseline (initB, loss 5.0).
+		cb := w.asked(g[0], true)
+		if code := send(g[0], cb, initB, 4.9, 5.0); code != 200 {
+			t.Fatalf("bob: HTTP %d", code)
+		}
+		// Carol & Dave are NOT asked for baseline initially (PerRound=1 filled by bob's sole baseline),
+		// and lock rd.InitSHA = initA without sending a baseline!
+		cc := w.asked(g[1], false)
+		if code := send(g[1], cc, initA, 5.8, 0); code != 200 {
+			t.Fatalf("carol: HTTP %d", code)
+		}
+		cd := w.asked(g[2], false)
+		if code := send(g[2], cd, initA, 5.8, 0); code != 200 {
+			t.Fatalf("dave: HTTP %d", code)
+		}
+		// Now rd.InitSHA == initA, bob's sole initB baseline MUST be wiped (no stale BaseItems or scores)!
+		w.app.st.view(func(s *State) {
+			rd := s.Rounds[idx]
+			if rd.InitSHA != initA || rd.BaselineLoss != nil || len(rd.BaseItems) != 0 {
+				t.Fatalf("after sole bad-init baseline eviction: init=%q baseLoss=%v len(BaseItems)=%d", rd.InitSHA, rd.BaselineLoss, len(rd.BaseItems))
+			}
+		})
+		// Erin is asked for a replacement baseline (Baseline=true), sends wrong initB -> refused 409,
+		// releasing the baseline promise so Frank is asked next!
+		ce := w.asked(g[3], true)
+		if code := send(g[3], ce, initB, 5.8, 5.0); code != 409 {
+			t.Fatalf("late bad-init baseline after lock: HTTP %d, want 409", code)
+		}
+		cf := w.asked(g[4], true)
+		if code := send(g[4], cf, initA, 5.8, 6.0); code != 200 {
+			t.Fatalf("frank replacement baseline: HTTP %d", code)
+		}
+		w.pass(w.cfg.ReplicaWait + time.Minute)
+		if w.settled(idx) != 1 {
+			t.Fatal("round did not settle after replacement baseline")
+		}
+		e := w.entry(idx, "entry-0")
+		if e.Gain == nil || math.Abs(*e.Gain-0.20) > 1e-4 {
+			t.Fatalf("entry gain = %v, want +0.20", e.Gain)
+		}
+		w.check()
+	})
 }

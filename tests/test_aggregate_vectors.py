@@ -52,3 +52,27 @@ def test_the_servers_vectors_are_current():
         assert old["score"] == pytest.approx(new["score"], rel=0, abs=1e-12), (old["name"], hint)
         assert old["pillars"] == pytest.approx(new["pillars"], rel=0, abs=1e-12), (old["name"], hint)
     assert len(now["cases"]) >= 30 and all(c["shares"] for c in now["cases"])  # the server is always given shares
+
+
+def test_season2_vectors_replay_unchanged():
+    """Review 7 Finding 4: Season 2 replay must preserve its original aggregation rule
+    (`weight_other_by_share=False`) bit-for-bit against all 47 base-branch reference vectors."""
+    from stet.exam.aggregate import plan_of
+
+    s2_plan = plan_of(load_season("s2"))
+    s3_plan = plan_of(load_season("s3"))
+    assert s2_plan.weight_other_by_share is False
+    assert s3_plan.weight_other_by_share is True
+
+    v2_path = Path(__file__).resolve().parents[1] / "server" / "testdata" / "aggregate_vectors_s2.json"
+    v2 = json.loads(v2_path.read_text())
+    assert len(v2["cases"]) == 47
+    checked_every_source = False
+    for c in v2["cases"]:
+        got = score_from_table(v2["tables"][c["table"]], c["gains"], c["shares"], plan=s2_plan)
+        assert got["score"] == pytest.approx(c["score"], rel=0, abs=1e-12), c["name"]
+        assert got["pillars"] == pytest.approx(c["pillars"], rel=0, abs=1e-12), c["name"]
+        if c["name"] == "every source of writing":
+            assert got["score"] == pytest.approx(-0.008952, abs=1e-5)
+            checked_every_source = True
+    assert checked_every_source

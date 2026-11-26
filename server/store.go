@@ -372,6 +372,7 @@ type Baseline struct {
 	Loss       float64 `json:"loss"` // the student's mean bits per byte on the exam's items
 	CorpusSHA  string  `json:"corpus_sha256"`
 	ExamSHA    string  `json:"exam_sha256"`
+	InitSHA    string  `json:"init_sha256,omitempty"`
 	ReceivedAt int64   `json:"received_at"`
 	// Established says the account was established when it measured this, so the measurement
 	// is one of those the round's baseline is the median of.

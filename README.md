@@ -60,7 +60,7 @@ stet service install      # leave it running: starts with the machine, upgrades 
   can add no text of its own, so the exam cannot reach the student through it.
 - **Only what tells curators apart.** Every part of the exam is validated before the season for
   multi-seed stability, resistance to style mimicry, and agreement with published pretraining recipes.
-  Zero raw web-text perplexity: surface style matching cancels out, and nothing is sat that does not count.
+  Zero raw web-text perplexity: a context-insensitive surface-style predictor scores zero on twin-context comprehension, and nothing is sat that does not count.
 - **Copies only.** Everything the student reads is copied byte for byte from the round's
   corpus. A script holds no text of its own.
 - **Checked by other people.** Two volunteers run each curator, on NVIDIA and AMD, and

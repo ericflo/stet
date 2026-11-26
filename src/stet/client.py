@@ -201,9 +201,32 @@ def fetch_round(season, index: int):
         sys.stderr.write(f"stet: round {clean(d['round']['id'], 40)} has not been drawn yet\n")
         sys.exit(1)
     rnd = round_from_api(season, d["round"])
-    if rnd.exam_digest and d["round"].get("status") == "settled":
-        fetch_public_exam(rnd)
+    if rnd.exam_digest:
+        fetch_round_shares(rnd, d["round"])
+        if d["round"].get("status") == "settled":
+            fetch_public_exam(rnd)
     return rnd
+
+
+def fetch_round_shares(rnd, round_doc: dict | None = None) -> dict[str, float] | None:
+    """Fetch and cache an official round's measured corpus language shares so `stet score` and
+    `stet run` weight official replays identically to the server."""
+    from . import data
+
+    if cached := data.round_shares(rnd):
+        return cached
+    shares = (round_doc or {}).get("languages")
+    if not (isinstance(shares, dict) and shares) and (round_doc or {}).get("status") == "settled":
+        try:
+            scores = request("GET", f"/api/v1/rounds/{rnd.id}/scores", timeout=120, limit=EXAM_LIMIT)
+            if isinstance(scores, dict) and isinstance(scores.get("languages"), dict):
+                shares = scores["languages"]
+        except ApiError:
+            shares = None
+    if isinstance(shares, dict) and shares:
+        data.save_round_shares(rnd, shares)
+        return data.round_shares(rnd)
+    return None
 
 
 def fetch_public_exam(rnd) -> None:
@@ -582,7 +605,10 @@ def slim_result(result: dict, base: dict | None) -> dict:
     out["round"] = result["round"]["id"]
     # Every item's score: the server makes the round's score from them.
     if base is not None:
-        out["baseline"] = {"mean": base["exam"]["mean"], "item_scores": base["exam"]["item_scores"]}
+        base_out = {"mean": base["exam"]["mean"], "item_scores": base["exam"]["item_scores"]}
+        if base_init := (base.get("train") or {}).get("init_sha256"):
+            base_out["init_sha256"] = base_init
+        out["baseline"] = base_out
     if result.get("valid"):
         s = result["script"]
         out["script"] = {k: s.get(k) for k in ("script_sha256", "tokens_sha256", "script_lines", "out_docs", "out_bytes", "src_docs", "kept_doc_frac", "kept_byte_frac", "tokens_one_pass", "passes", "truncated")}

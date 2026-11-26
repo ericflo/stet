@@ -403,10 +403,12 @@ type ResultPayload struct {
 }
 
 // ExamScore is a student's score on the round's exam: one score for each of its items (bits
-// per byte, higher is better), and their mean.
+// per byte, higher is better), and their mean. When carrying a baseline measurement, InitSHA256
+// records the baseline training run's own initial weights digest.
 type ExamScore struct {
 	Mean       float64   `json:"mean"`
 	ItemScores []float64 `json:"item_scores"`
+	InitSHA256 string    `json:"init_sha256,omitempty"`
 }
 
 type TrainInfo struct {
@@ -780,10 +782,12 @@ type verdict struct {
 	// scored: and each of them has its score against the round's baseline. Until the
 	// baseline somebody was asked for arrives, a grade that counts has none, and gain
 	// says nothing yet: nothing is settled on it, and no two runs are compared by it.
-	scored bool
-	valid  bool
-	gain   float64
-	tie    bool // two decide it, and they disagree
+	scored    bool
+	valid     bool
+	gain      float64
+	tie       bool   // two decide it and disagree, or valid grades have no agreed token stream
+	tokensSHA string // agreed script tokens_sha256 among counted valid grades, if resolved
+	tokensTie bool   // multiple distinct tokens_sha256 with no unique >=2 winner
 }
 
 // same reports whether two grades of a script are consistent with honest runs.
@@ -807,11 +811,17 @@ func (j *judge) agrees(g *gradeView, v *verdict) bool {
 	if g.r.Valid != v.valid {
 		return false
 	}
+	if v.valid && v.tokensSHA != "" && g.r.TokensSHA != "" && g.r.TokensSHA != v.tokensSHA {
+		return false
+	}
 	return !v.valid || within(g.gain-v.gain, j.a.tolerance().Grade)
 }
 
 // weigh works out what a script's grades come to so far. The established accounts' grades
-// decide; a self grade counts only while it is all there is.
+// decide; a self grade counts only while it is all there is. When valid grades report
+// script.tokens_sha256 and disagree, the token digest is resolved BEFORE computing the median
+// or representative grade: a unique digest with >= 2 votes wins and minority-digest grades are
+// excluded; otherwise (e.g. A vs B, A vs B vs C, or a 2-2 split) the verdict stays disputed.
 func (j *judge) weigh(sc *scriptState) *verdict {
 	if sc.verdict != nil {
 		return sc.verdict
@@ -842,6 +852,39 @@ func (j *judge) weigh(sc *scriptState) *verdict {
 	if len(v.counted) == 0 {
 		v.counted, v.self = own, len(own) > 0
 	}
+	tokCounts := map[string]int{}
+	for _, g := range v.counted {
+		if g.r.Valid && g.r.TokensSHA != "" {
+			tokCounts[g.r.TokensSHA]++
+		}
+	}
+	if len(tokCounts) == 1 {
+		for tok := range tokCounts {
+			v.tokensSHA = tok
+		}
+	} else if len(tokCounts) > 1 {
+		bestTok, bestN, tied := "", 0, false
+		for tok, n := range tokCounts {
+			switch {
+			case n > bestN:
+				bestTok, bestN, tied = tok, n, false
+			case n == bestN:
+				tied = true
+			}
+		}
+		if bestN >= 2 && !tied {
+			v.tokensSHA = bestTok
+			kept := make([]*gradeView, 0, len(v.counted))
+			for _, g := range v.counted {
+				if !g.r.Valid || g.r.TokensSHA == "" || g.r.TokensSHA == bestTok {
+					kept = append(kept, g)
+				}
+			}
+			v.counted = kept
+		} else {
+			v.tokensTie = true
+		}
+	}
 	v.known = len(v.counted) > 0
 	v.scored = v.known
 	var gains []float64
@@ -855,7 +898,7 @@ func (j *judge) weigh(sc *scriptState) *verdict {
 	if v.valid = 2*len(gains) > len(v.counted); v.valid {
 		v.gain = median(gains)
 	}
-	v.tie = len(v.counted) == 2 && !j.same(v.counted[0], v.counted[1])
+	v.tie = v.tokensTie || (len(v.counted) == 2 && !j.same(v.counted[0], v.counted[1]))
 	sc.verdict = v
 	return v
 }
@@ -2060,6 +2103,12 @@ func (a *App) submitResult(ctx context.Context, acctID, claimID int64, p *Result
 		if p.Train != nil && sha256Re.MatchString(p.Train.InitSHA256) {
 			initSHA = p.Train.InitSHA256
 		}
+		baseInitSHA := ""
+		if p.Baseline != nil && sha256Re.MatchString(p.Baseline.InitSHA256) {
+			baseInitSHA = p.Baseline.InitSHA256
+		} else if p.Baseline != nil && p.Valid && initSHA != "" {
+			baseInitSHA = initSHA
+		}
 		tokensSHA := scriptTokensSHA(p.Script)
 		if p.Valid && len(a.season.Student) > 0 {
 			if initSHA == "" {
@@ -2069,13 +2118,23 @@ func (a *App) submitResult(ctx context.Context, acctID, claimID int64, p *Result
 				return fail(400, "valid grades for %s must report a 64-hex script.tokens_sha256", a.season.ID)
 			}
 		}
+		if p.Baseline != nil && len(a.season.Student) > 0 && baseInitSHA == "" {
+			return fail(400, "baselines for %s must report a 64-hex baseline.init_sha256", a.season.ID)
+		}
+		if p.Valid && initSHA != "" && baseInitSHA != "" && initSHA != baseInitSHA {
+			return fail(400, "baseline and exam initial weights hashes differ for %s", p.Round)
+		}
 		if p.Valid && initSHA != "" && rd.InitSHA != "" && rd.InitSHA != initSHA {
 			return refuse("init", 0, "your initial weights hash for %s differs from the round's. Check your student model cache and harness version", p.Round)
+		}
+		if baseInitSHA != "" && rd.InitSHA != "" && rd.InitSHA != baseInitSHA {
+			return refuse("init", 0, "your baseline initial weights hash for %s differs from the round's. Check your student model cache and harness version", p.Round)
 		}
 		if p.Valid && tokensSHA != "" {
 			tokVotes := map[string]map[int64]bool{}
 			for _, prev := range s.results(rd.Idx, e.EditorID) {
-				if prev.Script == c.Script && prev.Valid && prev.TokensSHA != "" && a.established(s.Accounts[prev.AccountID]) {
+				if prev.Script == c.Script && prev.Valid && prev.TokensSHA != "" && a.established(s.Accounts[prev.AccountID]) &&
+					(rd.InitSHA == "" || prev.InitSHA == "" || prev.InitSHA == rd.InitSHA) {
 					if tokVotes[prev.TokensSHA] == nil {
 						tokVotes[prev.TokensSHA] = map[int64]bool{}
 					}
@@ -2113,23 +2172,32 @@ func (a *App) submitResult(ctx context.Context, acctID, claimID int64, p *Result
 		// Everything is checked. From here on the change is made.
 		if p.Baseline != nil {
 			b := &Baseline{RoundIdx: rd.Idx, AccountID: acctID, Loss: places5(-p.Baseline.Mean), Items: p.Baseline.ItemScores,
-				CorpusSHA: p.CorpusSHA256, ExamSHA: p.ExamSHA256, ReceivedAt: now(), Established: est}
+				CorpusSHA: p.CorpusSHA256, ExamSHA: p.ExamSHA256, InitSHA: baseInitSHA, ReceivedAt: now(), Established: est}
 			tx.saveBaseline(b)
 		}
 		if est {
 			rd.CorpusSHA = p.CorpusSHA256
-			if p.Valid && initSHA != "" && rd.InitSHA == "" {
+			voteInit := initSHA
+			if voteInit == "" {
+				voteInit = baseInitSHA
+			}
+			if voteInit != "" && rd.InitSHA == "" {
 				// Require agreement from at least two independent established accounts before
 				// locking rd.InitSHA (unless the examiner already posted it authoritatively),
 				// so one honest machine with a bad first result cannot poison the whole round.
 				voters := map[int64]bool{acctID: true}
 				for _, r := range s.Results {
-					if r.RoundIdx == rd.Idx && r.Valid && r.InitSHA == initSHA && a.established(s.Accounts[r.AccountID]) {
+					if r.RoundIdx == rd.Idx && r.Valid && r.InitSHA == voteInit && a.established(s.Accounts[r.AccountID]) {
 						voters[r.AccountID] = true
 					}
 				}
+				for _, b := range s.Baselines {
+					if b.RoundIdx == rd.Idx && b.InitSHA == voteInit && (b.Established || (s.Accounts[b.AccountID] != nil && s.Accounts[b.AccountID].Anchor)) {
+						voters[b.AccountID] = true
+					}
+				}
 				if len(voters) >= 2 {
-					rd.InitSHA = initSHA
+					rd.InitSHA = voteInit
 				}
 			}
 			a.moved(tx, rd)
@@ -2518,10 +2586,7 @@ func (a *App) settleScript(tx *Tx, j *judge, st *entryState, sc *scriptState) *g
 	for _, g := range v.counted {
 		solid = solid || (!v.tie && g.acct.Anchor)
 	}
-	bestTokens := ""
-	if out.best != nil {
-		bestTokens = out.best.TokensSHA
-	}
+	agreedTokens := v.tokensSHA
 	ref := map[string]any{"round": roundID(a.season.ID, rd.Idx), "editor": st.Entry.EditorID}
 	for _, r := range sc.Results {
 		g := j.view(sc, r)
@@ -2537,12 +2602,13 @@ func (a *App) settleScript(tx *Tx, j *judge, st *entryState, sc *scriptState) *g
 			r.Verdict = "counted"
 			g.acct.GPUSeconds += r.Seconds
 		case decides[r] && v.tie:
-			// Two established accounts, two answers, and nobody to say which is right.
+			// Established accounts disagree (on gain, validity, or tokenized stream), with no
+			// resolved majority to say which is right.
 			r.Verdict, shown = "disputed", "disputed"
 			g.acct.GPUSeconds += r.Seconds
 		case !decides[r] && (r.CorpusSHA != rd.CorpusSHA || r.ExamSHA != rd.ExamSHA ||
 			(r.InitSHA != "" && rd.InitSHA != "" && r.InitSHA != rd.InitSHA) ||
-			(r.TokensSHA != "" && bestTokens != "" && r.TokensSHA != bestTokens)):
+			(r.TokensSHA != "" && agreedTokens != "" && r.TokensSHA != agreedTokens)):
 			// It graded different data. A setup problem, and no evidence about this script.
 			r.Verdict, shown = "void", "other data"
 		case !decides[r] && b != nil && (j.oddOut(r) || !a.baselineAgrees(rd, b)):

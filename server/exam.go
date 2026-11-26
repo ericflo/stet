@@ -48,6 +48,12 @@ func (a *App) examBlob(idx int, name string) string {
 	return fmt.Sprintf("exams/%s/%08d/%s", a.season.ID, idx, name)
 }
 
+// examDigestBlob is an immutable, digest-addressed blob key for a round's exam files so two
+// overlapping publications with different digests cannot overwrite each other before commit.
+func (a *App) examDigestBlob(idx int, digest, name string) string {
+	return fmt.Sprintf("exams/%s/%08d/%s/%s", a.season.ID, idx, digest, name)
+}
+
 // examPosted reports whether a round's exam is there to be sat: it is made after the draw.
 func examPosted(rd *Round) bool { return rd.ExamSHA != "" }
 
@@ -123,7 +129,7 @@ func (a *App) postExam(ctx context.Context, idx int, p *ExamPost) (bool, error) 
 		name, kind string
 		b          []byte
 	}{{examItems, "application/zstd", file}, {examPublic, "application/zstd", public}, {examTable, "application/json", table}} {
-		if err := a.st.blobs.Put(ctx, a.examBlob(idx, put.name), put.b, put.kind); err != nil {
+		if err := a.st.blobs.Put(ctx, a.examDigestBlob(idx, p.Digest, put.name), put.b, put.kind); err != nil {
 			slog.Error("keeping a round's exam", "round", idx, "err", err)
 			return false, fail(503, "the file store is not answering; try again in a moment")
 		}
@@ -307,16 +313,20 @@ func (a *App) apiExamGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var posted, settled bool
+	var examSHA string
 	a.st.view(func(s *State) {
 		rd := s.Rounds[idx]
 		posted = rd != nil && examPosted(rd)
 		settled = posted && rd.Status == "settled"
+		if posted {
+			examSHA = rd.ExamSHA
+		}
 	})
 	if !posted {
 		writeErr(w, fail(404, "%s has no exam yet", roundID(a.season.ID, idx)))
 		return
 	}
-	blob := a.examBlob(idx, examPublic)
+	name := examPublic
 	if !settled {
 		acct, _, _, err := a.signedBy(w, r, 1<<10, true, anyone)
 		if err != nil {
@@ -333,9 +343,13 @@ func (a *App) apiExamGet(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, fail(403, "until a round settles, its exam is given to the machines grading it"))
 			return
 		}
-		blob = a.examBlob(idx, examItems)
+		name = examItems
 	}
-	f, size, err := a.st.blobs.Open(r.Context(), blob)
+	f, size, err := a.st.blobs.Open(r.Context(), a.examDigestBlob(idx, examSHA, name))
+	if errors.Is(err, errNoBlob) {
+		// Backwards compatibility for rounds stored before digest-keyed exam blobs.
+		f, size, err = a.st.blobs.Open(r.Context(), a.examBlob(idx, name))
+	}
 	if err != nil {
 		slog.Error("reading a round's exam", "round", idx, "err", err)
 		writeErr(w, fail(503, "the file store is not answering; try again in a moment"))
@@ -395,16 +409,29 @@ func diffItems(x, base []float64) []float64 {
 	return out
 }
 
+// baselineMatchesInit reports whether a stored baseline matches the round's agreed initial
+// student weights digest (always true before the round locks an InitSHA, or on seasons without
+// a pinned student model).
+func (a *App) baselineMatchesInit(rd *Round, b *Baseline) bool {
+	if rd == nil || b == nil || rd.InitSHA == "" {
+		return true
+	}
+	if b.InitSHA == "" {
+		return len(a.season.Student) == 0
+	}
+	return b.InitSHA == rd.InitSHA
+}
+
 // roundBaselines are the round's baselines that may make its own, in the order of their
-// accounts: measured on its corpus and exam, by an account established when it measured (or the
-// organisers'). Whether a measurement counts was settled when it arrived: standing earned as the
-// round settles must not move the round's own baseline.
+// accounts: measured on its corpus, exam and agreed initial weights, by an account established
+// when it measured (or the organisers'). Whether a measurement counts was settled when it
+// arrived: standing earned as the round settles must not move the round's own baseline.
 func (a *App) roundBaselines(s *State, rd *Round) []*Baseline {
 	var out []*Baseline
 	for _, b := range s.Baselines {
 		acct := s.Accounts[b.AccountID]
 		if b.RoundIdx == rd.Idx && (b.Established || (acct != nil && acct.Anchor)) && b.CorpusSHA == rd.CorpusSHA && b.ExamSHA == rd.ExamSHA &&
-			len(b.Items) == len(rd.ExamTable) {
+			a.baselineMatchesInit(rd, b) && len(b.Items) == len(rd.ExamTable) {
 			out = append(out, b)
 		}
 	}
@@ -493,9 +520,9 @@ func (a *App) baselineDev(s *State, rd *Round, acctID int64, items []float64) (d
 }
 
 // baselineAgrees says whether a grader's baseline is within the tolerance of the round's: its
-// score against the round's baseline, on the exam's aggregate.
+// score against the round's baseline, on the exam's aggregate, and matching the agreed InitSHA.
 func (a *App) baselineAgrees(rd *Round, b *Baseline) bool {
-	if b == nil || len(rd.BaseItems) == 0 || len(b.Items) != len(rd.BaseItems) || b.ExamSHA != rd.ExamSHA {
+	if b == nil || len(rd.BaseItems) == 0 || len(b.Items) != len(rd.BaseItems) || b.ExamSHA != rd.ExamSHA || !a.baselineMatchesInit(rd, b) {
 		return false
 	}
 	dev, _, err := a.season.Exam.ScoreItems(rd.ExamTable, diffItems(b.Items, rd.BaseItems), rd.Shares)
@@ -533,10 +560,35 @@ func (j *judge) measuring(rd *Round) map[int64]bool {
 		return who
 	}
 	who := map[int64]bool{}
+	var agreeing []*Baseline
 	for _, b := range j.a.baselinesKept(j.s, rd) {
 		if j.a.baselineAgrees(rd, b) {
-			who[b.AccountID] = true
+			agreeing = append(agreeing, b)
 		}
+	}
+	// Before rd.InitSHA locks, baselines that report different InitSHA values cannot all survive
+	// once consensus locks; count only the largest agreeing InitSHA cohort so a replacement
+	// baseline is requested immediately rather than letting conflicting baselines fill PerRound.
+	if rd.InitSHA == "" && len(agreeing) > 1 {
+		byInit := map[string][]*Baseline{}
+		for _, b := range agreeing {
+			if b.InitSHA != "" {
+				byInit[b.InitSHA] = append(byInit[b.InitSHA], b)
+			}
+		}
+		if len(byInit) > 1 {
+			bestSHA := ""
+			var bestCohort []*Baseline
+			for sha, cohort := range byInit {
+				if len(cohort) > len(bestCohort) || (len(cohort) == len(bestCohort) && (bestSHA == "" || sha < bestSHA)) {
+					bestSHA, bestCohort = sha, cohort
+				}
+			}
+			agreeing = bestCohort
+		}
+	}
+	for _, b := range agreeing {
+		who[b.AccountID] = true
 	}
 	for _, c := range j.s.Claims {
 		if c.RoundIdx == rd.Idx && c.Kind == "grade" && c.Baseline && c.live(j.t) && j.est[c.AccountID] &&
@@ -581,6 +633,18 @@ func (a *App) refreshScores(tx *Tx, rd *Round) {
 	s := tx.s
 	kept := a.baselinesKept(s, rd)
 	if len(kept) == 0 {
+		if len(rd.BaseItems) > 0 || rd.BaselineLoss != nil || rd.BaselineN != 0 {
+			rd.BaseItems, rd.BaselineLoss, rd.BaselineN = nil, nil, 0
+			tx.saveRound(rd)
+			for _, e := range s.inRound[rd.Idx] {
+				for _, r := range s.results(rd.Idx, e.EditorID) {
+					if r.Score != nil || len(r.BySource) > 0 {
+						r.Score, r.BySource = nil, nil
+						tx.saveResult(r)
+					}
+				}
+			}
+		}
 		return
 	}
 	base := medianItems(itemsOf(kept))

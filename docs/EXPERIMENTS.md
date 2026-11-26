@@ -381,75 +381,93 @@ both the student and the exam from first principles and verified the exact live 
      - **2-Draw Independent Mean (`Draw 1 + Draw 2`, English subset):** **`47/66` (`71.2%`, perm
        one-sided `p = 0.0314`)**, **`2pt+ = 26/31` (`83.9%`)**, **`ρ = +0.580` (`p = 0.0479`)**,
        3% trap `#11/12`. *(On the full multilingual exam, English-only DataDecide recipes score
-       `28/66`–`30/66`, `ρ = −0.18` to `−0.10`, because strict English-only DCLM-QC filters regress
-       against `dolma1_7` on the ~66% non-English crawl.)*
+       `28/66`, `28/66`, `30/66` [Draw 1 / Draw 2 / 2-draw mean] under the pre-Review #6 unweighted
+       `"other"`-pool scorer, and **`27/66` (`ρ = −0.238`), `37/66` (`ρ = +0.084`), `34/66`
+       (`ρ = −0.042`)** under the shipping `weight_other_by_share=true` Season 3 scorer, because
+       strict English-only DCLM-QC filters regress against `dolma1_7` on the non-English crawl;
+       the English-subset totals `46/66`, `48/66`, `47/66` are identical under both scorers.)*
      - **Honest bias diagnosis (not draw noise):** Draw 1 and Draw 2 correlate at **`ρ = +0.94`**
        (`60/66` pairs) with each other, which means the gap from DataDecide's 1B truth table is a
        **systematic lean**, not sampling noise that averages out across rounds. Both draws reliably
        separate filtered from unfiltered recipes (`11/11`) and catch severe overfiltering (`#11/12`),
        but both place `FineWeb-Edu` (`#7/12` in 1B macro, `1.95 pp` below `#1`) at `#1` by ~2× the
-       runner-up (`+0.025–0.029 bpb` vs `+0.011–0.013 bpb`) because the teacher's explanatory prose
-       over-rewards educational/textbook style; among the top-8 recipes within 2 pp of each other,
-       shipped-exam ordering is near chance (`16/28` and `17/28`, `ρ ≈ +0.2`). *(An earlier
-       historical prototype sweep `sweep10` reached `55/66 = 83.3%`, `96.8%` `2pt+`, `ρ = +0.818`,
-       `p = 0.0010` on a pre-shipped prototype exam; future sweeps should keep trained student
-       checkpoints so scoring changes can be re-evaluated without retraining.)*
+       runner-up (`+0.0205` vs `+0.0097` on Draw 1, `+0.0248` vs `+0.0153` on Draw 2) because the
+       teacher's explanatory prose over-rewards educational/textbook style; among the top-8 recipes
+       within 2 pp of each other, shipped-exam ordering is near chance (`16/28` and `17/28`,
+       `ρ ≈ +0.2`). *(An earlier historical prototype sweep `sweep10` reached `55/66 = 83.3%`,
+       `96.8%` `2pt+`, `ρ = +0.818`, `p = 0.0010` on a pre-shipped prototype exam; future sweeps
+       should keep trained student checkpoints so scoring changes can be re-evaluated without
+       retraining.)*
    - **Cross-GPU determinism on real materialized stream:** identical `127.4M`-parameter
      `trainable_sha256` (`4c949103d67fc83d`) across GPU 4 and GPU 5 (`max_item_diff = 2.0e-6`).
    - **Live official exam gauntlet (100% unmodified `stet.pipeline.edit_round` + `stet.script.materialize`
-     + `round_score`; raw 2-seed unedited mean diff = `0.0004 bpb`, curated 2-seed SD = `0.00057–0.00138 bpb`,
-     paired item-bootstrap SE ≈ `±0.0010 bpb`):**
+     + `round_score`; raw 2-seed unedited mean diff = `0.0004 bpb`, paired item-bootstrap SE ≈
+     `±0.0010 bpb`).** Both the historical pre-Review #6 scorer (`weight_other_by_share=false`)
+     and the **shipping Season 3 scorer (`weight_other_by_share=true`)** on the exact same saved
+     Phase 9 item score arrays and 2-seed unedited baseline are shown side by side:
 
-| Curator (all via `stet.script.materialize`) | Score (bpb) | Comp | Reas | Notes |
-|---|---:|---:|---:|---|
-| **`reader` v2 (shipped, 2-seed)** | **`+0.0192`** | `+0.0016` | **`+0.0369`** | `vllm` `259.1s/1200s` *(unsandboxed host cores)*, `py3langid` per-lang quantile, `80` langs, `SD=0.00138` |
-| **`fineweb2` (2-seed)** | **`+0.0191`** | **`+0.0036`** | `+0.0347` | Positive on all 7 pillars (`SD=0.00057`) |
-| `mimic` | `+0.0074` | `+0.0019` | `+0.0129` | `2.6×` below `fineweb2` and `reader` v2 |
-| `unedited` (2-seed baseline) | `0.0000` | `0.0000` | `0.0000` | Baseline (2-seed raw mean diff `0.0004 bpb`) |
-| `reader` v1 *(pre-fix diagnosis, 2-seed)* | `−0.0034` | `+0.0008` | `−0.0076` | Exposed `BYTES_PER_TOKEN=4.0` top-band truncation + coarse script buckets |
-| `adv_qa_spam` (Q/A-heavy pages) | **`−0.0063`** | `+0.0032` | `−0.0158` | Below unedited on 74-language live exam |
-| `adv_splice_qa` (synthetic Q/A splices) | **`−0.0348`** | `−0.0052` | `−0.0644` | Crushed below unedited |
-| `english` (English-only filter) | **`−0.0851`** | `+0.0091` | `−0.1794` | Monolingual collapse penalized |
-| `adv_overfilter` (top-3% narrow keep) | **`−0.5427`** | `−0.0290` | `−1.0564` | Obliterated |
+| Curator (all via `stet.script.materialize`) | Pre-Review #6 scorer (bpb) | **Shipping S3 scorer (bpb)** | Shipping Comp | Shipping Reas | Notes |
+|---|---:|---:|---:|---:|---|
+| **`fineweb2` (2-seed)** | `+0.01911` | **`+0.02056`** | **`+0.00379`** | `+0.03733` | Positive on all 7 pillars (`s0=+0.02010`, `s1=+0.02102`, diff `0.00092`) |
+| **`reader` v2 (shipped, 2-seed)** | `+0.01922` | **`+0.01993`** | `+0.00178` | **`+0.03808`** | `vllm` `259.1s/1200s` *(unsandboxed host cores)*, `py3langid` per-lang quantile, `80` langs (`s0=+0.01916`, `s1=+0.02070`, diff `0.00154`) |
+| `mimic` | `+0.00740` | **`+0.01527`** | `+0.00141` | `+0.02912` | Rises under crawl-weighted `"other"` pool; still `~0.0053 bpb` below `fineweb2` |
+| `reader` v1 *(pre-fix diagnosis, 2-seed)* | `−0.00340` | **`+0.00348`** | `+0.00120` | `+0.00575` | Exposed `BYTES_PER_TOKEN=4.0` top-band truncation + coarse script buckets |
+| `adv_qa_spam` (Q/A-heavy pages) | `−0.00630` | **`+0.00153`** | `+0.00339` | `−0.00034` | **Crosses slightly above unedited** under shipping scorer (`+0.00339` comp, `−0.00034` reas; `13×` below `fineweb2` / `reader` v2) |
+| `unedited` (2-seed baseline) | `0.00000` | **`0.00000`** | `0.00000` | `0.00000` | Baseline (2-seed raw mean diff `0.0004 bpb`) |
+| `adv_splice_qa` (synthetic Q/A splices) | `−0.03480` | **`−0.03696`** | `−0.00538` | `−0.06854` | Crushed below unedited |
+| `english` (English-only filter) | `−0.08510` | **`−0.08671`** | `+0.00884` | `−0.18226` | Monolingual collapse penalized |
+| `adv_overfilter` (top-3% narrow keep) | `−0.54270` | **`−0.51935`** | `−0.02921` | `−1.00948` | Obliterated |
 
 **What it decided.** Season 3 ships `baidu/ERNIE-4.5-0.3B-Base-PT` (`freeze_bottom: true`,
 `65.5M` tokens, 1-epoch commercial-permissive multilingual SFT probe) with the 100%-fresh 7-pillar
-`comprehension` + `reasoning` exam (`rules_version: 7`, `min_pillar_items: 20` with sparse-pillar
-omission and `STET_EXAM_TIMEOUT = 6h` + `POST /api/v1/admin/rounds/{id}/cancel`, `baselines.per_round = 2`),
+`comprehension` + `reasoning` exam (`rules_version: 7`, `weight_other_by_share: true`,
+`min_pillar_items: 20` with sparse-pillar omission and `STET_EXAM_TIMEOUT = 6h` +
+`POST /api/v1/admin/rounds/{id}/cancel`, `baselines.per_round = 2`),
 a **12 GB** volunteer grading floor, **24 GB+** neural curator sandboxes, and on-demand rounds (`$0/day` idle).
 Running unmodified `stet.pipeline.edit_round` + `stet.script.materialize` caught and fixed two real
 bugs in `examples/reader/curator.py` (`BYTES_PER_TOKEN=4.0` truncating the top 3,634 Band-3 docs
-and coarse 10-script buckets starving `fa`, `pl`, `uk`), jumping `reader` from `−0.0034` to
-**`+0.0192 bpb`** (`fa −0.150 → +0.0168`, `pl −0.081 → +0.0410`, `uk −0.030 → +0.0398`, `zh −0.018 →
-+0.0002`, `ja −0.011 → −0.0014`, `ko −0.029 → −0.0184`) in `259.1s / 1,200s` on `vllm==0.34.0`
+and coarse 10-script buckets starving `fa`, `pl`, `uk`), jumping `reader` from `+0.00348` to
+**`+0.01993 bpb`** under the shipping scorer (`−0.00340 → +0.01922` under the historical scorer;
+`fa −0.150 → +0.0168`, `pl −0.081 → +0.0410`, `uk −0.030 → +0.0398`, `zh −0.018 → +0.0002`,
+`ja −0.011 → −0.0014`, `ko −0.029 → −0.0184`) in `259.1s / 1,200s` on `vllm==0.34.0`
 *(unsandboxed host cores; standalone 6-core `taskset -c 0-5` benchmark on `s3-p00000`'s `507,387` docs
 completed prefiltering + `py3langid` in **`37.49s`** -> `75,678` candidates, leaving `>1,160s` for
 GPU scoring)*.
 
 3. **Production AMD Radeon 8060S examiner verification & language-mix adversary gate (`amd_examiner`, `lang_adv_gate`).**
    After fixing the `synthesis` `PROMPT: ...` placeholder, adding crawl-share weighting inside the
-   pooled `"other"` small-language cell, collapsing Wikipedia variants into one source bucket,
-   lowering CJK `min_len` to 180 chars, adding wrong-language / mid-sentence / `\ufffd` filters,
-   enforcing `min_keep_rate = 0.5`, and publishing teacher `prompt` + `cont` + `wrapper_id` +
-   `excerpt_sha256` for every withheld reasoning item:
+   pooled `"other"` small-language cell (`weight_other_by_share: true` on `s3`, preserving `false`
+   for `s2`), collapsing Wikipedia variants into one source bucket, lowering CJK `min_len` to 180
+   chars, adding wrong-language / mid-sentence / `\ufffd` filters, enforcing `min_keep_rate = 0.5`,
+   and publishing teacher `prompt` + `cont` + `wrapper_id` + `excerpt_sha256` for every withheld
+   reasoning item:
    - **Two cold official draws on the production AMD Radeon 8060S (`124 GiB`, `PyTorch 2.15.0+rocm7.14`, `transformers 5.23.0`, `$0/round`):**
      - **Draw A (`s3-o00002`, real `news=0` draw, hours `1795636800/44000/51200`):** omitted `news=0`
        cleanly (redistributing `16.7%` each to `reference/technical/conversation`), built **`1,517` fresh
        items** (`explain=206, infer=210, synthesis=203`; `620/640 = 96.9%` kept, `synthesis` `95.3%`,
-       dropped `wrong_lang=13, truncated_sentence=6, broken_utf8=1`; `0` bad UTF-8 / `0` mid-sentence /
-       `0` wrong-lang surviving) in **`1,222.5s` synthesis / `1,400.6s` build (`~24.5 min` incl. `68s`
-       corpus fetch)**; `N_eff = 782.7`; tiny `<0.1%` langs **`0.39%`** of score; `294/294` withheld
-       reasoning items published and bit-verified to exact `Item.id`.
+       automated parser drops `wrong_lang=13, truncated_sentence=6, broken_utf8=1`) in **`1,222.5s`
+       synthesis / `1,400.6s` build (`~24.5 min` incl. `68s` corpus fetch)**; `N_eff = 782.7`; tiny
+       `<0.1%` langs **`0.39%`** of score; `294/294` withheld reasoning items published and
+       bit-verified to exact `Item.id`.
      - **Draw B (`s3-o00003`, full 7-pillar draw, hours `1795633200/40400/47600`):** built **`1,491` fresh
        items** (`ref=192, news=180, tech=193, conv=315, explain=204, infer=203, synthesis=204`;
-       `617/640 = 96.4%` kept, `synthesis` `95.8%`; dropped `wrong_lang=11, broken_utf8=7,
-       truncated_sentence=5`; `0` surviving quality defects) in **`1,212.6s` synthesis / `1,357.9s`
-       build (`~23.8 min` incl. `~68s` corpus fetch)**; Wikipedia share of reasoning dropped **`56.9% →
-       36.0%`**; `N_eff` rose **`566 → 799.4`**; tiny `<0.1%` langs dropped **`10.3% → 0.01%`** of
-       score; 9 major languages cleared `SMALL=8` across all 3 reasoning kinds (`de, en, es, fr, it,
-       ja, pl, pt, ru`); major language weights tracked crawl shares closely (`en 36.1% vs 34.8%`,
-       `ru 14.2% vs 14.0%`, `ja 6.7% vs 6.8%`, `de 5.6% vs 5.3%`, `fr 4.9% vs 4.2%`, `zh 4.7% vs 3.7%`,
-       `es 4.1% vs 4.0%`); `391/391` withheld reasoning items published and bit-verified.
+       `617/640 = 96.4%` kept, `synthesis` `95.8%`; automated parser drops `wrong_lang=11,
+       broken_utf8=7, truncated_sentence=5`) in **`1,212.6s` synthesis / `1,357.9s` build (`~23.8 min`
+       incl. `~68s` corpus fetch)**; Wikipedia share of reasoning dropped **`56.9% → 36.0%`**; `N_eff`
+       rose **`566 → 799.4`**; tiny `<0.1%` langs dropped **`10.3% → 0.01%`** of score; 9 major
+       languages cleared `SMALL=8` across all 3 reasoning kinds (`de, en, es, fr, it, ja, pl, pt, ru`);
+       major language weights tracked crawl shares closely (`en 36.1% vs 34.8%`, `ru 14.2% vs 14.0%`,
+       `ja 6.7% vs 6.8%`, `de 5.6% vs 5.3%`, `fr 4.9% vs 4.2%`, `zh 4.7% vs 3.7%`, `es 4.1% vs 4.0%`);
+       `391/391` withheld reasoning items published and bit-verified.
+     - **Independent inspection & prompt-language hardening (Review #7):** those two draws were built
+       before lead-in language checking and foreign-script leakage filtering were added; automated
+       response-only checks showed `0` drops on re-check, whereas independent inspection caught
+       mixed-language Thai-in-Arabic prompts (`3fe4e6696726367f` on Draw A, `a371cfa3983dca24` on
+       Draw B) plus 4 short 2–3 character foreign-script leaks (Han-in-Hebrew prompt `959cf9ee516c7757`,
+       Han-in-Russian `9ad6cf24e01e5a64`, Arabic-in-Hebrew `dcf36ba39d52a0eb`, Han-in-Bulgarian
+       `de426502d930db4a`). `parse_generated_items` now checks **both** teacher prompts and responses
+       for language/script fidelity and foreign non-Latin script leakage (`>= 2` chars absent from the
+       excerpt), catching all 6 defects when re-run over the archived Draw A and Draw B outputs.
    - **Cross-vendor `init_sha256` parity & 4× RTX 5090 language-mix adversary gate (`lang_adv_gate`):**
      - Local AMD Radeon 8060S (`ROCm 7.14`, `PyTorch 2.15.0`) `init_sha256` (`5bd1d5ce4547697e...`)
        matched **4/4 NVIDIA RTX 5090 (`CUDA 13`, `PyTorch 2.14.0`) graders bit-for-bit**.
@@ -460,15 +478,19 @@ GPU scoring)*.
        `"other"`-pool exploit is closed.
      - **`adv_exam_lang_mix` (clean deduplicated pool resampled to Draw B's exam item counts):** scored
        **`+0.03193`** vs `fineweb2` `+0.02795` (`+0.0040`) on matched Draw B and **`+0.02296`** vs
-       `+0.02060` (`+0.0024`) on unmatched Phase 9 (`s3-o00001`). Two factors drove the difference:
-       (i) `adv_exam_lang_mix` sampled from `reader`'s CJK-aware deduplicated prefilter rather than
-       `fineweb2`'s filter (restoring `ja` from `1.99% → 3.59%` and swinging `ja` by `+0.0259 bpb`),
-       and (ii) mild temperature upsampling of `1%–5%` major crawl languages (`de, it, pt, nl, pl, cs, ar`)
-       at the expense of `<0.5%` micro-languages genuinely lifts crawl-weighted multilingual BPB even on
-       an unseen draw (`+0.0024` unmatched vs `+0.0040` matched = `+0.0016 bpb` upper bound on any
-       exam-specific language-mix effect, below the `0.005` record margin).
+       `+0.02060` (`+0.0024`) on unmatched Phase 9 (`s3-o00001`), an **observed single-seed point
+       difference of `+0.0016 bpb`** between the matched and unmatched draws. Because
+       `adv_exam_lang_mix` and `fineweb2` also differed in prefiltering and deduplication (using
+       `reader`'s CJK-aware prefilter restored `ja` from `1.99% → 3.59%`, lifting `ja` by
+       `+0.0259 bpb`, alongside mild temperature upsampling of `1%–5%` major languages over `<0.5%`
+       micro-languages), this single-seed comparison does **not** establish a formal upper bound on
+       exam-specific language-mix exploitation; estimating a bound requires toggling reweighting on/off
+       over the same filtered pool across multiple independently held-out draws and training seeds.
 
 ## Still to measure
+
+- Exam-specific language-mix sensitivity with controlled prefiltering: compare reweighting on vs off
+  on the **same** filtered pool across multiple independently held-out draws and training seeds.
 
 - How far two curators' gains differ from round to round: what the record's margin should
   be set from.

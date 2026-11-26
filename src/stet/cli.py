@@ -223,7 +223,8 @@ def _with_baseline(result: dict, rnd, scale, device, out: Out, skip: bool):
     result["baseline"] = {"mean": base["exam"]["mean"]}
     if result["valid"]:
         plan = plan_of(rnd.season)
-        agg = round_score(data.round_exam(rnd, scale), gains(result["exam"]["item_scores"], base["exam"]["item_scores"]), plan=plan)
+        shares = data.round_shares(rnd)
+        agg = round_score(data.round_exam(rnd, scale), gains(result["exam"]["item_scores"], base["exam"]["item_scores"]), shares=shares, plan=plan)
         result["gain"] = round(agg["score"], 5)
         result["pillars"] = {k: v["score"] for k, v in agg["pillars"].items()}
         present_groups = {plan.pillars[p] for p in agg["pillars"]}

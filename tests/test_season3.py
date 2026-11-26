@@ -264,19 +264,27 @@ def test_context_twin_mean_bpb_cancels_nontrivial_style_boost_and_zeros_uniform_
     dead = ContextAndStyleLM(style_boost=0.0, ctx_boost=0.0)
     assert exam_score.sit(dead, [ctx_item], enc, eot=0, ctx=64, device=torch.device("cpu"))[0] == pytest.approx(0.0, abs=1e-6)
 
-    # 2. Pure unconditional style boost (no context comprehension) shifts raw answer score hugely
-    #    (> +1.5 bits/byte!), yet scores EXACTLY 0.0 on twin-context comprehension!
+    # 2. Pure context-insensitive style boost (ctx_boost = 0) shifts raw answer score hugely
+    #    (> +1.5 bits/byte!), yet scores EXACTLY 0.0 on twin-context comprehension.
     style_lo = ContextAndStyleLM(style_boost=0.0, ctx_boost=0.0)
     style_hi = ContextAndStyleLM(style_boost=4.0, ctx_boost=0.0)
     ans_lo = exam_score.sit(style_lo, [ans_item], enc, eot=0, ctx=64, device=torch.device("cpu"))[0]
     ans_hi = exam_score.sit(style_hi, [ans_item], enc, eot=0, ctx=64, device=torch.device("cpu"))[0]
     ctx_hi = exam_score.sit(style_hi, [ctx_item], enc, eot=0, ctx=64, device=torch.device("cpu"))[0]
     assert ans_hi - ans_lo > 1.5  # proves style_boost genuinely moves continuation likelihood!
-    assert ctx_hi == pytest.approx(0.0, abs=1e-6)  # twin-context cancels unconditional style completely!
+    assert ctx_hi == pytest.approx(0.0, abs=1e-6)  # context-insensitive style predictor scores 0
 
     # 3. Real context comprehension (ctx_boost > 0) produces a strong positive twin-context score.
     smart = ContextAndStyleLM(style_boost=0.0, ctx_boost=3.0)
-    assert exam_score.sit(smart, [ctx_item], enc, eot=0, ctx=64, device=torch.device("cpu"))[0] > 0.5
+    smart_score = exam_score.sit(smart, [ctx_item], enc, eot=0, ctx=64, device=torch.device("cpu"))[0]
+    assert smart_score > 3.0
+
+    # 4. Combined context + unconditional style boost: because softmax is nonlinear, changing
+    #    unconditional token preferences DOES move a context-sensitive predictor's twin-context
+    #    score (here saturation lowers it from ~3.65 to ~0.61 bpb rather than manufacturing gain).
+    combined = ContextAndStyleLM(style_boost=4.0, ctx_boost=3.0)
+    combined_score = exam_score.sit(combined, [ctx_item], enc, eot=0, ctx=64, device=torch.device("cpu"))[0]
+    assert 0.0 < combined_score < 1.0 < smart_score
 
 
 def test_reset_top_layers_preserves_bottom_half_and_is_seed_deterministic():
@@ -1533,14 +1541,21 @@ def test_reason_cjk_and_short_copy_filter_and_decoupled_wrappers():
             "한파로 쌓인 얼음이 기둥 주변 지반을 약화시켜 다리가 버티지 못하고 파손되었으며 주민 이동에도 큰 차질이 생겼다.",
         ),
     ]
+    prompts_by_lang = {
+        "en": "Why did the bridge collapse during the winter freeze?",
+        "zh": "这座石桥为何在冬季清晨发生坍塌？",
+        "ja": "この古い石橋が早朝に崩落した理由は何ですか？",
+        "ko": "이 오래된 돌다리가 새벽에 무너진 이유는 무엇인가요?",
+    }
     for lang, src, exact_copy, paraphrase in fixtures:
         assert ngram_overlap(exact_copy, src) > 0.50, f"failed to catch copy in {lang}"
         assert ngram_overlap(paraphrase, src) <= 0.50, f"falsely rejected paraphrase in {lang}"
         sel_copy = [{"source": "ccnews", "id": f"art-{lang}-1", "lang": lang, "text": src, "excerpt": src, "task_type": "explain", "wrapper_id": 0}]
-        kept_copy, drop_copy = parse_generated_items(sel_copy, [f"Explain why the structure failed in {lang}?\nRESPONSE: {exact_copy}"])
+        pr = prompts_by_lang[lang]
+        kept_copy, drop_copy = parse_generated_items(sel_copy, [f"{pr}\nRESPONSE: {exact_copy}"])
         assert not kept_copy and drop_copy.get("verbatim_copy") == 1, (lang, kept_copy, drop_copy)
 
-        kept_para, drop_para = parse_generated_items(sel_copy, [f"Explain why the structure failed in {lang}?\nRESPONSE: {paraphrase}"])
+        kept_para, drop_para = parse_generated_items(sel_copy, [f"{pr}\nRESPONSE: {paraphrase}"])
         assert len(kept_para) == 1 and not drop_para, (lang, drop_para)
         # Finding 7: harvest doc ID preserved on reasoning item source!
         assert kept_para[0].source == f"explain:ccnews:art-{lang}-1"
@@ -2059,3 +2074,178 @@ def test_review6_authoritative_init_sha256_matches_build_model(monkeypatch):
     h2 = examine._round_init_sha256(rnd, scale)
     expected = tr.weights_sha256(fake_build(scale, s3, rnd.init_seed, torch.device("cpu")))
     assert h1 == h2 == expected and len(h1) == 64
+
+
+def test_review7_slim_result_carries_baseline_init_sha256():
+    """Review 7 Finding 2: client.slim_result carries baseline.init_sha256 from the baseline run
+    itself, both on valid grades and when the graded script is invalid."""
+    from stet.client import slim_result
+
+    base_init = "b" * 64
+    exam_init = "a" * 64
+    base = {
+        "valid": True,
+        "exam": {"mean": -2.5, "item_scores": [-2.5, -2.5]},
+        "train": {"init_sha256": base_init},
+    }
+    valid_res = {
+        "round": {"id": "s3-o00001"},
+        "valid": True,
+        "script": {"script_sha256": "1" * 64, "tokens_sha256": "2" * 64},
+        "exam": {"mean": -2.4, "item_scores": [-2.4, -2.4]},
+        "train": {"seconds": 10.0, "tokens_per_second": 1000.0, "final_train_loss": 2.4, "init_sha256": exam_init, "precision": "bf16", "curve": [[1, 3.0]]},
+    }
+    slim_valid = slim_result(valid_res, base)
+    assert slim_valid["baseline"]["init_sha256"] == base_init
+    assert slim_valid["train"]["init_sha256"] == exam_init
+
+    invalid_res = {"round": {"id": "s3-o00001"}, "valid": False, "invalid_reason": "bad script"}
+    slim_invalid = slim_result(invalid_res, base)
+    assert slim_invalid["baseline"]["init_sha256"] == base_init
+    assert "train" not in slim_invalid
+
+
+def test_review7_official_replay_uses_recorded_language_shares(monkeypatch, tmp_path):
+    """Review 7 Finding 5: official CLI replays pass the round's recorded language shares
+    through `stet score` and `stet run` (`_with_baseline`) instead of falling back to SHARES."""
+    from stet import cli, client, data
+    from stet.exam.aggregate import plan_of, round_score
+    from stet.exam.items import Item
+    from stet.spec import official_round
+
+    monkeypatch.setenv("STET_CACHE", str(tmp_path))
+    s3 = load_season("s3")
+    rnd = official_round(
+        s3,
+        1,
+        {"round": 123456, "randomness": "ab" * 32},
+        {"crawl": "CC-MAIN-2026-43", "paths_sha256": "cd" * 32, "n_shards": 100000},
+    )
+    rnd = dataclasses.replace(rnd, exam_digest="e" * 64)
+    recorded_shares = {"en": 20.0, "ja": 80.0}
+    client.fetch_round_shares(rnd, {"status": "settled", "languages": recorded_shares})
+    assert data.round_shares(rnd) == recorded_shares
+
+    items = (
+        [Item(kind="answer", corner=f"explain/en/wiki/{i}", fmt="prose", lang="en", source=f"explain:wikipedia:en-{i}", ctx="Q", cont="A") for i in range(8)]
+        + [Item(kind="answer", corner=f"explain/ja/wiki/{i}", fmt="prose", lang="ja", source=f"explain:wikipedia:ja-{i}", ctx="Q", cont="A") for i in range(8)]
+    )
+    base_scores = [-3.0] * len(items)
+    # English improves by +0.10, Japanese regresses by -0.10 -> default SHARES (~43% en) vs recorded (20% en / 80% ja) differ sharply!
+    exam_scores = [-2.9] * 8 + [-3.1] * 8
+
+    monkeypatch.setattr(data, "round_exam", lambda r, sc: items)
+    monkeypatch.setitem(
+        sys.modules,
+        "stet.pipeline",
+        types.SimpleNamespace(baseline=lambda *a, **kw: {"valid": True, "exam": {"mean": -3.0, "item_scores": base_scores}}),
+    )
+
+    result = {"valid": True, "exam": {"mean": -3.0, "item_scores": exam_scores}}
+    cli._with_baseline(result, rnd, s3.scale("nano"), None, cli.Out(quiet=True), skip=False)
+
+    want_recorded = round_score(items, [a - b for a, b in zip(exam_scores, base_scores, strict=True)], shares=recorded_shares, plan=plan_of(s3))["score"]
+    want_default = round_score(items, [a - b for a, b in zip(exam_scores, base_scores, strict=True)], shares=None, plan=plan_of(s3))["score"]
+    assert abs(want_recorded - want_default) > 0.05
+    assert result["gain"] == pytest.approx(round(want_recorded, 5), abs=1e-5)
+
+
+def test_review7_practice_synthesis_on_then_off_ignores_reasoning_cache(monkeypatch, tmp_path):
+    """Review 7 Finding 6: running practice with synthesis ON (populating the inner reasoning
+    cache) followed by synthesis OFF must NOT load cached reasoning items into the OFF build."""
+    from stet import data
+    from stet.exam import examine
+    from stet.exam.fresh import Doc, write_snapshot
+    from stet.exam.items import Item
+
+    monkeypatch.setenv("STET_CACHE", str(tmp_path))
+    s3 = load_season("s3")
+    rnd = practice_round(s3, 0)
+    scale = s3.scale("nano")
+
+    # Write a minimal harvested snapshot and fake corpus so assemble runs completely offline.
+    snap = tmp_path / "1800000000.jsonl"
+    docs = [
+        Doc(source="wikipedia", id=f"w{i}", url=f"https://en.wikipedia.org/wiki/T{i}", lang="en", license="CC BY-SA 4.0",
+            published=1_800_000_000 + i, title=f"Topic {i}",
+            text=f"Paragraph one of article {i} introducing background details cleanly.\n\nParagraph two of article {i} continuing the explanation in clear prose with plenty of bytes.", topic="")
+        for i in range(10)
+    ]
+    write_snapshot(docs, snap, {"hour": 1_800_000_000})
+
+    fake_corpus = types.SimpleNamespace(meta={"sha256": "0" * 64})
+    monkeypatch.setattr(data, "corpus", lambda r, sc: fake_corpus)
+    monkeypatch.setattr("stet.exam.decontam.seen", lambda fresh, corpus, season, log=None: set())
+
+    def fake_select_context(docs_in, seed, target, allowed, per_corner=2, shares=None):
+        return [
+            Item(kind="context", corner=f"fresh/wikipedia/en/c{i}", fmt="prose", lang="en",
+                 source=f"wikipedia:w{i}", ctx=f"Opening {i}", cont=f" Continuation {i}", wrongs=(f"Wrong {i}",))
+            for i in range(4)
+        ]
+
+    def fake_synth(docs_in, seed, r_cfg, shares=None, log=None):
+        return [
+            Item(kind="answer", corner=f"{kind}/en/wikipedia", fmt="prose", lang="en",
+                 source=f"{kind}:wikipedia:w{i}", ctx=f"Excerpt {i}\nQ?", cont=f" Answer {i}.")
+            for kind in ("explain", "infer", "synthesis")
+            for i in range(20)
+        ]
+
+    monkeypatch.setattr("stet.exam.fresh.select.select_context", fake_select_context)
+    monkeypatch.setattr("stet.exam.fresh.reason.synthesize_reasoning", fake_synth)
+
+    work_warm = tmp_path / "work_warm"
+    work_cold = tmp_path / "work_cold"
+    # Cold OFF build
+    cold_off, _, _, _ = examine.assemble(rnd, scale, [(1_800_000_000, snap)], work_cold, log=lambda m: None, measure=False, synthesize=False, check_coverage=False)
+    assert not any(it.source.startswith(("explain:", "infer:", "synthesis:")) for it in cold_off)
+
+    # Warm ON build (populates inner reasoning cache) followed by OFF build on the same work dir
+    warm_on, _, _, _ = examine.assemble(rnd, scale, [(1_800_000_000, snap)], work_warm, log=lambda m: None, measure=False, synthesize=True, check_coverage=False)
+    assert sum(1 for it in warm_on if it.source.startswith(("explain:", "infer:", "synthesis:"))) == 60
+
+    warm_off, _, _, _ = examine.assemble(rnd, scale, [(1_800_000_000, snap)], work_warm, log=lambda m: None, measure=False, synthesize=False, check_coverage=False)
+    assert not any(it.source.startswith(("explain:", "infer:", "synthesis:")) for it in warm_off)
+    assert [it.id for it in warm_off] == [it.id for it in cold_off]
+
+
+def test_review7_prompt_language_and_foreign_script_leak_filter():
+    """Review 7 Finding 9: quality checks reject mixed-language/code-switched teacher prompts
+    (e.g., Thai prefix in Arabic prompt) and foreign non-Latin script leaks in prompts or responses,
+    while allowing valid Japanese kanji+kana mixes."""
+    from stet.exam.fresh import reason
+
+    ar_excerpt = "تمكنت الجهات الرقابية من ضبط مصنع غير مرخص لتصنيع المخللات يفتقر إلى أبسط الاشتراطات الصحية والإنشائية."
+    he_excerpt = "הדיונים המדיניים התמקדו בתוכנית עשרים הנקודות ובשאלת כוח הייצוב הבינלאומי ברצועת עזה."
+    ru_excerpt = "Виноделие в Пьемонте является важной частью экономики региона и опирается на многовековые традиции производства."
+    ja_excerpt = "日本の鉄道網は高い定時性と安全性を誇り、都市間の移動や地域経済の発展に大きく貢献している。"
+
+    selected = [
+        # 1. Exact Review 7 Thai-in-Arabic prompt bug -> MUST drop (wrong_prompt_lang)
+        {"task_type": "explain", "source": "ccnews", "id": "ar-thai-pr", "lang": "ar", "wrapper_id": 0, "text": ar_excerpt, "excerpt": ar_excerpt},
+        # 2. Han-in-Hebrew prompt leak -> MUST drop (wrong_prompt_lang)
+        {"task_type": "explain", "source": "ccnews", "id": "he-han-pr", "lang": "he", "wrapper_id": 0, "text": he_excerpt, "excerpt": he_excerpt},
+        # 3. Han-in-Russian response leak -> MUST drop (wrong_lang)
+        {"task_type": "synthesis", "source": "wikipedia", "id": "ru-han-re", "lang": "ru", "wrapper_id": 0, "text": ru_excerpt, "excerpt": ru_excerpt},
+        # 4. Pure English prompt on Arabic excerpt -> MUST drop (wrong_prompt_lang)
+        {"task_type": "explain", "source": "ccnews", "id": "ar-en-pr", "lang": "ar", "wrapper_id": 0, "text": ar_excerpt, "excerpt": ar_excerpt},
+        # 5. Clean Arabic prompt + response -> MUST pass
+        {"task_type": "explain", "source": "ccnews", "id": "ar-clean", "lang": "ar", "wrapper_id": 0, "text": ar_excerpt, "excerpt": ar_excerpt},
+        # 6. Clean Japanese kanji+kana prompt + response -> MUST pass
+        {"task_type": "explain", "source": "wikipedia", "id": "ja-clean", "lang": "ja", "wrapper_id": 0, "text": ja_excerpt, "excerpt": ja_excerpt},
+    ]
+    generations = [
+        "ทำไมการตรวจพบโรงงาน تصنيع المخللات غير المرخصة يعتبر خطراً على الصحة العامة؟\nRESPONSE: لأن الموقع غير مجهز بأي اشتراطات صحية أو إنشائية، مما يؤدي إلى تلوث المنتجات بالأتربة والحشرات.",
+        "למה דרשו להתקדם עם תוכנית 20 הנקודות ול接纳 כוח הייצוב הבינלאומי?\nRESPONSE: המהלך נועד לייצב את המצב הביטחוני וליצור מסגרת ניהולית ברורה יותר לאזור כולו.",
+        "Виноделие в Пьемонте играет важную роль в хозяйстве региона на протяжении многих поколений.\nRESPONSE: Отрасль обеспечивает значительные объёмы экспорта благодаря традициям и развитию знаменитых винных产区.",
+        "Why does operating an unlicensed pickling facility pose a serious threat to public health?\nRESPONSE: لأن الموقع غير مجهز بأي اشتراطات صحية أو إنشائية، مما يؤدي إلى تلوث المنتجات بالأتربة والحشرات.",
+        "لماذا يشكل تشغيل مصنع مخللات غير مرخص خطراً كبيراً على سلامة المستهلكين؟\nRESPONSE: لأن غياب التجهيزات الصحية والرقابة يعرض المنتجات للتلوث البيئي والبكتيري، مما يهدد صحة الأفراد.",
+        "日本の鉄道網が地域社会と経済の発展を支える上で重要な理由は何ですか？\nRESPONSE: 正確な運行と高い安全基準がビジネスや観光の移動を円滑にし、広域的な経済活動を後押ししているためです。",
+    ]
+
+    kept, dropped = reason.parse_generated_items(selected, generations, check_lang=True)
+    kept_sources = {it.source for it in kept}
+    assert kept_sources == {"explain:ccnews:ar-clean", "explain:wikipedia:ja-clean"}, (kept_sources, dropped)
+    assert dropped.get("wrong_prompt_lang") == 3, dropped
+    assert dropped.get("wrong_lang") == 1, dropped

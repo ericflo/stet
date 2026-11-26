@@ -107,7 +107,8 @@
     "aggregate": {
       "clip": 4.0,
       "trim": 0.1,
-      "small": 8
+      "small": 8,
+      "weight_other_by_share": true
     },
     "groups": {
       "comprehension": 0.5,

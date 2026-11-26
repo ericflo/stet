@@ -869,6 +869,53 @@ def exam_public_path(rnd: Round, digest: str) -> Path:
     return cache_dir() / "rounds" / rnd.id / f"exam-public-{digest[:16]}.jsonl.zst"
 
 
+def exam_shares_path(rnd: Round, digest: str) -> Path:
+    """Where an official round's recorded language shares are kept for local replays."""
+    return cache_dir() / "rounds" / rnd.id / f"exam-shares-{digest[:16]}.json"
+
+
+def save_round_shares(rnd: Round, shares: dict[str, float]) -> None:
+    """Atomically cache an official round's measured corpus language shares."""
+    if rnd.kind != "official" or not rnd.exam_digest or not isinstance(shares, dict) or not shares:
+        return
+    clean: dict[str, float] = {}
+    for k, v in shares.items():
+        try:
+            fv = float(v)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(k, str) and k and fv >= 0.0 and fv <= 100.0 and fv == fv:
+            clean[k] = fv
+    if not clean:
+        return
+    path = exam_shares_path(rnd, rnd.exam_digest)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.tmp{os.getpid()}")
+    try:
+        tmp.write_text(json.dumps(clean, sort_keys=True))
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def round_shares(rnd: Round) -> dict[str, float] | None:
+    """An official round's recorded language shares, or None when not recorded (falls back to SHARES)."""
+    if rnd.kind != "official" or not rnd.exam_digest:
+        return None
+    path = exam_shares_path(rnd, rnd.exam_digest)
+    try:
+        raw = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(raw, dict) or not raw:
+        return None
+    out: dict[str, float] = {}
+    for k, v in raw.items():
+        if isinstance(k, str) and isinstance(v, (int, float)) and v >= 0.0:
+            out[k] = float(v)
+    return out or None
+
+
 def _items(rnd: Round):
     """A round's exam items. An official round's are the ones the organisers posted
     after its draw (fetched by the grader beforehand: see client.fetch_exam); a practice or gym

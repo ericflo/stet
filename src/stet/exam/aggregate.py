@@ -71,6 +71,7 @@ class Plan:
     clip: float = CLIP
     trim: float = TRIM
     small: int = SMALL
+    weight_other_by_share: bool = False
 
     def pillar_of(self, part: str) -> str:
         """The pillar a part counts in. A part the season does not name is not on the exam."""
@@ -102,7 +103,8 @@ def plan_of(season) -> Plan:
     parts = {part: p for p, v in cfg["pillars"].items() for part in v["parts"]}
     agg = cfg.get("aggregate", {})
     plan = Plan(groups={g: float(s) for g, s in cfg["groups"].items()}, pillars=pillars, parts=parts,
-                clip=float(agg.get("clip", CLIP)), trim=float(agg.get("trim", TRIM)), small=int(agg.get("small", SMALL)))
+                clip=float(agg.get("clip", CLIP)), trim=float(agg.get("trim", TRIM)), small=int(agg.get("small", SMALL)),
+                weight_other_by_share=bool(agg.get("weight_other_by_share", False)))
     if set(pillars.values()) != set(plan.groups) or len(named) != len(parts) or abs(sum(plan.groups.values()) - 1) > 1e-9:
         raise ValueError(f"season {season.id}: the exam's groups, pillars and parts do not fit together")
     families = {f.NAME for f in FAMILIES}
@@ -264,7 +266,7 @@ def _part(pairs: list[Pair], plan: Plan, shares) -> float:
         cells[cell[row["lang"]]].append((row, g))
     total = 0.0
     for c in sorted(cells):
-        iw = [_share(row["lang"], shares) for row, _ in cells[c]] if c == OTHER_LANG else None
+        iw = [_share(row["lang"], shares) for row, _ in cells[c]] if (c == OTHER_LANG and plan.weight_other_by_share) else None
         total += w[c] * _balanced(cells[c], plan, iw)[0]
     return total
 

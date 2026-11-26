@@ -268,7 +268,7 @@ def assemble(
     # Fresh harvest-derived comprehension & reasoning (Season 3 Exam C v2): deterministic greedy
     # synthesis cached atomically under `work` by snapshot + seed + reasoning config digest so
     # retries cost zero GPU work and partial/interrupted cache files are automatically regenerated.
-    if r_cfg := cfg.get("reasoning"):
+    if synthesize and (r_cfg := cfg.get("reasoning")):
         rcfg_sig = hashlib.sha256(json.dumps(r_cfg, sort_keys=True).encode()).hexdigest()[:8]
         rcache = work / f"reasoning-{snapshot_name(shas)[:12]}-{rnd.seed.hex()[:8]}-{rcfg_sig}.jsonl.zst"
         reasoning: list[Item] = []
@@ -286,7 +286,7 @@ def assemble(
             except (OSError, ValueError, zstandard.ZstdError):
                 log("  reasoning cache unreadable; regenerating")
                 rcache.unlink(missing_ok=True)
-        if not loaded and synthesize:
+        if not loaded:
             reasoning = synthesize_reasoning(docs, rnd.seed, r_cfg, shares=mix, log=log)
             if not reasoning:
                 raise RuntimeError(f"{rnd.id}: reasoning synthesis produced zero items")

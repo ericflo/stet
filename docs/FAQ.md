@@ -156,8 +156,8 @@ rounds is what kinds of text teach a model well (reference, news, technical writ
 conversation, clear explanations across every language), and keeping more of those is
 choosing good data, which is the point. The exam weighs four comprehension kinds and three
 reasoning kinds, and every language by its share of the crawl, so no one source or kind of
-text can carry a score — twin-context scoring cancels out surface style mimicry identically,
-and declarative `synthesis` (zero Q/A punctuation) defeats QA-spam.
+text can carry a score — a context-insensitive surface-style mimic scores zero on twin-context comprehension,
+and declarative `synthesis` (zero Q/A punctuation) resists synthetic Q/A-splicing.
 
 ## Does everything on the exam count?
 

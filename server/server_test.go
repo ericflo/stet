@@ -524,13 +524,16 @@ func (w *world) edit(a *actor, c *claimed, script string) (int, string) {
 // against a round whose baseline is baseline, its gain is baseline - loss.
 func (w *world) result(c *claimed, loss, baseline float64) map[string]any {
 	tokSum := sha256.Sum256([]byte("tokens:" + c.Job.Script.SHA256))
+	defaultInit := strings.Repeat("a1", 32)
+	base := itemScores(-baseline)
+	base["init_sha256"] = defaultInit
 	return map[string]any{
 		"harness": w.app.season.Harness, "season": w.app.season.ID, "season_digest": w.app.season.Digest,
 		"round": c.Job.Round["id"], "scale": c.Job.Scale, "corpus_sha256": corpusSHA, "exam_sha256": examSHA,
 		"script_sha256": c.Job.Script.SHA256, "valid": true, "hardware": map[string]any{"gpu": "Test GPU", "device": "cuda"},
 		"script":   map[string]any{"script_sha256": c.Job.Script.SHA256, "tokens_sha256": hex.EncodeToString(tokSum[:]), "kept_doc_frac": 0.1, "kept_byte_frac": 0.08, "passes": 1.4, "out_docs": 1200},
-		"baseline": itemScores(-baseline), "exam": itemScores(-loss),
-		"train":      map[string]any{"init_sha256": strings.Repeat("a1", 32), "seconds": 30.0, "tokens_per_second": 100000.0, "final_train_loss": 5.0, "curve": [][]float64{{1, 9}, {50, 6}, {100, 5.5}, {150, 5.2}}},
+		"baseline": base, "exam": itemScores(-loss),
+		"train":      map[string]any{"init_sha256": defaultInit, "seconds": 30.0, "tokens_per_second": 100000.0, "final_train_loss": 5.0, "curve": [][]float64{{1, 9}, {50, 6}, {100, 5.5}, {150, 5.2}}},
 		"started_at": time.Now().Unix() - 60, "finished_at": time.Now().Unix(),
 	}
 }

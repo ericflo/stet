@@ -174,3 +174,69 @@ func TestTheScoreItemsRefusesWhatItCannotScore(t *testing.T) {
 		t.Fatalf("one item: %v %v %v", s, p, err)
 	}
 }
+
+// Review 7 Finding 4: Season 2 replay preserves its original unweighted pooled-language rule
+// (`WeightOtherByShare: false`) across all 47 base-branch reference vectors to within 1e-9,
+// while Season 3 enables `WeightOtherByShare: true` explicitly in its season plan.
+func TestSeason2AggregateVectorsReplayUnchanged(t *testing.T) {
+	if !loadSeason().Exam.WeightOtherByShare {
+		t.Fatal("Season 3 ExamPlan must enable WeightOtherByShare")
+	}
+	s2Plan := &ExamPlan{
+		Groups: map[string]float64{"writing": 0.75, "skills": 0.25},
+		Pillars: []PlanPillar{
+			{Name: "reference", Group: "writing", Parts: []string{"reference"}},
+			{Name: "news", Group: "writing", Parts: []string{"news"}},
+			{Name: "technical", Group: "writing", Parts: []string{"technical"}},
+			{Name: "conversation", Group: "writing", Parts: []string{"discussion", "social"}},
+			{Name: "agents", Group: "skills", Parts: []string{"agent"}},
+			{Name: "reading", Group: "skills", Parts: []string{"context"}},
+			{Name: "logic", Group: "skills", Parts: []string{"logic"}},
+			{Name: "grammar", Group: "skills", Parts: []string{"grammar"}},
+			{Name: "numbers", Group: "skills", Parts: []string{"arith-shots", "units-shots", "word-shots", "algebra-shots"}},
+			{Name: "programs", Group: "skills", Parts: []string{"algo-shots"}},
+			{Name: "knowledge", Group: "skills", Parts: []string{"knowledge"}},
+		},
+		Clip:               4.0,
+		Trim:               0.1,
+		Small:              8,
+		WeightOtherByShare: false,
+	}
+	raw, err := os.ReadFile("testdata/aggregate_vectors_s2.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var v aggregateVectors
+	if err := json.Unmarshal(raw, &v); err != nil {
+		t.Fatal(err)
+	}
+	if len(v.Cases) != 47 {
+		t.Fatalf("expected 47 Season 2 vectors, got %d", len(v.Cases))
+	}
+	const tol = 1e-9
+	sawEverySource := false
+	for _, c := range v.Cases {
+		items := v.Tables[c.Table]
+		score, pillars, err := s2Plan.ScoreItems(items, c.Gains, c.Shares)
+		if err != nil {
+			t.Fatalf("%s: %v", c.Name, err)
+		}
+		if math.Abs(score-c.Score) > tol {
+			t.Errorf("%s: score %.17g, base Season 2 %.17g", c.Name, score, c.Score)
+		}
+		for p, want := range c.Pillars {
+			if math.Abs(pillars[p]-want) > tol {
+				t.Errorf("%s/%s: %.17g, base Season 2 %.17g", c.Name, p, pillars[p], want)
+			}
+		}
+		if c.Name == "every source of writing" {
+			sawEverySource = true
+			if math.Abs(score-(-0.008952)) > 1e-5 {
+				t.Fatalf("every source of writing = %.6f, want -0.008952", score)
+			}
+		}
+	}
+	if !sawEverySource {
+		t.Fatal("missing 'every source of writing' case in Season 2 vectors")
+	}
+}

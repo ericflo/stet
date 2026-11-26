@@ -41,15 +41,16 @@ type FreshPlan struct {
 // ExamPlan is what a season's score is made of: exam.groups, exam.pillars and exam.aggregate of
 // its file, as tools/export_season.py writes them. The pillars name every part of the exam.
 type ExamPlan struct {
-	Groups         map[string]float64 `json:"groups"`    // each group's share of the score
-	Pillars        []PlanPillar       `json:"pillars"`   // in the order they are shown
-	Generated      []string           `json:"generated"` // the parts that are families of generated problems; the others are kinds of writing
-	Clip           float64            `json:"clip"`      // robust widths
-	Trim           float64            `json:"trim"`      // from each end, within a stratum
-	Small          int                `json:"small"`     // items a language or a stratum needs to count in full
-	Floor          int                `json:"answer_floor_bytes"`
-	MinPillarItems int                `json:"min_pillar_items,omitempty"`
-	Fresh          FreshPlan          `json:"fresh"`
+	Groups             map[string]float64 `json:"groups"`    // each group's share of the score
+	Pillars            []PlanPillar       `json:"pillars"`   // in the order they are shown
+	Generated          []string           `json:"generated"` // the parts that are families of generated problems; the others are kinds of writing
+	Clip               float64            `json:"clip"`      // robust widths
+	Trim               float64            `json:"trim"`      // from each end, within a stratum
+	Small              int                `json:"small"`     // items a language or a stratum needs to count in full
+	WeightOtherByShare bool               `json:"weight_other_by_share,omitempty"`
+	Floor              int                `json:"answer_floor_bytes"`
+	MinPillarItems     int                `json:"min_pillar_items,omitempty"`
+	Fresh              FreshPlan          `json:"fresh"`
 }
 
 type PlanPillar struct {
@@ -214,7 +215,7 @@ func (p *ExamPlan) part(items []ItemInfo, gains []float64, idx []int, shares map
 	terms := make([]float64, len(names))
 	for j, c := range names {
 		var iw map[string]float64
-		if c == otherLang {
+		if c == otherLang && p.WeightOtherByShare {
 			iw = shares
 		}
 		terms[j] = float64(w[c] * p.balanced(items, gains, byCell[c], iw))

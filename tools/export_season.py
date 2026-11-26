@@ -46,6 +46,7 @@ def export(season_id: str = CURRENT_SEASON) -> dict:
             # Which of those parts are families of generated problems; every other part is a kind of writing.
             "generated": [f.NAME for f in gen.named(plan.parts)],
             "clip": raw["exam"]["aggregate"]["clip"], "trim": raw["exam"]["aggregate"]["trim"], "small": raw["exam"]["aggregate"]["small"],
+            "weight_other_by_share": bool(raw["exam"]["aggregate"].get("weight_other_by_share", False)),
             "answer_floor_bytes": season.answer_floor_bytes,
             "min_pillar_items": int(raw["exam"].get("min_pillar_items", 0)),
             # How the exam's writing is taken from the hours the examiner harvests: server/harvest.go.

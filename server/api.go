@@ -1093,7 +1093,11 @@ func (a *App) apiRound(w http.ResponseWriter, r *http.Request) {
 		for _, e := range entriesOfRound(s, idx) {
 			entries = append(entries, a.entryJSON(s, e))
 		}
-		out = map[string]any{"round": a.roundJSON(s, rd), "entries": entries}
+		roundObj := a.roundJSON(s, rd)
+		if examPosted(rd) && len(rd.Shares) > 0 {
+			roundObj["languages"] = rd.Shares
+		}
+		out = map[string]any{"round": roundObj, "entries": entries}
 		// Before the draw a round has no entries. Who its draw would enter now is not one.
 		if rd.Status == "scheduled" {
 			in, later := a.expected(s, rd)

@@ -22,7 +22,7 @@
   "key_bytes": 64,
   "min_letters": 38
  },
- "digest": "14de18aa8d58f787f282c9559a277d8737dfe3910c16c781f7d32057e6c3fd28",
+ "digest": "53272bfe794df8e89b276babb8541688f350a19dd6fe7a200508b742d7ff1773",
  "draw_grid_seconds": 600,
  "environment": {
   "also": {
@@ -368,7 +368,8 @@
    }
   ],
   "small": 8,
-  "trim": 0.1
+  "trim": 0.1,
+  "weight_other_by_share": true
  },
  "exam_sources": [
   "reference",

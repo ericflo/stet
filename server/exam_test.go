@@ -2,11 +2,16 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"math"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -437,5 +442,108 @@ func TestAdminCancelRoundAndExamTimeoutAutoCancel(t *testing.T) {
 	rid3 := roundID(w.app.season.ID, idx3)
 	if code := anchor.do("POST", "/api/v1/admin/rounds/"+rid3+"/cancel", nil, nil); code != 409 {
 		t.Fatalf("cancelling a round that already has its exam: HTTP %d, want 409", code)
+	}
+}
+
+// Review 7 Finding 3: two overlapping exam publications with DIFFERENT digests cannot overwrite
+// each other's files. Both private (while open) and public (after settlement) downloads must
+// serve the winning digest's exact bytes even when the losing publisher writes blobs concurrently.
+func TestOverlappingExamPublicationsDoNotOverwriteWinnerFiles(t *testing.T) {
+	pub, priv := newKey()
+	w := newWorld(t, pub)
+	anchor := w.join("anchor-one", priv)
+	bob := w.join("bob", nil)
+	w.established("bob")
+	w.submit(w.join("alice", nil), "tidy", "print('v1')")
+	idx := w.drawWithoutExam()
+	if w.editAll(anchor) != 1 {
+		t.Fatal("anchor should have run entry")
+	}
+	ctx := context.Background()
+	table := testTable()
+	enc, _ := zstd.NewWriter(nil)
+	makePost := func(digest, privLine, pubLine string) ExamPost {
+		privZst := enc.EncodeAll([]byte(privLine+"\n"), nil)
+		pubZst := enc.EncodeAll([]byte(pubLine+"\n"), nil)
+		return ExamPost{
+			Round:    roundID(w.app.season.ID, idx),
+			Digest:   digest,
+			File:     base64.StdEncoding.EncodeToString(privZst),
+			Public:   base64.StdEncoding.EncodeToString(pubZst),
+			Table:    table,
+			Shares:   map[string]float64{"en": 60, "de": 40},
+			Snapshot: strings.Repeat("5", 64),
+			Fresh:    len(table),
+		}
+	}
+	digestA := strings.Repeat("a", 64)
+	digestB := strings.Repeat("b", 64)
+	loser := makePost(digestA, `{"id":"loser-private"}`, `{"withheld":true,"id":"loser-public"}`)
+	winner := makePost(digestB, `{"id":"winner-private"}`, `{"withheld":true,"id":"winner-public"}`)
+
+	cache := w.app.st.blobs
+	inner := cache.Blobs
+	var winnerPosted bool
+	var winnerErr error
+	// Start loser's postExam; right before its first blob Put completes, winner races ahead and commits!
+	cache.Blobs = &postingBlobs{Blobs: inner, first: func() {
+		winnerPosted, winnerErr = w.app.postExam(ctx, idx, &winner)
+	}}
+	loserPosted, loserErr := w.app.postExam(ctx, idx, &loser)
+	cache.Blobs = inner
+
+	if winnerErr != nil || !winnerPosted {
+		t.Fatalf("winning exam post failed: posted=%v err=%v", winnerPosted, winnerErr)
+	}
+	if loserPosted || loserErr == nil {
+		t.Fatalf("losing exam post should fail with 409, got posted=%v err=%v", loserPosted, loserErr)
+	}
+	w.app.st.view(func(s *State) {
+		if s.Rounds[idx].ExamSHA != digestB {
+			t.Fatalf("round ExamSHA = %q, want winner %q", s.Rounds[idx].ExamSHA, digestB)
+		}
+	})
+
+	// 1. Private exam download (while open, authenticated grader holding a grade claim) MUST belong to winner!
+	cb := w.claim(bob, false)
+	if cb.Job == nil || cb.Job.Kind != "grade" {
+		t.Fatalf("bob should get grade job: %+v", cb.Job)
+	}
+	rid := roundID(w.app.season.ID, idx)
+	path := "/api/v1/rounds/" + rid + "/exam"
+	req, _ := http.NewRequest("GET", w.srv.URL+path, nil)
+	ts := strconv.FormatInt(time.Now().Unix(), 10)
+	sum := sha256.Sum256(nil)
+	msg := strings.Join([]string{"stet-v1", "GET", path, ts, hex.EncodeToString(sum[:])}, "\n")
+	req.Header.Set("X-Stet-Key", bob.pub)
+	req.Header.Set("X-Stet-Body", hex.EncodeToString(sum[:]))
+	req.Header.Set("X-Stet-Time", ts)
+	req.Header.Set("X-Stet-Sig", hex.EncodeToString(ed25519.Sign(bob.priv, []byte(msg))))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil || resp.StatusCode != 200 {
+		t.Fatalf("private exam fetch: err=%v status=%v", err, resp)
+	}
+	privBytes, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	dec, _ := zstd.NewReader(nil)
+	if plain, _ := dec.DecodeAll(privBytes, nil); !strings.Contains(string(plain), "winner-private") {
+		t.Fatalf("private exam download served wrong bytes: %q", plain)
+	}
+
+	// 2. After settlement, public exam download MUST also belong to winner!
+	w.app.st.update(ctx, func(tx *Tx) error {
+		rd := tx.s.Rounds[idx]
+		rd.Status = "settled"
+		tx.saveRound(rd)
+		return nil
+	})
+	resp, err = http.Get(w.srv.URL + "/api/v1/rounds/" + rid + "/exam")
+	if err != nil || resp.StatusCode != 200 {
+		t.Fatalf("public exam fetch: err=%v status=%v", err, resp)
+	}
+	pubBytes, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if plain, _ := dec.DecodeAll(pubBytes, nil); !strings.Contains(string(plain), "winner-public") {
+		t.Fatalf("public exam download served wrong bytes: %q", plain)
 	}
 }

@@ -145,33 +145,106 @@ def _langs_compatible(want: str, got: str) -> bool:
     return any(w in cl and g in cl for cl in _LANG_CLUSTERS)
 
 
-def _response_matches_language(resp: str, excerpt: str, lang: str) -> bool:
-    """Verify the teacher's answer stays in the excerpt's language/script (catches English or
-    neighboring-language fallback on smaller languages)."""
+def _non_latin_scripts(text: str) -> dict[str, int]:
+    """Count characters per non-Latin script (for detecting cross-script code-switching leaks)."""
+    counts: dict[str, int] = {}
+    for ch in text[:2000]:
+        o = ord(ch)
+        if 0x0400 <= o <= 0x052F:
+            s = "cyrillic"
+        elif 0x0600 <= o <= 0x06FF or 0x0750 <= o <= 0x077F:
+            s = "arabic"
+        elif 0x0900 <= o <= 0x097F:
+            s = "devanagari"
+        elif 0x0980 <= o <= 0x09FF:
+            s = "bengali"
+        elif 0x0E00 <= o <= 0x0E7F:
+            s = "thai"
+        elif 0x0590 <= o <= 0x05FF:
+            s = "hebrew"
+        elif 0x0370 <= o <= 0x03FF:
+            s = "greek"
+        elif 0xAC00 <= o <= 0xD7AF or 0x1100 <= o <= 0x11FF:
+            s = "hangul"
+        elif 0x3040 <= o <= 0x30FF:
+            s = "kana"
+        elif 0x4E00 <= o <= 0x9FFF or 0x3400 <= o <= 0x4DBF:
+            s = "han"
+        elif 0x10A0 <= o <= 0x10FF:
+            s = "georgian"
+        elif 0x0530 <= o <= 0x058F:
+            s = "armenian"
+        else:
+            continue
+        counts[s] = counts.get(s, 0) + 1
+    return counts
+
+
+def _has_foreign_script(text: str, excerpt: str, min_chars: int = 2) -> bool:
+    """Return True if `text` introduces >= `min_chars` characters of a non-Latin script absent
+    from `excerpt` (treating Han and Kana as compatible for Japanese)."""
+    ex_scripts = _non_latin_scripts(excerpt)
+    txt_scripts = _non_latin_scripts(text)
+    for script, n in txt_scripts.items():
+        if n < min_chars:
+            continue
+        if script in ex_scripts:
+            continue
+        if script == "han" and "kana" in ex_scripts:
+            continue
+        if script == "kana" and "han" in ex_scripts:
+            continue
+        return True
+    return False
+
+
+def _text_matches_language(
+    text: str,
+    excerpt: str,
+    lang: str,
+    *,
+    min_langid_chars: int = 35,
+    min_en_chars: int = 35,
+) -> bool:
+    """Verify a teacher-written prompt or answer stays in the excerpt's language/script and
+    does not leak foreign non-Latin scripts (e.g., Thai or Han tokens in Arabic/Hebrew/Russian)."""
+    if _has_foreign_script(text, excerpt):
+        return False
     ex_script = _dominant_script(excerpt)
-    re_script = _dominant_script(resp)
-    if ex_script and re_script:
+    tx_script = _dominant_script(text)
+    if ex_script and tx_script:
         if ex_script == "ja":
-            if re_script not in ("ja", "han"):
+            if tx_script not in ("ja", "han"):
                 return False
         elif ex_script == "han":
-            if re_script not in ("han", "ja"):
+            if tx_script not in ("han", "ja"):
                 return False
-        elif ex_script != re_script:
+        elif ex_script != tx_script:
             return False
 
-    if _langid is not None and len(resp) >= 35:
+    if _langid is not None and len(text) >= min(min_langid_chars, min_en_chars):
         try:
-            det, _ = _langid.classify(resp)
+            det, _ = _langid.classify(text)
         except Exception:
             det = ""
         if det:
             base_lang = lang.lower().split("-", 1)[0]
-            if base_lang != "en" and det == "en":
+            if len(text) >= min_en_chars and base_lang != "en" and det == "en":
                 return False
-            if base_lang in _LANGID_SUPPORTED and not _langs_compatible(base_lang, det):
+            if len(text) >= min_langid_chars and base_lang in _LANGID_SUPPORTED and not _langs_compatible(base_lang, det):
                 return False
     return True
+
+
+def _prompt_matches_language(prompt: str, excerpt: str, lang: str) -> bool:
+    """Verify the teacher's lead-in prompt stays in the excerpt's script/language without code-switching."""
+    return _text_matches_language(prompt, excerpt, lang, min_langid_chars=60, min_en_chars=25)
+
+
+def _response_matches_language(resp: str, excerpt: str, lang: str) -> bool:
+    """Verify the teacher's answer stays in the excerpt's language/script (catches English,
+    neighboring-language fallback, or mid-sentence foreign-script leaks)."""
+    return _text_matches_language(resp, excerpt, lang, min_langid_chars=35, min_en_chars=35)
 
 
 def _char_shingle_overlap(ans_compact: str, src_compact: str, k: int) -> float:
@@ -590,9 +663,13 @@ def parse_generated_items(
             # Enforce zero-question syntax on synthesis lead-ins
             pr = pr.rstrip("?？؟").strip() + "."
         excerpt = d.get("excerpt") or bound_excerpt(d["text"])
-        if check_lang and not _response_matches_language(resp, excerpt, d["lang"]):
-            dropped["wrong_lang"] += 1
-            continue
+        if check_lang:
+            if not _prompt_matches_language(pr, excerpt, d["lang"]):
+                dropped["wrong_prompt_lang"] += 1
+                continue
+            if not _response_matches_language(resp, excerpt, d["lang"]):
+                dropped["wrong_lang"] += 1
+                continue
         if ngram_overlap(resp, excerpt, n=5) > max_ngram_overlap:
             dropped["verbatim_copy"] += 1
             continue
