@@ -129,7 +129,9 @@ func (f *Fleet) appendJSON(path string, v any) {
 	}
 	fh, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
+		f.sayMu.Lock()
 		f.out.Write([]byte("keeping " + filepath.Base(path) + ": " + err.Error() + "\n"))
+		f.sayMu.Unlock()
 		return
 	}
 	defer fh.Close()
@@ -138,15 +140,20 @@ func (f *Fleet) appendJSON(path string, v any) {
 
 // beginLook starts the record of a look; endLook keeps it.
 func (f *Fleet) beginLook() *lookRecord {
-	f.cur = &lookRecord{T: f.now().UTC(), Fleet: fleetBuild()}
-	collectCalls(f.cur)
-	return f.cur
+	rec := &lookRecord{T: f.now().UTC(), Fleet: fleetBuild()}
+	f.sayMu.Lock()
+	f.cur = rec
+	f.sayMu.Unlock()
+	collectCalls(rec)
+	return rec
 }
 
 func (f *Fleet) endLook(start time.Time, err error) {
 	stopCalls()
+	f.sayMu.Lock()
 	rec := f.cur
 	f.cur = nil
+	f.sayMu.Unlock()
 	if rec == nil {
 		return
 	}

@@ -573,9 +573,11 @@ func (j *judge) measuring(rd *Round) map[int64]bool {
 	}
 	who := map[int64]bool{}
 	var agreeing []*Baseline
-	for _, b := range j.a.baselinesKept(j.s, rd) {
-		if j.a.baselineAgrees(rd, b) {
-			agreeing = append(agreeing, b)
+	if !j.a.baselineDisputed(j.s, rd) {
+		for _, b := range j.a.baselinesKept(j.s, rd) {
+			if j.a.baselineAgrees(rd, b) {
+				agreeing = append(agreeing, b)
+			}
 		}
 	}
 	// Before rd.InitSHA locks, baselines that report different InitSHA values cannot all survive
@@ -613,10 +615,11 @@ func (j *judge) measuring(rd *Round) map[int64]bool {
 }
 
 // baselineDisputed reports whether a round has two or more established baselines whose
-// measurements disagree so far that fewer than two agree within tolerance of the kept median.
-// A round with a disputed baseline must request another independent baseline rather than
-// settling on an uncorroborated midpoint, and closes unrated if the disagreement cannot be
-// resolved.
+// measurements disagree beyond tolerance. With two kept baselines, they are compared directly
+// against each other (rather than against their midpoint, which would double the allowed spread);
+// with three or more, at least two must agree within tolerance of the kept median. A round with a
+// disputed baseline must request another independent baseline rather than settling on an
+// uncorroborated midpoint, and closes unrated if the disagreement cannot be resolved.
 func (a *App) baselineDisputed(s *State, rd *Round) bool {
 	all := a.roundBaselines(s, rd)
 	if len(all) < 2 {
@@ -626,7 +629,12 @@ func (a *App) baselineDisputed(s *State, rd *Round) bool {
 	if len(kept) < 2 {
 		return true
 	}
-	mid, tol := medianItems(itemsOf(kept)), a.tolerance().Baseline
+	tol := a.tolerance().Baseline
+	if len(kept) == 2 {
+		dev, _, err := a.season.Exam.ScoreItems(rd.ExamTable, diffItems(kept[0].Items, kept[1].Items), rd.Shares)
+		return err != nil || !within(dev, tol)
+	}
+	mid := medianItems(itemsOf(kept))
 	agreed := 0
 	for _, b := range kept {
 		if dev, _, err := a.season.Exam.ScoreItems(rd.ExamTable, diffItems(b.Items, mid), rd.Shares); err == nil && within(dev, tol) {
@@ -657,11 +665,13 @@ func (j *judge) baselineComing(round int) bool {
 
 // baselinesWanted is how many more machines a round would ask for its baseline, as it stands.
 func (j *judge) baselinesWanted(rd *Round) int {
-	want := max(0, j.a.season.Baselines.PerRound-len(j.measuring(rd)))
-	if want == 0 && j.a.baselineDisputed(j.s, rd) && !j.baselineTieLive(rd) {
-		want = 1
+	if j.a.baselineDisputed(j.s, rd) {
+		if j.baselineTieLive(rd) {
+			return 0
+		}
+		return 1
 	}
-	return want
+	return max(0, j.a.season.Baselines.PerRound-len(j.measuring(rd)))
 }
 
 // asksBaseline says whether a grade job handed to this account now asks its machine for the
@@ -725,9 +735,11 @@ func (a *App) refreshScores(tx *Tx, rd *Round) {
 	// round left out of its own.
 	out := a.baselinesLeftOut(s, rd)
 	rd.BaselineN = 0
-	for _, b := range s.Baselines {
-		if b.RoundIdx == rd.Idx && !out[b.AccountID] && a.baselineAgrees(rd, b) {
-			rd.BaselineN++
+	if !a.baselineDisputed(s, rd) {
+		for _, b := range s.Baselines {
+			if b.RoundIdx == rd.Idx && !out[b.AccountID] && a.baselineAgrees(rd, b) {
+				rd.BaselineN++
+			}
 		}
 	}
 	tx.saveRound(rd)
@@ -806,10 +818,12 @@ func (a *App) archiveExam(ctx context.Context) {
 				}
 				return strconv.FormatInt(id, 10)
 			}
-			for _, b := range a.baselinesKept(s, rd) {
-				out.BaselineOf = append(out.BaselineOf, handle(b.AccountID))
+			if len(rd.BaseItems) > 0 {
+				for _, b := range a.baselinesKept(s, rd) {
+					out.BaselineOf = append(out.BaselineOf, handle(b.AccountID))
+				}
+				sort.Strings(out.BaselineOf)
 			}
-			sort.Strings(out.BaselineOf)
 			for _, b := range s.Baselines {
 				if b.RoundIdx == idx && len(b.Items) > 0 {
 					out.Baselines[handle(b.AccountID)] = b.Items

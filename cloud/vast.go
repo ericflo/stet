@@ -40,8 +40,10 @@ type vastOffer struct {
 	GPURAM       float64 `json:"gpu_ram"` // MB
 	NumGPUs      int     `json:"num_gpus"`
 	DPHBase      float64 `json:"dph_base"`
+	DPHTotal     float64 `json:"dph_total"`
 	StorageCost  float64 `json:"storage_cost"`   // dollars a GB a month
 	InetDownCost float64 `json:"inet_down_cost"` // dollars a GB
+	InetDown     float64 `json:"inet_down"`      // Mbps
 	CUDAMaxGood  float64 `json:"cuda_max_good"`
 	Verification string  `json:"verification"`
 	HostingType  int     `json:"hosting_type"` // 1: a data centre
@@ -177,17 +179,24 @@ func (m *vastMarket) Rent(ctx context.Context, o Offer, l Launch) (*Rental, erro
 	return nil, err
 }
 
+// vastPort is one host port mapping reported on a Vast.ai instance.
+type vastPort struct {
+	HostPort string `json:"HostPort"`
+}
+
 // vastInstance is one of the account's instances, of the fields read here.
 type vastInstance struct {
-	ID             int64   `json:"id"`
-	Label          *string `json:"label"`
-	ActualStatus   *string `json:"actual_status"`
-	IntendedStatus string  `json:"intended_status"`
-	CurState       string  `json:"cur_state"`
-	StatusMsg      *string `json:"status_msg"`
-	GPUName        string  `json:"gpu_name"`
-	DPHTotal       float64 `json:"dph_total"`
-	StartDate      float64 `json:"start_date"`
+	ID             int64                 `json:"id"`
+	Label          *string               `json:"label"`
+	ActualStatus   *string               `json:"actual_status"`
+	IntendedStatus string                `json:"intended_status"`
+	CurState       string                `json:"cur_state"`
+	StatusMsg      *string               `json:"status_msg"`
+	GPUName        string                `json:"gpu_name"`
+	DPHTotal       float64               `json:"dph_total"`
+	StartDate      float64               `json:"start_date"`
+	PublicIPAddr   string                `json:"public_ipaddr"`
+	Ports          map[string][]vastPort `json:"ports"`
 }
 
 // vastState is what an instance's state comes to: starting until its container runs, and
@@ -313,4 +322,168 @@ func (m *vastMarket) Check(ctx context.Context) (Account, error) {
 		a.Note = "Vast says the account cannot pay"
 	}
 	return a, nil
+}
+
+// ExaminerOffers searches Vast.ai for verified single RTX 5090 hosts suited to serving the
+// Season 3 pinned Inkling-2-Mini vLLM container, preferring high-bandwidth hosts (>=500 Mbps)
+// and falling back to >=200 Mbps when supply is tight.
+func (m *vastMarket) ExaminerOffers(ctx context.Context, maxPrice float64) ([]ExaminerOffer, error) {
+	for _, minDown := range []int{500, 200} {
+		q := map[string]any{
+			"type": "ondemand", "limit": 50, "order": [][]string{{"dph_total", "asc"}},
+			"verified": map[string]any{"eq": true}, "rentable": map[string]any{"eq": true}, "rented": map[string]any{"eq": false},
+			"external": map[string]any{"eq": false}, "num_gpus": map[string]any{"eq": 1}, "gpu_name": map[string]any{"eq": "RTX 5090"},
+			"cuda_max_good": map[string]any{"gte": 13.2}, "disk_space": map[string]any{"gte": examinerDiskGB},
+			"reliability": map[string]any{"gte": 0.97}, "inet_down": map[string]any{"gte": minDown}, "duration": map[string]any{"gte": 3600},
+		}
+		if maxPrice > 0 {
+			q["dph_total"] = map[string]any{"lte": maxPrice}
+		}
+		var out struct {
+			Offers []vastOffer `json:"offers"`
+		}
+		if _, err := m.a.do(ctx, "POST", "/api/v0/bundles/", q, &out); err != nil {
+			return nil, err
+		}
+		var offers []ExaminerOffer
+		for _, o := range out.Offers {
+			if o.NumGPUs != 1 {
+				continue
+			}
+			price := o.DPHTotal
+			if price <= 0 {
+				price = o.DPHBase
+			}
+			if maxPrice > 0 && price > maxPrice+1e-9 {
+				continue
+			}
+			offers = append(offers, ExaminerOffer{
+				ID: strconv.FormatInt(o.ID, 10), Card: vastCard(o.GPUName), Price: price,
+				CUDA: o.CUDAMaxGood, Region: o.Geolocation, InetDown: o.InetDown,
+			})
+		}
+		if len(offers) > 0 {
+			return offers, nil
+		}
+	}
+	return nil, nil
+}
+
+// RentExaminer rents one Vast.ai RTX 5090 running the pinned immutable vLLM OpenAI-compatible
+// server container directly (image Entrypoint is ["vllm", "serve"]) with a per-instance Bearer
+// API key and TCP port 8000 exposed.
+func (m *vastMarket) RentExaminer(ctx context.Context, offerID string, l ExaminerLaunch) (string, error) {
+	env := map[string]string{
+		"-p 8000:8000":              "1",
+		"HF_HUB_ENABLE_HF_TRANSFER": "1",
+	}
+	if l.HFToken != "" {
+		env["HF_TOKEN"] = l.HFToken
+	}
+	disk := l.DiskGB
+	if disk <= 0 {
+		disk = examinerDiskGB
+	}
+	servedName := l.Model
+	if l.Revision != "" {
+		servedName = l.Model + "@" + l.Revision
+	}
+	args := []string{l.Model}
+	if l.Revision != "" {
+		args = append(args, "--revision", l.Revision)
+	}
+	args = append(args,
+		"--served-model-name", servedName,
+		"--reasoning-parser", "inkling",
+		"--tensor-parallel-size", "1",
+		"--max-model-len", "4096",
+		"--max-num-seqs", "32",
+		"--gpu-memory-utilization", "0.88",
+		"--host", "0.0.0.0", "--port", "8000",
+		"--api-key", l.APIKey,
+	)
+	body := map[string]any{
+		"client_id": "me", "image": l.Image, "label": l.Label, "disk": disk, "env": env,
+		"runtype":        "args",
+		"args":           args,
+		"cancel_unavail": true, "target_state": "running",
+	}
+	var out struct {
+		Success     bool   `json:"success"`
+		NewContract int64  `json:"new_contract"`
+		Msg         string `json:"msg"`
+	}
+	status, err := m.a.do(ctx, "PUT", "/api/v0/asks/"+url.PathEscape(offerID)+"/", body, &out)
+	switch {
+	case err == nil && out.Success && out.NewContract > 0:
+		return strconv.FormatInt(out.NewContract, 10), nil
+	case err == nil:
+		return "", fmt.Errorf("Vast.ai answered %d to a new examiner instance, without one: %s", status, out.Msg)
+	case status == 404 || status == 410 || (status == 400 && strings.Contains(err.Error(), "no_such_ask")):
+		return "", fmt.Errorf("%w (%v)", errNoRoom, err)
+	case status == 0 || status >= 500:
+		if rs, lerr := m.ListExaminers(ctx); lerr == nil {
+			for _, r := range rs {
+				if r.Label == l.Label && r.State != "stopped" {
+					return r.ID, nil
+				}
+			}
+		}
+	}
+	return "", err
+}
+
+// ListExaminers lists every Vast.ai instance labelled as a stet-cloud ephemeral examiner,
+// including its mapped public IP and host port for container port 8000/tcp.
+func (m *vastMarket) ListExaminers(ctx context.Context) ([]ExaminerInstance, error) {
+	var all []ExaminerInstance
+	after := ""
+	for page := 0; page < 100; page++ {
+		q := url.Values{"limit": {"25"}}
+		if after != "" {
+			q.Set("after_token", after)
+		}
+		var out struct {
+			Instances []vastInstance `json:"instances"`
+			NextToken *string        `json:"next_token"`
+		}
+		if _, err := m.a.do(ctx, "GET", "/api/v1/instances/?"+q.Encode(), nil, &out); err != nil {
+			return nil, err
+		}
+		for _, i := range out.Instances {
+			label := ""
+			if i.Label != nil {
+				label = *i.Label
+			}
+			if !strings.HasPrefix(label, examinerLabelPrefix) {
+				continue
+			}
+			state, status := vastState(i)
+			hostPort := ""
+			for _, p := range i.Ports["8000/tcp"] {
+				if hp := strings.TrimSpace(p.HostPort); hp != "" {
+					hostPort = hp
+					break
+				}
+			}
+			var created time.Time
+			if i.StartDate > 0 {
+				created = time.Unix(int64(i.StartDate), 0)
+			}
+			all = append(all, ExaminerInstance{
+				ID: strconv.FormatInt(i.ID, 10), Label: label, State: state, Status: status,
+				PublicIP: strings.TrimSpace(i.PublicIPAddr), HostPort: hostPort,
+				Price: i.DPHTotal, Created: created,
+			})
+		}
+		if out.NextToken == nil || *out.NextToken == "" {
+			return all, nil
+		}
+		after = *out.NextToken
+	}
+	return all, fmt.Errorf("Vast listed more than 2,500 instances")
+}
+
+func (m *vastMarket) EndExaminer(ctx context.Context, id string) error {
+	return m.End(ctx, id)
 }

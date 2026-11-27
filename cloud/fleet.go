@@ -17,6 +17,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -84,6 +85,12 @@ type Fleet struct {
 	onePass bool
 	// lease is the server's job lease from /admin/work (defaults to defaultLease when absent).
 	lease time.Duration
+	// examiner manages the optional ephemeral 1x RTX 5090 vLLM server and local auth proxy
+	// when --examiner-addr is configured (examiner.go).
+	examiner *Examiner
+	// sayMu serializes writes to f.out and concurrent appends/transitions on f.cur.Said from
+	// background examiner probe/proxy goroutines.
+	sayMu sync.Mutex
 }
 
 // --- the pool of keys ---------------------------------------------------------------------------
@@ -1418,6 +1425,8 @@ func held(jobs, students int) string {
 
 func (f *Fleet) say(format string, args ...any) {
 	msg := fmt.Sprintf(format, args...)
+	f.sayMu.Lock()
+	defer f.sayMu.Unlock()
 	fmt.Fprintf(f.out, "%s  %s\n", f.now().UTC().Format("15:04:05"), msg)
 	if f.cur != nil {
 		f.cur.Said = append(f.cur.Said, msg)

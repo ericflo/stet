@@ -81,8 +81,10 @@ Every official round's exam is made by an organisers' machine running `stet exam
   caught up). It keeps the harvest under `~/.cache/stet/examine/hours/` and tells the
   server its hash at once; `GET /api/v1/harvests` lists them. It reads every source at
   once, so a harvest takes as long as its slowest source (Lemmy, about ten minutes).
-- **When a round is drawn it makes the round's exam**, right after the draw (~11–13 minutes
-  end-to-end with a 1× RTX 5090 vLLM server). The server gives the round three of the hours
+- **When a round is drawn it makes the round's exam**, right after the draw (measured at
+  `14.3 min` cold-start from Vast.ai rent to 640 synthesized drafts, `~16–18 min` end-to-end
+  including CC shard fetch, decontam, and authoritative CPU `init_sha256` on an automated
+  ephemeral 1× RTX 5090 vLLM container). The server gives the round three of the hours
   harvested in the day before the draw, chosen by the round's seed. The examiner takes exactly
   those, builds the round's corpus, drops fresh items the corpus already holds, writes the
   reasoning items once with the pinned teacher model
@@ -103,19 +105,35 @@ What it needs:
   organisers may post an exam;
 - the stet client with the season's libraries, PyTorch among them, and the same version of
   the exam's generators as the season (an older client refuses, and says to upgrade);
-- **Production Season 3 examiner hardware (`thinkingmachines/Inkling-2-Mini@c9d02830`, `reasoning_effort=low`, greedy `temperature=0`):**
+- **Production Season 3 examiner hardware & automated ephemeral provisioning (`thinkingmachines/Inkling-2-Mini@c9d02830`, `reasoning_effort=low`, greedy `temperature=0`):**
   `thinkingmachines/Inkling-2-Mini` is a 26.4B-total / 3.4B-active looped MoE distributed as a
   single ~20 GB mixed NVFP4/MXFP8 checkpoint (Apache 2.0) and served via an OpenAI-compatible
   `/v1/chat/completions` endpoint configured in `STET_EXAMINER_LLM_URL` (with optional
   `STET_EXAMINER_LLM_KEY`). In production, `stet-examine.service` runs hourly harvests on the
-  organisers' host and sends draw-time synthesis requests to a pinned vLLM server (e.g., an
-  ephemeral 1× NVIDIA RTX 5090 / 32 GB Blackwell host at `~$0.60/h` for `~10 min` = **`~$0.10/round`**;
-  measured at `562.2s` for all 640 Draw B drafts, `626/640 = 97.8%` keep rate across 42 languages,
-  `~11–13 min` total draw-to-publication including CC shard fetch, decontam, and authoritative CPU
-  `init_sha256`, matching `stet-cloud`'s `--exam-after 25m` budget with comfortable headroom):
+  organisers' host (`STET_EXAMINER_LLM_URL=http://127.0.0.1:8000/v1`) and `stet-cloud` automates
+  the ephemeral 1× NVIDIA RTX 5090 backend whenever `--examiner-addr 127.0.0.1:8000` is enabled
+  (on `stet-cloud scale --follow` or standalone `stet-cloud examiner`):
+  1. Watches `GET /api/v1/admin/work` for any open round with `exam_at == 0`.
+  2. Rents one verified 1× RTX 5090 on Vast.ai running the immutable pinned image
+     `vllm/vllm-openai@sha256:d24e5fc73f0b859bd76c9d2f6f6fa4da3001afd7637f2610876420f3027ea6c7`
+     with a fresh random 256-bit `--api-key` and `--served-model-name thinkingmachines/Inkling-2-Mini@c9d028302cd0f035fdf8e7e91f089a4ce94d2195`.
+  3. Verifies `/v1/models` returns the pinned revision, then opens the loopback reverse proxy on
+     `127.0.0.1:8000` injecting `Authorization: Bearer <api_key>` (returning `503` while warming
+     so `stet-examine`'s retry loop waits cleanly).
+  4. Destroys the Vast.ai instance immediately once the exam is posted (`exam_at > 0`) or hard
+     `--examiner-timeout` (`45m`) expires, cleaning up any orphaned `stet-examiner*` instances on
+     restart and logging examiner spend to `spent.jsonl`.
+  Cold-start measured end-to-end on a live Vast.ai 1× RTX 5090 (`$0.619/h`): container start
+  `125.6s`, model pull + `/v1/models` verified `+141.9s` (`267.5s = 4.46 min` total cold boot),
+  640 Draw B drafts via shipped `synthesize_reasoning()` `588.7s` (`627/640 = 98.0%` kept) ->
+  **`856.3s` (`14.27 min`, `$0.147` GPU cost)**, or `~16–18 min` (`~$0.16–$0.20/round`) total
+  draw-to-publication including CC shard fetch, decontam, and CPU `init_sha256` (warm synthesis
+  `367–379s`; comfortably within `stet-cloud`'s `--exam-after 25m` default). If you prefer to run a dedicated local vLLM server
+  manually instead of `stet-cloud --examiner-addr`, launch the same pinned revision:
 
   ```sh
-  # vLLM >= 0.35.0 (or nightly wheel / vllm/vllm-openai:nightly, CUDA 13.2+ driver):
+  # Immutable pinned image: vllm/vllm-openai@sha256:d24e5fc73f0b859bd76c9d2f6f6fa4da3001afd7637f2610876420f3027ea6c7
+  # (CUDA 13.2+ driver, 32 GB Blackwell RTX 5090):
   vllm serve thinkingmachines/Inkling-2-Mini \
     --revision c9d028302cd0f035fdf8e7e91f089a4ce94d2195 \
     --served-model-name thinkingmachines/Inkling-2-Mini@c9d028302cd0f035fdf8e7e91f089a4ce94d2195 \
@@ -133,7 +151,10 @@ What it needs:
   on mismatch, missing `STET_EXAMINER_LLM_URL`, or tokenizer load failure. Under
   `stet examine --follow`, transient endpoint/network failures raise retryable `RuntimeError`
   (never cancelling the round), and transient failures when posting `POST /cancel` for an
-  unbuildable exam are retried on subsequent polls without re-running the exam build;
+  unbuildable exam are retried on subsequent polls without re-running the exam build. On the
+  verifier side, `wait_for_exam` and early-grade `Pending` waits enforce a bounded deadline
+  (`STET_EXAM_WAIT_SECONDS`, default `5400` = 90 minutes) and release held jobs cleanly rather
+  than idling rented GPUs until the server's 6-hour `STET_EXAM_TIMEOUT`;
 - about 3 GB of disk a round, under `~/.cache/stet/examine/<round>/` and the round's corpus,
   and the hours it has harvested;
 - the network: Wikipedia, Common Crawl's news crawl, GH Archive, Hacker News, Lemmy,
@@ -667,8 +688,8 @@ a run. Each script is trained once (`ERNIE-4.5-0.3B-Base-PT`, bottom half frozen
 reset, on 65.5M tokens plus the 32-step SFT probe), about 20 minutes on an RTX 5090 (~30
 minutes on an RTX 4090, ~55 minutes on an RTX 3090), and two established machines train the
 round's unedited baseline (`baselines.per_round = 2`, two passes). On a 6-GPU fleet a typical round takes about 1.5 to
-2.5 hours from draw to settlement (~$3–$5). The exam is posted ~11–13 minutes after the
-draw using a 1× RTX 5090 `Inkling-2-Mini` vLLM endpoint (~$0.10/round) while curators run, so trained students sit it immediately.
+2.5 hours from draw to settlement (~$3–$5). The exam is posted ~16–18 minutes after the
+draw using an automated ephemeral 1× RTX 5090 `Inkling-2-Mini` vLLM container (`stet-cloud --examiner-addr 127.0.0.1:8000`, ~$0.15–$0.20/round including cold boot) while curators run, so trained students sit it immediately.
 
 ## When something is wrong
 

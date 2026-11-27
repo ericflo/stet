@@ -48,7 +48,10 @@ Vast.ai, Lium, Salad and Clore.ai.
                                  (--vouch: any not vouched for; --revoke HANDLE...)
   stet-cloud status              what is waiting, what is rented, what it costs
   stet-cloud scale [--follow]    rent and end machines to match the work (once, or
-                                 every minute until stopped)
+                                 every minute until stopped; with --examiner-addr, also
+                                 provisions and proxies the ephemeral 1x RTX 5090 examiner)
+  stet-cloud examiner            run only the automated ephemeral 1x RTX 5090 examiner
+                                 controller and local authenticated vLLM proxy
   stet-cloud up [N]              rent N machines now, whatever is waiting (default 1)
   stet-cloud down [--force] [HANDLE...]
                                  end machines that hold no job; --force ends the rest
@@ -100,11 +103,12 @@ type Options struct {
 	LongMinutes         int     // the longest of the organisers' students a machine takes, minutes; 0: the short ones only
 	Cheapest            bool    // rent the cheapest a grade first, not the fastest
 	// For grades taken before an exam: how long after it the round may settle.
-	Settle time.Duration
-	Idle   int
-	SSHKey string
-	DryRun bool
-	Every  time.Duration
+	Settle   time.Duration
+	Idle     int
+	SSHKey   string
+	DryRun   bool
+	Every    time.Duration
+	Examiner ExaminerConfig
 	Policy
 }
 
@@ -178,7 +182,13 @@ func flags(name string, o *Options) *flag.FlagSet {
 	fs.DurationVar(&o.Every, "every", time.Minute, "with scale --follow: how often to look")
 	fs.DurationVar(&o.Early, "early", 90*time.Minute, "rent graders for a round's exam from at most this long before it is due, each kind of GPU just in time, the cheapest a round first (0: only once it is posted)")
 	fs.DurationVar(&o.Settle, "settle-within", 15*time.Minute, "with --early: how long after its exam a round may settle; a kind of GPU is rented in time to report by then, and a quicker, dearer one only once the cheaper ones can no longer")
-	fs.DurationVar(&o.ExamAfter, "exam-after", 25*time.Minute, "how long after its draw a round's exam is posted, about, when the server does not say: in Season 3 the exam is built right after the draw (~12-15 minutes on a 1x RTX 5090 Inkling-2-Mini examiner, with headroom) from hours of the day before")
+	fs.DurationVar(&o.ExamAfter, "exam-after", 25*time.Minute, "how long after its draw a round's exam is posted, about, when the server does not say: in Season 3 the exam is built right after the draw (~14-18 minutes on a cold 1x RTX 5090 Inkling-2-Mini examiner, with headroom) from hours of the day before")
+	fs.StringVar(&o.Examiner.Addr, "examiner-addr", "", "loopback address for the automated ephemeral 1x RTX 5090 vLLM examiner proxy (e.g. 127.0.0.1:8000); when set, rents a 5090 on Vast.ai at round draw and destroys it once the exam is posted")
+	fs.DurationVar(&o.Examiner.Timeout, "examiner-timeout", 45*time.Minute, "hard wall-clock TTL for an automated ephemeral examiner GPU before it is destroyed")
+	fs.Float64Var(&o.Examiner.MaxPrice, "examiner-max-price", 1.50, "maximum $/h for an automated ephemeral 1x RTX 5090 examiner on Vast.ai")
+	fs.StringVar(&o.Examiner.Image, "examiner-image", defaultExaminerImage, "pinned immutable Docker image digest for the ephemeral vLLM examiner")
+	fs.StringVar(&o.Examiner.Model, "examiner-model", defaultExaminerModel, "pinned Hugging Face model ID served by the ephemeral vLLM examiner")
+	fs.StringVar(&o.Examiner.Revision, "examiner-revision", defaultExaminerRevision, "pinned Hugging Face revision SHA served by the ephemeral vLLM examiner")
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), "usage: stet-cloud %s [settings]\n\n", name)
 		fs.PrintDefaults()
@@ -375,6 +385,22 @@ func run(args []string, stdout, stderr io.Writer) error {
 			}
 		}
 		return cmdScale(ctx, f, *follow)
+	case "examiner":
+		rest, err := parse(fs, args)
+		if err != nil {
+			return err
+		}
+		if len(rest) > 0 {
+			return fmt.Errorf("%s takes no %q", cmd, rest[0])
+		}
+		if o.Examiner.Addr == "" {
+			o.Examiner.Addr = "127.0.0.1:8000"
+		}
+		f, err := open(o, stdout, true, true)
+		if err != nil {
+			return err
+		}
+		return cmdExaminer(ctx, f)
 	case "up":
 		rest, err := parse(fs, args)
 		if err != nil {

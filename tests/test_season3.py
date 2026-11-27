@@ -3060,4 +3060,66 @@ def test_inkling2_chat_teacher_config_and_endpoint(monkeypatch):
     assert not isinstance(exc_fail.value, reason.FatalExamError)
 
 
+def test_control_token_filter_allows_code_pipe_operator_and_rejects_special_tokens():
+    """Review 10 P3: _CONTROL_TOKEN_RE must not drop code reasoning answers containing |>
+    (Elixir/F#/OCaml/R/Julia pipe operators) while still rejecting <|...|> and <think> tags."""
+    from stet.exam.fresh import reason
+
+    # Code pipe operator in answer MUST be accepted by both _CONTROL_TOKEN_RE and _clean_chat_output.
+    ok_pipe = (
+        "PROMPT: How does the pipeline transform the input list?\n"
+        "RESPONSE: The expression `data |> Enum.filter(&(&1 > 0)) |> Enum.map(&(&1 * 2))` "
+        "passes the collection through filtering before doubling each positive element."
+    )
+    cleaned = reason._normalize_chat_output(ok_pipe)
+    assert cleaned and "|>" in cleaned and not reason._CONTROL_TOKEN_RE.search(cleaned)
+
+    # Actual control/CoT tokens MUST still be rejected (including hyphenated special tokens).
+    for bad in (
+        "PROMPT: What happens?\nRESPONSE: Let me think <|custom_ctrl|> about this carefully first.",
+        "PROMPT: What happens?\nRESPONSE: Done now.<|special_end|> Extra trailing commentary here.",
+        "PROMPT: What happens?\nRESPONSE: Done now.<|end-of-text|> Extra trailing commentary here.",
+        "PROMPT: What happens?\nRESPONSE: <think>internal reasoning</think> The final explanation is here.",
+    ):
+        assert reason._CONTROL_TOKEN_RE.search(bad), f"expected _CONTROL_TOKEN_RE to match: {bad!r}"
+    assert reason._normalize_chat_output("PROMPT: Q?\nRESPONSE: text <|custom_ctrl|> more.") == ""
+    assert reason._normalize_chat_output("PROMPT: Q?\nRESPONSE: <think>unfinished reasoning") == ""
+
+
+def test_wait_for_exam_is_bounded_and_releases_pending_jobs_on_timeout(monkeypatch):
+    """Review 10 P1 #1: wait_for_exam and early-grade Pending waits must enforce a bounded deadline
+    instead of hanging indefinitely on a stalled examiner."""
+    from stet import client
+
+    rnd = types.SimpleNamespace(id="s3-o00009", exam_digest="")
+    out = types.SimpleNamespace(line=lambda *a, **k: None, dim=lambda s: s, bad=lambda s: s)
+
+    # 1. wait_for_exam raises ExamWaitTimeout (ApiError 409) once elapsed >= timeout.
+    clock = {"t": 100.0}
+    sleeps: list[float] = []
+    monkeypatch.setattr(client, "exam_now", lambda r: None)
+    monkeypatch.setattr(client.time, "monotonic", lambda: clock["t"])
+
+    def fake_sleep(sec):
+        sleeps.append(sec)
+        clock["t"] += sec
+
+    monkeypatch.setattr(client.time, "sleep", fake_sleep)
+    with pytest.raises(client.ExamWaitTimeout) as exc:
+        client.wait_for_exam(rnd, out, timeout=50.0)
+    assert exc.value.status == 409
+    assert client.EXAM_WAIT_TIMEOUT_REASON in str(exc.value)
+    assert sum(sleeps) == pytest.approx(50.0)
+
+    # 2. _exam_wait_limit reads STET_EXAM_WAIT_SECONDS with safe default EXAM_WAIT_MAX and rejects nan/inf/negative.
+    monkeypatch.delenv("STET_EXAM_WAIT_SECONDS", raising=False)
+    assert client._exam_wait_limit() == float(client.EXAM_WAIT_MAX)
+    monkeypatch.setenv("STET_EXAM_WAIT_SECONDS", "1200")
+    assert client._exam_wait_limit() == 1200.0
+    for bad_env in ("nan", "inf", "-inf", "-5", "nope"):
+        monkeypatch.setenv("STET_EXAM_WAIT_SECONDS", bad_env)
+        assert client._exam_wait_limit() == float(client.EXAM_WAIT_MAX)
+
+
+
 

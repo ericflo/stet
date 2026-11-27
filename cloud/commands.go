@@ -194,6 +194,9 @@ func cmdStatus(ctx context.Context, f *Fleet) error {
 	if rented == 0 {
 		fmt.Fprintf(f.out, "Nothing rented (%d keys in the pool).\n", len(v.Workers))
 	}
+	if ex := readExaminerState(f.o.Home); ex != nil {
+		fmt.Fprintf(f.out, "Examiner GPU: machine %s for %s ($%.2f/h, up %s)\n", ex.InstanceID, ex.RoundID, ex.Price, now.Sub(ex.Created).Round(time.Minute))
+	}
 	fmt.Fprintf(f.out, "\n$%.2f an hour now · about $%.2f today (UTC)\n", v.Hourly, v.Today)
 	fmt.Fprintf(f.out, "The work wants %d machines now (at most %d)", d.Target, f.o.MaxWorkers)
 	if d.Launch > 0 || len(d.End) > 0 {
@@ -259,6 +262,11 @@ func tick(ctx context.Context, f *Fleet) (err error) {
 		}
 		f.st.site(ctx) // and the builds the server says it runs and hands out
 	}
+	if f.examiner != nil {
+		if exErr := f.examiner.Reconcile(ctx, v.Work, v.Today, f.o.DailyBudget); exErr != nil {
+			f.say("examiner: %v", exErr)
+		}
+	}
 	d := f.o.Policy.decideNext(v.Work, v.Workers, v.Today, f.now(), next)
 	rec.decided(d, next)
 	ended := len(v.Ledger.Pods)
@@ -278,6 +286,11 @@ func cmdScale(ctx context.Context, f *Fleet, follow bool) error {
 	if !follow {
 		return tick(ctx, f)
 	}
+	stopExaminer, err := f.startExaminer(ctx)
+	if err != nil {
+		return err
+	}
+	defer stopExaminer()
 	f.say("scaling to the work every %s, at most %d machines and $%.2f an hour (%s cloud%s). Ctrl-C to stop; the machines stop by themselves.",
 		f.o.Every, f.o.MaxWorkers, f.o.MaxHourly, strings.ToLower(f.o.Cloud), f.ceiling(false)+f.longCeiling())
 	for {
@@ -289,6 +302,39 @@ func cmdScale(ctx context.Context, f *Fleet, follow bool) error {
 			f.say("%v", err)
 		}
 		if err := sleepCtx(ctx, f.o.Every); err != nil {
+			return nil
+		}
+	}
+}
+
+func cmdExaminer(ctx context.Context, f *Fleet) error {
+	stopExaminer, err := f.startExaminer(ctx)
+	if err != nil {
+		return err
+	}
+	defer stopExaminer()
+	every := min(f.o.Every, 15*time.Second)
+	if every <= 0 {
+		every = 15 * time.Second
+	}
+	for {
+		w, err := f.st.work(ctx, f.op)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			f.say("examiner: %v", err)
+		} else {
+			l, _ := f.readLedger()
+			today := 0.0
+			if l != nil {
+				today, _ = f.spent(l, startOfDay(f.now()))
+			}
+			if err := f.examiner.Reconcile(ctx, w, today, f.o.DailyBudget); err != nil && ctx.Err() == nil {
+				f.say("examiner: %v", err)
+			}
+		}
+		if err := sleepCtx(ctx, every); err != nil {
 			return nil
 		}
 	}

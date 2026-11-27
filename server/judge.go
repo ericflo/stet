@@ -523,16 +523,27 @@ type judge struct {
 	// quit: accounts that were handed a script of a round and handed it back or let it run
 	// out. One that is not established is handed no more of that round's scripts: asking
 	// and handing back would otherwise show it every script there is.
-	quit     map[int64]map[int]bool
-	around   []*asker                      // found when first asked for
-	passes   map[string]map[string]float64 // a training pass's seconds, by scale and GPU: worked out when first asked for
-	measures map[int]map[int64]bool        // whose baseline each round has or is promised (measuring): worked out when first asked for
-	left     map[int]map[int64]bool        // whose baseline each round leaves out of its own (oddOut): worked out when first asked for
+	quit map[int64]map[int]bool
+	// examTimedOut: accounts that already released a pre-exam grade on a round because the
+	// exam never posted within STET_EXAM_WAIT_SECONDS. Not handed another pre-exam grade on
+	// that same round (avoiding an infinite re-train/re-timeout loop); eligible again once
+	// the exam posts.
+	examTimedOut map[int64]map[int]bool
+	around       []*asker                      // found when first asked for
+	passes       map[string]map[string]float64 // a training pass's seconds, by scale and GPU: worked out when first asked for
+	measures     map[int]map[int64]bool        // whose baseline each round has or is promised (measuring): worked out when first asked for
+	left         map[int]map[int64]bool        // whose baseline each round leaves out of its own (oddOut): worked out when first asked for
 }
+
+const (
+	examWaitTimeoutReason     = "timed out waiting for the round's exam"
+	examEndedBeforePostReason = "the round ended before its exam was posted"
+)
 
 func (a *App) newJudge(s *State) *judge {
 	j := &judge{a: a, s: s, t: now(), est: map[int64]bool{}, standing: map[int64]bool{}, busy: map[int64]bool{}, training: map[int64]bool{},
-		resting: map[int64]bool{}, differs: map[int64]map[int]int{}, quit: map[int64]map[int]bool{}, measures: map[int]map[int64]bool{}, left: map[int]map[int64]bool{}}
+		resting: map[int64]bool{}, differs: map[int64]map[int]int{}, quit: map[int64]map[int]bool{}, examTimedOut: map[int64]map[int]bool{},
+		measures: map[int]map[int64]bool{}, left: map[int]map[int64]bool{}}
 	for id, acct := range s.Accounts {
 		j.est[id], j.standing[id] = a.established(acct), acct.Agreed > 0
 	}
@@ -542,6 +553,12 @@ func (a *App) newJudge(s *State) *judge {
 				j.quit[c.AccountID] = map[int]bool{}
 			}
 			j.quit[c.AccountID][c.RoundIdx] = true
+			if c.Status == "released" && c.Reason == examWaitTimeoutReason {
+				if j.examTimedOut[c.AccountID] == nil {
+					j.examTimedOut[c.AccountID] = map[int]bool{}
+				}
+				j.examTimedOut[c.AccountID][c.RoundIdx] = true
+			}
 		}
 		switch {
 		case c.live(j.t):
@@ -729,6 +746,9 @@ func (j *judge) states(rd *Round) []*entryState {
 		switch {
 		case c.live(j.t):
 			sc.Live = append(sc.Live, c)
+		case c.Status == "released" && (c.Reason == examWaitTimeoutReason || c.Reason == examEndedBeforePostReason):
+			// Pre-exam wait timeout / round end before exam is an infrastructure delay, not a
+			// script defect: do not burn maxGradeAttempts and abandon innocent curators' scripts.
 		case c.Status != "done" && j.est[c.AccountID]:
 			sc.Tries++
 		}
@@ -1233,7 +1253,7 @@ func (j *judge) offers(st *entryState, q *asker, closing bool) []offer {
 		out = append(out, offer{st: st, kind: "edit", score: score, required: true})
 	}
 	for _, sc := range st.Scripts {
-		if !j.mayGrade(st, sc, q.acct) || j.running(st, q.acct) || (!examPosted(st.Round) && !q.early) {
+		if !j.mayGrade(st, sc, q.acct) || j.running(st, q.acct) || (!examPosted(st.Round) && (!q.early || j.examTimedOut[q.acct.ID][st.Round.Idx])) {
 			continue
 		}
 		v := j.weigh(sc)
@@ -1350,8 +1370,11 @@ func (j *judge) settleable(st *entryState) bool {
 	if len(st.LiveEdits) > 0 || !examPosted(st.Round) || j.a.baselineDisputed(j.s, st.Round) {
 		return false
 	}
+	wait := int64(j.a.cfg.ReplicaWait.Seconds())
+	expired := j.t >= max(st.Round.ActiveAt, st.Round.DrawnAt)+wait
 	for _, sc := range st.Scripts {
-		if !j.weigh(sc).scored {
+		v := j.weigh(sc)
+		if !v.scored || (v.tokensTie && !expired) {
 			return false
 		}
 		for _, c := range sc.Live {

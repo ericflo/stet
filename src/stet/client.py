@@ -6,6 +6,7 @@ import argparse
 import errno
 import hashlib
 import json
+import math
 import os
 import re
 import sys
@@ -887,6 +888,7 @@ class Pending:
 
     def __init__(self, job: dict, rnd, trained, device):
         self.job, self.rnd, self.trained, self.device = job, rnd, trained, device
+        self.trained_at = time.monotonic()
 
 
 def wants_baseline(job: dict) -> bool:
@@ -975,8 +977,29 @@ def _grade_job(job, season, scale, device, key, out, work: Path, bases: dict | N
 
 
 EXAM_POLL = 20  # seconds between looks at whether a round's exam is posted
+EXAM_WAIT_MAX = 90 * 60  # default max seconds a verifier waits for a round's exam before releasing
+EXAM_WAIT_TIMEOUT_REASON = "timed out waiting for the round's exam"
 # What a verifier says of its own speed when it asks for work (bench.py).
 BENCH_SAID = ("gpu_tokens_per_second", "cpu_mb_per_second", "cores", "memory_gb", "gpu_memory_gb", "disk_gb")
+
+
+class ExamWaitTimeout(ApiError):
+    """Raised when waiting for a round's exam exceeds the client's bounded deadline."""
+
+    def __init__(self, round_id: str, waited_s: float):
+        super().__init__(409, f"{EXAM_WAIT_TIMEOUT_REASON} (round {round_id}, waited {int(waited_s)}s)")
+
+
+def _exam_wait_limit() -> float:
+    raw = os.environ.get("STET_EXAM_WAIT_SECONDS", "").strip()
+    if raw:
+        try:
+            val = float(raw)
+            if math.isfinite(val) and val >= 0.0:
+                return val
+        except ValueError:
+            pass
+    return float(EXAM_WAIT_MAX)
 
 
 def exam_now(rnd):
@@ -1000,18 +1023,28 @@ def exam_now(rnd):
     return None
 
 
-def wait_for_exam(rnd, out):
+def wait_for_exam(rnd, out, timeout: float | None = None):
     """The round as it is once its exam is posted: the organisers' examiner makes it after
-    the draw, from text published since. Waits as long as that takes."""
+    the draw, from text published since. Waits up to `timeout` seconds (default STET_EXAM_WAIT_SECONDS
+    or EXAM_WAIT_MAX = 90m) so a rented grader never hangs indefinitely on a stalled examiner."""
+    limit = _exam_wait_limit() if timeout is None else float(timeout)
+    started = time.monotonic()
     said = 0.0
     while True:
         posted = exam_now(rnd)
         if posted is not None:
             return posted
+        elapsed = time.monotonic() - started
+        if limit > 0 and elapsed >= limit:
+            raise ExamWaitTimeout(rnd.id, elapsed)
         if time.time() - said >= 600:
             said = time.time()
             out.line("", out.dim(f"trained; waiting for round {rnd.id}'s exam"))
-        time.sleep(EXAM_POLL)
+        sleep_for = EXAM_POLL
+        if limit > 0:
+            sleep_for = min(EXAM_POLL, max(0.0, limit - elapsed))
+        if sleep_for > 0:
+            time.sleep(sleep_for)
 
 
 def fetch_exam(rnd, key) -> Path:
@@ -1539,6 +1572,7 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
     # such round's unedited student, trained once for all of them.
     waiting: dict[int, Pending] = {}
     bases: dict = {}
+    exam_timed_out: set[str] = set()  # rounds whose exam timed out on this machine; avoid re-claiming early grades
     told_waiting = False
     scale_name, gpu_name = str(info["scale"]), hw.get("gpu")
     held_until = 0  # when the server stops waiting for that job, if it said
@@ -1609,6 +1643,8 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
 
     def asking() -> dict:
         ask = {**hello, "trained": list(waiting)}
+        if exam_timed_out:
+            ask["early"] = False
         if (p := saved_pass(scale_name, gpu_name)) is not None:
             ask["pass_seconds"] = p
         return ask
@@ -1636,6 +1672,25 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
                         if p.rnd.id == posted.id:
                             p.rnd = posted
                     sit = waiting.pop(next(iter(waiting)))
+                else:
+                    limit = _exam_wait_limit()
+                    waited = time.monotonic() - getattr(first, "trained_at", time.monotonic())
+                    if limit > 0 and waited >= limit:
+                        gone = [jid for jid, p in waiting.items() if p.rnd.id == first.rnd.id]
+                        out.line("", out.bad(f"{EXAM_WAIT_TIMEOUT_REASON} (round {first.rnd.id}, {int(waited)}s); letting go of {len(gone)} trained grade(s)"))
+                        all_released = True
+                        for jid in gone:
+                            if _release(jid, key, EXAM_WAIT_TIMEOUT_REASON):
+                                del waiting[jid]
+                            else:
+                                all_released = False
+                        exam_timed_out.add(first.rnd.id)
+                        if not any(p.rnd.id == first.rnd.id for p in waiting.values()):
+                            bases.pop(first.rnd.id, None)
+                        if not all_released:
+                            out.line("", out.bad(f"could not release all timed-out grades for round {first.rnd.id}; retrying in {EXAM_POLL}s"))
+                            time.sleep(EXAM_POLL)
+                        continue
             if holding is None and not waiting and sit is None:
                 upgrader.look()  # never with a job in hand
             try:
@@ -1737,6 +1792,13 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
                 continue
             holding = job_id
             round_id = clean(job["round"].get("id"), 40)
+            if exam_timed_out and (
+                (isinstance(job["round"].get("exam_digest"), str) and SHA256_RE.fullmatch(job["round"]["exam_digest"]))
+                or (round_id and round_id not in exam_timed_out)
+            ):
+                exam_timed_out.discard(round_id)
+                if round_id and round_id not in exam_timed_out:
+                    exam_timed_out.clear()
             out.line("", "")
             out.line(job["kind"], f"job {job_id} · {editor_label(job['editor'])} · round {round_id}")
             if job["kind"] == "edit" and not args.edits:
@@ -1807,6 +1869,15 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
                 refused[round_id] = 2  # not this session
                 out.line("", out.bad(str(err)))
                 stop_if_once()
+                continue
+            except ExamWaitTimeout as err:
+                remove_tree(work)
+                back = hand_back(EXAM_WAIT_TIMEOUT_REASON)
+                stuck.pop(job_id, None)
+                forget_base(sit)
+                if round_id:
+                    exam_timed_out.add(round_id)
+                patience(f"{clean(err)}; {handed(back)}")
                 continue
             except (FetchError, ApiError) as err:  # a download failed: the network's trouble, or the host's
                 remove_tree(work)

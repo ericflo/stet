@@ -69,7 +69,7 @@ _SPACELESS_RE = re.compile(
 )
 _NON_WORD_RE = re.compile(r"[\W_]+", re.UNICODE)
 _SENTENCE_END_RE = re.compile(r"[.!?。！？…؟۔।][\"'”’»)\]}」』】]*$")
-_CONTROL_TOKEN_RE = re.compile(r"<think>|</think>|<\||\|>", re.IGNORECASE)
+_CONTROL_TOKEN_RE = re.compile(r"<think>|</think>|<\|[a-z0-9_-]+\|>", re.IGNORECASE)
 _INKLING_STOP_TOKENS = (
     "<|end_message|>",
     "<|im_end|>",

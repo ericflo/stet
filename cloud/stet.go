@@ -231,6 +231,12 @@ type WorkRound struct {
 	// next grade, training twice (Season 2: four a round). Nil from a server that does not
 	// say, where every machine's first grade of a round measured it (Season 1).
 	BaselinesWanted *int `json:"baselines_wanted,omitempty"`
+	// BaselineDisputed is true when established baselines disagree beyond tolerance and
+	// require a fresh independent machine that has not yet measured the round's baseline.
+	BaselineDisputed bool `json:"baseline_disputed,omitempty"`
+	// FreshGradersWanted counts fresh grading machines needed when grades are waiting that
+	// no currently idle organiser machine is eligible to take (e.g. a baseline or script tie).
+	FreshGradersWanted int `json:"fresh_graders_wanted,omitempty"`
 }
 
 // Machine is one of the organisers' accounts as the server sees it.

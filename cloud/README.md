@@ -81,7 +81,9 @@ and forgets it. A key not vouched for is vouched for when it is first rented.
 ```sh
 stet-cloud gpus                      # what would be rented, the fastest first
 stet-cloud status                    # what is waiting, what is rented, what it costs
-stet-cloud scale --follow            # rent and end to match the work, every minute
+stet-cloud scale --follow --examiner-addr 127.0.0.1:8000
+                                     # rent/end graders AND automate the ephemeral 1x RTX 5090 examiner
+stet-cloud examiner                  # run only the automated ephemeral 1x RTX 5090 examiner proxy
 stet-cloud up 2                      # or by hand: two now, whatever is waiting
 stet-cloud down                      # end those that hold no job
 stet-cloud pause                     # draw no more rounds: the machines turn to the organisers' students
@@ -101,8 +103,18 @@ How many it rents: one for each machine at a grade, which takes no other until i
 trains the student once; the two machines a round asks to measure its unedited baseline
 (Season 3's `baselines.per_round = 2`, `baselines_wanted` in `/admin/work`) train that first, on
 as many tokens. In Season 3 the exam is built right after the draw from hours of the day before already
-harvested (~11–13 minutes using a 1× RTX 5090 `Inkling-2-Mini` vLLM endpoint, within `--exam-after 25m`), so nearly every grade is taken once the
-exam is posted, and wants a machine then. A grader may also take a grade before the exam is
+harvested (measured at `14.3 min` cold-start from Vast.ai rent to 640 synthesized drafts on a
+1× RTX 5090 running `vllm/vllm-openai@sha256:d24e5fc7...` serving `Inkling-2-Mini`, `~16–18 min`
+total draw-to-publication including CC shard fetch and CPU `init_sha256`, within `--exam-after 25m`,
+at `~$0.15–$0.20/round`), so nearly every grade is taken once the
+exam is posted, and wants a machine then. When `stet-cloud` runs with `--examiner-addr 127.0.0.1:8000`
+(or standalone `stet-cloud examiner`), it automates the entire examiner GPU lifecycle: renting one
+verified 1× RTX 5090 on Vast.ai as soon as `/admin/work` shows an open round with `exam_at == 0`,
+generating a fresh random 256-bit `--api-key`, verifying `/v1/models` returns the pinned
+`thinkingmachines/Inkling-2-Mini@c9d02830...` revision, proxying `http://127.0.0.1:8000` with
+injected Bearer auth so `stet-examine.service` needs no manual intervention or static key, and
+destroying the 5090 immediately once the exam is posted (or past `--examiner-timeout`, default 45m,
+plus automatic orphan cleanup on restart). A grader may also take a grade before the exam is
 posted and hold it until it is: such grades want machines from `--early` (90 minutes) before
 the exam is due (when the server says, or else `--exam-after`, 25 minutes, after the draw), and
 each kind of GPU is rented just in time, so that, rented now, it would report between a
@@ -175,7 +187,7 @@ Wants=network-online.target
 After=network-online.target
 
 [Service]
-ExecStart=%h/.local/bin/stet-cloud scale --follow --cloud any --max 6 --max-price 1.10 --max-hourly 4 --daily-budget 60 --per-machine 1 --exam-after 25m --early 0
+ExecStart=%h/.local/bin/stet-cloud scale --follow --cloud any --max 6 --max-price 1.10 --max-hourly 4 --daily-budget 60 --per-machine 1 --exam-after 25m --early 0 --examiner-addr 127.0.0.1:8000
 Restart=always
 RestartSec=60
 

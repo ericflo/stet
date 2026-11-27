@@ -578,3 +578,66 @@ func TestWarmRunnersAreKeptAcrossImminentDrawNoticeAndEndedWhenQuiet(t *testing.
 		t.Fatalf("when paused, want all idle GPUs ended; ended %s", handles(d.End))
 	}
 }
+
+// Review 10 P2 #6: when two baseline graders disagree and sit idle ("waiting"), they cannot break
+// their own baseline tie, so stet-cloud must rent a fresh machine rather than waiting out --idle.
+// Crucially, on a normal undisputed edit-to-grade transition (BaselineDisputed == false,
+// FreshGradersWanted == 0), healthy idle GPUs must NOT be evicted or duplicated.
+func TestTieBreakBaselineRentsAFreshMachineWhileBaselineGradersIdle(t *testing.T) {
+	p := testPolicy()
+	p.Edits, p.MaxWorkers = true, 6
+	one := 1
+	w := &Work{Rounds: []WorkRound{{
+		ID: "s3-o00001", Entries: 3, GradesWanted: 1, BaselinesWanted: &one,
+		BaselineDisputed: true, FreshGradersWanted: 1,
+	}}}
+	ws := pool(w, "waiting", "waiting", "free", "free")
+	d := p.decide(w, ws, 0, t0)
+	if d.Launch == 0 {
+		t.Fatalf("stuck: two idle graders cannot break their own baseline tie; Launch=%d End=%v",
+			d.Launch, handles(d.End))
+	}
+	// Once that fresh machine is starting, no additional machines are launched on the next tick.
+	wsStarting := pool(w, "waiting", "waiting", "starting", "free")
+	if d2 := p.decide(w, wsStarting, 0, t0); d2.Launch != 0 {
+		t.Fatalf("with fresh tie-break grader already starting, should not launch more: Launch=%d", d2.Launch)
+	}
+	// Even at MaxWorkers == 2 (at capacity with 2 idle graders), make room for 1 fresh machine.
+	p.MaxWorkers = 2
+	wsCap := pool(w, "waiting", "waiting", "free", "free")
+	wsCap[0].Speed, wsCap[1].Speed = 1.0, 2.0
+	if d3 := p.decide(w, wsCap, 0, t0); d3.Launch != 1 || handles(d3.End) != "stet-rp-01" {
+		t.Fatalf("at MaxWorkers=2, want slowest idle grader ended and 1 fresh launched: Launch=%d End=%s", d3.Launch, handles(d3.End))
+	}
+	// Explicit BaselineDisputed flag launches a fresh machine even while other grades are under way.
+	p.MaxWorkers = 6
+	wDisp := &Work{Rounds: []WorkRound{{
+		ID: "s3-o00001", Entries: 3, GradesWanted: 1, GradesUnderWay: 1, BaselinesWanted: &one, BaselineDisputed: true,
+	}}}
+	if d4 := p.decide(wDisp, pool(wDisp, "waiting", "waiting", "grading", "free"), 0, t0); d4.Launch != 1 {
+		t.Fatalf("explicit BaselineDisputed with other grade under way: want Launch=1, got %d", d4.Launch)
+	}
+	// Explicit FreshGradersWanted (e.g. two idle graders disagreed on tokens_sha256) launches a 3rd.
+	zero := 0
+	wTok := &Work{Rounds: []WorkRound{{
+		ID: "s3-o00001", Entries: 1, GradesWanted: 1, BaselinesWanted: &zero, FreshGradersWanted: 1,
+	}}}
+	if d5 := p.decide(wTok, pool(wTok, "waiting", "waiting", "free"), 0, t0); d5.Launch != 1 {
+		t.Fatalf("FreshGradersWanted=1 for script tie-break: want Launch=1, got %d", d5.Launch)
+	}
+	// Normal undisputed edit-to-grade transition: 2 GPUs finished edits and wait for first grade
+	// (BaselinesWanted=2, GradesWanted=2, GradesUnderWay=0, BaselineDisputed=false, FreshGradersWanted=0).
+	// Must NOT over-rent below MaxWorkers and must NOT evict healthy idle GPUs at MaxWorkers.
+	two := 2
+	wNormal := &Work{Rounds: []WorkRound{{
+		ID: "s3-o00002", Entries: 3, GradesWanted: 2, BaselinesWanted: &two,
+	}}}
+	p.MaxWorkers = 6
+	if d6 := p.decide(wNormal, pool(wNormal, "waiting", "waiting", "free", "free"), 0, t0); d6.Launch != 0 || len(d6.End) != 0 {
+		t.Fatalf("normal undisputed round start (Max=6): want Launch=0 End=[], got Launch=%d End=%s", d6.Launch, handles(d6.End))
+	}
+	p.MaxWorkers = 2
+	if d7 := p.decide(wNormal, pool(wNormal, "waiting", "waiting", "free", "free"), 0, t0); d7.Launch != 0 || len(d7.End) != 0 {
+		t.Fatalf("normal undisputed round start (Max=2): want Launch=0 End=[], got Launch=%d End=%s", d7.Launch, handles(d7.End))
+	}
+}

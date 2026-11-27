@@ -398,6 +398,25 @@ func (p Policy) nearDraw(w *Work, now time.Time) bool {
 
 const keptNearDraw = 2
 
+// freshGraders counts fresh machines needed for tie-breaking baselines or disputed grades that
+// existing idle ("waiting") machines cannot take (because they already measured the baseline or
+// graded the disputed script). Driven strictly by server-emitted FreshGradersWanted / BaselineDisputed
+// so normal undisputed round transitions never over-rent or evict healthy idle GPUs.
+func (p Policy) freshGraders(w *Work) int {
+	need := 0
+	for _, r := range w.Rounds {
+		if r.GradesWanted <= 0 {
+			continue
+		}
+		roundNeed := r.FreshGradersWanted
+		if roundNeed == 0 && r.BaselineDisputed && (r.BaselinesWanted == nil || *r.BaselinesWanted > 0) {
+			roundNeed = 1
+		}
+		need += roundNeed
+	}
+	return need
+}
+
 // decideNext decides, where a machine rented now for grades taken before an exam is taken to
 // take next of them (forExam's plan for the kind it would rent).
 func (p Policy) decideNext(w *Work, workers []*Worker, spentToday float64, now time.Time, next int) Decision {
@@ -419,8 +438,8 @@ func (p Policy) decideNext(w *Work, workers []*Worker, spentToday float64, now t
 	early, renting := p.earlyMachines(p.earlyWanted(w, now), next, workers, now, ending)
 	waiting := p.targetHolding(w, held, now, early)
 	d := Decision{Target: min(waiting+working, p.MaxWorkers)}
-	free := 0
-	var idle []*Worker
+	free, starting := 0, 0
+	var idle, waitingIdle []*Worker
 	for _, wk := range workers {
 		switch st := wk.state(now, p); st {
 		case "free":
@@ -449,13 +468,15 @@ func (p Policy) decideNext(w *Work, workers []*Worker, spentToday float64, now t
 			}
 			d.Live++
 			idle = append(idle, wk)
+			waitingIdle = append(waitingIdle, wk)
 		default:
 			if st == "starting" && wk.GradeOnly && p.runners(w) > 0 && !p.gradeFor(w, wk, now) {
 				d.End = append(d.End, Ending{Worker: wk, Why: "it grades only, and no grade wants it yet"})
 				continue
 			}
 			d.Live++
-			if st == "waiting" || st == "starting" {
+			if st == "starting" {
+				starting++
 				idle = append(idle, wk)
 			}
 		}
@@ -503,6 +524,18 @@ func (p Policy) decideNext(w *Work, workers []*Worker, spentToday float64, now t
 			d.Live--
 		}
 		return d
+	}
+	if freshNeed := p.freshGraders(w); freshNeed > starting && len(waitingIdle) > 0 {
+		extra := freshNeed - starting
+		if d.Live+extra > p.MaxWorkers {
+			drop := min(d.Live+extra-p.MaxWorkers, len(waitingIdle))
+			sort.SliceStable(waitingIdle, func(i, j int) bool { return waitingIdle[i].Speed < waitingIdle[j].Speed })
+			for _, wk := range waitingIdle[:drop] {
+				d.End = append(d.End, Ending{Worker: wk, Why: "idle while a fresh machine is needed to break a dispute"})
+				d.Live--
+			}
+		}
+		d.Target = min(max(d.Target, d.Live+extra), p.MaxWorkers)
 	}
 	d.Launch = max(0, min(d.Target, p.MaxWorkers)-d.Live)
 	if d.Launch > free {

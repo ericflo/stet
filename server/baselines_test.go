@@ -1602,3 +1602,260 @@ func TestBadInitBaselineIsFilteredAndReplacedWhenExaminerOmitsInit(t *testing.T)
 		w.check()
 	})
 }
+
+// Review 10 P1 #4: two baselines 0.016–0.030 apart (e.g. 6.00 vs 6.02 against tol 0.015) MUST be
+// treated as disputed (not settled rated against their 6.01 midpoint), must request a third
+// independent baseline, must leave ExamScores.BaselineOf empty if closed unrated, and must resolve
+// cleanly if a third baseline arrives within ReplicaWait.
+func TestTwoBaselinesBeyondToleranceButWithinTwiceSettleOnMidpoint(t *testing.T) {
+	t.Run("unresolved_closes_unrated_with_empty_baseline_of", func(t *testing.T) {
+		w, anchor, idx := toGrade(t, 2)
+		w.app.season.Tolerance[w.cfg.Scale] = Tolerance{Grade: 0.012, Baseline: 0.015, Run: 0.015}
+		g := w.volunteers("bob", "carol")
+		c0 := w.asked(g[0], true)
+		c1 := w.asked(g[1], true)
+		if code, status := w.send(g[0], c0, 5.6, 6.00); code != 200 || status != "pending" {
+			t.Fatalf("bob: HTTP %d %s", code, status)
+		}
+		if code, status := w.send(g[1], c1, 5.6, 6.02); code != 200 || status != "pending" {
+			t.Fatalf("carol (0.020 > 0.015 apart) must NOT settle round: HTTP %d %s", code, status)
+		}
+		w.app.st.view(func(s *State) {
+			rd := s.Rounds[idx]
+			if rd.Status != "open" || rd.BaselineN != 0 || !w.app.baselineDisputed(s, rd) {
+				t.Fatalf("expected open disputed round with BaselineN=0, got status=%s baseN=%d disputed=%v",
+					rd.Status, rd.BaselineN, w.app.baselineDisputed(s, rd))
+			}
+		})
+		if wk := w.work(anchor).Rounds[0]; !wk.BaselineDisputed || wk.BaselinesWanted == 0 || wk.GradesWanted != 1 || wk.FreshGradersWanted == 0 {
+			t.Fatalf("work must flag disputed baseline and request fresh tie-break grader: %+v", wk)
+		}
+		// After ReplicaWait expires unresolved, round closes unrated and archived ExamScores.BaselineOf is empty.
+		w.pass(w.cfg.ReplicaWait + time.Minute)
+		w.app.archiveExam(t.Context())
+		w.app.st.view(func(s *State) {
+			rd := s.Rounds[idx]
+			if rd.Status != "settled" || rd.BaselineLoss != nil || rd.BaselineN != 0 {
+				t.Fatalf("unresolved round: status=%s loss=%v n=%d", rd.Status, rd.BaselineLoss, rd.BaselineN)
+			}
+			for _, en := range s.inRound[idx] {
+				if s.rated(en) || !en.Void || !en.Unattended {
+					t.Fatalf("entry must close void+unattended+unrated: %+v", en)
+				}
+			}
+		})
+		var scores ExamScores
+		if code := anchor.do("GET", "/api/v1/rounds/"+roundID(w.app.season.ID, idx)+"/scores", nil, &scores); code != 200 {
+			t.Fatalf("GET archived scores: HTTP %d", code)
+		}
+		if len(scores.Baseline) != 0 || len(scores.BaselineOf) != 0 {
+			t.Fatalf("unrated archived ExamScores must have empty Baseline and BaselineOf, got len(Baseline)=%d BaselineOf=%v",
+				len(scores.Baseline), scores.BaselineOf)
+		}
+		w.check()
+	})
+
+	t.Run("third_baseline_resolves_0.020_spread", func(t *testing.T) {
+		w, _, idx := toGrade(t, 2)
+		w.app.season.Tolerance[w.cfg.Scale] = Tolerance{Grade: 0.012, Baseline: 0.015, Run: 0.015}
+		g := w.volunteers("bob", "carol", "erin")
+		c0 := w.asked(g[0], true)
+		c1 := w.asked(g[1], true)
+		if code, _ := w.send(g[0], c0, 5.6, 6.00); code != 200 {
+			t.Fatalf("bob: HTTP %d", code)
+		}
+		if code, status := w.send(g[1], c1, 5.6, 6.02); code != 200 || status != "pending" {
+			t.Fatalf("carol: HTTP %d %s", code, status)
+		}
+		// Erin reports 6.004 -> median(6.00, 6.004, 6.02) = 6.004; bob (0.004) and erin (0) agree,
+		// while carol (0.016 > 0.015) is oddOut!
+		c2 := w.asked(g[2], true)
+		if code, _ := w.send(g[2], c2, 5.6, 6.004); code != 200 {
+			t.Fatalf("erin: HTTP %d", code)
+		}
+		if c2.Job.Editor.Name != c1.Job.Editor.Name {
+			cRe := w.claim(g[0], false)
+			if cRe.Job == nil {
+				t.Fatalf("expected bob to re-grade carol's oddOut script")
+			}
+			if code, status := w.send(g[0], cRe, 5.6, 6.00); code != 200 || status != "settled" {
+				t.Fatalf("bob re-grade: HTTP %d %s", code, status)
+			}
+		}
+		w.app.st.view(func(s *State) {
+			rd := s.Rounds[idx]
+			if rd.Status != "settled" || rd.BaselineLoss == nil || math.Abs(*rd.BaselineLoss-6.002) > 1e-6 || rd.BaselineN != 2 {
+				t.Fatalf("resolved 0.020 spread: status=%s loss=%v n=%d", rd.Status, rd.BaselineLoss, rd.BaselineN)
+			}
+		})
+		w.check()
+	})
+}
+
+// Review 10 P2 #5: when two graders disagree on script.tokens_sha256 with no 3rd grader active yet,
+// the entry must stay open for ReplicaWait so a deciding 3rd grader can arrive (via stet-cloud or
+// volunteer), resolving cleanly if one arrives and voiding unattended only after ReplicaWait expires.
+func TestTokensTieVoidsAtOnceWithoutWaitingForDecidingGrade(t *testing.T) {
+	setupTokensTie := func(t *testing.T) (*world, *actor, int, []*actor) {
+		t.Helper()
+		pub, priv := newKey()
+		w := newWorld(t, pub)
+		anchor := w.join("anchor-one", priv)
+		g := w.volunteers("bob", "carol", "dave")
+		w.submit(w.join("owner-0", nil), "entry-0", "print(0)")
+		idx := w.drawWithoutExam()
+		ce := w.claim(anchor, true)
+		if code, _ := w.edit(anchor, ce, "0\n1\n"); code != 200 {
+			t.Fatalf("edit: HTTP %d", code)
+		}
+		c0, c1 := w.claimEarly(g[0]), w.claimEarly(g[1])
+		w.exam(idx)
+		p0 := w.result(c0, 5.5, 6.0)
+		p0["script"].(map[string]any)["tokens_sha256"] = strings.Repeat("a", 64)
+		p1 := w.result(c1, 5.5, 6.0)
+		p1["script"].(map[string]any)["tokens_sha256"] = strings.Repeat("b", 64)
+		if code := g[0].do("POST", fmt.Sprintf("/api/v1/jobs/%d/result", c0.Job.ID), p0, nil); code != 200 {
+			t.Fatalf("bob: HTTP %d", code)
+		}
+		if code := g[1].do("POST", fmt.Sprintf("/api/v1/jobs/%d/result", c1.Job.ID), p1, nil); code != 200 {
+			t.Fatalf("carol: HTTP %d", code)
+		}
+		// Immediately after the 2nd disagreeing grade, the entry MUST stay open (not voided!).
+		w.app.st.view(func(s *State) {
+			if en := s.inRound[idx][0]; en.Status != "open" {
+				t.Fatalf("tokens tie settled immediately (%s, void=%v) instead of waiting ReplicaWait for a 3rd grader",
+					en.Status, en.Void)
+			}
+		})
+		if wk := w.work(anchor).Rounds[0]; wk.GradesWanted != 1 {
+			t.Fatalf("work must request 1 deciding grade during ReplicaWait: %+v", wk)
+		}
+		return w, anchor, idx, g
+	}
+
+	t.Run("third_grader_resolves_within_replica_wait", func(t *testing.T) {
+		w, _, idx, g := setupTokensTie(t)
+		w.pass(w.cfg.ReplicaWait / 2)
+		c2 := w.claim(g[2], false)
+		if c2.Job == nil || c2.Job.Kind != "grade" {
+			t.Fatalf("expected 3rd grader to receive deciding grade during ReplicaWait, got %+v", c2.Job)
+		}
+		p2 := w.result(c2, 5.5, 6.0)
+		p2["script"].(map[string]any)["tokens_sha256"] = strings.Repeat("a", 64)
+		if code := g[2].do("POST", fmt.Sprintf("/api/v1/jobs/%d/result", c2.Job.ID), p2, nil); code != 200 {
+			t.Fatalf("dave: HTTP %d", code)
+		}
+		if w.settled(idx) != 1 {
+			t.Fatalf("expected round to settle once 3rd grader broke tokens tie")
+		}
+		e := w.entry(idx, "entry-0")
+		if e.Void || !e.Valid {
+			t.Fatalf("resolved tokens tie should settle valid & rated: %+v", e)
+		}
+		w.check()
+	})
+
+	t.Run("unresolved_voids_after_replica_wait", func(t *testing.T) {
+		w, _, idx, _ := setupTokensTie(t)
+		w.pass(w.cfg.ReplicaWait + time.Minute)
+		if w.settled(idx) != 1 {
+			t.Fatalf("expected unresolved tokens tie to settle after ReplicaWait")
+		}
+		e := w.entry(idx, "entry-0")
+		if !e.Void || e.Valid {
+			t.Fatalf("unresolved tokens tie after ReplicaWait should void unattended: %+v", e)
+		}
+		w.check()
+	})
+}
+
+// Gate 4 P2 #6: when 2 baselines disagree beyond tolerance on a PerRound=2 round, baselinesWanted
+// must ask for only ONE tie-break baseline (3rd), NOT two simultaneous tie-breakers (3rd + 4th).
+func TestDisputedBaselinesOnlyAskForOneSimultaneousTieBreaker(t *testing.T) {
+	w, anchor, idx := toGrade(t, 4)
+	w.app.season.Baselines.PerRound = 2
+	w.app.season.Tolerance[w.cfg.Scale] = Tolerance{Grade: 0.012, Baseline: 0.015, Run: 0.015}
+	g := w.volunteers("bob", "carol", "dave", "erin")
+
+	c0 := w.asked(g[0], true)
+	c1 := w.asked(g[1], true)
+	if code, _ := w.send(g[0], c0, 5.6, 6.000); code != 200 {
+		t.Fatalf("bob: HTTP %d", code)
+	}
+	if code, _ := w.send(g[1], c1, 5.6, 6.020); code != 200 {
+		t.Fatalf("carol: HTTP %d", code)
+	}
+	// Disputed 2-baseline round with 0 tie-breakers live -> BaselinesWanted MUST be 1 (not 2!).
+	if wk := w.work(anchor).Rounds[0]; !wk.BaselineDisputed || wk.BaselinesWanted != 1 {
+		t.Fatalf("disputed 2-baseline round before tie-breaker claim: want BaselineDisputed=true BaselinesWanted=1, got %+v", wk)
+	}
+	// 3rd grader claims -> asks for baseline, and BaselinesWanted drops to 0 so 4th grader does NOT
+	// also train a redundant 4th baseline on another open script!
+	c2 := w.asked(g[2], true)
+	if c2.Job.Baseline == nil || !*c2.Job.Baseline {
+		t.Fatalf("3rd grader must be asked for the tie-break baseline")
+	}
+	if wk := w.work(anchor).Rounds[0]; wk.BaselinesWanted != 0 {
+		t.Fatalf("while 3rd tie-break baseline is live, want BaselinesWanted=0, got %+v", wk)
+	}
+	c3 := w.asked(g[3], false)
+	if c3.Job.Baseline != nil && *c3.Job.Baseline {
+		t.Fatalf("4th grader must NOT be asked for a redundant 4th baseline while 3rd tie-breaker is live")
+	}
+	_ = idx
+	w.check()
+}
+
+// Gate 4 P1 #2: releasing a pre-exam grade due to ExamWaitTimeout must NOT burn maxGradeAttempts
+// (sc.Tries) to abandon innocent curators' scripts, and must NOT immediately re-offer pre-exam
+// grades to the same Anchor account until the round's exam is actually posted.
+func TestExamWaitTimeoutDoesNotBurnAttemptsOrReofferPreExamGrade(t *testing.T) {
+	pub, priv := newKey()
+	w := newWorld(t, pub)
+	anchor := w.join("anchor-one", priv)
+	w.submit(w.join("owner-0", nil), "entry-0", "print(0)")
+	idx := w.drawWithoutExam()
+	ce := w.claim(anchor, true)
+	if code, _ := w.edit(anchor, ce, "0\n1\n"); code != 200 {
+		t.Fatalf("edit: HTTP %d", code)
+	}
+
+	// Simulate 6 Anchor machines timing out waiting for the stalled exam (> maxGradeAttempts=5).
+	anchors := make([]*actor, 6)
+	for i := range anchors {
+		a := w.rented(anchor, fmt.Sprintf("fleet-%d", i))
+		anchors[i] = a
+
+		c := w.claimEarly(a)
+		if c.Job == nil || c.Job.Kind != "grade" {
+			t.Fatalf("fleet-%d expected pre-exam grade, got %+v", i, c.Job)
+		}
+		if code := a.do("POST", fmt.Sprintf("/api/v1/jobs/%d/release", c.Job.ID),
+			map[string]any{"reason": examWaitTimeoutReason}, nil); code != 200 {
+			t.Fatalf("fleet-%d release: HTTP %d", i, code)
+		}
+		// Immediately re-asking with early=true before exam posts MUST NOT hand the grade back!
+		if again := w.claimEarly(a); again.Job != nil {
+			t.Fatalf("fleet-%d was immediately re-handed pre-exam grade %d after exam wait timeout (infinite loop!)", i, again.Job.ID)
+		}
+	}
+
+	// Even after 6 timeouts (> maxGradeAttempts), the script MUST still be open and NOT abandoned!
+	w.app.st.view(func(s *State) {
+		en := s.inRound[idx][0]
+		if en.Status != "open" || en.Void {
+			t.Fatalf("entry abandoned after exam wait timeouts: status=%s void=%v", en.Status, en.Void)
+		}
+	})
+
+	// Once the exam posts, the same Anchor account IS eligible to grade normally and settle rated.
+	w.exam(idx)
+	cPost := w.claim(anchors[0], false)
+	if cPost.Job == nil || cPost.Job.Kind != "grade" {
+		t.Fatalf("after exam posts, timed-out anchor must be eligible to grade again, got %+v", cPost.Job)
+	}
+	if code, status := w.send(anchors[0], cPost, 5.5, 6.0); code != 200 || status != "settled" {
+		t.Fatalf("post-exam grade: HTTP %d %s", code, status)
+	}
+	w.check()
+}

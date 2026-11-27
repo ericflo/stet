@@ -158,11 +158,13 @@ every item is published with it.
 There is nothing to fit in advance: every round's exam comes from three hours of writing
 published the day before, which its draw picks. What a curator can learn from past rounds is
 what kinds of text teach a model well across every language by its share of the crawl. Known
-caveats and empirical adversary tests — including the head-to-head teacher benchmark showing how
-switching from `Qwen3-8B` to `Inkling-2-Mini` (`reasoning_effort=low`) eliminated `FineWeb-Edu`'s
-`#1` lead on DataDecide (`#1 → #8`, exact `#1` recipe `dclm-baseline-qc-20p`) and shrank
-`adv_ppl_qwen06b`'s margin over `fineweb2` by `94.6%` (`137.5% → 102.3%`) — are documented openly
-in [Experiments](EXPERIMENTS.md).
+caveats and empirical adversary tests — including the head-to-head teacher comparison and 3-draw
+validation showing how switching from `Qwen3-8B` to `Inkling-2-Mini` (`reasoning_effort=low`)
+eliminated `FineWeb-Edu`'s `#1` textbook lean (`100% → 0%` #1 rate across resamples and 3 disjoint
+draws, pooled `#6/12` vs true `#7`), shrank `adv_ppl_qwen06b − fineweb2` by `0.019 bpb` (and pushed
+cross-family `adv_ppl_ernie03b` below `fineweb2`), and keeps `adv_qa_spam` at `−0.0005` alongside
+real CJK and between-curator excerpt-rotation caveats — are documented openly in
+[Experiments](EXPERIMENTS.md).
 
 ## Does everything on the exam count?
 

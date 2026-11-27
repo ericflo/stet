@@ -46,6 +46,13 @@ type WorkRound struct {
 	// that have measured it or hold a grade that asked them to. Such a machine's first
 	// grade of the round is two training passes; any other's is one.
 	BaselinesWanted int `json:"baselines_wanted"`
+	// BaselineDisputed is true when the round's established baselines disagree beyond
+	// tolerance and need a fresh independent machine that has not yet measured it.
+	BaselineDisputed bool `json:"baseline_disputed,omitempty"`
+	// FreshGradersWanted counts fresh grading machines needed when grades are waiting that
+	// no currently idle organiser machine is eligible to take (e.g. a baseline or script tie
+	// where the idle machines have already measured or graded the disputed item).
+	FreshGradersWanted int `json:"fresh_graders_wanted,omitempty"`
 }
 
 // WorkMachine is one of the organisers' accounts, as the judge sees it now.
@@ -132,12 +139,37 @@ func (a *App) work(s *State) Work {
 	fresh := &asker{acct: &Account{ID: -1, Anchor: true, Worker: true}, est: true, gpuMake: "cuda"}
 	early := &asker{acct: &Account{ID: -3, Anchor: true, Worker: true}, est: true, gpuMake: "cuda", early: true}
 	runner := &asker{acct: &Account{ID: -2, Anchor: true, Worker: true}, est: true, canEdit: true, gpuMake: "cuda"}
+	busy, long := map[int64]string{}, map[int64]bool{}
+	holding, untrained := map[int64]int{}, map[int64]bool{}
+	// Training one of the organisers' own students counts as at work, so that a rented machine is
+	// not ended partway through one; an official job it holds says so instead.
+	at := now()
+	for _, b := range s.Farm {
+		for _, t := range b.Tasks {
+			if t.Done == nil && t.Holder != 0 && t.Until > at {
+				busy[t.Holder] = "farm"
+				long[t.Holder] = long[t.Holder] || b.lease() > farmShort
+			}
+		}
+	}
+	for _, c := range s.Claims {
+		if e := s.entry(c.RoundIdx, c.EditorID); c.live(j.t) && e != nil && e.Status == "open" {
+			busy[c.AccountID] = c.Kind
+			if c.Kind == "grade" {
+				holding[c.AccountID]++
+			}
+			untrained[c.AccountID] = untrained[c.AccountID] || c.Kind != "grade" || c.TrainedAt == 0
+		}
+	}
+	active := j.active()
 	for _, rd := range openRounds(s) {
 		states := j.states(rd)
 		closing := j.closing(states)
+		disputed := a.baselineDisputed(s, rd)
 		wr := WorkRound{ID: roundID(a.season.ID, rd.Idx), Entries: len(states), ExamAt: rd.ExamAt, DrawnAt: rd.DrawnAt, ExamDue: examDue(s, rd),
-			BaselinesWanted: j.baselinesWanted(rd)}
+			BaselinesWanted: j.baselinesWanted(rd), BaselineDisputed: disputed}
 		tieBreakOffer := false
+		estGradesUnderWay := 0
 		for _, st := range states {
 			wr.EditsUnderWay += len(st.LiveEdits)
 			if len(st.LiveEdits) == 0 && j.anyone(st, nil) {
@@ -145,6 +177,11 @@ func (a *App) work(s *State) Work {
 			}
 			for _, sc := range st.Scripts {
 				wr.GradesUnderWay += len(sc.Live)
+				for _, c := range sc.Live {
+					if j.est[c.AccountID] {
+						estGradesUnderWay++
+					}
+				}
 			}
 			for _, o := range j.offers(st, fresh, closing) {
 				if o.kind == "grade" && o.required {
@@ -171,9 +208,36 @@ func (a *App) work(s *State) Work {
 		if wr.GradesWanted == 0 && wr.BaselinesWanted > 0 && tieBreakOffer {
 			wr.GradesWanted = 1
 		}
+		if wr.GradesWanted > 0 {
+			idleAnchors, eligibleIdle := 0, 0
+			for _, q := range active {
+				if !q.acct.Anchor || busy[q.acct.ID] != "" {
+					continue
+				}
+				idleAnchors++
+				canTake := false
+				for _, st := range states {
+					for _, o := range j.offers(st, q, closing) {
+						if o.kind == "grade" && o.required {
+							canTake = true
+							break
+						}
+					}
+					if canTake {
+						break
+					}
+				}
+				if canTake {
+					eligibleIdle++
+				}
+			}
+			if (disputed && eligibleIdle == 0) || (idleAnchors > 0 && eligibleIdle == 0 && estGradesUnderWay == 0) {
+				wr.FreshGradersWanted = 1
+			}
+		}
 		out.Rounds = append(out.Rounds, wr)
 	}
-	for _, q := range j.active() {
+	for _, q := range active {
 		if q.canEdit {
 			out.Runners++
 		}
@@ -193,29 +257,7 @@ func (a *App) work(s *State) Work {
 		soon, _ := a.earlyDraw(s)
 		out.Waiting = soon != nil
 	}
-	out.FarmWaiting, out.FarmUnderWay, out.FarmLongWaiting = farmWaiting(s, now())
-	busy, long := map[int64]string{}, map[int64]bool{}
-	holding, untrained := map[int64]int{}, map[int64]bool{}
-	// Training one of the organisers' own students counts as at work, so that a rented machine is
-	// not ended partway through one; an official job it holds says so instead.
-	at := now()
-	for _, b := range s.Farm {
-		for _, t := range b.Tasks {
-			if t.Done == nil && t.Holder != 0 && t.Until > at {
-				busy[t.Holder] = "farm"
-				long[t.Holder] = long[t.Holder] || b.lease() > farmShort
-			}
-		}
-	}
-	for _, c := range s.Claims {
-		if e := s.entry(c.RoundIdx, c.EditorID); c.live(j.t) && e != nil && e.Status == "open" {
-			busy[c.AccountID] = c.Kind
-			if c.Kind == "grade" {
-				holding[c.AccountID]++
-			}
-			untrained[c.AccountID] = untrained[c.AccountID] || c.Kind != "grade" || c.TrainedAt == 0
-		}
-	}
+	out.FarmWaiting, out.FarmUnderWay, out.FarmLongWaiting = farmWaiting(s, at)
 	failed, refused, trouble := troubles(s, at)
 	for _, acct := range s.Accounts {
 		if acct.Anchor {
@@ -242,7 +284,7 @@ func (a *App) apiAdminWork(w http.ResponseWriter, r *http.Request) {
 // stopped are the reasons a job is handed back for that say nothing against the machine: it
 // was stopped, the round ended, the organisers ended it, or it did not say (before the server
 // kept reasons).
-var stopped = map[string]bool{"": true, "interrupted": true, "the verifier stopped": true, "the round ended before its exam was posted": true, endedReason: true}
+var stopped = map[string]bool{"": true, "interrupted": true, "the verifier stopped": true, "the round ended before its exam was posted": true, "timed out waiting for the round's exam": true, endedReason: true}
 
 // troubles counts, for each of the organisers' accounts, the jobs it took since its key's
 // last machine was ended (and within a day) that failed or whose result was refused, and says

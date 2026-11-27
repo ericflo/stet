@@ -433,14 +433,14 @@ and coarse 10-script buckets starving `fa`, `pl`, `uk`), jumping `reader` from `
 completed prefiltering + `py3langid` in **`37.49s`** -> `75,678` candidates, leaving `>1,160s` for
 GPU scoring)*.
 
-3. **Production AMD Radeon 8060S examiner verification & language-mix adversary gate (`amd_examiner`, `lang_adv_gate`).**
+3. **AMD Radeon 8060S examiner verification (prior `Qwen3-8B` baseline) & language-mix adversary gate (`amd_examiner`, `lang_adv_gate`).**
    After fixing the `synthesis` `PROMPT: ...` placeholder, adding crawl-share weighting inside the
    pooled `"other"` small-language cell (`weight_other_by_share: true` on `s3`, preserving `false`
    for `s2`), collapsing Wikipedia variants into one source bucket, lowering CJK `min_len` to 180
    chars, adding wrong-language / mid-sentence / `\ufffd` filters, enforcing `min_keep_rate = 0.5`,
    and publishing teacher `prompt` + `cont` + `wrapper_id` + `excerpt_sha256` for every withheld
    reasoning item:
-   - **Two cold official draws on the production AMD Radeon 8060S (`124 GiB`, `PyTorch 2.15.0+rocm7.14`, `transformers 5.23.0`, `$0/round`):**
+   - **Two cold official draws on AMD Radeon 8060S (`124 GiB`, `PyTorch 2.15.0+rocm7.14`, `transformers 5.23.0`, prior `Qwen3-8B` `$0/round` baseline):**
      - **Draw A (`s3-o00002`, real `news=0` draw, hours `1795636800/44000/51200`):** omitted `news=0`
        cleanly (redistributing `16.7%` each to `reference/technical/conversation`), built **`1,517` fresh
        items** (`explain=206, infer=210, synthesis=203`; `620/640 = 96.9%` kept, `synthesis` `95.3%`,
@@ -594,48 +594,126 @@ GPU scoring)*.
      To test whether a newer Apache-2.0 teacher fixes `Qwen3-8B`'s `FineWeb-Edu` textbook lean and
      `adv_ppl_qwen06b` perplexity-pruning edge, we synthesized Draw B (`s3-o00003`) reasoning exams
      from the **exact same 640 Draw B source documents across 43 languages** with `Qwen/Qwen3.5-9B`
-     (`c2022362`, both `enable_thinking=False` and `enable_thinking=True`) and
-     `thinkingmachines/Inkling-2-Mini` (`c9d02830`, both `reasoning_effort="none"` and
-     `reasoning_effort="low"`), applied exact `stet.exam.decontam.seen()` against the Draw B corpus,
-     and evaluated **16 official CUDA `standard` (`65.5M`-token) `ERNIE-4.5-0.3B` students**
-     (4 multilingual/adversarial streams + all 12 DataDecide 1B recipes, all bit-identical
-     `init_sha256 = 5bd1d5ce4547697e...`) on every exam under both original (`orig`) and
-     within-`(lang, task)` rotated excerpts (`rot`). (`Qwen/Qwen3.5-9B` with `enable_thinking=True`
-     has no `reasoning_effort` knob and burned `>2,048` CoT tokens per 2-sentence item even under
-     official anti-loop sampling `temp=0.6, presence_penalty=1.5`, yielding `0/640` kept drafts.)
+     (`c2022362`, `enable_thinking=False`) and `thinkingmachines/Inkling-2-Mini` (`c9d02830`, both
+     `reasoning_effort="none"` and `reasoning_effort="low"`), applied exact `stet.exam.decontam.seen()`
+     against the Draw B corpus, and evaluated **16 official CUDA `standard` (`65.5M`-token)
+     `ERNIE-4.5-0.3B` students** (4 multilingual/adversarial streams + all 12 DataDecide 1B recipes,
+     all bit-identical `init_sha256 = 5bd1d5ce4547697e...`) on every exam under both original (`orig`)
+     and within-`(lang, task)` rotated excerpts (`rot`). Two experimental notes for transparency:
+     (a) `Qwen/Qwen3.5-9B` with `enable_thinking=True` has no `reasoning_effort` knob and burned
+     `>2,048` CoT tokens per 2-sentence item even under anti-loop sampling (`temp=0.6, pp=1.5`),
+     producing an empty exam (`0/640` kept, not compared in the table); (b) `Inkling-2-Mini` with
+     `reasoning_effort="none"` kept only `3/640` under greedy `t=0, max_tokens=512` and was rerun
+     non-greedily (`t=0.6, top_p=0.95, pp=1.0, max_tokens=1536`) to yield `621/640`, whereas shipped
+     `Inkling-2-Mini` (`effort="low"`, greedy `t=0.0, max_tokens=1536`) kept `626/640` cleanly.
 
-| Teacher (exact same 640 Draw B docs) | Synth Wall Time | Kept / 640 (Post-Decontam) | Langs | DD 1B Pairs (`orig` / `rot`) | DD 1B `2pt+` (`orig` / `rot`) | DD 1B `ρ` (`orig`) | 3% Trap | `FineWeb-Edu` Rank *(true `#7`)* | Predicted Top-1 *(1B Shortfall)* |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
-| `Qwen/Qwen3-8B` (prior S3) | `1213s` *(AMD 8060S)* | `617` (`96.4%` → `611`) | `39` | `54/66` / `51/66` | `30/31` / `26/31` | `+0.7762` | `#11/12` | `#1/12` (`+0.0198`) | `fineweb-edu` (`+1.95pp`) |
-| `Qwen/Qwen3.5-9B` (`nothink`) | `58.6s` *(1× 5090)* | `612` (`95.6%` → `606`) | `42` | `58/66` / `51/66` | `31/31` / `28/31` | `+0.8392` | `#11/12` | `#1/12` (`+0.0072`) | `fineweb-edu` (`+1.95pp`) |
-| `Inkling-2-Mini` (`effort="none"`, `t=0.6`) | `246.6s` *(2× 5090)* | `621` (`97.0%` → `614`) | `40` | `55/66` / `49/66` | `30/31` / `27/31` | `+0.8042` | `#11/12` | `#7/12` (`−0.0067`) | `dclm-baseline-qc-7p-fw2` (`+0.14pp`) |
-| **`Inkling-2-Mini` (`effort="low"`, `t=0.0`)** | `562.2s` *(1× 5090)* | **`626` (`97.8%` → `617`)** | `41` | **`58/66`** / `52/66` | **`31/31`** / `27/31` | **`+0.8601`** | **`#11/12`** | **`#8/12`** (`−0.0083`) | **`dclm-baseline-qc-20p` (`0.00pp`)** |
+| Teacher (exact same 640 Draw B docs) | Synth Wall Time | Kept / 640 (Post-Decontam) | Langs | DD 1B Pairs (`orig` / `rot`, paired boot 95% CI) | DD 1B `ρ` (`orig`) | `FineWeb-Edu` Rank *(true `#7`)* / `P(#1)` | Predicted Top-1 *(1B Shortfall)* |
+|---|---:|---:|---:|---:|---:|---:|---|
+| `Qwen/Qwen3-8B` (prior S3) | `1213s` *(AMD 8060S)* | `617` (`96.4%` → `611`) | `39` | `54/66` / `51/66` (`[47, 57]`) | `+0.7762` | `#1/12` / `100%` | `fineweb-edu` (`+1.95pp`) |
+| `Qwen/Qwen3.5-9B` (`nothink`) | `58.6s` *(1× 5090)* | `612` (`95.6%` → `606`) | `42` | `58/66` / `51/66` (`[49, 59]`) | `+0.8392` | `#1/12` / `99%` | `fineweb-edu` (`+1.95pp`) |
+| `Inkling-2-Mini` (`effort="none"`, `t=0.6` rerun) | `246.6s` *(2× 5090)* | `621` (`97.0%` → `614`) | `40` | `55/66` / `49/66` (`[49, 58]`) | `+0.8042` | `#7/12` / `0%` | `dclm-baseline-qc-7p-fw2` (`+0.14pp`) |
+| **`Inkling-2-Mini` (`effort="low"`, `t=0.0`)** | `562.2s` *(1× 5090 warm)* | **`626` (`97.8%` → `617`)** | `41` | **`58/66`** / `52/66` (`[50, 61]`) | **`+0.8601`** | **`#8/12` / `0%`** | `dclm-baseline-qc-20p` (`0.00pp`) |
 
-| Teacher (43-lang Draw B ML + adversarial + rotated control) | `fineweb2` | `adv_ppl_qwen06b` (`%` of `fw2`) | `mimic` (`%` of `fw2`) | `fw2 − adv` | Abs Drop on Rot (`u / fw2`) | `adv − fw2` (`orig` → `rot`) | Per-Pillar DD `exp/inf/syn /66` |
+| Teacher (43-lang Draw B ML + adversarial + rotated control) | `fineweb2` | `adv_ppl_qwen06b` (`%` of `fw2`) | `mimic` (`%` of `fw2`) | `adv − fw2` (`orig` → `rot`) | `fw2 − mimic` | CJK `fw2` raw mean (`n=50`) | Abs Drop on Rot (`u / fw2`) |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| `Qwen/Qwen3-8B` | `+0.05424` | `+0.07458` (`137.5%`) | `+0.02692` (`49.6%`) | `−0.02034` | `+0.139 / +0.136` | `+0.02034 → +0.01930` (`94.9%`) | `48 / 48 / 50` |
-| `Qwen/Qwen3.5-9B` (`nothink`) | `+0.05332` | `+0.06525` (`122.4%`) | `+0.03155` (`59.2%`) | `−0.01193` | `+0.148 / +0.141` | `+0.01193 → +0.00695` (`58.2%`) | `54 / 52 / 50` |
-| `Inkling-2-Mini` (`effort="none"`) | `+0.04955` | `+0.05248` (`105.9%`) | `+0.02743` (`55.4%`) | `−0.00293` | `+0.139 / +0.134` | `+0.00293 → −0.00037` | `55 / 50 / 52` |
-| **`Inkling-2-Mini` (`effort="low"`)** | `+0.04710` | **`+0.04820` (`102.3%`)** | `+0.02922` (`62.0%`) | **`−0.00110`** | **`+0.211 / +0.205` (+51.2% / +50.2%)** | **`+0.00110 → −0.00143`** | **`58 / 54 / 50`** |
+| `Qwen/Qwen3-8B` | `+0.05424` | `+0.07458` (`137.5%`) | `+0.02692` (`49.6%`) | `+0.02034 → +0.01930` | `+0.02732` | `+0.018` | `+0.139 / +0.136` |
+| `Qwen/Qwen3.5-9B` (`nothink`) | `+0.05332` | `+0.06525` (`122.4%`) | `+0.03155` (`59.2%`) | `+0.01193 → +0.00695` | `+0.02177` | — | `+0.148 / +0.141` |
+| `Inkling-2-Mini` (`effort="none"`) | `+0.04955` | `+0.05248` (`105.9%`) | `+0.02743` (`55.4%`) | `+0.00293 → −0.00037` | `+0.02212` | — | `+0.139 / +0.134` |
+| **`Inkling-2-Mini` (`effort="low"`)** | `+0.04710` | **`+0.04820` (`102.3%`)** | `+0.02922` (`62.0%`) | **`+0.00110 → −0.00143`** | `+0.01788` | `+0.005` | `+0.211 / +0.205` |
 
-     **What it decided:** Season 3 switches its pinned reasoning teacher to
-     **`thinkingmachines/Inkling-2-Mini@c9d02830`** (`api: "chat"`, `reasoning_effort: "low"`,
-     `max_new_tokens: 1536`, `temperature: 0.0`), served via vLLM (`/v1/chat/completions` with
-     `--reasoning-parser inkling`, `~$0.10/round` on a 1× RTX 5090):
-     1. *Eliminates `FineWeb-Edu` textbook bias:* drops `FineWeb-Edu` from `#1` (both Qwen
-        teachers) to `#8` (right beside its true `#7` 1B OLMES rank) and selects the **exact
-        true `#1` recipe (`dclm-baseline-qc-20p`, `0.00pp` shortfall)** with `58/66` (`87.9%`),
-        `31/31` (`100%`) on `2pt+`, and `ρ = +0.8601`.
-     2. *Slashes Qwen-family perplexity-pruning bias by `94.6%`:* shrinks `adv_ppl_qwen06b −
-        fineweb2` from `+0.02034` (`137.5%`) to `+0.00110` (`102.3%`, practically tied with
-        heuristic `fineweb2`, and flipping to `−0.00143` under excerpt rotation).
-     3. *Deeper excerpt grounding & real ranking sensitivity:* raises absolute excerpt-rotation
-        drop by `+51.2%` on `unedited` (`+0.1394 → +0.2109 bpb`) and `+50.2%` on `fineweb2`
-        (`+0.1365 → +0.2049 bpb`), and across every teacher rotating excerpts drops
-        DataDecide 1B ordering by `4.5–10.6pp` (`58/66 → 52/66`, `31/31 → 27/31` on
-        `Inkling-2-Mini`), though `fineweb2 − unedited` on 43-language Draw B still retains
-        `110.1%` under rotation so full between-curator excerpt grounding remains a Season 4 goal.
-   - **Cross-card hardware parity (`5090` vs `4090` vs `3090` at `standard` 65.5M tokens; `5090` vs `AMD 8060S` at `nano`/`micro`; final pooled-trim `code_share = 0.15` scorer):**
+     **Honest statistical readout (paired stratified bootstrap over the 143 common EN docs and
+     587 common multilingual docs):**
+     1. *What IS statistically established:* (a) **Elimination of `FineWeb-Edu`'s `#1` textbook
+        lean** — `Qwen3-8B` ranks `FineWeb-Edu` `#1/12` in `100%` of bootstrap resamples and
+        `Qwen3.5-9B` in `99%`, while **`Inkling-2-Mini` ranks it `#1/12` in `0%`** (median `#7`,
+        matching its true `#7` 1B OLMES rank); (b) **`adv_ppl_qwen06b − fineweb2` shrinks by
+        `0.019 bpb`** (95% CI `[−0.022, −0.015]`), moving `adv_ppl_qwen06b` from a `+37.5%`
+        runaway lead to statistically tied with `fineweb2` (`+0.0019`, 95% CI `[−0.0011, +0.0047]`).
+     2. *What is NOT statistically proven by a single draw:* single-draw pairwise DataDecide
+        accuracy differences are within item-sampling noise (`Inkling-low` vs `Qwen3-8B`: `+3.7`
+        pairs, 95% CI `[−3, +10]`, `18%` not ahead; vs `Qwen3.5-9B nothink`: `+1.2`, `[−5, +7]`,
+        `41%` not ahead; vs `Inkling-none`: `+2.2`, `[−4, +8]`, `29%` not ahead). Likewise,
+        picking exact `#1` (`dclm-baseline-qc-20p`) on one Draw B slice is not stable across
+        resamples or draws (see the 3-draw validation below).
+     3. *Real trade-offs stated candidly:* on Draw B common docs, `Inkling-2-Mini` lowers raw
+        `fineweb2` gain by `0.0069 bpb` (`[−0.0105, −0.0032]`), narrows `fineweb2 − mimic` by
+        `0.0090` (`[−0.0133, −0.0051]`, raising `mimic` from `50%` to `62%` of `fineweb2` on
+        Draw B), and compresses `fineweb2` CJK raw mean gain (`+0.018 → +0.005`, 95% CI diff
+        `[−0.026, −0.001]` across `n=50` CJK items). And while rotating excerpts drops absolute
+        NLL by `~0.20–0.21 bpb` (vs `~0.14 bpb` on `Qwen3-8B`), **`fineweb2 − unedited` still
+        retains `110.1%` under rotation**, so between-curator rankings on multilingual crawls
+        still do not rely on the source excerpt.
+
+   - **Full Safety-Case Re-Validation on Shipped `Inkling-2-Mini` Exams (`r10_gate`, 3 Disjoint
+     Harvest Draws, 34 Official CUDA `standard` Students, Saved `bf16` Weights, Cold-Start 5090
+     Examiner & Cross-Card RTX 4090 Parity):**
+     Because the initial head-to-head only scored 4 multilingual students on 1 draw, we ran the
+     **complete Season 3 safety case directly on the shipped `Inkling-2-Mini` code** across
+     three completely disjoint harvest windows (`draw_b`: Nov 25 late, `618` clean / `42` langs /
+     `143` EN; `phase9`: Nov 25 mid, `621` clean / `39` langs / `128` EN; `draw1`: Nov 24, `624`
+     clean / `38` langs / `150` EN), synthesized live by the unmodified shipped
+     `stet.exam.fresh.reason.synthesize_reasoning()` client against the immutable pinned vLLM
+     container (`vllm/vllm-openai@sha256:d24e5fc73f0b859bd76c9d2f6f6fa4da3001afd7637f2610876420f3027ea6c7`,
+     `1,883/1,920 = 98.1%` kept raw, zero CoT/control-token leaks, cold-start Draw B rent-to-synth
+     **`856.3s` (`14.27 min`), `$0.147` GPU cost** at `$0.619/h`: `125.6s` container start +
+     `141.9s` model load & `/v1/models` check + `588.7s` cold synthesis; warm synthesis `367–379s`).
+     All 34 trained students (all 12 Phase 9 gauntlet students, all 8 Draw B controls/adversaries,
+     all 12 DataDecide 1B recipes on brand-new shortest-row 32-lane dealt slices, and 2 RTX 4090
+     cross-card parity students) sat all 3 Inkling draws (`orig` and `rot`), and all 34 trainable
+     upper-half `bf16` checkpoints (`244 MB` each, `8.1 GB` total) were archived.
+
+     - **Multi-draw DataDecide 1B (3 disjoint Inkling draws, 421 EN items, 2,000-resample stratified bootstrap):**
+
+| Shipped Inkling Draw | EN Items | DD 1B Pairs (`orig` / `rot`, 95% CI) | `2pt+` Pairs | Spearman `ρ` (95% CI) | `FineWeb-Edu` Rank *(true `#7`)* / `P(#1)` | Predicted Top-1 *(1B Shortfall)* |
+|---|---:|---:|---:|---:|---:|---|
+| Draw B (`s3-o00003`) | `143` | `52/66` (`78.8%`) / `48/66` (`[48, 56]`) | `26/31` | `+0.7902` (`[+0.622, +0.867]`) | `#7/12` / `0.0%` | `dclm-baseline-qc-10p` (`+0.49pp`) |
+| Phase 9 (`s3-o00001`) | `128` | `53/66` (`80.3%`) / `52/66` (`[49, 57]`) | `27/31` | `+0.8042` (`[+0.636, +0.895]`) | `#5/12` / `0.4%` | `dclm-baseline-qc-7p-fw2` (`+0.14pp`) |
+| Draw 1 (`s3-p00000`) | `150` | `53/66` (`80.3%`) / `50/66` (`[49, 55]`) | `27/31` | `+0.8042` (`[+0.629, +0.825]`) | `#6/12` / `0.0%` | `dclm-baseline-qc-7p-fw2` (`+0.14pp`) |
+| **Pooled 3-Draw Mean** | **`421`** | **`53/66` (`80.3%`) / `49/66` (`[50, 55]`)** | **`27/31`** | **`+0.8042` (`[+0.706, +0.832]`)** | **`#6/12` / `0.0%`** | **`dclm-baseline-qc-7p-fw2` (`+0.14pp`)** |
+
+     - **Complete Phase 9 (`s3-o00001`) & Draw B (`s3-o00003`) Gauntlets on Shipped Inkling-2-Mini (3-draw mean + 1,000-resample stratified bootstrap CIs):**
+
+| Curator (65.5M CUDA `standard`, shipped Inkling-2-Mini) | Draw B | Phase 9 | Draw 1 | **3-Draw Mean (`orig` / `rot`)** | EN / CJK / Other raw (`n=421/162/1280`) |
+|---|---:|---:|---:|---:|---|
+| **Phase 9 (`s3-o00001`) corpus:** `p9_reader_v2` (`s0` / `s1`) | `+0.04315` / `+0.04234` | `+0.04768` / `+0.04670` | `+0.04360` / `+0.04343` | **`+0.04481`** (`s1 +0.04416`) / `+0.05101` | `+0.0505 / −0.0104 / +0.0567` |
+| `p9_fineweb2` (`s0` / `s1`) | `+0.04063` / `+0.04034` | `+0.04376` / `+0.04478` | `+0.03892` / `+0.04146` | **`+0.04110`** (`s1 +0.04219`) / `+0.04723` | `+0.0454 / −0.0062 / +0.0534` |
+| `p9_mimic` | `+0.02359` | `+0.02200` | `+0.02383` | **`+0.02314`** (`56.3%` of `fw2`) / `+0.02636` | `+0.0471 / +0.0111 / +0.0043` |
+| `p9_reader_v1` (un-normalized) | `+0.00381` | `+0.00192` | `+0.00314` | `+0.00296` / `+0.00516` | `+0.0279 / −0.0434 / −0.0212` |
+| `p9_adv_qa_spam` | `+0.00294` | `−0.00486` | `+0.00041` | **`−0.00050`** / `−0.00578` | `+0.0154 / +0.0365 / −0.0334` |
+| `p9_adv_splice_qa` | `−0.09313` | `−0.09086` | `−0.09540` | **`−0.09313`** / `−0.05698` | — |
+| `p9_english` (monolingual) | `−0.18501` | `−0.17491` | `−0.18723` | **`−0.18238`** / `−0.20248` | — |
+| `p9_adv_overfilter` | `−1.07806` | `−1.11926` | `−1.07957` | **`−1.09230`** / `−1.07095` | — |
+| **Draw B (`s3-o00003`) corpus:** `db_adv_exam_lang_mix` | `+0.05140` | `+0.05709` | `+0.05224` | `+0.05358` / `+0.06080` | `+0.0541 / +0.0316 / +0.0565` |
+| `db_adv_ppl_qwen06b` | `+0.04797` | `+0.05250` | `+0.04930` | **`+0.04992`** (`103.9%` of `fw2`) / `+0.05154` | `+0.0583 / −0.0037 / +0.0622` |
+| `db_fineweb2` | `+0.04644` | `+0.05086` | `+0.04683` | **`+0.04804`** / `+0.05273` | `+0.0562 / +0.0058 / +0.0574` |
+| `db_adv_ppl_ernie03b` (cross-family) | `+0.04531` | `+0.04759` | `+0.04420` | **`+0.04570`** (`95.1%` of `fw2`) / `+0.04776` | `+0.0525 / −0.0201 / +0.0594` |
+| `db_mimic` | `+0.02718` | `+0.02277` | `+0.02681` | **`+0.02559`** (`53.3%` of `fw2`) / `+0.02983` | `+0.0502 / +0.0219 / +0.0044` |
+| `db_adv_tiny_lang_boost` | `+0.01089` | `+0.01369` | `+0.01029` | **`+0.01162`** (`4.1×` below `fw2`) / `+0.01756` | `+0.0116 / −0.0018 / +0.0230` |
+
+     - **Key 3-draw stratified bootstrap margins (pooled across all 3 Inkling draws, 1,000 resamples):**
+       `p9_reader_v2 − p9_fineweb2 = +0.00371` (`[+0.00253, +0.00491]`, `P(<=0)=0.000`);
+       `p9_fineweb2 − p9_mimic = +0.01796` (`[+0.01637, +0.01941]`, `P(<=0)=0.000`);
+       `p9_fineweb2 − p9_adv_qa_spam = +0.04161` (`[+0.03982, +0.04312]`, `P(<=0)=0.000`);
+       `db_fineweb2 − db_mimic = +0.02246` (`[+0.02090, +0.02370]`, `P(<=0)=0.000`);
+       `db_adv_ppl_qwen06b − db_fineweb2 = +0.00188` (`[+0.00037, +0.00337]`, `P(<=0)=0.012`);
+       `db_adv_ppl_ernie03b − db_fineweb2 = −0.00235` (`[−0.00411, −0.00054]`, `P(<=0)=0.995`,
+       meaning cross-family ERNIE-0.3B lowest-PPL loses to `fineweb2` under `Inkling-2-Mini`!);
+       `db_fineweb2 − db_adv_tiny_lang_boost = +0.03642` (`[+0.03518, +0.03754]`, `P(<=0)=0.000`).
+       Multi-seed paired gain deltas (`s1 − s0`): `p9_reader_v2` `−0.00081 / −0.00098 / −0.00017`,
+       `p9_fineweb2` `−0.00029 / +0.00101 / +0.00253`, `db_unedited` `+0.00009 / −0.00013 / −0.00015`.
+       Between-curator rotation survival across all 3 Inkling draws remains `103.2%–116.6%` despite
+       `+0.190–+0.198 bpb` absolute drop, confirming that between-curator rankings still rely on
+       prompt-conditioned answer-prose modeling rather than the excerpt.
+     - **Direct Cross-Card NVIDIA RTX 5090 vs RTX 4090 Parity on Shipped `Inkling-2-Mini` (~525-byte answers):**
+       Training `db_unedited_s0` and `db_fineweb2_s0` on RTX 5090 vs RTX 4090 produced bit-identical
+       `tokens_sha256` and `init_sha256` (`5bd1d5ce4547697e...`). Across all 3 shipped Inkling draws,
+       aggregate cross-card baseline diffs were **`+0.000463` (`draw_b`), `+0.001003` (`phase9`), and
+       `+0.001696` (`draw1`)** (`8.8×–32×` inside the `0.015` baseline tolerance), and `fineweb2` gain
+       diffs were **`+0.001127 / +0.000875 / −0.000310` own-base** and **`+0.002008 / +0.001781 /
+       +0.001175` shared-base** (`6.0×–10.2×` inside the `0.012` grade tolerance), directly confirming
+       that calibrated `0.012 / 0.015` tolerances hold on `Inkling-2-Mini` exams.
+
+   - **Prior 3-Architecture NVIDIA Cross-Card Parity (`Qwen3-8B` exams, `r8_gate`: `5090` vs `4090` vs `3090` at `standard` 65.5M tokens; `5090` vs `AMD 8060S` at `nano`/`micro`; final pooled-trim `code_share = 0.15` scorer):**
      Training the exact archived `fineweb2.jsonl` from the Draw B seed produced **bit-identical
      `init_sha256` (`5bd1d5ce4547697e...`) across all four GPUs** and **bit-identical
      `tokens_sha256` at each matched scale** (`232c6bee572bc914...` across RTX 5090 / 4090 / 3090
@@ -664,10 +742,11 @@ GPU scoring)*.
      (`~$0.15` at `$0.45/h`), `~30 min` on an RTX 4090 (`~$0.22` at `$0.43/h`), or `~55 min` on an
      RTX 3090 (`~$0.20` at `$0.22/h`), versus `$0.041–$0.046` per training in Season 2. A typical
      10-script Season 3 round runs 12 trainings (`10` scripts + `2` baselines) = **`~$1.80` of
-     grading compute** (vs `~$0.55` in Season 2) plus `~$0.10/round` for the 1× RTX 5090
-     `Inkling-2-Mini` examiner (`~10 min` at `$0.60/h`) and curator runs/boot overhead
-     (**`~$3–$5` all-in per round**, ~`2.5–3×` Season 2's `$1.57–$2.16`, while on-demand draws
-     keep idle days at `$0/day`).
+     grading compute** (vs `~$0.55` in Season 2) plus **`~$0.15–$0.20/round`** for the automated
+     ephemeral 1× RTX 5090 `Inkling-2-Mini` examiner (measured cold-start `14.27 min` / `$0.147`
+     rent-to-synth-done at `$0.619/h` via `stet-cloud --examiner-addr 127.0.0.1:8000`) and curator
+     runs/boot overhead (**`~$3–$5` all-in per round**, ~`2.5–3×` Season 2's `$1.57–$2.16`, while
+     on-demand draws keep idle days at `$0/day`).
 
 ## Still to measure
 

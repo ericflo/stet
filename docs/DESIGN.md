@@ -270,8 +270,9 @@ What is left is in [Rules](RULES.md#what-is-trusted-and-what-is-not).
    (`exam_hours`). Curators run as soon as the
    round is drawn. A round drawn while the server knows of no harvest is given hours once
    there are some, and says so (`exam_hours_late`).
-3. **The examiner** makes the exam from exactly those hours right after the draw (~10–15 minutes
-   using a 1× RTX 5090 vLLM server). It:
+3. **The examiner** makes the exam from exactly those hours right after the draw (~14.3 min
+   cold-start to 640 synthesized drafts, ~16–18 min end-to-end using an automated ephemeral 1×
+   RTX 5090 vLLM container managed by `stet-cloud --examiner-addr 127.0.0.1:8000`). It:
    - builds the round's corpus, measures its languages, selects fresh twin-context
      comprehension items, writes `explain`/`infer`/`synthesis` reasoning items once at the draw
      with the pinned teacher model (`thinkingmachines/Inkling-2-Mini@c9d02830`,
