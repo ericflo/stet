@@ -60,9 +60,14 @@ const (
 )
 
 // errRentRejected marks a provider response that definitively refused to create an instance
-// (HTTP 4xx or 2xx with success=false), as opposed to ambiguous timeouts / 5xx responses where
-// Vast may still have created the contract and a stale listing may briefly omit it.
+// (HTTP 4xx or 2xx with explicit success=false), as opposed to ambiguous timeouts / 5xx or
+// incomplete 2xx responses where Vast may still have created the contract and a stale listing
+// may briefly omit it.
 var errRentRejected = errors.New("examiner rental rejected by provider")
+
+// errRentNotSent marks a transport failure proven to have occurred before any connection was
+// established or request bytes were sent (such as dial ECONNREFUSED or non-timeout DNS failure).
+var errRentNotSent = errors.New("examiner rental request was not sent")
 
 // ExaminerConfig configures the automated ephemeral vLLM examiner GPU and local auth proxy.
 type ExaminerConfig struct {
@@ -2190,7 +2195,7 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 			elapsed = now.Sub(saved.Created).Round(time.Second)
 		}
 		if e.cfg.Timeout > 0 && elapsed > e.cfg.Timeout {
-			e.say("examiner GPU reservation %s remains unresolved after %s (past --examiner-timeout %s); holding slot and budget until provider confirms outcome", saved.ReservedLabel, elapsed, e.cfg.Timeout)
+			e.say("examiner GPU reservation %s remains unresolved after %s (past --examiner-timeout %s); holding slot and budget until provider confirms outcome (run `stet-cloud examiner resolve` after verifying on Vast.ai)", saved.ReservedLabel, elapsed, e.cfg.Timeout)
 		} else {
 			e.say("waiting for pending examiner GPU reservation %s to appear (%s elapsed)", saved.ReservedLabel, elapsed)
 		}
@@ -2335,9 +2340,10 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 		if errors.Is(rerr, errNoRoom) {
 			continue
 		}
-		if errors.Is(rerr, errRentRejected) {
-			// Provider explicitly refused to create an instance (4xx / success=false); clear the
-			// reservation immediately so the slot is freed cleanly.
+		if errors.Is(rerr, errRentRejected) || errors.Is(rerr, errRentNotSent) {
+			// Provider explicitly refused to create an instance (4xx / explicit success=false) OR
+			// transport proved the create request never reached the provider (e.g. dial
+			// ECONNREFUSED); clear the reservation immediately so future examiners are not blocked.
 			e.clearState()
 			return fmt.Errorf("renting examiner GPU on Vast.ai: %w", rerr)
 		}
@@ -2469,6 +2475,158 @@ func appendExaminerSpend(path string, rec podRecord) error {
 		return err
 	}
 	return fh.Close()
+}
+
+// resolvePendingExaminer verifies an unresolved PendingRent reservation in examiner.json
+// against the provider: if a matching instance is listed it is adopted into InstanceID (or
+// terminated and billed when end is true), and if the provider lists zero matching instances
+// the pending reservation is cleared while preserving PendingSpends and Unresolved.
+func resolvePendingExaminer(
+	ctx context.Context,
+	home string,
+	prov ExaminerProvider,
+	nowFn func() time.Time,
+	say func(string, ...any),
+	dryRun bool,
+	end bool,
+	onSpent func(podRecord) error,
+) error {
+	if nowFn == nil {
+		nowFn = time.Now
+	}
+	if say == nil {
+		say = func(string, ...any) {}
+	}
+	st, err := readExaminerStateErr(home)
+	if err != nil {
+		return err
+	}
+	if st == nil || !st.PendingRent || st.InstanceID != "" {
+		say("no pending examiner rental reservation to resolve")
+		return nil
+	}
+	rawInsts, err := prov.ListExaminers(ctx)
+	if err != nil {
+		return fmt.Errorf("listing examiner instances on provider: %w", err)
+	}
+	var matches []ExaminerInstance
+	for i := range rawInsts {
+		if st.ReservedLabel != "" && rawInsts[i].Label == st.ReservedLabel {
+			matches = append(matches, rawInsts[i])
+		}
+	}
+	now := nowFn()
+	if len(matches) > 0 {
+		if end {
+			if dryRun {
+				for _, m := range matches {
+					say("would end examiner GPU (machine %s) for reservation %s", m.ID, st.ReservedLabel)
+				}
+				return nil
+			}
+			next := examinerState{
+				PendingSpends: append([]podRecord(nil), st.PendingSpends...),
+				Unresolved:    append([]ExaminerInstance(nil), st.Unresolved...),
+			}
+			var firstEndErr, spendErr error
+			var failedEnds []ExaminerInstance
+			for _, match := range matches {
+				if err := prov.EndExaminer(ctx, match.ID); err != nil {
+					u := match
+					if u.Created.IsZero() {
+						u.Created = st.Created
+					}
+					if !validRate(u.Price) && validRate(st.Price) {
+						u.Price = st.Price
+					}
+					u.ObservedLiveAt = now
+					failedEnds = append(failedEnds, u)
+					if firstEndErr == nil {
+						firstEndErr = fmt.Errorf("ending examiner GPU %s for reservation: %w", match.ID, err)
+					}
+					continue
+				}
+				price := match.Price
+				if !validRate(price) {
+					price = st.Price
+				}
+				start := match.Created
+				if start.IsZero() {
+					start = st.Created
+				}
+				if start.IsZero() || start.After(now) {
+					start = now
+				}
+				rec := podRecord{
+					ID: match.ID, Market: "vast", Handle: "examiner", GPU: "RTX 5090",
+					Cost: price, Start: start, Alive: now, End: now,
+					For: "examiner", Round: st.RoundID, Why: "resolved pending examiner reservation (--end)",
+				}
+				if onSpent != nil && !spentHasExaminer(home, match.ID) {
+					if serr := onSpent(rec); serr != nil {
+						next.PendingSpends = mergePendingSpends(next.PendingSpends, []podRecord{rec})
+						if spendErr == nil {
+							spendErr = fmt.Errorf("recording ended examiner spend: %w", serr)
+						}
+					}
+				}
+				say("ended examiner GPU (machine %s) for reservation %s", match.ID, st.ReservedLabel)
+			}
+			if len(failedEnds) > 0 {
+				// Persist failed teardowns strictly in Unresolved (with InstanceID/APIKey/CertPEM
+				// cleared) so snapshotFromState continues accounting for slot/rate/spend AND the
+				// next Reconcile unconditionally retries EndExaminer instead of re-adopting them.
+				next.Unresolved = mergeUnresolvedLists(next.Unresolved, failedEnds)
+			}
+			if werr := writeExaminerState(home, &next); werr != nil {
+				return fmt.Errorf("updating examiner.json after resolving %s: %w", st.ReservedLabel, werr)
+			}
+			if firstEndErr != nil {
+				return firstEndErr
+			}
+			return spendErr
+		}
+		// Adopt mode: prefer a live (non-stopped) match over any stopped duplicate; any remaining
+		// duplicates will be terminated as strays on the next Reconcile tick.
+		match := matches[0]
+		for _, cand := range matches {
+			if cand.State != "stopped" {
+				match = cand
+				break
+			}
+		}
+		if dryRun {
+			say("would adopt examiner GPU (machine %s, state %s) for reservation %s", match.ID, match.State, st.ReservedLabel)
+			return nil
+		}
+		label := st.ReservedLabel
+		st.InstanceID = match.ID
+		st.PendingRent = false
+		st.ReservedLabel = ""
+		if !validRate(st.Price) && validRate(match.Price) {
+			st.Price = match.Price
+		}
+		st.ObservedLiveAt = now
+		if err := writeExaminerState(home, st); err != nil {
+			return fmt.Errorf("saving adopted examiner.json: %w", err)
+		}
+		say("confirmed examiner GPU (machine %s, state %s) for reservation %s: adopted into examiner.json", match.ID, match.State, label)
+		return nil
+	}
+	if dryRun {
+		say("would clear pending examiner reservation %s (confirmed absent on Vast.ai)", st.ReservedLabel)
+		return nil
+	}
+	label := st.ReservedLabel
+	next := examinerState{
+		PendingSpends: append([]podRecord(nil), st.PendingSpends...),
+		Unresolved:    append([]ExaminerInstance(nil), st.Unresolved...),
+	}
+	if err := writeExaminerState(home, &next); err != nil {
+		return fmt.Errorf("clearing pending examiner reservation %s: %w", label, err)
+	}
+	say("cleared pending examiner reservation %s (confirmed absent on Vast.ai; no spend recorded)", label)
+	return nil
 }
 
 // startExaminer initializes and starts the Fleet's automated ephemeral examiner if --examiner-addr

@@ -5,17 +5,23 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/http/httptrace"
 	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -140,6 +146,14 @@ type Rental struct {
 // of it: the last n lines.
 type logger interface {
 	Logs(ctx context.Context, id string, n int) ([]string, error)
+}
+
+// rentalLookup is a market that can verify a single machine directly by ID when a list omits it.
+// Returns (rental, true, nil) if the machine still exists on the provider, (nil, false, nil) if
+// the provider explicitly confirms it does not exist (e.g. HTTP 404), or (nil, false, err) when
+// status could not be confirmed.
+type rentalLookup interface {
+	Lookup(ctx context.Context, id string) (*Rental, bool, error)
 }
 
 // logLines are the lines a market's log answer holds, whatever its shape: strings, or objects
@@ -434,6 +448,50 @@ func (a *api) do(ctx context.Context, method, path string, body any, into any) (
 	return a.doWith(ctx, method, path, nil, body, into)
 }
 
+// errRequestNotSent marks a transport failure that occurred strictly before any TCP/TLS
+// connection was established or any HTTP request bytes were written (such as dial ECONNREFUSED
+// or non-timeout DNS resolution failure). Ambiguous failures (timeouts, EOFs, or errors after
+// GotConn/WroteRequest) are NEVER wrapped with errRequestNotSent.
+var errRequestNotSent = errors.New("request was not sent")
+
+func isProvenPreSendError(err error, gotConn, wroteAny, tlsStarted, tlsDone bool) bool {
+	if err == nil || gotConn || wroteAny {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return false
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return false
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) && !dnsErr.IsTimeout {
+		return true
+	}
+	var opErr *net.OpError
+	if errors.As(err, &opErr) && opErr.Op == "dial" {
+		if errors.Is(err, syscall.ECONNREFUSED) ||
+			errors.Is(err, syscall.EHOSTUNREACH) ||
+			errors.Is(err, syscall.ENETUNREACH) ||
+			errors.Is(err, syscall.EADDRNOTAVAIL) ||
+			errors.Is(err, syscall.EHOSTDOWN) ||
+			errors.Is(err, syscall.ENETDOWN) {
+			return true
+		}
+	}
+	if tlsStarted && !tlsDone {
+		var certInvalid x509.CertificateInvalidError
+		var hostErr x509.HostnameError
+		var unkAuth x509.UnknownAuthorityError
+		var recHdr tls.RecordHeaderError
+		if errors.As(err, &certInvalid) || errors.As(err, &hostErr) || errors.As(err, &unkAuth) || errors.As(err, &recHdr) {
+			return true
+		}
+	}
+	return false
+}
+
 // doWith is do, with more headers.
 func (a *api) doWith(ctx context.Context, method, path string, headers map[string]string, body any, into any) (int, error) {
 	var raw []byte
@@ -445,7 +503,20 @@ func (a *api) doWith(ctx context.Context, method, path string, headers map[strin
 	}
 	reads := method == "GET" || (method == "POST" && into != nil && a.readOnlyPost(path))
 	for attempt := 0; ; attempt++ {
-		req, err := http.NewRequestWithContext(ctx, method, a.base+path, bytes.NewReader(raw))
+		var gotConn, wroteAny, tlsStarted, tlsDone atomic.Bool
+		trace := &httptrace.ClientTrace{
+			GotConn:           func(httptrace.GotConnInfo) { gotConn.Store(true) },
+			WroteHeaderField:  func(string, []string) { wroteAny.Store(true) },
+			WroteHeaders:      func() { wroteAny.Store(true) },
+			WroteRequest:      func(httptrace.WroteRequestInfo) { wroteAny.Store(true) },
+			TLSHandshakeStart: func() { tlsStarted.Store(true) },
+			TLSHandshakeDone: func(_ tls.ConnectionState, err error) {
+				if err == nil {
+					tlsDone.Store(true)
+				}
+			},
+		}
+		req, err := http.NewRequestWithContext(httptrace.WithClientTrace(ctx, trace), method, a.base+path, bytes.NewReader(raw))
 		if err != nil {
 			return 0, err
 		}
@@ -466,6 +537,9 @@ func (a *api) doWith(ctx context.Context, method, path string, headers map[strin
 					return 0, err
 				}
 				continue
+			}
+			if isProvenPreSendError(err, gotConn.Load(), wroteAny.Load(), tlsStarted.Load(), tlsDone.Load()) {
+				return 0, fmt.Errorf("%w: %s could not be reached: %w", errRequestNotSent, marketTitle(a.market), err)
 			}
 			return 0, fmt.Errorf("%s could not be reached: %w", marketTitle(a.market), err)
 		}

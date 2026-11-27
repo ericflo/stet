@@ -226,6 +226,26 @@ func liumState(status string) string {
 	return strings.ToLower(status)
 }
 
+func liumPodRental(p liumPod) Rental {
+	price := 0.0
+	if p.Price != nil {
+		price = *p.Price
+	}
+	r := Rental{Market: "lium", ID: p.ID, Name: p.PodName, Card: shortGPU(p.GPUName), Price: price,
+		State: liumState(p.Status), Status: p.Status, Created: liumTime(p.CreatedAt)}
+	r.Phase = strings.ToLower(p.Status)
+	if p.Phase != nil && *p.Phase != "" {
+		r.Phase += ": " + *p.Phase
+	}
+	r.Up = map[bool]string{true: "yes", false: "no"}[p.Status == "RUNNING"]
+	r.Detail = r.Phase
+	if p.NodeOffline {
+		r.Phase += " (node offline)"
+		r.Detail = r.Phase
+	}
+	return r
+}
+
 // Rentals are the pods the key may see: with pod visibility "own", those it rented.
 func (m *liumMarket) Rentals(ctx context.Context) ([]Rental, error) {
 	var pods []liumPod
@@ -234,25 +254,26 @@ func (m *liumMarket) Rentals(ctx context.Context) ([]Rental, error) {
 	}
 	out := make([]Rental, 0, len(pods))
 	for _, p := range pods {
-		price := 0.0
-		if p.Price != nil {
-			price = *p.Price
-		}
-		r := Rental{Market: "lium", ID: p.ID, Name: p.PodName, Card: shortGPU(p.GPUName), Price: price,
-			State: liumState(p.Status), Status: p.Status, Created: liumTime(p.CreatedAt)}
-		r.Phase = strings.ToLower(p.Status)
-		if p.Phase != nil && *p.Phase != "" {
-			r.Phase += ": " + *p.Phase
-		}
-		r.Up = map[bool]string{true: "yes", false: "no"}[p.Status == "RUNNING"]
-		r.Detail = r.Phase
-		if p.NodeOffline {
-			r.Phase += " (node offline)"
-			r.Detail = r.Phase
-		}
-		out = append(out, r)
+		out = append(out, liumPodRental(p))
 	}
 	return out, nil
+}
+
+// Lookup verifies one Lium pod directly by ID when a listing omits it.
+func (m *liumMarket) Lookup(ctx context.Context, id string) (*Rental, bool, error) {
+	var p liumPod
+	status, err := m.a.do(ctx, "GET", "/pods/"+url.PathEscape(id), nil, &p)
+	if status == 404 {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	if p.ID == "" || p.ID != id {
+		return nil, false, fmt.Errorf("Lium lookup for %q returned unexpected pod id %q", id, p.ID)
+	}
+	r := liumPodRental(p)
+	return &r, true, nil
 }
 
 // sshTo is where to log in to a pod: "root@host", and the port.

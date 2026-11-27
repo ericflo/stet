@@ -692,6 +692,22 @@ func (a *App) maybeDraw(ctx context.Context, force bool) error {
 		if cur == nil || cur.Status != "scheduled" || cur.DrandRound != r.DrandRound || cur.Crawl == nil {
 			return errors.New("the round changed while it was being drawn")
 		}
+		if s.Meta.Paused != 0 {
+			if a.onDemandOnly() {
+				tx.dropRound(cur)
+			} else {
+				a.reschedule(tx, cur, a.laterSlot())
+			}
+			problem = errors.New("the organisers have paused the rounds")
+			return nil
+		}
+		if s.roundWithStatus("open") != nil {
+			cur.Postponed = true
+			a.reschedule(tx, cur, a.laterSlot())
+			tx.saveRound(cur)
+			problem = errors.New("the previous round is still being graded")
+			return nil
+		}
 		entrants := a.selectEntrants(s, cur.DrawAt, cur.Idx)
 		if len(entrants) == 0 {
 			if a.onDemandOnly() {

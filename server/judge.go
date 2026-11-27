@@ -825,7 +825,7 @@ type verdict struct {
 	gain      float64
 	tie       bool   // two decide it and disagree, or valid grades have no agreed token stream / init weights / validity
 	tokensSHA string // agreed script tokens_sha256 among counted valid grades, if resolved
-	tokensTie bool   // multiple distinct tokens_sha256 with no unique >=2 winner
+	tokensTie bool   // multiple distinct tokens_sha256 with no strict-majority (>=2 and >half) winner
 	initTie   bool   // multiple distinct init_sha256 with no agreed round InitSHA (pinned student season)
 	validTie  bool   // valid and invalid counted grades split exactly 50/50 (e.g. 1-1 or 2-2)
 }
@@ -888,16 +888,9 @@ func (j *judge) supported(v *verdict) bool {
 	return false
 }
 
-// weigh works out what a script's grades come to so far. The established accounts' grades
-// decide; a self grade counts only while it is all there is. When valid grades report
-// script.tokens_sha256 and disagree, the token digest is resolved BEFORE computing the median
-// or representative grade: a unique digest with >= 2 votes wins and minority-digest grades are
-// excluded; otherwise (e.g. A vs B, A vs B vs C, or a 2-2 split) the verdict stays disputed.
-func (j *judge) weigh(sc *scriptState) *verdict {
-	if sc.verdict != nil {
-		return sc.verdict
-	}
-	v := &verdict{}
+// eligibleGrades returns the established grades that can decide sc (or self grades when no
+// non-self established grades exist), before any token-stream majority filtering.
+func (j *judge) eligibleGrades(sc *scriptState) (counted []*gradeView, self bool) {
 	var own []*gradeView
 	for _, r := range sc.Results {
 		rd := j.s.Rounds[r.RoundIdx]
@@ -917,12 +910,63 @@ func (j *judge) weigh(sc *scriptState) *verdict {
 		case g.self:
 			own = append(own, g)
 		default:
-			v.counted = append(v.counted, g)
+			counted = append(counted, g)
 		}
 	}
-	if len(v.counted) == 0 {
-		v.counted, v.self = own, len(own) > 0
+	if len(counted) == 0 {
+		return own, len(own) > 0
 	}
+	return counted, false
+}
+
+// resolveTokenMajority resolves script.tokens_sha256 across distinct eligible graders BEFORE
+// filtering. A digest is authoritative only when at least 2 distinct eligible valid graders
+// report it AND they form a strict majority (> half) of all distinct eligible graders on the
+// script. When only one non-empty digest has been observed (uncontested), agreed returns it
+// with conflicted=false (authoritative is true only if that digest also meets >= 2 and > half).
+func resolveTokenMajority(counted []*gradeView) (agreed string, authoritative bool, conflicted bool) {
+	allVoters := map[int64]bool{}
+	tokVoters := map[string]map[int64]bool{}
+	for _, g := range counted {
+		allVoters[g.acct.ID] = true
+		if g.r.Valid && g.r.TokensSHA != "" {
+			if tokVoters[g.r.TokensSHA] == nil {
+				tokVoters[g.r.TokensSHA] = map[int64]bool{}
+			}
+			tokVoters[g.r.TokensSHA][g.acct.ID] = true
+		}
+	}
+	if len(tokVoters) == 0 {
+		return "", false, false
+	}
+	bestTok, bestN := "", 0
+	for tok, voters := range tokVoters {
+		if len(voters) > bestN {
+			bestTok, bestN = tok, len(voters)
+		}
+	}
+	conflicted = len(tokVoters) > 1
+	if bestN >= 2 && 2*bestN > len(allVoters) {
+		return bestTok, true, conflicted
+	}
+	if !conflicted {
+		return bestTok, false, false
+	}
+	return "", false, true
+}
+
+// weigh works out what a script's grades come to so far. The established accounts' grades
+// decide; a self grade counts only while it is all there is. When valid grades report
+// script.tokens_sha256 and disagree, the token digest is resolved BEFORE computing the median
+// or representative grade: only a digest with >= 2 distinct eligible graders forming a strict
+// majority (> half of all distinct eligible graders before filtering) wins and excludes
+// minority-digest grades; otherwise (e.g. 1-1, 1-1-1, 2-2, or 2-1-1) the verdict stays disputed.
+func (j *judge) weigh(sc *scriptState) *verdict {
+	if sc.verdict != nil {
+		return sc.verdict
+	}
+	v := &verdict{}
+	v.counted, v.self = j.eligibleGrades(sc)
 	// On seasons with a pinned student model, if the round's InitSHA has not locked yet and
 	// valid counted grades disagree on init_sha256 with each other OR with the round's baseline
 	// initial weights, never pool or score them into a rated gain. Trigger initTie whenever valid
@@ -952,44 +996,28 @@ func (j *judge) weigh(sc *scriptState) *verdict {
 			}
 		}
 	}
-	tokCounts := map[string]int{}
 	validCount := 0
 	for _, g := range v.counted {
 		if g.r.Valid {
 			validCount++
-			if g.r.TokensSHA != "" {
-				tokCounts[g.r.TokensSHA]++
-			}
 		}
 	}
-	if len(tokCounts) == 1 {
-		for tok := range tokCounts {
-			v.tokensSHA = tok
-		}
-	} else if len(tokCounts) > 1 {
-		bestTok, bestN, tied := "", 0, false
-		for tok, n := range tokCounts {
-			switch {
-			case n > bestN:
-				bestTok, bestN, tied = tok, n, false
-			case n == bestN:
-				tied = true
+	agreedTok, authTok, conflictedTok := resolveTokenMajority(v.counted)
+	if !conflictedTok {
+		v.tokensSHA = agreedTok
+	} else if authTok {
+		v.tokensSHA = agreedTok
+		kept := make([]*gradeView, 0, len(v.counted))
+		for _, g := range v.counted {
+			if !g.r.Valid || g.r.TokensSHA == "" || g.r.TokensSHA == agreedTok {
+				kept = append(kept, g)
 			}
 		}
-		if bestN >= 2 && !tied {
-			v.tokensSHA = bestTok
-			kept := make([]*gradeView, 0, len(v.counted))
-			for _, g := range v.counted {
-				if !g.r.Valid || g.r.TokensSHA == "" || g.r.TokensSHA == bestTok {
-					kept = append(kept, g)
-				}
-			}
-			v.counted = kept
-		} else if 2*validCount > len(v.counted) {
-			// Only a tokenized-stream tie when valid grades would otherwise carry the script;
-			// if invalid grades already hold a majority, the script settles invalid cleanly.
-			v.tokensTie = true
-		}
+		v.counted = kept
+	} else if 2*validCount > len(v.counted) {
+		// Only a tokenized-stream tie when valid grades would otherwise carry the script;
+		// if invalid grades already hold a majority, the script settles invalid cleanly.
+		v.tokensTie = true
 	}
 	v.known = len(v.counted) > 0
 	var gains []float64
@@ -2306,19 +2334,17 @@ func (a *App) submitResult(ctx context.Context, acctID, claimID int64, p *Result
 			return refuse("init", 0, "your baseline initial weights hash for %s differs from the round's. Check your student model cache and harness version", p.Round)
 		}
 		if p.Valid && tokensSHA != "" {
-			tokVotes := map[string]map[int64]bool{}
-			for _, prev := range s.results(rd.Idx, e.EditorID) {
-				if prev.Script == c.Script && prev.Valid && prev.TokensSHA != "" && a.established(s.Accounts[prev.AccountID]) &&
-					(rd.InitSHA == "" || prev.InitSHA == "" || prev.InitSHA == rd.InitSHA) {
-					if tokVotes[prev.TokensSHA] == nil {
-						tokVotes[prev.TokensSHA] = map[int64]bool{}
+			j := a.newJudge(s)
+			for _, st := range j.states(rd) {
+				if st.Entry.EditorID == e.EditorID {
+					if sc := st.byScript[c.Script]; sc != nil {
+						if eligible, self := j.eligibleGrades(sc); !self {
+							if agreedTok, auth, _ := resolveTokenMajority(eligible); auth && agreedTok != tokensSHA {
+								return refuse("tokens", 0, "your tokenized training stream for this script in %s differs from established graders'", p.Round)
+							}
+						}
 					}
-					tokVotes[prev.TokensSHA][prev.AccountID] = true
-				}
-			}
-			for agreedTok, voters := range tokVotes {
-				if len(voters) >= 2 && agreedTok != tokensSHA {
-					return refuse("tokens", 0, "your tokenized training stream for this script in %s differs from established graders'", p.Round)
+					break
 				}
 			}
 		}

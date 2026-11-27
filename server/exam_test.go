@@ -1347,3 +1347,186 @@ func TestReview19JudgeHardwareEligibilityMatchesSharedSeason3Vectors(t *testing.
 		t.Fatalf("result with qualifying hardware + baseline.hardware: HTTP %d, want 200", code)
 	}
 }
+
+// Review 20 P1 #1: token-stream resolution MUST require a strict majority (> half of all distinct
+// eligible graders before filtering, and >= 2) in BOTH weigh/settlement and submitResult admission.
+// On a 2-1-1 split (A, B, C, A), the entry MUST remain disputed/open for a deciding grader (and
+// admit a 5th grader reporting any digest rather than rejecting against the non-majority pair),
+// settle rated only once a strict majority is reached (e.g. 4 of 7 or 3 of 5), or void unrated
+// with zero curator penalty if ReplicaWait expires without a majority.
+func TestReview20TokenStreamStrictMajoritySettlementAndAdmission(t *testing.T) {
+	tokA := strings.Repeat("a", 64)
+	tokB := strings.Repeat("b", 64)
+	tokC := strings.Repeat("c", 64)
+
+	makeGraders := func(t *testing.T, w *world, n int) []*actor {
+		t.Helper()
+		gs := make([]*actor, n)
+		for i := range n {
+			name := fmt.Sprintf("grader-%d", i+1)
+			g := w.join(name, nil)
+			w.established(name)
+			gs[i] = g
+		}
+		return gs
+	}
+
+	submitWithTok := func(t *testing.T, w *world, g *actor, c *claimed, tok string) int {
+		t.Helper()
+		p := w.result(c, 5.98, 6.00)
+		p["script"].(map[string]any)["tokens_sha256"] = tok
+		return g.do("POST", fmt.Sprintf("/api/v1/jobs/%d/result", c.Job.ID), p, nil)
+	}
+
+	t.Run("two_of_four_split_stays_open_admits_deciding_grades_and_settles_on_strict_majority", func(t *testing.T) {
+		pub, priv := newKey()
+		w := newWorld(t, pub)
+		w.app.cfg.RunsPerEntry = 1
+		anchor := w.join("anchor-one", priv)
+		alice := w.join("alice", nil)
+		gs := makeGraders(t, w, 7)
+		w.submit(alice, "tidy", "print('v1')")
+		idx := w.drawWithoutExam()
+
+		ce := w.claim(anchor, true)
+		if code, _ := w.edit(anchor, ce, scriptOne); code != 200 {
+			t.Fatalf("edit: HTTP %d", code)
+		}
+
+		// g1..g4 claim early before exam posts, then report A, B, C, A (2-1-1 split, 2/4 = 50%).
+		earlyClaims := make([]*claimed, 4)
+		for i := range 4 {
+			earlyClaims[i] = w.claimEarly(gs[i])
+		}
+		w.exam(idx)
+		for i, tok := range []string{tokA, tokB, tokC, tokA} {
+			if code := submitWithTok(t, w, gs[i], earlyClaims[i], tok); code != 200 {
+				t.Fatalf("grader %d (%s): HTTP %d, want 200", i+1, tok[:4], code)
+			}
+		}
+
+		// Entry MUST remain open (disputed), NOT settled rated at +0.0200!
+		w.app.st.view(func(s *State) {
+			e := s.inRound[idx][0]
+			if e.Status != "open" {
+				t.Fatalf("2-1-1 token-stream split settled prematurely: status=%q valid=%v gain=%.5f", e.Status, e.Valid, e.Gain)
+			}
+			wk := w.app.work(s)
+			if len(wk.Rounds) != 1 || wk.Rounds[0].GradesWanted < 1 {
+				t.Fatalf("expected 2-1-1 disputed script to request a deciding grade, got %+v", wk.Rounds)
+			}
+		})
+
+		// Result admission MUST NOT treat the 2/4 pair as authoritative: g5 reporting B (making 2-2-1)
+		// MUST be admitted (HTTP 200, not 409) and keep the script disputed.
+		c5 := w.asked(gs[4], false)
+		if code := submitWithTok(t, w, gs[4], c5, tokB); code != 200 {
+			t.Fatalf("5th grader submitting B against 2-1-1 split: HTTP %d, want 200 (not refused)", code)
+		}
+		// g6 reporting A makes 3-2-1 (3/6 = 50%, still NOT a strict majority) -> still open!
+		c6 := w.asked(gs[5], false)
+		if code := submitWithTok(t, w, gs[5], c6, tokA); code != 200 {
+			t.Fatalf("6th grader submitting A against 2-2-1 split: HTTP %d, want 200", code)
+		}
+		w.app.st.view(func(s *State) {
+			if st := s.inRound[idx][0].Status; st != "open" {
+				t.Fatalf("3-2-1 split (50%%) must still remain open, got status=%q", st)
+			}
+		})
+
+		// g7 reporting A makes 4-2-1 (4/7 > 50% strict majority) -> now settles rated at +0.0200!
+		c7 := w.asked(gs[6], false)
+		if code := submitWithTok(t, w, gs[6], c7, tokA); code != 200 {
+			t.Fatalf("7th grader submitting A (4/7 strict majority): HTTP %d, want 200", code)
+		}
+		w.app.st.view(func(s *State) {
+			e := s.inRound[idx][0]
+			if e.Status != "settled" || !e.Valid || e.Void || math.Abs(e.Gain-0.02) > 1e-4 {
+				t.Fatalf("expected rated settlement at +0.02 after 4/7 strict majority, got status=%q valid=%v void=%v gain=%.5f",
+					e.Status, e.Valid, e.Void, e.Gain)
+			}
+		})
+		w.check()
+	})
+
+	t.Run("two_of_four_split_times_out_unrated_void_without_curator_penalty", func(t *testing.T) {
+		pub, priv := newKey()
+		w := newWorld(t, pub)
+		w.app.cfg.RunsPerEntry = 1
+		anchor := w.join("anchor-one", priv)
+		alice := w.join("alice", nil)
+		gs := makeGraders(t, w, 4)
+		w.submit(alice, "tidy", "print('v1')")
+		idx := w.drawWithoutExam()
+
+		ce := w.claim(anchor, true)
+		if code, _ := w.edit(anchor, ce, scriptOne); code != 200 {
+			t.Fatalf("edit: HTTP %d", code)
+		}
+		earlyClaims := make([]*claimed, 4)
+		for i := range 4 {
+			earlyClaims[i] = w.claimEarly(gs[i])
+		}
+		w.exam(idx)
+		for i, tok := range []string{tokA, tokB, tokC, tokA} {
+			if code := submitWithTok(t, w, gs[i], earlyClaims[i], tok); code != 200 {
+				t.Fatalf("grader %d: HTTP %d", i+1, code)
+			}
+		}
+
+		// Expire ReplicaWait with no 5th grader -> MUST close unrated (void + unattended, zero penalty).
+		w.pass(w.app.cfg.ReplicaWait + time.Minute)
+		if err := w.app.st.update(context.Background(), func(tx *Tx) error {
+			w.app.settleReady(tx)
+			return nil
+		}); err != nil {
+			t.Fatalf("settleReady: %v", err)
+		}
+		w.app.st.view(func(s *State) {
+			e := s.inRound[idx][0]
+			if e.Status != "settled" || !e.Void || !e.Unattended || e.Valid {
+				t.Fatalf("expected 2-1-1 timeout to settle void+unattended (unrated), got status=%q void=%v unattended=%v valid=%v gain=%.5f",
+					e.Status, e.Void, e.Unattended, e.Valid, e.Gain)
+			}
+			for _, r := range s.results(idx, e.EditorID) {
+				if r.Verdict != "disputed" {
+					t.Fatalf("expected all 4 grades disputed on 2-1-1 timeout, got %q", r.Verdict)
+				}
+			}
+		})
+		w.check()
+	})
+
+	t.Run("strict_majority_two_of_three_refuses_fourth_dissenting_digest_at_admission", func(t *testing.T) {
+		pub, priv := newKey()
+		w := newWorld(t, pub)
+		w.app.cfg.RunsPerEntry = 1
+		anchor := w.join("anchor-one", priv)
+		alice := w.join("alice", nil)
+		gs := makeGraders(t, w, 4)
+		w.submit(alice, "tidy", "print('v1')")
+		idx := w.drawWithoutExam()
+
+		ce := w.claim(anchor, true)
+		if code, _ := w.edit(anchor, ce, scriptOne); code != 200 {
+			t.Fatalf("edit: HTTP %d", code)
+		}
+		// All 4 established graders claim early before the exam posts so the 4th holds a live
+		// claim when the first 3 report A, B, A (2/3 strict majority).
+		claims := make([]*claimed, 4)
+		for i := range 4 {
+			claims[i] = w.claimEarly(gs[i])
+		}
+		w.exam(idx)
+		for i, tok := range []string{tokA, tokB, tokA} {
+			if code := submitWithTok(t, w, gs[i], claims[i], tok); code != 200 {
+				t.Fatalf("grader %d (%s): HTTP %d, want 200", i+1, tok[:4], code)
+			}
+		}
+		// Now A holds 2 of 3 (> half strict majority): 4th grader submitting C MUST be refused (409)!
+		if code := submitWithTok(t, w, gs[3], claims[3], tokC); code != 409 {
+			t.Fatalf("4th grader dissenting against 2/3 strict majority: HTTP %d, want 409", code)
+		}
+		w.check()
+	})
+}

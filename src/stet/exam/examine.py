@@ -104,20 +104,37 @@ def _student_window(season, scale, *, required: bool = False) -> tuple[object, i
         return None
 
 
-def _reasoning_cache_usable(reasoning: list[Item], season, *, student_window: tuple[object, int] | None = None) -> bool:
+def _reasoning_cache_usable(
+    reasoning: list[Item],
+    season,
+    *,
+    student_window: tuple[object, int] | None = None,
+    require_langid: bool = False,
+) -> bool:
     """Whether a cached reasoning synthesis result is complete and conforms to current filter rules.
 
-    Matches `_filter_pillar_support`: every cached item must pass `cached_item_passes_filter`
-    (authoritative prompt/wrapper metadata, zero control tokens, prompt/response overlap limits,
+    Matches `_filter_pillar_support` and fresh synthesis: every cached item must pass
+    `cached_item_passes_filter` (authoritative prompt/wrapper metadata, quality/length/sentence
+    checks, active language verification, zero control tokens, prompt/response overlap limits,
     and student scoring-window fit), and at least one reasoning pillar must meet `min_pillar_items`."""
     from .aggregate import REASONING_KINDS, plan_of
-    from .fresh.reason import cached_item_passes_filter
+    from .fresh.reason import _ensure_langid_available, cached_item_passes_filter
 
+    if require_langid:
+        _ensure_langid_available()
     if not reasoning:
         return False
     r_cfg = (season.raw.get("exam") or {}).get("reasoning") or {}
     max_ov = float(r_cfg.get("max_ngram_overlap", 0.50))
-    if not all(cached_item_passes_filter(it, max_ngram_overlap=max_ov, student_window=student_window) for it in reasoning):
+    if not all(
+        cached_item_passes_filter(
+            it,
+            max_ngram_overlap=max_ov,
+            require_langid=require_langid,
+            student_window=student_window,
+        )
+        for it in reasoning
+    ):
         return False
     min_items = int((season.raw.get("exam") or {}).get("min_pillar_items", 0))
     if min_items <= 0:
@@ -376,9 +393,12 @@ def assemble(
     # synthesis cached atomically under `work` by snapshot + seed + filter version + reasoning
     # config digest so retries cost zero GPU work and partial/stale cache files regenerate.
     if synthesize and (r_cfg := cfg.get("reasoning")):
-        from .fresh.reason import REASONING_FILTER_VERSION
+        from .fresh.reason import REASONING_FILTER_VERSION, _ensure_langid_available
 
-        require_sw = bool(getattr(rnd, "kind", "") == "official" and season.raw.get("student") and season.raw.get("tokenizer"))
+        is_official = bool(getattr(rnd, "kind", "") == "official")
+        if is_official:
+            _ensure_langid_available()
+        require_sw = bool(is_official and season.raw.get("student") and season.raw.get("tokenizer"))
         sw = _student_window(season, scale, required=require_sw)
         rcfg_sig = hashlib.sha256(
             json.dumps({"filter_version": REASONING_FILTER_VERSION, "cfg": r_cfg}, sort_keys=True).encode()
@@ -391,7 +411,7 @@ def assemble(
         if rcache.exists():
             try:
                 cached = unpack_items(rcache.read_bytes())
-                if _reasoning_cache_usable(cached, season, student_window=sw):
+                if _reasoning_cache_usable(cached, season, student_window=sw, require_langid=is_official):
                     reasoning = cached
                     loaded = True
                     log(f"  reasoning items: {len(reasoning)} loaded from cache")
@@ -407,11 +427,11 @@ def assemble(
             synth_kw: dict = {"shares": mix, "log": log, "drops_path": rdrops}
             try:
                 s_params = inspect.signature(synthesize_reasoning).parameters
-                if sw is not None and (
-                    "student_window" in s_params
-                    or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in s_params.values())
-                ):
+                has_varkw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in s_params.values())
+                if sw is not None and ("student_window" in s_params or has_varkw):
                     synth_kw["student_window"] = sw
+                if is_official and ("require_langid" in s_params or has_varkw):
+                    synth_kw["require_langid"] = True
             except (TypeError, ValueError):
                 pass
             reasoning = synthesize_reasoning(docs, rnd.seed, r_cfg, **synth_kw)

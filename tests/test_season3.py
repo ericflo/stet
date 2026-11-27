@@ -4908,3 +4908,345 @@ def test_review19_shared_baseline_retained_across_cache_error_and_recovered_once
     assert fail_rec_calls == [rnd.id]
 
 
+def test_review20_reasoning_cache_shares_language_and_quality_checks_and_requires_langid(monkeypatch, tmp_path):
+    """Review 20 P2 #6:
+    (a) Language detection (`py3langid`) is a base dependency available for official synthesis.
+    (b) Fresh parser and cached-item revalidator share the exact same per-item checks, so a
+        French prompt paired with an English answer (or truncated/meta-chatter row) is rejected
+        equally on fresh synthesis and on cached reload during a restarted build.
+    (c) Official synthesis and official cache validation fail closed if `py3langid` is missing."""
+    import zstandard as zstd
+
+    from stet.exam import examine
+    from stet.exam.farm import pack_items
+    from stet.exam.fresh import Doc, reason, write_snapshot
+    from stet.spec import official_round
+
+    # Base packaging includes py3langid so lean examiner installs always have the language checker.
+    pyproject = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text()
+    assert '"py3langid>=0.4"' in pyproject
+    assert reason._langid is not None
+
+    s3 = load_season("s3")
+    scale = s3.scale("nano")
+    rnd = official_round(
+        s3,
+        25,
+        {"round": 123465, "randomness": "ee" * 32},
+        {"crawl": "CC-MAIN-2026-43", "paths_sha256": "ff" * 32, "n_shards": 100000},
+    )
+
+    fr_excerpt = (
+        "Les ingénieurs portuaires de Marseille ont modernisé les écluses du bassin nord afin de "
+        "réduire les retards lors des grandes marées et de limiter la consommation électrique "
+        "des pompes hydrauliques pendant les heures de pointe nocturnes."
+    )
+    fr_prompt = "Pourquoi la modernisation des écluses réduit-elle les retards maritimes ?"
+    en_wrong_resp = (
+        "Modernizing the lock gates speeds up vessel transit during extreme tides while lowering "
+        "nighttime hydraulic pump electricity demand across the northern port basin."
+    )
+    fr_good_resp = (
+        "La rénovation des vannes accélère le passage des navires lors des fortes marées tout en "
+        "diminuant la puissance absorbée par les stations de pompage durant la nuit."
+    )
+
+    doc_sel = [
+        {
+            "source": "ccnews",
+            "id": "fr-1",
+            "lang": "fr",
+            "text": fr_excerpt,
+            "excerpt": fr_excerpt,
+            "task_type": "explain",
+            "wrapper_id": 0,
+        }
+    ]
+    bad_gen = [f"{fr_prompt}\nRESPONSE: {en_wrong_resp}"]
+    good_gen = [f"{fr_prompt}\nRESPONSE: {fr_good_resp}"]
+
+    # 1. Fresh parser rejects French prompt + English answer as wrong_lang, and keeps valid French.
+    kept_bad, drops_bad, _ = reason.parse_generated_items_detailed(doc_sel, bad_gen, require_langid=True)
+    assert kept_bad == [] and drops_bad.get("wrong_lang") == 1
+    kept_good, drops_good, _ = reason.parse_generated_items_detailed(doc_sel, good_gen, require_langid=True)
+    assert len(kept_good) == 1 and not drops_good
+
+    # 2. Construct a 20-row poisoned cached fixture (as if built earlier without language detector):
+    #    cached_item_passes_filter and _reasoning_cache_usable MUST reject it!
+    poisoned_rows = [
+        Item(
+            kind="answer",
+            corner="explain/fr/ccnews",
+            fmt="prose",
+            lang="fr",
+            source=f"explain:ccnews:fr-bad-{i}",
+            ctx=reason.wrap_prompt(fr_excerpt, fr_prompt, "explain", i % 6),
+            cont=f" {en_wrong_resp} Note {i}.",
+            prompt=fr_prompt,
+            wrapper_id=i % 6,
+        )
+        for i in range(25)
+    ]
+    good_rows = [
+        Item(
+            kind="answer",
+            corner="explain/fr/ccnews",
+            fmt="prose",
+            lang="fr",
+            source=f"explain:ccnews:fr-good-{i}",
+            ctx=reason.wrap_prompt(fr_excerpt, fr_prompt, "explain", i % 6),
+            cont=f" {fr_good_resp} Détail {i}.",
+            prompt=fr_prompt,
+            wrapper_id=i % 6,
+        )
+        for i in range(25)
+    ]
+    assert reason.cached_item_passes_filter(poisoned_rows[0], require_langid=True) is False
+    assert reason.cached_item_passes_filter(good_rows[0], require_langid=True) is True
+    assert examine._reasoning_cache_usable(poisoned_rows, s3, require_langid=True) is False
+    assert examine._reasoning_cache_usable(good_rows, s3, require_langid=True) is True
+
+    # Shared quality checks (truncated sentence, meta-chatter) are also enforced on cached rows.
+    truncated_item = dataclasses.replace(good_rows[0], cont=f" {fr_good_resp.rstrip('.')}")
+    chatter_item = dataclasses.replace(good_rows[0], cont=f" Here is the answer: {fr_good_resp}")
+    assert reason.cached_item_passes_filter(truncated_item, require_langid=True) is False
+    assert reason.cached_item_passes_filter(chatter_item, require_langid=True) is False
+
+    # 3. Restarted official assemble() rejects the poisoned cache and regenerates cleanly.
+    snap_path = tmp_path / "2026-11-27-00.jsonl.zst"
+    write_snapshot(
+        [Doc(source="ccnews", id="d1", url="https://example.invalid/fr", lang="fr", license="ccnews", published=1_800_000_000, title="T", text=fr_excerpt)],
+        snap_path,
+        {"slot": "2026-11-27-00"},
+    )
+    shas = [hashlib.sha256(snap_path.read_bytes()).hexdigest()]
+    r_cfg = s3.raw["exam"]["reasoning"]
+    rcfg_sig = hashlib.sha256(
+        json.dumps({"filter_version": reason.REASONING_FILTER_VERSION, "cfg": r_cfg}, sort_keys=True).encode()
+    ).hexdigest()[:8]
+    work = tmp_path / "work"
+    work.mkdir()
+    rcache = work / f"reasoning-{examine.snapshot_name(shas)[:12]}-{rnd.seed.hex()[:8]}-{rcfg_sig}.jsonl.zst"
+    rcache.write_bytes(pack_items(poisoned_rows))
+
+    (tmp_path / "empty.jsonl.zst").write_bytes(zstd.ZstdCompressor().compress(b""))
+    monkeypatch.setattr("stet.data.corpus", lambda *a, **k: tmp_path / "empty.jsonl.zst")
+    monkeypatch.setattr("stet.exam.decontam.seen", lambda *a, **k: set())
+    monkeypatch.setattr("stet.exam.fresh.select.select_context", lambda *a, **k: [])
+    monkeypatch.setattr(examine, "_student_window", lambda *a, **k: None)
+
+    synth_calls: list[dict] = []
+
+    def fake_synth(docs, seed, cfg, **kw):
+        synth_calls.append(kw)
+        return list(good_rows)
+
+    monkeypatch.setattr("stet.exam.fresh.reason.synthesize_reasoning", fake_synth)
+    items, _, _, _ = examine.assemble(rnd, scale, [(0, snap_path)], work, measure=False, synthesize=True, check_coverage=False, log=lambda _: None)
+    assert len(synth_calls) == 1 and synth_calls[0].get("require_langid") is True
+    assert all(it.source.startswith("explain:ccnews:fr-good-") for it in items)
+
+    # 4. If py3langid is unavailable, official synthesis, cache validation, and assemble() MUST fail closed.
+    monkeypatch.setattr(reason, "_langid", None)
+    with pytest.raises(RuntimeError, match="py3langid"):
+        reason.parse_generated_items_detailed(doc_sel, bad_gen, require_langid=True)
+    with pytest.raises(RuntimeError, match="py3langid"):
+        reason.cached_item_passes_filter(good_rows[0], require_langid=True)
+    with pytest.raises(RuntimeError, match="py3langid"):
+        examine._reasoning_cache_usable(good_rows, s3, require_langid=True)
+    with pytest.raises(RuntimeError, match="py3langid"):
+        examine.assemble(rnd, scale, [(0, snap_path)], work, measure=False, synthesize=True, check_coverage=False, log=lambda _: None)
+
+
+def test_review20_posted_exam_grade_job_retains_baseline_across_cache_write_error(monkeypatch, tmp_path):
+    """Review 20 P2 #7: when the exam is ALREADY posted and ONLY the baseline cache rename fails
+    with OSError, `_grade_job` MUST use the valid in-memory baseline for the current job, proceed
+    to script download & grading, reuse that in-memory baseline on subsequent jobs without
+    retraining, and persist the cache opportunistically once storage recovers."""
+    if importlib.util.find_spec("torch") is None:
+        pytest.skip("torch not installed")
+    import os
+    import time
+
+    import zstandard as zstd
+
+    from stet import cli, client, grade, pipeline
+    from stet.spec import official_round
+
+    monkeypatch.setenv("STET_CACHE", str(tmp_path))
+    s3 = load_season("s3")
+    scale = s3.scale("nano")
+    items = [Item(kind="answer", corner="explain/en/wiki", fmt="prose", lang="en", source="explain:wikipedia:en:1", ctx="Ctx", cont=" Ans")]
+    exam_sha = data.exam_digest(items)
+    rnd = dataclasses.replace(
+        official_round(
+            s3,
+            26,
+            {"round": 123466, "randomness": "11" * 32},
+            {"crawl": "CC-MAIN-2026-43", "paths_sha256": "22" * 32, "n_shards": 100000},
+        ),
+        exam_digest=exam_sha,
+    )
+    key = types.SimpleNamespace(public_hex="b" * 64, handle="tester")
+    dev = types.SimpleNamespace(type="cpu")
+    out = cli.Out(quiet=True)
+
+    script_bytes = b'{"doc": 0}\n'
+    script_sha = hashlib.sha256(script_bytes).hexdigest()
+    compressed = zstd.ZstdCompressor().compress(script_bytes)
+
+    train_calls: list[str] = []
+    download_calls: list[str] = []
+    grade_calls: list[bytes] = []
+
+    monkeypatch.setattr(client, "_job_round", lambda season, job, out_: rnd)
+    monkeypatch.setattr(client, "fetch_exam", lambda *a, **k: None)
+    monkeypatch.setattr(data, "round_exam", lambda *a, **k: items)
+
+    def fake_request(method, path, **kw):
+        download_calls.append(path)
+        return compressed
+
+    def fake_train_baseline(r, sc, d, **kw):
+        train_calls.append(r.id)
+        return grade.Trained(
+            model=types.SimpleNamespace(tag="base"),
+            enc=None,
+            device=dev,
+            result={"valid": False, "hardware": {"device": "cpu"}, "train": {"init_sha256": "3" * 64}},
+            trained=True,
+        )
+
+    def fake_sit_exam(trained, r, sc, ex):
+        try:
+            res = dict(trained.result)
+            res["valid"] = True
+            res["exam_sha256"] = exam_sha
+            res["exam"] = {"items": len(ex), "item_scores": [-2.1], "mean": -2.1}
+            return res
+        finally:
+            trained.model = None
+
+    def fake_grade_round(r, sc, path, **kw):
+        grade_calls.append(path.read_bytes())
+        return {"valid": True, "exam_sha256": exam_sha, "exam": {"items": 1, "item_scores": [-1.9], "mean": -1.9}}
+
+    monkeypatch.setattr(client, "request", fake_request)
+    monkeypatch.setattr(pipeline, "train_baseline", fake_train_baseline)
+    monkeypatch.setattr(pipeline, "sit_exam", fake_sit_exam)
+    monkeypatch.setattr(pipeline, "grade_round", fake_grade_round)
+
+    # Fail ONLY baseline cache rename (work dir remains writable).
+    orig_replace = os.replace
+    fail_base_cache = {"on": True}
+
+    def flaky_replace(src, dst):
+        if fail_base_cache["on"] and "baseline-" in str(dst):
+            raise OSError("Read-only baseline cache mount")
+        return orig_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", flaky_replace)
+
+    bases: dict = {}
+    job1 = {"id": 101, "baseline": True, "script": {"sha256": script_sha}}
+    job2 = {"id": 102, "baseline": True, "script": {"sha256": script_sha}}
+    job3 = {"id": 103, "baseline": True, "script": {"sha256": script_sha}}
+
+    # Job 1: baseline cache rename fails -> MUST NOT abort; completes script download + grading!
+    res1, base1 = client._grade_job(job1, s3, scale, dev, key, out, tmp_path / "work1", bases=bases)
+    assert res1["valid"] is True and base1["valid"] is True and base1["exam_sha256"] == exam_sha
+    assert len(train_calls) == 1
+    assert len(download_calls) == 1 and len(grade_calls) == 1
+    assert isinstance(bases[rnd.id], client._SatBaseline) and bases[rnd.id].cached is False
+
+    # Job 2 while cache rename STILL fails: reuses in-memory baseline (zero retrain!), finishes grading!
+    res2, base2 = client._grade_job(job2, s3, scale, dev, key, out, tmp_path / "work2", bases=bases)
+    assert res2["valid"] is True and base2 == base1
+    assert len(train_calls) == 1
+    assert len(download_calls) == 2 and len(grade_calls) == 2
+    assert bases[rnd.id].cached is False
+
+    # Job 3 once storage recovers: still zero retrain, AND opportunistically persists baseline cache!
+    fail_base_cache["on"] = False
+    res3, base3 = client._grade_job(job3, s3, scale, dev, key, out, tmp_path / "work3", bases=bases)
+    assert res3["valid"] is True and base3 == base1
+    assert len(train_calls) == 1
+    assert len(download_calls) == 3 and len(grade_calls) == 3
+    assert bases[rnd.id].cached is True
+    bp = pipeline.baseline_path(rnd, scale, dev, exam_sha=exam_sha, verifier=key.public_hex, gpu="")
+    assert bp.exists()
+
+    # Standalone _grade_job(..., bases=None) also survives a baseline cache rename OSError!
+    bp.unlink()
+    fail_base_cache["on"] = True
+    res4, base4 = client._grade_job(job1, s3, scale, dev, key, out, tmp_path / "work4", bases=None)
+    assert res4["valid"] is True and base4["valid"] is True
+    assert len(train_calls) == 2 and len(download_calls) == 4 and len(grade_calls) == 4
+
+    # Gate 4 P1-1: verify HTTP 409 refusal in `_verify()` evicts the in-memory `_SatBaseline` in
+    # `bases[round_id]` alongside `_forget_round` so the retry re-measures a fresh baseline instead
+    # of immediately re-submitting the refused in-memory baseline!
+    refusal_attempts = []
+    submitted_baselines = []
+    forgotten = []
+    verify_jobs = [
+        {"id": 201, "kind": "grade", "scale": "nano", "baseline": True, "expires_at": int(time.time()) + 3600,
+         "round": rnd.describe(), "editor": {"id": "ed1", "name": "e", "version": 1, "owner": "a"},
+         "script": {"sha256": script_sha, "size": len(script_bytes)}},
+        {"id": 202, "kind": "grade", "scale": "nano", "baseline": True, "expires_at": int(time.time()) + 3600,
+         "round": rnd.describe(), "editor": {"id": "ed1", "name": "e", "version": 1, "owner": "a"},
+         "script": {"sha256": script_sha, "size": len(script_bytes)}},
+    ]
+    baseline_ver = {"n": 0}
+
+    def fake_train_for_409(r, sc, d, **kw):
+        baseline_ver["n"] += 1
+        return grade.Trained(
+            model=types.SimpleNamespace(tag=f"v{baseline_ver['n']}"),
+            enc=None,
+            device=dev,
+            result={"valid": False, "hardware": {"device": "cpu"}, "train": {"init_sha256": f"{baseline_ver['n']}" * 64}},
+            trained=True,
+        )
+
+    def fake_verify_req(method, path, body=None, **kw):
+        if path == "/api/v1/season":
+            return {"scale": "nano"}
+        if path == "/api/v1/me":
+            return {"account": {"handle": "tester"}, "verifier": {"validated": 0}}
+        if path == "/api/v1/jobs/claim":
+            return {"job": verify_jobs.pop(0)} if verify_jobs else {"job": None}
+        if path.startswith("/api/v1/scripts/"):
+            return compressed
+        if path.endswith("/release"):
+            return {}
+        return {}
+
+    def fake_report(path, payload, k, **kw):
+        submitted_baselines.append(payload.get("baseline", {}).get("init_sha256"))
+        if len(refusal_attempts) == 0:
+            refusal_attempts.append(path)
+            raise client.ApiError(409, "your unedited baseline differs from the round's")
+        return {"status": "pending"}
+
+    monkeypatch.setattr(pipeline, "train_baseline", fake_train_for_409)
+    monkeypatch.setattr(client, "request", fake_verify_req)
+    monkeypatch.setattr(client, "report", fake_report)
+    monkeypatch.setattr(client, "_forget_round", lambda *a, **k: forgotten.append(a[0]["round"]["id"]))
+    monkeypatch.setattr(client, "slim_result", lambda r, b: {"valid": True, "baseline": {"init_sha256": b["train"]["init_sha256"]}})
+    monkeypatch.setattr(client, "need_key", lambda: key)
+    monkeypatch.setattr(client, "note_pass", lambda *a, **k: None)
+    monkeypatch.setattr(client, "saved_pass", lambda *a, **k: None)
+    monkeypatch.setattr(client, "remember_announcement", lambda *a, **k: None)
+    monkeypatch.setattr(client, "tidy", lambda *a, **k: None)
+    monkeypatch.setattr(client, "config_dir", lambda: tmp_path / "cfg")
+    monkeypatch.setattr(client.time, "sleep", lambda *a, **k: None)
+    monkeypatch.setattr("stet.env.problems", lambda *a, **k: [])
+    monkeypatch.setattr("stet.train.pick_device", lambda *a, **k: dev)
+    monkeypatch.setattr("stet.train.hardware_info", lambda *a, **k: {"device": "cpu", "gpu": ""})
+    monkeypatch.setattr("stet.upgrade.Upgrader", lambda *a, **k: types.SimpleNamespace(on=False, consider=lambda *a, **k: None, look=lambda: None, now=lambda: None))
+    args = types.SimpleNamespace(once=False, max_jobs=1, edits=False, device="cpu", season="s3", no_sandbox=False, any_device=True, exit_when_idle=0, no_upgrade=True)
+    client._verify(args)
+    assert forgotten == [rnd.id]
+    assert submitted_baselines == ["1" * 64, "2" * 64], f"409 refusal MUST evict in-memory _SatBaseline and re-measure! got {submitted_baselines}"
+

@@ -221,6 +221,9 @@ type podRecord struct {
 	Asked   bool `json:"asked,omitempty"`
 	// Gone: the market stopped listing it, or stopped it, without the fleet ending it.
 	Gone bool `json:"gone,omitempty"`
+	// Stopped: confirmed stopped by provider by-ID lookup while omitted from listing, kept in
+	// fleet.json until m.End(ctx, id) confirms destruction (e.g. to stop Vast disk billing).
+	Stopped bool `json:"stopped,omitempty"`
 	// Why it ended, as the fleet said it, and the cause when it failed (seen.go).
 	Why   string `json:"why,omitempty"`
 	Cause string `json:"cause,omitempty"`
@@ -325,9 +328,12 @@ func owner(l *ledger, r *Rental) string {
 	return ""
 }
 
-// note brings the record up to date with the machines the markets list now: the live ones
-// were alive now, and those a market that answered no longer lists are gone.
-func (f *Fleet) note(l *ledger, rentals []Rental, answered map[string]bool) error {
+// note brings the record up to date with the machines the markets list now: live ones retain
+// their last known positive hourly rate if a listing omits the price, and a recorded machine
+// omitted from a listing is only retired once confirmed gone (via by-ID lookup) or explicitly
+// listed as non-live; while its status is uncertain, its ledger record, slot, and positive rate
+// are preserved and represented in the returned rentals slice.
+func (f *Fleet) note(ctx context.Context, l *ledger, rentals []Rental, answered map[string]bool) ([]Rental, error) {
 	now := f.now()
 	listed := map[string]*Rental{}
 	for i := range rentals {
@@ -342,45 +348,132 @@ func (f *Fleet) note(l *ledger, rentals []Rental, answered map[string]bool) erro
 			key := ledgerKey(p.Market, p.ID)
 			r := l.Pods[key]
 			if r == nil { // rented by another copy of this tool, or by hand
-				r = &podRecord{ID: p.ID, Market: p.Market, Handle: k.Handle, GPU: p.Card, Cost: p.Price, Start: p.Created, Tracked: true}
+				cost := 0.0
+				if validRate(p.Price) {
+					cost = p.Price
+				}
+				r = &podRecord{ID: p.ID, Market: p.Market, Handle: k.Handle, GPU: p.Card, Cost: cost, Start: p.Created, Tracked: true}
 				l.Pods[key] = r
 			}
-			r.Alive, r.Cost = now, p.Price
+			r.Alive = now
+			r.Stopped = false
+			if validRate(p.Price) {
+				r.Cost = p.Price
+			} else if validRate(r.Cost) {
+				p.Price = r.Cost
+			} else {
+				p.Price = 0
+			}
 		}
 	}
-	for key, r := range l.Pods {
-		if !answered[r.market()] {
+	every := f.o.Every
+	if every <= 0 {
+		every = time.Minute
+	}
+	retireGone := func(key string, r *podRecord, p *Rental) error {
+		r.Gone = true
+		gone := Rental{Market: r.market(), ID: r.ID, Card: r.GPU}
+		why := "its market no longer lists it"
+		if p != nil {
+			gone = *p
+			why = "its market has it " + strings.ToLower(p.Status)
+			if p.Detail != "" && p.Detail != strings.ToLower(p.Status) {
+				why += ": " + p.Detail
+			}
+		}
+		if r.Asked {
+			why = "ended by itself, or by its market: " + why
+		} else {
+			r.Cause = causeGone
+			why = "taken away before it asked for work: " + why
+		}
+		r.Why = why
+		f.event(&gone, r.Handle, "gone", why)
+		return f.retire(l, key, minTime(now, r.Alive.Add(2*every)))
+	}
+	keys := make([]string, 0, len(l.Pods))
+	for key := range l.Pods {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	var extra []Rental
+	for _, key := range keys {
+		r := l.Pods[key]
+		if r == nil || !answered[r.market()] {
 			continue
 		}
-		if p := listed[key]; p == nil || !p.live() {
-			r.Gone = true
-			gone := Rental{Market: r.market(), ID: r.ID, Card: r.GPU}
-			why := "its market no longer lists it"
-			if p != nil {
-				gone = *p
-				why = "its market has it " + strings.ToLower(p.Status)
-				if p.Detail != "" && p.Detail != strings.ToLower(p.Status) {
-					why += ": " + p.Detail
-				}
-			}
-			if r.Asked {
-				why = "ended by itself, or by its market: " + why
+		p := listed[key]
+		if p != nil && p.live() {
+			r.Alive = now
+			r.Stopped = false
+			if validRate(p.Price) {
+				r.Cost = p.Price
+			} else if validRate(r.Cost) {
+				p.Price = r.Cost
 			} else {
-				r.Cause = causeGone
-				why = "taken away before it asked for work: " + why
+				p.Price = 0
 			}
-			r.Why = why
-			f.event(&gone, r.Handle, "gone", why)
-			every := f.o.Every
-			if every <= 0 {
-				every = time.Minute
-			}
-			if err := f.retire(l, key, minTime(now, r.Alive.Add(2*every))); err != nil {
-				return err
-			}
+			continue
 		}
+		if p != nil {
+			if err := retireGone(key, r, p); err != nil {
+				return rentals, err
+			}
+			continue
+		}
+		// Known worker omitted from a successful listing: verify by ID before retiring so a
+		// truncated/eventually-consistent listing can never free a live slot or erase its rate.
+		if lu, ok := f.market(r.market()).(rentalLookup); ok {
+			fresh, exists, lerr := lu.Lookup(ctx, r.ID)
+			switch {
+			case lerr == nil && !exists:
+				if err := retireGone(key, r, nil); err != nil {
+					return rentals, err
+				}
+			case lerr == nil && exists && fresh != nil && fresh.live():
+				if fresh.Name == "" {
+					fresh.Name = r.Handle
+				}
+				r.Alive = now
+				r.Stopped = false
+				if validRate(fresh.Price) {
+					r.Cost = fresh.Price
+				} else if validRate(r.Cost) {
+					fresh.Price = r.Cost
+				} else {
+					fresh.Price = 0
+				}
+				extra = append(extra, *fresh)
+			case lerr == nil && exists && fresh != nil:
+				if fresh.Name == "" {
+					fresh.Name = r.Handle
+				}
+				if !validRate(fresh.Price) {
+					if validRate(r.Cost) {
+						fresh.Price = r.Cost
+					} else {
+						fresh.Price = 0
+					}
+				}
+				extra = append(extra, *fresh)
+				if fresh.State == "stopped" {
+					// Keep stopped instance in fleet.json (with Stopped=true) until m.End(ctx, id)
+					// confirms provider deletion so Vast disk billing / failed ends are retried.
+					r.Stopped = true
+				} else if err := retireGone(key, r, fresh); err != nil {
+					return rentals, err
+				}
+			default:
+				extra = append(extra, recordedRental(r, "unconfirmed (omitted from listing)"))
+			}
+			continue
+		}
+		extra = append(extra, recordedRental(r, "unconfirmed (omitted from listing)"))
 	}
-	return f.writeLedger(l)
+	if len(extra) > 0 {
+		rentals = append(rentals, extra...)
+	}
+	return rentals, f.writeLedger(l)
 }
 
 // retire moves a machine that has ended from the record of live ones to the log of what was
@@ -413,7 +506,11 @@ func (f *Fleet) spent(l *ledger, since time.Time) (float64, error) {
 	total := 0.0
 	for _, r := range l.Pods {
 		r := *r
-		r.End = now
+		if r.Stopped && !r.Alive.IsZero() {
+			r.End = r.Alive
+		} else {
+			r.End = now
+		}
 		total += r.dollarsBetween(since, now)
 	}
 	fh, err := os.Open(f.spentLog())
@@ -599,12 +696,27 @@ func (f *Fleet) rentals(ctx context.Context, l *ledger) ([]Rental, map[string]bo
 	return all, answered, nil
 }
 
+func recordedRental(r *podRecord, status string) Rental {
+	state := "running"
+	if r.Stopped {
+		state = "stopped"
+	}
+	cost := r.Cost
+	if !validRate(cost) {
+		cost = 0
+	}
+	return Rental{
+		Market: r.market(), ID: r.ID, Name: r.Handle, Card: r.GPU,
+		Price: cost, State: state, Status: status, Created: r.Start,
+	}
+}
+
 // recordedRentals are a market's machines as the record has them, live.
 func recordedRentals(l *ledger, market string) []Rental {
 	var out []Rental
 	for _, r := range l.Pods {
 		if r.market() == market {
-			out = append(out, Rental{Market: market, ID: r.ID, Name: r.Handle, Card: r.GPU, Price: r.Cost, State: "running", Status: "as recorded", Created: r.Start})
+			out = append(out, recordedRental(r, "as recorded"))
 		}
 	}
 	return out
@@ -630,7 +742,7 @@ func (f *Fleet) look(ctx context.Context) (*View, error) {
 	if err != nil {
 		return &View{Work: work, Ledger: l}, err
 	}
-	if err := f.note(l, rentals, answered); err != nil {
+	if rentals, err = f.note(ctx, l, rentals, answered); err != nil {
 		return &View{Work: work, Ledger: l}, err
 	}
 	v := &View{Work: work, Ledger: l}
@@ -648,6 +760,9 @@ func (f *Fleet) look(ctx context.Context) (*View, error) {
 		}
 		if w.Rental != nil {
 			if rec := l.Pods[ledgerKey(w.Rental.Market, w.Rental.ID)]; rec != nil {
+				if !validRate(w.Rental.Price) && validRate(rec.Cost) {
+					w.Rental.Price = rec.Cost
+				}
 				w.Plan = rec.Grades
 				if !rec.Asked && w.Machine != nil && w.Machine.LastSeen >= w.Rental.Created.Unix() {
 					rec.Asked, asked = true, true
@@ -680,7 +795,9 @@ func (f *Fleet) look(ctx context.Context) (*View, error) {
 			}
 		}
 		if w.Rental != nil && w.Rental.live() {
-			v.Hourly += w.Rental.Price
+			if validRate(w.Rental.Price) {
+				v.Hourly += w.Rental.Price
+			}
 			f.seeStart(w)
 		}
 		if window := earlyWindow(work); w.Rental != nil && window > 0 {

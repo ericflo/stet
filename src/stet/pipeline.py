@@ -79,6 +79,7 @@ def baseline(
     exam=None,
     practice_key: str | None = None,
     ignore_cache_error: bool = False,
+    _cache_ok: list[bool] | None = None,
 ) -> dict:
     """The unedited corpus's result for a round: every document, in corpus order. Cached.
 
@@ -110,9 +111,12 @@ def baseline(
         want_verifier=verifier,
     )
     if cached is not None:
+        if _cache_ok is not None:
+            _cache_ok.append(True)
         return cached
-    return sit_baseline(
-        train_baseline(rnd, scale, device, progress=progress, log=log),
+    trained = train_baseline(rnd, scale, device, progress=progress, log=log)
+    result = sit_baseline(
+        trained,
         rnd,
         scale,
         verifier=verifier,
@@ -121,6 +125,9 @@ def baseline(
         practice_key=practice_key,
         ignore_cache_error=ignore_cache_error,
     )
+    if _cache_ok is not None:
+        _cache_ok.append(bool(getattr(trained, "_sat_cached", False)))
+    return result
 
 
 def baseline_path(

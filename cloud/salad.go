@@ -236,6 +236,32 @@ func saladState(status string) string {
 	return status
 }
 
+func saladGroupRental(g saladGroup, byID map[string]saladClass) Rental {
+	r := Rental{Market: "salad", ID: g.Name, Name: g.DisplayName, State: saladState(g.CurrentState.Status), Status: g.CurrentState.Status, Created: g.CreateTime}
+	c := g.CurrentState.Counts
+	switch {
+	case c.Running > 0:
+		r.Up, r.Phase = "yes", "running"
+	case c.Creating > 0:
+		r.Up, r.Phase = "no", "creating: pulling the image"
+	case c.Allocating > 0:
+		r.Up, r.Phase = "no", "allocating: looking for a node"
+	default:
+		r.Up, r.Phase = "no", g.CurrentState.Status
+	}
+	r.Detail = r.Phase
+	if d := g.CurrentState.Description; d != nil && *d != "" {
+		r.Detail += ": " + *d
+	}
+	if cs := g.Container.Resources.GPUClasses; len(cs) > 0 {
+		if c, ok := byID[cs[0]]; ok {
+			r.Card, _ = saladCard(c.Name)
+			r.Price = c.price(g.Priority)
+		}
+	}
+	return r
+}
+
 // Rentals are the project's container groups, each one machine. A group's display name is
 // the worker key's handle; its name has more after it, since Salad never takes a name twice.
 func (m *saladMarket) Rentals(ctx context.Context) ([]Rental, error) {
@@ -252,31 +278,31 @@ func (m *saladMarket) Rentals(ctx context.Context) ([]Rental, error) {
 	}
 	var rentals []Rental
 	for _, g := range out.Items {
-		r := Rental{Market: "salad", ID: g.Name, Name: g.DisplayName, State: saladState(g.CurrentState.Status), Status: g.CurrentState.Status, Created: g.CreateTime}
-		c := g.CurrentState.Counts
-		switch {
-		case c.Running > 0:
-			r.Up, r.Phase = "yes", "running"
-		case c.Creating > 0:
-			r.Up, r.Phase = "no", "creating: pulling the image"
-		case c.Allocating > 0:
-			r.Up, r.Phase = "no", "allocating: looking for a node"
-		default:
-			r.Up, r.Phase = "no", g.CurrentState.Status
-		}
-		r.Detail = r.Phase
-		if d := g.CurrentState.Description; d != nil && *d != "" {
-			r.Detail += ": " + *d
-		}
-		if cs := g.Container.Resources.GPUClasses; len(cs) > 0 {
-			if c, ok := byID[cs[0]]; ok {
-				r.Card, _ = saladCard(c.Name)
-				r.Price = c.price(g.Priority)
-			}
-		}
-		rentals = append(rentals, r)
+		rentals = append(rentals, saladGroupRental(g, byID))
 	}
 	return rentals, nil
+}
+
+// Lookup verifies one Salad container group directly by ID when a listing omits it.
+func (m *saladMarket) Lookup(ctx context.Context, id string) (*Rental, bool, error) {
+	var g saladGroup
+	status, err := m.a.do(ctx, "GET", m.orgPath()+"/projects/"+url.PathEscape(m.project)+"/containers/"+url.PathEscape(id), nil, &g)
+	if status == 404 {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	if g.Name == "" || g.Name != id {
+		return nil, false, fmt.Errorf("Salad lookup for %q returned unexpected container group %q", id, g.Name)
+	}
+	classes, _ := m.gpuClasses(ctx)
+	byID := map[string]saladClass{}
+	for _, c := range classes {
+		byID[c.ID] = c
+	}
+	r := saladGroupRental(g, byID)
+	return &r, true, nil
 }
 
 // Logs are what the container group's container has said, from Salad's log store (queries are

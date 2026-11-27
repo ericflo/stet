@@ -52,6 +52,10 @@ Vast.ai, Lium, Salad and Clore.ai.
                                  provisions and proxies the ephemeral 1x RTX 5090 examiner)
   stet-cloud examiner            run only the automated ephemeral 1x RTX 5090 examiner
                                  controller and local authenticated vLLM proxy
+  stet-cloud examiner resolve [--end]
+                                 verify an unresolved pending examiner reservation with
+                                 Vast.ai, adopting (or ending with --end) if found or
+                                 clearing it when confirmed absent
   stet-cloud up [N]              rent N machines now, whatever is waiting (default 1)
   stet-cloud down [--force] [HANDLE...]
                                  end machines that hold no job; --force ends the rest
@@ -398,12 +402,23 @@ func run(args []string, stdout, stderr io.Writer) error {
 		}
 		return cmdScale(ctx, f, *follow)
 	case "examiner":
+		end := fs.Bool("end", false, "with resolve: terminate a pending examiner instance if Vast.ai now lists it")
 		rest, err := parse(fs, args)
 		if err != nil {
 			return err
 		}
+		if len(rest) == 1 && rest[0] == "resolve" {
+			f, err := open(o, stdout, true, false)
+			if err != nil {
+				return err
+			}
+			return cmdExaminerResolve(ctx, f, *end)
+		}
 		if len(rest) > 0 {
-			return fmt.Errorf("%s takes no %q", cmd, rest[0])
+			return fmt.Errorf("%s takes no %q (try: stet-cloud examiner resolve)", cmd, rest[0])
+		}
+		if *end {
+			return errors.New("--end is only for `stet-cloud examiner resolve`")
 		}
 		if o.Examiner.Addr == "" {
 			o.Examiner.Addr = "127.0.0.1:8000"

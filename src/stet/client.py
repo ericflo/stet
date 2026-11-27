@@ -971,6 +971,7 @@ def _grade_job(job, season, scale, device, key, out, work: Path, bases: dict | N
         _device_gpu_name,
         baseline,
         baseline_path,
+        cache_baseline,
         grade_round,
         sit_baseline,
         train_baseline,
@@ -983,7 +984,24 @@ def _grade_job(job, season, scale, device, key, out, work: Path, bases: dict | N
     vid = _verifier_id(key)
     if rnd.exam_digest:
         fetch_exam(rnd, key)
-        if asked:
+        entry = (bases or {}).get(rnd.id)
+        if isinstance(entry, _SatBaseline) and entry.exam_digest == rnd.exam_digest:
+            base = entry.result
+            if not entry.cached:
+                dev = device if hasattr(device, "type") else pick_device(device)
+                dev_gpu = _device_gpu_name(dev)
+                entry.cached = _call_supported(
+                    cache_baseline,
+                    base,
+                    rnd,
+                    scale,
+                    dev,
+                    verifier=vid,
+                    gpu=dev_gpu,
+                    ignore_os_error=True,
+                )
+        elif asked:
+            cache_ok: list[bool] = []
             base = _call_supported(
                 baseline,
                 rnd,
@@ -992,7 +1010,15 @@ def _grade_job(job, season, scale, device, key, out, work: Path, bases: dict | N
                 progress=out.progress("baseline"),
                 log=lambda m: out.line("", out.dim("baseline " + m)),
                 verifier=vid,
+                ignore_cache_error=True,
+                _cache_ok=cache_ok,
             )
+            if bases is not None and isinstance(base, dict):
+                bases[rnd.id] = _SatBaseline(
+                    rnd.exam_digest,
+                    base,
+                    cached=(cache_ok[-1] if cache_ok else True),
+                )
         else:
             # What an earlier job of the round measured on THIS verifier and GPU is still
             # this machine's to send, provided it sat the exact full exam digest.
@@ -1014,6 +1040,8 @@ def _grade_job(job, season, scale, device, key, out, work: Path, bases: dict | N
                 base = None
             if base is not None and dev_gpu and isinstance(base.get("hardware"), dict) and base["hardware"].get("gpu") != dev_gpu:
                 base = None
+            if base is not None and bases is not None:
+                bases[rnd.id] = _SatBaseline(rnd.exam_digest, base, cached=True)
     want = job["script"]["sha256"]
     limit = int(season.raw["script"]["max_bytes"])
     # Signed: until its round settles, a script is given only to whoever was handed it to grade.
@@ -1064,7 +1092,7 @@ def _grade_job(job, season, scale, device, key, out, work: Path, bases: dict | N
     dev_gpu = _device_gpu_name(device)
     if asked and base_t is not None:
         # Prefer sitting THIS verifier's already-trained baseline rather than reading any cache.
-        base = _call_supported(sit_baseline, base_t, rnd, scale, verifier=vid, gpu=dev_gpu)
+        base = _call_supported(sit_baseline, base_t, rnd, scale, verifier=vid, gpu=dev_gpu, ignore_cache_error=True)
     else:
         bp = _call_supported(baseline_path, rnd, scale, device, verifier=vid, gpu=dev_gpu)
         base = _call_supported(
@@ -1267,9 +1295,21 @@ def _sit(p: Pending, bases: dict, key, scale) -> tuple[dict, dict | None]:
                 # Pass ignore_cache_error=True so a disk cache error during recovery never poisons
                 # bases[rnd.id] after the recovered baseline has already scored cleanly in memory.
                 bases[p.rnd.id] = _FailedBaseline(p.rnd.exam_digest, recovered=True)
-                base = _call_supported(baseline, p.rnd, scale, p.device, verifier=vid, ignore_cache_error=True)
-                bp = _call_supported(baseline_path, p.rnd, scale, p.device, verifier=vid, gpu=dev_gpu)
-                bases[p.rnd.id] = _SatBaseline(p.rnd.exam_digest, base, cached=bool(bp.exists()))
+                cache_ok: list[bool] = []
+                base = _call_supported(
+                    baseline,
+                    p.rnd,
+                    scale,
+                    p.device,
+                    verifier=vid,
+                    ignore_cache_error=True,
+                    _cache_ok=cache_ok,
+                )
+                bases[p.rnd.id] = _SatBaseline(
+                    p.rnd.exam_digest,
+                    base,
+                    cached=(cache_ok[-1] if cache_ok else True),
+                )
     else:
         if isinstance(entry, _SatBaseline) and entry.exam_digest == p.rnd.exam_digest:
             base = entry.result
@@ -1890,9 +1930,13 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
         return ok
 
     def forget_base(p: Pending | None) -> None:
-        """Let go of a round's unedited student once no trained grade waits to sit beside it."""
+        """Let go of a round's unedited student once no trained grade waits to sit beside it,
+        retaining an uncached _SatBaseline dict so later posted-exam jobs for the same round
+        can reuse it in memory and retry disk persistence."""
         if p is not None and not any(q.rnd.id == p.rnd.id for q in waiting.values()):
-            bases.pop(p.rnd.id, None)
+            cur = bases.get(p.rnd.id)
+            if not (isinstance(cur, _SatBaseline) and not cur.cached):
+                bases.pop(p.rnd.id, None)
 
     def more_wanted() -> bool:
         return not args.once and not (args.max_jobs and done + len(waiting) >= args.max_jobs)
@@ -2247,9 +2291,12 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
                 # not that: it is the refusal itself, heard on a second try.
                 late = err.status == 409 and "already refused" not in said and any(w in said for w in ("already", "ended before", "settled before"))
                 if err.status in (400, 409) and not late:  # a disagreement about the round, not some other no
+                    if isinstance(bases.get(round_id), _SatBaseline):
+                        bases.pop(round_id, None)
                     refused[round_id] = refused.get(round_id, 0) + 1
                     if err.status == 409 and refused[round_id] == 1:
                         # Our corpus or baseline differs from the round's. The copy on disk is the first suspect.
+                        bases.pop(round_id, None)
                         _forget_round(job, season, scale)
                         out.line("", out.dim(f"dropped this machine's copy of round {round_id}; it is rebuilt once, in case the copy was at fault"))
                 stop_if_once()

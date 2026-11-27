@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -155,16 +156,25 @@ func (m *vastMarket) Rent(ctx context.Context, o Offer, l Launch) (*Rental, erro
 		"runtype": "args", "args": []string{"bash", "-c", l.Script}, "cancel_unavail": true, "target_state": "running",
 	}
 	var out struct {
-		Success     bool   `json:"success"`
+		Success     *bool  `json:"success"`
 		NewContract int64  `json:"new_contract"`
 		Msg         string `json:"msg"`
 	}
 	status, err := m.a.do(ctx, "PUT", "/api/v0/asks/"+url.PathEscape(o.ID)+"/", body, &out)
 	switch {
-	case err == nil && out.Success && out.NewContract > 0:
+	case err == nil && out.NewContract > 0 && (out.Success == nil || *out.Success):
 		return &Rental{Market: "vast", ID: strconv.FormatInt(out.NewContract, 10), Name: l.Name, Card: o.Card,
 			Price: o.Price, State: "starting", Status: "created", Created: time.Now()}, nil
+	case err == nil && out.Success != nil && !*out.Success:
+		return nil, fmt.Errorf("Vast.ai refused new instance (%d): %s", status, out.Msg)
 	case err == nil:
+		if rs, lerr := m.Rentals(ctx); lerr == nil {
+			for i := range rs {
+				if rs[i].Name == l.Name && rs[i].live() {
+					return &rs[i], nil
+				}
+			}
+		}
 		return nil, fmt.Errorf("Vast.ai answered %d to a new instance, without one: %s", status, out.Msg)
 	case status == 404 || status == 410 || (status == 400 && strings.Contains(err.Error(), "no_such_ask")):
 		// Gone between the search and the rent: Vast says so with a 400 too.
@@ -220,6 +230,35 @@ func vastState(i vastInstance) (state, status string) {
 	return s, s
 }
 
+func vastInstanceRental(i vastInstance) Rental {
+	state, status := vastState(i)
+	name := ""
+	if i.Label != nil {
+		name = *i.Label
+	}
+	price := i.DPHTotal
+	if !validRate(price) && validRate(i.DPHBase) {
+		price = i.DPHBase
+	}
+	if !validRate(price) {
+		price = 0
+	}
+	r := Rental{Market: "vast", ID: strconv.FormatInt(i.ID, 10), Name: name, Card: vastCard(i.GPUName),
+		Price: price, State: state, Status: status, Created: time.Unix(int64(i.StartDate), 0)}
+	r.Phase = status
+	if r.Phase == "" {
+		r.Phase = "scheduling"
+	}
+	r.Up = map[bool]string{true: "yes", false: "no"}[status == "running"]
+	if i.StatusMsg != nil {
+		r.Detail = strings.TrimSpace(*i.StatusMsg)
+	}
+	if r.Detail == "" {
+		r.Detail = r.Phase
+	}
+	return r
+}
+
 func (m *vastMarket) Rentals(ctx context.Context) ([]Rental, error) {
 	var all []Rental
 	after := ""
@@ -237,25 +276,7 @@ func (m *vastMarket) Rentals(ctx context.Context) ([]Rental, error) {
 			return nil, err
 		}
 		for _, i := range out.Instances {
-			state, status := vastState(i)
-			name := ""
-			if i.Label != nil {
-				name = *i.Label
-			}
-			r := Rental{Market: "vast", ID: strconv.FormatInt(i.ID, 10), Name: name, Card: vastCard(i.GPUName),
-				Price: i.DPHTotal, State: state, Status: status, Created: time.Unix(int64(i.StartDate), 0)}
-			r.Phase = status
-			if r.Phase == "" {
-				r.Phase = "scheduling"
-			}
-			r.Up = map[bool]string{true: "yes", false: "no"}[status == "running"]
-			if i.StatusMsg != nil {
-				r.Detail = strings.TrimSpace(*i.StatusMsg)
-			}
-			if r.Detail == "" {
-				r.Detail = r.Phase
-			}
-			all = append(all, r)
+			all = append(all, vastInstanceRental(i))
 		}
 		if out.NextToken == nil || *out.NextToken == "" {
 			return all, nil
@@ -263,6 +284,57 @@ func (m *vastMarket) Rentals(ctx context.Context) ([]Rental, error) {
 		after = *out.NextToken
 	}
 	return all, fmt.Errorf("Vast listed more than 2,500 instances")
+}
+
+// Lookup verifies one Vast.ai instance directly by ID when a listing omits it.
+func (m *vastMarket) Lookup(ctx context.Context, id string) (*Rental, bool, error) {
+	var raw struct {
+		Instances json.RawMessage `json:"instances"`
+	}
+	status, err := m.a.do(ctx, "GET", "/api/v0/instances/"+url.PathEscape(id)+"/", nil, &raw)
+	if status == 404 {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	b := bytes.TrimSpace(raw.Instances)
+	if len(b) == 0 {
+		return nil, false, fmt.Errorf("Vast.ai lookup for %q returned empty response without instances field", id)
+	}
+	if string(b) == "null" {
+		return nil, false, nil
+	}
+	var inst vastInstance
+	if b[0] == '[' {
+		var list []vastInstance
+		if err := json.Unmarshal(b, &list); err != nil {
+			return nil, false, err
+		}
+		if len(list) == 0 {
+			return nil, false, nil
+		}
+		found := false
+		for _, cand := range list {
+			if cand.ID > 0 && strconv.FormatInt(cand.ID, 10) == id {
+				inst = cand
+				found = true
+				break
+			}
+		}
+		if !found {
+			return nil, false, fmt.Errorf("Vast.ai lookup for %q returned instances without matching id", id)
+		}
+	} else {
+		if err := json.Unmarshal(b, &inst); err != nil {
+			return nil, false, err
+		}
+		if inst.ID <= 0 || strconv.FormatInt(inst.ID, 10) != id {
+			return nil, false, fmt.Errorf("Vast.ai lookup for %q returned unexpected instance id %d", id, inst.ID)
+		}
+	}
+	r := vastInstanceRental(inst)
+	return &r, true, nil
 }
 
 // Logs are what the instance's container has said: Vast puts the last n lines where they can be
@@ -573,16 +645,30 @@ func (m *vastMarket) RentExaminer(ctx context.Context, offerID string, l Examine
 		"target_state":   "running",
 	}
 	var out struct {
-		Success     bool   `json:"success"`
+		Success     *bool  `json:"success"`
 		NewContract int64  `json:"new_contract"`
 		Msg         string `json:"msg"`
 	}
 	status, err := m.a.do(ctx, "PUT", "/api/v0/asks/"+url.PathEscape(offerID)+"/", body, &out)
 	switch {
-	case err == nil && out.Success && out.NewContract > 0:
+	case err == nil && out.NewContract > 0 && (out.Success == nil || *out.Success):
 		return strconv.FormatInt(out.NewContract, 10), nil
+	case err == nil && out.Success != nil && !*out.Success:
+		return "", fmt.Errorf("%w: Vast.ai refused examiner rental (%d): %s", errRentRejected, status, out.Msg)
 	case err == nil:
-		return "", fmt.Errorf("%w: Vast.ai answered %d to a new examiner instance, without one: %s", errRentRejected, status, out.Msg)
+		// Incomplete 2xx response (e.g. {"success":true} with no new_contract): the contract may
+		// still have been created on Vast.ai. Try label reconciliation immediately and otherwise
+		// return an ambiguous (non-errRentRejected) error so the controller keeps the reservation.
+		if rs, lerr := m.ListExaminers(ctx); lerr == nil {
+			for _, r := range rs {
+				if r.Label == l.Label && r.State != "stopped" {
+					return r.ID, nil
+				}
+			}
+		}
+		return "", fmt.Errorf("Vast.ai answered %d to a new examiner instance without a contract ID (keeping reservation %s): %s", status, l.Label, out.Msg)
+	case errors.Is(err, errRequestNotSent):
+		return "", fmt.Errorf("%w: %w", errRentNotSent, err)
 	case status == 404 || status == 410 || (status == 400 && strings.Contains(err.Error(), "no_such_ask")):
 		return "", fmt.Errorf("%w (%v)", errNoRoom, err)
 	case status >= 400 && status < 500 && status != http.StatusRequestTimeout:

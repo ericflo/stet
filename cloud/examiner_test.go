@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/hex"
@@ -8,6 +9,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -3526,4 +3529,567 @@ func TestReview18UnpricedOfferRejectedByVastAndReconcile(t *testing.T) {
 			t.Fatalf("Reconcile MUST NOT rent $0/negative offer under $0.10/h cap! rented=%+v", prov.rented)
 		}
 	})
+}
+
+// Review 20 P1 #3: an incomplete worker listing (omitting a recorded live worker or reporting its
+// price as 0) MUST NOT free its slot or erase its last known positive hourly rate; only a by-ID
+// confirmation that the worker is gone (HTTP 404) or explicit non-live status / termination may
+// release the slot.
+func TestReview20IncompleteWorkerListingRetainsSlotAndPositiveRate(t *testing.T) {
+	t.Run("omitted_worker_checked_by_id_retains_slot_and_rate_until_confirmed_gone", func(t *testing.T) {
+		clk := newTestClock(time.Date(2026, 11, 27, 13, 0, 0, 0, time.UTC))
+		home := t.TempDir()
+		st := newFakeStet(t)
+		st.work = Work{Rounds: []WorkRound{{ID: "s3-o00095", Entries: 1, ExamAt: 0}}}
+
+		var mu sync.Mutex
+		listOmit := true
+		getStatus := 200 // 200 -> still live, 500 -> uncertain, 404 -> confirmed gone
+		livePod := Pod{ID: "pod-live", Name: "stet-rp-01", Status: "RUNNING", Cost: 0.43, CreatedAt: clk.Now().Add(-10 * time.Minute)}
+
+		rpSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			omit, gcode := listOmit, getStatus
+			pod := livePod
+			mu.Unlock()
+			switch {
+			case r.Method == "GET" && r.URL.Path == "/pods":
+				var pods []Pod
+				if !omit {
+					pods = append(pods, pod)
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"pods": pods, "pagination": map[string]any{"hasNextPage": false}})
+			case r.Method == "GET" && r.URL.Path == "/pods/pod-live":
+				if gcode != 200 {
+					w.WriteHeader(gcode)
+					return
+				}
+				_ = json.NewEncoder(w).Encode(pod)
+			default:
+				w.WriteHeader(404)
+			}
+		}))
+		defer rpSrv.Close()
+
+		k1, _ := newKey("stet-rp-01")
+		op, _ := newKey("op")
+		cloudMode := "ANY"
+		exProv := &fakeExaminerProv{offers: []ExaminerOffer{{ID: "off-5090", Card: "RTX 5090", Price: 0.62}}}
+		ex := newExaminer(ExaminerConfig{Addr: "127.0.0.1:0", Timeout: 45 * time.Minute, MaxPrice: 1.50}, home, exProv, clk.Now, nil, false)
+		f := &Fleet{
+			o:        &Options{Home: home, Every: time.Minute, Policy: Policy{MaxWorkers: 1, MaxHourly: 0.70, DailyBudget: 10.0}},
+			markets:  []Market{newRunPodMarket(newRunPod(rpSrv.URL, "rp-key"), &cloudMode)},
+			fixed:    true,
+			st:       newStet(st.srv.URL),
+			op:       op,
+			out:      &bytes.Buffer{},
+			now:      clk.Now,
+			keys:     []*Key{k1},
+			examiner: ex,
+		}
+		if err := f.writeLedger(&ledger{Pods: map[string]*podRecord{
+			ledgerKey("runpod", "pod-live"): {ID: "pod-live", Market: "runpod", Handle: "stet-rp-01", GPU: "RTX 4090", Cost: 0.43, Start: clk.Now().Add(-10 * time.Minute), Alive: clk.Now().Add(-time.Minute)},
+		}}); err != nil {
+			t.Fatalf("seed ledger: %v", err)
+		}
+
+		// 1. Listing omits pod-live, but GET /pods/pod-live returns 200 RUNNING -> MUST keep pod in ledger and NOT rent examiner!
+		if err := reconcileExaminerOnce(context.Background(), f); err != nil {
+			t.Fatalf("reconcileExaminerOnce (lookup 200): %v", err)
+		}
+		if len(exProv.rented) != 0 {
+			t.Fatalf("examiner rented despite live worker confirmed by ID! rented=%d", len(exProv.rented))
+		}
+		if l, err := f.readLedger(); err != nil || l.Pods["pod-live"] == nil || l.Pods["pod-live"].Cost != 0.43 {
+			t.Fatalf("expected pod-live retained at $0.43/h, got %+v err=%v", l, err)
+		}
+
+		// 2. Listing omits pod-live AND GET /pods/pod-live fails with 500 (uncertain) OR returns
+		//    empty HTTP 200 {} (malformed) -> MUST STILL keep slot & rate and NOT rent!
+		mu.Lock()
+		getStatus = 500
+		mu.Unlock()
+		if err := reconcileExaminerOnce(context.Background(), f); err != nil {
+			t.Fatalf("reconcileExaminerOnce (lookup 500): %v", err)
+		}
+		if len(exProv.rented) != 0 {
+			t.Fatalf("examiner rented while omitted worker's status was uncertain (HTTP 500)! rented=%d", len(exProv.rented))
+		}
+		if l, err := f.readLedger(); err != nil || l.Pods["pod-live"] == nil || l.Pods["pod-live"].Cost != 0.43 {
+			t.Fatalf("expected pod-live retained when lookup is uncertain, got %+v err=%v", l, err)
+		}
+
+		// Gate 4 P1-2: empty HTTP 200 {} from RunPod GET /pods/<id> MUST be treated as uncertain
+		// error rather than retiring a live worker!
+		mu.Lock()
+		getStatus = 200
+		livePod.ID = ""
+		mu.Unlock()
+		if err := reconcileExaminerOnce(context.Background(), f); err != nil {
+			t.Fatalf("reconcileExaminerOnce (empty 200): %v", err)
+		}
+		if len(exProv.rented) != 0 {
+			t.Fatalf("examiner rented after empty HTTP 200 lookup! rented=%d", len(exProv.rented))
+		}
+		if l, err := f.readLedger(); err != nil || l.Pods["pod-live"] == nil || l.Pods["pod-live"].Cost != 0.43 {
+			t.Fatalf("empty 200 lookup MUST NOT retire pod-live, got %+v err=%v", l, err)
+		}
+		mu.Lock()
+		livePod.ID = "pod-live"
+		mu.Unlock()
+
+		// Gate 4 P1-2: Vast.ai empty HTTP 200 {} without "instances" field MUST return an error,
+		// NOT (nil, false, nil) ("confirmed gone")!
+		vastEmptySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(`{}`))
+		}))
+		defer vastEmptySrv.Close()
+		if _, exists, lerr := newVast(vastEmptySrv.URL, "k").Lookup(context.Background(), "999"); lerr == nil || exists {
+			t.Fatalf("Vast empty 200 {} Lookup MUST return error, got exists=%v err=%v", exists, lerr)
+		}
+
+		// 3. Listing omits pod-live on a market without rentalLookup -> MUST ALSO retain slot & rate!
+		origMarkets := f.markets
+		f.markets = []Market{&stubWorkerMarket{name: "runpod", rentals: nil}}
+		if err := reconcileExaminerOnce(context.Background(), f); err != nil {
+			t.Fatalf("reconcileExaminerOnce (no lookup): %v", err)
+		}
+		if len(exProv.rented) != 0 {
+			t.Fatalf("examiner rented when omitted worker could not be verified by ID! rented=%d", len(exProv.rented))
+		}
+		f.markets = origMarkets
+
+		// 4. Now GET /pods/pod-live returns HTTP 404 (provider confirms gone) -> worker IS retired and examiner IS rented!
+		mu.Lock()
+		getStatus = 404
+		mu.Unlock()
+		if err := reconcileExaminerOnce(context.Background(), f); err != nil {
+			t.Fatalf("reconcileExaminerOnce (lookup 404): %v", err)
+		}
+		if len(exProv.rented) != 1 {
+			t.Fatalf("expected examiner rented once worker confirmed 404 gone, got rented=%d", len(exProv.rented))
+		}
+		if l, err := f.readLedger(); err != nil || l.Pods["pod-live"] != nil {
+			t.Fatalf("expected confirmed-gone pod-live retired from ledger, got %+v err=%v", l, err)
+		}
+	})
+
+	t.Run("visible_worker_omitting_price_retains_last_known_positive_rate", func(t *testing.T) {
+		clk := newTestClock(time.Date(2026, 11, 27, 13, 30, 0, 0, time.UTC))
+		home := t.TempDir()
+		rp, st := newFakeRunPod(t), newFakeStet(t)
+		f, _ := testFleet(t, rp, st, 1)
+		f.o.Home = home
+		f.now = clk.Now
+		f.o.Policy.MaxWorkers = 2 // slot available, ONLY hourly cap ($0.43 + $0.62 > $0.70) blocks!
+		f.o.Policy.MaxHourly = 0.70
+		f.o.Policy.DailyBudget = 10.0
+
+		// Seed ledger with known $0.43/h rate, while RunPod listing omits Cost (0).
+		if err := f.writeLedger(&ledger{Pods: map[string]*podRecord{
+			"pod-noprice": {ID: "pod-noprice", Market: "runpod", Handle: "stet-rp-01", GPU: "RTX 4090", Cost: 0.43, Start: clk.Now().Add(-5 * time.Minute), Alive: clk.Now().Add(-time.Minute)},
+		}}); err != nil {
+			t.Fatalf("seed ledger: %v", err)
+		}
+		rp.pods["pod-noprice"] = &Pod{ID: "pod-noprice", Name: "stet-rp-01", Status: "RUNNING", Cost: 0, CreatedAt: clk.Now().Add(-5 * time.Minute)}
+		st.work = Work{Rounds: []WorkRound{{ID: "s3-o00096", Entries: 1, ExamAt: 0}}}
+		exProv := &fakeExaminerProv{offers: []ExaminerOffer{{ID: "off-5090", Card: "RTX 5090", Price: 0.62}}}
+		f.examiner = newExaminer(ExaminerConfig{Addr: "127.0.0.1:0", Timeout: 45 * time.Minute, MaxPrice: 1.50}, home, exProv, clk.Now, nil, false)
+
+		if err := reconcileExaminerOnce(context.Background(), f); err != nil {
+			t.Fatalf("reconcileExaminerOnce: %v", err)
+		}
+		if len(exProv.rented) != 0 {
+			t.Fatalf("omitted price overwrote $0.43/h with $0 and exceeded --max-hourly $0.70! rented=%d", len(exProv.rented))
+		}
+		if l, err := f.readLedger(); err != nil || l.Pods["pod-noprice"] == nil || math.Abs(l.Pods["pod-noprice"].Cost-0.43) > 1e-9 {
+			t.Fatalf("expected retained positive rate $0.43/h in fleet.json, got %+v err=%v", l, err)
+		}
+		v, err := f.look(context.Background())
+		if err != nil {
+			t.Fatalf("look: %v", err)
+		}
+		if math.Abs(v.Hourly-0.43) > 1e-9 {
+			t.Fatalf("expected look() Hourly=$0.43/h with omitted listing price, got $%.4f/h", v.Hourly)
+		}
+	})
+}
+
+// Review 20 P1 #4: production vastMarket receiving HTTP 200 {"success":true} without new_contract
+// MUST NOT classify it as errRentRejected or clear the PendingRent reservation; a restarted
+// controller MUST hold the reservation and reconcile by label instead of creating a second contract,
+// while explicit {"success":false} still clears the reservation immediately.
+func TestReview20VastIncompleteSuccessResponseKeepsReservationAcrossRestart(t *testing.T) {
+	clk := newTestClock(time.Date(2026, 11, 27, 14, 0, 0, 0, time.UTC))
+	home := t.TempDir()
+
+	var mu sync.Mutex
+	var createdLabels []string
+	var visible bool
+	var explicitRefuse bool
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch {
+		case r.Method == "POST" && r.URL.Path == "/api/v0/bundles/":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"offers": []map[string]any{
+					{"id": 50901, "gpu_name": "RTX 5090", "num_gpus": 1, "dph_base": 0.62, "dph_total": 0.62, "cuda_max_good": 13.2, "inet_down": 2000},
+				},
+			})
+		case r.Method == "PUT" && strings.HasPrefix(r.URL.Path, "/api/v0/asks/"):
+			if explicitRefuse {
+				_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "msg": "offer refused"})
+				return
+			}
+			var body struct {
+				Label string `json:"label"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			createdLabels = append(createdLabels, body.Label)
+			// Return HTTP 200 {"success":true} WITHOUT new_contract!
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": true})
+		case r.Method == "GET" && r.URL.Path == "/api/v1/instances/":
+			var insts []map[string]any
+			if visible && len(createdLabels) > 0 {
+				insts = append(insts, map[string]any{
+					"id": 9001, "label": createdLabels[0], "actual_status": "running",
+					"intended_status": "running", "cur_state": "running",
+					"gpu_name": "RTX 5090", "dph_total": 0.62, "start_date": float64(clk.Now().Unix()),
+				})
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"instances": insts, "next_token": nil})
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer srv.Close()
+
+	vm := newVast(srv.URL, "vast-key")
+	cfg := ExaminerConfig{Addr: "127.0.0.1:0", Timeout: 45 * time.Minute, MaxPrice: 1.50}
+	work := &Work{Rounds: []WorkRound{{ID: "s3-o00097", Entries: 1, ExamAt: 0}}}
+	budget := ExaminerBudget{MaxWorkers: 1, MaxHourly: 1.00, DailyBudget: 10.0}
+
+	// 1. First create returns {"success":true} with no new_contract while listing still omits it.
+	ex1 := newExaminer(cfg, home, vm, clk.Now, nil, false)
+	err := ex1.Reconcile(context.Background(), work, budget)
+	if err == nil {
+		t.Fatal("expected error on incomplete 200 response without new_contract")
+	}
+	if errors.Is(err, errRentRejected) {
+		t.Fatalf("incomplete {\"success\":true} MUST NOT be classified as errRentRejected: %v", err)
+	}
+	diskSt, serr := readExaminerStateErr(home)
+	if serr != nil || diskSt == nil || !diskSt.PendingRent || diskSt.ReservedLabel == "" {
+		t.Fatalf("expected PendingRent reservation preserved on disk, got st=%+v err=%v", diskSt, serr)
+	}
+
+	// 2. Restart controller while instance is still absent from listing -> MUST NOT rent a second contract!
+	clk.Advance(5 * time.Minute)
+	ex2 := newExaminer(cfg, home, vm, clk.Now, nil, false)
+	if err := ex2.Reconcile(context.Background(), work, budget); err != nil {
+		t.Fatalf("restarted reconcile while reservation pending: %v", err)
+	}
+	mu.Lock()
+	nCreated := len(createdLabels)
+	mu.Unlock()
+	if nCreated != 1 {
+		t.Fatalf("restarted controller created a second contract under --max 1! total creates=%d", nCreated)
+	}
+
+	// 3. Instance now appears in listing -> reconciled & adopted by ReservedLabel cleanly!
+	mu.Lock()
+	visible = true
+	mu.Unlock()
+	if err := ex2.Reconcile(context.Background(), work, budget); err != nil {
+		t.Fatalf("reconcile after contract becomes visible: %v", err)
+	}
+	diskSt, serr = readExaminerStateErr(home)
+	if serr != nil || diskSt == nil || diskSt.InstanceID != "9001" || diskSt.PendingRent {
+		t.Fatalf("expected contract 9001 adopted cleanly, got st=%+v err=%v", diskSt, serr)
+	}
+
+	// 4. Explicit {"success":false} on a fresh home MUST release reservation immediately.
+	homeRefuse := t.TempDir()
+	mu.Lock()
+	explicitRefuse = true
+	visible = false
+	mu.Unlock()
+	ex3 := newExaminer(cfg, homeRefuse, vm, clk.Now, nil, false)
+	err = ex3.Reconcile(context.Background(), work, budget)
+	if !errors.Is(err, errRentRejected) {
+		t.Fatalf("explicit success=false should return errRentRejected, got %v", err)
+	}
+	if stRef, _ := readExaminerStateErr(homeRefuse); stRef != nil && stRef.PendingRent {
+		t.Fatalf("explicit refusal should clear PendingRent immediately, got %+v", stRef)
+	}
+}
+
+// Review 20 P1 #5:
+//
+//	(a) A proven pre-send TCP connection refused on PUT /api/v0/asks/ through the production Vast
+//	    adapter MUST release the reservation immediately so later demand after recovery/restart
+//	    proceeds without holding a phantom slot or accruing phantom spend.
+//	(b) A genuinely ambiguous lost response (connection closed after server read the request) MUST
+//	    keep the PendingRent reservation, and `stet-cloud examiner resolve` MUST verify with the
+//	    provider before clearing an absent reservation (preserving PendingSpends) or adopting/ending
+//	    a found instance.
+func TestReview20PreSendConnectionRefusedClearsReservationAndOperatorResolve(t *testing.T) {
+	t.Run("tcp_connection_refused_before_send_clears_reservation_and_allows_later_rent", func(t *testing.T) {
+		clk := newTestClock(time.Date(2026, 11, 27, 15, 0, 0, 0, time.UTC))
+		home := t.TempDir()
+
+		// Serve initial ListExaminers + ExaminerOffers, then close the listener right before PUT
+		// so the production vastMarket PUT hits a genuine TCP ECONNREFUSED pre-send error.
+		var srv *httptest.Server
+		srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == "GET" && r.URL.Path == "/api/v1/instances/":
+				_ = json.NewEncoder(w).Encode(map[string]any{"instances": []any{}, "next_token": nil})
+			case r.Method == "POST" && r.URL.Path == "/api/v0/bundles/":
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"offers": []map[string]any{
+						{"id": 50902, "gpu_name": "RTX 5090", "num_gpus": 1, "dph_base": 0.62, "dph_total": 0.62, "cuda_max_good": 13.2, "inet_down": 2000},
+					},
+				})
+				if fl, ok := w.(http.Flusher); ok {
+					fl.Flush()
+				}
+				// Close server listener asynchronously after response completes? Even cleaner:
+				// hijack/close isn't needed if we close via a second provider URL; let's shut down
+				// a dedicated listener on PUT!
+			default:
+				w.WriteHeader(404)
+			}
+		}))
+		// Grab a guaranteed-closed loopback port for ECONNREFUSED on PUT.
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("listen: %v", err)
+		}
+		closedAddr := ln.Addr().String()
+		_ = ln.Close()
+		defer srv.Close()
+
+		// Use real vastMarket pointed at closedAddr for RentExaminer, and real vastMarket pointed at
+		// srv for offers/list — exercising the exact production api.doWith + vastMarket.RentExaminer path!
+		vmLive := newVast(srv.URL, "vast-key")
+		vmClosed := newVast("http://"+closedAddr, "vast-key")
+		prov := struct {
+			*vastMarket
+		}{vmLive}
+		_ = prov
+		splitProv := &splitVastExaminerProv{read: vmLive, rent: vmClosed}
+
+		cfg := ExaminerConfig{Addr: "127.0.0.1:0", Timeout: 45 * time.Minute, MaxPrice: 1.50}
+		work := &Work{Rounds: []WorkRound{{ID: "s3-o00098", Entries: 1, ExamAt: 0}}}
+		budget := ExaminerBudget{MaxWorkers: 1, MaxHourly: 1.00, DailyBudget: 10.0}
+
+		ex1 := newExaminer(cfg, home, splitProv, clk.Now, nil, false)
+		rerr := ex1.Reconcile(context.Background(), work, budget)
+		if !errors.Is(rerr, errRentNotSent) {
+			t.Fatalf("expected errRentNotSent on TCP ECONNREFUSED, got %v", rerr)
+		}
+
+		// Reservation MUST be cleared immediately: 0 live, $0/h, $0 accrued even 12 hours later!
+		clk.Advance(12 * time.Hour)
+		live, hourly, accrued, serr := activeExaminerFromDisk(home, clk.Now(), cfg.Timeout, cfg.MaxPrice)
+		if serr != nil || live != 0 || hourly != 0 || accrued != 0 {
+			t.Fatalf("pre-send ECONNREFUSED MUST NOT hold slot/budget 12h later: live=%d hourly=%.2f accrued=%.2f err=%v", live, hourly, accrued, serr)
+		}
+
+		// After connectivity recovers and controller restarts, new demand MUST rent cleanly!
+		recSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == "GET" && r.URL.Path == "/api/v1/instances/":
+				_ = json.NewEncoder(w).Encode(map[string]any{"instances": []any{}, "next_token": nil})
+			case r.Method == "POST" && r.URL.Path == "/api/v0/bundles/":
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"offers": []map[string]any{
+						{"id": 50903, "gpu_name": "RTX 5090", "num_gpus": 1, "dph_base": 0.62, "dph_total": 0.62, "cuda_max_good": 13.2, "inet_down": 2000},
+					},
+				})
+			case r.Method == "PUT" && r.URL.Path == "/api/v0/asks/50903/":
+				_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "new_contract": 9002})
+			default:
+				w.WriteHeader(404)
+			}
+		}))
+		defer recSrv.Close()
+
+		ex2 := newExaminer(cfg, home, newVast(recSrv.URL, "vast-key"), clk.Now, nil, false)
+		if err := ex2.Reconcile(context.Background(), work, budget); err != nil {
+			t.Fatalf("reconcile after recovery: %v", err)
+		}
+		stDisk, err := readExaminerStateErr(home)
+		if err != nil || stDisk == nil || stDisk.InstanceID != "9002" {
+			t.Fatalf("expected recovered controller to rent instance 9002, got %+v err=%v", stDisk, err)
+		}
+	})
+
+	t.Run("lost_response_keeps_reservation_and_examiner_resolve_clears_or_adopts", func(t *testing.T) {
+		clk := newTestClock(time.Date(2026, 11, 27, 16, 0, 0, 0, time.UTC))
+		home := t.TempDir()
+
+		// Local Vast server that reads PUT and then drops the TCP connection without responding
+		// (genuine lost response after send -> MUST NOT classify as errRentNotSent!).
+		dropSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == "GET" && r.URL.Path == "/api/v1/instances/":
+				_ = json.NewEncoder(w).Encode(map[string]any{"instances": []any{}, "next_token": nil})
+			case r.Method == "POST" && r.URL.Path == "/api/v0/bundles/":
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"offers": []map[string]any{
+						{"id": 50904, "gpu_name": "RTX 5090", "num_gpus": 1, "dph_base": 0.62, "dph_total": 0.62, "cuda_max_good": 13.2, "inet_down": 2000},
+					},
+				})
+			case r.Method == "PUT" && r.URL.Path == "/api/v0/asks/50904/":
+				_, _ = io.ReadAll(r.Body)
+				if hj, ok := w.(http.Hijacker); ok {
+					if conn, _, err := hj.Hijack(); err == nil {
+						_ = conn.Close()
+						return
+					}
+				}
+				w.WriteHeader(500)
+			default:
+				w.WriteHeader(404)
+			}
+		}))
+		defer dropSrv.Close()
+
+		// Pre-seed a PendingSpends record to verify resolvePendingExaminer preserves it!
+		if err := writeExaminerState(home, &examinerState{
+			PendingSpends: []podRecord{{ID: "old-spend-1", Market: "vast", Cost: 0.60, Start: clk.Now().Add(-time.Hour), End: clk.Now().Add(-30 * time.Minute)}},
+		}); err != nil {
+			t.Fatalf("seed pending spend: %v", err)
+		}
+
+		cfg := ExaminerConfig{Addr: "127.0.0.1:0", Timeout: 45 * time.Minute, MaxPrice: 1.50}
+		work := &Work{Rounds: []WorkRound{{ID: "s3-o00099", Entries: 1, ExamAt: 0}}}
+		budget := ExaminerBudget{MaxWorkers: 1, MaxHourly: 1.00, DailyBudget: 10.0}
+
+		ex := newExaminer(cfg, home, newVast(dropSrv.URL, "vast-key"), clk.Now, nil, false)
+		rerr := ex.Reconcile(context.Background(), work, budget)
+		if rerr == nil || errors.Is(rerr, errRentNotSent) || errors.Is(rerr, errRentRejected) {
+			t.Fatalf("lost response after send MUST be ambiguous (not errRentNotSent/errRentRejected), got %v", rerr)
+		}
+		st1, err := readExaminerStateErr(home)
+		if err != nil || st1 == nil || !st1.PendingRent || st1.ReservedLabel == "" {
+			t.Fatalf("expected PendingRent held after lost response, got %+v err=%v", st1, err)
+		}
+
+		// 1. Operator resolve fails closed if provider listing fails (keeps reservation!).
+		failProv := &fakeExaminerProv{listErr: errors.New("Vast API 503")}
+		if err := resolvePendingExaminer(context.Background(), home, failProv, clk.Now, nil, false, false, nil); err == nil {
+			t.Fatal("expected resolvePendingExaminer to fail when provider listing fails")
+		}
+		if stStill, _ := readExaminerStateErr(home); stStill == nil || !stStill.PendingRent {
+			t.Fatalf("reservation must stay held when provider check fails, got %+v", stStill)
+		}
+
+		// 2. Operator resolve when provider confirms ZERO matching instances -> clears PendingRent
+		//    while preserving PendingSpends!
+		emptyProv := &fakeExaminerProv{}
+		if err := resolvePendingExaminer(context.Background(), home, emptyProv, clk.Now, nil, false, false, nil); err != nil {
+			t.Fatalf("resolvePendingExaminer (absent): %v", err)
+		}
+		stCleared, err := readExaminerStateErr(home)
+		if err != nil || stCleared == nil || stCleared.PendingRent || stCleared.InstanceID != "" || len(stCleared.PendingSpends) != 1 {
+			t.Fatalf("expected PendingRent cleared and PendingSpends preserved, got %+v err=%v", stCleared, err)
+		}
+
+		// 3. Operator resolve when provider DOES list matching instance -> adopts (end=false) or
+		//    terminates + bills (end=true)!
+		if err := writeExaminerState(home, &examinerState{
+			PendingRent: true, ReservedLabel: "stet-examiner-abc-s3-o00099-12345678",
+			RoundID: "s3-o00099", APIKey: "k", CertPEM: "c", Price: 0.62, Created: clk.Now().Add(-10 * time.Minute),
+		}); err != nil {
+			t.Fatalf("seed pending for adopt: %v", err)
+		}
+		foundProv := &fakeExaminerProv{
+			insts: map[string]ExaminerInstance{
+				"ex-found": {ID: "ex-found", Label: "stet-examiner-abc-s3-o00099-12345678", State: "running", Price: 0.62, Created: clk.Now().Add(-10 * time.Minute)},
+			},
+		}
+		if err := resolvePendingExaminer(context.Background(), home, foundProv, clk.Now, nil, false, false, nil); err != nil {
+			t.Fatalf("resolvePendingExaminer (adopt): %v", err)
+		}
+		stAdopted, err := readExaminerStateErr(home)
+		if err != nil || stAdopted == nil || stAdopted.InstanceID != "ex-found" || stAdopted.PendingRent {
+			t.Fatalf("expected ex-found adopted, got %+v err=%v", stAdopted, err)
+		}
+
+		// Re-seed pending and resolve with --end -> terminates on provider and logs spend!
+		if err := writeExaminerState(home, &examinerState{
+			PendingRent: true, ReservedLabel: "stet-examiner-abc-s3-o00099-12345678",
+			RoundID: "s3-o00099", APIKey: "k", CertPEM: "c", Price: 0.62, Created: clk.Now().Add(-10 * time.Minute),
+		}); err != nil {
+			t.Fatalf("seed pending for end: %v", err)
+		}
+		var billed []podRecord
+		if err := resolvePendingExaminer(context.Background(), home, foundProv, clk.Now, nil, false, true, func(rec podRecord) error {
+			billed = append(billed, rec)
+			return nil
+		}); err != nil {
+			t.Fatalf("resolvePendingExaminer (--end): %v", err)
+		}
+		if len(foundProv.ended) != 1 || foundProv.ended[0] != "ex-found" || len(billed) != 1 {
+			t.Fatalf("expected ex-found ended and billed, ended=%v billed=%+v", foundProv.ended, billed)
+		}
+		if stAfterEnd, err := readExaminerStateErr(home); err != nil || stAfterEnd != nil {
+			t.Fatalf("expected empty examiner.json after --end resolve, got %+v err=%v", stAfterEnd, err)
+		}
+
+		// Gate 4 P2-6: if --end fails EndExaminer transiently, examiner.json MUST clear InstanceID
+		// and credentials and record the instance ONLY in Unresolved so the next Reconcile
+		// unconditionally retries EndExaminer instead of re-adopting it as active!
+		if err := writeExaminerState(home, &examinerState{
+			PendingRent: true, ReservedLabel: "stet-examiner-abc-s3-o00099-12345678",
+			RoundID: "s3-o00099", APIKey: "k", CertPEM: "c", Price: 0.62, Created: clk.Now().Add(-10 * time.Minute),
+		}); err != nil {
+			t.Fatalf("seed pending for end failure: %v", err)
+		}
+		failEndProv := &fakeExaminerProv{
+			insts: map[string]ExaminerInstance{
+				"ex-stuck": {ID: "ex-stuck", Label: "stet-examiner-abc-s3-o00099-12345678", State: "running", Price: 0.62, Created: clk.Now().Add(-10 * time.Minute)},
+			},
+			endErr: map[string]error{"ex-stuck": errors.New("Vast 503")},
+		}
+		if err := resolvePendingExaminer(context.Background(), home, failEndProv, clk.Now, nil, false, true, nil); err == nil {
+			t.Fatal("expected error when --end EndExaminer fails")
+		}
+		stUnres, err := readExaminerStateErr(home)
+		if err != nil || stUnres == nil || stUnres.InstanceID != "" || stUnres.PendingRent || len(stUnres.Unresolved) != 1 || stUnres.Unresolved[0].ID != "ex-stuck" {
+			t.Fatalf("failed --end MUST store ex-stuck strictly in Unresolved (no InstanceID/creds), got %+v err=%v", stUnres, err)
+		}
+		// Next Reconcile with open round MUST still destroy ex-stuck once provider recovers!
+		failEndProv.endErr = nil
+		exRetry := newExaminer(cfg, home, failEndProv, clk.Now, nil, false)
+		if err := exRetry.Reconcile(context.Background(), work, budget); err != nil {
+			t.Fatalf("reconcile retrying unresolved --end: %v", err)
+		}
+		if len(failEndProv.ended) != 1 || failEndProv.ended[0] != "ex-stuck" {
+			t.Fatalf("expected Reconcile to destroy ex-stuck after --end failure instead of adopting it! ended=%v", failEndProv.ended)
+		}
+	})
+}
+
+type splitVastExaminerProv struct {
+	read *vastMarket
+	rent *vastMarket
+}
+
+func (p *splitVastExaminerProv) ExaminerOffers(ctx context.Context, maxPrice float64) ([]ExaminerOffer, error) {
+	return p.read.ExaminerOffers(ctx, maxPrice)
+}
+func (p *splitVastExaminerProv) ListExaminers(ctx context.Context) ([]ExaminerInstance, error) {
+	return p.read.ListExaminers(ctx)
+}
+func (p *splitVastExaminerProv) EndExaminer(ctx context.Context, id string) error {
+	return p.read.EndExaminer(ctx, id)
+}
+func (p *splitVastExaminerProv) RentExaminer(ctx context.Context, offerID string, l ExaminerLaunch) (string, error) {
+	return p.rent.RentExaminer(ctx, offerID, l)
 }

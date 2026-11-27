@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"net/url"
 	"strings"
 	"time"
@@ -126,6 +127,26 @@ func (m *runpodMarket) inspect(ctx context.Context, id string) (*Rental, error) 
 		r.Up, r.Phase, r.Detail = "no", "no container yet", "no container yet"
 	}
 	return &r, nil
+}
+
+// Lookup verifies one pod directly by ID when a listing omits it.
+func (m *runpodMarket) Lookup(ctx context.Context, id string) (*Rental, bool, error) {
+	var p Pod
+	status, err := m.rp.do(ctx, "GET", "/pods/"+url.PathEscape(id), nil, &p)
+	if status == 404 {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	if p.ID == "" || p.ID != id {
+		return nil, false, fmt.Errorf("RunPod lookup for %q returned unexpected pod id %q", id, p.ID)
+	}
+	r := podRental(&p)
+	if p.Runtime == nil && r.live() {
+		r.Up, r.Phase, r.Detail = "no", "no container yet", "no container yet"
+	}
+	return &r, true, nil
 }
 
 // Logs are what RunPod and the pod's container have said of it: the last n lines.

@@ -17,6 +17,7 @@ license-files = [
 ]
 dependencies = [
     "numpy>=1.26",
+    "py3langid>=0.4",
     "tiktoken>=0.7",
     "tokenizers>=0.20",
     "zstandard>=0.22",

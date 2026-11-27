@@ -203,7 +203,7 @@ func cmdStatus(ctx context.Context, f *Fleet) error {
 	if ex := readExaminerState(f.o.Home); ex != nil && ex.InstanceID != "" {
 		fmt.Fprintf(f.out, "Examiner GPU: machine %s for %s ($%.2f/h, up %s)\n", ex.InstanceID, ex.RoundID, ex.Price, now.Sub(ex.Created).Round(time.Minute))
 	} else if ex != nil && ex.PendingRent {
-		fmt.Fprintf(f.out, "Examiner GPU: rental reservation pending for %s ($%.2f/h)\n", ex.RoundID, ex.Price)
+		fmt.Fprintf(f.out, "Examiner GPU: rental reservation pending for %s ($%.2f/h; run `stet-cloud examiner resolve` after verifying on Vast.ai)\n", ex.RoundID, ex.Price)
 	} else if ex != nil && len(ex.Unresolved) > 0 {
 		fmt.Fprintf(f.out, "Examiner GPU: %d unresolved instance(s) awaiting teardown\n", len(ex.Unresolved))
 	} else if ex != nil && len(ex.PendingSpends) > 0 {
@@ -291,15 +291,30 @@ func tick(ctx context.Context, f *Fleet) (err error) {
 	var snapErr error
 	if f.examiner != nil {
 		liveWorkers := 0
+		seenWorker := map[string]bool{}
+		hourlyWorkers := max(0, v.Hourly-v.ExaminerHourly)
 		for _, wk := range v.Workers {
 			if wk.Rental != nil && wk.Rental.live() {
+				seenWorker[ledgerKey(wk.Rental.Market, wk.Rental.ID)] = true
 				liveWorkers++
+			}
+		}
+		if v.Ledger != nil {
+			for key, rec := range v.Ledger.Pods {
+				if seenWorker[key] || rec.Stopped {
+					continue
+				}
+				seenWorker[key] = true
+				liveWorkers++
+				if validRate(rec.Cost) {
+					hourlyWorkers += rec.Cost
+				}
 			}
 		}
 		budget := ExaminerBudget{
 			LiveWorkers: liveWorkers,
 			MaxWorkers:  f.o.MaxWorkers,
-			HourlyNow:   max(0, v.Hourly-v.ExaminerHourly),
+			HourlyNow:   hourlyWorkers,
 			MaxHourly:   f.o.MaxHourly,
 			SpentToday:  v.Today,
 			DailyBudget: f.o.DailyBudget,
@@ -456,7 +471,8 @@ func reconcileExaminerOnce(ctx context.Context, f *Fleet) error {
 					}
 				}
 				if acctErr == nil {
-					if nerr := f.note(l, rentals, answered); nerr != nil {
+					var nerr error
+					if rentals, nerr = f.note(ctx, l, rentals, answered); nerr != nil {
 						acctErr = fmt.Errorf("reconciling fleet ledger: %w", nerr)
 					}
 				}
@@ -469,8 +485,13 @@ func reconcileExaminerOnce(ctx context.Context, f *Fleet) error {
 		}
 		for key, p := range l.Pods {
 			seen[key] = true
+			if p.Stopped {
+				continue
+			}
 			liveWorkers++
-			hourlyWorkers += p.Cost
+			if validRate(p.Cost) {
+				hourlyWorkers += p.Cost
+			}
 		}
 		for i := range rentals {
 			r := &rentals[i]
@@ -484,7 +505,9 @@ func reconcileExaminerOnce(ctx context.Context, f *Fleet) error {
 			if h := owner(l, r); h != "" && knownHandles[h] {
 				seen[key] = true
 				liveWorkers++
-				hourlyWorkers += r.Price
+				if validRate(r.Price) {
+					hourlyWorkers += r.Price
+				}
 			}
 		}
 		t, serr := f.spent(l, startOfDay(f.now()))
@@ -550,6 +573,35 @@ func cmdExaminer(ctx context.Context, f *Fleet) error {
 			return nil
 		}
 	}
+}
+
+// cmdExaminerResolve lets an operator resolve an uncertain PendingRent examiner reservation in
+// examiner.json after querying Vast.ai under the fleet lock: if Vast.ai lists the reserved
+// instance it is adopted (or destroyed when end is true), and if Vast.ai confirms zero matching
+// instances the pending reservation is cleared while preserving PendingSpends and Unresolved.
+func cmdExaminerResolve(ctx context.Context, f *Fleet, end bool) error {
+	unlock, err := f.lock(time.Minute)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if !f.fixed {
+		if err := f.refresh(); err != nil {
+			return err
+		}
+	}
+	var prov ExaminerProvider
+	if f.examiner != nil && f.examiner.prov != nil {
+		prov = f.examiner.prov
+	} else if vm, ok := f.market("vast").(*vastMarket); ok && vm != nil {
+		prov = vm
+	}
+	if prov == nil {
+		return fmt.Errorf("examiner resolve requires VAST_API_KEY in %s (or environment)", f.o.Credentials)
+	}
+	return resolvePendingExaminer(ctx, f.o.Home, prov, f.now, f.say, f.o.DryRun, end, func(rec podRecord) error {
+		return appendExaminerSpend(f.spentLog(), rec)
+	})
 }
 
 func cmdUp(ctx context.Context, f *Fleet, n int) error {

@@ -61,7 +61,7 @@ DEFAULT_MIN_KEEP_RATE = 0.50
 TEACHER_MAX_PROMPT_TOKENS = 1400
 # Bump whenever reasoning generation or post-generation filtering rules change so cached
 # synthesis artifacts from an older harness revision are automatically regenerated.
-REASONING_FILTER_VERSION = 4
+REASONING_FILTER_VERSION = 5
 
 # Sources whose text is prose/discussion/documentation suitable for natural-language reasoning.
 SKIP_LANG_PREFIXES = ("code:",)
@@ -326,18 +326,92 @@ def student_window_fits(ctx_str: str, cont: str, enc, seq_len: int) -> bool:
     return 1 + len(encode_one(enc, ctx_str)) + len(encode_one(enc, cont)) <= int(seq_len) + 1
 
 
+def _ensure_langid_available() -> None:
+    if _langid is None:
+        raise RuntimeError(
+            "official reasoning synthesis and cache validation require py3langid for language verification; "
+            "install py3langid (or stet-cli[run])"
+        )
+
+
+def _item_rejection_reason(
+    *,
+    task_type: str,
+    lang: str,
+    excerpt: str,
+    pr: str,
+    resp: str,
+    ctx_str: str,
+    cont: str,
+    max_ngram_overlap: float = 0.50,
+    check_lang: bool = True,
+    require_langid: bool = False,
+    student_window: tuple[object, int] | None = None,
+) -> str | None:
+    """Shared per-item validation used identically by fresh synthesis and cached-item revalidation.
+
+    Returns the drop reason string if the item fails any active quality, language, overlap, or
+    student scoring-window check, or None when the item passes every check."""
+    if "\ufffd" in pr or "\ufffd" in resp or "\ufffd" in excerpt:
+        return "broken_utf8"
+    if _CONTROL_TOKEN_RE.search(pr) or _CONTROL_TOKEN_RE.search(resp):
+        return "control_token"
+    if "prompt:" in pr.lower() or pr.lower().startswith(BAD_PREFIX):
+        return "meta_chatter"
+    is_cjk = lang in CJK_LANGS
+    min_pr = 6 if is_cjk else 10
+    if (
+        not (min_pr <= len(pr) <= 450)
+        or not pr.strip(" .…-:")
+        or pr.startswith("...")
+        or pr.lower().startswith(ECHO_PROMPT_PREFIX)
+    ):
+        return "prompt_len"
+    min_bytes = 48 if is_cjk else 70
+    resp_b = len(resp.encode("utf-8"))
+    if not (min_bytes <= resp_b <= 1200):
+        return "resp_len"
+    if resp.lower().startswith(BAD_PREFIX):
+        return "meta_chatter"
+    if not _SENTENCE_END_RE.search(resp):
+        return "truncated_sentence"
+    if task_type == "synthesis" and _has_question_mark(pr):
+        return "synthesis_question"
+    if check_lang:
+        if require_langid:
+            _ensure_langid_available()
+        if not _prompt_matches_language(pr, excerpt, lang):
+            return "wrong_prompt_lang"
+        if not _response_matches_language(resp, excerpt, lang):
+            return "wrong_lang"
+    if prompt_copies_excerpt(pr, excerpt, max_ngram_overlap=max_ngram_overlap):
+        return "prompt_excerpt_copy"
+    if ngram_overlap(resp, excerpt, n=5) > max_ngram_overlap:
+        return "verbatim_copy"
+    if ngram_overlap(resp, pr, n=5) > max_ngram_overlap:
+        return "prompt_copy"
+    if student_window is not None:
+        s_enc, s_ctx = student_window
+        if not student_window_fits(ctx_str, cont, s_enc, s_ctx):
+            return "student_window_overflow"
+    return None
+
+
 def cached_item_passes_filter(
     item: Item,
     *,
     max_ngram_overlap: float = 0.50,
+    check_lang: bool = True,
+    require_langid: bool = False,
     student_window: tuple[object, int] | None = None,
 ) -> bool:
-    """Revalidate a cached reasoning Item against the current shipped filtering rules.
+    """Revalidate a cached reasoning Item against the exact shipped per-item filtering rules.
 
-    Ensures a restarted or upgraded exam build never reuses a cached reasoning pack containing
-    rows missing authoritative `(prompt, wrapper_id)` metadata, leaking control tokens,
-    violating the current prompt-vs-excerpt / response-vs-excerpt overlap limits, or exceeding
-    the student's scoring window."""
+    Shares `_item_rejection_reason` with fresh synthesis so a restarted or upgraded exam build
+    never reuses cached reasoning rows missing authoritative `(prompt, wrapper_id)` metadata or
+    failing any active quality, language, overlap, or student scoring-window check."""
+    if check_lang and require_langid:
+        _ensure_langid_available()
     if item.kind != "answer" or not item.source or not item.prompt or item.wrapper_id is None:
         return False
     task_type = item.source.split(":", 1)[0]
@@ -346,25 +420,20 @@ def cached_item_passes_filter(
     excerpt = extract_wrapped_excerpt(item.ctx, item.prompt, task_type, item.wrapper_id)
     if excerpt is None:
         return False
-    pr = item.prompt
-    resp = item.cont.strip()
-    if "\ufffd" in pr or "\ufffd" in resp or "\ufffd" in excerpt:
-        return False
-    if _CONTROL_TOKEN_RE.search(pr) or _CONTROL_TOKEN_RE.search(resp):
-        return False
-    if task_type == "synthesis" and _has_question_mark(pr):
-        return False
-    if prompt_copies_excerpt(pr, excerpt, max_ngram_overlap=max_ngram_overlap):
-        return False
-    if ngram_overlap(resp, excerpt, n=5) > max_ngram_overlap:
-        return False
-    if ngram_overlap(resp, pr, n=5) > max_ngram_overlap:
-        return False
-    if student_window is not None:
-        s_enc, s_ctx = student_window
-        if not student_window_fits(item.ctx, item.cont, s_enc, s_ctx):
-            return False
-    return True
+    reason = _item_rejection_reason(
+        task_type=task_type,
+        lang=item.lang,
+        excerpt=excerpt,
+        pr=item.prompt,
+        resp=item.cont.strip(),
+        ctx_str=item.ctx,
+        cont=item.cont,
+        max_ngram_overlap=max_ngram_overlap,
+        check_lang=check_lang,
+        require_langid=require_langid,
+        student_window=student_window,
+    )
+    return reason is None
 
 
 def bound_excerpt(
@@ -759,10 +828,13 @@ def parse_generated_items_detailed(
     *,
     max_ngram_overlap: float = 0.50,
     check_lang: bool = True,
+    require_langid: bool = False,
     student_window: tuple[object, int] | None = None,
 ) -> tuple[list[Item], dict[str, int], list[dict]]:
     """Deterministically parse and filter raw teacher generations into `Item` objects,
     returning `(kept_items, drop_counts, drop_records)` so every dropped draft is auditable."""
+    if check_lang and require_langid:
+        _ensure_langid_available()
     items: list[Item] = []
     dropped: Counter[str] = Counter()
     drop_records: list[dict] = []
@@ -804,70 +876,33 @@ def parse_generated_items_detailed(
                 resp = resp.split(stop_tok, 1)[0].strip()
         pr = _clean_angle(pr)
         resp = _clean_angle(resp)
-        if "\ufffd" in pr or "\ufffd" in resp or "\ufffd" in d.get("excerpt", ""):
-            _drop("broken_utf8", d, gen_txt, pr, resp)
-            continue
-        if _CONTROL_TOKEN_RE.search(pr) or _CONTROL_TOKEN_RE.search(resp):
-            _drop("control_token", d, gen_txt, pr, resp)
-            continue
-        if "prompt:" in pr.lower() or pr.lower().startswith(BAD_PREFIX):
-            _drop("meta_chatter", d, gen_txt, pr, resp)
-            continue
-        is_cjk = d["lang"] in CJK_LANGS
-        min_pr = 6 if is_cjk else 10
-        if (
-            not (min_pr <= len(pr) <= 450)
-            or not pr.strip(" .…-:")
-            or pr.startswith("...")
-            or pr.lower().startswith(ECHO_PROMPT_PREFIX)
-        ):
-            _drop("prompt_len", d, gen_txt, pr, resp)
-            continue
-        min_bytes = 48 if is_cjk else 70
-        resp_b = len(resp.encode("utf-8"))
-        if not (min_bytes <= resp_b <= 1200):
-            _drop("resp_len", d, gen_txt, pr, resp)
-            continue
-        if resp.lower().startswith(BAD_PREFIX):
-            _drop("meta_chatter", d, gen_txt, pr, resp)
-            continue
-        if not _SENTENCE_END_RE.search(resp):
-            _drop("truncated_sentence", d, gen_txt, pr, resp)
-            continue
         if d["task_type"] == "synthesis" and _has_question_mark(pr):
             # Enforce strictly declarative lead-ins on synthesis items: only a pure trailing
             # question mark can be converted cleanly; any interior question mark is rejected.
             cand = pr.rstrip("?？؟").strip()
-            if not cand or _has_question_mark(cand):
-                _drop("synthesis_question", d, gen_txt, pr, resp)
-                continue
-            pr = cand if cand.endswith((".", "。", "۔", "।")) else cand + "."
+            if cand and not _has_question_mark(cand):
+                pr = cand if cand.endswith((".", "。", "۔", "।")) else cand + "."
         excerpt = d.get("excerpt") or bound_excerpt(d["text"])
-        if check_lang:
-            if not _prompt_matches_language(pr, excerpt, d["lang"]):
-                _drop("wrong_prompt_lang", d, gen_txt, pr, resp, excerpt)
-                continue
-            if not _response_matches_language(resp, excerpt, d["lang"]):
-                _drop("wrong_lang", d, gen_txt, pr, resp, excerpt)
-                continue
-        if prompt_copies_excerpt(pr, excerpt, max_ngram_overlap=max_ngram_overlap):
-            _drop("prompt_excerpt_copy", d, gen_txt, pr, resp, excerpt)
-            continue
-        if ngram_overlap(resp, excerpt, n=5) > max_ngram_overlap:
-            _drop("verbatim_copy", d, gen_txt, pr, resp, excerpt)
-            continue
-        if ngram_overlap(resp, pr, n=5) > max_ngram_overlap:
-            _drop("prompt_copy", d, gen_txt, pr, resp, excerpt)
-            continue
         w_mod = 3 if d["task_type"] == "synthesis" else 6
         w_id = int(d["wrapper_id"]) % w_mod
         ctx_str = wrap_prompt(excerpt, pr, d["task_type"], w_id)
         cont = resp if ctx_str.endswith((" ", "\n")) else f" {resp}"
-        if student_window is not None:
-            s_enc, s_ctx = student_window
-            if not student_window_fits(ctx_str, cont, s_enc, s_ctx):
-                _drop("student_window_overflow", d, gen_txt, pr, resp, excerpt)
-                continue
+        reject = _item_rejection_reason(
+            task_type=d["task_type"],
+            lang=d["lang"],
+            excerpt=excerpt,
+            pr=pr,
+            resp=resp,
+            ctx_str=ctx_str,
+            cont=cont,
+            max_ngram_overlap=max_ngram_overlap,
+            check_lang=check_lang,
+            require_langid=require_langid,
+            student_window=student_window,
+        )
+        if reject is not None:
+            _drop(reject, d, gen_txt, pr, resp, excerpt)
+            continue
         src_prefix = d["source"].split(":", 1)[0]
         doc_id = str(d.get("id") or "").strip()
         # Preserve the immutable harvest document ID (matching fresh/select.py's `<source>:<id>`)
@@ -895,6 +930,7 @@ def parse_generated_items(
     *,
     max_ngram_overlap: float = 0.50,
     check_lang: bool = True,
+    require_langid: bool = False,
     student_window: tuple[object, int] | None = None,
 ) -> tuple[list[Item], dict[str, int]]:
     """Deterministically parse and filter raw teacher generations into `Item` objects."""
@@ -903,6 +939,7 @@ def parse_generated_items(
         generations,
         max_ngram_overlap=max_ngram_overlap,
         check_lang=check_lang,
+        require_langid=require_langid,
         student_window=student_window,
     )
     return items, dropped
@@ -1358,6 +1395,7 @@ def synthesize_reasoning(
     log=print,
     drops_path=None,
     student_window: tuple[object, int] | None = None,
+    require_langid: bool = False,
 ) -> list[Item]:
     """Synthesize fresh multilingual `explain`, `infer`, and `synthesis` items from harvested docs.
 
@@ -1367,6 +1405,9 @@ def synthesize_reasoning(
     no reasoning kind survives, so `stet examine --follow` cancels the round immediately rather than
     repeating an identical temp=0 synthesis for hours."""
     from pathlib import Path
+
+    if require_langid:
+        _ensure_langid_available()
 
     target = int(cfg.get("items", 640))
     max_ov = float(cfg.get("max_ngram_overlap", 0.50))
@@ -1417,7 +1458,11 @@ def synthesize_reasoning(
         else:
             gens = _generate_local_gpu(prompts, repo, rev, max_new_tokens=max_new, log=log)
     items, dropped, drop_records = parse_generated_items_detailed(
-        selected, gens, max_ngram_overlap=max_ov, student_window=student_window
+        selected,
+        gens,
+        max_ngram_overlap=max_ov,
+        require_langid=require_langid,
+        student_window=student_window,
     )
     if drops_path is not None:
         dp = Path(drops_path)
