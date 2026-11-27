@@ -200,8 +200,10 @@ func cmdStatus(ctx context.Context, f *Fleet) error {
 	if rented == 0 {
 		fmt.Fprintf(f.out, "Nothing rented (%d keys in the pool).\n", len(v.Workers))
 	}
-	if ex := readExaminerState(f.o.Home); ex != nil {
+	if ex := readExaminerState(f.o.Home); ex != nil && ex.InstanceID != "" {
 		fmt.Fprintf(f.out, "Examiner GPU: machine %s for %s ($%.2f/h, up %s)\n", ex.InstanceID, ex.RoundID, ex.Price, now.Sub(ex.Created).Round(time.Minute))
+	} else if ex != nil && len(ex.PendingSpends) > 0 {
+		fmt.Fprintf(f.out, "Examiner GPU: idle (%d pending spend record(s) awaiting spent.jsonl flush)\n", len(ex.PendingSpends))
 	}
 	fmt.Fprintf(f.out, "\n$%.2f an hour now · about $%.2f today (UTC)\n", v.Hourly, v.Today)
 	if statusReserved > 0 {
@@ -258,7 +260,11 @@ func tick(ctx context.Context, f *Fleet) (err error) {
 	v, err := f.look(ctx)
 	if err != nil {
 		if f.examiner != nil {
-			if exErr := f.examiner.EnforceTimeout(ctx); exErr != nil {
+			if v != nil && v.Work != nil {
+				if exErr := f.examiner.Reconcile(ctx, v.Work, ExaminerBudget{AccountingErr: err}); exErr != nil && !errors.Is(exErr, err) {
+					f.say("examiner: %v", exErr)
+				}
+			} else if exErr := f.examiner.EnforceTimeout(ctx); exErr != nil {
 				f.say("examiner: %v", exErr)
 			}
 		}

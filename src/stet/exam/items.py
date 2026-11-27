@@ -24,10 +24,15 @@ class Item:
     good: str = ""  # pair: the acceptable sentence
     bad: str = ""  # pair: its unacceptable twin
     wrongs: tuple[str, ...] = ()  # context: matched wrong contexts from other documents of the same source & language
+    prompt: str = ""  # reasoning answer: authoritative teacher prompt line (preserves excerpt boundary)
+    wrapper_id: int | None = None  # reasoning answer: authoritative wrapper layout ID
 
     def __post_init__(self):
         if isinstance(self.wrongs, list):
             object.__setattr__(self, "wrongs", tuple(self.wrongs))
+        if self.wrapper_id is not None:
+            if isinstance(self.wrapper_id, bool) or not isinstance(self.wrapper_id, int) or self.wrapper_id < 0:
+                raise ValueError(f"invalid wrapper_id {self.wrapper_id!r}")
         if self.kind not in KINDS:
             raise ValueError(f"unknown kind {self.kind!r}")
         if self.fmt not in FORMATS:
@@ -57,7 +62,7 @@ class Item:
     def to_dict(self) -> dict:
         out = {}
         for k, v in asdict(self).items():
-            if v == "" or v == ():
+            if v == "" or v == () or v is None:
                 continue
             out[k] = list(v) if isinstance(v, tuple) else v
         return out
@@ -68,6 +73,14 @@ class Item:
         for k in cls.__dataclass_fields__:
             if k == "wrongs":
                 kwargs[k] = tuple(d.get(k) or ())
+            elif k == "wrapper_id":
+                v = d.get(k)
+                if v is None or v == "":
+                    kwargs[k] = None
+                elif isinstance(v, bool) or not isinstance(v, int):
+                    raise ValueError(f"invalid wrapper_id {v!r}")
+                else:
+                    kwargs[k] = v
             else:
                 kwargs[k] = d.get(k, "")
         return cls(**kwargs)

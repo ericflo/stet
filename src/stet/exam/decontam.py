@@ -30,9 +30,13 @@ def scored_texts(it: Item) -> list[str]:
     if it.kind == "context":
         return [t for t in (it.ctx, it.cont, *it.wrongs) if t]
     if it.kind == "answer" and it.source.split(":", 1)[0] in REASONING_KINDS:
-        # Fresh harvest-derived reasoning items embed an excerpt in `ctx`; drop the item if
-        # either the source excerpt or the response appears in the round's training corpus.
-        return [t for t in (it.ctx, it.cont) if t]
+        # Fresh harvest-derived reasoning items wrap an excerpt with a prompt/prefix (e.g.
+        # wrapper 4's `Context:\n`). Extract the unprefixed source excerpt so single-sentence
+        # excerpts keep their true opening key, and decontaminate excerpt and answer independently.
+        from .fresh.reason import reasoning_excerpt
+
+        excerpt = reasoning_excerpt(it)
+        return [t for t in (excerpt if excerpt is not None else it.ctx, it.cont) if t]
     t = {"passage": it.text, "answer": it.cont}.get(it.kind, "")
     return [t] if t else []
 

@@ -1168,12 +1168,12 @@ def test_trainer_sft_prompt_mask_cuda_ckpt_vram_gate_and_early_offload(monkeypat
     tr._set_activation_checkpointing(probe, False)
     assert calls == [("enable", {"activation_checkpointing_kwargs": {"use_reentrant": False}}), ("disable", {})]
 
-    # 3. 16 GB VRAM gate in _verify rejects a 12 GB CUDA GPU for Season 3.
+    # 3. 11 GB VRAM gate in _verify rejects an 8 GB CUDA GPU for Season 3 (12 GB floor).
     monkeypatch.delenv("STET_DEV", raising=False)
     monkeypatch.setattr(client, "need_key", lambda: types.SimpleNamespace(handle="v", public="0" * 64, private="0" * 64))
-    monkeypatch.setattr(client, "request", lambda method, path, **kw: {"scale": "standard"})
+    monkeypatch.setattr(client, "request", lambda method, path, *a, **kw: {"scale": "standard"})
     monkeypatch.setattr(tr, "pick_device", lambda dev=None: types.SimpleNamespace(type="cuda"))
-    monkeypatch.setattr(tr, "hardware_info", lambda dev: {"device": "cuda", "gpu": "RTX 3060", "vram_gb": 12.0, "backend": "cuda"})
+    monkeypatch.setattr(tr, "hardware_info", lambda dev: {"device": "cuda", "gpu": "RTX 3050", "vram_gb": 8.0, "backend": "cuda"})
     args = types.SimpleNamespace(
         season="s3",
         device="cuda",
@@ -2255,6 +2255,7 @@ def test_review8_training_divergence_retries_once_then_raises_training_error(mon
     """Review 8 Finding 3: a FloatingPointError in train() retries once on the same machine; if it
     recovers on attempt 2, grading succeeds; if it fails twice, raises TrainingError (NOT valid=False).
     ScriptError still returns valid=False immediately without retrying or training."""
+    pytest.importorskip("torch")
     from stet import grade
     from stet.script import ScriptError
 
@@ -2549,6 +2550,7 @@ def test_review9_explicit_season_round_resolution(monkeypatch, capsys):
 def test_review9_public_and_full_exam_baseline_cache_isolation(monkeypatch, tmp_path):
     """Review 9 P2 #2: public-subset replay and full official exam never share a baseline cache entry
     in either transition (public -> full or full -> public)."""
+    pytest.importorskip("torch")
     import json
     from types import SimpleNamespace
 
@@ -3125,9 +3127,8 @@ def test_review12_baseline_cache_isolates_rocm_from_nvidia_cuda(monkeypatch, tmp
     """Review 12 P2 #3: NVIDIA CUDA grades must never reuse a ROCm or untagged CUDA baseline from
     a shared or migrated cache across baseline(), early-grade _sit(), optional-baseline lookup,
     and slim_result()."""
+    torch = pytest.importorskip("torch")
     import json
-
-    import torch
 
     from stet import client, data, grade, pipeline, train
     from stet.exam.items import Item
@@ -3243,6 +3244,296 @@ def test_review12_baseline_cache_isolates_rocm_from_nvidia_cuda(monkeypatch, tmp
         client.slim_result(nvidia_grade, legacy_untagged)
     slim_ok = client.slim_result(nvidia_grade, nv_base)
     assert slim_ok["baseline"]["hardware"] == nvidia_hw
+
+
+def test_review13_slim_result_enforces_baseline_backend_without_torch():
+    """Review 13 P1 #1: pure-Python baseline-backend enforcement in slim_result() runs in the
+    lightweight no-Torch test suite as well as the Torch suite."""
+    from stet import client
+
+    nvidia_hw = {"device": "cuda", "backend": "cuda", "gpu": "NVIDIA GeForce RTX 5090", "vram_gb": 32.0}
+    rocm_hw = {"device": "cuda", "backend": "rocm", "gpu": "AMD Radeon 8060S", "vram_gb": 96.0}
+    untagged_hw = {"device": "cuda", "gpu": "NVIDIA GeForce RTX 5090", "vram_gb": 32.0}
+    grade_payload = {
+        "round": {"id": "s3-o00007"},
+        "valid": True,
+        "hardware": nvidia_hw,
+        "script": {"script_sha256": "1" * 64, "tokens_sha256": "2" * 64},
+        "exam": {"mean": -2.3, "item_scores": [-2.3, -2.3]},
+        "train": {"seconds": 10.0, "tokens_per_second": 1000.0, "final_train_loss": 2.3, "init_sha256": "a" * 64, "precision": "bf16", "curve": [[1, 3.0]]},
+    }
+    base_rocm = {"valid": True, "hardware": rocm_hw, "train": {"init_sha256": "a" * 64}, "exam": {"mean": -2.5, "item_scores": [-2.5, -2.5]}}
+    base_untagged = {"valid": True, "hardware": untagged_hw, "train": {"init_sha256": "a" * 64}, "exam": {"mean": -2.5, "item_scores": [-2.5, -2.5]}}
+    base_nv = {"valid": True, "hardware": nvidia_hw, "train": {"init_sha256": "a" * 64}, "exam": {"mean": -2.4, "item_scores": [-2.4, -2.4]}}
+
+    with pytest.raises(ValueError, match="backend"):
+        client.slim_result(grade_payload, base_rocm)
+    with pytest.raises(ValueError, match="backend"):
+        client.slim_result(grade_payload, base_untagged)
+    slim_ok = client.slim_result(grade_payload, base_nv)
+    assert slim_ok["baseline"]["hardware"] == nvidia_hw
+
+
+def test_review13_decontam_catches_wrapper4_single_sentence_excerpt_copy():
+    """Review 13 P2 #5: an exact single-sentence source excerpt in the corpus must be caught by
+    decontam.seen() under every wrapper including wrapper 4 (`Context:\\n...`), for both newly
+    generated items (with preserved metadata) and legacy items without metadata."""
+    from stet.exam import decontam
+    from stet.exam.fresh import reason
+
+    s3 = load_season("s3")
+    excerpt = "Coastal hydrologists documented rapid salinity intrusion across twelve estuarine aquifers after the autumn drought."
+    prompt = "Why did salinity increase in those aquifers?"
+    cont = "Reduced river discharge allowed denser tidal seawater to migrate farther inland through porous sand layers."
+
+    class OneDocCorpus:
+        def __len__(self):
+            return 1
+
+        def text(self, i: int) -> str:
+            return excerpt
+
+    items = []
+    for task, n_wrap in (("explain", 6), ("infer", 6), ("synthesis", 3)):
+        for wid in range(n_wrap):
+            ctx = reason.wrap_prompt(excerpt, prompt, task, wid)
+            # Authoritative metadata item (produced by parse_generated_items_detailed)
+            items.append(
+                Item(
+                    kind="answer",
+                    corner=f"{task}/en/ccnews",
+                    fmt="prose",
+                    lang="en",
+                    source=f"{task}:ccnews:doc-{wid}",
+                    ctx=ctx,
+                    cont=cont,
+                    prompt=prompt,
+                    wrapper_id=wid,
+                )
+            )
+            # Legacy item without explicit prompt/wrapper_id (e.g. archived draws)
+            items.append(
+                Item(
+                    kind="answer",
+                    corner=f"{task}/en/ccnews",
+                    fmt="prose",
+                    lang="en",
+                    source=f"{task}:ccnews:legacy-{wid}",
+                    ctx=ctx,
+                    cont=cont,
+                )
+            )
+
+    for it in items:
+        spans = decontam.scored_texts(it)
+        assert spans == [excerpt, cont], f"wrapper leaked prefix/prompt into scored_texts: {spans!r}"
+
+    dropped = decontam.seen(items, OneDocCorpus(), s3)
+    assert dropped == set(range(len(items))), f"missed exact excerpt copies: {set(range(len(items))) - dropped}"
+
+
+def test_review13_public_items_preserves_excerpt_boundary_with_horizontal_rule():
+    """Review 13 P2 #6: a third-party excerpt containing a Markdown horizontal rule (`\\n\\n---\\n`),
+    `Context:\\n`, or bullet markers must never leak third-party prose into the published `prompt`
+    or break `rebuild_withheld_reasoning` SHA verification."""
+    from stet.exam import examine
+    from stet.exam.farm import pack_items, unpack_items
+    from stet.exam.fresh import reason
+
+    tricky_excerpts = [
+        "Opening section from third-party article about turbine blades.\n\n---\nSecond third-party paragraph after a Markdown horizontal rule.",
+        "Context:\nLeading context marker inside the third-party article itself.\n\n• Bullet line inside the article.",
+    ]
+    prompt_syn = "Summarize the structural failure mode described in the passage."
+    prompt_exp = "Why did the turbine blade fatigue crack propagate along the root?"
+    resp = (
+        "Cyclic thermal expansion concentrated bending stress near the blade root fillet until microscopic "
+        "surface pits joined into a propagating fracture across the alloy grain boundary."
+    )
+
+    docs = []
+    gens = []
+    for ex_idx, ex in enumerate(tricky_excerpts):
+        for task, pr, n_wrap in (("synthesis", prompt_syn, 3), ("explain", prompt_exp, 6), ("infer", prompt_exp, 6)):
+            for wid in range(n_wrap):
+                docs.append({
+                    "id": f"doc-{ex_idx}-{task}-{wid}",
+                    "source": "ccnews:2026-11-26",
+                    "lang": "en",
+                    "text": ex,
+                    "excerpt": ex,
+                    "task_type": task,
+                    "wrapper_id": wid,
+                })
+                gens.append(f"{pr}\nRESPONSE: {resp}")
+
+    items, dropped = reason.parse_generated_items(docs, gens, check_lang=False)
+    assert not dropped and len(items) == len(docs), (len(items), dropped)
+
+    # Round-trip through pack_items/unpack_items (reasoning cache & full exam storage).
+    unpacked = unpack_items(pack_items(items))
+    assert unpacked == items
+
+    pub = examine.public_items(unpacked)
+    assert len(pub) == len(items)
+    for d, it, row in zip(docs, unpacked, pub, strict=True):
+        expected_pr = prompt_syn if d["task_type"] == "synthesis" else prompt_exp
+        expected_ex = d["excerpt"]
+        assert row["withheld"] is True and row["withheld_excerpt"] is True
+        assert row["prompt"] == expected_pr, f"leaked prose into prompt for {d['task_type']} w={d['wrapper_id']}: {row['prompt']!r}"
+        assert row["wrapper_id"] == d["wrapper_id"]
+        assert row["excerpt_sha256"] == hashlib.sha256(expected_ex.encode("utf-8")).hexdigest()
+        assert row["excerpt_chars"] == len(expected_ex)
+        assert "Second third-party paragraph" not in json.dumps(row)
+        assert "Bullet line inside the article" not in json.dumps(row)
+        rebuilt = examine.rebuild_withheld_reasoning(row, expected_ex)
+        assert rebuilt == it and rebuilt.id == it.id
+
+
+def test_review13_exam_timeout_is_round_scoped_across_two_rounds(monkeypatch, tmp_path):
+    """Review 13 P2 #7: timing out waiting for Round A's exam must exclude only Round A from
+    pre-exam grades (`skip_early_rounds=['s3-o00001']`, keeping `early=True`) so a grade-only
+    worker still takes and finishes pre-exam grades for Round B."""
+    import sys
+    from types import SimpleNamespace
+
+    from stet import bench, client, env, upgrade
+
+    monkeypatch.setenv("STET_CACHE", str(tmp_path))
+    monkeypatch.setenv("STET_EXAM_WAIT_SECONDS", "30")
+    monkeypatch.setenv("STET_DEV", "1")
+    monkeypatch.setattr(client, "need_key", lambda: SimpleNamespace(handle="grader-1", pub="pub", priv="priv"))
+    monkeypatch.setattr(upgrade, "Upgrader", lambda *a, **k: SimpleNamespace(on=False, consider=lambda *a, **k: None, look=lambda: None, now=lambda: None))
+    monkeypatch.setattr(env, "problems", lambda *a, **k: [])
+    monkeypatch.setattr(bench, "saved", lambda: None)
+    monkeypatch.setattr(client, "remember_announcement", lambda *a, **k: None)
+    monkeypatch.setattr(client, "saved_pass", lambda *a, **k: None)
+    monkeypatch.setattr(client, "tidy", lambda *a, **k: None)
+    monkeypatch.setattr(client, "EXAM_POLL", 10)
+
+    # Stub stet.train so this test runs cleanly even in the lightweight no-Torch venv.
+    fake_train = types.ModuleType("stet.train")
+    fake_train.pick_device = lambda *a, **k: SimpleNamespace(type="cuda", index=0)
+    fake_train.hardware_info = lambda d: {"device": "cuda", "backend": "cuda", "gpu": "RTX 5090", "vram_gb": 32.0}
+    monkeypatch.setitem(sys.modules, "stet.train", fake_train)
+
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(client.time, "monotonic", lambda: clock["t"])
+
+    def fake_sleep(sec):
+        clock["t"] += sec
+
+    monkeypatch.setattr(client.time, "sleep", fake_sleep)
+
+    round_a_job = {
+        "id": 101,
+        "kind": "grade",
+        "scale": "nano",
+        "baseline": False,
+        "expires_at": 9999999999,
+        "round": {"id": "s3-o00001", "index": 1, "drawn_at": 1000, "exam_digest": ""},
+        "editor": {"id": "ed1", "name": "ed1", "version": 1, "owner": "alice", "size": 10},
+        "script": {"sha256": "1" * 64, "size": 10},
+    }
+    round_b_job = {
+        "id": 202,
+        "kind": "grade",
+        "scale": "nano",
+        "baseline": False,
+        "expires_at": 9999999999,
+        "round": {"id": "s3-o00002", "index": 2, "drawn_at": 2000, "exam_digest": ""},
+        "editor": {"id": "ed2", "name": "ed2", "version": 1, "owner": "alice", "size": 10},
+        "script": {"sha256": "2" * 64, "size": 10},
+    }
+
+    claims_seen: list[dict] = []
+    releases: list[tuple[int, str]] = []
+    submitted: list[int] = []
+    state = {"phase": "A", "b_exam_posted": False}
+
+    def fake_request(method, path, body=None, **kw):
+        if method == "GET" and path == "/api/v1/season":
+            return {"scale": "nano"}
+        if method == "POST" and path == "/api/v1/jobs/claim":
+            claims_seen.append(dict(body or {}))
+            if len(claims_seen) > 20:
+                raise AssertionError(f"too many claims: {claims_seen}")
+            if state["phase"] == "A":
+                state["phase"] = "A_wait"
+                return {"job": round_a_job}
+            if state["phase"] == "A_wait":
+                return {"job": None, "retry_after": 10}
+            if state["phase"] == "B_legacy_guard":
+                # Simulate an older server ignoring skip_early_rounds and re-offering Round A pre-exam.
+                state["phase"] = "B"
+                return {"job": round_a_job}
+            if state["phase"] == "B":
+                # Round B offers ONLY pre-exam grades: requires early=True and Round B not skipped!
+                if not body.get("early") or "s3-o00002" in (body.get("skip_early_rounds") or []):
+                    return {"job": None, "retry_after": 10}
+                state["phase"] = "B_wait"
+                return {"job": round_b_job}
+            return {"job": None, "retry_after": 10}
+        if method == "POST" and path.endswith("/release"):
+            jid = int(path.split("/")[4])
+            releases.append((jid, (body or {}).get("reason", "")))
+            if jid == 101 and state["phase"] == "A_wait":
+                state["phase"] = "B_legacy_guard"
+            return {"ok": True}
+        if method == "POST" and path.endswith("/result"):
+            jid = int(path.split("/")[4])
+            submitted.append(jid)
+            return {"status": "settled"}
+        raise AssertionError(f"unexpected request: {method} {path}")
+
+    def fake_exam_now(rnd):
+        if rnd.id == "s3-o00002" and state["b_exam_posted"]:
+            return SimpleNamespace(id="s3-o00002", exam_digest="e" * 64)
+        return None
+
+    def fake_grade_job(job, season, scale, device, key, out, work, bases=None):
+        rid = job["round"]["id"]
+        if rid == "s3-o00002":
+            state["b_exam_posted"] = True
+        return client.Pending(job, SimpleNamespace(id=rid, exam_digest=""), SimpleNamespace(model=None), device)
+
+    def fake_sit(pending, bases, key, scale):
+        return (
+            {
+                "round": {"id": pending.rnd.id},
+                "valid": True,
+                "hardware": {"device": "cuda", "backend": "cuda", "gpu": "RTX 5090"},
+                "script": {"script_sha256": "2" * 64, "tokens_sha256": "3" * 64},
+                "exam": {"mean": -2.0, "item_scores": [-2.0]},
+                "train": {"seconds": 1.0, "tokens_per_second": 100.0, "final_train_loss": 2.0, "init_sha256": "a" * 64, "precision": "bf16", "curve": [[1, 2.0]]},
+            },
+            None,
+        )
+
+    monkeypatch.setattr(client, "request", fake_request)
+    monkeypatch.setattr(client, "exam_now", fake_exam_now)
+    monkeypatch.setattr(client, "_grade_job", fake_grade_job)
+    monkeypatch.setattr(client, "_sit", fake_sit)
+
+    args = SimpleNamespace(
+        season="s3",
+        device="cuda",
+        any_device=True,
+        edits=False,  # grade-only worker!
+        once=False,
+        max_jobs=1,
+        exit_when_idle=None,
+        auto_upgrade=False,
+    )
+    client._verify(args, organiser=False, me={"account": {"handle": "grader-1"}})
+
+    # Round A timed out and released; subsequent claims kept early=True with skip_early_rounds=['s3-o00001']!
+    assert (101, client.EXAM_WAIT_TIMEOUT_REASON) in releases
+    post_timeout_claims = [c for c in claims_seen if "s3-o00001" in (c.get("skip_early_rounds") or [])]
+    assert len(post_timeout_claims) >= 2, f"expected round-scoped skip_early_rounds claims, got {claims_seen}"
+    assert all(c.get("early") is True for c in post_timeout_claims), f"early was disabled globally: {post_timeout_claims}"
+    assert submitted == [202], f"expected Round B pre-exam grade 202 to complete and submit, got {submitted}"
+
 
 
 

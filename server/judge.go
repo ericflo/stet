@@ -226,6 +226,10 @@ type Hello struct {
 	// PassSeconds is how long this machine last took to train a grade's student, kept on its
 	// disk from its latest grade (stet 0.4.4 and later); 0 until it has graded.
 	PassSeconds float64 `json:"pass_seconds,omitempty"`
+	// SkipEarlyRounds lists round IDs on which this machine already timed out waiting for the
+	// exam and must not be handed another pre-exam grade (while still taking early grades on
+	// newer rounds).
+	SkipEarlyRounds []string `json:"skip_early_rounds,omitempty"`
 }
 
 // hardwareFacts is the part of a hardware description the server reads. All of it is
@@ -591,11 +595,12 @@ func (j *judge) barred(acct *Account, round int) bool {
 
 // asker is an account as it stands when it asks for work, or as it stood when it last did.
 type asker struct {
-	acct    *Account
-	est     bool
-	canEdit bool   // it may be handed editors to run
-	gpuMake string // cuda | rocm
-	early   bool   // it trains before the exam, and may be handed a grade before it is posted
+	acct      *Account
+	est       bool
+	canEdit   bool            // it may be handed editors to run
+	gpuMake   string          // cuda | rocm
+	early     bool            // it trains before the exam, and may be handed a grade before it is posted
+	skipEarly map[string]bool // round IDs excluded from pre-exam grades for this worker
 }
 
 // active lists the accounts that are around: those that asked for work a short while ago,
@@ -970,9 +975,36 @@ func (j *judge) weigh(sc *scriptState) *verdict {
 	if v.valid {
 		v.gain = median(gains)
 	}
-	v.tie = v.tokensTie || v.initTie || (len(v.counted) == 2 && !j.same(v.counted[0], v.counted[1]))
+	// A numerical or validity tie exists when two counted grades disagree, when valid and
+	// invalid grades split exactly 50/50 (e.g. 2-2), OR when three or more scored counted
+	// grades still have neither two agreeing with the verdict nor an organisers' grade agreeing
+	// with it (e.g., three mutually inconsistent volunteer grades +0.010/+0.090/+0.050).
+	numTie := (len(v.counted) == 2 && !j.same(v.counted[0], v.counted[1])) ||
+		(len(v.counted) > 2 && 2*len(gains) == len(v.counted))
+	if !numTie && len(v.counted) > 2 && v.scored {
+		agreed, anchorAgreed := 0, false
+		for _, g := range v.counted {
+			if j.agrees(g, v) {
+				agreed++
+				if g.acct.Anchor {
+					anchorAgreed = true
+				}
+			}
+		}
+		numTie = agreed < 2 && !anchorAgreed
+	}
+	v.tie = v.tokensTie || v.initTie || numTie
 	sc.verdict = v
 	return v
+}
+
+// uncorroboratedInvalid reports whether a script's invalid verdict rests solely on one
+// volunteer's word (neither corroborated by a second established grader nor vouched for by an
+// organisers' machine). Mirrors vouched() for failed edit runs: one volunteer cannot fail an
+// entry unconfirmed.
+func uncorroboratedInvalid(v *verdict) bool {
+	return v.known && !v.valid && !v.tokensTie && !v.initTie &&
+		len(v.counted) == 1 && !v.counted[0].acct.Anchor
 }
 
 // middleOf is the part of a sorted list that its median is made of: the middle one of an
@@ -1297,7 +1329,7 @@ func (j *judge) offers(st *entryState, q *asker, closing bool) []offer {
 		out = append(out, offer{st: st, kind: "edit", score: score, required: true})
 	}
 	for _, sc := range st.Scripts {
-		if !j.mayGrade(st, sc, q.acct) || j.running(st, q.acct) || (!examPosted(st.Round) && (!q.early || j.examTimedOut[q.acct.ID][st.Round.Idx])) {
+		if !j.mayGrade(st, sc, q.acct) || j.running(st, q.acct) || (!examPosted(st.Round) && (!q.early || j.examTimedOut[q.acct.ID][st.Round.Idx] || q.skipEarly[roundID(j.a.season.ID, st.Round.Idx)])) {
 			continue
 		}
 		v := j.weigh(sc)
@@ -1418,7 +1450,7 @@ func (j *judge) settleable(st *entryState) bool {
 	expired := j.expired || j.t >= max(st.Round.ActiveAt, st.Round.DrawnAt)+wait
 	for _, sc := range st.Scripts {
 		v := j.weigh(sc)
-		if (!v.scored && !(v.initTie && expired)) || (v.tie && !expired) {
+		if (!v.scored && !(v.initTie && expired)) || (v.tie && !expired) || uncorroboratedInvalid(v) {
 			return false
 		}
 		for _, c := range sc.Live {
@@ -1649,7 +1681,16 @@ func (a *App) claim(ctx context.Context, acctID int64, h *Hello) (*Handed, error
 		var pick *offer
 		best, n := math.MaxInt, 0
 		j := a.newJudge(s)
-		q := &asker{acct: acct, est: j.est[acctID], canEdit: canEdit, gpuMake: hw.gpuMake(), early: h.Early}
+		var skipEarly map[string]bool
+		if len(h.SkipEarlyRounds) > 0 {
+			skipEarly = make(map[string]bool, len(h.SkipEarlyRounds))
+			for _, rid := range h.SkipEarlyRounds {
+				if rid != "" {
+					skipEarly[rid] = true
+				}
+			}
+		}
+		q := &asker{acct: acct, est: j.est[acctID], canEdit: canEdit, gpuMake: hw.gpuMake(), early: h.Early, skipEarly: skipEarly}
 		for _, rd := range openRounds(s) {
 			if held > 0 && !j.more(rd, q, held, h.PassSeconds) {
 				continue
@@ -2182,8 +2223,8 @@ func (a *App) submitResult(ctx context.Context, acctID, claimID int64, p *Result
 		if (rd.CorpusSHA != "" && rd.CorpusSHA != p.CorpusSHA256) || (rd.ExamSHA != "" && rd.ExamSHA != p.ExamSHA256) {
 			return refuse("corpus", 0, "your corpus or exam for %s differs from the round's. This verifier rebuilds its copy once", p.Round)
 		}
-		if p.Baseline != nil && len(p.Baseline.Hardware) > 0 && !a.cfg.Dev && !a.season.gradesOnHardware(readHardware(p.Baseline.Hardware)) {
-			return fail(400, "baselines for the leaderboard must come from %s", a.season.gradeHardwareRequirement())
+		if p.Baseline != nil && !a.cfg.Dev && !a.season.gradesOnHardware(readHardware(p.Baseline.Hardware)) {
+			return fail(400, "baselines for the leaderboard must report hardware from %s", a.season.gradeHardwareRequirement())
 		}
 		initSHA := ""
 		if p.Train != nil && sha256Re.MatchString(p.Train.InitSHA256) {
@@ -2501,11 +2542,27 @@ func (j *judge) vouched(st *entryState, run *Run) bool {
 	return len(st.Runs) > 1 || (by != nil && by.Anchor)
 }
 
+// canCorroborate reports whether somebody who is around could actually be offered a required
+// grade on sc right now (using the same offer rules as ready(), so giveUp never leaves an
+// uncorroborated invalid report stuck behind an ineligible active account such as the script's
+// own anchor writer).
+func (j *judge) canCorroborate(st *entryState, sc *scriptState) bool {
+	for _, q := range j.active() {
+		for _, o := range j.offers(st, q, true) {
+			if o.kind == "grade" && o.sc == sc && o.required {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // giveUp drops what nobody is there to check: a script that no established account has
-// graded, is grading, or could be handed; a failed run with nobody to run the entry a
-// second time; and, when the rest of the round is being held up by it, an entry with no
-// run and nobody to give it one. An entry left with nothing is void for the round, and
-// that is not held against it. Reports whether it changed anything.
+// graded, is grading, or could be handed; an uncorroborated lone volunteer invalid report
+// with nobody else around to confirm or overturn it; a failed run with nobody to run the
+// entry a second time; and, when the rest of the round is being held up by it, an entry
+// with no run and nobody to give it one. An entry left with nothing is void for the round,
+// and that is not held against it. Reports whether it changed anything.
 func (a *App) giveUp(tx *Tx, j *judge, st *entryState, held bool) bool {
 	e := st.Entry
 	if len(st.Runs) == 0 {
@@ -2527,12 +2584,14 @@ func (a *App) giveUp(tx *Tx, j *judge, st *entryState, held bool) bool {
 		return false
 	}
 	gave := false
+	unconfirmedInvalid := false
 	for _, sc := range st.Scripts {
 		counting := false
 		for _, c := range sc.Live {
 			counting = counting || j.est[c.AccountID]
 		}
-		if !j.weigh(sc).known && !counting && !j.anyone(st, sc) {
+		v := j.weigh(sc)
+		if !v.known && !counting && !j.anyone(st, sc) {
 			why := "nobody else was there to grade it"
 			for _, r := range sc.Results {
 				if j.est[r.AccountID] && r.Valid && r.Score == nil {
@@ -2543,6 +2602,10 @@ func (a *App) giveUp(tx *Tx, j *judge, st *entryState, held bool) bool {
 			}
 			a.dropScript(tx, j, st, sc, why)
 			gave = true
+		} else if uncorroboratedInvalid(v) && !counting && len(st.LiveEdits) == 0 && !j.canCorroborate(st, sc) {
+			a.dropScript(tx, j, st, sc, "nobody else was there to confirm that this script is invalid")
+			unconfirmedInvalid = true
+			gave = true
 		}
 	}
 	for _, run := range st.Runs {
@@ -2552,8 +2615,11 @@ func (a *App) giveUp(tx *Tx, j *judge, st *entryState, held bool) bool {
 			gave = true
 		}
 	}
-	if gave && !counts(e) {
+	if gave && !counts(e) && len(st.LiveEdits) == 0 {
 		why := "no second verifier was there to check this entry's run; the round does not count for it"
+		if unconfirmedInvalid {
+			why = "no second verifier was there to confirm that this entry's script is invalid; the round does not count for it"
+		}
 		for _, run := range e.Runs {
 			if run.Dropped && strings.Contains(strings.ToLower(run.Reason), "training failed") {
 				why = "the training failed on the machines that tried to grade this entry; the round does not count for it"
@@ -2598,6 +2664,8 @@ func (a *App) dropScript(tx *Tx, j *judge, st *entryState, sc *scriptState, why 
 		shown := "no established grade"
 		if g.est && !g.base {
 			shown = "no baseline" // an established grade, and nothing to score it against
+		} else if g.est && !r.Valid {
+			shown = "unconfirmed"
 		}
 		grades = append(grades, j.publish(g, shown, false))
 		r.Verdict, r.Summary = "void", nil
@@ -2740,10 +2808,16 @@ func (a *App) settleScript(tx *Tx, j *judge, st *entryState, sc *scriptState) *g
 	// A strike says that a grade is wrong, and one volunteer's grade against another's
 	// does not show which of them is. It takes a gain that two established grades agree
 	// on, or one of an organisers' machine.
-	solid := !v.tie && len(v.counted) > 1
+	agreed, anchorAgreed := 0, false
 	for _, g := range v.counted {
-		solid = solid || (!v.tie && g.acct.Anchor)
+		if j.agrees(g, v) {
+			agreed++
+			if g.acct.Anchor {
+				anchorAgreed = true
+			}
+		}
 	}
+	solid := !v.tie && (agreed >= 2 || anchorAgreed)
 	agreedTokens := v.tokensSHA
 	baseInit, baseInitOK := a.baselineInitSHA(j.s, rd)
 	ref := map[string]any{"round": roundID(a.season.ID, rd.Idx), "editor": st.Entry.EditorID}

@@ -246,8 +246,8 @@ known CJK / mimic / rotated-excerpt trade-offs).
   passage ease cancel identically;
 - on fresh harvest-derived reasoning (`kind="answer"`), how likely the student finds the
   multi-sentence explanation, inference, or synthesis given the excerpt and prompt (see
-  [Experiments](EXPERIMENTS.md) for the rotated-excerpt control showing that while absolute NLL
-  depends strongly on the excerpt (`~0.19–0.20 bpb` under `Inkling-2-Mini`, `~0.14 bpb` under the
+  [Experiments](EXPERIMENTS.md) for the rotated-excerpt control showing that while rotating excerpts
+  raises absolute mean NLL (`~0.19–0.20 bpb` higher NLL under `Inkling-2-Mini`, `~0.14 bpb` under the
   prior `Qwen3-8B` baseline), between-curator differences at `65.5M` tokens on frozen-bottom
   `ERNIE-4.5-0.3B` still survive excerpt rotation at `103%–117%` and therefore remain driven
   primarily by prompt-conditioned multilingual answer-prose modeling rather than excerpt-grounded

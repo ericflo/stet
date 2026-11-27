@@ -565,8 +565,8 @@ corpus on Season 3's 100%-reasoning score, in bits per byte):
   `FineWeb-Edu` `#6/12` (true `#7`, `0%` #1 rate across resamples), and Top-1
   `dclm-baseline-qc-7p-fw2` (`0.14pp` shortfall)** (scoring all `1,863` multilingual items under
   official crawl weights against that English-only target yields `25/66`, `ρ = −0.294`, ranking
-  multilingual `dolma1_7` `#1`). While rotating excerpts drops absolute NLL by `~0.19–0.20 bpb`
-  and lowers English DataDecide ordering (`53/66 → 49/66` pooled),
+  multilingual `dolma1_7` `#1`). While rotating excerpts raises absolute mean NLL by `~0.19–0.20 bpb`
+  (e.g. Draw B unedited seed-0 rose from `1.337` to `1.522 bpb`) and lowers English DataDecide ordering (`53/66 → 49/66` pooled),
   between-curator gains vs `unedited` on multilingual crawls still retain `103%–117%` under
   rotation — so clean, diverse, non-boilerplate multilingual prose across every language remains
   the foundation. Note also that under `Inkling-2-Mini`, `fineweb2` and `reader` v2 still score

@@ -361,9 +361,50 @@ def wrap_prompt(excerpt: str, prompt_line: str, task_type: str, wrapper_id: int)
     return f"{excerpt}\n\n• {prompt_line}\n"
 
 
+def extract_wrapped_excerpt(ctx: str, prompt_line: str, task_type: str, wrapper_id: int) -> str | None:
+    """Invert `wrap_prompt()` authoritatively using the preserved `prompt_line` and `wrapper_id`,
+    never guessing wrapper boundaries from excerpt contents (even when an excerpt contains `---`
+    rules, `Context:` prefixes, or bullet separators)."""
+    if not prompt_line:
+        return None
+    if task_type == "synthesis":
+        w = wrapper_id % 3
+        prefix = ""
+        suffix = {
+            0: f"\n\n{prompt_line}",
+            1: f"\n\n---\n{prompt_line}",
+            2: f"\n\n{prompt_line} ",
+        }[w]
+    else:
+        w = wrapper_id % 6
+        if w == 2:
+            prefix, suffix = f"{prompt_line}\n\n", "\n\n"
+        elif w == 4:
+            prefix, suffix = "Context:\n", f"\n\n{prompt_line}\n"
+        else:
+            prefix = ""
+            suffix = {
+                0: f"\n\n{prompt_line}\n",
+                1: f"\n\n---\n{prompt_line}\n\n",
+                3: f"\n\n{prompt_line} ",
+                5: f"\n\n• {prompt_line}\n",
+            }[w]
+    if len(ctx) < len(prefix) + len(suffix):
+        return None
+    if prefix and not ctx.startswith(prefix):
+        return None
+    if suffix and not ctx.endswith(suffix):
+        return None
+    end = len(ctx) - len(suffix) if suffix else len(ctx)
+    excerpt = ctx[len(prefix) : end]
+    if wrap_prompt(excerpt, prompt_line, task_type, w) != ctx:
+        return None
+    return excerpt
+
+
 def split_wrapped_ctx(ctx: str, task_type: str) -> tuple[str, str, int] | None:
-    """Invert `wrap_prompt()` cleanly so `public_items()` can publish the teacher's prompt line
-    and wrapper_id while withholding only a third-party source excerpt."""
+    """Legacy fallback inverter for `wrap_prompt()` when an item lacks explicit `(prompt, wrapper_id)`
+    metadata. Newly generated items carry authoritative metadata and use `extract_wrapped_excerpt()`."""
     if task_type == "synthesis":
         if "\n\n---\n" in ctx:
             ex, pr = ctx.rsplit("\n\n---\n", 1)
@@ -400,6 +441,17 @@ def split_wrapped_ctx(ctx: str, task_type: str) -> tuple[str, str, int] | None:
     if wrap_prompt(ex, pr, task_type, w_id) != ctx:
         return None
     return ex, pr, w_id
+
+
+def reasoning_excerpt(it: Item) -> str | None:
+    """Return the raw unprefixed source excerpt of a reasoning item (preferring preserved
+    `(prompt, wrapper_id)` metadata, with heuristic `split_wrapped_ctx` fallback for legacy items)."""
+    task_type = it.source.split(":", 1)[0]
+    if it.prompt and it.wrapper_id is not None:
+        return extract_wrapped_excerpt(it.ctx, it.prompt, task_type, it.wrapper_id)
+    if split := split_wrapped_ctx(it.ctx, task_type):
+        return split[0]
+    return None
 
 
 def _clean_angle(text: str) -> str:
@@ -734,7 +786,9 @@ def parse_generated_items_detailed(
         if ngram_overlap(resp, pr, n=5) > max_ngram_overlap:
             _drop("prompt_copy", d, gen_txt, pr, resp, excerpt)
             continue
-        ctx_str = wrap_prompt(excerpt, pr, d["task_type"], d["wrapper_id"])
+        w_mod = 3 if d["task_type"] == "synthesis" else 6
+        w_id = int(d["wrapper_id"]) % w_mod
+        ctx_str = wrap_prompt(excerpt, pr, d["task_type"], w_id)
         cont = resp if ctx_str.endswith((" ", "\n")) else f" {resp}"
         src_prefix = d["source"].split(":", 1)[0]
         doc_id = str(d.get("id") or "").strip()
@@ -750,6 +804,8 @@ def parse_generated_items_detailed(
                 source=full_src,
                 ctx=ctx_str,
                 cont=cont,
+                prompt=pr,
+                wrapper_id=w_id,
             )
         )
     return items, dict(dropped), drop_records

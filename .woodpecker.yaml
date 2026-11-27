@@ -72,11 +72,45 @@ steps:
             drop:
               - ALL
 
+  # Torch-dependent harness tests on CPU: exercises training divergence retries, baseline cache
+  # isolation (public/full and CUDA/ROCm), and PyTorch grading helpers before image publication.
+  - name: test-harness-torch
+    image: localhost:32000/epsilon-ci-uv313:main-20261119084320-fb19a1937e22@sha256:c295f6d2255fd808267c3e63cf3f8a0dcf3f14f0e5de5ef90556fea2c9321500
+    commands:
+      - export HOME=/tmp/stet-home UV_CACHE_DIR=/tmp/stet-uv UV_LINK_MODE=copy
+      - uv venv /tmp/stet-venv
+      - VIRTUAL_ENV=/tmp/stet-venv uv pip install --index-url https://download.pytorch.org/whl/cpu torch==2.14.0
+      - VIRTUAL_ENV=/tmp/stet-venv uv pip install -e '.[dev]' safetensors==0.8.0 transformers==5.22.2
+      - export PATH=/tmp/stet-venv/bin:$$PATH
+      - python -m pytest -q
+    backend_options:
+      kubernetes:
+        resources:
+          requests:
+            cpu: 250m
+            memory: 1Gi
+          limits:
+            cpu: "2"
+            memory: 4Gi
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          runAsGroup: 1000
+          fsGroup: 1000
+          fsGroupChangePolicy: OnRootMismatch
+          seccompProfile:
+            type: RuntimeDefault
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+              - ALL
+
   - name: publish-immutable-images
     image: localhost:32000/epsilon-buildkit:main-20261119070655-a24d45762658@sha256:85e0c6ae37f5d1f29225442ee1ca8ff626ada7aed01319ca6a3ef627a1f2c3c3
     depends_on:
       - test-server
       - test-harness
+      - test-harness-torch
     commands:
       - |-
         set -eu

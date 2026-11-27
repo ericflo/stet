@@ -2379,11 +2379,251 @@ func TestPinnedStudentRejectsMissingMalformedBaselineInitAndDisallowedBaselineHa
 		t.Fatalf("ROCm baseline.hardware on CUDA-only season must return HTTP 400, got %d", code)
 	}
 
+	// 4. Review 13 P2 #4: omitted baseline.hardware on hardware-restricted production season -> HTTP 400.
+	pNoHW := w.result(c, 5.95, 6.00)
+	pNoHW["hardware"] = nvHW
+	pNoHW["train"] = map[string]any{"init_sha256": initA}
+	pNoHW["script"].(map[string]any)["tokens_sha256"] = tokA
+	pNoHW["baseline"].(map[string]any)["init_sha256"] = initA
+	delete(pNoHW["baseline"].(map[string]any), "hardware")
+	if code := bob.do("POST", fmt.Sprintf("/api/v1/jobs/%d/result", c.Job.ID), pNoHW, nil); code != 400 {
+		t.Fatalf("omitted baseline.hardware on CUDA-only production season must return HTTP 400, got %d", code)
+	}
+
+	// 5. Untagged CUDA baseline.hardware (missing backend) on CUDA-only production season -> HTTP 400.
+	pUntagged := w.result(c, 5.95, 6.00)
+	pUntagged["hardware"] = nvHW
+	pUntagged["train"] = map[string]any{"init_sha256": initA}
+	pUntagged["script"].(map[string]any)["tokens_sha256"] = tokA
+	pUntagged["baseline"].(map[string]any)["init_sha256"] = initA
+	pUntagged["baseline"].(map[string]any)["hardware"] = map[string]any{"device": "cuda", "gpu": "NVIDIA GeForce RTX 5090"}
+	if code := bob.do("POST", fmt.Sprintf("/api/v1/jobs/%d/result", c.Job.ID), pUntagged, nil); code != 400 {
+		t.Fatalf("untagged CUDA baseline.hardware on CUDA-only production season must return HTTP 400, got %d", code)
+	}
+
 	// Verify NO baseline was stored by any of the rejected submissions.
 	w.app.st.view(func(s *State) {
 		if len(s.Baselines) != 0 || s.Rounds[idx].BaselineN != 0 {
 			t.Fatalf("rejected submissions must not store baselines: count=%d baseN=%d", len(s.Baselines), s.Rounds[idx].BaselineN)
 		}
+	})
+
+	// 6. Valid NVIDIA CUDA baseline.hardware succeeds with HTTP 200.
+	pOK := w.result(c, 5.95, 6.00)
+	pOK["hardware"] = nvHW
+	pOK["train"] = map[string]any{"init_sha256": initA}
+	pOK["script"].(map[string]any)["tokens_sha256"] = tokA
+	pOK["baseline"].(map[string]any)["init_sha256"] = initA
+	pOK["baseline"].(map[string]any)["hardware"] = nvHW
+	if code := bob.do("POST", fmt.Sprintf("/api/v1/jobs/%d/result", c.Job.ID), pOK, nil); code != 200 {
+		t.Fatalf("valid NVIDIA CUDA baseline.hardware must return HTTP 200, got %d", code)
+	}
+}
+
+// Review 13 P1 #2: three mutually inconsistent established volunteer grades (+0.010, +0.090, +0.050,
+// every pair > 0.012 tolerance) have no agreeing pair and no agreeing organiser's grade. The third
+// grade must keep the script disputed through ReplicaWait and settle with ZERO strikes on all three
+// volunteers when no fourth grader agrees; once a fourth grader agrees with +0.050 (+0.051), the
+// agreeing pair resolves the dispute and strikes the two outliers.
+func TestThreeMutuallyInconsistentGradesCauseZeroStrikes(t *testing.T) {
+	runThreeWay := func(t *testing.T, thirdIsAnchor bool, addFourthAgreeing bool) {
+		t.Helper()
+		pub, priv := newKey()
+		w := newWorld(t, pub)
+		w.app.season.Baselines.PerRound = 2
+		w.app.season.Tolerance[w.cfg.Scale] = Tolerance{Grade: 0.012, Baseline: 0.015, Run: 0.015}
+		anchor := w.join("anchor-one", priv)
+		alice := w.join("alice", nil)
+		bob := w.join("bob", nil)
+		carol := w.join("carol", nil)
+		dave := w.join("dave", nil)
+		erin := w.join("erin", nil)
+		for _, h := range []string{"bob", "carol", "dave", "erin"} {
+			w.established(h)
+		}
+		var thirdAnchor *actor
+		if thirdIsAnchor {
+			pk, sk := newKey()
+			if code := w.vouch(anchor, pk); code != 201 {
+				t.Fatalf("vouch anchor-two: HTTP %d", code)
+			}
+			thirdAnchor = w.join("anchor-two", sk)
+		}
+		w.submit(alice, "tidy", "print(1)")
+		idx := w.drawWithoutExam()
+		ce := w.claim(anchor, true)
+		if code, _ := w.edit(anchor, ce, scriptOne); code != 200 {
+			t.Fatalf("anchor edit: HTTP %d", code)
+		}
+		// Bob and Carol both claim the script before the exam posts so two grades arrive.
+		cBob := w.claimEarly(bob)
+		cCarol := w.claimEarly(carol)
+		w.exam(idx)
+
+		// Submit matching baselines (6.000), matching init/tokens, and gains +0.010, +0.090, +0.050.
+		initA := strings.Repeat("a", 64)
+		tokA := strings.Repeat("1", 64)
+		submitAt := func(a *actor, c *claimed, loss float64) string {
+			p := w.result(c, loss, 6.000)
+			p["train"] = map[string]any{"init_sha256": initA}
+			p["script"].(map[string]any)["tokens_sha256"] = tokA
+			if c.Job.Baseline != nil && *c.Job.Baseline {
+				p["baseline"].(map[string]any)["init_sha256"] = initA
+			} else {
+				delete(p, "baseline")
+			}
+			var ack struct {
+				Status string `json:"status"`
+			}
+			if code := a.do("POST", fmt.Sprintf("/api/v1/jobs/%d/result", c.Job.ID), p, &ack); code != 200 {
+				t.Fatalf("%s submit: HTTP %d", a.handle, code)
+			}
+			return ack.Status
+		}
+		gradeAt := func(a *actor, loss float64) string {
+			c := w.claim(a, false)
+			if c.Job == nil || c.Job.Kind != "grade" {
+				t.Fatalf("%s expected grade job, got %+v", a.handle, c.Job)
+			}
+			return submitAt(a, c, loss)
+		}
+
+		// Bob (+0.010), Carol (+0.090), then third (+0.050).
+		if st := submitAt(bob, cBob, 5.990); st != "pending" {
+			t.Fatalf("after bob: status=%q, want pending", st)
+		}
+		if st := submitAt(carol, cCarol, 5.910); st != "pending" {
+			t.Fatalf("after carol: status=%q, want pending", st)
+		}
+		third := dave
+		if thirdIsAnchor {
+			third = thirdAnchor
+		}
+		st3 := gradeAt(third, 5.950)
+
+		if thirdIsAnchor {
+			// Organiser's machine agreed with median +0.050 -> solid by published standing rule!
+			if st3 != "settled" {
+				t.Fatalf("anchor median (+0.050) should settle solid, got status=%q", st3)
+			}
+			if w.account("bob").Strikes != 1 || w.account("carol").Strikes != 1 {
+				t.Fatalf("against anchor median, bob/carol should each have 1 strike: bob=%d carol=%d",
+					w.account("bob").Strikes, w.account("carol").Strikes)
+			}
+			w.check()
+			return
+		}
+
+		// Three mutually inconsistent volunteers MUST NOT immediately settle and strike!
+		if st3 != "pending" || w.settled(idx) != 0 {
+			t.Fatalf("three mutually inconsistent volunteer grades must NOT settle immediately: status=%q settled=%d", st3, w.settled(idx))
+		}
+		if addFourthAgreeing {
+			// Fourth volunteer agrees with Dave (+0.051 within 0.012 of +0.050) -> resolves dispute!
+			if st4 := gradeAt(erin, 5.949); st4 != "settled" {
+				t.Fatalf("fourth agreeing grader should settle dispute, got status=%q", st4)
+			}
+			if w.account("bob").Strikes != 1 || w.account("carol").Strikes != 1 {
+				t.Fatalf("expected 1 strike each for outliers bob/carol after agreeing pair, got bob=%d carol=%d",
+					w.account("bob").Strikes, w.account("carol").Strikes)
+			}
+			if w.account("dave").Strikes != 0 || w.account("erin").Strikes != 0 {
+				t.Fatalf("agreeing pair dave/erin must have 0 strikes, got dave=%d erin=%d",
+					w.account("dave").Strikes, w.account("erin").Strikes)
+			}
+			w.check()
+			return
+		}
+
+		// No fourth grader arrives -> wait out ReplicaWait -> settles disputed with ZERO strikes!
+		w.pass(w.cfg.ReplicaWait + time.Minute)
+		if w.settled(idx) != 1 {
+			t.Fatalf("expected 3-way dispute to settle after ReplicaWait, settled=%d", w.settled(idx))
+		}
+		for _, h := range []string{"bob", "carol", "dave"} {
+			if acct := w.account(h); acct.Strikes != 0 {
+				t.Fatalf("three mutually inconsistent volunteer grades struck %s (strikes=%d, want 0)", h, acct.Strikes)
+			}
+		}
+		en := w.entries(alice, idx)[0]
+		if !en.Valid || en.Gain == nil || math.Abs(*en.Gain-0.050) > 1e-4 {
+			t.Fatalf("expected settled median gain +0.050, got %+v", en)
+		}
+		if en.Detail == nil || !en.Detail.DisputedTogether {
+			t.Fatalf("expected DisputedTogether=true on unresolved 3-way dispute, got %+v", en.Detail)
+		}
+		for _, gr := range en.Runs[0].Grades {
+			if gr.Verdict != "disputed" {
+				t.Fatalf("expected all 3 mutually inconsistent grades published as disputed, got %+v", en.Runs[0].Grades)
+			}
+		}
+		w.check()
+	}
+
+	t.Run("three_volunteers_no_fourth_zero_strikes", func(t *testing.T) { runThreeWay(t, false, false) })
+	t.Run("three_volunteers_fourth_agrees_strikes_outliers", func(t *testing.T) { runThreeWay(t, false, true) })
+	t.Run("anchor_as_median_strikes_outliers", func(t *testing.T) { runThreeWay(t, true, false) })
+
+	// Gate 4 P2 #4: an exact 2-2 Valid-vs-Invalid split among 4 established volunteers must
+	// remain disputed (zero strikes on both Valid volunteers) instead of settling solid invalid.
+	t.Run("two_valid_vs_two_invalid_split_zero_strikes", func(t *testing.T) {
+		pub, priv := newKey()
+		w := newWorld(t, pub)
+		w.app.season.Baselines.PerRound = 2
+		anchor := w.join("anchor-one", priv)
+		alice := w.join("alice", nil)
+		g := w.volunteers("bob", "carol", "dave", "erin")
+		w.submit(alice, "tidy", "print(1)")
+		idx := w.drawWithoutExam()
+		ce := w.claim(anchor, true)
+		if code, _ := w.edit(anchor, ce, scriptOne); code != 200 {
+			t.Fatalf("anchor edit: HTTP %d", code)
+		}
+		cs := make([]*claimed, len(g))
+		for i, a := range g {
+			cs[i] = w.claimEarly(a)
+		}
+		w.exam(idx)
+		initA, tokA := strings.Repeat("a", 64), strings.Repeat("1", 64)
+		for i, a := range g {
+			p := w.result(cs[i], 5.950, 6.000)
+			if i < 2 {
+				p["train"] = map[string]any{"init_sha256": initA}
+				p["script"].(map[string]any)["tokens_sha256"] = tokA
+				if cs[i].Job.Baseline != nil && *cs[i].Job.Baseline {
+					p["baseline"].(map[string]any)["init_sha256"] = initA
+				} else {
+					delete(p, "baseline")
+				}
+			} else {
+				p["valid"], p["invalid_reason"] = false, "line 1: bad script"
+				delete(p, "exam")
+				delete(p, "baseline")
+			}
+			var ack struct {
+				Status string `json:"status"`
+			}
+			if code := a.do("POST", fmt.Sprintf("/api/v1/jobs/%d/result", cs[i].Job.ID), p, &ack); code != 200 {
+				t.Fatalf("%s submit: HTTP %d", a.handle, code)
+			}
+			if i == 3 && ack.Status != "pending" {
+				t.Fatalf("2-2 valid-vs-invalid split must stay pending through ReplicaWait, got %q", ack.Status)
+			}
+		}
+		w.pass(w.cfg.ReplicaWait + time.Minute)
+		if w.settled(idx) != 1 {
+			t.Fatalf("expected 2-2 split to settle after ReplicaWait, settled=%d", w.settled(idx))
+		}
+		for _, a := range g {
+			if acct := w.account(a.handle); acct.Strikes != 0 {
+				t.Fatalf("2-2 valid-vs-invalid split struck %s (strikes=%d, want 0)", a.handle, acct.Strikes)
+			}
+		}
+		en := w.entries(alice, idx)[0]
+		if en.Detail == nil || !en.Detail.DisputedTogether {
+			t.Fatalf("expected DisputedTogether=true on 2-2 split, got %+v", en.Detail)
+		}
+		w.check()
 	})
 }
 

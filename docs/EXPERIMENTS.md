@@ -639,10 +639,10 @@ GPU scoring)*.
         `fineweb2` gain by `0.0069 bpb` (`[−0.0105, −0.0032]`), narrows `fineweb2 − mimic` by
         `0.0090` (`[−0.0133, −0.0051]`, raising `mimic` from `50%` to `62%` of `fineweb2` on
         Draw B), and compresses `fineweb2` CJK raw mean gain (`+0.018 → +0.005`, 95% CI diff
-        `[−0.026, −0.001]` across `n=50` CJK items). And while rotating excerpts drops absolute
-        NLL by `~0.20–0.21 bpb` (vs `~0.14 bpb` on `Qwen3-8B`), **`fineweb2 − unedited` still
-        retains `110.1%` under rotation**, so between-curator rankings on multilingual crawls
-        still do not rely on the source excerpt.
+        `[−0.026, −0.001]` across `n=50` CJK items). And while rotating excerpts raises absolute
+        mean NLL by `~0.19–0.21 bpb` (worse likelihood; vs `~0.14 bpb` on `Qwen3-8B`),
+        **`fineweb2 − unedited` still retains `110.1%` under rotation**, so between-curator
+        rankings on multilingual crawls still do not rely on the source excerpt.
 
    - **Full Safety-Case Re-Validation on Shipped `Inkling-2-Mini` Exams (`r10_gate`, 3 Disjoint
      Harvest Draws, 34 Official CUDA `standard` Students, Saved `bf16` Weights, Cold-Start 5090
@@ -693,8 +693,11 @@ GPU scoring)*.
 | `db_mimic` | `+0.02718` | `+0.02277` | `+0.02681` | **`+0.02559`** (`53.3%` of `fw2`) / `+0.02983` | `+0.0502 / +0.0219 / +0.0044` |
 | `db_adv_tiny_lang_boost` | `+0.01089` | `+0.01369` | `+0.01029` | **`+0.01162`** (`4.1×` below `fw2`) / `+0.01756` | `+0.0116 / −0.0018 / +0.0230` |
 
-     - **Key 3-draw stratified bootstrap margins (pooled across all 3 Inkling draws, 1,000 resamples):**
-       `p9_reader_v2 − p9_fineweb2 = +0.00371` (`[+0.00253, +0.00491]`, `P(<=0)=0.000`);
+     - **Key 3-draw stratified bootstrap margins (pooled across all 3 Inkling draws, 1,000 resamples; 95% CIs reflect item-resampling uncertainty conditional on the seed-0 students and training corpus):**
+       `p9_reader_v2 − p9_fineweb2 = +0.00371` (`s0`, 95% item-resampling CI `[+0.00253, +0.00491]`,
+       `P(<=0)=0.000`, conditional on the seed-0 students and Phase 9 corpus; `s1` paired 3-draw
+       mean margin **`+0.00197`**, `+0.04416 − +0.04219`, winning all 3 draws and sitting below the
+       seed-0 item-resampling lower endpoint of `+0.00253`);
        `p9_fineweb2 − p9_mimic = +0.01796` (`[+0.01637, +0.01941]`, `P(<=0)=0.000`);
        `p9_fineweb2 − p9_adv_qa_spam = +0.04161` (`[+0.03982, +0.04312]`, `P(<=0)=0.000`);
        `db_fineweb2 − db_mimic = +0.02246` (`[+0.02090, +0.02370]`, `P(<=0)=0.000`);
@@ -711,9 +714,10 @@ GPU scoring)*.
        pool and training budget across held-out draws and seeds is the right follow-up test.
        Multi-seed paired gain deltas (`s1 − s0`): `p9_reader_v2` `−0.00081 / −0.00098 / −0.00017`,
        `p9_fineweb2` `−0.00029 / +0.00101 / +0.00253`, `db_unedited` `+0.00009 / −0.00013 / −0.00015`.
-       Between-curator rotation survival across all 3 Inkling draws remains `103.2%–116.6%` despite
-       `+0.190–+0.198 bpb` absolute drop, confirming that between-curator rankings still rely on
-       prompt-conditioned answer-prose modeling rather than the excerpt.
+       Between-curator rotation survival across all 3 Inkling draws remains `103.2%–116.6%` even
+       though rotating excerpts raises absolute mean NLL by `+0.185–+0.198 bpb` (e.g. Draw B
+       unedited seed-0 mean NLL rose from `1.337` to `1.522 bpb`), confirming that between-curator
+       rankings still rely on prompt-conditioned answer-prose modeling rather than the excerpt.
      - **Direct Cross-Card NVIDIA RTX 5090 vs RTX 4090 Parity on Shipped `Inkling-2-Mini` (~525-byte answers):**
        Training `db_unedited_s0` and `db_fineweb2_s0` on RTX 5090 vs RTX 4090 produced bit-identical
        `tokens_sha256` and `init_sha256` (`5bd1d5ce4547697e...`). Across all 3 shipped Inkling draws,

@@ -140,7 +140,7 @@ def public_items(items: list[Item]) -> list[dict]:
     file against `exam_digest` and rebuild any withheld reasoning item from its source excerpt."""
     import hashlib
 
-    from .fresh.reason import split_wrapped_ctx
+    from .fresh.reason import extract_wrapped_excerpt, split_wrapped_ctx
 
     out = []
     for it in items:
@@ -158,7 +158,14 @@ def public_items(items: list[Item]) -> list[dict]:
                 "corner": it.corner,
                 "cont": it.cont,
             }
-            if split := split_wrapped_ctx(it.ctx, task_type):
+            split: tuple[str, str, int] | None = None
+            if it.prompt and it.wrapper_id is not None:
+                if (ex := extract_wrapped_excerpt(it.ctx, it.prompt, task_type, it.wrapper_id)) is not None:
+                    w_mod = 3 if task_type == "synthesis" else 6
+                    split = (ex, it.prompt, it.wrapper_id % w_mod)
+            else:
+                split = split_wrapped_ctx(it.ctx, task_type)
+            if split is not None:
                 excerpt, prompt_line, wrapper_id = split
                 row["withheld_excerpt"] = True
                 row["prompt"] = prompt_line
@@ -184,7 +191,10 @@ def rebuild_withheld_reasoning(row: dict, excerpt: str) -> Item:
     if row.get("excerpt_sha256") and got_sha != row["excerpt_sha256"]:
         raise ValueError(f"excerpt sha256 mismatch: got {got_sha}, want {row['excerpt_sha256']}")
     task_type = str(row["source"]).split(":", 1)[0]
-    ctx = wrap_prompt(excerpt, str(row["prompt"]), task_type, int(row["wrapper_id"]))
+    w_mod = 3 if task_type == "synthesis" else 6
+    w_id = int(row["wrapper_id"]) % w_mod
+    prompt_line = str(row["prompt"])
+    ctx = wrap_prompt(excerpt, prompt_line, task_type, w_id)
     it = Item(
         kind=str(row["kind"]),
         corner=str(row["corner"]),
@@ -193,10 +203,24 @@ def rebuild_withheld_reasoning(row: dict, excerpt: str) -> Item:
         source=str(row["source"]),
         ctx=ctx,
         cont=str(row["cont"]),
+        prompt=prompt_line,
+        wrapper_id=w_id,
     )
-    if it.id != row["id"]:
-        raise ValueError(f"rebuilt item id {it.id} does not match published id {row['id']}")
-    return it
+    if it.id == row["id"]:
+        return it
+    # Legacy items serialized before authoritative (prompt, wrapper_id) fields were added to Item.
+    legacy = Item(
+        kind=str(row["kind"]),
+        corner=str(row["corner"]),
+        fmt=str(row["fmt"]),
+        lang=str(row["lang"]),
+        source=str(row["source"]),
+        ctx=ctx,
+        cont=str(row["cont"]),
+    )
+    if legacy.id == row["id"]:
+        return legacy
+    raise ValueError(f"rebuilt item id {it.id} does not match published id {row['id']}")
 
 
 def read_public_info(raw: bytes, want: str) -> tuple[list[Item], int]:

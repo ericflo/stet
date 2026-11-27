@@ -1669,7 +1669,9 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
     def asking() -> dict:
         ask = {**hello, "trained": list(waiting)}
         if exam_timed_out:
-            ask["early"] = False
+            # Scope early-grade exclusion strictly to rounds that timed out on this worker,
+            # keeping `early=True` so newer rounds can still hand out pre-exam grades normally.
+            ask["skip_early_rounds"] = sorted(exam_timed_out)[-32:]
         if (p := saved_pass(scale_name, gpu_name)) is not None:
             ask["pass_seconds"] = p
         return ask
@@ -1817,13 +1819,17 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
                 continue
             holding = job_id
             round_id = clean(job["round"].get("id"), 40)
-            if exam_timed_out and (
-                (isinstance(job["round"].get("exam_digest"), str) and SHA256_RE.fullmatch(job["round"]["exam_digest"]))
-                or (round_id and round_id not in exam_timed_out)
-            ):
-                exam_timed_out.discard(round_id)
-                if round_id and round_id not in exam_timed_out:
-                    exam_timed_out.clear()
+            has_exam = isinstance(job["round"].get("exam_digest"), str) and bool(SHA256_RE.fullmatch(job["round"]["exam_digest"]))
+            if round_id in exam_timed_out:
+                if has_exam:
+                    exam_timed_out.discard(round_id)
+                elif job["kind"] == "grade" and sit is None:
+                    # Compatibility guard: if an older server without round-scoped skip_early_rounds /
+                    # examTimedOut hands back a pre-exam grade for a round we already timed out on,
+                    # release it instead of re-training it into another timeout loop.
+                    hand_back(EXAM_WAIT_TIMEOUT_REASON)
+                    time.sleep(EXAM_POLL)
+                    continue
             out.line("", "")
             out.line(job["kind"], f"job {job_id} · {editor_label(job['editor'])} · round {round_id}")
             if job["kind"] == "edit" and not args.edits:

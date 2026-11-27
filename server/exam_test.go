@@ -715,3 +715,203 @@ func TestOverlappingExamPublicationsDoNotOverwriteWinnerFiles(t *testing.T) {
 		t.Fatalf("public exam download served wrong bytes: %q", plain)
 	}
 }
+
+// Review 13 P2 #3: a lone invalid report from an established volunteer with NO second eligible
+// grader online must NOT immediately settle the entry invalid; it stays open through ReplicaWait,
+// exposes GradesWanted=1 / FreshGradersWanted=1 on /admin/work, closes unrated (Void=true,
+// Unattended=true) if corroboration never arrives, and settles invalid if an on-demand second
+// grader arrives and confirms it.
+func TestLoneInvalidVolunteerReportWaitsForReplicaWindowAndVoidsIfUncorroborated(t *testing.T) {
+	setup := func(t *testing.T) (*world, *actor, *actor, *actor, int) {
+		t.Helper()
+		pub, priv := newKey()
+		w := newWorld(t, pub)
+		anchor := w.join("anchor-one", priv)
+		alice := w.join("alice", nil)
+		bob := w.join("bob", nil)
+		w.established("bob")
+		w.submit(alice, "tidy", "print(1)")
+		idx := w.draw()
+		w.run(anchor, scriptOne)
+		// No other eligible grader is online (anchor wrote the script alone and cannot self-corroborate).
+		cb := w.claim(bob, false)
+		if cb.Job == nil || cb.Job.Kind != "grade" {
+			t.Fatalf("bob should get grade job, got %+v", cb.Job)
+		}
+		inv := w.result(cb, 5.5, 6.0)
+		inv["valid"], inv["invalid_reason"] = false, "SFT probe diverged at step 2"
+		delete(inv, "exam")
+		var ack struct {
+			Status string `json:"status"`
+		}
+		if code := bob.do("POST", fmt.Sprintf("/api/v1/jobs/%d/result", cb.Job.ID), inv, &ack); code != 200 {
+			t.Fatalf("bob invalid report: HTTP %d", code)
+		}
+		if ack.Status != "pending" || w.settled(idx) != 0 {
+			t.Fatalf("lone volunteer invalid report with nobody else online must NOT settle immediately: status=%q settled=%d", ack.Status, w.settled(idx))
+		}
+		wk := w.work(anchor).Rounds[0]
+		if wk.GradesWanted != 1 {
+			t.Fatalf("expected /admin/work GradesWanted=1 for uncorroborated invalid report, got %+v", wk)
+		}
+		if wk.FreshGradersWanted == nil || *wk.FreshGradersWanted != 1 {
+			t.Fatalf("expected FreshGradersWanted=1 when only script-writer anchor is idle, got %v", wk.FreshGradersWanted)
+		}
+		return w, anchor, alice, bob, idx
+	}
+
+	t.Run("closes_unrated_if_uncorroborated", func(t *testing.T) {
+		w, _, alice, _, idx := setup(t)
+		w.pass(w.cfg.ReplicaWait + time.Minute)
+		if w.settled(idx) != 1 {
+			t.Fatalf("expected round to settle cleanly after ReplicaWait, settled=%d", w.settled(idx))
+		}
+		en := w.entries(alice, idx)[0]
+		if !en.Void || en.Valid {
+			t.Fatalf("uncorroborated lone volunteer invalid report must close unrated (Void=true, Valid=false), got %+v", en)
+		}
+		w.app.st.view(func(s *State) {
+			raw := s.inRound[idx][0]
+			if !raw.Void || !raw.Unattended || raw.Valid {
+				t.Fatalf("expected stored entry Void=true Unattended=true Valid=false, got %+v", raw)
+			}
+		})
+		w.check()
+	})
+
+	t.Run("on_demand_second_grader_confirms_invalid", func(t *testing.T) {
+		w, _, alice, _, idx := setup(t)
+		// An on-demand second established grader arrives AFTER bob's invalid report.
+		carol := w.join("carol", nil)
+		w.established("carol")
+		cc := w.claim(carol, false)
+		if cc.Job == nil || cc.Job.Kind != "grade" {
+			t.Fatalf("on-demand second grader carol should receive the corroboration grade, got %+v", cc.Job)
+		}
+		inv2 := w.result(cc, 5.5, 6.0)
+		inv2["valid"], inv2["invalid_reason"] = false, "line 1: bad script"
+		delete(inv2, "exam")
+		var ack struct {
+			Status string `json:"status"`
+		}
+		if code := carol.do("POST", fmt.Sprintf("/api/v1/jobs/%d/result", cc.Job.ID), inv2, &ack); code != 200 {
+			t.Fatalf("carol confirm invalid: HTTP %d", code)
+		}
+		if ack.Status != "settled" || w.settled(idx) != 1 {
+			t.Fatalf("corroborated invalid report should settle immediately: status=%q settled=%d", ack.Status, w.settled(idx))
+		}
+		en := w.entries(alice, idx)[0]
+		if en.Void || en.Valid {
+			t.Fatalf("corroborated invalid entry should settle Valid=false Void=false, got %+v", en)
+		}
+		w.check()
+	})
+
+	// Gate 4 P2 #1: an in-flight second edit run (LiveEdits > 0) must NOT be expired/voided when
+	// Run 1 has an uncorroborated invalid report and ReplicaWait elapses mid-edit.
+	t.Run("does_not_void_mid_edit_when_second_run_is_live", func(t *testing.T) {
+		pub, priv := newKey()
+		w := newWorld(t, pub)
+		w.app.cfg.RunsPerEntry = 2
+		anchor := w.join("anchor-one", priv)
+		alice := w.join("alice", nil)
+		bob := w.join("bob", nil)
+		dave := w.join("dave", nil)
+		w.established("bob", "dave")
+		w.submit(alice, "tidy", "print(1)")
+		idx := w.draw()
+
+		// Run 1 by anchor writes scriptOne; Dave holds live edit claim for Run 2.
+		ce1 := w.claim(anchor, true)
+		if code, _ := w.edit(anchor, ce1, scriptOne); code != 200 {
+			t.Fatalf("anchor edit: HTTP %d", code)
+		}
+		ce2 := w.claim(dave, true)
+		if ce2.Job == nil || ce2.Job.Kind != "edit" {
+			t.Fatalf("dave should get Run 2 edit claim, got %+v", ce2.Job)
+		}
+		// Bob reports Run 1's script invalid while Dave's edit is still in flight.
+		cb := w.claim(bob, false)
+		if cb.Job == nil || cb.Job.Kind != "grade" {
+			t.Fatalf("bob should get grade job, got %+v", cb.Job)
+		}
+		inv := w.result(cb, 5.5, 6.0)
+		inv["valid"], inv["invalid_reason"] = false, "SFT probe diverged"
+		delete(inv, "exam")
+		if code := bob.do("POST", fmt.Sprintf("/api/v1/jobs/%d/result", cb.Job.ID), inv, nil); code != 200 {
+			t.Fatalf("bob invalid report: HTTP %d", code)
+		}
+		// ReplicaWait passes while Dave's edit lease is still active: entry MUST stay open and Dave's edit MUST succeed!
+		w.pass(w.cfg.ReplicaWait + time.Minute)
+		if w.settled(idx) != 0 {
+			t.Fatalf("entry must NOT be voided while Dave's Run 2 edit is live")
+		}
+		if code, status := w.edit(dave, ce2, scriptTwo); code != 200 {
+			t.Fatalf("dave's in-flight Run 2 edit should still be accepted, got HTTP %d %s", code, status)
+		}
+		w.check()
+	})
+}
+
+// Review 13 P2 #7 (server-side): SkipEarlyRounds on Hello excludes only the named round(s) from
+// pre-exam grade offers while still handing out pre-exam grades for newer rounds with Early=true.
+func TestSkipEarlyRoundsIsRoundScoped(t *testing.T) {
+	pub, priv := newKey()
+	w := newWorld(t, pub)
+	anchor := w.join("anchor-one", priv)
+	alice := w.join("alice", nil)
+	bob := w.join("bob", nil)
+	w.established("bob")
+	w.submit(alice, "tidy", "print(1)")
+
+	// Round 1 (no exam yet) has a script waiting for early grades.
+	idx1 := w.drawWithoutExam()
+	ce1 := w.claim(anchor, true)
+	if code, _ := w.edit(anchor, ce1, scriptOne); code != 200 {
+		t.Fatalf("round 1 edit: HTTP %d", code)
+	}
+	rid1 := roundID(w.app.season.ID, idx1)
+
+	// Claiming with Early=true and SkipEarlyRounds=[rid1] must NOT receive round 1's pre-exam grade!
+	claimWithSkip := func(skip []string) *claimed {
+		var out claimed
+		code := bob.do("POST", "/api/v1/jobs/claim", map[string]any{
+			"harness":           w.app.season.Harness,
+			"season":            w.app.season.ID,
+			"season_digest":     w.app.season.Digest,
+			"hardware":          map[string]any{"device": "cuda", "backend": "cuda"},
+			"early":             true,
+			"skip_early_rounds": skip,
+		}, &out)
+		if code != 200 {
+			t.Fatalf("claim skip=%v: HTTP %d", skip, code)
+		}
+		return &out
+	}
+	if got := claimWithSkip([]string{rid1}); got.Job != nil {
+		t.Fatalf("expected no pre-exam job for skipped round %s, got %+v", rid1, got.Job)
+	}
+
+	// Open a second round (Round 2, also pre-exam) alongside Round 1: bob with SkipEarlyRounds=[rid1]
+	// MUST immediately receive Round 2's pre-exam grade!
+	anchorID := w.account("anchor-one").ID
+	w.app.st.update(context.Background(), func(tx *Tx) error {
+		rd2 := &Round{
+			Idx: idx1 + 1, Status: "open", Scale: w.cfg.Scale,
+			DrawnAt: now(), ActiveAt: now(),
+			Seed: strings.Repeat("2", 64), CorpusSHA: strings.Repeat("3", 64),
+		}
+		tx.saveRound(rd2)
+		edID := tx.s.inRound[idx1][0].EditorID
+		tx.saveEntry(&Entry{
+			RoundIdx: rd2.Idx, EditorID: edID, Status: "open",
+			Runs: []*Run{{N: 1, By: anchorID, Script: strings.Repeat("b", 64), ScriptSize: 16, At: now()}},
+		})
+		return nil
+	})
+	rid2 := roundID(w.app.season.ID, idx1+1)
+	got2 := claimWithSkip([]string{rid1})
+	if got2.Job == nil || got2.Job.Kind != "grade" || got2.Job.Round["id"] != rid2 {
+		t.Fatalf("expected pre-exam grade for round %s while %s is skipped, got %+v", rid2, rid1, got2.Job)
+	}
+}

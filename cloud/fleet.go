@@ -615,18 +615,18 @@ func (f *Fleet) look(ctx context.Context) (*View, error) {
 		f.lease = time.Duration(work.LeaseSeconds) * time.Second
 	}
 	if err := f.refresh(); err != nil {
-		return nil, err
+		return &View{Work: work}, err
 	}
 	l, err := f.readLedger()
 	if err != nil {
-		return nil, err
+		return &View{Work: work}, err
 	}
 	rentals, answered, err := f.rentals(ctx, l)
 	if err != nil {
-		return nil, err
+		return &View{Work: work, Ledger: l}, err
 	}
 	if err := f.note(l, rentals, answered); err != nil {
-		return nil, err
+		return &View{Work: work, Ledger: l}, err
 	}
 	v := &View{Work: work, Ledger: l}
 	asked := false
@@ -699,11 +699,11 @@ func (f *Fleet) look(ctx context.Context) (*View, error) {
 	f.forget(live)
 	if asked {
 		if err := f.writeLedger(l); err != nil {
-			return nil, err
+			return &View{Work: work, Ledger: l}, err
 		}
 	}
 	if v.Today, err = f.spent(l, startOfDay(f.now())); err != nil {
-		return nil, err
+		return &View{Work: work, Ledger: l}, err
 	}
 	exLive, exHourly, exAccrued := f.examinerSnapshot()
 	v.ExaminerLive, v.ExaminerHourly, v.ExaminerAccrued = exLive, exHourly, exAccrued

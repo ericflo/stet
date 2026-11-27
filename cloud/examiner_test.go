@@ -141,7 +141,7 @@ func TestExaminerFullLifecycleProxyAuthAndTeardown(t *testing.T) {
 	home := t.TempDir()
 	var spent []podRecord
 	ex := newExaminer(ExaminerConfig{Addr: "127.0.0.1:0", Timeout: 45 * time.Minute, MaxPrice: 1.50}, home, prov, clk.Now, nil, false)
-	ex.onSpent = func(rec podRecord) { spent = append(spent, rec) }
+	ex.onSpent = func(rec podRecord) error { spent = append(spent, rec); return nil }
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -503,7 +503,7 @@ func TestExaminerTimeoutEndFailureAndZeroCreatedSpend(t *testing.T) {
 	home := t.TempDir()
 	var spent []podRecord
 	ex := newExaminer(ExaminerConfig{Addr: "127.0.0.1:0", Timeout: 30 * time.Minute, MaxPrice: 1.50}, home, prov, func() time.Time { return now }, nil, false)
-	ex.onSpent = func(rec podRecord) { spent = append(spent, rec) }
+	ex.onSpent = func(rec podRecord) error { spent = append(spent, rec); return nil }
 
 	openWork := &Work{Rounds: []WorkRound{{ID: "s3-o00004", Entries: 1, ExamAt: 0}}}
 	if err := ex.Reconcile(context.Background(), openWork, testExaminerBudget()); err != nil {
@@ -622,7 +622,7 @@ func TestExaminerEnforceTimeoutDuringStetOutageAndSelfDestructPayload(t *testing
 	home := t.TempDir()
 	var spent []podRecord
 	ex := newExaminer(ExaminerConfig{Addr: "127.0.0.1:0", Timeout: 45 * time.Minute, MaxPrice: 1.50}, home, prov, func() time.Time { return now }, nil, false)
-	ex.onSpent = func(rec podRecord) { spent = append(spent, rec) }
+	ex.onSpent = func(rec podRecord) error { spent = append(spent, rec); return nil }
 
 	openWork := &Work{Rounds: []WorkRound{{ID: "s3-o00007", Entries: 1, ExamAt: 0}}}
 	if err := ex.Reconcile(context.Background(), openWork, testExaminerBudget()); err != nil {
@@ -1097,17 +1097,8 @@ func TestExaminerSelfTerminatedRecordsBoundedIdempotentDailySpend(t *testing.T) 
 	prov := &fakeExaminerProv{
 		offers: []ExaminerOffer{{ID: "off-5090", Card: "RTX 5090", Price: 0.62}},
 	}
-	appendSpent := func(rec podRecord) {
-		line, err := json.Marshal(rec)
-		if err != nil {
-			t.Fatalf("marshal spent: %v", err)
-		}
-		fh, err := os.OpenFile(filepath.Join(home, "spent.jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
-		if err != nil {
-			t.Fatalf("open spent.jsonl: %v", err)
-		}
-		_, _ = fh.Write(append(line, '\n'))
-		_ = fh.Close()
+	appendSpent := func(rec podRecord) error {
+		return appendExaminerSpend(filepath.Join(home, "spent.jsonl"), rec)
 	}
 
 	ex1 := newExaminer(ExaminerConfig{Addr: "127.0.0.1:0", Timeout: 45 * time.Minute, MaxPrice: 1.50}, home, prov, clk.Now, nil, false)
@@ -1213,5 +1204,228 @@ func TestExaminerOfferSearchFallsThroughToAffordableSlowerTier(t *testing.T) {
 	}
 	if rentedOfferID != "5001" {
 		t.Fatalf("expected fallthrough to $0.50/h 500 Mbps offer 5001 (queries=%v), got %q", seenQueries, rentedOfferID)
+	}
+}
+
+// Review 13 P2 #8: a temporary spent.jsonl write failure must propagate an error, retain a
+// retryable terminal spend record in examiner.json (still counted in daily accrual), and flush
+// the exact $0.31 charge once spent.jsonl becomes writable again — without double-charging.
+func TestExaminerTemporarySpendLogWriteErrorRetainsAndFlushesCharge(t *testing.T) {
+	clk := newTestClock(time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC))
+	home := t.TempDir()
+	prov := &fakeExaminerProv{
+		offers: []ExaminerOffer{{ID: "off-5090", Card: "RTX 5090", Price: 0.62}},
+	}
+	spentPath := filepath.Join(home, "spent.jsonl")
+	prodWriter := func(rec podRecord) error {
+		return appendExaminerSpend(spentPath, rec)
+	}
+
+	ex := newExaminer(ExaminerConfig{Addr: "127.0.0.1:0", Timeout: 45 * time.Minute, MaxPrice: 1.50}, home, prov, clk.Now, nil, false)
+	ex.onSpent = prodWriter
+	openWork := &Work{Rounds: []WorkRound{{ID: "s3-o00024", Entries: 1, ExamAt: 0}}}
+	if err := ex.Reconcile(context.Background(), openWork, testExaminerBudget()); err != nil {
+		t.Fatalf("Reconcile rent: %v", err)
+	}
+
+	// Let the $0.62/h examiner run 30 minutes ($0.31) and disappear, while spent.jsonl is unwritable.
+	clk.Advance(30 * time.Minute)
+	prov.mu.Lock()
+	delete(prov.insts, "ex-1")
+	prov.mu.Unlock()
+	if err := os.Mkdir(spentPath, 0o700); err != nil {
+		t.Fatalf("block spent.jsonl with directory: %v", err)
+	}
+
+	// Reconciliation MUST return an error and retain the pending $0.31 charge in examiner.json!
+	if err := ex.Reconcile(context.Background(), &Work{}, testExaminerBudget()); err == nil {
+		t.Fatalf("expected Reconcile error when spent.jsonl is unwritable")
+	}
+	st := readExaminerState(home)
+	if st == nil || st.InstanceID != "" || len(st.PendingSpends) != 1 || st.PendingSpends[0].ID != "ex-1" {
+		t.Fatalf("expected examiner.json to retain pending spend for ex-1 with empty InstanceID, got %+v", st)
+	}
+	// Daily accrual must STILL reflect $0.31 while pending flush (both in-memory and from disk).
+	if live, hourly, acc := ex.ActiveSnapshot(clk.Now()); live != 0 || hourly != 0 || acc < 0.309 || acc > 0.311 {
+		t.Fatalf("ActiveSnapshot while pending flush: live=%d hourly=%.2f accrued=%.4f, want 0/0/$0.31", live, hourly, acc)
+	}
+	if live, hourly, acc := activeExaminerFromDisk(home, clk.Now(), 45*time.Minute); live != 0 || hourly != 0 || acc < 0.309 || acc > 0.311 {
+		t.Fatalf("activeExaminerFromDisk while pending flush: live=%d hourly=%.2f accrued=%.4f, want 0/0/$0.31", live, hourly, acc)
+	}
+
+	// Gate 4 P2 #2 & #3: even when a second stray fails deletion while saved ex-1 ends and
+	// spent.jsonl is unwritable, saved state clears immediately (no double-count, no End inflation).
+	prov2 := &fakeExaminerProv{
+		offers: []ExaminerOffer{{ID: "off-5090", Card: "RTX 5090", Price: 0.62}},
+	}
+	home2 := t.TempDir()
+	spentPath2 := filepath.Join(home2, "spent.jsonl")
+	exP := newExaminer(ExaminerConfig{Addr: "127.0.0.1:0", Timeout: 45 * time.Minute, MaxPrice: 1.50}, home2, prov2, clk.Now, nil, false)
+	exP.onSpent = func(rec podRecord) error { return appendExaminerSpend(spentPath2, rec) }
+	if err := exP.Reconcile(context.Background(), openWork, testExaminerBudget()); err != nil {
+		t.Fatalf("Reconcile rent exP: %v", err)
+	}
+	owner2 := exP.ownerID()
+	prov2.mu.Lock()
+	ex1Inst := prov2.insts["ex-1"]
+	ex1Inst.Created = clk.Now()
+	prov2.insts["ex-1"] = ex1Inst
+	prov2.insts["stray-2"] = ExaminerInstance{ID: "stray-2", Label: examinerLabelPrefix + "-" + owner2 + "-s3-o00024-deadbeef", State: "running", Price: 0.62, Created: clk.Now()}
+	prov2.endErr = map[string]error{"stray-2": errors.New("transient Vast 500")}
+	prov2.mu.Unlock()
+	clk.Advance(30 * time.Minute)
+	if err := os.Mkdir(spentPath2, 0o700); err != nil {
+		t.Fatalf("block spentPath2: %v", err)
+	}
+	if err := exP.Reconcile(context.Background(), &Work{}, testExaminerBudget()); err == nil {
+		t.Fatalf("expected error while stray-2 fails deletion")
+	}
+	// ex-1 was confirmed ended -> InstanceID must be cleared so accrued is $0.31 (NOT 2x $0.62).
+	if live, hourly, acc := exP.ActiveSnapshot(clk.Now()); live != 0 || hourly != 0 || acc < 0.309 || acc > 0.311 {
+		t.Fatalf("expected no double-counting after saved ex-1 ended while stray-2 failed: live=%d hourly=%.2f acc=%.4f", live, hourly, acc)
+	}
+	// Advance clock another 10m and re-reconcile: ex-1's pending End must NOT inflate past 30m ($0.31).
+	clk.Advance(10 * time.Minute)
+	prov2.mu.Lock()
+	delete(prov2.endErr, "stray-2")
+	prov2.mu.Unlock()
+	if err := exP.Reconcile(context.Background(), &Work{}, testExaminerBudget()); err == nil {
+		t.Fatalf("expected spend log error while spentPath2 still blocked")
+	}
+	if err := os.Remove(spentPath2); err != nil {
+		t.Fatalf("unblock spentPath2: %v", err)
+	}
+	if err := exP.Reconcile(context.Background(), &Work{}, testExaminerBudget()); err != nil {
+		t.Fatalf("flush spentPath2: %v", err)
+	}
+	raw2, err := os.ReadFile(spentPath2)
+	if err != nil {
+		t.Fatalf("read spentPath2: %v", err)
+	}
+	foundEx1 := false
+	for _, ln := range strings.Split(strings.TrimSpace(string(raw2)), "\n") {
+		var r podRecord
+		if json.Unmarshal([]byte(ln), &r) == nil && r.ID == "ex-1" {
+			foundEx1 = true
+			if got := r.End.Sub(r.Start); got != 30*time.Minute {
+				t.Fatalf("ex-1 terminal duration inflated: got %s, want 30m", got)
+			}
+		}
+	}
+	if !foundEx1 {
+		t.Fatalf("expected ex-1 record in spentPath2, got %s", raw2)
+	}
+
+	// Make spent.jsonl writable again and reconcile with a fresh restarted Examiner!
+	if err := os.Remove(spentPath); err != nil {
+		t.Fatalf("unblock spent.jsonl: %v", err)
+	}
+	ex2 := newExaminer(ExaminerConfig{Addr: "127.0.0.1:0", Timeout: 45 * time.Minute, MaxPrice: 1.50}, home, prov, clk.Now, nil, false)
+	ex2.onSpent = prodWriter
+	if err := ex2.Reconcile(context.Background(), &Work{}, testExaminerBudget()); err != nil {
+		t.Fatalf("Reconcile after spent.jsonl recovered: %v", err)
+	}
+	if readExaminerState(home) != nil {
+		t.Fatalf("expected examiner.json removed once pending spend flushed")
+	}
+	f := &Fleet{o: &Options{Home: home}, now: clk.Now}
+	spentToday, err := f.spent(&ledger{Pods: map[string]*podRecord{}}, startOfDay(clk.Now()))
+	if err != nil {
+		t.Fatalf("f.spent: %v", err)
+	}
+	if spentToday < 0.309 || spentToday > 0.311 {
+		t.Fatalf("expected recovered $0.31 daily spend, got $%.4f", spentToday)
+	}
+	// Idempotent on repeat reconciliation.
+	if err := ex2.Reconcile(context.Background(), &Work{}, testExaminerBudget()); err != nil {
+		t.Fatalf("third Reconcile: %v", err)
+	}
+	spentAgain, err := f.spent(&ledger{Pods: map[string]*podRecord{}}, startOfDay(clk.Now()))
+	if err != nil || spentAgain < 0.309 || spentAgain > 0.311 {
+		t.Fatalf("expected idempotent $0.31 daily spend, got $%.4f err=%v", spentAgain, err)
+	}
+}
+
+// Review 13 P2 #9: when `scale` tick() fetches /admin/work cleanly with ExamAt > 0 and then
+// fails reading the worker ledger (fleet.json), tick() MUST still tear down the active examiner
+// instead of leaving it running until TTL, while still blocking new rentals when ExamAt == 0.
+func TestScaleTickTearsDownExaminerWhenExamPostedDespiteUnreadableLedger(t *testing.T) {
+	clk := newTestClock(time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC))
+	home := t.TempDir()
+	var mu sync.Mutex
+	examAt := int64(0)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		ea := examAt
+		mu.Unlock()
+		if r.URL.Path == "/api/v1/admin/work" {
+			_ = json.NewEncoder(w).Encode(Work{
+				Rounds: []WorkRound{{ID: "s3-o00025", Entries: 1, ExamAt: ea, DrawnAt: clk.Now().Unix()}},
+			})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	exProv := &fakeExaminerProv{
+		offers: []ExaminerOffer{{ID: "off-5090", Card: "RTX 5090", Price: 0.62}},
+	}
+	ex := newExaminer(ExaminerConfig{Addr: "127.0.0.1:0", Timeout: 45 * time.Minute, MaxPrice: 1.50}, home, exProv, clk.Now, nil, false)
+	// Rent an active examiner while ExamAt == 0.
+	if err := ex.Reconcile(context.Background(), &Work{Rounds: []WorkRound{{ID: "s3-o00025", Entries: 1, ExamAt: 0}}}, testExaminerBudget()); err != nil {
+		t.Fatalf("initial examiner rent: %v", err)
+	}
+	if len(exProv.insts) != 1 {
+		t.Fatalf("expected 1 active examiner, got %d", len(exProv.insts))
+	}
+
+	// Corrupt fleet.json so f.readLedger() fails inside f.look().
+	if err := os.WriteFile(filepath.Join(home, "fleet.json"), []byte("{corrupt ledger"), 0o600); err != nil {
+		t.Fatalf("write corrupt fleet.json: %v", err)
+	}
+	// Mark exam posted on /admin/work.
+	mu.Lock()
+	examAt = clk.Now().Unix()
+	mu.Unlock()
+
+	op, err := newKey("stet")
+	if err != nil {
+		t.Fatalf("newKey: %v", err)
+	}
+	f := &Fleet{
+		o: &Options{
+			Home: home, Every: time.Minute, Cloud: "secure", Idle: 20,
+			MinCuratorGPUMemory: 24, MinGPUMemory: 12,
+			Policy: Policy{MaxWorkers: 4, MaxHourly: 4.0},
+		},
+		st:       newStet(srv.URL),
+		op:       op,
+		examiner: ex,
+		now:      clk.Now,
+		out:      io.Discard,
+		fixed:    true,
+	}
+
+	// tick() MUST return the ledger error AND immediately destroy the active examiner!
+	if err := tick(context.Background(), f); err == nil {
+		t.Fatalf("expected tick() to return fleet.json ledger error")
+	}
+	if len(exProv.ended) != 1 || len(exProv.insts) != 0 {
+		t.Fatalf("tick() with ExamAt > 0 and corrupt fleet.json MUST destroy examiner immediately: ended=%v remaining=%d", exProv.ended, len(exProv.insts))
+	}
+	if readExaminerState(home) != nil {
+		t.Fatalf("expected examiner.json cleared after teardown")
+	}
+
+	// Now flip ExamAt back to 0 while fleet.json is still corrupt: tick() MUST NOT rent a new examiner!
+	mu.Lock()
+	examAt = 0
+	mu.Unlock()
+	if err := tick(context.Background(), f); err == nil {
+		t.Fatalf("expected tick() error when fleet.json is still corrupt")
+	}
+	if len(exProv.insts) != 0 {
+		t.Fatalf("tick() with ExamAt == 0 and corrupt fleet.json must NOT rent a new examiner, got %d", len(exProv.insts))
 	}
 }
