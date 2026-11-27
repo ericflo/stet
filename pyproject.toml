@@ -12,6 +12,7 @@ license = { text = "MIT" }
 license-files = [
     "LICENSE*",
     "src/stet/exam/data/THIRD_PARTY_NOTICES.md",
+    "src/stet/exam/data/WIKIPEDIA_ATTRIBUTION.jsonl",
     "src/stet/exam/data/licenses/*.txt",
 ]
 dependencies = [

@@ -627,6 +627,12 @@ def slim_result(result: dict, base: dict | None) -> dict:
                     raise ValueError(f"baseline hardware backend ({base_bk!r}) does not match grade hardware backend ({res_bk!r})")
             elif base_hw is not None and res_bk is not None and base_bk != res_bk:
                 raise ValueError(f"baseline hardware backend ({base_bk!r}) does not match grade hardware backend ({res_bk!r})")
+            res_gpu = res_hw.get("gpu")
+            base_gpu = base_hw.get("gpu") if isinstance(base_hw, dict) else None
+            if res_bk in ("cuda", "rocm") and res_gpu and base_gpu != res_gpu:
+                raise ValueError(f"baseline GPU ({base_gpu!r}) does not match grade GPU ({res_gpu!r})")
+            if res_gpu and base_gpu and base_gpu != res_gpu:
+                raise ValueError(f"baseline GPU ({base_gpu!r}) does not match grade GPU ({res_gpu!r})")
         base_out = {"mean": base["exam"]["mean"], "item_scores": base["exam"]["item_scores"]}
         if base_init := (base.get("train") or {}).get("init_sha256"):
             base_out["init_sha256"] = base_init
@@ -905,6 +911,34 @@ class Pending:
         self.trained_at = time.monotonic()
 
 
+class _SatBaseline:
+    """In-memory record that THIS verifier already sat its trained baseline for a round's exam."""
+
+    def __init__(self, exam_digest: str, result: dict):
+        self.exam_digest = exam_digest
+        self.result = result
+
+
+def _verifier_id(key) -> str | None:
+    pub = getattr(key, "public_hex", None)
+    return pub if isinstance(pub, str) and pub else None
+
+
+def _call_supported(fn, *args, **kwargs):
+    """Call `fn(*args, **filtered)` passing only keyword arguments accepted by `fn`."""
+    if not kwargs:
+        return fn(*args)
+    import inspect
+
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return fn(*args)
+    accepts_var = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+    filtered = kwargs if accepts_var else {k: v for k, v in kwargs.items() if k in params}
+    return fn(*args, **filtered)
+
+
 def wants_baseline(job: dict) -> bool:
     """Whether a grade job asks this machine for the round's unedited baseline too. The server
     asks a few machines a round (`baseline` on the job); the rest train the script's student
@@ -923,25 +957,53 @@ def _grade_job(job, season, scale, device, key, out, work: Path, bases: dict | N
 
     from . import data
     from .grade import sit_exam
-    from .pipeline import _cached, baseline, baseline_path, grade_round, sit_baseline, train_baseline, train_round
-    from .train import pick_device
+    from .pipeline import (
+        _cached,
+        _device_gpu_name,
+        baseline,
+        baseline_path,
+        grade_round,
+        sit_baseline,
+        train_baseline,
+        train_round,
+    )
+    from .train import device_backend, hardware_backend, pick_device
 
     rnd = _job_round(season, job, out)
     asked = wants_baseline(job)
+    vid = _verifier_id(key)
     if rnd.exam_digest:
         fetch_exam(rnd, key)
         if asked:
-            base = baseline(rnd, scale, device, progress=out.progress("baseline"), log=lambda m: out.line("", out.dim("baseline " + m)))
+            base = _call_supported(
+                baseline,
+                rnd,
+                scale,
+                device,
+                progress=out.progress("baseline"),
+                log=lambda m: out.line("", out.dim("baseline " + m)),
+                verifier=vid,
+            )
         else:
-            # What an earlier job of the round measured here is still this machine's to send,
-            # provided it sat the exact full exam digest on the same grading backend.
-            from .train import device_backend, hardware_backend
-
+            # What an earlier job of the round measured on THIS verifier and GPU is still
+            # this machine's to send, provided it sat the exact full exam digest.
             dev = device if hasattr(device, "type") else pick_device(device)
-            base = _cached(baseline_path(rnd, scale, dev))
+            dev_bk = device_backend(dev)
+            dev_gpu = _device_gpu_name(dev)
+            bp = _call_supported(baseline_path, rnd, scale, dev, verifier=vid, gpu=dev_gpu)
+            base = _call_supported(
+                _cached,
+                bp,
+                want_exam_sha=rnd.exam_digest,
+                want_backend=dev_bk,
+                want_gpu=dev_gpu,
+                want_verifier=vid,
+            )
             if base is not None and base.get("exam_sha256") and base.get("exam_sha256") != rnd.exam_digest:
                 base = None
-            if base is not None and base.get("hardware") is not None and hardware_backend(base.get("hardware")) != device_backend(dev):
+            if base is not None and base.get("hardware") is not None and hardware_backend(base.get("hardware")) != dev_bk:
+                base = None
+            if base is not None and dev_gpu and isinstance(base.get("hardware"), dict) and base["hardware"].get("gpu") != dev_gpu:
                 base = None
     want = job["script"]["sha256"]
     limit = int(season.raw["script"]["max_bytes"])
@@ -975,6 +1037,8 @@ def _grade_job(job, season, scale, device, key, out, work: Path, bases: dict | N
             torch.cuda.empty_cache()
 
     base_t = (bases or {}).get(rnd.id)
+    if isinstance(base_t, _SatBaseline):
+        base_t = None
     if base_t is None and asked:
         base_t = train_baseline(rnd, scale, device, progress=out.progress("baseline"), log=lambda m: out.line("", out.dim("baseline " + m)))
         _offload_cpu(base_t)
@@ -984,17 +1048,30 @@ def _grade_job(job, season, scale, device, key, out, work: Path, bases: dict | N
     if bases is not None:
         _offload_cpu(trained)
         return Pending(job, rnd, trained, device)
-    from .train import device_backend, hardware_backend
 
     rnd = wait_for_exam(rnd, out)
     fetch_exam(rnd, key)
-    base = _cached(baseline_path(rnd, scale, device))
-    if base is not None and base.get("exam_sha256") and rnd.exam_digest and base.get("exam_sha256") != rnd.exam_digest:
-        base = None
-    if base is not None and base.get("hardware") is not None and hardware_backend(base.get("hardware")) != device_backend(device):
-        base = None
-    if base is None and asked:
-        base = sit_baseline(base_t, rnd, scale)
+    dev_bk = device_backend(device)
+    dev_gpu = _device_gpu_name(device)
+    if asked and base_t is not None:
+        # Prefer sitting THIS verifier's already-trained baseline rather than reading any cache.
+        base = _call_supported(sit_baseline, base_t, rnd, scale, verifier=vid, gpu=dev_gpu)
+    else:
+        bp = _call_supported(baseline_path, rnd, scale, device, verifier=vid, gpu=dev_gpu)
+        base = _call_supported(
+            _cached,
+            bp,
+            want_exam_sha=rnd.exam_digest,
+            want_backend=dev_bk,
+            want_gpu=dev_gpu,
+            want_verifier=vid,
+        )
+        if base is not None and base.get("exam_sha256") and rnd.exam_digest and base.get("exam_sha256") != rnd.exam_digest:
+            base = None
+        if base is not None and base.get("hardware") is not None and hardware_backend(base.get("hardware")) != dev_bk:
+            base = None
+        if base is not None and dev_gpu and isinstance(base.get("hardware"), dict) and base["hardware"].get("gpu") != dev_gpu:
+            base = None
     return sit_exam(trained, rnd, scale, data.round_exam(rnd, scale)), base
 
 
@@ -1104,23 +1181,62 @@ def _sit(p: Pending, bases: dict, key, scale) -> tuple[dict, dict | None]:
     """A grade trained before its round's exam sits it, now that it is posted (p.rnd says
     so): the round's unedited student first, once for all of them, and then this one. A job
     that did not ask for the baseline sits its own student alone, and carries the baseline
-    only if this machine has the round's on disk."""
+    only if THIS verifier has its own measurement for the round and GPU on disk."""
     from . import data
     from .grade import sit_exam
-    from .pipeline import _cached, baseline_path, sit_baseline
+    from .pipeline import _cached, _device_gpu_name, baseline_path, sit_baseline
     from .train import device_backend, hardware_backend
 
     fetch_exam(p.rnd, key)
-    base = _cached(baseline_path(p.rnd, scale, p.device))
-    if base is not None and base.get("exam_sha256") and p.rnd.exam_digest and base.get("exam_sha256") != p.rnd.exam_digest:
-        base = None
-    if base is not None and base.get("hardware") is not None and hardware_backend(base.get("hardware")) != device_backend(p.device):
-        base = None
-    if base is None and wants_baseline(p.job):
-        base_t = bases.get(p.rnd.id)
-        if base_t is None or getattr(base_t, "model", True) is None:
-            raise RuntimeError(f"the unedited student of round {p.rnd.id} is no longer in memory")
-        base = sit_baseline(base_t, p.rnd, scale)
+    vid = _verifier_id(key)
+    dev_bk = device_backend(p.device)
+    dev_gpu = _device_gpu_name(p.device)
+    entry = bases.get(p.rnd.id)
+    if wants_baseline(p.job):
+        if isinstance(entry, _SatBaseline) and entry.exam_digest == p.rnd.exam_digest:
+            base = entry.result
+        elif entry is not None:
+            if getattr(entry, "model", True) is None:
+                raise RuntimeError(f"the unedited student of round {p.rnd.id} is no longer in memory")
+            base = _call_supported(sit_baseline, entry, p.rnd, scale, verifier=vid, gpu=dev_gpu)
+            bases[p.rnd.id] = _SatBaseline(p.rnd.exam_digest, base)
+        else:
+            bp = _call_supported(baseline_path, p.rnd, scale, p.device, verifier=vid, gpu=dev_gpu)
+            base = _call_supported(
+                _cached,
+                bp,
+                want_exam_sha=p.rnd.exam_digest,
+                want_backend=dev_bk,
+                want_gpu=dev_gpu,
+                want_verifier=vid,
+            )
+            if base is not None and base.get("exam_sha256") and p.rnd.exam_digest and base.get("exam_sha256") != p.rnd.exam_digest:
+                base = None
+            if base is not None and base.get("hardware") is not None and hardware_backend(base.get("hardware")) != dev_bk:
+                base = None
+            if base is not None and dev_gpu and isinstance(base.get("hardware"), dict) and base["hardware"].get("gpu") != dev_gpu:
+                base = None
+            if base is None:
+                raise RuntimeError(f"the unedited student of round {p.rnd.id} is no longer in memory")
+    else:
+        if isinstance(entry, _SatBaseline) and entry.exam_digest == p.rnd.exam_digest:
+            base = entry.result
+        else:
+            bp = _call_supported(baseline_path, p.rnd, scale, p.device, verifier=vid, gpu=dev_gpu)
+            base = _call_supported(
+                _cached,
+                bp,
+                want_exam_sha=p.rnd.exam_digest,
+                want_backend=dev_bk,
+                want_gpu=dev_gpu,
+                want_verifier=vid,
+            )
+            if base is not None and base.get("exam_sha256") and p.rnd.exam_digest and base.get("exam_sha256") != p.rnd.exam_digest:
+                base = None
+            if base is not None and base.get("hardware") is not None and hardware_backend(base.get("hardware")) != dev_bk:
+                base = None
+            if base is not None and dev_gpu and isinstance(base.get("hardware"), dict) and base["hardware"].get("gpu") != dev_gpu:
+                base = None
     return sit_exam(p.trained, p.rnd, scale, data.round_exam(p.rnd, scale)), base
 
 

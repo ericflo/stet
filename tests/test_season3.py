@@ -165,7 +165,7 @@ def test_s3_is_100pct_fresh_and_offline_practice_pack_has_both_groups():
     s3 = load_season("s3")
     assert gen.for_season(s3, b"s3-test-seed") == []
     pack = load_practice_pack(s3, b"s3-test-seed")
-    assert len(pack) == 509
+    assert len(pack) == 508
     assert pack == load_practice_pack(s3, b"s3-test-seed")
     assert pack != load_practice_pack(s3, b"other-seed")
     assert all(it.kind in ("context", "answer") for it in pack)
@@ -3644,7 +3644,7 @@ def test_review14_bundled_practice_pack_uses_inkling2_and_passes_copy_filter():
     ctx_items = [it for it in items if it.kind == "context"]
     ans_items = [it for it in items if it.kind == "answer"]
     assert len(ctx_items) == 221
-    assert len(ans_items) == 288
+    assert len(ans_items) == 287
     by_task: dict[str, int] = {}
     for it in ans_items:
         task = it.source.split(":", 1)[0]
@@ -3654,7 +3654,7 @@ def test_review14_bundled_practice_pack_uses_inkling2_and_passes_copy_filter():
         excerpt = reason.extract_wrapped_excerpt(it.ctx, it.prompt, task, it.wrapper_id)
         assert excerpt is not None, f"could not extract excerpt for {it.id}"
         assert not reason.prompt_copies_excerpt(it.prompt, excerpt), f"prompt copies excerpt in {it.id}"
-    assert by_task == {"explain": 96, "infer": 96, "synthesis": 96}
+    assert by_task == {"explain": 96, "infer": 95, "synthesis": 96}
 
     notices = (repo_root / "src/stet/exam/data/THIRD_PARTY_NOTICES.md").read_text()
     assert "thinkingmachines/Inkling-2-Mini" in notices
@@ -3993,4 +3993,455 @@ def test_review16_wheel_bundles_upstream_license_texts(tmp_path):
         assert "TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION" in apache_entries[0]
         assert len(gsm8k_entries) == 1 and "Copyright (c) 2021 OpenAI" in gsm8k_entries[0]
         assert "Permission is hereby granted, free of charge" in gsm8k_entries[0]
+
+
+def test_review17_official_baseline_cache_bound_to_verifier_and_gpu_and_prefers_in_memory(monkeypatch, tmp_path):
+    """Review 17 P1 #1: official baseline reuse MUST be bound to both the producing verifier key
+    and the concrete GPU model, and early grading MUST prefer sitting the verifier's own
+    already-trained baseline when the job requests one."""
+    pytest.importorskip("torch")
+    import torch
+
+    from stet import cli, client, data, grade, keys, pipeline
+    from stet.spec import official_round
+
+    monkeypatch.setenv("STET_CACHE", str(tmp_path))
+    s3 = load_season("s3")
+    scale = s3.scale("nano")
+    rnd = official_round(
+        s3,
+        17,
+        {"round": 123456, "randomness": "ab" * 32},
+        {"crawl": "CC-MAIN-2026-43", "paths_sha256": "cd" * 32, "n_shards": 100000},
+    )
+    exam = [
+        Item(kind="answer", corner="explain/en/wiki", fmt="prose", lang="en", source="explain:wikipedia:en:1", ctx="Q1", cont=" A1"),
+        Item(kind="answer", corner="infer/en/wiki", fmt="prose", lang="en", source="infer:wikipedia:en:2", ctx="Q2", cont=" A2"),
+    ]
+    full_sha = data.exam_digest(exam)
+    rnd = dataclasses.replace(rnd, exam_digest=full_sha)
+
+    monkeypatch.setattr(torch.version, "hip", None, raising=False)
+    monkeypatch.setattr(data, "round_exam", lambda r, sc, **kw: exam)
+    monkeypatch.setattr(client, "fetch_exam", lambda r, k: None)
+
+    k1 = keys.create_key()
+    k2 = keys.create_key()
+    dev_5090 = types.SimpleNamespace(type="cuda", gpu="NVIDIA GeForce RTX 5090")
+    dev_4090 = types.SimpleNamespace(type="cuda", gpu="NVIDIA GeForce RTX 4090")
+    hw_5090 = {"device": "cuda", "backend": "cuda", "gpu": "NVIDIA GeForce RTX 5090", "vram_gb": 32.0}
+    hw_4090 = {"device": "cuda", "backend": "cuda", "gpu": "NVIDIA GeForce RTX 4090", "vram_gb": 24.0}
+
+    # 1. Cache paths separate different verifiers AND different GPU models on the same exam.
+    p_k1_5090 = pipeline.baseline_path(rnd, scale, dev_5090, verifier=k1.public_hex)
+    p_k2_5090 = pipeline.baseline_path(rnd, scale, dev_5090, verifier=k2.public_hex)
+    p_k1_4090 = pipeline.baseline_path(rnd, scale, dev_4090, verifier=k1.public_hex)
+    p_k2_4090 = pipeline.baseline_path(rnd, scale, dev_4090, verifier=k2.public_hex)
+    assert len({p_k1_5090, p_k2_5090, p_k1_4090, p_k2_4090}) == 4
+
+    sat_calls: list[tuple[str, str]] = []
+
+    def fake_sit_exam(trained, r, sc, ex):
+        tag = getattr(trained, "tag", "unknown")
+        hw = hw_5090 if getattr(trained.device, "gpu", "") == "NVIDIA GeForce RTX 5090" else hw_4090
+        score = -2.10 if hw is hw_5090 else -2.35
+        sat_calls.append((tag, hw["gpu"]))
+        return {
+            "valid": True,
+            "exam_sha256": full_sha,
+            "hardware": hw,
+            "train": {"init_sha256": "a" * 64},
+            "exam": {"items": len(ex), "mean": score, "item_scores": [score] * len(ex)},
+        }
+
+    monkeypatch.setattr(pipeline, "sit_exam", fake_sit_exam)
+    monkeypatch.setattr(grade, "sit_exam", fake_sit_exam)
+
+    # 2. Verifier 1 (RTX 5090) sits its early grade and populates the shared STET_CACHE.
+    bases1 = {rnd.id: types.SimpleNamespace(device=dev_5090, model=object(), tag="base-v1-5090")}
+    p1 = client.Pending({"id": 1, "baseline": True}, rnd, types.SimpleNamespace(device=dev_5090, tag="cand-v1"), dev_5090)
+    res1, base1 = client._sit(p1, bases1, k1, scale)
+    assert base1["hardware"]["gpu"] == "NVIDIA GeForce RTX 5090" and base1["exam"]["mean"] == -2.10
+    assert "verifier" not in base1
+    assert p_k1_5090.exists()
+
+    # 3. Verifier 2 (RTX 4090, different key) has its own trained baseline in memory AND baseline=True:
+    #    MUST sit Verifier 2's own RTX 4090 baseline (NEVER reuse Verifier 1's RTX 5090 cache!).
+    bases2 = {rnd.id: types.SimpleNamespace(device=dev_4090, model=object(), tag="base-v2-4090")}
+    p2 = client.Pending({"id": 2, "baseline": True}, rnd, types.SimpleNamespace(device=dev_4090, tag="cand-v2"), dev_4090)
+    res2, base2 = client._sit(p2, bases2, k2, scale)
+    assert base2["hardware"]["gpu"] == "NVIDIA GeForce RTX 4090" and base2["exam"]["mean"] == -2.35
+    assert ("base-v2-4090", "NVIDIA GeForce RTX 4090") in sat_calls
+    assert p_k2_4090.exists()
+
+    # 4. A third verifier with baseline=False on RTX 5090 MUST NOT borrow Verifier 1's cached baseline.
+    k3 = keys.create_key()
+    p3 = client.Pending({"id": 3, "baseline": False}, rnd, types.SimpleNamespace(device=dev_5090, tag="cand-v3"), dev_5090)
+    _, base3 = client._sit(p3, {}, k3, scale)
+    assert base3 is None
+
+    # 5. Even if Verifier 1's cache file were copied onto Verifier 3's path, _cached rejects wrong verifier,
+    #    and slim_result rejects mismatched GPU hardware as defense in depth.
+    p_k3_5090 = pipeline.baseline_path(rnd, scale, dev_5090, verifier=k3.public_hex)
+    p_k3_5090.write_text(p_k1_5090.read_text())
+    assert pipeline._cached(p_k3_5090, want_exam_sha=full_sha, want_backend="cuda", want_gpu="NVIDIA GeForce RTX 5090", want_verifier=k3.public_hex) is None
+    assert pipeline._cached(p_k1_5090, want_exam_sha=full_sha, want_backend="cuda", want_gpu="NVIDIA GeForce RTX 4090", want_verifier=k1.public_hex) is None
+
+    with pytest.raises(ValueError, match="baseline GPU"):
+        client.slim_result(
+            {"round": {"id": rnd.id}, "valid": False, "hardware": hw_4090},
+            base1,
+        )
+
+    # 6. Late _grade_job on Verifier 2 (different key) after exam posted does NOT reuse Verifier 1's file.
+    trained_late: list[str] = []
+    monkeypatch.setattr(
+        pipeline,
+        "train_baseline",
+        lambda r, sc, d, **kw: trained_late.append("v3") or types.SimpleNamespace(device=d, tag="late-v3"),
+    )
+    base_late = pipeline.baseline(rnd, scale, dev_5090, verifier=k3.public_hex)
+    assert trained_late == ["v3"] and base_late["hardware"]["gpu"] == "NVIDIA GeForce RTX 5090"
+    _ = cli
+
+
+def test_review17_rejected_409_publication_preserves_accepted_exam_for_whole_exam(monkeypatch, tmp_path):
+    """Review 17 P2 #2: overlapping exam builds sharing a round work directory stage each
+    candidate under an immutable digest-addressed directory before posting and only promote to
+    KEPT_ITEMS / KEPT_LANGUAGES after post() succeeds, so a 409 rejection never clobbers the
+    accepted exam on disk and stages.whole_exam() always recovers the committed exam."""
+    import base64
+
+    from stet import client
+    from stet.exam import examine, stages
+    from stet.exam.farm import pack_items
+    from stet.spec import official_round
+
+    monkeypatch.setenv("STET_CACHE", str(tmp_path))
+    s3 = load_season("s3")
+    scale = s3.scale("nano")
+    rnd = official_round(
+        s3,
+        18,
+        {"round": 123456, "randomness": "ab" * 32},
+        {"crawl": "CC-MAIN-2026-43", "paths_sha256": "cd" * 32, "n_shards": 100000},
+    )
+
+    items_a = [Item(kind="answer", corner="explain/en/wiki", fmt="prose", lang="en", source="explain:wikipedia:en:100", ctx="Ctx A", cont=" Ans A")]
+    items_b = [Item(kind="answer", corner="explain/en/wiki", fmt="prose", lang="en", source="explain:wikipedia:en:200", ctx="Ctx B", cont=" Ans B")]
+    digest_a = data.exam_digest(items_a)
+    digest_b = data.exam_digest(items_b)
+    assert digest_a != digest_b
+
+    exam_a = {
+        "round": rnd.id,
+        "items_digest": digest_a,
+        "items_file": base64.b64encode(pack_items(items_a)).decode(),
+        "languages": {"en": 100.0},
+        "table": [{"id": items_a[0].id}],
+    }
+    exam_b = {
+        "round": rnd.id,
+        "items_digest": digest_b,
+        "items_file": base64.b64encode(pack_items(items_b)).decode(),
+        "languages": {"en": 99.0},
+        "table": [{"id": items_b[0].id}],
+    }
+
+    work = tmp_path / "examine" / rnd.id
+    built_queue = iter([exam_a, exam_b])
+    monkeypatch.setattr(examine, "build", lambda *a, **kw: next(built_queue))
+
+    accepted_digest = {"val": None}
+
+    def fake_post(ex, key):
+        if accepted_digest["val"] is None:
+            accepted_digest["val"] = ex["items_digest"]
+            return {"ok": True}
+        raise client.ApiError(409, "round already has an exam")
+
+    monkeypatch.setattr(examine, "post", fake_post)
+
+    # Build A succeeds and promotes A to KEPT_ITEMS / KEPT_LANGUAGES.
+    examine.examine(rnd, scale, [], work, key=None, log=lambda *a: None)
+    # Overlapping build B finishes later and receives 409 -> MUST NOT overwrite A!
+    with pytest.raises(client.ApiError, match="409|already"):
+        examine.examine(rnd, scale, [], work, key=None, log=lambda *a: None)
+
+    rnd_settled = dataclasses.replace(rnd, exam_digest=digest_a)
+    got_items, got_shares = stages.whole_exam(rnd_settled, tmp_path / "stages_work")
+    assert got_items == items_a and got_shares == {"en": 100.0}
+
+    # Even if KEPT_ITEMS were missing/corrupted after A staged & posted, whole_exam recovers A from candidate-<digest>.
+    (work / examine.KEPT_ITEMS).unlink()
+    got_items2, got_shares2 = stages.whole_exam(rnd_settled, tmp_path / "stages_work_2")
+    assert got_items2 == items_a and got_shares2 == {"en": 100.0}
+
+
+def test_review17_advancing_harvest_pins_practice_exam_and_checks_digests(monkeypatch, tmp_path):
+    """Review 17 P2 #8:
+    (a) `_practice()` MUST derive its cache filename from the passed `hours` rather than calling
+        `practice_hours()` again, so an advancing harvest between selection and caching cannot
+        store exam A under key B.
+    (b) `cli._with_baseline()` MUST check both candidate and baseline `exam_sha256` against the
+        pinned exam digest rather than subtracting scores from two disjoint equal-length exams."""
+    from stet import cli
+
+    monkeypatch.setenv("STET_CACHE", str(tmp_path))
+    s2 = load_season("s2")
+    rnd = practice_round(s2, 3)
+    scale = s2.scale("nano")
+
+    h_dir = data.harvest_dir()
+    h_dir.mkdir(parents=True, exist_ok=True)
+    h1 = h_dir / "1700000000.jsonl"
+    h2 = h_dir / "1700003600.jsonl"
+    h1.write_text('{"hour":1700000000,"v":1}\n')
+
+    items_a = [Item(kind="answer", corner="logic/a", fmt="prose", lang="en", source="gen:logic", ctx="A?", cont=" 1")]
+    items_b = [Item(kind="answer", corner="logic/b", fmt="prose", lang="en", source="gen:logic", ctx="B?", cont=" 2")]
+    sha_a = data.exam_digest(items_a)
+    sha_b = data.exam_digest(items_b)
+    assert sha_a != sha_b
+
+    # Simulate harvest advancing right after round_exam() selected hours A=[(1700000000, h1)]:
+    hours_a = data.practice_hours(rnd)
+    key_a = data.practice_key(rnd, hours_a)
+    h2.write_text('{"hour":1700003600,"v":2}\n')
+    hours_b = data.practice_hours(rnd)
+    key_b = data.practice_key(rnd, hours_b)
+    assert key_a != key_b
+
+    from stet.exam import examine
+
+    def fake_assemble(r, sc, hrs, work, **kw):
+        return (items_a if hrs == hours_a else items_b, 1, {"en": 100.0}, [])
+
+    monkeypatch.setattr(examine, "assemble", fake_assemble)
+
+    # Calling _practice(rnd, scale, hours_a) AFTER h2 appeared MUST write under key_a, NOT key_b!
+    got_a = data._practice(rnd, scale, hours_a)
+    assert got_a == items_a
+    # Subsequent round_exam(rnd, scale) with hours_b selected MUST return items_b (never poisoned with items_a!).
+    got_b = data.round_exam(rnd, scale)
+    assert got_b == items_b
+
+    # Disjoint equal-length candidate vs baseline digests MUST raise RuntimeError in _with_baseline!
+    monkeypatch.setitem(
+        sys.modules,
+        "stet.pipeline",
+        types.SimpleNamespace(
+            baseline=lambda *a, **k: {
+                "valid": True,
+                "exam_sha256": sha_b,
+                "exam": {"mean": -3.0, "item_scores": [-3.0]},
+            }
+        ),
+    )
+    res_a = {
+        "valid": True,
+        "exam_sha256": sha_a,
+        "exam": {"mean": -2.0, "item_scores": [-2.0]},
+    }
+    with pytest.raises(RuntimeError, match="cannot compute gain"):
+        cli._with_baseline(res_a, rnd, scale, None, cli.Out(quiet=True), skip=False, exam=items_a, practice_key=key_a)
+
+    # (c) Direct pipeline.baseline() and gym.Env(split="practice").step() also pin practice hours/exam!
+    if importlib.util.find_spec("torch") is not None:
+        from stet import gym, pipeline
+
+        # Advance harvest during train_baseline -> sit_baseline MUST still sit exam_b and cache under key_b!
+        h3 = h_dir / "1700007200.jsonl"
+        sat_exams: list[str] = []
+
+        def fake_train_base(r, sc, d, **kw):
+            h3.write_text('{"hour":1700007200,"v":3}\n')
+            return types.SimpleNamespace(device=d)
+
+        def fake_sit_base_exam(tr, r, sc, ex):
+            sat_exams.append(data.exam_digest(ex))
+            return {
+                "valid": True,
+                "exam_sha256": data.exam_digest(ex),
+                "hardware": {"device": "cpu"},
+                "exam": {"items": len(ex), "mean": -3.0, "item_scores": [-3.0] * len(ex)},
+            }
+
+        monkeypatch.setattr(pipeline, "train_baseline", fake_train_base)
+        monkeypatch.setattr(pipeline, "sit_exam", fake_sit_base_exam)
+        base_b = pipeline.baseline(rnd, scale, device=types.SimpleNamespace(type="cpu"))
+        assert sat_exams == [sha_b] and base_b["exam_sha256"] == sha_b
+        assert pipeline.baseline_path(rnd, scale, types.SimpleNamespace(type="cpu"), practice_key=key_b).exists()
+
+        # gym.Env(split="practice").step() rejects mismatched baseline vs candidate digests.
+        env = gym.Env(scale="nano", split="practice", device="cpu", season="s2")
+        monkeypatch.setattr(data, "corpus", lambda *a, **k: types.SimpleNamespace(total_bytes=100, meta={"sha256": "0" * 64}, __len__=lambda self: 1))
+        monkeypatch.setattr("stet.runner.task_info", lambda *a, **k: {"train_tokens": 1024})
+        env.reset(3)
+        monkeypatch.setattr(
+            gym,
+            "baseline",
+            lambda *a, **k: {"valid": True, "exam_sha256": sha_a, "exam": {"mean": -3.0, "item_scores": [-3.0]}},
+        )
+        monkeypatch.setattr(
+            "stet.grade.grade",
+            lambda *a, **k: {
+                "valid": True,
+                "invalid_reason": None,
+                "exam_sha256": sha_b,
+                "script": {"out_docs": 1},
+                "train": {"tokens": 1024},
+                "exam": {"items": 1, "mean": -2.0, "item_scores": [-2.0]},
+            },
+        )
+        with pytest.raises(RuntimeError, match="cannot compute reward"):
+            env.step([0])
+
+
+def test_review17_wikipedia_donor_sources_and_attribution_manifest_in_wheel(tmp_path):
+    """Review 17 P2 #9:
+    - `select_context()` preserves donor revision IDs in `Item.wrong_sources` (1:1 with `wrongs`).
+    - `public_items()` preserves `wrong_sources` and per-passage Wikimedia revision/history URLs
+      while `read_public_info()` still matches the round's exact `exam_digest`.
+    - The built `stet-cli` wheel bundles `s3-practice.jsonl.zst` with `wrong_sources` on all 221
+      comprehension items AND `WIKIPEDIA_ATTRIBUTION.jsonl` (both in `stet/exam/data/` and
+      `.dist-info/licenses/`) covering 100% of primary, donor, and reasoning Wikipedia passages."""
+    import shutil
+    import subprocess
+    import zipfile
+
+    from stet.exam import examine
+    from stet.exam.farm import unpack_items
+    from stet.exam.fresh import Doc
+    from stet.exam.fresh.select import select_context
+
+    # 1. Selector preserves donor wrong_sources and public_items carries revision/history attribution.
+    docs = [
+        Doc(
+            source="wikipedia",
+            id=f"en:{1000 + i}",
+            lang="en",
+            title=f"Article {i}",
+            url=f"https://en.wikipedia.org/wiki/Article_{i}",
+            license="CC BY-SA 4.0",
+            published=1_800_000_000 + i,
+            text=(
+                f"Opening paragraph number {i} describes the distinct geological history of basin {i} "
+                f"with carefully measured sedimentary layers and mineral formations across the valley.\n\n"
+                f"Continuation paragraph number {i} explains how later tectonic uplift reshaped region {i} "
+                f"and altered downstream river courses over several million years."
+            ),
+        )
+        for i in range(6)
+    ]
+    selected = select_context(docs, b"review17-seed", 4, {"reference"}, per_corner=10)
+    assert len(selected) >= 4
+    for it in selected:
+        assert it.kind == "context"
+        assert len(it.wrong_sources) == len(it.wrongs) and len(it.wrong_sources) > 0
+        assert all(ws.startswith("wikipedia:en:") and ws != it.source for ws in it.wrong_sources)
+
+    pub_rows = examine.public_items(selected)
+    for it, row in zip(selected, pub_rows, strict=True):
+        assert row["wrong_sources"] == list(it.wrong_sources)
+        attr_by_src = {a["source"]: a for a in row["attribution"]}
+        for sid in (it.source, *it.wrong_sources):
+            assert sid in attr_by_src
+            assert "oldid=" in attr_by_src[sid]["revision_url"]
+            assert "action=history" in attr_by_src[sid]["history_url"]
+    raw_pub = "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in pub_rows).encode("utf-8")
+    kept, total = examine.read_public_info(raw_pub, data.exam_digest(selected))
+    assert kept == selected and total == len(selected)
+
+    # 2. Build actual wheel and verify s3-practice.jsonl.zst + WIKIPEDIA_ATTRIBUTION.jsonl inside it.
+    repo_root = Path(__file__).resolve().parents[1]
+    out_dir = tmp_path / "dist"
+    out_dir.mkdir()
+    built = False
+    try:
+        from hatchling.builders.wheel import WheelBuilder
+
+        WheelBuilder(str(repo_root)).build_standard(str(out_dir))
+        built = True
+    except ImportError:
+        uv_bin = shutil.which("uv")
+        if uv_bin:
+            subprocess.run(
+                [uv_bin, "build", "--wheel", "--out-dir", str(out_dir), str(repo_root)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            built = True
+    assert built, "neither hatchling nor uv was available to build the wheel artifact"
+
+    wheels = list(out_dir.glob("stet_cli-*.whl"))
+    assert len(wheels) == 1
+    with zipfile.ZipFile(wheels[0]) as zf:
+        names = set(zf.namelist())
+        pack_blob = zf.read("stet/exam/data/s3-practice.jsonl.zst")
+        data_manifest = zf.read("stet/exam/data/WIKIPEDIA_ATTRIBUTION.jsonl").decode("utf-8")
+        lic_manifests = [zf.read(n).decode("utf-8") for n in names if ".dist-info/licenses/" in n and n.endswith("WIKIPEDIA_ATTRIBUTION.jsonl")]
+        assert len(lic_manifests) == 1 and lic_manifests[0] == data_manifest
+
+    manifest_rows = [json.loads(ln) for ln in data_manifest.splitlines() if ln.strip()]
+    by_src = {r["source"]: r for r in manifest_rows}
+    pack_items = unpack_items(pack_blob)
+    ctx_items = [it for it in pack_items if it.kind == "context"]
+    ans_items = [it for it in pack_items if it.kind == "answer"]
+    assert len(ctx_items) == 221 and len(ans_items) == 287
+
+    all_referenced: set[str] = set()
+    for it in ctx_items:
+        assert len(it.wrong_sources) == len(it.wrongs) and len(it.wrong_sources) > 0
+        for sid in (it.source, *it.wrong_sources):
+            all_referenced.add(sid)
+            assert sid in by_src, f"missing attribution for {sid}"
+            rec = by_src[sid]
+            assert rec["title"] and rec["url"] and "oldid=" in rec["revision_url"] and "action=history" in rec["history_url"]
+    for it in ans_items:
+        norm = it.source.split(":", 1)[1]
+        all_referenced.add(norm)
+        assert norm in by_src, f"missing attribution for reasoning item {it.source}"
+    assert set(by_src) == all_referenced
+
+
+def test_review17_student_window_overflow_rejected_in_synthesis_and_cache():
+    """Review 17 P3 #10: `parse_generated_items_detailed` and `cached_item_passes_filter` MUST
+    reject any reasoning item whose `[eot] + encode(ctx) + encode(cont)` exceeds `seq_len + 1`
+    tokens as `student_window_overflow`, while keeping items that fit."""
+    from stet.exam.fresh import reason
+
+    class CharEnc:
+        def encode_ordinary(self, text: str) -> list[int]:
+            return [ord(ch) for ch in text]
+
+    enc = CharEnc()
+    short_ex = "Short excerpt about river sediment transport across coastal plains."
+    long_ex = "Dense excerpt " + ("word " * 90)
+    prompt = "Explain why downstream sediment deposition shifts after seasonal flooding."
+    resp = "Seasonal flooding increases river velocity and carries coarser grains further downstream before slowing near the delta, where suspended particles settle and reshape alluvial channels."
+    gen_txt = f"{prompt}\nRESPONSE: {resp}"
+
+    selected = [
+        {"source": "wikipedia", "id": "en:1", "lang": "en", "text": short_ex, "excerpt": short_ex, "task_type": "explain", "wrapper_id": 0},
+        {"source": "wikipedia", "id": "en:2", "lang": "en", "text": long_ex, "excerpt": long_ex, "task_type": "explain", "wrapper_id": 0},
+    ]
+    # Window of 400 tokens fits the short item (~330 chars) and overflows the long item (~700+ chars).
+    items, dropped, drop_records = reason.parse_generated_items_detailed(
+        selected,
+        [gen_txt, gen_txt],
+        check_lang=False,
+        student_window=(enc, 400),
+    )
+    assert len(items) == 1 and items[0].source == "explain:wikipedia:en:1"
+    assert dropped == {"student_window_overflow": 1}
+    assert drop_records[0]["reason"] == "student_window_overflow" and drop_records[0]["id"] == "en:2"
+
+    # Without student_window, both parse; cached_item_passes_filter then rejects the overflowing item!
+    both, _ = reason.parse_generated_items(selected, [gen_txt, gen_txt], check_lang=False)
+    assert len(both) == 2
+    assert reason.cached_item_passes_filter(both[0], student_window=(enc, 400)) is True
+    assert reason.cached_item_passes_filter(both[1], student_window=(enc, 400)) is False
+
 

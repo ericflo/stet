@@ -61,7 +61,7 @@ DEFAULT_MIN_KEEP_RATE = 0.50
 TEACHER_MAX_PROMPT_TOKENS = 1400
 # Bump whenever reasoning generation or post-generation filtering rules change so cached
 # synthesis artifacts from an older harness revision are automatically regenerated.
-REASONING_FILTER_VERSION = 2
+REASONING_FILTER_VERSION = 3
 
 # Sources whose text is prose/discussion/documentation suitable for natural-language reasoning.
 SKIP_LANG_PREFIXES = ("code:",)
@@ -311,13 +311,26 @@ def prompt_copies_excerpt(prompt_line: str, excerpt: str, *, max_ngram_overlap: 
     return ngram_overlap(prompt_line, excerpt, n=5) > max_ngram_overlap
 
 
-def cached_item_passes_filter(item: Item, *, max_ngram_overlap: float = 0.50) -> bool:
+def student_window_fits(ctx_str: str, cont: str, enc, seq_len: int) -> bool:
+    """Whether `[eot] + encode_one(enc, ctx_str) + encode_one(enc, cont)` fits inside one
+    student scoring window (`seq_len + 1` tokens) without left-truncating any context tokens."""
+    from ...tok import encode_one
+
+    return 1 + len(encode_one(enc, ctx_str)) + len(encode_one(enc, cont)) <= int(seq_len) + 1
+
+
+def cached_item_passes_filter(
+    item: Item,
+    *,
+    max_ngram_overlap: float = 0.50,
+    student_window: tuple[object, int] | None = None,
+) -> bool:
     """Revalidate a cached reasoning Item against the current shipped filtering rules.
 
     Ensures a restarted or upgraded exam build never reuses a cached reasoning pack containing
-    rows missing authoritative `(prompt, wrapper_id)` metadata, leaking control tokens, or
-    violating the current prompt-vs-excerpt / response-vs-excerpt overlap limits.
-    """
+    rows missing authoritative `(prompt, wrapper_id)` metadata, leaking control tokens,
+    violating the current prompt-vs-excerpt / response-vs-excerpt overlap limits, or exceeding
+    the student's scoring window."""
     if item.kind != "answer" or not item.source or not item.prompt or item.wrapper_id is None:
         return False
     task_type = item.source.split(":", 1)[0]
@@ -338,6 +351,10 @@ def cached_item_passes_filter(item: Item, *, max_ngram_overlap: float = 0.50) ->
         return False
     if ngram_overlap(resp, pr, n=5) > max_ngram_overlap:
         return False
+    if student_window is not None:
+        s_enc, s_ctx = student_window
+        if not student_window_fits(item.ctx, item.cont, s_enc, s_ctx):
+            return False
     return True
 
 
@@ -733,6 +750,7 @@ def parse_generated_items_detailed(
     *,
     max_ngram_overlap: float = 0.50,
     check_lang: bool = True,
+    student_window: tuple[object, int] | None = None,
 ) -> tuple[list[Item], dict[str, int], list[dict]]:
     """Deterministically parse and filter raw teacher generations into `Item` objects,
     returning `(kept_items, drop_counts, drop_records)` so every dropped draft is auditable."""
@@ -831,6 +849,11 @@ def parse_generated_items_detailed(
         w_id = int(d["wrapper_id"]) % w_mod
         ctx_str = wrap_prompt(excerpt, pr, d["task_type"], w_id)
         cont = resp if ctx_str.endswith((" ", "\n")) else f" {resp}"
+        if student_window is not None:
+            s_enc, s_ctx = student_window
+            if not student_window_fits(ctx_str, cont, s_enc, s_ctx):
+                _drop("student_window_overflow", d, gen_txt, pr, resp, excerpt)
+                continue
         src_prefix = d["source"].split(":", 1)[0]
         doc_id = str(d.get("id") or "").strip()
         # Preserve the immutable harvest document ID (matching fresh/select.py's `<source>:<id>`)
@@ -858,10 +881,15 @@ def parse_generated_items(
     *,
     max_ngram_overlap: float = 0.50,
     check_lang: bool = True,
+    student_window: tuple[object, int] | None = None,
 ) -> tuple[list[Item], dict[str, int]]:
     """Deterministically parse and filter raw teacher generations into `Item` objects."""
     items, dropped, _ = parse_generated_items_detailed(
-        selected, generations, max_ngram_overlap=max_ngram_overlap, check_lang=check_lang
+        selected,
+        generations,
+        max_ngram_overlap=max_ngram_overlap,
+        check_lang=check_lang,
+        student_window=student_window,
     )
     return items, dropped
 
@@ -1315,6 +1343,7 @@ def synthesize_reasoning(
     shares: dict[str, float] | None = None,
     log=print,
     drops_path=None,
+    student_window: tuple[object, int] | None = None,
 ) -> list[Item]:
     """Synthesize fresh multilingual `explain`, `infer`, and `synthesis` items from harvested docs.
 
@@ -1348,8 +1377,9 @@ def synthesize_reasoning(
             f"(e.g. vllm serve {repo} --revision {rev} --served-model-name {repo}@{rev} "
             f"--reasoning-parser inkling --max-model-len 4096)"
         )
-    # Bound every document's excerpt ONCE with the pinned teacher tokenizer so both teacher and
-    # student see the exact same excerpt and no teacher prompt can ever overflow.
+    # Bound every document's excerpt with the pinned teacher tokenizer so no teacher prompt can
+    # overflow; wrapped prompt + response are additionally checked against `student_window` below
+    # so dense scripts cannot left-truncate inside the student's scoring window.
     tok = _load_teacher_tokenizer(repo, rev, required=True)
     selected = apply_token_budget(selected, tok, max_tokens=max_ex_toks, max_chars=max_ex_chars)
     if api == "chat":
@@ -1372,7 +1402,9 @@ def synthesize_reasoning(
             )
         else:
             gens = _generate_local_gpu(prompts, repo, rev, max_new_tokens=max_new, log=log)
-    items, dropped, drop_records = parse_generated_items_detailed(selected, gens, max_ngram_overlap=max_ov)
+    items, dropped, drop_records = parse_generated_items_detailed(
+        selected, gens, max_ngram_overlap=max_ov, student_window=student_window
+    )
     if drops_path is not None:
         dp = Path(drops_path)
         dp.parent.mkdir(parents=True, exist_ok=True)

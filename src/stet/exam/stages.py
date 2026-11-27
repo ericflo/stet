@@ -150,8 +150,11 @@ def whole_exam(rnd, work: Path, items_file=None, shares_file=None) -> tuple[list
     kept, kept_shares = work / rnd.id / "exam.jsonl.zst", work / rnd.id / "languages.json"
     if not (kept.exists() and kept_shares.exists()):
         made = cache_dir() / "examine" / rnd.id
+        cand = examine.candidate_dir(made, rnd.exam_digest) if getattr(rnd, "exam_digest", "") else None
         if items_file and shares_file:
             items, shares = _items_of(Path(items_file).read_bytes()), _read(Path(shares_file))
+        elif cand is not None and (cand / examine.KEPT_ITEMS).exists() and (cand / examine.KEPT_LANGUAGES).exists():
+            items, shares = _items_of((cand / examine.KEPT_ITEMS).read_bytes()), _read(cand / examine.KEPT_LANGUAGES)
         elif (made / examine.KEPT_ITEMS).exists() and (made / examine.KEPT_LANGUAGES).exists():
             items, shares = _items_of((made / examine.KEPT_ITEMS).read_bytes()), _read(made / examine.KEPT_LANGUAGES)
         elif (made / "fresh.jsonl").exists():

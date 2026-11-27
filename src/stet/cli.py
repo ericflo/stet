@@ -232,7 +232,33 @@ def cmd_init(args):
     out.line("", "AGENTS.md has everything a coding agent needs to work on it.")
 
 
-def _with_baseline(result: dict, rnd, scale, device, out: Out, skip: bool):
+def _pin_round_exam(rnd, scale):
+    """Resolve and pin `(hours, practice_key, exam)` once for a CLI run so advancing harvests
+    mid-run cannot make candidate grading and baseline comparison sit different exams."""
+    from . import data
+
+    if rnd is None or scale is None:
+        return None, None, None
+    hours = data.practice_hours(rnd) if rnd.kind == "practice" else []
+    pk = data.practice_key(rnd, hours) if rnd.kind == "practice" else None
+    try:
+        exam = data.round_exam(rnd, scale, hours=hours) if rnd.kind == "practice" else data.round_exam(rnd, scale)
+    except TypeError:
+        exam = data.round_exam(rnd, scale)
+    return hours, pk, exam
+
+
+def _with_baseline(
+    result: dict,
+    rnd,
+    scale,
+    device,
+    out: Out,
+    skip: bool,
+    *,
+    exam=None,
+    practice_key: str | None = None,
+):
     from . import data
 
     if result["valid"]:
@@ -244,16 +270,52 @@ def _with_baseline(result: dict, rnd, scale, device, out: Out, skip: bool):
         return None
     from .pipeline import baseline
 
-    base = baseline(rnd, scale, device, progress=out.progress("baseline"), log=lambda m: out.line("", out.dim("baseline " + m)))
+    if exam is None and rnd is not None and scale is not None:
+        _, pinned_pk, exam = _pin_round_exam(rnd, scale)
+        if practice_key is None:
+            practice_key = pinned_pk
+
+    import inspect
+
+    base_kw: dict = {
+        "progress": out.progress("baseline"),
+        "log": lambda m: out.line("", out.dim("baseline " + m)),
+    }
+    try:
+        b_params = inspect.signature(baseline).parameters
+        accepts_var = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in b_params.values())
+    except (TypeError, ValueError):
+        b_params, accepts_var = {}, False
+    if exam is not None and (accepts_var or "exam" in b_params):
+        base_kw["exam"] = exam
+    if practice_key is not None and (accepts_var or "practice_key" in b_params):
+        base_kw["practice_key"] = practice_key
+    base = baseline(rnd, scale, device, **base_kw)
     # The gain is the exam's aggregate of the item-by-item differences, with the languages
     # weighed by the published table (a round's own corpus is measured only for official rounds).
     from .exam.aggregate import gains, plan_of, round_score
 
     result["baseline"] = {"mean": base["exam"]["mean"]}
     if result["valid"]:
+        if exam is None:
+            exam = data.round_exam(rnd, scale)
+        want_sha = data.exam_digest(exam)
+        res_sha = result.get("exam_sha256")
+        base_sha = base.get("exam_sha256")
+        if res_sha and res_sha != want_sha:
+            raise RuntimeError(f"cannot compute gain: candidate exam ({res_sha[:12]}) does not match pinned exam ({want_sha[:12]})")
+        if base_sha and base_sha != want_sha:
+            raise RuntimeError(f"cannot compute gain: baseline exam ({base_sha[:12]}) does not match pinned exam ({want_sha[:12]})")
+        if res_sha and base_sha and res_sha != base_sha:
+            raise RuntimeError(f"cannot compute gain: candidate exam ({res_sha[:12]}) and baseline exam ({base_sha[:12]}) differ")
+        if len(result["exam"]["item_scores"]) != len(exam) or len(base["exam"]["item_scores"]) != len(exam):
+            raise RuntimeError(
+                f"cannot compute gain: item score counts ({len(result['exam']['item_scores'])}, "
+                f"{len(base['exam']['item_scores'])}) do not match pinned exam ({len(exam)})"
+            )
         plan = plan_of(rnd.season)
         shares = data.round_shares(rnd)
-        agg = round_score(data.round_exam(rnd, scale), gains(result["exam"]["item_scores"], base["exam"]["item_scores"]), shares=shares, plan=plan)
+        agg = round_score(exam, gains(result["exam"]["item_scores"], base["exam"]["item_scores"]), shares=shares, plan=plan)
         result["gain"] = round(agg["score"], 5)
         result["pillars"] = {k: v["score"] for k, v in agg["pillars"].items()}
         present_groups = {plan.pillars[p] for p in agg["pillars"]}
@@ -345,18 +407,22 @@ def cmd_run(args):
             except ProjectError as e:
                 die(str(e))
             bundle = work / "bundle"
+        pinned_hours, pinned_pk, pinned_exam = _pin_round_exam(rnd, scale)
         try:
             result = run_round(
                 bundle, project.entry, rnd, scale, work, sandbox=sandbox, device=device,
                 echo=args.verbose, progress=out.progress("training"), log=lambda m: out.line("", out.dim(m)),
                 assets=project.assets, time_limit=getattr(args, "time_limit", None),
+                exam=pinned_exam,
             )  # fmt: skip
         finally:
             if bundle != project.path:
                 remove_tree(bundle)
         result["editor"] = {"name": project.name}
-        base = _with_baseline(result, rnd, scale, device, out, args.no_baseline)
-        result["writing"] = _has_writing(rnd)
+        base = _with_baseline(
+            result, rnd, scale, device, out, args.no_baseline, exam=pinned_exam, practice_key=pinned_pk
+        )
+        result["writing"] = bool(pinned_hours) if rnd.kind == "practice" else _has_writing(rnd)
         (work / "result.json").write_text(json.dumps(result, indent=1))
         report(out, result, base, season)
         _edit_time_line(out, result, season)
@@ -493,8 +559,14 @@ def cmd_score(args):
     script = script_file(args.script, season, rnd)
     device = pick_device(args.device)
     out.line("", out.bold(f"stet score · {args.script} · {rnd.kind} round {rnd.id} · {scale.name} · {device.type}"))
-    result = grade_round(rnd, scale, script, device=device, progress=out.progress("training"), log=lambda m: out.line("", out.dim(m)))
-    base = _with_baseline(result, rnd, scale, device, out, args.no_baseline)
+    pinned_hours, pinned_pk, pinned_exam = _pin_round_exam(rnd, scale)
+    result = grade_round(
+        rnd, scale, script, device=device, progress=out.progress("training"), log=lambda m: out.line("", out.dim(m)),
+        exam=pinned_exam,
+    )
+    base = _with_baseline(
+        result, rnd, scale, device, out, args.no_baseline, exam=pinned_exam, practice_key=pinned_pk
+    )
     report(out, result, base, season)
     _emit(args, result)
     sys.exit(0 if result["valid"] else 2)
@@ -507,7 +579,16 @@ def cmd_baseline(args):
 
     out = Out(quiet=args.quiet)
     season, scale, rnd = resolve_round(args)
-    base = baseline(rnd, scale, pick_device(args.device), progress=out.progress("training"), log=lambda m: out.line("", out.dim(m)))
+    _, pinned_pk, pinned_exam = _pin_round_exam(rnd, scale)
+    base = baseline(
+        rnd,
+        scale,
+        pick_device(args.device),
+        progress=out.progress("training"),
+        log=lambda m: out.line("", out.dim(m)),
+        exam=pinned_exam,
+        practice_key=pinned_pk,
+    )
     out.line("round", f"{rnd.id} · {scale.name}")
     from . import data as stet_data
 

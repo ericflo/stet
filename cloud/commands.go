@@ -303,6 +303,17 @@ func tick(ctx context.Context, f *Fleet) (err error) {
 			MaxHourly:   f.o.MaxHourly,
 			SpentToday:  v.Today,
 			DailyBudget: f.o.DailyBudget,
+			CurrentSpentToday: func() (float64, error) {
+				spentBase, serr := f.spent(v.Ledger, startOfDay(f.now()))
+				if serr != nil {
+					return 0, fmt.Errorf("reading daily spend: %w", serr)
+				}
+				_, _, exAcc, aerr := f.examinerSnapshot()
+				if aerr != nil {
+					return 0, aerr
+				}
+				return spentBase + exAcc, nil
+			},
 		}
 		if exErr = f.examiner.Reconcile(ctx, v.Work, budget); exErr != nil {
 			f.say("examiner: %v", exErr)
@@ -440,6 +451,19 @@ func reconcileExaminerOnce(ctx context.Context, f *Fleet) error {
 		DailyBudget:   f.o.DailyBudget,
 		AccountingErr: acctErr,
 	}
+	if l != nil && acctErr == nil {
+		budget.CurrentSpentToday = func() (float64, error) {
+			spentBase, serr := f.spent(l, startOfDay(f.now()))
+			if serr != nil {
+				return 0, fmt.Errorf("reading daily spend: %w", serr)
+			}
+			_, _, exAcc, aerr := f.examinerSnapshot()
+			if aerr != nil {
+				return 0, aerr
+			}
+			return spentBase + exAcc, nil
+		}
+	}
 	if err := f.examiner.Reconcile(ctx, w, budget); err != nil {
 		if ctx.Err() == nil {
 			f.say("examiner: %v", err)
@@ -563,6 +587,89 @@ func cmdDown(ctx context.Context, f *Fleet, force bool, handles []string) error 
 		f.say("nothing to end")
 	}
 	return f.end(ctx, v, endings)
+}
+
+// cmdDownRental ends one specific rental by exact (market, id) under the fleet lock,
+// retiring only that ledger entry and never touching a replacement machine that may have
+// reused the same worker handle. An already-gone rental is treated as complete.
+func cmdDownRental(ctx context.Context, f *Fleet, market, id string) error {
+	if id == "" || id == "dry-run" {
+		return nil
+	}
+	unlock, err := f.lock(time.Minute)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if err := f.refresh(); err != nil {
+		return err
+	}
+	m := f.market(market)
+	if m == nil {
+		return fmt.Errorf("could not end %s on %s: there is no key for %s now", id, marketTitle(market), marketTitle(market))
+	}
+	l, err := f.readLedger()
+	if err != nil {
+		return err
+	}
+	key := ledgerKey(market, id)
+	rec := l.Pods[key]
+	var found *Rental
+	listedOK := false
+	if rs, rerr := m.Rentals(ctx); rerr == nil {
+		listedOK = true
+		for i := range rs {
+			if rs[i].ID == id && (rs[i].Market == "" || rs[i].Market == market) {
+				found = &rs[i]
+				break
+			}
+		}
+	}
+	if listedOK && found == nil {
+		if rec != nil {
+			rec.Why = "probe ended before cleanup"
+			if err := f.retire(l, key, minTime(f.now(), rec.Alive.Add(2*f.o.Every))); err != nil {
+				return err
+			}
+			return f.writeLedger(l)
+		}
+		return nil
+	}
+	if f.o.DryRun {
+		f.say("would end probe machine %s on %s", id, marketTitle(market))
+		return nil
+	}
+	if err := m.End(ctx, id); err != nil {
+		return err
+	}
+	handle := ""
+	if rec != nil {
+		handle = rec.Handle
+		rec.Why = "probe ended"
+	} else if found != nil {
+		handle = found.Name
+	}
+	r := Rental{Market: market, ID: id}
+	if found != nil {
+		r = *found
+	} else if rec != nil {
+		r.Card = rec.GPU
+	}
+	f.event(&r, handle, "ended", "probe ended")
+	if rec != nil {
+		if err := f.retire(l, key, f.now()); err != nil {
+			return err
+		}
+		if err := f.writeLedger(l); err != nil {
+			return err
+		}
+	}
+	if handle != "" {
+		f.say("ended probe %s (%s on %s)", handle, id, marketTitle(market))
+	} else {
+		f.say("ended probe %s on %s", id, marketTitle(market))
+	}
+	return nil
 }
 
 func cmdSSH(ctx context.Context, f *Fleet, handle string) error {

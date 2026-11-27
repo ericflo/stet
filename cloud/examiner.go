@@ -80,13 +80,14 @@ type ExaminerConfig struct {
 // MaxHourly is honored as an explicit zero ceiling (no examiner rental permitted); AccountingErr
 // defers new rentals while still allowing teardown and timeout cleanup.
 type ExaminerBudget struct {
-	LiveWorkers   int
-	MaxWorkers    int
-	HourlyNow     float64 // live worker $/h (excluding any already-active examiner)
-	MaxHourly     float64
-	SpentToday    float64
-	DailyBudget   float64
-	AccountingErr error
+	LiveWorkers       int
+	MaxWorkers        int
+	HourlyNow         float64 // live worker $/h (excluding any already-active examiner)
+	MaxHourly         float64
+	SpentToday        float64
+	DailyBudget       float64
+	AccountingErr     error
+	CurrentSpentToday func() (float64, error) // optional fresh today-spend reader recomputed after cleanup, before rent
 }
 
 // ExaminerOffer is one eligible 1x RTX 5090 offer on Vast.ai.
@@ -115,14 +116,15 @@ type ExaminerLaunch struct {
 
 // ExaminerInstance is one live or stopped examiner instance returned by Vast.ai.
 type ExaminerInstance struct {
-	ID       string
-	Label    string
-	State    string // starting | running | stopped
-	Status   string
-	PublicIP string
-	HostPort string
-	Price    float64
-	Created  time.Time
+	ID             string
+	Label          string
+	State          string // starting | running | stopped
+	Status         string
+	PublicIP       string
+	HostPort       string
+	Price          float64
+	Created        time.Time
+	ObservedLiveAt time.Time `json:"observed_live_at,omitempty"`
 }
 
 // ExaminerProvider abstracts Vast.ai examiner provisioning so tests can mock it cleanly.
@@ -137,17 +139,18 @@ type ExaminerProvider interface {
 // API key, pinned peer certificate, pre-rental reservation, unrecorded terminal spend charges,
 // or leak an orphaned 5090 on Vast.ai.
 type examinerState struct {
-	InstanceID    string             `json:"instance_id,omitempty"`
-	PendingRent   bool               `json:"pending_rent,omitempty"`
-	ReservedLabel string             `json:"reserved_label,omitempty"`
-	RoundID       string             `json:"round_id,omitempty"`
-	APIKey        string             `json:"api_key,omitempty"`
-	CertPEM       string             `json:"cert_pem,omitempty"`
-	Upstream      string             `json:"upstream,omitempty"`
-	Price         float64            `json:"price,omitempty"`
-	Created       time.Time          `json:"created,omitempty"`
-	PendingSpends []podRecord        `json:"pending_spends,omitempty"`
-	Unresolved    []ExaminerInstance `json:"unresolved,omitempty"`
+	InstanceID     string             `json:"instance_id,omitempty"`
+	PendingRent    bool               `json:"pending_rent,omitempty"`
+	ReservedLabel  string             `json:"reserved_label,omitempty"`
+	RoundID        string             `json:"round_id,omitempty"`
+	APIKey         string             `json:"api_key,omitempty"`
+	CertPEM        string             `json:"cert_pem,omitempty"`
+	Upstream       string             `json:"upstream,omitempty"`
+	Price          float64            `json:"price,omitempty"`
+	Created        time.Time          `json:"created,omitempty"`
+	ObservedLiveAt time.Time          `json:"observed_live_at,omitempty"`
+	PendingSpends  []podRecord        `json:"pending_spends,omitempty"`
+	Unresolved     []ExaminerInstance `json:"unresolved,omitempty"`
 }
 
 func validRate(p float64) bool { return p > 0 && !math.IsNaN(p) && !math.IsInf(p, 0) }
@@ -378,20 +381,32 @@ func examinerTLSConfig(certPEM []byte, now func() time.Time) (*tls.Config, error
 	}, nil
 }
 
-func boundedExaminerAccrual(price float64, created, now, dayStart time.Time, timeout time.Duration) float64 {
-	start := created
-	if start.IsZero() || start.After(now) {
-		start = now
-	}
+// examinerAccrualEnd returns the accrual end time for an examiner instance: capped at the
+// container-side self-destruct TTL when unobserved (controller offline), but extending through
+// the latest time the provider confirmed the contract was still live when teardown failed past TTL.
+func examinerAccrualEnd(created, observedLive, now time.Time, timeout time.Duration) time.Time {
 	end := now
 	if timeout <= 0 {
 		timeout = 45 * time.Minute
 	}
 	if !created.IsZero() {
-		if capAt := created.Add(timeout); end.After(capAt) {
+		capAt := created.Add(timeout)
+		if !observedLive.IsZero() && observedLive.After(capAt) {
+			capAt = observedLive
+		}
+		if end.After(capAt) {
 			end = capAt
 		}
 	}
+	return end
+}
+
+func boundedExaminerAccrual(price float64, created, observedLive, now, dayStart time.Time, timeout time.Duration) float64 {
+	start := created
+	if start.IsZero() || start.After(now) {
+		start = now
+	}
+	end := examinerAccrualEnd(created, observedLive, now, timeout)
 	rec := podRecord{Cost: price, Start: start, End: end}
 	return rec.dollarsBetween(dayStart, end)
 }
@@ -405,15 +420,28 @@ func snapshotFromState(st examinerState, home string, now time.Time, timeout tim
 	seenLive := map[string]bool{}
 	if st.InstanceID != "" || st.PendingRent {
 		live++
+		obs := st.ObservedLiveAt
+		created := st.Created
+		rate := st.Price
 		if st.InstanceID != "" {
 			seenLive[st.InstanceID] = true
+			if u, ok := findUnresolved(st.Unresolved, st.InstanceID); ok {
+				if u.ObservedLiveAt.After(obs) {
+					obs = u.ObservedLiveAt
+				}
+				if created.IsZero() && !u.Created.IsZero() {
+					created = u.Created
+				}
+				if !validRate(rate) && validRate(u.Price) {
+					rate = u.Price
+				}
+			}
 		}
-		rate := st.Price
 		if !validRate(rate) {
 			rate = fallbackRate
 		}
 		hourly += rate
-		accrued += boundedExaminerAccrual(rate, st.Created, now, dayStart, timeout)
+		accrued += boundedExaminerAccrual(rate, created, obs, now, dayStart, timeout)
 	}
 	for _, u := range st.Unresolved {
 		if u.ID == "" || seenLive[u.ID] {
@@ -426,7 +454,7 @@ func snapshotFromState(st examinerState, home string, now time.Time, timeout tim
 			rate = fallbackRate
 		}
 		hourly += rate
-		accrued += boundedExaminerAccrual(rate, u.Created, now, dayStart, timeout)
+		accrued += boundedExaminerAccrual(rate, u.Created, u.ObservedLiveAt, now, dayStart, timeout)
 	}
 	for _, p := range st.PendingSpends {
 		if p.ID != "" && !seenLive[p.ID] && !spentHasExaminer(home, p.ID) {
@@ -456,6 +484,30 @@ func activeExaminerFromDisk(home string, now time.Time, timeout time.Duration, m
 	return live, hourly, accrued, nil
 }
 
+// examinerDiskID identifies the active instance / pre-rental reservation last observed or written
+// cleanly to examiner.json so dirty recovery can distinguish a peer controller's newer disk write
+// from this controller's own stale pre-failure file.
+type examinerDiskID struct {
+	InstanceID    string
+	PendingRent   bool
+	ReservedLabel string
+	APIKey        string
+	CertPEM       string
+}
+
+func diskIDOf(st *examinerState) examinerDiskID {
+	if st == nil {
+		return examinerDiskID{}
+	}
+	return examinerDiskID{
+		InstanceID:    st.InstanceID,
+		PendingRent:   st.PendingRent,
+		ReservedLabel: st.ReservedLabel,
+		APIKey:        st.APIKey,
+		CertPEM:       st.CertPEM,
+	}
+}
+
 // Examiner manages the lifecycle of an ephemeral 1x RTX 5090 vLLM server and serves an
 // authenticated local loopback reverse proxy for stet-examine.
 type Examiner struct {
@@ -472,6 +524,8 @@ type Examiner struct {
 	recorded     map[string]bool
 	mu           sync.RWMutex
 	loaded       bool
+	dirty        bool           // true when last saveState/persistState failed so in-memory state leads disk
+	lastDisk     examinerDiskID // active identity on disk at last clean read or write
 	owner        string
 	state        examinerState
 	ready        bool
@@ -574,13 +628,36 @@ func (e *Examiner) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	proxy.ServeHTTP(w, r)
 }
 
+func (e *Examiner) writeStateFile(st *examinerState) error {
+	if e.home == "" || e.dryRun {
+		return nil
+	}
+	e.fileMu.Lock()
+	defer e.fileMu.Unlock()
+	err := writeExaminerState(e.home, st)
+	if err == nil {
+		e.mu.Lock()
+		e.dirty = false
+		e.lastDisk = diskIDOf(st)
+		e.mu.Unlock()
+	}
+	return err
+}
+
 func (e *Examiner) saveState(st *examinerState) error {
 	if e.home == "" || e.dryRun {
 		return nil
 	}
 	e.fileMu.Lock()
 	defer e.fileMu.Unlock()
-	return writeExaminerState(e.home, st)
+	err := writeExaminerState(e.home, st)
+	e.mu.Lock()
+	e.dirty = err != nil
+	if err == nil {
+		e.lastDisk = diskIDOf(st)
+	}
+	e.mu.Unlock()
+	return err
 }
 
 func (e *Examiner) persistState(st *examinerState) error {
@@ -589,11 +666,14 @@ func (e *Examiner) persistState(st *examinerState) error {
 	}
 	e.fileMu.Lock()
 	defer e.fileMu.Unlock()
+	var err error
+	written := st
 	if st != nil && st.InstanceID != "" {
 		e.mu.RLock()
 		match := e.state.InstanceID == st.InstanceID && e.state.APIKey == st.APIKey && e.state.CertPEM == st.CertPEM
 		pending := append([]podRecord(nil), e.state.PendingSpends...)
 		unresolved := append([]ExaminerInstance(nil), e.state.Unresolved...)
+		obs := e.state.ObservedLiveAt
 		e.mu.RUnlock()
 		if !match {
 			return nil
@@ -601,9 +681,21 @@ func (e *Examiner) persistState(st *examinerState) error {
 		cp := *st
 		cp.PendingSpends = pending
 		cp.Unresolved = unresolved
-		return writeExaminerState(e.home, &cp)
+		if obs.After(cp.ObservedLiveAt) {
+			cp.ObservedLiveAt = obs
+		}
+		written = &cp
+		err = writeExaminerState(e.home, &cp)
+	} else {
+		err = writeExaminerState(e.home, st)
 	}
-	return writeExaminerState(e.home, st)
+	e.mu.Lock()
+	e.dirty = err != nil
+	if err == nil {
+		e.lastDisk = diskIDOf(written)
+	}
+	e.mu.Unlock()
+	return err
 }
 
 // setUpstream activates the local proxy ONLY if the active instance ID, API key, and pinned peer
@@ -719,9 +811,53 @@ func (e *Examiner) pendingRentActive(saved examinerState, now time.Time) bool {
 	return now.Sub(saved.Created) < e.pendingRentGrace()
 }
 
-func (e *Examiner) ensureLoaded() error {
+func mergePendingSpends(a, b []podRecord) []podRecord {
+	seen := map[string]bool{}
+	var out []podRecord
+	for _, list := range [][]podRecord{a, b} {
+		for _, r := range list {
+			if r.ID == "" || seen[r.ID] {
+				continue
+			}
+			seen[r.ID] = true
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+func mergeUnresolvedLists(a, b []ExaminerInstance) []ExaminerInstance {
+	byID := map[string]ExaminerInstance{}
+	var order []string
+	for _, list := range [][]ExaminerInstance{a, b} {
+		for _, u := range list {
+			if u.ID == "" {
+				continue
+			}
+			if prev, ok := byID[u.ID]; ok {
+				byID[u.ID] = mergeExaminerInstance(prev, u)
+			} else {
+				byID[u.ID] = u
+				order = append(order, u.ID)
+			}
+		}
+	}
+	out := make([]ExaminerInstance, 0, len(order))
+	for _, id := range order {
+		out = append(out, byID[id])
+	}
+	return out
+}
+
+// reloadState reloads durable examiner.json under fileMu so multiple controllers sharing a fleet
+// home (e.g. standalone `stet-cloud examiner` and `stet-cloud scale --follow` serialized by the
+// fleet lock) always observe each other's rentals and teardowns instead of killing active VMs as
+// strays. When a prior write failed (e.dirty), disk is inspected first so recovery NEVER clobbers
+// or deletes an active examiner persisted by another controller.
+func (e *Examiner) reloadState(tryFlush bool) error {
+	e.fileMu.Lock()
+	defer e.fileMu.Unlock()
 	e.mu.Lock()
-	defer e.mu.Unlock()
 	var ownerErr error
 	if e.owner == "" {
 		if id, err := ensureExaminerOwner(e.home, !e.dryRun); err != nil {
@@ -730,29 +866,152 @@ func (e *Examiner) ensureLoaded() error {
 			e.owner = id
 		}
 	}
-	var stateErr error
-	if !e.loaded {
-		if e.home == "" {
-			e.loaded = true
-		} else if st, err := readExaminerStateErr(e.home); err != nil {
-			stateErr = err
-		} else {
-			e.loaded = true
-			if st != nil {
-				e.state = *st
+	if e.home == "" {
+		e.loaded = true
+		e.mu.Unlock()
+		return ownerErr
+	}
+	dirty := e.dirty
+	lastDisk := e.lastDisk
+	memSt := e.cloneStateLocked()
+	e.mu.Unlock()
+
+	diskSt, stateErr := readExaminerStateErr(e.home)
+	if dirty {
+		if stateErr != nil {
+			// Disk is still broken/unreadable: preserve authoritative in-memory state for
+			// ActiveSnapshot (tryFlush=false), and report the error on Reconcile/EnforceTimeout.
+			if !tryFlush {
+				return ownerErr
 			}
+			return stateErr
 		}
+		curDiskID := diskIDOf(diskSt)
+		if curDiskID != lastDisk {
+			// A peer controller genuinely moved examiner.json since our last clean sync.
+			// Adopt disk's active state and merge any unsaved PendingSpends/Unresolved obligations
+			// rather than clobbering the peer's state.
+			var merged examinerState
+			if diskSt != nil {
+				merged = *diskSt
+			}
+			merged.PendingSpends = mergePendingSpends(merged.PendingSpends, memSt.PendingSpends)
+			merged.Unresolved = mergeUnresolvedLists(merged.Unresolved, memSt.Unresolved)
+			var basePending []podRecord
+			var baseUnresolved []ExaminerInstance
+			if diskSt != nil {
+				basePending = diskSt.PendingSpends
+				baseUnresolved = diskSt.Unresolved
+			}
+			needWrite := len(merged.PendingSpends) != len(basePending) ||
+				len(merged.Unresolved) != len(baseUnresolved)
+			var werr error
+			if tryFlush && needWrite && !e.dryRun {
+				werr = writeExaminerState(e.home, &merged)
+			}
+			e.mu.Lock()
+			e.loaded = true
+			e.lastDisk = curDiskID
+			if !needWrite || (tryFlush && werr == nil) {
+				e.dirty = false
+				if tryFlush && werr == nil {
+					e.lastDisk = diskIDOf(&merged)
+				}
+			}
+			changed := e.state.InstanceID != merged.InstanceID ||
+				e.state.APIKey != merged.APIKey ||
+				e.state.CertPEM != merged.CertPEM
+			e.state = merged
+			var oldTr *http.Transport
+			if changed {
+				oldTr = e.proxyTr
+				e.ready = false
+				e.proxy = nil
+				e.proxyTr = nil
+				e.upstream = ""
+				e.lastProbeErr = ""
+			}
+			e.mu.Unlock()
+			if oldTr != nil {
+				oldTr.CloseIdleConnections()
+			}
+			if werr != nil {
+				return werr
+			}
+			return ownerErr
+		}
+		// Disk still holds our own stale pre-failure state (no peer moved it): NEVER resurrect
+		// stale disk state into memory; keep memSt for ActiveSnapshot, and flush memSt on tryFlush.
+		if !tryFlush {
+			return ownerErr
+		}
+		merged := memSt
+		if diskSt != nil {
+			merged.PendingSpends = mergePendingSpends(memSt.PendingSpends, diskSt.PendingSpends)
+			merged.Unresolved = mergeUnresolvedLists(memSt.Unresolved, diskSt.Unresolved)
+		}
+		if err := writeExaminerState(e.home, &merged); err != nil {
+			return err
+		}
+		e.mu.Lock()
+		e.state = merged
+		e.lastDisk = diskIDOf(&merged)
+		e.dirty = false
+		e.loaded = true
+		e.mu.Unlock()
+		return ownerErr
 	}
 	if stateErr != nil {
 		return stateErr
 	}
+	e.mu.Lock()
+	e.loaded = true
+	var next examinerState
+	if diskSt != nil {
+		next = *diskSt
+	}
+	e.lastDisk = diskIDOf(diskSt)
+	changed := e.state.InstanceID != next.InstanceID ||
+		e.state.APIKey != next.APIKey ||
+		e.state.CertPEM != next.CertPEM
+	e.state = next
+	var oldTr *http.Transport
+	if changed {
+		oldTr = e.proxyTr
+		e.ready = false
+		e.proxy = nil
+		e.proxyTr = nil
+		e.upstream = ""
+		e.lastProbeErr = ""
+	}
+	e.mu.Unlock()
+	if oldTr != nil {
+		oldTr.CloseIdleConnections()
+	}
 	return ownerErr
 }
 
+func (e *Examiner) ensureLoaded() error {
+	return e.reloadState(false)
+}
+
 func (e *Examiner) ownerID() string {
-	_ = e.ensureLoaded()
 	e.mu.RLock()
-	defer e.mu.RUnlock()
+	if e.owner != "" {
+		id := e.owner
+		e.mu.RUnlock()
+		return id
+	}
+	e.mu.RUnlock()
+	e.fileMu.Lock()
+	defer e.fileMu.Unlock()
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.owner == "" {
+		if id, err := ensureExaminerOwner(e.home, !e.dryRun); err == nil {
+			e.owner = id
+		}
+	}
 	return e.owner
 }
 
@@ -766,8 +1025,21 @@ func (e *Examiner) cloneStateLocked() examinerState {
 func (e *Examiner) setUnresolved(insts []ExaminerInstance) {
 	e.mu.Lock()
 	had := len(e.state.Unresolved) > 0
-	e.state.Unresolved = append([]ExaminerInstance(nil), insts...)
-	shouldSave := e.loaded && (had || len(insts) > 0)
+	prevByID := map[string]ExaminerInstance{}
+	for _, p := range e.state.Unresolved {
+		if p.ID != "" {
+			prevByID[p.ID] = p
+		}
+	}
+	merged := make([]ExaminerInstance, 0, len(insts))
+	for _, cur := range insts {
+		if prev, ok := prevByID[cur.ID]; ok {
+			cur = mergeExaminerInstance(prev, cur)
+		}
+		merged = append(merged, cur)
+	}
+	e.state.Unresolved = merged
+	shouldSave := e.loaded && (had || len(merged) > 0)
 	st := e.cloneStateLocked()
 	e.mu.Unlock()
 	if shouldSave {
@@ -775,6 +1047,22 @@ func (e *Examiner) setUnresolved(insts []ExaminerInstance) {
 			e.say("warning: could not persist unresolved examiner state in examiner.json: %v", err)
 		}
 	}
+}
+
+func mergeExaminerInstance(prev, cur ExaminerInstance) ExaminerInstance {
+	if cur.Label == "" {
+		cur.Label = prev.Label
+	}
+	if cur.Created.IsZero() {
+		cur.Created = prev.Created
+	}
+	if !validRate(cur.Price) && validRate(prev.Price) {
+		cur.Price = prev.Price
+	}
+	if prev.ObservedLiveAt.After(cur.ObservedLiveAt) {
+		cur.ObservedLiveAt = prev.ObservedLiveAt
+	}
+	return cur
 }
 
 // updateUnresolved refreshes persisted Unresolved after a partial pass (like EnforceTimeout) that
@@ -793,11 +1081,15 @@ func (e *Examiner) updateUnresolved(owned []ExaminerInstance, ended map[string]b
 			continue
 		}
 		if cur, ok := listed[prev.ID]; ok {
-			byID[prev.ID] = cur
+			byID[prev.ID] = mergeExaminerInstance(prev, cur)
 		}
 	}
 	for _, inst := range failed {
-		byID[inst.ID] = inst
+		if prev, ok := byID[inst.ID]; ok {
+			byID[inst.ID] = mergeExaminerInstance(prev, inst)
+		} else {
+			byID[inst.ID] = inst
+		}
 	}
 	next := make([]ExaminerInstance, 0, len(byID))
 	for _, inst := range byID {
@@ -954,9 +1246,9 @@ func spentHasExaminer(home, id string) bool {
 	return false
 }
 
-func (e *Examiner) recordSpend(rec podRecord) error {
+func (e *Examiner) recordSpend(rec podRecord) (bool, error) {
 	if e.onSpent == nil || rec.ID == "" {
-		return nil
+		return false, nil
 	}
 	e.fileMu.Lock()
 	defer e.fileMu.Unlock()
@@ -965,13 +1257,13 @@ func (e *Examiner) recordSpend(rec podRecord) error {
 	}
 	if e.recorded[rec.ID] || spentHasExaminer(e.home, rec.ID) {
 		e.recorded[rec.ID] = true
-		return nil
+		return false, nil
 	}
 	if err := e.onSpent(rec); err != nil {
-		return err
+		return false, err
 	}
 	e.recorded[rec.ID] = true
-	return nil
+	return true, nil
 }
 
 func (e *Examiner) queuePendingSpend(rec podRecord) {
@@ -1013,7 +1305,7 @@ func (e *Examiner) flushPendingSpends() error {
 		if !validRate(rec.Cost) {
 			rec.Cost = e.fallbackHourlyRate()
 		}
-		if err := e.recordSpend(rec); err != nil {
+		if _, err := e.recordSpend(rec); err != nil {
 			keep = append(keep, rec)
 			if firstErr == nil {
 				firstErr = fmt.Errorf("recording examiner spend for %s: %w", rec.ID, err)
@@ -1047,8 +1339,13 @@ func (e *Examiner) flushPendingSpends() error {
 }
 
 func (e *Examiner) recordEndedAt(id, label string, price float64, start, end time.Time, roundID, why string) error {
-	if e.onSpent == nil || id == "" {
-		return nil
+	_, err := e.recordEndedAtDollars(id, label, price, start, end, roundID, why)
+	return err
+}
+
+func (e *Examiner) recordEndedAtDollars(id, label string, price float64, start, end time.Time, roundID, why string) (float64, error) {
+	if id == "" {
+		return 0, nil
 	}
 	if start.IsZero() || start.After(end) {
 		start = end
@@ -1057,8 +1354,8 @@ func (e *Examiner) recordEndedAt(id, label string, price float64, start, end tim
 		roundID = examinerLabelRound(label, e.ownerID())
 	}
 	if !validRate(price) {
-		if spentHasExaminer(e.home, id) {
-			return nil
+		if e.onSpent != nil && spentHasExaminer(e.home, id) {
+			return 0, nil
 		}
 		// Never write a $0.00 spend record or deadlock future autoscaling when the provider omits
 		// a stray instance's hourly rate: record conservatively at the configured max-price cap.
@@ -1074,14 +1371,28 @@ func (e *Examiner) recordEndedAt(id, label string, price float64, start, end tim
 		Cloud: "verified", Cost: price, Start: start, Alive: end, End: end,
 		For: "examiner", Round: roundID, Why: why,
 	}
-	if err := e.recordSpend(rec); err != nil {
-		e.queuePendingSpend(rec)
-		return fmt.Errorf("recording examiner spend for %s: %w", id, err)
+	now := e.now()
+	todayDollars := rec.dollarsBetween(startOfDay(now), end)
+	if e.onSpent == nil {
+		return todayDollars, nil
 	}
-	return nil
+	wrote, err := e.recordSpend(rec)
+	if err != nil {
+		e.queuePendingSpend(rec)
+		return todayDollars, fmt.Errorf("recording examiner spend for %s: %w", id, err)
+	}
+	if !wrote {
+		return 0, nil
+	}
+	return todayDollars, nil
 }
 
 func (e *Examiner) recordEnded(inst ExaminerInstance, fallbackStart time.Time, fallbackPrice float64, roundID, why string) error {
+	_, err := e.recordEndedDollars(inst, fallbackStart, fallbackPrice, roundID, why)
+	return err
+}
+
+func (e *Examiner) recordEndedDollars(inst ExaminerInstance, fallbackStart time.Time, fallbackPrice float64, roundID, why string) (float64, error) {
 	now := e.now()
 	start := inst.Created
 	if start.IsZero() {
@@ -1091,49 +1402,63 @@ func (e *Examiner) recordEnded(inst ExaminerInstance, fallbackStart time.Time, f
 	if !validRate(price) {
 		price = fallbackPrice
 	}
-	return e.recordEndedAt(inst.ID, inst.Label, price, start, now, roundID, why)
+	return e.recordEndedAtDollars(inst.ID, inst.Label, price, start, now, roundID, why)
 }
 
 // recordMissingSaved records a bounded, idempotent terminal spend charge for a saved examiner
 // instance that vanished from the provider (e.g. terminated by its container-side TTL watchdog
 // or ended during a controller outage) so accrued spend never vanishes from daily budget totals.
 func (e *Examiner) recordMissingSaved(saved examinerState, why string) error {
+	_, err := e.recordMissingSavedDollars(saved, why)
+	return err
+}
+
+func (e *Examiner) recordMissingSavedDollars(saved examinerState, why string) (float64, error) {
 	if saved.InstanceID == "" || e.dryRun {
-		return nil
+		return 0, nil
 	}
 	now := e.now()
-	start := saved.Created
+	created := saved.Created
+	obs := saved.ObservedLiveAt
+	price := saved.Price
+	if u, ok := findUnresolved(saved.Unresolved, saved.InstanceID); ok {
+		if u.ObservedLiveAt.After(obs) {
+			obs = u.ObservedLiveAt
+		}
+		if created.IsZero() && !u.Created.IsZero() {
+			created = u.Created
+		}
+		if !validRate(price) && validRate(u.Price) {
+			price = u.Price
+		}
+	}
+	start := created
 	if start.IsZero() || start.After(now) {
 		start = now
 	}
-	end := now
-	if !saved.Created.IsZero() && e.cfg.Timeout > 0 {
-		if capAt := saved.Created.Add(e.cfg.Timeout); end.After(capAt) {
-			end = capAt
-		}
-	}
-	return e.recordEndedAt(saved.InstanceID, "", saved.Price, start, end, saved.RoundID, why)
+	end := examinerAccrualEnd(created, obs, now, e.cfg.Timeout)
+	return e.recordEndedAtDollars(saved.InstanceID, saved.ReservedLabel, price, start, end, saved.RoundID, why)
 }
 
 // recordMissingInstance records a bounded, idempotent terminal spend charge for a tracked
 // examiner instance (saved or previously unresolved orphan) that vanished from the provider so
 // its accrued daily spend never disappears from budget totals.
 func (e *Examiner) recordMissingInstance(inst ExaminerInstance, why string) error {
+	_, err := e.recordMissingInstanceDollars(inst, why)
+	return err
+}
+
+func (e *Examiner) recordMissingInstanceDollars(inst ExaminerInstance, why string) (float64, error) {
 	if inst.ID == "" || e.dryRun {
-		return nil
+		return 0, nil
 	}
 	now := e.now()
 	start := inst.Created
 	if start.IsZero() || start.After(now) {
 		start = now
 	}
-	end := now
-	if !inst.Created.IsZero() && e.cfg.Timeout > 0 {
-		if capAt := inst.Created.Add(e.cfg.Timeout); end.After(capAt) {
-			end = capAt
-		}
-	}
-	return e.recordEndedAt(inst.ID, inst.Label, inst.Price, start, end, "", why)
+	end := examinerAccrualEnd(inst.Created, inst.ObservedLiveAt, now, e.cfg.Timeout)
+	return e.recordEndedAtDollars(inst.ID, inst.Label, inst.Price, start, end, "", why)
 }
 
 func findUnresolved(prev []ExaminerInstance, id string) (ExaminerInstance, bool) {
@@ -1146,15 +1471,96 @@ func findUnresolved(prev []ExaminerInstance, id string) (ExaminerInstance, bool)
 }
 
 func savedOrphanInstance(saved examinerState, prev []ExaminerInstance) ExaminerInstance {
+	obs := saved.ObservedLiveAt
 	if u, ok := findUnresolved(prev, saved.InstanceID); ok {
+		if obs.After(u.ObservedLiveAt) {
+			u.ObservedLiveAt = obs
+		}
+		if u.Created.IsZero() {
+			u.Created = saved.Created
+		}
+		if !validRate(u.Price) && validRate(saved.Price) {
+			u.Price = saved.Price
+		}
 		return u
 	}
 	return ExaminerInstance{
-		ID:      saved.InstanceID,
-		Label:   saved.ReservedLabel,
-		State:   "unknown",
-		Price:   saved.Price,
-		Created: saved.Created,
+		ID:             saved.InstanceID,
+		Label:          saved.ReservedLabel,
+		State:          "unknown",
+		Price:          saved.Price,
+		Created:        saved.Created,
+		ObservedLiveAt: obs,
+	}
+}
+
+func (e *Examiner) noteSavedObservedLive(saved *examinerState, now time.Time) {
+	if now.After(saved.ObservedLiveAt) {
+		saved.ObservedLiveAt = now
+	}
+	e.mu.Lock()
+	if e.state.InstanceID == saved.InstanceID && now.After(e.state.ObservedLiveAt) {
+		e.state.ObservedLiveAt = now
+	}
+	e.mu.Unlock()
+}
+
+// teardownKnownDueOnListErr attempts direct EndExaminer teardown on known due instance IDs
+// (tracked saved.InstanceID and Unresolved orphans) even while provider listing is failing, so a
+// listing outage never disables timeout or idle cleanup (including containers still pulling their
+// image before their in-container watchdog starts).
+func (e *Examiner) teardownKnownDueOnListErr(ctx context.Context, saved examinerState, allDue bool, now time.Time) {
+	_, savedWasUnresolved := findUnresolved(saved.Unresolved, saved.InstanceID)
+	savedDue := saved.InstanceID != "" &&
+		(allDue || savedWasUnresolved || saved.Created.IsZero() || now.Sub(saved.Created) > e.cfg.Timeout || saved.APIKey == "" || saved.CertPEM == "")
+	if e.dryRun {
+		if savedDue {
+			e.say("would end known due examiner GPU (machine %s) during listing outage", saved.InstanceID)
+		}
+		for _, u := range saved.Unresolved {
+			if u.ID != "" && u.ID != saved.InstanceID {
+				e.say("would end known unresolved examiner GPU (machine %s) during listing outage", u.ID)
+			}
+		}
+		return
+	}
+	endedIDs := map[string]bool{}
+	var keepUnresolved []ExaminerInstance
+	changedUnresolved := false
+	for _, u := range saved.Unresolved {
+		if u.ID == "" || u.ID == saved.InstanceID {
+			continue
+		}
+		if err := e.prov.EndExaminer(ctx, u.ID); err != nil {
+			keepUnresolved = append(keepUnresolved, u)
+			e.say("could not end known unresolved examiner GPU (machine %s) during listing outage: %v", u.ID, err)
+			continue
+		}
+		endedIDs[u.ID] = true
+		changedUnresolved = true
+		e.say("ended known unresolved examiner GPU (machine %s) during listing outage", u.ID)
+		_ = e.recordMissingInstance(u, "unresolved examiner ended during provider listing outage")
+	}
+	if savedDue {
+		if err := e.prov.EndExaminer(ctx, saved.InstanceID); err != nil {
+			e.proxyOffline()
+			keepUnresolved = append(keepUnresolved, savedOrphanInstance(saved, saved.Unresolved))
+			changedUnresolved = true
+			e.say("could not end known due examiner GPU (machine %s) during listing outage: %v", saved.InstanceID, err)
+		} else {
+			endedIDs[saved.InstanceID] = true
+			changedUnresolved = true
+			why := "examiner ended during provider listing outage"
+			if !allDue && !saved.Created.IsZero() && now.Sub(saved.Created) > e.cfg.Timeout {
+				why = "timed-out examiner ended during provider listing outage"
+			}
+			e.say("ended known examiner GPU (machine %s) during listing outage", saved.InstanceID)
+			_ = e.recordMissingSaved(saved, why)
+			e.clearState()
+		}
+	}
+	if changedUnresolved || len(endedIDs) > 0 {
+		e.setUnresolved(keepUnresolved)
 	}
 }
 
@@ -1162,9 +1568,9 @@ func savedOrphanInstance(saved examinerState, prev []ExaminerInstance) ExaminerI
 // provider listing. Never drops an orphan or bills terminal spend on omission alone: calls
 // EndExaminer so termination is confirmed (200/204/404 -> nil) before recording bounded spend,
 // and retains the orphan in Unresolved if EndExaminer fails.
-func (e *Examiner) confirmMissingUnresolved(ctx context.Context, prevUnresolved, listed []ExaminerInstance, skipID, why string) (still []ExaminerInstance, ended map[string]bool, endErr, spendErr error) {
+func (e *Examiner) confirmMissingUnresolved(ctx context.Context, prevUnresolved, listed []ExaminerInstance, skipID, why string) (still []ExaminerInstance, ended map[string]bool, endedToday float64, endErr, spendErr error) {
 	if len(prevUnresolved) == 0 || e.dryRun {
-		return nil, nil, nil, nil
+		return nil, nil, 0, nil, nil
 	}
 	listedIDs := make(map[string]bool, len(listed))
 	for _, inst := range listed {
@@ -1184,11 +1590,13 @@ func (e *Examiner) confirmMissingUnresolved(ctx context.Context, prevUnresolved,
 			continue
 		}
 		ended[prev.ID] = true
-		if rerr := e.recordMissingInstance(prev, why); rerr != nil && spendErr == nil {
+		d, rerr := e.recordMissingInstanceDollars(prev, why)
+		endedToday += d
+		if rerr != nil && spendErr == nil {
 			spendErr = rerr
 		}
 	}
-	return still, ended, endErr, spendErr
+	return still, ended, endedToday, endErr, spendErr
 }
 
 // EnforceTimeout checks owned examiner instances against the hard --examiner-timeout TTL and
@@ -1198,7 +1606,7 @@ func (e *Examiner) EnforceTimeout(ctx context.Context) error {
 	if e == nil || e.prov == nil {
 		return nil
 	}
-	loadErr := e.ensureLoaded()
+	loadErr := e.reloadState(true)
 	firstErr := e.flushPendingSpends()
 	if firstErr == nil && loadErr != nil {
 		firstErr = loadErr
@@ -1212,10 +1620,14 @@ func (e *Examiner) EnforceTimeout(ctx context.Context) error {
 	}
 	insts, err := e.prov.ListExaminers(ctx)
 	if err != nil {
+		e.teardownKnownDueOnListErr(ctx, saved, false, e.now())
 		return fmt.Errorf("listing examiner instances for timeout check: %w", err)
 	}
 	owned := filterOwnedExaminers(insts, owner, saved.InstanceID, saved.ReservedLabel)
 	now := e.now()
+	for i := range owned {
+		owned[i].ObservedLiveAt = now
+	}
 
 	foundSaved := false
 	endedIDs := map[string]bool{}
@@ -1225,6 +1637,7 @@ func (e *Examiner) EnforceTimeout(ctx context.Context) error {
 			(saved.ReservedLabel != "" && inst.Label == saved.ReservedLabel)
 		if inst.ID == saved.InstanceID {
 			foundSaved = true
+			e.noteSavedObservedLive(&saved, now)
 		}
 		var created time.Time
 		fallbackPrice := 0.0
@@ -1248,7 +1661,15 @@ func (e *Examiner) EnforceTimeout(ctx context.Context) error {
 			e.promoteReservedInstance(&saved, inst)
 			if inst.ID == saved.InstanceID {
 				foundSaved = true
+				e.noteSavedObservedLive(&saved, now)
 			}
+			if inst.Created.IsZero() && !created.IsZero() {
+				inst.Created = created
+			}
+			if !validRate(inst.Price) && validRate(fallbackPrice) {
+				inst.Price = fallbackPrice
+			}
+			inst.ObservedLiveAt = now
 			e.proxyOffline()
 			failedEnds = append(failedEnds, inst)
 			e.say("could not end timed-out examiner GPU (machine %s): %v", inst.ID, err)
@@ -1271,7 +1692,7 @@ func (e *Examiner) EnforceTimeout(ctx context.Context) error {
 	savedNeedsEnd := !foundSaved && saved.InstanceID != "" &&
 		(savedWasUnresolved || saved.Created.IsZero() || now.Sub(saved.Created) > e.cfg.Timeout)
 	if !e.dryRun {
-		stillUnresolved, confirmedEnded, uEndErr, uSpendErr := e.confirmMissingUnresolved(ctx, saved.Unresolved, owned, saved.InstanceID, "unresolved examiner orphan confirmed ended during timeout check")
+		stillUnresolved, confirmedEnded, _, uEndErr, uSpendErr := e.confirmMissingUnresolved(ctx, saved.Unresolved, owned, saved.InstanceID, "unresolved examiner orphan confirmed ended during timeout check")
 		for id := range confirmedEnded {
 			endedIDs[id] = true
 		}
@@ -1341,7 +1762,7 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 	if e == nil || e.prov == nil {
 		return nil
 	}
-	loadErr := e.ensureLoaded()
+	loadErr := e.reloadState(true)
 	spendErr := e.flushPendingSpends()
 	needRound := roundNeedingExam(w)
 	e.mu.RLock()
@@ -1350,17 +1771,21 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 	wasReady := e.ready
 	wasUpstream := e.upstream
 	e.mu.RUnlock()
+	preNow := e.now()
+	_, _, preAccrued := snapshotFromState(saved, e.home, preNow, e.cfg.Timeout, e.cfg.MaxPrice)
 	prevUnresolved := append([]ExaminerInstance(nil), saved.Unresolved...)
 	rawInsts, err := e.prov.ListExaminers(ctx)
 	if err != nil {
+		e.teardownKnownDueOnListErr(ctx, saved, needRound == "", e.now())
 		return fmt.Errorf("listing examiner instances: %w", err)
 	}
 	insts := filterOwnedExaminers(rawInsts, owner, saved.InstanceID, saved.ReservedLabel)
-	listedIDs := make(map[string]bool, len(insts))
-	for _, inst := range insts {
-		listedIDs[inst.ID] = true
-	}
 	now := e.now()
+	listedIDs := make(map[string]bool, len(insts))
+	for i := range insts {
+		insts[i].ObservedLiveAt = now
+		listedIDs[insts[i].ID] = true
+	}
 
 	// Case 1: no open round needs an exam -> tear down every owned examiner instance immediately.
 	if needRound == "" {
@@ -1368,12 +1793,24 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 		var failedEnds []ExaminerInstance
 		endedSaved := false
 		for _, inst := range insts {
+			matchesSaved := (saved.InstanceID != "" && inst.ID == saved.InstanceID) ||
+				(saved.ReservedLabel != "" && inst.Label == saved.ReservedLabel)
 			if e.dryRun {
 				e.say("would end examiner GPU (machine %s): no open round needs an exam", inst.ID)
 				continue
 			}
 			if err := e.prov.EndExaminer(ctx, inst.ID); err != nil {
 				e.promoteReservedInstance(&saved, inst)
+				if inst.ID == saved.InstanceID {
+					e.noteSavedObservedLive(&saved, now)
+					if inst.Created.IsZero() && !saved.Created.IsZero() {
+						inst.Created = saved.Created
+					}
+					if !validRate(inst.Price) && validRate(saved.Price) {
+						inst.Price = saved.Price
+					}
+				}
+				inst.ObservedLiveAt = now
 				failedEnds = append(failedEnds, inst)
 				e.say("could not end examiner GPU (machine %s): %v", inst.ID, err)
 				if firstEndErr == nil {
@@ -1381,8 +1818,6 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 				}
 				continue
 			}
-			matchesSaved := (saved.InstanceID != "" && inst.ID == saved.InstanceID) ||
-				(saved.ReservedLabel != "" && inst.Label == saved.ReservedLabel)
 			var fallbackStart time.Time
 			fallbackPrice := 0.0
 			rid := ""
@@ -1415,7 +1850,7 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 			}
 			return loadErr
 		}
-		stillUnresolved, _, uEndErr, uSpendErr := e.confirmMissingUnresolved(ctx, prevUnresolved, insts, saved.InstanceID, "unresolved examiner orphan confirmed ended during idle cleanup")
+		stillUnresolved, _, _, uEndErr, uSpendErr := e.confirmMissingUnresolved(ctx, prevUnresolved, insts, saved.InstanceID, "unresolved examiner orphan confirmed ended during idle cleanup")
 		failedEnds = append(failedEnds, stillUnresolved...)
 		if uEndErr != nil && firstEndErr == nil {
 			firstEndErr = uEndErr
@@ -1467,6 +1902,7 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 	var strayEndErr error
 	var failedEnds []ExaminerInstance
 	endedSaved := false
+	endedToday := 0.0
 	dryRunTimedOut := false
 	for i := range insts {
 		inst := insts[i]
@@ -1479,6 +1915,7 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 			saved.CertPEM != "" &&
 			active == nil {
 			e.promoteReservedInstance(&saved, inst)
+			e.noteSavedObservedLive(&saved, now)
 			if err := e.persistState(&saved); err != nil && spendErr == nil {
 				spendErr = fmt.Errorf("saving adopted examiner.json: %w", err)
 			}
@@ -1490,6 +1927,7 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 			saved.CertPEM != "" &&
 			active == nil
 		if keep {
+			e.noteSavedObservedLive(&saved, now)
 			created := saved.Created
 			if created.IsZero() {
 				created = inst.Created
@@ -1501,6 +1939,13 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 					continue
 				}
 				if err := e.prov.EndExaminer(ctx, inst.ID); err != nil {
+					if inst.Created.IsZero() {
+						inst.Created = created
+					}
+					if !validRate(inst.Price) && validRate(saved.Price) {
+						inst.Price = saved.Price
+					}
+					inst.ObservedLiveAt = now
 					e.proxyOffline()
 					failedEnds = append(failedEnds, inst)
 					e.say("could not end timed-out examiner GPU (machine %s): %v", inst.ID, err)
@@ -1510,7 +1955,9 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 					continue
 				}
 				e.say("ended examiner GPU (machine %s): exceeded --examiner-timeout (%s)", inst.ID, e.cfg.Timeout)
-				if rerr := e.recordEnded(inst, saved.Created, saved.Price, saved.RoundID, "exceeded examiner timeout"); rerr != nil && spendErr == nil {
+				d, rerr := e.recordEndedDollars(inst, saved.Created, saved.Price, saved.RoundID, "exceeded examiner timeout")
+				endedToday += d
+				if rerr != nil && spendErr == nil {
 					spendErr = rerr
 				}
 				endedSaved = true
@@ -1529,6 +1976,16 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 		}
 		if err := e.prov.EndExaminer(ctx, inst.ID); err != nil {
 			e.promoteReservedInstance(&saved, inst)
+			if inst.ID == saved.InstanceID {
+				e.noteSavedObservedLive(&saved, now)
+				if inst.Created.IsZero() && !saved.Created.IsZero() {
+					inst.Created = saved.Created
+				}
+				if !validRate(inst.Price) && validRate(saved.Price) {
+					inst.Price = saved.Price
+				}
+			}
+			inst.ObservedLiveAt = now
 			failedEnds = append(failedEnds, inst)
 			e.say("could not end stray examiner GPU (machine %s): %v", inst.ID, err)
 			if strayEndErr == nil {
@@ -1548,7 +2005,9 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 			endedSaved = true
 		}
 		e.say("ended stray examiner GPU (machine %s, state %s)", inst.ID, inst.State)
-		if rerr := e.recordEnded(inst, fallbackStart, fallbackPrice, rid, "stray or orphaned examiner instance"); rerr != nil && spendErr == nil {
+		d, rerr := e.recordEndedDollars(inst, fallbackStart, fallbackPrice, rid, "stray or orphaned examiner instance")
+		endedToday += d
+		if rerr != nil && spendErr == nil {
 			spendErr = rerr
 		}
 		if matchesSaved {
@@ -1558,7 +2017,8 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 	}
 	missingSavedHeld := false
 	if !e.dryRun {
-		stillUnresolved, _, uEndErr, uSpendErr := e.confirmMissingUnresolved(ctx, prevUnresolved, insts, saved.InstanceID, "unresolved examiner orphan confirmed ended during reconciliation")
+		stillUnresolved, _, uToday, uEndErr, uSpendErr := e.confirmMissingUnresolved(ctx, prevUnresolved, insts, saved.InstanceID, "unresolved examiner orphan confirmed ended during reconciliation")
+		endedToday += uToday
 		failedEnds = append(failedEnds, stillUnresolved...)
 		if uEndErr != nil && strayEndErr == nil {
 			strayEndErr = uEndErr
@@ -1590,7 +2050,9 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 					} else {
 						e.say("ended missing examiner GPU (machine %s): confirmed terminated", saved.InstanceID)
 					}
-					if rerr := e.recordMissingSaved(saved, why); rerr != nil && spendErr == nil {
+					d, rerr := e.recordMissingSavedDollars(saved, why)
+					endedToday += d
+					if rerr != nil && spendErr == nil {
 						spendErr = rerr
 					}
 					e.clearState()
@@ -1685,8 +2147,23 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 		e.say("not renting examiner GPU for %s: %d machines already live and --max is %d; waiting for a slot", needRound, budget.LiveWorkers, budget.MaxWorkers)
 		return nil
 	}
-	if budget.DailyBudget > 0 && budget.SpentToday >= budget.DailyBudget {
-		e.say("not renting examiner GPU for %s: about $%.2f spent today, and the daily budget is $%.2f", needRound, budget.SpentToday, budget.DailyBudget)
+	spentToday := budget.SpentToday
+	if budget.CurrentSpentToday != nil {
+		freshSpent, err := budget.CurrentSpentToday()
+		if err != nil {
+			e.say("not renting examiner GPU for %s: fleet accounting unavailable (%v)", needRound, err)
+			return err
+		}
+		spentToday = freshSpent
+	} else {
+		e.mu.RLock()
+		curSt := e.cloneStateLocked()
+		e.mu.RUnlock()
+		_, _, postAccrued := snapshotFromState(curSt, e.home, now, e.cfg.Timeout, e.cfg.MaxPrice)
+		spentToday = max(0, budget.SpentToday-preAccrued) + endedToday + postAccrued
+	}
+	if budget.DailyBudget > 0 && spentToday >= budget.DailyBudget {
+		e.say("not renting examiner GPU for %s: about $%.2f spent today, and the daily budget is $%.2f", needRound, spentToday, budget.DailyBudget)
 		return nil
 	}
 	headroom := budget.MaxHourly - budget.HourlyNow
@@ -1746,7 +2223,7 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 			Created:       now,
 			PendingSpends: pendingCopy,
 		}
-		if err := e.saveState(&reserved); err != nil {
+		if err := e.writeStateFile(&reserved); err != nil {
 			return fmt.Errorf("saving pre-rental examiner.json: %w", err)
 		}
 		e.mu.Lock()
@@ -1821,8 +2298,32 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 	return nil
 }
 
+func (e *Examiner) diskMatchesSaved(saved examinerState) (ok bool, changed bool) {
+	if e.home == "" || e.dryRun {
+		return true, false
+	}
+	e.fileMu.Lock()
+	defer e.fileMu.Unlock()
+	e.mu.RLock()
+	dirty := e.dirty
+	e.mu.RUnlock()
+	if dirty {
+		return true, false
+	}
+	diskSt, err := readExaminerStateErr(e.home)
+	if err != nil {
+		return false, false
+	}
+	if diskSt == nil || diskSt.InstanceID != saved.InstanceID || diskSt.APIKey != saved.APIKey || diskSt.CertPEM != saved.CertPEM {
+		return false, true
+	}
+	return true, false
+}
+
 // ProbeIfBooting polls Vast + https://<ip>:<port>/v1/models (over pinned TLS) once when an
 // examiner GPU is currently booting so the local proxy turns ready seconds after vLLM loads.
+// Strictly read-only on examiner.json so a stale background probe can never clobber another
+// controller's durable state.
 func (e *Examiner) ProbeIfBooting(ctx context.Context) {
 	if e == nil || e.prov == nil || !e.isBooting() {
 		return
@@ -1835,6 +2336,12 @@ func (e *Examiner) ProbeIfBooting(ctx context.Context) {
 	if ready || saved.InstanceID == "" || saved.APIKey == "" || saved.CertPEM == "" {
 		return
 	}
+	if ok, changed := e.diskMatchesSaved(saved); !ok {
+		if changed {
+			e.proxyOffline()
+		}
+		return
+	}
 	rawInsts, err := e.prov.ListExaminers(ctx)
 	if err != nil {
 		return
@@ -1843,8 +2350,13 @@ func (e *Examiner) ProbeIfBooting(ctx context.Context) {
 		if inst.ID == saved.InstanceID && inst.State != "stopped" && inst.PublicIP != "" && inst.HostPort != "" {
 			upstream := "https://" + net.JoinHostPort(inst.PublicIP, inst.HostPort)
 			if e.probeModels(ctx, upstream, saved.APIKey, saved.CertPEM) {
-				if st, ok, err := e.setUpstream(saved.InstanceID, upstream, saved.APIKey, saved.CertPEM); err == nil && ok {
-					_ = e.persistState(&st)
+				if ok, changed := e.diskMatchesSaved(saved); !ok {
+					if changed {
+						e.proxyOffline()
+					}
+					return
+				}
+				if _, ok, err := e.setUpstream(saved.InstanceID, upstream, saved.APIKey, saved.CertPEM); err == nil && ok {
 					boot := e.now().Sub(saved.Created).Round(time.Second)
 					if saved.Created.IsZero() || boot < 0 {
 						boot = 0

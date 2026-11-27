@@ -766,11 +766,12 @@ def prune_verified(rnd: Round, keep: int = 3) -> int:
 
 # --- exam ---------------------------------------------------------------------------------
 
-def round_exam(rnd: Round, scale: Scale):
+def round_exam(rnd: Round, scale: Scale, *, hours: list[tuple[int, Path]] | None = None):
     """The round's exam: its items (stet.exam), in order. A practice round's has the season's
     fresh writing too once some has been harvested on this machine (`stet harvest`)."""
-    if hours := practice_hours(rnd):
-        return _practice(rnd, scale, hours)
+    resolved = practice_hours(rnd) if hours is None else hours
+    if resolved:
+        return _practice(rnd, scale, resolved)
     return _items(rnd)
 
 
@@ -807,15 +808,15 @@ def practice_synthesize(rnd: Round) -> bool:
     return bool(os.environ.get("STET_SYNTHESIZE_PRACTICE")) and can_synthesize_locally(rnd.season)
 
 
-def practice_key(rnd: Round) -> str:
+def practice_key(rnd: Round, hours: list[tuple[int, Path]] | None = None) -> str:
     """What names the writing (and synthesis mode) a practice round sits here: "" when it sits none.
     Harvesting more hours or toggling `STET_SYNTHESIZE_PRACTICE` yields a distinct exam and baseline cache."""
     from .exam.examine import snapshot_name
 
-    hours = practice_hours(rnd)
-    if not hours:
+    resolved = practice_hours(rnd) if hours is None else hours
+    if not resolved:
         return ""
-    base = snapshot_name([hashlib.sha256(p.read_bytes()).hexdigest() for _, p in hours])
+    base = snapshot_name([hashlib.sha256(p.read_bytes()).hexdigest() for _, p in resolved])
     if rnd.season.raw["exam"].get("reasoning"):
         if practice_synthesize(rnd):
             from .exam.fresh.reason import REASONING_FILTER_VERSION
@@ -836,17 +837,20 @@ def _practice(rnd: Round, scale: Scale, hours: list[tuple[int, Path]]):
     from .exam.farm import unpack_items
 
     synth = practice_synthesize(rnd)
-    path = round_dir(rnd, scale) / f"exam-practice-{rnd.season.digest[:8]}-{practice_key(rnd)[:16]}.jsonl.zst"
+    pk = practice_key(rnd, hours)
+    path = round_dir(rnd, scale) / f"exam-practice-{rnd.season.digest[:8]}-{pk[:16]}.jsonl.zst"
     try:
         cached = unpack_items(path.read_bytes())
         if synth:
             from .exam.aggregate import REASONING_KINDS, part_of
+            from .exam.examine import _student_window
             from .exam.fresh.reason import cached_item_passes_filter
 
             r_cfg = rnd.season.raw["exam"].get("reasoning") or {}
             max_ov = float(r_cfg.get("max_ngram_overlap", 0.50))
+            sw = _student_window(rnd.season, scale)
             reas = [it for it in cached if part_of(it) in REASONING_KINDS]
-            if reas and all(cached_item_passes_filter(it, max_ngram_overlap=max_ov) for it in reas):
+            if reas and all(cached_item_passes_filter(it, max_ngram_overlap=max_ov, student_window=sw) for it in reas):
                 return cached
         else:
             return cached

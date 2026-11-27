@@ -10,6 +10,7 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -334,7 +335,8 @@ func (m *vastMarket) ExaminerOffers(ctx context.Context, maxPrice float64) ([]Ex
 	for _, minDown := range []int{1500, 500, 200} {
 		q := map[string]any{
 			"type": "ondemand", "limit": 50, "order": [][]string{{"dph_total", "asc"}},
-			"verified": map[string]any{"eq": true}, "rentable": map[string]any{"eq": true}, "rented": map[string]any{"eq": false},
+			"allocated_storage": examinerDiskGB,
+			"verified":          map[string]any{"eq": true}, "rentable": map[string]any{"eq": true}, "rented": map[string]any{"eq": false},
 			"external": map[string]any{"eq": false}, "num_gpus": map[string]any{"eq": 1}, "gpu_name": map[string]any{"eq": "RTX 5090"},
 			"cuda_max_good": map[string]any{"gte": 13.2}, "disk_space": map[string]any{"gte": examinerDiskGB},
 			"reliability": map[string]any{"gte": 0.97}, "inet_down": map[string]any{"gte": minDown}, "duration": map[string]any{"gte": 3600},
@@ -354,6 +356,12 @@ func (m *vastMarket) ExaminerOffers(ctx context.Context, maxPrice float64) ([]Ex
 				continue
 			}
 			price := o.DPHTotal
+			if o.DPHBase > 0 && o.StorageCost > 0 {
+				full := o.DPHBase + float64(examinerDiskGB)*o.StorageCost/720.0
+				if full > price {
+					price = full
+				}
+			}
 			if price <= 0 {
 				price = o.DPHBase
 			}
@@ -366,6 +374,7 @@ func (m *vastMarket) ExaminerOffers(ctx context.Context, maxPrice float64) ([]Ex
 			})
 		}
 		if len(offers) > 0 {
+			sort.SliceStable(offers, func(i, j int) bool { return offers[i].Price < offers[j].Price })
 			return offers, nil
 		}
 	}

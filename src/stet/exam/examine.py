@@ -24,6 +24,7 @@ import base64
 import json
 import os
 import sys
+import threading
 import time
 from collections import Counter
 from pathlib import Path
@@ -34,7 +35,7 @@ from .items import Item, digest
 
 
 def _atomic_write_bytes(path: Path, payload: bytes) -> None:
-    tmp = path.with_name(f"{path.name}.tmp{os.getpid()}")
+    tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}.{threading.get_ident()}")
     try:
         tmp.write_bytes(payload)
         os.replace(tmp, path)
@@ -81,12 +82,26 @@ def _filter_pillar_support(items: list[Item], season, rnd_id: str, log=print) ->
     return items
 
 
-def _reasoning_cache_usable(reasoning: list[Item], season) -> bool:
+def _student_window(season, scale) -> tuple[object, int] | None:
+    """Return `(student_encoding, ctx)` so reasoning synthesis can reject items whose wrapped
+    prompt + answer would exceed the student's scoring window, or None if unavailable."""
+    seq_len = getattr(scale, "ctx", None)
+    if not isinstance(seq_len, int) or seq_len <= 0:
+        return None
+    try:
+        from ..tok import load_encoding
+
+        return (load_encoding(season), seq_len)
+    except Exception:
+        return None
+
+
+def _reasoning_cache_usable(reasoning: list[Item], season, *, student_window: tuple[object, int] | None = None) -> bool:
     """Whether a cached reasoning synthesis result is complete and conforms to current filter rules.
 
     Matches `_filter_pillar_support`: every cached item must pass `cached_item_passes_filter`
-    (authoritative prompt/wrapper metadata, zero control tokens, prompt/response overlap limits),
-    and at least one reasoning pillar must meet `min_pillar_items`."""
+    (authoritative prompt/wrapper metadata, zero control tokens, prompt/response overlap limits,
+    and student scoring-window fit), and at least one reasoning pillar must meet `min_pillar_items`."""
     from .aggregate import REASONING_KINDS, plan_of
     from .fresh.reason import cached_item_passes_filter
 
@@ -94,7 +109,7 @@ def _reasoning_cache_usable(reasoning: list[Item], season) -> bool:
         return False
     r_cfg = (season.raw.get("exam") or {}).get("reasoning") or {}
     max_ov = float(r_cfg.get("max_ngram_overlap", 0.50))
-    if not all(cached_item_passes_filter(it, max_ngram_overlap=max_ov) for it in reasoning):
+    if not all(cached_item_passes_filter(it, max_ngram_overlap=max_ov, student_window=student_window) for it in reasoning):
         return False
     min_items = int((season.raw.get("exam") or {}).get("min_pillar_items", 0))
     if min_items <= 0:
@@ -150,7 +165,15 @@ def public_items(items: list[Item]) -> list[dict]:
     out = []
     for it in items:
         if it.source.startswith(OPEN):
-            out.append(it.to_dict())
+            row = it.to_dict()
+            attrs = [
+                entry
+                for sid in (it.source, *it.wrong_sources)
+                if (entry := wikipedia_attribution_entry(sid)) is not None
+            ]
+            if attrs:
+                row["attribution"] = attrs
+            out.append(row)
         elif it.source.startswith(REASONING_PREFIXES):
             task_type = it.source.split(":", 1)[0]
             row = {
@@ -347,6 +370,7 @@ def assemble(
     if synthesize and (r_cfg := cfg.get("reasoning")):
         from .fresh.reason import REASONING_FILTER_VERSION
 
+        sw = _student_window(season, scale)
         rcfg_sig = hashlib.sha256(
             json.dumps({"filter_version": REASONING_FILTER_VERSION, "cfg": r_cfg}, sort_keys=True).encode()
         ).hexdigest()[:8]
@@ -358,7 +382,7 @@ def assemble(
         if rcache.exists():
             try:
                 cached = unpack_items(rcache.read_bytes())
-                if _reasoning_cache_usable(cached, season):
+                if _reasoning_cache_usable(cached, season, student_window=sw):
                     reasoning = cached
                     loaded = True
                     log(f"  reasoning items: {len(reasoning)} loaded from cache")
@@ -369,7 +393,19 @@ def assemble(
                 log("  reasoning cache unreadable; regenerating")
                 rcache.unlink(missing_ok=True)
         if not loaded:
-            reasoning = synthesize_reasoning(docs, rnd.seed, r_cfg, shares=mix, log=log, drops_path=rdrops)
+            import inspect
+
+            synth_kw: dict = {"shares": mix, "log": log, "drops_path": rdrops}
+            try:
+                s_params = inspect.signature(synthesize_reasoning).parameters
+                if sw is not None and (
+                    "student_window" in s_params
+                    or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in s_params.values())
+                ):
+                    synth_kw["student_window"] = sw
+            except (TypeError, ValueError):
+                pass
+            reasoning = synthesize_reasoning(docs, rnd.seed, r_cfg, **synth_kw)
             if not reasoning:
                 raise FatalExamError(f"{rnd.id}: reasoning synthesis produced zero items")
             _atomic_write_bytes(rcache, pack_items(reasoning))
@@ -443,19 +479,87 @@ def post(exam: dict, key) -> dict:
 KEPT_ITEMS, KEPT_LANGUAGES = "items.jsonl.zst", "languages.json"
 
 
+def wikipedia_attribution_entry(source_id: str, *, title: str = "", url: str = "") -> dict | None:
+    """Map a Wikipedia passage or reasoning source ID (`wikipedia:<lang>:<revid>`,
+    `wikipedia-added:<lang>:<revid>`, `wikipedia-talk:<lang>:<revid>`, or
+    `<task>:wikipedia*:<lang>:<revid>`) to its CC-BY-SA 4.0 revision & history URLs."""
+    raw = source_id
+    for pref in REASONING_PREFIXES:
+        if raw.startswith(pref):
+            raw = raw[len(pref) :]
+            break
+    parts = raw.split(":")
+    if len(parts) < 3 or parts[0] not in ("wikipedia", "wikipedia-added", "wikipedia-talk"):
+        return None
+    kind_src, lang, revid = parts[0], parts[1], parts[2]
+    if not lang or not revid.isdigit():
+        return None
+    base = f"https://{lang}.wikipedia.org/w/index.php?oldid={revid}"
+    entry = {
+        "source": f"{kind_src}:{lang}:{revid}",
+        "lang": lang,
+        "revid": revid,
+        "revision_url": base,
+        "history_url": f"{base}&action=history",
+        "license": "CC-BY-SA-4.0",
+    }
+    if title:
+        entry["title"] = title
+    if url:
+        entry["url"] = url
+    return entry
+
+
+def wikipedia_attribution_manifest(items: list[Item]) -> list[dict]:
+    """Deduplicated passage-to-page attribution manifest covering every primary and donor
+    (`wrong_sources`) Wikipedia passage appearing in `items`."""
+    seen: dict[str, dict] = {}
+    for it in items:
+        for sid in (it.source, *it.wrong_sources):
+            entry = wikipedia_attribution_entry(sid)
+            if entry is not None and entry["source"] not in seen:
+                seen[entry["source"]] = entry
+    return [seen[k] for k in sorted(seen)]
+
+
+def candidate_dir(work: Path, items_digest: str) -> Path:
+    """Immutable per-candidate staging directory under `work` keyed by `items_digest`."""
+    return work / f"candidate-{items_digest[:16]}"
+
+
+def stage(exam: dict, work: Path) -> Path:
+    """Atomically stage a candidate exam's full items and language shares under an immutable
+    digest-addressed directory before posting, so a rejected duplicate build (409) never
+    overwrites an already-accepted exam's files."""
+    dest = candidate_dir(work, str(exam["items_digest"]))
+    dest.mkdir(parents=True, exist_ok=True)
+    _atomic_write_bytes(dest / KEPT_ITEMS, base64.b64decode(exam["items_file"]))
+    _atomic_write_bytes(dest / KEPT_LANGUAGES, json.dumps(exam["languages"]).encode("utf-8"))
+    return dest
+
+
 def keep(exam: dict, work: Path) -> None:
-    """Keep the whole exam and the corpus's languages beside the harvest. Once the round settles
-    the server gives out only the published exam, and the organisers' own measurements of the
-    round (the curve, the audit, the finals: stages.py) sit students on all of it."""
-    (work / KEPT_ITEMS).write_bytes(base64.b64decode(exam["items_file"]))
-    (work / KEPT_LANGUAGES).write_text(json.dumps(exam["languages"]))
+    """Keep the accepted whole exam and the corpus's languages beside the harvest. Once the
+    round settles the server gives out only the published exam, and the organisers' own
+    measurements of the round (the curve, the audit, the finals: stages.py) sit students on all
+    of it."""
+    work.mkdir(parents=True, exist_ok=True)
+    if exam.get("items_digest"):
+        stage(exam, work)
+    _atomic_write_bytes(work / KEPT_ITEMS, base64.b64decode(exam["items_file"]))
+    _atomic_write_bytes(work / KEPT_LANGUAGES, json.dumps(exam["languages"]).encode("utf-8"))
 
 
 def examine(rnd, scale, snapshots: list[tuple[int, Path]], work: Path, key, log=print) -> dict:
-    """Make a round's exam from its hours' harvests and post it."""
+    """Make a round's exam from its hours' harvests and post it.
+
+    Stages each candidate under an immutable digest-addressed directory before posting and
+    promotes it into `KEPT_ITEMS` / `KEPT_LANGUAGES` only after the server accepts the post,
+    so an overlapping build that receives 409 never overwrites the accepted exam on disk."""
     t0 = time.time()
     exam = build(rnd, scale, snapshots, work, log=log)
-    keep(exam, work)
+    stage(exam, work)
     out = post(exam, key)
+    keep(exam, work)
     log(f"  posted {rnd.id}'s exam: {len(exam['table'])} items ({time.time() - t0:.0f}s)")
     return out

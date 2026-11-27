@@ -26,7 +26,7 @@ Full upstream license texts required for redistribution (`Apache License 2.0` fo
 
 ---
 
-## 2. `s3-practice.jsonl.zst` (509 offline practice exam items)
+## 2. `s3-practice.jsonl.zst` (508 offline practice exam items)
 
 Used for local `practice` and `gym` rounds (offline fallback when no fresh harvest hours are
 present, and default scored reasoning items when `stet harvest` is used without
@@ -35,17 +35,29 @@ present, and default scored reasoning items when `stet harvest` is used without
 - **Source material:** Wikipedia articles (`wikipedia`), Wikipedia article additions
   (`wikipedia-added`), and Wikipedia talk pages (`wikipedia-talk`) across 42 languages,
   authored by **Wikipedia contributors** (https://www.wikipedia.org/).
+- **Per-passage attribution manifest:** [`WIKIPEDIA_ATTRIBUTION.jsonl`](WIKIPEDIA_ATTRIBUTION.jsonl)
+  (bundled both alongside this notice in `stet/exam/data/` and in the wheel's `.dist-info/licenses/`
+  directory) lists all **744** unique Wikipedia pages and revisions referenced by the practice pack
+  — including all `221` primary comprehension openings, all `376` distinct donor alternative openings
+  (`611` occurrences, including all `236` donor-only pages preserved in each item's `wrong_sources`),
+  and all `287` reasoning source passages — with each page's language, revision ID, title, canonical
+  page URL, direct revision permalink (`?oldid=...`), and direct page-history URL
+  (`?oldid=...&action=history`). Published official settled exams (`public_items()`) likewise
+  preserve `wrong_sources` and per-passage `attribution` revision/history URLs for every openly
+  licensed Wikipedia twin-context and reasoning item.
 - **License:** **CC BY-SA 4.0** (https://creativecommons.org/licenses/by-sa/4.0/) and
-  GFDL, per Wikimedia Foundation Terms of Use.
+  GFDL, per Wikimedia Foundation Terms of Use (§7,
+  https://foundation.wikimedia.org/wiki/Policy:Terms_of_Use/en#7._Licensing_of_Content).
 - **Transformations:**
   - `221` twin-context comprehension items (`kind: "context"`): Wikipedia passages split
-    at a sentence/paragraph boundary with length-matched wrong openings from the same
-    source and language, normalized to crawl whitespace (`src/stet/exam/fresh/select.py`).
-  - `288` reasoning items (`explain: 96`, `infer: 96`, `synthesis: 96`): deterministic
+    at a sentence/paragraph boundary with length-matched wrong openings (`wrongs`) and their
+    donor revision IDs (`wrong_sources`) from the same source and language, normalized to crawl
+    whitespace (`src/stet/exam/fresh/select.py`).
+  - `287` reasoning items (`explain: 96`, `infer: 95`, `synthesis: 96`): deterministic
     `thinkingmachines/Inkling-2-Mini` (`c9d02830`, `reasoning_effort="low"`, Apache 2.0)
     multi-sentence comprehension/reasoning prompts and responses derived from decontaminated
-    Wikipedia excerpts (`src/stet/exam/fresh/reason.py`), distributed under CC BY-SA 4.0 as
-    adaptations of Wikipedia text.
+    Wikipedia excerpts (`src/stet/exam/fresh/reason.py`), filtered to fit within the 1,024-token
+    student scoring window and distributed under CC BY-SA 4.0 as adaptations of Wikipedia text.
 
 ---
 

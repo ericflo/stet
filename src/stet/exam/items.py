@@ -24,12 +24,15 @@ class Item:
     good: str = ""  # pair: the acceptable sentence
     bad: str = ""  # pair: its unacceptable twin
     wrongs: tuple[str, ...] = ()  # context: matched wrong contexts from other documents of the same source & language
+    wrong_sources: tuple[str, ...] = ()  # context: donor `<source>:<doc_id>` for each wrong context (1:1 with `wrongs`)
     prompt: str = ""  # reasoning answer: authoritative teacher prompt line (preserves excerpt boundary)
     wrapper_id: int | None = None  # reasoning answer: authoritative wrapper layout ID
 
     def __post_init__(self):
         if isinstance(self.wrongs, list):
             object.__setattr__(self, "wrongs", tuple(self.wrongs))
+        if isinstance(self.wrong_sources, list):
+            object.__setattr__(self, "wrong_sources", tuple(self.wrong_sources))
         if self.wrapper_id is not None:
             if isinstance(self.wrapper_id, bool) or not isinstance(self.wrapper_id, int) or self.wrapper_id < 0:
                 raise ValueError(f"invalid wrapper_id {self.wrapper_id!r}")
@@ -48,6 +51,11 @@ class Item:
                 raise ValueError("a context item needs a context, a continuation, and wrong contexts")
             if any((not w) or w == self.ctx for w in self.wrongs):
                 raise ValueError("every wrong context must be non-empty and differ from the real context")
+            if self.wrong_sources:
+                if len(self.wrong_sources) != len(self.wrongs) or any(
+                    not isinstance(s, str) or not s for s in self.wrong_sources
+                ):
+                    raise ValueError("wrong_sources must match wrongs in length with non-empty source ids")
 
     @property
     def family(self) -> str:
@@ -71,7 +79,7 @@ class Item:
     def from_dict(cls, d: dict) -> Item:
         kwargs = {}
         for k in cls.__dataclass_fields__:
-            if k == "wrongs":
+            if k in ("wrongs", "wrong_sources"):
                 kwargs[k] = tuple(d.get(k) or ())
             elif k == "wrapper_id":
                 v = d.get(k)

@@ -83,7 +83,11 @@ func cmdProbe(ctx context.Context, f *Fleet, check string, wait time.Duration) e
 	for _, line := range found {
 		held = held || strings.Contains(line, "every case held")
 	}
-	if err := cmdDown(context.WithoutCancel(ctx), f, true, []string{handle}); err != nil {
+	podMarket := pod.Market
+	if podMarket == "" {
+		podMarket = market
+	}
+	if err := cmdDownRental(context.WithoutCancel(ctx), f, podMarket, pod.ID); err != nil {
 		f.say("ending the probe: %v", err)
 	}
 	switch {

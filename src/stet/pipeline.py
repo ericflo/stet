@@ -8,6 +8,7 @@ grade the published scripts.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -20,12 +21,32 @@ from .spec import HARNESS_VERSION, Round, Scale
 from .train import device_backend, hardware_backend, pick_device
 
 
-def _exam_cache_identity(rnd: Round, scale: Scale) -> tuple[str | None, int | None, bool]:
-    """Return `(exam_sha, n_items, is_public_subset)` for the exact exam items `round_exam` will sit."""
+def _device_gpu_name(device) -> str | None:
+    """Concrete GPU model name for CUDA/ROCm devices when available, else None."""
+    if getattr(device, "type", None) != "cuda":
+        return None
+    explicit = getattr(device, "gpu", None)
+    if isinstance(explicit, str) and explicit:
+        return explicit
     try:
-        exam = data.round_exam(rnd, scale)
+        import torch
+
+        props = torch.cuda.get_device_properties(device)
+        name = getattr(props, "name", None)
+        if isinstance(name, str) and name:
+            return name
     except Exception:
-        return (rnd.exam_digest or None), None, False
+        pass
+    return None
+
+
+def _exam_cache_identity(rnd: Round, scale: Scale, *, exam=None) -> tuple[str | None, int | None, bool]:
+    """Return `(exam_sha, n_items, is_public_subset)` for the exact exam items to sit."""
+    if exam is None:
+        try:
+            exam = data.round_exam(rnd, scale)
+        except Exception:
+            return (rnd.exam_digest or None), None, False
     if not exam:
         return (rnd.exam_digest or None), None, False
     actual_sha = data.exam_digest(exam)
@@ -33,20 +54,71 @@ def _exam_cache_identity(rnd: Round, scale: Scale) -> tuple[str | None, int | No
     return actual_sha, len(exam), is_pub
 
 
-def baseline(rnd: Round, scale: Scale, device=None, progress=None, log=None) -> dict:
+def _resolve_practice_pin(rnd: Round, scale: Scale, *, exam=None, practice_key: str | None = None):
+    """Pin `(exam, practice_key)` once for practice rounds when not already pinned by caller,
+    so harvest changes mid-baseline cannot mismatch the exam sat vs cache filename written."""
+    if rnd.kind == "practice" and exam is None:
+        hours = data.practice_hours(rnd)
+        if practice_key is None:
+            practice_key = data.practice_key(rnd, hours)
+        try:
+            exam = data.round_exam(rnd, scale, hours=hours)
+        except TypeError:
+            exam = data.round_exam(rnd, scale)
+    return exam, practice_key
+
+
+def baseline(
+    rnd: Round,
+    scale: Scale,
+    device=None,
+    progress=None,
+    log=None,
+    *,
+    verifier: str | None = None,
+    exam=None,
+    practice_key: str | None = None,
+) -> dict:
     """The unedited corpus's result for a round: every document, in corpus order. Cached.
 
     The corpus is in seeded random order, so the baseline student trains on a fair sample of
     the round's raw data.
     """
     device = pick_device(device) if not hasattr(device, "type") else device
-    want_sha, want_n, is_pub = _exam_cache_identity(rnd, scale)
+    exam, practice_key = _resolve_practice_pin(rnd, scale, exam=exam, practice_key=practice_key)
+    want_sha, want_n, is_pub = _exam_cache_identity(rnd, scale, exam=exam)
     bk = device_backend(device)
-    path = baseline_path(rnd, scale, device, exam_sha=want_sha, public_subset=is_pub, backend=bk)
-    cached = _cached(path, want_exam_sha=want_sha, want_items=want_n, want_backend=bk)
+    dev_gpu = _device_gpu_name(device)
+    path = baseline_path(
+        rnd,
+        scale,
+        device,
+        exam_sha=want_sha,
+        public_subset=is_pub,
+        backend=bk,
+        verifier=verifier,
+        gpu=dev_gpu,
+        practice_key=practice_key,
+    )
+    cached = _cached(
+        path,
+        want_exam_sha=want_sha,
+        want_items=want_n,
+        want_backend=bk,
+        want_gpu=dev_gpu,
+        want_verifier=verifier,
+    )
     if cached is not None:
         return cached
-    return sit_baseline(train_baseline(rnd, scale, device, progress=progress, log=log), rnd, scale)
+    return sit_baseline(
+        train_baseline(rnd, scale, device, progress=progress, log=log),
+        rnd,
+        scale,
+        verifier=verifier,
+        gpu=dev_gpu,
+        exam=exam,
+        practice_key=practice_key,
+    )
 
 
 def baseline_path(
@@ -57,20 +129,31 @@ def baseline_path(
     exam_sha: str | None = None,
     public_subset: bool = False,
     backend: str | None = None,
+    verifier: str | None = None,
+    gpu: str | None = None,
+    practice_key: str | None = None,
 ) -> Path:
-    # A baseline is for the exact exam and grading backend that sat it (separating NVIDIA CUDA
-    # from AMD ROCm, which both use PyTorch device.type == "cuda"). An official round's full exam
-    # uses rnd.exam_digest[:12]; a public-subset replay uses the subset's own digest with `-public`
-    # so public-subset and full-exam caches never collide. A practice round's is named for the
-    # season and harvested hours.
+    # A baseline is for the exact exam, grading backend, GPU model, and (for official verifying)
+    # producing verifier key that sat it: two verifiers sharing STET_CACHE never submit one
+    # cached measurement as two independent baselines, and two different GPU models never share
+    # a baseline file. An official round's full exam uses rnd.exam_digest[:12]; a public-subset
+    # replay uses the subset's own digest with `-public`. A practice round's is named for the
+    # season and pinned harvested hours.
     if rnd.exam_digest:
         tag = (exam_sha or rnd.exam_digest)[:12]
         if public_subset or (exam_sha and exam_sha != rnd.exam_digest):
             tag = f"{tag}-public"
     else:
-        tag = f"{rnd.season.digest[:8]}-{(data.practice_key(rnd) or 'generated')[:12]}"
+        pk = practice_key if practice_key is not None else data.practice_key(rnd)
+        tag = f"{rnd.season.digest[:8]}-{(pk or 'generated')[:12]}"
     bk = backend or device_backend(device)
-    return data.round_dir(rnd, scale) / f"baseline-{HARNESS_VERSION}-{bk}-{tag}.json"
+    suffix = ""
+    dev_gpu = gpu if gpu is not None else _device_gpu_name(device)
+    if dev_gpu:
+        suffix += f"-g{hashlib.sha256(dev_gpu.encode('utf-8')).hexdigest()[:8]}"
+    if verifier:
+        suffix += f"-v{hashlib.sha256(verifier.encode('utf-8')).hexdigest()[:12]}"
+    return data.round_dir(rnd, scale) / f"baseline-{HARNESS_VERSION}-{bk}-{tag}{suffix}.json"
 
 
 def train_baseline(rnd: Round, scale: Scale, device=None, progress=None, log=None) -> Trained:
@@ -86,25 +169,49 @@ def train_baseline(rnd: Round, scale: Scale, device=None, progress=None, log=Non
         script.unlink(missing_ok=True)
 
 
-def sit_baseline(trained: Trained, rnd: Round, scale: Scale) -> dict:
+def sit_baseline(
+    trained: Trained,
+    rnd: Round,
+    scale: Scale,
+    *,
+    verifier: str | None = None,
+    gpu: str | None = None,
+    exam=None,
+    practice_key: str | None = None,
+) -> dict:
     """The unedited student sits the round's exam (`rnd` as it is now, its exam posted), and
     the result is kept for the round's other grades on this machine."""
-    exam = data.round_exam(rnd, scale)
+    exam, practice_key = _resolve_practice_pin(rnd, scale, exam=exam, practice_key=practice_key)
+    exam = exam if exam is not None else data.round_exam(rnd, scale)
     result = sit_exam(trained, rnd, scale, exam)
     if not result["valid"]:
         raise RuntimeError(f"the baseline for {rnd.id} could not be graded: {result['invalid_reason']}")
     actual_sha = result.get("exam_sha256") or (data.exam_digest(exam) if exam else (rnd.exam_digest or None))
     is_pub = bool(rnd.kind == "official" and rnd.exam_digest and actual_sha and actual_sha != rnd.exam_digest)
     bk = hardware_backend(result.get("hardware")) or device_backend(trained.device)
-    path = baseline_path(rnd, scale, trained.device, exam_sha=actual_sha, public_subset=is_pub, backend=bk)
+    dev_gpu = gpu if gpu is not None else _device_gpu_name(trained.device)
+    path = baseline_path(
+        rnd,
+        scale,
+        trained.device,
+        exam_sha=actual_sha,
+        public_subset=is_pub,
+        backend=bk,
+        verifier=verifier,
+        gpu=dev_gpu,
+        practice_key=practice_key,
+    )
     path.parent.mkdir(parents=True, exist_ok=True)
+    to_cache = dict(result)
+    if verifier:
+        to_cache["verifier"] = verifier
     # Written whole or not at all: a file cut short by a full disk would otherwise stop
     # every later job of the round.
     tmp = path.with_name(f"{path.name}.tmp{os.getpid()}")
     try:
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
         with os.fdopen(fd, "w") as f:
-            f.write(json.dumps(result))
+            f.write(json.dumps(to_cache))
         os.replace(tmp, path)
     finally:
         tmp.unlink(missing_ok=True)  # nothing is there once it has been renamed
@@ -126,10 +233,13 @@ def _cached(
     want_exam_sha: str | None = None,
     want_items: int | None = None,
     want_backend: str | None = None,
+    want_gpu: str | None = None,
+    want_verifier: str | None = None,
 ) -> dict | None:
-    """A baseline saved earlier, or None if there is none that matches the exact exam items
-    and grading backend. A file that cannot be read, sat a different item set, or came from
-    another/unverified GPU backend (e.g. ROCm vs NVIDIA CUDA) is treated as a cache miss."""
+    """A baseline saved earlier, or None if there is none that matches the exact exam items,
+    grading backend, GPU model, and producing verifier. A file that cannot be read, sat a
+    different item set, came from another GPU/backend, or was produced by another verifier is
+    treated as a cache miss."""
     try:
         cached = json.loads(path.read_text())
     except (OSError, ValueError):
@@ -144,6 +254,15 @@ def _cached(
     elif want_backend is not None and cached.get("hardware") is not None:
         if hardware_backend(cached.get("hardware")) != want_backend:
             return None
+    if want_gpu is not None:
+        hw = cached.get("hardware")
+        if not isinstance(hw, dict) or hw.get("gpu") != want_gpu:
+            return None
+    if want_verifier is not None:
+        if cached.get("verifier") != want_verifier:
+            return None
+    elif cached.get("verifier") is not None:
+        return None
     if want_exam_sha:
         got_sha = cached.get("exam_sha256")
         if want_items is not None:
@@ -153,6 +272,7 @@ def _cached(
             return None
     if want_items is not None and cached["exam"].get("items") != want_items:
         return None
+    cached.pop("verifier", None)
     return cached
 
 
@@ -199,9 +319,12 @@ def edit_round(
     return edit
 
 
-def grade_round(rnd: Round, scale: Scale, script_path: Path, device=None, progress=None, log=None) -> dict:
+def grade_round(rnd: Round, scale: Scale, script_path: Path, device=None, progress=None, log=None, *, exam=None) -> dict:
     """Score an edit script on a round."""
-    corpus, exam = data.materialize(rnd, scale)
+    if exam is None:
+        corpus, exam = data.materialize(rnd, scale)
+    else:
+        corpus = data.corpus(rnd, scale)
     return grade(rnd, scale, corpus, exam, script_path, device=device, progress=progress, log=log)
 
 
@@ -223,18 +346,23 @@ def run_round(
     log=None,
     assets=(),
     time_limit: float | None = None,
+    *,
+    exam=None,
 ) -> dict:
     """Edit, then grade. If the curator leaves no script the result is invalid and carries no
     exam score: by the rules its student is the one trained on the unedited corpus."""
     edit = edit_round(bundle, entry, rnd, scale, work, sandbox=sandbox, echo=echo, log=log, assets=assets, time_limit=time_limit)
     if edit.script is None:
-        corpus, exam = data.materialize(rnd, scale)
+        if exam is None:
+            corpus, exam = data.materialize(rnd, scale)
+        else:
+            corpus = data.corpus(rnd, scale)
         result = {
             "harness": HARNESS_VERSION, "season": rnd.season.id, "season_digest": rnd.season.digest, "round": rnd.describe(),
             "scale": scale.name, "corpus_sha256": corpus.meta["sha256"], "exam_sha256": data.exam_digest(exam),
             "valid": False, "invalid_reason": edit.reason or f"the curator produced no script ({edit.status})",
         }  # fmt: skip
     else:
-        result = grade_round(rnd, scale, edit.script, device=device, progress=progress, log=log)
+        result = grade_round(rnd, scale, edit.script, device=device, progress=progress, log=log, exam=exam)
     result["edit"] = edit.to_dict()
     return result

@@ -663,7 +663,10 @@ GPU scoring)*.
      dealt slices, and 2 RTX 4090 cross-card parity students) sat all 3 Inkling draws (`orig` and
      `rot`), all 34 trainable upper-half `bf16` checkpoints (`244 MB` each, `8.1 GB` total) were
      archived, and the tables below rescore the archived student outputs on the exact `1,854`-item
-     post-filter population.
+     post-filter population (of which `1/1,854` archived item—Draw 1 Telugu `infer:wikipedia:te:5029902`—produced
+     `773` context tokens including `[eot]` plus `309` answer tokens = `1,082 > 1,025`, left-truncating
+     `57` leading tokens in the student's 1,024-token window; `REASONING_FILTER_VERSION = 3` now rejects
+     any item exceeding the student tokenizer's scoring window as `student_window_overflow`).
 
      - **Multi-draw DataDecide 1B (3 disjoint Inkling draws under shipped filter; English subset vs. full multilingual-scored diagnostic, 2,000-resample stratified bootstrap):**
 

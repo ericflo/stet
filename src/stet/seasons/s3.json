@@ -103,7 +103,7 @@
     "min_pillar_items": 20,
     "practice_pack": {
       "file": "s3-practice.jsonl.zst",
-      "sha256": "928ece4ba7dbdb246ddbf20a4718947a38cadec49350ab1423cde46bf8611286"
+      "sha256": "f562ce8b752b6349589aaad8716b71ee9bfef40dee13772fd7899ef8f87d9d76"
     },
     "answer_floor_bytes": 16,
     "aggregate": {

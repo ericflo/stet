@@ -1652,3 +1652,86 @@ func TestProbeDoesNotTerminateExistingWorkerWhenExaminerFillsLastSlot(t *testing
 		t.Fatalf("expected only the newly rented probe pod ended and pod-grading preserved, got pods=%+v", rp.pods)
 	}
 }
+
+// Review 17 P2 #4: probe cleanup MUST end ONLY its exact recorded (market, rental ID) under the
+// fleet lock and treat an already-gone probe as complete, NEVER deleting a replacement worker
+// that reused the same handle or releasing that replacement's active grading job.
+func TestReview17ProbeCleanupNeverDeletesReplacementWithReusedHandle(t *testing.T) {
+	rp, st := newFakeRunPod(t), newFakeStet(t)
+	f, _ := testFleet(t, rp, st, 1)
+	f.o.MaxWorkers = 2
+	f.o.Market = "runpod"
+	now := f.now()
+
+	// Wrap RunPod market so the first Logs() poll during cmdProbe simulates the probe pod vanishing
+	// and a replacement grader immediately reusing the same handle `stet-rp-01` and taking a job.
+	var swapped bool
+	var probeID string
+	rpMkt := f.market("runpod")
+	f.markets = []Market{&probeSwapMarket{
+		Market: rpMkt,
+		onLogs: func(id string) ([]string, error) {
+			if !swapped {
+				swapped = true
+				probeID = id
+				// Probe pod vanishes from RunPod; replacement pod-replacement takes handle stet-rp-01.
+				delete(rp.pods, id)
+				rp.pods["pod-replacement"] = &Pod{
+					ID: "pod-replacement", Name: "stet-rp-01",
+					Status: "RUNNING", Cost: 0.43, CreatedAt: now.Add(5 * time.Second),
+				}
+				st.work = Work{
+					Rounds: []WorkRound{{ID: "s3-o00044", Entries: 1, ExamAt: 0}},
+					Machines: []Machine{{
+						Handle: "stet-rp-01", Worker: true,
+						Busy: "grade", LastSeen: now.Add(10 * time.Second).Unix(),
+					}},
+				}
+				if l, err := f.readLedger(); err == nil {
+					l.Pods[ledgerKey("runpod", "pod-replacement")] = &podRecord{
+						ID: "pod-replacement", Market: "runpod", Handle: "stet-rp-01",
+						GPU: "RTX 4090", Cost: 0.43, Start: now.Add(5 * time.Second), Alive: now.Add(10 * time.Second),
+					}
+					_ = f.writeLedger(l)
+				}
+			}
+			return []string{"[probe] done: every case held"}, nil
+		},
+	}}
+
+	checkFile := filepath.Join(t.TempDir(), "cage_check.py")
+	if err := os.WriteFile(checkFile, []byte("print('ok')\n"), 0o600); err != nil {
+		t.Fatalf("write check file: %v", err)
+	}
+	if err := cmdProbe(context.Background(), f, checkFile, time.Minute); err != nil {
+		t.Fatalf("cmdProbe: %v", err)
+	}
+	if !swapped || probeID == "" {
+		t.Fatalf("expected swap hook to run with rented probe ID")
+	}
+	if rp.pods["pod-replacement"] == nil {
+		t.Fatalf("probe cleanup DELETED replacement worker pod-replacement sharing handle stet-rp-01! pods=%+v", rp.pods)
+	}
+	if len(st.released) != 0 {
+		t.Fatalf("probe cleanup MUST NOT release replacement worker's grading job! released=%v", st.released)
+	}
+	l, err := f.readLedger()
+	if err != nil {
+		t.Fatalf("readLedger: %v", err)
+	}
+	if l.Pods[ledgerKey("runpod", "pod-replacement")] == nil {
+		t.Fatalf("replacement worker ledger record must remain intact, got %+v", l.Pods)
+	}
+	if l.Pods[ledgerKey("runpod", probeID)] != nil {
+		t.Fatalf("gone probe pod ledger record should have been retired, got %+v", l.Pods)
+	}
+}
+
+type probeSwapMarket struct {
+	Market
+	onLogs func(id string) ([]string, error)
+}
+
+func (m *probeSwapMarket) Logs(_ context.Context, id string, _ int) ([]string, error) {
+	return m.onLogs(id)
+}

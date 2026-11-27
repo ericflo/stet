@@ -411,16 +411,28 @@ def select_context(docs: list[Doc], seed: bytes, n: int, kinds, per_corner: int 
             sub_rng = Rng(seed, f"fresh/wrong-ctx/{src}/{lang}/{int(is_nl)}/{d.id}")
             sub_rng.shuffle(band)
             wrongs: list[str] = []
+            wrong_sources: list[str] = []
             seen_w: set[str] = set()
-            for _, c, _ in band:
+            for did, c, _ in band:
                 if c not in seen_w:
                     seen_w.add(c)
                     wrongs.append(c)
+                    wrong_sources.append(f"{src}:{did}")
                     if len(wrongs) >= CONTEXT_WRONGS:
                         break
             if not wrongs:
                 continue
-            it = Item(kind="context", corner=corner, fmt=fmt, lang=lang, source=f"{d.source}:{d.id}", ctx=ctx, cont=cont, wrongs=tuple(wrongs))
+            it = Item(
+                kind="context",
+                corner=corner,
+                fmt=fmt,
+                lang=lang,
+                source=f"{d.source}:{d.id}",
+                ctx=ctx,
+                cont=cont,
+                wrongs=tuple(wrongs),
+                wrong_sources=tuple(wrong_sources),
+            )
             by_kind[kind_of(it)].append(it)
 
     # 3. Select across kinds, languages, sources, and corners exactly as select() does.
