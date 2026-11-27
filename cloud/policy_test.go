@@ -589,7 +589,7 @@ func TestTieBreakBaselineRentsAFreshMachineWhileBaselineGradersIdle(t *testing.T
 	one := 1
 	w := &Work{Rounds: []WorkRound{{
 		ID: "s3-o00001", Entries: 3, GradesWanted: 1, BaselinesWanted: &one,
-		BaselineDisputed: true, FreshGradersWanted: 1,
+		BaselineDisputed: true, FreshGradersWanted: &one,
 	}}}
 	ws := pool(w, "waiting", "waiting", "free", "free")
 	d := p.decide(w, ws, 0, t0)
@@ -620,7 +620,7 @@ func TestTieBreakBaselineRentsAFreshMachineWhileBaselineGradersIdle(t *testing.T
 	// Explicit FreshGradersWanted (e.g. two idle graders disagreed on tokens_sha256) launches a 3rd.
 	zero := 0
 	wTok := &Work{Rounds: []WorkRound{{
-		ID: "s3-o00001", Entries: 1, GradesWanted: 1, BaselinesWanted: &zero, FreshGradersWanted: 1,
+		ID: "s3-o00001", Entries: 1, GradesWanted: 1, BaselinesWanted: &zero, FreshGradersWanted: &one,
 	}}}
 	if d5 := p.decide(wTok, pool(wTok, "waiting", "waiting", "free"), 0, t0); d5.Launch != 1 {
 		t.Fatalf("FreshGradersWanted=1 for script tie-break: want Launch=1, got %d", d5.Launch)
@@ -655,7 +655,7 @@ func TestTieBreakBaselineRentsAFreshMachineWhileBaselineGradersIdle(t *testing.T
 	// (LastSeen >= DrawnAt), it cannot be treated as a fresh spare key to justify eviction.
 	wDrawn := &Work{Rounds: []WorkRound{{
 		ID: "s3-o00001", Entries: 3, GradesWanted: 1, BaselinesWanted: &one,
-		BaselineDisputed: true, FreshGradersWanted: 1, DrawnAt: t0.Add(-15 * time.Minute).Unix(),
+		BaselineDisputed: true, FreshGradersWanted: &one, DrawnAt: t0.Add(-15 * time.Minute).Unix(),
 	}}}
 	wsUsedSpare := pool(wDrawn, "grading", "grading", "grading", "grading", "waiting", "waiting", "free")
 	wsUsedSpare[6].Machine = &Machine{Handle: wsUsedSpare[6].Key.Handle, LastSeen: t0.Add(-5 * time.Minute).Unix()}
@@ -696,7 +696,7 @@ func TestTieBreakBaselineRentsAFreshMachineWhileBaselineGradersIdle(t *testing.T
 	p.PerWorker = 1
 	wDisp2 := &Work{Rounds: []WorkRound{{
 		ID: "s3-o00001", Entries: 3, GradesWanted: 2, BaselinesWanted: &one,
-		BaselineDisputed: true, FreshGradersWanted: 1, DrawnAt: t0.Add(-15 * time.Minute).Unix(),
+		BaselineDisputed: true, FreshGradersWanted: &one, DrawnAt: t0.Add(-15 * time.Minute).Unix(),
 	}}}
 	wsVarB := pool(wDisp2, "grading", "grading", "grading", "waiting", "free", "free")
 	wsVarB[4].Machine = &Machine{Handle: wsVarB[4].Key.Handle, LastSeen: t0.Add(-5 * time.Minute).Unix()}
@@ -717,5 +717,21 @@ func TestTieBreakBaselineRentsAFreshMachineWhileBaselineGradersIdle(t *testing.T
 	if len(d13.End) != 1 || d13.End[0].Worker != wsOver[4] || d13.Launch != 0 {
 		t.Fatalf("over --max with reserved examiner slot: want slowest idle worker evicted and Launch=0; got End=%s Launch=%d",
 			handles(d13.End), d13.Launch)
+	}
+	// Review 12 P2 #8: when the server explicitly sends fresh_graders_wanted=0 alongside
+	// baseline_disputed=true (because an idle organiser machine already online is eligible to
+	// break the tie), policy MUST honor that 0 — neither evicting an idle worker nor renting a
+	// fresh machine.
+	p.MaxWorkers = 3
+	p.PerWorker = 6
+	wEligibleIdle := &Work{Rounds: []WorkRound{{
+		ID: "s3-o00004", Entries: 3, GradesWanted: 1, BaselinesWanted: &one,
+		BaselineDisputed: true, FreshGradersWanted: &zero,
+	}}}
+	wsThreeIdle := pool(wEligibleIdle, "waiting", "waiting", "waiting", "free")
+	d14 := p.decide(wEligibleIdle, wsThreeIdle, 0, t0)
+	if len(d14.End) != 0 || d14.Launch != 0 {
+		t.Fatalf("explicit fresh_graders_wanted=0 on disputed baseline must not evict or rent: End=%s Launch=%d",
+			handles(d14.End), d14.Launch)
 	}
 }

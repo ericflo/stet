@@ -662,14 +662,17 @@ GPU scoring)*.
      cross-card parity students) sat all 3 Inkling draws (`orig` and `rot`), and all 34 trainable
      upper-half `bf16` checkpoints (`244 MB` each, `8.1 GB` total) were archived.
 
-     - **Multi-draw DataDecide 1B (3 disjoint Inkling draws, 421 EN items, 2,000-resample stratified bootstrap):**
+     - **Multi-draw DataDecide 1B (3 disjoint Inkling draws; English subset vs. full multilingual-scored diagnostic, 2,000-resample stratified bootstrap):**
 
-| Shipped Inkling Draw | EN Items | DD 1B Pairs (`orig` / `rot`, 95% CI) | `2pt+` Pairs | Spearman `ρ` (95% CI) | `FineWeb-Edu` Rank *(true `#7`)* / `P(#1)` | Predicted Top-1 *(1B Shortfall)* |
+| Shipped Inkling Draw / Scope | Items | DD 1B Pairs (`orig` / `rot`, 95% CI) | `2pt+` Pairs | Spearman `ρ` (95% CI) | `FineWeb-Edu` Rank *(true `#7`)* / `P(#1)` | Predicted Top-1 *(1B Shortfall)* |
 |---|---:|---:|---:|---:|---:|---|
-| Draw B (`s3-o00003`) | `143` | `52/66` (`78.8%`) / `48/66` (`[48, 56]`) | `26/31` | `+0.7902` (`[+0.622, +0.867]`) | `#7/12` / `0.0%` | `dclm-baseline-qc-10p` (`+0.49pp`) |
-| Phase 9 (`s3-o00001`) | `128` | `53/66` (`80.3%`) / `52/66` (`[49, 57]`) | `27/31` | `+0.8042` (`[+0.636, +0.895]`) | `#5/12` / `0.4%` | `dclm-baseline-qc-7p-fw2` (`+0.14pp`) |
-| Draw 1 (`s3-p00000`) | `150` | `53/66` (`80.3%`) / `50/66` (`[49, 55]`) | `27/31` | `+0.8042` (`[+0.629, +0.825]`) | `#6/12` / `0.0%` | `dclm-baseline-qc-7p-fw2` (`+0.14pp`) |
-| **Pooled 3-Draw Mean** | **`421`** | **`53/66` (`80.3%`) / `49/66` (`[50, 55]`)** | **`27/31`** | **`+0.8042` (`[+0.706, +0.832]`)** | **`#6/12` / `0.0%`** | **`dclm-baseline-qc-7p-fw2` (`+0.14pp`)** |
+| Draw B (`s3-o00003`, EN subset) | `143` | `52/66` (`78.8%`) / `48/66` (`[48, 56]`) | `26/31` | `+0.7902` (`[+0.622, +0.867]`) | `#7/12` / `0.0%` | `dclm-baseline-qc-10p` (`+0.49pp`) |
+| Phase 9 (`s3-o00001`, EN subset) | `128` | `53/66` (`80.3%`) / `52/66` (`[49, 57]`) | `27/31` | `+0.8042` (`[+0.636, +0.895]`) | `#5/12` / `0.4%` | `dclm-baseline-qc-7p-fw2` (`+0.14pp`) |
+| Draw 1 (`s3-p00000`, EN subset) | `150` | `53/66` (`80.3%`) / `50/66` (`[49, 55]`) | `27/31` | `+0.8042` (`[+0.629, +0.825]`) | `#6/12` / `0.0%` | `dclm-baseline-qc-7p-fw2` (`+0.14pp`) |
+| **Pooled 3-Draw Mean (EN subset)** | **`421`** | **`53/66` (`80.3%`) / `49/66` (`[50, 55]`)** | **`27/31`** | **`+0.8042` (`[+0.706, +0.832]`)** | **`#6/12` / `0.0%`** | **`dclm-baseline-qc-7p-fw2` (`+0.14pp`)** |
+| **All scored reasoning (official lang weights, EN target diagnostic)** | **`1,863`** | **`25/66` (`25/66`, `27/66`, `24/66`)** | **`9/31`** | **`−0.294`** | — | `dolma1_7` `#1` *(true `#12` on EN)* |
+
+       *Scope qualification:* the **`53/66` (`80.3%`)** DataDecide 1B agreement is measured specifically on the **English reasoning subset** (`421` items across the three draws) because DataDecide's 1B OLMES macro target is English-only. Scoring the same 12 recipes with the full official multilingual leaderboard scorer (`1,863` items under each draw's recorded crawl language weights) ranks `dolma1_7` first on every draw (`25/66`, `27/66`, `24/66`; pooled `25/66`, `9/31` `2pt+`, `ρ = −0.294` against English OLMES) because `dolma1_7` contains non-English text while most higher-ranked DataDecide recipes filter strictly to English. Validating downstream ordering of the full multilingual leaderboard requires a multilingual downstream benchmark target.
 
      - **Complete Phase 9 (`s3-o00001`) & Draw B (`s3-o00003`) Gauntlets on Shipped Inkling-2-Mini (3-draw mean + 1,000-resample stratified bootstrap CIs):**
 

@@ -17,7 +17,7 @@ from .grade import Trained, grade, sit_exam, train_script
 from .runner import EditRun, run_editor
 from .script import write_script
 from .spec import HARNESS_VERSION, Round, Scale
-from .train import pick_device
+from .train import device_backend, hardware_backend, pick_device
 
 
 def _exam_cache_identity(rnd: Round, scale: Scale) -> tuple[str | None, int | None, bool]:
@@ -41,8 +41,9 @@ def baseline(rnd: Round, scale: Scale, device=None, progress=None, log=None) -> 
     """
     device = pick_device(device) if not hasattr(device, "type") else device
     want_sha, want_n, is_pub = _exam_cache_identity(rnd, scale)
-    path = baseline_path(rnd, scale, device, exam_sha=want_sha, public_subset=is_pub)
-    cached = _cached(path, want_exam_sha=want_sha, want_items=want_n)
+    bk = device_backend(device)
+    path = baseline_path(rnd, scale, device, exam_sha=want_sha, public_subset=is_pub, backend=bk)
+    cached = _cached(path, want_exam_sha=want_sha, want_items=want_n, want_backend=bk)
     if cached is not None:
         return cached
     return sit_baseline(train_baseline(rnd, scale, device, progress=progress, log=log), rnd, scale)
@@ -55,18 +56,21 @@ def baseline_path(
     *,
     exam_sha: str | None = None,
     public_subset: bool = False,
+    backend: str | None = None,
 ) -> Path:
-    # A baseline is for the exact exam it sat: named for it. An official round's full exam uses
-    # rnd.exam_digest[:12]; a public-subset replay uses the subset's own digest with `-public` so
-    # public-subset and full-exam caches never collide. A practice round's is named for the season
-    # and harvested hours.
+    # A baseline is for the exact exam and grading backend that sat it (separating NVIDIA CUDA
+    # from AMD ROCm, which both use PyTorch device.type == "cuda"). An official round's full exam
+    # uses rnd.exam_digest[:12]; a public-subset replay uses the subset's own digest with `-public`
+    # so public-subset and full-exam caches never collide. A practice round's is named for the
+    # season and harvested hours.
     if rnd.exam_digest:
         tag = (exam_sha or rnd.exam_digest)[:12]
         if public_subset or (exam_sha and exam_sha != rnd.exam_digest):
             tag = f"{tag}-public"
     else:
         tag = f"{rnd.season.digest[:8]}-{(data.practice_key(rnd) or 'generated')[:12]}"
-    return data.round_dir(rnd, scale) / f"baseline-{HARNESS_VERSION}-{device.type}-{tag}.json"
+    bk = backend or device_backend(device)
+    return data.round_dir(rnd, scale) / f"baseline-{HARNESS_VERSION}-{bk}-{tag}.json"
 
 
 def train_baseline(rnd: Round, scale: Scale, device=None, progress=None, log=None) -> Trained:
@@ -91,7 +95,8 @@ def sit_baseline(trained: Trained, rnd: Round, scale: Scale) -> dict:
         raise RuntimeError(f"the baseline for {rnd.id} could not be graded: {result['invalid_reason']}")
     actual_sha = result.get("exam_sha256") or (data.exam_digest(exam) if exam else (rnd.exam_digest or None))
     is_pub = bool(rnd.kind == "official" and rnd.exam_digest and actual_sha and actual_sha != rnd.exam_digest)
-    path = baseline_path(rnd, scale, trained.device, exam_sha=actual_sha, public_subset=is_pub)
+    bk = hardware_backend(result.get("hardware")) or device_backend(trained.device)
+    path = baseline_path(rnd, scale, trained.device, exam_sha=actual_sha, public_subset=is_pub, backend=bk)
     path.parent.mkdir(parents=True, exist_ok=True)
     # Written whole or not at all: a file cut short by a full disk would otherwise stop
     # every later job of the round.
@@ -106,15 +111,39 @@ def sit_baseline(trained: Trained, rnd: Round, scale: Scale) -> dict:
     return result
 
 
-def _cached(path: Path, *, want_exam_sha: str | None = None, want_items: int | None = None) -> dict | None:
+def _path_backend(path: Path) -> str | None:
+    prefix = f"baseline-{HARNESS_VERSION}-"
+    if path.name.startswith(prefix):
+        bk = path.name[len(prefix) :].split("-", 1)[0]
+        if bk in ("cuda", "rocm", "mps", "cpu"):
+            return bk
+    return None
+
+
+def _cached(
+    path: Path,
+    *,
+    want_exam_sha: str | None = None,
+    want_items: int | None = None,
+    want_backend: str | None = None,
+) -> dict | None:
     """A baseline saved earlier, or None if there is none that matches the exact exam items
-    being sat. A file that cannot be read or sat a different item set is treated as a cache miss."""
+    and grading backend. A file that cannot be read, sat a different item set, or came from
+    another/unverified GPU backend (e.g. ROCm vs NVIDIA CUDA) is treated as a cache miss."""
     try:
         cached = json.loads(path.read_text())
     except (OSError, ValueError):
         return None
     if not isinstance(cached, dict) or not cached.get("valid") or not isinstance(cached.get("exam"), dict):
         return None
+    if want_backend is None:
+        want_backend = _path_backend(path)
+    if want_backend in ("cuda", "rocm"):
+        if hardware_backend(cached.get("hardware")) != want_backend:
+            return None
+    elif want_backend is not None and cached.get("hardware") is not None:
+        if hardware_backend(cached.get("hardware")) != want_backend:
+            return None
     if want_exam_sha:
         got_sha = cached.get("exam_sha256")
         if want_items is not None:

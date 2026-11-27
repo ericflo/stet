@@ -705,6 +705,36 @@ func (j *judge) asksBaseline(rd *Round, acct *Account) bool {
 	return j.baselinesWanted(rd) > 0
 }
 
+// baselineInitSHA returns the single agreed initial student weights hash behind the round's kept
+// baselines (always "", true on seasons without a pinned student model). Before rd.InitSHA locks,
+// returns ("", false) when no kept baseline exists, any kept baseline lacks InitSHA, or kept
+// baselines disagree on InitSHA.
+func (a *App) baselineInitSHA(s *State, rd *Round) (string, bool) {
+	if len(a.season.Student) == 0 {
+		return "", true
+	}
+	if rd == nil {
+		return "", false
+	}
+	if rd.InitSHA != "" {
+		return rd.InitSHA, true
+	}
+	kept := a.baselinesKept(s, rd)
+	if len(kept) == 0 {
+		return "", false
+	}
+	sha := kept[0].InitSHA
+	if sha == "" {
+		return "", false
+	}
+	for _, b := range kept[1:] {
+		if b.InitSHA != sha {
+			return "", false
+		}
+	}
+	return sha, true
+}
+
 // refreshScores sets the round's baseline to the median of the baselines it keeps
 // (baselinesKept), item by item, and every grade's score to the exam's aggregate of its item
 // scores less that.
@@ -760,9 +790,23 @@ func (a *App) refreshScores(tx *Tx, rd *Round) {
 		}
 	}
 	tx.saveRound(rd)
+	baseInit, baseInitOK := a.baselineInitSHA(s, rd)
 	for _, e := range s.inRound[rd.Idx] {
 		for _, r := range s.results(rd.Idx, e.EditorID) {
 			if !r.Valid || len(r.Items) != len(base) {
+				continue
+			}
+			// Never score a grade against a baseline trained from different initial weights.
+			if len(a.season.Student) > 0 && (!baseInitOK || r.InitSHA == "" || r.InitSHA != baseInit) {
+				if r.Score != nil || len(r.BySource) > 0 {
+					r.Score, r.BySource = nil, nil
+					rmean := 0.0
+					for _, v := range r.Items {
+						rmean += v
+					}
+					r.Loss = places5(-rmean / float64(len(r.Items)))
+					tx.saveResult(r)
+				}
 				continue
 			}
 			score, pillars, err := a.season.Exam.ScoreItems(rd.ExamTable, diffItems(r.Items, base), rd.Shares)

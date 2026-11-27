@@ -142,7 +142,7 @@ func cmdStatus(ctx context.Context, f *Fleet) error {
 	now := f.now()
 	statusPol := f.o.Policy
 	statusReserved := v.ExaminerLive
-	if statusReserved == 0 && f.o.Examiner.Addr != "" && roundNeedingExam(v.Work) != "" {
+	if statusReserved == 0 && f.o.MaxWorkers > 0 && f.o.Examiner.Addr != "" && roundNeedingExam(v.Work) != "" {
 		statusReserved = 1
 	}
 	statusPol.MaxWorkers = max(0, statusPol.MaxWorkers-statusReserved)
@@ -367,6 +367,65 @@ func cmdScale(ctx context.Context, f *Fleet, follow bool) error {
 	}
 }
 
+// reconcileExaminerOnce serializes standalone examiner budget checks, rentals, and state updates
+// under the same fleet lock used by `up`, `down`, and `scale`, and defers new rentals whenever
+// fleet accounting (fleet.json or spent.jsonl) cannot be read cleanly.
+func reconcileExaminerOnce(ctx context.Context, f *Fleet) error {
+	unlock, err := f.lock(time.Minute)
+	if err != nil {
+		if ctx.Err() == nil {
+			f.say("examiner: %v", err)
+		}
+		return err
+	}
+	defer unlock()
+	w, err := f.st.work(ctx, f.op)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil
+		}
+		f.say("examiner: %v", err)
+		if exErr := f.examiner.EnforceTimeout(ctx); exErr != nil && ctx.Err() == nil {
+			f.say("examiner: %v", exErr)
+		}
+		return err
+	}
+	var acctErr error
+	l, lerr := f.readLedger()
+	today, liveWorkers, hourlyWorkers := 0.0, 0, 0.0
+	if lerr != nil {
+		acctErr = fmt.Errorf("reading fleet ledger: %w", lerr)
+	} else {
+		t, serr := f.spent(l, startOfDay(f.now()))
+		if serr != nil {
+			acctErr = fmt.Errorf("reading daily spend: %w", serr)
+		} else {
+			today = t
+		}
+		for _, p := range l.Pods {
+			liveWorkers++
+			hourlyWorkers += p.Cost
+		}
+	}
+	_, _, exAccrued := f.examinerSnapshot()
+	budget := ExaminerBudget{
+		LiveWorkers:   liveWorkers,
+		MaxWorkers:    f.o.MaxWorkers,
+		HourlyNow:     hourlyWorkers,
+		MaxHourly:     f.o.MaxHourly,
+		SpentToday:    today + exAccrued,
+		DailyBudget:   f.o.DailyBudget,
+		AccountingErr: acctErr,
+	}
+	if err := f.examiner.Reconcile(ctx, w, budget); err != nil {
+		if ctx.Err() == nil {
+			f.say("examiner: %v", err)
+		}
+		return err
+	}
+	return nil
+}
+
 func cmdExaminer(ctx context.Context, f *Fleet) error {
 	stopExaminer, err := f.startExaminer(ctx)
 	if err != nil {
@@ -378,37 +437,9 @@ func cmdExaminer(ctx context.Context, f *Fleet) error {
 		every = 15 * time.Second
 	}
 	for {
-		w, err := f.st.work(ctx, f.op)
-		if err != nil {
-			if ctx.Err() != nil {
-				return nil
-			}
-			f.say("examiner: %v", err)
-			if exErr := f.examiner.EnforceTimeout(ctx); exErr != nil && ctx.Err() == nil {
-				f.say("examiner: %v", exErr)
-			}
-		} else {
-			l, _ := f.readLedger()
-			today, liveWorkers, hourlyWorkers := 0.0, 0, 0.0
-			if l != nil {
-				today, _ = f.spent(l, startOfDay(f.now()))
-				for _, p := range l.Pods {
-					liveWorkers++
-					hourlyWorkers += p.Cost
-				}
-			}
-			_, _, exAccrued := f.examinerSnapshot()
-			budget := ExaminerBudget{
-				LiveWorkers: liveWorkers,
-				MaxWorkers:  f.o.MaxWorkers,
-				HourlyNow:   hourlyWorkers,
-				MaxHourly:   f.o.MaxHourly,
-				SpentToday:  today + exAccrued,
-				DailyBudget: f.o.DailyBudget,
-			}
-			if err := f.examiner.Reconcile(ctx, w, budget); err != nil && ctx.Err() == nil {
-				f.say("examiner: %v", err)
-			}
+		_ = reconcileExaminerOnce(ctx, f)
+		if ctx.Err() != nil {
+			return nil
 		}
 		if err := sleepCtx(ctx, every); err != nil {
 			return nil

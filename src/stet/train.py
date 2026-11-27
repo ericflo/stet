@@ -43,6 +43,17 @@ def pick_device(name: str | None = None) -> torch.device:
     return torch.device("cpu")
 
 
+def device_backend(device: torch.device) -> str:
+    """Concrete grading backend identifier separating NVIDIA CUDA from AMD ROCm."""
+    dev_type = getattr(device, "type", str(device).split(":", 1)[0])
+    if dev_type == "cuda":
+        return "rocm" if getattr(torch.version, "hip", None) else "cuda"
+    return dev_type
+
+
+from .spec import hardware_backend as hardware_backend  # noqa: E402
+
+
 def hardware_info(device: torch.device) -> dict:
     info = {
         "device": device.type,
@@ -54,7 +65,7 @@ def hardware_info(device: torch.device) -> dict:
         props = torch.cuda.get_device_properties(device)
         info["gpu"] = props.name
         info["vram_gb"] = round(props.total_memory / 2**30, 1)
-        info["backend"] = "rocm" if getattr(torch.version, "hip", None) else "cuda"
+        info["backend"] = device_backend(device)
     return info
 
 

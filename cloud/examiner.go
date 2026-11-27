@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/ecdsa"
@@ -68,14 +69,17 @@ type ExaminerConfig struct {
 }
 
 // ExaminerBudget passes the fleet's live machine, hourly, and daily budget limits into Reconcile
-// so an examiner rental never exceeds --max, --max-hourly, or --daily-budget.
+// so an examiner rental never exceeds --max, --max-hourly, or --daily-budget. Zero MaxWorkers or
+// MaxHourly is honored as an explicit zero ceiling (no examiner rental permitted); AccountingErr
+// defers new rentals while still allowing teardown and timeout cleanup.
 type ExaminerBudget struct {
-	LiveWorkers int
-	MaxWorkers  int
-	HourlyNow   float64 // live worker $/h (excluding any already-active examiner)
-	MaxHourly   float64
-	SpentToday  float64
-	DailyBudget float64
+	LiveWorkers   int
+	MaxWorkers    int
+	HourlyNow     float64 // live worker $/h (excluding any already-active examiner)
+	MaxHourly     float64
+	SpentToday    float64
+	DailyBudget   float64
+	AccountingErr error
 }
 
 // ExaminerOffer is one eligible 1x RTX 5090 offer on Vast.ai.
@@ -328,7 +332,7 @@ func examinerTLSConfig(certPEM []byte, now func() time.Time) (*tls.Config, error
 	}, nil
 }
 
-func activeExaminerFromDisk(home string, now time.Time) (live int, hourly float64, accrued float64) {
+func activeExaminerFromDisk(home string, now time.Time, timeout time.Duration) (live int, hourly float64, accrued float64) {
 	st := readExaminerState(home)
 	if st == nil || st.InstanceID == "" {
 		return 0, 0, 0
@@ -337,8 +341,17 @@ func activeExaminerFromDisk(home string, now time.Time) (live int, hourly float6
 	if start.IsZero() || start.After(now) {
 		start = now
 	}
-	rec := podRecord{Cost: st.Price, Start: start, End: now}
-	return 1, st.Price, rec.dollarsBetween(startOfDay(now), now)
+	end := now
+	if timeout <= 0 {
+		timeout = 45 * time.Minute
+	}
+	if !st.Created.IsZero() {
+		if capAt := st.Created.Add(timeout); end.After(capAt) {
+			end = capAt
+		}
+	}
+	rec := podRecord{Cost: st.Price, Start: start, End: end}
+	return 1, st.Price, rec.dollarsBetween(startOfDay(now), end)
 }
 
 // Examiner manages the lifecycle of an ephemeral 1x RTX 5090 vLLM server and serves an
@@ -354,6 +367,7 @@ type Examiner struct {
 	onSpent func(podRecord)
 
 	fileMu       sync.Mutex
+	recorded     map[string]bool
 	mu           sync.RWMutex
 	loaded       bool
 	owner        string
@@ -601,8 +615,14 @@ func (e *Examiner) ActiveSnapshot(now time.Time) (live int, hourly float64, accr
 	if start.IsZero() || start.After(now) {
 		start = now
 	}
-	rec := podRecord{Cost: st.Price, Start: start, End: now}
-	return 1, st.Price, rec.dollarsBetween(startOfDay(now), now)
+	end := now
+	if !st.Created.IsZero() && e.cfg.Timeout > 0 {
+		if capAt := st.Created.Add(e.cfg.Timeout); end.After(capAt) {
+			end = capAt
+		}
+	}
+	rec := podRecord{Cost: st.Price, Start: start, End: end}
+	return 1, st.Price, rec.dollarsBetween(startOfDay(now), end)
 }
 
 func (e *Examiner) isBooting() bool {
@@ -708,26 +728,81 @@ func (e *Examiner) probeModels(ctx context.Context, upstream, apiKey, certPEM st
 	return false
 }
 
-func (e *Examiner) recordEnded(inst ExaminerInstance, fallbackStart time.Time, roundID, why string) {
-	if e.onSpent == nil {
+func spentHasExaminer(home, id string) bool {
+	if home == "" || id == "" {
+		return false
+	}
+	fh, err := os.Open(filepath.Join(home, "spent.jsonl"))
+	if err != nil {
+		return false
+	}
+	defer fh.Close()
+	sc := bufio.NewScanner(fh)
+	for sc.Scan() {
+		var r podRecord
+		if json.Unmarshal(sc.Bytes(), &r) == nil && r.Market == "vast" && r.For == "examiner" && r.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+func (e *Examiner) recordEndedAt(id, label string, price float64, start, end time.Time, roundID, why string) {
+	if e.onSpent == nil || id == "" {
 		return
 	}
+	e.fileMu.Lock()
+	if e.recorded == nil {
+		e.recorded = map[string]bool{}
+	}
+	if e.recorded[id] || spentHasExaminer(e.home, id) {
+		e.recorded[id] = true
+		e.fileMu.Unlock()
+		return
+	}
+	e.recorded[id] = true
+	e.fileMu.Unlock()
+	if start.IsZero() || start.After(end) {
+		start = end
+	}
+	if roundID == "" {
+		roundID = examinerLabelRound(label, e.ownerID())
+	}
+	e.onSpent(podRecord{
+		ID: id, Market: "vast", Handle: examinerLabelPrefix, GPU: "RTX 5090",
+		Cloud: "verified", Cost: price, Start: start, Alive: end, End: end,
+		For: "examiner", Round: roundID, Why: why,
+	})
+}
+
+func (e *Examiner) recordEnded(inst ExaminerInstance, fallbackStart time.Time, roundID, why string) {
 	now := e.now()
 	start := inst.Created
 	if start.IsZero() {
 		start = fallbackStart
 	}
+	e.recordEndedAt(inst.ID, inst.Label, inst.Price, start, now, roundID, why)
+}
+
+// recordMissingSaved records a bounded, idempotent terminal spend charge for a saved examiner
+// instance that vanished from the provider (e.g. terminated by its container-side TTL watchdog
+// or ended during a controller outage) so accrued spend never vanishes from daily budget totals.
+func (e *Examiner) recordMissingSaved(saved examinerState, why string) {
+	if saved.InstanceID == "" || saved.Price <= 0 || e.dryRun {
+		return
+	}
+	now := e.now()
+	start := saved.Created
 	if start.IsZero() || start.After(now) {
 		start = now
 	}
-	if roundID == "" {
-		roundID = examinerLabelRound(inst.Label, e.ownerID())
+	end := now
+	if !saved.Created.IsZero() && e.cfg.Timeout > 0 {
+		if capAt := saved.Created.Add(e.cfg.Timeout); end.After(capAt) {
+			end = capAt
+		}
 	}
-	e.onSpent(podRecord{
-		ID: inst.ID, Market: "vast", Handle: examinerLabelPrefix, GPU: "RTX 5090",
-		Cloud: "verified", Cost: inst.Price, Start: start, Alive: now, End: now,
-		For: "examiner", Round: roundID, Why: why,
-	})
+	e.recordEndedAt(saved.InstanceID, "", saved.Price, start, end, saved.RoundID, why)
 }
 
 // EnforceTimeout checks owned examiner instances against the hard --examiner-timeout TTL and
@@ -786,7 +861,8 @@ func (e *Examiner) EnforceTimeout(ctx context.Context) error {
 			saved = examinerState{}
 		}
 	}
-	if !foundSaved && saved.InstanceID != "" && !saved.Created.IsZero() && now.Sub(saved.Created) > e.cfg.Timeout && !e.dryRun {
+	if !foundSaved && saved.InstanceID != "" && !e.dryRun {
+		e.recordMissingSaved(saved, "examiner disappeared before timeout check (self-terminated or ended)")
 		e.clearState()
 	}
 	return firstErr
@@ -822,6 +898,7 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 	// Case 1: no open round needs an exam -> tear down every owned examiner instance immediately.
 	if needRound == "" {
 		var firstEndErr error
+		endedSaved := false
 		for _, inst := range insts {
 			if e.dryRun {
 				e.say("would end examiner GPU (machine %s): no open round needs an exam", inst.ID)
@@ -839,6 +916,7 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 			if inst.ID == saved.InstanceID {
 				fallbackStart = saved.Created
 				rid = saved.RoundID
+				endedSaved = true
 			}
 			start := inst.Created
 			if start.IsZero() {
@@ -858,6 +936,9 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 			e.proxyOffline()
 			return firstEndErr
 		}
+		if saved.InstanceID != "" && !endedSaved {
+			e.recordMissingSaved(saved, "examiner disappeared before teardown (self-terminated or ended)")
+		}
 		if saved.InstanceID != "" || wasReady {
 			e.clearState()
 		}
@@ -869,6 +950,7 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 	// instances. Never rent a replacement while any live owned orphan fails deletion.
 	var active *ExaminerInstance
 	var strayEndErr error
+	endedSaved := false
 	for i := range insts {
 		inst := insts[i]
 		keep := inst.State != "stopped" &&
@@ -894,6 +976,7 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 				}
 				e.say("ended examiner GPU (machine %s): exceeded --examiner-timeout (%s)", inst.ID, e.cfg.Timeout)
 				e.recordEnded(inst, saved.Created, saved.RoundID, "exceeded examiner timeout")
+				endedSaved = true
 				e.clearState()
 				saved, wasReady, wasUpstream = examinerState{}, false, ""
 				continue
@@ -919,6 +1002,7 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 		if inst.ID == saved.InstanceID {
 			fallbackStart = saved.Created
 			rid = saved.RoundID
+			endedSaved = true
 		}
 		e.say("ended stray examiner GPU (machine %s, state %s)", inst.ID, inst.State)
 		e.recordEnded(inst, fallbackStart, rid, "stray or orphaned examiner instance")
@@ -943,18 +1027,25 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 		return nil
 	}
 
-	// Do NOT rent a replacement while an owned live orphan could not be confirmed destroyed.
+	// Do NOT rent a replacement while an owned orphan could not be confirmed destroyed.
 	if strayEndErr != nil {
 		e.proxyOffline()
 		return strayEndErr
 	}
 
-	// Saved instance is no longer listed -> clear stale state before renting a new one.
+	// Saved instance is no longer listed -> record its bounded spend before clearing stale state.
+	if saved.InstanceID != "" && !endedSaved {
+		e.recordMissingSaved(saved, "examiner disappeared (self-terminated or ended)")
+	}
 	if saved.InstanceID != "" || wasReady {
 		e.clearState()
 	}
 
-	if budget.MaxWorkers > 0 && budget.LiveWorkers >= budget.MaxWorkers {
+	if budget.AccountingErr != nil {
+		e.say("not renting examiner GPU for %s: fleet accounting unavailable (%v)", needRound, budget.AccountingErr)
+		return budget.AccountingErr
+	}
+	if budget.MaxWorkers <= 0 || budget.LiveWorkers >= budget.MaxWorkers {
 		e.say("not renting examiner GPU for %s: %d machines already live and --max is %d; waiting for a slot", needRound, budget.LiveWorkers, budget.MaxWorkers)
 		return nil
 	}
@@ -962,18 +1053,27 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 		e.say("not renting examiner GPU for %s: about $%.2f spent today, and the daily budget is $%.2f", needRound, budget.SpentToday, budget.DailyBudget)
 		return nil
 	}
+	headroom := budget.MaxHourly - budget.HourlyNow
+	if budget.MaxHourly <= 0 || headroom <= 1e-9 {
+		e.say("not renting examiner GPU for %s: live hourly spend $%.2f/h leaves no room under --max-hourly $%.2f/h", needRound, budget.HourlyNow, budget.MaxHourly)
+		return nil
+	}
+	effMaxPrice := e.cfg.MaxPrice
+	if effMaxPrice <= 0 || headroom < effMaxPrice {
+		effMaxPrice = headroom
+	}
 
-	offers, err := e.prov.ExaminerOffers(ctx, e.cfg.MaxPrice)
+	offers, err := e.prov.ExaminerOffers(ctx, effMaxPrice)
 	if err != nil {
 		return fmt.Errorf("searching Vast.ai RTX 5090 offers for examiner: %w", err)
 	}
 	if len(offers) == 0 {
-		e.say("Vast.ai has no 1x RTX 5090 free for %s examiner under $%.2f/h; retrying on next tick", needRound, e.cfg.MaxPrice)
+		e.say("Vast.ai has no 1x RTX 5090 free for %s examiner under $%.2f/h (headroom $%.2f/h); retrying on next tick", needRound, effMaxPrice, headroom)
 		return nil
 	}
 	var fitting []ExaminerOffer
 	for _, off := range offers {
-		if budget.MaxHourly <= 0 || budget.HourlyNow+off.Price <= budget.MaxHourly+1e-9 {
+		if budget.HourlyNow+off.Price <= budget.MaxHourly+1e-9 && (e.cfg.MaxPrice <= 0 || off.Price <= e.cfg.MaxPrice+1e-9) {
 			fitting = append(fitting, off)
 		}
 	}

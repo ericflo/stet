@@ -38,6 +38,29 @@ class TrainingError(RuntimeError):
     """
 
 
+def hardware_backend(hw: dict | None) -> str | None:
+    """Extract the concrete backend ('cuda', 'rocm', 'mps', 'cpu') from a hardware info dict.
+
+    Returns None when CUDA metadata lacks an explicit backend (unless ROCm/AMD hints identify
+    ROCm) so NVIDIA grades never reuse an untagged or ROCm-labelled legacy cache entry.
+    """
+    if not isinstance(hw, dict):
+        return None
+    dev = hw.get("device")
+    if not isinstance(dev, str) or not dev:
+        return None
+    if dev == "cuda":
+        bk = hw.get("backend")
+        if bk in ("cuda", "rocm"):
+            return bk
+        torch_ver = str(hw.get("torch") or "").lower()
+        gpu = str(hw.get("gpu") or "").lower()
+        if "rocm" in torch_ver or "hip" in torch_ver or "amd" in gpu or "radeon" in gpu or "instinct" in gpu:
+            return "rocm"
+        return None
+    return dev
+
+
 @dataclass(frozen=True)
 class Scale:
     name: str

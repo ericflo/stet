@@ -453,7 +453,7 @@ func (f *Fleet) examinerSnapshot() (live int, hourly float64, accrued float64) {
 	if f.examiner != nil {
 		return f.examiner.ActiveSnapshot(now)
 	}
-	return activeExaminerFromDisk(f.o.Home, now)
+	return activeExaminerFromDisk(f.o.Home, now, f.o.Examiner.Timeout)
 }
 
 // seeStart notes how long a machine took to first ask for work, if it was seen before it had.

@@ -20,19 +20,26 @@ import (
 )
 
 type fakeExaminerProv struct {
-	mu      sync.Mutex
-	offers  []ExaminerOffer
-	insts   map[string]ExaminerInstance
-	rented  []ExaminerLaunch
-	ended   []string
-	nextID  int
-	failIDs map[string]error
-	endErr  map[string]error
+	mu          sync.Mutex
+	offers      []ExaminerOffer
+	insts       map[string]ExaminerInstance
+	rented      []ExaminerLaunch
+	ended       []string
+	nextID      int
+	failIDs     map[string]error
+	endErr      map[string]error
+	onList      func()
+	offerPrices []float64
+}
+
+func testExaminerBudget() ExaminerBudget {
+	return ExaminerBudget{MaxWorkers: 6, MaxHourly: 4.00}
 }
 
 func (p *fakeExaminerProv) ExaminerOffers(ctx context.Context, maxPrice float64) ([]ExaminerOffer, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.offerPrices = append(p.offerPrices, maxPrice)
 	var out []ExaminerOffer
 	for _, o := range p.offers {
 		if maxPrice <= 0 || o.Price <= maxPrice {
@@ -69,6 +76,12 @@ func (p *fakeExaminerProv) RentExaminer(ctx context.Context, offerID string, l E
 }
 
 func (p *fakeExaminerProv) ListExaminers(ctx context.Context) ([]ExaminerInstance, error) {
+	p.mu.Lock()
+	hook := p.onList
+	p.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	var out []ExaminerInstance
@@ -148,7 +161,7 @@ func TestExaminerFullLifecycleProxyAuthAndTeardown(t *testing.T) {
 	if resp.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("idle proxy status = %d, want 503", resp.StatusCode)
 	}
-	if err := ex.Reconcile(ctx, &Work{}, ExaminerBudget{}); err != nil {
+	if err := ex.Reconcile(ctx, &Work{}, testExaminerBudget()); err != nil {
 		t.Fatalf("Reconcile idle: %v", err)
 	}
 	if len(prov.rented) != 0 {
@@ -158,7 +171,7 @@ func TestExaminerFullLifecycleProxyAuthAndTeardown(t *testing.T) {
 	// 2. Round opens with ExamAt == 0 -> rents 1x RTX 5090 with pinned image/model/revision,
 	//    256-bit API key, per-instance TLS cert+key, owner label, and TTL.
 	openWork := &Work{Rounds: []WorkRound{{ID: "s3-o00001", Entries: 4, ExamAt: 0}}}
-	if err := ex.Reconcile(ctx, openWork, ExaminerBudget{}); err != nil {
+	if err := ex.Reconcile(ctx, openWork, testExaminerBudget()); err != nil {
 		t.Fatalf("Reconcile open: %v", err)
 	}
 	if len(prov.rented) != 1 {
@@ -223,7 +236,7 @@ func TestExaminerFullLifecycleProxyAuthAndTeardown(t *testing.T) {
 	prov.mu.Unlock()
 
 	clk.Advance(4 * time.Minute)
-	if err := ex.Reconcile(ctx, openWork, ExaminerBudget{}); err != nil {
+	if err := ex.Reconcile(ctx, openWork, testExaminerBudget()); err != nil {
 		t.Fatalf("Reconcile ready: %v", err)
 	}
 	if st := readExaminerState(home); st == nil || !strings.HasPrefix(st.Upstream, "https://") {
@@ -242,7 +255,7 @@ func TestExaminerFullLifecycleProxyAuthAndTeardown(t *testing.T) {
 	// 4. Exam is posted (ExamAt > 0) -> Reconcile destroys Vast instance at once, clears state, records spend.
 	clk.Advance(11 * time.Minute)
 	postedWork := &Work{Rounds: []WorkRound{{ID: "s3-o00001", Entries: 4, ExamAt: clk.Now().Unix()}}}
-	if err := ex.Reconcile(ctx, postedWork, ExaminerBudget{}); err != nil {
+	if err := ex.Reconcile(ctx, postedWork, testExaminerBudget()); err != nil {
 		t.Fatalf("Reconcile posted: %v", err)
 	}
 	if len(prov.ended) != 1 || prov.ended[0] != "ex-1" {
@@ -280,7 +293,7 @@ func TestExaminerRejectsPlaintextHTTPAndWrongTLSCertificate(t *testing.T) {
 	defer stopProxy()
 
 	openWork := &Work{Rounds: []WorkRound{{ID: "s3-o00009", Entries: 1, ExamAt: 0}}}
-	if err := ex.Reconcile(ctx, openWork, ExaminerBudget{}); err != nil {
+	if err := ex.Reconcile(ctx, openWork, testExaminerBudget()); err != nil {
 		t.Fatalf("Reconcile open: %v", err)
 	}
 
@@ -300,7 +313,7 @@ func TestExaminerRejectsPlaintextHTTPAndWrongTLSCertificate(t *testing.T) {
 	prov.insts["ex-1"] = inst
 	prov.mu.Unlock()
 
-	if err := ex.Reconcile(ctx, openWork, ExaminerBudget{}); err != nil {
+	if err := ex.Reconcile(ctx, openWork, testExaminerBudget()); err != nil {
 		t.Fatalf("Reconcile plaintext: %v", err)
 	}
 	if plainGotAuth {
@@ -332,7 +345,7 @@ func TestExaminerRejectsPlaintextHTTPAndWrongTLSCertificate(t *testing.T) {
 	prov.insts["ex-1"] = inst
 	prov.mu.Unlock()
 
-	if err := ex.Reconcile(ctx, openWork, ExaminerBudget{}); err != nil {
+	if err := ex.Reconcile(ctx, openWork, testExaminerBudget()); err != nil {
 		t.Fatalf("Reconcile MITM: %v", err)
 	}
 	if mitmGotAuth {
@@ -363,7 +376,7 @@ func TestExaminerOrphanCleanupAndTimeoutAndLoopbackGuard(t *testing.T) {
 	}
 
 	// Owned orphan without local examiner.json is destroyed when idle.
-	if err := ex.Reconcile(context.Background(), &Work{}, ExaminerBudget{}); err != nil {
+	if err := ex.Reconcile(context.Background(), &Work{}, testExaminerBudget()); err != nil {
 		t.Fatalf("Reconcile orphan idle: %v", err)
 	}
 	if len(prov.ended) != 1 || prov.ended[0] != "orphan-99" {
@@ -372,14 +385,14 @@ func TestExaminerOrphanCleanupAndTimeoutAndLoopbackGuard(t *testing.T) {
 
 	// Rent for an open round, then advance past hard 30m Timeout -> destroyed & replaced.
 	openWork := &Work{Rounds: []WorkRound{{ID: "s3-o00002", Entries: 2, ExamAt: 0}}}
-	if err := ex.Reconcile(context.Background(), openWork, ExaminerBudget{}); err != nil {
+	if err := ex.Reconcile(context.Background(), openWork, testExaminerBudget()); err != nil {
 		t.Fatalf("Reconcile open: %v", err)
 	}
 	if len(prov.rented) != 1 {
 		t.Fatalf("expected 1 rented, got %d", len(prov.rented))
 	}
 	now = now.Add(31 * time.Minute)
-	if err := ex.Reconcile(context.Background(), openWork, ExaminerBudget{}); err != nil {
+	if err := ex.Reconcile(context.Background(), openWork, testExaminerBudget()); err != nil {
 		t.Fatalf("Reconcile past timeout: %v", err)
 	}
 	if len(prov.ended) != 2 || prov.ended[1] != "ex-1" {
@@ -421,7 +434,7 @@ func TestExaminerConcurrentProbeAndTeardownNoRaceAndNoStaleRevival(t *testing.T)
 	defer stopProxy()
 
 	openWork := &Work{Rounds: []WorkRound{{ID: "s3-o00003", Entries: 1, ExamAt: 0}}}
-	if err := ex.Reconcile(ctx, openWork, ExaminerBudget{}); err != nil {
+	if err := ex.Reconcile(ctx, openWork, testExaminerBudget()); err != nil {
 		t.Fatalf("Reconcile rent: %v", err)
 	}
 	launch := prov.rented[0]
@@ -459,7 +472,7 @@ func TestExaminerConcurrentProbeAndTeardownNoRaceAndNoStaleRevival(t *testing.T)
 
 	_ = f.beginLook()
 	postedWork := &Work{Rounds: []WorkRound{{ID: "s3-o00003", Entries: 1, ExamAt: now.Unix()}}}
-	if err := ex.Reconcile(ctx, postedWork, ExaminerBudget{}); err != nil {
+	if err := ex.Reconcile(ctx, postedWork, testExaminerBudget()); err != nil {
 		t.Fatalf("Reconcile teardown: %v", err)
 	}
 	f.endLook(now, nil)
@@ -493,7 +506,7 @@ func TestExaminerTimeoutEndFailureAndZeroCreatedSpend(t *testing.T) {
 	ex.onSpent = func(rec podRecord) { spent = append(spent, rec) }
 
 	openWork := &Work{Rounds: []WorkRound{{ID: "s3-o00004", Entries: 1, ExamAt: 0}}}
-	if err := ex.Reconcile(context.Background(), openWork, ExaminerBudget{}); err != nil {
+	if err := ex.Reconcile(context.Background(), openWork, testExaminerBudget()); err != nil {
 		t.Fatalf("Reconcile open: %v", err)
 	}
 	prov.mu.Lock()
@@ -503,7 +516,7 @@ func TestExaminerTimeoutEndFailureAndZeroCreatedSpend(t *testing.T) {
 	prov.mu.Unlock()
 
 	now = now.Add(31 * time.Minute)
-	if err := ex.Reconcile(context.Background(), openWork, ExaminerBudget{}); err == nil {
+	if err := ex.Reconcile(context.Background(), openWork, testExaminerBudget()); err == nil {
 		t.Fatalf("expected error when EndExaminer fails on timeout")
 	}
 	if len(prov.rented) != 1 {
@@ -516,7 +529,7 @@ func TestExaminerTimeoutEndFailureAndZeroCreatedSpend(t *testing.T) {
 	prov.mu.Lock()
 	delete(prov.endErr, "ex-1")
 	prov.mu.Unlock()
-	if err := ex.Reconcile(context.Background(), openWork, ExaminerBudget{}); err != nil {
+	if err := ex.Reconcile(context.Background(), openWork, testExaminerBudget()); err != nil {
 		t.Fatalf("Reconcile retry timeout: %v", err)
 	}
 	if len(spent) != 1 {
@@ -540,7 +553,7 @@ func TestExaminerOwnerIsolationPreventsCrossDeploymentDeletion(t *testing.T) {
 
 	// Controller 1 rents an examiner for an open round.
 	openWork := &Work{Rounds: []WorkRound{{ID: "s3-o00005", Entries: 2, ExamAt: 0}}}
-	if err := ex1.Reconcile(context.Background(), openWork, ExaminerBudget{}); err != nil {
+	if err := ex1.Reconcile(context.Background(), openWork, testExaminerBudget()); err != nil {
 		t.Fatalf("ex1 Reconcile: %v", err)
 	}
 	if len(prov.insts) != 1 {
@@ -548,7 +561,7 @@ func TestExaminerOwnerIsolationPreventsCrossDeploymentDeletion(t *testing.T) {
 	}
 
 	// Controller 2 has NO open work and reconciles -> MUST NOT touch Controller 1's active examiner!
-	if err := ex2.Reconcile(context.Background(), &Work{}, ExaminerBudget{}); err != nil {
+	if err := ex2.Reconcile(context.Background(), &Work{}, testExaminerBudget()); err != nil {
 		t.Fatalf("ex2 Reconcile idle: %v", err)
 	}
 	if len(prov.ended) != 0 || len(prov.insts) != 1 {
@@ -582,7 +595,7 @@ func TestExaminerFailedOrphanDeletionBlocksReplacementRental(t *testing.T) {
 	openWork := &Work{Rounds: []WorkRound{{ID: "s3-o00006", Entries: 1, ExamAt: 0}}}
 
 	// Transient error deleting orphan -> Reconcile MUST fail and MUST NOT rent a 2nd examiner!
-	if err := ex.Reconcile(context.Background(), openWork, ExaminerBudget{}); err == nil {
+	if err := ex.Reconcile(context.Background(), openWork, testExaminerBudget()); err == nil {
 		t.Fatalf("expected error when live orphan deletion fails")
 	}
 	if len(prov.rented) != 0 || len(prov.insts) != 1 {
@@ -591,7 +604,7 @@ func TestExaminerFailedOrphanDeletionBlocksReplacementRental(t *testing.T) {
 
 	// Next tick deletion succeeds -> orphan destroyed AND 1 replacement rented cleanly.
 	delete(prov.endErr, "orphan-1")
-	if err := ex.Reconcile(context.Background(), openWork, ExaminerBudget{}); err != nil {
+	if err := ex.Reconcile(context.Background(), openWork, testExaminerBudget()); err != nil {
 		t.Fatalf("Reconcile after orphan delete recovers: %v", err)
 	}
 	if len(prov.ended) != 1 || prov.ended[0] != "orphan-1" || len(prov.rented) != 1 || len(prov.insts) != 1 {
@@ -612,7 +625,7 @@ func TestExaminerEnforceTimeoutDuringStetOutageAndSelfDestructPayload(t *testing
 	ex.onSpent = func(rec podRecord) { spent = append(spent, rec) }
 
 	openWork := &Work{Rounds: []WorkRound{{ID: "s3-o00007", Entries: 1, ExamAt: 0}}}
-	if err := ex.Reconcile(context.Background(), openWork, ExaminerBudget{}); err != nil {
+	if err := ex.Reconcile(context.Background(), openWork, testExaminerBudget()); err != nil {
 		t.Fatalf("Reconcile rent: %v", err)
 	}
 	// Verify container-side onstart script embeds TLS flags and Vast self-destruct TTL watchdog.
@@ -859,7 +872,7 @@ func TestExaminerOnstart0600PermsLegacyUpgradeAndStoppedOrphanBlock(t *testing.T
 		},
 	}
 	exLegacy := newExaminer(ExaminerConfig{Addr: "127.0.0.1:0", Timeout: 45 * time.Minute}, homeLegacy, provLegacy, func() time.Time { return now }, nil, false)
-	if err := exLegacy.Reconcile(context.Background(), &Work{}, ExaminerBudget{}); err != nil {
+	if err := exLegacy.Reconcile(context.Background(), &Work{}, testExaminerBudget()); err != nil {
 		t.Fatalf("Reconcile legacy idle: %v", err)
 	}
 	if len(provLegacy.ended) != 1 || provLegacy.ended[0] != "legacy-1" {
@@ -878,10 +891,327 @@ func TestExaminerOnstart0600PermsLegacyUpgradeAndStoppedOrphanBlock(t *testing.T
 	}
 	exStop := newExaminer(ExaminerConfig{Addr: "127.0.0.1:0", Timeout: 45 * time.Minute}, homeStop, provStop, func() time.Time { return now }, nil, false)
 	openWork := &Work{Rounds: []WorkRound{{ID: "s3-o00010", Entries: 1, ExamAt: 0}}}
-	if err := exStop.Reconcile(context.Background(), openWork, ExaminerBudget{}); err == nil {
+	if err := exStop.Reconcile(context.Background(), openWork, testExaminerBudget()); err == nil {
 		t.Fatalf("expected error when deleting stopped owned orphan fails")
 	}
 	if len(provStop.rented) != 0 {
 		t.Fatalf("must not rent replacement while stopped orphan deletion failed, rented=%d", len(provStop.rented))
+	}
+}
+
+// Review 12 P1 #4: explicit zero ceilings (--max 0 or --max-hourly 0) parsed via real CLI flags
+// must prevent renting a paid examiner just as they prevent renting workers, and negative caps
+// must be rejected at flag parsing.
+func TestExaminerZeroCapsEnforcedFromRealCLIFlags(t *testing.T) {
+	now := time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)
+	stetSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/admin/work":
+			_ = json.NewEncoder(w).Encode(Work{
+				Rounds: []WorkRound{{ID: "s3-o00020", Entries: 1, RunsWanted: 1, ExamAt: 0}},
+			})
+		case "/api/v1/season":
+			_ = json.NewEncoder(w).Encode(map[string]any{"site": "https://example.invalid"})
+		case "/api/v1/admin/workers":
+			_ = json.NewEncoder(w).Encode(map[string]any{"workers": []any{}})
+		case "/api/v1/accounts":
+			_ = json.NewEncoder(w).Encode(map[string]any{"account": map[string]any{"anchor": true, "worker": true}})
+		default:
+			_ = json.NewEncoder(w).Encode(map[string]any{})
+		}
+	}))
+	defer stetSrv.Close()
+
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"max_zero", []string{"--max", "0", "--max-hourly", "4"}},
+		{"max_hourly_zero", []string{"--max", "6", "--max-hourly", "0"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			var o Options
+			fs := flags("scale", &o)
+			if _, err := parse(fs, append([]string{"--home", home, "--api", stetSrv.URL, "--examiner-addr", "127.0.0.1:0"}, tc.args...)); err != nil {
+				t.Fatalf("parse %v: %v", tc.args, err)
+			}
+			exProv := &fakeExaminerProv{
+				offers: []ExaminerOffer{{ID: "off-5090", Card: "RTX 5090", Price: 0.62}},
+			}
+			ex := newExaminer(o.Examiner, home, exProv, func() time.Time { return now }, nil, false)
+			op, _ := newKey("op")
+			k1, _ := newKey("stet-rp-01")
+			workerMarket := &stubWorkerMarket{
+				name:   "runpod",
+				offers: []Offer{{Market: "runpod", ID: "gpu-1", Card: "RTX 4090", Model: "NVIDIA GeForce RTX 4090", Maker: "NVIDIA", Price: 0.57, MemoryGB: 24, Trust: "secure"}},
+			}
+			f := &Fleet{
+				o: &o, st: newStet(stetSrv.URL), op: op, out: io.Discard,
+				now: func() time.Time { return now }, fixed: true,
+				markets: []Market{workerMarket}, keys: []*Key{k1}, examiner: ex,
+			}
+			if err := tick(context.Background(), f); err != nil {
+				t.Fatalf("tick: %v", err)
+			}
+			if len(exProv.rented) != 0 || len(workerMarket.rentals) != 0 {
+				t.Fatalf("%s rented machines under explicit zero ceiling: examiners=%d workers=%d",
+					tc.name, len(exProv.rented), len(workerMarket.rentals))
+			}
+		})
+	}
+
+	// Negative limits and zero --examiner-max-price must be rejected during flag parsing.
+	for _, bad := range [][]string{{"--max", "-1"}, {"--max-hourly", "-0.5"}, {"--daily-budget", "-1"}, {"--examiner-max-price", "0"}, {"--examiner-max-price", "-1"}} {
+		var o Options
+		fs := flags("scale", &o)
+		if _, err := parse(fs, bad); err == nil {
+			t.Fatalf("expected parse to reject invalid flag %v", bad)
+		}
+	}
+}
+
+// Review 12 P2 #5: standalone reconcileExaminerOnce must serialize with cmdUp via f.lock so both
+// cannot spend the last --max slot concurrently, and must defer new rentals when fleet.json or
+// spent.jsonl cannot be read while still allowing idle teardown.
+func TestStandaloneExaminerSerializesWithUpAndDefersOnAccountingError(t *testing.T) {
+	now := time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)
+	home := t.TempDir()
+	op, _ := newKey("op")
+	k1, _ := newKey("stet-rp-01")
+
+	examAt := int64(0)
+	var mu sync.Mutex
+	stetSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		ea := examAt
+		mu.Unlock()
+		switch r.URL.Path {
+		case "/api/v1/admin/work":
+			_ = json.NewEncoder(w).Encode(Work{
+				Rounds: []WorkRound{{ID: "s3-o00021", Entries: 1, RunsWanted: 1, ExamAt: ea}},
+			})
+		case "/api/v1/season":
+			_ = json.NewEncoder(w).Encode(map[string]any{"site": "https://example.invalid"})
+		case "/api/v1/admin/workers":
+			_ = json.NewEncoder(w).Encode(map[string]any{"workers": []any{}})
+		case "/api/v1/accounts":
+			_ = json.NewEncoder(w).Encode(map[string]any{"account": map[string]any{"anchor": true, "worker": true}})
+		default:
+			_ = json.NewEncoder(w).Encode(map[string]any{})
+		}
+	}))
+	defer stetSrv.Close()
+
+	listEntered := make(chan struct{})
+	releaseList := make(chan struct{})
+	var listOnce sync.Once
+	exProv := &fakeExaminerProv{
+		offers: []ExaminerOffer{{ID: "off-5090", Card: "RTX 5090", Price: 0.62}},
+		onList: func() {
+			listOnce.Do(func() {
+				close(listEntered)
+				<-releaseList
+			})
+		},
+	}
+	workerMarket := &stubWorkerMarket{
+		name:   "runpod",
+		offers: []Offer{{Market: "runpod", ID: "gpu-1", Card: "RTX 4090", Model: "NVIDIA GeForce RTX 4090", Maker: "NVIDIA", Price: 0.57, MemoryGB: 24, Trust: "secure"}},
+	}
+
+	makeFleet := func(ex *Examiner) *Fleet {
+		return &Fleet{
+			o: &Options{
+				Home: home, Every: time.Minute, Cloud: "secure", Idle: 20,
+				MinCuratorGPUMemory: 24, MinGPUMemory: 12,
+				Policy: Policy{MaxWorkers: 1, MaxHourly: 4.00, Edits: true, PerWorker: 6},
+			},
+			st: newStet(stetSrv.URL), op: op, out: io.Discard,
+			now: func() time.Time { return now }, fixed: true,
+			markets: []Market{workerMarket}, keys: []*Key{k1}, examiner: ex,
+		}
+	}
+
+	ex := newExaminer(ExaminerConfig{Addr: "127.0.0.1:0", Timeout: 45 * time.Minute, MaxPrice: 1.50}, home, exProv, func() time.Time { return now }, nil, false)
+	fStandalone := makeFleet(ex)
+	fUp := makeFleet(nil) // separate CLI process (`stet-cloud up 1`) sharing --home
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- reconcileExaminerOnce(context.Background(), fStandalone)
+	}()
+	<-listEntered
+
+	upDone := make(chan error, 1)
+	go func() {
+		upDone <- cmdUp(context.Background(), fUp, 1)
+	}()
+	// Give cmdUp a moment to contend on f.lock, then release standalone reconciliation.
+	time.Sleep(40 * time.Millisecond)
+	close(releaseList)
+
+	if err := <-errCh; err != nil {
+		t.Fatalf("reconcileExaminerOnce: %v", err)
+	}
+	if err := <-upDone; err != nil {
+		t.Fatalf("cmdUp: %v", err)
+	}
+	totalLive := len(exProv.insts) + len(workerMarket.rentals)
+	if len(exProv.insts) != 1 || len(workerMarket.rentals) != 0 || totalLive != 1 {
+		t.Fatalf("concurrent standalone examiner + up exceeded --max 1: examiners=%d workers=%d",
+			len(exProv.insts), len(workerMarket.rentals))
+	}
+
+	// Now corrupt fleet.json -> teardown on ExamAt > 0 MUST still succeed, while a new rental on
+	// an open round MUST be deferred with an accounting error (never treating unknown spend as 0).
+	if err := os.WriteFile(filepath.Join(home, "fleet.json"), []byte("{not-json"), 0o600); err != nil {
+		t.Fatalf("write corrupt fleet.json: %v", err)
+	}
+	mu.Lock()
+	examAt = now.Unix()
+	mu.Unlock()
+	if err := reconcileExaminerOnce(context.Background(), fStandalone); err != nil {
+		t.Fatalf("idle teardown should succeed even when fleet.json is corrupt: %v", err)
+	}
+	if len(exProv.insts) != 0 {
+		t.Fatalf("expected active examiner torn down on ExamAt > 0, remaining=%d", len(exProv.insts))
+	}
+	mu.Lock()
+	examAt = 0
+	mu.Unlock()
+	if err := reconcileExaminerOnce(context.Background(), fStandalone); err == nil {
+		t.Fatalf("expected accounting error to defer new examiner rental when fleet.json is corrupt")
+	}
+	if len(exProv.insts) != 0 {
+		t.Fatalf("must not rent new examiner when fleet.json is unreadable, got %d", len(exProv.insts))
+	}
+}
+
+// Review 12 P2 #6: when an examiner self-terminates (e.g. via its container watchdog) and disappears
+// from Vast before restart/reconciliation, its accrued spend must be written idempotently to
+// spent.jsonl (bounded by Timeout) rather than vanishing to $0.000.
+func TestExaminerSelfTerminatedRecordsBoundedIdempotentDailySpend(t *testing.T) {
+	clk := newTestClock(time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC))
+	home := t.TempDir()
+	prov := &fakeExaminerProv{
+		offers: []ExaminerOffer{{ID: "off-5090", Card: "RTX 5090", Price: 0.62}},
+	}
+	appendSpent := func(rec podRecord) {
+		line, err := json.Marshal(rec)
+		if err != nil {
+			t.Fatalf("marshal spent: %v", err)
+		}
+		fh, err := os.OpenFile(filepath.Join(home, "spent.jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+		if err != nil {
+			t.Fatalf("open spent.jsonl: %v", err)
+		}
+		_, _ = fh.Write(append(line, '\n'))
+		_ = fh.Close()
+	}
+
+	ex1 := newExaminer(ExaminerConfig{Addr: "127.0.0.1:0", Timeout: 45 * time.Minute, MaxPrice: 1.50}, home, prov, clk.Now, nil, false)
+	ex1.onSpent = appendSpent
+	openWork := &Work{Rounds: []WorkRound{{ID: "s3-o00022", Entries: 1, ExamAt: 0}}}
+	if err := ex1.Reconcile(context.Background(), openWork, testExaminerBudget()); err != nil {
+		t.Fatalf("Reconcile rent: %v", err)
+	}
+
+	// Simulate 45m runtime followed by container self-destruct AND a 2-hour controller outage.
+	clk.Advance(2 * time.Hour)
+	prov.mu.Lock()
+	delete(prov.insts, "ex-1")
+	prov.mu.Unlock()
+
+	// Fresh restarted controller (new Examiner loading examiner.json from disk) reconciles idle.
+	// Even BEFORE Reconcile runs, ActiveSnapshot must cap accrued spend at Timeout ($0.465, not 2h $1.24).
+	ex2 := newExaminer(ExaminerConfig{Addr: "127.0.0.1:0", Timeout: 45 * time.Minute, MaxPrice: 1.50}, home, prov, clk.Now, nil, false)
+	ex2.onSpent = appendSpent
+	if _, _, snapAccrued := ex2.ActiveSnapshot(clk.Now()); snapAccrued < 0.464 || snapAccrued > 0.466 {
+		t.Fatalf("ActiveSnapshot after 2h outage must cap accrued spend at 45m timeout ($0.465), got $%.4f", snapAccrued)
+	}
+	if err := ex2.Reconcile(context.Background(), &Work{}, testExaminerBudget()); err != nil {
+		t.Fatalf("Reconcile after self-destruct: %v", err)
+	}
+	if readExaminerState(home) != nil {
+		t.Fatalf("expected examiner.json cleared after missing-instance reconciliation")
+	}
+
+	// Verify spent.jsonl recorded the bounded 45m charge ($0.465 = 0.62 * 0.75), NOT $0.000 and NOT 2h ($1.24).
+	f := &Fleet{o: &Options{Home: home}, now: clk.Now}
+	spentToday, err := f.spent(&ledger{Pods: map[string]*podRecord{}}, startOfDay(clk.Now()))
+	if err != nil {
+		t.Fatalf("f.spent: %v", err)
+	}
+	if spentToday < 0.464 || spentToday > 0.466 {
+		t.Fatalf("expected bounded 45m daily spend $0.465 after self-termination, got $%.4f", spentToday)
+	}
+
+	// Re-calling EnforceTimeout / recordMissingSaved for the same instance ID must be idempotent.
+	ex2.recordMissingSaved(examinerState{InstanceID: "ex-1", RoundID: "s3-o00022", Price: 0.62, Created: clk.Now().Add(-2 * time.Hour)}, "duplicate")
+	spentAgain, err := f.spent(&ledger{Pods: map[string]*podRecord{}}, startOfDay(clk.Now()))
+	if err != nil {
+		t.Fatalf("f.spent again: %v", err)
+	}
+	if spentAgain < 0.464 || spentAgain > 0.466 {
+		t.Fatalf("expected idempotent spend $0.465 (no double-charge), got $%.4f", spentAgain)
+	}
+}
+
+// Review 12 P2 #7: when remaining fleet hourly headroom ($0.60/h) is lower than --examiner-max-price
+// ($1.50/h) and the fastest tier (>=1500 Mbps) only has a $1.20/h card while the >=500 Mbps tier has
+// an affordable $0.50/h card, Reconcile must pass the effective headroom into ExaminerOffers so Vast
+// falls through to the affordable slower tier and rents the $0.50/h 5090.
+func TestExaminerOfferSearchFallsThroughToAffordableSlowerTier(t *testing.T) {
+	now := time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)
+	var rentedOfferID string
+	var seenQueries []float64
+	vastSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/api/v1/instances/"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"instances": []any{}})
+		case r.Method == "POST" && r.URL.Path == "/api/v0/bundles/":
+			var q map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&q)
+			minDown := 0.0
+			if m, ok := q["inet_down"].(map[string]any); ok {
+				minDown, _ = m["gte"].(float64)
+			}
+			maxDPH := 999.0
+			if m, ok := q["dph_total"].(map[string]any); ok {
+				maxDPH, _ = m["lte"].(float64)
+			}
+			seenQueries = append(seenQueries, minDown)
+			var offers []vastOffer
+			all := []vastOffer{
+				{ID: 15001, GPUName: "RTX 5090", NumGPUs: 1, DPHTotal: 1.20, DPHBase: 1.20, InetDown: 2000, CUDAMaxGood: 13.3},
+				{ID: 5001, GPUName: "RTX 5090", NumGPUs: 1, DPHTotal: 0.50, DPHBase: 0.50, InetDown: 600, CUDAMaxGood: 13.3},
+			}
+			for _, o := range all {
+				if o.InetDown >= minDown && o.DPHTotal <= maxDPH+1e-9 {
+					offers = append(offers, o)
+				}
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"offers": offers})
+		case r.Method == "PUT" && strings.HasPrefix(r.URL.Path, "/api/v0/asks/"):
+			rentedOfferID = strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v0/asks/"), "/")
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "new_contract": 77777})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer vastSrv.Close()
+
+	vm := newVast(vastSrv.URL, "test-vast-key")
+	home := t.TempDir()
+	ex := newExaminer(ExaminerConfig{Addr: "127.0.0.1:0", Timeout: 45 * time.Minute, MaxPrice: 1.50}, home, vm, func() time.Time { return now }, nil, false)
+	openWork := &Work{Rounds: []WorkRound{{ID: "s3-o00023", Entries: 1, ExamAt: 0}}}
+	// Fleet has $0.60/h headroom ($4.00 cap - $3.40 live).
+	budget := ExaminerBudget{LiveWorkers: 4, MaxWorkers: 6, HourlyNow: 3.40, MaxHourly: 4.00}
+	if err := ex.Reconcile(context.Background(), openWork, budget); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if rentedOfferID != "5001" {
+		t.Fatalf("expected fallthrough to $0.50/h 500 Mbps offer 5001 (queries=%v), got %q", seenQueries, rentedOfferID)
 	}
 }

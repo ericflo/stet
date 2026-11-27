@@ -3121,5 +3121,130 @@ def test_wait_for_exam_is_bounded_and_releases_pending_jobs_on_timeout(monkeypat
         assert client._exam_wait_limit() == float(client.EXAM_WAIT_MAX)
 
 
+def test_review12_baseline_cache_isolates_rocm_from_nvidia_cuda(monkeypatch, tmp_path):
+    """Review 12 P2 #3: NVIDIA CUDA grades must never reuse a ROCm or untagged CUDA baseline from
+    a shared or migrated cache across baseline(), early-grade _sit(), optional-baseline lookup,
+    and slim_result()."""
+    import json
+
+    import torch
+
+    from stet import client, data, grade, pipeline, train
+    from stet.exam.items import Item
+    from stet.exam.items import digest as items_digest
+    from stet.spec import official_round
+
+    monkeypatch.setenv("STET_CACHE", str(tmp_path))
+    s3 = load_season("s3")
+    scale = s3.scale("nano")
+    p = s3.raw["pools"]["practice"]
+    crawl = {"crawl": p["crawl"], "paths_sha256": p["paths_sha256"], "n_shards": int(p["n_shards"])}
+
+    exam = [
+        Item(kind="answer", corner="fresh/explain/en/1", fmt="prose", lang="en", source="explain", ctx="c1", cont="a" * 32),
+        Item(kind="answer", corner="fresh/infer/en/2", fmt="prose", lang="en", source="infer", ctx="c2", cont="b" * 32),
+    ]
+    full_sha = items_digest(exam)
+    rnd = official_round(s3, 7, {"round": 900007, "randomness": "77" * 32}, crawl)
+    rnd = type(rnd)(**{**rnd.__dict__, "exam_digest": full_sha})
+    monkeypatch.setattr(data, "round_exam", lambda r, sc: exam)
+
+    cuda_dev = types.SimpleNamespace(type="cuda")
+    nvidia_hw = {"device": "cuda", "backend": "cuda", "gpu": "NVIDIA GeForce RTX 5090", "vram_gb": 32.0}
+    rocm_hw = {"device": "cuda", "backend": "rocm", "gpu": "AMD Radeon 8060S", "vram_gb": 96.0}
+    untagged_hw = {"device": "cuda", "gpu": "NVIDIA GeForce RTX 5090", "vram_gb": 32.0}
+
+    # 1. Cache filenames separate NVIDIA CUDA (-cuda-) from AMD ROCm (-rocm-).
+    monkeypatch.setattr(torch.version, "hip", None, raising=False)
+    assert train.device_backend(cuda_dev) == "cuda"
+    nv_path = pipeline.baseline_path(rnd, scale, cuda_dev)
+    assert "-cuda-" in nv_path.name
+
+    monkeypatch.setattr(torch.version, "hip", "7.14.0", raising=False)
+    assert train.device_backend(cuda_dev) == "rocm"
+    rocm_path = pipeline.baseline_path(rnd, scale, cuda_dev)
+    assert "-rocm-" in rocm_path.name and rocm_path != nv_path
+
+    # Switch back to NVIDIA CUDA host and plant a migrated ROCm-labelled baseline AT the NVIDIA path!
+    monkeypatch.setattr(torch.version, "hip", None, raising=False)
+    rocm_cached = {
+        "valid": True,
+        "exam_sha256": full_sha,
+        "hardware": rocm_hw,
+        "train": {"init_sha256": "a" * 64},
+        "exam": {"items": 2, "mean": -2.5, "item_scores": [-2.5, -2.5]},
+    }
+    nv_path.parent.mkdir(parents=True, exist_ok=True)
+    nv_path.write_text(json.dumps(rocm_cached))
+
+    # 2. _cached() MUST reject the ROCm-labelled file at the NVIDIA cache path.
+    assert pipeline._cached(nv_path) is None
+    assert pipeline._cached(nv_path, want_exam_sha=full_sha, want_items=2, want_backend="cuda") is None
+
+    # Untagged legacy CUDA cache without explicit backend is ALSO rejected on NVIDIA CUDA.
+    legacy_untagged = dict(rocm_cached, hardware=untagged_hw)
+    nv_path.write_text(json.dumps(legacy_untagged))
+    assert pipeline._cached(nv_path) is None
+
+    # Put ROCm cache back at nv_path and verify baseline(), early-grade _sit(), and optional-baseline
+    # _grade_job() all treat it as a cache miss instead of reusing AMD measurements.
+    nv_path.write_text(json.dumps(rocm_cached))
+    retrained = []
+    monkeypatch.setattr(pipeline, "train_baseline", lambda r, sc, d, **kw: retrained.append("trained") or types.SimpleNamespace(device=cuda_dev))
+    monkeypatch.setattr(
+        pipeline,
+        "sit_exam",
+        lambda tr, r, sc, ex: {
+            "valid": True,
+            "exam_sha256": full_sha,
+            "hardware": nvidia_hw,
+            "train": {"init_sha256": "a" * 64},
+            "exam": {"items": 2, "mean": -2.4, "item_scores": [-2.4, -2.4]},
+        },
+    )
+    nv_base = pipeline.baseline(rnd, scale, cuda_dev)
+    assert retrained == ["trained"] and nv_base["hardware"]["backend"] == "cuda"
+    assert pipeline._cached(nv_path, want_exam_sha=full_sha, want_items=2, want_backend="cuda") is not None
+
+    # Overwrite nv_path with ROCm cache again and verify _sit() (baseline=False) returns base=None!
+    nv_path.write_text(json.dumps(rocm_cached))
+    monkeypatch.setattr(client, "fetch_exam", lambda r, k: None)
+    monkeypatch.setattr(grade, "sit_exam", lambda tr, r, sc, ex: {"valid": True, "hardware": nvidia_hw})
+    pending = client.Pending({"id": 1, "baseline": False}, rnd, types.SimpleNamespace(model=None), cuda_dev)
+    _, sit_base = client._sit(pending, {}, None, scale)
+    assert sit_base is None, "early-grade _sit() must not reuse ROCm-labelled baseline on NVIDIA CUDA"
+
+    # Optional-baseline lookup in _grade_job (baseline=False, exam already posted) also returns base=None!
+    import hashlib
+
+    import zstandard
+
+    script_bytes = b'{"doc": 0}\n'
+    sha = hashlib.sha256(script_bytes).hexdigest()
+    monkeypatch.setattr(client, "_job_round", lambda season, job, out: rnd)
+    monkeypatch.setattr(client, "request", lambda m, p, **kw: zstandard.ZstdCompressor().compress(script_bytes))
+    monkeypatch.setattr(pipeline, "grade_round", lambda r, sc, p, **kw: {"valid": True, "hardware": nvidia_hw})
+    out_stub = types.SimpleNamespace(line=lambda *a, **k: None, dim=lambda s: s, progress=lambda *a, **k: None)
+    _, opt_base = client._grade_job({"id": 2, "baseline": False, "script": {"sha256": sha}}, s3, scale, cuda_dev, None, out_stub, tmp_path / "work")
+    assert opt_base is None, "optional-baseline _grade_job() must not reuse ROCm-labelled baseline on NVIDIA CUDA"
+
+    # 3. slim_result() rejects mismatched baseline hardware and attaches matching baseline.hardware.
+    nvidia_grade = {
+        "round": {"id": rnd.id},
+        "valid": True,
+        "hardware": nvidia_hw,
+        "script": {"script_sha256": sha, "tokens_sha256": "2" * 64},
+        "exam": {"mean": -2.3, "item_scores": [-2.3, -2.3]},
+        "train": {"seconds": 10.0, "tokens_per_second": 1000.0, "final_train_loss": 2.3, "init_sha256": "a" * 64, "precision": "bf16", "curve": [[1, 3.0]]},
+    }
+    with pytest.raises(ValueError, match="backend"):
+        client.slim_result(nvidia_grade, rocm_cached)
+    with pytest.raises(ValueError, match="backend"):
+        client.slim_result(nvidia_grade, legacy_untagged)
+    slim_ok = client.slim_result(nvidia_grade, nv_base)
+    assert slim_ok["baseline"]["hardware"] == nvidia_hw
+
+
+
 
 

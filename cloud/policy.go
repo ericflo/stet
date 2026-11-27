@@ -408,11 +408,13 @@ func (p Policy) freshGraders(w *Work) int {
 		if r.GradesWanted <= 0 {
 			continue
 		}
-		roundNeed := r.FreshGradersWanted
-		if roundNeed == 0 && r.BaselineDisputed && (r.BaselinesWanted == nil || *r.BaselinesWanted > 0) {
-			roundNeed = 1
+		if r.FreshGradersWanted != nil {
+			need += *r.FreshGradersWanted
+			continue
 		}
-		need += roundNeed
+		if r.BaselineDisputed && (r.BaselinesWanted == nil || *r.BaselinesWanted > 0) {
+			need++
+		}
 	}
 	return need
 }
@@ -565,7 +567,7 @@ func (p Policy) decideNext(w *Work, workers []*Worker, spentToday float64, now t
 	disputedOnly := freshNeed > 0 && early == 0 && p.runners(w) == 0 && w.FarmWaiting == 0 && (!p.LongFarm || w.FarmLongWaiting == 0)
 	if disputedOnly {
 		for _, r := range w.Rounds {
-			if r.GradesWanted > 0 && !r.BaselineDisputed && r.FreshGradersWanted < r.GradesWanted {
+			if r.GradesWanted > 0 && !r.BaselineDisputed && r.freshGradersWanted() < r.GradesWanted {
 				disputedOnly = false
 				break
 			}

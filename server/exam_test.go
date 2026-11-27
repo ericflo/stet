@@ -39,7 +39,7 @@ func (w *world) examResult(c *claimed, n int, gain, base float64) map[string]any
 		return s / float64(len(v))
 	}
 	b, e := items(base), items(base+gain)
-	p["baseline"] = map[string]any{"mean": mean(b), "item_scores": b}
+	p["baseline"] = map[string]any{"mean": mean(b), "item_scores": b, "init_sha256": p["train"].(map[string]any)["init_sha256"]}
 	p["exam"] = map[string]any{"mean": mean(e), "item_scores": e}
 	return p
 }
@@ -297,7 +297,9 @@ func TestAuthoritativeExamInitSHALocksRound(t *testing.T) {
 		t.Fatalf("expected grade job, got %+v", cb.Job)
 	}
 	bad := w.examResult(cb, len(testTable()), 0.1, -3)
-	bad["train"].(map[string]any)["init_sha256"] = strings.Repeat("b", 64)
+	badInit := strings.Repeat("b", 64)
+	bad["train"].(map[string]any)["init_sha256"] = badInit
+	bad["baseline"].(map[string]any)["init_sha256"] = badInit
 	if code := bob.do("POST", fmt.Sprintf("/api/v1/jobs/%d/result", cb.Job.ID), bad, nil); code != 409 {
 		t.Fatalf("bad init_sha256 against authoritative exam lock: HTTP %d, want 409", code)
 	}
@@ -309,6 +311,7 @@ func TestAuthoritativeExamInitSHALocksRound(t *testing.T) {
 	}
 	good := w.examResult(cc, len(testTable()), 0.1, -3)
 	good["train"].(map[string]any)["init_sha256"] = wantInit
+	good["baseline"].(map[string]any)["init_sha256"] = wantInit
 	if code := carol.do("POST", fmt.Sprintf("/api/v1/jobs/%d/result", cc.Job.ID), good, nil); code != 200 {
 		t.Fatalf("matching init_sha256 against authoritative exam lock: HTTP %d, want 200", code)
 	}

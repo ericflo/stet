@@ -51,8 +51,9 @@ type WorkRound struct {
 	BaselineDisputed bool `json:"baseline_disputed,omitempty"`
 	// FreshGradersWanted counts fresh grading machines needed when grades are waiting that
 	// no currently idle organiser machine is eligible to take (e.g. a baseline or script tie
-	// where the idle machines have already measured or graded the disputed item).
-	FreshGradersWanted int `json:"fresh_graders_wanted,omitempty"`
+	// where the idle machines have already measured or graded the disputed item). Non-nil 0
+	// explicitly signals that an idle organiser machine already suffices.
+	FreshGradersWanted *int `json:"fresh_graders_wanted,omitempty"`
 }
 
 // WorkMachine is one of the organisers' accounts, as the judge sees it now.
@@ -231,9 +232,11 @@ func (a *App) work(s *State) Work {
 					eligibleIdle++
 				}
 			}
+			freshWanted := 0
 			if (disputed && eligibleIdle == 0) || (idleAnchors > 0 && eligibleIdle == 0 && estGradesUnderWay == 0) {
-				wr.FreshGradersWanted = 1
+				freshWanted = 1
 			}
+			wr.FreshGradersWanted = &freshWanted
 		}
 		out.Rounds = append(out.Rounds, wr)
 	}

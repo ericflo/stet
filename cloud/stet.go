@@ -236,7 +236,15 @@ type WorkRound struct {
 	BaselineDisputed bool `json:"baseline_disputed,omitempty"`
 	// FreshGradersWanted counts fresh grading machines needed when grades are waiting that
 	// no currently idle organiser machine is eligible to take (e.g. a baseline or script tie).
-	FreshGradersWanted int `json:"fresh_graders_wanted,omitempty"`
+	// Non-nil 0 explicitly signals that an idle organiser machine already suffices.
+	FreshGradersWanted *int `json:"fresh_graders_wanted,omitempty"`
+}
+
+func (r WorkRound) freshGradersWanted() int {
+	if r.FreshGradersWanted == nil {
+		return 0
+	}
+	return *r.FreshGradersWanted
 }
 
 // Machine is one of the organisers' accounts as the server sees it.

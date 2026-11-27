@@ -1627,7 +1627,7 @@ func TestTwoBaselinesBeyondToleranceButWithinTwiceSettleOnMidpoint(t *testing.T)
 					rd.Status, rd.BaselineN, w.app.baselineDisputed(s, rd))
 			}
 		})
-		if wk := w.work(anchor).Rounds[0]; !wk.BaselineDisputed || wk.BaselinesWanted == 0 || wk.GradesWanted != 1 || wk.FreshGradersWanted == 0 {
+		if wk := w.work(anchor).Rounds[0]; !wk.BaselineDisputed || wk.BaselinesWanted == 0 || wk.GradesWanted != 1 || wk.FreshGradersWanted == nil || *wk.FreshGradersWanted == 0 {
 			t.Fatalf("work must flag disputed baseline and request fresh tie-break grader: %+v", wk)
 		}
 		// After ReplicaWait expires unresolved, round closes unrated and archived ExamScores.BaselineOf is empty.
@@ -2039,4 +2039,404 @@ func TestNumericalGradeDisputeWaitsThroughReplicaWaitForDecidingGrade(t *testing
 		}
 		w.check()
 	})
+}
+
+// Review 12 P1 #1: in a 3-entry round with rd.InitSHA unset, if Grader 1 returns baseline A +
+// grade A, Grader 2 releases its baseline job (leaving BaselineN=1, rd.InitSHA=""), and Grader 3
+// returns a script-only grade with init B for Entry 1, Entry 1 MUST NOT settle rated against
+// baseline A. It must request corroboration and either settle once consensus locks OR void
+// unattended past ReplicaWait while preserving the matching 1-grader case.
+func TestScriptGradeWithDifferentInitSHADoesNotSettleAgainstMismatchedBaseline(t *testing.T) {
+	initA := strings.Repeat("a", 64)
+	initB := strings.Repeat("b", 64)
+	tokA := strings.Repeat("1", 64)
+
+	sendWithInit := func(w *world, a *actor, c *claimed, examLoss, baseLoss float64, initSHA string) (int, string) {
+		p := w.result(c, examLoss, baseLoss)
+		p["train"] = map[string]any{"init_sha256": initSHA}
+		if baseLoss > 0 {
+			p["baseline"].(map[string]any)["init_sha256"] = initSHA
+		} else {
+			delete(p, "baseline")
+		}
+		p["script"].(map[string]any)["tokens_sha256"] = tokA
+		var ack struct {
+			Status string `json:"status"`
+			Error  string `json:"error"`
+		}
+		code := a.do("POST", fmt.Sprintf("/api/v1/jobs/%d/result", c.Job.ID), p, &ack)
+		if ack.Error != "" {
+			return code, ack.Error
+		}
+		return code, ack.Status
+	}
+
+	setupMismatch := func(t *testing.T) (*world, *actor, int, []*actor, string, string) {
+		t.Helper()
+		pub, priv := newKey()
+		w := newWorld(t, pub)
+		w.app.season.Student = map[string]any{"kind": "hf_topreset", "repo": "baidu/ERNIE-4.5-0.3B-Base-PT"}
+		w.app.season.Baselines.PerRound = 2
+		anchor := w.join("anchor-one", priv)
+		g := w.volunteers("bob", "carol", "dave", "erin")
+		for i := 0; i < 3; i++ {
+			w.submit(w.join(fmt.Sprintf("owner-%d", i), nil), fmt.Sprintf("entry-%d", i), fmt.Sprintf("print(%d)", i))
+		}
+		idx := w.drawWithoutExam()
+		if w.editAll(anchor) != 3 {
+			t.Fatalf("expected anchor to edit all 3 entries")
+		}
+		// Bob and Carol claim the 2 baseline jobs; Dave claims a script-only job on another entry.
+		cBob := w.claimEarly(g[0])
+		cCarol := w.claimEarly(g[1])
+		cDave := w.claimEarly(g[2])
+		if cBob.Job.Baseline == nil || !*cBob.Job.Baseline || cCarol.Job.Baseline == nil || !*cCarol.Job.Baseline {
+			t.Fatalf("expected bob and carol to be asked for baselines")
+		}
+		if cDave.Job.Baseline == nil || *cDave.Job.Baseline {
+			t.Fatalf("expected dave to be a script-only grade (baseline=false), got %+v", cDave.Job.Baseline)
+		}
+		// Examiner omits optional round init_sha256.
+		w.exam(idx)
+		// Bob submits baseline A + valid grade A (gain +0.050).
+		if code, st := sendWithInit(w, g[0], cBob, 5.950, 6.000, initA); code != 200 || st != "pending" {
+			t.Fatalf("bob (initA): HTTP %d %s", code, st)
+		}
+		// Carol releases her baseline job, leaving BaselineN=1 and rd.InitSHA="".
+		w.release(g[1], cCarol)
+		// Dave submits script-only valid grade with init B (loss 5.950 -> would look like +0.050 against baseline A!).
+		if code, st := sendWithInit(w, g[2], cDave, 5.950, 0, initB); code != 200 || st != "pending" {
+			t.Fatalf("dave (initB script-only): HTTP %d %s", code, st)
+		}
+		// Verify Dave's mismatched grade was NOT scored against baseline A.
+		w.app.st.view(func(s *State) {
+			rd := s.Rounds[idx]
+			if rd.InitSHA != "" || rd.BaselineN != 1 {
+				t.Fatalf("expected unlocked round with BaselineN=1, got init=%q baseN=%d", rd.InitSHA, rd.BaselineN)
+			}
+			for _, r := range s.Results {
+				if r.RoundIdx == idx && r.InitSHA == initB && r.Score != nil {
+					t.Fatalf("grade with initB must NOT be scored against baseline initA: score=%v", *r.Score)
+				}
+			}
+		})
+		// /admin/work must still want grades to corroborate Dave's entry.
+		if wk := w.work(anchor).Rounds[0]; wk.GradesWanted == 0 {
+			t.Fatalf("expected GradesWanted > 0 for baseline-vs-grade init mismatch: %+v", wk)
+		}
+		return w, anchor, idx, g, cBob.Job.Editor.Name, cDave.Job.Editor.Name
+	}
+
+	t.Run("unresolved_mismatched_entry_voids_unrated_after_replica_wait", func(t *testing.T) {
+		w, _, idx, _, bobEntry, daveEntry := setupMismatch(t)
+		w.pass(w.cfg.ReplicaWait + time.Minute)
+		if w.settled(idx) != 3 {
+			t.Fatalf("expected all 3 entries to settle after ReplicaWait, got %d", w.settled(idx))
+		}
+		eb := w.entry(idx, bobEntry)
+		if eb.Void || !eb.Valid || eb.Gain == nil || math.Abs(*eb.Gain-0.050) > 1e-6 {
+			t.Fatalf("matching initA entry (1-grader case) must stay valid +0.050: %+v", eb)
+		}
+		ed := w.entry(idx, daveEntry)
+		if !ed.Void || ed.Valid || (ed.Gain != nil && *ed.Gain != 0) {
+			t.Fatalf("mismatched initB entry must settle void/unrated (not valid +0.050!): %+v", ed)
+		}
+		w.app.st.view(func(s *State) {
+			for _, r := range s.Results {
+				if r.RoundIdx == idx && r.InitSHA == initB && r.Verdict != "disputed" {
+					t.Fatalf("expected mismatched initB grade verdict=disputed, got %q", r.Verdict)
+				}
+			}
+		})
+		w.check()
+	})
+
+	t.Run("corroboration_locks_initA_and_settles_valid", func(t *testing.T) {
+		w, _, idx, g, _, daveEntry := setupMismatch(t)
+		// Erin claims the remaining/mismatched scripts with initA -> locks rd.InitSHA=initA!
+		for i := 0; i < 2; i++ {
+			c := w.claim(g[3], false)
+			if c.Job == nil {
+				break
+			}
+			baseLoss := 0.0
+			if c.Job.Baseline != nil && *c.Job.Baseline {
+				baseLoss = 6.000
+			}
+			if code, st := sendWithInit(w, g[3], c, 5.960, baseLoss, initA); code != 200 {
+				t.Fatalf("erin grade %d: HTTP %d %s", i, code, st)
+			}
+		}
+		w.pass(w.cfg.ReplicaWait + time.Minute)
+		w.app.st.view(func(s *State) {
+			if rd := s.Rounds[idx]; rd.InitSHA != initA {
+				t.Fatalf("expected rd.InitSHA locked to initA, got %q", rd.InitSHA)
+			}
+		})
+		ed := w.entry(idx, daveEntry)
+		if ed.Void || !ed.Valid || ed.Gain == nil || math.Abs(*ed.Gain-0.040) > 1e-6 {
+			t.Fatalf("corroborated entry should settle at initA gain +0.040, got %+v", ed)
+		}
+		w.check()
+	})
+
+	t.Run("valid_initB_tied_with_invalid_and_majority_invalid_never_deadlock", func(t *testing.T) {
+		// Gate 4 P1 #1 Case B: [Valid(initB, base=false), Invalid] must NOT deadlock after ReplicaWait.
+		w, _, idx, g, _, daveEntry := setupMismatch(t)
+		cBob2 := w.claim(g[0], false)
+		for cBob2.Job != nil && cBob2.Job.Editor.Name != daveEntry {
+			w.release(g[0], cBob2)
+			cBob2 = w.claim(g[0], false)
+		}
+		if cBob2.Job == nil {
+			t.Fatalf("expected bob to be able to claim dave's initB entry")
+		}
+		pInv := w.result(cBob2, 0, 6.000)
+		pInv["valid"] = false
+		pInv["invalid_reason"] = "bad script"
+		pInv["baseline"].(map[string]any)["init_sha256"] = initA
+		delete(pInv, "exam")
+		delete(pInv, "train")
+		if code := g[0].do("POST", fmt.Sprintf("/api/v1/jobs/%d/result", cBob2.Job.ID), pInv, nil); code != 200 {
+			t.Fatalf("bob invalid grade on daveEntry: HTTP %d", code)
+		}
+		w.pass(w.cfg.ReplicaWait + time.Minute)
+		if w.settled(idx) != 3 {
+			t.Fatalf("expected [Valid(initB), Invalid] round to settle without deadlock, settled=%d", w.settled(idx))
+		}
+		ed := w.entry(idx, daveEntry)
+		if !ed.Void || ed.Valid {
+			t.Fatalf("expected [Valid(initB), Invalid] to void unrated, got %+v", ed)
+		}
+		w.check()
+
+		// Gate 4 P1 #1 Case C: [Valid(initB, base=false), Invalid, Invalid] settles invalid cleanly
+		// without deadlocking AND marks Dave's initB grade "void" (zero false outlier strike).
+		w2, _, idx2, g2, _, daveEntry2 := setupMismatch(t)
+		w2.app.season.Baselines.PerRound = 1 // keep Erin script-only so rd.InitSHA stays ""
+		sendInvalid := func(a *actor) {
+			c := w2.claim(a, false)
+			for c.Job != nil && c.Job.Editor.Name != daveEntry2 {
+				w2.release(a, c)
+				c = w2.claim(a, false)
+			}
+			if c.Job == nil {
+				t.Fatalf("expected %s to claim %s", a.handle, daveEntry2)
+			}
+			p := w2.result(c, 0, 6.000)
+			p["valid"] = false
+			p["invalid_reason"] = "bad script"
+			if c.Job.Baseline != nil && *c.Job.Baseline {
+				p["baseline"].(map[string]any)["init_sha256"] = initA
+			} else {
+				delete(p, "baseline")
+			}
+			delete(p, "exam")
+			delete(p, "train")
+			if code := a.do("POST", fmt.Sprintf("/api/v1/jobs/%d/result", c.Job.ID), p, nil); code != 200 {
+				t.Fatalf("%s invalid grade: HTTP %d", a.handle, code)
+			}
+		}
+		sendInvalid(g2[0])
+		sendInvalid(g2[3])
+		w2.pass(w2.cfg.ReplicaWait + time.Minute)
+		if w2.settled(idx2) != 3 {
+			t.Fatalf("expected [Valid(initB), Invalid, Invalid] round to settle without deadlock, settled=%d", w2.settled(idx2))
+		}
+		ed2 := w2.entry(idx2, daveEntry2)
+		if ed2.Void || ed2.Valid {
+			t.Fatalf("expected 2-to-1 invalid majority to settle invalid (not void/valid), got %+v", ed2)
+		}
+		w2.app.st.view(func(s *State) {
+			if s.Rounds[idx2].InitSHA != "" {
+				t.Fatalf("expected rd.InitSHA to remain empty in Case C, got %q", s.Rounds[idx2].InitSHA)
+			}
+			for _, r := range s.Results {
+				if r.RoundIdx == idx2 && r.InitSHA == initB && r.Verdict != "void" {
+					t.Fatalf("expected minority initB grade verdict=void (not outlier), got %q", r.Verdict)
+				}
+			}
+			for _, acct := range s.Accounts {
+				if acct.Handle == "dave" && acct.Strikes != 0 {
+					t.Fatalf("dave must not receive an outlier strike for initB mismatch: strikes=%d", acct.Strikes)
+				}
+			}
+		})
+		w2.check()
+	})
+
+	t.Run("non_established_mismatched_init_gets_void_not_agreed_or_outlier", func(t *testing.T) {
+		// Gate 4 P2 #2: while rd.InitSHA == "" and BaselineN == 1 (initA), a non-established
+		// volunteer submitting initB must be marked "void" ("other data") — neither earning false
+		// standing credit when |v.gain| <= tol.Grade nor taking a false strike when |v.gain| > tol.Grade.
+		for _, tc := range []struct {
+			name     string
+			examLoss float64 // against base 6.000 -> gain 0.005 (<= 0.012) or 0.050 (> 0.012)
+		}{
+			{"small_gain_no_false_agreed", 5.995},
+			{"large_gain_no_false_strike", 5.950},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				pub, priv := newKey()
+				w := newWorld(t, pub)
+				w.app.season.Student = map[string]any{"kind": "hf_topreset", "repo": "baidu/ERNIE-4.5-0.3B-Base-PT"}
+				w.app.season.Baselines.PerRound = 2
+				w.app.season.Tolerance[w.cfg.Scale] = Tolerance{Grade: 0.012, Baseline: 0.015, Run: 0.015}
+				anchor := w.join("anchor-one", priv)
+				newbie := w.join("newbie", nil)
+				w.submit(w.join("owner-0", nil), "entry-0", "print(0)")
+				idx := w.drawWithoutExam()
+				ce := w.claim(anchor, true)
+				if code, _ := w.edit(anchor, ce, "0\n1\n"); code != 200 {
+					t.Fatalf("edit: HTTP %d", code)
+				}
+				cAnchor := w.claimEarly(anchor)
+				cNewbie := w.claimEarly(newbie)
+				w.exam(idx)
+				// Non-established volunteer submits baseline B (loss 6.000, within 0.015) + grade B first.
+				if code, _ := sendWithInit(w, newbie, cNewbie, tc.examLoss, 6.000, initB); code != 200 {
+					t.Fatalf("newbie (initB): HTTP %d", code)
+				}
+				// Anchor submits baseline A + grade A (rd.InitSHA stays "" with 1 established voter) -> settles!
+				if code, _ := sendWithInit(w, anchor, cAnchor, tc.examLoss, 6.000, initA); code != 200 {
+					t.Fatalf("anchor (initA): HTTP %d", code)
+				}
+				w.pass(w.cfg.ReplicaWait + time.Minute)
+				if w.settled(idx) != 1 {
+					t.Fatalf("expected round to settle, got %d", w.settled(idx))
+				}
+				w.app.st.view(func(s *State) {
+					if s.Rounds[idx].InitSHA != "" {
+						t.Fatalf("%s: expected rd.InitSHA empty, got %q", tc.name, s.Rounds[idx].InitSHA)
+					}
+					for _, r := range s.Results {
+						if r.RoundIdx == idx && r.InitSHA == initB && r.Verdict != "void" {
+							t.Fatalf("%s: expected newbie initB verdict=void, got %q", tc.name, r.Verdict)
+						}
+					}
+					for _, acct := range s.Accounts {
+						if acct.Handle == "newbie" && (acct.Agreed != 0 || acct.Strikes != 0) {
+							t.Fatalf("%s: newbie got Agreed=%d Strikes=%d, want 0/0", tc.name, acct.Agreed, acct.Strikes)
+						}
+					}
+				})
+				w.check()
+			})
+		}
+	})
+}
+
+// Review 12 P2 #2 & #3 (server-side): on a pinned-student season, a valid grade MUST NOT copy
+// train.init_sha256 into a missing or malformed baseline.init_sha256, and baseline.hardware from a
+// disallowed backend (e.g. AMD ROCm on a CUDA-only season) is rejected with HTTP 400.
+func TestPinnedStudentRejectsMissingMalformedBaselineInitAndDisallowedBaselineHardware(t *testing.T) {
+	pub, priv := newKey()
+	w := newWorld(t, pub)
+	w.app.season.Student = map[string]any{"kind": "hf_topreset", "repo": "baidu/ERNIE-4.5-0.3B-Base-PT"}
+	w.app.season.GradeBackends = []string{"cuda"}
+	anchor := w.join("anchor-one", priv)
+	bob := w.volunteers("bob")[0]
+	w.submit(w.join("owner-0", nil), "entry-0", "print(0)")
+	idx := w.draw()
+	ce := w.claim(anchor, true)
+	if code, _ := w.edit(anchor, ce, "0\n1\n"); code != 200 {
+		t.Fatalf("edit: HTTP %d", code)
+	}
+	c := w.asked(bob, true)
+	w.app.cfg.Dev = false
+	initA := strings.Repeat("a", 64)
+	tokA := strings.Repeat("1", 64)
+	nvHW := map[string]any{"device": "cuda", "backend": "cuda", "gpu": "NVIDIA GeForce RTX 5090"}
+
+	// 1. Absent baseline.init_sha256 alongside valid train.init_sha256 -> HTTP 400.
+	pMissing := w.result(c, 5.95, 6.00)
+	pMissing["hardware"] = nvHW
+	pMissing["train"] = map[string]any{"init_sha256": initA}
+	pMissing["script"].(map[string]any)["tokens_sha256"] = tokA
+	delete(pMissing["baseline"].(map[string]any), "init_sha256")
+	if code := bob.do("POST", fmt.Sprintf("/api/v1/jobs/%d/result", c.Job.ID), pMissing, nil); code != 400 {
+		t.Fatalf("absent baseline.init_sha256 must return HTTP 400, got %d", code)
+	}
+
+	// 2. Malformed baseline.init_sha256 alongside valid train.init_sha256 -> HTTP 400.
+	pBad := w.result(c, 5.95, 6.00)
+	pBad["hardware"] = nvHW
+	pBad["train"] = map[string]any{"init_sha256": initA}
+	pBad["script"].(map[string]any)["tokens_sha256"] = tokA
+	pBad["baseline"].(map[string]any)["init_sha256"] = "not-a-valid-sha256"
+	if code := bob.do("POST", fmt.Sprintf("/api/v1/jobs/%d/result", c.Job.ID), pBad, nil); code != 400 {
+		t.Fatalf("malformed baseline.init_sha256 must return HTTP 400, got %d", code)
+	}
+
+	// 3. Disallowed ROCm baseline.hardware on NVIDIA grade -> HTTP 400.
+	pROCm := w.result(c, 5.95, 6.00)
+	pROCm["hardware"] = nvHW
+	pROCm["train"] = map[string]any{"init_sha256": initA}
+	pROCm["script"].(map[string]any)["tokens_sha256"] = tokA
+	pROCm["baseline"].(map[string]any)["init_sha256"] = initA
+	pROCm["baseline"].(map[string]any)["hardware"] = map[string]any{"device": "cuda", "backend": "rocm", "gpu": "AMD Radeon 8060S"}
+	if code := bob.do("POST", fmt.Sprintf("/api/v1/jobs/%d/result", c.Job.ID), pROCm, nil); code != 400 {
+		t.Fatalf("ROCm baseline.hardware on CUDA-only season must return HTTP 400, got %d", code)
+	}
+
+	// Verify NO baseline was stored by any of the rejected submissions.
+	w.app.st.view(func(s *State) {
+		if len(s.Baselines) != 0 || s.Rounds[idx].BaselineN != 0 {
+			t.Fatalf("rejected submissions must not store baselines: count=%d baseN=%d", len(s.Baselines), s.Rounds[idx].BaselineN)
+		}
+	})
+}
+
+// Review 12 P2 #8 (server-side): when a round's baselines are disputed but an idle organiser
+// machine already online has NOT measured the baseline and can take the tie-breaking job,
+// /admin/work explicitly emits fresh_graders_wanted: 0 (non-nil pointer) so stet-cloud honors
+// the server's eligibility decision instead of evicting an idle worker.
+func TestDisputedBaselineWithEligibleIdleAnchorEmitsExplicitZeroFreshGradersWanted(t *testing.T) {
+	pub, priv := newKey()
+	w := newWorld(t, pub)
+	w.app.season.Baselines.PerRound = 2
+	w.app.season.Tolerance[w.cfg.Scale] = Tolerance{Grade: 0.012, Baseline: 0.015, Run: 0.015}
+	anchor := w.join("anchor-one", priv)
+	newAnchor := func(name string) *actor {
+		pk, sk := newKey()
+		if code := w.vouch(anchor, pk); code != 201 {
+			t.Fatalf("vouch %s: HTTP %d", name, code)
+		}
+		return w.join(name, sk)
+	}
+	a1 := newAnchor("stet-w1")
+	a2 := newAnchor("stet-w2")
+	a3 := newAnchor("stet-w3")
+	w.submit(w.join("owner-0", nil), "entry-0", "print(0)")
+	idx := w.drawWithoutExam()
+	ce := w.claim(anchor, true)
+	if code, _ := w.edit(anchor, ce, "0\n1\n"); code != 200 {
+		t.Fatalf("edit: HTTP %d", code)
+	}
+	c1, c2 := w.claimEarly(a1), w.claimEarly(a2)
+	w.exam(idx)
+	// a1 and a2 submit conflicting baselines (6.000 vs 6.080 > 0.015), while a3 checks in idle.
+	if code, _ := w.send(a1, c1, 5.950, 6.000); code != 200 {
+		t.Fatalf("a1: HTTP %d", code)
+	}
+	if code, _ := w.send(a2, c2, 6.030, 6.080); code != 200 {
+		t.Fatalf("a2: HTTP %d", code)
+	}
+	// Mark a3 recently active as an idle anchor who has NOT measured the baseline.
+	w.app.st.update(context.Background(), func(tx *Tx) error {
+		for _, acct := range tx.s.Accounts {
+			if acct.Handle == a3.handle {
+				acct.LastSeen = now()
+				tx.saveAccount(acct)
+			}
+		}
+		return nil
+	})
+	wk := w.work(anchor).Rounds[0]
+	if !wk.BaselineDisputed || wk.GradesWanted != 1 {
+		t.Fatalf("expected BaselineDisputed=true GradesWanted=1, got %+v", wk)
+	}
+	if wk.FreshGradersWanted == nil || *wk.FreshGradersWanted != 0 {
+		t.Fatalf("eligible idle anchor a3 already suffices: want explicit non-nil FreshGradersWanted=0, got %v", wk.FreshGradersWanted)
+	}
 }

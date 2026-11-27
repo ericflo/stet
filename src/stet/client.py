@@ -609,15 +609,29 @@ def slim_result(result: dict, base: dict | None) -> dict:
     """What a grader reports: everything needed to judge the run, nothing bulky. `base` is
     this machine's unedited baseline for the round, or None when its job did not ask for one
     and none is on disk: the grade is scored against the round's, which other machines measure."""
+    from .spec import hardware_backend
+
     keys = ("harness", "harness_sha256", "season", "season_digest", "scale", "corpus_sha256", "exam_sha256", "script_sha256",
             "valid", "invalid_reason", "hardware", "started_at", "finished_at")  # fmt: skip
     out = {k: result.get(k) for k in keys}
     out["round"] = result["round"]["id"]
     # Every item's score: the server makes the round's score from them.
     if base is not None:
+        res_hw = result.get("hardware")
+        base_hw = base.get("hardware")
+        if isinstance(res_hw, dict) and res_hw:
+            res_bk = hardware_backend(res_hw)
+            base_bk = hardware_backend(base_hw)
+            if res_bk in ("cuda", "rocm"):
+                if base_bk != res_bk:
+                    raise ValueError(f"baseline hardware backend ({base_bk!r}) does not match grade hardware backend ({res_bk!r})")
+            elif base_hw is not None and res_bk is not None and base_bk != res_bk:
+                raise ValueError(f"baseline hardware backend ({base_bk!r}) does not match grade hardware backend ({res_bk!r})")
         base_out = {"mean": base["exam"]["mean"], "item_scores": base["exam"]["item_scores"]}
         if base_init := (base.get("train") or {}).get("init_sha256"):
             base_out["init_sha256"] = base_init
+        if isinstance(base_hw, dict) and base_hw:
+            base_out["hardware"] = base_hw
         out["baseline"] = base_out
     if result.get("valid"):
         s = result["script"]
@@ -920,10 +934,14 @@ def _grade_job(job, season, scale, device, key, out, work: Path, bases: dict | N
             base = baseline(rnd, scale, device, progress=out.progress("baseline"), log=lambda m: out.line("", out.dim("baseline " + m)))
         else:
             # What an earlier job of the round measured here is still this machine's to send,
-            # provided it sat the exact full exam digest.
+            # provided it sat the exact full exam digest on the same grading backend.
+            from .train import device_backend, hardware_backend
+
             dev = device if hasattr(device, "type") else pick_device(device)
             base = _cached(baseline_path(rnd, scale, dev))
             if base is not None and base.get("exam_sha256") and base.get("exam_sha256") != rnd.exam_digest:
+                base = None
+            if base is not None and base.get("hardware") is not None and hardware_backend(base.get("hardware")) != device_backend(dev):
                 base = None
     want = job["script"]["sha256"]
     limit = int(season.raw["script"]["max_bytes"])
@@ -966,10 +984,14 @@ def _grade_job(job, season, scale, device, key, out, work: Path, bases: dict | N
     if bases is not None:
         _offload_cpu(trained)
         return Pending(job, rnd, trained, device)
+    from .train import device_backend, hardware_backend
+
     rnd = wait_for_exam(rnd, out)
     fetch_exam(rnd, key)
     base = _cached(baseline_path(rnd, scale, device))
     if base is not None and base.get("exam_sha256") and rnd.exam_digest and base.get("exam_sha256") != rnd.exam_digest:
+        base = None
+    if base is not None and base.get("hardware") is not None and hardware_backend(base.get("hardware")) != device_backend(device):
         base = None
     if base is None and asked:
         base = sit_baseline(base_t, rnd, scale)
@@ -1086,10 +1108,13 @@ def _sit(p: Pending, bases: dict, key, scale) -> tuple[dict, dict | None]:
     from . import data
     from .grade import sit_exam
     from .pipeline import _cached, baseline_path, sit_baseline
+    from .train import device_backend, hardware_backend
 
     fetch_exam(p.rnd, key)
     base = _cached(baseline_path(p.rnd, scale, p.device))
     if base is not None and base.get("exam_sha256") and p.rnd.exam_digest and base.get("exam_sha256") != p.rnd.exam_digest:
+        base = None
+    if base is not None and base.get("hardware") is not None and hardware_backend(base.get("hardware")) != device_backend(p.device):
         base = None
     if base is None and wants_baseline(p.job):
         base_t = bases.get(p.rnd.id)

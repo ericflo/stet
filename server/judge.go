@@ -404,11 +404,13 @@ type ResultPayload struct {
 
 // ExamScore is a student's score on the round's exam: one score for each of its items (bits
 // per byte, higher is better), and their mean. When carrying a baseline measurement, InitSHA256
-// records the baseline training run's own initial weights digest.
+// records the baseline training run's own initial weights digest and Hardware records the
+// hardware/backend that measured it.
 type ExamScore struct {
-	Mean       float64   `json:"mean"`
-	ItemScores []float64 `json:"item_scores"`
-	InitSHA256 string    `json:"init_sha256,omitempty"`
+	Mean       float64         `json:"mean"`
+	ItemScores []float64       `json:"item_scores"`
+	InitSHA256 string          `json:"init_sha256,omitempty"`
+	Hardware   json.RawMessage `json:"hardware,omitempty"`
 }
 
 type TrainInfo struct {
@@ -533,6 +535,7 @@ type judge struct {
 	passes       map[string]map[string]float64 // a training pass's seconds, by scale and GPU: worked out when first asked for
 	measures     map[int]map[int64]bool        // whose baseline each round has or is promised (measuring): worked out when first asked for
 	left         map[int]map[int64]bool        // whose baseline each round leaves out of its own (oddOut): worked out when first asked for
+	expired      bool                          // true in settleRound once ReplicaWait had already elapsed before giveUp ran
 }
 
 const (
@@ -832,6 +835,9 @@ func (j *judge) agrees(g *gradeView, v *verdict) bool {
 	if g.r.Valid != v.valid {
 		return false
 	}
+	if v.valid && !g.base {
+		return false
+	}
 	if v.valid && v.tokensSHA != "" && g.r.TokensSHA != "" && g.r.TokensSHA != v.tokensSHA {
 		return false
 	}
@@ -874,20 +880,30 @@ func (j *judge) weigh(sc *scriptState) *verdict {
 		v.counted, v.self = own, len(own) > 0
 	}
 	// On seasons with a pinned student model, if the round's InitSHA has not locked yet and
-	// valid counted grades disagree on init_sha256, never pool them into one gain.
+	// valid counted grades disagree on init_sha256 with each other OR with the round's baseline
+	// initial weights, never pool or score them into a rated gain. Trigger initTie whenever valid
+	// grades carry OR tie the script (>= half of counted grades) so an init-mismatched tie like
+	// [Valid(B), Invalid] requests corroboration and voids unrated past ReplicaWait instead of
+	// deadlocking or failing the curator.
+	baseInit, baseInitOK := "", false
 	if len(j.a.season.Student) > 0 && len(v.counted) > 0 {
 		if rd := j.s.Rounds[v.counted[0].r.RoundIdx]; rd != nil && rd.InitSHA == "" {
+			baseInit, baseInitOK = j.a.baselineInitSHA(j.s, rd)
 			initCounts := map[string]int{}
 			validInits := 0
+			baseMismatch := false
 			for _, g := range v.counted {
 				if g.r.Valid {
 					validInits++
 					if g.r.InitSHA != "" {
 						initCounts[g.r.InitSHA]++
 					}
+					if baseInitOK && baseInit != "" && g.r.InitSHA != baseInit {
+						baseMismatch = true
+					}
 				}
 			}
-			if len(initCounts) > 1 && 2*validInits > len(v.counted) {
+			if (len(initCounts) > 1 || baseMismatch) && 2*validInits >= len(v.counted) {
 				v.initTie = true
 			}
 		}
@@ -932,17 +948,26 @@ func (j *judge) weigh(sc *scriptState) *verdict {
 		}
 	}
 	v.known = len(v.counted) > 0
-	v.scored = v.known
 	var gains []float64
 	for _, g := range v.counted {
-		v.scored = v.scored && g.base
 		if g.r.Valid {
 			gains = append(gains, g.gain)
 		}
 	}
 	// Most of them must find it valid. As many for as against is not enough.
 	// An unresolved tokenized-stream or initial-weights tie never yields a valid rated gain.
-	if v.valid = !v.tokensTie && !v.initTie && 2*len(gains) > len(v.counted); v.valid {
+	v.valid = !v.tokensTie && !v.initTie && 2*len(gains) > len(v.counted)
+	v.scored = v.known
+	for _, g := range v.counted {
+		// When invalid grades hold a strict majority (!v.valid && !v.initTie), a valid grade
+		// left unscored solely because its InitSHA disagrees with the round's baseline does not
+		// hold up settling the script as invalid (its gain is unused).
+		if !g.base && !v.valid && !v.initTie && g.r.Valid && baseInitOK && baseInit != "" && g.r.InitSHA != baseInit {
+			continue
+		}
+		v.scored = v.scored && g.base
+	}
+	if v.valid {
 		v.gain = median(gains)
 	}
 	v.tie = v.tokensTie || v.initTie || (len(v.counted) == 2 && !j.same(v.counted[0], v.counted[1]))
@@ -1390,10 +1415,10 @@ func (j *judge) settleable(st *entryState) bool {
 		return false
 	}
 	wait := int64(j.a.cfg.ReplicaWait.Seconds())
-	expired := j.t >= max(st.Round.ActiveAt, st.Round.DrawnAt)+wait
+	expired := j.expired || j.t >= max(st.Round.ActiveAt, st.Round.DrawnAt)+wait
 	for _, sc := range st.Scripts {
 		v := j.weigh(sc)
-		if !v.scored || (v.tie && !expired) {
+		if (!v.scored && !(v.initTie && expired)) || (v.tie && !expired) {
 			return false
 		}
 		for _, c := range sc.Live {
@@ -2157,15 +2182,20 @@ func (a *App) submitResult(ctx context.Context, acctID, claimID int64, p *Result
 		if (rd.CorpusSHA != "" && rd.CorpusSHA != p.CorpusSHA256) || (rd.ExamSHA != "" && rd.ExamSHA != p.ExamSHA256) {
 			return refuse("corpus", 0, "your corpus or exam for %s differs from the round's. This verifier rebuilds its copy once", p.Round)
 		}
+		if p.Baseline != nil && len(p.Baseline.Hardware) > 0 && !a.cfg.Dev && !a.season.gradesOnHardware(readHardware(p.Baseline.Hardware)) {
+			return fail(400, "baselines for the leaderboard must come from %s", a.season.gradeHardwareRequirement())
+		}
 		initSHA := ""
 		if p.Train != nil && sha256Re.MatchString(p.Train.InitSHA256) {
 			initSHA = p.Train.InitSHA256
 		}
 		baseInitSHA := ""
-		if p.Baseline != nil && sha256Re.MatchString(p.Baseline.InitSHA256) {
-			baseInitSHA = p.Baseline.InitSHA256
-		} else if p.Baseline != nil && p.Valid && initSHA != "" {
-			baseInitSHA = initSHA
+		if p.Baseline != nil {
+			if sha256Re.MatchString(p.Baseline.InitSHA256) {
+				baseInitSHA = p.Baseline.InitSHA256
+			} else if p.Baseline.InitSHA256 != "" {
+				return fail(400, "malformed baseline.init_sha256 for %s", a.season.ID)
+			}
 		}
 		tokensSHA := scriptTokensSHA(p.Script)
 		if p.Valid && len(a.season.Student) > 0 {
@@ -2178,6 +2208,11 @@ func (a *App) submitResult(ctx context.Context, acctID, claimID int64, p *Result
 		}
 		if p.Baseline != nil && len(a.season.Student) > 0 && baseInitSHA == "" {
 			return fail(400, "baselines for %s must report a 64-hex baseline.init_sha256", a.season.ID)
+		}
+		// Legacy fallback applies only on seasons without a pinned student model when the
+		// baseline omitted init_sha256 altogether.
+		if p.Baseline != nil && len(a.season.Student) == 0 && baseInitSHA == "" && p.Valid && initSHA != "" {
+			baseInitSHA = initSHA
 		}
 		if p.Valid && initSHA != "" && baseInitSHA != "" && initSHA != baseInitSHA {
 			return fail(400, "baseline and exam initial weights hashes differ for %s", p.Round)
@@ -2408,6 +2443,7 @@ func (a *App) settleRound(tx *Tx, rd *Round) {
 		}
 		if gave {
 			j = a.newJudge(s)
+			j.expired = true
 			states = j.states(rd)
 		}
 	}
@@ -2709,6 +2745,7 @@ func (a *App) settleScript(tx *Tx, j *judge, st *entryState, sc *scriptState) *g
 		solid = solid || (!v.tie && g.acct.Anchor)
 	}
 	agreedTokens := v.tokensSHA
+	baseInit, baseInitOK := a.baselineInitSHA(j.s, rd)
 	ref := map[string]any{"round": roundID(a.season.ID, rd.Idx), "editor": st.Entry.EditorID}
 	for _, r := range sc.Results {
 		g := j.view(sc, r)
@@ -2717,21 +2754,24 @@ func (a *App) settleScript(tx *Tx, j *judge, st *entryState, sc *scriptState) *g
 		}
 		shown := "agreed"
 		b := j.s.Baselines[baselineKey(r.RoundIdx, r.AccountID)]
+		initMismatch := r.Valid && len(a.season.Student) > 0 && baseInitOK && baseInit != "" && r.InitSHA != baseInit
 		switch {
+		case decides[r] && v.tie:
+			// Established accounts disagree (on gain, validity, tokenized stream, or initial
+			// weights vs. baseline/peer), with no resolved majority to say which is right.
+			r.Verdict, shown = "disputed", "disputed"
+			g.acct.GPUSeconds += r.Seconds
 		case decides[r] && len(v.counted) == 1:
 			// It is the script's gain, with nothing to compare it with: shown as agreed, and
 			// not counted among the grades that did agree with somebody's.
 			r.Verdict = "counted"
 			g.acct.GPUSeconds += r.Seconds
-		case decides[r] && v.tie:
-			// Established accounts disagree (on gain, validity, or tokenized stream), with no
-			// resolved majority to say which is right.
-			r.Verdict, shown = "disputed", "disputed"
-			g.acct.GPUSeconds += r.Seconds
-		case !decides[r] && (r.CorpusSHA != rd.CorpusSHA || r.ExamSHA != rd.ExamSHA ||
+		case (!decides[r] && (r.CorpusSHA != rd.CorpusSHA || r.ExamSHA != rd.ExamSHA ||
 			(r.InitSHA != "" && rd.InitSHA != "" && r.InitSHA != rd.InitSHA) ||
-			(r.TokensSHA != "" && agreedTokens != "" && r.TokensSHA != agreedTokens)):
-			// It graded different data. A setup problem, and no evidence about this script.
+			(r.TokensSHA != "" && agreedTokens != "" && r.TokensSHA != agreedTokens))) ||
+			(!v.tie && initMismatch):
+			// It graded different data (including a pinned-student grade whose initial weights
+			// differed from the round's baseline). A setup problem, and no evidence about this script.
 			r.Verdict, shown = "void", "other data"
 		case !decides[r] && b != nil && (j.oddOut(r) || !a.baselineAgrees(rd, b)):
 			// Its arithmetic differs on the unedited corpus too. (A grader that was not asked

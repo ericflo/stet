@@ -257,13 +257,16 @@ Inside each group, every pillar counts the same:
   format with fewer than eight items counts in proportion. `pillars` shows every scored and
   diagnostic pillar.
 - **Only validated parts decide the score.** The season names every part of the exam: the
-  pillars above, and nothing else. The combined three-pillar reasoning score cleared multi-draw
-  DataDecide 1B ranking validation (`52/66`, `53/66`, `53/66` across three disjoint `Inkling-2-Mini`
-  draws; pooled 3-draw `53/66` `95% CI [50, 55]`, `27/31` on `2pt+`, Spearman `ρ = +0.804`,
-  `FineWeb-Edu` `#6/12` with `0%` `#1` rate, top-1 within `+0.14pp` of best; see
-  `docs/EXPERIMENTS.md` for full 3-draw and bootstrap figures) and carries `100%` of the official score; the four human-written
-  twin-context kinds carry `0%` weight and stay visible as published diagnostics until a
-  human-written measure clears DataDecide.
+  pillars above, and nothing else. The **English subset** (`421` items across three disjoint
+  `Inkling-2-Mini` draws) of the three-pillar reasoning score cleared multi-draw English
+  DataDecide 1B ranking validation (`52/66`, `53/66`, `53/66`; pooled 3-draw `53/66` = `80.3%`,
+  `95% CI [50, 55]`, `27/31` on `2pt+`, Spearman `ρ = +0.804`, `FineWeb-Edu` `#6/12` with `0%`
+  `#1` rate, top-1 within `+0.14pp` of best; scoring all `1,863` multilingual items under official
+  crawl weights against that English-only target yields `25/66`, `ρ = −0.294`, because validating
+  the full multilingual leaderboard requires a multilingual downstream target — see
+  `docs/EXPERIMENTS.md` for full 3-draw and bootstrap figures) and the three reasoning pillars carry
+  `100%` of the official score; the four human-written twin-context kinds carry `0%` weight and stay
+  visible as published diagnostics until a human-written measure clears DataDecide.
 - **Practice rounds work out of the box.** Without harvested hours, `stet run` sits a bundled
   openly-licensed CC-BY-SA Wikipedia practice pack (both scored reasoning and diagnostic
   twin-context comprehension); once you run `stet harvest`, practice rounds sit fresh
@@ -555,12 +558,15 @@ corpus on Season 3's 100%-reasoning score, in bits per byte):
   boilerplate/TOS and AI-SEO prose, whereas quality-filtered corpora (`DCLM-qc-7p-fw2`,
   `DCLM-qc-10p`, `DCLM-qc-20p`) consistently lead on English DataDecide recipes.
 - **Agreement with 1B pretraining, CJK headroom, & what the exam rewards.** Across all 12
-  published DataDecide recipes (English subset, 3 disjoint `Inkling-2-Mini` draws, 421 EN items
-  total, shortest-row 32-lane dealt slices), Season 3's reasoning exam scores **`52/66`, `53/66`,
-  and `53/66` — pooled `53/66` (`80.3%`, 95% CI `[50, 55]`), `27/31` on `2pt+` pairs, Spearman
-  `ρ = +0.804` (`[+0.706, +0.832]`), `FineWeb-Edu` `#6/12` (true `#7`, `0%` #1 rate across
-  resamples), and Top-1 `dclm-baseline-qc-7p-fw2` (`0.14pp` shortfall)**. While rotating excerpts
-  drops absolute NLL by `~0.19–0.20 bpb` and lowers DataDecide ordering (`53/66 → 49/66` pooled),
+  published English DataDecide recipes (scored on the **English reasoning subset**, 3 disjoint
+  `Inkling-2-Mini` draws, 421 EN items total, shortest-row 32-lane dealt slices), Season 3's
+  English reasoning subset scores **`52/66`, `53/66`, and `53/66` — pooled `53/66` (`80.3%`, 95%
+  CI `[50, 55]`), `27/31` on `2pt+` pairs, Spearman `ρ = +0.804` (`[+0.706, +0.832]`),
+  `FineWeb-Edu` `#6/12` (true `#7`, `0%` #1 rate across resamples), and Top-1
+  `dclm-baseline-qc-7p-fw2` (`0.14pp` shortfall)** (scoring all `1,863` multilingual items under
+  official crawl weights against that English-only target yields `25/66`, `ρ = −0.294`, ranking
+  multilingual `dolma1_7` `#1`). While rotating excerpts drops absolute NLL by `~0.19–0.20 bpb`
+  and lowers English DataDecide ordering (`53/66 → 49/66` pooled),
   between-curator gains vs `unedited` on multilingual crawls still retain `103%–117%` under
   rotation — so clean, diverse, non-boilerplate multilingual prose across every language remains
   the foundation. Note also that under `Inkling-2-Mini`, `fineweb2` and `reader` v2 still score

@@ -195,6 +195,18 @@ func flags(name string, o *Options) *flag.FlagSet {
 	}
 	o.Grace, o.Silence = 25*time.Minute, 20*time.Minute
 	finish := func() error {
+		if o.MaxWorkers < 0 {
+			return errors.New("--max must be 0 or more")
+		}
+		if o.MaxHourly < 0 {
+			return errors.New("--max-hourly must be 0 or more")
+		}
+		if o.DailyBudget < 0 {
+			return errors.New("--daily-budget must be 0 or more")
+		}
+		if o.Examiner.MaxPrice <= 0 {
+			return errors.New("--examiner-max-price must be greater than 0")
+		}
 		if o.Market != "" && !slices.Contains(marketOrder, o.Market) {
 			return fmt.Errorf("--market is one of %s, not %q", strings.Join(marketOrder, ", "), o.Market)
 		}
