@@ -140,7 +140,7 @@ def public_items(items: list[Item]) -> list[dict]:
     file against `exam_digest` and rebuild any withheld reasoning item from its source excerpt."""
     import hashlib
 
-    from .fresh.reason import extract_wrapped_excerpt, split_wrapped_ctx
+    from .fresh.reason import extract_wrapped_excerpt, ngram_overlap, prompt_copies_excerpt, split_wrapped_ctx
 
     out = []
     for it in items:
@@ -168,32 +168,62 @@ def public_items(items: list[Item]) -> list[dict]:
             if split is not None:
                 excerpt, prompt_line, wrapper_id = split
                 row["withheld_excerpt"] = True
-                row["prompt"] = prompt_line
                 row["wrapper_id"] = wrapper_id
                 row["excerpt_sha256"] = hashlib.sha256(excerpt.encode("utf-8")).hexdigest()
                 row["excerpt_chars"] = len(excerpt)
+                if prompt_copies_excerpt(prompt_line, excerpt):
+                    row["withheld_prompt"] = True
+                    row["prompt_sha256"] = hashlib.sha256(prompt_line.encode("utf-8")).hexdigest()
+                    row["prompt_chars"] = len(prompt_line)
+                else:
+                    row["prompt"] = prompt_line
+                if ngram_overlap(it.cont, excerpt, n=5) > 0.50:
+                    row.pop("cont", None)
+                    row["withheld_cont"] = True
+                    row["cont_sha256"] = hashlib.sha256(it.cont.encode("utf-8")).hexdigest()
+                    row["cont_chars"] = len(it.cont)
             out.append(row)
         else:
             out.append({"withheld": True, "id": it.id, "source": it.source, "kind": it.kind, "fmt": it.fmt, "lang": it.lang, "corner": it.corner})
     return out
 
 
-def rebuild_withheld_reasoning(row: dict, excerpt: str) -> Item:
+def rebuild_withheld_reasoning(
+    row: dict,
+    excerpt: str,
+    *,
+    prompt: str | None = None,
+    cont: str | None = None,
+) -> Item:
     """Reconstruct a settled non-Wikipedia reasoning item from its published teacher text and
-    source excerpt, verifying both `excerpt_sha256` and the exact item `id`."""
+    source excerpt (plus `prompt`/`cont` if withheld due to source overlap), verifying every
+    published SHA-256 and the exact item `id`."""
     import hashlib
 
     from .fresh.reason import wrap_prompt
 
-    if "prompt" not in row or "cont" not in row or "wrapper_id" not in row:
+    if "wrapper_id" not in row:
         raise ValueError("published row does not carry withheld reasoning fields")
+    prompt_line = str(row["prompt"]) if "prompt" in row else prompt
+    if prompt_line is None:
+        raise ValueError("published row withheld prompt; pass prompt= to rebuild")
+    if row.get("prompt_sha256"):
+        got_p_sha = hashlib.sha256(prompt_line.encode("utf-8")).hexdigest()
+        if got_p_sha != row["prompt_sha256"]:
+            raise ValueError(f"prompt sha256 mismatch: got {got_p_sha}, want {row['prompt_sha256']}")
+    cont_text = str(row["cont"]) if "cont" in row else cont
+    if cont_text is None:
+        raise ValueError("published row withheld cont; pass cont= to rebuild")
+    if row.get("cont_sha256"):
+        got_c_sha = hashlib.sha256(cont_text.encode("utf-8")).hexdigest()
+        if got_c_sha != row["cont_sha256"]:
+            raise ValueError(f"cont sha256 mismatch: got {got_c_sha}, want {row['cont_sha256']}")
     got_sha = hashlib.sha256(excerpt.encode("utf-8")).hexdigest()
     if row.get("excerpt_sha256") and got_sha != row["excerpt_sha256"]:
         raise ValueError(f"excerpt sha256 mismatch: got {got_sha}, want {row['excerpt_sha256']}")
     task_type = str(row["source"]).split(":", 1)[0]
     w_mod = 3 if task_type == "synthesis" else 6
     w_id = int(row["wrapper_id"]) % w_mod
-    prompt_line = str(row["prompt"])
     ctx = wrap_prompt(excerpt, prompt_line, task_type, w_id)
     it = Item(
         kind=str(row["kind"]),
@@ -202,7 +232,7 @@ def rebuild_withheld_reasoning(row: dict, excerpt: str) -> Item:
         lang=str(row["lang"]),
         source=str(row["source"]),
         ctx=ctx,
-        cont=str(row["cont"]),
+        cont=cont_text,
         prompt=prompt_line,
         wrapper_id=w_id,
     )
@@ -216,7 +246,7 @@ def rebuild_withheld_reasoning(row: dict, excerpt: str) -> Item:
         lang=str(row["lang"]),
         source=str(row["source"]),
         ctx=ctx,
-        cont=str(row["cont"]),
+        cont=cont_text,
     )
     if legacy.id == row["id"]:
         return legacy

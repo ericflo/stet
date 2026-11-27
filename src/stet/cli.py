@@ -362,10 +362,26 @@ def cmd_run(args):
         _edit_time_line(out, result, season)
         if not result["writing"]:
             if season.raw.get("exam", {}).get("practice_pack"):
-                out.line("note", "using bundled CC-BY-SA practice pack (reasoning + diagnostic comprehension); "
-                                 "`stet harvest` adds fresh local hours, once, and needs no account.")
+                teacher = ((season.raw.get("exam") or {}).get("reasoning") or {}).get("model", "pinned teacher")
+                out.line(
+                    "note",
+                    f"scored on bundled CC-BY-SA Wikipedia practice reasoning ({teacher}) + diagnostic comprehension; "
+                    "`stet harvest` adds fresh local hours, once, and needs no account.",
+                )
             else:
                 out.line("note", "no fresh writing in this round's exam. `stet harvest` fetches some, once, and needs no account.")
+        elif rnd.kind == "practice" and (season.raw.get("exam") or {}).get("reasoning") and (season.raw.get("exam") or {}).get("practice_pack"):
+            from .data import practice_synthesize
+
+            teacher = ((season.raw.get("exam") or {}).get("reasoning") or {}).get("model", "pinned teacher")
+            if practice_synthesize(rnd):
+                out.line("note", f"scored on fresh locally synthesized reasoning ({teacher}) + local harvested diagnostic comprehension.")
+            else:
+                out.line(
+                    "note",
+                    f"scored on bundled CC-BY-SA Wikipedia practice reasoning ({teacher}) + local harvested diagnostic comprehension "
+                    "(set STET_SYNTHESIZE_PRACTICE=1 with STET_EXAMINER_LLM_URL to synthesize fresh reasoning locally).",
+                )
         out.line("saved", str((work / "result.json").relative_to(Path.cwd()) if work.is_relative_to(Path.cwd()) else work / "result.json"))
         results.append(result)
     if len(results) == 1:

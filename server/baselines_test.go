@@ -2680,3 +2680,273 @@ func TestDisputedBaselineWithEligibleIdleAnchorEmitsExplicitZeroFreshGradersWant
 		t.Fatalf("eligible idle anchor a3 already suffices: want explicit non-nil FreshGradersWanted=0, got %v", wk.FreshGradersWanted)
 	}
 }
+
+// Review 14 P1 #1: four mutually inconsistent established volunteer grades (+0.010, +0.090,
+// +0.040, +0.060; every pair > 0.012 tolerance) have synthetic midpoint +0.050 within 0.010 of
+// both +0.040 and +0.060 even though no actual pair agrees. Must remain pending through
+// ReplicaWait and settle DisputedTogether=true with ZERO strikes on all four volunteers; once
+// a fifth grader agrees with +0.040 (+0.042), or when the inner pair mutually agrees (+0.045,
+// +0.055), the agreeing pair resolves the dispute and strikes only the outliers.
+func TestFourMutuallyInconsistentGradesCauseZeroStrikes(t *testing.T) {
+	setupFour := func(t *testing.T, gains []float64) (*world, int, *actor, []*actor, string) {
+		t.Helper()
+		pub, priv := newKey()
+		w := newWorld(t, pub)
+		w.app.season.Baselines.PerRound = 2
+		w.app.season.Tolerance[w.cfg.Scale] = Tolerance{Grade: 0.012, Baseline: 0.015, Run: 0.015}
+		anchor := w.join("anchor-one", priv)
+		alice := w.join("alice", nil)
+		g := w.volunteers("bob", "carol", "dave", "erin", "frank")
+		w.submit(alice, "tidy", "print(1)")
+		idx := w.drawWithoutExam()
+		ce := w.claim(anchor, true)
+		if code, _ := w.edit(anchor, ce, scriptOne); code != 200 {
+			t.Fatalf("anchor edit: HTTP %d", code)
+		}
+		cBob := w.claimEarly(g[0])
+		cCarol := w.claimEarly(g[1])
+		w.exam(idx)
+
+		initA, tokA := strings.Repeat("a", 64), strings.Repeat("1", 64)
+		submitAt := func(a *actor, c *claimed, gain float64) string {
+			p := w.result(c, 6.000-gain, 6.000)
+			p["train"] = map[string]any{"init_sha256": initA}
+			p["script"].(map[string]any)["tokens_sha256"] = tokA
+			if c.Job.Baseline != nil && *c.Job.Baseline {
+				p["baseline"].(map[string]any)["init_sha256"] = initA
+			} else {
+				delete(p, "baseline")
+			}
+			var ack struct {
+				Status string `json:"status"`
+			}
+			if code := a.do("POST", fmt.Sprintf("/api/v1/jobs/%d/result", c.Job.ID), p, &ack); code != 200 {
+				t.Fatalf("%s submit: HTTP %d", a.handle, code)
+			}
+			return ack.Status
+		}
+		if st := submitAt(g[0], cBob, gains[0]); st != "pending" {
+			t.Fatalf("after bob: status=%q, want pending", st)
+		}
+		if st := submitAt(g[1], cCarol, gains[1]); st != "pending" {
+			t.Fatalf("after carol: status=%q, want pending", st)
+		}
+		var lastStatus string
+		for i := 2; i < len(gains); i++ {
+			c := w.claim(g[i], false)
+			if c.Job == nil || c.Job.Kind != "grade" {
+				t.Fatalf("%s expected grade job, got %+v", g[i].handle, c.Job)
+			}
+			lastStatus = submitAt(g[i], c, gains[i])
+		}
+		return w, idx, alice, g, lastStatus
+	}
+
+	t.Run("four_volunteers_no_agreeing_pair_zero_strikes", func(t *testing.T) {
+		w, idx, alice, g, st4 := setupFour(t, []float64{0.010, 0.090, 0.040, 0.060})
+		if st4 != "pending" || w.settled(idx) != 0 {
+			t.Fatalf("four mutually inconsistent volunteer grades must stay pending: status=%q settled=%d", st4, w.settled(idx))
+		}
+		w.pass(w.cfg.ReplicaWait + time.Minute)
+		if w.settled(idx) != 1 {
+			t.Fatalf("expected 4-way dispute to settle after ReplicaWait, settled=%d", w.settled(idx))
+		}
+		for _, a := range g[:4] {
+			if acct := w.account(a.handle); acct.Strikes != 0 {
+				t.Fatalf("four mutually inconsistent volunteer grades struck %s (strikes=%d, want 0)", a.handle, acct.Strikes)
+			}
+		}
+		en := w.entries(alice, idx)[0]
+		if en.Detail == nil || !en.Detail.DisputedTogether {
+			t.Fatalf("expected DisputedTogether=true on unresolved 4-way dispute, got %+v", en.Detail)
+		}
+		for _, gr := range en.Runs[0].Grades {
+			if gr.Verdict != "disputed" {
+				t.Fatalf("expected all 4 mutually inconsistent grades published as disputed, got %+v", en.Runs[0].Grades)
+			}
+		}
+		w.check()
+	})
+
+	t.Run("fifth_agreeing_grader_resolves_four_way_dispute", func(t *testing.T) {
+		w, idx, _, g, st5 := setupFour(t, []float64{0.010, 0.090, 0.040, 0.060, 0.042})
+		if st5 != "settled" || w.settled(idx) != 1 {
+			t.Fatalf("fifth agreeing grader (+0.042 matching +0.040) should settle dispute: status=%q settled=%d", st5, w.settled(idx))
+		}
+		for _, h := range []string{"dave", "frank"} {
+			if acct := w.account(h); acct.Strikes != 0 {
+				t.Fatalf("agreeing pair member %s got %d strikes, want 0", h, acct.Strikes)
+			}
+		}
+		for _, h := range []string{"bob", "carol", "erin"} {
+			if acct := w.account(h); acct.Strikes != 1 {
+				t.Fatalf("outlier %s got %d strikes, want 1", h, acct.Strikes)
+			}
+		}
+		_ = g
+		w.check()
+	})
+
+	t.Run("four_volunteers_inner_pair_mutually_agrees_settles_solid", func(t *testing.T) {
+		w, idx, _, _, st4 := setupFour(t, []float64{0.010, 0.090, 0.045, 0.055})
+		if st4 != "settled" || w.settled(idx) != 1 {
+			t.Fatalf("agreeing inner pair (+0.045/+0.055 within 0.012) should settle solid: status=%q settled=%d", st4, w.settled(idx))
+		}
+		if w.account("bob").Strikes != 1 || w.account("carol").Strikes != 1 {
+			t.Fatalf("expected 1 strike each on outer outliers, got bob=%d carol=%d", w.account("bob").Strikes, w.account("carol").Strikes)
+		}
+		if w.account("dave").Strikes != 0 || w.account("erin").Strikes != 0 {
+			t.Fatalf("agreeing inner pair must have 0 strikes, got dave=%d erin=%d", w.account("dave").Strikes, w.account("erin").Strikes)
+		}
+		w.check()
+	})
+}
+
+// Review 14 P2 #2: during a three-way baseline dispute (6.000, 6.080, 6.040; tolerance 0.015), a
+// fourth independent grader repeating 6.000 must be accepted with HTTP 200 (not rejected with HTTP
+// 409 against the disputed median 6.020) and resolve the round's baseline to 6.000 so subsequent
+// outlier baselines (6.080) are rejected with 409. Four mutually inconsistent baselines (6.000,
+// 6.080, 6.040, 6.060) and a 2-vs-2 split (6.000, 6.080, 6.000, 6.080) must both remain disputed.
+func TestThreeWayBaselineDisputeAcceptsFourthAgreeingBaselineAndResolves(t *testing.T) {
+	setupDispute := func(t *testing.T) (*world, int, *actor, []*actor) {
+		t.Helper()
+		pub, priv := newKey()
+		w := newWorld(t, pub)
+		w.app.season.Baselines.PerRound = 2
+		w.app.season.Tolerance[w.cfg.Scale] = Tolerance{Grade: 0.012, Baseline: 0.015, Run: 0.015}
+		anchor := w.join("anchor-one", priv)
+		g := w.volunteers("gr1", "gr2", "gr3", "gr4", "gr5")
+		w.submit(w.join("owner-0", nil), "entry-0", "print(0)")
+		idx := w.drawWithoutExam()
+		ce := w.claim(anchor, true)
+		if code, _ := w.edit(anchor, ce, "0\n1\n"); code != 200 {
+			t.Fatalf("edit: HTTP %d", code)
+		}
+		c1, c2 := w.claimEarly(g[0]), w.claimEarly(g[1])
+		w.exam(idx)
+		if code, _ := w.send(g[0], c1, 5.950, 6.000); code != 200 {
+			t.Fatalf("g1 (6.000): HTTP %d", code)
+		}
+		if code, _ := w.send(g[1], c2, 6.030, 6.080); code != 200 {
+			t.Fatalf("g2 (6.080): HTTP %d", code)
+		}
+		c3 := w.claim(g[2], false)
+		if c3.Job == nil || c3.Job.Baseline == nil || !*c3.Job.Baseline {
+			t.Fatalf("expected tie-breaking baseline job for g3, got %+v", c3.Job)
+		}
+		if code, _ := w.send(g[2], c3, 5.990, 6.040); code != 200 {
+			t.Fatalf("g3 (6.040): HTTP %d", code)
+		}
+		w.app.st.view(func(s *State) {
+			if !w.app.baselineDisputed(s, s.Rounds[idx]) {
+				t.Fatalf("expected 3-way split (6.000/6.080/6.040) to be disputed")
+			}
+		})
+		return w, idx, anchor, g
+	}
+
+	t.Run("fourth_grader_repeating_6000_resolves_dispute_and_subsequent_outlier_409s", func(t *testing.T) {
+		w, idx, _, g := setupDispute(t)
+		c4 := w.claim(g[3], false)
+		if c4.Job == nil || c4.Job.Baseline == nil || !*c4.Job.Baseline {
+			t.Fatalf("expected tie-breaking baseline job for g4, got %+v", c4.Job)
+		}
+		if code, st := w.send(g[3], c4, 5.950, 6.000); code != 200 {
+			t.Fatalf("g4 repeating 6.000 must succeed with HTTP 200 (not 409), got HTTP %d (%s)", code, st)
+		}
+		w.app.st.view(func(s *State) {
+			rd := s.Rounds[idx]
+			if w.app.baselineDisputed(s, rd) {
+				t.Fatalf("expected 6.000 pair (g1, g4) to resolve 3-way baseline dispute")
+			}
+			if rd.BaselineN != 2 || rd.BaselineLoss == nil || math.Abs(*rd.BaselineLoss-6.000) > 1e-4 {
+				t.Fatalf("expected resolved baseline 6.000 (n=2), got %v (n=%d)", rd.BaselineLoss, rd.BaselineN)
+			}
+			left := w.app.baselinesLeftOut(s, rd)
+			if !left[w.account("gr2").ID] || !left[w.account("gr3").ID] || left[w.account("gr1").ID] || left[w.account("gr4").ID] {
+				t.Fatalf("expected gr2/gr3 oddOut and gr1/gr4 kept, got %+v", left)
+			}
+			// Now that baseline consensus is established at 6.000, baselineDev MUST reject 6.080!
+			outlier := make([]float64, len(rd.ExamTable))
+			for i := range outlier {
+				outlier[i] = -6.080
+			}
+			dev, ok := w.app.baselineDev(s, rd, w.account("gr5").ID, outlier)
+			if !ok || within(dev, w.app.tolerance().Baseline) {
+				t.Fatalf("expected 6.080 rejected against resolved 6.000 baseline: dev=%.4f ok=%v", dev, ok)
+			}
+		})
+		if w.settled(idx) != 1 {
+			t.Fatalf("expected round to settle once baseline resolved and g1/g4 agreed, settled=%d", w.settled(idx))
+		}
+		w.check()
+	})
+
+	t.Run("four_mutually_inconsistent_baselines_stay_disputed", func(t *testing.T) {
+		w, idx, _, g := setupDispute(t)
+		c4 := w.claim(g[3], false)
+		if code, _ := w.send(g[3], c4, 6.010, 6.060); code != 200 {
+			t.Fatalf("g4 (6.060) during dispute should be stored with HTTP 200, got %d", code)
+		}
+		w.app.st.view(func(s *State) {
+			if !w.app.baselineDisputed(s, s.Rounds[idx]) {
+				t.Fatalf("4 mutually inconsistent baselines (6.000/6.040/6.060/6.080) must stay disputed")
+			}
+		})
+		w.check()
+	})
+
+	t.Run("two_vs_two_baseline_tie_stays_disputed", func(t *testing.T) {
+		pub, priv := newKey()
+		w := newWorld(t, pub)
+		w.app.season.Baselines.PerRound = 2
+		w.app.season.Tolerance[w.cfg.Scale] = Tolerance{Grade: 0.012, Baseline: 0.015, Run: 0.015}
+		anchor := w.join("anchor-one", priv)
+		g := w.volunteers("gr1", "gr2", "gr3", "gr4")
+		w.submit(w.join("owner-0", nil), "entry-0", "print(0)")
+		idx := w.drawWithoutExam()
+		ce := w.claim(anchor, true)
+		if code, _ := w.edit(anchor, ce, "0\n1\n"); code != 200 {
+			t.Fatalf("edit: HTTP %d", code)
+		}
+		c1, c2 := w.claimEarly(g[0]), w.claimEarly(g[1])
+		w.exam(idx)
+		if code, _ := w.send(g[0], c1, 5.950, 6.000); code != 200 {
+			t.Fatalf("gr1 (6.000): HTTP %d", code)
+		}
+		if code, _ := w.send(g[1], c2, 6.030, 6.080); code != 200 {
+			t.Fatalf("gr2 (6.080): HTTP %d", code)
+		}
+		// Inject simultaneous second 6.000 and second 6.080 baselines (exact 2-vs-2 split).
+		id1, id3, id4 := w.account("gr1").ID, w.account("gr3").ID, w.account("gr4").ID
+		w.app.st.update(context.Background(), func(tx *Tx) error {
+			rd := tx.s.Rounds[idx]
+			initSHA := tx.s.Baselines[baselineKey(idx, id1)].InitSHA
+			for _, pair := range []struct {
+				id   int64
+				loss float64
+			}{{id3, 6.000}, {id4, 6.080}} {
+				items := make([]float64, len(rd.ExamTable))
+				for k := range items {
+					items[k] = -pair.loss
+				}
+				tx.saveBaseline(&Baseline{
+					RoundIdx: idx, AccountID: pair.id, Loss: pair.loss, Items: items,
+					CorpusSHA: rd.CorpusSHA, ExamSHA: rd.ExamSHA, InitSHA: initSHA, Established: true, ReceivedAt: now(),
+				})
+			}
+			w.app.refreshScores(tx, rd)
+			return nil
+		})
+		w.app.st.view(func(s *State) {
+			rd := s.Rounds[idx]
+			if !w.app.baselineDisputed(s, rd) {
+				t.Fatalf("exact 2-vs-2 baseline split (6.000/6.000 vs 6.080/6.080) must stay disputed")
+			}
+			if kept := w.app.baselinesKept(s, rd); len(kept) != 4 {
+				t.Fatalf("2-vs-2 baseline tie must keep all 4 baselines (no arbitrary winner), got %d", len(kept))
+			}
+		})
+		w.check()
+	})
+}

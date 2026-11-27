@@ -3535,6 +3535,135 @@ def test_review13_exam_timeout_is_round_scoped_across_two_rounds(monkeypatch, tm
     assert submitted == [202], f"expected Round B pre-exam grade 202 to complete and submit, got {submitted}"
 
 
+def test_review14_prompt_excerpt_copy_filtered_and_redacted_on_publish():
+    """Review 14 P2 #7: reasoning prompts that reproduce source excerpt prose (>50% 5-gram overlap)
+    are dropped at generation time (`prompt_excerpt_copy`), and any legacy withheld third-party item
+    whose prompt or response reproduces the excerpt is redacted in public_items() with SHA-256
+    metadata while preserving exact Item.id and rebuild_withheld_reasoning() fidelity."""
+    from stet.exam import examine
+    from stet.exam.fresh import reason
+
+    excerpt = (
+        "Coastal rail operators announced overnight maintenance across three river bridges after "
+        "inspection crews detected accelerated corrosion along the southern steel deck bearings "
+        "during heavy winter storm tides."
+    )
+    copied_prompt = (
+        "Why did coastal rail operators announce overnight maintenance across three river bridges "
+        "after inspection crews detected accelerated corrosion along the southern steel deck bearings?"
+    )
+    clean_prompt = "Why are the river crossings closing overnight for urgent structural repairs?"
+    clean_resp = (
+        "Saltwater spray from winter storm surges accelerated rust on load-bearing deck hardware, "
+        "requiring off-peak engineering work before commuter traffic resumes safely."
+    )
+    copied_resp = (
+        "Coastal rail operators announced overnight maintenance across three river bridges after "
+        "inspection crews detected accelerated corrosion along the southern steel deck bearings "
+        "during heavy winter storm tides."
+    )
+
+    assert reason.prompt_copies_excerpt(copied_prompt, excerpt) is True
+    assert reason.prompt_copies_excerpt(clean_prompt, excerpt) is False
+
+    # 1. Generation-time filter drops items whose prompt reproduces the excerpt.
+    docs = [
+        {"id": "copy-1", "source": "ccnews:2026-11-26", "lang": "en", "text": excerpt, "excerpt": excerpt, "task_type": "explain", "wrapper_id": 0},
+        {"id": "ok-1", "source": "ccnews:2026-11-26", "lang": "en", "text": excerpt, "excerpt": excerpt, "task_type": "explain", "wrapper_id": 0},
+    ]
+    gens = [
+        f"{copied_prompt}\nRESPONSE: {clean_resp}",
+        f"{clean_prompt}\nRESPONSE: {clean_resp}",
+    ]
+    kept, drops, _ = reason.parse_generated_items_detailed(docs, gens, check_lang=False)
+    assert len(kept) == 1 and kept[0].source == "explain:ccnews:2026-11-26:ok-1"
+    assert drops == {"prompt_excerpt_copy": 1}
+
+    # 2. Publication-time defense-in-depth redacts copied prompt/cont on legacy withheld rows while
+    #    preserving exact Item.id and verified reconstruction via rebuild_withheld_reasoning().
+    legacy_copied_prompt_item = Item(
+        kind="answer",
+        corner="explain/en/ccnews",
+        fmt="prose",
+        lang="en",
+        source="explain:ccnews:2026-11-26:legacy-copy",
+        ctx=reason.wrap_prompt(excerpt, copied_prompt, "explain", 2),
+        cont=clean_resp,
+        prompt=copied_prompt,
+        wrapper_id=2,
+    )
+    legacy_copied_cont_item = Item(
+        kind="answer",
+        corner="infer/en/ccnews",
+        fmt="prose",
+        lang="en",
+        source="infer:ccnews:2026-11-26:legacy-cont",
+        ctx=reason.wrap_prompt(excerpt, clean_prompt, "infer", 1),
+        cont=copied_resp,
+        prompt=clean_prompt,
+        wrapper_id=1,
+    )
+    pub = examine.public_items([legacy_copied_prompt_item, legacy_copied_cont_item])
+
+    row_p, row_c = pub[0], pub[1]
+    assert row_p["id"] == legacy_copied_prompt_item.id
+    assert row_p["withheld"] is True and row_p["withheld_excerpt"] is True
+    assert row_p["withheld_prompt"] is True and "prompt" not in row_p
+    assert row_p["prompt_sha256"] == hashlib.sha256(copied_prompt.encode("utf-8")).hexdigest()
+    assert row_p["prompt_chars"] == len(copied_prompt)
+    assert "southern steel deck bearings" not in json.dumps(row_p)
+    with pytest.raises(ValueError, match="withheld prompt"):
+        examine.rebuild_withheld_reasoning(row_p, excerpt)
+    with pytest.raises(ValueError, match="prompt sha256 mismatch"):
+        examine.rebuild_withheld_reasoning(row_p, excerpt, prompt="wrong prompt")
+    rebuilt_p = examine.rebuild_withheld_reasoning(row_p, excerpt, prompt=copied_prompt)
+    assert rebuilt_p == legacy_copied_prompt_item and rebuilt_p.id == legacy_copied_prompt_item.id
+
+    assert row_c["id"] == legacy_copied_cont_item.id
+    assert row_c["withheld_cont"] is True and "cont" not in row_c
+    assert row_c["cont_sha256"] == hashlib.sha256(copied_resp.encode("utf-8")).hexdigest()
+    assert "southern steel deck bearings" not in json.dumps(row_c)
+    rebuilt_c = examine.rebuild_withheld_reasoning(row_c, excerpt, cont=copied_resp)
+    assert rebuilt_c == legacy_copied_cont_item and rebuilt_c.id == legacy_copied_cont_item.id
+
+
+def test_review14_bundled_practice_pack_uses_inkling2_and_passes_copy_filter():
+    """Review 14 P3 #8: the bundled Season 3 practice pack ships Inkling-2-Mini CC-BY-SA Wikipedia
+    reasoning items (matching the production examiner teacher), carries authoritative prompt/wrapper
+    metadata with zero excerpt-copying prompts, and attributes Inkling-2-Mini in notices & README."""
+    from stet.exam.farm import unpack_items
+    from stet.exam.fresh import reason
+
+    repo_root = Path(__file__).resolve().parents[1]
+    pack_path = repo_root / "src/stet/exam/data/s3-practice.jsonl.zst"
+    s3 = load_season("s3")
+    raw = pack_path.read_bytes()
+    assert hashlib.sha256(raw).hexdigest() == s3.raw["exam"]["practice_pack"]["sha256"]
+
+    items = unpack_items(raw)
+    ctx_items = [it for it in items if it.kind == "context"]
+    ans_items = [it for it in items if it.kind == "answer"]
+    assert len(ctx_items) == 221
+    assert len(ans_items) == 288
+    by_task: dict[str, int] = {}
+    for it in ans_items:
+        task = it.source.split(":", 1)[0]
+        by_task[task] = by_task.get(task, 0) + 1
+        assert it.source.startswith(f"{task}:wikipedia"), f"practice pack must only use CC-BY-SA Wikipedia sources: {it.source}"
+        assert isinstance(it.prompt, str) and it.prompt and isinstance(it.wrapper_id, int)
+        excerpt = reason.extract_wrapped_excerpt(it.ctx, it.prompt, task, it.wrapper_id)
+        assert excerpt is not None, f"could not extract excerpt for {it.id}"
+        assert not reason.prompt_copies_excerpt(it.prompt, excerpt), f"prompt copies excerpt in {it.id}"
+    assert by_task == {"explain": 96, "infer": 96, "synthesis": 96}
+
+    notices = (repo_root / "src/stet/exam/data/THIRD_PARTY_NOTICES.md").read_text()
+    assert "thinkingmachines/Inkling-2-Mini" in notices
+    assert "Qwen3-8B" not in notices
+    readme = (repo_root / "README.md").read_text()
+    assert "Inkling-2-Mini" in readme and "STET_SYNTHESIZE_PRACTICE=1" in readme
+
+
+
 
 
 

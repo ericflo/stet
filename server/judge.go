@@ -849,6 +849,34 @@ func (j *judge) agrees(g *gradeView, v *verdict) bool {
 	return !v.valid || within(g.gain-v.gain, j.a.tolerance().Grade)
 }
 
+// supported reports whether a verdict is backed by an agreeing organisers' grade or by at least
+// two distinct counted grades that both agree with the verdict and mutually agree with each other.
+// Requiring a mutually agreeing pair prevents an even number of mutually inconsistent volunteer
+// grades (e.g. +0.010, +0.090, +0.040, +0.060 around synthetic midpoint +0.050) from looking
+// corroborated when no two graders actually agreed within tolerance.
+func (j *judge) supported(v *verdict) bool {
+	if !v.known || (v.valid && !v.scored) {
+		return false
+	}
+	var matching []*gradeView
+	for _, g := range v.counted {
+		if j.agrees(g, v) {
+			if g.acct.Anchor {
+				return true
+			}
+			matching = append(matching, g)
+		}
+	}
+	for i := 0; i < len(matching); i++ {
+		for k := i + 1; k < len(matching); k++ {
+			if j.same(matching[i], matching[k]) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // weigh works out what a script's grades come to so far. The established accounts' grades
 // decide; a self grade counts only while it is all there is. When valid grades report
 // script.tokens_sha256 and disagree, the token digest is resolved BEFORE computing the median
@@ -977,21 +1005,12 @@ func (j *judge) weigh(sc *scriptState) *verdict {
 	}
 	// A numerical or validity tie exists when two counted grades disagree, when valid and
 	// invalid grades split exactly 50/50 (e.g. 2-2), OR when three or more scored counted
-	// grades still have neither two agreeing with the verdict nor an organisers' grade agreeing
-	// with it (e.g., three mutually inconsistent volunteer grades +0.010/+0.090/+0.050).
+	// grades still have neither two mutually agreeing grades backing the verdict nor an
+	// organisers' grade agreeing with it (e.g. +0.010/+0.090/+0.050 or +0.010/+0.090/+0.040/+0.060).
 	numTie := (len(v.counted) == 2 && !j.same(v.counted[0], v.counted[1])) ||
 		(len(v.counted) > 2 && 2*len(gains) == len(v.counted))
 	if !numTie && len(v.counted) > 2 && v.scored {
-		agreed, anchorAgreed := 0, false
-		for _, g := range v.counted {
-			if j.agrees(g, v) {
-				agreed++
-				if g.acct.Anchor {
-					anchorAgreed = true
-				}
-			}
-		}
-		numTie = agreed < 2 && !anchorAgreed
+		numTie = !j.supported(v)
 	}
 	v.tie = v.tokensTie || v.initTie || numTie
 	sc.verdict = v
@@ -2709,7 +2728,7 @@ func (a *App) abandonStuck(tx *Tx) {
 		j := a.newJudge(tx.s)
 		for _, st := range j.states(rd) {
 			e := st.Entry
-			if len(e.Runs) == 0 {
+			if len(st.Runs) == 0 {
 				if len(st.LiveEdits) == 0 && st.EditFailed >= maxEditAttempts {
 					a.voidEntry(tx, e, fmt.Sprintf("the verifiers could not run this entry in %d attempts; the round does not count for it", maxEditAttempts), false)
 				}
@@ -2740,7 +2759,7 @@ func (a *App) abandonStuck(tx *Tx) {
 					gave = true
 				}
 			}
-			if gave && !counts(e) {
+			if gave && !counts(e) && len(st.LiveEdits) == 0 {
 				why := fmt.Sprintf("the verifiers could not grade this entry's script in %d attempts; the round does not count for it", maxGradeAttempts)
 				if trainFailed {
 					why = fmt.Sprintf("the training failed on this entry's script in %d attempts; the round does not count for it", maxGradeAttempts)
@@ -2806,18 +2825,9 @@ func (a *App) settleScript(tx *Tx, j *judge, st *entryState, sc *scriptState) *g
 	// is invalid: that is decided before anything is trained.
 	plain := !v.valid || math.Abs(v.gain) < 1e-9
 	// A strike says that a grade is wrong, and one volunteer's grade against another's
-	// does not show which of them is. It takes a gain that two established grades agree
-	// on, or one of an organisers' machine.
-	agreed, anchorAgreed := 0, false
-	for _, g := range v.counted {
-		if j.agrees(g, v) {
-			agreed++
-			if g.acct.Anchor {
-				anchorAgreed = true
-			}
-		}
-	}
-	solid := !v.tie && (agreed >= 2 || anchorAgreed)
+	// does not show which of them is. It takes a verdict backed by two mutually agreeing
+	// established grades or by an organisers' machine.
+	solid := !v.tie && j.supported(v)
 	agreedTokens := v.tokensSHA
 	baseInit, baseInitOK := a.baselineInitSHA(j.s, rd)
 	ref := map[string]any{"round": roundID(a.season.ID, rd.Idx), "editor": st.Entry.EditorID}

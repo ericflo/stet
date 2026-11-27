@@ -915,3 +915,122 @@ func TestSkipEarlyRoundsIsRoundScoped(t *testing.T) {
 		t.Fatalf("expected pre-exam grade for round %s while %s is skipped, got %+v", rid2, rid1, got2.Job)
 	}
 }
+
+// Review 14 P2 #3: five failed grade attempts on Run 1 must drop Run 1's script WITHOUT voiding
+// the entry while Run 2's edit claim is still executing; Run 2's completed edit must be accepted
+// with HTTP 200 and settle cleanly. And if Run 2 subsequently fails maxEditAttempts edits with no
+// non-dropped runs remaining, abandonStuck must still void the entry.
+func TestAbandonStuckDoesNotVoidEntryWhileSecondRunEditIsLive(t *testing.T) {
+	t.Run("keeps_entry_open_during_live_second_edit", func(t *testing.T) {
+		pub, priv := newKey()
+		w := newWorld(t, pub)
+		w.app.cfg.RunsPerEntry = 2
+		anchor := w.join("anchor-one", priv)
+		alice := w.join("alice", nil)
+		graders := w.volunteers("gr1", "gr2", "gr3", "gr4", "gr5")
+		dave := w.join("dave", nil)
+		w.established("dave")
+		w.submit(alice, "tidy", "print(1)")
+		idx := w.draw()
+
+		// Anchor completes Run 1; Dave holds a live edit lease for Run 2.
+		ce1 := w.claim(anchor, true)
+		if code, _ := w.edit(anchor, ce1, scriptOne); code != 200 {
+			t.Fatalf("anchor Run 1 edit: HTTP %d", code)
+		}
+		ce2 := w.claim(dave, true)
+		if ce2.Job == nil || ce2.Job.Kind != "edit" {
+			t.Fatalf("expected Dave to claim Run 2 edit, got %+v", ce2.Job)
+		}
+
+		// Five established graders fail grading Run 1 with "training failed".
+		for i, g := range graders {
+			cg := w.claim(g, false)
+			if cg.Job == nil || cg.Job.Kind != "grade" {
+				t.Fatalf("grader %d expected Run 1 grade job, got %+v", i, cg.Job)
+			}
+			if code := g.do("POST", fmt.Sprintf("/api/v1/jobs/%d/release", cg.Job.ID), map[string]any{"reason": "training failed: OOM"}, nil); code != 200 {
+				t.Fatalf("grader %d release: HTTP %d", i, code)
+			}
+		}
+
+		// Trigger abandonStuck while Dave's Run 2 edit lease is still active.
+		w.pass(time.Minute)
+		w.app.st.view(func(s *State) {
+			e := s.inRound[idx][0]
+			if e.Status != "open" || e.Void {
+				t.Fatalf("entry must stay open while Run 2 edit is live: status=%q void=%v", e.Status, e.Void)
+			}
+			if len(e.Runs) != 1 || !e.Runs[0].Dropped {
+				t.Fatalf("Run 1 should be dropped after %d failed grade attempts: %+v", maxGradeAttempts, e.Runs)
+			}
+		})
+
+		// Dave finishes Run 2 edit -> MUST return HTTP 200!
+		if code, st := w.edit(dave, ce2, scriptTwo); code != 200 {
+			t.Fatalf("Dave's live Run 2 edit must be accepted with HTTP 200, got HTTP %d (%s)", code, st)
+		}
+		// Anchor grades Run 2 -> entry settles Valid=true, Void=false!
+		cg2 := w.claim(anchor, false)
+		if cg2.Job == nil || cg2.Job.Kind != "grade" {
+			t.Fatalf("expected anchor to grade Run 2, got %+v", cg2.Job)
+		}
+		if code, _ := w.send(anchor, cg2, 5.950, 6.000); code != 200 {
+			t.Fatalf("anchor Run 2 grade: HTTP %d", code)
+		}
+		w.pass(w.cfg.ReplicaWait + time.Minute)
+		en := w.entries(alice, idx)[0]
+		if en.Void || !en.Valid {
+			t.Fatalf("expected entry to settle valid from Run 2, got %+v", en)
+		}
+		w.check()
+	})
+
+	t.Run("voids_entry_if_second_run_exhausts_edit_attempts_after_run1_dropped", func(t *testing.T) {
+		pub, priv := newKey()
+		w := newWorld(t, pub)
+		w.app.cfg.RunsPerEntry = 2
+		anchor := w.join("anchor-one", priv)
+		alice := w.join("alice", nil)
+		graders := w.volunteers("gr1", "gr2", "gr3", "gr4", "gr5")
+		runners := w.volunteers("rn1", "rn2", "rn3", "rn4", "rn5")
+		w.submit(alice, "tidy", "print(1)")
+		idx := w.draw()
+
+		ce1 := w.claim(anchor, true)
+		if code, _ := w.edit(anchor, ce1, scriptOne); code != 200 {
+			t.Fatalf("anchor Run 1 edit: HTTP %d", code)
+		}
+		// Hold a live edit claim while Run 1 gets dropped so the entry stays open.
+		ceLive := w.claim(runners[0], true)
+		for _, g := range graders {
+			cg := w.claim(g, false)
+			if code := g.do("POST", fmt.Sprintf("/api/v1/jobs/%d/release", cg.Job.ID), map[string]any{"reason": "training failed: OOM"}, nil); code != 200 {
+				t.Fatalf("release grade: HTTP %d", code)
+			}
+		}
+		w.pass(time.Minute)
+		// Now Run 2's edit fails maxEditAttempts times (no non-dropped runs left!).
+		if code := runners[0].do("POST", fmt.Sprintf("/api/v1/jobs/%d/release", ceLive.Job.ID), map[string]any{"reason": "curator crashed"}, nil); code != 200 {
+			t.Fatalf("release edit 0: HTTP %d", code)
+		}
+		for i := 1; i < maxEditAttempts; i++ {
+			ce := w.claim(runners[i], true)
+			if ce.Job == nil || ce.Job.Kind != "edit" {
+				t.Fatalf("expected edit attempt %d, got %+v", i, ce.Job)
+			}
+			if code := runners[i].do("POST", fmt.Sprintf("/api/v1/jobs/%d/release", ce.Job.ID), map[string]any{"reason": "curator crashed"}, nil); code != 200 {
+				t.Fatalf("release edit %d: HTTP %d", i, code)
+			}
+		}
+		w.pass(time.Minute)
+		if w.settled(idx) != 1 {
+			t.Fatalf("expected entry voided once Run 1 dropped and Run 2 exhausted edit attempts, settled=%d", w.settled(idx))
+		}
+		en := w.entries(alice, idx)[0]
+		if !en.Void || en.Valid {
+			t.Fatalf("expected Void=true Valid=false, got %+v", en)
+		}
+		w.check()
+	})
+}

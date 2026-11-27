@@ -448,12 +448,12 @@ type View struct {
 	ExaminerAccrued float64 // active examiner's accrued spend today (included in Today)
 }
 
-func (f *Fleet) examinerSnapshot() (live int, hourly float64, accrued float64) {
+func (f *Fleet) examinerSnapshot() (live int, hourly float64, accrued float64, err error) {
 	now := f.now()
 	if f.examiner != nil {
 		return f.examiner.ActiveSnapshot(now)
 	}
-	return activeExaminerFromDisk(f.o.Home, now, f.o.Examiner.Timeout)
+	return activeExaminerFromDisk(f.o.Home, now, f.o.Examiner.Timeout, f.o.Examiner.MaxPrice)
 }
 
 // seeStart notes how long a machine took to first ask for work, if it was seen before it had.
@@ -705,7 +705,10 @@ func (f *Fleet) look(ctx context.Context) (*View, error) {
 	if v.Today, err = f.spent(l, startOfDay(f.now())); err != nil {
 		return &View{Work: work, Ledger: l}, err
 	}
-	exLive, exHourly, exAccrued := f.examinerSnapshot()
+	exLive, exHourly, exAccrued, err := f.examinerSnapshot()
+	if err != nil {
+		return &View{Work: work, Ledger: l}, err
+	}
 	v.ExaminerLive, v.ExaminerHourly, v.ExaminerAccrued = exLive, exHourly, exAccrued
 	v.Hourly += exHourly
 	v.Today += exAccrued

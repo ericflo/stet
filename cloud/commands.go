@@ -202,6 +202,10 @@ func cmdStatus(ctx context.Context, f *Fleet) error {
 	}
 	if ex := readExaminerState(f.o.Home); ex != nil && ex.InstanceID != "" {
 		fmt.Fprintf(f.out, "Examiner GPU: machine %s for %s ($%.2f/h, up %s)\n", ex.InstanceID, ex.RoundID, ex.Price, now.Sub(ex.Created).Round(time.Minute))
+	} else if ex != nil && ex.PendingRent {
+		fmt.Fprintf(f.out, "Examiner GPU: rental reservation pending for %s ($%.2f/h)\n", ex.RoundID, ex.Price)
+	} else if ex != nil && len(ex.Unresolved) > 0 {
+		fmt.Fprintf(f.out, "Examiner GPU: %d unresolved instance(s) awaiting teardown\n", len(ex.Unresolved))
 	} else if ex != nil && len(ex.PendingSpends) > 0 {
 		fmt.Fprintf(f.out, "Examiner GPU: idle (%d pending spend record(s) awaiting spent.jsonl flush)\n", len(ex.PendingSpends))
 	}
@@ -283,6 +287,8 @@ func tick(ctx context.Context, f *Fleet) (err error) {
 		}
 		f.st.site(ctx) // and the builds the server says it runs and hands out
 	}
+	var exErr error
+	var snapErr error
 	if f.examiner != nil {
 		liveWorkers := 0
 		for _, wk := range v.Workers {
@@ -298,19 +304,24 @@ func tick(ctx context.Context, f *Fleet) (err error) {
 			SpentToday:  v.Today,
 			DailyBudget: f.o.DailyBudget,
 		}
-		if exErr := f.examiner.Reconcile(ctx, v.Work, budget); exErr != nil {
+		if exErr = f.examiner.Reconcile(ctx, v.Work, budget); exErr != nil {
 			f.say("examiner: %v", exErr)
 		}
-		exLive, exHourly, exAccrued := f.examinerSnapshot()
-		v.Hourly = max(0, v.Hourly-v.ExaminerHourly) + exHourly
-		if spentBase, serr := f.spent(v.Ledger, startOfDay(f.now())); serr == nil {
-			v.Today = spentBase + exAccrued
-		} else if exLive > 0 {
-			v.Today = max(0, v.Today-v.ExaminerAccrued) + exAccrued
-		}
-		v.ExaminerLive, v.ExaminerHourly, v.ExaminerAccrued = exLive, exHourly, exAccrued
-		if rec != nil {
-			rec.Hourly, rec.Today = v.Hourly, v.Today
+		exLive, exHourly, exAccrued, sErr := f.examinerSnapshot()
+		snapErr = sErr
+		if sErr != nil {
+			f.say("examiner: %v", sErr)
+		} else {
+			v.Hourly = max(0, v.Hourly-v.ExaminerHourly) + exHourly
+			if spentBase, serr := f.spent(v.Ledger, startOfDay(f.now())); serr == nil {
+				v.Today = spentBase + exAccrued
+			} else if exLive > 0 {
+				v.Today = max(0, v.Today-v.ExaminerAccrued) + exAccrued
+			}
+			v.ExaminerLive, v.ExaminerHourly, v.ExaminerAccrued = exLive, exHourly, exAccrued
+			if rec != nil {
+				rec.Hourly, rec.Today = v.Hourly, v.Today
+			}
 		}
 	}
 	pol := f.o.Policy
@@ -344,6 +355,9 @@ func tick(ctx context.Context, f *Fleet) (err error) {
 		}
 	}
 	launchN := min(d.Launch, max(0, pol.MaxWorkers-postLive))
+	if exErr != nil || snapErr != nil {
+		launchN = 0
+	}
 	rec.Rented, err = f.launchExcluding(ctx, v, launchN, d.LaunchLong, d.LaunchEarly, d.LaunchRuns, d.ExamDue, evicted)
 	return err
 }
@@ -413,7 +427,10 @@ func reconcileExaminerOnce(ctx context.Context, f *Fleet) error {
 			hourlyWorkers += p.Cost
 		}
 	}
-	_, _, exAccrued := f.examinerSnapshot()
+	_, _, exAccrued, snapErr := f.examinerSnapshot()
+	if snapErr != nil && acctErr == nil {
+		acctErr = snapErr
+	}
 	budget := ExaminerBudget{
 		LiveWorkers:   liveWorkers,
 		MaxWorkers:    f.o.MaxWorkers,

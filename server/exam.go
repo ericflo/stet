@@ -464,10 +464,51 @@ func itemsOf(bs []*Baseline) [][]float64 {
 	return rows
 }
 
+// baselinesAgree reports whether two baselines for the same round are mutually within baseline
+// tolerance on the exam's aggregate (and share InitSHA when the season pins initial weights).
+func (a *App) baselinesAgree(rd *Round, x, y *Baseline) bool {
+	if x == nil || y == nil || len(x.Items) != len(rd.ExamTable) || len(y.Items) != len(rd.ExamTable) {
+		return false
+	}
+	if len(a.season.Student) > 0 && x.InitSHA != "" && y.InitSHA != "" && x.InitSHA != y.InitSHA {
+		return false
+	}
+	dev, _, err := a.season.Exam.ScoreItems(rd.ExamTable, diffItems(x.Items, y.Items), rd.Shares)
+	return err == nil && within(dev, a.tolerance().Baseline)
+}
+
+// hasAgreeingBaselinePair reports whether at least two distinct baselines in bs mutually agree
+// within baseline tolerance.
+func (a *App) hasAgreeingBaselinePair(rd *Round, bs []*Baseline) bool {
+	for i := 0; i < len(bs); i++ {
+		for k := i + 1; k < len(bs); k++ {
+			if a.baselinesAgree(rd, bs[i], bs[k]) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func sameBaselineSet(x, y []*Baseline) bool {
+	if len(x) != len(y) {
+		return false
+	}
+	for i := range x {
+		if x[i].AccountID != y[i].AccountID {
+			return false
+		}
+	}
+	return true
+}
+
 // baselinesKept are the round's baselines that make its own. While fewer than three are in,
 // all of them: whichever came first is no more the standard than the next. From three on,
-// those within the tolerance of the median of them all, whatever order they came in. (If none
-// is, they are all kept: there is no telling.)
+// those within the tolerance of the median of them all whenever at least two of them mutually
+// agree; otherwise, if there is a unique strictly largest mutually agreeing cohort of size >= 2
+// (e.g. a 4th grader repeating 6.000 to break a 6.000/6.040/6.080 three-way split whose even-count
+// median 6.020 misses every baseline), that cohort is kept. If no agreeing consensus exists, all
+// baselines are kept so baselineDisputed reports the unresolved dispute.
 func (a *App) baselinesKept(s *State, rd *Round) []*Baseline {
 	all := a.roundBaselines(s, rd)
 	if len(all) < baselineQuorum {
@@ -480,10 +521,32 @@ func (a *App) baselinesKept(s *State, rd *Round) []*Baseline {
 			kept = append(kept, b)
 		}
 	}
-	if len(kept) == 0 {
-		return all
+	if len(kept) >= 2 && a.hasAgreeingBaselinePair(rd, kept) {
+		return kept
 	}
-	return kept
+	var best []*Baseline
+	tied := false
+	for _, b := range all {
+		var cohort []*Baseline
+		for _, other := range all {
+			if other == b || a.baselinesAgree(rd, b, other) {
+				cohort = append(cohort, other)
+			}
+		}
+		if len(cohort) < 2 {
+			continue
+		}
+		switch {
+		case len(cohort) > len(best):
+			best, tied = cohort, false
+		case len(cohort) == len(best) && !sameBaselineSet(cohort, best):
+			tied = true
+		}
+	}
+	if len(best) >= 2 && !tied {
+		return best
+	}
+	return all
 }
 
 // baselinesLeftOut is whose baseline of a round is the odd one out: one that may make the
@@ -513,13 +576,18 @@ func (j *judge) oddOut(r *Result) bool {
 	return out[r.AccountID]
 }
 
-// baselineDev is how far a grader's baseline is from the median of the round's baselines, its
-// own among them (the others' and this one, whether or not its account is established), on the
-// exam's score. ok is false while fewer than two others are in: nobody is turned away for
-// differing from one machine, which may be the one that is wrong.
+// baselineDev is how far a grader's baseline is from the median of the round's established
+// baselines, its own among them (the kept others' and this one, whether or not its account is
+// established), on the exam's score. ok is false while fewer than two others are in OR while the
+// round's existing baselines are still disputed: nobody is turned away when no established
+// baseline consensus exists yet (otherwise a tie-breaking grader repeating one of the disputed
+// baselines could be rejected with 409 before it can resolve the dispute).
 func (a *App) baselineDev(s *State, rd *Round, acctID int64, items []float64) (dev float64, ok bool) {
+	if a.baselineDisputed(s, rd) {
+		return 0, false
+	}
 	var rows [][]float64
-	for _, b := range a.roundBaselines(s, rd) {
+	for _, b := range a.baselinesKept(s, rd) {
 		if b.AccountID != acctID {
 			rows = append(rows, b.Items)
 		}
@@ -648,17 +716,16 @@ func (a *App) baselineDisputed(s *State, rd *Round) bool {
 	}
 	tol := a.tolerance().Baseline
 	if len(kept) == 2 {
-		dev, _, err := a.season.Exam.ScoreItems(rd.ExamTable, diffItems(kept[0].Items, kept[1].Items), rd.Shares)
-		return err != nil || !within(dev, tol)
+		return !a.baselinesAgree(rd, kept[0], kept[1])
 	}
 	mid := medianItems(itemsOf(kept))
-	agreed := 0
+	var agreeing []*Baseline
 	for _, b := range kept {
 		if dev, _, err := a.season.Exam.ScoreItems(rd.ExamTable, diffItems(b.Items, mid), rd.Shares); err == nil && within(dev, tol) {
-			agreed++
+			agreeing = append(agreeing, b)
 		}
 	}
-	return agreed < 2
+	return !a.hasAgreeingBaselinePair(rd, agreeing)
 }
 
 // baselineTieLive reports whether an established account without a baseline for this round

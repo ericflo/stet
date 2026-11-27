@@ -26,29 +26,29 @@ during grading (`src/stet/exam/sft.py`). No rows from this pack appear in any ex
 
 ## 2. `s3-practice.jsonl.zst` (509 offline practice exam items)
 
-Used solely as an offline fallback for local `practice` and `gym` rounds when no local
-fresh harvest hours are present on disk. Official competition rounds never use this pack.
+Used for local `practice` and `gym` rounds (offline fallback when no fresh harvest hours are
+present, and default scored reasoning items when `stet harvest` is used without
+`STET_SYNTHESIZE_PRACTICE=1`). Official competition rounds never use this pack.
 
 - **Source material:** Wikipedia articles (`wikipedia`), Wikipedia article additions
-  (`wikipedia-added`), and Wikipedia talk pages (`wikipedia-talk`) across 15 languages
-  (`en, ru, de, ja, fr, zh, es, fa, uk, it, ar, nl, pl, ko, pt`), authored by
-  **Wikipedia contributors** (https://www.wikipedia.org/).
+  (`wikipedia-added`), and Wikipedia talk pages (`wikipedia-talk`) across 42 languages,
+  authored by **Wikipedia contributors** (https://www.wikipedia.org/).
 - **License:** **CC BY-SA 4.0** (https://creativecommons.org/licenses/by-sa/4.0/) and
   GFDL, per Wikimedia Foundation Terms of Use.
 - **Transformations:**
   - `221` twin-context comprehension items (`kind: "context"`): Wikipedia passages split
     at a sentence/paragraph boundary with length-matched wrong openings from the same
     source and language, normalized to crawl whitespace (`src/stet/exam/fresh/select.py`).
-  - `288` reasoning items (`explain: 101`, `infer: 93`, `synthesis: 94`): deterministic
-    `Qwen/Qwen3-8B` (Apache 2.0) multi-sentence comprehension/reasoning prompts and
-    responses derived from the Wikipedia excerpts (`src/stet/exam/fresh/reason.py`),
-    distributed under CC BY-SA 4.0 as adaptations of Wikipedia text.
+  - `288` reasoning items (`explain: 96`, `infer: 96`, `synthesis: 96`): deterministic
+    `thinkingmachines/Inkling-2-Mini` (`c9d02830`, `reasoning_effort="low"`, Apache 2.0)
+    multi-sentence comprehension/reasoning prompts and responses derived from decontaminated
+    Wikipedia excerpts (`src/stet/exam/fresh/reason.py`), distributed under CC BY-SA 4.0 as
+    adaptations of Wikipedia text.
 
 ---
 
 ## 3. Referenced Models (Not Bundled in Wheel)
 
 - **`baidu/ERNIE-4.5-0.3B-Base-PT`** (Season 3 runtime student & tokenizer): **Apache License 2.0** — https://huggingface.co/baidu/ERNIE-4.5-0.3B-Base-PT
-- **`thinkingmachines/Inkling-2-Mini`** (Season 3 official runtime examiner reasoning teacher): **Apache License 2.0** — https://huggingface.co/thinkingmachines/Inkling-2-Mini
+- **`thinkingmachines/Inkling-2-Mini`** (Season 3 official runtime examiner reasoning teacher & generator of the bundled `s3-practice.jsonl.zst` reasoning items): **Apache License 2.0** — https://huggingface.co/thinkingmachines/Inkling-2-Mini
 - **`Qwen/Qwen3-0.6B`** (`examples/reader` runtime reference curator): **Apache License 2.0** — https://huggingface.co/Qwen/Qwen3-0.6B
-- **`Qwen/Qwen3-8B`** (offline build-time generator of the bundled `s3-practice.jsonl.zst` practice pack; not downloaded at runtime): **Apache License 2.0** — https://huggingface.co/Qwen/Qwen3-8B

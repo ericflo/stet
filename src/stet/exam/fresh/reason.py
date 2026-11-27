@@ -303,6 +303,11 @@ def ngram_overlap(ans: str, src: str, n: int = 5, *, cjk_char_n: int = 8, fallba
     return sum(1 for g in a_ng if g in s_set) / max(1, len(a_ng))
 
 
+def prompt_copies_excerpt(prompt_line: str, excerpt: str, *, max_ngram_overlap: float = 0.50) -> bool:
+    """Report whether a teacher prompt line reproduces too much of its source excerpt."""
+    return ngram_overlap(prompt_line, excerpt, n=5) > max_ngram_overlap
+
+
 def bound_excerpt(
     text: str,
     *,
@@ -780,6 +785,9 @@ def parse_generated_items_detailed(
             if not _response_matches_language(resp, excerpt, d["lang"]):
                 _drop("wrong_lang", d, gen_txt, pr, resp, excerpt)
                 continue
+        if prompt_copies_excerpt(pr, excerpt, max_ngram_overlap=max_ngram_overlap):
+            _drop("prompt_excerpt_copy", d, gen_txt, pr, resp, excerpt)
+            continue
         if ngram_overlap(resp, excerpt, n=5) > max_ngram_overlap:
             _drop("verbatim_copy", d, gen_txt, pr, resp, excerpt)
             continue

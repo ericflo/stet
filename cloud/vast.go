@@ -194,6 +194,7 @@ type vastInstance struct {
 	CurState       string                `json:"cur_state"`
 	StatusMsg      *string               `json:"status_msg"`
 	GPUName        string                `json:"gpu_name"`
+	DPHBase        float64               `json:"dph_base"`
 	DPHTotal       float64               `json:"dph_total"`
 	StartDate      float64               `json:"start_date"`
 	PublicIPAddr   string                `json:"public_ipaddr"`
@@ -578,10 +579,17 @@ func (m *vastMarket) ListExaminers(ctx context.Context) ([]ExaminerInstance, err
 			if i.StartDate > 0 {
 				created = time.Unix(int64(i.StartDate), 0)
 			}
+			price := i.DPHTotal
+			if price <= 0 || math.IsNaN(price) || math.IsInf(price, 0) {
+				price = i.DPHBase
+			}
+			if price <= 0 || math.IsNaN(price) || math.IsInf(price, 0) {
+				price = 0
+			}
 			all = append(all, ExaminerInstance{
 				ID: strconv.FormatInt(i.ID, 10), Label: label, State: state, Status: status,
 				PublicIP: strings.TrimSpace(i.PublicIPAddr), HostPort: hostPort,
-				Price: i.DPHTotal, Created: created,
+				Price: price, Created: created,
 			})
 		}
 		if out.NextToken == nil || *out.NextToken == "" {
