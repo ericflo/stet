@@ -4,6 +4,7 @@ and choose with the round's seed."""
 from __future__ import annotations
 
 import dataclasses
+import math
 import re
 from collections import defaultdict
 
@@ -172,11 +173,19 @@ def _select_kind(
         want = n - len(chosen)
         if want <= 0:
             break
-        weight = {lang: shares.get(lang, OTHER) for lang in by_lang}
+        weight = {
+            lang: (w if math.isfinite(w) and w > 0 else 0.0)
+            for lang in by_lang
+            for w in (float(shares.get(lang, OTHER)),)
+        }
         pos = {lang: 0 for lang in by_lang}
         while want > 0 and weight:
             total = sum(weight.values())
-            quota = {lang: max(1, round(want * w / total)) for lang, w in weight.items()}
+            if total > 0:
+                quota = {lang: max(1, round(want * w / total)) for lang, w in weight.items()}
+            else:
+                even = max(1, (want + len(weight) - 1) // len(weight))
+                quota = {lang: even for lang in weight}
             got = 0
             for lang in sorted(weight, key=lambda x: (-weight[x], x)):
                 q = quota[lang]

@@ -539,52 +539,252 @@ func (a *App) baselinesAgree(rd *Round, x, y *Baseline) bool {
 	return err == nil && within(dev, a.tolerance().Baseline)
 }
 
-// hasAgreeingBaselinePair reports whether at least two distinct baselines in bs mutually agree
-// within baseline tolerance.
-func (a *App) hasAgreeingBaselinePair(rd *Round, bs []*Baseline) bool {
-	for i := 0; i < len(bs); i++ {
-		for k := i + 1; k < len(bs); k++ {
-			if a.baselinesAgree(rd, bs[i], bs[k]) {
-				return true
-			}
-		}
-	}
-	return false
+// baselinesPairAgree reports whether two baselines mutually agree symmetrically within baseline
+// tolerance. Checking both directions guarantees an undirected agreement graph even in the
+// presence of floating-point rounding.
+func (a *App) baselinesPairAgree(rd *Round, x, y *Baseline) bool {
+	return a.baselinesAgree(rd, x, y) && a.baselinesAgree(rd, y, x)
 }
 
-func sameBaselineSet(x, y []*Baseline) bool {
-	if len(x) != len(y) {
-		return false
-	}
-	for i := range x {
-		if x[i].AccountID != y[i].AccountID {
-			return false
+// allBaselinesAgree reports whether every pair of baselines in bs mutually agrees within baseline
+// tolerance.
+func (a *App) allBaselinesAgree(rd *Round, bs []*Baseline) bool {
+	for i := 0; i < len(bs); i++ {
+		for k := i + 1; k < len(bs); k++ {
+			if !a.baselinesPairAgree(rd, bs[i], bs[k]) {
+				return false
+			}
 		}
 	}
 	return true
 }
 
-// largestBaselineCohort finds the largest mutually agreeing neighborhood (size >= 2) centered on
-// any baseline in bs, and sets tied=true when two distinct sets tie for that maximum size.
-func (a *App) largestBaselineCohort(rd *Round, bs []*Baseline) (best []*Baseline, tied bool) {
-	for _, b := range bs {
-		var cohort []*Baseline
-		for _, other := range bs {
-			if other == b || a.baselinesAgree(rd, b, other) {
-				cohort = append(cohort, other)
+// baselineAdj builds the symmetric pairwise-agreement adjacency matrix for bs.
+func (a *App) baselineAdj(rd *Round, bs []*Baseline) [][]bool {
+	n := len(bs)
+	adj := make([][]bool, n)
+	for i := range n {
+		adj[i] = make([]bool, n)
+		adj[i][i] = true
+	}
+	for i := 0; i < n; i++ {
+		for k := i + 1; k < n; k++ {
+			if a.baselinesPairAgree(rd, bs[i], bs[k]) {
+				adj[i][k] = true
+				adj[k][i] = true
 			}
 		}
-		if len(cohort) < 2 {
-			continue
-		}
-		switch {
-		case len(cohort) > len(best):
-			best, tied = cohort, false
-		case len(cohort) == len(best) && !sameBaselineSet(cohort, best):
-			tied = true
+	}
+	return adj
+}
+
+// largestBaselineClique finds the largest pairwise-mutually-agreeing clique (size >= 2) in bs
+// using exact Bron-Kerbosch enumeration with Tomita pivoting, and sets tied=true whenever two or
+// more distinct maximal cliques tie for that maximum size.
+func (a *App) largestBaselineClique(rd *Round, bs []*Baseline) (best []*Baseline, tied bool) {
+	n := len(bs)
+	if n < 2 {
+		return nil, false
+	}
+	adj := a.baselineAdj(rd, bs)
+	allAgree := true
+	for i := 0; i < n && allAgree; i++ {
+		for k := i + 1; k < n; k++ {
+			if !adj[i][k] {
+				allAgree = false
+				break
+			}
 		}
 	}
+	if allAgree {
+		out := make([]*Baseline, n)
+		copy(out, bs)
+		return out, false
+	}
+	var bestIdx []int
+	var bk func(r, p, x []int)
+	bk = func(r, p, x []int) {
+		if len(p) == 0 && len(x) == 0 {
+			if len(r) < 2 {
+				return
+			}
+			switch {
+			case len(r) > len(bestIdx):
+				bestIdx = make([]int, len(r))
+				copy(bestIdx, r)
+				tied = false
+			case len(r) == len(bestIdx):
+				tied = true
+			}
+			return
+		}
+		// Upper-bound prune strictly below max(2, len(bestIdx)) so equal-size maximal cliques are
+		// still visited and mark tied=true.
+		if len(r)+len(p) < max(2, len(bestIdx)) {
+			return
+		}
+		pivot, bestDeg := -1, -1
+		for _, u := range p {
+			deg := 0
+			for _, v := range p {
+				if u != v && adj[u][v] {
+					deg++
+				}
+			}
+			if deg > bestDeg {
+				bestDeg, pivot = deg, u
+			}
+		}
+		for _, u := range x {
+			deg := 0
+			for _, v := range p {
+				if adj[u][v] {
+					deg++
+				}
+			}
+			if deg > bestDeg {
+				bestDeg, pivot = deg, u
+			}
+		}
+		pCur := append([]int(nil), p...)
+		xCur := append([]int(nil), x...)
+		for _, v := range p {
+			if pivot >= 0 && v != pivot && adj[pivot][v] {
+				continue
+			}
+			var nextP, nextX []int
+			for _, w := range pCur {
+				if w != v && adj[v][w] {
+					nextP = append(nextP, w)
+				}
+			}
+			for _, w := range xCur {
+				if adj[v][w] {
+					nextX = append(nextX, w)
+				}
+			}
+			nextR := make([]int, len(r)+1)
+			copy(nextR, r)
+			nextR[len(r)] = v
+			bk(nextR, nextP, nextX)
+			for i, w := range pCur {
+				if w == v {
+					pCur = append(pCur[:i], pCur[i+1:]...)
+					break
+				}
+			}
+			xCur = append(xCur, v)
+		}
+	}
+	initP := make([]int, n)
+	for i := range n {
+		initP[i] = i
+	}
+	bk(nil, initP, nil)
+	if len(bestIdx) < 2 {
+		return nil, false
+	}
+	sort.Ints(bestIdx)
+	best = make([]*Baseline, len(bestIdx))
+	for i, idx := range bestIdx {
+		best[i] = bs[idx]
+	}
 	return best, tied
+}
+
+// hasCompetingBaselineClique reports whether bs contains any maximal clique not contained in
+// winning whose size is at least minSize. Used only when median fixed-point pruning shrinks the
+// winning clique (possible under multi-item MAD clipping) so a shrunken group cannot beat or tie
+// another pairwise-agreeing clique of at least the same size.
+func (a *App) hasCompetingBaselineClique(rd *Round, bs, winning []*Baseline, minSize int) bool {
+	inWin := make(map[int64]bool, len(winning))
+	for _, b := range winning {
+		inWin[b.AccountID] = true
+	}
+	n := len(bs)
+	adj := a.baselineAdj(rd, bs)
+	found := false
+	var bk func(r, p, x []int)
+	bk = func(r, p, x []int) {
+		if found {
+			return
+		}
+		if len(p) == 0 && len(x) == 0 {
+			if len(r) >= minSize {
+				for _, idx := range r {
+					if !inWin[bs[idx].AccountID] {
+						found = true
+						return
+					}
+				}
+			}
+			return
+		}
+		if len(r)+len(p) < minSize {
+			return
+		}
+		pivot, bestDeg := -1, -1
+		for _, u := range p {
+			deg := 0
+			for _, v := range p {
+				if u != v && adj[u][v] {
+					deg++
+				}
+			}
+			if deg > bestDeg {
+				bestDeg, pivot = deg, u
+			}
+		}
+		for _, u := range x {
+			deg := 0
+			for _, v := range p {
+				if adj[u][v] {
+					deg++
+				}
+			}
+			if deg > bestDeg {
+				bestDeg, pivot = deg, u
+			}
+		}
+		pCur := append([]int(nil), p...)
+		xCur := append([]int(nil), x...)
+		for _, v := range p {
+			if found {
+				return
+			}
+			if pivot >= 0 && v != pivot && adj[pivot][v] {
+				continue
+			}
+			var nextP, nextX []int
+			for _, w := range pCur {
+				if w != v && adj[v][w] {
+					nextP = append(nextP, w)
+				}
+			}
+			for _, w := range xCur {
+				if adj[v][w] {
+					nextX = append(nextX, w)
+				}
+			}
+			nextR := make([]int, len(r)+1)
+			copy(nextR, r)
+			nextR[len(r)] = v
+			bk(nextR, nextP, nextX)
+			for i, w := range pCur {
+				if w == v {
+					pCur = append(pCur[:i], pCur[i+1:]...)
+					break
+				}
+			}
+			xCur = append(xCur, v)
+		}
+	}
+	initP := make([]int, n)
+	for i := range n {
+		initP[i] = i
+	}
+	bk(nil, initP, nil)
+	return found
 }
 
 // pruneBaselinesToMedian iteratively drops baselines outside tolerance of the current set's
@@ -610,32 +810,25 @@ func (a *App) pruneBaselinesToMedian(rd *Round, bs []*Baseline) []*Baseline {
 
 // baselinesKept are the round's baselines that make its own. While fewer than three are in,
 // all of them: whichever came first is no more the standard than the next. From three on, there
-// must be a unique strictly largest mutually agreeing cohort of size >= 2 across all established
-// baselines (so a 2-2 split whose midpoint falls within tolerance of both groups cannot produce
-// a rated result). Once that unique cohort exists, baselines are pruned iteratively against the
-// kept median until fixed point; if that median-kept set contains an agreeing pair and has no
-// tied largest cohort, it is returned, otherwise the unique largest agreeing cohort is pruned to
-// its own median fixed point so every kept baseline agrees with the round's median. If no unique
-// agreeing consensus exists, all baselines are kept so baselineDisputed reports the dispute.
+// must be a unique strictly largest pairwise-agreeing clique of size >= 2 across all established
+// baselines (so neither a 2-2 split nor a bridge baseline spanning two disagreeing pairs can settle
+// a tie, and a genuine agreeing majority is never voided by wider disagreeing neighborhoods). The
+// accepted baseline is computed from that winning clique (pruned to its own median fixed point so
+// every kept baseline also agrees with the round's item-wise median). If no unique agreeing
+// consensus exists, all baselines are kept so baselineDisputed reports the dispute.
 func (a *App) baselinesKept(s *State, rd *Round) []*Baseline {
 	all := a.roundBaselines(s, rd)
 	if len(all) < baselineQuorum {
 		return all
 	}
-	best, tied := a.largestBaselineCohort(rd, all)
+	best, tied := a.largestBaselineClique(rd, all)
 	if len(best) < 2 || tied {
 		return all
 	}
-	kept := a.pruneBaselinesToMedian(rd, all)
-	if len(kept) >= 2 && a.hasAgreeingBaselinePair(rd, kept) {
-		if kBest, kTied := a.largestBaselineCohort(rd, kept); len(kBest) >= 2 && !kTied {
+	kept := a.pruneBaselinesToMedian(rd, best)
+	if len(kept) >= 2 && a.allBaselinesAgree(rd, kept) {
+		if len(kept) == len(best) || !a.hasCompetingBaselineClique(rd, all, best, len(kept)) {
 			return kept
-		}
-	}
-	prunedBest := a.pruneBaselinesToMedian(rd, best)
-	if len(prunedBest) >= 2 && a.hasAgreeingBaselinePair(rd, prunedBest) {
-		if bBest, bTied := a.largestBaselineCohort(rd, prunedBest); len(bBest) >= 2 && !bTied {
-			return prunedBest
 		}
 	}
 	return all
@@ -906,7 +1099,7 @@ func (a *App) baselineDisputed(s *State, rd *Round) bool {
 		}
 	}
 	if len(all) >= baselineQuorum {
-		if best, tied := a.largestBaselineCohort(rd, all); len(best) < 2 || tied {
+		if best, tied := a.largestBaselineClique(rd, all); len(best) < 2 || tied {
 			return true
 		}
 	}
@@ -914,22 +1107,20 @@ func (a *App) baselineDisputed(s *State, rd *Round) bool {
 	if len(kept) < 2 {
 		return true
 	}
-	tol := a.tolerance().Baseline
-	if len(kept) == 2 {
-		return !a.baselinesAgree(rd, kept[0], kept[1])
-	}
-	mid := medianItems(itemsOf(kept))
-	var agreeing []*Baseline
-	for _, b := range kept {
-		if dev, _, err := a.season.Exam.ScoreItems(rd.ExamTable, diffItems(b.Items, mid), rd.Shares); err == nil && within(dev, tol) {
-			agreeing = append(agreeing, b)
-		}
-	}
-	if len(agreeing) != len(kept) || !a.hasAgreeingBaselinePair(rd, agreeing) {
+	if !a.allBaselinesAgree(rd, kept) {
 		return true
 	}
-	kBest, kTied := a.largestBaselineCohort(rd, agreeing)
-	return len(kBest) < 2 || kTied
+	if len(kept) == 2 {
+		return false
+	}
+	tol := a.tolerance().Baseline
+	mid := medianItems(itemsOf(kept))
+	for _, b := range kept {
+		if dev, _, err := a.season.Exam.ScoreItems(rd.ExamTable, diffItems(b.Items, mid), rd.Shares); err != nil || !within(dev, tol) {
+			return true
+		}
+	}
+	return false
 }
 
 // baselineTieLive reports whether an established account without a baseline for this round

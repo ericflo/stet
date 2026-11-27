@@ -5547,3 +5547,72 @@ def test_review22_fetch_round_shares_prefers_server_response_over_stale_cache(mo
     assert client.fetch_round_shares(rnd, {"status": "open", "languages": {"en": True, "de": -1.0}}) == {"en": 75.0, "de": 25.0}
 
 
+def test_review24_select_context_handles_zero_percent_measured_language_shares():
+    """Review 24 P2 #4: measured shares rounded to 0.0% (e.g. {'en': 100.0, 'de': 0.0}) MUST NOT
+    raise ZeroDivisionError in _select_kind, whether all candidates for a kind are in zero-weight
+    languages or positive-weight languages run out leaving only zero-weight candidates."""
+    from stet.exam.fresh import Doc
+    from stet.exam.fresh.select import select, select_context
+
+    def _wiki_doc(lang: str, idx: int) -> Doc:
+        if lang == "de":
+            text = (
+                f"Der Artikel Nummer {idx} beschreibt eine regionale Eisenbahnstrecke im Norden mit mehreren historischen Bahnhoefen und Bruecken. "
+                f"Seit dem Umbau im vergangenen Jahr verkehren dort wieder regelmaessige Zuege zwischen den groesseren Staedten der Region. "
+                f"Die neue Signaltechnik verbessert die Puenktlichkeit auf dem gesamten Streckenabschnitt Nummer {idx} deutlich."
+            )
+            title = f"Strecke {idx}"
+        elif lang == "fr":
+            text = (
+                f"L article numero {idx} presente un pont ferroviaire historique qui traverse la vallee centrale sur plusieurs centaines de metres. "
+                f"Apres des travaux de renovation complets, la circulation regionale a repris a cadence reguliere dans toute la province. "
+                f"Les ingenieurs soulignent la robustesse de la structure metallique installee pour le troncon numero {idx}."
+            )
+            title = f"Pont {idx}"
+        else:
+            text = (
+                f"Article number {idx} describes a coastal weather observatory that records wind pressure and ocean temperature throughout the year. "
+                f"Researchers use its continuous archive to study seasonal storms and long-term shifts across the northern basin. "
+                f"Recent instrument upgrades increased sampling precision across station sector number {idx} without interrupting daily logs."
+            )
+            title = f"Observatory {idx}"
+        return Doc(
+            source="wikipedia",
+            id=f"{lang}-{idx}",
+            url=f"https://{lang}.wikipedia.org/wiki/{idx}",
+            lang=lang,
+            license="CC-BY-SA-4.0",
+            published="2026-07-01T12:00:00Z",
+            topic=f"topic-{lang}-{idx}",
+            title=title,
+            text=text,
+        )
+
+    # 1. All-zero candidate pool for one kind: 6 German Wikipedia docs under {"en": 100.0, "de": 0.0}.
+    de_docs = [_wiki_doc("de", i) for i in range(6)]
+    all_zero_ctx = select_context(de_docs, b"r24-zero-all", 6, {"reference"}, per_corner=2, shares={"en": 100.0, "de": 0.0})
+    assert len(all_zero_ctx) == 6
+    assert all(it.lang == "de" for it in all_zero_ctx)
+    # Plain select() uses _select_kind too and must also handle all-zero shares cleanly.
+    all_zero_plain = select(de_docs, b"r24-zero-all", 6, {"reference"}, per_corner=2, shares={"en": 100.0, "de": 0.0})
+    assert len(all_zero_plain) == 6
+
+    # 2. Mixed pool where positive-weight English candidates run out leaving zero-weight German
+    #    and French candidates.
+    mixed_docs = [_wiki_doc("en", i) for i in range(2)] + [_wiki_doc("de", i) for i in range(4)] + [_wiki_doc("fr", i) for i in range(4)]
+    mixed_ctx = select_context(
+        mixed_docs,
+        b"r24-zero-mixed",
+        8,
+        {"reference"},
+        per_corner=2,
+        shares={"en": 100.0, "de": 0.0, "fr": 0.0},
+    )
+    assert len(mixed_ctx) == 8
+    langs = [it.lang for it in mixed_ctx]
+    assert langs.count("en") == 2
+    assert langs.count("de") == 3
+    assert langs.count("fr") == 3
+
+
+

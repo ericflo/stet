@@ -251,7 +251,8 @@ type podRecord struct {
 	TransferCost float64   `json:"transfer_cost,omitempty"`
 	PartialCost  bool      `json:"partial_cost,omitempty"`
 	Start        time.Time `json:"start"`
-	Alive        time.Time `json:"alive"` // last seen running
+	Alive        time.Time `json:"alive"`               // last seen running
+	StoppedAt    time.Time `json:"stopped_at,omitzero"` // when GPU compute stopped (disk billing continues until End)
 	End          time.Time `json:"end,omitzero"`
 }
 
@@ -262,13 +263,62 @@ func (r *podRecord) market() string {
 	return r.Market
 }
 
+// stoppedHourlyRate is the ongoing hourly rate billed while the worker is stopped with an attached
+// disk (e.g. Vast.ai storage billing before the instance is destroyed).
+func (r podRecord) stoppedHourlyRate() float64 {
+	if validRate(r.DiskCost) {
+		return r.DiskCost
+	}
+	return 0
+}
+
+// markStopped records that GPU compute has stopped while preserving the timestamp at which GPU
+// billing ended and attached storage billing took over.
+func (r *podRecord) markStopped(now time.Time) {
+	r.Stopped = true
+	if r.StoppedAt.IsZero() {
+		switch {
+		case !r.Alive.IsZero():
+			r.StoppedAt = r.Alive
+		case !r.Start.IsZero():
+			r.StoppedAt = r.Start
+		default:
+			r.StoppedAt = now
+		}
+	}
+}
+
 func (r podRecord) dollarsBetween(from, to time.Time) float64 {
 	end := r.End
 	if end.IsZero() {
 		end = r.Alive
 	}
+	if r.Stopped {
+		gpuEnd := r.StoppedAt
+		if gpuEnd.IsZero() {
+			gpuEnd = r.Alive
+			if gpuEnd.IsZero() {
+				gpuEnd = r.Start
+			}
+		}
+		if !end.IsZero() && gpuEnd.After(end) {
+			gpuEnd = end
+		}
+		total := 0.0
+		if validRate(r.Cost) {
+			if a, b := maxTime(r.Start, from), minTime(gpuEnd, to); b.After(a) {
+				total += b.Sub(a).Hours() * r.Cost
+			}
+		}
+		if diskRate := r.stoppedHourlyRate(); diskRate > 0 && !gpuEnd.IsZero() && end.After(gpuEnd) {
+			if a, b := maxTime(gpuEnd, from), minTime(end, to); b.After(a) {
+				total += b.Sub(a).Hours() * diskRate
+			}
+		}
+		return total
+	}
 	a, b := maxTime(r.Start, from), minTime(end, to)
-	if !b.After(a) {
+	if !b.After(a) || !validRate(r.Cost) {
 		return 0
 	}
 	return b.Sub(a).Hours() * r.Cost
@@ -480,7 +530,14 @@ func applyOfferRateToRental(o Offer, r *Rental) {
 		disk = o.DiskCost
 	}
 	r.DiskCost = disk
-	transfer := max(0, o.TransferCost)
+	origTransfer := max(0, r.TransferCost)
+	transfer := origTransfer
+	if nonNegFinite(o.TransferCost) && o.TransferCost > transfer {
+		transfer = o.TransferCost
+	}
+	r.TransferCost = transfer
+	missingDisk := max(0, disk-origDisk)
+	missingTransfer := max(0, transfer-origTransfer)
 	switch {
 	case validRate(r.Price) && !r.PartialRate:
 		eff := r.Price
@@ -492,7 +549,7 @@ func applyOfferRateToRental(o Offer, r *Rental) {
 		}
 		r.Price = eff
 	case validRate(r.Price) && r.PartialRate:
-		reconstructed := r.Price + max(0, disk-origDisk) + transfer
+		reconstructed := r.Price + missingDisk + missingTransfer
 		if validRate(o.Price) {
 			r.Price = max(o.Price, reconstructed)
 			r.PartialRate = false
@@ -528,22 +585,29 @@ func reconcileRentalRate(r *podRecord, p *Rental) {
 	}
 	p.DiskCost = r.DiskCost
 	missingDisk := max(0, r.DiskCost-origDisk)
-	transfer := max(0, r.TransferCost)
+	origTransfer := max(0, p.TransferCost)
+	if nonNegFinite(p.TransferCost) && p.TransferCost > r.TransferCost {
+		r.TransferCost = p.TransferCost
+	}
+	p.TransferCost = r.TransferCost
+	missingTransfer := max(0, r.TransferCost-origTransfer)
 	switch {
 	case validRate(p.Price) && !p.PartialRate:
 		eff := p.Price
-		if validRate(p.BasePrice) && p.BasePrice+r.DiskCost+transfer > eff {
-			eff = p.BasePrice + r.DiskCost + transfer
+		if validRate(p.BasePrice) && p.BasePrice+r.DiskCost+r.TransferCost > eff {
+			eff = p.BasePrice + r.DiskCost + r.TransferCost
 		}
-		if !r.PartialCost && validRate(r.Cost) && r.Cost > eff {
+		if validRate(r.Cost) && r.Cost > eff {
 			eff = r.Cost
 		}
 		r.Cost = eff
-		r.PartialCost = false
+		if p.State != "stopped" {
+			r.PartialCost = false
+		}
 		p.Price = eff
-		p.PartialRate = false
+		p.PartialRate = r.PartialCost
 	case validRate(p.Price) && p.PartialRate:
-		reconstructed := p.Price + missingDisk + transfer
+		reconstructed := p.Price + missingDisk + missingTransfer
 		if !r.PartialCost && validRate(r.Cost) {
 			eff := max(r.Cost, reconstructed)
 			r.Cost = eff
@@ -663,13 +727,17 @@ func (f *Fleet) note(ctx context.Context, l *ledger, rentals []Rental, answered 
 				start = now
 			}
 			alive := now
+			var stoppedAt time.Time
 			if !p.live() {
 				alive = start
+				if p.State == "stopped" {
+					stoppedAt = start
+				}
 			}
 			rec := &podRecord{
 				ID: p.ID, Market: p.Market, Handle: pr.Handle, GPU: gpu, Cloud: pr.Cloud,
 				Cost: pr.Cost, DiskCost: pr.DiskCost, TransferCost: pr.TransferCost, PartialCost: !validRate(pr.Cost),
-				Start: start, Alive: alive, Tracked: true, Stopped: p.State == "stopped",
+				Start: start, Alive: alive, StoppedAt: stoppedAt, Tracked: true, Stopped: p.State == "stopped",
 				Grades: pr.Grades, Host: host, CPU: pr.CPU, Curators: pr.Curators,
 				For: pr.For, Round: pr.Round, Report: pr.Report,
 			}
@@ -713,12 +781,14 @@ func (f *Fleet) note(ctx context.Context, l *ledger, rentals []Rental, answered 
 				start = now
 			}
 			alive := now
+			var stoppedAt time.Time
 			if p.State == "stopped" {
 				alive = start
+				stoppedAt = start
 			}
 			r = &podRecord{ID: p.ID, Market: p.Market, Handle: h, Host: p.Host, GPU: p.Card,
-				Cost: cost, DiskCost: max(0, p.DiskCost), PartialCost: p.PartialRate,
-				Start: start, Alive: alive, Tracked: true, Stopped: p.State == "stopped"}
+				Cost: cost, DiskCost: max(0, p.DiskCost), PartialCost: p.PartialRate || p.State == "stopped",
+				Start: start, Alive: alive, StoppedAt: stoppedAt, Tracked: true, Stopped: p.State == "stopped"}
 			l.Pods[key] = r
 		}
 		if r.Host == "" && p.Host != "" {
@@ -727,6 +797,7 @@ func (f *Fleet) note(ctx context.Context, l *ledger, rentals []Rental, answered 
 		if p.live() {
 			r.Alive = now
 			r.Stopped = false
+			r.StoppedAt = time.Time{}
 		}
 		if r.Terminating {
 			p.Terminating = true
@@ -756,7 +827,12 @@ func (f *Fleet) note(ctx context.Context, l *ledger, rentals []Rental, answered 
 		}
 		r.Why = why
 		f.event(&gone, r.Handle, "gone", why)
-		return f.retire(l, key, minTime(now, r.Alive.Add(2*every)))
+		endAt := minTime(now, r.Alive.Add(2*every))
+		if r.Stopped {
+			r.markStopped(now)
+			endAt = now
+		}
+		return f.retire(l, key, endAt)
 	}
 	keys := make([]string, 0, len(l.Pods))
 	for key := range l.Pods {
@@ -773,6 +849,7 @@ func (f *Fleet) note(ctx context.Context, l *ledger, rentals []Rental, answered 
 		if p != nil && p.live() {
 			r.Alive = now
 			r.Stopped = false
+			r.StoppedAt = time.Time{}
 			reconcileRentalRate(r, p)
 			continue
 		}
@@ -785,8 +862,9 @@ func (f *Fleet) note(ctx context.Context, l *ledger, rentals []Rental, answered 
 				// Keep stopped instance in fleet.json (with Stopped=true) until m.End(ctx, id)
 				// confirms provider deletion or Lookup confirms absence (e.g. to stop Vast disk
 				// billing even if a delete fails and a later listing omits the stopped worker).
-				if !r.Stopped {
-					r.Stopped = true
+				wasStopped := r.Stopped
+				r.markStopped(now)
+				if !wasStopped {
 					r.Gone = true
 					why := "its market has it " + strings.ToLower(p.Status)
 					if p.Detail != "" && p.Detail != strings.ToLower(p.Status) {
@@ -822,6 +900,7 @@ func (f *Fleet) note(ctx context.Context, l *ledger, rentals []Rental, answered 
 				fresh.Terminating = r.Terminating
 				r.Alive = now
 				r.Stopped = false
+				r.StoppedAt = time.Time{}
 				reconcileRentalRate(r, fresh)
 				extra = append(extra, *fresh)
 			case lerr == nil && exists && fresh != nil:
@@ -834,7 +913,7 @@ func (f *Fleet) note(ctx context.Context, l *ledger, rentals []Rental, answered 
 				fresh.Terminating = r.Terminating
 				reconcileRentalRate(r, fresh)
 				if fresh.State == "stopped" {
-					r.Stopped = true
+					r.markStopped(now)
 					extra = append(extra, *fresh)
 				} else if err := retireGone(key, r, fresh); err != nil {
 					return rentals, err
@@ -883,18 +962,7 @@ func (f *Fleet) spent(l *ledger, since time.Time) (float64, error) {
 	total := 0.0
 	for _, r := range l.Pods {
 		r := *r
-		if r.Stopped {
-			switch {
-			case !r.Alive.IsZero():
-				r.End = r.Alive
-			case !r.Start.IsZero():
-				r.End = r.Start
-			default:
-				r.End = now
-			}
-		} else {
-			r.End = now
-		}
+		r.End = now
 		total += r.dollarsBetween(since, now)
 	}
 	for _, pr := range l.Pending {
@@ -1211,7 +1279,7 @@ func recordedRental(r *podRecord, status string) Rental {
 	}
 	return Rental{
 		Market: r.market(), ID: r.ID, Name: r.Handle, Host: r.Host, Card: r.GPU,
-		Price: cost, DiskCost: r.DiskCost, PartialRate: r.PartialCost, State: state, Status: status, Created: r.Start, Terminating: r.Terminating,
+		Price: cost, DiskCost: r.DiskCost, TransferCost: r.TransferCost, PartialRate: r.PartialCost, State: state, Status: status, Created: r.Start, Terminating: r.Terminating,
 	}
 }
 
@@ -1330,6 +1398,14 @@ func (f *Fleet) look(ctx context.Context) (*View, error) {
 			}
 			if !validRate(p.Price) || p.PartialRate {
 				v.noteUnknownRate(key, unknownRateLabel(p.Market, p.ID, h))
+			}
+		} else if p.State == "stopped" {
+			diskRate := p.DiskCost
+			if rec != nil && rec.stoppedHourlyRate() > diskRate {
+				diskRate = rec.stoppedHourlyRate()
+			}
+			if validRate(diskRate) {
+				v.Hourly += diskRate
 			}
 		}
 		if knownHandles[h] {
@@ -2287,19 +2363,25 @@ func (f *Fleet) end(ctx context.Context, v *View, endings []Ending) error {
 			continue
 		}
 		v.removeLiveRental(r.Market, r.ID)
-		if r.live() && validRate(r.Price) {
-			v.Hourly = max(0, v.Hourly-r.Price)
-		}
 		key := ledgerKey(r.Market, r.ID)
+		rec := v.Ledger.Pods[key]
+		switch {
+		case r.live() && validRate(r.Price):
+			v.Hourly = max(0, v.Hourly-r.Price)
+		case r.State == "stopped":
+			diskRate := r.DiskCost
+			if rec != nil && rec.stoppedHourlyRate() > diskRate {
+				diskRate = rec.stoppedHourlyRate()
+			}
+			if validRate(diskRate) {
+				v.Hourly = max(0, v.Hourly-diskRate)
+			}
+		}
 		endAt := f.now()
-		if rec := v.Ledger.Pods[key]; rec != nil {
+		if rec != nil {
 			rec.Why, rec.Cause = why, cause
 			if rec.Stopped {
-				if !rec.Alive.IsZero() && rec.Alive.Before(endAt) {
-					endAt = rec.Alive
-				} else if rec.Alive.IsZero() && !rec.Start.IsZero() && rec.Start.Before(endAt) {
-					endAt = rec.Start
-				}
+				rec.markStopped(endAt)
 			}
 		}
 		f.event(r, handle, "ended", why)

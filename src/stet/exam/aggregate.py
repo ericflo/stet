@@ -381,13 +381,16 @@ def round_score(items: list[Item], item_gains: list[float], shares: dict[str, fl
         out["strata"] = {k: round(v, 5) for k, v in _balanced(gen, plan)[1].items()}
     if fresh:
         by_lang: dict[str, list[Pair]] = defaultdict(list)
+        by_group: dict[str, int] = defaultdict(int)
         for it, p in zip(items, pairs, strict=True):
             if not is_generated(it):
                 by_lang[it.lang].append(p)
-        cell, weight = language_cells({k: len(v) for k, v in by_lang.items()}, shares, plan.small, plan.code_share)
+                by_group[p[0]["lang"]] += 1
+        cell, weight = language_cells(by_group, shares, plan.small, plan.code_share)
         out["fresh"] = {"score": _score(_parts(fresh, plan, shares), plan), "items": len(fresh),
-                        "languages": {lang: {"cell": cell[lang], "weight": round(weight[cell[lang]], 5),
+                        "languages": {lang: {"cell": cell[grp], "weight": round(weight[cell[grp]], 5),
                                              "score": round(_balanced(p, plan)[0], 5), "items": len(p)}
-                                      for lang, p in sorted(by_lang.items())}}
+                                      for lang, p in sorted(by_lang.items())
+                                      for grp in (p[0][0]["lang"],)}}
     out["families"] = {k: round(sum(v) / len(v), 5) for k, v in sorted(fam.items())}
     return out

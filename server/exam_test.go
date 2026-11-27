@@ -2612,3 +2612,220 @@ func TestReview23Gate4ImmutableBaselineAndPrunedBestFallback(t *testing.T) {
 		})
 	})
 }
+
+// Review 24 P1 #1: pairwise maximum-clique consensus prevents a bridge baseline from settling a
+// 2-vs-2 tie and prevents wider non-clique star neighborhoods from voiding a unique 3-clique
+// majority. Exercises both table rows end-to-end through the judge's HTTP endpoints.
+func TestReview24FifthBaselineCliqueSettlement(t *testing.T) {
+	initA := strings.Repeat("a", 64)
+	tokA := strings.Repeat("1", 64)
+
+	submitBase := func(t *testing.T, w *world, g *actor, c *claimed, candLoss, baseLoss float64) int {
+		t.Helper()
+		p := w.result(c, candLoss, baseLoss)
+		p["train"] = map[string]any{"init_sha256": initA}
+		p["script"].(map[string]any)["tokens_sha256"] = tokA
+		p["baseline"].(map[string]any)["init_sha256"] = initA
+		return g.do("POST", fmt.Sprintf("/api/v1/jobs/%d/result", c.Job.ID), p, nil)
+	}
+
+	setupFive := func(t *testing.T) (*world, int, []*actor, []*claimed) {
+		t.Helper()
+		pub, priv := newKey()
+		w := newWorld(t, pub)
+		w.app.cfg.RunsPerEntry = 2
+		w.app.season.Baselines.PerRound = 2
+		w.app.season.Tolerance[w.cfg.Scale] = Tolerance{Grade: 0.012, Baseline: 0.015, Run: 0.015}
+		anchor := w.join("anchor-one", priv)
+		runners := w.volunteers("run-a", "run-b")
+		gs := w.volunteers("gr1", "gr2", "gr3", "gr4", "gr5", "gr6")
+		w.submit(w.join("owner-1", nil), "entry-one", "print(1)")
+		w.submit(w.join("owner-2", nil), "entry-two", "print(2)")
+		idx := w.drawWithoutExam()
+		for _, runner := range []*actor{anchor, runners[0], runners[1]} {
+			for range 2 {
+				ce := w.claim(runner, true)
+				if ce.Job == nil || ce.Job.Kind != "edit" {
+					break
+				}
+				sc := scriptOne
+				if ce.Job.Editor.Name == "entry-two" {
+					sc = scriptTwo
+				}
+				if code, _ := w.edit(runner, ce, sc); code != 200 {
+					t.Fatalf("edit by %s: HTTP %d", runner.handle, code)
+				}
+			}
+		}
+		w.exam(idx)
+		c1Init := w.claim(gs[0], false)
+		c2Init := w.claim(gs[1], false)
+		for i, c := range []*claimed{c1Init, c2Init} {
+			if code := gs[i].do("POST", fmt.Sprintf("/api/v1/jobs/%d/release", c.Job.ID), map[string]any{"reason": "rebalance"}, nil); code != 200 {
+				t.Fatalf("release g%d: HTTP %d", i+1, code)
+			}
+		}
+		c3 := w.claim(gs[2], false)
+		c4 := w.claim(gs[3], false)
+		c1 := w.claim(gs[0], false)
+		c2 := w.claim(gs[1], false)
+		return w, idx, gs, []*claimed{c1, c2, c3, c4}
+	}
+
+	t.Run("bridge_fifth_baseline_keeps_tie_disputed", func(t *testing.T) {
+		// [6.000, 6.000, 6.026, 6.026] + 6.013: two maximal 3-cliques ({6.000,6.000,6.013} and
+		// {6.013,6.026,6.026}) tie; MUST remain disputed and close unrated at ReplicaWait.
+		w, idx, gs, claims := setupFive(t)
+		for i, base := range []float64{6.000, 6.000, 6.026, 6.026} {
+			if code := submitBase(t, w, gs[i], claims[i], 6.010, base); code != 200 {
+				t.Fatalf("step %d (base=%.3f): HTTP %d, want 200", i+1, base, code)
+			}
+		}
+		c5 := w.claim(gs[4], false)
+		if c5.Job == nil || c5.Job.Baseline == nil || !*c5.Job.Baseline {
+			t.Fatalf("expected 5th grader asked for deciding baseline, got %+v", c5.Job)
+		}
+		if code := submitBase(t, w, gs[4], c5, 6.010, 6.013); code != 200 {
+			t.Fatalf("5th bridge baseline: HTTP %d, want 200", code)
+		}
+		w.app.st.view(func(s *State) {
+			if !w.app.baselineDisputed(s, s.Rounds[idx]) {
+				t.Fatal("[6.000,6.000,6.026,6.026,6.013] MUST stay disputed (two tied 3-cliques)")
+			}
+		})
+		if w.settled(idx) != 0 {
+			t.Fatalf("tied bridge baseline settled prematurely: %d entries settled", w.settled(idx))
+		}
+		w.pass(w.cfg.ReplicaWait + time.Minute)
+		if err := w.app.st.update(context.Background(), func(tx *Tx) error {
+			w.app.settleReady(tx)
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		w.app.st.view(func(s *State) {
+			if s.Rounds[idx].Status != "settled" {
+				t.Fatalf("expected round closed unrated at ReplicaWait, got %s", s.Rounds[idx].Status)
+			}
+			for _, e := range s.inRound[idx] {
+				if !e.Void || !e.Unattended || e.Gain != 0 {
+					t.Fatalf("tied bridge baseline must close void+unattended, got void=%v unattended=%v gain=%v", e.Void, e.Unattended, e.Gain)
+				}
+			}
+		})
+		w.check()
+	})
+
+	t.Run("unique_three_clique_rates_both_entries", func(t *testing.T) {
+		// [6.000, 6.008, 6.020, 6.032] + 6.016: {6.008, 6.016, 6.020} is the unique 3-clique
+		// (spread 0.012 <= 0.015, median 6.016); MUST resolve the dispute, mark 6.000 and 6.032
+		// oddOut, and rate both entries at gain = 6.016 - 6.010 = +0.006.
+		w, idx, gs, claims := setupFive(t)
+		for i, base := range []float64{6.000, 6.008, 6.020, 6.032} {
+			if code := submitBase(t, w, gs[i], claims[i], 6.010, base); code != 200 {
+				t.Fatalf("step %d (base=%.3f): HTTP %d, want 200", i+1, base, code)
+			}
+		}
+		c5 := w.claim(gs[4], false)
+		if c5.Job == nil || c5.Job.Baseline == nil || !*c5.Job.Baseline {
+			t.Fatalf("expected 5th grader asked for deciding baseline, got %+v", c5.Job)
+		}
+		if code := submitBase(t, w, gs[4], c5, 6.010, 6.016); code != 200 {
+			t.Fatalf("5th majority baseline: HTTP %d, want 200", code)
+		}
+		w.app.st.view(func(s *State) {
+			rd := s.Rounds[idx]
+			if w.app.baselineDisputed(s, rd) {
+				t.Fatal("[6.000,6.008,6.020,6.032,6.016] MUST NOT be disputed: {6.008,6.016,6.020} is the unique 3-clique")
+			}
+			kept := w.app.baselinesKept(s, rd)
+			if len(kept) != 3 {
+				t.Fatalf("expected 3 kept baselines in winning clique, got %d", len(kept))
+			}
+			left := w.app.baselinesLeftOut(s, rd)
+			if !left[w.account(gs[0].handle).ID] || !left[w.account(gs[3].handle).ID] || len(left) != 2 {
+				t.Fatalf("expected exactly 6.000 (gr1) and 6.032 (gr4) in baselinesLeftOut, got %v", left)
+			}
+		})
+		// Agreeing graders finish the remaining runs on both entries (6.000 & 6.032 grades are oddOut).
+		for _, g := range []*actor{gs[1], gs[2], gs[4]} {
+			for range 2 {
+				c := w.claim(g, false)
+				if c.Job == nil || c.Job.Kind != "grade" {
+					break
+				}
+				base := 6.016
+				if g == gs[1] {
+					base = 6.008
+				} else if g == gs[2] {
+					base = 6.020
+				}
+				if code := submitBase(t, w, g, c, 6.010, base); code != 200 {
+					t.Fatalf("corroborator %s: HTTP %d, want 200", g.handle, code)
+				}
+			}
+		}
+		if w.settled(idx) != 2 {
+			t.Fatalf("expected both entries settled from unique 3-clique, got %d", w.settled(idx))
+		}
+		w.app.st.view(func(s *State) {
+			for _, e := range s.inRound[idx] {
+				if e.Void || math.Abs(e.Gain-0.006) > 1e-4 {
+					t.Fatalf("entry %s: gain=%.5f void=%v, want +0.006 (median 6.016 - cand 6.010)", e.EditorID, e.Gain, e.Void)
+				}
+			}
+		})
+		w.check()
+	})
+
+	t.Run("accepted_baseline_computed_from_winning_clique_only", func(t *testing.T) {
+		// [6.000, 6.004, 6.008, 6.008, 6.020] (tol=0.015):
+		// Unique 4-clique is {6.000, 6.004, 6.008, 6.008} (median 6.006). 6.020 disagrees with
+		// 6.000 (0.020) and 6.004 (0.016), even though |6.020 - median(all)=6.008| = 0.012 <= 0.015.
+		// baselinesKept MUST keep only the winning 4-clique (excluding 6.020).
+		pub, priv := newKey()
+		w := newWorld(t, pub)
+		w.app.season.Tolerance[w.cfg.Scale] = Tolerance{Grade: 0.012, Baseline: 0.015, Run: 0.015}
+		w.join("anchor-one", priv)
+		gs := w.volunteers("wc1", "wc2", "wc3", "wc4", "wc5")
+		table := testTable()
+		constItems := func(loss float64) []float64 {
+			out := make([]float64, len(table))
+			for i := range out {
+				out[i] = -loss
+			}
+			return out
+		}
+		rd := &Round{
+			Idx: 1, Status: "open", CorpusSHA: strings.Repeat("c", 64), ExamSHA: strings.Repeat("e", 64),
+			InitSHA: initA, ExamTable: table, Shares: map[string]float64{"en": 0.5, "de": 0.5},
+		}
+		losses := []float64{6.000, 6.004, 6.008, 6.008, 6.020}
+		w.app.st.view(func(s *State) {
+			sim := *s
+			sim.Rounds = map[int]*Round{1: rd}
+			sim.Baselines = map[string]*Baseline{}
+			for i, loss := range losses {
+				id := w.account(gs[i].handle).ID
+				sim.Baselines[baselineKey(1, id)] = &Baseline{
+					RoundIdx: 1, AccountID: id, Established: true,
+					CorpusSHA: rd.CorpusSHA, ExamSHA: rd.ExamSHA, InitSHA: initA, Items: constItems(loss),
+				}
+			}
+			if w.app.baselineDisputed(&sim, rd) {
+				t.Fatal("unique 4-clique must not be disputed")
+			}
+			kept := w.app.baselinesKept(&sim, rd)
+			if len(kept) != 4 {
+				t.Fatalf("expected winning 4-clique kept (excluding 6.020), got %d", len(kept))
+			}
+			mid := medianItems(itemsOf(kept))
+			if math.Abs(-mid[0]-6.006) > 1e-6 {
+				t.Fatalf("expected winning clique median 6.006, got %.6f", -mid[0])
+			}
+			if left := w.app.baselinesLeftOut(&sim, rd); !left[w.account(gs[4].handle).ID] || len(left) != 1 {
+				t.Fatalf("expected only 6.020 (wc5) in baselinesLeftOut, got %v", left)
+			}
+		})
+	})
+}

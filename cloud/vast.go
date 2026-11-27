@@ -290,6 +290,26 @@ func vastInstanceRate(i vastInstance) (price, basePrice, diskCost float64, parti
 	return 0, 0, diskCost, false
 }
 
+// vastStoppedDiskCost infers storage billing for a stopped Vast.ai instance when Vast omits
+// storage_cost/disk_space: a stopped dph_total lower than dph_base (or with dph_base == 0) is the
+// storage-only rate; a dph_total above dph_base carries the storage delta.
+func vastStoppedDiskCost(state string, dphTotal, basePrice, diskCost float64) float64 {
+	if state != "stopped" || !validRate(dphTotal) {
+		return diskCost
+	}
+	switch {
+	case !validRate(basePrice) || dphTotal < basePrice:
+		if dphTotal > diskCost {
+			return dphTotal
+		}
+	case dphTotal > basePrice:
+		if extra := dphTotal - basePrice; extra > diskCost {
+			return extra
+		}
+	}
+	return diskCost
+}
+
 // vastState is what an instance's state comes to: starting until its container runs, and
 // stopped once it has exited, gone offline, or been stopped (which still bills its disk).
 func vastState(i vastInstance) (state, status string) {
@@ -315,6 +335,7 @@ func vastInstanceRental(i vastInstance) Rental {
 		name = *i.Label
 	}
 	price, basePrice, diskCost, partial := vastInstanceRate(i)
+	diskCost = vastStoppedDiskCost(state, i.DPHTotal, basePrice, diskCost)
 	r := Rental{Market: "vast", ID: strconv.FormatInt(i.ID, 10), Name: name, Card: vastCard(i.GPUName),
 		Price: price, BasePrice: basePrice, DiskCost: diskCost, PartialRate: partial,
 		State: state, Status: status, Created: time.Unix(int64(i.StartDate), 0)}
@@ -783,6 +804,7 @@ func (m *vastMarket) ListExaminers(ctx context.Context) ([]ExaminerInstance, err
 				created = time.Unix(int64(i.StartDate), 0)
 			}
 			price, basePrice, diskCost, partial := vastInstanceRate(i)
+			diskCost = vastStoppedDiskCost(state, i.DPHTotal, basePrice, diskCost)
 			all = append(all, ExaminerInstance{
 				ID: strconv.FormatInt(i.ID, 10), Label: label, State: state, Status: status,
 				PublicIP: strings.TrimSpace(i.PublicIPAddr), HostPort: hostPort,

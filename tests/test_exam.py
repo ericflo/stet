@@ -354,11 +354,21 @@ def test_programming_languages_count_together():
         [_item("code", "passage", f"fresh/lore/rust/{i}", lang="code:rust", source="lore:2") for i in range(2)]
     r = round_score(items, [0.1] * 10 + [0.5] * 2)
     assert r["pillars"]["technical"]["score"] == pytest.approx((0.1 * 9 + 0.5) / 10)  # one pool, trimmed by one at each end
+    assert r["fresh"]["languages"]["code:c"]["cell"] == "code"
+    assert r["fresh"]["languages"]["code:c"]["weight"] == pytest.approx(1.0)
+    assert r["fresh"]["languages"]["code:rust"]["cell"] == "code"
+    assert r["fresh"]["languages"]["code:rust"]["weight"] == pytest.approx(1.0)
     # beside prose, code takes Season 3's capped code_share (0.15) of diagnostic technical writing
     prose = [_item("prose", "passage", f"fresh/github/en/{i}", source="github:1") for i in range(8)]
-    r2 = round_score(items + prose, [0.1] * 10 + [0.5] * 2 + [0.3] * 8)
+    r2 = round_score(items + prose, [0.1] * 10 + [0.5] * 2 + [0.3] * 8, shares={"en": 100.0})
     assert r2["pillars"]["technical"]["score"] == pytest.approx(0.15 * 0.14 + 0.85 * 0.3)
     assert r2["score"] == pytest.approx(0.0)  # diagnostic group has 0% weight in overall score
+    assert r2["fresh"]["languages"]["code:c"]["cell"] == "code"
+    assert r2["fresh"]["languages"]["code:c"]["weight"] == pytest.approx(0.15)
+    assert r2["fresh"]["languages"]["code:rust"]["cell"] == "code"
+    assert r2["fresh"]["languages"]["code:rust"]["weight"] == pytest.approx(0.15)
+    assert r2["fresh"]["languages"]["en"]["cell"] == "en"
+    assert r2["fresh"]["languages"]["en"]["weight"] == pytest.approx(0.85)
 
 
 def test_trimmed_mean_and_gains():

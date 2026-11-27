@@ -549,6 +549,9 @@ func reconcileExaminerOnce(ctx context.Context, f *Fleet) error {
 		for key, p := range l.Pods {
 			seen[key] = true
 			if p.Stopped {
+				if rate := p.stoppedHourlyRate(); rate > 0 {
+					hourlyWorkers += rate
+				}
 				continue
 			}
 			liveWorkers++
@@ -561,21 +564,23 @@ func reconcileExaminerOnce(ctx context.Context, f *Fleet) error {
 		}
 		for i := range rentals {
 			r := &rentals[i]
-			if !r.live() {
-				continue
-			}
 			key := ledgerKey(r.Market, r.ID)
 			if seen[key] {
 				continue
 			}
 			if h := owner(l, r); h != "" && knownHandles[h] {
-				seen[key] = true
-				liveWorkers++
-				if validRate(r.Price) {
-					hourlyWorkers += r.Price
-				}
-				if !validRate(r.Price) || r.PartialRate {
-					unknownRates = append(unknownRates, unknownRateLabel(r.Market, r.ID, h))
+				if r.live() {
+					seen[key] = true
+					liveWorkers++
+					if validRate(r.Price) {
+						hourlyWorkers += r.Price
+					}
+					if !validRate(r.Price) || r.PartialRate {
+						unknownRates = append(unknownRates, unknownRateLabel(r.Market, r.ID, h))
+					}
+				} else if r.State == "stopped" && validRate(r.DiskCost) {
+					seen[key] = true
+					hourlyWorkers += r.DiskCost
 				}
 			}
 		}
@@ -911,11 +916,7 @@ func cmdWorkersResolve(ctx context.Context, f *Fleet, end bool, clearIDs ...stri
 		}
 		endAt := now
 		if rec.Stopped {
-			if !rec.Alive.IsZero() && rec.Alive.Before(endAt) {
-				endAt = rec.Alive
-			} else if rec.Alive.IsZero() && !rec.Start.IsZero() && rec.Start.Before(endAt) {
-				endAt = rec.Start
-			}
+			rec.markStopped(now)
 		}
 		if !end {
 			if lu, ok := m.(rentalLookup); ok {
@@ -1093,7 +1094,11 @@ func cmdWorkersResolve(ctx context.Context, f *Fleet, end bool, clearIDs ...stri
 		}
 		alive := now
 		endAt := now
-		if !p.live() {
+		var stoppedAt time.Time
+		if p.State == "stopped" {
+			alive = start
+			stoppedAt = start
+		} else if !p.live() {
 			alive = start
 			endAt = start
 		}
@@ -1108,7 +1113,7 @@ func cmdWorkersResolve(ctx context.Context, f *Fleet, end bool, clearIDs ...stri
 		rec := &podRecord{
 			ID: p.ID, Market: p.Market, Handle: pr.Handle, GPU: gpu, Cloud: pr.Cloud,
 			Cost: pr.Cost, DiskCost: pr.DiskCost, TransferCost: pr.TransferCost, PartialCost: !validRate(pr.Cost),
-			Start: start, Alive: alive, Tracked: true, Stopped: p.State == "stopped",
+			Start: start, Alive: alive, StoppedAt: stoppedAt, Tracked: true, Stopped: p.State == "stopped",
 			Grades: pr.Grades, Host: host, CPU: pr.CPU, Curators: pr.Curators,
 			For: pr.For, Round: pr.Round, Report: pr.Report,
 		}
@@ -1228,7 +1233,11 @@ func cmdDownRental(ctx context.Context, f *Fleet, market, id string) error {
 		return fmt.Errorf("ended probe %s on %s, but fleet ledger could not be read for cleanup: %w", id, marketTitle(market), ledgerErr)
 	}
 	if rec != nil {
-		if err := f.retire(l, key, f.now()); err != nil {
+		endAt := f.now()
+		if rec.Stopped {
+			rec.markStopped(endAt)
+		}
+		if err := f.retire(l, key, endAt); err != nil {
 			return fmt.Errorf("ended probe %s on %s, but retiring ledger entry failed: %w", id, marketTitle(market), err)
 		}
 		if err := f.writeLedger(l); err != nil {

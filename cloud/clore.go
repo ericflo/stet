@@ -381,7 +381,9 @@ func (m *cloreMarket) sshTo(ctx context.Context, id string) (string, int, error)
 	return "", 0, errors.New("Clore does not list it")
 }
 
-// End cancels an order. One Clore no longer lists as active is gone already, and not an error.
+// End cancels an order. If /cancel_order fails, treat it as already ended only when Clore
+// positively lists this exact order ID as expired/gone in /my_orders; never treat omission from
+// a listing as proof of cancellation.
 func (m *cloreMarket) End(ctx context.Context, id string) error {
 	n, err := strconv.ParseInt(id, 10, 64)
 	if err != nil {
@@ -393,11 +395,10 @@ func (m *cloreMarket) End(ctx context.Context, id string) error {
 	}
 	if os, lerr := m.orders(ctx); lerr == nil {
 		for _, o := range os {
-			if o.ID == id && o.State != "gone" {
-				return err
+			if o.ID == id && o.State == "gone" {
+				return nil
 			}
 		}
-		return nil
 	}
 	return err
 }
