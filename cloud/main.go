@@ -52,14 +52,15 @@ Vast.ai, Lium, Salad and Clore.ai.
                                  provisions and proxies the ephemeral 1x RTX 5090 examiner)
   stet-cloud examiner            run only the automated ephemeral 1x RTX 5090 examiner
                                  controller and local authenticated vLLM proxy
-  stet-cloud examiner resolve [--end]
+  stet-cloud examiner resolve [--end] [--clear LABEL]
                                  verify an unresolved pending examiner reservation with
-                                 Vast.ai, adopting (or ending with --end) if found or
-                                 clearing it when confirmed absent
-  stet-cloud workers resolve [--end]
+                                 Vast.ai, adopting (or ending with --end) if found; keeps
+                                 unlisted reservations unless verified and named with --clear
+  stet-cloud workers resolve [--end] [--clear ID]
                                  verify unresolved pending worker create reservations
                                  with their providers, adopting (or ending with --end)
-                                 matching contracts or clearing confirmed-absent ones
+                                 matching contracts; keeps unlisted reservations unless
+                                 verified and named with --clear
   stet-cloud up [N]              rent N machines now, whatever is waiting (default 1)
   stet-cloud down [--force] [HANDLE...]
                                  end machines that hold no job; --force ends the rest
@@ -407,6 +408,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return cmdScale(ctx, f, *follow)
 	case "examiner":
 		end := fs.Bool("end", false, "with resolve: terminate a pending examiner instance if Vast.ai now lists it")
+		clearLabel := fs.String("clear", "", "with resolve: manually release this exact verified pending examiner reservation label when absent from Vast.ai")
 		rest, err := parse(fs, args)
 		if err != nil {
 			return err
@@ -416,13 +418,13 @@ func run(args []string, stdout, stderr io.Writer) error {
 			if err != nil {
 				return err
 			}
-			return cmdExaminerResolve(ctx, f, *end)
+			return cmdExaminerResolve(ctx, f, *end, strings.TrimSpace(*clearLabel))
 		}
 		if len(rest) > 0 {
 			return fmt.Errorf("%s takes no %q (try: stet-cloud examiner resolve)", cmd, rest[0])
 		}
-		if *end {
-			return errors.New("--end is only for `stet-cloud examiner resolve`")
+		if *end || *clearLabel != "" {
+			return errors.New("--end and --clear are only for `stet-cloud examiner resolve`")
 		}
 		if o.Examiner.Addr == "" {
 			o.Examiner.Addr = "127.0.0.1:8000"
@@ -434,6 +436,8 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return cmdExaminer(ctx, f)
 	case "workers":
 		end := fs.Bool("end", false, "with resolve: terminate matching worker contracts if the provider now lists them")
+		var clearIDs multiFlag
+		fs.Var(&clearIDs, "clear", "with resolve: manually release this exact verified pending reservation ID when unlisted (repeatable or comma-separated)")
 		rest, err := parse(fs, args)
 		if err != nil {
 			return err
@@ -443,9 +447,9 @@ func run(args []string, stdout, stderr io.Writer) error {
 			if err != nil {
 				return err
 			}
-			return cmdWorkersResolve(ctx, f, *end)
+			return cmdWorkersResolve(ctx, f, *end, clearIDs...)
 		}
-		return fmt.Errorf("workers takes `resolve [--end]` (got %q)", strings.Join(rest, " "))
+		return fmt.Errorf("workers takes `resolve [--end] [--clear ID]` (got %q)", strings.Join(rest, " "))
 	case "up":
 		rest, err := parse(fs, args)
 		if err != nil {
@@ -621,6 +625,20 @@ func loadService(home string) *Service {
 		return nil
 	}
 	return &svc
+}
+
+// multiFlag collects repeatable or comma-separated flag values.
+type multiFlag []string
+
+func (m *multiFlag) String() string { return strings.Join(*m, ",") }
+
+func (m *multiFlag) Set(v string) error {
+	for _, part := range strings.Split(v, ",") {
+		if s := strings.TrimSpace(part); s != "" {
+			*m = append(*m, s)
+		}
+	}
+	return nil
 }
 
 // String is the settings as they would be typed.

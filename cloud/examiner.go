@@ -99,6 +99,7 @@ type ExaminerOffer struct {
 	ID       string
 	Card     string
 	Price    float64
+	DiskCost float64
 	CUDA     float64
 	Region   string
 	InetDown float64
@@ -128,6 +129,9 @@ type ExaminerInstance struct {
 	PublicIP       string
 	HostPort       string
 	Price          float64
+	BasePrice      float64 `json:"base_price,omitempty"`
+	DiskCost       float64 `json:"disk_cost,omitempty"`
+	PartialRate    bool    `json:"partial_rate,omitempty"`
 	Created        time.Time
 	ObservedLiveAt time.Time `json:"observed_live_at,omitempty"`
 }
@@ -152,6 +156,7 @@ type examinerState struct {
 	CertPEM        string             `json:"cert_pem,omitempty"`
 	Upstream       string             `json:"upstream,omitempty"`
 	Price          float64            `json:"price,omitempty"`
+	DiskCost       float64            `json:"disk_cost,omitempty"`
 	Created        time.Time          `json:"created,omitempty"`
 	ObservedLiveAt time.Time          `json:"observed_live_at,omitempty"`
 	PendingSpends  []podRecord        `json:"pending_spends,omitempty"`
@@ -412,6 +417,19 @@ func boundedExaminerAccrual(price float64, created, observedLive, now, dayStart 
 	return rec.dollarsBetween(dayStart, end)
 }
 
+func higherValidRate(a, b float64) float64 {
+	switch {
+	case validRate(a) && validRate(b):
+		return max(a, b)
+	case validRate(a):
+		return a
+	case validRate(b):
+		return b
+	default:
+		return 0
+	}
+}
+
 func snapshotFromState(st examinerState, home string, now time.Time, timeout time.Duration, maxPrice float64) (live int, hourly float64, accrued float64) {
 	fallbackRate := maxPrice
 	if !validRate(fallbackRate) {
@@ -433,9 +451,7 @@ func snapshotFromState(st examinerState, home string, now time.Time, timeout tim
 				if created.IsZero() && !u.Created.IsZero() {
 					created = u.Created
 				}
-				if !validRate(rate) && validRate(u.Price) {
-					rate = u.Price
-				}
+				rate = higherValidRate(rate, u.Price)
 			}
 		}
 		if !validRate(rate) {
@@ -694,6 +710,8 @@ func (e *Examiner) persistState(st *examinerState) error {
 		pending := append([]podRecord(nil), e.state.PendingSpends...)
 		unresolved := append([]ExaminerInstance(nil), e.state.Unresolved...)
 		obs := e.state.ObservedLiveAt
+		memPrice := e.state.Price
+		memDisk := e.state.DiskCost
 		e.mu.RUnlock()
 		if !match {
 			return nil
@@ -701,6 +719,10 @@ func (e *Examiner) persistState(st *examinerState) error {
 		cp := *st
 		cp.PendingSpends = pending
 		cp.Unresolved = unresolved
+		cp.Price = higherValidRate(cp.Price, memPrice)
+		if nonNegFinite(memDisk) && memDisk > cp.DiskCost {
+			cp.DiskCost = memDisk
+		}
 		if obs.After(cp.ObservedLiveAt) {
 			cp.ObservedLiveAt = obs
 		}
@@ -968,6 +990,18 @@ func (e *Examiner) reloadState(tryFlush bool) error {
 		if diskSt != nil {
 			merged.PendingSpends = mergePendingSpends(memSt.PendingSpends, diskSt.PendingSpends)
 			merged.Unresolved = mergeUnresolvedLists(memSt.Unresolved, diskSt.Unresolved)
+			if memSt.InstanceID != "" &&
+				memSt.InstanceID == diskSt.InstanceID &&
+				memSt.APIKey == diskSt.APIKey &&
+				memSt.CertPEM == diskSt.CertPEM {
+				merged.Price = higherValidRate(merged.Price, diskSt.Price)
+				if nonNegFinite(diskSt.DiskCost) && diskSt.DiskCost > merged.DiskCost {
+					merged.DiskCost = diskSt.DiskCost
+				}
+				if diskSt.ObservedLiveAt.After(merged.ObservedLiveAt) {
+					merged.ObservedLiveAt = diskSt.ObservedLiveAt
+				}
+			}
 		}
 		if err := writeExaminerState(e.home, &merged); err != nil {
 			e.mu.Lock()
@@ -976,6 +1010,18 @@ func (e *Examiner) reloadState(tryFlush bool) error {
 			return err
 		}
 		e.mu.Lock()
+		if e.state.InstanceID != "" &&
+			e.state.InstanceID == merged.InstanceID &&
+			e.state.APIKey == merged.APIKey &&
+			e.state.CertPEM == merged.CertPEM {
+			merged.Price = higherValidRate(merged.Price, e.state.Price)
+			if nonNegFinite(e.state.DiskCost) && e.state.DiskCost > merged.DiskCost {
+				merged.DiskCost = e.state.DiskCost
+			}
+			if e.state.ObservedLiveAt.After(merged.ObservedLiveAt) {
+				merged.ObservedLiveAt = e.state.ObservedLiveAt
+			}
+		}
 		e.state = merged
 		e.lastDisk = diskIDOf(&merged)
 		e.dirty = false
@@ -990,6 +1036,8 @@ func (e *Examiner) reloadState(tryFlush bool) error {
 	}
 	var werr error
 	needFlushRecovered := false
+	needRecoverWrite := false
+	needRateWrite := false
 	if wasUnreadable && (len(memSt.PendingSpends) > 0 || len(memSt.Unresolved) > 0) {
 		var basePending []podRecord
 		var baseUnresolved []ExaminerInstance
@@ -1000,12 +1048,30 @@ func (e *Examiner) reloadState(tryFlush bool) error {
 		next.PendingSpends = mergePendingSpends(next.PendingSpends, memSt.PendingSpends)
 		next.Unresolved = mergeUnresolvedLists(next.Unresolved, memSt.Unresolved)
 		if len(next.PendingSpends) != len(basePending) || len(next.Unresolved) != len(baseUnresolved) {
-			if tryFlush && !e.dryRun {
-				werr = writeExaminerState(e.home, &next)
-				needFlushRecovered = werr != nil
-			} else if !e.dryRun {
-				needFlushRecovered = true
-			}
+			needRecoverWrite = true
+		}
+	}
+	if diskSt != nil && memSt.InstanceID != "" &&
+		memSt.InstanceID == diskSt.InstanceID &&
+		memSt.APIKey == diskSt.APIKey &&
+		memSt.CertPEM == diskSt.CertPEM {
+		next.Price = higherValidRate(next.Price, memSt.Price)
+		if nonNegFinite(memSt.DiskCost) && memSt.DiskCost > next.DiskCost {
+			next.DiskCost = memSt.DiskCost
+		}
+		if memSt.ObservedLiveAt.After(next.ObservedLiveAt) {
+			next.ObservedLiveAt = memSt.ObservedLiveAt
+		}
+		if next.Price > diskSt.Price+1e-9 || next.DiskCost > diskSt.DiskCost+1e-9 {
+			needRateWrite = true
+		}
+	}
+	if (needRecoverWrite || needRateWrite) && !e.dryRun {
+		if tryFlush {
+			werr = writeExaminerState(e.home, &next)
+			needFlushRecovered = werr != nil
+		} else if needRecoverWrite {
+			needFlushRecovered = true
 		}
 	}
 	e.mu.Lock()
@@ -1020,6 +1086,15 @@ func (e *Examiner) reloadState(tryFlush bool) error {
 	changed := e.state.InstanceID != next.InstanceID ||
 		e.state.APIKey != next.APIKey ||
 		e.state.CertPEM != next.CertPEM
+	if !changed && e.state.InstanceID != "" && e.state.InstanceID == next.InstanceID {
+		next.Price = higherValidRate(next.Price, e.state.Price)
+		if nonNegFinite(e.state.DiskCost) && e.state.DiskCost > next.DiskCost {
+			next.DiskCost = e.state.DiskCost
+		}
+		if e.state.ObservedLiveAt.After(next.ObservedLiveAt) {
+			next.ObservedLiveAt = e.state.ObservedLiveAt
+		}
+	}
 	e.state = next
 	var oldTr *http.Transport
 	if changed {
@@ -1098,6 +1173,21 @@ func (e *Examiner) setUnresolved(insts []ExaminerInstance) {
 	}
 }
 
+func examinerObservedRate(savedPrice, savedDisk float64, inst ExaminerInstance) (price, disk float64) {
+	disk = max(0, savedDisk)
+	origDisk := max(0, inst.DiskCost)
+	if nonNegFinite(inst.DiskCost) && inst.DiskCost > disk {
+		disk = inst.DiskCost
+	}
+	price = higherValidRate(savedPrice, inst.Price)
+	if validRate(inst.BasePrice) {
+		price = higherValidRate(price, inst.BasePrice+disk)
+	} else if inst.PartialRate && validRate(inst.Price) {
+		price = higherValidRate(price, inst.Price+max(0, disk-origDisk))
+	}
+	return price, disk
+}
+
 func mergeExaminerInstance(prev, cur ExaminerInstance) ExaminerInstance {
 	if cur.Label == "" {
 		cur.Label = prev.Label
@@ -1105,9 +1195,7 @@ func mergeExaminerInstance(prev, cur ExaminerInstance) ExaminerInstance {
 	if cur.Created.IsZero() {
 		cur.Created = prev.Created
 	}
-	if !validRate(cur.Price) && validRate(prev.Price) {
-		cur.Price = prev.Price
-	}
+	cur.Price, cur.DiskCost = examinerObservedRate(prev.Price, prev.DiskCost, cur)
 	if prev.ObservedLiveAt.After(cur.ObservedLiveAt) {
 		cur.ObservedLiveAt = prev.ObservedLiveAt
 	}
@@ -1447,10 +1535,7 @@ func (e *Examiner) recordEndedDollars(inst ExaminerInstance, fallbackStart time.
 	if start.IsZero() {
 		start = fallbackStart
 	}
-	price := inst.Price
-	if !validRate(price) {
-		price = fallbackPrice
-	}
+	price := higherValidRate(inst.Price, fallbackPrice)
 	return e.recordEndedAtDollars(inst.ID, inst.Label, price, start, now, roundID, why)
 }
 
@@ -1477,9 +1562,7 @@ func (e *Examiner) recordMissingSavedDollars(saved examinerState, why string) (f
 		if created.IsZero() && !u.Created.IsZero() {
 			created = u.Created
 		}
-		if !validRate(price) && validRate(u.Price) {
-			price = u.Price
-		}
+		price = higherValidRate(price, u.Price)
 	}
 	start := created
 	if start.IsZero() || start.After(now) {
@@ -1528,9 +1611,7 @@ func savedOrphanInstance(saved examinerState, prev []ExaminerInstance) ExaminerI
 		if u.Created.IsZero() {
 			u.Created = saved.Created
 		}
-		if !validRate(u.Price) && validRate(saved.Price) {
-			u.Price = saved.Price
-		}
+		u.Price, u.DiskCost = examinerObservedRate(saved.Price, saved.DiskCost, u)
 		return u
 	}
 	return ExaminerInstance{
@@ -1538,6 +1619,7 @@ func savedOrphanInstance(saved examinerState, prev []ExaminerInstance) ExaminerI
 		Label:          saved.ReservedLabel,
 		State:          "unknown",
 		Price:          saved.Price,
+		DiskCost:       saved.DiskCost,
 		Created:        saved.Created,
 		ObservedLiveAt: obs,
 	}
@@ -1552,6 +1634,41 @@ func (e *Examiner) noteSavedObservedLive(saved *examinerState, now time.Time) {
 		e.state.ObservedLiveAt = now
 	}
 	e.mu.Unlock()
+}
+
+// noteSavedPrice raises saved.Price and e.state.Price whenever the provider reports a higher
+// valid hourly rate (or higher base compute rate plus known disk storage cost) for the same
+// instance, never lowering a conservative reserved/known rate. Reports whether persisted fields
+// changed.
+func (e *Examiner) noteSavedPrice(saved *examinerState, inst ExaminerInstance) bool {
+	price, disk := examinerObservedRate(saved.Price, saved.DiskCost, inst)
+	changed := false
+	if validRate(price) && (!validRate(saved.Price) || price > saved.Price+1e-9) {
+		saved.Price = price
+		changed = true
+	}
+	if nonNegFinite(disk) && disk > saved.DiskCost+1e-9 {
+		saved.DiskCost = disk
+		changed = true
+	}
+	e.mu.Lock()
+	if e.state.InstanceID == saved.InstanceID {
+		ePrice, eDisk := examinerObservedRate(e.state.Price, e.state.DiskCost, inst)
+		ePrice = higherValidRate(ePrice, saved.Price)
+		if saved.DiskCost > eDisk {
+			eDisk = saved.DiskCost
+		}
+		if validRate(ePrice) && (!validRate(e.state.Price) || ePrice > e.state.Price+1e-9) {
+			e.state.Price = ePrice
+			changed = true
+		}
+		if nonNegFinite(eDisk) && eDisk > e.state.DiskCost+1e-9 {
+			e.state.DiskCost = eDisk
+			changed = true
+		}
+	}
+	e.mu.Unlock()
+	return changed
 }
 
 // teardownKnownDueOnListErr attempts direct EndExaminer teardown on known due instance IDs
@@ -1699,13 +1816,18 @@ func (e *Examiner) enforceOwnedTimeouts(ctx context.Context, owned []ExaminerIns
 		if inst.ID == saved.InstanceID {
 			foundSaved = true
 			e.noteSavedObservedLive(&saved, now)
+			if e.noteSavedPrice(&saved, inst) && !logDeferred && !e.dryRun {
+				if perr := e.persistState(&saved); perr != nil && firstErr == nil {
+					firstErr = fmt.Errorf("saving updated examiner.json price: %w", perr)
+				}
+			}
 		}
 		var created time.Time
 		fallbackPrice := 0.0
 		rid := ""
 		if matchesSaved {
 			created = saved.Created
-			fallbackPrice = saved.Price
+			fallbackPrice, _ = examinerObservedRate(saved.Price, saved.DiskCost, inst)
 			rid = saved.RoundID
 		}
 		if created.IsZero() {
@@ -1730,9 +1852,11 @@ func (e *Examiner) enforceOwnedTimeouts(ctx context.Context, owned []ExaminerIns
 			if inst.Created.IsZero() && !created.IsZero() {
 				inst.Created = created
 			}
-			if !validRate(inst.Price) && validRate(fallbackPrice) {
-				inst.Price = fallbackPrice
+			fallbackDisk := 0.0
+			if matchesSaved {
+				fallbackDisk = saved.DiskCost
 			}
+			inst.Price, inst.DiskCost = examinerObservedRate(fallbackPrice, fallbackDisk, inst)
 			inst.ObservedLiveAt = now
 			e.proxyOffline()
 			failedEnds = append(failedEnds, inst)
@@ -1802,14 +1926,15 @@ func (e *Examiner) promoteReservedInstance(saved *examinerState, inst ExaminerIn
 	saved.InstanceID = inst.ID
 	saved.PendingRent = false
 	saved.ReservedLabel = ""
-	if !validRate(saved.Price) && validRate(inst.Price) {
-		saved.Price = inst.Price
-	}
+	saved.Price, saved.DiskCost = examinerObservedRate(saved.Price, saved.DiskCost, inst)
 	e.mu.Lock()
 	e.state.InstanceID = saved.InstanceID
 	e.state.PendingRent = false
 	e.state.ReservedLabel = ""
-	e.state.Price = saved.Price
+	e.state.Price = higherValidRate(e.state.Price, saved.Price)
+	if saved.DiskCost > e.state.DiskCost {
+		e.state.DiskCost = saved.DiskCost
+	}
 	e.mu.Unlock()
 }
 
@@ -1867,12 +1992,11 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 				e.promoteReservedInstance(&saved, inst)
 				if inst.ID == saved.InstanceID {
 					e.noteSavedObservedLive(&saved, now)
+					e.noteSavedPrice(&saved, inst)
 					if inst.Created.IsZero() && !saved.Created.IsZero() {
 						inst.Created = saved.Created
 					}
-					if !validRate(inst.Price) && validRate(saved.Price) {
-						inst.Price = saved.Price
-					}
+					inst.Price, inst.DiskCost = examinerObservedRate(saved.Price, saved.DiskCost, inst)
 				}
 				inst.ObservedLiveAt = now
 				failedEnds = append(failedEnds, inst)
@@ -1887,7 +2011,7 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 			rid := ""
 			if matchesSaved {
 				fallbackStart = saved.Created
-				fallbackPrice = saved.Price
+				fallbackPrice, _ = examinerObservedRate(saved.Price, saved.DiskCost, inst)
 				rid = saved.RoundID
 				endedSaved = true
 			}
@@ -2005,6 +2129,11 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 			active == nil
 		if keep {
 			e.noteSavedObservedLive(&saved, now)
+			if e.noteSavedPrice(&saved, inst) && !e.dryRun {
+				if err := e.persistState(&saved); err != nil && spendErr == nil {
+					spendErr = fmt.Errorf("saving updated examiner.json price: %w", err)
+				}
+			}
 			created := saved.Created
 			if created.IsZero() {
 				created = inst.Created
@@ -2019,9 +2148,7 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 					if inst.Created.IsZero() {
 						inst.Created = created
 					}
-					if !validRate(inst.Price) && validRate(saved.Price) {
-						inst.Price = saved.Price
-					}
+					inst.Price, inst.DiskCost = examinerObservedRate(saved.Price, saved.DiskCost, inst)
 					inst.ObservedLiveAt = now
 					e.proxyOffline()
 					failedEnds = append(failedEnds, inst)
@@ -2055,12 +2182,11 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 			e.promoteReservedInstance(&saved, inst)
 			if inst.ID == saved.InstanceID {
 				e.noteSavedObservedLive(&saved, now)
+				e.noteSavedPrice(&saved, inst)
 				if inst.Created.IsZero() && !saved.Created.IsZero() {
 					inst.Created = saved.Created
 				}
-				if !validRate(inst.Price) && validRate(saved.Price) {
-					inst.Price = saved.Price
-				}
+				inst.Price, inst.DiskCost = examinerObservedRate(saved.Price, saved.DiskCost, inst)
 			}
 			inst.ObservedLiveAt = now
 			failedEnds = append(failedEnds, inst)
@@ -2077,7 +2203,7 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 		rid := ""
 		if matchesSaved {
 			fallbackStart = saved.Created
-			fallbackPrice = saved.Price
+			fallbackPrice, _ = examinerObservedRate(saved.Price, saved.DiskCost, inst)
 			rid = saved.RoundID
 			endedSaved = true
 		}
@@ -2306,6 +2432,7 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 			APIKey:        apiKey,
 			CertPEM:       string(certPEM),
 			Price:         off.Price,
+			DiskCost:      off.DiskCost,
 			Created:       now,
 			PendingSpends: pendingCopy,
 		}
@@ -2360,6 +2487,7 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 			APIKey:     apiKey,
 			CertPEM:    string(certPEM),
 			Price:      off.Price,
+			DiskCost:   off.DiskCost,
 			Created:    now,
 		}
 		e.mu.Lock()
@@ -2374,7 +2502,7 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 				e.clearState()
 				return fmt.Errorf("saving examiner.json after renting %s (unwound rental): %w", id, err)
 			} else {
-				e.setUnresolved([]ExaminerInstance{{ID: id, Label: label, State: "starting", Price: off.Price, Created: now}})
+				e.setUnresolved([]ExaminerInstance{{ID: id, Label: label, State: "starting", Price: off.Price, DiskCost: off.DiskCost, Created: now}})
 				return fmt.Errorf("saving examiner.json after renting %s (unwind failed: %v): %w", id, endErr, err)
 			}
 		}
@@ -2435,6 +2563,9 @@ func (e *Examiner) ProbeIfBooting(ctx context.Context) {
 		return
 	}
 	for _, inst := range filterOwnedExaminers(rawInsts, owner, saved.InstanceID, saved.ReservedLabel) {
+		if inst.ID == saved.InstanceID && inst.State != "stopped" {
+			e.noteSavedPrice(&saved, inst)
+		}
 		if inst.ID == saved.InstanceID && inst.State != "stopped" && inst.PublicIP != "" && inst.HostPort != "" {
 			upstream := "https://" + net.JoinHostPort(inst.PublicIP, inst.HostPort)
 			if e.probeModels(ctx, upstream, saved.APIKey, saved.CertPEM) {
@@ -2479,8 +2610,9 @@ func appendExaminerSpend(path string, rec podRecord) error {
 
 // resolvePendingExaminer verifies an unresolved PendingRent reservation in examiner.json
 // against the provider: if a matching instance is listed it is adopted into InstanceID (or
-// terminated and billed when end is true), and if the provider lists zero matching instances
-// the pending reservation is cleared while preserving PendingSpends and Unresolved.
+// terminated and billed when end is true). If the provider lists zero matching instances, the
+// reservation is kept intact unless the operator explicitly verified absence and passed
+// clearLabel matching st.ReservedLabel (preserving PendingSpends and Unresolved).
 func resolvePendingExaminer(
 	ctx context.Context,
 	home string,
@@ -2489,6 +2621,7 @@ func resolvePendingExaminer(
 	say func(string, ...any),
 	dryRun bool,
 	end bool,
+	clearLabel string,
 	onSpent func(podRecord) error,
 ) error {
 	if nowFn == nil {
@@ -2497,6 +2630,7 @@ func resolvePendingExaminer(
 	if say == nil {
 		say = func(string, ...any) {}
 	}
+	clearLabel = strings.TrimSpace(clearLabel)
 	st, err := readExaminerStateErr(home)
 	if err != nil {
 		return err
@@ -2504,6 +2638,9 @@ func resolvePendingExaminer(
 	hasPending := st != nil && st.PendingRent && st.InstanceID == ""
 	hasUnresolved := st != nil && len(st.Unresolved) > 0
 	if !hasPending && !hasUnresolved {
+		if clearLabel != "" {
+			return fmt.Errorf("no pending examiner reservation matching --clear %q", clearLabel)
+		}
 		say("no pending examiner rental reservation to resolve")
 		return nil
 	}
@@ -2517,6 +2654,7 @@ func resolvePendingExaminer(
 		target.CertPEM = ""
 		target.Upstream = ""
 		target.Price = 0
+		target.DiskCost = 0
 		target.Created = time.Time{}
 		target.ObservedLiveAt = time.Time{}
 	}
@@ -2526,8 +2664,8 @@ func resolvePendingExaminer(
 			return false, fmt.Errorf("ending unresolved examiner GPU %s: %w", u.ID, err), nil
 		}
 		price := u.Price
-		if !validRate(price) {
-			price = st.Price
+		if u.ID == st.InstanceID || st.PendingRent || !validRate(price) {
+			price, _ = examinerObservedRate(st.Price, st.DiskCost, *u)
 		}
 		if !validRate(price) {
 			price = 1.50
@@ -2554,6 +2692,9 @@ func resolvePendingExaminer(
 		return true, nil, spendErr
 	}
 	if !hasPending {
+		if clearLabel != "" {
+			return fmt.Errorf("no pending examiner reservation matching --clear %q", clearLabel)
+		}
 		if !end {
 			e := fmt.Errorf("examiner.json has %d unresolved examiner instance(s) awaiting termination; run `stet-cloud examiner resolve --end` to retry", len(st.Unresolved))
 			say("%v", e)
@@ -2605,6 +2746,9 @@ func resolvePendingExaminer(
 		}
 	}
 	if len(matches) > 0 {
+		if clearLabel != "" {
+			return fmt.Errorf("refusing --clear %q: Vast.ai lists %d matching examiner instance(s) (first: %s); run `stet-cloud examiner resolve` to adopt or `--end` to terminate", clearLabel, len(matches), matches[0].ID)
+		}
 		if end {
 			if dryRun {
 				for _, m := range matches {
@@ -2628,9 +2772,7 @@ func resolvePendingExaminer(
 					if u.Created.IsZero() {
 						u.Created = st.Created
 					}
-					if !validRate(u.Price) && validRate(st.Price) {
-						u.Price = st.Price
-					}
+					u.Price, u.DiskCost = examinerObservedRate(st.Price, st.DiskCost, u)
 					u.ObservedLiveAt = now
 					failedEnds = append(failedEnds, u)
 					if firstEndErr == nil {
@@ -2638,10 +2780,7 @@ func resolvePendingExaminer(
 					}
 					continue
 				}
-				price := match.Price
-				if !validRate(price) {
-					price = st.Price
-				}
+				price, _ := examinerObservedRate(st.Price, st.DiskCost, match)
 				start := match.Created
 				if start.IsZero() {
 					start = st.Created
@@ -2711,9 +2850,7 @@ func resolvePendingExaminer(
 		st.InstanceID = match.ID
 		st.PendingRent = false
 		st.ReservedLabel = ""
-		if !validRate(st.Price) && validRate(match.Price) {
-			st.Price = match.Price
-		}
+		st.Price, st.DiskCost = examinerObservedRate(st.Price, st.DiskCost, match)
 		st.ObservedLiveAt = now
 		if err := writeExaminerState(home, st); err != nil {
 			return fmt.Errorf("saving adopted examiner.json: %w", err)
@@ -2721,8 +2858,52 @@ func resolvePendingExaminer(
 		say("confirmed examiner GPU (machine %s, state %s) for reservation %s: adopted into examiner.json", match.ID, match.State, label)
 		return nil
 	}
+	if clearLabel == "" {
+		next := *st
+		var firstEndErr, spendErr error
+		if end && len(st.Unresolved) > 0 {
+			if dryRun {
+				for _, u := range st.Unresolved {
+					say("would retry ending unresolved examiner GPU (machine %s)", u.ID)
+				}
+			} else {
+				next.Unresolved = nil
+				for i := range st.Unresolved {
+					u := st.Unresolved[i]
+					if u.ID == "" {
+						continue
+					}
+					ok, eErr, sErr := endUnresolved(&u, st.RoundID, "resolved unresolved examiner teardown (--end)", &next)
+					if !ok {
+						next.Unresolved = append(next.Unresolved, u)
+						if firstEndErr == nil {
+							firstEndErr = eErr
+						}
+					}
+					if sErr != nil && spendErr == nil {
+						spendErr = sErr
+					}
+				}
+				if werr := writeExaminerState(home, &next); werr != nil {
+					return fmt.Errorf("updating examiner.json after retrying unresolved teardowns: %w", werr)
+				}
+			}
+		}
+		e := fmt.Errorf("pending examiner reservation %s is not listed on Vast.ai yet; keeping reservation (verify on Vast.ai and re-run `stet-cloud examiner resolve --clear %s` only if confirmed absent)", st.ReservedLabel, st.ReservedLabel)
+		say("%v", e)
+		if firstEndErr != nil {
+			return firstEndErr
+		}
+		if spendErr != nil {
+			return spendErr
+		}
+		return e
+	}
+	if clearLabel != st.ReservedLabel {
+		return fmt.Errorf("--clear %q does not match pending examiner reservation %q; keeping reservation", clearLabel, st.ReservedLabel)
+	}
 	if dryRun {
-		say("would clear pending examiner reservation %s (confirmed absent on Vast.ai)", st.ReservedLabel)
+		say("would clear verified pending examiner reservation %s (not listed on Vast.ai)", st.ReservedLabel)
 		if end {
 			for _, u := range st.Unresolved {
 				say("would retry ending unresolved examiner GPU (machine %s)", u.ID)
@@ -2758,7 +2939,7 @@ func resolvePendingExaminer(
 	if err := writeExaminerState(home, &next); err != nil {
 		return fmt.Errorf("clearing pending examiner reservation %s: %w", label, err)
 	}
-	say("cleared pending examiner reservation %s (confirmed absent on Vast.ai; no spend recorded)", label)
+	say("cleared pending examiner reservation %s via --clear (not listed on Vast.ai; no spend recorded)", label)
 	if firstEndErr != nil {
 		return firstEndErr
 	}

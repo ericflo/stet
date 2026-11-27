@@ -2502,12 +2502,31 @@ func (a *App) submitResult(ctx context.Context, acctID, claimID int64, p *Result
 		}
 		tol := a.tolerance()
 		var incomingBase *Baseline
+		saveIncomingBase := false
 		if p.Baseline != nil {
-			incomingBase = &Baseline{RoundIdx: rd.Idx, AccountID: acctID, Loss: places5(-p.Baseline.Mean), Items: p.Baseline.ItemScores,
+			cand := &Baseline{RoundIdx: rd.Idx, AccountID: acctID, Loss: places5(-p.Baseline.Mean), Items: p.Baseline.ItemScores,
 				CorpusSHA: p.CorpusSHA256, ExamSHA: p.ExamSHA256, InitSHA: baseInitSHA, ReceivedAt: now(), Established: est}
-			if dev, bad := a.baselineAdmissionRefuses(s, rd, acct, est, incomingBase); bad {
-				return refuse("baseline", places5(dev),
-					"your unedited baseline for %s is further from the round's other graders' than the tolerance of %.3f bits per byte allows, so this machine's setup or arithmetic differs. That is published with the round when it settles; nothing counts against you", p.Round, tol.Baseline)
+			if prev := s.Baselines[baselineKey(rd.Idx, acctID)]; prev != nil {
+				// Keep each account's first accepted baseline for the round immutable so grading
+				// additional scripts in the same round cannot mutate s.Baselines or destabilize
+				// locked consensus.
+				if (len(a.season.Student) > 0 && prev.InitSHA != "" && cand.InitSHA != "" && prev.InitSHA != cand.InitSHA) ||
+					!a.baselinesAgree(rd, prev, cand) {
+					dev, _, _ := a.season.Exam.ScoreItems(rd.ExamTable, diffItems(cand.Items, prev.Items), rd.Shares)
+					return refuse("baseline", places5(dev),
+						"your unedited baseline for %s differs from the baseline this account already reported for the round (tolerance %.3f bits per byte)", p.Round, tol.Baseline)
+				}
+				if dev, bad := a.baselineAdmissionRefuses(s, rd, acct, est, prev); bad {
+					return refuse("baseline", places5(dev),
+						"your unedited baseline for %s is further from the round's other graders' than the tolerance of %.3f bits per byte allows, so this machine's setup or arithmetic differs. That is published with the round when it settles; nothing counts against you", p.Round, tol.Baseline)
+				}
+			} else {
+				incomingBase = cand
+				if dev, bad := a.baselineAdmissionRefuses(s, rd, acct, est, incomingBase); bad {
+					return refuse("baseline", places5(dev),
+						"your unedited baseline for %s is further from the round's other graders' than the tolerance of %.3f bits per byte allows, so this machine's setup or arithmetic differs. That is published with the round when it settles; nothing counts against you", p.Round, tol.Baseline)
+				}
+				saveIncomingBase = true
 			}
 		}
 		if p.Valid && tokensSHA != "" {
@@ -2523,7 +2542,7 @@ func (a *App) submitResult(ctx context.Context, acctID, claimID int64, p *Result
 		}
 
 		// Everything is checked. From here on the change is made.
-		if incomingBase != nil {
+		if saveIncomingBase && incomingBase != nil {
 			tx.saveBaseline(incomingBase)
 		}
 		if est {

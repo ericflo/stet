@@ -564,33 +564,12 @@ func sameBaselineSet(x, y []*Baseline) bool {
 	return true
 }
 
-// baselinesKept are the round's baselines that make its own. While fewer than three are in,
-// all of them: whichever came first is no more the standard than the next. From three on,
-// those within the tolerance of the median of them all whenever at least two of them mutually
-// agree; otherwise, if there is a unique strictly largest mutually agreeing cohort of size >= 2
-// (e.g. a 4th grader repeating 6.000 to break a 6.000/6.040/6.080 three-way split whose even-count
-// median 6.020 misses every baseline), that cohort is kept. If no agreeing consensus exists, all
-// baselines are kept so baselineDisputed reports the unresolved dispute.
-func (a *App) baselinesKept(s *State, rd *Round) []*Baseline {
-	all := a.roundBaselines(s, rd)
-	if len(all) < baselineQuorum {
-		return all
-	}
-	mid, tol := medianItems(itemsOf(all)), a.tolerance().Baseline
-	var kept []*Baseline
-	for _, b := range all {
-		if dev, _, err := a.season.Exam.ScoreItems(rd.ExamTable, diffItems(b.Items, mid), rd.Shares); err == nil && within(dev, tol) {
-			kept = append(kept, b)
-		}
-	}
-	if len(kept) >= 2 && a.hasAgreeingBaselinePair(rd, kept) {
-		return kept
-	}
-	var best []*Baseline
-	tied := false
-	for _, b := range all {
+// largestBaselineCohort finds the largest mutually agreeing neighborhood (size >= 2) centered on
+// any baseline in bs, and sets tied=true when two distinct sets tie for that maximum size.
+func (a *App) largestBaselineCohort(rd *Round, bs []*Baseline) (best []*Baseline, tied bool) {
+	for _, b := range bs {
 		var cohort []*Baseline
-		for _, other := range all {
+		for _, other := range bs {
 			if other == b || a.baselinesAgree(rd, b, other) {
 				cohort = append(cohort, other)
 			}
@@ -605,8 +584,59 @@ func (a *App) baselinesKept(s *State, rd *Round) []*Baseline {
 			tied = true
 		}
 	}
-	if len(best) >= 2 && !tied {
-		return best
+	return best, tied
+}
+
+// pruneBaselinesToMedian iteratively drops baselines outside tolerance of the current set's
+// item-wise median until fixed point or fewer than two baselines remain.
+func (a *App) pruneBaselinesToMedian(rd *Round, bs []*Baseline) []*Baseline {
+	tol := a.tolerance().Baseline
+	kept := bs
+	for len(kept) >= 2 {
+		mid := medianItems(itemsOf(kept))
+		var next []*Baseline
+		for _, b := range kept {
+			if dev, _, err := a.season.Exam.ScoreItems(rd.ExamTable, diffItems(b.Items, mid), rd.Shares); err == nil && within(dev, tol) {
+				next = append(next, b)
+			}
+		}
+		if len(next) == len(kept) {
+			break
+		}
+		kept = next
+	}
+	return kept
+}
+
+// baselinesKept are the round's baselines that make its own. While fewer than three are in,
+// all of them: whichever came first is no more the standard than the next. From three on, there
+// must be a unique strictly largest mutually agreeing cohort of size >= 2 across all established
+// baselines (so a 2-2 split whose midpoint falls within tolerance of both groups cannot produce
+// a rated result). Once that unique cohort exists, baselines are pruned iteratively against the
+// kept median until fixed point; if that median-kept set contains an agreeing pair and has no
+// tied largest cohort, it is returned, otherwise the unique largest agreeing cohort is pruned to
+// its own median fixed point so every kept baseline agrees with the round's median. If no unique
+// agreeing consensus exists, all baselines are kept so baselineDisputed reports the dispute.
+func (a *App) baselinesKept(s *State, rd *Round) []*Baseline {
+	all := a.roundBaselines(s, rd)
+	if len(all) < baselineQuorum {
+		return all
+	}
+	best, tied := a.largestBaselineCohort(rd, all)
+	if len(best) < 2 || tied {
+		return all
+	}
+	kept := a.pruneBaselinesToMedian(rd, all)
+	if len(kept) >= 2 && a.hasAgreeingBaselinePair(rd, kept) {
+		if kBest, kTied := a.largestBaselineCohort(rd, kept); len(kBest) >= 2 && !kTied {
+			return kept
+		}
+	}
+	prunedBest := a.pruneBaselinesToMedian(rd, best)
+	if len(prunedBest) >= 2 && a.hasAgreeingBaselinePair(rd, prunedBest) {
+		if bBest, bTied := a.largestBaselineCohort(rd, prunedBest); len(bBest) >= 2 && !bTied {
+			return prunedBest
+		}
 	}
 	return all
 }
@@ -661,50 +691,17 @@ func (a *App) baselineDev(s *State, rd *Round, acctID int64, items []float64) (d
 	return dev, err == nil
 }
 
-// medianBounds computes the item-wise minimum (lo) and maximum (hi) possible medians of rows
-// after appending up to extra arbitrary real-valued baseline rows (requires 0 <= extra < len(rows)).
-// Placing all extra rows at -inf gives lo and at +inf gives hi; because every intermediate count
-// 0 <= k <= extra shifts each coordinate's median monotonically within [lo[i], hi[i]], and
-// ExamPlan.ScoreItems is coordinate-wise non-decreasing (clipping + trimmed mean + non-negative
-// weights), a baseline within tolerance of both lo and hi is guaranteed to stay within tolerance
-// of the resulting median regardless of what those extra rows report.
-func medianBounds(rows [][]float64, extra int) (lo, hi []float64) {
-	n := len(rows)
-	if n == 0 || extra < 0 || extra >= n {
-		return nil, nil
-	}
-	m := len(rows[0])
-	lo = make([]float64, m)
-	hi = make([]float64, m)
-	col := make([]float64, n)
-	total := n + extra
-	for i := range m {
-		for r, row := range rows {
-			col[r] = row[i]
-		}
-		sort.Float64s(col)
-		if total%2 == 1 {
-			lo[i] = col[(n-extra-1)/2]
-			hi[i] = col[(n+extra-1)/2]
-		} else {
-			lo[i] = (col[(n-extra)/2-1] + col[(n-extra)/2]) / 2
-			hi[i] = (col[(n+extra)/2-1] + col[(n+extra)/2]) / 2
-		}
-	}
-	return lo, hi
-}
-
 // baselineConsensusState reports whether the round's kept established baseline cohort is already
 // irrevocable AND returns the set of established baseline voters provably guaranteed to remain
-// inside the kept cohort (not pushed into oddOut) under any 0..K arbitrary baseline submissions
-// from outstanding live established grade claims on rd:
+// inside the kept cohort (not pushed into oddOut):
 //   - never locks before rd.InitSHA locks (on pinned-student seasons), while baselineDisputed is
 //     true, or on fewer than 2 corroborated baselines (len(simKept) < 2);
 //   - counts ALL live established grade claims on rd (including c.Baseline==false, because clients
 //     with a cached local baseline may still attach p.Baseline and enter s.Baselines);
-//   - when K > 0 live established claims remain, computes worst-case item-wise shifted median
-//     bounds [lo, hi], keeps only voters within tolerance of BOTH lo and hi, and requires a
-//     mutually agreeing stable core strictly larger than maxRival + K.
+//   - defers locking whenever any other live established grade claim remains on rd (k > 0),
+//     because ExamPlan.ScoreItems uses MAD-based outlier clipping (which skips clipping when
+//     MAD == 0 and is therefore not monotone in item diffs), so any additional baseline can alter
+//     which existing voters stay within tolerance or fall into oddOut.
 func (a *App) baselineConsensusState(s *State, rd *Round, acct *Account, est bool, incoming *Baseline) (locked bool, stableVoters map[int64]bool, liveOther map[int64]bool) {
 	if rd == nil {
 		return false, nil, nil
@@ -740,21 +737,6 @@ func (a *App) baselineConsensusState(s *State, rd *Round, acct *Account, est boo
 	for _, b := range simKept {
 		inKept[b.AccountID] = true
 	}
-	maxRival := 0
-	for _, b := range simAll {
-		if inKept[b.AccountID] {
-			continue
-		}
-		cohort := 0
-		for _, other := range simAll {
-			if other == b || a.baselinesAgree(rd, b, other) {
-				cohort++
-			}
-		}
-		if cohort > maxRival {
-			maxRival = cohort
-		}
-	}
 	otherLive := map[int64]bool{}
 	t := now()
 	for _, c := range s.Claims {
@@ -768,51 +750,10 @@ func (a *App) baselineConsensusState(s *State, rd *Round, acct *Account, est boo
 			otherLive[c.AccountID] = true
 		}
 	}
-	k := len(otherLive)
-	if k == 0 {
-		return maxRival < len(simKept), inKept, otherLive
-	}
-	if k >= len(simAll) {
+	if len(otherLive) > 0 {
 		return false, nil, otherLive
 	}
-	lo, hi := medianBounds(itemsOf(simAll), k)
-	if len(lo) == 0 || len(hi) == 0 {
-		return false, nil, otherLive
-	}
-	tol := a.tolerance().Baseline
-	var stableKept []*Baseline
-	stableVoters = make(map[int64]bool, len(simKept))
-	for _, b := range simKept {
-		devLo, _, err1 := a.season.Exam.ScoreItems(rd.ExamTable, diffItems(b.Items, lo), rd.Shares)
-		devHi, _, err2 := a.season.Exam.ScoreItems(rd.ExamTable, diffItems(b.Items, hi), rd.Shares)
-		if err1 == nil && err2 == nil && within(devLo, tol) && within(devHi, tol) {
-			stableKept = append(stableKept, b)
-			stableVoters[b.AccountID] = true
-		}
-	}
-	coreSize := 0
-	for _, b := range stableKept {
-		clique := []*Baseline{b}
-		for _, other := range stableKept {
-			if other == b {
-				continue
-			}
-			ok := true
-			for _, m := range clique {
-				if !a.baselinesAgree(rd, m, other) {
-					ok = false
-					break
-				}
-			}
-			if ok {
-				clique = append(clique, other)
-			}
-		}
-		if len(clique) > coreSize {
-			coreSize = len(clique)
-		}
-	}
-	return coreSize >= baselineQuorum-1 && maxRival+k < coreSize, stableVoters, otherLive
+	return true, inKept, otherLive
 }
 
 // baselineConsensusLocked reports whether the round's kept established baseline cohort is already
@@ -964,6 +905,11 @@ func (a *App) baselineDisputed(s *State, rd *Round) bool {
 			}
 		}
 	}
+	if len(all) >= baselineQuorum {
+		if best, tied := a.largestBaselineCohort(rd, all); len(best) < 2 || tied {
+			return true
+		}
+	}
 	kept := a.baselinesKept(s, rd)
 	if len(kept) < 2 {
 		return true
@@ -979,7 +925,11 @@ func (a *App) baselineDisputed(s *State, rd *Round) bool {
 			agreeing = append(agreeing, b)
 		}
 	}
-	return !a.hasAgreeingBaselinePair(rd, agreeing)
+	if len(agreeing) != len(kept) || !a.hasAgreeingBaselinePair(rd, agreeing) {
+		return true
+	}
+	kBest, kTied := a.largestBaselineCohort(rd, agreeing)
+	return len(kBest) < 2 || kTied
 }
 
 // baselineTieLive reports whether an established account without a baseline for this round

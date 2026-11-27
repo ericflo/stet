@@ -805,8 +805,15 @@ def _round_hours(season, d: dict, seed: bytes) -> tuple[list[tuple[int, Path]], 
     named = d.get("exam_hours") or []
     late = not named
     if late:
-        first = int(d["draw_at"]) - int(season.raw["exam"]["fresh"]["reach_seconds"])
-        held = [int(p.stem) for p in _hours_dir().glob("*.jsonl") if p.stem.isdigit() and int(p.stem) >= first]
+        from .exam.fresh.harvest import HOUR
+
+        draw_at = int(d["draw_at"])
+        first = draw_at - int(season.raw["exam"]["fresh"]["reach_seconds"])
+        held = [
+            int(p.stem)
+            for p in _hours_dir().glob("*.jsonl")
+            if p.stem.isdigit() and first <= int(p.stem) and int(p.stem) + HOUR <= draw_at
+        ]
         named = [{"hour": h} for h in choose_hours(seed, held, int(season.raw["exam"]["fresh"]["hours"]))]
     out = []
     for x in named:

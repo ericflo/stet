@@ -153,7 +153,7 @@ func cloreOffer(s cloreServer, n Need) (Offer, bool) {
 	}
 	return Offer{
 		Market: "clore", Card: shortGPU(model), Model: model, Name: shortGPU(model), ID: strconv.FormatInt(s.ID, 10),
-		Maker: maker, MemoryGB: int(s.Specs.GPURAM + 0.5), Price: clorePrice(price), Ask: price, Stock: 1, CUDA: s.CUDA,
+		Maker: maker, MemoryGB: int(s.Specs.GPURAM + 0.5), Price: clorePrice(price), TransferCost: cloreOrderFee / expectedLife.Hours(), Ask: price, Stock: 1, CUDA: s.CUDA,
 		Trust: "community", Region: s.Specs.Net.CC, Host: strconv.FormatInt(s.ID, 10), CPU: strings.TrimSpace(s.Specs.CPU),
 	}, true
 }
@@ -345,8 +345,12 @@ func (m *cloreMarket) orders(ctx context.Context) ([]cloreRental, error) {
 		if o.CT > 0 {
 			created = time.Unix(o.CT, 0)
 		}
+		price := 0.0
+		if (o.Currency == "" || o.Currency == cloreCurrency) && validRate(o.Price) {
+			price = o.Price / 24 * (1 + cloreFee)
+		}
 		rentals = append(rentals, cloreRental{Rental{Market: "clore", ID: strconv.FormatInt(o.ID, 10), Host: host, Card: shortGPU(card),
-			Price: o.Price / 24 * (1 + cloreFee), State: state, Status: status, Created: created,
+			Price: price, BasePrice: price, State: state, Status: status, Created: created,
 			Phase: "order " + status, Detail: "order " + status + " (Clore says no more of it)"}, o.SI})
 	}
 	return rentals, nil

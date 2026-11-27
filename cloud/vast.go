@@ -117,11 +117,18 @@ func nonNegFinite(x float64) bool { return !math.IsNaN(x) && !math.IsInf(x, 0) &
 // greater of Vast's reported dph_total and the explicit component sum (dph_base + disk + optional
 // download transfer estimate), and rejecting offers with no usable positive rate.
 func vastOfferPrice(o vastOffer, diskGB int, downloadGB float64) (float64, bool) {
+	price, _, _, ok := vastOfferBreakdown(o, diskGB, downloadGB)
+	return price, ok
+}
+
+// vastOfferBreakdown computes the conservative all-in hourly rate for a Vast.ai offer alongside
+// its known hourly storage and amortized download-transfer components so subsequent base-only
+// instance listings never erase known storage or transfer costs.
+func vastOfferBreakdown(o vastOffer, diskGB int, downloadGB float64) (price, diskCost, dlCost float64, ok bool) {
 	base := 0.0
 	if validRate(o.DPHTotal) {
 		base = o.DPHTotal
 	}
-	diskCost := 0.0
 	if diskGB > 0 && nonNegFinite(o.StorageCost) {
 		diskCost = float64(diskGB) * o.StorageCost / 720.0
 	}
@@ -132,17 +139,16 @@ func vastOfferPrice(o vastOffer, diskGB int, downloadGB float64) (float64, bool)
 		}
 	}
 	if !validRate(base) {
-		return 0, false
+		return 0, 0, 0, false
 	}
-	dlCost := 0.0
 	if downloadGB > 0 && nonNegFinite(o.InetDownCost) {
 		dlCost = downloadGB * o.InetDownCost / expectedLife.Hours()
 	}
-	price := base + dlCost
+	price = base + dlCost
 	if !validRate(price) {
-		return 0, false
+		return 0, 0, 0, false
 	}
-	return price, true
+	return price, diskCost, dlCost, true
 }
 
 func (m *vastMarket) Offers(ctx context.Context, n Need) ([]Offer, error) {
@@ -157,7 +163,7 @@ func (m *vastMarket) Offers(ctx context.Context, n Need) ([]Offer, error) {
 		if o.NumGPUs != 1 {
 			continue
 		}
-		price, ok := vastOfferPrice(o, n.DiskGB, 3)
+		price, diskCost, dlCost, ok := vastOfferBreakdown(o, n.DiskGB, 3)
 		if !ok {
 			continue
 		}
@@ -167,7 +173,7 @@ func (m *vastMarket) Offers(ctx context.Context, n Need) ([]Offer, error) {
 		}
 		offers = append(offers, Offer{
 			Market: "vast", Card: vastCard(o.GPUName), Model: o.GPUName, Name: o.GPUName, ID: strconv.FormatInt(o.ID, 10),
-			Maker: "NVIDIA", MemoryGB: int(math.Round(o.GPURAM / 1024)), Price: price, Stock: 1,
+			Maker: "NVIDIA", MemoryGB: int(math.Round(o.GPURAM / 1024)), Price: price, DiskCost: diskCost, TransferCost: dlCost, Stock: 1,
 			CUDA: strconv.FormatFloat(o.CUDAMaxGood, 'f', -1, 64), Trust: trust, Region: o.Geolocation,
 			Host: vastHost(o.MachineID), CPU: strings.TrimSpace(o.CPUName),
 		})
@@ -202,9 +208,7 @@ func (m *vastMarket) Rent(ctx context.Context, o Offer, l Launch) (*Rental, erro
 		var matched []*Rental
 		for i := range rs {
 			if rs[i].Name == l.Name && rs[i].live() && !l.KnownIDs[rs[i].ID] {
-				if !validRate(rs[i].Price) && validRate(o.Price) {
-					rs[i].Price = o.Price
-				}
+				applyOfferRateToRental(o, &rs[i])
 				matched = append(matched, &rs[i])
 			}
 		}
@@ -217,7 +221,7 @@ func (m *vastMarket) Rent(ctx context.Context, o Offer, l Launch) (*Rental, erro
 	switch {
 	case err == nil && out.NewContract > 0 && (out.Success == nil || *out.Success):
 		return &Rental{Market: "vast", ID: strconv.FormatInt(out.NewContract, 10), Name: l.Name, Card: o.Card,
-			Price: o.Price, State: "starting", Status: "created", Created: time.Now()}, nil
+			Price: o.Price, DiskCost: o.DiskCost, State: "starting", Status: "created", Created: time.Now()}, nil
 	case err == nil && out.Success != nil && !*out.Success:
 		return nil, fmt.Errorf("%w: Vast.ai refused new instance (%d): %s", errRentRejected, status, out.Msg)
 	case err == nil:
@@ -256,9 +260,34 @@ type vastInstance struct {
 	GPUName        string                `json:"gpu_name"`
 	DPHBase        float64               `json:"dph_base"`
 	DPHTotal       float64               `json:"dph_total"`
+	DiskSpace      float64               `json:"disk_space"`
+	StorageCost    float64               `json:"storage_cost"`
 	StartDate      float64               `json:"start_date"`
 	PublicIPAddr   string                `json:"public_ipaddr"`
 	Ports          map[string][]vastPort `json:"ports"`
+}
+
+// vastInstanceRate extracts the conservative hourly rate from a Vast.ai instance listing.
+// When Vast omits dph_total and falls back to dph_base (+ any reported disk storage component),
+// partial is true so the ledger preserves previously known storage/transfer cost components.
+func vastInstanceRate(i vastInstance) (price, basePrice, diskCost float64, partial bool) {
+	if nonNegFinite(i.DiskSpace) && i.DiskSpace > 0 && nonNegFinite(i.StorageCost) {
+		diskCost = i.DiskSpace * i.StorageCost / 720.0
+	}
+	if validRate(i.DPHBase) {
+		basePrice = i.DPHBase
+	}
+	if validRate(i.DPHTotal) {
+		price = i.DPHTotal
+		if validRate(basePrice) && basePrice+diskCost > price {
+			price = basePrice + diskCost
+		}
+		return price, basePrice, diskCost, false
+	}
+	if validRate(basePrice) {
+		return basePrice + diskCost, basePrice, diskCost, true
+	}
+	return 0, 0, diskCost, false
 }
 
 // vastState is what an instance's state comes to: starting until its container runs, and
@@ -285,15 +314,10 @@ func vastInstanceRental(i vastInstance) Rental {
 	if i.Label != nil {
 		name = *i.Label
 	}
-	price := i.DPHTotal
-	if !validRate(price) && validRate(i.DPHBase) {
-		price = i.DPHBase
-	}
-	if !validRate(price) {
-		price = 0
-	}
+	price, basePrice, diskCost, partial := vastInstanceRate(i)
 	r := Rental{Market: "vast", ID: strconv.FormatInt(i.ID, 10), Name: name, Card: vastCard(i.GPUName),
-		Price: price, State: state, Status: status, Created: time.Unix(int64(i.StartDate), 0)}
+		Price: price, BasePrice: basePrice, DiskCost: diskCost, PartialRate: partial,
+		State: state, Status: status, Created: time.Unix(int64(i.StartDate), 0)}
 	r.Phase = status
 	if r.Phase == "" {
 		r.Phase = "scheduling"
@@ -476,7 +500,7 @@ func (m *vastMarket) ExaminerOffers(ctx context.Context, maxPrice float64) ([]Ex
 			if o.NumGPUs != 1 {
 				continue
 			}
-			price, ok := vastOfferPrice(o, examinerDiskGB, 0)
+			price, diskCost, _, ok := vastOfferBreakdown(o, examinerDiskGB, 0)
 			if !ok {
 				continue
 			}
@@ -484,7 +508,7 @@ func (m *vastMarket) ExaminerOffers(ctx context.Context, maxPrice float64) ([]Ex
 				continue
 			}
 			offers = append(offers, ExaminerOffer{
-				ID: strconv.FormatInt(o.ID, 10), Card: vastCard(o.GPUName), Price: price,
+				ID: strconv.FormatInt(o.ID, 10), Card: vastCard(o.GPUName), Price: price, DiskCost: diskCost,
 				CUDA: o.CUDAMaxGood, Region: o.Geolocation, InetDown: o.InetDown,
 			})
 		}
@@ -758,17 +782,11 @@ func (m *vastMarket) ListExaminers(ctx context.Context) ([]ExaminerInstance, err
 			if i.StartDate > 0 {
 				created = time.Unix(int64(i.StartDate), 0)
 			}
-			price := i.DPHTotal
-			if price <= 0 || math.IsNaN(price) || math.IsInf(price, 0) {
-				price = i.DPHBase
-			}
-			if price <= 0 || math.IsNaN(price) || math.IsInf(price, 0) {
-				price = 0
-			}
+			price, basePrice, diskCost, partial := vastInstanceRate(i)
 			all = append(all, ExaminerInstance{
 				ID: strconv.FormatInt(i.ID, 10), Label: label, State: state, Status: status,
 				PublicIP: strings.TrimSpace(i.PublicIPAddr), HostPort: hostPort,
-				Price: price, Created: created,
+				Price: price, BasePrice: basePrice, DiskCost: diskCost, PartialRate: partial, Created: created,
 			})
 		}
 		if out.NextToken == nil || *out.NextToken == "" {

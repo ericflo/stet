@@ -77,20 +77,22 @@ type Need struct {
 // Offer is one kind of machine a market has now: on RunPod a kind of GPU in one of its clouds,
 // elsewhere often one host's machine.
 type Offer struct {
-	Market   string
-	Card     string // the GPU as stet's grades name it, without the maker's name: "RTX 4090"
-	Model    string // the market's own name for it, as its API gives it
-	Name     string // the market's short name for it, where it has another
-	ID       string // the market's own: RunPod's GPU ID, a Vast ask, a Lium executor, a Salad GPU class, a Clore server
-	Maker    string // NVIDIA, AMD
-	MemoryGB int
-	Price    float64 // dollars an hour, all in: the GPU, the disk, the market's fees
-	Ask      float64 // the market's own price, as it lists it (Clore: a day, before its fees)
-	Stock    int     // machines like it free now; -1 when the market says only Level
-	Level    string  // the market's own word for how many are free: low, medium, high
-	CUDA     string  // the newest CUDA the host's driver takes, where the market says
-	Trust    string  // the market's word for its hosts: secure, verified, datacenter, community
-	Region   string
+	Market       string
+	Card         string // the GPU as stet's grades name it, without the maker's name: "RTX 4090"
+	Model        string // the market's own name for it, as its API gives it
+	Name         string // the market's short name for it, where it has another
+	ID           string // the market's own: RunPod's GPU ID, a Vast ask, a Lium executor, a Salad GPU class, a Clore server
+	Maker        string // NVIDIA, AMD
+	MemoryGB     int
+	Price        float64 // dollars an hour, all in: the GPU, the disk, the market's fees
+	DiskCost     float64 // hourly storage component included in Price, when known separately
+	TransferCost float64 // amortized transfer component included in Price, when known separately
+	Ask          float64 // the market's own price, as it lists it (Clore: a day, before its fees)
+	Stock        int     // machines like it free now; -1 when the market says only Level
+	Level        string  // the market's own word for how many are free: low, medium, high
+	CUDA         string  // the newest CUDA the host's driver takes, where the market says
+	Trust        string  // the market's word for its hosts: secure, verified, datacenter, community
+	Region       string
 	// The host it is on and its CPU, where the market says: a machine runs curators only on a
 	// CPU at the season's floor, which some hosts' are not (curators.go).
 	Host string
@@ -129,6 +131,9 @@ type Rental struct {
 	Host        string // provider host/server ID when reported (e.g. Clore order server ID `si`)
 	Card        string
 	Price       float64 // dollars an hour
+	BasePrice   float64 // compute-only hourly rate when reported alongside Price (e.g. Vast dph_base)
+	DiskCost    float64 // hourly storage rate when reported on the instance (e.g. Vast storage_cost * disk_space / 720)
+	PartialRate bool    // true when Price is a partial/base fallback lacking the provider's all-in total (e.g. Vast dph_total == 0)
 	State       string  // starting, running, stopped; anything else is the market's own word
 	Status      string  // the market's own word
 	Created     time.Time

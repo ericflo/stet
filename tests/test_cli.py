@@ -252,8 +252,22 @@ def test_the_examiner_harvests_the_newest_settled_hour_first_and_makes_an_exam_f
         cli._round_hours(season, {"draw_at": now, "exam_hours": [{"hour": last + 36000, "sha256": "00" * 32}]}, b"seed")
     # It had been told of none: they are chosen now, by the same rule, from what this machine holds of the round's day.
     got, late = cli._round_hours(season, {"draw_at": now}, b"seed")
-    held = [int(p.stem) for p in hours.glob("*.jsonl") if int(p.stem) >= now - reach]
+    held = [int(p.stem) for p in hours.glob("*.jsonl") if int(p.stem) >= now - reach and int(p.stem) + 3600 <= now]
     assert late and [h for h, _ in got] == choose_hours(b"seed", held, season.raw["exam"]["fresh"]["hours"]) and len(got) == 3
+
+    # Review 23 P2 #3: a late examiner MUST NOT select post-draw hours or an in-progress hour spanning draw_at.
+    draw_hour = now - now % 3600
+    for post_h in (draw_hour, draw_hour + 3600, draw_hour + 2 * 3600, draw_hour + 3 * 3600):
+        (hours / f"{post_h}.jsonl").write_text(f"{{}}\n{post_h}\n")
+    got_with_post, late_with_post = cli._round_hours(season, {"draw_at": now}, b"seed")
+    assert late_with_post and all(h + 3600 <= now for h, _ in got_with_post)
+    assert [h for h, _ in got_with_post] == choose_hours(b"seed", held, season.raw["exam"]["fresh"]["hours"])
+    # If ONLY post-draw / spanning hours exist on disk, _round_hours returns empty rather than post-draw hours.
+    for p in list(hours.glob("*.jsonl")):
+        if int(p.stem) + 3600 <= now:
+            p.unlink()
+    got_only_post, late_only_post = cli._round_hours(season, {"draw_at": now}, b"seed")
+    assert late_only_post and got_only_post == []
 
 
 def test_harvest_holds_hours_spread_over_the_last_day_and_only_asks_for_what_is_missing(monkeypatch, tmp_path, capsys):

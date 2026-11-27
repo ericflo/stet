@@ -240,16 +240,19 @@ type podRecord struct {
 	Refused  string `json:"refused,omitempty"`
 	// What it was rented for (curators, early grades, grades, bigger students), the round, and
 	// when it was expected to report its last grade (history.go).
-	For    string    `json:"for,omitempty"`
-	Round  string    `json:"round,omitempty"`
-	Report time.Time `json:"report,omitzero"`
-	Handle string    `json:"handle"`
-	GPU    string    `json:"gpu"`
-	Cloud  string    `json:"cloud"`
-	Cost   float64   `json:"cost"`
-	Start  time.Time `json:"start"`
-	Alive  time.Time `json:"alive"` // last seen running
-	End    time.Time `json:"end,omitzero"`
+	For          string    `json:"for,omitempty"`
+	Round        string    `json:"round,omitempty"`
+	Report       time.Time `json:"report,omitzero"`
+	Handle       string    `json:"handle"`
+	GPU          string    `json:"gpu"`
+	Cloud        string    `json:"cloud"`
+	Cost         float64   `json:"cost"`
+	DiskCost     float64   `json:"disk_cost,omitempty"`
+	TransferCost float64   `json:"transfer_cost,omitempty"`
+	PartialCost  bool      `json:"partial_cost,omitempty"`
+	Start        time.Time `json:"start"`
+	Alive        time.Time `json:"alive"` // last seen running
+	End          time.Time `json:"end,omitzero"`
 }
 
 func (r *podRecord) market() string {
@@ -290,23 +293,25 @@ func minTime(a, b time.Time) time.Time {
 // its slot, handle, and hourly rate durably until the contract is adopted from provider listings
 // or explicitly resolved via `stet-cloud workers resolve`.
 type pendingRent struct {
-	ID       string    `json:"id"`
-	Market   string    `json:"market"`
-	Handle   string    `json:"handle"`
-	OfferID  string    `json:"offer_id,omitempty"`
-	GPU      string    `json:"gpu"`
-	Cloud    string    `json:"cloud,omitempty"`
-	Cost     float64   `json:"cost"`
-	Created  time.Time `json:"created"`
-	Grades   int       `json:"grades,omitempty"`
-	Host     string    `json:"host,omitempty"`
-	CPU      string    `json:"cpu,omitempty"`
-	Curators bool      `json:"curators,omitempty"`
-	For      string    `json:"for,omitempty"`
-	Round    string    `json:"round,omitempty"`
-	Report   time.Time `json:"report,omitzero"`
-	Error    string    `json:"error,omitempty"`
-	KnownIDs []string  `json:"known_ids,omitempty"`
+	ID           string    `json:"id"`
+	Market       string    `json:"market"`
+	Handle       string    `json:"handle"`
+	OfferID      string    `json:"offer_id,omitempty"`
+	GPU          string    `json:"gpu"`
+	Cloud        string    `json:"cloud,omitempty"`
+	Cost         float64   `json:"cost"`
+	DiskCost     float64   `json:"disk_cost,omitempty"`
+	TransferCost float64   `json:"transfer_cost,omitempty"`
+	Created      time.Time `json:"created"`
+	Grades       int       `json:"grades,omitempty"`
+	Host         string    `json:"host,omitempty"`
+	CPU          string    `json:"cpu,omitempty"`
+	Curators     bool      `json:"curators,omitempty"`
+	For          string    `json:"for,omitempty"`
+	Round        string    `json:"round,omitempty"`
+	Report       time.Time `json:"report,omitzero"`
+	Error        string    `json:"error,omitempty"`
+	KnownIDs     []string  `json:"known_ids,omitempty"`
 }
 
 func (pr *pendingRent) dollarsBetween(from, to time.Time) float64 {
@@ -462,6 +467,127 @@ func rentalIDList(rs []*Rental) string {
 	return strings.Join(ids, ", ")
 }
 
+// applyOfferRateToRental merges a newly created Rental's provider rate with the Offer it was
+// rented from, ensuring a base-only/partial, lower, or zero initial listing never erases known
+// storage, transfer, or order-fee components.
+func applyOfferRateToRental(o Offer, r *Rental) {
+	if r == nil {
+		return
+	}
+	origDisk := max(0, r.DiskCost)
+	disk := origDisk
+	if nonNegFinite(o.DiskCost) && o.DiskCost > disk {
+		disk = o.DiskCost
+	}
+	r.DiskCost = disk
+	transfer := max(0, o.TransferCost)
+	switch {
+	case validRate(r.Price) && !r.PartialRate:
+		eff := r.Price
+		if validRate(r.BasePrice) && r.BasePrice+disk+transfer > eff {
+			eff = r.BasePrice + disk + transfer
+		}
+		if validRate(o.Price) && o.Price > eff {
+			eff = o.Price
+		}
+		r.Price = eff
+	case validRate(r.Price) && r.PartialRate:
+		reconstructed := r.Price + max(0, disk-origDisk) + transfer
+		if validRate(o.Price) {
+			r.Price = max(o.Price, reconstructed)
+			r.PartialRate = false
+		} else {
+			r.Price = reconstructed
+		}
+	default:
+		if validRate(o.Price) {
+			r.Price = o.Price
+			r.PartialRate = false
+		} else {
+			r.Price = 0
+		}
+	}
+}
+
+// reconcileRentalRate merges a provider-reported Rental rate with a persisted podRecord,
+// preserving known storage/transfer/all-in cost components whenever the provider returns a
+// partial (base-only), lower (e.g. stopped disk-only or compute-only), or zero rate.
+func reconcileRentalRate(r *podRecord, p *Rental) {
+	if p == nil {
+		return
+	}
+	if r == nil {
+		if !validRate(p.Price) {
+			p.Price = 0
+		}
+		return
+	}
+	origDisk := max(0, p.DiskCost)
+	if nonNegFinite(p.DiskCost) && p.DiskCost > r.DiskCost {
+		r.DiskCost = p.DiskCost
+	}
+	p.DiskCost = r.DiskCost
+	missingDisk := max(0, r.DiskCost-origDisk)
+	transfer := max(0, r.TransferCost)
+	switch {
+	case validRate(p.Price) && !p.PartialRate:
+		eff := p.Price
+		if validRate(p.BasePrice) && p.BasePrice+r.DiskCost+transfer > eff {
+			eff = p.BasePrice + r.DiskCost + transfer
+		}
+		if !r.PartialCost && validRate(r.Cost) && r.Cost > eff {
+			eff = r.Cost
+		}
+		r.Cost = eff
+		r.PartialCost = false
+		p.Price = eff
+		p.PartialRate = false
+	case validRate(p.Price) && p.PartialRate:
+		reconstructed := p.Price + missingDisk + transfer
+		if !r.PartialCost && validRate(r.Cost) {
+			eff := max(r.Cost, reconstructed)
+			r.Cost = eff
+			p.Price = eff
+			p.PartialRate = false
+		} else {
+			eff := reconstructed
+			if validRate(r.Cost) && r.Cost > eff {
+				eff = r.Cost
+			}
+			r.Cost = eff
+			r.PartialCost = true
+			p.Price = eff
+			p.PartialRate = true
+		}
+	default:
+		if validRate(r.Cost) {
+			p.Price = r.Cost
+			p.PartialRate = r.PartialCost
+		} else {
+			p.Price = 0
+			p.PartialRate = false
+		}
+	}
+}
+
+func betterRental(prev, cur *Rental) bool {
+	if prev == nil {
+		return true
+	}
+	if !prev.live() && cur.live() {
+		return true
+	}
+	if prev.live() != cur.live() {
+		return false
+	}
+	prevFull := validRate(prev.Price) && !prev.PartialRate
+	curFull := validRate(cur.Price) && !cur.PartialRate
+	if !prevFull && curFull {
+		return true
+	}
+	return !validRate(prev.Price) && validRate(cur.Price)
+}
+
 // note brings the record up to date with the machines the markets list now:
 //   - unresolved pending worker creates are adopted automatically when the provider lists one
 //     unambiguous matching contract, and otherwise remain reserved in l.Pending;
@@ -513,21 +639,13 @@ func (f *Fleet) note(ctx context.Context, l *ledger, rentals []Rental, answered 
 				continue
 			}
 			if adopted[key] {
-				delete(l.Pending, id)
+				f.say("pending worker reservation %s (%s on %s) matches already-adopted contract %s; keeping reservation pending until verified",
+					id, pr.Handle, marketTitle(pr.Market), p.ID)
 				continue
 			}
 			adopted[key] = true
 			if p.Name == "" {
 				p.Name = pr.Handle
-			}
-			cost := 0.0
-			if validRate(p.Price) {
-				cost = p.Price
-			} else if validRate(pr.Cost) {
-				cost = pr.Cost
-				p.Price = cost
-			} else {
-				p.Price = 0
 			}
 			gpu := p.Card
 			if gpu == "" {
@@ -550,10 +668,12 @@ func (f *Fleet) note(ctx context.Context, l *ledger, rentals []Rental, answered 
 			}
 			rec := &podRecord{
 				ID: p.ID, Market: p.Market, Handle: pr.Handle, GPU: gpu, Cloud: pr.Cloud,
-				Cost: cost, Start: start, Alive: alive, Tracked: true, Stopped: p.State == "stopped",
+				Cost: pr.Cost, DiskCost: pr.DiskCost, TransferCost: pr.TransferCost, PartialCost: !validRate(pr.Cost),
+				Start: start, Alive: alive, Tracked: true, Stopped: p.State == "stopped",
 				Grades: pr.Grades, Host: host, CPU: pr.CPU, Curators: pr.Curators,
 				For: pr.For, Round: pr.Round, Report: pr.Report,
 			}
+			reconcileRentalRate(rec, p)
 			l.Pods[key] = rec
 			delete(l.Pending, id)
 			f.event(p, pr.Handle, "rented", "adopted after uncertain create")
@@ -564,8 +684,7 @@ func (f *Fleet) note(ctx context.Context, l *ledger, rentals []Rental, answered 
 	listed := map[string]*Rental{}
 	for i := range rentals {
 		key := ledgerKey(rentals[i].Market, rentals[i].ID)
-		prev := listed[key]
-		if prev == nil || (!prev.live() && rentals[i].live()) || (prev.live() == rentals[i].live() && !validRate(prev.Price) && validRate(rentals[i].Price)) {
+		if betterRental(listed[key], &rentals[i]) {
 			listed[key] = &rentals[i]
 		}
 	}
@@ -597,7 +716,9 @@ func (f *Fleet) note(ctx context.Context, l *ledger, rentals []Rental, answered 
 			if p.State == "stopped" {
 				alive = start
 			}
-			r = &podRecord{ID: p.ID, Market: p.Market, Handle: h, Host: p.Host, GPU: p.Card, Cost: cost, Start: start, Alive: alive, Tracked: true, Stopped: p.State == "stopped"}
+			r = &podRecord{ID: p.ID, Market: p.Market, Handle: h, Host: p.Host, GPU: p.Card,
+				Cost: cost, DiskCost: max(0, p.DiskCost), PartialCost: p.PartialRate,
+				Start: start, Alive: alive, Tracked: true, Stopped: p.State == "stopped"}
 			l.Pods[key] = r
 		}
 		if r.Host == "" && p.Host != "" {
@@ -610,13 +731,7 @@ func (f *Fleet) note(ctx context.Context, l *ledger, rentals []Rental, answered 
 		if r.Terminating {
 			p.Terminating = true
 		}
-		if validRate(p.Price) {
-			r.Cost = p.Price
-		} else if validRate(r.Cost) {
-			p.Price = r.Cost
-		} else {
-			p.Price = 0
-		}
+		reconcileRentalRate(r, p)
 	}
 	every := f.o.Every
 	if every <= 0 {
@@ -658,26 +773,14 @@ func (f *Fleet) note(ctx context.Context, l *ledger, rentals []Rental, answered 
 		if p != nil && p.live() {
 			r.Alive = now
 			r.Stopped = false
-			if validRate(p.Price) {
-				r.Cost = p.Price
-			} else if validRate(r.Cost) {
-				p.Price = r.Cost
-			} else {
-				p.Price = 0
-			}
+			reconcileRentalRate(r, p)
 			continue
 		}
 		if p != nil {
 			if p.Name == "" {
 				p.Name = r.Handle
 			}
-			if !validRate(p.Price) {
-				if validRate(r.Cost) {
-					p.Price = r.Cost
-				} else {
-					p.Price = 0
-				}
-			}
+			reconcileRentalRate(r, p)
 			if p.State == "stopped" {
 				// Keep stopped instance in fleet.json (with Stopped=true) until m.End(ctx, id)
 				// confirms provider deletion or Lookup confirms absence (e.g. to stop Vast disk
@@ -719,13 +822,7 @@ func (f *Fleet) note(ctx context.Context, l *ledger, rentals []Rental, answered 
 				fresh.Terminating = r.Terminating
 				r.Alive = now
 				r.Stopped = false
-				if validRate(fresh.Price) {
-					r.Cost = fresh.Price
-				} else if validRate(r.Cost) {
-					fresh.Price = r.Cost
-				} else {
-					fresh.Price = 0
-				}
+				reconcileRentalRate(r, fresh)
 				extra = append(extra, *fresh)
 			case lerr == nil && exists && fresh != nil:
 				if fresh.Name == "" {
@@ -735,13 +832,7 @@ func (f *Fleet) note(ctx context.Context, l *ledger, rentals []Rental, answered 
 					fresh.Host = r.Host
 				}
 				fresh.Terminating = r.Terminating
-				if !validRate(fresh.Price) {
-					if validRate(r.Cost) {
-						fresh.Price = r.Cost
-					} else {
-						fresh.Price = 0
-					}
-				}
+				reconcileRentalRate(r, fresh)
 				if fresh.State == "stopped" {
 					r.Stopped = true
 					extra = append(extra, *fresh)
@@ -1120,7 +1211,7 @@ func recordedRental(r *podRecord, status string) Rental {
 	}
 	return Rental{
 		Market: r.market(), ID: r.ID, Name: r.Handle, Host: r.Host, Card: r.GPU,
-		Price: cost, State: state, Status: status, Created: r.Start, Terminating: r.Terminating,
+		Price: cost, DiskCost: r.DiskCost, PartialRate: r.PartialCost, State: state, Status: status, Created: r.Start, Terminating: r.Terminating,
 	}
 }
 
@@ -1195,7 +1286,7 @@ func (f *Fleet) look(ctx context.Context) (*View, error) {
 		if prev == nil {
 			byKey[key] = p
 			orderKeys = append(orderKeys, key)
-		} else if (!prev.live() && p.live()) || (prev.live() == p.live() && !validRate(prev.Price) && validRate(p.Price)) {
+		} else if betterRental(prev, p) {
 			byKey[key] = p
 		}
 	}
@@ -1224,9 +1315,7 @@ func (f *Fleet) look(ctx context.Context) (*View, error) {
 			continue
 		}
 		if rec != nil {
-			if !validRate(p.Price) && validRate(rec.Cost) {
-				p.Price = rec.Cost
-			}
+			reconcileRentalRate(rec, p)
 			if rec.Terminating {
 				p.Terminating = true
 			}
@@ -1238,7 +1327,8 @@ func (f *Fleet) look(ctx context.Context) (*View, error) {
 			v.LiveRentals = append(v.LiveRentals, p)
 			if validRate(p.Price) {
 				v.Hourly += p.Price
-			} else {
+			}
+			if !validRate(p.Price) || p.PartialRate {
 				v.noteUnknownRate(key, unknownRateLabel(p.Market, p.ID, h))
 			}
 		}
@@ -2026,22 +2116,24 @@ func (f *Fleet) rent(ctx context.Context, v *View, k *Key, gpus []Offer, site st
 			v.Ledger.Pending = map[string]*pendingRent{}
 		}
 		pr := &pendingRent{
-			ID:       newID()[:16],
-			Market:   c.Market,
-			Handle:   k.Handle,
-			OfferID:  c.ID,
-			GPU:      c.Card,
-			Cloud:    cloud,
-			Cost:     price,
-			Created:  f.now(),
-			Grades:   plannedGrades,
-			Host:     c.Host,
-			CPU:      c.CPU,
-			Curators: l.Env["STET_WORKER_EDITS"] == "1",
-			For:      plan.what,
-			Round:    plan.round,
-			Report:   plannedReport,
-			KnownIDs: knownSlice,
+			ID:           newID()[:16],
+			Market:       c.Market,
+			Handle:       k.Handle,
+			OfferID:      c.ID,
+			GPU:          c.Card,
+			Cloud:        cloud,
+			Cost:         price,
+			DiskCost:     c.DiskCost,
+			TransferCost: c.TransferCost,
+			Created:      f.now(),
+			Grades:       plannedGrades,
+			Host:         c.Host,
+			CPU:          c.CPU,
+			Curators:     l.Env["STET_WORKER_EDITS"] == "1",
+			For:          plan.what,
+			Round:        plan.round,
+			Report:       plannedReport,
+			KnownIDs:     knownSlice,
 		}
 		v.Ledger.Pending[pr.ID] = pr
 		if err := f.writeLedger(v.Ledger); err != nil {
@@ -2093,12 +2185,15 @@ func (f *Fleet) rent(ctx context.Context, v *View, k *Key, gpus []Offer, site st
 			return nil, fmt.Errorf("uncertain create for %s on %s (slot and $%.2f/h reserved until reconciled): %w", k.Handle, marketTitle(c.Market), pr.Cost, err)
 		}
 		delete(v.Ledger.Pending, pr.ID)
+		applyOfferRateToRental(c, r)
 		if !validRate(r.Price) {
 			r.Price = price
 		}
 		v.Hourly += r.Price
 		v.addLiveRental(r)
-		rec := &podRecord{ID: r.ID, Market: r.Market, Handle: k.Handle, GPU: c.Card, Cloud: cloud, Cost: r.Price, Start: f.now(), Alive: f.now(), Tracked: true,
+		rec := &podRecord{ID: r.ID, Market: r.Market, Handle: k.Handle, GPU: c.Card, Cloud: cloud,
+			Cost: r.Price, DiskCost: max(c.DiskCost, r.DiskCost), TransferCost: c.TransferCost,
+			Start: f.now(), Alive: f.now(), Tracked: true,
 			Host: c.Host, CPU: c.CPU, Curators: l.Env["STET_WORKER_EDITS"] == "1", For: plan.what, Round: plan.round, Report: plannedReport}
 		// Seen from its start: a machine that asks for work before the next look still has its
 		// boot counted (calibrate.go). Lium's first, at 41 s, never was.

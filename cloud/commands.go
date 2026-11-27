@@ -258,8 +258,8 @@ func cmdStatus(ctx context.Context, f *Fleet) error {
 		if !validRate(pr.Cost) {
 			prate = "unknown/h"
 		}
-		fmt.Fprintf(f.out, "  %-14s %-11s %-26s %-9s up %s  · uncertain create (run `stet-cloud workers resolve`)\n",
-			pr.Handle, "pending", card, prate, now.Sub(pr.Created).Round(time.Minute))
+		fmt.Fprintf(f.out, "  %-14s %-11s %-26s %-9s up %s  · uncertain create %s (run `stet-cloud workers resolve`)\n",
+			pr.Handle, "pending", card, prate, now.Sub(pr.Created).Round(time.Minute), pr.ID)
 	}
 	if rented == 0 {
 		fmt.Fprintf(f.out, "Nothing rented (%d keys in the pool).\n", len(v.Workers))
@@ -267,7 +267,7 @@ func cmdStatus(ctx context.Context, f *Fleet) error {
 	if ex := readExaminerState(f.o.Home); ex != nil && ex.InstanceID != "" {
 		fmt.Fprintf(f.out, "Examiner GPU: machine %s for %s ($%.2f/h, up %s)\n", ex.InstanceID, ex.RoundID, ex.Price, now.Sub(ex.Created).Round(time.Minute))
 	} else if ex != nil && ex.PendingRent {
-		fmt.Fprintf(f.out, "Examiner GPU: rental reservation pending for %s ($%.2f/h; run `stet-cloud examiner resolve` after verifying on Vast.ai)\n", ex.RoundID, ex.Price)
+		fmt.Fprintf(f.out, "Examiner GPU: rental reservation %s pending for %s ($%.2f/h; run `stet-cloud examiner resolve` after verifying on Vast.ai)\n", ex.ReservedLabel, ex.RoundID, ex.Price)
 	} else if ex != nil && len(ex.Unresolved) > 0 {
 		fmt.Fprintf(f.out, "Examiner GPU: %d unresolved instance(s) awaiting teardown\n", len(ex.Unresolved))
 	} else if ex != nil && len(ex.PendingSpends) > 0 {
@@ -554,7 +554,8 @@ func reconcileExaminerOnce(ctx context.Context, f *Fleet) error {
 			liveWorkers++
 			if validRate(p.Cost) {
 				hourlyWorkers += p.Cost
-			} else {
+			}
+			if !validRate(p.Cost) || p.PartialCost {
 				unknownRates = append(unknownRates, unknownRateLabel(p.market(), p.ID, p.Handle))
 			}
 		}
@@ -572,7 +573,8 @@ func reconcileExaminerOnce(ctx context.Context, f *Fleet) error {
 				liveWorkers++
 				if validRate(r.Price) {
 					hourlyWorkers += r.Price
-				} else {
+				}
+				if !validRate(r.Price) || r.PartialRate {
 					unknownRates = append(unknownRates, unknownRateLabel(r.Market, r.ID, h))
 				}
 			}
@@ -659,9 +661,10 @@ func cmdExaminer(ctx context.Context, f *Fleet) error {
 
 // cmdExaminerResolve lets an operator resolve an uncertain PendingRent examiner reservation in
 // examiner.json after querying Vast.ai under the fleet lock: if Vast.ai lists the reserved
-// instance it is adopted (or destroyed when end is true), and if Vast.ai confirms zero matching
-// instances the pending reservation is cleared while preserving PendingSpends and Unresolved.
-func cmdExaminerResolve(ctx context.Context, f *Fleet, end bool) error {
+// instance it is adopted (or destroyed when end is true); if Vast.ai lists zero matching
+// instances the reservation is kept unless the operator explicitly verified absence and passed
+// clearLabel matching ReservedLabel (preserving PendingSpends and Unresolved).
+func cmdExaminerResolve(ctx context.Context, f *Fleet, end bool, clearLabel string) error {
 	unlock, err := f.lock(time.Minute)
 	if err != nil {
 		return err
@@ -681,7 +684,7 @@ func cmdExaminerResolve(ctx context.Context, f *Fleet, end bool) error {
 	if prov == nil {
 		return fmt.Errorf("examiner resolve requires VAST_API_KEY in %s (or environment)", f.o.Credentials)
 	}
-	return resolvePendingExaminer(ctx, f.o.Home, prov, f.now, f.say, f.o.DryRun, end, func(rec podRecord) error {
+	return resolvePendingExaminer(ctx, f.o.Home, prov, f.now, f.say, f.o.DryRun, end, clearLabel, func(rec podRecord) error {
 		return appendExaminerSpend(f.spentLog(), rec)
 	})
 }
@@ -826,8 +829,9 @@ func cmdDown(ctx context.Context, f *Fleet, force bool, handles []string) error 
 //     deletion fails transiently so retrying `workers resolve --end` retries that contract);
 //   - genuinely ambiguous pending matches (multiple candidate contracts or multiple competing
 //     handles) are left pending without adopting or canceling any contract;
-//   - reservations confirmed absent from a successful listing are cleared.
-func cmdWorkersResolve(ctx context.Context, f *Fleet, end bool) error {
+//   - unmatched reservations on an inconclusive provider listing are kept intact unless the
+//     operator explicitly verified absence and scoped release to that reservation ID via --clear.
+func cmdWorkersResolve(ctx context.Context, f *Fleet, end bool, clearIDs ...string) error {
 	unlock, err := f.lock(time.Minute)
 	if err != nil {
 		return err
@@ -841,6 +845,16 @@ func cmdWorkersResolve(ctx context.Context, f *Fleet, end bool) error {
 	l, err := f.readLedger()
 	if err != nil {
 		return err
+	}
+	clearSet := map[string]bool{}
+	var clearList []string
+	for _, raw := range clearIDs {
+		for _, part := range strings.Split(raw, ",") {
+			if cid := strings.TrimSpace(part); cid != "" && !clearSet[cid] {
+				clearSet[cid] = true
+				clearList = append(clearList, cid)
+			}
+		}
 	}
 	var termKeys []string
 	for key, rec := range l.Pods {
@@ -859,12 +873,24 @@ func cmdWorkersResolve(ctx context.Context, f *Fleet, end bool) error {
 	}
 	sort.Strings(pkeys)
 	if len(pkeys) == 0 && len(termKeys) == 0 {
+		if len(clearList) > 0 {
+			return fmt.Errorf("no pending worker reservation matching --clear %s", strings.Join(clearList, ", "))
+		}
 		f.say("no pending worker reservations in fleet.json")
 		return nil
 	}
 	now := f.now()
 	changed := false
 	var firstErr error
+	for _, cid := range clearList {
+		if l.Pending[cid] == nil {
+			e := fmt.Errorf("no pending worker reservation matching --clear %q", cid)
+			f.say("%v", e)
+			if firstErr == nil {
+				firstErr = e
+			}
+		}
+	}
 	endedTermKeys := map[string]bool{}
 
 	// 1. Reconcile any persisted outstanding terminations bound to exact contract IDs.
@@ -990,13 +1016,22 @@ func cmdWorkersResolve(ctx context.Context, f *Fleet, end bool) error {
 		}
 		matches := matchesByID[id]
 		if len(matches) == 0 {
+			if !clearSet[id] {
+				e := fmt.Errorf("pending worker reservation %s (%s on %s, $%.2f/h) is not listed yet; keeping reservation (verify on %s and re-run `stet-cloud workers resolve --clear %s` only if confirmed absent)",
+					id, pr.Handle, marketTitle(pr.Market), pr.Cost, marketTitle(pr.Market), id)
+				f.say("%v", e)
+				if firstErr == nil {
+					firstErr = e
+				}
+				continue
+			}
 			if f.o.DryRun {
-				f.say("would clear absent pending worker reservation %s on %s ($%.2f/h)", pr.Handle, marketTitle(pr.Market), pr.Cost)
+				f.say("would clear verified pending worker reservation %s (%s on %s, $%.2f/h)", id, pr.Handle, marketTitle(pr.Market), pr.Cost)
 				continue
 			}
 			delete(l.Pending, id)
 			changed = true
-			f.say("cleared pending worker reservation %s on %s: provider confirmed no matching contract", pr.Handle, marketTitle(pr.Market))
+			f.say("cleared pending worker reservation %s (%s on %s) via --clear", id, pr.Handle, marketTitle(pr.Market))
 			continue
 		}
 		if len(matches) > 1 {
@@ -1020,18 +1055,35 @@ func cmdWorkersResolve(ctx context.Context, f *Fleet, end bool) error {
 			continue
 		}
 		if handled[key] {
-			if !f.o.DryRun {
-				delete(l.Pending, id)
-				changed = true
+			if !clearSet[id] {
+				e := fmt.Errorf("pending worker reservation %s (%s on %s) has no remaining unmatched contract (contract %s was already resolved by another reservation); keeping reservation (re-run with `--clear %s` after verifying no second contract exists on %s)",
+					id, pr.Handle, marketTitle(pr.Market), p.ID, id, marketTitle(pr.Market))
+				f.say("%v", e)
+				if firstErr == nil {
+					firstErr = e
+				}
+				continue
+			}
+			if f.o.DryRun {
+				f.say("would clear verified duplicate pending worker reservation %s (%s on %s)", id, pr.Handle, marketTitle(pr.Market))
+				continue
+			}
+			delete(l.Pending, id)
+			changed = true
+			f.say("cleared pending worker reservation %s (%s on %s) via --clear", id, pr.Handle, marketTitle(pr.Market))
+			continue
+		}
+		if clearSet[id] {
+			e := fmt.Errorf("refusing --clear %q: %s lists matching contract %s for %s; run `stet-cloud workers resolve` to adopt or `--end` to terminate",
+				id, marketTitle(pr.Market), p.ID, pr.Handle)
+			f.say("%v", e)
+			if firstErr == nil {
+				firstErr = e
 			}
 			continue
 		}
 		handled[key] = true
 		m := f.market(pr.Market)
-		cost := pr.Cost
-		if validRate(p.Price) {
-			cost = p.Price
-		}
 		start := p.Created
 		if start.IsZero() {
 			start = pr.Created
@@ -1053,17 +1105,20 @@ func cmdWorkersResolve(ctx context.Context, f *Fleet, end bool) error {
 		if host == "" {
 			host = pr.Host
 		}
+		rec := &podRecord{
+			ID: p.ID, Market: p.Market, Handle: pr.Handle, GPU: gpu, Cloud: pr.Cloud,
+			Cost: pr.Cost, DiskCost: pr.DiskCost, TransferCost: pr.TransferCost, PartialCost: !validRate(pr.Cost),
+			Start: start, Alive: alive, Tracked: true, Stopped: p.State == "stopped",
+			Grades: pr.Grades, Host: host, CPU: pr.CPU, Curators: pr.Curators,
+			For: pr.For, Round: pr.Round, Report: pr.Report,
+		}
+		reconcileRentalRate(rec, p)
 		if !end {
 			if f.o.DryRun {
 				f.say("would adopt matching contract %s for pending worker %s on %s", p.ID, pr.Handle, marketTitle(pr.Market))
 				continue
 			}
-			l.Pods[key] = &podRecord{
-				ID: p.ID, Market: p.Market, Handle: pr.Handle, GPU: gpu, Cloud: pr.Cloud,
-				Cost: cost, Start: start, Alive: alive, Tracked: true, Stopped: p.State == "stopped",
-				Grades: pr.Grades, Host: host, CPU: pr.CPU, Curators: pr.Curators,
-				For: pr.For, Round: pr.Round, Report: pr.Report,
-			}
+			l.Pods[key] = rec
 			delete(l.Pending, id)
 			changed = true
 			f.event(p, pr.Handle, "rented", "adopted via workers resolve")
@@ -1074,12 +1129,7 @@ func cmdWorkersResolve(ctx context.Context, f *Fleet, end bool) error {
 			f.say("would end matching contract %s for pending worker %s on %s", p.ID, pr.Handle, marketTitle(pr.Market))
 			continue
 		}
-		rec := &podRecord{
-			ID: p.ID, Market: p.Market, Handle: pr.Handle, GPU: gpu, Cloud: pr.Cloud,
-			Cost: cost, Start: start, Alive: alive, Tracked: true, Stopped: p.State == "stopped",
-			Grades: pr.Grades, Host: host, CPU: pr.CPU, Curators: pr.Curators,
-			For: pr.For, Round: pr.Round, Report: pr.Report, Why: "ended via workers resolve --end",
-		}
+		rec.Why = "ended via workers resolve --end"
 		if err := m.End(ctx, p.ID); err != nil {
 			// Persist outstanding termination against the exact contract ID so retrying
 			// `workers resolve --end` (and `scale` ticks even while work wants GPUs) keeps
