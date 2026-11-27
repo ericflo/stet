@@ -1758,3 +1758,409 @@ func TestReview21TokenStreamArrivalOrderInvariance(t *testing.T) {
 		w.check()
 	})
 }
+
+// Review 22 P1 #1: four live baseline-requested claims split 2-vs-2 (6.000/6.000 vs 6.080/6.080)
+// MUST be arrival-order invariant through the HTTP claim/release/result APIs: regardless of which
+// pair reports first, all four submissions return HTTP 200 and leave the round's baseline disputed,
+// requesting an independent 5th deciding baseline (or closing the round unrated at ReplicaWait)
+// rather than letting the first agreeing pair reject the second pair with 409 and flip the sign
+// of the settled score.
+func TestReview22BaselineArrivalOrderInvariance(t *testing.T) {
+	initA := strings.Repeat("a", 64)
+	tokA := strings.Repeat("1", 64)
+	tokB := strings.Repeat("2", 64)
+
+	submitBase := func(t *testing.T, w *world, g *actor, c *claimed, tok string, candLoss, baseLoss float64) int {
+		t.Helper()
+		p := w.result(c, candLoss, baseLoss)
+		p["train"] = map[string]any{"init_sha256": initA}
+		p["script"].(map[string]any)["tokens_sha256"] = tok
+		p["baseline"].(map[string]any)["init_sha256"] = initA
+		return g.do("POST", fmt.Sprintf("/api/v1/jobs/%d/result", c.Job.ID), p, nil)
+	}
+
+	setupFourLiveClaims := func(t *testing.T) (*world, int, []*actor, []*claimed) {
+		t.Helper()
+		pub, priv := newKey()
+		w := newWorld(t, pub)
+		w.app.cfg.RunsPerEntry = 2
+		w.app.season.Baselines.PerRound = 2
+		w.app.season.Tolerance[w.cfg.Scale] = Tolerance{Grade: 0.012, Baseline: 0.015, Run: 0.015}
+		anchor := w.join("anchor-one", priv)
+		runners := w.volunteers("run-a", "run-b")
+		gs := w.volunteers("gr1", "gr2", "gr3", "gr4", "gr5", "gr6", "gr7")
+		w.submit(w.join("owner-1", nil), "entry-one", "print(1)")
+		w.submit(w.join("owner-2", nil), "entry-two", "print(2)")
+		idx := w.drawWithoutExam()
+		// Two edit replicas per entry (same script per entry so each entry wants 2 grades).
+		for _, runner := range []*actor{anchor, runners[0], runners[1]} {
+			for range 2 {
+				ce := w.claim(runner, true)
+				if ce.Job == nil || ce.Job.Kind != "edit" {
+					break
+				}
+				sc := scriptOne
+				if ce.Job.Editor.Name == "entry-two" {
+					sc = scriptTwo
+				}
+				if code, _ := w.edit(runner, ce, sc); code != 200 {
+					t.Fatalf("edit by %s: HTTP %d", runner.handle, code)
+				}
+			}
+		}
+		w.exam(idx)
+		// g1 & g2 claim Entry 1 with Baseline=true, then release.
+		c1Init := w.claim(gs[0], false)
+		c2Init := w.claim(gs[1], false)
+		if c1Init.Job == nil || c2Init.Job == nil || c1Init.Job.Baseline == nil || !*c1Init.Job.Baseline || c2Init.Job.Baseline == nil || !*c2Init.Job.Baseline {
+			t.Fatalf("expected g1/g2 initial claims to request baselines: c1=%+v c2=%+v", c1Init.Job, c2Init.Job)
+		}
+		for i, c := range []*claimed{c1Init, c2Init} {
+			if code := gs[i].do("POST", fmt.Sprintf("/api/v1/jobs/%d/release", c.Job.ID), map[string]any{"reason": "rebalance"}, nil); code != 200 {
+				t.Fatalf("release g%d: HTTP %d", i+1, code)
+			}
+		}
+		// Replacements g3 & g4 claim Entry 1 (both Baseline=true); g1 & g2 claim Entry 2 (still Baseline=true via asksBaseline).
+		c3 := w.claim(gs[2], false)
+		c4 := w.claim(gs[3], false)
+		c1 := w.claim(gs[0], false)
+		c2 := w.claim(gs[1], false)
+		claims := []*claimed{c1, c2, c3, c4}
+		for i, c := range claims {
+			if c.Job == nil || c.Job.Kind != "grade" || c.Job.Baseline == nil || !*c.Job.Baseline {
+				t.Fatalf("claim %d must be a live baseline-requested grade, got %+v", i+1, c.Job)
+			}
+		}
+		return w, idx, gs, claims
+	}
+
+	orders := []struct {
+		name  string
+		order []int     // indices into g1..g4
+		bases []float64 // baseline reported by each in submission order
+	}{
+		{"6000_pair_first", []int{0, 1, 2, 3}, []float64{6.000, 6.000, 6.080, 6.080}},
+		{"6080_pair_first", []int{2, 3, 0, 1}, []float64{6.080, 6.080, 6.000, 6.000}},
+		{"interleaved_6000_first", []int{0, 2, 1, 3}, []float64{6.000, 6.080, 6.000, 6.080}},
+		{"interleaved_6080_first", []int{2, 0, 3, 1}, []float64{6.080, 6.000, 6.080, 6.000}},
+	}
+
+	for _, tc := range orders {
+		t.Run(tc.name+"_disputes_and_resolves_with_fifth_vote", func(t *testing.T) {
+			w, idx, gs, claims := setupFourLiveClaims(t)
+			for step, gi := range tc.order {
+				if code := submitBase(t, w, gs[gi], claims[gi], tokA, 6.040, tc.bases[step]); code != 200 {
+					t.Fatalf("%s step %d (g%d base=%.3f): HTTP %d, want 200", tc.name, step+1, gi+1, tc.bases[step], code)
+				}
+			}
+			w.app.st.view(func(s *State) {
+				rd := s.Rounds[idx]
+				if !w.app.baselineDisputed(s, rd) {
+					t.Fatalf("%s: 2-vs-2 live baseline split MUST remain disputed", tc.name)
+				}
+			})
+			if w.settled(idx) != 0 {
+				t.Fatalf("%s: 2-vs-2 baseline split must not settle before tie-breaker", tc.name)
+			}
+			// Independent 5th grader claims (must be asked for tie-breaking baseline) and votes 6.000.
+			c5 := w.claim(gs[4], false)
+			if c5.Job == nil || c5.Job.Baseline == nil || !*c5.Job.Baseline {
+				t.Fatalf("%s: expected 5th grader to be asked for deciding baseline, got %+v", tc.name, c5.Job)
+			}
+			if code := submitBase(t, w, gs[4], c5, tokA, 6.040, 6.000); code != 200 {
+				t.Fatalf("%s: 5th deciding baseline HTTP %d, want 200", tc.name, code)
+			}
+			// Corroborate any entry whose previous graders became oddOut so both entries settle to -0.040.
+			for _, g := range []*actor{gs[5], gs[6], gs[4]} {
+				for range 2 {
+					c := w.claim(g, false)
+					if c.Job == nil || c.Job.Kind != "grade" {
+						break
+					}
+					if code := submitBase(t, w, g, c, tokA, 6.040, 6.000); code != 200 {
+						t.Fatalf("%s corroborator %s: HTTP %d", tc.name, g.handle, code)
+					}
+				}
+			}
+			if w.settled(idx) != 2 {
+				t.Fatalf("%s: expected both entries settled after 5th baseline broke tie, got %d", tc.name, w.settled(idx))
+			}
+			w.app.st.view(func(s *State) {
+				for _, e := range s.inRound[idx] {
+					if e.Void || math.Abs(e.Gain-(-0.040)) > 1e-4 {
+						t.Fatalf("%s: entry %s gain = %.5f void=%v, want -0.040", tc.name, e.EditorID, e.Gain, e.Void)
+					}
+				}
+			})
+			w.check()
+		})
+	}
+
+	t.Run("unresolved_2_vs_2_closes_unrated_at_deadline", func(t *testing.T) {
+		for _, pair := range []struct {
+			name  string
+			order []int
+			bases []float64
+		}{
+			{"6000_first", []int{0, 1, 2, 3}, []float64{6.000, 6.000, 6.080, 6.080}},
+			{"6080_first", []int{2, 3, 0, 1}, []float64{6.080, 6.080, 6.000, 6.000}},
+		} {
+			w, idx, gs, claims := setupFourLiveClaims(t)
+			for step, gi := range pair.order {
+				if code := submitBase(t, w, gs[gi], claims[gi], tokA, 6.040, pair.bases[step]); code != 200 {
+					t.Fatalf("%s step %d: HTTP %d, want 200", pair.name, step+1, code)
+				}
+			}
+			// Advance clock past ReplicaWait with no 5th grader active -> closes unrated!
+			w.pass(w.cfg.ReplicaWait + time.Minute)
+			if err := w.app.st.update(context.Background(), func(tx *Tx) error {
+				w.app.settleReady(tx)
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			w.app.st.view(func(s *State) {
+				if s.Rounds[idx].Status != "settled" {
+					t.Fatalf("%s: expected round closed at ReplicaWait, got %s", pair.name, s.Rounds[idx].Status)
+				}
+				for _, e := range s.inRound[idx] {
+					if !e.Void || !e.Unattended || e.Gain != 0 {
+						t.Fatalf("%s: entry %s must close void+unattended with zero gain, got void=%v unattended=%v gain=%v",
+							pair.name, e.EditorID, e.Void, e.Unattended, e.Gain)
+					}
+				}
+			})
+			w.check()
+		}
+	})
+
+	t.Run("cross_entry_live_baseline_prevents_premature_token_majority_409", func(t *testing.T) {
+		pub, priv := newKey()
+		w := newWorld(t, pub)
+		w.app.cfg.RunsPerEntry = 1
+		w.app.season.Baselines.PerRound = 2
+		w.app.season.Tolerance[w.cfg.Scale] = Tolerance{Grade: 0.012, Baseline: 0.015, Run: 0.015}
+		anchor := w.join("anchor-one", priv)
+		gs := w.volunteers("gr1", "gr2", "gr3", "gr4")
+		w.submit(w.join("owner-1", nil), "entry-one", "print(1)")
+		w.submit(w.join("owner-2", nil), "entry-two", "print(2)")
+		idx := w.drawWithoutExam()
+		for range 2 {
+			ce := w.claim(anchor, true)
+			sc := scriptOne
+			if ce.Job.Editor.Name == "entry-two" {
+				sc = scriptTwo
+			}
+			if code, _ := w.edit(anchor, ce, sc); code != 200 {
+				t.Fatalf("edit: HTTP %d", code)
+			}
+		}
+		// Give g1, g2, g3 live early claims on entry-one and g4 on entry-two, all Baseline=true.
+		c1 := w.claimEarly(gs[0])
+		c2 := w.claimEarly(gs[1])
+		// Release g1 & g2 so g3 & g4 get Baseline=true too, then reclaim.
+		for i, c := range []*claimed{c1, c2} {
+			if code := gs[i].do("POST", fmt.Sprintf("/api/v1/jobs/%d/release", c.Job.ID), map[string]any{"reason": "swap"}, nil); code != 200 {
+				t.Fatalf("release: HTTP %d", code)
+			}
+		}
+		c3 := w.claimEarly(gs[2])
+		c4 := w.claimEarly(gs[3])
+		c1 = w.claimEarly(gs[0])
+		c2 = w.claimEarly(gs[1])
+		// Ensure c1, c2, c3 are on the same script (or verify whichever shares script with c3).
+		w.exam(idx)
+		// Submit g1 (6.000, tokA) and g2 (6.000, tokA); g3 (6.080, tokB) MUST get 200 because g4's
+		// live baseline claim on entry-two can still tie/dispute the baseline!
+		if code := submitBase(t, w, gs[0], c1, tokA, 6.040, 6.000); code != 200 {
+			t.Fatalf("g1: HTTP %d", code)
+		}
+		if code := submitBase(t, w, gs[1], c2, tokA, 6.040, 6.000); code != 200 {
+			t.Fatalf("g2: HTTP %d", code)
+		}
+		if code := submitBase(t, w, gs[2], c3, tokB, 6.040, 6.080); code != 200 {
+			t.Fatalf("g3 (dissenting baseline+tokens while g4 holds live baseline claim): HTTP %d, want 200", code)
+		}
+		if code := submitBase(t, w, gs[3], c4, tokB, 6.040, 6.080); code != 200 {
+			t.Fatalf("g4: HTTP %d, want 200", code)
+		}
+		w.app.st.view(func(s *State) {
+			if !w.app.baselineDisputed(s, s.Rounds[idx]) {
+				t.Fatal("expected 2-vs-2 baseline split across entries to remain disputed")
+			}
+		})
+		w.check()
+	})
+
+	// Gate 4 P1 #1 (Hole 1): 5 live claims with bridge baseline [6.000, 6.000, 6.020, 6.040, 6.040]
+	// MUST stay disputed across ALL arrival orders (no median-shift 409 flipping 6.000 vs 6.040).
+	t.Run("five_grader_bridge_baseline_median_shift_order_invariant", func(t *testing.T) {
+		for _, tc := range []struct {
+			name  string
+			bases []float64
+		}{
+			{"low_first", []float64{6.000, 6.000, 6.020, 6.040, 6.040}},
+			{"high_first", []float64{6.040, 6.040, 6.020, 6.000, 6.000}},
+			{"interleaved", []float64{6.000, 6.040, 6.000, 6.040, 6.020}},
+		} {
+			pub, priv := newKey()
+			w := newWorld(t, pub)
+			w.app.cfg.RunsPerEntry = 1
+			w.app.season.Baselines.PerRound = 5
+			w.app.season.Tolerance[w.cfg.Scale] = Tolerance{Grade: 0.012, Baseline: 0.015, Run: 0.015}
+			anchor := w.join("anchor-one", priv)
+			gs := w.volunteers("gr1", "gr2", "gr3", "gr4", "gr5")
+			w.submit(w.join("owner-1", nil), "entry-one", "print(1)")
+			w.submit(w.join("owner-2", nil), "entry-two", "print(2)")
+			idx := w.drawWithoutExam()
+			for range 2 {
+				ce := w.claim(anchor, true)
+				sc := scriptOne
+				if ce.Job.Editor.Name == "entry-two" {
+					sc = scriptTwo
+				}
+				if code, _ := w.edit(anchor, ce, sc); code != 200 {
+					t.Fatalf("edit: HTTP %d", code)
+				}
+			}
+			claims := make([]*claimed, 5)
+			for i := range 5 {
+				claims[i] = w.claimEarly(gs[i])
+				if claims[i].Job == nil {
+					t.Fatalf("%s: expected live claim for grader %d", tc.name, i+1)
+				}
+			}
+			w.exam(idx)
+			for i, b := range tc.bases {
+				if code := submitBase(t, w, gs[i], claims[i], tokA, 6.020, b); code != 200 {
+					t.Fatalf("%s grader %d (base=%.3f): HTTP %d, want 200", tc.name, i+1, b, code)
+				}
+			}
+			w.app.st.view(func(s *State) {
+				if !w.app.baselineDisputed(s, s.Rounds[idx]) {
+					t.Fatalf("%s: bridge 5-way baseline split [6.000,6.000,6.020,6.040,6.040] MUST remain disputed", tc.name)
+				}
+			})
+			w.check()
+		}
+	})
+
+	// Gate 4 P1 #1 (Hole 2): tokenMajorityRefuses MUST NOT 409 a dissenting token stream while a
+	// remaining live claim can shift the baseline median enough to push a leading voter into oddOut.
+	t.Run("token_majority_not_premature_when_live_baseline_can_shift_voter_odd_out", func(t *testing.T) {
+		for _, swapLastTwo := range []bool{false, true} {
+			pub, priv := newKey()
+			w := newWorld(t, pub)
+			w.app.cfg.RunsPerEntry = 1
+			w.app.season.Baselines.PerRound = 5
+			w.app.season.Tolerance[w.cfg.Scale] = Tolerance{Grade: 0.012, Baseline: 0.015, Run: 0.015}
+			anchor := w.join("anchor-one", priv)
+			gs := w.volunteers("gr1", "gr2", "gr3", "gr4", "gr5")
+			w.submit(w.join("owner-1", nil), "entry-one", "print(1)")
+			w.submit(w.join("owner-2", nil), "entry-two", "print(2)")
+			idx := w.drawWithoutExam()
+			for range 2 {
+				ce := w.claim(anchor, true)
+				sc := scriptOne
+				if ce.Job.Editor.Name == "entry-two" {
+					sc = scriptTwo
+				}
+				if code, _ := w.edit(anchor, ce, sc); code != 200 {
+					t.Fatalf("edit: HTTP %d", code)
+				}
+			}
+			// Claim early until we have 3 graders on one script (S) and 2 on the other (S2).
+			byScript := map[string][]int{}
+			claims := make([]*claimed, 5)
+			for i := range 5 {
+				claims[i] = w.claimEarly(gs[i])
+				byScript[claims[i].Job.Script.SHA256] = append(byScript[claims[i].Job.Script.SHA256], i)
+			}
+			var sList, s2List []int
+			for _, list := range byScript {
+				if len(list) == 3 {
+					sList = list
+				} else {
+					s2List = list
+				}
+			}
+			if len(sList) != 3 || len(s2List) != 2 {
+				t.Fatalf("expected 3+2 split across entries, got %v", byScript)
+			}
+			w.exam(idx)
+			// Assign: sList[0]=5.998(tokA), sList[1]=6.010(tokA), s2List[0]=6.014(tokA),
+			//         sList[2]=6.026(tokB), s2List[1]=6.026(tokA).
+			if code := submitBase(t, w, gs[sList[0]], claims[sList[0]], tokA, 6.000, 5.998); code != 200 {
+				t.Fatalf("g1: HTTP %d", code)
+			}
+			if code := submitBase(t, w, gs[sList[1]], claims[sList[1]], tokA, 6.000, 6.010); code != 200 {
+				t.Fatalf("g2: HTTP %d", code)
+			}
+			if code := submitBase(t, w, gs[s2List[0]], claims[s2List[0]], tokA, 6.000, 6.014); code != 200 {
+				t.Fatalf("g3: HTTP %d", code)
+			}
+			if swapLastTwo {
+				if code := submitBase(t, w, gs[s2List[1]], claims[s2List[1]], tokA, 6.000, 6.026); code != 200 {
+					t.Fatalf("g5 first: HTTP %d", code)
+				}
+				if code := submitBase(t, w, gs[sList[2]], claims[sList[2]], tokB, 6.000, 6.026); code != 200 {
+					t.Fatalf("g4 second: HTTP %d, want 200", code)
+				}
+			} else {
+				if code := submitBase(t, w, gs[sList[2]], claims[sList[2]], tokB, 6.000, 6.026); code != 200 {
+					t.Fatalf("g4 first (while g5 can shift g1 oddOut): HTTP %d, want 200", code)
+				}
+				if code := submitBase(t, w, gs[s2List[1]], claims[s2List[1]], tokA, 6.000, 6.026); code != 200 {
+					t.Fatalf("g5 second: HTTP %d", code)
+				}
+			}
+			w.check()
+		}
+	})
+
+	// Gate 4 P1 #1 (Hole 3): live established claims with Baseline==false that attach a cached
+	// local baseline MUST also be counted in otherLive so arrival order cannot reverse 2-vs-2!
+	t.Run("voluntary_baseline_on_baseline_false_claims_order_invariant", func(t *testing.T) {
+		for _, tc := range []struct {
+			name  string
+			order []int
+			bases []float64
+		}{
+			{"requested_pair_first", []int{0, 1, 2, 3}, []float64{6.000, 6.000, 6.080, 6.080}},
+			{"voluntary_pair_first", []int{2, 3, 0, 1}, []float64{6.080, 6.080, 6.000, 6.000}},
+		} {
+			pub, priv := newKey()
+			w := newWorld(t, pub)
+			w.app.cfg.RunsPerEntry = 1
+			w.app.season.Baselines.PerRound = 2
+			w.app.season.Tolerance[w.cfg.Scale] = Tolerance{Grade: 0.012, Baseline: 0.015, Run: 0.015}
+			anchor := w.join("anchor-one", priv)
+			gs := w.volunteers("gr1", "gr2", "gr3", "gr4")
+			w.submit(w.join("owner-1", nil), "entry-one", "print(1)")
+			idx := w.drawWithoutExam()
+			ce := w.claim(anchor, true)
+			if code, _ := w.edit(anchor, ce, scriptOne); code != 200 {
+				t.Fatalf("edit: HTTP %d", code)
+			}
+			claims := make([]*claimed, 4)
+			for i := range 4 {
+				claims[i] = w.claimEarly(gs[i])
+			}
+			if claims[2].Job.Baseline == nil || *claims[2].Job.Baseline || claims[3].Job.Baseline == nil || *claims[3].Job.Baseline {
+				t.Fatalf("expected gr3/gr4 claims to have Baseline=false under PerRound=2")
+			}
+			w.exam(idx)
+			for step, gi := range tc.order {
+				if code := submitBase(t, w, gs[gi], claims[gi], tokA, 6.040, tc.bases[step]); code != 200 {
+					t.Fatalf("%s step %d (gr%d): HTTP %d, want 200", tc.name, step+1, gi+1, code)
+				}
+			}
+			w.app.st.view(func(s *State) {
+				if !w.app.baselineDisputed(s, s.Rounds[idx]) {
+					t.Fatalf("%s: 2-vs-2 split including voluntary baselines MUST stay disputed", tc.name)
+				}
+			})
+			w.check()
+		}
+	})
+}

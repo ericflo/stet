@@ -151,7 +151,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"maps"
 	"math"
 	"math/rand/v2"
 	"sort"
@@ -1003,21 +1002,21 @@ func (j *judge) tokenMajorityRefuses(sc *scriptState, rd *Round, acct *Account, 
 	if bestN < 2 || bestTok == "" || bestTok == tokensSHA {
 		return false
 	}
-	if est && acct != nil && incomingBase != nil {
-		sim := *j.s
-		sim.Baselines = maps.Clone(j.s.Baselines)
-		if sim.Baselines == nil {
-			sim.Baselines = map[string]*Baseline{}
-		}
-		sim.Baselines[baselineKey(rd.Idx, acct.ID)] = incomingBase
-		if j.a.baselineDisputed(&sim, rd) {
-			return false
-		}
-		simOut := j.a.baselinesLeftOut(&sim, rd)
-		for voterID := range tokVoters[bestTok] {
-			if simOut[voterID] {
+	locked, stableVoters, liveNoBase := j.a.baselineConsensusState(j.s, rd, acct, est, incomingBase)
+	if !locked {
+		return false
+	}
+	for voterID := range tokVoters[bestTok] {
+		// Every leading voter with a stored baseline must remain provably inside the kept
+		// consensus across all possible remaining live baseline submissions (not pushable into
+		// oddOut), and a leading voter without a baseline yet that still holds a live grade
+		// claim in the round could later submit a dissenting baseline and self-evict into oddOut.
+		if j.s.Baselines[baselineKey(rd.Idx, voterID)] != nil {
+			if !stableVoters[voterID] {
 				return false
 			}
+		} else if liveNoBase[voterID] {
+			return false
 		}
 	}
 	incomingVote := 0
@@ -2504,12 +2503,12 @@ func (a *App) submitResult(ctx context.Context, acctID, claimID int64, p *Result
 		tol := a.tolerance()
 		var incomingBase *Baseline
 		if p.Baseline != nil {
-			if dev, ok := a.baselineDev(s, rd, acctID, p.Baseline.ItemScores); ok && !within(dev, tol.Baseline) {
+			incomingBase = &Baseline{RoundIdx: rd.Idx, AccountID: acctID, Loss: places5(-p.Baseline.Mean), Items: p.Baseline.ItemScores,
+				CorpusSHA: p.CorpusSHA256, ExamSHA: p.ExamSHA256, InitSHA: baseInitSHA, ReceivedAt: now(), Established: est}
+			if dev, bad := a.baselineAdmissionRefuses(s, rd, acct, est, incomingBase); bad {
 				return refuse("baseline", places5(dev),
 					"your unedited baseline for %s is further from the round's other graders' than the tolerance of %.3f bits per byte allows, so this machine's setup or arithmetic differs. That is published with the round when it settles; nothing counts against you", p.Round, tol.Baseline)
 			}
-			incomingBase = &Baseline{RoundIdx: rd.Idx, AccountID: acctID, Loss: places5(-p.Baseline.Mean), Items: p.Baseline.ItemScores,
-				CorpusSHA: p.CorpusSHA256, ExamSHA: p.ExamSHA256, InitSHA: baseInitSHA, ReceivedAt: now(), Established: est}
 		}
 		if p.Valid && tokensSHA != "" {
 			j := a.newJudge(s)

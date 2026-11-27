@@ -263,11 +263,18 @@ func (m *cloreMarket) Rent(ctx context.Context, o Offer, l Launch) (*Rental, err
 	for try := 0; try < 6; try++ {
 		rs, err := m.orders(ctx)
 		if err == nil {
+			var found []cloreRental
 			for _, r := range rs {
-				if r.server == server && !r.Created.Before(asked) && r.State != "gone" && !l.KnownIDs[r.ID] {
-					r.Rental.Name, r.Rental.State = l.Name, "starting"
-					return &r.Rental, nil
+				if r.server == server && (r.Created.IsZero() || !r.Created.Before(asked)) && r.State != "gone" && !l.KnownIDs[r.ID] {
+					found = append(found, r)
 				}
+			}
+			if len(found) == 1 {
+				found[0].Rental.Name, found[0].Rental.State = l.Name, "starting"
+				return &found[0].Rental, nil
+			}
+			if len(found) > 1 {
+				return nil, fmt.Errorf("Clore listed %d ambiguous untracked orders for server %d", len(found), server)
 			}
 		}
 		if err := m.sleep(ctx, 2*time.Second); err != nil {
@@ -330,8 +337,16 @@ func (m *cloreMarket) orders(ctx context.Context) ([]cloreRental, error) {
 			state = "gone"
 		}
 		status := map[bool]string{true: "expired", false: "active"}[o.Expired]
-		rentals = append(rentals, cloreRental{Rental{Market: "clore", ID: strconv.FormatInt(o.ID, 10), Card: shortGPU(card),
-			Price: o.Price / 24 * (1 + cloreFee), State: state, Status: status, Created: time.Unix(o.CT, 0),
+		host := ""
+		if o.SI > 0 {
+			host = strconv.FormatInt(o.SI, 10)
+		}
+		var created time.Time
+		if o.CT > 0 {
+			created = time.Unix(o.CT, 0)
+		}
+		rentals = append(rentals, cloreRental{Rental{Market: "clore", ID: strconv.FormatInt(o.ID, 10), Host: host, Card: shortGPU(card),
+			Price: o.Price / 24 * (1 + cloreFee), State: state, Status: status, Created: created,
 			Phase: "order " + status, Detail: "order " + status + " (Clore says no more of it)"}, o.SI})
 	}
 	return rentals, nil

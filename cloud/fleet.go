@@ -224,6 +224,11 @@ type podRecord struct {
 	// Stopped: confirmed stopped by provider by-ID lookup while omitted from listing, kept in
 	// fleet.json until m.End(ctx, id) confirms destruction (e.g. to stop Vast disk billing).
 	Stopped bool `json:"stopped,omitempty"`
+	// Terminating: operator or resolve --end requested teardown of this exact contract ID, but
+	// provider deletion failed transiently; persisted until deletion or confirmed absence so
+	// retrying `workers resolve --end` and `scale` ticks keep terminating it even while the
+	// fleet wants workers.
+	Terminating bool `json:"terminating,omitempty"`
 	// Why it ended, as the fleet said it, and the cause when it failed (seen.go).
 	Why   string `json:"why,omitempty"`
 	Cause string `json:"cause,omitempty"`
@@ -365,8 +370,11 @@ func owner(l *ledger, r *Rental) string {
 }
 
 // matchPendingRentals returns pointers into rentals that match an unresolved pendingRent
-// (same market, not already tracked in l.Pods, not in pr.KnownIDs, and matching handle/timestamp),
-// ordered live-first and newest-first.
+// (same market, not already tracked in l.Pods, not in pr.KnownIDs, and matching provider
+// identity/handle), ordered live-first and newest-first.
+// For Clore (which carries no worker handle on orders), an explicit server ID match (si ==
+// pr.OfferID/pr.Host) is required so recovery on a shared account never adopts or cancels
+// somebody else's order on a different server.
 func matchPendingRentals(pr *pendingRent, l *ledger, rentals []Rental) []*Rental {
 	known := make(map[string]bool, len(pr.KnownIDs))
 	for _, id := range pr.KnownIDs {
@@ -385,6 +393,13 @@ func matchPendingRentals(pr *pendingRent, l *ledger, rentals []Rental) []*Rental
 			continue
 		}
 		if pr.Market == "clore" {
+			wantServer := pr.OfferID
+			if wantServer == "" {
+				wantServer = pr.Host
+			}
+			if wantServer == "" || p.Host == "" || p.Host != wantServer {
+				continue
+			}
 			if !p.Created.IsZero() && !pr.Created.IsZero() && p.Created.Before(pr.Created.Add(-2*time.Minute)) {
 				continue
 			}
@@ -408,9 +423,48 @@ func matchPendingRentals(pr *pendingRent, l *ledger, rentals []Rental) []*Rental
 	return matches
 }
 
+// resolvePendingMatches computes candidate matches for every pending reservation in pkeys plus
+// the distinct worker handles claiming each candidate contract, so callers leave genuinely
+// ambiguous matches (multiple contracts for one reservation, or multiple handles competing for
+// the same contract) pending rather than guessing or canceling unrelated contracts.
+func resolvePendingMatches(l *ledger, rentalsByMarket map[string][]Rental, pkeys []string) (map[string][]*Rental, map[string]map[string]bool) {
+	matchesByID := make(map[string][]*Rental, len(pkeys))
+	claimants := map[string]map[string]bool{}
+	for _, id := range pkeys {
+		pr := l.Pending[id]
+		if pr == nil {
+			continue
+		}
+		rs, ok := rentalsByMarket[pr.Market]
+		if !ok {
+			continue
+		}
+		ms := matchPendingRentals(pr, l, rs)
+		matchesByID[id] = ms
+		for _, p := range ms {
+			key := ledgerKey(p.Market, p.ID)
+			if claimants[key] == nil {
+				claimants[key] = map[string]bool{}
+			}
+			claimants[key][pr.Handle] = true
+		}
+	}
+	return matchesByID, claimants
+}
+
+func rentalIDList(rs []*Rental) string {
+	ids := make([]string, 0, len(rs))
+	for _, r := range rs {
+		if r != nil && r.ID != "" {
+			ids = append(ids, r.ID)
+		}
+	}
+	return strings.Join(ids, ", ")
+}
+
 // note brings the record up to date with the machines the markets list now:
-//   - unresolved pending worker creates are adopted automatically when the provider lists them,
-//     and otherwise remain reserved in l.Pending;
+//   - unresolved pending worker creates are adopted automatically when the provider lists one
+//     unambiguous matching contract, and otherwise remain reserved in l.Pending;
 //   - live rentals retain their last known positive hourly rate if a listing omits or zeroes Price;
 //   - stopped rentals (whether listed directly or returned by Lookup) stay in fleet.json with
 //     Stopped=true until m.End(ctx, id) confirms deletion or Lookup confirms absence (404);
@@ -421,23 +475,48 @@ func (f *Fleet) note(ctx context.Context, l *ledger, rentals []Rental, answered 
 	if l.Pending == nil {
 		l.Pending = map[string]*pendingRent{}
 	}
-	// 1. Adopt any unresolved pending worker creates that now appear in an answered listing.
+	// 1. Adopt any unresolved pending worker creates that now have a single unambiguous match
+	//    in an answered listing; leave genuinely ambiguous matches pending.
 	if len(l.Pending) > 0 {
 		pkeys := make([]string, 0, len(l.Pending))
 		for id := range l.Pending {
 			pkeys = append(pkeys, id)
 		}
 		sort.Strings(pkeys)
+		rentalsByMarket := map[string][]Rental{}
+		for mName, ok := range answered {
+			if ok {
+				rentalsByMarket[mName] = rentals
+			}
+		}
+		matchesByID, claimants := resolvePendingMatches(l, rentalsByMarket, pkeys)
+		adopted := map[string]bool{}
 		for _, id := range pkeys {
 			pr := l.Pending[id]
 			if pr == nil || !answered[pr.Market] {
 				continue
 			}
-			matches := matchPendingRentals(pr, l, rentals)
+			matches := matchesByID[id]
 			if len(matches) == 0 {
 				continue
 			}
+			if len(matches) > 1 {
+				f.say("pending worker %s on %s matches %d untracked contracts (%s); leaving pending (verify on %s before resolving)",
+					pr.Handle, marketTitle(pr.Market), len(matches), rentalIDList(matches), marketTitle(pr.Market))
+				continue
+			}
 			p := matches[0]
+			key := ledgerKey(p.Market, p.ID)
+			if len(claimants[key]) > 1 {
+				f.say("pending worker %s on %s shares candidate contract %s with another pending handle; leaving pending",
+					pr.Handle, marketTitle(pr.Market), p.ID)
+				continue
+			}
+			if adopted[key] {
+				delete(l.Pending, id)
+				continue
+			}
+			adopted[key] = true
 			if p.Name == "" {
 				p.Name = pr.Handle
 			}
@@ -454,6 +533,10 @@ func (f *Fleet) note(ctx context.Context, l *ledger, rentals []Rental, answered 
 			if gpu == "" {
 				gpu = pr.GPU
 			}
+			host := p.Host
+			if host == "" {
+				host = pr.Host
+			}
 			start := p.Created
 			if start.IsZero() {
 				start = pr.Created
@@ -468,10 +551,10 @@ func (f *Fleet) note(ctx context.Context, l *ledger, rentals []Rental, answered 
 			rec := &podRecord{
 				ID: p.ID, Market: p.Market, Handle: pr.Handle, GPU: gpu, Cloud: pr.Cloud,
 				Cost: cost, Start: start, Alive: alive, Tracked: true, Stopped: p.State == "stopped",
-				Grades: pr.Grades, Host: pr.Host, CPU: pr.CPU, Curators: pr.Curators,
+				Grades: pr.Grades, Host: host, CPU: pr.CPU, Curators: pr.Curators,
 				For: pr.For, Round: pr.Round, Report: pr.Report,
 			}
-			l.Pods[ledgerKey(p.Market, p.ID)] = rec
+			l.Pods[key] = rec
 			delete(l.Pending, id)
 			f.event(p, pr.Handle, "rented", "adopted after uncertain create")
 			f.say("adopted pending worker %s on %s (machine %s)", pr.Handle, marketTitle(p.Market), p.ID)
@@ -514,12 +597,18 @@ func (f *Fleet) note(ctx context.Context, l *ledger, rentals []Rental, answered 
 			if p.State == "stopped" {
 				alive = start
 			}
-			r = &podRecord{ID: p.ID, Market: p.Market, Handle: h, GPU: p.Card, Cost: cost, Start: start, Alive: alive, Tracked: true, Stopped: p.State == "stopped"}
+			r = &podRecord{ID: p.ID, Market: p.Market, Handle: h, Host: p.Host, GPU: p.Card, Cost: cost, Start: start, Alive: alive, Tracked: true, Stopped: p.State == "stopped"}
 			l.Pods[key] = r
+		}
+		if r.Host == "" && p.Host != "" {
+			r.Host = p.Host
 		}
 		if p.live() {
 			r.Alive = now
 			r.Stopped = false
+		}
+		if r.Terminating {
+			p.Terminating = true
 		}
 		if validRate(p.Price) {
 			r.Cost = p.Price
@@ -624,6 +713,10 @@ func (f *Fleet) note(ctx context.Context, l *ledger, rentals []Rental, answered 
 				if fresh.Name == "" {
 					fresh.Name = r.Handle
 				}
+				if fresh.Host == "" {
+					fresh.Host = r.Host
+				}
+				fresh.Terminating = r.Terminating
 				r.Alive = now
 				r.Stopped = false
 				if validRate(fresh.Price) {
@@ -638,6 +731,10 @@ func (f *Fleet) note(ctx context.Context, l *ledger, rentals []Rental, answered 
 				if fresh.Name == "" {
 					fresh.Name = r.Handle
 				}
+				if fresh.Host == "" {
+					fresh.Host = r.Host
+				}
+				fresh.Terminating = r.Terminating
 				if !validRate(fresh.Price) {
 					if validRate(r.Cost) {
 						fresh.Price = r.Cost
@@ -742,14 +839,56 @@ type View struct {
 	Work            *Work
 	Workers         []*Worker
 	Ledger          *ledger
-	LiveRentals     []*Rental      // deduplicated live fleet worker contracts (one per unique market/id)
-	PendingRents    []*pendingRent // unresolved pending worker create reservations
-	OrphanRentals   []*Rental      // fleet ledger contracts whose key is no longer in f.keys
-	Hourly          float64        // dollars an hour, every live contract + pending create + active examiner together
-	Today           float64        // about what has been spent today (UTC), including any active examiner
-	ExaminerLive    int            // 1 when an ephemeral examiner GPU is active, else 0
-	ExaminerHourly  float64        // active examiner's hourly rate (included in Hourly)
-	ExaminerAccrued float64        // active examiner's accrued spend today (included in Today)
+	LiveRentals     []*Rental           // deduplicated live fleet worker contracts (one per unique market/id)
+	PendingRents    []*pendingRent      // unresolved pending worker create reservations
+	OrphanRentals   []*Rental           // fleet ledger contracts whose key is no longer in f.keys
+	UnknownRateKeys map[string]string   // live contracts / pending reservations with no known positive hourly rate
+	MarketKnownIDs  map[string][]string // all non-gone contract IDs listed per market (including unowned on shared accounts)
+	Hourly          float64             // dollars an hour, every live contract + pending create + active examiner together
+	Today           float64             // about what has been spent today (UTC), including any active examiner
+	ExaminerLive    int                 // 1 when an ephemeral examiner GPU is active, else 0
+	ExaminerHourly  float64             // active examiner's hourly rate (included in Hourly)
+	ExaminerAccrued float64             // active examiner's accrued spend today (included in Today)
+}
+
+func unknownRateLabel(market, id, handle string) string {
+	name := handle
+	if name == "" {
+		name = id
+	}
+	if market == "" {
+		return name
+	}
+	if name != id && id != "" {
+		return fmt.Sprintf("%s (%s on %s)", name, id, marketTitle(market))
+	}
+	return fmt.Sprintf("%s on %s", name, marketTitle(market))
+}
+
+func (v *View) noteUnknownRate(key, label string) {
+	if v == nil || key == "" {
+		return
+	}
+	if v.UnknownRateKeys == nil {
+		v.UnknownRateKeys = map[string]string{}
+	}
+	v.UnknownRateKeys[key] = label
+}
+
+func (v *View) hourlyUnknown() bool {
+	return v != nil && len(v.UnknownRateKeys) > 0
+}
+
+func (v *View) unknownRateSummary() string {
+	if v == nil || len(v.UnknownRateKeys) == 0 {
+		return ""
+	}
+	labels := make([]string, 0, len(v.UnknownRateKeys))
+	for _, lbl := range v.UnknownRateKeys {
+		labels = append(labels, lbl)
+	}
+	sort.Strings(labels)
+	return strings.Join(labels, ", ")
 }
 
 func (v *View) liveWorkerCount() int {
@@ -816,6 +955,7 @@ func (v *View) removeLiveRental(market, id string) {
 		}
 	}
 	v.LiveRentals = out
+	delete(v.UnknownRateKeys, key)
 }
 
 func (f *Fleet) examinerSnapshot() (live int, hourly float64, accrued float64, err error) {
@@ -979,8 +1119,8 @@ func recordedRental(r *podRecord, status string) Rental {
 		cost = 0
 	}
 	return Rental{
-		Market: r.market(), ID: r.ID, Name: r.Handle, Card: r.GPU,
-		Price: cost, State: state, Status: status, Created: r.Start,
+		Market: r.market(), ID: r.ID, Name: r.Handle, Host: r.Host, Card: r.GPU,
+		Price: cost, State: state, Status: status, Created: r.Start, Terminating: r.Terminating,
 	}
 }
 
@@ -1018,12 +1158,31 @@ func (f *Fleet) look(ctx context.Context) (*View, error) {
 	if rentals, err = f.note(ctx, l, rentals, answered); err != nil {
 		return &View{Work: work, Ledger: l}, err
 	}
-	v := &View{Work: work, Ledger: l}
+	v := &View{Work: work, Ledger: l, MarketKnownIDs: map[string][]string{}}
 	asked := false
 	live := map[string]bool{}
 	knownHandles := map[string]bool{}
 	for _, k := range f.keys {
 		knownHandles[k.Handle] = true
+	}
+	// Record every non-gone rental ID seen on each market (including unowned contracts on shared
+	// accounts) so subsequent worker creates include them in Launch.KnownIDs / pr.KnownIDs.
+	marketSeen := map[string]map[string]bool{}
+	for i := range rentals {
+		p := &rentals[i]
+		if p.Market == "" || p.ID == "" || (!p.live() && p.State != "stopped") {
+			continue
+		}
+		if marketSeen[p.Market] == nil {
+			marketSeen[p.Market] = map[string]bool{}
+		}
+		if !marketSeen[p.Market][p.ID] {
+			marketSeen[p.Market][p.ID] = true
+			v.MarketKnownIDs[p.Market] = append(v.MarketKnownIDs[p.Market], p.ID)
+		}
+	}
+	for mName := range v.MarketKnownIDs {
+		sort.Strings(v.MarketKnownIDs[mName])
 	}
 	// Deduplicate all rentals by exact (market, contract ID) so capacity and hourly spend are
 	// counted once per live contract ID even when multiple contracts share a single handle.
@@ -1064,13 +1223,23 @@ func (f *Fleet) look(ctx context.Context) (*View, error) {
 		if !knownHandles[h] && rec == nil {
 			continue
 		}
-		if rec != nil && !validRate(p.Price) && validRate(rec.Cost) {
-			p.Price = rec.Cost
+		if rec != nil {
+			if !validRate(p.Price) && validRate(rec.Cost) {
+				p.Price = rec.Cost
+			}
+			if rec.Terminating {
+				p.Terminating = true
+			}
+			if p.Host == "" && rec.Host != "" {
+				p.Host = rec.Host
+			}
 		}
 		if p.live() {
 			v.LiveRentals = append(v.LiveRentals, p)
 			if validRate(p.Price) {
 				v.Hourly += p.Price
+			} else {
+				v.noteUnknownRate(key, unknownRateLabel(p.Market, p.ID, h))
 			}
 		}
 		if knownHandles[h] {
@@ -1094,6 +1263,8 @@ func (f *Fleet) look(ctx context.Context) (*View, error) {
 			v.PendingRents = append(v.PendingRents, pr)
 			if validRate(pr.Cost) {
 				v.Hourly += pr.Cost
+			} else {
+				v.noteUnknownRate("pending:"+pr.ID, unknownRateLabel(pr.Market, pr.ID, pr.Handle))
 			}
 			pendingByHandle[pr.Handle] = append(pendingByHandle[pr.Handle], pr)
 		}
@@ -1108,6 +1279,9 @@ func (f *Fleet) look(ctx context.Context) (*View, error) {
 			li, lj := list[i].live(), list[j].live()
 			if li != lj {
 				return li
+			}
+			if list[i].Terminating != list[j].Terminating {
+				return !list[i].Terminating
 			}
 			if !list[i].Created.Equal(list[j].Created) {
 				return list[i].Created.After(list[j].Created)
@@ -1501,6 +1675,10 @@ func (f *Fleet) launchExcludingRentals(ctx context.Context, v *View, n, long, ea
 	if n <= 0 {
 		return nil, nil
 	}
+	if v.hourlyUnknown() {
+		f.say("not renting another machine: live hourly spend is incomplete (%s has no reported hourly rate yet); waiting for provider rate", v.unknownRateSummary())
+		return nil, nil
+	}
 	site, err := f.st.site(ctx)
 	if err != nil {
 		return nil, err
@@ -1748,6 +1926,10 @@ func roundFor(w *Work, what string, due time.Time) string {
 }
 
 func (f *Fleet) rent(ctx context.Context, v *View, k *Key, gpus []Offer, site string, grades func(Offer) int, plan rentPlan, curators bool) (*Rental, error) {
+	if v.hourlyUnknown() {
+		f.say("not renting another machine: live hourly spend is incomplete (%s has no reported hourly rate yet); waiting for provider rate", v.unknownRateSummary())
+		return nil, nil
+	}
 	tried, dearer := 0, 0
 	failed := map[string]bool{} // markets that definitively rejected/could not be reached, passed over now
 	for _, c := range gpus {
@@ -1804,6 +1986,9 @@ func (f *Fleet) rent(ctx context.Context, v *View, k *Key, gpus []Offer, site st
 					addKnown(ex.Market, ex.ID)
 				}
 			}
+		}
+		for _, id := range v.MarketKnownIDs[c.Market] {
+			addKnown(c.Market, id)
 		}
 		sort.Strings(knownSlice)
 		l.KnownIDs = knownIDs

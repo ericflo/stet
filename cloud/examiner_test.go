@@ -4544,3 +4544,387 @@ func (m *r21LookupMarket) Lookup(_ context.Context, id string) (*Rental, bool, e
 	return m.lookupFn(id)
 }
 func (m *r21LookupMarket) End(_ context.Context, id string) error { return m.endFn(id) }
+
+// Review 22 P1 #2: Clore recovery MUST carry server ID `si` through Rentals() and match it against
+// the pending reservation's OfferID/Host so an unrelated order on a shared account (different `si`)
+// is NEVER adopted or canceled, and genuinely ambiguous matches (multiple untracked orders on the
+// same server ID) remain pending without adopting or canceling any order.
+func TestReview22CloreRecoveryMatchesServerIDAndLeavesAmbiguousPending(t *testing.T) {
+	rp, st := newFakeRunPod(t), newFakeStet(t)
+	now := time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
+
+	var ordersJSON atomic.Value
+	var mu sync.Mutex
+	var canceled []int64
+	cloreSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/my_orders":
+			_, _ = w.Write([]byte(ordersJSON.Load().(string)))
+		case "/cancel_order":
+			var req struct {
+				ID int64 `json:"id"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			mu.Lock()
+			canceled = append(canceled, req.ID)
+			mu.Unlock()
+			_, _ = w.Write([]byte(`{"code":0}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer cloreSrv.Close()
+
+	makeFleet := func() *Fleet {
+		f, _ := testFleet(t, rp, st, 2)
+		f.now = func() time.Time { return now }
+		cm := newClore(cloreSrv.URL, "clore-key")
+		cm.sleep = func(context.Context, time.Duration) error { return nil }
+		f.markets = []Market{cm}
+		return f
+	}
+
+	// Order 701 on server 111 (ours) and order 702 created 1s later on server 222 (somebody else's!).
+	ordersJSON.Store(fmt.Sprintf(`{"code":0,"orders":[
+		{"id":701,"si":111,"ct":%d,"price":4.8,"currency":"USD-Blockchain","expired":false,"specs":{"gpu":"1x NVIDIA GeForce RTX 4090"}},
+		{"id":702,"si":222,"ct":%d,"price":4.8,"currency":"USD-Blockchain","expired":false,"specs":{"gpu":"1x NVIDIA GeForce RTX 4090"}}
+	]}`, now.Unix(), now.Unix()+1))
+
+	// 1. Automatic reconciliation via f.look() MUST adopt ONLY 701 (never 702!).
+	f1 := makeFleet()
+	if err := f1.writeLedger(&ledger{Pending: map[string]*pendingRent{
+		"p-clore-1": {ID: "p-clore-1", Market: "clore", Handle: "stet-rp-01", OfferID: "111", Host: "111", GPU: "RTX 4090", Cost: 0.25, Created: now},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	v1, err := f1.look(context.Background())
+	if err != nil {
+		t.Fatalf("look: %v", err)
+	}
+	if len(v1.Ledger.Pending) != 0 {
+		t.Fatalf("expected pending Clore reservation adopted, got %+v", v1.Ledger.Pending)
+	}
+	if v1.Ledger.Pods[ledgerKey("clore", "701")] == nil || v1.Ledger.Pods[ledgerKey("clore", "702")] != nil {
+		t.Fatalf("expected ONLY order 701 adopted (never 702 on server 222), got pods=%+v", v1.Ledger.Pods)
+	}
+	// Verify MarketKnownIDs captured unowned order 702 too so future creates exclude it.
+	found702 := false
+	for _, id := range v1.MarketKnownIDs["clore"] {
+		if id == "702" {
+			found702 = true
+		}
+	}
+	if !found702 {
+		t.Fatalf("expected MarketKnownIDs to capture pre-existing unowned Clore order 702, got %v", v1.MarketKnownIDs)
+	}
+
+	// 2. Starting fresh from the same reservation, `workers resolve --end` MUST cancel ONLY 701!
+	f2 := makeFleet()
+	if err := f2.writeLedger(&ledger{Pending: map[string]*pendingRent{
+		"p-clore-2": {ID: "p-clore-2", Market: "clore", Handle: "stet-rp-01", OfferID: "111", Host: "111", GPU: "RTX 4090", Cost: 0.25, Created: now},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmdWorkersResolve(context.Background(), f2, true); err != nil {
+		t.Fatalf("cmdWorkersResolve --end: %v", err)
+	}
+	mu.Lock()
+	gotCanceled := append([]int64(nil), canceled...)
+	canceled = nil
+	mu.Unlock()
+	if len(gotCanceled) != 1 || gotCanceled[0] != 701 {
+		t.Fatalf("expected workers resolve --end to cancel ONLY 701 (never 702!), got %v", gotCanceled)
+	}
+
+	// 3. Genuinely ambiguous match: TWO untracked orders (701 and 703) BOTH on server 111!
+	ordersJSON.Store(fmt.Sprintf(`{"code":0,"orders":[
+		{"id":701,"si":111,"ct":%d,"price":4.8,"currency":"USD-Blockchain","expired":false,"specs":{"gpu":"1x NVIDIA GeForce RTX 4090"}},
+		{"id":703,"si":111,"ct":%d,"price":4.8,"currency":"USD-Blockchain","expired":false,"specs":{"gpu":"1x NVIDIA GeForce RTX 4090"}}
+	]}`, now.Unix(), now.Unix()+2))
+	f3 := makeFleet()
+	if err := f3.writeLedger(&ledger{Pending: map[string]*pendingRent{
+		"p-clore-ambig": {ID: "p-clore-ambig", Market: "clore", Handle: "stet-rp-01", OfferID: "111", Host: "111", GPU: "RTX 4090", Cost: 0.25, Created: now},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	v3, err := f3.look(context.Background())
+	if err != nil {
+		t.Fatalf("look ambiguous: %v", err)
+	}
+	if len(v3.Ledger.Pending) != 1 || len(v3.Ledger.Pods) != 0 {
+		t.Fatalf("ambiguous Clore matches MUST remain pending without adopting either order, got pending=%+v pods=%+v", v3.Ledger.Pending, v3.Ledger.Pods)
+	}
+	if err := cmdWorkersResolve(context.Background(), f3, true); err == nil {
+		t.Fatal("expected error from cmdWorkersResolve --end on ambiguous Clore matches")
+	}
+	mu.Lock()
+	ambigCanceled := append([]int64(nil), canceled...)
+	mu.Unlock()
+	if len(ambigCanceled) != 0 {
+		t.Fatalf("ambiguous cmdWorkersResolve --end MUST cancel 0 orders, got %v", ambigCanceled)
+	}
+	l3, _ := f3.readLedger()
+	if len(l3.Pending) != 1 {
+		t.Fatalf("expected ambiguous reservation still pending in fleet.json, got %+v", l3.Pending)
+	}
+}
+
+// Review 22 P1 #3: a newly discovered live worker with an unknown hourly rate (e.g. Price==0 and
+// empty ledger) MUST mark live hourly spend incomplete and defer new paid creates in BOTH worker
+// admission (`up`, `scale`) and examiner admission (`reconcileExaminerOnce`, `tick`) until the
+// provider reports a positive rate.
+func TestReview22UnknownRateWorkerDefersPaidWorkerAndExaminerCreates(t *testing.T) {
+	rp, st := newFakeRunPod(t), newFakeStet(t)
+	f, _ := testFleet(t, rp, st, 2)
+	f.o.MaxWorkers = 2
+	f.o.MaxHourly = 0.30
+	f.o.Cheapest = true
+	f.o.Edits = false
+	now := f.now()
+
+	// Empty ledger, two worker keys, and one live RunPod rental named stet-rp-01 returning Cost==0.
+	rp.pods["pod-zero-rate"] = &Pod{ID: "pod-zero-rate", Name: "stet-rp-01", Status: "RUNNING", Cost: 0, CreatedAt: now.Add(-5 * time.Minute)}
+
+	// 1. `up 1` MUST defer (0 new pods created even though $0.18/$0.20 offer is below $0.30!).
+	if err := cmdUp(context.Background(), f, 1); err != nil {
+		t.Fatalf("cmdUp with unknown-rate worker: %v", err)
+	}
+	if len(rp.created) != 0 {
+		t.Fatalf("cmdUp MUST defer new paid worker while live worker rate is unknown! created=%d", len(rp.created))
+	}
+
+	// 2. `tick` (with waiting work) MUST also defer new paid worker AND examiner creates!
+	st.work.Rounds = []WorkRound{{ID: "s3-o00050", Entries: 1, GradesWanted: 4, ExamAt: 0}}
+	exProv := &fakeExaminerProv{
+		offers: []ExaminerOffer{{ID: "ex-offer-1", Card: "RTX 5090", Price: 0.25}},
+	}
+	f.examiner = newExaminer(ExaminerConfig{Addr: "127.0.0.1:8000", Timeout: 45 * time.Minute, MaxPrice: 1.50}, f.o.Home, exProv, f.now, f.say, false)
+	if err := tick(context.Background(), f); err != nil {
+		t.Fatalf("tick with unknown-rate worker: %v", err)
+	}
+	if len(rp.created) != 0 || len(exProv.rented) != 0 {
+		t.Fatalf("tick MUST defer paid worker & examiner creates while worker rate is unknown: rp=%d exRent=%d", len(rp.created), len(exProv.rented))
+	}
+
+	// 3. Standalone `reconcileExaminerOnce` MUST also defer renting a paid examiner!
+	if err := reconcileExaminerOnce(context.Background(), f); err == nil {
+		t.Fatal("expected reconcileExaminerOnce to report incomplete hourly spend error")
+	}
+	if len(exProv.rented) != 0 {
+		t.Fatalf("reconcileExaminerOnce MUST NOT rent examiner while live worker rate is unknown: exRent=%d", len(exProv.rented))
+	}
+
+	// 4. Once provider reports $0.21/h for pod-zero-rate:
+	//    - under --max-hourly 0.30, $0.21 + $0.18 = $0.39 > $0.30 -> STILL blocked!
+	//    - under --max-hourly 0.50, $0.21 + $0.18 = $0.39 <= $0.50 -> admitted cleanly!
+	rp.pods["pod-zero-rate"].Cost = 0.21
+	f.examiner = nil
+	if err := cmdUp(context.Background(), f, 1); err != nil {
+		t.Fatalf("cmdUp after rate recovered ($0.21 + $0.18 > $0.30): %v", err)
+	}
+	if len(rp.created) != 0 {
+		t.Fatalf("expected $0.21 + $0.18 > $0.30 to stay blocked after rate recovery, created=%d", len(rp.created))
+	}
+	f.o.MaxHourly = 0.50
+	if err := cmdUp(context.Background(), f, 1); err != nil {
+		t.Fatalf("cmdUp after raising --max-hourly to $0.50: %v", err)
+	}
+	if len(rp.created) != 1 {
+		t.Fatalf("expected 1 new pod created once rate recovered and headroom allowed, created=%d", len(rp.created))
+	}
+}
+
+// Review 22 P2 #4: when `workers resolve --end` (or `examiner resolve --end`) hits a transient
+// deletion failure, the outstanding termination MUST stay persisted against the exact contract ID
+// so retrying the identical command retries deletion (never reporting success while live!), and
+// `scale` ticks keep tearing it down even while the fleet still wants workers.
+func TestReview22WorkersResolveEndPersistsFailedTerminationAcrossRetryAndScale(t *testing.T) {
+	rp, st := newFakeRunPod(t), newFakeStet(t)
+	f, _ := testFleet(t, rp, st, 2)
+	now := f.now()
+
+	var deleteAttempt atomic.Int32
+	var deletedIDs []string
+	var mu sync.Mutex
+	var failDelete atomic.Bool
+	failDelete.Store(true)
+	var alive atomic.Bool
+	alive.Store(true)
+
+	vastSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "GET" && r.URL.Path == "/api/v1/instances/":
+			if !alive.Load() {
+				_, _ = w.Write([]byte(`{"instances":[],"next_token":null}`))
+				return
+			}
+			_, _ = w.Write([]byte(fmt.Sprintf(`{"instances":[{"id":99881,"label":"stet-rp-01","actual_status":"running","intended_status":"running","cur_state":"running","gpu_name":"RTX 4090","dph_total":0.22,"start_date":%d}],"next_token":null}`, now.Add(-5*time.Minute).Unix())))
+		case r.Method == "GET" && r.URL.Path == "/api/v0/instances/99881/":
+			if !alive.Load() {
+				http.NotFound(w, r)
+				return
+			}
+			_, _ = w.Write([]byte(fmt.Sprintf(`{"instances":{"id":99881,"label":"stet-rp-01","actual_status":"running","intended_status":"running","cur_state":"running","gpu_name":"RTX 4090","dph_total":0.22,"start_date":%d}}`, now.Add(-5*time.Minute).Unix())))
+		case r.Method == "DELETE" && r.URL.Path == "/api/v0/instances/99881/":
+			n := deleteAttempt.Add(1)
+			mu.Lock()
+			deletedIDs = append(deletedIDs, fmt.Sprintf("try%d:99881", n))
+			mu.Unlock()
+			if failDelete.Load() {
+				w.WriteHeader(503)
+				_, _ = w.Write([]byte(`{"msg":"temporary Vast 503"}`))
+				return
+			}
+			alive.Store(false)
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{"success":true}`))
+		case r.Method == "POST" && r.URL.Path == "/api/v0/bundles/":
+			_, _ = w.Write([]byte(`{"offers":[]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer vastSrv.Close()
+	vm := newVast(vastSrv.URL, "vast-key")
+	vm.a.sleep = func(context.Context, time.Duration) error { return nil }
+	f.markets = []Market{vm}
+	if err := (&Arming{Armed: map[string]Armed{"vast": {At: 1}}}).save(f.o.Home); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.writeLedger(&ledger{Pending: map[string]*pendingRent{
+		"p-vast-end": {ID: "p-vast-end", Market: "vast", Handle: "stet-rp-01", GPU: "RTX 4090", Cost: 0.22, Created: now.Add(-5 * time.Minute)},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. First `workers resolve --end` hits transient 503 -> returns error and persists Terminating=true on vast:99881.
+	if err := cmdWorkersResolve(context.Background(), f, true); err == nil {
+		t.Fatal("expected error on first workers resolve --end when Vast DELETE returns 503")
+	}
+	l1, err := f.readLedger()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := l1.Pods[ledgerKey("vast", "99881")]
+	if rec == nil || !rec.Terminating || len(l1.Pending) != 0 {
+		t.Fatalf("expected vast:99881 persisted with Terminating=true and Pending cleared, got pods=%+v pending=%+v", l1.Pods, l1.Pending)
+	}
+
+	// 2. Non-`--end` resolve MUST also return an error (never report "no pending" while Terminating!).
+	if err := cmdWorkersResolve(context.Background(), f, false); err == nil {
+		t.Fatal("expected workers resolve (without --end) to error while vast:99881 has an outstanding termination")
+	}
+
+	// 3. Even while the fleet WANTS workers (GradesWanted=4), `tick()` MUST still attempt teardown of vast:99881!
+	st.work.Rounds = []WorkRound{{ID: "s3-o00051", Entries: 1, GradesWanted: 4, ExamAt: now.Unix()}}
+	if err := tick(context.Background(), f); err != nil {
+		t.Fatalf("tick while terminating worker still failing delete: %v", err)
+	}
+	if deleteAttempt.Load() < 2 {
+		t.Fatalf("expected tick() to retry DELETE on terminating vast:99881 even while work wants GPUs, attempts=%d", deleteAttempt.Load())
+	}
+
+	// 4. Provider recovers -> identical retry of `workers resolve --end` MUST send DELETE, retire vast:99881, and succeed!
+	failDelete.Store(false)
+	prevAttempts := deleteAttempt.Load()
+	if err := cmdWorkersResolve(context.Background(), f, true); err != nil {
+		t.Fatalf("retry workers resolve --end after provider recovery: %v", err)
+	}
+	if deleteAttempt.Load() != prevAttempts+1 || alive.Load() {
+		t.Fatalf("expected retry workers resolve --end to issue DELETE and terminate 99881, attempts=%d->%d alive=%v", prevAttempts, deleteAttempt.Load(), alive.Load())
+	}
+	l2, _ := f.readLedger()
+	if len(l2.Pods) != 0 || len(l2.Pending) != 0 {
+		t.Fatalf("expected clean fleet.json after retry succeeded, got pods=%+v pending=%+v", l2.Pods, l2.Pending)
+	}
+
+	// 5. Parity check: retrying `resolvePendingExaminer(..., end=true)` after transient EndExaminer failure
+	//    MUST also retry EndExaminer on persisted Unresolved and succeed cleanly once provider recovers!
+	exHome := t.TempDir()
+	nowFn := func() time.Time { return now }
+	if err := writeExaminerState(exHome, &examinerState{
+		PendingRent: true, ReservedLabel: "stet-examiner-abc-s3-o00051-12345678",
+		RoundID: "s3-o00051", APIKey: "k", CertPEM: "c", Price: 0.62, Created: now.Add(-5 * time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	exProv := &fakeExaminerProv{
+		insts:  map[string]ExaminerInstance{"ex-retry-1": {ID: "ex-retry-1", Label: "stet-examiner-abc-s3-o00051-12345678", State: "running", Price: 0.62, Created: now.Add(-5 * time.Minute)}},
+		endErr: map[string]error{"ex-retry-1": errors.New("Vast 503")},
+	}
+	if err := resolvePendingExaminer(context.Background(), exHome, exProv, nowFn, nil, false, true, nil); err == nil {
+		t.Fatal("expected first resolvePendingExaminer --end to fail on 503")
+	}
+	exProv.endErr = nil
+	if err := resolvePendingExaminer(context.Background(), exHome, exProv, nowFn, nil, false, true, nil); err != nil {
+		t.Fatalf("retry resolvePendingExaminer --end after provider recovery: %v", err)
+	}
+	if len(exProv.ended) != 1 || exProv.ended[0] != "ex-retry-1" {
+		t.Fatalf("expected retry resolvePendingExaminer --end to terminate ex-retry-1, ended=%v", exProv.ended)
+	}
+	if stAfter, err := readExaminerStateErr(exHome); err != nil || stAfter != nil {
+		t.Fatalf("expected examiner.json cleared after retry succeeded, got %+v err=%v", stAfter, err)
+	}
+
+	// 6. Gate 4 P1 #2 + P3: when examiner.json holds BOTH InstanceID AND matching Unresolved entry
+	//    (after Reconcile/EnforceTimeout failed teardown), `resolvePendingExaminer --end` MUST:
+	//    (a) persist updated ObservedLiveAt on failure, and
+	//    (b) clear InstanceID/APIKey/CertPEM/Price when EndExaminer succeeds so no phantom GPU or
+	//        double spend remains!
+	exHome2 := t.TempDir()
+	t0 := now.Add(-15 * time.Minute)
+	if err := writeExaminerState(exHome2, &examinerState{
+		InstanceID: "inst-stuck", RoundID: "s3-o00052", APIKey: "secret", CertPEM: "cert", Price: 1.50,
+		Created: t0, ObservedLiveAt: t0,
+		Unresolved: []ExaminerInstance{{ID: "inst-stuck", State: "running", Price: 1.50, Created: t0, ObservedLiveAt: t0}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	exProv2 := &fakeExaminerProv{endErr: map[string]error{"inst-stuck": errors.New("Vast 503")}}
+	if err := resolvePendingExaminer(context.Background(), exHome2, exProv2, nowFn, nil, false, true, nil); err == nil {
+		t.Fatal("expected error while inst-stuck EndExaminer returns 503")
+	}
+	stFail, err := readExaminerStateErr(exHome2)
+	if err != nil || stFail == nil || len(stFail.Unresolved) != 1 || !stFail.Unresolved[0].ObservedLiveAt.Equal(now) {
+		t.Fatalf("expected ObservedLiveAt updated to %v on failure, got %+v err=%v", now, stFail, err)
+	}
+	exProv2.endErr = nil
+	if err := resolvePendingExaminer(context.Background(), exHome2, exProv2, nowFn, nil, false, true, nil); err != nil {
+		t.Fatalf("resolvePendingExaminer --end on active+unresolved inst-stuck: %v", err)
+	}
+	if stClear, err := readExaminerStateErr(exHome2); err != nil || stClear != nil {
+		t.Fatalf("expected examiner.json completely cleared after inst-stuck ended (no lingering InstanceID!), got %+v err=%v", stClear, err)
+	}
+	if live, hourly, _, err := activeExaminerFromDisk(exHome2, now, 45*time.Minute, 1.50); err != nil || live != 0 || hourly != 0 {
+		t.Fatalf("expected 0 live / $0/h after inst-stuck cleared, got live=%d hourly=%.2f err=%v", live, hourly, err)
+	}
+
+	// 7. Gate 4 P2 #3: when a worker key has BOTH an older healthy grading contract and a newer
+	//    Terminating duplicate, look() MUST place the healthy contract on w.Rental so `down`
+	//    (without --force) destroys ONLY the Terminating duplicate and spares the grading machine!
+	rp2, st2 := newFakeRunPod(t), newFakeStet(t)
+	f2, _ := testFleet(t, rp2, st2, 1)
+	f2.now = func() time.Time { return now }
+	st2.work.Machines = []Machine{{Handle: "stet-rp-01", Busy: "grade", LastSeen: now.Unix()}}
+	rp2.pods["pod-healthy"] = &Pod{ID: "pod-healthy", Name: "stet-rp-01", Status: "RUNNING", Cost: 0.25, CreatedAt: now.Add(-10 * time.Minute)}
+	rp2.pods["pod-term-dup"] = &Pod{ID: "pod-term-dup", Name: "stet-rp-01", Status: "RUNNING", Cost: 0.25, CreatedAt: now.Add(-1 * time.Minute)}
+	if err := f2.writeLedger(&ledger{Pods: map[string]*podRecord{
+		ledgerKey("runpod", "pod-healthy"):  {ID: "pod-healthy", Market: "runpod", Handle: "stet-rp-01", GPU: "RTX 4090", Cost: 0.25, Start: now.Add(-10 * time.Minute), Alive: now},
+		ledgerKey("runpod", "pod-term-dup"): {ID: "pod-term-dup", Market: "runpod", Handle: "stet-rp-01", GPU: "RTX 4090", Cost: 0.25, Start: now.Add(-1 * time.Minute), Alive: now, Terminating: true},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	v2, err := f2.look(context.Background())
+	if err != nil {
+		t.Fatalf("look with healthy + terminating dup: %v", err)
+	}
+	if v2.Workers[0].Rental == nil || v2.Workers[0].Rental.ID != "pod-healthy" || len(v2.Workers[0].ExtraRentals) != 1 || v2.Workers[0].ExtraRentals[0].ID != "pod-term-dup" {
+		t.Fatalf("expected healthy pod-healthy on w.Rental and terminating dup in ExtraRentals, got rental=%+v extra=%+v", v2.Workers[0].Rental, v2.Workers[0].ExtraRentals)
+	}
+	if err := cmdDown(context.Background(), f2, false, nil); err != nil {
+		t.Fatalf("cmdDown without --force: %v", err)
+	}
+	if rp2.pods["pod-term-dup"] != nil || rp2.pods["pod-healthy"] == nil {
+		t.Fatalf("cmdDown without --force MUST end ONLY pod-term-dup and spare actively grading pod-healthy! remaining pods=%+v", rp2.pods)
+	}
+}

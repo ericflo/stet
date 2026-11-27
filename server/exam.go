@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"math"
 	"net/http"
 	"sort"
@@ -658,6 +659,198 @@ func (a *App) baselineDev(s *State, rd *Round, acctID int64, items []float64) (d
 	}
 	dev, _, err := a.season.Exam.ScoreItems(rd.ExamTable, diffItems(items, medianItems(append(rows, items))), rd.Shares)
 	return dev, err == nil
+}
+
+// medianBounds computes the item-wise minimum (lo) and maximum (hi) possible medians of rows
+// after appending up to extra arbitrary real-valued baseline rows (requires 0 <= extra < len(rows)).
+// Placing all extra rows at -inf gives lo and at +inf gives hi; because every intermediate count
+// 0 <= k <= extra shifts each coordinate's median monotonically within [lo[i], hi[i]], and
+// ExamPlan.ScoreItems is coordinate-wise non-decreasing (clipping + trimmed mean + non-negative
+// weights), a baseline within tolerance of both lo and hi is guaranteed to stay within tolerance
+// of the resulting median regardless of what those extra rows report.
+func medianBounds(rows [][]float64, extra int) (lo, hi []float64) {
+	n := len(rows)
+	if n == 0 || extra < 0 || extra >= n {
+		return nil, nil
+	}
+	m := len(rows[0])
+	lo = make([]float64, m)
+	hi = make([]float64, m)
+	col := make([]float64, n)
+	total := n + extra
+	for i := range m {
+		for r, row := range rows {
+			col[r] = row[i]
+		}
+		sort.Float64s(col)
+		if total%2 == 1 {
+			lo[i] = col[(n-extra-1)/2]
+			hi[i] = col[(n+extra-1)/2]
+		} else {
+			lo[i] = (col[(n-extra)/2-1] + col[(n-extra)/2]) / 2
+			hi[i] = (col[(n+extra)/2-1] + col[(n+extra)/2]) / 2
+		}
+	}
+	return lo, hi
+}
+
+// baselineConsensusState reports whether the round's kept established baseline cohort is already
+// irrevocable AND returns the set of established baseline voters provably guaranteed to remain
+// inside the kept cohort (not pushed into oddOut) under any 0..K arbitrary baseline submissions
+// from outstanding live established grade claims on rd:
+//   - never locks before rd.InitSHA locks (on pinned-student seasons), while baselineDisputed is
+//     true, or on fewer than 2 corroborated baselines (len(simKept) < 2);
+//   - counts ALL live established grade claims on rd (including c.Baseline==false, because clients
+//     with a cached local baseline may still attach p.Baseline and enter s.Baselines);
+//   - when K > 0 live established claims remain, computes worst-case item-wise shifted median
+//     bounds [lo, hi], keeps only voters within tolerance of BOTH lo and hi, and requires a
+//     mutually agreeing stable core strictly larger than maxRival + K.
+func (a *App) baselineConsensusState(s *State, rd *Round, acct *Account, est bool, incoming *Baseline) (locked bool, stableVoters map[int64]bool, liveOther map[int64]bool) {
+	if rd == nil {
+		return false, nil, nil
+	}
+	if len(a.season.Student) > 0 && rd.InitSHA == "" {
+		return false, nil, nil
+	}
+	if a.baselineDisputed(s, rd) {
+		return false, nil, nil
+	}
+	isEst := est || (acct != nil && acct.Anchor)
+	sim := *s
+	if isEst && acct != nil && incoming != nil {
+		sim.Baselines = maps.Clone(s.Baselines)
+		if sim.Baselines == nil {
+			sim.Baselines = map[string]*Baseline{}
+		}
+		sim.Baselines[baselineKey(rd.Idx, acct.ID)] = incoming
+	}
+	if a.baselineDisputed(&sim, rd) {
+		return false, nil, nil
+	}
+	simAll := a.roundBaselines(&sim, rd)
+	simKept := a.baselinesKept(&sim, rd)
+	if len(simKept) < baselineQuorum-1 {
+		return false, nil, nil
+	}
+	inSimAll := make(map[int64]bool, len(simAll))
+	for _, b := range simAll {
+		inSimAll[b.AccountID] = true
+	}
+	inKept := make(map[int64]bool, len(simKept))
+	for _, b := range simKept {
+		inKept[b.AccountID] = true
+	}
+	maxRival := 0
+	for _, b := range simAll {
+		if inKept[b.AccountID] {
+			continue
+		}
+		cohort := 0
+		for _, other := range simAll {
+			if other == b || a.baselinesAgree(rd, b, other) {
+				cohort++
+			}
+		}
+		if cohort > maxRival {
+			maxRival = cohort
+		}
+	}
+	otherLive := map[int64]bool{}
+	t := now()
+	for _, c := range s.Claims {
+		if c.RoundIdx != rd.Idx || c.Kind != "grade" || !c.live(t) {
+			continue
+		}
+		if (acct != nil && c.AccountID == acct.ID) || inSimAll[c.AccountID] {
+			continue
+		}
+		if ca := s.Accounts[c.AccountID]; ca != nil && (a.established(ca) || ca.Anchor) {
+			otherLive[c.AccountID] = true
+		}
+	}
+	k := len(otherLive)
+	if k == 0 {
+		return maxRival < len(simKept), inKept, otherLive
+	}
+	if k >= len(simAll) {
+		return false, nil, otherLive
+	}
+	lo, hi := medianBounds(itemsOf(simAll), k)
+	if len(lo) == 0 || len(hi) == 0 {
+		return false, nil, otherLive
+	}
+	tol := a.tolerance().Baseline
+	var stableKept []*Baseline
+	stableVoters = make(map[int64]bool, len(simKept))
+	for _, b := range simKept {
+		devLo, _, err1 := a.season.Exam.ScoreItems(rd.ExamTable, diffItems(b.Items, lo), rd.Shares)
+		devHi, _, err2 := a.season.Exam.ScoreItems(rd.ExamTable, diffItems(b.Items, hi), rd.Shares)
+		if err1 == nil && err2 == nil && within(devLo, tol) && within(devHi, tol) {
+			stableKept = append(stableKept, b)
+			stableVoters[b.AccountID] = true
+		}
+	}
+	coreSize := 0
+	for _, b := range stableKept {
+		clique := []*Baseline{b}
+		for _, other := range stableKept {
+			if other == b {
+				continue
+			}
+			ok := true
+			for _, m := range clique {
+				if !a.baselinesAgree(rd, m, other) {
+					ok = false
+					break
+				}
+			}
+			if ok {
+				clique = append(clique, other)
+			}
+		}
+		if len(clique) > coreSize {
+			coreSize = len(clique)
+		}
+	}
+	return coreSize >= baselineQuorum-1 && maxRival+k < coreSize, stableVoters, otherLive
+}
+
+// baselineConsensusLocked reports whether the round's kept established baseline cohort is already
+// irrevocable under any possible baseline submissions from remaining live established claims.
+func (a *App) baselineConsensusLocked(s *State, rd *Round, acct *Account, est bool, incoming *Baseline) bool {
+	locked, _, _ := a.baselineConsensusState(s, rd, acct, est, incoming)
+	return locked
+}
+
+// baselineAdmissionRefuses reports whether an incoming baseline measurement must be refused at
+// admission with HTTP 409 because it deviates beyond tolerance from an already-locked established
+// baseline consensus that neither this report nor any outstanding live baseline-requested claim
+// can tie or overturn.
+func (a *App) baselineAdmissionRefuses(s *State, rd *Round, acct *Account, est bool, incoming *Baseline) (dev float64, refuse bool) {
+	if acct == nil || incoming == nil {
+		return 0, false
+	}
+	dev, ok := a.baselineDev(s, rd, acct.ID, incoming.Items)
+	if !ok || within(dev, a.tolerance().Baseline) {
+		return dev, false
+	}
+	if !a.baselineConsensusLocked(s, rd, acct, est, incoming) {
+		return dev, false
+	}
+	if est || acct.Anchor {
+		sim := *s
+		sim.Baselines = maps.Clone(s.Baselines)
+		if sim.Baselines == nil {
+			sim.Baselines = map[string]*Baseline{}
+		}
+		sim.Baselines[baselineKey(rd.Idx, acct.ID)] = incoming
+		for _, b := range a.baselinesKept(&sim, rd) {
+			if b.AccountID == acct.ID {
+				return dev, false
+			}
+		}
+	}
+	return dev, true
 }
 
 // baselineAgrees says whether a grader's baseline is within the tolerance of the round's: its

@@ -2501,9 +2501,98 @@ func resolvePendingExaminer(
 	if err != nil {
 		return err
 	}
-	if st == nil || !st.PendingRent || st.InstanceID != "" {
+	hasPending := st != nil && st.PendingRent && st.InstanceID == ""
+	hasUnresolved := st != nil && len(st.Unresolved) > 0
+	if !hasPending && !hasUnresolved {
 		say("no pending examiner rental reservation to resolve")
 		return nil
+	}
+	now := nowFn()
+	clearActiveInstance := func(target *examinerState) {
+		target.InstanceID = ""
+		target.PendingRent = false
+		target.ReservedLabel = ""
+		target.RoundID = ""
+		target.APIKey = ""
+		target.CertPEM = ""
+		target.Upstream = ""
+		target.Price = 0
+		target.Created = time.Time{}
+		target.ObservedLiveAt = time.Time{}
+	}
+	endUnresolved := func(u *ExaminerInstance, roundID, why string, next *examinerState) (ended bool, endErr, spendErr error) {
+		if err := prov.EndExaminer(ctx, u.ID); err != nil {
+			u.ObservedLiveAt = now
+			return false, fmt.Errorf("ending unresolved examiner GPU %s: %w", u.ID, err), nil
+		}
+		price := u.Price
+		if !validRate(price) {
+			price = st.Price
+		}
+		if !validRate(price) {
+			price = 1.50
+		}
+		start := u.Created
+		if start.IsZero() {
+			start = st.Created
+		}
+		if start.IsZero() || start.After(now) {
+			start = now
+		}
+		rec := podRecord{
+			ID: u.ID, Market: "vast", Handle: "examiner", GPU: "RTX 5090",
+			Cost: price, Start: start, Alive: now, End: now,
+			For: "examiner", Round: roundID, Why: why,
+		}
+		if onSpent != nil && !spentHasExaminer(home, u.ID) {
+			if serr := onSpent(rec); serr != nil {
+				next.PendingSpends = mergePendingSpends(next.PendingSpends, []podRecord{rec})
+				spendErr = fmt.Errorf("recording ended examiner spend: %w", serr)
+			}
+		}
+		say("ended unresolved examiner GPU (machine %s)", u.ID)
+		return true, nil, spendErr
+	}
+	if !hasPending {
+		if !end {
+			e := fmt.Errorf("examiner.json has %d unresolved examiner instance(s) awaiting termination; run `stet-cloud examiner resolve --end` to retry", len(st.Unresolved))
+			say("%v", e)
+			return e
+		}
+		if dryRun {
+			for _, u := range st.Unresolved {
+				say("would retry ending unresolved examiner GPU (machine %s)", u.ID)
+			}
+			return nil
+		}
+		next := *st
+		next.Unresolved = nil
+		var firstEndErr, spendErr error
+		for i := range st.Unresolved {
+			u := st.Unresolved[i]
+			if u.ID == "" {
+				continue
+			}
+			ok, eErr, sErr := endUnresolved(&u, st.RoundID, "resolved unresolved examiner teardown (--end)", &next)
+			if !ok {
+				next.Unresolved = append(next.Unresolved, u)
+				if firstEndErr == nil {
+					firstEndErr = eErr
+				}
+			} else if next.InstanceID != "" && u.ID == next.InstanceID {
+				clearActiveInstance(&next)
+			}
+			if sErr != nil && spendErr == nil {
+				spendErr = sErr
+			}
+		}
+		if werr := writeExaminerState(home, &next); werr != nil {
+			return fmt.Errorf("updating examiner.json after resolving unresolved instances: %w", werr)
+		}
+		if firstEndErr != nil {
+			return firstEndErr
+		}
+		return spendErr
 	}
 	rawInsts, err := prov.ListExaminers(ctx)
 	if err != nil {
@@ -2515,22 +2604,25 @@ func resolvePendingExaminer(
 			matches = append(matches, rawInsts[i])
 		}
 	}
-	now := nowFn()
 	if len(matches) > 0 {
 		if end {
 			if dryRun {
 				for _, m := range matches {
 					say("would end examiner GPU (machine %s) for reservation %s", m.ID, st.ReservedLabel)
 				}
+				for _, u := range st.Unresolved {
+					say("would retry ending unresolved examiner GPU (machine %s)", u.ID)
+				}
 				return nil
 			}
 			next := examinerState{
 				PendingSpends: append([]podRecord(nil), st.PendingSpends...),
-				Unresolved:    append([]ExaminerInstance(nil), st.Unresolved...),
 			}
 			var firstEndErr, spendErr error
 			var failedEnds []ExaminerInstance
+			handledIDs := map[string]bool{}
 			for _, match := range matches {
+				handledIDs[match.ID] = true
 				if err := prov.EndExaminer(ctx, match.ID); err != nil {
 					u := match
 					if u.Created.IsZero() {
@@ -2572,10 +2664,26 @@ func resolvePendingExaminer(
 				}
 				say("ended examiner GPU (machine %s) for reservation %s", match.ID, st.ReservedLabel)
 			}
+			for i := range st.Unresolved {
+				u := st.Unresolved[i]
+				if u.ID == "" || handledIDs[u.ID] {
+					continue
+				}
+				ok, eErr, sErr := endUnresolved(&u, st.RoundID, "resolved unresolved examiner teardown (--end)", &next)
+				if !ok {
+					failedEnds = append(failedEnds, u)
+					if firstEndErr == nil {
+						firstEndErr = eErr
+					}
+				}
+				if sErr != nil && spendErr == nil {
+					spendErr = sErr
+				}
+			}
 			if len(failedEnds) > 0 {
 				// Persist failed teardowns strictly in Unresolved (with InstanceID/APIKey/CertPEM
-				// cleared) so snapshotFromState continues accounting for slot/rate/spend AND the
-				// next Reconcile unconditionally retries EndExaminer instead of re-adopting them.
+				// cleared) so snapshotFromState continues accounting for slot/rate/spend AND both
+				// `examiner resolve --end` retries and Reconcile unconditionally retry EndExaminer.
 				next.Unresolved = mergeUnresolvedLists(next.Unresolved, failedEnds)
 			}
 			if werr := writeExaminerState(home, &next); werr != nil {
@@ -2615,18 +2723,46 @@ func resolvePendingExaminer(
 	}
 	if dryRun {
 		say("would clear pending examiner reservation %s (confirmed absent on Vast.ai)", st.ReservedLabel)
+		if end {
+			for _, u := range st.Unresolved {
+				say("would retry ending unresolved examiner GPU (machine %s)", u.ID)
+			}
+		}
 		return nil
 	}
 	label := st.ReservedLabel
 	next := examinerState{
 		PendingSpends: append([]podRecord(nil), st.PendingSpends...),
-		Unresolved:    append([]ExaminerInstance(nil), st.Unresolved...),
+	}
+	var firstEndErr, spendErr error
+	if end {
+		for i := range st.Unresolved {
+			u := st.Unresolved[i]
+			if u.ID == "" {
+				continue
+			}
+			ok, eErr, sErr := endUnresolved(&u, st.RoundID, "resolved unresolved examiner teardown (--end)", &next)
+			if !ok {
+				next.Unresolved = append(next.Unresolved, u)
+				if firstEndErr == nil {
+					firstEndErr = eErr
+				}
+			}
+			if sErr != nil && spendErr == nil {
+				spendErr = sErr
+			}
+		}
+	} else {
+		next.Unresolved = append([]ExaminerInstance(nil), st.Unresolved...)
 	}
 	if err := writeExaminerState(home, &next); err != nil {
 		return fmt.Errorf("clearing pending examiner reservation %s: %w", label, err)
 	}
 	say("cleared pending examiner reservation %s (confirmed absent on Vast.ai; no spend recorded)", label)
-	return nil
+	if firstEndErr != nil {
+		return firstEndErr
+	}
+	return spendErr
 }
 
 // startExaminer initializes and starts the Fleet's automated ephemeral examiner if --examiner-addr

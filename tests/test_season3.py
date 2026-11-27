@@ -5476,3 +5476,74 @@ def test_review21_exam_scoring_deterministic_no_index_add_and_guard(monkeypatch)
     grade.sit_exam(grade.Trained(result={}, trained=True, model=fake_cuda_model, enc=None, device=types.SimpleNamespace(type="cpu")), rnd, s3.scale("nano"), exam)
     assert det_flags == [True, False], f"expected _deterministic_cuda flags [True, False], got {det_flags}"
 
+
+def test_review22_fetch_round_shares_prefers_server_response_over_stale_cache(monkeypatch, tmp_path):
+    """Review 22 P2 #5: fetch_round_shares() MUST prefer the current server response's language
+    shares and refresh the cache on disk rather than returning stale cached weights from another
+    server sharing the same round ID and exam digest, falling back to cache only when the server
+    supplies no weights."""
+    import dataclasses
+
+    from stet import client, data
+    from stet.exam.aggregate import plan_of, round_score
+    from stet.exam.items import Item, digest
+    from stet.spec import load_season, official_round
+
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    monkeypatch.setenv("STET_DEV", "1")
+    monkeypatch.setattr(client, "verify_beacon", lambda *a, **k: None)
+
+    s3 = load_season("s3")
+    items = (
+        [Item(kind="answer", corner="explain/en/wiki", fmt="prose", lang="en", source=f"explain:wikipedia:en:{i}", ctx=f"Ex {i}.", cont=f" Answer {i}.") for i in range(24)]
+        + [Item(kind="answer", corner="explain/de/wiki", fmt="prose", lang="de", source=f"explain:wikipedia:de:{i}", ctx=f"Erkl {i}.", cont=f" Antwort {i}.") for i in range(24)]
+    )
+    exam_sha = digest(items)
+    rnd = dataclasses.replace(
+        official_round(
+            s3,
+            41,
+            {"round": 123600, "randomness": "88" * 32},
+            {"crawl": "CC-MAIN-2026-43", "paths_sha256": "99" * 32, "n_shards": 100000},
+        ),
+        exam_digest=exam_sha,
+    )
+
+    # Seed stale cached weights (10% en, 90% de) from another server sharing the cache directory.
+    data.save_round_shares(rnd, {"en": 10.0, "de": 90.0})
+    assert data.round_shares(rnd) == {"en": 10.0, "de": 90.0}
+
+    # 1. Server returns 90% en / 10% de in GET /api/v1/rounds/{rid} -> fetch_round MUST refresh
+    #    the cache so local scoring matches the server (+0.080 bpb, NOT stale -0.080 bpb!).
+    round_doc = {**rnd.describe(), "status": "open", "languages": {"en": 90.0, "de": 10.0}}
+    monkeypatch.setattr(client, "request", lambda method, path, **kw: {"round": round_doc} if path == f"/api/v1/rounds/{rnd.id}" else {})
+    fetched = client.fetch_round(s3, 41)
+    assert fetched.exam_digest == exam_sha
+    assert data.round_shares(fetched) == {"en": 90.0, "de": 10.0}
+    item_gains = [0.10] * 24 + [-0.10] * 24
+    agg = round_score(items, item_gains, shares=data.round_shares(fetched), plan=plan_of(s3))
+    assert agg["score"] == pytest.approx(0.080, abs=1e-6), f"expected +0.080 bpb with refreshed server weights, got {agg['score']}"
+
+    # 2. Settled round omitting `languages` on /rounds/{rid} but returning updated weights on
+    #    /rounds/{rid}/scores MUST also refresh stale cached weights.
+    data.save_round_shares(rnd, {"en": 10.0, "de": 90.0})
+    monkeypatch.setattr(
+        client,
+        "request",
+        lambda method, path, **kw: {"languages": {"en": 75.0, "de": 25.0}} if path.endswith("/scores") else {},
+    )
+    got_settled = client.fetch_round_shares(rnd, {"status": "settled"})
+    assert got_settled == {"en": 75.0, "de": 25.0}
+    assert data.round_shares(rnd) == {"en": 75.0, "de": 25.0}
+
+    # 3. When the server supplies no valid weights (or /scores fails), cached weights remain the fallback.
+    monkeypatch.setattr(
+        client,
+        "request",
+        lambda method, path, **kw: (_ for _ in ()).throw(client.ApiError(503, "down")),
+    )
+    got_fallback = client.fetch_round_shares(rnd, {"status": "settled"})
+    assert got_fallback == {"en": 75.0, "de": 25.0}
+    assert client.fetch_round_shares(rnd, {"status": "open", "languages": {"en": True, "de": -1.0}}) == {"en": 75.0, "de": 25.0}
+
+

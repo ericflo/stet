@@ -123,14 +123,16 @@ type Launch struct {
 
 // Rental is one machine rented on a market, as the market says.
 type Rental struct {
-	Market  string
-	ID      string
-	Name    string // the worker key's handle, where the market keeps a name; "" where it does not
-	Card    string
-	Price   float64 // dollars an hour
-	State   string  // starting, running, stopped; anything else is the market's own word
-	Status  string  // the market's own word
-	Created time.Time
+	Market      string
+	ID          string
+	Name        string // the worker key's handle, where the market keeps a name; "" where it does not
+	Host        string // provider host/server ID when reported (e.g. Clore order server ID `si`)
+	Card        string
+	Price       float64 // dollars an hour
+	State       string  // starting, running, stopped; anything else is the market's own word
+	Status      string  // the market's own word
+	Created     time.Time
+	Terminating bool // persisted outstanding termination (e.g. failed `workers resolve --end`)
 	// What the market says of the machine itself, for seeing why one does not start: whether
 	// its container is up ("yes", "no", or "" where the market does not say), its phase in
 	// the market's own words (one that changes only as the machine moves on: "pulling image",

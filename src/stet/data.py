@@ -16,6 +16,7 @@ import gzip
 import hashlib
 import io
 import json
+import math
 import mmap
 import os
 import re
@@ -903,18 +904,30 @@ def exam_shares_path(rnd: Round, digest: str) -> Path:
     return cache_dir() / "rounds" / rnd.id / f"exam-shares-{digest[:16]}.json"
 
 
-def save_round_shares(rnd: Round, shares: dict[str, float]) -> None:
-    """Atomically cache an official round's measured corpus language shares."""
-    if rnd.kind != "official" or not rnd.exam_digest or not isinstance(shares, dict) or not shares:
-        return
+def normalize_round_shares(shares: object) -> dict[str, float] | None:
+    """Validate and normalize a language-share mapping (percent weights in [0, 100], sum > 0)."""
+    if not isinstance(shares, dict) or not shares:
+        return None
     clean: dict[str, float] = {}
     for k, v in shares.items():
+        if not isinstance(k, str) or not k or isinstance(v, bool):
+            continue
         try:
             fv = float(v)
         except (TypeError, ValueError):
             continue
-        if isinstance(k, str) and k and fv >= 0.0 and fv <= 100.0 and fv == fv:
+        if math.isfinite(fv) and 0.0 <= fv <= 100.0:
             clean[k] = fv
+    if not clean or not any(v > 0.0 for v in clean.values()):
+        return None
+    return clean
+
+
+def save_round_shares(rnd: Round, shares: dict[str, float]) -> None:
+    """Atomically cache an official round's measured corpus language shares."""
+    if rnd.kind != "official" or not rnd.exam_digest:
+        return
+    clean = normalize_round_shares(shares)
     if not clean:
         return
     path = exam_shares_path(rnd, rnd.exam_digest)
@@ -936,13 +949,7 @@ def round_shares(rnd: Round) -> dict[str, float] | None:
         raw = json.loads(path.read_text())
     except (OSError, ValueError):
         return None
-    if not isinstance(raw, dict) or not raw:
-        return None
-    out: dict[str, float] = {}
-    for k, v in raw.items():
-        if isinstance(k, str) and isinstance(v, (int, float)) and v >= 0.0:
-            out[k] = float(v)
-    return out or None
+    return normalize_round_shares(raw)
 
 
 def round_exam_meta(rnd: Round) -> dict:

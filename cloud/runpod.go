@@ -261,10 +261,14 @@ func (r *RunPod) create(ctx context.Context, spec NewPod, knownIDs map[string]bo
 		if lerr != nil {
 			return nil
 		}
+		var matched []*Pod
 		for i := range pods {
 			if pods[i].Name == spec.Name && pods[i].live() && !knownIDs[pods[i].ID] {
-				return &pods[i]
+				matched = append(matched, &pods[i])
 			}
+		}
+		if len(matched) == 1 {
+			return matched[0]
 		}
 		return nil
 	}

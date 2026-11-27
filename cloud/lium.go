@@ -195,13 +195,17 @@ func (m *liumMarket) Rent(ctx context.Context, o Offer, l Launch) (*Rental, erro
 		if lerr != nil {
 			return nil
 		}
+		var matched []*Rental
 		for i := range rs {
 			if rs[i].Name == l.Name && rs[i].live() && !l.KnownIDs[rs[i].ID] {
 				if !validRate(rs[i].Price) && validRate(o.Price) {
 					rs[i].Price = o.Price
 				}
-				return &rs[i]
+				matched = append(matched, &rs[i])
 			}
+		}
+		if len(matched) == 1 {
+			return matched[0]
 		}
 		return nil
 	}

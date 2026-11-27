@@ -285,6 +285,8 @@ func (w *Worker) state(now time.Time, p Policy) string {
 		return "pending"
 	case w.Rental == nil:
 		return "free"
+	case w.Rental.Terminating:
+		return "terminating"
 	case w.Rental.State == "stopped":
 		return "stopped"
 	case w.Machine != nil && w.Machine.Busy == "grade":
@@ -456,8 +458,12 @@ func (p Policy) decideNext(w *Work, workers []*Worker, spentToday float64, now t
 	var idle, waitingIdle []*Worker
 	for _, wk := range workers {
 		for _, extra := range wk.ExtraRentals {
-			if extra != nil && extra.State == "stopped" {
-				d.End = append(d.End, Ending{Worker: wk, Rental: extra, Why: "stopped duplicate machine on the same key"})
+			if extra != nil && (extra.State == "stopped" || extra.Terminating) {
+				why := "stopped duplicate machine on the same key"
+				if extra.Terminating {
+					why = "outstanding termination on duplicate machine"
+				}
+				d.End = append(d.End, Ending{Worker: wk, Rental: extra, Why: why})
 			}
 		}
 		switch st := wk.state(now, p); st {
@@ -471,6 +477,8 @@ func (p Policy) decideNext(w *Work, workers []*Worker, spentToday float64, now t
 			}
 		case "pending":
 			d.Live++
+		case "terminating":
+			d.End = append(d.End, Ending{Worker: wk, Rental: wk.Rental, Why: "outstanding termination"})
 		case "stopped":
 			d.End = append(d.End, Ending{Worker: wk, Why: "it stopped, or never asked for work", Failed: true})
 		case "quiet":

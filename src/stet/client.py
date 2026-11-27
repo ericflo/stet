@@ -220,23 +220,24 @@ def fetch_round(season, index: int):
 
 def fetch_round_shares(rnd, round_doc: dict | None = None) -> dict[str, float] | None:
     """Fetch and cache an official round's measured corpus language shares so `stet score` and
-    `stet run` weight official replays identically to the server."""
+    `stet run` weight official replays identically to the server.
+
+    Prefers shares from the current server response (refreshing the on-disk cache), falling back
+    to cached shares only when the server supplies none."""
     from . import data
 
-    if cached := data.round_shares(rnd):
-        return cached
-    shares = (round_doc or {}).get("languages")
-    if not (isinstance(shares, dict) and shares) and (round_doc or {}).get("status") == "settled":
+    shares = data.normalize_round_shares((round_doc or {}).get("languages"))
+    if not shares and (round_doc or {}).get("status") == "settled":
         try:
             scores = request("GET", f"/api/v1/rounds/{rnd.id}/scores", timeout=120, limit=EXAM_LIMIT)
-            if isinstance(scores, dict) and isinstance(scores.get("languages"), dict):
-                shares = scores["languages"]
+            if isinstance(scores, dict):
+                shares = data.normalize_round_shares(scores.get("languages"))
         except ApiError:
             shares = None
-    if isinstance(shares, dict) and shares:
+    if shares:
         data.save_round_shares(rnd, shares)
-        return data.round_shares(rnd)
-    return None
+        return dict(shares)
+    return data.round_shares(rnd)
 
 
 def fetch_public_exam(rnd) -> None:
