@@ -102,7 +102,7 @@ func (f *Fleet) loadKeys() error {
 	if err != nil {
 		return err
 	}
-	f.keys = nil
+	var keys []*Key
 	for _, p := range paths {
 		k, err := loadKey(p)
 		if err != nil {
@@ -111,9 +111,10 @@ func (f *Fleet) loadKeys() error {
 		if k.Handle == "" {
 			k.Handle = strings.TrimSuffix(filepath.Base(p), ".json")
 		}
-		f.keys = append(f.keys, k)
+		keys = append(keys, k)
 	}
-	sort.Slice(f.keys, func(i, j int) bool { return f.keys[i].Handle < f.keys[j].Handle })
+	sort.Slice(keys, func(i, j int) bool { return keys[i].Handle < keys[j].Handle })
+	f.keys = keys
 	return nil
 }
 
@@ -370,7 +371,11 @@ func (f *Fleet) note(l *ledger, rentals []Rental, answered map[string]bool) erro
 			}
 			r.Why = why
 			f.event(&gone, r.Handle, "gone", why)
-			if err := f.retire(l, key, minTime(now, r.Alive.Add(2*f.o.Every))); err != nil {
+			every := f.o.Every
+			if every <= 0 {
+				every = time.Minute
+			}
+			if err := f.retire(l, key, minTime(now, r.Alive.Add(2*every))); err != nil {
 				return err
 			}
 		}
@@ -1138,17 +1143,21 @@ func (f *Fleet) launchSomeRentals(ctx context.Context, v *View, n int, long, cur
 			return rented, err
 		}
 		pod, err := f.rent(ctx, v, w.Key, gpus, site, grades, plan, wantCurators)
+		if pod != nil {
+			// Preserve the provider-acknowledged rental ID even if local ledger persistence
+			// failed so callers (such as cmdProbe) can still tear it down immediately.
+			w.Rental = pod
+			if rec := v.Ledger.Pods[ledgerKey(pod.Market, pod.ID)]; rec != nil {
+				w.Plan = rec.Grades
+			}
+			rented = append(rented, pod)
+		}
 		if err != nil {
 			return rented, err
 		}
 		if pod == nil {
 			break // nothing fits: no point trying the next key
 		}
-		w.Rental = pod
-		if rec := v.Ledger.Pods[ledgerKey(pod.Market, pod.ID)]; rec != nil {
-			w.Plan = rec.Grades
-		}
-		rented = append(rented, pod)
 	}
 	return rented, nil
 }

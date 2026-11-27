@@ -1,0 +1,127 @@
+[
+  {
+    "name": "rtx_3060_12gb_sm86_bf16_true",
+    "hardware": {"device": "cuda", "backend": "cuda", "gpu": "NVIDIA GeForce RTX 3060", "vram_gb": 12.0, "cuda_capability": "8.6", "bf16_native": true},
+    "eligible": true
+  },
+  {
+    "name": "rtx_4090_24gb_sm89_bf16_true",
+    "hardware": {"device": "cuda", "backend": "cuda", "gpu": "NVIDIA GeForce RTX 4090", "vram_gb": 24.0, "cuda_capability": "8.9", "bf16_native": true},
+    "eligible": true
+  },
+  {
+    "name": "rtx_5090_32gb_sm120_bf16_true",
+    "hardware": {"device": "cuda", "backend": "cuda", "gpu": "NVIDIA GeForce RTX 5090", "vram_gb": 32.0, "cuda_capability": "12.0", "bf16_native": true},
+    "eligible": true
+  },
+  {
+    "name": "qualifying_capability_only_omitted_bf16",
+    "hardware": {"device": "cuda", "backend": "cuda", "gpu": "NVIDIA L4", "vram_gb": 24.0, "cuda_capability": "8.9"},
+    "eligible": true
+  },
+  {
+    "name": "qualifying_bf16_only_omitted_capability",
+    "hardware": {"device": "cuda", "backend": "cuda", "gpu": "NVIDIA GeForce RTX 4080 SUPER", "vram_gb": 16.0, "bf16_native": true},
+    "eligible": true
+  },
+  {
+    "name": "tesla_t4_15gb_sm75_bf16_false",
+    "hardware": {"device": "cuda", "backend": "cuda", "gpu": "Tesla T4", "vram_gb": 15.0, "cuda_capability": "7.5", "bf16_native": false},
+    "eligible": false
+  },
+  {
+    "name": "tesla_t4_15gb_absent_capability",
+    "hardware": {"device": "cuda", "backend": "cuda", "gpu": "NVIDIA Tesla T4", "vram_gb": 15.0},
+    "eligible": false
+  },
+  {
+    "name": "tesla_t4_15gb_contradictory_bf16_true_sm75",
+    "hardware": {"device": "cuda", "backend": "cuda", "gpu": "Tesla T4", "vram_gb": 15.0, "cuda_capability": "7.5", "bf16_native": true},
+    "eligible": false
+  },
+  {
+    "name": "v100_16gb_sm70_bf16_false",
+    "hardware": {"device": "cuda", "backend": "cuda", "gpu": "Tesla V100-SXM2-16GB", "vram_gb": 16.0, "cuda_capability": "7.0", "bf16_native": false},
+    "eligible": false
+  },
+  {
+    "name": "rtx_3060_ti_8gb_sm86_bf16_true",
+    "hardware": {"device": "cuda", "backend": "cuda", "gpu": "NVIDIA GeForce RTX 3060 Ti", "vram_gb": 8.0, "cuda_capability": "8.6", "bf16_native": true},
+    "eligible": false
+  },
+  {
+    "name": "under_floor_10_9gb_sm86_bf16_true",
+    "hardware": {"device": "cuda", "backend": "cuda", "gpu": "NVIDIA GeForce RTX 3080", "vram_gb": 10.9, "cuda_capability": "8.6", "bf16_native": true},
+    "eligible": false
+  },
+  {
+    "name": "absent_vram_rtx_4090",
+    "hardware": {"device": "cuda", "backend": "cuda", "gpu": "NVIDIA GeForce RTX 4090", "cuda_capability": "8.9", "bf16_native": true},
+    "eligible": false
+  },
+  {
+    "name": "absent_capability_and_bf16_rtx_4090",
+    "hardware": {"device": "cuda", "backend": "cuda", "gpu": "NVIDIA GeForce RTX 4090", "vram_gb": 24.0},
+    "eligible": false
+  },
+  {
+    "name": "absent_capability_and_bf16_unknown_gpu",
+    "hardware": {"device": "cuda", "backend": "cuda", "gpu": "Unknown GPU", "vram_gb": 24.0},
+    "eligible": false
+  },
+  {
+    "name": "malformed_capability_string",
+    "hardware": {"device": "cuda", "backend": "cuda", "gpu": "NVIDIA GeForce RTX 4090", "vram_gb": 24.0, "cuda_capability": "8.x", "bf16_native": true},
+    "eligible": false
+  },
+  {
+    "name": "signed_plus_capability_string",
+    "hardware": {"device": "cuda", "backend": "cuda", "gpu": "NVIDIA GeForce RTX 4090", "vram_gb": 24.0, "cuda_capability": "+8.0", "bf16_native": true},
+    "eligible": false
+  },
+  {
+    "name": "signed_minus_zero_capability_string",
+    "hardware": {"device": "cuda", "backend": "cuda", "gpu": "NVIDIA GeForce RTX 4090", "vram_gb": 24.0, "cuda_capability": "8.-0", "bf16_native": true},
+    "eligible": false
+  },
+  {
+    "name": "unicode_arabic_digits_capability",
+    "hardware": {"device": "cuda", "backend": "cuda", "gpu": "NVIDIA GeForce RTX 4090", "vram_gb": 24.0, "cuda_capability": "٨.٠", "bf16_native": true},
+    "eligible": false
+  },
+  {
+    "name": "unicode_superscript_digits_capability",
+    "hardware": {"device": "cuda", "backend": "cuda", "gpu": "NVIDIA GeForce RTX 4090", "vram_gb": 24.0, "cuda_capability": "⁸.⁰", "bf16_native": true},
+    "eligible": false
+  },
+  {
+    "name": "string_vram_gb_rejected",
+    "hardware": {"device": "cuda", "backend": "cuda", "gpu": "NVIDIA GeForce RTX 4090", "vram_gb": "24", "cuda_capability": "8.9", "bf16_native": true},
+    "eligible": false
+  },
+  {
+    "name": "negative_vram_gb_rejected",
+    "hardware": {"device": "cuda", "backend": "cuda", "gpu": "NVIDIA GeForce RTX 4090", "vram_gb": -1.0, "cuda_capability": "8.9", "bf16_native": true},
+    "eligible": false
+  },
+  {
+    "name": "amd_rocm_96gb",
+    "hardware": {"device": "cuda", "backend": "rocm", "gpu": "AMD Radeon 8060S", "vram_gb": 96.0},
+    "eligible": false
+  },
+  {
+    "name": "untagged_cuda_backend",
+    "hardware": {"device": "cuda", "gpu": "NVIDIA GeForce RTX 5090", "vram_gb": 32.0, "cuda_capability": "12.0", "bf16_native": true},
+    "eligible": false
+  },
+  {
+    "name": "cpu_only",
+    "hardware": {"device": "cpu"},
+    "eligible": false
+  },
+  {
+    "name": "empty_hardware",
+    "hardware": {},
+    "eligible": false
+  }
+]

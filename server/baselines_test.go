@@ -2435,7 +2435,7 @@ func TestPinnedStudentRejectsMissingMalformedBaselineInitAndDisallowedBaselineHa
 	w.app.cfg.Dev = false
 	initA := strings.Repeat("a", 64)
 	tokA := strings.Repeat("1", 64)
-	nvHW := map[string]any{"device": "cuda", "backend": "cuda", "gpu": "NVIDIA GeForce RTX 5090"}
+	nvHW := map[string]any{"device": "cuda", "backend": "cuda", "gpu": "NVIDIA GeForce RTX 5090", "vram_gb": 32.0, "cuda_capability": "12.0", "bf16_native": true}
 
 	// 1. Absent baseline.init_sha256 alongside valid train.init_sha256 -> HTTP 400.
 	pMissing := w.result(c, 5.95, 6.00)

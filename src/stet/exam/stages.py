@@ -148,14 +148,22 @@ def whole_exam(rnd, work: Path, items_file=None, shares_file=None, *, server_sha
     from ..data import cache_dir, round_shares
     from . import examine
 
+    authoritative = server_shares if isinstance(server_shares, dict) and server_shares else round_shares(rnd)
     explicit_shares = _read(Path(shares_file)) if shares_file else None
-    auth_shares = explicit_shares or (server_shares if isinstance(server_shares, dict) and server_shares else round_shares(rnd))
+    if shares_file and not (isinstance(explicit_shares, dict) and explicit_shares):
+        raise Stop(f"{rnd.id}: --shares ({shares_file}) must be a non-empty JSON object of language shares")
+    if authoritative and explicit_shares is not None:
+        if examine.shares_digest(explicit_shares) != examine.shares_digest(authoritative):
+            raise Stop(
+                f"{rnd.id}: --shares ({shares_file}) does not match the language shares the round committed to on the server"
+            )
+    auth_shares = authoritative or explicit_shares
     kept, kept_shares = work / rnd.id / "exam.jsonl.zst", work / rnd.id / "languages.json"
     if not (kept.exists() and kept_shares.exists()):
         made = cache_dir() / "examine" / rnd.id
         items = shares = None
         if items_file and shares_file:
-            items, shares = _items_of(Path(items_file).read_bytes()), dict(explicit_shares)
+            items, shares = _items_of(Path(items_file).read_bytes()), dict(auth_shares)
         else:
             # 1. Exact (items_digest, server_shares_digest) staged directory when server shares are known.
             if getattr(rnd, "exam_digest", "") and auth_shares:

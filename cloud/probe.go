@@ -42,9 +42,20 @@ func cmdProbe(ctx context.Context, f *Fleet, check string, wait time.Duration) e
 	if m == nil {
 		return fmt.Errorf("%s has no key: %s", marketTitle(market), f.off[market])
 	}
-	rented, err := cmdUpRentals(ctx, f, 1)
-	if err != nil {
-		return err
+	rented, upErr := cmdUpRentals(ctx, f, 1)
+	if upErr != nil {
+		if len(rented) > 0 && !f.o.DryRun && rented[0].ID != "" && rented[0].ID != "dry-run" {
+			pod := rented[0]
+			podMarket := pod.Market
+			if podMarket == "" {
+				podMarket = market
+			}
+			f.say("probe machine %s on %s was created, but local accounting failed (%v); tearing down immediately", pod.ID, marketTitle(podMarket), upErr)
+			if endErr := cmdDownRental(context.WithoutCancel(ctx), f, podMarket, pod.ID); endErr != nil {
+				return fmt.Errorf("probe launch accounting failed (%v); cleanup of %s on %s reported: %w", upErr, pod.ID, marketTitle(podMarket), endErr)
+			}
+		}
+		return upErr
 	}
 	if len(rented) == 0 {
 		return fmt.Errorf("nothing was rented on %s", marketTitle(market))

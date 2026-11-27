@@ -51,13 +51,12 @@ import (
 //      by the container-side self-destruct timer), logging spend to spent.jsonl.
 
 const (
-	defaultExaminerImage     = "vllm/vllm-openai@sha256:d24e5fc73f0b859bd76c9d2f6f6fa4da3001afd7637f2610876420f3027ea6c7"
-	defaultExaminerModel     = "thinkingmachines/Inkling-2-Mini"
-	defaultExaminerRevision  = "c9d028302cd0f035fdf8e7e91f089a4ce94d2195"
-	examinerLabelPrefix      = "stet-examiner"
-	examinerServerName       = "stet-examiner.internal"
-	examinerDiskGB           = 80
-	examinerPendingRentGrace = 3 * time.Minute
+	defaultExaminerImage    = "vllm/vllm-openai@sha256:d24e5fc73f0b859bd76c9d2f6f6fa4da3001afd7637f2610876420f3027ea6c7"
+	defaultExaminerModel    = "thinkingmachines/Inkling-2-Mini"
+	defaultExaminerRevision = "c9d028302cd0f035fdf8e7e91f089a4ce94d2195"
+	examinerLabelPrefix     = "stet-examiner"
+	examinerServerName      = "stet-examiner.internal"
+	examinerDiskGB          = 80
 )
 
 // errRentRejected marks a provider response that definitively refused to create an instance
@@ -110,6 +109,7 @@ type ExaminerLaunch struct {
 	CertPEM    []byte
 	KeyPEM     []byte
 	TTLSeconds int
+	ExpireAt   int64 // absolute UTC Unix deadline for container-side self-destruct watchdog
 	HFToken    string
 	DiskGB     int
 }
@@ -381,22 +381,18 @@ func examinerTLSConfig(certPEM []byte, now func() time.Time) (*tls.Config, error
 	}, nil
 }
 
-// examinerAccrualEnd returns the accrual end time for an examiner instance: capped at the
-// container-side self-destruct TTL when unobserved (controller offline), but extending through
-// the latest time the provider confirmed the contract was still live when teardown failed past TTL.
-func examinerAccrualEnd(created, observedLive, now time.Time, timeout time.Duration) time.Time {
+// examinerAccrualEnd returns the conservative accrual end time for an examiner instance whose
+// termination has not been independently timestamped by the provider. Because a slow image pull,
+// broken startup, or controller outage can let a contract outlive created+timeout, we do not
+// optimistically cap accrual at created+timeout before provider confirmation; accrual runs
+// through max(now, observedLive) until termination is confirmed.
+func examinerAccrualEnd(created, observedLive, now time.Time, _ time.Duration) time.Time {
 	end := now
-	if timeout <= 0 {
-		timeout = 45 * time.Minute
+	if !observedLive.IsZero() && observedLive.After(end) {
+		end = observedLive
 	}
-	if !created.IsZero() {
-		capAt := created.Add(timeout)
-		if !observedLive.IsZero() && observedLive.After(capAt) {
-			capAt = observedLive
-		}
-		if end.After(capAt) {
-			end = capAt
-		}
+	if !created.IsZero() && end.Before(created) {
+		end = created
 	}
 	return end
 }
@@ -814,20 +810,13 @@ func (e *Examiner) fallbackHourlyRate() float64 {
 	return 1.50
 }
 
-func (e *Examiner) pendingRentGrace() time.Duration {
-	if e.cfg.Timeout > 0 && e.cfg.Timeout < examinerPendingRentGrace {
-		return e.cfg.Timeout
-	}
-	return examinerPendingRentGrace
-}
-
-// pendingRentActive reports whether an unresolved pre-rental reservation is still within its
-// provider-visibility reconciliation window and must be preserved across stale empty listings.
-func (e *Examiner) pendingRentActive(saved examinerState, now time.Time) bool {
-	if !saved.PendingRent || saved.InstanceID != "" || saved.Created.IsZero() {
-		return false
-	}
-	return now.Sub(saved.Created) < e.pendingRentGrace()
+// pendingRentActive reports whether an unresolved pre-rental reservation must remain held.
+// Because Vast.ai create calls are not idempotent, an ambiguous create whose response was lost
+// could still have produced a live paid contract that appears late; keep holding the slot and
+// hourly charge until the provider confirms its outcome (instance appears and is adopted/ended,
+// or create returned an explicit errRentRejected / errNoRoom).
+func (e *Examiner) pendingRentActive(saved examinerState, _ time.Time) bool {
+	return saved.PendingRent && saved.InstanceID == ""
 }
 
 func mergePendingSpends(a, b []podRecord) []podRecord {
@@ -1800,7 +1789,7 @@ func (e *Examiner) enforceOwnedTimeouts(ctx context.Context, owned []ExaminerIns
 // promoteReservedInstance binds a materialized PendingRent instance to saved.InstanceID and
 // e.state when it is adopted or when teardown fails on it, so snapshotFromState deduplicates it
 // against Unresolved (exact 1x slot/hourly/accrued count) and later disappearance bills it once
-// and clears state cleanly without stranding PendingRent for the rest of examinerPendingRentGrace.
+// and clears state cleanly without leaving PendingRent set.
 func (e *Examiner) promoteReservedInstance(saved *examinerState, inst ExaminerInstance) {
 	if saved.InstanceID != "" || !saved.PendingRent || saved.ReservedLabel == "" || inst.Label != saved.ReservedLabel {
 		return
@@ -2192,19 +2181,23 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 		return nil
 	}
 
-	// Preserve an active pre-rental reservation across stale provider listings until either the
-	// instance appears (and is adopted above) or the reconciliation window expires, so eventual
-	// consistency after an ambiguous create cannot trigger a second paid rental.
+	// Preserve an unresolved pre-rental reservation across stale provider listings until the
+	// provider confirms its outcome (the delayed instance appears and is adopted or ended), so a
+	// lost create confirmation can never trigger a second paid rental exceeding --max/--max-hourly.
 	if saved.InstanceID == "" && saved.PendingRent && !endedSaved {
-		if e.pendingRentActive(saved, now) {
-			rem := max(time.Second, e.pendingRentGrace()-now.Sub(saved.Created)).Round(time.Second)
-			e.say("waiting for pending examiner GPU reservation %s to appear (%s remaining in reconciliation window)", saved.ReservedLabel, rem)
-			if spendErr != nil {
-				return spendErr
-			}
-			return nil
+		elapsed := time.Duration(0)
+		if !saved.Created.IsZero() && now.After(saved.Created) {
+			elapsed = now.Sub(saved.Created).Round(time.Second)
 		}
-		e.clearState()
+		if e.cfg.Timeout > 0 && elapsed > e.cfg.Timeout {
+			e.say("examiner GPU reservation %s remains unresolved after %s (past --examiner-timeout %s); holding slot and budget until provider confirms outcome", saved.ReservedLabel, elapsed, e.cfg.Timeout)
+		} else {
+			e.say("waiting for pending examiner GPU reservation %s to appear (%s elapsed)", saved.ReservedLabel, elapsed)
+		}
+		if spendErr != nil {
+			return spendErr
+		}
+		return nil
 	} else if saved.InstanceID != "" || wasReady {
 		e.clearState()
 	}
@@ -2296,6 +2289,7 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 	}
 	label := examinerLabelPrefix + "-" + owner + "-" + needRound + "-" + apiKey[:8]
 	ttlSeconds := max(60, int(e.cfg.Timeout.Seconds()))
+	expireAt := now.Add(time.Duration(ttlSeconds) * time.Second).Unix()
 	for _, off := range fitting {
 		e.mu.RLock()
 		pendingCopy := append([]podRecord(nil), e.state.PendingSpends...)
@@ -2334,6 +2328,7 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 			CertPEM:    certPEM,
 			KeyPEM:     keyPEM,
 			TTLSeconds: ttlSeconds,
+			ExpireAt:   expireAt,
 			HFToken:    e.hfToken,
 			DiskGB:     examinerDiskGB,
 		})
@@ -2350,7 +2345,7 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 			// Keep PendingRent intact on ambiguous/transient errors (e.g. network timeout or 5xx
 			// where Vast may still have created the VM): separate CLI processes continue seeing
 			// the reserved slot, and subsequent Reconcile polls hold the reservation across stale
-			// listings until the VM appears and is adopted or the reconciliation window expires.
+			// listings until the provider confirms its outcome (the VM appears and is adopted/ended).
 			return fmt.Errorf("renting examiner GPU on Vast.ai: %w", rerr)
 		}
 		st := examinerState{

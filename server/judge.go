@@ -235,9 +235,12 @@ type Hello struct {
 // hardwareFacts is the part of a hardware description the server reads. All of it is
 // whatever the client sent.
 type hardwareFacts struct {
-	Device  string `json:"device"`
-	GPU     string `json:"gpu"`
-	Backend string `json:"backend"`
+	Device         string  `json:"device"`
+	GPU            string  `json:"gpu"`
+	Backend        string  `json:"backend"`
+	VRAMGB         float64 `json:"vram_gb"`
+	CUDACapability string  `json:"cuda_capability"`
+	BF16Native     *bool   `json:"bf16_native"`
 	// Bench is the machine's measurement of itself against the season's floor: see
 	// src/stet/bench.py.
 	Bench *struct {
@@ -1610,8 +1613,10 @@ func (a *App) claim(ctx context.Context, acctID int64, h *Hello) (*Handed, error
 	if err := a.checkHarness(h.Harness, h.Season, h.SeasonDigest); err != nil {
 		return nil, err
 	}
-	if !a.cfg.Dev && !a.season.gradesOnHardware(readHardware(h.Hardware)) {
-		return nil, fail(400, "grading for the leaderboard needs %s, so that every grade uses the same arithmetic", a.season.gradeHardwareRequirement())
+	if !a.cfg.Dev {
+		if why := a.season.gradeHardwareIssue(readHardware(h.Hardware)); why != "" {
+			return nil, fail(400, "%s", why)
+		}
 	}
 	out := &Handed{}
 	err := a.st.update(ctx, func(tx *Tx) error {
@@ -2156,8 +2161,10 @@ func (a *App) submitResult(ctx context.Context, acctID, claimID int64, p *Result
 	if !sha256Re.MatchString(p.CorpusSHA256) || !sha256Re.MatchString(p.ExamSHA256) {
 		return nil, fail(400, "the result does not say which corpus and exam it used")
 	}
-	if !a.cfg.Dev && !a.season.gradesOnHardware(readHardware(p.Hardware)) {
-		return nil, fail(400, "grades for the leaderboard must come from %s", a.season.gradeHardwareRequirement())
+	if !a.cfg.Dev {
+		if why := a.season.gradeHardwareIssue(readHardware(p.Hardware)); why != "" {
+			return nil, fail(400, "%s", why)
+		}
 	}
 	// One score for every item: how many the round has is checked against the round below.
 	check := func(sc *ExamScore, what string) error {
@@ -2255,8 +2262,10 @@ func (a *App) submitResult(ctx context.Context, acctID, claimID int64, p *Result
 		if (rd.CorpusSHA != "" && rd.CorpusSHA != p.CorpusSHA256) || (rd.ExamSHA != "" && rd.ExamSHA != p.ExamSHA256) {
 			return refuse("corpus", 0, "your corpus or exam for %s differs from the round's. This verifier rebuilds its copy once", p.Round)
 		}
-		if p.Baseline != nil && !a.cfg.Dev && !a.season.gradesOnHardware(readHardware(p.Baseline.Hardware)) {
-			return fail(400, "baselines for the leaderboard must report hardware from %s", a.season.gradeHardwareRequirement())
+		if p.Baseline != nil && !a.cfg.Dev {
+			if why := a.season.gradeHardwareIssue(readHardware(p.Baseline.Hardware)); why != "" {
+				return fail(400, "baseline hardware ineligible: %s", why)
+			}
 		}
 		initSHA := ""
 		if p.Train != nil && sha256Re.MatchString(p.Train.InitSHA256) {

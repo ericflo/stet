@@ -914,9 +914,18 @@ class Pending:
 class _SatBaseline:
     """In-memory record that THIS verifier already sat its trained baseline for a round's exam."""
 
-    def __init__(self, exam_digest: str, result: dict):
+    def __init__(self, exam_digest: str, result: dict, *, cached: bool = True):
         self.exam_digest = exam_digest
         self.result = result
+        self.cached = cached
+
+
+class _FailedBaseline:
+    """Tracks a failed shared baseline sit so remaining trained students can recover it once."""
+
+    def __init__(self, exam_digest: str, *, recovered: bool = False):
+        self.exam_digest = exam_digest
+        self.recovered = recovered
 
 
 def _verifier_id(key) -> str | None:
@@ -1037,7 +1046,7 @@ def _grade_job(job, season, scale, device, key, out, work: Path, bases: dict | N
             torch.cuda.empty_cache()
 
     base_t = (bases or {}).get(rnd.id)
-    if isinstance(base_t, _SatBaseline):
+    if isinstance(base_t, (_SatBaseline, _FailedBaseline)):
         base_t = None
     if base_t is None and asked:
         base_t = train_baseline(rnd, scale, device, progress=out.progress("baseline"), log=lambda m: out.line("", out.dim("baseline " + m)))
@@ -1184,59 +1193,92 @@ def _sit(p: Pending, bases: dict, key, scale) -> tuple[dict, dict | None]:
     only if THIS verifier has its own measurement for the round and GPU on disk."""
     from . import data
     from .grade import sit_exam
-    from .pipeline import _cached, _device_gpu_name, baseline_path, sit_baseline
+    from .pipeline import _cached, _device_gpu_name, baseline, baseline_path, cache_baseline, sit_baseline
     from .train import device_backend, hardware_backend
 
     fetch_exam(p.rnd, key)
     vid = _verifier_id(key)
     dev_bk = device_backend(p.device)
     dev_gpu = _device_gpu_name(p.device)
+
+    def _load_disk_base():
+        bp = _call_supported(baseline_path, p.rnd, scale, p.device, verifier=vid, gpu=dev_gpu)
+        b = _call_supported(
+            _cached,
+            bp,
+            want_exam_sha=p.rnd.exam_digest,
+            want_backend=dev_bk,
+            want_gpu=dev_gpu,
+            want_verifier=vid,
+        )
+        if b is not None and b.get("exam_sha256") and p.rnd.exam_digest and b.get("exam_sha256") != p.rnd.exam_digest:
+            b = None
+        if b is not None and b.get("hardware") is not None and hardware_backend(b.get("hardware")) != dev_bk:
+            b = None
+        if b is not None and dev_gpu and isinstance(b.get("hardware"), dict) and b["hardware"].get("gpu") != dev_gpu:
+            b = None
+        return b
+
     entry = bases.get(p.rnd.id)
     if wants_baseline(p.job):
         if isinstance(entry, _SatBaseline) and entry.exam_digest == p.rnd.exam_digest:
             base = entry.result
-        elif entry is not None:
-            if getattr(entry, "model", True) is None:
-                raise RuntimeError(f"the unedited student of round {p.rnd.id} is no longer in memory")
-            base = _call_supported(sit_baseline, entry, p.rnd, scale, verifier=vid, gpu=dev_gpu)
-            bases[p.rnd.id] = _SatBaseline(p.rnd.exam_digest, base)
+            if not entry.cached:
+                entry.cached = _call_supported(
+                    cache_baseline, base, p.rnd, scale, p.device, verifier=vid, gpu=dev_gpu, ignore_os_error=True
+                )
+        elif entry is not None and not isinstance(entry, (_SatBaseline, _FailedBaseline)) and getattr(entry, "model", True) is not None:
+            cached_ok = True
+            try:
+                base = _call_supported(sit_baseline, entry, p.rnd, scale, verifier=vid, gpu=dev_gpu)
+            except OSError:
+                sat_pair = getattr(entry, "_sat_baseline", None)
+                if (
+                    isinstance(sat_pair, tuple)
+                    and len(sat_pair) == 2
+                    and sat_pair[0] == p.rnd.exam_digest
+                    and isinstance(sat_pair[1], dict)
+                ):
+                    # Baseline scored cleanly in memory and ONLY disk caching failed: retain the
+                    # valid in-memory measurement for THIS job and all remaining jobs (retrying
+                    # disk caching later once storage recovers) without discarding trained models.
+                    base = sat_pair[1]
+                    cached_ok = False
+                else:
+                    if getattr(entry, "model", None) is None:
+                        bases[p.rnd.id] = _FailedBaseline(p.rnd.exam_digest, recovered=False)
+                    raise
+            except Exception:
+                # Sitting failed before scoring and cleared entry.model: allow one recovery
+                # for remaining already-trained students instead of failing all of them.
+                if getattr(entry, "model", None) is None:
+                    bases[p.rnd.id] = _FailedBaseline(p.rnd.exam_digest, recovered=False)
+                raise
+            bases[p.rnd.id] = _SatBaseline(p.rnd.exam_digest, base, cached=cached_ok)
         else:
-            bp = _call_supported(baseline_path, p.rnd, scale, p.device, verifier=vid, gpu=dev_gpu)
-            base = _call_supported(
-                _cached,
-                bp,
-                want_exam_sha=p.rnd.exam_digest,
-                want_backend=dev_bk,
-                want_gpu=dev_gpu,
-                want_verifier=vid,
-            )
-            if base is not None and base.get("exam_sha256") and p.rnd.exam_digest and base.get("exam_sha256") != p.rnd.exam_digest:
-                base = None
-            if base is not None and base.get("hardware") is not None and hardware_backend(base.get("hardware")) != dev_bk:
-                base = None
-            if base is not None and dev_gpu and isinstance(base.get("hardware"), dict) and base["hardware"].get("gpu") != dev_gpu:
-                base = None
-            if base is None:
-                raise RuntimeError(f"the unedited student of round {p.rnd.id} is no longer in memory")
+            base = _load_disk_base()
+            if base is not None:
+                bases[p.rnd.id] = _SatBaseline(p.rnd.exam_digest, base, cached=True)
+            else:
+                if isinstance(entry, _FailedBaseline) and entry.exam_digest == p.rnd.exam_digest and entry.recovered:
+                    raise RuntimeError(f"the unedited student of round {p.rnd.id} is no longer in memory")
+                # Recover a lost/failed baseline once for remaining already-trained students so a
+                # single baseline sit failure never discards every other trained grade for the round.
+                # Pass ignore_cache_error=True so a disk cache error during recovery never poisons
+                # bases[rnd.id] after the recovered baseline has already scored cleanly in memory.
+                bases[p.rnd.id] = _FailedBaseline(p.rnd.exam_digest, recovered=True)
+                base = _call_supported(baseline, p.rnd, scale, p.device, verifier=vid, ignore_cache_error=True)
+                bp = _call_supported(baseline_path, p.rnd, scale, p.device, verifier=vid, gpu=dev_gpu)
+                bases[p.rnd.id] = _SatBaseline(p.rnd.exam_digest, base, cached=bool(bp.exists()))
     else:
         if isinstance(entry, _SatBaseline) and entry.exam_digest == p.rnd.exam_digest:
             base = entry.result
+            if not entry.cached:
+                entry.cached = _call_supported(
+                    cache_baseline, base, p.rnd, scale, p.device, verifier=vid, gpu=dev_gpu, ignore_os_error=True
+                )
         else:
-            bp = _call_supported(baseline_path, p.rnd, scale, p.device, verifier=vid, gpu=dev_gpu)
-            base = _call_supported(
-                _cached,
-                bp,
-                want_exam_sha=p.rnd.exam_digest,
-                want_backend=dev_bk,
-                want_gpu=dev_gpu,
-                want_verifier=vid,
-            )
-            if base is not None and base.get("exam_sha256") and p.rnd.exam_digest and base.get("exam_sha256") != p.rnd.exam_digest:
-                base = None
-            if base is not None and base.get("hardware") is not None and hardware_backend(base.get("hardware")) != dev_bk:
-                base = None
-            if base is not None and dev_gpu and isinstance(base.get("hardware"), dict) and base["hardware"].get("gpu") != dev_gpu:
-                base = None
+            base = _load_disk_base()
     return sit_exam(p.trained, p.rnd, scale, data.round_exam(p.rnd, scale)), base
 
 
@@ -1582,30 +1624,53 @@ def grade_hardware_requirement(season) -> str:
     return "an NVIDIA (CUDA) or AMD (ROCm) GPU"
 
 
-def _cuda_has_native_bf16(hw: dict) -> bool:
-    """Whether an NVIDIA CUDA GPU supports native bf16 Tensor Cores (Ampere SM 8.0+)."""
+_CUDA_CAP_RE = re.compile(r"^[0-9]+\.[0-9]+$")
+
+
+def _parse_cuda_capability(cap) -> int | None:
+    """Parse a strict ASCII `<major>.<minor>` CUDA compute capability string, returning major or None."""
+    if not isinstance(cap, str):
+        return None
+    s = cap.strip()
+    if not _CUDA_CAP_RE.fullmatch(s):
+        return None
+    return int(s.split(".", 1)[0])
+
+
+def _cuda_has_native_bf16(hw: dict, *, require_evidence: bool = False) -> bool:
+    """Whether an NVIDIA CUDA GPU supports native bf16 Tensor Cores (Ampere SM 8.0+).
+
+    Mirrors server/season.go:cudaHasNativeBF16 so client and judge agree on every case,
+    including contradictory or absent capability metadata on CUDA-restricted seasons."""
     bf16 = hw.get("bf16_native")
-    if isinstance(bf16, bool):
-        return bf16
-    cap = hw.get("cuda_capability")
-    if isinstance(cap, str) and "." in cap:
-        try:
-            return int(cap.split(".", 1)[0]) >= 8
-        except ValueError:
-            pass
+    if isinstance(bf16, bool) and not bf16:
+        return False
+    cap_raw = hw.get("cuda_capability")
+    has_cap = isinstance(cap_raw, str) and bool(cap_raw.strip())
+    if has_cap:
+        maj = _parse_cuda_capability(cap_raw)
+        if maj is None or maj < 8:
+            return False
     gpu_name = str(hw.get("gpu") or "")
     if gpu_name and _PRE_AMPERE_GPU_RE.search(gpu_name):
         return False
-    return True
+    if isinstance(bf16, bool) and bf16:
+        return True
+    if has_cap:
+        return True
+    return not require_evidence
 
 
 def grade_eligibility(season, hw: dict, *, device_type: str | None = None, check_vram: bool = True) -> tuple[bool, str]:
     """Single source of truth for official grading eligibility across `stet doctor` and `stet verify`.
 
     Verifies device type/backend, native bf16 Tensor Core support on NVIDIA CUDA (excluding
-    pre-Ampere GPUs such as Tesla T4 / V100 / RTX 20xx), and usable VRAM against
-    `runner.grade_gpu_memory_gb`. Returns `(eligible, failing_reason)`.
+    pre-Ampere GPUs such as Tesla T4 / V100 / RTX 20xx and absent capability metadata on
+    CUDA-restricted seasons), and usable VRAM against `runner.grade_gpu_memory_gb`.
+    Mirrors server/season.go:gradeHardwareIssue. Returns `(eligible, failing_reason)`.
     """
+    import math
+
     dev_type = str(device_type or hw.get("device") or "")
     backend = hw.get("backend")
     if not grade_hardware_ok(season, dev_type, backend):
@@ -1614,19 +1679,21 @@ def grade_eligibility(season, hw: dict, *, device_type: str | None = None, check
             False,
             f"official grading for {season.title} needs {need}, so every grade uses the same arithmetic",
         )
-    if dev_type == "cuda" and backend != "rocm" and not _cuda_has_native_bf16(hw):
+    min_grade_vram = float((season.raw.get("runner") or {}).get("grade_gpu_memory_gb") or 0)
+    require_cap_evidence = bool(season.raw.get("grade_backends") or min_grade_vram > 0)
+    if dev_type == "cuda" and backend != "rocm" and not _cuda_has_native_bf16(hw, require_evidence=require_cap_evidence):
         gpu_desc = hw.get("gpu") or "this GPU"
         if cap := hw.get("cuda_capability"):
             gpu_desc = f"{gpu_desc} (SM {cap})"
         return (
             False,
             f"official grading for {season.title} needs an NVIDIA GPU with native bf16 support "
-            f"(Ampere / SM 8.0 or newer; {gpu_desc} lacks native bf16)",
+            f"(Ampere / SM 8.0 or newer; {gpu_desc} lacks native bf16 or capability metadata)",
         )
-    min_grade_vram = float((season.raw.get("runner") or {}).get("grade_gpu_memory_gb") or 0)
     if check_vram and min_grade_vram > 0 and dev_type == "cuda":
-        have_vram = float(hw.get("vram_gb") or 0)
-        if have_vram < min_grade_vram:
+        raw_vram = hw.get("vram_gb")
+        have_vram = float(raw_vram) if isinstance(raw_vram, (int, float)) and not isinstance(raw_vram, bool) else 0.0
+        if not math.isfinite(have_vram) or have_vram < min_grade_vram:
             return (
                 False,
                 f"official grading for {season.title} needs a GPU with at least {min_grade_vram:g} GB of memory "
@@ -2116,19 +2183,26 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
                 if isinstance(err, (KeyboardInterrupt, SystemExit, GeneratorExit)):
                     raise
                 remove_tree(work)
-                forget_base(sit)  # a grade that failed while sitting is trained afresh if it is tried again, with the exam posted
                 failures += 1
                 tries[job_id] = tries.get(job_id, 0) + 1
                 what = f"could not run this job ({type(err).__name__}: {clean(err)})"
                 # Three in a row on three jobs is this machine, not the jobs. Stop rather than churn through the queue.
                 stopping = args.once or failures >= STOP_AFTER_FAILURES
                 if tries[job_id] <= len(RETRY_PAUSES) and not stopping:
+                    # If the failure happened before sitting this job's own trained student (e.g.
+                    # a transient shared-baseline failure), put it back in `waiting` before
+                    # `forget_base` so neither its trained model nor the round's baseline entry
+                    # is discarded on retry.
+                    if sit is not None and getattr(getattr(sit, "trained", None), "model", None) is not None:
+                        waiting[job_id], holding = sit, None
+                    forget_base(sit)
                     # A fault that passes (a full disk someone is clearing, a driver that
                     # recovers) should cost a few minutes, not one of the entry's attempts.
                     pause = RETRY_PAUSES[tries[job_id] - 1]
                     out.line("", out.bad(f"{what}; keeping it and trying again in {pause // 60} min"))
                     time.sleep(pause)
                     continue
+                forget_base(sit)  # a grade that failed while sitting is trained afresh if it is tried again, with the exam posted
                 back = hand_back(clean(f"{type(err).__name__}: {err}", 300))
                 tries.pop(job_id, None)
                 out.line("", out.bad(f"{what}; {handed(back)}"))

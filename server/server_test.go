@@ -3462,7 +3462,7 @@ func TestOnlyAnEstablishedAccountOnAMachineUpToTheFloorIsHandedEditors(t *testin
 	}
 	hello := func(b map[string]any, sandbox string) map[string]any {
 		h := w.hello(true)
-		hw := map[string]any{"gpu": "Test GPU", "device": "cuda", "backend": "cuda"}
+		hw := map[string]any{"gpu": "Test GPU", "device": "cuda", "backend": "cuda", "vram_gb": 24.0, "cuda_capability": "8.9", "bf16_native": true}
 		if b != nil {
 			hw["bench"] = b
 		}

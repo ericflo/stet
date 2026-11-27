@@ -78,6 +78,7 @@ def baseline(
     verifier: str | None = None,
     exam=None,
     practice_key: str | None = None,
+    ignore_cache_error: bool = False,
 ) -> dict:
     """The unedited corpus's result for a round: every document, in corpus order. Cached.
 
@@ -118,6 +119,7 @@ def baseline(
         gpu=dev_gpu,
         exam=exam,
         practice_key=practice_key,
+        ignore_cache_error=ignore_cache_error,
     )
 
 
@@ -169,6 +171,57 @@ def train_baseline(rnd: Round, scale: Scale, device=None, progress=None, log=Non
         script.unlink(missing_ok=True)
 
 
+def cache_baseline(
+    result: dict,
+    rnd: Round,
+    scale: Scale,
+    device,
+    *,
+    verifier: str | None = None,
+    gpu: str | None = None,
+    practice_key: str | None = None,
+    ignore_os_error: bool = False,
+) -> bool:
+    """Atomically write a valid baseline measurement to local cache.
+
+    Leaves nothing half-written on failure. When `ignore_os_error=True`, returns False on
+    transient storage errors instead of raising."""
+    actual_sha = result.get("exam_sha256") or (rnd.exam_digest or None)
+    is_pub = bool(rnd.kind == "official" and rnd.exam_digest and actual_sha and actual_sha != rnd.exam_digest)
+    bk = hardware_backend(result.get("hardware")) or device_backend(device)
+    dev_gpu = gpu if gpu is not None else _device_gpu_name(device)
+    path = baseline_path(
+        rnd,
+        scale,
+        device,
+        exam_sha=actual_sha,
+        public_subset=is_pub,
+        backend=bk,
+        verifier=verifier,
+        gpu=dev_gpu,
+        practice_key=practice_key,
+    )
+    to_cache = dict(result)
+    if verifier:
+        to_cache["verifier"] = verifier
+    # Written whole or not at all: a file cut short by a full disk would otherwise stop
+    # every later job of the round.
+    tmp = path.with_name(f"{path.name}.tmp{os.getpid()}")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+        with os.fdopen(fd, "w") as f:
+            f.write(json.dumps(to_cache))
+        os.replace(tmp, path)
+        return True
+    except OSError:
+        if ignore_os_error:
+            return False
+        raise
+    finally:
+        tmp.unlink(missing_ok=True)  # nothing is there once it has been renamed
+
+
 def sit_baseline(
     trained: Trained,
     rnd: Round,
@@ -178,6 +231,7 @@ def sit_baseline(
     gpu: str | None = None,
     exam=None,
     practice_key: str | None = None,
+    ignore_cache_error: bool = False,
 ) -> dict:
     """The unedited student sits the round's exam (`rnd` as it is now, its exam posted), and
     the result is kept for the round's other grades on this machine."""
@@ -187,34 +241,21 @@ def sit_baseline(
     if not result["valid"]:
         raise RuntimeError(f"the baseline for {rnd.id} could not be graded: {result['invalid_reason']}")
     actual_sha = result.get("exam_sha256") or (data.exam_digest(exam) if exam else (rnd.exam_digest or None))
-    is_pub = bool(rnd.kind == "official" and rnd.exam_digest and actual_sha and actual_sha != rnd.exam_digest)
-    bk = hardware_backend(result.get("hardware")) or device_backend(trained.device)
-    dev_gpu = gpu if gpu is not None else _device_gpu_name(trained.device)
-    path = baseline_path(
+    if actual_sha and not result.get("exam_sha256"):
+        result["exam_sha256"] = actual_sha
+    # Preserve the valid in-memory measurement on `trained` BEFORE attempting disk cache write so
+    # callers sharing one trained baseline across multiple waiting jobs retain it if caching fails.
+    trained._sat_baseline = (actual_sha, result)
+    trained._sat_cached = cache_baseline(
+        result,
         rnd,
         scale,
         trained.device,
-        exam_sha=actual_sha,
-        public_subset=is_pub,
-        backend=bk,
         verifier=verifier,
-        gpu=dev_gpu,
+        gpu=gpu,
         practice_key=practice_key,
+        ignore_os_error=ignore_cache_error,
     )
-    path.parent.mkdir(parents=True, exist_ok=True)
-    to_cache = dict(result)
-    if verifier:
-        to_cache["verifier"] = verifier
-    # Written whole or not at all: a file cut short by a full disk would otherwise stop
-    # every later job of the round.
-    tmp = path.with_name(f"{path.name}.tmp{os.getpid()}")
-    try:
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
-        with os.fdopen(fd, "w") as f:
-            f.write(json.dumps(to_cache))
-        os.replace(tmp, path)
-    finally:
-        tmp.unlink(missing_ok=True)  # nothing is there once it has been renamed
     return result
 
 

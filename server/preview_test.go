@@ -233,7 +233,7 @@ func playRound(t *testing.T, w *world, crew []*previewActor, gain func(string, i
 
 func claimAs(t *testing.T, w *world, a *previewActor) *claimed {
 	h := w.hello(a.edits)
-	h["hardware"] = map[string]any{"gpu": a.gpu, "device": "cuda", "backend": backendOf(a.gpu)}
+	h["hardware"] = map[string]any{"gpu": a.gpu, "device": "cuda", "backend": backendOf(a.gpu), "vram_gb": 24.0, "cuda_capability": "8.9", "bf16_native": true}
 	return w.claimWith(a.actor, h)
 }
 
@@ -307,7 +307,7 @@ func reportAs(t *testing.T, w *world, a *previewActor, c *claimed, loss, base fl
 	p := map[string]any{
 		"harness": w.app.season.Harness, "season": w.app.season.ID, "season_digest": w.app.season.Digest,
 		"round": c.Job.Round["id"], "scale": c.Job.Scale, "corpus_sha256": corpusSHA, "exam_sha256": examSHA,
-		"script_sha256": c.Job.Script.SHA256, "valid": true, "hardware": map[string]any{"gpu": a.gpu, "device": "cuda", "backend": backendOf(a.gpu)},
+		"script_sha256": c.Job.Script.SHA256, "valid": true, "hardware": map[string]any{"gpu": a.gpu, "device": "cuda", "backend": backendOf(a.gpu), "vram_gb": 24.0, "cuda_capability": "8.9", "bf16_native": true},
 		"script":     map[string]any{"script_sha256": c.Job.Script.SHA256, "kept_doc_frac": kept, "kept_byte_frac": kept * 0.8, "passes": 1.0, "out_docs": 1200},
 		"baseline":   map[string]any{"mean": -base, "item_scores": baseline},
 		"exam":       map[string]any{"mean": -loss, "item_scores": exam},

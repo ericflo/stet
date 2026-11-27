@@ -399,8 +399,10 @@ func cmdScale(ctx context.Context, f *Fleet, follow bool) error {
 }
 
 // reconcileExaminerOnce serializes standalone examiner budget checks, rentals, and state updates
-// under the same fleet lock used by `up`, `down`, and `scale`, and defers new rentals whenever
-// fleet accounting (fleet.json or spent.jsonl) cannot be read cleanly.
+// under the same fleet lock used by `up`, `down`, and `scale`, reconciling live owned worker
+// rentals with the configured markets before admitting a new examiner and deferring new rentals
+// whenever fleet accounting (markets, fleet.json, or spent.jsonl) cannot be read cleanly while
+// keeping teardown and timeout enforcement available.
 func reconcileExaminerOnce(ctx context.Context, f *Fleet) error {
 	unlock, err := f.lock(time.Minute)
 	if err != nil {
@@ -422,20 +424,76 @@ func reconcileExaminerOnce(ctx context.Context, f *Fleet) error {
 		return err
 	}
 	var acctErr error
+	if !f.fixed && f.o.Credentials != "" {
+		if rerr := f.refresh(); rerr != nil {
+			acctErr = fmt.Errorf("reading market settings: %w", rerr)
+		}
+	}
+	if (!f.fixed || len(f.keys) == 0) && f.o.Home != "" {
+		if kerr := f.loadKeys(); kerr != nil && acctErr == nil {
+			acctErr = fmt.Errorf("reading worker keys: %w", kerr)
+		}
+	}
 	l, lerr := f.readLedger()
 	today, liveWorkers, hourlyWorkers := 0.0, 0, 0.0
 	if lerr != nil {
-		acctErr = fmt.Errorf("reading fleet ledger: %w", lerr)
-	} else {
-		t, serr := f.spent(l, startOfDay(f.now()))
-		if serr != nil {
-			acctErr = fmt.Errorf("reading daily spend: %w", serr)
-		} else {
-			today = t
+		if acctErr == nil {
+			acctErr = fmt.Errorf("reading fleet ledger: %w", lerr)
 		}
-		for _, p := range l.Pods {
+	} else {
+		var rentals []Rental
+		var answered map[string]bool
+		if acctErr == nil && len(f.markets) > 0 {
+			rs, ans, rerr := f.rentals(ctx, l)
+			if rerr != nil {
+				acctErr = fmt.Errorf("listing market rentals: %w", rerr)
+			} else {
+				rentals, answered = rs, ans
+				for _, m := range f.markets {
+					if !answered[m.Name()] {
+						acctErr = fmt.Errorf("%s did not list its rentals", marketTitle(m.Name()))
+						break
+					}
+				}
+				if acctErr == nil {
+					if nerr := f.note(l, rentals, answered); nerr != nil {
+						acctErr = fmt.Errorf("reconciling fleet ledger: %w", nerr)
+					}
+				}
+			}
+		}
+		seen := map[string]bool{}
+		knownHandles := map[string]bool{}
+		for _, k := range f.keys {
+			knownHandles[k.Handle] = true
+		}
+		for key, p := range l.Pods {
+			seen[key] = true
 			liveWorkers++
 			hourlyWorkers += p.Cost
+		}
+		for i := range rentals {
+			r := &rentals[i]
+			if !r.live() {
+				continue
+			}
+			key := ledgerKey(r.Market, r.ID)
+			if seen[key] {
+				continue
+			}
+			if h := owner(l, r); h != "" && knownHandles[h] {
+				seen[key] = true
+				liveWorkers++
+				hourlyWorkers += r.Price
+			}
+		}
+		t, serr := f.spent(l, startOfDay(f.now()))
+		if serr != nil {
+			if acctErr == nil {
+				acctErr = fmt.Errorf("reading daily spend: %w", serr)
+			}
+		} else {
+			today = t
 		}
 	}
 	_, _, exAccrued, snapErr := f.examinerSnapshot()
@@ -589,35 +647,48 @@ func cmdDown(ctx context.Context, f *Fleet, force bool, handles []string) error 
 	return f.end(ctx, v, endings)
 }
 
-// cmdDownRental ends one specific rental by exact (market, id) under the fleet lock,
-// calling the market's idempotent End directly (never trusting a listing omission to skip
-// teardown), retiring only that ledger entry after confirmed teardown, and never touching a
-// replacement machine that may have reused the same worker handle.
+// cmdDownRental ends one specific rental by exact (market, id), attempting to acquire the fleet
+// lock and update fleet.json but NEVER letting a lock failure, read-only filesystem, or corrupt
+// ledger prevent issuing m.End(ctx, id) to the provider. Any lock or ledger repair error is
+// reported AFTER provider teardown is confirmed.
 func cmdDownRental(ctx context.Context, f *Fleet, market, id string) error {
 	if id == "" || id == "dry-run" {
 		return nil
 	}
-	unlock, err := f.lock(time.Minute)
-	if err != nil {
-		return err
-	}
-	defer unlock()
-	if err := f.refresh(); err != nil {
-		return err
+	unlock, lockErr := f.lock(time.Minute)
+	if lockErr == nil {
+		defer unlock()
 	}
 	m := f.market(market)
+	var refreshErr error
+	if lockErr == nil || m == nil {
+		refreshErr = f.refresh()
+		if refreshed := f.market(market); refreshed != nil {
+			m = refreshed
+		}
+	}
 	if m == nil {
+		if refreshErr != nil {
+			return refreshErr
+		}
+		if lockErr != nil {
+			return lockErr
+		}
 		return fmt.Errorf("could not end %s on %s: there is no key for %s now", id, marketTitle(market), marketTitle(market))
 	}
-	l, err := f.readLedger()
-	if err != nil {
-		return err
-	}
-	key := ledgerKey(market, id)
-	rec := l.Pods[key]
 	if f.o.DryRun {
 		f.say("would end probe machine %s on %s", id, marketTitle(market))
 		return nil
+	}
+	var l *ledger
+	var ledgerErr error
+	var rec *podRecord
+	key := ledgerKey(market, id)
+	if lockErr == nil {
+		l, ledgerErr = f.readLedger()
+		if ledgerErr == nil && l != nil {
+			rec = l.Pods[key]
+		}
 	}
 	if err := m.End(ctx, id); err != nil {
 		return err
@@ -630,18 +701,24 @@ func cmdDownRental(ctx context.Context, f *Fleet, market, id string) error {
 		r.Card = rec.GPU
 	}
 	f.event(&r, handle, "ended", "probe ended")
-	if rec != nil {
-		if err := f.retire(l, key, f.now()); err != nil {
-			return err
-		}
-		if err := f.writeLedger(l); err != nil {
-			return err
-		}
-	}
 	if handle != "" {
 		f.say("ended probe %s (%s on %s)", handle, id, marketTitle(market))
 	} else {
 		f.say("ended probe %s on %s", id, marketTitle(market))
+	}
+	if lockErr != nil {
+		return fmt.Errorf("ended probe %s on %s, but fleet lock could not be acquired for ledger cleanup: %w", id, marketTitle(market), lockErr)
+	}
+	if ledgerErr != nil {
+		return fmt.Errorf("ended probe %s on %s, but fleet ledger could not be read for cleanup: %w", id, marketTitle(market), ledgerErr)
+	}
+	if rec != nil {
+		if err := f.retire(l, key, f.now()); err != nil {
+			return fmt.Errorf("ended probe %s on %s, but retiring ledger entry failed: %w", id, marketTitle(market), err)
+		}
+		if err := f.writeLedger(l); err != nil {
+			return fmt.Errorf("ended probe %s on %s, but writing fleet ledger failed: %w", id, marketTitle(market), err)
+		}
 	}
 	return nil
 }

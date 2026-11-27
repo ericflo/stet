@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -1126,11 +1128,13 @@ func TestExaminerSelfTerminatedRecordsBoundedIdempotentDailySpend(t *testing.T) 
 	prov.mu.Unlock()
 
 	// Fresh restarted controller (new Examiner loading examiner.json from disk) reconciles idle.
-	// Even BEFORE Reconcile runs, ActiveSnapshot must cap accrued spend at Timeout ($0.465, not 2h $1.24).
+	// Because the end time is unconfirmed before provider reconciliation (a slow image pull or
+	// broken startup could have kept the VM alive past 45m), ActiveSnapshot keeps accruing through
+	// now ($1.24 for 2h at $0.62/h) rather than optimistically capping at $0.465 before confirmation.
 	ex2 := newExaminer(ExaminerConfig{Addr: "127.0.0.1:0", Timeout: 45 * time.Minute, MaxPrice: 1.50}, home, prov, clk.Now, nil, false)
 	ex2.onSpent = appendSpent
-	if _, _, snapAccrued, err := ex2.ActiveSnapshot(clk.Now()); err != nil || snapAccrued < 0.464 || snapAccrued > 0.466 {
-		t.Fatalf("ActiveSnapshot after 2h outage must cap accrued spend at 45m timeout ($0.465), got $%.4f err=%v", snapAccrued, err)
+	if _, _, snapAccrued, err := ex2.ActiveSnapshot(clk.Now()); err != nil || snapAccrued < 1.239 || snapAccrued > 1.241 {
+		t.Fatalf("ActiveSnapshot after 2h outage before provider confirmation must accrue full 2h ($1.24), got $%.4f err=%v", snapAccrued, err)
 	}
 	if err := ex2.Reconcile(context.Background(), &Work{}, testExaminerBudget()); err != nil {
 		t.Fatalf("Reconcile after self-destruct: %v", err)
@@ -1139,14 +1143,14 @@ func TestExaminerSelfTerminatedRecordsBoundedIdempotentDailySpend(t *testing.T) 
 		t.Fatalf("expected examiner.json cleared after missing-instance reconciliation")
 	}
 
-	// Verify spent.jsonl recorded the bounded 45m charge ($0.465 = 0.62 * 0.75), NOT $0.000 and NOT 2h ($1.24).
+	// Verify spent.jsonl recorded the conservative 2h charge ($1.24 = 0.62 * 2), NOT $0.000.
 	f := &Fleet{o: &Options{Home: home}, now: clk.Now}
 	spentToday, err := f.spent(&ledger{Pods: map[string]*podRecord{}}, startOfDay(clk.Now()))
 	if err != nil {
 		t.Fatalf("f.spent: %v", err)
 	}
-	if spentToday < 0.464 || spentToday > 0.466 {
-		t.Fatalf("expected bounded 45m daily spend $0.465 after self-termination, got $%.4f", spentToday)
+	if spentToday < 1.239 || spentToday > 1.241 {
+		t.Fatalf("expected conservative 2h daily spend $1.24 after unconfirmed disappearance, got $%.4f", spentToday)
 	}
 
 	// Re-calling EnforceTimeout / recordMissingSaved for the same instance ID must be idempotent.
@@ -1155,8 +1159,8 @@ func TestExaminerSelfTerminatedRecordsBoundedIdempotentDailySpend(t *testing.T) 
 	if err != nil {
 		t.Fatalf("f.spent again: %v", err)
 	}
-	if spentAgain < 0.464 || spentAgain > 0.466 {
-		t.Fatalf("expected idempotent spend $0.465 (no double-charge), got $%.4f", spentAgain)
+	if spentAgain < 1.239 || spentAgain > 1.241 {
+		t.Fatalf("expected idempotent spend $1.24 (no double-charge), got $%.4f", spentAgain)
 	}
 }
 
@@ -2041,7 +2045,9 @@ func TestPendingRentSurvivesStaleListingAndPreventsDoubleRental(t *testing.T) {
 			t.Fatalf("confirmed errRentRejected must clear PendingRent immediately, got %+v", st)
 		}
 
-		// 2. Ambiguous timeout that genuinely never created a VM expires cleanly past examinerPendingRentGrace.
+		// 2. Review 19 P1 #1: an ambiguous create whose response was lost MUST NOT discard
+		//    PendingRent and create a second contract after 3m01s (or even past timeout): a delayed
+		//    successful first create stays within --max 1 / $0.70/h and is adopted once visible.
 		homeExp := t.TempDir()
 		provExp := &fakeExaminerProv{
 			offers:  []ExaminerOffer{{ID: "off-5090", Card: "RTX 5090", Price: 0.62}},
@@ -2051,15 +2057,42 @@ func TestPendingRentSurvivesStaleListingAndPreventsDoubleRental(t *testing.T) {
 		if err := exExp.Reconcile(context.Background(), openWork, ExaminerBudget{MaxWorkers: 1, MaxHourly: 0.70}); err == nil {
 			t.Fatalf("expected 504 error")
 		}
+		stPend := readExaminerState(homeExp)
+		if stPend == nil || !stPend.PendingRent || stPend.ReservedLabel == "" {
+			t.Fatalf("expected PendingRent persisted after 504, got %+v", stPend)
+		}
+		origLabel := stPend.ReservedLabel
 		provExp.mu.Lock()
 		delete(provExp.failIDs, "off-5090")
 		provExp.mu.Unlock()
-		clk.Advance(examinerPendingRentGrace + time.Second)
+
+		// 3m01s later with listing still empty -> MUST keep charging reservation and NOT create a 2nd GPU!
+		clk.Advance(3*time.Minute + time.Second)
 		if err := exExp.Reconcile(context.Background(), openWork, ExaminerBudget{MaxWorkers: 1, MaxHourly: 0.70}); err != nil {
-			t.Fatalf("retry after PendingRent grace expired: %v", err)
+			t.Fatalf("Reconcile at 3m01s with unresolved PendingRent: %v", err)
 		}
-		if len(provExp.rented) != 1 || len(provExp.insts) != 1 {
-			t.Fatalf("expected clean retry rental once reconciliation window expired: rented=%d insts=%d", len(provExp.rented), len(provExp.insts))
+		if len(provExp.rented) != 0 {
+			t.Fatalf("MUST NOT rent a second examiner while first create outcome is unconfirmed! rented=%d", len(provExp.rented))
+		}
+		if live, hourly, _, err := exExp.ActiveSnapshot(clk.Now()); err != nil || live != 1 || hourly < 0.619 || hourly > 0.621 {
+			t.Fatalf("unresolved PendingRent must keep holding 1 slot / $0.62/h: live=%d hourly=%.2f err=%v", live, hourly, err)
+		}
+
+		// When the delayed first contract finally appears at T0 + 5m, Reconcile adopts it cleanly (still 1 GPU total!).
+		clk.Advance(2 * time.Minute)
+		provExp.mu.Lock()
+		provExp.insts = map[string]ExaminerInstance{
+			"ex-delayed-1": {ID: "ex-delayed-1", Label: origLabel, State: "running", Price: 0.62, Created: clk.Now().Add(-5 * time.Minute)},
+		}
+		provExp.mu.Unlock()
+		if err := exExp.Reconcile(context.Background(), openWork, ExaminerBudget{MaxWorkers: 1, MaxHourly: 0.70}); err != nil {
+			t.Fatalf("adopt delayed first contract: %v", err)
+		}
+		if len(provExp.rented) != 0 || len(provExp.insts) != 1 {
+			t.Fatalf("expected delayed first contract adopted with 0 extra rentals: rented=%d insts=%d", len(provExp.rented), len(provExp.insts))
+		}
+		if st := readExaminerState(homeExp); st == nil || st.InstanceID != "ex-delayed-1" || st.PendingRent {
+			t.Fatalf("expected adopted ex-delayed-1 with PendingRent=false, got %+v", st)
 		}
 	})
 
@@ -2292,8 +2325,8 @@ func TestDisappearedUnresolvedOrphanRecordsBoundedSpend(t *testing.T) {
 			t.Fatalf("expected flushed observed $1.24 spend, got $%.4f err=%v", spentToday, err)
 		}
 
-		// Part B: Unobserved offline orphan (persisted at T0, never observed past TTL, gone by T0+2h)
-		// STILL caps at the 45m container self-destruct TTL ($0.465).
+		// Part B: Unobserved offline orphan (persisted at T0, gone by T0+2h, end time uncertain
+		// until confirmed via EndExaminer) accrues conservatively through confirmation time ($1.24).
 		homeOff := t.TempDir()
 		ownerOff := loadOrCreateExaminerOwner(homeOff)
 		if err := writeExaminerState(homeOff, &examinerState{
@@ -2313,8 +2346,8 @@ func TestDisappearedUnresolvedOrphanRecordsBoundedSpend(t *testing.T) {
 		if err := exOff.EnforceTimeout(context.Background()); err == nil {
 			t.Fatalf("expected spent.jsonl write error on offline orphan")
 		}
-		if live, _, acc, err := activeExaminerFromDisk(homeOff, clk.Now(), 45*time.Minute, 1.50); err != nil || live != 0 || acc < 0.464 || acc > 0.466 {
-			t.Fatalf("offline unobserved orphan must still cap at 45m ($0.465): live=%d acc=%.4f err=%v", live, acc, err)
+		if live, _, acc, err := activeExaminerFromDisk(homeOff, clk.Now(), 45*time.Minute, 1.50); err != nil || live != 0 || acc < 1.239 || acc > 1.241 {
+			t.Fatalf("offline unobserved orphan must accrue conservatively through confirmation time ($1.24): live=%d acc=%.4f err=%v", live, acc, err)
 		}
 	})
 }
@@ -2435,7 +2468,7 @@ func TestOmittedAcknowledgedExaminerPreservesContractWithoutDoubleRental(t *test
 		if st := readExaminerState(home); st == nil || st.InstanceID != "ex-1" || spentCalls != 0 {
 			t.Fatalf("unconfirmed timeout cleanup must retain ex-1 without terminal spend: st=%+v spentCalls=%d", st, spentCalls)
 		}
-		// Once EndExaminer succeeds (200/404 -> nil), EnforceTimeout confirms termination, bills bounded 45m, and clears!
+		// Once EndExaminer succeeds (200/404 -> nil), EnforceTimeout confirms termination, bills conservatively through now (50m = $0.5167), and clears!
 		prov.mu.Lock()
 		delete(prov.endErr, "ex-1")
 		prov.mu.Unlock()
@@ -2447,8 +2480,8 @@ func TestOmittedAcknowledgedExaminerPreservesContractWithoutDoubleRental(t *test
 		}
 		f := &Fleet{o: &Options{Home: home}, now: clk.Now}
 		spentToday, err := f.spent(&ledger{Pods: map[string]*podRecord{}}, startOfDay(clk.Now()))
-		if err != nil || spentToday < 0.464 || spentToday > 0.466 {
-			t.Fatalf("expected bounded 45m spend $0.465, got $%.4f err=%v", spentToday, err)
+		if err != nil || spentToday < 0.515 || spentToday > 0.518 {
+			t.Fatalf("expected conservative 50m spend $0.5167 through confirmation time, got $%.4f err=%v", spentToday, err)
 		}
 	})
 
@@ -3234,6 +3267,214 @@ func TestReview18Gate4UnreadableStatePreservesDiskAndHandlesUnresolvedAndOwnTime
 			t.Fatalf("expected ex-1 spend billed at saved.Price ($0.62/h), got %+v", spendRecs)
 		}
 	})
+}
+
+// Review 19 P2 #3: standalone `stet-cloud examiner` (`reconcileExaminerOnce`) MUST reconcile owned
+// worker rentals with the markets before admitting a new examiner so a running worker missing from
+// `fleet.json` (e.g. after a failed ledger write) is counted against `--max` and `--max-hourly`,
+// while teardown remains available when market accounting is unavailable.
+func TestReview19StandaloneExaminerReconcilesUntrackedLiveWorker(t *testing.T) {
+	clk := newTestClock(time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC))
+	home := t.TempDir()
+	rp, st := newFakeRunPod(t), newFakeStet(t)
+	f, _ := testFleet(t, rp, st, 1)
+	f.o.Home = home
+	f.now = clk.Now
+	f.o.Policy.MaxWorkers = 1
+	f.o.Policy.MaxHourly = 0.70
+	f.o.Policy.DailyBudget = 10.0
+
+	// Put a running $0.43/h worker under registered fleet handle `stet-rp-01` on RunPod while
+	// local fleet.json is completely empty (simulating successful create + failed ledger write).
+	rp.pods["pod-untracked"] = &Pod{
+		ID: "pod-untracked", Name: "stet-rp-01",
+		Status: "RUNNING", Cost: 0.43, CreatedAt: clk.Now().Add(-5 * time.Minute),
+	}
+	st.work = Work{Rounds: []WorkRound{{ID: "s3-o00090", Entries: 1, ExamAt: 0}}}
+	exProv := &fakeExaminerProv{
+		offers: []ExaminerOffer{{ID: "off-5090", Card: "RTX 5090", Price: 0.62}},
+	}
+	ex := newExaminer(ExaminerConfig{Addr: "127.0.0.1:0", Timeout: 45 * time.Minute, MaxPrice: 1.50}, home, exProv, clk.Now, nil, false)
+	f.examiner = ex
+
+	if err := reconcileExaminerOnce(context.Background(), f); err != nil {
+		t.Fatalf("reconcileExaminerOnce: %v", err)
+	}
+	if len(exProv.rented) != 0 {
+		t.Fatalf("standalone examiner exceeded --max 1 / $0.70/h alongside untracked $0.43/h worker! rented=%d", len(exProv.rented))
+	}
+	// Verify reconciliation also adopted the live worker into fleet.json.
+	l, err := f.readLedger()
+	if err != nil || l.Pods[ledgerKey("runpod", "pod-untracked")] == nil {
+		t.Fatalf("expected untracked worker adopted into fleet.json: pods=%+v err=%v", l.Pods, err)
+	}
+
+	// Now verify teardown still runs when market listing fails (accounting unavailable):
+	// remove the worker, rent an examiner, then fail RunPod Rentals() and publish ExamAt > 0.
+	delete(rp.pods, "pod-untracked")
+	if err := reconcileExaminerOnce(context.Background(), f); err != nil {
+		t.Fatalf("reconcileExaminerOnce rent examiner: %v", err)
+	}
+	if len(exProv.rented) != 1 {
+		t.Fatalf("expected examiner rented once worker ended, got rented=%d", len(exProv.rented))
+	}
+	f.markets = []Market{&probeSwapMarket{
+		Market: f.market("runpod"),
+		onRentals: func() ([]Rental, error) {
+			return nil, errors.New("RunPod API 503")
+		},
+	}}
+	st.work = Work{Rounds: []WorkRound{{ID: "s3-o00090", Entries: 1, ExamAt: clk.Now().Unix()}}}
+	if err := reconcileExaminerOnce(context.Background(), f); err != nil {
+		t.Fatalf("teardown under market accounting error: %v", err)
+	}
+	if len(exProv.ended) != 1 || len(exProv.insts) != 0 {
+		t.Fatalf("expected live examiner torn down on ExamAt > 0 even when market Rentals() fails: ended=%v insts=%d", exProv.ended, len(exProv.insts))
+	}
+
+	// Gate 4 P2-1: a production standalone examiner daemon (f.fixed == false) whose initial
+	// f.keys already has 1 key MUST reload newly added worker keys from <home>/workers/*.json
+	// on subsequent ticks so a worker running under a newly added key is still counted!
+	homeDyn := t.TempDir()
+	rpDyn, stDyn := newFakeRunPod(t), newFakeStet(t)
+	k1, err := newKey("stet-rp-01")
+	if err != nil {
+		t.Fatalf("newKey k1: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(homeDyn, "workers"), 0o700); err != nil {
+		t.Fatalf("mkdir workers: %v", err)
+	}
+	if err := k1.save(filepath.Join(homeDyn, "workers", "stet-rp-01.json")); err != nil {
+		t.Fatalf("save k1: %v", err)
+	}
+	opDyn, _ := newKey("op")
+	exProvDyn := &fakeExaminerProv{
+		offers: []ExaminerOffer{{ID: "off-5090", Card: "RTX 5090", Price: 0.62}},
+	}
+	exDyn := newExaminer(ExaminerConfig{Addr: "127.0.0.1:0", Timeout: 45 * time.Minute, MaxPrice: 1.50}, homeDyn, exProvDyn, clk.Now, nil, false)
+	fDyn, _ := testFleet(t, rpDyn, stDyn, 1)
+	fDyn.fixed = false
+	fDyn.o.Home = homeDyn
+	fDyn.o.Credentials = ""
+	fDyn.now = clk.Now
+	fDyn.o.Policy.MaxWorkers = 1
+	fDyn.o.Policy.MaxHourly = 0.70
+	fDyn.o.Policy.DailyBudget = 10.0
+	fDyn.keys = []*Key{k1}
+	fDyn.examiner = exDyn
+	_ = opDyn
+	// Add a brand-new key `stet-rp-02` to disk AFTER daemon startup, and put a live worker under it!
+	k2, _ := newKey("stet-rp-02")
+	if err := k2.save(filepath.Join(homeDyn, "workers", "stet-rp-02.json")); err != nil {
+		t.Fatalf("save k2: %v", err)
+	}
+	rpDyn.pods["pod-new-key"] = &Pod{
+		ID: "pod-new-key", Name: "stet-rp-02",
+		Status: "RUNNING", Cost: 0.43, CreatedAt: clk.Now().Add(-3 * time.Minute),
+	}
+	stDyn.work = Work{Rounds: []WorkRound{{ID: "s3-o00091", Entries: 1, ExamAt: 0}}}
+	if err := reconcileExaminerOnce(context.Background(), fDyn); err != nil {
+		t.Fatalf("reconcileExaminerOnce with newly added worker key: %v", err)
+	}
+	if len(exProvDyn.rented) != 0 {
+		t.Fatalf("standalone examiner missed worker under newly added key stet-rp-02! rented=%d", len(exProvDyn.rented))
+	}
+}
+
+// Review 19 P2 #4: examinerOnstartScript MUST:
+//   - read STET_EXAMINER_EXPIRE_AT and STET_EXAMINER_TTL_SECONDS from /etc/environment (never
+//     falling back to shell default 2700 when delivered via /etc/environment),
+//   - arm the self-destruct watchdog BEFORE fallible TLS materialization, and
+//   - compute remaining sleep from the absolute STET_EXAMINER_EXPIRE_AT deadline (even after a
+//     slow image pull).
+func TestReview19OnstartWatchdogUsesEtcEnvironmentAbsoluteExpiryAndArmsBeforeTLS(t *testing.T) {
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 not available")
+	}
+	cert, key, err := generateExaminerCert(time.Now(), 5*time.Minute)
+	if err != nil {
+		t.Fatalf("generateExaminerCert: %v", err)
+	}
+	// Helper that rewrites /etc/environment and /tmp/stet-* into an isolated temp dir, captures
+	// the computed delay from /tmp/stet-selfdestruct.py without sleeping or calling Vast.
+	runSandboxed := func(t *testing.T, launch ExaminerLaunch, etcEnv string) (rc int, watchdogDelay string, watchdogArmed bool, failArmed bool) {
+		t.Helper()
+		dir := t.TempDir()
+		envPath := filepath.Join(dir, "environment")
+		if err := os.WriteFile(envPath, []byte(etcEnv), 0o600); err != nil {
+			t.Fatalf("write env file: %v", err)
+		}
+		script := examinerOnstartScript(launch, launch.Model+"@"+launch.Revision)
+		// Rewrite paths into temp dir and stub time.sleep + vllm so the script runs fast & safely.
+		script = strings.ReplaceAll(script, "/etc/environment", envPath)
+		script = strings.ReplaceAll(script, "/tmp/stet-", filepath.Join(dir, "stet-"))
+		script = strings.ReplaceAll(script,
+			`if delay > 0: time.sleep(delay)`,
+			`open(`+strconv.Quote(filepath.Join(dir, "delays.log"))+`, "a").write(f"{sys.argv[1:]!r}:{delay}\n"); sys.exit(0)`)
+		script = strings.ReplaceAll(script, "nohup sh "+filepath.Join(dir, "stet-vllm.sh"), "true # skip vllm")
+		// Run watchdog synchronously in test so delays.log is guaranteed flushed before return.
+		script = strings.ReplaceAll(script, "nohup python3 "+filepath.Join(dir, "stet-selfdestruct.py")+" >", "python3 "+filepath.Join(dir, "stet-selfdestruct.py")+" >")
+		script = strings.ReplaceAll(script, "nohup python3 "+filepath.Join(dir, "stet-selfdestruct.py")+" 15 >", "python3 "+filepath.Join(dir, "stet-selfdestruct.py")+" 15 >")
+		script = strings.ReplaceAll(script, "2>&1 &", "2>&1")
+
+		cmd := exec.Command("sh", "-c", script)
+		cmd.Env = []string{"PATH=" + os.Getenv("PATH")} // deliberately empty STET_EXAMINER_* in process env!
+		out, runErr := cmd.CombinedOutput()
+		if runErr != nil {
+			var ee *exec.ExitError
+			if errors.As(runErr, &ee) {
+				rc = ee.ExitCode()
+			} else {
+				t.Fatalf("exec sh: %v (%s)", runErr, string(out))
+			}
+		}
+		raw, _ := os.ReadFile(filepath.Join(dir, "delays.log"))
+		for _, ln := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+			if strings.HasPrefix(ln, "[]:") {
+				watchdogArmed = true
+				watchdogDelay = strings.TrimPrefix(ln, "[]:")
+			}
+			if strings.HasPrefix(ln, "['15']:") {
+				failArmed = true
+			}
+		}
+		return rc, watchdogDelay, watchdogArmed, failArmed
+	}
+
+	certHex := hex.EncodeToString(cert)
+	keyHex := hex.EncodeToString(key)
+
+	// 1. /etc/environment delivers STET_EXAMINER_TTL_SECONDS=300 (5m) with no exported shell vars:
+	//    watchdog MUST compute 300s, NOT 2700s!
+	rc, delayStr, armed, _ := runSandboxed(t,
+		ExaminerLaunch{Model: defaultExaminerModel, Revision: defaultExaminerRevision, TTLSeconds: 2700},
+		fmt.Sprintf("STET_EXAMINER_TTL_SECONDS=300\nSTET_EXAMINER_CERT_HEX=%s\nSTET_EXAMINER_KEY_HEX=%s\nSTET_EXAMINER_API_KEY=k\n", certHex, keyHex),
+	)
+	if rc != 0 || !armed || delayStr != "300" {
+		t.Fatalf("/etc/environment TTL=300: rc=%d armed=%v delay=%q, want rc=0 armed=true delay=\"300\"", rc, armed, delayStr)
+	}
+
+	// 2. /etc/environment delivers absolute STET_EXAMINER_EXPIRE_AT = now+120 (e.g. 5m TTL after 3m pull):
+	//    watchdog MUST sleep <= 120s (not 300s or 2700s)!
+	exp := time.Now().Unix() + 120
+	rc, delayStr, armed, _ = runSandboxed(t,
+		ExaminerLaunch{Model: defaultExaminerModel, Revision: defaultExaminerRevision, TTLSeconds: 300, ExpireAt: exp},
+		fmt.Sprintf("STET_EXAMINER_EXPIRE_AT=%d\nSTET_EXAMINER_TTL_SECONDS=300\nSTET_EXAMINER_CERT_HEX=%s\nSTET_EXAMINER_KEY_HEX=%s\nSTET_EXAMINER_API_KEY=k\n", exp, certHex, keyHex),
+	)
+	dVal, perr := strconv.Atoi(delayStr)
+	if rc != 0 || !armed || perr != nil || dVal < 110 || dVal > 120 {
+		t.Fatalf("absolute STET_EXAMINER_EXPIRE_AT: rc=%d armed=%v delay=%q (err=%v), want 110..120", rc, armed, delayStr, perr)
+	}
+
+	// 3. Missing TLS material causes setup to fail (rc != 0), YET watchdog MUST ALREADY BE ARMED
+	//    AND prompt 15s self-destruct triggered!
+	rc, delayStr, armed, failArmed := runSandboxed(t,
+		ExaminerLaunch{Model: defaultExaminerModel, Revision: defaultExaminerRevision, TTLSeconds: 300},
+		"STET_EXAMINER_TTL_SECONDS=300\n",
+	)
+	if rc == 0 || !armed || delayStr != "300" || !failArmed {
+		t.Fatalf("missing TLS setup failure: rc=%d armed=%v delay=%q failArmed=%v, want rc!=0 armed=true delay=300 failArmed=true", rc, armed, delayStr, failArmed)
+	}
 }
 
 // Review 18 P2 #3: an offer with missing/zero/non-positive price MUST be rejected by both

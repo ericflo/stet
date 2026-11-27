@@ -3414,7 +3414,7 @@ def test_review13_exam_timeout_is_round_scoped_across_two_rounds(monkeypatch, tm
     # Stub stet.train so this test runs cleanly even in the lightweight no-Torch venv.
     fake_train = types.ModuleType("stet.train")
     fake_train.pick_device = lambda *a, **k: SimpleNamespace(type="cuda", index=0)
-    fake_train.hardware_info = lambda d: {"device": "cuda", "backend": "cuda", "gpu": "RTX 5090", "vram_gb": 32.0}
+    fake_train.hardware_info = lambda d: {"device": "cuda", "backend": "cuda", "gpu": "RTX 5090", "vram_gb": 32.0, "cuda_capability": "12.0", "bf16_native": True}
     monkeypatch.setitem(sys.modules, "stet.train", fake_train)
 
     clock = {"t": 1000.0}
@@ -4684,5 +4684,227 @@ def test_review18_synthesis_rejects_interior_question_in_parser_and_cache():
     )
     assert reason.cached_item_passes_filter(bad_cached) is False
     assert reason.cached_item_passes_filter(items[0]) is True
+
+
+def test_review19_stale_shares_file_rejected_against_server_shares(monkeypatch, tmp_path):
+    """Review 19 P2 #5: supplying a stale `--shares` file that disagrees with authoritative server
+    shares MUST raise `stages.Stop` without mutating `work/<round>/languages.json` (preventing a
+    +0.080 -> -0.080 score reversal), while still allowing `--shares` fallback when server shares
+    are unavailable (historical rounds)."""
+    from stet.exam import aggregate, examine, farm, stages
+    from stet.spec import official_round
+
+    monkeypatch.setenv("STET_CACHE", str(tmp_path))
+    s3 = load_season("s3")
+    items = [
+        Item(kind="answer", corner=f"explain/{lang}/wiki", fmt="prose", lang=lang, source=f"explain:wikipedia:{lang}:{i}", ctx=f"Ctx {lang} {i}", cont=f" Ans {lang} {i}")
+        for lang in ("en", "de")
+        for i in range(24)
+    ]
+    digest = data.exam_digest(items)
+    rnd = dataclasses.replace(
+        official_round(
+            s3,
+            21,
+            {"round": 123459, "randomness": "aa" * 32},
+            {"crawl": "CC-MAIN-2026-43", "paths_sha256": "bb" * 32, "n_shards": 100000},
+        ),
+        exam_digest=digest,
+    )
+    made = tmp_path / "examine" / rnd.id
+    made.mkdir(parents=True, exist_ok=True)
+    (made / examine.KEPT_ITEMS).write_bytes(farm.pack_items(items))
+    (made / examine.KEPT_LANGUAGES).write_text(json.dumps({"en": 90.0, "de": 10.0}))
+
+    work = tmp_path / "audit_work"
+    got_items, got_shares = stages.whole_exam(rnd, work, server_shares={"en": 90.0, "de": 10.0})
+    assert got_items == items and got_shares == {"en": 90.0, "de": 10.0}
+
+    # Construct gains (+0.10 on en, -0.10 on de) -> +0.080 under 90/10, -0.080 under 10/90!
+    gains = [0.10 if it.lang == "en" else -0.10 for it in items]
+    plan = aggregate.plan_of(s3)
+    score_auth = aggregate.round_score(items, gains, got_shares, plan)["score"]
+    assert abs(score_auth - 0.080) < 1e-6
+
+    # Supplying a stale 10/90 --shares file against authoritative 90/10 server_shares MUST fail
+    # with Stop and leave work/<round>/languages.json untouched!
+    stale = tmp_path / "stale_shares.json"
+    stale.write_text(json.dumps({"en": 10.0, "de": 90.0}))
+    with pytest.raises(stages.Stop, match="does not match"):
+        stages.whole_exam(rnd, work, shares_file=stale, server_shares={"en": 90.0, "de": 10.0})
+    assert json.loads((work / rnd.id / "languages.json").read_text()) == {"en": 90.0, "de": 10.0}
+
+    # Matching --shares (even with int vs float JSON formatting) succeeds cleanly.
+    matching = tmp_path / "matching_shares.json"
+    matching.write_text(json.dumps({"en": 90, "de": 10}))
+    _, got_match = stages.whole_exam(rnd, work, shares_file=matching, server_shares={"en": 90.0, "de": 10.0})
+    assert got_match == {"en": 90.0, "de": 10.0}
+
+    # Non-dict JSON in --shares raises stages.Stop cleanly instead of AttributeError.
+    bad_shares = tmp_path / "bad_shares.json"
+    bad_shares.write_text("[]")
+    with pytest.raises(stages.Stop, match="JSON object"):
+        stages.whole_exam(rnd, work, shares_file=bad_shares, server_shares={"en": 90.0, "de": 10.0})
+
+    # Historical fallback (server_shares=None and no cached round_shares) still accepts explicit --shares.
+    work_hist = tmp_path / "hist_work"
+    _, got_hist = stages.whole_exam(rnd, work_hist, shares_file=stale, server_shares=None)
+    assert got_hist == {"en": 10.0, "de": 90.0}
+
+
+def test_review19_python_hardware_eligibility_matches_shared_season3_vectors():
+    """Review 19 P2 #6: Python `client.grade_eligibility()` MUST agree with Go `gradesOnHardware()`
+    on every vector in `server/testdata/grade_hardware_vectors_s3.json`."""
+    from stet import client
+
+    s3 = load_season("s3")
+    vec_path = Path(__file__).resolve().parents[1] / "server" / "testdata" / "grade_hardware_vectors_s3.json"
+    vectors = json.loads(vec_path.read_text())
+    assert len(vectors) >= 10
+    for vec in vectors:
+        ok, why = client.grade_eligibility(s3, vec["hardware"])
+        assert ok is vec["eligible"], f"vector {vec['name']} ({vec['hardware']}): got ({ok}, {why!r}), want {vec['eligible']}"
+
+
+def test_review19_shared_baseline_retained_across_cache_error_and_recovered_once(monkeypatch, tmp_path):
+    """Review 19 P2 #7:
+    (a) When `sit_baseline` scores successfully and ONLY writing the baseline cache fails, the
+        valid in-memory baseline is retained for job 1 and job 2, and persisted once storage recovers.
+    (b) When the first baseline `sit_exam` fails once (clearing `entry.model = None` in `finally`),
+        the second already-trained job recovers the baseline ONCE via `pipeline.baseline` instead
+        of failing with 'no longer in memory', and subsequent jobs reuse that recovered baseline."""
+    if importlib.util.find_spec("torch") is None:
+        pytest.skip("torch not installed")
+    import os
+
+    from stet import client, grade, pipeline
+    from stet.spec import official_round
+
+    monkeypatch.setenv("STET_CACHE", str(tmp_path))
+    s3 = load_season("s3")
+    scale = s3.scale("nano")
+    items = [Item(kind="answer", corner="explain/en/wiki", fmt="prose", lang="en", source="explain:wikipedia:en:1", ctx="Ctx", cont=" Ans")]
+    exam_sha = data.exam_digest(items)
+    rnd = dataclasses.replace(
+        official_round(
+            s3,
+            22,
+            {"round": 123460, "randomness": "cc" * 32},
+            {"crawl": "CC-MAIN-2026-43", "paths_sha256": "dd" * 32, "n_shards": 100000},
+        ),
+        exam_digest=exam_sha,
+    )
+    key = types.SimpleNamespace(public_hex="a" * 64)
+    dev = types.SimpleNamespace(type="cpu")
+
+    monkeypatch.setattr(client, "fetch_exam", lambda *a, **k: None)
+    monkeypatch.setattr(data, "round_exam", lambda *a, **k: items)
+
+    def make_trained(tag: str):
+        return grade.Trained(
+            model=types.SimpleNamespace(tag=tag),
+            enc=None,
+            device=dev,
+            result={"valid": False, "hardware": {"device": "cpu"}, "train": {"init_sha256": "1" * 64}},
+            trained=True,
+        )
+
+    def fake_sit_exam(trained, r, sc, ex):
+        try:
+            if getattr(trained.model, "fail_once", False):
+                trained.model.fail_once = False
+                raise RuntimeError("transient baseline sit error")
+            if trained.model is None:
+                raise RuntimeError("model already cleared")
+            res = dict(trained.result)
+            res["valid"] = True
+            res["exam_sha256"] = exam_sha
+            res["exam"] = {"items": len(ex), "item_scores": [-2.0], "mean": -2.0}
+            return res
+        finally:
+            trained.model = None
+
+    monkeypatch.setattr(pipeline, "sit_exam", fake_sit_exam)
+    monkeypatch.setattr(grade, "sit_exam", fake_sit_exam)
+
+    # (a) Cache write fails during job 1 after baseline sit_exam succeeds -> _sit retains the valid
+    #     in-memory measurement so BOTH job 1 and job 2 succeed without discarding trained models,
+    #     and persists the cache file once storage recovers!
+    orig_replace = os.replace
+    fail_disk = {"on": True}
+
+    def flaky_replace(src, dst):
+        if fail_disk["on"]:
+            raise OSError("No space left on device")
+        return orig_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", flaky_replace)
+    bases_a = {rnd.id: make_trained("base-a")}
+    p1 = client.Pending({"id": 1, "baseline": True}, rnd, make_trained("cand-1"), dev)
+    p2 = client.Pending({"id": 2, "baseline": True}, rnd, make_trained("cand-2"), dev)
+
+    res1, base1 = client._sit(p1, bases_a, key, scale)
+    assert res1["valid"] and base1["valid"] and base1["exam_sha256"] == exam_sha
+    assert isinstance(bases_a[rnd.id], client._SatBaseline) and bases_a[rnd.id].cached is False
+
+    # Storage recovers before job 2 -> job 2 reuses retained in-memory baseline AND persists cache file!
+    fail_disk["on"] = False
+    res2, base2 = client._sit(p2, bases_a, key, scale)
+    assert res2["valid"] and base2 == base1
+    assert bases_a[rnd.id].cached is True
+    bp = pipeline.baseline_path(rnd, scale, dev, exam_sha=exam_sha, verifier=key.public_hex, gpu="")
+    assert bp.exists()
+
+    # (b) First baseline sit_exam raises once (clearing entry.model = None in finally):
+    #     job 2 recovers baseline ONCE via pipeline.baseline — EVEN IF disk cache write fails
+    #     during recovery — and job 3 reuses that recovered _SatBaseline without poisoning bases!
+    bp.unlink(missing_ok=True)
+    recovered_trains = []
+    monkeypatch.setattr(pipeline, "train_baseline", lambda *a, **k: recovered_trains.append(rnd.id) or make_trained("recovered-base"))
+    bad_base = make_trained("base-b")
+    bad_base.model.fail_once = True
+    bases_b = {rnd.id: bad_base}
+    q1 = client.Pending({"id": 10, "baseline": True}, rnd, make_trained("cand-10"), dev)
+    q2 = client.Pending({"id": 11, "baseline": True}, rnd, make_trained("cand-11"), dev)
+    q3 = client.Pending({"id": 12, "baseline": True}, rnd, make_trained("cand-12"), dev)
+
+    with pytest.raises(RuntimeError, match="transient baseline sit error"):
+        client._sit(q1, bases_b, key, scale)
+    assert bad_base.model is None  # cleared by sit_exam's finally
+    assert q1.trained.model is not None  # q1's own student untouched
+
+    # Make disk full DURING recovery too -> recovery MUST still succeed in memory and NOT poison bases_b!
+    fail_disk["on"] = True
+    r2, b2 = client._sit(q2, bases_b, key, scale)
+    assert r2["valid"] and b2["valid"] and b2["exam_sha256"] == exam_sha
+    assert recovered_trains == [rnd.id]
+    assert isinstance(bases_b[rnd.id], client._SatBaseline) and bases_b[rnd.id].cached is False
+
+    # Storage recovers before job 3 -> job 3 reuses recovered _SatBaseline AND persists cache!
+    fail_disk["on"] = False
+    r3, b3 = client._sit(q3, bases_b, key, scale)
+    assert r3["valid"] and b3 == b2
+    assert recovered_trains == [rnd.id]
+    assert bases_b[rnd.id].cached is True and bp.exists()
+
+    # (c) If the single recovery attempt itself fails during training/sitting, a subsequent job does NOT retry recovery infinitely!
+    bp.unlink(missing_ok=True)
+    fail_rec_calls = []
+
+    def failing_recover(r, sc, d, **kw):
+        fail_rec_calls.append(r.id)
+        raise RuntimeError("recovery failed")
+
+    monkeypatch.setattr(pipeline, "baseline", failing_recover)
+    bad_base2 = make_trained("base-c")
+    bad_base2.model.fail_once = True
+    bases_c = {rnd.id: bad_base2}
+    with pytest.raises(RuntimeError, match="transient baseline sit error"):
+        client._sit(client.Pending({"id": 20, "baseline": True}, rnd, make_trained("c20"), dev), bases_c, key, scale)
+    with pytest.raises(RuntimeError, match="recovery failed"):
+        client._sit(client.Pending({"id": 21, "baseline": True}, rnd, make_trained("c21"), dev), bases_c, key, scale)
+    with pytest.raises(RuntimeError, match="no longer in memory"):
+        client._sit(client.Pending({"id": 22, "baseline": True}, rnd, make_trained("c22"), dev), bases_c, key, scale)
+    assert fail_rec_calls == [rnd.id]
 
 

@@ -8,8 +8,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"regexp"
 	"sort"
 	"strconv"
+	"strings"
 )
 
 // season.json is written by tools/export_season.py. The server never derives a corpus or
@@ -171,21 +173,90 @@ func (s *Season) gradesOn(device string) bool {
 	return false
 }
 
-// gradesOnHardware reports whether a machine's device and GPU backend (cuda vs rocm) may grade
-// officially for this season. When grade_backends is empty, any backend on an allowed device counts.
-func (s *Season) gradesOnHardware(hw hardwareFacts) bool {
-	if !s.gradesOn(hw.Device) {
+// preAmpereGPURe matches pre-Ampere NVIDIA GPU names lacking native bf16 Tensor Cores.
+// Must match _PRE_AMPERE_GPU_RE in src/stet/client.py.
+var preAmpereGPURe = regexp.MustCompile(`(?i)\b(?:V100|T4|P100|P40|P4|K80|M60|TITAN|GTX)\b|RTX\s*20\d\d|Quadro\s*(?:RTX|P|M|K|GV)`)
+
+var cudaCapRe = regexp.MustCompile(`^[0-9]+\.[0-9]+$`)
+
+func parseCUDACapability(cap string) (major int, ok bool) {
+	s := strings.TrimSpace(cap)
+	if !cudaCapRe.MatchString(s) {
+		return 0, false
+	}
+	parts := strings.Split(s, ".")
+	maj, err1 := strconv.Atoi(parts[0])
+	_, err2 := strconv.Atoi(parts[1])
+	if err1 != nil || err2 != nil {
+		return 0, false
+	}
+	return maj, true
+}
+
+func cudaHasNativeBF16(hw hardwareFacts, requireEvidence bool) bool {
+	if hw.BF16Native != nil && !*hw.BF16Native {
 		return false
+	}
+	hasCap := strings.TrimSpace(hw.CUDACapability) != ""
+	if hasCap {
+		maj, ok := parseCUDACapability(hw.CUDACapability)
+		if !ok || maj < 8 {
+			return false
+		}
+	}
+	if hw.GPU != "" && preAmpereGPURe.MatchString(hw.GPU) {
+		return false
+	}
+	if hw.BF16Native != nil && *hw.BF16Native {
+		return true
+	}
+	if hasCap {
+		return true
+	}
+	return !requireEvidence
+}
+
+// gradeHardwareIssue mirrors src/stet/client.py:grade_eligibility so the judge and verifier
+// enforce the exact same device, backend, native bf16 capability, and VRAM floor rules.
+// Returns "" when eligible, or a human-readable rejection reason.
+func (s *Season) gradeHardwareIssue(hw hardwareFacts) string {
+	if !s.gradesOn(hw.Device) {
+		return fmt.Sprintf("grading for the leaderboard needs %s, so that every grade uses the same arithmetic", s.gradeHardwareRequirement())
 	}
 	if hw.Device == "cuda" && len(s.GradeBackends) > 0 {
+		matched := false
 		for _, b := range s.GradeBackends {
 			if b == hw.Backend {
-				return true
+				matched = true
+				break
 			}
 		}
-		return false
+		if !matched {
+			return fmt.Sprintf("grading for the leaderboard needs %s, so that every grade uses the same arithmetic", s.gradeHardwareRequirement())
+		}
 	}
-	return true
+	requireCapEvidence := len(s.GradeBackends) > 0 || s.Runner.GradeGPUMemoryGB > 0
+	if hw.Device == "cuda" && hw.Backend != "rocm" && !cudaHasNativeBF16(hw, requireCapEvidence) {
+		gpuDesc := hw.GPU
+		if gpuDesc == "" {
+			gpuDesc = "this GPU"
+		}
+		if capStr := strings.TrimSpace(hw.CUDACapability); capStr != "" {
+			gpuDesc = fmt.Sprintf("%s (SM %s)", gpuDesc, capStr)
+		}
+		return fmt.Sprintf("official grading for %s needs an NVIDIA GPU with native bf16 support (Ampere / SM 8.0 or newer; %s lacks native bf16 or capability metadata)", s.Title, gpuDesc)
+	}
+	if s.Runner.GradeGPUMemoryGB > 0 && hw.Device == "cuda" {
+		if math.IsNaN(hw.VRAMGB) || math.IsInf(hw.VRAMGB, 0) || hw.VRAMGB < s.Runner.GradeGPUMemoryGB {
+			return fmt.Sprintf("official grading for %s needs a GPU with at least %g GB of memory (this GPU reports %.1f GB)", s.Title, s.Runner.GradeGPUMemoryGB, hw.VRAMGB)
+		}
+	}
+	return ""
+}
+
+// gradesOnHardware reports whether a machine's hardware may grade officially for this season.
+func (s *Season) gradesOnHardware(hw hardwareFacts) bool {
+	return s.gradeHardwareIssue(hw) == ""
 }
 
 func (s *Season) gradeHardwareRequirement() string {

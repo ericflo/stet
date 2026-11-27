@@ -393,15 +393,22 @@ func shellQuote(s string) string {
 }
 
 // examinerOnstartScript builds the Vast.ai startup script that:
-//  1. Materializes the per-instance TLS certificate & private key (0600) in /tmp from hex-encoded
-//     environment variables (with /etc/environment fallback).
-//  2. Spawns a detached container-side Python 3 self-destruct timer calling
-//     DELETE https://console.vast.ai/api/v0/instances/$CONTAINER_ID/ after STET_EXAMINER_TTL_SECONDS
-//     so hard timeout enforcement survives stet-cloud exiting or losing connectivity.
+//  1. Immediately writes and arms a detached Python 3 self-destruct watchdog BEFORE any fallible
+//     setup, computing its sleep from an absolute STET_EXAMINER_EXPIRE_AT deadline (or
+//     STET_EXAMINER_TTL_SECONDS) read from process env OR /etc/environment (with baked launch-time
+//     deadline fallback), so slow image pulls, /etc/environment-only delivery, or missing TLS
+//     material can never extend container lifetime past the rental deadline.
+//  2. Materializes the per-instance TLS certificate & private key (0600) in /tmp from hex-encoded
+//     environment variables (with /etc/environment fallback), self-destructing promptly on failure.
 //  3. Launches vLLM over HTTPS (--ssl-certfile / --ssl-keyfile) with the per-instance Bearer key,
 //     streaming non-secret startup logs to container stdout (/proc/1/fd/1) so Vast logs remain
 //     observable while onstart exits 0 promptly, and self-destructing if vLLM exits unexpectedly.
 func examinerOnstartScript(l ExaminerLaunch, servedName string) string {
+	ttl := l.TTLSeconds
+	if ttl <= 0 {
+		ttl = 45 * 60
+	}
+	expireAt := l.ExpireAt
 	args := []string{"vllm", "serve", shellQuote(l.Model)}
 	if l.Revision != "" {
 		args = append(args, "--revision", shellQuote(l.Revision))
@@ -419,28 +426,10 @@ func examinerOnstartScript(l ExaminerLaunch, servedName string) string {
 		"--api-key", `"$STET_EXAMINER_API_KEY"`,
 	)
 	return strings.Join([]string{
-		`set -eu`,
 		`export PATH="/usr/local/bin:/opt/venv/bin:/venv/bin:$PATH"`,
 		`LOG=/tmp/stet-vllm.log`,
 		`[ -w /proc/1/fd/1 ] && LOG=/proc/1/fd/1`,
 		`echo "[stet-examiner] onstart begin" >>"$LOG" 2>&1 || true`,
-		`python3 -c 'import os` + "\n" +
-			`def _env(n):` + "\n" +
-			`    v = os.environ.get(n, "").strip()` + "\n" +
-			`    if v: return v` + "\n" +
-			`    try:` + "\n" +
-			`        for line in open("/etc/environment", encoding="utf-8", errors="ignore"):` + "\n" +
-			`            line = line.strip()` + "\n" +
-			`            if line.startswith("export "): line = line[7:].strip()` + "\n" +
-			`            if line.startswith(n + "="): return line.split("=", 1)[1].strip().strip("\"\x27")` + "\n" +
-			`    except OSError: pass` + "\n" +
-			`    return ""` + "\n" +
-			`for p,k in (("/tmp/stet-examiner-cert.pem","STET_EXAMINER_CERT_HEX"),("/tmp/stet-examiner-key.pem","STET_EXAMINER_KEY_HEX")):` + "\n" +
-			`    raw = bytes.fromhex(_env(k))` + "\n" +
-			`    if not raw: raise SystemExit(f"missing {k}")` + "\n" +
-			`    fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)` + "\n" +
-			`    with os.fdopen(fd, "wb") as fh:` + "\n" +
-			`        fh.write(raw)' >>"$LOG" 2>&1`,
 		`cat >/tmp/stet-selfdestruct.py <<'PY'`,
 		`import os, sys, time, urllib.error, urllib.request`,
 		`def _env(name):`,
@@ -455,7 +444,28 @@ func examinerOnstartScript(l ExaminerLaunch, servedName string) string {
 		`    except OSError:`,
 		`        pass`,
 		`    return ""`,
-		`delay = max(0, int(sys.argv[1])) if len(sys.argv) > 1 else 0`,
+		`def _pos_int(s):`,
+		`    try:`,
+		`        v = int(s)`,
+		`        return v if v > 0 else 0`,
+		`    except (TypeError, ValueError):`,
+		`        return 0`,
+		`def _compute_delay():`,
+		`    if len(sys.argv) > 1 and sys.argv[1] != "":`,
+		`        return max(0, int(sys.argv[1]))`,
+		`    exp = _pos_int(_env("STET_EXAMINER_EXPIRE_AT"))`,
+		`    if exp > 0:`,
+		`        return max(0, exp - int(time.time()))`,
+		fmt.Sprintf(`    baked_exp = %d`, expireAt),
+		`    ttl = _pos_int(_env("STET_EXAMINER_TTL_SECONDS"))`,
+		`    if ttl > 0:`,
+		`        if baked_exp > 0:`,
+		`            return min(ttl, max(0, baked_exp - int(time.time())))`,
+		`        return ttl`,
+		`    if baked_exp > 0:`,
+		`        return max(0, baked_exp - int(time.time()))`,
+		fmt.Sprintf(`    return %d`, ttl),
+		`delay = _compute_delay()`,
 		`if delay > 0: time.sleep(delay)`,
 		`cid, key = _env("CONTAINER_ID"), _env("CONTAINER_API_KEY")`,
 		`if not cid or not key: sys.exit(0)`,
@@ -471,6 +481,29 @@ func examinerOnstartScript(l ExaminerLaunch, servedName string) string {
 		`        pass`,
 		`    time.sleep(30 if attempt < 10 else 120)`,
 		`PY`,
+		`nohup python3 /tmp/stet-selfdestruct.py >/tmp/stet-ttl.log 2>&1 &`,
+		`if ! python3 -c 'import os` + "\n" +
+			`def _env(n):` + "\n" +
+			`    v = os.environ.get(n, "").strip()` + "\n" +
+			`    if v: return v` + "\n" +
+			`    try:` + "\n" +
+			`        for line in open("/etc/environment", encoding="utf-8", errors="ignore"):` + "\n" +
+			`            line = line.strip()` + "\n" +
+			`            if line.startswith("export "): line = line[7:].strip()` + "\n" +
+			`            if line.startswith(n + "="): return line.split("=", 1)[1].strip().strip("\"\x27")` + "\n" +
+			`    except OSError: pass` + "\n" +
+			`    return ""` + "\n" +
+			`for p,k in (("/tmp/stet-examiner-cert.pem","STET_EXAMINER_CERT_HEX"),("/tmp/stet-examiner-key.pem","STET_EXAMINER_KEY_HEX")):` + "\n" +
+			`    raw = bytes.fromhex(_env(k))` + "\n" +
+			`    if not raw: raise SystemExit(f"missing {k}")` + "\n" +
+			`    fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)` + "\n" +
+			`    with os.fdopen(fd, "wb") as fh:` + "\n" +
+			`        fh.write(raw)' >>"$LOG" 2>&1; then`,
+		`  echo "[stet-examiner] TLS materialization failed; self-destructing in 15s" >>"$LOG" 2>&1 || true`,
+		`  nohup python3 /tmp/stet-selfdestruct.py 15 >/tmp/stet-ttl-fail.log 2>&1 &`,
+		`  exit 1`,
+		`fi`,
+		`set -eu`,
 		`cat >/tmp/stet-vllm.sh <<'SH'`,
 		`#!/bin/sh`,
 		`export PATH="/usr/local/bin:/opt/venv/bin:/venv/bin:$PATH"`,
@@ -488,7 +521,6 @@ func examinerOnstartScript(l ExaminerLaunch, servedName string) string {
 		`python3 /tmp/stet-selfdestruct.py 15`,
 		`SH`,
 		`chmod 700 /tmp/stet-vllm.sh`,
-		`nohup python3 /tmp/stet-selfdestruct.py "${STET_EXAMINER_TTL_SECONDS:-2700}" >/tmp/stet-ttl.log 2>&1 &`,
 		`nohup sh /tmp/stet-vllm.sh >>"$LOG" 2>&1 &`,
 	}, "\n")
 }
@@ -504,12 +536,19 @@ func (m *vastMarket) RentExaminer(ctx context.Context, offerID string, l Examine
 	if ttl <= 0 {
 		ttl = 45 * 60
 	}
+	expireAt := l.ExpireAt
+	if expireAt <= 0 {
+		expireAt = time.Now().Unix() + int64(ttl)
+	}
+	l.TTLSeconds = ttl
+	l.ExpireAt = expireAt
 	env := map[string]string{
 		"-p 8000:8000":              "1",
 		"STET_EXAMINER_CERT_HEX":    hex.EncodeToString(l.CertPEM),
 		"STET_EXAMINER_KEY_HEX":     hex.EncodeToString(l.KeyPEM),
 		"STET_EXAMINER_API_KEY":     l.APIKey,
 		"STET_EXAMINER_TTL_SECONDS": strconv.Itoa(ttl),
+		"STET_EXAMINER_EXPIRE_AT":   strconv.FormatInt(expireAt, 10),
 	}
 	if l.HFToken != "" {
 		env["HF_TOKEN"] = l.HFToken

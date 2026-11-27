@@ -12,6 +12,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -575,8 +576,8 @@ func TestSingleInvalidGradeSeeksSecondOpinionAndTrainingFailedWording(t *testing
 // Review 8 Finding 4: grade_backends distinguishes NVIDIA CUDA from AMD ROCm when device=="cuda".
 func TestGradeBackendsEnforcement(t *testing.T) {
 	s := &Season{GradeDevices: []string{"cuda"}, GradeBackends: []string{"cuda"}}
-	if !s.gradesOnHardware(hardwareFacts{Device: "cuda", Backend: "cuda"}) {
-		t.Fatal("NVIDIA cuda should be accepted")
+	if !s.gradesOnHardware(hardwareFacts{Device: "cuda", Backend: "cuda", CUDACapability: "8.9"}) {
+		t.Fatal("NVIDIA cuda SM 8.9 should be accepted")
 	}
 	if s.gradesOnHardware(hardwareFacts{Device: "cuda", Backend: "rocm"}) {
 		t.Fatal("AMD rocm should be rejected when grade_backends is [cuda]")
@@ -601,7 +602,7 @@ func TestGradeBackendsEnforcement(t *testing.T) {
 			"harness":       w.app.season.Harness,
 			"season":        w.app.season.ID,
 			"season_digest": w.app.season.Digest,
-			"hardware":      map[string]any{"device": "cuda", "backend": backend, "gpu": "Test GPU"},
+			"hardware":      map[string]any{"device": "cuda", "backend": backend, "gpu": "Test GPU", "vram_gb": 24.0, "cuda_capability": "8.9", "bf16_native": true},
 		}
 	}
 	var errResp map[string]any
@@ -1258,4 +1259,91 @@ func TestReview18CancelRejectsMalformedNonEmptyBodyAndKeepsEmptyBody(t *testing.
 		t.Fatalf("empty-body cancel on unexamined round: HTTP %d, want 200", code)
 	}
 	w.check()
+}
+
+// Review 19 P2 #6: Go judge hardware eligibility MUST agree with Python `grade_eligibility()` on
+// every shared Season 3 test vector (including Tesla T4 15 GiB, RTX 3060 Ti 8 GiB, absent VRAM or
+// capability metadata, and qualifying Ampere/Ada/Blackwell cards) across claim, result, and
+// attached-baseline HTTP paths.
+func TestReview19JudgeHardwareEligibilityMatchesSharedSeason3Vectors(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("testdata", "grade_hardware_vectors_s3.json"))
+	if err != nil {
+		t.Fatalf("read shared vectors: %v", err)
+	}
+	var vectors []struct {
+		Name     string          `json:"name"`
+		Hardware json.RawMessage `json:"hardware"`
+		Eligible bool            `json:"eligible"`
+	}
+	if err := json.Unmarshal(raw, &vectors); err != nil {
+		t.Fatalf("unmarshal shared vectors: %v", err)
+	}
+	if len(vectors) < 10 {
+		t.Fatalf("expected comprehensive vector set, got %d", len(vectors))
+	}
+	s3 := loadSeason()
+	for _, vec := range vectors {
+		got := s3.gradesOnHardware(readHardware(vec.Hardware))
+		if got != vec.Eligible {
+			t.Errorf("vector %s (%s): gradesOnHardware=%v, want %v (issue=%q)",
+				vec.Name, string(vec.Hardware), got, vec.Eligible, s3.gradeHardwareIssue(readHardware(vec.Hardware)))
+		}
+	}
+
+	// End-to-end HTTP enforcement (Dev=false) across claim, result, and attached baseline.
+	pub, priv := newKey()
+	w := newWorld(t, pub)
+	anchor := w.join("anchor-one", priv)
+	bob := w.join("bob", nil)
+	alice := w.join("alice", nil)
+	w.submit(alice, "tidy", "print('v1')")
+	w.draw()
+	ce := w.claim(anchor, true)
+	if code, _ := w.edit(anchor, ce, scriptOne); code != 200 {
+		t.Fatalf("edit: HTTP %d", code)
+	}
+	c := w.asked(bob, true)
+	w.app.cfg.Dev = false
+
+	t4HW := map[string]any{"device": "cuda", "backend": "cuda", "gpu": "Tesla T4", "vram_gb": 15.0, "cuda_capability": "7.5", "bf16_native": false}
+	lowVRAMHW := map[string]any{"device": "cuda", "backend": "cuda", "gpu": "NVIDIA GeForce RTX 3060 Ti", "vram_gb": 8.0, "cuda_capability": "8.6", "bf16_native": true}
+	absentCapHW := map[string]any{"device": "cuda", "backend": "cuda", "gpu": "NVIDIA GeForce RTX 4090", "vram_gb": 24.0}
+	goodHW := map[string]any{"device": "cuda", "backend": "cuda", "gpu": "NVIDIA GeForce RTX 4090", "vram_gb": 24.0, "cuda_capability": "8.9", "bf16_native": true}
+
+	// 1. /api/v1/jobs/claim rejects T4, 8 GiB 3060 Ti, and absent capability; accepts qualifying 4090.
+	vol := w.join("vol-hw", nil)
+	for _, bad := range []map[string]any{t4HW, lowVRAMHW, absentCapHW} {
+		h := map[string]any{"harness": w.app.season.Harness, "season": w.app.season.ID, "season_digest": w.app.season.Digest, "hardware": bad}
+		if code := vol.do("POST", "/api/v1/jobs/claim", h, nil); code != 400 {
+			t.Fatalf("claim with ineligible hardware %v: HTTP %d, want 400", bad, code)
+		}
+	}
+	hOK := map[string]any{"harness": w.app.season.Harness, "season": w.app.season.ID, "season_digest": w.app.season.Digest, "hardware": goodHW}
+	if code := vol.do("POST", "/api/v1/jobs/claim", hOK, nil); code != 200 {
+		t.Fatalf("claim with qualifying 4090: HTTP %d, want 200", code)
+	}
+
+	// 2. /api/v1/jobs/{id}/result rejects ineligible result hardware AND ineligible baseline.hardware.
+	initSHA := strings.Repeat("a", 64)
+	tokSHA := strings.Repeat("b", 64)
+	makeRes := func(resHW, baseHW map[string]any) map[string]any {
+		p := w.result(c, 5.95, 6.00)
+		p["hardware"] = resHW
+		p["train"] = map[string]any{"init_sha256": initSHA}
+		p["script"].(map[string]any)["tokens_sha256"] = tokSHA
+		p["baseline"].(map[string]any)["init_sha256"] = initSHA
+		p["baseline"].(map[string]any)["hardware"] = baseHW
+		return p
+	}
+	for _, bad := range []map[string]any{t4HW, lowVRAMHW, absentCapHW} {
+		if code := bob.do("POST", fmt.Sprintf("/api/v1/jobs/%d/result", c.Job.ID), makeRes(bad, goodHW), nil); code != 400 {
+			t.Fatalf("result with ineligible hardware %v: HTTP %d, want 400", bad, code)
+		}
+		if code := bob.do("POST", fmt.Sprintf("/api/v1/jobs/%d/result", c.Job.ID), makeRes(goodHW, bad), nil); code != 400 {
+			t.Fatalf("result with ineligible baseline.hardware %v: HTTP %d, want 400", bad, code)
+		}
+	}
+	if code := bob.do("POST", fmt.Sprintf("/api/v1/jobs/%d/result", c.Job.ID), makeRes(goodHW, goodHW), nil); code != 200 {
+		t.Fatalf("result with qualifying hardware + baseline.hardware: HTTP %d, want 200", code)
+	}
 }

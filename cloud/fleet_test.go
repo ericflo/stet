@@ -1868,3 +1868,159 @@ func TestReview18ProbeCleanupCallsEndOnListOmissionAndPropagatesError(t *testing
 		}
 	})
 }
+
+// Review 19 P1 #2:
+//
+//	(a) If the provider creates the probe pod and the immediate fleet.json ledger write fails,
+//	    launchSomeRentals MUST still return the live pod ID and cmdProbe MUST immediately tear it
+//	    down on the provider so zero unpaid-for/leaked probe pods keep running `sleep infinity`.
+//	(b) If fleet.json becomes corrupt/unparsable after the probe completes, cmdDownRental MUST
+//	    still issue m.End(ctx, pod.ID) directly before returning the ledger repair error.
+func TestReview19ProbeTeardownSurvivesLedgerWriteAndReadFailures(t *testing.T) {
+	t.Run("launch_ledger_write_failure_still_tears_down_probe_pod", func(t *testing.T) {
+		rp, st := newFakeRunPod(t), newFakeStet(t)
+		f, _ := testFleet(t, rp, st, 1)
+		f.o.MaxWorkers = 2
+		f.o.Market = "runpod"
+
+		var rentedID string
+		var endedIDs []string
+		rpMkt := f.market("runpod")
+		f.markets = []Market{&probeRentHookMarket{
+			Market: rpMkt,
+			onRent: func(ctx context.Context, o Offer, l Launch) (*Rental, error) {
+				r, err := rpMkt.Rent(ctx, o, l)
+				if err == nil && r != nil {
+					rentedID = r.ID
+					// Make home read-only right before writeLedger runs (after Rent succeeded!).
+					if cerr := os.Chmod(f.o.Home, 0o500); cerr != nil {
+						t.Errorf("chmod home 0500: %v", cerr)
+					}
+				}
+				return r, err
+			},
+			onEnd: func(ctx context.Context, id string) error {
+				endedIDs = append(endedIDs, id)
+				return rpMkt.End(ctx, id)
+			},
+		}}
+		t.Cleanup(func() { _ = os.Chmod(f.o.Home, 0o700) })
+
+		checkFile := filepath.Join(t.TempDir(), "cage_check.py")
+		if err := os.WriteFile(checkFile, []byte("print('ok')\n"), 0o600); err != nil {
+			t.Fatalf("write check file: %v", err)
+		}
+		err := cmdProbe(context.Background(), f, checkFile, time.Minute)
+		_ = os.Chmod(f.o.Home, 0o700)
+		if err == nil {
+			t.Fatalf("expected non-nil error when launch writeLedger fails")
+		}
+		if rentedID == "" {
+			t.Fatalf("expected provider to have created probe pod")
+		}
+		if len(endedIDs) != 1 || endedIDs[0] != rentedID {
+			t.Fatalf("probe MUST tear down created pod %s even when launch writeLedger fails! ended=%v", rentedID, endedIDs)
+		}
+		if len(rp.pods) != 0 {
+			t.Fatalf("leaked live probe pod after launch writeLedger failure! pods=%+v", rp.pods)
+		}
+	})
+
+	t.Run("corrupt_ledger_at_probe_completion_still_calls_End_before_reporting_error", func(t *testing.T) {
+		rp, st := newFakeRunPod(t), newFakeStet(t)
+		f, _ := testFleet(t, rp, st, 1)
+		f.o.MaxWorkers = 2
+		f.o.Market = "runpod"
+
+		var probeID string
+		var endedIDs []string
+		rpMkt := f.market("runpod")
+		f.markets = []Market{&probeSwapMarket{
+			Market: rpMkt,
+			onLogs: func(id string) ([]string, error) {
+				probeID = id
+				// Corrupt fleet.json before probe teardown runs.
+				if err := os.WriteFile(filepath.Join(f.o.Home, "fleet.json"), []byte("{corrupt"), 0o600); err != nil {
+					t.Errorf("corrupt fleet.json: %v", err)
+				}
+				return []string{"[probe] done: every case held"}, nil
+			},
+			onEnd: func(id string) error {
+				endedIDs = append(endedIDs, id)
+				return rpMkt.End(context.Background(), id)
+			},
+		}}
+
+		checkFile := filepath.Join(t.TempDir(), "cage_check.py")
+		if err := os.WriteFile(checkFile, []byte("print('ok')\n"), 0o600); err != nil {
+			t.Fatalf("write check file: %v", err)
+		}
+		err := cmdProbe(context.Background(), f, checkFile, time.Minute)
+		if err == nil || !strings.Contains(err.Error(), "fleet.json") {
+			t.Fatalf("expected ledger repair error after teardown, got %v", err)
+		}
+		if probeID == "" || len(endedIDs) != 1 || endedIDs[0] != probeID {
+			t.Fatalf("cmdDownRental MUST call m.End(%q) even when fleet.json is unparsable! ended=%v", probeID, endedIDs)
+		}
+		if len(rp.pods) != 0 {
+			t.Fatalf("live probe pod was NOT terminated when fleet.json was corrupt! pods=%+v", rp.pods)
+		}
+	})
+
+	t.Run("unwritable_lock_file_still_calls_End_before_reporting_error", func(t *testing.T) {
+		rp, st := newFakeRunPod(t), newFakeStet(t)
+		f, _ := testFleet(t, rp, st, 1)
+		f.o.MaxWorkers = 2
+		f.o.Market = "runpod"
+
+		var probeID string
+		var endedIDs []string
+		rpMkt := f.market("runpod")
+		f.markets = []Market{&probeSwapMarket{
+			Market: rpMkt,
+			onLogs: func(id string) ([]string, error) {
+				probeID = id
+				// Make <home>/lock unwritable (0400) so f.lock() fails during teardown (simulating EROFS / EACCES).
+				lockPath := filepath.Join(f.o.Home, "lock")
+				_ = os.Chmod(lockPath, 0o400)
+				return []string{"[probe] done: every case held"}, nil
+			},
+			onEnd: func(id string) error {
+				endedIDs = append(endedIDs, id)
+				return rpMkt.End(context.Background(), id)
+			},
+		}}
+		t.Cleanup(func() { _ = os.Chmod(filepath.Join(f.o.Home, "lock"), 0o600) })
+
+		checkFile := filepath.Join(t.TempDir(), "cage_check.py")
+		if err := os.WriteFile(checkFile, []byte("print('ok')\n"), 0o600); err != nil {
+			t.Fatalf("write check file: %v", err)
+		}
+		err := cmdProbe(context.Background(), f, checkFile, time.Minute)
+		_ = os.Chmod(filepath.Join(f.o.Home, "lock"), 0o600)
+		// If running as non-root, lock failed and cmdProbe returns lock cleanup error AFTER calling End.
+		if probeID == "" || len(endedIDs) != 1 || endedIDs[0] != probeID {
+			t.Fatalf("cmdDownRental MUST call m.End(%q) even when f.lock() fails! ended=%v err=%v", probeID, endedIDs, err)
+		}
+		if len(rp.pods) != 0 {
+			t.Fatalf("live probe pod was NOT terminated when f.lock() failed! pods=%+v", rp.pods)
+		}
+		if os.Geteuid() != 0 && (err == nil || !strings.Contains(err.Error(), "fleet lock")) {
+			t.Fatalf("expected fleet lock cleanup error reported after provider teardown, got %v", err)
+		}
+	})
+}
+
+type probeRentHookMarket struct {
+	Market
+	onRent func(ctx context.Context, o Offer, l Launch) (*Rental, error)
+	onEnd  func(ctx context.Context, id string) error
+}
+
+func (m *probeRentHookMarket) Rent(ctx context.Context, o Offer, l Launch) (*Rental, error) {
+	return m.onRent(ctx, o, l)
+}
+
+func (m *probeRentHookMarket) End(ctx context.Context, id string) error {
+	return m.onEnd(ctx, id)
+}

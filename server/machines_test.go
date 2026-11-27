@@ -23,7 +23,7 @@ func TestTheOrganisersSeeWhyAMachineRunsNoCuratorsAndWhichOfItsJobsFailed(t *tes
 	hello := func(edits bool, cpu float64) map[string]any {
 		h := w.hello(edits)
 		h["sandbox"] = "container"
-		hw := map[string]any{"gpu": "Test GPU", "device": "cuda", "backend": "cuda"}
+		hw := map[string]any{"gpu": "Test GPU", "device": "cuda", "backend": "cuda", "vram_gb": 24.0, "cuda_capability": "8.9", "bf16_native": true}
 		if cpu > 0 {
 			hw["bench"] = map[string]any{"gpu_tokens_per_second": f.GPUTokensPerSecond, "cpu_mb_per_second": cpu, "cores": f.Cores, "memory_gb": f.MemoryGB, "gpu_memory_gb": f.GPUMemoryGB}
 		}
