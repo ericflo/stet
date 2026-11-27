@@ -14,7 +14,7 @@ from . import source_digest
 from .data import Corpus, exam_digest
 from .script import ScriptError, file_sha256, materialize
 from .spec import HARNESS_VERSION, Round, Scale, TrainingError
-from .train import hardware_info, pick_device, train
+from .train import _deterministic_cuda, hardware_info, pick_device, train
 
 
 @dataclass
@@ -109,8 +109,10 @@ def sit_exam(trained: Trained, rnd: Round, scale: Scale, exam) -> dict:
                 if first_param is not None and first_param.device.type != "cuda":
                     trained.model.to(trained.device)
             t1 = time.time()
+            use_det = ((getattr(rnd.season, "raw", None) or {}).get("student") or {}).get("kind") == "hf_topreset" and getattr(trained.device, "type", "") == "cuda"
             try:
-                scores = sit(trained.model, exam, trained.enc, rnd.season.eot, scale.ctx, trained.device, floor=rnd.season.answer_floor_bytes)
+                with _deterministic_cuda(use_det):
+                    scores = sit(trained.model, exam, trained.enc, rnd.season.eot, scale.ctx, trained.device, floor=rnd.season.answer_floor_bytes)
             except FloatingPointError as e:
                 msg = str(e)
                 if e.__traceback__ is not None:

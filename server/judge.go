@@ -151,6 +151,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"math"
 	"math/rand/v2"
 	"sort"
@@ -953,6 +954,157 @@ func resolveTokenMajority(counted []*gradeView) (agreed string, authoritative bo
 		return bestTok, false, false
 	}
 	return "", false, true
+}
+
+// tokenMajorityRefuses reports whether an established non-self strict majority on sc has already
+// irrevocably locked onto a different tokens_sha256 than tokensSHA — meaning:
+//   - round InitSHA is already locked (on pinned-student seasons),
+//   - the round's unedited baselines are not disputed (and adding incomingBase would neither
+//     dispute them nor mark any leading voter oddOut),
+//   - sc already has a scored, non-tied verdict requiring zero additional established grades, and
+//   - even if this incoming report AND every other outstanding live established non-self claim
+//     disagreed with the leader, the leading digest would still hold >= 2 distinct eligible votes
+//     and strictly more than half of all potential voters.
+func (j *judge) tokenMajorityRefuses(sc *scriptState, rd *Round, acct *Account, est bool, tokensSHA string, incomingBase *Baseline) bool {
+	if tokensSHA == "" || rd == nil {
+		return false
+	}
+	if len(j.a.season.Student) > 0 && rd.InitSHA == "" {
+		return false
+	}
+	if j.a.baselineDisputed(j.s, rd) {
+		return false
+	}
+	v := j.weigh(sc)
+	if v.self || !v.known || !v.scored || v.tie || j.short(sc) > 0 {
+		return false
+	}
+	eligible, self := j.eligibleGrades(sc)
+	if self || len(eligible) == 0 {
+		return false
+	}
+	existingVoters := map[int64]bool{}
+	tokVoters := map[string]map[int64]bool{}
+	for _, g := range eligible {
+		existingVoters[g.acct.ID] = true
+		if g.r.Valid && g.r.TokensSHA != "" {
+			if tokVoters[g.r.TokensSHA] == nil {
+				tokVoters[g.r.TokensSHA] = map[int64]bool{}
+			}
+			tokVoters[g.r.TokensSHA][g.acct.ID] = true
+		}
+	}
+	bestTok, bestN := "", 0
+	for tok, voters := range tokVoters {
+		if len(voters) > bestN {
+			bestTok, bestN = tok, len(voters)
+		}
+	}
+	if bestN < 2 || bestTok == "" || bestTok == tokensSHA {
+		return false
+	}
+	if est && acct != nil && incomingBase != nil {
+		sim := *j.s
+		sim.Baselines = maps.Clone(j.s.Baselines)
+		if sim.Baselines == nil {
+			sim.Baselines = map[string]*Baseline{}
+		}
+		sim.Baselines[baselineKey(rd.Idx, acct.ID)] = incomingBase
+		if j.a.baselineDisputed(&sim, rd) {
+			return false
+		}
+		simOut := j.a.baselinesLeftOut(&sim, rd)
+		for voterID := range tokVoters[bestTok] {
+			if simOut[voterID] {
+				return false
+			}
+		}
+	}
+	incomingVote := 0
+	if est && acct != nil && !sc.wroteAlone(acct) && !existingVoters[acct.ID] {
+		incomingVote = 1
+	}
+	otherLive := map[int64]bool{}
+	for _, lc := range sc.Live {
+		if (acct != nil && lc.AccountID == acct.ID) || existingVoters[lc.AccountID] || !j.est[lc.AccountID] {
+			continue
+		}
+		if la := j.s.Accounts[lc.AccountID]; la != nil && !sc.wroteAlone(la) {
+			otherLive[lc.AccountID] = true
+		}
+	}
+	totalPotential := len(existingVoters) + incomingVote + len(otherLive)
+	return 2*bestN > totalPotential
+}
+
+// maybeLockRoundInit locks rd.InitSHA once a digest holds >= 2 distinct established votes AND a
+// strict majority (> half) of all established init voters plus any remaining live established
+// grade claims in the round, so arrival order among concurrent claims cannot lock an arbitrary
+// side of a split. Reports whether rd.InitSHA transitioned from "" to locked.
+func (a *App) maybeLockRoundInit(tx *Tx, rd *Round) bool {
+	if rd == nil || rd.InitSHA != "" {
+		return false
+	}
+	s := tx.s
+	byAcct := map[int64]string{}
+	conflictAcct := map[int64]bool{}
+	recordVote := func(acctID int64, sha string) {
+		if sha == "" {
+			return
+		}
+		if prev, ok := byAcct[acctID]; ok && prev != sha {
+			conflictAcct[acctID] = true
+			return
+		}
+		byAcct[acctID] = sha
+	}
+	for _, r := range s.Results {
+		if r.RoundIdx == rd.Idx && r.Valid && r.InitSHA != "" && a.established(s.Accounts[r.AccountID]) {
+			recordVote(r.AccountID, r.InitSHA)
+		}
+	}
+	for _, b := range s.Baselines {
+		if b.RoundIdx == rd.Idx && b.InitSHA != "" && (b.Established || (s.Accounts[b.AccountID] != nil && s.Accounts[b.AccountID].Anchor)) {
+			recordVote(b.AccountID, b.InitSHA)
+		}
+	}
+	if len(byAcct) < 2 {
+		return false
+	}
+	counts := map[string]int{}
+	for id, sha := range byAcct {
+		if !conflictAcct[id] {
+			counts[sha]++
+		}
+	}
+	bestSHA, bestN := "", 0
+	for sha, n := range counts {
+		if n > bestN {
+			bestSHA, bestN = sha, n
+		}
+	}
+	if bestN < 2 {
+		return false
+	}
+	otherLive := map[int64]bool{}
+	t := now()
+	for _, c := range s.Claims {
+		if c.RoundIdx != rd.Idx || c.Kind != "grade" || !c.live(t) {
+			continue
+		}
+		if _, voted := byAcct[c.AccountID]; voted {
+			continue
+		}
+		if a.established(s.Accounts[c.AccountID]) {
+			otherLive[c.AccountID] = true
+		}
+	}
+	if 2*bestN > len(byAcct)+len(otherLive) {
+		rd.InitSHA = bestSHA
+		tx.saveRound(rd)
+		return true
+	}
+	return false
 }
 
 // weigh works out what a script's grades come to so far. The established accounts' grades
@@ -2287,12 +2439,25 @@ func (a *App) submitResult(ctx context.Context, acctID, claimID int64, p *Result
 		// like every other, and what holds it to account is what holds them all: the grades
 		// of a script by different people must agree (settleScript), and only an
 		// established account, which earned that by agreeing, is ever not asked.
-		if (rd.CorpusSHA != "" && rd.CorpusSHA != p.CorpusSHA256) || (rd.ExamSHA != "" && rd.ExamSHA != p.ExamSHA256) {
-			return refuse("corpus", 0, "your corpus or exam for %s differs from the round's. This verifier rebuilds its copy once", p.Round)
+		// Validate request format and exam availability BEFORE any state-mutating refusal so a
+		// malformed 400 or pre-exam 409 request never closes the claim as refused or pollutes Differs.
+		n := len(rd.ExamTable)
+		if rd.ExamSHA == "" || n == 0 {
+			return fail(409, "%s has no exam yet", p.Round)
 		}
-		if p.Baseline != nil && !a.cfg.Dev {
-			if why := a.season.gradeHardwareIssue(readHardware(p.Baseline.Hardware)); why != "" {
-				return fail(400, "baseline hardware ineligible: %s", why)
+		if p.Baseline != nil {
+			if err := checkItems(p.Baseline, n, "baseline"); err != nil {
+				return err
+			}
+			if !a.cfg.Dev {
+				if why := a.season.gradeHardwareIssue(readHardware(p.Baseline.Hardware)); why != "" {
+					return fail(400, "baseline hardware ineligible: %s", why)
+				}
+			}
+		}
+		if p.Valid {
+			if err := checkItems(p.Exam, n, "exam"); err != nil {
+				return err
 			}
 		}
 		initSHA := ""
@@ -2327,80 +2492,43 @@ func (a *App) submitResult(ctx context.Context, acctID, claimID int64, p *Result
 		if p.Valid && initSHA != "" && baseInitSHA != "" && initSHA != baseInitSHA {
 			return fail(400, "baseline and exam initial weights hashes differ for %s", p.Round)
 		}
+		if (rd.CorpusSHA != "" && rd.CorpusSHA != p.CorpusSHA256) || (rd.ExamSHA != "" && rd.ExamSHA != p.ExamSHA256) {
+			return refuse("corpus", 0, "your corpus or exam for %s differs from the round's. This verifier rebuilds its copy once", p.Round)
+		}
 		if p.Valid && initSHA != "" && rd.InitSHA != "" && rd.InitSHA != initSHA {
 			return refuse("init", 0, "your initial weights hash for %s differs from the round's. Check your student model cache and harness version", p.Round)
 		}
 		if baseInitSHA != "" && rd.InitSHA != "" && rd.InitSHA != baseInitSHA {
 			return refuse("init", 0, "your baseline initial weights hash for %s differs from the round's. Check your student model cache and harness version", p.Round)
 		}
-		if p.Valid && tokensSHA != "" {
-			j := a.newJudge(s)
-			for _, st := range j.states(rd) {
-				if st.Entry.EditorID == e.EditorID {
-					if sc := st.byScript[c.Script]; sc != nil {
-						if eligible, self := j.eligibleGrades(sc); !self {
-							if agreedTok, auth, _ := resolveTokenMajority(eligible); auth && agreedTok != tokensSHA {
-								return refuse("tokens", 0, "your tokenized training stream for this script in %s differs from established graders'", p.Round)
-							}
-						}
-					}
-					break
-				}
-			}
-		}
-		n := len(rd.ExamTable)
-		if rd.ExamSHA == "" || n == 0 {
-			return fail(409, "%s has no exam yet", p.Round)
-		}
-		if p.Baseline != nil {
-			if err := checkItems(p.Baseline, n, "baseline"); err != nil {
-				return err
-			}
-		}
-		if p.Valid {
-			if err := checkItems(p.Exam, n, "exam"); err != nil {
-				return err
-			}
-		}
 		tol := a.tolerance()
+		var incomingBase *Baseline
 		if p.Baseline != nil {
 			if dev, ok := a.baselineDev(s, rd, acctID, p.Baseline.ItemScores); ok && !within(dev, tol.Baseline) {
 				return refuse("baseline", places5(dev),
 					"your unedited baseline for %s is further from the round's other graders' than the tolerance of %.3f bits per byte allows, so this machine's setup or arithmetic differs. That is published with the round when it settles; nothing counts against you", p.Round, tol.Baseline)
 			}
+			incomingBase = &Baseline{RoundIdx: rd.Idx, AccountID: acctID, Loss: places5(-p.Baseline.Mean), Items: p.Baseline.ItemScores,
+				CorpusSHA: p.CorpusSHA256, ExamSHA: p.ExamSHA256, InitSHA: baseInitSHA, ReceivedAt: now(), Established: est}
+		}
+		if p.Valid && tokensSHA != "" {
+			j := a.newJudge(s)
+			for _, st := range j.states(rd) {
+				if st.Entry.EditorID == e.EditorID {
+					if sc := st.byScript[c.Script]; sc != nil && j.tokenMajorityRefuses(sc, rd, acct, est, tokensSHA, incomingBase) {
+						return refuse("tokens", 0, "your tokenized training stream for this script in %s differs from established graders'", p.Round)
+					}
+					break
+				}
+			}
 		}
 
 		// Everything is checked. From here on the change is made.
-		if p.Baseline != nil {
-			b := &Baseline{RoundIdx: rd.Idx, AccountID: acctID, Loss: places5(-p.Baseline.Mean), Items: p.Baseline.ItemScores,
-				CorpusSHA: p.CorpusSHA256, ExamSHA: p.ExamSHA256, InitSHA: baseInitSHA, ReceivedAt: now(), Established: est}
-			tx.saveBaseline(b)
+		if incomingBase != nil {
+			tx.saveBaseline(incomingBase)
 		}
 		if est {
 			rd.CorpusSHA = p.CorpusSHA256
-			voteInit := initSHA
-			if voteInit == "" {
-				voteInit = baseInitSHA
-			}
-			if voteInit != "" && rd.InitSHA == "" {
-				// Require agreement from at least two independent established accounts before
-				// locking rd.InitSHA (unless the examiner already posted it authoritatively),
-				// so one honest machine with a bad first result cannot poison the whole round.
-				voters := map[int64]bool{acctID: true}
-				for _, r := range s.Results {
-					if r.RoundIdx == rd.Idx && r.Valid && r.InitSHA == voteInit && a.established(s.Accounts[r.AccountID]) {
-						voters[r.AccountID] = true
-					}
-				}
-				for _, b := range s.Baselines {
-					if b.RoundIdx == rd.Idx && b.InitSHA == voteInit && (b.Established || (s.Accounts[b.AccountID] != nil && s.Accounts[b.AccountID].Anchor)) {
-						voters[b.AccountID] = true
-					}
-				}
-				if len(voters) >= 2 {
-					rd.InitSHA = voteInit
-				}
-			}
 			a.moved(tx, rd)
 		}
 		// GPU time is what the grader says, but never more than the job was out for. It
@@ -2417,9 +2545,12 @@ func (a *App) submitResult(ctx context.Context, acctID, claimID int64, p *Result
 			res.Loss, res.Items = places5(-p.Exam.Mean), p.Exam.ItemScores
 		}
 		tx.newResult(res)
-		a.refreshScores(tx, rd) // the round's baseline, and every grade's score against it
 		c.Status, c.EndedAt = "done", now()
 		tx.saveClaim(c)
+		if est {
+			a.maybeLockRoundInit(tx, rd)
+		}
+		a.refreshScores(tx, rd) // the round's baseline, and every grade's score against it
 		acct.LastSeen = now()
 		tx.saveAccount(acct)
 
@@ -2488,6 +2619,9 @@ func (a *App) settleReady(tx *Tx) {
 
 // settleRound settles a round's open entries, all at once, if the round is ready.
 func (a *App) settleRound(tx *Tx, rd *Round) {
+	if a.maybeLockRoundInit(tx, rd) {
+		a.refreshScores(tx, rd)
+	}
 	s, t := tx.s, now()
 	wait := int64(a.cfg.ReplicaWait.Seconds())
 	j := a.newJudge(s)

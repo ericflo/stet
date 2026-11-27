@@ -206,9 +206,11 @@ func (p Policy) earlyMachines(grades, next int, workers []*Worker, now time.Time
 // Worker is one key of the pool, with the machine rented with it if there is one, and what
 // the server says of it.
 type Worker struct {
-	Key     *Key
-	Rental  *Rental
-	Machine *Machine
+	Key          *Key
+	Rental       *Rental
+	ExtraRentals []*Rental    // additional live or stopped contracts sharing this handle
+	Pending      *pendingRent // unresolved uncertain create reservation for this handle
+	Machine      *Machine
 	// Plan is how many grades it was rented to take before an exam (0 or 1: one).
 	Plan int
 	// Grace is how long it may take to first ask for work (0: the policy's).
@@ -279,6 +281,8 @@ func (p Policy) tooEarly(w *Work, workers []*Worker, now time.Time) map[*Worker]
 //	stopped   the machine stopped, or never got going
 func (w *Worker) state(now time.Time, p Policy) string {
 	switch {
+	case w.Rental == nil && w.Pending != nil:
+		return "pending"
 	case w.Rental == nil:
 		return "free"
 	case w.Rental.State == "stopped":
@@ -321,11 +325,13 @@ func (w *Worker) grace(p Policy) time.Duration {
 }
 
 // Ending is a machine to end, and why. Failed: it never asked for work, or went quiet; what
-// became of it is asked of its market before it is ended.
+// became of it is asked of its market before it is ended. Rental overrides Worker.Rental when
+// ending a duplicate contract sharing the same handle or an orphaned ledger contract.
 type Ending struct {
 	Worker *Worker
 	Why    string
 	Failed bool
+	Rental *Rental
 }
 
 // Decision is one look at the work and the machines.
@@ -449,6 +455,11 @@ func (p Policy) decideNext(w *Work, workers []*Worker, spentToday float64, now t
 	free, freshFree, starting := 0, 0, 0
 	var idle, waitingIdle []*Worker
 	for _, wk := range workers {
+		for _, extra := range wk.ExtraRentals {
+			if extra != nil && extra.State == "stopped" {
+				d.End = append(d.End, Ending{Worker: wk, Rental: extra, Why: "stopped duplicate machine on the same key"})
+			}
+		}
 		switch st := wk.state(now, p); st {
 		case "free":
 			free++
@@ -458,10 +469,12 @@ func (p Policy) decideNext(w *Work, workers []*Worker, spentToday float64, now t
 			if wk.Machine != nil && wk.Machine.Busy != "" {
 				d.Release = append(d.Release, wk)
 			}
+		case "pending":
+			d.Live++
 		case "stopped":
-			d.End = append(d.End, Ending{wk, "it stopped, or never asked for work", true})
+			d.End = append(d.End, Ending{Worker: wk, Why: "it stopped, or never asked for work", Failed: true})
 		case "quiet":
-			d.End = append(d.End, Ending{wk, fmt.Sprintf("nothing heard from it for %s, and it holds no job", now.Sub(time.Unix(wk.Machine.LastSeen, 0)).Round(time.Minute)), true})
+			d.End = append(d.End, Ending{Worker: wk, Why: fmt.Sprintf("nothing heard from it for %s, and it holds no job", now.Sub(time.Unix(wk.Machine.LastSeen, 0)).Round(time.Minute)), Failed: true})
 		case "waiting":
 			if ending[wk] {
 				d.End = append(d.End, Ending{Worker: wk, Why: fmt.Sprintf("too early for the exam's grades: a machine of its kind is rented again in time, from %s UTC", wk.Window.UTC().Format("15:04"))})

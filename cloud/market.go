@@ -112,12 +112,13 @@ func (o Offer) rankPrice() float64 {
 
 // Launch is what a machine is rented with.
 type Launch struct {
-	Name   string            // the worker key's handle
-	Image  string            // the container image
-	Env    map[string]string // the worker's settings, its key among them
-	Script string            // worker.sh
-	Need   Need
-	SSHKey string
+	Name     string            // the worker key's handle
+	Image    string            // the container image
+	Env      map[string]string // the worker's settings, its key among them
+	Script   string            // worker.sh
+	Need     Need
+	SSHKey   string
+	KnownIDs map[string]bool // contract IDs already known on the target market before this create
 }
 
 // Rental is one machine rented on a market, as the market says.

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
@@ -80,7 +81,7 @@ type liumExecutor struct {
 // memory and disk shared out among its GPUs enough for one.
 func liumOffer(e liumExecutor, n Need) (Offer, bool) {
 	gpus := max(e.GPUCount, 1)
-	if e.Tier != "secure" || e.AvailableGPUCount < 1 || e.FrequentRentFailures || e.PricePerGPU <= 0 {
+	if e.Tier != "secure" || e.AvailableGPUCount < 1 || e.FrequentRentFailures || !validRate(e.PricePerGPU) {
 		return Offer{}, false
 	}
 	if e.MinGPUCountForRental != nil && *e.MinGPUCountForRental > 1 {
@@ -135,7 +136,7 @@ func (m *liumMarket) Offers(ctx context.Context, n Need) ([]Offer, error) {
 func (m *liumMarket) Rent(ctx context.Context, o Offer, l Launch) (*Rental, error) {
 	key := sshKey(l)
 	if key == "" {
-		return nil, errors.New("Lium rents only with an SSH public key: there is none in ~/.ssh")
+		return nil, fmt.Errorf("%w: Lium rents only with an SSH public key: there is none in ~/.ssh", errRentRejected)
 	}
 	// A Lium container's own disk is a few GB, most of it the image's: stet, its libraries
 	// and what it fetches go on the pod's volume, /workspace.
@@ -155,10 +156,14 @@ func (m *liumMarket) Rent(ctx context.Context, o Offer, l Launch) (*Rental, erro
 		"category": "PYTORCH", "volumes": []string{"/workspace"}, "environment": env, "startup_commands": liumCommand,
 		"is_private": true, "one_time_template": true,
 	}, &tpl); err != nil {
-		return nil, fmt.Errorf("Lium's template for %s: %w", l.Name, err)
+		if errors.Is(err, errRequestNotSent) {
+			return nil, fmt.Errorf("%w: Lium's template for %s: %w", errRentNotSent, l.Name, err)
+		}
+		// Template creation alone never rents a GPU instance.
+		return nil, fmt.Errorf("%w: Lium's template for %s: %w", errRentRejected, l.Name, err)
 	}
 	if tpl.ID == "" {
-		return nil, errors.New("Lium made a template, and gave no ID for it")
+		return nil, fmt.Errorf("%w: Lium made a template, and gave no ID for it", errRentRejected)
 	}
 	body := map[string]any{
 		"pod_name": l.Name, "user_public_key": key, "template_id": tpl.ID, "gpu_count": 1, "termination_hours": liumHours,
@@ -166,24 +171,71 @@ func (m *liumMarket) Rent(ctx context.Context, o Offer, l Launch) (*Rental, erro
 	}
 	idem := map[string]string{"Idempotency-Key": newID()}
 	var out struct {
-		Success bool   `json:"success"`
+		Success *bool  `json:"success"`
 		PodID   string `json:"pod_id"`
 	}
 	var status int
 	var err error
+	ambiguousPrev := false
 	for try := 0; try < 2; try++ {
+		out = struct {
+			Success *bool  `json:"success"`
+			PodID   string `json:"pod_id"`
+		}{}
 		status, err = m.a.doWith(ctx, "POST", "/executors/"+url.PathEscape(o.ID)+"/rent", idem, body, &out)
-		if !(status == 0 || status >= 500) || ctx.Err() != nil {
+		if errors.Is(err, errRequestNotSent) || !(status == 0 || status >= 500) || ctx.Err() != nil {
 			break
 		}
+		// Previous attempt reached (or may have reached) Lium with an ambiguous outcome (5xx/timeout):
+		// even if the retry now gets 409/400/ECONNREFUSED, the first attempt may have created a pod.
+		ambiguousPrev = true
+	}
+	findCreated := func() *Rental {
+		rs, lerr := m.Rentals(ctx)
+		if lerr != nil {
+			return nil
+		}
+		for i := range rs {
+			if rs[i].Name == l.Name && rs[i].live() && !l.KnownIDs[rs[i].ID] {
+				if !validRate(rs[i].Price) && validRate(o.Price) {
+					rs[i].Price = o.Price
+				}
+				return &rs[i]
+			}
+		}
+		return nil
 	}
 	switch {
-	case err == nil && out.PodID != "":
+	case err == nil && out.PodID != "" && (out.Success == nil || *out.Success):
 		return &Rental{Market: "lium", ID: out.PodID, Name: l.Name, Card: o.Card, Price: o.Price, State: "starting", Status: "PENDING", Created: time.Now()}, nil
+	case ambiguousPrev:
+		// First attempt was ambiguous (5xx/timeout): never downgrade a subsequent retry failure
+		// (e.g. 409 already-rented, 400 consumed one-time template, or ECONNREFUSED) to a
+		// confirmed non-create! Try recovery by handle and otherwise return an ambiguous error.
+		if found := findCreated(); found != nil {
+			return found, nil
+		}
+		if err != nil {
+			return nil, fmt.Errorf("Lium rent outcome uncertain after ambiguous retry (%s)", firstLine(err.Error()))
+		}
+		return nil, fmt.Errorf("Lium answered %d to a rent retry without a pod", status)
+	case err == nil && out.Success != nil && !*out.Success:
+		return nil, fmt.Errorf("%w: Lium refused rent (%d)", errRentRejected, status)
 	case err == nil:
+		if found := findCreated(); found != nil {
+			return found, nil
+		}
 		return nil, fmt.Errorf("Lium answered %d to a rent, without a pod", status)
+	case errors.Is(err, errRequestNotSent):
+		return nil, fmt.Errorf("%w: %w", errRentNotSent, err)
 	case status == 400 || status == 404 || status == 409 || status == 410:
 		return nil, fmt.Errorf("%w (%v)", errNoRoom, err)
+	case status >= 400 && status < 500 && status != http.StatusRequestTimeout:
+		return nil, fmt.Errorf("%w (%v)", errRentRejected, err)
+	case status == 0 || status == http.StatusRequestTimeout || status >= 500:
+		if found := findCreated(); found != nil {
+			return found, nil
+		}
 	}
 	return nil, err
 }

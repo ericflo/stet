@@ -409,8 +409,13 @@ def assemble(
         reasoning: list[Item] = []
         loaded = False
         if rcache.exists():
+            cached: list[Item] | None = None
             try:
                 cached = unpack_items(rcache.read_bytes())
+            except (OSError, ValueError, zstandard.ZstdError):
+                log("  reasoning cache unreadable; regenerating")
+                rcache.unlink(missing_ok=True)
+            if cached is not None:
                 if _reasoning_cache_usable(cached, season, student_window=sw, require_langid=is_official):
                     reasoning = cached
                     loaded = True
@@ -418,9 +423,6 @@ def assemble(
                 else:
                     log("  reasoning cache incomplete; regenerating")
                     rcache.unlink(missing_ok=True)
-            except (OSError, ValueError, zstandard.ZstdError):
-                log("  reasoning cache unreadable; regenerating")
-                rcache.unlink(missing_ok=True)
         if not loaded:
             import inspect
 

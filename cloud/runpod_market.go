@@ -43,7 +43,7 @@ func (m *runpodMarket) Offers(ctx context.Context, n Need) ([]Offer, error) {
 		}
 		for _, g := range gpus {
 			p := g.price(cloud)
-			if p <= 0 || g.Availability == "NONE" || g.Availability == "" {
+			if !validRate(p) || g.Availability == "NONE" || g.Availability == "" {
 				continue
 			}
 			out = append(out, Offer{
@@ -73,11 +73,14 @@ func (m *runpodMarket) Rent(ctx context.Context, o Offer, l Launch) (*Rental, er
 		Name: l.Name, Image: l.Image, Cloud: cloudOf(o), Disk: l.Need.DiskGB, Env: env, Ports: ports,
 		GPU:        NewPodGPU{ID: o.ID, Count: 1, MinRAMPerGPU: l.Need.MinRAMGB, MinVCPUPerGPU: l.Need.MinCPUs, MinCUDAVersion: l.Need.MinCUDA},
 		Entrypoint: []string{"/bin/bash", "-c"}, Cmd: []string{l.Script},
-	})
+	}, l.KnownIDs)
 	if err != nil {
 		return nil, err
 	}
 	r := podRental(pod)
+	if !validRate(r.Price) && validRate(o.Price) {
+		r.Price = o.Price
+	}
 	return &r, nil
 }
 

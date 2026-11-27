@@ -5250,3 +5250,229 @@ def test_review20_posted_exam_grade_job_retains_baseline_across_cache_write_erro
     assert forgotten == [rnd.id]
     assert submitted_baselines == ["1" * 64, "2" * 64], f"409 refusal MUST evict in-memory _SatBaseline and re-measure! got {submitted_baselines}"
 
+
+def test_review21_official_langid_runtime_error_fails_closed(monkeypatch, tmp_path):
+    """Review 21 P2 #6: when py3langid IS installed but classify() raises an I/O / runtime error
+    (or returns an empty detection), official reasoning parsing, cache validation, and assemble()
+    MUST propagate RuntimeError instead of silently accepting wrong-language items or deleting a
+    healthy cache file."""
+    import hashlib
+    import json
+
+    from stet.exam import examine, farm
+    from stet.exam.fresh import Doc, write_snapshot
+    from stet.exam.fresh import reason as reason_mod
+    from stet.spec import official_round
+
+    assert reason_mod._langid is not None, "py3langid must be installed in base dependencies"
+
+    fr_excerpt = (
+        "Les ingénieurs ferroviaires de Lyon ont installé de nouveaux capteurs acoustiques "
+        "le long des aiguillages afin de détecter les microfissures thermiques avant les "
+        "périodes de grand froid hivernal et réduire les interruptions de service."
+    )
+    fr_prompt = "Pourquoi les capteurs acoustiques ont-ils été installés sur les aiguillages lyonnais ?"
+    en_wrong_answer = (
+        "Engineers mounted acoustic sensors along rail switches to catch thermal cracks before "
+        "severe winter cold arrives, reducing unexpected service disruptions across the network."
+    )
+    doc_sel = [
+        {
+            "source": "ccnews",
+            "id": f"fr-io-{i}",
+            "lang": "fr",
+            "text": fr_excerpt,
+            "excerpt": fr_excerpt,
+            "task_type": "explain",
+            "wrapper_id": i % 6,
+        }
+        for i in range(20)
+    ]
+    raw_gens = [f"{fr_prompt}\nRESPONSE: {en_wrong_answer}" for _ in range(20)]
+
+    # 1. Healthy detector rejects all 20 French-prompt/English-answer items as wrong_lang.
+    items_ok, dropped_ok, _ = reason_mod.parse_generated_items_detailed(
+        doc_sel, raw_gens, require_langid=True
+    )
+    assert items_ok == [] and dropped_ok.get("wrong_lang") == 20
+
+    # Build a cached batch of those 20 bad items (bypassing check_lang during fixture setup).
+    bad_cached, _ = reason_mod.parse_generated_items(doc_sel, raw_gens, check_lang=False)
+    assert len(bad_cached) == 20
+
+    # 2. Simulate installed classifier raising OSError on classify()!
+    broken_langid = types.SimpleNamespace(
+        rank=reason_mod._langid.rank,
+        classify=lambda text: (_ for _ in ()).throw(OSError("model file I/O error")),
+    )
+    monkeypatch.setattr(reason_mod, "_langid", broken_langid)
+
+    with pytest.raises(RuntimeError, match="py3langid language classification failed"):
+        reason_mod._ensure_langid_available()
+    with pytest.raises(RuntimeError, match="py3langid language classification failed"):
+        reason_mod.parse_generated_items_detailed(doc_sel, raw_gens, require_langid=True)
+    with pytest.raises(RuntimeError, match="py3langid language classification failed"):
+        reason_mod.cached_item_passes_filter(bad_cached[0], require_langid=True)
+
+    s3 = load_season("s3")
+    with pytest.raises(RuntimeError, match="py3langid language classification failed"):
+        examine._reasoning_cache_usable(bad_cached, s3, require_langid=True)
+
+    # 3. Official assemble() must propagate RuntimeError AND preserve the cache file on disk
+    # (not treat classify()'s OSError as a corrupt zstd cache and unlink it!).
+    snap_path = tmp_path / "2026-11-27-00.jsonl.zst"
+    snap_docs = [
+        Doc(source="ccnews", id=f"fr-io-{i}", url="https://example.invalid/fr", lang="fr", license="ccnews", published=1_800_000_000, title=f"T{i}", text=fr_excerpt)
+        for i in range(20)
+    ]
+    write_snapshot(snap_docs, snap_path, {"slot": "2026-11-27-00"})
+    rnd = official_round(
+        s3,
+        31,
+        {"round": 123499, "randomness": "33" * 32},
+        {"crawl": "CC-MAIN-2026-43", "paths_sha256": "44" * 32, "n_shards": 100000},
+    )
+    scale = s3.scale("nano")
+    work = tmp_path / "work"
+    work.mkdir()
+    r_cfg = s3.raw["exam"]["reasoning"]
+    rcfg_sig = hashlib.sha256(
+        json.dumps({"filter_version": reason_mod.REASONING_FILTER_VERSION, "cfg": r_cfg}, sort_keys=True).encode()
+    ).hexdigest()[:8]
+    snap_sha = hashlib.sha256(snap_path.read_bytes()).hexdigest()
+    rcache = work / f"reasoning-{examine.snapshot_name([snap_sha])[:12]}-{rnd.seed.hex()[:8]}-{rcfg_sig}.jsonl.zst"
+    rcache.write_bytes(farm.pack_items(bad_cached))
+
+    monkeypatch.setattr("stet.data.corpus", lambda *a, **k: types.SimpleNamespace(docs=[], meta={"sha256": "5" * 64}))
+    monkeypatch.setattr(examine, "_student_window", lambda *a, **k: None)
+    with pytest.raises(RuntimeError, match="py3langid language classification failed"):
+        examine.assemble(rnd, scale, [(0, snap_path)], work, measure=False, synthesize=True, check_coverage=False, log=lambda _: None)
+    assert rcache.exists(), "classify() failure must NOT unlink an intact reasoning cache file"
+
+    # 4. Empty detection string under require_langid=True also fails closed.
+    empty_langid = types.SimpleNamespace(rank=reason_mod._langid.rank, classify=lambda text: ("", 0.0))
+    monkeypatch.setattr(reason_mod, "_langid", empty_langid)
+    with pytest.raises(RuntimeError, match="empty language prediction"):
+        reason_mod.parse_generated_items_detailed(doc_sel, raw_gens, require_langid=True)
+
+    # 5. Non-official mode (require_langid=False) stays graceful when classify() raises.
+    monkeypatch.setattr(reason_mod, "_langid", broken_langid)
+    non_official_items, _, _ = reason_mod.parse_generated_items_detailed(
+        doc_sel[:2], raw_gens[:2], require_langid=False
+    )
+    assert len(non_official_items) == 2
+
+
+def test_review21_exam_scoring_deterministic_no_index_add_and_guard(monkeypatch):
+    """Review 21 P3 #7: large-vocab `nll()` must never call GPU-nondeterministic `index_add_`,
+    must produce bit-identical results matching dense FP32 CE under strict deterministic mode, and
+    `sit_exam()` must wrap `sit()` in `_deterministic_cuda(use_det)` matching `train()`."""
+    if importlib.util.find_spec("torch") is None:
+        pytest.skip("torch not installed")
+    import contextlib
+
+    import torch
+    import torch.nn as nn
+    import torch.nn.functional as F
+
+    from stet import grade
+    from stet.exam import score as score_mod
+    from stet.spec import official_round
+
+    vocab = 65540
+    hidden = 8
+    torch.manual_seed(42)
+
+    class _Inner(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.emb = nn.Embedding(vocab, hidden)
+
+        def forward(self, x):
+            return types.SimpleNamespace(last_hidden_state=self.emb(x))
+
+    class _SplitLargeModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.config = types.SimpleNamespace(vocab_size=vocab)
+            self.model = _Inner()
+            self.lm_head = nn.Linear(hidden, vocab, bias=False)
+
+    class _DirectLargeModel(nn.Module):
+        def __init__(self, split_m):
+            super().__init__()
+            self.config = types.SimpleNamespace(vocab_size=vocab)
+            self._split = split_m
+
+        def forward(self, x):
+            h = self._split.model(x).last_hidden_state
+            return types.SimpleNamespace(logits=self._split.lm_head(h))
+
+    split_m = _SplitLargeModel().eval()
+    direct_m = _DirectLargeModel(split_m).eval()
+
+    # Four identical sequences (same shape as reviewer repro) plus a shorter varied sequence.
+    base_seq = ([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12], 3)
+    seqs = [base_seq, base_seq, base_seq, base_seq, ([1, 5, 8, 2, 9], 2)]
+
+    # Reference dense FP32 cross-entropy.
+    expected = []
+    with torch.no_grad():
+        for ids, first in seqs:
+            x = torch.tensor([ids[:-1]], dtype=torch.long)
+            y = torch.tensor(ids[1:], dtype=torch.long)
+            y[: max(0, first - 1)] = -100
+            logits = split_m.lm_head(split_m.model(x).last_hidden_state)[0].float()
+            expected.append(float(F.cross_entropy(logits, y, ignore_index=-100, reduction="sum").item()))
+
+    # Forbid index_add_ completely during nll() AND enforce strict deterministic algorithms!
+    def _forbid_index_add(*a, **k):
+        raise AssertionError("index_add_ must not be called during exam scoring")
+
+    monkeypatch.setattr(torch.Tensor, "index_add_", _forbid_index_add)
+    prev_det = torch.are_deterministic_algorithms_enabled()
+    prev_warn = torch.is_deterministic_algorithms_warn_only_enabled()
+    try:
+        torch.use_deterministic_algorithms(True, warn_only=False)
+        dev = torch.device("cpu")
+        runs_split = [score_mod.nll(split_m, seqs, dev, batch=4) for _ in range(5)]
+        runs_direct = [score_mod.nll(direct_m, seqs, dev, batch=4) for _ in range(5)]
+    finally:
+        torch.use_deterministic_algorithms(prev_det, warn_only=prev_warn)
+
+    for r in runs_split[1:]:
+        assert r == runs_split[0], "split large-vocab nll() must be bit-identical across runs"
+    for r in runs_direct[1:]:
+        assert r == runs_direct[0], "direct large-vocab nll() must be bit-identical across runs"
+    assert runs_split[0][0] == runs_split[0][1] == runs_split[0][2] == runs_split[0][3]
+    assert runs_direct[0][0] == runs_direct[0][1] == runs_direct[0][2] == runs_direct[0][3]
+    for got_s, got_d, want in zip(runs_split[0], runs_direct[0], expected, strict=True):
+        assert abs(got_s - want) < 1e-4
+        assert abs(got_d - want) < 1e-4
+
+    # Verify sit_exam() invokes _deterministic_cuda(True) on Season 3 hf_topreset CUDA devices
+    # and _deterministic_cuda(False) on CPU devices.
+    det_flags: list[bool] = []
+
+    @contextlib.contextmanager
+    def _spy_det(enabled: bool):
+        det_flags.append(bool(enabled))
+        yield
+
+    monkeypatch.setattr(grade, "_deterministic_cuda", _spy_det)
+    monkeypatch.setattr(score_mod, "sit", lambda *a, **k: [-1.5])
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
+
+    s3 = load_season("s3")
+    rnd = official_round(
+        s3,
+        32,
+        {"round": 123500, "randomness": "66" * 32},
+        {"crawl": "CC-MAIN-2026-43", "paths_sha256": "77" * 32, "n_shards": 100000},
+    )
+    exam = [Item(kind="answer", corner="explain/en/wiki", fmt="prose", lang="en", source="explain:wikipedia:en:1", ctx="C", cont=" A")]
+    fake_cuda_model = types.SimpleNamespace(parameters=lambda: iter([]))
+    grade.sit_exam(grade.Trained(result={}, trained=True, model=fake_cuda_model, enc=None, device=types.SimpleNamespace(type="cuda")), rnd, s3.scale("nano"), exam)
+    grade.sit_exam(grade.Trained(result={}, trained=True, model=fake_cuda_model, enc=None, device=types.SimpleNamespace(type="cpu")), rnd, s3.scale("nano"), exam)
+    assert det_flags == [True, False], f"expected _deterministic_cuda flags [True, False], got {det_flags}"
+

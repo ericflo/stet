@@ -224,9 +224,12 @@ def _text_matches_language(
     *,
     min_langid_chars: int = 35,
     min_en_chars: int = 35,
+    require_langid: bool = False,
 ) -> bool:
     """Verify a teacher-written prompt or answer stays in the excerpt's language/script and
     does not leak foreign non-Latin scripts (e.g., Thai or Han tokens in Arabic/Hebrew/Russian)."""
+    if require_langid:
+        _ensure_langid_available()
     if _has_foreign_script(text, excerpt):
         return False
     ex_script = _dominant_script(excerpt)
@@ -243,10 +246,19 @@ def _text_matches_language(
 
     if _langid is not None and len(text) >= min(min_langid_chars, min_en_chars):
         try:
-            det, _ = _langid.classify(text)
-        except Exception:
+            res = _langid.classify(text)
+            det = res[0] if isinstance(res, tuple | list) and len(res) >= 1 else ""
+            if not isinstance(det, str):
+                det = ""
+            det = det.strip()
+        except Exception as exc:
+            if require_langid:
+                raise RuntimeError(f"py3langid language classification failed during official validation: {exc}") from exc
             det = ""
-        if det:
+        if not det:
+            if require_langid:
+                raise RuntimeError("py3langid returned an empty language prediction during official validation")
+        else:
             base_lang = lang.lower().split("-", 1)[0]
             if len(text) >= min_en_chars and base_lang != "en" and det == "en":
                 return False
@@ -255,15 +267,19 @@ def _text_matches_language(
     return True
 
 
-def _prompt_matches_language(prompt: str, excerpt: str, lang: str) -> bool:
+def _prompt_matches_language(prompt: str, excerpt: str, lang: str, *, require_langid: bool = False) -> bool:
     """Verify the teacher's lead-in prompt stays in the excerpt's script/language without code-switching."""
-    return _text_matches_language(prompt, excerpt, lang, min_langid_chars=60, min_en_chars=25)
+    return _text_matches_language(
+        prompt, excerpt, lang, min_langid_chars=60, min_en_chars=25, require_langid=require_langid
+    )
 
 
-def _response_matches_language(resp: str, excerpt: str, lang: str) -> bool:
+def _response_matches_language(resp: str, excerpt: str, lang: str, *, require_langid: bool = False) -> bool:
     """Verify the teacher's answer stays in the excerpt's language/script (catches English,
     neighboring-language fallback, or mid-sentence foreign-script leaks)."""
-    return _text_matches_language(resp, excerpt, lang, min_langid_chars=35, min_en_chars=35)
+    return _text_matches_language(
+        resp, excerpt, lang, min_langid_chars=35, min_en_chars=35, require_langid=require_langid
+    )
 
 
 def _char_shingle_overlap(ans_compact: str, src_compact: str, k: int) -> float:
@@ -327,11 +343,29 @@ def student_window_fits(ctx_str: str, cont: str, enc, seq_len: int) -> bool:
 
 
 def _ensure_langid_available() -> None:
+    global _LANGID_SUPPORTED
     if _langid is None:
         raise RuntimeError(
             "official reasoning synthesis and cache validation require py3langid for language verification; "
             "install py3langid (or stet-cli[run])"
         )
+    if not _LANGID_SUPPORTED:
+        try:
+            _LANGID_SUPPORTED = frozenset(lang for lang, _ in _langid.rank("hello"))
+        except Exception as exc:
+            raise RuntimeError(f"py3langid failed to initialize language set during official validation: {exc}") from exc
+        if not _LANGID_SUPPORTED:
+            raise RuntimeError("py3langid returned an empty supported language set during official validation")
+    try:
+        probe = _langid.classify("hello")
+        det = probe[0] if isinstance(probe, tuple | list) and len(probe) >= 1 else ""
+        if not isinstance(det, str):
+            det = ""
+        det = det.strip()
+    except Exception as exc:
+        raise RuntimeError(f"py3langid language classification failed during official validation: {exc}") from exc
+    if not det:
+        raise RuntimeError("py3langid returned an empty language prediction during official validation")
 
 
 def _item_rejection_reason(
@@ -380,9 +414,9 @@ def _item_rejection_reason(
     if check_lang:
         if require_langid:
             _ensure_langid_available()
-        if not _prompt_matches_language(pr, excerpt, lang):
+        if not _prompt_matches_language(pr, excerpt, lang, require_langid=require_langid):
             return "wrong_prompt_lang"
-        if not _response_matches_language(resp, excerpt, lang):
+        if not _response_matches_language(resp, excerpt, lang, require_langid=require_langid):
             return "wrong_lang"
     if prompt_copies_excerpt(pr, excerpt, max_ngram_overlap=max_ngram_overlap):
         return "prompt_excerpt_copy"

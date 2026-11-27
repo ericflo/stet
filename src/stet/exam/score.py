@@ -126,29 +126,35 @@ def nll(model, seqs: list[tuple[list[int], int]], device, batch: int = 32) -> li
             lm_head = getattr(model, "lm_head", None)
             if large_vocab and inner is not None and lm_head is not None:
                 # Project only scored positions through lm_head in bounded chunks so evaluation
-                # never materializes full (B, T, V) logits (keeps reserved VRAM <= 10 GiB on 12 GB GPUs).
+                # never materializes full (B, T, V) logits (keeps reserved VRAM <= 10 GiB on 12 GB GPUs),
+                # and reduce in deterministic left-to-right token order without GPU index_add_ atomics.
                 if device.type == "cuda":
                     with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                         raw = inner(x)
                 else:
                     raw = inner(x)
                 h = raw.last_hidden_state if hasattr(raw, "last_hidden_state") else raw[0]
-                row_idx, pos_idx = (y != -100).nonzero(as_tuple=True)
-                loss = torch.zeros(len(idx), dtype=torch.float32, device=device)
-                n_scored = int(row_idx.numel())
+                h_flat = h.reshape(-1, h.size(-1))
+                y_flat = y.reshape(-1)
+                flat_idx = (y_flat != -100).nonzero(as_tuple=False).squeeze(1)
+                row_list = (flat_idx // T).cpu().tolist()
+                row_sums = [0.0] * len(idx)
+                n_scored = len(row_list)
                 for start in range(0, n_scored, ce_chunk):
-                    r_sl = row_idx[start : start + ce_chunk]
-                    p_sl = pos_idx[start : start + ce_chunk]
+                    idx_sl = flat_idx[start : start + ce_chunk]
+                    h_sl = h_flat.index_select(0, idx_sl)
+                    y_sl = y_flat.index_select(0, idx_sl)
                     if device.type == "cuda":
                         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                            logits_sl = lm_head(h[r_sl, p_sl])
+                            logits_sl = lm_head(h_sl)
                     else:
-                        logits_sl = lm_head(h[r_sl, p_sl])
-                    sub_loss = F.cross_entropy(logits_sl.float(), y[r_sl, p_sl], reduction="none")
-                    loss.index_add_(0, r_sl, sub_loss)
+                        logits_sl = lm_head(h_sl)
+                    sub_loss = F.cross_entropy(logits_sl.float(), y_sl, reduction="none")
+                    for r_i, val in zip(row_list[start : start + ce_chunk], sub_loss.detach().cpu().tolist(), strict=True):
+                        row_sums[r_i] += val
                 for r, i in enumerate(idx):
-                    out[i] = float(loss[r])
-                del raw, h, loss
+                    out[i] = row_sums[r]
+                del raw, h, h_flat
                 continue
             if device.type == "cuda":
                 with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
@@ -157,16 +163,22 @@ def nll(model, seqs: list[tuple[list[int], int]], device, batch: int = 32) -> li
                 raw = model(x)
             logits = raw.logits if hasattr(raw, "logits") else raw
             if large_vocab or logits.size(-1) >= 65536:
-                row_idx, pos_idx = (y != -100).nonzero(as_tuple=True)
-                loss = torch.zeros(len(idx), dtype=torch.float32, device=device)
-                n_scored = int(row_idx.numel())
+                logits_flat = logits.reshape(-1, logits.size(-1))
+                y_flat = y.reshape(-1)
+                flat_idx = (y_flat != -100).nonzero(as_tuple=False).squeeze(1)
+                row_list = (flat_idx // T).cpu().tolist()
+                row_sums = [0.0] * len(idx)
+                n_scored = len(row_list)
                 for start in range(0, n_scored, ce_chunk):
-                    r_sl = row_idx[start : start + ce_chunk]
-                    p_sl = pos_idx[start : start + ce_chunk]
-                    sub_loss = F.cross_entropy(logits[r_sl, p_sl].float(), y[r_sl, p_sl], reduction="none")
-                    loss.index_add_(0, r_sl, sub_loss)
-            else:
-                loss = F.cross_entropy(logits.float().transpose(1, 2), y, ignore_index=-100, reduction="none").sum(1)
+                    idx_sl = flat_idx[start : start + ce_chunk]
+                    sub_loss = F.cross_entropy(logits_flat.index_select(0, idx_sl).float(), y_flat.index_select(0, idx_sl), reduction="none")
+                    for r_i, val in zip(row_list[start : start + ce_chunk], sub_loss.detach().cpu().tolist(), strict=True):
+                        row_sums[r_i] += val
+                for r, i in enumerate(idx):
+                    out[i] = row_sums[r]
+                del raw, logits, logits_flat
+                continue
+            loss = F.cross_entropy(logits.float().transpose(1, 2), y, ignore_index=-100, reduction="none").sum(1)
             for r, i in enumerate(idx):
                 out[i] = float(loss[r])
             del raw, logits, loss

@@ -106,14 +106,43 @@ func vastQuery(n Need) map[string]any {
 	}
 	if n.DiskGB > 0 {
 		q["disk_space"] = map[string]any{"gte": n.DiskGB}
+		q["allocated_storage"] = n.DiskGB
 	}
 	return q
 }
 
-// vastPrice is an offer's price all in, an hour: the GPU, the disk for the hour, and the
-// image and the season's libraries downloaded once (about 3 GB), over the machine's life.
-func vastPrice(o vastOffer, n Need) float64 {
-	return o.DPHBase + float64(n.DiskGB)*o.StorageCost/720 + 3*o.InetDownCost/expectedLife.Hours()
+func nonNegFinite(x float64) bool { return !math.IsNaN(x) && !math.IsInf(x, 0) && x >= 0 }
+
+// vastOfferPrice computes a conservative positive hourly rate for a Vast.ai offer, taking the
+// greater of Vast's reported dph_total and the explicit component sum (dph_base + disk + optional
+// download transfer estimate), and rejecting offers with no usable positive rate.
+func vastOfferPrice(o vastOffer, diskGB int, downloadGB float64) (float64, bool) {
+	base := 0.0
+	if validRate(o.DPHTotal) {
+		base = o.DPHTotal
+	}
+	diskCost := 0.0
+	if diskGB > 0 && nonNegFinite(o.StorageCost) {
+		diskCost = float64(diskGB) * o.StorageCost / 720.0
+	}
+	if validRate(o.DPHBase) {
+		comp := o.DPHBase + diskCost
+		if comp > base {
+			base = comp
+		}
+	}
+	if !validRate(base) {
+		return 0, false
+	}
+	dlCost := 0.0
+	if downloadGB > 0 && nonNegFinite(o.InetDownCost) {
+		dlCost = downloadGB * o.InetDownCost / expectedLife.Hours()
+	}
+	price := base + dlCost
+	if !validRate(price) {
+		return 0, false
+	}
+	return price, true
 }
 
 func (m *vastMarket) Offers(ctx context.Context, n Need) ([]Offer, error) {
@@ -128,13 +157,17 @@ func (m *vastMarket) Offers(ctx context.Context, n Need) ([]Offer, error) {
 		if o.NumGPUs != 1 {
 			continue
 		}
+		price, ok := vastOfferPrice(o, n.DiskGB, 3)
+		if !ok {
+			continue
+		}
 		trust := "verified"
 		if o.HostingType == 1 {
 			trust = "datacenter"
 		}
 		offers = append(offers, Offer{
 			Market: "vast", Card: vastCard(o.GPUName), Model: o.GPUName, Name: o.GPUName, ID: strconv.FormatInt(o.ID, 10),
-			Maker: "NVIDIA", MemoryGB: int(math.Round(o.GPURAM / 1024)), Price: vastPrice(o, n), Stock: 1,
+			Maker: "NVIDIA", MemoryGB: int(math.Round(o.GPURAM / 1024)), Price: price, Stock: 1,
 			CUDA: strconv.FormatFloat(o.CUDAMaxGood, 'f', -1, 64), Trust: trust, Region: o.Geolocation,
 			Host: vastHost(o.MachineID), CPU: strings.TrimSpace(o.CPUName),
 		})
@@ -145,7 +178,8 @@ func (m *vastMarket) Offers(ctx context.Context, n Need) ([]Offer, error) {
 // Rent rents one offer: the image, with the worker as its only process (bash -c, as on
 // RunPod), its settings in its environment, and the disk asked for, labelled with the worker
 // key's handle. Vast refuses an offer that has gone (404, 410): the next may do. An answer lost
-// on the way is looked for by its label before anything is said, so that none is rented twice.
+// or lacking a contract ID is looked for by its label (excluding any pre-existing known IDs) and
+// otherwise returns an ambiguous error so the caller keeps its pre-rental reservation.
 func (m *vastMarket) Rent(ctx context.Context, o Offer, l Launch) (*Rental, error) {
 	env := map[string]string{"STET_MARKET": "vast"}
 	for k, v := range l.Env {
@@ -160,32 +194,43 @@ func (m *vastMarket) Rent(ctx context.Context, o Offer, l Launch) (*Rental, erro
 		NewContract int64  `json:"new_contract"`
 		Msg         string `json:"msg"`
 	}
+	findCreated := func() *Rental {
+		rs, lerr := m.Rentals(ctx)
+		if lerr != nil {
+			return nil
+		}
+		for i := range rs {
+			if rs[i].Name == l.Name && rs[i].live() && !l.KnownIDs[rs[i].ID] {
+				if !validRate(rs[i].Price) && validRate(o.Price) {
+					rs[i].Price = o.Price
+				}
+				return &rs[i]
+			}
+		}
+		return nil
+	}
 	status, err := m.a.do(ctx, "PUT", "/api/v0/asks/"+url.PathEscape(o.ID)+"/", body, &out)
 	switch {
 	case err == nil && out.NewContract > 0 && (out.Success == nil || *out.Success):
 		return &Rental{Market: "vast", ID: strconv.FormatInt(out.NewContract, 10), Name: l.Name, Card: o.Card,
 			Price: o.Price, State: "starting", Status: "created", Created: time.Now()}, nil
 	case err == nil && out.Success != nil && !*out.Success:
-		return nil, fmt.Errorf("Vast.ai refused new instance (%d): %s", status, out.Msg)
+		return nil, fmt.Errorf("%w: Vast.ai refused new instance (%d): %s", errRentRejected, status, out.Msg)
 	case err == nil:
-		if rs, lerr := m.Rentals(ctx); lerr == nil {
-			for i := range rs {
-				if rs[i].Name == l.Name && rs[i].live() {
-					return &rs[i], nil
-				}
-			}
+		if found := findCreated(); found != nil {
+			return found, nil
 		}
-		return nil, fmt.Errorf("Vast.ai answered %d to a new instance, without one: %s", status, out.Msg)
+		return nil, fmt.Errorf("Vast.ai answered %d to a new instance without a contract ID: %s", status, out.Msg)
+	case errors.Is(err, errRequestNotSent):
+		return nil, fmt.Errorf("%w: %w", errRentNotSent, err)
 	case status == 404 || status == 410 || (status == 400 && strings.Contains(err.Error(), "no_such_ask")):
 		// Gone between the search and the rent: Vast says so with a 400 too.
 		return nil, fmt.Errorf("%w (%v)", errNoRoom, err)
-	case status == 0 || status >= 500:
-		if rs, lerr := m.Rentals(ctx); lerr == nil {
-			for i := range rs {
-				if rs[i].Name == l.Name && rs[i].live() {
-					return &rs[i], nil
-				}
-			}
+	case status >= 400 && status < 500 && status != http.StatusRequestTimeout:
+		return nil, fmt.Errorf("%w (%v)", errRentRejected, err)
+	case status == 0 || status == http.StatusRequestTimeout || status >= 500:
+		if found := findCreated(); found != nil {
+			return found, nil
 		}
 	}
 	return nil, err
@@ -427,22 +472,9 @@ func (m *vastMarket) ExaminerOffers(ctx context.Context, maxPrice float64) ([]Ex
 			if o.NumGPUs != 1 {
 				continue
 			}
-			price := o.DPHTotal
-			if !validRate(price) {
-				price = 0
-			}
-			if validRate(o.DPHBase) && !math.IsNaN(o.StorageCost) && !math.IsInf(o.StorageCost, 0) && o.StorageCost >= 0 {
-				full := o.DPHBase + float64(examinerDiskGB)*o.StorageCost/720.0
-				if full > price {
-					price = full
-				}
-			}
-			if !validRate(price) {
-				if validRate(o.DPHBase) {
-					price = o.DPHBase
-				} else {
-					continue
-				}
+			price, ok := vastOfferPrice(o, examinerDiskGB, 0)
+			if !ok {
+				continue
 			}
 			if maxPrice > 0 && price > maxPrice+1e-9 {
 				continue

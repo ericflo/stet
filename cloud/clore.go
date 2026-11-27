@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"regexp"
 	"strconv"
 	"strings"
@@ -125,7 +126,7 @@ func clorePrice(perDay float64) float64 {
 func cloreOffer(s cloreServer, n Need) (Offer, bool) {
 	g := cloreGPU.FindStringSubmatch(s.Specs.GPU)
 	price := s.Price.OnDemand[cloreCurrency]
-	if s.Rented || g == nil || g[1] != "1" || price <= 0 || s.MRL < 2 || !cudaAtLeast(s.CUDA, n.MinCUDA) {
+	if s.Rented || g == nil || g[1] != "1" || !validRate(price) || s.MRL < 2 || !cudaAtLeast(s.CUDA, n.MinCUDA) {
 		return Offer{}, false
 	}
 	takes := false
@@ -212,11 +213,11 @@ func splitEnv(env map[string]string, prefix, v string) []string {
 func (m *cloreMarket) Rent(ctx context.Context, o Offer, l Launch) (*Rental, error) {
 	server, err := strconv.ParseInt(o.ID, 10, 64)
 	if err != nil {
-		return nil, fmt.Errorf("a Clore server's ID: %q", o.ID)
+		return nil, fmt.Errorf("%w: a Clore server's ID: %q", errRentRejected, o.ID)
 	}
 	if wait := 5*time.Second - time.Since(m.lastOrder); wait > 0 {
 		if err := m.sleep(ctx, wait); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("%w: %w", errRentNotSent, err)
 		}
 	}
 	env, command := cloreScript(l.Script)
@@ -243,9 +244,19 @@ func (m *cloreMarket) Rent(ctx context.Context, o Offer, l Launch) (*Rental, err
 	asked := time.Now().Add(-time.Minute)
 	m.lastOrder = time.Now()
 	if err := m.do(ctx, "POST", "/create_order", body, nil); err != nil {
+		if errors.Is(err, errRequestNotSent) {
+			return nil, fmt.Errorf("%w: %w", errRentNotSent, err)
+		}
 		var e *APIError
-		if errors.As(err, &e) && e.Status == 200 && strings.HasPrefix(e.Detail, "code 6") && !strings.Contains(e.Detail, "balance") {
-			return nil, fmt.Errorf("%w (%v)", errNoRoom, err)
+		if errors.As(err, &e) {
+			switch {
+			case e.Status == 200 && strings.HasPrefix(e.Detail, "code 6,") && !strings.Contains(e.Detail, "balance"):
+				return nil, fmt.Errorf("%w (%v)", errNoRoom, err)
+			case e.Status == 200 && (strings.HasPrefix(e.Detail, "code 2,") || strings.HasPrefix(e.Detail, "code 3,") || strings.HasPrefix(e.Detail, "code 4,") || strings.HasPrefix(e.Detail, "code 5,") || strings.HasPrefix(e.Detail, "code 6,")):
+				return nil, fmt.Errorf("%w (%v)", errRentRejected, err)
+			case e.Status >= 400 && e.Status < 500 && e.Status != http.StatusRequestTimeout:
+				return nil, fmt.Errorf("%w (%v)", errRentRejected, err)
+			}
 		}
 		return nil, err
 	}
@@ -253,7 +264,7 @@ func (m *cloreMarket) Rent(ctx context.Context, o Offer, l Launch) (*Rental, err
 		rs, err := m.orders(ctx)
 		if err == nil {
 			for _, r := range rs {
-				if r.server == server && !r.Created.Before(asked) && r.State != "gone" {
+				if r.server == server && !r.Created.Before(asked) && r.State != "gone" && !l.KnownIDs[r.ID] {
 					r.Rental.Name, r.Rental.State = l.Name, "starting"
 					return &r.Rental, nil
 				}

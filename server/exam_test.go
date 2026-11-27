@@ -1497,7 +1497,7 @@ func TestReview20TokenStreamStrictMajoritySettlementAndAdmission(t *testing.T) {
 		w.check()
 	})
 
-	t.Run("strict_majority_two_of_three_refuses_fourth_dissenting_digest_at_admission", func(t *testing.T) {
+	t.Run("strict_majority_irrevocable_refuses_fourth_dissenting_digest_at_admission", func(t *testing.T) {
 		pub, priv := newKey()
 		w := newWorld(t, pub)
 		w.app.cfg.RunsPerEntry = 1
@@ -1511,22 +1511,250 @@ func TestReview20TokenStreamStrictMajoritySettlementAndAdmission(t *testing.T) {
 		if code, _ := w.edit(anchor, ce, scriptOne); code != 200 {
 			t.Fatalf("edit: HTTP %d", code)
 		}
-		// All 4 established graders claim early before the exam posts so the 4th holds a live
-		// claim when the first 3 report A, B, A (2/3 strict majority).
+		// All 4 established graders claim early before the exam posts; the first 3 all report A,
+		// so even counting the 4th grader's vote (3 of 4 > half), A is irrevocably the strict
+		// majority and a 4th grader submitting C MUST be refused (409).
 		claims := make([]*claimed, 4)
 		for i := range 4 {
 			claims[i] = w.claimEarly(gs[i])
 		}
 		w.exam(idx)
-		for i, tok := range []string{tokA, tokB, tokA} {
-			if code := submitWithTok(t, w, gs[i], claims[i], tok); code != 200 {
-				t.Fatalf("grader %d (%s): HTTP %d, want 200", i+1, tok[:4], code)
+		for i := range 3 {
+			if code := submitWithTok(t, w, gs[i], claims[i], tokA); code != 200 {
+				t.Fatalf("grader %d (A): HTTP %d, want 200", i+1, code)
 			}
 		}
-		// Now A holds 2 of 3 (> half strict majority): 4th grader submitting C MUST be refused (409)!
 		if code := submitWithTok(t, w, gs[3], claims[3], tokC); code != 409 {
-			t.Fatalf("4th grader dissenting against 2/3 strict majority: HTTP %d, want 409", code)
+			t.Fatalf("4th grader dissenting against irrevocable 3/4 strict majority: HTTP %d, want 409", code)
 		}
+		w.check()
+	})
+}
+
+// Review 21 P1 #1: arrival order of four already-claimed established grades MUST NEVER reverse
+// the settled result. When 4 distinct established graders hold claims before the exam appears and
+// split 2-2 on tokens_sha256 (two A at +0.0200, two B at -0.0200), EVERY permutation (A,B,A,B;
+// B,A,B,A; A,A,B,B; B,B,A,A) must accept all four reports (200), stay open for a deciding grade,
+// and close unrated (Void && Unattended, zero curator penalty) if no 5th grader resolves the tie.
+// Also verifies 4-claim arrival-order invariance for round InitSHA consensus.
+func TestReview21TokenStreamArrivalOrderInvariance(t *testing.T) {
+	tokA := strings.Repeat("a", 64)
+	tokB := strings.Repeat("b", 64)
+	tokC := strings.Repeat("c", 64)
+	initA := strings.Repeat("1", 64)
+	initB := strings.Repeat("2", 64)
+
+	makeGraders := func(t *testing.T, w *world, n int) []*actor {
+		t.Helper()
+		gs := make([]*actor, n)
+		for i := range n {
+			name := fmt.Sprintf("r21-grader-%d", i+1)
+			g := w.join(name, nil)
+			w.established(name)
+			gs[i] = g
+		}
+		return gs
+	}
+
+	submitGrade := func(t *testing.T, w *world, a *actor, c *claimed, initSHA, tokSHA string, examLoss, baseLoss float64) int {
+		t.Helper()
+		p := w.result(c, examLoss, baseLoss)
+		p["train"] = map[string]any{"precision": "bf16", "seconds": 10.0, "init_sha256": initSHA}
+		if b, ok := p["baseline"].(map[string]any); ok {
+			b["init_sha256"] = initSHA
+		}
+		p["script"] = map[string]any{"script_sha256": c.Job.Script.SHA256, "tokens_sha256": tokSHA}
+		var ack map[string]any
+		return a.do("POST", fmt.Sprintf("/api/v1/jobs/%d/result", c.Job.ID), p, &ack)
+	}
+
+	type vote struct {
+		tok  string
+		loss float64 // baseLoss is 6.00: loss=5.98 => gain=+0.0200; loss=6.02 => gain=-0.0200
+	}
+	voteA := vote{tok: tokA, loss: 5.98}
+	voteB := vote{tok: tokB, loss: 6.02}
+
+	orders := map[string][]vote{
+		"A_B_A_B": {voteA, voteB, voteA, voteB},
+		"B_A_B_A": {voteB, voteA, voteB, voteA},
+		"A_A_B_B": {voteA, voteA, voteB, voteB},
+		"B_B_A_A": {voteB, voteB, voteA, voteA},
+	}
+
+	for name, seq := range orders {
+		t.Run("four_claims_2_2_split_order_"+name, func(t *testing.T) {
+			pub, priv := newKey()
+			w := newWorld(t, pub)
+			w.app.cfg.RunsPerEntry = 1
+			w.app.season.Baselines.PerRound = 4
+			anchor := w.join("anchor-one", priv)
+			owner := w.join("owner-ord", nil)
+			gs := makeGraders(t, w, 5)
+			w.submit(owner, "ord-ed", "print(1)")
+			idx := w.drawWithoutExam()
+			ce := w.claim(anchor, true)
+			if code, _ := w.edit(anchor, ce, scriptOne); code != 200 {
+				t.Fatalf("edit: HTTP %d", code)
+			}
+			claims := make([]*claimed, 4)
+			for i := range 4 {
+				claims[i] = w.claimEarly(gs[i])
+			}
+			w.exam(idx)
+
+			for i, v := range seq {
+				if code := submitGrade(t, w, gs[i], claims[i], initA, v.tok, v.loss, 6.0); code != 200 {
+					t.Fatalf("order %s report %d (%s): HTTP %d, want 200", name, i+1, v.tok[:4], code)
+				}
+			}
+			if w.settled(idx) != 0 {
+				t.Fatalf("order %s: 2-2 split settled prematurely!", name)
+			}
+			c5 := w.claim(gs[4], false)
+			if c5.Job == nil || c5.Job.Kind != "grade" {
+				t.Fatalf("order %s: expected 5th deciding grade to be offered, got %+v", name, c5.Job)
+			}
+			if code := gs[4].do("POST", fmt.Sprintf("/api/v1/jobs/%d/release", c5.Job.ID), map[string]any{"reason": "busy"}, nil); code != 200 {
+				t.Fatalf("release c5: HTTP %d", code)
+			}
+			w.pass(w.cfg.ReplicaWait + time.Minute)
+			w.app.st.view(func(s *State) {
+				if s.Rounds[idx].Status != "settled" {
+					t.Fatalf("order %s: round did not settle after ReplicaWait: %s", name, s.Rounds[idx].Status)
+				}
+				en := s.inRound[idx][0]
+				if !en.Void || !en.Unattended {
+					t.Fatalf("order %s: unresolved 2-2 split must close Void && Unattended (got valid=%v void=%v unattended=%v gain=%.4f)", name, en.Valid, en.Void, en.Unattended, en.Gain)
+				}
+				if failing(s, en.EditorID) || roundsRun(s, en.EditorID) != 0 {
+					t.Fatalf("order %s: curator penalized by unresolved 2-2 split: failing=%v roundsRun=%d", name, failing(s, en.EditorID), roundsRun(s, en.EditorID))
+				}
+			})
+			w.check()
+		})
+	}
+
+	t.Run("four_claims_2_1_1_admits_fourth_and_fifth_decides", func(t *testing.T) {
+		pub, priv := newKey()
+		w := newWorld(t, pub)
+		w.app.cfg.RunsPerEntry = 1
+		w.app.season.Baselines.PerRound = 4
+		anchor := w.join("anchor-one", priv)
+		owner := w.join("owner-211", nil)
+		gs := makeGraders(t, w, 5)
+		w.submit(owner, "ed-211", "print(1)")
+		idx := w.drawWithoutExam()
+		ce := w.claim(anchor, true)
+		if code, _ := w.edit(anchor, ce, scriptOne); code != 200 {
+			t.Fatalf("edit: HTTP %d", code)
+		}
+		claims := make([]*claimed, 4)
+		for i := range 4 {
+			claims[i] = w.claimEarly(gs[i])
+		}
+		w.exam(idx)
+		for i, tok := range []string{tokA, tokB, tokA, tokC} {
+			if code := submitGrade(t, w, gs[i], claims[i], initA, tok, 5.98, 6.0); code != 200 {
+				t.Fatalf("report %d (%s): HTTP %d, want 200", i+1, tok[:4], code)
+			}
+		}
+		if w.settled(idx) != 0 {
+			t.Fatalf("2-1-1 split settled prematurely!")
+		}
+		c5 := w.asked(gs[4], false)
+		if code := submitGrade(t, w, gs[4], c5, initA, tokA, 5.98, 6.0); code != 200 {
+			t.Fatalf("5th deciding grade: HTTP %d, want 200", code)
+		}
+		if w.settled(idx) != 1 {
+			t.Fatalf("expected settlement once A reached 3/5 strict majority")
+		}
+		w.check()
+	})
+
+	t.Run("four_claims_init_sha_split_is_order_invariant", func(t *testing.T) {
+		for _, pair := range []struct {
+			name  string
+			inits []string
+		}{
+			{"abab", []string{initA, initB, initA, initB}},
+			{"baba", []string{initB, initA, initB, initA}},
+		} {
+			pub, priv := newKey()
+			w := newWorld(t, pub)
+			w.app.cfg.RunsPerEntry = 1
+			w.app.season.Baselines.PerRound = 4
+			anchor := w.join("anchor-one", priv)
+			owner := w.join("owner-init-"+pair.name, nil)
+			gs := makeGraders(t, w, 4)
+			w.submit(owner, "ed-init-"+pair.name, "print(1)")
+			idx := w.drawWithoutExam()
+			ce := w.claim(anchor, true)
+			if code, _ := w.edit(anchor, ce, scriptOne); code != 200 {
+				t.Fatalf("edit: HTTP %d", code)
+			}
+			claims := make([]*claimed, 4)
+			for i := range 4 {
+				claims[i] = w.claimEarly(gs[i])
+			}
+			w.exam(idx)
+			for i, in := range pair.inits {
+				if code := submitGrade(t, w, gs[i], claims[i], in, tokA, 5.98, 6.0); code != 200 {
+					t.Fatalf("%s report %d: HTTP %d, want 200", pair.name, i+1, code)
+				}
+			}
+			w.app.st.view(func(s *State) {
+				if s.Rounds[idx].InitSHA != "" {
+					t.Fatalf("%s: 2-2 init_sha256 split must NOT prematurely lock Round.InitSHA (got %q)", pair.name, s.Rounds[idx].InitSHA)
+				}
+			})
+			if w.settled(idx) != 0 {
+				t.Fatalf("%s: 2-2 init_sha256 split settled prematurely!", pair.name)
+			}
+			w.check()
+		}
+	})
+
+	// Gate 4 P1-1: when a 4th claim releases after a 2-vs-1 InitSHA split (which wiped scores
+	// while rd.InitSHA was still ""), settleRound locking rd.InitSHA MUST call refreshScores()
+	// so the winning 2 graders get rescored and the round settles cleanly instead of deadlocking.
+	t.Run("release_unlocking_init_sha_refreshes_scores_and_settles", func(t *testing.T) {
+		pub, priv := newKey()
+		w := newWorld(t, pub)
+		w.app.cfg.RunsPerEntry = 1
+		w.app.season.Baselines.PerRound = 3
+		anchor := w.join("anchor-one", priv)
+		owner := w.join("owner-init-ref", nil)
+		gs := makeGraders(t, w, 4)
+		w.submit(owner, "ed-init-ref", "print(1)")
+		idx := w.drawWithoutExam()
+		ce := w.claim(anchor, true)
+		if code, _ := w.edit(anchor, ce, scriptOne); code != 200 {
+			t.Fatalf("edit: HTTP %d", code)
+		}
+		claims := make([]*claimed, 4)
+		for i := range 4 {
+			claims[i] = w.claimEarly(gs[i])
+		}
+		w.exam(idx)
+		// g1(I1), g2(I1), g3(I2) all report while g4 is still live -> rd.InitSHA stays "" and scores clear.
+		for i, in := range []string{initA, initA, initB} {
+			if code := submitGrade(t, w, gs[i], claims[i], in, tokA, 5.98, 6.0); code != 200 {
+				t.Fatalf("grader %d: HTTP %d, want 200", i+1, code)
+			}
+		}
+		// g4 now releases -> settleRound locks rd.InitSHA=initA, MUST refreshScores, and settle!
+		if code := gs[3].do("POST", fmt.Sprintf("/api/v1/jobs/%d/release", claims[3].Job.ID), map[string]any{"reason": "busy"}, nil); code != 200 {
+			t.Fatalf("release g4: HTTP %d", code)
+		}
+		w.app.st.view(func(s *State) {
+			if s.Rounds[idx].InitSHA != initA {
+				t.Fatalf("expected rd.InitSHA locked to %s after g4 released, got %q", initA, s.Rounds[idx].InitSHA)
+			}
+			if s.Rounds[idx].Status != "settled" || s.Rounds[idx].BaselineN < 2 {
+				t.Fatalf("expected round settled with BaselineN>=2 after refreshScores, got status=%s BaselineN=%d", s.Rounds[idx].Status, s.Rounds[idx].BaselineN)
+			}
+		})
 		w.check()
 	})
 }

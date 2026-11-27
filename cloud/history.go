@@ -177,8 +177,19 @@ func (rec *lookRecord) decided(d Decision, next int) {
 		rec.ExamDue = d.ExamDue.Unix()
 	}
 	for _, e := range d.End {
-		el := endingLook{Handle: e.Worker.Key.Handle, Why: e.Why, Failed: e.Failed}
-		if r := e.Worker.Rental; r != nil {
+		handle := ""
+		if e.Worker != nil && e.Worker.Key != nil {
+			handle = e.Worker.Key.Handle
+		}
+		r := e.Rental
+		if r == nil && e.Worker != nil {
+			r = e.Worker.Rental
+		}
+		if handle == "" && r != nil {
+			handle = r.Name
+		}
+		el := endingLook{Handle: handle, Why: e.Why, Failed: e.Failed}
+		if r != nil {
 			el.Market, el.ID = r.Market, r.ID
 		}
 		rec.Endings = append(rec.Endings, el)
@@ -208,7 +219,16 @@ func (rec *lookRecord) seenWork(v *View, p Policy, now time.Time) {
 			rec.States, rec.Live = map[string]int{}, map[string]int{}
 		}
 		rec.States[st]++
-		rec.Live[wk.Rental.Market]++
+		if wk.Rental != nil {
+			rec.Live[wk.Rental.Market]++
+		} else if wk.Pending != nil {
+			rec.Live[wk.Pending.Market]++
+		}
+		for _, ex := range wk.ExtraRentals {
+			if ex != nil && ex.live() {
+				rec.Live[ex.Market]++
+			}
+		}
 	}
 }
 

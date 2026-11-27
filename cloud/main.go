@@ -56,6 +56,10 @@ Vast.ai, Lium, Salad and Clore.ai.
                                  verify an unresolved pending examiner reservation with
                                  Vast.ai, adopting (or ending with --end) if found or
                                  clearing it when confirmed absent
+  stet-cloud workers resolve [--end]
+                                 verify unresolved pending worker create reservations
+                                 with their providers, adopting (or ending with --end)
+                                 matching contracts or clearing confirmed-absent ones
   stet-cloud up [N]              rent N machines now, whatever is waiting (default 1)
   stet-cloud down [--force] [HANDLE...]
                                  end machines that hold no job; --force ends the rest
@@ -428,6 +432,20 @@ func run(args []string, stdout, stderr io.Writer) error {
 			return err
 		}
 		return cmdExaminer(ctx, f)
+	case "workers":
+		end := fs.Bool("end", false, "with resolve: terminate matching worker contracts if the provider now lists them")
+		rest, err := parse(fs, args)
+		if err != nil {
+			return err
+		}
+		if len(rest) == 1 && rest[0] == "resolve" {
+			f, err := open(o, stdout, true, false)
+			if err != nil {
+				return err
+			}
+			return cmdWorkersResolve(ctx, f, *end)
+		}
+		return fmt.Errorf("workers takes `resolve [--end]` (got %q)", strings.Join(rest, " "))
 	case "up":
 		rest, err := parse(fs, args)
 		if err != nil {

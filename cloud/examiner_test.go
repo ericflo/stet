@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -4093,3 +4094,453 @@ func (p *splitVastExaminerProv) EndExaminer(ctx context.Context, id string) erro
 func (p *splitVastExaminerProv) RentExaminer(ctx context.Context, offerID string, l ExaminerLaunch) (string, error) {
 	return p.rent.RentExaminer(ctx, offerID, l)
 }
+
+// Review 21 P1 #2: an ambiguous worker create (e.g. Vast HTTP 200 {"success":true} without
+// new_contract and an eventually-consistent empty first listing) MUST keep a durable pending
+// reservation in fleet.json, count its slot and hourly rate, NEVER fall through to a second
+// market, auto-adopt when the listing later catches up, and support `workers resolve [--end]`.
+func TestReview21AmbiguousWorkerCreateReservesSlotAndDoesNotFallThrough(t *testing.T) {
+	rp, st := newFakeRunPod(t), newFakeStet(t)
+	f, _ := testFleet(t, rp, st, 2)
+	f.o.MaxWorkers = 1
+	f.o.MaxHourly = 0.30
+	f.o.Cheapest = true
+	f.o.Edits = false
+
+	// fakeRunPod already lists a $0.18/h RTX 3080 Ti (12 GB community) and $0.27/h RTX 3090 Ti:
+	// with Vast offering $0.15/h RTX 4090 and --max-hourly 0.30, an unreserved fallthrough to
+	// RunPod would create two contracts ($0.15 + $0.18 = $0.33/h > $0.30 ceiling!).
+	// Make Vast strictly cheaper ($0.15/h) so --cheapest picks Vast first.
+	var vastListed atomic.Bool
+	var vastCreated atomic.Int32
+	var vastDeleted []string
+	var mu sync.Mutex
+	vastSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "POST" && r.URL.Path == "/api/v0/bundles/":
+			_, _ = w.Write([]byte(`{"offers":[{"id":7701,"gpu_name":"RTX 4090","gpu_ram":24576,"num_gpus":1,"dph_base":0.15,"dph_total":0.15,"storage_cost":0,"inet_down_cost":0,"cuda_max_good":13.2,"verification":"verified","hosting_type":1,"geolocation":"US"}]}`))
+		case r.Method == "PUT" && strings.HasPrefix(r.URL.Path, "/api/v0/asks/"):
+			vastCreated.Add(1)
+			// Ambiguous HTTP 200 {"success":true} missing new_contract!
+			_, _ = w.Write([]byte(`{"success":true}`))
+		case r.Method == "GET" && r.URL.Path == "/api/v1/instances/":
+			if !vastListed.Load() {
+				_, _ = w.Write([]byte(`{"instances":[],"next_token":null}`))
+				return
+			}
+			_, _ = w.Write([]byte(fmt.Sprintf(`{"instances":[{"id":99771,"label":"stet-rp-01","actual_status":"running","intended_status":"running","cur_state":"running","gpu_name":"RTX 4090","dph_total":0.15,"start_date":%d}],"next_token":null}`, f.now().Unix())))
+		case r.Method == "DELETE" && strings.HasPrefix(r.URL.Path, "/api/v0/instances/"):
+			mu.Lock()
+			vastDeleted = append(vastDeleted, strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v0/instances/"), "/"))
+			mu.Unlock()
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{"success":true}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer vastSrv.Close()
+	vm := newVast(vastSrv.URL, "vast-key")
+	vm.a.sleep = func(context.Context, time.Duration) error { return nil }
+	f.markets = append(f.markets, vm)
+	if err := (&Arming{Armed: map[string]Armed{"runpod": {}, "vast": {At: 1}}}).save(f.o.Home); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. up 1 hits ambiguous Vast create -> MUST return error, MUST NOT fall through to RunPod,
+	//    and MUST persist durable pending reservation in fleet.json.
+	err := cmdUp(context.Background(), f, 1)
+	if err == nil {
+		t.Fatal("expected error on ambiguous Vast worker create, got nil")
+	}
+	if vastCreated.Load() != 1 {
+		t.Fatalf("expected 1 Vast create attempt, got %d", vastCreated.Load())
+	}
+	if len(rp.created) != 0 {
+		t.Fatalf("ambiguous Vast create MUST NOT fall through to RunPod! RunPod created=%d", len(rp.created))
+	}
+	l, err := f.readLedger()
+	if err != nil || len(l.Pending) != 1 {
+		t.Fatalf("expected 1 durable pending reservation in fleet.json, got %+v err=%v", l, err)
+	}
+
+	// 2. Subsequent look() and second `up 1` MUST still count the pending reservation's slot & $0.15/h
+	//    while Vast's listing still omits the new instance!
+	v, err := f.look(context.Background())
+	if err != nil {
+		t.Fatalf("look with pending reservation: %v", err)
+	}
+	if v.liveWorkerCount() != 1 || math.Abs(v.Hourly-0.15) > 1e-6 {
+		t.Fatalf("expected 1 live worker and $0.15/h from pending reservation, got live=%d hourly=%.4f", v.liveWorkerCount(), v.Hourly)
+	}
+	if err := cmdUp(context.Background(), f, 1); err != nil {
+		t.Fatalf("second up 1 under --max 1 should admit 0 cleanly, got %v", err)
+	}
+	if len(rp.created) != 0 || vastCreated.Load() != 1 {
+		t.Fatalf("second up 1 MUST NOT rent past pending slot: rp=%d vast=%d", len(rp.created), vastCreated.Load())
+	}
+
+	// 3. Even with --max 2 --max-hourly 0.30, RunPod ($0.18/h) is STILL blocked because
+	//    $0.15 reserved + $0.18 = $0.33 > $0.30! (Hide Vast offers temporarily so only RunPod fits.)
+	f.o.MaxWorkers = 2
+	f.o.Market = "runpod"
+	if err := cmdUp(context.Background(), f, 1); err != nil {
+		t.Fatalf("up 1 under --max-hourly 0.30 should refuse $0.18 cleanly, got %v", err)
+	}
+	if len(rp.created) != 0 {
+		t.Fatalf("hourly ceiling bypassed past pending reservation: rp=%d", len(rp.created))
+	}
+	f.o.Market = ""
+
+	// 4. Once Vast's listing catches up and lists instance 99771, look() auto-adopts it into
+	//    l.Pods and removes the pending reservation cleanly!
+	vastListed.Store(true)
+	v2, err := f.look(context.Background())
+	if err != nil {
+		t.Fatalf("look after Vast lists instance: %v", err)
+	}
+	if len(v2.PendingRents) != 0 || len(v2.Ledger.Pending) != 0 {
+		t.Fatalf("expected pending reservation adopted and cleared, got pending=%+v", v2.Ledger.Pending)
+	}
+	if v2.Ledger.Pods[ledgerKey("vast", "99771")] == nil || v2.liveWorkerCount() != 1 || math.Abs(v2.Hourly-0.15) > 1e-6 {
+		t.Fatalf("expected vast:99771 adopted at $0.15/h, got pods=%+v live=%d hourly=%.4f", v2.Ledger.Pods, v2.liveWorkerCount(), v2.Hourly)
+	}
+
+	// 5. Verify `stet-cloud workers resolve` clears a confirmed-absent reservation, and
+	//    `--end` destroys a matching provider contract ONCE (even if two pending reservations
+	//    share the same handle) without double-billing spent.jsonl!
+	l2, _ := f.readLedger()
+	delete(l2.Pods, ledgerKey("vast", "99771"))
+	l2.Pending["p-absent"] = &pendingRent{ID: "p-absent", Market: "vast", Handle: "stet-rp-02", GPU: "RTX 4090", Cost: 0.15, Created: f.now()}
+	l2.Pending["p-present-1"] = &pendingRent{ID: "p-present-1", Market: "vast", Handle: "stet-rp-01", GPU: "RTX 4090", Cost: 0.15, Created: f.now()}
+	l2.Pending["p-present-2"] = &pendingRent{ID: "p-present-2", Market: "vast", Handle: "stet-rp-01", GPU: "RTX 4090", Cost: 0.15, Created: f.now()}
+	if err := f.writeLedger(l2); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmdWorkersResolve(context.Background(), f, true); err != nil {
+		t.Fatalf("cmdWorkersResolve --end: %v", err)
+	}
+	l3, _ := f.readLedger()
+	if len(l3.Pending) != 0 || len(l3.Pods) != 0 {
+		t.Fatalf("expected all pending reservations resolved, got pending=%+v pods=%+v", l3.Pending, l3.Pods)
+	}
+	mu.Lock()
+	delCount := len(vastDeleted)
+	mu.Unlock()
+	if delCount != 1 || vastDeleted[0] != "99771" {
+		t.Fatalf("expected workers resolve --end to delete 99771 exactly ONCE, got %v", vastDeleted)
+	}
+
+	// Gate 4 P1-3: Lium 2-try retry loop after try 0 returned 500 and try 1 returned 409 MUST
+	// remain ambiguous (NOT downgrade to errNoRoom) so fleet.go retains the pending reservation!
+	var liumRentTry atomic.Int32
+	liumSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "POST" && r.URL.Path == "/templates":
+			_, _ = w.Write([]byte(`{"id":"tpl-1"}`))
+		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/rent"):
+			if liumRentTry.Add(1) == 1 {
+				w.WriteHeader(500)
+				_, _ = w.Write([]byte(`{"detail":"upstream timeout after create"}`))
+				return
+			}
+			w.WriteHeader(409)
+			_, _ = w.Write([]byte(`{"detail":"executor already rented"}`))
+		case r.Method == "GET" && r.URL.Path == "/pods":
+			_, _ = w.Write([]byte(`[]`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer liumSrv.Close()
+	lm := newLium(liumSrv.URL, "lium-key")
+	lm.a.sleep = func(context.Context, time.Duration) error { return nil }
+	_, lerr := lm.Rent(context.Background(), Offer{Market: "lium", ID: "exec-1", Card: "RTX 4090", Price: 0.25}, Launch{
+		Name: "stet-rp-01", Script: "echo hi", SSHKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest test@example",
+	})
+	if lerr == nil || errors.Is(lerr, errNoRoom) || errors.Is(lerr, errRentRejected) || errors.Is(lerr, errRentNotSent) {
+		t.Fatalf("Lium 500->409 retry MUST stay ambiguous (not errNoRoom/errRentRejected/errRentNotSent), got %v", lerr)
+	}
+}
+
+// Review 21 P1 #3: two visible, ledgered contracts with different provider IDs sharing ONE worker
+// handle MUST BOTH count toward capacity and hourly spend in look(), status, up, scale, and down.
+func TestReview21DuplicateContractsSharingHandleCountIndividually(t *testing.T) {
+	rp, st := newFakeRunPod(t), newFakeStet(t)
+	f, _ := testFleet(t, rp, st, 2)
+	f.o.MaxWorkers = 2
+	f.o.MaxHourly = 1.00
+	f.o.Edits = false
+	now := f.now()
+
+	// Seed two running $0.43/h RunPod contracts under the SAME handle `stet-rp-01` (both visible
+	// in provider listings and in fleet.json); fakeRunPod's cheapest fit GPU is $0.18/h
+	// ($0.86 + $0.18 = $1.04 > $1.00 ceiling!).
+	rp.pods["pod-dup-a"] = &Pod{ID: "pod-dup-a", Name: "stet-rp-01", Status: "RUNNING", Cost: 0.43, CreatedAt: now.Add(-10 * time.Minute)}
+	rp.pods["pod-dup-b"] = &Pod{ID: "pod-dup-b", Name: "stet-rp-01", Status: "RUNNING", Cost: 0.43, CreatedAt: now.Add(-5 * time.Minute)}
+	if err := f.writeLedger(&ledger{Pods: map[string]*podRecord{
+		ledgerKey("runpod", "pod-dup-a"): {ID: "pod-dup-a", Market: "runpod", Handle: "stet-rp-01", GPU: "RTX 4090", Cost: 0.43, Start: now.Add(-10 * time.Minute), Alive: now},
+		ledgerKey("runpod", "pod-dup-b"): {ID: "pod-dup-b", Market: "runpod", Handle: "stet-rp-01", GPU: "RTX 4090", Cost: 0.43, Start: now.Add(-5 * time.Minute), Alive: now},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. look() MUST report $0.86/h and 2 live contracts (while keeping newest pod-dup-b on Worker.Rental).
+	v, err := f.look(context.Background())
+	if err != nil {
+		t.Fatalf("look: %v", err)
+	}
+	if math.Abs(v.Hourly-0.86) > 1e-6 {
+		t.Fatalf("expected hourly $0.86 for two $0.43 contracts sharing a handle, got $%.4f", v.Hourly)
+	}
+	if v.liveWorkerCount() != 2 {
+		t.Fatalf("expected liveWorkerCount=2, got %d", v.liveWorkerCount())
+	}
+	if v.Workers[0].Rental == nil || v.Workers[0].Rental.ID != "pod-dup-b" || len(v.Workers[0].ExtraRentals) != 1 || v.Workers[0].ExtraRentals[0].ID != "pod-dup-a" {
+		t.Fatalf("expected newest pod-dup-b for dispatch + pod-dup-a in ExtraRentals, got rental=%+v extra=%+v", v.Workers[0].Rental, v.Workers[0].ExtraRentals)
+	}
+
+	// 2. Under --max 2 --max-hourly 1.00, `up 1` MUST admit 0 workers!
+	if err := cmdUp(context.Background(), f, 1); err != nil {
+		t.Fatalf("up 1 under --max 2: %v", err)
+	}
+	if len(rp.created) != 0 {
+		t.Fatalf("up 1 breached --max 2 with duplicate-handle contracts! created=%d", len(rp.created))
+	}
+
+	// 3. Even under --max 3 --max-hourly 1.00, a $0.20/h worker MUST be refused ($0.86 + $0.20 = $1.06 > $1.00)!
+	f.o.MaxWorkers = 3
+	if err := cmdUp(context.Background(), f, 1); err != nil {
+		t.Fatalf("up 1 under --max-hourly 1.00: %v", err)
+	}
+	if len(rp.created) != 0 {
+		t.Fatalf("up 1 breached --max-hourly 1.00 ($0.86 + $0.20 = $1.06)! created=%d", len(rp.created))
+	}
+
+	// 4. `scale` (tick) under --max 2 with work waiting MUST also count both contracts and launch 0!
+	f.o.MaxWorkers = 2
+	f.o.MaxHourly = 5.00
+	st.work = Work{
+		Rounds:   []WorkRound{{ID: "s3-o00050", Entries: 1, GradesWanted: 12, ExamAt: now.Unix()}},
+		Machines: []Machine{{Handle: "stet-rp-01", Worker: true, Busy: "grade", LastSeen: now.Unix()}},
+	}
+	if err := tick(context.Background(), f); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	if len(rp.created) != 0 {
+		t.Fatalf("tick breached --max 2 with duplicate-handle contracts! created=%d", len(rp.created))
+	}
+
+	// 5. If the older duplicate stops, tick() ends ONLY the stopped duplicate without releasing
+	//    stet-rp-01's active grading job or touching pod-dup-b!
+	rp.pods["pod-dup-a"].Status = "EXITED"
+	if err := tick(context.Background(), f); err != nil {
+		t.Fatalf("tick cleaning stopped duplicate: %v", err)
+	}
+	if rp.pods["pod-dup-a"] != nil || rp.pods["pod-dup-b"] == nil {
+		t.Fatalf("expected stopped duplicate pod-dup-a ended and live pod-dup-b preserved, pods=%+v", rp.pods)
+	}
+	if len(st.released) != 0 {
+		t.Fatalf("ending stopped duplicate MUST NOT release active worker's job! released=%v", st.released)
+	}
+}
+
+// Review 21 P2 #4: Vast worker offers MUST use conservative pricing (max of dph_total and
+// component sum), preserve worker disk + download estimates, skip offers with no positive price,
+// and NEVER rent a positive-priced offer under --max-hourly 0.
+func TestReview21VastWorkerOfferUsesConservativePricingAndSkipsZero(t *testing.T) {
+	rp, st := newFakeRunPod(t), newFakeStet(t)
+	f, _ := testFleet(t, rp, st, 1)
+	f.o.Market = "vast"
+	f.o.MaxHourly = 0
+	f.o.Disk = 120
+	f.o.Edits = false
+
+	var rentCalls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "POST" && r.URL.Path == "/api/v0/bundles/":
+			// Offer 8001: dph_total=0.62 with NO dph_base (exact reviewer repro!).
+			// Offer 8002: dph_base=0.40, dph_total=0.41, storage_cost=0.36, inet_down_cost=0.01 (components > dph_total).
+			// Offer 8003: dph_total=0, dph_base=0 (unusable price -> must be skipped!).
+			// Offer 8004: dph_total=-0.50, dph_base=0 (negative price -> must be skipped!).
+			_, _ = w.Write([]byte(`{"offers":[
+				{"id":8001,"gpu_name":"RTX 4090","gpu_ram":24576,"num_gpus":1,"dph_total":0.62,"cuda_max_good":13.2,"verification":"verified","hosting_type":1,"geolocation":"US"},
+				{"id":8002,"gpu_name":"RTX 4090","gpu_ram":24576,"num_gpus":1,"dph_base":0.40,"dph_total":0.41,"storage_cost":0.36,"inet_down_cost":0.01,"cuda_max_good":13.2,"verification":"verified","hosting_type":1,"geolocation":"US"},
+				{"id":8003,"gpu_name":"RTX 4090","gpu_ram":24576,"num_gpus":1,"dph_total":0,"dph_base":0,"storage_cost":0.20,"cuda_max_good":13.2,"verification":"verified","hosting_type":1,"geolocation":"US"},
+				{"id":8004,"gpu_name":"RTX 4090","gpu_ram":24576,"num_gpus":1,"dph_total":-0.50,"dph_base":0,"cuda_max_good":13.2,"verification":"verified","hosting_type":1,"geolocation":"US"}
+			]}`))
+		case r.Method == "GET" && r.URL.Path == "/api/v1/instances/":
+			_, _ = w.Write([]byte(`{"instances":[],"next_token":null}`))
+		case r.Method == "PUT" && strings.HasPrefix(r.URL.Path, "/api/v0/asks/"):
+			rentCalls.Add(1)
+			_, _ = w.Write([]byte(`{"success":true,"new_contract":9999}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	vm := newVast(srv.URL, "vast-key")
+	vm.a.sleep = func(context.Context, time.Duration) error { return nil }
+
+	offers, err := vm.Offers(context.Background(), Need{MinGPUMemGB: 12, DiskGB: 120})
+	if err != nil {
+		t.Fatalf("Offers: %v", err)
+	}
+	if len(offers) != 2 {
+		t.Fatalf("expected 2 usable offers (skipping zero/negative), got %d: %+v", len(offers), offers)
+	}
+	byID := map[string]Offer{}
+	for _, o := range offers {
+		byID[o.ID] = o
+	}
+	if math.Abs(byID["8001"].Price-0.62) > 1e-6 {
+		t.Fatalf("offer 8001 (dph_total=0.62, no dph_base): got price %.6f, want 0.62", byID["8001"].Price)
+	}
+	want8002 := 0.40 + 120*0.36/720.0 + 3*0.01/expectedLife.Hours()
+	if math.Abs(byID["8002"].Price-want8002) > 1e-6 {
+		t.Fatalf("offer 8002 (component sum > dph_total): got price %.6f, want %.6f", byID["8002"].Price, want8002)
+	}
+
+	// Under --max-hourly 0, cmdUp MUST rent 0 contracts (NOT treat offer 8001 as $0.00/h!).
+	f.markets = []Market{vm}
+	if err := cmdUp(context.Background(), f, 1); err != nil {
+		t.Fatalf("cmdUp under --max-hourly 0: %v", err)
+	}
+	if rentCalls.Load() != 0 {
+		t.Fatalf("rented %d Vast contract(s) under --max-hourly 0!", rentCalls.Load())
+	}
+}
+
+// Review 21 P2 #5: a tracked worker that appears as stopped in the normal provider listing MUST
+// stay in fleet.json (with Stopped=true) if m.End() fails, so that if the next tick's listing
+// omits it, the fleet verifies by ID via Lookup and retries m.End() until deletion succeeds or
+// Lookup confirms absence (404).
+func TestReview21StoppedWorkerRetainedAcrossFailedDeleteAndLaterOmission(t *testing.T) {
+	rp, st := newFakeRunPod(t), newFakeStet(t)
+	f, _ := testFleet(t, rp, st, 1)
+	f.o.MaxWorkers = 1
+	f.o.Edits = false
+	now := f.now()
+
+	listMode := "stopped" // "stopped" -> "omitted" -> "omitted_404"
+	endFail := true
+	var lookupCalls, endCalls int
+	mkt := &r21LookupMarket{
+		name: "vast",
+		rentalsFn: func() ([]Rental, error) {
+			if listMode == "stopped" {
+				return []Rental{{
+					Market: "vast", ID: "v-stop-1", Name: "stet-rp-01", Card: "RTX 4090",
+					Price: 0.42, State: "stopped", Status: "exited", Created: now.Add(-30 * time.Minute),
+				}}, nil
+			}
+			return nil, nil // omitted on subsequent ticks!
+		},
+		lookupFn: func(id string) (*Rental, bool, error) {
+			lookupCalls++
+			if listMode == "omitted_404" {
+				return nil, false, nil
+			}
+			return &Rental{
+				Market: "vast", ID: id, Name: "stet-rp-01", Card: "RTX 4090",
+				Price: 0.42, State: "stopped", Status: "exited", Created: now.Add(-30 * time.Minute),
+			}, true, nil
+		},
+		endFn: func(id string) error {
+			endCalls++
+			if endFail {
+				return errors.New("temporary 503 delete error")
+			}
+			return nil
+		},
+	}
+	f.markets = []Market{mkt}
+	if err := f.writeLedger(&ledger{Pods: map[string]*podRecord{
+		ledgerKey("vast", "v-stop-1"): {
+			ID: "v-stop-1", Market: "vast", Handle: "stet-rp-01",
+			GPU: "RTX 4090", Cost: 0.42, Start: now.Add(-30 * time.Minute), Alive: now.Add(-10 * time.Minute),
+		},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Tick 1: listed as stopped, m.End() fails transiently -> MUST keep ledger record (Stopped=true)!
+	if err := tick(context.Background(), f); err != nil {
+		t.Fatalf("tick 1: %v", err)
+	}
+	if endCalls != 1 {
+		t.Fatalf("expected 1 delete attempt on tick 1, got %d", endCalls)
+	}
+	l1, err := f.readLedger()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec1 := l1.Pods[ledgerKey("vast", "v-stop-1")]
+	if rec1 == nil || !rec1.Stopped {
+		t.Fatalf("stopped worker MUST remain in fleet.json with Stopped=true after failed End(), got %+v", l1.Pods)
+	}
+
+	// Tick 2: provider listing OMITS the stopped worker, Lookup confirms it still exists stopped,
+	// and m.End() succeeds -> MUST perform by-ID Lookup, retry m.End(), and retire ledger record!
+	listMode = "omitted"
+	endFail = false
+	if err := tick(context.Background(), f); err != nil {
+		t.Fatalf("tick 2: %v", err)
+	}
+	if lookupCalls != 1 {
+		t.Fatalf("expected by-ID Lookup on tick 2 after listing omission, got %d", lookupCalls)
+	}
+	if endCalls != 2 {
+		t.Fatalf("expected second m.End() retry on tick 2, got %d", endCalls)
+	}
+	l2, err := f.readLedger()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(l2.Pods) != 0 {
+		t.Fatalf("expected stopped worker retired from fleet.json after delete succeeded, got %+v", l2.Pods)
+	}
+
+	// Sub-check: if a stopped worker is omitted and Lookup explicitly confirms 404 absence, it IS retired cleanly.
+	listMode = "omitted_404"
+	if err := f.writeLedger(&ledger{Pods: map[string]*podRecord{
+		ledgerKey("vast", "v-stop-2"): {
+			ID: "v-stop-2", Market: "vast", Handle: "stet-rp-01",
+			GPU: "RTX 4090", Cost: 0.42, Start: now.Add(-30 * time.Minute), Alive: now.Add(-10 * time.Minute), Stopped: true,
+		},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := tick(context.Background(), f); err != nil {
+		t.Fatalf("tick 3 (404 absent): %v", err)
+	}
+	if lookupCalls != 2 {
+		t.Fatalf("expected by-ID Lookup on tick 3, got %d", lookupCalls)
+	}
+	l3, _ := f.readLedger()
+	if len(l3.Pods) != 0 {
+		t.Fatalf("expected 404-confirmed absent stopped worker retired, got %+v", l3.Pods)
+	}
+}
+
+type r21LookupMarket struct {
+	name      string
+	rentalsFn func() ([]Rental, error)
+	lookupFn  func(id string) (*Rental, bool, error)
+	endFn     func(id string) error
+}
+
+func (m *r21LookupMarket) Name() string                                  { return m.name }
+func (m *r21LookupMarket) Caps() Caps                                    { return Caps{Rents: true} }
+func (m *r21LookupMarket) Offers(context.Context, Need) ([]Offer, error) { return nil, nil }
+func (m *r21LookupMarket) Rent(context.Context, Offer, Launch) (*Rental, error) {
+	return nil, errNoRoom
+}
+func (m *r21LookupMarket) Check(context.Context) (Account, error)    { return Account{}, nil }
+func (m *r21LookupMarket) Rentals(context.Context) ([]Rental, error) { return m.rentalsFn() }
+func (m *r21LookupMarket) Lookup(_ context.Context, id string) (*Rental, bool, error) {
+	return m.lookupFn(id)
+}
+func (m *r21LookupMarket) End(_ context.Context, id string) error { return m.endFn(id) }

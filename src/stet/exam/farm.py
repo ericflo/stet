@@ -153,7 +153,11 @@ def work_one(task: dict, season, key, device, log=print) -> None:
         body = dict(meta)
         body["reason"] = body.pop("invalid_reason", "")
         if model is not None:
-            body["item_scores"] = [round(s, 6) for s in sit(model, items, enc, season.eot, scale.ctx, device, floor=season.answer_floor_bytes)]
+            from ..train import _deterministic_cuda
+
+            use_det = ((getattr(season, "raw", None) or {}).get("student") or {}).get("kind") == "hf_topreset" and getattr(device, "type", "") == "cuda"
+            with _deterministic_cuda(use_det):
+                body["item_scores"] = [round(s, 6) for s in sit(model, items, enc, season.eot, scale.ctx, device, floor=season.answer_floor_bytes)]
             del model
         release_gpu_memory()
         try:

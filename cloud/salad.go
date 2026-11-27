@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"regexp"
 	"strconv"
@@ -152,7 +153,7 @@ func (m *saladMarket) Offers(ctx context.Context, n Need) ([]Offer, error) {
 	for _, c := range classes {
 		card, mem := saladCard(c.Name)
 		price := c.price(saladPriority)
-		if saladMaker(c.Name) != "NVIDIA" || mem < n.MinGPUMemGB || unfitGPU.MatchString(c.Name) || price <= 0 {
+		if saladMaker(c.Name) != "NVIDIA" || mem < n.MinGPUMemGB || unfitGPU.MatchString(c.Name) || !validRate(price) {
 			continue
 		}
 		stock, err := m.available(ctx, c.ID, n)
@@ -189,9 +190,16 @@ func (m *saladMarket) Rent(ctx context.Context, o Offer, l Launch) (*Rental, err
 	path := m.orgPath() + "/projects/" + url.PathEscape(m.project) + "/containers"
 	var out saladGroup
 	status, err := m.a.do(ctx, "POST", path, body, &out)
-	if err != nil && (status == 0 || status >= 500) {
-		if _, gerr := m.a.do(ctx, "GET", path+"/"+url.PathEscape(name), nil, &out); gerr == nil {
-			err = nil
+	if err != nil {
+		switch {
+		case errors.Is(err, errRequestNotSent):
+			return nil, fmt.Errorf("%w: %w", errRentNotSent, err)
+		case status >= 400 && status < 500 && status != http.StatusRequestTimeout:
+			return nil, fmt.Errorf("%w (%v)", errRentRejected, err)
+		case status == 0 || status == http.StatusRequestTimeout || status >= 500:
+			if _, gerr := m.a.do(ctx, "GET", path+"/"+url.PathEscape(name), nil, &out); gerr == nil && out.Name == name {
+				err = nil
+			}
 		}
 	}
 	if err != nil {
