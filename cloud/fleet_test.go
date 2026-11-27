@@ -1729,9 +1729,142 @@ func TestReview17ProbeCleanupNeverDeletesReplacementWithReusedHandle(t *testing.
 
 type probeSwapMarket struct {
 	Market
-	onLogs func(id string) ([]string, error)
+	onLogs    func(id string) ([]string, error)
+	onRentals func() ([]Rental, error)
+	onEnd     func(id string) error
 }
 
-func (m *probeSwapMarket) Logs(_ context.Context, id string, _ int) ([]string, error) {
-	return m.onLogs(id)
+func (m *probeSwapMarket) Logs(ctx context.Context, id string, n int) ([]string, error) {
+	if m.onLogs != nil {
+		return m.onLogs(id)
+	}
+	if lm, ok := m.Market.(interface {
+		Logs(context.Context, string, int) ([]string, error)
+	}); ok {
+		return lm.Logs(ctx, id, n)
+	}
+	return nil, nil
+}
+
+func (m *probeSwapMarket) Rentals(ctx context.Context) ([]Rental, error) {
+	if m.onRentals != nil {
+		return m.onRentals()
+	}
+	return m.Market.Rentals(ctx)
+}
+
+func (m *probeSwapMarket) End(ctx context.Context, id string) error {
+	if m.onEnd != nil {
+		return m.onEnd(id)
+	}
+	return m.Market.End(ctx, id)
+}
+
+// Review 18 P2 #2:
+//
+//	(a) If the probe pod is temporarily omitted from Rentals() after logs finish, cmdDownRental
+//	    MUST still invoke m.End(ctx, pod.ID) directly so the live rental is actually terminated
+//	    before its ledger entry is retired.
+//	(b) If m.End(ctx, pod.ID) fails, cmdDownRental MUST leave the ledger entry intact and
+//	    cmdProbe MUST return a non-nil error instead of reporting success.
+func TestReview18ProbeCleanupCallsEndOnListOmissionAndPropagatesError(t *testing.T) {
+	t.Run("omitted_from_Rentals_still_calls_End_and_retires_ledger", func(t *testing.T) {
+		rp, st := newFakeRunPod(t), newFakeStet(t)
+		f, _ := testFleet(t, rp, st, 1)
+		f.o.MaxWorkers = 2
+		f.o.Market = "runpod"
+
+		var probeID string
+		var endedIDs []string
+		omitProbe := false
+		rpMkt := f.market("runpod")
+		f.markets = []Market{&probeSwapMarket{
+			Market: rpMkt,
+			onLogs: func(id string) ([]string, error) {
+				probeID = id
+				omitProbe = true // simulate stale/eventually-consistent Rentals() omitting the live pod
+				return []string{"[probe] done: every case held"}, nil
+			},
+			onRentals: func() ([]Rental, error) {
+				rs, err := rpMkt.Rentals(context.Background())
+				if err != nil || !omitProbe {
+					return rs, err
+				}
+				filtered := rs[:0]
+				for _, r := range rs {
+					if r.ID != probeID {
+						filtered = append(filtered, r)
+					}
+				}
+				return filtered, nil
+			},
+			onEnd: func(id string) error {
+				endedIDs = append(endedIDs, id)
+				return rpMkt.End(context.Background(), id)
+			},
+		}}
+
+		checkFile := filepath.Join(t.TempDir(), "cage_check.py")
+		if err := os.WriteFile(checkFile, []byte("print('ok')\n"), 0o600); err != nil {
+			t.Fatalf("write check file: %v", err)
+		}
+		if err := cmdProbe(context.Background(), f, checkFile, time.Minute); err != nil {
+			t.Fatalf("cmdProbe: %v", err)
+		}
+		if probeID == "" {
+			t.Fatalf("expected probe pod ID recorded")
+		}
+		if len(endedIDs) != 1 || endedIDs[0] != probeID {
+			t.Fatalf("expected End(%q) called despite omission from Rentals(), got endedIDs=%v", probeID, endedIDs)
+		}
+		if rp.pods[probeID] != nil {
+			t.Fatalf("live probe pod %s was NOT deleted on RunPod!", probeID)
+		}
+		l, err := f.readLedger()
+		if err != nil {
+			t.Fatalf("readLedger: %v", err)
+		}
+		if l.Pods[ledgerKey("runpod", probeID)] != nil {
+			t.Fatalf("expected ledger entry retired after End succeeded, got %+v", l.Pods)
+		}
+	})
+
+	t.Run("End_error_keeps_ledger_entry_and_returns_error_from_cmdProbe", func(t *testing.T) {
+		rp, st := newFakeRunPod(t), newFakeStet(t)
+		f, _ := testFleet(t, rp, st, 1)
+		f.o.MaxWorkers = 2
+		f.o.Market = "runpod"
+
+		var probeID string
+		rpMkt := f.market("runpod")
+		f.markets = []Market{&probeSwapMarket{
+			Market: rpMkt,
+			onLogs: func(id string) ([]string, error) {
+				probeID = id
+				return []string{"[probe] done: every case held"}, nil
+			},
+			onEnd: func(id string) error {
+				return fmt.Errorf("RunPod DELETE 503")
+			},
+		}}
+
+		checkFile := filepath.Join(t.TempDir(), "cage_check.py")
+		if err := os.WriteFile(checkFile, []byte("print('ok')\n"), 0o600); err != nil {
+			t.Fatalf("write check file: %v", err)
+		}
+		err := cmdProbe(context.Background(), f, checkFile, time.Minute)
+		if err == nil || !strings.Contains(err.Error(), "RunPod DELETE 503") {
+			t.Fatalf("expected cmdProbe to return wrapped teardown error, got %v", err)
+		}
+		if rp.pods[probeID] == nil {
+			t.Fatalf("expected pod still running on RunPod after End failed")
+		}
+		l, rerr := f.readLedger()
+		if rerr != nil {
+			t.Fatalf("readLedger: %v", rerr)
+		}
+		if l.Pods[ledgerKey("runpod", probeID)] == nil {
+			t.Fatalf("ledger MUST retain probe pod %s when End fails so scale/down can clean it up!", probeID)
+		}
+	})
 }

@@ -82,17 +82,25 @@ def _filter_pillar_support(items: list[Item], season, rnd_id: str, log=print) ->
     return items
 
 
-def _student_window(season, scale) -> tuple[object, int] | None:
+def _student_window(season, scale, *, required: bool = False) -> tuple[object, int] | None:
     """Return `(student_encoding, ctx)` so reasoning synthesis can reject items whose wrapped
-    prompt + answer would exceed the student's scoring window, or None if unavailable."""
+    prompt + answer would exceed the student's scoring window.
+
+    When `required=True` (official builds on seasons with a pinned student tokenizer), any
+    download, checksum, or parse error raises a retryable `RuntimeError` instead of silently
+    disabling the student-window fit check."""
     seq_len = getattr(scale, "ctx", None)
     if not isinstance(seq_len, int) or seq_len <= 0:
+        if required:
+            raise RuntimeError(f"cannot enforce student window check: scale {scale!r} has invalid ctx={seq_len!r}")
         return None
     try:
         from ..tok import load_encoding
 
         return (load_encoding(season), seq_len)
-    except Exception:
+    except Exception as exc:
+        if required:
+            raise RuntimeError(f"could not load pinned student tokenizer for window check: {exc}") from exc
         return None
 
 
@@ -370,7 +378,8 @@ def assemble(
     if synthesize and (r_cfg := cfg.get("reasoning")):
         from .fresh.reason import REASONING_FILTER_VERSION
 
-        sw = _student_window(season, scale)
+        require_sw = bool(getattr(rnd, "kind", "") == "official" and season.raw.get("student") and season.raw.get("tokenizer"))
+        sw = _student_window(season, scale, required=require_sw)
         rcfg_sig = hashlib.sha256(
             json.dumps({"filter_version": REASONING_FILTER_VERSION, "cfg": r_cfg}, sort_keys=True).encode()
         ).hexdigest()[:8]
@@ -522,16 +531,29 @@ def wikipedia_attribution_manifest(items: list[Item]) -> list[dict]:
     return [seen[k] for k in sorted(seen)]
 
 
-def candidate_dir(work: Path, items_digest: str) -> Path:
-    """Immutable per-candidate staging directory under `work` keyed by `items_digest`."""
+def shares_digest(languages: dict) -> str:
+    """Canonical SHA-256 digest of a round's corpus language shares (normalizing int/float numbers)."""
+    import hashlib
+
+    canon = {str(k): float(v) for k, v in languages.items()}
+    return hashlib.sha256(json.dumps(canon, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def candidate_dir(work: Path, items_digest: str, shares_sha: str | None = None) -> Path:
+    """Immutable per-candidate staging directory under `work` keyed by `items_digest` and
+    (when provided) `shares_digest`, so retries with identical items but different language
+    shares never overwrite an accepted candidate's staged files."""
+    if shares_sha:
+        return work / f"candidate-{items_digest[:16]}-{shares_sha[:12]}"
     return work / f"candidate-{items_digest[:16]}"
 
 
 def stage(exam: dict, work: Path) -> Path:
     """Atomically stage a candidate exam's full items and language shares under an immutable
-    digest-addressed directory before posting, so a rejected duplicate build (409) never
-    overwrites an already-accepted exam's files."""
-    dest = candidate_dir(work, str(exam["items_digest"]))
+    `(items_digest, shares_digest)` directory before posting, so a rejected or duplicate build
+    never overwrites an already-accepted exam's files."""
+    s_sha = shares_digest(exam["languages"]) if isinstance(exam.get("languages"), dict) else None
+    dest = candidate_dir(work, str(exam["items_digest"]), s_sha)
     dest.mkdir(parents=True, exist_ok=True)
     _atomic_write_bytes(dest / KEPT_ITEMS, base64.b64decode(exam["items_file"]))
     _atomic_write_bytes(dest / KEPT_LANGUAGES, json.dumps(exam["languages"]).encode("utf-8"))
@@ -553,13 +575,18 @@ def keep(exam: dict, work: Path) -> None:
 def examine(rnd, scale, snapshots: list[tuple[int, Path]], work: Path, key, log=print) -> dict:
     """Make a round's exam from its hours' harvests and post it.
 
-    Stages each candidate under an immutable digest-addressed directory before posting and
-    promotes it into `KEPT_ITEMS` / `KEPT_LANGUAGES` only after the server accepts the post,
-    so an overlapping build that receives 409 never overwrites the accepted exam on disk."""
+    Stages each candidate under an immutable `(items_digest, shares_digest)` directory before
+    posting and promotes it into `KEPT_ITEMS` / `KEPT_LANGUAGES` only when the server accepts
+    it as the winning publication (`posted != False`), so an overlapping or retried build never
+    overwrites the accepted exam or its language shares on disk."""
     t0 = time.time()
     exam = build(rnd, scale, snapshots, work, log=log)
     stage(exam, work)
     out = post(exam, key)
-    keep(exam, work)
+    if isinstance(out, dict) and out.get("posted") is False:
+        if not ((work / KEPT_ITEMS).exists() and (work / KEPT_LANGUAGES).exists()):
+            keep(exam, work)
+    else:
+        keep(exam, work)
     log(f"  posted {rnd.id}'s exam: {len(exam['table'])} items ({time.time() - t0:.0f}s)")
     return out

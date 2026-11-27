@@ -590,8 +590,9 @@ func cmdDown(ctx context.Context, f *Fleet, force bool, handles []string) error 
 }
 
 // cmdDownRental ends one specific rental by exact (market, id) under the fleet lock,
-// retiring only that ledger entry and never touching a replacement machine that may have
-// reused the same worker handle. An already-gone rental is treated as complete.
+// calling the market's idempotent End directly (never trusting a listing omission to skip
+// teardown), retiring only that ledger entry after confirmed teardown, and never touching a
+// replacement machine that may have reused the same worker handle.
 func cmdDownRental(ctx context.Context, f *Fleet, market, id string) error {
 	if id == "" || id == "dry-run" {
 		return nil
@@ -614,27 +615,6 @@ func cmdDownRental(ctx context.Context, f *Fleet, market, id string) error {
 	}
 	key := ledgerKey(market, id)
 	rec := l.Pods[key]
-	var found *Rental
-	listedOK := false
-	if rs, rerr := m.Rentals(ctx); rerr == nil {
-		listedOK = true
-		for i := range rs {
-			if rs[i].ID == id && (rs[i].Market == "" || rs[i].Market == market) {
-				found = &rs[i]
-				break
-			}
-		}
-	}
-	if listedOK && found == nil {
-		if rec != nil {
-			rec.Why = "probe ended before cleanup"
-			if err := f.retire(l, key, minTime(f.now(), rec.Alive.Add(2*f.o.Every))); err != nil {
-				return err
-			}
-			return f.writeLedger(l)
-		}
-		return nil
-	}
 	if f.o.DryRun {
 		f.say("would end probe machine %s on %s", id, marketTitle(market))
 		return nil
@@ -643,16 +623,10 @@ func cmdDownRental(ctx context.Context, f *Fleet, market, id string) error {
 		return err
 	}
 	handle := ""
+	r := Rental{Market: market, ID: id}
 	if rec != nil {
 		handle = rec.Handle
 		rec.Why = "probe ended"
-	} else if found != nil {
-		handle = found.Name
-	}
-	r := Rental{Market: market, ID: id}
-	if found != nil {
-		r = *found
-	} else if rec != nil {
 		r.Card = rec.GPU
 	}
 	f.event(&r, handle, "ended", "probe ended")

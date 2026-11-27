@@ -14,6 +14,7 @@ package main
 // round is open at a time, so the database holds at most one round's worth.
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
@@ -86,8 +87,21 @@ type ExamPost struct {
 	InitSHA  string             `json:"init_sha256,omitempty"` // optional authoritative initial weights sha256 from the examiner
 }
 
-// apiExamPost: POST /api/v1/admin/rounds/{id}/exam, from the organisers. Posting the same exam
-// again is harmless; posting another is refused.
+func sharesEqual(a, b map[string]float64) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, va := range a {
+		vb, ok := b[k]
+		if !ok || va != vb {
+			return false
+		}
+	}
+	return true
+}
+
+// apiExamPost: POST /api/v1/admin/rounds/{id}/exam, from the organisers. Posting the exact same
+// exam (items digest and language shares) again is harmless; posting another is refused.
 func (a *App) apiExamPost(w http.ResponseWriter, r *http.Request) {
 	_, _, body, err := a.signedBy(w, r, 4*examFileMax/3+(8<<20), true, organisers)
 	if err != nil {
@@ -126,12 +140,17 @@ func (a *App) postExam(ctx context.Context, idx int, p *ExamPost) (bool, error) 
 	var already bool
 	a.st.view(func(s *State) {
 		rd := s.Rounds[idx]
-		already = rd != nil && rd.ExamSHA == p.Digest
 		if rd == nil || rd.Status != "open" {
 			err = fail(409, "%s is not open", roundID(a.season.ID, idx))
 		} else if rd.ExamSHA != "" && rd.ExamSHA != p.Digest {
 			err = fail(409, "%s already has its exam", roundID(a.season.ID, idx))
-		} else if !already {
+		} else if rd.ExamSHA == p.Digest {
+			if !sharesEqual(rd.Shares, p.Shares) {
+				err = fail(409, "%s already has its exam with different language shares", roundID(a.season.ID, idx))
+			} else {
+				already = true
+			}
+		} else {
 			_, err = a.checkHours(s, rd, p)
 		}
 	})
@@ -155,8 +174,11 @@ func (a *App) postExam(ctx context.Context, idx int, p *ExamPost) (bool, error) 
 			return fail(409, "%s changed while its exam was being kept; send it again", roundID(a.season.ID, idx))
 		}
 		if rd.ExamSHA == p.Digest {
-			// The same exam, posted twice at once: the other post was first, and the round's
-			// clock, its event and its grades' time are that one's.
+			if !sharesEqual(rd.Shares, p.Shares) {
+				return fail(409, "%s already has its exam with different language shares", roundID(a.season.ID, idx))
+			}
+			// The same exam and language shares, posted twice at once: the other post was first,
+			// and the round's clock, its event and its grades' time are that one's.
 			already = true
 			return nil
 		}
@@ -307,8 +329,21 @@ func (a *App) apiRoundCancel(w http.ResponseWriter, r *http.Request) {
 		Reason string `json:"reason"`
 		Force  bool   `json:"force"`
 	}
-	if len(body) > 0 {
-		json.Unmarshal(body, &req)
+	if trimmed := bytes.TrimSpace(body); len(trimmed) > 0 {
+		if trimmed[0] != '{' {
+			writeErr(w, fail(400, "bad cancel request: expected JSON object"))
+			return
+		}
+		dec := json.NewDecoder(bytes.NewReader(trimmed))
+		if err := dec.Decode(&req); err != nil {
+			writeErr(w, fail(400, "bad cancel request: %v", err))
+			return
+		}
+		var extra any
+		if err := dec.Decode(&extra); err != io.EOF {
+			writeErr(w, fail(400, "bad cancel request: unexpected trailing data"))
+			return
+		}
 	}
 	err = a.st.update(r.Context(), func(tx *Tx) error {
 		rd := tx.s.Rounds[idx]

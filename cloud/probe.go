@@ -87,8 +87,9 @@ func cmdProbe(ctx context.Context, f *Fleet, check string, wait time.Duration) e
 	if podMarket == "" {
 		podMarket = market
 	}
-	if err := cmdDownRental(context.WithoutCancel(ctx), f, podMarket, pod.ID); err != nil {
-		f.say("ending the probe: %v", err)
+	endErr := cmdDownRental(context.WithoutCancel(ctx), f, podMarket, pod.ID)
+	if endErr != nil {
+		f.say("ending the probe: %v", endErr)
 	}
 	switch {
 	case held:
@@ -97,6 +98,9 @@ func cmdProbe(ctx context.Context, f *Fleet, check string, wait time.Duration) e
 		f.say("the sandbox did not hold on this %s machine: its machines go on grading only", marketTitle(market))
 	default:
 		f.say("the probe said nothing more in %s", wait)
+	}
+	if endErr != nil {
+		return fmt.Errorf("ending probe %s (%s on %s): %w", handle, pod.ID, marketTitle(podMarket), endErr)
 	}
 	return nil
 }

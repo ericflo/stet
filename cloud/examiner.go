@@ -520,19 +520,20 @@ type Examiner struct {
 	hfToken string
 	onSpent func(podRecord) error
 
-	fileMu       sync.Mutex
-	recorded     map[string]bool
-	mu           sync.RWMutex
-	loaded       bool
-	dirty        bool           // true when last saveState/persistState failed so in-memory state leads disk
-	lastDisk     examinerDiskID // active identity on disk at last clean read or write
-	owner        string
-	state        examinerState
-	ready        bool
-	proxy        *httputil.ReverseProxy
-	proxyTr      *http.Transport
-	upstream     string
-	lastProbeErr string
+	fileMu         sync.Mutex
+	recorded       map[string]bool
+	mu             sync.RWMutex
+	loaded         bool
+	dirty          bool           // true when last saveState/persistState failed so in-memory state leads disk
+	diskUnreadable bool           // true when last readExaminerStateErr failed; blocks overwriting/removing examiner.json
+	lastDisk       examinerDiskID // active identity on disk at last clean read or write
+	owner          string
+	state          examinerState
+	ready          bool
+	proxy          *httputil.ReverseProxy
+	proxyTr        *http.Transport
+	upstream       string
+	lastProbeErr   string
 }
 
 func newExaminer(cfg ExaminerConfig, home string, prov ExaminerProvider, now func() time.Time, say func(string, ...any), dryRun bool) *Examiner {
@@ -634,6 +635,12 @@ func (e *Examiner) writeStateFile(st *examinerState) error {
 	}
 	e.fileMu.Lock()
 	defer e.fileMu.Unlock()
+	e.mu.RLock()
+	unreadable := e.diskUnreadable
+	e.mu.RUnlock()
+	if unreadable {
+		return errors.New("examiner.json unreadable; refusing to overwrite disk state")
+	}
 	err := writeExaminerState(e.home, st)
 	if err == nil {
 		e.mu.Lock()
@@ -650,6 +657,12 @@ func (e *Examiner) saveState(st *examinerState) error {
 	}
 	e.fileMu.Lock()
 	defer e.fileMu.Unlock()
+	e.mu.RLock()
+	unreadable := e.diskUnreadable
+	e.mu.RUnlock()
+	if unreadable {
+		return errors.New("examiner.json unreadable; refusing to overwrite disk state")
+	}
 	err := writeExaminerState(e.home, st)
 	e.mu.Lock()
 	e.dirty = err != nil
@@ -666,6 +679,12 @@ func (e *Examiner) persistState(st *examinerState) error {
 	}
 	e.fileMu.Lock()
 	defer e.fileMu.Unlock()
+	e.mu.RLock()
+	unreadable := e.diskUnreadable
+	e.mu.RUnlock()
+	if unreadable {
+		return errors.New("examiner.json unreadable; refusing to overwrite disk state")
+	}
 	var err error
 	written := st
 	if st != nil && st.InstanceID != "" {
@@ -872,20 +891,22 @@ func (e *Examiner) reloadState(tryFlush bool) error {
 		return ownerErr
 	}
 	dirty := e.dirty
+	wasUnreadable := e.diskUnreadable
 	lastDisk := e.lastDisk
 	memSt := e.cloneStateLocked()
 	e.mu.Unlock()
 
 	diskSt, stateErr := readExaminerStateErr(e.home)
-	if dirty {
-		if stateErr != nil {
-			// Disk is still broken/unreadable: preserve authoritative in-memory state for
-			// ActiveSnapshot (tryFlush=false), and report the error on Reconcile/EnforceTimeout.
-			if !tryFlush {
-				return ownerErr
-			}
-			return stateErr
+	if stateErr != nil {
+		e.mu.Lock()
+		e.diskUnreadable = true
+		e.mu.Unlock()
+		if dirty && !tryFlush {
+			return ownerErr
 		}
+		return stateErr
+	}
+	if dirty {
 		curDiskID := diskIDOf(diskSt)
 		if curDiskID != lastDisk {
 			// A peer controller genuinely moved examiner.json since our last clean sync.
@@ -911,6 +932,7 @@ func (e *Examiner) reloadState(tryFlush bool) error {
 			}
 			e.mu.Lock()
 			e.loaded = true
+			e.diskUnreadable = false
 			e.lastDisk = curDiskID
 			if !needWrite || (tryFlush && werr == nil) {
 				e.dirty = false
@@ -943,6 +965,9 @@ func (e *Examiner) reloadState(tryFlush bool) error {
 		// Disk still holds our own stale pre-failure state (no peer moved it): NEVER resurrect
 		// stale disk state into memory; keep memSt for ActiveSnapshot, and flush memSt on tryFlush.
 		if !tryFlush {
+			e.mu.Lock()
+			e.diskUnreadable = false
+			e.mu.Unlock()
 			return ownerErr
 		}
 		merged := memSt
@@ -951,26 +976,53 @@ func (e *Examiner) reloadState(tryFlush bool) error {
 			merged.Unresolved = mergeUnresolvedLists(memSt.Unresolved, diskSt.Unresolved)
 		}
 		if err := writeExaminerState(e.home, &merged); err != nil {
+			e.mu.Lock()
+			e.diskUnreadable = false
+			e.mu.Unlock()
 			return err
 		}
 		e.mu.Lock()
 		e.state = merged
 		e.lastDisk = diskIDOf(&merged)
 		e.dirty = false
+		e.diskUnreadable = false
 		e.loaded = true
 		e.mu.Unlock()
 		return ownerErr
 	}
-	if stateErr != nil {
-		return stateErr
-	}
-	e.mu.Lock()
-	e.loaded = true
 	var next examinerState
 	if diskSt != nil {
 		next = *diskSt
 	}
-	e.lastDisk = diskIDOf(diskSt)
+	var werr error
+	needFlushRecovered := false
+	if wasUnreadable && (len(memSt.PendingSpends) > 0 || len(memSt.Unresolved) > 0) {
+		var basePending []podRecord
+		var baseUnresolved []ExaminerInstance
+		if diskSt != nil {
+			basePending = diskSt.PendingSpends
+			baseUnresolved = diskSt.Unresolved
+		}
+		next.PendingSpends = mergePendingSpends(next.PendingSpends, memSt.PendingSpends)
+		next.Unresolved = mergeUnresolvedLists(next.Unresolved, memSt.Unresolved)
+		if len(next.PendingSpends) != len(basePending) || len(next.Unresolved) != len(baseUnresolved) {
+			if tryFlush && !e.dryRun {
+				werr = writeExaminerState(e.home, &next)
+				needFlushRecovered = werr != nil
+			} else if !e.dryRun {
+				needFlushRecovered = true
+			}
+		}
+	}
+	e.mu.Lock()
+	e.loaded = true
+	e.diskUnreadable = false
+	if needFlushRecovered {
+		e.dirty = true
+		e.lastDisk = diskIDOf(diskSt)
+	} else {
+		e.lastDisk = diskIDOf(&next)
+	}
 	changed := e.state.InstanceID != next.InstanceID ||
 		e.state.APIKey != next.APIKey ||
 		e.state.CertPEM != next.CertPEM
@@ -987,6 +1039,9 @@ func (e *Examiner) reloadState(tryFlush bool) error {
 	e.mu.Unlock()
 	if oldTr != nil {
 		oldTr.CloseIdleConnections()
+	}
+	if werr != nil {
+		return werr
 	}
 	return ownerErr
 }
@@ -1628,7 +1683,19 @@ func (e *Examiner) EnforceTimeout(ctx context.Context) error {
 	for i := range owned {
 		owned[i].ObservedLiveAt = now
 	}
+	if err := e.enforceOwnedTimeouts(ctx, owned, saved, now, false); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	return firstErr
+}
 
+// enforceOwnedTimeouts ends only owned examiner instances that have independently exceeded
+// --examiner-timeout (plus missing unresolved orphans and missing timed-out saved contracts),
+// leaving unexpired live instances untouched. Shared by EnforceTimeout and Reconcile's degraded
+// state-unavailable path so both enforce identical proxy teardown, missing-orphan confirmation,
+// and spend recording without ever clobbering an unreadable examiner.json on disk.
+func (e *Examiner) enforceOwnedTimeouts(ctx context.Context, owned []ExaminerInstance, saved examinerState, now time.Time, logDeferred bool) error {
+	var firstErr error
 	foundSaved := false
 	endedIDs := map[string]bool{}
 	var failedEnds []ExaminerInstance
@@ -1651,6 +1718,9 @@ func (e *Examiner) EnforceTimeout(ctx context.Context) error {
 			created = inst.Created
 		}
 		if created.IsZero() || now.Sub(created) <= e.cfg.Timeout {
+			if logDeferred {
+				e.say("examiner state unavailable; deferring stray check for live examiner GPU (machine %s) until examiner.json is readable", inst.ID)
+			}
 			continue
 		}
 		if e.dryRun {
@@ -1895,9 +1965,22 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 		return loadErr
 	}
 
-	// Case 2: needRound needs an exam. Find if our known owned instance is alive, has a pinned
-	// cert + key, and is within TTL; destroy any stopped, expired, duplicate, or orphaned owned
-	// instances. Never rent a replacement while any live owned orphan fails deletion.
+	// Case 2: needRound needs an exam.
+	// If examiner.json could not be read or flushed cleanly (loadErr != nil), defer any
+	// identity-dependent stray deletion until durable state is readable so a restarted or
+	// degraded controller never destroys the active round's examiner; independently established
+	// timeout expiry, missing-orphan confirmation, and proxy teardown still proceed.
+	if loadErr != nil {
+		if timeoutErr := e.enforceOwnedTimeouts(ctx, insts, saved, now, true); timeoutErr != nil {
+			return timeoutErr
+		}
+		e.say("not renting examiner GPU for %s: examiner state unavailable (%v)", needRound, loadErr)
+		return loadErr
+	}
+
+	// Find if our known owned instance is alive, has a pinned cert + key, and is within TTL;
+	// destroy any stopped, expired, duplicate, or orphaned owned instances. Never rent a
+	// replacement while any live owned orphan fails deletion.
 	var active *ExaminerInstance
 	var strayEndErr error
 	var failedEnds []ExaminerInstance
@@ -2066,7 +2149,7 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 		}
 		e.setUnresolved(failedEnds)
 	} else if dryRunTimedOut || (saved.InstanceID != "" && !listedIDs[saved.InstanceID]) {
-		return loadErr
+		return nil
 	}
 
 	if active != nil {
@@ -2091,7 +2174,7 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 		if spendErr != nil {
 			return spendErr
 		}
-		return loadErr
+		return nil
 	}
 
 	// Do NOT rent a replacement while an owned orphan could not be confirmed destroyed.
@@ -2106,7 +2189,7 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 		if spendErr != nil {
 			return spendErr
 		}
-		return loadErr
+		return nil
 	}
 
 	// Preserve an active pre-rental reservation across stale provider listings until either the
@@ -2119,17 +2202,13 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 			if spendErr != nil {
 				return spendErr
 			}
-			return loadErr
+			return nil
 		}
 		e.clearState()
 	} else if saved.InstanceID != "" || wasReady {
 		e.clearState()
 	}
 
-	if loadErr != nil {
-		e.say("not renting examiner GPU for %s: examiner state unavailable (%v)", needRound, loadErr)
-		return loadErr
-	}
 	if !e.dryRun && owner == "" {
 		return errors.New("examiner owner id unavailable")
 	}
@@ -2186,13 +2265,21 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 	}
 	var fitting []ExaminerOffer
 	for _, off := range offers {
+		if !validRate(off.Price) {
+			continue
+		}
 		if budget.HourlyNow+off.Price <= budget.MaxHourly+1e-9 && (e.cfg.MaxPrice <= 0 || off.Price <= e.cfg.MaxPrice+1e-9) {
 			fitting = append(fitting, off)
 		}
 	}
 	if len(fitting) == 0 {
-		e.say("not renting examiner GPU for %s: cheapest 1x RTX 5090 ($%.2f/h) plus $%.2f/h live exceeds --max-hourly $%.2f/h",
-			needRound, offers[0].Price, budget.HourlyNow, budget.MaxHourly)
+		if validRate(offers[0].Price) {
+			e.say("not renting examiner GPU for %s: cheapest 1x RTX 5090 ($%.2f/h) plus $%.2f/h live exceeds --max-hourly $%.2f/h",
+				needRound, offers[0].Price, budget.HourlyNow, budget.MaxHourly)
+		} else {
+			e.say("not renting examiner GPU for %s: no valid priced 1x RTX 5090 offers fit under --max-hourly $%.2f/h",
+				needRound, budget.MaxHourly)
+		}
 		return nil
 	}
 	if e.dryRun {

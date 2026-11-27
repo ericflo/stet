@@ -1561,6 +1561,9 @@ def cmd_verify(args):
             lock.close()
 
 
+_PRE_AMPERE_GPU_RE = re.compile(r"\b(?:V100|T4|P100|P40|P4|K80|M60|TITAN|GTX)\b|RTX\s*20\d\d|Quadro\s*(?:RTX|P|M|K|GV)", re.IGNORECASE)
+
+
 def grade_hardware_ok(season, device_type: str, backend: str | None) -> bool:
     """Whether this device and GPU backend may grade officially for `season`."""
     allowed_devices = season.raw.get("grade_devices", ["cuda"])
@@ -1577,6 +1580,59 @@ def grade_hardware_requirement(season) -> str:
     if backends == ["cuda"]:
         return "an NVIDIA (CUDA) GPU"
     return "an NVIDIA (CUDA) or AMD (ROCm) GPU"
+
+
+def _cuda_has_native_bf16(hw: dict) -> bool:
+    """Whether an NVIDIA CUDA GPU supports native bf16 Tensor Cores (Ampere SM 8.0+)."""
+    bf16 = hw.get("bf16_native")
+    if isinstance(bf16, bool):
+        return bf16
+    cap = hw.get("cuda_capability")
+    if isinstance(cap, str) and "." in cap:
+        try:
+            return int(cap.split(".", 1)[0]) >= 8
+        except ValueError:
+            pass
+    gpu_name = str(hw.get("gpu") or "")
+    if gpu_name and _PRE_AMPERE_GPU_RE.search(gpu_name):
+        return False
+    return True
+
+
+def grade_eligibility(season, hw: dict, *, device_type: str | None = None, check_vram: bool = True) -> tuple[bool, str]:
+    """Single source of truth for official grading eligibility across `stet doctor` and `stet verify`.
+
+    Verifies device type/backend, native bf16 Tensor Core support on NVIDIA CUDA (excluding
+    pre-Ampere GPUs such as Tesla T4 / V100 / RTX 20xx), and usable VRAM against
+    `runner.grade_gpu_memory_gb`. Returns `(eligible, failing_reason)`.
+    """
+    dev_type = str(device_type or hw.get("device") or "")
+    backend = hw.get("backend")
+    if not grade_hardware_ok(season, dev_type, backend):
+        need = grade_hardware_requirement(season)
+        return (
+            False,
+            f"official grading for {season.title} needs {need}, so every grade uses the same arithmetic",
+        )
+    if dev_type == "cuda" and backend != "rocm" and not _cuda_has_native_bf16(hw):
+        gpu_desc = hw.get("gpu") or "this GPU"
+        if cap := hw.get("cuda_capability"):
+            gpu_desc = f"{gpu_desc} (SM {cap})"
+        return (
+            False,
+            f"official grading for {season.title} needs an NVIDIA GPU with native bf16 support "
+            f"(Ampere / SM 8.0 or newer; {gpu_desc} lacks native bf16)",
+        )
+    min_grade_vram = float((season.raw.get("runner") or {}).get("grade_gpu_memory_gb") or 0)
+    if check_vram and min_grade_vram > 0 and dev_type == "cuda":
+        have_vram = float(hw.get("vram_gb") or 0)
+        if have_vram < min_grade_vram:
+            return (
+                False,
+                f"official grading for {season.title} needs a GPU with at least {min_grade_vram:g} GB of memory "
+                f"(this GPU reports {have_vram:.1f} GB)",
+            )
+    return True, ""
 
 
 def _verify(args, organiser: bool = False, me: dict | None = None):
@@ -1598,23 +1654,15 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
     scale = season.scale(info["scale"])
     device = pick_device(args.device)
     hw = hardware_info(device)
-    if not grade_hardware_ok(season, device.type, hw.get("backend")) and not args.any_device:
-        need = grade_hardware_requirement(season)
-        sys.stderr.write(
-            f"stet: grading for the leaderboard needs {need}, so that every grade is\n"
-            "  computed with the same arithmetic. You can still build, run and submit curators on this machine.\n"
-        )
-        sys.exit(1)
     from . import bench, env
 
     dev = os.environ.get("STET_DEV") == "1"
-    min_grade_vram = float((season.raw.get("runner") or {}).get("grade_gpu_memory_gb") or 0)
-    if min_grade_vram > 0 and device.type == "cuda" and not dev and not args.any_device:
-        have_vram = float(hw.get("vram_gb") or 0)
-        if have_vram < min_grade_vram:
+    if not args.any_device:
+        ok_hw, why_hw = grade_eligibility(season, hw, device_type=device.type, check_vram=not dev)
+        if not ok_hw:
             sys.stderr.write(
-                f"stet: grading for {season.title} needs a GPU with at least {min_grade_vram:g} GB of memory "
-                f"(this GPU reports {have_vram:.1f} GB).\n"
+                f"stet: {why_hw}.\n"
+                "  You can still build, run and submit curators on this machine.\n"
             )
             sys.exit(1)
     # Every grade is trained by the season's pinned grading stack (PyTorch, plus Transformers/safetensors for HF students).

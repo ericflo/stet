@@ -662,13 +662,19 @@ GPU scoring)*.
      Draw B controls/adversaries, all 12 DataDecide 1B recipes on brand-new shortest-row 32-lane
      dealt slices, and 2 RTX 4090 cross-card parity students) sat all 3 Inkling draws (`orig` and
      `rot`), all 34 trainable upper-half `bf16` checkpoints (`244 MB` each, `8.1 GB` total) were
-     archived, and the tables below rescore the archived student outputs on the exact `1,854`-item
-     post-filter population (of which `1/1,854` archived item—Draw 1 Telugu `infer:wikipedia:te:5029902`—produced
-     `773` context tokens including `[eot]` plus `309` answer tokens = `1,082 > 1,025`, left-truncating
-     `57` leading tokens in the student's 1,024-token window; `REASONING_FILTER_VERSION = 3` now rejects
-     any item exceeding the student tokenizer's scoring window as `student_window_overflow`).
+     archived, and the tables below rescore the archived student outputs on the `1,854`-item
+     `REASONING_FILTER_VERSION = 2` (`prompt_copies_excerpt`) population (`618 / 615 / 621`).
+     Applying the `REASONING_FILTER_VERSION = 3` student-window filter (carried forward in `v4`,
+     rejecting items where `1 + len(enc(ctx)) + len(enc(cont)) > ctx + 1` as
+     `student_window_overflow`) removes `1/1,854` archived item—Draw 1 Telugu
+     `infer:wikipedia:te:5029902` (`773` context tokens including `[eot]` plus `309` answer tokens
+     = `1,082 > 1,025`, left-truncating `57` leading tokens in the 1,024-token student window)—
+     yielding **`1,853`** items (**`618 / 615 / 620`**), leaving English DataDecide (`420` items:
+     `52/66`, `53/66`, `52/66`; pooled `53/66`, `ρ = +0.804`) and full multilingual-weighted
+     DataDecide (`25/66`, `ρ = −0.294`) unchanged and keeping 3-draw `reader_v2 − fineweb2`
+     positive on both seeds (`+0.00383` / `+0.00199`).
 
-     - **Multi-draw DataDecide 1B (3 disjoint Inkling draws under shipped filter; English subset vs. full multilingual-scored diagnostic, 2,000-resample stratified bootstrap):**
+     - **Multi-draw DataDecide 1B (3 disjoint Inkling draws; English subset vs. full multilingual-scored diagnostic, 2,000-resample stratified bootstrap):**
 
 | Shipped Inkling Draw / Scope | Items | DD 1B Pairs (`orig` / `rot`, 95% CI) | `2pt+` Pairs | Spearman `ρ` (95% CI) | `FineWeb-Edu` Rank *(true `#7`)* / `P(#1)` | Predicted Top-1 *(1B Shortfall)* |
 |---|---:|---:|---:|---:|---:|---|
@@ -676,7 +682,7 @@ GPU scoring)*.
 | Phase 9 (`s3-o00001`, EN subset) | `128` | `53/66` (`80.3%`) / `52/66` (`[49, 57]`) | `27/31` | `+0.8042` (`[+0.636, +0.895]`) | `#5/12` / `0.4%` | `dclm-baseline-qc-7p-fw2` (`+0.14pp`) |
 | Draw 1 (`s3-p00000`, EN subset) | `149` | `52/66` (`78.8%`) / `50/66` (`[49, 55]`) | `27/31` | `+0.7972` (`[+0.636, +0.825]`) | `#6/12` / `0.0%` | `dclm-baseline-qc-10p` (`+0.49pp`) |
 | **Pooled 3-Draw Mean (EN subset)** | **`420`** | **`53/66` (`80.3%`) / `49/66` (`[49, 55]`)** | **`27/31`** | **`+0.8042` (`[+0.699, +0.832]`)** | **`#6/12` / `0.0%`** | **`dclm-baseline-qc-7p-fw2` (`+0.14pp`)** |
-| **All scored reasoning (official lang weights, EN target diagnostic)** | **`1,854`** | **`25/66` (`25/66`, `26/66`, `24/66`)** | **`9/31`** | **`−0.294`** | — | `dolma1_7` `#1` *(true `#12` on EN)* |
+| **All scored reasoning (official lang weights, EN target diagnostic)** | **`1,854` (v2) / `1,853` (v3)** | **`25/66` (`25/66`, `26/66`, `24/66`)** | **`9/31`** | **`−0.294`** | — | `dolma1_7` `#1` *(true `#12` on EN)* |
 
        *Scope qualification:* the **`53/66` (`80.3%`)** DataDecide 1B agreement is measured specifically on the **English reasoning subset** (`420` items across the three draws) because DataDecide's 1B OLMES macro target is English-only. Scoring the same 12 recipes with the full official multilingual leaderboard scorer (`1,854` items under each draw's recorded crawl language weights) ranks `dolma1_7` first on every draw (`25/66`, `26/66`, `24/66`; pooled `25/66`, `9/31` `2pt+`, `ρ = −0.294` against English OLMES) because `dolma1_7` contains non-English text while most higher-ranked DataDecide recipes filter strictly to English. Validating downstream ordering of the full multilingual leaderboard requires a multilingual downstream benchmark target.
 

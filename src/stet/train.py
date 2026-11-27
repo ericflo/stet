@@ -66,6 +66,23 @@ def hardware_info(device: torch.device) -> dict:
         info["gpu"] = props.name
         info["vram_gb"] = round(props.total_memory / 2**30, 1)
         info["backend"] = device_backend(device)
+        major = getattr(props, "major", None)
+        minor = getattr(props, "minor", None)
+        if isinstance(major, int) and isinstance(minor, int):
+            info["cuda_capability"] = f"{major}.{minor}"
+        if info["backend"] == "cuda":
+            if isinstance(major, int):
+                info["bf16_native"] = major >= 8
+            else:
+                try:
+                    info["bf16_native"] = bool(torch.cuda.is_bf16_supported(including_emulation=False))
+                except TypeError:
+                    try:
+                        info["bf16_native"] = bool(torch.cuda.is_bf16_supported())
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
     return info
 
 

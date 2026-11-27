@@ -61,7 +61,7 @@ DEFAULT_MIN_KEEP_RATE = 0.50
 TEACHER_MAX_PROMPT_TOKENS = 1400
 # Bump whenever reasoning generation or post-generation filtering rules change so cached
 # synthesis artifacts from an older harness revision are automatically regenerated.
-REASONING_FILTER_VERSION = 3
+REASONING_FILTER_VERSION = 4
 
 # Sources whose text is prose/discussion/documentation suitable for natural-language reasoning.
 SKIP_LANG_PREFIXES = ("code:",)
@@ -311,6 +311,13 @@ def prompt_copies_excerpt(prompt_line: str, excerpt: str, *, max_ngram_overlap: 
     return ngram_overlap(prompt_line, excerpt, n=5) > max_ngram_overlap
 
 
+_QUESTION_MARKS = ("?", "？", "؟", "¿")
+
+
+def _has_question_mark(text: str) -> bool:
+    return any(q in text for q in _QUESTION_MARKS)
+
+
 def student_window_fits(ctx_str: str, cont: str, enc, seq_len: int) -> bool:
     """Whether `[eot] + encode_one(enc, ctx_str) + encode_one(enc, cont)` fits inside one
     student scoring window (`seq_len + 1` tokens) without left-truncating any context tokens."""
@@ -344,6 +351,8 @@ def cached_item_passes_filter(
     if "\ufffd" in pr or "\ufffd" in resp or "\ufffd" in excerpt:
         return False
     if _CONTROL_TOKEN_RE.search(pr) or _CONTROL_TOKEN_RE.search(resp):
+        return False
+    if task_type == "synthesis" and _has_question_mark(pr):
         return False
     if prompt_copies_excerpt(pr, excerpt, max_ngram_overlap=max_ngram_overlap):
         return False
@@ -825,9 +834,14 @@ def parse_generated_items_detailed(
         if not _SENTENCE_END_RE.search(resp):
             _drop("truncated_sentence", d, gen_txt, pr, resp)
             continue
-        if d["task_type"] == "synthesis" and ("?" in pr or "？" in pr or "؟" in pr):
-            # Enforce zero-question syntax on synthesis lead-ins
-            pr = pr.rstrip("?？؟").strip() + "."
+        if d["task_type"] == "synthesis" and _has_question_mark(pr):
+            # Enforce strictly declarative lead-ins on synthesis items: only a pure trailing
+            # question mark can be converted cleanly; any interior question mark is rejected.
+            cand = pr.rstrip("?？؟").strip()
+            if not cand or _has_question_mark(cand):
+                _drop("synthesis_question", d, gen_txt, pr, resp)
+                continue
+            pr = cand if cand.endswith((".", "。", "۔", "।")) else cand + "."
         excerpt = d.get("excerpt") or bound_excerpt(d["text"])
         if check_lang:
             if not _prompt_matches_language(pr, excerpt, d["lang"]):

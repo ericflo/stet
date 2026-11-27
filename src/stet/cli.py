@@ -1015,12 +1015,13 @@ def cmd_doctor(args):
             rows.append((WARN, "gpu", f"this machine has {maker} GPU, but this PyTorch build ({torch.__version__}) cannot use it; training will run on {dev.type}.\n" + TORCH_HELP))
         else:
             rows.append((WARN, "gpu", f"no CUDA or ROCm GPU; training will run on {dev.type} (fine for --scale nano)"))
-        from .client import grade_hardware_ok, grade_hardware_requirement
+        from .client import grade_eligibility
 
-        if grade_hardware_ok(season, dev.type, hw.get("backend")):
+        ok_hw, why_hw = grade_eligibility(season, hw, device_type=dev.type)
+        if ok_hw:
             rows.append((OK, "verify", "this machine can grade for the leaderboard: `stet verify`"))
         else:
-            rows.append((WARN, "verify", f"official grading needs {grade_hardware_requirement(season)}, so every grade uses the same arithmetic"))
+            rows.append((WARN, "verify", why_hw))
     except ImportError:
         rows.append((WARN, "torch", "not installed: `stet run` and `stet verify` need it.\n" + TORCH_HELP))
     ok, why = bwrap_available() if sys.platform == "linux" else (False, "")

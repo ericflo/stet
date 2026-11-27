@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
@@ -1134,6 +1135,127 @@ func TestOverlappingExamPostsWithDifferentDerivedFilesPreserveWinner(t *testing.
 	resp.Body.Close()
 	if resp.StatusCode != 200 || string(gotPub) != string(publicA) {
 		t.Fatalf("settled public download corrupted by losing post: HTTP %d got=%q want=%q", resp.StatusCode, string(gotPub), string(publicA))
+	}
+	w.check()
+}
+
+// Review 18 P2 #4: posting an exam with the SAME items_digest but DIFFERENT language shares MUST
+// be rejected with HTTP 409 (keeping the accepted round shares untouched), while re-posting the
+// exact same items_digest AND identical language shares remains idempotent (HTTP 200, posted=false).
+func TestReview18DuplicateExamPostWithDifferentSharesRejected409(t *testing.T) {
+	pub, priv := newKey()
+	w := newWorld(t, pub)
+	anchor := w.join("anchor-one", priv)
+	w.submit(w.join("alice", nil), "tidy", "print('v1')")
+	idx := w.drawWithoutExam()
+	rid := roundID(w.app.season.ID, idx)
+
+	post1 := testExam(testTable())
+	post1["languages"] = map[string]float64{"en": 60.0, "fr": 40.0}
+	var out1 struct {
+		OK     bool `json:"ok"`
+		Posted bool `json:"posted"`
+	}
+	if code := anchor.do("POST", "/api/v1/admin/rounds/"+rid+"/exam", post1, &out1); code != 200 || !out1.Posted {
+		t.Fatalf("first exam post: HTTP %d out=%+v", code, out1)
+	}
+
+	// Retry with identical items_digest and identical language shares -> HTTP 200, posted=false.
+	var outSame struct {
+		OK     bool `json:"ok"`
+		Posted bool `json:"posted"`
+	}
+	if code := anchor.do("POST", "/api/v1/admin/rounds/"+rid+"/exam", post1, &outSame); code != 200 || outSame.Posted {
+		t.Fatalf("identical retry: HTTP %d out=%+v, want 200 posted=false", code, outSame)
+	}
+
+	// Retry with identical items_digest but DIFFERENT language shares -> HTTP 409!
+	postDiff := testExam(testTable())
+	postDiff["languages"] = map[string]float64{"en": 55.0, "fr": 45.0}
+	if code := anchor.do("POST", "/api/v1/admin/rounds/"+rid+"/exam", postDiff, nil); code != 409 {
+		t.Fatalf("duplicate items with different language shares: HTTP %d, want 409", code)
+	}
+
+	// Accepted shares on the round must remain 60/40.
+	w.app.st.view(func(s *State) {
+		rd := s.Rounds[idx]
+		if rd.Shares["en"] != 60.0 || rd.Shares["fr"] != 40.0 {
+			t.Fatalf("round shares mutated: %+v", rd.Shares)
+		}
+	})
+	w.check()
+}
+
+// Review 18 P2 #7: POST /api/v1/admin/rounds/{id}/cancel MUST reject malformed or partially decoded
+// non-empty JSON bodies with HTTP 400 before mutating state (e.g. {"force":true,"reason":123}),
+// while continuing to accept an empty body for unexamined rounds.
+func TestReview18CancelRejectsMalformedNonEmptyBodyAndKeepsEmptyBody(t *testing.T) {
+	pub, priv := newKey()
+	w := newWorld(t, pub)
+	anchor := w.join("anchor-one", priv)
+	w.submit(w.join("alice", nil), "tidy", "print('v1')")
+	idx := w.draw() // already examined!
+	rid := roundID(w.app.season.ID, idx)
+
+	// 1. Partially decodable JSON where force=true decodes before reason=123 type mismatch -> HTTP 400, round stays open!
+	if code := anchor.do("POST", "/api/v1/admin/rounds/"+rid+"/cancel", map[string]any{"force": true, "reason": 123}, nil); code != 400 {
+		t.Fatalf("cancel with numeric reason: HTTP %d, want 400", code)
+	}
+	w.app.st.view(func(s *State) {
+		if s.Rounds[idx].Status != "open" {
+			t.Fatalf("malformed cancel body MUST NOT cancel round! status=%q", s.Rounds[idx].Status)
+		}
+		if s.inRound[idx][0].Void {
+			t.Fatalf("malformed cancel body MUST NOT void entry!")
+		}
+	})
+
+	sendRaw := func(path string, body []byte) int {
+		t.Helper()
+		var rdr io.Reader
+		if body != nil {
+			rdr = bytes.NewReader(body)
+		}
+		req, err := http.NewRequest("POST", w.srv.URL+path, rdr)
+		if err != nil {
+			t.Fatalf("new request: %v", err)
+		}
+		ts := strconv.FormatInt(time.Now().Unix(), 10)
+		sum := sha256.Sum256(body)
+		msg := strings.Join([]string{"stet-v1", "POST", path, ts, hex.EncodeToString(sum[:])}, "\n")
+		req.Header.Set("X-Stet-Key", anchor.pub)
+		req.Header.Set("X-Stet-Body", hex.EncodeToString(sum[:]))
+		req.Header.Set("X-Stet-Time", ts)
+		req.Header.Set("X-Stet-Sig", hex.EncodeToString(ed25519.Sign(anchor.priv, []byte(msg))))
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("send %s: %v", path, err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	// 2. Valid JSON object followed by trailing garbage or non-object JSON (`null`) -> HTTP 400!
+	if code := sendRaw("/api/v1/admin/rounds/"+rid+"/cancel", []byte(`{"force":true,"reason":"ok"} trailing`)); code != 400 {
+		t.Fatalf("cancel with trailing data: HTTP %d, want 400", code)
+	}
+	if code := sendRaw("/api/v1/admin/rounds/"+rid+"/cancel", []byte(`null`)); code != 400 {
+		t.Fatalf("cancel with JSON null: HTTP %d, want 400", code)
+	}
+	w.app.st.view(func(s *State) {
+		if s.Rounds[idx].Status != "open" {
+			t.Fatalf("trailing-data cancel MUST NOT cancel round! status=%q", s.Rounds[idx].Status)
+		}
+	})
+
+	// 3. Valid force cancel succeeds; then an unexamined round with empty body still cancels with HTTP 200.
+	if code := anchor.do("POST", "/api/v1/admin/rounds/"+rid+"/cancel", map[string]any{"force": true, "reason": "clean"}, nil); code != 200 {
+		t.Fatalf("valid force cancel: HTTP %d, want 200", code)
+	}
+	idx2 := w.drawWithoutExam()
+	rid2 := roundID(w.app.season.ID, idx2)
+	if code := sendRaw("/api/v1/admin/rounds/"+rid2+"/cancel", nil); code != 200 {
+		t.Fatalf("empty-body cancel on unexamined round: HTTP %d, want 200", code)
 	}
 	w.check()
 }

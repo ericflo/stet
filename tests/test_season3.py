@@ -4445,3 +4445,244 @@ def test_review17_student_window_overflow_rejected_in_synthesis_and_cache():
     assert reason.cached_item_passes_filter(both[1], student_window=(enc, 400)) is False
 
 
+def test_review18_duplicate_items_different_shares_never_clobbers_accepted_shares(monkeypatch, tmp_path):
+    """Review 18 P2 #4: staging MUST key by `(items_digest, shares_digest)`, a duplicate post
+    (`posted=False` or HTTP 409) MUST NOT overwrite accepted `KEPT_LANGUAGES`, and
+    `stages.whole_exam()` MUST honor authoritative `server_shares` and refuse ambiguous
+    multi-share candidate dirs when server shares are omitted."""
+    import base64
+
+    from stet.exam import examine, stages
+    from stet.exam.farm import pack_items
+    from stet.spec import official_round
+
+    monkeypatch.setenv("STET_CACHE", str(tmp_path))
+    s3 = load_season("s3")
+    scale = s3.scale("nano")
+    rnd = official_round(
+        s3,
+        19,
+        {"round": 123457, "randomness": "cd" * 32},
+        {"crawl": "CC-MAIN-2026-43", "paths_sha256": "ef" * 32, "n_shards": 100000},
+    )
+
+    items = [Item(kind="answer", corner="explain/en/wiki", fmt="prose", lang="en", source="explain:wikipedia:en:100", ctx="Ctx A", cont=" Ans A")]
+    digest = data.exam_digest(items)
+    blob = base64.b64encode(pack_items(items)).decode()
+    exam_first = {"round": rnd.id, "items_digest": digest, "items_file": blob, "languages": {"en": 60.0, "fr": 40.0}, "table": [{"id": items[0].id}]}
+    exam_retry = {"round": rnd.id, "items_digest": digest, "items_file": blob, "languages": {"en": 55.0, "fr": 45.0}, "table": [{"id": items[0].id}]}
+
+    work = tmp_path / "examine" / rnd.id
+    built = iter([exam_first, exam_retry])
+    monkeypatch.setattr(examine, "build", lambda *a, **kw: next(built))
+    posts = iter([{"ok": True, "posted": True}, {"ok": True, "posted": False}])
+    monkeypatch.setattr(examine, "post", lambda *a, **kw: next(posts))
+
+    examine.examine(rnd, scale, [], work, key=None, log=lambda *a: None)
+    examine.examine(rnd, scale, [], work, key=None, log=lambda *a: None)
+
+    # Distinct candidate directories for the two share maps, while KEPT_LANGUAGES retains winner (60/40).
+    d1 = examine.candidate_dir(work, digest, examine.shares_digest(exam_first["languages"]))
+    d2 = examine.candidate_dir(work, digest, examine.shares_digest(exam_retry["languages"]))
+    assert d1 != d2 and d1.is_dir() and d2.is_dir()
+    assert json.loads((work / examine.KEPT_LANGUAGES).read_text()) == {"en": 60.0, "fr": 40.0}
+
+    rnd_settled = dataclasses.replace(rnd, exam_digest=digest)
+    got_items, got_shares = stages.whole_exam(rnd_settled, tmp_path / "w1")
+    assert got_items == items and got_shares == {"en": 60.0, "fr": 40.0}
+
+    # If KEPT_ITEMS is removed while two conflicting share candidates exist, whole_exam MUST
+    # fail cleanly unless authoritative server_shares are passed.
+    (work / examine.KEPT_ITEMS).unlink()
+    with pytest.raises(stages.Stop, match="multiple candidate language shares"):
+        stages.whole_exam(rnd_settled, tmp_path / "w2")
+
+    got_items2, got_shares2 = stages.whole_exam(rnd_settled, tmp_path / "w3", server_shares={"en": 60, "fr": 40})
+    assert got_items2 == items and got_shares2 == {"en": 60, "fr": 40}
+    assert examine.shares_digest({"en": 60, "fr": 40}) == examine.shares_digest({"en": 60.0, "fr": 40.0})
+
+    # Passing --shares alone (without --items) also resolves the ambiguous multi-share directory!
+    shares_only = tmp_path / "explicit_shares.json"
+    shares_only.write_text(json.dumps({"en": 60.0, "fr": 40.0}))
+    got_items3, got_shares3 = stages.whole_exam(rnd_settled, tmp_path / "w4", shares_file=shares_only)
+    assert got_items3 == items and got_shares3 == {"en": 60.0, "fr": 40.0}
+
+
+def test_review18_official_tokenizer_failure_raises_retryable_error(monkeypatch, tmp_path):
+    """Review 18 P2 #5: on official builds for a season with a pinned student tokenizer, failing to
+    load that tokenizer MUST raise a retryable `RuntimeError` (not `FatalExamError` and not
+    silently setting `student_window=None`) so overflowing items can never slip into the exam."""
+    from stet import tok
+    from stet.exam import examine
+    from stet.exam.fresh import langs, reason
+    from stet.spec import official_round
+
+    monkeypatch.setenv("STET_CACHE", str(tmp_path))
+    s3 = load_season("s3")
+    scale = s3.scale("nano")
+    rnd = official_round(
+        s3,
+        20,
+        {"round": 123458, "randomness": "ef" * 32},
+        {"crawl": "CC-MAIN-2026-43", "paths_sha256": "11" * 32, "n_shards": 100000},
+    )
+
+    monkeypatch.setattr(tok, "load_encoding", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("tokenizer checksum mismatch")))
+    monkeypatch.setattr(data, "corpus", lambda *a, **k: types.SimpleNamespace(total_bytes=0, meta={}, __len__=lambda self: 0))
+    monkeypatch.setattr(langs, "shares", lambda *a, **k: {"en": 100.0})
+
+    snap = tmp_path / "1700000000.jsonl"
+    snap.write_text(
+        json.dumps(
+            {
+                "source": "wikipedia",
+                "id": "en:99",
+                "lang": "en",
+                "title": "Test",
+                "url": "https://en.wikipedia.org/wiki/Test",
+                "license": "CC BY-SA 4.0",
+                "published": 1700000000,
+                "text": "Enough prose to qualify as a document. " * 40,
+            }
+        )
+        + "\n"
+    )
+    with pytest.raises(RuntimeError, match="pinned student tokenizer") as exc_info:
+        examine.assemble(rnd, scale, [(1700000000, snap)], tmp_path / "work", log=lambda *a: None)
+    assert not isinstance(exc_info.value, reason.FatalExamError)
+
+
+def test_review18_doctor_and_verify_agree_on_vram_and_native_bf16(monkeypatch, tmp_path, capsys):
+    """Review 18 P2 #6: `stet doctor` and `stet verify` MUST share `grade_eligibility()` so both
+    reject under-VRAM GPUs (e.g. 8 GB RTX 3070) and pre-Ampere GPUs lacking native bf16 (e.g.
+    16 GB Tesla T4 SM 7.5), while accepting 12 GB+ Ampere/Ada/Blackwell GPUs."""
+    from stet import bench, cli, client, env, runner
+
+    s3 = load_season("s3")
+    cases = [
+        (
+            {"device": "cuda", "backend": "cuda", "gpu": "NVIDIA GeForce RTX 3070", "vram_gb": 8.0, "cuda_capability": "8.6", "bf16_native": True},
+            False,
+            "11 GB",
+        ),
+        (
+            {"device": "cuda", "backend": "cuda", "gpu": "Tesla T4", "vram_gb": 16.0, "cuda_capability": "7.5", "bf16_native": False},
+            False,
+            "native bf16",
+        ),
+        (
+            {"device": "cuda", "backend": "cuda", "gpu": "NVIDIA Tesla T4", "vram_gb": 16.0},
+            False,
+            "native bf16",
+        ),
+        (
+            {"device": "cuda", "backend": "cuda", "gpu": "NVIDIA GeForce RTX 3060", "vram_gb": 12.0, "cuda_capability": "8.6", "bf16_native": True},
+            True,
+            "",
+        ),
+        (
+            {"device": "cuda", "backend": "cuda", "gpu": "NVIDIA GeForce RTX 4090", "vram_gb": 24.0, "cuda_capability": "8.9", "bf16_native": True},
+            True,
+            "",
+        ),
+    ]
+    for hw, want_ok, want_sub in cases:
+        ok, why = client.grade_eligibility(s3, hw)
+        assert ok is want_ok, f"grade_eligibility({hw}) -> ({ok}, {why!r}), want {want_ok}"
+        if want_sub:
+            assert want_sub in why, f"expected {want_sub!r} in {why!r}"
+
+    # Verify cmd_doctor and _verify both reject 8 GB RTX 3070 and 16 GB Tesla T4.
+    monkeypatch.setenv("STET_CACHE", str(tmp_path))
+    monkeypatch.delenv("STET_DEV", raising=False)
+    for bad_hw, expect_msg in [
+        ({"device": "cuda", "backend": "cuda", "gpu": "NVIDIA GeForce RTX 3070", "vram_gb": 8.0, "cuda_capability": "8.6", "bf16_native": True}, "11 GB"),
+        ({"device": "cuda", "backend": "cuda", "gpu": "Tesla T4", "vram_gb": 16.0, "cuda_capability": "7.5", "bf16_native": False}, "native bf16"),
+    ]:
+        # _verify path
+        fake_train = types.SimpleNamespace(
+            pick_device=lambda d=None: types.SimpleNamespace(type="cuda"),
+            hardware_info=lambda d, hw=bad_hw: hw,
+        )
+        monkeypatch.setitem(sys.modules, "stet.train", fake_train)
+        monkeypatch.setattr(client, "need_key", lambda: types.SimpleNamespace(public_hex="0" * 64))
+        monkeypatch.setattr(client, "request", lambda method, path, *a, **kw: {"season": "s3", "scale": "standard"})
+        capsys.readouterr()
+        args = types.SimpleNamespace(season="s3", device="cuda", any_device=False, upgrade=False)
+        with pytest.raises(SystemExit) as se:
+            client._verify(args)
+        assert se.value.code == 1
+        assert expect_msg in capsys.readouterr().err
+
+        # cmd_doctor path: mock minimal torch + train so doctor runs cleanly even without Torch installed
+        fake_torch = types.SimpleNamespace(
+            __version__="2.9.1+cu128",
+            cuda=types.SimpleNamespace(is_available=lambda: True, get_device_name=lambda i, g=bad_hw["gpu"]: g),
+        )
+        monkeypatch.setitem(sys.modules, "torch", fake_torch)
+        monkeypatch.setattr("stet.spec.load_season", lambda name=None: s3)
+        monkeypatch.setattr(runner, "bwrap_available", lambda: (True, "/usr/bin/bwrap"))
+        monkeypatch.setattr(runner, "scope_available", lambda: (True, ""))
+        monkeypatch.setattr(env, "problems", lambda *a, **k: [])
+        monkeypatch.setattr(env, "summary", lambda *a, **k: "ok")
+        monkeypatch.setattr(bench, "load_cached", lambda *a, **k: None, raising=False)
+        capsys.readouterr()
+        with pytest.raises(SystemExit) as doc_se:
+            cli.cmd_doctor(types.SimpleNamespace(json=False, quiet=False))
+        assert doc_se.value.code == 0
+        cap = capsys.readouterr()
+        doc_out = cap.out + cap.err
+        assert "this machine can grade for the leaderboard" not in doc_out
+        assert expect_msg in doc_out
+
+
+def test_review18_synthesis_rejects_interior_question_in_parser_and_cache():
+    """Review 18 P3 #8: synthesis prompts containing an interior question mark (e.g.
+    'What changed? Describe the consequences.') MUST be dropped as `synthesis_question` in
+    `parse_generated_items_detailed` and rejected by `cached_item_passes_filter`, while a pure
+    trailing '?' normalizes cleanly without producing a double period."""
+    from stet.exam.fresh import reason
+
+    assert reason.REASONING_FILTER_VERSION >= 4
+    ex = "Coastal marsh restoration alters tidal drainage channels and modifies local carbon burial rates over multi-decade intervals."
+    resp = "Restored tidal drainage reconnects marsh flats to marine sediment supply, accelerating vertical accretion and stabilizing buried organic carbon against erosion."
+    selected = [
+        {"source": "wikipedia", "id": "en:10", "lang": "en", "text": ex, "excerpt": ex, "task_type": "synthesis", "wrapper_id": 2},
+        {"source": "wikipedia", "id": "es:13", "lang": "es", "text": ex, "excerpt": ex, "task_type": "synthesis", "wrapper_id": 2},
+        {"source": "wikipedia", "id": "en:11", "lang": "en", "text": ex, "excerpt": ex, "task_type": "synthesis", "wrapper_id": 2},
+        {"source": "wikipedia", "id": "en:12", "lang": "en", "text": ex, "excerpt": ex, "task_type": "synthesis", "wrapper_id": 2},
+    ]
+    gens = [
+        f"What changed? Describe the ecological consequences.\nRESPONSE: {resp}",
+        f"¿Qué explica este mecanismo de restauración?\nRESPONSE: {resp}",
+        f"Summarize the primary mechanism governing marsh stability?\nRESPONSE: {resp}",
+        f"Outline the long-term carbon balance trade-off.?\nRESPONSE: {resp}",
+    ]
+    items, dropped, records = reason.parse_generated_items_detailed(selected, gens, check_lang=False)
+    assert dropped == {"synthesis_question": 2}
+    assert {r["id"] for r in records} == {"en:10", "es:13"}
+    assert all(r["reason"] == "synthesis_question" for r in records)
+    assert len(items) == 2
+    assert items[0].source == "synthesis:wikipedia:en:11"
+    assert items[0].prompt == "Summarize the primary mechanism governing marsh stability."
+    assert "?" not in items[0].prompt
+    assert items[1].source == "synthesis:wikipedia:en:12"
+    assert items[1].prompt == "Outline the long-term carbon balance trade-off."
+    assert not items[1].prompt.endswith("..")
+
+    # cached_item_passes_filter must also reject a previously cached synthesis item with an interior '?'.
+    bad_cached = Item(
+        kind="answer",
+        corner="synthesis/en/wiki",
+        fmt="prose",
+        lang="en",
+        source="synthesis:wikipedia:en:99",
+        ctx=reason.wrap_prompt(ex, "What changed? Describe the ecological consequences.", "synthesis", 2),
+        cont=" " + resp,
+        prompt="What changed? Describe the ecological consequences.",
+        wrapper_id=2,
+    )
+    assert reason.cached_item_passes_filter(bad_cached) is False
+    assert reason.cached_item_passes_filter(items[0]) is True
+
+

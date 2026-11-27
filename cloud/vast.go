@@ -356,14 +356,21 @@ func (m *vastMarket) ExaminerOffers(ctx context.Context, maxPrice float64) ([]Ex
 				continue
 			}
 			price := o.DPHTotal
-			if o.DPHBase > 0 && o.StorageCost > 0 {
+			if !validRate(price) {
+				price = 0
+			}
+			if validRate(o.DPHBase) && !math.IsNaN(o.StorageCost) && !math.IsInf(o.StorageCost, 0) && o.StorageCost >= 0 {
 				full := o.DPHBase + float64(examinerDiskGB)*o.StorageCost/720.0
 				if full > price {
 					price = full
 				}
 			}
-			if price <= 0 {
-				price = o.DPHBase
+			if !validRate(price) {
+				if validRate(o.DPHBase) {
+					price = o.DPHBase
+				} else {
+					continue
+				}
 			}
 			if maxPrice > 0 && price > maxPrice+1e-9 {
 				continue
