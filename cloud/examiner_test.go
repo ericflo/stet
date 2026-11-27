@@ -1908,3 +1908,353 @@ func TestExaminerMissingProviderRateFallsBackToSavedAndKeepsUnknownPending(t *te
 		}
 	})
 }
+
+// Review 15 P1 #2: when RentExaminer times out after creating a contract on Vast and the next
+// provider listing (15s later) temporarily omits the instance (eventual consistency), Reconcile
+// must keep PendingRent, ReservedLabel, and its $0.62/h budget slot across stale listings rather
+// than clearing state and renting a second paid GPU; once the delayed instance appears, it must
+// be adopted cleanly so only 1 GPU at $0.62/h ever exists. Confirmed 4xx rejections release the
+// reservation immediately, and expiry past examinerPendingRentGrace allows retrying.
+func TestPendingRentSurvivesStaleListingAndPreventsDoubleRental(t *testing.T) {
+	t.Run("stale_empty_list_between_timeout_and_visibility_prevents_second_rental", func(t *testing.T) {
+		clk := newTestClock(time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC))
+		home := t.TempDir()
+		op, _ := newKey("op")
+		k1, _ := newKey("stet-rp-01")
+		stetSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/api/v1/admin/work":
+				_ = json.NewEncoder(w).Encode(Work{
+					Rounds: []WorkRound{{ID: "s3-o00035", Entries: 1, RunsWanted: 1, ExamAt: 0}},
+				})
+			case "/api/v1/season":
+				_ = json.NewEncoder(w).Encode(map[string]any{"site": "https://example.invalid"})
+			case "/api/v1/admin/workers":
+				_ = json.NewEncoder(w).Encode(map[string]any{"workers": []any{}})
+			case "/api/v1/accounts":
+				_ = json.NewEncoder(w).Encode(map[string]any{"account": map[string]any{"anchor": true, "worker": true}})
+			default:
+				_ = json.NewEncoder(w).Encode(map[string]any{})
+			}
+		}))
+		defer stetSrv.Close()
+
+		// Simulate RentExaminer timing out AFTER Vast actually accepted creation under l.Label.
+		exProv := &fakeExaminerProv{
+			offers:  []ExaminerOffer{{ID: "off-5090", Card: "RTX 5090", Price: 0.62}},
+			failIDs: map[string]error{"off-5090": errors.New("context deadline exceeded")},
+		}
+		ex := newExaminer(ExaminerConfig{Addr: "127.0.0.1:0", Timeout: 45 * time.Minute, MaxPrice: 1.50}, home, exProv, clk.Now, nil, false)
+		wm := &stubWorkerMarket{
+			name:   "runpod",
+			offers: []Offer{{Market: "runpod", ID: "gpu-57", Card: "RTX 4090", Model: "NVIDIA GeForce RTX 4090", Maker: "NVIDIA", Price: 0.57, MemoryGB: 24, Trust: "secure"}},
+		}
+		openWork := &Work{Rounds: []WorkRound{{ID: "s3-o00035", Entries: 1, RunsWanted: 1, ExamAt: 0}}}
+
+		// Poll 1 (T0): RentExaminer times out -> PendingRent reservation written & kept!
+		if err := ex.Reconcile(context.Background(), openWork, ExaminerBudget{MaxWorkers: 1, MaxHourly: 0.70}); err == nil {
+			t.Fatalf("expected timeout error from Poll 1 RentExaminer")
+		}
+		st1 := readExaminerState(home)
+		if st1 == nil || !st1.PendingRent || st1.ReservedLabel == "" {
+			t.Fatalf("expected PendingRent persisted after timeout, got %+v", st1)
+		}
+		origLabel := st1.ReservedLabel
+
+		// Clear failIDs so IF Reconcile erroneously tries to rent a 2nd time, it WOULD create a 2nd VM!
+		exProv.mu.Lock()
+		delete(exProv.failIDs, "off-5090")
+		exProv.mu.Unlock()
+
+		// Poll 2 (T0 + 15s): provider listing succeeds but is STALE (returns empty []).
+		// Reconcile MUST keep PendingRent, original ReservedLabel, and $0.62/h budget charge,
+		// and MUST NOT rent a second GPU or allow cmdUp/tick to rent a worker!
+		clk.Advance(15 * time.Second)
+		if err := ex.Reconcile(context.Background(), openWork, ExaminerBudget{MaxWorkers: 1, MaxHourly: 0.70}); err != nil {
+			t.Fatalf("Poll 2 stale list should wait cleanly without error: %v", err)
+		}
+		if len(exProv.rented) != 0 {
+			t.Fatalf("stale empty listing triggered a second paid rental! rented=%d", len(exProv.rented))
+		}
+		st2 := readExaminerState(home)
+		if st2 == nil || !st2.PendingRent || st2.ReservedLabel != origLabel || st2.Price != 0.62 {
+			t.Fatalf("expected original PendingRent reservation preserved across stale list, got %+v", st2)
+		}
+		if live, hourly, _, err := ex.ActiveSnapshot(clk.Now()); err != nil || live != 1 || hourly < 0.619 || hourly > 0.621 {
+			t.Fatalf("ActiveSnapshot during stale-list grace: live=%d hourly=%.2f err=%v, want 1/$0.62", live, hourly, err)
+		}
+		fUp := &Fleet{
+			o: &Options{
+				Home: home, Every: time.Minute, Cloud: "secure", Idle: 20,
+				MinCuratorGPUMemory: 24, MinGPUMemory: 12,
+				Policy: Policy{MaxWorkers: 1, MaxHourly: 0.70, Edits: true, PerWorker: 6},
+			},
+			st: newStet(stetSrv.URL), op: op, out: io.Discard,
+			now: clk.Now, fixed: true, markets: []Market{wm}, keys: []*Key{k1}, examiner: nil,
+		}
+		if err := cmdUp(context.Background(), fUp, 1); err != nil {
+			t.Fatalf("cmdUp during stale-list grace: %v", err)
+		}
+		if len(wm.rentals) != 0 {
+			t.Fatalf("cmdUp exceeded --max 1 / $0.70/h during PendingRent grace: workers=%d", len(wm.rentals))
+		}
+
+		// Poll 3 (T0 + 30s): delayed VM finally becomes visible under origLabel -> adopted cleanly!
+		clk.Advance(15 * time.Second)
+		exProv.mu.Lock()
+		exProv.insts = map[string]ExaminerInstance{
+			"ex-first": {ID: "ex-first", Label: origLabel, State: "starting", Price: 0.62, Created: clk.Now().Add(-30 * time.Second)},
+		}
+		exProv.mu.Unlock()
+		if err := ex.Reconcile(context.Background(), openWork, ExaminerBudget{MaxWorkers: 1, MaxHourly: 0.70}); err != nil {
+			t.Fatalf("Poll 3 adoption: %v", err)
+		}
+		if len(exProv.insts) != 1 || len(exProv.rented) != 0 || len(exProv.ended) != 0 {
+			t.Fatalf("want exactly 1 adopted instance (0 extra rents, 0 ended): insts=%d rented=%d ended=%d",
+				len(exProv.insts), len(exProv.rented), len(exProv.ended))
+		}
+		st3 := readExaminerState(home)
+		if st3 == nil || st3.InstanceID != "ex-first" || st3.PendingRent {
+			t.Fatalf("expected adopted ex-first with PendingRent=false, got %+v", st3)
+		}
+	})
+
+	t.Run("confirmed_rejection_clears_immediately_and_grace_expiry_allows_retry", func(t *testing.T) {
+		clk := newTestClock(time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC))
+		openWork := &Work{Rounds: []WorkRound{{ID: "s3-o00036", Entries: 1, ExamAt: 0}}}
+
+		// 1. Confirmed provider rejection (errRentRejected) clears PendingRent immediately.
+		homeRej := t.TempDir()
+		provRej := &fakeExaminerProv{
+			offers:  []ExaminerOffer{{ID: "off-5090", Card: "RTX 5090", Price: 0.62}},
+			failIDs: map[string]error{"off-5090": errors.Join(errRentRejected, errors.New("400 bad request"))},
+		}
+		exRej := newExaminer(ExaminerConfig{Addr: "127.0.0.1:0", Timeout: 45 * time.Minute, MaxPrice: 1.50}, homeRej, provRej, clk.Now, nil, false)
+		if err := exRej.Reconcile(context.Background(), openWork, ExaminerBudget{MaxWorkers: 1, MaxHourly: 0.70}); err == nil {
+			t.Fatalf("expected error on confirmed rejection")
+		}
+		if st := readExaminerState(homeRej); st != nil {
+			t.Fatalf("confirmed errRentRejected must clear PendingRent immediately, got %+v", st)
+		}
+
+		// 2. Ambiguous timeout that genuinely never created a VM expires cleanly past examinerPendingRentGrace.
+		homeExp := t.TempDir()
+		provExp := &fakeExaminerProv{
+			offers:  []ExaminerOffer{{ID: "off-5090", Card: "RTX 5090", Price: 0.62}},
+			failIDs: map[string]error{"off-5090": errors.New("504 Gateway Timeout")},
+		}
+		exExp := newExaminer(ExaminerConfig{Addr: "127.0.0.1:0", Timeout: 45 * time.Minute, MaxPrice: 1.50}, homeExp, provExp, clk.Now, nil, false)
+		if err := exExp.Reconcile(context.Background(), openWork, ExaminerBudget{MaxWorkers: 1, MaxHourly: 0.70}); err == nil {
+			t.Fatalf("expected 504 error")
+		}
+		provExp.mu.Lock()
+		delete(provExp.failIDs, "off-5090")
+		provExp.mu.Unlock()
+		clk.Advance(examinerPendingRentGrace + time.Second)
+		if err := exExp.Reconcile(context.Background(), openWork, ExaminerBudget{MaxWorkers: 1, MaxHourly: 0.70}); err != nil {
+			t.Fatalf("retry after PendingRent grace expired: %v", err)
+		}
+		if len(provExp.rented) != 1 || len(provExp.insts) != 1 {
+			t.Fatalf("expected clean retry rental once reconciliation window expired: rented=%d insts=%d", len(provExp.rented), len(provExp.insts))
+		}
+	})
+
+	t.Run("failed_end_on_materialized_pending_rent_dedups_and_clears_on_vanish", func(t *testing.T) {
+		clk := newTestClock(time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC))
+		home := t.TempDir()
+		owner := loadOrCreateExaminerOwner(home)
+		lbl := examinerLabelPrefix + "-" + owner + "-s3-o00039-cafebabe"
+		if err := writeExaminerState(home, &examinerState{
+			PendingRent:   true,
+			ReservedLabel: lbl,
+			RoundID:       "s3-o00039",
+			APIKey:        "k-mat",
+			CertPEM:       "dummy-cert",
+			Price:         0.62,
+			Created:       clk.Now().Add(-30 * time.Second),
+		}); err != nil {
+			t.Fatalf("writeExaminerState: %v", err)
+		}
+		prov := &fakeExaminerProv{
+			offers: []ExaminerOffer{{ID: "off-5090", Card: "RTX 5090", Price: 0.62}},
+			insts: map[string]ExaminerInstance{
+				"ex-mat": {ID: "ex-mat", Label: lbl, State: "stopped", Price: 0.62, Created: clk.Now().Add(-30 * time.Second)},
+			},
+			endErr: map[string]error{"ex-mat": errors.New("Vast 503")},
+		}
+		ex := newExaminer(ExaminerConfig{Addr: "127.0.0.1:0", Timeout: 45 * time.Minute, MaxPrice: 1.50}, home, prov, clk.Now, nil, false)
+		ex.onSpent = func(rec podRecord) error { return appendExaminerSpend(filepath.Join(home, "spent.jsonl"), rec) }
+
+		// Case 2 sees stopped VM matching ReservedLabel; EndExaminer fails -> promotes to InstanceID
+		// so both memory and disk snapshots count exact 1x GPU ($0.62/h), NOT 2x ($1.24/h)!
+		openWork := &Work{Rounds: []WorkRound{{ID: "s3-o00039", Entries: 1, ExamAt: 0}}}
+		if err := ex.Reconcile(context.Background(), openWork, ExaminerBudget{MaxWorkers: 1, MaxHourly: 0.70}); err == nil {
+			t.Fatalf("expected EndExaminer failure on stopped materialized VM")
+		}
+		if live, hourly, _, err := ex.ActiveSnapshot(clk.Now()); err != nil || live != 1 || hourly < 0.619 || hourly > 0.621 {
+			t.Fatalf("in-memory snapshot double-counted materialized PendingRent: live=%d hourly=%.2f err=%v", live, hourly, err)
+		}
+		if live, hourly, _, err := activeExaminerFromDisk(home, clk.Now(), 45*time.Minute, 1.50); err != nil || live != 1 || hourly < 0.619 || hourly > 0.621 {
+			t.Fatalf("disk snapshot double-counted materialized PendingRent: live=%d hourly=%.2f err=%v", live, hourly, err)
+		}
+		st := readExaminerState(home)
+		if st == nil || st.InstanceID != "ex-mat" || st.PendingRent {
+			t.Fatalf("expected PendingRent promoted to InstanceID=ex-mat, got %+v", st)
+		}
+
+		// VM self-terminates / disappears 30s later (still well inside examinerPendingRentGrace):
+		// must record spend once, clear state cleanly (not strand PendingRent!), and allow renting!
+		clk.Advance(30 * time.Second)
+		prov.mu.Lock()
+		delete(prov.insts, "ex-mat")
+		prov.mu.Unlock()
+		if err := ex.Reconcile(context.Background(), &Work{}, ExaminerBudget{MaxWorkers: 1, MaxHourly: 0.70}); err != nil {
+			t.Fatalf("Case 1 reconcile after materialized VM vanished: %v", err)
+		}
+		if stAfter := readExaminerState(home); stAfter != nil {
+			t.Fatalf("expected examiner.json cleared without stranding PendingRent, got %+v", stAfter)
+		}
+		if live, _, _, err := ex.ActiveSnapshot(clk.Now()); err != nil || live != 0 {
+			t.Fatalf("expected 0 live examiners after vanished VM cleared, got live=%d err=%v", live, err)
+		}
+		f := &Fleet{o: &Options{Home: home}, now: clk.Now}
+		spentToday, err := f.spent(&ledger{Pods: map[string]*podRecord{}}, startOfDay(clk.Now()))
+		if err != nil || spentToday < 0.009 || spentToday > 0.012 {
+			t.Fatalf("expected 1m single spend (~$0.0103) recorded once, got $%.5f err=%v", spentToday, err)
+		}
+	})
+
+	t.Run("vast_408_request_timeout_remains_ambiguous_not_rejected", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == "PUT" {
+				w.WriteHeader(http.StatusRequestTimeout)
+				_, _ = w.Write([]byte(`{"msg":"request timeout"}`))
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"instances": []any{}})
+		}))
+		defer srv.Close()
+		vm := newVast(srv.URL, "tok")
+		vm.a.http = srv.Client()
+		_, err := vm.RentExaminer(context.Background(), "123", ExaminerLaunch{
+			Label: "stet-examiner-test", Image: "vllm/vllm-openai@sha256:0000", Model: "m", APIKey: "k", CertPEM: []byte("c"), KeyPEM: []byte("p"),
+		})
+		if err == nil {
+			t.Fatalf("expected error on HTTP 408")
+		}
+		if errors.Is(err, errRentRejected) || errors.Is(err, errNoRoom) {
+			t.Fatalf("HTTP 408 Request Timeout must stay ambiguous (not errRentRejected/errNoRoom): %v", err)
+		}
+	})
+}
+
+// Review 15 P2 #3: when an unresolved owned orphan disappears from the provider before the next
+// poll (e.g. Vast finished deleting it after returning an error on the prior EndExaminer call),
+// Reconcile and EnforceTimeout must record a bounded, idempotent terminal spend charge in
+// spent.jsonl (preserving it in PendingSpends if spent.jsonl is temporarily unwritable) so its
+// accrued daily spend never vanishes to $0.00.
+func TestDisappearedUnresolvedOrphanRecordsBoundedSpend(t *testing.T) {
+	t.Run("records_bounded_charge_when_unresolved_orphan_disappears", func(t *testing.T) {
+		clk := newTestClock(time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC))
+		home := t.TempDir()
+		owner := loadOrCreateExaminerOwner(home)
+		prov := &fakeExaminerProv{
+			insts: map[string]ExaminerInstance{
+				"orphan-30m": {
+					ID: "orphan-30m", Label: examinerLabelPrefix + "-" + owner + "-s3-o00037-deadbeef",
+					State: "running", Price: 0.62, Created: clk.Now().Add(-30 * time.Minute),
+				},
+			},
+			endErr: map[string]error{"orphan-30m": errors.New("transient Vast 503")},
+		}
+		ex := newExaminer(ExaminerConfig{Addr: "127.0.0.1:0", Timeout: 45 * time.Minute, MaxPrice: 1.50}, home, prov, clk.Now, nil, false)
+		ex.onSpent = func(rec podRecord) error { return appendExaminerSpend(filepath.Join(home, "spent.jsonl"), rec) }
+
+		// Poll 1: EndExaminer fails -> retained in Unresolved with $0.31 accrued.
+		if err := ex.Reconcile(context.Background(), &Work{}, testExaminerBudget()); err == nil {
+			t.Fatalf("expected EndExaminer failure on Poll 1")
+		}
+		if live, _, acc, err := ex.ActiveSnapshot(clk.Now()); err != nil || live != 1 || acc < 0.309 || acc > 0.311 {
+			t.Fatalf("Poll 1 snapshot: live=%d acc=%.4f err=%v, want 1/$0.31", live, acc, err)
+		}
+
+		// Provider finishes deleting orphan-30m before Poll 2 -> vanishes from ListExaminers.
+		prov.mu.Lock()
+		delete(prov.insts, "orphan-30m")
+		prov.mu.Unlock()
+
+		// Poll 2: Unresolved clears AND $0.31 terminal charge is durably written to spent.jsonl!
+		if err := ex.Reconcile(context.Background(), &Work{}, testExaminerBudget()); err != nil {
+			t.Fatalf("Poll 2 after orphan vanished: %v", err)
+		}
+		if readExaminerState(home) != nil {
+			t.Fatalf("expected examiner.json cleared after vanished orphan spend recorded")
+		}
+		f := &Fleet{o: &Options{Home: home}, now: clk.Now}
+		spentToday, err := f.spent(&ledger{Pods: map[string]*podRecord{}}, startOfDay(clk.Now()))
+		if err != nil {
+			t.Fatalf("f.spent: %v", err)
+		}
+		if spentToday < 0.309 || spentToday > 0.311 {
+			t.Fatalf("vanished unresolved orphan spend must remain $0.31 (not $0.00!), got $%.4f", spentToday)
+		}
+		// Idempotent on repeat reconciliation.
+		if err := ex.Reconcile(context.Background(), &Work{}, testExaminerBudget()); err != nil {
+			t.Fatalf("Poll 3 idempotent check: %v", err)
+		}
+		spentAgain, err := f.spent(&ledger{Pods: map[string]*podRecord{}}, startOfDay(clk.Now()))
+		if err != nil || spentAgain < 0.309 || spentAgain > 0.311 {
+			t.Fatalf("expected idempotent $0.31 spend, got $%.4f err=%v", spentAgain, err)
+		}
+	})
+
+	t.Run("preserves_obligation_when_spent_jsonl_unwritable_and_caps_at_timeout", func(t *testing.T) {
+		clk := newTestClock(time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC))
+		home := t.TempDir()
+		owner := loadOrCreateExaminerOwner(home)
+		spentPath := filepath.Join(home, "spent.jsonl")
+		prov := &fakeExaminerProv{
+			insts: map[string]ExaminerInstance{
+				"orphan-2h": {
+					ID: "orphan-2h", Label: examinerLabelPrefix + "-" + owner + "-s3-o00038-deadbeef",
+					State: "running", Price: 0.62, Created: clk.Now().Add(-2 * time.Hour),
+				},
+			},
+			endErr: map[string]error{"orphan-2h": errors.New("transient Vast 503")},
+		}
+		ex := newExaminer(ExaminerConfig{Addr: "127.0.0.1:0", Timeout: 45 * time.Minute, MaxPrice: 1.50}, home, prov, clk.Now, nil, false)
+		ex.onSpent = func(rec podRecord) error { return appendExaminerSpend(spentPath, rec) }
+
+		// EnforceTimeout fails delete -> stores orphan-2h in Unresolved.
+		if err := ex.EnforceTimeout(context.Background()); err == nil {
+			t.Fatalf("expected EnforceTimeout delete failure")
+		}
+		// Block spent.jsonl and remove orphan-2h from provider.
+		if err := os.Mkdir(spentPath, 0o700); err != nil {
+			t.Fatalf("block spent.jsonl: %v", err)
+		}
+		prov.mu.Lock()
+		delete(prov.insts, "orphan-2h")
+		prov.mu.Unlock()
+
+		// EnforceTimeout detects disappearance, fails writing spent.jsonl, and retains bounded 45m ($0.465) in PendingSpends!
+		if err := ex.EnforceTimeout(context.Background()); err == nil {
+			t.Fatalf("expected spent.jsonl write error to propagate")
+		}
+		if live, _, acc, err := activeExaminerFromDisk(home, clk.Now(), 45*time.Minute, 1.50); err != nil || live != 0 || acc < 0.464 || acc > 0.466 {
+			t.Fatalf("disk snapshot while PendingSpends retained: live=%d acc=%.4f err=%v, want 0/$0.465", live, acc, err)
+		}
+		// Unblock spent.jsonl -> flushes exact $0.465 charge and clears examiner.json.
+		if err := os.Remove(spentPath); err != nil {
+			t.Fatalf("unblock spent.jsonl: %v", err)
+		}
+		if err := ex.EnforceTimeout(context.Background()); err != nil {
+			t.Fatalf("EnforceTimeout flush: %v", err)
+		}
+		f := &Fleet{o: &Options{Home: home}, now: clk.Now}
+		spentToday, err := f.spent(&ledger{Pods: map[string]*podRecord{}}, startOfDay(clk.Now()))
+		if err != nil || spentToday < 0.464 || spentToday > 0.466 {
+			t.Fatalf("expected flushed bounded $0.465 spend, got $%.4f err=%v", spentToday, err)
+		}
+	})
+}

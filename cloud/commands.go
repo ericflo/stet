@@ -504,6 +504,11 @@ func cmdUp(ctx context.Context, f *Fleet, n int) error {
 					break
 				}
 			}
+			if runs == 0 {
+				if want := f.o.Policy.runners(v.Work); want > 0 {
+					runs = min(n, want)
+				}
+			}
 		}
 	}
 	got, err := f.launch(ctx, v, n, 0, 0, runs, time.Time{})

@@ -527,10 +527,12 @@ func (m *vastMarket) RentExaminer(ctx context.Context, offerID string, l Examine
 	case err == nil && out.Success && out.NewContract > 0:
 		return strconv.FormatInt(out.NewContract, 10), nil
 	case err == nil:
-		return "", fmt.Errorf("Vast.ai answered %d to a new examiner instance, without one: %s", status, out.Msg)
+		return "", fmt.Errorf("%w: Vast.ai answered %d to a new examiner instance, without one: %s", errRentRejected, status, out.Msg)
 	case status == 404 || status == 410 || (status == 400 && strings.Contains(err.Error(), "no_such_ask")):
 		return "", fmt.Errorf("%w (%v)", errNoRoom, err)
-	case status == 0 || status >= 500:
+	case status >= 400 && status < 500 && status != http.StatusRequestTimeout:
+		return "", fmt.Errorf("%w (%v)", errRentRejected, err)
+	case status == 0 || status == http.StatusRequestTimeout || status >= 500:
 		if rs, lerr := m.ListExaminers(ctx); lerr == nil {
 			for _, r := range rs {
 				if r.Label == l.Label && r.State != "stopped" {

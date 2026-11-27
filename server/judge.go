@@ -813,10 +813,11 @@ type verdict struct {
 	scored    bool
 	valid     bool
 	gain      float64
-	tie       bool   // two decide it and disagree, or valid grades have no agreed token stream / init weights
+	tie       bool   // two decide it and disagree, or valid grades have no agreed token stream / init weights / validity
 	tokensSHA string // agreed script tokens_sha256 among counted valid grades, if resolved
 	tokensTie bool   // multiple distinct tokens_sha256 with no unique >=2 winner
 	initTie   bool   // multiple distinct init_sha256 with no agreed round InitSHA (pinned student season)
+	validTie  bool   // valid and invalid counted grades split exactly 50/50 (e.g. 1-1 or 2-2)
 }
 
 // same reports whether two grades of a script are consistent with honest runs.
@@ -1004,11 +1005,11 @@ func (j *judge) weigh(sc *scriptState) *verdict {
 		v.gain = median(gains)
 	}
 	// A numerical or validity tie exists when two counted grades disagree, when valid and
-	// invalid grades split exactly 50/50 (e.g. 2-2), OR when three or more scored counted
+	// invalid grades split exactly 50/50 (e.g. 1-1 or 2-2), OR when three or more scored counted
 	// grades still have neither two mutually agreeing grades backing the verdict nor an
 	// organisers' grade agreeing with it (e.g. +0.010/+0.090/+0.050 or +0.010/+0.090/+0.040/+0.060).
-	numTie := (len(v.counted) == 2 && !j.same(v.counted[0], v.counted[1])) ||
-		(len(v.counted) > 2 && 2*len(gains) == len(v.counted))
+	v.validTie = !v.tokensTie && !v.initTie && len(v.counted) > 0 && 2*len(gains) == len(v.counted)
+	numTie := (len(v.counted) == 2 && !j.same(v.counted[0], v.counted[1])) || v.validTie
 	if !numTie && len(v.counted) > 2 && v.scored {
 		numTie = !j.supported(v)
 	}
@@ -2816,6 +2817,8 @@ func (a *App) settleScript(tx *Tx, j *judge, st *entryState, sc *scriptState) *g
 		out.reason = "verifiers disagreed on the student's initial weights"
 	} else if v.tokensTie {
 		out.reason = "verifiers disagreed on the script's tokenized stream"
+	} else if v.validTie {
+		out.reason = "verifiers disagreed on whether the script is valid"
 	} else if !v.valid && out.reason == "" {
 		out.reason = "the script is invalid"
 	}
@@ -2861,9 +2864,9 @@ func (a *App) settleScript(tx *Tx, j *judge, st *entryState, sc *scriptState) *g
 			// Its arithmetic differs on the unedited corpus too. (A grader that was not asked
 			// for the baseline, and sent none, has only its grade to be judged by.)
 			r.Verdict, shown = "void", "baseline differs"
-		case v.tokensTie || v.initTie:
-			// Established accounts disagreed on the script's tokenized stream or initial student
-			// weights, so non-deciding grades cannot agree or disagree with an unresolved verdict.
+		case v.tokensTie || v.initTie || v.validTie:
+			// Established accounts disagreed on the script's tokenized stream, initial student
+			// weights, or validity, so non-deciding grades cannot agree or disagree with an unresolved verdict.
 			r.Verdict, shown = "disputed", "disputed"
 			g.acct.GPUSeconds += r.Seconds
 		case j.agrees(g, v):
@@ -2923,7 +2926,7 @@ func (a *App) settleEntry(tx *Tx, j *judge, st *entryState) {
 	detail := &EntryDetail{Verifiers: []string{}, Audited: len(st.Scripts) > 0}
 	var runs []*Run
 	var gains []float64
-	valid, self, tokensDisputed := 0, false, false
+	valid, self, runDisputed := 0, false, false
 	for _, run := range e.Runs {
 		if run.Dropped {
 			continue
@@ -2940,16 +2943,16 @@ func (a *App) settleEntry(tx *Tx, j *judge, st *entryState) {
 				}
 				run.Reason = fmt.Sprintf("the curator produced no script (%s)", status)
 			}
-		} else if g.v.tokensTie || g.v.initTie {
-			// Verifiers disagreed on the script's tokenized stream or initial student weights with
-			// no majority; drop this run cleanly (preserving its disputed grades) without penalizing
-			// the curator.
-			tokensDisputed = true
+		} else if g.v.tokensTie || g.v.initTie || g.v.validTie {
+			// Verifiers disagreed on the script's tokenized stream, initial student weights, or
+			// validity with no majority; drop this run cleanly (preserving its disputed grades)
+			// without penalizing the curator.
+			runDisputed = true
 			run.Grades, run.Self = g.grades, g.v.self
 			run.Dropped = true
 			run.Reason = g.reason
 			if run.Reason == "" {
-				run.Reason = "verifiers disagreed on the script's tokenized stream"
+				run.Reason = "verifiers disagreed on the script"
 			}
 			if by := tx.s.Accounts[run.By]; by != nil && run.Owed {
 				by.Runs++
@@ -2971,9 +2974,9 @@ func (a *App) settleEntry(tx *Tx, j *judge, st *entryState) {
 		runs = append(runs, run)
 		gains = append(gains, run.Gain)
 	}
-	// If dropping a tokens-disputed run leaves a lone unvouched non-anchor failed edit, drop
+	// If dropping a disputed run leaves a lone unvouched non-anchor failed edit, drop
 	// that failed run too so a curator is never rated invalid on one volunteer's unvouched word.
-	if tokensDisputed && len(runs) == 1 && runs[0].Script == "" {
+	if runDisputed && len(runs) == 1 && runs[0].Script == "" {
 		if by := tx.s.Accounts[runs[0].By]; by == nil || !by.Anchor {
 			runs[0].Dropped = true
 			runs[0].Reason = "no confirmed run remained to vouch for this failed edit"
@@ -2992,17 +2995,17 @@ func (a *App) settleEntry(tx *Tx, j *judge, st *entryState) {
 		run.Owed = false
 	}
 	if len(runs) == 0 {
-		if tokensDisputed {
+		if runDisputed {
 			named := map[string]bool{}
-			disputeWhy := "verifiers disagreed on the script's tokenized stream; the round does not count for it"
+			hasInitTie, hasTokensTie := false, false
 			for _, k := range []int{0, 1} {
 				for _, sc := range st.Scripts {
-					if !scripts[sc.SHA].v.tokensTie && !scripts[sc.SHA].v.initTie {
+					v := scripts[sc.SHA].v
+					if !v.tokensTie && !v.initTie && !v.validTie {
 						continue
 					}
-					if scripts[sc.SHA].v.initTie {
-						disputeWhy = "verifiers disagreed on the student's initial weights; the round does not count for it"
-					}
+					hasInitTie = hasInitTie || v.initTie
+					hasTokensTie = hasTokensTie || v.tokensTie
 					for _, h := range scripts[sc.SHA].names[k] {
 						if !named[h] {
 							named[h] = true
@@ -3012,11 +3015,18 @@ func (a *App) settleEntry(tx *Tx, j *judge, st *entryState) {
 				}
 			}
 			for _, sc := range st.Scripts {
-				if !scripts[sc.SHA].v.tokensTie && !scripts[sc.SHA].v.initTie {
+				v := scripts[sc.SHA].v
+				if !v.tokensTie && !v.initTie && !v.validTie {
 					continue
 				}
 				detail.Disputed += scripts[sc.SHA].outliers
-				detail.DisputedTogether = detail.DisputedTogether || scripts[sc.SHA].v.tie
+				detail.DisputedTogether = detail.DisputedTogether || v.tie
+			}
+			disputeWhy := "verifiers disagreed on whether the script is valid; the round does not count for it"
+			if hasInitTie {
+				disputeWhy = "verifiers disagreed on the student's initial weights; the round does not count for it"
+			} else if hasTokensTie {
+				disputeWhy = "verifiers disagreed on the script's tokenized stream; the round does not count for it"
 			}
 			e.Void, e.Unattended, e.NRuns, e.NResults = true, true, 0, len(detail.Verifiers)
 			a.settleInvalid(tx, e, disputeWhy, detail)

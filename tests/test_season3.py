@@ -3663,8 +3663,167 @@ def test_review14_bundled_practice_pack_uses_inkling2_and_passes_copy_filter():
     assert "Inkling-2-Mini" in readme and "STET_SYNTHESIZE_PRACTICE=1" in readme
 
 
+def test_review15_examine_derives_season_from_round_id_and_rejects_conflict(monkeypatch):
+    """Review 15 P2 #5: `stet examine --round s2-o00003` must target season s2 (not silently
+    default to s3 and query /api/v1/rounds/s3-o00003), and an explicit conflicting `--season s3`
+    must be rejected before any network call is made."""
+    from types import SimpleNamespace
+
+    from stet import cli, client
+
+    fetched: list[tuple[str, int]] = []
+    requested: list[tuple[str, str]] = []
+
+    def fake_fetch_round(season, index):
+        fetched.append((season.id, index))
+        return SimpleNamespace(id=f"{season.id}-o{index:05d}", seed=b"\x00" * 32)
+
+    def fake_request(method, path, body=None, **kw):
+        requested.append((method, path))
+        return {"round": {"id": path.rsplit("/", 1)[-1], "exam_digest": "a" * 64}}
+
+    monkeypatch.setattr(client, "fetch_round", fake_fetch_round)
+    monkeypatch.setattr(client, "request", fake_request)
+
+    parser = cli.build_parser()
+
+    # 1. `stet examine --round s2-o00003` (no --season) targets season s2, index 3!
+    args_s2 = parser.parse_args(["examine", "--round", "s2-o00003", "--quiet"])
+    assert args_s2.season is None
+    cli.cmd_examine(args_s2)
+    assert fetched == [("s2", 3)]
+    assert requested == [("GET", "/api/v1/rounds/s2-o00003")]
+
+    # 2. Explicit conflicting `--season s3` fails BEFORE fetching anything!
+    fetched.clear()
+    requested.clear()
+    args_conflict = parser.parse_args(["examine", "--round", "s2-o00003", "--season", "s3", "--quiet"])
+    with pytest.raises(SystemExit) as exc:
+        cli.cmd_examine(args_conflict)
+    assert exc.value.code != 0
+    assert fetched == [] and requested == []
+
+    # 3. Matching explicit `--season s2` succeeds cleanly.
+    args_match = parser.parse_args(["examine", "--round", "s2-o00003", "--season", "s2", "--quiet"])
+    cli.cmd_examine(args_match)
+    assert fetched == [("s2", 3)]
+    assert requested == [("GET", "/api/v1/rounds/s2-o00003")]
 
 
+def test_review15_reasoning_cache_versioned_and_revalidated_on_upgrade(monkeypatch, tmp_path):
+    """Review 15 P2 #6: upgrading generation/filter rules invalidates the reasoning cache stem
+    (via REASONING_FILTER_VERSION) AND `_reasoning_cache_usable` revalidates every cached row
+    against current filters so a previously-accepted prompt-copying row triggers clean regeneration."""
+    import zstandard as zstd
 
+    from stet.exam import examine
+    from stet.exam.farm import pack_items
+    from stet.exam.fresh import Doc, reason, write_snapshot
+    from stet.spec import practice_round
 
+    s3 = load_season("s3")
+    r_cfg = s3.raw["exam"]["reasoning"]
+    rnd = practice_round(s3, 0)
+    scale = s3.scale("nano")
+
+    excerpt = (
+        "Coastal rail operators announced overnight maintenance across three river bridges after "
+        "inspection crews detected accelerated corrosion along the southern steel deck bearings "
+        "during heavy winter storm tides."
+    )
+    copied_prompt = (
+        "Why did coastal rail operators announce overnight maintenance across three river bridges "
+        "after inspection crews detected accelerated corrosion along the southern steel deck bearings?"
+    )
+    clean_prompt = "Why are the river crossings closing overnight for urgent structural repairs?"
+    clean_resp = (
+        "Saltwater spray from winter storm surges accelerated rust on load-bearing deck hardware, "
+        "requiring off-peak engineering work before commuter traffic resumes safely."
+    )
+
+    bad_copied_item = Item(
+        kind="answer",
+        corner="explain/en/ccnews",
+        fmt="prose",
+        lang="en",
+        source="explain:ccnews:2026-11-26:old-copied",
+        ctx=reason.wrap_prompt(excerpt, copied_prompt, "explain", 0),
+        cont=clean_resp,
+        prompt=copied_prompt,
+        wrapper_id=0,
+    )
+    bad_legacy_no_prompt = Item(
+        kind="answer",
+        corner="explain/en/ccnews",
+        fmt="prose",
+        lang="en",
+        source="explain:ccnews:2026-11-26:old-no-meta",
+        ctx=reason.wrap_prompt(excerpt, clean_prompt, "explain", 0),
+        cont=clean_resp,
+    )
+    good_items = [
+        Item(
+            kind="answer",
+            corner="explain/en/ccnews",
+            fmt="prose",
+            lang="en",
+            source=f"explain:ccnews:2026-11-26:clean-{i}",
+            ctx=reason.wrap_prompt(excerpt, clean_prompt, "explain", i % 6),
+            cont=f"{clean_resp} Bridge section {i}.",
+            prompt=clean_prompt,
+            wrapper_id=i % 6,
+        )
+        for i in range(45)
+    ]
+
+    # 1. Direct revalidation rejects both prompt-copying rows and metadata-less legacy rows.
+    assert reason.cached_item_passes_filter(bad_copied_item) is False
+    assert reason.cached_item_passes_filter(bad_legacy_no_prompt) is False
+    assert reason.cached_item_passes_filter(good_items[0]) is True
+    assert examine._reasoning_cache_usable(good_items + [bad_copied_item], s3) is False
+    assert examine._reasoning_cache_usable(good_items + [bad_legacy_no_prompt], s3) is False
+    assert examine._reasoning_cache_usable(good_items, s3) is True
+
+    # 2. Cache key differs from pre-versioned r_cfg-only digest, AND placing a poisoned pack
+    #    at the exact versioned cache path forces regeneration on examine.assemble().
+    snap_path = tmp_path / "2026-11-26-00.jsonl.zst"
+    write_snapshot(
+        [Doc(source="ccnews", id="d1", url="https://example.invalid/1", lang="en", license="ccnews", published=1_800_000_000, title="T", text=excerpt)],
+        snap_path,
+        {"slot": "2026-11-26-00"},
+    )
+    shas = [hashlib.sha256(snap_path.read_bytes()).hexdigest()]
+    old_sig = hashlib.sha256(json.dumps(r_cfg, sort_keys=True).encode()).hexdigest()[:8]
+    new_sig = hashlib.sha256(
+        json.dumps({"filter_version": reason.REASONING_FILTER_VERSION, "cfg": r_cfg}, sort_keys=True).encode()
+    ).hexdigest()[:8]
+    assert new_sig != old_sig
+
+    work = tmp_path / "work"
+    work.mkdir()
+    cur_stem = f"{examine.snapshot_name(shas)[:12]}-{rnd.seed.hex()[:8]}-{new_sig}"
+    cur_cache = work / f"reasoning-{cur_stem}.jsonl.zst"
+    cur_cache.write_bytes(pack_items(good_items + [bad_copied_item]))
+
+    synth_calls = []
+
+    def fake_synth(docs, seed, cfg, **kw):
+        synth_calls.append(len(docs))
+        return list(good_items)
+
+    monkeypatch.setattr("stet.exam.fresh.reason.synthesize_reasoning", fake_synth)
+    monkeypatch.setattr("stet.data.corpus", lambda *a, **k: tmp_path / "empty.jsonl.zst")
+    (tmp_path / "empty.jsonl.zst").write_bytes(zstd.ZstdCompressor().compress(b""))
+    monkeypatch.setattr("stet.exam.decontam.seen", lambda *a, **k: set())
+    monkeypatch.setattr("stet.exam.fresh.select.select_context", lambda *a, **k: [])
+
+    # First assemble: poisoned cache at cur_cache is rejected & regenerated!
+    items1, _, _, _ = examine.assemble(rnd, scale, [(0, snap_path)], work, measure=False, synthesize=True, check_coverage=False, log=lambda _: None)
+    assert len(synth_calls) == 1
+    assert all(it.source != bad_copied_item.source for it in items1)
+
+    # Second assemble: freshly written clean cache IS reused with zero extra synthesis calls!
+    items2, _, _, _ = examine.assemble(rnd, scale, [(0, snap_path)], work, measure=False, synthesize=True, check_coverage=False, log=lambda _: None)
+    assert len(synth_calls) == 1
+    assert items2 == items1
 

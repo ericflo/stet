@@ -59,6 +59,9 @@ DEFAULT_MAX_EXCERPT_CHARS = 1200
 DEFAULT_MAX_NEW_TOKENS = 1536
 DEFAULT_MIN_KEEP_RATE = 0.50
 TEACHER_MAX_PROMPT_TOKENS = 1400
+# Bump whenever reasoning generation or post-generation filtering rules change so cached
+# synthesis artifacts from an older harness revision are automatically regenerated.
+REASONING_FILTER_VERSION = 2
 
 # Sources whose text is prose/discussion/documentation suitable for natural-language reasoning.
 SKIP_LANG_PREFIXES = ("code:",)
@@ -306,6 +309,36 @@ def ngram_overlap(ans: str, src: str, n: int = 5, *, cjk_char_n: int = 8, fallba
 def prompt_copies_excerpt(prompt_line: str, excerpt: str, *, max_ngram_overlap: float = 0.50) -> bool:
     """Report whether a teacher prompt line reproduces too much of its source excerpt."""
     return ngram_overlap(prompt_line, excerpt, n=5) > max_ngram_overlap
+
+
+def cached_item_passes_filter(item: Item, *, max_ngram_overlap: float = 0.50) -> bool:
+    """Revalidate a cached reasoning Item against the current shipped filtering rules.
+
+    Ensures a restarted or upgraded exam build never reuses a cached reasoning pack containing
+    rows missing authoritative `(prompt, wrapper_id)` metadata, leaking control tokens, or
+    violating the current prompt-vs-excerpt / response-vs-excerpt overlap limits.
+    """
+    if item.kind != "answer" or not item.source or not item.prompt or item.wrapper_id is None:
+        return False
+    task_type = item.source.split(":", 1)[0]
+    if task_type not in TASK_TYPES:
+        return False
+    excerpt = extract_wrapped_excerpt(item.ctx, item.prompt, task_type, item.wrapper_id)
+    if excerpt is None:
+        return False
+    pr = item.prompt
+    resp = item.cont.strip()
+    if "\ufffd" in pr or "\ufffd" in resp or "\ufffd" in excerpt:
+        return False
+    if _CONTROL_TOKEN_RE.search(pr) or _CONTROL_TOKEN_RE.search(resp):
+        return False
+    if prompt_copies_excerpt(pr, excerpt, max_ngram_overlap=max_ngram_overlap):
+        return False
+    if ngram_overlap(resp, excerpt, n=5) > max_ngram_overlap:
+        return False
+    if ngram_overlap(resp, pr, n=5) > max_ngram_overlap:
+        return False
+    return True
 
 
 def bound_excerpt(

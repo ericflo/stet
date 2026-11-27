@@ -63,10 +63,10 @@ stet service install      # leave it running: starts with the machine, upgrades 
 - **Only what tells curators apart.** The scored exam is validated before the season across
   three disjoint harvest draws for multi-seed stability, resistance to QA-spam, spliced Q&A,
   perplexity pruning, and over-filtering, and agreement with published 1B English pretraining
-  rankings (on the **English reasoning subset**, `421` items across 3 disjoint `Inkling-2-Mini`
-  draws vs. English DataDecide 1B: **`52–53/66` (`78.8%–80.3%`), pooled `53/66` (95% CI `[50, 55]`),
-  `ρ = +0.804` (`[+0.706, +0.832]`), `FineWeb-Edu` `#6/12` vs true `#7` (`0%` #1 rate), Top-1
-  `dclm-baseline-qc-7p-fw2` (`0.14pp` shortfall)**; scoring all `1,863` multilingual items under
+  rankings (on the **English reasoning subset**, `420` items across 3 disjoint `Inkling-2-Mini`
+  draws vs. English DataDecide 1B: **`52–53/66` (`78.8%–80.3%`), pooled `53/66` (95% CI `[49, 55]`),
+  `ρ = +0.804` (`[+0.699, +0.832]`), `FineWeb-Edu` `#6/12` vs true `#7` (`0%` #1 rate), Top-1
+  `dclm-baseline-qc-7p-fw2` (`0.14pp` shortfall)**; scoring all `1,854` multilingual items under
   official crawl weights against that English-only target yields `25/66`, `ρ = −0.294`, because
   multilingual downstream validity requires a multilingual target); parts that did not clear
   DataDecide (the four human-written twin-context kinds) carry `0%` weight and are shown only as

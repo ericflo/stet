@@ -82,14 +82,19 @@ def _filter_pillar_support(items: list[Item], season, rnd_id: str, log=print) ->
 
 
 def _reasoning_cache_usable(reasoning: list[Item], season) -> bool:
-    """Whether a cached reasoning synthesis result is complete enough to reuse.
+    """Whether a cached reasoning synthesis result is complete and conforms to current filter rules.
 
-    Matches `_filter_pillar_support`: a synthesis where at least one reasoning pillar meets
-    `min_pillar_items` is valid to reuse (a legitimately short kind is omitted rather than
-    discarding the entire 20-minute build on restart)."""
+    Matches `_filter_pillar_support`: every cached item must pass `cached_item_passes_filter`
+    (authoritative prompt/wrapper metadata, zero control tokens, prompt/response overlap limits),
+    and at least one reasoning pillar must meet `min_pillar_items`."""
     from .aggregate import REASONING_KINDS, plan_of
+    from .fresh.reason import cached_item_passes_filter
 
     if not reasoning:
+        return False
+    r_cfg = (season.raw.get("exam") or {}).get("reasoning") or {}
+    max_ov = float(r_cfg.get("max_ngram_overlap", 0.50))
+    if not all(cached_item_passes_filter(it, max_ngram_overlap=max_ov) for it in reasoning):
         return False
     min_items = int((season.raw.get("exam") or {}).get("min_pillar_items", 0))
     if min_items <= 0:
@@ -337,10 +342,14 @@ def assemble(
     fresh = chooser(docs, rnd.seed, int(cfg["fresh"]["items"]), plan_of(season).parts, per_corner=int(cfg["fresh"]["per_corner"]), shares=mix)
 
     # Fresh harvest-derived comprehension & reasoning (Season 3 Exam C v2): deterministic greedy
-    # synthesis cached atomically under `work` by snapshot + seed + reasoning config digest so
-    # retries cost zero GPU work and partial/interrupted cache files are automatically regenerated.
+    # synthesis cached atomically under `work` by snapshot + seed + filter version + reasoning
+    # config digest so retries cost zero GPU work and partial/stale cache files regenerate.
     if synthesize and (r_cfg := cfg.get("reasoning")):
-        rcfg_sig = hashlib.sha256(json.dumps(r_cfg, sort_keys=True).encode()).hexdigest()[:8]
+        from .fresh.reason import REASONING_FILTER_VERSION
+
+        rcfg_sig = hashlib.sha256(
+            json.dumps({"filter_version": REASONING_FILTER_VERSION, "cfg": r_cfg}, sort_keys=True).encode()
+        ).hexdigest()[:8]
         cache_stem = f"{snapshot_name(shas)[:12]}-{rnd.seed.hex()[:8]}-{rcfg_sig}"
         rcache = work / f"reasoning-{cache_stem}.jsonl.zst"
         rdrops = work / f"reasoning-drops-{cache_stem}.jsonl"

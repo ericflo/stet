@@ -754,10 +754,19 @@ def _examine_one(args, round_id: str) -> None:
     from .exam.examine import examine
     from .spec import load_season, parse_round_id
 
-    season = load_season(args.season)
-    _, kind, index = parse_round_id(round_id)
+    explicit_season = getattr(args, "season", None)
+    try:
+        parsed_season, kind, index = parse_round_id(round_id)
+    except ValueError as e:
+        die(str(e))
     if kind != "official":
         die("only an official round has an exam to make")
+    if explicit_season and explicit_season != parsed_season:
+        die(f"round {round_id!r} belongs to season {parsed_season!r}, which conflicts with --season {explicit_season!r}")
+    try:
+        season = load_season(parsed_season)
+    except (FileNotFoundError, ValueError) as e:
+        die(f"season {parsed_season!r} for round {round_id!r} is not available: {e}")
     rnd = fetch_round(season, index)
     d = request("GET", f"/api/v1/rounds/{rnd.id}")["round"]
     out = Out(quiet=args.quiet)
@@ -783,9 +792,9 @@ def _examine_follow(args) -> None:
 
     from .client import ApiError, need_key, request
     from .exam.examine import FatalExamError
-    from .spec import load_season
+    from .spec import CURRENT_SEASON, load_season
 
-    season = load_season(args.season)
+    season = load_season(args.season or CURRENT_SEASON)
     out = Out(quiet=args.quiet)
     out.line("", out.bold("stet examine --follow"))
     key = need_key()
@@ -804,6 +813,8 @@ def _examine_follow(args) -> None:
             rounds = []
         for x in sorted(rounds, key=lambda x: x["id"]):
             rid = x["id"]
+            if not rid.startswith(f"{season.id}-"):
+                continue
             if x.get("status") != "open" or x.get("exam_digest"):
                 pending_cancel.pop(rid, None)
                 continue
@@ -1175,7 +1186,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("examine", help=argparse.SUPPRESS)  # organisers: harvest each hour, and make each official round's exam at its draw
     p.add_argument("--round", help="the official round (default with --follow: every open one)")
     p.add_argument("--follow", action="store_true", help="every hour as it settles, and every open round as soon as it is drawn")
-    p.add_argument("--season", default=CURRENT_SEASON, help=argparse.SUPPRESS)
+    p.add_argument("--season", default=None, help=argparse.SUPPRESS)
     p.add_argument("--quiet", action="store_true", help=argparse.SUPPRESS)
     p.set_defaults(fn=cmd_examine)
 

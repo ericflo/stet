@@ -51,13 +51,19 @@ import (
 //      by the container-side self-destruct timer), logging spend to spent.jsonl.
 
 const (
-	defaultExaminerImage    = "vllm/vllm-openai@sha256:d24e5fc73f0b859bd76c9d2f6f6fa4da3001afd7637f2610876420f3027ea6c7"
-	defaultExaminerModel    = "thinkingmachines/Inkling-2-Mini"
-	defaultExaminerRevision = "c9d028302cd0f035fdf8e7e91f089a4ce94d2195"
-	examinerLabelPrefix     = "stet-examiner"
-	examinerServerName      = "stet-examiner.internal"
-	examinerDiskGB          = 80
+	defaultExaminerImage     = "vllm/vllm-openai@sha256:d24e5fc73f0b859bd76c9d2f6f6fa4da3001afd7637f2610876420f3027ea6c7"
+	defaultExaminerModel     = "thinkingmachines/Inkling-2-Mini"
+	defaultExaminerRevision  = "c9d028302cd0f035fdf8e7e91f089a4ce94d2195"
+	examinerLabelPrefix      = "stet-examiner"
+	examinerServerName       = "stet-examiner.internal"
+	examinerDiskGB           = 80
+	examinerPendingRentGrace = 3 * time.Minute
 )
+
+// errRentRejected marks a provider response that definitively refused to create an instance
+// (HTTP 4xx or 2xx with success=false), as opposed to ambiguous timeouts / 5xx responses where
+// Vast may still have created the contract and a stale listing may briefly omit it.
+var errRentRejected = errors.New("examiner rental rejected by provider")
 
 // ExaminerConfig configures the automated ephemeral vLLM examiner GPU and local auth proxy.
 type ExaminerConfig struct {
@@ -697,6 +703,22 @@ func (e *Examiner) fallbackHourlyRate() float64 {
 	return 1.50
 }
 
+func (e *Examiner) pendingRentGrace() time.Duration {
+	if e.cfg.Timeout > 0 && e.cfg.Timeout < examinerPendingRentGrace {
+		return e.cfg.Timeout
+	}
+	return examinerPendingRentGrace
+}
+
+// pendingRentActive reports whether an unresolved pre-rental reservation is still within its
+// provider-visibility reconciliation window and must be preserved across stale empty listings.
+func (e *Examiner) pendingRentActive(saved examinerState, now time.Time) bool {
+	if !saved.PendingRent || saved.InstanceID != "" || saved.Created.IsZero() {
+		return false
+	}
+	return now.Sub(saved.Created) < e.pendingRentGrace()
+}
+
 func (e *Examiner) ensureLoaded() error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -1093,6 +1115,47 @@ func (e *Examiner) recordMissingSaved(saved examinerState, why string) error {
 	return e.recordEndedAt(saved.InstanceID, "", saved.Price, start, end, saved.RoundID, why)
 }
 
+// recordMissingInstance records a bounded, idempotent terminal spend charge for a tracked
+// examiner instance (saved or previously unresolved orphan) that vanished from the provider so
+// its accrued daily spend never disappears from budget totals.
+func (e *Examiner) recordMissingInstance(inst ExaminerInstance, why string) error {
+	if inst.ID == "" || e.dryRun {
+		return nil
+	}
+	now := e.now()
+	start := inst.Created
+	if start.IsZero() || start.After(now) {
+		start = now
+	}
+	end := now
+	if !inst.Created.IsZero() && e.cfg.Timeout > 0 {
+		if capAt := inst.Created.Add(e.cfg.Timeout); end.After(capAt) {
+			end = capAt
+		}
+	}
+	return e.recordEndedAt(inst.ID, inst.Label, inst.Price, start, end, "", why)
+}
+
+func (e *Examiner) recordDisappearedUnresolved(prevUnresolved, listed []ExaminerInstance, skipID, why string) error {
+	if len(prevUnresolved) == 0 || e.dryRun {
+		return nil
+	}
+	listedIDs := make(map[string]bool, len(listed))
+	for _, inst := range listed {
+		listedIDs[inst.ID] = true
+	}
+	var firstErr error
+	for _, prev := range prevUnresolved {
+		if prev.ID == "" || prev.ID == skipID || listedIDs[prev.ID] {
+			continue
+		}
+		if err := e.recordMissingInstance(prev, why); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
 // EnforceTimeout checks owned examiner instances against the hard --examiner-timeout TTL and
 // destroys any expired instance WITHOUT querying the Stet server, so Stet outages can never
 // disable timeout enforcement.
@@ -1107,9 +1170,9 @@ func (e *Examiner) EnforceTimeout(ctx context.Context) error {
 	}
 	e.mu.RLock()
 	owner := e.owner
-	saved := e.state
+	saved := e.cloneStateLocked()
 	e.mu.RUnlock()
-	if owner == "" && saved.InstanceID == "" && saved.ReservedLabel == "" {
+	if owner == "" && saved.InstanceID == "" && saved.ReservedLabel == "" && len(saved.Unresolved) == 0 {
 		return firstErr
 	}
 	insts, err := e.prov.ListExaminers(ctx)
@@ -1147,6 +1210,10 @@ func (e *Examiner) EnforceTimeout(ctx context.Context) error {
 			continue
 		}
 		if err := e.prov.EndExaminer(ctx, inst.ID); err != nil {
+			e.promoteReservedInstance(&saved, inst)
+			if inst.ID == saved.InstanceID {
+				foundSaved = true
+			}
 			e.proxyOffline()
 			failedEnds = append(failedEnds, inst)
 			e.say("could not end timed-out examiner GPU (machine %s): %v", inst.ID, err)
@@ -1162,10 +1229,13 @@ func (e *Examiner) EnforceTimeout(ctx context.Context) error {
 		}
 		if matchesSaved {
 			e.clearState()
-			saved = examinerState{}
+			saved.InstanceID, saved.PendingRent, saved.ReservedLabel = "", false, ""
 		}
 	}
 	if !e.dryRun {
+		if rerr := e.recordDisappearedUnresolved(saved.Unresolved, owned, saved.InstanceID, "unresolved examiner orphan disappeared before timeout check"); rerr != nil && firstErr == nil {
+			firstErr = rerr
+		}
 		e.updateUnresolved(owned, endedIDs, failedEnds)
 	}
 	if !foundSaved && saved.InstanceID != "" && !e.dryRun {
@@ -1175,6 +1245,28 @@ func (e *Examiner) EnforceTimeout(ctx context.Context) error {
 		e.clearState()
 	}
 	return firstErr
+}
+
+// promoteReservedInstance binds a materialized PendingRent instance to saved.InstanceID and
+// e.state when it is adopted or when teardown fails on it, so snapshotFromState deduplicates it
+// against Unresolved (exact 1x slot/hourly/accrued count) and later disappearance bills it once
+// and clears state cleanly without stranding PendingRent for the rest of examinerPendingRentGrace.
+func (e *Examiner) promoteReservedInstance(saved *examinerState, inst ExaminerInstance) {
+	if saved.InstanceID != "" || !saved.PendingRent || saved.ReservedLabel == "" || inst.Label != saved.ReservedLabel {
+		return
+	}
+	saved.InstanceID = inst.ID
+	saved.PendingRent = false
+	saved.ReservedLabel = ""
+	if !validRate(saved.Price) && validRate(inst.Price) {
+		saved.Price = inst.Price
+	}
+	e.mu.Lock()
+	e.state.InstanceID = saved.InstanceID
+	e.state.PendingRent = false
+	e.state.ReservedLabel = ""
+	e.state.Price = saved.Price
+	e.mu.Unlock()
 }
 
 // Reconcile brings the ephemeral 1x RTX 5090 examiner in line with /admin/work:
@@ -1195,15 +1287,20 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 	needRound := roundNeedingExam(w)
 	e.mu.RLock()
 	owner := e.owner
-	saved := e.state
+	saved := e.cloneStateLocked()
 	wasReady := e.ready
 	wasUpstream := e.upstream
 	e.mu.RUnlock()
+	prevUnresolved := append([]ExaminerInstance(nil), saved.Unresolved...)
 	rawInsts, err := e.prov.ListExaminers(ctx)
 	if err != nil {
 		return fmt.Errorf("listing examiner instances: %w", err)
 	}
 	insts := filterOwnedExaminers(rawInsts, owner, saved.InstanceID, saved.ReservedLabel)
+	listedIDs := make(map[string]bool, len(insts))
+	for _, inst := range insts {
+		listedIDs[inst.ID] = true
+	}
 	now := e.now()
 
 	// Case 1: no open round needs an exam -> tear down every owned examiner instance immediately.
@@ -1217,6 +1314,7 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 				continue
 			}
 			if err := e.prov.EndExaminer(ctx, inst.ID); err != nil {
+				e.promoteReservedInstance(&saved, inst)
 				failedEnds = append(failedEnds, inst)
 				e.say("could not end examiner GPU (machine %s): %v", inst.ID, err)
 				if firstEndErr == nil {
@@ -1255,15 +1353,27 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 		if e.dryRun {
 			return loadErr
 		}
+		if rerr := e.recordDisappearedUnresolved(prevUnresolved, insts, saved.InstanceID, "unresolved examiner orphan disappeared before teardown"); rerr != nil && spendErr == nil {
+			spendErr = rerr
+		}
+		if saved.InstanceID != "" && !endedSaved && !listedIDs[saved.InstanceID] {
+			if rerr := e.recordMissingSaved(saved, "examiner disappeared before teardown (self-terminated or ended)"); rerr != nil && spendErr == nil {
+				spendErr = rerr
+			}
+			e.clearState()
+			saved, wasReady, wasUpstream = examinerState{}, false, ""
+		}
 		e.setUnresolved(failedEnds)
 		if firstEndErr != nil {
 			e.proxyOffline()
 			return firstEndErr
 		}
-		if saved.InstanceID != "" && !endedSaved {
-			if rerr := e.recordMissingSaved(saved, "examiner disappeared before teardown (self-terminated or ended)"); rerr != nil && spendErr == nil {
-				spendErr = rerr
+		if saved.InstanceID == "" && !endedSaved && e.pendingRentActive(saved, now) {
+			e.proxyOffline()
+			if spendErr != nil {
+				return spendErr
 			}
+			return loadErr
 		}
 		if saved.InstanceID != "" || saved.PendingRent || wasReady {
 			e.clearState()
@@ -1292,18 +1402,7 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 			saved.APIKey != "" &&
 			saved.CertPEM != "" &&
 			active == nil {
-			saved.InstanceID = inst.ID
-			saved.PendingRent = false
-			saved.ReservedLabel = ""
-			if !validRate(saved.Price) && validRate(inst.Price) {
-				saved.Price = inst.Price
-			}
-			e.mu.Lock()
-			e.state.InstanceID = saved.InstanceID
-			e.state.PendingRent = false
-			e.state.ReservedLabel = ""
-			e.state.Price = saved.Price
-			e.mu.Unlock()
+			e.promoteReservedInstance(&saved, inst)
 			if err := e.persistState(&saved); err != nil && spendErr == nil {
 				spendErr = fmt.Errorf("saving adopted examiner.json: %w", err)
 			}
@@ -1353,6 +1452,7 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 			continue
 		}
 		if err := e.prov.EndExaminer(ctx, inst.ID); err != nil {
+			e.promoteReservedInstance(&saved, inst)
 			failedEnds = append(failedEnds, inst)
 			e.say("could not end stray examiner GPU (machine %s): %v", inst.ID, err)
 			if strayEndErr == nil {
@@ -1381,6 +1481,16 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 		}
 	}
 	if !e.dryRun {
+		if rerr := e.recordDisappearedUnresolved(prevUnresolved, insts, saved.InstanceID, "unresolved examiner orphan disappeared before reconciliation"); rerr != nil && spendErr == nil {
+			spendErr = rerr
+		}
+		if saved.InstanceID != "" && !endedSaved && !listedIDs[saved.InstanceID] {
+			if rerr := e.recordMissingSaved(saved, "examiner disappeared (self-terminated or ended)"); rerr != nil && spendErr == nil {
+				spendErr = rerr
+			}
+			e.clearState()
+			saved, wasReady, wasUpstream = examinerState{}, false, ""
+		}
 		e.setUnresolved(failedEnds)
 	} else if dryRunTimedOut {
 		return loadErr
@@ -1417,13 +1527,20 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 		return strayEndErr
 	}
 
-	// Saved instance is no longer listed -> record its bounded spend before clearing stale state.
-	if saved.InstanceID != "" && !endedSaved {
-		if rerr := e.recordMissingSaved(saved, "examiner disappeared (self-terminated or ended)"); rerr != nil && spendErr == nil {
-			spendErr = rerr
+	// Preserve an active pre-rental reservation across stale provider listings until either the
+	// instance appears (and is adopted above) or the reconciliation window expires, so eventual
+	// consistency after an ambiguous create cannot trigger a second paid rental.
+	if saved.InstanceID == "" && saved.PendingRent && !endedSaved {
+		if e.pendingRentActive(saved, now) {
+			rem := max(time.Second, e.pendingRentGrace()-now.Sub(saved.Created)).Round(time.Second)
+			e.say("waiting for pending examiner GPU reservation %s to appear (%s remaining in reconciliation window)", saved.ReservedLabel, rem)
+			if spendErr != nil {
+				return spendErr
+			}
+			return loadErr
 		}
-	}
-	if saved.InstanceID != "" || saved.PendingRent || wasReady {
+		e.clearState()
+	} else if saved.InstanceID != "" || wasReady {
 		e.clearState()
 	}
 
@@ -1539,11 +1656,17 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 		if errors.Is(rerr, errNoRoom) {
 			continue
 		}
+		if errors.Is(rerr, errRentRejected) {
+			// Provider explicitly refused to create an instance (4xx / success=false); clear the
+			// reservation immediately so the slot is freed cleanly.
+			e.clearState()
+			return fmt.Errorf("renting examiner GPU on Vast.ai: %w", rerr)
+		}
 		if rerr != nil {
 			// Keep PendingRent intact on ambiguous/transient errors (e.g. network timeout or 5xx
 			// where Vast may still have created the VM): separate CLI processes continue seeing
-			// the reserved slot, and the next Reconcile's ListExaminers either adopts the created
-			// VM by ReservedLabel or confirms non-existence and clears PendingRent before retrying.
+			// the reserved slot, and subsequent Reconcile polls hold the reservation across stale
+			// listings until the VM appears and is adopted or the reconciliation window expires.
 			return fmt.Errorf("renting examiner GPU on Vast.ai: %w", rerr)
 		}
 		st := examinerState{

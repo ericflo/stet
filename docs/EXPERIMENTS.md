@@ -650,81 +650,85 @@ GPU scoring)*.
      Because the initial head-to-head only scored 4 multilingual students on 1 draw, we ran the
      **complete Season 3 safety case directly on the shipped `Inkling-2-Mini` code** across
      three completely disjoint harvest windows (`draw_b`: Nov 25 late, `618` clean / `42` langs /
-     `143` EN; `phase9`: Nov 25 mid, `621` clean / `39` langs / `128` EN; `draw1`: Nov 24, `624`
-     clean / `38` langs / `150` EN), synthesized live by the unmodified shipped
-     `stet.exam.fresh.reason.synthesize_reasoning()` client against the immutable pinned vLLM
-     container (`vllm/vllm-openai@sha256:d24e5fc73f0b859bd76c9d2f6f6fa4da3001afd7637f2610876420f3027ea6c7`,
-     `1,883/1,920 = 98.1%` kept raw, zero CoT/control-token leaks, cold-start Draw B rent-to-synth
-     **`856.3s` (`14.27 min`), `$0.147` GPU cost** at `$0.619/h`: `125.6s` container start +
-     `141.9s` model load & `/v1/models` check + `588.7s` cold synthesis; warm synthesis `367–379s`).
-     All 34 trained students (all 12 Phase 9 gauntlet students, all 8 Draw B controls/adversaries,
-     all 12 DataDecide 1B recipes on brand-new shortest-row 32-lane dealt slices, and 2 RTX 4090
-     cross-card parity students) sat all 3 Inkling draws (`orig` and `rot`), and all 34 trainable
-     upper-half `bf16` checkpoints (`244 MB` each, `8.1 GB` total) were archived.
+     `143` EN; `phase9`: Nov 25 mid, `615` clean / `39` langs / `128` EN; `draw1`: Nov 24, `621`
+     clean / `38` langs / `149` EN, after applying the shipped `prompt_copies_excerpt` filter
+     which removes `0` / `6` / `3` = `9` prompt-copying rows from the archived draws), synthesized
+     live by the shipped `stet.exam.fresh.reason.synthesize_reasoning()` client against the
+     immutable pinned vLLM container (`vllm/vllm-openai@sha256:d24e5fc73f0b859bd76c9d2f6f6fa4da3001afd7637f2610876420f3027ea6c7`,
+     `1,874/1,920 = 97.6%` kept raw under the shipped filter, zero CoT/control-token leaks,
+     cold-start Draw B rent-to-synth **`856.3s` (`14.27 min`), `$0.147` GPU cost** at `$0.619/h`:
+     `125.6s` container start + `141.9s` model load & `/v1/models` check + `588.7s` cold synthesis;
+     warm synthesis `367–379s`). All 34 trained students (all 12 Phase 9 gauntlet students, all 8
+     Draw B controls/adversaries, all 12 DataDecide 1B recipes on brand-new shortest-row 32-lane
+     dealt slices, and 2 RTX 4090 cross-card parity students) sat all 3 Inkling draws (`orig` and
+     `rot`), all 34 trainable upper-half `bf16` checkpoints (`244 MB` each, `8.1 GB` total) were
+     archived, and the tables below rescore the archived student outputs on the exact `1,854`-item
+     post-filter population.
 
-     - **Multi-draw DataDecide 1B (3 disjoint Inkling draws; English subset vs. full multilingual-scored diagnostic, 2,000-resample stratified bootstrap):**
+     - **Multi-draw DataDecide 1B (3 disjoint Inkling draws under shipped filter; English subset vs. full multilingual-scored diagnostic, 2,000-resample stratified bootstrap):**
 
 | Shipped Inkling Draw / Scope | Items | DD 1B Pairs (`orig` / `rot`, 95% CI) | `2pt+` Pairs | Spearman `ρ` (95% CI) | `FineWeb-Edu` Rank *(true `#7`)* / `P(#1)` | Predicted Top-1 *(1B Shortfall)* |
 |---|---:|---:|---:|---:|---:|---|
 | Draw B (`s3-o00003`, EN subset) | `143` | `52/66` (`78.8%`) / `48/66` (`[48, 56]`) | `26/31` | `+0.7902` (`[+0.622, +0.867]`) | `#7/12` / `0.0%` | `dclm-baseline-qc-10p` (`+0.49pp`) |
 | Phase 9 (`s3-o00001`, EN subset) | `128` | `53/66` (`80.3%`) / `52/66` (`[49, 57]`) | `27/31` | `+0.8042` (`[+0.636, +0.895]`) | `#5/12` / `0.4%` | `dclm-baseline-qc-7p-fw2` (`+0.14pp`) |
-| Draw 1 (`s3-p00000`, EN subset) | `150` | `53/66` (`80.3%`) / `50/66` (`[49, 55]`) | `27/31` | `+0.8042` (`[+0.629, +0.825]`) | `#6/12` / `0.0%` | `dclm-baseline-qc-7p-fw2` (`+0.14pp`) |
-| **Pooled 3-Draw Mean (EN subset)** | **`421`** | **`53/66` (`80.3%`) / `49/66` (`[50, 55]`)** | **`27/31`** | **`+0.8042` (`[+0.706, +0.832]`)** | **`#6/12` / `0.0%`** | **`dclm-baseline-qc-7p-fw2` (`+0.14pp`)** |
-| **All scored reasoning (official lang weights, EN target diagnostic)** | **`1,863`** | **`25/66` (`25/66`, `27/66`, `24/66`)** | **`9/31`** | **`−0.294`** | — | `dolma1_7` `#1` *(true `#12` on EN)* |
+| Draw 1 (`s3-p00000`, EN subset) | `149` | `52/66` (`78.8%`) / `50/66` (`[49, 55]`) | `27/31` | `+0.7972` (`[+0.636, +0.825]`) | `#6/12` / `0.0%` | `dclm-baseline-qc-10p` (`+0.49pp`) |
+| **Pooled 3-Draw Mean (EN subset)** | **`420`** | **`53/66` (`80.3%`) / `49/66` (`[49, 55]`)** | **`27/31`** | **`+0.8042` (`[+0.699, +0.832]`)** | **`#6/12` / `0.0%`** | **`dclm-baseline-qc-7p-fw2` (`+0.14pp`)** |
+| **All scored reasoning (official lang weights, EN target diagnostic)** | **`1,854`** | **`25/66` (`25/66`, `26/66`, `24/66`)** | **`9/31`** | **`−0.294`** | — | `dolma1_7` `#1` *(true `#12` on EN)* |
 
-       *Scope qualification:* the **`53/66` (`80.3%`)** DataDecide 1B agreement is measured specifically on the **English reasoning subset** (`421` items across the three draws) because DataDecide's 1B OLMES macro target is English-only. Scoring the same 12 recipes with the full official multilingual leaderboard scorer (`1,863` items under each draw's recorded crawl language weights) ranks `dolma1_7` first on every draw (`25/66`, `27/66`, `24/66`; pooled `25/66`, `9/31` `2pt+`, `ρ = −0.294` against English OLMES) because `dolma1_7` contains non-English text while most higher-ranked DataDecide recipes filter strictly to English. Validating downstream ordering of the full multilingual leaderboard requires a multilingual downstream benchmark target.
+       *Scope qualification:* the **`53/66` (`80.3%`)** DataDecide 1B agreement is measured specifically on the **English reasoning subset** (`420` items across the three draws) because DataDecide's 1B OLMES macro target is English-only. Scoring the same 12 recipes with the full official multilingual leaderboard scorer (`1,854` items under each draw's recorded crawl language weights) ranks `dolma1_7` first on every draw (`25/66`, `26/66`, `24/66`; pooled `25/66`, `9/31` `2pt+`, `ρ = −0.294` against English OLMES) because `dolma1_7` contains non-English text while most higher-ranked DataDecide recipes filter strictly to English. Validating downstream ordering of the full multilingual leaderboard requires a multilingual downstream benchmark target.
 
-     - **Complete Phase 9 (`s3-o00001`) & Draw B (`s3-o00003`) Gauntlets on Shipped Inkling-2-Mini (3-draw mean + 1,000-resample stratified bootstrap CIs):**
+     - **Complete Phase 9 (`s3-o00001`) & Draw B (`s3-o00003`) Gauntlets on Shipped Inkling-2-Mini (3-draw mean + 1,000-resample `(part, lang)` stratified bootstrap CIs):**
 
-| Curator (65.5M CUDA `standard`, shipped Inkling-2-Mini) | Draw B | Phase 9 | Draw 1 | **3-Draw Mean (`orig` / `rot`)** | EN / CJK / Other raw (`n=421/162/1280`) |
+| Curator (65.5M CUDA `standard`, shipped Inkling-2-Mini) | Draw B | Phase 9 | Draw 1 | **3-Draw Mean (`orig` / `rot`)** | EN / CJK / Other raw (`n=420/160/1274`) |
 |---|---:|---:|---:|---:|---|
-| **Phase 9 (`s3-o00001`) corpus:** `p9_reader_v2` (`s0` / `s1`) | `+0.04315` / `+0.04234` | `+0.04768` / `+0.04670` | `+0.04360` / `+0.04343` | **`+0.04481`** (`s1 +0.04416`) / `+0.05101` | `+0.0505 / −0.0104 / +0.0567` |
-| `p9_fineweb2` (`s0` / `s1`) | `+0.04063` / `+0.04034` | `+0.04376` / `+0.04478` | `+0.03892` / `+0.04146` | **`+0.04110`** (`s1 +0.04219`) / `+0.04723` | `+0.0454 / −0.0062 / +0.0534` |
-| `p9_mimic` | `+0.02359` | `+0.02200` | `+0.02383` | **`+0.02314`** (`56.3%` of `fw2`) / `+0.02636` | `+0.0471 / +0.0111 / +0.0043` |
-| `p9_reader_v1` (un-normalized) | `+0.00381` | `+0.00192` | `+0.00314` | `+0.00296` / `+0.00516` | `+0.0279 / −0.0434 / −0.0212` |
-| `p9_adv_qa_spam` | `+0.00294` | `−0.00486` | `+0.00041` | **`−0.00050`** / `−0.00578` | `+0.0154 / +0.0365 / −0.0334` |
-| `p9_adv_splice_qa` | `−0.09313` | `−0.09086` | `−0.09540` | **`−0.09313`** / `−0.05698` | — |
-| `p9_english` (monolingual) | `−0.18501` | `−0.17491` | `−0.18723` | **`−0.18238`** / `−0.20248` | — |
-| `p9_adv_overfilter` | `−1.07806` | `−1.11926` | `−1.07957` | **`−1.09230`** / `−1.07095` | — |
-| **Draw B (`s3-o00003`) corpus:** `db_adv_exam_lang_mix` | `+0.05140` | `+0.05709` | `+0.05224` | `+0.05358` / `+0.06080` | `+0.0541 / +0.0316 / +0.0565` |
-| `db_adv_ppl_qwen06b` | `+0.04797` | `+0.05250` | `+0.04930` | **`+0.04992`** (`103.9%` of `fw2`) / `+0.05154` | `+0.0583 / −0.0037 / +0.0622` |
-| `db_fineweb2` | `+0.04644` | `+0.05086` | `+0.04683` | **`+0.04804`** / `+0.05273` | `+0.0562 / +0.0058 / +0.0574` |
-| `db_adv_ppl_ernie03b` (cross-family) | `+0.04531` | `+0.04759` | `+0.04420` | **`+0.04570`** (`95.1%` of `fw2`) / `+0.04776` | `+0.0525 / −0.0201 / +0.0594` |
-| `db_mimic` | `+0.02718` | `+0.02277` | `+0.02681` | **`+0.02559`** (`53.3%` of `fw2`) / `+0.02983` | `+0.0502 / +0.0219 / +0.0044` |
-| `db_adv_tiny_lang_boost` | `+0.01089` | `+0.01369` | `+0.01029` | **`+0.01162`** (`4.1×` below `fw2`) / `+0.01756` | `+0.0116 / −0.0018 / +0.0230` |
+| **Phase 9 (`s3-o00001`) corpus:** `p9_reader_v2` (`s0` / `s1`) | `+0.04315` / `+0.04234` | `+0.04760` / `+0.04660` | `+0.04372` / `+0.04329` | **`+0.04482`** (`s1 +0.04408`) / `+0.05100` | `+0.0506 / −0.0103 / +0.0567` |
+| `p9_fineweb2` (`s0` / `s1`) | `+0.04063` / `+0.04034` | `+0.04366` / `+0.04472` | `+0.03871` / `+0.04120` | **`+0.04100`** (`s1 +0.04209`) / `+0.04708` | `+0.0455 / −0.0069 / +0.0534` |
+| `p9_mimic` | `+0.02359` | `+0.02249` | `+0.02383` | **`+0.02330`** (`56.8%` of `fw2`) / `+0.02652` | `+0.0471 / +0.0108 / +0.0043` |
+| `p9_reader_v1` (un-normalized) | `+0.00381` | `+0.00256` | `+0.00339` | `+0.00325` / `+0.00546` | `+0.0280 / −0.0434 / −0.0212` |
+| `p9_adv_qa_spam` | `+0.00294` | `−0.00471` | `+0.00046` | **`−0.00044`** / `−0.00571` | `+0.0154 / +0.0365 / −0.0333` |
+| `p9_adv_splice_qa` | `−0.09313` | `−0.09280` | `−0.09565` | **`−0.09386`** / `−0.05750` | — |
+| `p9_english` (monolingual) | `−0.18501` | `−0.17615` | `−0.18755` | **`−0.18290`** / `−0.20322` | — |
+| `p9_adv_overfilter` | `−1.07806` | `−1.11557` | `−1.08021` | **`−1.09128`** / `−1.06998` | — |
+| **Draw B (`s3-o00003`) corpus:** `db_adv_exam_lang_mix` | `+0.05140` | `+0.05649` | `+0.05250` | `+0.05346` / `+0.06065` | `+0.0543 / +0.0314 / +0.0567` |
+| `db_adv_ppl_qwen06b` | `+0.04797` | `+0.05248` | `+0.04915` | **`+0.04987`** (`103.8%` of `fw2`) / `+0.05150` | `+0.0584 / −0.0042 / +0.0621` |
+| `db_fineweb2` | `+0.04644` | `+0.05077` | `+0.04687` | **`+0.04803`** / `+0.05273` | `+0.0562 / +0.0058 / +0.0574` |
+| `db_adv_ppl_ernie03b` (cross-family) | `+0.04531` | `+0.04740` | `+0.04424` | **`+0.04565`** (`95.0%` of `fw2`) / `+0.04774` | `+0.0526 / −0.0206 / +0.0595` |
+| `db_mimic` | `+0.02718` | `+0.02331` | `+0.02680` | **`+0.02576`** (`53.6%` of `fw2`) / `+0.03006` | `+0.0502 / +0.0221 / +0.0045` |
+| `db_adv_tiny_lang_boost` | `+0.01089` | `+0.01330` | `+0.01046` | **`+0.01155`** (`4.2×` below `fw2`) / `+0.01741` | `+0.0117 / −0.0021 / +0.0232` |
 
-     - **Key 3-draw stratified bootstrap margins (pooled across all 3 Inkling draws, 1,000 resamples; 95% CIs reflect item-resampling uncertainty conditional on the seed-0 students and training corpus):**
-       `p9_reader_v2 − p9_fineweb2 = +0.00371` (`s0`, 95% item-resampling CI `[+0.00253, +0.00491]`,
+     - **Key 3-draw stratified bootstrap margins (pooled across all 3 Inkling draws, 1,000 `(part, lang)` resamples; 95% CIs reflect item-resampling uncertainty conditional on the seed-0 students and training corpus):**
+       `p9_reader_v2 − p9_fineweb2 = +0.00382` (`s0`, 95% item-resampling CI `[+0.00251, +0.00499]`,
        `P(<=0)=0.000`, conditional on the seed-0 students and Phase 9 corpus; `s1` paired 3-draw
-       mean margin **`+0.00197`**, `+0.04416 − +0.04219`, winning all 3 draws and sitting below the
-       seed-0 item-resampling lower endpoint of `+0.00253`);
-       `p9_fineweb2 − p9_mimic = +0.01796` (`[+0.01637, +0.01941]`, `P(<=0)=0.000`);
-       `p9_fineweb2 − p9_adv_qa_spam = +0.04161` (`[+0.03982, +0.04312]`, `P(<=0)=0.000`);
-       `db_fineweb2 − db_mimic = +0.02246` (`[+0.02090, +0.02370]`, `P(<=0)=0.000`);
-       `db_adv_ppl_qwen06b − db_fineweb2 = +0.00188` (`[+0.00037, +0.00337]`, `P(<=0)=0.012`);
-       `db_adv_ppl_ernie03b − db_fineweb2 = −0.00235` (`[−0.00411, −0.00054]`, `P(<=0)=0.995`,
+       mean margin **`+0.00199`**, `+0.04408 − +0.04209`, `[+0.00095, +0.00312]`, winning all 3
+       draws and sitting below the seed-0 item-resampling lower endpoint of `+0.00251`);
+       `p9_fineweb2 − p9_mimic = +0.01770` (`[+0.01618, +0.01915]`, `P(<=0)=0.000`);
+       `p9_fineweb2 − p9_adv_qa_spam = +0.04144` (`[+0.03974, +0.04293]`, `P(<=0)=0.000`);
+       `db_fineweb2 − db_mimic = +0.02226` (`[+0.02080, +0.02357]`, `P(<=0)=0.000`);
+       `db_adv_ppl_qwen06b − db_fineweb2 = +0.00184` (`[+0.00036, +0.00330]`, `P(<=0)=0.008`);
+       `db_adv_ppl_ernie03b − db_fineweb2 = −0.00238` (`[−0.00428, −0.00076]`, `P(<=0)=0.995`,
        meaning cross-family ERNIE-0.3B lowest-PPL loses to `fineweb2` under `Inkling-2-Mini`!);
-       `db_fineweb2 − db_adv_tiny_lang_boost = +0.03642` (`[+0.03518, +0.03754]`, `P(<=0)=0.000`).
-       On `db_adv_exam_lang_mix` (`+0.05358` vs `db_fineweb2` `+0.04804`, margin `+0.00553`, 95%
-       item-resampling CI `[+0.00436, +0.00681]` spanning the provisional `0.005` record margin):
-       substituting `fineweb2`'s CJK item gains drops the lead to `+0.00136`, locating most of the
+       `db_fineweb2 − db_adv_tiny_lang_boost = +0.03647` (`[+0.03515, +0.03753]`, `P(<=0)=0.000`).
+       On `db_adv_exam_lang_mix` (`+0.05346` vs `db_fineweb2` `+0.04803`, margin `+0.00544`, 95%
+       item-resampling CI `[+0.00432, +0.00667]` spanning the provisional `0.005` record margin):
+       substituting `fineweb2`'s CJK item gains drops the lead to `+0.00125`, locating most of the
        difference in CJK. Because the two training streams differed in both prefiltering and
        language weighting, this experiment cannot isolate which change caused the gap; an
        apples-to-apples comparison of crawl-share vs exam-share weighting on the identical filtered
        pool and training budget across held-out draws and seeds is the right follow-up test.
-       Multi-seed paired gain deltas (`s1 − s0`): `p9_reader_v2` `−0.00081 / −0.00098 / −0.00017`,
-       `p9_fineweb2` `−0.00029 / +0.00101 / +0.00253`, `db_unedited` `+0.00009 / −0.00013 / −0.00015`.
-       Between-curator rotation survival across all 3 Inkling draws remains `103.2%–116.6%` even
-       though rotating excerpts raises absolute mean NLL by `+0.185–+0.198 bpb` (e.g. Draw B
-       unedited seed-0 mean NLL rose from `1.337` to `1.522 bpb`), confirming that between-curator
-       rankings still rely on prompt-conditioned answer-prose modeling rather than the excerpt.
+       Multi-seed paired gain deltas (`s1 − s0`): `p9_reader_v2` `−0.00081 / −0.00100 / −0.00043`,
+       `p9_fineweb2` `−0.00029 / +0.00106 / +0.00250`, `db_unedited` `+0.00009 / −0.00011 / −0.00012`.
+       Between-curator rotation survival across all 3 Inkling draws remains `107.8%–118.0%` on
+       `fineweb2` even though rotating excerpts raises absolute mean NLL by `+0.180–+0.190 bpb`
+       (e.g. Draw B unedited seed-0 mean NLL rose from `1.337` to `1.522 bpb`), confirming that
+       between-curator rankings still rely on prompt-conditioned answer-prose modeling rather than
+       the excerpt.
      - **Direct Cross-Card NVIDIA RTX 5090 vs RTX 4090 Parity on Shipped `Inkling-2-Mini` (~525-byte answers):**
        Training `db_unedited_s0` and `db_fineweb2_s0` on RTX 5090 vs RTX 4090 produced bit-identical
        `tokens_sha256` and `init_sha256` (`5bd1d5ce4547697e...`). Across all 3 shipped Inkling draws,
-       aggregate cross-card baseline diffs were **`+0.000463` (`draw_b`), `+0.001003` (`phase9`), and
-       `+0.001696` (`draw1`)** (`8.8×–32×` inside the `0.015` baseline tolerance), and `fineweb2` gain
-       diffs were **`+0.001127 / +0.000875 / −0.000310` own-base** and **`+0.002008 / +0.001781 /
-       +0.001175` shared-base** (`6.0×–10.2×` inside the `0.012` grade tolerance), directly confirming
+       aggregate cross-card baseline diffs were **`+0.000463` (`draw_b`), `+0.001068` (`phase9`), and
+       `+0.001732` (`draw1`)** (`8.7×–32×` inside the `0.015` baseline tolerance), and `fineweb2` gain
+       diffs were **`+0.001127 / +0.000797 / −0.000364` own-base** and **`+0.002008 / +0.001724 /
+       +0.001173` shared-base** (`6.0×–10.2×` inside the `0.012` grade tolerance), directly confirming
        that calibrated `0.012 / 0.015` tolerances hold on `Inkling-2-Mini` exams.
 
    - **Prior 3-Architecture NVIDIA Cross-Card Parity (`Qwen3-8B` exams, `r8_gate`: `5090` vs `4090` vs `3090` at `standard` 65.5M tokens; `5090` vs `AMD 8060S` at `nano`/`micro`; final pooled-trim `code_share = 0.15` scorer):**

@@ -435,7 +435,7 @@ func TestTokensTieEdgeCases(t *testing.T) {
 		pub, priv := newKey()
 		w := newWorld(t, pub)
 		_ = w.join("anchor-one", priv)
-		g := w.volunteers("gr1", "gr2", "gr3", "gr4", "gr5")
+		g := w.volunteers("gr1", "gr2", "gr3", "gr4", "gr5", "gr6")
 		w.submit(w.join("owner-0", nil), "entry-0", "print(0)")
 		idx := w.drawWithoutExam()
 		cEdit := w.claim(g[0], true)
@@ -446,7 +446,7 @@ func TestTokensTieEdgeCases(t *testing.T) {
 			t.Fatalf("script: HTTP %d", code)
 		}
 		// Claim 4 early grades (max early replicas = 1 + maxReplicas = 4) before posting exam.
-		graders := g[1:]
+		graders := g[1:5]
 		var cs []*claimed
 		for _, a := range graders {
 			c := w.claimEarly(a)
@@ -457,8 +457,7 @@ func TestTokensTieEdgeCases(t *testing.T) {
 		}
 		w.exam(idx)
 		// First 2 valid with conflicting tokens_sha256 (tokA, tokB), next 2 invalid:
-		// after 3 grades (2 valid vs 1 invalid), valid still carries 2*2 > 3 so tokensTie holds;
-		// after 4th grade (2 valid vs 2 invalid), valid no longer has strict majority -> rated invalid!
+		// 2 valid vs 2 invalid is a 50/50 validity tie (stays pending and requests a tie-breaker).
 		for i, a := range graders {
 			var p map[string]any
 			if i < 2 {
@@ -479,11 +478,28 @@ func TestTokensTieEdgeCases(t *testing.T) {
 				t.Fatalf("grader %d result: HTTP %d", i, code)
 			}
 		}
+		if w.settled(idx) != 0 {
+			t.Fatalf("2 valid (tokA/tokB) vs 2 invalid must stay pending for a tie-breaker")
+		}
+		// 5th established grader submits a 3rd invalid grade: strict invalid majority (3 vs 2)
+		// beats the tokens disagreement and settles rated invalid!
+		c5 := w.claim(g[5], false)
+		if c5.Job == nil || c5.Job.Kind != "grade" {
+			t.Fatalf("tie-breaker claim for %s: %+v", g[5].handle, c5.Job)
+		}
+		p5 := w.result(c5, 5.5, 6.0)
+		p5["valid"] = false
+		p5["invalid_reason"] = "bad script syntax"
+		delete(p5, "exam")
+		delete(p5, "baseline")
+		if code := g[5].do("POST", fmt.Sprintf("/api/v1/jobs/%d/result", c5.Job.ID), p5, nil); code != 200 {
+			t.Fatalf("grader 5 result: HTTP %d", code)
+		}
 		w.pass(w.cfg.ReplicaWait + time.Minute)
 		w.app.st.view(func(s *State) {
 			en := s.inRound[idx][0]
 			if en.Status != "settled" || en.Void || en.Valid {
-				t.Fatalf("non-majority valid with tokens disagreement must settle rated invalid (not void tokensTie): %+v", en)
+				t.Fatalf("strict invalid majority (3 vs 2) with tokens disagreement must settle rated invalid (not void): %+v", en)
 			}
 		})
 		w.check()
@@ -2620,9 +2636,21 @@ func TestThreeMutuallyInconsistentGradesCauseZeroStrikes(t *testing.T) {
 			}
 		}
 		en := w.entries(alice, idx)[0]
+		if !en.Void || en.Valid {
+			t.Fatalf("2-2 validity split must void unattended (not count as invalid round!), got Void=%v Valid=%v", en.Void, en.Valid)
+		}
 		if en.Detail == nil || !en.Detail.DisputedTogether {
 			t.Fatalf("expected DisputedTogether=true on 2-2 split, got %+v", en.Detail)
 		}
+		w.app.st.view(func(s *State) {
+			raw := s.entry(idx, en.Editor)
+			if raw == nil || !raw.Unattended {
+				t.Fatalf("2-2 validity split must set raw.Unattended=true, got %+v", raw)
+			}
+			if failing(s, en.Editor) {
+				t.Fatalf("2-2 validity tie must not mark curator as failing")
+			}
+		})
 		w.check()
 	})
 }
@@ -2947,6 +2975,186 @@ func TestThreeWayBaselineDisputeAcceptsFourthAgreeingBaselineAndResolves(t *test
 				t.Fatalf("2-vs-2 baseline tie must keep all 4 baselines (no arbitrary winner), got %d", len(kept))
 			}
 		})
+		w.check()
+	})
+}
+
+// Review 15 P1 #1: a 1-vs-1 (or 2-vs-2) validity tie among established graders must drop the
+// disputed run at ReplicaWait expiry and void the entry as unattended (`Void=true, Unattended=true`)
+// rather than counting as an invalid round toward curator retirement (`failing()`).
+func TestValidityTieVoidsUnattendedWithoutRetiringCurator(t *testing.T) {
+	t.Run("one_valid_one_invalid_across_two_rounds_never_retires_curator", func(t *testing.T) {
+		pub, priv := newKey()
+		w := newWorld(t, pub)
+		w.app.season.Baselines.PerRound = 2
+		anchor := w.join("anchor-one", priv)
+		alice := w.join("alice", nil)
+		bob := w.join("bob", nil)
+		carol := w.join("carol", nil)
+		newbie := w.join("newbie", nil) // non-established grader: should also be marked disputed
+		w.established("bob", "carol")
+		w.submit(alice, "tidy", "print(1)")
+
+		initA, tokA := strings.Repeat("a", 64), strings.Repeat("1", 64)
+		var editorID string
+		for roundNum := 1; roundNum <= retireAfterInvalid; roundNum++ {
+			idx := w.drawWithoutExam()
+			ce := w.claim(anchor, true)
+			if code, _ := w.edit(anchor, ce, scriptOne); code != 200 {
+				t.Fatalf("round %d anchor edit: HTTP %d", roundNum, code)
+			}
+			cBob := w.claimEarly(bob)
+			cCarol := w.claimEarly(carol)
+			cNewbie := w.claimEarly(newbie)
+			w.exam(idx)
+
+			// Bob submits valid (+0.050), Carol submits invalid ("bad script") with matching baselines.
+			pBob := w.result(cBob, 5.950, 6.000)
+			pBob["train"] = map[string]any{"init_sha256": initA}
+			pBob["script"].(map[string]any)["tokens_sha256"] = tokA
+			pBob["baseline"].(map[string]any)["init_sha256"] = initA
+			if code := bob.do("POST", fmt.Sprintf("/api/v1/jobs/%d/result", cBob.Job.ID), pBob, nil); code != 200 {
+				t.Fatalf("round %d bob valid: HTTP %d", roundNum, code)
+			}
+
+			pCarol := w.result(cCarol, 0, 6.000)
+			pCarol["valid"], pCarol["invalid_reason"] = false, "bad script"
+			pCarol["baseline"].(map[string]any)["init_sha256"] = initA
+			delete(pCarol, "exam")
+			delete(pCarol, "train")
+			var ack struct {
+				Status string `json:"status"`
+			}
+			if code := carol.do("POST", fmt.Sprintf("/api/v1/jobs/%d/result", cCarol.Job.ID), pCarol, &ack); code != 200 {
+				t.Fatalf("round %d carol invalid: HTTP %d", roundNum, code)
+			}
+			if ack.Status != "pending" {
+				t.Fatalf("round %d 1-1 validity tie must stay pending through ReplicaWait, got %q", roundNum, ack.Status)
+			}
+
+			// Non-established newbie also submits valid; on a validity tie it must settle disputed (0 strikes/outliers).
+			pNewbie := w.result(cNewbie, 5.950, 6.000)
+			pNewbie["train"] = map[string]any{"init_sha256": initA}
+			pNewbie["script"].(map[string]any)["tokens_sha256"] = tokA
+			pNewbie["baseline"].(map[string]any)["init_sha256"] = initA
+			if code := newbie.do("POST", fmt.Sprintf("/api/v1/jobs/%d/result", cNewbie.Job.ID), pNewbie, nil); code != 200 {
+				t.Fatalf("round %d newbie valid: HTTP %d", roundNum, code)
+			}
+
+			w.pass(w.cfg.ReplicaWait + time.Minute)
+			if w.settled(idx) != 1 {
+				t.Fatalf("round %d expected entry to settle after ReplicaWait, got %d", roundNum, w.settled(idx))
+			}
+			en := w.entries(alice, idx)[0]
+			editorID = en.Editor
+			if !en.Void || en.Valid {
+				t.Fatalf("round %d 1-1 validity tie must settle Void=true Valid=false, got %+v", roundNum, en)
+			}
+			w.app.st.view(func(s *State) {
+				raw := s.entry(idx, editorID)
+				if raw == nil || !raw.Unattended {
+					t.Fatalf("round %d 1-1 validity tie must set raw.Unattended=true, got %+v", roundNum, raw)
+				}
+			})
+			if en.Detail == nil || !en.Detail.DisputedTogether {
+				t.Fatalf("round %d expected DisputedTogether=true, got %+v", roundNum, en.Detail)
+			}
+			if len(en.Runs) != 0 || len(en.Dropped) != 1 {
+				t.Fatalf("round %d expected tied run in Dropped (0 counted, 1 dropped), got runs=%+v dropped=%+v", roundNum, en.Runs, en.Dropped)
+			}
+			for _, gr := range en.Dropped[0].Grades {
+				if gr.Verdict != "disputed" {
+					t.Fatalf("round %d expected every grade verdict=disputed on 1-1 validity tie, got %+v", roundNum, en.Dropped[0].Grades)
+				}
+			}
+			for _, h := range []string{"bob", "carol", "newbie"} {
+				if acct := w.account(h); acct.Strikes != 0 {
+					t.Fatalf("round %d 1-1 validity tie struck %s (%d strikes)", roundNum, h, acct.Strikes)
+				}
+			}
+		}
+
+		// After retireAfterInvalid (2) consecutive 1-1 validity ties, curator must NOT be retired!
+		w.app.st.view(func(s *State) {
+			if failing(s, editorID) {
+				t.Fatalf("curator %s must NOT be retired by %d validity-tied rounds", editorID, retireAfterInvalid)
+			}
+		})
+		// Confirm a 3rd round still draws this curator cleanly.
+		idx3 := w.drawWithoutExam()
+		if len(w.entries(alice, idx3)) != 1 {
+			t.Fatalf("non-retired curator should still be scheduled in round 3")
+		}
+		w.check()
+	})
+
+	t.Run("two_runs_drops_tied_run_and_scores_remaining_valid_run", func(t *testing.T) {
+		pub, priv := newKey()
+		w := newWorld(t, pub)
+		w.app.cfg.RunsPerEntry = 2
+		w.app.season.Baselines.PerRound = 2
+		anchor := w.join("anchor-one", priv)
+		alice := w.join("alice", nil)
+		bob := w.join("bob", nil)
+		carol := w.join("carol", nil)
+		dave := w.join("dave", nil)
+		w.established("bob", "carol", "dave")
+		w.submit(alice, "tidy", "print(1)")
+		idx := w.drawWithoutExam()
+
+		ce1 := w.claim(anchor, true)
+		if code, _ := w.edit(anchor, ce1, scriptOne); code != 200 {
+			t.Fatalf("Run 1 edit: HTTP %d", code)
+		}
+		// Claim Bob and Carol onto Run 1 before Run 2's script is uploaded so assignment is deterministic.
+		cBob := w.claimEarly(bob)
+		cCarol := w.claimEarly(carol)
+		ce2 := w.claim(dave, true)
+		if code, _ := w.edit(dave, ce2, scriptTwo); code != 200 {
+			t.Fatalf("Run 2 edit: HTTP %d", code)
+		}
+		cAnchor := w.claimEarly(anchor)
+		w.exam(idx)
+
+		initA, tokA := strings.Repeat("a", 64), strings.Repeat("1", 64)
+		// Run 1 gets 1-1 validity tie (Bob valid +0.050 vs Carol invalid); Run 2 gets anchor valid (+0.040).
+		sendValid := func(a *actor, c *claimed, loss float64) {
+			p := w.result(c, loss, 6.000)
+			p["train"] = map[string]any{"init_sha256": initA}
+			p["script"].(map[string]any)["tokens_sha256"] = tokA
+			if c.Job.Baseline != nil && *c.Job.Baseline {
+				p["baseline"].(map[string]any)["init_sha256"] = initA
+			} else {
+				delete(p, "baseline")
+			}
+			if code := a.do("POST", fmt.Sprintf("/api/v1/jobs/%d/result", c.Job.ID), p, nil); code != 200 {
+				t.Fatalf("%s valid: HTTP %d", a.handle, code)
+			}
+		}
+		if cBob.Job.Run != 1 || cCarol.Job.Run != 1 {
+			// Ensure whichever claim landed on Run 1 gets the tie and Run 2 gets valid.
+			t.Fatalf("expected bob/carol on Run 1, got bob=%d carol=%d anchor=%d", cBob.Job.Run, cCarol.Job.Run, cAnchor.Job.Run)
+		}
+		sendValid(bob, cBob, 5.950)
+		pCarol := w.result(cCarol, 0, 6.000)
+		pCarol["valid"], pCarol["invalid_reason"] = false, "bad script"
+		pCarol["baseline"].(map[string]any)["init_sha256"] = initA
+		delete(pCarol, "exam")
+		delete(pCarol, "train")
+		if code := carol.do("POST", fmt.Sprintf("/api/v1/jobs/%d/result", cCarol.Job.ID), pCarol, nil); code != 200 {
+			t.Fatalf("carol invalid: HTTP %d", code)
+		}
+		// Anchor grades Run 2 valid (+0.040).
+		if cAnchor.Job.Run != 2 {
+			w.release(anchor, cAnchor)
+			cAnchor = w.claim(anchor, false)
+		}
+		sendValid(anchor, cAnchor, 5.960)
+		w.pass(w.cfg.ReplicaWait + time.Minute)
+		en := w.entries(alice, idx)[0]
+		if en.Void || !en.Valid || en.Gain == nil || math.Abs(*en.Gain-0.040) > 1e-4 {
+			t.Fatalf("expected entry to drop tied Run 1 and settle valid from Run 2 (+0.040), got %+v", en)
+		}
 		w.check()
 	})
 }

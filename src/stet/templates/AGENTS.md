@@ -257,11 +257,11 @@ Inside each group, every pillar counts the same:
   format with fewer than eight items counts in proportion. `pillars` shows every scored and
   diagnostic pillar.
 - **Only validated parts decide the score.** The season names every part of the exam: the
-  pillars above, and nothing else. The **English subset** (`421` items across three disjoint
+  pillars above, and nothing else. The **English subset** (`420` items across three disjoint
   `Inkling-2-Mini` draws) of the three-pillar reasoning score cleared multi-draw English
-  DataDecide 1B ranking validation (`52/66`, `53/66`, `53/66`; pooled 3-draw `53/66` = `80.3%`,
-  `95% CI [50, 55]`, `27/31` on `2pt+`, Spearman `ρ = +0.804`, `FineWeb-Edu` `#6/12` with `0%`
-  `#1` rate, top-1 within `+0.14pp` of best; scoring all `1,863` multilingual items under official
+  DataDecide 1B ranking validation (`52/66`, `53/66`, `52/66`; pooled 3-draw `53/66` = `80.3%`,
+  `95% CI [49, 55]`, `27/31` on `2pt+`, Spearman `ρ = +0.804`, `FineWeb-Edu` `#6/12` with `0%`
+  `#1` rate, top-1 within `+0.14pp` of best; scoring all `1,854` multilingual items under official
   crawl weights against that English-only target yields `25/66`, `ρ = −0.294`, because validating
   the full multilingual leaderboard requires a multilingual downstream target — see
   `docs/EXPERIMENTS.md` for full 3-draw and bootstrap figures) and the three reasoning pillars carry
@@ -543,36 +543,36 @@ corpus on Season 3's 100%-reasoning score, in bits per byte):
   `mimic` beat `fineweb2` (+0.10 vs +0.05) by matching surface style. Under Season 3's
   100%-fresh harvest-derived `Inkling-2-Mini` reasoning exam (`ERNIE-4.5-0.3B` frozen bottom
   half, 65.5M tokens + 1-epoch SFT probe; 3-draw mean across 3 disjoint harvest windows),
-  `reader` v2 (`+0.0448`) and `fineweb2` (`+0.0411` on Phase 9 / `+0.0480` on Draw B) beat
-  `mimic` (`+0.0231` / `+0.0256`, `52%–56%` of `fineweb2`/`reader` v2; narrower margin than
-  `Qwen3-8B` on Draw B, but strictly positive with `P(<=0) = 0.000`), QA-spam (`−0.0005`),
-  spliced Q&A (`−0.0931`), English-only (`−0.1824`), tiny-language boosting (`+0.0116`), and
-  extreme over-filtering (`−1.0923`).
+  `reader` v2 (`+0.0448`) and `fineweb2` (`+0.0410` on Phase 9 / `+0.0480` on Draw B) beat
+  `mimic` (`+0.0233` / `+0.0258`, `54%–57%` of `fineweb2`; narrower margin than
+  `Qwen3-8B` on Draw B, but strictly positive with `P(<=0) = 0.000`), QA-spam (`−0.0004`),
+  spliced Q&A (`−0.0939`), English-only (`−0.1829`), tiny-language boosting (`+0.0116`), and
+  extreme over-filtering (`−1.0913`).
 - **CCNet-head perplexity pruning vs genuine data quality.** Under Season 3's pinned
   `thinkingmachines/Inkling-2-Mini` (`reasoning_effort=low`) teacher across 3 disjoint draws,
   switching from `Qwen3-8B` shrank `adv_ppl_qwen06b − fineweb2` by `0.019 bpb`: naive `Qwen3-0.6B`
   lowest-perplexity pruning (`adv_ppl_qwen06b`, bottom ~29% NLL/byte matching the crawl's language
-  mix) scores `+0.0499` vs `fineweb2` `+0.0480` (`+0.0019`, 95% CI `[+0.0004, +0.0034]`, down from
+  mix) scores `+0.0499` vs `fineweb2` `+0.0480` (`+0.0018`, 95% CI `[+0.0004, +0.0033]`, down from
   `+37.5%` under `Qwen3-8B`), and cross-family `adv_ppl_ernie03b` (`+0.0457`) falls *below*
-  `fineweb2` (`−0.0024`, 95% CI `[−0.0041, −0.0005]`). Uncapped lowest-PPL still admits
+  `fineweb2` (`−0.0024`, 95% CI `[−0.0043, −0.0008]`). Uncapped lowest-PPL still admits
   boilerplate/TOS and AI-SEO prose, whereas quality-filtered corpora (`DCLM-qc-7p-fw2`,
   `DCLM-qc-10p`, `DCLM-qc-20p`) consistently lead on English DataDecide recipes.
 - **Agreement with 1B pretraining, CJK headroom, & what the exam rewards.** Across all 12
   published English DataDecide recipes (scored on the **English reasoning subset**, 3 disjoint
-  `Inkling-2-Mini` draws, 421 EN items total, shortest-row 32-lane dealt slices), Season 3's
-  English reasoning subset scores **`52/66`, `53/66`, and `53/66` — pooled `53/66` (`80.3%`, 95%
-  CI `[50, 55]`), `27/31` on `2pt+` pairs, Spearman `ρ = +0.804` (`[+0.706, +0.832]`),
+  `Inkling-2-Mini` draws, 420 EN items total, shortest-row 32-lane dealt slices), Season 3's
+  English reasoning subset scores **`52/66`, `53/66`, and `52/66` — pooled `53/66` (`80.3%`, 95%
+  CI `[49, 55]`), `27/31` on `2pt+` pairs, Spearman `ρ = +0.804` (`[+0.699, +0.832]`),
   `FineWeb-Edu` `#6/12` (true `#7`, `0%` #1 rate across resamples), and Top-1
-  `dclm-baseline-qc-7p-fw2` (`0.14pp` shortfall)** (scoring all `1,863` multilingual items under
+  `dclm-baseline-qc-7p-fw2` (`0.14pp` shortfall)** (scoring all `1,854` multilingual items under
   official crawl weights against that English-only target yields `25/66`, `ρ = −0.294`, ranking
-  multilingual `dolma1_7` `#1`). While rotating excerpts raises absolute mean NLL by `~0.19–0.20 bpb`
+  multilingual `dolma1_7` `#1`). While rotating excerpts raises absolute mean NLL by `+0.180–+0.190 bpb`
   (e.g. Draw B unedited seed-0 rose from `1.337` to `1.522 bpb`) and lowers English DataDecide ordering (`53/66 → 49/66` pooled),
-  between-curator gains vs `unedited` on multilingual crawls still retain `103%–117%` under
+  between-curator gains vs `unedited` on multilingual crawls still retain `107.8%–118.0%` on `fineweb2` under
   rotation — so clean, diverse, non-boilerplate multilingual prose across every language remains
   the foundation. Note also that under `Inkling-2-Mini`, `fineweb2` and `reader` v2 still score
-  weakly on CJK (`−0.006` to `+0.006` raw mean across 162 CJK items) because aggressive Gopher/word
+  weakly on CJK (`−0.010` to `+0.006` raw mean across 160 CJK items) because aggressive Gopher/word
   rules starve Japanese and Chinese (`ja 5.31% → 1.99%`), whereas preserving CJK volume
-  (`db_adv_exam_lang_mix`, `ja 3.59%`) lifted CJK gain to `+0.0316` — a major opportunity for
+  (`db_adv_exam_lang_mix`, `ja 3.59%`) lifted CJK gain to `+0.0314` — a major opportunity for
   better multilingual curators.
 - **Balance every language — watch out for English-rubric bias.** Keeping every language and
   cleaning each (`fineweb2`, `reader`) beats English-only corpora by >0.20 bpb on reasoning.
@@ -589,7 +589,7 @@ corpus on Season 3's 100%-reasoning score, in bits per byte):
   out with a range edit (`"k"`) are allowed, however short the lines that are kept; make sure
   they were not worth keeping.
 - **Repeating costs more as the student grows.** Keeping a tiny slice and repeating it dozens
-  of times collapses generalization (`adv_overfilter`: `-1.0923` bpb on `Inkling-2-Mini` reasoning
+  of times collapses generalization (`adv_overfilter`: `-1.0913` bpb on `Inkling-2-Mini` reasoning
   at 65.5M tokens).
 - **Do not train in raw rank order.** The corpus arrives already shuffled. If you rank
   documents, shuffle inside quality bands (a gentle curriculum) or shuffle what you keep.

@@ -1535,3 +1535,48 @@ func TestUnfilled24GBCuratorSlotsFallBackTo16GBGradersOnlyWhenGradesWait(t *test
 		t.Fatal("worker.sh does not set STET_GRADE_ONLY=1 for grade-only workers")
 	}
 }
+
+// Review 15 P2 #4: when edits are enabled, an entry is waiting, no round is open, and no runners
+// are online, manual `stet-cloud up 1` must launch a curator-capable runner (STET_WORKER_EDITS=1)
+// matching Policy.runners so the server announces the on-demand round instead of stalling on a
+// grade-only machine.
+func TestManualUpLaunchesCuratorRunnerWhenWaitingEntryNeedsDraw(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("up_1_launches_curator_runner_for_waiting_round", func(t *testing.T) {
+		rp, st := newFakeRunPod(t), newFakeStet(t)
+		f, _ := testFleet(t, rp, st, 2)
+		f.o.Edits = true
+		f.o.MinGPUMemory = 12
+		f.o.MinCuratorGPUMemory = 24
+		st.work = Work{Rounds: nil, Waiting: true, Runners: 0, Paused: 0}
+
+		if err := cmdUp(ctx, f, 1); err != nil {
+			t.Fatalf("cmdUp 1: %v", err)
+		}
+		if len(rp.created) != 1 {
+			t.Fatalf("expected 1 pod created, got %d", len(rp.created))
+		}
+		pod := rp.created[0]
+		if pod.Env["STET_WORKER_EDITS"] != "1" {
+			t.Fatalf("manual up 1 for waiting round set STET_WORKER_EDITS=%q, want 1", pod.Env["STET_WORKER_EDITS"])
+		}
+		if pod.Disk != f.o.Disk {
+			t.Fatalf("manual up 1 curator runner requested %d GB disk, want %d GB", pod.Disk, f.o.Disk)
+		}
+	})
+
+	t.Run("no_edits_keeps_grade_only_on_manual_up", func(t *testing.T) {
+		rp, st := newFakeRunPod(t), newFakeStet(t)
+		f, _ := testFleet(t, rp, st, 2)
+		f.o.Edits = false
+		st.work = Work{Rounds: nil, Waiting: true, Runners: 0, Paused: 0}
+
+		if err := cmdUp(ctx, f, 1); err != nil {
+			t.Fatalf("cmdUp 1 --no-edits: %v", err)
+		}
+		if len(rp.created) != 1 || rp.created[0].Env["STET_WORKER_EDITS"] != "0" {
+			t.Fatalf("expected grade-only worker with --no-edits, got %+v", rp.created)
+		}
+	})
+}
