@@ -575,8 +575,8 @@ are graded by **verifiers**: anyone who runs `stet verify`.
   (`grade_backends: ["cuda"]`): 12 GB+ VRAM and the season's PyTorch for grading, plus Linux,
   the sandbox, the season's libraries, and a 24 GB+ NVIDIA GPU at or above the floor for running
   curators, so every official grade uses cross-verified CUDA arithmetic. AMD ROCm and Apple
-  Silicon remain supported for local practice (`stet run`), and AMD ROCm runs the organisers'
-  production examiner.
+  Silicon remain supported for local practice (`stet run`), while the organisers' automated
+  ephemeral 1× RTX 5090 examiner (managed by `stet-cloud`) synthesizes the fresh reasoning exam.
 
 More in [Verifying](VERIFYING.md).
 

@@ -1,13 +1,21 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -28,19 +36,24 @@ import (
 //
 // When stet-cloud runs with --examiner-addr (e.g. 127.0.0.1:8000), it automatically:
 //   1. Watches GET /api/v1/admin/work for any open round with ExamAt == 0.
-//   2. Rents one verified 1x RTX 5090 on Vast.ai running the pinned immutable vLLM Docker digest
-//      and pinned Inkling-2-Mini revision with a fresh random 256-bit --api-key.
-//   3. Probes /v1/models on the remote instance, then enables a local loopback reverse proxy on
-//      --examiner-addr that injects Authorization: Bearer <api_key> so `stet-examine.service`
-//      points at http://127.0.0.1:8000/v1 with zero manual provisioning or shared static keys.
-//   4. Destroys the Vast.ai instance immediately once every open round has ExamAt > 0 (or on
-//      hard --examiner-timeout TTL, and cleans up any orphaned stet-examiner instances on restart).
+//   2. Rents one verified 1x RTX 5090 on Vast.ai (within --max, --max-hourly, --daily-budget, and
+//      --examiner-max-price) running the pinned immutable vLLM Docker digest and pinned
+//      Inkling-2-Mini revision with a fresh per-instance 256-bit --api-key, a fresh per-instance
+//      ECDSA P-256 TLS certificate, a persistent deployment owner label, and a container-side
+//      self-destruct TTL watchdog that survives controller exit.
+//   3. Probes https://<ip>:<port>/v1/models over a peer-verified pinned-certificate TLS connection,
+//      then enables a local loopback reverse proxy on --examiner-addr that forwards over that same
+//      pinned TLS transport injecting Authorization: Bearer <api_key>.
+//   4. Destroys its owned Vast.ai instance immediately once every open round has ExamAt > 0 or
+//      once hard --examiner-timeout expires (enforced even during Stet server outages, and backed
+//      by the container-side self-destruct timer), logging spend to spent.jsonl.
 
 const (
 	defaultExaminerImage    = "vllm/vllm-openai@sha256:d24e5fc73f0b859bd76c9d2f6f6fa4da3001afd7637f2610876420f3027ea6c7"
 	defaultExaminerModel    = "thinkingmachines/Inkling-2-Mini"
 	defaultExaminerRevision = "c9d028302cd0f035fdf8e7e91f089a4ce94d2195"
 	examinerLabelPrefix     = "stet-examiner"
+	examinerServerName      = "stet-examiner.internal"
 	examinerDiskGB          = 80
 )
 
@@ -52,6 +65,17 @@ type ExaminerConfig struct {
 	Image    string        // pinned immutable vLLM Docker image digest
 	Model    string        // pinned Hugging Face model ID
 	Revision string        // pinned Hugging Face commit SHA
+}
+
+// ExaminerBudget passes the fleet's live machine, hourly, and daily budget limits into Reconcile
+// so an examiner rental never exceeds --max, --max-hourly, or --daily-budget.
+type ExaminerBudget struct {
+	LiveWorkers int
+	MaxWorkers  int
+	HourlyNow   float64 // live worker $/h (excluding any already-active examiner)
+	MaxHourly   float64
+	SpentToday  float64
+	DailyBudget float64
 }
 
 // ExaminerOffer is one eligible 1x RTX 5090 offer on Vast.ai.
@@ -66,13 +90,16 @@ type ExaminerOffer struct {
 
 // ExaminerLaunch is what RentExaminer passes to Vast.ai.
 type ExaminerLaunch struct {
-	Label    string
-	Image    string
-	Model    string
-	Revision string
-	APIKey   string
-	HFToken  string
-	DiskGB   int
+	Label      string
+	Image      string
+	Model      string
+	Revision   string
+	APIKey     string
+	CertPEM    []byte
+	KeyPEM     []byte
+	TTLSeconds int
+	HFToken    string
+	DiskGB     int
 }
 
 // ExaminerInstance is one live or stopped examiner instance returned by Vast.ai.
@@ -96,19 +123,24 @@ type ExaminerProvider interface {
 }
 
 // examinerState is persisted to <home>/examiner.json (0600) so restarts never lose the random
-// API key or leak an orphaned 5090 on Vast.ai.
+// API key, pinned peer certificate, or leak an orphaned 5090 on Vast.ai.
 type examinerState struct {
 	InstanceID string    `json:"instance_id"`
 	RoundID    string    `json:"round_id"`
 	APIKey     string    `json:"api_key"`
+	CertPEM    string    `json:"cert_pem,omitempty"`
 	Upstream   string    `json:"upstream,omitempty"`
 	Price      float64   `json:"price"`
 	Created    time.Time `json:"created"`
 }
 
 func examinerStatePath(home string) string { return filepath.Join(home, "examiner.json") }
+func examinerOwnerPath(home string) string { return filepath.Join(home, "examiner-owner") }
 
 func readExaminerState(home string) *examinerState {
+	if home == "" {
+		return nil
+	}
 	raw, err := os.ReadFile(examinerStatePath(home))
 	if err != nil {
 		return nil
@@ -120,22 +152,11 @@ func readExaminerState(home string) *examinerState {
 	return &st
 }
 
-func writeExaminerState(home string, st *examinerState) error {
-	path := examinerStatePath(home)
-	if st == nil || st.InstanceID == "" {
-		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
-		return nil
-	}
-	if err := os.MkdirAll(home, 0o700); err != nil {
+func writeAtomic0600(dir, pattern, dest string, data []byte) error {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	raw, err := json.MarshalIndent(st, "", " ")
-	if err != nil {
-		return err
-	}
-	fh, err := os.CreateTemp(home, "examiner.json.tmp-*")
+	fh, err := os.CreateTemp(dir, pattern)
 	if err != nil {
 		return err
 	}
@@ -145,7 +166,7 @@ func writeExaminerState(home string, st *examinerState) error {
 		_ = os.Remove(tmp)
 		return err
 	}
-	if _, err := fh.Write(raw); err != nil {
+	if _, err := fh.Write(data); err != nil {
 		_ = fh.Close()
 		_ = os.Remove(tmp)
 		return err
@@ -154,19 +175,87 @@ func writeExaminerState(home string, st *examinerState) error {
 		_ = os.Remove(tmp)
 		return err
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	if err := os.Rename(tmp, dest); err != nil {
 		_ = os.Remove(tmp)
 		return err
 	}
 	return nil
 }
 
+func writeExaminerState(home string, st *examinerState) error {
+	path := examinerStatePath(home)
+	if st == nil || st.InstanceID == "" {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return nil
+	}
+	raw, err := json.MarshalIndent(st, "", " ")
+	if err != nil {
+		return err
+	}
+	return writeAtomic0600(home, "examiner.json.tmp-*", path, raw)
+}
+
+func randomHex(nBytes int) (string, error) {
+	b := make([]byte, nBytes)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}
+
+func loadOrCreateExaminerOwner(home string) string {
+	if home != "" {
+		if raw, err := os.ReadFile(examinerOwnerPath(home)); err == nil {
+			if id := strings.TrimSpace(string(raw)); len(id) == 12 {
+				if _, err := hex.DecodeString(id); err == nil {
+					return id
+				}
+			}
+		}
+	}
+	id, err := randomHex(6)
+	if err != nil {
+		id = fmt.Sprintf("%012x", time.Now().UnixNano()&0xffffffffffff)
+	}
+	if home != "" {
+		_ = writeAtomic0600(home, "examiner-owner.tmp-*", examinerOwnerPath(home), []byte(id+"\n"))
+	}
+	return id
+}
+
+// examinerBelongsToOwner reports whether a provider instance label belongs strictly to this
+// controller deployment so separate deployments sharing a Vast account never delete each other.
+func examinerBelongsToOwner(label, ownerID string) bool {
+	return ownerID != "" && strings.HasPrefix(label, examinerLabelPrefix+"-"+ownerID+"-")
+}
+
+func filterOwnedExaminers(insts []ExaminerInstance, ownerID, savedID string) []ExaminerInstance {
+	var out []ExaminerInstance
+	for _, inst := range insts {
+		if examinerBelongsToOwner(inst.Label, ownerID) || (savedID != "" && inst.ID == savedID) {
+			out = append(out, inst)
+		}
+	}
+	return out
+}
+
 // examinerLabelRound extracts the round ID from labels formatted as
-// "stet-examiner-<round>" or "stet-examiner-<round>-<8hex>".
-func examinerLabelRound(label string) string {
-	rest, ok := strings.CutPrefix(label, examinerLabelPrefix+"-")
-	if !ok || rest == "" {
-		return ""
+// "stet-examiner-<owner>-<round>-<8hex>" or legacy "stet-examiner-<round>[-<8hex>]".
+func examinerLabelRound(label, ownerID string) string {
+	rest := ""
+	if ownerID != "" {
+		if r, ok := strings.CutPrefix(label, examinerLabelPrefix+"-"+ownerID+"-"); ok {
+			rest = r
+		}
+	}
+	if rest == "" {
+		var ok bool
+		rest, ok = strings.CutPrefix(label, examinerLabelPrefix+"-")
+		if !ok || rest == "" {
+			return ""
+		}
 	}
 	if i := strings.LastIndex(rest, "-"); i > 0 && len(rest)-i-1 == 8 {
 		if _, err := hex.DecodeString(rest[i+1:]); err == nil {
@@ -176,27 +265,104 @@ func examinerLabelRound(label string) string {
 	return rest
 }
 
+// generateExaminerCert creates a fresh per-instance ECDSA P-256 X.509 certificate for peer-verified
+// TLS between stet-cloud and the ephemeral Vast.ai vLLM instance.
+func generateExaminerCert(now time.Time, ttl time.Duration) (certPEM, keyPEM []byte, err error) {
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, nil, err
+	}
+	serialLimit := new(big.Int).Lsh(big.NewInt(1), 128)
+	serial, err := rand.Int(rand.Reader, serialLimit)
+	if err != nil {
+		return nil, nil, err
+	}
+	validFor := max(ttl*2, 24*time.Hour)
+	tmpl := &x509.Certificate{
+		SerialNumber: serial,
+		Subject:      pkix.Name{CommonName: examinerServerName},
+		NotBefore:    now.Add(-5 * time.Minute),
+		NotAfter:     now.Add(validFor),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		DNSNames:     []string{examinerServerName},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &priv.PublicKey, priv)
+	if err != nil {
+		return nil, nil, err
+	}
+	keyDER, err := x509.MarshalPKCS8PrivateKey(priv)
+	if err != nil {
+		return nil, nil, err
+	}
+	certPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	keyPEM = pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})
+	return certPEM, keyPEM, nil
+}
+
+// examinerTLSConfig builds a strict TLS client configuration that verifies and pins the exact
+// per-instance X.509 certificate before sending any credentials or exam material over the network.
+func examinerTLSConfig(certPEM []byte, now func() time.Time) (*tls.Config, error) {
+	block, _ := pem.Decode(certPEM)
+	if block == nil || block.Type != "CERTIFICATE" {
+		return nil, errors.New("missing or invalid examiner PEM certificate")
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("parsing examiner certificate: %w", err)
+	}
+	pool := x509.NewCertPool()
+	pool.AddCert(cert)
+	expectedDER := append([]byte(nil), block.Bytes...)
+	return &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		ServerName: examinerServerName,
+		RootCAs:    pool,
+		Time:       now,
+		VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+			if len(rawCerts) == 0 || !bytes.Equal(rawCerts[0], expectedDER) {
+				return errors.New("examiner peer certificate does not match pinned instance certificate")
+			}
+			return nil
+		},
+	}, nil
+}
+
+func activeExaminerFromDisk(home string, now time.Time) (live int, hourly float64, accrued float64) {
+	st := readExaminerState(home)
+	if st == nil || st.InstanceID == "" {
+		return 0, 0, 0
+	}
+	start := st.Created
+	if start.IsZero() || start.After(now) {
+		start = now
+	}
+	rec := podRecord{Cost: st.Price, Start: start, End: now}
+	return 1, st.Price, rec.dollarsBetween(startOfDay(now), now)
+}
+
 // Examiner manages the lifecycle of an ephemeral 1x RTX 5090 vLLM server and serves an
 // authenticated local loopback reverse proxy for stet-examine.
 type Examiner struct {
-	cfg        ExaminerConfig
-	home       string
-	prov       ExaminerProvider
-	probeHTTP  *http.Client
-	proxyTrans http.RoundTripper
-	now        func() time.Time
-	say        func(string, ...any)
-	dryRun     bool
-	hfToken    string
-	onSpent    func(podRecord)
+	cfg     ExaminerConfig
+	home    string
+	prov    ExaminerProvider
+	now     func() time.Time
+	say     func(string, ...any)
+	dryRun  bool
+	hfToken string
+	onSpent func(podRecord)
 
-	fileMu   sync.Mutex
-	mu       sync.RWMutex
-	loaded   bool
-	state    examinerState
-	ready    bool
-	proxy    *httputil.ReverseProxy
-	upstream string
+	fileMu       sync.Mutex
+	mu           sync.RWMutex
+	loaded       bool
+	owner        string
+	state        examinerState
+	ready        bool
+	proxy        *httputil.ReverseProxy
+	proxyTr      *http.Transport
+	upstream     string
+	lastProbeErr string
 }
 
 func newExaminer(cfg ExaminerConfig, home string, prov ExaminerProvider, now func() time.Time, say func(string, ...any), dryRun bool) *Examiner {
@@ -222,16 +388,9 @@ func newExaminer(cfg ExaminerConfig, home string, prov ExaminerProvider, now fun
 		say = func(string, ...any) {}
 	}
 	return &Examiner{
-		cfg:       cfg,
-		home:      home,
-		prov:      prov,
-		probeHTTP: &http.Client{Timeout: 10 * time.Second},
-		proxyTrans: &http.Transport{
-			Proxy:                 http.ProxyFromEnvironment,
-			DialContext:           (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
-			ResponseHeaderTimeout: 10 * time.Minute,
-			IdleConnTimeout:       90 * time.Second,
-		},
+		cfg:     cfg,
+		home:    home,
+		prov:    prov,
 		now:     now,
 		say:     say,
 		dryRun:  dryRun,
@@ -283,8 +442,9 @@ func (e *Examiner) Start(ctx context.Context) (net.Addr, func() error, error) {
 	return ln.Addr(), closeFn, nil
 }
 
-// ServeHTTP proxies requests to the active ephemeral 5090 vLLM server once /v1/models is verified,
-// injecting Authorization: Bearer <apiKey>. While no examiner GPU is ready, it answers 503.
+// ServeHTTP proxies requests to the active ephemeral 5090 vLLM server once /v1/models is verified
+// over peer-verified TLS, injecting Authorization: Bearer <apiKey>. While no examiner GPU is ready,
+// it answers 503.
 func (e *Examiner) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	e.mu.RLock()
 	ready, proxy := e.ready, e.proxy
@@ -306,7 +466,7 @@ func (e *Examiner) persistState(st *examinerState) error {
 	defer e.fileMu.Unlock()
 	if st != nil && st.InstanceID != "" {
 		e.mu.RLock()
-		match := e.state.InstanceID == st.InstanceID && e.state.APIKey == st.APIKey
+		match := e.state.InstanceID == st.InstanceID && e.state.APIKey == st.APIKey && e.state.CertPEM == st.CertPEM
 		e.mu.RUnlock()
 		if !match {
 			return nil
@@ -315,18 +475,33 @@ func (e *Examiner) persistState(st *examinerState) error {
 	return writeExaminerState(e.home, st)
 }
 
-// setUpstream activates the local proxy ONLY if the active instance ID and API key still match
-// what was probed, preventing a stale background ProbeIfBooting from reviving a destroyed VM or
-// corrupting a replacement VM's state.
-func (e *Examiner) setUpstream(expectedID, upstream, apiKey string) (examinerState, bool, error) {
+// setUpstream activates the local proxy ONLY if the active instance ID, API key, and pinned peer
+// certificate still match what was probed, preventing a stale background ProbeIfBooting from
+// reviving a destroyed VM or corrupting a replacement VM's state.
+func (e *Examiner) setUpstream(expectedID, upstream, apiKey, certPEM string) (examinerState, bool, error) {
 	u, err := url.Parse(upstream)
 	if err != nil {
 		return examinerState{}, false, err
 	}
+	if u.Scheme != "https" {
+		return examinerState{}, false, fmt.Errorf("examiner upstream must use https, got %q", u.Scheme)
+	}
+	tlsCfg, err := examinerTLSConfig([]byte(certPEM), e.now)
+	if err != nil {
+		return examinerState{}, false, err
+	}
+	tr := &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		DialContext:           (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		TLSClientConfig:       tlsCfg,
+		TLSHandshakeTimeout:   15 * time.Second,
+		ResponseHeaderTimeout: 10 * time.Minute,
+		IdleConnTimeout:       90 * time.Second,
+	}
 	rp := &httputil.ReverseProxy{
-		Transport: e.proxyTrans,
+		Transport: tr,
 		Director: func(req *http.Request) {
-			req.URL.Scheme = u.Scheme
+			req.URL.Scheme = "https"
 			req.URL.Host = u.Host
 			req.Host = u.Host
 			req.Header.Set("Authorization", "Bearer "+apiKey)
@@ -338,26 +513,52 @@ func (e *Examiner) setUpstream(expectedID, upstream, apiKey string) (examinerSta
 		},
 	}
 	e.mu.Lock()
-	if expectedID == "" || e.state.InstanceID != expectedID || e.state.APIKey != apiKey {
+	if expectedID == "" || e.state.InstanceID != expectedID || e.state.APIKey != apiKey || e.state.CertPEM != certPEM {
 		e.mu.Unlock()
+		tr.CloseIdleConnections()
 		return examinerState{}, false, nil
 	}
+	oldTr := e.proxyTr
 	e.upstream = upstream
 	e.proxy = rp
+	e.proxyTr = tr
 	e.ready = true
 	e.state.Upstream = upstream
 	st := e.state
 	e.mu.Unlock()
+	if oldTr != nil {
+		oldTr.CloseIdleConnections()
+	}
 	return st, true, nil
+}
+
+func (e *Examiner) proxyOffline() {
+	e.mu.Lock()
+	oldTr := e.proxyTr
+	e.ready = false
+	e.proxy = nil
+	e.proxyTr = nil
+	e.upstream = ""
+	e.lastProbeErr = ""
+	e.mu.Unlock()
+	if oldTr != nil {
+		oldTr.CloseIdleConnections()
+	}
 }
 
 func (e *Examiner) clearState() {
 	e.mu.Lock()
+	oldTr := e.proxyTr
 	e.state = examinerState{}
 	e.ready = false
 	e.proxy = nil
+	e.proxyTr = nil
 	e.upstream = ""
+	e.lastProbeErr = ""
 	e.mu.Unlock()
+	if oldTr != nil {
+		oldTr.CloseIdleConnections()
+	}
 	_ = e.persistState(nil)
 }
 
@@ -368,11 +569,40 @@ func (e *Examiner) ensureLoaded() {
 		return
 	}
 	e.loaded = true
+	e.owner = loadOrCreateExaminerOwner(e.home)
 	if e.home != "" {
 		if st := readExaminerState(e.home); st != nil {
 			e.state = *st
 		}
 	}
+}
+
+func (e *Examiner) ownerID() string {
+	e.ensureLoaded()
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.owner
+}
+
+// ActiveSnapshot reports the live count (0 or 1), hourly price, and accrued spend today (UTC)
+// of any active examiner managed by this controller.
+func (e *Examiner) ActiveSnapshot(now time.Time) (live int, hourly float64, accrued float64) {
+	if e == nil {
+		return 0, 0, 0
+	}
+	e.ensureLoaded()
+	e.mu.RLock()
+	st := e.state
+	e.mu.RUnlock()
+	if st.InstanceID == "" {
+		return 0, 0, 0
+	}
+	start := st.Created
+	if start.IsZero() || start.After(now) {
+		start = now
+	}
+	rec := podRecord{Cost: st.Price, Start: start, End: now}
+	return 1, st.Price, rec.dollarsBetween(startOfDay(now), now)
 }
 
 func (e *Examiner) isBooting() bool {
@@ -394,28 +624,59 @@ func roundNeedingExam(w *Work) string {
 	return ""
 }
 
-func randomAPIKey() (string, error) {
-	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
+func randomAPIKey() (string, error) { return randomHex(32) }
+
+func (e *Examiner) noteProbeIssue(msg string) {
+	if msg == "" {
+		return
 	}
-	return hex.EncodeToString(b), nil
+	e.mu.Lock()
+	changed := e.lastProbeErr != msg
+	if changed {
+		e.lastProbeErr = msg
+	}
+	e.mu.Unlock()
+	if changed {
+		e.say("examiner HTTPS probe issue: %s", msg)
+	}
 }
 
-// probeModels verifies that the remote vLLM server responds 200 to GET /v1/models with Bearer
-// auth and is serving the pinned model ID.
-func (e *Examiner) probeModels(ctx context.Context, upstream, apiKey string) bool {
+// probeModels verifies over peer-verified pinned TLS that the remote vLLM server responds 200 to
+// GET /v1/models with Bearer auth and is serving the exact pinned model@revision.
+func (e *Examiner) probeModels(ctx context.Context, upstream, apiKey, certPEM string) bool {
+	u, err := url.Parse(upstream)
+	if err != nil || u.Scheme != "https" {
+		return false
+	}
+	tlsCfg, err := examinerTLSConfig([]byte(certPEM), e.now)
+	if err != nil {
+		e.noteProbeIssue(err.Error())
+		return false
+	}
+	tr := &http.Transport{
+		Proxy:               http.ProxyFromEnvironment,
+		DialContext:         (&net.Dialer{Timeout: 10 * time.Second}).DialContext,
+		TLSClientConfig:     tlsCfg,
+		TLSHandshakeTimeout: 10 * time.Second,
+	}
+	defer tr.CloseIdleConnections()
+	cl := &http.Client{Timeout: 10 * time.Second, Transport: tr}
 	req, err := http.NewRequestWithContext(ctx, "GET", strings.TrimRight(upstream, "/")+"/v1/models", nil)
 	if err != nil {
 		return false
 	}
 	req.Header.Set("Authorization", "Bearer "+apiKey)
-	resp, err := e.probeHTTP.Do(req)
+	resp, err := cl.Do(req)
 	if err != nil {
+		es := err.Error()
+		if strings.Contains(es, "x509:") || strings.Contains(es, "tls:") || strings.Contains(es, "pinned instance certificate") {
+			e.noteProbeIssue(es)
+		}
 		return false
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
+		e.noteProbeIssue(fmt.Sprintf("%s/v1/models returned HTTP %d", upstream, resp.StatusCode))
 		return false
 	}
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
@@ -428,6 +689,7 @@ func (e *Examiner) probeModels(ctx context.Context, upstream, apiKey string) boo
 		} `json:"data"`
 	}
 	if json.Unmarshal(raw, &out) != nil {
+		e.noteProbeIssue(fmt.Sprintf("%s/v1/models returned invalid JSON", upstream))
 		return false
 	}
 	wantID := e.cfg.Model
@@ -436,9 +698,13 @@ func (e *Examiner) probeModels(ctx context.Context, upstream, apiKey string) boo
 	}
 	for _, m := range out.Data {
 		if m.ID == wantID {
+			e.mu.Lock()
+			e.lastProbeErr = ""
+			e.mu.Unlock()
 			return true
 		}
 	}
+	e.noteProbeIssue(fmt.Sprintf("%s/v1/models missing expected model %q", upstream, wantID))
 	return false
 }
 
@@ -455,7 +721,7 @@ func (e *Examiner) recordEnded(inst ExaminerInstance, fallbackStart time.Time, r
 		start = now
 	}
 	if roundID == "" {
-		roundID = examinerLabelRound(inst.Label)
+		roundID = examinerLabelRound(inst.Label, e.ownerID())
 	}
 	e.onSpent(podRecord{
 		ID: inst.ID, Market: "vast", Handle: examinerLabelPrefix, GPU: "RTX 5090",
@@ -464,32 +730,98 @@ func (e *Examiner) recordEnded(inst ExaminerInstance, fallbackStart time.Time, r
 	})
 }
 
-// Reconcile brings the ephemeral 1x RTX 5090 examiner in line with /admin/work:
-//   - When no open round needs an exam, destroys any live/orphaned examiner instances at once.
-//   - When an open round has ExamAt == 0, ensures exactly one live RTX 5090 is running with a
-//     known per-instance API key, enforces hard --examiner-timeout TTL, probes /v1/models, and
-//     activates the local reverse proxy once verified.
-func (e *Examiner) Reconcile(ctx context.Context, w *Work, spentToday, dailyBudget float64) error {
+// EnforceTimeout checks owned examiner instances against the hard --examiner-timeout TTL and
+// destroys any expired instance WITHOUT querying the Stet server, so Stet outages can never
+// disable timeout enforcement.
+func (e *Examiner) EnforceTimeout(ctx context.Context) error {
 	if e == nil || e.prov == nil {
 		return nil
 	}
 	e.ensureLoaded()
-	needRound := roundNeedingExam(w)
+	owner := e.ownerID()
 	insts, err := e.prov.ListExaminers(ctx)
+	if err != nil {
+		return fmt.Errorf("listing examiner instances for timeout check: %w", err)
+	}
+	e.mu.RLock()
+	saved := e.state
+	e.mu.RUnlock()
+	owned := filterOwnedExaminers(insts, owner, saved.InstanceID)
+	now := e.now()
+
+	var firstErr error
+	foundSaved := false
+	for _, inst := range owned {
+		if inst.ID == saved.InstanceID {
+			foundSaved = true
+		}
+		var created time.Time
+		rid := ""
+		if inst.ID == saved.InstanceID {
+			created = saved.Created
+			rid = saved.RoundID
+		}
+		if created.IsZero() {
+			created = inst.Created
+		}
+		if created.IsZero() || now.Sub(created) <= e.cfg.Timeout {
+			continue
+		}
+		if e.dryRun {
+			e.say("would end timed-out examiner GPU (machine %s): exceeded --examiner-timeout (%s)", inst.ID, e.cfg.Timeout)
+			continue
+		}
+		if err := e.prov.EndExaminer(ctx, inst.ID); err != nil {
+			e.proxyOffline()
+			e.say("could not end timed-out examiner GPU (machine %s): %v", inst.ID, err)
+			if firstErr == nil {
+				firstErr = fmt.Errorf("ending timed-out examiner GPU %s: %w", inst.ID, err)
+			}
+			continue
+		}
+		e.say("ended examiner GPU (machine %s): exceeded --examiner-timeout (%s)", inst.ID, e.cfg.Timeout)
+		e.recordEnded(inst, created, rid, "exceeded examiner timeout")
+		if inst.ID == saved.InstanceID {
+			e.clearState()
+			saved = examinerState{}
+		}
+	}
+	if !foundSaved && saved.InstanceID != "" && !saved.Created.IsZero() && now.Sub(saved.Created) > e.cfg.Timeout && !e.dryRun {
+		e.clearState()
+	}
+	return firstErr
+}
+
+// Reconcile brings the ephemeral 1x RTX 5090 examiner in line with /admin/work:
+//   - Scopes all discovery, adoption, and teardown strictly to this deployment's owner ID.
+//   - When no open round needs an exam, destroys every owned examiner instance at once.
+//   - When an open round has ExamAt == 0, ensures at most one owned live RTX 5090 is running with
+//     a known per-instance API key and pinned TLS certificate, enforces hard --examiner-timeout,
+//     refuses to rent a replacement until any live owned orphan is confirmed destroyed, respects
+//     fleet --max / --max-hourly / --daily-budget, and activates the local reverse proxy only once
+//     https://<ip>:<port>/v1/models passes peer-verified TLS.
+func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget) error {
+	if e == nil || e.prov == nil {
+		return nil
+	}
+	e.ensureLoaded()
+	owner := e.ownerID()
+	needRound := roundNeedingExam(w)
+	rawInsts, err := e.prov.ListExaminers(ctx)
 	if err != nil {
 		return fmt.Errorf("listing examiner instances: %w", err)
 	}
-	now := e.now()
-
 	e.mu.RLock()
 	saved := e.state
 	wasReady := e.ready
 	wasUpstream := e.upstream
 	e.mu.RUnlock()
+	insts := filterOwnedExaminers(rawInsts, owner, saved.InstanceID)
+	now := e.now()
 
-	// Case 1: no open round needs an exam -> tear down every examiner instance immediately.
+	// Case 1: no open round needs an exam -> tear down every owned examiner instance immediately.
 	if needRound == "" {
-		allEnded := true
+		var firstEndErr error
 		for _, inst := range insts {
 			if e.dryRun {
 				e.say("would end examiner GPU (machine %s): no open round needs an exam", inst.ID)
@@ -497,7 +829,9 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, spentToday, dailyBudg
 			}
 			if err := e.prov.EndExaminer(ctx, inst.ID); err != nil {
 				e.say("could not end examiner GPU (machine %s): %v", inst.ID, err)
-				allEnded = false
+				if firstEndErr == nil {
+					firstEndErr = fmt.Errorf("ending examiner GPU %s: %w", inst.ID, err)
+				}
 				continue
 			}
 			var fallbackStart time.Time
@@ -520,14 +854,9 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, spentToday, dailyBudg
 		if e.dryRun {
 			return nil
 		}
-		if !allEnded {
-			// Keep InstanceID persisted so the next tick retries teardown, while taking proxy offline.
-			e.mu.Lock()
-			e.ready = false
-			e.proxy = nil
-			e.upstream = ""
-			e.mu.Unlock()
-			return nil
+		if firstEndErr != nil {
+			e.proxyOffline()
+			return firstEndErr
 		}
 		if saved.InstanceID != "" || wasReady {
 			e.clearState()
@@ -535,15 +864,18 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, spentToday, dailyBudg
 		return nil
 	}
 
-	// Case 2: needRound needs an exam. Find if our known instance is alive & within TTL; destroy
-	// any stopped, expired, duplicate, or orphaned instances (orphans have unknown random keys).
+	// Case 2: needRound needs an exam. Find if our known owned instance is alive, has a pinned
+	// cert + key, and is within TTL; destroy any stopped, expired, duplicate, or orphaned owned
+	// instances. Never rent a replacement while any live owned orphan fails deletion.
 	var active *ExaminerInstance
+	var strayEndErr error
 	for i := range insts {
 		inst := insts[i]
 		keep := inst.State != "stopped" &&
 			saved.InstanceID != "" &&
 			inst.ID == saved.InstanceID &&
 			saved.APIKey != "" &&
+			saved.CertPEM != "" &&
 			active == nil
 		if keep {
 			created := saved.Created
@@ -556,13 +888,7 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, spentToday, dailyBudg
 					return nil
 				}
 				if err := e.prov.EndExaminer(ctx, inst.ID); err != nil {
-					// Take proxy offline but keep saved.InstanceID so we retry destroying this VM
-					// on the next tick instead of leaking it and renting a duplicate 5090.
-					e.mu.Lock()
-					e.ready = false
-					e.proxy = nil
-					e.upstream = ""
-					e.mu.Unlock()
+					e.proxyOffline()
 					e.say("could not end timed-out examiner GPU (machine %s): %v", inst.ID, err)
 					return fmt.Errorf("ending timed-out examiner GPU %s: %w", inst.ID, err)
 				}
@@ -583,6 +909,9 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, spentToday, dailyBudg
 		}
 		if err := e.prov.EndExaminer(ctx, inst.ID); err != nil {
 			e.say("could not end stray examiner GPU (machine %s): %v", inst.ID, err)
+			if strayEndErr == nil {
+				strayEndErr = fmt.Errorf("ending stray examiner GPU %s: %w", inst.ID, err)
+			}
 			continue
 		}
 		var fallbackStart time.Time
@@ -596,17 +925,17 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, spentToday, dailyBudg
 	}
 
 	if active != nil {
-		if active.State == "running" && active.PublicIP != "" && active.HostPort != "" {
-			upstream := "http://" + net.JoinHostPort(active.PublicIP, active.HostPort)
+		if active.State != "stopped" && active.PublicIP != "" && active.HostPort != "" {
+			upstream := "https://" + net.JoinHostPort(active.PublicIP, active.HostPort)
 			if !wasReady || wasUpstream != upstream {
-				if e.probeModels(ctx, upstream, saved.APIKey) {
-					if st, ok, err := e.setUpstream(saved.InstanceID, upstream, saved.APIKey); err == nil && ok {
+				if e.probeModels(ctx, upstream, saved.APIKey, saved.CertPEM) {
+					if st, ok, err := e.setUpstream(saved.InstanceID, upstream, saved.APIKey, saved.CertPEM); err == nil && ok {
 						_ = e.persistState(&st)
 						boot := now.Sub(saved.Created).Round(time.Second)
 						if saved.Created.IsZero() || boot < 0 {
 							boot = 0
 						}
-						e.say("examiner GPU ready in %s (%s -> %s, %s)", boot, e.cfg.Addr, upstream, e.cfg.Model)
+						e.say("examiner GPU ready in %s (%s -> %s, %s, TLS pinned)", boot, e.cfg.Addr, upstream, e.cfg.Model)
 					}
 				}
 			}
@@ -614,13 +943,23 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, spentToday, dailyBudg
 		return nil
 	}
 
+	// Do NOT rent a replacement while an owned live orphan could not be confirmed destroyed.
+	if strayEndErr != nil {
+		e.proxyOffline()
+		return strayEndErr
+	}
+
 	// Saved instance is no longer listed -> clear stale state before renting a new one.
 	if saved.InstanceID != "" || wasReady {
 		e.clearState()
 	}
 
-	if dailyBudget > 0 && spentToday >= dailyBudget {
-		e.say("not renting examiner GPU for %s: about $%.2f spent today, and the daily budget is $%.2f", needRound, spentToday, dailyBudget)
+	if budget.MaxWorkers > 0 && budget.LiveWorkers >= budget.MaxWorkers {
+		e.say("not renting examiner GPU for %s: %d machines already live and --max is %d; waiting for a slot", needRound, budget.LiveWorkers, budget.MaxWorkers)
+		return nil
+	}
+	if budget.DailyBudget > 0 && budget.SpentToday >= budget.DailyBudget {
+		e.say("not renting examiner GPU for %s: about $%.2f spent today, and the daily budget is $%.2f", needRound, budget.SpentToday, budget.DailyBudget)
 		return nil
 	}
 
@@ -632,24 +971,43 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, spentToday, dailyBudg
 		e.say("Vast.ai has no 1x RTX 5090 free for %s examiner under $%.2f/h; retrying on next tick", needRound, e.cfg.MaxPrice)
 		return nil
 	}
+	var fitting []ExaminerOffer
+	for _, off := range offers {
+		if budget.MaxHourly <= 0 || budget.HourlyNow+off.Price <= budget.MaxHourly+1e-9 {
+			fitting = append(fitting, off)
+		}
+	}
+	if len(fitting) == 0 {
+		e.say("not renting examiner GPU for %s: cheapest 1x RTX 5090 ($%.2f/h) plus $%.2f/h live exceeds --max-hourly $%.2f/h",
+			needRound, offers[0].Price, budget.HourlyNow, budget.MaxHourly)
+		return nil
+	}
 	if e.dryRun {
-		e.say("would rent examiner GPU on Vast.ai for %s: %s at $%.2f/h (offer %s)", needRound, offers[0].Card, offers[0].Price, offers[0].ID)
+		e.say("would rent examiner GPU on Vast.ai for %s: %s at $%.2f/h (offer %s)", needRound, fitting[0].Card, fitting[0].Price, fitting[0].ID)
 		return nil
 	}
 	apiKey, err := randomAPIKey()
 	if err != nil {
 		return err
 	}
-	label := examinerLabelPrefix + "-" + needRound + "-" + apiKey[:8]
-	for _, off := range offers {
+	certPEM, keyPEM, err := generateExaminerCert(now, e.cfg.Timeout)
+	if err != nil {
+		return fmt.Errorf("generating examiner TLS certificate: %w", err)
+	}
+	label := examinerLabelPrefix + "-" + owner + "-" + needRound + "-" + apiKey[:8]
+	ttlSeconds := max(60, int(e.cfg.Timeout.Seconds()))
+	for _, off := range fitting {
 		id, rerr := e.prov.RentExaminer(ctx, off.ID, ExaminerLaunch{
-			Label:    label,
-			Image:    e.cfg.Image,
-			Model:    e.cfg.Model,
-			Revision: e.cfg.Revision,
-			APIKey:   apiKey,
-			HFToken:  e.hfToken,
-			DiskGB:   examinerDiskGB,
+			Label:      label,
+			Image:      e.cfg.Image,
+			Model:      e.cfg.Model,
+			Revision:   e.cfg.Revision,
+			APIKey:     apiKey,
+			CertPEM:    certPEM,
+			KeyPEM:     keyPEM,
+			TTLSeconds: ttlSeconds,
+			HFToken:    e.hfToken,
+			DiskGB:     examinerDiskGB,
 		})
 		if errors.Is(rerr, errNoRoom) {
 			continue
@@ -661,53 +1019,60 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, spentToday, dailyBudg
 			InstanceID: id,
 			RoundID:    needRound,
 			APIKey:     apiKey,
+			CertPEM:    string(certPEM),
 			Price:      off.Price,
 			Created:    now,
 		}
 		e.mu.Lock()
+		oldTr := e.proxyTr
 		e.state = st
 		e.ready = false
 		e.proxy = nil
+		e.proxyTr = nil
 		e.upstream = ""
 		e.mu.Unlock()
+		if oldTr != nil {
+			oldTr.CloseIdleConnections()
+		}
 		if err := e.persistState(&st); err != nil {
 			e.say("warning: could not save examiner.json: %v", err)
 		}
-		e.say("rented examiner GPU on Vast.ai for %s: %s, $%.2f/h (machine %s); warming %s", needRound, off.Card, off.Price, id, e.cfg.Model)
+		e.say("rented examiner GPU on Vast.ai for %s: %s, $%.2f/h (machine %s); warming %s (TLS pinned, TTL %s)", needRound, off.Card, off.Price, id, e.cfg.Model, e.cfg.Timeout)
 		return nil
 	}
-	e.say("none of the %d RTX 5090 offers tried for %s examiner were available; retrying on next tick", len(offers), needRound)
+	e.say("none of the %d RTX 5090 offers tried for %s examiner were available; retrying on next tick", len(fitting), needRound)
 	return nil
 }
 
-// ProbeIfBooting polls Vast + /v1/models once when an examiner GPU is currently booting so the
-// local proxy turns ready seconds after vLLM loads rather than waiting a full scale interval.
+// ProbeIfBooting polls Vast + https://<ip>:<port>/v1/models (over pinned TLS) once when an
+// examiner GPU is currently booting so the local proxy turns ready seconds after vLLM loads.
 func (e *Examiner) ProbeIfBooting(ctx context.Context) {
 	if e == nil || e.prov == nil || !e.isBooting() {
 		return
 	}
+	owner := e.ownerID()
 	e.mu.RLock()
 	saved := e.state
 	ready := e.ready
 	e.mu.RUnlock()
-	if ready || saved.InstanceID == "" || saved.APIKey == "" {
+	if ready || saved.InstanceID == "" || saved.APIKey == "" || saved.CertPEM == "" {
 		return
 	}
-	insts, err := e.prov.ListExaminers(ctx)
+	rawInsts, err := e.prov.ListExaminers(ctx)
 	if err != nil {
 		return
 	}
-	for _, inst := range insts {
-		if inst.ID == saved.InstanceID && inst.State == "running" && inst.PublicIP != "" && inst.HostPort != "" {
-			upstream := "http://" + net.JoinHostPort(inst.PublicIP, inst.HostPort)
-			if e.probeModels(ctx, upstream, saved.APIKey) {
-				if st, ok, err := e.setUpstream(saved.InstanceID, upstream, saved.APIKey); err == nil && ok {
+	for _, inst := range filterOwnedExaminers(rawInsts, owner, saved.InstanceID) {
+		if inst.ID == saved.InstanceID && inst.State != "stopped" && inst.PublicIP != "" && inst.HostPort != "" {
+			upstream := "https://" + net.JoinHostPort(inst.PublicIP, inst.HostPort)
+			if e.probeModels(ctx, upstream, saved.APIKey, saved.CertPEM) {
+				if st, ok, err := e.setUpstream(saved.InstanceID, upstream, saved.APIKey, saved.CertPEM); err == nil && ok {
 					_ = e.persistState(&st)
 					boot := e.now().Sub(saved.Created).Round(time.Second)
 					if saved.Created.IsZero() || boot < 0 {
 						boot = 0
 					}
-					e.say("examiner GPU ready in %s (%s -> %s, %s)", boot, e.cfg.Addr, upstream, e.cfg.Model)
+					e.say("examiner GPU ready in %s (%s -> %s, %s, TLS pinned)", boot, e.cfg.Addr, upstream, e.cfg.Model)
 				}
 			}
 			return
@@ -747,7 +1112,7 @@ func (f *Fleet) startExaminer(ctx context.Context) (func() error, error) {
 		return nil, err
 	}
 	f.examiner = ex
-	f.say("ephemeral examiner proxy listening on http://%s (1x RTX 5090 up to $%.2f/h, timeout %s)", addr.String(), ex.cfg.MaxPrice, ex.cfg.Timeout)
+	f.say("ephemeral examiner proxy listening on http://%s (1x RTX 5090 up to $%.2f/h, timeout %s, pinned TLS upstream)", addr.String(), ex.cfg.MaxPrice, ex.cfg.Timeout)
 	go func() {
 		t := time.NewTicker(10 * time.Second)
 		defer t.Stop()

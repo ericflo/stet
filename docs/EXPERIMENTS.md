@@ -699,6 +699,13 @@ GPU scoring)*.
        `db_adv_ppl_ernie03b − db_fineweb2 = −0.00235` (`[−0.00411, −0.00054]`, `P(<=0)=0.995`,
        meaning cross-family ERNIE-0.3B lowest-PPL loses to `fineweb2` under `Inkling-2-Mini`!);
        `db_fineweb2 − db_adv_tiny_lang_boost = +0.03642` (`[+0.03518, +0.03754]`, `P(<=0)=0.000`).
+       On `db_adv_exam_lang_mix` (`+0.05358` vs `db_fineweb2` `+0.04804`, margin `+0.00553`, 95%
+       item-resampling CI `[+0.00436, +0.00681]` spanning the provisional `0.005` record margin):
+       substituting `fineweb2`'s CJK item gains drops the lead to `+0.00136`, locating most of the
+       difference in CJK. Because the two training streams differed in both prefiltering and
+       language weighting, this experiment cannot isolate which change caused the gap; an
+       apples-to-apples comparison of crawl-share vs exam-share weighting on the identical filtered
+       pool and training budget across held-out draws and seeds is the right follow-up test.
        Multi-seed paired gain deltas (`s1 − s0`): `p9_reader_v2` `−0.00081 / −0.00098 / −0.00017`,
        `p9_fineweb2` `−0.00029 / +0.00101 / +0.00253`, `db_unedited` `+0.00009 / −0.00013 / −0.00015`.
        Between-curator rotation survival across all 3 Inkling draws remains `103.2%–116.6%` despite

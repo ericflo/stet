@@ -438,12 +438,21 @@ func (p Policy) decideNext(w *Work, workers []*Worker, spentToday float64, now t
 	early, renting := p.earlyMachines(p.earlyWanted(w, now), next, workers, now, ending)
 	waiting := p.targetHolding(w, held, now, early)
 	d := Decision{Target: min(waiting+working, p.MaxWorkers)}
-	free, starting := 0, 0
+	earliestDrawn := int64(0)
+	for _, r := range w.Rounds {
+		if r.DrawnAt > 0 && (earliestDrawn == 0 || r.DrawnAt < earliestDrawn) {
+			earliestDrawn = r.DrawnAt
+		}
+	}
+	free, freshFree, starting := 0, 0, 0
 	var idle, waitingIdle []*Worker
 	for _, wk := range workers {
 		switch st := wk.state(now, p); st {
 		case "free":
 			free++
+			if wk.Machine == nil || earliestDrawn == 0 || wk.Machine.LastSeen < earliestDrawn {
+				freshFree++
+			}
 			if wk.Machine != nil && wk.Machine.Busy != "" {
 				d.Release = append(d.Release, wk)
 			}
@@ -525,21 +534,52 @@ func (p Policy) decideNext(w *Work, workers []*Worker, spentToday float64, now t
 		}
 		return d
 	}
-	if freshNeed := p.freshGraders(w); freshNeed > starting && len(waitingIdle) > 0 {
-		extra := freshNeed - starting
-		if d.Live+extra > p.MaxWorkers {
-			drop := min(d.Live+extra-p.MaxWorkers, len(waitingIdle))
-			sort.SliceStable(waitingIdle, func(i, j int) bool { return waitingIdle[i].Speed < waitingIdle[j].Speed })
-			for _, wk := range waitingIdle[:drop] {
-				d.End = append(d.End, Ending{Worker: wk, Why: "idle while a fresh machine is needed to break a dispute"})
-				d.Live--
-			}
+	if d.Live > p.MaxWorkers && len(waitingIdle) > 0 {
+		drop := min(d.Live-p.MaxWorkers, len(waitingIdle))
+		sort.SliceStable(waitingIdle, func(i, j int) bool { return waitingIdle[i].Speed < waitingIdle[j].Speed })
+		for _, wk := range waitingIdle[:drop] {
+			d.End = append(d.End, Ending{Worker: wk, Why: "idle while a slot is needed under --max"})
+			d.Live--
 		}
-		d.Target = min(max(d.Target, d.Live+extra), p.MaxWorkers)
+		waitingIdle = waitingIdle[drop:]
+	}
+	freshNeed := p.freshGraders(w)
+	shortFreshKeys := 0
+	if freshNeed > starting && len(waitingIdle) > 0 {
+		wantExtra := freshNeed - starting
+		extra := min(wantExtra, freshFree)
+		shortFreshKeys = wantExtra - extra
+		if extra > 0 {
+			if d.Live+extra > p.MaxWorkers {
+				drop := min(d.Live+extra-p.MaxWorkers, len(waitingIdle))
+				sort.SliceStable(waitingIdle, func(i, j int) bool { return waitingIdle[i].Speed < waitingIdle[j].Speed })
+				for _, wk := range waitingIdle[:drop] {
+					d.End = append(d.End, Ending{Worker: wk, Why: "idle while a fresh machine is needed to break a dispute"})
+					d.Live--
+				}
+			}
+			d.Target = min(max(d.Target, d.Live+extra), p.MaxWorkers)
+		}
 	}
 	d.Launch = max(0, min(d.Target, p.MaxWorkers)-d.Live)
+	disputedOnly := freshNeed > 0 && early == 0 && p.runners(w) == 0 && w.FarmWaiting == 0 && (!p.LongFarm || w.FarmLongWaiting == 0)
+	if disputedOnly {
+		for _, r := range w.Rounds {
+			if r.GradesWanted > 0 && !r.BaselineDisputed && r.FreshGradersWanted < r.GradesWanted {
+				disputedOnly = false
+				break
+			}
+		}
+	}
+	if disputedOnly && d.Launch > freshFree {
+		shortFreshKeys = max(shortFreshKeys, d.Launch-freshFree)
+		d.Launch = freshFree
+	}
 	if d.Launch > free {
 		d.Launch, d.Note = free, fmt.Sprintf("only %d keys are free: make more with `stet-cloud keys --add N`", free)
+	}
+	if shortFreshKeys > 0 && d.Note == "" {
+		d.Note = fmt.Sprintf("need %d more fresh key(s) to break a dispute (all %d keys are in use or already participated in this round): run `stet-cloud keys --add %d`", shortFreshKeys, len(workers), shortFreshKeys)
 	}
 	if d.Launch > 0 && p.DailyBudget > 0 && spentToday >= p.DailyBudget {
 		d.Launch, d.Note = 0, fmt.Sprintf("about $%.2f spent today, and the daily budget is $%.2f", spentToday, p.DailyBudget)

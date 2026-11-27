@@ -114,15 +114,22 @@ What it needs:
   the ephemeral 1× NVIDIA RTX 5090 backend whenever `--examiner-addr 127.0.0.1:8000` is enabled
   (on `stet-cloud scale --follow` or standalone `stet-cloud examiner`):
   1. Watches `GET /api/v1/admin/work` for any open round with `exam_at == 0`.
-  2. Rents one verified 1× RTX 5090 on Vast.ai running the immutable pinned image
+  2. Rents one verified 1× RTX 5090 on Vast.ai (counting against `--max`, `--max-hourly`,
+     `--daily-budget`, `status`, and live spend from launch) running the immutable pinned image
      `vllm/vllm-openai@sha256:d24e5fc73f0b859bd76c9d2f6f6fa4da3001afd7637f2610876420f3027ea6c7`
-     with a fresh random 256-bit `--api-key` and `--served-model-name thinkingmachines/Inkling-2-Mini@c9d028302cd0f035fdf8e7e91f089a4ce94d2195`.
-  3. Verifies `/v1/models` returns the pinned revision, then opens the loopback reverse proxy on
-     `127.0.0.1:8000` injecting `Authorization: Bearer <api_key>` (returning `503` while warming
-     so `stet-examine`'s retry loop waits cleanly).
-  4. Destroys the Vast.ai instance immediately once the exam is posted (`exam_at > 0`) or hard
-     `--examiner-timeout` (`45m`) expires, cleaning up any orphaned `stet-examiner*` instances on
-     restart and logging examiner spend to `spent.jsonl`.
+     with a fresh random 256-bit `--api-key`, a fresh per-instance ECDSA P-256 TLS certificate
+     (`--ssl-certfile`/`--ssl-keyfile`), a persistent deployment owner label (`examiner-owner`) so
+     separate deployments sharing a Vast account never delete each other, a container-side
+     self-destruct TTL watchdog (`STET_EXAMINER_TTL_SECONDS`) that survives controller exit, and
+     `--served-model-name thinkingmachines/Inkling-2-Mini@c9d028302cd0f035fdf8e7e91f089a4ce94d2195`.
+  3. Verifies `https://<ip>:<port>/v1/models` returns the pinned revision over a peer-verified
+     pinned-certificate TLS connection (never plaintext HTTP), then opens the loopback reverse proxy
+     on `127.0.0.1:8000` forwarding over that same pinned TLS transport with `Authorization: Bearer <api_key>`
+     (returning `503` while warming so `stet-examine`'s retry loop waits cleanly).
+  4. Destroys its owned Vast.ai instance immediately once the exam is posted (`exam_at > 0`) or
+     once hard `--examiner-timeout` (`45m`) expires — enforced even during Stet server outages,
+     requiring confirmed deletion of any owned live orphan before renting a replacement, and logging
+     examiner spend to `spent.jsonl`.
   Cold-start measured end-to-end on a live Vast.ai 1× RTX 5090 (`$0.619/h`): container start
   `125.6s`, model pull + `/v1/models` verified `+141.9s` (`267.5s = 4.46 min` total cold boot),
   640 Draw B drafts via shipped `synthesize_reasoning()` `588.7s` (`627/640 = 98.0%` kept) ->
@@ -581,14 +588,26 @@ soon as `/api/v1/season` names it:
 stet upgrade && stet login --handle stet    # the new client, and the organisers' account made again
 stet doctor                                 # verify torch/transformers match s3.json
 
-# 2. Rebuild stet-cloud and update ~/.config/systemd/user/stet-cloud.service flags
-#    (replace Season 2's --max 8 --max-hourly 16 --exam-after 5m with Season 3's 6, 4, 25m):
+# 2. Rebuild stet-cloud and update BOTH ~/.config/systemd/user/stet-cloud.service
+#    and ~/.config/systemd/user/stet-examine.service for Season 3:
+#    - stet-cloud.service: replace Season 2's --max 8 --max-hourly 16 --exam-after 5m
+#      with --max 6 --max-hourly 4 --exam-after 25m AND add --examiner-addr 127.0.0.1:8000
+#    - stet-examine.service: set Environment=STET_EXAMINER_LLM_URL=http://127.0.0.1:8000/v1
 (cd cloud && go build -o ~/.local/bin/stet-cloud .)
 sed -i 's/--max 8/--max 6/; s/--max-hourly 16/--max-hourly 4/; s/--exam-after 5m/--exam-after 25m/' ~/.config/systemd/user/stet-cloud.service
+grep -Eq '^[[:space:]]*ExecStart=.*--examiner-addr' ~/.config/systemd/user/stet-cloud.service || \
+  sed -i '/^ExecStart=/ s/scale --follow/scale --follow --examiner-addr 127.0.0.1:8000/' ~/.config/systemd/user/stet-cloud.service
+grep -Eq '^[[:space:]]*Environment=.*STET_EXAMINER_LLM_URL=' ~/.config/systemd/user/stet-examine.service || \
+  sed -i '/^\[Service\]/a Environment=STET_EXAMINER_LLM_URL=http://127.0.0.1:8000/v1' ~/.config/systemd/user/stet-examine.service
 systemctl --user daemon-reload
-systemctl --user restart stet-examine stet-cloud
+systemctl --user restart stet-cloud stet-examine
 
-# 3. Enter the Season 3 reference curators:
+# 3. Verify both unit configs and the loopback examiner proxy BEFORE submitting reference curators:
+systemctl --user show -p ExecStart stet-cloud | grep -F -- '--examiner-addr 127.0.0.1:8000'
+systemctl --user show -p Environment stet-examine | grep -F 'STET_EXAMINER_LLM_URL=http://127.0.0.1:8000/v1'
+test "$(curl -s --retry 5 --retry-connrefused --retry-delay 1 -o /dev/null -w '%{http_code}' http://127.0.0.1:8000/v1/models)" = "503"  # idle proxy is listening
+
+# 4. Enter the Season 3 reference curators:
 for d in fineweb2 reader dclm tidy identity english heuristic fineweb-edu mimic; do stet submit examples/$d --yes; done
 ```
 

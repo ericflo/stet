@@ -1859,3 +1859,184 @@ func TestExamWaitTimeoutDoesNotBurnAttemptsOrReofferPreExamGrade(t *testing.T) {
 	}
 	w.check()
 }
+
+// Review 11 P1 #1: when rd.InitSHA is unset (e.g. examiner CPU init failed) and two established
+// graders report identical baseline loss (6.000) and script gain (+0.050) but DIFFERENT init_sha256,
+// they MUST NOT be pooled into a rated result. The server must treat the round as disputed, leave
+// BaselineN=0 and rd.InitSHA empty, request an independent measurement, and either resolve once a
+// 3rd grader establishes consensus OR close unrated with zero curator penalty past ReplicaWait.
+func TestConflictingInitSHAWIthEqualBaselinesDoesNotSettleRated(t *testing.T) {
+	initA := strings.Repeat("a", 64)
+	initB := strings.Repeat("b", 64)
+	tokA := strings.Repeat("1", 64)
+
+	setupConflict := func(t *testing.T) (*world, *actor, int, []*actor) {
+		t.Helper()
+		pub, priv := newKey()
+		w := newWorld(t, pub)
+		w.app.season.Student = map[string]any{"kind": "hf_topreset", "repo": "baidu/ERNIE-4.5-0.3B-Base-PT"}
+		w.app.season.Baselines.PerRound = 2
+		anchor := w.join("anchor-one", priv)
+		g := w.volunteers("bob", "carol", "dave")
+		w.submit(w.join("owner-0", nil), "entry-0", "print(0)")
+		idx := w.drawWithoutExam()
+		ce := w.claim(anchor, true)
+		if code, _ := w.edit(anchor, ce, "0\n1\n"); code != 200 {
+			t.Fatalf("edit: HTTP %d", code)
+		}
+		c0, c1 := w.claimEarly(g[0]), w.claimEarly(g[1])
+		w.exam(idx)
+		sendWithInit := func(a *actor, c *claimed, initSHA string) (int, string) {
+			p := w.result(c, 5.950, 6.000)
+			p["train"] = map[string]any{"init_sha256": initSHA}
+			p["baseline"].(map[string]any)["init_sha256"] = initSHA
+			p["script"].(map[string]any)["tokens_sha256"] = tokA
+			var ack struct {
+				Status string `json:"status"`
+				Error  string `json:"error"`
+			}
+			code := a.do("POST", fmt.Sprintf("/api/v1/jobs/%d/result", c.Job.ID), p, &ack)
+			if ack.Error != "" {
+				return code, ack.Error
+			}
+			return code, ack.Status
+		}
+
+		if code, st := sendWithInit(g[0], c0, initA); code != 200 || st != "pending" {
+			t.Fatalf("bob (initA): HTTP %d %s", code, st)
+		}
+		if code, st := sendWithInit(g[1], c1, initB); code != 200 || st != "pending" {
+			t.Fatalf("carol (initB, equal baseline 6.000) must NOT settle immediately: HTTP %d %s", code, st)
+		}
+		w.app.st.view(func(s *State) {
+			rd := s.Rounds[idx]
+			if rd.Status != "open" || rd.InitSHA != "" || rd.BaselineN != 0 || !w.app.baselineDisputed(s, rd) {
+				t.Fatalf("conflicting InitSHA with equal baselines: status=%s init=%q baseN=%d disputed=%v",
+					rd.Status, rd.InitSHA, rd.BaselineN, w.app.baselineDisputed(s, rd))
+			}
+		})
+		if wk := w.work(anchor).Rounds[0]; !wk.BaselineDisputed || wk.BaselinesWanted != 1 || wk.GradesWanted != 1 {
+			t.Fatalf("work must request independent measurement for conflicting InitSHA: %+v", wk)
+		}
+		return w, anchor, idx, g
+	}
+
+	t.Run("unresolved_closes_unrated_after_replica_wait", func(t *testing.T) {
+		w, _, idx, _ := setupConflict(t)
+		w.pass(w.cfg.ReplicaWait + time.Minute)
+		if w.settled(idx) != 1 {
+			t.Fatalf("expected unresolved conflicting-InitSHA round to close after ReplicaWait")
+		}
+		w.app.st.view(func(s *State) {
+			rd := s.Rounds[idx]
+			if rd.BaselineLoss != nil || rd.BaselineN != 0 || len(rd.BaseItems) != 0 || rd.InitSHA != "" {
+				t.Fatalf("closed unresolved InitSHA round must have empty baseline & init: loss=%v n=%d items=%d init=%q",
+					rd.BaselineLoss, rd.BaselineN, len(rd.BaseItems), rd.InitSHA)
+			}
+		})
+		e := w.entry(idx, "entry-0")
+		if !e.Void || e.Valid {
+			t.Fatalf("entry must close void/unrated (not valid +0.050!): %+v", e)
+		}
+		w.check()
+	})
+
+	t.Run("third_grader_resolves_init_sha_consensus", func(t *testing.T) {
+		w, _, idx, g := setupConflict(t)
+		c2 := w.asked(g[2], true)
+		p2 := w.result(c2, 5.950, 6.000)
+		p2["train"] = map[string]any{"init_sha256": initA}
+		p2["baseline"].(map[string]any)["init_sha256"] = initA
+		p2["script"].(map[string]any)["tokens_sha256"] = tokA
+		if code := g[2].do("POST", fmt.Sprintf("/api/v1/jobs/%d/result", c2.Job.ID), p2, nil); code != 200 {
+			t.Fatalf("dave (initA): HTTP %d", code)
+		}
+		if w.settled(idx) != 1 {
+			t.Fatalf("expected round to settle once 3rd grader locked initA consensus")
+		}
+		w.app.st.view(func(s *State) {
+			rd := s.Rounds[idx]
+			if rd.InitSHA != initA || rd.BaselineN != 2 || rd.BaselineLoss == nil || math.Abs(*rd.BaselineLoss-6.0) > 1e-6 {
+				t.Fatalf("resolved initA round: init=%q baseN=%d loss=%v", rd.InitSHA, rd.BaselineN, rd.BaselineLoss)
+			}
+		})
+		e := w.entry(idx, "entry-0")
+		if e.Void || !e.Valid || e.Gain == nil || math.Abs(*e.Gain-0.050) > 1e-6 {
+			t.Fatalf("resolved initA entry: %+v", e)
+		}
+		w.check()
+	})
+}
+
+// Review 11 P2 #2: a numerical grade dispute (+0.010 vs +0.090 against tol 0.012) with no 3rd
+// grader online yet MUST remain open and claimable through ReplicaWait (exposing GradesWanted=1
+// and FreshGradersWanted=1 on /admin/work so stet-cloud can supply a deciding grader), then apply
+// the documented midpoint fallback only after ReplicaWait expires.
+func TestNumericalGradeDisputeWaitsThroughReplicaWaitForDecidingGrade(t *testing.T) {
+	setupNumTie := func(t *testing.T) (*world, *actor, int, []*actor) {
+		t.Helper()
+		pub, priv := newKey()
+		w := newWorld(t, pub)
+		w.app.season.Tolerance[w.cfg.Scale] = Tolerance{Grade: 0.012, Baseline: 0.015, Run: 0.015}
+		anchor := w.join("anchor-one", priv)
+		g := w.volunteers("bob", "carol", "dave")
+		w.submit(w.join("owner-0", nil), "entry-0", "print(0)")
+		idx := w.drawWithoutExam()
+		ce := w.claim(anchor, true)
+		if code, _ := w.edit(anchor, ce, "0\n1\n"); code != 200 {
+			t.Fatalf("edit: HTTP %d", code)
+		}
+		c0, c1 := w.claimEarly(g[0]), w.claimEarly(g[1])
+		w.exam(idx)
+		// Both report identical baseline 6.000, but gains +0.010 (loss 5.990) vs +0.090 (loss 5.910) -> diff 0.080 > 0.012!
+		if code, st := w.send(g[0], c0, 5.990, 6.000); code != 200 || st != "pending" {
+			t.Fatalf("bob (+0.010): HTTP %d %s", code, st)
+		}
+		if code, st := w.send(g[1], c1, 5.910, 6.000); code != 200 || st != "pending" {
+			t.Fatalf("carol (+0.090) must NOT immediately settle midpoint: HTTP %d %s", code, st)
+		}
+		w.app.st.view(func(s *State) {
+			if en := s.inRound[idx][0]; en.Status != "open" {
+				t.Fatalf("numerical grade dispute settled immediately (%s) instead of waiting ReplicaWait", en.Status)
+			}
+		})
+		if wk := w.work(anchor).Rounds[0]; wk.GradesWanted != 1 {
+			t.Fatalf("work must expose GradesWanted=1 for numerical grade dispute: %+v", wk)
+		}
+		return w, anchor, idx, g
+	}
+
+	t.Run("third_grader_breaks_numerical_tie_within_replica_wait", func(t *testing.T) {
+		w, _, idx, g := setupNumTie(t)
+		w.pass(w.cfg.ReplicaWait / 2)
+		c2 := w.claim(g[2], false)
+		if c2.Job == nil || c2.Job.Kind != "grade" {
+			t.Fatalf("expected 3rd grader to receive deciding grade, got %+v", c2.Job)
+		}
+		// 3rd grader agrees with bob (+0.012, loss 5.988) -> settles immediately at median +0.012 (not +0.050!).
+		if code, st := w.send(g[2], c2, 5.988, 6.000); code != 200 || st != "settled" {
+			t.Fatalf("dave deciding grade: HTTP %d %s", code, st)
+		}
+		e := w.entry(idx, "entry-0")
+		if e.Void || !e.Valid || e.Gain == nil || math.Abs(*e.Gain-0.012) > 1e-6 {
+			t.Fatalf("expected deciding grade median +0.012, got %+v", e)
+		}
+		w.check()
+	})
+
+	t.Run("unresolved_applies_documented_midpoint_fallback_after_replica_wait", func(t *testing.T) {
+		w, _, idx, _ := setupNumTie(t)
+		w.pass(w.cfg.ReplicaWait + time.Minute)
+		if w.settled(idx) != 1 {
+			t.Fatalf("expected unresolved numerical dispute to settle on fallback after ReplicaWait")
+		}
+		e := w.entry(idx, "entry-0")
+		if e.Void || !e.Valid || e.Gain == nil || math.Abs(*e.Gain-0.050) > 1e-6 {
+			t.Fatalf("expected midpoint fallback +0.050, got %+v", e)
+		}
+		if e.Detail == nil || !e.Detail.DisputedTogether {
+			t.Fatalf("expected DisputedTogether=true on unresolved midpoint fallback: %+v", e.Detail)
+		}
+		w.check()
+	})
+}

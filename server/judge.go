@@ -805,9 +805,10 @@ type verdict struct {
 	scored    bool
 	valid     bool
 	gain      float64
-	tie       bool   // two decide it and disagree, or valid grades have no agreed token stream
+	tie       bool   // two decide it and disagree, or valid grades have no agreed token stream / init weights
 	tokensSHA string // agreed script tokens_sha256 among counted valid grades, if resolved
 	tokensTie bool   // multiple distinct tokens_sha256 with no unique >=2 winner
+	initTie   bool   // multiple distinct init_sha256 with no agreed round InitSHA (pinned student season)
 }
 
 // same reports whether two grades of a script are consistent with honest runs.
@@ -872,6 +873,25 @@ func (j *judge) weigh(sc *scriptState) *verdict {
 	if len(v.counted) == 0 {
 		v.counted, v.self = own, len(own) > 0
 	}
+	// On seasons with a pinned student model, if the round's InitSHA has not locked yet and
+	// valid counted grades disagree on init_sha256, never pool them into one gain.
+	if len(j.a.season.Student) > 0 && len(v.counted) > 0 {
+		if rd := j.s.Rounds[v.counted[0].r.RoundIdx]; rd != nil && rd.InitSHA == "" {
+			initCounts := map[string]int{}
+			validInits := 0
+			for _, g := range v.counted {
+				if g.r.Valid {
+					validInits++
+					if g.r.InitSHA != "" {
+						initCounts[g.r.InitSHA]++
+					}
+				}
+			}
+			if len(initCounts) > 1 && 2*validInits > len(v.counted) {
+				v.initTie = true
+			}
+		}
+	}
 	tokCounts := map[string]int{}
 	validCount := 0
 	for _, g := range v.counted {
@@ -921,12 +941,11 @@ func (j *judge) weigh(sc *scriptState) *verdict {
 		}
 	}
 	// Most of them must find it valid. As many for as against is not enough.
-	// An unresolved tokenized-stream tie (v.tokensTie) means verifiers disagreed on what token
-	// stream the script produced, so it never yields a valid rated gain.
-	if v.valid = !v.tokensTie && 2*len(gains) > len(v.counted); v.valid {
+	// An unresolved tokenized-stream or initial-weights tie never yields a valid rated gain.
+	if v.valid = !v.tokensTie && !v.initTie && 2*len(gains) > len(v.counted); v.valid {
 		v.gain = median(gains)
 	}
-	v.tie = v.tokensTie || (len(v.counted) == 2 && !j.same(v.counted[0], v.counted[1]))
+	v.tie = v.tokensTie || v.initTie || (len(v.counted) == 2 && !j.same(v.counted[0], v.counted[1]))
 	sc.verdict = v
 	return v
 }
@@ -1374,7 +1393,7 @@ func (j *judge) settleable(st *entryState) bool {
 	expired := j.t >= max(st.Round.ActiveAt, st.Round.DrawnAt)+wait
 	for _, sc := range st.Scripts {
 		v := j.weigh(sc)
-		if !v.scored || (v.tokensTie && !expired) {
+		if !v.scored || (v.tie && !expired) {
 			return false
 		}
 		for _, c := range sc.Live {
@@ -2670,7 +2689,9 @@ func (a *App) settleScript(tx *Tx, j *judge, st *entryState, sc *scriptState) *g
 			out.reason = g.r.InvalidReason
 		}
 	}
-	if v.tokensTie {
+	if v.initTie {
+		out.reason = "verifiers disagreed on the student's initial weights"
+	} else if v.tokensTie {
 		out.reason = "verifiers disagreed on the script's tokenized stream"
 	} else if !v.valid && out.reason == "" {
 		out.reason = "the script is invalid"
@@ -2716,9 +2737,9 @@ func (a *App) settleScript(tx *Tx, j *judge, st *entryState, sc *scriptState) *g
 			// Its arithmetic differs on the unedited corpus too. (A grader that was not asked
 			// for the baseline, and sent none, has only its grade to be judged by.)
 			r.Verdict, shown = "void", "baseline differs"
-		case v.tokensTie:
-			// Established accounts disagreed on the script's tokenized stream, so non-deciding
-			// grades cannot agree or disagree with an unresolved verdict.
+		case v.tokensTie || v.initTie:
+			// Established accounts disagreed on the script's tokenized stream or initial student
+			// weights, so non-deciding grades cannot agree or disagree with an unresolved verdict.
 			r.Verdict, shown = "disputed", "disputed"
 			g.acct.GPUSeconds += r.Seconds
 		case j.agrees(g, v):
@@ -2795,13 +2816,17 @@ func (a *App) settleEntry(tx *Tx, j *judge, st *entryState) {
 				}
 				run.Reason = fmt.Sprintf("the curator produced no script (%s)", status)
 			}
-		} else if g.v.tokensTie {
-			// Verifiers disagreed on the script's tokenized training stream with no majority;
-			// drop this run cleanly (preserving its disputed grades) without penalizing the curator.
+		} else if g.v.tokensTie || g.v.initTie {
+			// Verifiers disagreed on the script's tokenized stream or initial student weights with
+			// no majority; drop this run cleanly (preserving its disputed grades) without penalizing
+			// the curator.
 			tokensDisputed = true
 			run.Grades, run.Self = g.grades, g.v.self
 			run.Dropped = true
-			run.Reason = "verifiers disagreed on the script's tokenized stream"
+			run.Reason = g.reason
+			if run.Reason == "" {
+				run.Reason = "verifiers disagreed on the script's tokenized stream"
+			}
 			if by := tx.s.Accounts[run.By]; by != nil && run.Owed {
 				by.Runs++
 				by.GPUSeconds += a.editSeconds(run)
@@ -2845,10 +2870,14 @@ func (a *App) settleEntry(tx *Tx, j *judge, st *entryState) {
 	if len(runs) == 0 {
 		if tokensDisputed {
 			named := map[string]bool{}
+			disputeWhy := "verifiers disagreed on the script's tokenized stream; the round does not count for it"
 			for _, k := range []int{0, 1} {
 				for _, sc := range st.Scripts {
-					if !scripts[sc.SHA].v.tokensTie {
+					if !scripts[sc.SHA].v.tokensTie && !scripts[sc.SHA].v.initTie {
 						continue
+					}
+					if scripts[sc.SHA].v.initTie {
+						disputeWhy = "verifiers disagreed on the student's initial weights; the round does not count for it"
 					}
 					for _, h := range scripts[sc.SHA].names[k] {
 						if !named[h] {
@@ -2859,14 +2888,14 @@ func (a *App) settleEntry(tx *Tx, j *judge, st *entryState) {
 				}
 			}
 			for _, sc := range st.Scripts {
-				if !scripts[sc.SHA].v.tokensTie {
+				if !scripts[sc.SHA].v.tokensTie && !scripts[sc.SHA].v.initTie {
 					continue
 				}
 				detail.Disputed += scripts[sc.SHA].outliers
 				detail.DisputedTogether = detail.DisputedTogether || scripts[sc.SHA].v.tie
 			}
 			e.Void, e.Unattended, e.NRuns, e.NResults = true, true, 0, len(detail.Verifiers)
-			a.settleInvalid(tx, e, "verifiers disagreed on the script's tokenized stream; the round does not count for it", detail)
+			a.settleInvalid(tx, e, disputeWhy, detail)
 			a.moved(tx, rd)
 			tx.event("abandoned", map[string]any{"round": roundID(a.season.ID, e.RoundIdx), "editor": e.EditorID, "at": now()})
 			return

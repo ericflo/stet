@@ -615,15 +615,32 @@ func (j *judge) measuring(rd *Round) map[int64]bool {
 }
 
 // baselineDisputed reports whether a round has two or more established baselines whose
-// measurements disagree beyond tolerance. With two kept baselines, they are compared directly
-// against each other (rather than against their midpoint, which would double the allowed spread);
-// with three or more, at least two must agree within tolerance of the kept median. A round with a
-// disputed baseline must request another independent baseline rather than settling on an
-// uncorroborated midpoint, and closes unrated if the disagreement cannot be resolved.
+// measurements disagree beyond tolerance, or (on a season with a pinned student model before
+// rd.InitSHA locks) come from conflicting initial student weights. With two kept baselines, they
+// are compared directly against each other (rather than against their midpoint, which would double
+// the allowed spread); with three or more, at least two must agree within tolerance of the kept
+// median. A round with a disputed baseline must request another independent baseline rather than
+// settling on an uncorroborated midpoint, and closes unrated if the disagreement cannot be resolved.
 func (a *App) baselineDisputed(s *State, rd *Round) bool {
 	all := a.roundBaselines(s, rd)
 	if len(all) < 2 {
 		return false
+	}
+	if len(a.season.Student) > 0 && rd.InitSHA == "" {
+		byInit := map[string][]*Baseline{}
+		for _, b := range all {
+			if b.InitSHA != "" {
+				byInit[b.InitSHA] = append(byInit[b.InitSHA], b)
+			}
+		}
+		if len(byInit) != 1 {
+			return true
+		}
+		for _, cohort := range byInit {
+			if len(cohort) < 2 {
+				return true
+			}
+		}
 	}
 	kept := a.baselinesKept(s, rd)
 	if len(kept) < 2 {

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -325,10 +326,11 @@ func (m *vastMarket) Check(ctx context.Context) (Account, error) {
 }
 
 // ExaminerOffers searches Vast.ai for verified single RTX 5090 hosts suited to serving the
-// Season 3 pinned Inkling-2-Mini vLLM container, preferring high-bandwidth hosts (>=500 Mbps)
-// and falling back to >=200 Mbps when supply is tight.
+// Season 3 pinned Inkling-2-Mini vLLM container, preferring gigabit+ hosts (>=1500 Mbps) so the
+// vLLM image + 18 GB model weights pull quickly, and falling back to >=500 / >=200 Mbps when
+// supply is tight.
 func (m *vastMarket) ExaminerOffers(ctx context.Context, maxPrice float64) ([]ExaminerOffer, error) {
-	for _, minDown := range []int{500, 200} {
+	for _, minDown := range []int{1500, 500, 200} {
 		q := map[string]any{
 			"type": "ondemand", "limit": 50, "order": [][]string{{"dph_total", "asc"}},
 			"verified": map[string]any{"eq": true}, "rentable": map[string]any{"eq": true}, "rented": map[string]any{"eq": false},
@@ -369,13 +371,128 @@ func (m *vastMarket) ExaminerOffers(ctx context.Context, maxPrice float64) ([]Ex
 	return nil, nil
 }
 
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// examinerOnstartScript builds the Vast.ai startup script that:
+//  1. Materializes the per-instance TLS certificate & private key (0600) in /tmp from hex-encoded
+//     environment variables (with /etc/environment fallback).
+//  2. Spawns a detached container-side Python 3 self-destruct timer calling
+//     DELETE https://console.vast.ai/api/v0/instances/$CONTAINER_ID/ after STET_EXAMINER_TTL_SECONDS
+//     so hard timeout enforcement survives stet-cloud exiting or losing connectivity.
+//  3. Launches vLLM over HTTPS (--ssl-certfile / --ssl-keyfile) with the per-instance Bearer key,
+//     streaming non-secret startup logs to container stdout (/proc/1/fd/1) so Vast logs remain
+//     observable while onstart exits 0 promptly, and self-destructing if vLLM exits unexpectedly.
+func examinerOnstartScript(l ExaminerLaunch, servedName string) string {
+	args := []string{"vllm", "serve", shellQuote(l.Model)}
+	if l.Revision != "" {
+		args = append(args, "--revision", shellQuote(l.Revision))
+	}
+	args = append(args,
+		"--served-model-name", shellQuote(servedName),
+		"--reasoning-parser", "inkling",
+		"--tensor-parallel-size", "1",
+		"--max-model-len", "4096",
+		"--max-num-seqs", "32",
+		"--gpu-memory-utilization", "0.88",
+		"--host", "0.0.0.0", "--port", "8000",
+		"--ssl-certfile", "/tmp/stet-examiner-cert.pem",
+		"--ssl-keyfile", "/tmp/stet-examiner-key.pem",
+		"--api-key", `"$STET_EXAMINER_API_KEY"`,
+	)
+	return strings.Join([]string{
+		`set -eu`,
+		`export PATH="/usr/local/bin:/opt/venv/bin:/venv/bin:$PATH"`,
+		`LOG=/tmp/stet-vllm.log`,
+		`[ -w /proc/1/fd/1 ] && LOG=/proc/1/fd/1`,
+		`echo "[stet-examiner] onstart begin" >>"$LOG" 2>&1 || true`,
+		`python3 -c 'import os` + "\n" +
+			`def _env(n):` + "\n" +
+			`    v = os.environ.get(n, "").strip()` + "\n" +
+			`    if v: return v` + "\n" +
+			`    try:` + "\n" +
+			`        for line in open("/etc/environment", encoding="utf-8", errors="ignore"):` + "\n" +
+			`            line = line.strip()` + "\n" +
+			`            if line.startswith("export "): line = line[7:].strip()` + "\n" +
+			`            if line.startswith(n + "="): return line.split("=", 1)[1].strip().strip("\"\x27")` + "\n" +
+			`    except OSError: pass` + "\n" +
+			`    return ""` + "\n" +
+			`for p,k in (("/tmp/stet-examiner-cert.pem","STET_EXAMINER_CERT_HEX"),("/tmp/stet-examiner-key.pem","STET_EXAMINER_KEY_HEX")):` + "\n" +
+			`    raw = bytes.fromhex(_env(k))` + "\n" +
+			`    if not raw: raise SystemExit(f"missing {k}")` + "\n" +
+			`    fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)` + "\n" +
+			`    with os.fdopen(fd, "wb") as fh:` + "\n" +
+			`        fh.write(raw)' >>"$LOG" 2>&1`,
+		`cat >/tmp/stet-selfdestruct.py <<'PY'`,
+		`import os, sys, time, urllib.error, urllib.request`,
+		`def _env(name):`,
+		`    v = os.environ.get(name, "").strip()`,
+		`    if v: return v`,
+		`    try:`,
+		`        for line in open("/etc/environment", encoding="utf-8", errors="ignore"):`,
+		`            line = line.strip()`,
+		`            if line.startswith("export "): line = line[7:].strip()`,
+		`            if line.startswith(name + "="):`,
+		`                return line.split("=", 1)[1].strip().strip("\"'")`,
+		`    except OSError:`,
+		`        pass`,
+		`    return ""`,
+		`delay = max(0, int(sys.argv[1])) if len(sys.argv) > 1 else 0`,
+		`if delay > 0: time.sleep(delay)`,
+		`cid, key = _env("CONTAINER_ID"), _env("CONTAINER_API_KEY")`,
+		`if not cid or not key: sys.exit(0)`,
+		`url = f"https://console.vast.ai/api/v0/instances/{cid}/"`,
+		`for attempt in range(30):`,
+		`    req = urllib.request.Request(url, method="DELETE", headers={"Authorization": f"Bearer {key}"})`,
+		`    try:`,
+		`        with urllib.request.urlopen(req, timeout=15) as r:`,
+		`            if r.status in (200, 204, 404): break`,
+		`    except urllib.error.HTTPError as e:`,
+		`        if e.code == 404: break`,
+		`    except Exception:`,
+		`        pass`,
+		`    time.sleep(30 if attempt < 10 else 120)`,
+		`PY`,
+		`cat >/tmp/stet-vllm.sh <<'SH'`,
+		`#!/bin/sh`,
+		`export PATH="/usr/local/bin:/opt/venv/bin:/venv/bin:$PATH"`,
+		`if [ -z "${STET_EXAMINER_API_KEY:-}" ] && [ -r /etc/environment ]; then`,
+		`  STET_EXAMINER_API_KEY="$(python3 -c 'import re` + "\n" +
+			`for l in open("/etc/environment", encoding="utf-8", errors="ignore"):` + "\n" +
+			`    m = re.match(r"^(?:export\s+)?STET_EXAMINER_API_KEY=(.*)$", l.strip())` + "\n" +
+			`    if m: print(m.group(1).strip().strip("\"\x27")); break')"`,
+		`  export STET_EXAMINER_API_KEY`,
+		`fi`,
+		`echo "[stet-examiner] launching vllm ($(command -v vllm || echo missing))"`,
+		strings.Join(args, " "),
+		`rc=$?`,
+		`echo "[stet-examiner] vllm exited rc=$rc; self-destructing in 15s"`,
+		`python3 /tmp/stet-selfdestruct.py 15`,
+		`SH`,
+		`chmod 700 /tmp/stet-vllm.sh`,
+		`nohup python3 /tmp/stet-selfdestruct.py "${STET_EXAMINER_TTL_SECONDS:-2700}" >/tmp/stet-ttl.log 2>&1 &`,
+		`nohup sh /tmp/stet-vllm.sh >>"$LOG" 2>&1 &`,
+	}, "\n")
+}
+
 // RentExaminer rents one Vast.ai RTX 5090 running the pinned immutable vLLM OpenAI-compatible
-// server container directly (image Entrypoint is ["vllm", "serve"]) with a per-instance Bearer
-// API key and TCP port 8000 exposed.
+// server container over peer-verified HTTPS (--ssl-certfile/--ssl-keyfile) with a per-instance
+// Bearer API key, TCP port 8000 exposed, and a container-side self-destruct TTL watchdog.
 func (m *vastMarket) RentExaminer(ctx context.Context, offerID string, l ExaminerLaunch) (string, error) {
+	if len(l.CertPEM) == 0 || len(l.KeyPEM) == 0 {
+		return "", errors.New("examiner launch requires per-instance TLS cert and key")
+	}
+	ttl := l.TTLSeconds
+	if ttl <= 0 {
+		ttl = 45 * 60
+	}
 	env := map[string]string{
 		"-p 8000:8000":              "1",
-		"HF_HUB_ENABLE_HF_TRANSFER": "1",
+		"STET_EXAMINER_CERT_HEX":    hex.EncodeToString(l.CertPEM),
+		"STET_EXAMINER_KEY_HEX":     hex.EncodeToString(l.KeyPEM),
+		"STET_EXAMINER_API_KEY":     l.APIKey,
+		"STET_EXAMINER_TTL_SECONDS": strconv.Itoa(ttl),
 	}
 	if l.HFToken != "" {
 		env["HF_TOKEN"] = l.HFToken
@@ -388,25 +505,16 @@ func (m *vastMarket) RentExaminer(ctx context.Context, offerID string, l Examine
 	if l.Revision != "" {
 		servedName = l.Model + "@" + l.Revision
 	}
-	args := []string{l.Model}
-	if l.Revision != "" {
-		args = append(args, "--revision", l.Revision)
-	}
-	args = append(args,
-		"--served-model-name", servedName,
-		"--reasoning-parser", "inkling",
-		"--tensor-parallel-size", "1",
-		"--max-model-len", "4096",
-		"--max-num-seqs", "32",
-		"--gpu-memory-utilization", "0.88",
-		"--host", "0.0.0.0", "--port", "8000",
-		"--api-key", l.APIKey,
-	)
 	body := map[string]any{
-		"client_id": "me", "image": l.Image, "label": l.Label, "disk": disk, "env": env,
-		"runtype":        "args",
-		"args":           args,
-		"cancel_unavail": true, "target_state": "running",
+		"client_id":      "me",
+		"image":          l.Image,
+		"label":          l.Label,
+		"disk":           disk,
+		"env":            env,
+		"runtype":        "ssh",
+		"onstart":        examinerOnstartScript(l, servedName),
+		"cancel_unavail": true,
+		"target_state":   "running",
 	}
 	var out struct {
 		Success     bool   `json:"success"`

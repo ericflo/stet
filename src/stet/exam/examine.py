@@ -23,6 +23,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import sys
 import time
 from collections import Counter
 from pathlib import Path
@@ -112,7 +113,8 @@ def _round_init_sha256(rnd, scale) -> str:
         sha = weights_sha256(model)
         del model
         return sha
-    except Exception:
+    except Exception as exc:
+        sys.stderr.write(f"stet: warning: could not compute authoritative round init_sha256 on CPU ({exc}); graders will establish consensus\n")
         return ""
 
 # Sources whose text is openly licensed, and is published with a settled round as it is. Every

@@ -109,12 +109,18 @@ total draw-to-publication including CC shard fetch and CPU `init_sha256`, within
 at `~$0.15–$0.20/round`), so nearly every grade is taken once the
 exam is posted, and wants a machine then. When `stet-cloud` runs with `--examiner-addr 127.0.0.1:8000`
 (or standalone `stet-cloud examiner`), it automates the entire examiner GPU lifecycle: renting one
-verified 1× RTX 5090 on Vast.ai as soon as `/admin/work` shows an open round with `exam_at == 0`,
-generating a fresh random 256-bit `--api-key`, verifying `/v1/models` returns the pinned
-`thinkingmachines/Inkling-2-Mini@c9d02830...` revision, proxying `http://127.0.0.1:8000` with
-injected Bearer auth so `stet-examine.service` needs no manual intervention or static key, and
-destroying the 5090 immediately once the exam is posted (or past `--examiner-timeout`, default 45m,
-plus automatic orphan cleanup on restart). A grader may also take a grade before the exam is
+verified 1× RTX 5090 on Vast.ai as soon as `/admin/work` shows an open round with `exam_at == 0`
+(counted against `--max`, `--max-hourly`, `--daily-budget`, `status`, and live daily spend from
+launch), generating a fresh per-instance 256-bit `--api-key` and ECDSA P-256 TLS certificate
+(`--ssl-certfile`/`--ssl-keyfile`), tagging instances with a persistent deployment owner ID
+(`examiner-owner`) so separate deployments sharing a Vast account never delete each other, starting
+a container-side self-destruct TTL watchdog (`STET_EXAMINER_TTL_SECONDS`) that survives controller
+exit, verifying `https://<ip>:<port>/v1/models` over peer-verified pinned TLS returns the pinned
+`thinkingmachines/Inkling-2-Mini@c9d02830...` revision, proxying `http://127.0.0.1:8000` over that
+same pinned TLS connection with injected Bearer auth so `stet-examine.service` needs no manual
+intervention or static key, and destroying the 5090 immediately once the exam is posted (or past
+`--examiner-timeout`, default 45m, enforced even during Stet outages, plus owner-scoped orphan
+cleanup requiring confirmed deletion before renting a replacement). A grader may also take a grade before the exam is
 posted and hold it until it is: such grades want machines from `--early` (90 minutes) before
 the exam is due (when the server says, or else `--exam-after`, 25 minutes, after the draw), and
 each kind of GPU is rented just in time, so that, rented now, it would report between a
@@ -210,7 +216,9 @@ In `~/.config/stet-cloud` (`STET_CLOUD_HOME`):
 |---|---|
 | `workers/*.json` | The pool's keys, in stet's own key format. Back them up with the rest, or make new ones |
 | `fleet.json` | The pods rented now, and when each was last seen running |
-| `spent.jsonl` | Every pod that has ended: GPU, dollars an hour, start, end |
+| `examiner.json` | The active ephemeral 1× RTX 5090 examiner's ID, random Bearer key, pinned peer TLS certificate, and launch time (`0600`) |
+| `examiner-owner` | Persistent 12-hex deployment owner ID scoping Vast.ai examiner discovery and cleanup (`0600`) |
+| `spent.jsonl` | Every pod and examiner GPU that has ended: GPU, dollars an hour, start, end |
 | `curators.json` | Hosts, and CPU models, under the season's floor for running curators this week: none is rented to run them |
 | `machines.jsonl` | Each machine's story, an event a line: rented (for what, which round, when it should report, where, on what CPU), its market's phases, first asked for work, what it did, trouble, how it ended and why |
 | `history/looks-DAY.jsonl` | One line a look (a minute): all `/admin/work` said, the machines by state and market, $/h and today's spend, what the work wanted and what was rented and ended, the plan, every market's offers and how long they took, every machine tried and what came of it, every call to a market or the server timed, everything the fleet said, and the builds. Days before today are gzipped |

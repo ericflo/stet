@@ -438,11 +438,22 @@ func startOfDay(t time.Time) time.Time {
 
 // View is one look at everything: the work, the pool and its machines, and the money.
 type View struct {
-	Work    *Work
-	Workers []*Worker
-	Ledger  *ledger
-	Hourly  float64 // dollars an hour, every live machine together
-	Today   float64 // about what has been spent today (UTC)
+	Work            *Work
+	Workers         []*Worker
+	Ledger          *ledger
+	Hourly          float64 // dollars an hour, every live machine (including any active examiner) together
+	Today           float64 // about what has been spent today (UTC), including any active examiner
+	ExaminerLive    int     // 1 when an ephemeral examiner GPU is active, else 0
+	ExaminerHourly  float64 // active examiner's hourly rate (included in Hourly)
+	ExaminerAccrued float64 // active examiner's accrued spend today (included in Today)
+}
+
+func (f *Fleet) examinerSnapshot() (live int, hourly float64, accrued float64) {
+	now := f.now()
+	if f.examiner != nil {
+		return f.examiner.ActiveSnapshot(now)
+	}
+	return activeExaminerFromDisk(f.o.Home, now)
 }
 
 // seeStart notes how long a machine took to first ask for work, if it was seen before it had.
@@ -694,6 +705,10 @@ func (f *Fleet) look(ctx context.Context) (*View, error) {
 	if v.Today, err = f.spent(l, startOfDay(f.now())); err != nil {
 		return nil, err
 	}
+	exLive, exHourly, exAccrued := f.examinerSnapshot()
+	v.ExaminerLive, v.ExaminerHourly, v.ExaminerAccrued = exLive, exHourly, exAccrued
+	v.Hourly += exHourly
+	v.Today += exAccrued
 	return v, nil
 }
 
@@ -982,6 +997,10 @@ func (f *Fleet) launchFor(k *Key, site string) Launch {
 // launch rents up to n machines on keys that have no pod, in the order chosen, within what
 // may be spent an hour. It says what it did as it goes.
 func (f *Fleet) launch(ctx context.Context, v *View, n, long, early, runs int, due time.Time) (int, error) {
+	return f.launchExcluding(ctx, v, n, long, early, runs, due, nil)
+}
+
+func (f *Fleet) launchExcluding(ctx context.Context, v *View, n, long, early, runs int, due time.Time, excludeKeys map[string]bool) (int, error) {
 	if n <= 0 {
 		return 0, nil
 	}
@@ -1012,7 +1031,7 @@ func (f *Fleet) launch(ctx context.Context, v *View, n, long, early, runs int, d
 		due            time.Time
 		what           string
 	}{{long, true, false, time.Time{}, "bigger students"}, {early, false, false, due, "early grades"}, {runs, false, true, time.Time{}, "curators"}} {
-		got, err := f.launchSome(ctx, v, batch.n, batch.long, batch.curators, batch.due, site, vouched, batch.what)
+		got, err := f.launchSome(ctx, v, batch.n, batch.long, batch.curators, batch.due, site, vouched, batch.what, excludeKeys)
 		rented += got
 		if err != nil {
 			return rented, err
@@ -1035,12 +1054,12 @@ func (f *Fleet) launch(ctx context.Context, v *View, n, long, early, runs int, d
 			}
 		}
 	}
-	got, err := f.launchSome(ctx, v, grades, false, false, time.Time{}, site, vouched, "grades")
+	got, err := f.launchSome(ctx, v, grades, false, false, time.Time{}, site, vouched, "grades", excludeKeys)
 	rented += got
 	return rented, err
 }
 
-func (f *Fleet) launchSome(ctx context.Context, v *View, n int, long, curators bool, due time.Time, site string, vouched map[string]Vouched, what string) (int, error) {
+func (f *Fleet) launchSome(ctx context.Context, v *View, n int, long, curators bool, due time.Time, site string, vouched map[string]Vouched, what string, excludeKeys map[string]bool) (int, error) {
 	if n <= 0 {
 		return 0, nil
 	}
@@ -1103,7 +1122,7 @@ func (f *Fleet) launchSome(ctx context.Context, v *View, n int, long, curators b
 		return 0, nil
 	}
 	rented := 0
-	for _, w := range quietest(v.Workers) {
+	for _, w := range quietestExcluding(v.Workers, excludeKeys) {
 		if rented == n {
 			break
 		}
@@ -1132,9 +1151,13 @@ func (f *Fleet) launchSome(ctx context.Context, v *View, n int, long, curators b
 // the round's curators would find nothing it may run, wait out its idle minutes, end, and
 // be rented again with the same key, while the curators' second runs waited.
 func quietest(ws []*Worker) []*Worker {
+	return quietestExcluding(ws, nil)
+}
+
+func quietestExcluding(ws []*Worker, exclude map[string]bool) []*Worker {
 	var free []*Worker
 	for _, w := range ws {
-		if w.Rental == nil {
+		if w.Rental == nil && !exclude[w.Key.Handle] {
 			free = append(free, w)
 		}
 	}

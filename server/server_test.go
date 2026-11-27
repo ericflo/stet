@@ -3662,13 +3662,18 @@ func TestTwoEstablishedGradesThatDisagreeGetAThird(t *testing.T) {
 		return w, idx, bob, carol, dave, cb, cc
 	}
 
-	// Nobody is there to say which of two is right: the gain is midway, and says so.
+	// Nobody is there yet to say which of two is right: hold open through ReplicaWait so the
+	// fleet or a volunteer can supply a deciding grade, then fall back to the midpoint.
 	w, idx, bob, carol, _, cb, cc := start(false)
 	if code, status := w.report(bob, cb, 5.5); code != 200 || status != "pending" {
 		t.Fatalf("HTTP %d %s", code, status)
 	}
-	if code, status := w.report(carol, cc, 5.2); code != 200 || status != "settled" {
-		t.Fatalf("HTTP %d %s", code, status)
+	if code, status := w.report(carol, cc, 5.2); code != 200 || status != "pending" {
+		t.Fatalf("numerical dispute should wait ReplicaWait before falling back to midpoint: HTTP %d %s", code, status)
+	}
+	w.pass(w.cfg.ReplicaWait + time.Minute)
+	if w.settled(idx) != 1 {
+		t.Fatalf("unresolved numerical dispute did not settle after ReplicaWait")
 	}
 	w.check()
 	e := w.entry(idx, "tidy")
