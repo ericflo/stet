@@ -556,11 +556,14 @@ func (a *App) newJudge(s *State) *judge {
 	}
 	for _, c := range s.Claims {
 		if c.Kind == "grade" && (c.Status == "released" || c.Status == "lapsed" || (c.Status == "claimed" && !c.live(j.t))) {
-			if j.quit[c.AccountID] == nil {
-				j.quit[c.AccountID] = map[int]bool{}
+			preExamRelease := c.Status == "released" && c.PreExamWait
+			if !preExamRelease {
+				if j.quit[c.AccountID] == nil {
+					j.quit[c.AccountID] = map[int]bool{}
+				}
+				j.quit[c.AccountID][c.RoundIdx] = true
 			}
-			j.quit[c.AccountID][c.RoundIdx] = true
-			if c.Status == "released" && c.Reason == examWaitTimeoutReason {
+			if preExamRelease && c.Reason == examWaitTimeoutReason {
 				if j.examTimedOut[c.AccountID] == nil {
 					j.examTimedOut[c.AccountID] = map[int]bool{}
 				}
@@ -750,13 +753,17 @@ func (j *judge) states(rd *Round) []*entryState {
 		if sc == nil {
 			continue
 		}
-		sc.Offered[c.AccountID] = true
+		preExamRelease := c.Status == "released" && c.PreExamWait
+		if !preExamRelease {
+			sc.Offered[c.AccountID] = true
+		}
 		switch {
 		case c.live(j.t):
 			sc.Live = append(sc.Live, c)
-		case c.Status == "released" && (c.Reason == examWaitTimeoutReason || c.Reason == examEndedBeforePostReason):
+		case preExamRelease:
 			// Pre-exam wait timeout / round end before exam is an infrastructure delay, not a
-			// script defect: do not burn maxGradeAttempts and abandon innocent curators' scripts.
+			// script defect: do not burn maxGradeAttempts or permanently bar volunteers once the
+			// exam posts (j.examTimedOut still prevents pre-exam reoffers).
 		case c.Status != "done" && j.est[c.AccountID]:
 			sc.Tries++
 		}
@@ -1757,7 +1764,8 @@ func (a *App) claim(ctx context.Context, acctID int64, h *Hello) (*Handed, error
 		}
 		e := pick.st.Entry
 		c := &Claim{RoundIdx: e.RoundIdx, EditorID: e.EditorID, AccountID: acctID, Kind: pick.kind,
-			ClaimedAt: now(), ExpiresAt: now() + int64(a.cfg.Lease.Seconds()), Status: "claimed"}
+			ClaimedAt: now(), ExpiresAt: now() + int64(a.cfg.Lease.Seconds()), Status: "claimed",
+			PreExam: pick.kind == "grade" && !examPosted(pick.st.Round)}
 		if pick.sc != nil {
 			c.Script = pick.sc.SHA
 			c.Baseline = j.asksBaseline(pick.st.Round, acct)
@@ -1792,8 +1800,12 @@ func (a *App) release(ctx context.Context, acctID, claimID int64, reason string)
 // keeps why.
 func (a *App) handBack(tx *Tx, c *Claim, reason string) {
 	c.Status, c.Reason, c.EndedAt = "released", clip(strings.ToValidUTF8(reason, "?"), 300), now()
+	rd := tx.s.Rounds[c.RoundIdx]
+	c.PreExamWait = c.Kind == "grade" && c.PreExam && rd != nil &&
+		((c.Reason == examWaitTimeoutReason && (!examPosted(rd) || c.EndedAt-rd.ExamAt <= 60)) ||
+			(c.Reason == examEndedBeforePostReason && !examPosted(rd) && rd.Status != "open"))
 	tx.saveClaim(c)
-	if rd := tx.s.Rounds[c.RoundIdx]; rd != nil && rd.Status == "open" && a.established(tx.s.Accounts[c.AccountID]) {
+	if rd != nil && rd.Status == "open" && a.established(tx.s.Accounts[c.AccountID]) {
 		a.moved(tx, rd)
 	}
 }

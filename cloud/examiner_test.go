@@ -2102,14 +2102,26 @@ func TestPendingRentSurvivesStaleListingAndPreventsDoubleRental(t *testing.T) {
 			t.Fatalf("expected PendingRent promoted to InstanceID=ex-mat, got %+v", st)
 		}
 
-		// VM self-terminates / disappears 30s later (still well inside examinerPendingRentGrace):
-		// must record spend once, clear state cleanly (not strand PendingRent!), and allow renting!
+		// VM disappears from listing 30s later while provider still returns 503 on DELETE ->
+		// termination is NOT confirmed yet, so ex-mat must remain tracked with zero terminal spend!
 		clk.Advance(30 * time.Second)
 		prov.mu.Lock()
 		delete(prov.insts, "ex-mat")
 		prov.mu.Unlock()
+		if err := ex.Reconcile(context.Background(), &Work{}, ExaminerBudget{MaxWorkers: 1, MaxHourly: 0.70}); err == nil {
+			t.Fatalf("expected error while DELETE still fails on missing ex-mat")
+		}
+		if live, _, _, err := ex.ActiveSnapshot(clk.Now()); err != nil || live != 1 {
+			t.Fatalf("unconfirmed missing ex-mat must remain live=1, got live=%d err=%v", live, err)
+		}
+
+		// Once DELETE succeeds (e.g. Vast answers 404 confirming termination), must record spend
+		// once, clear state cleanly (not strand PendingRent!), and allow renting!
+		prov.mu.Lock()
+		delete(prov.endErr, "ex-mat")
+		prov.mu.Unlock()
 		if err := ex.Reconcile(context.Background(), &Work{}, ExaminerBudget{MaxWorkers: 1, MaxHourly: 0.70}); err != nil {
-			t.Fatalf("Case 1 reconcile after materialized VM vanished: %v", err)
+			t.Fatalf("Case 1 reconcile after materialized VM confirmed terminated: %v", err)
 		}
 		if stAfter := readExaminerState(home); stAfter != nil {
 			t.Fatalf("expected examiner.json cleared without stranding PendingRent, got %+v", stAfter)
@@ -2178,9 +2190,20 @@ func TestDisappearedUnresolvedOrphanRecordsBoundedSpend(t *testing.T) {
 			t.Fatalf("Poll 1 snapshot: live=%d acc=%.4f err=%v, want 1/$0.31", live, acc, err)
 		}
 
-		// Provider finishes deleting orphan-30m before Poll 2 -> vanishes from ListExaminers.
+		// Provider omits orphan-30m before Poll 2 while DELETE still errors -> retained in Unresolved!
 		prov.mu.Lock()
 		delete(prov.insts, "orphan-30m")
+		prov.mu.Unlock()
+		if err := ex.Reconcile(context.Background(), &Work{}, testExaminerBudget()); err == nil {
+			t.Fatalf("expected error when omitted orphan-30m DELETE still fails")
+		}
+		if live, _, _, err := ex.ActiveSnapshot(clk.Now()); err != nil || live != 1 {
+			t.Fatalf("omitted orphan-30m with failing DELETE must stay live=1, got live=%d err=%v", live, err)
+		}
+
+		// Provider finishes deleting orphan-30m (DELETE now returns 404 -> nil).
+		prov.mu.Lock()
+		delete(prov.endErr, "orphan-30m")
 		prov.mu.Unlock()
 
 		// Poll 2: Unresolved clears AND $0.31 terminal charge is durably written to spent.jsonl!
@@ -2229,12 +2252,13 @@ func TestDisappearedUnresolvedOrphanRecordsBoundedSpend(t *testing.T) {
 		if err := ex.EnforceTimeout(context.Background()); err == nil {
 			t.Fatalf("expected EnforceTimeout delete failure")
 		}
-		// Block spent.jsonl and remove orphan-2h from provider.
+		// Block spent.jsonl, remove orphan-2h from provider, and clear transient 503 so DELETE confirms 404 -> nil.
 		if err := os.Mkdir(spentPath, 0o700); err != nil {
 			t.Fatalf("block spent.jsonl: %v", err)
 		}
 		prov.mu.Lock()
 		delete(prov.insts, "orphan-2h")
+		delete(prov.endErr, "orphan-2h")
 		prov.mu.Unlock()
 
 		// EnforceTimeout detects disappearance, fails writing spent.jsonl, and retains bounded 45m ($0.465) in PendingSpends!
@@ -2255,6 +2279,200 @@ func TestDisappearedUnresolvedOrphanRecordsBoundedSpend(t *testing.T) {
 		spentToday, err := f.spent(&ledger{Pods: map[string]*podRecord{}}, startOfDay(clk.Now()))
 		if err != nil || spentToday < 0.464 || spentToday > 0.466 {
 			t.Fatalf("expected flushed bounded $0.465 spend, got $%.4f err=%v", spentToday, err)
+		}
+	})
+}
+
+// Review 16 P1 #1: once Vast acknowledges a contract ID, a subsequent listing that omits it (stale
+// eventual-consistency listing or delayed label visibility) must NOT record terminal spend, clear
+// credentials, or rent a second paid GPU. The acknowledged ID, credentials, slot, and hourly rate
+// remain intact until it reappears (re-adopted) or EndExaminer confirms termination (on timeout or
+// idle cleanup).
+func TestOmittedAcknowledgedExaminerPreservesContractWithoutDoubleRental(t *testing.T) {
+	t.Run("omitted_contract_re_adopted_without_replacement_or_terminal_charge", func(t *testing.T) {
+		clk := newTestClock(time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC))
+		home := t.TempDir()
+		prov := &fakeExaminerProv{
+			offers: []ExaminerOffer{{ID: "off-5090", Card: "RTX 5090", Price: 0.62}},
+		}
+		spentCalls := 0
+		ex := newExaminer(ExaminerConfig{Addr: "127.0.0.1:0", Timeout: 45 * time.Minute, MaxPrice: 1.50}, home, prov, clk.Now, nil, false)
+		ex.onSpent = func(rec podRecord) error {
+			spentCalls++
+			return appendExaminerSpend(filepath.Join(home, "spent.jsonl"), rec)
+		}
+		openWork := &Work{Rounds: []WorkRound{{ID: "s3-o00040", Entries: 1, ExamAt: 0}}}
+		budget := ExaminerBudget{MaxWorkers: 1, MaxHourly: 0.70}
+
+		// Poll 1 (T0): create succeeds -> ex-1 acknowledged and persisted.
+		if err := ex.Reconcile(context.Background(), openWork, budget); err != nil {
+			t.Fatalf("Poll 1 rent: %v", err)
+		}
+		st1 := readExaminerState(home)
+		if st1 == nil || st1.InstanceID != "ex-1" || st1.APIKey == "" || st1.CertPEM == "" {
+			t.Fatalf("expected persisted ex-1 with credentials, got %+v", st1)
+		}
+		savedInst := prov.insts["ex-1"]
+
+		// Poll 2 (T0 + 15s): hide ex-1 from provider listing (stale list / delayed label visibility).
+		clk.Advance(15 * time.Second)
+		prov.mu.Lock()
+		delete(prov.insts, "ex-1")
+		prov.mu.Unlock()
+		if err := ex.Reconcile(context.Background(), openWork, budget); err != nil {
+			t.Fatalf("Poll 2 stale omission: %v", err)
+		}
+		if len(prov.rented) != 1 || len(prov.ended) != 0 || spentCalls != 0 {
+			t.Fatalf("stale omission must NOT rent a replacement, terminate, or write terminal spend: rented=%d ended=%d spentCalls=%d",
+				len(prov.rented), len(prov.ended), spentCalls)
+		}
+		st2 := readExaminerState(home)
+		if st2 == nil || st2.InstanceID != "ex-1" || st2.APIKey != st1.APIKey || st2.CertPEM != st1.CertPEM {
+			t.Fatalf("expected ex-1 and credentials preserved across omission, got %+v", st2)
+		}
+		if live, hourly, _, err := ex.ActiveSnapshot(clk.Now()); err != nil || live != 1 || hourly < 0.619 || hourly > 0.621 {
+			t.Fatalf("in-memory snapshot during omission: live=%d hourly=%.2f err=%v, want 1/$0.62", live, hourly, err)
+		}
+		if live, hourly, _, err := activeExaminerFromDisk(home, clk.Now(), 45*time.Minute, 1.50); err != nil || live != 1 || hourly < 0.619 || hourly > 0.621 {
+			t.Fatalf("disk snapshot during omission: live=%d hourly=%.2f err=%v, want 1/$0.62", live, hourly, err)
+		}
+
+		// EnforceTimeout while within TTL and still omitted must ALSO keep ex-1 untouched!
+		if err := ex.EnforceTimeout(context.Background()); err != nil {
+			t.Fatalf("EnforceTimeout within TTL during omission: %v", err)
+		}
+		if len(prov.ended) != 0 || spentCalls != 0 || readExaminerState(home) == nil {
+			t.Fatalf("EnforceTimeout within TTL must keep omitted contract intact: ended=%d spentCalls=%d", len(prov.ended), spentCalls)
+		}
+
+		// Poll 3 (T0 + 30s): restore visibility -> ex-1 is re-adopted cleanly!
+		clk.Advance(15 * time.Second)
+		prov.mu.Lock()
+		prov.insts["ex-1"] = savedInst
+		prov.mu.Unlock()
+		if err := ex.Reconcile(context.Background(), openWork, budget); err != nil {
+			t.Fatalf("Poll 3 re-adoption: %v", err)
+		}
+		if len(prov.rented) != 1 || len(prov.insts) != 1 || len(prov.ended) != 0 || spentCalls != 0 {
+			t.Fatalf("expected exact 1 live contract at $0.62/h, 0 terminations, 0 terminal spend: rented=%d insts=%d ended=%d spentCalls=%d",
+				len(prov.rented), len(prov.insts), len(prov.ended), spentCalls)
+		}
+		st3 := readExaminerState(home)
+		if st3 == nil || st3.InstanceID != "ex-1" || st3.APIKey != st1.APIKey {
+			t.Fatalf("expected original ex-1 re-adopted with original credentials, got %+v", st3)
+		}
+	})
+
+	t.Run("idle_and_timeout_cleanup_require_confirmed_termination_for_omitted_contract", func(t *testing.T) {
+		clk := newTestClock(time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC))
+		home := t.TempDir()
+		prov := &fakeExaminerProv{
+			offers: []ExaminerOffer{{ID: "off-5090", Card: "RTX 5090", Price: 0.62}},
+			endErr: map[string]error{"ex-1": errors.New("Vast 503")},
+		}
+		spentCalls := 0
+		ex := newExaminer(ExaminerConfig{Addr: "127.0.0.1:0", Timeout: 45 * time.Minute, MaxPrice: 1.50}, home, prov, clk.Now, nil, false)
+		ex.onSpent = func(rec podRecord) error {
+			spentCalls++
+			return appendExaminerSpend(filepath.Join(home, "spent.jsonl"), rec)
+		}
+		openWork := &Work{Rounds: []WorkRound{{ID: "s3-o00041", Entries: 1, ExamAt: 0}}}
+		if err := ex.Reconcile(context.Background(), openWork, ExaminerBudget{MaxWorkers: 1, MaxHourly: 0.70}); err != nil {
+			t.Fatalf("rent: %v", err)
+		}
+		// Hide ex-1 from listing; idle cleanup calls EndExaminer("ex-1") -> 503 -> must NOT clear or bill!
+		clk.Advance(10 * time.Minute)
+		prov.mu.Lock()
+		delete(prov.insts, "ex-1")
+		prov.mu.Unlock()
+		if err := ex.Reconcile(context.Background(), &Work{}, ExaminerBudget{MaxWorkers: 1, MaxHourly: 0.70}); err == nil {
+			t.Fatalf("expected idle cleanup error when EndExaminer fails on omitted ex-1")
+		}
+		if st := readExaminerState(home); st == nil || st.InstanceID != "ex-1" || spentCalls != 0 {
+			t.Fatalf("unconfirmed idle cleanup must retain ex-1 without terminal spend: st=%+v spentCalls=%d", st, spentCalls)
+		}
+		// Past timeout, EnforceTimeout also calls EndExaminer("ex-1") -> still 503 -> must NOT clear or bill!
+		clk.Advance(40 * time.Minute)
+		if err := ex.EnforceTimeout(context.Background()); err == nil {
+			t.Fatalf("expected EnforceTimeout error when EndExaminer fails on omitted timed-out ex-1")
+		}
+		if st := readExaminerState(home); st == nil || st.InstanceID != "ex-1" || spentCalls != 0 {
+			t.Fatalf("unconfirmed timeout cleanup must retain ex-1 without terminal spend: st=%+v spentCalls=%d", st, spentCalls)
+		}
+		// Once EndExaminer succeeds (200/404 -> nil), EnforceTimeout confirms termination, bills bounded 45m, and clears!
+		prov.mu.Lock()
+		delete(prov.endErr, "ex-1")
+		prov.mu.Unlock()
+		if err := ex.EnforceTimeout(context.Background()); err != nil {
+			t.Fatalf("EnforceTimeout confirmed end: %v", err)
+		}
+		if readExaminerState(home) != nil || spentCalls != 1 {
+			t.Fatalf("expected cleared state and 1 terminal spend after confirmed end: st=%+v spentCalls=%d", readExaminerState(home), spentCalls)
+		}
+		f := &Fleet{o: &Options{Home: home}, now: clk.Now}
+		spentToday, err := f.spent(&ledger{Pods: map[string]*podRecord{}}, startOfDay(clk.Now()))
+		if err != nil || spentToday < 0.464 || spentToday > 0.466 {
+			t.Fatalf("expected bounded 45m spend $0.465, got $%.4f err=%v", spentToday, err)
+		}
+	})
+
+	t.Run("condemned_unresolved_saved_examiner_confirms_and_replaces_without_45m_stall", func(t *testing.T) {
+		clk := newTestClock(time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC))
+		home := t.TempDir()
+		prov := &fakeExaminerProv{
+			offers: []ExaminerOffer{{ID: "off-5090", Card: "RTX 5090", Price: 0.62}},
+			endErr: map[string]error{"ex-1": errors.New("Vast 503")},
+		}
+		ex := newExaminer(ExaminerConfig{Addr: "127.0.0.1:0", Timeout: 45 * time.Minute, MaxPrice: 1.50}, home, prov, clk.Now, nil, false)
+		ex.onSpent = func(rec podRecord) error { return appendExaminerSpend(filepath.Join(home, "spent.jsonl"), rec) }
+		openWork := &Work{Rounds: []WorkRound{{ID: "s3-o00042", Entries: 1, ExamAt: 0}}}
+		budget := ExaminerBudget{MaxWorkers: 1, MaxHourly: 0.70}
+
+		// Rent ex-1, then crash it to State="stopped" at T0+2m with transient DELETE 503 -> Unresolved=[ex-1].
+		if err := ex.Reconcile(context.Background(), openWork, budget); err != nil {
+			t.Fatalf("rent ex-1: %v", err)
+		}
+		clk.Advance(2 * time.Minute)
+		prov.mu.Lock()
+		inst := prov.insts["ex-1"]
+		inst.State = "stopped"
+		prov.insts["ex-1"] = inst
+		prov.mu.Unlock()
+		if err := ex.Reconcile(context.Background(), openWork, budget); err == nil {
+			t.Fatalf("expected DELETE failure on stopped ex-1")
+		}
+
+		// At T0+3m (well within 45m TTL), ex-1 vanishes from ListExaminers while DELETE still returns 503 ->
+		// must keep ex-1 in Unresolved (deduplicated live=1) and NOT rent replacement.
+		clk.Advance(time.Minute)
+		prov.mu.Lock()
+		delete(prov.insts, "ex-1")
+		prov.mu.Unlock()
+		if err := ex.Reconcile(context.Background(), openWork, budget); err == nil {
+			t.Fatalf("expected error while DELETE still fails on missing condemned ex-1")
+		}
+		stMid := readExaminerState(home)
+		if stMid == nil || stMid.InstanceID != "ex-1" || len(stMid.Unresolved) != 1 || stMid.Unresolved[0].ID != "ex-1" {
+			t.Fatalf("missing condemned ex-1 must stay in BOTH InstanceID and Unresolved, got %+v", stMid)
+		}
+		if live, hourly, _, err := ex.ActiveSnapshot(clk.Now()); err != nil || live != 1 || hourly < 0.619 || hourly > 0.621 {
+			t.Fatalf("expected deduplicated live=1/$0.62, got live=%d hourly=%.2f err=%v", live, hourly, err)
+		}
+
+		// DELETE now succeeds (404 -> nil): Case 2 immediately confirms termination and rents replacement ex-2
+		// without waiting out the remaining 42 minutes of TTL!
+		prov.mu.Lock()
+		delete(prov.endErr, "ex-1")
+		prov.mu.Unlock()
+		if err := ex.Reconcile(context.Background(), openWork, budget); err != nil {
+			t.Fatalf("reconcile after condemned ex-1 confirmed terminated: %v", err)
+		}
+		stNew := readExaminerState(home)
+		if stNew == nil || stNew.InstanceID != "ex-2" || len(stNew.Unresolved) != 0 {
+			t.Fatalf("expected immediate replacement ex-2 with empty Unresolved, got %+v", stNew)
+		}
+		if len(prov.rented) != 2 || len(prov.insts) != 1 {
+			t.Fatalf("expected clean replacement (2 total rents, 1 live), got rented=%d insts=%d", len(prov.rented), len(prov.insts))
 		}
 	})
 }

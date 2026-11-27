@@ -471,14 +471,19 @@ func cmdExaminer(ctx context.Context, f *Fleet) error {
 }
 
 func cmdUp(ctx context.Context, f *Fleet, n int) error {
+	_, err := cmdUpRentals(ctx, f, n)
+	return err
+}
+
+func cmdUpRentals(ctx context.Context, f *Fleet, n int) ([]*Rental, error) {
 	unlock, err := f.lock(time.Minute)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer unlock()
 	v, err := f.look(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	live := v.ExaminerLive
 	for _, w := range v.Workers {
@@ -491,7 +496,7 @@ func cmdUp(ctx context.Context, f *Fleet, n int) error {
 		n = max(room, 0)
 	}
 	if v.Today >= f.o.DailyBudget && f.o.DailyBudget > 0 {
-		return fmt.Errorf("about $%.2f spent today, and the daily budget is $%.2f", v.Today, f.o.DailyBudget)
+		return nil, fmt.Errorf("about $%.2f spent today, and the daily budget is $%.2f", v.Today, f.o.DailyBudget)
 	}
 	runs := 0
 	if f.o.Edits {
@@ -511,11 +516,11 @@ func cmdUp(ctx context.Context, f *Fleet, n int) error {
 			}
 		}
 	}
-	got, err := f.launch(ctx, v, n, 0, 0, runs, time.Time{})
-	if err == nil && got > 0 {
+	rented, err := f.launchExcludingRentals(ctx, v, n, 0, 0, runs, time.Time{}, nil)
+	if err == nil && len(rented) > 0 {
 		f.say("each stops by itself after %d minutes with nothing to grade", f.o.Idle)
 	}
-	return err
+	return rented, err
 }
 
 func cmdDown(ctx context.Context, f *Fleet, force bool, handles []string) error {

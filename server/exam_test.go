@@ -1034,3 +1034,106 @@ func TestAbandonStuckDoesNotVoidEntryWhileSecondRunEditIsLive(t *testing.T) {
 		w.check()
 	})
 }
+
+// Review 16 P2 #4: two overlapping exam posts with the SAME items_digest but DIFFERENT derived
+// public_file or classification table must stage into distinct content-addressed prefixes so the
+// losing post (posted=false) can never overwrite the winner's stored public file or table.
+func TestOverlappingExamPostsWithDifferentDerivedFilesPreserveWinner(t *testing.T) {
+	pub, priv := newKey()
+	w := newWorld(t, pub)
+	anchor := w.join("anchor-one", priv)
+	w.submit(w.join("alice", nil), "tidy", "print('v1')")
+	idx := w.drawWithoutExam()
+	w.run(anchor, scriptOne)
+	ctx := context.Background()
+
+	enc, _ := zstd.NewWriter(nil)
+	defer enc.Close()
+
+	// Post A (winner): table Lang="en", public_file="winner-public-payload".
+	tableA := testTable()
+	for i := range tableA {
+		tableA[i].Lang = "en"
+	}
+	rawA, _ := json.Marshal(testExam(tableA))
+	var postA ExamPost
+	if err := json.Unmarshal(rawA, &postA); err != nil {
+		t.Fatalf("unmarshal postA: %v", err)
+	}
+	publicA := enc.EncodeAll([]byte("{\"id\":\"winner\",\"prompt\":\"clean\"}\n"), nil)
+	postA.Public = base64.StdEncoding.EncodeToString(publicA)
+
+	// Post B (loser): SAME Digest (items_digest), DIFFERENT table Lang="fr" and public_file!
+	tableB := testTable()
+	for i := range tableB {
+		tableB[i].Lang = "fr"
+	}
+	rawB, _ := json.Marshal(testExam(tableB))
+	var postB ExamPost
+	if err := json.Unmarshal(rawB, &postB); err != nil {
+		t.Fatalf("unmarshal postB: %v", err)
+	}
+	publicB := enc.EncodeAll([]byte("{\"id\":\"loser\",\"prompt\":\"stale-redaction\"}\n"), nil)
+	postB.Public = base64.StdEncoding.EncodeToString(publicB)
+	if postA.Digest != postB.Digest {
+		t.Fatalf("test setup error: expected identical items_digest")
+	}
+
+	var firstPosted bool
+	cache := w.app.st.blobs
+	inner := cache.Blobs
+	// Interleave: postB starts putting blobs -> hook runs postA to completion -> postB resumes
+	// putting its blobs and enters the DB transaction (losing with posted=false).
+	cache.Blobs = &postingBlobs{Blobs: inner, first: func() {
+		var err error
+		if firstPosted, err = w.app.postExam(ctx, idx, &postA); err != nil {
+			t.Errorf("winning postA failed: %v", err)
+		}
+	}}
+	secondPosted, err := w.app.postExam(ctx, idx, &postB)
+	cache.Blobs = inner
+	if err != nil || !firstPosted || secondPosted {
+		t.Fatalf("overlapping posts: first=%v second=%v err=%v, want true/false/nil", firstPosted, secondPosted, err)
+	}
+
+	var blobSHA string
+	w.app.st.view(func(s *State) {
+		rd := s.Rounds[idx]
+		blobSHA = rd.ExamBlobSHA
+		if blobSHA == "" {
+			t.Fatalf("expected non-empty ExamBlobSHA on winning round")
+		}
+		if len(rd.ExamTable) == 0 || rd.ExamTable[0].Lang != "en" {
+			t.Fatalf("winning round ExamTable corrupted: %+v", rd.ExamTable)
+		}
+	})
+
+	// Stored table blob under winning prefix must match postA ("en"), NOT postB ("fr").
+	tf, _, err := w.blobs.Open(ctx, w.app.examDigestBlob(idx, blobSHA, examTable))
+	if err != nil {
+		t.Fatalf("open winning table blob: %v", err)
+	}
+	tableRaw, _ := io.ReadAll(tf)
+	tf.Close()
+	var storedTable []ItemInfo
+	if err := json.Unmarshal(tableRaw, &storedTable); err != nil || len(storedTable) == 0 || storedTable[0].Lang != "en" {
+		t.Fatalf("stored winning table blob overwritten by loser: %s", string(tableRaw))
+	}
+
+	// Settle round and confirm the public download serves postA's exact public file, NOT postB's!
+	c := w.claim(anchor, false)
+	if code, status := w.send(anchor, c, 5.5, 6.0); code != 200 || status != "settled" {
+		t.Fatalf("settle grade: HTTP %d %s", code, status)
+	}
+	req, _ := http.NewRequest("GET", w.srv.URL+"/api/v1/rounds/"+roundID(w.app.season.ID, idx)+"/exam", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET settled exam: %v", err)
+	}
+	gotPub, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 200 || string(gotPub) != string(publicA) {
+		t.Fatalf("settled public download corrupted by losing post: HTTP %d got=%q want=%q", resp.StatusCode, string(gotPub), string(publicA))
+	}
+	w.check()
+}

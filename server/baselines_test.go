@@ -1856,7 +1856,41 @@ func TestExamWaitTimeoutDoesNotBurnAttemptsOrReofferPreExamGrade(t *testing.T) {
 		}
 	}
 
-	// Even after 6 timeouts (> maxGradeAttempts), the script MUST still be open and NOT abandoned!
+	// Review 16 P2 #3: an established volunteer who times out waiting for the exam must ALSO
+	// respect the pre-exam cooldown (no immediate pre-exam reoffer), and once the exam posts must
+	// regain eligibility to grade that exact script (not be permanently excluded by sc.Offered).
+	bob := w.join("bob", nil)
+	carol := w.join("carol", nil)
+	w.established("bob", "carol")
+	cBobEarly := w.claimEarly(bob)
+	if cBobEarly.Job == nil || cBobEarly.Job.Kind != "grade" {
+		t.Fatalf("bob expected pre-exam grade, got %+v", cBobEarly.Job)
+	}
+	if code := bob.do("POST", fmt.Sprintf("/api/v1/jobs/%d/release", cBobEarly.Job.ID),
+		map[string]any{"reason": examWaitTimeoutReason}, nil); code != 200 {
+		t.Fatalf("bob release: HTTP %d", code)
+	}
+	if again := w.claimEarly(bob); again.Job != nil {
+		t.Fatalf("bob was immediately re-handed pre-exam grade %d after exam wait timeout", again.Job.ID)
+	}
+
+	// Gate 4 security check: forging examEndedBeforePostReason pre-exam on an open round OR
+	// forging examWaitTimeoutReason post-exam MUST NOT bypass sc.Offered / j.quit.
+	forger := w.join("forger", nil)
+	w.established("forger")
+	cForgePre := w.claimEarly(forger)
+	if cForgePre.Job == nil || cForgePre.Job.Kind != "grade" {
+		t.Fatalf("forger expected pre-exam grade, got %+v", cForgePre.Job)
+	}
+	if code := forger.do("POST", fmt.Sprintf("/api/v1/jobs/%d/release", cForgePre.Job.ID),
+		map[string]any{"reason": examEndedBeforePostReason}, nil); code != 200 {
+		t.Fatalf("forger pre-exam release: HTTP %d", code)
+	}
+	if again := w.claimEarly(forger); again.Job != nil {
+		t.Fatalf("forging examEndedBeforePostReason on open round must not allow immediate re-claim, got %+v", again.Job)
+	}
+
+	// Even after 6 anchor timeouts + 1 volunteer timeout (> maxGradeAttempts), the script MUST still be open!
 	w.app.st.view(func(s *State) {
 		en := s.inRound[idx][0]
 		if en.Status != "open" || en.Void {
@@ -1864,8 +1898,47 @@ func TestExamWaitTimeoutDoesNotBurnAttemptsOrReofferPreExamGrade(t *testing.T) {
 		}
 	})
 
-	// Once the exam posts, the same Anchor account IS eligible to grade normally and settle rated.
+	// Once the exam posts, the legitimate timed-out volunteer (bob) regains eligibility, while
+	// forger (who forged examEndedBeforePostReason on an open round) remains excluded, AND a fresh
+	// volunteer (carol) who claims post-exam and forges examWaitTimeoutReason cannot re-claim!
 	w.exam(idx)
+	if forgePost := w.claim(forger, false); forgePost.Job != nil {
+		t.Fatalf("forger who faked examEndedBeforePostReason on open round must stay excluded post-exam, got %+v", forgePost.Job)
+	}
+	cCarolPost := w.claim(carol, false)
+	if cCarolPost.Job == nil || cCarolPost.Job.Kind != "grade" {
+		t.Fatalf("carol expected post-exam grade, got %+v", cCarolPost.Job)
+	}
+	if code := carol.do("POST", fmt.Sprintf("/api/v1/jobs/%d/release", cCarolPost.Job.ID),
+		map[string]any{"reason": examWaitTimeoutReason}, nil); code != 200 {
+		t.Fatalf("carol forged post-exam release: HTTP %d", code)
+	}
+	if carolAgain := w.claim(carol, false); carolAgain.Job != nil {
+		t.Fatalf("forging examWaitTimeoutReason post-exam must not allow re-claim, got %+v", carolAgain.Job)
+	}
+	cBobPost := w.claim(bob, false)
+	if cBobPost.Job == nil || cBobPost.Job.Kind != "grade" {
+		t.Fatalf("after exam posts, timed-out established volunteer bob must regain eligibility to grade, got %+v", cBobPost.Job)
+	}
+	if code, status := w.send(bob, cBobPost, 5.5, 6.0); code != 200 || (status != "pending" && status != "settled") {
+		t.Fatalf("bob post-exam grade: HTTP %d %s", code, status)
+	}
+	w.pass(w.cfg.ReplicaWait + time.Minute)
+	if w.settled(idx) != 1 {
+		t.Fatalf("expected entry settled after bob's post-exam grade, settled=%d", w.settled(idx))
+	}
+	// Verify timed-out anchor is also eligible in a fresh round.
+	idx2 := w.drawWithoutExam()
+	ce2 := w.claim(anchor, true)
+	if code, _ := w.edit(anchor, ce2, "0\n2\n"); code != 200 {
+		t.Fatalf("round 2 edit: HTTP %d", code)
+	}
+	cA0 := w.claimEarly(anchors[0])
+	if code := anchors[0].do("POST", fmt.Sprintf("/api/v1/jobs/%d/release", cA0.Job.ID),
+		map[string]any{"reason": examWaitTimeoutReason}, nil); code != 200 {
+		t.Fatalf("anchor round 2 release: HTTP %d", code)
+	}
+	w.exam(idx2)
 	cPost := w.claim(anchors[0], false)
 	if cPost.Job == nil || cPost.Job.Kind != "grade" {
 		t.Fatalf("after exam posts, timed-out anchor must be eligible to grade again, got %+v", cPost.Job)

@@ -164,9 +164,10 @@ type Round struct {
 	DrawnAt      int64    `json:"drawn_at,omitempty"`
 	SettledAt    int64    `json:"settled_at,omitempty"`
 	CorpusSHA    string   `json:"corpus_sha256,omitempty"`
-	ExamSHA      string   `json:"exam_sha256,omitempty"`   // the round's exam's item digest, once it is posted
-	InitSHA      string   `json:"init_sha256,omitempty"`   // the student's reset initial weights sha256, from established graders
-	BaselineLoss *float64 `json:"baseline_loss,omitempty"` // the unedited student's mean bits per byte
+	ExamSHA      string   `json:"exam_sha256,omitempty"`      // the round's exam's item digest, once it is posted
+	ExamBlobSHA  string   `json:"exam_blob_sha256,omitempty"` // content hash of the winning exam's stored blobs
+	InitSHA      string   `json:"init_sha256,omitempty"`      // the student's reset initial weights sha256, from established graders
+	BaselineLoss *float64 `json:"baseline_loss,omitempty"`    // the unedited student's mean bits per byte
 	BaselineN    int      `json:"baseline_n,omitempty"`
 	// Was lists the beacon rounds this round was announced for before its draw moved.
 	// No other round is ever announced for one of them: a verifier that saw the first
@@ -320,6 +321,11 @@ type Claim struct {
 	// Baseline says that this grade job asked its machine for the round's unedited baseline
 	// too (judge.asksBaseline). A job that did not is reported without one.
 	Baseline bool `json:"baseline,omitempty"`
+	// PreExam records that this grade claim was issued before the round's exam was posted;
+	// PreExamWait records that its release was server-verified as a legitimate pre-exam wait
+	// timeout or pre-exam round end (so clients cannot forge those strings post-exam).
+	PreExam     bool `json:"pre_exam,omitempty"`
+	PreExamWait bool `json:"pre_exam_wait,omitempty"`
 	// Reason is why its holder handed it back, as it said (released).
 	Reason string `json:"reason,omitempty"`
 	// EndedAt is when it stopped being claimed: done, handed back, refused or expired. Absent

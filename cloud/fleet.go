@@ -1004,16 +1004,21 @@ func (f *Fleet) launch(ctx context.Context, v *View, n, long, early, runs int, d
 }
 
 func (f *Fleet) launchExcluding(ctx context.Context, v *View, n, long, early, runs int, due time.Time, excludeKeys map[string]bool) (int, error) {
+	rented, err := f.launchExcludingRentals(ctx, v, n, long, early, runs, due, excludeKeys)
+	return len(rented), err
+}
+
+func (f *Fleet) launchExcludingRentals(ctx context.Context, v *View, n, long, early, runs int, due time.Time, excludeKeys map[string]bool) ([]*Rental, error) {
 	if n <= 0 {
-		return 0, nil
+		return nil, nil
 	}
 	site, err := f.st.site(ctx)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	vouched, err := f.st.vouched(ctx, f.op)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	// The machines for the bigger students first, each chosen for what a student costs on
 	// it; then those for grades taken before an exam, each kind just in time; then those to
@@ -1027,19 +1032,19 @@ func (f *Fleet) launchExcluding(ctx context.Context, v *View, n, long, early, ru
 	early = min(early, n-long)
 	runs = min(runs, n-long-early)
 	grades := n - long - early - runs
-	rented := 0
+	var rented []*Rental
 	for _, batch := range []struct {
 		n              int
 		long, curators bool
 		due            time.Time
 		what           string
 	}{{long, true, false, time.Time{}, "bigger students"}, {early, false, false, due, "early grades"}, {runs, false, true, time.Time{}, "curators"}} {
-		got, err := f.launchSome(ctx, v, batch.n, batch.long, batch.curators, batch.due, site, vouched, batch.what, excludeKeys)
-		rented += got
+		got, err := f.launchSomeRentals(ctx, v, batch.n, batch.long, batch.curators, batch.due, site, vouched, batch.what, excludeKeys)
+		rented = append(rented, got...)
 		if err != nil {
 			return rented, err
 		}
-		if batch.curators && got < batch.n && v.Work != nil {
+		if batch.curators && len(got) < batch.n && v.Work != nil {
 			// When 24 GB curator GPUs are scarce, pass unfilled curator slots to 12 GB+ graders
 			// if grades or farm tasks are actually waiting, rather than leaving those slots idle.
 			extraWant := 0
@@ -1052,24 +1057,24 @@ func (f *Fleet) launchExcluding(ctx context.Context, v *View, n, long, early, ru
 			if f.o.PerFarm > 0 {
 				extraWant += (v.Work.FarmWaiting + f.o.PerFarm - 1) / f.o.PerFarm
 			}
-			if spare := min(batch.n-got, max(0, extraWant-grades)); spare > 0 {
+			if spare := min(batch.n-len(got), max(0, extraWant-grades)); spare > 0 {
 				grades += spare
 			}
 		}
 	}
-	got, err := f.launchSome(ctx, v, grades, false, false, time.Time{}, site, vouched, "grades", excludeKeys)
-	rented += got
+	got, err := f.launchSomeRentals(ctx, v, grades, false, false, time.Time{}, site, vouched, "grades", excludeKeys)
+	rented = append(rented, got...)
 	return rented, err
 }
 
-func (f *Fleet) launchSome(ctx context.Context, v *View, n int, long, curators bool, due time.Time, site string, vouched map[string]Vouched, what string, excludeKeys map[string]bool) (int, error) {
+func (f *Fleet) launchSomeRentals(ctx context.Context, v *View, n int, long, curators bool, due time.Time, site string, vouched map[string]Vouched, what string, excludeKeys map[string]bool) ([]*Rental, error) {
 	if n <= 0 {
-		return 0, nil
+		return nil, nil
 	}
 	wantCurators := curators && f.o.Edits && f.probe == ""
 	gpus, err := f.choicesFor(ctx, long, wantCurators, false)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	if wantCurators {
 		// Machines to run curators, only where stet's container sandbox is known to hold, and
@@ -1114,7 +1119,7 @@ func (f *Fleet) launchSome(ctx context.Context, v *View, n int, long, curators b
 			if f.cur != nil {
 				f.cur.Plan = msg
 			}
-			return 0, nil
+			return nil, nil
 		}
 		gpus = now
 		grades = func(o Offer) int { return pl.grades(o, left) }
@@ -1122,11 +1127,11 @@ func (f *Fleet) launchSome(ctx context.Context, v *View, n int, long, curators b
 	}
 	if len(gpus) == 0 {
 		f.say("%s no GPU free now that fits (%s cloud%s%s); trying again later", f.armedHave(), strings.ToLower(f.o.Cloud), f.ceiling(long), map[bool]string{true: ", --gpu " + strings.Join(f.o.GPUs, ","), false: ""}[len(f.o.GPUs) > 0])
-		return 0, nil
+		return nil, nil
 	}
-	rented := 0
+	var rented []*Rental
 	for _, w := range quietestExcluding(v.Workers, excludeKeys) {
-		if rented == n {
+		if len(rented) == n {
 			break
 		}
 		if err := f.ready(ctx, w.Key, vouched); err != nil {
@@ -1143,7 +1148,7 @@ func (f *Fleet) launchSome(ctx context.Context, v *View, n int, long, curators b
 		if rec := v.Ledger.Pods[ledgerKey(pod.Market, pod.ID)]; rec != nil {
 			w.Plan = rec.Grades
 		}
-		rented++
+		rented = append(rented, pod)
 	}
 	return rented, nil
 }

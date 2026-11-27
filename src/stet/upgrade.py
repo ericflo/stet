@@ -126,6 +126,30 @@ def has_torch() -> bool:
         return False
 
 
+def is_grade_only(prefix: str | Path | None = None) -> bool:
+    """Whether this uv tool install was created as a lean grade-only install (`stet-cli[train]`),
+    so upgrades preserve the selected installation role even when STET_GRADE_ONLY is not kept in
+    the environment."""
+    receipt = Path(prefix if prefix is not None else sys.prefix) / "uv-receipt.toml"
+    if not receipt.is_file():
+        return False
+    try:
+        import tomllib
+
+        data = tomllib.loads(receipt.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    reqs = (data.get("tool") or {}).get("requirements") or []
+    for req in reqs:
+        if not isinstance(req, dict):
+            continue
+        if str(req.get("name") or "").lower().replace("_", "-") != "stet-cli":
+            continue
+        extras = {str(e).strip().lower() for e in (req.get("extras") or [])}
+        return "train" in extras and "run" not in extras
+    return False
+
+
 def fetch_installer(site: str) -> bytes:
     # The host is compared whole: "http://localhost.example" and "http://127.0.0.1@example" are not this machine.
     try:
@@ -159,8 +183,11 @@ def install(site: str, season_env: dict | None = None, log=None) -> tuple[bool, 
     env["STET_UPGRADE"] = "1"
     if not has_torch():
         env["STET_LIGHT"] = "1"
-    elif not env.get("STET_TORCH_INDEX") and (index := torch_index(season_env or {})):
-        env["STET_TORCH_INDEX"] = index
+    else:
+        if not env.get("STET_GRADE_ONLY") and is_grade_only():
+            env["STET_GRADE_ONLY"] = "1"
+        if not env.get("STET_TORCH_INDEX") and (index := torch_index(season_env or {})):
+            env["STET_TORCH_INDEX"] = index
     with tempfile.TemporaryDirectory(prefix="stet-upgrade-") as tmp:
         path = Path(tmp) / "install.sh"
         path.write_bytes(script)

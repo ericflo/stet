@@ -3827,3 +3827,170 @@ def test_review15_reasoning_cache_versioned_and_revalidated_on_upgrade(monkeypat
     assert len(synth_calls) == 1
     assert items2 == items1
 
+
+def test_review16_practice_cache_invalidated_on_reasoning_filter_upgrade(monkeypatch, tmp_path):
+    """Review 16 P2 #5: upgrading REASONING_FILTER_VERSION invalidates BOTH the synthesized
+    practice exam cache and its shared baseline cache key, AND `_practice()` revalidates cached
+    synthesized reasoning rows against `cached_item_passes_filter` before returning them."""
+    import importlib.util
+
+    from stet.exam.examine import snapshot_name
+    from stet.exam.farm import pack_items
+    from stet.exam.fresh import Doc, reason, write_snapshot
+
+    s3 = load_season("s3")
+    rnd = practice_round(s3, 0)
+    scale = s3.scale("nano")
+
+    monkeypatch.setenv("STET_CACHE", str(tmp_path))
+    monkeypatch.setenv("STET_SYNTHESIZE_PRACTICE", "1")
+    monkeypatch.setattr("stet.exam.fresh.reason.can_synthesize_locally", lambda *a, **k: True)
+
+    excerpt = (
+        "Municipal ferry operators suspended two harbor routes on Tuesday evening after sonar surveys "
+        "detected submerged timber pilings blocking the southern approach channel during low tide."
+    )
+    copied_prompt = (
+        "Why did municipal ferry operators suspend two harbor routes on Tuesday evening after sonar "
+        "surveys detected submerged timber pilings blocking the southern approach channel?"
+    )
+    clean_prompt = "What hazard forced evening ferry closures along the harbor channel?"
+    clean_resp = (
+        "Underwater inspection identified sunken wooden dock pilings obstructing shallow-water navigation, "
+        "prompting temporary suspensions until salvage crews clear the shipping lane."
+    )
+
+    hdir = data.harvest_dir()
+    hdir.mkdir(parents=True, exist_ok=True)
+    snap_paths = []
+    for h in (1_800_000_000, 1_800_003_600, 1_800_007_200):
+        sp = hdir / f"{h}.jsonl"
+        write_snapshot(
+            [Doc(source="ccnews", id=f"d-{h}", url=f"https://example.invalid/{h}", lang="en", license="ccnews", published=h, title="T", text=excerpt)],
+            sp,
+            {"hour": h},
+        )
+        snap_paths.append(sp)
+
+    # 1. Versioned practice_key differs from pre-versioned `f"{base}:synth"` AND rolls over on bump.
+    hours = data.practice_hours(rnd)
+    base = snapshot_name([hashlib.sha256(p.read_bytes()).hexdigest() for _, p in hours])
+    old_unversioned_key = hashlib.sha256(f"{base}:synth".encode()).hexdigest()
+    cur_key = data.practice_key(rnd)
+    assert cur_key != old_unversioned_key
+
+    has_torch = importlib.util.find_spec("torch") is not None
+    pipeline = importlib.import_module("stet.pipeline") if has_torch else None
+    b_cur = pipeline.baseline_path(rnd, scale, types.SimpleNamespace(type="cpu")) if pipeline else None
+
+    monkeypatch.setattr(reason, "REASONING_FILTER_VERSION", reason.REASONING_FILTER_VERSION + 1)
+    bumped_key = data.practice_key(rnd)
+    b_bumped = pipeline.baseline_path(rnd, scale, types.SimpleNamespace(type="cpu")) if pipeline else None
+    assert bumped_key != cur_key
+    if pipeline is not None:
+        assert b_bumped != b_cur
+    monkeypatch.setattr(reason, "REASONING_FILTER_VERSION", reason.REASONING_FILTER_VERSION - 1)
+
+    bad_copied_item = Item(
+        kind="answer",
+        corner="explain/en/ccnews",
+        fmt="prose",
+        lang="en",
+        source="explain:ccnews:2026-11-26:old-copied",
+        ctx=reason.wrap_prompt(excerpt, copied_prompt, "explain", 0),
+        cont=clean_resp,
+        prompt=copied_prompt,
+        wrapper_id=0,
+    )
+    clean_item = Item(
+        kind="answer",
+        corner="explain/en/ccnews",
+        fmt="prose",
+        lang="en",
+        source="explain:ccnews:2026-11-26:clean-0",
+        ctx=reason.wrap_prompt(excerpt, clean_prompt, "explain", 0),
+        cont=clean_resp,
+        prompt=clean_prompt,
+        wrapper_id=0,
+    )
+    assert reason.cached_item_passes_filter(bad_copied_item) is False
+    assert reason.cached_item_passes_filter(clean_item) is True
+
+    # Place poisoned packs at BOTH the old pre-versioned path AND the current versioned path!
+    rdir = data.round_dir(rnd, scale)
+    rdir.mkdir(parents=True, exist_ok=True)
+    old_cache = rdir / f"exam-practice-{rnd.season.digest[:8]}-{old_unversioned_key[:16]}.jsonl.zst"
+    cur_cache = rdir / f"exam-practice-{rnd.season.digest[:8]}-{cur_key[:16]}.jsonl.zst"
+    old_cache.write_bytes(pack_items([bad_copied_item]))
+    cur_cache.write_bytes(pack_items([bad_copied_item]))
+
+    assemble_calls = []
+
+    def fake_assemble(*a, **k):
+        assemble_calls.append(k.get("synthesize"))
+        return ([clean_item], 1, {"en": 100.0}, [])
+
+    monkeypatch.setattr("stet.exam.examine.assemble", fake_assemble)
+
+    # First call rejects the poisoned cached row and re-assembles cleanly!
+    got1 = data.round_exam(rnd, scale)
+    assert assemble_calls == [True]
+    assert got1 == [clean_item]
+
+    # Second call reuses the freshly written clean cache without re-assembling!
+    got2 = data.round_exam(rnd, scale)
+    assert assemble_calls == [True]
+    assert got2 == [clean_item]
+
+
+def test_review16_wheel_bundles_upstream_license_texts(tmp_path):
+    """Review 16 P2 #7: the built stet-cli wheel must distribute full upstream license texts
+    for Apache 2.0 (Global-MMLU / OpenBookQA) and GSM8K's MIT copyright & permission notice."""
+    import importlib.resources as res
+    import shutil
+    import subprocess
+    import zipfile
+
+    # 1. Verify bundled package resources directly.
+    lic_dir = res.files("stet.exam").joinpath("data", "licenses")
+    apache_text = lic_dir.joinpath("APACHE-2.0.txt").read_text(encoding="utf-8")
+    gsm8k_text = lic_dir.joinpath("GSM8K-MIT.txt").read_text(encoding="utf-8")
+    assert "Apache License" in apache_text and "Version 2.0, January 2004" in apache_text
+    assert "TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION" in apache_text
+    assert "Copyright (c) 2021 OpenAI" in gsm8k_text and "Permission is hereby granted, free of charge" in gsm8k_text
+
+    # 2. Build the actual wheel into tmp_path and inspect its .dist-info/licenses/ archive entries.
+    repo_root = Path(__file__).resolve().parents[1]
+    out_dir = tmp_path / "dist"
+    out_dir.mkdir()
+    built = False
+    try:
+        from hatchling.builders.wheel import WheelBuilder
+
+        WheelBuilder(str(repo_root)).build_standard(str(out_dir))
+        built = True
+    except ImportError:
+        uv_bin = shutil.which("uv")
+        if uv_bin:
+            subprocess.run(
+                [uv_bin, "build", "--wheel", "--out-dir", str(out_dir), str(repo_root)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            built = True
+    assert built, "neither hatchling nor uv was available to build the wheel artifact"
+
+    wheels = list(out_dir.glob("stet_cli-*.whl"))
+    assert len(wheels) == 1, f"expected 1 built wheel, got {wheels}"
+    with zipfile.ZipFile(wheels[0]) as zf:
+        names = set(zf.namelist())
+        dist_licenses = {n: zf.read(n).decode("utf-8") for n in names if ".dist-info/licenses/" in n}
+        assert any(n.endswith("THIRD_PARTY_NOTICES.md") for n in dist_licenses), f"missing notices: {dist_licenses.keys()}"
+        apache_entries = [txt for n, txt in dist_licenses.items() if n.endswith("APACHE-2.0.txt")]
+        gsm8k_entries = [txt for n, txt in dist_licenses.items() if n.endswith("GSM8K-MIT.txt")]
+        assert len(apache_entries) == 1 and "Version 2.0, January 2004" in apache_entries[0]
+        assert "TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION" in apache_entries[0]
+        assert len(gsm8k_entries) == 1 and "Copyright (c) 2021 OpenAI" in gsm8k_entries[0]
+        assert "Permission is hereby granted, free of charge" in gsm8k_entries[0]
+

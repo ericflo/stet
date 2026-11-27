@@ -1801,12 +1801,18 @@ else
     fi
     rm -rf "$PRE"
   fi
-  say "Installing stet with Python $PY, PyTorch and the curator libraries (a few GB the first time)..."
+  if [ "$EXTRAS" = "train" ]; then
+    say "Installing stet with Python $PY and the grading libraries (PyTorch and Transformers)..."
+  else
+    say "Installing stet with Python $PY, PyTorch and the curator libraries (a few GB the first time)..."
+  fi
   set -- uv tool install --force --python "$PY" --constraints "$TMP/constraints.txt"
   if [ -n "$INDEX" ]; then
     set -- "$@" --index "$INDEX" --index-strategy unsafe-best-match
   fi
-  if ! "$@" "stet-cli[$EXTRAS] @ $WHEEL"; then
+  if [ "$EXTRAS" = "train" ]; then
+    "$@" "stet-cli[train] @ $WHEEL"
+  elif ! "$@" "stet-cli[$EXTRAS] @ $WHEEL"; then
     if [ "$EXTRAS" != "run" ]; then
       say ""
       say "The CUDA-accelerated extras could not be installed; retrying with the portable library set..."

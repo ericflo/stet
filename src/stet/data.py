@@ -817,7 +817,12 @@ def practice_key(rnd: Round) -> str:
         return ""
     base = snapshot_name([hashlib.sha256(p.read_bytes()).hexdigest() for _, p in hours])
     if rnd.season.raw["exam"].get("reasoning"):
-        mode = "synth" if practice_synthesize(rnd) else "nosynth"
+        if practice_synthesize(rnd):
+            from .exam.fresh.reason import REASONING_FILTER_VERSION
+
+            mode = f"synth:v{REASONING_FILTER_VERSION}"
+        else:
+            mode = "nosynth"
         return hashlib.sha256(f"{base}:{mode}".encode()).hexdigest()
     return base
 
@@ -833,7 +838,18 @@ def _practice(rnd: Round, scale: Scale, hours: list[tuple[int, Path]]):
     synth = practice_synthesize(rnd)
     path = round_dir(rnd, scale) / f"exam-practice-{rnd.season.digest[:8]}-{practice_key(rnd)[:16]}.jsonl.zst"
     try:
-        return unpack_items(path.read_bytes())
+        cached = unpack_items(path.read_bytes())
+        if synth:
+            from .exam.aggregate import REASONING_KINDS, part_of
+            from .exam.fresh.reason import cached_item_passes_filter
+
+            r_cfg = rnd.season.raw["exam"].get("reasoning") or {}
+            max_ov = float(r_cfg.get("max_ngram_overlap", 0.50))
+            reas = [it for it in cached if part_of(it) in REASONING_KINDS]
+            if reas and all(cached_item_passes_filter(it, max_ngram_overlap=max_ov) for it in reas):
+                return cached
+        else:
+            return cached
     except (OSError, ValueError, zstandard.ZstdError):
         pass
     items = assemble(

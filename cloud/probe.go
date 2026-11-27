@@ -42,28 +42,33 @@ func cmdProbe(ctx context.Context, f *Fleet, check string, wait time.Duration) e
 	if m == nil {
 		return fmt.Errorf("%s has no key: %s", marketTitle(market), f.off[market])
 	}
-	if err := cmdUp(ctx, f, 1); err != nil {
-		return err
-	}
-	// The machine just rented on the market: the newest of the pool's there.
-	l, err := f.readLedger()
+	rented, err := cmdUpRentals(ctx, f, 1)
 	if err != nil {
 		return err
 	}
-	var rec *podRecord
-	for _, r := range l.Pods {
-		if r.market() == market && (rec == nil || r.Start.After(rec.Start)) {
-			rec = r
-		}
-	}
-	if rec == nil {
+	if len(rented) == 0 {
 		return fmt.Errorf("nothing was rented on %s", marketTitle(market))
 	}
-	f.say("probing %s on %s (%s, %s): waiting up to %s for what it finds", rec.Handle, marketTitle(market), rec.ID, rec.GPU, wait)
+	pod := rented[0]
+	if f.o.DryRun || pod.ID == "" || pod.ID == "dry-run" {
+		return nil
+	}
+	handle, gpu := pod.Name, pod.Card
+	if l, err := f.readLedger(); err == nil {
+		if rec := l.Pods[ledgerKey(pod.Market, pod.ID)]; rec != nil {
+			if rec.Handle != "" {
+				handle = rec.Handle
+			}
+			if rec.GPU != "" {
+				gpu = rec.GPU
+			}
+		}
+	}
+	f.say("probing %s on %s (%s, %s): waiting up to %s for what it finds", handle, marketTitle(market), pod.ID, gpu, wait)
 	deadline := f.now().Add(wait)
 	var found []string
 	for {
-		found = f.probeFound(ctx, m, rec.ID)
+		found = f.probeFound(ctx, m, pod.ID)
 		if probeDone(found) || f.now().After(deadline) || ctx.Err() != nil {
 			break
 		}
@@ -78,7 +83,7 @@ func cmdProbe(ctx context.Context, f *Fleet, check string, wait time.Duration) e
 	for _, line := range found {
 		held = held || strings.Contains(line, "every case held")
 	}
-	if err := cmdDown(context.WithoutCancel(ctx), f, true, []string{rec.Handle}); err != nil {
+	if err := cmdDown(context.WithoutCancel(ctx), f, true, []string{handle}); err != nil {
 		f.say("ending the probe: %v", err)
 	}
 	switch {

@@ -15,7 +15,9 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -49,9 +51,21 @@ func (a *App) examBlob(idx int, name string) string {
 }
 
 // examDigestBlob is an immutable, digest-addressed blob key for a round's exam files so two
-// overlapping publications with different digests cannot overwrite each other before commit.
+// overlapping publications cannot overwrite each other before commit.
 func (a *App) examDigestBlob(idx int, digest, name string) string {
 	return fmt.Sprintf("exams/%s/%08d/%s/%s", a.season.ID, idx, digest, name)
+}
+
+// examBlobSHA hashes the full publication payload (ordered items digest + compressed items,
+// public, and table bytes) so overlapping posts with the same items_digest but different derived
+// public_file or table stage into distinct immutable prefixes and cannot overwrite the winner.
+func examBlobSHA(digest string, file, public, table []byte) string {
+	fh := sha256.Sum256(file)
+	ph := sha256.Sum256(public)
+	th := sha256.Sum256(table)
+	h := sha256.New()
+	fmt.Fprintf(h, "%s\n%x\n%x\n%x", digest, fh, ph, th)
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // examPosted reports whether a round's exam is there to be sat: it is made after the draw.
@@ -125,11 +139,12 @@ func (a *App) postExam(ctx context.Context, idx int, p *ExamPost) (bool, error) 
 		return false, err
 	}
 	table, _ := json.Marshal(p.Table)
+	blobSHA := examBlobSHA(p.Digest, file, public, table)
 	for _, put := range []struct {
 		name, kind string
 		b          []byte
 	}{{examItems, "application/zstd", file}, {examPublic, "application/zstd", public}, {examTable, "application/json", table}} {
-		if err := a.st.blobs.Put(ctx, a.examDigestBlob(idx, p.Digest, put.name), put.b, put.kind); err != nil {
+		if err := a.st.blobs.Put(ctx, a.examDigestBlob(idx, blobSHA, put.name), put.b, put.kind); err != nil {
 			slog.Error("keeping a round's exam", "round", idx, "err", err)
 			return false, fail(503, "the file store is not answering; try again in a moment")
 		}
@@ -152,7 +167,7 @@ func (a *App) postExam(ctx context.Context, idx int, p *ExamPost) (bool, error) 
 		if late {
 			rd.Hours, rd.HoursLate = p.Hours, true
 		}
-		rd.ExamSHA, rd.ExamAt, rd.ExamTable, rd.Shares, rd.Snapshot, rd.Fresh = p.Digest, now(), p.Table, p.Shares, p.Snapshot, p.Fresh
+		rd.ExamSHA, rd.ExamBlobSHA, rd.ExamAt, rd.ExamTable, rd.Shares, rd.Snapshot, rd.Fresh = p.Digest, blobSHA, now(), p.Table, p.Shares, p.Snapshot, p.Fresh
 		if p.InitSHA != "" && rd.InitSHA == "" {
 			rd.InitSHA = p.InitSHA
 		}
@@ -325,13 +340,14 @@ func (a *App) apiExamGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var posted, settled bool
-	var examSHA string
+	var examSHA, blobSHA string
 	a.st.view(func(s *State) {
 		rd := s.Rounds[idx]
 		posted = rd != nil && examPosted(rd)
 		settled = posted && rd.Status == "settled"
 		if posted {
 			examSHA = rd.ExamSHA
+			blobSHA = rd.ExamBlobSHA
 		}
 	})
 	if !posted {
@@ -357,9 +373,19 @@ func (a *App) apiExamGet(w http.ResponseWriter, r *http.Request) {
 		}
 		name = examItems
 	}
-	f, size, err := a.st.blobs.Open(r.Context(), a.examDigestBlob(idx, examSHA, name))
+	var (
+		f    io.ReadCloser
+		size int64
+		err  error = errNoBlob
+	)
+	if blobSHA != "" {
+		f, size, err = a.st.blobs.Open(r.Context(), a.examDigestBlob(idx, blobSHA, name))
+	}
 	if errors.Is(err, errNoBlob) {
-		// Backwards compatibility for rounds stored before digest-keyed exam blobs.
+		// Backwards compatibility for rounds stored under items_digest-only or unkeyed exam blobs.
+		f, size, err = a.st.blobs.Open(r.Context(), a.examDigestBlob(idx, examSHA, name))
+	}
+	if errors.Is(err, errNoBlob) {
 		f, size, err = a.st.blobs.Open(r.Context(), a.examBlob(idx, name))
 	}
 	if err != nil {

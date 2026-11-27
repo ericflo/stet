@@ -1136,24 +1136,59 @@ func (e *Examiner) recordMissingInstance(inst ExaminerInstance, why string) erro
 	return e.recordEndedAt(inst.ID, inst.Label, inst.Price, start, end, "", why)
 }
 
-func (e *Examiner) recordDisappearedUnresolved(prevUnresolved, listed []ExaminerInstance, skipID, why string) error {
+func findUnresolved(prev []ExaminerInstance, id string) (ExaminerInstance, bool) {
+	for _, u := range prev {
+		if u.ID != "" && u.ID == id {
+			return u, true
+		}
+	}
+	return ExaminerInstance{}, false
+}
+
+func savedOrphanInstance(saved examinerState, prev []ExaminerInstance) ExaminerInstance {
+	if u, ok := findUnresolved(prev, saved.InstanceID); ok {
+		return u
+	}
+	return ExaminerInstance{
+		ID:      saved.InstanceID,
+		Label:   saved.ReservedLabel,
+		State:   "unknown",
+		Price:   saved.Price,
+		Created: saved.Created,
+	}
+}
+
+// confirmMissingUnresolved checks previously unresolved orphans that are absent from the latest
+// provider listing. Never drops an orphan or bills terminal spend on omission alone: calls
+// EndExaminer so termination is confirmed (200/204/404 -> nil) before recording bounded spend,
+// and retains the orphan in Unresolved if EndExaminer fails.
+func (e *Examiner) confirmMissingUnresolved(ctx context.Context, prevUnresolved, listed []ExaminerInstance, skipID, why string) (still []ExaminerInstance, ended map[string]bool, endErr, spendErr error) {
 	if len(prevUnresolved) == 0 || e.dryRun {
-		return nil
+		return nil, nil, nil, nil
 	}
 	listedIDs := make(map[string]bool, len(listed))
 	for _, inst := range listed {
 		listedIDs[inst.ID] = true
 	}
-	var firstErr error
+	ended = map[string]bool{}
 	for _, prev := range prevUnresolved {
 		if prev.ID == "" || prev.ID == skipID || listedIDs[prev.ID] {
 			continue
 		}
-		if err := e.recordMissingInstance(prev, why); err != nil && firstErr == nil {
-			firstErr = err
+		if err := e.prov.EndExaminer(ctx, prev.ID); err != nil {
+			still = append(still, prev)
+			e.say("could not confirm termination of missing examiner GPU (machine %s): %v", prev.ID, err)
+			if endErr == nil {
+				endErr = fmt.Errorf("confirming termination of missing examiner GPU %s: %w", prev.ID, err)
+			}
+			continue
+		}
+		ended[prev.ID] = true
+		if rerr := e.recordMissingInstance(prev, why); rerr != nil && spendErr == nil {
+			spendErr = rerr
 		}
 	}
-	return firstErr
+	return still, ended, endErr, spendErr
 }
 
 // EnforceTimeout checks owned examiner instances against the hard --examiner-timeout TTL and
@@ -1232,17 +1267,41 @@ func (e *Examiner) EnforceTimeout(ctx context.Context) error {
 			saved.InstanceID, saved.PendingRent, saved.ReservedLabel = "", false, ""
 		}
 	}
+	_, savedWasUnresolved := findUnresolved(saved.Unresolved, saved.InstanceID)
+	savedNeedsEnd := !foundSaved && saved.InstanceID != "" &&
+		(savedWasUnresolved || saved.Created.IsZero() || now.Sub(saved.Created) > e.cfg.Timeout)
 	if !e.dryRun {
-		if rerr := e.recordDisappearedUnresolved(saved.Unresolved, owned, saved.InstanceID, "unresolved examiner orphan disappeared before timeout check"); rerr != nil && firstErr == nil {
-			firstErr = rerr
+		stillUnresolved, confirmedEnded, uEndErr, uSpendErr := e.confirmMissingUnresolved(ctx, saved.Unresolved, owned, saved.InstanceID, "unresolved examiner orphan confirmed ended during timeout check")
+		for id := range confirmedEnded {
+			endedIDs[id] = true
+		}
+		failedEnds = append(failedEnds, stillUnresolved...)
+		if uEndErr != nil && firstErr == nil {
+			firstErr = uEndErr
+		}
+		if uSpendErr != nil && firstErr == nil {
+			firstErr = uSpendErr
+		}
+		if savedNeedsEnd {
+			if err := e.prov.EndExaminer(ctx, saved.InstanceID); err != nil {
+				e.proxyOffline()
+				failedEnds = append(failedEnds, savedOrphanInstance(saved, saved.Unresolved))
+				e.say("could not end missing timed-out examiner GPU (machine %s): %v", saved.InstanceID, err)
+				if firstErr == nil {
+					firstErr = fmt.Errorf("ending missing timed-out examiner GPU %s: %w", saved.InstanceID, err)
+				}
+			} else {
+				endedIDs[saved.InstanceID] = true
+				e.say("ended missing timed-out examiner GPU (machine %s): exceeded --examiner-timeout (%s)", saved.InstanceID, e.cfg.Timeout)
+				if rerr := e.recordMissingSaved(saved, "timed-out examiner confirmed ended after omission from provider listing"); rerr != nil && firstErr == nil {
+					firstErr = rerr
+				}
+				e.clearState()
+			}
 		}
 		e.updateUnresolved(owned, endedIDs, failedEnds)
-	}
-	if !foundSaved && saved.InstanceID != "" && !e.dryRun {
-		if rerr := e.recordMissingSaved(saved, "examiner disappeared before timeout check (self-terminated or ended)"); rerr != nil && firstErr == nil {
-			firstErr = rerr
-		}
-		e.clearState()
+	} else if savedNeedsEnd {
+		e.say("would end missing timed-out examiner GPU (machine %s): exceeded --examiner-timeout (%s)", saved.InstanceID, e.cfg.Timeout)
 	}
 	return firstErr
 }
@@ -1351,17 +1410,34 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 			}
 		}
 		if e.dryRun {
+			if saved.InstanceID != "" && !listedIDs[saved.InstanceID] {
+				e.say("would end missing examiner GPU (machine %s): no open round needs an exam", saved.InstanceID)
+			}
 			return loadErr
 		}
-		if rerr := e.recordDisappearedUnresolved(prevUnresolved, insts, saved.InstanceID, "unresolved examiner orphan disappeared before teardown"); rerr != nil && spendErr == nil {
-			spendErr = rerr
+		stillUnresolved, _, uEndErr, uSpendErr := e.confirmMissingUnresolved(ctx, prevUnresolved, insts, saved.InstanceID, "unresolved examiner orphan confirmed ended during idle cleanup")
+		failedEnds = append(failedEnds, stillUnresolved...)
+		if uEndErr != nil && firstEndErr == nil {
+			firstEndErr = uEndErr
+		}
+		if uSpendErr != nil && spendErr == nil {
+			spendErr = uSpendErr
 		}
 		if saved.InstanceID != "" && !endedSaved && !listedIDs[saved.InstanceID] {
-			if rerr := e.recordMissingSaved(saved, "examiner disappeared before teardown (self-terminated or ended)"); rerr != nil && spendErr == nil {
-				spendErr = rerr
+			if err := e.prov.EndExaminer(ctx, saved.InstanceID); err != nil {
+				failedEnds = append(failedEnds, savedOrphanInstance(saved, prevUnresolved))
+				e.say("could not end missing examiner GPU (machine %s): %v", saved.InstanceID, err)
+				if firstEndErr == nil {
+					firstEndErr = fmt.Errorf("ending missing examiner GPU %s: %w", saved.InstanceID, err)
+				}
+			} else {
+				if rerr := e.recordMissingSaved(saved, "examiner confirmed ended during idle cleanup"); rerr != nil && spendErr == nil {
+					spendErr = rerr
+				}
+				e.clearState()
+				saved, wasReady, wasUpstream = examinerState{}, false, ""
+				endedSaved = true
 			}
-			e.clearState()
-			saved, wasReady, wasUpstream = examinerState{}, false, ""
 		}
 		e.setUnresolved(failedEnds)
 		if firstEndErr != nil {
@@ -1480,19 +1556,54 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 			saved, wasReady, wasUpstream = examinerState{}, false, ""
 		}
 	}
+	missingSavedHeld := false
 	if !e.dryRun {
-		if rerr := e.recordDisappearedUnresolved(prevUnresolved, insts, saved.InstanceID, "unresolved examiner orphan disappeared before reconciliation"); rerr != nil && spendErr == nil {
-			spendErr = rerr
+		stillUnresolved, _, uEndErr, uSpendErr := e.confirmMissingUnresolved(ctx, prevUnresolved, insts, saved.InstanceID, "unresolved examiner orphan confirmed ended during reconciliation")
+		failedEnds = append(failedEnds, stillUnresolved...)
+		if uEndErr != nil && strayEndErr == nil {
+			strayEndErr = uEndErr
+		}
+		if uSpendErr != nil && spendErr == nil {
+			spendErr = uSpendErr
 		}
 		if saved.InstanceID != "" && !endedSaved && !listedIDs[saved.InstanceID] {
-			if rerr := e.recordMissingSaved(saved, "examiner disappeared (self-terminated or ended)"); rerr != nil && spendErr == nil {
-				spendErr = rerr
+			// Never clear a healthy acknowledged contract or record terminal spend on a single
+			// missing provider listing (eventual consistency or delayed label visibility).
+			// However, if the instance was already condemned (Unresolved from a prior failed
+			// teardown), lacks credentials to adopt, has a zero creation time, or has exceeded TTL,
+			// confirm termination via EndExaminer now instead of stalling synthesis.
+			_, wasUnresolved := findUnresolved(prevUnresolved, saved.InstanceID)
+			timedOut := saved.Created.IsZero() || now.Sub(saved.Created) > e.cfg.Timeout
+			unadoptable := saved.APIKey == "" || saved.CertPEM == ""
+			if timedOut || wasUnresolved || unadoptable {
+				if err := e.prov.EndExaminer(ctx, saved.InstanceID); err != nil {
+					failedEnds = append(failedEnds, savedOrphanInstance(saved, prevUnresolved))
+					e.say("could not end missing examiner GPU (machine %s): %v", saved.InstanceID, err)
+					if strayEndErr == nil {
+						strayEndErr = fmt.Errorf("ending missing examiner GPU %s: %w", saved.InstanceID, err)
+					}
+				} else {
+					why := "examiner confirmed ended after omission from provider listing"
+					if timedOut {
+						e.say("ended missing timed-out examiner GPU (machine %s): exceeded --examiner-timeout (%s)", saved.InstanceID, e.cfg.Timeout)
+						why = "timed-out examiner confirmed ended after omission from provider listing"
+					} else {
+						e.say("ended missing examiner GPU (machine %s): confirmed terminated", saved.InstanceID)
+					}
+					if rerr := e.recordMissingSaved(saved, why); rerr != nil && spendErr == nil {
+						spendErr = rerr
+					}
+					e.clearState()
+					saved, wasReady, wasUpstream = examinerState{}, false, ""
+					endedSaved = true
+				}
+			} else {
+				missingSavedHeld = true
+				e.say("examiner GPU %s omitted from provider listing; keeping reservation until it reappears or terminates", saved.InstanceID)
 			}
-			e.clearState()
-			saved, wasReady, wasUpstream = examinerState{}, false, ""
 		}
 		e.setUnresolved(failedEnds)
-	} else if dryRunTimedOut {
+	} else if dryRunTimedOut || (saved.InstanceID != "" && !listedIDs[saved.InstanceID]) {
 		return loadErr
 	}
 
@@ -1525,6 +1636,15 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 	if strayEndErr != nil {
 		e.proxyOffline()
 		return strayEndErr
+	}
+
+	// Keep an acknowledged contract omitted from a stale listing intact (credentials, slot,
+	// hourly charge) without renting a replacement or recording terminal spend.
+	if missingSavedHeld {
+		if spendErr != nil {
+			return spendErr
+		}
+		return loadErr
 	}
 
 	// Preserve an active pre-rental reservation across stale provider listings until either the

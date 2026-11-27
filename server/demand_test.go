@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"html"
 	"os"
 	"os/exec"
@@ -359,6 +360,80 @@ func TestTheInstallerIsAScriptAShellAcceptsAndClearsUpAfterItself(t *testing.T) 
 		if out, err := exec.Command(bin, "-n", path).CombinedOutput(); err != nil {
 			t.Errorf("%s does not accept the installer: %v\n%s", sh, err, out)
 		}
+	}
+}
+
+// Review 16 P2 #6: with STET_GRADE_ONLY=1, a failure installing stet-cli[train] must fail cleanly
+// and NEVER fall back to stet-cli[run] or stet-cli[run,cuda]; upgrades with STET_GRADE_ONLY=1
+// must keep both prefetch and install strictly on [train].
+func TestInstallShGradeOnlyNeverEscalatesToCuratorExtras(t *testing.T) {
+	pub, _ := newKey()
+	w := newWorld(t, pub)
+	if err := os.WriteFile(filepath.Join(w.app.cfg.FilesDir, "stet_cli-9.9.9-py3-none-any.whl"), []byte("a wheel"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, body := w.page("/install.sh")
+	if code != 200 {
+		t.Fatalf("/install.sh: HTTP %d", code)
+	}
+	scriptPath := filepath.Join(t.TempDir(), "install.sh")
+	if err := os.WriteFile(scriptPath, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	runStub := func(t *testing.T, extraEnv []string, failToolInstall bool) (error, string) {
+		t.Helper()
+		binDir := t.TempDir()
+		logFile := filepath.Join(t.TempDir(), "uv.log")
+		uvFail := ""
+		if failToolInstall {
+			uvFail = `if [ "${1:-}" = "tool" ]; then exit 1; fi`
+		}
+		uvScript := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$*\" >> %q\n%s\nexit 0\n", logFile, uvFail)
+		if err := os.WriteFile(filepath.Join(binDir, "uv"), []byte(uvScript), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		curlScript := "#!/bin/sh\nout=\"\"\nwhile [ $# -gt 0 ]; do\n  if [ \"$1\" = \"-o\" ]; then out=\"$2\"; shift 2; else shift; fi\ndone\n[ -n \"$out\" ] && : > \"$out\"\nexit 0\n"
+		if err := os.WriteFile(filepath.Join(binDir, "curl"), []byte(curlScript), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		// Stub nvidia-smi so HAS_NVIDIA=1 on Linux x86_64 even on CPU-only test runners.
+		if err := os.WriteFile(filepath.Join(binDir, "nvidia-smi"), []byte("#!/bin/sh\necho 'GPU 0: Fake NVIDIA'\nexit 0\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command("sh", scriptPath)
+		cmd.Env = append([]string{
+			"PATH=" + binDir + ":/usr/bin:/bin",
+			"HOME=" + t.TempDir(),
+			"STET_CACHE=" + t.TempDir(),
+		}, extraEnv...)
+		_, err := cmd.CombinedOutput()
+		raw, _ := os.ReadFile(logFile)
+		return err, string(raw)
+	}
+
+	// 1. Failing [train] install with STET_GRADE_ONLY=1 must exit non-zero and NEVER request [run] or [run,cuda].
+	err, logFail := runStub(t, []string{"STET_GRADE_ONLY=1"}, true)
+	if err == nil {
+		t.Fatalf("expected non-zero exit when STET_GRADE_ONLY=1 [train] install fails; uv log:\n%s", logFail)
+	}
+	if !strings.Contains(logFail, "stet-cli[train]") {
+		t.Fatalf("expected stet-cli[train] call in uv log, got:\n%s", logFail)
+	}
+	if strings.Contains(logFail, "stet-cli[run") {
+		t.Fatalf("STET_GRADE_ONLY=1 escalated to curator extras on failure! uv log:\n%s", logFail)
+	}
+
+	// 2. Upgrading with STET_GRADE_ONLY=1 STET_UPGRADE=1 keeps BOTH prefetch and install on [train].
+	err, logUp := runStub(t, []string{"STET_GRADE_ONLY=1", "STET_UPGRADE=1"}, false)
+	if err != nil {
+		t.Fatalf("STET_GRADE_ONLY=1 STET_UPGRADE=1 failed: %v\nuv log:\n%s", err, logUp)
+	}
+	if strings.Count(logUp, "stet-cli[train]") < 2 {
+		t.Fatalf("expected both prefetch and tool install to request stet-cli[train], got:\n%s", logUp)
+	}
+	if strings.Contains(logUp, "stet-cli[run") {
+		t.Fatalf("STET_GRADE_ONLY=1 STET_UPGRADE=1 requested curator extras! uv log:\n%s", logUp)
 	}
 }
 

@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -1579,4 +1580,75 @@ func TestManualUpLaunchesCuratorRunnerWhenWaitingEntryNeedsDraw(t *testing.T) {
 			t.Fatalf("expected grade-only worker with --no-edits, got %+v", rp.created)
 		}
 	})
+}
+
+// Review 16 P2 #2: when the examiner fills the last --max slot alongside an existing working
+// RunPod grader, `cmdProbe` rents 0 machines and MUST exit immediately without selecting the
+// existing grader from the ledger or running forced cleanup on it.
+func TestProbeDoesNotTerminateExistingWorkerWhenExaminerFillsLastSlot(t *testing.T) {
+	rp, st := newFakeRunPod(t), newFakeStet(t)
+	f, _ := testFleet(t, rp, st, 2)
+	f.o.MaxWorkers = 2
+	f.o.Market = "runpod"
+
+	// Existing RunPod worker actively grading on stet-rp-01 (slot 1 of 2).
+	rp.pods["pod-grading"] = &Pod{
+		ID: "pod-grading", Name: "stet-rp-01",
+		Status: "RUNNING", Cost: 0.43, CreatedAt: f.now().Add(-10 * time.Minute),
+	}
+	st.work = Work{
+		Rounds: []WorkRound{{ID: "s3-o00042", Entries: 1, ExamAt: 0}},
+		Machines: []Machine{{
+			Handle: "stet-rp-01", Worker: true,
+			Busy: "grade", LastSeen: f.now().Unix(),
+		}},
+	}
+	if err := f.writeLedger(&ledger{Pods: map[string]*podRecord{
+		ledgerKey("runpod", "pod-grading"): {
+			ID: "pod-grading", Market: "runpod", Handle: "stet-rp-01",
+			GPU: "RTX 4090", Cost: 0.43, Start: f.now().Add(-10 * time.Minute),
+		},
+	}}); err != nil {
+		t.Fatalf("writeLedger: %v", err)
+	}
+
+	// Active examiner fills slot 2 of 2 (persisted in examiner.json).
+	if err := writeExaminerState(f.o.Home, &examinerState{
+		InstanceID: "ex-live", RoundID: "s3-o00042", APIKey: "k", CertPEM: "c",
+		Price: 0.62, Created: f.now().Add(-2 * time.Minute),
+	}); err != nil {
+		t.Fatalf("writeExaminerState: %v", err)
+	}
+
+	checkFile := filepath.Join(t.TempDir(), "cage_check.py")
+	if err := os.WriteFile(checkFile, []byte("print('ok')\n"), 0o600); err != nil {
+		t.Fatalf("write check file: %v", err)
+	}
+
+	err := cmdProbe(context.Background(), f, checkFile, time.Minute)
+	if err == nil || !strings.Contains(err.Error(), "nothing was rented") {
+		t.Fatalf("expected 'nothing was rented' error when examiner fills last slot, got %v", err)
+	}
+	if len(rp.created) != 0 {
+		t.Fatalf("expected 0 new pods created, got %d", len(rp.created))
+	}
+	if len(st.released) != 0 {
+		t.Fatalf("probe MUST NOT release existing grader's active job! released=%v", st.released)
+	}
+	if _, ok := rp.pods["pod-grading"]; !ok {
+		t.Fatalf("probe MUST NOT terminate existing working grader!")
+	}
+
+	// With one open slot (--max 3), probe rents its own pod and cleans up ONLY that probe pod,
+	// leaving pod-grading untouched.
+	f.o.MaxWorkers = 3
+	if err := cmdProbe(context.Background(), f, checkFile, 0); err != nil {
+		t.Fatalf("cmdProbe with open slot: %v", err)
+	}
+	if len(rp.created) != 1 {
+		t.Fatalf("expected 1 probe pod rented, got %d", len(rp.created))
+	}
+	if len(rp.pods) != 1 || rp.pods["pod-grading"] == nil {
+		t.Fatalf("expected only the newly rented probe pod ended and pod-grading preserved, got pods=%+v", rp.pods)
+	}
 }
