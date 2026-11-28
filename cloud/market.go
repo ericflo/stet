@@ -144,12 +144,16 @@ type Rental struct {
 	TransferObserved      bool    // true when the provider reported observed transfer usage for this contract
 	ObservedTransferDown  float64 // provider-reported cumulative download transfer spend when present
 	TransferDownObserved  bool    // true when the provider reported download transfer usage
+	TransferDownUnpriced  bool    // true when the provider reported positive/invalid download usage without a usable rate
 	ObservedTransferUp    float64 // provider-reported cumulative upload transfer spend when present
 	TransferUpObserved    bool    // true when the provider reported upload transfer usage
+	TransferUpUnpriced    bool    // true when the provider reported positive/invalid upload usage without a usable rate
 	ObservedTransferTotal float64 // provider-reported explicit combined transfer_cost when present
 	TransferTotalObserved bool    // true when the provider reported explicit combined transfer_cost
+	TransferTotalUnpriced bool    // true when the provider reported a malformed/non-finite transfer_cost or sum overflow
 	PartialRate           bool    // true when Price is a partial/base fallback lacking the provider's all-in total (e.g. Vast dph_total == 0)
 	State                 string  // starting, running, stopped; anything else is the market's own word
+	Offline               bool    // true when the provider confirms the instance is offline and exempt from compute and storage charges (e.g. Vast actual_status=offline)
 	Status                string  // the market's own word
 	Created               time.Time
 	StoppedAt             time.Time // trustworthy provider stop timestamp when reported (zero when unknown)

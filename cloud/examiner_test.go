@@ -646,12 +646,17 @@ func TestExaminerEnforceTimeoutDuringStetOutageAndSelfDestructPayload(t *testing
 	if err := ex.Reconcile(context.Background(), openWork, testExaminerBudget()); err != nil {
 		t.Fatalf("Reconcile rent: %v", err)
 	}
-	// Verify container-side onstart script embeds TLS flags and Vast self-destruct TTL watchdog.
+	// Verify container-side onstart bootstrap stays under Vast's 4,048-char limit and embeds TLS
+	// flags and Vast self-destruct TTL watchdog in its payload.
 	launch := prov.rented[0]
-	script := examinerOnstartScript(launch, launch.Model+"@"+launch.Revision)
+	onstart := examinerOnstartScript(launch, launch.Model+"@"+launch.Revision)
+	if len(onstart) > vastMaxOnstartChars {
+		t.Fatalf("onstart script length %d exceeds Vast.ai limit %d", len(onstart), vastMaxOnstartChars)
+	}
+	script := examinerOnstartPayload(launch, launch.Model+"@"+launch.Revision)
 	for _, want := range []string{"--ssl-certfile", "--ssl-keyfile", "STET_EXAMINER_TTL_SECONDS", "CONTAINER_API_KEY", "console.vast.ai/api/v0/instances/"} {
 		if !strings.Contains(script, want) {
-			t.Fatalf("onstart script missing %q:\n%s", want, script)
+			t.Fatalf("onstart payload missing %q:\n%s", want, script)
 		}
 	}
 
@@ -831,16 +836,25 @@ func TestExaminerOnstart0600PermsLegacyUpgradeAndStoppedOrphanBlock(t *testing.T
 	if err != nil {
 		t.Fatalf("generateExaminerCert: %v", err)
 	}
-	// 1. Execute the exact Python cert/key materialization snippet from examinerOnstartScript
-	//    against a temp directory and assert both files are created with mode 0600!
+	// 1. Execute the exact Python cert/key materialization snippet from examinerOnstartPayload
+	//    against a temp directory and assert both files are created with mode 0600, while also
+	//    verifying the compressed onstart bootstrap stays within Vast's 4,048-char limit and passes sh -n!
 	tmp := t.TempDir()
-	script := examinerOnstartScript(ExaminerLaunch{
+	launch := ExaminerLaunch{
 		Model: defaultExaminerModel, Revision: defaultExaminerRevision, APIKey: "k",
 		CertPEM: certPEM, KeyPEM: keyPEM, TTLSeconds: 2700,
-	}, defaultExaminerModel+"@"+defaultExaminerRevision)
-	// 0. Validate shell syntax of the complete onstart script with sh -n.
+	}
+	onstart := examinerOnstartScript(launch, defaultExaminerModel+"@"+defaultExaminerRevision)
+	if len(onstart) > vastMaxOnstartChars {
+		t.Fatalf("onstart bootstrap length %d exceeds Vast limit %d", len(onstart), vastMaxOnstartChars)
+	}
+	if out, err := exec.Command("sh", "-n", "-c", onstart).CombinedOutput(); err != nil {
+		t.Fatalf("onstart bootstrap failed sh -n syntax check: %v\n%s\n%s", err, out, onstart)
+	}
+	script := examinerOnstartPayload(launch, defaultExaminerModel+"@"+defaultExaminerRevision)
+	// 0. Validate shell syntax of the complete decoded onstart payload with sh -n.
 	if out, err := exec.Command("sh", "-n", "-c", script).CombinedOutput(); err != nil {
-		t.Fatalf("onstart script failed sh -n syntax check: %v\n%s\n%s", err, out, script)
+		t.Fatalf("onstart payload failed sh -n syntax check: %v\n%s\n%s", err, out, script)
 	}
 	// Extract the python3 cert writer lines (between python3 -c ' and closing ').
 	startIdx := strings.Index(script, "python3 -c '")
@@ -3409,7 +3423,11 @@ func TestReview19OnstartWatchdogUsesEtcEnvironmentAbsoluteExpiryAndArmsBeforeTLS
 		if err := os.WriteFile(envPath, []byte(etcEnv), 0o600); err != nil {
 			t.Fatalf("write env file: %v", err)
 		}
-		script := examinerOnstartScript(launch, launch.Model+"@"+launch.Revision)
+		onstart := examinerOnstartScript(launch, launch.Model+"@"+launch.Revision)
+		if len(onstart) > vastMaxOnstartChars {
+			t.Fatalf("onstart bootstrap length %d exceeds Vast limit %d", len(onstart), vastMaxOnstartChars)
+		}
+		script := examinerOnstartPayload(launch, launch.Model+"@"+launch.Revision)
 		// Rewrite paths into temp dir and stub time.sleep + vllm so the script runs fast & safely.
 		script = strings.ReplaceAll(script, "/etc/environment", envPath)
 		script = strings.ReplaceAll(script, "/tmp/stet-", filepath.Join(dir, "stet-"))
@@ -11452,6 +11470,562 @@ func TestReview33OvernightTransferDirectionalMergeAndExaminerObservedTransfer(t 
 		}
 		if gotBDay1 := recB.dollarsBetween(startOfDay(day1Start), midnight); math.Abs(gotBDay1-0.50) > 1e-4 {
 			t.Fatalf("cmdDownRentalMeta midnight with Day-1 Pending.Created want $0.50 on Day 1 ($0.40 + 10m*$0.60), got $%.4f (rec=%+v)", gotBDay1, recB)
+		}
+	})
+}
+
+func TestReview34ExaminerOnstartLimitPartialTransferAndOfflineBilling(t *testing.T) {
+	t.Run("p1_1_serialized_create_request_under_vast_4048_limit", func(t *testing.T) {
+		certPEM, keyPEM, err := generateExaminerCert(time.Now(), 45*time.Minute)
+		if err != nil {
+			t.Fatalf("generateExaminerCert: %v", err)
+		}
+		var capturedBody map[string]any
+		var reqCount atomic.Int32
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			reqCount.Add(1)
+			if r.Method == "PUT" && strings.HasPrefix(r.URL.Path, "/api/v0/asks/") {
+				if err := json.NewDecoder(r.Body).Decode(&capturedBody); err != nil {
+					t.Errorf("decode create body: %v", err)
+				}
+				_, _ = w.Write([]byte(`{"success":true,"new_contract":993401}`))
+				return
+			}
+			http.NotFound(w, r)
+		}))
+		defer srv.Close()
+
+		vm := newVast(srv.URL, "vast-key")
+		vm.a.sleep = func(context.Context, time.Duration) error { return nil }
+		launch := ExaminerLaunch{
+			Image:      defaultExaminerImage,
+			Model:      defaultExaminerModel,
+			Revision:   defaultExaminerRevision,
+			Label:      "stet-examiner-owner1234567-s3-o00034",
+			APIKey:     strings.Repeat("a", 64),
+			CertPEM:    certPEM,
+			KeyPEM:     keyPEM,
+			TTLSeconds: 45 * 60,
+			ExpireAt:   time.Now().Unix() + 45*60,
+			DiskGB:     examinerDiskGB,
+		}
+		id, err := vm.RentExaminer(context.Background(), "777", launch)
+		if err != nil || id != "993401" {
+			t.Fatalf("RentExaminer: id=%q err=%v", id, err)
+		}
+		onstart, ok := capturedBody["onstart"].(string)
+		if !ok || onstart == "" {
+			t.Fatalf("serialized create request missing onstart: %+v", capturedBody)
+		}
+		if len(onstart) > vastMaxOnstartChars {
+			t.Fatalf("serialized onstart length %d exceeds Vast 4,048-char limit", len(onstart))
+		}
+		for i := 0; i < len(onstart); i++ {
+			if onstart[i] >= 0x80 {
+				t.Fatalf("serialized onstart contains non-ASCII byte 0x%x at %d", onstart[i], i)
+			}
+		}
+		if out, err := exec.Command("sh", "-n", "-c", onstart).CombinedOutput(); err != nil {
+			t.Fatalf("serialized onstart failed sh -n: %v\n%s", err, out)
+		}
+		// Execute the actual compressed bootstrap into a temp file (without exec'ing vLLM)
+		// to verify unpacking produces the exact full payload with mode 0700 and closing vllm launch.
+		if _, err := exec.LookPath("python3"); err == nil {
+			tmp := t.TempDir()
+			unpackedPath := filepath.Join(tmp, "stet-onstart.sh")
+			sandboxed := strings.ReplaceAll(onstart, "/tmp/stet-onstart.sh", unpackedPath)
+			sandboxed = strings.ReplaceAll(sandboxed, `os.execvp("sh",["sh",p])`, `None`)
+			if out, err := exec.Command("sh", "-c", sandboxed).CombinedOutput(); err != nil {
+				t.Fatalf("executing compressed onstart bootstrap failed: %v\n%s", err, out)
+			}
+			fi, err := os.Stat(unpackedPath)
+			if err != nil {
+				t.Fatalf("stat unpacked onstart: %v", err)
+			}
+			if fi.Mode().Perm() != 0o700 {
+				t.Fatalf("unpacked onstart perms = %04o, want 0700", fi.Mode().Perm())
+			}
+			raw, err := os.ReadFile(unpackedPath)
+			if err != nil {
+				t.Fatalf("read unpacked onstart: %v", err)
+			}
+			wantPayload := examinerOnstartPayload(launch, launch.Model+"@"+launch.Revision)
+			if string(raw) != wantPayload {
+				t.Fatalf("unpacked payload mismatch: got %d bytes, want %d bytes", len(raw), len(wantPayload))
+			}
+			if out, err := exec.Command("sh", "-n", unpackedPath).CombinedOutput(); err != nil {
+				t.Fatalf("unpacked payload failed sh -n: %v\n%s", err, out)
+			}
+			for _, tail := range []string{"cat >/tmp/stet-vllm.sh <<'SH'", "chmod 700 /tmp/stet-vllm.sh", `nohup sh /tmp/stet-vllm.sh >>"$LOG" 2>&1 &`} {
+				if !strings.Contains(string(raw), tail) {
+					t.Fatalf("unpacked payload missing %q", tail)
+				}
+			}
+		}
+		// Oversized onstart must be rejected BEFORE sending any HTTP create request.
+		before := reqCount.Load()
+		bigLaunch := launch
+		var sb strings.Builder
+		x := uint64(0x9e3779b97f4a7c15)
+		for i := 0; i < 6000; i++ {
+			x ^= x >> 12
+			x ^= x << 25
+			x ^= x >> 27
+			sb.WriteByte(byte('a' + (x*2685821657736338717)%26))
+		}
+		bigLaunch.Model = sb.String()
+		_, err = vm.RentExaminer(context.Background(), "777", bigLaunch)
+		if !errors.Is(err, errRentNotSent) {
+			t.Fatalf("oversized onstart expected errRentNotSent, got %v", err)
+		}
+		if reqCount.Load() != before {
+			t.Fatalf("oversized onstart sent HTTP request (%d -> %d)", before, reqCount.Load())
+		}
+	})
+
+	t.Run("p1_2_missing_bandwidth_price_preserves_known_charge_both_orders_admission_and_retirement", func(t *testing.T) {
+		t0 := time.Date(2026, 11, 28, 12, 0, 0, 0, time.UTC)
+		tNow := t0.Add(6 * time.Minute) // 6 min @ $0.50/hr = $0.05 compute
+
+		// Case 1 & 2: Both directions (down priced + up unpriced, AND up priced + down unpriced)
+		// MUST report >= $2.05 and BLOCK `stet-cloud up 1` under `--daily-budget 1.00`, then when
+		// the other direction's rate arrives on Poll 2, retire at exact $2.35 ($0.05 + $2.00 + $0.30).
+		cases := []struct {
+			name   string
+			poll1  string
+			poll2  string
+			wantP1 float64
+			wantP2 float64
+		}{
+			{
+				name:   "down_priced_up_unpriced_then_up_priced",
+				poll1:  fmt.Sprintf(`{"id":993410,"label":"stet-rp-01","actual_status":"running","intended_status":"running","cur_state":"running","gpu_name":"RTX 4090","dph_base":0.50,"dph_total":0.50,"storage_cost":0,"inet_down_cost":0.10,"inet_down_billed":20.0,"inet_up_billed":3.0,"start_date":%d}`, t0.Unix()),
+				poll2:  fmt.Sprintf(`{"id":993410,"label":"stet-rp-01","actual_status":"running","intended_status":"running","cur_state":"running","gpu_name":"RTX 4090","dph_base":0.50,"dph_total":0.50,"storage_cost":0,"inet_up_cost":0.10,"inet_up_billed":3.0,"start_date":%d}`, t0.Unix()),
+				wantP1: 2.05,
+				wantP2: 2.35,
+			},
+			{
+				name:   "up_priced_down_unpriced_then_down_priced",
+				poll1:  fmt.Sprintf(`{"id":993410,"label":"stet-rp-01","actual_status":"running","intended_status":"running","cur_state":"running","gpu_name":"RTX 4090","dph_base":0.50,"dph_total":0.50,"storage_cost":0,"inet_up_cost":0.10,"inet_up_billed":20.0,"inet_down_billed":3.0,"start_date":%d}`, t0.Unix()),
+				poll2:  fmt.Sprintf(`{"id":993410,"label":"stet-rp-01","actual_status":"running","intended_status":"running","cur_state":"running","gpu_name":"RTX 4090","dph_base":0.50,"dph_total":0.50,"storage_cost":0,"inet_down_cost":0.10,"inet_down_billed":3.0,"start_date":%d}`, t0.Unix()),
+				wantP1: 2.05,
+				wantP2: 2.35,
+			},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				var poll atomic.Int32
+				var creates atomic.Int32
+				var deleted atomic.Bool
+				vastSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					switch {
+					case r.Method == "GET" && r.URL.Path == "/api/v1/instances/":
+						if deleted.Load() {
+							_, _ = w.Write([]byte(`{"instances":[],"next_token":null}`))
+							return
+						}
+						if poll.Load() == 0 {
+							_, _ = w.Write([]byte(`{"instances":[` + tc.poll1 + `],"next_token":null}`))
+						} else {
+							_, _ = w.Write([]byte(`{"instances":[` + tc.poll2 + `],"next_token":null}`))
+						}
+					case r.Method == "POST" && r.URL.Path == "/api/v0/bundles/":
+						_, _ = w.Write([]byte(`{"offers":[{"id":999,"gpu_name":"RTX 4090","num_gpus":1,"gpu_ram":24576,"cpu_cores":8,"cpu_ram":32768,"disk_space":120,"cuda_max_good":13.0,"dph_base":0.40,"dph_total":0.40,"storage_cost":0,"inet_down_cost":0,"inet_down":2000,"verified":true,"reliability2":0.99}]}`))
+					case r.Method == "PUT" && strings.HasPrefix(r.URL.Path, "/api/v0/asks/"):
+						creates.Add(1)
+						_, _ = w.Write([]byte(`{"success":true,"new_contract":993499}`))
+					case r.Method == "DELETE" && r.URL.Path == "/api/v0/instances/993410/":
+						deleted.Store(true)
+						_, _ = w.Write([]byte(`{"success":true}`))
+					default:
+						http.NotFound(w, r)
+					}
+				}))
+				defer vastSrv.Close()
+
+				rp, st := newFakeRunPod(t), newFakeStet(t)
+				f, _ := testFleet(t, rp, st, 2)
+				f.now = func() time.Time { return tNow }
+				f.o.MaxWorkers = 4
+				f.o.MaxHourly = 10.0
+				f.o.DailyBudget = 1.00
+				vm := newVast(vastSrv.URL, "vast-key")
+				vm.a.sleep = func(context.Context, time.Duration) error { return nil }
+				f.markets = []Market{vm}
+				if err := f.writeLedger(&ledger{Pods: map[string]*podRecord{
+					ledgerKey("vast", "993410"): {
+						ID: "993410", Market: "vast", Handle: f.keys[0].Handle, GPU: "RTX 4090",
+						Cost: 1.10, TransferCost: 0.60, FixedCost: 0.60, FixedCostEstimated: true,
+						Start: t0, Alive: t0, Tracked: true,
+					},
+				}}); err != nil {
+					t.Fatal(err)
+				}
+				v1, err := f.look(context.Background())
+				if err != nil {
+					t.Fatalf("look poll1: %v", err)
+				}
+				if math.Abs(v1.Today-tc.wantP1) > 1e-4 {
+					t.Fatalf("poll1 Today = $%.4f, want $%.2f", v1.Today, tc.wantP1)
+				}
+				// Admission under --daily-budget 1.00 MUST be blocked with 0 create calls!
+				upErr := cmdUp(context.Background(), f, 1)
+				if upErr == nil || !strings.Contains(upErr.Error(), "2.05") {
+					t.Fatalf("cmdUp under $1 daily budget expected budget error mentioning $2.05, got %v", upErr)
+				}
+				if creates.Load() != 0 {
+					t.Fatalf("cmdUp sent %d create request(s) despite known spend $2.05 > $1.00 daily budget", creates.Load())
+				}
+
+				// Poll 2 provides the previously missing direction's price -> retires at $2.35!
+				poll.Store(1)
+				v2, err := f.look(context.Background())
+				if err != nil {
+					t.Fatalf("look poll2: %v", err)
+				}
+				if math.Abs(v2.Today-tc.wantP2) > 1e-4 {
+					t.Fatalf("poll2 Today = $%.4f, want $%.2f", v2.Today, tc.wantP2)
+				}
+				if err := cmdDown(context.Background(), f, true, nil); err != nil {
+					t.Fatalf("cmdDown: %v", err)
+				}
+				vRet, err := f.look(context.Background())
+				if err != nil {
+					t.Fatalf("look retired: %v", err)
+				}
+				if math.Abs(vRet.Today-tc.wantP2) > 1e-4 {
+					t.Fatalf("retired Today = $%.4f, want $%.2f", vRet.Today, tc.wantP2)
+				}
+			})
+		}
+
+		// Case 3: When known direction ($0.00) < FixedCost ($0.60) and the other direction is STILL
+		// unpriced at retirement, retirement MUST preserve the $0.60 cold-start floor ($0.65 total).
+		var delLow atomic.Bool
+		lowSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == "GET" && r.URL.Path == "/api/v1/instances/":
+				if delLow.Load() {
+					_, _ = w.Write([]byte(`{"instances":[],"next_token":null}`))
+					return
+				}
+				_, _ = w.Write([]byte(fmt.Sprintf(`{"instances":[{"id":993411,"label":"stet-rp-01","actual_status":"running","intended_status":"running","cur_state":"running","gpu_name":"RTX 4090","dph_base":0.50,"dph_total":0.50,"storage_cost":0,"inet_down_cost":0.10,"inet_down_billed":0.0,"inet_up_billed":3.0,"start_date":%d}],"next_token":null}`, t0.Unix())))
+			case r.Method == "DELETE" && r.URL.Path == "/api/v0/instances/993411/":
+				delLow.Store(true)
+				_, _ = w.Write([]byte(`{"success":true}`))
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer lowSrv.Close()
+		rp, st := newFakeRunPod(t), newFakeStet(t)
+		fLow, _ := testFleet(t, rp, st, 1)
+		fLow.now = func() time.Time { return tNow }
+		vmLow := newVast(lowSrv.URL, "vast-key")
+		vmLow.a.sleep = func(context.Context, time.Duration) error { return nil }
+		fLow.markets = []Market{vmLow}
+		if err := fLow.writeLedger(&ledger{Pods: map[string]*podRecord{
+			ledgerKey("vast", "993411"): {
+				ID: "993411", Market: "vast", Handle: fLow.keys[0].Handle, GPU: "RTX 4090",
+				Cost: 1.10, TransferCost: 0.60, FixedCost: 0.60, FixedCostEstimated: true,
+				Start: t0, Alive: t0, Tracked: true,
+			},
+		}}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := fLow.look(context.Background()); err != nil {
+			t.Fatalf("look low: %v", err)
+		}
+		if err := cmdDown(context.Background(), fLow, true, nil); err != nil {
+			t.Fatalf("cmdDown low: %v", err)
+		}
+		vLowRet, err := fLow.look(context.Background())
+		if err != nil {
+			t.Fatalf("look low retired: %v", err)
+		}
+		if math.Abs(vLowRet.Today-0.65) > 1e-4 {
+			t.Fatalf("retired incomplete low-charge pod dropped FixedCost floor: got $%.4f, want $0.65", vLowRet.Today)
+		}
+	})
+
+	t.Run("p2_5_confirmed_offline_vast_workers_zero_storage_and_conservative_when_unreachable", func(t *testing.T) {
+		t0 := time.Date(2026, 11, 28, 1, 0, 0, 0, time.UTC)
+		cur := t0
+		var status atomic.Value
+		status.Store("offline")
+		var failList atomic.Bool
+		var deleted atomic.Bool
+
+		vastSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == "GET" && r.URL.Path == "/api/v1/instances/":
+				if failList.Load() {
+					w.WriteHeader(500)
+					return
+				}
+				if deleted.Load() {
+					_, _ = w.Write([]byte(`{"instances":[],"next_token":null}`))
+					return
+				}
+				st := status.Load().(string)
+				// 80 GB disk @ $0.90/GB/month = $0.10/hour storage; $0.50/hr compute.
+				_, _ = w.Write([]byte(fmt.Sprintf(
+					`{"instances":[{"id":993420,"label":"stet-rp-01","actual_status":%q,"intended_status":"running","cur_state":%q,"gpu_name":"RTX 4090","dph_base":0.50,"dph_total":0.50,"disk_space":80,"storage_cost":0.90,"inet_down_cost":0,"start_date":%d}],"next_token":null}`,
+					st, st, t0.Unix(),
+				)))
+			case r.Method == "DELETE" && r.URL.Path == "/api/v0/instances/993420/":
+				deleted.Store(true)
+				_, _ = w.Write([]byte(`{"success":true}`))
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer vastSrv.Close()
+
+		rp, st := newFakeRunPod(t), newFakeStet(t)
+		f, _ := testFleet(t, rp, st, 1)
+		f.now = func() time.Time { return cur }
+		vm := newVast(vastSrv.URL, "vast-key")
+		vm.a.sleep = func(context.Context, time.Duration) error { return nil }
+		f.markets = []Market{vm}
+
+		// Poll 1 at t0: actual_status=offline -> $0 spend, $0 hourly!
+		v1, err := f.look(context.Background())
+		if err != nil {
+			t.Fatalf("look t0: %v", err)
+		}
+		if v1.Today > 1e-6 || v1.Hourly > 1e-6 {
+			t.Fatalf("t0 offline: want Today=0 Hourly=0, got Today=$%.4f Hourly=$%.4f", v1.Today, v1.Hourly)
+		}
+
+		// Poll 2 at t0 + 12h: still actual_status=offline -> STILL $0.00 (NOT $1.20)!
+		cur = t0.Add(12 * time.Hour)
+		v2, err := f.look(context.Background())
+		if err != nil {
+			t.Fatalf("look t0+12h: %v", err)
+		}
+		if v2.Today > 1e-6 || v2.Hourly > 1e-6 {
+			t.Fatalf("t0+12h confirmed offline MUST NOT accrue storage charges: got Today=$%.4f Hourly=$%.4f", v2.Today, v2.Hourly)
+		}
+
+		// Poll 3 at t0 + 13h: Vast unreachable (HTTP 500) -> confirmed [t0, t0+12h] stays $0,
+		// unobserved [t0+12h, t0+13h] conservatively bills 1h at running compute+disk rate ($0.60/hr: $0.50 base + $0.10 disk)!
+		cur = t0.Add(13 * time.Hour)
+		failList.Store(true)
+		v3, err := f.look(context.Background())
+		if err != nil {
+			t.Fatalf("look t0+13h unreachable: %v", err)
+		}
+		if math.Abs(v3.Today-0.60) > 1e-4 {
+			t.Fatalf("unreachable after 12h offline: want $0.60 (1h unobserved @ $0.60/hr, 12h offline @ $0), got $%.4f", v3.Today)
+		}
+		if math.Abs(v3.Hourly-0.60) > 1e-4 {
+			t.Fatalf("unreachable offline hourly reserve: want $0.60/hr, got $%.4f", v3.Hourly)
+		}
+
+		// Poll 4 at t0 + 14h: Vast reachable again and reports actual_status="exited" (stopped with disk billing).
+		// Confirmed offline [t0, t0+12h] = $0; transition [t0+12h, t0+14h] bills 2h @ $0.10/hr storage = $0.20!
+		failList.Store(false)
+		status.Store("exited")
+		cur = t0.Add(14 * time.Hour)
+		v4, err := f.look(context.Background())
+		if err != nil {
+			t.Fatalf("look t0+14h exited: %v", err)
+		}
+		if math.Abs(v4.Today-0.20) > 1e-4 || math.Abs(v4.Hourly-0.10) > 1e-4 {
+			t.Fatalf("offline->exited at t0+14h: want Today=$0.20 Hourly=$0.10, got Today=$%.4f Hourly=$%.4f", v4.Today, v4.Hourly)
+		}
+
+		// Poll 5 at t0 + 16h: back to actual_status="offline" -> [t0+14h, t0+16h] bills 2h storage ($0.20),
+		// cumulative = $0.40; Poll 6 at t0 + 20h still offline -> [t0+16h, t0+20h] bills $0, stays $0.40!
+		status.Store("offline")
+		cur = t0.Add(16 * time.Hour)
+		if _, err := f.look(context.Background()); err != nil {
+			t.Fatalf("look t0+16h offline: %v", err)
+		}
+		cur = t0.Add(20 * time.Hour)
+		v6, err := f.look(context.Background())
+		if err != nil {
+			t.Fatalf("look t0+20h offline: %v", err)
+		}
+		if math.Abs(v6.Today-0.40) > 1e-4 || v6.Hourly > 1e-6 {
+			t.Fatalf("exited->offline at t0+20h: want Today=$0.40 Hourly=$0.00, got Today=$%.4f Hourly=$%.4f", v6.Today, v6.Hourly)
+		}
+	})
+
+	t.Run("gate4_r34_offline_disk_unknown_examiner_hourly_and_unpriced_merges", func(t *testing.T) {
+		t0 := time.Date(2026, 11, 28, 2, 0, 0, 0, time.UTC)
+
+		// 1. P1 Finding #1: exited (DiskCostUnknown=true, 4h @ $0.50/h = $2.00) -> offline MUST NOT
+		//    erase the 4h of accrued unknown-rate stopped storage!
+		cur := t0
+		var stVal atomic.Value
+		stVal.Store("exited")
+		unkSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == "GET" && r.URL.Path == "/api/v1/instances/" {
+				s := stVal.Load().(string)
+				// storage_cost omitted, dph_total=0 -> DiskCostUnknown=true while exited.
+				_, _ = w.Write([]byte(fmt.Sprintf(
+					`{"instances":[{"id":993430,"label":"stet-rp-01","actual_status":%q,"intended_status":"running","cur_state":%q,"gpu_name":"RTX 4090","dph_base":0.50,"dph_total":0,"disk_space":80,"inet_down_cost":0,"start_date":%d}],"next_token":null}`,
+					s, s, t0.Unix(),
+				)))
+				return
+			}
+			http.NotFound(w, r)
+		}))
+		defer unkSrv.Close()
+		rp, st := newFakeRunPod(t), newFakeStet(t)
+		f, _ := testFleet(t, rp, st, 1)
+		f.now = func() time.Time { return cur }
+		vm := newVast(unkSrv.URL, "vast-key")
+		vm.a.sleep = func(context.Context, time.Duration) error { return nil }
+		f.markets = []Market{vm}
+		if _, err := f.look(context.Background()); err != nil {
+			t.Fatalf("look t0 exited: %v", err)
+		}
+		cur = t0.Add(4 * time.Hour)
+		vEx, err := f.look(context.Background())
+		if err != nil {
+			t.Fatalf("look t0+4h exited: %v", err)
+		}
+		if math.Abs(vEx.Today-2.00) > 1e-4 {
+			t.Fatalf("exited 4h unknown-disk spend want $2.00, got $%.4f", vEx.Today)
+		}
+		stVal.Store("offline")
+		vOff, err := f.look(context.Background())
+		if err != nil {
+			t.Fatalf("look t0+4h offline: %v", err)
+		}
+		if math.Abs(vOff.Today-2.00) > 1e-4 {
+			t.Fatalf("exited->offline erased accrued unknown-disk spend: want $2.00, got $%.4f", vOff.Today)
+		}
+		if vOff.Hourly > 1e-6 || vOff.hourlyUnknown() {
+			t.Fatalf("confirmed offline worker must report $0 hourly and not unknown hourly: Hourly=$%.4f unknown=%v", vOff.Hourly, vOff.hourlyUnknown())
+		}
+		// 4 more hours offline MUST stay $2.00!
+		cur = t0.Add(8 * time.Hour)
+		vOff2, err := f.look(context.Background())
+		if err != nil {
+			t.Fatalf("look t0+8h offline: %v", err)
+		}
+		if math.Abs(vOff2.Today-2.00) > 1e-4 {
+			t.Fatalf("continued offline after unknown-disk exited must stay $2.00, got $%.4f", vOff2.Today)
+		}
+
+		// 2. P2 Finding #2: reconcileExaminerOnce excludes confirmed offline worker storage & DiskCostUnknown
+		//    so an RTX 5090 examiner at $0.95/h fits under --max-hourly 1.00!
+		exProv := &fakeExaminerProv{
+			offers: []ExaminerOffer{{ID: "ex-off-1", Card: "RTX 5090", Price: 0.95}},
+		}
+		f.o.MaxWorkers = 4
+		f.o.MaxHourly = 1.00
+		f.o.DailyBudget = 50.0
+		st.work = Work{Rounds: []WorkRound{{ID: "s3-o00034", Entries: 1, ExamAt: 0}}}
+		ex := newExaminer(ExaminerConfig{Addr: "127.0.0.1:0", Timeout: 45 * time.Minute, MaxPrice: 1.50}, f.o.Home, exProv, f.now, func(string, ...any) {}, false)
+		f.examiner = ex
+		if err := reconcileExaminerOnce(context.Background(), f); err != nil {
+			t.Fatalf("reconcileExaminerOnce with offline worker: %v", err)
+		}
+		if len(exProv.rented) != 1 {
+			t.Fatalf("reconcileExaminerOnce must rent $0.95/h examiner under $1.00/h cap when only worker is confirmed offline, rented=%d", len(exProv.rented))
+		}
+
+		// 3. P2 Finding #3: mergeState must NOT let a stale unpriced snapshot re-taint a newer resolved snapshot
+		//    (in either argument order, for both directional resolution and TotalObserved resolution).
+		resolvedDir := transferState{
+			Observed: 0.15, HasObserved: true,
+			Down: 0.0, DownObserved: true,
+			Up: 0.15, UpObserved: true,
+			Charges: []transferCharge{{At: t0.Add(5 * time.Minute), Amount: 0.15}},
+		}
+		staleUnpriced := transferState{
+			Observed: 0.0, HasObserved: true,
+			Down: 0.0, DownObserved: true,
+			UpUnpriced: true,
+		}
+		r1 := resolvedDir.clone()
+		r1.mergeState(staleUnpriced, true, "running", t0, t0.Add(10*time.Minute))
+		if r1.incomplete() {
+			t.Fatalf("stale UpUnpriced snapshot re-tainted resolved directional state: %+v", r1)
+		}
+		if got := r1.dollarsBetween(1.80, true, t0, startOfDay(t0), t0.Add(10*time.Minute), true); math.Abs(got-0.15) > 1e-6 {
+			t.Fatalf("retired resolved state inflated to cold-start floor: want $0.15, got $%.4f", got)
+		}
+		resolvedTot := transferState{
+			Observed: 0.15, HasObserved: true,
+			Total: 0.15, TotalObserved: true,
+			Charges: []transferCharge{{At: t0.Add(5 * time.Minute), Amount: 0.15}},
+		}
+		r2 := resolvedTot.clone()
+		r2.mergeState(staleUnpriced, true, "running", t0, t0.Add(10*time.Minute))
+		if r2.incomplete() {
+			t.Fatalf("stale UpUnpriced snapshot re-tainted resolved TotalObserved state: %+v", r2)
+		}
+
+		// 4. P2 Finding #4: malformed negative transfer_cost alongside $0 download MUST mark reading
+		//    incomplete (TotalUnpriced=true) so retirement retains the $0.60 FixedCost floor.
+		var badTot vastInstance
+		if err := json.Unmarshal([]byte(`{"id":99,"transfer_cost":-1.0,"inet_down_cost":0.10,"inet_down_billed":0.0}`), &badTot); err != nil {
+			t.Fatal(err)
+		}
+		trBad := vastInstanceTransferReading(badTot)
+		if !trBad.TotalUnpriced {
+			t.Fatalf("malformed negative transfer_cost must set TotalUnpriced=true, got %+v", trBad)
+		}
+		var tsBad transferState
+		tsBad.mergeReading(trBad, true, "running", t0, t0.Add(time.Minute))
+		if got := tsBad.dollarsBetween(0.60, true, t0, startOfDay(t0), t0.Add(time.Minute), true); math.Abs(got-0.60) > 1e-6 {
+			t.Fatalf("malformed negative transfer_cost dropped $0.60 FixedCost floor on retirement: got $%.4f", got)
+		}
+
+		// 5. P3 Finding #5: strictly regressed transfer_cost ($0.10 < already observed $0.20) MUST NOT
+		//    clear UpUnpriced=true in mergeReading.
+		var tsReg transferState
+		tsReg.mergeReading(transferReading{Effective: 0.20, Observed: true, Down: 0.20, DownObserved: true, UpUnpriced: true}, true, "running", t0, t0.Add(time.Minute))
+		tsReg.mergeReading(transferReading{Effective: 0.10, Observed: true, Total: 0.10, TotalObserved: true}, true, "running", t0, t0.Add(2*time.Minute))
+		if !tsReg.incomplete() {
+			t.Fatalf("regressed transfer_cost ($0.10 < $0.20) must not clear UpUnpriced: %+v", tsReg)
+		}
+		if got := tsReg.dollarsBetween(0.60, true, t0, startOfDay(t0), t0.Add(2*time.Minute), true); math.Abs(got-0.60) > 1e-6 {
+			t.Fatalf("regressed transfer_cost dropped $0.60 FixedCost floor on retirement: got $%.4f", got)
+		}
+
+		// 6. Gate 4 Round 2 P2: clean T1 snapshot at the exact same Total/Down/Up value MUST NOT erase
+		//    a newer T2 post-observation unpriced flag (both in mergeState symmetry and single-process
+		//    noteSavedPrice -> persistState!).
+		cleanT1 := transferState{Observed: 0.20, HasObserved: true, Total: 0.20, TotalObserved: true, Charges: []transferCharge{{At: t0, Amount: 0.20}}}
+		postUnpricedT2 := transferState{Observed: 0.20, HasObserved: true, Total: 0.20, TotalObserved: true, UpUnpriced: true, Charges: []transferCharge{{At: t0, Amount: 0.20}}}
+		mAB := cleanT1.clone()
+		mAB.mergeState(postUnpricedT2, true, "running", t0, t0.Add(5*time.Minute))
+		mBA := postUnpricedT2.clone()
+		mBA.mergeState(cleanT1, true, "running", t0, t0.Add(5*time.Minute))
+		if !mAB.UpUnpriced || !mBA.UpUnpriced {
+			t.Fatalf("clean T1 Total=$0.20 erased newer T2 post-Total UpUnpriced: mAB=%+v mBA=%+v", mAB, mBA)
+		}
+		// Single-process live poll sequence through noteSavedPrice -> persistState:
+		exHome := t.TempDir()
+		ex2 := newExaminer(ExaminerConfig{Addr: "127.0.0.1:0", Timeout: 45 * time.Minute, MaxPrice: 1.50}, exHome, exProv, func() time.Time { return t0.Add(5 * time.Minute) }, func(string, ...any) {}, false)
+		savedEx := examinerState{InstanceID: "ex-unp-1", Price: 0.60, TransferDollars: 1.80, TransferEstimated: true, Created: t0}
+		ex2.state = savedEx
+		// Poll 1: transfer_cost=0.20 -> clean TotalObserved=$0.20 on both savedEx and ex2.state + disk.
+		ex2.noteSavedPrice(&savedEx, ExaminerInstance{ID: "ex-unp-1", State: "running", Price: 0.60, ObservedTransferCost: 0.20, TransferObserved: true, ObservedTransferTotal: 0.20, TransferTotalObserved: true})
+		if err := ex2.persistState(&savedEx); err != nil {
+			t.Fatalf("persistState poll1: %v", err)
+		}
+		// Poll 2: transfer_cost omitted, inet_up_billed=5.0 unpriced -> MUST persist TransferUpUnpriced=true!
+		ex2.noteSavedPrice(&savedEx, ExaminerInstance{ID: "ex-unp-1", State: "running", Price: 0.60, TransferUpUnpriced: true})
+		if err := ex2.persistState(&savedEx); err != nil {
+			t.Fatalf("persistState poll2: %v", err)
+		}
+		diskAfter := readExaminerState(exHome)
+		if diskAfter == nil {
+			t.Fatal("readExaminerState returned nil")
+		}
+		if !savedEx.TransferUpUnpriced || !ex2.state.TransferUpUnpriced || !diskAfter.TransferUpUnpriced {
+			t.Fatalf("post-Total UpUnpriced was wiped: saved=%v mem=%v disk=%v", savedEx.TransferUpUnpriced, ex2.state.TransferUpUnpriced, diskAfter.TransferUpUnpriced)
+		}
+		if got := diskAfter.transferState().dollarsBetween(1.80, true, t0, startOfDay(t0), t0.Add(5*time.Minute), true); math.Abs(got-1.80) > 1e-6 {
+			t.Fatalf("post-Total UpUnpriced examiner retirement dropped $1.80 floor: got $%.4f", got)
 		}
 	})
 }

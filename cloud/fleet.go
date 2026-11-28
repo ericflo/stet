@@ -224,6 +224,9 @@ type podRecord struct {
 	// Stopped: confirmed stopped by provider by-ID lookup while omitted from listing, kept in
 	// fleet.json until m.End(ctx, id) confirms destruction (e.g. to stop Vast disk billing).
 	Stopped bool `json:"stopped,omitempty"`
+	// Offline: confirmed offline by provider (e.g. Vast actual_status=offline), exempt from both
+	// compute and storage charges while confirmed offline; unobserved gaps still accrue conservatively.
+	Offline bool `json:"offline,omitempty"`
 	// Terminating: operator or resolve --end requested teardown of this exact contract ID, but
 	// provider deletion failed transiently; persisted until deletion or confirmed absence so
 	// retrying `workers resolve --end` and `scale` ticks keep terminating it even while the
@@ -257,10 +260,13 @@ type podRecord struct {
 	TransferObserved      bool             `json:"transfer_observed,omitempty"`       // true when the provider reported observed transfer usage for this contract
 	ObservedTransferDown  float64          `json:"observed_transfer_down,omitempty"`  // cumulative observed download transfer spend when reported
 	TransferDownObserved  bool             `json:"transfer_down_observed,omitempty"`  // true when the provider reported download transfer usage
+	TransferDownUnpriced  bool             `json:"transfer_down_unpriced,omitempty"`  // true when the provider reported positive/invalid download usage without a usable rate
 	ObservedTransferUp    float64          `json:"observed_transfer_up,omitempty"`    // cumulative observed upload transfer spend when reported
 	TransferUpObserved    bool             `json:"transfer_up_observed,omitempty"`    // true when the provider reported upload transfer usage
+	TransferUpUnpriced    bool             `json:"transfer_up_unpriced,omitempty"`    // true when the provider reported positive/invalid upload usage without a usable rate
 	ObservedTransferTotal float64          `json:"observed_transfer_total,omitempty"` // explicit combined provider transfer_cost when reported
 	TransferTotalObserved bool             `json:"transfer_total_observed,omitempty"` // true when the provider reported explicit combined transfer_cost
+	TransferTotalUnpriced bool             `json:"transfer_total_unpriced,omitempty"` // true when the provider reported a malformed/non-finite transfer_cost or sum overflow
 	TransferCharges       []transferCharge `json:"transfer_charges,omitempty"`        // incremental observed transfer charges attributed to the UTC day they were accounted for
 	PartialCost           bool             `json:"partial_cost,omitempty"`
 	Start                 time.Time        `json:"start"`
@@ -287,10 +293,13 @@ type transferReading struct {
 	Observed      bool
 	Down          float64
 	DownObserved  bool
+	DownUnpriced  bool
 	Up            float64
 	UpObserved    bool
+	UpUnpriced    bool
 	Total         float64
 	TotalObserved bool
+	TotalUnpriced bool
 }
 
 // transferState is the shared cumulative + timestamped observed-transfer accounting state used by
@@ -300,11 +309,18 @@ type transferState struct {
 	HasObserved   bool
 	Down          float64
 	DownObserved  bool
+	DownUnpriced  bool
 	Up            float64
 	UpObserved    bool
+	UpUnpriced    bool
 	Total         float64
 	TotalObserved bool
+	TotalUnpriced bool
 	Charges       []transferCharge
+}
+
+func (s transferState) incomplete() bool {
+	return s.DownUnpriced || s.UpUnpriced || s.TotalUnpriced
 }
 
 func cloneTransferCharges(src []transferCharge) []transferCharge {
@@ -379,18 +395,59 @@ func (s *transferState) appendCharge(at time.Time, delta float64) {
 }
 
 func (s *transferState) mergeReading(tr transferReading, fixedEstimated bool, state string, start, now time.Time) bool {
-	if !tr.Observed {
-		return false
-	}
-	effIn := tr.Effective
-	if !nonNegFinite(effIn) {
-		return false
-	}
-	if fixedEstimated && effIn == 0 && state == "starting" {
+	if !tr.Observed && !tr.DownUnpriced && !tr.UpUnpriced && !tr.TotalUnpriced {
 		return false
 	}
 	prevEff := s.effectiveObserved()
 	changed := false
+	if tr.TotalObserved && nonNegFinite(tr.Total) {
+		if tr.Total >= prevEff-1e-9 && (s.DownUnpriced || s.UpUnpriced || s.TotalUnpriced) {
+			s.DownUnpriced = false
+			s.UpUnpriced = false
+			s.TotalUnpriced = false
+			changed = true
+		}
+	} else {
+		if tr.TotalUnpriced && !s.TotalUnpriced {
+			s.TotalUnpriced = true
+			changed = true
+		}
+		if tr.DownObserved && nonNegFinite(tr.Down) {
+			if s.DownUnpriced && tr.Down >= s.Down-1e-9 {
+				s.DownUnpriced = false
+				changed = true
+			}
+		} else if tr.DownUnpriced && !s.DownUnpriced {
+			s.DownUnpriced = true
+			changed = true
+		}
+		if tr.UpObserved && nonNegFinite(tr.Up) {
+			if s.UpUnpriced && tr.Up >= s.Up-1e-9 {
+				s.UpUnpriced = false
+				changed = true
+			}
+		} else if tr.UpUnpriced && !s.UpUnpriced {
+			s.UpUnpriced = true
+			changed = true
+		}
+		if s.TotalUnpriced && !tr.TotalUnpriced &&
+			tr.DownObserved && nonNegFinite(tr.Down) && tr.Down >= s.Down-1e-9 &&
+			tr.UpObserved && nonNegFinite(tr.Up) && tr.Up >= s.Up-1e-9 &&
+			tr.Down+tr.Up >= prevEff-1e-9 {
+			s.TotalUnpriced = false
+			changed = true
+		}
+	}
+	if !tr.Observed {
+		return changed
+	}
+	effIn := tr.Effective
+	if !nonNegFinite(effIn) {
+		return changed
+	}
+	if fixedEstimated && effIn == 0 && state == "starting" {
+		return changed
+	}
 	if !s.HasObserved {
 		s.HasObserved = true
 		changed = true
@@ -466,20 +523,73 @@ func combineTransferCharges(a, b []transferCharge) []transferCharge {
 
 func (s *transferState) mergeState(other transferState, fixedEstimated bool, state string, start, now time.Time) bool {
 	otherEff := other.effectiveObserved()
-	if !other.HasObserved && len(other.Charges) == 0 && !other.DownObserved && !other.UpObserved && !other.TotalObserved {
-		return false
-	}
-	if fixedEstimated && otherEff == 0 && len(other.Charges) == 0 && state == "starting" {
+	hasValue := other.HasObserved || len(other.Charges) > 0 || other.DownObserved || other.UpObserved || other.TotalObserved
+	if !hasValue && !other.DownUnpriced && !other.UpUnpriced && !other.TotalUnpriced {
 		return false
 	}
 	prevEff := s.effectiveObserved()
+	changed := false
+	sCovered := s.TotalObserved && !s.incomplete() && s.Total >= otherEff-1e-9 && (!other.TotalObserved || s.Total > other.Total+1e-9)
+	otherCovered := other.TotalObserved && nonNegFinite(other.Total) && !other.incomplete() && other.Total >= prevEff-1e-9 && (!s.TotalObserved || other.Total > s.Total+1e-9)
+	if otherCovered {
+		if s.DownUnpriced || s.UpUnpriced || s.TotalUnpriced {
+			s.DownUnpriced = false
+			s.UpUnpriced = false
+			s.TotalUnpriced = false
+			changed = true
+		}
+	} else if !sCovered {
+		if other.TotalUnpriced {
+			sBothDirs := s.DownObserved && s.UpObserved && !s.incomplete() &&
+				s.Down >= other.Down-1e-9 && s.Up >= other.Up-1e-9 && prevEff >= otherEff-1e-9 &&
+				(!other.DownObserved || !other.UpObserved || s.Down > other.Down+1e-9 || s.Up > other.Up+1e-9)
+			if !s.TotalUnpriced && !sBothDirs {
+				s.TotalUnpriced = true
+				changed = true
+			}
+		} else if s.TotalUnpriced && !other.incomplete() &&
+			other.DownObserved && nonNegFinite(other.Down) && other.Down >= s.Down-1e-9 &&
+			other.UpObserved && nonNegFinite(other.Up) && other.Up >= s.Up-1e-9 &&
+			other.Down+other.Up >= prevEff-1e-9 &&
+			(!s.DownObserved || !s.UpObserved || other.Down > s.Down+1e-9 || other.Up > s.Up+1e-9) {
+			s.TotalUnpriced = false
+			changed = true
+		}
+		if other.DownUnpriced {
+			if !s.DownUnpriced && !(s.DownObserved && !s.DownUnpriced && (!other.DownObserved || s.Down > other.Down+1e-9)) {
+				s.DownUnpriced = true
+				changed = true
+			}
+		} else if other.DownObserved && nonNegFinite(other.Down) && (!s.DownObserved || other.Down > s.Down+1e-9) {
+			if s.DownUnpriced {
+				s.DownUnpriced = false
+				changed = true
+			}
+		}
+		if other.UpUnpriced {
+			if !s.UpUnpriced && !(s.UpObserved && !s.UpUnpriced && (!other.UpObserved || s.Up > other.Up+1e-9)) {
+				s.UpUnpriced = true
+				changed = true
+			}
+		} else if other.UpObserved && nonNegFinite(other.Up) && (!s.UpObserved || other.Up > s.Up+1e-9) {
+			if s.UpUnpriced {
+				s.UpUnpriced = false
+				changed = true
+			}
+		}
+	}
+	if !hasValue {
+		return changed
+	}
+	if fixedEstimated && otherEff == 0 && len(other.Charges) == 0 && state == "starting" {
+		return changed
+	}
 	prevChargesSum := s.chargesSum()
 	prevDownOnly := s.DownObserved && !s.UpObserved && !s.TotalObserved
 	prevUpOnly := s.UpObserved && !s.DownObserved && !s.TotalObserved
 	otherSum := other.chargesSum()
 	otherDownOnly := other.DownObserved && !other.UpObserved && !other.TotalObserved
 	otherUpOnly := other.UpObserved && !other.DownObserved && !other.TotalObserved
-	changed := false
 	if !s.HasObserved {
 		s.HasObserved = true
 		changed = true
@@ -605,7 +715,7 @@ func (s transferState) dollarsBetween(fixed float64, fixedEstimated bool, start,
 	total := windowCharges
 	if startInWindow {
 		total += legacyDelta
-		if !retired && fixedVal > totalObs {
+		if (!retired || s.incomplete()) && fixedVal > totalObs {
 			total += fixedVal - totalObs
 		}
 	}
@@ -621,10 +731,13 @@ func rentalTransferReading(p *Rental) transferReading {
 		Observed:      p.TransferObserved,
 		Down:          max(0, p.ObservedTransferDown),
 		DownObserved:  p.TransferDownObserved,
+		DownUnpriced:  p.TransferDownUnpriced,
 		Up:            max(0, p.ObservedTransferUp),
 		UpObserved:    p.TransferUpObserved,
+		UpUnpriced:    p.TransferUpUnpriced,
 		Total:         max(0, p.ObservedTransferTotal),
 		TotalObserved: p.TransferTotalObserved,
+		TotalUnpriced: p.TransferTotalUnpriced,
 	}
 	if tr.DownObserved || tr.UpObserved || tr.TotalObserved {
 		tr.Observed = true
@@ -651,10 +764,13 @@ func (r podRecord) transferState() transferState {
 		HasObserved:   r.TransferObserved,
 		Down:          r.ObservedTransferDown,
 		DownObserved:  r.TransferDownObserved,
+		DownUnpriced:  r.TransferDownUnpriced,
 		Up:            r.ObservedTransferUp,
 		UpObserved:    r.TransferUpObserved,
+		UpUnpriced:    r.TransferUpUnpriced,
 		Total:         r.ObservedTransferTotal,
 		TotalObserved: r.TransferTotalObserved,
+		TotalUnpriced: r.TransferTotalUnpriced,
 		Charges:       r.TransferCharges,
 	}
 }
@@ -664,10 +780,13 @@ func (r *podRecord) setTransferState(ts transferState) {
 	r.TransferObserved = ts.HasObserved
 	r.ObservedTransferDown = ts.Down
 	r.TransferDownObserved = ts.DownObserved
+	r.TransferDownUnpriced = ts.DownUnpriced
 	r.ObservedTransferUp = ts.Up
 	r.TransferUpObserved = ts.UpObserved
+	r.TransferUpUnpriced = ts.UpUnpriced
 	r.ObservedTransferTotal = ts.Total
 	r.TransferTotalObserved = ts.TotalObserved
+	r.TransferTotalUnpriced = ts.TotalUnpriced
 	r.TransferCharges = ts.Charges
 }
 
@@ -678,6 +797,7 @@ type billingSegment struct {
 	End         time.Time `json:"end"`
 	Rate        float64   `json:"rate"`
 	Stopped     bool      `json:"stopped,omitempty"`
+	Offline     bool      `json:"offline,omitempty"`
 	RateUnknown bool      `json:"rate_unknown,omitempty"`
 }
 
@@ -769,25 +889,76 @@ func resolveStopTime(minAt, now, providerAt time.Time) time.Time {
 	return now
 }
 
-// markStopped records that GPU compute has stopped without a provider stop timestamp, keeping
-// compute billing conservatively through now (the first confirmed stop).
+// markStopped records that GPU compute has stopped without a provider stop timestamp, preserving
+// the current offline status when advancing an already-stopped/offline interval.
 func (r *podRecord) markStopped(now time.Time) {
-	r.markStoppedAt(now, time.Time{})
+	r.markStoppedStateAt(now, time.Time{}, r.Offline)
 }
 
-// markStoppedAt records that GPU compute has stopped, closing the completed running interval into
-// Segments and setting StoppedAt to where attached storage billing takes over. Repeated stopped
-// observations advance StoppedSeen so confirmed storage time is preserved across restarts while any
-// unobserved downtime before a later resume is billed conservatively at the compute rate.
+// markStoppedAt records that GPU compute has stopped (billing attached storage), closing any
+// completed running interval into Segments and setting StoppedAt to where storage billing takes over.
 func (r *podRecord) markStoppedAt(now, providerStopAt time.Time) {
+	r.markStoppedStateAt(now, providerStopAt, false)
+}
+
+// markStoppedStateAt records that GPU compute has stopped, distinguishing confirmed offline
+// intervals (offline=true, e.g. Vast actual_status=offline, exempt from compute and storage charges)
+// from ordinary stopped intervals (offline=false, billing attached storage). Repeated observations
+// in the same state advance StoppedSeen so confirmed offline/storage intervals survive restarts,
+// while unobserved transitions to/from unreachable or resumed states bill conservatively.
+func (r *podRecord) markStoppedStateAt(now, providerStopAt time.Time, offline bool) {
 	if r.Stopped {
-		if r.StoppedAt.IsZero() {
-			r.StoppedAt = r.currentStopStart(now)
+		if r.Offline == offline {
+			if r.StoppedAt.IsZero() {
+				r.StoppedAt = r.currentStopStart(now)
+			}
+			if r.StoppedSeen.IsZero() || now.After(r.StoppedSeen) {
+				r.StoppedSeen = now
+			}
+			if !r.StoppedAt.IsZero() && r.StoppedSeen.Before(r.StoppedAt) {
+				r.StoppedSeen = r.StoppedAt
+			}
+			return
 		}
-		if r.StoppedSeen.IsZero() || now.After(r.StoppedSeen) {
+		stopStart := r.currentStopStart(now)
+		if stopStart.After(now) {
+			stopStart = now
+		}
+		if len(r.Segments) == 0 && !r.Start.IsZero() && stopStart.After(r.Start) {
+			r.Segments = append(r.Segments, billingSegment{Start: r.Start, End: stopStart, Rate: r.runningSpendRate(), Stopped: false})
+		}
+		if !r.Offline && offline {
+			// Stopped -> Offline: bill attached storage conservatively through the first confirmed
+			// offline observation (now), then start a zero-cost offline interval at now.
+			if !stopStart.IsZero() && now.After(stopStart) {
+				r.Segments = append(r.Segments, billingSegment{
+					Start: stopStart, End: now, Rate: r.stoppedHourlyRate(), Stopped: true, Offline: false,
+					RateUnknown: r.DiskCostUnknown && !validRate(r.DiskCost),
+				})
+			}
+			r.Offline = true
+			r.StoppedAt = now
 			r.StoppedSeen = now
+			return
 		}
-		if !r.StoppedAt.IsZero() && r.StoppedSeen.Before(r.StoppedAt) {
+		// Offline -> Stopped: preserve the confirmed offline interval [stopStart, lastOffline] at
+		// $0/h and conservatively begin stopped storage billing at lastOffline.
+		lastOffline := r.StoppedSeen
+		if lastOffline.IsZero() || lastOffline.Before(stopStart) {
+			lastOffline = stopStart
+		}
+		if lastOffline.After(now) {
+			lastOffline = now
+		}
+		if !stopStart.IsZero() && lastOffline.After(stopStart) {
+			r.Segments = append(r.Segments, billingSegment{
+				Start: stopStart, End: lastOffline, Rate: 0, Stopped: true, Offline: true,
+			})
+		}
+		r.Offline = false
+		r.StoppedAt = lastOffline
+		r.StoppedSeen = now
+		if r.StoppedSeen.Before(r.StoppedAt) {
 			r.StoppedSeen = r.StoppedAt
 		}
 		return
@@ -808,6 +979,7 @@ func (r *podRecord) markStoppedAt(now, providerStopAt time.Time) {
 		r.Segments = append(r.Segments, billingSegment{Start: rs, End: stopAt, Rate: r.runningSpendRate(), Stopped: false})
 	}
 	r.Stopped = true
+	r.Offline = offline
 	r.StoppedAt = stopAt
 	r.StoppedSeen = now
 	if r.StoppedSeen.Before(stopAt) {
@@ -821,10 +993,10 @@ func (r *podRecord) markLive(now time.Time) {
 	r.markLiveAt(now, time.Time{})
 }
 
-// markLiveAt records that the worker is currently running, closing any prior stopped interval into
-// Segments so resuming a stopped contract preserves confirmed storage time while conservatively
-// budgeting any unobserved downtime after the last confirmed stopped observation (StoppedSeen) at
-// the compute rate unless a trustworthy providerResumedAt in [StoppedSeen, now] is supplied.
+// markLiveAt records that the worker is currently running, closing any prior stopped/offline
+// interval into Segments so resuming a stopped/offline contract preserves confirmed offline/storage
+// time while conservatively budgeting any unobserved downtime after the last confirmed observation
+// (StoppedSeen) at the compute rate unless a trustworthy providerResumedAt in [StoppedSeen, now] is supplied.
 func (r *podRecord) markLiveAt(now, providerResumedAt time.Time) {
 	if r.Stopped {
 		stopStart := r.currentStopStart(now)
@@ -848,12 +1020,15 @@ func (r *podRecord) markLiveAt(now, providerResumedAt time.Time) {
 			resumeAt = providerResumedAt
 		}
 		if !stopStart.IsZero() && resumeAt.After(stopStart) {
-			r.Segments = append(r.Segments, billingSegment{
-				Start: stopStart, End: resumeAt, Rate: r.stoppedHourlyRate(), Stopped: true,
-				RateUnknown: r.DiskCostUnknown && !validRate(r.DiskCost),
-			})
+			seg := billingSegment{Start: stopStart, End: resumeAt, Stopped: true, Offline: r.Offline}
+			if !r.Offline {
+				seg.Rate = r.stoppedHourlyRate()
+				seg.RateUnknown = r.DiskCostUnknown && !validRate(r.DiskCost)
+			}
+			r.Segments = append(r.Segments, seg)
 		}
 		r.Stopped = false
+		r.Offline = false
 		r.StoppedAt = time.Time{}
 		r.StoppedSeen = time.Time{}
 		r.ResumeAt = resumeAt
@@ -875,12 +1050,19 @@ func (r podRecord) dollarsBetweenMode(from, to time.Time, retired bool) float64 
 	total := r.transferState().dollarsBetween(r.FixedCost, r.FixedCostEstimated, r.Start, from, to, retired)
 	runRate := r.runningSpendRate()
 	stopRate := r.stoppedSpendRate()
+	tailStopRate := stopRate
+	if r.Offline {
+		tailStopRate = 0
+	}
 	effRunRate := runRate
 	if !validRate(effRunRate) && stopRate > 0 {
 		effRunRate = stopRate
 	}
 	if len(r.Segments) > 0 {
 		for _, seg := range r.Segments {
+			if seg.Offline {
+				continue
+			}
 			segEnd := seg.End
 			if !end.IsZero() && segEnd.After(end) {
 				segEnd = end
@@ -912,9 +1094,9 @@ func (r podRecord) dollarsBetweenMode(from, to time.Time, retired bool) float64 
 			if tailStart.IsZero() {
 				tailStart = r.Segments[len(r.Segments)-1].End
 			}
-			if stopRate > 0 && !tailStart.IsZero() && end.After(tailStart) {
+			if tailStopRate > 0 && !tailStart.IsZero() && end.After(tailStart) {
 				if a, b := maxTime(tailStart, from), minTime(end, to); b.After(a) {
-					total += b.Sub(a).Hours() * stopRate
+					total += b.Sub(a).Hours() * tailStopRate
 				}
 			}
 		} else {
@@ -943,9 +1125,9 @@ func (r podRecord) dollarsBetweenMode(from, to time.Time, retired bool) float64 
 				total += b.Sub(a).Hours() * effRunRate
 			}
 		}
-		if stopRate > 0 && !gpuEnd.IsZero() && end.After(gpuEnd) {
+		if tailStopRate > 0 && !gpuEnd.IsZero() && end.After(gpuEnd) {
 			if a, b := maxTime(gpuEnd, from), minTime(end, to); b.After(a) {
-				total += b.Sub(a).Hours() * stopRate
+				total += b.Sub(a).Hours() * tailStopRate
 			}
 		}
 		return total
@@ -1258,9 +1440,9 @@ func reconcileRentalRateAt(r *podRecord, p *Rental, now time.Time) {
 	if validRate(r.DiskCost) {
 		r.DiskCostUnknown = false
 		p.DiskCostUnknown = false
-	} else if p.State == "stopped" {
+	} else if p.State == "stopped" && !p.Offline {
 		r.DiskCostUnknown = p.DiskCostUnknown
-	} else if r.DiskCostUnknown {
+	} else if r.DiskCostUnknown && !p.Offline {
 		p.DiskCostUnknown = true
 	}
 	missingDisk := max(0, r.DiskCost-origDisk)
@@ -1280,6 +1462,9 @@ func reconcileRentalRateAt(r *podRecord, p *Rental, now time.Time) {
 	ts := r.transferState()
 	ts.mergeReading(rentalTransferReading(p), r.FixedCostEstimated, p.State, r.Start, now)
 	r.setTransferState(ts)
+	p.TransferDownUnpriced = r.TransferDownUnpriced
+	p.TransferUpUnpriced = r.TransferUpUnpriced
+	p.TransferTotalUnpriced = r.TransferTotalUnpriced
 	if r.TransferObserved {
 		p.TransferObserved = true
 		p.ObservedTransferCost = r.ObservedTransferCost
@@ -1493,7 +1678,7 @@ func (f *Fleet) note(ctx context.Context, l *ledger, rentals []Rental, answered 
 				Cost: pr.Cost, DiskCost: pr.DiskCost, TransferCost: pr.TransferCost,
 				FixedCost: pr.FixedCost, FixedCostEstimated: pr.FixedCostEstimated,
 				PartialCost: !validRate(pr.Cost),
-				Start:       start, Alive: alive, StoppedAt: stoppedAt, StoppedSeen: stoppedSeen, Tracked: true, Stopped: p.State == "stopped",
+				Start:       start, Alive: alive, StoppedAt: stoppedAt, StoppedSeen: stoppedSeen, Tracked: true, Stopped: p.State == "stopped", Offline: p.State == "stopped" && p.Offline,
 				Grades: pr.Grades, Host: host, CPU: pr.CPU, Curators: pr.Curators,
 				For: pr.For, Round: pr.Round, Report: pr.Report,
 			}
@@ -1546,7 +1731,7 @@ func (f *Fleet) note(ctx context.Context, l *ledger, rentals []Rental, answered 
 				Cost: cost, DiskCost: max(0, p.DiskCost), DiskCostUnknown: p.DiskCostUnknown,
 				FixedCost: max(0, p.FixedCost), FixedCostEstimated: p.FixedCostEstimated,
 				PartialCost: p.PartialRate || p.State == "stopped",
-				Start:       start, Alive: alive, StoppedAt: stoppedAt, StoppedSeen: stoppedSeen, Tracked: true, Stopped: p.State == "stopped"}
+				Start:       start, Alive: alive, StoppedAt: stoppedAt, StoppedSeen: stoppedSeen, Tracked: true, Stopped: p.State == "stopped", Offline: p.State == "stopped" && p.Offline}
 			l.Pods[key] = r
 		}
 		if r.Host == "" && p.Host != "" {
@@ -1653,7 +1838,7 @@ func (f *Fleet) note(ctx context.Context, l *ledger, rentals []Rental, answered 
 				// confirms provider deletion or Lookup confirms absence (e.g. to stop Vast disk
 				// billing even if a delete fails and a later listing omits the stopped worker).
 				wasStopped := r.Stopped
-				r.markStoppedAt(now, p.StoppedAt)
+				r.markStoppedStateAt(now, p.StoppedAt, p.Offline)
 				if !wasStopped {
 					r.Gone = true
 					why := "its market has it " + strings.ToLower(p.Status)
@@ -1701,7 +1886,7 @@ func (f *Fleet) note(ctx context.Context, l *ledger, rentals []Rental, answered 
 				fresh.Terminating = r.Terminating
 				reconcileRentalRateAt(r, fresh, now)
 				if fresh.State == "stopped" {
-					r.markStoppedAt(now, fresh.StoppedAt)
+					r.markStoppedStateAt(now, fresh.StoppedAt, fresh.Offline)
 					extra = append(extra, *fresh)
 				} else if err := retireGone(key, r, fresh); err != nil {
 					return rentals, err
@@ -2339,10 +2524,10 @@ func recordedRental(r *podRecord, status string) Rental {
 		Price: cost, DiskCost: r.DiskCost, DiskCostUnknown: r.DiskCostUnknown, TransferCost: r.TransferCost,
 		FixedCost: r.FixedCost, FixedCostEstimated: r.FixedCostEstimated,
 		ObservedTransferCost: r.ObservedTransferCost, TransferObserved: r.TransferObserved,
-		ObservedTransferDown: r.ObservedTransferDown, TransferDownObserved: r.TransferDownObserved,
-		ObservedTransferUp: r.ObservedTransferUp, TransferUpObserved: r.TransferUpObserved,
-		ObservedTransferTotal: r.ObservedTransferTotal, TransferTotalObserved: r.TransferTotalObserved,
-		PartialRate: r.PartialCost, State: state, Status: status, Created: r.Start, Terminating: r.Terminating, Unconfirmed: true,
+		ObservedTransferDown: r.ObservedTransferDown, TransferDownObserved: r.TransferDownObserved, TransferDownUnpriced: r.TransferDownUnpriced,
+		ObservedTransferUp: r.ObservedTransferUp, TransferUpObserved: r.TransferUpObserved, TransferUpUnpriced: r.TransferUpUnpriced,
+		ObservedTransferTotal: r.ObservedTransferTotal, TransferTotalObserved: r.TransferTotalObserved, TransferTotalUnpriced: r.TransferTotalUnpriced,
+		PartialRate: r.PartialCost, State: state, Offline: r.Stopped && r.Offline, Status: status, Created: r.Start, Terminating: r.Terminating, Unconfirmed: true,
 	}
 }
 
@@ -2473,14 +2658,16 @@ func (f *Fleet) look(ctx context.Context) (*View, error) {
 				v.noteUnknownRate(key, unknownRateLabel(p.Market, p.ID, h))
 			}
 		} else if p.State == "stopped" {
-			diskRate := p.DiskCost
-			if rec != nil && rec.stoppedHourlyRate() > diskRate {
-				diskRate = rec.stoppedHourlyRate()
-			}
-			if validRate(diskRate) {
-				v.Hourly += diskRate
-			} else if p.DiskCostUnknown || (rec != nil && rec.DiskCostUnknown) {
-				v.noteUnknownRate(key, unknownRateLabel(p.Market, p.ID, h))
+			if !p.Offline {
+				diskRate := p.DiskCost
+				if rec != nil && rec.stoppedHourlyRate() > diskRate {
+					diskRate = rec.stoppedHourlyRate()
+				}
+				if validRate(diskRate) {
+					v.Hourly += diskRate
+				} else if p.DiskCostUnknown || (rec != nil && rec.DiskCostUnknown) {
+					v.noteUnknownRate(key, unknownRateLabel(p.Market, p.ID, h))
+				}
 			}
 		}
 		if knownHandles[h] {
@@ -3582,7 +3769,7 @@ func (f *Fleet) end(ctx context.Context, v *View, endings []Ending) error {
 			if validRate(r.Price) {
 				preHourlyRate = r.Price
 			}
-		case r.State == "stopped":
+		case r.State == "stopped" && !r.Offline:
 			preHourlyRate = r.DiskCost
 			if rec != nil && rec.stoppedHourlyRate() > preHourlyRate {
 				preHourlyRate = rec.stoppedHourlyRate()
@@ -3614,7 +3801,7 @@ func (f *Fleet) end(ctx context.Context, v *View, endings []Ending) error {
 							continue
 						}
 					} else if fresh.State == "stopped" {
-						rec.markStoppedAt(now, fresh.StoppedAt)
+						rec.markStoppedStateAt(now, fresh.StoppedAt, fresh.Offline)
 						unconfirmedStopped = false
 					}
 				}

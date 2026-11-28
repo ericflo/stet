@@ -731,13 +731,19 @@ GPU scoring)*.
        (e.g. Draw B unedited seed-0 mean NLL rose from `1.337` to `1.522 bpb`), confirming that
        between-curator rankings still rely on prompt-conditioned answer-prose modeling rather than
        the excerpt.
-     - **Cross-Card NVIDIA RTX 5090 vs RTX 4090 Replay of Archived Measurement Path on Shipped `Inkling-2-Mini` (~525-byte answers):**
-       Training `db_unedited_s0` and `db_fineweb2_s0` on RTX 5090 vs RTX 4090 produced bit-identical
-       `tokens_sha256` and `init_sha256` (`5bd1d5ce4547697e...`). Replaying the archived per-item
-       scores from `run_r10_workers.py` across all 3 shipped Inkling draws gives aggregate cross-card
-       baseline diffs of **`+0.000463` (`draw_b`), `+0.001068` (`phase9`), and `+0.001732` (`draw1`)**
-       (`8.7×–32×` inside the `0.015` baseline tolerance), and `fineweb2` (`4090 − 5090`, before
-       server rounding) gain diffs of:
+     - **Cross-Card NVIDIA RTX 5090 vs RTX 4090 Replay of Archived Measurement Path on Shipped `Inkling-2-Mini` (~525-byte answers; 1 training draw re-sat on 3 exams):**
+       All four archived RTX 5090 and RTX 4090 students (`db_unedited_s0` and `db_fineweb2_s0`)
+       were trained on **Draw B only** (`init_sha256 = 5bd1d5ce4547697e...`, Draw B corpus and
+       SFT seed, with bit-identical `tokens_sha256` and `init_sha256` across cards) and re-sat on
+       all three shipped `Inkling-2-Mini` exams (`draw_b`, `phase9`, `draw1`)—measuring
+       sensitivity to exam content across three exams for one training draw, **not** three
+       independent round trainings (Phase 9 requires `init_sha256 = 3a3a76cbc989eaf8...` and Draw 1
+       uses its own round initialization, so the judge would refuse a Draw B training artifact
+       submitted for Phase 9). Replaying the archived per-item scores from `run_r10_workers.py`
+       across those three exams gives aggregate cross-card baseline diffs of **`+0.000463`
+       (`draw_b`), `+0.001068` (`phase9`), and `+0.001732` (`draw1`)** (`8.7×–32×` inside the
+       `0.015` baseline tolerance), and `fineweb2` (`4090 − 5090`, before server rounding) gain
+       diffs of:
        - **Own-card baseline:** `+0.001127` (`draw_b`), `+0.000797` (`phase9`), `−0.000364` (`draw1`, `1,854`-item v2; `−0.000362` on `1,853`-item v3+)
        - **Both candidates against the RTX 5090 baseline:** `+0.002008 / +0.001724 / +0.001173` on the `1,854`-item v2 rescore (**`+0.002008 / +0.001724 / +0.001175`** on the current `618 / 615 / 620` retained v3+ items; `6.0×–10.2×` inside the `0.012` grade tolerance)
        - **Both candidates against the two-grader settlement per-item median baseline (`server/exam.go`):** **`+0.002004 / +0.001837 / +0.001277`** on the current `618 / 615 / 620` retained v3+ items (`6.0×–9.4×` inside the `0.012` grade tolerance)
@@ -747,12 +753,16 @@ GPU scoring)*.
        PyTorch's default deterministic flags), bypassing both `grade.py:sit_exam`'s explicit
        `_deterministic_cuda(True)` wrapper and the complete released exam's length-sorted `score.py`
        forward batching pass (which also packs zero-weight comprehension items; current filtering
-       alone changes batch shape for `169/615` Phase 9 and `212/620` Draw 1 items). These figures
-       are therefore a replay of the archived measurement path; the size of any score change under
-       the released sitting path is **unmeasured** until the same complete, filtered released exam
-       is rerun through `grade.py:sit_exam` on both cards, with both baseline vectors and both
-       candidate vectors passed through server settlement and the final rounded grades recorded
-       alongside the exam digest and deterministic flags.
+       alone changes batch shape for `169/615` Phase 9 and `212/620` Draw 1 items). In addition,
+       the four archived checkpoints saved on disk hold **BF16** copies of all `127,421,440`
+       trainable parameters, whereas the released trainer (`src/stet/train.py`) maintains **FP32**
+       master weights. These figures are therefore a single-training-draw replay of the archived
+       measurement path; the size of any score change under the released sitting path is
+       **unmeasured** until fresh baseline and candidate models (or lossless FP32 master-weight
+       checkpoints) are trained on **each claimed round's own corpus, `init_sha256`, and SFT seed**
+       on both cards, sat on the complete, filtered released exam through `grade.py:sit_exam`, and
+       passed through server settlement with the final rounded grades recorded alongside the exam
+       digest, `init_sha256`, and deterministic flags.
 
    - **Prior 3-Architecture NVIDIA Cross-Card Parity (`Qwen3-8B` exams, `r8_gate`: `5090` vs `4090` vs `3090` at `standard` 65.5M tokens; `5090` vs `AMD 8060S` at `nano`/`micro`; final pooled-trim `code_share = 0.15` scorer):**
      Training the exact archived `fineweb2.jsonl` from the Draw B seed produced **bit-identical

@@ -228,17 +228,16 @@ def select(docs: list[Doc], seed: bytes, n: int, kinds, per_corner: int = 2, sha
     used: dict[str, int] = defaultdict(int)
     chosen: dict[str, list[Item]] = {k: [] for k in by_kind}
     left = sorted(by_kind)
+    # Keep Season 2's exact selection loop (`part = max(1, want // len(left))` across all remaining
+    # kinds per pass) so published Season 2 exams (including s2-o00008 and s2-o00009) replay with
+    # bit-identical item lists and digests; Season 3 uses select_context() with a strict <= n cap.
     while left and (want := n - sum(map(len, chosen.values()))) > 0:
         part = max(1, want // len(left))
         for k in list(left):
-            rem = n - sum(map(len, chosen.values()))
-            if rem <= 0:
-                break
-            ask = min(part, rem)
             got = _select_kind([it for it in by_kind[k] if used[it.corner] < per_corner and it not in set(chosen[k])],
-                               rng.child(f"{k}/{len(chosen[k])}"), ask, per_corner, shares, used)
+                               rng.child(f"{k}/{len(chosen[k])}"), part, per_corner, shares, used)
             chosen[k] += got
-            if len(got) < ask:
+            if len(got) < part:
                 left.remove(k)
     return [it for k in sorted(chosen) for it in chosen[k]]
 

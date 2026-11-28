@@ -6294,13 +6294,21 @@ def test_review33_practice_synthesize_explicit_truthy_parsing(monkeypatch, tmp_p
     assert key_one != key_unset
 
 
-def test_review33_select_context_and_select_never_exceed_quota():
-    """Review 33 P3 #8: select_context() and select() MUST stop once remaining quota hits zero
-    even when `want < len(left)` on the final selection pass across multiple active kinds."""
-    from stet.exam.fresh import Doc
-    from stet.exam.fresh.select import select, select_context
+def test_review33_select_context_strict_cap_and_review34_season2_exam_digest_parity(tmp_path, monkeypatch):
+    """Review 33 P3 #8 + Review 34 P2 #3: Season 3 select_context() strictly caps at <= n even when
+    `want < len(left)` on the final pass, while Season 2 select() preserves its original selection
+    rule so full Season 2 exam digests replay bit-identically."""
+    from types import SimpleNamespace
 
-    # Build enough distinct multi-sentence docs across all 4 active comprehension kinds
+    from stet import data as data_mod
+    from stet.exam import examine
+    from stet.exam.aggregate import kind_of
+    from stet.exam.fresh import Doc, write_snapshot
+    from stet.exam.fresh.select import select, select_context
+    from stet.exam.items import digest
+    from stet.spec import load_season
+
+    # Build distinct multi-sentence docs across all 4 comprehension kinds
     # (reference=wikipedia, news=ccnews, technical=lore, discussion=hackernews).
     docs: list[Doc] = []
     sources = [
@@ -6332,17 +6340,41 @@ def test_review33_select_context_and_select_never_exceed_quota():
                 )
             )
 
-    from stet.exam.aggregate import kind_of
-
     kinds = {"reference", "news", "technical", "discussion"}
-    # Test quotas not divisible by 4 (1, 2, 3, 5, 9, 10, 11, 13, 17, 25) where final pass has want < len(left).
+    # 1. Season 3 select_context() strictly caps at <= n for every non-multiple quota.
     for quota in (1, 2, 3, 5, 9, 10, 11, 13, 17, 25):
         got_ctx = select_context(docs, b"r33-quota-seed", quota, kinds, per_corner=2)
         assert len(got_ctx) == quota, f"select_context quota {quota}: got {len(got_ctx)}"
         if quota >= 4:
             assert {kind_of(it) for it in got_ctx} == kinds
 
-        got_plain = select(docs, b"r33-quota-seed", quota, kinds, per_corner=2)
-        assert len(got_plain) == quota, f"select quota {quota}: got {len(got_plain)}"
-        if quota >= 4:
-            assert {kind_of(it) for it in got_plain} == kinds
+    # 2. Season 2 select() + full exam assemble()/digest(): when one kind runs short so the final
+    #    pass starts with `want < len(left)` (matching s2-o00008 / s2-o00009), Season 2's original
+    #    loop takes `part = 1` from every remaining kind (producing n + (len(left) - want) fresh
+    #    items) and preserves the exact full exam digest!
+    short_docs = [d for d in docs if not (d.source == "ccnews" and int(d.id.split("-")[1]) >= 1)]
+    seed = b"s2-replay-seed-00008"
+    # With n=10 across 4 kinds: pass 1 takes part=2 -> news gives 1 (removed, left=3), others 2 each
+    # (total 7, want=3); pass 2 takes part=1 from 3 kinds (total 10). With n=9: pass 1 takes part=2 ->
+    # news gives 1 (left=3), others 2 each (total 7, want=2 < len(left)=3); pass 2 takes part=1 from
+    # all 3 remaining kinds -> 10 fresh items (1 extra, identical mechanism to s2-o00009)!
+    s2_fresh = select(short_docs, seed, 9, kinds, per_corner=2)
+    assert len(s2_fresh) == 10, f"Season 2 select must preserve original overspill (10 items), got {len(s2_fresh)}"
+
+    # Exercise full examine.assemble() + digest() on a Season 2 season definition (without mode="context").
+    s2 = load_season("s2")
+    s2_raw = json.loads(json.dumps(s2.raw))
+    s2_raw["exam"]["fresh"]["items"] = 9
+    s2_raw["exam"]["per_corner"] = 0  # isolate fresh + full examine.assemble() pipeline cleanly
+    s2_copy = SimpleNamespace(id="s2", raw=s2_raw)
+    rnd = SimpleNamespace(id="s2-o00009-replay", kind="official", season=s2_copy, seed=seed)
+    snap = tmp_path / "hour-0.jsonl"
+    write_snapshot(short_docs, snap, {"hour": 1700000000})
+    monkeypatch.setattr(data_mod, "corpus", lambda *_a, **_kw: [])
+    items, fresh_n, _mix, _shas = examine.assemble(
+        rnd, "nano", [(1700000000, snap)], tmp_path / "work", log=lambda *_a, **_kw: None, measure=False, synthesize=False
+    )
+    assert fresh_n == 10 and len(items) == 10
+    assert digest(items) == digest(s2_fresh)
+    # A strict-cap selector would have truncated to 9 items and produced a different exam digest.
+    assert digest(items) != digest(s2_fresh[:9])

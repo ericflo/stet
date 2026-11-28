@@ -149,14 +149,50 @@ type ExaminerInstance struct {
 	TransferObserved      bool             `json:"transfer_observed,omitempty"`
 	ObservedTransferDown  float64          `json:"observed_transfer_down,omitempty"`
 	TransferDownObserved  bool             `json:"transfer_down_observed,omitempty"`
+	TransferDownUnpriced  bool             `json:"transfer_down_unpriced,omitempty"`
 	ObservedTransferUp    float64          `json:"observed_transfer_up,omitempty"`
 	TransferUpObserved    bool             `json:"transfer_up_observed,omitempty"`
+	TransferUpUnpriced    bool             `json:"transfer_up_unpriced,omitempty"`
 	ObservedTransferTotal float64          `json:"observed_transfer_total,omitempty"`
 	TransferTotalObserved bool             `json:"transfer_total_observed,omitempty"`
+	TransferTotalUnpriced bool             `json:"transfer_total_unpriced,omitempty"`
 	TransferCharges       []transferCharge `json:"transfer_charges,omitempty"`
 	PartialRate           bool             `json:"partial_rate,omitempty"`
 	Created               time.Time
 	ObservedLiveAt        time.Time `json:"observed_live_at,omitempty"`
+}
+
+func (i ExaminerInstance) transferReading() transferReading {
+	tr := transferReading{
+		Effective:     max(0, i.ObservedTransferCost),
+		Observed:      i.TransferObserved,
+		Down:          max(0, i.ObservedTransferDown),
+		DownObserved:  i.TransferDownObserved,
+		DownUnpriced:  i.TransferDownUnpriced,
+		Up:            max(0, i.ObservedTransferUp),
+		UpObserved:    i.TransferUpObserved,
+		UpUnpriced:    i.TransferUpUnpriced,
+		Total:         max(0, i.ObservedTransferTotal),
+		TotalObserved: i.TransferTotalObserved,
+		TotalUnpriced: i.TransferTotalUnpriced,
+	}
+	if tr.DownObserved || tr.UpObserved || tr.TotalObserved {
+		tr.Observed = true
+		dir := 0.0
+		if tr.DownObserved {
+			dir += tr.Down
+		}
+		if tr.UpObserved {
+			dir += tr.Up
+		}
+		if dir > tr.Effective {
+			tr.Effective = dir
+		}
+		if tr.TotalObserved && tr.Total > tr.Effective {
+			tr.Effective = tr.Total
+		}
+	}
+	return tr
 }
 
 func (i ExaminerInstance) transferState() transferState {
@@ -165,10 +201,13 @@ func (i ExaminerInstance) transferState() transferState {
 		HasObserved:   i.TransferObserved,
 		Down:          i.ObservedTransferDown,
 		DownObserved:  i.TransferDownObserved,
+		DownUnpriced:  i.TransferDownUnpriced,
 		Up:            i.ObservedTransferUp,
 		UpObserved:    i.TransferUpObserved,
+		UpUnpriced:    i.TransferUpUnpriced,
 		Total:         i.ObservedTransferTotal,
 		TotalObserved: i.TransferTotalObserved,
+		TotalUnpriced: i.TransferTotalUnpriced,
 		Charges:       cloneTransferCharges(i.TransferCharges),
 	}
 }
@@ -178,10 +217,13 @@ func (i *ExaminerInstance) setTransferState(ts transferState) {
 	i.TransferObserved = ts.HasObserved
 	i.ObservedTransferDown = ts.Down
 	i.TransferDownObserved = ts.DownObserved
+	i.TransferDownUnpriced = ts.DownUnpriced
 	i.ObservedTransferUp = ts.Up
 	i.TransferUpObserved = ts.UpObserved
+	i.TransferUpUnpriced = ts.UpUnpriced
 	i.ObservedTransferTotal = ts.Total
 	i.TransferTotalObserved = ts.TotalObserved
+	i.TransferTotalUnpriced = ts.TotalUnpriced
 	i.TransferCharges = cloneTransferCharges(ts.Charges)
 }
 
@@ -252,10 +294,13 @@ type examinerState struct {
 	TransferObserved      bool               `json:"transfer_observed,omitempty"`
 	ObservedTransferDown  float64            `json:"observed_transfer_down,omitempty"`
 	TransferDownObserved  bool               `json:"transfer_down_observed,omitempty"`
+	TransferDownUnpriced  bool               `json:"transfer_down_unpriced,omitempty"`
 	ObservedTransferUp    float64            `json:"observed_transfer_up,omitempty"`
 	TransferUpObserved    bool               `json:"transfer_up_observed,omitempty"`
+	TransferUpUnpriced    bool               `json:"transfer_up_unpriced,omitempty"`
 	ObservedTransferTotal float64            `json:"observed_transfer_total,omitempty"`
 	TransferTotalObserved bool               `json:"transfer_total_observed,omitempty"`
+	TransferTotalUnpriced bool               `json:"transfer_total_unpriced,omitempty"`
 	TransferCharges       []transferCharge   `json:"transfer_charges,omitempty"`
 	Created               time.Time          `json:"created,omitempty"`
 	ObservedLiveAt        time.Time          `json:"observed_live_at,omitempty"`
@@ -269,10 +314,13 @@ func (s examinerState) transferState() transferState {
 		HasObserved:   s.TransferObserved,
 		Down:          s.ObservedTransferDown,
 		DownObserved:  s.TransferDownObserved,
+		DownUnpriced:  s.TransferDownUnpriced,
 		Up:            s.ObservedTransferUp,
 		UpObserved:    s.TransferUpObserved,
+		UpUnpriced:    s.TransferUpUnpriced,
 		Total:         s.ObservedTransferTotal,
 		TotalObserved: s.TransferTotalObserved,
+		TotalUnpriced: s.TransferTotalUnpriced,
 		Charges:       cloneTransferCharges(s.TransferCharges),
 	}
 }
@@ -282,10 +330,13 @@ func (s *examinerState) setTransferState(ts transferState) {
 	s.TransferObserved = ts.HasObserved
 	s.ObservedTransferDown = ts.Down
 	s.TransferDownObserved = ts.DownObserved
+	s.TransferDownUnpriced = ts.DownUnpriced
 	s.ObservedTransferUp = ts.Up
 	s.TransferUpObserved = ts.UpObserved
+	s.TransferUpUnpriced = ts.UpUnpriced
 	s.ObservedTransferTotal = ts.Total
 	s.TransferTotalObserved = ts.TotalObserved
+	s.TransferTotalUnpriced = ts.TotalUnpriced
 	s.TransferCharges = cloneTransferCharges(ts.Charges)
 }
 
@@ -306,15 +357,38 @@ func mergeExaminerTransfer(
 	return est, estFlag, ts, changed
 }
 
+// mergeExaminerInstanceTransfer merges a live provider poll or already-tracked ExaminerInstance
+// into an existing transferState: raw provider readings (len(inst.TransferCharges) == 0) apply via
+// mergeReading so new unpriced flags on live polls are recorded directly, while already-tracked
+// snapshots with persisted TransferCharges merge via mergeState.
+func mergeExaminerInstanceTransfer(
+	estA float64, estFlagA bool, tsA transferState,
+	inst ExaminerInstance, start, now time.Time,
+) (est float64, estFlag bool, ts transferState, changed bool) {
+	est = nonNegMax(estA, inst.TransferDollars)
+	estFlag = estFlagA || inst.TransferEstimated || est > 0
+	ts = tsA.clone()
+	if est > estA+1e-9 || (estFlag && !estFlagA) {
+		changed = true
+	}
+	if len(inst.TransferCharges) == 0 {
+		if ts.mergeReading(inst.transferReading(), estFlag, inst.State, start, now) {
+			changed = true
+		}
+	} else if ts.mergeState(inst.transferState(), estFlag, inst.State, start, now) {
+		changed = true
+	}
+	return est, estFlag, ts, changed
+}
+
 func mergeSavedTransferIntoInstance(saved examinerState, inst *ExaminerInstance, now time.Time) {
 	start := inst.Created
 	if start.IsZero() {
 		start = saved.Created
 	}
-	est, estFlag, ts, _ := mergeExaminerTransfer(
+	est, estFlag, ts, _ := mergeExaminerInstanceTransfer(
 		saved.TransferDollars, saved.TransferEstimated, saved.transferState(),
-		inst.TransferDollars, inst.TransferEstimated, inst.transferState(),
-		inst.State, start, now,
+		*inst, start, now,
 	)
 	inst.TransferDollars = est
 	inst.TransferEstimated = estFlag
@@ -331,7 +405,11 @@ func normalizeFreshExaminerTransfer(inst *ExaminerInstance, now time.Time) {
 		start = now
 	}
 	var ts transferState
-	ts.mergeState(inst.transferState(), estFlag, inst.State, start, now)
+	if len(inst.TransferCharges) == 0 {
+		ts.mergeReading(inst.transferReading(), estFlag, inst.State, start, now)
+	} else {
+		ts.mergeState(inst.transferState(), estFlag, inst.State, start, now)
+	}
 	inst.TransferDollars = est
 	inst.TransferEstimated = estFlag
 	inst.setTransferState(ts)
@@ -1455,10 +1533,9 @@ func mergeExaminerInstance(prev, cur ExaminerInstance) ExaminerInstance {
 	if at.IsZero() {
 		at = cur.Created
 	}
-	est, estFlag, ts, _ := mergeExaminerTransfer(
+	est, estFlag, ts, _ := mergeExaminerInstanceTransfer(
 		prev.TransferDollars, prev.TransferEstimated, prev.transferState(),
-		cur.TransferDollars, cur.TransferEstimated, cur.transferState(),
-		cur.State, cur.Created, at,
+		cur, cur.Created, at,
 	)
 	cur.TransferDollars = est
 	cur.TransferEstimated = estFlag
@@ -2005,10 +2082,9 @@ func (e *Examiner) noteSavedPrice(saved *examinerState, inst ExaminerInstance) b
 	if start.IsZero() {
 		start = inst.Created
 	}
-	transfer, transferEst, ts, trChanged := mergeExaminerTransfer(
+	transfer, transferEst, ts, trChanged := mergeExaminerInstanceTransfer(
 		saved.TransferDollars, saved.TransferEstimated, saved.transferState(),
-		inst.TransferDollars, inst.TransferEstimated, inst.transferState(),
-		inst.State, start, now,
+		inst, start, now,
 	)
 	changed := false
 	if validRate(price) && (!validRate(saved.Price) || price > saved.Price+1e-9) {
@@ -2032,11 +2108,16 @@ func (e *Examiner) noteSavedPrice(saved *examinerState, inst ExaminerInstance) b
 		if saved.DiskCost > eDisk {
 			eDisk = saved.DiskCost
 		}
-		eTransfer, eTransferEst, eTS, eTrChanged := mergeExaminerTransfer(
+		eTransfer, eTransferEst, eTS, eTrChanged1 := mergeExaminerInstanceTransfer(
 			e.state.TransferDollars, e.state.TransferEstimated, e.state.transferState(),
+			inst, start, now,
+		)
+		eTransfer, eTransferEst, eTS, eTrChanged2 := mergeExaminerTransfer(
+			eTransfer, eTransferEst, eTS,
 			saved.TransferDollars, saved.TransferEstimated, saved.transferState(),
 			"", start, now,
 		)
+		eTrChanged := eTrChanged1 || eTrChanged2
 		if validRate(ePrice) && (!validRate(e.state.Price) || ePrice > e.state.Price+1e-9) {
 			e.state.Price = ePrice
 			changed = true

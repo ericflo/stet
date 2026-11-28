@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -400,9 +402,11 @@ func vastState(i vastInstance) (state, status string) {
 // vastStoppedDiskCostUnknown reports whether a stopped Vast.ai instance's storage rate could not
 // be determined (omitted/null storage_cost and no positive dph_total while disk storage is
 // attached or unreported), distinguishing unknown pricing from an explicit $0.00/h free-storage
-// report (storage_cost: 0, disk_space: 0, or positive dph_total == dph_base).
-func vastStoppedDiskCostUnknown(state string, i vastInstance, basePrice, diskCost float64) bool {
-	if state != "stopped" || validRate(diskCost) {
+// report (storage_cost: 0, disk_space: 0, or positive dph_total == dph_base). Confirmed offline
+// instances are exempt from Vast compute and storage charges so their storage rate is not needed
+// while offline.
+func vastStoppedDiskCostUnknown(state, status string, i vastInstance, basePrice, diskCost float64) bool {
+	if state != "stopped" || status == "offline" || validRate(diskCost) {
 		return false
 	}
 	if i.storageCostSet && nonNegFinite(i.StorageCost) && i.StorageCost == 0 {
@@ -420,53 +424,60 @@ func vastStoppedDiskCostUnknown(state string, i vastInstance, basePrice, diskCos
 // vastInstanceTransferReading extracts provider-reported observed transfer spend broken down by
 // direction (inet_down_billed / inet_up_billed with confirmed unit rates) and any authoritative
 // combined transfer_cost, so alternating partial directional polls merge cumulatively without
-// dropping known charges or double-counting repeated readings.
+// dropping known charges or double-counting repeated readings. When one direction has positive or
+// malformed billed usage without a usable unit rate, any validly priced direction is STILL kept as
+// a lower bound while the missing direction is flagged via DownUnpriced / UpUnpriced.
 func vastInstanceTransferReading(i vastInstance) transferReading {
 	var tr transferReading
 	if i.TransferCostBilled != nil {
-		if !nonNegFinite(*i.TransferCostBilled) {
-			return transferReading{}
+		if nonNegFinite(*i.TransferCostBilled) {
+			tr.Total = *i.TransferCostBilled
+			tr.TotalObserved = true
+		} else {
+			tr.TotalUnpriced = true
 		}
-		tr.Total = *i.TransferCostBilled
-		tr.TotalObserved = true
 	}
-	downInvalid := false
 	if i.InetDownBilled != nil {
 		if !nonNegFinite(*i.InetDownBilled) {
-			downInvalid = true
+			tr.DownUnpriced = true
 		} else if *i.InetDownBilled > 0 {
 			if !nonNegFinite(i.InetDownCost) || (i.InetDownCost == 0 && !i.inetDownCostSet) {
-				downInvalid = true
-			} else {
-				tr.Down = *i.InetDownBilled * i.InetDownCost
+				tr.DownUnpriced = true
+			} else if d := *i.InetDownBilled * i.InetDownCost; nonNegFinite(d) {
+				tr.Down = d
 				tr.DownObserved = true
+			} else {
+				tr.DownUnpriced = true
 			}
 		} else {
 			tr.Down = 0
 			tr.DownObserved = true
 		}
 	}
-	upInvalid := false
 	if i.InetUpBilled != nil {
 		if !nonNegFinite(*i.InetUpBilled) {
-			upInvalid = true
+			tr.UpUnpriced = true
 		} else if *i.InetUpBilled > 0 {
 			if !nonNegFinite(i.InetUpCost) || (i.InetUpCost == 0 && !i.inetUpCostSet) {
-				upInvalid = true
-			} else {
-				tr.Up = *i.InetUpBilled * i.InetUpCost
+				tr.UpUnpriced = true
+			} else if u := *i.InetUpBilled * i.InetUpCost; nonNegFinite(u) {
+				tr.Up = u
 				tr.UpObserved = true
+			} else {
+				tr.UpUnpriced = true
 			}
 		} else {
 			tr.Up = 0
 			tr.UpObserved = true
 		}
 	}
-	if !tr.TotalObserved && (downInvalid || upInvalid) {
-		return transferReading{}
+	if tr.TotalObserved {
+		tr.DownUnpriced = false
+		tr.UpUnpriced = false
+		tr.TotalUnpriced = false
 	}
 	if !tr.TotalObserved && !tr.DownObserved && !tr.UpObserved {
-		return transferReading{}
+		return tr
 	}
 	dirSum := 0.0
 	if tr.DownObserved {
@@ -480,7 +491,7 @@ func vastInstanceTransferReading(i vastInstance) transferReading {
 		eff = tr.Total
 	}
 	if !nonNegFinite(eff) {
-		return transferReading{}
+		return transferReading{DownUnpriced: tr.DownUnpriced, UpUnpriced: tr.UpUnpriced, TotalUnpriced: true}
 	}
 	tr.Effective = eff
 	tr.Observed = true
@@ -499,13 +510,14 @@ func vastInstanceObservedTransfer(i vastInstance) (float64, bool) {
 
 func vastInstanceRental(i vastInstance) Rental {
 	state, status := vastState(i)
+	offline := state == "stopped" && status == "offline"
 	name := ""
 	if i.Label != nil {
 		name = *i.Label
 	}
 	price, basePrice, diskCost, partial := vastInstanceRate(i)
 	diskCost = vastStoppedDiskCost(state, i.DPHTotal, basePrice, diskCost)
-	diskCostUnknown := vastStoppedDiskCostUnknown(state, i, basePrice, diskCost)
+	diskCostUnknown := vastStoppedDiskCostUnknown(state, status, i, basePrice, diskCost)
 	fixedEst := workerOfferTransferDollars(i.InetDownCost, workerGraderDownloadGB)
 	tr := vastInstanceTransferReading(i)
 	var created time.Time
@@ -516,10 +528,10 @@ func vastInstanceRental(i vastInstance) Rental {
 		Price: price, BasePrice: basePrice, DiskCost: diskCost, DiskCostUnknown: diskCostUnknown,
 		FixedCost: fixedEst, FixedCostEstimated: fixedEst > 0,
 		ObservedTransferCost: tr.Effective, TransferObserved: tr.Observed,
-		ObservedTransferDown: tr.Down, TransferDownObserved: tr.DownObserved,
-		ObservedTransferUp: tr.Up, TransferUpObserved: tr.UpObserved,
-		ObservedTransferTotal: tr.Total, TransferTotalObserved: tr.TotalObserved,
-		PartialRate: partial, State: state, Status: status, Created: created}
+		ObservedTransferDown: tr.Down, TransferDownObserved: tr.DownObserved, TransferDownUnpriced: tr.DownUnpriced,
+		ObservedTransferUp: tr.Up, TransferUpObserved: tr.UpObserved, TransferUpUnpriced: tr.UpUnpriced,
+		ObservedTransferTotal: tr.Total, TransferTotalObserved: tr.TotalObserved, TransferTotalUnpriced: tr.TotalUnpriced,
+		PartialRate: partial, State: state, Offline: offline, Status: status, Created: created}
 	r.Phase = status
 	if r.Phase == "" {
 		r.Phase = "scheduling"
@@ -769,7 +781,11 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
-// examinerOnstartScript builds the Vast.ai startup script that:
+// vastMaxOnstartChars is Vast.ai's published maximum length for the `onstart` field on instance
+// creation requests (api-reference/openapi.yaml).
+const vastMaxOnstartChars = 4048
+
+// examinerOnstartPayload builds the full Vast.ai examiner startup shell script that:
 //  1. Immediately writes and arms a detached Python 3 self-destruct watchdog BEFORE any fallible
 //     setup, computing its sleep from an absolute STET_EXAMINER_EXPIRE_AT deadline (or
 //     STET_EXAMINER_TTL_SECONDS) read from process env OR /etc/environment (with baked launch-time
@@ -780,7 +796,7 @@ func shellQuote(s string) string {
 //  3. Launches vLLM over HTTPS (--ssl-certfile / --ssl-keyfile) with the per-instance Bearer key,
 //     streaming non-secret startup logs to container stdout (/proc/1/fd/1) so Vast logs remain
 //     observable while onstart exits 0 promptly, and self-destructing if vLLM exits unexpectedly.
-func examinerOnstartScript(l ExaminerLaunch, servedName string) string {
+func examinerOnstartPayload(l ExaminerLaunch, servedName string) string {
 	ttl := l.TTLSeconds
 	if ttl <= 0 {
 		ttl = 45 * 60
@@ -902,6 +918,29 @@ func examinerOnstartScript(l ExaminerLaunch, servedName string) string {
 	}, "\n")
 }
 
+// examinerOnstartScript wraps examinerOnstartPayload in a deterministic gzip+base64 bootstrap so
+// the serialized Vast.ai `onstart` field stays comfortably under Vast's 4,048-character API limit.
+func examinerOnstartScript(l ExaminerLaunch, servedName string) string {
+	payload := examinerOnstartPayload(l, servedName)
+	var buf bytes.Buffer
+	gz, err := gzip.NewWriterLevel(&buf, gzip.BestCompression)
+	if err != nil {
+		return payload
+	}
+	gz.OS = 255
+	if _, err := gz.Write([]byte(payload)); err != nil {
+		return payload
+	}
+	if err := gz.Close(); err != nil {
+		return payload
+	}
+	encoded := base64.StdEncoding.EncodeToString(buf.Bytes())
+	return strings.Join([]string{
+		`export PATH="/usr/local/bin:/opt/venv/bin:/venv/bin:$PATH"`,
+		`python3 -c 'import base64,gzip,os,sys;p="/tmp/stet-onstart.sh";f=os.fdopen(os.open(p,os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o700),"wb");f.write(gzip.decompress(base64.b64decode(sys.argv[1])));f.close();os.execvp("sh",["sh",p])' '` + encoded + `'`,
+	}, "\n")
+}
+
 // RentExaminer rents one Vast.ai RTX 5090 running the pinned immutable vLLM OpenAI-compatible
 // server container over peer-verified HTTPS (--ssl-certfile/--ssl-keyfile) with a per-instance
 // Bearer API key, TCP port 8000 exposed, and a container-side self-destruct TTL watchdog.
@@ -938,6 +977,10 @@ func (m *vastMarket) RentExaminer(ctx context.Context, offerID string, l Examine
 	if l.Revision != "" {
 		servedName = l.Model + "@" + l.Revision
 	}
+	onstart := examinerOnstartScript(l, servedName)
+	if len(onstart) > vastMaxOnstartChars {
+		return "", fmt.Errorf("%w: examiner onstart script length %d exceeds Vast.ai limit %d", errRentNotSent, len(onstart), vastMaxOnstartChars)
+	}
 	body := map[string]any{
 		"client_id":      "me",
 		"image":          l.Image,
@@ -945,7 +988,7 @@ func (m *vastMarket) RentExaminer(ctx context.Context, offerID string, l Examine
 		"disk":           disk,
 		"env":            env,
 		"runtype":        "ssh",
-		"onstart":        examinerOnstartScript(l, servedName),
+		"onstart":        onstart,
 		"cancel_unavail": true,
 		"target_state":   "running",
 	}
@@ -1037,9 +1080,9 @@ func (m *vastMarket) ListExaminers(ctx context.Context) ([]ExaminerInstance, err
 				Price: price, BasePrice: basePrice, DiskCost: diskCost,
 				TransferDollars: transferDollars, TransferEstimated: transferDollars > 0,
 				ObservedTransferCost: tr.Effective, TransferObserved: tr.Observed,
-				ObservedTransferDown: tr.Down, TransferDownObserved: tr.DownObserved,
-				ObservedTransferUp: tr.Up, TransferUpObserved: tr.UpObserved,
-				ObservedTransferTotal: tr.Total, TransferTotalObserved: tr.TotalObserved,
+				ObservedTransferDown: tr.Down, TransferDownObserved: tr.DownObserved, TransferDownUnpriced: tr.DownUnpriced,
+				ObservedTransferUp: tr.Up, TransferUpObserved: tr.UpObserved, TransferUpUnpriced: tr.UpUnpriced,
+				ObservedTransferTotal: tr.Total, TransferTotalObserved: tr.TotalObserved, TransferTotalUnpriced: tr.TotalUnpriced,
 				PartialRate: partial, Created: created,
 			})
 		}

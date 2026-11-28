@@ -482,7 +482,7 @@ func tick(ctx context.Context, f *Fleet) (err error) {
 				if validRate(r.Price) {
 					projectedHourly = max(0, projectedHourly-r.Price)
 				}
-			case r.State == "stopped":
+			case r.State == "stopped" && !r.Offline:
 				diskRate := r.DiskCost
 				if recPod := v.Ledger.Pods[ledgerKey(r.Market, r.ID)]; recPod != nil && recPod.stoppedHourlyRate() > diskRate {
 					diskRate = recPod.stoppedHourlyRate()
@@ -893,10 +893,12 @@ func reconcileExaminerOnce(ctx context.Context, f *Fleet) error {
 				unconfirmed[key] = true
 			}
 			if p.Stopped && !unconfirmed[key] {
-				if rate := p.stoppedHourlyRate(); rate > 0 {
-					hourlyWorkers += rate
-				} else if p.DiskCostUnknown {
-					unknownRates = append(unknownRates, unknownRateLabel(p.market(), p.ID, p.Handle))
+				if !p.Offline {
+					if rate := p.stoppedHourlyRate(); rate > 0 {
+						hourlyWorkers += rate
+					} else if p.DiskCostUnknown {
+						unknownRates = append(unknownRates, unknownRateLabel(p.market(), p.ID, p.Handle))
+					}
 				}
 				continue
 			}
@@ -926,10 +928,12 @@ func reconcileExaminerOnce(ctx context.Context, f *Fleet) error {
 					}
 				} else if r.State == "stopped" {
 					seen[key] = true
-					if validRate(r.DiskCost) {
-						hourlyWorkers += r.DiskCost
-					} else if r.DiskCostUnknown {
-						unknownRates = append(unknownRates, unknownRateLabel(r.Market, r.ID, h))
+					if !r.Offline {
+						if validRate(r.DiskCost) {
+							hourlyWorkers += r.DiskCost
+						} else if r.DiskCostUnknown {
+							unknownRates = append(unknownRates, unknownRateLabel(r.Market, r.ID, h))
+						}
 					}
 				}
 			}
@@ -1374,7 +1378,7 @@ func cmdWorkersResolve(ctx context.Context, f *Fleet, end bool, clearIDs ...stri
 						rec.markLiveAt(now, fresh.ResumedAt)
 						changed = true
 					} else if fresh.State == "stopped" {
-						rec.markStoppedAt(now, fresh.StoppedAt)
+						rec.markStoppedStateAt(now, fresh.StoppedAt, fresh.Offline)
 						changed = true
 					}
 				}
@@ -1403,7 +1407,7 @@ func cmdWorkersResolve(ctx context.Context, f *Fleet, end bool, clearIDs ...stri
 				stateConfirmed = true
 				changed = true
 			case fresh.State == "stopped":
-				rec.markStoppedAt(now, fresh.StoppedAt)
+				rec.markStoppedStateAt(now, fresh.StoppedAt, fresh.Offline)
 				stateConfirmed = true
 				changed = true
 			default:
@@ -1424,7 +1428,7 @@ func cmdWorkersResolve(ctx context.Context, f *Fleet, end bool, clearIDs ...stri
 							rec.markLiveAt(now, fresh2.ResumedAt)
 							changed = true
 						} else if fresh2.State == "stopped" {
-							rec.markStoppedAt(now, fresh2.StoppedAt)
+							rec.markStoppedStateAt(now, fresh2.StoppedAt, fresh2.Offline)
 							changed = true
 						}
 					}
@@ -1671,7 +1675,7 @@ func cmdWorkersResolve(ctx context.Context, f *Fleet, end bool, clearIDs ...stri
 			Cost: pr.Cost, DiskCost: pr.DiskCost, TransferCost: pr.TransferCost,
 			FixedCost: pr.FixedCost, FixedCostEstimated: pr.FixedCostEstimated,
 			PartialCost: !validRate(pr.Cost),
-			Start:       start, Alive: alive, StoppedAt: stoppedAt, StoppedSeen: stoppedSeen, Tracked: true, Stopped: p.State == "stopped",
+			Start:       start, Alive: alive, StoppedAt: stoppedAt, StoppedSeen: stoppedSeen, Tracked: true, Stopped: p.State == "stopped", Offline: p.State == "stopped" && p.Offline,
 			Grades: pr.Grades, Host: host, CPU: pr.CPU, Curators: pr.Curators,
 			For: pr.For, Round: pr.Round, Report: pr.Report,
 		}
@@ -1889,7 +1893,7 @@ func cmdDownRentalMeta(ctx context.Context, f *Fleet, market, id string, meta *R
 					rec.markLiveAt(now, fresh.ResumedAt)
 					stateConfirmed = true
 				} else if fresh.State == "stopped" {
-					rec.markStoppedAt(now, fresh.StoppedAt)
+					rec.markStoppedStateAt(now, fresh.StoppedAt, fresh.Offline)
 					stateConfirmed = true
 				}
 			}
