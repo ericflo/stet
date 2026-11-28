@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -9116,6 +9117,299 @@ func TestReview29ExaminerFallsBackToAffordableTierWhenFastTierExceedsDailyTransf
 		})
 		if err == nil || !strings.Contains(err.Error(), "searching Vast.ai") {
 			t.Fatalf("expected dry-run requery error propagated, got %v", err)
+		}
+	})
+}
+
+// Review 30 P2 #2: When a fast bandwidth tier (>=1500 Mbps) lists an offer that returns a
+// definitive stockout (404 / errNoRoom) on create, Examiner.Reconcile MUST advance to slower
+// bandwidth tiers (>=500 -> >=200 Mbps) on the same tick while skipping offer IDs already tried,
+// and MUST still preserve PendingRent on ambiguous create errors (e.g. 500) without advancing.
+func TestReview30ExaminerAdvancesBandwidthTierOnStockout(t *testing.T) {
+	t0 := time.Date(2026, 11, 27, 15, 0, 0, 0, time.UTC)
+
+	t.Run("404_on_1500_tier_advances_to_500_tier_and_rents_on_same_tick", func(t *testing.T) {
+		var queriedFloors []int
+		var attemptedOffers []string
+		vastSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == "GET" && r.URL.Path == "/api/v1/instances/":
+				_, _ = w.Write([]byte(`{"instances":[],"next_token":null}`))
+			case r.Method == "POST" && r.URL.Path == "/api/v0/bundles/":
+				var q map[string]any
+				_ = json.NewDecoder(r.Body).Decode(&q)
+				minDown := 0
+				if idm, ok := q["inet_down"].(map[string]any); ok {
+					if gte, ok := idm["gte"].(float64); ok {
+						minDown = int(gte)
+					}
+				}
+				queriedFloors = append(queriedFloors, minDown)
+				if minDown >= 1500 {
+					_, _ = w.Write([]byte(`{"offers":[{"id":3001,"gpu_name":"RTX 5090","num_gpus":1,"dph_total":0.60,"dph_base":0.55,"storage_cost":0.45,"inet_down_cost":0.0,"cuda_max_good":13.3,"inet_down":2000,"geolocation":"US"}]}`))
+					return
+				}
+				// 500 Mbps query returns both the stale 2000 Mbps offer AND the rentable 600 Mbps offer.
+				_, _ = w.Write([]byte(`{"offers":[{"id":3001,"gpu_name":"RTX 5090","num_gpus":1,"dph_total":0.60,"dph_base":0.55,"storage_cost":0.45,"inet_down_cost":0.0,"cuda_max_good":13.3,"inet_down":2000,"geolocation":"US"},{"id":3002,"gpu_name":"RTX 5090","num_gpus":1,"dph_total":0.65,"dph_base":0.60,"storage_cost":0.45,"inet_down_cost":0.0,"cuda_max_good":13.3,"inet_down":600,"geolocation":"US"}]}`))
+			case r.Method == "PUT" && r.URL.Path == "/api/v0/asks/3001/":
+				attemptedOffers = append(attemptedOffers, "3001")
+				http.Error(w, "not found", http.StatusNotFound)
+			case r.Method == "PUT" && r.URL.Path == "/api/v0/asks/3002/":
+				attemptedOffers = append(attemptedOffers, "3002")
+				_, _ = w.Write([]byte(`{"success":true,"new_contract":993002}`))
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer vastSrv.Close()
+
+		home := t.TempDir()
+		vm := newVast(vastSrv.URL, "vast-key")
+		vm.a.sleep = func(context.Context, time.Duration) error { return nil }
+		ex := newExaminer(ExaminerConfig{Addr: "127.0.0.1:0", Timeout: 45 * time.Minute, MaxPrice: 1.50}, home, vm, func() time.Time { return t0 }, nil, false)
+		ex.owner = "abcdef012345"
+
+		if err := ex.Reconcile(context.Background(), &Work{Rounds: []WorkRound{{ID: "s3-o00030", ExamAt: 0}}}, ExaminerBudget{
+			MaxWorkers: 2, MaxHourly: 2.0, DailyBudget: 10.0,
+		}); err != nil {
+			t.Fatalf("Reconcile: %v", err)
+		}
+		if !slices.Equal(queriedFloors, []int{1500, 500}) {
+			t.Fatalf("expected queried bandwidth floors [1500 500], got %v", queriedFloors)
+		}
+		if !slices.Equal(attemptedOffers, []string{"3001", "3002"}) {
+			t.Fatalf("expected offers [3001 3002] attempted once each (no duplicate 3001 retry), got %v", attemptedOffers)
+		}
+		if st := readExaminerState(home); st == nil || st.InstanceID != "993002" {
+			t.Fatalf("expected examiner rented on 600 Mbps host 993002, got %+v", st)
+		}
+	})
+
+	t.Run("404_on_1500_and_500_advances_to_200_tier_skipping_tried_ids", func(t *testing.T) {
+		var queriedFloors []int
+		var attemptedOffers []string
+		vastSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == "GET" && r.URL.Path == "/api/v1/instances/":
+				_, _ = w.Write([]byte(`{"instances":[],"next_token":null}`))
+			case r.Method == "POST" && r.URL.Path == "/api/v0/bundles/":
+				var q map[string]any
+				_ = json.NewDecoder(r.Body).Decode(&q)
+				minDown := 0
+				if idm, ok := q["inet_down"].(map[string]any); ok {
+					if gte, ok := idm["gte"].(float64); ok {
+						minDown = int(gte)
+					}
+				}
+				queriedFloors = append(queriedFloors, minDown)
+				switch minDown {
+				case 1500:
+					_, _ = w.Write([]byte(`{"offers":[{"id":3011,"gpu_name":"RTX 5090","num_gpus":1,"dph_total":0.60,"dph_base":0.55,"storage_cost":0.45,"inet_down_cost":0.0,"cuda_max_good":13.3,"inet_down":2000,"geolocation":"US"}]}`))
+				case 500:
+					_, _ = w.Write([]byte(`{"offers":[{"id":3011,"gpu_name":"RTX 5090","num_gpus":1,"dph_total":0.60,"dph_base":0.55,"storage_cost":0.45,"inet_down_cost":0.0,"cuda_max_good":13.3,"inet_down":2000,"geolocation":"US"},{"id":3012,"gpu_name":"RTX 5090","num_gpus":1,"dph_total":0.62,"dph_base":0.57,"storage_cost":0.45,"inet_down_cost":0.0,"cuda_max_good":13.3,"inet_down":600,"geolocation":"US"}]}`))
+				default:
+					_, _ = w.Write([]byte(`{"offers":[{"id":3011,"gpu_name":"RTX 5090","num_gpus":1,"dph_total":0.60,"dph_base":0.55,"storage_cost":0.45,"inet_down_cost":0.0,"cuda_max_good":13.3,"inet_down":2000,"geolocation":"US"},{"id":3012,"gpu_name":"RTX 5090","num_gpus":1,"dph_total":0.62,"dph_base":0.57,"storage_cost":0.45,"inet_down_cost":0.0,"cuda_max_good":13.3,"inet_down":600,"geolocation":"US"},{"id":3013,"gpu_name":"RTX 5090","num_gpus":1,"dph_total":0.65,"dph_base":0.60,"storage_cost":0.45,"inet_down_cost":0.0,"cuda_max_good":13.3,"inet_down":250,"geolocation":"US"}]}`))
+				}
+			case r.Method == "PUT" && (r.URL.Path == "/api/v0/asks/3011/" || r.URL.Path == "/api/v0/asks/3012/"):
+				attemptedOffers = append(attemptedOffers, strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v0/asks/"), "/"))
+				http.Error(w, "gone", http.StatusGone)
+			case r.Method == "PUT" && r.URL.Path == "/api/v0/asks/3013/":
+				attemptedOffers = append(attemptedOffers, "3013")
+				_, _ = w.Write([]byte(`{"success":true,"new_contract":993013}`))
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer vastSrv.Close()
+
+		home := t.TempDir()
+		vm := newVast(vastSrv.URL, "vast-key")
+		vm.a.sleep = func(context.Context, time.Duration) error { return nil }
+		ex := newExaminer(ExaminerConfig{Addr: "127.0.0.1:0", Timeout: 45 * time.Minute, MaxPrice: 1.50}, home, vm, func() time.Time { return t0 }, nil, false)
+		ex.owner = "abcdef012345"
+
+		if err := ex.Reconcile(context.Background(), &Work{Rounds: []WorkRound{{ID: "s3-o00030", ExamAt: 0}}}, ExaminerBudget{
+			MaxWorkers: 2, MaxHourly: 2.0, DailyBudget: 10.0,
+		}); err != nil {
+			t.Fatalf("Reconcile: %v", err)
+		}
+		if !slices.Equal(queriedFloors, []int{1500, 500, 200}) {
+			t.Fatalf("expected queried bandwidth floors [1500 500 200], got %v", queriedFloors)
+		}
+		if !slices.Equal(attemptedOffers, []string{"3011", "3012", "3013"}) {
+			t.Fatalf("expected offers [3011 3012 3013] tried once each, got %v", attemptedOffers)
+		}
+		if st := readExaminerState(home); st == nil || st.InstanceID != "993013" {
+			t.Fatalf("expected examiner rented on 250 Mbps host 993013, got %+v", st)
+		}
+	})
+
+	t.Run("ambiguous_500_keeps_pending_reservation_and_does_not_advance_tier", func(t *testing.T) {
+		var queriedFloors []int
+		vastSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == "GET" && r.URL.Path == "/api/v1/instances/":
+				_, _ = w.Write([]byte(`{"instances":[],"next_token":null}`))
+			case r.Method == "POST" && r.URL.Path == "/api/v0/bundles/":
+				var q map[string]any
+				_ = json.NewDecoder(r.Body).Decode(&q)
+				if idm, ok := q["inet_down"].(map[string]any); ok {
+					if gte, ok := idm["gte"].(float64); ok {
+						queriedFloors = append(queriedFloors, int(gte))
+					}
+				}
+				_, _ = w.Write([]byte(`{"offers":[{"id":3021,"gpu_name":"RTX 5090","num_gpus":1,"dph_total":0.60,"dph_base":0.55,"storage_cost":0.45,"inet_down_cost":0.0,"cuda_max_good":13.3,"inet_down":2000,"geolocation":"US"}]}`))
+			case r.Method == "PUT" && r.URL.Path == "/api/v0/asks/3021/":
+				http.Error(w, "internal error", http.StatusInternalServerError)
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer vastSrv.Close()
+
+		home := t.TempDir()
+		vm := newVast(vastSrv.URL, "vast-key")
+		vm.a.sleep = func(context.Context, time.Duration) error { return nil }
+		ex := newExaminer(ExaminerConfig{Addr: "127.0.0.1:0", Timeout: 45 * time.Minute, MaxPrice: 1.50}, home, vm, func() time.Time { return t0 }, nil, false)
+		ex.owner = "abcdef012345"
+
+		err := ex.Reconcile(context.Background(), &Work{Rounds: []WorkRound{{ID: "s3-o00030", ExamAt: 0}}}, ExaminerBudget{
+			MaxWorkers: 2, MaxHourly: 2.0, DailyBudget: 10.0,
+		})
+		if err == nil {
+			t.Fatal("expected ambiguous 500 error from Reconcile")
+		}
+		if !slices.Equal(queriedFloors, []int{1500}) {
+			t.Fatalf("ambiguous 500 MUST NOT advance to slower bandwidth tiers, queried=%v", queriedFloors)
+		}
+		if st := readExaminerState(home); st == nil || !st.PendingRent {
+			t.Fatalf("ambiguous 500 MUST preserve PendingRent reservation on disk, got %+v", st)
+		}
+	})
+
+	t.Run("stockout_under_headroom_probes_maxBudget_and_reclaims_idle_worker_in_tick", func(t *testing.T) {
+		var rentedOffer string
+		vastSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == "GET" && r.URL.Path == "/api/v1/instances/":
+				_, _ = w.Write([]byte(`{"instances":[],"next_token":null}`))
+			case r.Method == "POST" && r.URL.Path == "/api/v0/bundles/":
+				var q map[string]any
+				_ = json.NewDecoder(r.Body).Decode(&q)
+				maxP := 999.0
+				if dp, ok := q["dph_total"].(map[string]any); ok {
+					if lte, ok := dp["lte"].(float64); ok {
+						maxP = lte
+					}
+				}
+				// Offer 3031 ($0.38/h) is stale (404 on PUT); Offer 3032 ($0.55/h) is live and > $0.40 headroom!
+				if maxP < 0.55 {
+					_, _ = w.Write([]byte(`{"offers":[{"id":3031,"gpu_name":"RTX 5090","num_gpus":1,"dph_total":0.38,"dph_base":0.33,"storage_cost":0.45,"inet_down_cost":0.0,"cuda_max_good":13.3,"inet_down":2000,"geolocation":"US"}]}`))
+					return
+				}
+				_, _ = w.Write([]byte(`{"offers":[{"id":3031,"gpu_name":"RTX 5090","num_gpus":1,"dph_total":0.38,"dph_base":0.33,"storage_cost":0.45,"inet_down_cost":0.0,"cuda_max_good":13.3,"inet_down":2000,"geolocation":"US"},{"id":3032,"gpu_name":"RTX 5090","num_gpus":1,"dph_total":0.55,"dph_base":0.50,"storage_cost":0.45,"inet_down_cost":0.0,"cuda_max_good":13.3,"inet_down":2000,"geolocation":"US"}]}`))
+			case r.Method == "PUT" && r.URL.Path == "/api/v0/asks/3031/":
+				http.Error(w, "not found", http.StatusNotFound)
+			case r.Method == "PUT" && r.URL.Path == "/api/v0/asks/3032/":
+				rentedOffer = "3032"
+				_, _ = w.Write([]byte(`{"success":true,"new_contract":993032}`))
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer vastSrv.Close()
+
+		rp, st := newFakeRunPod(t), newFakeStet(t)
+		f, _ := testFleet(t, rp, st, 2)
+		f.now = func() time.Time { return t0 }
+		f.o.MaxWorkers = 4
+		f.o.MaxHourly = 1.00
+		f.o.DailyBudget = 50.0
+		f.o.Examiner.MaxPrice = 0.80
+		vm := newVast(vastSrv.URL, "vast-key")
+		vm.a.sleep = func(context.Context, time.Duration) error { return nil }
+		f.examiner = newExaminer(ExaminerConfig{Addr: "127.0.0.1:0", Timeout: 45 * time.Minute, MaxPrice: 0.80}, f.o.Home, vm, func() time.Time { return t0 }, f.say, false)
+		f.examiner.owner = "abcdef012345"
+
+		// Two idle RunPod workers at $0.30/h each ($0.60/h live -> $0.40/h headroom).
+		rp.pods["rp-w1"] = &Pod{ID: "rp-w1", Name: f.keys[0].Handle, Status: "RUNNING", Cost: 0.30, CreatedAt: t0.Add(-5 * time.Minute)}
+		rp.pods["rp-w2"] = &Pod{ID: "rp-w2", Name: f.keys[1].Handle, Status: "RUNNING", Cost: 0.30, CreatedAt: t0.Add(-5 * time.Minute)}
+		st.work = Work{
+			Rounds: []WorkRound{{ID: "s3-o00030", GradesWanted: 1, ExamAt: 0}},
+			Machines: []Machine{
+				{Handle: f.keys[0].Handle, LastSeen: t0.Add(-10 * time.Second).Unix()},
+				{Handle: f.keys[1].Handle, LastSeen: t0.Add(-10 * time.Second).Unix()},
+			},
+		}
+		if err := f.writeLedger(&ledger{Pods: map[string]*podRecord{
+			ledgerKey("runpod", "rp-w1"): {ID: "rp-w1", Market: "runpod", Handle: f.keys[0].Handle, GPU: "RTX 4090", Cost: 0.30, Start: t0.Add(-5 * time.Minute), Alive: t0},
+			ledgerKey("runpod", "rp-w2"): {ID: "rp-w2", Market: "runpod", Handle: f.keys[1].Handle, GPU: "RTX 4090", Cost: 0.30, Start: t0.Add(-5 * time.Minute), Alive: t0},
+		}}); err != nil {
+			t.Fatal(err)
+		}
+
+		// tick() hits 404 on 3031, probes maxBudget ($0.80) excluding 3031 -> sets blockedHourly=$0.55 ->
+		// evicts one $0.30/h idle worker -> immediately rents 3032 ($0.55/h) on the same tick!
+		if err := tick(context.Background(), f); err != nil {
+			t.Fatalf("tick: %v", err)
+		}
+		if rentedOffer != "3032" {
+			t.Fatalf("expected tick() to reclaim idle worker after 3031 stockout and rent 3032, got rentedOffer=%q", rentedOffer)
+		}
+	})
+
+	t.Run("dry_run_advances_across_multiple_tiers_when_spend_grows_repeatedly", func(t *testing.T) {
+		var queriedFloors []int
+		spent := 0.20 // $0.80 remaining initially
+		vastSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == "GET" && r.URL.Path == "/api/v1/instances/":
+				_, _ = w.Write([]byte(`{"instances":[],"next_token":null}`))
+			case r.Method == "POST" && r.URL.Path == "/api/v0/bundles/":
+				var q map[string]any
+				_ = json.NewDecoder(r.Body).Decode(&q)
+				minDown := 0
+				if idm, ok := q["inet_down"].(map[string]any); ok {
+					if gte, ok := idm["gte"].(float64); ok {
+						minDown = int(gte)
+					}
+				}
+				queriedFloors = append(queriedFloors, minDown)
+				switch minDown {
+				case 1500:
+					spent = 0.50 // shrinks remaining to $0.50 -> eliminates $0.54 transfer ($0.03/GB * 18 GB)
+					_, _ = w.Write([]byte(`{"offers":[{"id":3041,"gpu_name":"RTX 5090","num_gpus":1,"dph_total":0.50,"dph_base":0.45,"storage_cost":0.45,"inet_down_cost":0.03,"cuda_max_good":13.3,"inet_down":2000,"geolocation":"US"}]}`))
+				case 500:
+					spent = 0.70 // shrinks remaining to $0.30 -> eliminates $0.36 transfer ($0.02/GB * 18 GB)
+					_, _ = w.Write([]byte(`{"offers":[{"id":3042,"gpu_name":"RTX 5090","num_gpus":1,"dph_total":0.50,"dph_base":0.45,"storage_cost":0.45,"inet_down_cost":0.02,"cuda_max_good":13.3,"inet_down":600,"geolocation":"US"}]}`))
+				default:
+					_, _ = w.Write([]byte(`{"offers":[{"id":3043,"gpu_name":"RTX 5090","num_gpus":1,"dph_total":0.50,"dph_base":0.45,"storage_cost":0.45,"inet_down_cost":0.0,"cuda_max_good":13.3,"inet_down":250,"geolocation":"US"}]}`))
+				}
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer vastSrv.Close()
+
+		var logs bytes.Buffer
+		vm := newVast(vastSrv.URL, "vast-key")
+		vm.a.sleep = func(context.Context, time.Duration) error { return nil }
+		ex := newExaminer(ExaminerConfig{Addr: "127.0.0.1:0", Timeout: 45 * time.Minute, MaxPrice: 1.50}, t.TempDir(), vm, func() time.Time { return t0 }, func(format string, args ...any) {
+			fmt.Fprintf(&logs, format+"\n", args...)
+		}, true)
+		ex.owner = "abcdef012345"
+
+		if err := ex.Reconcile(context.Background(), &Work{Rounds: []WorkRound{{ID: "s3-o00030", ExamAt: 0}}}, ExaminerBudget{
+			MaxWorkers: 2, MaxHourly: 2.0, SpentToday: 0.20, DailyBudget: 1.00,
+			CurrentSpentToday: func() (float64, error) { return spent, nil },
+		}); err != nil {
+			t.Fatalf("dryRun Reconcile: %v", err)
+		}
+		if !slices.Equal(queriedFloors, []int{1500, 500, 200}) {
+			t.Fatalf("expected dryRun to advance [1500 500 200], got %v\nlogs:\n%s", queriedFloors, logs.String())
+		}
+		if !strings.Contains(logs.String(), "offer 3043") {
+			t.Fatalf("expected dryRun to pick free-ingress 200 Mbps offer 3043, logs:\n%s", logs.String())
 		}
 	})
 }

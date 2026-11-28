@@ -3472,3 +3472,339 @@ func TestReview29IncompatiblePairsOfGradersRemainOpenForDecidingGrade(t *testing
 		}
 	})
 }
+
+// Review 30 P1 #1: numericalSplit MUST evaluate mutually compatible groups across the FULL set of
+// valid grades rather than partitioning around the median's tolerance band first, so the judge
+// never strikes a member of the strongest agreeing group (e.g. 6-grader [-0.017, +0.019, -0.011,
+// +0.040, +0.005, -0.006] where {-0.017, -0.011, -0.006} is the only 3-grader consensus) or
+// strikes members of equal-support overlapping pairs (e.g. 4-grader [-0.015, -0.005, +0.005, +0.015]).
+func TestReview30ConsensusDoesNotStrikeStrongestAgreeingGroup(t *testing.T) {
+	initA := strings.Repeat("a", 64)
+	tokA := strings.Repeat("1", 64)
+
+	sendGrade := func(t *testing.T, w *world, a *actor, c *claimed, gain float64) (int, string) {
+		t.Helper()
+		examLoss := 6.000 - gain
+		p := w.result(c, examLoss, 6.000)
+		p["train"] = map[string]any{"init_sha256": initA}
+		p["script"].(map[string]any)["tokens_sha256"] = tokA
+		if c.Job.Baseline != nil && *c.Job.Baseline {
+			p["baseline"].(map[string]any)["init_sha256"] = initA
+		} else {
+			delete(p, "baseline")
+		}
+		var ack struct {
+			Status string `json:"status"`
+			Error  string `json:"error"`
+		}
+		code := a.do("POST", fmt.Sprintf("/api/v1/jobs/%d/result", c.Job.ID), p, &ack)
+		if ack.Error != "" {
+			return code, ack.Error
+		}
+		return code, ack.Status
+	}
+
+	setup := func(t *testing.T, gains []float64) (*world, *actor, int, []*actor) {
+		t.Helper()
+		pub, priv := newKey()
+		w := newWorld(t, pub)
+		w.app.season.Student = map[string]any{"kind": "hf_topreset", "repo": "baidu/ERNIE-4.5-0.3B-Base-PT"}
+		w.app.season.Baselines.PerRound = 2
+		w.app.season.Tolerance[w.cfg.Scale] = Tolerance{Grade: 0.012, Baseline: 0.015, Run: 0.015}
+		anchor := w.join("anchor-one", priv)
+		g := w.volunteers("grd1", "grd2", "grd3", "grd4", "grd5", "grd6", "grd7", "grd8")
+		w.submit(w.join("owner-0", nil), "entry-0", "print(0)")
+		idx := w.drawWithoutExam()
+		ce := w.claim(anchor, true)
+		if code, _ := w.edit(anchor, ce, "0\n1\n"); code != 200 {
+			t.Fatalf("edit: HTTP %d", code)
+		}
+		earlyN := min(4, len(gains))
+		claims := make([]*claimed, len(gains))
+		for i := 0; i < earlyN; i++ {
+			claims[i] = w.claimEarly(g[i])
+			if claims[i].Job == nil {
+				t.Fatalf("expected early claim for grader %d", i)
+			}
+		}
+		w.exam(idx)
+		for i, gain := range gains {
+			if claims[i] == nil {
+				claims[i] = w.claim(g[i], false)
+				if claims[i].Job == nil || claims[i].Job.Kind != "grade" {
+					t.Fatalf("expected post-exam grade claim for grader %d, got %+v", i, claims[i].Job)
+				}
+			}
+			code, st := sendGrade(t, w, g[i], claims[i], gain)
+			if code != 200 || st != "pending" {
+				t.Fatalf("grader %d (%+.4f): HTTP %d status=%q, want 200 pending", i, gain, code, st)
+			}
+		}
+		w.app.st.view(func(s *State) {
+			if en := s.inRound[idx][0]; en.Status != "open" {
+				t.Fatalf("settled prematurely (%s) instead of staying open for deciding grade", en.Status)
+			}
+		})
+		if wk := w.work(anchor).Rounds[0]; wk.GradesWanted != 1 {
+			t.Fatalf("expected GradesWanted=1 while unresolved, got %+v", wk)
+		}
+		return w, anchor, idx, g
+	}
+
+	sixGains := []float64{-0.017, +0.019, -0.011, +0.040, +0.005, -0.006}
+
+	t.Run("six_graders_three_member_consensus_stays_open_and_seventh_resolves_without_striking_consensus", func(t *testing.T) {
+		w, _, idx, g := setup(t, sixGains)
+		c7 := w.claim(g[6], false)
+		if c7.Job == nil || c7.Job.Kind != "grade" {
+			t.Fatalf("expected 7th grader to claim deciding grade, got %+v", c7.Job)
+		}
+		// 7th grader at -0.011 confirms the 3-member consensus -> settles cleanly at -0.006!
+		if code, st := sendGrade(t, w, g[6], c7, -0.011); code != 200 || st != "settled" {
+			t.Fatalf("7th grader (-0.011) should resolve cleanly: HTTP %d status=%q", code, st)
+		}
+		e := w.entry(idx, "entry-0")
+		if e.Void || !e.Valid || e.Gain == nil || math.Abs(*e.Gain-(-0.006)) > 1e-6 {
+			t.Fatalf("expected resolved gain -0.006, got %+v", e)
+		}
+		if e.Detail == nil || e.Detail.DisputedTogether {
+			t.Fatalf("expected clean resolution (DisputedTogether=false), got %+v", e.Detail)
+		}
+		// Consensus members (-0.017, -0.011, -0.006, +0.005, -0.011) MUST have zero strikes;
+		// only genuine outliers (+0.019, +0.040) receive strikes.
+		w.app.st.view(func(s *State) {
+			for i, wantStrike := range []int{0, 1, 0, 1, 0, 0, 0} {
+				acct := s.byHandle[g[i].handle]
+				if acct.Strikes != wantStrike {
+					t.Fatalf("grader %d (%s): strikes=%d, want %d", i, acct.Handle, acct.Strikes, wantStrike)
+				}
+			}
+		})
+		w.check()
+	})
+
+	t.Run("six_graders_replica_wait_expiry_preserves_no_strike_disputed_outcome", func(t *testing.T) {
+		w, _, idx, g := setup(t, sixGains)
+		preAgreed := make([]int, 6)
+		w.app.st.view(func(s *State) {
+			for i := 0; i < 6; i++ {
+				preAgreed[i] = s.byHandle[g[i].handle].Agreed
+			}
+		})
+		w.pass(w.cfg.ReplicaWait + time.Minute)
+		if w.settled(idx) != 1 {
+			t.Fatal("expected unresolved 6-grader dispute to settle after ReplicaWait")
+		}
+		e := w.entry(idx, "entry-0")
+		if e.Void || !e.Valid || e.Detail == nil || !e.Detail.DisputedTogether {
+			t.Fatalf("expected DisputedTogether=true on ReplicaWait expiry, got %+v", e)
+		}
+		for _, gr := range e.Runs[0].Grades {
+			if gr.Verdict != "disputed" {
+				t.Fatalf("grade %s verdict = %q, want disputed", gr.Handle, gr.Verdict)
+			}
+		}
+		w.app.st.view(func(s *State) {
+			for i := 0; i < 6; i++ {
+				acct := s.byHandle[g[i].handle]
+				if acct.Strikes != 0 || acct.Agreed != preAgreed[i] {
+					t.Fatalf("grader %s must get zero strikes and zero agreed credit on expired dispute: strikes=%d agreed=%d (was %d)",
+						acct.Handle, acct.Strikes, acct.Agreed, preAgreed[i])
+				}
+			}
+		})
+		w.check()
+	})
+
+	t.Run("seven_graders_overlapping_3_vs_3_tie_stays_open_for_eighth", func(t *testing.T) {
+		w, _, idx, g := setup(t, sixGains)
+		c7 := w.claim(g[6], false)
+		// 7th grader at +0.005 creates overlapping 3-vs-3 tie: {-0.017,-0.011,-0.006} vs {-0.006,+0.005,+0.005}.
+		if code, st := sendGrade(t, w, g[6], c7, +0.005); code != 200 || st != "pending" {
+			t.Fatalf("7th grader (+0.005) overlapping 3-vs-3 tie must stay open: HTTP %d status=%q", code, st)
+		}
+		c8 := w.claim(g[7], false)
+		if c8.Job == nil || c8.Job.Kind != "grade" {
+			t.Fatalf("expected 8th grader to claim deciding grade, got %+v", c8.Job)
+		}
+		if code, st := sendGrade(t, w, g[7], c8, +0.005); code != 200 || st != "settled" {
+			t.Fatalf("8th grader (+0.005) should resolve 4-vs-3 cleanly: HTTP %d status=%q", code, st)
+		}
+		e := w.entry(idx, "entry-0")
+		if e.Gain == nil || math.Abs(*e.Gain-0.005) > 1e-6 || e.Detail == nil || e.Detail.DisputedTogether {
+			t.Fatalf("expected clean +0.005 settlement after 8th grader, got %+v", e)
+		}
+		w.check()
+	})
+
+	t.Run("four_graders_three_equal_adjacent_pairs_stays_open_without_strikes", func(t *testing.T) {
+		fourGains := []float64{-0.015, -0.005, +0.005, +0.015}
+		// Branch A: 5th grader at +0.005 breaks the 3-way tie cleanly at +0.005.
+		wA, _, idxA, gA := setup(t, fourGains)
+		c5 := wA.claim(gA[4], false)
+		if code, st := sendGrade(t, wA, gA[4], c5, +0.005); code != 200 || st != "settled" {
+			t.Fatalf("5th grader (+0.005) should resolve 4-grader adjacent-pairs tie: HTTP %d status=%q", code, st)
+		}
+		eA := wA.entry(idxA, "entry-0")
+		if eA.Gain == nil || math.Abs(*eA.Gain-0.005) > 1e-6 || eA.Detail == nil || eA.Detail.DisputedTogether {
+			t.Fatalf("expected clean +0.005 settlement after 5th grader, got %+v", eA)
+		}
+		wA.check()
+
+		// Branch B: ReplicaWait expires -> DisputedTogether=true with ZERO strikes!
+		wB, _, idxB, gB := setup(t, fourGains)
+		wB.pass(wB.cfg.ReplicaWait + time.Minute)
+		eB := wB.entry(idxB, "entry-0")
+		if eB.Detail == nil || !eB.Detail.DisputedTogether {
+			t.Fatalf("expected DisputedTogether=true after ReplicaWait on 4-grader tie, got %+v", eB)
+		}
+		wB.app.st.view(func(s *State) {
+			for i := 0; i < 4; i++ {
+				if acct := s.byHandle[gB[i].handle]; acct.Strikes != 0 {
+					t.Fatalf("grader %s got %d strike(s) on unresolved 4-grader tie, want 0", acct.Handle, acct.Strikes)
+				}
+			}
+		})
+		wB.check()
+	})
+
+	t.Run("mixed_valid_and_invalid_does_not_let_weaker_or_tied_valid_cluster_strike_invalid_group", func(t *testing.T) {
+		sendInvalid := func(t *testing.T, w *world, a *actor, c *claimed) (int, string) {
+			t.Helper()
+			p := w.result(c, 0, 6.000)
+			p["valid"] = false
+			delete(p, "exam")
+			if c.Job.Baseline != nil && *c.Job.Baseline {
+				p["baseline"].(map[string]any)["init_sha256"] = initA
+			} else {
+				delete(p, "baseline")
+			}
+			var ack struct {
+				Status string `json:"status"`
+				Error  string `json:"error"`
+			}
+			code := a.do("POST", fmt.Sprintf("/api/v1/jobs/%d/result", c.Job.ID), p, &ack)
+			if ack.Error != "" {
+				return code, ack.Error
+			}
+			return code, ack.Status
+		}
+
+		// Case A (7 graders): [Invalid, Invalid, Valid(-0.050), Valid(+0.050), Valid(+0.010), Invalid, Valid(+0.010)]
+		// 2-grader Valid(+0.010) cluster MUST NOT settle and strike 3 mutually agreeing Invalid graders!
+		pub, priv := newKey()
+		w := newWorld(t, pub)
+		w.app.season.Student = map[string]any{"kind": "hf_topreset", "repo": "baidu/ERNIE-4.5-0.3B-Base-PT"}
+		w.app.season.Baselines.PerRound = 2
+		w.app.season.Tolerance[w.cfg.Scale] = Tolerance{Grade: 0.012, Baseline: 0.015, Run: 0.015}
+		anchor := w.join("anchor-one", priv)
+		g := w.volunteers("inv1", "inv2", "val1", "val2", "val3", "inv3", "val4")
+		w.submit(w.join("owner-0", nil), "entry-0", "print(0)")
+		idx := w.drawWithoutExam()
+		ce := w.claim(anchor, true)
+		if code, _ := w.edit(anchor, ce, "0\n1\n"); code != 200 {
+			t.Fatalf("edit: HTTP %d", code)
+		}
+		c0, c1, c2, c3 := w.claimEarly(g[0]), w.claimEarly(g[1]), w.claimEarly(g[2]), w.claimEarly(g[3])
+		w.exam(idx)
+		for i, res := range []struct {
+			code int
+			st   string
+		}{
+			func() struct {
+				code int
+				st   string
+			} {
+				c, s := sendInvalid(t, w, g[0], c0)
+				return struct {
+					code int
+					st   string
+				}{c, s}
+			}(),
+			func() struct {
+				code int
+				st   string
+			} {
+				c, s := sendInvalid(t, w, g[1], c1)
+				return struct {
+					code int
+					st   string
+				}{c, s}
+			}(),
+			func() struct {
+				code int
+				st   string
+			} {
+				c, s := sendGrade(t, w, g[2], c2, -0.050)
+				return struct {
+					code int
+					st   string
+				}{c, s}
+			}(),
+			func() struct {
+				code int
+				st   string
+			} {
+				c, s := sendGrade(t, w, g[3], c3, +0.050)
+				return struct {
+					code int
+					st   string
+				}{c, s}
+			}(),
+		} {
+			if res.code != 200 || res.st != "pending" {
+				t.Fatalf("early grader %d: HTTP %d status=%q, want 200 pending", i, res.code, res.st)
+			}
+		}
+		c4 := w.claim(g[4], false)
+		if code, st := sendGrade(t, w, g[4], c4, +0.010); code != 200 || st != "pending" {
+			t.Fatalf("5th grader Valid(+0.010): HTTP %d status=%q, want 200 pending", code, st)
+		}
+		c5 := w.claim(g[5], false)
+		if code, st := sendInvalid(t, w, g[5], c5); code != 200 || st != "pending" {
+			t.Fatalf("6th grader Invalid: HTTP %d status=%q, want 200 pending", code, st)
+		}
+		c6 := w.claim(g[6], false)
+		if code, st := sendGrade(t, w, g[6], c6, +0.010); code != 200 || st != "pending" {
+			t.Fatalf("7th grader Valid(+0.010) must NOT strike 3-grader Invalid consensus: HTTP %d status=%q", code, st)
+		}
+		w.pass(w.cfg.ReplicaWait + time.Minute)
+		e := w.entry(idx, "entry-0")
+		if e.Detail == nil || !e.Detail.DisputedTogether {
+			t.Fatalf("expected DisputedTogether=true on unresolved 2-valid vs 3-invalid split, got %+v", e)
+		}
+		w.app.st.view(func(s *State) {
+			for i := range g {
+				if acct := s.byHandle[g[i].handle]; acct.Strikes != 0 {
+					t.Fatalf("grader %s received %d strike(s) on unresolved valid/invalid split, want 0", acct.Handle, acct.Strikes)
+				}
+			}
+		})
+		w.check()
+
+		// Case B (5 graders): [Valid(-0.005), Valid(+0.005), Valid(+0.015), Invalid, Invalid] where all 3
+		// valid grades agree with +0.005 (zero valid disagreeing) yet maxAgreeingCluster(valid)=2 == invalidCount=2!
+		j := w.app.newJudge(w.app.st.s)
+		mkV := func(gain float64) *gradeView {
+			return &gradeView{r: &Result{Valid: true, InitSHA: initA, TokensSHA: tokA}, acct: &Account{}, gain: gain, base: true}
+		}
+		mkInv := func() *gradeView {
+			return &gradeView{r: &Result{Valid: false}, acct: &Account{}, base: true}
+		}
+		vTie := &verdict{
+			known: true, valid: true, scored: true, gain: +0.005,
+			counted: []*gradeView{mkV(-0.005), mkV(+0.005), mkV(+0.015), mkInv(), mkInv()},
+		}
+		if !j.numericalSplit(vTie) {
+			t.Fatal("2-member valid clique tied with 2 invalid grades (zero valid disagreeing) must set numericalSplit=true")
+		}
+		// Clean 3-agreeing-valid vs 2-invalid MUST still settle (numericalSplit=false).
+		vClean := &verdict{
+			known: true, valid: true, scored: true, gain: +0.005,
+			counted: []*gradeView{mkV(+0.005), mkV(+0.005), mkV(+0.005), mkInv(), mkInv()},
+		}
+		if j.numericalSplit(vClean) {
+			t.Fatal("3 mutually agreeing valid grades vs 2 invalid grades should settle (numericalSplit=false)")
+		}
+	})
+}

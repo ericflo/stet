@@ -1462,11 +1462,17 @@ func cmdWorkersResolve(ctx context.Context, f *Fleet, end bool, clearIDs ...stri
 	return firstErr
 }
 
-// cmdDownRental ends one specific rental by exact (market, id), attempting to acquire the fleet
-// lock and update fleet.json but NEVER letting a lock failure, read-only filesystem, or corrupt
-// ledger prevent issuing m.End(ctx, id) to the provider. Any lock or ledger repair error is
-// reported AFTER provider teardown is confirmed.
+// cmdDownRental ends one specific rental by exact (market, id), persisting termination intent
+// (`Terminating: true`) in fleet.json BEFORE calling m.End(ctx, id) whenever local accounting is
+// writable so transient DELETE failures remain visible to `workers resolve --end` and `scale`,
+// while NEVER letting a lock failure, read-only filesystem, or corrupt ledger prevent issuing
+// m.End(ctx, id) to the provider. Any lock or ledger repair error is reported AFTER provider
+// teardown is confirmed.
 func cmdDownRental(ctx context.Context, f *Fleet, market, id string) error {
+	return cmdDownRentalMeta(ctx, f, market, id, nil)
+}
+
+func cmdDownRentalMeta(ctx context.Context, f *Fleet, market, id string, meta *Rental) error {
 	if id == "" || id == "dry-run" {
 		return nil
 	}
@@ -1497,20 +1503,92 @@ func cmdDownRental(ctx context.Context, f *Fleet, market, id string) error {
 	}
 	var l *ledger
 	var ledgerErr error
+	var termWriteErr error
 	var rec *podRecord
 	key := ledgerKey(market, id)
 	if lockErr == nil {
 		l, ledgerErr = f.readLedger()
 		if ledgerErr == nil && l != nil {
-			rec = l.Pods[key]
-			if rec != nil {
-				if spentSum, serr := f.readSpentSummary(); serr == nil && spentSum.hasContract(market, id) {
+			pendingID := ""
+			if meta != nil {
+				pendingID = meta.PendingID
+			}
+			if spentSum, serr := f.readSpentSummary(); serr == nil && spentSum.hasContract(market, id) {
+				cleared := false
+				if l.Pods[key] != nil {
 					delete(l.Pods, key)
+					cleared = true
+				}
+				if pendingID != "" && l.Pending[pendingID] != nil {
+					delete(l.Pending, pendingID)
+					cleared = true
+				}
+				if cleared {
 					if err := f.writeLedger(l); err != nil {
 						return fmt.Errorf("clearing already-retired probe %s on %s from fleet ledger failed: %w", id, marketTitle(market), err)
 					}
-					f.say("cleared probe %s (%s on %s): already retired in spent.jsonl", rec.Handle, id, marketTitle(market))
-					return nil
+				}
+				f.say("cleared probe %s on %s: already retired in spent.jsonl", id, marketTitle(market))
+				return nil
+			}
+			rec = l.Pods[key]
+			now := f.now()
+			if rec == nil {
+				rec = &podRecord{
+					ID: id, Market: market, Start: now, Alive: now, Tracked: true,
+				}
+				if meta != nil {
+					rec.Handle = meta.Name
+					rec.GPU = meta.Card
+					rec.Host = meta.Host
+					if validRate(meta.Price) {
+						rec.Cost = meta.Price
+					}
+					if nonNegFinite(meta.DiskCost) {
+						rec.DiskCost = meta.DiskCost
+					}
+					rec.DiskCostUnknown = meta.DiskCostUnknown
+					if nonNegFinite(meta.TransferCost) {
+						rec.TransferCost = meta.TransferCost
+					}
+					if !meta.Created.IsZero() && !meta.Created.After(now) {
+						rec.Start = meta.Created
+					}
+				}
+				rec.PartialCost = !validRate(rec.Cost) || (meta != nil && meta.PartialRate)
+				l.Pods[key] = rec
+			}
+			if pendingID != "" {
+				if rec.PendingID == "" {
+					rec.PendingID = pendingID
+				}
+				if pr := l.Pending[pendingID]; pr != nil {
+					if rec.Handle == "" {
+						rec.Handle = pr.Handle
+					}
+					if rec.GPU == "" {
+						rec.GPU = pr.GPU
+					}
+					if rec.Host == "" {
+						rec.Host = pr.Host
+					}
+					if rec.Cloud == "" {
+						rec.Cloud = pr.Cloud
+					}
+					if !validRate(rec.Cost) && validRate(pr.Cost) {
+						rec.Cost = pr.Cost
+						rec.PartialCost = false
+					}
+					if rec.DiskCost == 0 && nonNegFinite(pr.DiskCost) {
+						rec.DiskCost = pr.DiskCost
+					}
+					if rec.TransferCost == 0 && nonNegFinite(pr.TransferCost) {
+						rec.TransferCost = pr.TransferCost
+					}
+					if !pr.Created.IsZero() && !pr.Created.After(now) && pr.Created.Before(rec.Start) {
+						rec.Start = pr.Created
+					}
+					delete(l.Pending, pendingID)
 				}
 			}
 		}
@@ -1520,6 +1598,15 @@ func cmdDownRental(ctx context.Context, f *Fleet, market, id string) error {
 		if lu, ok := m.(rentalLookup); ok {
 			if fresh, exists, lerr := lu.Lookup(ctx, id); lerr == nil && exists && fresh != nil {
 				reconcileRentalRate(rec, fresh)
+				if rec.Handle == "" && fresh.Name != "" {
+					rec.Handle = fresh.Name
+				}
+				if rec.GPU == "" && fresh.Card != "" {
+					rec.GPU = fresh.Card
+				}
+				if rec.Host == "" && fresh.Host != "" {
+					rec.Host = fresh.Host
+				}
 				now := f.now()
 				if fresh.live() {
 					rec.markLiveAt(now, fresh.ResumedAt)
@@ -1530,8 +1617,28 @@ func cmdDownRental(ctx context.Context, f *Fleet, market, id string) error {
 				}
 			}
 		}
+		// Persist termination intent against the exact contract ID BEFORE issuing DELETE so any
+		// transient provider failure or process crash leaves the contract visible to
+		// `stet-cloud workers resolve --end` and `scale`. Never block DELETE if writing fails.
+		rec.Terminating = true
+		if rec.Why == "" {
+			rec.Why = "probe ended"
+		}
+		termWriteErr = f.writeLedger(l)
 	}
 	if err := m.End(ctx, id); err != nil {
+		if rec != nil && lockErr == nil && ledgerErr == nil {
+			if termWriteErr == nil {
+				name := rec.Handle
+				if name == "" {
+					name = id
+				}
+				f.say("could not end probe %s (%s on %s): %v (persisted as terminating in fleet.json; retry `stet-cloud workers resolve --end`)",
+					name, id, marketTitle(market), err)
+				return err
+			}
+			return fmt.Errorf("%w (also could not persist terminating state in fleet.json: %v)", err, termWriteErr)
+		}
 		return err
 	}
 	handle := ""
@@ -1540,6 +1647,9 @@ func cmdDownRental(ctx context.Context, f *Fleet, market, id string) error {
 		handle = rec.Handle
 		rec.Why = "probe ended"
 		r.Card = rec.GPU
+	} else if meta != nil {
+		handle = meta.Name
+		r.Card = meta.Card
 	}
 	f.event(&r, handle, "ended", "probe ended")
 	if handle != "" {

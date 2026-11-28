@@ -144,6 +144,7 @@ type Rental struct {
 	EndedAt         time.Time // trustworthy provider termination/end timestamp when reported (zero when unknown)
 	Terminating     bool      // persisted outstanding termination (e.g. failed `workers resolve --end`)
 	Unconfirmed     bool      // true when reconstructed from ledger because provider listing/lookup failed to confirm current state
+	PendingID       string    // originating pendingRent reservation ID when returned from f.rent() before ledger write
 	// What the market says of the machine itself, for seeing why one does not start: whether
 	// its container is up ("yes", "no", or "" where the market does not say), its phase in
 	// the market's own words (one that changes only as the machine moves on: "pulling image",

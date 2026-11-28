@@ -2868,6 +2868,7 @@ func (f *Fleet) rent(ctx context.Context, v *View, k *Key, gpus []Offer, site st
 			return nil, fmt.Errorf("uncertain create for %s on %s (slot and $%.2f/h reserved until reconciled): %w", k.Handle, marketTitle(c.Market), pr.Cost, err)
 		}
 		delete(v.Ledger.Pending, pr.ID)
+		r.PendingID = pr.ID
 		applyOfferRateToRental(c, r)
 		if !validRate(r.Price) {
 			r.Price = price
@@ -2876,7 +2877,7 @@ func (f *Fleet) rent(ctx context.Context, v *View, k *Key, gpus []Offer, site st
 		v.addLiveRental(r)
 		rec := &podRecord{ID: r.ID, Market: r.Market, Handle: k.Handle, GPU: c.Card, Cloud: cloud,
 			Cost: r.Price, DiskCost: max(c.DiskCost, r.DiskCost), TransferCost: c.TransferCost,
-			Start: began, Alive: f.now(), Tracked: true,
+			Start: began, Alive: f.now(), Tracked: true, PendingID: pr.ID,
 			Host: c.Host, CPU: c.CPU, Curators: l.Env["STET_WORKER_EDITS"] == "1", For: plan.what, Round: plan.round, Report: plannedReport}
 		// Seen from its start: a machine that asks for work before the next look still has its
 		// boot counted (calibrate.go). Lium's first, at 41 s, never was.

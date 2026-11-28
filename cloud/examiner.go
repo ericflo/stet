@@ -164,6 +164,10 @@ type examinerOfferSearcher interface {
 	ExaminerOffersWithTransferCap(ctx context.Context, maxPrice, maxTransfer float64) ([]ExaminerOffer, error)
 }
 
+type examinerTieredOfferSearcher interface {
+	ExaminerOffersByTier(ctx context.Context, maxPrice, maxTransfer float64, startTier int, excludeIDs map[string]bool) ([]ExaminerOffer, int, error)
+}
+
 // examinerState is persisted to <home>/examiner.json (0600) so restarts never lose the random
 // API key, pinned peer certificate, pre-rental reservation, unrecorded terminal spend charges,
 // or leak an orphaned 5090 on Vast.ai.
@@ -2513,8 +2517,13 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 		}
 		return max(0, budget.DailyBudget-spent)
 	}
+	ts, canTierSearch := e.prov.(examinerTieredOfferSearcher)
 	_, canCapTransfer := e.prov.(examinerOfferSearcher)
 	searchOffers := func(maxPrice, maxTransfer float64) ([]ExaminerOffer, error) {
+		if canTierSearch {
+			offs, _, err := ts.ExaminerOffersByTier(ctx, maxPrice, maxTransfer, 0, nil)
+			return offs, err
+		}
 		if s, ok := e.prov.(examinerOfferSearcher); ok {
 			return s.ExaminerOffersWithTransferCap(ctx, maxPrice, maxTransfer)
 		}
@@ -2561,7 +2570,13 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 		return out
 	}
 
-	offers, err := searchOffers(effMaxPrice, maxTransfer)
+	var offers []ExaminerOffer
+	curTier := 0
+	if canTierSearch {
+		offers, curTier, err = ts.ExaminerOffersByTier(ctx, effMaxPrice, maxTransfer, 0, nil)
+	} else {
+		offers, err = searchOffers(effMaxPrice, maxTransfer)
+	}
 	if err != nil {
 		return fmt.Errorf("searching Vast.ai RTX 5090 offers for examiner: %w", err)
 	}
@@ -2580,8 +2595,26 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 		return nil
 	}
 	fitting := filterFitting(offers)
+	allUnfit := offers
+	if len(fitting) == 0 && canTierSearch {
+		for {
+			more, nextTier, merr := ts.ExaminerOffersByTier(ctx, effMaxPrice, maxTransfer, curTier+1, nil)
+			if merr != nil {
+				return fmt.Errorf("searching Vast.ai RTX 5090 offers for examiner: %w", merr)
+			}
+			if len(more) == 0 || nextTier <= curTier {
+				break
+			}
+			curTier = nextTier
+			allUnfit = append(allUnfit, more...)
+			if nextFit := filterFitting(more); len(nextFit) > 0 {
+				fitting = nextFit
+				break
+			}
+		}
+	}
 	if len(fitting) == 0 {
-		need := cheapestValidExaminerOffer(offers, maxBudget, maxTransfer)
+		need := cheapestValidExaminerOffer(allUnfit, maxBudget, maxTransfer)
 		if need == 0 && effMaxPrice < maxBudget-1e-9 {
 			if probe, perr := searchOffers(maxBudget, maxTransfer); perr == nil {
 				need = cheapestValidExaminerOffer(probe, maxBudget, maxTransfer)
@@ -2591,9 +2624,9 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 		if need > 0 {
 			e.say("not renting examiner GPU for %s: cheapest 1x RTX 5090 ($%.2f/h) plus $%.2f/h live exceeds --max-hourly $%.2f/h",
 				needRound, need, budget.HourlyNow, budget.MaxHourly)
-		} else if validRate(offers[0].Price) {
+		} else if validRate(allUnfit[0].Price) {
 			e.say("not renting examiner GPU for %s: cheapest 1x RTX 5090 ($%.2f/h) plus $%.2f/h live exceeds --max-hourly $%.2f/h",
-				needRound, offers[0].effectiveHourly(), budget.HourlyNow, budget.MaxHourly)
+				needRound, allUnfit[0].effectiveHourly(), budget.HourlyNow, budget.MaxHourly)
 		} else {
 			e.say("not renting examiner GPU for %s: no valid priced 1x RTX 5090 offers fit under --max-hourly $%.2f/h",
 				needRound, budget.MaxHourly)
@@ -2620,7 +2653,28 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 			return ExaminerOffer{}, false
 		}
 		chosen, ok := findDryRun(fitting)
-		if !ok && canCapTransfer && budget.DailyBudget > 0 {
+		if !ok && canTierSearch && budget.DailyBudget > 0 {
+			for !ok {
+				tighter := transferCapFor(spentNow)
+				more, nextTier, merr := ts.ExaminerOffersByTier(ctx, effMaxPrice, tighter, curTier+1, nil)
+				if merr != nil {
+					return fmt.Errorf("searching Vast.ai RTX 5090 offers for examiner: %w", merr)
+				}
+				if len(more) == 0 || nextTier <= curTier {
+					break
+				}
+				curTier = nextTier
+				spentNow, serr = currentSpentToday(e.now())
+				if serr != nil {
+					return serr
+				}
+				if spentNow >= budget.DailyBudget {
+					e.say("not renting examiner GPU for %s: about $%.2f spent today, and the daily budget is $%.2f", needRound, spentNow, budget.DailyBudget)
+					return nil
+				}
+				chosen, ok = findDryRun(filterFitting(more))
+			}
+		} else if !ok && canCapTransfer && budget.DailyBudget > 0 {
 			if tighter := transferCapFor(spentNow); tighter < maxTransfer-1e-9 {
 				more, merr := searchOffers(effMaxPrice, tighter)
 				if merr != nil {
@@ -2658,7 +2712,9 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 	tried := 0
 	skippedTransferDaily := 0
 	triedIDs := map[string]bool{}
-	for searchPass := 0; searchPass < 2; searchPass++ {
+	transferRequeried := false
+	for {
+		noRoomThisPass := 0
 		skippedThisPass := 0
 		for _, off := range fitting {
 			if triedIDs[off.ID] {
@@ -2733,6 +2789,7 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 				// Offer was definitively unavailable; clear the failed reservation immediately so
 				// subsequent offer attempts do not count a phantom PendingRent against daily spend.
 				e.clearState()
+				noRoomThisPass++
 				continue
 			}
 			if errors.Is(rerr, errRentRejected) || errors.Is(rerr, errRentNotSent) {
@@ -2782,10 +2839,42 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 			}
 			return nil
 		}
-		if searchPass == 0 && canCapTransfer && skippedThisPass > 0 && budget.DailyBudget > 0 {
-			// If spend accrued during the search/retries shrank the remaining daily budget and
-			// eliminated the returned tier on transfer cost, re-query with the tighter transfer
-			// cap so slower free-ingress tiers can still be tried on this tick.
+		if canTierSearch && (noRoomThisPass > 0 || skippedThisPass > 0) {
+			// Every offer in the current bandwidth tier was definitively unavailable (errNoRoom)
+			// or exceeded remaining daily transfer budget: advance to slower bandwidth tiers
+			// (500 -> 200 Mbps) while skipping offer IDs already tried in this pass.
+			freshSpent, serr := currentSpentToday(e.now())
+			if serr != nil {
+				return serr
+			}
+			if budget.DailyBudget > 0 && freshSpent >= budget.DailyBudget {
+				e.say("not renting examiner GPU for %s: about $%.2f spent today, and the daily budget is $%.2f", needRound, freshSpent, budget.DailyBudget)
+				return nil
+			}
+			maxTransfer = transferCapFor(freshSpent)
+			advanced := false
+			for {
+				more, nextTier, merr := ts.ExaminerOffersByTier(ctx, effMaxPrice, maxTransfer, curTier+1, triedIDs)
+				if merr != nil {
+					return fmt.Errorf("searching Vast.ai RTX 5090 offers for examiner: %w", merr)
+				}
+				if len(more) == 0 || nextTier <= curTier {
+					break
+				}
+				curTier = nextTier
+				if nextFitting := filterFitting(more); len(nextFitting) > 0 {
+					fitting = nextFitting
+					advanced = true
+					break
+				}
+			}
+			if advanced {
+				continue
+			}
+		} else if !transferRequeried && canCapTransfer && skippedThisPass > 0 && budget.DailyBudget > 0 {
+			// Non-tiered provider fallback: if spend accrued during the search/retries shrank the
+			// remaining daily budget and eliminated offers on transfer cost, re-query once tighter.
+			transferRequeried = true
 			freshSpent, serr := currentSpentToday(e.now())
 			if serr != nil {
 				return serr
@@ -2810,6 +2899,43 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 	if tried == 0 && skippedTransferDaily > 0 {
 		e.say("not renting examiner GPU for %s: %d available RTX 5090 offer(s) had cold-start download charges exceeding remaining --daily-budget $%.2f", needRound, skippedTransferDaily, budget.DailyBudget)
 		return nil
+	}
+	if tried > 0 && effMaxPrice < maxBudget-1e-9 && maxBudget > 0 {
+		// Stale cheap offer(s) under current headroom stocked out (errNoRoom), and no other offer
+		// fit under effMaxPrice. Probe maxBudget excluding triedIDs so tick() can reclaim idle
+		// workers when a live offer exists under --max-hourly.
+		freshSpent, serr := currentSpentToday(e.now())
+		if serr != nil {
+			return serr
+		}
+		if budget.DailyBudget > 0 && freshSpent >= budget.DailyBudget {
+			e.say("not renting examiner GPU for %s: about $%.2f spent today, and the daily budget is $%.2f", needRound, freshSpent, budget.DailyBudget)
+			return nil
+		}
+		probeTransfer := transferCapFor(freshSpent)
+		var probe []ExaminerOffer
+		var perr error
+		if canTierSearch {
+			probe, _, perr = ts.ExaminerOffersByTier(ctx, maxBudget, probeTransfer, 0, triedIDs)
+		} else {
+			if raw, rerr := searchOffers(maxBudget, probeTransfer); rerr == nil {
+				for _, off := range raw {
+					if !triedIDs[off.ID] {
+						probe = append(probe, off)
+					}
+				}
+			} else {
+				perr = rerr
+			}
+		}
+		if perr == nil {
+			if need := cheapestValidExaminerOffer(probe, maxBudget, probeTransfer); need > 0 {
+				e.setBlockedHourly(need)
+				e.say("not renting examiner GPU for %s: %d offer(s) under headroom were unavailable and cheapest remaining 1x RTX 5090 ($%.2f/h) plus $%.2f/h live exceeds --max-hourly $%.2f/h",
+					needRound, tried, need, budget.HourlyNow, budget.MaxHourly)
+				return nil
+			}
+		}
 	}
 	e.say("none of the %d RTX 5090 offers tried for %s examiner were available; retrying on next tick", tried, needRound)
 	return nil

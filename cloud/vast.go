@@ -550,6 +550,8 @@ func examinerOfferTransferDollars(inetDownCost float64) float64 {
 	return 0
 }
 
+var examinerBandwidthTiers = []int{1500, 500, 200}
+
 // ExaminerOffers searches Vast.ai for verified single RTX 5090 hosts suited to serving the
 // Season 3 pinned Inkling-2-Mini vLLM container, preferring gigabit+ hosts (>=1500 Mbps) so the
 // vLLM image + 18 GB model weights pull quickly, and falling back to >=500 / >=200 Mbps when
@@ -564,7 +566,17 @@ func (m *vastMarket) ExaminerOffers(ctx context.Context, maxPrice float64) ([]Ex
 // optional remaining daily cold-start transfer allowance (maxTransfer >= 0) so slower affordable
 // or free-ingress tiers are queried when every faster-tier host exceeds the remaining daily budget.
 func (m *vastMarket) ExaminerOffersWithTransferCap(ctx context.Context, maxPrice, maxTransfer float64) ([]ExaminerOffer, error) {
-	for _, minDown := range []int{1500, 500, 200} {
+	offers, _, err := m.ExaminerOffersByTier(ctx, maxPrice, maxTransfer, 0, nil)
+	return offers, err
+}
+
+// ExaminerOffersByTier searches Vast.ai starting from bandwidth tier index startTier
+// (0: 1500 Mbps, 1: 500 Mbps, 2: 200 Mbps), skipping offer IDs in excludeIDs and enforcing both
+// maxPrice and optional maxTransfer >= 0. Returns the matching offers and the tier index that
+// produced them so callers can advance directly to the next slower tier after definitive stockouts.
+func (m *vastMarket) ExaminerOffersByTier(ctx context.Context, maxPrice, maxTransfer float64, startTier int, excludeIDs map[string]bool) ([]ExaminerOffer, int, error) {
+	for tier := max(0, startTier); tier < len(examinerBandwidthTiers); tier++ {
+		minDown := examinerBandwidthTiers[tier]
 		q := map[string]any{
 			"type": "ondemand", "limit": 2000, "order": [][]string{{"dph_total", "asc"}},
 			"allocated_storage": examinerDiskGB,
@@ -580,11 +592,15 @@ func (m *vastMarket) ExaminerOffersWithTransferCap(ctx context.Context, maxPrice
 			Offers []vastOffer `json:"offers"`
 		}
 		if _, err := m.a.do(ctx, "POST", "/api/v0/bundles/", q, &out); err != nil {
-			return nil, err
+			return nil, tier, err
 		}
 		var offers []ExaminerOffer
 		for _, o := range out.Offers {
 			if o.NumGPUs != 1 {
+				continue
+			}
+			idStr := strconv.FormatInt(o.ID, 10)
+			if excludeIDs[idStr] {
 				continue
 			}
 			price, diskCost, _, ok := vastOfferBreakdown(o, examinerDiskGB, 0)
@@ -599,7 +615,7 @@ func (m *vastMarket) ExaminerOffersWithTransferCap(ctx context.Context, maxPrice
 				continue
 			}
 			offers = append(offers, ExaminerOffer{
-				ID: strconv.FormatInt(o.ID, 10), Card: vastCard(o.GPUName), Price: price, DiskCost: diskCost,
+				ID: idStr, Card: vastCard(o.GPUName), Price: price, DiskCost: diskCost,
 				TransferDollars: transferDollars,
 				CUDA:            o.CUDAMaxGood, Region: o.Geolocation, InetDown: o.InetDown,
 			})
@@ -612,10 +628,10 @@ func (m *vastMarket) ExaminerOffersWithTransferCap(ctx context.Context, maxPrice
 				}
 				return offers[i].Price < offers[j].Price
 			})
-			return offers, nil
+			return offers, tier, nil
 		}
 	}
-	return nil, nil
+	return nil, len(examinerBandwidthTiers), nil
 }
 
 func shellQuote(s string) string {

@@ -4,10 +4,12 @@ Pretraining data that builds latent reasoning, reading, multilingual, and tool-u
 responds strongly to a brief fixed supervised fine-tuning probe; shallow style mimicry does not.
 Every verifier runs the exact same deterministic probe derived solely from the round's seed
 (before the official exam is even posted). In Season 3, the probe loads the bundled, sha256-pinned
-commercial-permissive multilingual SFT pack (`s3-sft-ml.jsonl.zst`, 512 examples from Dolly-15k
-and Aya/COHERE-permissive multilingual instruction splits), ordered deterministically from the
-round's seed with zero overlap with any scored exam item. Earlier/unpacked configurations fall back
-to disjoint generated examples (using a separate RNG domain and the odd-parity Wikidata split).
+commercial-permissive multilingual SFT pack (`s3-sft-ml.jsonl.zst`, 512 examples drawn from
+Global-MMLU, XStoryCloze, GSM8K, ARC-Easy, OpenBookQA, and MBPP — see the full manifest and
+upstream license notices in `src/stet/exam/data/THIRD_PARTY_NOTICES.md`), ordered deterministically
+from the round's seed with zero overlap with any scored exam item. Earlier/unpacked configurations
+fall back to disjoint generated examples (using a separate RNG domain and the odd-parity Wikidata
+split).
 """
 
 from __future__ import annotations

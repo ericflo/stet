@@ -864,8 +864,9 @@ func (j *judge) agrees(g *gradeView, v *verdict) bool {
 
 // maxAgreeingCluster returns the exact size of the largest subset of sorted valid grades in which
 // every pair satisfies j.same (within grade tolerance and compatible init/token digests),
-// independent of submission order.
-func (j *judge) maxAgreeingCluster(sorted []*gradeView) int {
+// independent of submission order. When require is non-nil, only subsets containing at least one
+// grade in require are considered.
+func (j *judge) maxAgreeingCluster(sorted []*gradeView, require map[*gradeView]bool) int {
 	if len(sorted) == 0 {
 		return 0
 	}
@@ -906,11 +907,18 @@ func (j *judge) maxAgreeingCluster(sorted []*gradeView) int {
 				}
 			}
 			lo := 0
+			reqInWindow := 0
 			for hi := range compat {
+				if require != nil && require[compat[hi]] {
+					reqInWindow++
+				}
 				for lo < hi && !within(compat[hi].gain-compat[lo].gain, tol) {
+					if require != nil && require[compat[lo]] {
+						reqInWindow--
+					}
 					lo++
 				}
-				if hi-lo+1 > best {
+				if (require == nil || reqInWindow > 0) && hi-lo+1 > best {
 					best = hi - lo + 1
 				}
 			}
@@ -920,20 +928,27 @@ func (j *judge) maxAgreeingCluster(sorted []*gradeView) int {
 }
 
 // numericalSplit reports whether a valid scored verdict rests on incompatible equal-support
-// numerical measurements rather than a resolved majority:
+// numerical measurements or would strike a member of a competing mutually compatible group with
+// equal or stronger support than the median's own consensus:
 //   - an even-sized set of valid grades whose two middle grades disagree beyond tolerance (e.g.
 //     two at +0.015 and two at -0.005 against tol 0.012, where the synthetic midpoint +0.005
 //     falls within tolerance of both incompatible pairs), OR
-//   - a mutually agreeing cluster outside the verdict's tolerance band that has at least as much
-//     support (>= 2) as the largest mutually agreeing cluster backing the verdict (e.g. two at
-//     -0.005, two at +0.015, and one outlier at +0.035).
+//   - a mutually agreeing cluster across the full valid set containing at least one grade outside
+//     the verdict's tolerance band, OR the mutually agreeing cluster of invalid grades in v.counted,
+//     that has at least as much support (>= 2) as the largest mutually agreeing cluster completely
+//     inside the verdict's tolerance band (e.g. a 3-grader consensus [-0.017, -0.011, -0.006]
+//     straddling the -0.0005 median's band boundary, four grades [-0.015, -0.005, +0.005, +0.015]
+//     forming three equal adjacent pairs, or 3 invalid grades competing with a 2-grader valid cluster).
 func (j *judge) numericalSplit(v *verdict) bool {
 	if !v.known || !v.valid || !v.scored {
 		return false
 	}
 	var valid []*gradeView
+	invalidCount := 0
 	for _, g := range v.counted {
-		if g.r.Valid && g.base {
+		if !g.r.Valid {
+			invalidCount++
+		} else if g.base {
 			valid = append(valid, g)
 		}
 	}
@@ -952,20 +967,24 @@ func (j *judge) numericalSplit(v *verdict) bool {
 	if len(valid)%2 == 0 && !j.same(valid[len(valid)/2-1], valid[len(valid)/2]) {
 		return true
 	}
-	var agreeing, rival []*gradeView
+	var agreeing []*gradeView
+	disagreeing := map[*gradeView]bool{}
 	for _, g := range valid {
 		if j.agrees(g, v) {
 			agreeing = append(agreeing, g)
 		} else {
-			rival = append(rival, g)
+			disagreeing[g] = true
 		}
 	}
-	if len(rival) == 0 {
+	if len(disagreeing) == 0 && invalidCount < 2 {
 		return false
 	}
-	medSupport := j.maxAgreeingCluster(agreeing)
-	rivalSupport := j.maxAgreeingCluster(rival)
-	return rivalSupport >= 2 && rivalSupport >= medSupport
+	medSupport := j.maxAgreeingCluster(agreeing, nil)
+	competingSupport := invalidCount
+	if len(disagreeing) > 0 {
+		competingSupport = max(competingSupport, j.maxAgreeingCluster(valid, disagreeing))
+	}
+	return competingSupport >= 2 && competingSupport >= medSupport
 }
 
 // supported reports whether a verdict is backed by an agreeing organisers' grade or by at least

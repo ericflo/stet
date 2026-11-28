@@ -51,7 +51,7 @@ func cmdProbe(ctx context.Context, f *Fleet, check string, wait time.Duration) e
 				podMarket = market
 			}
 			f.say("probe machine %s on %s was created, but local accounting failed (%v); tearing down immediately", pod.ID, marketTitle(podMarket), upErr)
-			if endErr := cmdDownRental(context.WithoutCancel(ctx), f, podMarket, pod.ID); endErr != nil {
+			if endErr := cmdDownRentalMeta(context.WithoutCancel(ctx), f, podMarket, pod.ID, pod); endErr != nil {
 				return fmt.Errorf("probe launch accounting failed (%v); cleanup of %s on %s reported: %w", upErr, pod.ID, marketTitle(podMarket), endErr)
 			}
 		}
@@ -98,7 +98,7 @@ func cmdProbe(ctx context.Context, f *Fleet, check string, wait time.Duration) e
 	if podMarket == "" {
 		podMarket = market
 	}
-	endErr := cmdDownRental(context.WithoutCancel(ctx), f, podMarket, pod.ID)
+	endErr := cmdDownRentalMeta(context.WithoutCancel(ctx), f, podMarket, pod.ID, pod)
 	if endErr != nil {
 		f.say("ending the probe: %v", endErr)
 	}

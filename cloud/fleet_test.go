@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -2023,4 +2024,232 @@ func (m *probeRentHookMarket) Rent(ctx context.Context, o Offer, l Launch) (*Ren
 
 func (m *probeRentHookMarket) End(ctx context.Context, id string) error {
 	return m.onEnd(ctx, id)
+}
+
+// Review 30 P2 #3: When probe teardown DELETE fails transiently (e.g. HTTP 503), cmdDownRental
+// MUST persist Terminating=true on the exact contract ID in fleet.json BEFORE calling m.End so
+// `stet-cloud workers resolve --end` (including after a controller restart) retries DELETE against
+// that exact pod and stops billing, while still issuing best-effort DELETE if the ledger cannot be
+// written.
+func TestProbeFailedTeardownPersistsTerminatingForWorkersResolve(t *testing.T) {
+	t.Run("failed_probe_delete_persists_terminating_and_fresh_workers_resolve_ends_it", func(t *testing.T) {
+		rp, st := newFakeRunPod(t), newFakeStet(t)
+		f, _ := testFleet(t, rp, st, 1)
+		f.o.MaxWorkers = 2
+		f.o.Market = "runpod"
+
+		var probeID string
+		var failDelete atomic.Bool
+		failDelete.Store(true)
+		var deleteCalls []string
+		rpMkt := f.market("runpod")
+		f.markets = []Market{&probeSwapMarket{
+			Market: rpMkt,
+			onLogs: func(id string) ([]string, error) {
+				probeID = id
+				return []string{"[probe] done: every case held"}, nil
+			},
+			onEnd: func(id string) error {
+				deleteCalls = append(deleteCalls, id)
+				if failDelete.Load() {
+					return fmt.Errorf("HTTP 503: service unavailable")
+				}
+				return rpMkt.End(context.Background(), id)
+			},
+		}}
+
+		checkFile := filepath.Join(t.TempDir(), "cage_check.py")
+		if err := os.WriteFile(checkFile, []byte("print('ok')\n"), 0o600); err != nil {
+			t.Fatalf("write check file: %v", err)
+		}
+		if err := cmdProbe(context.Background(), f, checkFile, time.Minute); err == nil {
+			t.Fatal("expected cmdProbe error when provider DELETE returns 503")
+		}
+		if probeID == "" || len(deleteCalls) != 1 || deleteCalls[0] != probeID {
+			t.Fatalf("expected 1 failed DELETE on probe %q, got %v", probeID, deleteCalls)
+		}
+		// fleet.json MUST record Terminating=true on the exact probe contract ID.
+		l, err := f.readLedger()
+		if err != nil {
+			t.Fatalf("readLedger: %v", err)
+		}
+		rec := l.Pods[ledgerKey("runpod", probeID)]
+		if rec == nil || !rec.Terminating {
+			t.Fatalf("expected Terminating=true persisted on probe %s after 503 DELETE, got %+v", probeID, rec)
+		}
+
+		// Simulate controller restart + restored RunPod provider.
+		failDelete.Store(false)
+		cloudMode := f.o.Cloud
+		fRestart := &Fleet{
+			o:       f.o,
+			markets: []Market{newRunPodMarket(newRunPod(rp.srv.URL, "rp-key"), &cloudMode)},
+			fixed:   true,
+			st:      f.st,
+			op:      f.op,
+			out:     &bytes.Buffer{},
+			now:     f.now,
+			keys:    f.keys,
+		}
+		// Dry/inspect `workers resolve` (without --end) MUST report the outstanding termination.
+		if err := cmdWorkersResolve(context.Background(), fRestart, false); err == nil {
+			t.Fatal("expected `workers resolve` without --end to report outstanding probe termination")
+		}
+		// `workers resolve --end` MUST retry DELETE on the exact probe pod, stop billing, and clear fleet.json.
+		if err := cmdWorkersResolve(context.Background(), fRestart, true); err != nil {
+			t.Fatalf("workers resolve --end: %v", err)
+		}
+		rp.mu.Lock()
+		remainingPods := len(rp.pods)
+		rp.mu.Unlock()
+		if remainingPods != 0 {
+			t.Fatalf("probe pod still running after `workers resolve --end`! pods=%d", remainingPods)
+		}
+		lAfter, err := fRestart.readLedger()
+		if err != nil {
+			t.Fatalf("readLedger after resolve: %v", err)
+		}
+		if lAfter.Pods[ledgerKey("runpod", probeID)] != nil {
+			t.Fatalf("expected probe %s removed from fleet.json after resolve --end, got %+v", probeID, lAfter.Pods)
+		}
+		sum, err := fRestart.readSpentSummary()
+		if err != nil || !sum.hasContract("runpod", probeID) {
+			t.Fatalf("expected retired probe %s recorded in spent.jsonl, err=%v", probeID, err)
+		}
+	})
+
+	t.Run("readonly_home_still_issues_best_effort_DELETE_even_when_pre_delete_write_fails", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("chmod 0500 does not prevent root writes")
+		}
+		rp, st := newFakeRunPod(t), newFakeStet(t)
+		f, _ := testFleet(t, rp, st, 1)
+		f.o.MaxWorkers = 2
+		f.o.Market = "runpod"
+
+		rp.pods["probe-ro"] = &Pod{ID: "probe-ro", Name: f.keys[0].Handle, Status: "RUNNING", Cost: 0.40, CreatedAt: f.now()}
+		if err := f.writeLedger(&ledger{Pods: map[string]*podRecord{
+			ledgerKey("runpod", "probe-ro"): {
+				ID: "probe-ro", Market: "runpod", Handle: f.keys[0].Handle, GPU: "RTX 4090", Cost: 0.40, Start: f.now(), Alive: f.now(),
+			},
+		}}); err != nil {
+			t.Fatal(err)
+		}
+		// Ensure lock file exists and is writable while the home directory itself is 0500 so
+		// f.lock() succeeds, f.readLedger() succeeds, and f.writeLedger() (creating fleet.json.tmp) fails!
+		if _, err := os.OpenFile(filepath.Join(f.o.Home, "lock"), os.O_CREATE|os.O_RDWR, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(f.o.Home, 0o500); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(f.o.Home, 0o700) })
+
+		err := cmdDownRental(context.Background(), f, "runpod", "probe-ro")
+		_ = os.Chmod(f.o.Home, 0o700)
+		if err == nil {
+			t.Fatal("expected ledger cleanup error after DELETE on read-only home dir")
+		}
+		rp.mu.Lock()
+		_, stillAlive := rp.pods["probe-ro"]
+		rp.mu.Unlock()
+		if stillAlive {
+			t.Fatal("cmdDownRental MUST still issue best-effort DELETE when persisting Terminating=true fails")
+		}
+	})
+
+	t.Run("launch_writeLedger_failure_clears_pending_on_immediate_and_503_teardown", func(t *testing.T) {
+		for _, failFirstDelete := range []bool{false, true} {
+			name := "immediate_delete_clears_pending"
+			if failFirstDelete {
+				name = "503_delete_converts_pending_to_terminating_without_double_counting"
+			}
+			t.Run(name, func(t *testing.T) {
+				if os.Geteuid() == 0 {
+					t.Skip("chmod 0500 does not prevent root writes")
+				}
+				rp, st := newFakeRunPod(t), newFakeStet(t)
+				f, _ := testFleet(t, rp, st, 1)
+				f.o.MaxWorkers = 2
+				f.o.Market = "runpod"
+
+				var probeID string
+				var deleteDenied atomic.Bool
+				deleteDenied.Store(failFirstDelete)
+				rpMkt := f.market("runpod")
+				f.markets = []Market{&probeRentHookMarket{
+					Market: rpMkt,
+					onRent: func(ctx context.Context, o Offer, l Launch) (*Rental, error) {
+						r, err := rpMkt.Rent(ctx, o, l)
+						if err == nil && r != nil {
+							probeID = r.ID
+							// Make home dir read-only right after Rent so f.rent's final writeLedger fails
+							// while l.Pending[pr.ID] remains on disk!
+							_ = os.Chmod(f.o.Home, 0o500)
+						}
+						return r, err
+					},
+					onEnd: func(ctx context.Context, id string) error {
+						if deleteDenied.Load() {
+							return fmt.Errorf("HTTP 503: service unavailable")
+						}
+						return rpMkt.End(ctx, id)
+					},
+				}}
+				t.Cleanup(func() { _ = os.Chmod(f.o.Home, 0o700) })
+
+				// Restore writeability right before cmdDownRentalMeta runs by wrapping probe?
+				// Even simpler: simulate f.rent() failing its final writeLedger, then disk recovers before cmdDownRentalMeta!
+				checkFile := filepath.Join(t.TempDir(), "cage_check.py")
+				if err := os.WriteFile(checkFile, []byte("print('ok')\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				f.probe = gzipB64("print('ok')\n")
+				rented, upErr := cmdUpRentals(context.Background(), f, 1)
+				_ = os.Chmod(f.o.Home, 0o700)
+				if upErr == nil || len(rented) != 1 || probeID == "" {
+					t.Fatalf("expected launch writeLedger error with created rental, got rented=%+v err=%v", rented, upErr)
+				}
+				lPre, err := f.readLedger()
+				if err != nil || len(lPre.Pending) != 1 || lPre.Pods[ledgerKey("runpod", probeID)] != nil {
+					t.Fatalf("expected 1 pending reservation and 0 pods on disk after launch writeLedger failure, got %+v err=%v", lPre, err)
+				}
+
+				endErr := cmdDownRentalMeta(context.Background(), f, "runpod", probeID, rented[0])
+				if !failFirstDelete {
+					if endErr != nil {
+						t.Fatalf("cmdDownRentalMeta (immediate delete): %v", endErr)
+					}
+					lPost, err := f.readLedger()
+					if err != nil || len(lPost.Pending) != 0 || len(lPost.Pods) != 0 {
+						t.Fatalf("immediate teardown after launch writeLedger failure MUST clear Pending & Pods, got %+v err=%v", lPost, err)
+					}
+					return
+				}
+
+				if endErr == nil {
+					t.Fatal("expected 503 error from cmdDownRentalMeta")
+				}
+				lMid, err := f.readLedger()
+				if err != nil || len(lMid.Pending) != 0 || lMid.Pods[ledgerKey("runpod", probeID)] == nil || !lMid.Pods[ledgerKey("runpod", probeID)].Terminating {
+					t.Fatalf("503 teardown MUST convert Pending into single Terminating pod (no double count), got pods=%+v pending=%+v err=%v", lMid.Pods, lMid.Pending, err)
+				}
+				// Restore DELETE and run `workers resolve --end`: MUST succeed cleanly with 0 pods and 0 pending!
+				deleteDenied.Store(false)
+				if err := cmdWorkersResolve(context.Background(), f, true); err != nil {
+					t.Fatalf("workers resolve --end: %v", err)
+				}
+				lEnd, err := f.readLedger()
+				if err != nil || len(lEnd.Pending) != 0 || len(lEnd.Pods) != 0 {
+					t.Fatalf("expected clean fleet.json after resolve --end, got pods=%+v pending=%+v err=%v", lEnd.Pods, lEnd.Pending, err)
+				}
+				rp.mu.Lock()
+				rem := len(rp.pods)
+				rp.mu.Unlock()
+				if rem != 0 {
+					t.Fatalf("expected 0 running pods after resolve --end, got %d", rem)
+				}
+			})
+		}
+	})
 }
