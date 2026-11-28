@@ -134,8 +134,10 @@ def resolve_round(args, offset: int = 0):
         if kind == "official":
             from .client import fetch_round
 
-            # Replays of official rounds default to the scale they were scored at.
-            return season, season.scale(args.scale or season.official_scale), fetch_round(season, index + offset)
+            explicit_scale = season.scale(args.scale) if args.scale else None
+            # Replays of official rounds default to the scale the round was published/scored at.
+            rnd = fetch_round(season, index + offset)
+            return season, explicit_scale or season.scale(rnd.scale or season.official_scale), rnd
         return season, season.scale(args.scale or "nano"), practice_round(season, index + offset, kind)
     except ValueError as e:
         die(str(e))

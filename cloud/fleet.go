@@ -265,10 +265,11 @@ type podRecord struct {
 // billingSegment is one completed, immutable billing interval for a worker contract so stop/resume
 // transitions never reprice earlier hours across controller restarts or UTC day boundaries.
 type billingSegment struct {
-	Start   time.Time `json:"start"`
-	End     time.Time `json:"end"`
-	Rate    float64   `json:"rate"`
-	Stopped bool      `json:"stopped,omitempty"`
+	Start       time.Time `json:"start"`
+	End         time.Time `json:"end"`
+	Rate        float64   `json:"rate"`
+	Stopped     bool      `json:"stopped,omitempty"`
+	RateUnknown bool      `json:"rate_unknown,omitempty"`
 }
 
 func (r *podRecord) market() string {
@@ -278,13 +279,52 @@ func (r *podRecord) market() string {
 	return r.Market
 }
 
-// stoppedHourlyRate is the ongoing hourly rate billed while the worker is stopped with an attached
-// disk (e.g. Vast.ai storage billing before the instance is destroyed).
+// unknownStoppedFallbackRate is the conservative hourly storage rate applied in daily spend when a
+// stopped contract with an attached disk never reported a storage rate (DiskCostUnknown=true) and
+// also has no known positive running rate.
+const unknownStoppedFallbackRate = 0.50
+
+// runningSpendRate returns the ongoing hourly compute+disk rate used for daily spend accrual.
+// When FixedCost already accounts for a one-time startup charge (e.g. Vast cold-start download or
+// Clore order creation fee) whose amortized equivalent TransferCost is folded into Cost for hourly
+// cap comparisons, subtract TransferCost so daily spend bills FixedCost once at Start plus actual
+// ongoing hourly compute+disk without double-counting.
+func (r podRecord) runningSpendRate() float64 {
+	if !validRate(r.Cost) {
+		return 0
+	}
+	if validRate(r.FixedCost) && validRate(r.TransferCost) {
+		return max(0, r.Cost-r.TransferCost)
+	}
+	return r.Cost
+}
+
+// stoppedHourlyRate is the reported ongoing hourly rate billed while the worker is stopped with an
+// attached disk (e.g. Vast.ai storage billing before the instance is destroyed). Returns 0 when
+// storage is free or unknown (callers check DiskCostUnknown separately for live unknown-rate gates).
 func (r podRecord) stoppedHourlyRate() float64 {
 	if validRate(r.DiskCost) {
 		return r.DiskCost
 	}
 	return 0
+}
+
+// stoppedSpendRate returns the hourly rate used for daily spend over a stopped interval: the
+// reported DiskCost when known, 0 when storage is confirmed free (!DiskCostUnknown), or a
+// conservative estimate when DiskCostUnknown is true (the worker's known running rate, or
+// unknownStoppedFallbackRate when neither storage nor compute rate was ever reported) so deleting
+// an unknown-rate stopped worker stops future billing without erasing already-incurred hours.
+func (r podRecord) stoppedSpendRate() float64 {
+	if validRate(r.DiskCost) {
+		return r.DiskCost
+	}
+	if !r.DiskCostUnknown {
+		return 0
+	}
+	if rate := r.runningSpendRate(); validRate(rate) {
+		return rate
+	}
+	return unknownStoppedFallbackRate
 }
 
 func (r podRecord) currentRunStart() time.Time {
@@ -356,11 +396,7 @@ func (r *podRecord) markStoppedAt(now, providerStopAt time.Time) {
 		stopAt = rs
 	}
 	if !rs.IsZero() && stopAt.After(rs) {
-		rate := 0.0
-		if validRate(r.Cost) {
-			rate = r.Cost
-		}
-		r.Segments = append(r.Segments, billingSegment{Start: rs, End: stopAt, Rate: rate, Stopped: false})
+		r.Segments = append(r.Segments, billingSegment{Start: rs, End: stopAt, Rate: r.runningSpendRate(), Stopped: false})
 	}
 	r.Stopped = true
 	r.StoppedAt = stopAt
@@ -389,11 +425,7 @@ func (r *podRecord) markLiveAt(now, providerResumedAt time.Time) {
 		// Backfill the initial pre-stop compute interval for legacy records persisted before
 		// Segments existed (or newly adopted stopped records that later resume).
 		if len(r.Segments) == 0 && !r.Start.IsZero() && stopStart.After(r.Start) {
-			rate := 0.0
-			if validRate(r.Cost) {
-				rate = r.Cost
-			}
-			r.Segments = append(r.Segments, billingSegment{Start: r.Start, End: stopStart, Rate: rate, Stopped: false})
+			r.Segments = append(r.Segments, billingSegment{Start: r.Start, End: stopStart, Rate: r.runningSpendRate(), Stopped: false})
 		}
 		lastStopped := r.StoppedSeen
 		if lastStopped.IsZero() || lastStopped.Before(stopStart) {
@@ -409,6 +441,7 @@ func (r *podRecord) markLiveAt(now, providerResumedAt time.Time) {
 		if !stopStart.IsZero() && resumeAt.After(stopStart) {
 			r.Segments = append(r.Segments, billingSegment{
 				Start: stopStart, End: resumeAt, Rate: r.stoppedHourlyRate(), Stopped: true,
+				RateUnknown: r.DiskCostUnknown && !validRate(r.DiskCost),
 			})
 		}
 		r.Stopped = false
@@ -430,6 +463,12 @@ func (r podRecord) dollarsBetween(from, to time.Time) float64 {
 	if validRate(r.FixedCost) && !r.Start.IsZero() && !r.Start.Before(from) && !r.Start.After(to) {
 		total += r.FixedCost
 	}
+	runRate := r.runningSpendRate()
+	stopRate := r.stoppedSpendRate()
+	effRunRate := runRate
+	if !validRate(effRunRate) && stopRate > 0 {
+		effRunRate = stopRate
+	}
 	if len(r.Segments) > 0 {
 		for _, seg := range r.Segments {
 			segEnd := seg.End
@@ -439,9 +478,17 @@ func (r podRecord) dollarsBetween(from, to time.Time) float64 {
 			rate := seg.Rate
 			if !validRate(rate) {
 				if seg.Stopped {
-					rate = r.stoppedHourlyRate()
-				} else if validRate(r.Cost) {
-					rate = r.Cost
+					if validRate(r.DiskCost) {
+						rate = r.DiskCost
+					} else if seg.RateUnknown || r.DiskCostUnknown {
+						if validRate(runRate) {
+							rate = runRate
+						} else {
+							rate = unknownStoppedFallbackRate
+						}
+					}
+				} else if validRate(effRunRate) {
+					rate = effRunRate
 				}
 			}
 			if validRate(rate) {
@@ -455,16 +502,16 @@ func (r podRecord) dollarsBetween(from, to time.Time) float64 {
 			if tailStart.IsZero() {
 				tailStart = r.Segments[len(r.Segments)-1].End
 			}
-			if diskRate := r.stoppedHourlyRate(); diskRate > 0 && !tailStart.IsZero() && end.After(tailStart) {
+			if stopRate > 0 && !tailStart.IsZero() && end.After(tailStart) {
 				if a, b := maxTime(tailStart, from), minTime(end, to); b.After(a) {
-					total += b.Sub(a).Hours() * diskRate
+					total += b.Sub(a).Hours() * stopRate
 				}
 			}
 		} else {
 			tailStart := r.currentRunStart()
-			if validRate(r.Cost) && !tailStart.IsZero() && end.After(tailStart) {
+			if validRate(effRunRate) && !tailStart.IsZero() && end.After(tailStart) {
 				if a, b := maxTime(tailStart, from), minTime(end, to); b.After(a) {
-					total += b.Sub(a).Hours() * r.Cost
+					total += b.Sub(a).Hours() * effRunRate
 				}
 			}
 		}
@@ -481,23 +528,23 @@ func (r podRecord) dollarsBetween(from, to time.Time) float64 {
 		if !end.IsZero() && gpuEnd.After(end) {
 			gpuEnd = end
 		}
-		if validRate(r.Cost) {
+		if validRate(effRunRate) {
 			if a, b := maxTime(r.Start, from), minTime(gpuEnd, to); b.After(a) {
-				total += b.Sub(a).Hours() * r.Cost
+				total += b.Sub(a).Hours() * effRunRate
 			}
 		}
-		if diskRate := r.stoppedHourlyRate(); diskRate > 0 && !gpuEnd.IsZero() && end.After(gpuEnd) {
+		if stopRate > 0 && !gpuEnd.IsZero() && end.After(gpuEnd) {
 			if a, b := maxTime(gpuEnd, from), minTime(end, to); b.After(a) {
-				total += b.Sub(a).Hours() * diskRate
+				total += b.Sub(a).Hours() * stopRate
 			}
 		}
 		return total
 	}
 	a, b := maxTime(r.Start, from), minTime(end, to)
-	if !b.After(a) || !validRate(r.Cost) {
+	if !b.After(a) || !validRate(effRunRate) {
 		return total
 	}
-	return total + b.Sub(a).Hours()*r.Cost
+	return total + b.Sub(a).Hours()*effRunRate
 }
 
 func maxTime(a, b time.Time) time.Time {
@@ -528,6 +575,7 @@ type pendingRent struct {
 	Cost         float64   `json:"cost"`
 	DiskCost     float64   `json:"disk_cost,omitempty"`
 	TransferCost float64   `json:"transfer_cost,omitempty"`
+	FixedCost    float64   `json:"fixed_cost,omitempty"`
 	Created      time.Time `json:"created"`
 	Grades       int       `json:"grades,omitempty"`
 	Host         string    `json:"host,omitempty"`
@@ -541,10 +589,10 @@ type pendingRent struct {
 }
 
 func (pr *pendingRent) dollarsBetween(from, to time.Time) float64 {
-	if pr == nil || !validRate(pr.Cost) {
+	if pr == nil || (!validRate(pr.Cost) && !validRate(pr.FixedCost)) {
 		return 0
 	}
-	r := podRecord{Cost: pr.Cost, Start: pr.Created, End: to}
+	r := podRecord{Cost: pr.Cost, TransferCost: pr.TransferCost, FixedCost: pr.FixedCost, Start: pr.Created, End: to}
 	return r.dollarsBetween(from, to)
 }
 
@@ -715,11 +763,14 @@ func applyOfferRateToRental(o Offer, r *Rental) {
 		transfer = o.TransferCost
 	}
 	r.TransferCost = transfer
+	if nonNegFinite(o.FixedCost) && o.FixedCost > r.FixedCost {
+		r.FixedCost = o.FixedCost
+	}
 	missingDisk := max(0, disk-origDisk)
 	missingTransfer := max(0, transfer-origTransfer)
 	switch {
 	case validRate(r.Price) && !r.PartialRate:
-		eff := r.Price
+		eff := r.Price + missingTransfer
 		if validRate(r.BasePrice) && r.BasePrice+disk+transfer > eff {
 			eff = r.BasePrice + disk + transfer
 		}
@@ -777,10 +828,14 @@ func reconcileRentalRate(r *podRecord, p *Rental) {
 		r.TransferCost = p.TransferCost
 	}
 	p.TransferCost = r.TransferCost
+	if nonNegFinite(p.FixedCost) && p.FixedCost > r.FixedCost {
+		r.FixedCost = p.FixedCost
+	}
+	p.FixedCost = r.FixedCost
 	missingTransfer := max(0, r.TransferCost-origTransfer)
 	switch {
 	case validRate(p.Price) && !p.PartialRate:
-		eff := p.Price
+		eff := p.Price + missingTransfer
 		if validRate(p.BasePrice) && p.BasePrice+r.DiskCost+r.TransferCost > eff {
 			eff = p.BasePrice + r.DiskCost + r.TransferCost
 		}
@@ -947,7 +1002,7 @@ func (f *Fleet) note(ctx context.Context, l *ledger, rentals []Rental, answered 
 			}
 			rec := &podRecord{
 				ID: p.ID, Market: p.Market, Handle: pr.Handle, GPU: gpu, Cloud: pr.Cloud, PendingID: pr.ID,
-				Cost: pr.Cost, DiskCost: pr.DiskCost, TransferCost: pr.TransferCost, PartialCost: !validRate(pr.Cost),
+				Cost: pr.Cost, DiskCost: pr.DiskCost, TransferCost: pr.TransferCost, FixedCost: pr.FixedCost, PartialCost: !validRate(pr.Cost),
 				Start: start, Alive: alive, StoppedAt: stoppedAt, StoppedSeen: stoppedSeen, Tracked: true, Stopped: p.State == "stopped",
 				Grades: pr.Grades, Host: host, CPU: pr.CPU, Curators: pr.Curators,
 				For: pr.For, Round: pr.Round, Report: pr.Report,
@@ -998,7 +1053,7 @@ func (f *Fleet) note(ctx context.Context, l *ledger, rentals []Rental, answered 
 				stoppedSeen = now
 			}
 			r = &podRecord{ID: p.ID, Market: p.Market, Handle: h, Host: p.Host, GPU: p.Card,
-				Cost: cost, DiskCost: max(0, p.DiskCost), DiskCostUnknown: p.DiskCostUnknown, PartialCost: p.PartialRate || p.State == "stopped",
+				Cost: cost, DiskCost: max(0, p.DiskCost), DiskCostUnknown: p.DiskCostUnknown, FixedCost: max(0, p.FixedCost), PartialCost: p.PartialRate || p.State == "stopped",
 				Start: start, Alive: alive, StoppedAt: stoppedAt, StoppedSeen: stoppedSeen, Tracked: true, Stopped: p.State == "stopped"}
 			l.Pods[key] = r
 		}
@@ -1781,7 +1836,7 @@ func recordedRental(r *podRecord, status string) Rental {
 	}
 	return Rental{
 		Market: r.market(), ID: r.ID, Name: r.Handle, Host: r.Host, Card: r.GPU,
-		Price: cost, DiskCost: r.DiskCost, DiskCostUnknown: r.DiskCostUnknown, TransferCost: r.TransferCost, PartialRate: r.PartialCost, State: state, Status: status, Created: r.Start, Terminating: r.Terminating, Unconfirmed: true,
+		Price: cost, DiskCost: r.DiskCost, DiskCostUnknown: r.DiskCostUnknown, TransferCost: r.TransferCost, FixedCost: r.FixedCost, PartialRate: r.PartialCost, State: state, Status: status, Created: r.Start, Terminating: r.Terminating, Unconfirmed: true,
 	}
 }
 
@@ -2068,7 +2123,7 @@ func (f *Fleet) look(ctx context.Context) (*View, error) {
 // Not the kinds a grade can be trusted to: those without bf16 (before Ampere), slices of
 // one GPU shared with others, a laptop's, and makers other than NVIDIA (grades are taken on
 // CUDA).
-var unfitGPU = regexp.MustCompile(`(?i)V100|\bT4\b|P100|P40|\bP4\b|K80|M60|Quadro|RTX 20|TITAN|GTX|MIG|Laptop`)
+var unfitGPU = regexp.MustCompile(`(?i)V100|\bT4\b|P100|P40|\bP4\b|K80|M60|Quadro|RTX\s*20[5-9]\d|TITAN|GTX|MIG|Laptop`)
 
 // quietWithoutSelfEnd is how long a machine on a market where it cannot end itself may say
 // nothing, holding no job, before it is ended: a stet waiting for work asks far more often.
@@ -2674,6 +2729,13 @@ func (f *Fleet) currentSpentToday(v *View) (float64, error) {
 		return 0, fmt.Errorf("reading examiner spend: %w", err)
 	}
 	total := base + exAccrued
+	if f.o.DryRun {
+		for _, dr := range v.LiveRentals {
+			if dr != nil && dr.ID == "dry-run" && validRate(dr.FixedCost) {
+				total += dr.FixedCost
+			}
+		}
+	}
 	v.Today = total
 	return total, nil
 }
@@ -2693,7 +2755,7 @@ func (f *Fleet) rent(ctx context.Context, v *View, k *Key, gpus []Offer, site st
 			return nil, nil
 		}
 	}
-	tried, dearer := 0, 0
+	tried, dearer, skippedDailyTransfer := 0, 0, 0
 	failed := map[string]bool{} // markets that definitively rejected/could not be reached, passed over now
 	for _, c := range gpus {
 		if failed[c.Market] {
@@ -2711,11 +2773,30 @@ func (f *Fleet) rent(ctx context.Context, v *View, k *Key, gpus []Offer, site st
 		if m == nil || (!f.armed(c.Market) && c.Market != f.o.Market) {
 			continue // not to be rented on, whatever it offers (but by hand, with up --market)
 		}
+		fixed := 0.0
+		if nonNegFinite(c.FixedCost) && c.FixedCost > 0 {
+			fixed = c.FixedCost
+		}
+		if f.o.DailyBudget > 0 {
+			today, err := f.currentSpentToday(v)
+			if err != nil {
+				return nil, err
+			}
+			if today >= f.o.DailyBudget {
+				f.say("not renting another machine: about $%.2f spent today, and the daily budget is $%.2f", today, f.o.DailyBudget)
+				return nil, nil
+			}
+			if fixed > 0 && today+fixed > f.o.DailyBudget+1e-9 {
+				skippedDailyTransfer++
+				continue
+			}
+		}
 		tried++
 		if f.o.DryRun {
 			f.say("would rent %s on %s (%s cloud, about $%.2f an hour)", k.Handle, offerName(c), c.Trust, price)
 			v.Hourly += price
-			dr := &Rental{Market: c.Market, ID: "dry-run", Name: k.Handle, Card: c.Card, State: "starting", Status: "PROVISIONING", Price: price, Created: f.now()}
+			v.Today += fixed
+			dr := &Rental{Market: c.Market, ID: "dry-run", Name: k.Handle, Card: c.Card, State: "starting", Status: "PROVISIONING", Price: price, FixedCost: fixed, Created: f.now()}
 			v.addLiveRental(dr)
 			return dr, nil
 		}
@@ -2794,6 +2875,11 @@ func (f *Fleet) rent(ctx context.Context, v *View, k *Key, gpus []Offer, site st
 				f.say("not renting another machine: about $%.2f spent today, and the daily budget is $%.2f", today, f.o.DailyBudget)
 				return nil, nil
 			}
+			if fixed > 0 && today+fixed > f.o.DailyBudget+1e-9 {
+				tried--
+				skippedDailyTransfer++
+				continue
+			}
 		}
 		if v.Ledger.Pending == nil {
 			v.Ledger.Pending = map[string]*pendingRent{}
@@ -2809,6 +2895,7 @@ func (f *Fleet) rent(ctx context.Context, v *View, k *Key, gpus []Offer, site st
 			Cost:         price,
 			DiskCost:     c.DiskCost,
 			TransferCost: c.TransferCost,
+			FixedCost:    fixed,
 			Created:      began,
 			Grades:       plannedGrades,
 			Host:         c.Host,
@@ -2876,7 +2963,7 @@ func (f *Fleet) rent(ctx context.Context, v *View, k *Key, gpus []Offer, site st
 		v.Hourly += r.Price
 		v.addLiveRental(r)
 		rec := &podRecord{ID: r.ID, Market: r.Market, Handle: k.Handle, GPU: c.Card, Cloud: cloud,
-			Cost: r.Price, DiskCost: max(c.DiskCost, r.DiskCost), TransferCost: c.TransferCost,
+			Cost: r.Price, DiskCost: max(c.DiskCost, r.DiskCost), TransferCost: c.TransferCost, FixedCost: max(fixed, r.FixedCost),
 			Start: began, Alive: f.now(), Tracked: true, PendingID: pr.ID,
 			Host: c.Host, CPU: c.CPU, Curators: l.Env["STET_WORKER_EDITS"] == "1", For: plan.what, Round: plan.round, Report: plannedReport}
 		// Seen from its start: a machine that asks for work before the next look still has its
@@ -2912,6 +2999,8 @@ func (f *Fleet) rent(ctx context.Context, v *View, k *Key, gpus []Offer, site st
 		return r, nil
 	}
 	switch {
+	case tried == 0 && skippedDailyTransfer > 0:
+		f.say("not renting another machine: %d available offer(s) had startup transfer/order charges exceeding remaining --daily-budget $%.2f (about $%.2f spent today)", skippedDailyTransfer, f.o.DailyBudget, v.Today)
 	case tried == 0 && dearer > 0 && v.ExaminerReservedHourly > 0:
 		f.say("not renting another machine: at $%.2f an hour or more (plus $%.2f/h reserved for the round's examiner) it would pass --max-hourly $%.2f", v.Hourly+cheapest(gpus), v.ExaminerReservedHourly, f.o.MaxHourly)
 	case tried == 0 && dearer > 0:

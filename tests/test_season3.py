@@ -6039,3 +6039,54 @@ def test_review28_grade_packages_pins_tokenizers(monkeypatch):
     raw_no_explicit["environment"].pop("grade_packages", None)
     fallback_season = type("S", (), {"raw": raw_no_explicit})()
     assert "tokenizers" in env.grade_packages(fallback_season)
+
+
+def test_review31_official_replay_uses_published_round_scale_and_preserves_cli_override(monkeypatch, tmp_path):
+    """Review 31 P2 #5: Official round replays (stet score / run / baseline) MUST default
+    to the scale declared by the published official round (/api/v1/rounds/<id>) instead of
+    always falling back to season.official_scale, while still honoring explicit --scale."""
+    import argparse
+
+    from stet import cli, client
+    from stet.spec import official_round, round_from_description
+
+    monkeypatch.setenv("STET_CACHE", str(tmp_path / "cache"))
+    monkeypatch.setenv("STET_DEV", "1")
+    monkeypatch.setattr(client, "verify_beacon", lambda season, beacon: None)
+
+    s3 = load_season("s3")
+    beacon = {"round": 12345, "randomness": "a" * 64}
+    crawl = {"crawl": "CC-MAIN-2026-08", "paths_sha256": "b" * 64, "n_shards": 1000}
+    base_desc = official_round(s3, 7, beacon, crawl).describe()
+
+    # 1. Server publishes a non-default scale ("micro") on an official S3 round.
+    micro_desc = dict(base_desc, scale="micro")
+    monkeypatch.setattr(client, "request", lambda method, path, **kw: {"round": micro_desc})
+
+    season, scale, rnd = cli.resolve_round(argparse.Namespace(round="s3-o00007", scale=None, season=None))
+    assert season.id == "s3"
+    assert rnd.id == "s3-o00007"
+    assert rnd.scale == "micro"
+    assert scale.name == "micro"
+    assert scale.train_tokens == s3.scale("micro").train_tokens
+    # Round.describe() and round_from_description() preserve scale cleanly.
+    roundtrip = round_from_description(s3, rnd.describe())
+    assert roundtrip.scale == "micro"
+
+    # 2. Explicit --scale override still wins over the published round scale.
+    _, override_scale, _ = cli.resolve_round(argparse.Namespace(round="s3-o00007", scale="nano", season=None))
+    assert override_scale.name == "nano"
+
+    # 3. Published round omitting "scale" (or blank) falls back to season.official_scale.
+    no_scale_desc = dict(base_desc)
+    no_scale_desc.pop("scale", None)
+    monkeypatch.setattr(client, "request", lambda method, path, **kw: {"round": no_scale_desc})
+    _, default_scale, default_rnd = cli.resolve_round(argparse.Namespace(round="s3-o00007", scale=None, season=None))
+    assert default_rnd.scale == ""
+    assert "scale" not in default_rnd.describe()
+    assert default_scale.name == s3.official_scale
+
+    # 4. Practice and gym rounds are unaffected and still default to nano.
+    _, practice_scale, practice_rnd = cli.resolve_round(argparse.Namespace(round="3", scale=None, season="s3"))
+    assert practice_rnd.kind == "practice"
+    assert practice_scale.name == "nano"

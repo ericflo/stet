@@ -2529,6 +2529,43 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 		}
 		return e.prov.ExaminerOffers(ctx, maxPrice)
 	}
+	minFeasibleHourly := func(maxPrice, maxTransfer float64, excludeIDs map[string]bool) float64 {
+		if canTierSearch {
+			best := 0.0
+			start := 0
+			for {
+				offs, tier, perr := ts.ExaminerOffersByTier(ctx, maxPrice, maxTransfer, start, excludeIDs)
+				if perr != nil {
+					return 0
+				}
+				if len(offs) == 0 {
+					break
+				}
+				if cand := cheapestValidExaminerOffer(offs, maxPrice, maxTransfer); cand > 0 && (best == 0 || cand < best) {
+					best = cand
+				}
+				if tier < start {
+					break
+				}
+				start = tier + 1
+			}
+			return best
+		}
+		probe, perr := searchOffers(maxPrice, maxTransfer)
+		if perr != nil {
+			return 0
+		}
+		if len(excludeIDs) > 0 {
+			filtered := make([]ExaminerOffer, 0, len(probe))
+			for _, off := range probe {
+				if !excludeIDs[off.ID] {
+					filtered = append(filtered, off)
+				}
+			}
+			probe = filtered
+		}
+		return cheapestValidExaminerOffer(probe, maxPrice, maxTransfer)
+	}
 	maxTransfer := transferCapFor(spentToday)
 	maxBudget := budget.MaxHourly
 	if e.cfg.MaxPrice > 0 && e.cfg.MaxPrice < maxBudget {
@@ -2538,9 +2575,7 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 	if budget.MaxHourly <= 0 || headroom <= 1e-9 {
 		e.say("not renting examiner GPU for %s: live hourly spend $%.2f/h leaves no room under --max-hourly $%.2f/h", needRound, budget.HourlyNow, budget.MaxHourly)
 		if budget.MaxHourly > 0 && maxBudget > 0 {
-			if probe, perr := searchOffers(maxBudget, maxTransfer); perr == nil {
-				e.setBlockedHourly(cheapestValidExaminerOffer(probe, maxBudget, maxTransfer))
-			}
+			e.setBlockedHourly(minFeasibleHourly(maxBudget, maxTransfer, nil))
 		}
 		return nil
 	}
@@ -2582,13 +2617,11 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 	}
 	if len(offers) == 0 {
 		if effMaxPrice < maxBudget-1e-9 {
-			if probe, perr := searchOffers(maxBudget, maxTransfer); perr == nil {
-				if need := cheapestValidExaminerOffer(probe, maxBudget, maxTransfer); need > 0 {
-					e.setBlockedHourly(need)
-					e.say("not renting examiner GPU for %s: cheapest 1x RTX 5090 ($%.2f/h) plus $%.2f/h live exceeds --max-hourly $%.2f/h",
-						needRound, need, budget.HourlyNow, budget.MaxHourly)
-					return nil
-				}
+			if need := minFeasibleHourly(maxBudget, maxTransfer, nil); need > 0 {
+				e.setBlockedHourly(need)
+				e.say("not renting examiner GPU for %s: cheapest 1x RTX 5090 ($%.2f/h) plus $%.2f/h live exceeds --max-hourly $%.2f/h",
+					needRound, need, budget.HourlyNow, budget.MaxHourly)
+				return nil
 			}
 		}
 		e.say("Vast.ai has no 1x RTX 5090 free for %s examiner under $%.2f/h (headroom $%.2f/h); retrying on next tick", needRound, effMaxPrice, headroom)
@@ -2615,9 +2648,9 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 	}
 	if len(fitting) == 0 {
 		need := cheapestValidExaminerOffer(allUnfit, maxBudget, maxTransfer)
-		if need == 0 && effMaxPrice < maxBudget-1e-9 {
-			if probe, perr := searchOffers(maxBudget, maxTransfer); perr == nil {
-				need = cheapestValidExaminerOffer(probe, maxBudget, maxTransfer)
+		if effMaxPrice < maxBudget-1e-9 {
+			if cand := minFeasibleHourly(maxBudget, maxTransfer, nil); cand > 0 && (need == 0 || cand < need) {
+				need = cand
 			}
 		}
 		e.setBlockedHourly(need)
@@ -2913,28 +2946,11 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 			return nil
 		}
 		probeTransfer := transferCapFor(freshSpent)
-		var probe []ExaminerOffer
-		var perr error
-		if canTierSearch {
-			probe, _, perr = ts.ExaminerOffersByTier(ctx, maxBudget, probeTransfer, 0, triedIDs)
-		} else {
-			if raw, rerr := searchOffers(maxBudget, probeTransfer); rerr == nil {
-				for _, off := range raw {
-					if !triedIDs[off.ID] {
-						probe = append(probe, off)
-					}
-				}
-			} else {
-				perr = rerr
-			}
-		}
-		if perr == nil {
-			if need := cheapestValidExaminerOffer(probe, maxBudget, probeTransfer); need > 0 {
-				e.setBlockedHourly(need)
-				e.say("not renting examiner GPU for %s: %d offer(s) under headroom were unavailable and cheapest remaining 1x RTX 5090 ($%.2f/h) plus $%.2f/h live exceeds --max-hourly $%.2f/h",
-					needRound, tried, need, budget.HourlyNow, budget.MaxHourly)
-				return nil
-			}
+		if need := minFeasibleHourly(maxBudget, probeTransfer, triedIDs); need > 0 {
+			e.setBlockedHourly(need)
+			e.say("not renting examiner GPU for %s: %d offer(s) under headroom were unavailable and cheapest remaining 1x RTX 5090 ($%.2f/h) plus $%.2f/h live exceeds --max-hourly $%.2f/h",
+				needRound, tried, need, budget.HourlyNow, budget.MaxHourly)
+			return nil
 		}
 	}
 	e.say("none of the %d RTX 5090 offers tried for %s examiner were available; retrying on next tick", tried, needRound)

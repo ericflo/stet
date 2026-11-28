@@ -261,6 +261,7 @@ class Round:
     beacon: dict | None = None  # the drand round an official seed was drawn from
     crawl: dict | None = None  # the published crawl an official corpus is drawn from
     exam_digest: str = ""  # an official round: the digest of the exam posted after its draw
+    scale: str = ""  # published official round scale (e.g. "micro", "standard"), when reported
 
     @property
     def id(self) -> str:
@@ -303,6 +304,8 @@ class Round:
             d["crawl"] = self.crawl
         if self.exam_digest:
             d["exam_digest"] = self.exam_digest
+        if self.scale:
+            d["scale"] = self.scale
         return d
 
 
@@ -353,6 +356,8 @@ def round_from_description(season: Season, d: dict) -> Round:
         if not SHA256_RE.fullmatch(str(d["exam_digest"])):
             raise ValueError(f"round {d.get('id')}: its exam's digest is not a sha256")
         rnd = dataclasses.replace(rnd, exam_digest=str(d["exam_digest"]))
+    if d.get("scale"):
+        rnd = dataclasses.replace(rnd, scale=str(d["scale"]).strip())
     return rnd
 
 

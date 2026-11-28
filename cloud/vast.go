@@ -151,6 +151,15 @@ func vastOfferBreakdown(o vastOffer, diskGB int, downloadGB float64) (price, dis
 	return price, diskCost, dlCost, true
 }
 
+const workerDownloadGB = 3.0
+
+func workerOfferTransferDollars(inetDownCost float64) float64 {
+	if nonNegFinite(inetDownCost) && inetDownCost > 0 {
+		return workerDownloadGB * inetDownCost
+	}
+	return 0
+}
+
 func (m *vastMarket) Offers(ctx context.Context, n Need) ([]Offer, error) {
 	var out struct {
 		Offers []vastOffer `json:"offers"`
@@ -163,7 +172,7 @@ func (m *vastMarket) Offers(ctx context.Context, n Need) ([]Offer, error) {
 		if o.NumGPUs != 1 {
 			continue
 		}
-		price, diskCost, dlCost, ok := vastOfferBreakdown(o, n.DiskGB, 3)
+		price, diskCost, dlCost, ok := vastOfferBreakdown(o, n.DiskGB, workerDownloadGB)
 		if !ok {
 			continue
 		}
@@ -173,7 +182,7 @@ func (m *vastMarket) Offers(ctx context.Context, n Need) ([]Offer, error) {
 		}
 		offers = append(offers, Offer{
 			Market: "vast", Card: vastCard(o.GPUName), Model: o.GPUName, Name: o.GPUName, ID: strconv.FormatInt(o.ID, 10),
-			Maker: "NVIDIA", MemoryGB: int(math.Round(o.GPURAM / 1024)), Price: price, DiskCost: diskCost, TransferCost: dlCost, Stock: 1,
+			Maker: "NVIDIA", MemoryGB: int(math.Round(o.GPURAM / 1024)), Price: price, DiskCost: diskCost, TransferCost: dlCost, FixedCost: workerOfferTransferDollars(o.InetDownCost), Stock: 1,
 			CUDA: strconv.FormatFloat(o.CUDAMaxGood, 'f', -1, 64), Trust: trust, Region: o.Geolocation,
 			Host: vastHost(o.MachineID), CPU: strings.TrimSpace(o.CPUName),
 		})
@@ -221,7 +230,7 @@ func (m *vastMarket) Rent(ctx context.Context, o Offer, l Launch) (*Rental, erro
 	switch {
 	case err == nil && out.NewContract > 0 && (out.Success == nil || *out.Success):
 		return &Rental{Market: "vast", ID: strconv.FormatInt(out.NewContract, 10), Name: l.Name, Card: o.Card,
-			Price: o.Price, DiskCost: o.DiskCost, State: "starting", Status: "created", Created: time.Now()}, nil
+			Price: o.Price, DiskCost: o.DiskCost, TransferCost: o.TransferCost, FixedCost: o.FixedCost, State: "starting", Status: "created", Created: time.Now()}, nil
 	case err == nil && out.Success != nil && !*out.Success:
 		return nil, fmt.Errorf("%w: Vast.ai refused new instance (%d): %s", errRentRejected, status, out.Msg)
 	case err == nil:
@@ -387,7 +396,7 @@ func vastInstanceRental(i vastInstance) Rental {
 		created = time.Unix(int64(i.StartDate), 0)
 	}
 	r := Rental{Market: "vast", ID: strconv.FormatInt(i.ID, 10), Name: name, Card: vastCard(i.GPUName),
-		Price: price, BasePrice: basePrice, DiskCost: diskCost, DiskCostUnknown: diskCostUnknown, PartialRate: partial,
+		Price: price, BasePrice: basePrice, DiskCost: diskCost, DiskCostUnknown: diskCostUnknown, FixedCost: workerOfferTransferDollars(i.InetDownCost), PartialRate: partial,
 		State: state, Status: status, Created: created}
 	r.Phase = status
 	if r.Phase == "" {

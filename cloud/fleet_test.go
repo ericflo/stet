@@ -1404,11 +1404,17 @@ func TestFitsDropsCardsTooSlowForLease(t *testing.T) {
 	// With passOn3090=52m, cards slower than ~0.40x a 3090 (e.g. RTX 2000 Ada at 0.35x) exceed
 	// a 5h lease on a 2-pass baseline plus margin; cards >=0.40x (even RTX 3060 12 GB!) fit.
 	for _, slow := range []Offer{
-		{Maker: "NVIDIA", MemoryGB: 16, Model: "NVIDIA RTX 2000 Ada", Card: "RTX 2000 Ada"},
+		{Maker: "NVIDIA", MemoryGB: 16, Model: "NVIDIA RTX 2000 Ada Generation", Card: "RTX 2000 Ada"},
 	} {
 		if f.fits(slow) {
 			t.Errorf("fits(%s) = true under 5h lease, want false", slow.Card)
 		}
+		if why := f.unfitReason(slow); !strings.Contains(why, "too slow") {
+			t.Errorf("unfitReason(%s) = %q, want lease-speed reason (not pre-Ampere bf16 rejection)", slow.Card, why)
+		}
+	}
+	if why := f.unfitReason(Offer{Maker: "NVIDIA", MemoryGB: 12, Model: "NVIDIA GeForce RTX 2080", Card: "RTX 2080"}); !strings.Contains(why, "bf16") {
+		t.Errorf("unfitReason(RTX 2080) = %q, want unsupported architecture/bf16 reason", why)
 	}
 	for _, fast := range []Offer{
 		{Maker: "NVIDIA", MemoryGB: 12, Model: "NVIDIA GeForce RTX 3060", Card: "RTX 3060"},

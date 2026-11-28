@@ -459,6 +459,7 @@ func tick(ctx context.Context, f *Fleet) (err error) {
 		if needHourly := f.examiner.blockedHourly(); needHourly > 0 {
 			endingWorkers := make(map[*Worker]bool, len(d.End))
 			projectedHourly := v.Hourly
+			projectedLive := v.liveWorkerCount()
 			for _, e := range d.End {
 				if e.Worker != nil && (e.Rental == nil || e.Rental == e.Worker.Rental) {
 					endingWorkers[e.Worker] = true
@@ -472,6 +473,7 @@ func tick(ctx context.Context, f *Fleet) (err error) {
 				}
 				switch {
 				case r.live() || r.Unconfirmed:
+					projectedLive = max(0, projectedLive-1)
 					if validRate(r.Price) {
 						projectedHourly = max(0, projectedHourly-r.Price)
 					}
@@ -504,14 +506,26 @@ func tick(ctx context.Context, f *Fleet) (err error) {
 					}
 					return idle[i].Key.Handle < idle[j].Key.Handle
 				})
+				// Stage the complete eviction decision first and commit ONLY if evicting available
+				// idle workers actually achieves both --max-hourly and --max headroom for the
+				// examiner; otherwise keep all warm idle workers alive.
+				candHourly := projectedHourly
+				candLive := projectedLive
+				var evict []*Worker
 				for _, wk := range idle {
-					if projectedHourly+needHourly <= f.o.MaxHourly+1e-9 {
+					if candHourly+needHourly <= f.o.MaxHourly+1e-9 && (f.o.MaxWorkers <= 0 || candLive < f.o.MaxWorkers) {
 						break
 					}
-					d.End = append(d.End, Ending{Worker: wk, Why: "idle while hourly budget is needed for the round's examiner"})
-					endingWorkers[wk] = true
-					projectedHourly = max(0, projectedHourly-wk.Rental.Price)
-					d.Live = max(0, d.Live-1)
+					evict = append(evict, wk)
+					candHourly = max(0, candHourly-wk.Rental.Price)
+					candLive = max(0, candLive-1)
+				}
+				if candHourly+needHourly <= f.o.MaxHourly+1e-9 && (f.o.MaxWorkers <= 0 || candLive < f.o.MaxWorkers) {
+					for _, wk := range evict {
+						d.End = append(d.End, Ending{Worker: wk, Why: "idle while hourly budget is needed for the round's examiner"})
+						endingWorkers[wk] = true
+						d.Live = max(0, d.Live-1)
+					}
 				}
 			}
 		}
@@ -1407,7 +1421,7 @@ func cmdWorkersResolve(ctx context.Context, f *Fleet, end bool, clearIDs ...stri
 		}
 		rec := &podRecord{
 			ID: p.ID, Market: p.Market, Handle: pr.Handle, GPU: gpu, Cloud: pr.Cloud, PendingID: pr.ID,
-			Cost: pr.Cost, DiskCost: pr.DiskCost, TransferCost: pr.TransferCost, PartialCost: !validRate(pr.Cost),
+			Cost: pr.Cost, DiskCost: pr.DiskCost, TransferCost: pr.TransferCost, FixedCost: pr.FixedCost, PartialCost: !validRate(pr.Cost),
 			Start: start, Alive: alive, StoppedAt: stoppedAt, StoppedSeen: stoppedSeen, Tracked: true, Stopped: p.State == "stopped",
 			Grades: pr.Grades, Host: host, CPU: pr.CPU, Curators: pr.Curators,
 			For: pr.For, Round: pr.Round, Report: pr.Report,
@@ -1551,6 +1565,9 @@ func cmdDownRentalMeta(ctx context.Context, f *Fleet, market, id string, meta *R
 					if nonNegFinite(meta.TransferCost) {
 						rec.TransferCost = meta.TransferCost
 					}
+					if nonNegFinite(meta.FixedCost) {
+						rec.FixedCost = meta.FixedCost
+					}
 					if !meta.Created.IsZero() && !meta.Created.After(now) {
 						rec.Start = meta.Created
 					}
@@ -1584,6 +1601,9 @@ func cmdDownRentalMeta(ctx context.Context, f *Fleet, market, id string, meta *R
 					}
 					if rec.TransferCost == 0 && nonNegFinite(pr.TransferCost) {
 						rec.TransferCost = pr.TransferCost
+					}
+					if rec.FixedCost == 0 && nonNegFinite(pr.FixedCost) {
+						rec.FixedCost = pr.FixedCost
 					}
 					if !pr.Created.IsZero() && !pr.Created.After(now) && pr.Created.Before(rec.Start) {
 						rec.Start = pr.Created

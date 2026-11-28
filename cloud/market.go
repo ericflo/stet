@@ -87,6 +87,7 @@ type Offer struct {
 	Price        float64 // dollars an hour, all in: the GPU, the disk, the market's fees
 	DiskCost     float64 // hourly storage component included in Price, when known separately
 	TransferCost float64 // amortized transfer component included in Price, when known separately
+	FixedCost    float64 // one-time startup transfer or order fee incurred at rental creation
 	Ask          float64 // the market's own price, as it lists it (Clore: a day, before its fees)
 	Stock        int     // machines like it free now; -1 when the market says only Level
 	Level        string  // the market's own word for how many are free: low, medium, high
@@ -135,6 +136,7 @@ type Rental struct {
 	DiskCost        float64 // hourly storage rate when reported on the instance (e.g. Vast storage_cost * disk_space / 720)
 	DiskCostUnknown bool    // true when a stopped instance has attached storage whose price was not reported (distinct from explicit $0)
 	TransferCost    float64 // hourly amortized transfer rate already accounted for in Price
+	FixedCost       float64 // one-time startup transfer or order fee incurred at rental creation
 	PartialRate     bool    // true when Price is a partial/base fallback lacking the provider's all-in total (e.g. Vast dph_total == 0)
 	State           string  // starting, running, stopped; anything else is the market's own word
 	Status          string  // the market's own word

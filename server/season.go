@@ -175,7 +175,7 @@ func (s *Season) gradesOn(device string) bool {
 
 // preAmpereGPURe matches pre-Ampere NVIDIA GPU names lacking native bf16 Tensor Cores.
 // Must match _PRE_AMPERE_GPU_RE in src/stet/client.py.
-var preAmpereGPURe = regexp.MustCompile(`(?i)\b(?:V100|T4|P100|P40|P4|K80|M60|TITAN|GTX)\b|RTX\s*20\d\d|Quadro\s*(?:RTX|P|M|K|GV)`)
+var preAmpereGPURe = regexp.MustCompile(`(?i)\b(?:V100|T4|P100|P40|P4|K80|M60|TITAN|GTX)\b|RTX\s*20[5-9]\d|Quadro\s*(?:RTX|P|M|K|GV)`)
 
 var cudaCapRe = regexp.MustCompile(`^[0-9]+\.[0-9]+$`)
 

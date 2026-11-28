@@ -1650,7 +1650,7 @@ def cmd_verify(args):
             lock.close()
 
 
-_PRE_AMPERE_GPU_RE = re.compile(r"\b(?:V100|T4|P100|P40|P4|K80|M60|TITAN|GTX)\b|RTX\s*20\d\d|Quadro\s*(?:RTX|P|M|K|GV)", re.IGNORECASE)
+_PRE_AMPERE_GPU_RE = re.compile(r"\b(?:V100|T4|P100|P40|P4|K80|M60|TITAN|GTX)\b|RTX\s*20[5-9]\d|Quadro\s*(?:RTX|P|M|K|GV)", re.IGNORECASE)
 
 
 def grade_hardware_ok(season, device_type: str, backend: str | None) -> bool:

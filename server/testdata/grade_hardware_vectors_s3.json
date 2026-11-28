@@ -1,5 +1,20 @@
 [
   {
+    "name": "rtx_2000_ada_16gb_sm89_bf16_true",
+    "hardware": {"device": "cuda", "backend": "cuda", "gpu": "NVIDIA RTX 2000 Ada Generation", "vram_gb": 16.0, "cuda_capability": "8.9", "bf16_native": true},
+    "eligible": true
+  },
+  {
+    "name": "rtx_2080_12gb_sm75_bf16_false",
+    "hardware": {"device": "cuda", "backend": "cuda", "gpu": "NVIDIA GeForce RTX 2080", "vram_gb": 12.0, "cuda_capability": "7.5", "bf16_native": false},
+    "eligible": false
+  },
+  {
+    "name": "rtx_2080_contradictory_sm86_bf16_true",
+    "hardware": {"device": "cuda", "backend": "cuda", "gpu": "NVIDIA GeForce RTX 2080", "vram_gb": 12.0, "cuda_capability": "8.6", "bf16_native": true},
+    "eligible": false
+  },
+  {
     "name": "rtx_3060_12gb_sm86_bf16_true",
     "hardware": {"device": "cuda", "backend": "cuda", "gpu": "NVIDIA GeForce RTX 3060", "vram_gb": 12.0, "cuda_capability": "8.6", "bf16_native": true},
     "eligible": true
