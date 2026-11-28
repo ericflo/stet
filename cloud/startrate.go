@@ -1,10 +1,7 @@
 package main
 
 import (
-	"bufio"
-	"encoding/json"
 	"fmt"
-	"os"
 	"strings"
 	"time"
 )
@@ -130,22 +127,24 @@ func (f *Fleet) startRates() startRates {
 		}
 		s.byClass[k] = c
 	}
-	if fh, err := os.Open(f.spentLog()); err == nil {
-		sc := bufio.NewScanner(fh)
-		for sc.Scan() {
-			var r podRecord
-			if json.Unmarshal(sc.Bytes(), &r) == nil {
-				end := r.End
-				if end.IsZero() {
-					end = r.Alive
-				}
-				count(r, end)
+	seen := map[string]bool{}
+	if sum, err := f.readSpentSummary(); err == nil {
+		for _, r := range sum.records {
+			if r.ID != "" {
+				seen[ledgerKey(r.market(), r.ID)] = true
 			}
+			end := r.End
+			if end.IsZero() {
+				end = r.Alive
+			}
+			count(r, end)
 		}
-		fh.Close()
 	}
 	if l, err := f.readLedger(); err == nil {
-		for _, r := range l.Pods {
+		for key, r := range l.Pods {
+			if r == nil || (r.ID != "" && seen[ledgerKey(r.market(), r.ID)]) || seen[key] {
+				continue
+			}
 			count(*r, f.now())
 		}
 	}

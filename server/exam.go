@@ -578,15 +578,15 @@ func (a *App) baselineAdj(rd *Round, bs []*Baseline) [][]bool {
 	return adj
 }
 
-// largestBaselineClique finds the largest pairwise-mutually-agreeing clique (size >= 2) in bs
-// using exact Bron-Kerbosch enumeration with Tomita pivoting, and sets tied=true whenever two or
-// more distinct maximal cliques tie for that maximum size.
-func (a *App) largestBaselineClique(rd *Round, bs []*Baseline) (best []*Baseline, tied bool) {
+// largestBaselineCliqueFromAdj finds the largest pairwise-mutually-agreeing clique (size >= 2)
+// in bs given its precomputed symmetric adjacency matrix adj, using exact Bron-Kerbosch
+// enumeration with Tomita pivoting, and sets tied=true whenever two or more distinct maximal
+// cliques tie for that maximum size.
+func largestBaselineCliqueFromAdj(bs []*Baseline, adj [][]bool) (best []*Baseline, tied bool) {
 	n := len(bs)
 	if n < 2 {
 		return nil, false
 	}
-	adj := a.baselineAdj(rd, bs)
 	allAgree := true
 	for i := 0; i < n && allAgree; i++ {
 		for k := i + 1; k < n; k++ {
@@ -692,17 +692,17 @@ func (a *App) largestBaselineClique(rd *Round, bs []*Baseline) (best []*Baseline
 	return best, tied
 }
 
-// hasCompetingBaselineClique reports whether bs contains any maximal clique not contained in
-// winning whose size is at least minSize. Used only when median fixed-point pruning shrinks the
-// winning clique (possible under multi-item MAD clipping) so a shrunken group cannot beat or tie
-// another pairwise-agreeing clique of at least the same size.
-func (a *App) hasCompetingBaselineClique(rd *Round, bs, winning []*Baseline, minSize int) bool {
+// hasCompetingBaselineCliqueFromAdj reports whether bs contains any maximal clique not contained
+// in winning whose size is at least minSize, reusing the precomputed symmetric adjacency matrix
+// adj. Used only when median fixed-point pruning shrinks the winning clique (possible under
+// multi-item MAD clipping) so a shrunken group cannot beat or tie another pairwise-agreeing
+// clique of at least the same size.
+func hasCompetingBaselineCliqueFromAdj(bs []*Baseline, adj [][]bool, winning []*Baseline, minSize int) bool {
 	inWin := make(map[int64]bool, len(winning))
 	for _, b := range winning {
 		inWin[b.AccountID] = true
 	}
 	n := len(bs)
-	adj := a.baselineAdj(rd, bs)
 	found := false
 	var bk func(r, p, x []int)
 	bk = func(r, p, x []int) {
@@ -788,10 +788,12 @@ func (a *App) hasCompetingBaselineClique(rd *Round, bs, winning []*Baseline, min
 }
 
 // pruneBaselinesToMedian iteratively drops baselines outside tolerance of the current set's
-// item-wise median until fixed point or fewer than two baselines remain.
-func (a *App) pruneBaselinesToMedian(rd *Round, bs []*Baseline) []*Baseline {
+// item-wise median until fixed point or fewer than two baselines remain. converged is true iff
+// at least two baselines survived and every surviving baseline agreed within tolerance of the
+// surviving set's item-wise median in the final pass.
+func (a *App) pruneBaselinesToMedian(rd *Round, bs []*Baseline) (kept []*Baseline, converged bool) {
 	tol := a.tolerance().Baseline
-	kept := bs
+	kept = bs
 	for len(kept) >= 2 {
 		mid := medianItems(itemsOf(kept))
 		var next []*Baseline
@@ -801,12 +803,91 @@ func (a *App) pruneBaselinesToMedian(rd *Round, bs []*Baseline) []*Baseline {
 			}
 		}
 		if len(next) == len(kept) {
-			break
+			return kept, true
 		}
 		kept = next
 	}
-	return kept
+	return kept, false
 }
+
+// roundBaselineConsensus holds the evaluated baseline agreement state for one round within a
+// State snapshot so pairwise agreement and median fixed-point scoring run once per round rather
+// than being recomputed across work summary, offer generation, and settlement checks.
+type roundBaselineConsensus struct {
+	all      []*Baseline
+	kept     []*Baseline
+	leftOut  map[int64]bool
+	disputed bool
+}
+
+// baselineConsensus computes the round's kept baselines, odd-out accounts, and dispute status in
+// a single pass, building the pairwise agreement graph at most once per round.
+func (a *App) baselineConsensus(s *State, rd *Round) roundBaselineConsensus {
+	all := a.roundBaselines(s, rd)
+	if len(all) < 2 {
+		return roundBaselineConsensus{all: all, kept: all}
+	}
+	initDisputed := false
+	if len(a.season.Student) > 0 && rd.InitSHA == "" {
+		byInit := map[string][]*Baseline{}
+		for _, b := range all {
+			if b.InitSHA != "" {
+				byInit[b.InitSHA] = append(byInit[b.InitSHA], b)
+			}
+		}
+		if len(byInit) != 1 {
+			initDisputed = true
+		} else {
+			for _, cohort := range byInit {
+				if len(cohort) < 2 {
+					initDisputed = true
+				}
+			}
+		}
+	}
+	if len(all) < baselineQuorum {
+		agree := a.baselinesPairAgree(rd, all[0], all[1])
+		return roundBaselineConsensus{all: all, kept: all, disputed: initDisputed || !agree}
+	}
+	adj := a.baselineAdj(rd, all)
+	best, tied := largestBaselineCliqueFromAdj(all, adj)
+	if len(best) < 2 || tied {
+		return roundBaselineConsensus{all: all, kept: all, disputed: true}
+	}
+	kept, converged := a.pruneBaselinesToMedian(rd, best)
+	if !converged || len(kept) < 2 || (len(kept) < len(best) && hasCompetingBaselineCliqueFromAdj(all, adj, best, len(kept))) {
+		return roundBaselineConsensus{all: all, kept: all, disputed: true}
+	}
+	var leftOut map[int64]bool
+	if len(kept) < len(all) {
+		leftOut = make(map[int64]bool, len(all)-len(kept))
+		for _, b := range all {
+			leftOut[b.AccountID] = true
+		}
+		for _, b := range kept {
+			delete(leftOut, b.AccountID)
+		}
+	}
+	return roundBaselineConsensus{all: all, kept: kept, leftOut: leftOut, disputed: initDisputed}
+}
+
+// baselineConsensus returns the round's cached baseline consensus for this judge snapshot,
+// computing the pairwise agreement graph at most once per round.
+func (j *judge) baselineConsensus(rd *Round) roundBaselineConsensus {
+	if rd == nil {
+		return roundBaselineConsensus{}
+	}
+	if cons, ok := j.consensus[rd.Idx]; ok {
+		return cons
+	}
+	cons := j.a.baselineConsensus(j.s, rd)
+	j.consensus[rd.Idx] = cons
+	return cons
+}
+
+func (j *judge) baselineDisputed(rd *Round) bool           { return j.baselineConsensus(rd).disputed }
+func (j *judge) baselinesKept(rd *Round) []*Baseline       { return j.baselineConsensus(rd).kept }
+func (j *judge) baselinesLeftOut(rd *Round) map[int64]bool { return j.baselineConsensus(rd).leftOut }
 
 // baselinesKept are the round's baselines that make its own. While fewer than three are in,
 // all of them: whichever came first is no more the standard than the next. From three on, there
@@ -817,34 +898,17 @@ func (a *App) pruneBaselinesToMedian(rd *Round, bs []*Baseline) []*Baseline {
 // every kept baseline also agrees with the round's item-wise median). If no unique agreeing
 // consensus exists, all baselines are kept so baselineDisputed reports the dispute.
 func (a *App) baselinesKept(s *State, rd *Round) []*Baseline {
-	all := a.roundBaselines(s, rd)
-	if len(all) < baselineQuorum {
-		return all
-	}
-	best, tied := a.largestBaselineClique(rd, all)
-	if len(best) < 2 || tied {
-		return all
-	}
-	kept := a.pruneBaselinesToMedian(rd, best)
-	if len(kept) >= 2 && a.allBaselinesAgree(rd, kept) {
-		if len(kept) == len(best) || !a.hasCompetingBaselineClique(rd, all, best, len(kept)) {
-			return kept
-		}
-	}
-	return all
+	return a.baselineConsensus(s, rd).kept
 }
 
 // baselinesLeftOut is whose baseline of a round is the odd one out: one that may make the
 // round's (roundBaselines) and that the round does not keep (baselinesKept).
 func (a *App) baselinesLeftOut(s *State, rd *Round) map[int64]bool {
-	out := map[int64]bool{}
-	for _, b := range a.roundBaselines(s, rd) {
-		out[b.AccountID] = true
+	left := a.baselineConsensus(s, rd).leftOut
+	if left == nil {
+		return map[int64]bool{}
 	}
-	for _, b := range a.baselinesKept(s, rd) {
-		delete(out, b.AccountID)
-	}
-	return out
+	return left
 }
 
 // oddOut reports whether a grade is by a machine whose baseline of its round is the odd one
@@ -854,7 +918,7 @@ func (j *judge) oddOut(r *Result) bool {
 	out, ok := j.left[r.RoundIdx]
 	if !ok {
 		if rd := j.s.Rounds[r.RoundIdx]; rd != nil {
-			out = j.a.baselinesLeftOut(j.s, rd)
+			out = j.baselinesLeftOut(rd)
 		}
 		j.left[r.RoundIdx] = out
 	}
@@ -868,11 +932,12 @@ func (j *judge) oddOut(r *Result) bool {
 // baseline consensus exists yet (otherwise a tie-breaking grader repeating one of the disputed
 // baselines could be rejected with 409 before it can resolve the dispute).
 func (a *App) baselineDev(s *State, rd *Round, acctID int64, items []float64) (dev float64, ok bool) {
-	if a.baselineDisputed(s, rd) {
+	cons := a.baselineConsensus(s, rd)
+	if cons.disputed {
 		return 0, false
 	}
 	var rows [][]float64
-	for _, b := range a.baselinesKept(s, rd) {
+	for _, b := range cons.kept {
 		if b.AccountID != acctID {
 			rows = append(rows, b.Items)
 		}
@@ -914,11 +979,12 @@ func (a *App) baselineConsensusState(s *State, rd *Round, acct *Account, est boo
 		}
 		sim.Baselines[baselineKey(rd.Idx, acct.ID)] = incoming
 	}
-	if a.baselineDisputed(&sim, rd) {
+	simCons := a.baselineConsensus(&sim, rd)
+	if simCons.disputed {
 		return false, nil, nil
 	}
-	simAll := a.roundBaselines(&sim, rd)
-	simKept := a.baselinesKept(&sim, rd)
+	simAll := simCons.all
+	simKept := simCons.kept
 	if len(simKept) < baselineQuorum-1 {
 		return false, nil, nil
 	}
@@ -1029,8 +1095,8 @@ func (j *judge) measuring(rd *Round) map[int64]bool {
 	}
 	who := map[int64]bool{}
 	var agreeing []*Baseline
-	if !j.a.baselineDisputed(j.s, rd) {
-		for _, b := range j.a.baselinesKept(j.s, rd) {
+	if cons := j.baselineConsensus(rd); !cons.disputed {
+		for _, b := range cons.kept {
 			if j.a.baselineAgrees(rd, b) {
 				agreeing = append(agreeing, b)
 			}
@@ -1078,61 +1144,28 @@ func (j *judge) measuring(rd *Round) map[int64]bool {
 // median. A round with a disputed baseline must request another independent baseline rather than
 // settling on an uncorroborated midpoint, and closes unrated if the disagreement cannot be resolved.
 func (a *App) baselineDisputed(s *State, rd *Round) bool {
-	all := a.roundBaselines(s, rd)
-	if len(all) < 2 {
-		return false
-	}
-	if len(a.season.Student) > 0 && rd.InitSHA == "" {
-		byInit := map[string][]*Baseline{}
-		for _, b := range all {
-			if b.InitSHA != "" {
-				byInit[b.InitSHA] = append(byInit[b.InitSHA], b)
-			}
-		}
-		if len(byInit) != 1 {
-			return true
-		}
-		for _, cohort := range byInit {
-			if len(cohort) < 2 {
-				return true
-			}
-		}
-	}
-	if len(all) >= baselineQuorum {
-		if best, tied := a.largestBaselineClique(rd, all); len(best) < 2 || tied {
-			return true
-		}
-	}
-	kept := a.baselinesKept(s, rd)
-	if len(kept) < 2 {
-		return true
-	}
-	if !a.allBaselinesAgree(rd, kept) {
-		return true
-	}
-	if len(kept) == 2 {
-		return false
-	}
-	tol := a.tolerance().Baseline
-	mid := medianItems(itemsOf(kept))
-	for _, b := range kept {
-		if dev, _, err := a.season.Exam.ScoreItems(rd.ExamTable, diffItems(b.Items, mid), rd.Shares); err != nil || !within(dev, tol) {
-			return true
-		}
-	}
-	return false
+	return a.baselineConsensus(s, rd).disputed
 }
 
 // baselineTieLive reports whether an established account without a baseline for this round
 // currently holds a live grade job that asks for one.
 func (j *judge) baselineTieLive(rd *Round) bool {
+	if rd == nil {
+		return false
+	}
+	if live, ok := j.tieLive[rd.Idx]; ok {
+		return live
+	}
+	live := false
 	for _, c := range j.s.Claims {
 		if c.RoundIdx == rd.Idx && c.Kind == "grade" && c.Baseline && c.live(j.t) && j.est[c.AccountID] &&
 			j.s.Baselines[baselineKey(rd.Idx, c.AccountID)] == nil {
-			return true
+			live = true
+			break
 		}
 	}
-	return false
+	j.tieLive[rd.Idx] = live
+	return live
 }
 
 // baselineComing reports whether a round has a baseline, or somebody at work on it was asked
@@ -1144,7 +1177,7 @@ func (j *judge) baselineComing(round int) bool {
 
 // baselinesWanted is how many more machines a round would ask for its baseline, as it stands.
 func (j *judge) baselinesWanted(rd *Round) int {
-	if j.a.baselineDisputed(j.s, rd) {
+	if j.baselineDisputed(rd) {
 		if j.baselineTieLive(rd) {
 			return 0
 		}
@@ -1181,7 +1214,19 @@ func (a *App) baselineInitSHA(s *State, rd *Round) (string, bool) {
 	if rd.InitSHA != "" {
 		return rd.InitSHA, true
 	}
-	kept := a.baselinesKept(s, rd)
+	return a.baselineInitSHAFromKept(rd, a.baselinesKept(s, rd))
+}
+
+func (a *App) baselineInitSHAFromKept(rd *Round, kept []*Baseline) (string, bool) {
+	if len(a.season.Student) == 0 {
+		return "", true
+	}
+	if rd == nil {
+		return "", false
+	}
+	if rd.InitSHA != "" {
+		return rd.InitSHA, true
+	}
 	if len(kept) == 0 {
 		return "", false
 	}
@@ -1209,8 +1254,9 @@ func (a *App) refreshScores(tx *Tx, rd *Round) {
 			break
 		}
 	}
-	kept := a.baselinesKept(s, rd)
-	if len(kept) == 0 || (!hasOpen && a.baselineDisputed(s, rd)) {
+	cons := a.baselineConsensus(s, rd)
+	kept := cons.kept
+	if len(kept) == 0 || (!hasOpen && cons.disputed) {
 		if len(rd.BaseItems) > 0 || rd.BaselineLoss != nil || rd.BaselineN != 0 {
 			rd.BaseItems, rd.BaselineLoss, rd.BaselineN = nil, nil, 0
 			tx.saveRound(rd)
@@ -1242,9 +1288,9 @@ func (a *App) refreshScores(tx *Tx, rd *Round) {
 	rd.BaselineLoss = &loss
 	// How many machines measured it, whoever they were: but not one whose measurement the
 	// round left out of its own.
-	out := a.baselinesLeftOut(s, rd)
+	out := cons.leftOut
 	rd.BaselineN = 0
-	if !a.baselineDisputed(s, rd) {
+	if !cons.disputed {
 		for _, b := range s.Baselines {
 			if b.RoundIdx == rd.Idx && !out[b.AccountID] && a.baselineAgrees(rd, b) {
 				rd.BaselineN++
@@ -1252,7 +1298,7 @@ func (a *App) refreshScores(tx *Tx, rd *Round) {
 		}
 	}
 	tx.saveRound(rd)
-	baseInit, baseInitOK := a.baselineInitSHA(s, rd)
+	baseInit, baseInitOK := a.baselineInitSHAFromKept(rd, kept)
 	for _, e := range s.inRound[rd.Idx] {
 		for _, r := range s.results(rd.Idx, e.EditorID) {
 			if !r.Valid || len(r.Items) != len(base) {

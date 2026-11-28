@@ -438,33 +438,40 @@ func snapshotFromState(st examinerState, home string, now time.Time, timeout tim
 	dayStart := startOfDay(now)
 	seenLive := map[string]bool{}
 	if st.InstanceID != "" || st.PendingRent {
-		live++
-		obs := st.ObservedLiveAt
-		created := st.Created
-		rate := st.Price
-		if st.InstanceID != "" {
+		if st.InstanceID != "" && spentHasExaminer(home, st.InstanceID) {
 			seenLive[st.InstanceID] = true
-			if u, ok := findUnresolved(st.Unresolved, st.InstanceID); ok {
-				if u.ObservedLiveAt.After(obs) {
-					obs = u.ObservedLiveAt
+		} else {
+			live++
+			obs := st.ObservedLiveAt
+			created := st.Created
+			rate := st.Price
+			if st.InstanceID != "" {
+				seenLive[st.InstanceID] = true
+				if u, ok := findUnresolved(st.Unresolved, st.InstanceID); ok {
+					if u.ObservedLiveAt.After(obs) {
+						obs = u.ObservedLiveAt
+					}
+					if created.IsZero() && !u.Created.IsZero() {
+						created = u.Created
+					}
+					rate = higherValidRate(rate, u.Price)
 				}
-				if created.IsZero() && !u.Created.IsZero() {
-					created = u.Created
-				}
-				rate = higherValidRate(rate, u.Price)
 			}
+			if !validRate(rate) {
+				rate = fallbackRate
+			}
+			hourly += rate
+			accrued += boundedExaminerAccrual(rate, created, obs, now, dayStart, timeout)
 		}
-		if !validRate(rate) {
-			rate = fallbackRate
-		}
-		hourly += rate
-		accrued += boundedExaminerAccrual(rate, created, obs, now, dayStart, timeout)
 	}
 	for _, u := range st.Unresolved {
 		if u.ID == "" || seenLive[u.ID] {
 			continue
 		}
 		seenLive[u.ID] = true
+		if spentHasExaminer(home, u.ID) {
+			continue
+		}
 		live++
 		rate := u.Price
 		if !validRate(rate) {
@@ -1374,6 +1381,7 @@ func spentHasExaminer(home, id string) bool {
 	}
 	defer fh.Close()
 	sc := bufio.NewScanner(fh)
+	sc.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	for sc.Scan() {
 		var r podRecord
 		if json.Unmarshal(sc.Bytes(), &r) == nil && r.Market == "vast" && r.For == "examiner" && r.ID == id {

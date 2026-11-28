@@ -538,11 +538,13 @@ type judge struct {
 	// that same round (avoiding an infinite re-train/re-timeout loop); eligible again once
 	// the exam posts.
 	examTimedOut map[int64]map[int]bool
-	around       []*asker                      // found when first asked for
-	passes       map[string]map[string]float64 // a training pass's seconds, by scale and GPU: worked out when first asked for
-	measures     map[int]map[int64]bool        // whose baseline each round has or is promised (measuring): worked out when first asked for
-	left         map[int]map[int64]bool        // whose baseline each round leaves out of its own (oddOut): worked out when first asked for
-	expired      bool                          // true in settleRound once ReplicaWait had already elapsed before giveUp ran
+	around       []*asker                       // found when first asked for
+	passes       map[string]map[string]float64  // a training pass's seconds, by scale and GPU: worked out when first asked for
+	measures     map[int]map[int64]bool         // whose baseline each round has or is promised (measuring): worked out when first asked for
+	left         map[int]map[int64]bool         // whose baseline each round leaves out of its own (oddOut): worked out when first asked for
+	consensus    map[int]roundBaselineConsensus // per-round baseline consensus cached for this read snapshot
+	tieLive      map[int]bool                   // per-round baselineTieLive cached for this read snapshot
+	expired      bool                           // true in settleRound once ReplicaWait had already elapsed before giveUp ran
 }
 
 const (
@@ -553,7 +555,7 @@ const (
 func (a *App) newJudge(s *State) *judge {
 	j := &judge{a: a, s: s, t: now(), est: map[int64]bool{}, standing: map[int64]bool{}, busy: map[int64]bool{}, training: map[int64]bool{},
 		resting: map[int64]bool{}, differs: map[int64]map[int]int{}, quit: map[int64]map[int]bool{}, examTimedOut: map[int64]map[int]bool{},
-		measures: map[int]map[int64]bool{}, left: map[int]map[int64]bool{}}
+		measures: map[int]map[int64]bool{}, left: map[int]map[int64]bool{}, consensus: map[int]roundBaselineConsensus{}, tieLive: map[int]bool{}}
 	for id, acct := range s.Accounts {
 		j.est[id], j.standing[id] = a.established(acct), acct.Agreed > 0
 	}
@@ -971,7 +973,7 @@ func (j *judge) tokenMajorityRefuses(sc *scriptState, rd *Round, acct *Account, 
 	if len(j.a.season.Student) > 0 && rd.InitSHA == "" {
 		return false
 	}
-	if j.a.baselineDisputed(j.s, rd) {
+	if j.baselineDisputed(rd) {
 		return false
 	}
 	v := j.weigh(sc)
@@ -1586,7 +1588,7 @@ func (j *judge) offers(st *entryState, q *asker, closing bool) []offer {
 			// word for the whole score. When the round's unedited baselines disagree beyond
 			// tolerance, any established grader that has not yet measured the baseline is
 			// also required to supply a tie-breaking baseline even if ordinary grading is done.
-			needsBase := j.a.baselineDisputed(j.s, st.Round) && !j.baselineTieLive(st.Round) &&
+			needsBase := j.baselineDisputed(st.Round) && !j.baselineTieLive(st.Round) &&
 				j.s.Baselines[baselineKey(st.Round.Idx, q.acct.ID)] == nil
 			ordinary := counting < j.short(sc)
 			o.required = ordinary || needsBase
@@ -1652,7 +1654,7 @@ func (j *judge) sitting(st *entryState, sc *scriptState) bool {
 // volunteer's word alone. A grade that counts and has no score yet is not one to settle
 // on: the round's baseline, which somebody was asked for, has still to come.
 func (j *judge) settleable(st *entryState) bool {
-	if len(st.LiveEdits) > 0 || !examPosted(st.Round) || j.a.baselineDisputed(j.s, st.Round) {
+	if len(st.LiveEdits) > 0 || !examPosted(st.Round) || j.baselineDisputed(st.Round) {
 		return false
 	}
 	wait := int64(j.a.cfg.ReplicaWait.Seconds())
@@ -2655,7 +2657,7 @@ func (a *App) settleRound(tx *Tx, rd *Round) {
 		// Check unresolved disputed baselines BEFORE giveUp so a 3-way baseline split (where
 		// two baselines are oddOut and their scripts lack non-oddOut grades) closes the entire
 		// round uniformly as disputed-baseline rather than dropping individual entries via giveUp.
-		if len(states) > 0 && a.baselineDisputed(s, rd) {
+		if len(states) > 0 && j.baselineDisputed(rd) {
 			if j.baselineTieLive(rd) {
 				return
 			}

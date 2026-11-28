@@ -434,6 +434,8 @@ def assemble(
                     synth_kw["student_window"] = sw
                 if is_official and ("require_langid" in s_params or has_varkw):
                     synth_kw["require_langid"] = True
+                if "min_pillar_items" in s_params or has_varkw:
+                    synth_kw["min_pillar_items"] = int((season.raw.get("exam") or {}).get("min_pillar_items", 20))
             except (TypeError, ValueError):
                 pass
             reasoning = synthesize_reasoning(docs, rnd.seed, r_cfg, **synth_kw)

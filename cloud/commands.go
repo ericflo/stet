@@ -540,6 +540,10 @@ func reconcileExaminerOnce(ctx context.Context, f *Fleet) error {
 				}
 			}
 		}
+		spentSum, serr := f.readSpentSummary()
+		if serr != nil && acctErr == nil {
+			acctErr = fmt.Errorf("reading spend log: %w", serr)
+		}
 		seen := map[string]bool{}
 		knownHandles := map[string]bool{}
 		for _, k := range f.keys {
@@ -547,6 +551,9 @@ func reconcileExaminerOnce(ctx context.Context, f *Fleet) error {
 		}
 		var unknownRates []string
 		for key, p := range l.Pods {
+			if p == nil || spentSum.hasContract(p.market(), p.ID) {
+				continue
+			}
 			seen[key] = true
 			if p.Stopped {
 				if rate := p.stoppedHourlyRate(); rate > 0 {
@@ -585,7 +592,7 @@ func reconcileExaminerOnce(ctx context.Context, f *Fleet) error {
 			}
 		}
 		for _, pr := range l.Pending {
-			if pr == nil {
+			if pr == nil || (spentSum != nil && spentSum.byPendingID[pr.ID]) {
 				continue
 			}
 			liveWorkers++
@@ -869,11 +876,9 @@ func cmdWorkersResolve(ctx context.Context, f *Fleet, end bool, clearIDs ...stri
 	}
 	sort.Strings(termKeys)
 	pkeys := make([]string, 0, len(l.Pending))
-	marketsNeeded := map[string]bool{}
 	for id, pr := range l.Pending {
 		if pr != nil {
 			pkeys = append(pkeys, id)
-			marketsNeeded[pr.Market] = true
 		}
 	}
 	sort.Strings(pkeys)
@@ -883,6 +888,10 @@ func cmdWorkersResolve(ctx context.Context, f *Fleet, end bool, clearIDs ...stri
 		}
 		f.say("no pending worker reservations in fleet.json")
 		return nil
+	}
+	spentSum, err := f.readSpentSummary()
+	if err != nil {
+		return fmt.Errorf("reading spend log: %w", err)
 	}
 	now := f.now()
 	changed := false
@@ -905,6 +914,17 @@ func cmdWorkersResolve(ctx context.Context, f *Fleet, end bool, clearIDs ...stri
 			continue
 		}
 		mName := rec.market()
+		if spentSum.hasContract(mName, rec.ID) {
+			if f.o.DryRun {
+				f.say("would clear already-retired terminating worker %s (%s on %s)", rec.Handle, rec.ID, marketTitle(mName))
+				continue
+			}
+			delete(l.Pods, key)
+			endedTermKeys[key] = true
+			changed = true
+			f.say("cleared terminating worker %s (%s on %s): already retired in spent.jsonl", rec.Handle, rec.ID, marketTitle(mName))
+			continue
+		}
 		m := f.market(mName)
 		if m == nil {
 			e := fmt.Errorf("resolving terminating worker %s (%s on %s) requires credentials: %s", rec.Handle, rec.ID, marketTitle(mName), f.off[mName])
@@ -971,6 +991,29 @@ func cmdWorkersResolve(ctx context.Context, f *Fleet, end bool, clearIDs ...stri
 	}
 
 	// 2. Reconcile unresolved pending create reservations against provider listings.
+	if len(spentSum.byPendingID) > 0 {
+		rem := pkeys[:0]
+		for _, id := range pkeys {
+			if spentSum.byPendingID[id] {
+				if f.o.DryRun {
+					f.say("would clear already-retired pending worker reservation %s", id)
+					continue
+				}
+				delete(l.Pending, id)
+				changed = true
+				f.say("cleared pending worker reservation %s (already retired in spent.jsonl)", id)
+				continue
+			}
+			rem = append(rem, id)
+		}
+		pkeys = rem
+	}
+	marketsNeeded := map[string]bool{}
+	for _, id := range pkeys {
+		if pr := l.Pending[id]; pr != nil && pr.Market != "" {
+			marketsNeeded[pr.Market] = true
+		}
+	}
 	marketList := make([]string, 0, len(marketsNeeded))
 	for mName := range marketsNeeded {
 		marketList = append(marketList, mName)
@@ -1086,18 +1129,20 @@ func cmdWorkersResolve(ctx context.Context, f *Fleet, end bool, clearIDs ...stri
 		handled[key] = true
 		m := f.market(pr.Market)
 		start := p.Created
-		if start.IsZero() {
+		if !pr.Created.IsZero() && (start.IsZero() || start.After(pr.Created)) {
 			start = pr.Created
 		}
-		if start.IsZero() {
+		if start.IsZero() || start.After(now) {
 			start = now
 		}
 		alive := now
 		endAt := now
 		var stoppedAt time.Time
 		if p.State == "stopped" {
-			alive = start
-			stoppedAt = start
+			// No provider stop timestamp is available: preserve the conservative compute-rate
+			// accrual reserved while pending up through this first confirmed stop, then accrue
+			// storage from now forward.
+			stoppedAt = now
 		} else if !p.live() {
 			alive = start
 			endAt = start
@@ -1111,7 +1156,7 @@ func cmdWorkersResolve(ctx context.Context, f *Fleet, end bool, clearIDs ...stri
 			host = pr.Host
 		}
 		rec := &podRecord{
-			ID: p.ID, Market: p.Market, Handle: pr.Handle, GPU: gpu, Cloud: pr.Cloud,
+			ID: p.ID, Market: p.Market, Handle: pr.Handle, GPU: gpu, Cloud: pr.Cloud, PendingID: pr.ID,
 			Cost: pr.Cost, DiskCost: pr.DiskCost, TransferCost: pr.TransferCost, PartialCost: !validRate(pr.Cost),
 			Start: start, Alive: alive, StoppedAt: stoppedAt, Tracked: true, Stopped: p.State == "stopped",
 			Grades: pr.Grades, Host: host, CPU: pr.CPU, Curators: pr.Curators,
@@ -1208,6 +1253,16 @@ func cmdDownRental(ctx context.Context, f *Fleet, market, id string) error {
 		l, ledgerErr = f.readLedger()
 		if ledgerErr == nil && l != nil {
 			rec = l.Pods[key]
+			if rec != nil {
+				if spentSum, serr := f.readSpentSummary(); serr == nil && spentSum.hasContract(market, id) {
+					delete(l.Pods, key)
+					if err := f.writeLedger(l); err != nil {
+						return fmt.Errorf("clearing already-retired probe %s on %s from fleet ledger failed: %w", id, marketTitle(market), err)
+					}
+					f.say("cleared probe %s (%s on %s): already retired in spent.jsonl", rec.Handle, id, marketTitle(market))
+					return nil
+				}
+			}
 		}
 	}
 	if err := m.End(ctx, id); err != nil {

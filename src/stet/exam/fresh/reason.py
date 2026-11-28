@@ -24,6 +24,7 @@ import concurrent.futures as cf
 import gc
 import hashlib
 import json
+import math
 import os
 import re
 import threading
@@ -682,71 +683,32 @@ def _source_bucket(source: str) -> str:
     return base
 
 
-def select_source_docs(
-    docs: list[Doc],
-    seed: bytes,
-    target: int = 640,
-    shares: dict[str, float] | None = None,
+def _allocate_language_quotas(
+    langs: list[str],
+    by_lang: dict[str, list[Doc]],
+    want_total: int,
+    shares: dict[str, float],
     *,
-    max_excerpt_chars: int = DEFAULT_MAX_EXCERPT_CHARS,
-    min_lang_share: float = 0.05,
     major_lang_share: float = 1.0,
     major_lang_floor: int = 27,
-) -> list[dict]:
-    """Deterministically pick ~`target` fresh harvest docs aligned with the round's corpus shares.
-
-    - Allocates quotas strictly in proportion to crawl shares (English capped at <=38%), never
-      inflating tiny micro-languages with a fixed floor.
-    - Ensures every major crawl language (`share >= 1.0%`) with available docs receives at least
-      `major_lang_floor` (27 = 9 per reasoning kind) docs so each major language clears `SMALL=8`
-      per kind rather than falling into the pooled small-language bucket.
-    - Round-robins across source families with Wikipedia variants grouped as one bucket.
-    """
-    shares = shares or SHARES
-    by_lang: dict[str, list[Doc]] = defaultdict(list)
-    seen_prefix: set[str] = set()
-    # Deterministic order before filtering so dedup never depends on input order.
-    ordered = sorted(docs, key=lambda d: (prf_u64(seed, f"reason-doc/{d.source}/{d.id}", 0), d.source, d.id))
-    for d in ordered:
-        lang = (d.lang or "en").strip()
-        if not lang or lang.startswith(SKIP_LANG_PREFIXES):
-            continue
-        txt = (d.text or "").strip()
-        min_len = 180 if lang in CJK_LANGS else 450
-        if not (min_len <= len(txt) <= 6000) or "\ufffd" in txt:
-            continue
-        key = txt[:160].lower()
-        if key in seen_prefix:
-            continue
-        seen_prefix.add(key)
-        by_lang[lang].append(d)
-
-    if not by_lang:
-        return []
-
-    # Exclude micro-languages (< min_lang_share% of the crawl) when larger languages are available,
-    # so teacher slots go to real crawl languages rather than 1-doc Wikipedia micro-editions that
-    # the teacher often answers in English or a neighboring language.
-    eligible = [lang for lang in sorted(by_lang) if float(shares.get(lang, 0.0)) >= min_lang_share]
-    if not eligible or sum(len(by_lang[lang]) for lang in eligible) < min(target, 30):
-        eligible = sorted(by_lang)
-
-    raw_w = {lang: max(float(shares.get(lang, 0.05)), 0.01) for lang in eligible}
-    if "en" in raw_w and len(eligible) > 1:
+) -> dict[str, int]:
+    """Allocate `want_total` slots across `langs` proportionally to crawl shares (English capped
+    at <= ~38.3%) with `major_lang_floor` reserved for major crawl languages."""
+    if not langs or want_total <= 0:
+        return {}
+    raw_w = {lang: max(float(shares.get(lang, 0.05)), 0.01) for lang in langs}
+    if "en" in raw_w and len(langs) > 1:
         others = sum(v for k, v in raw_w.items() if k != "en")
         raw_w["en"] = min(raw_w["en"], others * 0.62)  # <= ~38.3% English
 
-    # Exact crawl-share quota allocation with a `major_lang_floor` (27 = 9/kind) floor for major
-    # crawl languages (`share >= 1.0%`), filled iteratively to `target` without truncating majors.
-    quotas: dict[str, int] = {lang: 0 for lang in eligible}
-    cap_of = {lang: len(by_lang[lang]) for lang in eligible}
-    total_avail = sum(cap_of.values())
-    want_total = min(target, total_avail)
+    quotas: dict[str, int] = {lang: 0 for lang in langs}
+    cap_of = {lang: len(by_lang[lang]) for lang in langs}
+    want_total = min(want_total, sum(cap_of.values()))
 
     # Pass 1: reserve `major_lang_floor` for major languages (ordered by crawl share desc),
     # scaling the floor down cleanly if `want_total` is smaller than `len(majors) * floor`.
     majors = sorted(
-        [lang for lang in eligible if float(shares.get(lang, 0.0)) >= major_lang_share],
+        [lang for lang in langs if float(shares.get(lang, 0.0)) >= major_lang_share],
         key=lambda k: (-float(shares.get(k, 0.0)), k),
     )
     eff_floor = min(major_lang_floor, want_total // max(1, len(majors))) if majors else 0
@@ -756,9 +718,9 @@ def select_source_docs(
         quotas[lang] = give
         used += give
 
-    # Pass 2: distribute remaining budget proportionally to crawl share across all eligible languages.
+    # Pass 2: distribute remaining budget proportionally to crawl share across all langs.
     while used < want_total:
-        rem_langs = [lang for lang in eligible if quotas[lang] < cap_of[lang]]
+        rem_langs = [lang for lang in langs if quotas[lang] < cap_of[lang]]
         if not rem_langs:
             break
         rem_need = want_total - used
@@ -783,10 +745,99 @@ def select_source_docs(
                     used += 1
         elif added == 0:
             break
+    return quotas
+
+
+def select_source_docs(
+    docs: list[Doc],
+    seed: bytes,
+    target: int = 640,
+    shares: dict[str, float] | None = None,
+    *,
+    max_excerpt_chars: int = DEFAULT_MAX_EXCERPT_CHARS,
+    min_lang_share: float = 0.05,
+    major_lang_share: float = 1.0,
+    major_lang_floor: int = 27,
+    min_pillar_items: int = 20,
+    min_keep_rate: float = DEFAULT_MIN_KEEP_RATE,
+) -> list[dict]:
+    """Deterministically pick ~`target` fresh harvest docs aligned with the round's corpus shares.
+
+    - Allocates quotas strictly in proportion to crawl shares (English capped at <=38%), never
+      inflating tiny micro-languages with a fixed floor.
+    - Ensures every major crawl language (`share >= 1.0%`) with available docs receives at least
+      `major_lang_floor` (27 = 9 per reasoning kind) docs so each major language clears `SMALL=8`
+      per kind rather than falling into the pooled small-language bucket.
+    - Prefers languages above `min_lang_share`, and when sparse harvests fall below the configured
+      pillar support floor (`min_pillar_items` across `TASK_TYPES` adjusted for `min_keep_rate`),
+      smoothly backfills only the deficit from below-cutoff languages without discarding above-cutoff
+      documents or introducing a sharp cutoff discontinuity.
+    - Round-robins across source families with Wikipedia variants grouped as one bucket.
+    """
+    shares = shares or SHARES
+    by_lang: dict[str, list[Doc]] = defaultdict(list)
+    seen_prefix: set[str] = set()
+    # Deterministic order before filtering so dedup never depends on input order.
+    ordered = sorted(docs, key=lambda d: (prf_u64(seed, f"reason-doc/{d.source}/{d.id}", 0), d.source, d.id))
+    for d in ordered:
+        lang = (d.lang or "en").strip()
+        if not lang or lang.startswith(SKIP_LANG_PREFIXES):
+            continue
+        txt = (d.text or "").strip()
+        min_len = 180 if lang in CJK_LANGS else 450
+        if not (min_len <= len(txt) <= 6000) or "\ufffd" in txt:
+            continue
+        key = txt[:160].lower()
+        if key in seen_prefix:
+            continue
+        seen_prefix.add(key)
+        by_lang[lang].append(d)
+
+    if not by_lang or target <= 0:
+        return []
+
+    # Exclude micro-languages (< min_lang_share% of the crawl) when larger languages already meet
+    # the configured pillar support floor; otherwise keep all above-cutoff docs and backfill only
+    # the remaining support deficit from below-cutoff languages so sparse draws stay viable and
+    # monotonic in the number of above-cutoff documents.
+    primary = [lang for lang in sorted(by_lang) if float(shares.get(lang, 0.0)) >= min_lang_share]
+    primary_avail = sum(len(by_lang[lang]) for lang in primary)
+    if min_pillar_items > 0:
+        keep = max(min(float(min_keep_rate), 1.0), 0.25) if float(min_keep_rate) > 0 else 0.5
+        support_floor = min(target, max(30, len(TASK_TYPES) * math.ceil(min_pillar_items / keep)))
+    else:
+        support_floor = min(target, 30)
+
+    if primary and primary_avail >= support_floor:
+        eligible = primary
+        quotas = _allocate_language_quotas(
+            primary,
+            by_lang,
+            min(target, primary_avail),
+            shares,
+            major_lang_share=major_lang_share,
+            major_lang_floor=major_lang_floor,
+        )
+    else:
+        primary_set = set(primary)
+        fallback = [lang for lang in sorted(by_lang) if lang not in primary_set]
+        quotas = {lang: len(by_lang[lang]) for lang in primary}
+        backfill_need = min(target, support_floor) - primary_avail
+        if fallback and backfill_need > 0:
+            fb_quotas = _allocate_language_quotas(
+                fallback,
+                by_lang,
+                backfill_need,
+                shares,
+                major_lang_share=major_lang_share,
+                major_lang_floor=major_lang_floor,
+            )
+            quotas.update(fb_quotas)
+        eligible = sorted(quotas)
 
     selected_docs: list[Doc] = []
     for lang in eligible:
-        cap = quotas[lang]
+        cap = quotas.get(lang, 0)
         if cap <= 0:
             continue
         by_src: dict[str, list[Doc]] = defaultdict(list)
@@ -1430,6 +1481,7 @@ def synthesize_reasoning(
     drops_path=None,
     student_window: tuple[object, int] | None = None,
     require_langid: bool = False,
+    min_pillar_items: int = 20,
 ) -> list[Item]:
     """Synthesize fresh multilingual `explain`, `infer`, and `synthesis` items from harvested docs.
 
@@ -1455,7 +1507,15 @@ def synthesize_reasoning(
     min_keep_rate = float(cfg.get("min_keep_rate", DEFAULT_MIN_KEEP_RATE))
     temp = float(cfg.get("temperature", 0.0))
 
-    selected = select_source_docs(docs, seed, target=target, shares=shares, max_excerpt_chars=max_ex_chars)
+    selected = select_source_docs(
+        docs,
+        seed,
+        target=target,
+        shares=shares,
+        max_excerpt_chars=max_ex_chars,
+        min_pillar_items=min_pillar_items,
+        min_keep_rate=min_keep_rate,
+    )
     if not selected:
         return []
     url = os.environ.get("STET_EXAMINER_LLM_URL", "").strip()

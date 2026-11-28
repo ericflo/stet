@@ -2829,3 +2829,169 @@ func TestReview24FifthBaselineCliqueSettlement(t *testing.T) {
 		})
 	})
 }
+
+// Review 25 P2 #5: benchmark and correctness check for `/admin/work` (`a.work(s)`) with 10 open
+// entries, 2 runs producing the same script per entry, a 1,500-item exam, and 2, 3 (a round that
+// needed a third grader), and 5 mutually agreeing established baselines.
+func setupWorkBaselineBenchWorld(tb testing.TB, nBaselines int, nItems int) (*App, *State) {
+	tb.Helper()
+	pub, _ := newKey()
+	cfg := Config{
+		BaseURL: "http://site.test", APIURL: "http://api.test",
+		DataDir: tb.TempDir(), FilesDir: tb.TempDir(), DocsDir: "../docs",
+		AgentsFile: "../src/stet/templates/AGENTS.md",
+		AnchorKeys: map[string]bool{hex.EncodeToString(pub): true},
+		Scale:      "nano", RunsPerEntry: 2, Lease: time.Hour,
+		ReplicaWait: time.Hour, ExamTimeout: 4 * time.Hour,
+		EstablishAfter: 5, ActiveWindow: 10 * time.Minute, Dev: true,
+	}
+	season := loadSeason()
+	season.Baselines.PerRound = 2
+	season.Tolerance[cfg.Scale] = Tolerance{Grade: 0.012, Baseline: 0.015, Run: 0.015}
+	app, err := newApp(context.Background(), cfg, season, newMemKV(), dirBlobs{filepath.Join(cfg.DataDir, "blobs")})
+	if err != nil {
+		tb.Fatal(err)
+	}
+	var table []ItemInfo
+	parts := 0
+	for _, p := range season.Exam.Pillars {
+		parts += len(p.Parts)
+	}
+	perPart := max(1, nItems/max(1, parts))
+	for _, p := range season.Exam.Pillars {
+		for _, part := range p.Parts {
+			for k := range perPart {
+				lang := "en"
+				if k%3 == 1 {
+					lang = "de"
+				} else if k%3 == 2 {
+					lang = "ja"
+				}
+				table = append(table, ItemInfo{Pillar: p.Name, Part: part, Lang: lang, Stratum: "prose/answer"})
+			}
+		}
+	}
+	for len(table) < nItems {
+		table = append(table, table[len(table)%len(table)])
+	}
+	table = table[:nItems]
+
+	initA := strings.Repeat("a", 64)
+	tokA := strings.Repeat("1", 64)
+	corpusSHA := strings.Repeat("c", 64)
+	examSHA := strings.Repeat("e", 64)
+	tNow := now()
+
+	baseItems := make([]float64, nItems)
+	for i := range baseItems {
+		baseItems[i] = -6.0
+	}
+	rd := &Round{
+		Idx: 1, Status: "open", DrawnAt: tNow - 600, ActiveAt: tNow - 600, ExamAt: tNow - 300,
+		CorpusSHA: corpusSHA, ExamSHA: examSHA, InitSHA: initA,
+		ExamTable: table, Shares: map[string]float64{"en": 50, "de": 25, "ja": 25},
+		BaseItems: baseItems,
+	}
+	s := newState()
+	s.Rounds[1] = rd
+	nextID := int64(1)
+	addAcct := func(handle string, anchor, worker bool) *Account {
+		a := &Account{
+			ID: nextID, Handle: handle, Anchor: anchor, Worker: worker,
+			Agreed: 10, LastSeen: tNow, RunnerSeen: tNow, Backend: "cuda",
+		}
+		nextID++
+		s.Accounts[a.ID] = a
+		return a
+	}
+	r1 := addAcct("bench-run-1", true, true)
+	r2 := addAcct("bench-run-2", true, true)
+	addAcct("bench-idle-anchor", true, true)
+	owner := addAcct("bench-owner", false, false)
+	graders := make([]*Account, nBaselines)
+	for i := range nBaselines {
+		graders[i] = addAcct(fmt.Sprintf("bench-grader-%d", i+1), false, false)
+		items := make([]float64, nItems)
+		loss := 6.000 + float64(i)*0.001
+		for k := range items {
+			items[k] = -loss
+		}
+		s.Baselines[baselineKey(1, graders[i].ID)] = &Baseline{
+			RoundIdx: 1, AccountID: graders[i].ID, Established: true,
+			CorpusSHA: corpusSHA, ExamSHA: examSHA, InitSHA: initA, Items: items, Loss: loss,
+		}
+	}
+	// 10 open entries, each with 2 runs producing the exact same script and 1 existing grade.
+	score0 := 0.010
+	for i := range 10 {
+		edID := fmt.Sprintf("ed-%02d", i+1)
+		sha := fmt.Sprintf("%064x", i+1)
+		s.addEditor(&Editor{ID: edID, AccountID: owner.ID, Name: edID, Status: "running"})
+		e := &Entry{
+			RoundIdx: 1, EditorID: edID, Status: "open",
+			Runs: []*Run{
+				{N: 1, By: r1.ID, Script: sha, At: tNow - 500, Valid: true, Backend: "cuda"},
+				{N: 2, By: r2.ID, Script: sha, At: tNow - 480, Valid: true, Backend: "cuda"},
+			},
+		}
+		s.addEntry(e)
+		s.addResult(&Result{
+			ID: int64(i + 1), RoundIdx: 1, EditorID: edID, Script: sha,
+			AccountID: graders[0].ID, Valid: true, InitSHA: initA, TokensSHA: tokA, Score: &score0,
+		})
+	}
+	return app, s
+}
+
+func TestReview25WorkConsensusCachesPerSnapshot(t *testing.T) {
+	for _, n := range []int{2, 3, 5} {
+		app, s := setupWorkBaselineBenchWorld(t, n, 150)
+		wk := app.work(s)
+		if len(wk.Rounds) != 1 {
+			t.Fatalf("n=%d: expected 1 work round, got %d", n, len(wk.Rounds))
+		}
+		if wk.Rounds[0].BaselineDisputed {
+			t.Fatalf("n=%d: mutually agreeing baselines must not be disputed", n)
+		}
+		if wk.Rounds[0].GradesWanted != 10 {
+			t.Fatalf("n=%d: expected 10 grades wanted (2-run scripts with 1 grade each), got %d", n, wk.Rounds[0].GradesWanted)
+		}
+	}
+}
+
+func BenchmarkWorkAdminBaselineConsensus(b *testing.B) {
+	for _, n := range []int{2, 3, 5} {
+		b.Run(fmt.Sprintf("baselines_%d", n), func(b *testing.B) {
+			app, s := setupWorkBaselineBenchWorld(b, n, 1500)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				wk := app.work(s)
+				if len(wk.Rounds) != 1 || wk.Rounds[0].BaselineDisputed {
+					b.Fatalf("unexpected work summary: %+v", wk.Rounds)
+				}
+			}
+		})
+	}
+	b.Run("baselines_3_outlier_tiebreak", func(b *testing.B) {
+		app, s := setupWorkBaselineBenchWorld(b, 3, 1500)
+		// Turn grader 3 into an outlier (+0.050 > 0.015) so Bron-Kerbosch, leftOut, and oddOut run.
+		for _, bs := range s.Baselines {
+			if bs.Loss > 6.0015 {
+				for k := range bs.Items {
+					bs.Items[k] = -6.050
+				}
+				bs.Loss = 6.050
+				break
+			}
+		}
+		b.ReportAllocs()
+		b.ResetTimer()
+		for range b.N {
+			wk := app.work(s)
+			if len(wk.Rounds) != 1 || wk.Rounds[0].BaselineDisputed {
+				b.Fatalf("unexpected work summary: %+v", wk.Rounds)
+			}
+		}
+	})
+}

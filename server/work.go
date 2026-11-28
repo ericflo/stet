@@ -166,7 +166,7 @@ func (a *App) work(s *State) Work {
 	for _, rd := range openRounds(s) {
 		states := j.states(rd)
 		closing := j.closing(states)
-		disputed := a.baselineDisputed(s, rd)
+		disputed := j.baselineDisputed(rd)
 		wr := WorkRound{ID: roundID(a.season.ID, rd.Idx), Entries: len(states), ExamAt: rd.ExamAt, DrawnAt: rd.DrawnAt, ExamDue: examDue(s, rd),
 			BaselinesWanted: j.baselinesWanted(rd), BaselineDisputed: disputed}
 		tieBreakOffer := false

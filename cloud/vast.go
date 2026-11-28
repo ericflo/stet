@@ -336,9 +336,13 @@ func vastInstanceRental(i vastInstance) Rental {
 	}
 	price, basePrice, diskCost, partial := vastInstanceRate(i)
 	diskCost = vastStoppedDiskCost(state, i.DPHTotal, basePrice, diskCost)
+	var created time.Time
+	if i.StartDate > 0 {
+		created = time.Unix(int64(i.StartDate), 0)
+	}
 	r := Rental{Market: "vast", ID: strconv.FormatInt(i.ID, 10), Name: name, Card: vastCard(i.GPUName),
 		Price: price, BasePrice: basePrice, DiskCost: diskCost, PartialRate: partial,
-		State: state, Status: status, Created: time.Unix(int64(i.StartDate), 0)}
+		State: state, Status: status, Created: created}
 	r.Phase = status
 	if r.Phase == "" {
 		r.Phase = "scheduling"

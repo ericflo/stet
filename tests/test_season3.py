@@ -5615,4 +5615,91 @@ def test_review24_select_context_handles_zero_percent_measured_language_shares()
     assert langs.count("fr") == 3
 
 
+def test_review25_sparse_harvest_backfills_across_29_30_boundary_and_passes_coverage():
+    """Review 25 P2 #4: adding a 30th above-cutoff English document to a sparse harvest with 300
+    below-cutoff Welsh documents MUST NOT drop selection from 329 down to 30 (10/10/10) and cancel
+    a viable round under `min_pillar_items=20`. Selection must smoothly backfill up to the pillar
+    support floor without discontinuity and pass `_filter_pillar_support` on both sides of 29/30."""
+    from collections import Counter
+
+    from stet.exam.examine import _filter_pillar_support
+    from stet.exam.fresh import Doc
+    from stet.exam.fresh.reason import select_source_docs
+    from stet.spec import load_season
+
+    s3 = load_season("s3")
+    shares = {"en": 50.0, "cy": 0.01}
+
+    def _make_doc(lang: str, idx: int) -> Doc:
+        if lang == "cy":
+            text = (
+                f"Mae erthygl rhif {idx} yn disgrifio rhwydwaith rheilffordd hanesyddol ar draws dyffrynnoedd y gogledd gyda nifer o bontydd cerrig a gorsafoedd lleol. "
+                f"Wedi gwaith adfer manwl yn ystod y blynyddoedd diwethaf, mae trenau rheolaidd bellach yn cysylltu pentrefi gwledig a threfi marchnad bob awr. "
+                f"Mae peirianwyr lleol yn nodi bod systemau signalau modern ar adran rhif {idx} wedi gwella dibynadwyedd teithiau dyddiol yn sylweddol ac wedi lleihau oedi, "
+                f"tra bod cynghorau sir yn buddsoddi mewn llwybrau beicio a gwasanaethau bws cysylltiedig ar gyfer cymunedau gwledig y rhanbarth."
+            )
+            title = f"Rheilffordd {idx}"
+        else:
+            text = (
+                f"Report number {idx} documents a coastal hydrology network measuring river sediment transport, tidal salinity shifts, and seasonal storm surges. "
+                f"Over the past decade, automated sensor buoys installed along the estuary have recorded continuous hourly telemetry used by municipal flood planners. "
+                f"Calibration logs from monitoring station {idx} confirm that updated pressure transducers maintain millimeter accuracy even during winter gales, "
+                f"and independent verification teams compare buoy observations against satellite altimetry and harbor tide gauges every month."
+            )
+            title = f"Estuary {idx}"
+        return Doc(
+            source="wikipedia",
+            id=f"{lang}-{idx}",
+            url=f"https://{lang}.wikipedia.org/wiki/{idx}",
+            lang=lang,
+            license="CC-BY-SA-4.0",
+            published="2026-07-01T12:00:00Z",
+            topic=f"topic-{lang}-{idx}",
+            title=title,
+            text=text,
+        )
+
+    cy_docs = [_make_doc("cy", i) for i in range(300)]
+    assert select_source_docs(cy_docs + [_make_doc("en", 0)], b"r25-zero-target", target=0, shares=shares) == []
+
+    # Verify monotonicity and coverage across the 29/30 boundary and up through the 120-doc support floor.
+    prev_total = 0
+    prev_en = 0
+    for n_en in (0, 29, 30, 59, 60, 119, 120, 121):
+        docs = cy_docs + [_make_doc("en", i) for i in range(n_en)]
+        sel = select_source_docs(docs, b"r25-sparse-boundary", target=640, shares=shares, min_pillar_items=20)
+        assert len(sel) >= 120, f"n_en={n_en}: selected only {len(sel)} docs"
+        assert len(sel) >= prev_total, f"n_en={n_en}: total dropped from {prev_total} to {len(sel)}"
+        got_en = sum(1 for d in sel if d["lang"] == "en")
+        assert got_en == n_en, f"n_en={n_en}: expected all {n_en} English docs kept, got {got_en}"
+        assert got_en >= prev_en
+        if n_en >= 120:
+            assert all(d["lang"] == "en" for d in sel), f"n_en={n_en}: micro-language should not be used once support floor is met"
+        kinds = Counter(d["task_type"] for d in sel)
+        assert all(kinds[k] >= 38 for k in ("explain", "infer", "synthesis")), f"n_en={n_en}: uneven kinds {kinds}"
+
+        # Pass through _filter_pillar_support treating every selected doc as a valid teacher item
+        # (and even at 60% teacher acceptance!) -> all 3 reasoning pillars survive, never canceling!
+        items_100 = [
+            Item(
+                kind="answer",
+                corner=f"{d['task_type']}/{d['lang']}/wiki",
+                fmt="prose",
+                lang=d["lang"],
+                source=f"{d['task_type']}:{d['source']}:{d['id']}",
+                ctx=f"Prompt {i}",
+                cont=f" Answer {i}.",
+            )
+            for i, d in enumerate(sel)
+        ]
+        kept_100 = _filter_pillar_support(items_100, s3, f"s3-o99-{n_en}")
+        assert len(kept_100) == len(items_100)
+        items_60 = [it for i, it in enumerate(items_100) if i % 5 < 3]
+        kept_60 = _filter_pillar_support(items_60, s3, f"s3-o98-{n_en}")
+        assert len(kept_60) == len(items_60)
+        prev_total = len(sel)
+        prev_en = got_en
+
+
+
 
