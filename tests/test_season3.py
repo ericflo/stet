@@ -5875,3 +5875,138 @@ def test_review26_farm_memory_planner_uses_season_token_width():
             label = f"{name} {suffix}".strip()
             want = f"| {label} | {row['tokens'] / 1e6:.1f}M | {row['hours_each']:.2f} | {row['hold_minutes']} | {row['memory_gb']:.2f} GB |"
             assert want in operating, f"missing/stale operating table row: {want}"
+
+
+def test_review27_all_withheld_public_replay_early_error_and_baseline_cache_isolation(monkeypatch, tmp_path, capsys):
+    """Review 27 P2 #5: an official round whose public replay has 0 openly licensed items (all
+    withheld) MUST: (1) fail fast with 'no publicly replayable items' before training in CLI;
+    (2) give `exam=[]` its own digest (e3b0c44298fc) and item count (0) in pipeline cache lookup
+    so it never returns the cached full-exam baseline and hits its own empty-subset cache cleanly."""
+    import json
+    from types import SimpleNamespace
+
+    import zstandard as zstd
+
+    from stet import cli, data
+    from stet.exam.examine import _filter_pillar_support, public_items
+    from stet.exam.items import digest as items_digest
+    from stet.spec import official_round
+
+    monkeypatch.setenv("STET_CACHE", str(tmp_path))
+    s3 = load_season("s3")
+    scale = s3.scale("nano")
+    p = s3.raw["pools"]["practice"]
+    crawl = {"crawl": p["crawl"], "paths_sha256": p["paths_sha256"], "n_shards": int(p["n_shards"])}
+
+    # 24 explain:ccnews items passing official pillar support -> 0 public / 24 withheld.
+    full_items = [
+        Item(
+            kind="answer",
+            corner="explain/en/ccnews",
+            fmt="prose",
+            lang="en",
+            source=f"explain:ccnews:{i}",
+            ctx=f"CCNews prompt {i}",
+            cont=f" Answer {i}.",
+        )
+        for i in range(24)
+    ]
+    assert len(_filter_pillar_support(full_items, s3, "s3-o00027")) == 24
+    full_sha = items_digest(full_items)
+    rnd = official_round(s3, 27, {"round": 900027, "randomness": "27" * 32}, crawl)
+    rnd = type(rnd)(**{**rnd.__dict__, "exam_digest": full_sha})
+
+    pub_rows = public_items(full_items)
+    pub_raw = "\n".join(json.dumps(r, ensure_ascii=False) for r in pub_rows).encode()
+    pub_path = data.exam_public_path(rnd, full_sha)
+    pub_path.parent.mkdir(parents=True, exist_ok=True)
+    pub_path.write_bytes(zstd.ZstdCompressor().compress(pub_raw))
+
+    pub_exam = data.round_exam(rnd, scale)
+    meta = data.round_exam_meta(rnd)
+    assert pub_exam == []
+    assert meta["public_subset"] is True and meta["public_items"] == 0 and meta["withheld_items"] == 24 and meta["total_items"] == 24
+
+    # 1. CLI MUST fail fast BEFORE training with "no publicly replayable items".
+    with pytest.raises(SystemExit):
+        cli._check_replayable_exam(rnd, pub_exam)
+    err = capsys.readouterr().err
+    assert "no publicly replayable items" in err and "0 of 24" in err
+
+    # 2. When torch is installed, verify pipeline.baseline cache lookup & write identity for exam=[].
+    torch = pytest.importorskip("torch")
+    _ = torch
+    from stet import pipeline
+
+    empty_sha = items_digest([])
+    want_sha, want_n, is_pub = pipeline._exam_cache_identity(rnd, scale, exam=[])
+    assert want_sha == empty_sha and want_n == 0 and is_pub is True
+
+    dev = SimpleNamespace(type="cpu")
+    # Seed a cached 24-item full-exam baseline first.
+    full_base = {
+        "valid": True,
+        "exam_sha256": full_sha,
+        "hardware": {"device": "cpu", "backend": "cpu"},
+        "exam": {"items": 24, "mean": -2.5, "item_scores": [-2.5] * 24},
+    }
+    assert pipeline.cache_baseline(full_base, rnd, scale, dev)
+
+    train_calls = []
+
+    def fake_train(r, sc, d, **kw):
+        train_calls.append(r.id)
+        return SimpleNamespace(device=dev)
+
+    def fake_sit(trained, r, sc, exam):
+        sha = items_digest(exam)
+        return {
+            "valid": True,
+            "exam_sha256": sha,
+            "hardware": {"device": "cpu", "backend": "cpu"},
+            "exam": {"items": len(exam), "mean": 0.0, "item_scores": []},
+        }
+
+    monkeypatch.setattr(pipeline, "train_baseline", fake_train)
+    monkeypatch.setattr(pipeline, "sit_exam", fake_sit)
+
+    # First replay with exam=[] MUST NOT return the cached 24-item full baseline!
+    b1 = pipeline.baseline(rnd, scale, dev, exam=[])
+    assert b1["exam_sha256"] == empty_sha and b1["exam"]["items"] == 0
+    assert len(train_calls) == 1
+    # Second replay with exam=[] AND with exam=None (auto-resolved public subset) MUST hit cache cleanly!
+    b2 = pipeline.baseline(rnd, scale, dev, exam=[])
+    b3 = pipeline.baseline(rnd, scale, dev)
+    assert b2["exam_sha256"] == empty_sha and b2["exam"]["items"] == 0
+    assert b3["exam_sha256"] == empty_sha and b3["exam"]["items"] == 0
+    assert len(train_calls) == 1
+
+
+def test_review27_verifier_pass_cache_scoped_by_season_digest(monkeypatch, tmp_path):
+    """Review 27 P2 #6: local pass.json timing cache MUST be keyed by season_digest so returning
+    Season 2 verifiers (both legacy unkeyed and S2-tagged entries) do not send Season 2 pass times
+    to the Season 3 scheduler."""
+    import json
+
+    from stet import client
+
+    monkeypatch.setenv("STET_CONFIG", str(tmp_path))
+    s2 = load_season("s2")
+    s3 = load_season("s3")
+    assert s2.digest != s3.digest
+
+    # 1. Legacy unkeyed Season 2 pass.json (no season_digest) MUST be ignored for Season 3.
+    pass_path = client._pass_path()
+    pass_path.parent.mkdir(parents=True, exist_ok=True)
+    pass_path.write_text(json.dumps({"scale": "standard", "gpu": "RTX 4090", "seconds": 600.0, "at": 1700000000}))
+    assert client.saved_pass("standard", "RTX 4090", s3.digest) is None
+
+    # 2. Explicitly Season 2-tagged pass.json MUST match s2.digest and return None for s3.digest.
+    client.note_pass("standard", "RTX 4090", {"train": {"seconds": 600.0}}, s2.digest)
+    assert client.saved_pass("standard", "RTX 4090", s2.digest) == 600.0
+    assert client.saved_pass("standard", "RTX 4090", s3.digest) is None
+
+    # 3. Once a Season 3 grade is recorded, s3.digest reads the Season 3 pass time cleanly.
+    client.note_pass("standard", "RTX 4090", {"train": {"seconds": 1825.5}}, s3.digest)
+    assert client.saved_pass("standard", "RTX 4090", s3.digest) == 1825.5
+    assert client.saved_pass("standard", "RTX 4090", s2.digest) is None

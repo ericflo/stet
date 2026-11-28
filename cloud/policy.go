@@ -518,8 +518,12 @@ func (p Policy) decideNext(w *Work, workers []*Worker, spentToday float64, now t
 		// an exam, the fastest that are waiting are kept for a grade a failed machine leaves.
 		// Near an imminent scheduled draw (e.g., during the 6-16m on-demand notice window), up
 		// to keptNearDraw warm runners are kept so the draw starts without cold-boot churn.
+		// Cap warm workers by remaining worker slots (p.MaxWorkers minus busy/pending workers) so
+		// a warm idle machine can never occupy a slot reserved for a required examiner.
+		busy := max(0, d.Live-len(idle))
+		warmCap := max(0, p.MaxWorkers-busy)
 		kept := map[*Worker]bool{}
-		if p.nearExam(w, now) {
+		if p.nearExam(w, now) && warmCap > 0 {
 			var fast []*Worker
 			for _, wk := range idle {
 				if wk.state(now, p) == "waiting" {
@@ -527,10 +531,10 @@ func (p Policy) decideNext(w *Work, workers []*Worker, spentToday float64, now t
 				}
 			}
 			sort.SliceStable(fast, func(i, j int) bool { return fast[i].Speed > fast[j].Speed })
-			for _, wk := range fast[:min(len(fast), keptNearExam)] {
+			for _, wk := range fast[:min(len(fast), min(keptNearExam, warmCap))] {
 				kept[wk] = true
 			}
-		} else if p.nearDraw(w, now) {
+		} else if p.nearDraw(w, now) && warmCap > 0 {
 			var warm []*Worker
 			for _, wk := range idle {
 				if wk.NoCurators == "" && !wk.GradeOnly {
@@ -544,7 +548,7 @@ func (p Policy) decideNext(w *Work, workers []*Worker, spentToday float64, now t
 				}
 				return warm[i].Speed > warm[j].Speed
 			})
-			for _, wk := range warm[:min(len(warm), keptNearDraw)] {
+			for _, wk := range warm[:min(len(warm), min(keptNearDraw, warmCap))] {
 				kept[wk] = true
 			}
 		}

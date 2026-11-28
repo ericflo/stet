@@ -57,7 +57,10 @@ type Account struct {
 	Backend    string `json:"backend,omitempty"`
 	// PassSeconds is how long its machine last took to train a grade's student, as it said
 	// when it last asked for work (stet 0.4.4 and later); 0 when it did not say.
+	// PassSeason scopes PassSeconds to the season digest active when it was reported so
+	// Season 2 timings never leak into Season 3 scheduling after a season rollover.
 	PassSeconds float64 `json:"pass_seconds,omitempty"`
+	PassSeason  string  `json:"pass_season,omitempty"`
 	// CuratorsWhy is why it could not be handed curators the last time it asked for work, in
 	// words (curatorsWhy); empty when it could.
 	CuratorsWhy string `json:"curators_why,omitempty"`

@@ -42,12 +42,18 @@ def _device_gpu_name(device) -> str | None:
 
 def _exam_cache_identity(rnd: Round, scale: Scale, *, exam=None) -> tuple[str | None, int | None, bool]:
     """Return `(exam_sha, n_items, is_public_subset)` for the exact exam items to sit."""
+    explicit = exam is not None
     if exam is None:
         try:
             exam = data.round_exam(rnd, scale)
         except Exception:
             return (rnd.exam_digest or None), None, False
     if not exam:
+        meta = data.round_exam_meta(rnd) if rnd is not None else {}
+        if explicit or meta.get("public_subset"):
+            actual_sha = data.exam_digest(exam)
+            is_pub = bool(rnd.kind == "official" and rnd.exam_digest and actual_sha != rnd.exam_digest)
+            return actual_sha, 0, is_pub
         return (rnd.exam_digest or None), None, False
     actual_sha = data.exam_digest(exam)
     is_pub = bool(rnd.kind == "official" and rnd.exam_digest and actual_sha != rnd.exam_digest)
@@ -242,12 +248,18 @@ def sit_baseline(
 ) -> dict:
     """The unedited student sits the round's exam (`rnd` as it is now, its exam posted), and
     the result is kept for the round's other grades on this machine."""
+    explicit_exam = exam is not None
     exam, practice_key = _resolve_practice_pin(rnd, scale, exam=exam, practice_key=practice_key)
     exam = exam if exam is not None else data.round_exam(rnd, scale)
     result = sit_exam(trained, rnd, scale, exam)
     if not result["valid"]:
         raise RuntimeError(f"the baseline for {rnd.id} could not be graded: {result['invalid_reason']}")
-    actual_sha = result.get("exam_sha256") or (data.exam_digest(exam) if exam else (rnd.exam_digest or None))
+    if result.get("exam_sha256"):
+        actual_sha = result["exam_sha256"]
+    elif exam or explicit_exam or (data.round_exam_meta(rnd).get("public_subset") if rnd is not None else False):
+        actual_sha = data.exam_digest(exam)
+    else:
+        actual_sha = rnd.exam_digest or None
     if actual_sha and not result.get("exam_sha256"):
         result["exam_sha256"] = actual_sha
     # Preserve the valid in-memory measurement on `trained` BEFORE attempting disk cache write so

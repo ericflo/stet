@@ -264,8 +264,12 @@ func (a *App) work(s *State) Work {
 	failed, refused, trouble := troubles(s, at)
 	for _, acct := range s.Accounts {
 		if acct.Anchor {
+			passSecs := acct.PassSeconds
+			if a.season.Digest != "" && acct.PassSeason != a.season.Digest {
+				passSecs = 0
+			}
 			out.Machines = append(out.Machines, WorkMachine{Handle: acct.Handle, Worker: acct.Worker, LastSeen: acct.LastSeen, Busy: busy[acct.ID], Long: busy[acct.ID] == "farm" && long[acct.ID],
-				Holding: holding[acct.ID], Ready: holding[acct.ID] > 0 && !untrained[acct.ID], PassSeconds: acct.PassSeconds,
+				Holding: holding[acct.ID], Ready: holding[acct.ID] > 0 && !untrained[acct.ID], PassSeconds: passSecs,
 				Curators: acct.RunnerSeen != 0, CuratorsWhy: acct.CuratorsWhy, Failed: failed[acct.ID], Refused: refused[acct.ID], Trouble: trouble[acct.ID],
 				Harness: acct.Harness})
 		}

@@ -252,9 +252,10 @@ type podRecord struct {
 	TransferCost float64          `json:"transfer_cost,omitempty"`
 	PartialCost  bool             `json:"partial_cost,omitempty"`
 	Start        time.Time        `json:"start"`
-	Alive        time.Time        `json:"alive"`               // last seen running
-	StoppedAt    time.Time        `json:"stopped_at,omitzero"` // when current stopped interval began (disk billing continues until ResumeAt/End)
-	ResumeAt     time.Time        `json:"resume_at,omitzero"`  // when current running interval began after prior Segments
+	Alive        time.Time        `json:"alive"`                 // last seen running
+	StoppedAt    time.Time        `json:"stopped_at,omitzero"`   // when current stopped interval began (disk billing continues until ResumeAt/End)
+	StoppedSeen  time.Time        `json:"stopped_seen,omitzero"` // last confirmed stopped observation (bounds confirmed storage across downtime)
+	ResumeAt     time.Time        `json:"resume_at,omitzero"`    // when current running interval began after prior Segments
 	End          time.Time        `json:"end,omitzero"`
 	Segments     []billingSegment `json:"segments,omitempty"` // completed prior billing intervals preserved across stop/resume
 }
@@ -307,12 +308,12 @@ func (r podRecord) currentStopStart(now time.Time) time.Time {
 	return now
 }
 
-// resolveStopTime picks when a running -> stopped transition takes effect: a trustworthy
-// provider stop timestamp bounded within [minAt, now] when reported, or else now so a delayed
-// stop observation never retroactively refunds unconfirmed compute time.
-func resolveStopTime(minAt, now, providerStopAt time.Time) time.Time {
-	if !providerStopAt.IsZero() && !providerStopAt.After(now) && (minAt.IsZero() || !providerStopAt.Before(minAt)) {
-		return providerStopAt
+// resolveStopTime picks when a running -> stopped or running -> ended transition takes effect: a
+// trustworthy provider timestamp bounded within [minAt, now] when reported, or else now so a
+// delayed observation never retroactively refunds unconfirmed compute time.
+func resolveStopTime(minAt, now, providerAt time.Time) time.Time {
+	if !providerAt.IsZero() && !providerAt.After(now) && (minAt.IsZero() || !providerAt.Before(minAt)) {
+		return providerAt
 	}
 	return now
 }
@@ -324,13 +325,19 @@ func (r *podRecord) markStopped(now time.Time) {
 }
 
 // markStoppedAt records that GPU compute has stopped, closing the completed running interval into
-// Segments and setting StoppedAt to where attached storage billing takes over. A trustworthy
-// providerStopAt in [max(runStart, Alive), now] is used when available; otherwise compute billing
-// is preserved through now so delayed stop observations never retroactively refund compute hours.
+// Segments and setting StoppedAt to where attached storage billing takes over. Repeated stopped
+// observations advance StoppedSeen so confirmed storage time is preserved across restarts while any
+// unobserved downtime before a later resume is billed conservatively at the compute rate.
 func (r *podRecord) markStoppedAt(now, providerStopAt time.Time) {
 	if r.Stopped {
 		if r.StoppedAt.IsZero() {
 			r.StoppedAt = r.currentStopStart(now)
+		}
+		if r.StoppedSeen.IsZero() || now.After(r.StoppedSeen) {
+			r.StoppedSeen = now
+		}
+		if !r.StoppedAt.IsZero() && r.StoppedSeen.Before(r.StoppedAt) {
+			r.StoppedSeen = r.StoppedAt
 		}
 		return
 	}
@@ -355,12 +362,23 @@ func (r *podRecord) markStoppedAt(now, providerStopAt time.Time) {
 	}
 	r.Stopped = true
 	r.StoppedAt = stopAt
+	r.StoppedSeen = now
+	if r.StoppedSeen.Before(stopAt) {
+		r.StoppedSeen = stopAt
+	}
 	r.ResumeAt = time.Time{}
 }
 
-// markLive records that the worker is currently running, closing any prior stopped interval into
-// Segments so resuming a stopped contract never reprices its earlier stopped hours at the compute rate.
+// markLive records that the worker is currently running without a provider resume timestamp.
 func (r *podRecord) markLive(now time.Time) {
+	r.markLiveAt(now, time.Time{})
+}
+
+// markLiveAt records that the worker is currently running, closing any prior stopped interval into
+// Segments so resuming a stopped contract preserves confirmed storage time while conservatively
+// budgeting any unobserved downtime after the last confirmed stopped observation (StoppedSeen) at
+// the compute rate unless a trustworthy providerResumedAt in [StoppedSeen, now] is supplied.
+func (r *podRecord) markLiveAt(now, providerResumedAt time.Time) {
 	if r.Stopped {
 		stopStart := r.currentStopStart(now)
 		if stopStart.After(now) {
@@ -375,14 +393,26 @@ func (r *podRecord) markLive(now time.Time) {
 			}
 			r.Segments = append(r.Segments, billingSegment{Start: r.Start, End: stopStart, Rate: rate, Stopped: false})
 		}
-		if !stopStart.IsZero() && now.After(stopStart) {
+		lastStopped := r.StoppedSeen
+		if lastStopped.IsZero() || lastStopped.Before(stopStart) {
+			lastStopped = stopStart
+		}
+		if lastStopped.After(now) {
+			lastStopped = now
+		}
+		resumeAt := lastStopped
+		if !providerResumedAt.IsZero() && !providerResumedAt.Before(lastStopped) && !providerResumedAt.After(now) {
+			resumeAt = providerResumedAt
+		}
+		if !stopStart.IsZero() && resumeAt.After(stopStart) {
 			r.Segments = append(r.Segments, billingSegment{
-				Start: stopStart, End: now, Rate: r.stoppedHourlyRate(), Stopped: true,
+				Start: stopStart, End: resumeAt, Rate: r.stoppedHourlyRate(), Stopped: true,
 			})
 		}
 		r.Stopped = false
 		r.StoppedAt = time.Time{}
-		r.ResumeAt = now
+		r.StoppedSeen = time.Time{}
+		r.ResumeAt = resumeAt
 	}
 	if now.After(r.Alive) || r.Alive.IsZero() {
 		r.Alive = now
@@ -878,19 +908,20 @@ func (f *Fleet) note(ctx context.Context, l *ledger, rentals []Rental, answered 
 				start = now
 			}
 			alive := now
-			var stoppedAt time.Time
+			var stoppedAt, stoppedSeen time.Time
 			if p.State == "stopped" {
 				// Use a trustworthy provider stop timestamp when available; otherwise preserve
 				// the conservative compute-rate accrual reserved while pending up through this
 				// first confirmed stop, then accrue storage from now forward.
 				stoppedAt = resolveStopTime(start, now, p.StoppedAt)
+				stoppedSeen = now
 			} else if !p.live() {
 				alive = start
 			}
 			rec := &podRecord{
 				ID: p.ID, Market: p.Market, Handle: pr.Handle, GPU: gpu, Cloud: pr.Cloud, PendingID: pr.ID,
 				Cost: pr.Cost, DiskCost: pr.DiskCost, TransferCost: pr.TransferCost, PartialCost: !validRate(pr.Cost),
-				Start: start, Alive: alive, StoppedAt: stoppedAt, Tracked: true, Stopped: p.State == "stopped",
+				Start: start, Alive: alive, StoppedAt: stoppedAt, StoppedSeen: stoppedSeen, Tracked: true, Stopped: p.State == "stopped",
 				Grades: pr.Grades, Host: host, CPU: pr.CPU, Curators: pr.Curators,
 				For: pr.For, Round: pr.Round, Report: pr.Report,
 			}
@@ -934,13 +965,14 @@ func (f *Fleet) note(ctx context.Context, l *ledger, rentals []Rental, answered 
 				start = now
 			}
 			alive := now
-			var stoppedAt time.Time
+			var stoppedAt, stoppedSeen time.Time
 			if p.State == "stopped" {
 				stoppedAt = resolveStopTime(start, now, p.StoppedAt)
+				stoppedSeen = now
 			}
 			r = &podRecord{ID: p.ID, Market: p.Market, Handle: h, Host: p.Host, GPU: p.Card,
 				Cost: cost, DiskCost: max(0, p.DiskCost), PartialCost: p.PartialRate || p.State == "stopped",
-				Start: start, Alive: alive, StoppedAt: stoppedAt, Tracked: true, Stopped: p.State == "stopped"}
+				Start: start, Alive: alive, StoppedAt: stoppedAt, StoppedSeen: stoppedSeen, Tracked: true, Stopped: p.State == "stopped"}
 			l.Pods[key] = r
 		}
 		if r.Host == "" && p.Host != "" {
@@ -951,19 +983,17 @@ func (f *Fleet) note(ctx context.Context, l *ledger, rentals []Rental, answered 
 		}
 		reconcileRentalRate(r, p)
 		if p.live() {
-			r.markLive(now)
+			r.markLiveAt(now, p.ResumedAt)
 		}
-	}
-	every := f.o.Every
-	if every <= 0 {
-		every = time.Minute
 	}
 	retireGone := func(key string, r *podRecord, p *Rental) error {
 		r.Gone = true
 		gone := Rental{Market: r.market(), ID: r.ID, Card: r.GPU}
 		why := "its market no longer lists it"
+		var providerEndAt time.Time
 		if p != nil {
 			gone = *p
+			providerEndAt = p.EndedAt
 			why = "its market has it " + strings.ToLower(p.Status)
 			if p.Detail != "" && p.Detail != strings.ToLower(p.Status) {
 				why += ": " + p.Detail
@@ -977,14 +1007,25 @@ func (f *Fleet) note(ctx context.Context, l *ledger, rentals []Rental, answered 
 		}
 		r.Why = why
 		f.event(&gone, r.Handle, "gone", why)
-		endAt := now
-		if !r.Alive.IsZero() {
-			endAt = minTime(now, r.Alive.Add(2*every))
+		minEnd := r.currentRunStart()
+		if !r.Alive.IsZero() && (minEnd.IsZero() || r.Alive.After(minEnd)) {
+			minEnd = r.Alive
 		}
 		if r.Stopped {
-			r.markStopped(now)
-			endAt = now
+			stoppedAt := r.StoppedAt
+			if stoppedAt.IsZero() {
+				stoppedAt = r.currentStopStart(now)
+			}
+			if !stoppedAt.IsZero() && (minEnd.IsZero() || stoppedAt.After(minEnd)) {
+				minEnd = stoppedAt
+			}
+			if !r.StoppedSeen.IsZero() && (minEnd.IsZero() || r.StoppedSeen.After(minEnd)) {
+				minEnd = r.StoppedSeen
+			}
 		}
+		// Without a trustworthy provider end timestamp, keep the budget charged through the first
+		// confirmed absence (now) rather than retroactively refunding compute back to Alive.
+		endAt := resolveStopTime(minEnd, now, providerEndAt)
 		return f.retire(l, key, endAt)
 	}
 	keys := make([]string, 0, len(l.Pods))
@@ -1012,7 +1053,7 @@ func (f *Fleet) note(ctx context.Context, l *ledger, rentals []Rental, answered 
 		}
 		if p != nil && p.live() {
 			reconcileRentalRate(r, p)
-			r.markLive(now)
+			r.markLiveAt(now, p.ResumedAt)
 			continue
 		}
 		if p != nil {
@@ -1061,7 +1102,7 @@ func (f *Fleet) note(ctx context.Context, l *ledger, rentals []Rental, answered 
 				}
 				fresh.Terminating = r.Terminating
 				reconcileRentalRate(r, fresh)
-				r.markLive(now)
+				r.markLiveAt(now, fresh.ResumedAt)
 				extra = append(extra, *fresh)
 			case lerr == nil && exists && fresh != nil:
 				if fresh.Name == "" {
@@ -1347,6 +1388,9 @@ func (f *Fleet) retire(l *ledger, key string, end time.Time) error {
 		return nil
 	}
 	recCopy := *r
+	if recCopy.Stopped {
+		recCopy.markStopped(end)
+	}
 	recCopy.End = end
 	if _, err := appendSpendRecord(f.spentLog(), recCopy, true); err != nil {
 		return err
@@ -2381,6 +2425,16 @@ func (f *Fleet) launchSomeRentals(ctx context.Context, v *View, n int, long, cur
 		if len(rented) == n {
 			break
 		}
+		if f.o.DailyBudget > 0 {
+			today, err := f.currentSpentToday(v)
+			if err != nil {
+				return rented, err
+			}
+			if today >= f.o.DailyBudget {
+				f.say("not renting another machine: about $%.2f spent today, and the daily budget is $%.2f", today, f.o.DailyBudget)
+				break
+			}
+		}
 		if err := f.ready(ctx, w.Key, vouched); err != nil {
 			return rented, err
 		}
@@ -2505,10 +2559,41 @@ func roundFor(w *Work, what string, due time.Time) string {
 	return w.Rounds[0].ID
 }
 
+// currentSpentToday recomputes live UTC-day spend (spent.jsonl + live/stopped/pending workers in
+// v.Ledger + active/pending examiner spend) at f.now() so batch worker creates re-check
+// --daily-budget immediately before each paid provider call.
+func (f *Fleet) currentSpentToday(v *View) (float64, error) {
+	if v == nil || v.Ledger == nil {
+		return 0, errors.New("fleet ledger unavailable")
+	}
+	now := f.now()
+	base, err := f.spent(v.Ledger, startOfDay(now))
+	if err != nil {
+		return 0, fmt.Errorf("reading daily spend: %w", err)
+	}
+	_, _, exAccrued, err := f.examinerSnapshot()
+	if err != nil {
+		return 0, fmt.Errorf("reading examiner spend: %w", err)
+	}
+	total := base + exAccrued
+	v.Today = total
+	return total, nil
+}
+
 func (f *Fleet) rent(ctx context.Context, v *View, k *Key, gpus []Offer, site string, grades func(Offer) int, plan rentPlan, curators bool) (*Rental, error) {
 	if v.hourlyUnknown() {
 		f.say("not renting another machine: live hourly spend is incomplete (%s has no reported hourly rate yet); waiting for provider rate", v.unknownRateSummary())
 		return nil, nil
+	}
+	if f.o.DailyBudget > 0 {
+		today, err := f.currentSpentToday(v)
+		if err != nil {
+			return nil, err
+		}
+		if today >= f.o.DailyBudget {
+			f.say("not renting another machine: about $%.2f spent today, and the daily budget is $%.2f", today, f.o.DailyBudget)
+			return nil, nil
+		}
 	}
 	tried, dearer := 0, 0
 	failed := map[string]bool{} // markets that definitively rejected/could not be reached, passed over now
@@ -2602,9 +2687,20 @@ func (f *Fleet) rent(ctx context.Context, v *View, k *Key, gpus []Offer, site st
 		if plan.report != nil {
 			plannedReport = plan.report(c)
 		}
+		if f.o.DailyBudget > 0 {
+			today, err := f.currentSpentToday(v)
+			if err != nil {
+				return nil, err
+			}
+			if today >= f.o.DailyBudget {
+				f.say("not renting another machine: about $%.2f spent today, and the daily budget is $%.2f", today, f.o.DailyBudget)
+				return nil, nil
+			}
+		}
 		if v.Ledger.Pending == nil {
 			v.Ledger.Pending = map[string]*pendingRent{}
 		}
+		began := f.now()
 		pr := &pendingRent{
 			ID:           newID()[:16],
 			Market:       c.Market,
@@ -2615,7 +2711,7 @@ func (f *Fleet) rent(ctx context.Context, v *View, k *Key, gpus []Offer, site st
 			Cost:         price,
 			DiskCost:     c.DiskCost,
 			TransferCost: c.TransferCost,
-			Created:      f.now(),
+			Created:      began,
 			Grades:       plannedGrades,
 			Host:         c.Host,
 			CPU:          c.CPU,
@@ -2630,7 +2726,6 @@ func (f *Fleet) rent(ctx context.Context, v *View, k *Key, gpus []Offer, site st
 			delete(v.Ledger.Pending, pr.ID)
 			return nil, fmt.Errorf("persisting worker create reservation before rent: %w", err)
 		}
-		began := f.now()
 		r, err := m.Rent(ctx, c, l)
 		if err == nil && (r == nil || r.ID == "") {
 			err = fmt.Errorf("%s answered without a rental ID", marketTitle(c.Market))
@@ -2683,7 +2778,7 @@ func (f *Fleet) rent(ctx context.Context, v *View, k *Key, gpus []Offer, site st
 		v.addLiveRental(r)
 		rec := &podRecord{ID: r.ID, Market: r.Market, Handle: k.Handle, GPU: c.Card, Cloud: cloud,
 			Cost: r.Price, DiskCost: max(c.DiskCost, r.DiskCost), TransferCost: c.TransferCost,
-			Start: f.now(), Alive: f.now(), Tracked: true,
+			Start: began, Alive: f.now(), Tracked: true,
 			Host: c.Host, CPU: c.CPU, Curators: l.Env["STET_WORKER_EDITS"] == "1", For: plan.what, Round: plan.round, Report: plannedReport}
 		// Seen from its start: a machine that asks for work before the next look still has its
 		// boot counted (calibrate.go). Lium's first, at 41 s, never was.
@@ -2796,9 +2891,6 @@ func (f *Fleet) end(ctx context.Context, v *View, endings []Ending) error {
 		endAt := f.now()
 		if rec != nil {
 			rec.Why, rec.Cause = why, cause
-			if rec.Stopped {
-				rec.markStopped(endAt)
-			}
 		}
 		f.event(r, handle, "ended", why)
 		if err := f.retire(v.Ledger, key, endAt); err != nil {

@@ -1835,9 +1835,9 @@ func (a *App) claim(ctx context.Context, acctID int64, h *Hello) (*Handed, error
 		}
 		// Said with every request, and nothing when it has not graded yet: a key moves from
 		// one rented machine to the next, and the last one's GPU may have been another.
-		acct.PassSeconds = 0
+		acct.PassSeconds, acct.PassSeason = 0, ""
 		if p := h.PassSeconds; finite(p) && p > 0 && p < 86400 {
-			acct.PassSeconds = p
+			acct.PassSeconds, acct.PassSeason = p, a.season.Digest
 		}
 		tx.touch(acct)
 		if canEdit && a.established(acct) {

@@ -1362,22 +1362,25 @@ def _pass_path() -> Path:
     return config_dir() / "pass.json"
 
 
-def saved_pass(scale: str, gpu) -> float | None:
+def saved_pass(scale: str, gpu, season_digest: str | None = None) -> float | None:
     """How long this machine last took to train a grade's student at this scale, in seconds,
-    as kept from its latest grade; None before it has graded. Said with every request for
-    work (stet 0.4.4), so that the server can tell whether one more grade fits before an exam,
-    and which machines are the fastest."""
+    as kept from its latest grade; None before it has graded. Scoped by season_digest when given
+    so pass times from an earlier season (or legacy unkeyed entries) are treated as unknown until
+    the first current-season grade. Said with every request for work (stet 0.4.4), so that the
+    server can tell whether one more grade fits before an exam, and which machines are fastest."""
     try:
         d = json.loads(_pass_path().read_text())
     except (OSError, ValueError):
         return None
     if not isinstance(d, dict) or d.get("scale") != scale or d.get("gpu") != gpu:
         return None
+    if season_digest is not None and d.get("season_digest") != season_digest:
+        return None
     x = d.get("seconds")
     return float(x) if isinstance(x, (int, float)) and not isinstance(x, bool) and 0 < x < 86400 else None
 
 
-def note_pass(scale: str, gpu, result) -> None:
+def note_pass(scale: str, gpu, result, season_digest: str | None = None) -> None:
     """Keep how long the student of a grade just trained took (its result's train.seconds)."""
     try:
         x = float(result["train"]["seconds"])
@@ -1385,11 +1388,14 @@ def note_pass(scale: str, gpu, result) -> None:
         return
     if not 0 < x < 86400:
         return
+    payload: dict = {"scale": scale, "gpu": gpu, "seconds": round(x, 2), "at": int(time.time())}
+    if season_digest:
+        payload["season_digest"] = season_digest
     path = _pass_path()
     tmp = path.with_name(f"{path.name}.tmp{os.getpid()}")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp.write_text(json.dumps({"scale": scale, "gpu": gpu, "seconds": round(x, 2), "at": int(time.time())}))
+        tmp.write_text(json.dumps(payload))
         os.replace(tmp, path)
     except OSError:
         tmp.unlink(missing_ok=True)  # it only helps the server plan: without it, one grade at a time
@@ -1948,7 +1954,7 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
             # Scope early-grade exclusion strictly to rounds that timed out on this worker,
             # keeping `early=True` so newer rounds can still hand out pre-exam grades normally.
             ask["skip_early_rounds"] = sorted(exam_timed_out)[-32:]
-        if (p := saved_pass(scale_name, gpu_name)) is not None:
+        if (p := saved_pass(scale_name, gpu_name, season.digest)) is not None:
             ask["pass_seconds"] = p
         return ask
 
@@ -2145,7 +2151,7 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
                         del bases[rid]  # a round nothing waits for any more
                     got = _grade_job(job, season, scale, device, key, out, work, bases=bases)
                     if isinstance(got, Pending):
-                        note_pass(scale_name, gpu_name, getattr(got.trained, "result", None))
+                        note_pass(scale_name, gpu_name, getattr(got.trained, "result", None), season.digest)
                         waiting[job_id] = got
                         holding = None
                         remove_tree(work)
@@ -2155,7 +2161,7 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
                         out.line("", out.dim("trained; it sits the exam once it is posted"))
                         continue
                     result, base = got
-                    note_pass(scale_name, gpu_name, result)
+                    note_pass(scale_name, gpu_name, result, season.digest)
                     payload = slim_result(result, base)
                     path = f"/api/v1/jobs/{job_id}/result"
             except RoundRefused as err:

@@ -263,6 +263,22 @@ def _pin_round_exam(rnd, scale):
     return hours, pk, exam
 
 
+def _check_replayable_exam(rnd, exam) -> None:
+    """Fail fast before training when an official round's public replay has zero replayable items."""
+    if exam is None or len(exam) > 0:
+        return
+    from . import data
+
+    meta = data.round_exam_meta(rnd)
+    if meta.get("public_subset") and meta.get("total_items"):
+        die(
+            f"round {rnd.id} has no publicly replayable items "
+            f"(0 of {meta['total_items']:,} items are openly licensed; "
+            f"{meta['withheld_items']:,} third-party items withheld)"
+        )
+    die(f"round {rnd.id} has no exam items to replay")
+
+
 def _with_baseline(
     result: dict,
     rnd,
@@ -433,6 +449,8 @@ def cmd_run(args):
         work = project.path / ".stet" / "runs" / f"{stamp}-{rnd.id}-{scale.name}"
         work.mkdir(parents=True, exist_ok=True)
         out.line("", out.bold(f"stet · {project.name} · {rnd.kind} round {rnd.id} · {scale.name} · {device.type}"))
+        pinned_hours, pinned_pk, pinned_exam = _pin_round_exam(rnd, scale)
+        _check_replayable_exam(rnd, pinned_exam)
         bundle = project.path
         if sandbox != "none":
             # Run what `stet submit` would send, unpacked as a verifier unpacks it: a file the
@@ -443,7 +461,6 @@ def cmd_run(args):
             except ProjectError as e:
                 die(str(e))
             bundle = work / "bundle"
-        pinned_hours, pinned_pk, pinned_exam = _pin_round_exam(rnd, scale)
         try:
             result = run_round(
                 bundle, project.entry, rnd, scale, work, sandbox=sandbox, device=device,
@@ -596,6 +613,7 @@ def cmd_score(args):
     device = pick_device(args.device)
     out.line("", out.bold(f"stet score · {args.script} · {rnd.kind} round {rnd.id} · {scale.name} · {device.type}"))
     pinned_hours, pinned_pk, pinned_exam = _pin_round_exam(rnd, scale)
+    _check_replayable_exam(rnd, pinned_exam)
     result = grade_round(
         rnd, scale, script, device=device, progress=out.progress("training"), log=lambda m: out.line("", out.dim(m)),
         exam=pinned_exam,
@@ -616,6 +634,7 @@ def cmd_baseline(args):
     out = Out(quiet=args.quiet)
     season, scale, rnd = resolve_round(args)
     _, pinned_pk, pinned_exam = _pin_round_exam(rnd, scale)
+    _check_replayable_exam(rnd, pinned_exam)
     base = baseline(
         rnd,
         scale,

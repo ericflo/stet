@@ -139,6 +139,8 @@ type Rental struct {
 	Status       string  // the market's own word
 	Created      time.Time
 	StoppedAt    time.Time // trustworthy provider stop timestamp when reported (zero when unknown)
+	ResumedAt    time.Time // trustworthy provider resume timestamp when reported (zero when unknown)
+	EndedAt      time.Time // trustworthy provider termination/end timestamp when reported (zero when unknown)
 	Terminating  bool      // persisted outstanding termination (e.g. failed `workers resolve --end`)
 	// What the market says of the machine itself, for seeing why one does not start: whether
 	// its container is up ("yes", "no", or "" where the market does not say), its phase in

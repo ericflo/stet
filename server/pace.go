@@ -155,7 +155,7 @@ func (j *judge) fastFirst(rd *Round, q *asker, offers []offer) []offer {
 // none, or a machine that does not say its GPU, counts as the slowest.
 func (j *judge) passOf(acct *Account, scale string) float64 {
 	if j.passes == nil {
-		j.passes = passTimes(j.s, j.a.cfg.Scale)
+		j.passes = passTimes(j.s, j.a.cfg.Scale, j.a.season.Digest)
 	}
 	if p, ok := j.passes[scale][readHardware(acct.Hardware).gpuName()]; ok {
 		return p
@@ -166,8 +166,9 @@ func (j *judge) passOf(acct *Account, scale string) float64 {
 const passesKept = 10 // settled grades of each kind of GPU counted, the latest
 
 // passTimes is the median pass by scale and GPU. What the machines last said is at the scale
-// rounds are drawn at now, the server's.
-func passTimes(s *State, scale string) map[string]map[string]float64 {
+// rounds are drawn at now, the server's, scoped to seasonDigest so timings persisted on returning
+// accounts from an earlier season never contaminate a new season's scheduler.
+func passTimes(s *State, scale, seasonDigest string) map[string]map[string]float64 {
 	type sample struct {
 		round int
 		at    int64
@@ -202,6 +203,9 @@ func passTimes(s *State, scale string) map[string]map[string]float64 {
 		}
 	}
 	for _, acct := range s.Accounts {
+		if seasonDigest != "" && acct.PassSeason != seasonDigest {
+			continue
+		}
 		add(scale, readHardware(acct.Hardware).gpuName(), sample{secs: acct.PassSeconds})
 	}
 	out := map[string]map[string]float64{}

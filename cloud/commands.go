@@ -508,6 +508,7 @@ func tick(ctx context.Context, f *Fleet) (err error) {
 	}
 	rec.decided(d, next)
 	ended := len(v.Ledger.Pods)
+	preLive := v.liveWorkerCount()
 	if err := f.end(ctx, v, d.End); err != nil {
 		return err
 	}
@@ -515,7 +516,7 @@ func tick(ctx context.Context, f *Fleet) (err error) {
 	f.release(ctx, d.Release)
 	// If ending idle/stopped workers freed a slot or hourly headroom while a required examiner is
 	// still absent, give the examiner an immediate second chance before launching new workers.
-	if f.examiner != nil && v.ExaminerLive == 0 && needExaminer && exErr == nil && snapErr == nil && !f.o.DryRun && rec.Ended > 0 && !v.hourlyUnknown() && v.liveWorkerCount() < f.o.MaxWorkers {
+	if f.examiner != nil && v.ExaminerLive == 0 && needExaminer && exErr == nil && snapErr == nil && !f.o.DryRun && (rec.Ended > 0 || v.liveWorkerCount() < preLive) && !v.hourlyUnknown() && v.liveWorkerCount() < f.o.MaxWorkers {
 		reconcileTickExaminer()
 		reserved = v.ExaminerLive
 		if reserved == 0 && needExaminer {
@@ -1033,9 +1034,6 @@ func cmdWorkersResolve(ctx context.Context, f *Fleet, end bool, clearIDs ...stri
 			continue
 		}
 		endAt := now
-		if rec.Stopped {
-			rec.markStopped(now)
-		}
 		if !end {
 			if lu, ok := m.(rentalLookup); ok {
 				if _, exists, lerr := lu.Lookup(ctx, rec.ID); lerr == nil && !exists {
@@ -1235,12 +1233,13 @@ func cmdWorkersResolve(ctx context.Context, f *Fleet, end bool, clearIDs ...stri
 		}
 		alive := now
 		endAt := now
-		var stoppedAt time.Time
+		var stoppedAt, stoppedSeen time.Time
 		if p.State == "stopped" {
 			// Use a trustworthy provider stop timestamp when available; otherwise preserve the
 			// conservative compute-rate accrual reserved while pending up through this first
 			// confirmed stop, then accrue storage from now forward.
 			stoppedAt = resolveStopTime(start, now, p.StoppedAt)
+			stoppedSeen = now
 		} else if !p.live() {
 			alive = start
 			endAt = start
@@ -1256,7 +1255,7 @@ func cmdWorkersResolve(ctx context.Context, f *Fleet, end bool, clearIDs ...stri
 		rec := &podRecord{
 			ID: p.ID, Market: p.Market, Handle: pr.Handle, GPU: gpu, Cloud: pr.Cloud, PendingID: pr.ID,
 			Cost: pr.Cost, DiskCost: pr.DiskCost, TransferCost: pr.TransferCost, PartialCost: !validRate(pr.Cost),
-			Start: start, Alive: alive, StoppedAt: stoppedAt, Tracked: true, Stopped: p.State == "stopped",
+			Start: start, Alive: alive, StoppedAt: stoppedAt, StoppedSeen: stoppedSeen, Tracked: true, Stopped: p.State == "stopped",
 			Grades: pr.Grades, Host: host, CPU: pr.CPU, Curators: pr.Curators,
 			For: pr.For, Round: pr.Round, Report: pr.Report,
 		}
@@ -1387,9 +1386,6 @@ func cmdDownRental(ctx context.Context, f *Fleet, market, id string) error {
 	}
 	if rec != nil {
 		endAt := f.now()
-		if rec.Stopped {
-			rec.markStopped(endAt)
-		}
 		if err := f.retire(l, key, endAt); err != nil {
 			return fmt.Errorf("ended probe %s on %s, but retiring ledger entry failed: %w", id, marketTitle(market), err)
 		}

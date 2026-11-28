@@ -315,3 +315,52 @@ func TestARentedMachineIsHandedGradesOnlyOnceTheyWouldKeepItBusyUntilNearTheExam
 	}
 	w.check()
 }
+
+// Review 27 P2 #6 (server defense-in-depth): persisted Account.PassSeconds from an earlier season
+// (or legacy unkeyed accounts) MUST NOT leak into passTimes or /api/v1/admin/work after rollover.
+func TestReview27PassTimesScopedBySeasonDigest(t *testing.T) {
+	pub, priv := newKey()
+	w := newWorld(t, pub)
+	anchor := w.join("anchor-one", priv)
+	bob := w.rented(anchor, "bob")
+
+	// Seed a returning Season 2 account with legacy unkeyed PassSeconds=600 (or old season digest).
+	var bobID int64
+	w.app.st.update(context.Background(), func(tx *Tx) error {
+		for _, acct := range tx.s.Accounts {
+			if acct.Pubkey == bob.pub {
+				bobID = acct.ID
+				acct.Hardware = []byte(`{"gpu":"RTX 4090","device":"cuda","backend":"cuda"}`)
+				acct.PassSeconds = 600
+				acct.PassSeason = "old-s2-digest"
+				tx.touch(acct)
+				break
+			}
+		}
+		return nil
+	})
+	w.app.st.view(func(s *State) {
+		pt := passTimes(s, w.app.cfg.Scale, w.app.season.Digest)
+		if _, ok := pt[w.app.cfg.Scale]["RTX 4090"]; ok {
+			t.Fatalf("stale season PassSeconds leaked into passTimes: %+v", pt)
+		}
+	})
+	if m := w.machine(w.work(anchor), "bob"); m.PassSeconds != 0 {
+		t.Fatalf("stale season PassSeconds leaked into /admin/work: %+v", m)
+	}
+
+	// Once bob reports a current-season pass time (1800s), PassSeason stamps the active season.
+	w.waiting(bob, "RTX 4090", 1800)
+	w.app.st.view(func(s *State) {
+		if got := s.Accounts[bobID].PassSeason; got != w.app.season.Digest {
+			t.Fatalf("expected PassSeason=%q, got %q", w.app.season.Digest, got)
+		}
+		pt := passTimes(s, w.app.cfg.Scale, w.app.season.Digest)
+		if got := pt[w.app.cfg.Scale]["RTX 4090"]; got != 1800 {
+			t.Fatalf("expected current-season pass time 1800, got %v", got)
+		}
+	})
+	if m := w.machine(w.work(anchor), "bob"); m.PassSeconds != 1800 {
+		t.Fatalf("expected /admin/work PassSeconds=1800, got %+v", m)
+	}
+}
