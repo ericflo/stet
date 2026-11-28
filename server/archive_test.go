@@ -102,6 +102,26 @@ func TestAFinishedSeasonKeepsItsPages(t *testing.T) {
 	if _, _, rounds := get("/rounds"); !strings.Contains(rounds, "Rounds of earlier seasons") {
 		t.Error("the rounds page does not mention the earlier seasons' rounds")
 	}
+	// Top-level /rounds/<archived-season>-o<idx> links (e.g. /rounds/s2-o00001) redirect 301
+	// to their archived season page rather than returning 404.
+	for _, a := range w.app.site.archives {
+		for key := range a.pages {
+			if id, ok := strings.CutPrefix(key, "rounds/"); ok && strings.HasPrefix(id, a.Meta.ID+"-") {
+				req, _ := http.NewRequest("GET", w.srv.URL+"/rounds/"+id, nil)
+				req.Host = "site.test"
+				resp, err := http.DefaultTransport.RoundTrip(req)
+				if err != nil {
+					t.Fatal(err)
+				}
+				resp.Body.Close()
+				wantLoc := "/seasons/" + a.Meta.ID + "/rounds/" + id
+				if resp.StatusCode != http.StatusMovedPermanently || resp.Header.Get("Location") != wantLoc {
+					t.Errorf("GET /rounds/%s: HTTP %d Location=%q, want 301 %q", id, resp.StatusCode, resp.Header.Get("Location"), wantLoc)
+				}
+				break
+			}
+		}
+	}
 }
 
 // The copy a finished season is archived from is read into memory, and never with a real

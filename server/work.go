@@ -46,6 +46,14 @@ type WorkRound struct {
 	// that have measured it or hold a grade that asked them to. Such a machine's first
 	// grade of the round is two training passes; any other's is one.
 	BaselinesWanted int `json:"baselines_wanted"`
+	// BaselineDisputed is true when the round's established baselines disagree beyond
+	// tolerance and need a fresh independent machine that has not yet measured it.
+	BaselineDisputed bool `json:"baseline_disputed,omitempty"`
+	// FreshGradersWanted counts fresh grading machines needed when grades are waiting that
+	// no currently idle organiser machine is eligible to take (e.g. a baseline or script tie
+	// where the idle machines have already measured or graded the disputed item). Non-nil 0
+	// explicitly signals that an idle organiser machine already suffices.
+	FreshGradersWanted *int `json:"fresh_graders_wanted,omitempty"`
 }
 
 // WorkMachine is one of the organisers' accounts, as the judge sees it now.
@@ -103,6 +111,12 @@ type Work struct {
 	FarmLongWaiting int `json:"farm_long_waiting"`
 	// Paused is when the organisers paused the rounds (0: they are not): none is drawn.
 	Paused int64 `json:"paused,omitempty"`
+	// BackoffUntil is when on-demand automatic draws will resume after two consecutive
+	// rounds settled with no baseline (0: not backed off).
+	BackoffUntil int64 `json:"backoff_until,omitempty"`
+	// LeaseSeconds is the server's job lease (STET_LEASE), so the fleet can refuse GPUs
+	// too slow to finish a two-pass baseline grade inside it.
+	LeaseSeconds int `json:"lease_seconds,omitempty"`
 	// EarlyGradesPerMachine is the most grades one machine may hold before an exam, trained
 	// and waiting for it; FastFirstSeconds how long after an exam is posted the grades scores
 	// wait for are kept for the faster machines around (pace.go). They are counted in
@@ -122,55 +136,10 @@ type Work struct {
 func (a *App) work(s *State) Work {
 	j := a.newJudge(s)
 	out := Work{Rounds: []WorkRound{}, Machines: []WorkMachine{}, EarlyGradesPerMachine: earlyGradesPerMachine, FastFirstSeconds: fastFirstSeconds,
-		EarlyWindowSeconds: int(a.cfg.EarlyWindow.Seconds())}
+		EarlyWindowSeconds: int(a.cfg.EarlyWindow.Seconds()), LeaseSeconds: int(a.cfg.Lease.Seconds())}
 	fresh := &asker{acct: &Account{ID: -1, Anchor: true, Worker: true}, est: true, gpuMake: "cuda"}
 	early := &asker{acct: &Account{ID: -3, Anchor: true, Worker: true}, est: true, gpuMake: "cuda", early: true}
 	runner := &asker{acct: &Account{ID: -2, Anchor: true, Worker: true}, est: true, canEdit: true, gpuMake: "cuda"}
-	for _, rd := range openRounds(s) {
-		states := j.states(rd)
-		closing := j.closing(states)
-		wr := WorkRound{ID: roundID(a.season.ID, rd.Idx), Entries: len(states), ExamAt: rd.ExamAt, DrawnAt: rd.DrawnAt, ExamDue: examDue(s, rd),
-			BaselinesWanted: j.baselinesWanted(rd)}
-		for _, st := range states {
-			wr.EditsUnderWay += len(st.LiveEdits)
-			if len(st.LiveEdits) == 0 && j.anyone(st, nil) {
-				wr.RunsWaiting++
-			}
-			for _, sc := range st.Scripts {
-				wr.GradesUnderWay += len(sc.Live)
-			}
-			for _, o := range j.offers(st, fresh, closing) {
-				if o.kind == "grade" && o.required {
-					wr.GradesWanted++
-				}
-			}
-			if !examPosted(rd) {
-				// Every grade a score will wait on: before the exam, one taken alongside
-				// another is not held back, and nothing is gained by taking them in turn.
-				for _, sc := range st.Scripts {
-					if j.mayGrade(st, sc, early.acct) {
-						wr.GradesEarly += max(0, j.short(sc)-len(sc.Live))
-					}
-				}
-			}
-			if j.mayRun(st, runner) {
-				wr.RunsWanted++
-			}
-		}
-		out.Rounds = append(out.Rounds, wr)
-	}
-	for _, q := range j.active() {
-		if q.canEdit {
-			out.Runners++
-		}
-	}
-	if r := s.roundWithStatus("scheduled"); r != nil && s.Meta.Paused == 0 {
-		out.NextDrawAt = r.DrawAt
-	}
-	out.Paused = s.Meta.Paused
-	soon, _ := a.earlyDraw(s)
-	out.Waiting = soon != nil
-	out.FarmWaiting, out.FarmUnderWay, out.FarmLongWaiting = farmWaiting(s, now())
 	busy, long := map[int64]string{}, map[int64]bool{}
 	holding, untrained := map[int64]int{}, map[int64]bool{}
 	// Training one of the organisers' own students counts as at work, so that a rented machine is
@@ -193,11 +162,114 @@ func (a *App) work(s *State) Work {
 			untrained[c.AccountID] = untrained[c.AccountID] || c.Kind != "grade" || c.TrainedAt == 0
 		}
 	}
+	active := j.active()
+	for _, rd := range openRounds(s) {
+		states := j.states(rd)
+		closing := j.closing(states)
+		disputed := j.baselineDisputed(rd)
+		wr := WorkRound{ID: roundID(a.season.ID, rd.Idx), Entries: len(states), ExamAt: rd.ExamAt, DrawnAt: rd.DrawnAt, ExamDue: examDue(s, rd),
+			BaselinesWanted: j.baselinesWanted(rd), BaselineDisputed: disputed}
+		tieBreakOffer := false
+		estGradesUnderWay := 0
+		for _, st := range states {
+			wr.EditsUnderWay += len(st.LiveEdits)
+			if len(st.LiveEdits) == 0 && j.anyone(st, nil) {
+				wr.RunsWaiting++
+			}
+			for _, sc := range st.Scripts {
+				wr.GradesUnderWay += len(sc.Live)
+				for _, c := range sc.Live {
+					if j.est[c.AccountID] {
+						estGradesUnderWay++
+					}
+				}
+			}
+			for _, o := range j.offers(st, fresh, closing) {
+				if o.kind == "grade" && o.required {
+					if o.baselineTie {
+						tieBreakOffer = true
+					} else {
+						wr.GradesWanted++
+					}
+				}
+			}
+			if !examPosted(rd) {
+				// Every grade a score will wait on: before the exam, one taken alongside
+				// another is not held back, and nothing is gained by taking them in turn.
+				for _, sc := range st.Scripts {
+					if j.mayGrade(st, sc, early.acct) {
+						wr.GradesEarly += max(0, j.short(sc)-len(sc.Live))
+					}
+				}
+			}
+			if j.mayRun(st, runner) {
+				wr.RunsWanted++
+			}
+		}
+		if wr.GradesWanted == 0 && wr.BaselinesWanted > 0 && tieBreakOffer {
+			wr.GradesWanted = 1
+		}
+		if wr.GradesWanted > 0 {
+			idleAnchors, eligibleIdle := 0, 0
+			for _, q := range active {
+				if !q.acct.Anchor || busy[q.acct.ID] != "" {
+					continue
+				}
+				idleAnchors++
+				canTake := false
+				for _, st := range states {
+					for _, o := range j.offers(st, q, closing) {
+						if o.kind == "grade" && o.required {
+							canTake = true
+							break
+						}
+					}
+					if canTake {
+						break
+					}
+				}
+				if canTake {
+					eligibleIdle++
+				}
+			}
+			freshWanted := 0
+			if (disputed && eligibleIdle == 0) || (idleAnchors > 0 && eligibleIdle == 0 && estGradesUnderWay == 0) {
+				freshWanted = 1
+			}
+			wr.FreshGradersWanted = &freshWanted
+		}
+		out.Rounds = append(out.Rounds, wr)
+	}
+	for _, q := range active {
+		if q.canEdit {
+			out.Runners++
+		}
+	}
+	if r := s.roundWithStatus("scheduled"); r != nil && s.Meta.Paused == 0 {
+		out.NextDrawAt = r.DrawAt
+	}
+	out.Paused = s.Meta.Paused
+	out.BackoffUntil = a.backoffUntil(s)
+	if a.onDemandOnly() {
+		at, blocked := a.demandSlot(s)
+		sched := s.roundWithStatus("scheduled")
+		out.Waiting = s.Meta.Paused == 0 && s.roundWithStatus("open") == nil &&
+			a.savedCrawl(s) != nil && a.waiting(s) && !blocked &&
+			(sched == nil || at < sched.DrawAt)
+	} else {
+		soon, _ := a.earlyDraw(s)
+		out.Waiting = soon != nil
+	}
+	out.FarmWaiting, out.FarmUnderWay, out.FarmLongWaiting = farmWaiting(s, at)
 	failed, refused, trouble := troubles(s, at)
 	for _, acct := range s.Accounts {
 		if acct.Anchor {
+			passSecs := acct.PassSeconds
+			if (a.season.Digest != "" && acct.PassSeason != a.season.Digest) || acct.PassScale != a.cfg.Scale {
+				passSecs = 0
+			}
 			out.Machines = append(out.Machines, WorkMachine{Handle: acct.Handle, Worker: acct.Worker, LastSeen: acct.LastSeen, Busy: busy[acct.ID], Long: busy[acct.ID] == "farm" && long[acct.ID],
-				Holding: holding[acct.ID], Ready: holding[acct.ID] > 0 && !untrained[acct.ID], PassSeconds: acct.PassSeconds,
+				Holding: holding[acct.ID], Ready: holding[acct.ID] > 0 && !untrained[acct.ID], PassSeconds: passSecs,
 				Curators: acct.RunnerSeen != 0, CuratorsWhy: acct.CuratorsWhy, Failed: failed[acct.ID], Refused: refused[acct.ID], Trouble: trouble[acct.ID],
 				Harness: acct.Harness})
 		}
@@ -219,7 +291,7 @@ func (a *App) apiAdminWork(w http.ResponseWriter, r *http.Request) {
 // stopped are the reasons a job is handed back for that say nothing against the machine: it
 // was stopped, the round ended, the organisers ended it, or it did not say (before the server
 // kept reasons).
-var stopped = map[string]bool{"": true, "interrupted": true, "the verifier stopped": true, "the round ended before its exam was posted": true, endedReason: true}
+var stopped = map[string]bool{"": true, "interrupted": true, "the verifier stopped": true, "the round ended before its exam was posted": true, "timed out waiting for the round's exam": true, endedReason: true}
 
 // troubles counts, for each of the organisers' accounts, the jobs it took since its key's
 // last machine was ended (and within a day) that failed or whose result was refused, and says

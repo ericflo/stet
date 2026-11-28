@@ -215,14 +215,15 @@ def test_the_example_that_uses_a_model_names_files_the_season_allows(season):
 
     root = Path(__file__).resolve().parents[1] / "examples" / "reader"
     project = load_project(root)
-    assert len(project.assets) >= 2 and all(a.path.startswith("smollm2-135m/") for a in project.assets)
-    assert sum(a.size for a in project.assets) < 1 << 30  # a small model: this is the pattern, not the limit
+    assert len(project.assets) >= 2 and all(a.path.startswith("qwen3-0.6b/") for a in project.assets)
+    assert sum(a.size for a in project.assets) < 2 << 30  # a 0.6B model: this is the pattern, not the limit
     assert len({a.url.split("/resolve/")[1].split("/")[0] for a in project.assets}) == 1  # one commit
     source = (root / "curator.py").read_text()
     compile(source, "curator.py", "exec")
-    assert 'task.asset("smollm2-135m")' in source and "task.device()" in source
+    assert 'task.asset("qwen3-0.6b")' in source and "task.device()" in source
     main = source[source.index("def main()") :]
-    assert main.index("task.write(") < main.index("read_candidates(")  # a script is written before the model is even loaded
+    assert "task.write(" not in main[: main.index("_score_vllm(")]  # no silent unrated fallback before model runs
+    assert "raise RuntimeError" in main and "task.write(" in main
 
 
 # --- when a file cannot be had ------------------------------------------------------------------

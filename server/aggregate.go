@@ -15,10 +15,12 @@ import (
 // to the others of its group. Inside a pillar each part (a family of generators, or a kind of
 // writing) counts the same; inside a part each language counts by its share of the round's
 // corpus, the small ones measured together as "other", programming languages together as one,
-// which takes half beside natural languages; inside a language each stratum (format/kind)
-// counts the same, each a trimmed mean of gains clipped to a few robust widths. A language or
-// a stratum with fewer than the season's "small" items counts in proportion to how many it has.
-// The season names every part: an item of any other part is not scored, it is refused.
+// taking code_share beside natural languages (default 0.5; 0.15 in Season 3); inside a language
+// each stratum (format/kind) counts the same, each a trimmed mean of gains clipped to a few
+// robust widths. A language or a stratum with fewer than the season's "small" items counts in
+// proportion to how many it has. The season names every part: an item of any other part is not
+// scored, it is refused. A group declared with 0.0 weight is scored per pillar for diagnostics
+// without entering the headline score.
 //
 // To give the harness's floating point, not just its arithmetic, everything is added in the
 // order the harness adds it, with the compensated sum Python's sum() does, and no product is
@@ -41,14 +43,24 @@ type FreshPlan struct {
 // ExamPlan is what a season's score is made of: exam.groups, exam.pillars and exam.aggregate of
 // its file, as tools/export_season.py writes them. The pillars name every part of the exam.
 type ExamPlan struct {
-	Groups    map[string]float64 `json:"groups"`    // each group's share of the score
-	Pillars   []PlanPillar       `json:"pillars"`   // in the order they are shown
-	Generated []string           `json:"generated"` // the parts that are families of generated problems; the others are kinds of writing
-	Clip      float64            `json:"clip"`      // robust widths
-	Trim      float64            `json:"trim"`      // from each end, within a stratum
-	Small     int                `json:"small"`     // items a language or a stratum needs to count in full
-	Floor     int                `json:"answer_floor_bytes"`
-	Fresh     FreshPlan          `json:"fresh"`
+	Groups             map[string]float64 `json:"groups"`    // each group's share of the score
+	Pillars            []PlanPillar       `json:"pillars"`   // in the order they are shown
+	Generated          []string           `json:"generated"` // the parts that are families of generated problems; the others are kinds of writing
+	Clip               float64            `json:"clip"`      // robust widths
+	Trim               float64            `json:"trim"`      // from each end, within a stratum
+	Small              int                `json:"small"`     // items a language or a stratum needs to count in full
+	WeightOtherByShare bool               `json:"weight_other_by_share,omitempty"`
+	CodeShare          *float64           `json:"code_share,omitempty"` // share given to code beside natural languages (default 0.5)
+	Floor              int                `json:"answer_floor_bytes"`
+	MinPillarItems     int                `json:"min_pillar_items,omitempty"`
+	Fresh              FreshPlan          `json:"fresh"`
+}
+
+func (p *ExamPlan) codeShare() float64 {
+	if p.CodeShare != nil {
+		return *p.CodeShare
+	}
+	return 0.5
 }
 
 type PlanPillar struct {
@@ -102,6 +114,14 @@ func (p *ExamPlan) weights(present map[string]bool) map[string]float64 {
 	}
 	total := pySum(shares)
 	out := map[string]float64{}
+	if total <= 0 {
+		for _, g := range groups {
+			for _, name := range byGroup[g] {
+				out[name] = 0.0
+			}
+		}
+		return out
+	}
 	for _, g := range groups {
 		for _, name := range byGroup[g] {
 			out[name] = p.Groups[g] / total / float64(len(byGroup[g]))
@@ -199,19 +219,24 @@ func groupInOrder(idx []int, key func(int) string) ([]string, map[string][]int) 
 }
 
 // part is a part's score: each language cell's balanced score by its weight, added in the
-// cells' sorted order.
+// cells' sorted order. Inside the pooled small-language cell "other", each item is weighted by
+// its language's crawl share.
 func (p *ExamPlan) part(items []ItemInfo, gains []float64, idx []int, shares map[string]float64) float64 {
 	_, byLang := groupInOrder(idx, func(i int) string { return items[i].Lang })
 	counts := make(map[string]int, len(byLang))
 	for lang, ix := range byLang {
 		counts[lang] = len(ix)
 	}
-	cell, w := languageCells(counts, shares, p.Small)
+	cell, w := languageCells(counts, shares, p.Small, p.codeShare())
 	names, byCell := groupInOrder(idx, func(i int) string { return cell[items[i].Lang] })
 	sort.Strings(names)
 	terms := make([]float64, len(names))
 	for j, c := range names {
-		terms[j] = float64(w[c] * p.balanced(items, gains, byCell[c]))
+		var iw map[string]float64
+		if c == otherLang && p.WeightOtherByShare {
+			iw = shares
+		}
+		terms[j] = float64(w[c] * p.balanced(items, gains, byCell[c], iw))
 	}
 	return pySum(terms)
 }
@@ -220,8 +245,8 @@ func (p *ExamPlan) part(items []ItemInfo, gains []float64, idx []int, shares map
 // natural language with at least `small` items is a cell of its own; the others share the cell
 // "other". A cell's weight is its share of the round's corpus, a pooled cell's the sum of its
 // languages', and a cell with fewer than `small` items counts in proportion. Programming
-// languages together, beside natural languages, take half (in proportion, when they are few).
-func languageCells(counts map[string]int, shares map[string]float64, small int) (cell map[string]string, weight map[string]float64) {
+// languages together, beside natural languages, take codeShare (in proportion, when they are few).
+func languageCells(counts map[string]int, shares map[string]float64, small int, codeShare float64) (cell map[string]string, weight map[string]float64) {
 	var natural []string
 	for lang := range counts {
 		if lang != codeLang {
@@ -275,7 +300,7 @@ func languageCells(counts map[string]int, shares map[string]float64, small int) 
 		if len(weight) == 0 {
 			return cell, map[string]float64{codeLang: 1.0}
 		}
-		half := 0.5 * float64(min(k, small)) / float64(small)
+		half := codeShare * float64(min(k, small)) / float64(small)
 		for c, v := range weight {
 			weight[c] = float64(v * (1 - half))
 		}
@@ -284,21 +309,42 @@ func languageCells(counts map[string]int, shares map[string]float64, small int) 
 	return cell, weight
 }
 
+func langShare(lang string, shares map[string]float64) float64 {
+	s, ok := shares[lang]
+	if !ok || s <= 0 {
+		return otherShare
+	}
+	return s
+}
+
 // balanced is a language cell's score: its strata, in sorted order, each a trimmed mean of
-// its clipped gains, with equal weight; one with fewer than `small` items in proportion.
-func (p *ExamPlan) balanced(items []ItemInfo, gains []float64, idx []int) float64 {
+// its clipped gains (or crawl-share weighted trimmed mean of clipped gains inside the pooled
+// "other" cell), with equal weight; one with fewer than `small` items in proportion.
+func (p *ExamPlan) balanced(items []ItemInfo, gains []float64, idx []int, poolShares map[string]float64) float64 {
 	strata, byStratum := groupInOrder(idx, func(i int) string { return items[i].Stratum })
 	sort.Strings(strata)
 	terms := make([]float64, len(strata))
 	total := 0
 	for j, s := range strata {
-		vals := make([]float64, len(byStratum[s]))
-		for k, i := range byStratum[s] {
+		sidx := byStratum[s]
+		vals := make([]float64, len(sidx))
+		for k, i := range sidx {
 			vals[k] = gains[i]
+		}
+		cl := clipped(vals, p.Clip)
+		var mean float64
+		if poolShares == nil {
+			mean = trimmedMean(cl, p.Trim)
+		} else {
+			ws := make([]float64, len(sidx))
+			for k, i := range sidx {
+				ws[k] = langShare(items[i].Lang, poolShares)
+			}
+			mean = weightedTrimmedMean(cl, ws, p.Trim)
 		}
 		w := min(len(vals), p.Small)
 		total += w
-		terms[j] = float64(float64(w) * trimmedMean(clipped(vals, p.Clip), p.Trim))
+		terms[j] = float64(float64(w) * mean)
 	}
 	return pySum(terms) / float64(total)
 }
@@ -331,6 +377,56 @@ func clipped(vals []float64, k float64) []float64 {
 		}
 	}
 	return out
+}
+
+// weightedTrimmedMean cuts `trim` of the total weight from each tail of the values sorted
+// ascending, matching weighted_trimmed_mean in src/stet/exam/aggregate.py.
+func weightedTrimmedMean(vals, weights []float64, trim float64) float64 {
+	n := len(vals)
+	totalW := pySum(weights)
+	plain := func() float64 {
+		num := make([]float64, n)
+		for i := range vals {
+			num[i] = float64(weights[i] * vals[i])
+		}
+		return pySum(num) / totalW
+	}
+	if n < 3 || trim <= 0 || trim >= 0.5 || totalW <= 0 {
+		return plain()
+	}
+	lo, hi := float64(totalW*trim), float64(totalW*(1.0-trim))
+	if hi <= lo {
+		return plain()
+	}
+	type pair struct{ v, w float64 }
+	pairs := make([]pair, n)
+	for i := range vals {
+		pairs[i] = pair{vals[i], weights[i]}
+	}
+	sort.SliceStable(pairs, func(i, j int) bool { return pairs[i].v < pairs[j].v })
+	cum := 0.0
+	var num, den []float64
+	for _, p := range pairs {
+		nxt := cum + p.w
+		top := nxt
+		if hi < top {
+			top = hi
+		}
+		bot := cum
+		if lo > bot {
+			bot = lo
+		}
+		if kept := top - bot; kept > 0.0 {
+			num = append(num, float64(kept*p.v))
+			den = append(den, kept)
+		}
+		cum = nxt
+	}
+	denSum := pySum(den)
+	if denSum <= 0.0 {
+		return plain()
+	}
+	return pySum(num) / denSum
 }
 
 // trimmedMean is the mean of the values with int(n*trim) cut from each end.

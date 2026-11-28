@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -140,7 +141,13 @@ func cmdStatus(ctx context.Context, f *Fleet) error {
 		return err
 	}
 	now := f.now()
-	d := f.o.Policy.decideNext(v.Work, v.Workers, v.Today, now, f.nextGrades(ctx, v.Work))
+	statusPol := f.o.Policy
+	statusReserved := v.ExaminerLive
+	if statusReserved == 0 && f.o.MaxWorkers > 0 && f.o.Examiner.Addr != "" && roundNeedingExam(v.Work) != "" {
+		statusReserved = 1
+	}
+	statusPol.MaxWorkers = max(0, statusPol.MaxWorkers-statusReserved-v.extraWorkerLiveCount())
+	d := statusPol.decideNext(v.Work, v.Workers, v.Today, now, f.nextGrades(ctx, v.Work))
 	if len(v.Work.Rounds) == 0 {
 		fmt.Fprintln(f.out, "No round is open.")
 	}
@@ -155,6 +162,10 @@ func cmdStatus(ctx context.Context, f *Fleet) error {
 	if v.Work.Paused > 0 {
 		fmt.Fprintf(f.out, "Rounds paused since %s UTC: none is drawn (stet-cloud resume)\n", time.Unix(v.Work.Paused, 0).UTC().Format("Jan 2 15:04"))
 	}
+	if v.Work.BackoffUntil > 0 {
+		at := time.Unix(v.Work.BackoffUntil, 0)
+		fmt.Fprintf(f.out, "Automatic draws backed off until %s UTC (%s) after two empty rounds (`stet draw` overrides)\n", at.UTC().Format("15:04"), until(now, at))
+	}
 	if v.Work.NextDrawAt > 0 {
 		at := time.Unix(v.Work.NextDrawAt, 0)
 		fmt.Fprintf(f.out, "Next draw %s UTC (%s)\n", at.UTC().Format("15:04"), until(now, at))
@@ -167,7 +178,7 @@ func cmdStatus(ctx context.Context, f *Fleet) error {
 	rented := 0
 	for _, w := range v.Workers {
 		st := w.state(now, f.o.Policy)
-		if st == "free" {
+		if st == "free" || st == "pending" || w.Rental == nil {
 			continue
 		}
 		rented++
@@ -176,8 +187,14 @@ func cmdStatus(ctx context.Context, f *Fleet) error {
 			card += " (" + marketTitle(w.Rental.Market) + ")"
 		}
 		note := ""
-		if st == "starting" || st == "stopped" || st == "quiet" || w.Rental.Up == "no" {
-			note = "  · " + w.Rental.Detail // what its market says of it, while it is not at work
+		if st == "terminating" {
+			note = "  · outstanding termination (run `stet-cloud workers resolve --end`)"
+		} else if st == "unconfirmed" || st == "starting" || st == "stopped" || st == "quiet" || w.Rental.Up == "no" {
+			if msg := w.Rental.Detail; msg != "" {
+				note = "  · " + msg // what its market says of it, while it is not at work
+			} else if w.Rental.Status != "" {
+				note = "  · " + w.Rental.Status
+			}
 		}
 		if w.NoCurators != "" {
 			note += "  · grades only: " + w.NoCurators
@@ -185,13 +202,99 @@ func cmdStatus(ctx context.Context, f *Fleet) error {
 		if t := w.Machine.trouble(); t != "" && w.Machine.LastSeen >= w.Rental.Created.Unix() {
 			note += "  · " + t
 		}
-		fmt.Fprintf(f.out, "  %-14s %-8s %-26s $%.2f/h  up %s%s\n", w.Key.Handle, st, card, w.Rental.Price, now.Sub(w.Rental.Created).Round(time.Minute), note)
+		rate := fmt.Sprintf("$%.2f/h", w.Rental.Price)
+		if !validRate(w.Rental.Price) {
+			rate = "unknown/h"
+		}
+		fmt.Fprintf(f.out, "  %-14s %-11s %-26s %-9s up %s%s\n", w.Key.Handle, st, card, rate, now.Sub(w.Rental.Created).Round(time.Minute), note)
+		for _, ex := range w.ExtraRentals {
+			if ex == nil {
+				continue
+			}
+			rented++
+			ecard := ex.Card
+			if ex.Market != "runpod" {
+				ecard += " (" + marketTitle(ex.Market) + ")"
+			}
+			erate := fmt.Sprintf("$%.2f/h", ex.Price)
+			if !validRate(ex.Price) {
+				erate = "unknown/h"
+			}
+			est := ex.State
+			if ex.Terminating {
+				est = "terminating"
+			} else if ex.Unconfirmed && ex.State == "stopped" {
+				est = "unconfirmed"
+			}
+			fmt.Fprintf(f.out, "  %-14s %-11s %-26s %-9s up %s  · extra contract %s\n",
+				w.Key.Handle, est, ecard, erate, now.Sub(ex.Created).Round(time.Minute), ex.ID)
+		}
+	}
+	for _, orph := range v.OrphanRentals {
+		if orph == nil {
+			continue
+		}
+		rented++
+		card := orph.Card
+		if orph.Market != "runpod" {
+			card += " (" + marketTitle(orph.Market) + ")"
+		}
+		name := orph.Name
+		if name == "" {
+			name = orph.ID
+		}
+		orate := fmt.Sprintf("$%.2f/h", orph.Price)
+		if !validRate(orph.Price) {
+			orate = "unknown/h"
+		}
+		ost := orph.State
+		if orph.Terminating {
+			ost = "terminating"
+		} else if orph.Unconfirmed && orph.State == "stopped" {
+			ost = "unconfirmed"
+		}
+		fmt.Fprintf(f.out, "  %-14s %-11s %-26s %-9s up %s  · unpooled contract %s\n",
+			name, ost, card, orate, now.Sub(orph.Created).Round(time.Minute), orph.ID)
+	}
+	for _, pr := range v.PendingRents {
+		if pr == nil {
+			continue
+		}
+		rented++
+		card := pr.GPU + " (" + marketTitle(pr.Market) + ")"
+		prate := fmt.Sprintf("$%.2f/h", pr.Cost)
+		if !validRate(pr.Cost) {
+			prate = "unknown/h"
+		}
+		fmt.Fprintf(f.out, "  %-14s %-11s %-26s %-9s up %s  · uncertain create %s (run `stet-cloud workers resolve`)\n",
+			pr.Handle, "pending", card, prate, now.Sub(pr.Created).Round(time.Minute), pr.ID)
 	}
 	if rented == 0 {
 		fmt.Fprintf(f.out, "Nothing rented (%d keys in the pool).\n", len(v.Workers))
 	}
-	fmt.Fprintf(f.out, "\n$%.2f an hour now · about $%.2f today (UTC)\n", v.Hourly, v.Today)
-	fmt.Fprintf(f.out, "The work wants %d machines now (at most %d)", d.Target, f.o.MaxWorkers)
+	if ex := readExaminerState(f.o.Home); ex != nil && ex.InstanceID != "" {
+		fmt.Fprintf(f.out, "Examiner GPU: machine %s for %s ($%.2f/h, up %s)\n", ex.InstanceID, ex.RoundID, ex.Price, now.Sub(ex.Created).Round(time.Minute))
+	} else if ex != nil && ex.PendingRent {
+		fmt.Fprintf(f.out, "Examiner GPU: rental reservation %s pending for %s ($%.2f/h; run `stet-cloud examiner resolve` after verifying on Vast.ai)\n", ex.ReservedLabel, ex.RoundID, ex.Price)
+	} else if ex != nil && len(ex.Unresolved) > 0 {
+		fmt.Fprintf(f.out, "Examiner GPU: %d unresolved instance(s) awaiting teardown\n", len(ex.Unresolved))
+	} else if ex != nil && len(ex.PendingSpends) > 0 {
+		fmt.Fprintf(f.out, "Examiner GPU: idle (%d pending spend record(s) awaiting spent.jsonl flush)\n", len(ex.PendingSpends))
+	}
+	if v.hourlyUnknown() {
+		fmt.Fprintf(f.out, "\n$%.2f an hour now (incomplete: rate unknown on %s) · about $%.2f today (UTC)\n", v.Hourly, v.unknownRateSummary(), v.Today)
+		d.Launch = 0
+		if d.Note == "" {
+			d.Note = fmt.Sprintf("deferring new paid rentals until provider reports hourly rate for %s", v.unknownRateSummary())
+		}
+	} else {
+		fmt.Fprintf(f.out, "\n$%.2f an hour now · about $%.2f today (UTC)\n", v.Hourly, v.Today)
+	}
+	if statusReserved > 0 {
+		fmt.Fprintf(f.out, "The work wants %d worker machines now (at most %d workers + %d examiner = %d total)", d.Target, statusPol.MaxWorkers, statusReserved, f.o.MaxWorkers)
+	} else {
+		fmt.Fprintf(f.out, "The work wants %d machines now (at most %d)", d.Target, f.o.MaxWorkers)
+	}
 	if d.Launch > 0 || len(d.End) > 0 {
 		fmt.Fprintf(f.out, ": `stet-cloud scale` would rent %d and end %d", d.Launch, len(d.End))
 	}
@@ -227,6 +330,23 @@ func until(now, t time.Time) string {
 	return "in " + strings.TrimSuffix(d.String(), "0s")
 }
 
+func (f *Fleet) examinerReserveHourly() float64 {
+	if f.o.MaxHourly <= 0 {
+		return 0
+	}
+	reserve := f.o.Examiner.MaxPrice
+	if f.examiner != nil && validRate(f.examiner.cfg.MaxPrice) {
+		reserve = f.examiner.cfg.MaxPrice
+	}
+	if !validRate(reserve) {
+		reserve = 1.50
+	}
+	if reserve > f.o.MaxHourly {
+		reserve = f.o.MaxHourly
+	}
+	return reserve
+}
+
 // tick is one round of scale: look, decide, act. What it saw, decided and did is kept, a line a
 // look (history.go).
 func tick(ctx context.Context, f *Fleet) (err error) {
@@ -240,13 +360,22 @@ func tick(ctx context.Context, f *Fleet) (err error) {
 	defer func() { f.endLook(start, err) }()
 	v, err := f.look(ctx)
 	if err != nil {
+		if f.examiner != nil {
+			if v != nil && v.Work != nil {
+				if exErr := f.examiner.Reconcile(ctx, v.Work, ExaminerBudget{AccountingErr: err}); exErr != nil && !errors.Is(exErr, err) {
+					f.say("examiner: %v", exErr)
+				}
+			} else if exErr := f.examiner.EnforceTimeout(ctx); exErr != nil {
+				f.say("examiner: %v", exErr)
+			}
+		}
 		return err
 	}
 	rec.seenWork(v, f.o.Policy, f.now())
 	f.roundsSettled(ctx, v.Work)
 	f.keepBalances(ctx)
 	f.calibrate(ctx)
-	f.tickOffers = map[bool][]Offer{}
+	f.tickOffers = map[offerKey][]Offer{}
 	defer func() { f.tickOffers = nil }()
 	next := f.nextGrades(ctx, v.Work)
 	if f.offersDue() {
@@ -255,18 +384,404 @@ func tick(ctx context.Context, f *Fleet) (err error) {
 		}
 		f.st.site(ctx) // and the builds the server says it runs and hands out
 	}
-	d := f.o.Policy.decideNext(v.Work, v.Workers, v.Today, f.now(), next)
+	var exErr error
+	var snapErr error
+	reconcileTickExaminer := func() {
+		if f.examiner == nil {
+			return
+		}
+		var rateErr error
+		if v.hourlyUnknown() {
+			rateErr = fmt.Errorf("live hourly spend is incomplete (%s has no reported hourly rate)", v.unknownRateSummary())
+		}
+		budget := ExaminerBudget{
+			LiveWorkers:   v.liveWorkerCount(),
+			MaxWorkers:    f.o.MaxWorkers,
+			HourlyNow:     v.liveWorkerHourly(),
+			MaxHourly:     f.o.MaxHourly,
+			SpentToday:    v.Today,
+			DailyBudget:   f.o.DailyBudget,
+			AccountingErr: rateErr,
+			CurrentSpentToday: func() (float64, error) {
+				now := f.now()
+				f.refreshStaleDatedCharges(ctx, v.Ledger, v.AnsweredMarkets, now)
+				spentBase, serr := f.spentFor(v.Ledger, startOfDay(now), v.UnconfirmedKeys)
+				if serr != nil {
+					return 0, fmt.Errorf("reading daily spend: %w", serr)
+				}
+				_, _, exAcc, aerr := f.examinerSnapshot()
+				if aerr != nil {
+					return 0, aerr
+				}
+				return spentBase + exAcc, nil
+			},
+		}
+		if exErr = f.examiner.Reconcile(ctx, v.Work, budget); exErr != nil {
+			f.say("examiner: %v", exErr)
+		}
+		exLive, exHourly, exAccrued, sErr := f.examinerSnapshot()
+		snapErr = sErr
+		if sErr != nil {
+			f.say("examiner: %v", sErr)
+		} else {
+			v.Hourly = max(0, v.Hourly-v.ExaminerHourly) + exHourly
+			if spentBase, serr := f.spentFor(v.Ledger, startOfDay(f.now()), v.UnconfirmedKeys); serr == nil {
+				v.Today = spentBase + exAccrued
+			} else if exLive > 0 {
+				v.Today = max(0, v.Today-v.ExaminerAccrued) + exAccrued
+			}
+			v.ExaminerLive, v.ExaminerHourly, v.ExaminerAccrued = exLive, exHourly, exAccrued
+			if rec != nil {
+				rec.Hourly, rec.Today = v.Hourly, v.Today
+			}
+		}
+	}
+	reconcileTickExaminer()
+	now := f.now()
+	pol := f.o.Policy
+	needExaminer := roundNeedingExam(v.Work) != ""
+	reserved := v.ExaminerLive
+	reserveSlotOnly := false
+	if reserved == 0 && needExaminer {
+		if f.examiner != nil {
+			// Managed examiner: reserve a free slot against new worker launches, but defer any
+			// slot-reclaiming idle eviction until examiner admission confirms an affordable offer
+			// actually fits both --max and --max-hourly after eviction.
+			reserveSlotOnly = true
+		} else if f.o.Examiner.Addr != "" {
+			reserved = 1
+		}
+	}
+	pol.MaxWorkers = max(0, pol.MaxWorkers-reserved-v.extraWorkerLiveCount())
+	d := pol.decideNext(v.Work, v.Workers, v.Today, now, next)
+	for _, orph := range v.OrphanRentals {
+		if orph != nil && (orph.Terminating || ((orph.State == "stopped" || orph.State == "unknown") && !orph.Unconfirmed)) {
+			why := "stopped unpooled machine"
+			if orph.Terminating {
+				why = "outstanding termination on unpooled machine"
+			} else if orph.State == "unknown" {
+				statusWord := strings.ToLower(orph.Status)
+				if statusWord == "" {
+					statusWord = "unknown"
+				}
+				why = "unpooled machine in unrecoverable status (" + statusWord + ")"
+			}
+			d.End = append(d.End, Ending{Rental: orph, Why: why})
+		}
+	}
+	projectAfterEnds := func(ends []Ending) (endingWorkers map[*Worker]bool, projectedHourly float64, projectedLive int) {
+		endingWorkers = make(map[*Worker]bool, len(ends))
+		projectedHourly = v.Hourly
+		projectedLive = v.liveWorkerCount()
+		for _, e := range ends {
+			if e.Worker != nil && (e.Rental == nil || e.Rental == e.Worker.Rental) {
+				endingWorkers[e.Worker] = true
+			}
+			r := e.Rental
+			if r == nil && e.Worker != nil {
+				r = e.Worker.Rental
+			}
+			if r == nil {
+				continue
+			}
+			switch {
+			case r.live() || r.Unconfirmed:
+				projectedLive = max(0, projectedLive-1)
+				if validRate(r.Price) {
+					projectedHourly = max(0, projectedHourly-r.Price)
+				}
+			case r.State == "stopped" && !r.Offline:
+				diskRate := r.DiskCost
+				if recPod := v.Ledger.Pods[ledgerKey(r.Market, r.ID)]; recPod != nil && recPod.stoppedHourlyRate() > diskRate {
+					diskRate = recPod.stoppedHourlyRate()
+				}
+				if validRate(diskRate) {
+					projectedHourly = max(0, projectedHourly-diskRate)
+				}
+			}
+		}
+		return endingWorkers, projectedHourly, projectedLive
+	}
+	// Make dispute-breaker evictions conditional on a replacement grader actually passing admission
+	// (no unknown hourly rates, no examiner/accounting error blocking launches, and at least one
+	// armed offer fitting post-eviction --max, --max-hourly, and remaining --daily-budget).
+	const disputeEvictWhy = "idle while a fresh machine is needed to break a dispute"
+	var nonDisputeEnds, disputeEnds []Ending
+	for _, e := range d.End {
+		if e.Why == disputeEvictWhy {
+			disputeEnds = append(disputeEnds, e)
+		} else {
+			nonDisputeEnds = append(nonDisputeEnds, e)
+		}
+	}
+	if len(disputeEnds) > 0 {
+		launchReservedPre := reserved
+		if launchReservedPre == 0 && reserveSlotOnly && needExaminer {
+			launchReservedPre = 1
+		}
+		exReserveHourly := 0.0
+		if launchReservedPre > v.ExaminerLive {
+			exReserveHourly = f.examinerReserveHourly()
+		}
+		admitOK := !v.hourlyUnknown() && exErr == nil && snapErr == nil &&
+			f.o.MaxHourly > 0 &&
+			(f.o.DailyBudget <= 0 || v.Today < f.o.DailyBudget) &&
+			(f.o.MaxWorkers <= 0 || f.o.MaxWorkers-launchReservedPre > 0)
+		var offers []Offer
+		if admitOK {
+			if got, oerr := f.choicesFor(ctx, false, false, false); oerr == nil {
+				for _, c := range got {
+					m := f.market(c.Market)
+					if m == nil || (!f.armed(c.Market) && c.Market != f.o.Market) || !validRate(c.Price) {
+						continue
+					}
+					offers = append(offers, c)
+				}
+			}
+			// Re-check daily spend after offer search so a slow search that crossed --daily-budget
+			// does not evict warm idle dispute-breaker workers when replacement launch will be blocked.
+			if f.o.DailyBudget > 0 {
+				if todayNow, serr := f.currentSpentToday(ctx, v); serr == nil && todayNow >= f.o.DailyBudget {
+					offers = nil
+				}
+			}
+		}
+		// Order dispute eviction candidates so keeping a prefix frees the highest hourly cost
+		// (tie-broken by slowest speed, then handle) first.
+		sort.SliceStable(disputeEnds, func(i, j int) bool {
+			ri, rj := disputeEnds[i].Rental, disputeEnds[j].Rental
+			if ri == nil && disputeEnds[i].Worker != nil {
+				ri = disputeEnds[i].Worker.Rental
+			}
+			if rj == nil && disputeEnds[j].Worker != nil {
+				rj = disputeEnds[j].Worker.Rental
+			}
+			pi, pj := 0.0, 0.0
+			if ri != nil && validRate(ri.Price) {
+				pi = ri.Price
+			}
+			if rj != nil && validRate(rj.Price) {
+				pj = rj.Price
+			}
+			if pi != pj {
+				return pi > pj
+			}
+			si, sj := 0.0, 0.0
+			if disputeEnds[i].Worker != nil {
+				si = disputeEnds[i].Worker.Speed
+			}
+			if disputeEnds[j].Worker != nil {
+				sj = disputeEnds[j].Worker.Speed
+			}
+			if si != sj {
+				return si < sj
+			}
+			hi, hj := "", ""
+			if disputeEnds[i].Worker != nil && disputeEnds[i].Worker.Key != nil {
+				hi = disputeEnds[i].Worker.Key.Handle
+			}
+			if disputeEnds[j].Worker != nil && disputeEnds[j].Worker.Key != nil {
+				hj = disputeEnds[j].Worker.Key.Handle
+			}
+			return hi < hj
+		})
+		_, baseHourly, baseLive := projectAfterEnds(nonDisputeEnds)
+		workerCap := f.o.MaxWorkers - launchReservedPre
+		simulateLaunches := func(want, liveCount int, hourlyNow, todayNow float64) int {
+			if !admitOK || want <= 0 {
+				return 0
+			}
+			capN := want
+			if f.o.MaxWorkers > 0 {
+				capN = min(capN, max(0, workerCap-liveCount))
+			}
+			if capN <= 0 {
+				return 0
+			}
+			remStock := make([]int, len(offers))
+			for i, c := range offers {
+				remStock[i] = c.Stock
+			}
+			launched := 0
+			curHourly := hourlyNow
+			curToday := todayNow
+			for launched < capN {
+				if f.o.DailyBudget > 0 && curToday >= f.o.DailyBudget {
+					break
+				}
+				pickedIdx := -1
+				for i := range offers {
+					if offers[i].Stock > 0 && remStock[i] <= 0 {
+						continue
+					}
+					c := &offers[i]
+					if curHourly+exReserveHourly+c.Price > f.o.MaxHourly+1e-9 {
+						continue
+					}
+					fixed := 0.0
+					if nonNegFinite(c.FixedCost) && c.FixedCost > 0 {
+						fixed = c.FixedCost
+					}
+					if f.o.DailyBudget > 0 && curToday+fixed > f.o.DailyBudget+1e-9 {
+						continue
+					}
+					pickedIdx = i
+					break
+				}
+				if pickedIdx < 0 {
+					break
+				}
+				if offers[pickedIdx].Stock > 0 {
+					remStock[pickedIdx]--
+				}
+				curHourly += offers[pickedIdx].Price
+				if nonNegFinite(offers[pickedIdx].FixedCost) && offers[pickedIdx].FixedCost > 0 {
+					curToday += offers[pickedIdx].FixedCost
+				}
+				launched++
+			}
+			return launched
+		}
+		// Keep the smallest prefix of dispute evictions that strictly increases the number of
+		// affordable replacement launches beyond what already fits in free slots without evicting.
+		baseWant := max(0, d.Launch-len(disputeEnds))
+		curHourly, curLive := baseHourly, baseLive
+		bestK := 0
+		bestAchievable := simulateLaunches(baseWant, curLive, curHourly, v.Today)
+		for k := 1; k <= len(disputeEnds); k++ {
+			e := disputeEnds[k-1]
+			r := e.Rental
+			if r == nil && e.Worker != nil {
+				r = e.Worker.Rental
+			}
+			if r != nil && (r.live() || r.Unconfirmed) {
+				curLive = max(0, curLive-1)
+				if validRate(r.Price) {
+					curHourly = max(0, curHourly-r.Price)
+				}
+			}
+			wantK := min(d.Launch, baseWant+k)
+			if achievable := simulateLaunches(wantK, curLive, curHourly, v.Today); achievable > bestAchievable {
+				bestAchievable = achievable
+				bestK = k
+			}
+		}
+		keptDispute := disputeEnds[:bestK]
+		if dropped := len(disputeEnds) - bestK; dropped > 0 {
+			d.Live += dropped
+			d.Launch = max(0, d.Launch-dropped)
+			d.LaunchLong = min(d.LaunchLong, d.Launch)
+			d.LaunchEarly = min(d.LaunchEarly, max(0, d.Launch-d.LaunchLong))
+			d.LaunchRuns = min(d.LaunchRuns, max(0, d.Launch-d.LaunchLong-d.LaunchEarly))
+		}
+		d.End = append(nonDisputeEnds, keptDispute...)
+	}
+	// If a required managed examiner is absent and blocked by --max or --max-hourly, reclaim
+	// headroom from idle (waiting) workers ONLY when evicting available idle workers satisfies
+	// BOTH --max and --max-hourly for the cheapest feasible examiner offer.
+	if f.examiner != nil && v.ExaminerLive == 0 && needExaminer && exErr == nil && snapErr == nil && !v.hourlyUnknown() && f.o.MaxHourly > 0 {
+		if needHourly := f.examiner.blockedHourly(); needHourly > 0 {
+			endingWorkers, projectedHourly, projectedLive := projectAfterEnds(d.End)
+			needSlot := f.o.MaxWorkers > 0 && projectedLive >= f.o.MaxWorkers
+			needBudget := projectedHourly+needHourly > f.o.MaxHourly+1e-9
+			if needSlot || needBudget {
+				var idle []*Worker
+				for _, wk := range v.Workers {
+					if wk == nil || endingWorkers[wk] || wk.Rental == nil || !wk.Rental.live() || !validRate(wk.Rental.Price) {
+						continue
+					}
+					if wk.state(now, f.o.Policy) == "waiting" {
+						idle = append(idle, wk)
+					}
+				}
+				sort.SliceStable(idle, func(i, j int) bool {
+					if needBudget && idle[i].Rental.Price != idle[j].Rental.Price {
+						return idle[i].Rental.Price > idle[j].Rental.Price
+					}
+					if idle[i].Speed != idle[j].Speed {
+						return idle[i].Speed < idle[j].Speed
+					}
+					if idle[i].Rental.Price != idle[j].Rental.Price {
+						return idle[i].Rental.Price > idle[j].Rental.Price
+					}
+					return idle[i].Key.Handle < idle[j].Key.Handle
+				})
+				// Stage the complete eviction decision first and commit ONLY if evicting available
+				// idle workers actually achieves both --max-hourly and --max headroom for the
+				// examiner; otherwise keep all warm idle workers alive.
+				candHourly := projectedHourly
+				candLive := projectedLive
+				var evict []*Worker
+				for _, wk := range idle {
+					hourlyOK := f.o.MaxHourly > 0 && candHourly+needHourly <= f.o.MaxHourly+1e-9
+					slotOK := f.o.MaxWorkers <= 0 || candLive < f.o.MaxWorkers
+					if hourlyOK && slotOK {
+						break
+					}
+					evict = append(evict, wk)
+					candHourly = max(0, candHourly-wk.Rental.Price)
+					candLive = max(0, candLive-1)
+				}
+				hourlyOK := f.o.MaxHourly > 0 && candHourly+needHourly <= f.o.MaxHourly+1e-9
+				slotOK := f.o.MaxWorkers <= 0 || candLive < f.o.MaxWorkers
+				if len(evict) > 0 && hourlyOK && slotOK {
+					why := "idle while hourly budget is needed for the round's examiner"
+					if needSlot && !needBudget {
+						why = "idle while a slot is needed for the round's examiner"
+					}
+					for _, wk := range evict {
+						d.End = append(d.End, Ending{Worker: wk, Why: why})
+						endingWorkers[wk] = true
+						d.Live = max(0, d.Live-1)
+					}
+				}
+			}
+		}
+	}
 	rec.decided(d, next)
 	ended := len(v.Ledger.Pods)
+	preLive := v.liveWorkerCount()
 	if err := f.end(ctx, v, d.End); err != nil {
 		return err
 	}
 	rec.Ended = max(ended-len(v.Ledger.Pods), 0)
 	f.release(ctx, d.Release)
-	if d.Note != "" && d.Launch < d.Target-d.Live {
+	// If ending idle/stopped workers freed a slot or hourly headroom while a required examiner is
+	// still absent, give the examiner an immediate second chance before launching new workers.
+	if f.examiner != nil && v.ExaminerLive == 0 && needExaminer && exErr == nil && snapErr == nil && !f.o.DryRun && (rec.Ended > 0 || v.liveWorkerCount() < preLive) && !v.hourlyUnknown() && v.liveWorkerCount() < f.o.MaxWorkers {
+		reconcileTickExaminer()
+		reserved = v.ExaminerLive
+		if reserved == 0 && needExaminer {
+			reserved = 1
+		}
+	}
+	launchReserved := reserved
+	if launchReserved == 0 && reserveSlotOnly && needExaminer {
+		launchReserved = 1
+	}
+	if launchReserved > v.ExaminerLive {
+		v.ExaminerReservedHourly = f.examinerReserveHourly()
+	} else {
+		v.ExaminerReservedHourly = 0
+	}
+	if d.Note != "" {
 		f.say("%s", d.Note)
 	}
-	rec.Rented, err = f.launch(ctx, v, d.Launch, d.LaunchLong, d.LaunchEarly, d.LaunchRuns, d.ExamDue)
+	var evicted map[string]bool
+	if len(d.End) > 0 {
+		evicted = make(map[string]bool, len(d.End))
+		for _, e := range d.End {
+			if e.Worker != nil && e.Worker.Key != nil {
+				evicted[e.Worker.Key.Handle] = true
+			}
+		}
+	}
+	postLive := v.liveWorkerCount()
+	launchN := min(d.Launch, max(0, (f.o.MaxWorkers-launchReserved)-postLive))
+	if exErr != nil || snapErr != nil {
+		launchN = 0
+	}
+	rec.Rented, err = f.launchExcluding(ctx, v, launchN, d.LaunchLong, d.LaunchEarly, d.LaunchRuns, d.ExamDue, evicted)
 	return err
 }
 
@@ -274,6 +789,11 @@ func cmdScale(ctx context.Context, f *Fleet, follow bool) error {
 	if !follow {
 		return tick(ctx, f)
 	}
+	stopExaminer, err := f.startExaminer(ctx)
+	if err != nil {
+		return err
+	}
+	defer stopExaminer()
 	f.say("scaling to the work every %s, at most %d machines and $%.2f an hour (%s cloud%s). Ctrl-C to stop; the machines stop by themselves.",
 		f.o.Every, f.o.MaxWorkers, f.o.MaxHourly, strings.ToLower(f.o.Cloud), f.ceiling(false)+f.longCeiling())
 	for {
@@ -290,34 +810,308 @@ func cmdScale(ctx context.Context, f *Fleet, follow bool) error {
 	}
 }
 
-func cmdUp(ctx context.Context, f *Fleet, n int) error {
+// reconcileExaminerOnce serializes standalone examiner budget checks, rentals, and state updates
+// under the same fleet lock used by `up`, `down`, and `scale`, reconciling live owned worker
+// rentals with the configured markets before admitting a new examiner and deferring new rentals
+// whenever fleet accounting (markets, fleet.json, or spent.jsonl) cannot be read cleanly while
+// keeping teardown and timeout enforcement available.
+func reconcileExaminerOnce(ctx context.Context, f *Fleet) error {
+	unlock, err := f.lock(time.Minute)
+	if err != nil {
+		if ctx.Err() == nil {
+			f.say("examiner: %v", err)
+		}
+		return err
+	}
+	defer unlock()
+	w, err := f.st.work(ctx, f.op)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil
+		}
+		f.say("examiner: %v", err)
+		if exErr := f.examiner.EnforceTimeout(ctx); exErr != nil && ctx.Err() == nil {
+			f.say("examiner: %v", exErr)
+		}
+		return err
+	}
+	var acctErr error
+	if !f.fixed && f.o.Credentials != "" {
+		if rerr := f.refresh(); rerr != nil {
+			acctErr = fmt.Errorf("reading market settings: %w", rerr)
+		}
+	}
+	if (!f.fixed || len(f.keys) == 0) && f.o.Home != "" {
+		if kerr := f.loadKeys(); kerr != nil && acctErr == nil {
+			acctErr = fmt.Errorf("reading worker keys: %w", kerr)
+		}
+	}
+	l, lerr := f.readLedger()
+	today, liveWorkers, hourlyWorkers := 0.0, 0, 0.0
+	var unconfirmed map[string]bool
+	var answeredMarkets map[string]bool
+	if lerr != nil {
+		if acctErr == nil {
+			acctErr = fmt.Errorf("reading fleet ledger: %w", lerr)
+		}
+	} else {
+		var rentals []Rental
+		var answered map[string]bool
+		if acctErr == nil && len(f.markets) > 0 {
+			rs, ans, rerr := f.rentals(ctx, l)
+			if rerr != nil {
+				acctErr = fmt.Errorf("listing market rentals: %w", rerr)
+			} else {
+				rentals, answered, answeredMarkets = rs, ans, ans
+				for _, m := range f.markets {
+					if !answered[m.Name()] {
+						acctErr = fmt.Errorf("%s did not list its rentals", marketTitle(m.Name()))
+						break
+					}
+				}
+				if acctErr == nil {
+					var nerr error
+					if rentals, nerr = f.note(ctx, l, rentals, answered); nerr != nil {
+						acctErr = fmt.Errorf("reconciling fleet ledger: %w", nerr)
+					}
+				}
+			}
+		}
+		spentSum, serr := f.readSpentSummary()
+		if serr != nil && acctErr == nil {
+			acctErr = fmt.Errorf("reading spend log: %w", serr)
+		}
+		seen := map[string]bool{}
+		knownHandles := map[string]bool{}
+		for _, k := range f.keys {
+			knownHandles[k.Handle] = true
+		}
+		unconfirmed = map[string]bool{}
+		confirmedListed := map[string]bool{}
+		for i := range rentals {
+			key := ledgerKey(rentals[i].Market, rentals[i].ID)
+			if rentals[i].Unconfirmed {
+				unconfirmed[key] = true
+			} else {
+				confirmedListed[key] = true
+			}
+		}
+		for key := range confirmedListed {
+			delete(unconfirmed, key)
+		}
+		var unknownRates []string
+		for key, p := range l.Pods {
+			if p == nil || spentSum.hasContract(p.market(), p.ID) {
+				continue
+			}
+			seen[key] = true
+			if !confirmedListed[key] {
+				unconfirmed[key] = true
+			}
+			if p.Stopped && !unconfirmed[key] {
+				if !p.Offline {
+					if rate := p.stoppedHourlyRate(); rate > 0 {
+						hourlyWorkers += rate
+					} else if p.DiskCostUnknown {
+						unknownRates = append(unknownRates, unknownRateLabel(p.market(), p.ID, p.Handle))
+					}
+				}
+				continue
+			}
+			liveWorkers++
+			if validRate(p.Cost) {
+				hourlyWorkers += p.Cost
+			}
+			if !validRate(p.Cost) || p.PartialCost {
+				unknownRates = append(unknownRates, unknownRateLabel(p.market(), p.ID, p.Handle))
+			}
+		}
+		for i := range rentals {
+			r := &rentals[i]
+			key := ledgerKey(r.Market, r.ID)
+			if seen[key] {
+				continue
+			}
+			if h := owner(l, r); h != "" && knownHandles[h] {
+				if r.live() || r.Unconfirmed {
+					seen[key] = true
+					liveWorkers++
+					if validRate(r.Price) {
+						hourlyWorkers += r.Price
+					}
+					if !validRate(r.Price) || r.PartialRate {
+						unknownRates = append(unknownRates, unknownRateLabel(r.Market, r.ID, h))
+					}
+				} else if r.State == "stopped" {
+					seen[key] = true
+					if !r.Offline {
+						if validRate(r.DiskCost) {
+							hourlyWorkers += r.DiskCost
+						} else if r.DiskCostUnknown {
+							unknownRates = append(unknownRates, unknownRateLabel(r.Market, r.ID, h))
+						}
+					}
+				}
+			}
+		}
+		for _, pr := range l.Pending {
+			if pr == nil || (spentSum != nil && spentSum.byPendingID[pr.ID]) {
+				continue
+			}
+			liveWorkers++
+			if validRate(pr.Cost) {
+				hourlyWorkers += pr.Cost
+			} else {
+				unknownRates = append(unknownRates, unknownRateLabel(pr.Market, pr.ID, pr.Handle))
+			}
+		}
+		if len(unknownRates) > 0 && acctErr == nil {
+			sort.Strings(unknownRates)
+			acctErr = fmt.Errorf("live hourly spend is incomplete (%s has no reported hourly rate)", strings.Join(unknownRates, ", "))
+		}
+		t, serr := f.spentFor(l, startOfDay(f.now()), unconfirmed)
+		if serr != nil {
+			if acctErr == nil {
+				acctErr = fmt.Errorf("reading daily spend: %w", serr)
+			}
+		} else {
+			today = t
+		}
+	}
+	_, _, exAccrued, snapErr := f.examinerSnapshot()
+	if snapErr != nil && acctErr == nil {
+		acctErr = snapErr
+	}
+	budget := ExaminerBudget{
+		LiveWorkers:   liveWorkers,
+		MaxWorkers:    f.o.MaxWorkers,
+		HourlyNow:     hourlyWorkers,
+		MaxHourly:     f.o.MaxHourly,
+		SpentToday:    today + exAccrued,
+		DailyBudget:   f.o.DailyBudget,
+		AccountingErr: acctErr,
+	}
+	if l != nil && acctErr == nil {
+		budget.CurrentSpentToday = func() (float64, error) {
+			now := f.now()
+			f.refreshStaleDatedCharges(ctx, l, answeredMarkets, now)
+			spentBase, serr := f.spentFor(l, startOfDay(now), unconfirmed)
+			if serr != nil {
+				return 0, fmt.Errorf("reading daily spend: %w", serr)
+			}
+			_, _, exAcc, aerr := f.examinerSnapshot()
+			if aerr != nil {
+				return 0, aerr
+			}
+			return spentBase + exAcc, nil
+		}
+	}
+	if err := f.examiner.Reconcile(ctx, w, budget); err != nil {
+		if ctx.Err() == nil {
+			f.say("examiner: %v", err)
+		}
+		return err
+	}
+	return nil
+}
+
+func cmdExaminer(ctx context.Context, f *Fleet) error {
+	stopExaminer, err := f.startExaminer(ctx)
+	if err != nil {
+		return err
+	}
+	defer stopExaminer()
+	every := min(f.o.Every, 15*time.Second)
+	if every <= 0 {
+		every = 15 * time.Second
+	}
+	for {
+		_ = reconcileExaminerOnce(ctx, f)
+		if ctx.Err() != nil {
+			return nil
+		}
+		if err := sleepCtx(ctx, every); err != nil {
+			return nil
+		}
+	}
+}
+
+// cmdExaminerResolve lets an operator resolve an uncertain PendingRent examiner reservation in
+// examiner.json after querying Vast.ai under the fleet lock: if Vast.ai lists the reserved
+// instance it is adopted (or destroyed when end is true); if Vast.ai lists zero matching
+// instances the reservation is kept unless the operator explicitly verified absence and passed
+// clearLabel matching ReservedLabel (preserving PendingSpends and Unresolved).
+func cmdExaminerResolve(ctx context.Context, f *Fleet, end bool, clearLabel string) error {
 	unlock, err := f.lock(time.Minute)
 	if err != nil {
 		return err
 	}
 	defer unlock()
-	v, err := f.look(ctx)
-	if err != nil {
-		return err
-	}
-	live := 0
-	for _, w := range v.Workers {
-		if w.Rental != nil && w.Rental.live() {
-			live++
+	if !f.fixed {
+		if err := f.refresh(); err != nil {
+			return err
 		}
 	}
+	var prov ExaminerProvider
+	if f.examiner != nil && f.examiner.prov != nil {
+		prov = f.examiner.prov
+	} else if vm, ok := f.market("vast").(*vastMarket); ok && vm != nil {
+		prov = vm
+	}
+	if prov == nil {
+		return fmt.Errorf("examiner resolve requires VAST_API_KEY in %s (or environment)", f.o.Credentials)
+	}
+	return resolvePendingExaminer(ctx, f.o.Home, prov, f.now, f.say, f.o.DryRun, end, clearLabel, func(rec podRecord) error {
+		return appendExaminerSpend(f.spentLog(), rec)
+	})
+}
+
+func cmdUp(ctx context.Context, f *Fleet, n int) error {
+	_, err := cmdUpRentals(ctx, f, n)
+	return err
+}
+
+func cmdUpRentals(ctx context.Context, f *Fleet, n int) ([]*Rental, error) {
+	unlock, err := f.lock(time.Minute)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+	v, err := f.look(ctx)
+	if err != nil {
+		return nil, err
+	}
+	live := v.totalLiveCount()
 	if room := f.o.MaxWorkers - live; n > room {
 		f.say("%d rented already, and --max is %d: renting %d", live, f.o.MaxWorkers, max(room, 0))
 		n = max(room, 0)
 	}
 	if v.Today >= f.o.DailyBudget && f.o.DailyBudget > 0 {
-		return fmt.Errorf("about $%.2f spent today, and the daily budget is $%.2f", v.Today, f.o.DailyBudget)
+		return nil, fmt.Errorf("about $%.2f spent today, and the daily budget is $%.2f", v.Today, f.o.DailyBudget)
 	}
-	got, err := f.launch(ctx, v, n, 0, 0, 0, time.Time{})
-	if err == nil && got > 0 {
+	runs := 0
+	if f.o.Edits {
+		if v.Work == nil {
+			runs = n
+		} else {
+			for _, r := range v.Work.Rounds {
+				if r.RunsWanted > 0 || r.RunsWaiting > 0 {
+					runs = n
+					break
+				}
+			}
+			if runs == 0 {
+				if want := f.o.Policy.runners(v.Work); want > 0 {
+					runs = min(n, want)
+				}
+			}
+		}
+	}
+	rented, err := f.launchExcludingRentals(ctx, v, n, 0, 0, runs, time.Time{}, nil)
+	if err == nil && len(rented) > 0 {
 		f.say("each stops by itself after %d minutes with nothing to grade", f.o.Idle)
 	}
-	return err
+	return rented, err
 }
 
 func cmdDown(ctx context.Context, f *Fleet, force bool, handles []string) error {
@@ -326,7 +1120,8 @@ func cmdDown(ctx context.Context, f *Fleet, force bool, handles []string) error 
 		return err
 	}
 	defer unlock()
-	v, err := f.look(ctx)
+	// Teardown must proceed independently of provider billing sync / Retry-After backoffs.
+	v, err := f.lookWith(ctx, false)
 	if err != nil {
 		return err
 	}
@@ -336,20 +1131,70 @@ func cmdDown(ctx context.Context, f *Fleet, force bool, handles []string) error 
 	}
 	var endings []Ending
 	for _, w := range v.Workers {
-		if w.Rental == nil || (len(want) > 0 && !want[w.Key.Handle]) {
+		if len(want) > 0 && !want[w.Key.Handle] {
+			continue
+		}
+		if w.Rental == nil && len(w.ExtraRentals) == 0 {
+			if w.Pending != nil {
+				found[w.Key.Handle] = true
+				f.say("%s has an unresolved pending worker create on %s: run `stet-cloud workers resolve --end`", w.Key.Handle, marketTitle(w.Pending.Market))
+			}
 			continue
 		}
 		found[w.Key.Handle] = true
 		st := w.state(f.now(), f.o.Policy)
-		if st == "grading" || st == "running" || st == "training" {
-			if !force {
-				f.say("left %s, which is %s: it stops by itself once there is nothing more for it. --force ends it now, and hands its job back", w.Key.Handle, st)
+		if w.Rental != nil {
+			if st == "grading" || st == "running" || st == "training" {
+				if !force {
+					f.say("left %s, which is %s: it stops by itself once there is nothing more for it. --force ends it now, and hands its job back", w.Key.Handle, st)
+				} else {
+					endings = append(endings, Ending{Worker: w, Rental: w.Rental, Why: "ended by hand, in the middle of a job; it hands the job back", Forced: true})
+				}
+			} else if st == "unconfirmed" && !force {
+				f.say("left %s, whose provider state is unconfirmed (%s): --force ends it now", w.Key.Handle, w.Rental.Status)
+			} else {
+				endings = append(endings, Ending{Worker: w, Rental: w.Rental, Why: "ended by hand", Forced: force})
+			}
+		}
+		for _, ex := range w.ExtraRentals {
+			if ex == nil {
 				continue
 			}
-			endings = append(endings, Ending{Worker: w, Why: "ended by hand, in the middle of a job; it hands the job back"})
+			if ((ex.live() && ex.State != "unknown") || ex.Unconfirmed) && !ex.Terminating && !force && (ex.Unconfirmed || st == "grading" || st == "running" || st == "training") {
+				whySt := st
+				if ex.Unconfirmed {
+					whySt = "unconfirmed"
+				}
+				f.say("left extra contract %s on %s while %s (--force ends it now)", ex.ID, w.Key.Handle, whySt)
+				continue
+			}
+			endings = append(endings, Ending{Worker: w, Rental: ex, Why: "ended by hand", Forced: force})
+		}
+	}
+	for _, orph := range v.OrphanRentals {
+		if orph == nil {
 			continue
 		}
-		endings = append(endings, Ending{Worker: w, Why: "ended by hand"})
+		if len(want) > 0 && !want[orph.Name] && !want[orph.ID] {
+			continue
+		}
+		if orph.Name != "" {
+			found[orph.Name] = true
+		}
+		found[orph.ID] = true
+		if ((orph.live() && orph.State != "unknown") || orph.Unconfirmed) && !orph.Terminating && !force {
+			name := orph.Name
+			if name == "" {
+				name = orph.ID
+			}
+			stateDesc := orph.State
+			if orph.Unconfirmed {
+				stateDesc = "unconfirmed"
+			}
+			f.say("left unpooled machine %s (%s on %s), which is still %s: --force ends it now", name, orph.ID, marketTitle(orph.Market), stateDesc)
+			continue
+		}
+		endings = append(endings, Ending{Rental: orph, Why: "ended by hand", Forced: force})
 	}
 	for h := range want {
 		if !found[h] {
@@ -360,6 +1205,782 @@ func cmdDown(ctx context.Context, f *Fleet, force bool, handles []string) error 
 		f.say("nothing to end")
 	}
 	return f.end(ctx, v, endings)
+}
+
+// cmdWorkersResolve reconciles unresolved pending worker create reservations AND persisted
+// outstanding terminations (`Terminating: true`) in fleet.json against each provider under the
+// fleet lock:
+//   - persisted terminating contract IDs are retried via m.End(ctx, id) when end is true until
+//     provider deletion or confirmed absence, and reported as errors when end is false;
+//   - pending reservations with a single unambiguous matching contract are adopted into fleet.json
+//     (or destroyed when end is true, persisting Terminating=true on the exact contract ID if
+//     deletion fails transiently so retrying `workers resolve --end` retries that contract);
+//   - genuinely ambiguous pending matches (multiple candidate contracts or multiple competing
+//     handles) are left pending without adopting or canceling any contract;
+//   - unmatched reservations on an inconclusive provider listing are kept intact unless the
+//     operator explicitly verified absence and scoped release to that reservation ID via --clear.
+func cmdWorkersResolve(ctx context.Context, f *Fleet, end bool, clearIDs ...string) error {
+	unlock, err := f.lock(time.Minute)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if !f.fixed {
+		if err := f.refresh(); err != nil {
+			return err
+		}
+	}
+	l, err := f.readLedger()
+	if err != nil {
+		return err
+	}
+	clearSet := map[string]bool{}
+	var clearList []string
+	for _, raw := range clearIDs {
+		for _, part := range strings.Split(raw, ",") {
+			if cid := strings.TrimSpace(part); cid != "" && !clearSet[cid] {
+				clearSet[cid] = true
+				clearList = append(clearList, cid)
+			}
+		}
+	}
+	var termKeys []string
+	for key, rec := range l.Pods {
+		if rec != nil && rec.Terminating {
+			termKeys = append(termKeys, key)
+		}
+	}
+	sort.Strings(termKeys)
+	pkeys := make([]string, 0, len(l.Pending))
+	for id, pr := range l.Pending {
+		if pr != nil {
+			pkeys = append(pkeys, id)
+		}
+	}
+	sort.Strings(pkeys)
+	if len(pkeys) == 0 && len(termKeys) == 0 {
+		if len(clearList) > 0 {
+			return fmt.Errorf("no pending worker reservation matching --clear %s", strings.Join(clearList, ", "))
+		}
+		f.say("no pending worker reservations in fleet.json")
+		return nil
+	}
+	spentSum, err := f.readSpentSummary()
+	if err != nil {
+		return fmt.Errorf("reading spend log: %w", err)
+	}
+	now := f.now()
+	changed := false
+	var firstErr error
+	for _, cid := range clearList {
+		if l.Pending[cid] == nil {
+			e := fmt.Errorf("no pending worker reservation matching --clear %q", cid)
+			f.say("%v", e)
+			if firstErr == nil {
+				firstErr = e
+			}
+		}
+	}
+	endedTermKeys := map[string]bool{}
+
+	// 1. Reconcile any persisted outstanding terminations bound to exact contract IDs.
+	fallbackListed := map[string][]Rental{}
+	fallbackListErr := map[string]error{}
+	lookupContract := func(m Market, id string) (fresh *Rental, exists bool, direct bool, err error) {
+		if lu, ok := m.(rentalLookup); ok {
+			f, ex, lerr := lu.Lookup(ctx, id)
+			return f, ex, true, lerr
+		}
+		mName := m.Name()
+		rs, loaded := fallbackListed[mName]
+		lerr, hadErr := fallbackListErr[mName]
+		if !loaded && !hadErr {
+			rs, lerr = m.Rentals(ctx)
+			if lerr != nil {
+				fallbackListErr[mName] = lerr
+			} else {
+				fallbackListed[mName] = rs
+			}
+		}
+		if lerr != nil {
+			return nil, false, false, lerr
+		}
+		for i := range rs {
+			if rs[i].ID == id {
+				cp := rs[i]
+				return &cp, true, false, nil
+			}
+		}
+		return nil, false, false, nil
+	}
+	terminatedEndAt := func(rec *podRecord, fresh *Rental) (time.Time, bool) {
+		minEnd := rec.currentRunStart()
+		if !rec.Alive.IsZero() && (minEnd.IsZero() || rec.Alive.After(minEnd)) {
+			minEnd = rec.Alive
+		}
+		if rec.Stopped {
+			stoppedAt := rec.StoppedAt
+			if stoppedAt.IsZero() {
+				stoppedAt = rec.currentStopStart(now)
+			}
+			if !stoppedAt.IsZero() && (minEnd.IsZero() || stoppedAt.After(minEnd)) {
+				minEnd = stoppedAt
+			}
+			if !rec.StoppedSeen.IsZero() && (minEnd.IsZero() || rec.StoppedSeen.After(minEnd)) {
+				minEnd = rec.StoppedSeen
+			}
+		}
+		var providerEndAt time.Time
+		if fresh != nil {
+			providerEndAt = fresh.EndedAt
+		}
+		endAt := resolveStopTime(minEnd, now, providerEndAt)
+		trusted := !providerEndAt.IsZero() && endAt.Equal(providerEndAt)
+		return endAt, trusted
+	}
+
+	for _, key := range termKeys {
+		rec := l.Pods[key]
+		if rec == nil {
+			continue
+		}
+		mName := rec.market()
+		if spentSum.hasContract(mName, rec.ID) {
+			if f.o.DryRun {
+				f.say("would clear already-retired terminating worker %s (%s on %s)", rec.Handle, rec.ID, marketTitle(mName))
+				continue
+			}
+			delete(l.Pods, key)
+			endedTermKeys[key] = true
+			changed = true
+			f.say("cleared terminating worker %s (%s on %s): already retired in spent.jsonl", rec.Handle, rec.ID, marketTitle(mName))
+			continue
+		}
+		m := f.market(mName)
+		if m == nil {
+			e := fmt.Errorf("resolving terminating worker %s (%s on %s) requires credentials: %s", rec.Handle, rec.ID, marketTitle(mName), f.off[mName])
+			f.say("%v", e)
+			if firstErr == nil {
+				firstErr = e
+			}
+			continue
+		}
+		endAt := now
+		if !end {
+			if lu, ok := m.(rentalLookup); ok {
+				fresh, exists, lerr := lu.Lookup(ctx, rec.ID)
+				if lerr == nil && !exists {
+					if f.o.DryRun {
+						f.say("would clear absent terminating worker %s (%s on %s)", rec.Handle, rec.ID, marketTitle(mName))
+						continue
+					}
+					if rec.Stopped {
+						// 404 confirms absence without proving the worker stayed stopped during
+						// [StoppedSeen, endAt]; conservatively budget any unobserved gap at compute rate.
+						rec.markLiveAt(endAt, time.Time{})
+					}
+					ts := rec.transferState()
+					ts.clearUnconfirmedZero(rec.FixedCostEstimated)
+					rec.setTransferState(ts)
+					f.event(&Rental{Market: mName, ID: rec.ID, Name: rec.Handle, Host: rec.Host, Card: rec.GPU, Price: rec.Cost}, rec.Handle, "ended", rec.Why)
+					if rerr := f.retire(l, key, endAt); rerr != nil && firstErr == nil {
+						firstErr = rerr
+					}
+					endedTermKeys[key] = true
+					changed = true
+					f.say("cleared terminating worker %s (%s on %s): provider confirmed absent", rec.Handle, rec.ID, marketTitle(mName))
+					continue
+				}
+				if lerr == nil && exists && fresh != nil && !f.o.DryRun {
+					reconcileRentalRateAt(rec, fresh, now)
+					if fresh.live() {
+						rec.markLiveAt(now, fresh.ResumedAt)
+						changed = true
+					} else if fresh.State == "stopped" {
+						rec.markStoppedStateAt(now, fresh.StoppedAt, fresh.Offline)
+						changed = true
+					}
+				}
+			}
+			e := fmt.Errorf("worker %s (%s on %s) has an outstanding termination; run `stet-cloud workers resolve --end` to retry", rec.Handle, rec.ID, marketTitle(mName))
+			f.say("%v", e)
+			if firstErr == nil {
+				firstErr = e
+			}
+			continue
+		}
+		if f.o.DryRun {
+			f.say("would retry ending terminating worker %s (%s on %s)", rec.Handle, rec.ID, marketTitle(mName))
+			continue
+		}
+		// Reconcile the exact contract BEFORE deleting it so a stopped worker that resumed during
+		// controller downtime (or changed rate) applies the ordinary rate and transition logic
+		// instead of retiring the stale stopped record at storage rates.
+		fresh, exists, _, lerr := lookupContract(m, rec.ID)
+		stateConfirmed := false
+		if lerr == nil && exists && fresh != nil {
+			reconcileRentalRateAt(rec, fresh, now)
+			switch {
+			case fresh.live():
+				rec.markLiveAt(now, fresh.ResumedAt)
+				stateConfirmed = true
+				changed = true
+			case fresh.State == "stopped":
+				rec.markStoppedStateAt(now, fresh.StoppedAt, fresh.Offline)
+				stateConfirmed = true
+				changed = true
+			default:
+				var trusted bool
+				endAt, trusted = terminatedEndAt(rec, fresh)
+				stateConfirmed = trusted
+			}
+		}
+		endErr := m.End(ctx, rec.ID)
+		if endErr != nil {
+			if lu, ok := m.(rentalLookup); ok {
+				if fresh2, exists2, lerr2 := lu.Lookup(ctx, rec.ID); lerr2 == nil {
+					if !exists2 {
+						endErr = nil
+					} else if fresh2 != nil {
+						reconcileRentalRateAt(rec, fresh2, now)
+						if fresh2.live() {
+							rec.markLiveAt(now, fresh2.ResumedAt)
+							changed = true
+						} else if fresh2.State == "stopped" {
+							rec.markStoppedStateAt(now, fresh2.StoppedAt, fresh2.Offline)
+							changed = true
+						}
+					}
+				}
+			}
+		}
+		if endErr != nil {
+			f.say("could not end terminating worker %s (%s on %s): %v (still persisted for retry)", rec.Handle, rec.ID, marketTitle(mName), endErr)
+			if firstErr == nil {
+				firstErr = fmt.Errorf("ending %s on %s: %w", rec.ID, marketTitle(mName), endErr)
+			}
+			continue
+		}
+		if !stateConfirmed {
+			if rec.Stopped {
+				// Lookup did not confirm the contract stayed stopped during [StoppedSeen, endAt];
+				// retain confirmed storage through StoppedSeen and conservatively bill the unobserved
+				// interval at the compute rate before retiring.
+				rec.markLiveAt(endAt, time.Time{})
+			}
+			ts := rec.transferState()
+			ts.clearUnconfirmedZero(rec.FixedCostEstimated)
+			rec.setTransferState(ts)
+		}
+		f.event(&Rental{Market: mName, ID: rec.ID, Name: rec.Handle, Host: rec.Host, Card: rec.GPU, Price: rec.Cost}, rec.Handle, "ended", rec.Why)
+		if rerr := f.retire(l, key, endAt); rerr != nil && firstErr == nil {
+			firstErr = rerr
+		}
+		endedTermKeys[key] = true
+		changed = true
+		f.say("ended terminating worker %s (%s on %s)", rec.Handle, rec.ID, marketTitle(mName))
+	}
+
+	// 2. Reconcile unresolved pending create reservations against provider listings.
+	if len(spentSum.byPendingID) > 0 {
+		rem := pkeys[:0]
+		for _, id := range pkeys {
+			if spentSum.byPendingID[id] {
+				if f.o.DryRun {
+					f.say("would clear already-retired pending worker reservation %s", id)
+					continue
+				}
+				delete(l.Pending, id)
+				changed = true
+				f.say("cleared pending worker reservation %s (already retired in spent.jsonl)", id)
+				continue
+			}
+			rem = append(rem, id)
+		}
+		pkeys = rem
+	}
+	marketsNeeded := map[string]bool{}
+	for _, id := range pkeys {
+		if pr := l.Pending[id]; pr != nil && pr.Market != "" {
+			marketsNeeded[pr.Market] = true
+		}
+	}
+	marketList := make([]string, 0, len(marketsNeeded))
+	for mName := range marketsNeeded {
+		marketList = append(marketList, mName)
+	}
+	sort.Strings(marketList)
+	listedByMarket := map[string][]Rental{}
+	for _, mName := range marketList {
+		m := f.market(mName)
+		if m == nil {
+			e := fmt.Errorf("resolving pending workers on %s requires credentials: %s", marketTitle(mName), f.off[mName])
+			if firstErr == nil {
+				firstErr = e
+			}
+			continue
+		}
+		rs, rerr := m.Rentals(ctx)
+		if rerr != nil {
+			e := fmt.Errorf("listing rentals on %s: %w", marketTitle(mName), rerr)
+			if firstErr == nil {
+				firstErr = e
+			}
+			continue
+		}
+		if len(endedTermKeys) > 0 {
+			filtered := rs[:0]
+			for _, r := range rs {
+				if !endedTermKeys[ledgerKey(r.Market, r.ID)] {
+					filtered = append(filtered, r)
+				}
+			}
+			rs = filtered
+		}
+		listedByMarket[mName] = rs
+	}
+	matchesByID, claimants := resolvePendingMatches(l, spentSum, listedByMarket, pkeys)
+	handled := map[string]bool{}
+	for _, id := range pkeys {
+		pr := l.Pending[id]
+		if pr == nil {
+			continue
+		}
+		if _, ok := listedByMarket[pr.Market]; !ok {
+			continue
+		}
+		matches := matchesByID[id]
+		if len(matches) == 0 {
+			if !clearSet[id] {
+				e := fmt.Errorf("pending worker reservation %s (%s on %s, $%.2f/h) is not listed yet; keeping reservation (verify on %s and re-run `stet-cloud workers resolve --clear %s` only if confirmed absent)",
+					id, pr.Handle, marketTitle(pr.Market), pr.Cost, marketTitle(pr.Market), id)
+				f.say("%v", e)
+				if firstErr == nil {
+					firstErr = e
+				}
+				continue
+			}
+			if f.o.DryRun {
+				f.say("would clear verified pending worker reservation %s (%s on %s, $%.2f/h)", id, pr.Handle, marketTitle(pr.Market), pr.Cost)
+				continue
+			}
+			delete(l.Pending, id)
+			changed = true
+			f.say("cleared pending worker reservation %s (%s on %s) via --clear", id, pr.Handle, marketTitle(pr.Market))
+			continue
+		}
+		if len(matches) > 1 {
+			e := fmt.Errorf("pending worker %s on %s ambiguously matches %d untracked contracts (%s); leaving pending without modifying any contract",
+				pr.Handle, marketTitle(pr.Market), len(matches), rentalIDList(matches))
+			f.say("%v", e)
+			if firstErr == nil {
+				firstErr = e
+			}
+			continue
+		}
+		p := matches[0]
+		key := ledgerKey(p.Market, p.ID)
+		if len(claimants[key]) > 1 {
+			e := fmt.Errorf("pending worker %s on %s shares candidate contract %s with another pending handle; leaving pending without modifying the contract",
+				pr.Handle, marketTitle(pr.Market), p.ID)
+			f.say("%v", e)
+			if firstErr == nil {
+				firstErr = e
+			}
+			continue
+		}
+		if handled[key] {
+			if !clearSet[id] {
+				e := fmt.Errorf("pending worker reservation %s (%s on %s) has no remaining unmatched contract (contract %s was already resolved by another reservation); keeping reservation (re-run with `--clear %s` after verifying no second contract exists on %s)",
+					id, pr.Handle, marketTitle(pr.Market), p.ID, id, marketTitle(pr.Market))
+				f.say("%v", e)
+				if firstErr == nil {
+					firstErr = e
+				}
+				continue
+			}
+			if f.o.DryRun {
+				f.say("would clear verified duplicate pending worker reservation %s (%s on %s)", id, pr.Handle, marketTitle(pr.Market))
+				continue
+			}
+			delete(l.Pending, id)
+			changed = true
+			f.say("cleared pending worker reservation %s (%s on %s) via --clear", id, pr.Handle, marketTitle(pr.Market))
+			continue
+		}
+		if clearSet[id] {
+			e := fmt.Errorf("refusing --clear %q: %s lists matching contract %s for %s; run `stet-cloud workers resolve` to adopt or `--end` to terminate",
+				id, marketTitle(pr.Market), p.ID, pr.Handle)
+			f.say("%v", e)
+			if firstErr == nil {
+				firstErr = e
+			}
+			continue
+		}
+		handled[key] = true
+		m := f.market(pr.Market)
+		start := p.Created
+		if !pr.Created.IsZero() && (start.IsZero() || start.After(pr.Created)) {
+			start = pr.Created
+		}
+		if start.IsZero() || start.After(now) {
+			start = now
+		}
+		if p.State == "gone" {
+			statusWord := strings.ToLower(p.Status)
+			if statusWord == "" {
+				statusWord = "gone"
+			}
+			if f.o.DryRun {
+				f.say("would retire already-%s matching contract %s for pending worker %s on %s", statusWord, p.ID, pr.Handle, marketTitle(pr.Market))
+				continue
+			}
+			gpu := p.Card
+			if gpu == "" {
+				gpu = pr.GPU
+			}
+			host := p.Host
+			if host == "" {
+				host = pr.Host
+			}
+			rec := &podRecord{
+				ID: p.ID, Market: p.Market, Handle: pr.Handle, GPU: gpu, Cloud: pr.Cloud, PendingID: pr.ID,
+				Cost: pr.Cost, DiskCost: pr.DiskCost, TransferCost: pr.TransferCost,
+				FixedCost: pr.FixedCost, FixedCostEstimated: pr.FixedCostEstimated,
+				PartialCost: !validRate(pr.Cost), Start: start, Alive: now, Tracked: true, Gone: true,
+				Why:    "its market already has it " + statusWord,
+				Grades: pr.Grades, Host: host, CPU: pr.CPU, Curators: pr.Curators,
+				For: pr.For, Round: pr.Round, Report: pr.Report,
+			}
+			reconcileRentalRateAt(rec, p, now)
+			endAt := resolveStopTime(start, now, p.EndedAt)
+			l.Pods[key] = rec
+			if rerr := f.retire(l, key, endAt); rerr != nil {
+				delete(l.Pods, key)
+				if firstErr == nil {
+					firstErr = rerr
+				}
+				continue
+			}
+			delete(l.Pending, id)
+			changed = true
+			f.event(p, pr.Handle, "gone", rec.Why)
+			f.say("retired already-%s pending worker %s on %s (machine %s)", statusWord, pr.Handle, marketTitle(p.Market), p.ID)
+			continue
+		}
+		alive := now
+		endAt := now
+		var stoppedAt, stoppedSeen time.Time
+		if p.State == "stopped" {
+			// Use a trustworthy provider stop timestamp when available; otherwise preserve the
+			// conservative compute-rate accrual reserved while pending up through this first
+			// confirmed stop, then accrue storage from now forward.
+			stoppedAt = resolveStopTime(start, now, p.StoppedAt)
+			stoppedSeen = now
+		} else if !p.live() {
+			alive = start
+			endAt = start
+		}
+		gpu := p.Card
+		if gpu == "" {
+			gpu = pr.GPU
+		}
+		host := p.Host
+		if host == "" {
+			host = pr.Host
+		}
+		rec := &podRecord{
+			ID: p.ID, Market: p.Market, Handle: pr.Handle, GPU: gpu, Cloud: pr.Cloud, PendingID: pr.ID,
+			Cost: pr.Cost, DiskCost: pr.DiskCost, TransferCost: pr.TransferCost,
+			FixedCost: pr.FixedCost, FixedCostEstimated: pr.FixedCostEstimated,
+			PartialCost: !validRate(pr.Cost),
+			Start:       start, Alive: alive, StoppedAt: stoppedAt, StoppedSeen: stoppedSeen, Tracked: true, Stopped: p.State == "stopped", Offline: p.State == "stopped" && p.Offline,
+			Grades: pr.Grades, Host: host, CPU: pr.CPU, Curators: pr.Curators,
+			For: pr.For, Round: pr.Round, Report: pr.Report,
+		}
+		reconcileRentalRateAt(rec, p, now)
+		if !end {
+			if f.o.DryRun {
+				f.say("would adopt matching contract %s for pending worker %s on %s", p.ID, pr.Handle, marketTitle(pr.Market))
+				continue
+			}
+			l.Pods[key] = rec
+			delete(l.Pending, id)
+			changed = true
+			f.event(p, pr.Handle, "rented", "adopted via workers resolve")
+			f.say("adopted pending worker %s on %s (machine %s)", pr.Handle, marketTitle(p.Market), p.ID)
+			continue
+		}
+		if f.o.DryRun {
+			f.say("would end matching contract %s for pending worker %s on %s", p.ID, pr.Handle, marketTitle(pr.Market))
+			continue
+		}
+		rec.Why = "ended via workers resolve --end"
+		if err := m.End(ctx, p.ID); err != nil {
+			// Persist outstanding termination against the exact contract ID so retrying
+			// `workers resolve --end` (and `scale` ticks even while work wants GPUs) keeps
+			// terminating this exact contract until deletion or confirmed absence.
+			rec.Terminating = true
+			l.Pods[key] = rec
+			delete(l.Pending, id)
+			changed = true
+			f.say("could not end pending worker %s (%s on %s): %v (persisted as terminating in fleet.json; retry `stet-cloud workers resolve --end`)",
+				pr.Handle, p.ID, marketTitle(p.Market), err)
+			if firstErr == nil {
+				firstErr = fmt.Errorf("ending %s on %s: %w", p.ID, marketTitle(p.Market), err)
+			}
+			continue
+		}
+		l.Pods[key] = rec
+		f.event(p, pr.Handle, "ended", rec.Why)
+		if rerr := f.retire(l, key, endAt); rerr != nil && firstErr == nil {
+			firstErr = rerr
+		}
+		delete(l.Pending, id)
+		changed = true
+		f.say("ended pending worker %s (%s on %s)", pr.Handle, p.ID, marketTitle(p.Market))
+	}
+	if changed {
+		if werr := f.writeLedger(l); werr != nil && firstErr == nil {
+			firstErr = werr
+		}
+	}
+	return firstErr
+}
+
+// cmdDownRental ends one specific rental by exact (market, id), persisting termination intent
+// (`Terminating: true`) in fleet.json BEFORE calling m.End(ctx, id) whenever local accounting is
+// writable so transient DELETE failures remain visible to `workers resolve --end` and `scale`,
+// while NEVER letting a lock failure, read-only filesystem, or corrupt ledger prevent issuing
+// m.End(ctx, id) to the provider. Any lock or ledger repair error is reported AFTER provider
+// teardown is confirmed.
+func cmdDownRental(ctx context.Context, f *Fleet, market, id string) error {
+	return cmdDownRentalMeta(ctx, f, market, id, nil)
+}
+
+func cmdDownRentalMeta(ctx context.Context, f *Fleet, market, id string, meta *Rental) error {
+	if id == "" || id == "dry-run" {
+		return nil
+	}
+	unlock, lockErr := f.lock(time.Minute)
+	if lockErr == nil {
+		defer unlock()
+	}
+	m := f.market(market)
+	var refreshErr error
+	if lockErr == nil || m == nil {
+		refreshErr = f.refresh()
+		if refreshed := f.market(market); refreshed != nil {
+			m = refreshed
+		}
+	}
+	if m == nil {
+		if refreshErr != nil {
+			return refreshErr
+		}
+		if lockErr != nil {
+			return lockErr
+		}
+		return fmt.Errorf("could not end %s on %s: there is no key for %s now", id, marketTitle(market), marketTitle(market))
+	}
+	if f.o.DryRun {
+		f.say("would end probe machine %s on %s", id, marketTitle(market))
+		return nil
+	}
+	var l *ledger
+	var ledgerErr error
+	var termWriteErr error
+	var rec *podRecord
+	key := ledgerKey(market, id)
+	if lockErr == nil {
+		l, ledgerErr = f.readLedger()
+		if ledgerErr == nil && l != nil {
+			pendingID := ""
+			if meta != nil {
+				pendingID = meta.PendingID
+			}
+			if spentSum, serr := f.readSpentSummary(); serr == nil && spentSum.hasContract(market, id) {
+				cleared := false
+				if l.Pods[key] != nil {
+					delete(l.Pods, key)
+					cleared = true
+				}
+				if pendingID != "" && l.Pending[pendingID] != nil {
+					delete(l.Pending, pendingID)
+					cleared = true
+				}
+				if cleared {
+					if err := f.writeLedger(l); err != nil {
+						return fmt.Errorf("clearing already-retired probe %s on %s from fleet ledger failed: %w", id, marketTitle(market), err)
+					}
+				}
+				f.say("cleared probe %s on %s: already retired in spent.jsonl", id, marketTitle(market))
+				return nil
+			}
+			rec = l.Pods[key]
+			now := f.now()
+			createdNew := rec == nil
+			if createdNew {
+				rec = &podRecord{
+					ID: id, Market: market, Start: now, Alive: now, Tracked: true,
+				}
+				if meta != nil {
+					rec.Handle = meta.Name
+					rec.GPU = meta.Card
+					rec.Host = meta.Host
+					if validRate(meta.Price) {
+						rec.Cost = meta.Price
+					}
+					if nonNegFinite(meta.DiskCost) {
+						rec.DiskCost = meta.DiskCost
+					}
+					rec.DiskCostUnknown = meta.DiskCostUnknown
+					if nonNegFinite(meta.TransferCost) {
+						rec.TransferCost = meta.TransferCost
+					}
+					if nonNegFinite(meta.FixedCost) {
+						rec.FixedCost = meta.FixedCost
+						rec.FixedCostEstimated = meta.FixedCostEstimated
+					}
+					if !meta.Created.IsZero() && !meta.Created.After(now) {
+						rec.Start = meta.Created
+					}
+				}
+				rec.PartialCost = !validRate(rec.Cost) || (meta != nil && meta.PartialRate)
+				l.Pods[key] = rec
+			}
+			if pendingID != "" {
+				if rec.PendingID == "" {
+					rec.PendingID = pendingID
+				}
+				if pr := l.Pending[pendingID]; pr != nil {
+					if rec.Handle == "" {
+						rec.Handle = pr.Handle
+					}
+					if rec.GPU == "" {
+						rec.GPU = pr.GPU
+					}
+					if rec.Host == "" {
+						rec.Host = pr.Host
+					}
+					if rec.Cloud == "" {
+						rec.Cloud = pr.Cloud
+					}
+					if !validRate(rec.Cost) && validRate(pr.Cost) {
+						rec.Cost = pr.Cost
+						rec.PartialCost = false
+					}
+					if rec.DiskCost == 0 && nonNegFinite(pr.DiskCost) {
+						rec.DiskCost = pr.DiskCost
+					}
+					if rec.TransferCost == 0 && nonNegFinite(pr.TransferCost) {
+						rec.TransferCost = pr.TransferCost
+					}
+					if rec.FixedCost == 0 && nonNegFinite(pr.FixedCost) {
+						rec.FixedCost = pr.FixedCost
+						rec.FixedCostEstimated = pr.FixedCostEstimated
+					}
+					if !pr.Created.IsZero() && !pr.Created.After(now) && pr.Created.Before(rec.Start) {
+						rec.Start = pr.Created
+					}
+					delete(l.Pending, pendingID)
+				}
+			}
+			if createdNew && meta != nil {
+				ts := rec.transferState()
+				ts.mergeReading(rentalTransferReading(meta), rec.FixedCostEstimated, meta.State, rec.Start, now)
+				rec.setTransferState(ts)
+			}
+		}
+	}
+	stateConfirmed := false
+	if rec != nil && lockErr == nil && ledgerErr == nil {
+		if lu, ok := m.(rentalLookup); ok {
+			if fresh, exists, lerr := lu.Lookup(ctx, id); lerr == nil && exists && fresh != nil {
+				now := f.now()
+				reconcileRentalRateAt(rec, fresh, now)
+				if rec.Handle == "" && fresh.Name != "" {
+					rec.Handle = fresh.Name
+				}
+				if rec.GPU == "" && fresh.Card != "" {
+					rec.GPU = fresh.Card
+				}
+				if rec.Host == "" && fresh.Host != "" {
+					rec.Host = fresh.Host
+				}
+				if fresh.live() {
+					rec.markLiveAt(now, fresh.ResumedAt)
+					stateConfirmed = true
+				} else if fresh.State == "stopped" {
+					rec.markStoppedStateAt(now, fresh.StoppedAt, fresh.Offline)
+					stateConfirmed = true
+				}
+			}
+		}
+		// Persist termination intent against the exact contract ID BEFORE issuing DELETE so any
+		// transient provider failure or process crash leaves the contract visible to
+		// `stet-cloud workers resolve --end` and `scale`. Never block DELETE if writing fails.
+		rec.Terminating = true
+		if rec.Why == "" {
+			rec.Why = "probe ended"
+		}
+		termWriteErr = f.writeLedger(l)
+	}
+	if err := m.End(ctx, id); err != nil {
+		if rec != nil && lockErr == nil && ledgerErr == nil {
+			if termWriteErr == nil {
+				name := rec.Handle
+				if name == "" {
+					name = id
+				}
+				f.say("could not end probe %s (%s on %s): %v (persisted as terminating in fleet.json; retry `stet-cloud workers resolve --end`)",
+					name, id, marketTitle(market), err)
+				return err
+			}
+			return fmt.Errorf("%w (also could not persist terminating state in fleet.json: %v)", err, termWriteErr)
+		}
+		return err
+	}
+	handle := ""
+	r := Rental{Market: market, ID: id}
+	if rec != nil {
+		handle = rec.Handle
+		rec.Why = "probe ended"
+		r.Card = rec.GPU
+	} else if meta != nil {
+		handle = meta.Name
+		r.Card = meta.Card
+	}
+	f.event(&r, handle, "ended", "probe ended")
+	if handle != "" {
+		f.say("ended probe %s (%s on %s)", handle, id, marketTitle(market))
+	} else {
+		f.say("ended probe %s on %s", id, marketTitle(market))
+	}
+	if lockErr != nil {
+		return fmt.Errorf("ended probe %s on %s, but fleet lock could not be acquired for ledger cleanup: %w", id, marketTitle(market), lockErr)
+	}
+	if ledgerErr != nil {
+		return fmt.Errorf("ended probe %s on %s, but fleet ledger could not be read for cleanup: %w", id, marketTitle(market), ledgerErr)
+	}
+	if rec != nil {
+		endAt := f.now()
+		if !stateConfirmed {
+			if rec.Stopped {
+				rec.markLiveAt(endAt, time.Time{})
+			}
+			ts := rec.transferState()
+			ts.clearUnconfirmedZero(rec.FixedCostEstimated)
+			rec.setTransferState(ts)
+		}
+		if err := f.retire(l, key, endAt); err != nil {
+			return fmt.Errorf("ended probe %s on %s, but retiring ledger entry failed: %w", id, marketTitle(market), err)
+		}
+		if err := f.writeLedger(l); err != nil {
+			return fmt.Errorf("ended probe %s on %s, but writing fleet ledger failed: %w", id, marketTitle(market), err)
+		}
+	}
+	return nil
 }
 
 func cmdSSH(ctx context.Context, f *Fleet, handle string) error {

@@ -23,8 +23,26 @@ from ..data import normalise, sentence_starts, window_hashes
 from .items import Item
 
 
+def scored_texts(it: Item) -> list[str]:
+    """Every independent text span whose familiarity in the training corpus would bias this item's score."""
+    from .aggregate import REASONING_KINDS
+
+    if it.kind == "context":
+        return [t for t in (it.ctx, it.cont, *it.wrongs) if t]
+    if it.kind == "answer" and it.source.split(":", 1)[0] in REASONING_KINDS:
+        # Fresh harvest-derived reasoning items wrap an excerpt with a prompt/prefix (e.g.
+        # wrapper 4's `Context:\n`). Extract the unprefixed source excerpt so single-sentence
+        # excerpts keep their true opening key, and decontaminate excerpt and answer independently.
+        from .fresh.reason import reasoning_excerpt
+
+        excerpt = reasoning_excerpt(it)
+        return [t for t in (excerpt if excerpt is not None else it.ctx, it.cont) if t]
+    t = {"passage": it.text, "answer": it.cont}.get(it.kind, "")
+    return [t] if t else []
+
+
 def scored_text(it: Item) -> str:
-    return {"passage": it.text, "answer": it.cont}.get(it.kind, "")
+    return "\n".join(scored_texts(it))
 
 
 def seen(items: list[Item], corpus, season, log=None) -> set[int]:
@@ -33,8 +51,9 @@ def seen(items: list[Item], corpus, season, log=None) -> set[int]:
     k, need = int(cfg["key_bytes"]), int(cfg["min_letters"])
     owners: dict[int, list[int]] = defaultdict(list)
     for i, it in enumerate(items):
-        for key in sentence_starts(scored_text(it), k, need):
-            owners[int(window_hashes(key, k)[0])].append(i)
+        for text in scored_texts(it):
+            for key in sentence_starts(text, k, need):
+                owners[int(window_hashes(key, k)[0])].append(i)
     if not owners:
         return set()
     keys = np.array(sorted(owners), dtype=np.uint64)

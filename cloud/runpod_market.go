@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"net/url"
 	"strings"
 	"time"
@@ -42,7 +43,7 @@ func (m *runpodMarket) Offers(ctx context.Context, n Need) ([]Offer, error) {
 		}
 		for _, g := range gpus {
 			p := g.price(cloud)
-			if p <= 0 || g.Availability == "NONE" || g.Availability == "" {
+			if !validRate(p) || g.Availability == "NONE" || g.Availability == "" {
 				continue
 			}
 			out = append(out, Offer{
@@ -72,11 +73,14 @@ func (m *runpodMarket) Rent(ctx context.Context, o Offer, l Launch) (*Rental, er
 		Name: l.Name, Image: l.Image, Cloud: cloudOf(o), Disk: l.Need.DiskGB, Env: env, Ports: ports,
 		GPU:        NewPodGPU{ID: o.ID, Count: 1, MinRAMPerGPU: l.Need.MinRAMGB, MinVCPUPerGPU: l.Need.MinCPUs, MinCUDAVersion: l.Need.MinCUDA},
 		Entrypoint: []string{"/bin/bash", "-c"}, Cmd: []string{l.Script},
-	})
+	}, l.KnownIDs)
 	if err != nil {
 		return nil, err
 	}
 	r := podRental(pod)
+	if !validRate(r.Price) && validRate(o.Price) {
+		r.Price = o.Price
+	}
 	return &r, nil
 }
 
@@ -126,6 +130,26 @@ func (m *runpodMarket) inspect(ctx context.Context, id string) (*Rental, error) 
 		r.Up, r.Phase, r.Detail = "no", "no container yet", "no container yet"
 	}
 	return &r, nil
+}
+
+// Lookup verifies one pod directly by ID when a listing omits it.
+func (m *runpodMarket) Lookup(ctx context.Context, id string) (*Rental, bool, error) {
+	var p Pod
+	status, err := m.rp.do(ctx, "GET", "/pods/"+url.PathEscape(id), nil, &p)
+	if status == 404 {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	if p.ID == "" || p.ID != id {
+		return nil, false, fmt.Errorf("RunPod lookup for %q returned unexpected pod id %q", id, p.ID)
+	}
+	r := podRental(&p)
+	if p.Runtime == nil && r.live() {
+		r.Up, r.Phase, r.Detail = "no", "no container yet", "no container yet"
+	}
+	return &r, true, nil
 }
 
 // Logs are what RunPod and the pod's container have said of it: the last n lines.

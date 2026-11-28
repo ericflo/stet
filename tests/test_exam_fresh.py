@@ -113,13 +113,13 @@ def test_only_the_kinds_of_writing_the_season_names_are_selected():
 def test_the_season_names_kinds_of_writing_that_sources_give():
     """Every kind of writing the season's exam names has a source that is harvested for it, and
     every source the harvest can give is of a kind the season could name."""
-    from stet.exam.aggregate import SOURCE_KIND, current_plan
+    from stet.exam.aggregate import REASONING_KINDS, SOURCE_KIND, current_plan
     from stet.exam.fresh import harvest
     from stet.exam.gen import FAMILIES
 
     given = ["wikipedia", "wikipedia-added", "wikipedia-talk", *(s for name in harvest.OTHERS for s in harvest.gives(name))]
     assert set(given) <= set(SOURCE_KIND) and {SOURCE_KIND[s] for s in given} == set(SOURCE_KIND.values())
-    writing = set(current_plan().parts) - {f.NAME for f in FAMILIES}
+    writing = set(current_plan().parts) - {f.NAME for f in FAMILIES} - set(REASONING_KINDS)
     assert writing and writing <= {SOURCE_KIND[s] for s in given}
 
 
@@ -183,6 +183,36 @@ def test_items_the_corpus_already_holds_are_found(tmp_path):
     answer = Item(kind="answer", corner="fresh/y/en/-/answer", fmt="dialogue", lang="en", source="t",
                   ctx=quoted + " Why?", cont=" Nothing in the corpus says this, not even close to it, as far as anyone knows.")
     assert seen([copied, new, answer], corpus, load_season("s2")) == {0}  # an answer is checked on its answer, not its question
+
+
+def test_context_items_are_decontaminated_on_wrong_contexts_too(tmp_path):
+    from conftest import make_corpus
+
+    from stet.exam.decontam import seen
+    from stet.exam.items import Item
+    from stet.spec import load_season
+
+    s3 = load_season("s3")
+    ctx = "Opening context about regional alpine geology and glacial erosion that is completely fresh."
+    right = " Fresh continuation explaining moraine formation across the eastern valley floor in late autumn."
+    wrong_hit = "The river authority approved a new flood barrier for the lower town after three wet winters in a row."
+    wrong_clean = "An entirely separate opening about maritime trade routes during the early seventeenth century."
+    item = Item(
+        kind="context", corner="fresh/ccnews/en/-/context", fmt="prose", lang="en", source="ccnews:1",
+        ctx=ctx, cont=right, wrongs=(wrong_hit, wrong_clean),
+    )
+    # Wrong-context overlap must drop the item because familiarity with a wrong opening biases the score.
+    c_wrong = make_corpus(tmp_path / "wrong", ["Header\n" + wrong_hit + " Extra words."])
+    assert seen([item], c_wrong, s3) == {0}
+    # Continuation overlap also drops the item.
+    c_right = make_corpus(tmp_path / "right", ["Header\n" + right + " Extra words."])
+    assert seen([item], c_right, s3) == {0}
+    # Real opening overlap also drops the item.
+    c_ctx = make_corpus(tmp_path / "ctx", ["Header\n" + ctx + " Extra words."])
+    assert seen([item], c_ctx, s3) == {0}
+    # Unseen context, continuation, and wrongs survive.
+    c_clean = make_corpus(tmp_path / "clean", ["Unrelated page about baking sourdough bread at home."])
+    assert seen([item], c_clean, s3) == set()
 
 
 def test_copied_text_is_found_in_every_script(tmp_path):

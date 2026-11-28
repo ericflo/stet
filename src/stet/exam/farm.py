@@ -153,7 +153,11 @@ def work_one(task: dict, season, key, device, log=print) -> None:
         body = dict(meta)
         body["reason"] = body.pop("invalid_reason", "")
         if model is not None:
-            body["item_scores"] = [round(s, 6) for s in sit(model, items, enc, season.eot, scale.ctx, device, floor=season.answer_floor_bytes)]
+            from ..train import _deterministic_cuda
+
+            use_det = ((getattr(season, "raw", None) or {}).get("student") or {}).get("kind") == "hf_topreset" and getattr(device, "type", "") == "cuda"
+            with _deterministic_cuda(use_det):
+                body["item_scores"] = [round(s, 6) for s in sit(model, items, enc, season.eot, scale.ctx, device, floor=season.answer_floor_bytes)]
             del model
         release_gpu_memory()
         try:
@@ -226,7 +230,7 @@ def train_student(rnd, scale, corpus, enc, script: Path, device):
     except ScriptError as e:
         meta["invalid_reason"] = str(e)
         return meta, None
-    model, tr = train(tokens, scale, rnd.season, rnd.init_seed, device)
+    model, tr = train(tokens, scale, rnd.season, rnd.init_seed, device, sft_seed=rnd.seed, enc=enc)
     meta.update(valid=True, kept_doc_frac=stats.to_dict(corpus)["kept_doc_frac"], train_seconds=round(tr["seconds"], 1))
     return meta, model
 
@@ -240,12 +244,14 @@ def write_items(items: list[Item], path: Path) -> None:
 def summarize(rnd, scale, items: list[Item], base: dict, students: dict[str, dict], shares: dict[str, float] | None = None) -> dict:
     """What a batch came to: each script's score on the items over the unedited student's."""
     from . import gen
+    from .aggregate import plan_of
 
+    plan = plan_of(rnd.season)
     rows = []
     for name, r in students.items():
         row = {"name": name, "valid": r["valid"]}
         if r["valid"]:
-            agg = round_score(items, gains(r["item_scores"], base["item_scores"]), shares=shares)
+            agg = round_score(items, gains(r["item_scores"], base["item_scores"]), plan=plan, shares=shares)
             row.update(score=round(agg["score"], 5), pillars={k: v["score"] for k, v in agg["pillars"].items()}, families=agg["families"])
         else:
             row["reason"] = r.get("invalid_reason")

@@ -19,20 +19,52 @@ from dataclasses import dataclass, field
 from functools import cache
 from importlib import resources
 
-HARNESS_VERSION = "0.5.0"
+HARNESS_VERSION = "0.6.0"
 # The oldest stet whose grades are this one's: the server refuses jobs and results from older
 # ones, and they upgrade. Moved up only when what a grade measures changes, so that a release
 # that changes nothing in a grade does not throw away work under way.
-GRADES_SINCE = "0.5.0"
+GRADES_SINCE = "0.6.0"
 # The season the competition is in: what every command means when it names none. Changing it is
 # the switch from one season to the next (see docs/OPERATING.md).
-CURRENT_SEASON = "s2"
+CURRENT_SEASON = "s3"
+
+
+class TrainingError(RuntimeError):
+    """Training or scoring diverged numerically (non-finite loss or score).
+
+    A numerical divergence is the grader's failure, not a script rule violation: the grader
+    retries once on the same machine and, if it still fails, hands the job back so another
+    machine grades the script before anything is held against the entry.
+    """
+
+
+def hardware_backend(hw: dict | None) -> str | None:
+    """Extract the concrete backend ('cuda', 'rocm', 'mps', 'cpu') from a hardware info dict.
+
+    Returns None when CUDA metadata lacks an explicit backend (unless ROCm/AMD hints identify
+    ROCm) so NVIDIA grades never reuse an untagged or ROCm-labelled legacy cache entry.
+    """
+    if not isinstance(hw, dict):
+        return None
+    dev = hw.get("device")
+    if not isinstance(dev, str) or not dev:
+        return None
+    if dev == "cuda":
+        bk = hw.get("backend")
+        if bk in ("cuda", "rocm"):
+            return bk
+        torch_ver = str(hw.get("torch") or "").lower()
+        gpu = str(hw.get("gpu") or "").lower()
+        if "rocm" in torch_ver or "hip" in torch_ver or "amd" in gpu or "radeon" in gpu or "instinct" in gpu:
+            return "rocm"
+        return None
+    return dev
 
 
 @dataclass(frozen=True)
 class Scale:
     name: str
-    corpus_units: int  # corpus size, in units of roughly 350 MB of raw text
+    corpus_units: int  # corpus size, in units of roughly 300-350 MB of raw text
     train_tokens: int
     n_layer: int
     n_head: int
@@ -41,6 +73,9 @@ class Scale:
     batch_size: int
     lr: float
     edit_seconds: int
+    micro_batch: int = 0  # 0: same as batch_size (no gradient accumulation)
+    sft_steps: int = 0  # 0: no post-pretraining SFT probe
+    warmup_steps: int = 0  # 0: derive from season warmup_frac (Season 1-2 default)
 
     @property
     def steps(self) -> int:
@@ -76,9 +111,22 @@ class Season:
         """
         rules = {k: v for k, v in self.raw.items() if k not in POLICY_KEYS}
         h = hashlib.sha256(json.dumps(rules, sort_keys=True, separators=(",", ":")).encode())
-        h.update(resources.files("stet.seasons").joinpath(self.raw["tokenizer"]["file"]).read_bytes())
-        # the facts its knowledge items ask
-        h.update(resources.files("stet.exam").joinpath("data", self.raw["exam"]["facts"]["file"]).read_bytes())
+        tok_cfg = self.raw["tokenizer"]
+        if tok_cfg.get("kind") == "hf":
+            # External HF tokenizer pinned by sha256 in rules (verified on download in tok.py).
+            h.update(bytes.fromhex(tok_cfg["sha256"]))
+        else:
+            h.update(resources.files("stet.seasons").joinpath(tok_cfg["file"]).read_bytes())
+        # Pinned base student files (if the season starts from a pretrained checkpoint).
+        for f in (self.raw.get("student") or {}).get("files") or []:
+            h.update(bytes.fromhex(f["sha256"]))
+        # Pinned SFT probe pack (if the season bundles a fixed multilingual SFT probe).
+        sft_cfg = self.raw.get("sft") or {}
+        if sft_cfg.get("pack"):
+            h.update(resources.files("stet.exam").joinpath("data", sft_cfg["pack"]).read_bytes())
+        # the facts its knowledge items ask (when the season uses generated knowledge items)
+        if facts_cfg := (self.raw.get("exam") or {}).get("facts"):
+            h.update(resources.files("stet.exam").joinpath("data", facts_cfg["file"]).read_bytes())
         for s in self.pool("gym"):
             h.update(bytes.fromhex(s.sha256))
         return h.hexdigest()
@@ -213,6 +261,7 @@ class Round:
     beacon: dict | None = None  # the drand round an official seed was drawn from
     crawl: dict | None = None  # the published crawl an official corpus is drawn from
     exam_digest: str = ""  # an official round: the digest of the exam posted after its draw
+    scale: str = ""  # published official round scale (e.g. "micro", "standard"), when reported
 
     @property
     def id(self) -> str:
@@ -255,6 +304,8 @@ class Round:
             d["crawl"] = self.crawl
         if self.exam_digest:
             d["exam_digest"] = self.exam_digest
+        if self.scale:
+            d["scale"] = self.scale
         return d
 
 
@@ -305,6 +356,8 @@ def round_from_description(season: Season, d: dict) -> Round:
         if not SHA256_RE.fullmatch(str(d["exam_digest"])):
             raise ValueError(f"round {d.get('id')}: its exam's digest is not a sha256")
         rnd = dataclasses.replace(rnd, exam_digest=str(d["exam_digest"]))
+    if d.get("scale"):
+        rnd = dataclasses.replace(rnd, scale=str(d["scale"]).strip())
     return rnd
 
 

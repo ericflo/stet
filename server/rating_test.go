@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"path/filepath"
@@ -442,5 +443,221 @@ func TestACuratorThatNeverFinishedIsListedLastWithNoNumber(t *testing.T) {
 	}
 	if got := strings.Join(names, " "); got != "good once low never" {
 		t.Fatalf("the board's order: %s", got)
+	}
+}
+
+// Review 33 P1 #1: checkRecord (and recordRace.Clear) MUST apply each contributing round's
+// recorded scale margin rather than the current server process's STET_SCALE, keeping published
+// Advantage in raw gain units across both restart directions and mixed-scale histories.
+func TestReview33RecordUsesPerRoundMarginAcrossRestartsAndMixedScaleHistory(t *testing.T) {
+	runCheck := func(t *testing.T, serverScale string, roundScales []string, gains []float64) (awarded bool, adv, p float64, clear bool) {
+		t.Helper()
+		pub, priv := newKey()
+		w := newWorld(t, pub)
+		w.app.cfg.Scale = serverScale
+		anchor := w.join("anchor-one", priv)
+		edID := w.submit(anchor, "challenger", "print(1)")
+
+		err := w.app.st.update(context.Background(), func(tx *Tx) error {
+			if ed := tx.s.Editors[edID]; ed != nil {
+				ed.Public = true
+				ed.Status = "active"
+				tx.saveEditor(ed)
+			}
+			baseLoss := 5.5
+			for i, sc := range roundScales {
+				idx := i + 1
+				tx.saveRound(&Round{
+					Idx: idx, Status: "settled", Scale: sc, BaselineLoss: &baseLoss,
+					DrawnAt: now() - int64(3600*(len(roundScales)-i)),
+					ExamAt:  now() - int64(3500*(len(roundScales)-i)),
+				})
+				tx.saveEntry(&Entry{
+					RoundIdx: idx, EditorID: edID, Status: "settled",
+					Valid: true, Gain: gains[i], SettledAt: now() - int64(3400*(len(roundScales)-i)),
+				})
+			}
+			w.app.checkRecord(tx, len(roundScales))
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		w.app.st.view(func(s *State) {
+			awarded = s.holder() != nil && s.holder().EditorID == edID
+			lk := s.Looks[lookKey(edID, "", 5)]
+			if lk == nil {
+				t.Fatalf("expected look@5 recorded")
+			}
+			adv, p = lk.Advantage, lk.P
+			if awarded {
+				rec := s.holder()
+				if math.Abs(rec.Advantage-adv) > 1e-12 || math.Abs(rec.P-p) > 1e-12 {
+					t.Fatalf("record Advantage/P mismatch with look: rec=(%v,%v) look=(%v,%v)", rec.Advantage, rec.P, adv, p)
+				}
+			}
+			// Also check recordRace.Clear before any holder existed (when not awarded).
+			b := w.app.computeBoard(s)
+			if !awarded {
+				race := w.app.recordRace(s, b, 10)
+				if len(race.Rows) != 1 {
+					t.Fatalf("expected 1 challenger row in recordRace, got %+v", race.Rows)
+				}
+				clear = race.Rows[0].Clear
+			} else {
+				clear = true
+			}
+		})
+		return awarded, adv, p, clear
+	}
+
+	// 1. Exact reviewer repro: 5 settled `nano` rounds with gains 0.0098..0.0102.
+	//    nano margin = 0.030 (no record), standard margin = 0.005 (would falsely award record!).
+	//    MUST yield NO record under BOTH STET_SCALE=nano AND STET_SCALE=standard!
+	nanoScales := []string{"nano", "nano", "nano", "nano", "nano"}
+	gains01 := []float64{0.0098, 0.0099, 0.0100, 0.0101, 0.0102}
+	awN, advN, pN, clN := runCheck(t, "nano", nanoScales, gains01)
+	awS, advS, pS, clS := runCheck(t, "standard", nanoScales, gains01)
+	if awN || awS {
+		t.Fatalf("5 nano rounds at 0.010 gain MUST NOT award record on either scale: nano=%v standard=%v", awN, awS)
+	}
+	if clN || clS {
+		t.Fatalf("recordRace.Clear MUST be false on 5 nano rounds at 0.010 gain: nano=%v standard=%v", clN, clS)
+	}
+	if math.Abs(advN-0.0100) > 1e-9 || math.Abs(advS-advN) > 1e-12 || math.Abs(pS-pN) > 1e-12 {
+		t.Fatalf("nano->standard restart changed record test: nano=(adv=%v,p=%v) standard=(adv=%v,p=%v)", advN, pN, advS, pS)
+	}
+
+	// 2. Reverse restart direction: 5 settled `standard` rounds with gains 0.0098..0.0102.
+	//    MUST award record under BOTH STET_SCALE=standard AND STET_SCALE=nano with identical Advantage & P!
+	stdScales := []string{"standard", "standard", "standard", "standard", "standard"}
+	awSS, advSS, pSS, _ := runCheck(t, "standard", stdScales, gains01)
+	awSN, advSN, pSN, _ := runCheck(t, "nano", stdScales, gains01)
+	if !awSS || !awSN {
+		t.Fatalf("5 standard rounds at 0.010 gain MUST award record on both scales: standard=%v nano=%v", awSS, awSN)
+	}
+	if math.Abs(advSS-0.0100) > 1e-9 || math.Abs(advSN-advSS) > 1e-12 || math.Abs(pSN-pSS) > 1e-12 {
+		t.Fatalf("standard->nano restart changed record test: standard=(adv=%v,p=%v) nano=(adv=%v,p=%v)", advSS, pSS, advSN, pSN)
+	}
+
+	// 3. Genuinely mixed-scale history: 2 nano (0.030) + 3 standard (0.005) -> effective margin 0.015.
+	mixedScales := []string{"nano", "nano", "standard", "standard", "standard"}
+	// 3a. Mean gain 0.012 beats standard's 0.005 but NOT mixed 0.015 -> NO record on either scale, raw Advantage = 0.012!
+	gains12 := []float64{0.0118, 0.0119, 0.0120, 0.0121, 0.0122}
+	awM1S, advM1S, pM1S, clM1S := runCheck(t, "standard", mixedScales, gains12)
+	awM1N, advM1N, pM1N, clM1N := runCheck(t, "nano", mixedScales, gains12)
+	if awM1S || awM1N || clM1S || clM1N {
+		t.Fatalf("mixed history at 0.012 (< 0.015 mixed margin) must not award/clear: std=(%v,%v) nano=(%v,%v)", awM1S, clM1S, awM1N, clM1N)
+	}
+	if math.Abs(advM1S-0.0120) > 1e-9 || math.Abs(advM1N-advM1S) > 1e-12 || math.Abs(pM1N-pM1S) > 1e-12 {
+		t.Fatalf("mixed history (below) differed across scales: std=(adv=%v,p=%v) nano=(adv=%v,p=%v)", advM1S, pM1S, advM1N, pM1N)
+	}
+
+	// 3b. Mean gain 0.045 (exceeds both per-round margins cleanly) -> awards record on BOTH scales
+	//     with raw Advantage = 0.0450 (NOT corrupted by adding back a.cfg.Scale's margin!).
+	gains45 := []float64{0.0448, 0.0449, 0.0450, 0.0451, 0.0452}
+	awM2S, advM2S, pM2S, _ := runCheck(t, "standard", mixedScales, gains45)
+	awM2N, advM2N, pM2N, _ := runCheck(t, "nano", mixedScales, gains45)
+	if !awM2S || !awM2N {
+		t.Fatalf("mixed history at 0.045 must award record on both scales: std=%v nano=%v", awM2S, awM2N)
+	}
+	if math.Abs(advM2S-0.0450) > 1e-9 || math.Abs(advM2N-advM2S) > 1e-12 || math.Abs(pM2N-pM2S) > 1e-12 {
+		t.Fatalf("mixed history (above) raw Advantage or P differed across scales: std=(adv=%v,p=%v) nano=(adv=%v,p=%v)", advM2S, pM2S, advM2N, pM2N)
+	}
+}
+
+func TestReview34LadderSelectionInvariantAcrossDefaultScaleRestarts(t *testing.T) {
+	runLadder := func(t *testing.T, serverScale string, roundScales []string) (winnerID string, lowerA, lowerB, seA, seB float64, entrants []string) {
+		t.Helper()
+		w := newWorld(t)
+		w.app.cfg.Scale = serverScale
+		w.app.cfg.LadderSize = 1
+		w.app.cfg.RatedRounds = 3
+		// Use the real Season 3 noise configuration: nano falls back to noiseFloor (0.01^2 = 0.0001),
+		// standard has round_sd=0.015 (0.000225), micro has round_sd=0.025 (0.000625).
+		w.app.season.Noise = map[string]any{
+			"micro":    map[string]any{"gain_sd": 0.02, "round_sd": 0.025},
+			"standard": map[string]any{"gain_sd": 0.004, "order_sd": 0.006, "round_sd": 0.015},
+		}
+		if err := w.app.st.update(context.Background(), func(tx *Tx) error {
+			for _, acct := range []struct {
+				id     int64
+				handle string
+			}{{101, "alice"}, {102, "bob"}} {
+				tx.s.Accounts[acct.id] = &Account{ID: acct.id, Handle: acct.handle}
+			}
+			tx.s.Editors["curA"] = &Editor{ID: "curA", AccountID: 101, Name: "curA", Version: 1, Status: "running", Public: true, CreatedAt: 100}
+			tx.s.Editors["curB"] = &Editor{ID: "curB", AccountID: 102, Name: "curB", Version: 1, Status: "running", Public: true, CreatedAt: 101}
+			baseLoss := 1.5
+			for i, sc := range roundScales {
+				idx := i + 1
+				tx.s.Rounds[idx] = &Round{Idx: idx, Status: "settled", Scale: sc, BaselineLoss: &baseLoss}
+				// Curator B runs all 12 rounds at 0.0200; Curator A runs the first 3 rounds at 0.0226.
+				if i < 3 {
+					eA := &Entry{RoundIdx: idx, EditorID: "curA", Status: "settled", Valid: true, Gain: 0.0226}
+					tx.s.Entries[entryKey(idx, "curA")] = eA
+					tx.s.inRound[idx] = append(tx.s.inRound[idx], eA)
+				}
+				eB := &Entry{RoundIdx: idx, EditorID: "curB", Status: "settled", Valid: true, Gain: 0.0200}
+				tx.s.Entries[entryKey(idx, "curB")] = eB
+				tx.s.inRound[idx] = append(tx.s.inRound[idx], eB)
+			}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		var b *Board
+		var es []entrant
+		w.app.st.view(func(s *State) {
+			b = w.app.computeBoard(s)
+			es = w.app.selectEntrants(s, 1000, len(roundScales)+1)
+		})
+		if len(b.Ladder) != 1 {
+			t.Fatalf("scale=%s: expected 1 ladder seat, got %d", serverScale, len(b.Ladder))
+		}
+		for _, e := range es {
+			if e.Why == "ladder" {
+				entrants = append(entrants, e.EditorID)
+			}
+		}
+		return b.Ladder[0].ID, *b.ByID["curA"].Lower, *b.ByID["curB"].Lower, *b.ByID["curA"].SE, *b.ByID["curB"].SE, entrants
+	}
+
+	// 1. Exact Review #34 repro: 12 settled nano rounds. Across restarts to nano, standard, or micro,
+	//    prior variance MUST stay derived from the nano rounds -> lower bounds 0.018039 / 0.017719,
+	//    and curA MUST win the ladder seat in both computeBoard and selectEntrants!
+	nano12 := make([]string, 12)
+	for i := range nano12 {
+		nano12[i] = "nano"
+	}
+	wN, lAN, lBN, seAN, seBN, eN := runLadder(t, "nano", nano12)
+	wS, lAS, lBS, seAS, seBS, eS := runLadder(t, "standard", nano12)
+	wM, lAM, lBM, seAM, seBM, eM := runLadder(t, "micro", nano12)
+	if wN != "curA" || wS != "curA" || wM != "curA" {
+		t.Fatalf("12 nano rounds must select curA across all restart scales: nano=%s standard=%s micro=%s", wN, wS, wM)
+	}
+	if len(eN) != 1 || eN[0] != "curA" || len(eS) != 1 || eS[0] != "curA" || len(eM) != 1 || eM[0] != "curA" {
+		t.Fatalf("selectEntrants ladder differed across restart scales: nano=%v standard=%v micro=%v", eN, eS, eM)
+	}
+	if math.Abs(lAN-0.018039) > 1e-5 || math.Abs(lBN-0.017719) > 1e-5 {
+		t.Fatalf("nano lower bounds want ~0.018039 / ~0.017719, got %.6f / %.6f", lAN, lBN)
+	}
+	if math.Abs(lAS-lAN) > 1e-12 || math.Abs(lBS-lBN) > 1e-12 || math.Abs(seAS-seAN) > 1e-12 || math.Abs(seBS-seBN) > 1e-12 ||
+		math.Abs(lAM-lAN) > 1e-12 || math.Abs(lBM-lBN) > 1e-12 || math.Abs(seAM-seAN) > 1e-12 || math.Abs(seBM-seBN) > 1e-12 {
+		t.Fatalf("restart changed SE/Lower on identical nano history: nano=(%.6f,%.6f) std=(%.6f,%.6f) micro=(%.6f,%.6f)", lAN, lBN, lAS, lBS, lAM, lBM)
+	}
+
+	// 2. Mixed-scale history (3 nano + 9 standard) MUST also produce bit-identical SE, Lower, and
+	//    ladder selection across restarts between nano, standard, and micro.
+	mixed12 := []string{"nano", "nano", "nano", "standard", "standard", "standard", "standard", "standard", "standard", "standard", "standard", "standard"}
+	mwN, mlAN, mlBN, mseAN, mseBN, meN := runLadder(t, "nano", mixed12)
+	mwS, mlAS, mlBS, mseAS, mseBS, meS := runLadder(t, "standard", mixed12)
+	mwM, mlAM, mlBM, mseAM, mseBM, meM := runLadder(t, "micro", mixed12)
+	if mwN != mwS || mwN != mwM || len(meN) != 1 || len(meS) != 1 || len(meM) != 1 || meN[0] != meS[0] || meN[0] != meM[0] {
+		t.Fatalf("mixed-scale ladder differed across restarts: nano=%s(%v) std=%s(%v) micro=%s(%v)", mwN, meN, mwS, meS, mwM, meM)
+	}
+	if math.Abs(mlAS-mlAN) > 1e-12 || math.Abs(mlBS-mlBN) > 1e-12 || math.Abs(mseAS-mseAN) > 1e-12 || math.Abs(mseBS-mseBN) > 1e-12 ||
+		math.Abs(mlAM-mlAN) > 1e-12 || math.Abs(mlBM-mlBN) > 1e-12 || math.Abs(mseAM-mseAN) > 1e-12 || math.Abs(mseBM-mseBN) > 1e-12 {
+		t.Fatalf("mixed-scale SE/Lower differed across restarts: nano=(%.6f,%.6f) std=(%.6f,%.6f) micro=(%.6f,%.6f)", mlAN, mlBN, mlAS, mlBS, mlAM, mlBM)
 	}
 }

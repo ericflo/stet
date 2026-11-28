@@ -14,13 +14,17 @@ package main
 // round is open at a time, so the database holds at most one round's worth.
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"math"
 	"net/http"
 	"sort"
@@ -48,6 +52,24 @@ func (a *App) examBlob(idx int, name string) string {
 	return fmt.Sprintf("exams/%s/%08d/%s", a.season.ID, idx, name)
 }
 
+// examDigestBlob is an immutable, digest-addressed blob key for a round's exam files so two
+// overlapping publications cannot overwrite each other before commit.
+func (a *App) examDigestBlob(idx int, digest, name string) string {
+	return fmt.Sprintf("exams/%s/%08d/%s/%s", a.season.ID, idx, digest, name)
+}
+
+// examBlobSHA hashes the full publication payload (ordered items digest + compressed items,
+// public, and table bytes) so overlapping posts with the same items_digest but different derived
+// public_file or table stage into distinct immutable prefixes and cannot overwrite the winner.
+func examBlobSHA(digest string, file, public, table []byte) string {
+	fh := sha256.Sum256(file)
+	ph := sha256.Sum256(public)
+	th := sha256.Sum256(table)
+	h := sha256.New()
+	fmt.Fprintf(h, "%s\n%x\n%x\n%x", digest, fh, ph, th)
+	return hex.EncodeToString(h.Sum(nil))
+}
+
 // examPosted reports whether a round's exam is there to be sat: it is made after the draw.
 func examPosted(rd *Round) bool { return rd.ExamSHA != "" }
 
@@ -61,12 +83,26 @@ type ExamPost struct {
 	Shares   map[string]float64 `json:"languages"` // percent of the round's corpus in each language
 	Snapshot string             `json:"snapshot_sha256"`
 	Fresh    int                `json:"fresh"`
-	Public   string             `json:"public_file"` // base64 of the zstd JSON lines published when the round settles
-	Hours    []RoundHour        `json:"hours"`       // the harvests its writing was made from: see harvest.go
+	Public   string             `json:"public_file"`           // base64 of the zstd JSON lines published when the round settles
+	Hours    []RoundHour        `json:"hours"`                 // the harvests its writing was made from: see harvest.go
+	InitSHA  string             `json:"init_sha256,omitempty"` // optional authoritative initial weights sha256 from the examiner
 }
 
-// apiExamPost: POST /api/v1/admin/rounds/{id}/exam, from the organisers. Posting the same exam
-// again is harmless; posting another is refused.
+func sharesEqual(a, b map[string]float64) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, va := range a {
+		vb, ok := b[k]
+		if !ok || va != vb {
+			return false
+		}
+	}
+	return true
+}
+
+// apiExamPost: POST /api/v1/admin/rounds/{id}/exam, from the organisers. Posting the exact same
+// exam (items digest and language shares) again is harmless; posting another is refused.
 func (a *App) apiExamPost(w http.ResponseWriter, r *http.Request) {
 	_, _, body, err := a.signedBy(w, r, 4*examFileMax/3+(8<<20), true, organisers)
 	if err != nil {
@@ -96,7 +132,7 @@ func (a *App) postExam(ctx context.Context, idx int, p *ExamPost) (bool, error) 
 	file, err := base64.StdEncoding.DecodeString(p.File)
 	public, perr := base64.StdEncoding.DecodeString(p.Public)
 	if err != nil || perr != nil || len(public) == 0 || len(public) > examFileMax || len(file) == 0 || len(file) > examFileMax || !sha256Re.MatchString(p.Digest) || len(p.Table) == 0 ||
-		len(p.Table) > examItemMax || (p.Snapshot != "" && !sha256Re.MatchString(p.Snapshot)) || p.Fresh < 0 || p.Fresh > len(p.Table) {
+		len(p.Table) > examItemMax || (p.Snapshot != "" && !sha256Re.MatchString(p.Snapshot)) || (p.InitSHA != "" && !sha256Re.MatchString(p.InitSHA)) || p.Fresh < 0 || p.Fresh > len(p.Table) {
 		return false, fail(400, "the exam does not add up")
 	}
 	if err := a.checkTable(p.Table, p.Shares); err != nil {
@@ -105,12 +141,17 @@ func (a *App) postExam(ctx context.Context, idx int, p *ExamPost) (bool, error) 
 	var already bool
 	a.st.view(func(s *State) {
 		rd := s.Rounds[idx]
-		already = rd != nil && rd.ExamSHA == p.Digest
 		if rd == nil || rd.Status != "open" {
 			err = fail(409, "%s is not open", roundID(a.season.ID, idx))
 		} else if rd.ExamSHA != "" && rd.ExamSHA != p.Digest {
 			err = fail(409, "%s already has its exam", roundID(a.season.ID, idx))
-		} else if !already {
+		} else if rd.ExamSHA == p.Digest {
+			if !sharesEqual(rd.Shares, p.Shares) {
+				err = fail(409, "%s already has its exam with different language shares", roundID(a.season.ID, idx))
+			} else {
+				already = true
+			}
+		} else {
 			_, err = a.checkHours(s, rd, p)
 		}
 	})
@@ -118,11 +159,12 @@ func (a *App) postExam(ctx context.Context, idx int, p *ExamPost) (bool, error) 
 		return false, err
 	}
 	table, _ := json.Marshal(p.Table)
+	blobSHA := examBlobSHA(p.Digest, file, public, table)
 	for _, put := range []struct {
 		name, kind string
 		b          []byte
 	}{{examItems, "application/zstd", file}, {examPublic, "application/zstd", public}, {examTable, "application/json", table}} {
-		if err := a.st.blobs.Put(ctx, a.examBlob(idx, put.name), put.b, put.kind); err != nil {
+		if err := a.st.blobs.Put(ctx, a.examDigestBlob(idx, blobSHA, put.name), put.b, put.kind); err != nil {
 			slog.Error("keeping a round's exam", "round", idx, "err", err)
 			return false, fail(503, "the file store is not answering; try again in a moment")
 		}
@@ -133,8 +175,11 @@ func (a *App) postExam(ctx context.Context, idx int, p *ExamPost) (bool, error) 
 			return fail(409, "%s changed while its exam was being kept; send it again", roundID(a.season.ID, idx))
 		}
 		if rd.ExamSHA == p.Digest {
-			// The same exam, posted twice at once: the other post was first, and the round's
-			// clock, its event and its grades' time are that one's.
+			if !sharesEqual(rd.Shares, p.Shares) {
+				return fail(409, "%s already has its exam with different language shares", roundID(a.season.ID, idx))
+			}
+			// The same exam and language shares, posted twice at once: the other post was first,
+			// and the round's clock, its event and its grades' time are that one's.
 			already = true
 			return nil
 		}
@@ -145,7 +190,10 @@ func (a *App) postExam(ctx context.Context, idx int, p *ExamPost) (bool, error) 
 		if late {
 			rd.Hours, rd.HoursLate = p.Hours, true
 		}
-		rd.ExamSHA, rd.ExamAt, rd.ExamTable, rd.Shares, rd.Snapshot, rd.Fresh = p.Digest, now(), p.Table, p.Shares, p.Snapshot, p.Fresh
+		rd.ExamSHA, rd.ExamBlobSHA, rd.ExamAt, rd.ExamTable, rd.Shares, rd.Snapshot, rd.Fresh = p.Digest, blobSHA, now(), p.Table, p.Shares, p.Snapshot, p.Fresh
+		if p.InitSHA != "" && rd.InitSHA == "" {
+			rd.InitSHA = p.InitSHA
+		}
 		rd.ExamMix = a.examMix(p.Table)
 		tx.event("exam", map[string]any{"round": roundID(a.season.ID, idx), "items": len(p.Table), "fresh": p.Fresh})
 		// A grade taken before the exam has waited for it: its time to sit it starts now.
@@ -162,24 +210,166 @@ func (a *App) postExam(ctx context.Context, idx int, p *ExamPost) (bool, error) 
 }
 
 // checkTable refuses a table with a part the season does not name, or one under a pillar the
-// season does not put it under, or a language share that is not a number. The weights are the
-// season's; the examiner only says what each item is.
+// season does not put it under, or a language share that is not a number. A pillar with zero
+// items is allowed (its share goes to the remaining pillars in its group, per RULES.md), while
+// a pillar that is present with fewer than min_pillar_items or a declared group with zero items
+// is refused. The weights are the season's; the examiner only says what each item is.
 func (a *App) checkTable(table []ItemInfo, shares map[string]float64) error {
+	counts := map[string]int{}
+	groupOf := map[string]string{}
+	for _, pl := range a.season.Exam.Pillars {
+		groupOf[pl.Name] = pl.Group
+	}
+	groupCounts := map[string]int{}
 	for i, it := range table {
 		if it.Pillar == "" || it.Pillar != a.season.Exam.pillarOf(it.Part) || it.Part == "" || it.Lang == "" || it.Stratum == "" ||
 			len(it.Part)+len(it.Lang)+len(it.Stratum) > 200 {
 			return fail(400, "item %d of the table is not one the season scores", i)
 		}
+		counts[it.Pillar]++
+		if g := groupOf[it.Pillar]; g != "" {
+			groupCounts[g]++
+		}
+	}
+	if minP := a.season.Exam.MinPillarItems; minP > 0 {
+		for _, pl := range a.season.Exam.Pillars {
+			if counts[pl.Name] > 0 && counts[pl.Name] < minP {
+				return fail(400, "exam pillar %q has %d items, fewer than the season's minimum of %d", pl.Name, counts[pl.Name], minP)
+			}
+		}
+	}
+	if len(a.season.Exam.Groups) > 0 {
+		groups := make([]string, 0, len(a.season.Exam.Groups))
+		for g := range a.season.Exam.Groups {
+			groups = append(groups, g)
+		}
+		sort.Strings(groups)
+		for _, g := range groups {
+			if a.season.Exam.Groups[g] > 0 && groupCounts[g] == 0 {
+				return fail(400, "exam group %q has 0 items; every scored group must be represented", g)
+			}
+		}
 	}
 	if len(shares) == 0 || len(shares) > 1000 {
 		return fail(400, "the exam names no languages, or too many: a round's share of each is part of its score")
 	}
+	hasPos := false
 	for k, v := range shares {
-		if len(k) > 32 || !finite(v) || v < 0 || v > 100 {
+		if k == "" || len(k) > 32 || !finite(v) || v < 0 || v > 100 {
 			return fail(400, "the share of %q is not a percentage", clip(k, 32))
 		}
+		if v > 0 {
+			hasPos = true
+		}
+	}
+	if !hasPos {
+		return fail(400, "the exam's language shares must include at least one positive percentage")
 	}
 	return nil
+}
+
+// cancelRound voids every open entry of a round whose exam could not be built, with nothing
+// held against any entry (unattended=true), expires all outstanding claims on the round, and
+// emits a public cancel event. Callers run settleRounds(tx) afterwards so the round settles
+// cleanly with BaselineLoss == nil and unblocks the next draw.
+func (a *App) cancelRound(tx *Tx, rd *Round, why string) {
+	if rd == nil || rd.Status != "open" {
+		return
+	}
+	why = clip(strings.TrimSpace(why), 300)
+	if why == "" {
+		why = "the round's exam could not be built; nothing is held against any entry"
+	}
+	for _, e := range tx.s.inRound[rd.Idx] {
+		for _, run := range e.Runs {
+			if !run.Dropped {
+				run.Dropped = true
+				if run.Reason == "" {
+					run.Reason = why
+				}
+			}
+			run.Owed = false
+		}
+		e.Loss, e.Gain, e.BySource, e.Detail = nil, 0, nil, nil
+		a.voidEntry(tx, e, why, true)
+	}
+	for _, c := range tx.s.Claims {
+		if c.RoundIdx == rd.Idx && c.Status == "claimed" {
+			c.Status, c.EndedAt = "expired", now()
+			tx.saveClaim(c)
+		}
+	}
+	var dropBases []*Baseline
+	for _, b := range tx.s.Baselines {
+		if b.RoundIdx == rd.Idx {
+			dropBases = append(dropBases, b)
+		}
+	}
+	for _, b := range dropBases {
+		tx.dropBaseline(b)
+	}
+	if len(rd.BaseItems) > 0 || rd.BaselineLoss != nil || rd.BaselineN != 0 {
+		rd.BaseItems, rd.BaselineLoss, rd.BaselineN = nil, nil, 0
+		tx.saveRound(rd)
+	}
+	tx.event("cancel", map[string]any{"round": roundID(a.season.ID, rd.Idx), "reason": why, "at": now()})
+	if len(tx.s.inRound[rd.Idx]) == 0 {
+		rd.Status, rd.SettledAt = "settled", now()
+		tx.saveRound(rd)
+	}
+}
+
+// apiRoundCancel: POST /api/v1/admin/rounds/{id}/cancel, from the organisers. Cancels an open
+// round, voiding all entries as unattended so nothing counts against any curator and the next
+// round can be drawn. Once an exam has been posted, requires {"force": true}.
+func (a *App) apiRoundCancel(w http.ResponseWriter, r *http.Request) {
+	_, _, body, err := a.signedBy(w, r, 1<<16, true, organisers)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	idx, ok := a.parseRoundID(r.PathValue("id"))
+	if !ok {
+		writeErr(w, fail(404, "no such round"))
+		return
+	}
+	var req struct {
+		Reason string `json:"reason"`
+		Force  bool   `json:"force"`
+	}
+	if trimmed := bytes.TrimSpace(body); len(trimmed) > 0 {
+		if trimmed[0] != '{' {
+			writeErr(w, fail(400, "bad cancel request: expected JSON object"))
+			return
+		}
+		dec := json.NewDecoder(bytes.NewReader(trimmed))
+		if err := dec.Decode(&req); err != nil {
+			writeErr(w, fail(400, "bad cancel request: %v", err))
+			return
+		}
+		var extra any
+		if err := dec.Decode(&extra); err != io.EOF {
+			writeErr(w, fail(400, "bad cancel request: unexpected trailing data"))
+			return
+		}
+	}
+	err = a.st.update(r.Context(), func(tx *Tx) error {
+		rd := tx.s.Rounds[idx]
+		if rd == nil || rd.Status != "open" {
+			return fail(409, "%s is not open", roundID(a.season.ID, idx))
+		}
+		if examPosted(rd) && !req.Force {
+			return fail(409, "%s already has its exam; pass {\"force\": true} to cancel an examined round", roundID(a.season.ID, idx))
+		}
+		a.cancelRound(tx, rd, req.Reason)
+		a.settleRounds(tx)
+		return nil
+	})
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, 200, map[string]any{"round": roundID(a.season.ID, idx), "status": "settled", "cancelled": true})
 }
 
 // apiExamGet: GET /api/v1/rounds/{id}/exam. Once a round settles, its published exam, to anyone:
@@ -193,16 +383,21 @@ func (a *App) apiExamGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var posted, settled bool
+	var examSHA, blobSHA string
 	a.st.view(func(s *State) {
 		rd := s.Rounds[idx]
 		posted = rd != nil && examPosted(rd)
 		settled = posted && rd.Status == "settled"
+		if posted {
+			examSHA = rd.ExamSHA
+			blobSHA = rd.ExamBlobSHA
+		}
 	})
 	if !posted {
 		writeErr(w, fail(404, "%s has no exam yet", roundID(a.season.ID, idx)))
 		return
 	}
-	blob := a.examBlob(idx, examPublic)
+	name := examPublic
 	if !settled {
 		acct, _, _, err := a.signedBy(w, r, 1<<10, true, anyone)
 		if err != nil {
@@ -219,9 +414,23 @@ func (a *App) apiExamGet(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, fail(403, "until a round settles, its exam is given to the machines grading it"))
 			return
 		}
-		blob = a.examBlob(idx, examItems)
+		name = examItems
 	}
-	f, size, err := a.st.blobs.Open(r.Context(), blob)
+	var (
+		f    io.ReadCloser
+		size int64
+		err  error = errNoBlob
+	)
+	if blobSHA != "" {
+		f, size, err = a.st.blobs.Open(r.Context(), a.examDigestBlob(idx, blobSHA, name))
+	}
+	if errors.Is(err, errNoBlob) {
+		// Backwards compatibility for rounds stored under items_digest-only or unkeyed exam blobs.
+		f, size, err = a.st.blobs.Open(r.Context(), a.examDigestBlob(idx, examSHA, name))
+	}
+	if errors.Is(err, errNoBlob) {
+		f, size, err = a.st.blobs.Open(r.Context(), a.examBlob(idx, name))
+	}
 	if err != nil {
 		slog.Error("reading a round's exam", "round", idx, "err", err)
 		writeErr(w, fail(503, "the file store is not answering; try again in a moment"))
@@ -281,16 +490,29 @@ func diffItems(x, base []float64) []float64 {
 	return out
 }
 
+// baselineMatchesInit reports whether a stored baseline matches the round's agreed initial
+// student weights digest (always true before the round locks an InitSHA, or on seasons without
+// a pinned student model).
+func (a *App) baselineMatchesInit(rd *Round, b *Baseline) bool {
+	if rd == nil || b == nil || rd.InitSHA == "" {
+		return true
+	}
+	if b.InitSHA == "" {
+		return len(a.season.Student) == 0
+	}
+	return b.InitSHA == rd.InitSHA
+}
+
 // roundBaselines are the round's baselines that may make its own, in the order of their
-// accounts: measured on its corpus and exam, by an account established when it measured (or the
-// organisers'). Whether a measurement counts was settled when it arrived: standing earned as the
-// round settles must not move the round's own baseline.
+// accounts: measured on its corpus, exam and agreed initial weights, by an account established
+// when it measured (or the organisers'). Whether a measurement counts was settled when it
+// arrived: standing earned as the round settles must not move the round's own baseline.
 func (a *App) roundBaselines(s *State, rd *Round) []*Baseline {
 	var out []*Baseline
 	for _, b := range s.Baselines {
 		acct := s.Accounts[b.AccountID]
 		if b.RoundIdx == rd.Idx && (b.Established || (acct != nil && acct.Anchor)) && b.CorpusSHA == rd.CorpusSHA && b.ExamSHA == rd.ExamSHA &&
-			len(b.Items) == len(rd.ExamTable) {
+			a.baselineMatchesInit(rd, b) && len(b.Items) == len(rd.ExamTable) {
 			out = append(out, b)
 		}
 	}
@@ -311,39 +533,389 @@ func itemsOf(bs []*Baseline) [][]float64 {
 	return rows
 }
 
-// baselinesKept are the round's baselines that make its own. While fewer than three are in,
-// all of them: whichever came first is no more the standard than the next. From three on,
-// those within the tolerance of the median of them all, whatever order they came in. (If none
-// is, they are all kept: there is no telling.)
-func (a *App) baselinesKept(s *State, rd *Round) []*Baseline {
-	all := a.roundBaselines(s, rd)
-	if len(all) < baselineQuorum {
-		return all
+// baselinesAgree reports whether two baselines for the same round are mutually within baseline
+// tolerance on the exam's aggregate (and share InitSHA when the season pins initial weights).
+func (a *App) baselinesAgree(rd *Round, x, y *Baseline) bool {
+	if x == nil || y == nil || len(x.Items) != len(rd.ExamTable) || len(y.Items) != len(rd.ExamTable) {
+		return false
 	}
-	mid, tol := medianItems(itemsOf(all)), a.tolerance().Baseline
-	var kept []*Baseline
-	for _, b := range all {
-		if dev, _, err := a.season.Exam.ScoreItems(rd.ExamTable, diffItems(b.Items, mid), rd.Shares); err == nil && within(dev, tol) {
-			kept = append(kept, b)
+	if len(a.season.Student) > 0 && x.InitSHA != "" && y.InitSHA != "" && x.InitSHA != y.InitSHA {
+		return false
+	}
+	dev, _, err := a.season.Exam.ScoreItems(rd.ExamTable, diffItems(x.Items, y.Items), rd.Shares)
+	return err == nil && within(dev, a.roundTolerance(rd).Baseline)
+}
+
+// baselinesPairAgree reports whether two baselines mutually agree symmetrically within baseline
+// tolerance. Checking both directions guarantees an undirected agreement graph even in the
+// presence of floating-point rounding.
+func (a *App) baselinesPairAgree(rd *Round, x, y *Baseline) bool {
+	return a.baselinesAgree(rd, x, y) && a.baselinesAgree(rd, y, x)
+}
+
+// allBaselinesAgree reports whether every pair of baselines in bs mutually agrees within baseline
+// tolerance.
+func (a *App) allBaselinesAgree(rd *Round, bs []*Baseline) bool {
+	for i := 0; i < len(bs); i++ {
+		for k := i + 1; k < len(bs); k++ {
+			if !a.baselinesPairAgree(rd, bs[i], bs[k]) {
+				return false
+			}
 		}
 	}
-	if len(kept) == 0 {
-		return all
+	return true
+}
+
+// baselineAdj builds the symmetric pairwise-agreement adjacency matrix for bs.
+func (a *App) baselineAdj(rd *Round, bs []*Baseline) [][]bool {
+	n := len(bs)
+	adj := make([][]bool, n)
+	for i := range n {
+		adj[i] = make([]bool, n)
+		adj[i][i] = true
 	}
-	return kept
+	for i := 0; i < n; i++ {
+		for k := i + 1; k < n; k++ {
+			if a.baselinesPairAgree(rd, bs[i], bs[k]) {
+				adj[i][k] = true
+				adj[k][i] = true
+			}
+		}
+	}
+	return adj
+}
+
+// largestBaselineCliqueFromAdj finds the largest pairwise-mutually-agreeing clique (size >= 2)
+// in bs given its precomputed symmetric adjacency matrix adj, using exact Bron-Kerbosch
+// enumeration with Tomita pivoting, and sets tied=true whenever two or more distinct maximal
+// cliques tie for that maximum size.
+func largestBaselineCliqueFromAdj(bs []*Baseline, adj [][]bool) (best []*Baseline, tied bool) {
+	n := len(bs)
+	if n < 2 {
+		return nil, false
+	}
+	allAgree := true
+	for i := 0; i < n && allAgree; i++ {
+		for k := i + 1; k < n; k++ {
+			if !adj[i][k] {
+				allAgree = false
+				break
+			}
+		}
+	}
+	if allAgree {
+		out := make([]*Baseline, n)
+		copy(out, bs)
+		return out, false
+	}
+	var bestIdx []int
+	var bk func(r, p, x []int)
+	bk = func(r, p, x []int) {
+		if len(p) == 0 && len(x) == 0 {
+			if len(r) < 2 {
+				return
+			}
+			switch {
+			case len(r) > len(bestIdx):
+				bestIdx = make([]int, len(r))
+				copy(bestIdx, r)
+				tied = false
+			case len(r) == len(bestIdx):
+				tied = true
+			}
+			return
+		}
+		// Upper-bound prune strictly below max(2, len(bestIdx)) so equal-size maximal cliques are
+		// still visited and mark tied=true.
+		if len(r)+len(p) < max(2, len(bestIdx)) {
+			return
+		}
+		pivot, bestDeg := -1, -1
+		for _, u := range p {
+			deg := 0
+			for _, v := range p {
+				if u != v && adj[u][v] {
+					deg++
+				}
+			}
+			if deg > bestDeg {
+				bestDeg, pivot = deg, u
+			}
+		}
+		for _, u := range x {
+			deg := 0
+			for _, v := range p {
+				if adj[u][v] {
+					deg++
+				}
+			}
+			if deg > bestDeg {
+				bestDeg, pivot = deg, u
+			}
+		}
+		pCur := append([]int(nil), p...)
+		xCur := append([]int(nil), x...)
+		for _, v := range p {
+			if pivot >= 0 && v != pivot && adj[pivot][v] {
+				continue
+			}
+			var nextP, nextX []int
+			for _, w := range pCur {
+				if w != v && adj[v][w] {
+					nextP = append(nextP, w)
+				}
+			}
+			for _, w := range xCur {
+				if adj[v][w] {
+					nextX = append(nextX, w)
+				}
+			}
+			nextR := make([]int, len(r)+1)
+			copy(nextR, r)
+			nextR[len(r)] = v
+			bk(nextR, nextP, nextX)
+			for i, w := range pCur {
+				if w == v {
+					pCur = append(pCur[:i], pCur[i+1:]...)
+					break
+				}
+			}
+			xCur = append(xCur, v)
+		}
+	}
+	initP := make([]int, n)
+	for i := range n {
+		initP[i] = i
+	}
+	bk(nil, initP, nil)
+	if len(bestIdx) < 2 {
+		return nil, false
+	}
+	sort.Ints(bestIdx)
+	best = make([]*Baseline, len(bestIdx))
+	for i, idx := range bestIdx {
+		best[i] = bs[idx]
+	}
+	return best, tied
+}
+
+// hasCompetingBaselineCliqueFromAdj reports whether bs contains any maximal clique not contained
+// in winning whose size is at least minSize, reusing the precomputed symmetric adjacency matrix
+// adj. Used only when median fixed-point pruning shrinks the winning clique (possible under
+// multi-item MAD clipping) so a shrunken group cannot beat or tie another pairwise-agreeing
+// clique of at least the same size.
+func hasCompetingBaselineCliqueFromAdj(bs []*Baseline, adj [][]bool, winning []*Baseline, minSize int) bool {
+	inWin := make(map[int64]bool, len(winning))
+	for _, b := range winning {
+		inWin[b.AccountID] = true
+	}
+	n := len(bs)
+	found := false
+	var bk func(r, p, x []int)
+	bk = func(r, p, x []int) {
+		if found {
+			return
+		}
+		if len(p) == 0 && len(x) == 0 {
+			if len(r) >= minSize {
+				for _, idx := range r {
+					if !inWin[bs[idx].AccountID] {
+						found = true
+						return
+					}
+				}
+			}
+			return
+		}
+		if len(r)+len(p) < minSize {
+			return
+		}
+		pivot, bestDeg := -1, -1
+		for _, u := range p {
+			deg := 0
+			for _, v := range p {
+				if u != v && adj[u][v] {
+					deg++
+				}
+			}
+			if deg > bestDeg {
+				bestDeg, pivot = deg, u
+			}
+		}
+		for _, u := range x {
+			deg := 0
+			for _, v := range p {
+				if adj[u][v] {
+					deg++
+				}
+			}
+			if deg > bestDeg {
+				bestDeg, pivot = deg, u
+			}
+		}
+		pCur := append([]int(nil), p...)
+		xCur := append([]int(nil), x...)
+		for _, v := range p {
+			if found {
+				return
+			}
+			if pivot >= 0 && v != pivot && adj[pivot][v] {
+				continue
+			}
+			var nextP, nextX []int
+			for _, w := range pCur {
+				if w != v && adj[v][w] {
+					nextP = append(nextP, w)
+				}
+			}
+			for _, w := range xCur {
+				if adj[v][w] {
+					nextX = append(nextX, w)
+				}
+			}
+			nextR := make([]int, len(r)+1)
+			copy(nextR, r)
+			nextR[len(r)] = v
+			bk(nextR, nextP, nextX)
+			for i, w := range pCur {
+				if w == v {
+					pCur = append(pCur[:i], pCur[i+1:]...)
+					break
+				}
+			}
+			xCur = append(xCur, v)
+		}
+	}
+	initP := make([]int, n)
+	for i := range n {
+		initP[i] = i
+	}
+	bk(nil, initP, nil)
+	return found
+}
+
+// pruneBaselinesToMedian iteratively drops baselines outside tolerance of the current set's
+// item-wise median until fixed point or fewer than two baselines remain. converged is true iff
+// at least two baselines survived and every surviving baseline agreed within tolerance of the
+// surviving set's item-wise median in the final pass.
+func (a *App) pruneBaselinesToMedian(rd *Round, bs []*Baseline) (kept []*Baseline, converged bool) {
+	tol := a.roundTolerance(rd).Baseline
+	kept = bs
+	for len(kept) >= 2 {
+		mid := medianItems(itemsOf(kept))
+		var next []*Baseline
+		for _, b := range kept {
+			if dev, _, err := a.season.Exam.ScoreItems(rd.ExamTable, diffItems(b.Items, mid), rd.Shares); err == nil && within(dev, tol) {
+				next = append(next, b)
+			}
+		}
+		if len(next) == len(kept) {
+			return kept, true
+		}
+		kept = next
+	}
+	return kept, false
+}
+
+// roundBaselineConsensus holds the evaluated baseline agreement state for one round within a
+// State snapshot so pairwise agreement and median fixed-point scoring run once per round rather
+// than being recomputed across work summary, offer generation, and settlement checks.
+type roundBaselineConsensus struct {
+	all      []*Baseline
+	kept     []*Baseline
+	leftOut  map[int64]bool
+	disputed bool
+}
+
+// baselineConsensus computes the round's kept baselines, odd-out accounts, and dispute status in
+// a single pass, building the pairwise agreement graph at most once per round.
+func (a *App) baselineConsensus(s *State, rd *Round) roundBaselineConsensus {
+	all := a.roundBaselines(s, rd)
+	if len(all) < 2 {
+		return roundBaselineConsensus{all: all, kept: all}
+	}
+	initDisputed := false
+	if len(a.season.Student) > 0 && rd.InitSHA == "" {
+		byInit := map[string][]*Baseline{}
+		for _, b := range all {
+			if b.InitSHA != "" {
+				byInit[b.InitSHA] = append(byInit[b.InitSHA], b)
+			}
+		}
+		if len(byInit) != 1 {
+			initDisputed = true
+		} else {
+			for _, cohort := range byInit {
+				if len(cohort) < 2 {
+					initDisputed = true
+				}
+			}
+		}
+	}
+	if len(all) < baselineQuorum {
+		agree := a.baselinesPairAgree(rd, all[0], all[1])
+		return roundBaselineConsensus{all: all, kept: all, disputed: initDisputed || !agree}
+	}
+	adj := a.baselineAdj(rd, all)
+	best, tied := largestBaselineCliqueFromAdj(all, adj)
+	if len(best) < 2 || tied {
+		return roundBaselineConsensus{all: all, kept: all, disputed: true}
+	}
+	kept, converged := a.pruneBaselinesToMedian(rd, best)
+	if !converged || len(kept) < 2 || (len(kept) < len(best) && hasCompetingBaselineCliqueFromAdj(all, adj, best, len(kept))) {
+		return roundBaselineConsensus{all: all, kept: all, disputed: true}
+	}
+	var leftOut map[int64]bool
+	if len(kept) < len(all) {
+		leftOut = make(map[int64]bool, len(all)-len(kept))
+		for _, b := range all {
+			leftOut[b.AccountID] = true
+		}
+		for _, b := range kept {
+			delete(leftOut, b.AccountID)
+		}
+	}
+	return roundBaselineConsensus{all: all, kept: kept, leftOut: leftOut, disputed: initDisputed}
+}
+
+// baselineConsensus returns the round's cached baseline consensus for this judge snapshot,
+// computing the pairwise agreement graph at most once per round.
+func (j *judge) baselineConsensus(rd *Round) roundBaselineConsensus {
+	if rd == nil {
+		return roundBaselineConsensus{}
+	}
+	if cons, ok := j.consensus[rd.Idx]; ok {
+		return cons
+	}
+	cons := j.a.baselineConsensus(j.s, rd)
+	j.consensus[rd.Idx] = cons
+	return cons
+}
+
+func (j *judge) baselineDisputed(rd *Round) bool           { return j.baselineConsensus(rd).disputed }
+func (j *judge) baselinesKept(rd *Round) []*Baseline       { return j.baselineConsensus(rd).kept }
+func (j *judge) baselinesLeftOut(rd *Round) map[int64]bool { return j.baselineConsensus(rd).leftOut }
+
+// baselinesKept are the round's baselines that make its own. While fewer than three are in,
+// all of them: whichever came first is no more the standard than the next. From three on, there
+// must be a unique strictly largest pairwise-agreeing clique of size >= 2 across all established
+// baselines (so neither a 2-2 split nor a bridge baseline spanning two disagreeing pairs can settle
+// a tie, and a genuine agreeing majority is never voided by wider disagreeing neighborhoods). The
+// accepted baseline is computed from that winning clique (pruned to its own median fixed point so
+// every kept baseline also agrees with the round's item-wise median). If no unique agreeing
+// consensus exists, all baselines are kept so baselineDisputed reports the dispute.
+func (a *App) baselinesKept(s *State, rd *Round) []*Baseline {
+	return a.baselineConsensus(s, rd).kept
 }
 
 // baselinesLeftOut is whose baseline of a round is the odd one out: one that may make the
 // round's (roundBaselines) and that the round does not keep (baselinesKept).
 func (a *App) baselinesLeftOut(s *State, rd *Round) map[int64]bool {
-	out := map[int64]bool{}
-	for _, b := range a.roundBaselines(s, rd) {
-		out[b.AccountID] = true
+	left := a.baselineConsensus(s, rd).leftOut
+	if left == nil {
+		return map[int64]bool{}
 	}
-	for _, b := range a.baselinesKept(s, rd) {
-		delete(out, b.AccountID)
-	}
-	return out
+	return left
 }
 
 // oddOut reports whether a grade is by a machine whose baseline of its round is the odd one
@@ -353,20 +925,26 @@ func (j *judge) oddOut(r *Result) bool {
 	out, ok := j.left[r.RoundIdx]
 	if !ok {
 		if rd := j.s.Rounds[r.RoundIdx]; rd != nil {
-			out = j.a.baselinesLeftOut(j.s, rd)
+			out = j.baselinesLeftOut(rd)
 		}
 		j.left[r.RoundIdx] = out
 	}
 	return out[r.AccountID]
 }
 
-// baselineDev is how far a grader's baseline is from the median of the round's baselines, its
-// own among them (the others' and this one, whether or not its account is established), on the
-// exam's score. ok is false while fewer than two others are in: nobody is turned away for
-// differing from one machine, which may be the one that is wrong.
+// baselineDev is how far a grader's baseline is from the median of the round's established
+// baselines, its own among them (the kept others' and this one, whether or not its account is
+// established), on the exam's score. ok is false while fewer than two others are in OR while the
+// round's existing baselines are still disputed: nobody is turned away when no established
+// baseline consensus exists yet (otherwise a tie-breaking grader repeating one of the disputed
+// baselines could be rejected with 409 before it can resolve the dispute).
 func (a *App) baselineDev(s *State, rd *Round, acctID int64, items []float64) (dev float64, ok bool) {
+	cons := a.baselineConsensus(s, rd)
+	if cons.disputed {
+		return 0, false
+	}
 	var rows [][]float64
-	for _, b := range a.roundBaselines(s, rd) {
+	for _, b := range cons.kept {
 		if b.AccountID != acctID {
 			rows = append(rows, b.Items)
 		}
@@ -378,14 +956,118 @@ func (a *App) baselineDev(s *State, rd *Round, acctID int64, items []float64) (d
 	return dev, err == nil
 }
 
+// baselineConsensusState reports whether the round's kept established baseline cohort is already
+// irrevocable AND returns the set of established baseline voters provably guaranteed to remain
+// inside the kept cohort (not pushed into oddOut):
+//   - never locks before rd.InitSHA locks (on pinned-student seasons), while baselineDisputed is
+//     true, or on fewer than 2 corroborated baselines (len(simKept) < 2);
+//   - counts ALL live established grade claims on rd (including c.Baseline==false, because clients
+//     with a cached local baseline may still attach p.Baseline and enter s.Baselines);
+//   - defers locking whenever any other live established grade claim remains on rd (k > 0),
+//     because ExamPlan.ScoreItems uses MAD-based outlier clipping (which skips clipping when
+//     MAD == 0 and is therefore not monotone in item diffs), so any additional baseline can alter
+//     which existing voters stay within tolerance or fall into oddOut.
+func (a *App) baselineConsensusState(s *State, rd *Round, acct *Account, est bool, incoming *Baseline) (locked bool, stableVoters map[int64]bool, liveOther map[int64]bool) {
+	if rd == nil {
+		return false, nil, nil
+	}
+	if len(a.season.Student) > 0 && rd.InitSHA == "" {
+		return false, nil, nil
+	}
+	if a.baselineDisputed(s, rd) {
+		return false, nil, nil
+	}
+	isEst := est || (acct != nil && acct.Anchor)
+	sim := *s
+	if isEst && acct != nil && incoming != nil {
+		sim.Baselines = maps.Clone(s.Baselines)
+		if sim.Baselines == nil {
+			sim.Baselines = map[string]*Baseline{}
+		}
+		sim.Baselines[baselineKey(rd.Idx, acct.ID)] = incoming
+	}
+	simCons := a.baselineConsensus(&sim, rd)
+	if simCons.disputed {
+		return false, nil, nil
+	}
+	simAll := simCons.all
+	simKept := simCons.kept
+	if len(simKept) < baselineQuorum-1 {
+		return false, nil, nil
+	}
+	inSimAll := make(map[int64]bool, len(simAll))
+	for _, b := range simAll {
+		inSimAll[b.AccountID] = true
+	}
+	inKept := make(map[int64]bool, len(simKept))
+	for _, b := range simKept {
+		inKept[b.AccountID] = true
+	}
+	otherLive := map[int64]bool{}
+	t := now()
+	for _, c := range s.Claims {
+		if c.RoundIdx != rd.Idx || c.Kind != "grade" || !c.live(t) {
+			continue
+		}
+		if (acct != nil && c.AccountID == acct.ID) || inSimAll[c.AccountID] {
+			continue
+		}
+		if ca := s.Accounts[c.AccountID]; ca != nil && (a.established(ca) || ca.Anchor) {
+			otherLive[c.AccountID] = true
+		}
+	}
+	if len(otherLive) > 0 {
+		return false, nil, otherLive
+	}
+	return true, inKept, otherLive
+}
+
+// baselineConsensusLocked reports whether the round's kept established baseline cohort is already
+// irrevocable under any possible baseline submissions from remaining live established claims.
+func (a *App) baselineConsensusLocked(s *State, rd *Round, acct *Account, est bool, incoming *Baseline) bool {
+	locked, _, _ := a.baselineConsensusState(s, rd, acct, est, incoming)
+	return locked
+}
+
+// baselineAdmissionRefuses reports whether an incoming baseline measurement must be refused at
+// admission with HTTP 409 because it deviates beyond tolerance from an already-locked established
+// baseline consensus that neither this report nor any outstanding live baseline-requested claim
+// can tie or overturn.
+func (a *App) baselineAdmissionRefuses(s *State, rd *Round, acct *Account, est bool, incoming *Baseline) (dev float64, refuse bool) {
+	if acct == nil || incoming == nil {
+		return 0, false
+	}
+	dev, ok := a.baselineDev(s, rd, acct.ID, incoming.Items)
+	if !ok || within(dev, a.roundTolerance(rd).Baseline) {
+		return dev, false
+	}
+	if !a.baselineConsensusLocked(s, rd, acct, est, incoming) {
+		return dev, false
+	}
+	if est || acct.Anchor {
+		sim := *s
+		sim.Baselines = maps.Clone(s.Baselines)
+		if sim.Baselines == nil {
+			sim.Baselines = map[string]*Baseline{}
+		}
+		sim.Baselines[baselineKey(rd.Idx, acct.ID)] = incoming
+		for _, b := range a.baselinesKept(&sim, rd) {
+			if b.AccountID == acct.ID {
+				return dev, false
+			}
+		}
+	}
+	return dev, true
+}
+
 // baselineAgrees says whether a grader's baseline is within the tolerance of the round's: its
-// score against the round's baseline, on the exam's aggregate.
+// score against the round's baseline, on the exam's aggregate, and matching the agreed InitSHA.
 func (a *App) baselineAgrees(rd *Round, b *Baseline) bool {
-	if b == nil || len(rd.BaseItems) == 0 || len(b.Items) != len(rd.BaseItems) || b.ExamSHA != rd.ExamSHA {
+	if b == nil || len(rd.BaseItems) == 0 || len(b.Items) != len(rd.BaseItems) || b.ExamSHA != rd.ExamSHA || !a.baselineMatchesInit(rd, b) {
 		return false
 	}
 	dev, _, err := a.season.Exam.ScoreItems(rd.ExamTable, diffItems(b.Items, rd.BaseItems), rd.Shares)
-	return err == nil && within(dev, a.tolerance().Baseline)
+	return err == nil && within(dev, a.roundTolerance(rd).Baseline)
 }
 
 // --- who measures a round's baseline -----------------------------------------------------------
@@ -419,10 +1101,37 @@ func (j *judge) measuring(rd *Round) map[int64]bool {
 		return who
 	}
 	who := map[int64]bool{}
-	for _, b := range j.a.baselinesKept(j.s, rd) {
-		if j.a.baselineAgrees(rd, b) {
-			who[b.AccountID] = true
+	var agreeing []*Baseline
+	if cons := j.baselineConsensus(rd); !cons.disputed {
+		for _, b := range cons.kept {
+			if j.a.baselineAgrees(rd, b) {
+				agreeing = append(agreeing, b)
+			}
 		}
+	}
+	// Before rd.InitSHA locks, baselines that report different InitSHA values cannot all survive
+	// once consensus locks; count only the largest agreeing InitSHA cohort so a replacement
+	// baseline is requested immediately rather than letting conflicting baselines fill PerRound.
+	if rd.InitSHA == "" && len(agreeing) > 1 {
+		byInit := map[string][]*Baseline{}
+		for _, b := range agreeing {
+			if b.InitSHA != "" {
+				byInit[b.InitSHA] = append(byInit[b.InitSHA], b)
+			}
+		}
+		if len(byInit) > 1 {
+			bestSHA := ""
+			var bestCohort []*Baseline
+			for sha, cohort := range byInit {
+				if len(cohort) > len(bestCohort) || (len(cohort) == len(bestCohort) && (bestSHA == "" || sha < bestSHA)) {
+					bestSHA, bestCohort = sha, cohort
+				}
+			}
+			agreeing = bestCohort
+		}
+	}
+	for _, b := range agreeing {
+		who[b.AccountID] = true
 	}
 	for _, c := range j.s.Claims {
 		if c.RoundIdx == rd.Idx && c.Kind == "grade" && c.Baseline && c.live(j.t) && j.est[c.AccountID] &&
@@ -434,6 +1143,38 @@ func (j *judge) measuring(rd *Round) map[int64]bool {
 	return who
 }
 
+// baselineDisputed reports whether a round has two or more established baselines whose
+// measurements disagree beyond tolerance, or (on a season with a pinned student model before
+// rd.InitSHA locks) come from conflicting initial student weights. With two kept baselines, they
+// are compared directly against each other (rather than against their midpoint, which would double
+// the allowed spread); with three or more, at least two must agree within tolerance of the kept
+// median. A round with a disputed baseline must request another independent baseline rather than
+// settling on an uncorroborated midpoint, and closes unrated if the disagreement cannot be resolved.
+func (a *App) baselineDisputed(s *State, rd *Round) bool {
+	return a.baselineConsensus(s, rd).disputed
+}
+
+// baselineTieLive reports whether an established account without a baseline for this round
+// currently holds a live grade job that asks for one.
+func (j *judge) baselineTieLive(rd *Round) bool {
+	if rd == nil {
+		return false
+	}
+	if live, ok := j.tieLive[rd.Idx]; ok {
+		return live
+	}
+	live := false
+	for _, c := range j.s.Claims {
+		if c.RoundIdx == rd.Idx && c.Kind == "grade" && c.Baseline && c.live(j.t) && j.est[c.AccountID] &&
+			j.s.Baselines[baselineKey(rd.Idx, c.AccountID)] == nil {
+			live = true
+			break
+		}
+	}
+	j.tieLive[rd.Idx] = live
+	return live
+}
+
 // baselineComing reports whether a round has a baseline, or somebody at work on it was asked
 // for one.
 func (j *judge) baselineComing(round int) bool {
@@ -443,6 +1184,12 @@ func (j *judge) baselineComing(round int) bool {
 
 // baselinesWanted is how many more machines a round would ask for its baseline, as it stands.
 func (j *judge) baselinesWanted(rd *Round) int {
+	if j.baselineDisputed(rd) {
+		if j.baselineTieLive(rd) {
+			return 0
+		}
+		return 1
+	}
 	return max(0, j.a.season.Baselines.PerRound-len(j.measuring(rd)))
 }
 
@@ -460,13 +1207,82 @@ func (j *judge) asksBaseline(rd *Round, acct *Account) bool {
 	return j.baselinesWanted(rd) > 0
 }
 
+// baselineInitSHA returns the single agreed initial student weights hash behind the round's kept
+// baselines (always "", true on seasons without a pinned student model). Before rd.InitSHA locks,
+// returns ("", false) when no kept baseline exists, any kept baseline lacks InitSHA, or kept
+// baselines disagree on InitSHA.
+func (a *App) baselineInitSHA(s *State, rd *Round) (string, bool) {
+	if len(a.season.Student) == 0 {
+		return "", true
+	}
+	if rd == nil {
+		return "", false
+	}
+	if rd.InitSHA != "" {
+		return rd.InitSHA, true
+	}
+	return a.baselineInitSHAFromKept(rd, a.baselinesKept(s, rd))
+}
+
+func (a *App) baselineInitSHAFromKept(rd *Round, kept []*Baseline) (string, bool) {
+	if len(a.season.Student) == 0 {
+		return "", true
+	}
+	if rd == nil {
+		return "", false
+	}
+	if rd.InitSHA != "" {
+		return rd.InitSHA, true
+	}
+	if len(kept) == 0 {
+		return "", false
+	}
+	sha := kept[0].InitSHA
+	if sha == "" {
+		return "", false
+	}
+	for _, b := range kept[1:] {
+		if b.InitSHA != sha {
+			return "", false
+		}
+	}
+	return sha, true
+}
+
 // refreshScores sets the round's baseline to the median of the baselines it keeps
 // (baselinesKept), item by item, and every grade's score to the exam's aggregate of its item
 // scores less that.
 func (a *App) refreshScores(tx *Tx, rd *Round) {
 	s := tx.s
-	kept := a.baselinesKept(s, rd)
-	if len(kept) == 0 {
+	hasOpen := false
+	for _, e := range s.inRound[rd.Idx] {
+		if e.Status == "open" {
+			hasOpen = true
+			break
+		}
+	}
+	cons := a.baselineConsensus(s, rd)
+	kept := cons.kept
+	if len(kept) == 0 || (!hasOpen && cons.disputed) {
+		if len(rd.BaseItems) > 0 || rd.BaselineLoss != nil || rd.BaselineN != 0 {
+			rd.BaseItems, rd.BaselineLoss, rd.BaselineN = nil, nil, 0
+			tx.saveRound(rd)
+		}
+		for _, e := range s.inRound[rd.Idx] {
+			for _, r := range s.results(rd.Idx, e.EditorID) {
+				if r.Score != nil || len(r.BySource) > 0 {
+					r.Score, r.BySource = nil, nil
+					if r.Valid && len(r.Items) > 0 {
+						mean := 0.0
+						for _, v := range r.Items {
+							mean += v
+						}
+						r.Loss = places5(-mean / float64(len(r.Items)))
+					}
+					tx.saveResult(r)
+				}
+			}
+		}
 		return
 	}
 	base := medianItems(itemsOf(kept))
@@ -479,17 +1295,33 @@ func (a *App) refreshScores(tx *Tx, rd *Round) {
 	rd.BaselineLoss = &loss
 	// How many machines measured it, whoever they were: but not one whose measurement the
 	// round left out of its own.
-	out := a.baselinesLeftOut(s, rd)
+	out := cons.leftOut
 	rd.BaselineN = 0
-	for _, b := range s.Baselines {
-		if b.RoundIdx == rd.Idx && !out[b.AccountID] && a.baselineAgrees(rd, b) {
-			rd.BaselineN++
+	if !cons.disputed {
+		for _, b := range s.Baselines {
+			if b.RoundIdx == rd.Idx && !out[b.AccountID] && a.baselineAgrees(rd, b) {
+				rd.BaselineN++
+			}
 		}
 	}
 	tx.saveRound(rd)
+	baseInit, baseInitOK := a.baselineInitSHAFromKept(rd, kept)
 	for _, e := range s.inRound[rd.Idx] {
 		for _, r := range s.results(rd.Idx, e.EditorID) {
 			if !r.Valid || len(r.Items) != len(base) {
+				continue
+			}
+			// Never score a grade against a baseline trained from different initial weights.
+			if len(a.season.Student) > 0 && (!baseInitOK || r.InitSHA == "" || r.InitSHA != baseInit) {
+				if r.Score != nil || len(r.BySource) > 0 {
+					r.Score, r.BySource = nil, nil
+					rmean := 0.0
+					for _, v := range r.Items {
+						rmean += v
+					}
+					r.Loss = places5(-rmean / float64(len(r.Items)))
+					tx.saveResult(r)
+				}
 				continue
 			}
 			score, pillars, err := a.season.Exam.ScoreItems(rd.ExamTable, diffItems(r.Items, base), rd.Shares)
@@ -562,10 +1394,12 @@ func (a *App) archiveExam(ctx context.Context) {
 				}
 				return strconv.FormatInt(id, 10)
 			}
-			for _, b := range a.baselinesKept(s, rd) {
-				out.BaselineOf = append(out.BaselineOf, handle(b.AccountID))
+			if len(rd.BaseItems) > 0 {
+				for _, b := range a.baselinesKept(s, rd) {
+					out.BaselineOf = append(out.BaselineOf, handle(b.AccountID))
+				}
+				sort.Strings(out.BaselineOf)
 			}
-			sort.Strings(out.BaselineOf)
 			for _, b := range s.Baselines {
 				if b.RoundIdx == idx && len(b.Items) > 0 {
 					out.Baselines[handle(b.AccountID)] = b.Items

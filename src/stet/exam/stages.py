@@ -135,7 +135,7 @@ def _items_of(blob: bytes) -> list[Item]:
     return [Item.from_dict(json.loads(line)) for line in blob.decode().split("\n") if line.strip()]
 
 
-def whole_exam(rnd, work: Path, items_file=None, shares_file=None) -> tuple[list[Item], dict]:
+def whole_exam(rnd, work: Path, items_file=None, shares_file=None, *, server_shares: dict | None = None) -> tuple[list[Item], dict]:
     """A settled round's whole exam and the languages of its corpus, as its score used them.
 
     The server gives out a settled round's published exam only, which leaves out the text of
@@ -143,23 +143,76 @@ def whole_exam(rnd, work: Path, items_file=None, shares_file=None) -> tuple[list
     harvest. A round examined before it did (Season 1's) has only the harvest there, and its
     exam is not made again from that: its items and languages are brought as files. Found
     once, it is kept under `work`. Whatever its source, it must hash to the digest the round
-    committed to."""
-    from ..data import cache_dir
+    committed to, and when the server's accepted language shares are known (`server_shares` or
+    cached round shares), those authoritative shares are used."""
+    from ..data import cache_dir, round_shares
     from . import examine
 
+    authoritative = server_shares if isinstance(server_shares, dict) and server_shares else round_shares(rnd)
+    explicit_shares = _read(Path(shares_file)) if shares_file else None
+    if shares_file and not (isinstance(explicit_shares, dict) and explicit_shares):
+        raise Stop(f"{rnd.id}: --shares ({shares_file}) must be a non-empty JSON object of language shares")
+    if authoritative and explicit_shares is not None:
+        if examine.shares_digest(explicit_shares) != examine.shares_digest(authoritative):
+            raise Stop(
+                f"{rnd.id}: --shares ({shares_file}) does not match the language shares the round committed to on the server"
+            )
+    auth_shares = authoritative or explicit_shares
     kept, kept_shares = work / rnd.id / "exam.jsonl.zst", work / rnd.id / "languages.json"
     if not (kept.exists() and kept_shares.exists()):
         made = cache_dir() / "examine" / rnd.id
+        items = shares = None
         if items_file and shares_file:
-            items, shares = _items_of(Path(items_file).read_bytes()), _read(Path(shares_file))
-        elif (made / examine.KEPT_ITEMS).exists() and (made / examine.KEPT_LANGUAGES).exists():
-            items, shares = _items_of((made / examine.KEPT_ITEMS).read_bytes()), _read(made / examine.KEPT_LANGUAGES)
-        elif (made / "fresh.jsonl").exists():
-            raise Stop(f"{rnd.id}: the examiner kept its harvest here ({made}) but not its whole exam, as it did before Season 2, and an exam is "
-                       "not made again from a harvest: bring its items and languages here and name them with --items and --shares")
+            items, shares = _items_of(Path(items_file).read_bytes()), dict(auth_shares)
         else:
-            raise Stop(f"{rnd.id}: its whole exam is not on this machine. It is kept where the round was examined ({made}): "
-                       "run this there, or bring its items and languages here and name them with --items and --shares")
+            # 1. Exact (items_digest, server_shares_digest) staged directory when server shares are known.
+            if getattr(rnd, "exam_digest", "") and auth_shares:
+                exact_cand = examine.candidate_dir(made, rnd.exam_digest, examine.shares_digest(auth_shares))
+                if (exact_cand / examine.KEPT_ITEMS).exists() and (exact_cand / examine.KEPT_LANGUAGES).exists():
+                    c_items = _items_of((exact_cand / examine.KEPT_ITEMS).read_bytes())
+                    if digest(c_items) == rnd.exam_digest:
+                        items, shares = c_items, dict(auth_shares)
+            # 2. Promoted accepted copy in made/{KEPT_ITEMS, KEPT_LANGUAGES} (overriding shares with
+            #    authoritative server_shares whenever known so replay always matches the judge).
+            if items is None and (made / examine.KEPT_ITEMS).exists() and (made / examine.KEPT_LANGUAGES).exists():
+                k_items = _items_of((made / examine.KEPT_ITEMS).read_bytes())
+                if digest(k_items) == rnd.exam_digest:
+                    items = k_items
+                    shares = dict(auth_shares) if auth_shares else _read(made / examine.KEPT_LANGUAGES)
+            # 3. Fallback to staged candidate directories (e.g. crash between stage() and keep(), or
+            #    stale top-level KEPT_ITEMS) matching rnd.exam_digest.
+            if items is None and getattr(rnd, "exam_digest", "") and made.exists():
+                cand_dirs = [
+                    p
+                    for p in sorted(made.glob(f"candidate-{rnd.exam_digest[:16]}*"))
+                    if p.is_dir() and (p / examine.KEPT_ITEMS).exists() and (p / examine.KEPT_LANGUAGES).exists()
+                ]
+                matched: list[tuple[list[Item], dict]] = []
+                for cdir in cand_dirs:
+                    c_items = _items_of((cdir / examine.KEPT_ITEMS).read_bytes())
+                    if digest(c_items) == rnd.exam_digest:
+                        matched.append((c_items, _read(cdir / examine.KEPT_LANGUAGES)))
+                if matched:
+                    if auth_shares:
+                        items, shares = matched[0][0], dict(auth_shares)
+                    else:
+                        uniq_shares = {examine.shares_digest(sh) for _, sh in matched}
+                        if len(uniq_shares) > 1:
+                            raise Stop(
+                                f"{rnd.id}: multiple candidate language shares exist for exam {rnd.exam_digest[:12]}; "
+                                "pass --shares or fetch the round's accepted shares from the server"
+                            )
+                        items, shares = matched[0]
+            # 4. Legacy/invalid top-level KEPT_ITEMS error path for diagnostics.
+            if items is None:
+                if (made / examine.KEPT_ITEMS).exists() and (made / examine.KEPT_LANGUAGES).exists():
+                    items, shares = _items_of((made / examine.KEPT_ITEMS).read_bytes()), _read(made / examine.KEPT_LANGUAGES)
+                elif (made / "fresh.jsonl").exists():
+                    raise Stop(f"{rnd.id}: the examiner kept its harvest here ({made}) but not its whole exam, as it did before Season 2, and an exam is "
+                               "not made again from a harvest: bring its items and languages here and name them with --items and --shares")
+                else:
+                    raise Stop(f"{rnd.id}: its whole exam is not on this machine. It is kept where the round was examined ({made}): "
+                               "run this there, or bring its items and languages here and name them with --items and --shares")
         if digest(items) != rnd.exam_digest:
             raise Stop(f"{rnd.id}: those items are not the exam the round committed to ({rnd.exam_digest[:12]})")
         kept.parent.mkdir(parents=True, exist_ok=True)
@@ -168,6 +221,9 @@ def whole_exam(rnd, work: Path, items_file=None, shares_file=None) -> tuple[list
     items, shares = _items_of(kept.read_bytes()), _read(kept_shares)
     if digest(items) != rnd.exam_digest:
         raise Stop(f"{rnd.id}: the exam kept at {kept} is not the one the round committed to; remove it and run this again")
+    if auth_shares and shares != auth_shares:
+        shares = dict(auth_shares)
+        _write(kept_shares, shares)
     return items, shares
 
 
@@ -489,7 +545,7 @@ def cost(season, rows: list[tuple]) -> list[dict]:
     for scale, n in rows:
         each = measure.train_seconds(season, scale) / 3600
         out.append({"scale": scale.name, "tokens": scale.train_tokens, "trainings": n, "hours_each": each, "hours": n * each,
-                    "hold_minutes": (measure.hold_seconds(season, scale) or measure.SERVER_HOLD) // 60, "memory_gb": measure.memory_gb(scale)})
+                    "hold_minutes": (measure.hold_seconds(season, scale) or measure.SERVER_HOLD) // 60, "memory_gb": measure.memory_gb(scale, season)})
     return out
 
 
@@ -571,13 +627,13 @@ def say_curve(title: str, points: list[dict], key: str) -> None:
         sys.stdout.flush()
 
 
-def curve_of(rnd_id: str, scale, points: list[dict], sat: list[Item], shares: dict, work: Path) -> dict | None:
+def curve_of(rnd_id: str, scale, points: list[dict], sat: list[Item], shares: dict, work: Path, plan=None) -> dict | None:
     """A round's curve from the students that are back, or None while there is no 1x student."""
     got = {p["multiple"]: (batch_dir(rnd_id, p["scale"].name, sat, work), p) for p in points}
     each = {m: scores(b, UNEDITED) for m, (b, _) in got.items()}
     if not each.get(1.0):
         return None
-    out = measure.curve(item_table(sat), shares, {m: v for m, v in each.items() if v})
+    out = measure.curve(item_table(sat, plan=plan), shares, {m: v for m, v in each.items() if v}, plan=plan)
     for row in out:
         bdir, p = got[row["multiple"]]
         row.update(tokens=p["scale"].train_tokens, passes=p["passes"], repeats=read_twice(p["passes"], bdir),
@@ -612,7 +668,7 @@ def cmd_curve(args):
                     "whether it reached the end is read from the training itself.")
         if args.plan:
             continue
-        items, shares = whole_exam(rnd, work, args.items, args.shares)
+        items, shares = whole_exam(rnd, work, args.items, args.shares, server_shares=(d.get("round") or {}).get("languages"))
         if scale.name != own.name:
             check_exam(rnd, scale, items, work)
         sat = exam_at(rnd.id, items, [scale.name], own.name, work)
@@ -623,7 +679,9 @@ def cmd_curve(args):
             batches.append((bdir, {UNEDITED: p["trainings"]}))
         say(f"{rnd.id}: {sum(p['trainings'] for p in points)} students of the unedited corpus, sitting {len(sat):,} items")
         follow(batches, key, wait=not args.no_wait)
-        out = curve_of(rnd.id, scale, points, sat, shares, work)
+        from .aggregate import plan_of
+
+        out = curve_of(rnd.id, scale, points, sat, shares, work, plan=plan_of(season))
         if out is None:
             say(f"{rnd.id}: no 1x student is back yet, and the curve is measured from it. Run this again later.")
             continue
@@ -702,9 +760,9 @@ def _audit(work: Path, round_id: str) -> dict:
 
 def _audit_scripts(args, season, work: Path, key) -> None:
     plan = _audit(work, args.round)
-    rnd, _ = settled_round(season, plan["round"])
+    rnd, d = settled_round(season, plan["round"])
     own = plan["sizes"][0]
-    items, _ = whole_exam(rnd, work, args.items, args.shares)
+    items, _ = whole_exam(rnd, work, args.items, args.shares, server_shares=(d.get("round") or {}).get("languages"))
     for size in plan["sizes"]:
         scale = season.scale(size)
         prepare(rnd, scale, work)
@@ -808,7 +866,10 @@ def _audit_report(args, season, work: Path, key) -> None:
                 collect(bdir, key)
             except ApiError as e:
                 say(f"the server could not be asked for what is new ({e}); this is what was collected before")
-    table_, stats, why = item_table(sat), {}, {}
+    from .aggregate import plan_of
+
+    plan_ = plan_of(season)
+    table_, stats, why = item_table(sat, plan=plan_), {}, {}
     for scale, bdir, _, _, who in batches:
         unedited = scores(bdir, UNEDITED)
         if not unedited:
@@ -832,7 +893,7 @@ def _audit_report(args, season, work: Path, key) -> None:
     # An order is compared between sizes, so a curator counts where it has a student at every size.
     for scale, *_ in batches:
         curators, unedited = stats[scale.name]
-        stats[scale.name] = measure.size_stats(table_, shares, unedited, {n: s for n, s in curators.items() if n not in left_out})
+        stats[scale.name] = measure.size_stats(table_, shares, unedited, {n: s for n, s in curators.items() if n not in left_out}, plan=plan_)
     rep = measure.audit(stats)
     whole = len(_items_of((work / plan["round"] / "exam.jsonl.zst").read_bytes()))
     rep.update(round=plan["round"], exam_digest=plan["exam_digest"], items=len(sat), items_digest=digest(sat), dropped=whole - len(sat), left_out=left_out,
@@ -1051,9 +1112,9 @@ def _finals_scripts(args, season, work: Path, key) -> None:
     plan, _ = _finals(args, work, season)
     scale = season.scale(plan["scale"])
     for rid in plan["rounds"]:
-        rnd, _ = settled_round(season, rid)
+        rnd, d = settled_round(season, rid)
         own = season.scale(plan["own"][rid])
-        items, _ = whole_exam(rnd, work, args.items, args.shares)
+        items, _ = whole_exam(rnd, work, args.items, args.shares, server_shares=(d.get("round") or {}).get("languages"))
         prepare(rnd, scale, work)
         if scale.name != own.name:
             check_exam(rnd, scale, items, work)
@@ -1187,14 +1248,18 @@ def _finals_table(args, season, work: Path, key) -> None:
                 notes.setdefault("curve", []).append(f"{b['round']}: the student at {multiple_text(p['multiple'])} read some of the corpus twice, and is no point of the curve")
             else:
                 curve[p["multiple"]] = got
-        rounds.append({"round": b["round"], "table": item_table(b["sat"]), "shares": b["shares"], "unedited": unedited, "students": students, "curve": curve})
+        from .aggregate import plan_of
+
+        rounds.append({"round": b["round"], "table": item_table(b["sat"], plan=plan_of(season)), "shares": b["shares"], "unedited": unedited, "students": students, "curve": curve})
         # What is published of a round: its exam as a settled round's is, and how every student did on every item.
         pub = fdir / "published" / b["round"]
         _write(pub / "scores.json", {"round": b["round"], "scale": plan["scale"], "items": [it.id for it in b["sat"]], "left_out": b["whole"] - len(b["sat"]),
                                      "languages": b["shares"], "unedited": unedited, "students": students, "scripts": {w["name"]: b["who"][w["name"]] for w in runs},
                                      "curve": {multiple_text(m): v for m, v in curve.items()}})
         (pub / "exam.jsonl").write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in public_items(b["sat"])))
-    out = finals.table(rounds, {w["name"]: w["role"] for w in runs if w["name"] not in waiting})
+    from .aggregate import plan_of
+
+    out = finals.table(rounds, {w["name"]: w["role"] for w in runs if w["name"] not in waiting}, plan=plan_of(season))
     for r in out["rows"]:
         if notes.get(r["name"]):
             r["note"] = "; ".join(notes[r["name"]])

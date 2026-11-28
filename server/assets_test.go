@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -20,6 +21,7 @@ func assetTable(path, file string, sha string, size int64) string {
 
 // hub stands in for the host of the assets: what it says about each file.
 type hub struct {
+	mu    sync.Mutex
 	files map[string]hubFile // by the file's path in the repository
 	asked []string
 	down  bool
@@ -33,15 +35,18 @@ type hubFile struct {
 }
 
 func (h *hub) RoundTrip(r *http.Request) (*http.Response, error) {
+	h.mu.Lock()
 	h.asked = append(h.asked, r.Method+" "+r.URL.Path)
-	if h.down {
+	down := h.down
+	name := r.URL.Path[strings.Index(r.URL.Path, testCommit)+len(testCommit)+1:]
+	f, ok := h.files[name]
+	h.mu.Unlock()
+	if down {
 		return nil, errors.New("no route to host")
 	}
 	answer := func(status int, header http.Header, body string) (*http.Response, error) {
 		return &http.Response{StatusCode: status, Header: header, Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
 	}
-	name := r.URL.Path[strings.Index(r.URL.Path, testCommit)+len(testCommit)+1:]
-	f, ok := h.files[name]
 	if !ok {
 		return answer(404, http.Header{}, "")
 	}

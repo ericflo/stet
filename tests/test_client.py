@@ -1408,16 +1408,27 @@ def test_why_a_machine_runs_no_curators_is_kept_for_a_week_and_no_longer(monkeyp
 
 def test_a_grader_with_another_pytorch_is_turned_away_before_it_grades(loop, monkeypatch, capsys):
     from stet import env
-
-    monkeypatch.setattr(env, "problems", lambda season, only=None: ["a different version: torch 2.9.0 (the season's is 2.15.0)"] if only == ("torch",) else [])
     from stet.spec import load_season
 
+    s2 = load_season("s2")
+    monkeypatch.setattr(env, "problems", lambda season, only=None: ["a different version: torch 2.9.0 (the season's is 2.15.0)"] if only == env.grade_packages(season) else [])
     monkeypatch.setattr(Args, "any_device", False, raising=False)
-    monkeypatch.setitem(load_season("s2").raw, "grade_devices", ["cuda", "cpu"])  # the test machine's device counts, so the check is reached
+    monkeypatch.setitem(s2.raw, "grade_devices", ["cuda", "cpu"])  # the test machine's device counts, so the check is reached
     loop.claims = [a_job()]
     with pytest.raises(SystemExit):
         client.cmd_verify(Args())
-    assert "the season's PyTorch" in capsys.readouterr().err and not loop.graded
+    assert "grading libraries" in capsys.readouterr().err and not loop.graded
+
+    # Season 3 grading requires transformers and safetensors as well as torch.
+    s3 = load_season("s3")
+    assert set(env.grade_packages(s3)) >= {"torch", "transformers", "safetensors"}
+    monkeypatch.setattr(env, "problems", lambda season, only=None: ["not installed: transformers"] if only and "transformers" in only else [])
+    monkeypatch.setitem(s3.raw, "grade_devices", ["cuda", "cpu"])
+    args_s3 = Args()
+    args_s3.season = "s3"
+    with pytest.raises(SystemExit):
+        client.cmd_verify(args_s3)
+    assert "not installed: transformers" in capsys.readouterr().err and not loop.graded
 
 
 def test_an_account_is_told_where_it_stands():
@@ -1611,3 +1622,21 @@ def test_a_rented_machine_hands_its_job_back(loop, monkeypatch):
     with pytest.raises(Stop):
         client.cmd_verify(Args())
     assert loop.released == [("/api/v1/jobs/8/release", "the verifier stopped")]
+
+
+def test_training_divergence_releases_grade_job_instead_of_failing_entry(loop, capsys):
+    """Review 8 Finding 3: a persistent TrainingError from train_script/sit_exam releases the
+    grade job with a 'training failed' reason so another machine grades it, rather than
+    reporting valid=False against the entry."""
+    from stet.spec import TrainingError
+
+    loop.claims = [a_job(id=19)]
+    loop.grade = TrainingError("the training failed after retry: SFT probe diverged at step 2")
+    with pytest.raises(Stop):
+        client.cmd_verify(Args())
+    assert not loop.reports
+    assert len(loop.released) == 1
+    path, reason = loop.released[0]
+    assert path == "/api/v1/jobs/19/release"
+    assert "training failed" in reason and "SFT probe diverged" in reason
+    assert "training failed" in capsys.readouterr().err

@@ -378,12 +378,10 @@ func settledEntries(s *State) []entryRow {
 	return out
 }
 
-// roundNoise is the variance of one round's gain to assume until the season's own rounds
-// can say: the square of how far the season's file takes a curator's gain to move from round
-// to round (noise.<scale>.round_sd), or failing that between two trainings (gain_sd), or
-// noiseFloor where neither is given.
-func (a *App) roundNoise() float64 {
-	if m, ok := a.season.Noise[a.cfg.Scale].(map[string]any); ok {
+// scaleNoise is the prior variance of one round's gain for a given scale: the square of
+// noise.<scale>.round_sd, or failing that gain_sd, or noiseFloor where neither is given.
+func (a *App) scaleNoise(scale string) float64 {
+	if m, ok := a.season.Noise[scale].(map[string]any); ok {
 		for _, key := range []string{"round_sd", "gain_sd"} {
 			if sd, ok := m[key].(float64); ok && sd > 0 {
 				return sd * sd
@@ -393,13 +391,53 @@ func (a *App) roundNoise() float64 {
 	return noiseFloor
 }
 
+// roundNoise is the variance of one round's gain to assume for the server's configured scale.
+func (a *App) roundNoise() float64 {
+	return a.scaleNoise(a.cfg.Scale)
+}
+
+// roundNoiseFor returns the prior variance for roundIdx from its recorded scale, falling back to
+// the server's configured scale only for legacy rounds recorded without a scale.
+func (a *App) roundNoiseFor(s *State, roundIdx int) float64 {
+	if s != nil {
+		if rd := s.Rounds[roundIdx]; rd != nil && rd.Scale != "" {
+			return a.scaleNoise(rd.Scale)
+		}
+	}
+	return a.roundNoise()
+}
+
+// observedRoundNoise derives the pooled prior variance from the scales of the settled rounds that
+// produced the observations (using valid measured observations when any exist, else all settled
+// entries), so restarting the server with a different default scale does not alter standard errors,
+// lower bounds, ties, or ladder seat selection for already-settled history.
+func (a *App) observedRoundNoise(s *State, entries []entryRow) float64 {
+	sum, n := 0.0, 0
+	for _, e := range entries {
+		if e.Valid {
+			sum += a.roundNoiseFor(s, e.RoundIdx)
+			n++
+		}
+	}
+	if n == 0 {
+		for _, e := range entries {
+			sum += a.roundNoiseFor(s, e.RoundIdx)
+			n++
+		}
+	}
+	if n == 0 {
+		return a.roundNoise()
+	}
+	return sum / float64(n)
+}
+
 // priorRounds is how many rounds' worth of evidence roundNoise counts as, beside the season's
 // own rounds, when the spread of a round's gain is worked out.
 const priorRounds = 8
 
 func (a *App) computeBoard(s *State) *Board {
 	entries := settledEntries(s)
-	ratings, diff := fitRatings(entries, a.roundNoise(), priorRounds)
+	ratings, diff := fitRatings(entries, a.observedRoundNoise(s, entries), priorRounds)
 	b := &Board{ByID: map[string]*BoardRow{}, Entries: entries, Difficulty: diff}
 	if h := s.holder(); h != nil {
 		b.RecordID = h.EditorID
@@ -559,6 +597,17 @@ func gainsByRound(entries []entryRow, editorID string) map[int]float64 {
 //
 // The first record goes to the first editor that beats the unedited baseline on the same
 // terms.
+func (a *App) roundMargin(s *State, roundIdx int) float64 {
+	if s != nil {
+		if rd := s.Rounds[roundIdx]; rd != nil && rd.Scale != "" {
+			if m, ok := a.season.Record.Margin[rd.Scale]; ok {
+				return m
+			}
+		}
+	}
+	return a.season.Record.Margin[a.cfg.Scale]
+}
+
 func (a *App) checkRecord(tx *Tx, roundIdx int) {
 	s := tx.s
 	rule := a.season.Record
@@ -566,7 +615,6 @@ func (a *App) checkRecord(tx *Tx, roundIdx int) {
 		return
 	}
 	b := a.computeBoard(s)
-	margin := rule.Margin[a.cfg.Scale]
 	alpha := rule.Alpha / float64(len(rule.Looks))
 	holder, holderN := "", 0
 	if h := s.holder(); h != nil {
@@ -578,16 +626,21 @@ func (a *App) checkRecord(tx *Tx, roundIdx int) {
 		if c.ID == holder {
 			continue
 		}
-		var d []float64
+		var raw, d []float64
 		for _, e := range b.Entries {
 			if e.EditorID != c.ID {
 				continue
 			}
+			var diff float64
 			if holder == "" {
-				d = append(d, e.Gain-margin)
+				diff = e.Gain
 			} else if h, ok := held[e.RoundIdx]; ok {
-				d = append(d, e.Gain-h-margin)
+				diff = e.Gain - h
+			} else {
+				continue
 			}
+			raw = append(raw, diff)
+			d = append(d, diff-a.roundMargin(s, e.RoundIdx))
 		}
 		look := 0
 		for _, l := range rule.Looks {
@@ -598,8 +651,8 @@ func (a *App) checkRecord(tx *Tx, roundIdx int) {
 		if look == 0 {
 			continue // nothing new to look at
 		}
-		p := pairedP(d) // H0: the mean advantage is no more than the margin
-		advantage := mean(d) + margin
+		p := pairedP(d) // H0: the mean advantage does not exceed the contributing rounds' margins
+		advantage := mean(raw)
 		for _, l := range rule.Looks { // a look at 10 rounds uses up the look at 5
 			if l <= look && s.Looks[lookKey(c.ID, holder, l)] == nil {
 				tx.saveLook(&Look{Challenger: c.ID, Holder: holder, Look: l, Shared: len(d), Advantage: advantage, P: p, At: now()})

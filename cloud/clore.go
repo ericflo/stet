@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"regexp"
 	"strconv"
 	"strings"
@@ -45,7 +46,7 @@ func (m *cloreMarket) Caps() Caps { return Caps{Rents: true} }
 
 // cloreHours is how long Clore lets an order live, whatever becomes of the fleet: its own
 // backstop.
-const cloreHours = 3
+const cloreHours = 6
 
 // cloreEnvValue is the longest value Clore takes for one variable.
 const cloreEnvValue = 1536
@@ -125,7 +126,7 @@ func clorePrice(perDay float64) float64 {
 func cloreOffer(s cloreServer, n Need) (Offer, bool) {
 	g := cloreGPU.FindStringSubmatch(s.Specs.GPU)
 	price := s.Price.OnDemand[cloreCurrency]
-	if s.Rented || g == nil || g[1] != "1" || price <= 0 || s.MRL < 2 || !cudaAtLeast(s.CUDA, n.MinCUDA) {
+	if s.Rented || g == nil || g[1] != "1" || !validRate(price) || s.MRL < 2 || !cudaAtLeast(s.CUDA, n.MinCUDA) {
 		return Offer{}, false
 	}
 	takes := false
@@ -152,7 +153,7 @@ func cloreOffer(s cloreServer, n Need) (Offer, bool) {
 	}
 	return Offer{
 		Market: "clore", Card: shortGPU(model), Model: model, Name: shortGPU(model), ID: strconv.FormatInt(s.ID, 10),
-		Maker: maker, MemoryGB: int(s.Specs.GPURAM + 0.5), Price: clorePrice(price), Ask: price, Stock: 1, CUDA: s.CUDA,
+		Maker: maker, MemoryGB: int(s.Specs.GPURAM + 0.5), Price: clorePrice(price), TransferCost: cloreOrderFee / expectedLife.Hours(), FixedCost: cloreOrderFee, Ask: price, Stock: 1, CUDA: s.CUDA,
 		Trust: "community", Region: s.Specs.Net.CC, Host: strconv.FormatInt(s.ID, 10), CPU: strings.TrimSpace(s.Specs.CPU),
 	}, true
 }
@@ -212,11 +213,11 @@ func splitEnv(env map[string]string, prefix, v string) []string {
 func (m *cloreMarket) Rent(ctx context.Context, o Offer, l Launch) (*Rental, error) {
 	server, err := strconv.ParseInt(o.ID, 10, 64)
 	if err != nil {
-		return nil, fmt.Errorf("a Clore server's ID: %q", o.ID)
+		return nil, fmt.Errorf("%w: a Clore server's ID: %q", errRentRejected, o.ID)
 	}
 	if wait := 5*time.Second - time.Since(m.lastOrder); wait > 0 {
 		if err := m.sleep(ctx, wait); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("%w: %w", errRentNotSent, err)
 		}
 	}
 	env, command := cloreScript(l.Script)
@@ -243,20 +244,37 @@ func (m *cloreMarket) Rent(ctx context.Context, o Offer, l Launch) (*Rental, err
 	asked := time.Now().Add(-time.Minute)
 	m.lastOrder = time.Now()
 	if err := m.do(ctx, "POST", "/create_order", body, nil); err != nil {
+		if errors.Is(err, errRequestNotSent) {
+			return nil, fmt.Errorf("%w: %w", errRentNotSent, err)
+		}
 		var e *APIError
-		if errors.As(err, &e) && e.Status == 200 && strings.HasPrefix(e.Detail, "code 6") && !strings.Contains(e.Detail, "balance") {
-			return nil, fmt.Errorf("%w (%v)", errNoRoom, err)
+		if errors.As(err, &e) {
+			switch {
+			case e.Status == 200 && strings.HasPrefix(e.Detail, "code 6,") && !strings.Contains(e.Detail, "balance"):
+				return nil, fmt.Errorf("%w (%v)", errNoRoom, err)
+			case e.Status == 200 && (strings.HasPrefix(e.Detail, "code 2,") || strings.HasPrefix(e.Detail, "code 3,") || strings.HasPrefix(e.Detail, "code 4,") || strings.HasPrefix(e.Detail, "code 5,") || strings.HasPrefix(e.Detail, "code 6,")):
+				return nil, fmt.Errorf("%w (%v)", errRentRejected, err)
+			case e.Status >= 400 && e.Status < 500 && e.Status != http.StatusRequestTimeout:
+				return nil, fmt.Errorf("%w (%v)", errRentRejected, err)
+			}
 		}
 		return nil, err
 	}
 	for try := 0; try < 6; try++ {
 		rs, err := m.orders(ctx)
 		if err == nil {
+			var found []cloreRental
 			for _, r := range rs {
-				if r.server == server && !r.Created.Before(asked) && r.State != "gone" {
-					r.Rental.Name, r.Rental.State = l.Name, "starting"
-					return &r.Rental, nil
+				if r.server == server && (r.Created.IsZero() || !r.Created.Before(asked)) && r.State != "gone" && !l.KnownIDs[r.ID] {
+					found = append(found, r)
 				}
+			}
+			if len(found) == 1 {
+				found[0].Rental.Name, found[0].Rental.State = l.Name, "starting"
+				return &found[0].Rental, nil
+			}
+			if len(found) > 1 {
+				return nil, fmt.Errorf("Clore listed %d ambiguous untracked orders for server %d", len(found), server)
 			}
 		}
 		if err := m.sleep(ctx, 2*time.Second); err != nil {
@@ -319,8 +337,20 @@ func (m *cloreMarket) orders(ctx context.Context) ([]cloreRental, error) {
 			state = "gone"
 		}
 		status := map[bool]string{true: "expired", false: "active"}[o.Expired]
-		rentals = append(rentals, cloreRental{Rental{Market: "clore", ID: strconv.FormatInt(o.ID, 10), Card: shortGPU(card),
-			Price: o.Price / 24 * (1 + cloreFee), State: state, Status: status, Created: time.Unix(o.CT, 0),
+		host := ""
+		if o.SI > 0 {
+			host = strconv.FormatInt(o.SI, 10)
+		}
+		var created time.Time
+		if o.CT > 0 {
+			created = time.Unix(o.CT, 0)
+		}
+		price := 0.0
+		if (o.Currency == "" || o.Currency == cloreCurrency) && validRate(o.Price) {
+			price = o.Price / 24 * (1 + cloreFee)
+		}
+		rentals = append(rentals, cloreRental{Rental{Market: "clore", ID: strconv.FormatInt(o.ID, 10), Host: host, Card: shortGPU(card),
+			Price: price, BasePrice: price, State: state, Status: status, Created: created,
 			Phase: "order " + status, Detail: "order " + status + " (Clore says no more of it)"}, o.SI})
 	}
 	return rentals, nil
@@ -351,7 +381,9 @@ func (m *cloreMarket) sshTo(ctx context.Context, id string) (string, int, error)
 	return "", 0, errors.New("Clore does not list it")
 }
 
-// End cancels an order. One Clore no longer lists as active is gone already, and not an error.
+// End cancels an order. If /cancel_order fails, treat it as already ended only when Clore
+// positively lists this exact order ID as expired/gone in /my_orders; never treat omission from
+// a listing as proof of cancellation.
 func (m *cloreMarket) End(ctx context.Context, id string) error {
 	n, err := strconv.ParseInt(id, 10, 64)
 	if err != nil {
@@ -363,11 +395,10 @@ func (m *cloreMarket) End(ctx context.Context, id string) error {
 	}
 	if os, lerr := m.orders(ctx); lerr == nil {
 		for _, o := range os {
-			if o.ID == id && o.State != "gone" {
-				return err
+			if o.ID == id && o.State == "gone" {
+				return nil
 			}
 		}
-		return nil
 	}
 	return err
 }

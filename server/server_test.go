@@ -236,7 +236,7 @@ func testConfig(t *testing.T, anchors ...ed25519.PublicKey) Config {
 		BaseURL: "http://site.test", APIURL: "http://api.test", RedirectHosts: map[string]bool{"bare.test": true},
 		DataDir: t.TempDir(), FilesDir: t.TempDir(), DocsDir: "../docs", AgentsFile: "../src/stet/templates/AGENTS.md", AnchorKeys: map[string]bool{}, Scale: "nano",
 		RoundInterval: 6 * time.Hour, LadderSize: 10, QualifyRounds: 5, RatedRounds: 3, ReplicaWait: 45 * time.Minute,
-		Lease: 3 * time.Hour, FixedCrawl: &Crawl{Crawl: "CC-MAIN-TEST", PathsSHA256: strings.Repeat("ab", 32), NShards: 1000},
+		Lease: 3 * time.Hour, ExamTimeout: 6 * time.Hour, FixedCrawl: &Crawl{Crawl: "CC-MAIN-TEST", PathsSHA256: strings.Repeat("ab", 32), NShards: 1000},
 		GithubMinAgeDays: 30, Dev: true, EstablishAfter: 5, RunsPerEntry: 2, ActiveWindow: 10 * time.Minute,
 	}
 	for _, k := range anchors {
@@ -427,14 +427,24 @@ func (w *world) claimEarly(a *actor) *claimed {
 // round is given (testExam).
 var corpusSHA, examSHA = strings.Repeat("c0", 32), strings.Repeat("d1", 32)
 
-// testTable is a small exam: items in two pillars, a skill and a kind of writing, and two languages.
+// testTable is a valid full-coverage Season 3 exam: 20 items in each of the 7 pillars
+// (meeting min_pillar_items=20) across en and de.
 func testTable() []ItemInfo {
 	var out []ItemInfo
-	for i := 0; i < 12; i++ {
-		out = append(out, ItemInfo{Pillar: "logic", Part: "logic", Lang: "en", Stratum: "prose/answer"})
-	}
-	for i := 0; i < 6; i++ {
-		out = append(out, ItemInfo{Pillar: "reference", Part: "reference", Lang: []string{"en", "de"}[i%2], Stratum: "prose/passage"})
+	for _, spec := range []struct {
+		pillar, part, stratum string
+	}{
+		{"reference", "reference", "prose/context"},
+		{"news", "news", "prose/context"},
+		{"technical", "technical", "prose/context"},
+		{"conversation", "discussion", "dialogue/context"},
+		{"explain", "explain", "prose/answer"},
+		{"infer", "infer", "prose/answer"},
+		{"synthesis", "synthesis", "prose/answer"},
+	} {
+		for i := 0; i < 20; i++ {
+			out = append(out, ItemInfo{Pillar: spec.pillar, Part: spec.part, Lang: []string{"en", "de"}[i%2], Stratum: spec.stratum})
+		}
 	}
 	return out
 }
@@ -448,7 +458,7 @@ func testExam(table []ItemInfo) map[string]any {
 	return map[string]any{
 		"items_digest": examSHA, "items_file": base64.StdEncoding.EncodeToString(file), "table": table,
 		"public_file": base64.StdEncoding.EncodeToString(public),
-		"languages":   map[string]float64{"en": 60, "de": 40}, "fresh": 6,
+		"languages":   map[string]float64{"en": 60, "de": 40}, "fresh": len(table),
 	}
 }
 
@@ -513,13 +523,17 @@ func (w *world) edit(a *actor, c *claimed, script string) (int, string) {
 // -baseline: the exam's aggregate of a gain that is the same on every item is that gain, so
 // against a round whose baseline is baseline, its gain is baseline - loss.
 func (w *world) result(c *claimed, loss, baseline float64) map[string]any {
+	tokSum := sha256.Sum256([]byte("tokens:" + c.Job.Script.SHA256))
+	defaultInit := strings.Repeat("a1", 32)
+	base := itemScores(-baseline)
+	base["init_sha256"] = defaultInit
 	return map[string]any{
 		"harness": w.app.season.Harness, "season": w.app.season.ID, "season_digest": w.app.season.Digest,
 		"round": c.Job.Round["id"], "scale": c.Job.Scale, "corpus_sha256": corpusSHA, "exam_sha256": examSHA,
 		"script_sha256": c.Job.Script.SHA256, "valid": true, "hardware": map[string]any{"gpu": "Test GPU", "device": "cuda"},
-		"script":   map[string]any{"script_sha256": c.Job.Script.SHA256, "kept_doc_frac": 0.1, "kept_byte_frac": 0.08, "passes": 1.4, "out_docs": 1200},
-		"baseline": itemScores(-baseline), "exam": itemScores(-loss),
-		"train":      map[string]any{"seconds": 30.0, "tokens_per_second": 100000.0, "final_train_loss": 5.0, "curve": [][]float64{{1, 9}, {50, 6}, {100, 5.5}, {150, 5.2}}},
+		"script":   map[string]any{"script_sha256": c.Job.Script.SHA256, "tokens_sha256": hex.EncodeToString(tokSum[:]), "kept_doc_frac": 0.1, "kept_byte_frac": 0.08, "passes": 1.4, "out_docs": 1200},
+		"baseline": base, "exam": itemScores(-loss),
+		"train":      map[string]any{"init_sha256": defaultInit, "seconds": 30.0, "tokens_per_second": 100000.0, "final_train_loss": 5.0, "curve": [][]float64{{1, 9}, {50, 6}, {100, 5.5}, {150, 5.2}}},
 		"started_at": time.Now().Unix() - 60, "finished_at": time.Now().Unix(),
 	}
 }
@@ -3448,7 +3462,7 @@ func TestOnlyAnEstablishedAccountOnAMachineUpToTheFloorIsHandedEditors(t *testin
 	}
 	hello := func(b map[string]any, sandbox string) map[string]any {
 		h := w.hello(true)
-		hw := map[string]any{"gpu": "Test GPU", "device": "cuda", "backend": "cuda"}
+		hw := map[string]any{"gpu": "Test GPU", "device": "cuda", "backend": "cuda", "vram_gb": 24.0, "cuda_capability": "8.9", "bf16_native": true}
 		if b != nil {
 			hw["bench"] = b
 		}
@@ -3648,13 +3662,18 @@ func TestTwoEstablishedGradesThatDisagreeGetAThird(t *testing.T) {
 		return w, idx, bob, carol, dave, cb, cc
 	}
 
-	// Nobody is there to say which of two is right: the gain is midway, and says so.
+	// Nobody is there yet to say which of two is right: hold open through ReplicaWait so the
+	// fleet or a volunteer can supply a deciding grade, then fall back to the midpoint.
 	w, idx, bob, carol, _, cb, cc := start(false)
 	if code, status := w.report(bob, cb, 5.5); code != 200 || status != "pending" {
 		t.Fatalf("HTTP %d %s", code, status)
 	}
-	if code, status := w.report(carol, cc, 5.2); code != 200 || status != "settled" {
-		t.Fatalf("HTTP %d %s", code, status)
+	if code, status := w.report(carol, cc, 5.2); code != 200 || status != "pending" {
+		t.Fatalf("numerical dispute should wait ReplicaWait before falling back to midpoint: HTTP %d %s", code, status)
+	}
+	w.pass(w.cfg.ReplicaWait + time.Minute)
+	if w.settled(idx) != 1 {
+		t.Fatalf("unresolved numerical dispute did not settle after ReplicaWait")
 	}
 	w.check()
 	e := w.entry(idx, "tidy")

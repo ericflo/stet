@@ -156,26 +156,27 @@ func (s *Site) mount(mux *http.ServeMux) {
 // --- rendering ------------------------------------------------------------------------------
 
 type Page struct {
-	Title    string
-	Desc     string
-	Nav      string
-	Path     string
-	Season   *Season
-	Scale    Scale
-	ScaleID  string
-	BaseURL  string
-	APIURL   string
-	Version  string
-	Dev      bool
-	Now      int64
-	Wheel    string
-	CLI      string
-	Docs     []docSpec
-	Interval string
-	OnDemand bool    // a round is also drawn early when an entry is waiting (STET_ROUND_MIN_GAP); otherwise only on the clock
-	Github   bool    // entering needs a linked GitHub account
-	Live     NowView // what is happening now, said at the top of every page
-	D        any
+	Title        string
+	Desc         string
+	Nav          string
+	Path         string
+	Season       *Season
+	Scale        Scale
+	ScaleID      string
+	BaseURL      string
+	APIURL       string
+	Version      string
+	Dev          bool
+	Now          int64
+	Wheel        string
+	CLI          string
+	Docs         []docSpec
+	Interval     string
+	OnDemand     bool    // a round is also drawn early when an entry is waiting (STET_ROUND_MIN_GAP) or on-demand-only (STET_ROUND_INTERVAL=0)
+	OnDemandOnly bool    // rounds are drawn only when an entry is waiting (STET_ROUND_INTERVAL=0); no fixed-clock draws
+	Github       bool    // entering needs a linked GitHub account
+	Live         NowView // what is happening now, said at the top of every page
+	D            any
 }
 
 // NowView is what is happening at this moment, said at the top of every page: the round
@@ -229,7 +230,7 @@ func (s *Site) page(r *http.Request, title, nav string, d any) *Page {
 	return &Page{Live: nv,
 		Title: title, Nav: nav, Path: r.URL.Path, Season: a.season, Scale: a.season.Scales[a.cfg.Scale], ScaleID: a.cfg.Scale,
 		BaseURL: a.cfg.BaseURL, APIURL: a.cfg.APIURL, Version: s.version, Dev: a.cfg.Dev, Now: now(), Wheel: wheel, CLI: version,
-		Docs: s.docList(), Interval: plainDuration(a.cfg.RoundInterval), OnDemand: a.cfg.RoundMinGap > 0, Github: a.cfg.RequireGithub, D: d,
+		Docs: s.docList(), Interval: plainDuration(a.cfg.RoundInterval), OnDemand: a.cfg.RoundInterval == 0 || a.cfg.RoundMinGap > 0, OnDemandOnly: a.cfg.RoundInterval == 0, Github: a.cfg.RequireGithub, D: d,
 		Desc: "Stet is an open competition to make the best training data for a language model. You enter a curator: a program that cuts, keeps and reorders raw web crawl. The model, the trainer and the budget are fixed. The only thing you can touch is the data.",
 	}
 }
@@ -261,6 +262,8 @@ func (s *Site) notFound(w http.ResponseWriter, r *http.Request, what string) {
 
 func plainDuration(d time.Duration) string {
 	switch {
+	case d <= 0:
+		return "on demand"
 	case d%(24*time.Hour) == 0 && d >= 24*time.Hour:
 		n := int(d / (24 * time.Hour))
 		if n == 1 {
@@ -436,22 +439,50 @@ func (s *Site) funcs() template.FuncMap {
 		"gain":     func(v float64) string { return signed(v, 3) },
 		"ptr":      deref,
 		"has":      func(p *float64) bool { return p != nil },
-		"mult":     multText,
-		"pct":      func(v float64) string { return fmt.Sprintf("%.0f%%", 100*v) },
-		"pct1":     func(v float64) string { return trimZero(fmt.Sprintf("%.1f", 100*v)) + "%" },
-		"add":      func(a, b int) int { return a + b },
-		"sub":      func(a, b int) int { return a - b },
-		"min":      func(a, b int) int { return min(a, b) },
-		"addf":     func(a, b float64) float64 { return a + b },
-		"trust":    trustOf,
-		"pips":     pips,
-		"barw":     barWidth,
-		"halfw":    halfWidth,
-		"ordinal":  ordinal,
-		"neg":      func(v float64) bool { return v < 0 },
-		"hm":       func(ts int64) string { return time.Unix(ts, 0).UTC().Format("2 Jan, 15:04") },
-		"hourof":   func(ts int64) string { return time.Unix(ts, 0).UTC().Format("2 Jan 15:04") },
-		"hours":    func(seconds int64) string { return trimZero(fmt.Sprintf("%.1f", float64(seconds)/3600)) },
+		"hasPillar": func(m map[string]float64, k string) bool {
+			if m == nil {
+				return false
+			}
+			_, ok := m[k]
+			return ok
+		},
+		"hasGroupPillars": func(pillars []PlanPillar, groups map[string]float64, m map[string]float64, scored bool) bool {
+			if m == nil {
+				return false
+			}
+			for _, pl := range pillars {
+				isScored := groups[pl.Group] > 0
+				if isScored == scored {
+					if _, ok := m[pl.Name]; ok {
+						return true
+					}
+				}
+			}
+			return false
+		},
+		"pillarGain": func(m map[string]float64, k string) float64 {
+			if m == nil {
+				return 0
+			}
+			return m[k]
+		},
+		"groupWeight": func(groups map[string]float64, g string) float64 { return groups[g] },
+		"mult":        multText,
+		"pct":         func(v float64) string { return fmt.Sprintf("%.0f%%", 100*v) },
+		"pct1":        func(v float64) string { return trimZero(fmt.Sprintf("%.1f", 100*v)) + "%" },
+		"add":         func(a, b int) int { return a + b },
+		"sub":         func(a, b int) int { return a - b },
+		"min":         func(a, b int) int { return min(a, b) },
+		"addf":        func(a, b float64) float64 { return a + b },
+		"trust":       trustOf,
+		"pips":        pips,
+		"barw":        barWidth,
+		"halfw":       halfWidth,
+		"ordinal":     ordinal,
+		"neg":         func(v float64) bool { return v < 0 },
+		"hm":          func(ts int64) string { return time.Unix(ts, 0).UTC().Format("2 Jan, 15:04") },
+		"hourof":      func(ts int64) string { return time.Unix(ts, 0).UTC().Format("2 Jan 15:04") },
+		"hours":       func(seconds int64) string { return trimZero(fmt.Sprintf("%.1f", float64(seconds)/3600)) },
 		"dict": func(kv ...any) map[string]any {
 			m := map[string]any{}
 			for i := 0; i+1 < len(kv); i += 2 {
@@ -621,7 +652,20 @@ func trustOf(e EntryView) trustView {
 	case !e.Settled:
 		return trustView{0, "sealed", "Who ran it and what they measured are published when the round settles."}
 	case e.Void || e.NRuns == 0:
+		low := strings.ToLower(e.Reason)
+		if strings.Contains(low, "training failed") {
+			return trustView{0, "training failed", "The training failed on the machines that tried to grade it, so this round does not count for it."}
+		}
+		if strings.Contains(low, "disagreed") {
+			return trustView{0, "disputed", "Verifiers disagreed on the measurement, so this round does not count for it."}
+		}
 		return trustView{0, "not run", "Nobody could run it, or check a run of it, so this round does not count for it."}
+	case !e.Valid && (strings.Contains(strings.ToLower(e.Reason), "diverg") || strings.Contains(strings.ToLower(e.Reason), "training failed")):
+		return trustView{0, "training failed", "The training failed."}
+	case !e.Valid && e.ScriptSHA != "" && e.NRuns > 1:
+		return trustView{0, "failed on every run", fmt.Sprintf("All %d machines that ran it wrote an edit script that broke a rule.", e.NRuns)}
+	case !e.Valid && e.ScriptSHA != "":
+		return trustView{0, "failed", "The edit script it wrote broke a rule."}
 	case !e.Valid && e.NRuns > 1:
 		return trustView{0, "failed on every run", fmt.Sprintf("All %d machines that ran it got no usable edit script from it.", e.NRuns)}
 	case !e.Valid:
@@ -850,18 +894,23 @@ func (a *App) recordRace(st *State, b *Board, limit int) recordRace {
 		if c.ID == holder || !(c.Ladder || c.Provisional) {
 			continue // only a curator still being run can come to share more rounds
 		}
-		var d []float64
+		var d, excess []float64
 		for _, e := range of[c.ID] {
+			var diff float64
 			if holder == "" {
-				d = append(d, e.Gain)
+				diff = e.Gain
 			} else if h, ok := held[e.RoundIdx]; ok {
-				d = append(d, e.Gain-h)
+				diff = e.Gain - h
+			} else {
+				continue
 			}
+			d = append(d, diff)
+			excess = append(excess, diff-a.roundMargin(st, e.RoundIdx))
 		}
 		row := challengerRow{BoardRow: c, Shared: len(d)}
 		if len(d) > 0 {
 			row.Mean = mean(d)
-			row.Clear = row.Mean > race.Margin
+			row.Clear = mean(excess) > 0
 		}
 		if len(d) >= 2 {
 			se := stddev(d) / math.Sqrt(float64(len(d)))
@@ -1094,6 +1143,7 @@ func (a *App) nowFacts(st *State, d map[string]any) {
 	}
 	d["Active"], d["GPUHours"], d["Runners"], d["Queued"] = active, gpuHours, runners, queued
 	d["Paused"] = st.Meta.Paused != 0
+	d["BackoffUntil"] = a.backoffUntil(st)
 	if next := st.roundWithStatus("scheduled"); next != nil && st.Meta.Paused == 0 {
 		c := *next
 		d["Next"] = &c
@@ -1364,7 +1414,16 @@ func (s *Site) rounds(w http.ResponseWriter, r *http.Request) {
 
 func (s *Site) round(w http.ResponseWriter, r *http.Request) {
 	a := s.app
-	idx, ok := a.parseRoundID(r.PathValue("id"))
+	rawID := r.PathValue("id")
+	idx, ok := a.parseRoundID(rawID)
+	if !ok {
+		if m := roundIDRe.FindStringSubmatch(rawID); m != nil && m[1] != a.season.ID {
+			if arch := s.archived(m[1]); arch != nil && arch.pages["rounds/"+rawID] != nil {
+				http.Redirect(w, r, "/seasons/"+m[1]+"/rounds/"+rawID, http.StatusMovedPermanently)
+				return
+			}
+		}
+	}
 	var rs *roundSummary
 	var entries []roundEntry
 	var expected, later []expectedRow
@@ -1398,7 +1457,7 @@ func (s *Site) round(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sc := a.season.Scales[rs.Scale]
-	d := map[string]any{"R": rs, "ID": rs.ID, "Entries": entries, "Top": topGain(entries), "Scale": sc, "Tolerance": a.tolerance(),
+	d := map[string]any{"R": rs, "ID": rs.ID, "Entries": entries, "Top": topGain(entries), "Scale": sc, "Tolerance": a.toleranceFor(rs.Scale),
 		"RunsPerEntry": a.cfg.RunsPerEntry, "Prev": prev, "Next": next,
 		"Expected": expected, "Later": later, "QualifyRounds": a.cfg.QualifyRounds, "Work": work,
 		"Scores": scores}
@@ -1668,6 +1727,8 @@ const installShTmpl = `#!/bin/sh
 #
 #   STET_LIGHT=1         only what "stet submit", "stet status" and friends need: no
 #                        PyTorch and no libraries. Seconds to install, and megabytes.
+#   STET_GRADE_ONLY=1    only what "stet verify" needs to grade scripts (PyTorch, Transformers,
+#                        Safetensors): skips curator libraries and CUDA-only extras (vLLM, Liger).
 #   STET_TORCH_INDEX=... take PyTorch from this wheel index, not the one chosen below.
 #   STET_UPGRADE=1       replacing an install: fetch everything before touching it.
 #                        "stet upgrade", and a running "stet verify", set this.
@@ -1690,15 +1751,33 @@ if [ "${STET_LIGHT:-}" = "1" ] || [ "${STET_NO_TORCH:-}" = "1" ]; then
   say "Installing stet (light: no PyTorch, no libraries)..."
   uv tool install --force --python "$PY" "stet-cli @ $WHEEL"
 else
-  # Which build of PyTorch. With an NVIDIA GPU, the default one. With an AMD GPU and no
-  # NVIDIA one, the ROCm build. On a Mac the default build uses Metal.
+  # Which build of PyTorch, and which extras. Grade-only machines install only the lean "train"
+  # extra (torch, transformers, tokenizers, safetensors). Full curator machines on NVIDIA Linux x86_64 also
+  # install the "cuda" extra (vLLM, Liger). With an AMD GPU and no NVIDIA one, the ROCm build.
   INDEX="${STET_TORCH_INDEX:-}"
-  if [ -z "$INDEX" ] && [ "$(uname -s)" = "Linux" ]; then
+  if [ "${STET_GRADE_ONLY:-}" = "1" ]; then
+    EXTRAS="train"
+  else
+    EXTRAS="run"
+  fi
+  if [ "$(uname -s)" = "Linux" ]; then
     VENDORS="$(cat /sys/class/drm/card*/device/vendor 2>/dev/null || true)"
+    HAS_NVIDIA=0
     case "$VENDORS" in
-      *0x10de*) ;;
-      *0x1002*) INDEX="{{.AMDIndex}}"; say "AMD GPU found: taking the ROCm build of PyTorch." ;;
+      *0x10de*) HAS_NVIDIA=1 ;;
     esac
+    if [ "$HAS_NVIDIA" = "0" ] && command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
+      HAS_NVIDIA=1
+    fi
+    if [ "$HAS_NVIDIA" = "1" ]; then
+      if [ "${STET_GRADE_ONLY:-}" != "1" ] && [ "$(uname -m)" = "x86_64" ]; then
+        EXTRAS="run,cuda"
+      fi
+    elif [ -z "$INDEX" ]; then
+      case "$VENDORS" in
+        *0x1002*) INDEX="{{.AMDIndex}}"; say "AMD GPU found: taking the ROCm build of PyTorch." ;;
+      esac
+    fi
   fi
   TMP="$(mktemp -d)"
   PRE=""
@@ -1720,28 +1799,36 @@ else
     if [ -n "$INDEX" ]; then
       set -- "$@" --index "$INDEX" --index-strategy unsafe-best-match
     fi
-    if ! "$@" "stet-cli[run] @ $WHEEL"; then
+    if ! "$@" "stet-cli[$EXTRAS] @ $WHEEL"; then
       rm -rf "$PRE"
       say "The new version could not be fetched whole. Nothing was changed."
       exit 1
     fi
     rm -rf "$PRE"
   fi
-  say "Installing stet with Python $PY, PyTorch and the curator libraries (a few GB the first time)..."
+  if [ "$EXTRAS" = "train" ]; then
+    say "Installing stet with Python $PY and the grading libraries (PyTorch and Transformers)..."
+  else
+    say "Installing stet with Python $PY, PyTorch and the curator libraries (a few GB the first time)..."
+  fi
   set -- uv tool install --force --python "$PY" --constraints "$TMP/constraints.txt"
   if [ -n "$INDEX" ]; then
     set -- "$@" --index "$INDEX" --index-strategy unsafe-best-match
   fi
-  if ! "$@" "stet-cli[run] @ $WHEEL"; then
-    say ""
-    say "The full set of curator libraries could not be installed on this machine."
-    say "Installing stet with PyTorch alone: enough to grade, and to run curators that"
-    say "need nothing else. 'stet doctor' will say what is missing."
-    set -- uv tool install --force --python "$PY" --with "torch=={{.Torch}}"
-    if [ -n "$INDEX" ]; then
-      set -- "$@" --index "$INDEX" --index-strategy unsafe-best-match
+  if [ "$EXTRAS" = "train" ]; then
+    "$@" "stet-cli[train] @ $WHEEL"
+  elif ! "$@" "stet-cli[$EXTRAS] @ $WHEEL"; then
+    if [ "$EXTRAS" != "run" ]; then
+      say ""
+      say "The CUDA-accelerated extras could not be installed; retrying with the portable library set..."
     fi
-    "$@" "stet-cli @ $WHEEL"
+    if [ "$EXTRAS" = "run" ] || ! "$@" "stet-cli[run] @ $WHEEL"; then
+      say ""
+      say "The full set of curator libraries could not be installed on this machine."
+      say "Installing stet with the grading libraries (PyTorch and Transformers): enough to grade,"
+      say "and to run curators that need nothing else. 'stet doctor' will say what is missing."
+      "$@" "stet-cli[train] @ $WHEEL"
+    fi
   fi
 fi
 
@@ -1789,8 +1876,8 @@ if ($env:STET_LIGHT -eq "1" -or $env:STET_NO_TORCH -eq "1") {
   if ($index) { $more = @("--index", $index, "--index-strategy", "unsafe-best-match") }
   uv tool install --force --python $py --constraints $constraints @more "stet-cli[run] @ $wheel"
   if ($LASTEXITCODE -ne 0) {
-    Write-Host "The full set of curator libraries could not be installed here. Installing stet with PyTorch alone."
-    uv tool install --force --python $py --with "torch=={{.Torch}}" @more "stet-cli @ $wheel"
+    Write-Host "The full set of curator libraries could not be installed here. Installing stet with the grading libraries (PyTorch and Transformers)."
+    uv tool install --force --python $py --constraints $constraints @more "stet-cli[train] @ $wheel"
   }
 }
 
@@ -1807,6 +1894,9 @@ func (s *Site) constraints(w http.ResponseWriter, r *http.Request) {
 	env := s.app.season.Environment
 	only := map[string]bool{}
 	for _, name := range env.Linux {
+		only[name] = true
+	}
+	for _, name := range env.CUDALinux {
 		only[name] = true
 	}
 	var lines []string

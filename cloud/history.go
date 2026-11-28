@@ -129,7 +129,9 @@ func (f *Fleet) appendJSON(path string, v any) {
 	}
 	fh, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
+		f.sayMu.Lock()
 		f.out.Write([]byte("keeping " + filepath.Base(path) + ": " + err.Error() + "\n"))
+		f.sayMu.Unlock()
 		return
 	}
 	defer fh.Close()
@@ -138,15 +140,20 @@ func (f *Fleet) appendJSON(path string, v any) {
 
 // beginLook starts the record of a look; endLook keeps it.
 func (f *Fleet) beginLook() *lookRecord {
-	f.cur = &lookRecord{T: f.now().UTC(), Fleet: fleetBuild()}
-	collectCalls(f.cur)
-	return f.cur
+	rec := &lookRecord{T: f.now().UTC(), Fleet: fleetBuild()}
+	f.sayMu.Lock()
+	f.cur = rec
+	f.sayMu.Unlock()
+	collectCalls(rec)
+	return rec
 }
 
 func (f *Fleet) endLook(start time.Time, err error) {
 	stopCalls()
+	f.sayMu.Lock()
 	rec := f.cur
 	f.cur = nil
+	f.sayMu.Unlock()
 	if rec == nil {
 		return
 	}
@@ -170,8 +177,19 @@ func (rec *lookRecord) decided(d Decision, next int) {
 		rec.ExamDue = d.ExamDue.Unix()
 	}
 	for _, e := range d.End {
-		el := endingLook{Handle: e.Worker.Key.Handle, Why: e.Why, Failed: e.Failed}
-		if r := e.Worker.Rental; r != nil {
+		handle := ""
+		if e.Worker != nil && e.Worker.Key != nil {
+			handle = e.Worker.Key.Handle
+		}
+		r := e.Rental
+		if r == nil && e.Worker != nil {
+			r = e.Worker.Rental
+		}
+		if handle == "" && r != nil {
+			handle = r.Name
+		}
+		el := endingLook{Handle: handle, Why: e.Why, Failed: e.Failed}
+		if r != nil {
 			el.Market, el.ID = r.Market, r.ID
 		}
 		rec.Endings = append(rec.Endings, el)
@@ -201,7 +219,16 @@ func (rec *lookRecord) seenWork(v *View, p Policy, now time.Time) {
 			rec.States, rec.Live = map[string]int{}, map[string]int{}
 		}
 		rec.States[st]++
-		rec.Live[wk.Rental.Market]++
+		if wk.Rental != nil {
+			rec.Live[wk.Rental.Market]++
+		} else if wk.Pending != nil {
+			rec.Live[wk.Pending.Market]++
+		}
+		for _, ex := range wk.ExtraRentals {
+			if ex != nil && (ex.live() || ex.Unconfirmed) {
+				rec.Live[ex.Market]++
+			}
+		}
 	}
 }
 

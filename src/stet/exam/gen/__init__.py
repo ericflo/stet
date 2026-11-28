@@ -35,11 +35,11 @@ from . import (
     word,
 )
 
-FAMILIES = [logic, shell, grammar, context, knowledge]
+FAMILIES = [logic, shell, grammar, context, knowledge, knowledge.KnowledgeEven]
 # What a small student cannot do cold, asked after solved examples of the same task. Knowledge
 # is not: a fact is known or it is not, and other facts do not help.
 FAMILIES += [shots.Shots(f) for f in (arith, word, units, algebra, algo)]
-VERSION = 9  # bump when any generator changes what a seed produces
+VERSION = 11  # bump when any generator changes what a seed produces
 
 
 def all_corners() -> list[str]:
@@ -52,23 +52,25 @@ def named(parts) -> list:
     return [fam for fam in FAMILIES if fam.NAME in parts]
 
 
-def generate(seed: bytes | str, per_corner: int = 1, *, families, more: dict[str, int] | None = None) -> list[Item]:
+def generate(
+    seed: bytes | str, per_corner: int = 1, *, families, more: dict[str, int] | None = None, version: int = VERSION
+) -> list[Item]:
     """These families' items for a seed, in a fixed order: per_corner from every corner, and
     more[name] times that from a family named in `more`."""
-    root = Rng(seed, f"exam/v{VERSION}")
+    root = Rng(seed, f"exam/v{version}")
     more = more or {}
     out: list[Item] = []
     had: set[str] = set()
     for fam in families:
         for corner in fam.corners():
             for i in range(per_corner * int(more.get(fam.NAME, 1))):
-                it = fam.make(root.child(f"{corner}#{i}"), corner)
+                it = fam.make(root.child(f"{corner}#{i}"), corner, version=version) if fam is shell else fam.make(root.child(f"{corner}#{i}"), corner)
                 # A corner with few things to say can say one of them twice. An item sat twice
                 # counts twice: draw again, a few times, for one the exam does not have yet.
                 for again in range(1, 9):
                     if it.id not in had:
                         break
-                    it = fam.make(root.child(f"{corner}#{i}/again{again}"), corner)
+                    it = fam.make(root.child(f"{corner}#{i}/again{again}"), corner, version=version) if fam is shell else fam.make(root.child(f"{corner}#{i}/again{again}"), corner)
                 had.add(it.id)
                 out.append(it)
     return out
@@ -80,4 +82,10 @@ def for_season(season, seed: bytes | str) -> list[Item]:
     from ..aggregate import plan_of
 
     cfg = season.raw["exam"]
-    return generate(seed, int(cfg["per_corner"]), families=named(plan_of(season).parts), more=cfg.get("more"))
+    return generate(
+        seed,
+        int(cfg["per_corner"]),
+        families=named(plan_of(season).parts),
+        more=cfg.get("more"),
+        version=int(cfg["generator_version"]),
+    )

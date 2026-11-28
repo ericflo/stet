@@ -29,14 +29,15 @@ over it. Which markets are armed is kept in `markets.json`; with none, RunPod al
 ## What a rented machine does
 
 It is a single-GPU container on one of the markets armed, running `ubuntu:24.04` and [one
-script](worker.sh). The script installs stet from the site into `/opt/stet` (on Lium, under
+script](worker.sh). The script ensures `gcc`/`g++`/`libc6-dev` are present (for Triton/vLLM/FLA
+JIT kernels), installs stet from the site into `/opt/stet` (on Lium, under
 `/workspace`, since its container disk is 7.5 GB), writes the machine's key under `/root`, and
-runs `stet verify --edits --sandbox container --exit-when-idle 15`: it runs curators and
+runs `stet verify --edits --sandbox container --exit-when-idle 20`: it runs curators and
 grades, and trains the organisers' students when there is nothing official to do, until it
-has had nothing to do for fifteen minutes. Then it ends itself where its market gives it a key
+has had nothing to do for twenty minutes. Then it ends itself where its market gives it a key
 for that alone (RunPod a pod's own, Vast an instance's), and elsewhere waits for stet-cloud to
 end it from outside, with the market's own backstop should the fleet be gone: Lium ends a pod
-after `termination_hours`, Clore an order after `rental_hours` (both 3), and a Salad container
+after `termination_hours`, Clore an order after `rental_hours` (both 6), and a Salad container
 is made never to restart. A market may restart a container whose process exits, and keep
 billing for it, so the script never just exits.
 
@@ -80,7 +81,9 @@ and forgets it. A key not vouched for is vouched for when it is first rented.
 ```sh
 stet-cloud gpus                      # what would be rented, the fastest first
 stet-cloud status                    # what is waiting, what is rented, what it costs
-stet-cloud scale --follow            # rent and end to match the work, every minute
+stet-cloud scale --follow --examiner-addr 127.0.0.1:8000
+                                     # rent/end graders AND automate the ephemeral 1x RTX 5090 examiner
+stet-cloud examiner                  # run only the automated ephemeral 1x RTX 5090 examiner proxy
 stet-cloud up 2                      # or by hand: two now, whatever is waiting
 stet-cloud down                      # end those that hold no job
 stet-cloud pause                     # draw no more rounds: the machines turn to the organisers' students
@@ -95,15 +98,31 @@ service would rent and end is what the service will; settings given to it are ta
 those.
 
 How many it rents: one for each machine at a grade, which takes no other until it is done
-(about 18 minutes on a 3090 at the standard scale), and one more for every `--per-machine`
+(about 55 minutes on a 3090, ~30 on a 4090, ~20 on a 5090 at the standard scale), and one more for every `--per-machine`
 (6) scripts a new machine could grade now: `--per-machine 1` gives each its own. A grade
-trains the student once; the four machines a round asks to measure its unedited baseline
-(Season 2's `baselines.per_round`, `baselines_wanted` in `/admin/work`) train that first, on
-as many tokens. In Season 2 the exam is made at the draw, from hours of the day before already
-harvested, and posted within a minute or so of it, so nearly every grade is taken once the
-exam is posted, and wants a machine then. A grader may also take a grade before the exam is
+trains the student once; the two machines a round asks to measure its unedited baseline
+(Season 3's `baselines.per_round = 2`, `baselines_wanted` in `/admin/work`) train that first, on
+as many tokens. In Season 3 the exam is built right after the draw from hours of the day before already
+harvested (measured at `14.3 min` cold-start from Vast.ai rent to 640 synthesized drafts on a
+1× RTX 5090 running `vllm/vllm-openai@sha256:d24e5fc7...` serving `Inkling-2-Mini`, `~16–18 min`
+total draw-to-publication including CC shard fetch and CPU `init_sha256`, within `--exam-after 25m`,
+at `~$0.15–$0.20/round`), so nearly every grade is taken once the
+exam is posted, and wants a machine then. When `stet-cloud` runs with `--examiner-addr 127.0.0.1:8000`
+(or standalone `stet-cloud examiner`), it automates the entire examiner GPU lifecycle: renting one
+verified 1× RTX 5090 on Vast.ai as soon as `/admin/work` shows an open round with `exam_at == 0`
+(counted against `--max`, `--max-hourly`, `--daily-budget`, `status`, and live daily spend from
+launch), generating a fresh per-instance 256-bit `--api-key` and ECDSA P-256 TLS certificate
+(`--ssl-certfile`/`--ssl-keyfile`), tagging instances with a persistent deployment owner ID
+(`examiner-owner`) so separate deployments sharing a Vast account never delete each other, starting
+a container-side self-destruct TTL watchdog (`STET_EXAMINER_TTL_SECONDS`) that survives controller
+exit, verifying `https://<ip>:<port>/v1/models` over peer-verified pinned TLS returns the pinned
+`thinkingmachines/Inkling-2-Mini@c9d02830...` revision, proxying `http://127.0.0.1:8000` over that
+same pinned TLS connection with injected Bearer auth so `stet-examine.service` needs no manual
+intervention or static key, and destroying the 5090 immediately once the exam is posted (or past
+`--examiner-timeout`, default 45m, enforced even during Stet outages, plus owner-scoped orphan
+cleanup requiring confirmed deletion before renting a replacement). A grader may also take a grade before the exam is
 posted and hold it until it is: such grades want machines from `--early` (90 minutes) before
-the exam is due (when the server says, or else `--exam-after`, 5 minutes, after the draw), and
+the exam is due (when the server says, or else `--exam-after`, 25 minutes, after the draw), and
 each kind of GPU is rented just in time, so that, rented now, it would report between a
 minute before the exam and `--settle-within` (15 minutes) after it. A machine that has
 trained only waits, so what a grade costs on a kind is its price over the time it is held,
@@ -115,10 +134,10 @@ about 2h12m after the draw, and these early grades were most of its grades; the 
 runs with `--early 0`, renting graders only once an exam is posted.
 How long a training pass takes on each kind is learned from the grades of settled rounds
 (each says the GPU that trained, and for how long), and how long a machine takes to start
-from those this service rents; until a kind has been seen, its pass is a 3090's 18 minutes
+from those this service rents; until a kind has been seen, its pass is a 3090's 55 minutes
 over its speed in the table, and a machine is taken to start in 8 minutes. They are kept in
 `calibration.json`, and `stet-cloud gpus` shows them. The curators want a machine for every
-four entries to run, and never fewer than two, since each entry is run twice, by two
+two entries to run, and never fewer than two, since each entry is run twice, by two
 accounts. A machine with nothing official to do trains the organisers' own
 students (a few minutes each, on a settled round), so one more for every `--per-farm` (4)
 of those waiting, after the official work (`--per-farm 0`: none). `--long-farm 600` rents
@@ -128,10 +147,13 @@ at $0.89 trains one in about half the time of a 3090 at $0.50, so the student co
 the same and is done sooner. Where two cost about the same, the quicker comes first.
 `--long-max-price` is the ceiling for those machines (the same as `--max-price` if not
 given); `stet-cloud gpus` shows both orders. Never more than `--max` (6), or past
-`--max-hourly` dollars an hour (3), and nothing new once `--daily-budget` is spent.
+`--max-hourly` dollars an hour (4), and nothing new once `--daily-budget` is spent.
 `--max-price` never rents a machine dearer than that, however much is waiting: the work
-waits for a cheap one instead. When rounds are drawn on demand and an entry is waiting for
-one with nobody who runs curators around, one, so that the round is drawn early. It never ends a machine that
+waits for a cheap one instead. In Season 3's on-demand-only mode, rounds draw only when
+entries are waiting: when an entry waits with nobody who runs curators around, one 24 GB+
+machine is rented to trigger the draw; up to two warm machines are kept across the short
+6–16 minute draw notice window (`next_draw_at`), and when nothing is waiting or scheduled
+all idle machines are ended immediately down to **0 GPUs**. It never ends a machine that
 holds a job. It ends at once those doing nothing when nothing at all is waiting, and any
 that went quiet or stopped. The rest stop by themselves. A machine ended a moment after it
 took a job, or that stopped partway through one, still holds it as the server sees it: what
@@ -142,19 +164,15 @@ will do, looked up afresh each time: every kind of GPU the markets armed have fr
 `--max-price` is tried fastest first (the cheaper first where two are as fast) until one has a
 machine with room. A kind's price is ranked over how often machines of its kind have started
 (`startRates`: some cheap hosts never do), learned per market, card and class of host. A round
-settles only once its slowest grade is in: a pass is about 5 minutes on a 5090, 8 on a 4090
-and 17 on a 5070. A machine that runs curators takes grades as soon as its runs are done, and
-the first four to take one also measure the round's baseline, two passes. In Season 1 such a
-machine held a grade until the exam and was rented the cheapest a grade; in Season 2's first
-round two 5070s rented so set its last 35 minutes, for no less a pass than a 5090's (on Vast,
-about $0.04 a pass on either). `--cheapest` rents every machine by what a grade costs, its price over its speed:
-a 4090 at $0.89 an hour then comes before an A40 at $0.59, and an A4000 at $0.17 before
-both. What will do: NVIDIA, 12 GB or more (a machine that runs curators needs 10 and gives
-one 8), on a host with the season's floor of 16 GB of memory and 6 vCPUs a GPU, a driver
-new enough for CUDA 13 (the season's PyTorch, 2.15.0, is built only for 13.2), bf16
-(nothing older than Ampere), and a whole GPU, with a 100 GB disk (at 80, a machine that
-stayed up into another round and upgraded found less than the 60 GB a curator run keeps
-free, and only graded). `stet-cloud gpus` lists them as they stand.
+settles only once its slowest grade is in: a Season 3 `ERNIE-4.5-0.3B-Base-PT` pass (frozen bottom half, 65.5M tokens, deterministic CUDA kernels) is about 20 minutes
+on a 5090, 30 on a 4090 and 55 on a 3090. A machine that runs curators takes grades as soon as its runs are done, and
+the first two to take one also measure the round's baseline, two passes. `--cheapest` rents every machine by what a grade costs, its price over its speed.
+What will do: NVIDIA, `--min-gpu-memory` 12 GB or more for grading (peak grading VRAM is ≤10 GiB; `--min-curator-gpu-memory` 24 GB
+or more for running curators, which receive 22 GB VRAM inside the sandbox; unfilled 24 GB curator
+slots fall back to 12 GB+ graders whenever grades or farm tasks are waiting), fast enough to finish
+a two-pass baseline inside the server's 5-hour job lease (with a 30-minute margin), on a host with the season's floor of 24 GB of memory (`--min-ram`) and 6 vCPUs a GPU, a driver
+new enough for CUDA 13 (the season's PyTorch, 2.14.0, is built for CUDA 13), bf16
+(nothing older than Ampere), and a whole GPU, with a 120 GB disk for curator machines (above the 80 GB runner floor; 35 GB for grader-only machines). `stet-cloud gpus` lists them as they stand.
 `--gpu "RTX A5000,RTX 4090"` names them instead.
 
 `--cloud` is RunPod's: `any` (the default) takes the cheaper of its two clouds, which is
@@ -175,7 +193,7 @@ Wants=network-online.target
 After=network-online.target
 
 [Service]
-ExecStart=%h/.local/bin/stet-cloud scale --follow --cloud any --max 20 --max-price 1.10 --max-hourly 16 --daily-budget 60 --per-machine 1 --exam-after 5m --early 0
+ExecStart=%h/.local/bin/stet-cloud scale --follow --cloud any --max 6 --max-price 1.10 --max-hourly 4 --daily-budget 60 --per-machine 1 --exam-after 25m --early 0 --examiner-addr 127.0.0.1:8000
 Restart=always
 RestartSec=60
 
@@ -198,7 +216,9 @@ In `~/.config/stet-cloud` (`STET_CLOUD_HOME`):
 |---|---|
 | `workers/*.json` | The pool's keys, in stet's own key format. Back them up with the rest, or make new ones |
 | `fleet.json` | The pods rented now, and when each was last seen running |
-| `spent.jsonl` | Every pod that has ended: GPU, dollars an hour, start, end |
+| `examiner.json` | The active ephemeral 1× RTX 5090 examiner's ID, random Bearer key, pinned peer TLS certificate, and launch time (`0600`) |
+| `examiner-owner` | Persistent 12-hex deployment owner ID scoping Vast.ai examiner discovery and cleanup (`0600`) |
+| `spent.jsonl` | Every pod and examiner GPU that has ended: GPU, dollars an hour, start, end |
 | `curators.json` | Hosts, and CPU models, under the season's floor for running curators this week: none is rented to run them |
 | `machines.jsonl` | Each machine's story, an event a line: rented (for what, which round, when it should report, where, on what CPU), its market's phases, first asked for work, what it did, trouble, how it ended and why |
 | `history/looks-DAY.jsonl` | One line a look (a minute): all `/admin/work` said, the machines by state and market, $/h and today's spend, what the work wanted and what was rented and ended, the plan, every market's offers and how long they took, every machine tried and what came of it, every call to a market or the server timed, everything the fleet said, and the builds. Days before today are gzipped |

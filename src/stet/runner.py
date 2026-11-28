@@ -90,7 +90,16 @@ GPU_FREE_SHARE = 0.95
 DEFAULT_LIMITS = {"memory_gb": 48, "tasks": 4096, "scratch_gb": 16, "cores": 0, "gpu_memory_gb": 0, "required": False}
 # Inside the sandbox nothing can be downloaded. Libraries that would try are told so, and
 # fail at once with a message instead of waiting on a network that is not there.
-OFFLINE_ENV = {"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1", "HF_DATASETS_OFFLINE": "1", "HF_HUB_DISABLE_TELEMETRY": "1"}
+OFFLINE_ENV = {
+    "HF_HUB_OFFLINE": "1",
+    "TRANSFORMERS_OFFLINE": "1",
+    "HF_DATASETS_OFFLINE": "1",
+    "HF_HUB_DISABLE_TELEMETRY": "1",
+    "VLLM_NO_USAGE_STATS": "1",
+    "VLLM_USAGE_STATS_SERVER": "0",
+    "VLLM_LOGGING_LEVEL": "WARNING",
+    "VLLM_HOST_IP": "127.0.0.1",
+}
 
 
 def machine_limits(season) -> dict:
@@ -126,22 +135,36 @@ def pick_cpus(n: int) -> list[int]:
     return sorted(cpus + spare[: n - len(cpus)])  # fewer physical cores than n: hyperthreads make up the number
 
 
-_gpu_total: list[int] = []
+_gpu_total: dict[tuple[int, str, str, str], int] | list[int] = {}
 
 
-def gpu_total_bytes() -> int:
-    """How much memory PyTorch says the GPU has, or 0 with no usable GPU. Asked once."""
-    if not _gpu_total:
+def gpu_total_bytes(index: int = 0) -> int:
+    """How much memory PyTorch says GPU `index` has, or 0 with no usable GPU. Cached per device."""
+    if isinstance(_gpu_total, list):
+        if _gpu_total:
+            return int(_gpu_total[0])
+    else:
+        key = (
+            int(index),
+            str(os.environ.get("CUDA_VISIBLE_DEVICES") or ""),
+            str(os.environ.get("HIP_VISIBLE_DEVICES") or ""),
+            str(os.environ.get("CUDA_DEVICE_ORDER") or ""),
+        )
+        if key in _gpu_total:
+            return _gpu_total[key]
+    total = 0
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            total = int(torch.cuda.mem_get_info(index)[1])
+    except Exception:
         total = 0
-        try:
-            import torch
-
-            if torch.cuda.is_available():
-                total = int(torch.cuda.mem_get_info()[1])
-        except Exception:
-            total = 0
+    if isinstance(_gpu_total, list):
         _gpu_total.append(total)
-    return _gpu_total[0]
+    else:
+        _gpu_total[key] = total
+    return total
 
 
 def memory_free_bytes() -> int:
@@ -191,17 +214,43 @@ def one_gpu(environ=None, index: int = 0) -> dict[str, str]:
     """The environment that shows a curator one GPU: the one this machine grades on.
 
     Every curator is promised the same machine, and that machine has one GPU. A volunteer
-    with two cards would otherwise hand a curator both. What the operator set is kept,
-    cut down to its first device; with nothing set, device `index` is the one.
+    with two cards would otherwise hand a curator both. When CUDA_VISIBLE_DEVICES or
+    HIP_VISIBLE_DEVICES is set, the `index`-th listed device is selected so logical device
+    `cuda:<index>` maps to the same physical GPU; with nothing set, device `index` is selected.
     """
     environ = os.environ if environ is None else environ
-    out = {}
+    if index < 0:
+        raise HarnessError(f"invalid GPU index {index}")
+    out: dict[str, str] = {}
+    has_nonempty = False
+    empty_names: list[str] = []
     for name in ("CUDA_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES"):
-        value = str(environ.get(name) or "").strip()
-        if value:
-            out[name] = value.split(",")[0].strip()
-    if not out:
-        out = {"CUDA_VISIBLE_DEVICES": str(index), "HIP_VISIBLE_DEVICES": str(index)}
+        raw = environ.get(name)
+        if raw is None:
+            continue
+        value = str(raw).strip()
+        parts = [p.strip() for p in value.split(",") if p.strip()]
+        if not parts:
+            empty_names.append(name)
+            out[name] = ""
+            continue
+        if index >= len(parts):
+            raise HarnessError(
+                f"selected GPU index {index} is out of range for {name}={value!r} "
+                f"({len(parts)} visible device{'s' if len(parts) != 1 else ''})"
+            )
+        out[name] = parts[index]
+        has_nonempty = True
+    if not has_nonempty:
+        if empty_names:
+            if index > 0:
+                raise HarnessError(
+                    f"selected GPU index {index} is out of range for {empty_names[0]}='' (0 visible devices)"
+                )
+        else:
+            out = {"CUDA_VISIBLE_DEVICES": str(index), "HIP_VISIBLE_DEVICES": str(index)}
+    if order := str(environ.get("CUDA_DEVICE_ORDER") or "").strip():
+        out["CUDA_DEVICE_ORDER"] = order
     return out
 
 
@@ -279,8 +328,15 @@ def task_info(rnd: Round, scale: Scale, time_limit: float, machine: dict | None 
             "d_model": scale.d_model,
             "ctx": scale.ctx,
             "batch_size": scale.batch_size,
+            "micro_batch": scale.micro_batch or scale.batch_size,
+            "sft_steps": scale.sft_steps,
             "lr": scale.lr,
             "vocab_size": season.vocab_size,
+            **(
+                {"kind": season.raw["student"]["kind"], "repo": season.raw["student"]["repo"], "reset_frac": season.raw["student"].get("reset_frac", 0.0)}
+                if "student" in season.raw
+                else {}
+            ),
             **season.train_cfg,
         },
         "exam_pillars": season.exam_sources,
@@ -660,7 +716,7 @@ def run_editor(
     echo: bool = False,
     limits: dict | None = None,
     assets=(),
-    gpu: int = 0,
+    gpu: int | None = 0,
 ) -> EditRun:
     """Run `entry` from the bundle directory against a corpus.
 
@@ -751,20 +807,26 @@ def run_editor(
         "TMPDIR": "/tmp" if inside else str(scratch_dir),
         "HF_HOME": "/scratch/hf" if inside else str(scratch_dir / "hf"),
         "NUMBA_CACHE_DIR": "/scratch/numba" if inside else str(scratch_dir / "numba"),
+        "TRITON_CACHE_DIR": "/scratch/triton" if inside else str(scratch_dir / "triton"),
+        "VLLM_CACHE_ROOT": "/scratch/vllm" if inside else str(scratch_dir / "vllm"),
+        "VLLM_ENABLE_V1_MULTIPROCESSING": "0",
+        "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
+        "TORCHINDUCTOR_CACHE_DIR": "/scratch/inductor" if inside else str(scratch_dir / "inductor"),
         **OFFLINE_ENV,
         **paths,
     }
     if caged:
         env.update({"USER": "stet", "LOGNAME": "stet"})  # the curator's user has no name of its own
     # The same GPU memory on every machine: PyTorch is told what fraction of this card that is.
+    gpu_idx = 0 if gpu is None else gpu
     gpu_cap = float(limits["gpu_memory_gb"]) * 2**30
-    if gpu_cap > 0 and (total := gpu_total_bytes()) > 0:
+    if gpu_cap > 0 and (gpu is not None or inside or limits.get("required")) and (total := gpu_total_bytes(gpu_idx)) > 0:
         promised = int(min(gpu_cap, total))
         env["PYTORCH_ALLOC_CONF"] = f"per_process_memory_fraction:{min(1.0, gpu_cap / total):.6f}"
         env["STET_GPU_MEMORY_BYTES"] = str(promised)
         # The promise has to be there to be kept. If something else on this machine holds
         # the memory, a curator that runs out of it has not failed: this machine has.
-        free = gpu_free_bytes(gpu)
+        free = gpu_free_bytes(gpu_idx)
         if limits.get("required") and 0 <= free < promised * GPU_FREE_SHARE:
             raise HarnessError(
                 f"the GPU has {free / 2**30:.1f} GB of memory free and a curator is promised {promised / 2**30:.1f}: "
@@ -777,11 +839,13 @@ def run_editor(
             f"this machine has {free / 2**30:.1f} GB of memory free and a curator is promised {int(limits['memory_gb'])}: "
             "something else on this machine is using it"
         )
-    for k in ("LD_LIBRARY_PATH", "HSA_OVERRIDE_GFX_VERSION", "ROCM_PATH", "TORCH_BLAS_PREFER_HIPBLASLT"):
+    for k in ("LD_LIBRARY_PATH", "CUDA_DEVICE_ORDER", "HSA_OVERRIDE_GFX_VERSION", "ROCM_PATH", "TORCH_BLAS_PREFER_HIPBLASLT"):
         if k in os.environ:
             env[k] = os.environ[k]
     if inside or limits.get("required"):
-        env.update(one_gpu(index=gpu))  # the same single GPU on every machine
+        env.update(one_gpu(index=gpu_idx))  # the same single GPU on every machine
+    elif gpu is not None:
+        env.update(one_gpu(index=gpu))
     else:
         env.update({k: os.environ[k] for k in ("CUDA_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES") if k in os.environ})
 
@@ -1028,7 +1092,7 @@ def _outcome(status, reason, low_disk, out_dir, work, proc, seconds, time_limit,
     return EditRun(status, seconds, time_limit, proc.returncode, script, tail, sandbox, "", applied)
 
 
-def sandbox_selftest(sandbox: str = "bwrap") -> tuple[bool, str]:
+def sandbox_selftest(sandbox: str = "bwrap", gpu: int = 0) -> tuple[bool, str]:
     """Run a known-good curator in the sandbox. A verifier does this before taking edit jobs,
     so that a broken sandbox is never mistaken for a run of broken curators. The container
     sandbox is also tried from inside, by a curator that tries to get out of it."""
@@ -1050,7 +1114,7 @@ def sandbox_selftest(sandbox: str = "bwrap") -> tuple[bool, str]:
         (root / "bundle" / "curator.py").write_text("from stet.curator import Task\ntask = Task.from_env()\ntask.write([i for i, _ in task.corpus])\n")
         try:
             run = run_editor(root / "bundle", "python curator.py", Corpus(root / "corpus"), practice_round(season, 0), season.scale("nano"),
-                             root / "work", 60, sandbox=sandbox, limits={"required": True})  # fmt: skip
+                             root / "work", 60, sandbox=sandbox, limits={"required": True}, gpu=gpu)  # fmt: skip
         except HarnessError as e:
             return False, str(e)
         if run.status != "ok" or run.script is None or run.script.read_text().split() != ["0"]:
@@ -1059,7 +1123,7 @@ def sandbox_selftest(sandbox: str = "bwrap") -> tuple[bool, str]:
             (root / "bundle" / "curator.py").write_text(isolation_probe())
             try:
                 run = run_editor(root / "bundle", "python curator.py", Corpus(root / "corpus"), practice_round(season, 0), season.scale("nano"),
-                                 root / "work", 90, sandbox=sandbox, limits={"required": True})  # fmt: skip
+                                 root / "work", 90, sandbox=sandbox, limits={"required": True}, gpu=gpu)  # fmt: skip
             except HarnessError as e:
                 return False, str(e)
             if run.status != "ok" or run.script is None:
@@ -1071,19 +1135,19 @@ def sandbox_selftest(sandbox: str = "bwrap") -> tuple[bool, str]:
             (root / "bundle" / "curator.py").write_text(HARNESS_PROBE)
             try:
                 run = run_editor(root / "bundle", "python curator.py", Corpus(root / "corpus"), practice_round(season, 0), season.scale("nano"),
-                                 root / "work", 60, sandbox=sandbox, limits={"required": True})  # fmt: skip
+                                 root / "work", 60, sandbox=sandbox, limits={"required": True}, gpu=gpu)  # fmt: skip
             except HarnessError as e:
                 return False, str(e)
             if run.status != "ok" or run.script is None:
                 return False, f"a curator could not run the season's Node.js, or reach itself on loopback, inside the sandbox ({run.status}: {run.reason or ''} {run.log_tail.strip()[-400:]})"
-        if gpu_total_bytes() <= 0:
+        if gpu_total_bytes(gpu) <= 0:
             return True, ""
         # The same for the GPU and the season's libraries.
         want = int(machine_limits(season).get("cores") or 0)
         (root / "bundle" / "curator.py").write_text(GPU_PROBE.replace("WANT_CORES", str(want)))
         try:
             run = run_editor(root / "bundle", "python curator.py", Corpus(root / "corpus"), practice_round(season, 0), season.scale("nano"),
-                             root / "work", 180, sandbox=sandbox, limits={"required": True})  # fmt: skip
+                             root / "work", 180, sandbox=sandbox, limits={"required": True}, gpu=gpu)  # fmt: skip
         except HarnessError as e:
             return False, str(e)
         if run.status != "ok" or run.script is None:

@@ -52,7 +52,7 @@ func TestEachLookIsKept(t *testing.T) {
 	if len(l.Rounds) != 1 || l.Rounds[0].ID != "s1-o00001" || l.Rounds[0].RunsWanted != 8 || !strings.Contains(string(l.Work), `"runs_wanted":8`) {
 		t.Fatalf("the work: %+v %s", l.Rounds, l.Work)
 	}
-	if l.Target != 2 || l.Launch != 2 || l.LaunchRuns != 2 || l.Rented != 2 {
+	if l.Target != 4 || l.Launch != 2 || l.LaunchRuns != 2 || l.Rented != 2 {
 		t.Fatalf("decided %d to rent of %d wanted, %d to run curators; rented %d", l.Launch, l.Target, l.LaunchRuns, l.Rented)
 	}
 	if m := l.Markets["runpod"]; m == nil || m.Offers == 0 || m.Error != "" {

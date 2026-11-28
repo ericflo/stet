@@ -16,6 +16,7 @@ import gzip
 import hashlib
 import io
 import json
+import math
 import mmap
 import os
 import re
@@ -66,6 +67,7 @@ SET_ASIDE_FOR = 3 * 3600  # seconds a set-aside round is kept: longer than any j
 CACHE_KINDS = (
     ("rounds", "built rounds"),
     ("pool", "downloaded crawl files"),
+    ("models", "base student weights"),
     ("assets", "curators' model files"),
     ("verify", "a verifier's working files"),
     ("scripts", "edit scripts"),
@@ -304,9 +306,19 @@ def sweep_stale(directory: Path, pattern: str, now: float | None = None) -> int:
 
 
 def fetch(
-    urls: list[str], sha256: str, dest: Path, label: str = "", quiet: bool = False, max_bytes: int = FETCH_LIMIT_BYTES, gzipped: bool = False
+    urls: list[str],
+    sha256: str,
+    dest: Path,
+    label: str = "",
+    quiet: bool = False,
+    max_bytes: int = FETCH_LIMIT_BYTES,
+    gzipped: bool = False,
+    verify: bool = False,
 ) -> Path:
     """Download to `dest` unless it is already there, verifying the content hash.
+
+    With `verify=True` and a non-empty `sha256`, an existing cached file is also checked against
+    `sha256` on every load (raising `Mismatch` and removing the damaged copy if it differs).
 
     Stops at `max_bytes`: the hash is only known at the end, and a host that never stops
     sending must not fill the disk first.
@@ -315,6 +327,11 @@ def fetch(
     of its gzip stream before it is kept, so that a copy in the cache is a whole one.
     """
     if dest.exists():
+        if verify and sha256:
+            got = _sha256_file(dest)
+            if got != sha256:
+                dest.unlink(missing_ok=True)
+                raise Mismatch(f"cached {label or dest.name} sha256 mismatch: got {got}, want {sha256}")
         return dest
     dest.parent.mkdir(parents=True, exist_ok=True)
     last_err: Exception | None = None
@@ -750,11 +767,12 @@ def prune_verified(rnd: Round, keep: int = 3) -> int:
 
 # --- exam ---------------------------------------------------------------------------------
 
-def round_exam(rnd: Round, scale: Scale):
+def round_exam(rnd: Round, scale: Scale, *, hours: list[tuple[int, Path]] | None = None):
     """The round's exam: its items (stet.exam), in order. A practice round's has the season's
     fresh writing too once some has been harvested on this machine (`stet harvest`)."""
-    if hours := practice_hours(rnd):
-        return _practice(rnd, scale, hours)
+    resolved = practice_hours(rnd) if hours is None else hours
+    if resolved:
+        return _practice(rnd, scale, resolved)
     return _items(rnd)
 
 
@@ -782,29 +800,87 @@ def practice_hours(rnd: Round) -> list[tuple[int, Path]]:
     return [(h, held[h]) for h in choose_hours(rnd.seed, held, int(rnd.season.raw["exam"]["fresh"]["hours"]))]
 
 
-def practice_key(rnd: Round) -> str:
-    """What names the writing a practice round sits here: "" when it sits none. Harvesting more
-    hours changes which a round is given, and then its exam and its baseline are new ones."""
+_TRUTHY_ENV = frozenset({"1", "true", "yes", "on"})
+
+
+def practice_synthesize(rnd: Round) -> bool:
+    """Whether a local practice round with harvested hours synthesizes fresh reasoning items."""
+    if rnd.kind != "practice" or not rnd.season.raw["exam"].get("reasoning"):
+        return False
+    if os.environ.get("STET_SYNTHESIZE_PRACTICE", "").strip().lower() not in _TRUTHY_ENV:
+        return False
+    from .exam.fresh.reason import can_synthesize_locally
+
+    return can_synthesize_locally(rnd.season)
+
+
+def practice_key(rnd: Round, hours: list[tuple[int, Path]] | None = None) -> str:
+    """What names the writing (and synthesis mode) a practice round sits here: "" when it sits none.
+    Harvesting more hours or toggling `STET_SYNTHESIZE_PRACTICE` yields a distinct exam and baseline cache."""
     from .exam.examine import snapshot_name
 
-    hours = practice_hours(rnd)
-    return snapshot_name([hashlib.sha256(p.read_bytes()).hexdigest() for _, p in hours]) if hours else ""
+    resolved = practice_hours(rnd) if hours is None else hours
+    if not resolved:
+        return ""
+    base = snapshot_name([hashlib.sha256(p.read_bytes()).hexdigest() for _, p in resolved])
+    if rnd.season.raw["exam"].get("reasoning"):
+        if practice_synthesize(rnd):
+            from .exam.fresh.reason import REASONING_FILTER_VERSION
+
+            mode = f"synth:v{REASONING_FILTER_VERSION}"
+        else:
+            mode = "nosynth"
+        return hashlib.sha256(f"{base}:{mode}".encode()).hexdigest()
+    return base
 
 
 def _practice(rnd: Round, scale: Scale, hours: list[tuple[int, Path]]):
     """A practice round's exam with writing: made as the examiner makes an official round's,
     from hours harvested here, and kept beside the round's corpus, under the season's digest
-    and the hours' name: the season says which parts an exam has, so another season's file is
-    another exam."""
+    and the resolved exam mode/hours key: the season says which parts an exam has, so another
+    season's or synthesis mode's file is another exam."""
     from .exam.examine import assemble, pack_items
     from .exam.farm import unpack_items
 
-    path = round_dir(rnd, scale) / f"exam-practice-{rnd.season.digest[:8]}-{practice_key(rnd)[:16]}.jsonl.zst"
+    synth = practice_synthesize(rnd)
+    pk = practice_key(rnd, hours)
+    path = round_dir(rnd, scale) / f"exam-practice-{rnd.season.digest[:8]}-{pk[:16]}.jsonl.zst"
     try:
-        return unpack_items(path.read_bytes())
+        cached = unpack_items(path.read_bytes())
+        if synth:
+            from .exam.aggregate import REASONING_KINDS, part_of
+            from .exam.examine import _student_window
+            from .exam.fresh.reason import cached_item_passes_filter
+
+            r_cfg = rnd.season.raw["exam"].get("reasoning") or {}
+            max_ov = float(r_cfg.get("max_ngram_overlap", 0.50))
+            sw = _student_window(rnd.season, scale)
+            reas = [it for it in cached if part_of(it) in REASONING_KINDS]
+            if reas and all(cached_item_passes_filter(it, max_ngram_overlap=max_ov, student_window=sw) for it in reas):
+                return cached
+        else:
+            return cached
     except (OSError, ValueError, zstandard.ZstdError):
         pass
-    items = assemble(rnd, scale, hours, round_dir(rnd, scale) / "examine", log=lambda m: None, measure=False)[0]
+    items = assemble(
+        rnd,
+        scale,
+        hours,
+        round_dir(rnd, scale) / "examine",
+        log=lambda m: None,
+        measure=False,
+        synthesize=synth,
+        check_coverage=False,
+    )[0]
+    if not synth and rnd.season.raw["exam"].get("reasoning") and rnd.season.raw["exam"].get("practice_pack"):
+        from .exam.aggregate import REASONING_KINDS, part_of
+        from .exam.fresh.reason import load_practice_pack
+
+        pack = load_practice_pack(rnd.season, rnd.seed)
+        reas = [it for it in pack if part_of(it) in REASONING_KINDS]
+        if reas:
+            items = list(items) + reas
+    path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f"{path.name}.tmp{os.getpid()}")
     try:
         tmp.write_bytes(pack_items(items))
@@ -828,6 +904,92 @@ def exam_public_path(rnd: Round, digest: str) -> Path:
     return cache_dir() / "rounds" / rnd.id / f"exam-public-{digest[:16]}.jsonl.zst"
 
 
+def exam_shares_path(rnd: Round, digest: str) -> Path:
+    """Where an official round's recorded language shares are kept for local replays."""
+    return cache_dir() / "rounds" / rnd.id / f"exam-shares-{digest[:16]}.json"
+
+
+def normalize_round_shares(shares: object) -> dict[str, float] | None:
+    """Validate and normalize a language-share mapping (percent weights in [0, 100]).
+
+    Accepts valid non-empty mappings including already-recorded all-zero share tables so local
+    replays match server/aggregate.go (which falls back to otherShare per listed language) rather
+    than silently reverting to published crawl SHARES.
+    """
+    if not isinstance(shares, dict) or not shares:
+        return None
+    clean: dict[str, float] = {}
+    for k, v in shares.items():
+        if not isinstance(k, str) or not k or isinstance(v, bool):
+            return None
+        try:
+            fv = float(v)
+        except (TypeError, ValueError):
+            return None
+        if not (math.isfinite(fv) and 0.0 <= fv <= 100.0):
+            return None
+        clean[k] = fv
+    return clean or None
+
+
+def save_round_shares(rnd: Round, shares: dict[str, float]) -> None:
+    """Atomically cache an official round's measured corpus language shares."""
+    if rnd.kind != "official" or not rnd.exam_digest:
+        return
+    clean = normalize_round_shares(shares)
+    if not clean:
+        return
+    path = exam_shares_path(rnd, rnd.exam_digest)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.tmp{os.getpid()}")
+    try:
+        tmp.write_text(json.dumps(clean, sort_keys=True))
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def round_shares(rnd: Round) -> dict[str, float] | None:
+    """An official round's recorded language shares, or None when not recorded (falls back to SHARES)."""
+    if rnd.kind != "official" or not rnd.exam_digest:
+        return None
+    path = exam_shares_path(rnd, rnd.exam_digest)
+    try:
+        raw = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    return normalize_round_shares(raw)
+
+
+def round_exam_meta(rnd: Round) -> dict:
+    """Metadata about the local copy of an official round's exam, including whether local replay
+    is sitting only the openly licensed public subset of a settled round's exam."""
+    if rnd.kind != "official":
+        return {}
+    want = getattr(rnd, "exam_digest", "") or ""
+    if not want:
+        return {}
+    full = exam_items_path(rnd, want)
+    pub = exam_public_path(rnd, want)
+    if full.exists() or not pub.exists():
+        return {}
+    from .exam.examine import read_public_info
+
+    try:
+        raw = zstandard.ZstdDecompressor().decompress(pub.read_bytes(), max_output_size=1 << 30)
+        kept, total = read_public_info(raw, want)
+    except (OSError, ValueError, zstandard.ZstdError):
+        return {}
+    if total > len(kept):
+        return {
+            "public_subset": True,
+            "public_items": len(kept),
+            "total_items": total,
+            "withheld_items": total - len(kept),
+        }
+    return {}
+
+
 def _items(rnd: Round):
     """A round's exam items. An official round's are the ones the organisers posted
     after its draw (fetched by the grader beforehand: see client.fetch_exam); a practice or gym
@@ -836,11 +998,17 @@ def _items(rnd: Round):
     from .exam.items import Item
 
     cfg = rnd.season.raw["exam"]
-    if gen.VERSION != int(cfg["generator_version"]):
+    if int(cfg.get("generator_version", 0)) > gen.VERSION:
         raise RuntimeError(f"season {rnd.season.id} sets the exam's generators at version {cfg['generator_version']}, "
                            f"this copy of stet has {gen.VERSION}: upgrade stet")
     if rnd.kind != "official":
-        return gen.for_season(rnd.season, rnd.seed)
+        if int(cfg.get("per_corner", 0)) > 0:
+            generated = gen.for_season(rnd.season, rnd.seed)
+            if generated:
+                return generated
+        from .exam.fresh.reason import load_practice_pack
+
+        return load_practice_pack(rnd.season, rnd.seed)
     want = getattr(rnd, "exam_digest", "") or ""
     path = exam_items_path(rnd, want) if want else None
     if path is not None and not path.exists() and exam_public_path(rnd, want).exists():

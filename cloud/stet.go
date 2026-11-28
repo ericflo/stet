@@ -103,9 +103,9 @@ type Stet struct {
 	api  string
 	http *http.Client
 	now  func() time.Time
-	// cli is the stet the server hands out, and server the commit it runs, as it last said
-	// (/api/v1/season).
-	cli, server string
+	// cli is the stet the server hands out, server the commit it runs, and season the active
+	// season id, as it last said (/api/v1/season).
+	cli, server, season string
 }
 
 func newStet(api string) *Stet {
@@ -195,6 +195,11 @@ type Work struct {
 	FarmLongWaiting int `json:"farm_long_waiting"`
 	// When the organisers paused the rounds (0: they are not): none is drawn.
 	Paused int64 `json:"paused"`
+	// BackoffUntil is when on-demand automatic draws will resume after two empty rounds.
+	BackoffUntil int64 `json:"backoff_until,omitempty"`
+	// LeaseSeconds is the server's job lease (STET_LEASE), so the fleet refuses GPUs too slow
+	// to finish a two-pass baseline grade inside it.
+	LeaseSeconds int `json:"lease_seconds,omitempty"`
 	// The most grades one machine may hold before an exam (0 or 1: one), and how long after an
 	// exam is posted a grade still wanted is kept for the fastest card free: the server's own
 	// settings, which the fleet follows.
@@ -226,6 +231,20 @@ type WorkRound struct {
 	// next grade, training twice (Season 2: four a round). Nil from a server that does not
 	// say, where every machine's first grade of a round measured it (Season 1).
 	BaselinesWanted *int `json:"baselines_wanted,omitempty"`
+	// BaselineDisputed is true when established baselines disagree beyond tolerance and
+	// require a fresh independent machine that has not yet measured the round's baseline.
+	BaselineDisputed bool `json:"baseline_disputed,omitempty"`
+	// FreshGradersWanted counts fresh grading machines needed when grades are waiting that
+	// no currently idle organiser machine is eligible to take (e.g. a baseline or script tie).
+	// Non-nil 0 explicitly signals that an idle organiser machine already suffices.
+	FreshGradersWanted *int `json:"fresh_graders_wanted,omitempty"`
+}
+
+func (r WorkRound) freshGradersWanted() int {
+	if r.FreshGradersWanted == nil {
+		return 0
+	}
+	return *r.FreshGradersWanted
 }
 
 // Machine is one of the organisers' accounts as the server sees it.
@@ -432,6 +451,7 @@ func (s *Stet) vouched(ctx context.Context, op *Key) (map[string]Vouched, error)
 // site is the website whose installer a rented machine runs.
 func (s *Stet) site(ctx context.Context) (string, error) {
 	var out struct {
+		Season string `json:"season"`
 		Site   string `json:"site"`
 		Server string `json:"server"`
 		CLI    struct {
@@ -441,9 +461,23 @@ func (s *Stet) site(ctx context.Context) (string, error) {
 	if err := s.do(ctx, "GET", "/api/v1/season", nil, nil, &out); err != nil {
 		return "", err
 	}
-	s.cli, s.server = out.CLI.Version, out.Server
+	s.cli, s.server, s.season = out.CLI.Version, out.Server, out.Season
 	if out.Site == "" {
 		return "", errors.New("the Stet server did not say where its website is")
 	}
 	return strings.TrimRight(out.Site, "/"), nil
+}
+
+// seasonID asks /api/v1/season for the active season id once (empty if an older server omits it).
+func (s *Stet) seasonID(ctx context.Context) string {
+	if s.season != "" {
+		return s.season
+	}
+	var out struct {
+		Season string `json:"season"`
+	}
+	if s.do(ctx, "GET", "/api/v1/season", nil, nil, &out) == nil && out.Season != "" {
+		s.season = out.Season
+	}
+	return s.season
 }

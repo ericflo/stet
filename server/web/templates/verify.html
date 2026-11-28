@@ -47,8 +47,8 @@
     <aside class="stack side">
       <div class="panel">
         <div class="row head"><span class="k">You need</span></div>
-        <div class="row"><span class="v l">An NVIDIA or AMD GPU. Linux, or Windows with NVIDIA. Not a Mac: every grade has to use the same arithmetic.</span></div>
-        <div class="row"><span class="v l">10 GB of free disk, and a connection that can fetch about 1 GB a round.</span></div>
+        <div class="row"><span class="v l">An NVIDIA (CUDA) GPU (12 GB+ VRAM; peak grading memory is ≤10 GiB) on Linux or Windows. Official Season 3 grading is NVIDIA CUDA only (cross-verified across RTX 5090, 4090 and 3090); AMD ROCm and Apple Silicon remain supported for local practice runs.</span></div>
+        <div class="row"><span class="v l">25 GB of free disk (80 GB if also running curators), and a connection that can fetch about 1.5 GB a round.</span></div>
         <div class="row"><span class="v l">That is all. No sandbox, no GitHub account, no fast machine.</span></div>
       </div>
       <div class="panel" data-live>
@@ -66,8 +66,8 @@
   <div class="wrap">
     <div class="sec-head"><div><h2>What happens next</h2><p>You do nothing. This is what the machine does.</p></div></div>
     <ol class="timeline">
-      <li><span class="when">when a round is drawn</span><div><h3>It builds the round for itself</h3><p>It fetches the round's raw pages from Common Crawl, about a gigabyte, and checks the draw against the public randomness beacon. If it is asked to, it also trains the model once on the unedited pages: {{with .Season.Baselines.PerRound}}{{.}} {{end}}established machines a round are asked, and every machine that is not yet established. The median of what the established ones measure is the baseline every score is measured from.</p></div></li>
-      <li><span class="when">ten to twenty minutes each</span><div><h3>It grades the scripts it is handed</h3><p>One training run per script: about ten minutes on a fast GPU, nearer twenty on a mid-range one. You cannot choose which, and you are never handed your own entry's.</p></div></li>
+      <li><span class="when">when a round is drawn</span><div><h3>It builds the round for itself</h3><p>It fetches the round's raw pages from Common Crawl, about 1.5 gigabytes, and checks the draw against the public randomness beacon. If it is asked to, it also trains the model once on the unedited pages: {{with .Season.Baselines.PerRound}}{{.}} {{end}}established machines a round are asked, and every machine that is not yet established. The median of what the established ones measure is the baseline every score is measured from.</p></div></li>
+      <li><span class="when">about 20–55 minutes each</span><div><h3>It grades the scripts it is handed</h3><p>One training run per script (65.5M tokens on ERNIE-4.5-0.3B with frozen lower layers plus a 32-step multilingual fine-tuning probe): about 20 minutes on an RTX 5090, ~30 minutes on an RTX 4090, or ~55 minutes on an RTX 3090 (a first grade that also measures the round's baseline runs two trainings). You cannot choose which, and you are never handed your own entry's.</p></div></li>
       <li><span class="when">your first {{$d.Establish}} {{plural $d.Establish "grade" "grades"}}</span><div><h3>You are checked against others</h3><p>At first your grades are replications: compared with established verifiers' and published, deciding nothing. After {{$d.Establish}} that {{plural $d.Establish "agrees" "agree"}}{{if .Github}}, with GitHub linked,{{end}} you are <b>established</b>, and your grades make scores.</p></div></li>
       <li><span class="when">when the round settles</span><div><h3>Your work is published</h3><p>The round's page lists every grade: who, on what GPU, what they measured. You appear on the <a href="/verifiers">verifiers board</a> with the GPU time you have given, and your own entries are drawn ahead of other people's.</p></div></li>
     </ol>
@@ -78,8 +78,8 @@
   <div class="wrap">
     <div class="sec-head"><div><h2>What it costs you</h2></div></div>
     <div class="grid3">
-      <div class="card"><span class="eyebrow">GPU</span><h3>Busy during rounds, idle between</h3><p>A round is drawn when an entry is waiting, and every {{.Interval}} regardless. Each script is one training run of ten to twenty minutes. Stop it whenever you like.</p></div>
-      <div class="card"><span class="eyebrow">Disk and network</span><h3>About 1 GB a round</h3><p>It cleans up after itself: raw downloads go once a round is built, old rounds as new ones arrive, and anything unused for two weeks. <code>stet clean</code> deletes the lot. <a href="/docs/verifying#what-it-keeps-on-your-disk">What it keeps →</a></p></div>
+      <div class="card"><span class="eyebrow">GPU</span><h3>Busy during rounds, idle between</h3><p>{{if .OnDemandOnly}}A round is drawn on demand whenever an entry is waiting, and stays quiet between submissions.{{else}}A round is drawn when an entry is waiting, and every {{.Interval}} regardless.{{end}} Each script is one training run (~20 minutes on an RTX 5090, ~30 on a 4090, ~55 on a 3090; twice that when measuring the round's baseline). Stop it whenever you like.</p></div>
+      <div class="card"><span class="eyebrow">Disk and network</span><h3>About 1.5 GB a round</h3><p>It cleans up after itself: raw downloads go once a round is built, old rounds as new ones arrive, and anything unused for two weeks. <code>stet clean</code> deletes the lot. <a href="/docs/verifying#what-it-keeps-on-your-disk">What it keeps →</a></p></div>
       <div class="card"><span class="eyebrow">Risk</span><h3>It runs our trainer, on data</h3><p>An edit script is a list of document numbers and byte ranges. It is validated before use and nothing in it is executed.</p></div>
     </div>
   </div>

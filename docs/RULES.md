@@ -1,19 +1,27 @@
 # The rules
 
-Season 2 (rules version 5). These are the rules as the server and the harness enforce them. Where a number
+Season 3 (rules version 7). These are the rules as the server and the harness enforce them. Where a number
 is still being measured it says *provisional*, and [Experiments](EXPERIMENTS.md) says how it
 will be set.
 
 ## The idea
 
-A small language model, the **student**, is trained on raw web text for a fixed number of
-tokens and then sits an **exam**. The exam is made when the round is drawn: three quarters
-of it is human writing from three hours of the day before, which the draw picks, and one
-quarter is questions made from the round's seed. The model and the trainer never change. You change one thing: the data. You write a **curator**, a
-program that is handed raw web pages it has never seen and twenty minutes on one GPU. It
-answers with an **edit script**: what to keep, what to cut, and in what order to train on
-it. The better the student does on the exam than one trained on the raw pages, the better
-the curator.
+A fixed 0.3B language model, the **student** (`baidu/ERNIE-4.5-0.3B-Base-PT`, 18 × 1024, with
+its embeddings and lower half of layers frozen and its upper half reset from the round's
+seed), is trained on raw web text for a fixed number of tokens (65.5M at official `standard`
+scale), run through a short fixed multilingual fine-tuning probe, and then sits a 100%-fresh
+**exam**. The exam is made right after the round is drawn: the official score is 100% fresh
+harvest-derived reasoning (`explain`, `infer`, `synthesis`, one-third each) written once at
+the draw by the season's pinned teacher model (`thinkingmachines/Inkling-2-Mini@c9d02830`,
+`reasoning_effort=low`, `temperature=0`) from three hours of writing people published the day before, which the draw picks, and
+published in full at settlement. Four fresh human-written twin-context comprehension kinds
+from those same three hours are sat and shown beside each entry's score at `0%` weight as
+published diagnostic telemetry. There are zero static benchmarks, zero synthetic templates, and
+zero raw web perplexity. The model, the trainer, and the probe never change. You change one
+thing: the data. You write a **curator**, a program that is handed raw web pages it has never
+seen and twenty minutes on one 24 GB+ GPU. It answers with an **edit script**: what to keep,
+what to cut, and in what order to train on it. The better the student does on the exam than
+one trained on the raw pages, the better the curator.
 
 ## What you enter
 
@@ -30,20 +38,24 @@ A curator is a directory with a `stet.toml` and any program. `stet init` makes o
   `__pycache__/`, `runs/`, compiled Python and symbolic links are never packed;
   `stet submit --dry-run` lists exactly what is.
 - **Model weights go by reference.** A curator may use a model of its own: up to 32 files
-  and 4 GiB in all, named in `stet.toml` as `[[assets]]`. Each is a public file on Hugging
+  and 10 GiB in all, named in `stet.toml` as `[[assets]]`. Each is a public file on Hugging
   Face, pinned to a commit and named by its sha256. `stet asset add <owner>/<repository>`
   writes the tables. The files are fetched before the clock starts and are in place,
   read-only, when the curator runs. Nothing can be downloaded while it runs.
-- **Libraries are provided.** PyTorch, transformers, scikit-learn and some forty-five
-  others, and Node.js, at exact versions: see [the curator's machine](#the-curators-machine).
-  You bundle your own code and nothing else.
-- **It has to run on both makes of GPU.** Curators are run by volunteers, on NVIDIA and on
-  AMD. Use the GPU through PyTorch (`device="cuda"` is right on both) and it will. A run
-  that fails is never better than one that finishes: see [the score](#the-score).
+- **Libraries are provided.** PyTorch, transformers, flash-linear-attention, scikit-learn and
+  nearly fifty others, plus Node.js, at exact versions on every machine (`vLLM` and
+  `liger-kernel` are also preinstalled on NVIDIA Linux runners): see
+  [the curator's machine](#the-curators-machine). You bundle your own code and nothing else.
+- **Portable PyTorch code.** Official Season 3 runners and graders use NVIDIA CUDA Linux
+  machines (24 GB+ VRAM for runners, 12 GB+ for graders); AMD ROCm and Apple Silicon remain
+  supported for local practice (`stet run`), so use the GPU through PyTorch (`device="cuda"` is
+  right on both) and include a `transformers` fallback if you use `vLLM`. A run that fails is
+  never better than one that finishes: see [the score](#the-score).
 - **Try as much as you like on your own machine.** `stet run` is the leaderboard's own
   harness: nothing is uploaded and nothing is counted. Practice rounds never change, and
   every official round can be replayed once it has settled (`stet run --round <id>`).
-  A practice round's exam is the generated skills and, once you have run `stet harvest`,
+  A practice round's exam uses an openly licensed CC-BY-SA Wikipedia practice pack out of the
+  box (both twin-context comprehension and reasoning) and, once you have run `stet harvest`,
   the same kinds of recent writing an official exam has. A replay sits what its round published (see [the exam](#the-exam)), so its score
   differs from the round's.
 - Officially you may have 3 entries in play at once, waiting or qualifying. How often you
@@ -65,9 +77,10 @@ A curator is a directory with a `stet.toml` and any program. `stet init` makes o
 
 ## A round
 
-A round is drawn every 3 hours, on the clock, when a curator is waiting or on the board.
-Never two at once: a round starts only when the one before has settled, so one that runs
-late pushes the next back.
+Rounds are drawn **on demand** whenever a curator is waiting (or still qualifying) and a
+runner is around, with no idle clock rounds between submissions. Never two at once: a round
+starts only once the one before has settled, and the fleet scales down to zero whenever
+nothing is waiting.
 
 1. **Announce.** The server names, in advance, the drand round whose randomness will seed
    the draw and the Common Crawl crawl it will draw from. Verifiers keep a log of these
@@ -75,16 +88,21 @@ late pushes the next back.
    announced less than six minutes ahead, and a draw that is moved is announced again the
    same way, for a time no round was ever announced for before.
 2. **Draw.** The seed is `sha256(season, round number, drand round, drand randomness,
-   crawl)`. It picks the corpus files, the order of the documents, the exam's generated
-   questions and the student's initial weights. Nobody can know or steer any of that beforehand,
+   crawl)`. It picks the corpus files, the order of the documents, which three fresh hours
+   make the exam, and the student's initial weights. Nobody can know or steer any of that beforehand,
    organisers included. Draws happen only at fixed ten-minute marks, so the organisers
    cannot pick a favourable drand round either.
 3. **Edit.** Two volunteers each run every curator, in a sandbox, with a time limit. Each
    run writes an edit script.
-4. **Exam.** The round's exam is made at the draw. The organisers' examiner harvests what
-   people publish, every hour of the clock, and tells the server each harvest's hash as it is
-   made. The draw's seed picks three of the day's hours, and the exam is made from exactly
-   those and posted with its hash (see [the exam](#the-exam)). No round waits for its exam.
+4. **Exam.** The round's exam is built right after the draw (typically ~16–18 minutes cold using
+   an ephemeral 1× RTX 5090 `Inkling-2-Mini` examiner managed by `stet-cloud`, while curators run
+   and graders can begin training; bounded client wait `STET_EXAM_WAIT_SECONDS`, default `90m`). The organisers'
+   examiner harvests what people publish, every hour of the clock, and tells the server each
+   harvest's hash as it is made. The draw's seed picks three of the day's hours, and the exam
+   is made from exactly those and posted with its hash (see [the exam](#the-exam)). If an
+   un-examined round cannot have its exam built (for instance during an extended source outage),
+   the organisers can cancel it (`POST /api/v1/admin/rounds/{id}/cancel`) and the server
+   auto-cancels it after `STET_EXAM_TIMEOUT` (default `6h`) with nothing held against any entry.
 5. **Grade.** Other volunteers train the student on what each script says, as soon as it
    is written, and have it sit the exam. Grading runs no entrant code: a
    script is plain data.
@@ -103,17 +121,19 @@ entries takes longer, and the next is drawn when it has settled.
 
 Rounds never overlap. If one is still being graded when the next is due, the next is
 drawn at the first ten-minute mark that is at least six minutes after it settles. A round
-takes as long as its curators and its trainings do: about an hour from draw to settlement
-with enough machines. Season 1's rounds took two and a half, two of them waiting for the exam.
+takes as long as its curators and its trainings do: typically 1.5 to 2.5 hours from draw
+to settlement on a 6-GPU fleet (each standard training takes ~20 minutes on an RTX 5090,
+~30 minutes on an RTX 4090, or ~55 minutes on an RTX 3090, and baseline graders train two
+passes). Season 1's rounds took two and a half hours, two of them waiting for the exam.
 
 ## The corpus
 
 The newest published Common Crawl crawl at the time of the draw, as full-page text: every
 language, with menus, cookie banners, footers, shop listings, spam and duplicates
 alongside real prose. A round's corpus is a seeded sample of it: at the official scale
-about 335,000 pages and 2.5 GB, some six times more text than the student is trained on.
-Micro and large rounds have the same ratio, and the same time for each page.
-Your curator has to choose.
+about 500,000 pages and 3.8 GB (~1.1B tokens), roughly 17× more text than the 65.5M-token
+student budget. Micro and large rounds keep a similar excess of raw text over the student
+budget. Your curator has to choose.
 
 Nothing is removed from the corpus for the exam's sake: the exam did not exist yet. Fresh
 text that the corpus happens to hold already is dropped from the exam instead.
@@ -153,22 +173,23 @@ One line per output document. Line order is training order: the trainer does not
 
 ## The exam
 
-**Three quarters of the score is writing people published. One quarter is skills.** Inside
-each, every row below counts the same.
+**100% fresh. The official score is 100% fresh harvest-derived reasoning (`explain`, `infer`,
+`synthesis`, one-third each) from three hours of writing people published the day before the
+draw. Four fresh human-written twin-context comprehension kinds from those exact same three
+hours are sat and shown beside the score at `0%` weight as published diagnostic telemetry until
+a human-written measure passes DataDecide.** There are zero static benchmarks, zero synthetic
+templates, and zero raw web perplexity. Every part is measured in unified **bits per byte**.
+Inside each group, every row below counts the same.
 
 | | | What it asks | Where it comes from |
 |---|---|---|---|
-| Writing (75%) | Reference | Encyclopedia text | New and extended Wikipedia articles |
-| | News | News reports | Common Crawl's news crawl |
-| | Technical | Issues, pull requests, release notes, patches | GitHub, the kernel's mailing lists |
-| | Conversation | Posts and replies | Hacker News, Lemmy, forums, Bluesky, Mastodon, Wikipedia's talk pages |
-| Skills (25%) | Agents | What a tool says back, in a session at a shell | Generated |
-| | Reading | Taking an answer, or a new rule, from the context | Generated |
-| | Logic | What follows from what is given | Generated |
-| | Grammar | The right sentence of two | Generated |
-| | Numbers | Arithmetic, units, word problems and algebra, each after a few worked examples | Generated |
-| | Programs | What a small algorithm returns (a list sorted, a letter counted), after a few worked examples | Generated |
-| | Knowledge | Facts the web knows, in ten languages | Generated: the seed picks from a public list of facts |
+| **Reasoning (100% of score)** | Explain | Multi-sentence causal and mechanism explanation in the excerpt's own language | Written once at draw (`temp=0`, `effort=low`, pinned `thinkingmachines/Inkling-2-Mini@c9d02830`) from the 3 fresh hours; published in full at settlement |
+| | Infer | Multi-sentence analytical implications and trade-offs in the excerpt's own language | Written once at draw from the 3 fresh hours; published in full at settlement |
+| | Synthesis | Declarative prose synthesis of the excerpt's main point and rationale (zero Q/A syntax) | Written once at draw from the 3 fresh hours; published in full at settlement |
+| **Comprehension (0% diagnostic)** | Reference | Same continuation under real vs wrong openings of encyclopedia articles (same source & language) | New and extended Wikipedia articles |
+| | News | Same continuation under real vs wrong openings of fresh news reports (same source & language) | Common Crawl's news crawl |
+| | Technical | Same continuation under real vs wrong openings of issues, PRs, release notes and patches | GitHub, the kernel's mailing lists (`code_share = 0.15`, per-source capped) |
+| | Conversation | Same continuation under real vs wrong openings of posts and replies | Hacker News, Lemmy, forums, Bluesky, Mastodon, Wikipedia's talk pages |
 
 **The writing** is what people published in three hours of the day before the draw. The
 examiner harvests every hour of the clock an hour after it ends, keeping a sample chosen
@@ -184,38 +205,79 @@ Inside a kind of writing, every language gets its share of the round's corpus, a
 sources take turns. No source needs a key or an account. Writing the round's corpus already
 holds is dropped from the exam.
 
-**The skills** are made from the round's seed, so nobody can know them before the draw
-either. Every answer but a fact follows from what the item itself shows. The facts are
-well-known ones (a country's capital, who wrote a book), which the seed picks from a public
-list: a student knows them only from pages that say them.
+**The reasoning items** (`explain`, `infer`, `synthesis`) are written once at the draw from
+a stratified sample of those exact same three fresh hours by the season's pinned teacher model
+(`thinkingmachines/Inkling-2-Mini@c9d02830`, `reasoning_effort=low`, greedy `temperature=0`), using six varied natural wrappers (`synthesis`
+has no `?` or `Q:/A:` markers), a `<50%` 5-gram verbatim-copying filter against both the excerpt
+and the prompt lead-in, and response language/completeness checks. Because floating-point GPU
+inference at `temperature=0` is not guaranteed bit-reproducible across different hardware or batch
+sizes, the examiner publishes the exact generated teacher prompt, response, wrapper ID, and
+source-excerpt SHA-256 for every reasoning item when the round settles. Any item whose excerpt
+or response matches the round's training corpus is dropped.
 
-**Everything on the exam counts.** The season names every part of the exam: those in the
-table, and no other. Each part was measured before the season; a part that did not tell
-curators apart, or whose order did not hold for a larger student, is not on the exam. A part
-is in the score or it is not on the exam at all: nothing is sat that the score leaves out,
-and nothing on the exam counts for nothing. Numbers and programs are asked only after a few
-worked examples of the same task. Asked cold, a student this size is too near chance for
-curators to differ: Season 1 counted such questions, and two trainings of the same data
-disagreed about them more than two curators did.
+**Only validated parts decide the score.** The season names every part of the exam: those in
+the table, and no other. Before the season, every part is validated across multiple disjoint
+harvest draws for multi-seed stability, resistance to QA-spam, spliced Q&A, perplexity pruning,
+and over-filtering, and agreement with published 1B English pretraining rankings (DataDecide).
+In Season 3, the **English subset** (`420` items across three disjoint draws) of the three-pillar
+reasoning score (`explain`, `infer`, `synthesis`) generated by pinned
+`thinkingmachines/Inkling-2-Mini@c9d02830` (`reasoning_effort=low`) scores **`52/66`, `53/66`,
+and `52/66` against English DataDecide 1B (pooled `53/66` = `80.3%`, 95% CI `[49, 55]`, `2pt+`
+`27/31`, Spearman `ρ = +0.804` `[+0.699, +0.832]`, Top-1 `dclm-baseline-qc-7p-fw2` with `0.14pp`
+shortfall)** while eliminating the `FineWeb-Edu` `#1` textbook lean (`#5–#7`, pooled `#6` vs true
+`#7`, `0%` #1 rate vs `100%` under `Qwen3-8B`) and shrinking `adv_ppl_qwen06b − fineweb2` by
+`0.019 bpb` (and pushing cross-family `adv_ppl_ernie03b` below `fineweb2`). Because DataDecide is
+an English-only downstream target, scoring those 12 English-focused DataDecide recipes on all
+`1,854` multilingual reasoning items under official crawl language weights yields `25/66` (`25/66`,
+`26/66`, `24/66`; `9/31` on `2pt+`, `ρ = −0.294`, ranking multilingual `dolma1_7` `#1`); the
+`80.3%` agreement applies specifically to the English reasoning subset, and validating downstream
+rankings of the full multilingual leaderboard requires a multilingual downstream target. The three
+reasoning pillars carry **100% of the official score**, while the four human-written twin-context
+pillars (`24/66` and `34/66` on English DataDecide, and blind to missing non-English training data)
+carry **0% weight** and are sat and published alongside the score purely as diagnostic telemetry
+until a human-written measure passes DataDecide (see [Experiments](EXPERIMENTS.md) for full CIs and
+known CJK / mimic / rotated-excerpt trade-offs).
 
-**The score of an item** is how likely the student finds the right text, in bits per byte:
-a passage, an answer given its question, or the right sentence of a pair. An item's bits are
-never put over fewer than 16 bytes, so a one-word answer counts for less than a sentence. An
-answer or a passage longer than the student's window is scored whole, a window at a time.
-The exam's writing has the white space of the crawl's own text: one space between words,
-one line end between lines, no empty lines and no tabs.
+**The score of an item** is measured in **bits per byte** everywhere:
+- on fresh comprehension (`kind="context"`), each article is split cleanly on a sentence or
+  paragraph boundary into an opening and a continuation, and the exact same continuation is
+  scored under its real opening minus the mean of up to three length-matched wrong openings from
+  the exact same source, language, and boundary class — so surface style and unconditional
+  passage ease cancel identically;
+- on fresh harvest-derived reasoning (`kind="answer"`), how likely the student finds the
+  multi-sentence explanation, inference, or synthesis given the excerpt and prompt (see
+  [Experiments](EXPERIMENTS.md) for the rotated-excerpt control showing that while rotating excerpts
+  raises absolute mean NLL (`+0.180–+0.190 bpb` higher NLL under `Inkling-2-Mini`, `~0.14 bpb` under the
+  prior `Qwen3-8B` baseline), between-curator differences at `65.5M` tokens on frozen-bottom
+  `ERNIE-4.5-0.3B` still survive excerpt rotation at `107.8%–118.0%` on `fineweb2` and therefore remain driven
+  primarily by prompt-conditioned multilingual answer-prose modeling rather than excerpt-grounded
+  deduction).
+An item's bits are never put over fewer than 16 bytes, so a short answer never dominates a
+paragraph. The exam's writing has the white space of the crawl's own text: one space
+between words, one line end between lines, no empty lines and no tabs.
 
-**The exam's score** is three quarters the mean of the kinds of writing and one quarter the
-mean of the skills. A kind missing from a round gives its share to the others of its own
-group. Inside each, every language counts by its share of the round's corpus, then every
-format. No share rests on one or two items: a language or a format with fewer than eight
-items counts in proportion, and a part's small languages are measured together. A gain on
-an item is clipped to a few robust widths, so that no handful of items decides anything.
+**The exam's score** is the mean of the three fresh reasoning kinds (`explain`, `infer`,
+`synthesis`, one-third each; `reasoning = 1.0`, `comprehension = 0.0`). The four fresh
+human-written twin-context comprehension kinds are scored individually and displayed beside
+each entry's score on the round and curator pages for diagnostics without entering the score.
+Any kind that has fewer than the season's minimum (`min_pillar_items = 20`) items after
+decontamination is omitted from that round and its share goes to the remaining kinds of its
+own group (the round page lists omitted kinds); an exam is refused only if a scored group
+(`reasoning`) has zero surviving items.
+Inside each kind, every language counts by its share of the round's corpus, then every format.
+No share rests on one or two items: a language or a format with fewer than eight items counts in
+proportion, and a part's small languages are pooled into `"other"` with each item weighted by
+its own language's crawl share and trimmed symmetrically on the same 10% weight tails as major
+languages (so neither tiny micro-languages nor single extreme outliers can sway the pooled cell).
+A gain on an item is clipped to a few robust widths, so that no handful of items decides anything.
 
-When the round settles, its exam is published: every generated question and Wikipedia's
-text whole, and for every other source the item's source, its id there and the item's
-hash. Anyone can check those items at the source. So is every student's score on every
-item (`/api/v1/rounds/<id>/scores`): anyone can work every gain out again.
+When the round settles, its exam is published: openly licensed Wikipedia items whole, the
+organisers' generated teacher prompt, answer, wrapper ID, and source-excerpt hash for every
+reasoning item (withholding only third-party source excerpts, so anyone who fetches the source
+excerpt can reconstruct and verify the exact `Item.id`), and for every other comprehension
+source the item's source, its id there and the item's hash. Anyone can check those items at
+the source. So is every student's score on every item
+(`/api/v1/rounds/<id>/scores`): anyone can work every gain out again.
 
 **Nobody knows it in advance**, the organisers included. So no exam is kept secret, and
 none needs to be. Until the round settles, its items are served only to the machines
@@ -223,17 +285,21 @@ grading it.
 
 ## The student
 
-| | Layers × width | Context | Training budget | Edit limit |
-|---|---|---|---|---|
-| nano | 4 × 192 | 256 | 8M tokens | 120 s |
-| micro | 6 × 384 | 512 | 40M tokens | 300 s |
-| **standard (official)** | 8 × 512 | 512 | 160M tokens | 1,200 s |
-| large (finals) | 10 × 640 | 512 | 640M tokens | 4,800 s |
+| | Architecture | Context | Training budget | Edit limit | SFT probe |
+|---|---|---|---|---|---|
+| nano | `ERNIE-4.5-0.3B-Base-PT` (18 × 1024, bottom half frozen, top half reset) | 1024 | 1.0M tokens | 120 s | 8 steps |
+| micro | `ERNIE-4.5-0.3B-Base-PT` (18 × 1024, bottom half frozen, top half reset) | 1024 | 8.4M tokens | 300 s | 16 steps |
+| **standard (official)** | `ERNIE-4.5-0.3B-Base-PT` (18 × 1024, bottom half frozen, top half reset) | 1024 | 65.5M tokens | 1,200 s | 32 steps |
+| large (finals) | `ERNIE-4.5-0.3B-Base-PT` (18 × 1024, bottom half frozen, top half reset) | 1024 | 131M tokens | 4,800 s | 32 steps |
 
-An ordinary GPT with an 8,192-token vocabulary trained on the crawl alone, AdamW, warm-up and
-cosine decay. Training is counted in tokens, never seconds, so every machine does the same
-work. Rounds use the standard student because the smaller ones rank curators differently
-from the larger ones: [the measurements](research/exam-first-principles.md#75-scale-rounds-at-the-standard-student-finals-at-the-large-one-decide-the-season).
+Pinned `baidu/ERNIE-4.5-0.3B-Base-PT` weights (Apache 2.0, 103,424-token multilingual
+vocabulary) with its embeddings and lower 9 transformer layers frozen and its upper 9 layers
+deterministically re-initialized from the round's seed (`127.4M` trainable parameters; peak
+grading VRAM ≤10 GiB, fitting 12 GB+ GPUs). Trained without shuffling in the curator's exact
+script order using AdamW with cosine decay, then given a short fixed 1-epoch multilingual
+fine-tuning probe (512 open, commercial-permissive examples across 11 languages) so the
+student's acquired representations read out cleanly on comprehension and reasoning tasks.
+Training is counted in tokens, never seconds, so every machine does the same work.
 
 ## The curator's machine
 
@@ -242,9 +308,9 @@ Curators are run on volunteers' machines, which differ. What a curator is given 
 | | |
 |---|---|
 | CPU | 6 cores |
-| Memory | 12 GB |
-| GPU | one, NVIDIA or AMD, with 8 GB of its memory |
-| Scratch space | 8 GB at `/scratch`, held in memory, so it comes out of the 12 |
+| Memory | 20 GB |
+| GPU | one NVIDIA (CUDA) GPU, with 22 GB of its memory |
+| Scratch space | 12 GB at `/scratch`, held in memory, so it comes out of the 20 |
 | Network | none, but loopback (`127.0.0.1`) works between the curator's own processes |
 | Software | Python 3.13, Node.js 24 and the season's libraries |
 
@@ -277,7 +343,7 @@ Curators are run on volunteers' machines, which differ. What a curator is given 
 
   | | bubblewrap | the container sandbox |
   |---|---|---|
-  | Scratch space | in memory, part of the 12 GB | on disk, 8 GB, apart from the 12 GB |
+  | Scratch space | in memory, part of the 20 GB | on disk, 12 GB, apart from the 20 GB |
   | Loopback | TCP and UDP | TCP only, to ports 1024 and up |
   | The machine's other processes | not visible | listed in `/proc`, not readable |
   | `/tmp`, `/dev/shm` | the curator's own, 2 GB each | the machine's, 2 GB each, emptied of the curator's files after it |
@@ -295,9 +361,9 @@ where other entries did run, are taken to be the entry's doing, and it stops bei
 
 - **Gain** = how much better your script's student does on the exam than the unedited
   corpus's, on the same round with the same initial weights, in bits per byte. The unedited
-  student is trained four times a round, by four different established graders, and its
-  score on each item is the mean of theirs. The unedited corpus is every document in the
-  order it was drawn.
+  student is trained twice a round (`baselines.per_round = 2`), by two different established
+  graders, and its score on each item is the median of theirs. The unedited corpus is every
+  document in the order it was drawn.
 - **An entry's gain for a round is taken over its runs**: the mean of two, or the median
   of three. Two runs of a curator that uses neither the clock nor a GPU write the same
   script, and then there is one number.
@@ -335,10 +401,10 @@ may hold one too. That is how you beat your own record.
 
 The organisers' reference curators are the one exception to "one per entrant": their own
 three (`stet/identity`, `stet/english`, `stet/tidy`), four that rebuild published recipes
-(`stet/heuristic`, `stet/dclm`, `stet/fineweb-edu`, `stet/fineweb2`), and `stet/mimic`,
-which keeps the pages that look most like the exam and shows what that buys. They are yardsticks:
+(`stet/heuristic`, `stet/dclm`, `stet/fineweb-edu`, `stet/fineweb2`), `stet/mimic`, and
+`stet/reader` (a 0.6B `vLLM` multilingual quality rater). They are yardsticks:
 each holds a place of its own beside the eight, whatever its rating, and takes none from an
-entrant's curator. Two of them, `stet/fineweb2` and `stet/dclm`, run in every round and tie
+entrant's curator. Two of them, `stet/fineweb2` and `stet/reader`, run in every round and tie
 the rounds together; each of the others runs in one round in eight, in turn, and keeps its
 rating from the rounds it ran. Any curator but the record holder that has stopped producing
 valid scripts leaves the ladder, a reference too.
@@ -435,9 +501,7 @@ are graded by **verifiers**: anyone who runs `stet verify`.
 - **Someone has to be first.** The organisers' own accounts start out established. They
   are marked on the verifiers page, their work is checked like anyone's, and the season
   does not need them once other people are established.
-- **Each entry is run twice,** by two different established verifiers. A machine asking
-  for work is handed first an entry whose other run was on the other make of GPU, so the
-  two runs are on NVIDIA and AMD when machines of both are asking. Nobody runs their own entry, runs one entry twice, or
+- **Each entry is run twice,** by two different established verifiers. Nobody runs their own entry, runs one entry twice, or
   runs an entry after being shown a script of it. Scripts are sealed until the round
   settles, so the second runner cannot copy the first: a script is served only to the
   verifier handed it to grade, and a verifier running an entry holds no other job.
@@ -448,27 +512,40 @@ are graded by **verifiers**: anyone who runs `stet verify`.
   from the first round a second established verifier is around for.
 - **Each script is graded by someone other than the verifier who wrote it.** Its gain is
   the median of the established verifiers' grades, each against the round's unedited
-  student. Two honest machines agree to within a small tolerance *(provisional: 0.025 bits
-  per byte)*. The first four established graders of a round are each asked to train the
-  unedited student as well; the rest are not, and their grades are measured against the
-  mean of those four. (Season 1 trained one on every machine: a third of all its
-  trainings.) A measurement of the unedited student must agree with the
-  others' to within 0.04 bits per byte, or its grade is turned away and listed with the
-  round. A machine that is not yet established always trains its own: that is how it is
-  checked. When two established grades of a script
-  differ by more than that, a third is taken. When both runs write the same script, byte
-  for byte, it is nobody's own and either runner may grade it: neither could have made
-  it up. Established verifiers who come free before the exam is posted grade its
-  scripts again while it is made, up to four grades of each, and those count too. One
-  that has trained its grade before the exam may take another a score waits for, up to
-  three, while one more training still fits before the exam is due. After
-  the exam only the grades a score still waits for are handed out, since any other
-  would hold the round back for as long as it trained, and for its first two minutes they
-  go to the fastest machines that are free. The round settles as soon as those under way
-  are in.
-- **The entry's gain is the mean of its two runs.** When they differ by more than 0.04
-  bits per byte *(provisional)*, or one failed and the other did not, a third verifier runs the
-  curator and the median of the three is the score.
+  student. Two honest NVIDIA machines agree to within a small tolerance *(calibrated at
+  0.012 bits per byte from `standard`-scale RTX 5090 / 4090 / 3090 cross-architecture runs,
+  with `large` tolerances extrapolated from `standard`; see
+  [Experiments](EXPERIMENTS.md))*. The first two established graders of a round
+  (`baselines.per_round = 2`) are each asked to train the unedited student as well; the rest
+  are not, and their grades are measured against the median of theirs. (Season 1 trained one
+  on every machine: a third of all its trainings.) A measurement of the unedited student must
+  agree with the others' to within 0.015 bits per byte, or its grade is turned away and
+  listed with the round; if two baselines disagree by more than 0.015 bits per byte (or
+  fewer than two of three or more agree within 0.015 of their median), the round requests a
+  third independent baseline and closes unrated (no curator penalty) if unresolved. A machine that is not yet established always trains its own: that is
+  how it is checked. When two established grades of a script differ by more than the grade
+  tolerance, or disagree on the script's tokenized stream digest (`tokens_sha256`), a deciding
+  grade is taken; if a tokenized-stream disagreement remains unresolved without a majority
+  when time runs out, the entry closes unrated (`void`, no curator penalty). When both runs
+  write the same script, byte for byte, it is
+  nobody's own and either runner may grade it: neither could have made it up. Established
+  verifiers who come free before the exam is posted grade its scripts again while it is made,
+  up to four grades of each, and those count too. One that has trained its grade before the
+  exam may take another a score waits for, up to three, while one more training still fits
+  before the exam is due. After the exam only the grades a score still waits for are handed
+  out, since any other would hold the round back for as long as it trained, and for its first
+  two minutes they go to the fastest machines that are free. The round settles as soon as
+  those under way are in.
+- **The entry's gain is the mean of its two runs.** When they differ by more than 0.015
+  bits per byte, or one failed and the other did not, a third verifier runs the curator and
+  the median of the three is the score.
+- **Transient training divergence is a grader fault, not an entry failure.** Script validity
+  is decided before training. If training or the SFT probe produces a non-finite loss on a
+  grader, the grader retries once on a fresh GPU state; if it still diverges, it hands the
+  grade job back so a second machine grades the script rather than marking the entry invalid.
+  If every machine that tries to grade a script fails training, the round page reports *"The
+  training failed"* and the round is void (`unattended`) for that entry rather than a strike
+  against the curator.
 - **A round does not wait for people who are not there.** If nobody who is around (at
   work on a job, or has asked for one in the last ten minutes) could give an entry its
   second run, it settles with one. Every entry's page shows its runs, who made each, on what GPU, each run's
@@ -494,15 +571,18 @@ are graded by **verifiers**: anyone who runs `stet verify`.
   grade it is published as unresolved and counts against nobody.
 - A verifier whose job runs out of time unreported is offered no work for a day. A round
   waits for an established verifier that holds a job until the job is reported, handed
-  back or out of time, which is three hours at most. For anyone else whose grades have
+  back or out of time, which is five hours at most. For anyone else whose grades have
   agreed before it waits up to 45 minutes, and for an account with no such grade it does
   not wait.
 - Agreeing about an entry that left the corpus as it was earns no standing. Its score is
-  the unedited student's, which four machines a round measure anyway. Nor does agreeing that
+  the unedited student's, which two machines a round measure anyway. Nor does agreeing that
   a script is invalid, which is decided before anything is trained.
-- Running curators needs Linux, the sandbox, the season's libraries and a machine at or
-  above the floor. Grading needs an NVIDIA (CUDA) or AMD (ROCm) GPU and the season's
-  PyTorch, so that every grade uses the same arithmetic.
+- Official Season 3 verifying (both grading and running curators) requires an NVIDIA (CUDA) GPU
+  (`grade_backends: ["cuda"]`): 12 GB+ VRAM and the season's PyTorch for grading, plus Linux,
+  the sandbox, the season's libraries, and a 24 GB+ NVIDIA GPU at or above the floor for running
+  curators, so every official grade uses cross-verified CUDA arithmetic. AMD ROCm and Apple
+  Silicon remain supported for local practice (`stet run`), while the organisers' automated
+  ephemeral 1× RTX 5090 examiner (managed by `stet-cloud`) synthesizes the fresh reasoning exam.
 
 More in [Verifying](VERIFYING.md).
 
@@ -537,13 +617,18 @@ script with `stet score`.
 - **The first established accounts.** Theirs, and so which grades the first volunteers
   are compared with.
 - **Assigning work at random.** The server chooses who runs and who grades what.
-- **Harvesting honestly.** The examiner harvests every hour by published code and tells
-  the server each harvest's hash before any round can be given it (`/api/v1/harvests`); the
-  draw then picks the hours, so no harvest can be made to suit a round or a curator. Anyone
-  can make the generated questions again from the seed, check which hours the seed picks,
-  and check every fresh item against its source once the round settles. What they could do
-  and nobody would see: leave a source out of an hour's harvest. They tune nothing of their
-  own reference curators on a round's exam before it settles.
+- **Harvesting and building the exam honestly.** The examiner harvests every hour by published
+  code and tells the server each harvest's hash before any round can be given it
+  (`/api/v1/harvests`); the draw then picks the hours, so no harvest can be made to suit a round
+  or a curator. For the scored reasoning items, the examiner runs the pinned teacher model
+  (`thinkingmachines/Inkling-2-Mini@c9d02830`, `reasoning_effort=low`, `temperature=0`) once at the draw; because GPU generation is not
+  guaranteed bit-reproducible across different hardware or batch sizes, every generated teacher
+  prompt, response, wrapper ID, and source-excerpt hash is published in full when the round
+  settles, alongside the exact `items_digest` every grader sat. Anyone can check which hours the
+  seed picks, audit every published teacher prompt and response, and check every fresh item
+  against its source once the round settles. What the organisers could do and nobody would see:
+  leave a source out of an hour's harvest. They tune nothing of their own reference curators on
+  a round's exam before it settles.
 - **Training the finals.** The finals' students are trained on the organisers' machines.
   The scripts and the exam are published, so any of them can be trained again.
 - **Choosing when the season closes,** and so which rounds pick the finalists. The close is
@@ -554,6 +639,5 @@ script with `stet score`.
   after seeing its beacon value. Every round's page lists the draws it was announced for
   and left, and verifiers keep their own record of what they were told.
 
-They are not trusted with the seed, the corpus, the generated questions, the arithmetic,
-running your curator or grading it. All of those are done by other people or can be checked by
-anyone.
+They are not trusted with the seed, the corpus, the arithmetic, running your curator or
+grading it. All of those are done by other people or can be checked by anyone.

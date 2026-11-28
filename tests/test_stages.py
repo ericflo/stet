@@ -22,7 +22,7 @@ from stet.exam.items import Item, digest
 from stet.runner import EditRun
 from stet.spec import Scale, Season, load_season, official_round
 
-SEASON = load_season("s2")
+SEASON = load_season()
 # Students small enough that a corpus of a few hundred words is several budgets long.
 TINY = {
     "standard": Scale(name="standard", corpus_units=8, train_tokens=100, n_layer=2, n_head=2, d_model=64, ctx=16, batch_size=2, lr=0.001, edit_seconds=60),
@@ -33,13 +33,15 @@ CORPUS_TOKENS = {"standard": 400, "large": 1000}  # FakeEnc: a token a word, and
 
 
 def _items() -> list[Item]:
-    """An exam of eighteen: news written the day before the draw, and generated logic of two sorts."""
-    news = [Item(kind="passage", corner=f"fresh/ccnews/en/-/{i}", fmt="prose", lang="en", source="ccnews:test",
-                 text=QUOTED if i == 0 else f"Report number {i} of the day, which no crawl made before it could hold: the council met and adjourned {i} times over.")
+    """An exam of eighteen: news written the day before the draw, and fresh reasoning of two sorts."""
+    news = [Item(kind="context", corner=f"fresh/ccnews/en/-/{i}", fmt="prose", lang="en", source="ccnews:test",
+                 ctx=QUOTED if i == 0 else f"Opening number {i} of the day, which no crawl made before it could hold.",
+                 cont=f" The council met and adjourned {i} times over.",
+                 wrongs=(f"Unrelated news opening number {i} from another wire report.",))
             for i in range(6)]
-    chains = [Item(kind="answer", corner=f"logic/chain/{i}", fmt="prose", lang="en", source="gen:logic", ctx=f"If {i} then", cont=f" {i + 1}.") for i in range(6)]
-    orders = [Item(kind="answer", corner=f"logic/order/{i}", fmt="prose", lang="en", source="gen:logic", ctx=f"Q{i}", cont=f" A{i}.") for i in range(6)]
-    return news + chains + orders
+    explains = [Item(kind="answer", corner=f"fresh/explain/en/{i}", fmt="prose", lang="en", source=f"explain:wikipedia:test:{i}", ctx=f"If {i} then", cont=f" {i + 1}.") for i in range(6)]
+    infers = [Item(kind="answer", corner=f"fresh/infer/en/{i}", fmt="prose", lang="en", source=f"infer:wikipedia:test:{i}", ctx=f"Q{i}", cont=f" A{i}.") for i in range(6)]
+    return news + explains + infers
 
 
 def _slot(t: int) -> tuple[int, int]:
@@ -258,10 +260,10 @@ def test_curves_of_several_rounds_are_averaged(world, capsys):
     assert run(world, "curve", second, "--multiples", "1,2", "--repeats", "4") == 0
     assert ("standard", ["unedited", "unedited#2", "unedited#3", "unedited#4"]) in world.server.posts
     capsys.readouterr()
-    assert run(world, "curve", first, second, "s2-o00009", "--average") == 0
+    assert run(world, "curve", first, second, "s3-o00009", "--average") == 0
     said = capsys.readouterr()
     assert said.out == '"official/standard": [[0.5, 0.04], [1, 0], [2, -0.04]]\n'
-    assert "no standard curve measured yet for: s2-o00009" in said.err and "2 rounds" in said.err
+    assert "no standard curve measured yet for: s3-o00009" in said.err and "2 rounds" in said.err
     mean = {p["multiple"]: p for p in read(world.out / "curve-standard.json")["points"]}
     assert mean[2.0]["rounds"] == 2 and mean[2.0]["sd"] == pytest.approx(0.01 / 2**0.5) and mean[0.5]["rounds"] == 1
 
@@ -428,21 +430,21 @@ def test_the_audit_trains_a_round_at_two_sizes_and_says_whether_the_order_carrie
     assert score["carried"] == {"standard>large": pytest.approx(0.8)}
     assert score["sizes"]["standard"]["noise"] == pytest.approx(0.001 * 2**0.5) and score["sizes"]["large"]["spread"] == pytest.approx(0.02 * (5 / 3) ** 0.5)
     # The score and each pillar of the exam, and nothing else: every item sat is in one of them.
-    assert set(rep["measures"]) == {"score", "pillar:news", "pillar:logic"} and all(set(m) == {"sizes", "carried"} for m in rep["measures"].values())
-    assert rep["measures"]["pillar:logic"]["carried"] == {"standard>large": pytest.approx(0.8)}
+    assert set(rep["measures"]) == {"score", "pillar:news", "pillar:explain", "pillar:infer"} and all(set(m) == {"sizes", "carried"} for m in rep["measures"].values())
+    assert rep["measures"]["pillar:explain"]["carried"] == {"standard>large": pytest.approx(0.8)}
     assert rep["left_out"] == {"e5/c@v1": "it wrote no script at large", "e6/c@v1": "its large script breaks a rule: line 3: this line holds text",
                                "e7/c@v1": "its large script keeps the corpus as it is: it is the unedited student"}
     assert rep["unedited"] == {"standard": 4, "large": 4} and rep["trainings"]["large"]["e1/c@v1"] == 2
     assert "The order of curators carried from standard to large at +0.80" in said and "left out: e5/c@v1: it wrote no script at large" in said
-    assert "logic" in said and "(1 left out: a bigger corpus holds them)" in said and "stet audit report --over" in said
+    assert "explain" in said and "(1 left out: a bigger corpus holds them)" in said and "stet audit report --over" in said
 
     # The rounds audited so far as one: a round has too few curators for its order to say much alone.
-    assert run(world, "audit", "report", "--over", rid, "s2-o00099") == 0
+    assert run(world, "audit", "report", "--over", rid, "s3-o00099") == 0
     said = capsys.readouterr().err
     over = read(world.out / "audit-over.json")
     assert over["over"] == [rid] and over["rounds"] == 1 and set(over["measures"]) == set(rep["measures"])
     assert over["measures"]["score"]["carried"] == {"standard>large": {"rounds": 1, "mean": pytest.approx(0.8)}}
-    assert "no audit report yet for: s2-o00099" in said and f"rounds audited, 1: {rid}" in said and "standard to large +0.80 (1)" in said
+    assert "no audit report yet for: s3-o00099" in said and f"rounds audited, 1: {rid}" in said and "standard to large +0.80 (1)" in said
     # With what was collected, the report needs no server.
     world.server.forgetful = True
     assert run(world, "audit", "report", rid, "--offline") == 0 and read(world.out / rid / "audit-report.json")["measures"] == rep["measures"]
@@ -501,7 +503,7 @@ def test_the_finals_from_the_board_to_the_table(world, capsys):
 
     assert run(world, "finals", "plan") == 0
     said = capsys.readouterr().err
-    fdir = world.out / "finals-s2"
+    fdir = world.out / "finals-s3"
     plan = read(fdir / "plan.json")
     assert [r["owner"] for r in plan["finalists"]] == [f"f{i}" for i in range(1, 9)] and [r["owner"] for r in plan["yardsticks"]] == ["stet"]
     assert [r["owner"] for r in plan["pool"]] == ["q1", "q2"]  # q3 has run three rounds
@@ -532,7 +534,7 @@ def test_the_finals_from_the_board_to_the_table(world, capsys):
     assert "the lot's beacon round is named beforehand" in capsys.readouterr().err
     assert run(world, "finals", "plan", "--lot-beacon", f"{lot}:{'AB' * 32}") == 0
     plan = read(fdir / "plan.json")
-    pick = finals.draw_lot("s2", plan["pool"], {"round": lot, "randomness": "ab" * 32})
+    pick = finals.draw_lot("s3", plan["pool"], {"round": lot, "randomness": "ab" * 32})
     assert plan["lot"] == {"beacon": {"round": lot, "randomness": "ab" * 32}, "checked": True, "pick": pick} and pick["owner"] in ("q1", "q2")
     assert f"picks: {pick['owner']}/c@v1" in capsys.readouterr().err
     with pytest.raises(SystemExit):
@@ -553,7 +555,7 @@ def test_the_finals_from_the_board_to_the_table(world, capsys):
     with pytest.raises(SystemExit):
         run(world, "finals", "plan", "--rounds", r1)
     assert "the finals are 2 rounds" in capsys.readouterr().err
-    for again in (r1, "s2-o21"):  # one round named twice is not two rounds, however it is spelt
+    for again in (r1, "s3-o21"):  # one round named twice is not two rounds, however it is spelt
         with pytest.raises(SystemExit):
             run(world, "finals", "plan", "--rounds", r1, again)
         assert f"{r1} is named twice" in capsys.readouterr().err and read(fdir / "plan.json")["rounds"] == []
@@ -628,22 +630,22 @@ def test_a_rehearsal_is_kept_apart_and_says_what_it_is(world, capsys):
     rid = server.add_round(7, _items())
     with pytest.raises(SystemExit):
         run(world, "finals", "plan", "--scale", "standard")
-    assert "another size is for a rehearsal" in capsys.readouterr().err and not (world.out / "finals-s2").exists()
+    assert "another size is for a rehearsal" in capsys.readouterr().err and not (world.out / "finals-s3").exists()
     # Any settled round will do, at any size, with a beacon round that has been emitted already. An account named by hand
     # is the organisers' as well as those the board marks: f1's curator is a yardstick beside stet's.
     lot = SEASON.beacon_round_at(int(time.time()) - 3600)
     assert run(world, "finals", "plan", "--rehearsal", "--scale", "standard", "--organisers", "f1", "--rounds", rid, "--lot-beacon", f"{lot}:{'ab' * 32}") == 0
-    plan = read(world.out / "finals-s2-rehearsal" / "plan.json")
+    plan = read(world.out / "finals-s3-rehearsal" / "plan.json")
     assert plan["rehearsal"] and plan["scale"] == "standard" and plan["rounds"] == [rid] and [r["owner"] for r in plan["yardsticks"]] == ["f1", "stet"]
     assert [r["owner"] for r in plan["finalists"]] == ["f2", "f3", "f4", "f5", "f6", "f7", "f8", "q1"] and [r["owner"] for r in plan["pool"]] == ["q2"]
-    assert "a rehearsal" in capsys.readouterr().err and not (world.out / "finals-s2").exists()
+    assert "a rehearsal" in capsys.readouterr().err and not (world.out / "finals-s3").exists()
     with pytest.raises(SystemExit):
         run(world, "finals", "scripts")  # the finals themselves are not planned
     capsys.readouterr()
     assert run(world, "finals", "scripts", "--rehearsal") == 0 and {r[2] for r in world.ran} == {"standard"} and len(world.ran) == 11
     assert run(world, "finals", "farm", "--rehearsal") == 0
     assert run(world, "finals", "table", "--rehearsal") == 0
-    out = read(world.out / "finals-s2-rehearsal" / "table.json")
+    out = read(world.out / "finals-s3-rehearsal" / "table.json")
     assert out["rehearsal"] and out["complete"] and out["lot"]["name"] == "q2/c@v1" and "a rehearsal, not the finals" in capsys.readouterr().err
     assert [r["name"] for r in out["rows"] if r["role"] == "yardstick"] == ["f1/c@v1", "stet/c@v1"] and len(out["rows"]) == 11
 
@@ -656,7 +658,7 @@ def test_the_organisers_curators_are_those_the_board_marks_and_the_list_of_verif
     server.add_round(7, _items())
     server.board[0]["owner"], server.board[0]["organisers"] = "stet-two", True  # a second account of theirs, top of the board
     assert run(world, "finals", "plan", "--rehearsal") == 0
-    plan = read(world.out / "finals-s2-rehearsal" / "plan.json")
+    plan = read(world.out / "finals-s3-rehearsal" / "plan.json")
     assert plan["organisers"] == ["stet", "stet-two"] and [r["owner"] for r in plan["yardsticks"]] == ["stet-two", "stet"]
     assert [r["owner"] for r in plan["finalists"]] == ["f2", "f3", "f4", "f5", "f6", "f7", "f8", "q1"]  # none of them theirs
     capsys.readouterr()
@@ -665,11 +667,46 @@ def test_the_organisers_curators_are_those_the_board_marks_and_the_list_of_verif
         del r["organisers"]
     with pytest.raises(SystemExit):
         run(world, "finals", "plan")
-    assert "does not say which curators are the organisers' own" in capsys.readouterr().err and not (world.out / "finals-s2").exists()
+    assert "does not say which curators are the organisers' own" in capsys.readouterr().err and not (world.out / "finals-s3").exists()
     assert run(world, "finals", "plan", "--organisers", "stet,stet-two") == 0
-    assert [r["owner"] for r in read(world.out / "finals-s2" / "plan.json")["yardsticks"]] == ["stet-two", "stet"]
+    assert [r["owner"] for r in read(world.out / "finals-s3" / "plan.json")["yardsticks"]] == ["stet-two", "stet"]
 
 
 def test_the_lot_is_not_drawn_from_a_beacon_round_that_has_not_been_emitted():
     with pytest.raises(stages.Stop, match="the lot is drawn after that"):
         stages.fetch_beacon(SEASON, SEASON.beacon_round_at(int(time.time()) + 3600))  # and no relay is asked
+
+
+def test_season2_audit_and_finals_pass_s2_plan_with_knowledge_part(tmp_path):
+    """Item 8 (P2): Season 2 uses part 'knowledge' (Season 3 uses 'knowledge-even'); audit and
+    finals aggregation must pass plan_of(season) so Season 2 tables do not raise ValueError."""
+    from stet.exam import finals, measure
+    from stet.exam.aggregate import item_table, plan_of
+
+    s2 = load_season("s2")
+    plan_s2 = plan_of(s2)
+    items = [
+        Item(kind="answer", corner="knowledge/en/capital", fmt="prose", lang="en", source="gen:knowledge", ctx="Capital of France?", cont=" Paris"),
+        Item(kind="passage", corner="fresh/ccnews/en/0", fmt="prose", lang="en", source="ccnews:1", text="Fresh news article text."),
+    ]
+    tbl = item_table(items, plan=plan_s2)
+    shares = {"en": 100.0}
+    uned = [[-3.0, -3.0], [-3.0, -3.0]]
+    curators = {"a": [[-2.9, -2.9], [-2.9, -2.9]], "b": [[-2.8, -2.8], [-2.8, -2.8]], "c": [[-2.7, -2.7], [-2.7, -2.7]]}
+
+    # Audit path (measure.size_stats with explicit s2 plan).
+    st = measure.size_stats(tbl, shares, uned, curators, plan=plan_s2)
+    assert set(st["measures"]) == {"score", "pillar:knowledge", "pillar:news"}
+    assert st["gains"]["score"]["c"] == pytest.approx(0.3)
+
+    # Finals path (finals.table with explicit s2 plan).
+    rounds = [{"round": "s2-o00001", "table": tbl, "shares": shares, "unedited": uned, "students": curators, "curve": {}}]
+    out = finals.table(rounds, {"a": "finalist", "b": "finalist", "c": "finalist"}, plan=plan_s2)
+    assert [r["name"] for r in out["rows"]] == ["c", "b", "a"]
+
+    # Confirm stages.py actually passes plan=plan_of(season) in both _audit_report and _finals_table.
+    from pathlib import Path
+
+    src = Path(stages.__file__).read_text()
+    assert "measure.size_stats(" in src and "plan=plan_" in src
+    assert "finals.table(" in src and "plan=plan_of(season)" in src

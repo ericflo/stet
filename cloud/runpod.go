@@ -4,14 +4,17 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -145,7 +148,20 @@ func (r *RunPod) do(ctx context.Context, method, path string, body any, into any
 		}
 	}
 	for attempt := 0; ; attempt++ {
-		req, err := http.NewRequestWithContext(ctx, method, r.base+path, bytes.NewReader(raw))
+		var gotConn, wroteAny, tlsStarted, tlsDone atomic.Bool
+		trace := &httptrace.ClientTrace{
+			GotConn:           func(httptrace.GotConnInfo) { gotConn.Store(true) },
+			WroteHeaderField:  func(string, []string) { wroteAny.Store(true) },
+			WroteHeaders:      func() { wroteAny.Store(true) },
+			WroteRequest:      func(httptrace.WroteRequestInfo) { wroteAny.Store(true) },
+			TLSHandshakeStart: func() { tlsStarted.Store(true) },
+			TLSHandshakeDone: func(_ tls.ConnectionState, err error) {
+				if err == nil {
+					tlsDone.Store(true)
+				}
+			},
+		}
+		req, err := http.NewRequestWithContext(httptrace.WithClientTrace(ctx, trace), method, r.base+path, bytes.NewReader(raw))
 		if err != nil {
 			return 0, err
 		}
@@ -161,6 +177,9 @@ func (r *RunPod) do(ctx context.Context, method, path string, body any, into any
 					return 0, err
 				}
 				continue
+			}
+			if isProvenPreSendError(err, gotConn.Load(), wroteAny.Load(), tlsStarted.Load(), tlsDone.Load()) {
+				return 0, fmt.Errorf("%w: RunPod could not be reached: %w", errRequestNotSent, err)
 			}
 			return 0, fmt.Errorf("RunPod could not be reached: %w", err)
 		}
@@ -232,27 +251,46 @@ func (r *RunPod) pods(ctx context.Context) ([]Pod, error) {
 }
 
 // create rents a pod. errNoRoom means RunPod has no machine of that kind free now. A
-// create that may or may not have gone through (the answer was lost) is looked for by its
-// name before anything is said, so that one is never rented twice.
-func (r *RunPod) create(ctx context.Context, spec NewPod) (*Pod, error) {
+// create that may or may not have gone through (the answer was lost or lacked an ID) is looked
+// for by its name before anything is said, skipping any pre-existing knownIDs.
+func (r *RunPod) create(ctx context.Context, spec NewPod, knownIDs map[string]bool) (*Pod, error) {
 	var pod Pod
 	status, err := r.do(ctx, "POST", "/pods", spec, &pod)
+	findCreated := func() *Pod {
+		pods, lerr := r.pods(ctx)
+		if lerr != nil {
+			return nil
+		}
+		var matched []*Pod
+		for i := range pods {
+			if pods[i].Name == spec.Name && pods[i].live() && !knownIDs[pods[i].ID] {
+				matched = append(matched, &pods[i])
+			}
+		}
+		if len(matched) == 1 {
+			return matched[0]
+		}
+		return nil
+	}
 	switch {
-	case err == nil && status == 201:
+	case err == nil && (status == 201 || status == 200) && pod.ID != "":
 		return &pod, nil
 	case err == nil:
-		return nil, fmt.Errorf("RunPod answered %d to a new pod, not 201", status)
+		if found := findCreated(); found != nil {
+			return found, nil
+		}
+		return nil, fmt.Errorf("RunPod answered %d to a new pod without a pod ID", status)
+	case errors.Is(err, errRequestNotSent):
+		return nil, fmt.Errorf("%w: %w", errRentNotSent, err)
 	case status == 400 || status == 403:
 		// 400: no machine fits; 403: this kind is not open to the account. Either way the
 		// next kind may do.
 		return nil, fmt.Errorf("%w (%v)", errNoRoom, err)
-	case status == 0 || status >= 500:
-		if pods, lerr := r.pods(ctx); lerr == nil {
-			for i := range pods {
-				if pods[i].Name == spec.Name && pods[i].live() {
-					return &pods[i], nil
-				}
-			}
+	case status >= 400 && status < 500 && status != http.StatusRequestTimeout:
+		return nil, fmt.Errorf("%w (%v)", errRentRejected, err)
+	case status == 0 || status == http.StatusRequestTimeout || status >= 500:
+		if found := findCreated(); found != nil {
+			return found, nil
 		}
 	}
 	return nil, err

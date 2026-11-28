@@ -174,7 +174,7 @@ func TestOnlyARentedMachineRunsCuratorsInTheContainerSandbox(t *testing.T) {
 	hello := func(sandbox string) map[string]any {
 		h := w.hello(true)
 		h["sandbox"] = sandbox
-		h["hardware"] = map[string]any{"gpu": "Test GPU", "device": "cuda", "backend": "cuda",
+		h["hardware"] = map[string]any{"gpu": "Test GPU", "device": "cuda", "backend": "cuda", "vram_gb": 24.0, "cuda_capability": "8.9", "bf16_native": true,
 			"bench": map[string]any{"gpu_tokens_per_second": f.GPUTokensPerSecond, "cpu_mb_per_second": f.CPUMBPerSecond, "cores": f.Cores, "memory_gb": f.MemoryGB, "gpu_memory_gb": f.GPUMemoryGB}}
 		return h
 	}

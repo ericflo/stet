@@ -48,7 +48,19 @@ Vast.ai, Lium, Salad and Clore.ai.
                                  (--vouch: any not vouched for; --revoke HANDLE...)
   stet-cloud status              what is waiting, what is rented, what it costs
   stet-cloud scale [--follow]    rent and end machines to match the work (once, or
-                                 every minute until stopped)
+                                 every minute until stopped; with --examiner-addr, also
+                                 provisions and proxies the ephemeral 1x RTX 5090 examiner)
+  stet-cloud examiner            run only the automated ephemeral 1x RTX 5090 examiner
+                                 controller and local authenticated vLLM proxy
+  stet-cloud examiner resolve [--end] [--clear LABEL]
+                                 verify an unresolved pending examiner reservation with
+                                 Vast.ai, adopting (or ending with --end) if found; keeps
+                                 unlisted reservations unless verified and named with --clear
+  stet-cloud workers resolve [--end] [--clear ID]
+                                 verify unresolved pending worker create reservations
+                                 with their providers, adopting (or ending with --end)
+                                 matching contracts; keeps unlisted reservations unless
+                                 verified and named with --clear
   stet-cloud up [N]              rent N machines now, whatever is waiting (default 1)
   stet-cloud down [--force] [HANDLE...]
                                  end machines that hold no job; --force ends the rest
@@ -75,35 +87,37 @@ Run any command with -h for its settings.
 
 // Options are the settings every command shares.
 type Options struct {
-	Service      *Service // the settings the service runs with, when status judges by them
-	Home         string
-	Credentials  string // the markets' keys (market.go)
-	API          string
-	RunPodAPI    string
-	VastAPI      string
-	LiumAPI      string
-	SaladAPI     string
-	CloreAPI     string
-	OperatorKey  string
-	Cloud        string
-	Market       string // up and offers: this market alone; up rents there armed or not
-	GPUs         []string
-	Image        string
-	Disk         int
-	MinCUDA      string
-	MinRAM       int
-	MinCPU       int
-	MinGPUMemory int
-	MaxPrice     float64 // dollars an hour for one machine; 0: any
-	LongMaxPrice float64 // the same, for a machine rented for the organisers' bigger students; 0: MaxPrice
-	LongMinutes  int     // the longest of the organisers' students a machine takes, minutes; 0: the short ones only
-	Cheapest     bool    // rent the cheapest a grade first, not the fastest
+	Service             *Service // the settings the service runs with, when status judges by them
+	Home                string
+	Credentials         string // the markets' keys (market.go)
+	API                 string
+	RunPodAPI           string
+	VastAPI             string
+	LiumAPI             string
+	SaladAPI            string
+	CloreAPI            string
+	OperatorKey         string
+	Cloud               string
+	Market              string // up and offers: this market alone; up rents there armed or not
+	GPUs                []string
+	Image               string
+	Disk                int
+	MinCUDA             string
+	MinRAM              int
+	MinCPU              int
+	MinGPUMemory        int
+	MinCuratorGPUMemory int
+	MaxPrice            float64 // dollars an hour for one machine; 0: any
+	LongMaxPrice        float64 // the same, for a machine rented for the organisers' bigger students; 0: MaxPrice
+	LongMinutes         int     // the longest of the organisers' students a machine takes, minutes; 0: the short ones only
+	Cheapest            bool    // rent the cheapest a grade first, not the fastest
 	// For grades taken before an exam: how long after it the round may settle.
-	Settle time.Duration
-	Idle   int
-	SSHKey string
-	DryRun bool
-	Every  time.Duration
+	Settle   time.Duration
+	Idle     int
+	SSHKey   string
+	DryRun   bool
+	Every    time.Duration
+	Examiner ExaminerConfig
 	Policy
 }
 
@@ -155,12 +169,13 @@ func flags(name string, o *Options) *flag.FlagSet {
 	gpus := fs.String("gpu", "", "GPU kinds to rent, in order of preference, comma-separated (default: whatever fits, the fastest first)")
 	fs.BoolVar(&o.Cheapest, "cheapest", false, "rent the cheapest a grade first, not the fastest: a round settles only when its slowest grade is in, so this saves money and takes longer")
 	fs.StringVar(&o.Image, "image", "ubuntu:24.04", "the container image; stet is installed on it when the pod starts")
-	fs.IntVar(&o.Disk, "disk", 100, "container disk, GB: stet and the season's libraries, a round's corpus and assets, and the 60 GB a machine that runs curators keeps free")
+	fs.IntVar(&o.Disk, "disk", 120, "container disk, GB: stet and the season's libraries, a round's corpus and assets, and the 80 GB a machine that runs curators keeps free")
 	fs.StringVar(&o.MinCUDA, "min-cuda", "13.0", "the oldest CUDA the host's driver may have: the season's PyTorch is built for CUDA 13")
-	fs.IntVar(&o.MinRAM, "min-ram", 16, "host memory a GPU, GB: the season's floor for a machine that runs curators (a curator is given 12)")
+	fs.IntVar(&o.MinRAM, "min-ram", 24, "host memory a GPU, GB: the season's floor for a machine that runs curators (a curator is given 20)")
 	fs.IntVar(&o.MinCPU, "min-cpus", 6, "host vCPUs a GPU: the season's floor for a machine that runs curators")
-	fs.IntVar(&o.MinGPUMemory, "min-gpu-memory", 12, "GPU memory, GB: a curator is given 8, and a machine that runs them needs 10")
-	fs.IntVar(&o.Idle, "idle", 15, "minutes a machine waits with nothing to do before it ends itself")
+	fs.IntVar(&o.MinGPUMemory, "min-gpu-memory", 12, "GPU memory, GB: floor for grading the Season 3 ERNIE-4.5-0.3B student (<=10 GiB VRAM)")
+	fs.IntVar(&o.MinCuratorGPUMemory, "min-curator-gpu-memory", 24, "GPU memory, GB: floor for machines rented to run curators (a curator is given 22)")
+	fs.IntVar(&o.Idle, "idle", 20, "minutes a machine waits with nothing to do before it ends itself")
 	noEdits := fs.Bool("no-edits", false, "rent machines that only grade, and leave curators to the organisers' own machines")
 	ssh := fs.Bool("ssh", false, "let ~/.ssh/id_ed25519.pub log in to the machines rented (for `stet-cloud ssh`)")
 	fs.BoolVar(&o.DryRun, "dry-run", false, "say what would be rented and ended, and do none of it")
@@ -168,7 +183,7 @@ func flags(name string, o *Options) *flag.FlagSet {
 	fs.IntVar(&o.LongMinutes, "long-farm", 0, "rent machines that also take the organisers' bigger students, given up to this many minutes each, and one for each waiting (0: none)")
 	fs.Float64Var(&o.MaxPrice, "max-price", 0, "never rent a machine that costs more than this many dollars an hour, however much work is waiting (0: any)")
 	fs.Float64Var(&o.LongMaxPrice, "long-max-price", 0, "the same, for a machine rented for the organisers' bigger students, which is chosen for what a student costs on it rather than its price (0: --max-price)")
-	fs.Float64Var(&o.MaxHourly, "max-hourly", 3, "never rent past this many dollars an hour, all machines together")
+	fs.Float64Var(&o.MaxHourly, "max-hourly", 4, "never rent past this many dollars an hour, all machines together")
 	fs.Float64Var(&o.DailyBudget, "daily-budget", 0, "rent nothing more once about this many dollars have been spent today, UTC (0: no limit)")
 	fs.Float64Var(&o.PerRunner, "per-runner", 2, "with --no-edits: machines that keep pace with one of the organisers' machines running curators")
 	fs.IntVar(&o.PerWorker, "per-machine", 6, "scripts waiting to be graded that justify one more machine")
@@ -176,13 +191,31 @@ func flags(name string, o *Options) *flag.FlagSet {
 	fs.DurationVar(&o.Every, "every", time.Minute, "with scale --follow: how often to look")
 	fs.DurationVar(&o.Early, "early", 90*time.Minute, "rent graders for a round's exam from at most this long before it is due, each kind of GPU just in time, the cheapest a round first (0: only once it is posted)")
 	fs.DurationVar(&o.Settle, "settle-within", 15*time.Minute, "with --early: how long after its exam a round may settle; a kind of GPU is rented in time to report by then, and a quicker, dearer one only once the cheaper ones can no longer")
-	fs.DurationVar(&o.ExamAfter, "exam-after", 5*time.Minute, "how long after its draw a round's exam is posted, about, when the server does not say: in Season 2 the exam is made at the draw from hours of the day before, already harvested")
+	fs.DurationVar(&o.ExamAfter, "exam-after", 25*time.Minute, "how long after its draw a round's exam is posted, about, when the server does not say: in Season 3 the exam is built right after the draw (~14-18 minutes on a cold 1x RTX 5090 Inkling-2-Mini examiner, with headroom) from hours of the day before")
+	fs.StringVar(&o.Examiner.Addr, "examiner-addr", "", "loopback address for the automated ephemeral 1x RTX 5090 vLLM examiner proxy (e.g. 127.0.0.1:8000); when set, rents a 5090 on Vast.ai at round draw and destroys it once the exam is posted")
+	fs.DurationVar(&o.Examiner.Timeout, "examiner-timeout", 45*time.Minute, "hard wall-clock TTL for an automated ephemeral examiner GPU before it is destroyed")
+	fs.Float64Var(&o.Examiner.MaxPrice, "examiner-max-price", 1.50, "maximum $/h for an automated ephemeral 1x RTX 5090 examiner on Vast.ai")
+	fs.StringVar(&o.Examiner.Image, "examiner-image", defaultExaminerImage, "pinned immutable Docker image digest for the ephemeral vLLM examiner")
+	fs.StringVar(&o.Examiner.Model, "examiner-model", defaultExaminerModel, "pinned Hugging Face model ID served by the ephemeral vLLM examiner")
+	fs.StringVar(&o.Examiner.Revision, "examiner-revision", defaultExaminerRevision, "pinned Hugging Face revision SHA served by the ephemeral vLLM examiner")
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), "usage: stet-cloud %s [settings]\n\n", name)
 		fs.PrintDefaults()
 	}
 	o.Grace, o.Silence = 25*time.Minute, 20*time.Minute
 	finish := func() error {
+		if o.MaxWorkers < 0 {
+			return errors.New("--max must be 0 or more")
+		}
+		if o.MaxHourly < 0 {
+			return errors.New("--max-hourly must be 0 or more")
+		}
+		if o.DailyBudget < 0 {
+			return errors.New("--daily-budget must be 0 or more")
+		}
+		if o.Examiner.MaxPrice <= 0 {
+			return errors.New("--examiner-max-price must be greater than 0")
+		}
 		if o.Market != "" && !slices.Contains(marketOrder, o.Market) {
 			return fmt.Errorf("--market is one of %s, not %q", strings.Join(marketOrder, ", "), o.Market)
 		}
@@ -373,6 +406,50 @@ func run(args []string, stdout, stderr io.Writer) error {
 			}
 		}
 		return cmdScale(ctx, f, *follow)
+	case "examiner":
+		end := fs.Bool("end", false, "with resolve: terminate a pending examiner instance if Vast.ai now lists it")
+		clearLabel := fs.String("clear", "", "with resolve: manually release this exact verified pending examiner reservation label when absent from Vast.ai")
+		rest, err := parse(fs, args)
+		if err != nil {
+			return err
+		}
+		if len(rest) == 1 && rest[0] == "resolve" {
+			f, err := open(o, stdout, true, false)
+			if err != nil {
+				return err
+			}
+			return cmdExaminerResolve(ctx, f, *end, strings.TrimSpace(*clearLabel))
+		}
+		if len(rest) > 0 {
+			return fmt.Errorf("%s takes no %q (try: stet-cloud examiner resolve)", cmd, rest[0])
+		}
+		if *end || *clearLabel != "" {
+			return errors.New("--end and --clear are only for `stet-cloud examiner resolve`")
+		}
+		if o.Examiner.Addr == "" {
+			o.Examiner.Addr = "127.0.0.1:8000"
+		}
+		f, err := open(o, stdout, true, true)
+		if err != nil {
+			return err
+		}
+		return cmdExaminer(ctx, f)
+	case "workers":
+		end := fs.Bool("end", false, "with resolve: terminate matching worker contracts if the provider now lists them")
+		var clearIDs multiFlag
+		fs.Var(&clearIDs, "clear", "with resolve: manually release this exact verified pending reservation ID when unlisted (repeatable or comma-separated)")
+		rest, err := parse(fs, args)
+		if err != nil {
+			return err
+		}
+		if len(rest) == 1 && rest[0] == "resolve" {
+			f, err := open(o, stdout, true, false)
+			if err != nil {
+				return err
+			}
+			return cmdWorkersResolve(ctx, f, *end, clearIDs...)
+		}
+		return fmt.Errorf("workers takes `resolve [--end] [--clear ID]` (got %q)", strings.Join(rest, " "))
 	case "up":
 		rest, err := parse(fs, args)
 		if err != nil {
@@ -548,6 +625,20 @@ func loadService(home string) *Service {
 		return nil
 	}
 	return &svc
+}
+
+// multiFlag collects repeatable or comma-separated flag values.
+type multiFlag []string
+
+func (m *multiFlag) String() string { return strings.Join(*m, ",") }
+
+func (m *multiFlag) Set(v string) error {
+	for _, part := range strings.Split(v, ",") {
+		if s := strings.TrimSpace(part); s != "" {
+			*m = append(*m, s)
+		}
+	}
+	return nil
 }
 
 // String is the settings as they would be typed.

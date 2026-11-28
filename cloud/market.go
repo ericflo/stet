@@ -5,17 +5,23 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/http/httptrace"
 	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -66,25 +72,30 @@ func marketTitle(name string) string {
 type Need struct {
 	MinGPUMemGB, MinCPUs, MinRAMGB, DiskGB int
 	MinCUDA                                string // "13.0": a host driver of 580 or newer
+	Curators                               bool   // true when the machine will run curators (--edits) and download curator assets
 }
 
 // Offer is one kind of machine a market has now: on RunPod a kind of GPU in one of its clouds,
 // elsewhere often one host's machine.
 type Offer struct {
-	Market   string
-	Card     string // the GPU as stet's grades name it, without the maker's name: "RTX 4090"
-	Model    string // the market's own name for it, as its API gives it
-	Name     string // the market's short name for it, where it has another
-	ID       string // the market's own: RunPod's GPU ID, a Vast ask, a Lium executor, a Salad GPU class, a Clore server
-	Maker    string // NVIDIA, AMD
-	MemoryGB int
-	Price    float64 // dollars an hour, all in: the GPU, the disk, the market's fees
-	Ask      float64 // the market's own price, as it lists it (Clore: a day, before its fees)
-	Stock    int     // machines like it free now; -1 when the market says only Level
-	Level    string  // the market's own word for how many are free: low, medium, high
-	CUDA     string  // the newest CUDA the host's driver takes, where the market says
-	Trust    string  // the market's word for its hosts: secure, verified, datacenter, community
-	Region   string
+	Market             string
+	Card               string // the GPU as stet's grades name it, without the maker's name: "RTX 4090"
+	Model              string // the market's own name for it, as its API gives it
+	Name               string // the market's short name for it, where it has another
+	ID                 string // the market's own: RunPod's GPU ID, a Vast ask, a Lium executor, a Salad GPU class, a Clore server
+	Maker              string // NVIDIA, AMD
+	MemoryGB           int
+	Price              float64 // dollars an hour, all in: the GPU, the disk, the market's fees
+	DiskCost           float64 // hourly storage component included in Price, when known separately
+	TransferCost       float64 // amortized transfer component included in Price, when known separately
+	FixedCost          float64 // one-time startup transfer estimate or exact order fee incurred at rental creation
+	FixedCostEstimated bool    // true when FixedCost is a pre-launch transfer estimate rather than an exact provider fee
+	Ask                float64 // the market's own price, as it lists it (Clore: a day, before its fees)
+	Stock              int     // machines like it free now; -1 when the market says only Level
+	Level              string  // the market's own word for how many are free: low, medium, high
+	CUDA               string  // the newest CUDA the host's driver takes, where the market says
+	Trust              string  // the market's word for its hosts: secure, verified, datacenter, community
+	Region             string
 	// The host it is on and its CPU, where the market says: a machine runs curators only on a
 	// CPU at the season's floor, which some hosts' are not (curators.go).
 	Host string
@@ -106,24 +117,51 @@ func (o Offer) rankPrice() float64 {
 
 // Launch is what a machine is rented with.
 type Launch struct {
-	Name   string            // the worker key's handle
-	Image  string            // the container image
-	Env    map[string]string // the worker's settings, its key among them
-	Script string            // worker.sh
-	Need   Need
-	SSHKey string
+	Name     string            // the worker key's handle
+	Image    string            // the container image
+	Env      map[string]string // the worker's settings, its key among them
+	Script   string            // worker.sh
+	Need     Need
+	SSHKey   string
+	KnownIDs map[string]bool // contract IDs already known on the target market before this create
 }
 
 // Rental is one machine rented on a market, as the market says.
 type Rental struct {
-	Market  string
-	ID      string
-	Name    string // the worker key's handle, where the market keeps a name; "" where it does not
-	Card    string
-	Price   float64 // dollars an hour
-	State   string  // starting, running, stopped; anything else is the market's own word
-	Status  string  // the market's own word
-	Created time.Time
+	Market                string
+	ID                    string
+	Name                  string // the worker key's handle, where the market keeps a name; "" where it does not
+	Host                  string // provider host/server ID when reported (e.g. Clore order server ID `si`)
+	Card                  string
+	Price                 float64 // dollars an hour
+	BasePrice             float64 // compute-only hourly rate when reported alongside Price (e.g. Vast dph_base)
+	DiskCost              float64 // hourly storage rate when reported on the instance (e.g. Vast storage_cost * disk_space / 720)
+	DiskCostUnknown       bool    // true when a stopped instance has attached storage whose price was not reported (distinct from explicit $0)
+	TransferCost          float64 // hourly amortized transfer rate already accounted for in Price
+	FixedCost             float64 // one-time startup transfer estimate or exact order fee incurred at rental creation
+	FixedCostEstimated    bool    // true when FixedCost is a pre-launch transfer estimate rather than an exact provider fee
+	ObservedTransferCost  float64 // provider-reported effective cumulative observed transfer spend
+	TransferObserved      bool    // true when the provider reported observed transfer usage for this contract
+	ObservedTransferDown  float64 // provider-reported cumulative download transfer spend when present
+	TransferDownObserved  bool    // true when the provider reported download transfer usage
+	TransferDownUnpriced  bool    // true when the provider reported positive/invalid download usage without a usable rate
+	ObservedTransferUp    float64 // provider-reported cumulative upload transfer spend when present
+	TransferUpObserved    bool    // true when the provider reported upload transfer usage
+	TransferUpUnpriced    bool    // true when the provider reported positive/invalid upload usage without a usable rate
+	ObservedTransferTotal float64 // provider-reported explicit combined transfer_cost when present
+	TransferTotalObserved bool    // true when the provider reported explicit combined transfer_cost
+	TransferTotalUnpriced bool    // true when the provider reported a malformed/non-finite transfer_cost or sum overflow
+	PartialRate           bool    // true when Price is a partial/base fallback lacking the provider's all-in total (e.g. Vast dph_total == 0)
+	State                 string  // starting, running, stopped; anything else is the market's own word
+	Offline               bool    // true when the provider confirms the instance is offline and exempt from compute and storage charges (e.g. Vast actual_status=offline)
+	Status                string  // the market's own word
+	Created               time.Time
+	StoppedAt             time.Time // trustworthy provider stop timestamp when reported (zero when unknown)
+	ResumedAt             time.Time // trustworthy provider resume timestamp when reported (zero when unknown)
+	EndedAt               time.Time // trustworthy provider termination/end timestamp when reported (zero when unknown)
+	Terminating           bool      // persisted outstanding termination (e.g. failed `workers resolve --end`)
+	Unconfirmed           bool      // true when reconstructed from ledger because provider listing/lookup failed to confirm current state
+	PendingID             string    // originating pendingRent reservation ID when returned from f.rent() before ledger write
 	// What the market says of the machine itself, for seeing why one does not start: whether
 	// its container is up ("yes", "no", or "" where the market does not say), its phase in
 	// the market's own words (one that changes only as the machine moves on: "pulling image",
@@ -140,6 +178,27 @@ type Rental struct {
 // of it: the last n lines.
 type logger interface {
 	Logs(ctx context.Context, id string, n int) ([]string, error)
+}
+
+// rentalLookup is a market that can verify a single machine directly by ID when a list omits it.
+// Returns (rental, true, nil) if the machine still exists on the provider, (nil, false, nil) if
+// the provider explicitly confirms it does not exist (e.g. HTTP 404), or (nil, false, err) when
+// status could not be confirmed.
+type rentalLookup interface {
+	Lookup(ctx context.Context, id string) (*Rental, bool, error)
+}
+
+// dayTransferCharge is the provider-reported transfer spend for one contract on one UTC day.
+type dayTransferCharge struct {
+	Down float64 `json:"down,omitempty"`
+	Up   float64 `json:"up,omitempty"`
+}
+
+// transferChargesLookup is an optional market/provider extension that queries dated per-contract
+// bandwidth charges (e.g. Vast.ai GET /api/v0/charges) when instance listings omit usage counters.
+// Returned map is contractID -> UTC day ("2006-01-02") -> dayTransferCharge.
+type transferChargesLookup interface {
+	TransferCharges(ctx context.Context, from, to time.Time) (map[string]map[string]dayTransferCharge, error)
 }
 
 // logLines are the lines a market's log answer holds, whatever its shape: strings, or objects
@@ -199,8 +258,11 @@ func lastLines(lines []string, n int) []string {
 	return lines[max(0, len(lines)-n):]
 }
 
-// live is a machine that is, or is about to be, billed for.
-func (r *Rental) live() bool { return r.State == "starting" || r.State == "running" }
+// live is a machine that is, or is about to be, billed for (including provider-reported
+// "unknown" status, which remains owned, accrues full rate, and is queued for destruction).
+func (r *Rental) live() bool {
+	return r.State == "starting" || r.State == "running" || r.State == "unknown"
+}
 
 // Account is what a market says of the account.
 type Account struct {
@@ -434,8 +496,63 @@ func (a *api) do(ctx context.Context, method, path string, body any, into any) (
 	return a.doWith(ctx, method, path, nil, body, into)
 }
 
+// errRequestNotSent marks a transport failure that occurred strictly before any TCP/TLS
+// connection was established or any HTTP request bytes were written (such as dial ECONNREFUSED
+// or non-timeout DNS resolution failure). Ambiguous failures (timeouts, EOFs, or errors after
+// GotConn/WroteRequest) are NEVER wrapped with errRequestNotSent.
+var errRequestNotSent = errors.New("request was not sent")
+
+func isProvenPreSendError(err error, gotConn, wroteAny, tlsStarted, tlsDone bool) bool {
+	if err == nil || gotConn || wroteAny {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return false
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return false
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) && !dnsErr.IsTimeout {
+		return true
+	}
+	var opErr *net.OpError
+	if errors.As(err, &opErr) && opErr.Op == "dial" {
+		if errors.Is(err, syscall.ECONNREFUSED) ||
+			errors.Is(err, syscall.EHOSTUNREACH) ||
+			errors.Is(err, syscall.ENETUNREACH) ||
+			errors.Is(err, syscall.EADDRNOTAVAIL) ||
+			errors.Is(err, syscall.EHOSTDOWN) ||
+			errors.Is(err, syscall.ENETDOWN) {
+			return true
+		}
+	}
+	if tlsStarted && !tlsDone {
+		var certInvalid x509.CertificateInvalidError
+		var hostErr x509.HostnameError
+		var unkAuth x509.UnknownAuthorityError
+		var recHdr tls.RecordHeaderError
+		if errors.As(err, &certInvalid) || errors.As(err, &hostErr) || errors.As(err, &unkAuth) || errors.As(err, &recHdr) {
+			return true
+		}
+	}
+	return false
+}
+
+// doOnce sends one HTTP request without retry or Retry-After backoff sleeps (for non-blocking
+// best-effort reads like dated billing reconciliation that must never stall teardown or hold
+// the fleet lock behind provider rate limits).
+func (a *api) doOnce(ctx context.Context, method, path string, body any, into any) (int, error) {
+	return a.doWithOpts(ctx, method, path, nil, body, into, false)
+}
+
 // doWith is do, with more headers.
 func (a *api) doWith(ctx context.Context, method, path string, headers map[string]string, body any, into any) (int, error) {
+	return a.doWithOpts(ctx, method, path, headers, body, into, true)
+}
+
+func (a *api) doWithOpts(ctx context.Context, method, path string, headers map[string]string, body any, into any, retry bool) (int, error) {
 	var raw []byte
 	if body != nil {
 		var err error
@@ -443,9 +560,22 @@ func (a *api) doWith(ctx context.Context, method, path string, headers map[strin
 			return 0, err
 		}
 	}
-	reads := method == "GET" || (method == "POST" && into != nil && a.readOnlyPost(path))
+	reads := retry && (method == "GET" || (method == "POST" && into != nil && a.readOnlyPost(path)))
 	for attempt := 0; ; attempt++ {
-		req, err := http.NewRequestWithContext(ctx, method, a.base+path, bytes.NewReader(raw))
+		var gotConn, wroteAny, tlsStarted, tlsDone atomic.Bool
+		trace := &httptrace.ClientTrace{
+			GotConn:           func(httptrace.GotConnInfo) { gotConn.Store(true) },
+			WroteHeaderField:  func(string, []string) { wroteAny.Store(true) },
+			WroteHeaders:      func() { wroteAny.Store(true) },
+			WroteRequest:      func(httptrace.WroteRequestInfo) { wroteAny.Store(true) },
+			TLSHandshakeStart: func() { tlsStarted.Store(true) },
+			TLSHandshakeDone: func(_ tls.ConnectionState, err error) {
+				if err == nil {
+					tlsDone.Store(true)
+				}
+			},
+		}
+		req, err := http.NewRequestWithContext(httptrace.WithClientTrace(ctx, trace), method, a.base+path, bytes.NewReader(raw))
 		if err != nil {
 			return 0, err
 		}
@@ -467,6 +597,9 @@ func (a *api) doWith(ctx context.Context, method, path string, headers map[strin
 				}
 				continue
 			}
+			if isProvenPreSendError(err, gotConn.Load(), wroteAny.Load(), tlsStarted.Load(), tlsDone.Load()) {
+				return 0, fmt.Errorf("%w: %s could not be reached: %w", errRequestNotSent, marketTitle(a.market), err)
+			}
 			return 0, fmt.Errorf("%s could not be reached: %w", marketTitle(a.market), err)
 		}
 		data, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
@@ -475,7 +608,7 @@ func (a *api) doWith(ctx context.Context, method, path string, headers map[strin
 			return resp.StatusCode, err
 		}
 		switch {
-		case resp.StatusCode == 429 && attempt < 6:
+		case retry && resp.StatusCode == 429 && attempt < 6:
 			wait, _ := strconv.Atoi(resp.Header.Get("Retry-After"))
 			if err := a.sleep(ctx, time.Duration(max(wait, 2))*time.Second); err != nil {
 				return 0, err

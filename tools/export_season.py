@@ -46,7 +46,10 @@ def export(season_id: str = CURRENT_SEASON) -> dict:
             # Which of those parts are families of generated problems; every other part is a kind of writing.
             "generated": [f.NAME for f in gen.named(plan.parts)],
             "clip": raw["exam"]["aggregate"]["clip"], "trim": raw["exam"]["aggregate"]["trim"], "small": raw["exam"]["aggregate"]["small"],
+            "weight_other_by_share": bool(raw["exam"]["aggregate"].get("weight_other_by_share", False)),
+            **({"code_share": float(raw["exam"]["aggregate"]["code_share"])} if "code_share" in raw["exam"]["aggregate"] else {}),
             "answer_floor_bytes": season.answer_floor_bytes,
+            "min_pillar_items": int(raw["exam"].get("min_pillar_items", 0)),
             # How the exam's writing is taken from the hours the examiner harvests: server/harvest.go.
             "fresh": {k: int(raw["exam"]["fresh"][k]) for k in ("settle_seconds", "reach_seconds", "hours")},
         },
@@ -54,6 +57,7 @@ def export(season_id: str = CURRENT_SEASON) -> dict:
         "draw_grid_seconds": raw["draw_grid_seconds"],
         "pools": {k: {f: v for f, v in pool.items() if f != "manifest"} for k, pool in raw["pools"].items()},
         "grade_devices": raw["grade_devices"],
+        **({"grade_backends": raw["grade_backends"]} if raw.get("grade_backends") else {}),
         "environment": raw.get("environment", {}),
         "assets": raw.get("assets", {}),
         "machine": raw.get("machine", {}),
@@ -67,6 +71,8 @@ def export(season_id: str = CURRENT_SEASON) -> dict:
         "baselines": raw.get("baselines", {}),
         "references": raw.get("references", {}),
         "train": raw["train"],
+        "student": {k: raw["student"][k] for k in ("kind", "repo", "revision", "reset_frac", "freeze_bottom") if k in raw["student"]} if "student" in raw else {},
+        "sft": raw.get("sft", {}),
         "tokenizer": {k: raw["tokenizer"][k] for k in ("vocab_size",)},
         "parity": {
             "index": 7, "beacon": beacon, "crawl": crawl, "seed": rnd.seed.hex(),

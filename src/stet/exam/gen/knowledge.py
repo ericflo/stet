@@ -55,17 +55,24 @@ NO_SPACE = {"ja", "zh"}  # the answer follows without a space
 
 
 @cache
-def facts() -> dict[tuple[str, str], list[tuple[str, str]]]:
-    """(fact, language) -> [(subject, answer)], in the list's order."""
+def facts_with_ids() -> dict[tuple[str, str], list[tuple[str, str, str]]]:
+    """(fact, language) -> [(wikidata_qid, subject_label, answer_label)], in the list's order."""
     import zstandard
 
     raw = resources.files("stet.exam").joinpath("data/facts-s1.jsonl.zst").read_bytes()
-    out: dict[tuple[str, str], list[tuple[str, str]]] = {}
+    out: dict[tuple[str, str], list[tuple[str, str, str]]] = {}
     for line in zstandard.ZstdDecompressor().decompress(raw, max_output_size=256 << 20).decode().splitlines():
         row = json.loads(line)
+        qid = str(row["s"])
         for lang, (s, o) in row["labels"].items():
-            out.setdefault((row["fact"], lang), []).append((s, o))
+            out.setdefault((row["fact"], lang), []).append((qid, s, o))
     return out
+
+
+@cache
+def facts() -> dict[tuple[str, str], list[tuple[str, str]]]:
+    """(fact, language) -> [(subject, answer)], in the list's order."""
+    return {k: [(s, o) for _, s, o in rows] for k, rows in facts_with_ids().items()}
 
 
 def corners() -> list[str]:
@@ -83,3 +90,57 @@ def make(rng: Rng, corner: str) -> Item:
     ctx = TEMPLATES[fact][lang].format(s=s)
     return Item(kind="answer", corner=corner, fmt="prose", lang=lang, source=f"gen:{NAME}", ctx=ctx,
                 cont=o if lang in NO_SPACE else f" {o}")
+
+
+def _qid_parity(qid: str) -> int:
+    import hashlib
+
+    return hashlib.sha256(qid.encode("utf-8")).digest()[0] & 1
+
+
+def split_pool_with_ids(fact: str, lang: str, parity: int) -> tuple[list[tuple[str, str, str]], str]:
+    """Split a (fact, lang) pool deterministically by canonical Wikidata subject Q-ID parity:
+    0 = exam pool (knowledge-even), 1 = disjoint SFT probe pool (zero cross-language fact overlap)."""
+    full = facts_with_ids().get((fact, lang))
+    if not full:
+        lang = "en"
+        full = facts_with_ids()[(fact, "en")]
+    part = [(qid, s, o) for qid, s, o in full if _qid_parity(qid) == parity]
+    return part, lang
+
+
+def split_pool(fact: str, lang: str, parity: int) -> tuple[list[tuple[str, str]], str]:
+    """Split a (fact, lang) pool deterministically by canonical Wikidata subject Q-ID parity:
+    0 = exam pool (knowledge-even), 1 = disjoint SFT probe pool (zero cross-language fact overlap)."""
+    part, lang = split_pool_with_ids(fact, lang, parity)
+    return [(s, o) for _, s, o in part], lang
+
+
+class KnowledgeEven:
+    """Factual knowledge scored by right-answer likelihood (bits per byte) on the even-parity
+    canonical Wikidata subject Q-ID split — completely disjoint across all 10 languages from the
+    odd-parity split used by the post-pretraining SFT probe."""
+
+    NAME = "knowledge-even"
+
+    @staticmethod
+    def corners() -> list[str]:
+        return [f"{KnowledgeEven.NAME}/{lang}/{fact}" for fact in TEMPLATES for lang in LANGS]
+
+    @staticmethod
+    def make(rng: Rng, corner: str) -> Item:
+        _, lang, fact = corner.split("/")
+        pool, lang = split_pool(fact, lang, parity=0)
+        s, o = rng.choice(pool)
+        if fact == "birthyear":
+            o = str(int(o))
+        ctx = TEMPLATES[fact][lang].format(s=s)
+        return Item(
+            kind="answer",
+            corner=corner,
+            fmt="prose",
+            lang=lang,
+            source=f"gen:{KnowledgeEven.NAME}",
+            ctx=ctx,
+            cont=o if lang in NO_SPACE else f" {o}",
+        )

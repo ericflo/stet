@@ -170,3 +170,53 @@ def test_a_checkout_is_not_something_the_installer_made():
         pytest.skip("these tests are running from an installed stet")
     ok, why = upgrade.can()
     assert not ok and "installer" in why
+
+
+def test_review16_grade_only_install_role_preserved_across_upgrades(monkeypatch, tmp_path):
+    """Review 16 P2 #6: a volunteer who set STET_GRADE_ONLY=1 only for initial install keeps
+    stet-cli[train] across automatic upgrades via uv-receipt.toml unless explicitly overridden."""
+    train_prefix = tmp_path / "train-env"
+    train_prefix.mkdir()
+    (train_prefix / "uv-receipt.toml").write_text(
+        '[tool]\nrequirements = [{ name = "stet-cli", extras = ["train"], url = "https://api.test/stet.whl" }]\n',
+        encoding="utf-8",
+    )
+    run_prefix = tmp_path / "run-env"
+    run_prefix.mkdir()
+    (run_prefix / "uv-receipt.toml").write_text(
+        '[tool]\nrequirements = [{ name = "stet-cli", extras = ["run", "cuda"], url = "https://api.test/stet.whl" }]\n',
+        encoding="utf-8",
+    )
+    assert upgrade.is_grade_only(train_prefix) is True
+    assert upgrade.is_grade_only(run_prefix) is False
+    assert upgrade.is_grade_only(tmp_path / "missing") is False
+
+    seen_envs = []
+
+    def fake_run(cmd, env=None, **k):
+        seen_envs.append(dict(env or {}))
+        return argparse.Namespace(returncode=0, stdout="Done. Next:\n")
+
+    monkeypatch.setattr(upgrade, "fetch_installer", lambda site: b"#!/bin/sh\necho ok\n")
+    monkeypatch.setattr(upgrade.subprocess, "run", fake_run)
+    monkeypatch.setattr(upgrade, "find_uv", lambda: "/opt/uv/bin/uv")
+    monkeypatch.setattr(upgrade, "has_torch", lambda: True)
+    monkeypatch.setattr(upgrade, "torch_index", lambda env: "")
+    monkeypatch.delenv("STET_GRADE_ONLY", raising=False)
+    monkeypatch.delenv("STET_TORCH_INDEX", raising=False)
+
+    # Grade-only uv-receipt.toml -> upgrade.install() sets STET_GRADE_ONLY=1 automatically.
+    monkeypatch.setattr(upgrade.sys, "prefix", str(train_prefix))
+    ok, _ = upgrade.install("https://site.test", {})
+    assert ok and seen_envs[-1].get("STET_GRADE_ONLY") == "1"
+
+    # Explicit STET_GRADE_ONLY=0 lets a user opt into full curator libraries.
+    monkeypatch.setenv("STET_GRADE_ONLY", "0")
+    ok, _ = upgrade.install("https://site.test", {})
+    assert ok and seen_envs[-1].get("STET_GRADE_ONLY") == "0"
+    monkeypatch.delenv("STET_GRADE_ONLY", raising=False)
+
+    # Full [run,cuda] uv-receipt.toml -> upgrade.install() does NOT set STET_GRADE_ONLY.
+    monkeypatch.setattr(upgrade.sys, "prefix", str(run_prefix))
+    ok, _ = upgrade.install("https://site.test", {})
+    assert ok and "STET_GRADE_ONLY" not in seen_envs[-1]

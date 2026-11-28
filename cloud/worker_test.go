@@ -166,6 +166,12 @@ func TestAWorkerRunsCuratorsAndFallsBackToGrading(t *testing.T) {
   verify) echo "$* tools=$UV_TOOL_DIR python=$UV_PYTHON_INSTALL_DIR tmp=$TMPDIR" >> "$LOG/stet"; case "$*" in *--edits*) exit 3 ;; esac ;;
 esac
 `)
+	// Keep this test hermetic on Go-only CI hosts that lack a system C/C++ compiler toolchain.
+	for _, cc := range []string{"gcc", "g++"} {
+		if err := os.WriteFile(filepath.Join(w.bin, cc), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
 	opt := filepath.Join(w.dir, "opt")
 	w.env = append(w.env, "STET_WORKER_EDITS=1")
 	out, err := w.cmd().CombinedOutput()
@@ -260,5 +266,111 @@ esac
 	kept, _ := os.ReadFile(filepath.Join(w.home, "probe.txt"))
 	if !strings.Contains(string(kept), "[probe] cage: every case held") {
 		t.Fatalf("not kept in probe.txt:\n%s", kept)
+	}
+}
+
+// On a minimal root apt container without a complete C/C++ toolchain, a curator worker
+// (STET_WORKER_EDITS=1) installs gcc, g++ and libc6-dev for Triton/vLLM/FLA JIT kernels and ends
+// the pod loudly if any part of the toolchain (gcc, g++, or libc/libstdc++ headers) is still
+// missing or broken, whereas a grade-only worker (STET_WORKER_EDITS=0) skips it and sets
+// STET_GRADE_ONLY=1.
+func TestWorkerInstallsCompilerPackagesAndFailsLoudlyIfMissing(t *testing.T) {
+	runWithApt := func(aptBody string, edits string, preBins map[string]string) (string, string, string) {
+		w := newWorkerRun(t, `case "$1" in --version) echo "stet 0.0.0" ;; verify) echo "$*" >> "$LOG/stet" ;; esac`)
+		w.env = append(w.env, "STET_WORKER_EDITS="+edits)
+		// Minimal PATH containing only our fake tools + basic coreutils directory without gcc/g++.
+		shim := filepath.Join(w.dir, "shim")
+		os.MkdirAll(shim, 0o755)
+		for _, tool := range []string{"bash", "sh", "mkdir", "chmod", "touch", "rm", "date", "printf", "grep", "cat", "cp", "base64", "stat", "sed", "head", "awk", "df", "free", "nproc", "uname"} {
+			if p, err := exec.LookPath(tool); err == nil {
+				os.Symlink(p, filepath.Join(shim, tool))
+			}
+		}
+		writeShim := func(name, body string) {
+			if err := os.WriteFile(filepath.Join(w.bin, name), []byte("#!/bin/bash\n"+body), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		writeShim("id", `echo 0`)
+		writeShim("apt-get", aptBody)
+		for name, body := range preBins {
+			writeShim(name, body)
+		}
+		for i, e := range w.env {
+			if strings.HasPrefix(e, "PATH=") {
+				w.env[i] = "PATH=" + w.bin + ":" + shim
+			}
+		}
+		out, err := w.cmd().CombinedOutput()
+		if err != nil {
+			t.Fatalf("%v\n%s", err, out)
+		}
+		return string(out), w.log("apt"), w.log("stet")
+	}
+
+	// Curator success case: apt-get installs gcc, g++, libc6-dev and provides working gcc and g++
+	// supporting shared-library linking (-shared -fPIC) required by Triton/torch cpp_extension.
+	ccProbe := "case \"$*\" in *-shared*-fPIC*|*-fPIC*-shared*) exit 0 ;; *) exit 1 ;; esac\n"
+	out, aptLog, stetLog := runWithApt(`echo "$*" >> "$LOG/apt"
+if [ "$1" = "install" ]; then
+  printf '#!/bin/sh\ncase "$*" in *-shared*-fPIC*|*-fPIC*-shared*) exit 0 ;; *) exit 1 ;; esac\n' > "$LOG/bin/gcc" && chmod +x "$LOG/bin/gcc"
+  printf '#!/bin/sh\ncase "$*" in *-shared*-fPIC*|*-fPIC*-shared*) exit 0 ;; *) exit 1 ;; esac\n' > "$LOG/bin/g++" && chmod +x "$LOG/bin/g++"
+fi
+exit 0`, "1", nil)
+	for _, pkg := range []string{"gcc", "g++", "libc6-dev"} {
+		if !strings.Contains(aptLog, pkg) {
+			t.Fatalf("apt-get install did not request %q:\n%s\n%s", pkg, aptLog, out)
+		}
+	}
+	if !strings.Contains(stetLog, "verify") {
+		t.Fatalf("expected stet verify to run once gcc and g++ installed:\n%s", out)
+	}
+
+	// Review 29 P2 #4: gcc already on PATH while g++ is absent MUST run apt-get and install g++;
+	// if g++ is still absent afterward, worker MUST end_pod loudly and NEVER start stet verify --edits.
+	outGpp, aptGpp, stetGpp := runWithApt(`echo "$*" >> "$LOG/apt"
+if [ "$1" = "install" ]; then
+  printf '#!/bin/sh\ncase "$*" in *-shared*-fPIC*|*-fPIC*-shared*) exit 0 ;; *) exit 1 ;; esac\n' > "$LOG/bin/g++" && chmod +x "$LOG/bin/g++"
+fi
+exit 0`, "1", map[string]string{"gcc": ccProbe})
+	if !strings.Contains(aptGpp, "g++") || !strings.Contains(stetGpp, "verify --edits") {
+		t.Fatalf("gcc without g++ must invoke apt-get for g++ and then run verify --edits; apt=%q stet=%q\nout=%s", aptGpp, stetGpp, outGpp)
+	}
+	outNoGpp, aptNoGpp, stetNoGpp := runWithApt(`echo "$*" >> "$LOG/apt"; exit 0`, "1", map[string]string{"gcc": ccProbe})
+	if !strings.Contains(aptNoGpp, "g++") || stetNoGpp != "" || !strings.Contains(outNoGpp, "C/C++ compiler toolchain") {
+		t.Fatalf("missing g++ after apt-get must fail loudly without starting verify; apt=%q stet=%q\nout=%s", aptNoGpp, stetNoGpp, outNoGpp)
+	}
+
+	// Review 29 P2 #4: gcc and g++ present on PATH but headers/linker missing (shared probe exits 1)
+	// MUST invoke apt-get and fail loudly if the shared-library link probe still fails.
+	outNoHdr, aptNoHdr, stetNoHdr := runWithApt(`echo "$*" >> "$LOG/apt"; exit 0`, "1", map[string]string{
+		"gcc": "exit 1\n",
+		"g++": ccProbe,
+	})
+	if !strings.Contains(aptNoHdr, "libc6-dev") || stetNoHdr != "" || !strings.Contains(outNoHdr, "C/C++ compiler toolchain") {
+		t.Fatalf("broken libc headers/linker (failing gcc probe) must run apt-get and fail loudly; apt=%q stet=%q\nout=%s", aptNoHdr, stetNoHdr, outNoHdr)
+	}
+
+	// Review 29 Gate 4 P2 #4: non-root curator container (id -u != 0, cannot run apt-get) missing g++
+	// MUST STILL fail loudly and NEVER start stet verify --edits!
+	outNonRoot, aptNonRoot, stetNonRoot := runWithApt(`echo "$*" >> "$LOG/apt"; exit 0`, "1", map[string]string{
+		"id":  "echo 1000\n",
+		"gcc": ccProbe,
+	})
+	if aptNonRoot != "" || stetNonRoot != "" || !strings.Contains(outNonRoot, "C/C++ compiler toolchain") {
+		t.Fatalf("non-root curator missing g++ must fail loudly without starting verify; apt=%q stet=%q\nout=%s", aptNonRoot, stetNonRoot, outNonRoot)
+	}
+
+	// Curator failure case: apt-get fails (even though curl exists); worker must end_pod loudly
+	// instead of continuing without a compiler.
+	outFail, _, stetFail := runWithApt(`echo "$*" >> "$LOG/apt"; exit 1`, "1", nil)
+	if stetFail != "" || !strings.Contains(outFail, "C/C++ compiler toolchain") {
+		t.Fatalf("expected loud failure when compiler toolchain install fails; stet=%q\nout=%s", stetFail, outFail)
+	}
+
+	// Grade-only case: skips compiler installation completely and uses the lean grade-only installer.
+	outGrade, aptGrade, stetGrade := runWithApt(`echo "$*" >> "$LOG/apt"; exit 1`, "0", nil)
+	if aptGrade != "" || !strings.Contains(outGrade, "installing grade-only stet") || !strings.Contains(stetGrade, "verify") {
+		t.Fatalf("grade-only worker should skip compiler toolchain and run verify; apt=%q stet=%q\nout=%s", aptGrade, stetGrade, outGrade)
 	}
 }

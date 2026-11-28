@@ -16,37 +16,44 @@ from stet.spec import load_season, official_round, practice_round
 def test_the_season_is_the_exam_at_the_standard_scale():
     from stet.spec import CURRENT_SEASON
 
-    s1 = load_season()
-    assert s1.id == CURRENT_SEASON == "s2" and s1.official_scale == "standard" and "heldout_exam" not in s1.raw
-    assert s1.exam_sources == ["reference", "news", "technical", "conversation",
-                               "agents", "reading", "logic", "grammar", "numbers", "programs", "knowledge"]
-    assert s1.raw["exam"]["groups"] == {"writing": 0.75, "skills": 0.25} and s1.answer_floor_bytes == 16
-    # What the score is made of, by hand: four kinds of writing and seven skills, and each one's parts.
+    s3 = load_season()
+    assert s3.id == CURRENT_SEASON == "s3" and s3.official_scale == "standard" and "heldout_exam" not in s3.raw
+    assert s3.exam_sources == ["reference", "news", "technical", "conversation", "explain", "infer", "synthesis"]
+    assert s3.raw["exam"]["groups"] == {"comprehension": 0.0, "reasoning": 1.0} and s3.answer_floor_bytes == 16
+    assert s3.raw["exam"]["fresh"]["mode"] == "context"
+    assert s3.raw["grade_backends"] == ["cuda"]
+    assert s3.raw["tolerance"]["standard"] == {"grade": 0.012, "baseline": 0.015, "run": 0.015}
+    # What the score is made of: three scored reasoning kinds (100% of score) and four 0%-weight diagnostic comprehension kinds.
     from stet.exam.aggregate import plan_of
 
     made_of = {
-        "reference": ("writing", ["reference"]), "news": ("writing", ["news"]), "technical": ("writing", ["technical"]),
-        "conversation": ("writing", ["discussion", "social"]),
-        "agents": ("skills", ["agent"]), "reading": ("skills", ["context"]),
-        "logic": ("skills", ["logic"]), "grammar": ("skills", ["grammar"]),
-        "numbers": ("skills", ["arith-shots", "units-shots", "word-shots", "algebra-shots"]),
-        "programs": ("skills", ["algo-shots"]), "knowledge": ("skills", ["knowledge"]),
+        "reference": ("comprehension", ["reference"]), "news": ("comprehension", ["news"]), "technical": ("comprehension", ["technical"]),
+        "conversation": ("comprehension", ["discussion", "social"]),
+        "explain": ("reasoning", ["explain"]), "infer": ("reasoning", ["infer"]), "synthesis": ("reasoning", ["synthesis"]),
     }
-    assert {p: (v["group"], v["parts"]) for p, v in s1.raw["exam"]["pillars"].items()} == made_of
-    weights = plan_of(s1).weights(made_of)
-    assert weights == pytest.approx({p: 0.1875 if group == "writing" else 0.25 / 7 for p, (group, _) in made_of.items()})
-    assert s1.raw["exam"]["more"] == {"agent": 4, "context": 2, "logic": 2, "grammar": 3} and s1.raw["exam"]["per_corner"] == 2
-    assert s1.min_copy_bytes == 64  # the shortest copy a script may hold; of text of its own it holds none
-    assert s1.raw["exam"]["generator_version"] == gen.VERSION
-    assert len(s1.digest) == 64 and s1.digest == load_season("s2").digest
-    # the tokenizer and the facts its knowledge items ask are what the season says
+    assert {p: (v["group"], v["parts"]) for p, v in s3.raw["exam"]["pillars"].items()} == made_of
+    weights = plan_of(s3).weights(made_of)
+    assert weights == pytest.approx({p: 0.0 if group == "comprehension" else 1.0 / 3 for p, (group, _) in made_of.items()})
+    assert s3.raw["exam"]["more"] == {} and s3.raw["exam"]["per_corner"] == 0
+    assert s3.min_copy_bytes == 64  # the shortest copy a script may hold; of text of its own it holds none
+    assert s3.raw["exam"]["generator_version"] == gen.VERSION
+    assert len(s3.digest) == 64 and s3.digest == load_season("s3").digest
+    # The pinned HF student/tokenizer hashes, SFT pack, and practice pack hashes all match disk.
     import hashlib
     from importlib import resources
 
-    tok = resources.files("stet.seasons").joinpath(s1.raw["tokenizer"]["file"]).read_bytes()
-    assert hashlib.sha256(tok).hexdigest() == s1.raw["tokenizer"]["sha256"]
-    facts = resources.files("stet.exam").joinpath("data", s1.raw["exam"]["facts"]["file"]).read_bytes()
-    assert hashlib.sha256(facts).hexdigest() == s1.raw["exam"]["facts"]["sha256"]
+    assert s3.raw["tokenizer"]["kind"] == "hf" and len(s3.raw["tokenizer"]["sha256"]) == 64
+    assert s3.raw["student"]["kind"] == "hf_topreset" and s3.raw["student"]["reset_frac"] == 0.5
+    assert s3.raw["student"]["freeze_bottom"] is True
+    assert all(len(f["sha256"]) == 64 for f in s3.raw["student"]["files"])
+    sft_pack = resources.files("stet.exam").joinpath("data", s3.raw["sft"]["pack"]).read_bytes()
+    assert hashlib.sha256(sft_pack).hexdigest() == s3.raw["sft"]["pack_sha256"]
+    prac_pack = resources.files("stet.exam").joinpath("data", s3.raw["exam"]["practice_pack"]["file"]).read_bytes()
+    assert hashlib.sha256(prac_pack).hexdigest() == s3.raw["exam"]["practice_pack"]["sha256"]
+    # Season 2's bundled tokenizer still checks out for archival / replay compatibility.
+    s2 = load_season("s2")
+    tok = resources.files("stet.seasons").joinpath(s2.raw["tokenizer"]["file"]).read_bytes()
+    assert hashlib.sha256(tok).hexdigest() == s2.raw["tokenizer"]["sha256"]
 
 
 def test_a_practice_rounds_exam_is_generated_from_its_seed():
@@ -104,7 +111,7 @@ def test_a_grade_reports_every_items_score(monkeypatch):
 
     items = [Item(kind="answer", corner="arith/x", fmt="math", lang="en", source="gen:arith", ctx="1 + 1 =", cont=" 2")] * 3
     stats = types.SimpleNamespace(out_docs=1, out_bytes=1, tokens_one_pass=1, passes=1.0, to_dict=lambda corpus: {"script_sha256": "ab" * 32})
-    monkeypatch.setattr(grading, "train", lambda *a: (None, {"tokens": 9, "curve": []}))
+    monkeypatch.setattr(grading, "train", lambda *a, **kw: (None, {"tokens": 9, "curve": []}))
     monkeypatch.setattr(grading, "materialize", lambda *a: ([], stats))
     monkeypatch.setattr(grading, "file_sha256", lambda path, limit: "ab" * 32)
     monkeypatch.setattr(grading, "hardware_info", lambda device: {})
@@ -132,7 +139,7 @@ def test_the_examiner_makes_a_rounds_exam_from_its_harvest_and_seed(monkeypatch,
     import base64
 
     from stet.exam import examine
-    from stet.exam.aggregate import score_from_table
+    from stet.exam.aggregate import plan_of, score_from_table
     from stet.exam.farm import unpack_items
     from stet.exam.fresh import Doc, write_snapshot
 
@@ -158,7 +165,7 @@ def test_the_examiner_makes_a_rounds_exam_from_its_harvest_and_seed(monkeypatch,
     assert exam["snapshot_sha256"] == hashlib.sha256((shas[1] + shas[0]).encode()).hexdigest()
     assert len({it.source for it in items if not it.source.startswith("gen:")}) <= len(docs)
     # what the server is sent is all it needs to score a grade
-    assert score_from_table(exam["table"], [0.1] * len(items), exam["languages"])["score"] == pytest.approx(0.1)
+    assert score_from_table(exam["table"], [0.1] * len(items), exam["languages"], plan=plan_of(s1))["score"] == pytest.approx(0.1)
     # made again, it is the same exam
     assert examine.build(rnd, s1.scale("standard"), hours[::-1], tmp_path / "work", log=lambda m: None) == exam
     with pytest.raises(ValueError, match="no harvest"):

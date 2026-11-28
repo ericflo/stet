@@ -19,7 +19,7 @@ There are two kinds of work, and you choose whether to take the second.
 | | Grading | Running curators (`--edits`) |
 |---|---|---|
 | What runs on your machine | the fixed trainer, on plain data | entrants' programs, in a sandbox |
-| Needs | an NVIDIA (CUDA) or AMD (ROCm) GPU, the season's PyTorch, 10 GB of disk | also Linux, bubblewrap, the season's libraries, a machine at or above the floor, 60 GB of disk |
+| Needs | an NVIDIA (CUDA) GPU (12 GB+ VRAM; ≤10 GiB peak; `grade_backends: ["cuda"]`), the season's PyTorch and Transformers, 25 GB of disk | also Linux, bubblewrap, the season's libraries, a 24 GB+ NVIDIA (CUDA) GPU at or above the floor, 80 GB of disk |
 | Who is given it | anyone | accounts that are established (below) |
 
 The installer brings Python 3.13, PyTorch in the build for your GPU, and the season's
@@ -97,9 +97,12 @@ Grade jobs start as soon as a curator has written a script. The round's exam is 
 its draw, and posted as soon as the examiner has built it. A verifier handed a script
 before then trains at once and sits the exam the moment it is posted; one whose grade is
 trained and waiting asks for another, and sits them all then. At the official
-scale a grade is one training run, about 18 minutes on an RTX 3090 or 4070 Ti. The first
-job of a round also downloads the round's raw text (about a gigabyte; 2.5 GB once built).
-Four established machines a round are asked to train on the unedited corpus as well, and
+scale a grade is one training run (`ERNIE-4.5-0.3B-Base-PT`, bottom half frozen, top half
+reset, on 65.5M tokens plus a 32-step SFT probe), about 20 minutes on an RTX 5090 (~30
+minutes on an RTX 4090, ~55 minutes on an RTX 3090), using ≤10 GiB VRAM so 12 GB+ NVIDIA cards can
+grade. The first job of a round also downloads the round's raw text (about 1.5 GB compressed;
+~3.8 GB once built) and caches the pinned student weights (~0.7 GB).
+Two established machines a round (`baselines.per_round = 2`) are asked to train on the unedited corpus as well, and
 so is every machine that is not yet established: for them the first job takes about twice
 as long.
 
@@ -116,7 +119,7 @@ pass. Each one runs in a sandbox:
   named, all read-only, and scratch space held in memory;
 - not your machine's name, other processes or hardware serial numbers. It can see the
   path of the directories it was given, and so the name of the account `stet` runs as;
-- six cores, 12 GB of memory, one GPU with 8 GB of its memory, and the time limit, after
+- six cores, 20 GB of memory, one GPU with 22 GB of its memory, and the time limit, after
   which it is killed.
 
 `stet verify --edits` tests the sandbox before it takes any work and will not start
@@ -128,7 +131,7 @@ what any of this contains. Curators are public code from accounts tied to a GitH
 identity, which is a deterrent and not a guarantee. Run curators on a machine you could
 reinstall without loss.
 
-A curator may name model files, up to 4 GiB an entry. They are fetched from Hugging Face
+A curator may name model files, up to 10 GiB an entry. They are fetched from Hugging Face
 before it runs, checked against their hashes, and kept in a cache that is trimmed at
 40 GB and of whatever has gone unused for two weeks
 ([what it keeps on your disk](#what-it-keeps-on-your-disk)). A run takes up to twenty
@@ -175,13 +178,12 @@ A verifier does not take the server's word for what a round is.
 ## Why a score can be believed
 
 **Grading is reproducible.** Same script, same corpus, same exam, same initial weights,
-same number of tokens. Two honest machines agree to within a small tolerance
-*(provisional: 0.025 bits per byte at the official scale; see [Experiments](EXPERIMENTS.md))*.
+same number of tokens. Two honest NVIDIA machines (cross-verified across RTX 5090, 4090 and
+3090 at standard scale) agree to within a small tolerance *(`0.012` bits per byte at the
+official scale; see [Experiments](EXPERIMENTS.md))*.
 
-**Every curator is run twice, by different people,** when two are around. A machine is
-handed first an entry whose other run was on the other make of GPU, so the two are on
-NVIDIA and AMD when machines of both are asking. Nobody runs their own entry or runs one
-entry twice. When two runs differ by more than a tolerance *(provisional: 0.04 bits per
+**Every curator is run twice, by different people,** when two are around. Nobody runs their own entry or runs one
+entry twice. When two runs differ by more than a tolerance *(`0.015` bits per
 byte)*, or one fails, a third person runs it and the middle one counts. Whoever has seen one of an entry's scripts cannot run it, so a
 runner who could give that third run is handed none of them while someone else can grade.
 
@@ -201,12 +203,12 @@ a person who has been shown a script of an entry is never asked to run that entr
 an account that is not established is shown a script only once its entry is closed to
 further runs.
 
-**The round's baseline is measured four times.** The first four established graders of a
-round are each asked for a baseline with their grade: the unedited corpus's score on every
-item. The round's baseline is the item-by-item mean of theirs, and every grade is measured
+**The round's baseline is measured twice.** The first two established graders of a
+round (`baselines.per_round = 2`) are each asked for a baseline with their grade: the unedited corpus's score on every
+item. The round's baseline is the item-by-item median of theirs, and every grade is measured
 against it, whoever made it. A machine that is not yet established is always asked for its
 own: that is how it is checked. If your corpus or your exam differs from the round's, or your
-baseline is further from the others' than 0.04 bits per byte, your result is set aside with a
+baseline is further from the others' than 0.015 bits per byte, your result is set aside with a
 message saying which. That is a broken cache or a different PyTorch, and it does not count
 against you. It is listed on the round's page
 all the same: if honest machines of one kind keep landing there, the tolerance is wrong,
@@ -248,7 +250,7 @@ It does not wait for people who are not there. If nobody who is at work on a job
 asked for one in the last ten minutes, could give an entry its second run, the entry
 settles with one. If a
 verifier is part-way through a job, the round waits for them: for an established
-verifier until the job is reported, handed back or out of time (three hours at most), and
+verifier until the job is reported, handed back or out of time (five hours at most), and
 for anyone else up to 45 minutes, and only if a grade of theirs has agreed before. A key
 costs nothing, and one that could hold a round back just by taking a job would. So until your first grade has
 agreed, start early in a round. A grade that arrives after the round has settled earns

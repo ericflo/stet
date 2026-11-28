@@ -48,6 +48,7 @@ type Config struct {
 	QualifyRounds  int // rounds every entry is given
 	RatedRounds    int // rounds before an editor is ranked
 	Lease          time.Duration
+	ExamTimeout    time.Duration // how long an open round waits for its exam before cancelling cleanly with nothing held against entries (0 disables)
 	ReplicaWait    time.Duration // how long a round waits for people who have started, and before giving up what nobody is there to do
 	EstablishAfter int           // grades that must have agreed before an account's grades count and it may run editors
 	RunsPerEntry   int           // times each entry is run, by different people, before a third is wanted
@@ -99,6 +100,20 @@ func envDuration(key string, def time.Duration) time.Duration {
 	return def
 }
 
+func envDurationAllowZero(key string, def time.Duration) time.Duration {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return def
+	}
+	if raw == "0" {
+		return 0
+	}
+	if v, err := time.ParseDuration(raw); err == nil && v >= 0 {
+		return v
+	}
+	return def
+}
+
 func envBool(key string, def bool) bool {
 	switch strings.ToLower(os.Getenv(key)) {
 	case "1", "true", "yes", "on":
@@ -123,15 +138,16 @@ func loadConfig(season *Season) (Config, error) {
 		DBName:        env("STET_DB_NAME", "stet-"+season.ID), // a new season starts on a database of its own
 		AnchorKeys:    map[string]bool{},
 		Scale:         env("STET_SCALE", season.OfficialScale),
-		RoundInterval: envDuration("STET_ROUND_INTERVAL", 3*time.Hour),
-		RoundMinGap:   envDuration("STET_ROUND_MIN_GAP", 0),
+		RoundInterval: envDurationAllowZero("STET_ROUND_INTERVAL", 0),
+		RoundMinGap:   envDurationAllowZero("STET_ROUND_MIN_GAP", 0),
 		// A round takes every curator waiting at its draw. What bounds it is what one person
 		// may have in play at once; the organisers' own are not counted.
 		EntriesInPlay:    envInt("STET_ENTRIES_IN_PLAY", 3),
 		LadderSize:       envInt("STET_LADDER_SIZE", 8),
 		QualifyRounds:    envInt("STET_QUALIFY_ROUNDS", 3),
 		RatedRounds:      envInt("STET_RATED_ROUNDS", 3),
-		Lease:            envDuration("STET_LEASE", 3*time.Hour),
+		Lease:            envDuration("STET_LEASE", 5*time.Hour),
+		ExamTimeout:      envDurationAllowZero("STET_EXAM_TIMEOUT", 6*time.Hour),
 		EarlyWindow:      envDuration("STET_EARLY_WINDOW", 10*time.Minute),
 		ReplicaWait:      envDuration("STET_REPLICA_WAIT", 45*time.Minute),
 		EstablishAfter:   envInt("STET_ESTABLISH_AFTER", 5),
@@ -204,8 +220,9 @@ func (cfg *Config) check(season *Season) error {
 	if cfg.Dev {
 		return nil
 	}
-	if iv := int64(cfg.RoundInterval.Seconds()); season.DrawGrid <= 0 || iv < season.DrawGrid || iv%season.DrawGrid != 0 {
-		return fmt.Errorf("the round interval must be a multiple of the season's draw grid (%d seconds)", season.DrawGrid)
+	grid := time.Duration(season.DrawGrid) * time.Second
+	if season.DrawGrid <= 0 || (cfg.RoundInterval != 0 && (cfg.RoundInterval < grid || cfg.RoundInterval%grid != 0)) {
+		return fmt.Errorf("the round interval must be 0 (on demand) or a whole multiple of the season's draw grid (%d seconds)", season.DrawGrid)
 	}
 	if cfg.DBURL == "" {
 		return errors.New("STET_DB_URL is not set: outside development the records must live in durable-db")

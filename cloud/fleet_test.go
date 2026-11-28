@@ -13,22 +13,26 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
 
 // fakeRunPod is RunPod as far as stet-cloud can tell: a catalog, and pods made and ended.
 type fakeRunPod struct {
-	mu      sync.Mutex
-	pods    map[string]*Pod
-	noRoom  map[string]bool     // GPU kinds it has none of
-	logs    map[string][]string // what each pod's container said
-	created []NewPod
-	n       int
-	srv     *httptest.Server
+	mu             sync.Mutex
+	pods           map[string]*Pod
+	noRoom         map[string]bool     // GPU kinds it has none of
+	logs           map[string][]string // what each pod's container said
+	extraCommunity []map[string]any    // extra community offers for a single test
+	extraPrices    map[string]float64  // hourly prices for extraCommunity
+	created        []NewPod
+	n              int
+	srv            *httptest.Server
 }
 
 func newFakeRunPod(t *testing.T) *fakeRunPod {
@@ -52,12 +56,14 @@ func (f *fakeRunPod) serve(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if r.URL.Query().Get("cloud") == "COMMUNITY" {
-			json.NewEncoder(w).Encode(map[string]any{"gpus": []map[string]any{
+			gpus := []map[string]any{
 				{"id": "NVIDIA GeForce RTX 3080 Ti", "name": "RTX 3080 Ti", "manufacturer": "NVIDIA", "memory": 12, "price": map[string]any{"community": 0.18}, "availability": "LOW"},
 				{"id": "NVIDIA RTX A5000", "name": "RTX A5000", "manufacturer": "NVIDIA", "memory": 24, "price": map[string]any{"community": 0.16}, "availability": "NONE"},
 				{"id": "NVIDIA GeForce RTX 3090 Ti", "name": "RTX 3090 Ti", "manufacturer": "NVIDIA", "memory": 24, "price": map[string]any{"community": 0.27}, "availability": "LOW"},
 				{"id": "NVIDIA GeForce RTX 4090", "name": "RTX 4090", "manufacturer": "NVIDIA", "memory": 24, "price": map[string]any{"community": 0.45}, "availability": "LOW"},
-			}})
+			}
+			gpus = append(gpus, f.extraCommunity...)
+			json.NewEncoder(w).Encode(map[string]any{"gpus": gpus})
 			return
 		}
 		json.NewEncoder(w).Encode(map[string]any{"gpus": []map[string]any{
@@ -101,6 +107,9 @@ func (f *fakeRunPod) serve(w http.ResponseWriter, r *http.Request) {
 		f.n++
 		price := map[string]float64{"NVIDIA RTX A5000": 0.27, "NVIDIA GeForce RTX 3080": 0.2, "NVIDIA RTX PRO 4000 Blackwell": 0.57,
 			"NVIDIA GeForce RTX 3080 Ti": 0.18, "NVIDIA GeForce RTX 3090 Ti": 0.27}[spec.GPU.ID]
+		if p2, ok := f.extraPrices[spec.GPU.ID]; ok {
+			price = p2
+		}
 		p := &Pod{ID: fmt.Sprintf("pod%d", f.n), Name: spec.Name, Status: "RUNNING", Cost: price, CreatedAt: time.Now()}
 		p.GPU = &struct {
 			ID     string `json:"id"`
@@ -863,20 +872,20 @@ func TestStatusJudgesByTheServicesSettings(t *testing.T) {
 func TestGradersAreRentedBeforeTheExam(t *testing.T) {
 	rp, st := newFakeRunPod(t), newFakeStet(t)
 	f, out := testFleet(t, rp, st, 4)
-	f.o.Early, f.o.ExamAfter, f.o.PerWorker, f.o.Settle = 90*time.Minute, 2*time.Hour+12*time.Minute, 1, 15*time.Minute
+	f.o.Early, f.o.ExamAfter, f.o.PerWorker, f.o.Settle = 5*time.Hour, 5*time.Hour, 1, 15*time.Minute
 	st.work = Work{Runners: 1, Rounds: []WorkRound{{ID: "s1-o00001", Entries: 3, GradesEarly: 3}}}
 	// Nothing seen yet: a machine starts in 8 minutes, and with 2 to fetch and script and 1 to
 	// sit the exam, the secure kinds that fit, the 3080 ($0.20) and the A5000 ($0.27), each
-	// 0.85 of a 3090, are rented 53 minutes before they are to report; the PRO 4000 ($0.57),
-	// 0.8, 56.
-	st.drawnAt = time.Now().Add(-time.Hour).Unix() // the exam is due in 72 minutes
+	// 0.85 of a 3090 (61.2m/pass with passOn3090=52m), are rented 133 minutes before they are
+	// to report; the PRO 4000 ($0.57), 0.8, 141.
+	st.drawnAt = time.Now().Add(-30 * time.Minute).Unix() // the exam is due in 270 minutes
 	if err := tick(context.Background(), f); err != nil {
 		t.Fatal(err)
 	}
 	if len(rp.created) != 0 || !strings.Contains(out.String(), "waiting for the cheapest a round, RTX 3080 at $0.20 an hour") {
-		t.Fatalf("rented %d machines 72 minutes before the exam\n%s", len(rp.created), out)
+		t.Fatalf("rented %d machines 270 minutes before the exam\n%s", len(rp.created), out)
 	}
-	st.drawnAt = time.Now().Add(-79 * time.Minute).Unix() // due in 53 minutes
+	st.drawnAt = time.Now().Add(-175 * time.Minute).Unix() // due in 125 minutes
 	if err := tick(context.Background(), f); err != nil {
 		t.Fatal(err)
 	}
@@ -896,7 +905,7 @@ func TestCuratorsAreRunOnTheFastest(t *testing.T) {
 	rp, st := newFakeRunPod(t), newFakeStet(t)
 	f, out := testFleet(t, rp, st, 3)
 	f.o.Cloud, f.o.Edits = "ANY", true
-	st.work = *round(8, 0, 0, 0)
+	st.work = *round(4, 0, 0, 0)
 	if err := tick(context.Background(), f); err != nil {
 		t.Fatal(err)
 	}
@@ -908,6 +917,103 @@ func TestCuratorsAreRunOnTheFastest(t *testing.T) {
 	// would have been the cheapest a grade.
 	if len(got) != 2 || got[0] != "community RTX 4090" || got[1] != "community RTX 4090" {
 		t.Fatalf("rented %v\n%s", got, out)
+	}
+}
+
+// Season 3 curators require 24 GB+ VRAM (--min-curator-gpu-memory) while grading allows 16 GB+
+// (--min-gpu-memory). Verify both halves: curator launches skip the cheap 16 GB card, while
+// grade launches DO rent the 16 GB card (and start it grade-only with STET_WORKER_EDITS=0).
+func TestCuratorRunsRequire24GBVRAMWhileGradingAllowsSmaller(t *testing.T) {
+	rp, st := newFakeRunPod(t), newFakeStet(t)
+	rp.extraCommunity = []map[string]any{
+		// 16 GB card priced at $0.25/hr (speed 1.3 -> $0.192/grade, cheaper per grade than $0.27 RTX 3090 Ti).
+		{"id": "NVIDIA GeForce RTX 4080", "name": "RTX 4080", "manufacturer": "NVIDIA", "memory": 16, "price": map[string]any{"community": 0.25}, "availability": "LOW"},
+	}
+	rp.extraPrices = map[string]float64{"NVIDIA GeForce RTX 4080": 0.25}
+	f, out := testFleet(t, rp, st, 4)
+	everyHostStarts(t)
+	f.o.Cloud, f.o.Edits, f.o.MinGPUMemory, f.o.MinCuratorGPUMemory = "COMMUNITY", true, 16, 24
+	f.o.Cheapest = true // would pick 16 GB RTX 4080 ($0.25) if not filtered for curators
+	st.work = *round(4, 0, 0, 0)
+	if err := tick(context.Background(), f); err != nil {
+		t.Fatal(err)
+	}
+	if len(rp.created) != 2 {
+		t.Fatalf("rented %d\n%s", len(rp.created), out)
+	}
+	for _, spec := range rp.created {
+		if spec.GPU.ID == "NVIDIA GeForce RTX 4080" || spec.GPU.ID == "NVIDIA GeForce RTX 3080 Ti" {
+			t.Fatalf("rented <24 GB card %s for curator runs despite MinCuratorGPUMemory=24", spec.GPU.ID)
+		}
+	}
+	// Now request grades only (no curator runs): must pick the cheaper 16 GB RTX 4080 and
+	// launch it with STET_WORKER_EDITS=0 so it is tracked as grade-only!
+	for _, p := range rp.pods {
+		delete(rp.pods, p.ID)
+	}
+	before := len(rp.created)
+	st.work = *round(0, 0, 4, 0)
+	if err := tick(context.Background(), f); err != nil {
+		t.Fatal(err)
+	}
+	if len(rp.created) != before+1 {
+		t.Fatalf("expected 1 grade machine rented, got %d\n%s", len(rp.created)-before, out)
+	}
+	if got := rp.created[before]; got.GPU.ID != "NVIDIA GeForce RTX 4080" || got.Env["STET_WORKER_EDITS"] != "0" {
+		t.Fatalf("grade machine: gpu=%s edits=%q, want 16 GB RTX 4080 with STET_WORKER_EDITS=0", got.GPU.ID, got.Env["STET_WORKER_EDITS"])
+	}
+}
+
+// Calibration pass times are scoped per season: Season 2's shorter passes must not outrank
+// Season 3 cards or distort Season 3 lead times.
+func TestCalibrationResetsPassTimesOnNewSeason(t *testing.T) {
+	rp, st := newFakeRunPod(t), newFakeStet(t)
+	f, _ := testFleet(t, rp, st, 1)
+	// Seed a legacy Season 2 calibration.json (short 3090=18m, 4090=8m passes, plus boot times).
+	seed := Calibration{
+		Rounds: []string{"s2-o00001"},
+		Pass:   map[string][]float64{"RTX 3090": {18.0}, "RTX 4090": {8.0}},
+		Boot:   []BootSample{{Pod: "pod1", Minutes: 3.0}, {Pod: "pod2", Minutes: 4.0}, {Pod: "pod3", Minutes: 5.0}},
+	}
+	raw, _ := json.Marshal(seed)
+	if err := os.WriteFile(f.calibrationPath(), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Server is now on Season 3 with one settled Season 3 round on RTX 5090 (21m pass).
+	st.rounds = `{"rounds": [{"id": "s3-o00001", "status": "settled", "scale": "standard"}]}`
+	st.graded = map[string]string{
+		"s3-o00001": `{"round": {"id": "s3-o00001"}, "entries": [{"detail": {"hardware": {"gpu": "NVIDIA GeForce RTX 5090"}, "train": {"seconds": 1260}}}]}`,
+	}
+	// Override fakeStet route for /api/v1/rounds/s3-o00001 via direct season id check.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/season":
+			io.WriteString(w, `{"season": "s3", "site": "https://www.stet.test"}`)
+		case "/api/v1/rounds":
+			io.WriteString(w, st.rounds)
+		case "/api/v1/rounds/s3-o00001":
+			io.WriteString(w, st.graded["s3-o00001"])
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer srv.Close()
+	f.st = newStet(srv.URL)
+	f.calibrate(context.Background())
+
+	// Season 2's 3090 (18m) and 4090 (8m) must be cleared; 5090 (21m) must now rank faster than
+	// both unseen 4090 and unseen 3090! And Boot samples are preserved.
+	p5090, seen5090 := f.pass("NVIDIA GeForce RTX 5090")
+	p4090, seen4090 := f.pass("NVIDIA GeForce RTX 4090")
+	p3090, seen3090 := f.pass("NVIDIA GeForce RTX 3090")
+	if !seen5090 || seen4090 || seen3090 {
+		t.Fatalf("seen flags: 5090=%v 4090=%v 3090=%v", seen5090, seen4090, seen3090)
+	}
+	if p5090 >= p4090 || p5090 >= p3090 {
+		t.Fatalf("Season 2 pass leaked: 5090=%s 4090=%s 3090=%s", p5090, p4090, p3090)
+	}
+	if f.boot() != 5*time.Minute {
+		t.Fatalf("boot samples should survive season rollover, got %s", f.boot())
 	}
 }
 
@@ -978,7 +1084,7 @@ func TestWhatMachinesTakeIsLearned(t *testing.T) {
 		{"detail": {"hardware": {"gpu": "NVIDIA GeForce RTX 4090"}, "train": {"seconds": 480}}},
 		{"detail": {}}]}`}
 	pro := "NVIDIA RTX PRO 4000 Blackwell"
-	if p, seen := f.pass(pro); seen || p != time.Duration(float64(18*time.Minute)/0.8) {
+	if p, seen := f.pass(pro); seen || p != time.Duration(float64(passOn3090)/0.8) {
 		t.Fatalf("before any was seen: %s %v", p, seen)
 	}
 	f.calibrate(context.Background())
@@ -986,7 +1092,7 @@ func TestWhatMachinesTakeIsLearned(t *testing.T) {
 	if p, seen := f.pass(pro); !seen || p.Round(time.Second) != 15*time.Minute+40*time.Second {
 		t.Fatalf("a pass on the PRO 4000: %s %v\n%s", p, seen, out)
 	}
-	if s := f.speedOf("NVIDIA GeForce RTX 4090"); s != 2.25 {
+	if s := f.speedOf("NVIDIA GeForce RTX 4090"); s != float64(passOn3090)/float64(8*time.Minute) {
 		t.Fatalf("a 4090 is %vx a 3090", s)
 	}
 	// Seen starting, then asking for work: 3, 4 and 5 minutes, and one seen only once it had.
@@ -1022,10 +1128,10 @@ func TestWhatMachinesTakeIsLearned(t *testing.T) {
 func TestGradersTakeSeveralGradesBeforeTheExam(t *testing.T) {
 	rp, st := newFakeRunPod(t), newFakeStet(t)
 	f, out := testFleet(t, rp, st, 4)
-	f.o.Early, f.o.PerWorker, f.o.Settle, f.o.MaxHourly = 2*time.Hour, 1, 15*time.Minute, 16
-	// Nothing seen: the 3080 ($0.20, 0.85 of a 3090) passes in 21 minutes and leads by 53, so it
-	// takes three grades rented 97 minutes before the exam.
-	due := time.Now().Add(97 * time.Minute)
+	f.o.Early, f.o.PerWorker, f.o.Settle, f.o.MaxHourly = 8*time.Hour, 1, 15*time.Minute, 16
+	// Nothing seen: the 3080 ($0.20, 0.85 of a 3090) passes in 61.2 minutes and leads by 133.4, so it
+	// takes three grades rented 256.7 minutes before the exam.
+	due := time.Now().Add(257*time.Minute + 30*time.Second)
 	st.work = Work{EarlyGradesPerMachine: 3, FastFirstSeconds: 120,
 		Rounds: []WorkRound{{ID: "s1-o00008", Entries: 6, GradesEarly: 6, ExamDue: due.Unix()}}}
 	if err := tick(context.Background(), f); err != nil {
@@ -1165,16 +1271,16 @@ func TestTheCauseIsReadFromWhatTheMachineSaid(t *testing.T) {
 func TestACuratorMachineDoneTooEarlyIsEnded(t *testing.T) {
 	rp, st := newFakeRunPod(t), newFakeStet(t)
 	f, out := testFleet(t, rp, st, 2)
-	f.o.Early, f.o.PerWorker, f.o.MaxHourly = 3*time.Hour, 1, 16
+	f.o.Early, f.o.PerWorker, f.o.MaxHourly = 8*time.Hour, 1, 16
 	if err := cmdUp(context.Background(), f, 1); err != nil || len(rp.created) != 1 {
 		t.Fatalf("rented %d (%v)", len(rp.created), err)
 	}
-	// A 3080 (nothing seen: 0.85 of a 3090) takes 95 minutes from being rented to have three
-	// grades trained: with the exam 150 minutes off and a 10-minute window, its kind's time
-	// is 45 minutes off.
+	// A 3080 (nothing seen: 0.85 of a 3090) takes ~365 minutes from being rented to have three
+	// grades trained: with the exam 430 minutes off and a 10-minute window, its kind's time
+	// is ~55 minutes off.
 	now := time.Now()
 	st.work = Work{EarlyGradesPerMachine: 3, EarlyWindowSeconds: 600,
-		Rounds:   []WorkRound{{ID: "s1-o00009", Entries: 3, GradesEarly: 3, ExamDue: now.Add(150 * time.Minute).Unix()}},
+		Rounds:   []WorkRound{{ID: "s1-o00009", Entries: 3, GradesEarly: 3, ExamDue: now.Add(430 * time.Minute).Unix()}},
 		Machines: []Machine{{Handle: "stet-rp-01", Worker: true, LastSeen: now.Add(time.Second).Unix()}}}
 	out.Reset()
 	if err := tick(context.Background(), f); err != nil {
@@ -1285,4 +1391,871 @@ func TestOnlyAMachineMeasuringTheBaselineTrainsTwice(t *testing.T) {
 			t.Errorf("%d rounds open: lead %s, want %s", len(x.rounds), l, x.want)
 		}
 	}
+}
+
+// fits rejects slow GPUs whose two-pass baseline grade plus margin exceeds the server's lease,
+// while accepting faster cards that finish comfortably inside the lease.
+func TestFitsDropsCardsTooSlowForLease(t *testing.T) {
+	rp, st := newFakeRunPod(t), newFakeStet(t)
+	f, _ := testFleet(t, rp, st, 1)
+	f.o.MinGPUMemory = 12
+	f.lease = 5 * time.Hour
+
+	// With passOn3090=52m, cards slower than ~0.40x a 3090 (e.g. RTX 2000 Ada at 0.35x) exceed
+	// a 5h lease on a 2-pass baseline plus margin; cards >=0.40x (even RTX 3060 12 GB!) fit.
+	for _, slow := range []Offer{
+		{Maker: "NVIDIA", MemoryGB: 16, Model: "NVIDIA RTX 2000 Ada Generation", Card: "RTX 2000 Ada"},
+	} {
+		if f.fits(slow) {
+			t.Errorf("fits(%s) = true under 5h lease, want false", slow.Card)
+		}
+		if why := f.unfitReason(slow); !strings.Contains(why, "too slow") {
+			t.Errorf("unfitReason(%s) = %q, want lease-speed reason (not pre-Ampere bf16 rejection)", slow.Card, why)
+		}
+	}
+	if why := f.unfitReason(Offer{Maker: "NVIDIA", MemoryGB: 12, Model: "NVIDIA GeForce RTX 2080", Card: "RTX 2080"}); !strings.Contains(why, "bf16") {
+		t.Errorf("unfitReason(RTX 2080) = %q, want unsupported architecture/bf16 reason", why)
+	}
+	for _, fast := range []Offer{
+		{Maker: "NVIDIA", MemoryGB: 12, Model: "NVIDIA GeForce RTX 3060", Card: "RTX 3060"},
+		{Maker: "NVIDIA", MemoryGB: 16, Model: "NVIDIA GeForce RTX 4060 Ti", Card: "RTX 4060 Ti"},
+		{Maker: "NVIDIA", MemoryGB: 16, Model: "NVIDIA GeForce RTX 5060 Ti", Card: "RTX 5060 Ti"},
+		{Maker: "NVIDIA", MemoryGB: 24, Model: "NVIDIA L4", Card: "L4"},
+		{Maker: "NVIDIA", MemoryGB: 16, Model: "NVIDIA RTX A4000", Card: "RTX A4000"},
+		{Maker: "NVIDIA", MemoryGB: 16, Model: "NVIDIA GeForce RTX 4080 SUPER", Card: "RTX 4080 SUPER"},
+		{Maker: "NVIDIA", MemoryGB: 24, Model: "NVIDIA GeForce RTX 3090", Card: "RTX 3090"},
+		{Maker: "NVIDIA", MemoryGB: 24, Model: "NVIDIA GeForce RTX 4090", Card: "RTX 4090"},
+		{Maker: "NVIDIA", MemoryGB: 32, Model: "NVIDIA GeForce RTX 5090", Card: "RTX 5090"},
+	} {
+		if !f.fits(fast) {
+			t.Errorf("fits(%s) = false under 5h lease, want true", fast.Card)
+		}
+	}
+}
+
+// A 16 GB machine rented for grading is marked GradeOnly=true before it ever checks in, and
+// calibration samples from an earlier season (s2) are ignored once the active season is s3.
+func Test16GBRentalMarkedGradeOnlyAndSeasonGuardIgnoresS2Calibration(t *testing.T) {
+	rp, st := newFakeRunPod(t), newFakeStet(t)
+	f, _ := testFleet(t, rp, st, 2)
+	f.o.MinGPUMemory = 16
+	f.o.MinCuratorGPUMemory = 24
+	f.o.Edits = true
+	// Seed a Season 2 calibration (15 min 4090 pass) and point the fleet at Season 3.
+	f.cal = &Calibration{Season: "s2", Rounds: []string{"s2-o00001"}, Pass: map[string][]float64{"RTX 4090": {15}}}
+	f.st.season = "s3"
+	gotPass, seen := f.pass("NVIDIA GeForce RTX 4090")
+	wantPass := time.Duration(float64(passOn3090) / speed("RTX 4090"))
+	if seen || gotPass != wantPass {
+		t.Fatalf("s3 pass(4090) = %s (seen=%v), want default %s (seen=false)", gotPass, seen, wantPass)
+	}
+	// Rent a 16 GB machine for grading (Curators=false in ledger); even with Machine == nil,
+	// look() must mark Worker.GradeOnly == true so policy never counts it as a curator runner.
+	rp.noRoom["NVIDIA GeForce RTX 4090"] = true
+	rp.noRoom["NVIDIA GeForce RTX 3090 Ti"] = true
+	rp.extraCommunity = []map[string]any{
+		{"id": "NVIDIA GeForce RTX 4080 SUPER", "name": "RTX 4080 SUPER", "manufacturer": "NVIDIA", "memory": 16, "price": map[string]any{"community": 0.25}, "availability": "HIGH"},
+	}
+	rp.extraPrices = map[string]float64{"NVIDIA GeForce RTX 4080 SUPER": 0.25}
+	f.o.Cloud = "COMMUNITY"
+	st.work = Work{Rounds: []WorkRound{{ID: "s3-o00001", GradesWanted: 4}}}
+	v, err := f.look(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n, err := f.launch(context.Background(), v, 1, 0, 0, 0, time.Time{}); err != nil || n != 1 {
+		t.Fatalf("launch 16GB grader: n=%d err=%v", n, err)
+	}
+	v2, err := f.look(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, w := range v2.Workers {
+		if w.Rental != nil {
+			found = true
+			if w.Rental.Card != "RTX 4080 SUPER" {
+				t.Fatalf("expected 16 GB RTX 4080 SUPER, got %s", w.Rental.Card)
+			}
+			if w.Machine != nil {
+				t.Fatalf("expected Machine == nil before check-in, got %+v", w.Machine)
+			}
+			if !w.GradeOnly {
+				t.Fatal("16 GB grader rental was not marked GradeOnly=true before check-in")
+			}
+		}
+	}
+	if !found {
+		t.Fatal("rented 16 GB worker missing from view")
+	}
+}
+
+// When 24 GB curator GPUs are unavailable, unfilled curator slots fall back to 16 GB graders if
+// and only if grades or farm tasks are actually waiting.
+func TestUnfilled24GBCuratorSlotsFallBackTo16GBGradersOnlyWhenGradesWait(t *testing.T) {
+	rp, st := newFakeRunPod(t), newFakeStet(t)
+	f, _ := testFleet(t, rp, st, 4)
+	f.o.Cloud = "COMMUNITY"
+	f.o.Edits = true
+	f.o.MinGPUMemory = 16
+	f.o.MinCuratorGPUMemory = 24
+	f.o.PerWorker = 2
+	// Disable every 24 GB GPU on RunPod community, leaving only a 16 GB RTX 4080 SUPER.
+	rp.noRoom["NVIDIA GeForce RTX 3090 Ti"] = true
+	rp.noRoom["NVIDIA GeForce RTX 4090"] = true
+	rp.noRoom["NVIDIA RTX A5000"] = true
+	rp.extraCommunity = []map[string]any{
+		{"id": "NVIDIA GeForce RTX 4080 SUPER", "name": "RTX 4080 SUPER", "manufacturer": "NVIDIA", "memory": 16, "price": map[string]any{"community": 0.25}, "availability": "HIGH"},
+	}
+	rp.extraPrices = map[string]float64{"NVIDIA GeForce RTX 4080 SUPER": 0.25}
+	ctx := context.Background()
+
+	// Case 1: Only curator runs waiting (0 grades, 0 farm) -> do NOT waste slots on 16 GB graders.
+	st.work = Work{Rounds: []WorkRound{{ID: "s3-o00001", RunsWanted: 4, GradesWanted: 0}}}
+	v, err := f.look(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := f.launch(ctx, v, 2, 0, 0, 2, time.Time{}); err != nil || got != 0 {
+		t.Fatalf("with 0 grades waiting: rented %d (%v), want 0", got, err)
+	}
+
+	// Case 2: Both runs and grades waiting -> unfilled 24 GB curator slots pass to 16 GB graders!
+	st.work = Work{Rounds: []WorkRound{{ID: "s3-o00001", RunsWanted: 4, GradesWanted: 6}}}
+	v, err = f.look(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := f.launch(ctx, v, 2, 0, 0, 2, time.Time{}); err != nil || got != 2 {
+		t.Fatalf("with 6 grades waiting and no 24GB GPUs: rented %d (%v), want 2 16GB graders", got, err)
+	}
+	// Every grade-only rental must request only graderDisk (35 GB), NOT the 120 GB curator disk,
+	// and explicitly disable STET_WORKER_EDITS so worker.sh installs lean STET_GRADE_ONLY=1!
+	for _, pod := range rp.created {
+		if pod.Disk != graderDisk {
+			t.Fatalf("grade-only pod requested %d GB disk, want %d GB", pod.Disk, graderDisk)
+		}
+		if pod.Env["STET_WORKER_EDITS"] != "0" {
+			t.Fatalf("grade-only pod has STET_WORKER_EDITS=%q, want 0", pod.Env["STET_WORKER_EDITS"])
+		}
+	}
+	if !strings.Contains(workerScript, "STET_GRADE_ONLY=1") {
+		t.Fatal("worker.sh does not set STET_GRADE_ONLY=1 for grade-only workers")
+	}
+}
+
+// Review 15 P2 #4: when edits are enabled, an entry is waiting, no round is open, and no runners
+// are online, manual `stet-cloud up 1` must launch a curator-capable runner (STET_WORKER_EDITS=1)
+// matching Policy.runners so the server announces the on-demand round instead of stalling on a
+// grade-only machine.
+func TestManualUpLaunchesCuratorRunnerWhenWaitingEntryNeedsDraw(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("up_1_launches_curator_runner_for_waiting_round", func(t *testing.T) {
+		rp, st := newFakeRunPod(t), newFakeStet(t)
+		f, _ := testFleet(t, rp, st, 2)
+		f.o.Edits = true
+		f.o.MinGPUMemory = 12
+		f.o.MinCuratorGPUMemory = 24
+		st.work = Work{Rounds: nil, Waiting: true, Runners: 0, Paused: 0}
+
+		if err := cmdUp(ctx, f, 1); err != nil {
+			t.Fatalf("cmdUp 1: %v", err)
+		}
+		if len(rp.created) != 1 {
+			t.Fatalf("expected 1 pod created, got %d", len(rp.created))
+		}
+		pod := rp.created[0]
+		if pod.Env["STET_WORKER_EDITS"] != "1" {
+			t.Fatalf("manual up 1 for waiting round set STET_WORKER_EDITS=%q, want 1", pod.Env["STET_WORKER_EDITS"])
+		}
+		if pod.Disk != f.o.Disk {
+			t.Fatalf("manual up 1 curator runner requested %d GB disk, want %d GB", pod.Disk, f.o.Disk)
+		}
+	})
+
+	t.Run("no_edits_keeps_grade_only_on_manual_up", func(t *testing.T) {
+		rp, st := newFakeRunPod(t), newFakeStet(t)
+		f, _ := testFleet(t, rp, st, 2)
+		f.o.Edits = false
+		st.work = Work{Rounds: nil, Waiting: true, Runners: 0, Paused: 0}
+
+		if err := cmdUp(ctx, f, 1); err != nil {
+			t.Fatalf("cmdUp 1 --no-edits: %v", err)
+		}
+		if len(rp.created) != 1 || rp.created[0].Env["STET_WORKER_EDITS"] != "0" {
+			t.Fatalf("expected grade-only worker with --no-edits, got %+v", rp.created)
+		}
+	})
+}
+
+// Review 16 P2 #2: when the examiner fills the last --max slot alongside an existing working
+// RunPod grader, `cmdProbe` rents 0 machines and MUST exit immediately without selecting the
+// existing grader from the ledger or running forced cleanup on it.
+func TestProbeDoesNotTerminateExistingWorkerWhenExaminerFillsLastSlot(t *testing.T) {
+	rp, st := newFakeRunPod(t), newFakeStet(t)
+	f, _ := testFleet(t, rp, st, 2)
+	f.o.MaxWorkers = 2
+	f.o.Market = "runpod"
+
+	// Existing RunPod worker actively grading on stet-rp-01 (slot 1 of 2).
+	rp.pods["pod-grading"] = &Pod{
+		ID: "pod-grading", Name: "stet-rp-01",
+		Status: "RUNNING", Cost: 0.43, CreatedAt: f.now().Add(-10 * time.Minute),
+	}
+	st.work = Work{
+		Rounds: []WorkRound{{ID: "s3-o00042", Entries: 1, ExamAt: 0}},
+		Machines: []Machine{{
+			Handle: "stet-rp-01", Worker: true,
+			Busy: "grade", LastSeen: f.now().Unix(),
+		}},
+	}
+	if err := f.writeLedger(&ledger{Pods: map[string]*podRecord{
+		ledgerKey("runpod", "pod-grading"): {
+			ID: "pod-grading", Market: "runpod", Handle: "stet-rp-01",
+			GPU: "RTX 4090", Cost: 0.43, Start: f.now().Add(-10 * time.Minute),
+		},
+	}}); err != nil {
+		t.Fatalf("writeLedger: %v", err)
+	}
+
+	// Active examiner fills slot 2 of 2 (persisted in examiner.json).
+	if err := writeExaminerState(f.o.Home, &examinerState{
+		InstanceID: "ex-live", RoundID: "s3-o00042", APIKey: "k", CertPEM: "c",
+		Price: 0.62, Created: f.now().Add(-2 * time.Minute),
+	}); err != nil {
+		t.Fatalf("writeExaminerState: %v", err)
+	}
+
+	checkFile := filepath.Join(t.TempDir(), "cage_check.py")
+	if err := os.WriteFile(checkFile, []byte("print('ok')\n"), 0o600); err != nil {
+		t.Fatalf("write check file: %v", err)
+	}
+
+	err := cmdProbe(context.Background(), f, checkFile, time.Minute)
+	if err == nil || !strings.Contains(err.Error(), "nothing was rented") {
+		t.Fatalf("expected 'nothing was rented' error when examiner fills last slot, got %v", err)
+	}
+	if len(rp.created) != 0 {
+		t.Fatalf("expected 0 new pods created, got %d", len(rp.created))
+	}
+	if len(st.released) != 0 {
+		t.Fatalf("probe MUST NOT release existing grader's active job! released=%v", st.released)
+	}
+	if _, ok := rp.pods["pod-grading"]; !ok {
+		t.Fatalf("probe MUST NOT terminate existing working grader!")
+	}
+
+	// With one open slot (--max 3), probe rents its own pod and cleans up ONLY that probe pod,
+	// leaving pod-grading untouched.
+	f.o.MaxWorkers = 3
+	if err := cmdProbe(context.Background(), f, checkFile, 0); err != nil {
+		t.Fatalf("cmdProbe with open slot: %v", err)
+	}
+	if len(rp.created) != 1 {
+		t.Fatalf("expected 1 probe pod rented, got %d", len(rp.created))
+	}
+	if len(rp.pods) != 1 || rp.pods["pod-grading"] == nil {
+		t.Fatalf("expected only the newly rented probe pod ended and pod-grading preserved, got pods=%+v", rp.pods)
+	}
+}
+
+// Review 17 P2 #4: probe cleanup MUST end ONLY its exact recorded (market, rental ID) under the
+// fleet lock and treat an already-gone probe as complete, NEVER deleting a replacement worker
+// that reused the same handle or releasing that replacement's active grading job.
+func TestReview17ProbeCleanupNeverDeletesReplacementWithReusedHandle(t *testing.T) {
+	rp, st := newFakeRunPod(t), newFakeStet(t)
+	f, _ := testFleet(t, rp, st, 1)
+	f.o.MaxWorkers = 2
+	f.o.Market = "runpod"
+	now := f.now()
+
+	// Wrap RunPod market so the first Logs() poll during cmdProbe simulates the probe pod vanishing
+	// and a replacement grader immediately reusing the same handle `stet-rp-01` and taking a job.
+	var swapped bool
+	var probeID string
+	rpMkt := f.market("runpod")
+	f.markets = []Market{&probeSwapMarket{
+		Market: rpMkt,
+		onLogs: func(id string) ([]string, error) {
+			if !swapped {
+				swapped = true
+				probeID = id
+				// Probe pod vanishes from RunPod; replacement pod-replacement takes handle stet-rp-01.
+				delete(rp.pods, id)
+				rp.pods["pod-replacement"] = &Pod{
+					ID: "pod-replacement", Name: "stet-rp-01",
+					Status: "RUNNING", Cost: 0.43, CreatedAt: now.Add(5 * time.Second),
+				}
+				st.work = Work{
+					Rounds: []WorkRound{{ID: "s3-o00044", Entries: 1, ExamAt: 0}},
+					Machines: []Machine{{
+						Handle: "stet-rp-01", Worker: true,
+						Busy: "grade", LastSeen: now.Add(10 * time.Second).Unix(),
+					}},
+				}
+				if l, err := f.readLedger(); err == nil {
+					l.Pods[ledgerKey("runpod", "pod-replacement")] = &podRecord{
+						ID: "pod-replacement", Market: "runpod", Handle: "stet-rp-01",
+						GPU: "RTX 4090", Cost: 0.43, Start: now.Add(5 * time.Second), Alive: now.Add(10 * time.Second),
+					}
+					_ = f.writeLedger(l)
+				}
+			}
+			return []string{"[probe] done: every case held"}, nil
+		},
+	}}
+
+	checkFile := filepath.Join(t.TempDir(), "cage_check.py")
+	if err := os.WriteFile(checkFile, []byte("print('ok')\n"), 0o600); err != nil {
+		t.Fatalf("write check file: %v", err)
+	}
+	if err := cmdProbe(context.Background(), f, checkFile, time.Minute); err != nil {
+		t.Fatalf("cmdProbe: %v", err)
+	}
+	if !swapped || probeID == "" {
+		t.Fatalf("expected swap hook to run with rented probe ID")
+	}
+	if rp.pods["pod-replacement"] == nil {
+		t.Fatalf("probe cleanup DELETED replacement worker pod-replacement sharing handle stet-rp-01! pods=%+v", rp.pods)
+	}
+	if len(st.released) != 0 {
+		t.Fatalf("probe cleanup MUST NOT release replacement worker's grading job! released=%v", st.released)
+	}
+	l, err := f.readLedger()
+	if err != nil {
+		t.Fatalf("readLedger: %v", err)
+	}
+	if l.Pods[ledgerKey("runpod", "pod-replacement")] == nil {
+		t.Fatalf("replacement worker ledger record must remain intact, got %+v", l.Pods)
+	}
+	if l.Pods[ledgerKey("runpod", probeID)] != nil {
+		t.Fatalf("gone probe pod ledger record should have been retired, got %+v", l.Pods)
+	}
+}
+
+type probeSwapMarket struct {
+	Market
+	onLogs    func(id string) ([]string, error)
+	onRentals func() ([]Rental, error)
+	onEnd     func(id string) error
+}
+
+func (m *probeSwapMarket) Logs(ctx context.Context, id string, n int) ([]string, error) {
+	if m.onLogs != nil {
+		return m.onLogs(id)
+	}
+	if lm, ok := m.Market.(interface {
+		Logs(context.Context, string, int) ([]string, error)
+	}); ok {
+		return lm.Logs(ctx, id, n)
+	}
+	return nil, nil
+}
+
+func (m *probeSwapMarket) Rentals(ctx context.Context) ([]Rental, error) {
+	if m.onRentals != nil {
+		return m.onRentals()
+	}
+	return m.Market.Rentals(ctx)
+}
+
+func (m *probeSwapMarket) End(ctx context.Context, id string) error {
+	if m.onEnd != nil {
+		return m.onEnd(id)
+	}
+	return m.Market.End(ctx, id)
+}
+
+// Review 18 P2 #2:
+//
+//	(a) If the probe pod is temporarily omitted from Rentals() after logs finish, cmdDownRental
+//	    MUST still invoke m.End(ctx, pod.ID) directly so the live rental is actually terminated
+//	    before its ledger entry is retired.
+//	(b) If m.End(ctx, pod.ID) fails, cmdDownRental MUST leave the ledger entry intact and
+//	    cmdProbe MUST return a non-nil error instead of reporting success.
+func TestReview18ProbeCleanupCallsEndOnListOmissionAndPropagatesError(t *testing.T) {
+	t.Run("omitted_from_Rentals_still_calls_End_and_retires_ledger", func(t *testing.T) {
+		rp, st := newFakeRunPod(t), newFakeStet(t)
+		f, _ := testFleet(t, rp, st, 1)
+		f.o.MaxWorkers = 2
+		f.o.Market = "runpod"
+
+		var probeID string
+		var endedIDs []string
+		omitProbe := false
+		rpMkt := f.market("runpod")
+		f.markets = []Market{&probeSwapMarket{
+			Market: rpMkt,
+			onLogs: func(id string) ([]string, error) {
+				probeID = id
+				omitProbe = true // simulate stale/eventually-consistent Rentals() omitting the live pod
+				return []string{"[probe] done: every case held"}, nil
+			},
+			onRentals: func() ([]Rental, error) {
+				rs, err := rpMkt.Rentals(context.Background())
+				if err != nil || !omitProbe {
+					return rs, err
+				}
+				filtered := rs[:0]
+				for _, r := range rs {
+					if r.ID != probeID {
+						filtered = append(filtered, r)
+					}
+				}
+				return filtered, nil
+			},
+			onEnd: func(id string) error {
+				endedIDs = append(endedIDs, id)
+				return rpMkt.End(context.Background(), id)
+			},
+		}}
+
+		checkFile := filepath.Join(t.TempDir(), "cage_check.py")
+		if err := os.WriteFile(checkFile, []byte("print('ok')\n"), 0o600); err != nil {
+			t.Fatalf("write check file: %v", err)
+		}
+		if err := cmdProbe(context.Background(), f, checkFile, time.Minute); err != nil {
+			t.Fatalf("cmdProbe: %v", err)
+		}
+		if probeID == "" {
+			t.Fatalf("expected probe pod ID recorded")
+		}
+		if len(endedIDs) != 1 || endedIDs[0] != probeID {
+			t.Fatalf("expected End(%q) called despite omission from Rentals(), got endedIDs=%v", probeID, endedIDs)
+		}
+		if rp.pods[probeID] != nil {
+			t.Fatalf("live probe pod %s was NOT deleted on RunPod!", probeID)
+		}
+		l, err := f.readLedger()
+		if err != nil {
+			t.Fatalf("readLedger: %v", err)
+		}
+		if l.Pods[ledgerKey("runpod", probeID)] != nil {
+			t.Fatalf("expected ledger entry retired after End succeeded, got %+v", l.Pods)
+		}
+	})
+
+	t.Run("End_error_keeps_ledger_entry_and_returns_error_from_cmdProbe", func(t *testing.T) {
+		rp, st := newFakeRunPod(t), newFakeStet(t)
+		f, _ := testFleet(t, rp, st, 1)
+		f.o.MaxWorkers = 2
+		f.o.Market = "runpod"
+
+		var probeID string
+		rpMkt := f.market("runpod")
+		f.markets = []Market{&probeSwapMarket{
+			Market: rpMkt,
+			onLogs: func(id string) ([]string, error) {
+				probeID = id
+				return []string{"[probe] done: every case held"}, nil
+			},
+			onEnd: func(id string) error {
+				return fmt.Errorf("RunPod DELETE 503")
+			},
+		}}
+
+		checkFile := filepath.Join(t.TempDir(), "cage_check.py")
+		if err := os.WriteFile(checkFile, []byte("print('ok')\n"), 0o600); err != nil {
+			t.Fatalf("write check file: %v", err)
+		}
+		err := cmdProbe(context.Background(), f, checkFile, time.Minute)
+		if err == nil || !strings.Contains(err.Error(), "RunPod DELETE 503") {
+			t.Fatalf("expected cmdProbe to return wrapped teardown error, got %v", err)
+		}
+		if rp.pods[probeID] == nil {
+			t.Fatalf("expected pod still running on RunPod after End failed")
+		}
+		l, rerr := f.readLedger()
+		if rerr != nil {
+			t.Fatalf("readLedger: %v", rerr)
+		}
+		if l.Pods[ledgerKey("runpod", probeID)] == nil {
+			t.Fatalf("ledger MUST retain probe pod %s when End fails so scale/down can clean it up!", probeID)
+		}
+	})
+}
+
+// Review 19 P1 #2:
+//
+//	(a) If the provider creates the probe pod and the immediate fleet.json ledger write fails,
+//	    launchSomeRentals MUST still return the live pod ID and cmdProbe MUST immediately tear it
+//	    down on the provider so zero unpaid-for/leaked probe pods keep running `sleep infinity`.
+//	(b) If fleet.json becomes corrupt/unparsable after the probe completes, cmdDownRental MUST
+//	    still issue m.End(ctx, pod.ID) directly before returning the ledger repair error.
+func TestReview19ProbeTeardownSurvivesLedgerWriteAndReadFailures(t *testing.T) {
+	t.Run("launch_ledger_write_failure_still_tears_down_probe_pod", func(t *testing.T) {
+		rp, st := newFakeRunPod(t), newFakeStet(t)
+		f, _ := testFleet(t, rp, st, 1)
+		f.o.MaxWorkers = 2
+		f.o.Market = "runpod"
+
+		var rentedID string
+		var endedIDs []string
+		rpMkt := f.market("runpod")
+		f.markets = []Market{&probeRentHookMarket{
+			Market: rpMkt,
+			onRent: func(ctx context.Context, o Offer, l Launch) (*Rental, error) {
+				r, err := rpMkt.Rent(ctx, o, l)
+				if err == nil && r != nil {
+					rentedID = r.ID
+					// Make home read-only right before writeLedger runs (after Rent succeeded!).
+					if cerr := os.Chmod(f.o.Home, 0o500); cerr != nil {
+						t.Errorf("chmod home 0500: %v", cerr)
+					}
+				}
+				return r, err
+			},
+			onEnd: func(ctx context.Context, id string) error {
+				endedIDs = append(endedIDs, id)
+				return rpMkt.End(ctx, id)
+			},
+		}}
+		t.Cleanup(func() { _ = os.Chmod(f.o.Home, 0o700) })
+
+		checkFile := filepath.Join(t.TempDir(), "cage_check.py")
+		if err := os.WriteFile(checkFile, []byte("print('ok')\n"), 0o600); err != nil {
+			t.Fatalf("write check file: %v", err)
+		}
+		err := cmdProbe(context.Background(), f, checkFile, time.Minute)
+		_ = os.Chmod(f.o.Home, 0o700)
+		if err == nil {
+			t.Fatalf("expected non-nil error when launch writeLedger fails")
+		}
+		if rentedID == "" {
+			t.Fatalf("expected provider to have created probe pod")
+		}
+		if len(endedIDs) != 1 || endedIDs[0] != rentedID {
+			t.Fatalf("probe MUST tear down created pod %s even when launch writeLedger fails! ended=%v", rentedID, endedIDs)
+		}
+		if len(rp.pods) != 0 {
+			t.Fatalf("leaked live probe pod after launch writeLedger failure! pods=%+v", rp.pods)
+		}
+	})
+
+	t.Run("corrupt_ledger_at_probe_completion_still_calls_End_before_reporting_error", func(t *testing.T) {
+		rp, st := newFakeRunPod(t), newFakeStet(t)
+		f, _ := testFleet(t, rp, st, 1)
+		f.o.MaxWorkers = 2
+		f.o.Market = "runpod"
+
+		var probeID string
+		var endedIDs []string
+		rpMkt := f.market("runpod")
+		f.markets = []Market{&probeSwapMarket{
+			Market: rpMkt,
+			onLogs: func(id string) ([]string, error) {
+				probeID = id
+				// Corrupt fleet.json before probe teardown runs.
+				if err := os.WriteFile(filepath.Join(f.o.Home, "fleet.json"), []byte("{corrupt"), 0o600); err != nil {
+					t.Errorf("corrupt fleet.json: %v", err)
+				}
+				return []string{"[probe] done: every case held"}, nil
+			},
+			onEnd: func(id string) error {
+				endedIDs = append(endedIDs, id)
+				return rpMkt.End(context.Background(), id)
+			},
+		}}
+
+		checkFile := filepath.Join(t.TempDir(), "cage_check.py")
+		if err := os.WriteFile(checkFile, []byte("print('ok')\n"), 0o600); err != nil {
+			t.Fatalf("write check file: %v", err)
+		}
+		err := cmdProbe(context.Background(), f, checkFile, time.Minute)
+		if err == nil || !strings.Contains(err.Error(), "fleet.json") {
+			t.Fatalf("expected ledger repair error after teardown, got %v", err)
+		}
+		if probeID == "" || len(endedIDs) != 1 || endedIDs[0] != probeID {
+			t.Fatalf("cmdDownRental MUST call m.End(%q) even when fleet.json is unparsable! ended=%v", probeID, endedIDs)
+		}
+		if len(rp.pods) != 0 {
+			t.Fatalf("live probe pod was NOT terminated when fleet.json was corrupt! pods=%+v", rp.pods)
+		}
+	})
+
+	t.Run("unwritable_lock_file_still_calls_End_before_reporting_error", func(t *testing.T) {
+		rp, st := newFakeRunPod(t), newFakeStet(t)
+		f, _ := testFleet(t, rp, st, 1)
+		f.o.MaxWorkers = 2
+		f.o.Market = "runpod"
+
+		var probeID string
+		var endedIDs []string
+		rpMkt := f.market("runpod")
+		f.markets = []Market{&probeSwapMarket{
+			Market: rpMkt,
+			onLogs: func(id string) ([]string, error) {
+				probeID = id
+				// Make <home>/lock unwritable (0400) so f.lock() fails during teardown (simulating EROFS / EACCES).
+				lockPath := filepath.Join(f.o.Home, "lock")
+				_ = os.Chmod(lockPath, 0o400)
+				return []string{"[probe] done: every case held"}, nil
+			},
+			onEnd: func(id string) error {
+				endedIDs = append(endedIDs, id)
+				return rpMkt.End(context.Background(), id)
+			},
+		}}
+		t.Cleanup(func() { _ = os.Chmod(filepath.Join(f.o.Home, "lock"), 0o600) })
+
+		checkFile := filepath.Join(t.TempDir(), "cage_check.py")
+		if err := os.WriteFile(checkFile, []byte("print('ok')\n"), 0o600); err != nil {
+			t.Fatalf("write check file: %v", err)
+		}
+		err := cmdProbe(context.Background(), f, checkFile, time.Minute)
+		_ = os.Chmod(filepath.Join(f.o.Home, "lock"), 0o600)
+		// If running as non-root, lock failed and cmdProbe returns lock cleanup error AFTER calling End.
+		if probeID == "" || len(endedIDs) != 1 || endedIDs[0] != probeID {
+			t.Fatalf("cmdDownRental MUST call m.End(%q) even when f.lock() fails! ended=%v err=%v", probeID, endedIDs, err)
+		}
+		if len(rp.pods) != 0 {
+			t.Fatalf("live probe pod was NOT terminated when f.lock() failed! pods=%+v", rp.pods)
+		}
+		if os.Geteuid() != 0 && (err == nil || !strings.Contains(err.Error(), "fleet lock")) {
+			t.Fatalf("expected fleet lock cleanup error reported after provider teardown, got %v", err)
+		}
+	})
+}
+
+type probeRentHookMarket struct {
+	Market
+	onRent func(ctx context.Context, o Offer, l Launch) (*Rental, error)
+	onEnd  func(ctx context.Context, id string) error
+}
+
+func (m *probeRentHookMarket) Rent(ctx context.Context, o Offer, l Launch) (*Rental, error) {
+	return m.onRent(ctx, o, l)
+}
+
+func (m *probeRentHookMarket) End(ctx context.Context, id string) error {
+	return m.onEnd(ctx, id)
+}
+
+// Review 30 P2 #3: When probe teardown DELETE fails transiently (e.g. HTTP 503), cmdDownRental
+// MUST persist Terminating=true on the exact contract ID in fleet.json BEFORE calling m.End so
+// `stet-cloud workers resolve --end` (including after a controller restart) retries DELETE against
+// that exact pod and stops billing, while still issuing best-effort DELETE if the ledger cannot be
+// written.
+func TestProbeFailedTeardownPersistsTerminatingForWorkersResolve(t *testing.T) {
+	t.Run("failed_probe_delete_persists_terminating_and_fresh_workers_resolve_ends_it", func(t *testing.T) {
+		rp, st := newFakeRunPod(t), newFakeStet(t)
+		f, _ := testFleet(t, rp, st, 1)
+		f.o.MaxWorkers = 2
+		f.o.Market = "runpod"
+
+		var probeID string
+		var failDelete atomic.Bool
+		failDelete.Store(true)
+		var deleteCalls []string
+		rpMkt := f.market("runpod")
+		f.markets = []Market{&probeSwapMarket{
+			Market: rpMkt,
+			onLogs: func(id string) ([]string, error) {
+				probeID = id
+				return []string{"[probe] done: every case held"}, nil
+			},
+			onEnd: func(id string) error {
+				deleteCalls = append(deleteCalls, id)
+				if failDelete.Load() {
+					return fmt.Errorf("HTTP 503: service unavailable")
+				}
+				return rpMkt.End(context.Background(), id)
+			},
+		}}
+
+		checkFile := filepath.Join(t.TempDir(), "cage_check.py")
+		if err := os.WriteFile(checkFile, []byte("print('ok')\n"), 0o600); err != nil {
+			t.Fatalf("write check file: %v", err)
+		}
+		if err := cmdProbe(context.Background(), f, checkFile, time.Minute); err == nil {
+			t.Fatal("expected cmdProbe error when provider DELETE returns 503")
+		}
+		if probeID == "" || len(deleteCalls) != 1 || deleteCalls[0] != probeID {
+			t.Fatalf("expected 1 failed DELETE on probe %q, got %v", probeID, deleteCalls)
+		}
+		// fleet.json MUST record Terminating=true on the exact probe contract ID.
+		l, err := f.readLedger()
+		if err != nil {
+			t.Fatalf("readLedger: %v", err)
+		}
+		rec := l.Pods[ledgerKey("runpod", probeID)]
+		if rec == nil || !rec.Terminating {
+			t.Fatalf("expected Terminating=true persisted on probe %s after 503 DELETE, got %+v", probeID, rec)
+		}
+
+		// Simulate controller restart + restored RunPod provider.
+		failDelete.Store(false)
+		cloudMode := f.o.Cloud
+		fRestart := &Fleet{
+			o:       f.o,
+			markets: []Market{newRunPodMarket(newRunPod(rp.srv.URL, "rp-key"), &cloudMode)},
+			fixed:   true,
+			st:      f.st,
+			op:      f.op,
+			out:     &bytes.Buffer{},
+			now:     f.now,
+			keys:    f.keys,
+		}
+		// Dry/inspect `workers resolve` (without --end) MUST report the outstanding termination.
+		if err := cmdWorkersResolve(context.Background(), fRestart, false); err == nil {
+			t.Fatal("expected `workers resolve` without --end to report outstanding probe termination")
+		}
+		// `workers resolve --end` MUST retry DELETE on the exact probe pod, stop billing, and clear fleet.json.
+		if err := cmdWorkersResolve(context.Background(), fRestart, true); err != nil {
+			t.Fatalf("workers resolve --end: %v", err)
+		}
+		rp.mu.Lock()
+		remainingPods := len(rp.pods)
+		rp.mu.Unlock()
+		if remainingPods != 0 {
+			t.Fatalf("probe pod still running after `workers resolve --end`! pods=%d", remainingPods)
+		}
+		lAfter, err := fRestart.readLedger()
+		if err != nil {
+			t.Fatalf("readLedger after resolve: %v", err)
+		}
+		if lAfter.Pods[ledgerKey("runpod", probeID)] != nil {
+			t.Fatalf("expected probe %s removed from fleet.json after resolve --end, got %+v", probeID, lAfter.Pods)
+		}
+		sum, err := fRestart.readSpentSummary()
+		if err != nil || !sum.hasContract("runpod", probeID) {
+			t.Fatalf("expected retired probe %s recorded in spent.jsonl, err=%v", probeID, err)
+		}
+	})
+
+	t.Run("readonly_home_still_issues_best_effort_DELETE_even_when_pre_delete_write_fails", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("chmod 0500 does not prevent root writes")
+		}
+		rp, st := newFakeRunPod(t), newFakeStet(t)
+		f, _ := testFleet(t, rp, st, 1)
+		f.o.MaxWorkers = 2
+		f.o.Market = "runpod"
+
+		rp.pods["probe-ro"] = &Pod{ID: "probe-ro", Name: f.keys[0].Handle, Status: "RUNNING", Cost: 0.40, CreatedAt: f.now()}
+		if err := f.writeLedger(&ledger{Pods: map[string]*podRecord{
+			ledgerKey("runpod", "probe-ro"): {
+				ID: "probe-ro", Market: "runpod", Handle: f.keys[0].Handle, GPU: "RTX 4090", Cost: 0.40, Start: f.now(), Alive: f.now(),
+			},
+		}}); err != nil {
+			t.Fatal(err)
+		}
+		// Ensure lock file exists and is writable while the home directory itself is 0500 so
+		// f.lock() succeeds, f.readLedger() succeeds, and f.writeLedger() (creating fleet.json.tmp) fails!
+		if _, err := os.OpenFile(filepath.Join(f.o.Home, "lock"), os.O_CREATE|os.O_RDWR, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(f.o.Home, 0o500); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(f.o.Home, 0o700) })
+
+		err := cmdDownRental(context.Background(), f, "runpod", "probe-ro")
+		_ = os.Chmod(f.o.Home, 0o700)
+		if err == nil {
+			t.Fatal("expected ledger cleanup error after DELETE on read-only home dir")
+		}
+		rp.mu.Lock()
+		_, stillAlive := rp.pods["probe-ro"]
+		rp.mu.Unlock()
+		if stillAlive {
+			t.Fatal("cmdDownRental MUST still issue best-effort DELETE when persisting Terminating=true fails")
+		}
+	})
+
+	t.Run("launch_writeLedger_failure_clears_pending_on_immediate_and_503_teardown", func(t *testing.T) {
+		for _, failFirstDelete := range []bool{false, true} {
+			name := "immediate_delete_clears_pending"
+			if failFirstDelete {
+				name = "503_delete_converts_pending_to_terminating_without_double_counting"
+			}
+			t.Run(name, func(t *testing.T) {
+				if os.Geteuid() == 0 {
+					t.Skip("chmod 0500 does not prevent root writes")
+				}
+				rp, st := newFakeRunPod(t), newFakeStet(t)
+				f, _ := testFleet(t, rp, st, 1)
+				f.o.MaxWorkers = 2
+				f.o.Market = "runpod"
+
+				var probeID string
+				var deleteDenied atomic.Bool
+				deleteDenied.Store(failFirstDelete)
+				rpMkt := f.market("runpod")
+				f.markets = []Market{&probeRentHookMarket{
+					Market: rpMkt,
+					onRent: func(ctx context.Context, o Offer, l Launch) (*Rental, error) {
+						r, err := rpMkt.Rent(ctx, o, l)
+						if err == nil && r != nil {
+							probeID = r.ID
+							// Make home dir read-only right after Rent so f.rent's final writeLedger fails
+							// while l.Pending[pr.ID] remains on disk!
+							_ = os.Chmod(f.o.Home, 0o500)
+						}
+						return r, err
+					},
+					onEnd: func(ctx context.Context, id string) error {
+						if deleteDenied.Load() {
+							return fmt.Errorf("HTTP 503: service unavailable")
+						}
+						return rpMkt.End(ctx, id)
+					},
+				}}
+				t.Cleanup(func() { _ = os.Chmod(f.o.Home, 0o700) })
+
+				// Restore writeability right before cmdDownRentalMeta runs by wrapping probe?
+				// Even simpler: simulate f.rent() failing its final writeLedger, then disk recovers before cmdDownRentalMeta!
+				checkFile := filepath.Join(t.TempDir(), "cage_check.py")
+				if err := os.WriteFile(checkFile, []byte("print('ok')\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				f.probe = gzipB64("print('ok')\n")
+				rented, upErr := cmdUpRentals(context.Background(), f, 1)
+				_ = os.Chmod(f.o.Home, 0o700)
+				if upErr == nil || len(rented) != 1 || probeID == "" {
+					t.Fatalf("expected launch writeLedger error with created rental, got rented=%+v err=%v", rented, upErr)
+				}
+				lPre, err := f.readLedger()
+				if err != nil || len(lPre.Pending) != 1 || lPre.Pods[ledgerKey("runpod", probeID)] != nil {
+					t.Fatalf("expected 1 pending reservation and 0 pods on disk after launch writeLedger failure, got %+v err=%v", lPre, err)
+				}
+
+				endErr := cmdDownRentalMeta(context.Background(), f, "runpod", probeID, rented[0])
+				if !failFirstDelete {
+					if endErr != nil {
+						t.Fatalf("cmdDownRentalMeta (immediate delete): %v", endErr)
+					}
+					lPost, err := f.readLedger()
+					if err != nil || len(lPost.Pending) != 0 || len(lPost.Pods) != 0 {
+						t.Fatalf("immediate teardown after launch writeLedger failure MUST clear Pending & Pods, got %+v err=%v", lPost, err)
+					}
+					return
+				}
+
+				if endErr == nil {
+					t.Fatal("expected 503 error from cmdDownRentalMeta")
+				}
+				lMid, err := f.readLedger()
+				if err != nil || len(lMid.Pending) != 0 || lMid.Pods[ledgerKey("runpod", probeID)] == nil || !lMid.Pods[ledgerKey("runpod", probeID)].Terminating {
+					t.Fatalf("503 teardown MUST convert Pending into single Terminating pod (no double count), got pods=%+v pending=%+v err=%v", lMid.Pods, lMid.Pending, err)
+				}
+				// Restore DELETE and run `workers resolve --end`: MUST succeed cleanly with 0 pods and 0 pending!
+				deleteDenied.Store(false)
+				if err := cmdWorkersResolve(context.Background(), f, true); err != nil {
+					t.Fatalf("workers resolve --end: %v", err)
+				}
+				lEnd, err := f.readLedger()
+				if err != nil || len(lEnd.Pending) != 0 || len(lEnd.Pods) != 0 {
+					t.Fatalf("expected clean fleet.json after resolve --end, got pods=%+v pending=%+v err=%v", lEnd.Pods, lEnd.Pending, err)
+				}
+				rp.mu.Lock()
+				rem := len(rp.pods)
+				rp.mu.Unlock()
+				if rem != 0 {
+					t.Fatalf("expected 0 running pods after resolve --end, got %d", rem)
+				}
+			})
+		}
+	})
 }

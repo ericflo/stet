@@ -110,24 +110,34 @@ def resolve_round(args, offset: int = 0):
     """--round accepts 3 (practice round 3), g3 (gym round 3), or a full id like s2-o00012."""
     import re
 
-    from .spec import load_season, parse_round_id, practice_round
+    from .spec import CURRENT_SEASON, load_season, parse_round_id, practice_round
 
-    season = load_season(args.season)
+    explicit_season = getattr(args, "season", None)
     r = str(args.round)
     try:
         m = re.fullmatch(r"([pg]?)(\d+)", r)
         if m:
+            season = load_season(explicit_season or CURRENT_SEASON)
             kind, index = {"": "practice", "p": "practice", "g": "gym"}[m.group(1)], int(m.group(2))
         else:
             try:
-                _, kind, index = parse_round_id(r)
+                parsed_season, kind, index = parse_round_id(r)
             except Exception:
-                die(f"cannot parse round {r!r}; use 3 (practice), g3 (gym), or an id like {season.id}-o00003")
+                default_s = explicit_season or CURRENT_SEASON
+                die(f"cannot parse round {r!r}; use 3 (practice), g3 (gym), or an id like {default_s}-o00003")
+            if explicit_season and explicit_season != parsed_season:
+                die(f"round {r!r} belongs to season {parsed_season!r}, which conflicts with --season {explicit_season!r}")
+            try:
+                season = load_season(parsed_season)
+            except (FileNotFoundError, ValueError) as e:
+                die(f"season {parsed_season!r} for round {r!r} is not available: {e}")
         if kind == "official":
             from .client import fetch_round
 
-            # Replays of official rounds default to the scale they were scored at.
-            return season, season.scale(args.scale or season.official_scale), fetch_round(season, index + offset)
+            explicit_scale = season.scale(args.scale) if args.scale else None
+            # Replays of official rounds default to the scale the round was published/scored at.
+            rnd = fetch_round(season, index + offset)
+            return season, explicit_scale or season.scale(rnd.scale or season.official_scale), rnd
         return season, season.scale(args.scale or "nano"), practice_round(season, index + offset, kind)
     except ValueError as e:
         die(str(e))
@@ -157,20 +167,58 @@ def report(out: Out, result: dict, base: dict | None, season) -> None:
     t = result["train"]
     out.line("training", f"{t['tokens']:,} tokens in {t['seconds']:.0f}s ({t['tokens_per_second']:,} tok/s) · final train loss {t['final_train_loss']:.3f}")
     e = result["exam"]
-    out.line("exam", f"{e['items']:,} items · mean {e['mean']:.4f} bits per byte" + (f"   baseline {base['exam']['mean']:.4f}" if base else ""))
+    subset = result.get("exam_subset") or {}
+    if subset.get("public_subset") and subset.get("total_items"):
+        item_desc = (
+            f"{e['items']:,} of {subset['total_items']:,} items "
+            f"(public subset; {subset['withheld_items']:,} third-party items withheld)"
+        )
+    else:
+        item_desc = f"{e['items']:,} items"
+    out.line("exam", f"{item_desc} · mean {e['mean']:.4f} bits per byte" + (f"   baseline {base['exam']['mean']:.4f}" if base else ""))
     if base and "gain" in result:
-        out.line("", "          " + " · ".join(f"{k} {v:+.3f}" for k, v in (result.get("pillars") or {}).items()))
-        text = out.bold(f"{result['gain']:+.4f}") + " bits per byte: writing three quarters, skills one, of those above"
-        m = multiplier(season, result["round"]["kind"], result["scale"], result["gain"])
-        if m:
-            text += f"   →   {out.bold(format_multiplier(m))} data efficiency"
-        noise = (season.raw.get("noise") or {}).get(result["scale"]) or {}
-        if noise.get("gain_sd"):
-            note = f"training again moves this by about ±{noise['gain_sd']:.3f}"
-            if noise.get("order_sd"):  # measured: docs/EXPERIMENTS.md, the order of a script
-                note += f", another shuffle of the same pages by about ±{noise['order_sd']:.3f}"
-            text += out.dim(f"   ({note})")
-        out.line("gain", text)
+        pillars = result.get("pillars") or {}
+        if pillars:
+            out.line("", "          " + " · ".join(f"{k} {v:+.3f}" for k, v in pillars.items()))
+        groups = (season.raw.get("exam") or {}).get("groups") or {}
+        scored_groups = {g for g, w in groups.items() if float(w) > 0}
+        if result["gain"] is None:
+            missing = ", ".join(result.get("partial_exam") or sorted(scored_groups) or ["scored"])
+            diag = "; diagnostic pillars shown above" if pillars else ""
+            text = out.dim("unavailable") + f" (no scored {missing} items in this exam{diag})"
+            out.line("gain", text)
+        else:
+            if "comprehension" in scored_groups and "reasoning" in scored_groups:
+                text = out.bold(f"{result['gain']:+.4f}") + " (fresh twin-context comprehension and reasoning, of those above)"
+            elif "reasoning" in scored_groups and "comprehension" not in scored_groups:
+                text = out.bold(f"{result['gain']:+.4f}") + " (fresh harvest-derived reasoning, 100% of score; human-written comprehension shown at 0%)"
+            elif "comprehension" in scored_groups:
+                text = out.bold(f"{result['gain']:+.4f}") + " (fresh twin-context comprehension and skills, of those above)"
+            else:
+                text = out.bold(f"{result['gain']:+.4f}") + " bits per byte: writing three quarters, skills one, of those above"
+            m = multiplier(season, result["round"]["kind"], result["scale"], result["gain"])
+            if m:
+                text += f"   →   {out.bold(format_multiplier(m))} data efficiency"
+            noise = (season.raw.get("noise") or {}).get(result["scale"]) or {}
+            if noise.get("gain_sd"):
+                note = f"training again moves this by about ±{noise['gain_sd']:.3f}"
+                if noise.get("order_sd"):  # measured: docs/EXPERIMENTS.md, the order of a script
+                    note += f", another shuffle of the same pages by about ±{noise['order_sd']:.3f}"
+                text += out.dim(f"   ({note})")
+            out.line("gain", text)
+        if subset.get("public_subset") and subset.get("total_items"):
+            if result["gain"] is None:
+                out.line(
+                    "note",
+                    f"replayed on the {subset['public_items']:,} openly licensed items of {subset['total_items']:,}; "
+                    f"none are in a scored pillar, so only diagnostic pillars are shown (the official board score uses all {subset['total_items']:,} items).",
+                )
+            else:
+                out.line(
+                    "note",
+                    f"replayed on the {subset['public_items']:,} openly licensed items of {subset['total_items']:,}; "
+                    f"the official board score uses all {subset['total_items']:,} items, so this gain differs from the board.",
+                )
 
 
 # --- commands -------------------------------------------------------------------------------
@@ -201,24 +249,121 @@ def cmd_init(args):
     out.line("", "AGENTS.md has everything a coding agent needs to work on it.")
 
 
-def _with_baseline(result: dict, rnd, scale, device, out: Out, skip: bool):
-    if not result["valid"]:
+def _pin_round_exam(rnd, scale):
+    """Resolve and pin `(hours, practice_key, exam)` once for a CLI run so advancing harvests
+    mid-run cannot make candidate grading and baseline comparison sit different exams."""
+    from . import data
+
+    if rnd is None or scale is None:
+        return None, None, None
+    hours = data.practice_hours(rnd) if rnd.kind == "practice" else []
+    pk = data.practice_key(rnd, hours) if rnd.kind == "practice" else None
+    try:
+        exam = data.round_exam(rnd, scale, hours=hours) if rnd.kind == "practice" else data.round_exam(rnd, scale)
+    except TypeError:
+        exam = data.round_exam(rnd, scale)
+    return hours, pk, exam
+
+
+def _check_replayable_exam(rnd, exam) -> None:
+    """Fail fast before training when an official round's public replay has zero replayable items."""
+    if exam is None or len(exam) > 0:
+        return
+    from . import data
+
+    meta = data.round_exam_meta(rnd)
+    if meta.get("public_subset") and meta.get("total_items"):
+        die(
+            f"round {rnd.id} has no publicly replayable items "
+            f"(0 of {meta['total_items']:,} items are openly licensed; "
+            f"{meta['withheld_items']:,} third-party items withheld)"
+        )
+    die(f"round {rnd.id} has no exam items to replay")
+
+
+def _with_baseline(
+    result: dict,
+    rnd,
+    scale,
+    device,
+    out: Out,
+    skip: bool,
+    *,
+    exam=None,
+    practice_key: str | None = None,
+):
+    from . import data
+
+    if result["valid"]:
+        if subset := data.round_exam_meta(rnd):
+            result["exam_subset"] = subset
+    else:
         result["gain"] = 0.0  # by the rules, and so that whatever reads the JSON finds a number there
     if skip:
         return None
     from .pipeline import baseline
 
-    base = baseline(rnd, scale, device, progress=out.progress("baseline"), log=lambda m: out.line("", out.dim("baseline " + m)))
+    if exam is None and rnd is not None and scale is not None:
+        _, pinned_pk, exam = _pin_round_exam(rnd, scale)
+        if practice_key is None:
+            practice_key = pinned_pk
+
+    import inspect
+
+    base_kw: dict = {
+        "progress": out.progress("baseline"),
+        "log": lambda m: out.line("", out.dim("baseline " + m)),
+    }
+    try:
+        b_params = inspect.signature(baseline).parameters
+        accepts_var = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in b_params.values())
+    except (TypeError, ValueError):
+        b_params, accepts_var = {}, False
+    if exam is not None and (accepts_var or "exam" in b_params):
+        base_kw["exam"] = exam
+    if practice_key is not None and (accepts_var or "practice_key" in b_params):
+        base_kw["practice_key"] = practice_key
+    base = baseline(rnd, scale, device, **base_kw)
     # The gain is the exam's aggregate of the item-by-item differences, with the languages
     # weighed by the published table (a round's own corpus is measured only for official rounds).
-    from . import data
-    from .exam.aggregate import gains, round_score
+    from .exam.aggregate import gains, plan_of, round_score
 
     result["baseline"] = {"mean": base["exam"]["mean"]}
     if result["valid"]:
-        agg = round_score(data.round_exam(rnd, scale), gains(result["exam"]["item_scores"], base["exam"]["item_scores"]))
-        result["gain"] = round(agg["score"], 5)
+        if exam is None:
+            exam = data.round_exam(rnd, scale)
+        want_sha = data.exam_digest(exam)
+        res_sha = result.get("exam_sha256")
+        base_sha = base.get("exam_sha256")
+        if res_sha and res_sha != want_sha:
+            raise RuntimeError(f"cannot compute gain: candidate exam ({res_sha[:12]}) does not match pinned exam ({want_sha[:12]})")
+        if base_sha and base_sha != want_sha:
+            raise RuntimeError(f"cannot compute gain: baseline exam ({base_sha[:12]}) does not match pinned exam ({want_sha[:12]})")
+        if res_sha and base_sha and res_sha != base_sha:
+            raise RuntimeError(f"cannot compute gain: candidate exam ({res_sha[:12]}) and baseline exam ({base_sha[:12]}) differ")
+        if len(result["exam"]["item_scores"]) != len(exam) or len(base["exam"]["item_scores"]) != len(exam):
+            raise RuntimeError(
+                f"cannot compute gain: item score counts ({len(result['exam']['item_scores'])}, "
+                f"{len(base['exam']['item_scores'])}) do not match pinned exam ({len(exam)})"
+            )
+        plan = plan_of(rnd.season)
+        shares = data.round_shares(rnd)
+        agg = round_score(exam, gains(result["exam"]["item_scores"], base["exam"]["item_scores"]), shares=shares, plan=plan)
         result["pillars"] = {k: v["score"] for k, v in agg["pillars"].items()}
+        present_groups = {plan.pillars[p] for p in agg["pillars"]}
+        scored_groups = [g for g, w in plan.groups.items() if w > 0]
+        missing_groups = [g for g in scored_groups if g not in present_groups]
+        has_scored_group = any(g in present_groups for g in scored_groups)
+        result["gain"] = round(agg["score"], 5) if has_scored_group else None
+        if missing_groups:
+            result["partial_exam"] = missing_groups
+            if rnd.kind == "practice":
+                out.line(
+                    "note",
+                    f"partial practice exam: missing {', '.join(missing_groups)} "
+                    "(set STET_SYNTHESIZE_PRACTICE=1 with STET_EXAMINER_LLM_URL pointing at the pinned teacher server, "
+                    "or practice without local harvested hours to sit the full bundled practice pack)",
+                )
     return base
 
 
@@ -231,19 +376,38 @@ def _emit(args, result: dict):
         sys.stdout.write("\n")
 
 
-def _summary(out: Out, results: list[dict]) -> dict:
+def _summary(out: Out, results: list[dict], *, no_baseline: bool = False) -> dict:
     """Mean gain over several rounds, with its standard error."""
     import math
 
-    gains = [r.get("gain", 0.0) if r["valid"] else 0.0 for r in results]
+    if no_baseline or (results and any(r["valid"] and "gain" not in r for r in results) and not any(r["valid"] and "gain" in r for r in results)):
+        out.line("", "")
+        out.line("mean gain", out.dim("unavailable") + " (baseline skipped)")
+        return {"rounds": [r["round"]["id"] for r in results], "gains": [], "mean_gain": None, "se": None}
+    scored = [r for r in results if not (r["valid"] and r.get("gain") is None)]
+    excluded = [r["round"]["id"] for r in results if r["valid"] and "gain" in r and r["gain"] is None]
+    gains = [r["gain"] if r["valid"] else 0.0 for r in scored]
+    out.line("", "")
+    if not gains:
+        reason = f" ({len(excluded)} round{'s' if len(excluded) != 1 else ''} excluded: no scored pillars present)" if excluded else ""
+        out.line("mean gain", out.dim("unavailable") + reason)
+        summary: dict = {"rounds": [], "gains": [], "mean_gain": None, "se": None}
+        if excluded:
+            summary["excluded_rounds"] = excluded
+        return summary
     mean = sum(gains) / len(gains)
     se = math.sqrt(sum((g - mean) ** 2 for g in gains) / (len(gains) - 1) / len(gains)) if len(gains) > 1 else None
-    out.line("", "")
-    out.line("mean gain", out.bold(f"{mean:+.4f}") + (f" ± {se:.4f} (standard error over {len(gains)} rounds)" if se is not None else ""))
-    return {"rounds": [r["round"]["id"] for r in results], "gains": gains, "mean_gain": round(mean, 5), "se": None if se is None else round(se, 5)}
+    suffix = f" ± {se:.4f} (standard error over {len(gains)} rounds)" if se is not None else ""
+    if excluded:
+        suffix += out.dim(f"   ({len(excluded)} round{'s' if len(excluded) != 1 else ''} excluded: no scored pillars present)")
+    out.line("mean gain", out.bold(f"{mean:+.4f}") + suffix)
+    summary = {"rounds": [r["round"]["id"] for r in scored], "gains": gains, "mean_gain": round(mean, 5), "se": None if se is None else round(se, 5)}
+    if excluded:
+        summary["excluded_rounds"] = excluded
+    return summary
 
 
-def _edit_time_line(out: Out, result: dict, season) -> None:
+def _edit_time_line(out: Out, result: dict, season, device=None) -> None:
     """How long the edit took here, and what that means on the slowest machine that runs
     curators. A time limit in seconds is only as fair as the comparison is plain."""
     from . import bench
@@ -252,7 +416,7 @@ def _edit_time_line(out: Out, result: dict, season) -> None:
     took, limit = edit.get("seconds"), edit.get("time_limit")
     if not took or not limit:
         return
-    m = bench.saved()
+    m = bench.saved(device=device)
     if m is None:
         out.line("edit", f"{took:.0f}s of {limit:.0f}s here. `stet bench` says how this machine compares with the slowest that runs curators")
         return
@@ -287,6 +451,8 @@ def cmd_run(args):
         work = project.path / ".stet" / "runs" / f"{stamp}-{rnd.id}-{scale.name}"
         work.mkdir(parents=True, exist_ok=True)
         out.line("", out.bold(f"stet · {project.name} · {rnd.kind} round {rnd.id} · {scale.name} · {device.type}"))
+        pinned_hours, pinned_pk, pinned_exam = _pin_round_exam(rnd, scale)
+        _check_replayable_exam(rnd, pinned_exam)
         bundle = project.path
         if sandbox != "none":
             # Run what `stet submit` would send, unpacked as a verifier unpacks it: a file the
@@ -302,25 +468,47 @@ def cmd_run(args):
                 bundle, project.entry, rnd, scale, work, sandbox=sandbox, device=device,
                 echo=args.verbose, progress=out.progress("training"), log=lambda m: out.line("", out.dim(m)),
                 assets=project.assets, time_limit=getattr(args, "time_limit", None),
+                exam=pinned_exam,
             )  # fmt: skip
         finally:
             if bundle != project.path:
                 remove_tree(bundle)
         result["editor"] = {"name": project.name}
-        base = _with_baseline(result, rnd, scale, device, out, args.no_baseline)
-        result["writing"] = _has_writing(rnd)
+        base = _with_baseline(
+            result, rnd, scale, device, out, args.no_baseline, exam=pinned_exam, practice_key=pinned_pk
+        )
+        result["writing"] = bool(pinned_hours) if rnd.kind == "practice" else _has_writing(rnd)
         (work / "result.json").write_text(json.dumps(result, indent=1))
         report(out, result, base, season)
-        _edit_time_line(out, result, season)
+        _edit_time_line(out, result, season, device=device)
         if not result["writing"]:
-            out.line("note", "no writing in this round's exam, which is three quarters of an official round's score. "
-                             "`stet harvest` fetches some, once, and needs no account.")
+            if season.raw.get("exam", {}).get("practice_pack"):
+                teacher = ((season.raw.get("exam") or {}).get("reasoning") or {}).get("model", "pinned teacher")
+                out.line(
+                    "note",
+                    f"scored on bundled CC-BY-SA Wikipedia practice reasoning ({teacher}) + diagnostic comprehension; "
+                    "`stet harvest` adds fresh local hours, once, and needs no account.",
+                )
+            else:
+                out.line("note", "no fresh writing in this round's exam. `stet harvest` fetches some, once, and needs no account.")
+        elif rnd.kind == "practice" and (season.raw.get("exam") or {}).get("reasoning") and (season.raw.get("exam") or {}).get("practice_pack"):
+            from .data import practice_synthesize
+
+            teacher = ((season.raw.get("exam") or {}).get("reasoning") or {}).get("model", "pinned teacher")
+            if practice_synthesize(rnd):
+                out.line("note", f"scored on fresh locally synthesized reasoning ({teacher}) + local harvested diagnostic comprehension.")
+            else:
+                out.line(
+                    "note",
+                    f"scored on bundled CC-BY-SA Wikipedia practice reasoning ({teacher}) + local harvested diagnostic comprehension "
+                    "(set STET_SYNTHESIZE_PRACTICE=1 with STET_EXAMINER_LLM_URL to synthesize fresh reasoning locally).",
+                )
         out.line("saved", str((work / "result.json").relative_to(Path.cwd()) if work.is_relative_to(Path.cwd()) else work / "result.json"))
         results.append(result)
     if len(results) == 1:
         _emit(args, results[0])
     else:
-        summary = _summary(out, results)
+        summary = _summary(out, results, no_baseline=args.no_baseline)
         if args.json:
             json.dump(summary, sys.stdout, indent=1)
             sys.stdout.write("\n")
@@ -426,8 +614,15 @@ def cmd_score(args):
     script = script_file(args.script, season, rnd)
     device = pick_device(args.device)
     out.line("", out.bold(f"stet score · {args.script} · {rnd.kind} round {rnd.id} · {scale.name} · {device.type}"))
-    result = grade_round(rnd, scale, script, device=device, progress=out.progress("training"), log=lambda m: out.line("", out.dim(m)))
-    base = _with_baseline(result, rnd, scale, device, out, args.no_baseline)
+    pinned_hours, pinned_pk, pinned_exam = _pin_round_exam(rnd, scale)
+    _check_replayable_exam(rnd, pinned_exam)
+    result = grade_round(
+        rnd, scale, script, device=device, progress=out.progress("training"), log=lambda m: out.line("", out.dim(m)),
+        exam=pinned_exam,
+    )
+    base = _with_baseline(
+        result, rnd, scale, device, out, args.no_baseline, exam=pinned_exam, practice_key=pinned_pk
+    )
     report(out, result, base, season)
     _emit(args, result)
     sys.exit(0 if result["valid"] else 2)
@@ -440,9 +635,35 @@ def cmd_baseline(args):
 
     out = Out(quiet=args.quiet)
     season, scale, rnd = resolve_round(args)
-    base = baseline(rnd, scale, pick_device(args.device), progress=out.progress("training"), log=lambda m: out.line("", out.dim(m)))
+    _, pinned_pk, pinned_exam = _pin_round_exam(rnd, scale)
+    _check_replayable_exam(rnd, pinned_exam)
+    base = baseline(
+        rnd,
+        scale,
+        pick_device(args.device),
+        progress=out.progress("training"),
+        log=lambda m: out.line("", out.dim(m)),
+        exam=pinned_exam,
+        practice_key=pinned_pk,
+    )
     out.line("round", f"{rnd.id} · {scale.name}")
-    out.line("baseline", out.bold(f"{base['exam']['mean']:.4f}") + f" bits per byte, the mean over {base['exam']['items']:,} items")
+    from . import data as stet_data
+
+    subset = stet_data.round_exam_meta(rnd)
+    if (
+        subset.get("public_subset")
+        and subset.get("total_items")
+        and base.get("exam_sha256") != rnd.exam_digest
+        and base["exam"].get("items") == subset.get("public_items")
+    ):
+        base["exam_subset"] = subset
+        item_desc = (
+            f"{subset['public_items']:,} of {subset['total_items']:,} items "
+            f"(public subset; {subset['withheld_items']:,} third-party items withheld)"
+        )
+    else:
+        item_desc = f"{base['exam']['items']:,} items"
+    out.line("baseline", out.bold(f"{base['exam']['mean']:.4f}") + f" bits per byte, the mean over {item_desc}")
     if args.json:
         json.dump(base, sys.stdout, indent=1)
         sys.stdout.write("\n")
@@ -641,8 +862,15 @@ def _round_hours(season, d: dict, seed: bytes) -> tuple[list[tuple[int, Path]], 
     named = d.get("exam_hours") or []
     late = not named
     if late:
-        first = int(d["draw_at"]) - int(season.raw["exam"]["fresh"]["reach_seconds"])
-        held = [int(p.stem) for p in _hours_dir().glob("*.jsonl") if p.stem.isdigit() and int(p.stem) >= first]
+        from .exam.fresh.harvest import HOUR
+
+        draw_at = int(d["draw_at"])
+        first = draw_at - int(season.raw["exam"]["fresh"]["reach_seconds"])
+        held = [
+            int(p.stem)
+            for p in _hours_dir().glob("*.jsonl")
+            if p.stem.isdigit() and first <= int(p.stem) and int(p.stem) + HOUR <= draw_at
+        ]
         named = [{"hour": h} for h in choose_hours(seed, held, int(season.raw["exam"]["fresh"]["hours"]))]
     out = []
     for x in named:
@@ -671,10 +899,19 @@ def _examine_one(args, round_id: str) -> None:
     from .exam.examine import examine
     from .spec import load_season, parse_round_id
 
-    season = load_season(args.season)
-    _, kind, index = parse_round_id(round_id)
+    explicit_season = getattr(args, "season", None)
+    try:
+        parsed_season, kind, index = parse_round_id(round_id)
+    except ValueError as e:
+        die(str(e))
     if kind != "official":
         die("only an official round has an exam to make")
+    if explicit_season and explicit_season != parsed_season:
+        die(f"round {round_id!r} belongs to season {parsed_season!r}, which conflicts with --season {explicit_season!r}")
+    try:
+        season = load_season(parsed_season)
+    except (FileNotFoundError, ValueError) as e:
+        die(f"season {parsed_season!r} for round {round_id!r} is not available: {e}")
     rnd = fetch_round(season, index)
     d = request("GET", f"/api/v1/rounds/{rnd.id}")["round"]
     out = Out(quiet=args.quiet)
@@ -698,17 +935,21 @@ def _examine_follow(args) -> None:
     """Every hour's harvest as it settles, and every open round's exam as soon as it is drawn."""
     import threading
 
-    from .client import need_key, request
-    from .spec import load_season
+    from .client import ApiError, need_key, request
+    from .exam.examine import FatalExamError
+    from .spec import CURRENT_SEASON, load_season
 
-    season = load_season(args.season)
+    season = load_season(args.season or CURRENT_SEASON)
     out = Out(quiet=args.quiet)
     out.line("", out.bold("stet examine --follow"))
+    key = need_key()
     stop = threading.Event()
-    threading.Thread(target=_harvest_follow, args=(season, need_key(), out, stop), daemon=True).start()
+    threading.Thread(target=_harvest_follow, args=(season, key, out, stop), daemon=True).start()
     failed: dict[str, int] = {}
     again: dict[str, float] = {}  # when a round whose exam failed is tried next
     waiting: set[str] = set()
+    abandoned: set[str] = set()  # rounds cancelled/closed after a deterministic FatalExamError
+    pending_cancel: dict[str, str] = {}  # round_id -> reason for unacknowledged FatalExamError cancels
     while True:
         try:
             rounds = request("GET", "/api/v1/rounds?limit=20").get("rounds") or []
@@ -716,18 +957,58 @@ def _examine_follow(args) -> None:
             out.line("", out.dim(f"the server did not answer ({e}); trying again in a minute"))
             rounds = []
         for x in sorted(rounds, key=lambda x: x["id"]):
-            if x.get("status") != "open" or x.get("exam_digest") or time.time() < again.get(x["id"], 0):
+            rid = x["id"]
+            if not rid.startswith(f"{season.id}-"):
+                continue
+            if x.get("status") != "open" or x.get("exam_digest"):
+                pending_cancel.pop(rid, None)
+                continue
+            if rid in abandoned or time.time() < again.get(rid, 0):
+                continue
+            if rid in pending_cancel:
+                try:
+                    request("POST", f"/api/v1/admin/rounds/{rid}/cancel", {"reason": pending_cancel[rid][:280]}, key=key, timeout=60)
+                    pending_cancel.pop(rid, None)
+                    abandoned.add(rid)
+                    out.line("", out.dim(f"{rid}: round cancelled after retry"))
+                except ApiError as ce:
+                    if ce.status in (404, 409):
+                        pending_cancel.pop(rid, None)
+                        abandoned.add(rid)
+                    else:
+                        out.line("", out.bad(f"{rid}: cancel retry failed ({ce}); will retry on next poll"))
+                except Exception as ce:
+                    out.line("", out.bad(f"{rid}: cancel retry failed ({ce}); will retry on next poll"))
                 continue
             try:
-                _examine_one(args, x["id"])
+                _examine_one(args, rid)
             except _NotYet as e:  # said once, and looked at again every time round
-                if x["id"] not in waiting:
-                    waiting.add(x["id"])
+                if rid not in waiting:
+                    waiting.add(rid)
                     out.line("", out.dim(str(e)))
+            except FatalExamError as e:
+                # Deterministic synthesis/coverage failure: retrying temp=0 on the same harvests
+                # would repeat the same 20-minute build until timeout. Cancel the round cleanly now,
+                # and if the cancel request transiently fails, retain the reason and retry cancelling
+                # without repeating the build.
+                reason = str(e)
+                out.line("", out.bad(f"{rid}: {reason}; cancelling round rather than retrying identical inputs"))
+                try:
+                    request("POST", f"/api/v1/admin/rounds/{rid}/cancel", {"reason": reason[:280]}, key=key, timeout=60)
+                    abandoned.add(rid)
+                except ApiError as ce:
+                    if ce.status in (404, 409):
+                        abandoned.add(rid)
+                    else:
+                        pending_cancel[rid] = reason
+                        out.line("", out.bad(f"{rid}: cancel failed ({ce}); will retry cancellation without rebuilding exam"))
+                except Exception as ce:
+                    pending_cancel[rid] = reason
+                    out.line("", out.bad(f"{rid}: cancel failed ({ce}); will retry cancellation without rebuilding exam"))
             except (Exception, SystemExit) as e:  # tried again, less and less often, for as long as the round is open
-                n = failed[x["id"]] = failed.get(x["id"], 0) + 1
-                again[x["id"]] = time.time() + _again_in(n)
-                out.line("", out.bad(f"{x['id']}: {e}") + out.dim(f" (try {n}; again in {_again_in(n)}s)"))
+                n = failed[rid] = failed.get(rid, 0) + 1
+                again[rid] = time.time() + _again_in(n)
+                out.line("", out.bad(f"{rid}: {e}") + out.dim(f" (try {n}; again in {_again_in(n)}s)"))
         time.sleep(20)
 
 
@@ -781,7 +1062,6 @@ def cmd_doctor(args):
 
     out = Out()
     season = load_season()
-    grade_devices = season.raw.get("grade_devices", ["cuda"])
     rows: list[tuple[str, str, str]] = []
     rows.append((OK, "stet", f"{__version__} on Python {sys.version.split()[0]} ({sys.platform})"))
     try:
@@ -799,10 +1079,13 @@ def cmd_doctor(args):
             rows.append((WARN, "gpu", f"this machine has {maker} GPU, but this PyTorch build ({torch.__version__}) cannot use it; training will run on {dev.type}.\n" + TORCH_HELP))
         else:
             rows.append((WARN, "gpu", f"no CUDA or ROCm GPU; training will run on {dev.type} (fine for --scale nano)"))
-        if dev.type in grade_devices:
+        from .client import grade_eligibility
+
+        ok_hw, why_hw = grade_eligibility(season, hw, device_type=dev.type)
+        if ok_hw:
             rows.append((OK, "verify", "this machine can grade for the leaderboard: `stet verify`"))
         else:
-            rows.append((WARN, "verify", "official grading needs an NVIDIA or AMD GPU, so every grade uses the same arithmetic"))
+            rows.append((WARN, "verify", why_hw))
     except ImportError:
         rows.append((WARN, "torch", "not installed: `stet run` and `stet verify` need it.\n" + TORCH_HELP))
     ok, why = bwrap_available() if sys.platform == "linux" else (False, "")
@@ -851,12 +1134,14 @@ def cmd_bench(args):
     need_torch()
     from . import bench
     from .spec import load_season
+    from .train import pick_device
 
     out = Out()
     season = load_season()
+    device = pick_device(getattr(args, "device", None))
     out.line("", out.dim("measuring CPU and GPU (about half a minute; close other GPU work first) ..."))
-    m = bench.measure(season)
-    bench.save(m)
+    m = bench.measure(season, device=device)
+    bench.save(m, device=device)
     need = bench.floor(season)
     g, c = bench.ratios(season, m)
     machine = season.raw.get("machine") or {}
@@ -872,8 +1157,10 @@ def cmd_bench(args):
     short = bench.shortfalls(season, m)
     out.line("", "")
     if short:
+        from .client import grade_hardware_requirement
+
         out.line("", "This machine cannot run curators for the leaderboard: " + "; ".join(short) + ".")
-        out.line("", "It can still grade (`stet verify`) if it has an NVIDIA or AMD GPU, and run your own curator (`stet run`).")
+        out.line("", f"It can still grade (`stet verify`) if it has {grade_hardware_requirement(season)}, and run your own curator (`stet run`).")
     else:
         out.line("", "This machine is fast enough to run curators for the leaderboard: `stet verify --edits`, on Linux.")
     if args.json:
@@ -981,9 +1268,9 @@ def cmd_agents(args):
 
 
 def add_round_args(p, default_round="0"):
-    p.add_argument("--round", default=default_round, help="3 = practice round 3, g3 = gym round 3, or a round id like s2-o00012 (default: 0)")
+    p.add_argument("--round", default=default_round, help="3 = practice round 3, g3 = gym round 3, or a round id like s3-o00012 (default: 0)")
     p.add_argument("--scale", default=None, help="nano, micro or standard (default: nano)")
-    p.add_argument("--season", default=CURRENT_SEASON, help=argparse.SUPPRESS)
+    p.add_argument("--season", default=None, help=argparse.SUPPRESS)
     p.add_argument("--device", default=None, help="torch device (default: best available)")
     p.add_argument("--json", action="store_true", help="print the result as JSON on stdout")
     p.add_argument("-q", "--quiet", action="store_true")
@@ -1024,6 +1311,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(fn=cmd_asset)
 
     p = sub.add_parser("bench", help="measure this machine against the slowest that runs curators")
+    p.add_argument("--device", default=None, help="torch device to measure (default: best available)")
     p.add_argument("--json", action="store_true")
     p.set_defaults(fn=cmd_bench)
 
@@ -1047,7 +1335,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("examine", help=argparse.SUPPRESS)  # organisers: harvest each hour, and make each official round's exam at its draw
     p.add_argument("--round", help="the official round (default with --follow: every open one)")
     p.add_argument("--follow", action="store_true", help="every hour as it settles, and every open round as soon as it is drawn")
-    p.add_argument("--season", default=CURRENT_SEASON, help=argparse.SUPPRESS)
+    p.add_argument("--season", default=None, help=argparse.SUPPRESS)
     p.add_argument("--quiet", action="store_true", help=argparse.SUPPRESS)
     p.set_defaults(fn=cmd_examine)
 
@@ -1084,6 +1372,7 @@ def main(argv=None):
     from .data import ExamNotReady
     from .project import ProjectError
     from .runner import HarnessError
+    from .spec import TrainingError
 
     try:
         return args.fn(args) or 0
@@ -1091,7 +1380,7 @@ def main(argv=None):
         die("interrupted", 130)
     except ApiError as e:
         die(str(e))
-    except (OSError, HarnessError, ExamNotReady, ProjectError, AssetError, Unavailable) as e:
+    except (OSError, HarnessError, TrainingError, ExamNotReady, ProjectError, AssetError, Unavailable) as e:
         die(str(e))
 
 

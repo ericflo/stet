@@ -20,12 +20,37 @@ from importlib import metadata
 from .spec import Season
 
 
+def is_nvidia_linux() -> bool:
+    """Whether this machine is Linux x86_64 with an NVIDIA CUDA GPU."""
+    if not (sys.platform == "linux" and platform.machine() in ("x86_64", "AMD64")):
+        return False
+    try:
+        from pathlib import Path
+
+        for p in Path("/sys/class/drm").glob("card*/device/vendor"):
+            if "0x10de" in p.read_text().lower():
+                return True
+    except OSError:
+        pass
+    try:
+        import torch
+
+        return bool(torch.cuda.is_available() and not getattr(torch.version, "hip", None))
+    except ImportError:
+        return False
+
+
 def expected(season: Season) -> dict:
     """{"python": "3.13", "packages": {name: version}} for this machine's platform."""
     env = season.raw.get("environment") or {}
     packages = {**(env.get("also") or {}), **(env.get("packages") or {})}
     if not (sys.platform == "linux" and platform.machine() in ("x86_64", "AMD64")):
         for name in env.get("linux_x86_64_only") or []:
+            packages.pop(name, None)
+    if is_nvidia_linux():
+        packages.update(env.get("also_cuda") or {})
+    else:
+        for name in env.get("cuda_linux_only") or []:
             packages.pop(name, None)
     return {"python": str(env.get("python") or ""), "packages": packages}
 
@@ -77,6 +102,16 @@ def promised(season: Season) -> dict[str, str]:
     them along is pinned too, but is nobody's to rely on)."""
     env = season.raw.get("environment") or {}
     return dict(env.get("packages") or {})
+
+
+def grade_packages(season: Season) -> tuple[str, ...]:
+    """The pinned libraries required to train and grade students for this season."""
+    env = season.raw.get("environment") or {}
+    if explicit := env.get("grade_packages"):
+        return tuple(explicit)
+    if (season.raw.get("student") or {}).get("kind") == "hf_topreset":
+        return ("safetensors", "tokenizers", "torch", "transformers")
+    return ("torch",)
 
 
 def summary(season: Season) -> str:

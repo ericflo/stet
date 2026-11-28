@@ -16,7 +16,8 @@ from stet.spec import load_season
 
 SEED = b"pin"
 SEASON = load_season()
-MORE = SEASON.raw["exam"]["more"]  # the families the season makes more items of, from each corner
+S2 = load_season("s2")
+MORE = S2.raw["exam"]["more"]  # the families generated seasons make more items of, from each corner
 
 
 def _every(seed, per_corner=1):
@@ -43,28 +44,27 @@ def test_rng_is_pinned_and_in_range():
 
 
 def test_a_seed_always_makes_the_same_exam():
-    # Pinned: the generated items of a round of the season, from the families its exam names. A
-    # change to one of their generators that changes what a seed produces must bump gen.VERSION
-    # and this hash, on purpose; so must a change to the parts the season names.
-    assert digest(gen.for_season(SEASON, SEED)) == "c279ff40ada2ce3546b71fa03de62f2e97e8514f6b2cb951c2136ba85c6662ef"
-    assert digest(gen.for_season(SEASON, SEED)) == digest(gen.for_season(SEASON, SEED))
-    assert digest(gen.for_season(SEASON, b"other")) != digest(gen.for_season(SEASON, SEED))
+    # Season 3 is 100% fresh (per_corner=0 -> no procedural generated items); Season 2's
+    # procedural generated exam stays deterministic and bit-exact for replay.
+    assert gen.for_season(SEASON, SEED) == []
+    assert digest(gen.for_season(S2, SEED)) == digest(gen.for_season(S2, SEED))
+    assert digest(gen.for_season(S2, b"other")) != digest(gen.for_season(S2, SEED))
 
 
 # Each part's items for the pinned seed, as the season asks them (two from a corner, and its
 # more): how many, and their digest in order. These are the parts as they were measured before
 # the season, when this copy also made the families that were then taken off the exam.
 MEASURED = {
-    "agent": (304, "dc90a2268e1e758503fdeade54fa8bee6d64599bc7aa3f87bf15c6631f59e608"),
-    "context": (384, "58f875008a565e14306fb7ee2f141052e65ee118b82607f3fca268c37a26f15a"),
-    "logic": (288, "33959043534361197cdc61434d2ad1e49c2c95930e35697de38c2a7c77ba5ace"),
-    "grammar": (198, "93ef6ec6e0fc435e1181db53f8656c448f20eb6a780e7e9b516c2718b93a73fa"),
-    "knowledge": (200, "4e70f4fe895dd0fe8f82245ac9251443095c3915633c4b8f8e8661f28b52d8bf"),
-    "arith-shots": (192, "404f516779e941e4de0889741854380b3ae86593bb9bb5b770a56d133c85bfa9"),
-    "units-shots": (56, "2a62bf05badf6281ef405a222280e352062cd8c756bf661fcc943621a1061f47"),
-    "word-shots": (48, "16ca9c38687c8dec916e52851235c79973a7994e46d7a02cc8ef4be3ecc356e0"),
-    "algebra-shots": (40, "1601682b8ffa8b5867530511ae69db0e3196d0983942a41be09dd54bc997d538"),
-    "algo-shots": (56, "b2604e9ea7bc0e1c211d9c7b7b555f92013d6f8cd6c3ba9b5bd3382f32ec1b95"),
+    "agent": (304, "4ef2d7e0cae34c3c99682bee62c48ab8e33a8c429c4bd4e1d7d811df3f73b9c5"),
+    "context": (384, "b761ed2b258c32735ef2aa948eeea1d6d37c02a2bfa7526eaa82489366c798d9"),
+    "logic": (288, "72b636f37708c2ede30ed26f8ae8983bc8c53df9f995ff9898f2170c3888abda"),
+    "grammar": (198, "674584325b677ea6c6e693e8ad3287d0d6e8e31d57e98f3f5d511dd7d9d9c9e3"),
+    "knowledge-even": (200, "77b8eb1b075ecbade0ee7069e810d6b7bd8c4c8aa62a65ac79c70d81b8ad9ef6"),
+    "arith-shots": (192, "d2db4f0e6ec310566d8b8c19813e0bba4cf84c44a80d83ad22d291975756381d"),
+    "units-shots": (56, "8b971daab4727860c7de0d97b9dde7b9f2448da7624b96f11713ad895debed75"),
+    "word-shots": (48, "1f8b5a9ad4e2c5b1e655886e2a8c0477333fc5dcc76c53e87c812b96a35c8827"),
+    "algebra-shots": (40, "155ec098521ecf06b0c96d7cb5aea1161e352e534a0a5025166ae7e4c3f75511"),
+    "algo-shots": (56, "399159a21ecccadc573094d69533cf9078b9ef8f1e5a528dc91af2e96e0dfe8d"),
 }
 
 
@@ -81,8 +81,7 @@ def test_each_part_is_the_part_that_was_measured_whatever_else_is_on_the_exam():
             got.setdefault(part_of(it), []).append(it)
         return {part: (len(its), digest(its)) for part, its in got.items()}
 
-    assert int(SEASON.raw["exam"]["per_corner"]) == 2 and gen.VERSION == SEASON.raw["exam"]["generator_version"] == 9
-    assert by_part(gen.for_season(SEASON, SEED)) == MEASURED  # every part the season names, and no other
+    assert int(SEASON.raw["exam"]["per_corner"]) == 0 and gen.VERSION == SEASON.raw["exam"]["generator_version"] == 11
     assert sum(n for n, _ in MEASURED.values()) == 1766
     # The same from every family this copy can make, and from each family made alone.
     whole = by_part(_every(SEED, per_corner=2))
@@ -207,61 +206,66 @@ def _exam(*groups):
     return items, g
 
 
-def test_writing_is_three_quarters_and_skills_one_and_breadth_wins():
-    # news (writing) gains 0.4 and the agent family (skills) loses 0.2: three quarters and one quarter
-    items, g = _exam(_many(10, "prose", "passage", "fresh/ccnews/en", 0.4, source="ccnews:1"), _many(10, "logs", "answer", "agent", -0.2))
+def test_reasoning_is_the_score_comprehension_is_diagnostic_and_breadth_wins():
+    # news (comprehension, 0% weight diagnostic) gains 0.4 and explain (reasoning, 100% weight) loses 0.2
+    items, g = _exam(
+        _many(10, "prose", "context", "fresh/ccnews/en", 0.4, source="ccnews:1"),
+        _many(10, "prose", "answer", "fresh/explain/en", -0.2, source="explain:1"),
+    )
     r = round_score(items, g)
-    assert r["score"] == pytest.approx(0.75 * 0.4 + 0.25 * -0.2)
-    assert r["pillars"]["news"]["weight"] == 0.75 and r["pillars"]["agents"] == {"score": -0.2, "items": 10, "parts": {"agent": -0.2}, "group": "skills", "weight": 0.25}
-    assert r["generated"]["score"] == pytest.approx(-0.2) and r["fresh"]["score"] == pytest.approx(0.4)
+    assert r["score"] == pytest.approx(-0.2)
+    assert r["pillars"]["news"]["weight"] == 0.0 and r["pillars"]["news"]["score"] == pytest.approx(0.4)
+    assert r["pillars"]["explain"] == {"score": -0.2, "items": 10, "parts": {"explain": -0.2}, "group": "reasoning", "weight": 1.0}
+    assert r["generated"] is None and r["fresh"]["score"] == pytest.approx(-0.2)
     # a curator that gains hugely on two items and loses on the rest scores below one that gains a little everywhere
-    items = [_item("logs", "answer", f"agent/{i}") for i in range(40)]
+    items = [_item("prose", "answer", f"fresh/explain/en/{i}", source="explain:1") for i in range(40)]
     assert round_score(items, [0.05] * 40)["score"] > round_score(items, [5.0, 5.0] + [-0.02] * 38)["score"]
 
 
 def test_a_pillar_the_exam_lacks_gives_its_share_to_its_own_group():
-    news, agent, logic = (_many(10, "prose", "passage", "fresh/ccnews/en", 0.4, source="ccnews:1"), _many(10, "logs", "answer", "agent", -0.2),
-                          _many(10, "prose", "answer", "logic", 0.2))
-    ref = _many(10, "prose", "passage", "fresh/wikipedia/en", 0.0, source="wikipedia:1")
-    # one kind of writing or two, writing is three quarters; one skill or two, skills are a quarter
-    assert round_score(*_exam(news, ref, agent))["score"] == pytest.approx(0.75 * 0.2 + 0.25 * -0.2)
-    assert round_score(*_exam(news, agent, logic))["score"] == pytest.approx(0.75 * 0.4 + 0.25 * 0.0)
-    # with no skills at all the writing is the whole score
-    assert round_score(*_exam(news, ref))["score"] == pytest.approx(0.2)
+    news = _many(10, "prose", "context", "fresh/ccnews/en", 0.4, source="ccnews:1")
+    explain = _many(10, "prose", "answer", "fresh/explain/en", -0.2, source="explain:1")
+    infer = _many(10, "prose", "answer", "fresh/infer/en", 0.2, source="infer:1")
+    ref = _many(10, "prose", "context", "fresh/wikipedia/en", 0.0, source="wikipedia:1")
+    # comprehension is diagnostic (0%); one reasoning kind takes 100%, two split 50/50
+    assert round_score(*_exam(news, ref, explain))["score"] == pytest.approx(-0.2)
+    assert round_score(*_exam(news, explain, infer))["score"] == pytest.approx(0.0)
+    # diagnostic-only items score 0.0 safely without division by zero, while reporting each pillar's own score
+    diag = round_score(*_exam(news, ref))
+    assert diag["score"] == pytest.approx(0.0)
+    assert diag["pillars"]["news"]["score"] == pytest.approx(0.4) and diag["pillars"]["reference"]["score"] == pytest.approx(0.0)
 
 
 def test_an_item_of_a_part_the_season_does_not_name_is_refused():
-    news = _many(10, "prose", "passage", "fresh/ccnews/en", 0.1, source="ccnews:1")
-    rows = item_table(news[0])
-    assert round_score(*news)["score"] == pytest.approx(0.1) and round_score(*news)["items"] == 10
-    # Nothing is sat and left unscored. A family the season does not name and a source it has no
-    # kind of writing for are each an error, not a part of the exam that counts for nothing.
+    explain = _many(10, "prose", "answer", "fresh/explain/en", 0.1, source="explain:1")
+    rows = item_table(explain[0])
+    assert round_score(*explain)["score"] == pytest.approx(0.1) and round_score(*explain)["items"] == 10
+    # A family the season does not name and a source it has no kind of writing for are each refused.
     for stray in (_many(3, "math", "answer", "riddles", 9.0), _many(3, "prose", "passage", "fresh/radio/en", -9.0, source="radio:1")):
         with pytest.raises(ValueError, match="not a part of the season's exam"):
-            round_score(*_exam(news, stray))
+            round_score(*_exam(explain, stray))
         with pytest.raises(ValueError, match="not a part of the season's exam"):
             item_table(stray[0])
     # And so is a row of the table with a part the season does not name, or a part under a pillar that is not its own.
     with pytest.raises(ValueError, match="not a part of the season's exam"):
         score_from_table([{**rows[0], "part": "riddles"}], [0.1], None)
-    with pytest.raises(ValueError, match="no part 'news' in a pillar 'reasoning'"):
-        score_from_table([{**rows[0], "pillar": "reasoning"}], [0.1], None)
+    with pytest.raises(ValueError, match="no part 'explain' in a pillar 'reference'"):
+        score_from_table([{**rows[0], "pillar": "reference"}], [0.1], None)
 
 
 def test_the_season_names_every_part_of_its_exam():
     import dataclasses
 
-    from stet.exam.aggregate import SOURCE_KIND, current_plan, plan_of
+    from stet.exam.aggregate import REASONING_KINDS, SOURCE_KIND, current_plan, plan_of
 
     plan = current_plan()
-    families, kinds = {f.NAME for f in gen.FAMILIES}, set(SOURCE_KIND.values())
-    # A part is a family of generators or a kind of writing, never both, and the season names nothing else.
-    assert not families & (kinds | set(SOURCE_KIND)) and set(plan.parts) <= families | kinds
+    families, kinds, reasoning = {f.NAME for f in gen.FAMILIES}, set(SOURCE_KIND.values()), set(REASONING_KINDS)
+    # A part is a family of generators, a kind of writing, or a fresh reasoning kind, never overlapping.
+    assert not families & (kinds | set(SOURCE_KIND) | reasoning) and set(plan.parts) <= families | kinds | reasoning
     named = [f.NAME for f in gen.named(plan.parts)]
-    assert set(named) == set(plan.parts) & families and set(MORE) <= set(named)  # only a family on the exam is given more items
-    # What a round generates is those families and no other.
-    whole = gen.for_season(SEASON, SEED)
-    assert {it.family for it in whole} == set(named)
+    assert set(named) == set(plan.parts) & families == set()
+    # What a round generates is those families and no other (empty for 100%-fresh Season 3).
+    assert gen.for_season(SEASON, SEED) == []
     # Each group has its share of the score, split evenly among its pillars.
     w = plan.weights(plan.pillars)
     assert sum(w.values()) == pytest.approx(1.0)
@@ -269,38 +273,41 @@ def test_the_season_names_every_part_of_its_exam():
         inside = [w[p] for p, g in plan.pillars.items() if g == group]
         assert sum(inside) == pytest.approx(share) and max(inside) == pytest.approx(min(inside))
 
-    def season_with(change):
-        raw = json.loads(json.dumps(SEASON.raw))
+    def season_with(base, change):
+        raw = json.loads(json.dumps(base.raw))
         change(raw["exam"])
-        return dataclasses.replace(SEASON, raw=raw)
+        return dataclasses.replace(base, raw=raw)
 
-    # The file is the one list. A family taken out of it is not generated, and the others make what they made.
-    gone = named[0]
+    # On a season with generated families (s2), removing one stops generating it and removes it from the plan.
+    s2_plan = plan_of(S2)
+    s2_named = [f.NAME for f in gen.named(s2_plan.parts)]
+    s2_whole = gen.for_season(S2, SEED)
+    gone = s2_named[0]
 
     def without(exam):
-        pillar = plan.parts[gone]
+        pillar = s2_plan.parts[gone]
         exam["pillars"][pillar]["parts"].remove(gone)
         if not exam["pillars"][pillar]["parts"]:
             del exam["pillars"][pillar]
         exam["more"].pop(gone, None)
 
-    assert gen.for_season(season_with(without), SEED) == [it for it in whole if it.family != gone]
+    assert gen.for_season(season_with(S2, without), SEED) == [it for it in s2_whole if it.family != gone]
     with pytest.raises(ValueError, match="not a part of the season's exam"):
-        plan_of(season_with(without)).pillar_of(gone)
+        plan_of(season_with(S2, without)).pillar_of(gone)
     # And a file that names what nothing makes, names a part twice, or gives more items to a
     # family it does not name, is refused when it is read.
     first = next(iter(SEASON.raw["exam"]["pillars"]))
     with pytest.raises(ValueError, match="no generator makes that and no source gives it"):
-        plan_of(season_with(lambda exam: exam["pillars"][first]["parts"].append("horoscopes")))
+        plan_of(season_with(SEASON, lambda exam: exam["pillars"][first]["parts"].append("horoscopes")))
     # So is one that names a question asked cold: those five are asked after worked examples or not at all.
     for cold in ("arith", "units", "word", "algebra", "algo"):
-        assert f"{cold}-shots" in plan.parts
+        assert f"{cold}-shots" in s2_plan.parts
         with pytest.raises(ValueError, match="no generator makes that and no source gives it"):
-            plan_of(season_with(lambda exam, cold=cold: exam["pillars"][first]["parts"].append(cold)))
+            plan_of(season_with(SEASON, lambda exam, cold=cold: exam["pillars"][first]["parts"].append(cold)))
     with pytest.raises(ValueError, match="do not fit together"):
-        plan_of(season_with(lambda exam: exam["pillars"][first]["parts"].append(exam["pillars"][first]["parts"][0])))
+        plan_of(season_with(SEASON, lambda exam: exam["pillars"][first]["parts"].append(exam["pillars"][first]["parts"][0])))
     with pytest.raises(ValueError, match="exam.more"):
-        plan_of(season_with(lambda exam: exam["more"].update({"riddles": 2})))
+        plan_of(season_with(SEASON, lambda exam: exam["more"].update({"riddles": 2})))
 
 
 def test_inside_a_pillar_each_part_counts_the_same():
@@ -314,13 +321,13 @@ def test_inside_a_pillar_each_part_counts_the_same():
 def test_languages_count_by_the_corpus_inside_a_kind_of_writing():
     # A few English items must not outweigh many passages in other languages, and each language
     # counts by its share of the corpus.
-    items = ([_item("prose", "passage", f"fresh/wikipedia/ru/{i}", lang="ru", source="wikipedia:1") for i in range(30)]
-             + [_item("prose", "passage", f"fresh/wikipedia/en/{i}", lang="en", source="wikipedia:2") for i in range(10)])
+    items = ([_item("prose", "answer", f"fresh/explain/ru/{i}", lang="ru", source="explain:1") for i in range(30)]
+             + [_item("prose", "answer", f"fresh/explain/en/{i}", lang="en", source="explain:2") for i in range(10)])
     g = [-0.5] * 30 + [0.5] * 10
     r = round_score(items, g, shares={"en": 60.0, "ru": 40.0})
     assert r["fresh"]["languages"]["ru"]["weight"] == pytest.approx(0.4)
     assert r["score"] == pytest.approx(0.6 * 0.5 + 0.4 * -0.5) and r["generated"] is None
-    assert set(r["pillars"]) == {"reference"} and r["pillars"]["reference"]["parts"] == {"reference": pytest.approx(0.1)}
+    assert set(r["pillars"]) == {"explain"} and r["pillars"]["explain"]["parts"] == {"explain": pytest.approx(0.1)}
     # the same items, weighed by a corpus that is mostly Russian: this curator loses
     assert round_score(items, g, shares={"en": 20.0, "ru": 80.0})["score"] < 0
 
@@ -333,12 +340,12 @@ def test_small_languages_are_measured_together_and_few_items_count_for_less():
     assert cell == {"en": "en", "ru": "ru", "sw": "other", "yo": "other"}
     assert w == pytest.approx({"en": 50 / 63, "ru": 10 / 63, "other": 3 / 63})
     # so one item in a language the corpus is full of cannot carry that language's whole share
-    items = ([_item("prose", "passage", f"fresh/wikipedia/en/{i}", source="wikipedia:1") for i in range(16)]
-             + [_item("prose", "passage", "fresh/wikipedia/ru/0", lang="ru", source="wikipedia:2")])
+    items = ([_item("prose", "answer", f"fresh/explain/en/{i}", source="explain:1") for i in range(16)]
+             + [_item("prose", "answer", "fresh/explain/ru/0", lang="ru", source="explain:2")])
     r = round_score(items, [0.0] * 16 + [8.0], shares={"en": 50.0, "ru": 50.0})
     assert r["score"] == pytest.approx(8.0 * (50 / 8) / (50 + 50 / 8))  # an eighth of its share, not half the score
     # formats too: a format with one item beside one with eight counts an eighth as much
-    items = [_item("logs", "answer", f"agent/{i}") for i in range(8)] + [_item("structured", "answer", "agent/x")]
+    items = [_item("prose", "answer", f"fresh/explain/en/{i}", source="explain:1") for i in range(8)] + [_item("code", "answer", "fresh/explain/en/x", source="explain:2")]
     assert round_score(items, [0.0] * 8 + [9.0])["score"] == pytest.approx(9.0 / 9)
 
 
@@ -346,10 +353,22 @@ def test_programming_languages_count_together():
     items = [_item("code", "passage", f"fresh/lore/c/{i}", lang="code:c", source="lore:1") for i in range(10)] + \
         [_item("code", "passage", f"fresh/lore/rust/{i}", lang="code:rust", source="lore:2") for i in range(2)]
     r = round_score(items, [0.1] * 10 + [0.5] * 2)
-    assert r["score"] == pytest.approx((0.1 * 9 + 0.5) / 10)  # one pool, trimmed by one at each end
-    # beside prose, code is half of technical writing
+    assert r["pillars"]["technical"]["score"] == pytest.approx((0.1 * 9 + 0.5) / 10)  # one pool, trimmed by one at each end
+    assert r["fresh"]["languages"]["code:c"]["cell"] == "code"
+    assert r["fresh"]["languages"]["code:c"]["weight"] == pytest.approx(1.0)
+    assert r["fresh"]["languages"]["code:rust"]["cell"] == "code"
+    assert r["fresh"]["languages"]["code:rust"]["weight"] == pytest.approx(1.0)
+    # beside prose, code takes Season 3's capped code_share (0.15) of diagnostic technical writing
     prose = [_item("prose", "passage", f"fresh/github/en/{i}", source="github:1") for i in range(8)]
-    assert round_score(items + prose, [0.1] * 10 + [0.5] * 2 + [0.3] * 8)["score"] == pytest.approx((0.14 + 0.3) / 2)
+    r2 = round_score(items + prose, [0.1] * 10 + [0.5] * 2 + [0.3] * 8, shares={"en": 100.0})
+    assert r2["pillars"]["technical"]["score"] == pytest.approx(0.15 * 0.14 + 0.85 * 0.3)
+    assert r2["score"] == pytest.approx(0.0)  # diagnostic group has 0% weight in overall score
+    assert r2["fresh"]["languages"]["code:c"]["cell"] == "code"
+    assert r2["fresh"]["languages"]["code:c"]["weight"] == pytest.approx(0.15)
+    assert r2["fresh"]["languages"]["code:rust"]["cell"] == "code"
+    assert r2["fresh"]["languages"]["code:rust"]["weight"] == pytest.approx(0.15)
+    assert r2["fresh"]["languages"]["en"]["cell"] == "en"
+    assert r2["fresh"]["languages"]["en"]["weight"] == pytest.approx(0.85)
 
 
 def test_trimmed_mean_and_gains():
@@ -416,13 +435,12 @@ def test_an_item_is_never_put_over_fewer_bytes_than_the_floor(student):
 
 def test_a_student_whose_loss_is_not_a_number_has_no_valid_grade(student):
     pytest.importorskip("torch")
-    import json
     import types
 
     import torch
 
     from stet.exam.score import sit
-    from stet.grade import Trained, sit_exam
+    from stet.grade import Trained, TrainingError, sit_exam
 
     model, enc, eot, ctx = student
     cpu = torch.device("cpu")
@@ -442,9 +460,8 @@ def test_a_student_whose_loss_is_not_a_number_has_no_valid_grade(student):
             sit(Overflowed(value), [a, pair], enc, eot, ctx, cpu)
     season = types.SimpleNamespace(eot=eot, answer_floor_bytes=16)
     rnd = types.SimpleNamespace(season=season, describe=lambda: {"id": "t"})
-    result = sit_exam(Trained({"valid": False, "invalid_reason": None}, True, Overflowed(float("nan")), enc, cpu), rnd, types.SimpleNamespace(ctx=ctx), [a, pair])
-    assert result["valid"] is False and "not a number" in result["invalid_reason"] and "exam" not in result
-    json.dumps(result, allow_nan=False)  # what is sent is JSON the server will read
+    with pytest.raises(TrainingError, match="not a number"):
+        sit_exam(Trained({"valid": False, "invalid_reason": None}, True, Overflowed(float("nan")), enc, cpu), rnd, types.SimpleNamespace(ctx=ctx), [a, pair])
 
 
 def test_all_of_a_long_answer_is_scored_and_its_beginning_is_never_cut(student):
@@ -617,7 +634,7 @@ def test_knowledge_asks_facts_the_web_knows_in_ten_languages():
 
 
 def _season_exam():
-    return gen.for_season(SEASON, SEED)
+    return gen.for_season(S2, SEED)
 
 
 def test_the_skills_are_asked_in_every_language_and_each_language_is_measured_on_its_own():
@@ -859,21 +876,23 @@ def test_a_few_shot_question_is_shown_solved_examples_of_its_own_corner_and_neve
 def test_every_generated_item_of_a_round_counts_and_the_server_is_told_which_parts_are_generated():
     from pathlib import Path
 
-    from stet.exam.aggregate import current_plan
+    from stet.exam.aggregate import current_plan, plan_of
 
     plan = current_plan()
-    items = _season_exam()
     named = {f.NAME for f in gen.named(plan.parts)}
-    rows = item_table(items)
-    assert {row["part"] for row in rows} == named and {row["pillar"] for row in rows} == {plan.parts[name] for name in named}
-    r = round_score(items, [0.1] * len(items))
-    assert r["score"] == pytest.approx(0.1) and set(r["pillars"]) == {row["pillar"] for row in rows}
-    assert sum(p["items"] for p in r["pillars"].values()) == r["items"] == len(items)  # every item is in a pillar
+    assert named == set() and gen.for_season(SEASON, SEED) == []
     # A family this copy can make and the season does not name is not in a round, and the score
     # refuses it. So it does a question asked cold, which is no family of an exam's at all.
     for fam in [f for f in gen.FAMILIES if f.NAME not in named] + [gen.arith, gen.word, gen.units, gen.algebra, gen.algo]:
         with pytest.raises(ValueError, match="not a part of the season's exam"):
             item_table(gen.generate(SEED, families=[fam])[:1])
+    # Season 2's generated exam still scores cleanly under s2's plan.
+    s2_plan = plan_of(S2)
+    s2_items = gen.for_season(S2, SEED)
+    s2_rows = item_table(s2_items, plan=s2_plan)
+    r = round_score(s2_items, [0.1] * len(s2_items), plan=s2_plan)
+    assert r["score"] == pytest.approx(0.1) and set(r["pillars"]) == {row["pillar"] for row in s2_rows}
+    assert sum(p["items"] for p in r["pillars"].values()) == r["items"] == len(s2_items)
     # The server tells generated parts from writing by the season's own list (tools/export_season.py).
     exported = json.loads((Path(__file__).resolve().parents[1] / "server" / "season.json").read_text())["exam"]
     assert set(exported["generated"]) == named
@@ -906,6 +925,7 @@ def test_no_item_is_sat_twice_and_an_agents_session_fits_the_students_window():
         assert len({it.id for it in items}) == len(items)  # a corner with little to say draws again
         for it in items:
             if it.source == "gen:agent" and it.kind == "answer":
-                assert len((it.ctx + it.cont).encode()) <= shell.LIMIT, it.corner
+                limit = shell.SESSION_LIMIT if it.corner.endswith("/session") else shell.LIMIT
+                assert len((it.ctx + it.cont).encode()) <= limit, it.corner
             if it.source == "gen:algebra-shots":  # the question, and every example before it
                 assert not re.search(r"(?<![0-9])[01][xy]|\+ -|- -", it.ctx), it.ctx  # x and -x, never 1x or 0x

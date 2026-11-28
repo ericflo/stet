@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -77,8 +78,10 @@ func (p Policy) targetHolding(w *Work, held int, now time.Time, early int) int {
 }
 
 // runsEach is how many times the season runs an entry's curator, each by another account,
-// and runsPerMachine how many entries to run justify one more machine.
-const runsEach, runsPerMachine = 2, 4
+// and runsPerMachine how many entries to run justify one more machine. Season 3 neural
+// curators can take up to 20 minutes each, so one machine per two entries keeps waves fast
+// under the --max cap.
+const runsEach, runsPerMachine = 2, 2
 
 // runners is how many of the machines the rounds' work justifies run curators: one for
 // every runsPerMachine entries to run, and never fewer than runsEach; or one to ask for
@@ -204,9 +207,11 @@ func (p Policy) earlyMachines(grades, next int, workers []*Worker, now time.Time
 // Worker is one key of the pool, with the machine rented with it if there is one, and what
 // the server says of it.
 type Worker struct {
-	Key     *Key
-	Rental  *Rental
-	Machine *Machine
+	Key          *Key
+	Rental       *Rental
+	ExtraRentals []*Rental    // additional live or stopped contracts sharing this handle
+	Pending      *pendingRent // unresolved uncertain create reservation for this handle
+	Machine      *Machine
 	// Plan is how many grades it was rented to take before an exam (0 or 1: one).
 	Plan int
 	// Grace is how long it may take to first ask for work (0: the policy's).
@@ -224,6 +229,10 @@ type Worker struct {
 	// NoCurators is why the server would not hand it curators to run, rented to run them
 	// ("": it would, or it was not): it grades only (curators.go).
 	NoCurators string
+	// GradeOnly is true for a machine that cannot run curators (rented on a grade-only market
+	// or a GPU below --min-curator-gpu-memory, or refused by the server): never kept warm for
+	// draws and never counted in place of a curator runner.
+	GradeOnly bool
 }
 
 // gradeFor says whether something other than a curator wants a machine now: a grade of a posted
@@ -273,10 +282,27 @@ func (p Policy) tooEarly(w *Work, workers []*Worker, now time.Time) map[*Worker]
 //	stopped   the machine stopped, or never got going
 func (w *Worker) state(now time.Time, p Policy) string {
 	switch {
+	case w.Rental == nil && w.Pending != nil:
+		return "pending"
 	case w.Rental == nil:
 		return "free"
+	case w.Rental.Terminating:
+		return "terminating"
+	case w.Rental.Unconfirmed && w.Rental.State == "stopped":
+		if w.Machine != nil && w.Machine.Busy == "grade" {
+			return "grading"
+		}
+		if w.Machine != nil && w.Machine.Busy == "farm" {
+			return "training"
+		}
+		if w.Machine != nil && w.Machine.Busy != "" {
+			return "running"
+		}
+		return "unconfirmed"
 	case w.Rental.State == "stopped":
 		return "stopped"
+	case w.Rental.State == "unknown":
+		return "unknown"
 	case w.Machine != nil && w.Machine.Busy == "grade":
 		return "grading"
 	case w.Machine != nil && w.Machine.Busy == "farm":
@@ -315,11 +341,14 @@ func (w *Worker) grace(p Policy) time.Duration {
 }
 
 // Ending is a machine to end, and why. Failed: it never asked for work, or went quiet; what
-// became of it is asked of its market before it is ended.
+// became of it is asked of its market before it is ended. Rental overrides Worker.Rental when
+// ending a duplicate contract sharing the same handle or an orphaned ledger contract.
 type Ending struct {
 	Worker *Worker
 	Why    string
 	Failed bool
+	Forced bool
+	Rental *Rental
 }
 
 // Decision is one look at the work and the machines.
@@ -372,6 +401,47 @@ func (p Policy) nearExam(w *Work, now time.Time) bool {
 // keptNearExam is how many idle machines are kept near an exam: the fastest two.
 const keptNearExam = 2
 
+// nearDraw says whether an on-demand round is already scheduled to draw shortly (within the
+// draw notice window) while no round is open yet, or a waiting entry is about to be scheduled
+// by a runner that just checked in: keep up to keptNearDraw warm curator-capable runners alive
+// so the trigger runner is never killed before the draw fires.
+func (p Policy) nearDraw(w *Work, now time.Time) bool {
+	if !p.Edits || len(w.Rounds) != 0 || w.Paused != 0 {
+		return false
+	}
+	if w.Waiting && w.Runners > 0 {
+		return true
+	}
+	if w.NextDrawAt <= 0 {
+		return false
+	}
+	at := time.Unix(w.NextDrawAt, 0)
+	return at.After(now.Add(-2*time.Minute)) && at.Sub(now) <= 20*time.Minute
+}
+
+const keptNearDraw = 2
+
+// freshGraders counts fresh machines needed for tie-breaking baselines or disputed grades that
+// existing idle ("waiting") machines cannot take (because they already measured the baseline or
+// graded the disputed script). Driven strictly by server-emitted FreshGradersWanted / BaselineDisputed
+// so normal undisputed round transitions never over-rent or evict healthy idle GPUs.
+func (p Policy) freshGraders(w *Work) int {
+	need := 0
+	for _, r := range w.Rounds {
+		if r.GradesWanted <= 0 {
+			continue
+		}
+		if r.FreshGradersWanted != nil {
+			need += *r.FreshGradersWanted
+			continue
+		}
+		if r.BaselineDisputed && (r.BaselinesWanted == nil || *r.BaselinesWanted > 0) {
+			need++
+		}
+	}
+	return need
+}
+
 // decideNext decides, where a machine rented now for grades taken before an exam is taken to
 // take next of them (forExam's plan for the kind it would rent).
 func (p Policy) decideNext(w *Work, workers []*Worker, spentToday float64, now time.Time, next int) Decision {
@@ -393,35 +463,79 @@ func (p Policy) decideNext(w *Work, workers []*Worker, spentToday float64, now t
 	early, renting := p.earlyMachines(p.earlyWanted(w, now), next, workers, now, ending)
 	waiting := p.targetHolding(w, held, now, early)
 	d := Decision{Target: min(waiting+working, p.MaxWorkers)}
-	free := 0
-	var idle []*Worker
+	earliestDrawn := int64(0)
+	for _, r := range w.Rounds {
+		if r.DrawnAt > 0 && (earliestDrawn == 0 || r.DrawnAt < earliestDrawn) {
+			earliestDrawn = r.DrawnAt
+		}
+	}
+	free, freshFree, starting := 0, 0, 0
+	var idle, waitingIdle []*Worker
 	for _, wk := range workers {
+		for _, extra := range wk.ExtraRentals {
+			if extra != nil && (extra.Terminating || ((extra.State == "stopped" || extra.State == "unknown") && !extra.Unconfirmed)) {
+				why := "stopped duplicate machine on the same key"
+				if extra.Terminating {
+					why = "outstanding termination on duplicate machine"
+				} else if extra.State == "unknown" {
+					statusWord := strings.ToLower(extra.Status)
+					if statusWord == "" {
+						statusWord = "unknown"
+					}
+					why = "duplicate machine in unrecoverable status (" + statusWord + ")"
+				}
+				d.End = append(d.End, Ending{Worker: wk, Rental: extra, Why: why})
+			}
+		}
 		switch st := wk.state(now, p); st {
 		case "free":
 			free++
+			if wk.Machine == nil || earliestDrawn == 0 || wk.Machine.LastSeen < earliestDrawn {
+				freshFree++
+			}
 			if wk.Machine != nil && wk.Machine.Busy != "" {
 				d.Release = append(d.Release, wk)
 			}
+		case "pending", "unconfirmed":
+			d.Live++
+		case "terminating":
+			d.End = append(d.End, Ending{Worker: wk, Rental: wk.Rental, Why: "outstanding termination"})
 		case "stopped":
-			d.End = append(d.End, Ending{wk, "it stopped, or never asked for work", true})
+			d.End = append(d.End, Ending{Worker: wk, Why: "it stopped, or never asked for work", Failed: true})
+		case "unknown":
+			statusWord := strings.ToLower(wk.Rental.Status)
+			if statusWord == "" {
+				statusWord = "unknown"
+			}
+			d.End = append(d.End, Ending{Worker: wk, Why: "its market reports an unrecoverable status (" + statusWord + ")", Failed: true})
 		case "quiet":
-			d.End = append(d.End, Ending{wk, fmt.Sprintf("nothing heard from it for %s, and it holds no job", now.Sub(time.Unix(wk.Machine.LastSeen, 0)).Round(time.Minute)), true})
+			d.End = append(d.End, Ending{Worker: wk, Why: fmt.Sprintf("nothing heard from it for %s, and it holds no job", now.Sub(time.Unix(wk.Machine.LastSeen, 0)).Round(time.Minute)), Failed: true})
 		case "waiting":
 			if ending[wk] {
 				d.End = append(d.End, Ending{Worker: wk, Why: fmt.Sprintf("too early for the exam's grades: a machine of its kind is rented again in time, from %s UTC", wk.Window.UTC().Format("15:04"))})
 				continue
 			}
-			if wk.NoCurators != "" && p.runners(w) > 0 && !p.gradeFor(w, wk, now) {
-				// Rented to run curators, and it may not: it would only wait, and stand in the
-				// place of one that may.
-				d.End = append(d.End, Ending{Worker: wk, Why: "it may not run curators (" + wk.NoCurators + "), and no grade wants it yet"})
+			if (wk.NoCurators != "" || wk.GradeOnly) && p.runners(w) > 0 && !p.gradeFor(w, wk, now) {
+				// Cannot run curators, and only curators (or a draw trigger) want machines: end it
+				// so a curator-capable machine is rented in its place.
+				why := "it grades only, and no grade wants it yet"
+				if wk.NoCurators != "" {
+					why = "it may not run curators (" + wk.NoCurators + "), and no grade wants it yet"
+				}
+				d.End = append(d.End, Ending{Worker: wk, Why: why})
 				continue
 			}
 			d.Live++
 			idle = append(idle, wk)
+			waitingIdle = append(waitingIdle, wk)
 		default:
+			if st == "starting" && wk.GradeOnly && p.runners(w) > 0 && !p.gradeFor(w, wk, now) {
+				d.End = append(d.End, Ending{Worker: wk, Why: "it grades only, and no grade wants it yet"})
+				continue
+			}
 			d.Live++
-			if st == "waiting" || st == "starting" {
+			if st == "starting" {
+				starting++
 				idle = append(idle, wk)
 			}
 		}
@@ -429,8 +543,14 @@ func (p Policy) decideNext(w *Work, workers []*Worker, spentToday float64, now t
 	if waiting == 0 {
 		// Nothing is waiting for anybody: a machine doing nothing would only wait to stop. Near
 		// an exam, the fastest that are waiting are kept for a grade a failed machine leaves.
+		// Near an imminent scheduled draw (e.g., during the 6-16m on-demand notice window), up
+		// to keptNearDraw warm runners are kept so the draw starts without cold-boot churn.
+		// Cap warm workers by remaining worker slots (p.MaxWorkers minus busy/pending workers) so
+		// a warm idle machine can never occupy a slot reserved for a required examiner.
+		busy := max(0, d.Live-len(idle))
+		warmCap := max(0, p.MaxWorkers-busy)
 		kept := map[*Worker]bool{}
-		if p.nearExam(w, now) {
+		if p.nearExam(w, now) && warmCap > 0 {
 			var fast []*Worker
 			for _, wk := range idle {
 				if wk.state(now, p) == "waiting" {
@@ -438,7 +558,24 @@ func (p Policy) decideNext(w *Work, workers []*Worker, spentToday float64, now t
 				}
 			}
 			sort.SliceStable(fast, func(i, j int) bool { return fast[i].Speed > fast[j].Speed })
-			for _, wk := range fast[:min(len(fast), keptNearExam)] {
+			for _, wk := range fast[:min(len(fast), min(keptNearExam, warmCap))] {
+				kept[wk] = true
+			}
+		} else if p.nearDraw(w, now) && warmCap > 0 {
+			var warm []*Worker
+			for _, wk := range idle {
+				if wk.NoCurators == "" && !wk.GradeOnly {
+					warm = append(warm, wk)
+				}
+			}
+			sort.SliceStable(warm, func(i, j int) bool {
+				wi, wj := warm[i].state(now, p) == "waiting", warm[j].state(now, p) == "waiting"
+				if wi != wj {
+					return wi
+				}
+				return warm[i].Speed > warm[j].Speed
+			})
+			for _, wk := range warm[:min(len(warm), min(keptNearDraw, warmCap))] {
 				kept[wk] = true
 			}
 		}
@@ -451,11 +588,55 @@ func (p Policy) decideNext(w *Work, workers []*Worker, spentToday float64, now t
 		}
 		return d
 	}
+	if d.Live > p.MaxWorkers && len(waitingIdle) > 0 {
+		drop := min(d.Live-p.MaxWorkers, len(waitingIdle))
+		sort.SliceStable(waitingIdle, func(i, j int) bool { return waitingIdle[i].Speed < waitingIdle[j].Speed })
+		for _, wk := range waitingIdle[:drop] {
+			d.End = append(d.End, Ending{Worker: wk, Why: "idle while a slot is needed under --max"})
+			d.Live--
+		}
+		waitingIdle = waitingIdle[drop:]
+	}
+	freshNeed := p.freshGraders(w)
+	shortFreshKeys := 0
+	budgetBlocked := p.DailyBudget > 0 && spentToday >= p.DailyBudget
+	if freshNeed > starting && len(waitingIdle) > 0 {
+		wantExtra := freshNeed - starting
+		extra := min(wantExtra, freshFree)
+		shortFreshKeys = wantExtra - extra
+		if extra > 0 {
+			if !budgetBlocked && d.Live+extra > p.MaxWorkers {
+				drop := min(d.Live+extra-p.MaxWorkers, len(waitingIdle))
+				sort.SliceStable(waitingIdle, func(i, j int) bool { return waitingIdle[i].Speed < waitingIdle[j].Speed })
+				for _, wk := range waitingIdle[:drop] {
+					d.End = append(d.End, Ending{Worker: wk, Why: "idle while a fresh machine is needed to break a dispute"})
+					d.Live--
+				}
+			}
+			d.Target = min(max(d.Target, d.Live+extra), p.MaxWorkers)
+		}
+	}
 	d.Launch = max(0, min(d.Target, p.MaxWorkers)-d.Live)
+	disputedOnly := freshNeed > 0 && early == 0 && p.runners(w) == 0 && w.FarmWaiting == 0 && (!p.LongFarm || w.FarmLongWaiting == 0)
+	if disputedOnly {
+		for _, r := range w.Rounds {
+			if r.GradesWanted > 0 && !r.BaselineDisputed && r.freshGradersWanted() < r.GradesWanted {
+				disputedOnly = false
+				break
+			}
+		}
+	}
+	if disputedOnly && d.Launch > freshFree {
+		shortFreshKeys = max(shortFreshKeys, d.Launch-freshFree)
+		d.Launch = freshFree
+	}
 	if d.Launch > free {
 		d.Launch, d.Note = free, fmt.Sprintf("only %d keys are free: make more with `stet-cloud keys --add N`", free)
 	}
-	if d.Launch > 0 && p.DailyBudget > 0 && spentToday >= p.DailyBudget {
+	if shortFreshKeys > 0 && d.Note == "" {
+		d.Note = fmt.Sprintf("need %d more fresh key(s) to break a dispute (all %d keys are in use or already participated in this round): run `stet-cloud keys --add %d`", shortFreshKeys, len(workers), shortFreshKeys)
+	}
+	if budgetBlocked && (d.Launch > 0 || (freshNeed > starting && len(waitingIdle) > 0 && freshFree > 0)) {
 		d.Launch, d.Note = 0, fmt.Sprintf("about $%.2f spent today, and the daily budget is $%.2f", spentToday, p.DailyBudget)
 	}
 	if p.LongFarm {

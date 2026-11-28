@@ -198,9 +198,10 @@ func TestMachinesThatRunCuratorsAreRentedForRunsAndGrades(t *testing.T) {
 		want int
 	}{
 		{&Work{}, 0},
-		{round(36, 0, 0, 0), 8},   // a round starting: 36 entries, four to a machine, at most 8
+		{round(36, 0, 0, 0), 8},   // a round starting: 36 entries, two to a machine, at most 8
 		{round(3, 0, 0, 0), 2},    // three: each is run twice, by two machines
-		{round(5, 2, 1, 4), 3},    // five entries (two machines) and a script
+		{round(5, 2, 1, 4), 4},    // five entries (three machines at runsPerMachine=2) and a script
+		{round(8, 0, 0, 0), 4},    // eight entries: four curator machines (2 waves instead of 4)
 		{round(0, 3, 0, 5), 0},    // all under way: nothing more for a new machine
 		{round(0, 0, 2, 0), 1},    // two scripts left
 		{&Work{Waiting: true}, 1}, // an entry waiting, and nobody who runs curators around to have its round drawn
@@ -236,7 +237,7 @@ func TestTheFarmsStudentsWantMachinesToo(t *testing.T) {
 		{&Work{FarmWaiting: 1}, 1},
 		{&Work{FarmWaiting: 9}, 3},
 		{&Work{FarmUnderWay: 5}, 0},         // all being trained already
-		{withFarm(round(5, 0, 1, 0), 9), 6}, // 3 for the round's five entries and its script, 3 for the students
+		{withFarm(round(5, 0, 1, 0), 9), 7}, // 4 for the round's five entries and its script, 3 for the students
 		{withFarm(round(36, 0, 0, 0), 9), 8},
 	} {
 		if got := p.target(c.w); got != c.want {
@@ -494,7 +495,7 @@ func TestAMachineThatMayNotRunCuratorsMakesWayForOneThatMay(t *testing.T) {
 	p := testPolicy()
 	p.PerWorker, p.MaxWorkers, p.Edits = 1, 20, true
 	work := func() *Work {
-		return &Work{Rounds: []WorkRound{{ID: "s1-o00009", Entries: 8, RunsWanted: 8, RunsWaiting: 8}}}
+		return &Work{Rounds: []WorkRound{{ID: "s1-o00009", Entries: 4, RunsWanted: 4, RunsWaiting: 4}}}
 	}
 	const why = "under the season's floor for running curators: CPU 95 MB/s, floor 100"
 	w := work()
@@ -524,5 +525,230 @@ func TestAMachineThatMayNotRunCuratorsMakesWayForOneThatMay(t *testing.T) {
 	ws[0].Window, ws[1].Window = t0.Add(-time.Minute), t0.Add(20*time.Minute)
 	if d := p.decideNext(w, ws, 0, t0, 1); handles(d.End) != "stet-rp-02" {
 		t.Fatalf("ended %s", handles(d.End))
+	}
+}
+
+// During the 6-16m notice before an on-demand scheduled draw, up to keptNearDraw warm curator-capable
+// runners are kept alive (so the runner that triggered the draw isn't killed before the draw fires),
+// while extra idle GPUs and grade-only machines wind down immediately; draws far in the future (>20m)
+// or quiet/paused periods end all idle GPUs; and a trigger runner checking in right before the next
+// draw is scheduled (w.Waiting && w.Runners > 0) is also kept alive.
+func TestWarmRunnersAreKeptAcrossImminentDrawNoticeAndEndedWhenQuiet(t *testing.T) {
+	p := testPolicy()
+	p.Edits, p.MaxWorkers = true, 6
+	w := &Work{Runners: 1, NextDrawAt: t0.Add(10 * time.Minute).Unix()}
+	ws := pool(w, "waiting", "waiting", "waiting", "free")
+	ws[0].Speed, ws[1].Speed, ws[2].Speed = 1.0, 2.5, 1.8
+	if d := p.decide(w, ws, 0, t0); handles(d.End) != "stet-rp-01" {
+		t.Fatalf("10m before scheduled draw, want only slowest extra ended; ended %s", handles(d.End))
+	}
+	// A grade-only machine must NEVER be kept warm for a draw, even if it is the fastest.
+	ws[1].GradeOnly = true
+	if d := p.decide(w, ws, 0, t0); handles(d.End) != "stet-rp-02" {
+		t.Fatalf("grade-only machine must not be kept warm near draw; ended %s", handles(d.End))
+	}
+	ws[1].GradeOnly = false
+	// A draw outside the 20m keep-alive window (e.g. 40m away) must NOT keep idle GPUs warm.
+	w.NextDrawAt = t0.Add(40 * time.Minute).Unix()
+	if d := p.decide(w, ws, 0, t0); handles(d.End) != "stet-rp-01,stet-rp-02,stet-rp-03" {
+		t.Fatalf("40m before draw, want all idle GPUs ended; ended %s", handles(d.End))
+	}
+	// During the brief gap between a trigger runner asking for work (Runners==1) and NextDrawAt
+	// appearing (Waiting==true, NextDrawAt==0), keep the trigger runner alive.
+	w.NextDrawAt, w.Waiting, w.Runners = 0, true, 1
+	wsGap := pool(w, "waiting", "free")
+	if d := p.decide(w, wsGap, 0, t0); len(d.End) != 0 {
+		t.Fatalf("trigger runner killed during Waiting&&Runners>0 gap: ended %s", handles(d.End))
+	}
+	// If only a grade-only machine is idle when w.Waiting&&Runners==0, end it and rent a curator runner.
+	w.NextDrawAt, w.Waiting, w.Runners = 0, true, 0
+	wsGrade := pool(w, "waiting", "free")
+	wsGrade[0].GradeOnly = true
+	if d := p.decide(w, wsGrade, 0, t0); handles(d.End) != "stet-rp-01" || d.LaunchRuns != 1 {
+		t.Fatalf("grade-only machine should make way for draw-trigger runner: end=%s launchRuns=%d", handles(d.End), d.LaunchRuns)
+	}
+	// Once no draw is scheduled (NextDrawAt == 0, quiet), all idle GPUs end immediately.
+	w.NextDrawAt, w.Waiting, w.Runners = 0, false, 1
+	if d := p.decide(w, ws, 0, t0); handles(d.End) != "stet-rp-01,stet-rp-02,stet-rp-03" {
+		t.Fatalf("when quiet, want all idle GPUs ended; ended %s", handles(d.End))
+	}
+	// If rounds are paused, even an imminent draw keeps nobody.
+	w.NextDrawAt, w.Paused = t0.Add(10*time.Minute).Unix(), t0.Unix()
+	if d := p.decide(w, ws, 0, t0); handles(d.End) != "stet-rp-01,stet-rp-02,stet-rp-03" {
+		t.Fatalf("when paused, want all idle GPUs ended; ended %s", handles(d.End))
+	}
+}
+
+// Review 10 P2 #6: when two baseline graders disagree and sit idle ("waiting"), they cannot break
+// their own baseline tie, so stet-cloud must rent a fresh machine rather than waiting out --idle.
+// Crucially, on a normal undisputed edit-to-grade transition (BaselineDisputed == false,
+// FreshGradersWanted == 0), healthy idle GPUs must NOT be evicted or duplicated.
+func TestTieBreakBaselineRentsAFreshMachineWhileBaselineGradersIdle(t *testing.T) {
+	p := testPolicy()
+	p.Edits, p.MaxWorkers = true, 6
+	one := 1
+	w := &Work{Rounds: []WorkRound{{
+		ID: "s3-o00001", Entries: 3, GradesWanted: 1, BaselinesWanted: &one,
+		BaselineDisputed: true, FreshGradersWanted: &one,
+	}}}
+	ws := pool(w, "waiting", "waiting", "free", "free")
+	d := p.decide(w, ws, 0, t0)
+	if d.Launch == 0 {
+		t.Fatalf("stuck: two idle graders cannot break their own baseline tie; Launch=%d End=%v",
+			d.Launch, handles(d.End))
+	}
+	// Once that fresh machine is starting, no additional machines are launched on the next tick.
+	wsStarting := pool(w, "waiting", "waiting", "starting", "free")
+	if d2 := p.decide(w, wsStarting, 0, t0); d2.Launch != 0 {
+		t.Fatalf("with fresh tie-break grader already starting, should not launch more: Launch=%d", d2.Launch)
+	}
+	// Even at MaxWorkers == 2 (at capacity with 2 idle graders), make room for 1 fresh machine.
+	p.MaxWorkers = 2
+	wsCap := pool(w, "waiting", "waiting", "free", "free")
+	wsCap[0].Speed, wsCap[1].Speed = 1.0, 2.0
+	if d3 := p.decide(w, wsCap, 0, t0); d3.Launch != 1 || handles(d3.End) != "stet-rp-01" {
+		t.Fatalf("at MaxWorkers=2, want slowest idle grader ended and 1 fresh launched: Launch=%d End=%s", d3.Launch, handles(d3.End))
+	}
+	// Explicit BaselineDisputed flag launches a fresh machine even while other grades are under way.
+	p.MaxWorkers = 6
+	wDisp := &Work{Rounds: []WorkRound{{
+		ID: "s3-o00001", Entries: 3, GradesWanted: 1, GradesUnderWay: 1, BaselinesWanted: &one, BaselineDisputed: true,
+	}}}
+	if d4 := p.decide(wDisp, pool(wDisp, "waiting", "waiting", "grading", "free"), 0, t0); d4.Launch != 1 {
+		t.Fatalf("explicit BaselineDisputed with other grade under way: want Launch=1, got %d", d4.Launch)
+	}
+	// Explicit FreshGradersWanted (e.g. two idle graders disagreed on tokens_sha256) launches a 3rd.
+	zero := 0
+	wTok := &Work{Rounds: []WorkRound{{
+		ID: "s3-o00001", Entries: 1, GradesWanted: 1, BaselinesWanted: &zero, FreshGradersWanted: &one,
+	}}}
+	if d5 := p.decide(wTok, pool(wTok, "waiting", "waiting", "free"), 0, t0); d5.Launch != 1 {
+		t.Fatalf("FreshGradersWanted=1 for script tie-break: want Launch=1, got %d", d5.Launch)
+	}
+	// Normal undisputed edit-to-grade transition: 2 GPUs finished edits and wait for first grade
+	// (BaselinesWanted=2, GradesWanted=2, GradesUnderWay=0, BaselineDisputed=false, FreshGradersWanted=0).
+	// Must NOT over-rent below MaxWorkers and must NOT evict healthy idle GPUs at MaxWorkers.
+	two := 2
+	wNormal := &Work{Rounds: []WorkRound{{
+		ID: "s3-o00002", Entries: 3, GradesWanted: 2, BaselinesWanted: &two,
+	}}}
+	p.MaxWorkers = 6
+	if d6 := p.decide(wNormal, pool(wNormal, "waiting", "waiting", "free", "free"), 0, t0); d6.Launch != 0 || len(d6.End) != 0 {
+		t.Fatalf("normal undisputed round start (Max=6): want Launch=0 End=[], got Launch=%d End=%s", d6.Launch, handles(d6.End))
+	}
+	p.MaxWorkers = 2
+	if d7 := p.decide(wNormal, pool(wNormal, "waiting", "waiting", "free", "free"), 0, t0); d7.Launch != 0 || len(d7.End) != 0 {
+		t.Fatalf("normal undisputed round start (Max=2): want Launch=0 End=[], got Launch=%d End=%s", d7.Launch, handles(d7.End))
+	}
+	// Review 11 P2 #3: with 6 configured keys, --max 6, 4 busy and 2 idle graders who already
+	// measured the disputed baseline (ZERO free keys!), policy MUST NOT evict an idle grader
+	// (which would just free its barred key to be re-rented next tick) and MUST report what key
+	// resource the operator needs.
+	p.MaxWorkers = 6
+	wsNoSpare := pool(w, "grading", "grading", "grading", "grading", "waiting", "waiting")
+	d8 := p.decide(w, wsNoSpare, 0, t0)
+	if len(d8.End) != 0 || d8.Launch != 0 || !strings.Contains(d8.Note, "stet-cloud keys --add") {
+		t.Fatalf("all 6 keys committed on dispute: want End=[], Launch=0, actionable Note; got End=%s Launch=%d Note=%q",
+			handles(d8.End), d8.Launch, d8.Note)
+	}
+	// Even with a 7th free key, if that key ALREADY participated in the current open round
+	// (LastSeen >= DrawnAt), it cannot be treated as a fresh spare key to justify eviction.
+	wDrawn := &Work{Rounds: []WorkRound{{
+		ID: "s3-o00001", Entries: 3, GradesWanted: 1, BaselinesWanted: &one,
+		BaselineDisputed: true, FreshGradersWanted: &one, DrawnAt: t0.Add(-15 * time.Minute).Unix(),
+	}}}
+	wsUsedSpare := pool(wDrawn, "grading", "grading", "grading", "grading", "waiting", "waiting", "free")
+	wsUsedSpare[6].Machine = &Machine{Handle: wsUsedSpare[6].Key.Handle, LastSeen: t0.Add(-5 * time.Minute).Unix()}
+	d9 := p.decide(wDrawn, wsUsedSpare, 0, t0)
+	if len(d9.End) != 0 || d9.Launch != 0 || !strings.Contains(d9.Note, "stet-cloud keys --add") {
+		t.Fatalf("7th free key already active in current round: want End=[], Launch=0, Note; got End=%s Launch=%d Note=%q",
+			handles(d9.End), d9.Launch, d9.Note)
+	}
+	// With a genuinely fresh 7th spare key (LastSeen < DrawnAt), evict 1 slowest idle grader to
+	// make room and launch 1 fresh machine; quietestExcluding never selects the evicted key.
+	wsFreshSpare := pool(wDrawn, "grading", "grading", "grading", "grading", "waiting", "waiting", "free")
+	wsFreshSpare[4].Speed, wsFreshSpare[5].Speed = 1.0, 2.0
+	wsFreshSpare[6].Machine = &Machine{Handle: wsFreshSpare[6].Key.Handle, LastSeen: t0.Add(-2 * time.Hour).Unix()}
+	d10 := p.decide(wDrawn, wsFreshSpare, 0, t0)
+	if len(d10.End) != 1 || d10.End[0].Worker != wsFreshSpare[4] || d10.Launch != 1 {
+		t.Fatalf("with 1 fresh 7th spare key: want slowest idle evicted and Launch=1; got End=%s Launch=%d",
+			handles(d10.End), d10.Launch)
+	}
+	// Simulate ending the evicted worker, then confirm quietestExcluding selects ONLY the spare key.
+	wsFreshSpare[4].Rental = nil
+	evicted := map[string]bool{d10.End[0].Worker.Key.Handle: true}
+	picked := quietestExcluding(wsFreshSpare, evicted)
+	if len(picked) != 1 || picked[0].Key.Handle != wsFreshSpare[6].Key.Handle {
+		t.Fatalf("quietestExcluding must select fresh spare key %s, got %v", wsFreshSpare[6].Key.Handle, picked)
+	}
+	// Gate 4 P2 #4 Variant A: waitingIdle == 0 because both disputed graders self-ended after --idle,
+	// leaving 2 free keys that ALREADY participated in this round (LastSeen >= DrawnAt -> freshFree == 0).
+	// Policy MUST clamp Launch to 0 rather than renting a barred key in an idle-burn loop.
+	wsBothSelfEnded := pool(wDrawn, "grading", "grading", "grading", "grading", "free", "free")
+	wsBothSelfEnded[4].Machine = &Machine{Handle: wsBothSelfEnded[4].Key.Handle, LastSeen: t0.Add(-5 * time.Minute).Unix()}
+	wsBothSelfEnded[5].Machine = &Machine{Handle: wsBothSelfEnded[5].Key.Handle, LastSeen: t0.Add(-4 * time.Minute).Unix()}
+	d11 := p.decide(wDrawn, wsBothSelfEnded, 0, t0)
+	if d11.Launch != 0 || !strings.Contains(d11.Note, "stet-cloud keys --add") {
+		t.Fatalf("disputed baseline with only barred free keys (waitingIdle=0): want Launch=0 & keys note; got Launch=%d Note=%q",
+			d11.Launch, d11.Note)
+	}
+	// Gate 4 P2 #4 Variant B: GradesWanted=2 on a disputed round with waitingIdle=1 and 2 barred free keys (freshFree=0).
+	p.PerWorker = 1
+	wDisp2 := &Work{Rounds: []WorkRound{{
+		ID: "s3-o00001", Entries: 3, GradesWanted: 2, BaselinesWanted: &one,
+		BaselineDisputed: true, FreshGradersWanted: &one, DrawnAt: t0.Add(-15 * time.Minute).Unix(),
+	}}}
+	wsVarB := pool(wDisp2, "grading", "grading", "grading", "waiting", "free", "free")
+	wsVarB[4].Machine = &Machine{Handle: wsVarB[4].Key.Handle, LastSeen: t0.Add(-5 * time.Minute).Unix()}
+	wsVarB[5].Machine = &Machine{Handle: wsVarB[5].Key.Handle, LastSeen: t0.Add(-4 * time.Minute).Unix()}
+	d12 := p.decide(wDisp2, wsVarB, 0, t0)
+	if d12.Launch != 0 || len(d12.End) != 0 || !strings.Contains(d12.Note, "stet-cloud keys --add") {
+		t.Fatalf("disputed baseline Variant B (freshFree=0): want Launch=0 End=[] & keys note; got Launch=%d End=%s Note=%q",
+			d12.Launch, handles(d12.End), d12.Note)
+	}
+	// Gate 4 P2 #6: when pol.MaxWorkers is lowered to 5 to reserve 1 slot for a pending examiner
+	// while 6 workers are already live (4 grading + 2 waiting) and runs are waiting, evict 1 slowest
+	// idle worker immediately so the examiner is never starved.
+	p.MaxWorkers = 5
+	wNeedEx := &Work{Rounds: []WorkRound{{ID: "s3-o00003", Entries: 4, RunsWanted: 4, ExamAt: 0}}}
+	wsOver := pool(wNeedEx, "grading", "grading", "grading", "grading", "waiting", "waiting")
+	wsOver[4].Speed, wsOver[5].Speed = 1.0, 2.0
+	d13 := p.decide(wNeedEx, wsOver, 0, t0)
+	if len(d13.End) != 1 || d13.End[0].Worker != wsOver[4] || d13.Launch != 0 {
+		t.Fatalf("over --max with reserved examiner slot: want slowest idle worker evicted and Launch=0; got End=%s Launch=%d",
+			handles(d13.End), d13.Launch)
+	}
+	// Review 12 P2 #8: when the server explicitly sends fresh_graders_wanted=0 alongside
+	// baseline_disputed=true (because an idle organiser machine already online is eligible to
+	// break the tie), policy MUST honor that 0 — neither evicting an idle worker nor renting a
+	// fresh machine.
+	p.MaxWorkers = 3
+	p.PerWorker = 6
+	wEligibleIdle := &Work{Rounds: []WorkRound{{
+		ID: "s3-o00004", Entries: 3, GradesWanted: 1, BaselinesWanted: &one,
+		BaselineDisputed: true, FreshGradersWanted: &zero,
+	}}}
+	wsThreeIdle := pool(wEligibleIdle, "waiting", "waiting", "waiting", "free")
+	d14 := p.decide(wEligibleIdle, wsThreeIdle, 0, t0)
+	if len(d14.End) != 0 || d14.Launch != 0 {
+		t.Fatalf("explicit fresh_graders_wanted=0 on disputed baseline must not evict or rent: End=%s Launch=%d",
+			handles(d14.End), d14.Launch)
+	}
+	// Review 32 P2 #4: disputed baseline with 2 waiting workers at --max 2, 2 free keys, 2 curator
+	// runs waiting, and daily rental budget already exhausted ($1 spent against $1 budget) MUST NOT
+	// evict a warm waiting worker when the replacement launch cannot pass budget admission.
+	p.MaxWorkers = 2
+	p.DailyBudget = 1.00
+	p.Edits = true
+	wDispBudget := &Work{Rounds: []WorkRound{{
+		ID: "s3-o00005", Entries: 2, RunsWanted: 2, GradesWanted: 1, BaselinesWanted: &one,
+		BaselineDisputed: true, FreshGradersWanted: &one,
+	}}}
+	wsBudget := pool(wDispBudget, "waiting", "waiting", "free", "free")
+	wsBudget[0].Speed, wsBudget[1].Speed = 1.0, 2.0
+	d15 := p.decide(wDispBudget, wsBudget, 1.00, t0)
+	if len(d15.End) != 0 || d15.Launch != 0 || !strings.Contains(d15.Note, "daily budget") {
+		t.Fatalf("disputed baseline under exhausted daily budget must not evict warm workers: End=%s Launch=%d Note=%q",
+			handles(d15.End), d15.Launch, d15.Note)
 	}
 }

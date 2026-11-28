@@ -110,8 +110,8 @@ func TestVastsOffersArePricedAllIn(t *testing.T) {
 		}
 	}
 	o := byID(offers)
-	// $0.0533 for the GPU, 100 GB at $0.40 a GB a month for an hour, and 3 GB down.
-	if c := o["50121277"]; c.Card != "RTX 3060" || c.MemoryGB != 12 || !near(c.Price, 0.05333333333333334+100*0.39999999999999997/720+3*0.0013020833333333333) || c.Trust != "verified" || c.CUDA != "13" {
+	// $0.0533 for the GPU, 100 GB at $0.40 a GB a month for an hour, and workerGraderDownloadGB (6 GB) down.
+	if c := o["50121277"]; c.Card != "RTX 3060" || c.MemoryGB != 12 || !near(c.Price, 0.05333333333333334+100*0.39999999999999997/720+workerGraderDownloadGB*0.0013020833333333333) || c.Trust != "verified" || c.CUDA != "13" {
 		t.Errorf("the cheapest 3060: %+v", c)
 	}
 	if c := o["44053844"]; c.Trust != "datacenter" || c.Card != "RTX 5060 Ti" || c.MemoryGB != 16 {
@@ -422,7 +422,7 @@ func TestNothingIsRentedOnAMarketNotArmed(t *testing.T) {
 	fm.answers["POST /api/v0/bundles/"] = string(fixture(t, "vast_bundles.json"))
 	fm.answers["GET /api/v1/instances/"] = `{"instances": [], "next_token": null}`
 	f.markets = append(f.markets, newVast(fm.srv.URL, "vast-key"))
-	f.o.Cheapest = true
+	f.o.Cheapest, f.lease = true, 8*time.Hour // Season 1 fixture uses RTX 3060s
 	st.work = Work{Rounds: []WorkRound{{ID: "s1-o00001", GradesWanted: 12}}}
 	if err := tick(context.Background(), f); err != nil {
 		t.Fatal(err)
@@ -468,7 +468,7 @@ func TestUpRentsOnOneMarketByHand(t *testing.T) {
 	fm.answers["GET /api/v1/instances/"] = `{"instances": [], "next_token": null}`
 	fm.answers["PUT /api/v0/asks/50121277/"] = `{"success": true, "new_contract": 9001}`
 	f.markets = append(f.markets, newVast(fm.srv.URL, "vast-key"))
-	f.o.Market, f.o.Cheapest, f.o.MaxHourly, f.o.Edits = "vast", true, 3, true
+	f.o.Market, f.o.Cheapest, f.o.MaxHourly, f.o.Edits, f.lease = "vast", true, 3, true, 8*time.Hour // Season 1 fixture uses RTX 3060s
 	if err := cmdUp(context.Background(), f, 1); err != nil {
 		t.Fatalf("%v\n%s", err, out)
 	}

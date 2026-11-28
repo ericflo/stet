@@ -241,6 +241,7 @@ func (a *App) mountAPI(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/rounds/{id}/exam", a.apiExamGet)
 	mux.HandleFunc("GET /api/v1/rounds/{id}/scores", a.apiScoresGet)
 	mux.HandleFunc("POST /api/v1/admin/rounds/{id}/exam", a.apiExamPost)
+	mux.HandleFunc("POST /api/v1/admin/rounds/{id}/cancel", a.apiRoundCancel)
 	mux.HandleFunc("GET /api/v1/leaderboard", a.apiLeaderboard)
 	mux.HandleFunc("GET /api/v1/verifiers", a.apiVerifiers)
 	mux.HandleFunc("GET /api/v1/records", a.apiRecords)
@@ -390,6 +391,9 @@ func (a *App) apiSeason(w http.ResponseWriter, r *http.Request) {
 		"machine": a.season.Machine, "runner": a.season.Runner, "assets": a.season.Assets,
 		"environment": map[string]any{"python": a.season.Environment.Python, "packages": a.season.Environment.Packages},
 	}
+	if len(a.season.GradeBackends) > 0 {
+		out["grade_backends"] = a.season.GradeBackends
+	}
 	if name, version := a.site.wheel(); name != "" {
 		out["cli"] = map[string]any{"version": version, "wheel": a.cfg.APIURL + "/files/" + name}
 	}
@@ -397,6 +401,9 @@ func (a *App) apiSeason(w http.ResponseWriter, r *http.Request) {
 		out["next_round"] = a.announcement(s)
 		if s.Meta.Paused != 0 {
 			out["paused"] = s.Meta.Paused
+		}
+		if until := a.backoffUntil(s); until > 0 {
+			out["backoff_until"] = until
 		}
 		if open := s.roundWithStatus("open"); open != nil {
 			out["open_round"] = open.description(a.season)
@@ -690,6 +697,20 @@ func (a *App) apiSubmit(w http.ResponseWriter, r *http.Request) {
 				key = "enters"
 			}
 			out[key] = map[string]any{"round": roundID(a.season.ID, next.Idx), "draw_at": next.DrawAt}
+		} else if a.onDemandOnly() {
+			switch {
+			case s.Meta.Paused != 0:
+				out["message"] = "Rounds are paused; your entry will run once they resume."
+			case s.roundWithStatus("open") != nil:
+				open := s.roundWithStatus("open")
+				out["message"] = fmt.Sprintf("Round %s is still being graded; the next round will be drawn once it settles.", roundID(a.season.ID, open.Idx))
+			case a.backoffUntil(s) > 0:
+				until := a.backoffUntil(s)
+				out["backoff_until"] = until
+				out["message"] = fmt.Sprintf("Automatic draws are backed off until %s UTC after two empty rounds; your entry will run then (or sooner if an organiser runs `stet draw`).", time.Unix(until, 0).UTC().Format("15:04"))
+			default:
+				out["message"] = "No round is scheduled yet; one will be drawn on demand once a runner comes online (usually within 15-20 minutes)."
+			}
 		}
 	})
 	writeJSON(w, 201, out)
@@ -1075,7 +1096,11 @@ func (a *App) apiRound(w http.ResponseWriter, r *http.Request) {
 		for _, e := range entriesOfRound(s, idx) {
 			entries = append(entries, a.entryJSON(s, e))
 		}
-		out = map[string]any{"round": a.roundJSON(s, rd), "entries": entries}
+		roundObj := a.roundJSON(s, rd)
+		if examPosted(rd) && len(rd.Shares) > 0 {
+			roundObj["languages"] = rd.Shares
+		}
+		out = map[string]any{"round": roundObj, "entries": entries}
 		// Before the draw a round has no entries. Who its draw would enter now is not one.
 		if rd.Status == "scheduled" {
 			in, later := a.expected(s, rd)
@@ -1231,7 +1256,7 @@ func (a *App) apiClaim(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	out := map[string]any{"job": handed.Job}
+	out := map[string]any{"job": handed.Job, "scale": a.cfg.Scale}
 	if handed.Runner != nil {
 		out["runner"] = handed.Runner // whether this machine is handed editors to run, and if not, why
 	}
@@ -1369,6 +1394,10 @@ func (a *App) apiAdminPause(w http.ResponseWriter, r *http.Request) {
 		case !*req.Paused && m.Paused != 0:
 			m.Paused, m.PausedBy = 0, ""
 			tx.event("resume", map[string]any{"by": acct.Handle})
+			tx.put(metaKey, m)
+			a.onDemand(tx)
+			out = *m
+			return nil
 		}
 		tx.put(metaKey, m)
 		out = *m

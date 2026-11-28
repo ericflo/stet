@@ -14,9 +14,12 @@ import (
 // pillarResult is a grade whose student gains this much on every item of each of testTable's
 // parts, over a baseline of -6 on every item. The exam's aggregate of a gain that is the same
 // on every item of a pillar is that gain for the pillar.
-func (w *world) pillarResult(c *claimed, logic, reference float64) map[string]any {
+func (w *world) pillarResult(c *claimed, explain, reference float64) map[string]any {
 	p := w.result(c, 5, 6)
-	gains := map[string]float64{"logic": logic, "reference": reference}
+	gains := map[string]float64{
+		"explain": explain, "infer": explain, "synthesis": explain,
+		"reference": reference, "news": reference, "technical": reference, "discussion": reference,
+	}
 	var scores []float64
 	sum := 0.0
 	for _, it := range testTable() {
@@ -31,10 +34,9 @@ func (w *world) pillarResult(c *claimed, logic, reference float64) map[string]an
 // scripts, each graded by two more: four grades, no two alike on the exam's pillars. It
 // returns the round and the entry's id.
 //
-// A pillar of testTable in the skills counts a quarter and one in the writing three quarters,
-// so the grades of the first script come to 0.25(0.40) + 0.75(0.60) = 0.55 and 0.25(0.60) +
-// 0.75(0.50) = 0.525, and the script to 0.5375; those of the second to 0.575 and 0.56, and it
-// to 0.5675. The entry's gain is the mean of its two runs': 0.5525.
+// Reasoning carries 100% of the score and comprehension is 0%-weight diagnostic telemetry,
+// so the grades of the first script come to 0.50 and 0.55 (script 0.525) and those of the
+// second to 0.45 and 0.54 (script 0.495). The entry's gain is the mean of its two runs': 0.51.
 func runTwiceGradedTwice(t *testing.T) (*world, int, string) {
 	t.Helper()
 	w := newWorld(t)
@@ -69,13 +71,13 @@ func runTwiceGradedTwice(t *testing.T) (*world, int, string) {
 		var p map[string]any
 		switch {
 		case j.c.Job.Script.SHA256 == shaOf(one) && first:
-			p = w.pillarResult(j.c, 0.40, 0.60)
+			p = w.pillarResult(j.c, 0.50, 0.60)
 		case j.c.Job.Script.SHA256 == shaOf(one):
-			p = w.pillarResult(j.c, 0.60, 0.50)
+			p = w.pillarResult(j.c, 0.55, 0.50)
 		case first:
-			p = w.pillarResult(j.c, 0.20, 0.70)
+			p = w.pillarResult(j.c, 0.45, 0.70)
 		default:
-			p = w.pillarResult(j.c, 0.50, 0.58)
+			p = w.pillarResult(j.c, 0.54, 0.58)
 		}
 		var ack struct {
 			Status string `json:"status"`
@@ -98,7 +100,7 @@ func runTwiceGradedTwice(t *testing.T) (*world, int, string) {
 func TestAnEntrysPillarsAreMadeOfTheGradesItsGainIsMadeOf(t *testing.T) {
 	w, idx, id := runTwiceGradedTwice(t)
 	e := w.entry(idx, "tidy")
-	if !e.Valid || e.NRuns != 2 || e.Gain == nil || math.Abs(*e.Gain-0.5525) > 1e-9 {
+	if !e.Valid || e.NRuns != 2 || e.Gain == nil || math.Abs(*e.Gain-0.51) > 1e-9 {
 		t.Fatalf("the entry: %+v", e)
 	}
 	for _, r := range e.Runs {
@@ -107,7 +109,12 @@ func TestAnEntrysPillarsAreMadeOfTheGradesItsGainIsMadeOf(t *testing.T) {
 		}
 	}
 	// On each pillar, the mean over its two runs of the mean over the run's two grades.
-	want := map[string]float64{"logic": (0.40 + 0.60 + 0.20 + 0.50) / 4, "reference": (0.60 + 0.50 + 0.70 + 0.58) / 4}
+	reas := (0.50 + 0.55 + 0.45 + 0.54) / 4
+	comp := (0.60 + 0.50 + 0.70 + 0.58) / 4
+	want := map[string]float64{
+		"reference": comp, "news": comp, "technical": comp, "conversation": comp,
+		"explain": reas, "infer": reas, "synthesis": reas,
+	}
 	if len(e.BySource) != len(want) {
 		t.Fatalf("the entry's pillars: %v", e.BySource)
 	}
@@ -139,7 +146,7 @@ func TestAnEntrysPillarsAreMadeOfTheGradesItsGainIsMadeOf(t *testing.T) {
 			t.Fatalf("the entry has %d grades", len(rs))
 		}
 		for _, r := range rs {
-			if math.Abs(sum(r.BySource)-*e.Gain) < 1e-3 || math.Abs(r.BySource["logic"]-e.BySource["logic"]) < 1e-3 {
+			if math.Abs(sum(r.BySource)-*e.Gain) < 1e-3 || math.Abs(r.BySource["explain"]-e.BySource["explain"]) < 1e-3 {
 				t.Fatalf("this test is not testing anything: one grade's pillars are the entry's: %v", r.BySource)
 			}
 		}
@@ -225,7 +232,7 @@ func TestASettledRoundsItemScoresAreAnyones(t *testing.T) {
 		gains = append(gains, median(grades))
 	}
 	e := w.entry(idx, "tidy")
-	if got := median(gains); len(gains) != 2 || math.Abs(got-*e.Gain) > 2e-5 || math.Abs(got-0.5525) > 2e-5 {
+	if got := median(gains); len(gains) != 2 || math.Abs(got-*e.Gain) > 2e-5 || math.Abs(got-0.51) > 2e-5 {
 		t.Fatalf("worked out again from the round's item scores the entry's gain is %v, and the round published %v", got, *e.Gain)
 	}
 	// Each grade is told apart by who gave it, of which script.

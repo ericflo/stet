@@ -57,7 +57,11 @@ type Account struct {
 	Backend    string `json:"backend,omitempty"`
 	// PassSeconds is how long its machine last took to train a grade's student, as it said
 	// when it last asked for work (stet 0.4.4 and later); 0 when it did not say.
+	// PassSeason and PassScale scope PassSeconds to the season digest and scale active when it
+	// was reported so timings from an earlier season or another scale never contaminate scheduling.
 	PassSeconds float64 `json:"pass_seconds,omitempty"`
+	PassSeason  string  `json:"pass_season,omitempty"`
+	PassScale   string  `json:"pass_scale,omitempty"`
 	// CuratorsWhy is why it could not be handed curators the last time it asked for work, in
 	// words (curatorsWhy); empty when it could.
 	CuratorsWhy string `json:"curators_why,omitempty"`
@@ -164,13 +168,19 @@ type Round struct {
 	DrawnAt      int64    `json:"drawn_at,omitempty"`
 	SettledAt    int64    `json:"settled_at,omitempty"`
 	CorpusSHA    string   `json:"corpus_sha256,omitempty"`
-	ExamSHA      string   `json:"exam_sha256,omitempty"`   // the round's exam's item digest, once it is posted
-	BaselineLoss *float64 `json:"baseline_loss,omitempty"` // the unedited student's mean bits per byte
+	ExamSHA      string   `json:"exam_sha256,omitempty"`      // the round's exam's item digest, once it is posted
+	ExamBlobSHA  string   `json:"exam_blob_sha256,omitempty"` // content hash of the winning exam's stored blobs
+	InitSHA      string   `json:"init_sha256,omitempty"`      // the student's reset initial weights sha256, from established graders
+	BaselineLoss *float64 `json:"baseline_loss,omitempty"`    // the unedited student's mean bits per byte
 	BaselineN    int      `json:"baseline_n,omitempty"`
 	// Was lists the beacon rounds this round was announced for before its draw moved.
 	// No other round is ever announced for one of them: a verifier that saw the first
 	// announcement would rightly refuse the second.
 	Was []int64 `json:"was,omitempty"`
+	// Manual says an organiser explicitly asked for this round to be drawn (stet draw):
+	// in on-demand-only mode it draws at its announced slot even when no new entry is waiting
+	// (e.g. finals draws on the ladder).
+	Manual bool `json:"manual,omitempty"`
 	// Postponed says the draw was put off because the round before was still being graded.
 	// It is then made at the first grid mark after that round settles.
 	Postponed bool `json:"postponed,omitempty"`
@@ -315,6 +325,11 @@ type Claim struct {
 	// Baseline says that this grade job asked its machine for the round's unedited baseline
 	// too (judge.asksBaseline). A job that did not is reported without one.
 	Baseline bool `json:"baseline,omitempty"`
+	// PreExam records that this grade claim was issued before the round's exam was posted;
+	// PreExamWait records that its release was server-verified as a legitimate pre-exam wait
+	// timeout or pre-exam round end (so clients cannot forge those strings post-exam).
+	PreExam     bool `json:"pre_exam,omitempty"`
+	PreExamWait bool `json:"pre_exam_wait,omitempty"`
 	// Reason is why its holder handed it back, as it said (released).
 	Reason string `json:"reason,omitempty"`
 	// EndedAt is when it stopped being claimed: done, handed back, refused or expired. Absent
@@ -344,6 +359,8 @@ type Result struct {
 	InvalidReason string             `json:"invalid_reason,omitempty"`
 	CorpusSHA     string             `json:"corpus_sha256"`
 	ExamSHA       string             `json:"exam_sha256"`
+	InitSHA       string             `json:"init_sha256,omitempty"`
+	TokensSHA     string             `json:"tokens_sha256,omitempty"`
 	Seconds       float64            `json:"seconds,omitempty"`
 	// pending | counted (an established grade that stood alone as its script's gain) |
 	// agreed | same (agreed, on a script that earns no standing) | outlier | disputed (one
@@ -365,6 +382,7 @@ type Baseline struct {
 	Loss       float64 `json:"loss"` // the student's mean bits per byte on the exam's items
 	CorpusSHA  string  `json:"corpus_sha256"`
 	ExamSHA    string  `json:"exam_sha256"`
+	InitSHA    string  `json:"init_sha256,omitempty"`
 	ReceivedAt int64   `json:"received_at"`
 	// Established says the account was established when it measured this, so the measurement
 	// is one of those the round's baseline is the median of.
@@ -413,6 +431,12 @@ type Meta struct {
 	// the round under way finishes. 0: not paused.
 	Paused   int64  `json:"paused,omitempty"`
 	PausedBy string `json:"paused_by,omitempty"`
+	// UsedSlots remembers beacon rounds that were once announced for an un-drawn scheduled
+	// round later unscheduled in on-demand-only mode, so announcedSlots never reuses them.
+	UsedSlots []int64 `json:"used_slots,omitempty"`
+	// PendingWas carries a dropped scheduled round's moved_from trail onto the next round
+	// scheduled for the same round index, so a dropped announcement leaves a public audit trail.
+	PendingWas []int64 `json:"pending_was,omitempty"`
 }
 
 type SavedCrawl struct {
@@ -748,6 +772,38 @@ func (tx *Tx) saveRound(r *Round) {
 	tx.put(roundKey(r.Idx), r)
 }
 
+func (tx *Tx) dropRound(r *Round) {
+	if r == nil {
+		return
+	}
+	slots := append(tx.s.Meta.UsedSlots, r.Was...)
+	pending := append(tx.s.Meta.PendingWas, r.Was...)
+	if r.DrandRound > 0 {
+		slots = append(slots, r.DrandRound)
+		pending = append(pending, r.DrandRound)
+	}
+	if len(slots) > 128 {
+		slots = slots[len(slots)-128:]
+	}
+	// Deduplicate pending trail while preserving chronological order.
+	seen := make(map[int64]bool, len(pending))
+	dedup := make([]int64, 0, len(pending))
+	for _, slot := range pending {
+		if slot > 0 && !seen[slot] {
+			seen[slot] = true
+			dedup = append(dedup, slot)
+		}
+	}
+	if len(dedup) > 64 {
+		dedup = dedup[len(dedup)-64:]
+	}
+	tx.s.Meta.UsedSlots = slots
+	tx.s.Meta.PendingWas = dedup
+	tx.put(metaKey, &tx.s.Meta)
+	delete(tx.s.Rounds, r.Idx)
+	tx.put(roundKey(r.Idx), nil)
+}
+
 func (tx *Tx) saveEntry(e *Entry) {
 	if tx.s.entry(e.RoundIdx, e.EditorID) == nil {
 		tx.s.addEntry(e)
@@ -786,6 +842,12 @@ func (tx *Tx) saveBaseline(b *Baseline) {
 	k := baselineKey(b.RoundIdx, b.AccountID)
 	tx.s.Baselines[k] = b
 	tx.put(k, b)
+}
+
+func (tx *Tx) dropBaseline(b *Baseline) {
+	k := baselineKey(b.RoundIdx, b.AccountID)
+	delete(tx.s.Baselines, k)
+	tx.put(k, nil)
 }
 
 func (tx *Tx) addRecord(r *Record) {

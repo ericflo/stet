@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"reflect"
 	"strings"
@@ -150,6 +151,65 @@ func TestARoundDrawnWithNoHarvestTakesHoursChosenLate(t *testing.T) {
 	if !rd.HoursLate || !reflect.DeepEqual(rd.Hours, hours) {
 		t.Fatalf("the round's hours, chosen late: %+v late=%v", rd.Hours, rd.HoursLate)
 	}
+	w.check()
+}
+
+// Review 23 P2 #3: a round drawn with no harvests MUST still enforce the pre-draw cutoff
+// (h.Hour + 3600 <= rd.DrawAt) on late-submitted exam hours, rejecting both post-draw hours
+// and the in-progress hour spanning rd.DrawAt while still accepting eligible pre-draw hours
+// committed late.
+func TestReview23LateRoundRejectsPostDrawHours(t *testing.T) {
+	pub, priv := newKey()
+	w := newWorld(t, pub)
+	anchor := w.join("anchor-one", priv)
+	w.submit(anchor, "ref-a", "print(1)")
+	idx := w.drawWithoutExam()
+	// Model a 5h30m examiner delay after a mid-hour draw so post-draw hours (+1h, +2h, +3h)
+	// and the spanning draw hour (drawHour) have all ended and settled before now().
+	var drawAt int64
+	if err := w.app.st.update(context.Background(), func(tx *Tx) error {
+		rd := tx.s.Rounds[idx]
+		curHour := now() - now()%3600
+		rd.DrawAt = curHour - 5*3600 + 1800
+		rd.DrawnAt = rd.DrawAt
+		tx.saveRound(rd)
+		drawAt = rd.DrawAt
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	drawHour := drawAt - drawAt%3600
+	var out map[string]any
+	sha := strings.Repeat("aa", 32)
+	for _, h := range []int64{drawHour - 2*3600, drawHour - 3600, drawHour, drawHour + 3600, drawHour + 2*3600, drawHour + 3*3600} {
+		if code := anchor.do("POST", "/api/v1/admin/harvests", harvestBody(h, "aa"), &out); code != 201 {
+			t.Fatalf("posting harvest for %d: HTTP %d %v", h, code, out)
+		}
+	}
+	// Three post-draw hours (+1h, +2h, +3h) MUST be refused with HTTP 400!
+	postDraw := []RoundHour{{drawHour + 3600, sha}, {drawHour + 2*3600, sha}, {drawHour + 3*3600, sha}}
+	if code, msg := w.postExamFrom(anchor, idx, testTable(), postDraw, snapshotOf(postDraw)); code != 400 {
+		t.Fatalf("exam built from post-draw hours: HTTP %d %s, want 400", code, msg)
+	}
+	// The in-progress hour spanning drawAt ([drawHour, drawHour+3600) where drawAt < drawHour+3600)
+	// MUST also be refused unless drawAt was on an exact hour boundary (not spanning).
+	if drawHour+3600 > drawAt {
+		spanning := []RoundHour{{drawHour - 3600, sha}, {drawHour, sha}}
+		if code, msg := w.postExamFrom(anchor, idx, testTable(), spanning, snapshotOf(spanning)); code != 400 {
+			t.Fatalf("exam including in-progress draw hour: HTTP %d %s, want 400", code, msg)
+		}
+	}
+	// Eligible pre-draw hours committed late MUST still be accepted with HoursLate=true!
+	preDraw := []RoundHour{{drawHour - 2*3600, sha}, {drawHour - 3600, sha}}
+	if code, msg := w.postExamFrom(anchor, idx, testTable(), preDraw, snapshotOf(preDraw)); code != 200 {
+		t.Fatalf("exam built from eligible pre-draw hours committed late: HTTP %d %s, want 200", code, msg)
+	}
+	w.app.st.view(func(s *State) {
+		rd := s.Rounds[idx]
+		if !rd.HoursLate || !reflect.DeepEqual(rd.Hours, preDraw) {
+			t.Fatalf("expected late pre-draw hours %+v, got %+v late=%v", preDraw, rd.Hours, rd.HoursLate)
+		}
+	})
 	w.check()
 }
 

@@ -80,12 +80,13 @@ func chooseHours(seedHex string, hours []int64, k int) []int64 {
 }
 
 // roundHours chooses a round's hours at its draw: from the harvests the server had been told
-// of before the draw whose hour began no longer than the season's reach before it.
+// of before the draw whose hour ended by the draw and began no longer than the season's reach
+// before it.
 func (a *App) roundHours(s *State, rd *Round) []RoundHour {
 	f := a.season.Exam.Fresh
 	var could []int64
 	for _, h := range s.Harvests {
-		if h.Hour >= rd.DrawAt-f.Reach && h.At <= rd.DrawAt {
+		if h.Hour >= rd.DrawAt-f.Reach && h.Hour+harvestHour <= rd.DrawAt && h.At <= rd.DrawAt {
 			could = append(could, h.Hour)
 		}
 	}
@@ -122,9 +123,13 @@ func (a *App) checkHours(s *State, rd *Round, p *ExamPost) (late bool, err error
 			}
 		}
 	} else {
+		f := a.season.Exam.Fresh
+		if f.Hours > 0 && len(p.Hours) > f.Hours {
+			return false, fail(400, "an exam is made from at most %d hours' harvests", f.Hours)
+		}
 		for i, h := range p.Hours {
 			got := s.Harvests[h.Hour]
-			if got == nil || got.SHA != h.SHA || h.Hour < rd.DrawAt-a.season.Exam.Fresh.Reach || (i > 0 && p.Hours[i-1].Hour >= h.Hour) {
+			if got == nil || got.SHA != h.SHA || h.Hour < rd.DrawAt-f.Reach || h.Hour+harvestHour > rd.DrawAt || (i > 0 && p.Hours[i-1].Hour >= h.Hour) {
 				return false, fail(400, "an exam is made from harvests the server has been told of, of hours in the day before the draw")
 			}
 		}

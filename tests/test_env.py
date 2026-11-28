@@ -57,13 +57,43 @@ def test_what_differs_is_said_in_words(season, monkeypatch):
     assert "not installed: scipy" in said[1] and f"transformers 4.40.0 (the season's is {want['packages']['transformers']})" in said[2]
 
 
-def test_grading_needs_pytorch_to_match_and_nothing_else(season, monkeypatch):
+def test_grading_needs_the_seasons_grading_stack_to_match(season, monkeypatch):
     want = env.expected(season)
-    have(monkeypatch, {"torch": want["packages"]["torch"] + "+cu132"})
+    grade_pkgs = env.grade_packages(season)
+    assert set(grade_pkgs) == {"safetensors", "tokenizers", "torch", "transformers"}
+    have(monkeypatch, {
+        "torch": want["packages"]["torch"] + "+cu132",
+        "transformers": want["packages"]["transformers"],
+        "tokenizers": want["packages"]["tokenizers"],
+        "safetensors": want["packages"]["safetensors"],
+    })
     monkeypatch.setattr(sys, "version_info", type("V", (), {"major": 3, "minor": 11})())
-    assert env.problems(season, only=("torch",)) == []
-    have(monkeypatch, {"torch": "2.9.0"})
-    assert env.problems(season, only=("torch",)) == [f"a different version: torch 2.9.0 (the season's is {want['packages']['torch']})"]
+    assert env.problems(season, only=grade_pkgs) == []
+    # Missing transformers is caught before taking grading work.
+    have(monkeypatch, {
+        "torch": want["packages"]["torch"] + "+cu132",
+        "tokenizers": want["packages"]["tokenizers"],
+        "safetensors": want["packages"]["safetensors"],
+    })
+    assert env.problems(season, only=grade_pkgs) == ["not installed: transformers"]
+    # Missing or wrong tokenizers version is caught before taking grading work.
+    have(monkeypatch, {
+        "torch": want["packages"]["torch"] + "+cu132",
+        "transformers": want["packages"]["transformers"],
+        "tokenizers": "0.23.0",
+        "safetensors": want["packages"]["safetensors"],
+    })
+    assert env.problems(season, only=grade_pkgs) == [f"a different version: tokenizers 0.23.0 (the season's is {want['packages']['tokenizers']})"]
+    # Wrong PyTorch version is caught too.
+    have(monkeypatch, {
+        "torch": "2.9.0",
+        "transformers": want["packages"]["transformers"],
+        "tokenizers": want["packages"]["tokenizers"],
+        "safetensors": want["packages"]["safetensors"],
+    })
+    assert env.problems(season, only=grade_pkgs) == [f"a different version: torch 2.9.0 (the season's is {want['packages']['torch']})"]
+    # Season 2 needed PyTorch alone.
+    assert env.grade_packages(load_season("s2")) == ("torch",)
 
 
 def test_a_library_built_for_one_platform_is_not_asked_of_another(season, monkeypatch):
@@ -80,7 +110,7 @@ def test_the_floor_is_a_machine_people_have(season):
     need, machine = bench.floor(season), season.raw["machine"]
     # What a curator is given has to fit inside the smallest machine that runs curators.
     assert machine["cores"] <= need["cores"] and machine["memory_gb"] < need["memory_gb"] and machine["gpu_memory_gb"] < need["gpu_memory_gb"]
-    assert need["gpu_memory_gb"] <= 12 and need["memory_gb"] <= 32 and need["cores"] <= 8  # an ordinary desktop with a mid-range card
+    assert need["gpu_memory_gb"] <= 24 and need["memory_gb"] <= 32 and need["cores"] <= 8  # 24 GB GPU floor for 0.6B curators
     assert season.raw["assets"]["max_bytes"] <= machine["gpu_memory_gb"] * 2**30  # what may be named fits where it will be loaded
 
 
@@ -148,7 +178,7 @@ def test_the_documents_give_the_seasons_numbers(season):
         assert f"| CPU | {m['cores']} cores |" in doc and f"| Memory | {m['memory_gb']} GB |" in doc
         assert f"with {m['gpu_memory_gb']} GB of its memory" in doc and f"{m['scratch_gb']} GB" in doc
         assert f"{a['max_files']} files and {gib} GiB" in doc
-    assert f"| 40M tokens | {micro} s |" in rules and f"{micro} seconds at micro" in brief
+    assert f"| 8.4M tokens | {micro} s |" in rules and f"{micro} seconds at micro" in brief
     assert f"up to {gib} GiB" in faq and f"{m['gpu_memory_gb']} GB of memory" in faq
     assert f"{m['memory_gb']} GB of memory, one GPU with {m['gpu_memory_gb']} GB of its memory" in verifying and f"{need['disk_gb']} GB of disk" in verifying
     assert f"more than {season.raw['tolerance']['standard']['run']} bits per byte" in rules.replace("by more than", "more than")
@@ -160,14 +190,14 @@ def test_the_documents_and_the_site_name_the_pillars_the_season_names(season):
     """The exam's pillars are written out by hand in the rules, the brief and on the site. When
     the season's list changes, this says where."""
     pillars = season.raw["exam"]["pillars"]
-    count = {4: "four", 7: "seven", 8: "eight"}
-    writing, skills = (count[sum(v["group"] == g for v in pillars.values())] for g in ("writing", "skills"))
+    count = {3: "three", 4: "four", 7: "seven", 8: "eight"}
+    comp, reas = (count[sum(v["group"] == g for v in pillars.values())] for g in ("comprehension", "reasoning"))
     rules, brief, faq, design = (words(n) for n in ("docs/RULES.md", "src/stet/templates/AGENTS.md", "docs/FAQ.md", "docs/DESIGN.md"))
     home, glossary = (words(f"server/web/templates/{n}.html") for n in ("home", "glossary"))
-    assert f"{writing} kinds of writing and {skills} skills" in faq and f"{writing} kinds that count the same" in design
-    assert f"skills, in {skills} kinds that count the same" in design
-    assert f"{writing.capitalize()} kinds, each counting the same" in home and f"{skills.capitalize()} skills, each counting the same" in home
-    assert f"{writing} kinds of writing (" in glossary and f"and {skills} skills (" in glossary
+    assert f"{reas} fresh reasoning kinds" in faq and f"{comp} fresh human-written" in faq
+    assert f"in {reas} kinds that count one-third each" in design and f"{comp.capitalize()} fresh human-written" in design
+    assert f"{reas.capitalize()} kinds, each counting one-third" in home and f"{comp.capitalize()} kinds —" in home
+    assert f"{reas.capitalize()} reasoning kinds count one-third each" in glossary and f"{comp.capitalize()} fresh human-written" in glossary
     for name, pillar in pillars.items():
         assert f"| {name.capitalize()} |" in rules and f"| `{name}` | {pillar['group']} |" in brief, name
         assert f"<b>{name}</b>" in home and name in glossary and name in design, name

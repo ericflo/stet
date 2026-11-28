@@ -1,9 +1,9 @@
 # Reference curators
 
-Eight complete curators, entered in the competition by the organisers so that the board has
-fixed points: seven references, and [one red-team curator](#red-team). `fineweb2` and `dclm`
-run in every round; each of the others runs in one round in eight. Fork any of them:
-`stet fork stet/tidy`, `stet fork stet/fineweb2`.
+Nine complete curators, entered in the competition by the organisers so that the board has
+fixed points: eight references (including the `reader` neural baseline), and [one red-team curator](#red-team).
+`fineweb2` and `reader` run in every round; each of the others runs in one round in eight. Fork any of them:
+`stet fork stet/tidy`, `stet fork stet/fineweb2`, `stet fork stet/reader`.
 
 Three of the organisers' own:
 
@@ -13,9 +13,10 @@ Three of the organisers' own:
 | `english` | Keeps documents that look like English prose. |
 | `tidy` | Pages that read as writing, in any language: deduplicated, ranked by how much of each is sentences, the best kept whole, shuffled. |
 
-Three quarters of the exam's score is human writing in every language, each by its share of
-the round's corpus, so `english`, which keeps only English, gives up the writing in every
-other language. `tidy` asks no page what language it is in, and copies the pages it chooses
+The exam's official score is 100% fresh harvest-derived reasoning in every language, each by
+its share of the round's corpus (with four fresh human-written twin-context comprehension kinds
+shown alongside at 0% weight for diagnostics), so `english`, which keeps only English, gives up
+most of the exam. `tidy` asks no page what language it is in, and copies the pages it chooses
 whole: when it kept only their lines of prose it cut the code out with the menus, and scored
 0.03 bits per byte lower on the writing ([measured](../docs/EXPERIMENTS.md#text-a-model-writes)).
 
@@ -42,28 +43,23 @@ The English ones decide what is English as the published recipes do: Meta's fast
 The classifiers are the published weights, named by reference in `stet.toml` and fetched by
 whoever runs the curator.
 
-And two that are not entered, as patterns to build on:
+And two neural patterns (`reader` runs every round as the neural anchor; `agent` is a pattern not entered):
 
 | | What it does |
 |---|---|
-| `reader` | English prose with its boilerplate lines cut (the model reads English), then a 135M-parameter language model reads the opening of each and the least and most surprising are dropped. Shows `[[assets]]`, `task.asset`, the GPU through PyTorch, and writing a script early. |
+| `reader` | Multilingual prefilter and exact dedup across all CPU cores (`task.map`), then `Qwen/Qwen3-0.6B` scores candidate openings on a 1–5 educational/reasoning rubric using `vLLM` prefix caching on NVIDIA (or batched `transformers` on AMD/macOS), applies per-language/script quantile normalization so English-rubric score shifts never starve Korean/Russian/Arabic/Japanese, writes periodic neural-scored checkpoints and fails loudly if the model cannot run, before ordering kept pages as a 4-band curriculum. Shows `[[assets]]`, `task.asset`, `vLLM` (with `gpu_memory_utilization` capped to `task.gpu_memory_gb`), quantile normalization, curriculum ordering, and checkpointing neural progress. |
 | `agent` | English prose with its boilerplate lines cut; how strictly to filter it is decided by an agent: the pi harness, on Node, driving a 0.6B model served on loopback inside the sandbox. Shows how to bring a harness and a model of your own. Run `./pack.sh` first. |
 
 ## Red team
 
-And one that tries to buy the exam instead of curating well, entered by the organisers so
-that the board shows what that buys.
+And one that tries to game surface style instead of curating well, entered by the organisers so
+that the board shows whether style mimicry works.
 
 | | What it tries |
 |---|---|
-| `mimic` | To buy the exam by selection: the pages that look most like the exam's writing and the forms its skills come in (terminals, logs, JSON, code, questions and answers, reference, news, threads; any language) fill the budget first, and `tidy`'s selection tops it up only if they run short. |
+| `mimic` | To game the exam by surface form: the pages that look most like the exam's sources and formats (terminals, logs, JSON, code, questions and answers, reference, news, threads; any language) fill the budget first, and `tidy`'s selection tops it up only if they run short. |
 
-Measured before the season, it was the best of seven curators: 0.10 bits per byte above the
-unedited corpus, where `fineweb2` had 0.05 and `tidy` none
-([the table](../docs/EXPERIMENTS.md#which-parts-of-the-exam-count)). It writes nothing; it
-chooses. Keeping the pages that most resemble what the exam asks is selection, and selection
-is the competition, so that is not a hole in the exam: it is the mark a curator that selects
-has to beat.
+In Season 2's raw-perplexity exam, `mimic` beat every other reference curator (+0.10 bpb over raw crawl, ahead of `fineweb2`'s +0.05) simply by matching the exam's surface style. Season 3 replaced raw perplexity with 100%-fresh harvest-derived reasoning (`explain`, `infer`, `synthesis`) after a fixed multilingual SFT probe — with same-source human-written twin-context comprehension shown alongside at 0% weight for diagnostics — and `mimic` trails `fineweb2` at ~74–79% of its gain.
 
 There was a second, `scribe`, which spent the 16,000 tokens of its own text a script could
 then hold on worked problems in the exam's forms. That bought 0.10 bits per byte on the
