@@ -143,6 +143,7 @@ type Rental struct {
 	ResumedAt       time.Time // trustworthy provider resume timestamp when reported (zero when unknown)
 	EndedAt         time.Time // trustworthy provider termination/end timestamp when reported (zero when unknown)
 	Terminating     bool      // persisted outstanding termination (e.g. failed `workers resolve --end`)
+	Unconfirmed     bool      // true when reconstructed from ledger because provider listing/lookup failed to confirm current state
 	// What the market says of the machine itself, for seeing why one does not start: whether
 	// its container is up ("yes", "no", or "" where the market does not say), its phase in
 	// the market's own words (one that changes only as the machine moves on: "pulling image",

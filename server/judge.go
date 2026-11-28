@@ -862,13 +862,124 @@ func (j *judge) agrees(g *gradeView, v *verdict) bool {
 	return !v.valid || within(g.gain-v.gain, j.a.tolerance().Grade)
 }
 
+// maxAgreeingCluster returns the exact size of the largest subset of sorted valid grades in which
+// every pair satisfies j.same (within grade tolerance and compatible init/token digests),
+// independent of submission order.
+func (j *judge) maxAgreeingCluster(sorted []*gradeView) int {
+	if len(sorted) == 0 {
+		return 0
+	}
+	initSet := map[string]bool{}
+	tokSet := map[string]bool{}
+	for _, g := range sorted {
+		if g.r.InitSHA != "" {
+			initSet[g.r.InitSHA] = true
+		}
+		if g.r.TokensSHA != "" {
+			tokSet[g.r.TokensSHA] = true
+		}
+	}
+	inits := make([]string, 0, max(1, len(initSet)))
+	for s := range initSet {
+		inits = append(inits, s)
+	}
+	if len(inits) == 0 {
+		inits = []string{""}
+	}
+	toks := make([]string, 0, max(1, len(tokSet)))
+	for s := range tokSet {
+		toks = append(toks, s)
+	}
+	if len(toks) == 0 {
+		toks = []string{""}
+	}
+	tol := j.a.tolerance().Grade
+	best := 0
+	compat := make([]*gradeView, 0, len(sorted))
+	for _, initSHA := range inits {
+		for _, tokSHA := range toks {
+			compat = compat[:0]
+			for _, g := range sorted {
+				if (g.r.InitSHA == "" || g.r.InitSHA == initSHA) &&
+					(g.r.TokensSHA == "" || g.r.TokensSHA == tokSHA) {
+					compat = append(compat, g)
+				}
+			}
+			lo := 0
+			for hi := range compat {
+				for lo < hi && !within(compat[hi].gain-compat[lo].gain, tol) {
+					lo++
+				}
+				if hi-lo+1 > best {
+					best = hi - lo + 1
+				}
+			}
+		}
+	}
+	return best
+}
+
+// numericalSplit reports whether a valid scored verdict rests on incompatible equal-support
+// numerical measurements rather than a resolved majority:
+//   - an even-sized set of valid grades whose two middle grades disagree beyond tolerance (e.g.
+//     two at +0.015 and two at -0.005 against tol 0.012, where the synthetic midpoint +0.005
+//     falls within tolerance of both incompatible pairs), OR
+//   - a mutually agreeing cluster outside the verdict's tolerance band that has at least as much
+//     support (>= 2) as the largest mutually agreeing cluster backing the verdict (e.g. two at
+//     -0.005, two at +0.015, and one outlier at +0.035).
+func (j *judge) numericalSplit(v *verdict) bool {
+	if !v.known || !v.valid || !v.scored {
+		return false
+	}
+	var valid []*gradeView
+	for _, g := range v.counted {
+		if g.r.Valid && g.base {
+			valid = append(valid, g)
+		}
+	}
+	if len(valid) < 2 {
+		return false
+	}
+	sort.Slice(valid, func(a, b int) bool {
+		if valid[a].gain != valid[b].gain {
+			return valid[a].gain < valid[b].gain
+		}
+		if valid[a].r.InitSHA != valid[b].r.InitSHA {
+			return valid[a].r.InitSHA < valid[b].r.InitSHA
+		}
+		return valid[a].r.TokensSHA < valid[b].r.TokensSHA
+	})
+	if len(valid)%2 == 0 && !j.same(valid[len(valid)/2-1], valid[len(valid)/2]) {
+		return true
+	}
+	var agreeing, rival []*gradeView
+	for _, g := range valid {
+		if j.agrees(g, v) {
+			agreeing = append(agreeing, g)
+		} else {
+			rival = append(rival, g)
+		}
+	}
+	if len(rival) == 0 {
+		return false
+	}
+	medSupport := j.maxAgreeingCluster(agreeing)
+	rivalSupport := j.maxAgreeingCluster(rival)
+	return rivalSupport >= 2 && rivalSupport >= medSupport
+}
+
 // supported reports whether a verdict is backed by an agreeing organisers' grade or by at least
-// two distinct counted grades that both agree with the verdict and mutually agree with each other.
-// Requiring a mutually agreeing pair prevents an even number of mutually inconsistent volunteer
-// grades (e.g. +0.010, +0.090, +0.040, +0.060 around synthetic midpoint +0.050) from looking
-// corroborated when no two graders actually agreed within tolerance.
+// two distinct counted grades that both agree with the verdict and mutually agree with each other,
+// without an unresolved equal-support numerical split across incompatible measurements.
+// Requiring a mutually agreeing pair without an equal-support split prevents both an even number
+// of mutually inconsistent volunteer grades (e.g. +0.010, +0.090, +0.040, +0.060 around +0.050)
+// and two incompatible pairs straddling the median (e.g. -0.005, -0.005, +0.015, +0.015 around
+// +0.005 against tol 0.012) from settling as unanimous agreement.
 func (j *judge) supported(v *verdict) bool {
 	if !v.known || (v.valid && !v.scored) {
+		return false
+	}
+	if j.numericalSplit(v) {
 		return false
 	}
 	var matching []*gradeView

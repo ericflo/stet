@@ -3231,3 +3231,244 @@ func TestValidityTieVoidsUnattendedWithoutRetiringCurator(t *testing.T) {
 		w.check()
 	})
 }
+
+// Review 29 P1 #1: two incompatible pairs of established graders (+0.015/+0.015 vs -0.005/-0.005
+// against tol 0.012, diff 0.020 > 0.012) MUST NOT settle as unanimous agreement at synthetic
+// midpoint +0.005 in any submission order. The script MUST stay open for a 5th deciding grade
+// (resolving cleanly when a 5th grade arrives) and publish disputed grades with
+// DisputedTogether=true and zero strikes/credit if ReplicaWait expires unresolved.
+func TestReview29IncompatiblePairsOfGradersRemainOpenForDecidingGrade(t *testing.T) {
+	initA := strings.Repeat("a", 64)
+	tokA := strings.Repeat("1", 64)
+
+	sendGrade := func(t *testing.T, w *world, a *actor, c *claimed, gain float64) (int, string) {
+		t.Helper()
+		examLoss := 6.000 - gain
+		p := w.result(c, examLoss, 6.000)
+		p["train"] = map[string]any{"init_sha256": initA}
+		p["script"].(map[string]any)["tokens_sha256"] = tokA
+		if c.Job.Baseline != nil && *c.Job.Baseline {
+			p["baseline"].(map[string]any)["init_sha256"] = initA
+		} else {
+			delete(p, "baseline")
+		}
+		var ack struct {
+			Status string `json:"status"`
+			Error  string `json:"error"`
+		}
+		code := a.do("POST", fmt.Sprintf("/api/v1/jobs/%d/result", c.Job.ID), p, &ack)
+		if ack.Error != "" {
+			return code, ack.Error
+		}
+		return code, ack.Status
+	}
+
+	setupSplit := func(t *testing.T, order [4]float64) (*world, *actor, int, []*actor) {
+		t.Helper()
+		pub, priv := newKey()
+		w := newWorld(t, pub)
+		w.app.season.Student = map[string]any{"kind": "hf_topreset", "repo": "baidu/ERNIE-4.5-0.3B-Base-PT"}
+		w.app.season.Baselines.PerRound = 2
+		w.app.season.Tolerance[w.cfg.Scale] = Tolerance{Grade: 0.012, Baseline: 0.015, Run: 0.015}
+		anchor := w.join("anchor-one", priv)
+		g := w.volunteers("bob", "carol", "dave", "erin", "frank", "grace", "heidi")
+		w.submit(w.join("owner-0", nil), "entry-0", "print(0)")
+		idx := w.drawWithoutExam()
+		ce := w.claim(anchor, true)
+		if code, _ := w.edit(anchor, ce, "0\n1\n"); code != 200 {
+			t.Fatalf("edit: HTTP %d", code)
+		}
+		claims := make([]*claimed, 4)
+		for i := 0; i < 4; i++ {
+			claims[i] = w.claimEarly(g[i])
+		}
+		w.exam(idx)
+		for i := 0; i < 4; i++ {
+			code, st := sendGrade(t, w, g[i], claims[i], order[i])
+			if code != 200 || st != "pending" {
+				t.Fatalf("order %v grader %d (%+.3f): HTTP %d status=%q, want 200 pending", order, i, order[i], code, st)
+			}
+		}
+		w.app.st.view(func(s *State) {
+			if en := s.inRound[idx][0]; en.Status != "open" {
+				t.Fatalf("order %v settled prematurely (%s) instead of staying open for deciding grade", order, en.Status)
+			}
+		})
+		if wk := w.work(anchor).Rounds[0]; wk.GradesWanted != 1 {
+			t.Fatalf("order %v work must expose GradesWanted=1, got %+v", order, wk)
+		}
+		return w, anchor, idx, g
+	}
+
+	orders := [][4]float64{
+		{+0.015, +0.015, -0.005, -0.005},
+		{+0.015, -0.005, +0.015, -0.005},
+		{+0.015, -0.005, -0.005, +0.015},
+		{-0.005, +0.015, +0.015, -0.005},
+		{-0.005, +0.015, -0.005, +0.015},
+		{-0.005, -0.005, +0.015, +0.015},
+	}
+
+	t.Run("all_six_submission_orders_stay_open_and_fifth_grader_resolves", func(t *testing.T) {
+		for _, ord := range orders {
+			w, _, idx, g := setupSplit(t, ord)
+			c5 := w.claim(g[4], false)
+			if c5.Job == nil || c5.Job.Kind != "grade" {
+				t.Fatalf("order %v: expected 5th verifier to claim deciding grade, got %+v", ord, c5.Job)
+			}
+			// 5th grader sides with +0.015 -> immediately settles at +0.015 with 3 agreed and 2 outliers.
+			code, st := sendGrade(t, w, g[4], c5, +0.015)
+			if code != 200 || st != "settled" {
+				t.Fatalf("order %v: 5th grader (+0.015): HTTP %d status=%q, want 200 settled", ord, code, st)
+			}
+			e := w.entry(idx, "entry-0")
+			if e.Void || !e.Valid || e.Gain == nil || math.Abs(*e.Gain-0.015) > 1e-6 {
+				t.Fatalf("order %v: want settled gain +0.015, got %+v", ord, e)
+			}
+			if e.Detail == nil || e.Detail.DisputedTogether || e.Detail.Disputed != 2 {
+				t.Fatalf("order %v: want DisputedTogether=false Disputed=2, got %+v", ord, e.Detail)
+			}
+			agreedN, outlierN := 0, 0
+			for _, gr := range e.Runs[0].Grades {
+				switch gr.Verdict {
+				case "agreed":
+					agreedN++
+				case "outlier":
+					outlierN++
+				default:
+					t.Fatalf("order %v: unexpected grade verdict %+v", ord, gr)
+				}
+			}
+			if agreedN != 3 || outlierN != 2 {
+				t.Fatalf("order %v: want 3 agreed + 2 outlier, got agreed=%d outlier=%d", ord, agreedN, outlierN)
+			}
+			w.check()
+		}
+	})
+
+	t.Run("replica_wait_expiry_publishes_disputed_without_strikes_or_credit", func(t *testing.T) {
+		w, _, idx, g := setupSplit(t, orders[0])
+		preAgreed := make([]int, 4)
+		w.app.st.view(func(s *State) {
+			for i := 0; i < 4; i++ {
+				acct := s.byHandle[g[i].handle]
+				preAgreed[i] = acct.Agreed
+			}
+		})
+		// Ensure the 5th/6th volunteers are not active so ReplicaWait expiry settles the dispute.
+		w.pass(w.cfg.ReplicaWait + time.Minute)
+		if w.settled(idx) != 1 {
+			t.Fatal("expected unresolved 2-vs-2 split to settle after ReplicaWait")
+		}
+		e := w.entry(idx, "entry-0")
+		if e.Void || !e.Valid || e.Gain == nil || math.Abs(*e.Gain-0.005) > 1e-6 {
+			t.Fatalf("expected midpoint fallback +0.005 after ReplicaWait, got %+v", e)
+		}
+		if e.Detail == nil || !e.Detail.DisputedTogether {
+			t.Fatalf("expected DisputedTogether=true on unresolved 2-vs-2 split, got %+v", e.Detail)
+		}
+		if len(e.Runs) != 1 || len(e.Runs[0].Grades) != 4 {
+			t.Fatalf("expected 4 published grades, got %+v", e.Runs)
+		}
+		for _, gr := range e.Runs[0].Grades {
+			if gr.Verdict != "disputed" {
+				t.Fatalf("unresolved 2-vs-2 split grade %s verdict = %q, want disputed", gr.Handle, gr.Verdict)
+			}
+		}
+		w.app.st.view(func(s *State) {
+			for i := 0; i < 4; i++ {
+				acct := s.byHandle[g[i].handle]
+				if acct.Strikes != 0 || acct.Agreed != preAgreed[i] {
+					t.Fatalf("grader %s must get zero strikes and zero agreed credit on unresolved split: strikes=%d agreed=%d (was %d)",
+						acct.Handle, acct.Strikes, acct.Agreed, preAgreed[i])
+				}
+			}
+		})
+		w.check()
+	})
+
+	t.Run("five_graders_two_vs_two_plus_outlier_stays_open_until_true_majority", func(t *testing.T) {
+		// Case A: 5th grader submits high outlier (+0.035) shifting median onto +0.015 while
+		// -0.005 (2) and +0.015 (2) remain tied -> MUST stay open; 6th grader at +0.015 gives
+		// 3-vs-2-vs-1 with matching middle pair (+0.015, +0.015) -> settles cleanly at +0.015.
+		wA, _, idxA, gA := setupSplit(t, orders[0])
+		c5A := wA.claim(gA[4], false)
+		if code, st := sendGrade(t, wA, gA[4], c5A, +0.035); code != 200 || st != "pending" {
+			t.Fatalf("5th grader outlier (+0.035) must NOT settle 2-vs-2 split: HTTP %d status=%q", code, st)
+		}
+		c6A := wA.claim(gA[5], false)
+		if c6A.Job == nil || c6A.Job.Kind != "grade" {
+			t.Fatalf("expected 6th grader to claim deciding grade, got %+v", c6A.Job)
+		}
+		if code, st := sendGrade(t, wA, gA[5], c6A, +0.015); code != 200 || st != "settled" {
+			t.Fatalf("6th grader (+0.015) should resolve 3-vs-2-vs-1: HTTP %d status=%q", code, st)
+		}
+		eA := wA.entry(idxA, "entry-0")
+		if eA.Gain == nil || math.Abs(*eA.Gain-0.015) > 1e-6 || eA.Detail == nil || eA.Detail.DisputedTogether {
+			t.Fatalf("expected resolved gain +0.015 without DisputedTogether, got %+v", eA)
+		}
+		wA.check()
+
+		// Case B: 5th grader submits +0.035 (stays open), then 6th grader submits -0.005:
+		// sorted grades [-0.005, -0.005, -0.005, +0.015, +0.015, +0.035] STILL split 3 low vs
+		// 3 high with synthetic midpoint +0.005, so MUST stay open for a 7th grader; 7th grader
+		// at -0.005 gives 4-vs-2-vs-1 and settles cleanly at -0.005!
+		wB, _, idxB, gB := setupSplit(t, orders[0])
+		c5B := wB.claim(gB[4], false)
+		if code, st := sendGrade(t, wB, gB[4], c5B, +0.035); code != 200 || st != "pending" {
+			t.Fatalf("5th grader outlier (+0.035) must NOT settle 2-vs-2 split: HTTP %d status=%q", code, st)
+		}
+		c6B := wB.claim(gB[5], false)
+		if code, st := sendGrade(t, wB, gB[5], c6B, -0.005); code != 200 || st != "pending" {
+			t.Fatalf("6th grader (-0.005) on 3-low vs 3-high split must NOT settle on synthetic midpoint +0.005: HTTP %d status=%q", code, st)
+		}
+		c7B := wB.claim(gB[6], false)
+		if c7B.Job == nil || c7B.Job.Kind != "grade" {
+			t.Fatalf("expected 7th grader to claim deciding grade, got %+v", c7B.Job)
+		}
+		if code, st := sendGrade(t, wB, gB[6], c7B, -0.005); code != 200 || st != "settled" {
+			t.Fatalf("7th grader (-0.005) should resolve 4-vs-2-vs-1: HTTP %d status=%q", code, st)
+		}
+		eB := wB.entry(idxB, "entry-0")
+		if eB.Gain == nil || math.Abs(*eB.Gain-(-0.005)) > 1e-6 || eB.Detail == nil || eB.Detail.DisputedTogether {
+			t.Fatalf("expected resolved gain -0.005 without DisputedTogether, got %+v", eB)
+		}
+		wB.check()
+	})
+
+	t.Run("maxAgreeingCluster_and_numericalSplit_order_independent_with_mixed_init_digests", func(t *testing.T) {
+		pub, _ := newKey()
+		w := newWorld(t, pub)
+		w.app.season.Tolerance[w.cfg.Scale] = Tolerance{Grade: 0.012, Baseline: 0.015, Run: 0.015}
+		j := w.app.newJudge(w.app.st.s)
+		mk := func(gain float64, initSHA string) *gradeView {
+			return &gradeView{
+				r:    &Result{Valid: true, InitSHA: initSHA},
+				acct: &Account{},
+				gain: gain,
+				base: true,
+			}
+		}
+		// Agreeing cluster has {"", B, B} (size 3) plus A (size 2 with "") vs rival {A, A} (size 2):
+		// exact max cluster MUST be 3 regardless of whether A arrives before or after B!
+		for _, order := range [][]*gradeView{
+			{mk(-0.020, "A"), mk(-0.020, "A"), mk(+0.015, ""), mk(+0.015, "A"), mk(+0.015, "B"), mk(+0.015, "B"), mk(+0.050, "B")},
+			{mk(-0.020, "A"), mk(-0.020, "A"), mk(+0.015, "B"), mk(+0.015, "B"), mk(+0.015, ""), mk(+0.015, "A"), mk(+0.050, "B")},
+		} {
+			v := &verdict{known: true, valid: true, scored: true, gain: +0.015, counted: order}
+			if j.numericalSplit(v) {
+				t.Fatalf("exact agreeing cluster size 3 (\"\", B, B) beats rival size 2 (A, A) regardless of order; got numericalSplit=true")
+			}
+		}
+		// Equal-gain 2-vs-2 InitSHA split must return numericalSplit=true in every arrival order.
+		for _, order := range [][]*gradeView{
+			{mk(0.010, "A"), mk(0.010, "A"), mk(0.010, "B"), mk(0.010, "B")},
+			{mk(0.010, "B"), mk(0.010, "A"), mk(0.010, "A"), mk(0.010, "B")},
+		} {
+			v := &verdict{known: true, valid: true, scored: true, gain: 0.010, counted: order}
+			if !j.numericalSplit(v) {
+				t.Fatalf("equal-gain 2-vs-2 InitSHA split must stay open in every arrival order; got numericalSplit=false")
+			}
+		}
+	})
+}

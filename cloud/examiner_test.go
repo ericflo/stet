@@ -8506,3 +8506,616 @@ func TestReview28Gate4EdgeCases(t *testing.T) {
 		}
 	})
 }
+
+// Review 29 P1 #2: When a stopped Vast worker is omitted from the listing and Lookup returns 503
+// (or the market listing itself fails), the controller MUST NOT free its slot, hourly compute
+// budget, or conservative daily spend during the outage: it reserves 1 live slot, the known
+// running rate ($1.50/h), and conservative spend since StoppedSeen ($2.976) without mutating
+// fleet.json on disk, blocking both worker and examiner admission during the outage.
+func TestReview29InconclusiveLookupReservesSlotRateAndSpendDuringOutage(t *testing.T) {
+	t0 := time.Date(2026, 11, 27, 10, 0, 0, 0, time.UTC)
+	t1 := t0.Add(time.Minute)
+	noon := t0.Add(2 * time.Hour)
+	wantConservative := (1.0/60.0)*0.06 + (119.0/60.0)*1.50 // $2.976
+
+	t.Run("omitted_stopped_worker_with_503_lookup_blocks_up_during_outage", func(t *testing.T) {
+		var mode atomic.Value
+		mode.Store("outage")
+		vastSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch mode.Load().(string) {
+			case "outage":
+				if r.Method == "GET" && r.URL.Path == "/api/v1/instances/" {
+					_, _ = w.Write([]byte(`{"instances":[],"next_token":null}`))
+					return
+				}
+				if (r.Method == "GET" || r.Method == "DELETE") && r.URL.Path == "/api/v0/instances/99101/" {
+					http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+					return
+				}
+			case "running":
+				if r.Method == "GET" && r.URL.Path == "/api/v1/instances/" {
+					_, _ = w.Write([]byte(fmt.Sprintf(`{"instances":[{"id":99101,"label":"stet-rp-01","actual_status":"running","intended_status":"running","cur_state":"running","gpu_name":"RTX 5090","dph_total":1.50,"dph_base":1.44,"disk_space":100,"storage_cost":0.432,"start_date":%d}],"next_token":null}`, t0.Unix())))
+					return
+				}
+			case "stopped":
+				if r.Method == "GET" && r.URL.Path == "/api/v1/instances/" {
+					_, _ = w.Write([]byte(fmt.Sprintf(`{"instances":[{"id":99101,"label":"stet-rp-01","actual_status":"exited","intended_status":"stopped","cur_state":"stopped","gpu_name":"RTX 5090","dph_total":0.06,"dph_base":1.44,"disk_space":100,"storage_cost":0.432,"start_date":%d}],"next_token":null}`, t0.Unix())))
+					return
+				}
+			}
+			http.NotFound(w, r)
+		}))
+		defer vastSrv.Close()
+
+		rp, st := newFakeRunPod(t), newFakeStet(t)
+		f, _ := testFleet(t, rp, st, 2)
+		f.now = func() time.Time { return noon }
+		f.o.Cloud = "SECURE"
+		f.o.MinGPUMemory = 12
+		vm := newVast(vastSrv.URL, "vast-key")
+		vm.a.sleep = func(context.Context, time.Duration) error { return nil }
+		f.markets = append(f.markets, vm)
+		st.work = Work{Rounds: []WorkRound{{ID: "s3-o00029", GradesWanted: 2}}}
+		if err := f.writeLedger(&ledger{Pods: map[string]*podRecord{
+			ledgerKey("vast", "99101"): {
+				ID: "99101", Market: "vast", Handle: f.keys[0].Handle, GPU: "RTX 5090",
+				Cost: 1.50, DiskCost: 0.06, Tracked: true, Stopped: true,
+				Start: t0, Alive: t0, StoppedAt: t0, StoppedSeen: t1,
+			},
+		}}); err != nil {
+			t.Fatal(err)
+		}
+
+		// 1. During the 503 outage, f.look MUST report 1 live, $1.50/h, $2.976 today.
+		v, err := f.look(context.Background())
+		if err != nil {
+			t.Fatalf("look during outage: %v", err)
+		}
+		if v.liveWorkerCount() != 1 || math.Abs(v.Hourly-1.50) > 1e-4 || math.Abs(v.Today-wantConservative) > 1e-4 {
+			t.Fatalf("during 503 lookup want 1 live / $1.50/h / $%.4f today, got %d live / $%.4f/h / $%.4f today",
+				wantConservative, v.liveWorkerCount(), v.Hourly, v.Today)
+		}
+
+		// 2. Each limit individually (--max 1, --max-hourly 1.50, --daily-budget 2) MUST block cmdUp during the outage!
+		for _, tc := range []struct {
+			name         string
+			maxWorkers   int
+			maxHourly    float64
+			dailyBudget  float64
+			wantDailyErr bool
+		}{
+			{"combined_caps", 1, 1.50, 2.00, true},
+			{"max_workers_only", 1, 10.0, 50.0, false},
+			{"max_hourly_only", 4, 1.50, 50.0, false},
+			{"daily_budget_only", 4, 10.0, 2.00, true},
+		} {
+			f.o.MaxWorkers, f.o.MaxHourly, f.o.DailyBudget = tc.maxWorkers, tc.maxHourly, tc.dailyBudget
+			err := cmdUp(context.Background(), f, 1)
+			if tc.wantDailyErr {
+				if err == nil || !strings.Contains(err.Error(), "$2.98") {
+					t.Fatalf("cmdUp (%s) expected daily budget error mentioning $2.98, got %v", tc.name, err)
+				}
+			} else if err != nil {
+				t.Fatalf("cmdUp (%s): %v", tc.name, err)
+			}
+			if len(rp.created) != 0 {
+				t.Fatalf("cmdUp (%s) MUST NOT create a rental during inconclusive lookup, created %d", tc.name, len(rp.created))
+			}
+			// Also verify tick() (scale) blocks under each cap during the outage (when DELETE also 503s).
+			if err := tick(context.Background(), f); err != nil {
+				t.Fatalf("tick (%s): %v", tc.name, err)
+			}
+			if len(rp.created) != 0 {
+				t.Fatalf("tick (%s) MUST NOT create a rental during inconclusive lookup, created %d", tc.name, len(rp.created))
+			}
+		}
+
+		// 3. fleet.json on disk must stay unmutated (Stopped=true, StoppedSeen=10:01) so recovery is exact.
+		lDisk, err := f.readLedger()
+		if err != nil {
+			t.Fatal(err)
+		}
+		rec := lDisk.Pods[ledgerKey("vast", "99101")]
+		if rec == nil || !rec.Stopped || !rec.StoppedSeen.Equal(t1) {
+			t.Fatalf("inconclusive lookup must preserve Stopped=true & StoppedSeen=%v on disk, got %+v", t1, rec)
+		}
+
+		// 4. If provider recovers confirming still stopped -> returns to 0 live, $0.06/h, $0.12 today!
+		mode.Store("stopped")
+		vStopped, err := f.look(context.Background())
+		if err != nil {
+			t.Fatalf("look after stopped recovery: %v", err)
+		}
+		if vStopped.liveWorkerCount() != 0 || math.Abs(vStopped.Hourly-0.06) > 1e-4 || math.Abs(vStopped.Today-0.12) > 1e-4 {
+			t.Fatalf("after confirmed stopped recovery want 0 live / $0.06/h / $0.12 today, got %d / $%.4f / $%.4f",
+				vStopped.liveWorkerCount(), vStopped.Hourly, vStopped.Today)
+		}
+
+		// 5. Re-seed outage then recover as running -> 1 live (never 2!), $1.50/h, $2.976 today.
+		if err := f.writeLedger(&ledger{Pods: map[string]*podRecord{
+			ledgerKey("vast", "99101"): {
+				ID: "99101", Market: "vast", Handle: f.keys[0].Handle, GPU: "RTX 5090",
+				Cost: 1.50, DiskCost: 0.06, Tracked: true, Stopped: true,
+				Start: t0, Alive: t0, StoppedAt: t0, StoppedSeen: t1,
+			},
+		}}); err != nil {
+			t.Fatal(err)
+		}
+		mode.Store("running")
+		vRun, err := f.look(context.Background())
+		if err != nil {
+			t.Fatalf("look after running recovery: %v", err)
+		}
+		if vRun.liveWorkerCount() != 1 || math.Abs(vRun.Hourly-1.50) > 1e-4 || math.Abs(vRun.Today-wantConservative) > 1e-4 {
+			t.Fatalf("after running recovery want 1 live / $1.50/h / $%.4f today, got %d / $%.4f / $%.4f",
+				wantConservative, vRun.liveWorkerCount(), vRun.Hourly, vRun.Today)
+		}
+	})
+
+	t.Run("omitted_stopped_worker_with_503_lookup_blocks_examiner_during_outage", func(t *testing.T) {
+		vastSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == "GET" && r.URL.Path == "/api/v1/instances/" {
+				_, _ = w.Write([]byte(`{"instances":[],"next_token":null}`))
+				return
+			}
+			if r.Method == "GET" && r.URL.Path == "/api/v0/instances/99102/" {
+				http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			http.NotFound(w, r)
+		}))
+		defer vastSrv.Close()
+
+		rp, st := newFakeRunPod(t), newFakeStet(t)
+		f, _ := testFleet(t, rp, st, 2)
+		f.now = func() time.Time { return noon }
+		vm := newVast(vastSrv.URL, "vast-key")
+		vm.a.sleep = func(context.Context, time.Duration) error { return nil }
+		f.markets = append(f.markets, vm)
+		st.work = Work{Rounds: []WorkRound{{ID: "s3-o00029", ExamAt: 0}}}
+		if err := f.writeLedger(&ledger{Pods: map[string]*podRecord{
+			ledgerKey("vast", "99102"): {
+				ID: "99102", Market: "vast", Handle: f.keys[0].Handle, GPU: "RTX 5090",
+				Cost: 1.50, DiskCost: 0.06, Tracked: true, Stopped: true,
+				Start: t0, Alive: t0, StoppedAt: t0, StoppedSeen: t1,
+			},
+		}}); err != nil {
+			t.Fatal(err)
+		}
+		exProv := &fakeExaminerProv{
+			offers: []ExaminerOffer{{ID: "ex-5090", Card: "RTX 5090", Price: 0.60, DiskCost: 0.05}},
+		}
+		f.examiner = newExaminer(ExaminerConfig{Addr: "127.0.0.1:0", Timeout: 45 * time.Minute, MaxPrice: 1.50}, f.o.Home, exProv, func() time.Time { return noon }, f.say, false)
+		f.examiner.owner = "abcdef012345"
+
+		for _, tc := range []struct {
+			name        string
+			maxWorkers  int
+			maxHourly   float64
+			dailyBudget float64
+		}{
+			{"max_workers_only", 1, 10.0, 50.0},
+			{"max_hourly_only", 4, 1.50, 50.0},
+			{"daily_budget_only", 4, 10.0, 2.00},
+		} {
+			f.o.MaxWorkers, f.o.MaxHourly, f.o.DailyBudget = tc.maxWorkers, tc.maxHourly, tc.dailyBudget
+			if err := reconcileExaminerOnce(context.Background(), f); err != nil {
+				t.Fatalf("reconcileExaminerOnce (%s): %v", tc.name, err)
+			}
+			if len(exProv.rented) != 0 {
+				t.Fatalf("reconcileExaminerOnce (%s) MUST NOT rent examiner during inconclusive lookup, rented %d", tc.name, len(exProv.rented))
+			}
+		}
+	})
+
+	t.Run("listing_outage_on_stopped_worker_also_reserves_slot_rate_and_spend", func(t *testing.T) {
+		vastSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+		}))
+		defer vastSrv.Close()
+
+		rp, st := newFakeRunPod(t), newFakeStet(t)
+		f, _ := testFleet(t, rp, st, 2)
+		f.now = func() time.Time { return noon }
+		f.o.Cloud = "SECURE"
+		f.o.MinGPUMemory = 12
+		f.o.MaxWorkers = 1
+		f.o.MaxHourly = 1.50
+		f.o.DailyBudget = 2.00
+		vm := newVast(vastSrv.URL, "vast-key")
+		vm.a.sleep = func(context.Context, time.Duration) error { return nil }
+		f.markets = append(f.markets, vm)
+		st.work = Work{Rounds: []WorkRound{{ID: "s3-o00029", GradesWanted: 2}}}
+		if err := f.writeLedger(&ledger{Pods: map[string]*podRecord{
+			ledgerKey("vast", "99103"): {
+				ID: "99103", Market: "vast", Handle: f.keys[0].Handle, GPU: "RTX 5090",
+				Cost: 1.50, DiskCost: 0.06, Tracked: true, Stopped: true,
+				Start: t0, Alive: t0, StoppedAt: t0, StoppedSeen: t1,
+			},
+		}}); err != nil {
+			t.Fatal(err)
+		}
+		v, err := f.look(context.Background())
+		if err != nil {
+			t.Fatalf("look during listing outage: %v", err)
+		}
+		if v.liveWorkerCount() != 1 || math.Abs(v.Hourly-1.50) > 1e-4 || math.Abs(v.Today-wantConservative) > 1e-4 {
+			t.Fatalf("during listing outage want 1 live / $1.50/h / $%.4f today, got %d / $%.4f / $%.4f",
+				wantConservative, v.liveWorkerCount(), v.Hourly, v.Today)
+		}
+		if err := cmdUp(context.Background(), f, 1); err == nil || !strings.Contains(err.Error(), "$2.98") {
+			t.Fatalf("cmdUp during listing outage expected daily budget error mentioning $2.98, got %v", err)
+		}
+		if len(rp.created) != 0 {
+			t.Fatalf("cmdUp MUST NOT create a rental during Vast listing outage, created %d", len(rp.created))
+		}
+		f.o.DailyBudget = 50.0
+		if err := cmdUp(context.Background(), f, 1); err != nil {
+			t.Fatalf("cmdUp (--max 1 during listing outage): %v", err)
+		}
+		if len(rp.created) != 0 {
+			t.Fatalf("cmdUp MUST NOT bypass --max 1 during Vast listing outage, created %d", len(rp.created))
+		}
+		f.o.MaxWorkers = 4
+		if err := cmdUp(context.Background(), f, 1); err != nil {
+			t.Fatalf("cmdUp (--max-hourly 1.50 during listing outage): %v", err)
+		}
+		if len(rp.created) != 0 {
+			t.Fatalf("cmdUp MUST NOT bypass --max-hourly 1.50 during Vast listing outage, created %d", len(rp.created))
+		}
+	})
+
+	t.Run("unconfirmed_stopped_worker_not_destroyed_by_tick_or_down_and_reserves_slot_in_status_and_policy", func(t *testing.T) {
+		var deletes atomic.Int32
+		vastSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == "GET" && r.URL.Path == "/api/v1/instances/":
+				_, _ = w.Write([]byte(`{"instances":[],"next_token":null}`))
+			case r.Method == "GET" && r.URL.Path == "/api/v0/instances/99104/":
+				http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+			case r.Method == "DELETE" && r.URL.Path == "/api/v0/instances/99104/":
+				deletes.Add(1)
+				_, _ = w.Write([]byte(`{"success":true}`))
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer vastSrv.Close()
+
+		rp, st := newFakeRunPod(t), newFakeStet(t)
+		f, buf := testFleet(t, rp, st, 2)
+		f.now = func() time.Time { return noon }
+		f.o.MaxWorkers = 1
+		f.o.MaxHourly = 10.0
+		f.o.DailyBudget = 50.0
+		vm := newVast(vastSrv.URL, "vast-key")
+		vm.a.sleep = func(context.Context, time.Duration) error { return nil }
+		f.markets = append(f.markets, vm)
+		st.work = Work{Rounds: []WorkRound{{ID: "s3-o00029", GradesWanted: 2}}}
+		if err := f.writeLedger(&ledger{Pods: map[string]*podRecord{
+			ledgerKey("vast", "99104"): {
+				ID: "99104", Market: "vast", Handle: f.keys[0].Handle, GPU: "RTX 5090",
+				Cost: 1.50, DiskCost: 0.06, Tracked: true, Stopped: true,
+				Start: t0, Alive: t0, StoppedAt: t0, StoppedSeen: t1,
+			},
+		}}); err != nil {
+			t.Fatal(err)
+		}
+
+		// 1. cmdStatus must show unconfirmed and MUST NOT claim `would rent 1` or `would end 1`.
+		buf.Reset()
+		if err := cmdStatus(context.Background(), f); err != nil {
+			t.Fatalf("cmdStatus: %v", err)
+		}
+		if got := buf.String(); !strings.Contains(got, "unconfirmed") || strings.Contains(got, "would rent") || strings.Contains(got, "would end") {
+			t.Fatalf("cmdStatus during unconfirmed stopped worker should show unconfirmed without renting/ending:\n%s", got)
+		}
+
+		// 2. tick() MUST NOT call DELETE on the unconfirmed stopped worker even when DELETE would 200,
+		//    and MUST NOT launch a replacement past --max 1!
+		if err := tick(context.Background(), f); err != nil {
+			t.Fatalf("tick: %v", err)
+		}
+		if deletes.Load() != 0 || len(rp.created) != 0 {
+			t.Fatalf("tick MUST NOT destroy unconfirmed stopped worker or launch past --max 1: deletes=%d created=%d", deletes.Load(), len(rp.created))
+		}
+
+		// 3. cmdDown without --force MUST leave the unconfirmed worker alone; --force ends it.
+		if err := cmdDown(context.Background(), f, false, nil); err != nil {
+			t.Fatalf("cmdDown (no force): %v", err)
+		}
+		if deletes.Load() != 0 {
+			t.Fatalf("cmdDown without --force MUST NOT destroy unconfirmed worker: deletes=%d", deletes.Load())
+		}
+		if err := cmdDown(context.Background(), f, true, nil); err != nil {
+			t.Fatalf("cmdDown (--force): %v", err)
+		}
+		if deletes.Load() != 1 {
+			t.Fatalf("cmdDown --force should destroy unconfirmed worker once, got deletes=%d", deletes.Load())
+		}
+	})
+
+	t.Run("unconfirmed_stopped_worker_counts_in_dLive_so_idle_worker_evicts_for_examiner_and_unknown_rate_end_keeps_hourly", func(t *testing.T) {
+		var termResumedDeletes atomic.Int32
+		vastSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == "GET" && r.URL.Path == "/api/v1/instances/":
+				_, _ = w.Write([]byte(`{"instances":[],"next_token":null}`))
+			case r.Method == "GET" && r.URL.Path == "/api/v0/instances/99105/":
+				http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+			case r.Method == "GET" && r.URL.Path == "/api/v0/instances/99106/":
+				_, _ = w.Write([]byte(fmt.Sprintf(`{"instances":{"id":99106,"label":"stet-rp-01","actual_status":"running","intended_status":"running","cur_state":"running","gpu_name":"RTX 5090","dph_total":1.50,"dph_base":1.44,"disk_space":100,"storage_cost":0.432,"start_date":%d}}`, t0.Unix())))
+			case r.Method == "DELETE" && r.URL.Path == "/api/v0/instances/99106/":
+				t.Error("non-forced f.end MUST NOT DELETE a worker that pre-delete Lookup confirmed resumed running")
+				_, _ = w.Write([]byte(`{"success":true}`))
+			case r.Method == "GET" && r.URL.Path == "/api/v0/instances/99108/":
+				_, _ = w.Write([]byte(fmt.Sprintf(`{"instances":{"id":99108,"label":"stet-rp-01","actual_status":"running","intended_status":"running","cur_state":"running","gpu_name":"RTX 5090","dph_total":1.50,"dph_base":1.44,"disk_space":100,"storage_cost":0.432,"start_date":%d}}`, t0.Unix())))
+			case r.Method == "DELETE" && r.URL.Path == "/api/v0/instances/99108/":
+				termResumedDeletes.Add(1)
+				_, _ = w.Write([]byte(`{"success":true}`))
+			case r.Method == "DELETE" && r.URL.Path == "/api/v0/instances/99107/":
+				_, _ = w.Write([]byte(`{"success":true}`))
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer vastSrv.Close()
+
+		rp, st := newFakeRunPod(t), newFakeStet(t)
+		f, _ := testFleet(t, rp, st, 2)
+		f.now = func() time.Time { return noon }
+		f.o.MaxWorkers = 2 // 1 unconfirmed Vast worker + 1 idle RunPod worker + 1 required examiner -> idle RunPod MUST evict!
+		f.o.MaxHourly = 10.0
+		f.o.DailyBudget = 50.0
+		vm := newVast(vastSrv.URL, "vast-key")
+		vm.a.sleep = func(context.Context, time.Duration) error { return nil }
+		f.markets = append(f.markets, vm)
+
+		rp.pods["rp-idle"] = &Pod{ID: "rp-idle", Name: f.keys[1].Handle, Status: "RUNNING", Cost: 0.40, CreatedAt: t0}
+		st.work = Work{
+			Rounds:   []WorkRound{{ID: "s3-o00029", GradesWanted: 1, ExamAt: 0}},
+			Machines: []Machine{{Handle: f.keys[1].Handle, LastSeen: noon.Add(-10 * time.Second).Unix()}},
+		}
+		if err := f.writeLedger(&ledger{Pods: map[string]*podRecord{
+			ledgerKey("vast", "99105"): {
+				ID: "99105", Market: "vast", Handle: f.keys[0].Handle, GPU: "RTX 5090",
+				Cost: 1.50, DiskCost: 0.06, Tracked: true, Stopped: true,
+				Start: t0, Alive: t0, StoppedAt: t0, StoppedSeen: t1,
+			},
+			ledgerKey("runpod", "rp-idle"): {
+				ID: "rp-idle", Market: "runpod", Handle: f.keys[1].Handle, GPU: "RTX 4090",
+				Cost: 0.40, Start: t0, Alive: noon,
+			},
+		}}); err != nil {
+			t.Fatal(err)
+		}
+		exProv := &fakeExaminerProv{
+			offers: []ExaminerOffer{{ID: "ex-5090", Card: "RTX 5090", Price: 0.60, DiskCost: 0.05}},
+		}
+		f.examiner = newExaminer(ExaminerConfig{Addr: "127.0.0.1:0", Timeout: 45 * time.Minute, MaxPrice: 1.50}, f.o.Home, exProv, func() time.Time { return noon }, f.say, false)
+		f.examiner.owner = "abcdef012345"
+
+		if err := tick(context.Background(), f); err != nil {
+			t.Fatalf("tick: %v", err)
+		}
+		rp.mu.Lock()
+		_, stillAlive := rp.pods["rp-idle"]
+		rp.mu.Unlock()
+		if stillAlive {
+			t.Fatalf("expected idle RunPod worker evicted to free slot for examiner alongside unconfirmed worker, but rp-idle is still alive")
+		}
+		if len(exProv.rented) != 1 {
+			t.Fatalf("expected examiner rented once idle RunPod worker evicted, rented=%d", len(exProv.rented))
+		}
+
+		// Gate 4 P1 #1 & P2 #2: non-forced f.end skips DELETE when pre-delete Lookup confirms resumed;
+		// forced f.end on unconfirmed stopped rental with Price==0 & DiskCost==0.06 MUST NOT subtract DiskCost from v.Hourly.
+		recResumed := &podRecord{
+			ID: "99106", Market: "vast", Handle: f.keys[0].Handle, GPU: "RTX 5090",
+			Cost: 1.50, DiskCost: 0.06, Tracked: true, Stopped: true,
+			Start: t0, Alive: t0, StoppedAt: t0, StoppedSeen: t1,
+		}
+		recUnknown := &podRecord{
+			ID: "99107", Market: "vast", Handle: f.keys[1].Handle, GPU: "RTX 5090",
+			Cost: 0, DiskCost: 0.06, Tracked: true, Stopped: true,
+			Start: t0, Alive: t0, StoppedAt: t0, StoppedSeen: t1,
+		}
+		recTermResumed := &podRecord{
+			ID: "99108", Market: "vast", Handle: f.keys[0].Handle, GPU: "RTX 5090",
+			Cost: 1.50, DiskCost: 0.06, Tracked: true, Stopped: true, Terminating: true,
+			Start: t0, Alive: t0, StoppedAt: t0, StoppedSeen: t1,
+		}
+		v := &View{
+			Ledger: &ledger{Pods: map[string]*podRecord{
+				ledgerKey("vast", "99106"): recResumed,
+				ledgerKey("vast", "99107"): recUnknown,
+				ledgerKey("vast", "99108"): recTermResumed,
+			}},
+			UnconfirmedKeys: map[string]bool{
+				ledgerKey("vast", "99106"): true,
+				ledgerKey("vast", "99107"): true,
+				ledgerKey("vast", "99108"): true,
+			},
+			Hourly: 3.00, // 99106 ($1.50) + 99108 ($1.50); 99107 contributed $0 because Price==0
+		}
+		rResumed := &Rental{Market: "vast", ID: "99106", Name: f.keys[0].Handle, State: "stopped", Unconfirmed: true, Price: 1.50, DiskCost: 0.06}
+		rUnknown := &Rental{Market: "vast", ID: "99107", Name: f.keys[1].Handle, State: "stopped", Unconfirmed: true, Price: 0, DiskCost: 0.06}
+		rTermResumed := &Rental{Market: "vast", ID: "99108", Name: f.keys[0].Handle, State: "stopped", Terminating: true, Unconfirmed: true, Price: 1.50, DiskCost: 0.06}
+		if err := f.end(context.Background(), v, []Ending{
+			{Rental: rResumed, Why: "stopped worker"},
+			{Rental: rUnknown, Why: "ended by hand", Forced: true},
+			{Rental: rTermResumed, Why: "outstanding termination"},
+		}); err != nil {
+			t.Fatalf("f.end: %v", err)
+		}
+		if recResumed.Stopped || rResumed.Unconfirmed || rResumed.State != "running" || v.UnconfirmedKeys[ledgerKey("vast", "99106")] {
+			t.Fatalf("resumed worker 99106 should sync in-memory View + ledger to confirmed running: rec=%+v r=%+v unconfirmed=%v", recResumed, rResumed, v.UnconfirmedKeys)
+		}
+		if termResumedDeletes.Load() != 1 {
+			t.Fatalf("already-Terminating worker 99108 MUST still be deleted even if Lookup sees resumed running, deletes=%d", termResumedDeletes.Load())
+		}
+		if math.Abs(v.Hourly-1.50) > 1e-6 {
+			t.Fatalf("after ending 99108 ($1.50) and unknown-rate 99107 ($0), v.Hourly MUST remain $1.5000 (99106 only): got $%.4f", v.Hourly)
+		}
+	})
+}
+
+// Review 29 P2 #3: When a fast bandwidth tier (>=1500 Mbps) has only metered-ingress offers whose
+// cold-start download charge exceeds the remaining daily budget, examiner offer search MUST fall
+// through to slower tiers (>=500 / >=200 Mbps) to rent an affordable/free-ingress host, while
+// still re-checking live daily spend immediately before each create.
+func TestReview29ExaminerFallsBackToAffordableTierWhenFastTierExceedsDailyTransfer(t *testing.T) {
+	t0 := time.Date(2026, 11, 27, 14, 0, 0, 0, time.UTC)
+
+	t.Run("vast_falls_through_from_1500_metered_tier_to_500_free_ingress_tier", func(t *testing.T) {
+		var queriedMinDown []int
+		var rentedOffer string
+		vastSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == "GET" && r.URL.Path == "/api/v1/instances/":
+				_, _ = w.Write([]byte(`{"instances":[],"next_token":null}`))
+			case r.Method == "POST" && r.URL.Path == "/api/v0/bundles/":
+				var q map[string]any
+				_ = json.NewDecoder(r.Body).Decode(&q)
+				minDown := 0
+				if idm, ok := q["inet_down"].(map[string]any); ok {
+					if gte, ok := idm["gte"].(float64); ok {
+						minDown = int(gte)
+					}
+				}
+				queriedMinDown = append(queriedMinDown, minDown)
+				if minDown >= 1500 {
+					// Fast tier: $0.60/h + $0.02/GB ($0.36 transfer > $0.20 remaining today).
+					_, _ = w.Write([]byte(`{"offers":[{"id":2901,"gpu_name":"RTX 5090","num_gpus":1,"dph_total":0.60,"dph_base":0.55,"storage_cost":0.45,"inet_down_cost":0.02,"cuda_max_good":13.3,"inet_down":2000,"geolocation":"US"}]}`))
+					return
+				}
+				// 500 Mbps tier: $0.50/h with free ingress ($0 transfer <= $0.20 remaining today).
+				_, _ = w.Write([]byte(`{"offers":[
+					{"id":2901,"gpu_name":"RTX 5090","num_gpus":1,"dph_total":0.60,"dph_base":0.55,"storage_cost":0.45,"inet_down_cost":0.02,"cuda_max_good":13.3,"inet_down":2000,"geolocation":"US"},
+					{"id":2902,"gpu_name":"RTX 5090","num_gpus":1,"dph_total":0.50,"dph_base":0.45,"storage_cost":0.45,"inet_down_cost":0.0,"cuda_max_good":13.3,"inet_down":600,"geolocation":"US"}
+				]}`))
+			case r.Method == "PUT" && strings.HasPrefix(r.URL.Path, "/api/v0/asks/"):
+				rentedOffer = strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v0/asks/"), "/")
+				_, _ = w.Write([]byte(`{"success":true,"new_contract":992902}`))
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer vastSrv.Close()
+
+		home := t.TempDir()
+		vm := newVast(vastSrv.URL, "vast-key")
+		vm.a.sleep = func(context.Context, time.Duration) error { return nil }
+		ex := newExaminer(ExaminerConfig{Addr: "127.0.0.1:0", Timeout: 45 * time.Minute, MaxPrice: 1.50}, home, vm, func() time.Time { return t0 }, nil, false)
+		ex.owner = "abcdef012345"
+
+		w := &Work{Rounds: []WorkRound{{ID: "s3-o00029", ExamAt: 0}}}
+		budget := ExaminerBudget{
+			LiveWorkers: 0, MaxWorkers: 2,
+			HourlyNow: 0, MaxHourly: 1.50,
+			SpentToday: 0.80, DailyBudget: 1.00, // $0.20 remaining today
+			CurrentSpentToday: func() (float64, error) { return 0.80, nil },
+		}
+		if err := ex.Reconcile(context.Background(), w, budget); err != nil {
+			t.Fatalf("Reconcile: %v", err)
+		}
+		if len(queriedMinDown) != 2 || queriedMinDown[0] != 1500 || queriedMinDown[1] != 500 {
+			t.Fatalf("expected Vast search to fall through [1500, 500], got %v", queriedMinDown)
+		}
+		if rentedOffer != "2902" {
+			t.Fatalf("expected free-ingress 600 Mbps offer 2902 rented, got %q", rentedOffer)
+		}
+	})
+
+	t.Run("mid_search_spend_growth_requeries_tighter_tier_and_keeps_pre_create_recheck", func(t *testing.T) {
+		spent := 0.80 // $0.20 remaining initially
+		var queriedCaps []float64
+		var rentedOffer string
+		vastSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == "GET" && r.URL.Path == "/api/v1/instances/":
+				_, _ = w.Write([]byte(`{"instances":[],"next_token":null}`))
+			case r.Method == "POST" && r.URL.Path == "/api/v0/bundles/":
+				var q map[string]any
+				_ = json.NewDecoder(r.Body).Decode(&q)
+				minDown := 0
+				if idm, ok := q["inet_down"].(map[string]any); ok {
+					if gte, ok := idm["gte"].(float64); ok {
+						minDown = int(gte)
+					}
+				}
+				if minDown >= 1500 {
+					queriedCaps = append(queriedCaps, spent)
+					// First search sees $0.18 transfer offer ($0.01/GB * 18 GB <= $0.20), then spend grows to $0.90 ($0.10 left).
+					if spent < 0.85 {
+						spent = 0.90
+					}
+					_, _ = w.Write([]byte(`{"offers":[{"id":2911,"gpu_name":"RTX 5090","num_gpus":1,"dph_total":0.60,"dph_base":0.55,"storage_cost":0.45,"inet_down_cost":0.01,"cuda_max_good":13.3,"inet_down":2000,"geolocation":"US"}]}`))
+					return
+				}
+				_, _ = w.Write([]byte(`{"offers":[{"id":2912,"gpu_name":"RTX 5090","num_gpus":1,"dph_total":0.50,"dph_base":0.45,"storage_cost":0.45,"inet_down_cost":0.0,"cuda_max_good":13.3,"inet_down":600,"geolocation":"US"}]}`))
+			case r.Method == "PUT" && strings.HasPrefix(r.URL.Path, "/api/v0/asks/"):
+				rentedOffer = strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v0/asks/"), "/")
+				_, _ = w.Write([]byte(`{"success":true,"new_contract":992912}`))
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer vastSrv.Close()
+
+		home := t.TempDir()
+		vm := newVast(vastSrv.URL, "vast-key")
+		vm.a.sleep = func(context.Context, time.Duration) error { return nil }
+		ex := newExaminer(ExaminerConfig{Addr: "127.0.0.1:0", Timeout: 45 * time.Minute, MaxPrice: 1.50}, home, vm, func() time.Time { return t0 }, nil, false)
+		ex.owner = "abcdef012345"
+
+		w := &Work{Rounds: []WorkRound{{ID: "s3-o00029", ExamAt: 0}}}
+		budget := ExaminerBudget{
+			LiveWorkers: 0, MaxWorkers: 2,
+			HourlyNow: 0, MaxHourly: 1.50,
+			SpentToday: 0.80, DailyBudget: 1.00,
+			CurrentSpentToday: func() (float64, error) { return spent, nil },
+		}
+		if err := ex.Reconcile(context.Background(), w, budget); err != nil {
+			t.Fatalf("Reconcile: %v", err)
+		}
+		if rentedOffer != "2912" {
+			t.Fatalf("after mid-search budget drop to $0.10 remaining, expected requery to rent free-ingress offer 2912, got %q (queried=%v)", rentedOffer, queriedCaps)
+		}
+	})
+
+	t.Run("dry_run_requery_propagates_search_error_instead_of_claiming_budget_exceeded", func(t *testing.T) {
+		calls := 0
+		spent := 0.80
+		vastSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == "GET" && r.URL.Path == "/api/v1/instances/":
+				_, _ = w.Write([]byte(`{"instances":[],"next_token":null}`))
+			case r.Method == "POST" && r.URL.Path == "/api/v0/bundles/":
+				calls++
+				if calls == 1 {
+					spent = 0.90 // shrinks remaining budget below offer 2921's $0.18 transfer
+					_, _ = w.Write([]byte(`{"offers":[{"id":2921,"gpu_name":"RTX 5090","num_gpus":1,"dph_total":0.60,"dph_base":0.55,"storage_cost":0.45,"inet_down_cost":0.01,"cuda_max_good":13.3,"inet_down":2000,"geolocation":"US"}]}`))
+					return
+				}
+				http.Error(w, "vast unavailable", http.StatusServiceUnavailable)
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer vastSrv.Close()
+
+		vm := newVast(vastSrv.URL, "vast-key")
+		vm.a.sleep = func(context.Context, time.Duration) error { return nil }
+		ex := newExaminer(ExaminerConfig{Addr: "127.0.0.1:0", Timeout: 45 * time.Minute, MaxPrice: 1.50}, t.TempDir(), vm, func() time.Time { return t0 }, nil, true)
+		ex.owner = "abcdef012345"
+
+		err := ex.Reconcile(context.Background(), &Work{Rounds: []WorkRound{{ID: "s3-o00029", ExamAt: 0}}}, ExaminerBudget{
+			MaxWorkers: 2, MaxHourly: 1.50, SpentToday: 0.80, DailyBudget: 1.00,
+			CurrentSpentToday: func() (float64, error) { return spent, nil },
+		})
+		if err == nil || !strings.Contains(err.Error(), "searching Vast.ai") {
+			t.Fatalf("expected dry-run requery error propagated, got %v", err)
+		}
+	})
+}

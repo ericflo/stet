@@ -825,6 +825,9 @@ func betterRental(prev, cur *Rental) bool {
 	if prev == nil {
 		return true
 	}
+	if prev.Unconfirmed != cur.Unconfirmed {
+		return prev.Unconfirmed
+	}
 	if !prev.live() && cur.live() {
 		return true
 	}
@@ -1434,6 +1437,13 @@ func (f *Fleet) retire(l *ledger, key string, end time.Time) error {
 // pods not yet retired to spent.jsonl, and unresolved pending worker reservations not already
 // retired to spent.jsonl.
 func (f *Fleet) spent(l *ledger, since time.Time) (float64, error) {
+	return f.spentFor(l, since, nil)
+}
+
+// spentFor computes UTC spend since `since`, conservatively charging any stopped ledger contract
+// whose current provider status could not be confirmed (`unconfirmed[key]`) at its compute rate
+// over the unobserved [StoppedSeen, now] interval without mutating fleet.json on disk.
+func (f *Fleet) spentFor(l *ledger, since time.Time, unconfirmed map[string]bool) (float64, error) {
 	now := f.now()
 	sum, err := f.readSpentSummary()
 	if err != nil {
@@ -1443,7 +1453,7 @@ func (f *Fleet) spent(l *ledger, since time.Time) (float64, error) {
 	for _, r := range sum.records {
 		total += r.dollarsBetween(since, now)
 	}
-	for _, r := range l.Pods {
+	for key, r := range l.Pods {
 		if r == nil {
 			continue
 		}
@@ -1453,6 +1463,9 @@ func (f *Fleet) spent(l *ledger, since time.Time) (float64, error) {
 			}
 		}
 		rc := *r
+		if unconfirmed[key] && rc.Stopped {
+			rc.markLiveAt(now, time.Time{})
+		}
 		rc.End = now
 		total += rc.dollarsBetween(since, now)
 	}
@@ -1481,6 +1494,7 @@ type View struct {
 	PendingRents           []*pendingRent      // unresolved pending worker create reservations
 	OrphanRentals          []*Rental           // fleet ledger contracts whose key is no longer in f.keys
 	UnknownRateKeys        map[string]string   // live contracts / pending reservations with no known positive hourly rate
+	UnconfirmedKeys        map[string]bool     // ledger contracts whose current provider status could not be confirmed (outage/lookup error)
 	MarketKnownIDs         map[string][]string // all non-gone contract IDs listed per market (including unowned on shared accounts)
 	Hourly                 float64             // dollars an hour, every live contract + pending create + active examiner together
 	Today                  float64             // about what has been spent today (UTC), including any active examiner
@@ -1560,7 +1574,7 @@ func (v *View) extraWorkerLiveCount() int {
 	}
 	primary := 0
 	for _, w := range v.Workers {
-		if (w.Rental != nil && w.Rental.live()) || (w.Rental == nil && w.Pending != nil) {
+		if (w.Rental != nil && (w.Rental.live() || w.Rental.Unconfirmed)) || (w.Rental == nil && w.Pending != nil) {
 			primary++
 		}
 	}
@@ -1595,6 +1609,7 @@ func (v *View) removeLiveRental(market, id string) {
 	}
 	v.LiveRentals = out
 	delete(v.UnknownRateKeys, key)
+	delete(v.UnconfirmedKeys, key)
 }
 
 func (f *Fleet) examinerSnapshot() (live int, hourly float64, accrued float64, err error) {
@@ -1766,7 +1781,7 @@ func recordedRental(r *podRecord, status string) Rental {
 	}
 	return Rental{
 		Market: r.market(), ID: r.ID, Name: r.Handle, Host: r.Host, Card: r.GPU,
-		Price: cost, DiskCost: r.DiskCost, DiskCostUnknown: r.DiskCostUnknown, TransferCost: r.TransferCost, PartialRate: r.PartialCost, State: state, Status: status, Created: r.Start, Terminating: r.Terminating,
+		Price: cost, DiskCost: r.DiskCost, DiskCostUnknown: r.DiskCostUnknown, TransferCost: r.TransferCost, PartialRate: r.PartialCost, State: state, Status: status, Created: r.Start, Terminating: r.Terminating, Unconfirmed: true,
 	}
 }
 
@@ -1879,7 +1894,15 @@ func (f *Fleet) look(ctx context.Context) (*View, error) {
 				p.Host = rec.Host
 			}
 		}
-		if p.live() {
+		if p.Unconfirmed {
+			if v.UnconfirmedKeys == nil {
+				v.UnconfirmedKeys = map[string]bool{}
+			}
+			v.UnconfirmedKeys[key] = true
+		}
+		if p.live() || p.Unconfirmed {
+			// When provider listing/lookup could not confirm a stopped contract's current status,
+			// conservatively reserve its slot and running compute rate until status is confirmed.
 			v.LiveRentals = append(v.LiveRentals, p)
 			if validRate(p.Price) {
 				v.Hourly += p.Price
@@ -1931,10 +1954,19 @@ func (f *Fleet) look(ctx context.Context) (*View, error) {
 		// live), keeping every additional contract sharing this handle in ExtraRentals so all
 		// live contracts count toward capacity/spend and stopped duplicates are cleaned up.
 		list := byHandle[k.Handle]
+		rentalRank := func(r *Rental) int {
+			if r.live() && !r.Unconfirmed {
+				return 2
+			}
+			if r.Unconfirmed {
+				return 1
+			}
+			return 0
+		}
 		sort.SliceStable(list, func(i, j int) bool {
-			li, lj := list[i].live(), list[j].live()
-			if li != lj {
-				return li
+			ri, rj := rentalRank(list[i]), rentalRank(list[j])
+			if ri != rj {
+				return ri > rj
 			}
 			if list[i].Terminating != list[j].Terminating {
 				return !list[i].Terminating
@@ -2018,7 +2050,7 @@ func (f *Fleet) look(ctx context.Context) (*View, error) {
 			return &View{Work: work, Ledger: l}, err
 		}
 	}
-	if v.Today, err = f.spent(l, startOfDay(f.now())); err != nil {
+	if v.Today, err = f.spentFor(l, startOfDay(f.now()), v.UnconfirmedKeys); err != nil {
 		return &View{Work: work, Ledger: l}, err
 	}
 	exLive, exHourly, exAccrued, err := f.examinerSnapshot()
@@ -2633,7 +2665,7 @@ func (f *Fleet) currentSpentToday(v *View) (float64, error) {
 		return 0, errors.New("fleet ledger unavailable")
 	}
 	now := f.now()
-	base, err := f.spent(v.Ledger, startOfDay(now))
+	base, err := f.spentFor(v.Ledger, startOfDay(now), v.UnconfirmedKeys)
 	if err != nil {
 		return 0, fmt.Errorf("reading daily spend: %w", err)
 	}
@@ -2936,11 +2968,19 @@ func (f *Fleet) end(ctx context.Context, v *View, endings []Ending) error {
 		}
 		key := ledgerKey(r.Market, r.ID)
 		rec := v.Ledger.Pods[key]
-		preDiskRate := r.DiskCost
-		if rec != nil && rec.stoppedHourlyRate() > preDiskRate {
-			preDiskRate = rec.stoppedHourlyRate()
+		preHourlyRate := 0.0
+		switch {
+		case r.live() || r.Unconfirmed:
+			if validRate(r.Price) {
+				preHourlyRate = r.Price
+			}
+		case r.State == "stopped":
+			preHourlyRate = r.DiskCost
+			if rec != nil && rec.stoppedHourlyRate() > preHourlyRate {
+				preHourlyRate = rec.stoppedHourlyRate()
+			}
 		}
-		unconfirmedStopped := rec != nil && rec.Stopped && (r.Status == "as recorded" || r.Status == "unconfirmed (omitted from listing)")
+		unconfirmedStopped := rec != nil && rec.Stopped && (r.Unconfirmed || r.Status == "as recorded" || r.Status == "unconfirmed (omitted from listing)")
 		if unconfirmedStopped {
 			if lu, ok := m.(rentalLookup); ok {
 				if fresh, exists, lerr := lu.Lookup(ctx, r.ID); lerr == nil && exists && fresh != nil {
@@ -2949,6 +2989,22 @@ func (f *Fleet) end(ctx context.Context, v *View, endings []Ending) error {
 					if fresh.live() {
 						rec.markLiveAt(now, fresh.ResumedAt)
 						unconfirmedStopped = false
+						if !e.Forced && !r.Terminating && !rec.Terminating {
+							r.State = fresh.State
+							r.Unconfirmed = false
+							delete(v.UnconfirmedKeys, key)
+							v.addLiveRental(r)
+							if validRate(fresh.Price) {
+								r.Price = fresh.Price
+								r.PartialRate = fresh.PartialRate
+								if !fresh.PartialRate {
+									delete(v.UnknownRateKeys, key)
+								}
+								v.Hourly = max(0, v.Hourly-preHourlyRate) + fresh.Price
+							}
+							f.say("left %s on %s: provider confirmed it resumed running", handle, marketTitle(r.Market))
+							continue
+						}
 					} else if fresh.State == "stopped" {
 						rec.markStoppedAt(now, fresh.StoppedAt)
 						unconfirmedStopped = false
@@ -2962,13 +3018,8 @@ func (f *Fleet) end(ctx context.Context, v *View, endings []Ending) error {
 			continue
 		}
 		v.removeLiveRental(r.Market, r.ID)
-		switch {
-		case r.live() && validRate(r.Price):
-			v.Hourly = max(0, v.Hourly-r.Price)
-		case r.State == "stopped":
-			if validRate(preDiskRate) {
-				v.Hourly = max(0, v.Hourly-preDiskRate)
-			}
+		if validRate(preHourlyRate) {
+			v.Hourly = max(0, v.Hourly-preHourlyRate)
 		}
 		endAt := f.now()
 		if unconfirmedStopped && rec != nil && rec.Stopped {

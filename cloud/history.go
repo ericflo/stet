@@ -225,7 +225,7 @@ func (rec *lookRecord) seenWork(v *View, p Policy, now time.Time) {
 			rec.Live[wk.Pending.Market]++
 		}
 		for _, ex := range wk.ExtraRentals {
-			if ex != nil && ex.live() {
+			if ex != nil && (ex.live() || ex.Unconfirmed) {
 				rec.Live[ex.Market]++
 			}
 		}

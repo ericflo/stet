@@ -189,8 +189,12 @@ func cmdStatus(ctx context.Context, f *Fleet) error {
 		note := ""
 		if st == "terminating" {
 			note = "  · outstanding termination (run `stet-cloud workers resolve --end`)"
-		} else if st == "starting" || st == "stopped" || st == "quiet" || w.Rental.Up == "no" {
-			note = "  · " + w.Rental.Detail // what its market says of it, while it is not at work
+		} else if st == "unconfirmed" || st == "starting" || st == "stopped" || st == "quiet" || w.Rental.Up == "no" {
+			if msg := w.Rental.Detail; msg != "" {
+				note = "  · " + msg // what its market says of it, while it is not at work
+			} else if w.Rental.Status != "" {
+				note = "  · " + w.Rental.Status
+			}
 		}
 		if w.NoCurators != "" {
 			note += "  · grades only: " + w.NoCurators
@@ -219,6 +223,8 @@ func cmdStatus(ctx context.Context, f *Fleet) error {
 			est := ex.State
 			if ex.Terminating {
 				est = "terminating"
+			} else if ex.Unconfirmed && ex.State == "stopped" {
+				est = "unconfirmed"
 			}
 			fmt.Fprintf(f.out, "  %-14s %-11s %-26s %-9s up %s  · extra contract %s\n",
 				w.Key.Handle, est, ecard, erate, now.Sub(ex.Created).Round(time.Minute), ex.ID)
@@ -244,6 +250,8 @@ func cmdStatus(ctx context.Context, f *Fleet) error {
 		ost := orph.State
 		if orph.Terminating {
 			ost = "terminating"
+		} else if orph.Unconfirmed && orph.State == "stopped" {
+			ost = "unconfirmed"
 		}
 		fmt.Fprintf(f.out, "  %-14s %-11s %-26s %-9s up %s  · unpooled contract %s\n",
 			name, ost, card, orate, now.Sub(orph.Created).Round(time.Minute), orph.ID)
@@ -395,7 +403,7 @@ func tick(ctx context.Context, f *Fleet) (err error) {
 			DailyBudget:   f.o.DailyBudget,
 			AccountingErr: rateErr,
 			CurrentSpentToday: func() (float64, error) {
-				spentBase, serr := f.spent(v.Ledger, startOfDay(f.now()))
+				spentBase, serr := f.spentFor(v.Ledger, startOfDay(f.now()), v.UnconfirmedKeys)
 				if serr != nil {
 					return 0, fmt.Errorf("reading daily spend: %w", serr)
 				}
@@ -415,7 +423,7 @@ func tick(ctx context.Context, f *Fleet) (err error) {
 			f.say("examiner: %v", sErr)
 		} else {
 			v.Hourly = max(0, v.Hourly-v.ExaminerHourly) + exHourly
-			if spentBase, serr := f.spent(v.Ledger, startOfDay(f.now())); serr == nil {
+			if spentBase, serr := f.spentFor(v.Ledger, startOfDay(f.now()), v.UnconfirmedKeys); serr == nil {
 				v.Today = spentBase + exAccrued
 			} else if exLive > 0 {
 				v.Today = max(0, v.Today-v.ExaminerAccrued) + exAccrued
@@ -437,7 +445,7 @@ func tick(ctx context.Context, f *Fleet) (err error) {
 	pol.MaxWorkers = max(0, pol.MaxWorkers-reserved-v.extraWorkerLiveCount())
 	d := pol.decideNext(v.Work, v.Workers, v.Today, now, next)
 	for _, orph := range v.OrphanRentals {
-		if orph != nil && (orph.State == "stopped" || orph.Terminating) {
+		if orph != nil && (orph.Terminating || (orph.State == "stopped" && !orph.Unconfirmed)) {
 			why := "stopped unpooled machine"
 			if orph.Terminating {
 				why = "outstanding termination on unpooled machine"
@@ -463,8 +471,10 @@ func tick(ctx context.Context, f *Fleet) (err error) {
 					continue
 				}
 				switch {
-				case r.live() && validRate(r.Price):
-					projectedHourly = max(0, projectedHourly-r.Price)
+				case r.live() || r.Unconfirmed:
+					if validRate(r.Price) {
+						projectedHourly = max(0, projectedHourly-r.Price)
+					}
 				case r.State == "stopped":
 					diskRate := r.DiskCost
 					if recPod := v.Ledger.Pods[ledgerKey(r.Market, r.ID)]; recPod != nil && recPod.stoppedHourlyRate() > diskRate {
@@ -612,6 +622,7 @@ func reconcileExaminerOnce(ctx context.Context, f *Fleet) error {
 	}
 	l, lerr := f.readLedger()
 	today, liveWorkers, hourlyWorkers := 0.0, 0, 0.0
+	var unconfirmed map[string]bool
 	if lerr != nil {
 		if acctErr == nil {
 			acctErr = fmt.Errorf("reading fleet ledger: %w", lerr)
@@ -648,13 +659,29 @@ func reconcileExaminerOnce(ctx context.Context, f *Fleet) error {
 		for _, k := range f.keys {
 			knownHandles[k.Handle] = true
 		}
+		unconfirmed = map[string]bool{}
+		confirmedListed := map[string]bool{}
+		for i := range rentals {
+			key := ledgerKey(rentals[i].Market, rentals[i].ID)
+			if rentals[i].Unconfirmed {
+				unconfirmed[key] = true
+			} else {
+				confirmedListed[key] = true
+			}
+		}
+		for key := range confirmedListed {
+			delete(unconfirmed, key)
+		}
 		var unknownRates []string
 		for key, p := range l.Pods {
 			if p == nil || spentSum.hasContract(p.market(), p.ID) {
 				continue
 			}
 			seen[key] = true
-			if p.Stopped {
+			if !confirmedListed[key] {
+				unconfirmed[key] = true
+			}
+			if p.Stopped && !unconfirmed[key] {
 				if rate := p.stoppedHourlyRate(); rate > 0 {
 					hourlyWorkers += rate
 				} else if p.DiskCostUnknown {
@@ -677,7 +704,7 @@ func reconcileExaminerOnce(ctx context.Context, f *Fleet) error {
 				continue
 			}
 			if h := owner(l, r); h != "" && knownHandles[h] {
-				if r.live() {
+				if r.live() || r.Unconfirmed {
 					seen[key] = true
 					liveWorkers++
 					if validRate(r.Price) {
@@ -711,7 +738,7 @@ func reconcileExaminerOnce(ctx context.Context, f *Fleet) error {
 			sort.Strings(unknownRates)
 			acctErr = fmt.Errorf("live hourly spend is incomplete (%s has no reported hourly rate)", strings.Join(unknownRates, ", "))
 		}
-		t, serr := f.spent(l, startOfDay(f.now()))
+		t, serr := f.spentFor(l, startOfDay(f.now()), unconfirmed)
 		if serr != nil {
 			if acctErr == nil {
 				acctErr = fmt.Errorf("reading daily spend: %w", serr)
@@ -735,7 +762,7 @@ func reconcileExaminerOnce(ctx context.Context, f *Fleet) error {
 	}
 	if l != nil && acctErr == nil {
 		budget.CurrentSpentToday = func() (float64, error) {
-			spentBase, serr := f.spent(l, startOfDay(f.now()))
+			spentBase, serr := f.spentFor(l, startOfDay(f.now()), unconfirmed)
 			if serr != nil {
 				return 0, fmt.Errorf("reading daily spend: %w", serr)
 			}
@@ -887,21 +914,27 @@ func cmdDown(ctx context.Context, f *Fleet, force bool, handles []string) error 
 				if !force {
 					f.say("left %s, which is %s: it stops by itself once there is nothing more for it. --force ends it now, and hands its job back", w.Key.Handle, st)
 				} else {
-					endings = append(endings, Ending{Worker: w, Rental: w.Rental, Why: "ended by hand, in the middle of a job; it hands the job back"})
+					endings = append(endings, Ending{Worker: w, Rental: w.Rental, Why: "ended by hand, in the middle of a job; it hands the job back", Forced: true})
 				}
+			} else if st == "unconfirmed" && !force {
+				f.say("left %s, whose provider state is unconfirmed (%s): --force ends it now", w.Key.Handle, w.Rental.Status)
 			} else {
-				endings = append(endings, Ending{Worker: w, Rental: w.Rental, Why: "ended by hand"})
+				endings = append(endings, Ending{Worker: w, Rental: w.Rental, Why: "ended by hand", Forced: force})
 			}
 		}
 		for _, ex := range w.ExtraRentals {
 			if ex == nil {
 				continue
 			}
-			if ex.live() && !ex.Terminating && !force && (st == "grading" || st == "running" || st == "training") {
-				f.say("left extra contract %s on %s while key is %s (--force ends it now)", ex.ID, w.Key.Handle, st)
+			if (ex.live() || ex.Unconfirmed) && !ex.Terminating && !force && (ex.Unconfirmed || st == "grading" || st == "running" || st == "training") {
+				whySt := st
+				if ex.Unconfirmed {
+					whySt = "unconfirmed"
+				}
+				f.say("left extra contract %s on %s while %s (--force ends it now)", ex.ID, w.Key.Handle, whySt)
 				continue
 			}
-			endings = append(endings, Ending{Worker: w, Rental: ex, Why: "ended by hand"})
+			endings = append(endings, Ending{Worker: w, Rental: ex, Why: "ended by hand", Forced: force})
 		}
 	}
 	for _, orph := range v.OrphanRentals {
@@ -915,15 +948,19 @@ func cmdDown(ctx context.Context, f *Fleet, force bool, handles []string) error 
 			found[orph.Name] = true
 		}
 		found[orph.ID] = true
-		if orph.live() && !orph.Terminating && !force {
+		if (orph.live() || orph.Unconfirmed) && !orph.Terminating && !force {
 			name := orph.Name
 			if name == "" {
 				name = orph.ID
 			}
-			f.say("left unpooled machine %s (%s on %s), which is still %s: --force ends it now", name, orph.ID, marketTitle(orph.Market), orph.State)
+			stateDesc := orph.State
+			if orph.Unconfirmed {
+				stateDesc = "unconfirmed"
+			}
+			f.say("left unpooled machine %s (%s on %s), which is still %s: --force ends it now", name, orph.ID, marketTitle(orph.Market), stateDesc)
 			continue
 		}
-		endings = append(endings, Ending{Rental: orph, Why: "ended by hand"})
+		endings = append(endings, Ending{Rental: orph, Why: "ended by hand", Forced: force})
 	}
 	for h := range want {
 		if !found[h] {

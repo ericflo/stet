@@ -287,6 +287,17 @@ func (w *Worker) state(now time.Time, p Policy) string {
 		return "free"
 	case w.Rental.Terminating:
 		return "terminating"
+	case w.Rental.Unconfirmed && w.Rental.State == "stopped":
+		if w.Machine != nil && w.Machine.Busy == "grade" {
+			return "grading"
+		}
+		if w.Machine != nil && w.Machine.Busy == "farm" {
+			return "training"
+		}
+		if w.Machine != nil && w.Machine.Busy != "" {
+			return "running"
+		}
+		return "unconfirmed"
 	case w.Rental.State == "stopped":
 		return "stopped"
 	case w.Machine != nil && w.Machine.Busy == "grade":
@@ -333,6 +344,7 @@ type Ending struct {
 	Worker *Worker
 	Why    string
 	Failed bool
+	Forced bool
 	Rental *Rental
 }
 
@@ -458,7 +470,7 @@ func (p Policy) decideNext(w *Work, workers []*Worker, spentToday float64, now t
 	var idle, waitingIdle []*Worker
 	for _, wk := range workers {
 		for _, extra := range wk.ExtraRentals {
-			if extra != nil && (extra.State == "stopped" || extra.Terminating) {
+			if extra != nil && (extra.Terminating || (extra.State == "stopped" && !extra.Unconfirmed)) {
 				why := "stopped duplicate machine on the same key"
 				if extra.Terminating {
 					why = "outstanding termination on duplicate machine"
@@ -475,7 +487,7 @@ func (p Policy) decideNext(w *Work, workers []*Worker, spentToday float64, now t
 			if wk.Machine != nil && wk.Machine.Busy != "" {
 				d.Release = append(d.Release, wk)
 			}
-		case "pending":
+		case "pending", "unconfirmed":
 			d.Live++
 		case "terminating":
 			d.End = append(d.End, Ending{Worker: wk, Rental: wk.Rental, Why: "outstanding termination"})

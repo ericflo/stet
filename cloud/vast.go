@@ -556,6 +556,14 @@ func examinerOfferTransferDollars(inetDownCost float64) float64 {
 // supply is tight. Metered ingress charges for the 18 GB model pull are included in offer
 // filtering, ranking, and daily spend accounting.
 func (m *vastMarket) ExaminerOffers(ctx context.Context, maxPrice float64) ([]ExaminerOffer, error) {
+	return m.ExaminerOffersWithTransferCap(ctx, maxPrice, -1)
+}
+
+// ExaminerOffersWithTransferCap searches Vast.ai across bandwidth tiers (1500 -> 500 -> 200 Mbps)
+// and enforces both the effective hourly ceiling (price + transferDollars <= maxPrice) and an
+// optional remaining daily cold-start transfer allowance (maxTransfer >= 0) so slower affordable
+// or free-ingress tiers are queried when every faster-tier host exceeds the remaining daily budget.
+func (m *vastMarket) ExaminerOffersWithTransferCap(ctx context.Context, maxPrice, maxTransfer float64) ([]ExaminerOffer, error) {
 	for _, minDown := range []int{1500, 500, 200} {
 		q := map[string]any{
 			"type": "ondemand", "limit": 2000, "order": [][]string{{"dph_total", "asc"}},
@@ -585,6 +593,9 @@ func (m *vastMarket) ExaminerOffers(ctx context.Context, maxPrice float64) ([]Ex
 			}
 			transferDollars := examinerOfferTransferDollars(o.InetDownCost)
 			if maxPrice > 0 && price+transferDollars > maxPrice+1e-9 {
+				continue
+			}
+			if maxTransfer >= 0 && transferDollars > maxTransfer+1e-9 {
 				continue
 			}
 			offers = append(offers, ExaminerOffer{

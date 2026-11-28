@@ -77,12 +77,22 @@ if [ -n "${STET_PROBE:-}${STET_PROBE_0:-}" ]; then is_probe=1; fi
 is_curator=0
 if [ "${STET_WORKER_EDITS:-0}" = "1" ] || [ "$is_probe" = "1" ]; then is_curator=1; fi
 
+compiler_ready() {
+  command -v gcc >/dev/null 2>&1 && command -v g++ >/dev/null 2>&1 || return 1
+  probe_so="$TMPDIR/stet-cc-probe.$$.so"
+  printf '#include <stdio.h>\nint stet_c_probe(void) { return 0; }\n' | gcc -x c -shared -fPIC -o "$probe_so" - >/dev/null 2>&1 || { rm -f "$probe_so" 2>/dev/null || true; return 1; }
+  printf '#include <stdio.h>\n#include <vector>\nint stet_cpp_probe(void) { std::vector<int> v; return (int)v.size(); }\n' | g++ -x c++ -shared -fPIC -o "$probe_so" - >/dev/null 2>&1
+  rc=$?
+  rm -f "$probe_so" 2>/dev/null || true
+  return "$rc"
+}
+
 pkgs=""
-need_gcc=0
+need_compiler=0
 command -v curl >/dev/null 2>&1 || pkgs="curl ca-certificates"
-if [ "$is_curator" = "1" ] && [ "$(id -u)" = "0" ] && command -v apt-get >/dev/null 2>&1 && ! command -v gcc >/dev/null 2>&1; then
+if [ "$is_curator" = "1" ] && [ "$(id -u)" = "0" ] && command -v apt-get >/dev/null 2>&1 && ! compiler_ready; then
   pkgs="$pkgs gcc g++ libc6-dev"
-  need_gcc=1
+  need_compiler=1
 fi
 [ -n "${PUBLIC_KEY:-}" ] && pkgs="$pkgs openssh-server"
 if { [ "${STET_WORKER_SANDBOX:-container}" = bwrap ] || [ "$is_probe" = "1" ]; } && ! command -v bwrap >/dev/null 2>&1; then
@@ -96,8 +106,10 @@ if [ -n "$pkgs" ]; then
   done
 fi
 command -v curl >/dev/null 2>&1 || end_pod "curl could not be installed"
-if [ "$need_gcc" = "1" ] && ! command -v gcc >/dev/null 2>&1; then
-  end_pod "gcc could not be installed"
+if [ "${STET_WORKER_EDITS:-0}" = "1" ] && ! compiler_ready; then
+  end_pod "C/C++ compiler toolchain (gcc/g++/libc6-dev) is missing or could not be installed"
+elif [ "$need_compiler" = "1" ] && ! compiler_ready; then
+  end_pod "C/C++ compiler toolchain (gcc/g++/libc6-dev) could not be installed"
 fi
 
 # Salad does not say its hosts' drivers. One older than the season's PyTorch needs (580, for

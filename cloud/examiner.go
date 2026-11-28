@@ -157,6 +157,13 @@ type ExaminerProvider interface {
 	EndExaminer(ctx context.Context, id string) error
 }
 
+// examinerOfferSearcher is an optional ExaminerProvider extension that accepts an upper bound on
+// one-time cold-start transfer charges (maxTransfer < 0 means unlimited) so multi-tier searches
+// fall through to slower affordable/free-ingress tiers when faster tiers exceed remaining daily budget.
+type examinerOfferSearcher interface {
+	ExaminerOffersWithTransferCap(ctx context.Context, maxPrice, maxTransfer float64) ([]ExaminerOffer, error)
+}
+
 // examinerState is persisted to <home>/examiner.json (0600) so restarts never lose the random
 // API key, pinned peer certificate, pre-rental reservation, unrecorded terminal spend charges,
 // or leak an orphaned 5090 on Vast.ai.
@@ -1431,10 +1438,13 @@ func (e *Examiner) blockedHourly() float64 {
 	return e.blockedHourlyNeed
 }
 
-func cheapestValidExaminerOffer(offers []ExaminerOffer, maxPrice float64) float64 {
+func cheapestValidExaminerOffer(offers []ExaminerOffer, maxPrice, maxTransfer float64) float64 {
 	best := 0.0
 	for _, off := range offers {
 		if !validRate(off.Price) {
+			continue
+		}
+		if maxTransfer >= 0 && nonNegMax(off.TransferDollars, 0) > maxTransfer+1e-9 {
 			continue
 		}
 		eff := off.effectiveHourly()
@@ -2497,6 +2507,20 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 		e.say("not renting examiner GPU for %s: about $%.2f spent today, and the daily budget is $%.2f", needRound, spentToday, budget.DailyBudget)
 		return nil
 	}
+	transferCapFor := func(spent float64) float64 {
+		if budget.DailyBudget <= 0 {
+			return -1
+		}
+		return max(0, budget.DailyBudget-spent)
+	}
+	_, canCapTransfer := e.prov.(examinerOfferSearcher)
+	searchOffers := func(maxPrice, maxTransfer float64) ([]ExaminerOffer, error) {
+		if s, ok := e.prov.(examinerOfferSearcher); ok {
+			return s.ExaminerOffersWithTransferCap(ctx, maxPrice, maxTransfer)
+		}
+		return e.prov.ExaminerOffers(ctx, maxPrice)
+	}
+	maxTransfer := transferCapFor(spentToday)
 	maxBudget := budget.MaxHourly
 	if e.cfg.MaxPrice > 0 && e.cfg.MaxPrice < maxBudget {
 		maxBudget = e.cfg.MaxPrice
@@ -2505,8 +2529,8 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 	if budget.MaxHourly <= 0 || headroom <= 1e-9 {
 		e.say("not renting examiner GPU for %s: live hourly spend $%.2f/h leaves no room under --max-hourly $%.2f/h", needRound, budget.HourlyNow, budget.MaxHourly)
 		if budget.MaxHourly > 0 && maxBudget > 0 {
-			if probe, perr := e.prov.ExaminerOffers(ctx, maxBudget); perr == nil {
-				e.setBlockedHourly(cheapestValidExaminerOffer(probe, maxBudget))
+			if probe, perr := searchOffers(maxBudget, maxTransfer); perr == nil {
+				e.setBlockedHourly(cheapestValidExaminerOffer(probe, maxBudget, maxTransfer))
 			}
 		}
 		return nil
@@ -2516,14 +2540,35 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 		effMaxPrice = headroom
 	}
 
-	offers, err := e.prov.ExaminerOffers(ctx, effMaxPrice)
+	filterFitting := func(raw []ExaminerOffer) []ExaminerOffer {
+		var out []ExaminerOffer
+		for _, off := range raw {
+			if !validRate(off.Price) {
+				continue
+			}
+			eff := off.effectiveHourly()
+			if budget.HourlyNow+eff <= budget.MaxHourly+1e-9 && (e.cfg.MaxPrice <= 0 || eff <= e.cfg.MaxPrice+1e-9) {
+				out = append(out, off)
+			}
+		}
+		sort.SliceStable(out, func(i, j int) bool {
+			ei, ej := out[i].effectiveHourly(), out[j].effectiveHourly()
+			if ei != ej {
+				return ei < ej
+			}
+			return out[i].Price < out[j].Price
+		})
+		return out
+	}
+
+	offers, err := searchOffers(effMaxPrice, maxTransfer)
 	if err != nil {
 		return fmt.Errorf("searching Vast.ai RTX 5090 offers for examiner: %w", err)
 	}
 	if len(offers) == 0 {
 		if effMaxPrice < maxBudget-1e-9 {
-			if probe, perr := e.prov.ExaminerOffers(ctx, maxBudget); perr == nil {
-				if need := cheapestValidExaminerOffer(probe, maxBudget); need > 0 {
+			if probe, perr := searchOffers(maxBudget, maxTransfer); perr == nil {
+				if need := cheapestValidExaminerOffer(probe, maxBudget, maxTransfer); need > 0 {
 					e.setBlockedHourly(need)
 					e.say("not renting examiner GPU for %s: cheapest 1x RTX 5090 ($%.2f/h) plus $%.2f/h live exceeds --max-hourly $%.2f/h",
 						needRound, need, budget.HourlyNow, budget.MaxHourly)
@@ -2534,28 +2579,12 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 		e.say("Vast.ai has no 1x RTX 5090 free for %s examiner under $%.2f/h (headroom $%.2f/h); retrying on next tick", needRound, effMaxPrice, headroom)
 		return nil
 	}
-	var fitting []ExaminerOffer
-	for _, off := range offers {
-		if !validRate(off.Price) {
-			continue
-		}
-		eff := off.effectiveHourly()
-		if budget.HourlyNow+eff <= budget.MaxHourly+1e-9 && (e.cfg.MaxPrice <= 0 || eff <= e.cfg.MaxPrice+1e-9) {
-			fitting = append(fitting, off)
-		}
-	}
-	sort.SliceStable(fitting, func(i, j int) bool {
-		ei, ej := fitting[i].effectiveHourly(), fitting[j].effectiveHourly()
-		if ei != ej {
-			return ei < ej
-		}
-		return fitting[i].Price < fitting[j].Price
-	})
+	fitting := filterFitting(offers)
 	if len(fitting) == 0 {
-		need := cheapestValidExaminerOffer(offers, maxBudget)
+		need := cheapestValidExaminerOffer(offers, maxBudget, maxTransfer)
 		if need == 0 && effMaxPrice < maxBudget-1e-9 {
-			if probe, perr := e.prov.ExaminerOffers(ctx, maxBudget); perr == nil {
-				need = cheapestValidExaminerOffer(probe, maxBudget)
+			if probe, perr := searchOffers(maxBudget, maxTransfer); perr == nil {
+				need = cheapestValidExaminerOffer(probe, maxBudget, maxTransfer)
 			}
 		}
 		e.setBlockedHourly(need)
@@ -2580,15 +2609,40 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 			e.say("not renting examiner GPU for %s: about $%.2f spent today, and the daily budget is $%.2f", needRound, spentNow, budget.DailyBudget)
 			return nil
 		}
-		for _, off := range fitting {
-			transfer := nonNegMax(off.TransferDollars, 0)
-			if budget.DailyBudget > 0 && transfer > 0 && spentNow+transfer > budget.DailyBudget+1e-9 {
-				continue
+		findDryRun := func(list []ExaminerOffer) (ExaminerOffer, bool) {
+			for _, off := range list {
+				transfer := nonNegMax(off.TransferDollars, 0)
+				if budget.DailyBudget > 0 && transfer > 0 && spentNow+transfer > budget.DailyBudget+1e-9 {
+					continue
+				}
+				return off, true
 			}
+			return ExaminerOffer{}, false
+		}
+		chosen, ok := findDryRun(fitting)
+		if !ok && canCapTransfer && budget.DailyBudget > 0 {
+			if tighter := transferCapFor(spentNow); tighter < maxTransfer-1e-9 {
+				more, merr := searchOffers(effMaxPrice, tighter)
+				if merr != nil {
+					return fmt.Errorf("searching Vast.ai RTX 5090 offers for examiner: %w", merr)
+				}
+				spentNow, serr = currentSpentToday(e.now())
+				if serr != nil {
+					return serr
+				}
+				if spentNow >= budget.DailyBudget {
+					e.say("not renting examiner GPU for %s: about $%.2f spent today, and the daily budget is $%.2f", needRound, spentNow, budget.DailyBudget)
+					return nil
+				}
+				chosen, ok = findDryRun(filterFitting(more))
+			}
+		}
+		if ok {
+			transfer := nonNegMax(chosen.TransferDollars, 0)
 			if transfer > 0 {
-				e.say("would rent examiner GPU on Vast.ai for %s: %s at $%.2f/h + $%.2f transfer (offer %s)", needRound, off.Card, off.Price, transfer, off.ID)
+				e.say("would rent examiner GPU on Vast.ai for %s: %s at $%.2f/h + $%.2f transfer (offer %s)", needRound, chosen.Card, chosen.Price, transfer, chosen.ID)
 			} else {
-				e.say("would rent examiner GPU on Vast.ai for %s: %s at $%.2f/h (offer %s)", needRound, off.Card, off.Price, off.ID)
+				e.say("would rent examiner GPU on Vast.ai for %s: %s at $%.2f/h (offer %s)", needRound, chosen.Card, chosen.Price, chosen.ID)
 			}
 			return nil
 		}
@@ -2603,122 +2657,154 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 	ttlSeconds := max(60, int(e.cfg.Timeout.Seconds()))
 	tried := 0
 	skippedTransferDaily := 0
-	for _, off := range fitting {
-		attemptNow := e.now()
-		spentNow, serr := currentSpentToday(attemptNow)
-		if serr != nil {
-			return serr
-		}
-		if budget.DailyBudget > 0 && spentNow >= budget.DailyBudget {
-			e.say("not renting examiner GPU for %s: about $%.2f spent today, and the daily budget is $%.2f", needRound, spentNow, budget.DailyBudget)
+	triedIDs := map[string]bool{}
+	for searchPass := 0; searchPass < 2; searchPass++ {
+		skippedThisPass := 0
+		for _, off := range fitting {
+			if triedIDs[off.ID] {
+				continue
+			}
+			attemptNow := e.now()
+			spentNow, serr := currentSpentToday(attemptNow)
+			if serr != nil {
+				return serr
+			}
+			if budget.DailyBudget > 0 && spentNow >= budget.DailyBudget {
+				e.say("not renting examiner GPU for %s: about $%.2f spent today, and the daily budget is $%.2f", needRound, spentNow, budget.DailyBudget)
+				return nil
+			}
+			transfer := nonNegMax(off.TransferDollars, 0)
+			if budget.DailyBudget > 0 && transfer > 0 && spentNow+transfer > budget.DailyBudget+1e-9 {
+				skippedTransferDaily++
+				skippedThisPass++
+				continue
+			}
+			certPEM, keyPEM, err := generateExaminerCert(attemptNow, e.cfg.Timeout)
+			if err != nil {
+				return fmt.Errorf("generating examiner TLS certificate: %w", err)
+			}
+			expireAt := attemptNow.Add(time.Duration(ttlSeconds) * time.Second).Unix()
+			triedIDs[off.ID] = true
+			tried++
+			e.mu.RLock()
+			pendingCopy := append([]podRecord(nil), e.state.PendingSpends...)
+			e.mu.RUnlock()
+			reserved := examinerState{
+				PendingRent:     true,
+				ReservedLabel:   label,
+				RoundID:         needRound,
+				APIKey:          apiKey,
+				CertPEM:         string(certPEM),
+				Price:           off.Price,
+				DiskCost:        off.DiskCost,
+				TransferDollars: transfer,
+				Created:         attemptNow,
+				PendingSpends:   pendingCopy,
+			}
+			if err := e.writeStateFile(&reserved); err != nil {
+				return fmt.Errorf("saving pre-rental examiner.json: %w", err)
+			}
+			e.mu.Lock()
+			oldTr := e.proxyTr
+			reserved.PendingSpends = append([]podRecord(nil), e.state.PendingSpends...)
+			e.state = reserved
+			e.ready = false
+			e.proxy = nil
+			e.proxyTr = nil
+			e.upstream = ""
+			e.mu.Unlock()
+			if oldTr != nil {
+				oldTr.CloseIdleConnections()
+			}
+			id, rerr := e.prov.RentExaminer(ctx, off.ID, ExaminerLaunch{
+				Label:      label,
+				Image:      e.cfg.Image,
+				Model:      e.cfg.Model,
+				Revision:   e.cfg.Revision,
+				APIKey:     apiKey,
+				CertPEM:    certPEM,
+				KeyPEM:     keyPEM,
+				TTLSeconds: ttlSeconds,
+				ExpireAt:   expireAt,
+				HFToken:    e.hfToken,
+				DiskGB:     examinerDiskGB,
+			})
+			if errors.Is(rerr, errNoRoom) {
+				// Offer was definitively unavailable; clear the failed reservation immediately so
+				// subsequent offer attempts do not count a phantom PendingRent against daily spend.
+				e.clearState()
+				continue
+			}
+			if errors.Is(rerr, errRentRejected) || errors.Is(rerr, errRentNotSent) {
+				// Provider explicitly refused to create an instance (4xx / explicit success=false) OR
+				// transport proved the create request never reached the provider (e.g. dial
+				// ECONNREFUSED); clear the reservation immediately so future examiners are not blocked.
+				e.clearState()
+				return fmt.Errorf("renting examiner GPU on Vast.ai: %w", rerr)
+			}
+			if rerr != nil {
+				// Keep PendingRent intact on ambiguous/transient errors (e.g. network timeout or 5xx
+				// where Vast may still have created the VM): separate CLI processes continue seeing
+				// the reserved slot, and subsequent Reconcile polls hold the reservation across stale
+				// listings until the provider confirms its outcome (the VM appears and is adopted/ended).
+				return fmt.Errorf("renting examiner GPU on Vast.ai: %w", rerr)
+			}
+			st := examinerState{
+				InstanceID:      id,
+				RoundID:         needRound,
+				APIKey:          apiKey,
+				CertPEM:         string(certPEM),
+				Price:           off.Price,
+				DiskCost:        off.DiskCost,
+				TransferDollars: transfer,
+				Created:         attemptNow,
+			}
+			e.mu.Lock()
+			st.PendingSpends = append([]podRecord(nil), e.state.PendingSpends...)
+			st.Unresolved = append([]ExaminerInstance(nil), e.state.Unresolved...)
+			e.state = st
+			e.mu.Unlock()
+			if err := e.persistState(&st); err != nil {
+				e.say("could not save examiner.json after renting %s (%v); unwinding rental", id, err)
+				if endErr := e.prov.EndExaminer(ctx, id); endErr == nil {
+					_ = e.recordEnded(ExaminerInstance{ID: id, Label: label, Price: off.Price, TransferDollars: transfer, Created: attemptNow}, attemptNow, off.Price, needRound, "unwound after examiner.json save failure")
+					e.clearState()
+					return fmt.Errorf("saving examiner.json after renting %s (unwound rental): %w", id, err)
+				} else {
+					e.setUnresolved([]ExaminerInstance{{ID: id, Label: label, State: "starting", Price: off.Price, DiskCost: off.DiskCost, TransferDollars: transfer, Created: attemptNow}})
+					return fmt.Errorf("saving examiner.json after renting %s (unwind failed: %v): %w", id, endErr, err)
+				}
+			}
+			if transfer > 0 {
+				e.say("rented examiner GPU on Vast.ai for %s: %s, $%.2f/h + $%.2f transfer (machine %s); warming %s (TLS pinned, TTL %s)", needRound, off.Card, off.Price, transfer, id, e.cfg.Model, e.cfg.Timeout)
+			} else {
+				e.say("rented examiner GPU on Vast.ai for %s: %s, $%.2f/h (machine %s); warming %s (TLS pinned, TTL %s)", needRound, off.Card, off.Price, id, e.cfg.Model, e.cfg.Timeout)
+			}
 			return nil
 		}
-		transfer := nonNegMax(off.TransferDollars, 0)
-		if budget.DailyBudget > 0 && transfer > 0 && spentNow+transfer > budget.DailyBudget+1e-9 {
-			skippedTransferDaily++
-			continue
-		}
-		certPEM, keyPEM, err := generateExaminerCert(attemptNow, e.cfg.Timeout)
-		if err != nil {
-			return fmt.Errorf("generating examiner TLS certificate: %w", err)
-		}
-		expireAt := attemptNow.Add(time.Duration(ttlSeconds) * time.Second).Unix()
-		tried++
-		e.mu.RLock()
-		pendingCopy := append([]podRecord(nil), e.state.PendingSpends...)
-		e.mu.RUnlock()
-		reserved := examinerState{
-			PendingRent:     true,
-			ReservedLabel:   label,
-			RoundID:         needRound,
-			APIKey:          apiKey,
-			CertPEM:         string(certPEM),
-			Price:           off.Price,
-			DiskCost:        off.DiskCost,
-			TransferDollars: transfer,
-			Created:         attemptNow,
-			PendingSpends:   pendingCopy,
-		}
-		if err := e.writeStateFile(&reserved); err != nil {
-			return fmt.Errorf("saving pre-rental examiner.json: %w", err)
-		}
-		e.mu.Lock()
-		oldTr := e.proxyTr
-		reserved.PendingSpends = append([]podRecord(nil), e.state.PendingSpends...)
-		e.state = reserved
-		e.ready = false
-		e.proxy = nil
-		e.proxyTr = nil
-		e.upstream = ""
-		e.mu.Unlock()
-		if oldTr != nil {
-			oldTr.CloseIdleConnections()
-		}
-		id, rerr := e.prov.RentExaminer(ctx, off.ID, ExaminerLaunch{
-			Label:      label,
-			Image:      e.cfg.Image,
-			Model:      e.cfg.Model,
-			Revision:   e.cfg.Revision,
-			APIKey:     apiKey,
-			CertPEM:    certPEM,
-			KeyPEM:     keyPEM,
-			TTLSeconds: ttlSeconds,
-			ExpireAt:   expireAt,
-			HFToken:    e.hfToken,
-			DiskGB:     examinerDiskGB,
-		})
-		if errors.Is(rerr, errNoRoom) {
-			// Offer was definitively unavailable; clear the failed reservation immediately so
-			// subsequent offer attempts do not count a phantom PendingRent against daily spend.
-			e.clearState()
-			continue
-		}
-		if errors.Is(rerr, errRentRejected) || errors.Is(rerr, errRentNotSent) {
-			// Provider explicitly refused to create an instance (4xx / explicit success=false) OR
-			// transport proved the create request never reached the provider (e.g. dial
-			// ECONNREFUSED); clear the reservation immediately so future examiners are not blocked.
-			e.clearState()
-			return fmt.Errorf("renting examiner GPU on Vast.ai: %w", rerr)
-		}
-		if rerr != nil {
-			// Keep PendingRent intact on ambiguous/transient errors (e.g. network timeout or 5xx
-			// where Vast may still have created the VM): separate CLI processes continue seeing
-			// the reserved slot, and subsequent Reconcile polls hold the reservation across stale
-			// listings until the provider confirms its outcome (the VM appears and is adopted/ended).
-			return fmt.Errorf("renting examiner GPU on Vast.ai: %w", rerr)
-		}
-		st := examinerState{
-			InstanceID:      id,
-			RoundID:         needRound,
-			APIKey:          apiKey,
-			CertPEM:         string(certPEM),
-			Price:           off.Price,
-			DiskCost:        off.DiskCost,
-			TransferDollars: transfer,
-			Created:         attemptNow,
-		}
-		e.mu.Lock()
-		st.PendingSpends = append([]podRecord(nil), e.state.PendingSpends...)
-		st.Unresolved = append([]ExaminerInstance(nil), e.state.Unresolved...)
-		e.state = st
-		e.mu.Unlock()
-		if err := e.persistState(&st); err != nil {
-			e.say("could not save examiner.json after renting %s (%v); unwinding rental", id, err)
-			if endErr := e.prov.EndExaminer(ctx, id); endErr == nil {
-				_ = e.recordEnded(ExaminerInstance{ID: id, Label: label, Price: off.Price, TransferDollars: transfer, Created: attemptNow}, attemptNow, off.Price, needRound, "unwound after examiner.json save failure")
-				e.clearState()
-				return fmt.Errorf("saving examiner.json after renting %s (unwound rental): %w", id, err)
-			} else {
-				e.setUnresolved([]ExaminerInstance{{ID: id, Label: label, State: "starting", Price: off.Price, DiskCost: off.DiskCost, TransferDollars: transfer, Created: attemptNow}})
-				return fmt.Errorf("saving examiner.json after renting %s (unwind failed: %v): %w", id, endErr, err)
+		if searchPass == 0 && canCapTransfer && skippedThisPass > 0 && budget.DailyBudget > 0 {
+			// If spend accrued during the search/retries shrank the remaining daily budget and
+			// eliminated the returned tier on transfer cost, re-query with the tighter transfer
+			// cap so slower free-ingress tiers can still be tried on this tick.
+			freshSpent, serr := currentSpentToday(e.now())
+			if serr != nil {
+				return serr
+			}
+			if freshSpent < budget.DailyBudget {
+				if tighter := transferCapFor(freshSpent); tighter < maxTransfer-1e-9 {
+					maxTransfer = tighter
+					more, merr := searchOffers(effMaxPrice, maxTransfer)
+					if merr != nil {
+						return fmt.Errorf("searching Vast.ai RTX 5090 offers for examiner: %w", merr)
+					}
+					if nextFitting := filterFitting(more); len(nextFitting) > 0 {
+						fitting = nextFitting
+						continue
+					}
+				}
 			}
 		}
-		if transfer > 0 {
-			e.say("rented examiner GPU on Vast.ai for %s: %s, $%.2f/h + $%.2f transfer (machine %s); warming %s (TLS pinned, TTL %s)", needRound, off.Card, off.Price, transfer, id, e.cfg.Model, e.cfg.Timeout)
-		} else {
-			e.say("rented examiner GPU on Vast.ai for %s: %s, $%.2f/h (machine %s); warming %s (TLS pinned, TTL %s)", needRound, off.Card, off.Price, id, e.cfg.Model, e.cfg.Timeout)
-		}
-		return nil
+		break
 	}
 	e.clearState()
 	if tried == 0 && skippedTransferDaily > 0 {
