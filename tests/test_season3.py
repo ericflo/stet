@@ -6255,3 +6255,94 @@ def test_review32_verify_loop_uses_claimed_job_scale_and_deferred_sit_scale(monk
         raise AssertionError("expected ValueError on conflicting job/round scale")
     except ValueError as err:
         assert "does not match" in str(err)
+
+
+def test_review33_practice_synthesize_explicit_truthy_parsing(monkeypatch, tmp_path):
+    """Review 33 P3 #7: STET_SYNTHESIZE_PRACTICE=0 / false / no / off / empty MUST NOT enable
+    fresh synthesis even when STET_EXAMINER_LLM_URL is configured; documented opt-in spellings do."""
+    from stet import data
+    from stet.spec import practice_round
+
+    s3 = load_season("s3")
+    rnd = practice_round(s3, "r33-synth-flag")
+    monkeypatch.setenv("STET_EXAMINER_LLM_URL", "http://127.0.0.1:8000/v1")
+
+    for off_val in (None, "", "0", "false", "FALSE", "False", "no", "off", " 0 "):
+        if off_val is None:
+            monkeypatch.delenv("STET_SYNTHESIZE_PRACTICE", raising=False)
+        else:
+            monkeypatch.setenv("STET_SYNTHESIZE_PRACTICE", off_val)
+        assert data.practice_synthesize(rnd) is False, f"expected False for {off_val!r}"
+
+    for on_val in ("1", "true", "TRUE", "yes", "on", " 1 "):
+        monkeypatch.setenv("STET_SYNTHESIZE_PRACTICE", on_val)
+        assert data.practice_synthesize(rnd) is True, f"expected True for {on_val!r}"
+
+    # Verify practice_key matches nosynth for "0"/"false" and differs from "1".
+    h_file = tmp_path / "2026-11-28-00.jsonl.zst"
+    h_file.write_bytes(b"hour-bytes")
+    hours = [(2026112800, h_file)]
+    monkeypatch.delenv("STET_SYNTHESIZE_PRACTICE", raising=False)
+    key_unset = data.practice_key(rnd, hours)
+    monkeypatch.setenv("STET_SYNTHESIZE_PRACTICE", "0")
+    key_zero = data.practice_key(rnd, hours)
+    monkeypatch.setenv("STET_SYNTHESIZE_PRACTICE", "false")
+    key_false = data.practice_key(rnd, hours)
+    monkeypatch.setenv("STET_SYNTHESIZE_PRACTICE", "1")
+    key_one = data.practice_key(rnd, hours)
+    assert key_zero == key_unset == key_false
+    assert key_one != key_unset
+
+
+def test_review33_select_context_and_select_never_exceed_quota():
+    """Review 33 P3 #8: select_context() and select() MUST stop once remaining quota hits zero
+    even when `want < len(left)` on the final selection pass across multiple active kinds."""
+    from stet.exam.fresh import Doc
+    from stet.exam.fresh.select import select, select_context
+
+    # Build enough distinct multi-sentence docs across all 4 active comprehension kinds
+    # (reference=wikipedia, news=ccnews, technical=lore, discussion=hackernews).
+    docs: list[Doc] = []
+    sources = [
+        ("wikipedia", "ref"),
+        ("ccnews", "news"),
+        ("lore", "tech"),
+        ("hackernews", "disc"),
+    ]
+    for src, tag in sources:
+        for i in range(12):
+            body = (
+                f"Opening paragraph for {tag} document number {i} covering distinct subject matter "
+                f"alpha-{tag}-{i} with sufficient length to cross the context threshold cleanly. "
+                f"Second sentence elaborates beta-{tag}-{i} in additional factual detail for the context window. "
+                f"Third sentence continues gamma-{tag}-{i} with concrete observations and dates from 2026. "
+                f"Fourth sentence concludes delta-{tag}-{i} with a distinct continuation clause for selection."
+            )
+            docs.append(
+                Doc(
+                    source=src,
+                    id=f"{tag}-{i}",
+                    url=f"https://example.org/{tag}/{i}",
+                    lang="en",
+                    license="CC-BY-SA-4.0",
+                    published=1700000000 + i,
+                    topic=f"topic-{i}",
+                    title=f"Title {tag} {i}",
+                    text=body,
+                )
+            )
+
+    from stet.exam.aggregate import kind_of
+
+    kinds = {"reference", "news", "technical", "discussion"}
+    # Test quotas not divisible by 4 (1, 2, 3, 5, 9, 10, 11, 13, 17, 25) where final pass has want < len(left).
+    for quota in (1, 2, 3, 5, 9, 10, 11, 13, 17, 25):
+        got_ctx = select_context(docs, b"r33-quota-seed", quota, kinds, per_corner=2)
+        assert len(got_ctx) == quota, f"select_context quota {quota}: got {len(got_ctx)}"
+        if quota >= 4:
+            assert {kind_of(it) for it in got_ctx} == kinds
+
+        got_plain = select(docs, b"r33-quota-seed", quota, kinds, per_corner=2)
+        assert len(got_plain) == quota, f"select quota {quota}: got {len(got_plain)}"
+        if quota >= 4:
+            assert {kind_of(it) for it in got_plain} == kinds

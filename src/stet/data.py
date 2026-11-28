@@ -800,13 +800,18 @@ def practice_hours(rnd: Round) -> list[tuple[int, Path]]:
     return [(h, held[h]) for h in choose_hours(rnd.seed, held, int(rnd.season.raw["exam"]["fresh"]["hours"]))]
 
 
+_TRUTHY_ENV = frozenset({"1", "true", "yes", "on"})
+
+
 def practice_synthesize(rnd: Round) -> bool:
     """Whether a local practice round with harvested hours synthesizes fresh reasoning items."""
     if rnd.kind != "practice" or not rnd.season.raw["exam"].get("reasoning"):
         return False
+    if os.environ.get("STET_SYNTHESIZE_PRACTICE", "").strip().lower() not in _TRUTHY_ENV:
+        return False
     from .exam.fresh.reason import can_synthesize_locally
 
-    return bool(os.environ.get("STET_SYNTHESIZE_PRACTICE")) and can_synthesize_locally(rnd.season)
+    return can_synthesize_locally(rnd.season)
 
 
 def practice_key(rnd: Round, hours: list[tuple[int, Path]] | None = None) -> str:

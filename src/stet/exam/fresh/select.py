@@ -231,10 +231,14 @@ def select(docs: list[Doc], seed: bytes, n: int, kinds, per_corner: int = 2, sha
     while left and (want := n - sum(map(len, chosen.values()))) > 0:
         part = max(1, want // len(left))
         for k in list(left):
+            rem = n - sum(map(len, chosen.values()))
+            if rem <= 0:
+                break
+            ask = min(part, rem)
             got = _select_kind([it for it in by_kind[k] if used[it.corner] < per_corner and it not in set(chosen[k])],
-                               rng.child(f"{k}/{len(chosen[k])}"), part, per_corner, shares, used)
+                               rng.child(f"{k}/{len(chosen[k])}"), ask, per_corner, shares, used)
             chosen[k] += got
-            if len(got) < part:
+            if len(got) < ask:
                 left.remove(k)
     return [it for k in sorted(chosen) for it in chosen[k]]
 
@@ -451,16 +455,20 @@ def select_context(docs: list[Doc], seed: bytes, n: int, kinds, per_corner: int 
     while left and (want := n - sum(map(len, chosen.values()))) > 0:
         part = max(1, want // len(left))
         for k in list(left):
+            rem = n - sum(map(len, chosen.values()))
+            if rem <= 0:
+                break
+            ask = min(part, rem)
             got = _select_kind(
                 [it for it in by_kind[k] if used[it.corner] < per_corner and it not in set(chosen[k])],
                 rng.child(f"{k}/{len(chosen[k])}"),
-                part,
+                ask,
                 per_corner,
                 shares,
                 used,
                 max_source_frac=0.5,
             )
             chosen[k] += got
-            if len(got) < part:
+            if len(got) < ask:
                 left.remove(k)
     return [it for k in sorted(chosen) for it in chosen[k]]

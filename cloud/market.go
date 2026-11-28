@@ -128,30 +128,36 @@ type Launch struct {
 
 // Rental is one machine rented on a market, as the market says.
 type Rental struct {
-	Market               string
-	ID                   string
-	Name                 string // the worker key's handle, where the market keeps a name; "" where it does not
-	Host                 string // provider host/server ID when reported (e.g. Clore order server ID `si`)
-	Card                 string
-	Price                float64 // dollars an hour
-	BasePrice            float64 // compute-only hourly rate when reported alongside Price (e.g. Vast dph_base)
-	DiskCost             float64 // hourly storage rate when reported on the instance (e.g. Vast storage_cost * disk_space / 720)
-	DiskCostUnknown      bool    // true when a stopped instance has attached storage whose price was not reported (distinct from explicit $0)
-	TransferCost         float64 // hourly amortized transfer rate already accounted for in Price
-	FixedCost            float64 // one-time startup transfer estimate or exact order fee incurred at rental creation
-	FixedCostEstimated   bool    // true when FixedCost is a pre-launch transfer estimate rather than an exact provider fee
-	ObservedTransferCost float64 // provider-reported observed transfer spend when usage fields are present
-	TransferObserved     bool    // true when the provider reported observed transfer usage for this contract
-	PartialRate          bool    // true when Price is a partial/base fallback lacking the provider's all-in total (e.g. Vast dph_total == 0)
-	State                string  // starting, running, stopped; anything else is the market's own word
-	Status               string  // the market's own word
-	Created              time.Time
-	StoppedAt            time.Time // trustworthy provider stop timestamp when reported (zero when unknown)
-	ResumedAt            time.Time // trustworthy provider resume timestamp when reported (zero when unknown)
-	EndedAt              time.Time // trustworthy provider termination/end timestamp when reported (zero when unknown)
-	Terminating          bool      // persisted outstanding termination (e.g. failed `workers resolve --end`)
-	Unconfirmed          bool      // true when reconstructed from ledger because provider listing/lookup failed to confirm current state
-	PendingID            string    // originating pendingRent reservation ID when returned from f.rent() before ledger write
+	Market                string
+	ID                    string
+	Name                  string // the worker key's handle, where the market keeps a name; "" where it does not
+	Host                  string // provider host/server ID when reported (e.g. Clore order server ID `si`)
+	Card                  string
+	Price                 float64 // dollars an hour
+	BasePrice             float64 // compute-only hourly rate when reported alongside Price (e.g. Vast dph_base)
+	DiskCost              float64 // hourly storage rate when reported on the instance (e.g. Vast storage_cost * disk_space / 720)
+	DiskCostUnknown       bool    // true when a stopped instance has attached storage whose price was not reported (distinct from explicit $0)
+	TransferCost          float64 // hourly amortized transfer rate already accounted for in Price
+	FixedCost             float64 // one-time startup transfer estimate or exact order fee incurred at rental creation
+	FixedCostEstimated    bool    // true when FixedCost is a pre-launch transfer estimate rather than an exact provider fee
+	ObservedTransferCost  float64 // provider-reported effective cumulative observed transfer spend
+	TransferObserved      bool    // true when the provider reported observed transfer usage for this contract
+	ObservedTransferDown  float64 // provider-reported cumulative download transfer spend when present
+	TransferDownObserved  bool    // true when the provider reported download transfer usage
+	ObservedTransferUp    float64 // provider-reported cumulative upload transfer spend when present
+	TransferUpObserved    bool    // true when the provider reported upload transfer usage
+	ObservedTransferTotal float64 // provider-reported explicit combined transfer_cost when present
+	TransferTotalObserved bool    // true when the provider reported explicit combined transfer_cost
+	PartialRate           bool    // true when Price is a partial/base fallback lacking the provider's all-in total (e.g. Vast dph_total == 0)
+	State                 string  // starting, running, stopped; anything else is the market's own word
+	Status                string  // the market's own word
+	Created               time.Time
+	StoppedAt             time.Time // trustworthy provider stop timestamp when reported (zero when unknown)
+	ResumedAt             time.Time // trustworthy provider resume timestamp when reported (zero when unknown)
+	EndedAt               time.Time // trustworthy provider termination/end timestamp when reported (zero when unknown)
+	Terminating           bool      // persisted outstanding termination (e.g. failed `workers resolve --end`)
+	Unconfirmed           bool      // true when reconstructed from ledger because provider listing/lookup failed to confirm current state
+	PendingID             string    // originating pendingRent reservation ID when returned from f.rent() before ledger write
 	// What the market says of the machine itself, for seeing why one does not start: whether
 	// its container is up ("yes", "no", or "" where the market does not say), its phase in
 	// the market's own words (one that changes only as the machine moves on: "pulling image",

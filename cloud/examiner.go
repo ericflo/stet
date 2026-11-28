@@ -134,19 +134,84 @@ type ExaminerLaunch struct {
 
 // ExaminerInstance is one live or stopped examiner instance returned by Vast.ai.
 type ExaminerInstance struct {
-	ID              string
-	Label           string
-	State           string // starting | running | stopped
-	Status          string
-	PublicIP        string
-	HostPort        string
-	Price           float64
-	BasePrice       float64 `json:"base_price,omitempty"`
-	DiskCost        float64 `json:"disk_cost,omitempty"`
-	TransferDollars float64 `json:"transfer_dollars,omitempty"`
-	PartialRate     bool    `json:"partial_rate,omitempty"`
-	Created         time.Time
-	ObservedLiveAt  time.Time `json:"observed_live_at,omitempty"`
+	ID                    string
+	Label                 string
+	State                 string // starting | running | stopped
+	Status                string
+	PublicIP              string
+	HostPort              string
+	Price                 float64
+	BasePrice             float64          `json:"base_price,omitempty"`
+	DiskCost              float64          `json:"disk_cost,omitempty"`
+	TransferDollars       float64          `json:"transfer_dollars,omitempty"`
+	TransferEstimated     bool             `json:"transfer_estimated,omitempty"`
+	ObservedTransferCost  float64          `json:"observed_transfer_cost,omitempty"`
+	TransferObserved      bool             `json:"transfer_observed,omitempty"`
+	ObservedTransferDown  float64          `json:"observed_transfer_down,omitempty"`
+	TransferDownObserved  bool             `json:"transfer_down_observed,omitempty"`
+	ObservedTransferUp    float64          `json:"observed_transfer_up,omitempty"`
+	TransferUpObserved    bool             `json:"transfer_up_observed,omitempty"`
+	ObservedTransferTotal float64          `json:"observed_transfer_total,omitempty"`
+	TransferTotalObserved bool             `json:"transfer_total_observed,omitempty"`
+	TransferCharges       []transferCharge `json:"transfer_charges,omitempty"`
+	PartialRate           bool             `json:"partial_rate,omitempty"`
+	Created               time.Time
+	ObservedLiveAt        time.Time `json:"observed_live_at,omitempty"`
+}
+
+func (i ExaminerInstance) transferState() transferState {
+	return transferState{
+		Observed:      i.ObservedTransferCost,
+		HasObserved:   i.TransferObserved,
+		Down:          i.ObservedTransferDown,
+		DownObserved:  i.TransferDownObserved,
+		Up:            i.ObservedTransferUp,
+		UpObserved:    i.TransferUpObserved,
+		Total:         i.ObservedTransferTotal,
+		TotalObserved: i.TransferTotalObserved,
+		Charges:       cloneTransferCharges(i.TransferCharges),
+	}
+}
+
+func (i *ExaminerInstance) setTransferState(ts transferState) {
+	i.ObservedTransferCost = ts.Observed
+	i.TransferObserved = ts.HasObserved
+	i.ObservedTransferDown = ts.Down
+	i.TransferDownObserved = ts.DownObserved
+	i.ObservedTransferUp = ts.Up
+	i.TransferUpObserved = ts.UpObserved
+	i.ObservedTransferTotal = ts.Total
+	i.TransferTotalObserved = ts.TotalObserved
+	i.TransferCharges = cloneTransferCharges(ts.Charges)
+}
+
+func cloneExaminerInstance(i ExaminerInstance) ExaminerInstance {
+	i.TransferCharges = cloneTransferCharges(i.TransferCharges)
+	return i
+}
+
+func cloneExaminerInstances(src []ExaminerInstance) []ExaminerInstance {
+	if len(src) == 0 {
+		return nil
+	}
+	dst := make([]ExaminerInstance, len(src))
+	for idx := range src {
+		dst[idx] = cloneExaminerInstance(src[idx])
+	}
+	return dst
+}
+
+func clonePendingSpends(src []podRecord) []podRecord {
+	if len(src) == 0 {
+		return nil
+	}
+	dst := make([]podRecord, len(src))
+	for idx := range src {
+		cp := src[idx]
+		cp.TransferCharges = cloneTransferCharges(cp.TransferCharges)
+		dst[idx] = cp
+	}
+	return dst
 }
 
 // ExaminerProvider abstracts Vast.ai examiner provisioning so tests can mock it cleanly.
@@ -172,20 +237,104 @@ type examinerTieredOfferSearcher interface {
 // API key, pinned peer certificate, pre-rental reservation, unrecorded terminal spend charges,
 // or leak an orphaned 5090 on Vast.ai.
 type examinerState struct {
-	InstanceID      string             `json:"instance_id,omitempty"`
-	PendingRent     bool               `json:"pending_rent,omitempty"`
-	ReservedLabel   string             `json:"reserved_label,omitempty"`
-	RoundID         string             `json:"round_id,omitempty"`
-	APIKey          string             `json:"api_key,omitempty"`
-	CertPEM         string             `json:"cert_pem,omitempty"`
-	Upstream        string             `json:"upstream,omitempty"`
-	Price           float64            `json:"price,omitempty"`
-	DiskCost        float64            `json:"disk_cost,omitempty"`
-	TransferDollars float64            `json:"transfer_dollars,omitempty"`
-	Created         time.Time          `json:"created,omitempty"`
-	ObservedLiveAt  time.Time          `json:"observed_live_at,omitempty"`
-	PendingSpends   []podRecord        `json:"pending_spends,omitempty"`
-	Unresolved      []ExaminerInstance `json:"unresolved,omitempty"`
+	InstanceID            string             `json:"instance_id,omitempty"`
+	PendingRent           bool               `json:"pending_rent,omitempty"`
+	ReservedLabel         string             `json:"reserved_label,omitempty"`
+	RoundID               string             `json:"round_id,omitempty"`
+	APIKey                string             `json:"api_key,omitempty"`
+	CertPEM               string             `json:"cert_pem,omitempty"`
+	Upstream              string             `json:"upstream,omitempty"`
+	Price                 float64            `json:"price,omitempty"`
+	DiskCost              float64            `json:"disk_cost,omitempty"`
+	TransferDollars       float64            `json:"transfer_dollars,omitempty"`
+	TransferEstimated     bool               `json:"transfer_estimated,omitempty"`
+	ObservedTransferCost  float64            `json:"observed_transfer_cost,omitempty"`
+	TransferObserved      bool               `json:"transfer_observed,omitempty"`
+	ObservedTransferDown  float64            `json:"observed_transfer_down,omitempty"`
+	TransferDownObserved  bool               `json:"transfer_down_observed,omitempty"`
+	ObservedTransferUp    float64            `json:"observed_transfer_up,omitempty"`
+	TransferUpObserved    bool               `json:"transfer_up_observed,omitempty"`
+	ObservedTransferTotal float64            `json:"observed_transfer_total,omitempty"`
+	TransferTotalObserved bool               `json:"transfer_total_observed,omitempty"`
+	TransferCharges       []transferCharge   `json:"transfer_charges,omitempty"`
+	Created               time.Time          `json:"created,omitempty"`
+	ObservedLiveAt        time.Time          `json:"observed_live_at,omitempty"`
+	PendingSpends         []podRecord        `json:"pending_spends,omitempty"`
+	Unresolved            []ExaminerInstance `json:"unresolved,omitempty"`
+}
+
+func (s examinerState) transferState() transferState {
+	return transferState{
+		Observed:      s.ObservedTransferCost,
+		HasObserved:   s.TransferObserved,
+		Down:          s.ObservedTransferDown,
+		DownObserved:  s.TransferDownObserved,
+		Up:            s.ObservedTransferUp,
+		UpObserved:    s.TransferUpObserved,
+		Total:         s.ObservedTransferTotal,
+		TotalObserved: s.TransferTotalObserved,
+		Charges:       cloneTransferCharges(s.TransferCharges),
+	}
+}
+
+func (s *examinerState) setTransferState(ts transferState) {
+	s.ObservedTransferCost = ts.Observed
+	s.TransferObserved = ts.HasObserved
+	s.ObservedTransferDown = ts.Down
+	s.TransferDownObserved = ts.DownObserved
+	s.ObservedTransferUp = ts.Up
+	s.TransferUpObserved = ts.UpObserved
+	s.ObservedTransferTotal = ts.Total
+	s.TransferTotalObserved = ts.TotalObserved
+	s.TransferCharges = cloneTransferCharges(ts.Charges)
+}
+
+func mergeExaminerTransfer(
+	estA float64, estFlagA bool, tsA transferState,
+	estB float64, estFlagB bool, tsB transferState,
+	stateB string, start, now time.Time,
+) (est float64, estFlag bool, ts transferState, changed bool) {
+	est = nonNegMax(estA, estB)
+	estFlag = estFlagA || estFlagB || est > 0
+	ts = tsA.clone()
+	if est > estA+1e-9 || (estFlag && !estFlagA) {
+		changed = true
+	}
+	if ts.mergeState(tsB, estFlag, stateB, start, now) {
+		changed = true
+	}
+	return est, estFlag, ts, changed
+}
+
+func mergeSavedTransferIntoInstance(saved examinerState, inst *ExaminerInstance, now time.Time) {
+	start := inst.Created
+	if start.IsZero() {
+		start = saved.Created
+	}
+	est, estFlag, ts, _ := mergeExaminerTransfer(
+		saved.TransferDollars, saved.TransferEstimated, saved.transferState(),
+		inst.TransferDollars, inst.TransferEstimated, inst.transferState(),
+		inst.State, start, now,
+	)
+	inst.TransferDollars = est
+	inst.TransferEstimated = estFlag
+	inst.setTransferState(ts)
+}
+
+// normalizeFreshExaminerTransfer records any newly observed provider transfer reading on a fresh,
+// previously untracked examiner instance against now (while respecting the starting+$0 guard).
+func normalizeFreshExaminerTransfer(inst *ExaminerInstance, now time.Time) {
+	est := nonNegMax(inst.TransferDollars, 0)
+	estFlag := inst.TransferEstimated || est > 0
+	start := inst.Created
+	if start.IsZero() {
+		start = now
+	}
+	var ts transferState
+	ts.mergeState(inst.transferState(), estFlag, inst.State, start, now)
+	inst.TransferDollars = est
+	inst.TransferEstimated = estFlag
+	inst.setTransferState(ts)
 }
 
 func validRate(p float64) bool { return p > 0 && !math.IsNaN(p) && !math.IsInf(p, 0) }
@@ -466,19 +615,6 @@ func nonNegMax(a, b float64) float64 {
 	return best
 }
 
-func boundedExaminerTransfer(transfer float64, created, now, dayStart time.Time) float64 {
-	if !validRate(transfer) {
-		return 0
-	}
-	if created.IsZero() {
-		return transfer
-	}
-	if !created.Before(dayStart) && !created.After(now) {
-		return transfer
-	}
-	return 0
-}
-
 func snapshotFromState(st examinerState, home string, now time.Time, timeout time.Duration, maxPrice float64) (live int, hourly float64, accrued float64) {
 	fallbackRate := maxPrice
 	if !validRate(fallbackRate) {
@@ -495,6 +631,8 @@ func snapshotFromState(st examinerState, home string, now time.Time, timeout tim
 			created := st.Created
 			rate := st.Price
 			transfer := nonNegMax(st.TransferDollars, 0)
+			transferEst := st.TransferEstimated || transfer > 0
+			ts := st.transferState()
 			if st.InstanceID != "" {
 				seenLive[st.InstanceID] = true
 				if u, ok := findUnresolved(st.Unresolved, st.InstanceID); ok {
@@ -505,14 +643,27 @@ func snapshotFromState(st examinerState, home string, now time.Time, timeout tim
 						created = u.Created
 					}
 					rate = higherValidRate(rate, u.Price)
-					transfer = nonNegMax(transfer, u.TransferDollars)
+					startForMerge := created
+					if startForMerge.IsZero() {
+						startForMerge = now
+					}
+					transfer, transferEst, ts, _ = mergeExaminerTransfer(
+						transfer, transferEst, ts,
+						u.TransferDollars, u.TransferEstimated, u.transferState(),
+						u.State, startForMerge, now,
+					)
 				}
 			}
 			if !validRate(rate) {
 				rate = fallbackRate
 			}
+			startForTransfer := created
+			if startForTransfer.IsZero() {
+				startForTransfer = now
+			}
 			hourly += rate + transfer
-			accrued += boundedExaminerAccrual(rate, created, obs, now, dayStart, timeout) + boundedExaminerTransfer(transfer, created, now, dayStart)
+			accrued += boundedExaminerAccrual(rate, created, obs, now, dayStart, timeout) +
+				ts.dollarsBetween(transfer, transferEst, startForTransfer, dayStart, now, false)
 		}
 	}
 	for _, u := range st.Unresolved {
@@ -529,8 +680,15 @@ func snapshotFromState(st examinerState, home string, now time.Time, timeout tim
 			rate = fallbackRate
 		}
 		transfer := nonNegMax(u.TransferDollars, 0)
+		transferEst := u.TransferEstimated || transfer > 0
+		ts := u.transferState()
+		startForTransfer := u.Created
+		if startForTransfer.IsZero() {
+			startForTransfer = now
+		}
 		hourly += rate + transfer
-		accrued += boundedExaminerAccrual(rate, u.Created, u.ObservedLiveAt, now, dayStart, timeout) + boundedExaminerTransfer(transfer, u.Created, now, dayStart)
+		accrued += boundedExaminerAccrual(rate, u.Created, u.ObservedLiveAt, now, dayStart, timeout) +
+			ts.dollarsBetween(transfer, transferEst, startForTransfer, dayStart, now, false)
 	}
 	for _, p := range st.PendingSpends {
 		if p.ID != "" && !seenLive[p.ID] && !spentHasExaminer(home, p.ID) {
@@ -767,12 +925,14 @@ func (e *Examiner) persistState(st *examinerState) error {
 	if st != nil && st.InstanceID != "" {
 		e.mu.RLock()
 		match := e.state.InstanceID == st.InstanceID && e.state.APIKey == st.APIKey && e.state.CertPEM == st.CertPEM
-		pending := append([]podRecord(nil), e.state.PendingSpends...)
-		unresolved := append([]ExaminerInstance(nil), e.state.Unresolved...)
+		pending := clonePendingSpends(e.state.PendingSpends)
+		unresolved := cloneExaminerInstances(e.state.Unresolved)
 		obs := e.state.ObservedLiveAt
 		memPrice := e.state.Price
 		memDisk := e.state.DiskCost
 		memTransfer := e.state.TransferDollars
+		memTransferEst := e.state.TransferEstimated
+		memTS := e.state.transferState()
 		e.mu.RUnlock()
 		if !match {
 			return nil
@@ -782,7 +942,14 @@ func (e *Examiner) persistState(st *examinerState) error {
 		cp.Unresolved = unresolved
 		cp.Price = higherValidRate(cp.Price, memPrice)
 		cp.DiskCost = nonNegMax(cp.DiskCost, memDisk)
-		cp.TransferDollars = nonNegMax(cp.TransferDollars, memTransfer)
+		est, estFlag, ts, _ := mergeExaminerTransfer(
+			cp.TransferDollars, cp.TransferEstimated, cp.transferState(),
+			memTransfer, memTransferEst, memTS,
+			"", cp.Created, e.now(),
+		)
+		cp.TransferDollars = est
+		cp.TransferEstimated = estFlag
+		cp.setTransferState(ts)
 		if obs.After(cp.ObservedLiveAt) {
 			cp.ObservedLiveAt = obs
 		}
@@ -874,15 +1041,15 @@ func (e *Examiner) proxyOffline() {
 func (e *Examiner) clearState() {
 	e.mu.Lock()
 	oldTr := e.proxyTr
-	pending := append([]podRecord(nil), e.state.PendingSpends...)
-	unresolved := append([]ExaminerInstance(nil), e.state.Unresolved...)
+	pending := clonePendingSpends(e.state.PendingSpends)
+	unresolved := cloneExaminerInstances(e.state.Unresolved)
 	e.state = examinerState{PendingSpends: pending, Unresolved: unresolved}
 	e.ready = false
 	e.proxy = nil
 	e.proxyTr = nil
 	e.upstream = ""
 	e.lastProbeErr = ""
-	st := e.state
+	st := e.cloneStateLocked()
 	e.mu.Unlock()
 	if oldTr != nil {
 		oldTr.CloseIdleConnections()
@@ -1056,7 +1223,14 @@ func (e *Examiner) reloadState(tryFlush bool) error {
 				memSt.CertPEM == diskSt.CertPEM {
 				merged.Price = higherValidRate(merged.Price, diskSt.Price)
 				merged.DiskCost = nonNegMax(merged.DiskCost, diskSt.DiskCost)
-				merged.TransferDollars = nonNegMax(merged.TransferDollars, diskSt.TransferDollars)
+				est, estFlag, ts, _ := mergeExaminerTransfer(
+					merged.TransferDollars, merged.TransferEstimated, merged.transferState(),
+					diskSt.TransferDollars, diskSt.TransferEstimated, diskSt.transferState(),
+					"", merged.Created, e.now(),
+				)
+				merged.TransferDollars = est
+				merged.TransferEstimated = estFlag
+				merged.setTransferState(ts)
 				if diskSt.ObservedLiveAt.After(merged.ObservedLiveAt) {
 					merged.ObservedLiveAt = diskSt.ObservedLiveAt
 				}
@@ -1075,7 +1249,14 @@ func (e *Examiner) reloadState(tryFlush bool) error {
 			e.state.CertPEM == merged.CertPEM {
 			merged.Price = higherValidRate(merged.Price, e.state.Price)
 			merged.DiskCost = nonNegMax(merged.DiskCost, e.state.DiskCost)
-			merged.TransferDollars = nonNegMax(merged.TransferDollars, e.state.TransferDollars)
+			est, estFlag, ts, _ := mergeExaminerTransfer(
+				merged.TransferDollars, merged.TransferEstimated, merged.transferState(),
+				e.state.TransferDollars, e.state.TransferEstimated, e.state.transferState(),
+				"", merged.Created, e.now(),
+			)
+			merged.TransferDollars = est
+			merged.TransferEstimated = estFlag
+			merged.setTransferState(ts)
 			if e.state.ObservedLiveAt.After(merged.ObservedLiveAt) {
 				merged.ObservedLiveAt = e.state.ObservedLiveAt
 			}
@@ -1115,11 +1296,18 @@ func (e *Examiner) reloadState(tryFlush bool) error {
 		memSt.CertPEM == diskSt.CertPEM {
 		next.Price = higherValidRate(next.Price, memSt.Price)
 		next.DiskCost = nonNegMax(next.DiskCost, memSt.DiskCost)
-		next.TransferDollars = nonNegMax(next.TransferDollars, memSt.TransferDollars)
+		est, estFlag, ts, trChanged := mergeExaminerTransfer(
+			next.TransferDollars, next.TransferEstimated, next.transferState(),
+			memSt.TransferDollars, memSt.TransferEstimated, memSt.transferState(),
+			"", next.Created, e.now(),
+		)
+		next.TransferDollars = est
+		next.TransferEstimated = estFlag
+		next.setTransferState(ts)
 		if memSt.ObservedLiveAt.After(next.ObservedLiveAt) {
 			next.ObservedLiveAt = memSt.ObservedLiveAt
 		}
-		if next.Price > diskSt.Price+1e-9 || next.DiskCost > diskSt.DiskCost+1e-9 || next.TransferDollars > diskSt.TransferDollars+1e-9 {
+		if next.Price > diskSt.Price+1e-9 || next.DiskCost > diskSt.DiskCost+1e-9 || trChanged {
 			needRateWrite = true
 		}
 	}
@@ -1146,7 +1334,14 @@ func (e *Examiner) reloadState(tryFlush bool) error {
 	if !changed && e.state.InstanceID != "" && e.state.InstanceID == next.InstanceID {
 		next.Price = higherValidRate(next.Price, e.state.Price)
 		next.DiskCost = nonNegMax(next.DiskCost, e.state.DiskCost)
-		next.TransferDollars = nonNegMax(next.TransferDollars, e.state.TransferDollars)
+		est, estFlag, ts, _ := mergeExaminerTransfer(
+			next.TransferDollars, next.TransferEstimated, next.transferState(),
+			e.state.TransferDollars, e.state.TransferEstimated, e.state.transferState(),
+			"", next.Created, e.now(),
+		)
+		next.TransferDollars = est
+		next.TransferEstimated = estFlag
+		next.setTransferState(ts)
 		if e.state.ObservedLiveAt.After(next.ObservedLiveAt) {
 			next.ObservedLiveAt = e.state.ObservedLiveAt
 		}
@@ -1197,8 +1392,9 @@ func (e *Examiner) ownerID() string {
 
 func (e *Examiner) cloneStateLocked() examinerState {
 	st := e.state
-	st.PendingSpends = append([]podRecord(nil), e.state.PendingSpends...)
-	st.Unresolved = append([]ExaminerInstance(nil), e.state.Unresolved...)
+	st.TransferCharges = cloneTransferCharges(e.state.TransferCharges)
+	st.PendingSpends = clonePendingSpends(e.state.PendingSpends)
+	st.Unresolved = cloneExaminerInstances(e.state.Unresolved)
 	return st
 }
 
@@ -1252,7 +1448,21 @@ func mergeExaminerInstance(prev, cur ExaminerInstance) ExaminerInstance {
 		cur.Created = prev.Created
 	}
 	cur.Price, cur.DiskCost = examinerObservedRate(prev.Price, prev.DiskCost, cur)
-	cur.TransferDollars = nonNegMax(prev.TransferDollars, cur.TransferDollars)
+	at := cur.ObservedLiveAt
+	if at.IsZero() {
+		at = prev.ObservedLiveAt
+	}
+	if at.IsZero() {
+		at = cur.Created
+	}
+	est, estFlag, ts, _ := mergeExaminerTransfer(
+		prev.TransferDollars, prev.TransferEstimated, prev.transferState(),
+		cur.TransferDollars, cur.TransferEstimated, cur.transferState(),
+		cur.State, cur.Created, at,
+	)
+	cur.TransferDollars = est
+	cur.TransferEstimated = estFlag
+	cur.setTransferState(ts)
 	if prev.ObservedLiveAt.After(cur.ObservedLiveAt) {
 		cur.ObservedLiveAt = prev.ObservedLiveAt
 	}
@@ -1587,6 +1797,10 @@ func (e *Examiner) recordEndedAtDollars(id, label string, price float64, start, 
 }
 
 func (e *Examiner) recordEndedAtFull(id, label string, price, transferDollars float64, start, end time.Time, roundID, why string) (float64, error) {
+	return e.recordEndedWithTransfer(id, label, price, transferDollars, transferDollars > 0, transferState{}, start, end, roundID, why)
+}
+
+func (e *Examiner) recordEndedWithTransfer(id, label string, price, transferDollars float64, transferEst bool, ts transferState, start, end time.Time, roundID, why string) (float64, error) {
 	if id == "" {
 		return 0, nil
 	}
@@ -1612,9 +1826,11 @@ func (e *Examiner) recordEndedAtFull(id, label string, price, transferDollars fl
 	fixed := nonNegMax(transferDollars, 0)
 	rec := podRecord{
 		ID: id, Market: "vast", Handle: examinerLabelPrefix, GPU: "RTX 5090",
-		Cloud: "verified", Cost: price, FixedCost: fixed, Start: start, Alive: end, End: end,
+		Cloud: "verified", Cost: price, FixedCost: fixed, FixedCostEstimated: transferEst || fixed > 0,
+		Start: start, Alive: end, End: end,
 		For: "examiner", Round: roundID, Why: why,
 	}
+	rec.setTransferState(ts.clone())
 	now := e.now()
 	todayDollars := rec.dollarsBetween(startOfDay(now), end)
 	if e.onSpent == nil {
@@ -1643,7 +1859,13 @@ func (e *Examiner) recordEndedDollars(inst ExaminerInstance, fallbackStart time.
 		start = fallbackStart
 	}
 	price := higherValidRate(inst.Price, fallbackPrice)
-	return e.recordEndedAtFull(inst.ID, inst.Label, price, inst.TransferDollars, start, now, roundID, why)
+	est := nonNegMax(inst.TransferDollars, 0)
+	estFlag := inst.TransferEstimated || est > 0
+	ts := inst.transferState()
+	if inst.State == "starting" {
+		ts.clearUnconfirmedZero(estFlag)
+	}
+	return e.recordEndedWithTransfer(inst.ID, inst.Label, price, est, estFlag, ts, start, now, roundID, why)
 }
 
 // recordMissingSaved records a bounded, idempotent terminal spend charge for a saved examiner
@@ -1663,6 +1885,8 @@ func (e *Examiner) recordMissingSavedDollars(saved examinerState, why string) (f
 	obs := saved.ObservedLiveAt
 	price := saved.Price
 	transfer := nonNegMax(saved.TransferDollars, 0)
+	transferEst := saved.TransferEstimated || transfer > 0
+	ts := saved.transferState()
 	if u, ok := findUnresolved(saved.Unresolved, saved.InstanceID); ok {
 		if u.ObservedLiveAt.After(obs) {
 			obs = u.ObservedLiveAt
@@ -1671,14 +1895,19 @@ func (e *Examiner) recordMissingSavedDollars(saved examinerState, why string) (f
 			created = u.Created
 		}
 		price = higherValidRate(price, u.Price)
-		transfer = nonNegMax(transfer, u.TransferDollars)
+		transfer, transferEst, ts, _ = mergeExaminerTransfer(
+			transfer, transferEst, ts,
+			u.TransferDollars, u.TransferEstimated, u.transferState(),
+			u.State, created, now,
+		)
 	}
+	ts.clearUnconfirmedZero(transferEst)
 	start := created
 	if start.IsZero() || start.After(now) {
 		start = now
 	}
 	end := examinerAccrualEnd(created, obs, now, e.cfg.Timeout)
-	return e.recordEndedAtFull(saved.InstanceID, saved.ReservedLabel, price, transfer, start, end, saved.RoundID, why)
+	return e.recordEndedWithTransfer(saved.InstanceID, saved.ReservedLabel, price, transfer, transferEst, ts, start, end, saved.RoundID, why)
 }
 
 // recordMissingInstance records a bounded, idempotent terminal spend charge for a tracked
@@ -1699,7 +1928,11 @@ func (e *Examiner) recordMissingInstanceDollars(inst ExaminerInstance, why strin
 		start = now
 	}
 	end := examinerAccrualEnd(inst.Created, inst.ObservedLiveAt, now, e.cfg.Timeout)
-	return e.recordEndedAtFull(inst.ID, inst.Label, inst.Price, inst.TransferDollars, start, end, "", why)
+	est := nonNegMax(inst.TransferDollars, 0)
+	estFlag := inst.TransferEstimated || est > 0
+	ts := inst.transferState()
+	ts.clearUnconfirmedZero(estFlag)
+	return e.recordEndedWithTransfer(inst.ID, inst.Label, inst.Price, est, estFlag, ts, start, end, "", why)
 }
 
 func findUnresolved(prev []ExaminerInstance, id string) (ExaminerInstance, bool) {
@@ -1721,19 +1954,33 @@ func savedOrphanInstance(saved examinerState, prev []ExaminerInstance) ExaminerI
 			u.Created = saved.Created
 		}
 		u.Price, u.DiskCost = examinerObservedRate(saved.Price, saved.DiskCost, u)
-		u.TransferDollars = nonNegMax(u.TransferDollars, saved.TransferDollars)
+		at := u.ObservedLiveAt
+		if at.IsZero() {
+			at = u.Created
+		}
+		est, estFlag, ts, _ := mergeExaminerTransfer(
+			u.TransferDollars, u.TransferEstimated, u.transferState(),
+			saved.TransferDollars, saved.TransferEstimated, saved.transferState(),
+			"", u.Created, at,
+		)
+		u.TransferDollars = est
+		u.TransferEstimated = estFlag
+		u.setTransferState(ts)
 		return u
 	}
-	return ExaminerInstance{
-		ID:              saved.InstanceID,
-		Label:           saved.ReservedLabel,
-		State:           "unknown",
-		Price:           saved.Price,
-		DiskCost:        saved.DiskCost,
-		TransferDollars: saved.TransferDollars,
-		Created:         saved.Created,
-		ObservedLiveAt:  obs,
+	inst := ExaminerInstance{
+		ID:                saved.InstanceID,
+		Label:             saved.ReservedLabel,
+		State:             "unknown",
+		Price:             saved.Price,
+		DiskCost:          saved.DiskCost,
+		TransferDollars:   saved.TransferDollars,
+		TransferEstimated: saved.TransferEstimated || saved.TransferDollars > 0,
+		Created:           saved.Created,
+		ObservedLiveAt:    obs,
 	}
+	inst.setTransferState(saved.transferState())
+	return inst
 }
 
 func (e *Examiner) noteSavedObservedLive(saved *examinerState, now time.Time) {
@@ -1752,8 +1999,17 @@ func (e *Examiner) noteSavedObservedLive(saved *examinerState, now time.Time) {
 // instance, never lowering a conservative reserved/known rate. Reports whether persisted fields
 // changed.
 func (e *Examiner) noteSavedPrice(saved *examinerState, inst ExaminerInstance) bool {
+	now := e.now()
 	price, disk := examinerObservedRate(saved.Price, saved.DiskCost, inst)
-	transfer := nonNegMax(saved.TransferDollars, inst.TransferDollars)
+	start := saved.Created
+	if start.IsZero() {
+		start = inst.Created
+	}
+	transfer, transferEst, ts, trChanged := mergeExaminerTransfer(
+		saved.TransferDollars, saved.TransferEstimated, saved.transferState(),
+		inst.TransferDollars, inst.TransferEstimated, inst.transferState(),
+		inst.State, start, now,
+	)
 	changed := false
 	if validRate(price) && (!validRate(saved.Price) || price > saved.Price+1e-9) {
 		saved.Price = price
@@ -1763,8 +2019,10 @@ func (e *Examiner) noteSavedPrice(saved *examinerState, inst ExaminerInstance) b
 		saved.DiskCost = disk
 		changed = true
 	}
-	if nonNegFinite(transfer) && transfer > saved.TransferDollars+1e-9 {
+	if trChanged {
 		saved.TransferDollars = transfer
+		saved.TransferEstimated = transferEst
+		saved.setTransferState(ts)
 		changed = true
 	}
 	e.mu.Lock()
@@ -1774,7 +2032,11 @@ func (e *Examiner) noteSavedPrice(saved *examinerState, inst ExaminerInstance) b
 		if saved.DiskCost > eDisk {
 			eDisk = saved.DiskCost
 		}
-		eTransfer := nonNegMax(e.state.TransferDollars, saved.TransferDollars)
+		eTransfer, eTransferEst, eTS, eTrChanged := mergeExaminerTransfer(
+			e.state.TransferDollars, e.state.TransferEstimated, e.state.transferState(),
+			saved.TransferDollars, saved.TransferEstimated, saved.transferState(),
+			"", start, now,
+		)
 		if validRate(ePrice) && (!validRate(e.state.Price) || ePrice > e.state.Price+1e-9) {
 			e.state.Price = ePrice
 			changed = true
@@ -1783,8 +2045,10 @@ func (e *Examiner) noteSavedPrice(saved *examinerState, inst ExaminerInstance) b
 			e.state.DiskCost = eDisk
 			changed = true
 		}
-		if nonNegFinite(eTransfer) && eTransfer > e.state.TransferDollars+1e-9 {
+		if eTrChanged {
 			e.state.TransferDollars = eTransfer
+			e.state.TransferEstimated = eTransferEst
+			e.state.setTransferState(eTS)
 			changed = true
 		}
 	}
@@ -1912,11 +2176,18 @@ func (e *Examiner) EnforceTimeout(ctx context.Context) error {
 	}
 	owned := filterOwnedExaminers(insts, owner, saved.InstanceID, saved.ReservedLabel)
 	now := e.now()
+	matchedReserved := false
 	for i := range owned {
+		owned[i].ObservedLiveAt = now
 		if prev, ok := findUnresolved(saved.Unresolved, owned[i].ID); ok {
 			owned[i] = mergeExaminerInstance(prev, owned[i])
+		} else if saved.InstanceID != "" && owned[i].ID == saved.InstanceID {
+			// saved state carries this instance's transfer history
+		} else if !matchedReserved && saved.ReservedLabel != "" && owned[i].Label == saved.ReservedLabel {
+			matchedReserved = true
+		} else {
+			normalizeFreshExaminerTransfer(&owned[i], now)
 		}
-		owned[i].ObservedLiveAt = now
 	}
 	if err := e.enforceOwnedTimeouts(ctx, owned, saved, now, false); err != nil && firstErr == nil {
 		firstErr = err
@@ -1933,6 +2204,10 @@ func (e *Examiner) enforceOwnedTimeouts(ctx context.Context, owned []ExaminerIns
 	var firstErr error
 	foundSaved := false
 	endedIDs := map[string]bool{}
+	hadUnresolved := make(map[string]bool, len(saved.Unresolved))
+	for _, u := range saved.Unresolved {
+		hadUnresolved[u.ID] = true
+	}
 	var failedEnds []ExaminerInstance
 	for _, inst := range owned {
 		matchesSaved := (saved.InstanceID != "" && inst.ID == saved.InstanceID) ||
@@ -1979,7 +2254,9 @@ func (e *Examiner) enforceOwnedTimeouts(ctx context.Context, owned []ExaminerIns
 			fallbackDisk := 0.0
 			if matchesSaved {
 				fallbackDisk = saved.DiskCost
-				inst.TransferDollars = nonNegMax(inst.TransferDollars, saved.TransferDollars)
+				mergeSavedTransferIntoInstance(saved, &inst, now)
+			} else if !hadUnresolved[inst.ID] {
+				normalizeFreshExaminerTransfer(&inst, now)
 			}
 			inst.Price, inst.DiskCost = examinerObservedRate(fallbackPrice, fallbackDisk, inst)
 			inst.ObservedLiveAt = now
@@ -1993,7 +2270,9 @@ func (e *Examiner) enforceOwnedTimeouts(ctx context.Context, owned []ExaminerIns
 		}
 		endedIDs[inst.ID] = true
 		if matchesSaved {
-			inst.TransferDollars = nonNegMax(inst.TransferDollars, saved.TransferDollars)
+			mergeSavedTransferIntoInstance(saved, &inst, now)
+		} else if !hadUnresolved[inst.ID] {
+			normalizeFreshExaminerTransfer(&inst, now)
 		}
 		e.say("ended examiner GPU (machine %s): exceeded --examiner-timeout (%s)", inst.ID, e.cfg.Timeout)
 		if rerr := e.recordEnded(inst, created, fallbackPrice, rid, "exceeded examiner timeout"); rerr != nil && firstErr == nil {
@@ -2051,18 +2330,37 @@ func (e *Examiner) promoteReservedInstance(saved *examinerState, inst ExaminerIn
 	if saved.InstanceID != "" || !saved.PendingRent || saved.ReservedLabel == "" || inst.Label != saved.ReservedLabel {
 		return
 	}
+	now := e.now()
+	start := saved.Created
+	if start.IsZero() {
+		start = inst.Created
+	}
 	saved.InstanceID = inst.ID
 	saved.PendingRent = false
 	saved.ReservedLabel = ""
 	saved.Price, saved.DiskCost = examinerObservedRate(saved.Price, saved.DiskCost, inst)
-	saved.TransferDollars = nonNegMax(saved.TransferDollars, inst.TransferDollars)
+	est, estFlag, ts, _ := mergeExaminerTransfer(
+		saved.TransferDollars, saved.TransferEstimated, saved.transferState(),
+		inst.TransferDollars, inst.TransferEstimated, inst.transferState(),
+		inst.State, start, now,
+	)
+	saved.TransferDollars = est
+	saved.TransferEstimated = estFlag
+	saved.setTransferState(ts)
 	e.mu.Lock()
 	e.state.InstanceID = saved.InstanceID
 	e.state.PendingRent = false
 	e.state.ReservedLabel = ""
 	e.state.Price = higherValidRate(e.state.Price, saved.Price)
 	e.state.DiskCost = nonNegMax(e.state.DiskCost, saved.DiskCost)
-	e.state.TransferDollars = nonNegMax(e.state.TransferDollars, saved.TransferDollars)
+	eEst, eEstFlag, eTS, _ := mergeExaminerTransfer(
+		e.state.TransferDollars, e.state.TransferEstimated, e.state.transferState(),
+		saved.TransferDollars, saved.TransferEstimated, saved.transferState(),
+		"", start, now,
+	)
+	e.state.TransferDollars = eEst
+	e.state.TransferEstimated = eEstFlag
+	e.state.setTransferState(eTS)
 	e.mu.Unlock()
 }
 
@@ -2100,11 +2398,22 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 	insts := filterOwnedExaminers(rawInsts, owner, saved.InstanceID, saved.ReservedLabel)
 	now := e.now()
 	listedIDs := make(map[string]bool, len(insts))
+	hadUnresolved := make(map[string]bool, len(prevUnresolved))
+	for _, u := range prevUnresolved {
+		hadUnresolved[u.ID] = true
+	}
+	matchedReserved := false
 	for i := range insts {
+		insts[i].ObservedLiveAt = now
 		if prev, ok := findUnresolved(prevUnresolved, insts[i].ID); ok {
 			insts[i] = mergeExaminerInstance(prev, insts[i])
+		} else if saved.InstanceID != "" && insts[i].ID == saved.InstanceID {
+			// saved state carries this instance's transfer history
+		} else if !matchedReserved && saved.ReservedLabel != "" && insts[i].Label == saved.ReservedLabel {
+			matchedReserved = true
+		} else {
+			normalizeFreshExaminerTransfer(&insts[i], now)
 		}
-		insts[i].ObservedLiveAt = now
 		listedIDs[insts[i].ID] = true
 	}
 
@@ -2129,7 +2438,9 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 						inst.Created = saved.Created
 					}
 					inst.Price, inst.DiskCost = examinerObservedRate(saved.Price, saved.DiskCost, inst)
-					inst.TransferDollars = nonNegMax(inst.TransferDollars, saved.TransferDollars)
+					mergeSavedTransferIntoInstance(saved, &inst, now)
+				} else if !hadUnresolved[inst.ID] {
+					normalizeFreshExaminerTransfer(&inst, now)
 				}
 				inst.ObservedLiveAt = now
 				failedEnds = append(failedEnds, inst)
@@ -2145,9 +2456,11 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 			if matchesSaved {
 				fallbackStart = saved.Created
 				fallbackPrice, _ = examinerObservedRate(saved.Price, saved.DiskCost, inst)
-				inst.TransferDollars = nonNegMax(inst.TransferDollars, saved.TransferDollars)
+				mergeSavedTransferIntoInstance(saved, &inst, now)
 				rid = saved.RoundID
 				endedSaved = true
+			} else if !hadUnresolved[inst.ID] {
+				normalizeFreshExaminerTransfer(&inst, now)
 			}
 			start := inst.Created
 			if start.IsZero() {
@@ -2283,7 +2596,7 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 						inst.Created = created
 					}
 					inst.Price, inst.DiskCost = examinerObservedRate(saved.Price, saved.DiskCost, inst)
-					inst.TransferDollars = nonNegMax(inst.TransferDollars, saved.TransferDollars)
+					mergeSavedTransferIntoInstance(saved, &inst, now)
 					inst.ObservedLiveAt = now
 					e.proxyOffline()
 					failedEnds = append(failedEnds, inst)
@@ -2293,7 +2606,7 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 					}
 					continue
 				}
-				inst.TransferDollars = nonNegMax(inst.TransferDollars, saved.TransferDollars)
+				mergeSavedTransferIntoInstance(saved, &inst, now)
 				e.say("ended examiner GPU (machine %s): exceeded --examiner-timeout (%s)", inst.ID, e.cfg.Timeout)
 				d, rerr := e.recordEndedDollars(inst, saved.Created, saved.Price, saved.RoundID, "exceeded examiner timeout")
 				endedToday += d
@@ -2323,7 +2636,9 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 					inst.Created = saved.Created
 				}
 				inst.Price, inst.DiskCost = examinerObservedRate(saved.Price, saved.DiskCost, inst)
-				inst.TransferDollars = nonNegMax(inst.TransferDollars, saved.TransferDollars)
+				mergeSavedTransferIntoInstance(saved, &inst, now)
+			} else if !hadUnresolved[inst.ID] {
+				normalizeFreshExaminerTransfer(&inst, now)
 			}
 			inst.ObservedLiveAt = now
 			failedEnds = append(failedEnds, inst)
@@ -2341,9 +2656,11 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 		if matchesSaved {
 			fallbackStart = saved.Created
 			fallbackPrice, _ = examinerObservedRate(saved.Price, saved.DiskCost, inst)
-			inst.TransferDollars = nonNegMax(inst.TransferDollars, saved.TransferDollars)
+			mergeSavedTransferIntoInstance(saved, &inst, now)
 			rid = saved.RoundID
 			endedSaved = true
+		} else if !hadUnresolved[inst.ID] {
+			normalizeFreshExaminerTransfer(&inst, now)
 		}
 		e.say("ended stray examiner GPU (machine %s, state %s)", inst.ID, inst.State)
 		d, rerr := e.recordEndedDollars(inst, fallbackStart, fallbackPrice, rid, "stray or orphaned examiner instance")
@@ -2786,16 +3103,17 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 			pendingCopy := append([]podRecord(nil), e.state.PendingSpends...)
 			e.mu.RUnlock()
 			reserved := examinerState{
-				PendingRent:     true,
-				ReservedLabel:   label,
-				RoundID:         needRound,
-				APIKey:          apiKey,
-				CertPEM:         string(certPEM),
-				Price:           off.Price,
-				DiskCost:        off.DiskCost,
-				TransferDollars: transfer,
-				Created:         attemptNow,
-				PendingSpends:   pendingCopy,
+				PendingRent:       true,
+				ReservedLabel:     label,
+				RoundID:           needRound,
+				APIKey:            apiKey,
+				CertPEM:           string(certPEM),
+				Price:             off.Price,
+				DiskCost:          off.DiskCost,
+				TransferDollars:   transfer,
+				TransferEstimated: transfer > 0,
+				Created:           attemptNow,
+				PendingSpends:     pendingCopy,
 			}
 			if err := e.writeStateFile(&reserved); err != nil {
 				return fmt.Errorf("saving pre-rental examiner.json: %w", err)
@@ -2847,28 +3165,29 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 				return fmt.Errorf("renting examiner GPU on Vast.ai: %w", rerr)
 			}
 			st := examinerState{
-				InstanceID:      id,
-				RoundID:         needRound,
-				APIKey:          apiKey,
-				CertPEM:         string(certPEM),
-				Price:           off.Price,
-				DiskCost:        off.DiskCost,
-				TransferDollars: transfer,
-				Created:         attemptNow,
+				InstanceID:        id,
+				RoundID:           needRound,
+				APIKey:            apiKey,
+				CertPEM:           string(certPEM),
+				Price:             off.Price,
+				DiskCost:          off.DiskCost,
+				TransferDollars:   transfer,
+				TransferEstimated: transfer > 0,
+				Created:           attemptNow,
 			}
 			e.mu.Lock()
-			st.PendingSpends = append([]podRecord(nil), e.state.PendingSpends...)
-			st.Unresolved = append([]ExaminerInstance(nil), e.state.Unresolved...)
+			st.PendingSpends = clonePendingSpends(e.state.PendingSpends)
+			st.Unresolved = cloneExaminerInstances(e.state.Unresolved)
 			e.state = st
 			e.mu.Unlock()
 			if err := e.persistState(&st); err != nil {
 				e.say("could not save examiner.json after renting %s (%v); unwinding rental", id, err)
 				if endErr := e.prov.EndExaminer(ctx, id); endErr == nil {
-					_ = e.recordEnded(ExaminerInstance{ID: id, Label: label, Price: off.Price, TransferDollars: transfer, Created: attemptNow}, attemptNow, off.Price, needRound, "unwound after examiner.json save failure")
+					_ = e.recordEnded(ExaminerInstance{ID: id, Label: label, Price: off.Price, TransferDollars: transfer, TransferEstimated: transfer > 0, Created: attemptNow}, attemptNow, off.Price, needRound, "unwound after examiner.json save failure")
 					e.clearState()
 					return fmt.Errorf("saving examiner.json after renting %s (unwound rental): %w", id, err)
 				} else {
-					e.setUnresolved([]ExaminerInstance{{ID: id, Label: label, State: "starting", Price: off.Price, DiskCost: off.DiskCost, TransferDollars: transfer, Created: attemptNow}})
+					e.setUnresolved([]ExaminerInstance{{ID: id, Label: label, State: "starting", Price: off.Price, DiskCost: off.DiskCost, TransferDollars: transfer, TransferEstimated: transfer > 0, Created: attemptNow, ObservedLiveAt: attemptNow}})
 					return fmt.Errorf("saving examiner.json after renting %s (unwind failed: %v): %w", id, endErr, err)
 				}
 			}
@@ -3091,6 +3410,8 @@ func resolvePendingExaminer(
 		target.Price = 0
 		target.DiskCost = 0
 		target.TransferDollars = 0
+		target.TransferEstimated = false
+		target.setTransferState(transferState{})
 		target.Created = time.Time{}
 		target.ObservedLiveAt = time.Time{}
 	}
@@ -3100,16 +3421,6 @@ func resolvePendingExaminer(
 			return false, fmt.Errorf("ending unresolved examiner GPU %s: %w", u.ID, err), nil
 		}
 		price := u.Price
-		transfer := nonNegMax(u.TransferDollars, 0)
-		if u.ID == st.InstanceID || st.PendingRent || !validRate(price) {
-			price, _ = examinerObservedRate(st.Price, st.DiskCost, *u)
-		}
-		if u.ID == st.InstanceID || st.PendingRent {
-			transfer = nonNegMax(transfer, st.TransferDollars)
-		}
-		if !validRate(price) {
-			price = 1.50
-		}
 		start := u.Created
 		if start.IsZero() {
 			start = st.Created
@@ -3117,11 +3428,30 @@ func resolvePendingExaminer(
 		if start.IsZero() || start.After(now) {
 			start = now
 		}
+		transfer := nonNegMax(u.TransferDollars, 0)
+		transferEst := u.TransferEstimated || transfer > 0
+		ts := u.transferState()
+		if u.ID == st.InstanceID || st.PendingRent || !validRate(price) {
+			price, _ = examinerObservedRate(st.Price, st.DiskCost, *u)
+		}
+		if u.ID == st.InstanceID || st.PendingRent {
+			transfer, transferEst, ts, _ = mergeExaminerTransfer(
+				st.TransferDollars, st.TransferEstimated, st.transferState(),
+				transfer, transferEst, ts,
+				u.State, start, now,
+			)
+		} else if u.State == "starting" {
+			ts.clearUnconfirmedZero(transferEst)
+		}
+		if !validRate(price) {
+			price = 1.50
+		}
 		rec := podRecord{
 			ID: u.ID, Market: "vast", Handle: "examiner", GPU: "RTX 5090",
-			Cost: price, FixedCost: transfer, Start: start, Alive: now, End: now,
+			Cost: price, FixedCost: transfer, FixedCostEstimated: transferEst || transfer > 0, Start: start, Alive: now, End: now,
 			For: "examiner", Round: roundID, Why: why,
 		}
+		rec.setTransferState(ts)
 		if onSpent != nil && !spentHasExaminer(home, u.ID) {
 			if serr := onSpent(rec); serr != nil {
 				next.PendingSpends = mergePendingSpends(next.PendingSpends, []podRecord{rec})
@@ -3213,7 +3543,7 @@ func resolvePendingExaminer(
 						u.Created = st.Created
 					}
 					u.Price, u.DiskCost = examinerObservedRate(st.Price, st.DiskCost, u)
-					u.TransferDollars = nonNegMax(u.TransferDollars, st.TransferDollars)
+					mergeSavedTransferIntoInstance(*st, &u, now)
 					u.ObservedLiveAt = now
 					failedEnds = append(failedEnds, u)
 					if firstEndErr == nil {
@@ -3222,7 +3552,6 @@ func resolvePendingExaminer(
 					continue
 				}
 				price, _ := examinerObservedRate(st.Price, st.DiskCost, match)
-				transfer := nonNegMax(match.TransferDollars, st.TransferDollars)
 				start := match.Created
 				if start.IsZero() {
 					start = st.Created
@@ -3230,11 +3559,17 @@ func resolvePendingExaminer(
 				if start.IsZero() || start.After(now) {
 					start = now
 				}
+				transfer, transferEst, ts, _ := mergeExaminerTransfer(
+					st.TransferDollars, st.TransferEstimated, st.transferState(),
+					match.TransferDollars, match.TransferEstimated, match.transferState(),
+					match.State, start, now,
+				)
 				rec := podRecord{
 					ID: match.ID, Market: "vast", Handle: "examiner", GPU: "RTX 5090",
-					Cost: price, FixedCost: transfer, Start: start, Alive: now, End: now,
+					Cost: price, FixedCost: transfer, FixedCostEstimated: transferEst || transfer > 0, Start: start, Alive: now, End: now,
 					For: "examiner", Round: st.RoundID, Why: "resolved pending examiner reservation (--end)",
 				}
+				rec.setTransferState(ts)
 				if onSpent != nil && !spentHasExaminer(home, match.ID) {
 					if serr := onSpent(rec); serr != nil {
 						next.PendingSpends = mergePendingSpends(next.PendingSpends, []podRecord{rec})
@@ -3293,7 +3628,18 @@ func resolvePendingExaminer(
 		st.PendingRent = false
 		st.ReservedLabel = ""
 		st.Price, st.DiskCost = examinerObservedRate(st.Price, st.DiskCost, match)
-		st.TransferDollars = nonNegMax(st.TransferDollars, match.TransferDollars)
+		start := st.Created
+		if start.IsZero() {
+			start = match.Created
+		}
+		est, estFlag, ts, _ := mergeExaminerTransfer(
+			st.TransferDollars, st.TransferEstimated, st.transferState(),
+			match.TransferDollars, match.TransferEstimated, match.transferState(),
+			match.State, start, now,
+		)
+		st.TransferDollars = est
+		st.TransferEstimated = estFlag
+		st.setTransferState(ts)
 		st.ObservedLiveAt = now
 		if err := writeExaminerState(home, st); err != nil {
 			return fmt.Errorf("saving adopted examiner.json: %w", err)

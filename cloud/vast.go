@@ -417,47 +417,84 @@ func vastStoppedDiskCostUnknown(state string, i vastInstance, basePrice, diskCos
 	return true
 }
 
-// vastInstanceObservedTransfer extracts provider-reported observed transfer spend when an instance
-// payload includes actual billed bandwidth usage (with confirmed unit rates whenever billed usage
-// is positive) or direct transfer charges, distinguishing observed spend from the pre-launch
-// role-based cold-start estimate.
-func vastInstanceObservedTransfer(i vastInstance) (float64, bool) {
-	if i.TransferCostBilled != nil && nonNegFinite(*i.TransferCostBilled) {
-		return *i.TransferCostBilled, true
+// vastInstanceTransferReading extracts provider-reported observed transfer spend broken down by
+// direction (inet_down_billed / inet_up_billed with confirmed unit rates) and any authoritative
+// combined transfer_cost, so alternating partial directional polls merge cumulatively without
+// dropping known charges or double-counting repeated readings.
+func vastInstanceTransferReading(i vastInstance) transferReading {
+	var tr transferReading
+	if i.TransferCostBilled != nil {
+		if !nonNegFinite(*i.TransferCostBilled) {
+			return transferReading{}
+		}
+		tr.Total = *i.TransferCostBilled
+		tr.TotalObserved = true
 	}
-	if i.InetDownBilled == nil && i.InetUpBilled == nil {
-		return 0, false
-	}
-	total := 0.0
-	observed := false
+	downInvalid := false
 	if i.InetDownBilled != nil {
 		if !nonNegFinite(*i.InetDownBilled) {
-			return 0, false
-		}
-		if *i.InetDownBilled > 0 {
+			downInvalid = true
+		} else if *i.InetDownBilled > 0 {
 			if !nonNegFinite(i.InetDownCost) || (i.InetDownCost == 0 && !i.inetDownCostSet) {
-				return 0, false
+				downInvalid = true
+			} else {
+				tr.Down = *i.InetDownBilled * i.InetDownCost
+				tr.DownObserved = true
 			}
-			total += *i.InetDownBilled * i.InetDownCost
+		} else {
+			tr.Down = 0
+			tr.DownObserved = true
 		}
-		observed = true
 	}
+	upInvalid := false
 	if i.InetUpBilled != nil {
 		if !nonNegFinite(*i.InetUpBilled) {
-			return 0, false
-		}
-		if *i.InetUpBilled > 0 {
+			upInvalid = true
+		} else if *i.InetUpBilled > 0 {
 			if !nonNegFinite(i.InetUpCost) || (i.InetUpCost == 0 && !i.inetUpCostSet) {
-				return 0, false
+				upInvalid = true
+			} else {
+				tr.Up = *i.InetUpBilled * i.InetUpCost
+				tr.UpObserved = true
 			}
-			total += *i.InetUpBilled * i.InetUpCost
+		} else {
+			tr.Up = 0
+			tr.UpObserved = true
 		}
-		observed = true
 	}
-	if !observed || !nonNegFinite(total) {
+	if !tr.TotalObserved && (downInvalid || upInvalid) {
+		return transferReading{}
+	}
+	if !tr.TotalObserved && !tr.DownObserved && !tr.UpObserved {
+		return transferReading{}
+	}
+	dirSum := 0.0
+	if tr.DownObserved {
+		dirSum += tr.Down
+	}
+	if tr.UpObserved {
+		dirSum += tr.Up
+	}
+	eff := dirSum
+	if tr.TotalObserved && tr.Total > eff {
+		eff = tr.Total
+	}
+	if !nonNegFinite(eff) {
+		return transferReading{}
+	}
+	tr.Effective = eff
+	tr.Observed = true
+	return tr
+}
+
+// vastInstanceObservedTransfer extracts provider-reported effective observed transfer spend when an
+// instance payload includes actual billed bandwidth usage or direct transfer charges.
+func vastInstanceObservedTransfer(i vastInstance) (float64, bool) {
+	tr := vastInstanceTransferReading(i)
+	if !tr.Observed {
 		return 0, false
 	}
-	return total, true
+	return tr.Effective, true
 }
 
 func vastInstanceRental(i vastInstance) Rental {
@@ -470,7 +507,7 @@ func vastInstanceRental(i vastInstance) Rental {
 	diskCost = vastStoppedDiskCost(state, i.DPHTotal, basePrice, diskCost)
 	diskCostUnknown := vastStoppedDiskCostUnknown(state, i, basePrice, diskCost)
 	fixedEst := workerOfferTransferDollars(i.InetDownCost, workerGraderDownloadGB)
-	obsTransfer, transferObserved := vastInstanceObservedTransfer(i)
+	tr := vastInstanceTransferReading(i)
 	var created time.Time
 	if i.StartDate > 0 {
 		created = time.Unix(int64(i.StartDate), 0)
@@ -478,7 +515,10 @@ func vastInstanceRental(i vastInstance) Rental {
 	r := Rental{Market: "vast", ID: strconv.FormatInt(i.ID, 10), Name: name, Card: vastCard(i.GPUName),
 		Price: price, BasePrice: basePrice, DiskCost: diskCost, DiskCostUnknown: diskCostUnknown,
 		FixedCost: fixedEst, FixedCostEstimated: fixedEst > 0,
-		ObservedTransferCost: obsTransfer, TransferObserved: transferObserved,
+		ObservedTransferCost: tr.Effective, TransferObserved: tr.Observed,
+		ObservedTransferDown: tr.Down, TransferDownObserved: tr.DownObserved,
+		ObservedTransferUp: tr.Up, TransferUpObserved: tr.UpObserved,
+		ObservedTransferTotal: tr.Total, TransferTotalObserved: tr.TotalObserved,
 		PartialRate: partial, State: state, Status: status, Created: created}
 	r.Phase = status
 	if r.Phase == "" {
@@ -990,10 +1030,17 @@ func (m *vastMarket) ListExaminers(ctx context.Context) ([]ExaminerInstance, err
 			price, basePrice, diskCost, partial := vastInstanceRate(i)
 			diskCost = vastStoppedDiskCost(state, i.DPHTotal, basePrice, diskCost)
 			transferDollars := examinerOfferTransferDollars(i.InetDownCost)
+			tr := vastInstanceTransferReading(i)
 			all = append(all, ExaminerInstance{
 				ID: strconv.FormatInt(i.ID, 10), Label: label, State: state, Status: status,
 				PublicIP: strings.TrimSpace(i.PublicIPAddr), HostPort: hostPort,
-				Price: price, BasePrice: basePrice, DiskCost: diskCost, TransferDollars: transferDollars, PartialRate: partial, Created: created,
+				Price: price, BasePrice: basePrice, DiskCost: diskCost,
+				TransferDollars: transferDollars, TransferEstimated: transferDollars > 0,
+				ObservedTransferCost: tr.Effective, TransferObserved: tr.Observed,
+				ObservedTransferDown: tr.Down, TransferDownObserved: tr.DownObserved,
+				ObservedTransferUp: tr.Up, TransferUpObserved: tr.UpObserved,
+				ObservedTransferTotal: tr.Total, TransferTotalObserved: tr.TotalObserved,
+				PartialRate: partial, Created: created,
 			})
 		}
 		if out.NextToken == nil || *out.NextToken == "" {

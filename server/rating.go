@@ -559,6 +559,17 @@ func gainsByRound(entries []entryRow, editorID string) map[int]float64 {
 //
 // The first record goes to the first editor that beats the unedited baseline on the same
 // terms.
+func (a *App) roundMargin(s *State, roundIdx int) float64 {
+	if s != nil {
+		if rd := s.Rounds[roundIdx]; rd != nil && rd.Scale != "" {
+			if m, ok := a.season.Record.Margin[rd.Scale]; ok {
+				return m
+			}
+		}
+	}
+	return a.season.Record.Margin[a.cfg.Scale]
+}
+
 func (a *App) checkRecord(tx *Tx, roundIdx int) {
 	s := tx.s
 	rule := a.season.Record
@@ -566,7 +577,6 @@ func (a *App) checkRecord(tx *Tx, roundIdx int) {
 		return
 	}
 	b := a.computeBoard(s)
-	margin := rule.Margin[a.cfg.Scale]
 	alpha := rule.Alpha / float64(len(rule.Looks))
 	holder, holderN := "", 0
 	if h := s.holder(); h != nil {
@@ -578,16 +588,21 @@ func (a *App) checkRecord(tx *Tx, roundIdx int) {
 		if c.ID == holder {
 			continue
 		}
-		var d []float64
+		var raw, d []float64
 		for _, e := range b.Entries {
 			if e.EditorID != c.ID {
 				continue
 			}
+			var diff float64
 			if holder == "" {
-				d = append(d, e.Gain-margin)
+				diff = e.Gain
 			} else if h, ok := held[e.RoundIdx]; ok {
-				d = append(d, e.Gain-h-margin)
+				diff = e.Gain - h
+			} else {
+				continue
 			}
+			raw = append(raw, diff)
+			d = append(d, diff-a.roundMargin(s, e.RoundIdx))
 		}
 		look := 0
 		for _, l := range rule.Looks {
@@ -598,8 +613,8 @@ func (a *App) checkRecord(tx *Tx, roundIdx int) {
 		if look == 0 {
 			continue // nothing new to look at
 		}
-		p := pairedP(d) // H0: the mean advantage is no more than the margin
-		advantage := mean(d) + margin
+		p := pairedP(d) // H0: the mean advantage does not exceed the contributing rounds' margins
+		advantage := mean(raw)
 		for _, l := range rule.Looks { // a look at 10 rounds uses up the look at 5
 			if l <= look && s.Looks[lookKey(c.ID, holder, l)] == nil {
 				tx.saveLook(&Look{Challenger: c.ID, Holder: holder, Look: l, Shared: len(d), Advantage: advantage, P: p, At: now()})

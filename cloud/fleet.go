@@ -240,29 +240,435 @@ type podRecord struct {
 	Refused  string `json:"refused,omitempty"`
 	// What it was rented for (curators, early grades, grades, bigger students), the round, and
 	// when it was expected to report its last grade (history.go).
-	For                  string           `json:"for,omitempty"`
-	Round                string           `json:"round,omitempty"`
-	Report               time.Time        `json:"report,omitzero"`
-	Handle               string           `json:"handle"`
-	GPU                  string           `json:"gpu"`
-	Cloud                string           `json:"cloud"`
-	PendingID            string           `json:"pending_id,omitempty"` // original pendingRent.ID when adopted/ended from l.Pending
-	Cost                 float64          `json:"cost"`
-	DiskCost             float64          `json:"disk_cost,omitempty"`
-	DiskCostUnknown      bool             `json:"disk_cost_unknown,omitempty"`
-	TransferCost         float64          `json:"transfer_cost,omitempty"`
-	FixedCost            float64          `json:"fixed_cost,omitempty"`             // exact fixed order fee (Clore) or role-based cold-start transfer estimate (Vast) incurred at Start
-	FixedCostEstimated   bool             `json:"fixed_cost_estimated,omitempty"`   // true when FixedCost is a pre-launch transfer estimate rather than an exact provider fee
-	ObservedTransferCost float64          `json:"observed_transfer_cost,omitempty"` // provider-reported observed transfer spend when usage is available
-	TransferObserved     bool             `json:"transfer_observed,omitempty"`      // true when the provider reported observed transfer usage for this contract
-	PartialCost          bool             `json:"partial_cost,omitempty"`
-	Start                time.Time        `json:"start"`
-	Alive                time.Time        `json:"alive"`                 // last seen running
-	StoppedAt            time.Time        `json:"stopped_at,omitzero"`   // when current stopped interval began (disk billing continues until ResumeAt/End)
-	StoppedSeen          time.Time        `json:"stopped_seen,omitzero"` // last confirmed stopped observation (bounds confirmed storage across downtime)
-	ResumeAt             time.Time        `json:"resume_at,omitzero"`    // when current running interval began after prior Segments
-	End                  time.Time        `json:"end,omitzero"`
-	Segments             []billingSegment `json:"segments,omitempty"` // completed prior billing intervals preserved across stop/resume
+	For                   string           `json:"for,omitempty"`
+	Round                 string           `json:"round,omitempty"`
+	Report                time.Time        `json:"report,omitzero"`
+	Handle                string           `json:"handle"`
+	GPU                   string           `json:"gpu"`
+	Cloud                 string           `json:"cloud"`
+	PendingID             string           `json:"pending_id,omitempty"` // original pendingRent.ID when adopted/ended from l.Pending
+	Cost                  float64          `json:"cost"`
+	DiskCost              float64          `json:"disk_cost,omitempty"`
+	DiskCostUnknown       bool             `json:"disk_cost_unknown,omitempty"`
+	TransferCost          float64          `json:"transfer_cost,omitempty"`
+	FixedCost             float64          `json:"fixed_cost,omitempty"`              // exact fixed order fee (Clore) or role-based cold-start transfer estimate (Vast) incurred at Start
+	FixedCostEstimated    bool             `json:"fixed_cost_estimated,omitempty"`    // true when FixedCost is a pre-launch transfer estimate rather than an exact provider fee
+	ObservedTransferCost  float64          `json:"observed_transfer_cost,omitempty"`  // effective cumulative provider-reported observed transfer spend
+	TransferObserved      bool             `json:"transfer_observed,omitempty"`       // true when the provider reported observed transfer usage for this contract
+	ObservedTransferDown  float64          `json:"observed_transfer_down,omitempty"`  // cumulative observed download transfer spend when reported
+	TransferDownObserved  bool             `json:"transfer_down_observed,omitempty"`  // true when the provider reported download transfer usage
+	ObservedTransferUp    float64          `json:"observed_transfer_up,omitempty"`    // cumulative observed upload transfer spend when reported
+	TransferUpObserved    bool             `json:"transfer_up_observed,omitempty"`    // true when the provider reported upload transfer usage
+	ObservedTransferTotal float64          `json:"observed_transfer_total,omitempty"` // explicit combined provider transfer_cost when reported
+	TransferTotalObserved bool             `json:"transfer_total_observed,omitempty"` // true when the provider reported explicit combined transfer_cost
+	TransferCharges       []transferCharge `json:"transfer_charges,omitempty"`        // incremental observed transfer charges attributed to the UTC day they were accounted for
+	PartialCost           bool             `json:"partial_cost,omitempty"`
+	Start                 time.Time        `json:"start"`
+	Alive                 time.Time        `json:"alive"`                 // last seen running
+	StoppedAt             time.Time        `json:"stopped_at,omitzero"`   // when current stopped interval began (disk billing continues until ResumeAt/End)
+	StoppedSeen           time.Time        `json:"stopped_seen,omitzero"` // last confirmed stopped observation (bounds confirmed storage across downtime)
+	ResumeAt              time.Time        `json:"resume_at,omitzero"`    // when current running interval began after prior Segments
+	End                   time.Time        `json:"end,omitzero"`
+	Segments              []billingSegment `json:"segments,omitempty"` // completed prior billing intervals preserved across stop/resume
+}
+
+// transferCharge records one incremental increase in cumulative observed transfer spend against the
+// timestamp at which it was accounted for so multi-day workers attribute new-day transfer to the
+// UTC day that incurred it rather than backdating it onto Start.
+type transferCharge struct {
+	At     time.Time `json:"at"`
+	Amount float64   `json:"amount"`
+}
+
+// transferReading is one provider snapshot of cumulative observed transfer usage (per-direction
+// and/or explicit combined total).
+type transferReading struct {
+	Effective     float64
+	Observed      bool
+	Down          float64
+	DownObserved  bool
+	Up            float64
+	UpObserved    bool
+	Total         float64
+	TotalObserved bool
+}
+
+// transferState is the shared cumulative + timestamped observed-transfer accounting state used by
+// both worker podRecords and ephemeral Examiner instances.
+type transferState struct {
+	Observed      float64
+	HasObserved   bool
+	Down          float64
+	DownObserved  bool
+	Up            float64
+	UpObserved    bool
+	Total         float64
+	TotalObserved bool
+	Charges       []transferCharge
+}
+
+func cloneTransferCharges(src []transferCharge) []transferCharge {
+	if len(src) == 0 {
+		return nil
+	}
+	dst := make([]transferCharge, len(src))
+	copy(dst, src)
+	return dst
+}
+
+func (s transferState) clone() transferState {
+	s.Charges = cloneTransferCharges(s.Charges)
+	return s
+}
+
+func (s transferState) effectiveObserved() float64 {
+	eff := 0.0
+	if nonNegFinite(s.Observed) {
+		eff = s.Observed
+	}
+	dir := 0.0
+	if s.DownObserved && nonNegFinite(s.Down) {
+		dir += s.Down
+	}
+	if s.UpObserved && nonNegFinite(s.Up) {
+		dir += s.Up
+	}
+	if (s.DownObserved || s.UpObserved) && dir > eff {
+		eff = dir
+	}
+	if s.TotalObserved && nonNegFinite(s.Total) && s.Total > eff {
+		eff = s.Total
+	}
+	return eff
+}
+
+func (s transferState) chargesSum() float64 {
+	sum := 0.0
+	for _, tc := range s.Charges {
+		if validRate(tc.Amount) {
+			sum += tc.Amount
+		}
+	}
+	return sum
+}
+
+func transferChargeTime(start, now time.Time) time.Time {
+	if now.IsZero() {
+		return start
+	}
+	if !start.IsZero() && start.Before(now) && now.Equal(startOfDay(now)) {
+		// A reading polled at exact 00:00:00 UTC for a contract started on an earlier UTC day
+		// reflects usage accumulated before midnight (0s of the new day have elapsed).
+		return now.Add(-time.Nanosecond)
+	}
+	if !start.IsZero() && now.Before(start) {
+		return start
+	}
+	return now
+}
+
+func (s *transferState) appendCharge(at time.Time, delta float64) {
+	if !validRate(delta) || delta <= 1e-9 {
+		return
+	}
+	if n := len(s.Charges); n > 0 && s.Charges[n-1].At.Equal(at) {
+		s.Charges[n-1].Amount += delta
+		return
+	}
+	s.Charges = append(s.Charges, transferCharge{At: at, Amount: delta})
+}
+
+func (s *transferState) mergeReading(tr transferReading, fixedEstimated bool, state string, start, now time.Time) bool {
+	if !tr.Observed {
+		return false
+	}
+	effIn := tr.Effective
+	if !nonNegFinite(effIn) {
+		return false
+	}
+	if fixedEstimated && effIn == 0 && state == "starting" {
+		return false
+	}
+	prevEff := s.effectiveObserved()
+	changed := false
+	if !s.HasObserved {
+		s.HasObserved = true
+		changed = true
+	}
+	if tr.DownObserved && nonNegFinite(tr.Down) {
+		if !s.DownObserved || tr.Down > s.Down+1e-9 {
+			s.DownObserved = true
+			if tr.Down > s.Down {
+				s.Down = tr.Down
+			}
+			changed = true
+		}
+	}
+	if tr.UpObserved && nonNegFinite(tr.Up) {
+		if !s.UpObserved || tr.Up > s.Up+1e-9 {
+			s.UpObserved = true
+			if tr.Up > s.Up {
+				s.Up = tr.Up
+			}
+			changed = true
+		}
+	}
+	if tr.TotalObserved && nonNegFinite(tr.Total) {
+		if !s.TotalObserved || tr.Total > s.Total+1e-9 {
+			s.TotalObserved = true
+			if tr.Total > s.Total {
+				s.Total = tr.Total
+			}
+			changed = true
+		}
+	}
+	if !tr.DownObserved && !tr.UpObserved && !tr.TotalObserved && effIn > s.Observed+1e-9 {
+		s.Observed = effIn
+		changed = true
+	}
+	newEff := s.effectiveObserved()
+	if newEff > s.Observed+1e-9 {
+		s.Observed = newEff
+		changed = true
+	}
+	if delta := newEff - prevEff; delta > 1e-9 {
+		s.appendCharge(transferChargeTime(start, now), delta)
+		changed = true
+	}
+	return changed
+}
+
+func combineTransferCharges(a, b []transferCharge) []transferCharge {
+	out := make([]transferCharge, 0, len(a)+len(b))
+	for _, tc := range a {
+		if validRate(tc.Amount) && tc.Amount > 1e-9 {
+			out = append(out, tc)
+		}
+	}
+	for _, tc := range b {
+		if validRate(tc.Amount) && tc.Amount > 1e-9 {
+			out = append(out, tc)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		return out[i].At.Before(out[j].At)
+	})
+	var merged []transferCharge
+	for _, tc := range out {
+		if n := len(merged); n > 0 && merged[n-1].At.Equal(tc.At) {
+			merged[n-1].Amount += tc.Amount
+		} else {
+			merged = append(merged, tc)
+		}
+	}
+	return merged
+}
+
+func (s *transferState) mergeState(other transferState, fixedEstimated bool, state string, start, now time.Time) bool {
+	otherEff := other.effectiveObserved()
+	if !other.HasObserved && len(other.Charges) == 0 && !other.DownObserved && !other.UpObserved && !other.TotalObserved {
+		return false
+	}
+	if fixedEstimated && otherEff == 0 && len(other.Charges) == 0 && state == "starting" {
+		return false
+	}
+	prevEff := s.effectiveObserved()
+	prevChargesSum := s.chargesSum()
+	prevDownOnly := s.DownObserved && !s.UpObserved && !s.TotalObserved
+	prevUpOnly := s.UpObserved && !s.DownObserved && !s.TotalObserved
+	otherSum := other.chargesSum()
+	otherDownOnly := other.DownObserved && !other.UpObserved && !other.TotalObserved
+	otherUpOnly := other.UpObserved && !other.DownObserved && !other.TotalObserved
+	changed := false
+	if !s.HasObserved {
+		s.HasObserved = true
+		changed = true
+	}
+	if other.DownObserved && nonNegFinite(other.Down) {
+		if !s.DownObserved || other.Down > s.Down+1e-9 {
+			s.DownObserved = true
+			if other.Down > s.Down {
+				s.Down = other.Down
+			}
+			changed = true
+		}
+	}
+	if other.UpObserved && nonNegFinite(other.Up) {
+		if !s.UpObserved || other.Up > s.Up+1e-9 {
+			s.UpObserved = true
+			if other.Up > s.Up {
+				s.Up = other.Up
+			}
+			changed = true
+		}
+	}
+	if other.TotalObserved && nonNegFinite(other.Total) {
+		if !s.TotalObserved || other.Total > s.Total+1e-9 {
+			s.TotalObserved = true
+			if other.Total > s.Total {
+				s.Total = other.Total
+			}
+			changed = true
+		}
+	}
+	if nonNegFinite(other.Observed) && other.Observed > s.Observed+1e-9 {
+		s.Observed = other.Observed
+		changed = true
+	}
+	newEff := s.effectiveObserved()
+	if newEff > s.Observed+1e-9 {
+		s.Observed = newEff
+		changed = true
+	}
+	disjointDir := (prevDownOnly && otherUpOnly) || (prevUpOnly && otherDownOnly)
+	prevLegacy := max(0, prevEff-prevChargesSum)
+	otherLegacy := max(0, otherEff-otherSum)
+	covered := max(prevEff, prevChargesSum)
+	switch {
+	case disjointDir && len(other.Charges) > 0 && prevChargesSum+otherSum <= newEff+1e-9:
+		s.Charges = combineTransferCharges(s.Charges, other.Charges)
+		covered = max(max(prevEff, otherEff), min(newEff, prevChargesSum+otherSum+prevLegacy+otherLegacy))
+		changed = true
+	case len(s.Charges) > 0 && len(other.Charges) > 0 && otherSum > 0 &&
+		(otherEff <= prevLegacy+1e-9 || prevEff <= otherLegacy+1e-9) &&
+		prevChargesSum+otherSum <= newEff+1e-9:
+		s.Charges = combineTransferCharges(s.Charges, other.Charges)
+		covered = max(max(prevEff, otherEff), s.chargesSum())
+		changed = true
+	case (otherSum > prevChargesSum+1e-9 && otherEff >= prevEff-1e-9) ||
+		(len(s.Charges) == 0 && len(other.Charges) > 0 && otherEff >= prevEff-1e-9):
+		s.Charges = cloneTransferCharges(other.Charges)
+		covered = max(max(prevEff, otherEff), otherSum)
+		changed = true
+	}
+	// Only append a new timestamped delta for genuine cumulative increases not already covered
+	// by either side's persisted Charges or pre-existing legacy Observed baseline.
+	if delta := newEff - covered; delta > 1e-9 {
+		s.appendCharge(transferChargeTime(start, now), delta)
+		changed = true
+	}
+	return changed
+}
+
+func (s *transferState) clearUnconfirmedZero(fixedEstimated bool) {
+	if fixedEstimated && s.HasObserved && s.effectiveObserved() == 0 && len(s.Charges) == 0 {
+		s.HasObserved = false
+		s.DownObserved = false
+		s.UpObserved = false
+		s.TotalObserved = false
+	}
+}
+
+func (s transferState) dollarsBetween(fixed float64, fixedEstimated bool, start, from, to time.Time, retired bool) float64 {
+	fixedVal := 0.0
+	if validRate(fixed) {
+		fixedVal = fixed
+	}
+	startInWindow := !start.IsZero() && !start.Before(from) && !start.After(to)
+	effObs := s.effectiveObserved()
+	sumCharges := 0.0
+	windowCharges := 0.0
+	for _, tc := range s.Charges {
+		if !validRate(tc.Amount) {
+			continue
+		}
+		sumCharges += tc.Amount
+		if !tc.At.IsZero() && !tc.At.Before(from) && !tc.At.After(to) {
+			windowCharges += tc.Amount
+		}
+	}
+	legacyDelta := 0.0
+	if s.HasObserved && effObs > sumCharges+1e-9 {
+		legacyDelta = effObs - sumCharges
+	}
+	totalObs := sumCharges + legacyDelta
+
+	if !fixedEstimated {
+		total := 0.0
+		if startInWindow {
+			total += fixedVal
+		}
+		if s.HasObserved || len(s.Charges) > 0 {
+			total += windowCharges
+			if startInWindow {
+				total += legacyDelta
+			}
+		}
+		return total
+	}
+	if !s.HasObserved && len(s.Charges) == 0 {
+		if startInWindow {
+			return fixedVal
+		}
+		return 0
+	}
+	total := windowCharges
+	if startInWindow {
+		total += legacyDelta
+		if !retired && fixedVal > totalObs {
+			total += fixedVal - totalObs
+		}
+	}
+	return total
+}
+
+func rentalTransferReading(p *Rental) transferReading {
+	if p == nil {
+		return transferReading{}
+	}
+	tr := transferReading{
+		Effective:     max(0, p.ObservedTransferCost),
+		Observed:      p.TransferObserved,
+		Down:          max(0, p.ObservedTransferDown),
+		DownObserved:  p.TransferDownObserved,
+		Up:            max(0, p.ObservedTransferUp),
+		UpObserved:    p.TransferUpObserved,
+		Total:         max(0, p.ObservedTransferTotal),
+		TotalObserved: p.TransferTotalObserved,
+	}
+	if tr.DownObserved || tr.UpObserved || tr.TotalObserved {
+		tr.Observed = true
+		dir := 0.0
+		if tr.DownObserved {
+			dir += tr.Down
+		}
+		if tr.UpObserved {
+			dir += tr.Up
+		}
+		if dir > tr.Effective {
+			tr.Effective = dir
+		}
+		if tr.TotalObserved && tr.Total > tr.Effective {
+			tr.Effective = tr.Total
+		}
+	}
+	return tr
+}
+
+func (r podRecord) transferState() transferState {
+	return transferState{
+		Observed:      r.ObservedTransferCost,
+		HasObserved:   r.TransferObserved,
+		Down:          r.ObservedTransferDown,
+		DownObserved:  r.TransferDownObserved,
+		Up:            r.ObservedTransferUp,
+		UpObserved:    r.TransferUpObserved,
+		Total:         r.ObservedTransferTotal,
+		TotalObserved: r.TransferTotalObserved,
+		Charges:       r.TransferCharges,
+	}
+}
+
+func (r *podRecord) setTransferState(ts transferState) {
+	r.ObservedTransferCost = ts.Observed
+	r.TransferObserved = ts.HasObserved
+	r.ObservedTransferDown = ts.Down
+	r.TransferDownObserved = ts.DownObserved
+	r.ObservedTransferUp = ts.Up
+	r.TransferUpObserved = ts.UpObserved
+	r.ObservedTransferTotal = ts.Total
+	r.TransferTotalObserved = ts.TotalObserved
+	r.TransferCharges = ts.Charges
 }
 
 // billingSegment is one completed, immutable billing interval for a worker contract so stop/resume
@@ -287,39 +693,6 @@ func (r *podRecord) market() string {
 // also has no known positive running rate.
 const unknownStoppedFallbackRate = 0.50
 
-// oneTimeSpend returns the one-time startup/transfer charge attributed to Start in daily spend:
-//   - For exact fixed fees (!FixedCostEstimated, e.g. Clore order fee), charges FixedCost plus
-//     any provider-reported ObservedTransferCost.
-//   - For estimated cold-start transfer allowances (FixedCostEstimated, e.g. Vast ingress):
-//   - If the provider reported observed transfer usage (TransferObserved), uses max(FixedCost,
-//     ObservedTransferCost) while the contract is still live (!retired: conservative floor while
-//     cold start may still be downloading, immediately reflecting overruns), and uses the observed
-//     ObservedTransferCost once the contract is retired.
-//   - Otherwise falls back to the pre-launch role-based FixedCost estimate.
-func (r podRecord) oneTimeSpend(retired bool) float64 {
-	fixed := 0.0
-	if validRate(r.FixedCost) {
-		fixed = r.FixedCost
-	}
-	obs := 0.0
-	if nonNegFinite(r.ObservedTransferCost) {
-		obs = r.ObservedTransferCost
-	}
-	if !r.FixedCostEstimated {
-		if r.TransferObserved {
-			return fixed + obs
-		}
-		return fixed
-	}
-	if r.TransferObserved {
-		if retired {
-			return obs
-		}
-		return max(fixed, obs)
-	}
-	return fixed
-}
-
 // runningSpendRate returns the ongoing hourly compute+disk rate used for daily spend accrual.
 // When FixedCost or ObservedTransferCost already accounts for a one-time startup charge (e.g. Vast
 // cold-start download or Clore order creation fee) whose amortized equivalent TransferCost is
@@ -329,7 +702,7 @@ func (r podRecord) runningSpendRate() float64 {
 	if !validRate(r.Cost) {
 		return 0
 	}
-	if (validRate(r.FixedCost) || r.TransferObserved) && validRate(r.TransferCost) {
+	if (validRate(r.FixedCost) || r.TransferObserved || len(r.TransferCharges) > 0) && validRate(r.TransferCost) {
 		return max(0, r.Cost-r.TransferCost)
 	}
 	return r.Cost
@@ -499,10 +872,7 @@ func (r podRecord) dollarsBetweenMode(from, to time.Time, retired bool) float64 
 	if end.IsZero() {
 		end = r.Alive
 	}
-	total := 0.0
-	if ot := r.oneTimeSpend(retired); ot > 0 && !r.Start.IsZero() && !r.Start.Before(from) && !r.Start.After(to) {
-		total += ot
-	}
+	total := r.transferState().dollarsBetween(r.FixedCost, r.FixedCostEstimated, r.Start, from, to, retired)
 	runRate := r.runningSpendRate()
 	stopRate := r.stoppedSpendRate()
 	effRunRate := runRate
@@ -863,20 +1233,14 @@ func applyOfferRateToRental(o Offer, r *Rental) {
 	}
 }
 
-// rentalObservedTransferTrusted reports whether a provider rental's observed transfer reading
-// should latch TransferObserved on a podRecord: ignores $0.00 startup snapshots on contracts whose
-// transfer charge is estimated while the container is still starting (before cold-start downloads).
-func rentalObservedTransferTrusted(fixedEstimated bool, p *Rental) bool {
-	if p == nil || !p.TransferObserved {
-		return false
-	}
-	return !(fixedEstimated && p.ObservedTransferCost == 0 && p.State == "starting")
-}
-
 // reconcileRentalRate merges a provider-reported Rental rate with a persisted podRecord,
 // preserving known storage/transfer/all-in cost components whenever the provider returns a
 // partial (base-only), lower (e.g. stopped disk-only or compute-only), or zero rate.
 func reconcileRentalRate(r *podRecord, p *Rental) {
+	reconcileRentalRateAt(r, p, time.Time{})
+}
+
+func reconcileRentalRateAt(r *podRecord, p *Rental, now time.Time) {
 	if p == nil {
 		return
 	}
@@ -913,15 +1277,18 @@ func reconcileRentalRate(r *podRecord, p *Rental) {
 	if r.FixedCostEstimated {
 		p.FixedCostEstimated = true
 	}
-	if rentalObservedTransferTrusted(r.FixedCostEstimated, p) {
-		r.TransferObserved = true
-		if nonNegFinite(p.ObservedTransferCost) && p.ObservedTransferCost > r.ObservedTransferCost {
-			r.ObservedTransferCost = p.ObservedTransferCost
-		}
-	}
+	ts := r.transferState()
+	ts.mergeReading(rentalTransferReading(p), r.FixedCostEstimated, p.State, r.Start, now)
+	r.setTransferState(ts)
 	if r.TransferObserved {
 		p.TransferObserved = true
 		p.ObservedTransferCost = r.ObservedTransferCost
+		p.ObservedTransferDown = r.ObservedTransferDown
+		p.TransferDownObserved = r.TransferDownObserved
+		p.ObservedTransferUp = r.ObservedTransferUp
+		p.TransferUpObserved = r.TransferUpObserved
+		p.ObservedTransferTotal = r.ObservedTransferTotal
+		p.TransferTotalObserved = r.TransferTotalObserved
 	}
 	missingTransfer := max(0, r.TransferCost-origTransfer)
 	switch {
@@ -1098,7 +1465,7 @@ func (f *Fleet) note(ctx context.Context, l *ledger, rentals []Rental, answered 
 					Grades: pr.Grades, Host: host, CPU: pr.CPU, Curators: pr.Curators,
 					For: pr.For, Round: pr.Round, Report: pr.Report,
 				}
-				reconcileRentalRate(rec, p)
+				reconcileRentalRateAt(rec, p, now)
 				endAt := resolveStopTime(start, now, p.EndedAt)
 				l.Pods[key] = rec
 				if rerr := f.retire(l, key, endAt); rerr != nil {
@@ -1130,7 +1497,7 @@ func (f *Fleet) note(ctx context.Context, l *ledger, rentals []Rental, answered 
 				Grades: pr.Grades, Host: host, CPU: pr.CPU, Curators: pr.Curators,
 				For: pr.For, Round: pr.Round, Report: pr.Report,
 			}
-			reconcileRentalRate(rec, p)
+			reconcileRentalRateAt(rec, p, now)
 			l.Pods[key] = rec
 			delete(l.Pending, id)
 			f.event(p, pr.Handle, "rented", "adopted after uncertain create")
@@ -1188,16 +1555,18 @@ func (f *Fleet) note(ctx context.Context, l *ledger, rentals []Rental, answered 
 		if r.Terminating {
 			p.Terminating = true
 		}
-		reconcileRentalRate(r, p)
+		reconcileRentalRateAt(r, p, now)
 		if p.live() {
 			r.markLiveAt(now, p.ResumedAt)
 		}
 	}
 	retireGone := func(key string, r *podRecord, p *Rental) error {
-		if p == nil && r.FixedCostEstimated && r.TransferObserved && r.ObservedTransferCost == 0 {
+		if p == nil {
 			// If an instance vanished from provider listings without a terminal billing payload,
 			// do not let an earlier zero-transfer snapshot erase the pre-launch estimate.
-			r.TransferObserved = false
+			ts := r.transferState()
+			ts.clearUnconfirmedZero(r.FixedCostEstimated)
+			r.setTransferState(ts)
 		}
 		r.Gone = true
 		gone := Rental{Market: r.market(), ID: r.ID, Card: r.GPU}
@@ -1270,7 +1639,7 @@ func (f *Fleet) note(ctx context.Context, l *ledger, rentals []Rental, answered 
 			continue
 		}
 		if p != nil && p.live() {
-			reconcileRentalRate(r, p)
+			reconcileRentalRateAt(r, p, now)
 			r.markLiveAt(now, p.ResumedAt)
 			continue
 		}
@@ -1278,7 +1647,7 @@ func (f *Fleet) note(ctx context.Context, l *ledger, rentals []Rental, answered 
 			if p.Name == "" {
 				p.Name = r.Handle
 			}
-			reconcileRentalRate(r, p)
+			reconcileRentalRateAt(r, p, now)
 			if p.State == "stopped" {
 				// Keep stopped instance in fleet.json (with Stopped=true) until m.End(ctx, id)
 				// confirms provider deletion or Lookup confirms absence (e.g. to stop Vast disk
@@ -1319,7 +1688,7 @@ func (f *Fleet) note(ctx context.Context, l *ledger, rentals []Rental, answered 
 					fresh.Host = r.Host
 				}
 				fresh.Terminating = r.Terminating
-				reconcileRentalRate(r, fresh)
+				reconcileRentalRateAt(r, fresh, now)
 				r.markLiveAt(now, fresh.ResumedAt)
 				extra = append(extra, *fresh)
 			case lerr == nil && exists && fresh != nil:
@@ -1330,7 +1699,7 @@ func (f *Fleet) note(ctx context.Context, l *ledger, rentals []Rental, answered 
 					fresh.Host = r.Host
 				}
 				fresh.Terminating = r.Terminating
-				reconcileRentalRate(r, fresh)
+				reconcileRentalRateAt(r, fresh, now)
 				if fresh.State == "stopped" {
 					r.markStoppedAt(now, fresh.StoppedAt)
 					extra = append(extra, *fresh)
@@ -1606,6 +1975,7 @@ func (f *Fleet) retire(l *ledger, key string, end time.Time) error {
 		return nil
 	}
 	recCopy := *r
+	recCopy.TransferCharges = cloneTransferCharges(r.TransferCharges)
 	if recCopy.Stopped {
 		recCopy.markStopped(end)
 	}
@@ -1969,6 +2339,9 @@ func recordedRental(r *podRecord, status string) Rental {
 		Price: cost, DiskCost: r.DiskCost, DiskCostUnknown: r.DiskCostUnknown, TransferCost: r.TransferCost,
 		FixedCost: r.FixedCost, FixedCostEstimated: r.FixedCostEstimated,
 		ObservedTransferCost: r.ObservedTransferCost, TransferObserved: r.TransferObserved,
+		ObservedTransferDown: r.ObservedTransferDown, TransferDownObserved: r.TransferDownObserved,
+		ObservedTransferUp: r.ObservedTransferUp, TransferUpObserved: r.TransferUpObserved,
+		ObservedTransferTotal: r.ObservedTransferTotal, TransferTotalObserved: r.TransferTotalObserved,
 		PartialRate: r.PartialCost, State: state, Status: status, Created: r.Start, Terminating: r.Terminating, Unconfirmed: true,
 	}
 }
@@ -2075,7 +2448,7 @@ func (f *Fleet) look(ctx context.Context) (*View, error) {
 			continue
 		}
 		if rec != nil {
-			reconcileRentalRate(rec, p)
+			reconcileRentalRateAt(rec, p, f.now())
 			if rec.Terminating {
 				p.Terminating = true
 			}
@@ -3102,17 +3475,15 @@ func (f *Fleet) rent(ctx context.Context, v *View, k *Key, gpus []Offer, site st
 		v.Hourly += r.Price
 		v.addLiveRental(r)
 		fixedEst := c.FixedCostEstimated || r.FixedCostEstimated
-		obsTrusted := rentalObservedTransferTrusted(fixedEst, r)
-		obsTransfer := 0.0
-		if obsTrusted && nonNegFinite(r.ObservedTransferCost) {
-			obsTransfer = r.ObservedTransferCost
-		}
+		rentNow := f.now()
 		rec := &podRecord{ID: r.ID, Market: r.Market, Handle: k.Handle, GPU: c.Card, Cloud: cloud,
 			Cost: r.Price, DiskCost: max(c.DiskCost, r.DiskCost), TransferCost: c.TransferCost,
 			FixedCost: max(fixed, r.FixedCost), FixedCostEstimated: fixedEst,
-			ObservedTransferCost: obsTransfer, TransferObserved: obsTrusted,
-			Start: began, Alive: f.now(), Tracked: true, PendingID: pr.ID,
+			Start: began, Alive: rentNow, Tracked: true, PendingID: pr.ID,
 			Host: c.Host, CPU: c.CPU, Curators: l.Env["STET_WORKER_EDITS"] == "1", For: plan.what, Round: plan.round, Report: plannedReport}
+		ts := rec.transferState()
+		ts.mergeReading(rentalTransferReading(r), rec.FixedCostEstimated, r.State, rec.Start, rentNow)
+		rec.setTransferState(ts)
 		// Seen from its start: a machine that asks for work before the next look still has its
 		// boot counted (calibrate.go). Lium's first, at 41 s, never was.
 		if f.starting == nil {
@@ -3221,8 +3592,8 @@ func (f *Fleet) end(ctx context.Context, v *View, endings []Ending) error {
 		if unconfirmedStopped {
 			if lu, ok := m.(rentalLookup); ok {
 				if fresh, exists, lerr := lu.Lookup(ctx, r.ID); lerr == nil && exists && fresh != nil {
-					reconcileRentalRate(rec, fresh)
 					now := f.now()
+					reconcileRentalRateAt(rec, fresh, now)
 					if fresh.live() {
 						rec.markLiveAt(now, fresh.ResumedAt)
 						unconfirmedStopped = false

@@ -894,18 +894,23 @@ func (a *App) recordRace(st *State, b *Board, limit int) recordRace {
 		if c.ID == holder || !(c.Ladder || c.Provisional) {
 			continue // only a curator still being run can come to share more rounds
 		}
-		var d []float64
+		var d, excess []float64
 		for _, e := range of[c.ID] {
+			var diff float64
 			if holder == "" {
-				d = append(d, e.Gain)
+				diff = e.Gain
 			} else if h, ok := held[e.RoundIdx]; ok {
-				d = append(d, e.Gain-h)
+				diff = e.Gain - h
+			} else {
+				continue
 			}
+			d = append(d, diff)
+			excess = append(excess, diff-a.roundMargin(st, e.RoundIdx))
 		}
 		row := challengerRow{BoardRow: c, Shared: len(d)}
 		if len(d) > 0 {
 			row.Mean = mean(d)
-			row.Clear = row.Mean > race.Margin
+			row.Clear = mean(excess) > 0
 		}
 		if len(d) >= 2 {
 			se := stddev(d) / math.Sqrt(float64(len(d)))

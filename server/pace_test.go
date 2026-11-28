@@ -50,6 +50,7 @@ func (w *world) waiting(a *actor, gpu string, pass float64, trained ...*claimed)
 	h["hardware"] = map[string]any{"gpu": gpu, "device": "cuda", "backend": "cuda"}
 	if pass > 0 {
 		h["pass_seconds"] = pass
+		h["pass_scale"] = w.app.cfg.Scale
 	}
 	ids := []int64{}
 	for _, c := range trained {
@@ -214,7 +215,7 @@ func TestJustAfterTheExamTheGradesAScoreWaitsForGoToTheFastestMachines(t *testin
 		t.Fatalf("five minutes and the margin do not fit in four: %+v", more.Job)
 	}
 	h := w.hello(false)
-	h["pass_seconds"], h["hardware"] = 600.0, map[string]any{"gpu": "RTX 4090", "device": "cuda", "backend": "cuda"}
+	h["pass_seconds"], h["pass_scale"], h["hardware"] = 600.0, w.app.cfg.Scale, map[string]any{"gpu": "RTX 4090", "device": "cuda", "backend": "cuda"}
 	if c := w.claimWith(quick, h); c.Job != nil {
 		t.Fatalf("quick does not train before the exam: %+v", c.Job)
 	}
@@ -230,7 +231,7 @@ func TestJustAfterTheExamTheGradesAScoreWaitsForGoToTheFastestMachines(t *testin
 		RetryAfter int `json:"retry_after"`
 	}
 	sh := w.hello(false)
-	sh["early"], sh["pass_seconds"], sh["hardware"] = true, 1500.0, map[string]any{"gpu": "RTX 3080", "device": "cuda", "backend": "cuda"}
+	sh["early"], sh["pass_seconds"], sh["pass_scale"], sh["hardware"] = true, 1500.0, w.app.cfg.Scale, map[string]any{"gpu": "RTX 3080", "device": "cuda", "backend": "cuda"}
 	if code := slow.do("POST", "/api/v1/jobs/claim", sh, &out); code != 200 || out.Job != nil || out.RetryAfter < 5 || out.RetryAfter > 60 {
 		t.Fatalf("slow is held back: HTTP %d %+v", code, out)
 	}
@@ -469,4 +470,62 @@ func TestReview32PassSecondsScopedByScaleAcrossMixedRoundsAndRestarts(t *testing
 	if out2.Job == nil || out2.Job.Kind != "grade" {
 		t.Fatalf("nano pass_seconds=30 falsely triggered tooEarly on standard round; got job=%+v", out2.Job)
 	}
+}
+
+// Review 33 P2 #5: An older still-compatible 0.6.0 verifier sending `pass_seconds` WITHOUT
+// `pass_scale` (e.g. a 30s nano timing sent to a standard server) MUST be treated as unknown for
+// scale-specific scheduling and /admin/work, falling back to settled timings whose scale is known.
+func TestReview33UntaggedPassSecondsIgnoredByScheduler(t *testing.T) {
+	pub, priv := newKey()
+	w := newWorld(t, pub)
+	w.app.cfg.Scale = "standard"
+	w.app.cfg.EarlyWindow = 300 * time.Second
+	anchor := w.join("anchor-one", priv)
+	bob := w.rented(anchor, "bob")
+
+	w.submit(w.join("owner-ed", nil), "ed-one", "print(1)")
+	w.app.st.update(context.Background(), func(tx *Tx) error {
+		rd0 := &Round{Idx: 1, Scale: "standard", Status: "settled", DrawnAt: now() - 3600, ExamAt: now() - 2100}
+		tx.saveRound(rd0)
+		edID := ""
+		for id := range tx.s.Editors {
+			edID = id
+		}
+		tx.saveEntry(&Entry{
+			RoundIdx: 1, EditorID: edID, Status: "settled", SettledAt: now() - 1000,
+			Detail: &EntryDetail{
+				Train:    &TrainInfo{Seconds: 1000},
+				Hardware: json.RawMessage(`{"gpu":"RTX 4090","device":"cuda","backend":"cuda"}`),
+			},
+		})
+		return nil
+	})
+	w.drawWithoutExam()
+	if n := w.editAll(anchor); n != 1 {
+		t.Fatalf("expected 1 edit run on open standard round, got %d", n)
+	}
+
+	// Exact 0.6.0 client payload: pass_seconds=30.0 with NO pass_scale.
+	untagged := w.hello(false)
+	untagged["early"] = true
+	untagged["hardware"] = map[string]any{"gpu": "RTX 4090", "device": "cuda", "backend": "cuda"}
+	untagged["pass_seconds"] = 30.0
+	var out struct {
+		Job *Job `json:"job"`
+	}
+	if code := bob.do("POST", "/api/v1/jobs/claim", untagged, &out); code != 200 {
+		t.Fatalf("untagged claim failed: HTTP %d", code)
+	}
+	if out.Job == nil || out.Job.Kind != "grade" {
+		t.Fatalf("untagged 30s pass_seconds MUST fall back to settled 1000s standard timing and hand out grade; got job=%+v", out.Job)
+	}
+	if m := w.machine(w.work(anchor), "bob"); m.PassSeconds != 0 {
+		t.Fatalf("untagged pass_seconds MUST NOT leak into /admin/work PassSeconds: got %+v", m)
+	}
+	w.app.st.view(func(s *State) {
+		pt := passTimes(s, w.app.season.Digest)
+		if got := pt["standard"]["RTX 4090"]; got != 1000 {
+			t.Fatalf("untagged 30s pass_seconds contaminated standard passTimes: want 1000, got %v", got)
+		}
+	})
 }

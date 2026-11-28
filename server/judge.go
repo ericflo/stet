@@ -225,8 +225,9 @@ type Hello struct {
 	Trained []int64 `json:"trained,omitempty"`
 	// PassSeconds is how long this machine last took to train a grade's student, kept on its
 	// disk from its latest grade (stet 0.4.4 and later); 0 until it has graded.
-	// PassScale is the scale PassSeconds was measured at (empty for older clients, which are
-	// stamped with the server's active scale when saved).
+	// PassScale is the scale PassSeconds was measured at. Untagged timings (empty PassScale,
+	// e.g. from older clients) are treated as unknown for scale-specific scheduling so a
+	// timing from another scale cannot contaminate a round's scheduler.
 	PassSeconds float64 `json:"pass_seconds,omitempty"`
 	PassScale   string  `json:"pass_scale,omitempty"`
 	// SkipEarlyRounds lists round IDs on which this machine already timed out waiting for the
@@ -1986,15 +1987,14 @@ func (a *App) claim(ctx context.Context, acctID int64, h *Hello) (*Handed, error
 		}
 		// Said with every request, and nothing when it has not graded yet: a key moves from
 		// one rented machine to the next, and the last one's GPU may have been another.
+		// Require an explicit valid PassScale so an untagged timing from an older client
+		// (e.g. a nano timing sent to a standard server) stays unknown rather than
+		// contaminating scale-specific scheduling or /admin/work.
 		acct.PassSeconds, acct.PassSeason, acct.PassScale = 0, "", ""
 		passScale := ""
-		if p := h.PassSeconds; finite(p) && p > 0 && p < 86400 {
-			if h.PassScale == "" {
-				passScale = a.cfg.Scale
-			} else if _, ok := a.season.Scales[h.PassScale]; ok {
+		if p := h.PassSeconds; finite(p) && p > 0 && p < 86400 && h.PassScale != "" {
+			if _, ok := a.season.Scales[h.PassScale]; ok {
 				passScale = h.PassScale
-			}
-			if passScale != "" {
 				acct.PassSeconds, acct.PassSeason, acct.PassScale = p, a.season.Digest, passScale
 			}
 		}

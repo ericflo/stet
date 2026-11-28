@@ -736,17 +736,23 @@ GPU scoring)*.
        `tokens_sha256` and `init_sha256` (`5bd1d5ce4547697e...`). Replaying the archived per-item
        scores from `run_r10_workers.py` across all 3 shipped Inkling draws gives aggregate cross-card
        baseline diffs of **`+0.000463` (`draw_b`), `+0.001068` (`phase9`), and `+0.001732` (`draw1`)**
-       (`8.7×–32×` inside the `0.015` baseline tolerance), and `fineweb2` gain diffs of **`+0.001127 /
-       +0.000797 / −0.000364` own-base** and **`+0.002008 / +0.001724 / +0.001173` shared-base** on
-       the `1,854`-item v2 rescore (**`+0.002008 / +0.001724 / +0.001175`** on the current
-       `1,853`-item v3/v4 filter; `6.0×–10.2×` inside the `0.012` grade tolerance). **Qualification:**
-       `run_r10_workers.py` invoked `exam_score.sit()` directly after `train()` exited its
-       `_deterministic_cuda(True)` context (restoring PyTorch's default deterministic flags),
-       bypassing `grade.py:sit_exam`'s explicit `_deterministic_cuda(True)` wrapper. These figures
+       (`8.7×–32×` inside the `0.015` baseline tolerance), and `fineweb2` (`4090 − 5090`, before
+       server rounding) gain diffs of:
+       - **Own-card baseline:** `+0.001127` (`draw_b`), `+0.000797` (`phase9`), `−0.000364` (`draw1`, `1,854`-item v2; `−0.000362` on `1,853`-item v3+)
+       - **Both candidates against the RTX 5090 baseline:** `+0.002008 / +0.001724 / +0.001173` on the `1,854`-item v2 rescore (**`+0.002008 / +0.001724 / +0.001175`** on the current `618 / 615 / 620` retained v3+ items; `6.0×–10.2×` inside the `0.012` grade tolerance)
+       - **Both candidates against the two-grader settlement per-item median baseline (`server/exam.go`):** **`+0.002004 / +0.001837 / +0.001277`** on the current `618 / 615 / 620` retained v3+ items (`6.0×–9.4×` inside the `0.012` grade tolerance)
+
+       **Qualification:** `run_r10_workers.py` sat pre-filter reasoning-only files directly via
+       `exam_score.sit()` after `train()` exited its `_deterministic_cuda(True)` context (restoring
+       PyTorch's default deterministic flags), bypassing both `grade.py:sit_exam`'s explicit
+       `_deterministic_cuda(True)` wrapper and the complete released exam's length-sorted `score.py`
+       forward batching pass (which also packs zero-weight comprehension items; current filtering
+       alone changes batch shape for `169/615` Phase 9 and `212/620` Draw 1 items). These figures
        are therefore a replay of the archived measurement path; the size of any score change under
-       the released `grade.py:sit_exam` sitting path on both cards is **unmeasured** until the
-       baseline and candidate are rerun through `grade.py:sit_exam` on both cards with the
-       deterministic flags recorded at the call site.
+       the released sitting path is **unmeasured** until the same complete, filtered released exam
+       is rerun through `grade.py:sit_exam` on both cards, with both baseline vectors and both
+       candidate vectors passed through server settlement and the final rounded grades recorded
+       alongside the exam digest and deterministic flags.
 
    - **Prior 3-Architecture NVIDIA Cross-Card Parity (`Qwen3-8B` exams, `r8_gate`: `5090` vs `4090` vs `3090` at `standard` 65.5M tokens; `5090` vs `AMD 8060S` at `nano`/`micro`; final pooled-trim `code_share = 0.15` scorer):**
      Training the exact archived `fineweb2.jsonl` from the Draw B seed produced **bit-identical

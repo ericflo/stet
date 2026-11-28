@@ -1356,6 +1356,9 @@ func cmdWorkersResolve(ctx context.Context, f *Fleet, end bool, clearIDs ...stri
 						// [StoppedSeen, endAt]; conservatively budget any unobserved gap at compute rate.
 						rec.markLiveAt(endAt, time.Time{})
 					}
+					ts := rec.transferState()
+					ts.clearUnconfirmedZero(rec.FixedCostEstimated)
+					rec.setTransferState(ts)
 					f.event(&Rental{Market: mName, ID: rec.ID, Name: rec.Handle, Host: rec.Host, Card: rec.GPU, Price: rec.Cost}, rec.Handle, "ended", rec.Why)
 					if rerr := f.retire(l, key, endAt); rerr != nil && firstErr == nil {
 						firstErr = rerr
@@ -1366,7 +1369,7 @@ func cmdWorkersResolve(ctx context.Context, f *Fleet, end bool, clearIDs ...stri
 					continue
 				}
 				if lerr == nil && exists && fresh != nil && !f.o.DryRun {
-					reconcileRentalRate(rec, fresh)
+					reconcileRentalRateAt(rec, fresh, now)
 					if fresh.live() {
 						rec.markLiveAt(now, fresh.ResumedAt)
 						changed = true
@@ -1393,7 +1396,7 @@ func cmdWorkersResolve(ctx context.Context, f *Fleet, end bool, clearIDs ...stri
 		fresh, exists, _, lerr := lookupContract(m, rec.ID)
 		stateConfirmed := false
 		if lerr == nil && exists && fresh != nil {
-			reconcileRentalRate(rec, fresh)
+			reconcileRentalRateAt(rec, fresh, now)
 			switch {
 			case fresh.live():
 				rec.markLiveAt(now, fresh.ResumedAt)
@@ -1416,7 +1419,7 @@ func cmdWorkersResolve(ctx context.Context, f *Fleet, end bool, clearIDs ...stri
 					if !exists2 {
 						endErr = nil
 					} else if fresh2 != nil {
-						reconcileRentalRate(rec, fresh2)
+						reconcileRentalRateAt(rec, fresh2, now)
 						if fresh2.live() {
 							rec.markLiveAt(now, fresh2.ResumedAt)
 							changed = true
@@ -1435,11 +1438,16 @@ func cmdWorkersResolve(ctx context.Context, f *Fleet, end bool, clearIDs ...stri
 			}
 			continue
 		}
-		if !stateConfirmed && rec.Stopped {
-			// Lookup did not confirm the contract stayed stopped during [StoppedSeen, endAt];
-			// retain confirmed storage through StoppedSeen and conservatively bill the unobserved
-			// interval at the compute rate before retiring.
-			rec.markLiveAt(endAt, time.Time{})
+		if !stateConfirmed {
+			if rec.Stopped {
+				// Lookup did not confirm the contract stayed stopped during [StoppedSeen, endAt];
+				// retain confirmed storage through StoppedSeen and conservatively bill the unobserved
+				// interval at the compute rate before retiring.
+				rec.markLiveAt(endAt, time.Time{})
+			}
+			ts := rec.transferState()
+			ts.clearUnconfirmedZero(rec.FixedCostEstimated)
+			rec.setTransferState(ts)
 		}
 		f.event(&Rental{Market: mName, ID: rec.ID, Name: rec.Handle, Host: rec.Host, Card: rec.GPU, Price: rec.Cost}, rec.Handle, "ended", rec.Why)
 		if rerr := f.retire(l, key, endAt); rerr != nil && firstErr == nil {
@@ -1621,7 +1629,7 @@ func cmdWorkersResolve(ctx context.Context, f *Fleet, end bool, clearIDs ...stri
 				Grades: pr.Grades, Host: host, CPU: pr.CPU, Curators: pr.Curators,
 				For: pr.For, Round: pr.Round, Report: pr.Report,
 			}
-			reconcileRentalRate(rec, p)
+			reconcileRentalRateAt(rec, p, now)
 			endAt := resolveStopTime(start, now, p.EndedAt)
 			l.Pods[key] = rec
 			if rerr := f.retire(l, key, endAt); rerr != nil {
@@ -1667,7 +1675,7 @@ func cmdWorkersResolve(ctx context.Context, f *Fleet, end bool, clearIDs ...stri
 			Grades: pr.Grades, Host: host, CPU: pr.CPU, Curators: pr.Curators,
 			For: pr.For, Round: pr.Round, Report: pr.Report,
 		}
-		reconcileRentalRate(rec, p)
+		reconcileRentalRateAt(rec, p, now)
 		if !end {
 			if f.o.DryRun {
 				f.say("would adopt matching contract %s for pending worker %s on %s", p.ID, pr.Handle, marketTitle(pr.Market))
@@ -1788,7 +1796,8 @@ func cmdDownRentalMeta(ctx context.Context, f *Fleet, market, id string, meta *R
 			}
 			rec = l.Pods[key]
 			now := f.now()
-			if rec == nil {
+			createdNew := rec == nil
+			if createdNew {
 				rec = &podRecord{
 					ID: id, Market: market, Start: now, Alive: now, Tracked: true,
 				}
@@ -1809,12 +1818,6 @@ func cmdDownRentalMeta(ctx context.Context, f *Fleet, market, id string, meta *R
 					if nonNegFinite(meta.FixedCost) {
 						rec.FixedCost = meta.FixedCost
 						rec.FixedCostEstimated = meta.FixedCostEstimated
-					}
-					if rentalObservedTransferTrusted(rec.FixedCostEstimated, meta) {
-						rec.TransferObserved = true
-						if nonNegFinite(meta.ObservedTransferCost) {
-							rec.ObservedTransferCost = meta.ObservedTransferCost
-						}
 					}
 					if !meta.Created.IsZero() && !meta.Created.After(now) {
 						rec.Start = meta.Created
@@ -1860,13 +1863,19 @@ func cmdDownRentalMeta(ctx context.Context, f *Fleet, market, id string, meta *R
 					delete(l.Pending, pendingID)
 				}
 			}
+			if createdNew && meta != nil {
+				ts := rec.transferState()
+				ts.mergeReading(rentalTransferReading(meta), rec.FixedCostEstimated, meta.State, rec.Start, now)
+				rec.setTransferState(ts)
+			}
 		}
 	}
 	stateConfirmed := false
 	if rec != nil && lockErr == nil && ledgerErr == nil {
 		if lu, ok := m.(rentalLookup); ok {
 			if fresh, exists, lerr := lu.Lookup(ctx, id); lerr == nil && exists && fresh != nil {
-				reconcileRentalRate(rec, fresh)
+				now := f.now()
+				reconcileRentalRateAt(rec, fresh, now)
 				if rec.Handle == "" && fresh.Name != "" {
 					rec.Handle = fresh.Name
 				}
@@ -1876,7 +1885,6 @@ func cmdDownRentalMeta(ctx context.Context, f *Fleet, market, id string, meta *R
 				if rec.Host == "" && fresh.Host != "" {
 					rec.Host = fresh.Host
 				}
-				now := f.now()
 				if fresh.live() {
 					rec.markLiveAt(now, fresh.ResumedAt)
 					stateConfirmed = true
@@ -1934,8 +1942,13 @@ func cmdDownRentalMeta(ctx context.Context, f *Fleet, market, id string, meta *R
 	}
 	if rec != nil {
 		endAt := f.now()
-		if !stateConfirmed && rec.Stopped {
-			rec.markLiveAt(endAt, time.Time{})
+		if !stateConfirmed {
+			if rec.Stopped {
+				rec.markLiveAt(endAt, time.Time{})
+			}
+			ts := rec.transferState()
+			ts.clearUnconfirmedZero(rec.FixedCostEstimated)
+			rec.setTransferState(ts)
 		}
 		if err := f.retire(l, key, endAt); err != nil {
 			return fmt.Errorf("ended probe %s on %s, but retiring ledger entry failed: %w", id, marketTitle(market), err)

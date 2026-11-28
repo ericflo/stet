@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"path/filepath"
@@ -442,5 +443,125 @@ func TestACuratorThatNeverFinishedIsListedLastWithNoNumber(t *testing.T) {
 	}
 	if got := strings.Join(names, " "); got != "good once low never" {
 		t.Fatalf("the board's order: %s", got)
+	}
+}
+
+// Review 33 P1 #1: checkRecord (and recordRace.Clear) MUST apply each contributing round's
+// recorded scale margin rather than the current server process's STET_SCALE, keeping published
+// Advantage in raw gain units across both restart directions and mixed-scale histories.
+func TestReview33RecordUsesPerRoundMarginAcrossRestartsAndMixedScaleHistory(t *testing.T) {
+	runCheck := func(t *testing.T, serverScale string, roundScales []string, gains []float64) (awarded bool, adv, p float64, clear bool) {
+		t.Helper()
+		pub, priv := newKey()
+		w := newWorld(t, pub)
+		w.app.cfg.Scale = serverScale
+		anchor := w.join("anchor-one", priv)
+		edID := w.submit(anchor, "challenger", "print(1)")
+
+		err := w.app.st.update(context.Background(), func(tx *Tx) error {
+			if ed := tx.s.Editors[edID]; ed != nil {
+				ed.Public = true
+				ed.Status = "active"
+				tx.saveEditor(ed)
+			}
+			baseLoss := 5.5
+			for i, sc := range roundScales {
+				idx := i + 1
+				tx.saveRound(&Round{
+					Idx: idx, Status: "settled", Scale: sc, BaselineLoss: &baseLoss,
+					DrawnAt: now() - int64(3600*(len(roundScales)-i)),
+					ExamAt:  now() - int64(3500*(len(roundScales)-i)),
+				})
+				tx.saveEntry(&Entry{
+					RoundIdx: idx, EditorID: edID, Status: "settled",
+					Valid: true, Gain: gains[i], SettledAt: now() - int64(3400*(len(roundScales)-i)),
+				})
+			}
+			w.app.checkRecord(tx, len(roundScales))
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		w.app.st.view(func(s *State) {
+			awarded = s.holder() != nil && s.holder().EditorID == edID
+			lk := s.Looks[lookKey(edID, "", 5)]
+			if lk == nil {
+				t.Fatalf("expected look@5 recorded")
+			}
+			adv, p = lk.Advantage, lk.P
+			if awarded {
+				rec := s.holder()
+				if math.Abs(rec.Advantage-adv) > 1e-12 || math.Abs(rec.P-p) > 1e-12 {
+					t.Fatalf("record Advantage/P mismatch with look: rec=(%v,%v) look=(%v,%v)", rec.Advantage, rec.P, adv, p)
+				}
+			}
+			// Also check recordRace.Clear before any holder existed (when not awarded).
+			b := w.app.computeBoard(s)
+			if !awarded {
+				race := w.app.recordRace(s, b, 10)
+				if len(race.Rows) != 1 {
+					t.Fatalf("expected 1 challenger row in recordRace, got %+v", race.Rows)
+				}
+				clear = race.Rows[0].Clear
+			} else {
+				clear = true
+			}
+		})
+		return awarded, adv, p, clear
+	}
+
+	// 1. Exact reviewer repro: 5 settled `nano` rounds with gains 0.0098..0.0102.
+	//    nano margin = 0.030 (no record), standard margin = 0.005 (would falsely award record!).
+	//    MUST yield NO record under BOTH STET_SCALE=nano AND STET_SCALE=standard!
+	nanoScales := []string{"nano", "nano", "nano", "nano", "nano"}
+	gains01 := []float64{0.0098, 0.0099, 0.0100, 0.0101, 0.0102}
+	awN, advN, pN, clN := runCheck(t, "nano", nanoScales, gains01)
+	awS, advS, pS, clS := runCheck(t, "standard", nanoScales, gains01)
+	if awN || awS {
+		t.Fatalf("5 nano rounds at 0.010 gain MUST NOT award record on either scale: nano=%v standard=%v", awN, awS)
+	}
+	if clN || clS {
+		t.Fatalf("recordRace.Clear MUST be false on 5 nano rounds at 0.010 gain: nano=%v standard=%v", clN, clS)
+	}
+	if math.Abs(advN-0.0100) > 1e-9 || math.Abs(advS-advN) > 1e-12 || math.Abs(pS-pN) > 1e-12 {
+		t.Fatalf("nano->standard restart changed record test: nano=(adv=%v,p=%v) standard=(adv=%v,p=%v)", advN, pN, advS, pS)
+	}
+
+	// 2. Reverse restart direction: 5 settled `standard` rounds with gains 0.0098..0.0102.
+	//    MUST award record under BOTH STET_SCALE=standard AND STET_SCALE=nano with identical Advantage & P!
+	stdScales := []string{"standard", "standard", "standard", "standard", "standard"}
+	awSS, advSS, pSS, _ := runCheck(t, "standard", stdScales, gains01)
+	awSN, advSN, pSN, _ := runCheck(t, "nano", stdScales, gains01)
+	if !awSS || !awSN {
+		t.Fatalf("5 standard rounds at 0.010 gain MUST award record on both scales: standard=%v nano=%v", awSS, awSN)
+	}
+	if math.Abs(advSS-0.0100) > 1e-9 || math.Abs(advSN-advSS) > 1e-12 || math.Abs(pSN-pSS) > 1e-12 {
+		t.Fatalf("standard->nano restart changed record test: standard=(adv=%v,p=%v) nano=(adv=%v,p=%v)", advSS, pSS, advSN, pSN)
+	}
+
+	// 3. Genuinely mixed-scale history: 2 nano (0.030) + 3 standard (0.005) -> effective margin 0.015.
+	mixedScales := []string{"nano", "nano", "standard", "standard", "standard"}
+	// 3a. Mean gain 0.012 beats standard's 0.005 but NOT mixed 0.015 -> NO record on either scale, raw Advantage = 0.012!
+	gains12 := []float64{0.0118, 0.0119, 0.0120, 0.0121, 0.0122}
+	awM1S, advM1S, pM1S, clM1S := runCheck(t, "standard", mixedScales, gains12)
+	awM1N, advM1N, pM1N, clM1N := runCheck(t, "nano", mixedScales, gains12)
+	if awM1S || awM1N || clM1S || clM1N {
+		t.Fatalf("mixed history at 0.012 (< 0.015 mixed margin) must not award/clear: std=(%v,%v) nano=(%v,%v)", awM1S, clM1S, awM1N, clM1N)
+	}
+	if math.Abs(advM1S-0.0120) > 1e-9 || math.Abs(advM1N-advM1S) > 1e-12 || math.Abs(pM1N-pM1S) > 1e-12 {
+		t.Fatalf("mixed history (below) differed across scales: std=(adv=%v,p=%v) nano=(adv=%v,p=%v)", advM1S, pM1S, advM1N, pM1N)
+	}
+
+	// 3b. Mean gain 0.045 (exceeds both per-round margins cleanly) -> awards record on BOTH scales
+	//     with raw Advantage = 0.0450 (NOT corrupted by adding back a.cfg.Scale's margin!).
+	gains45 := []float64{0.0448, 0.0449, 0.0450, 0.0451, 0.0452}
+	awM2S, advM2S, pM2S, _ := runCheck(t, "standard", mixedScales, gains45)
+	awM2N, advM2N, pM2N, _ := runCheck(t, "nano", mixedScales, gains45)
+	if !awM2S || !awM2N {
+		t.Fatalf("mixed history at 0.045 must award record on both scales: std=%v nano=%v", awM2S, awM2N)
+	}
+	if math.Abs(advM2S-0.0450) > 1e-9 || math.Abs(advM2N-advM2S) > 1e-12 || math.Abs(pM2N-pM2S) > 1e-12 {
+		t.Fatalf("mixed history (above) raw Advantage or P differed across scales: std=(adv=%v,p=%v) nano=(adv=%v,p=%v)", advM2S, pM2S, advM2N, pM2N)
 	}
 }
