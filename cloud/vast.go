@@ -262,9 +262,34 @@ type vastInstance struct {
 	DPHTotal       float64               `json:"dph_total"`
 	DiskSpace      float64               `json:"disk_space"`
 	StorageCost    float64               `json:"storage_cost"`
+	InetDownCost   float64               `json:"inet_down_cost"`
 	StartDate      float64               `json:"start_date"`
 	PublicIPAddr   string                `json:"public_ipaddr"`
 	Ports          map[string][]vastPort `json:"ports"`
+	diskSpaceSet   bool
+	storageCostSet bool
+}
+
+func (v *vastInstance) UnmarshalJSON(data []byte) error {
+	type alias vastInstance
+	var raw struct {
+		alias
+		RawDiskSpace   *float64 `json:"disk_space"`
+		RawStorageCost *float64 `json:"storage_cost"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*v = vastInstance(raw.alias)
+	if raw.RawDiskSpace != nil {
+		v.DiskSpace = *raw.RawDiskSpace
+		v.diskSpaceSet = true
+	}
+	if raw.RawStorageCost != nil {
+		v.StorageCost = *raw.RawStorageCost
+		v.storageCostSet = true
+	}
+	return nil
 }
 
 // vastInstanceRate extracts the conservative hourly rate from a Vast.ai instance listing.
@@ -328,6 +353,26 @@ func vastState(i vastInstance) (state, status string) {
 	return s, s
 }
 
+// vastStoppedDiskCostUnknown reports whether a stopped Vast.ai instance's storage rate could not
+// be determined (omitted/null storage_cost and no positive dph_total while disk storage is
+// attached or unreported), distinguishing unknown pricing from an explicit $0.00/h free-storage
+// report (storage_cost: 0, disk_space: 0, or positive dph_total == dph_base).
+func vastStoppedDiskCostUnknown(state string, i vastInstance, basePrice, diskCost float64) bool {
+	if state != "stopped" || validRate(diskCost) {
+		return false
+	}
+	if i.storageCostSet && nonNegFinite(i.StorageCost) && i.StorageCost == 0 {
+		return false
+	}
+	if i.diskSpaceSet && nonNegFinite(i.DiskSpace) && i.DiskSpace == 0 {
+		return false
+	}
+	if validRate(i.DPHTotal) && validRate(basePrice) {
+		return false
+	}
+	return true
+}
+
 func vastInstanceRental(i vastInstance) Rental {
 	state, status := vastState(i)
 	name := ""
@@ -336,12 +381,13 @@ func vastInstanceRental(i vastInstance) Rental {
 	}
 	price, basePrice, diskCost, partial := vastInstanceRate(i)
 	diskCost = vastStoppedDiskCost(state, i.DPHTotal, basePrice, diskCost)
+	diskCostUnknown := vastStoppedDiskCostUnknown(state, i, basePrice, diskCost)
 	var created time.Time
 	if i.StartDate > 0 {
 		created = time.Unix(int64(i.StartDate), 0)
 	}
 	r := Rental{Market: "vast", ID: strconv.FormatInt(i.ID, 10), Name: name, Card: vastCard(i.GPUName),
-		Price: price, BasePrice: basePrice, DiskCost: diskCost, PartialRate: partial,
+		Price: price, BasePrice: basePrice, DiskCost: diskCost, DiskCostUnknown: diskCostUnknown, PartialRate: partial,
 		State: state, Status: status, Created: created}
 	r.Phase = status
 	if r.Phase == "" {
@@ -497,14 +543,22 @@ func (m *vastMarket) Check(ctx context.Context) (Account, error) {
 	return a, nil
 }
 
+func examinerOfferTransferDollars(inetDownCost float64) float64 {
+	if nonNegFinite(inetDownCost) && inetDownCost > 0 {
+		return examinerDownloadGB * inetDownCost
+	}
+	return 0
+}
+
 // ExaminerOffers searches Vast.ai for verified single RTX 5090 hosts suited to serving the
 // Season 3 pinned Inkling-2-Mini vLLM container, preferring gigabit+ hosts (>=1500 Mbps) so the
 // vLLM image + 18 GB model weights pull quickly, and falling back to >=500 / >=200 Mbps when
-// supply is tight.
+// supply is tight. Metered ingress charges for the 18 GB model pull are included in offer
+// filtering, ranking, and daily spend accounting.
 func (m *vastMarket) ExaminerOffers(ctx context.Context, maxPrice float64) ([]ExaminerOffer, error) {
 	for _, minDown := range []int{1500, 500, 200} {
 		q := map[string]any{
-			"type": "ondemand", "limit": 50, "order": [][]string{{"dph_total", "asc"}},
+			"type": "ondemand", "limit": 2000, "order": [][]string{{"dph_total", "asc"}},
 			"allocated_storage": examinerDiskGB,
 			"verified":          map[string]any{"eq": true}, "rentable": map[string]any{"eq": true}, "rented": map[string]any{"eq": false},
 			"external": map[string]any{"eq": false}, "num_gpus": map[string]any{"eq": 1}, "gpu_name": map[string]any{"eq": "RTX 5090"},
@@ -529,16 +583,24 @@ func (m *vastMarket) ExaminerOffers(ctx context.Context, maxPrice float64) ([]Ex
 			if !ok {
 				continue
 			}
-			if maxPrice > 0 && price > maxPrice+1e-9 {
+			transferDollars := examinerOfferTransferDollars(o.InetDownCost)
+			if maxPrice > 0 && price+transferDollars > maxPrice+1e-9 {
 				continue
 			}
 			offers = append(offers, ExaminerOffer{
 				ID: strconv.FormatInt(o.ID, 10), Card: vastCard(o.GPUName), Price: price, DiskCost: diskCost,
-				CUDA: o.CUDAMaxGood, Region: o.Geolocation, InetDown: o.InetDown,
+				TransferDollars: transferDollars,
+				CUDA:            o.CUDAMaxGood, Region: o.Geolocation, InetDown: o.InetDown,
 			})
 		}
 		if len(offers) > 0 {
-			sort.SliceStable(offers, func(i, j int) bool { return offers[i].Price < offers[j].Price })
+			sort.SliceStable(offers, func(i, j int) bool {
+				ei, ej := offers[i].effectiveHourly(), offers[j].effectiveHourly()
+				if ei != ej {
+					return ei < ej
+				}
+				return offers[i].Price < offers[j].Price
+			})
 			return offers, nil
 		}
 	}
@@ -809,10 +871,11 @@ func (m *vastMarket) ListExaminers(ctx context.Context) ([]ExaminerInstance, err
 			}
 			price, basePrice, diskCost, partial := vastInstanceRate(i)
 			diskCost = vastStoppedDiskCost(state, i.DPHTotal, basePrice, diskCost)
+			transferDollars := examinerOfferTransferDollars(i.InetDownCost)
 			all = append(all, ExaminerInstance{
 				ID: strconv.FormatInt(i.ID, 10), Label: label, State: state, Status: status,
 				PublicIP: strings.TrimSpace(i.PublicIPAddr), HostPort: hostPort,
-				Price: price, BasePrice: basePrice, DiskCost: diskCost, PartialRate: partial, Created: created,
+				Price: price, BasePrice: basePrice, DiskCost: diskCost, TransferDollars: transferDollars, PartialRate: partial, Created: created,
 			})
 		}
 		if out.NextToken == nil || *out.NextToken == "" {

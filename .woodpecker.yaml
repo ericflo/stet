@@ -80,7 +80,7 @@ steps:
       - export HOME=/tmp/stet-home UV_CACHE_DIR=/tmp/stet-uv UV_LINK_MODE=copy
       - uv venv /tmp/stet-venv
       - VIRTUAL_ENV=/tmp/stet-venv uv pip install --index-url https://download.pytorch.org/whl/cpu torch==2.14.0
-      - VIRTUAL_ENV=/tmp/stet-venv uv pip install -e '.[dev]' safetensors==0.8.0 transformers==5.22.2
+      - VIRTUAL_ENV=/tmp/stet-venv uv pip install -e '.[dev]' safetensors==0.8.0 tokenizers==0.23.3 transformers==5.22.2
       - export PATH=/tmp/stet-venv/bin:$$PATH
       - python -m pytest -q
     backend_options:

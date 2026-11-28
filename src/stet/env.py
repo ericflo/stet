@@ -110,7 +110,7 @@ def grade_packages(season: Season) -> tuple[str, ...]:
     if explicit := env.get("grade_packages"):
         return tuple(explicit)
     if (season.raw.get("student") or {}).get("kind") == "hf_topreset":
-        return ("safetensors", "torch", "transformers")
+        return ("safetensors", "tokenizers", "torch", "transformers")
     return ("torch",)
 
 

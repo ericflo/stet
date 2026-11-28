@@ -276,6 +276,7 @@
     ],
     "grade_packages": [
       "safetensors",
+      "tokenizers",
       "torch",
       "transformers"
     ],

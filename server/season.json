@@ -22,7 +22,7 @@
   "key_bytes": 64,
   "min_letters": 38
  },
- "digest": "56c8c9aa8d88e89e78b2eca88e22910ab51055ae62fc40f9f6957f2b11d64966",
+ "digest": "b47ecddf356b4d7371a1d9486ef6f908cd0ba46bc491e50ba5e3a8e6ad7b8018",
  "draw_grid_seconds": 600,
  "environment": {
   "also": {
@@ -227,6 +227,7 @@
   ],
   "grade_packages": [
    "safetensors",
+   "tokenizers",
    "torch",
    "transformers"
   ],

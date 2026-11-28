@@ -1747,7 +1747,7 @@ if [ "${STET_LIGHT:-}" = "1" ] || [ "${STET_NO_TORCH:-}" = "1" ]; then
   uv tool install --force --python "$PY" "stet-cli @ $WHEEL"
 else
   # Which build of PyTorch, and which extras. Grade-only machines install only the lean "train"
-  # extra (torch, transformers, safetensors). Full curator machines on NVIDIA Linux x86_64 also
+  # extra (torch, transformers, tokenizers, safetensors). Full curator machines on NVIDIA Linux x86_64 also
   # install the "cuda" extra (vLLM, Liger). With an AMD GPU and no NVIDIA one, the ROCm build.
   INDEX="${STET_TORCH_INDEX:-}"
   if [ "${STET_GRADE_ONLY:-}" = "1" ]; then

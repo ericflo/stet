@@ -240,24 +240,26 @@ type podRecord struct {
 	Refused  string `json:"refused,omitempty"`
 	// What it was rented for (curators, early grades, grades, bigger students), the round, and
 	// when it was expected to report its last grade (history.go).
-	For          string           `json:"for,omitempty"`
-	Round        string           `json:"round,omitempty"`
-	Report       time.Time        `json:"report,omitzero"`
-	Handle       string           `json:"handle"`
-	GPU          string           `json:"gpu"`
-	Cloud        string           `json:"cloud"`
-	PendingID    string           `json:"pending_id,omitempty"` // original pendingRent.ID when adopted/ended from l.Pending
-	Cost         float64          `json:"cost"`
-	DiskCost     float64          `json:"disk_cost,omitempty"`
-	TransferCost float64          `json:"transfer_cost,omitempty"`
-	PartialCost  bool             `json:"partial_cost,omitempty"`
-	Start        time.Time        `json:"start"`
-	Alive        time.Time        `json:"alive"`                 // last seen running
-	StoppedAt    time.Time        `json:"stopped_at,omitzero"`   // when current stopped interval began (disk billing continues until ResumeAt/End)
-	StoppedSeen  time.Time        `json:"stopped_seen,omitzero"` // last confirmed stopped observation (bounds confirmed storage across downtime)
-	ResumeAt     time.Time        `json:"resume_at,omitzero"`    // when current running interval began after prior Segments
-	End          time.Time        `json:"end,omitzero"`
-	Segments     []billingSegment `json:"segments,omitempty"` // completed prior billing intervals preserved across stop/resume
+	For             string           `json:"for,omitempty"`
+	Round           string           `json:"round,omitempty"`
+	Report          time.Time        `json:"report,omitzero"`
+	Handle          string           `json:"handle"`
+	GPU             string           `json:"gpu"`
+	Cloud           string           `json:"cloud"`
+	PendingID       string           `json:"pending_id,omitempty"` // original pendingRent.ID when adopted/ended from l.Pending
+	Cost            float64          `json:"cost"`
+	DiskCost        float64          `json:"disk_cost,omitempty"`
+	DiskCostUnknown bool             `json:"disk_cost_unknown,omitempty"`
+	TransferCost    float64          `json:"transfer_cost,omitempty"`
+	FixedCost       float64          `json:"fixed_cost,omitempty"` // one-time cold-start charge (e.g. metered examiner model download) incurred at Start
+	PartialCost     bool             `json:"partial_cost,omitempty"`
+	Start           time.Time        `json:"start"`
+	Alive           time.Time        `json:"alive"`                 // last seen running
+	StoppedAt       time.Time        `json:"stopped_at,omitzero"`   // when current stopped interval began (disk billing continues until ResumeAt/End)
+	StoppedSeen     time.Time        `json:"stopped_seen,omitzero"` // last confirmed stopped observation (bounds confirmed storage across downtime)
+	ResumeAt        time.Time        `json:"resume_at,omitzero"`    // when current running interval began after prior Segments
+	End             time.Time        `json:"end,omitzero"`
+	Segments        []billingSegment `json:"segments,omitempty"` // completed prior billing intervals preserved across stop/resume
 }
 
 // billingSegment is one completed, immutable billing interval for a worker contract so stop/resume
@@ -425,6 +427,9 @@ func (r podRecord) dollarsBetween(from, to time.Time) float64 {
 		end = r.Alive
 	}
 	total := 0.0
+	if validRate(r.FixedCost) && !r.Start.IsZero() && !r.Start.Before(from) && !r.Start.After(to) {
+		total += r.FixedCost
+	}
 	if len(r.Segments) > 0 {
 		for _, seg := range r.Segments {
 			segEnd := seg.End
@@ -490,9 +495,9 @@ func (r podRecord) dollarsBetween(from, to time.Time) float64 {
 	}
 	a, b := maxTime(r.Start, from), minTime(end, to)
 	if !b.After(a) || !validRate(r.Cost) {
-		return 0
+		return total
 	}
-	return b.Sub(a).Hours() * r.Cost
+	return total + b.Sub(a).Hours()*r.Cost
 }
 
 func maxTime(a, b time.Time) time.Time {
@@ -701,6 +706,9 @@ func applyOfferRateToRental(o Offer, r *Rental) {
 		disk = o.DiskCost
 	}
 	r.DiskCost = disk
+	if validRate(r.DiskCost) {
+		r.DiskCostUnknown = false
+	}
 	origTransfer := max(0, r.TransferCost)
 	transfer := origTransfer
 	if nonNegFinite(o.TransferCost) && o.TransferCost > transfer {
@@ -755,6 +763,14 @@ func reconcileRentalRate(r *podRecord, p *Rental) {
 		r.DiskCost = p.DiskCost
 	}
 	p.DiskCost = r.DiskCost
+	if validRate(r.DiskCost) {
+		r.DiskCostUnknown = false
+		p.DiskCostUnknown = false
+	} else if p.State == "stopped" {
+		r.DiskCostUnknown = p.DiskCostUnknown
+	} else if r.DiskCostUnknown {
+		p.DiskCostUnknown = true
+	}
 	missingDisk := max(0, r.DiskCost-origDisk)
 	origTransfer := max(0, p.TransferCost)
 	if nonNegFinite(p.TransferCost) && p.TransferCost > r.TransferCost {
@@ -814,6 +830,14 @@ func betterRental(prev, cur *Rental) bool {
 	}
 	if prev.live() != cur.live() {
 		return false
+	}
+	if !prev.live() {
+		if prev.DiskCostUnknown != cur.DiskCostUnknown {
+			return prev.DiskCostUnknown
+		}
+		if validRate(prev.DiskCost) != validRate(cur.DiskCost) {
+			return validRate(cur.DiskCost)
+		}
 	}
 	prevFull := validRate(prev.Price) && !prev.PartialRate
 	curFull := validRate(cur.Price) && !cur.PartialRate
@@ -971,7 +995,7 @@ func (f *Fleet) note(ctx context.Context, l *ledger, rentals []Rental, answered 
 				stoppedSeen = now
 			}
 			r = &podRecord{ID: p.ID, Market: p.Market, Handle: h, Host: p.Host, GPU: p.Card,
-				Cost: cost, DiskCost: max(0, p.DiskCost), PartialCost: p.PartialRate || p.State == "stopped",
+				Cost: cost, DiskCost: max(0, p.DiskCost), DiskCostUnknown: p.DiskCostUnknown, PartialCost: p.PartialRate || p.State == "stopped",
 				Start: start, Alive: alive, StoppedAt: stoppedAt, StoppedSeen: stoppedSeen, Tracked: true, Stopped: p.State == "stopped"}
 			l.Pods[key] = r
 		}
@@ -1024,8 +1048,14 @@ func (f *Fleet) note(ctx context.Context, l *ledger, rentals []Rental, answered 
 			}
 		}
 		// Without a trustworthy provider end timestamp, keep the budget charged through the first
-		// confirmed absence (now) rather than retroactively refunding compute back to Alive.
+		// confirmed absence (now) rather than retroactively refunding compute back to Alive, and
+		// conservatively budget any unobserved [StoppedSeen, endAt] gap on a stopped worker at
+		// the compute rate.
 		endAt := resolveStopTime(minEnd, now, providerEndAt)
+		trustedEnd := !providerEndAt.IsZero() && endAt.Equal(providerEndAt)
+		if r.Stopped && !trustedEnd {
+			r.markLiveAt(endAt, time.Time{})
+		}
 		return f.retire(l, key, endAt)
 	}
 	keys := make([]string, 0, len(l.Pods))
@@ -1736,7 +1766,7 @@ func recordedRental(r *podRecord, status string) Rental {
 	}
 	return Rental{
 		Market: r.market(), ID: r.ID, Name: r.Handle, Host: r.Host, Card: r.GPU,
-		Price: cost, DiskCost: r.DiskCost, TransferCost: r.TransferCost, PartialRate: r.PartialCost, State: state, Status: status, Created: r.Start, Terminating: r.Terminating,
+		Price: cost, DiskCost: r.DiskCost, DiskCostUnknown: r.DiskCostUnknown, TransferCost: r.TransferCost, PartialRate: r.PartialCost, State: state, Status: status, Created: r.Start, Terminating: r.Terminating,
 	}
 }
 
@@ -1864,6 +1894,8 @@ func (f *Fleet) look(ctx context.Context) (*View, error) {
 			}
 			if validRate(diskRate) {
 				v.Hourly += diskRate
+			} else if p.DiskCostUnknown || (rec != nil && rec.DiskCostUnknown) {
+				v.noteUnknownRate(key, unknownRateLabel(p.Market, p.ID, h))
 			}
 		}
 		if knownHandles[h] {
@@ -2060,18 +2092,34 @@ func (f *Fleet) needOn(m Market) Need {
 	return f.needFor(m, true)
 }
 
-// fits says whether an offer's GPU can be trusted with a grade, holds one, and is fast enough to
-// finish a two-pass baseline grade inside the server's job lease.
-func (f *Fleet) fits(c Offer) bool {
-	if c.Maker != "NVIDIA" || c.MemoryGB < f.o.MinGPUMemory || unfitGPU.MatchString(c.Model) {
-		return false
+// unfitReason explains why an offer's GPU cannot be trusted with a grade, hold one, or finish a
+// two-pass baseline grade inside the server's job lease, or returns "" when it is eligible.
+func (f *Fleet) unfitReason(c Offer) string {
+	if c.Maker != "NVIDIA" {
+		return fmt.Sprintf("non-NVIDIA maker %q", c.Maker)
+	}
+	if c.MemoryGB < f.o.MinGPUMemory {
+		return fmt.Sprintf("%d GB VRAM below --min-gpu-memory %d GB", c.MemoryGB, f.o.MinGPUMemory)
+	}
+	if unfitGPU.MatchString(c.Model) || unfitGPU.MatchString(c.Card) || unfitGPU.MatchString(c.Name) {
+		return "unsupported GPU architecture/class (no native bf16 or unfit for grading)"
 	}
 	lease := f.lease
 	if lease <= 0 {
 		lease = defaultLease
 	}
 	p, _ := f.pass(c.Card)
-	return 2*p+leaseMargin <= lease
+	if 2*p+leaseMargin > lease {
+		return fmt.Sprintf("too slow for %s job lease (estimated %s for two passes + %s margin)",
+			lease.Round(time.Minute), (2*p + leaseMargin).Round(time.Minute), leaseMargin.Round(time.Minute))
+	}
+	return ""
+}
+
+// fits says whether an offer's GPU can be trusted with a grade, holds one, and is fast enough to
+// finish a two-pass baseline grade inside the server's job lease.
+func (f *Fleet) fits(c Offer) bool {
+	return f.unfitReason(c) == ""
 }
 
 // offerName is an offer's card, with its market where that is not RunPod.
@@ -2085,9 +2133,9 @@ func offerName(o Offer) string {
 // choices are what to try, looked up afresh each time machines are rented: every fit kind of
 // machine the armed markets have free now (with all, every market a key is found for), the
 // fastest first, or with --cheapest the cheapest a grade first (the more trusted first where
-// that is the same); or those named with --gpu, in that order, each cheapest first. For the
-// organisers' bigger students (long), it is what a student costs on each kind that counts,
-// under --long-max-price. With all, a market whose offers cannot be had is passed over and
+// that is the same); or the fit ones among those named with --gpu, in that order, each cheapest
+// first. For the organisers' bigger students (long), it is what a student costs on each kind that
+// counts, under --long-max-price. With all, a market whose offers cannot be had is passed over and
 // why is kept in offerErrs; otherwise that is an error.
 func (f *Fleet) choices(ctx context.Context, long, all bool) ([]Offer, error) {
 	return f.choicesFor(ctx, long, false, all)
@@ -2180,12 +2228,30 @@ func (f *Fleet) choicesNowFor(ctx context.Context, long, curators, all bool) ([]
 	sortOffers(offers)
 	var out []Offer
 	if len(f.o.GPUs) > 0 {
+		seen := make([]bool, len(offers))
+		var rejected []string
+		seenRej := map[string]bool{}
 		for _, want := range f.o.GPUs {
-			for _, c := range offers {
+			for idx, c := range offers {
+				if seen[idx] {
+					continue
+				}
 				if strings.EqualFold(c.Model, want) || strings.EqualFold(c.Name, want) || strings.EqualFold(c.Card, want) {
+					if reason := f.unfitReason(c); reason != "" {
+						rkey := c.Card + ":" + reason
+						if !seenRej[rkey] {
+							seenRej[rkey] = true
+							rejected = append(rejected, fmt.Sprintf("%s (%s)", offerName(c), reason))
+						}
+						continue
+					}
+					seen[idx] = true
 					out = append(out, c)
 				}
 			}
+		}
+		if len(out) == 0 && len(rejected) > 0 && !all {
+			f.say("ignoring ineligible --gpu %s: %s", strings.Join(f.o.GPUs, ","), strings.Join(rejected, "; "))
 		}
 		return out, nil
 	}
@@ -2868,27 +2934,46 @@ func (f *Fleet) end(ctx context.Context, v *View, endings []Ending) error {
 			cause, said = f.diagnose(ctx, e.Worker)
 			why += ": " + said
 		}
+		key := ledgerKey(r.Market, r.ID)
+		rec := v.Ledger.Pods[key]
+		preDiskRate := r.DiskCost
+		if rec != nil && rec.stoppedHourlyRate() > preDiskRate {
+			preDiskRate = rec.stoppedHourlyRate()
+		}
+		unconfirmedStopped := rec != nil && rec.Stopped && (r.Status == "as recorded" || r.Status == "unconfirmed (omitted from listing)")
+		if unconfirmedStopped {
+			if lu, ok := m.(rentalLookup); ok {
+				if fresh, exists, lerr := lu.Lookup(ctx, r.ID); lerr == nil && exists && fresh != nil {
+					reconcileRentalRate(rec, fresh)
+					now := f.now()
+					if fresh.live() {
+						rec.markLiveAt(now, fresh.ResumedAt)
+						unconfirmedStopped = false
+					} else if fresh.State == "stopped" {
+						rec.markStoppedAt(now, fresh.StoppedAt)
+						unconfirmedStopped = false
+					}
+				}
+			}
+		}
 		if err := m.End(ctx, r.ID); err != nil {
 			// Said, and tried again at the next look; ledger entry is retained until deleted.
 			f.say("could not end %s on %s: %v", handle, marketTitle(r.Market), err)
 			continue
 		}
 		v.removeLiveRental(r.Market, r.ID)
-		key := ledgerKey(r.Market, r.ID)
-		rec := v.Ledger.Pods[key]
 		switch {
 		case r.live() && validRate(r.Price):
 			v.Hourly = max(0, v.Hourly-r.Price)
 		case r.State == "stopped":
-			diskRate := r.DiskCost
-			if rec != nil && rec.stoppedHourlyRate() > diskRate {
-				diskRate = rec.stoppedHourlyRate()
-			}
-			if validRate(diskRate) {
-				v.Hourly = max(0, v.Hourly-diskRate)
+			if validRate(preDiskRate) {
+				v.Hourly = max(0, v.Hourly-preDiskRate)
 			}
 		}
 		endAt := f.now()
+		if unconfirmedStopped && rec != nil && rec.Stopped {
+			rec.markLiveAt(endAt, time.Time{})
+		}
 		if rec != nil {
 			rec.Why, rec.Cause = why, cause
 		}

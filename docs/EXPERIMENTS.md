@@ -731,14 +731,22 @@ GPU scoring)*.
        (e.g. Draw B unedited seed-0 mean NLL rose from `1.337` to `1.522 bpb`), confirming that
        between-curator rankings still rely on prompt-conditioned answer-prose modeling rather than
        the excerpt.
-     - **Direct Cross-Card NVIDIA RTX 5090 vs RTX 4090 Parity on Shipped `Inkling-2-Mini` (~525-byte answers):**
+     - **Cross-Card NVIDIA RTX 5090 vs RTX 4090 Replay of Archived Measurement Path on Shipped `Inkling-2-Mini` (~525-byte answers):**
        Training `db_unedited_s0` and `db_fineweb2_s0` on RTX 5090 vs RTX 4090 produced bit-identical
-       `tokens_sha256` and `init_sha256` (`5bd1d5ce4547697e...`). Across all 3 shipped Inkling draws,
-       aggregate cross-card baseline diffs were **`+0.000463` (`draw_b`), `+0.001068` (`phase9`), and
-       `+0.001732` (`draw1`)** (`8.7×–32×` inside the `0.015` baseline tolerance), and `fineweb2` gain
-       diffs were **`+0.001127 / +0.000797 / −0.000364` own-base** and **`+0.002008 / +0.001724 /
-       +0.001173` shared-base** (`6.0×–10.2×` inside the `0.012` grade tolerance), directly confirming
-       that calibrated `0.012 / 0.015` tolerances hold on `Inkling-2-Mini` exams.
+       `tokens_sha256` and `init_sha256` (`5bd1d5ce4547697e...`). Replaying the archived per-item
+       scores from `run_r10_workers.py` across all 3 shipped Inkling draws gives aggregate cross-card
+       baseline diffs of **`+0.000463` (`draw_b`), `+0.001068` (`phase9`), and `+0.001732` (`draw1`)**
+       (`8.7×–32×` inside the `0.015` baseline tolerance), and `fineweb2` gain diffs of **`+0.001127 /
+       +0.000797 / −0.000364` own-base** and **`+0.002008 / +0.001724 / +0.001173` shared-base** on
+       the `1,854`-item v2 rescore (**`+0.002008 / +0.001724 / +0.001175`** on the current
+       `1,853`-item v3/v4 filter; `6.0×–10.2×` inside the `0.012` grade tolerance). **Qualification:**
+       `run_r10_workers.py` invoked `exam_score.sit()` directly after `train()` exited its
+       `_deterministic_cuda(True)` context (restoring PyTorch's default deterministic flags),
+       bypassing `grade.py:sit_exam`'s explicit `_deterministic_cuda(True)` wrapper. These figures
+       are therefore a replay of the archived measurement path; the size of any score change under
+       the released `grade.py:sit_exam` sitting path on both cards is **unmeasured** until the
+       baseline and candidate are rerun through `grade.py:sit_exam` on both cards with the
+       deterministic flags recorded at the call site.
 
    - **Prior 3-Architecture NVIDIA Cross-Card Parity (`Qwen3-8B` exams, `r8_gate`: `5090` vs `4090` vs `3090` at `standard` 65.5M tokens; `5090` vs `AMD 8060S` at `nano`/`micro`; final pooled-trim `code_share = 0.15` scorer):**
      Training the exact archived `fineweb2.jsonl` from the Draw B seed produced **bit-identical
@@ -770,13 +778,20 @@ GPU scoring)*.
      RTX 3090 (`~$0.20` at `$0.22/h`), versus `$0.041–$0.046` per training in Season 2. A typical
      10-script Season 3 round runs 12 trainings (`10` scripts + `2` baselines) = **`~$1.80` of
      grading compute** (vs `~$0.55` in Season 2) plus **`~$0.15–$0.20/round`** for the automated
-     ephemeral 1× RTX 5090 `Inkling-2-Mini` examiner (measured cold-start `14.27 min` / `$0.147`
-     rent-to-synth-done at `$0.619/h` via `stet-cloud --examiner-addr 127.0.0.1:8000`) and curator
-     runs/boot overhead (**`~$3–$5` all-in per round**, ~`2.5–3×` Season 2's `$1.57–$2.16`, while
-     on-demand draws keep idle days at `$0/day`).
+     ephemeral 1× RTX 5090 `Inkling-2-Mini` examiner on free/negligible-ingress Vast.ai hosts
+     (`inet_down_cost ≈ $0/GB`; measured cold-start `14.27 min` / `$0.147` rent-to-synth-done at
+     `$0.619/h` via `stet-cloud --examiner-addr 127.0.0.1:8000`; metered hosts add `18 GB ×
+     inet_down_cost` for the model pull—which `stet-cloud` now includes in offer selection and
+     daily spend accounting—plus any metered uncached container image bytes) and curator runs/boot overhead
+     (**`~$3–$5` all-in per round**, ~`2.5–3×` Season 2's `$1.57–$2.16`, while on-demand draws keep
+     idle days at `$0/day`).
 
 ## Still to measure
 
+- Rerun the RTX 5090 vs RTX 4090 `Inkling-2-Mini` baseline and candidate parity check through the
+  released `grade.py:sit_exam` sitting path on both cards, recording the deterministic flags at the
+  call site (replacing the archived `run_r10_workers.py` replay above; the size of any resulting
+  score change is currently unmeasured).
 - An exam and student setup whose **between-curator** gain is driven primarily by excerpt-grounded
   deduction rather than prompt-conditioned answer-prose modeling (see the `r9_excerpt`
   rotated-excerpt control above, where `80%–109%` of between-curator separation survived excerpt

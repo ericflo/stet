@@ -6010,3 +6010,32 @@ def test_review27_verifier_pass_cache_scoped_by_season_digest(monkeypatch, tmp_p
     client.note_pass("standard", "RTX 4090", {"train": {"seconds": 1825.5}}, s3.digest)
     assert client.saved_pass("standard", "RTX 4090", s3.digest) == 1825.5
     assert client.saved_pass("standard", "RTX 4090", s2.digest) is None
+
+
+def test_review28_grade_packages_pins_tokenizers(monkeypatch):
+    """Review 28 P3 #7: Season 3 grade_packages and the [train] extra MUST pin tokenizers
+    because src/stet/tok.py uses tokenizers.Tokenizer directly on every grading pass."""
+    import copy
+    import tomllib
+
+    from stet import env
+
+    s3 = load_season("s3")
+    grade_pkgs = env.grade_packages(s3)
+    assert "tokenizers" in grade_pkgs
+    want_tok = s3.raw["environment"]["packages"]["tokenizers"]
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text())
+    assert f"tokenizers=={want_tok}" in pyproject["project"]["optional-dependencies"]["train"]
+
+    want = env.expected(s3)["packages"]
+    versions = {name: want[name] for name in grade_pkgs}
+    versions["tokenizers"] = "0.23.1"
+    monkeypatch.setattr(env, "installed", lambda name: versions.get(name, ""))
+    problems = env.problems(s3, only=grade_pkgs)
+    assert problems == [f"a different version: tokenizers 0.23.1 (the season's is {want_tok})"]
+
+    # Fallback in env.grade_packages() when an hf_topreset season omits explicit grade_packages.
+    raw_no_explicit = copy.deepcopy(s3.raw)
+    raw_no_explicit["environment"].pop("grade_packages", None)
+    fallback_season = type("S", (), {"raw": raw_no_explicit})()
+    assert "tokenizers" in env.grade_packages(fallback_season)

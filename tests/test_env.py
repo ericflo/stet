@@ -60,19 +60,37 @@ def test_what_differs_is_said_in_words(season, monkeypatch):
 def test_grading_needs_the_seasons_grading_stack_to_match(season, monkeypatch):
     want = env.expected(season)
     grade_pkgs = env.grade_packages(season)
-    assert set(grade_pkgs) == {"safetensors", "torch", "transformers"}
+    assert set(grade_pkgs) == {"safetensors", "tokenizers", "torch", "transformers"}
     have(monkeypatch, {
         "torch": want["packages"]["torch"] + "+cu132",
         "transformers": want["packages"]["transformers"],
+        "tokenizers": want["packages"]["tokenizers"],
         "safetensors": want["packages"]["safetensors"],
     })
     monkeypatch.setattr(sys, "version_info", type("V", (), {"major": 3, "minor": 11})())
     assert env.problems(season, only=grade_pkgs) == []
     # Missing transformers is caught before taking grading work.
-    have(monkeypatch, {"torch": want["packages"]["torch"] + "+cu132", "safetensors": want["packages"]["safetensors"]})
+    have(monkeypatch, {
+        "torch": want["packages"]["torch"] + "+cu132",
+        "tokenizers": want["packages"]["tokenizers"],
+        "safetensors": want["packages"]["safetensors"],
+    })
     assert env.problems(season, only=grade_pkgs) == ["not installed: transformers"]
+    # Missing or wrong tokenizers version is caught before taking grading work.
+    have(monkeypatch, {
+        "torch": want["packages"]["torch"] + "+cu132",
+        "transformers": want["packages"]["transformers"],
+        "tokenizers": "0.23.0",
+        "safetensors": want["packages"]["safetensors"],
+    })
+    assert env.problems(season, only=grade_pkgs) == [f"a different version: tokenizers 0.23.0 (the season's is {want['packages']['tokenizers']})"]
     # Wrong PyTorch version is caught too.
-    have(monkeypatch, {"torch": "2.9.0", "transformers": want["packages"]["transformers"], "safetensors": want["packages"]["safetensors"]})
+    have(monkeypatch, {
+        "torch": "2.9.0",
+        "transformers": want["packages"]["transformers"],
+        "tokenizers": want["packages"]["tokenizers"],
+        "safetensors": want["packages"]["safetensors"],
+    })
     assert env.problems(season, only=grade_pkgs) == [f"a different version: torch 2.9.0 (the season's is {want['packages']['torch']})"]
     # Season 2 needed PyTorch alone.
     assert env.grade_packages(load_season("s2")) == ("torch",)

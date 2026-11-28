@@ -7430,6 +7430,10 @@ func TestReview27ResumeAfterDowntimeBillsUnobservedGapAtComputeRate(t *testing.T
 			case r.Method == "GET" && r.URL.Path == "/api/v1/instances/":
 				_, _ = w.Write([]byte(fmt.Sprintf(`{"instances":[{"id":99703,"label":"stet-rp-01","actual_status":"running","intended_status":"running","cur_state":"running","gpu_name":"RTX 5090","dph_total":1.50,"dph_base":1.44,"disk_space":100,"storage_cost":0.432,"start_date":%d}],"next_token":null}`, t0.Unix())))
 			case r.Method == "GET" && r.URL.Path == "/api/v0/instances/99703/":
+				if failDelete.Load() {
+					w.WriteHeader(http.StatusInternalServerError)
+					return
+				}
 				_, _ = w.Write([]byte(fmt.Sprintf(`{"instances":{"id":99703,"label":"stet-rp-01","actual_status":"running","intended_status":"running","cur_state":"running","gpu_name":"RTX 5090","dph_total":1.50,"dph_base":1.44,"disk_space":100,"storage_cost":0.432,"start_date":%d}}`, t0.Unix())))
 			case r.Method == "DELETE" && r.URL.Path == "/api/v0/instances/99703/":
 				if failDelete.Load() {
@@ -7683,6 +7687,822 @@ func TestReview27WarmIdleWorkerReleasesSlotForReservedExaminer(t *testing.T) {
 		}
 		if len(exProv.rented) != 1 {
 			t.Fatalf("same tick MUST rent examiner after releasing warm idle worker, got %d", len(exProv.rented))
+		}
+	})
+}
+
+// Review 28 P1 #1: `workers resolve --end` MUST reconcile a terminating worker against the
+// provider BEFORE deleting it so a stopped worker that resumed during controller downtime applies
+// the ordinary transition/rate logic ($2.976) on a successful first delete instead of retiring the
+// stale stopped record at storage rates ($0.120). If lookup fails before a successful delete, any
+// unobserved [StoppedSeen, now] interval MUST be conservatively budgeted at the compute rate.
+func TestReview28WorkersResolveEndReconcilesResumedWorkerBeforeDelete(t *testing.T) {
+	t0 := time.Date(2026, 11, 27, 10, 0, 0, 0, time.UTC)
+	t1 := t0.Add(time.Minute)
+	tEnd := t0.Add(2 * time.Hour)
+
+	seedStoppedTerminating := func(t *testing.T, f *Fleet, id string) {
+		t.Helper()
+		if err := f.writeLedger(&ledger{Pods: map[string]*podRecord{
+			ledgerKey("vast", id): {
+				ID: id, Market: "vast", Handle: f.keys[0].Handle, GPU: "RTX 5090",
+				Cost: 1.50, DiskCost: 0.06, Tracked: true, Stopped: true, Terminating: true,
+				Start: t0, Alive: t0, StoppedAt: t0, StoppedSeen: t1,
+			},
+		}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("resumed_worker_successful_first_delete_records_compute_not_storage", func(t *testing.T) {
+		var lookupCalls, deleteCalls atomic.Int32
+		vastSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == "GET" && r.URL.Path == "/api/v0/instances/98101/":
+				lookupCalls.Add(1)
+				_, _ = w.Write([]byte(fmt.Sprintf(`{"instances":{"id":98101,"label":"stet-rp-01","actual_status":"running","intended_status":"running","cur_state":"running","gpu_name":"RTX 5090","dph_total":1.50,"dph_base":1.44,"disk_space":100,"storage_cost":0.432,"start_date":%d}}`, t0.Unix())))
+			case r.Method == "DELETE" && r.URL.Path == "/api/v0/instances/98101/":
+				deleteCalls.Add(1)
+				_, _ = w.Write([]byte(`{"success":true}`))
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer vastSrv.Close()
+
+		rp, st := newFakeRunPod(t), newFakeStet(t)
+		f, _ := testFleet(t, rp, st, 1)
+		f.now = func() time.Time { return tEnd }
+		vm := newVast(vastSrv.URL, "vast-key")
+		vm.a.sleep = func(context.Context, time.Duration) error { return nil }
+		f.markets = []Market{vm}
+		seedStoppedTerminating(t, f, "98101")
+
+		if err := cmdWorkersResolve(context.Background(), f, true, ""); err != nil {
+			t.Fatalf("cmdWorkersResolve(--end): %v", err)
+		}
+		if lookupCalls.Load() != 1 || deleteCalls.Load() != 1 {
+			t.Fatalf("want 1 lookup before 1 delete, got lookup=%d delete=%d", lookupCalls.Load(), deleteCalls.Load())
+		}
+		l, err := f.readLedger()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(l.Pods) != 0 {
+			t.Fatalf("expected retired pod removed from ledger, got %+v", l.Pods)
+		}
+		spent, err := f.spent(l, startOfDay(tEnd))
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := (1.0/60.0)*0.06 + (119.0/60.0)*1.50 // $2.976
+		if math.Abs(spent-want) > 1e-4 {
+			t.Fatalf("successful first delete of resumed worker recorded $%.4f, want $%.4f (1m storage + 119m compute)", spent, want)
+		}
+	})
+
+	t.Run("lookup_failure_before_successful_delete_retains_conservative_gap", func(t *testing.T) {
+		var deleteCalls atomic.Int32
+		vastSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == "GET" && r.URL.Path == "/api/v0/instances/98102/":
+				http.Error(w, "upstream error", http.StatusInternalServerError)
+			case r.Method == "DELETE" && r.URL.Path == "/api/v0/instances/98102/":
+				deleteCalls.Add(1)
+				_, _ = w.Write([]byte(`{"success":true}`))
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer vastSrv.Close()
+
+		rp, st := newFakeRunPod(t), newFakeStet(t)
+		f, _ := testFleet(t, rp, st, 1)
+		f.now = func() time.Time { return tEnd }
+		vm := newVast(vastSrv.URL, "vast-key")
+		vm.a.sleep = func(context.Context, time.Duration) error { return nil }
+		f.markets = []Market{vm}
+		seedStoppedTerminating(t, f, "98102")
+
+		if err := cmdWorkersResolve(context.Background(), f, true, ""); err != nil {
+			t.Fatalf("cmdWorkersResolve(--end): %v", err)
+		}
+		if deleteCalls.Load() != 1 {
+			t.Fatalf("want 1 delete, got %d", deleteCalls.Load())
+		}
+		l, err := f.readLedger()
+		if err != nil {
+			t.Fatal(err)
+		}
+		spent, err := f.spent(l, startOfDay(tEnd))
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := (1.0/60.0)*0.06 + (119.0/60.0)*1.50 // $2.976 conservative estimate across unobserved [10:01, 12:00]
+		if math.Abs(spent-want) > 1e-4 {
+			t.Fatalf("lookup-failed first delete recorded $%.4f, want conservative $%.4f", spent, want)
+		}
+	})
+
+	t.Run("confirmed_still_stopped_before_delete_bills_storage", func(t *testing.T) {
+		vastSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == "GET" && r.URL.Path == "/api/v0/instances/98103/":
+				_, _ = w.Write([]byte(fmt.Sprintf(`{"instances":{"id":98103,"label":"stet-rp-01","actual_status":"exited","intended_status":"stopped","cur_state":"stopped","gpu_name":"RTX 5090","dph_total":0.06,"dph_base":1.44,"disk_space":100,"storage_cost":0.432,"start_date":%d}}`, t0.Unix())))
+			case r.Method == "DELETE" && r.URL.Path == "/api/v0/instances/98103/":
+				_, _ = w.Write([]byte(`{"success":true}`))
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer vastSrv.Close()
+
+		rp, st := newFakeRunPod(t), newFakeStet(t)
+		f, _ := testFleet(t, rp, st, 1)
+		f.now = func() time.Time { return tEnd }
+		vm := newVast(vastSrv.URL, "vast-key")
+		vm.a.sleep = func(context.Context, time.Duration) error { return nil }
+		f.markets = []Market{vm}
+		seedStoppedTerminating(t, f, "98103")
+
+		if err := cmdWorkersResolve(context.Background(), f, true, ""); err != nil {
+			t.Fatalf("cmdWorkersResolve(--end): %v", err)
+		}
+		l, err := f.readLedger()
+		if err != nil {
+			t.Fatal(err)
+		}
+		spent, err := f.spent(l, startOfDay(tEnd))
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := 2.0 * 0.06 // $0.120 confirmed stopped storage
+		if math.Abs(spent-want) > 1e-4 {
+			t.Fatalf("confirmed-stopped delete recorded $%.4f, want $%.4f", spent, want)
+		}
+	})
+}
+
+// Review 28 P2 #2: A stopped Vast.ai instance with attached disk whose storage price is omitted
+// (no storage_cost and no positive dph_total) MUST be marked DiskCostUnknown=true and defer new
+// paid worker/examiner rentals under --max-hourly rather than assuming $0.00/h, while an explicit
+// zero storage_cost (or dph_total == dph_base) is recognized as known $0.00/h free storage.
+func TestReview28StoppedDiskUnknownPriceDefersNewRentals(t *testing.T) {
+	now := time.Date(2026, 11, 27, 15, 0, 0, 0, time.UTC)
+
+	t.Run("omitted_storage_cost_and_dph_total_blocks_worker_and_examiner", func(t *testing.T) {
+		vastSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == "GET" && r.URL.Path == "/api/v1/instances/" {
+				_, _ = w.Write([]byte(fmt.Sprintf(`{"instances":[{"id":98201,"label":"stet-rp-01","actual_status":"exited","intended_status":"stopped","cur_state":"stopped","gpu_name":"RTX 5090","disk_space":100,"dph_base":1.44,"start_date":%d}],"next_token":null}`, now.Add(-time.Hour).Unix())))
+				return
+			}
+			http.NotFound(w, r)
+		}))
+		defer vastSrv.Close()
+
+		rp, st := newFakeRunPod(t), newFakeStet(t)
+		f, _ := testFleet(t, rp, st, 2)
+		f.now = func() time.Time { return now }
+		f.o.MaxWorkers = 2
+		f.o.MaxHourly = 0.28
+		f.o.DailyBudget = 50
+		f.o.Cloud = "SECURE"
+		f.o.MinGPUMemory = 12
+		vm := newVast(vastSrv.URL, "vast-key")
+		vm.a.sleep = func(context.Context, time.Duration) error { return nil }
+		f.markets = append(f.markets, vm)
+		st.work = Work{Rounds: []WorkRound{{ID: "s3-o00028", GradesWanted: 2, ExamAt: 0}}}
+
+		v, err := f.look(context.Background())
+		if err != nil {
+			t.Fatalf("look: %v", err)
+		}
+		if !v.hourlyUnknown() {
+			t.Fatalf("stopped Vast contract with disk_space=100 and omitted storage_cost/dph_total MUST mark hourlyUnknown()=true")
+		}
+		if err := cmdUp(context.Background(), f, 1); err != nil {
+			t.Fatalf("cmdUp: %v", err)
+		}
+		if len(rp.created) != 0 {
+			t.Fatalf("cmdUp MUST defer renting $0.27/h A5000 while stopped disk price is unknown, rented %d", len(rp.created))
+		}
+
+		exProv := &fakeExaminerProv{
+			offers: []ExaminerOffer{{ID: "ex-5090", Card: "RTX 5090", Price: 0.25, DiskCost: 0.02}},
+		}
+		f.examiner = newExaminer(ExaminerConfig{Addr: "127.0.0.1:0", Timeout: 45 * time.Minute, MaxPrice: 1.50}, f.o.Home, exProv, func() time.Time { return now }, f.say, false)
+		f.examiner.owner = "test"
+		err = reconcileExaminerOnce(context.Background(), f)
+		if err == nil || !strings.Contains(err.Error(), "hourly spend is incomplete") {
+			t.Fatalf("reconcileExaminerOnce MUST fail closed on unknown stopped disk rate, got err=%v", err)
+		}
+		if len(exProv.rented) != 0 {
+			t.Fatalf("reconcileExaminerOnce MUST NOT rent examiner while stopped disk price is unknown, rented %d", len(exProv.rented))
+		}
+	})
+
+	t.Run("explicit_zero_storage_cost_admits_worker_under_cap", func(t *testing.T) {
+		vastSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == "GET" && r.URL.Path == "/api/v1/instances/" {
+				_, _ = w.Write([]byte(fmt.Sprintf(`{"instances":[{"id":98202,"label":"stet-rp-01","actual_status":"exited","intended_status":"stopped","cur_state":"stopped","gpu_name":"RTX 5090","disk_space":100,"storage_cost":0,"dph_base":1.44,"start_date":%d}],"next_token":null}`, now.Add(-time.Hour).Unix())))
+				return
+			}
+			http.NotFound(w, r)
+		}))
+		defer vastSrv.Close()
+
+		rp, st := newFakeRunPod(t), newFakeStet(t)
+		f, _ := testFleet(t, rp, st, 2)
+		f.now = func() time.Time { return now }
+		f.o.MaxWorkers = 2
+		f.o.MaxHourly = 0.28
+		f.o.DailyBudget = 50
+		f.o.Cloud = "SECURE"
+		f.o.MinGPUMemory = 12
+		vm := newVast(vastSrv.URL, "vast-key")
+		vm.a.sleep = func(context.Context, time.Duration) error { return nil }
+		f.markets = append(f.markets, vm)
+		st.work = Work{Rounds: []WorkRound{{ID: "s3-o00028", GradesWanted: 2}}}
+
+		v, err := f.look(context.Background())
+		if err != nil {
+			t.Fatalf("look: %v", err)
+		}
+		if v.hourlyUnknown() {
+			t.Fatalf("explicit storage_cost: 0 MUST be treated as known $0.00/h, got unknown=%s", v.unknownRateSummary())
+		}
+		if err := cmdUp(context.Background(), f, 1); err != nil {
+			t.Fatalf("cmdUp: %v", err)
+		}
+		if len(rp.created) != 1 {
+			t.Fatalf("explicit free stopped storage MUST allow renting $0.27/h A5000 under $0.28/h cap, rented %d", len(rp.created))
+		}
+	})
+
+	t.Run("explicit_dph_total_equal_dph_base_is_known_free_storage", func(t *testing.T) {
+		var inst vastInstance
+		raw := fmt.Sprintf(`{"id":98203,"label":"stet-rp-01","actual_status":"exited","intended_status":"stopped","cur_state":"stopped","gpu_name":"RTX 5090","disk_space":100,"dph_base":1.44,"dph_total":1.44,"start_date":%d}`, now.Unix())
+		if err := json.Unmarshal([]byte(raw), &inst); err != nil {
+			t.Fatal(err)
+		}
+		r := vastInstanceRental(inst)
+		if r.DiskCost != 0 || r.DiskCostUnknown {
+			t.Fatalf("dph_total==dph_base should be known $0 storage, got DiskCost=%.4f DiskCostUnknown=%v", r.DiskCost, r.DiskCostUnknown)
+		}
+	})
+}
+
+type review28HookExaminerProv struct {
+	onOffers func(ctx context.Context, maxPrice float64) ([]ExaminerOffer, error)
+	onRent   func(ctx context.Context, offerID string, l ExaminerLaunch) (string, error)
+	insts    []ExaminerInstance
+	launches []ExaminerLaunch
+}
+
+func (p *review28HookExaminerProv) ExaminerOffers(ctx context.Context, maxPrice float64) ([]ExaminerOffer, error) {
+	return p.onOffers(ctx, maxPrice)
+}
+func (p *review28HookExaminerProv) RentExaminer(ctx context.Context, offerID string, l ExaminerLaunch) (string, error) {
+	p.launches = append(p.launches, l)
+	return p.onRent(ctx, offerID, l)
+}
+func (p *review28HookExaminerProv) ListExaminers(context.Context) ([]ExaminerInstance, error) {
+	return append([]ExaminerInstance(nil), p.insts...), nil
+}
+func (p *review28HookExaminerProv) EndExaminer(context.Context, string) error { return nil }
+
+// Review 28 P2 #3: Examiner.Reconcile MUST refresh daily spend, attempt timestamp, TLS cert
+// validity, and watchdog ExpireAt immediately before EACH paid create (after ExaminerOffers and
+// after any errNoRoom fallback), clearing any failed errNoRoom reservation immediately.
+func TestReview28ExaminerRefreshesDailySpendAndDeadlineBeforeEachCreate(t *testing.T) {
+	t0 := time.Date(2026, 11, 27, 14, 0, 0, 0, time.UTC)
+
+	seedDailySpendAndWorker := func(t *testing.T, f *Fleet, spentBefore float64, workerCost float64) {
+		t.Helper()
+		// Seed $spentBefore from an earlier ended pod today + a live worker accruing workerCost/h starting at t0.
+		if spentBefore > 0 {
+			priorStart := t0.Add(-2 * time.Hour)
+			priorEnd := t0.Add(-1 * time.Hour)
+			if _, err := appendSpendRecord(f.spentLog(), podRecord{
+				ID: "prior-pod", Market: "runpod", Handle: "prior", GPU: "RTX 4090",
+				Cost: spentBefore, Start: priorStart, Alive: priorEnd, End: priorEnd,
+			}, true); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := f.writeLedger(&ledger{Pods: map[string]*podRecord{
+			ledgerKey("runpod", "live-w1"): {
+				ID: "live-w1", Market: "runpod", Handle: f.keys[0].Handle, GPU: "RTX 4090",
+				Cost: workerCost, Start: t0, Alive: t0, Tracked: true,
+			},
+		}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("clock_advances_during_offer_search_blocks_create", func(t *testing.T) {
+		cur := t0
+		rp, st := newFakeRunPod(t), newFakeStet(t)
+		f, _ := testFleet(t, rp, st, 2)
+		f.now = func() time.Time { return cur }
+		f.o.MaxWorkers = 2
+		f.o.MaxHourly = 4.0
+		f.o.DailyBudget = 1.00
+		f.o.Examiner.MaxPrice = 1.50
+		rp.pods["live-w1"] = &Pod{ID: "live-w1", Name: f.keys[0].Handle, Status: "RUNNING", Cost: 0.20, CreatedAt: t0}
+		st.work = Work{Rounds: []WorkRound{{ID: "s3-o00028", ExamAt: 0}}}
+		seedDailySpendAndWorker(t, f, 0.995, 0.20)
+
+		prov := &review28HookExaminerProv{
+			onOffers: func(context.Context, float64) ([]ExaminerOffer, error) {
+				// 2 minutes elapse during slow offer search -> live worker adds $0.00667 -> $1.00167 >= $1.00.
+				cur = cur.Add(2 * time.Minute)
+				return []ExaminerOffer{{ID: "off-1", Card: "RTX 5090", Price: 0.60, DiskCost: 0.05}}, nil
+			},
+			onRent: func(context.Context, string, ExaminerLaunch) (string, error) {
+				t.Fatal("RentExaminer MUST NOT be called once refreshed daily spend reached --daily-budget")
+				return "", nil
+			},
+		}
+		f.examiner = newExaminer(ExaminerConfig{Addr: "127.0.0.1:0", Timeout: 45 * time.Minute, MaxPrice: 1.50}, f.o.Home, prov, func() time.Time { return cur }, f.say, false)
+		f.examiner.owner = "test"
+
+		if err := reconcileExaminerOnce(context.Background(), f); err != nil {
+			t.Fatalf("reconcileExaminerOnce: %v", err)
+		}
+		if len(prov.launches) != 0 {
+			t.Fatalf("expected 0 examiner creates after search crossed daily budget, got %d", len(prov.launches))
+		}
+	})
+
+	t.Run("clock_advances_after_errNoRoom_blocks_second_offer_and_clears_pending", func(t *testing.T) {
+		cur := t0
+		rp, st := newFakeRunPod(t), newFakeStet(t)
+		f, _ := testFleet(t, rp, st, 2)
+		f.now = func() time.Time { return cur }
+		f.o.MaxWorkers = 2
+		f.o.MaxHourly = 4.0
+		f.o.DailyBudget = 1.00
+		f.o.Examiner.MaxPrice = 1.50
+		rp.pods["live-w1"] = &Pod{ID: "live-w1", Name: f.keys[0].Handle, Status: "RUNNING", Cost: 0.20, CreatedAt: t0}
+		st.work = Work{Rounds: []WorkRound{{ID: "s3-o00028", ExamAt: 0}}}
+		seedDailySpendAndWorker(t, f, 0.995, 0.20)
+
+		var attempts []string
+		prov := &review28HookExaminerProv{
+			onOffers: func(context.Context, float64) ([]ExaminerOffer, error) {
+				return []ExaminerOffer{
+					{ID: "off-1", Card: "RTX 5090", Price: 0.60, DiskCost: 0.05},
+					{ID: "off-2", Card: "RTX 5090", Price: 0.65, DiskCost: 0.05},
+				}, nil
+			},
+			onRent: func(_ context.Context, offerID string, _ ExaminerLaunch) (string, error) {
+				attempts = append(attempts, offerID)
+				if offerID == "off-1" {
+					cur = cur.Add(2 * time.Minute) // crosses $1.00 daily budget before off-2
+					return "", errNoRoom
+				}
+				t.Fatalf("offer %s MUST NOT be tried after daily budget was reached", offerID)
+				return "", nil
+			},
+		}
+		f.examiner = newExaminer(ExaminerConfig{Addr: "127.0.0.1:0", Timeout: 45 * time.Minute, MaxPrice: 1.50}, f.o.Home, prov, func() time.Time { return cur }, f.say, false)
+		f.examiner.owner = "test"
+
+		if err := reconcileExaminerOnce(context.Background(), f); err != nil {
+			t.Fatalf("reconcileExaminerOnce: %v", err)
+		}
+		if len(attempts) != 1 || attempts[0] != "off-1" {
+			t.Fatalf("expected only off-1 attempted before budget stop, got %v", attempts)
+		}
+		if stDisk := readExaminerState(f.o.Home); stDisk != nil {
+			t.Fatalf("expected clean examiner.json after errNoRoom + budget stop, got %+v", stDisk)
+		}
+	})
+
+	t.Run("refreshes_watchdog_deadline_and_created_timestamp_after_slow_search", func(t *testing.T) {
+		cur := t0
+		rp, st := newFakeRunPod(t), newFakeStet(t)
+		f, _ := testFleet(t, rp, st, 2)
+		f.now = func() time.Time { return cur }
+		f.o.MaxWorkers = 2
+		f.o.MaxHourly = 4.0
+		f.o.DailyBudget = 50.0
+		f.o.Examiner.MaxPrice = 1.50
+		st.work = Work{Rounds: []WorkRound{{ID: "s3-o00028", ExamAt: 0}}}
+
+		prov := &review28HookExaminerProv{
+			onOffers: func(context.Context, float64) ([]ExaminerOffer, error) {
+				cur = cur.Add(3 * time.Minute)
+				return []ExaminerOffer{{ID: "off-fresh", Card: "RTX 5090", Price: 0.60, DiskCost: 0.05}}, nil
+			},
+			onRent: func(_ context.Context, _ string, _ ExaminerLaunch) (string, error) {
+				return "ex-98301", nil
+			},
+		}
+		f.examiner = newExaminer(ExaminerConfig{Addr: "127.0.0.1:0", Timeout: 45 * time.Minute, MaxPrice: 1.50}, f.o.Home, prov, func() time.Time { return cur }, f.say, false)
+		f.examiner.owner = "test"
+
+		if err := reconcileExaminerOnce(context.Background(), f); err != nil {
+			t.Fatalf("reconcileExaminerOnce: %v", err)
+		}
+		if len(prov.launches) != 1 {
+			t.Fatalf("expected 1 examiner create, got %d", len(prov.launches))
+		}
+		wantCreated := t0.Add(3 * time.Minute)
+		wantExpire := wantCreated.Add(45 * time.Minute).Unix()
+		if prov.launches[0].ExpireAt != wantExpire {
+			t.Fatalf("ExpireAt=%d, want post-search %d (full 45m from attemptNow)", prov.launches[0].ExpireAt, wantExpire)
+		}
+		stDisk := readExaminerState(f.o.Home)
+		if stDisk == nil || !stDisk.Created.Equal(wantCreated) {
+			t.Fatalf("examiner.json Created=%v, want post-search %v", stDisk, wantCreated)
+		}
+	})
+}
+
+// Review 28 P2 #4: Vast examiner offer selection and daily spend accounting MUST include the
+// one-time 18 GB cold-start model download charge on metered-ingress hosts (`inet_down_cost`).
+func TestReview28ExaminerIncludesColdDownloadTransferInSelectionAndSpend(t *testing.T) {
+	t0 := time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
+
+	t.Run("vast_offer_selection_filters_and_ranks_metered_ingress", func(t *testing.T) {
+		vastSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == "POST" && r.URL.Path == "/api/v0/bundles/" {
+				// Offer 202 has lower base ($0.58) than Offer 201 ($0.60), but $0.02/GB ingress
+				// adds $0.36 for 18 GB -> effective first-hour cost $0.94 vs $0.60.
+				// Offer 203 is $0.60 + $0.02/GB = $0.96.
+				_, _ = w.Write([]byte(`{"offers":[
+					{"id":202,"gpu_name":"RTX 5090","num_gpus":1,"dph_total":0.58,"dph_base":0.53,"storage_cost":0.45,"inet_down_cost":0.02,"cuda_max_good":13.3,"inet_down":2000,"geolocation":"US"},
+					{"id":201,"gpu_name":"RTX 5090","num_gpus":1,"dph_total":0.60,"dph_base":0.55,"storage_cost":0.45,"inet_down_cost":0.0,"cuda_max_good":13.3,"inet_down":2000,"geolocation":"US"},
+					{"id":203,"gpu_name":"RTX 5090","num_gpus":1,"dph_total":0.60,"dph_base":0.55,"storage_cost":0.45,"inet_down_cost":0.02,"cuda_max_good":13.3,"inet_down":2000,"geolocation":"US"}
+				]}`))
+				return
+			}
+			http.NotFound(w, r)
+		}))
+		defer vastSrv.Close()
+
+		vm := newVast(vastSrv.URL, "vast-key")
+		vm.a.sleep = func(context.Context, time.Duration) error { return nil }
+
+		// Under $0.61/h cap, ONLY free-ingress offer 201 fits; metered offers 202 ($0.94) & 203 ($0.96) are excluded.
+		capped, err := vm.ExaminerOffers(context.Background(), 0.61)
+		if err != nil {
+			t.Fatalf("ExaminerOffers(0.61): %v", err)
+		}
+		if len(capped) != 1 || capped[0].ID != "201" || capped[0].TransferDollars != 0 {
+			t.Fatalf("under $0.61 cap want only free-ingress offer 201, got %+v", capped)
+		}
+
+		// Under $1.50/h cap, all 3 fit and free-ingress 201 ($0.60) ranks ahead of metered 202 ($0.94) & 203 ($0.96).
+		all, err := vm.ExaminerOffers(context.Background(), 1.50)
+		if err != nil {
+			t.Fatalf("ExaminerOffers(1.50): %v", err)
+		}
+		if len(all) != 3 || all[0].ID != "201" || all[1].ID != "202" || all[2].ID != "203" {
+			t.Fatalf("expected ranking [201, 202, 203] by price+transfer, got %+v", all)
+		}
+		if math.Abs(all[2].TransferDollars-0.36) > 1e-6 {
+			t.Fatalf("expected 18 GB * $0.02/GB = $0.36 transfer on offer 203, got %.6f", all[2].TransferDollars)
+		}
+	})
+
+	t.Run("fifteen_minute_metered_examiner_bills_rental_plus_transfer_without_day2_double_charge", func(t *testing.T) {
+		cur := t0
+		rp, st := newFakeRunPod(t), newFakeStet(t)
+		f, _ := testFleet(t, rp, st, 1)
+		f.now = func() time.Time { return cur }
+		f.o.MaxWorkers = 2
+		f.o.MaxHourly = 2.00
+		f.o.DailyBudget = 10.00
+		f.o.Examiner.MaxPrice = 1.50
+
+		exProv := &fakeExaminerProv{
+			offers: []ExaminerOffer{{ID: "ex-metered", Card: "RTX 5090", Price: 0.60, DiskCost: 0.05, TransferDollars: 0.36}},
+		}
+		f.examiner = newExaminer(ExaminerConfig{Addr: "127.0.0.1:0", Timeout: 45 * time.Minute, MaxPrice: 1.50}, f.o.Home, exProv, func() time.Time { return cur }, f.say, false)
+		f.examiner.owner = "test"
+		f.examiner.onSpent = func(rec podRecord) error { return appendExaminerSpend(f.spentLog(), rec) }
+
+		// 1. Rent metered examiner at 12:00.
+		st.work = Work{Rounds: []WorkRound{{ID: "s3-o00028", ExamAt: 0}}}
+		if err := reconcileExaminerOnce(context.Background(), f); err != nil {
+			t.Fatalf("rent reconcile: %v", err)
+		}
+		if len(exProv.rented) != 1 {
+			t.Fatalf("expected 1 examiner rented, got %d", len(exProv.rented))
+		}
+
+		// 2. Advance 15 minutes (12:15): live snapshot MUST report hourly=$0.96 ($0.60+$0.36) and accrued=$0.51 ($0.15+$0.36).
+		cur = t0.Add(15 * time.Minute)
+		live, hourly, accrued, err := f.examiner.ActiveSnapshot(cur)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if live != 1 || math.Abs(hourly-0.96) > 1e-4 || math.Abs(accrued-0.51) > 1e-4 {
+			t.Fatalf("at +15m want live=1 hourly=$0.96 accrued=$0.51, got live=%d hourly=$%.4f accrued=$%.4f", live, hourly, accrued)
+		}
+
+		// 3. Exam posted at 12:15 -> tear down and retire to spent.jsonl with FixedCost=$0.36 -> Day 1 total == $0.51.
+		st.work = Work{Rounds: []WorkRound{{ID: "s3-o00028", ExamAt: cur.Unix()}}}
+		if err := reconcileExaminerOnce(context.Background(), f); err != nil {
+			t.Fatalf("teardown reconcile: %v", err)
+		}
+		l, err := f.readLedger()
+		if err != nil {
+			t.Fatal(err)
+		}
+		day1Spent, err := f.spent(l, startOfDay(cur))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if math.Abs(day1Spent-0.51) > 1e-4 {
+			t.Fatalf("retired 15m metered examiner Day 1 spend = $%.4f, want $0.51 ($0.15 rental + $0.36 transfer)", day1Spent)
+		}
+
+		// 4. On UTC Day 2, Day 1's cold-start transfer MUST NOT be double-charged.
+		day2 := time.Date(2026, 11, 28, 0, 10, 0, 0, time.UTC)
+		cur = day2
+		day2Spent, err := f.spent(l, startOfDay(day2))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if day2Spent != 0 {
+			t.Fatalf("UTC Day 2 spend must not re-bill Day 1 FixedCost, got $%.4f", day2Spent)
+		}
+	})
+
+	t.Run("daily_budget_blocks_metered_offer_exceeding_remaining_budget", func(t *testing.T) {
+		rp, st := newFakeRunPod(t), newFakeStet(t)
+		f, _ := testFleet(t, rp, st, 1)
+		f.now = func() time.Time { return t0 }
+		f.o.MaxWorkers = 2
+		f.o.MaxHourly = 2.00
+		f.o.DailyBudget = 1.00
+		f.o.Examiner.MaxPrice = 1.50
+		if _, err := appendSpendRecord(f.spentLog(), podRecord{
+			ID: "prior-today", Market: "runpod", Handle: "prior", GPU: "RTX 4090",
+			Cost: 0.80, Start: t0.Add(-2 * time.Hour), Alive: t0.Add(-1 * time.Hour), End: t0.Add(-1 * time.Hour),
+		}, true); err != nil {
+			t.Fatal(err)
+		}
+		st.work = Work{Rounds: []WorkRound{{ID: "s3-o00028", ExamAt: 0}}}
+		exProv := &fakeExaminerProv{
+			offers: []ExaminerOffer{{ID: "ex-metered", Card: "RTX 5090", Price: 0.60, DiskCost: 0.05, TransferDollars: 0.36}},
+		}
+		f.examiner = newExaminer(ExaminerConfig{Addr: "127.0.0.1:0", Timeout: 45 * time.Minute, MaxPrice: 1.50}, f.o.Home, exProv, func() time.Time { return t0 }, f.say, false)
+		f.examiner.owner = "test"
+
+		if err := reconcileExaminerOnce(context.Background(), f); err != nil {
+			t.Fatalf("reconcileExaminerOnce: %v", err)
+		}
+		if len(exProv.rented) != 0 {
+			t.Fatalf("metered offer with $0.36 transfer exceeding $0.20 remaining daily budget MUST NOT rent, rented %d", len(exProv.rented))
+		}
+	})
+}
+
+// Review 28 P2 #5: Explicit `--gpu` names MUST still pass `fits()` (CUDA maker, VRAM floor,
+// unfitGPU architecture/bf16 filter, and two-pass lease speed check) before being ordered.
+func TestReview28NamedGPUsEnforceEligibilityAndLeaseChecks(t *testing.T) {
+	t.Run("gpu_v100_rejected_by_up", func(t *testing.T) {
+		rp, st := newFakeRunPod(t), newFakeStet(t)
+		f, logs := testFleet(t, rp, st, 2)
+		f.o.Cloud = "COMMUNITY"
+		f.o.MinGPUMemory = 12
+		f.o.GPUs = []string{"V100"}
+		rp.extraCommunity = []map[string]any{
+			{"id": "Tesla V100-PCIE-16GB", "name": "V100", "manufacturer": "NVIDIA", "memory": 16, "price": map[string]any{"community": 0.30}, "availability": "HIGH"},
+		}
+		rp.extraPrices = map[string]float64{"Tesla V100-PCIE-16GB": 0.30}
+		st.work = Work{LeaseSeconds: int((5 * time.Hour).Seconds()), Rounds: []WorkRound{{ID: "s3-o00028", GradesWanted: 2}}}
+
+		if err := cmdUp(context.Background(), f, 1); err != nil {
+			t.Fatalf("cmdUp: %v", err)
+		}
+		if len(rp.created) != 0 {
+			t.Fatalf("--gpu V100 MUST NOT rent an unfit non-bf16 V100, rented %+v", rp.created)
+		}
+		if !strings.Contains(logs.String(), "ignoring ineligible --gpu V100") {
+			t.Fatalf("expected log explaining why --gpu V100 was ignored, got:\n%s", logs.String())
+		}
+	})
+
+	t.Run("gpu_a5000_rejected_under_one_hour_lease", func(t *testing.T) {
+		rp, st := newFakeRunPod(t), newFakeStet(t)
+		f, logs := testFleet(t, rp, st, 2)
+		f.o.Cloud = "SECURE"
+		f.o.MinGPUMemory = 12
+		f.o.GPUs = []string{"RTX A5000"}
+		st.work = Work{LeaseSeconds: int(time.Hour.Seconds()), Rounds: []WorkRound{{ID: "s3-o00028", GradesWanted: 2}}}
+
+		if err := cmdUp(context.Background(), f, 1); err != nil {
+			t.Fatalf("cmdUp: %v", err)
+		}
+		if len(rp.created) != 0 {
+			t.Fatalf("--gpu RTX A5000 MUST NOT rent under a 1h lease (2*pass+margin > 1h), rented %+v", rp.created)
+		}
+		if !strings.Contains(logs.String(), "too slow for 1h0m0s job lease") {
+			t.Fatalf("expected lease-speed rejection log for --gpu RTX A5000, got:\n%s", logs.String())
+		}
+	})
+
+	t.Run("gpu_mixed_skips_ineligible_and_preserves_order", func(t *testing.T) {
+		rp, st := newFakeRunPod(t), newFakeStet(t)
+		f, _ := testFleet(t, rp, st, 2)
+		f.o.Cloud = "COMMUNITY"
+		f.o.MinGPUMemory = 12
+		f.o.GPUs = []string{"V100", "RTX A5000", "RTX 4090"}
+		rp.extraCommunity = []map[string]any{
+			{"id": "Tesla V100-PCIE-16GB", "name": "V100", "manufacturer": "NVIDIA", "memory": 16, "price": map[string]any{"community": 0.30}, "availability": "HIGH"},
+			{"id": "NVIDIA RTX A5000", "name": "RTX A5000", "manufacturer": "NVIDIA", "memory": 24, "price": map[string]any{"community": 0.27}, "availability": "HIGH"},
+		}
+		rp.extraPrices = map[string]float64{
+			"Tesla V100-PCIE-16GB": 0.30,
+			"NVIDIA RTX A5000":     0.27,
+		}
+		// 2h lease excludes RTX A5000 (~2h32m) while allowing RTX 4090 (~1h32m).
+		st.work = Work{LeaseSeconds: int((2 * time.Hour).Seconds()), Rounds: []WorkRound{{ID: "s3-o00028", GradesWanted: 2}}}
+
+		if err := cmdUp(context.Background(), f, 1); err != nil {
+			t.Fatalf("cmdUp: %v", err)
+		}
+		if len(rp.created) != 1 || rp.created[0].GPU.ID != "NVIDIA GeForce RTX 4090" {
+			t.Fatalf("expected ineligible V100 & A5000 skipped and RTX 4090 rented, got %+v", rp.created)
+		}
+	})
+}
+
+// Review 28 Gate 4 edge cases:
+//  1. 404 (!exists) on a stopped worker with unobserved [StoppedSeen, now] gap bills conservative
+//     compute across workers resolve (--end and read-only) and Fleet.note (retireGone).
+//  2. Positive storage_cost with missing disk_space and omitted dph_total is marked DiskCostUnknown=true.
+//  3. betterRental never lets an unknown-disk-cost stopped duplicate overwrite a known-disk-cost one.
+//  4. Fleet.end subtracts the pre-lookup disk rate from v.Hourly rather than post-lookup mutated rec.DiskCost.
+//  5. Reconcile & EnforceTimeout merge Unresolved TransferDollars/Price/Created before recording ended spend.
+func TestReview28Gate4EdgeCases(t *testing.T) {
+	t0 := time.Date(2026, 11, 27, 10, 0, 0, 0, time.UTC)
+	t1 := t0.Add(time.Minute)
+	tEnd := t0.Add(2 * time.Hour)
+	wantConservative := (1.0/60.0)*0.06 + (119.0/60.0)*1.50 // $2.976
+
+	t.Run("stopped_worker_404_bills_conservative_gap_across_resolve_and_note", func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			run  func(ctx context.Context, f *Fleet) error
+		}{
+			{"workers_resolve_end", func(ctx context.Context, f *Fleet) error { return cmdWorkersResolve(ctx, f, true, "") }},
+			{"workers_resolve_readonly", func(ctx context.Context, f *Fleet) error { return cmdWorkersResolve(ctx, f, false, "") }},
+			{"fleet_look_retire_gone", func(ctx context.Context, f *Fleet) error { _, err := f.look(ctx); return err }},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				vastSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.Method == "GET" && r.URL.Path == "/api/v1/instances/" {
+						_, _ = w.Write([]byte(`{"instances":[],"next_token":null}`))
+						return
+					}
+					http.NotFound(w, r) // Lookup & DELETE return 404
+				}))
+				defer vastSrv.Close()
+
+				rp, st := newFakeRunPod(t), newFakeStet(t)
+				f, _ := testFleet(t, rp, st, 1)
+				f.now = func() time.Time { return tEnd }
+				vm := newVast(vastSrv.URL, "vast-key")
+				vm.a.sleep = func(context.Context, time.Duration) error { return nil }
+				f.markets = []Market{vm}
+				if err := f.writeLedger(&ledger{Pods: map[string]*podRecord{
+					ledgerKey("vast", "98401"): {
+						ID: "98401", Market: "vast", Handle: f.keys[0].Handle, GPU: "RTX 5090",
+						Cost: 1.50, DiskCost: 0.06, Tracked: true, Stopped: true, Terminating: true,
+						Start: t0, Alive: t0, StoppedAt: t0, StoppedSeen: t1,
+					},
+				}}); err != nil {
+					t.Fatal(err)
+				}
+				if err := tc.run(context.Background(), f); err != nil {
+					t.Fatalf("%s: %v", tc.name, err)
+				}
+				l, err := f.readLedger()
+				if err != nil {
+					t.Fatal(err)
+				}
+				spent, err := f.spent(l, startOfDay(tEnd))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if math.Abs(spent-wantConservative) > 1e-4 {
+					t.Fatalf("%s on 404 stopped worker: spent=$%.4f, want conservative $%.4f", tc.name, spent, wantConservative)
+				}
+			})
+		}
+	})
+
+	t.Run("positive_storage_cost_without_disk_space_is_unknown_and_better_rental_symmetric", func(t *testing.T) {
+		var inst vastInstance
+		raw := fmt.Sprintf(`{"id":98402,"label":"stet-rp-01","actual_status":"exited","intended_status":"stopped","cur_state":"stopped","gpu_name":"RTX 5090","dph_base":1.44,"storage_cost":0.432,"start_date":%d}`, t0.Unix())
+		if err := json.Unmarshal([]byte(raw), &inst); err != nil {
+			t.Fatal(err)
+		}
+		r := vastInstanceRental(inst)
+		if !r.DiskCostUnknown {
+			t.Fatalf("positive storage_cost with omitted disk_space MUST set DiskCostUnknown=true, got %+v", r)
+		}
+
+		known := &Rental{Market: "vast", ID: "98402", State: "stopped", DiskCost: 0.06, DiskCostUnknown: false, PartialRate: true}
+		unk := &Rental{Market: "vast", ID: "98402", State: "stopped", DiskCost: 0, DiskCostUnknown: true, Price: 1.44, PartialRate: false}
+		if betterRental(known, unk) {
+			t.Fatal("betterRental MUST NOT let DiskCostUnknown=true overwrite known DiskCost")
+		}
+		if !betterRental(unk, known) {
+			t.Fatal("betterRental MUST prefer known DiskCost over DiskCostUnknown=true")
+		}
+	})
+
+	t.Run("fleet_end_subtracts_pre_lookup_disk_rate_from_view_hourly", func(t *testing.T) {
+		vastSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == "GET" && r.URL.Path == "/api/v0/instances/98403/":
+				_, _ = w.Write([]byte(fmt.Sprintf(`{"instances":{"id":98403,"label":"stet-rp-01","actual_status":"exited","intended_status":"stopped","cur_state":"stopped","gpu_name":"RTX 5090","dph_total":0.40,"dph_base":1.44,"start_date":%d}}`, t0.Unix())))
+			case r.Method == "DELETE" && r.URL.Path == "/api/v0/instances/98403/":
+				_, _ = w.Write([]byte(`{"success":true}`))
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer vastSrv.Close()
+
+		rp, st := newFakeRunPod(t), newFakeStet(t)
+		f, _ := testFleet(t, rp, st, 2)
+		f.now = func() time.Time { return tEnd }
+		vm := newVast(vastSrv.URL, "vast-key")
+		vm.a.sleep = func(context.Context, time.Duration) error { return nil }
+		f.markets = []Market{vm}
+
+		rec := &podRecord{
+			ID: "98403", Market: "vast", Handle: f.keys[0].Handle, GPU: "RTX 5090",
+			Cost: 1.50, DiskCost: 0, DiskCostUnknown: true, Tracked: true, Stopped: true,
+			Start: t0, Alive: t0, StoppedAt: t0, StoppedSeen: t1,
+		}
+		v := &View{
+			Ledger:          &ledger{Pods: map[string]*podRecord{ledgerKey("vast", "98403"): rec}},
+			Hourly:          1.50, // Worker A's live $1.50/h; stopped B contributed $0 before lookup
+			UnknownRateKeys: map[string]string{ledgerKey("vast", "98403"): "stet-rp-01"},
+		}
+		r := &Rental{Market: "vast", ID: "98403", Name: f.keys[0].Handle, State: "stopped", Status: "as recorded", DiskCostUnknown: true}
+		if err := f.end(context.Background(), v, []Ending{{Rental: r, Why: "stopped worker"}}); err != nil {
+			t.Fatalf("f.end: %v", err)
+		}
+		if math.Abs(v.Hourly-1.50) > 1e-6 {
+			t.Fatalf("f.end subtracted post-lookup rate from v.Hourly: got $%.4f, want $1.5000", v.Hourly)
+		}
+	})
+
+	t.Run("unresolved_orphan_preserves_transfer_dollars_on_later_reconcile_teardown", func(t *testing.T) {
+		endAt := t0.Add(15 * time.Minute)
+		rp, st := newFakeRunPod(t), newFakeStet(t)
+		f, _ := testFleet(t, rp, st, 1)
+		f.now = func() time.Time { return endAt }
+		owner := "abcdef012345"
+		if err := os.WriteFile(examinerOwnerPath(f.o.Home), []byte(owner+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		// Seed examiner.json with ONLY an Unresolved metered orphan (InstanceID == "").
+		if err := writeExaminerState(f.o.Home, &examinerState{
+			Unresolved: []ExaminerInstance{{
+				ID: "ex-orphan-1", Label: examinerLabelPrefix + "-" + owner + "-s3-o00028-abcd1234",
+				State: "running", Price: 0.60, DiskCost: 0.05, TransferDollars: 0.36, Created: t0, ObservedLiveAt: t0,
+			}},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		// Provider lists the orphan WITHOUT inet_down_cost (TransferDollars == 0) and WITHOUT Price/Created.
+		exProv := &fakeExaminerProv{
+			insts: map[string]ExaminerInstance{
+				"ex-orphan-1": {
+					ID: "ex-orphan-1", Label: examinerLabelPrefix + "-" + owner + "-s3-o00028-abcd1234",
+					State: "running",
+				},
+			},
+		}
+		ex := newExaminer(ExaminerConfig{Addr: "127.0.0.1:0", Timeout: 45 * time.Minute, MaxPrice: 1.50}, f.o.Home, exProv, func() time.Time { return endAt }, f.say, false)
+		ex.onSpent = func(rec podRecord) error { return appendExaminerSpend(f.spentLog(), rec) }
+
+		// Idle reconcile tears down ex-orphan-1 and MUST preserve TransferDollars=$0.36, Price=$0.60, Created=t0 -> $0.51!
+		if err := ex.Reconcile(context.Background(), &Work{}, ExaminerBudget{MaxWorkers: 2, MaxHourly: 4}); err != nil {
+			t.Fatalf("Reconcile: %v", err)
+		}
+		l, err := f.readLedger()
+		if err != nil {
+			t.Fatal(err)
+		}
+		spent, err := f.spent(l, startOfDay(endAt))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if math.Abs(spent-0.51) > 1e-4 {
+			t.Fatalf("ended Unresolved orphan lost TransferDollars/Price/Created: spent=$%.4f, want $0.51", spent)
 		}
 	})
 }

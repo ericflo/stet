@@ -657,6 +657,8 @@ func reconcileExaminerOnce(ctx context.Context, f *Fleet) error {
 			if p.Stopped {
 				if rate := p.stoppedHourlyRate(); rate > 0 {
 					hourlyWorkers += rate
+				} else if p.DiskCostUnknown {
+					unknownRates = append(unknownRates, unknownRateLabel(p.market(), p.ID, p.Handle))
 				}
 				continue
 			}
@@ -684,9 +686,13 @@ func reconcileExaminerOnce(ctx context.Context, f *Fleet) error {
 					if !validRate(r.Price) || r.PartialRate {
 						unknownRates = append(unknownRates, unknownRateLabel(r.Market, r.ID, h))
 					}
-				} else if r.State == "stopped" && validRate(r.DiskCost) {
+				} else if r.State == "stopped" {
 					seen[key] = true
-					hourlyWorkers += r.DiskCost
+					if validRate(r.DiskCost) {
+						hourlyWorkers += r.DiskCost
+					} else if r.DiskCostUnknown {
+						unknownRates = append(unknownRates, unknownRateLabel(r.Market, r.ID, h))
+					}
 				}
 			}
 		}
@@ -1007,6 +1013,61 @@ func cmdWorkersResolve(ctx context.Context, f *Fleet, end bool, clearIDs ...stri
 	endedTermKeys := map[string]bool{}
 
 	// 1. Reconcile any persisted outstanding terminations bound to exact contract IDs.
+	fallbackListed := map[string][]Rental{}
+	fallbackListErr := map[string]error{}
+	lookupContract := func(m Market, id string) (fresh *Rental, exists bool, direct bool, err error) {
+		if lu, ok := m.(rentalLookup); ok {
+			f, ex, lerr := lu.Lookup(ctx, id)
+			return f, ex, true, lerr
+		}
+		mName := m.Name()
+		rs, loaded := fallbackListed[mName]
+		lerr, hadErr := fallbackListErr[mName]
+		if !loaded && !hadErr {
+			rs, lerr = m.Rentals(ctx)
+			if lerr != nil {
+				fallbackListErr[mName] = lerr
+			} else {
+				fallbackListed[mName] = rs
+			}
+		}
+		if lerr != nil {
+			return nil, false, false, lerr
+		}
+		for i := range rs {
+			if rs[i].ID == id {
+				cp := rs[i]
+				return &cp, true, false, nil
+			}
+		}
+		return nil, false, false, nil
+	}
+	terminatedEndAt := func(rec *podRecord, fresh *Rental) (time.Time, bool) {
+		minEnd := rec.currentRunStart()
+		if !rec.Alive.IsZero() && (minEnd.IsZero() || rec.Alive.After(minEnd)) {
+			minEnd = rec.Alive
+		}
+		if rec.Stopped {
+			stoppedAt := rec.StoppedAt
+			if stoppedAt.IsZero() {
+				stoppedAt = rec.currentStopStart(now)
+			}
+			if !stoppedAt.IsZero() && (minEnd.IsZero() || stoppedAt.After(minEnd)) {
+				minEnd = stoppedAt
+			}
+			if !rec.StoppedSeen.IsZero() && (minEnd.IsZero() || rec.StoppedSeen.After(minEnd)) {
+				minEnd = rec.StoppedSeen
+			}
+		}
+		var providerEndAt time.Time
+		if fresh != nil {
+			providerEndAt = fresh.EndedAt
+		}
+		endAt := resolveStopTime(minEnd, now, providerEndAt)
+		trusted := !providerEndAt.IsZero() && endAt.Equal(providerEndAt)
+		return endAt, trusted
+	}
+
 	for _, key := range termKeys {
 		rec := l.Pods[key]
 		if rec == nil {
@@ -1036,10 +1097,16 @@ func cmdWorkersResolve(ctx context.Context, f *Fleet, end bool, clearIDs ...stri
 		endAt := now
 		if !end {
 			if lu, ok := m.(rentalLookup); ok {
-				if _, exists, lerr := lu.Lookup(ctx, rec.ID); lerr == nil && !exists {
+				fresh, exists, lerr := lu.Lookup(ctx, rec.ID)
+				if lerr == nil && !exists {
 					if f.o.DryRun {
 						f.say("would clear absent terminating worker %s (%s on %s)", rec.Handle, rec.ID, marketTitle(mName))
 						continue
+					}
+					if rec.Stopped {
+						// 404 confirms absence without proving the worker stayed stopped during
+						// [StoppedSeen, endAt]; conservatively budget any unobserved gap at compute rate.
+						rec.markLiveAt(endAt, time.Time{})
 					}
 					f.event(&Rental{Market: mName, ID: rec.ID, Name: rec.Handle, Host: rec.Host, Card: rec.GPU, Price: rec.Cost}, rec.Handle, "ended", rec.Why)
 					if rerr := f.retire(l, key, endAt); rerr != nil && firstErr == nil {
@@ -1049,6 +1116,16 @@ func cmdWorkersResolve(ctx context.Context, f *Fleet, end bool, clearIDs ...stri
 					changed = true
 					f.say("cleared terminating worker %s (%s on %s): provider confirmed absent", rec.Handle, rec.ID, marketTitle(mName))
 					continue
+				}
+				if lerr == nil && exists && fresh != nil && !f.o.DryRun {
+					reconcileRentalRate(rec, fresh)
+					if fresh.live() {
+						rec.markLiveAt(now, fresh.ResumedAt)
+						changed = true
+					} else if fresh.State == "stopped" {
+						rec.markStoppedAt(now, fresh.StoppedAt)
+						changed = true
+					}
 				}
 			}
 			e := fmt.Errorf("worker %s (%s on %s) has an outstanding termination; run `stet-cloud workers resolve --end` to retry", rec.Handle, rec.ID, marketTitle(mName))
@@ -1062,11 +1139,44 @@ func cmdWorkersResolve(ctx context.Context, f *Fleet, end bool, clearIDs ...stri
 			f.say("would retry ending terminating worker %s (%s on %s)", rec.Handle, rec.ID, marketTitle(mName))
 			continue
 		}
+		// Reconcile the exact contract BEFORE deleting it so a stopped worker that resumed during
+		// controller downtime (or changed rate) applies the ordinary rate and transition logic
+		// instead of retiring the stale stopped record at storage rates.
+		fresh, exists, _, lerr := lookupContract(m, rec.ID)
+		stateConfirmed := false
+		if lerr == nil && exists && fresh != nil {
+			reconcileRentalRate(rec, fresh)
+			switch {
+			case fresh.live():
+				rec.markLiveAt(now, fresh.ResumedAt)
+				stateConfirmed = true
+				changed = true
+			case fresh.State == "stopped":
+				rec.markStoppedAt(now, fresh.StoppedAt)
+				stateConfirmed = true
+				changed = true
+			default:
+				var trusted bool
+				endAt, trusted = terminatedEndAt(rec, fresh)
+				stateConfirmed = trusted
+			}
+		}
 		endErr := m.End(ctx, rec.ID)
 		if endErr != nil {
 			if lu, ok := m.(rentalLookup); ok {
-				if _, exists, lerr := lu.Lookup(ctx, rec.ID); lerr == nil && !exists {
-					endErr = nil
+				if fresh2, exists2, lerr2 := lu.Lookup(ctx, rec.ID); lerr2 == nil {
+					if !exists2 {
+						endErr = nil
+					} else if fresh2 != nil {
+						reconcileRentalRate(rec, fresh2)
+						if fresh2.live() {
+							rec.markLiveAt(now, fresh2.ResumedAt)
+							changed = true
+						} else if fresh2.State == "stopped" {
+							rec.markStoppedAt(now, fresh2.StoppedAt)
+							changed = true
+						}
+					}
 				}
 			}
 		}
@@ -1076,6 +1186,12 @@ func cmdWorkersResolve(ctx context.Context, f *Fleet, end bool, clearIDs ...stri
 				firstErr = fmt.Errorf("ending %s on %s: %w", rec.ID, marketTitle(mName), endErr)
 			}
 			continue
+		}
+		if !stateConfirmed && rec.Stopped {
+			// Lookup did not confirm the contract stayed stopped during [StoppedSeen, endAt];
+			// retain confirmed storage through StoppedSeen and conservatively bill the unobserved
+			// interval at the compute rate before retiring.
+			rec.markLiveAt(endAt, time.Time{})
 		}
 		f.event(&Rental{Market: mName, ID: rec.ID, Name: rec.Handle, Host: rec.Host, Card: rec.GPU, Price: rec.Cost}, rec.Handle, "ended", rec.Why)
 		if rerr := f.retire(l, key, endAt); rerr != nil && firstErr == nil {
@@ -1362,6 +1478,22 @@ func cmdDownRental(ctx context.Context, f *Fleet, market, id string) error {
 			}
 		}
 	}
+	stateConfirmed := false
+	if rec != nil && lockErr == nil && ledgerErr == nil {
+		if lu, ok := m.(rentalLookup); ok {
+			if fresh, exists, lerr := lu.Lookup(ctx, id); lerr == nil && exists && fresh != nil {
+				reconcileRentalRate(rec, fresh)
+				now := f.now()
+				if fresh.live() {
+					rec.markLiveAt(now, fresh.ResumedAt)
+					stateConfirmed = true
+				} else if fresh.State == "stopped" {
+					rec.markStoppedAt(now, fresh.StoppedAt)
+					stateConfirmed = true
+				}
+			}
+		}
+	}
 	if err := m.End(ctx, id); err != nil {
 		return err
 	}
@@ -1386,6 +1518,9 @@ func cmdDownRental(ctx context.Context, f *Fleet, market, id string) error {
 	}
 	if rec != nil {
 		endAt := f.now()
+		if !stateConfirmed && rec.Stopped {
+			rec.markLiveAt(endAt, time.Time{})
+		}
 		if err := f.retire(l, key, endAt); err != nil {
 			return fmt.Errorf("ended probe %s on %s, but retiring ledger entry failed: %w", id, marketTitle(market), err)
 		}
