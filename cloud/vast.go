@@ -1135,27 +1135,46 @@ func (m *vastMarket) ListExaminers(ctx context.Context) ([]ExaminerInstance, err
 	return all, fmt.Errorf("Vast listed more than 2,500 instances")
 }
 
-// TransferCharges queries Vast.ai's dated charges endpoint (GET /api/v0/charges) for instance
-// bandwidth line items (`bwd` download, `bwu` upload) within [from, to] (UTC day granularity),
-// keyed by contract ID -> UTC day ("2006-01-02") -> dayTransferCharge. Returns (nil, nil) if the
-// endpoint is absent (HTTP 404/405/501) so minimal mocks continue using listing/estimate fallbacks.
+// vastChargeMatchesDay reports whether a charge line item returned by a single-UTC-day
+// `/api/v0/charges` query for `[dayStart, nextDayStart)` belongs to that day. Interval lines
+// spanning midnight (`start < nextDayStart && end > dayStart`) match the queried day so Vast's
+// day-scoped totals are attributed to the exact queried UTC day rather than the contract's first
+// day, while non-overlapping lines from other days (e.g. from minimal filter-ignoring fixtures)
+// are excluded.
+func vastChargeMatchesDay(startTS, endTS, dayTS float64, dayStart, nextDayStart int64) bool {
+	loDay := float64(dayStart)
+	hiDay := float64(nextDayStart)
+	if dayTS > 0 {
+		return dayTS >= loDay && dayTS < hiDay
+	}
+	if startTS > 0 && endTS > 0 {
+		lo, hi := min(startTS, endTS), max(startTS, endTS)
+		if lo < hi {
+			return lo < hiDay && hi > loDay
+		}
+		return lo >= loDay && lo < hiDay
+	}
+	if startTS > 0 {
+		return startTS >= loDay && startTS < hiDay
+	}
+	if endTS > 0 {
+		return endTS >= loDay && endTS < hiDay
+	}
+	return true
+}
+
+// TransferCharges queries Vast.ai's dated charges endpoint (GET /api/v0/charges) one UTC day at a
+// time across [from, to] (newest day first) for instance bandwidth line items (`bwd` download,
+// `bwu` upload), keyed by contract ID -> UTC day ("2006-01-02") -> dayTransferCharge. Querying
+// per UTC day prevents Vast's contract-grouped multi-day responses from attributing midnight-spanning
+// transfer lines solely to their first day. Uses single-attempt non-blocking reads (`doOnce`) so
+// provider rate limits never stall teardown; returns (nil, nil) if the endpoint is absent (HTTP
+// 404/405/501), and returns any partial per-day totals gathered alongside the first error.
 func (m *vastMarket) TransferCharges(ctx context.Context, from, to time.Time) (map[string]map[string]dayTransferCharge, error) {
 	fromDay := startOfDay(from)
 	toDay := startOfDay(to)
 	if toDay.Before(fromDay) {
 		toDay = fromDay
-	}
-	filters, err := json.Marshal(map[string]any{
-		"day": map[string]int64{
-			"gte": fromDay.Unix(),
-			"lte": toDay.Add(24*time.Hour - time.Second).Unix(),
-		},
-		"type": map[string][]string{
-			"in": {"instance"},
-		},
-	})
-	if err != nil {
-		return nil, err
 	}
 	type vastChargeItem struct {
 		Start  float64 `json:"start"`
@@ -1174,20 +1193,10 @@ func (m *vastMarket) TransferCharges(ctx context.Context, from, to time.Time) (m
 		Items      []vastChargeItem `json:"items"`
 	}
 	outMap := map[string]map[string]dayTransferCharge{}
-	addCharge := func(cid string, ts float64, kind string, amount float64) {
+	addCharge := func(cid, dayKey, kind string, amount float64) {
 		if cid == "" || !validRate(amount) {
 			return
 		}
-		var day time.Time
-		if ts > 0 {
-			day = startOfDay(time.Unix(int64(ts), 0).UTC())
-		} else {
-			day = toDay
-		}
-		if day.Before(fromDay) || day.After(toDay) {
-			return
-		}
-		dayKey := day.Format("2006-01-02")
 		if outMap[cid] == nil {
 			outMap[cid] = map[string]dayTransferCharge{}
 		}
@@ -1202,75 +1211,97 @@ func (m *vastMarket) TransferCharges(ctx context.Context, from, to time.Time) (m
 		}
 		outMap[cid][dayKey] = cur
 	}
-	after := ""
-	for page := 0; page < 50; page++ {
-		q := url.Values{
-			"select_filters": {string(filters)},
-			"format":         {"table"},
-			"latest_first":   {"true"},
-			"limit":          {"500"},
-		}
-		if after != "" {
-			q.Set("after_token", after)
-		}
-		var resp struct {
-			Results   []vastChargeRow `json:"results"`
-			Charges   []vastChargeRow `json:"charges"`
-			NextToken *string         `json:"next_token"`
-		}
-		status, err := m.a.do(ctx, "GET", "/api/v0/charges?"+q.Encode(), nil, &resp)
+	var firstErr error
+	for day := toDay; !day.Before(fromDay); day = day.AddDate(0, 0, -1) {
+		dayStart := day.Unix()
+		nextDayStart := day.AddDate(0, 0, 1).Unix()
+		dayKey := day.Format("2006-01-02")
+		filters, err := json.Marshal(map[string]any{
+			"day": map[string]int64{
+				"gte": dayStart,
+				"lte": nextDayStart - 1,
+			},
+			"type": map[string][]string{
+				"in": {"instance"},
+			},
+		})
 		if err != nil {
-			if status == http.StatusNotFound || status == http.StatusMethodNotAllowed || status == http.StatusNotImplemented {
-				return nil, nil
-			}
-			return nil, err
+			return outMap, err
 		}
-		rows := resp.Results
-		if len(rows) == 0 && len(resp.Charges) > 0 {
-			rows = resp.Charges
-		}
-		for _, row := range rows {
-			rowType := strings.ToLower(strings.TrimSpace(row.Type))
-			cid := ""
-			if strings.HasPrefix(row.Source, "instance-") {
-				cid = strings.TrimSpace(strings.TrimPrefix(row.Source, "instance-"))
-			} else if row.InstanceID > 0 {
-				cid = strconv.FormatInt(row.InstanceID, 10)
+		after := ""
+		for page := 0; page < 50; page++ {
+			q := url.Values{
+				"select_filters": {string(filters)},
+				"format":         {"table"},
+				"latest_first":   {"true"},
+				"limit":          {"500"},
 			}
-			if cid == "" {
-				continue
+			if after != "" {
+				q.Set("after_token", after)
 			}
-			if rowType != "" && rowType != "instance" && rowType != "bwd" && rowType != "bwu" {
-				continue
+			var resp struct {
+				Results   []vastChargeRow `json:"results"`
+				Charges   []vastChargeRow `json:"charges"`
+				NextToken *string         `json:"next_token"`
 			}
-			rowTS := row.Start
-			if rowTS <= 0 {
-				rowTS = row.End
-			}
-			if rowTS <= 0 {
-				rowTS = row.Day
-			}
-			if len(row.Items) > 0 {
-				for _, it := range row.Items {
-					itTS := it.Start
-					if itTS <= 0 {
-						itTS = it.End
-					}
-					if itTS <= 0 {
-						itTS = rowTS
-					}
-					addCharge(cid, itTS, it.Type, it.Amount)
+			status, err := m.a.doOnce(ctx, "GET", "/api/v0/charges?"+q.Encode(), nil, &resp)
+			if err != nil {
+				if status == http.StatusNotFound || status == http.StatusMethodNotAllowed || status == http.StatusNotImplemented {
+					return nil, nil
 				}
-			} else if rowType == "bwd" || rowType == "bwu" {
-				addCharge(cid, rowTS, rowType, row.Amount)
+				if firstErr == nil {
+					firstErr = err
+				}
+				if status == http.StatusTooManyRequests || ctx.Err() != nil {
+					return outMap, firstErr
+				}
+				break
 			}
+			rows := resp.Results
+			if len(rows) == 0 && len(resp.Charges) > 0 {
+				rows = resp.Charges
+			}
+			for _, row := range rows {
+				rowType := strings.ToLower(strings.TrimSpace(row.Type))
+				cid := ""
+				if strings.HasPrefix(row.Source, "instance-") {
+					cid = strings.TrimSpace(strings.TrimPrefix(row.Source, "instance-"))
+				} else if row.InstanceID > 0 {
+					cid = strconv.FormatInt(row.InstanceID, 10)
+				}
+				if cid == "" {
+					continue
+				}
+				if rowType != "" && rowType != "instance" && rowType != "bwd" && rowType != "bwu" {
+					continue
+				}
+				if len(row.Items) > 0 {
+					for _, it := range row.Items {
+						sTS, eTS := it.Start, it.End
+						if sTS <= 0 && eTS <= 0 {
+							sTS, eTS = row.Start, row.End
+						} else if sTS > 0 && eTS <= 0 && row.End >= sTS {
+							eTS = row.End
+						} else if eTS > 0 && sTS <= 0 && row.Start > 0 && row.Start <= eTS {
+							sTS = row.Start
+						}
+						if vastChargeMatchesDay(sTS, eTS, row.Day, dayStart, nextDayStart) {
+							addCharge(cid, dayKey, it.Type, it.Amount)
+						}
+					}
+				} else if rowType == "bwd" || rowType == "bwu" {
+					if vastChargeMatchesDay(row.Start, row.End, row.Day, dayStart, nextDayStart) {
+						addCharge(cid, dayKey, rowType, row.Amount)
+					}
+				}
+			}
+			if resp.NextToken == nil || *resp.NextToken == "" || *resp.NextToken == after {
+				break
+			}
+			after = *resp.NextToken
 		}
-		if resp.NextToken == nil || *resp.NextToken == "" || *resp.NextToken == after {
-			return outMap, nil
-		}
-		after = *resp.NextToken
 	}
-	return outMap, nil
+	return outMap, firstErr
 }
 
 func (m *vastMarket) EndExaminer(ctx context.Context, id string) error {

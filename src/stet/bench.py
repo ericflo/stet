@@ -72,14 +72,18 @@ def _cuda_index(device=None) -> int | None:
 def _gpu_device_token(index: int, environ=None) -> str:
     """Physical GPU token for logical `index` under CUDA_VISIBLE_DEVICES / HIP_VISIBLE_DEVICES."""
     env = os.environ if environ is None else environ
+    order = str(env.get("CUDA_DEVICE_ORDER") or "").strip()
+    suffix = f"@{order}" if order else ""
     for name in ("CUDA_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES"):
         value = str(env.get(name) or "").strip()
         if value:
             parts = [p.strip() for p in value.split(",") if p.strip()]
             if 0 <= index < len(parts):
-                return parts[index]
-            return f"cuda:{index}"
-    return str(index)
+                tok = parts[index]
+                # UUID/MIG tokens are independent of CUDA_DEVICE_ORDER; numeric masks depend on it.
+                return f"{tok}{suffix}" if tok.isdigit() else tok
+            return f"cuda:{index}{suffix}"
+    return f"{index}{suffix}"
 
 
 def _cache_key(m: dict) -> str:

@@ -135,7 +135,7 @@ def pick_cpus(n: int) -> list[int]:
     return sorted(cpus + spare[: n - len(cpus)])  # fewer physical cores than n: hyperthreads make up the number
 
 
-_gpu_total: dict[tuple[int, str, str], int] | list[int] = {}
+_gpu_total: dict[tuple[int, str, str, str], int] | list[int] = {}
 
 
 def gpu_total_bytes(index: int = 0) -> int:
@@ -144,7 +144,12 @@ def gpu_total_bytes(index: int = 0) -> int:
         if _gpu_total:
             return int(_gpu_total[0])
     else:
-        key = (int(index), str(os.environ.get("CUDA_VISIBLE_DEVICES") or ""), str(os.environ.get("HIP_VISIBLE_DEVICES") or ""))
+        key = (
+            int(index),
+            str(os.environ.get("CUDA_VISIBLE_DEVICES") or ""),
+            str(os.environ.get("HIP_VISIBLE_DEVICES") or ""),
+            str(os.environ.get("CUDA_DEVICE_ORDER") or ""),
+        )
         if key in _gpu_total:
             return _gpu_total[key]
     total = 0
@@ -216,21 +221,36 @@ def one_gpu(environ=None, index: int = 0) -> dict[str, str]:
     environ = os.environ if environ is None else environ
     if index < 0:
         raise HarnessError(f"invalid GPU index {index}")
-    out = {}
+    out: dict[str, str] = {}
+    has_nonempty = False
+    empty_names: list[str] = []
     for name in ("CUDA_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES"):
-        value = str(environ.get(name) or "").strip()
-        if value:
-            parts = [p.strip() for p in value.split(",") if p.strip()]
-            if not parts:
-                continue
-            if index >= len(parts):
+        raw = environ.get(name)
+        if raw is None:
+            continue
+        value = str(raw).strip()
+        parts = [p.strip() for p in value.split(",") if p.strip()]
+        if not parts:
+            empty_names.append(name)
+            out[name] = ""
+            continue
+        if index >= len(parts):
+            raise HarnessError(
+                f"selected GPU index {index} is out of range for {name}={value!r} "
+                f"({len(parts)} visible device{'s' if len(parts) != 1 else ''})"
+            )
+        out[name] = parts[index]
+        has_nonempty = True
+    if not has_nonempty:
+        if empty_names:
+            if index > 0:
                 raise HarnessError(
-                    f"selected GPU index {index} is out of range for {name}={value!r} "
-                    f"({len(parts)} visible device{'s' if len(parts) != 1 else ''})"
+                    f"selected GPU index {index} is out of range for {empty_names[0]}='' (0 visible devices)"
                 )
-            out[name] = parts[index]
-    if not out:
-        out = {"CUDA_VISIBLE_DEVICES": str(index), "HIP_VISIBLE_DEVICES": str(index)}
+        else:
+            out = {"CUDA_VISIBLE_DEVICES": str(index), "HIP_VISIBLE_DEVICES": str(index)}
+    if order := str(environ.get("CUDA_DEVICE_ORDER") or "").strip():
+        out["CUDA_DEVICE_ORDER"] = order
     return out
 
 
@@ -696,7 +716,7 @@ def run_editor(
     echo: bool = False,
     limits: dict | None = None,
     assets=(),
-    gpu: int = 0,
+    gpu: int | None = 0,
 ) -> EditRun:
     """Run `entry` from the bundle directory against a corpus.
 
@@ -798,14 +818,15 @@ def run_editor(
     if caged:
         env.update({"USER": "stet", "LOGNAME": "stet"})  # the curator's user has no name of its own
     # The same GPU memory on every machine: PyTorch is told what fraction of this card that is.
+    gpu_idx = 0 if gpu is None else gpu
     gpu_cap = float(limits["gpu_memory_gb"]) * 2**30
-    if gpu_cap > 0 and (total := gpu_total_bytes(gpu)) > 0:
+    if gpu_cap > 0 and (gpu is not None or inside or limits.get("required")) and (total := gpu_total_bytes(gpu_idx)) > 0:
         promised = int(min(gpu_cap, total))
         env["PYTORCH_ALLOC_CONF"] = f"per_process_memory_fraction:{min(1.0, gpu_cap / total):.6f}"
         env["STET_GPU_MEMORY_BYTES"] = str(promised)
         # The promise has to be there to be kept. If something else on this machine holds
         # the memory, a curator that runs out of it has not failed: this machine has.
-        free = gpu_free_bytes(gpu)
+        free = gpu_free_bytes(gpu_idx)
         if limits.get("required") and 0 <= free < promised * GPU_FREE_SHARE:
             raise HarnessError(
                 f"the GPU has {free / 2**30:.1f} GB of memory free and a curator is promised {promised / 2**30:.1f}: "
@@ -818,11 +839,13 @@ def run_editor(
             f"this machine has {free / 2**30:.1f} GB of memory free and a curator is promised {int(limits['memory_gb'])}: "
             "something else on this machine is using it"
         )
-    for k in ("LD_LIBRARY_PATH", "HSA_OVERRIDE_GFX_VERSION", "ROCM_PATH", "TORCH_BLAS_PREFER_HIPBLASLT"):
+    for k in ("LD_LIBRARY_PATH", "CUDA_DEVICE_ORDER", "HSA_OVERRIDE_GFX_VERSION", "ROCM_PATH", "TORCH_BLAS_PREFER_HIPBLASLT"):
         if k in os.environ:
             env[k] = os.environ[k]
     if inside or limits.get("required"):
-        env.update(one_gpu(index=gpu))  # the same single GPU on every machine
+        env.update(one_gpu(index=gpu_idx))  # the same single GPU on every machine
+    elif gpu is not None:
+        env.update(one_gpu(index=gpu))
     else:
         env.update({k: os.environ[k] for k in ("CUDA_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES") if k in os.environ})
 

@@ -349,7 +349,7 @@ def edit_round(
     assets=(),
     time_limit: float | None = None,
     verify_assets: bool = False,
-    gpu: int = 0,
+    gpu: int | None = 0,
 ) -> EditRun:
     """Run a curator on a round's corpus. Never raises on curator failure.
 
@@ -416,7 +416,7 @@ def run_round(
     gpu_idx = _cuda_index(device)
     edit = edit_round(
         bundle, entry, rnd, scale, work, sandbox=sandbox, echo=echo, log=log, assets=assets,
-        time_limit=time_limit, gpu=0 if gpu_idx is None else gpu_idx,
+        time_limit=time_limit, gpu=gpu_idx,
     )  # fmt: skip
     if edit.script is None:
         if exam is None:

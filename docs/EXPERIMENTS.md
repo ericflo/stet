@@ -717,10 +717,14 @@ GPU scoring)*.
        `p9_fineweb2 − p9_adv_qa_spam = +0.04144` (`[+0.03974, +0.04293]`, `P(<=0)=0.000`);
        `db_fineweb2 − db_mimic = +0.02226` (`[+0.02080, +0.02357]`, `P(<=0)=0.000`);
        `db_adv_ppl_qwen06b − db_fineweb2 = +0.00184` (`[+0.00036, +0.00330]`, `P(<=0)=0.008` on
-       unrotated excerpts; under excerpt rotation, this ordering reverses on all 3 draws to
+       unrotated excerpts; under excerpt rotation, the full-exam ordering reverses on all 3 draws to
        `−0.002751 / −0.000100 / −0.000823`, 3-draw mean `−0.001225` vs original `+0.001843` on
        `1,854` v2 items, and `−0.002751 / −0.000100 / −0.000825`, mean `−0.001226` vs `+0.001844`,
-       on the `1,853` retained v3+ items);
+       on the `1,853` retained v3+ items; restricting both conditions to the changed-excerpt subsets
+       where `rot_mask` is true—`576/618` Draw B, `574/615` Phase 9, `582/621` v2 or `582/620` v3+
+       Draw 1, identical across v2 and v3+—gives `+0.002516 → −0.001787`, `+0.002035 → +0.000264`
+       [shrinking `7.7×` while remaining slightly positive on Phase 9], and `+0.002385 → −0.001011`,
+       3-draw mean `+0.002312 → −0.000844`);
        `db_adv_ppl_ernie03b − db_fineweb2 = −0.00238` (`[−0.00428, −0.00076]`, `P(<=0)=0.995`,
        meaning cross-family ERNIE-0.3B lowest-PPL loses to `fineweb2` under `Inkling-2-Mini`!);
        `db_fineweb2 − db_adv_tiny_lang_boost = +0.03647` (`[+0.03515, +0.03753]`, `P(<=0)=0.000`).
@@ -739,11 +743,16 @@ GPU scoring)*.
        showing that large gains over `unedited` remain driven largely by prompt-conditioned
        answer-prose likelihood. However, excerpt rotation **does** alter closer between-curator
        orderings: English DataDecide 1B drops from `53/66` to `49/66`, and `db_adv_ppl_qwen06b − db_fineweb2`
-       reverses sign on all three draws (`+0.001530 / +0.001712 / +0.002289`, mean `+0.001843`
-       original vs `−0.002751 / −0.000100 / −0.000823`, mean `−0.001225` rotated on the `1,854`-item
-       v2 rescore; `+0.001530 / +0.001712 / +0.002290`, mean `+0.001844` vs `−0.002751 / −0.000100 / −0.000825`,
-       mean `−0.001226` on the `1,853`-item v3+ subset), so retained gain over `unedited` alone
-       does not establish that between-curator rankings are invariant to excerpt rotation.
+       reverses sign on all three draws on the full-exam population (`+0.001530 / +0.001712 / +0.002289`,
+       mean `+0.001843` original vs `−0.002751 / −0.000100 / −0.000823`, mean `−0.001225` rotated on
+       the `1,854`-item v2 rescore; `+0.001530 / +0.001712 / +0.002290`, mean `+0.001844` vs
+       `−0.002751 / −0.000100 / −0.000825`, mean `−0.001226` on the `1,853`-item v3+ subset), while
+       on the changed-excerpt subsets alone (`576/618` Draw B, `574/615` Phase 9, `582/621` v2 /
+       `582/620` v3+ Draw 1, identical across v2 and v3+), Draw B (`+0.002516 → −0.001787`) and
+       Draw 1 (`+0.002385 → −0.001011`) still reverse and Phase 9 shrinks `7.7×` while remaining
+       slightly positive (`+0.002035 → +0.000264`; 3-draw changed-subset mean `+0.002312 → −0.000844`),
+       so retained gain over `unedited` alone does not establish that between-curator rankings are
+       invariant to excerpt rotation.
      - **Cross-Card NVIDIA RTX 5090 vs RTX 4090 Replay of Archived Measurement Path on Shipped `Inkling-2-Mini` (~525-byte answers; 1 training draw re-sat on 3 exams):**
        All four archived RTX 5090 and RTX 4090 students (`db_unedited_s0` and `db_fineweb2_s0`)
        were trained on **Draw B only** (`init_sha256 = 5bd1d5ce4547697e...`, Draw B corpus and

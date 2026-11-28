@@ -2134,7 +2134,7 @@ func TestPendingRentSurvivesStaleListingAndPreventsDoubleRental(t *testing.T) {
 		prov := &fakeExaminerProv{
 			offers: []ExaminerOffer{{ID: "off-5090", Card: "RTX 5090", Price: 0.62}},
 			insts: map[string]ExaminerInstance{
-				"ex-mat": {ID: "ex-mat", Label: lbl, State: "stopped", Price: 0.62, Created: clk.Now().Add(-30 * time.Second)},
+				"ex-mat": {ID: "ex-mat", Label: lbl, State: "stopped", Price: 0.62, DiskCostUnknown: true, Created: clk.Now().Add(-30 * time.Second)},
 			},
 			endErr: map[string]error{"ex-mat": errors.New("Vast 503")},
 		}
@@ -12766,6 +12766,687 @@ func TestReview35VastStatusChargesPricingAndOfflineExaminer(t *testing.T) {
 		tsU.mergeDatedCharges(map[string]dayTransferCharge{"2026-11-28": {Down: 3.50, Up: 1.00}}, day2, day2.Add(20*time.Minute))
 		if got := tsU.dollarsBetween(0.60, true, day2, startOfDay(day2), day2.Add(20*time.Minute), false); math.Abs(got-4.50) > 1e-6 || math.Abs(tsU.Up-1.00) > 1e-6 || math.Abs(tsU.Down-3.50) > 1e-6 {
 			t.Fatalf("Gate 4 R2 poll3: want $4.50 Down=$3.50 Up=$1.00, got $%.4f Down=$%.4f Up=$%.4f", got, tsU.Down, tsU.Up)
+		}
+	})
+}
+
+func TestReview36BillingLifecycleAndExaminerFreeStorage(t *testing.T) {
+	t.Run("p1_1_midnight_spanning_bandwidth_single_day_vs_range", func(t *testing.T) {
+		day1 := time.Date(2026, 11, 27, 23, 0, 0, 0, time.UTC)
+		day2 := time.Date(2026, 11, 28, 1, 0, 0, 0, time.UTC)
+		day1Start := startOfDay(day1).Unix()
+		day2Start := startOfDay(day2).Unix()
+
+		var rangeSeen atomic.Int32
+		var singleDayQueries atomic.Int32
+		var rentCalls atomic.Int32
+
+		vastSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == "GET" && r.URL.Path == "/api/v1/instances/":
+				_, _ = w.Write([]byte(fmt.Sprintf(
+					`{"instances":[{"id":993601,"label":"stet-rp-01","actual_status":"running","intended_status":"running","cur_state":"running","gpu_name":"RTX 4090","dph_base":0.05,"dph_total":0.05,"start_date":%d}],"next_token":null}`,
+					day1.Unix(),
+				)))
+			case r.Method == "GET" && r.URL.Path == "/api/v0/charges":
+				var filt struct {
+					Day struct {
+						GTE int64 `json:"gte"`
+						LTE int64 `json:"lte"`
+					} `json:"day"`
+				}
+				_ = json.Unmarshal([]byte(r.URL.Query().Get("select_filters")), &filt)
+				span := filt.Day.LTE - filt.Day.GTE
+				if span >= 86400 {
+					// Multi-day range response: Vast groups contract into one spanning $3.00 line!
+					rangeSeen.Add(1)
+					_, _ = w.Write([]byte(fmt.Sprintf(
+						`{"success":true,"results":[{"start":%d,"end":%d,"type":"instance","source":"instance-993601","items":[{"start":%d,"end":%d,"type":"bwd","amount":3.00}]}]}`,
+						day1.Unix(), day2.Unix(), day1.Unix(), day2.Unix(),
+					)))
+					return
+				}
+				singleDayQueries.Add(1)
+				// Single-day queries return exact per-day totals ($1.00 Day 1, $2.00 Day 2) even when
+				// Vast preserves the contract's spanning [23:00 Day 1, 01:00 Day 2] timestamps!
+				switch {
+				case filt.Day.GTE == day1Start:
+					_, _ = w.Write([]byte(fmt.Sprintf(
+						`{"success":true,"results":[{"start":%d,"end":%d,"type":"instance","source":"instance-993601","items":[{"start":%d,"end":%d,"type":"bwd","amount":1.00}]}]}`,
+						day1.Unix(), day2.Unix(), day1.Unix(), day2.Unix(),
+					)))
+				case filt.Day.GTE == day2Start:
+					_, _ = w.Write([]byte(fmt.Sprintf(
+						`{"success":true,"results":[{"start":%d,"end":%d,"type":"instance","source":"instance-993601","items":[{"start":%d,"end":%d,"type":"bwd","amount":2.00}]}]}`,
+						day1.Unix(), day2.Unix(), day1.Unix(), day2.Unix(),
+					)))
+				default:
+					_, _ = w.Write([]byte(`{"success":true,"results":[]}`))
+				}
+			case r.Method == "POST" && r.URL.Path == "/api/v0/bundles/":
+				_, _ = w.Write([]byte(`{"offers":[{"id":601,"gpu_name":"RTX 4090","gpu_ram":24576,"num_gpus":1,"dph_base":0.20,"dph_total":0.20,"storage_cost":0.01,"inet_down_cost":0.0,"inet_down":500,"cuda_max_good":12.8,"verification":"verified","hosting_type":1,"gpu_arch":"nvidia","machine_id":6010}]}`))
+			case r.Method == "PUT" && strings.HasPrefix(r.URL.Path, "/api/v0/asks/"):
+				rentCalls.Add(1)
+				_, _ = w.Write([]byte(`{"success":true,"new_contract":993699}`))
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer vastSrv.Close()
+
+		// Compare raw range response ($3.00 single spanning line) vs adapter single-day queries ($1 + $2).
+		rawRangeFilter, _ := json.Marshal(map[string]any{
+			"day":  map[string]int64{"gte": day1Start, "lte": day2Start + 86399},
+			"type": map[string][]string{"in": {"instance"}},
+		})
+		resp, err := http.Get(vastSrv.URL + "/api/v0/charges?select_filters=" + url.QueryEscape(string(rawRangeFilter)))
+		if err != nil {
+			t.Fatalf("raw range query: %v", err)
+		}
+		var rawRange struct {
+			Results []struct {
+				Items []struct {
+					Amount float64 `json:"amount"`
+				} `json:"items"`
+			} `json:"results"`
+		}
+		_ = json.NewDecoder(resp.Body).Decode(&rawRange)
+		resp.Body.Close()
+		if len(rawRange.Results) != 1 || len(rawRange.Results[0].Items) != 1 || math.Abs(rawRange.Results[0].Items[0].Amount-3.00) > 1e-6 {
+			t.Fatalf("expected raw range query to return single $3.00 spanning line, got %+v", rawRange)
+		}
+		rangeSeen.Store(0)
+
+		vm := newVast(vastSrv.URL, "vast-key")
+		vm.a.sleep = func(context.Context, time.Duration) error { return nil }
+		perDay, err := vm.TransferCharges(context.Background(), day1, day2)
+		if err != nil {
+			t.Fatalf("TransferCharges: %v", err)
+		}
+		if rangeSeen.Load() != 0 {
+			t.Fatalf("TransferCharges must query per UTC day, not multi-day range (got %d range queries)", rangeSeen.Load())
+		}
+		if gotD1, gotD2 := perDay["993601"]["2026-11-27"].Down, perDay["993601"]["2026-11-28"].Down; math.Abs(gotD1-1.00) > 1e-6 || math.Abs(gotD2-2.00) > 1e-6 {
+			t.Fatalf("single-day totals want Day1=$1.00 Day2=$2.00 (sum=$3.00 matching range), got Day1=$%.2f Day2=$%.2f", gotD1, gotD2)
+		}
+
+		// End-to-end fleet check: $0.05 compute today + $2.00 Day 2 bwd = $2.05 -> blocks `up 1` under $1 cap!
+		rp, st := newFakeRunPod(t), newFakeStet(t)
+		f, _ := testFleet(t, rp, st, 2)
+		f.now = func() time.Time { return day2 }
+		f.o.MaxWorkers = 4
+		f.o.MaxHourly = 5.0
+		f.o.DailyBudget = 1.00
+		f.markets = []Market{vm}
+		if err := (&Arming{Armed: map[string]Armed{"vast": {At: 1}}}).save(f.o.Home); err != nil {
+			t.Fatal(err)
+		}
+		v, err := f.look(context.Background())
+		if err != nil {
+			t.Fatalf("f.look: %v", err)
+		}
+		if math.Abs(v.Today-2.05) > 1e-4 {
+			t.Fatalf("expected Today=$2.05 ($0.05 compute + $2.00 Day 2 bwd), got $%.4f", v.Today)
+		}
+		if err := cmdUp(context.Background(), f, 1); err == nil {
+			t.Fatalf("expected cmdUp(1) blocked by --daily-budget $1.00 with $2.05 today")
+		}
+		if rentCalls.Load() != 0 {
+			t.Fatalf("expected 0 paid creates under $1 daily cap, got %d", rentCalls.Load())
+		}
+		if singleDayQueries.Load() == 0 {
+			t.Fatalf("expected single-day /api/v0/charges queries")
+		}
+	})
+
+	t.Run("p1_2_restart_persists_retired_contract_dated_charge_through_503", func(t *testing.T) {
+		t0 := time.Date(2026, 11, 28, 10, 0, 0, 0, time.UTC)
+		t1 := t0.Add(time.Hour)
+		var billing503 atomic.Bool
+		var rentCalls atomic.Int32
+
+		vastSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == "GET" && r.URL.Path == "/api/v1/instances/":
+				_, _ = w.Write([]byte(`{"instances":[],"next_token":null}`))
+			case r.Method == "GET" && r.URL.Path == "/api/v0/charges":
+				if billing503.Load() {
+					w.WriteHeader(http.StatusServiceUnavailable)
+					_, _ = w.Write([]byte(`{"msg":"billing unavailable"}`))
+					return
+				}
+				_, _ = w.Write([]byte(fmt.Sprintf(
+					`{"success":true,"results":[{"start":%d,"end":%d,"type":"instance","source":"instance-993602","items":[{"start":%d,"end":%d,"type":"bwd","amount":2.00}]}]}`,
+					t0.Unix(), t1.Unix(), t0.Unix(), t1.Unix(),
+				)))
+			case r.Method == "POST" && r.URL.Path == "/api/v0/bundles/":
+				_, _ = w.Write([]byte(`{"offers":[{"id":602,"gpu_name":"RTX 4090","gpu_ram":24576,"num_gpus":1,"dph_base":0.20,"dph_total":0.20,"storage_cost":0.01,"inet_down_cost":0.0,"inet_down":500,"cuda_max_good":12.8,"verification":"verified","hosting_type":1,"gpu_arch":"nvidia","machine_id":6020}]}`))
+			case r.Method == "PUT" && strings.HasPrefix(r.URL.Path, "/api/v0/asks/"):
+				rentCalls.Add(1)
+				_, _ = w.Write([]byte(`{"success":true,"new_contract":993698}`))
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer vastSrv.Close()
+
+		rp, st := newFakeRunPod(t), newFakeStet(t)
+		f1, _ := testFleet(t, rp, st, 2)
+		f1.now = func() time.Time { return t1 }
+		f1.o.MaxWorkers = 4
+		f1.o.MaxHourly = 5.0
+		f1.o.DailyBudget = 1.00
+		vm1 := newVast(vastSrv.URL, "vast-key")
+		vm1.a.sleep = func(context.Context, time.Duration) error { return nil }
+		f1.markets = []Market{vm1}
+		if err := (&Arming{Armed: map[string]Armed{"vast": {At: 1}}}).save(f1.o.Home); err != nil {
+			t.Fatal(err)
+		}
+		// Seed retired worker in spent.jsonl: 1h @ $0.05/h compute + $0.60 estimated bandwidth.
+		if _, err := appendSpendRecord(f1.spentLog(), podRecord{
+			ID: "993602", Market: "vast", Handle: f1.keys[0].Handle, GPU: "RTX 4090",
+			Cost: 0.05, FixedCost: 0.60, FixedCostEstimated: true, Start: t0, Alive: t1, End: t1,
+		}, false); err != nil {
+			t.Fatal(err)
+		}
+
+		// Controller 1 observes the late $2.00 download charge -> $2.05 today, blocks `up 1`.
+		v1, err := f1.look(context.Background())
+		if err != nil {
+			t.Fatalf("f1.look: %v", err)
+		}
+		if math.Abs(v1.Today-2.05) > 1e-4 {
+			t.Fatalf("controller 1 want Today=$2.05, got $%.4f", v1.Today)
+		}
+		if err := cmdUp(context.Background(), f1, 1); err == nil {
+			t.Fatalf("controller 1 expected cmdUp(1) blocked under $1 cap")
+		}
+
+		// Restart with a brand-new Fleet sharing the same Home while ONLY /api/v0/charges returns 503!
+		billing503.Store(true)
+		vm2 := newVast(vastSrv.URL, "vast-key")
+		vm2.a.sleep = func(context.Context, time.Duration) error { return nil }
+		opts2 := *f1.o
+		f2 := &Fleet{
+			o:       &opts2,
+			markets: []Market{vm2},
+			fixed:   true,
+			st:      f1.st,
+			op:      f1.op,
+			keys:    f1.keys,
+			out:     io.Discard,
+			now:     func() time.Time { return t1.Add(5 * time.Minute) },
+		}
+		v2, err := f2.look(context.Background())
+		if err != nil {
+			t.Fatalf("restarted f2.look during billing 503: %v", err)
+		}
+		if math.Abs(v2.Today-2.05) > 1e-4 {
+			t.Fatalf("restarted controller must preserve persisted $2.05 through billing 503 (not revert to $0.65), got $%.4f", v2.Today)
+		}
+		if err := cmdUp(context.Background(), f2, 1); err == nil {
+			t.Fatalf("restarted controller must still block cmdUp(1) under $1 cap during billing 503")
+		}
+		if rentCalls.Load() != 0 {
+			t.Fatalf("expected 0 paid creates across restart + billing 503, got %d", rentCalls.Load())
+		}
+	})
+
+	t.Run("p2_3_first_observation_after_midnight_no_double_count_idempotent", func(t *testing.T) {
+		day1 := time.Date(2026, 11, 27, 23, 0, 0, 0, time.UTC)
+		cur := time.Date(2026, 11, 28, 1, 0, 0, 0, time.UTC)
+		day1Start := startOfDay(day1).Unix()
+		day2Start := startOfDay(cur).Unix()
+		var rentCalls atomic.Int32
+
+		vastSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == "GET" && r.URL.Path == "/api/v1/instances/":
+				// Cumulative 20 GB @ $0.10/GB = $2.00 first observed after midnight (at 01:00 Day 2).
+				_, _ = w.Write([]byte(fmt.Sprintf(
+					`{"instances":[{"id":993603,"label":"stet-rp-01","actual_status":"running","intended_status":"running","cur_state":"running","gpu_name":"RTX 4090","dph_base":0.05,"dph_total":0.05,"inet_down_cost":0.10,"inet_down_billed":20.0,"start_date":%d}],"next_token":null}`,
+					day1.Unix(),
+				)))
+			case r.Method == "GET" && r.URL.Path == "/api/v0/charges":
+				var filt struct {
+					Day struct {
+						GTE int64 `json:"gte"`
+					} `json:"day"`
+				}
+				_ = json.Unmarshal([]byte(r.URL.Query().Get("select_filters")), &filt)
+				if filt.Day.GTE == day1Start {
+					_, _ = w.Write([]byte(fmt.Sprintf(
+						`{"success":true,"results":[{"start":%d,"end":%d,"type":"instance","source":"instance-993603","items":[{"start":%d,"end":%d,"type":"bwd","amount":2.00}]}]}`,
+						day1.Unix(), day2Start-1, day1.Unix(), day2Start-1,
+					)))
+					return
+				}
+				// Zero new bandwidth on Day 2!
+				_, _ = w.Write([]byte(`{"success":true,"results":[]}`))
+			case r.Method == "POST" && r.URL.Path == "/api/v0/bundles/":
+				_, _ = w.Write([]byte(`{"offers":[{"id":603,"gpu_name":"RTX 4090","gpu_ram":24576,"num_gpus":1,"dph_base":0.20,"dph_total":0.20,"storage_cost":0.01,"inet_down_cost":0.0,"inet_down":500,"cuda_max_good":12.8,"verification":"verified","hosting_type":1,"gpu_arch":"nvidia","machine_id":6030}]}`))
+			case r.Method == "PUT" && strings.HasPrefix(r.URL.Path, "/api/v0/asks/"):
+				rentCalls.Add(1)
+				_, _ = w.Write([]byte(`{"success":true,"new_contract":993697}`))
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer vastSrv.Close()
+
+		rp, st := newFakeRunPod(t), newFakeStet(t)
+		f, _ := testFleet(t, rp, st, 2)
+		f.now = func() time.Time { return cur }
+		f.o.MaxWorkers = 4
+		f.o.MaxHourly = 5.0
+		f.o.DailyBudget = 1.00
+		vm := newVast(vastSrv.URL, "vast-key")
+		vm.a.sleep = func(context.Context, time.Duration) error { return nil }
+		f.markets = []Market{vm}
+		if err := (&Arming{Armed: map[string]Armed{"vast": {At: 1}}}).save(f.o.Home); err != nil {
+			t.Fatal(err)
+		}
+
+		// Poll 1 at 01:00 Day 2: invoice moves the overlapping $2.00 from Day 2 back to Day 1!
+		v1, err := f.look(context.Background())
+		if err != nil {
+			t.Fatalf("poll 1 look: %v", err)
+		}
+		if math.Abs(v1.Today-0.05) > 1e-4 {
+			t.Fatalf("poll 1 Today want $0.05 (not $2.05 double-counted), got $%.4f", v1.Today)
+		}
+		life1, err := f.spent(v1.Ledger, day1.Add(-time.Hour))
+		if err != nil {
+			t.Fatalf("poll 1 lifetime spent: %v", err)
+		}
+		if math.Abs(life1-2.10) > 1e-4 {
+			t.Fatalf("poll 1 lifetime spend want $2.10 (not $4.10 double-counted), got $%.4f", life1)
+		}
+
+		// Poll 2 at 01:06 Day 2: idempotent (no duplicate charges on repeated polls)!
+		cur = cur.Add(6 * time.Minute)
+		v2, err := f.look(context.Background())
+		if err != nil {
+			t.Fatalf("poll 2 look: %v", err)
+		}
+		if math.Abs(v2.Today-0.055) > 1e-4 {
+			t.Fatalf("poll 2 Today want $0.0550, got $%.4f", v2.Today)
+		}
+		life2, err := f.spent(v2.Ledger, day1.Add(-time.Hour))
+		if err != nil {
+			t.Fatalf("poll 2 lifetime spent: %v", err)
+		}
+		if math.Abs(life2-2.105) > 1e-4 {
+			t.Fatalf("poll 2 lifetime spend want $2.1050, got $%.4f", life2)
+		}
+		// With only $0.055 spent today under $1.00 cap, `up 1` must be allowed!
+		if err := cmdUp(context.Background(), f, 1); err != nil {
+			t.Fatalf("cmdUp(1) should succeed with only $0.055 spent today, got err: %v", err)
+		}
+		if rentCalls.Load() != 1 {
+			t.Fatalf("expected 1 create when Today=$0.055 < $1.00, got %d", rentCalls.Load())
+		}
+
+		// Unit check: partial lag ($3.50 listing at Day 2 01:00, $2.00 invoice on Day 1) -> Day1=$2.00, Day2=$1.50, life=$3.50.
+		var tsP transferState
+		tsP.mergeReading(transferReading{Effective: 3.50, Observed: true, Down: 3.50, DownObserved: true}, true, "running", day1, time.Date(2026, 11, 28, 1, 0, 0, 0, time.UTC))
+		tsP.mergeDatedCharges(map[string]dayTransferCharge{"2026-11-27": {Down: 2.00}}, day1, time.Date(2026, 11, 28, 1, 0, 0, 0, time.UTC))
+		gotD1 := tsP.dollarsBetween(0.60, true, day1, startOfDay(day1), startOfDay(cur).Add(-time.Nanosecond), false)
+		gotD2 := tsP.dollarsBetween(0.60, true, day1, startOfDay(cur), cur, false)
+		if math.Abs(gotD1-2.00) > 1e-6 || math.Abs(gotD2-1.50) > 1e-6 {
+			t.Fatalf("partial lag want Day1=$2.00 Day2=$1.50, got Day1=$%.4f Day2=$%.4f", gotD1, gotD2)
+		}
+	})
+
+	t.Run("p2_4_teardown_ignores_billing_retry_after_and_slow_search_refreshes_billing", func(t *testing.T) {
+		// Part A: `down --force` must DELETE immediately without blocking on billing `Retry-After: 120`.
+		t0 := time.Date(2026, 11, 28, 12, 0, 0, 0, time.UTC)
+		var chargesBeforeDelete atomic.Int32
+		var deleted atomic.Bool
+		var totalSlept atomic.Int64
+
+		srvDown := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == "GET" && r.URL.Path == "/api/v1/instances/":
+				if deleted.Load() {
+					_, _ = w.Write([]byte(`{"instances":[],"next_token":null}`))
+					return
+				}
+				_, _ = w.Write([]byte(fmt.Sprintf(
+					`{"instances":[{"id":993604,"label":"stet-rp-01","actual_status":"running","intended_status":"running","cur_state":"running","gpu_name":"RTX 4090","dph_base":0.20,"dph_total":0.20,"start_date":%d}],"next_token":null}`,
+					t0.Unix(),
+				)))
+			case r.Method == "GET" && r.URL.Path == "/api/v0/charges":
+				if !deleted.Load() {
+					chargesBeforeDelete.Add(1)
+				}
+				w.Header().Set("Retry-After", "120")
+				w.WriteHeader(http.StatusTooManyRequests)
+				_, _ = w.Write([]byte(`{"msg":"rate limited"}`))
+			case r.Method == "DELETE" && r.URL.Path == "/api/v0/instances/993604/":
+				deleted.Store(true)
+				_, _ = w.Write([]byte(`{"success":true}`))
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer srvDown.Close()
+
+		rpA, stA := newFakeRunPod(t), newFakeStet(t)
+		fA, _ := testFleet(t, rpA, stA, 2)
+		fA.now = func() time.Time { return t0.Add(10 * time.Minute) }
+		vmA := newVast(srvDown.URL, "vast-key")
+		vmA.a.sleep = func(_ context.Context, d time.Duration) error {
+			totalSlept.Add(int64(d))
+			return nil
+		}
+		fA.markets = []Market{vmA}
+		if err := (&Arming{Armed: map[string]Armed{"vast": {At: 1}}}).save(fA.o.Home); err != nil {
+			t.Fatal(err)
+		}
+		if err := cmdDown(context.Background(), fA, true, nil); err != nil {
+			t.Fatalf("cmdDown --force: %v", err)
+		}
+		if !deleted.Load() {
+			t.Fatalf("expected worker 993604 to be deleted by cmdDown --force")
+		}
+		if totalSlept.Load() != 0 {
+			t.Fatalf("cmdDown --force must not sleep on billing Retry-After: 120, slept %v", time.Duration(totalSlept.Load()))
+		}
+		if chargesBeforeDelete.Load() != 0 {
+			t.Fatalf("cmdDown --force must not call /api/v0/charges before DELETE, got %d call(s)", chargesBeforeDelete.Load())
+		}
+		// Even direct TransferCharges on 429 Retry-After: 120 must NOT sleep!
+		_, _ = vmA.TransferCharges(context.Background(), t0, t0)
+		if totalSlept.Load() != 0 {
+			t.Fatalf("TransferCharges must use single-attempt non-blocking HTTP read, slept %v", time.Duration(totalSlept.Load()))
+		}
+
+		// Part B: 2-minute slow offer search makes a new $2.00 charge available -> final budget check
+		// refreshes stale billing and blocks `up 1` under `--daily-budget 1.00`!
+		clkB := newTestClock(t0.Add(time.Hour))
+		var newChargeAvailable atomic.Bool
+		var rentCalls atomic.Int32
+		var chargesCalls atomic.Int32
+
+		srvSlow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == "GET" && r.URL.Path == "/api/v1/instances/":
+				_, _ = w.Write([]byte(fmt.Sprintf(
+					`{"instances":[{"id":993605,"label":"stet-rp-01","actual_status":"running","intended_status":"running","cur_state":"running","gpu_name":"RTX 4090","dph_base":0.05,"dph_total":0.05,"start_date":%d}],"next_token":null}`,
+					t0.Unix(),
+				)))
+			case r.Method == "GET" && r.URL.Path == "/api/v0/charges":
+				chargesCalls.Add(1)
+				if !newChargeAvailable.Load() {
+					_, _ = w.Write([]byte(`{"success":true,"results":[]}`))
+					return
+				}
+				nowUnix := clkB.Now().Unix()
+				_, _ = w.Write([]byte(fmt.Sprintf(
+					`{"success":true,"results":[{"start":%d,"end":%d,"type":"instance","source":"instance-993605","items":[{"start":%d,"end":%d,"type":"bwd","amount":2.00}]}]}`,
+					t0.Unix(), nowUnix, t0.Unix(), nowUnix,
+				)))
+			case r.Method == "POST" && r.URL.Path == "/api/v0/bundles/":
+				// Simulate a 2-minute offer search during which the $2.00 bandwidth charge posts!
+				clkB.Advance(2 * time.Minute)
+				newChargeAvailable.Store(true)
+				_, _ = w.Write([]byte(`{"offers":[{"id":605,"gpu_name":"RTX 4090","gpu_ram":24576,"num_gpus":1,"dph_base":0.20,"dph_total":0.20,"storage_cost":0.01,"inet_down_cost":0.0,"inet_down":500,"cuda_max_good":12.8,"verification":"verified","hosting_type":1,"gpu_arch":"nvidia","machine_id":6050}]}`))
+			case r.Method == "PUT" && strings.HasPrefix(r.URL.Path, "/api/v0/asks/"):
+				rentCalls.Add(1)
+				_, _ = w.Write([]byte(`{"success":true,"new_contract":993695}`))
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer srvSlow.Close()
+
+		rpB, stB := newFakeRunPod(t), newFakeStet(t)
+		fB, _ := testFleet(t, rpB, stB, 2)
+		fB.now = clkB.Now
+		fB.o.MaxWorkers = 4
+		fB.o.MaxHourly = 5.0
+		fB.o.DailyBudget = 1.00
+		vmB := newVast(srvSlow.URL, "vast-key")
+		vmB.a.sleep = func(context.Context, time.Duration) error { return nil }
+		fB.markets = []Market{vmB}
+		if err := (&Arming{Armed: map[string]Armed{"vast": {At: 1}}}).save(fB.o.Home); err != nil {
+			t.Fatal(err)
+		}
+		rented, err := cmdUpRentals(context.Background(), fB, 1)
+		if err != nil {
+			t.Fatalf("cmdUpRentals after slow search: %v", err)
+		}
+		if len(rented) != 0 || rentCalls.Load() != 0 {
+			t.Fatalf("slow search stale-billing refresh must block create under $1 cap: rented=%d rentCalls=%d", len(rented), rentCalls.Load())
+		}
+		if chargesCalls.Load() < 2 {
+			t.Fatalf("expected billing refresh after 2m slow offer search (>=2 /api/v0/charges calls), got %d", chargesCalls.Load())
+		}
+	})
+
+	t.Run("p2_5_exited_examiner_explicit_free_storage_not_billed_at_gpu_rate", func(t *testing.T) {
+		t0 := time.Date(2026, 11, 28, 14, 0, 0, 0, time.UTC)
+		cur := t0
+		home := t.TempDir()
+		owner := loadOrCreateExaminerOwner(home)
+		lbl := examinerLabelPrefix + "-" + owner + "-s3-o00036-free0001"
+		var curLbl atomic.Value
+		curLbl.Store(lbl)
+		if err := writeExaminerState(home, &examinerState{
+			InstanceID:     "993606",
+			RoundID:        "s3-o00036",
+			APIKey:         "k-free",
+			CertPEM:        "cert",
+			Price:          0.62,
+			Created:        t0,
+			ObservedLiveAt: t0,
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		var allowDelete atomic.Bool
+		var deleted atomic.Bool
+		var omitPricing atomic.Bool
+
+		vastSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == "GET" && r.URL.Path == "/api/v1/instances/":
+				if deleted.Load() {
+					_, _ = w.Write([]byte(`{"instances":[],"next_token":null}`))
+					return
+				}
+				pricing := `,"instance":{"diskHour":0},"storage_total_cost":0`
+				if omitPricing.Load() {
+					pricing = ""
+				}
+				_, _ = w.Write([]byte(fmt.Sprintf(
+					`{"instances":[{"id":993606,"label":%q,"actual_status":"exited","intended_status":"stopped","cur_state":"stopped","gpu_name":"RTX 5090","dph_base":0.62,"dph_total":0.0,"disk_space":80.0%s,"start_date":%d}],"next_token":null}`,
+					curLbl.Load().(string), pricing, t0.Unix(),
+				)))
+			case r.Method == "GET" && r.URL.Path == "/api/v0/charges":
+				_, _ = w.Write([]byte(`{"success":true,"results":[]}`))
+			case r.Method == "DELETE" && r.URL.Path == "/api/v0/instances/993606/":
+				if !allowDelete.Load() {
+					w.WriteHeader(http.StatusServiceUnavailable)
+					_, _ = w.Write([]byte(`{"msg":"delete unavailable"}`))
+					return
+				}
+				deleted.Store(true)
+				_, _ = w.Write([]byte(`{"success":true}`))
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer vastSrv.Close()
+
+		vm := newVast(vastSrv.URL, "vast-key")
+		vm.a.sleep = func(context.Context, time.Duration) error { return nil }
+		ex := newExaminer(ExaminerConfig{Addr: "127.0.0.1:0", Timeout: 2 * time.Hour, MaxPrice: 1.50}, home, vm, func() time.Time { return cur }, nil, false)
+		ex.onSpent = func(rec podRecord) error { return appendExaminerSpend(filepath.Join(home, "spent.jsonl"), rec) }
+
+		// Exited at minute 5 with explicit diskHour=0 & storage_total_cost=0 while DELETE fails through minute 25.
+		for m := 5; m <= 25; m += 2 {
+			cur = t0.Add(time.Duration(m) * time.Minute)
+			_ = ex.Reconcile(context.Background(), &Work{}, ExaminerBudget{MaxWorkers: 2, MaxHourly: 2.0, DailyBudget: 50.0})
+		}
+		want5m := (5.0 / 60.0) * 0.62 // $0.051667
+		live, hourly, accrued, err := ex.ActiveSnapshot(cur)
+		if err != nil || live != 1 {
+			t.Fatalf("minute 25 snapshot: live=%d err=%v", live, err)
+		}
+		if math.Abs(hourly-0.0) > 1e-6 {
+			t.Fatalf("exited examiner with explicit free storage (diskHour=0, storage_total_cost=0) must report $0.00/h at min 25, got $%.4f/h", hourly)
+		}
+		if math.Abs(accrued-want5m) > 1e-5 {
+			t.Fatalf("exited examiner with explicit free storage must accrue 5m ($%.6f) at min 25, got $%.6f", want5m, accrued)
+		}
+		if _, diskHourly, diskAcc, err := activeExaminerFromDisk(home, cur, 2*time.Hour, 1.50); err != nil || math.Abs(diskHourly) > 1e-6 || math.Abs(diskAcc-want5m) > 1e-5 {
+			t.Fatalf("disk snapshot at min 25 want hourly=$0 accrued=$%.6f, got hourly=$%.4f accrued=$%.6f err=%v", want5m, diskHourly, diskAcc, err)
+		}
+
+		// Keep confirming stop through minute 33, then DELETE succeeds at minute 35 -> archives $0.051667 (NOT $0.361667)!
+		for m := 27; m <= 33; m += 2 {
+			cur = t0.Add(time.Duration(m) * time.Minute)
+			_ = ex.Reconcile(context.Background(), &Work{}, ExaminerBudget{MaxWorkers: 2, MaxHourly: 2.0, DailyBudget: 50.0})
+		}
+		allowDelete.Store(true)
+		cur = t0.Add(35 * time.Minute)
+		if err := ex.Reconcile(context.Background(), &Work{}, ExaminerBudget{MaxWorkers: 2, MaxHourly: 2.0, DailyBudget: 50.0}); err != nil {
+			t.Fatalf("minute 35 delete reconcile: %v", err)
+		}
+		sum, err := readSpentFile(filepath.Join(home, "spent.jsonl"))
+		if err != nil || len(sum.records) != 1 {
+			t.Fatalf("readSpentFile: err=%v len=%d", err, len(sum.records))
+		}
+		if got := sum.records[0].dollarsBetween(startOfDay(t0), cur); math.Abs(got-want5m) > 1e-5 {
+			t.Fatalf("terminal archived spend want $%.6f (5m running + 30m free storage), got $%.6f", want5m, got)
+		}
+
+		// Contrast: identical exited examiner with OMITTED storage pricing still bills conservatively at $0.62/h!
+		omitPricing.Store(true)
+		allowDelete.Store(false)
+		deleted.Store(false)
+		homeUnk := t.TempDir()
+		ownerUnk := loadOrCreateExaminerOwner(homeUnk)
+		lblUnk := examinerLabelPrefix + "-" + ownerUnk + "-s3-o00036-unk0001"
+		curLbl.Store(lblUnk)
+		if err := writeExaminerState(homeUnk, &examinerState{
+			InstanceID: "993606", RoundID: "s3-o00036",
+			APIKey: "k-unk", CertPEM: "cert", Price: 0.62, Created: t0, ObservedLiveAt: t0,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		exUnk := newExaminer(ExaminerConfig{Addr: "127.0.0.1:0", Timeout: 2 * time.Hour, MaxPrice: 1.50}, homeUnk, vm, func() time.Time { return cur }, nil, false)
+		cur = t0.Add(5 * time.Minute)
+		_ = exUnk.Reconcile(context.Background(), &Work{}, ExaminerBudget{MaxWorkers: 2, MaxHourly: 2.0, DailyBudget: 50.0})
+		if _, unkH, _, err := exUnk.ActiveSnapshot(cur); err != nil || math.Abs(unkH-0.62) > 1e-4 {
+			t.Fatalf("omitted-storage exited examiner must stay conservatively billed at $0.62/h, got $%.4f err=%v", unkH, err)
+		}
+	})
+
+	t.Run("gate4_r36_diskunknown_recency_flush_and_429_shortcircuit", func(t *testing.T) {
+		t0 := time.Date(2026, 11, 28, 15, 0, 0, 0, time.UTC)
+		t5 := t0.Add(5 * time.Minute)
+		t15 := t0.Add(15 * time.Minute)
+
+		// 1. reloadState & savedOrphanInstance & snapshotFromState respect newer DiskCostUnknown=false!
+		home := t.TempDir()
+		stOlder := examinerState{
+			InstanceID: "993610", RoundID: "s3-o00036", APIKey: "k", CertPEM: "c",
+			Price: 0.62, DiskCostUnknown: true, Created: t0, ObservedLiveAt: t5,
+			Stopped: true, StoppedAt: t5, StoppedSeen: t5,
+			Segments: []billingSegment{{Start: t0, End: t5, Rate: 0.62}},
+		}
+		stNewer := stOlder
+		stNewer.DiskCostUnknown = false
+		stNewer.StoppedSeen = t15
+		if err := writeExaminerState(home, &stNewer); err != nil {
+			t.Fatal(err)
+		}
+		ex := newExaminer(ExaminerConfig{Addr: "127.0.0.1:0", Timeout: 2 * time.Hour, MaxPrice: 1.50}, home, nil, func() time.Time { return t15 }, nil, false)
+		ex.mu.Lock()
+		ex.state = stOlder
+		ex.loaded = true
+		ex.mu.Unlock()
+		if err := ex.reloadState(true); err != nil {
+			t.Fatalf("reloadState: %v", err)
+		}
+		ex.mu.RLock()
+		gotUnk := ex.state.DiskCostUnknown
+		ex.mu.RUnlock()
+		if gotUnk {
+			t.Fatalf("reloadState clobbered newer DiskCostUnknown=false with stale DiskCostUnknown=true")
+		}
+		// savedOrphanInstance with older saved (DiskCostUnknown=true) and newer Unresolved (DiskCostUnknown=false).
+		uNew := ExaminerInstance{
+			ID: "993610", State: "stopped", Price: 0.62, DiskCostUnknown: false,
+			Created: t0, ObservedLiveAt: t5, Stopped: true, StoppedAt: t5, StoppedSeen: t15,
+			Segments: []billingSegment{{Start: t0, End: t5, Rate: 0.62}},
+		}
+		if orph := savedOrphanInstance(stOlder, []ExaminerInstance{uNew}); orph.DiskCostUnknown {
+			t.Fatalf("savedOrphanInstance clobbered newer Unresolved DiskCostUnknown=false")
+		}
+		// snapshotFromState with newer st (DiskCostUnknown=false) and older Unresolved (DiskCostUnknown=true).
+		uOld := uNew
+		uOld.DiskCostUnknown = true
+		uOld.StoppedSeen = t5
+		stSnap := stNewer
+		stSnap.Unresolved = []ExaminerInstance{uOld}
+		if _, h, _, err := activeExaminerFromDisk(home, t15, 2*time.Hour, 1.50); err != nil || math.Abs(h) > 1e-6 {
+			t.Fatalf("activeExaminerFromDisk want $0/h, got $%.4f err=%v", h, err)
+		}
+		if _, h, _ := snapshotFromState(stSnap, home, t15, 2*time.Hour, 1.50); math.Abs(h) > 1e-6 {
+			t.Fatalf("snapshotFromState clobbered newer st DiskCostUnknown=false with older Unresolved: hourly=$%.4f", h)
+		}
+
+		// 2. syncDatedCharges flushes in-memory f.datedCharges back into l.DatedCharges after transient writeLedger error.
+		rp, st := newFakeRunPod(t), newFakeStet(t)
+		f, _ := testFleet(t, rp, st, 2)
+		if _, err := appendSpendRecord(f.spentLog(), podRecord{
+			ID: "993611", Market: "vast", Handle: f.keys[0].Handle, GPU: "RTX 4090",
+			Cost: 0.05, FixedCost: 0.60, FixedCostEstimated: true, Start: t0, Alive: t15, End: t15,
+		}, false); err != nil {
+			t.Fatal(err)
+		}
+		f.datedCharges = map[string]map[string]map[string]dayTransferCharge{
+			"vast": {
+				"993611":  {"2026-11-28": {Down: 2.00}},
+				"foreign": {"2026-11-28": {Down: 99.00}},
+			},
+		}
+		l := &ledger{Pods: map[string]*podRecord{}}
+		if !f.syncDatedCharges(context.Background(), l, nil, t15) {
+			t.Fatalf("expected syncDatedCharges to flush owned in-memory f.datedCharges into l.DatedCharges")
+		}
+		if got := l.DatedCharges["vast:993611"]["2026-11-28"].Down; math.Abs(got-2.00) > 1e-6 {
+			t.Fatalf("expected owned vast:993611 flushed to l.DatedCharges=$2.00, got $%.2f", got)
+		}
+		if _, leaked := l.DatedCharges["vast:foreign"]; leaked {
+			t.Fatalf("unowned foreign contract leaked into l.DatedCharges")
+		}
+
+		// 3. vastChargeMatchesDay checks explicit dayTS before spanning [start,end], and TransferCharges short-circuits on 429.
+		day1 := time.Date(2026, 11, 27, 23, 0, 0, 0, time.UTC)
+		day2 := time.Date(2026, 11, 28, 1, 0, 0, 0, time.UTC)
+		d1s, d2s, d3s := startOfDay(day1).Unix(), startOfDay(day2).Unix(), startOfDay(day2).AddDate(0, 0, 1).Unix()
+		if vastChargeMatchesDay(float64(day1.Unix()), float64(day2.Unix()), float64(d1s), d2s, d3s) {
+			t.Fatalf("explicit day=Day1 row must not match Day2 even when [start,end] spans midnight")
+		}
+		if !vastChargeMatchesDay(float64(day1.Unix()), float64(day2.Unix()), float64(d2s), d2s, d3s) {
+			t.Fatalf("explicit day=Day2 row must match Day2")
+		}
+		var calls429 atomic.Int32
+		srv429 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			calls429.Add(1)
+			w.Header().Set("Retry-After", "120")
+			w.WriteHeader(http.StatusTooManyRequests)
+		}))
+		defer srv429.Close()
+		vm429 := newVast(srv429.URL, "k")
+		_, _ = vm429.TransferCharges(context.Background(), day1.AddDate(0, 0, -5), day2)
+		if calls429.Load() != 1 {
+			t.Fatalf("TransferCharges must short-circuit on HTTP 429 after 1 request, got %d", calls429.Load())
 		}
 	})
 }

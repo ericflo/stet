@@ -540,8 +540,19 @@ func isProvenPreSendError(err error, gotConn, wroteAny, tlsStarted, tlsDone bool
 	return false
 }
 
+// doOnce sends one HTTP request without retry or Retry-After backoff sleeps (for non-blocking
+// best-effort reads like dated billing reconciliation that must never stall teardown or hold
+// the fleet lock behind provider rate limits).
+func (a *api) doOnce(ctx context.Context, method, path string, body any, into any) (int, error) {
+	return a.doWithOpts(ctx, method, path, nil, body, into, false)
+}
+
 // doWith is do, with more headers.
 func (a *api) doWith(ctx context.Context, method, path string, headers map[string]string, body any, into any) (int, error) {
+	return a.doWithOpts(ctx, method, path, headers, body, into, true)
+}
+
+func (a *api) doWithOpts(ctx context.Context, method, path string, headers map[string]string, body any, into any, retry bool) (int, error) {
 	var raw []byte
 	if body != nil {
 		var err error
@@ -549,7 +560,7 @@ func (a *api) doWith(ctx context.Context, method, path string, headers map[strin
 			return 0, err
 		}
 	}
-	reads := method == "GET" || (method == "POST" && into != nil && a.readOnlyPost(path))
+	reads := retry && (method == "GET" || (method == "POST" && into != nil && a.readOnlyPost(path)))
 	for attempt := 0; ; attempt++ {
 		var gotConn, wroteAny, tlsStarted, tlsDone atomic.Bool
 		trace := &httptrace.ClientTrace{
@@ -597,7 +608,7 @@ func (a *api) doWith(ctx context.Context, method, path string, headers map[strin
 			return resp.StatusCode, err
 		}
 		switch {
-		case resp.StatusCode == 429 && attempt < 6:
+		case retry && resp.StatusCode == 429 && attempt < 6:
 			wait, _ := strconv.Atoi(resp.Header.Get("Retry-After"))
 			if err := a.sleep(ctx, time.Duration(max(wait, 2))*time.Second); err != nil {
 				return 0, err

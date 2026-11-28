@@ -6582,3 +6582,108 @@ def test_review35_zero_language_shares_replay_parity(monkeypatch, tmp_path):
         gains.append(0.1)
     got = round_score(items, gains, shares=data.round_shares(rnd), plan=plan)["score"]
     assert abs(got - 0.05) < 1e-9, f"expected 0.05000 matching Go ScoreItems, got {got:.6f}"
+
+
+def test_review36_local_unsandboxed_curator_gpu_and_device_order(corpus, monkeypatch, tmp_path):
+    """Review 36 P2 #6: Default unsandboxed local `run_editor` MUST honor selected GPU index
+    under parent `CUDA_VISIBLE_DEVICES=2,0` AND preserve `CUDA_DEVICE_ORDER=PCI_BUS_ID` in the
+    real child process environment (plus isolate bench device tokens and service unit env)."""
+    import json as _json
+
+    from stet import bench, runner, service
+    from stet.runner import HarnessError, run_editor
+    from stet.spec import practice_round
+
+    s3 = load_season("s3")
+    rnd = practice_round(s3, 0)
+    scale = s3.scale("nano")
+
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (bundle / "curator.py").write_text(
+        "import json, os\n"
+        "from stet.curator import Task\n"
+        "print('CHILD_ENV', json.dumps({\n"
+        "    'CUDA_VISIBLE_DEVICES': os.environ.get('CUDA_VISIBLE_DEVICES'),\n"
+        "    'HIP_VISIBLE_DEVICES': os.environ.get('HIP_VISIBLE_DEVICES'),\n"
+        "    'CUDA_DEVICE_ORDER': os.environ.get('CUDA_DEVICE_ORDER'),\n"
+        "}))\n"
+        "Task.from_env().write([0])\n"
+    )
+
+    def _parse_child_env(log_tail: str) -> dict:
+        for line in log_tail.splitlines():
+            if line.startswith("CHILD_ENV "):
+                return _json.loads(line[len("CHILD_ENV "):])
+        raise AssertionError(f"CHILD_ENV missing from log_tail:\n{log_tail}")
+
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "2,0")
+    monkeypatch.setenv("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
+    monkeypatch.delenv("HIP_VISIBLE_DEVICES", raising=False)
+    monkeypatch.setattr(runner, "_gpu_total", {})
+
+    # 1. Default unsandboxed run with gpu=1 selects physical GPU 0 (NOT "2,0") and preserves PCI_BUS_ID!
+    run1 = run_editor(bundle, "python curator.py", corpus, rnd, scale, tmp_path / "w1", 30, sandbox="none", gpu=1)
+    assert run1.status == "ok", run1.log_tail
+    env1 = _parse_child_env(run1.log_tail)
+    assert env1["CUDA_VISIBLE_DEVICES"] == "0", env1
+    assert env1["CUDA_DEVICE_ORDER"] == "PCI_BUS_ID", env1
+
+    # 2. Default unsandboxed run with gpu=0 selects physical GPU 2 and preserves PCI_BUS_ID!
+    run0 = run_editor(bundle, "python curator.py", corpus, rnd, scale, tmp_path / "w0", 30, sandbox="none", gpu=0)
+    assert run0.status == "ok", run0.log_tail
+    env0 = _parse_child_env(run0.log_tail)
+    assert env0["CUDA_VISIBLE_DEVICES"] == "2", env0
+    assert env0["CUDA_DEVICE_ORDER"] == "PCI_BUS_ID", env0
+
+    # 3. CPU run (gpu=None) keeps parent mask intact and still preserves CUDA_DEVICE_ORDER.
+    run_cpu = run_editor(bundle, "python curator.py", corpus, rnd, scale, tmp_path / "wcpu", 30, sandbox="none", gpu=None)
+    assert run_cpu.status == "ok", run_cpu.log_tail
+    env_cpu = _parse_child_env(run_cpu.log_tail)
+    assert env_cpu["CUDA_VISIBLE_DEVICES"] == "2,0", env_cpu
+    assert env_cpu["CUDA_DEVICE_ORDER"] == "PCI_BUS_ID", env_cpu
+
+    # 4. Out-of-range GPU index fails explicitly in unsandboxed run too.
+    try:
+        run_editor(bundle, "python curator.py", corpus, rnd, scale, tmp_path / "woor", 30, sandbox="none", gpu=2)
+        raise AssertionError("expected HarnessError for out-of-range gpu=2 under CUDA_VISIBLE_DEVICES=2,0")
+    except HarnessError as exc:
+        assert "out of range" in str(exc)
+
+    # 5. Explicit empty mask CUDA_VISIBLE_DEVICES="" stays masked on gpu=0 and raises on gpu=1;
+    #    mixed empty + non-empty vendor masks still pin the non-empty vendor cleanly!
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
+    monkeypatch.delenv("HIP_VISIBLE_DEVICES", raising=False)
+    run_empty = run_editor(bundle, "python curator.py", corpus, rnd, scale, tmp_path / "wempty", 30, sandbox="none", gpu=0)
+    assert run_empty.status == "ok", run_empty.log_tail
+    assert _parse_child_env(run_empty.log_tail)["CUDA_VISIBLE_DEVICES"] == ""
+    assert runner.one_gpu({"CUDA_VISIBLE_DEVICES": ""}, index=0) == {"CUDA_VISIBLE_DEVICES": ""}
+    try:
+        run_editor(bundle, "python curator.py", corpus, rnd, scale, tmp_path / "wempty1", 30, sandbox="none", gpu=1)
+        raise AssertionError("expected HarnessError for gpu=1 under empty CUDA_VISIBLE_DEVICES=''")
+    except HarnessError as exc:
+        assert "0 visible devices" in str(exc)
+
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "2,0")
+    monkeypatch.setenv("HIP_VISIBLE_DEVICES", "")
+    run_mix0 = run_editor(bundle, "python curator.py", corpus, rnd, scale, tmp_path / "wmix0", 30, sandbox="none", gpu=0)
+    assert run_mix0.status == "ok", run_mix0.log_tail
+    env_mix0 = _parse_child_env(run_mix0.log_tail)
+    assert env_mix0["CUDA_VISIBLE_DEVICES"] == "2" and env_mix0["HIP_VISIBLE_DEVICES"] == "", env_mix0
+
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
+    monkeypatch.setenv("HIP_VISIBLE_DEVICES", "3,1")
+    run_mix1 = run_editor(bundle, "python curator.py", corpus, rnd, scale, tmp_path / "wmix1", 30, sandbox="none", gpu=1)
+    assert run_mix1.status == "ok", run_mix1.log_tail
+    env_mix1 = _parse_child_env(run_mix1.log_tail)
+    assert env_mix1["CUDA_VISIBLE_DEVICES"] == "" and env_mix1["HIP_VISIBLE_DEVICES"] == "1", env_mix1
+
+    # 6. one_gpu, bench._gpu_device_token, and service.unit_text all honor CUDA_DEVICE_ORDER.
+    assert runner.one_gpu({"CUDA_VISIBLE_DEVICES": "2,0", "CUDA_DEVICE_ORDER": "PCI_BUS_ID"}, index=1) == {
+        "CUDA_VISIBLE_DEVICES": "0",
+        "CUDA_DEVICE_ORDER": "PCI_BUS_ID",
+    }
+    assert bench._gpu_device_token(1, {"CUDA_VISIBLE_DEVICES": "2,0", "CUDA_DEVICE_ORDER": "PCI_BUS_ID"}) == "0@PCI_BUS_ID"
+    assert bench._gpu_device_token(0, {"CUDA_VISIBLE_DEVICES": "GPU-1234abcd", "CUDA_DEVICE_ORDER": "PCI_BUS_ID"}) == "GPU-1234abcd"
+    unit = service.unit_text("/x/stet", environ={"CUDA_VISIBLE_DEVICES": "2,0", "CUDA_DEVICE_ORDER": "PCI_BUS_ID"})
+    assert 'Environment="CUDA_DEVICE_ORDER=PCI_BUS_ID"' in unit

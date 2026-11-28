@@ -92,10 +92,18 @@ type Fleet struct {
 	// provider billing endpoints (e.g. Vast /api/v0/charges) so both active and recently retired
 	// owned contracts reflect delayed bandwidth billing without rewriting spent.jsonl.
 	datedCharges map[string]map[string]map[string]dayTransferCharge
+	// chargesAttemptAt records the last dated-billing sync timestamp per market so slow offer
+	// searches refresh stale billing data before authorizing a paid create without hammering
+	// provider billing endpoints on back-to-back offers within the same look.
+	chargesAttemptAt map[string]time.Time
 	// sayMu serializes writes to f.out and concurrent appends/transitions on f.cur.Said from
 	// background examiner probe/proxy goroutines.
 	sayMu sync.Mutex
 }
+
+// billingStaleAfter is the maximum age of a dated-billing snapshot before a paid create
+// re-queries provider billing (e.g. after a slow offer search) when --daily-budget is set.
+const billingStaleAfter = 30 * time.Second
 
 // --- the pool of keys ---------------------------------------------------------------------------
 
@@ -286,12 +294,14 @@ type podRecord struct {
 // transferCharge records one incremental increase in cumulative observed transfer spend against the
 // timestamp at which it was accounted for so multi-day workers attribute new-day transfer to the
 // UTC day that incurred it rather than backdating it onto Start. Dir optionally tags directional
-// charges ("down" or "up") so per-day billing reconciliation never drops or double-counts across
-// mixed directional/listing polls.
+// charges ("down" or "up") and Dated distinguishes invoice-dated billing lines (true, authoritative
+// UTC day) from cumulative listing-counter observations (false, re-attributable to an earlier UTC
+// day when the invoice later establishes the actual date).
 type transferCharge struct {
 	At     time.Time `json:"at"`
 	Amount float64   `json:"amount"`
 	Dir    string    `json:"dir,omitempty"`
+	Dated  bool      `json:"dated,omitempty"`
 }
 
 // transferReading is one provider snapshot of cumulative observed transfer usage (per-direction
@@ -418,21 +428,29 @@ func (s *transferState) appendCharge(at time.Time, delta float64) {
 }
 
 func (s *transferState) appendDirCharge(at time.Time, delta float64, dir string) {
+	s.appendTaggedCharge(at, delta, dir, false)
+}
+
+func (s *transferState) appendDatedCharge(at time.Time, delta float64, dir string) {
+	s.appendTaggedCharge(at, delta, dir, true)
+}
+
+func (s *transferState) appendTaggedCharge(at time.Time, delta float64, dir string, dated bool) {
 	if !validRate(delta) || delta <= 1e-9 {
 		return
 	}
 	for i := len(s.Charges) - 1; i >= 0; i-- {
-		if s.Charges[i].At.Equal(at) && s.Charges[i].Dir == dir {
+		if s.Charges[i].At.Equal(at) && s.Charges[i].Dir == dir && s.Charges[i].Dated == dated {
 			s.Charges[i].Amount += delta
 			return
 		}
 	}
-	s.Charges = append(s.Charges, transferCharge{At: at, Amount: delta, Dir: dir})
+	s.Charges = append(s.Charges, transferCharge{At: at, Amount: delta, Dir: dir, Dated: dated})
 }
 
-func (s transferState) chargesOnDayByDir(day time.Time) (down, up, untyped float64) {
+func (s transferState) chargesSumByDir() (down, up float64) {
 	for _, tc := range s.Charges {
-		if !validRate(tc.Amount) || tc.At.IsZero() || !startOfDay(tc.At).Equal(day) {
+		if !validRate(tc.Amount) {
 			continue
 		}
 		switch tc.Dir {
@@ -440,18 +458,85 @@ func (s transferState) chargesOnDayByDir(day time.Time) (down, up, untyped float
 			down += tc.Amount
 		case "up":
 			up += tc.Amount
-		default:
-			untyped += tc.Amount
 		}
 	}
-	return down, up, untyped
+	return down, up
+}
+
+// absorbUndated removes up to `need` dollars from undated (cumulative-counter) Charges whose
+// observation day is on or after `day` (causality: a counter polled on `day` or later can include
+// transfer incurred on `day`, whereas a counter polled before `day` cannot). Consumes same-day
+// matching-direction entries first, then later-day matching-direction entries earliest-first, then
+// same-day untyped entries, then later-day untyped entries earliest-first.
+func (s *transferState) absorbUndated(day time.Time, dir string, need float64) (absDir, absUntyped float64) {
+	if need <= 1e-9 || len(s.Charges) == 0 {
+		return 0, 0
+	}
+	takePass := func(matchDir string, sameDay bool) float64 {
+		if need <= 1e-9 {
+			return 0
+		}
+		var idxs []int
+		for i, tc := range s.Charges {
+			if tc.Dated || !validRate(tc.Amount) || tc.At.IsZero() || tc.Dir != matchDir {
+				continue
+			}
+			tcDay := startOfDay(tc.At)
+			if sameDay {
+				if !tcDay.Equal(day) {
+					continue
+				}
+			} else if !tcDay.After(day) {
+				continue
+			}
+			idxs = append(idxs, i)
+		}
+		if len(idxs) > 1 {
+			sort.SliceStable(idxs, func(a, b int) bool {
+				return s.Charges[idxs[a]].At.Before(s.Charges[idxs[b]].At)
+			})
+		}
+		taken := 0.0
+		for _, i := range idxs {
+			if need <= 1e-9 {
+				break
+			}
+			amt := s.Charges[i].Amount
+			if amt <= 1e-9 {
+				continue
+			}
+			take := min(need, amt)
+			s.Charges[i].Amount -= take
+			need -= take
+			taken += take
+		}
+		return taken
+	}
+	absDir += takePass(dir, true)
+	absDir += takePass(dir, false)
+	absUntyped += takePass("", true)
+	absUntyped += takePass("", false)
+	if absDir > 1e-9 || absUntyped > 1e-9 {
+		kept := s.Charges[:0]
+		for _, tc := range s.Charges {
+			if validRate(tc.Amount) && tc.Amount > 1e-9 {
+				kept = append(kept, tc)
+			}
+		}
+		if len(kept) == 0 {
+			s.Charges = nil
+		} else {
+			s.Charges = kept
+		}
+	}
+	return absDir, absUntyped
 }
 
 // mergeDatedCharges reconciles per-UTC-day provider bandwidth charges (e.g. Vast GET /api/v0/charges)
 // idempotently into transferState. Zero/empty inputs are ignored so pending actuals never erase a
-// pre-launch FixedCost estimate; per-day, per-direction reconciliation against existing timestamped
-// charges guarantees Day 2 / mixed-direction charges are never dropped or double-counted across
-// overlapping instance-listing counters and repeated billing polls.
+// pre-launch FixedCost estimate. When the invoice establishes the UTC date of a charge, overlapping
+// undated cumulative-counter charges observed on or after that day are moved onto the invoice day
+// (preserving causality and preventing cross-midnight double-counting across repeated polls).
 func (s *transferState) mergeDatedCharges(days map[string]dayTransferCharge, start, now time.Time) bool {
 	if len(days) == 0 {
 		return false
@@ -484,11 +569,11 @@ func (s *transferState) mergeDatedCharges(days map[string]dayTransferCharge, sta
 			Down: max(prevDay.Down, inDown),
 			Up:   max(prevDay.Up, inUp),
 		}
-		if newDay.Down <= prevDay.Down+1e-9 && newDay.Up <= prevDay.Up+1e-9 {
+		deltaDown := max(0, newDay.Down-prevDay.Down)
+		deltaUp := max(0, newDay.Up-prevDay.Up)
+		if deltaDown <= 1e-9 && deltaUp <= 1e-9 {
 			continue
 		}
-		dayDeltaDown := max(0, newDay.Down-prevDay.Down)
-		dayDeltaUp := max(0, newDay.Up-prevDay.Up)
 		prevEff := s.effectiveObserved()
 		prevLegacy := max(0, prevEff-s.chargesSum())
 
@@ -498,20 +583,36 @@ func (s *transferState) mergeDatedCharges(days map[string]dayTransferCharge, sta
 		s.Dated[dayKey] = newDay
 		changed = true
 
-		existDown, existUp, existUntyped := s.chargesOnDayByDir(day)
-		if !start.IsZero() && startOfDay(start).Equal(day) {
-			existUntyped += prevLegacy
+		chargeAt := day
+		if !start.IsZero() && startOfDay(start).Equal(day) && start.After(chargeAt) {
+			chargeAt = start.UTC()
 		}
-		needDown := max(0, newDay.Down-existDown)
-		needUp := max(0, newDay.Up-existUp)
-		if existUntyped > 0 {
-			if sub := min(existUntyped, needDown); sub > 0 {
-				needDown -= sub
-				existUntyped -= sub
+		if !now.IsZero() && startOfDay(now).Equal(day) && chargeAt.After(now) {
+			chargeAt = now.UTC()
+		}
+		legacyEligible := start.IsZero() || !day.Before(startOfDay(start))
+
+		remDown := 0.0
+		if deltaDown > 1e-9 {
+			absDir, absUntyped := s.absorbUndated(day, "down", deltaDown)
+			remDown = max(0, deltaDown-absDir-absUntyped)
+			if remDown > 1e-9 && legacyEligible && prevLegacy > 1e-9 {
+				take := min(remDown, prevLegacy)
+				prevLegacy -= take
+				remDown -= take
 			}
-			if sub := min(existUntyped, needUp); sub > 0 {
-				needUp -= sub
+			s.appendDatedCharge(chargeAt, deltaDown, "down")
+		}
+		remUp := 0.0
+		if deltaUp > 1e-9 {
+			absDir, absUntyped := s.absorbUndated(day, "up", deltaUp)
+			remUp = max(0, deltaUp-absDir-absUntyped)
+			if remUp > 1e-9 && legacyEligible && prevLegacy > 1e-9 {
+				take := min(remUp, prevLegacy)
+				prevLegacy -= take
+				remUp -= take
 			}
+			s.appendDatedCharge(chargeAt, deltaUp, "up")
 		}
 
 		datedDown, datedUp := 0.0, 0.0
@@ -523,9 +624,10 @@ func (s *transferState) mergeDatedCharges(days map[string]dayTransferCharge, sta
 				datedUp += dv.Up
 			}
 		}
+		sumDown, sumUp := s.chargesSumByDir()
 		s.HasObserved = true
 		if newDay.Down > 0 {
-			nextDown := max(s.Down+min(needDown, dayDeltaDown), datedDown)
+			nextDown := max(s.Down+remDown, max(datedDown, sumDown))
 			if !s.DownObserved || nextDown > s.Down+1e-9 {
 				s.DownObserved = true
 				s.Down = nextDown
@@ -533,26 +635,12 @@ func (s *transferState) mergeDatedCharges(days map[string]dayTransferCharge, sta
 			s.DownUnpriced = false
 		}
 		if newDay.Up > 0 {
-			nextUp := max(s.Up+min(needUp, dayDeltaUp), datedUp)
+			nextUp := max(s.Up+remUp, max(datedUp, sumUp))
 			if !s.UpObserved || nextUp > s.Up+1e-9 {
 				s.UpObserved = true
 				s.Up = nextUp
 			}
 			s.UpUnpriced = false
-		}
-
-		chargeAt := day
-		if !start.IsZero() && startOfDay(start).Equal(day) && start.After(chargeAt) {
-			chargeAt = start.UTC()
-		}
-		if !now.IsZero() && startOfDay(now).Equal(day) && chargeAt.After(now) {
-			chargeAt = now.UTC()
-		}
-		if needDown > 1e-9 {
-			s.appendDirCharge(chargeAt, needDown, "down")
-		}
-		if needUp > 1e-9 {
-			s.appendDirCharge(chargeAt, needUp, "up")
 		}
 		newEff := max(s.effectiveObserved(), s.chargesSum())
 		if newEff > s.Observed+1e-9 {
@@ -696,11 +784,14 @@ func combineTransferCharges(a, b []transferCharge) []transferCharge {
 		if !out[i].At.Equal(out[j].At) {
 			return out[i].At.Before(out[j].At)
 		}
-		return out[i].Dir < out[j].Dir
+		if out[i].Dir != out[j].Dir {
+			return out[i].Dir < out[j].Dir
+		}
+		return !out[i].Dated && out[j].Dated
 	})
 	var merged []transferCharge
 	for _, tc := range out {
-		if n := len(merged); n > 0 && merged[n-1].At.Equal(tc.At) && merged[n-1].Dir == tc.Dir {
+		if n := len(merged); n > 0 && merged[n-1].At.Equal(tc.At) && merged[n-1].Dir == tc.Dir && merged[n-1].Dated == tc.Dated {
 			merged[n-1].Amount += tc.Amount
 		} else {
 			merged = append(merged, tc)
@@ -1393,8 +1484,9 @@ func (pr *pendingRent) dollarsBetween(from, to time.Time) float64 {
 }
 
 type ledger struct {
-	Pods    map[string]*podRecord   `json:"pods"`
-	Pending map[string]*pendingRent `json:"pending,omitempty"`
+	Pods         map[string]*podRecord                   `json:"pods"`
+	Pending      map[string]*pendingRent                 `json:"pending,omitempty"`
+	DatedCharges map[string]map[string]dayTransferCharge `json:"dated_charges,omitempty"` // ledgerKey(market, id) -> YYYY-MM-DD -> provider-dated bandwidth charges for owned contracts
 }
 
 func (f *Fleet) readLedger() (*ledger, error) {
@@ -1774,6 +1866,10 @@ func betterRental(prev, cur *Rental) bool {
 //   - recorded machines omitted from an answered listing are verified via rentalLookup before
 //     retiring, preserving their slot, state, and positive rate while status is uncertain.
 func (f *Fleet) note(ctx context.Context, l *ledger, rentals []Rental, answered map[string]bool) ([]Rental, error) {
+	return f.noteWith(ctx, l, rentals, answered, true)
+}
+
+func (f *Fleet) noteWith(ctx context.Context, l *ledger, rentals []Rental, answered map[string]bool, syncBilling bool) ([]Rental, error) {
 	now := f.now()
 	if l.Pending == nil {
 		l.Pending = map[string]*pendingRent{}
@@ -2118,17 +2214,144 @@ func (f *Fleet) note(ctx context.Context, l *ledger, rentals []Rental, answered 
 	if len(extra) > 0 {
 		rentals = append(rentals, extra...)
 	}
-	f.syncDatedCharges(ctx, l, answered, now)
+	if syncBilling {
+		f.syncDatedCharges(ctx, l, answered, now)
+	} else {
+		f.syncDatedCharges(ctx, l, nil, now)
+	}
 	return rentals, f.writeLedger(l)
 }
 
 // syncDatedCharges polls provider billing endpoints (e.g. Vast.ai GET /api/v0/charges) for
 // answered markets and reconciles dated bandwidth charges exclusively onto owned contracts
-// (tracked in l.Pods, plus cached on f.datedCharges for owned contracts retired in spent.jsonl).
-// Unrelated contracts on shared provider accounts are strictly ignored.
-func (f *Fleet) syncDatedCharges(ctx context.Context, l *ledger, answered map[string]bool, now time.Time) {
+// (tracked in l.Pods or durably retired in spent.jsonl). Observed dated charges for owned
+// contracts are persisted on l.DatedCharges in fleet.json (as well as cached on f.datedCharges)
+// so restarts preserve late adjustments through billing outages. Unrelated contracts on shared
+// provider accounts are strictly ignored. Reports whether l was mutated.
+func (f *Fleet) syncDatedCharges(ctx context.Context, l *ledger, answered map[string]bool, now time.Time) bool {
+	if l == nil {
+		return false
+	}
 	todayStart := startOfDay(now)
 	minLookback := todayStart.AddDate(0, 0, -7)
+	recentCutoff := todayStart.AddDate(0, 0, -1)
+	spentSum, _ := f.readSpentSummary()
+
+	changed := false
+	// First sync any previously persisted l.DatedCharges into f.datedCharges (and vice-versa for
+	// owned contracts) so restarts and billing outages always retain the highest observed charges.
+	ownedByMarket := map[string]map[string]bool{}
+	addOwned := func(market, id string) {
+		if market == "" || id == "" {
+			return
+		}
+		if ownedByMarket[market] == nil {
+			ownedByMarket[market] = map[string]bool{}
+		}
+		ownedByMarket[market][id] = true
+	}
+	for _, r := range l.Pods {
+		if r != nil && r.ID != "" {
+			addOwned(r.market(), r.ID)
+		}
+	}
+	if spentSum != nil {
+		for _, r := range spentSum.records {
+			if r.ID != "" {
+				addOwned(r.market(), r.ID)
+			}
+		}
+	}
+	mergeDayMap := func(dst map[string]dayTransferCharge, src map[string]dayTransferCharge) bool {
+		mut := false
+		for dk, dv := range src {
+			inDown, inUp := 0.0, 0.0
+			if nonNegFinite(dv.Down) {
+				inDown = dv.Down
+			}
+			if nonNegFinite(dv.Up) {
+				inUp = dv.Up
+			}
+			if inDown <= 1e-9 && inUp <= 1e-9 {
+				continue
+			}
+			prev := dst[dk]
+			next := dayTransferCharge{
+				Down: max(prev.Down, inDown),
+				Up:   max(prev.Up, inUp),
+			}
+			if next.Down > prev.Down+1e-9 || next.Up > prev.Up+1e-9 {
+				dst[dk] = next
+				mut = true
+			}
+		}
+		return mut
+	}
+	recordOwnedDated := func(market, cid string, days map[string]dayTransferCharge) {
+		if market == "" || cid == "" || len(days) == 0 || !ownedByMarket[market][cid] {
+			return
+		}
+		if f.datedCharges == nil {
+			f.datedCharges = map[string]map[string]map[string]dayTransferCharge{}
+		}
+		mCache := f.datedCharges[market]
+		if mCache == nil {
+			mCache = map[string]map[string]dayTransferCharge{}
+			f.datedCharges[market] = mCache
+		}
+		cCache := mCache[cid]
+		if cCache == nil {
+			cCache = map[string]dayTransferCharge{}
+			mCache[cid] = cCache
+		}
+		mergeDayMap(cCache, days)
+		if l.DatedCharges == nil {
+			l.DatedCharges = map[string]map[string]dayTransferCharge{}
+		}
+		ck := ledgerKey(market, cid)
+		lDays := l.DatedCharges[ck]
+		if lDays == nil {
+			lDays = map[string]dayTransferCharge{}
+		}
+		if mergeDayMap(lDays, days) {
+			l.DatedCharges[ck] = lDays
+			changed = true
+		} else if _, exists := l.DatedCharges[ck]; !exists && len(lDays) > 0 {
+			l.DatedCharges[ck] = lDays
+			changed = true
+		}
+	}
+	// Hydrate in-memory cache from persisted ledger.DatedCharges.
+	for ck, days := range l.DatedCharges {
+		if len(days) == 0 {
+			continue
+		}
+		market, cid, ok := strings.Cut(ck, ":")
+		if !ok {
+			market, cid = "runpod", ck
+		}
+		if market == "" || cid == "" {
+			continue
+		}
+		if f.datedCharges == nil {
+			f.datedCharges = map[string]map[string]map[string]dayTransferCharge{}
+		}
+		if f.datedCharges[market] == nil {
+			f.datedCharges[market] = map[string]map[string]dayTransferCharge{}
+		}
+		if f.datedCharges[market][cid] == nil {
+			f.datedCharges[market][cid] = map[string]dayTransferCharge{}
+		}
+		mergeDayMap(f.datedCharges[market][cid], days)
+	}
+	// Also flush any owned in-memory dated charges back into l.DatedCharges so a transient
+	// writeLedger failure followed by a billing outage and restart never loses observed charges.
+	for market, mCache := range f.datedCharges {
+		for cid, days := range mCache {
+			recordOwnedDated(market, cid, days)
+		}
+	}
+
 	for _, m := range f.markets {
 		if !answered[m.Name()] {
 			continue
@@ -2145,57 +2368,108 @@ func (f *Fleet) syncDatedCharges(ctx context.Context, l *ledger, answered map[st
 				}
 			}
 		}
-		if from.Before(minLookback) {
-			from = minLookback
-		}
-		byContract, err := tcLookup.TransferCharges(ctx, from, now)
-		if err != nil {
-			continue
-		}
-		if len(byContract) > 0 {
-			if f.datedCharges == nil {
-				f.datedCharges = map[string]map[string]map[string]dayTransferCharge{}
-			}
-			mCache := f.datedCharges[m.Name()]
-			if mCache == nil {
-				mCache = map[string]map[string]dayTransferCharge{}
-				f.datedCharges[m.Name()] = mCache
-			}
-			for cid, days := range byContract {
-				if cid == "" || len(days) == 0 {
+		if spentSum != nil {
+			for _, r := range spentSum.records {
+				if r.market() != m.Name() || r.ID == "" || r.Start.IsZero() {
 					continue
 				}
-				cCache := mCache[cid]
-				if cCache == nil {
-					cCache = map[string]dayTransferCharge{}
-					mCache[cid] = cCache
-				}
-				for dk, dv := range days {
-					prev := cCache[dk]
-					cCache[dk] = dayTransferCharge{
-						Down: max(prev.Down, max(0, dv.Down)),
-						Up:   max(prev.Up, max(0, dv.Up)),
+				if (!r.End.IsZero() && !r.End.Before(recentCutoff)) || !r.Start.Before(recentCutoff) {
+					if sd := startOfDay(r.Start); sd.Before(from) {
+						from = sd
 					}
 				}
 			}
 		}
-		mCache := f.datedCharges[m.Name()]
-		if len(mCache) == 0 {
+		if from.Before(minLookback) {
+			from = minLookback
+		}
+		if f.chargesAttemptAt == nil {
+			f.chargesAttemptAt = map[string]time.Time{}
+		}
+		f.chargesAttemptAt[m.Name()] = now
+		byContract, _ := tcLookup.TransferCharges(ctx, from, now)
+		for cid, days := range byContract {
+			recordOwnedDated(m.Name(), cid, days)
+		}
+	}
+
+	for _, r := range l.Pods {
+		if r == nil || r.ID == "" {
 			continue
 		}
-		for _, r := range l.Pods {
-			if r == nil || r.market() != m.Name() || r.ID == "" {
-				continue
-			}
-			days := mCache[r.ID]
-			if len(days) == 0 {
-				continue
-			}
-			ts := r.transferState().clone()
-			if ts.mergeDatedCharges(days, r.Start, now) {
-				r.setTransferState(ts)
-			}
+		days := f.mergedDatedFor(l, r.market(), r.ID)
+		if len(days) == 0 {
+			continue
 		}
+		ts := r.transferState().clone()
+		if ts.mergeDatedCharges(days, r.Start, now) {
+			r.setTransferState(ts)
+			changed = true
+		}
+	}
+	return changed
+}
+
+// mergedDatedFor returns the union (per-day, per-direction max) of persisted ledger.DatedCharges
+// and in-memory f.datedCharges for an owned contract without mutating either map.
+func (f *Fleet) mergedDatedFor(l *ledger, market, id string) map[string]dayTransferCharge {
+	if market == "" || id == "" {
+		return nil
+	}
+	var fromLedger, fromMem map[string]dayTransferCharge
+	if l != nil && len(l.DatedCharges) > 0 {
+		fromLedger = l.DatedCharges[ledgerKey(market, id)]
+	}
+	if len(f.datedCharges) > 0 {
+		fromMem = f.datedCharges[market][id]
+	}
+	if len(fromLedger) == 0 && len(fromMem) == 0 {
+		return nil
+	}
+	if len(fromLedger) == 0 {
+		return fromMem
+	}
+	if len(fromMem) == 0 {
+		return fromLedger
+	}
+	out := make(map[string]dayTransferCharge, max(len(fromLedger), len(fromMem)))
+	for dk, dv := range fromLedger {
+		out[dk] = dv
+	}
+	for dk, dv := range fromMem {
+		prev := out[dk]
+		out[dk] = dayTransferCharge{
+			Down: max(prev.Down, max(0, dv.Down)),
+			Up:   max(prev.Up, max(0, dv.Up)),
+		}
+	}
+	return out
+}
+
+// refreshStaleDatedCharges re-queries provider billing before a paid create whenever the last
+// billing attempt is older than billingStaleAfter (e.g. after a slow offer search) or crossed a
+// UTC day boundary, persisting any newly observed charges to fleet.json. Checks every billing-capable
+// market regardless of whether its Rentals listing answered, so multi-market fleets do not bypass
+// dated charges on one market before renting on another.
+func (f *Fleet) refreshStaleDatedCharges(ctx context.Context, l *ledger, _ map[string]bool, now time.Time) {
+	if l == nil || len(f.markets) == 0 {
+		return
+	}
+	stale := map[string]bool{}
+	for _, m := range f.markets {
+		if _, ok := m.(transferChargesLookup); !ok {
+			continue
+		}
+		last := f.chargesAttemptAt[m.Name()]
+		if last.IsZero() || now.Sub(last) >= billingStaleAfter || !startOfDay(now).Equal(startOfDay(last)) {
+			stale[m.Name()] = true
+		}
+	}
+	if len(stale) == 0 {
+		return
+	}
+	if f.syncDatedCharges(ctx, l, stale, now) && !f.o.DryRun {
+		_ = f.writeLedger(l)
 	}
 }
 
@@ -2489,10 +2763,12 @@ func (f *Fleet) spentFor(l *ledger, since time.Time, unconfirmed map[string]bool
 	total := 0.0
 	for _, r := range sum.records {
 		rc := r
-		if rc.ID != "" && len(f.datedCharges[rc.market()][rc.ID]) > 0 {
-			ts := rc.transferState().clone()
-			if ts.mergeDatedCharges(f.datedCharges[rc.market()][rc.ID], rc.Start, now) {
-				rc.setTransferState(ts)
+		if rc.ID != "" {
+			if days := f.mergedDatedFor(l, rc.market(), rc.ID); len(days) > 0 {
+				ts := rc.transferState().clone()
+				if ts.mergeDatedCharges(days, rc.Start, now) {
+					rc.setTransferState(ts)
+				}
 			}
 		}
 		total += rc.dollarsBetween(since, now)
@@ -2508,10 +2784,12 @@ func (f *Fleet) spentFor(l *ledger, since time.Time, unconfirmed map[string]bool
 		}
 		rc := *r
 		rc.Segments = cloneBillingSegments(r.Segments)
-		if rc.ID != "" && len(f.datedCharges[rc.market()][rc.ID]) > 0 {
-			ts := rc.transferState().clone()
-			if ts.mergeDatedCharges(f.datedCharges[rc.market()][rc.ID], rc.Start, now) {
-				rc.setTransferState(ts)
+		if rc.ID != "" {
+			if days := f.mergedDatedFor(l, rc.market(), rc.ID); len(days) > 0 {
+				ts := rc.transferState().clone()
+				if ts.mergeDatedCharges(days, rc.Start, now) {
+					rc.setTransferState(ts)
+				}
 			}
 		}
 		if unconfirmed[key] && rc.Stopped {
@@ -2547,6 +2825,7 @@ type View struct {
 	UnknownRateKeys        map[string]string   // live contracts / pending reservations with no known positive hourly rate
 	UnconfirmedKeys        map[string]bool     // ledger contracts whose current provider status could not be confirmed (outage/lookup error)
 	MarketKnownIDs         map[string][]string // all non-gone contract IDs listed per market (including unowned on shared accounts)
+	AnsweredMarkets        map[string]bool     // markets whose Rentals listing succeeded during this look
 	Hourly                 float64             // dollars an hour, every live contract + pending create + active examiner together
 	Today                  float64             // about what has been spent today (UTC), including any active examiner
 	ExaminerLive           int                 // 1 when an ephemeral examiner GPU is active, else 0
@@ -2855,6 +3134,10 @@ func recordedRentals(l *ledger, market string, spentSum *spentSummary) []Rental 
 }
 
 func (f *Fleet) look(ctx context.Context) (*View, error) {
+	return f.lookWith(ctx, true)
+}
+
+func (f *Fleet) lookWith(ctx context.Context, syncBilling bool) (*View, error) {
 	work, err := f.st.work(ctx, f.op)
 	if err != nil {
 		return nil, err
@@ -2874,10 +3157,10 @@ func (f *Fleet) look(ctx context.Context) (*View, error) {
 	if err != nil {
 		return &View{Work: work, Ledger: l}, err
 	}
-	if rentals, err = f.note(ctx, l, rentals, answered); err != nil {
+	if rentals, err = f.noteWith(ctx, l, rentals, answered, syncBilling); err != nil {
 		return &View{Work: work, Ledger: l}, err
 	}
-	v := &View{Work: work, Ledger: l, MarketKnownIDs: map[string][]string{}}
+	v := &View{Work: work, Ledger: l, MarketKnownIDs: map[string][]string{}, AnsweredMarkets: answered}
 	asked := false
 	live := map[string]bool{}
 	knownHandles := map[string]bool{}
@@ -3591,7 +3874,7 @@ func (f *Fleet) launchSomeRentals(ctx context.Context, v *View, n int, long, cur
 			break
 		}
 		if f.o.DailyBudget > 0 {
-			today, err := f.currentSpentToday(v)
+			today, err := f.currentSpentToday(ctx, v)
 			if err != nil {
 				return rented, err
 			}
@@ -3725,13 +4008,15 @@ func roundFor(w *Work, what string, due time.Time) string {
 }
 
 // currentSpentToday recomputes live UTC-day spend (spent.jsonl + live/stopped/pending workers in
-// v.Ledger + active/pending examiner spend) at f.now() so batch worker creates re-check
-// --daily-budget immediately before each paid provider call.
-func (f *Fleet) currentSpentToday(v *View) (float64, error) {
+// v.Ledger + active/pending examiner spend) at f.now() after refreshing stale provider billing
+// data (e.g. after a slow offer search) so batch worker creates re-check --daily-budget
+// immediately before each paid provider call.
+func (f *Fleet) currentSpentToday(ctx context.Context, v *View) (float64, error) {
 	if v == nil || v.Ledger == nil {
 		return 0, errors.New("fleet ledger unavailable")
 	}
 	now := f.now()
+	f.refreshStaleDatedCharges(ctx, v.Ledger, v.AnsweredMarkets, now)
 	base, err := f.spentFor(v.Ledger, startOfDay(now), v.UnconfirmedKeys)
 	if err != nil {
 		return 0, fmt.Errorf("reading daily spend: %w", err)
@@ -3758,7 +4043,7 @@ func (f *Fleet) rent(ctx context.Context, v *View, k *Key, gpus []Offer, site st
 		return nil, nil
 	}
 	if f.o.DailyBudget > 0 {
-		today, err := f.currentSpentToday(v)
+		today, err := f.currentSpentToday(ctx, v)
 		if err != nil {
 			return nil, err
 		}
@@ -3790,7 +4075,7 @@ func (f *Fleet) rent(ctx context.Context, v *View, k *Key, gpus []Offer, site st
 			fixed = c.FixedCost
 		}
 		if f.o.DailyBudget > 0 {
-			today, err := f.currentSpentToday(v)
+			today, err := f.currentSpentToday(ctx, v)
 			if err != nil {
 				return nil, err
 			}
@@ -3879,7 +4164,7 @@ func (f *Fleet) rent(ctx context.Context, v *View, k *Key, gpus []Offer, site st
 			plannedReport = plan.report(c)
 		}
 		if f.o.DailyBudget > 0 {
-			today, err := f.currentSpentToday(v)
+			today, err := f.currentSpentToday(ctx, v)
 			if err != nil {
 				return nil, err
 			}

@@ -403,7 +403,9 @@ func tick(ctx context.Context, f *Fleet) (err error) {
 			DailyBudget:   f.o.DailyBudget,
 			AccountingErr: rateErr,
 			CurrentSpentToday: func() (float64, error) {
-				spentBase, serr := f.spentFor(v.Ledger, startOfDay(f.now()), v.UnconfirmedKeys)
+				now := f.now()
+				f.refreshStaleDatedCharges(ctx, v.Ledger, v.AnsweredMarkets, now)
+				spentBase, serr := f.spentFor(v.Ledger, startOfDay(now), v.UnconfirmedKeys)
 				if serr != nil {
 					return 0, fmt.Errorf("reading daily spend: %w", serr)
 				}
@@ -534,6 +536,13 @@ func tick(ctx context.Context, f *Fleet) (err error) {
 						continue
 					}
 					offers = append(offers, c)
+				}
+			}
+			// Re-check daily spend after offer search so a slow search that crossed --daily-budget
+			// does not evict warm idle dispute-breaker workers when replacement launch will be blocked.
+			if f.o.DailyBudget > 0 {
+				if todayNow, serr := f.currentSpentToday(ctx, v); serr == nil && todayNow >= f.o.DailyBudget {
+					offers = nil
 				}
 			}
 		}
@@ -840,6 +849,7 @@ func reconcileExaminerOnce(ctx context.Context, f *Fleet) error {
 	l, lerr := f.readLedger()
 	today, liveWorkers, hourlyWorkers := 0.0, 0, 0.0
 	var unconfirmed map[string]bool
+	var answeredMarkets map[string]bool
 	if lerr != nil {
 		if acctErr == nil {
 			acctErr = fmt.Errorf("reading fleet ledger: %w", lerr)
@@ -852,7 +862,7 @@ func reconcileExaminerOnce(ctx context.Context, f *Fleet) error {
 			if rerr != nil {
 				acctErr = fmt.Errorf("listing market rentals: %w", rerr)
 			} else {
-				rentals, answered = rs, ans
+				rentals, answered, answeredMarkets = rs, ans, ans
 				for _, m := range f.markets {
 					if !answered[m.Name()] {
 						acctErr = fmt.Errorf("%s did not list its rentals", marketTitle(m.Name()))
@@ -983,7 +993,9 @@ func reconcileExaminerOnce(ctx context.Context, f *Fleet) error {
 	}
 	if l != nil && acctErr == nil {
 		budget.CurrentSpentToday = func() (float64, error) {
-			spentBase, serr := f.spentFor(l, startOfDay(f.now()), unconfirmed)
+			now := f.now()
+			f.refreshStaleDatedCharges(ctx, l, answeredMarkets, now)
+			spentBase, serr := f.spentFor(l, startOfDay(now), unconfirmed)
 			if serr != nil {
 				return 0, fmt.Errorf("reading daily spend: %w", serr)
 			}
@@ -1108,7 +1120,8 @@ func cmdDown(ctx context.Context, f *Fleet, force bool, handles []string) error 
 		return err
 	}
 	defer unlock()
-	v, err := f.look(ctx)
+	// Teardown must proceed independently of provider billing sync / Retry-After backoffs.
+	v, err := f.lookWith(ctx, false)
 	if err != nil {
 		return err
 	}

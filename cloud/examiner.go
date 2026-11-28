@@ -523,10 +523,12 @@ func observeExaminerPoll(prev *ExaminerInstance, saved *examinerState, cur *Exam
 	if validRate(pod.DiskCost) {
 		pod.DiskCostUnknown = false
 	} else if cur.State == "stopped" && !cur.Offline {
-		// Examiners always provision an 80 GB NVMe disk; when a non-offline stopped examiner
-		// reports no separate positive storage rate, keep DiskCostUnknown=true so daily/hourly
-		// accounting conservatively retains its full rate until deleted.
-		pod.DiskCostUnknown = true
+		// Preserve the provider adapter's distinction between explicitly free storage
+		// (DiskCostUnknown=false, e.g. diskHour=0 / storage_total_cost=0) and unknown storage
+		// pricing (DiskCostUnknown=true, conservatively billed at full rate until deleted).
+		pod.DiskCostUnknown = cur.DiskCostUnknown
+	} else if cur.Offline {
+		pod.DiskCostUnknown = false
 	}
 	if cur.State == "stopped" {
 		offline := cur.Offline || strings.EqualFold(strings.TrimSpace(cur.Status), "offline")
@@ -969,11 +971,6 @@ func snapshotFromState(st examinerState, home string, now time.Time, timeout tim
 					}
 					rate = higherValidRate(rate, u.Price)
 					diskCost = nonNegMax(diskCost, u.DiskCost)
-					if validRate(diskCost) {
-						diskCostUnknown = false
-					} else if u.DiskCostUnknown {
-						diskCostUnknown = true
-					}
 					if u.hasBillingHistory() && (!st.hasBillingHistory() || !st.latestBillingTime().After(u.latestBillingTime())) {
 						obs = u.ObservedLiveAt
 						stopped = u.Stopped
@@ -983,7 +980,13 @@ func snapshotFromState(st examinerState, home string, now time.Time, timeout tim
 						stoppedSeen = u.StoppedSeen
 						resumeAt = u.ResumeAt
 						segments = u.Segments
+						diskCostUnknown = u.DiskCostUnknown && !validRate(diskCost) && !offline
 					} else {
+						if validRate(diskCost) || offline {
+							diskCostUnknown = false
+						} else if !st.hasBillingHistory() && u.DiskCostUnknown {
+							diskCostUnknown = true
+						}
 						if u.Unconfirmed && !st.latestBillingTime().After(u.latestBillingTime()) {
 							unconfirmed = true
 						}
@@ -1301,11 +1304,6 @@ func (e *Examiner) persistState(st *examinerState) error {
 		cp.Unresolved = unresolved
 		cp.Price = higherValidRate(cp.Price, memPrice)
 		cp.DiskCost = nonNegMax(cp.DiskCost, memDisk)
-		if validRate(cp.DiskCost) {
-			cp.DiskCostUnknown = false
-		} else if memDiskUnknown {
-			cp.DiskCostUnknown = true
-		}
 		est, estFlag, ts, _ := mergeExaminerTransfer(
 			cp.TransferDollars, cp.TransferEstimated, cp.transferState(),
 			memTransfer, memTransferEst, memTS,
@@ -1323,7 +1321,13 @@ func (e *Examiner) persistState(st *examinerState) error {
 			cp.ResumeAt = memBilling.ResumeAt
 			cp.Segments = cloneBillingSegments(memBilling.Segments)
 			cp.ObservedLiveAt = memBilling.ObservedLiveAt
+			cp.DiskCostUnknown = memDiskUnknown && !validRate(cp.DiskCost) && !cp.Offline
 		} else {
+			if validRate(cp.DiskCost) || cp.Offline {
+				cp.DiskCostUnknown = false
+			} else if !cp.hasBillingHistory() && memDiskUnknown {
+				cp.DiskCostUnknown = true
+			}
 			if memBilling.Unconfirmed && !cp.latestBillingTime().After(memBilling.latestBillingTime()) {
 				cp.Unconfirmed = true
 			}
@@ -1712,11 +1716,6 @@ func (e *Examiner) reloadState(tryFlush bool) error {
 	if !changed && e.state.InstanceID != "" && e.state.InstanceID == next.InstanceID {
 		next.Price = higherValidRate(next.Price, e.state.Price)
 		next.DiskCost = nonNegMax(next.DiskCost, e.state.DiskCost)
-		if validRate(next.DiskCost) {
-			next.DiskCostUnknown = false
-		} else if e.state.DiskCostUnknown {
-			next.DiskCostUnknown = true
-		}
 		est, estFlag, ts, _ := mergeExaminerTransfer(
 			next.TransferDollars, next.TransferEstimated, next.transferState(),
 			e.state.TransferDollars, e.state.TransferEstimated, e.state.transferState(),
@@ -1734,7 +1733,13 @@ func (e *Examiner) reloadState(tryFlush bool) error {
 			next.ResumeAt = e.state.ResumeAt
 			next.Segments = cloneBillingSegments(e.state.Segments)
 			next.ObservedLiveAt = e.state.ObservedLiveAt
+			next.DiskCostUnknown = e.state.DiskCostUnknown && !validRate(next.DiskCost) && !next.Offline
 		} else {
+			if validRate(next.DiskCost) || next.Offline {
+				next.DiskCostUnknown = false
+			} else if !next.hasBillingHistory() && e.state.DiskCostUnknown {
+				next.DiskCostUnknown = true
+			}
 			if e.state.Unconfirmed && !next.latestBillingTime().After(e.state.latestBillingTime()) {
 				next.Unconfirmed = true
 			}
@@ -1847,9 +1852,10 @@ func mergeExaminerInstance(prev, cur ExaminerInstance) ExaminerInstance {
 		cur.Created = prev.Created
 	}
 	cur.Price, cur.DiskCost = examinerObservedRate(prev.Price, prev.DiskCost, cur)
-	if validRate(cur.DiskCost) {
+	curNewer := cur.hasBillingHistory() && (!prev.hasBillingHistory() || !prev.latestBillingTime().After(cur.latestBillingTime()))
+	if validRate(cur.DiskCost) || cur.Offline {
 		cur.DiskCostUnknown = false
-	} else if !cur.DiskCostUnknown && prev.DiskCostUnknown && !cur.Offline {
+	} else if !curNewer && !cur.DiskCostUnknown && prev.DiskCostUnknown {
 		cur.DiskCostUnknown = true
 	}
 	at := cur.latestBillingTime()
@@ -2361,11 +2367,6 @@ func (e *Examiner) recordMissingSavedDollars(saved examinerState, why string) (f
 		}
 		price = higherValidRate(price, u.Price)
 		diskCost = nonNegMax(diskCost, u.DiskCost)
-		if validRate(diskCost) {
-			diskCostUnknown = false
-		} else if u.DiskCostUnknown {
-			diskCostUnknown = true
-		}
 		if u.hasBillingHistory() && (!saved.hasBillingHistory() || !saved.latestBillingTime().After(u.latestBillingTime())) {
 			obs = u.ObservedLiveAt
 			stopped = u.Stopped
@@ -2374,8 +2375,16 @@ func (e *Examiner) recordMissingSavedDollars(saved examinerState, why string) (f
 			stoppedSeen = u.StoppedSeen
 			resumeAt = u.ResumeAt
 			segments = u.Segments
-		} else if u.ObservedLiveAt.After(obs) {
-			obs = u.ObservedLiveAt
+			diskCostUnknown = u.DiskCostUnknown && !validRate(diskCost) && !offline
+		} else {
+			if validRate(diskCost) || offline {
+				diskCostUnknown = false
+			} else if !saved.hasBillingHistory() && u.DiskCostUnknown {
+				diskCostUnknown = true
+			}
+			if u.ObservedLiveAt.After(obs) {
+				obs = u.ObservedLiveAt
+			}
 		}
 		transfer, transferEst, ts, _ = mergeExaminerTransfer(
 			transfer, transferEst, ts,
@@ -2443,11 +2452,6 @@ func savedOrphanInstance(saved examinerState, prev []ExaminerInstance) ExaminerI
 			u.Created = saved.Created
 		}
 		u.Price, u.DiskCost = examinerObservedRate(saved.Price, saved.DiskCost, u)
-		if validRate(u.DiskCost) {
-			u.DiskCostUnknown = false
-		} else if saved.DiskCostUnknown && !u.Offline {
-			u.DiskCostUnknown = true
-		}
 		if saved.hasBillingHistory() && (!u.hasBillingHistory() || saved.latestBillingTime().After(u.latestBillingTime())) {
 			u.Stopped = saved.Stopped
 			u.Offline = saved.Offline
@@ -2456,8 +2460,16 @@ func savedOrphanInstance(saved examinerState, prev []ExaminerInstance) ExaminerI
 			u.ResumeAt = saved.ResumeAt
 			u.Segments = cloneBillingSegments(saved.Segments)
 			u.ObservedLiveAt = saved.ObservedLiveAt
-		} else if obs.After(u.ObservedLiveAt) {
-			u.ObservedLiveAt = obs
+			u.DiskCostUnknown = saved.DiskCostUnknown && !validRate(u.DiskCost) && !u.Offline
+		} else {
+			if validRate(u.DiskCost) || u.Offline {
+				u.DiskCostUnknown = false
+			} else if !u.hasBillingHistory() && saved.DiskCostUnknown {
+				u.DiskCostUnknown = true
+			}
+			if obs.After(u.ObservedLiveAt) {
+				u.ObservedLiveAt = obs
+			}
 		}
 		at := u.latestBillingTime()
 		if at.IsZero() {
@@ -2517,7 +2529,11 @@ func (e *Examiner) noteSavedBilling(saved *examinerState, inst ExaminerInstance)
 		if validRate(inst.DiskCost) {
 			saved.DiskCost = nonNegMax(saved.DiskCost, inst.DiskCost)
 			saved.DiskCostUnknown = false
-		} else if inst.DiskCostUnknown && !inst.Offline {
+		} else if inst.Stopped && !inst.Offline {
+			saved.DiskCostUnknown = inst.DiskCostUnknown
+		} else if inst.Offline {
+			saved.DiskCostUnknown = false
+		} else if inst.DiskCostUnknown {
 			saved.DiskCostUnknown = true
 		}
 	} else if !inst.Stopped && inst.ObservedLiveAt.After(saved.ObservedLiveAt) {
@@ -2538,7 +2554,11 @@ func (e *Examiner) noteSavedBilling(saved *examinerState, inst ExaminerInstance)
 			if validRate(saved.DiskCost) {
 				e.state.DiskCost = nonNegMax(e.state.DiskCost, saved.DiskCost)
 				e.state.DiskCostUnknown = false
-			} else if saved.DiskCostUnknown && !saved.Offline {
+			} else if saved.Stopped && !saved.Offline {
+				e.state.DiskCostUnknown = saved.DiskCostUnknown
+			} else if saved.Offline {
+				e.state.DiskCostUnknown = false
+			} else if saved.DiskCostUnknown {
 				e.state.DiskCostUnknown = true
 			}
 		} else if !saved.Stopped && saved.ObservedLiveAt.After(e.state.ObservedLiveAt) {
@@ -2989,8 +3009,8 @@ func (e *Examiner) syncDatedCharges(ctx context.Context, saved *examinerState, i
 	if from.Before(minLookback) {
 		from = minLookback
 	}
-	byContract, err := tcLookup.TransferCharges(ctx, from, now)
-	if err != nil || len(byContract) == 0 {
+	byContract, _ := tcLookup.TransferCharges(ctx, from, now)
+	if len(byContract) == 0 {
 		return false
 	}
 	stateChanged := false
@@ -3120,6 +3140,7 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 		}
 		listedIDs[insts[i].ID] = true
 	}
+	chargesSyncedAt := now
 	if e.syncDatedCharges(ctx, &saved, insts, now) {
 		prevUnresolved = cloneExaminerInstances(saved.Unresolved)
 		if !e.dryRun && loadErr == nil {
@@ -3535,6 +3556,15 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 				return 0, err
 			}
 			return freshSpent, nil
+		}
+		if chargesSyncedAt.IsZero() || at.Sub(chargesSyncedAt) >= billingStaleAfter || !startOfDay(at).Equal(startOfDay(chargesSyncedAt)) {
+			chargesSyncedAt = at
+			if e.syncDatedCharges(ctx, &saved, insts, at) && !e.dryRun && loadErr == nil {
+				e.mu.RLock()
+				stCopy := e.cloneStateLocked()
+				e.mu.RUnlock()
+				_ = e.saveState(&stCopy)
+			}
 		}
 		e.mu.RLock()
 		curSt := e.cloneStateLocked()
@@ -4150,8 +4180,10 @@ func resolvePendingExaminer(
 		if u.ID == st.InstanceID {
 			savedPtr = st
 			if st.hasBillingHistory() && (!u.hasBillingHistory() || st.latestBillingTime().After(u.latestBillingTime())) {
+				u.DiskCost = nonNegMax(u.DiskCost, st.DiskCost)
 				u.Stopped = st.Stopped
 				u.Offline = st.Offline
+				u.DiskCostUnknown = st.DiskCostUnknown && !validRate(u.DiskCost) && !u.Offline
 				u.Unconfirmed = u.Unconfirmed || st.Unconfirmed
 				u.StoppedAt = st.StoppedAt
 				u.StoppedSeen = st.StoppedSeen
