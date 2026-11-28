@@ -545,7 +545,7 @@ def cost(season, rows: list[tuple]) -> list[dict]:
     for scale, n in rows:
         each = measure.train_seconds(season, scale) / 3600
         out.append({"scale": scale.name, "tokens": scale.train_tokens, "trainings": n, "hours_each": each, "hours": n * each,
-                    "hold_minutes": (measure.hold_seconds(season, scale) or measure.SERVER_HOLD) // 60, "memory_gb": measure.memory_gb(scale)})
+                    "hold_minutes": (measure.hold_seconds(season, scale) or measure.SERVER_HOLD) // 60, "memory_gb": measure.memory_gb(scale, season)})
     return out
 
 

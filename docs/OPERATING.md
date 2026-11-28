@@ -381,14 +381,14 @@ GPUs).
 
 | student | tokens | GPU hours, one training | held (minutes) | memory for its tokens |
 |---|---|---|---|---|
-| standard at ½× | 32.8M | 0.43 | 45 | 0.18 GB |
-| standard | 65.5M | 0.87 | 120 | 0.37 GB |
-| standard at 2× | 131.1M | 1.73 | 220 | 0.73 GB |
-| standard at 4× | 262.1M | 3.47 | 420 | 1.46 GB |
-| large at ½× | 65.5M | 0.87 | 120 | 0.37 GB |
-| large | 131.1M | 1.73 | 220 | 0.73 GB |
-| large at 2× | 262.1M | 3.47 | 420 | 1.46 GB |
-| large at 4× | 524.3M | 6.93 | 820 | 2.93 GB |
+| standard at ½× | 32.8M | 0.94 | 135 | 0.37 GB |
+| standard | 65.5M | 1.88 | 205 | 0.73 GB |
+| standard at 2× | 131.1M | 3.76 | 345 | 1.46 GB |
+| standard at 4× | 262.1M | 7.52 | 625 | 2.93 GB |
+| large at ½× | 65.5M | 1.88 | 205 | 0.73 GB |
+| large | 131.1M | 3.76 | 345 | 1.46 GB |
+| large at 2× | 262.1M | 7.52 | 625 | 2.93 GB |
+| large at 4× | 524.3M | 15.03 | 1190 | 5.86 GB |
 
 Rent for the longest hold of what is posted (`stet-cloud scale --follow --long-farm 1440` for a curve at
 large, matching the 24-hour `large-x4` lease cap).
@@ -407,7 +407,7 @@ stet curve s2-o00012 --scale large                    # the same at another size
 stet curve s2-o00012 s2-o00015 s2-o00019 --average    # the mean of rounds already measured, with the spread between them
 ```
 
-One round's curve is 12.2 GPU hours at standard and 48.9 at large, at the floor. It prints
+One round's curve is 16.0 GPU hours at standard and 31.9 at large, at the floor. It prints
 the gain at each multiple, the gain per doubling of the data between each pair, and, on
 standard output, the line for the season file:
 
@@ -450,11 +450,11 @@ on the machine: run it by hand, on a machine at or above the floor with nothing 
 running. A curator that writes no usable script at the larger size, or one that keeps the
 corpus as it is, is left out of the comparison and named.
 
-With N curators an audit is 2N + 4 trainings at each size: for eight, 28.8 GPU hours at
-standard and 115.1 at large at the floor, and up to 10.7 hours of curators on the machine
+With N curators an audit is 2N + 4 trainings at each size: for eight, 37.6 GPU hours at
+standard and 75.2 at large at the floor, and up to 10.7 hours of curators on the machine
 that makes the scripts. `--sizes standard` audits a round at its own size alone, for its
 noise and spread there: `scripts` then only builds the round's corpus, no curator is run,
-and the 28.8 hours are all of it.
+and the 37.6 hours are all of it.
 
 For the score and each pillar, the report gives:
 
@@ -514,8 +514,8 @@ The season's table is decided by finals ([the rules](RULES.md#finals)). The comm
 What it trains, for n curators (eight finalists, the lot's pick and the yardsticks): in
 each of the two rounds, 2n + 4 large students and the unedited corpus once at ½, 2 and 4
 times the budget. With eight yardsticks (17 curators) that is 76 large
-students, 437 GPU hours at the floor, and 75 for the two curves: 512 GPU hours at the floor
-(about 220 on RTX 4090s or 160 on RTX 5090s).
+students, 286 GPU hours at the floor, and 49 for the two curves: 334 GPU hours at the floor
+(about 90 on RTX 4090s or 60 on RTX 5090s).
 The curators themselves take up to 45 hours on the machine that runs them (two rounds, 17
 curators, 4,800 s each), and each large corpus is built first.
 

@@ -138,7 +138,8 @@ type Rental struct {
 	State        string  // starting, running, stopped; anything else is the market's own word
 	Status       string  // the market's own word
 	Created      time.Time
-	Terminating  bool // persisted outstanding termination (e.g. failed `workers resolve --end`)
+	StoppedAt    time.Time // trustworthy provider stop timestamp when reported (zero when unknown)
+	Terminating  bool      // persisted outstanding termination (e.g. failed `workers resolve --end`)
 	// What the market says of the machine itself, for seeing why one does not start: whether
 	// its container is up ("yes", "no", or "" where the market does not say), its phase in
 	// the market's own words (one that changes only as the machine moves on: "pulling image",

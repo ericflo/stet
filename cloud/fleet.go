@@ -1,7 +1,7 @@
 package main
 
 import (
-	"bufio"
+	"bytes"
 	"context"
 	"crypto/rand"
 	_ "embed"
@@ -307,9 +307,27 @@ func (r podRecord) currentStopStart(now time.Time) time.Time {
 	return now
 }
 
-// markStopped records that GPU compute has stopped, closing the completed running interval into
-// Segments and setting StoppedAt to where attached storage billing takes over.
+// resolveStopTime picks when a running -> stopped transition takes effect: a trustworthy
+// provider stop timestamp bounded within [minAt, now] when reported, or else now so a delayed
+// stop observation never retroactively refunds unconfirmed compute time.
+func resolveStopTime(minAt, now, providerStopAt time.Time) time.Time {
+	if !providerStopAt.IsZero() && !providerStopAt.After(now) && (minAt.IsZero() || !providerStopAt.Before(minAt)) {
+		return providerStopAt
+	}
+	return now
+}
+
+// markStopped records that GPU compute has stopped without a provider stop timestamp, keeping
+// compute billing conservatively through now (the first confirmed stop).
 func (r *podRecord) markStopped(now time.Time) {
+	r.markStoppedAt(now, time.Time{})
+}
+
+// markStoppedAt records that GPU compute has stopped, closing the completed running interval into
+// Segments and setting StoppedAt to where attached storage billing takes over. A trustworthy
+// providerStopAt in [max(runStart, Alive), now] is used when available; otherwise compute billing
+// is preserved through now so delayed stop observations never retroactively refund compute hours.
+func (r *podRecord) markStoppedAt(now, providerStopAt time.Time) {
 	if r.Stopped {
 		if r.StoppedAt.IsZero() {
 			r.StoppedAt = r.currentStopStart(now)
@@ -317,13 +335,11 @@ func (r *podRecord) markStopped(now time.Time) {
 		return
 	}
 	rs := r.currentRunStart()
-	stopAt := now
-	switch {
-	case !r.Alive.IsZero():
-		stopAt = r.Alive
-	case !rs.IsZero():
-		stopAt = rs
+	minStop := rs
+	if !r.Alive.IsZero() && (minStop.IsZero() || r.Alive.After(minStop)) {
+		minStop = r.Alive
 	}
+	stopAt := resolveStopTime(minStop, now, providerStopAt)
 	if stopAt.After(now) {
 		stopAt = now
 	}
@@ -864,10 +880,10 @@ func (f *Fleet) note(ctx context.Context, l *ledger, rentals []Rental, answered 
 			alive := now
 			var stoppedAt time.Time
 			if p.State == "stopped" {
-				// No provider stop timestamp is available: preserve the conservative compute-rate
-				// accrual reserved while pending up through this first confirmed stop, then accrue
-				// storage from now forward.
-				stoppedAt = now
+				// Use a trustworthy provider stop timestamp when available; otherwise preserve
+				// the conservative compute-rate accrual reserved while pending up through this
+				// first confirmed stop, then accrue storage from now forward.
+				stoppedAt = resolveStopTime(start, now, p.StoppedAt)
 			} else if !p.live() {
 				alive = start
 			}
@@ -920,7 +936,7 @@ func (f *Fleet) note(ctx context.Context, l *ledger, rentals []Rental, answered 
 			alive := now
 			var stoppedAt time.Time
 			if p.State == "stopped" {
-				stoppedAt = now
+				stoppedAt = resolveStopTime(start, now, p.StoppedAt)
 			}
 			r = &podRecord{ID: p.ID, Market: p.Market, Handle: h, Host: p.Host, GPU: p.Card,
 				Cost: cost, DiskCost: max(0, p.DiskCost), PartialCost: p.PartialRate || p.State == "stopped",
@@ -1009,7 +1025,7 @@ func (f *Fleet) note(ctx context.Context, l *ledger, rentals []Rental, answered 
 				// confirms provider deletion or Lookup confirms absence (e.g. to stop Vast disk
 				// billing even if a delete fails and a later listing omits the stopped worker).
 				wasStopped := r.Stopped
-				r.markStopped(now)
+				r.markStoppedAt(now, p.StoppedAt)
 				if !wasStopped {
 					r.Gone = true
 					why := "its market has it " + strings.ToLower(p.Status)
@@ -1057,7 +1073,7 @@ func (f *Fleet) note(ctx context.Context, l *ledger, rentals []Rental, answered 
 				fresh.Terminating = r.Terminating
 				reconcileRentalRate(r, fresh)
 				if fresh.State == "stopped" {
-					r.markStopped(now)
+					r.markStoppedAt(now, fresh.StoppedAt)
 					extra = append(extra, *fresh)
 				} else if err := retireGone(key, r, fresh); err != nil {
 					return rentals, err
@@ -1076,9 +1092,13 @@ func (f *Fleet) note(ctx context.Context, l *ledger, rentals []Rental, answered 
 }
 
 type spentSummary struct {
-	records     []podRecord
-	byContract  map[string]podRecord // first terminal record per durable contract key (market:id)
-	byPendingID map[string]bool      // pending create IDs already durably retired in spent.jsonl
+	records            []podRecord
+	byContract         map[string]podRecord // first terminal record per durable contract key (market:id)
+	byPendingID        map[string]bool      // pending create IDs already durably retired in spent.jsonl
+	byExaminerID       map[string]bool      // examiner instance IDs already durably retired in spent.jsonl
+	incompleteTail     bool                 // true when a trailing partial JSON object (no '\n') needs truncation
+	tailOffset         int64                // byte offset right after the last '\n' when incompleteTail is true
+	needLeadingNewline bool                 // true when the file ends with a valid JSON object lacking '\n'
 }
 
 func (s *spentSummary) hasContract(market, id string) bool {
@@ -1092,82 +1112,246 @@ func (s *spentSummary) hasContract(market, id string) bool {
 	return ok
 }
 
-// readSpentSummary parses spent.jsonl once and deduplicates terminal records by durable contract
-// identity (market:id), preserving the first confirmed terminal record and end time.
-func (f *Fleet) readSpentSummary() (*spentSummary, error) {
-	sum := &spentSummary{
-		byContract:  map[string]podRecord{},
-		byPendingID: map[string]bool{},
+func (s *spentSummary) addRecord(r podRecord) {
+	if r.Market == "vast" && r.For == "examiner" && r.ID != "" {
+		s.byExaminerID[r.ID] = true
 	}
-	fh, err := os.Open(f.spentLog())
+	if r.ID != "" {
+		ck := ledgerKey(r.market(), r.ID)
+		if _, seen := s.byContract[ck]; seen {
+			return
+		}
+		s.byContract[ck] = r
+	}
+	if r.PendingID != "" {
+		s.byPendingID[r.PendingID] = true
+	}
+	s.records = append(s.records, r)
+}
+
+func parseSpentRecord(line []byte) (podRecord, error) {
+	var r podRecord
+	if len(line) == 0 || line[0] != '{' {
+		return r, errors.New("expected JSON object")
+	}
+	if err := json.Unmarshal(line, &r); err != nil {
+		return r, err
+	}
+	return r, nil
+}
+
+// isIncompleteJSONObjectPrefix reports whether tail (already TrimSpace'd) failed json.Unmarshal
+// solely because it was truncated mid-object at EOF, rather than containing glued records,
+// mid-line syntax errors, or type-corrupted JSON fields.
+func isIncompleteJSONObjectPrefix(tail []byte, err error) bool {
+	if len(tail) == 0 || tail[0] != '{' {
+		return false
+	}
+	var se *json.SyntaxError
+	if !errors.As(err, &se) {
+		return false
+	}
+	msg := se.Error()
+	return msg == "unexpected end of JSON input" ||
+		(se.Offset == int64(len(tail)) && strings.HasPrefix(msg, "invalid character ' ' "))
+}
+
+// parseSpentBytes parses spent.jsonl strictly:
+//   - Every complete newline-terminated non-empty line MUST parse as a JSON object; malformed
+//     history surfaces an explicit error instead of silently dropping spend.
+//   - An unterminated final fragment that is a strict incomplete JSON object prefix is classified
+//     as an uncommitted partial write (incompleteTail=true, tailOffset=offset after last '\n') so
+//     writers under lock truncate it back to tailOffset before appending the retried record.
+//     Glued records, type-corrupted objects, or mid-line syntax errors without '\n' fail closed.
+//   - A valid JSON object lacking a trailing '\n' is accepted and marked needLeadingNewline=true so
+//     the next append separates lines cleanly.
+func parseSpentBytes(path string, raw []byte) (*spentSummary, error) {
+	sum := &spentSummary{
+		byContract:   map[string]podRecord{},
+		byPendingID:  map[string]bool{},
+		byExaminerID: map[string]bool{},
+	}
+	pos := 0
+	lineNum := 1
+	for pos < len(raw) {
+		idx := bytes.IndexByte(raw[pos:], '\n')
+		if idx >= 0 {
+			line := bytes.TrimSpace(raw[pos : pos+idx])
+			pos += idx + 1
+			if len(line) > 0 {
+				r, err := parseSpentRecord(line)
+				if err != nil {
+					return nil, fmt.Errorf("corrupt spend log %s line %d: %w", path, lineNum, err)
+				}
+				sum.addRecord(r)
+			}
+			lineNum++
+			continue
+		}
+		tailStart := int64(pos)
+		tail := bytes.TrimSpace(raw[pos:])
+		if len(tail) == 0 {
+			sum.incompleteTail = true
+			sum.tailOffset = tailStart
+			break
+		}
+		r, err := parseSpentRecord(tail)
+		if err == nil {
+			sum.addRecord(r)
+			sum.needLeadingNewline = true
+			break
+		}
+		if !isIncompleteJSONObjectPrefix(tail, err) {
+			return nil, fmt.Errorf("corrupt spend log %s line %d: %w", path, lineNum, err)
+		}
+		sum.incompleteTail = true
+		sum.tailOffset = tailStart
+		break
+	}
+	return sum, nil
+}
+
+// readSpentFile reads and strictly validates a spent.jsonl file under a shared flock.
+func readSpentFile(path string) (*spentSummary, error) {
+	fh, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return sum, nil
+		return &spentSummary{
+			byContract:   map[string]podRecord{},
+			byPendingID:  map[string]bool{},
+			byExaminerID: map[string]bool{},
+		}, nil
 	}
 	if err != nil {
 		return nil, err
 	}
 	defer fh.Close()
-	sc := bufio.NewScanner(fh)
-	sc.Buffer(make([]byte, 64*1024), 4*1024*1024)
-	for sc.Scan() {
-		var r podRecord
-		if json.Unmarshal(sc.Bytes(), &r) != nil {
-			continue
-		}
-		if r.ID != "" {
-			ck := ledgerKey(r.market(), r.ID)
-			if _, seen := sum.byContract[ck]; seen {
-				continue
-			}
-			sum.byContract[ck] = r
-		}
-		if r.PendingID != "" {
-			sum.byPendingID[r.PendingID] = true
-		}
-		sum.records = append(sum.records, r)
-	}
-	if err := sc.Err(); err != nil {
+	if err := syscall.Flock(int(fh.Fd()), syscall.LOCK_SH); err != nil {
 		return nil, err
 	}
-	return sum, nil
+	defer syscall.Flock(int(fh.Fd()), syscall.LOCK_UN)
+	raw, err := io.ReadAll(fh)
+	if err != nil {
+		return nil, err
+	}
+	return parseSpentBytes(path, raw)
+}
+
+// appendSpendRecord durably appends a terminal podRecord to spent.jsonl under an exclusive flock:
+//   - Fails closed on any unrecoverable malformed newline-terminated line in spent.jsonl.
+//   - Recovers an unterminated partial trailing fragment by truncating back to the last valid
+//     newline and syncing before appending.
+//   - Separates lines if the previous valid record lacked a trailing newline.
+//   - Deduplicates idempotently by durable contract identity (market:id) or examiner instance ID.
+//   - Syncs and closes the file before returning nil so callers only clear live state once durable.
+func appendSpendRecord(path string, rec podRecord, dedupByContract bool) (bool, error) {
+	line, err := json.Marshal(rec)
+	if err != nil {
+		return false, err
+	}
+	fh, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return false, err
+	}
+	fd := int(fh.Fd())
+	if err := syscall.Flock(fd, syscall.LOCK_EX); err != nil {
+		_ = fh.Close()
+		return false, err
+	}
+	closeFile := func() error {
+		if fh == nil {
+			return nil
+		}
+		_ = syscall.Flock(fd, syscall.LOCK_UN)
+		cerr := fh.Close()
+		fh = nil
+		return cerr
+	}
+	defer func() { _ = closeFile() }()
+
+	raw, err := io.ReadAll(fh)
+	if err != nil {
+		return false, err
+	}
+	sum, err := parseSpentBytes(path, raw)
+	if err != nil {
+		return false, err
+	}
+	writeOffset := int64(len(raw))
+	if sum.incompleteTail {
+		if err := fh.Truncate(sum.tailOffset); err != nil {
+			return false, err
+		}
+		if err := fh.Sync(); err != nil {
+			return false, err
+		}
+		writeOffset = sum.tailOffset
+	}
+	if dedupByContract && rec.ID != "" && sum.hasContract(rec.market(), rec.ID) {
+		if !sum.incompleteTail {
+			if err := fh.Sync(); err != nil {
+				return false, err
+			}
+		}
+		return false, closeFile()
+	}
+	if !dedupByContract && rec.Market == "vast" && rec.For == "examiner" && rec.ID != "" && sum.byExaminerID[rec.ID] {
+		if !sum.incompleteTail {
+			if err := fh.Sync(); err != nil {
+				return false, err
+			}
+		}
+		return false, closeFile()
+	}
+	if _, err := fh.Seek(writeOffset, io.SeekStart); err != nil {
+		return false, err
+	}
+	var payload []byte
+	if !sum.incompleteTail && sum.needLeadingNewline {
+		payload = append(payload, '\n')
+	}
+	payload = append(payload, line...)
+	payload = append(payload, '\n')
+	n, err := fh.Write(payload)
+	if err != nil || n != len(payload) {
+		if err == nil {
+			err = io.ErrShortWrite
+		}
+		_ = fh.Truncate(writeOffset)
+		_ = fh.Sync()
+		return false, err
+	}
+	if err := fh.Sync(); err != nil {
+		return false, err
+	}
+	if err := closeFile(); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// readSpentSummary parses spent.jsonl once and deduplicates terminal records by durable contract
+// identity (market:id), preserving the first confirmed terminal record and end time.
+func (f *Fleet) readSpentSummary() (*spentSummary, error) {
+	return readSpentFile(f.spentLog())
 }
 
 // retire moves a machine that has ended from the record of live ones to the log of what was
 // spent, which is only ever added to. Retirement is idempotent per durable contract identity
 // (market:id): if a prior attempt already appended the terminal row before a failed fleet.json
 // write, retrying preserves the first confirmed end time and clears l.Pods without appending a
-// duplicate row.
+// duplicate row. An incomplete trailing fragment from an interrupted write is truncated under lock
+// and the complete terminal row is fsynced before l.Pods[key] is cleared.
 func (f *Fleet) retire(l *ledger, key string, end time.Time) error {
 	r := l.Pods[key]
 	if r == nil {
 		return nil
 	}
-	sum, err := f.readSpentSummary()
-	if err != nil {
+	recCopy := *r
+	recCopy.End = end
+	if _, err := appendSpendRecord(f.spentLog(), recCopy, true); err != nil {
 		return err
-	}
-	if r.ID != "" {
-		if _, exists := sum.byContract[ledgerKey(r.market(), r.ID)]; exists {
-			delete(l.Pods, key)
-			return nil
-		}
 	}
 	r.End = end
-	line, err := json.Marshal(r)
-	if err != nil {
-		return err
-	}
-	fh, err := os.OpenFile(f.spentLog(), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
-	if err != nil {
-		return err
-	}
-	if _, err := fh.Write(append(line, '\n')); err != nil {
-		fh.Close()
-		return err
-	}
-	if err := fh.Close(); err != nil {
-		return err
-	}
 	delete(l.Pods, key)
 	return nil
 }
@@ -1216,19 +1400,20 @@ func startOfDay(t time.Time) time.Time {
 
 // View is one look at everything: the work, the pool and its machines, and the money.
 type View struct {
-	Work            *Work
-	Workers         []*Worker
-	Ledger          *ledger
-	LiveRentals     []*Rental           // deduplicated live fleet worker contracts (one per unique market/id)
-	PendingRents    []*pendingRent      // unresolved pending worker create reservations
-	OrphanRentals   []*Rental           // fleet ledger contracts whose key is no longer in f.keys
-	UnknownRateKeys map[string]string   // live contracts / pending reservations with no known positive hourly rate
-	MarketKnownIDs  map[string][]string // all non-gone contract IDs listed per market (including unowned on shared accounts)
-	Hourly          float64             // dollars an hour, every live contract + pending create + active examiner together
-	Today           float64             // about what has been spent today (UTC), including any active examiner
-	ExaminerLive    int                 // 1 when an ephemeral examiner GPU is active, else 0
-	ExaminerHourly  float64             // active examiner's hourly rate (included in Hourly)
-	ExaminerAccrued float64             // active examiner's accrued spend today (included in Today)
+	Work                   *Work
+	Workers                []*Worker
+	Ledger                 *ledger
+	LiveRentals            []*Rental           // deduplicated live fleet worker contracts (one per unique market/id)
+	PendingRents           []*pendingRent      // unresolved pending worker create reservations
+	OrphanRentals          []*Rental           // fleet ledger contracts whose key is no longer in f.keys
+	UnknownRateKeys        map[string]string   // live contracts / pending reservations with no known positive hourly rate
+	MarketKnownIDs         map[string][]string // all non-gone contract IDs listed per market (including unowned on shared accounts)
+	Hourly                 float64             // dollars an hour, every live contract + pending create + active examiner together
+	Today                  float64             // about what has been spent today (UTC), including any active examiner
+	ExaminerLive           int                 // 1 when an ephemeral examiner GPU is active, else 0
+	ExaminerHourly         float64             // active examiner's hourly rate (included in Hourly)
+	ExaminerAccrued        float64             // active examiner's accrued spend today (included in Today)
+	ExaminerReservedHourly float64             // hourly headroom held back for a required examiner not yet rented
 }
 
 func unknownRateLabel(market, id, handle string) string {
@@ -2335,7 +2520,7 @@ func (f *Fleet) rent(ctx context.Context, v *View, k *Key, gpus []Offer, site st
 		if !validRate(price) {
 			continue
 		}
-		if v.Hourly+price > f.o.MaxHourly+1e-9 {
+		if v.Hourly+v.ExaminerReservedHourly+price > f.o.MaxHourly+1e-9 {
 			dearer++
 			continue
 		}
@@ -2533,6 +2718,8 @@ func (f *Fleet) rent(ctx context.Context, v *View, k *Key, gpus []Offer, site st
 		return r, nil
 	}
 	switch {
+	case tried == 0 && dearer > 0 && v.ExaminerReservedHourly > 0:
+		f.say("not renting another machine: at $%.2f an hour or more (plus $%.2f/h reserved for the round's examiner) it would pass --max-hourly $%.2f", v.Hourly+cheapest(gpus), v.ExaminerReservedHourly, f.o.MaxHourly)
 	case tried == 0 && dearer > 0:
 		f.say("not renting another machine: at $%.2f an hour or more it would pass --max-hourly $%.2f", v.Hourly+cheapest(gpus), f.o.MaxHourly)
 	case tried == 0:

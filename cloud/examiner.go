@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"crypto/ecdsa"
@@ -544,20 +543,21 @@ type Examiner struct {
 	hfToken string
 	onSpent func(podRecord) error
 
-	fileMu         sync.Mutex
-	recorded       map[string]bool
-	mu             sync.RWMutex
-	loaded         bool
-	dirty          bool           // true when last saveState/persistState failed so in-memory state leads disk
-	diskUnreadable bool           // true when last readExaminerStateErr failed; blocks overwriting/removing examiner.json
-	lastDisk       examinerDiskID // active identity on disk at last clean read or write
-	owner          string
-	state          examinerState
-	ready          bool
-	proxy          *httputil.ReverseProxy
-	proxyTr        *http.Transport
-	upstream       string
-	lastProbeErr   string
+	fileMu            sync.Mutex
+	recorded          map[string]bool
+	mu                sync.RWMutex
+	loaded            bool
+	dirty             bool           // true when last saveState/persistState failed so in-memory state leads disk
+	diskUnreadable    bool           // true when last readExaminerStateErr failed; blocks overwriting/removing examiner.json
+	lastDisk          examinerDiskID // active identity on disk at last clean read or write
+	owner             string
+	state             examinerState
+	ready             bool
+	proxy             *httputil.ReverseProxy
+	proxyTr           *http.Transport
+	upstream          string
+	lastProbeErr      string
+	blockedHourlyNeed float64 // cheapest valid examiner offer price blocked only by --max-hourly on last Reconcile
 }
 
 func newExaminer(cfg ExaminerConfig, home string, prov ExaminerProvider, now func() time.Time, say func(string, ...any), dryRun bool) *Examiner {
@@ -1371,24 +1371,57 @@ func (e *Examiner) probeModels(ctx context.Context, upstream, apiKey, certPEM st
 	return false
 }
 
-func spentHasExaminer(home, id string) bool {
-	if home == "" || id == "" {
-		return false
+func (e *Examiner) setBlockedHourly(price float64) {
+	if e == nil {
+		return
 	}
-	fh, err := os.Open(filepath.Join(home, "spent.jsonl"))
-	if err != nil {
-		return false
+	if !validRate(price) {
+		price = 0
 	}
-	defer fh.Close()
-	sc := bufio.NewScanner(fh)
-	sc.Buffer(make([]byte, 64*1024), 4*1024*1024)
-	for sc.Scan() {
-		var r podRecord
-		if json.Unmarshal(sc.Bytes(), &r) == nil && r.Market == "vast" && r.For == "examiner" && r.ID == id {
-			return true
+	e.mu.Lock()
+	e.blockedHourlyNeed = price
+	e.mu.Unlock()
+}
+
+func (e *Examiner) blockedHourly() float64 {
+	if e == nil {
+		return 0
+	}
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.blockedHourlyNeed
+}
+
+func cheapestValidExaminerOffer(offers []ExaminerOffer, maxPrice float64) float64 {
+	best := 0.0
+	for _, off := range offers {
+		if !validRate(off.Price) {
+			continue
+		}
+		if maxPrice > 0 && off.Price > maxPrice+1e-9 {
+			continue
+		}
+		if best == 0 || off.Price < best {
+			best = off.Price
 		}
 	}
-	return false
+	return best
+}
+
+func spentHasExaminerErr(home, id string) (bool, error) {
+	if home == "" || id == "" {
+		return false, nil
+	}
+	sum, err := readSpentFile(filepath.Join(home, "spent.jsonl"))
+	if err != nil {
+		return false, err
+	}
+	return sum.byExaminerID[id], nil
+}
+
+func spentHasExaminer(home, id string) bool {
+	has, err := spentHasExaminerErr(home, id)
+	return err == nil && has
 }
 
 func (e *Examiner) recordSpend(rec podRecord) (bool, error) {
@@ -1400,7 +1433,14 @@ func (e *Examiner) recordSpend(rec podRecord) (bool, error) {
 	if e.recorded == nil {
 		e.recorded = map[string]bool{}
 	}
-	if e.recorded[rec.ID] || spentHasExaminer(e.home, rec.ID) {
+	if e.recorded[rec.ID] {
+		return false, nil
+	}
+	has, err := spentHasExaminerErr(e.home, rec.ID)
+	if err != nil {
+		return false, err
+	}
+	if has {
 		e.recorded[rec.ID] = true
 		return false, nil
 	}
@@ -1959,6 +1999,7 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 	if e == nil || e.prov == nil {
 		return nil
 	}
+	e.setBlockedHourly(0)
 	loadErr := e.reloadState(true)
 	spendErr := e.flushPendingSpends()
 	needRound := roundNeedingExam(w)
@@ -2377,9 +2418,18 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 		e.say("not renting examiner GPU for %s: about $%.2f spent today, and the daily budget is $%.2f", needRound, spentToday, budget.DailyBudget)
 		return nil
 	}
+	maxBudget := budget.MaxHourly
+	if e.cfg.MaxPrice > 0 && e.cfg.MaxPrice < maxBudget {
+		maxBudget = e.cfg.MaxPrice
+	}
 	headroom := budget.MaxHourly - budget.HourlyNow
 	if budget.MaxHourly <= 0 || headroom <= 1e-9 {
 		e.say("not renting examiner GPU for %s: live hourly spend $%.2f/h leaves no room under --max-hourly $%.2f/h", needRound, budget.HourlyNow, budget.MaxHourly)
+		if budget.MaxHourly > 0 && maxBudget > 0 {
+			if probe, perr := e.prov.ExaminerOffers(ctx, maxBudget); perr == nil {
+				e.setBlockedHourly(cheapestValidExaminerOffer(probe, maxBudget))
+			}
+		}
 		return nil
 	}
 	effMaxPrice := e.cfg.MaxPrice
@@ -2392,6 +2442,16 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 		return fmt.Errorf("searching Vast.ai RTX 5090 offers for examiner: %w", err)
 	}
 	if len(offers) == 0 {
+		if effMaxPrice < maxBudget-1e-9 {
+			if probe, perr := e.prov.ExaminerOffers(ctx, maxBudget); perr == nil {
+				if need := cheapestValidExaminerOffer(probe, maxBudget); need > 0 {
+					e.setBlockedHourly(need)
+					e.say("not renting examiner GPU for %s: cheapest 1x RTX 5090 ($%.2f/h) plus $%.2f/h live exceeds --max-hourly $%.2f/h",
+						needRound, need, budget.HourlyNow, budget.MaxHourly)
+					return nil
+				}
+			}
+		}
 		e.say("Vast.ai has no 1x RTX 5090 free for %s examiner under $%.2f/h (headroom $%.2f/h); retrying on next tick", needRound, effMaxPrice, headroom)
 		return nil
 	}
@@ -2405,7 +2465,17 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 		}
 	}
 	if len(fitting) == 0 {
-		if validRate(offers[0].Price) {
+		need := cheapestValidExaminerOffer(offers, maxBudget)
+		if need == 0 && effMaxPrice < maxBudget-1e-9 {
+			if probe, perr := e.prov.ExaminerOffers(ctx, maxBudget); perr == nil {
+				need = cheapestValidExaminerOffer(probe, maxBudget)
+			}
+		}
+		e.setBlockedHourly(need)
+		if need > 0 {
+			e.say("not renting examiner GPU for %s: cheapest 1x RTX 5090 ($%.2f/h) plus $%.2f/h live exceeds --max-hourly $%.2f/h",
+				needRound, need, budget.HourlyNow, budget.MaxHourly)
+		} else if validRate(offers[0].Price) {
 			e.say("not renting examiner GPU for %s: cheapest 1x RTX 5090 ($%.2f/h) plus $%.2f/h live exceeds --max-hourly $%.2f/h",
 				needRound, offers[0].Price, budget.HourlyNow, budget.MaxHourly)
 		} else {
@@ -2597,23 +2667,8 @@ func (e *Examiner) ProbeIfBooting(ctx context.Context) {
 }
 
 func appendExaminerSpend(path string, rec podRecord) error {
-	line, err := json.Marshal(rec)
-	if err != nil {
-		return err
-	}
-	fh, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
-	if err != nil {
-		return err
-	}
-	if _, err := fh.Write(append(line, '\n')); err != nil {
-		_ = fh.Close()
-		return err
-	}
-	if err := fh.Sync(); err != nil {
-		_ = fh.Close()
-		return err
-	}
-	return fh.Close()
+	_, err := appendSpendRecord(path, rec, false)
+	return err
 }
 
 // resolvePendingExaminer verifies an unresolved PendingRent reservation in examiner.json

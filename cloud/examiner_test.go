@@ -5612,23 +5612,33 @@ func TestReview24StoppedVastWorkerDiskBillingInBothLimits(t *testing.T) {
 		return f
 	}
 
-	f1 := makeFleet(func() time.Time { return curNow })
-	if _, err := f1.addKeys(2, "stet-rp"); err != nil {
+	// Observe the stop at stopAt (16:00 UTC) so the 4h running segment ($6.00) closes at first
+	// confirmed stop, then advance 1h to curNow (17:00 UTC) for 1h of stopped disk ($0.06).
+	fStop := makeFleet(func() time.Time { return stopAt })
+	if _, err := fStop.addKeys(2, "stet-rp"); err != nil {
 		t.Fatal(err)
 	}
-	for _, k := range f1.keys {
+	for _, k := range fStop.keys {
 		st.workers[k.Public] = true
 		st.handles[k.Public] = k.Handle
 	}
 	if err := (&Arming{Armed: map[string]Armed{"runpod": {}, "vast": {At: 1}}}).save(home); err != nil {
 		t.Fatal(err)
 	}
-	if err := f1.writeLedger(&ledger{Pods: map[string]*podRecord{
+	if err := fStop.writeLedger(&ledger{Pods: map[string]*podRecord{
 		ledgerKey("vast", "88001"): {
 			ID: "88001", Market: "vast", Handle: "stet-rp-01", GPU: "RTX 5090",
 			Cost: 1.50, DiskCost: 0.06, Start: t0, Alive: stopAt, Tracked: true,
 		},
 	}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fStop.look(context.Background()); err != nil {
+		t.Fatalf("look at stopAt: %v", err)
+	}
+
+	f1 := makeFleet(func() time.Time { return curNow })
+	if err := f1.loadKeys(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -5746,7 +5756,7 @@ func TestReview24StoppedVastWorkerDiskBillingInBothLimits(t *testing.T) {
 	home2 := t.TempDir()
 	f5, _ := testFleet(t, rp, st, 1)
 	f5.o.Home = home2
-	f5.now = func() time.Time { return curNow }
+	f5.now = func() time.Time { return stopAt }
 	vm5 := newVast(vastSrv.URL, "vast-key")
 	vm5.a.sleep = func(context.Context, time.Duration) error { return nil }
 	f5.markets = []Market{vm5}
@@ -5758,6 +5768,10 @@ func TestReview24StoppedVastWorkerDiskBillingInBothLimits(t *testing.T) {
 	}}); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := f5.look(context.Background()); err != nil {
+		t.Fatalf("look dph-only stopped at stopAt: %v", err)
+	}
+	f5.now = func() time.Time { return curNow }
 	v5, err := f5.look(context.Background())
 	if err != nil {
 		t.Fatalf("look dph-only stopped: %v", err)
@@ -5788,7 +5802,7 @@ func TestReview24Gate4StoppedBillingEdgeCases(t *testing.T) {
 		}
 		p := &Rental{Market: "vast", ID: "99101", State: "stopped", Price: 0.06, DiskCost: 0.06, PartialRate: false}
 		reconcileRentalRate(r, p)
-		r.markStopped(now)
+		r.markStopped(stopAt)
 		r.End = now
 		if math.Abs(r.Cost-1.50) > 1e-6 || !r.PartialCost {
 			t.Fatalf("stopped disk-only listing MUST preserve Cost=1.50 and PartialCost=true, got %+v", r)
@@ -6329,11 +6343,12 @@ func TestReview25ResumedWorkerPreservesStoppedSegmentsAcrossReloadAndMidnight(t 
 			return f
 		}
 
-		f1 := makeFleet(tResume)
-		if _, err := f1.addKeys(1, "stet-rp"); err != nil {
+		// 1. Observe stopped at tStop (11:00 -> $1.50), then still stopped at 13:00 (+2h*$0.06 = $1.62).
+		f0 := makeFleet(tStop)
+		if _, err := f0.addKeys(1, "stet-rp"); err != nil {
 			t.Fatal(err)
 		}
-		if err := f1.writeLedger(&ledger{Pods: map[string]*podRecord{
+		if err := f0.writeLedger(&ledger{Pods: map[string]*podRecord{
 			ledgerKey("vast", "99501"): {
 				ID: "99501", Market: "vast", Handle: "stet-rp-01", GPU: "RTX 5090",
 				Cost: 1.50, DiskCost: 0.06, Start: t0, Alive: tStop, Tracked: true,
@@ -6341,7 +6356,13 @@ func TestReview25ResumedWorkerPreservesStoppedSegmentsAcrossReloadAndMidnight(t 
 		}}); err != nil {
 			t.Fatal(err)
 		}
-		// 1. Observe stopped at 13:00 -> $1.50 + $0.12 = $1.62.
+		if _, err := f0.look(context.Background()); err != nil {
+			t.Fatalf("look stopped at tStop: %v", err)
+		}
+		f1 := makeFleet(tResume)
+		if err := f1.loadKeys(); err != nil {
+			t.Fatal(err)
+		}
 		v1, err := f1.look(context.Background())
 		if err != nil {
 			t.Fatalf("look stopped: %v", err)
@@ -6435,16 +6456,23 @@ func TestReview25ResumedWorkerPreservesStoppedSegmentsAcrossReloadAndMidnight(t 
 			return f
 		}
 
-		f1 := makeFleet(tObsStop)
-		if _, err := f1.addKeys(1, "stet-rp"); err != nil {
+		f0 := makeFleet(tStop)
+		if _, err := f0.addKeys(1, "stet-rp"); err != nil {
 			t.Fatal(err)
 		}
-		if err := f1.writeLedger(&ledger{Pods: map[string]*podRecord{
+		if err := f0.writeLedger(&ledger{Pods: map[string]*podRecord{
 			ledgerKey("vast", "99502"): {
 				ID: "99502", Market: "vast", Handle: "stet-rp-01", GPU: "RTX 5090",
 				Cost: 1.50, DiskCost: 0.06, Start: t0, Alive: tStop, Tracked: true,
 			},
 		}}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f0.look(context.Background()); err != nil {
+			t.Fatalf("look stopped at tStop: %v", err)
+		}
+		f1 := makeFleet(tObsStop)
+		if err := f1.loadKeys(); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := f1.look(context.Background()); err != nil {
@@ -6662,6 +6690,476 @@ func TestReview25Gate4ConvergenceEdgeCases(t *testing.T) {
 		l, _ := f.readLedger()
 		if len(l.Pending) != 0 {
 			t.Fatalf("expected p-clore-ret cleared, got %+v", l.Pending)
+		}
+	})
+}
+
+// Review 26 P1 #1: an interrupted partial write at the tail of spent.jsonl MUST be recovered under
+// lock and the complete terminal record made durable before clearing fleet.json, while
+// unrecoverable malformed history surfaces an explicit error instead of silently erasing spend.
+func TestReview26PartialSpendLogRecoveryAndCorruptHistory(t *testing.T) {
+	t0 := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
+	endAt := t0.Add(2 * time.Hour) // 2h @ $1.50/h = $3.00
+
+	t.Run("partial_tail_recovered_across_restart_and_workers_resolve_retry", func(t *testing.T) {
+		var deleted atomic.Bool
+		vastSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == "GET" && r.URL.Path == "/api/v1/instances/":
+				if deleted.Load() {
+					_, _ = w.Write([]byte(`{"instances":[],"next_token":null}`))
+					return
+				}
+				_, _ = w.Write([]byte(fmt.Sprintf(`{"instances":[{"id":99401,"label":"stet-rp-01","actual_status":"running","intended_status":"running","cur_state":"running","gpu_name":"RTX 5090","dph_total":1.50,"dph_base":1.44,"disk_space":100,"storage_cost":0.432,"start_date":%d}],"next_token":null}`, t0.Unix())))
+			case r.Method == "DELETE" && r.URL.Path == "/api/v0/instances/99401/":
+				deleted.Store(true)
+				_, _ = w.Write([]byte(`{"success":true}`))
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer vastSrv.Close()
+
+		rp, st := newFakeRunPod(t), newFakeStet(t)
+		home := t.TempDir()
+		makeFleet := func() *Fleet {
+			f, _ := testFleet(t, rp, st, 0)
+			f.o.Home = home
+			f.now = func() time.Time { return endAt }
+			vm := newVast(vastSrv.URL, "vast-key")
+			vm.a.sleep = func(context.Context, time.Duration) error { return nil }
+			f.markets = []Market{vm}
+			return f
+		}
+
+		f0 := makeFleet()
+		if _, err := f0.addKeys(1, "stet-rp"); err != nil {
+			t.Fatal(err)
+		}
+		if err := f0.writeLedger(&ledger{Pods: map[string]*podRecord{
+			ledgerKey("vast", "99401"): {
+				ID: "99401", Market: "vast", Handle: "stet-rp-01", GPU: "RTX 5090",
+				Cost: 1.50, DiskCost: 0.06, Start: t0, Alive: endAt, Tracked: true, Terminating: true,
+			},
+		}}); err != nil {
+			t.Fatal(err)
+		}
+		// Simulate a short/crashed write leaving a partial unterminated JSON fragment in spent.jsonl.
+		if err := os.WriteFile(f0.spentLog(), []byte(`{"id":"99401","market":"vast","cost":1.5`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		// Restart BEFORE retry: daily total MUST still be $3.00 (counted from fleet.json).
+		f1 := makeFleet()
+		if err := f1.loadKeys(); err != nil {
+			t.Fatal(err)
+		}
+		l1, err := f1.readLedger()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if pre, err := f1.spent(l1, startOfDay(endAt)); err != nil || math.Abs(pre-3.00) > 1e-4 {
+			t.Fatalf("before retry with partial tail: want $3.00, got $%.4f (err=%v)", pre, err)
+		}
+
+		// Retry retirement via `workers resolve --end`: MUST truncate partial tail, write one valid
+		// durable $3.00 record, and clear fleet.json.
+		if err := cmdWorkersResolve(context.Background(), f1, true); err != nil {
+			t.Fatalf("cmdWorkersResolve --end retry: %v", err)
+		}
+		if !deleted.Load() {
+			t.Fatal("expected provider delete on retry")
+		}
+
+		// Reload from disk: 0 pods in fleet.json, exactly 1 valid $3.00 record in spent.jsonl, total=$3.00!
+		f2 := makeFleet()
+		if err := f2.loadKeys(); err != nil {
+			t.Fatal(err)
+		}
+		l2, err := f2.readLedger()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(l2.Pods) != 0 {
+			t.Fatalf("expected fleet.json cleared after durable retirement, got %+v", l2.Pods)
+		}
+		raw, err := os.ReadFile(f2.spentLog())
+		if err != nil {
+			t.Fatal(err)
+		}
+		lines := strings.Split(strings.TrimRight(string(raw), "\n"), "\n")
+		if len(lines) != 1 {
+			t.Fatalf("expected exactly 1 clean JSONL row in spent.jsonl, got %d: %q", len(lines), string(raw))
+		}
+		var rec podRecord
+		if err := json.Unmarshal([]byte(lines[0]), &rec); err != nil {
+			t.Fatalf("spent.jsonl row invalid JSON: %v (%q)", err, lines[0])
+		}
+		if post, err := f2.spent(l2, startOfDay(endAt)); err != nil || math.Abs(post-3.00) > 1e-4 {
+			t.Fatalf("after reload: want exact $3.00 charge, got $%.4f (err=%v)", post, err)
+		}
+	})
+
+	t.Run("partial_tail_after_prior_record_and_missing_newline_both_preserve_all_spend", func(t *testing.T) {
+		rp, st := newFakeRunPod(t), newFakeStet(t)
+		f, _ := testFleet(t, rp, st, 1)
+		f.now = func() time.Time { return endAt }
+
+		prior := podRecord{
+			ID: "99400", Market: "vast", Handle: "stet-rp-01", Cost: 1.50,
+			Start: t0, Alive: t0.Add(time.Hour), End: t0.Add(time.Hour), Tracked: true,
+		}
+		priorRaw, _ := json.Marshal(prior)
+		// Prior valid line + unterminated partial tail from interrupted second write.
+		content := append(append([]byte(nil), priorRaw...), '\n')
+		content = append(content, []byte(`{"id":"99402","market":"vast","cost":1.5`)...)
+		if err := os.WriteFile(f.spentLog(), content, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		l := &ledger{Pods: map[string]*podRecord{
+			ledgerKey("vast", "99402"): {
+				ID: "99402", Market: "vast", Handle: "stet-rp-01", Cost: 1.50,
+				Start: t0, Alive: endAt, Tracked: true,
+			},
+		}}
+		if err := f.retire(l, ledgerKey("vast", "99402"), endAt); err != nil {
+			t.Fatalf("retire over partial tail: %v", err)
+		}
+		if len(l.Pods) != 0 {
+			t.Fatalf("expected pod cleared after durable retire, got %+v", l.Pods)
+		}
+		if got, err := f.spent(l, startOfDay(endAt)); err != nil || math.Abs(got-4.50) > 1e-4 {
+			t.Fatalf("want $1.50 + $3.00 = $4.50, got $%.4f (err=%v)", got, err)
+		}
+
+		// Also verify a valid final JSON object lacking a trailing '\n' is separated cleanly on next append.
+		if err := os.WriteFile(f.spentLog(), priorRaw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		l2 := &ledger{Pods: map[string]*podRecord{
+			ledgerKey("vast", "99403"): {
+				ID: "99403", Market: "vast", Handle: "stet-rp-01", Cost: 1.50,
+				Start: t0, Alive: endAt, Tracked: true,
+			},
+		}}
+		if err := f.retire(l2, ledgerKey("vast", "99403"), endAt); err != nil {
+			t.Fatalf("retire after valid line without trailing newline: %v", err)
+		}
+		if got, err := f.spent(l2, startOfDay(endAt)); err != nil || math.Abs(got-4.50) > 1e-4 {
+			t.Fatalf("want $4.50 after newline separation, got $%.4f (err=%v)", got, err)
+		}
+	})
+
+	t.Run("unrecoverable_corrupt_history_surfaces_error_and_keeps_worker", func(t *testing.T) {
+		rp, st := newFakeRunPod(t), newFakeStet(t)
+		f, _ := testFleet(t, rp, st, 1)
+		f.now = func() time.Time { return endAt }
+
+		// A newline-terminated malformed line cannot be recovered and MUST fail closed.
+		if err := os.WriteFile(f.spentLog(), []byte(`{"id":"99405","cost":1.5}{"id":"99405","cost":1.5}`+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		l := &ledger{Pods: map[string]*podRecord{
+			ledgerKey("vast", "99405"): {
+				ID: "99405", Market: "vast", Handle: "stet-rp-01", Cost: 1.50,
+				Start: t0, Alive: endAt, Tracked: true,
+			},
+		}}
+		if _, err := f.spent(l, startOfDay(endAt)); err == nil || !strings.Contains(err.Error(), "corrupt spend log") {
+			t.Fatalf("f.spent MUST surface corrupt newline-terminated line, got err=%v", err)
+		}
+		if err := f.retire(l, ledgerKey("vast", "99405"), endAt); err == nil || !strings.Contains(err.Error(), "corrupt spend log") {
+			t.Fatalf("f.retire MUST surface corrupt spend log error, got err=%v", err)
+		}
+		if l.Pods[ledgerKey("vast", "99405")] == nil {
+			t.Fatal("f.retire MUST NOT delete worker from ledger when spent.jsonl is corrupt")
+		}
+		// Examiner spend append MUST also surface corrupt history and recover incomplete tails.
+		exRec := podRecord{ID: "ex-1", Market: "vast", For: "examiner", Cost: 0.62, Start: t0, End: endAt}
+		if err := appendExaminerSpend(f.spentLog(), exRec); err == nil || !strings.Contains(err.Error(), "corrupt spend log") {
+			t.Fatalf("appendExaminerSpend MUST surface corrupt spend log, got err=%v", err)
+		}
+		if err := os.WriteFile(f.spentLog(), []byte(`{"id":"ex-1","market":"vast","for":"exam`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := appendExaminerSpend(f.spentLog(), exRec); err != nil {
+			t.Fatalf("appendExaminerSpend MUST recover incomplete tail: %v", err)
+		}
+		if !spentHasExaminer(f.o.Home, "ex-1") {
+			t.Fatal("expected examiner spend durable after tail recovery")
+		}
+	})
+
+	t.Run("every_byte_prefix_recovers_while_corrupt_unterminated_tails_fail_closed", func(t *testing.T) {
+		sample := podRecord{
+			ID: "99499", Market: "vast", Handle: "stet-rp-01", GPU: "RTX 5090",
+			Cost: 1.5, DiskCost: 0.06, Start: t0, Alive: endAt, End: endAt,
+			Tracked: true, Why: "ended by fleet: idle",
+			Segments: []billingSegment{{Start: t0, End: endAt, Rate: 1.5}},
+		}
+		full, err := json.Marshal(sample)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Every strict non-empty byte prefix of a real JSON-marshaled podRecord MUST parse as a
+		// recoverable incomplete tail (never misclassified as corrupt!).
+		for k := 1; k < len(full); k++ {
+			sum, err := parseSpentBytes("spent.jsonl", full[:k])
+			if err != nil {
+				t.Fatalf("prefix len %d (%q) MUST be recoverable incomplete tail, got err=%v", k, string(full[:k]), err)
+			}
+			if !sum.incompleteTail || sum.tailOffset != 0 {
+				t.Fatalf("prefix len %d (%q): want incompleteTail=true tailOffset=0, got %+v", k, string(full[:k]), sum)
+			}
+		}
+		// Corrupt unterminated tails (glued records, bad field types, mid-line syntax errors) MUST
+		// fail closed instead of being silently dropped or truncated!
+		for _, bad := range []string{
+			`{"id":"w1","cost":1.5}{"id":"w2","cost":2.0}`,
+			`{"id":"w1","cost":1.5}{`,
+			`{"id":"w1","cost":"corrupt"}`,
+			`{"id":"w1","cost":1.x`,
+			`{corrupt`,
+			`{x`,
+			`{"id":"w1"} junk`,
+		} {
+			if _, err := parseSpentBytes("spent.jsonl", []byte(bad)); err == nil {
+				t.Fatalf("corrupt unterminated tail %q MUST fail closed, got nil error", bad)
+			}
+		}
+	})
+}
+
+// Review 26 P1 #2: a delayed stop observation on a tracked worker without a trustworthy provider
+// stop timestamp MUST keep the compute reservation through the first confirmed stop instead of
+// retroactively refunding compute back to the previous poll timestamp (r.Alive).
+func TestReview26DelayedStopObservationKeepsComputeThroughFirstStop(t *testing.T) {
+	t0 := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
+	obsStop := t0.Add(2 * time.Hour)   // 12:00 UTC (first observation after restart)
+	laterStop := t0.Add(3 * time.Hour) // 13:00 UTC (+1h stopped @ $0.06/h)
+
+	t.Run("delayed_stop_observation_preserves_compute_until_first_stop", func(t *testing.T) {
+		var deleted atomic.Bool
+		vastSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == "GET" && r.URL.Path == "/api/v1/instances/":
+				if deleted.Load() {
+					_, _ = w.Write([]byte(`{"instances":[],"next_token":null}`))
+					return
+				}
+				_, _ = w.Write([]byte(fmt.Sprintf(`{"instances":[{"id":88901,"label":"stet-rp-01","actual_status":"exited","intended_status":"stopped","cur_state":"stopped","gpu_name":"RTX 5090","dph_total":0.06,"dph_base":0,"disk_space":100,"storage_cost":0.432,"start_date":%d}],"next_token":null}`, t0.Unix())))
+			case r.Method == "DELETE" && r.URL.Path == "/api/v0/instances/88901/":
+				deleted.Store(true)
+				_, _ = w.Write([]byte(`{"success":true}`))
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer vastSrv.Close()
+
+		rp, st := newFakeRunPod(t), newFakeStet(t)
+		home := t.TempDir()
+		makeFleet := func(now time.Time) *Fleet {
+			f, _ := testFleet(t, rp, st, 0)
+			f.o.Home = home
+			f.now = func() time.Time { return now }
+			vm := newVast(vastSrv.URL, "vast-key")
+			vm.a.sleep = func(context.Context, time.Duration) error { return nil }
+			f.markets = []Market{vm}
+			return f
+		}
+
+		// Worker last seen running at 10:00 ($1.50/h). First post-restart observation at 12:00 says
+		// only "stopped" ($0.06/h disk) with no provider stop timestamp.
+		f1 := makeFleet(obsStop)
+		if _, err := f1.addKeys(1, "stet-rp"); err != nil {
+			t.Fatal(err)
+		}
+		if err := f1.writeLedger(&ledger{Pods: map[string]*podRecord{
+			ledgerKey("vast", "88901"): {
+				ID: "88901", Market: "vast", Handle: "stet-rp-01", GPU: "RTX 5090",
+				Cost: 1.50, DiskCost: 0.06, Start: t0, Alive: t0, Tracked: true,
+			},
+		}}); err != nil {
+			t.Fatal(err)
+		}
+		lPre, _ := f1.readLedger()
+		preTotal, err := f1.spent(lPre, startOfDay(obsStop))
+		if err != nil || math.Abs(preTotal-3.00) > 1e-4 {
+			t.Fatalf("pre-observation total at 12:00: want $3.00, got $%.4f (err=%v)", preTotal, err)
+		}
+
+		v1, err := f1.look(context.Background())
+		if err != nil {
+			t.Fatalf("look at 12:00: %v", err)
+		}
+		if math.Abs(v1.Today-3.00) > 1e-4 {
+			t.Fatalf("delayed stop observation MUST NOT refund compute at 12:00: want $3.00, got $%.4f", v1.Today)
+		}
+		if v1.liveWorkerCount() != 0 || math.Abs(v1.Hourly-0.06) > 1e-6 {
+			t.Fatalf("stopped worker must release GPU slot and bill $0.06/h disk, got live=%d hourly=%.4f", v1.liveWorkerCount(), v1.Hourly)
+		}
+
+		// 1h later (13:00): accrues 1h of disk storage -> $3.06; deleting persists $3.06.
+		f2 := makeFleet(laterStop)
+		if err := f2.loadKeys(); err != nil {
+			t.Fatal(err)
+		}
+		v2, err := f2.look(context.Background())
+		if err != nil {
+			t.Fatalf("look at 13:00: %v", err)
+		}
+		if math.Abs(v2.Today-3.06) > 1e-4 {
+			t.Fatalf("at 13:00 (2h compute + 1h disk): want $3.06, got $%.4f", v2.Today)
+		}
+		if err := f2.end(context.Background(), v2, []Ending{{Worker: v2.Workers[0], Rental: v2.Workers[0].Rental, Why: "stopped"}}); err != nil {
+			t.Fatalf("end stopped worker: %v", err)
+		}
+		lAfter, _ := f2.readLedger()
+		if sp, err := f2.spent(lAfter, startOfDay(laterStop)); err != nil || math.Abs(sp-3.06) > 1e-4 {
+			t.Fatalf("retired spend: want $3.06, got $%.4f (err=%v)", sp, err)
+		}
+	})
+
+	t.Run("trustworthy_provider_stop_time_used_and_out_of_range_ignored", func(t *testing.T) {
+		alive := t0.Add(30 * time.Minute) // 10:30
+		// Trustworthy provider stop timestamp at 11:00 (within [10:30, 12:00]) -> 1h*$1.50 + 1h*$0.06 = $1.56.
+		rGood := &podRecord{ID: "1", Market: "vast", Cost: 1.50, DiskCost: 0.06, Start: t0, Alive: alive, Tracked: true}
+		rGood.markStoppedAt(obsStop, t0.Add(time.Hour))
+		rGood.End = obsStop
+		if got := rGood.dollarsBetween(startOfDay(obsStop), obsStop); math.Abs(got-1.56) > 1e-4 {
+			t.Fatalf("trustworthy provider stop time 11:00: want $1.56, got $%.4f", got)
+		}
+		// Untrustworthy provider stop timestamp before Alive (10:15 < 10:30) -> falls back to obsStop (12:00 -> $3.00).
+		rEarly := &podRecord{ID: "2", Market: "vast", Cost: 1.50, DiskCost: 0.06, Start: t0, Alive: alive, Tracked: true}
+		rEarly.markStoppedAt(obsStop, t0.Add(15*time.Minute))
+		rEarly.End = obsStop
+		if got := rEarly.dollarsBetween(startOfDay(obsStop), obsStop); math.Abs(got-3.00) > 1e-4 {
+			t.Fatalf("provider stop time before Alive must fall back to now: want $3.00, got $%.4f", got)
+		}
+		// Untrustworthy future provider stop timestamp (12:30 > 12:00) -> falls back to obsStop (12:00 -> $3.00).
+		rFuture := &podRecord{ID: "3", Market: "vast", Cost: 1.50, DiskCost: 0.06, Start: t0, Alive: alive, Tracked: true}
+		rFuture.markStoppedAt(obsStop, obsStop.Add(30*time.Minute))
+		rFuture.End = obsStop
+		if got := rFuture.dollarsBetween(startOfDay(obsStop), obsStop); math.Abs(got-3.00) > 1e-4 {
+			t.Fatalf("future provider stop time must fall back to now: want $3.00, got $%.4f", got)
+		}
+	})
+}
+
+// Review 26 P2 #3: a temporary examiner stockout MUST preserve hourly headroom (and existing idle
+// workers MUST be reclaimable when an examiner offer needs headroom) so a required examiner is
+// never stranded under --max-hourly regardless of offer arrival order.
+func TestReview26TemporaryExaminerStockoutPreservesAndReclaimsHourlyBudget(t *testing.T) {
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+
+	setupFleet := func(t *testing.T, exOffers []ExaminerOffer) (*Fleet, *fakeRunPod, *fakeStet, *fakeExaminerProv) {
+		t.Helper()
+		rp, st := newFakeRunPod(t), newFakeStet(t)
+		rp.noRoom["NVIDIA RTX A5000"] = true
+		rp.noRoom["NVIDIA GeForce RTX 3080"] = true
+		f, _ := testFleet(t, rp, st, 6)
+		f.now = func() time.Time { return now }
+		f.o.MaxWorkers = 6
+		f.o.MaxHourly = 3.00
+		f.o.DailyBudget = 50.0
+		f.o.Edits = true
+		f.o.Cheapest = true
+		f.o.Cloud = "SECURE"
+		f.o.Examiner.MaxPrice = 1.50
+		st.work.Rounds = []WorkRound{{ID: "s3-o00095", Entries: 12, RunsWanted: 12, ExamAt: 0}}
+		exProv := &fakeExaminerProv{offers: exOffers}
+		f.examiner = newExaminer(ExaminerConfig{Addr: "127.0.0.1:0", Timeout: 45 * time.Minute, MaxPrice: 1.50}, f.o.Home, exProv, func() time.Time { return now }, f.say, false)
+		f.examiner.owner = "test"
+		return f, rp, st, exProv
+	}
+
+	t.Run("control_examiner_offered_on_first_tick", func(t *testing.T) {
+		f, rp, _, exProv := setupFleet(t, []ExaminerOffer{{ID: "ex-5090", Card: "RTX 5090", Price: 0.62, DiskCost: 0.05}})
+		if err := tick(context.Background(), f); err != nil {
+			t.Fatalf("control tick: %v", err)
+		}
+		if len(exProv.rented) != 1 || len(rp.pods) != 4 {
+			t.Fatalf("control: want 4 workers + 1 examiner, got workers=%d examiners=%d", len(rp.pods), len(exProv.rented))
+		}
+		v, err := f.look(context.Background())
+		if err != nil {
+			t.Fatalf("control look: %v", err)
+		}
+		if math.Abs(v.Hourly-2.90) > 1e-4 {
+			t.Fatalf("control hourly: want $2.90/h, got $%.4f/h", v.Hourly)
+		}
+	})
+
+	t.Run("stockout_tick1_then_examiner_returns_tick2_matches_control", func(t *testing.T) {
+		f, rp, _, exProv := setupFleet(t, nil) // empty examiner offer list on tick 1
+		if err := tick(context.Background(), f); err != nil {
+			t.Fatalf("stockout tick 1: %v", err)
+		}
+		if len(exProv.rented) != 0 {
+			t.Fatalf("tick 1 stockout: expected 0 examiners, got %d", len(exProv.rented))
+		}
+		if len(rp.pods) >= 5 {
+			t.Fatalf("tick 1 stockout MUST reserve hourly headroom instead of renting 5 workers ($2.85/h), got %d workers", len(rp.pods))
+		}
+
+		// Examiner $0.62/h offer returns on tick 2: MUST rent examiner and fill to 4 workers + 1 examiner at $2.90/h!
+		exProv.mu.Lock()
+		exProv.offers = []ExaminerOffer{{ID: "ex-5090", Card: "RTX 5090", Price: 0.62, DiskCost: 0.05}}
+		exProv.mu.Unlock()
+		if err := tick(context.Background(), f); err != nil {
+			t.Fatalf("recovery tick 2: %v", err)
+		}
+		if len(exProv.rented) != 1 || len(rp.pods) != 4 {
+			t.Fatalf("after stockout recovery: want 4 workers + 1 examiner, got workers=%d examiners=%d", len(rp.pods), len(exProv.rented))
+		}
+		v, err := f.look(context.Background())
+		if err != nil {
+			t.Fatalf("recovery look: %v", err)
+		}
+		if math.Abs(v.Hourly-2.90) > 1e-4 {
+			t.Fatalf("after recovery hourly: want $2.90/h, got $%.4f/h", v.Hourly)
+		}
+	})
+
+	t.Run("preexisting_idle_workers_reclaimed_without_killing_busy_workers", func(t *testing.T) {
+		f, rp, st, exProv := setupFleet(t, []ExaminerOffer{{ID: "ex-5090", Card: "RTX 5090", Price: 0.62, DiskCost: 0.05}})
+		// Seed 5 existing $0.57/h workers ($2.85/h, leaving only $0.15/h under $3.00/h), all BUSY first.
+		pods := map[string]*podRecord{}
+		for i := 0; i < 5; i++ {
+			id := fmt.Sprintf("pre-pod-%d", i+1)
+			handle := f.keys[i].Handle
+			rp.pods[id] = &Pod{ID: id, Name: handle, Status: "RUNNING", Cost: 0.57, CreatedAt: now.Add(-10 * time.Minute)}
+			pods[ledgerKey("runpod", id)] = &podRecord{
+				ID: id, Market: "runpod", Handle: handle, GPU: "RTX 4090", Cost: 0.57,
+				Start: now.Add(-10 * time.Minute), Alive: now.Add(-1 * time.Minute), Tracked: true,
+			}
+			st.work.Machines = append(st.work.Machines, Machine{Handle: handle, LastSeen: now.Unix(), Busy: "edit"})
+		}
+		if err := f.writeLedger(&ledger{Pods: pods}); err != nil {
+			t.Fatal(err)
+		}
+		// While all 5 workers are busy running curators, MUST NOT kill any mid-job!
+		if err := tick(context.Background(), f); err != nil {
+			t.Fatalf("tick while all busy: %v", err)
+		}
+		if len(rp.pods) != 5 || len(exProv.rented) != 0 {
+			t.Fatalf("must not kill busy workers mid-job: got workers=%d examiners=%d", len(rp.pods), len(exProv.rented))
+		}
+		// Once one worker finishes its job and becomes idle ("waiting"), scaler reclaims it and rents examiner!
+		st.work.Machines[0].Busy = ""
+		if err := tick(context.Background(), f); err != nil {
+			t.Fatalf("tick once one worker is idle: %v", err)
+		}
+		if len(rp.pods) != 4 || len(exProv.rented) != 1 {
+			t.Fatalf("reclaim idle worker for examiner: want 4 workers + 1 examiner, got workers=%d examiners=%d", len(rp.pods), len(exProv.rented))
+		}
+		v, err := f.look(context.Background())
+		if err != nil {
+			t.Fatalf("post-reclaim look: %v", err)
+		}
+		if math.Abs(v.Hourly-2.90) > 1e-4 {
+			t.Fatalf("post-reclaim hourly: want $2.90/h, got $%.4f/h", v.Hourly)
 		}
 	})
 }

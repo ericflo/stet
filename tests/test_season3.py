@@ -5701,5 +5701,177 @@ def test_review25_sparse_harvest_backfills_across_29_30_boundary_and_passes_cove
         prev_en = got_en
 
 
+def test_review26_public_replay_without_scored_pillars_reports_unavailable_gain(monkeypatch, tmp_path, capsys):
+    """Review 26 P2 #4: when a public replay retains only zero-weight diagnostic pillars (e.g.
+    20 openly licensed reference items while all 60 CCNews reasoning items are withheld), the CLI
+    MUST record gain=None (not numeric 0.0), print 'unavailable' (not '+0.0000'), preserve the
+    diagnostic pillar scores, and exclude that replay from multi-round gain summaries."""
+    import json
+    import sys
+    import types
+
+    import zstandard as zstd
+
+    import stet
+    from stet import cli, data
+    from stet.exam.examine import public_items
+    from stet.exam.items import digest as items_digest
+    from stet.spec import official_round
+
+    monkeypatch.setenv("STET_CACHE", str(tmp_path))
+    s3 = load_season("s3")
+    scale = s3.scale("nano")
+    p = s3.raw["pools"]["practice"]
+    crawl = {"crawl": p["crawl"], "paths_sha256": p["paths_sha256"], "n_shards": int(p["n_shards"])}
+
+    # Build an 80-item exam passing pillar minimums: 20 per reasoning pillar from CCNews (withheld
+    # in public replay) + 20 openly licensed Wikipedia reference items (0% diagnostic weight).
+    full_items: list[Item] = []
+    for pillar in ("explain", "infer", "synthesis"):
+        for i in range(20):
+            full_items.append(
+                Item(
+                    kind="answer",
+                    corner=f"{pillar}/en/ccnews",
+                    fmt="prose",
+                    lang="en",
+                    source=f"{pillar}:ccnews:{i}",
+                    ctx=f"CCNews prompt {pillar} {i}",
+                    cont=f" Answer {i}.",
+                )
+            )
+    for i in range(20):
+        full_items.append(
+            Item(
+                kind="context",
+                corner="fresh/wikipedia/en/ref",
+                fmt="prose",
+                lang="en",
+                source=f"wikipedia:{i}",
+                ctx=f"Reference opening {i}.",
+                cont=f" Reference continuation {i}.",
+                wrongs=(f"Distractor {i}.",),
+            )
+        )
+
+    full_sha = items_digest(full_items)
+    rnd = official_round(s3, 26, {"round": 900026, "randomness": "26" * 32}, crawl)
+    rnd = type(rnd)(**{**rnd.__dict__, "exam_digest": full_sha})
+
+    pub_rows = public_items(full_items)
+    pub_raw = "\n".join(json.dumps(r, ensure_ascii=False) for r in pub_rows).encode()
+    pub_path = data.exam_public_path(rnd, full_sha)
+    pub_path.parent.mkdir(parents=True, exist_ok=True)
+    pub_path.write_bytes(zstd.ZstdCompressor().compress(pub_raw))
+
+    pub_exam = data.round_exam(rnd, scale)
+    assert len(pub_exam) == 20
+    pub_sha = items_digest(pub_exam)
+
+    # Candidate gains +0.500 bpb on every diagnostic reference item over baseline.
+    base_result = {
+        "valid": True,
+        "exam_sha256": pub_sha,
+        "exam": {"items": 20, "mean": -2.5, "item_scores": [-2.5] * 20},
+    }
+    fake_pipeline = types.SimpleNamespace(baseline=lambda *a, **k: base_result)
+    monkeypatch.setitem(sys.modules, "stet.pipeline", fake_pipeline)
+    monkeypatch.setattr(stet, "pipeline", fake_pipeline, raising=False)
+
+    cand_result = {
+        "valid": True,
+        "round": {"id": rnd.id, "kind": rnd.kind},
+        "scale": scale.name,
+        "script": {"out_docs": 10, "src_docs": 10, "kept_doc_frac": 1.0, "out_bytes": 10000, "passes": 1.0, "truncated": False},
+        "train": {"tokens": 1000, "seconds": 1.0, "tokens_per_second": 1000, "final_train_loss": 2.0},
+        "exam_sha256": pub_sha,
+        "exam": {"items": 20, "mean": -2.0, "item_scores": [-2.0] * 20},
+    }
+    out = cli.Out()
+    base = cli._with_baseline(cand_result, rnd, scale, None, out, skip=False, exam=pub_exam)
+    assert cand_result["gain"] is None, f"expected gain=None when no scored pillar survives, got {cand_result['gain']!r}"
+    assert cand_result["pillars"] == pytest.approx({"reference": 0.5})
+    assert cand_result["partial_exam"] == ["reasoning"]
+
+    cli.report(out, cand_result, base, s3)
+    rendered = capsys.readouterr().err
+    assert "reference +0.500" in rendered
+    assert "unavailable" in rendered
+    assert "+0.0000" not in rendered
+
+    # Multi-round summary MUST exclude the diagnostic-only replay instead of diluting mean with 0.0.
+    scored_round = {"valid": True, "round": {"id": "s3-o00027"}, "gain": 0.4}
+    summary_mixed = cli._summary(cli.Out(), [cand_result, scored_round])
+    mixed_err = capsys.readouterr().err
+    assert summary_mixed["rounds"] == ["s3-o00027"]
+    assert summary_mixed["excluded_rounds"] == [rnd.id]
+    assert summary_mixed["gains"] == [0.4]
+    assert summary_mixed["mean_gain"] == pytest.approx(0.4)
+    assert summary_mixed["se"] is None
+    assert "+0.4000" in mixed_err
+
+    # When ALL replays lack scored pillars, mean_gain is None and CLI prints unavailable.
+    summary_all = cli._summary(cli.Out(), [cand_result])
+    all_err = capsys.readouterr().err
+    assert summary_all["mean_gain"] is None
+    assert summary_all["se"] is None
+    assert summary_all["gains"] == []
+    assert summary_all["excluded_rounds"] == [rnd.id]
+    assert "unavailable" in all_err
+    assert "+0.0000" not in all_err
+
+    # Gate 4 P2 #3: --no-baseline summaries MUST report "(baseline skipped)", NOT missing pillars!
+    no_base_rounds = [
+        {"valid": True, "round": {"id": "s3-p00000"}},
+        {"valid": False, "round": {"id": "s3-p00001"}, "gain": 0.0},
+    ]
+    summary_nb = cli._summary(cli.Out(), no_base_rounds, no_baseline=True)
+    nb_err = capsys.readouterr().err
+    assert summary_nb == {"rounds": ["s3-p00000", "s3-p00001"], "gains": [], "mean_gain": None, "se": None}
+    assert "baseline skipped" in nb_err and "no scored pillars" not in nb_err
+
+    # Gate 4 P3 #6: report() with gain=None and empty pillars MUST NOT claim "diagnostic pillars shown above".
+    empty_pillars = {**cand_result, "pillars": {}}
+    cli.report(cli.Out(), empty_pillars, base, s3)
+    empty_err = capsys.readouterr().err
+    assert "unavailable" in empty_err and "diagnostic pillars shown above" not in empty_err
 
 
+def test_review26_farm_memory_planner_uses_season_token_width():
+    """Review 26 P3 #5: Season 3's 103,424-entry vocab allocates uint32 (4 B/token × 3 buffers =
+    12 B/token) in script.materialize, so measure.memory_gb, stages.cost, and docs/OPERATING.md
+    MUST use 12 B/token for s3 (~5.86 GiB at large-x4) and 6 B/token for uint16 seasons (s2)."""
+    from pathlib import Path
+
+    from stet.exam import measure, stages
+
+    s2 = load_season("s2")
+    s3 = load_season("s3")
+    assert s2.vocab_size <= 65535 and s3.vocab_size > 65535
+    assert measure.token_bytes(s2) == 6
+    assert measure.token_bytes(s3) == 12
+    assert measure.token_bytes(None) == 6
+
+    std3 = s3.scale("standard")
+    large3 = s3.scale("large")
+    large3_x4 = measure.at_multiple(large3, 4)
+
+    assert measure.memory_gb(std3, s3) == pytest.approx(12 * std3.train_tokens / 2**30)
+    assert measure.memory_gb(large3_x4, s3) == pytest.approx(12 * large3_x4.train_tokens / 2**30)
+    assert measure.memory_gb(large3_x4, s3) == pytest.approx(5.859375, abs=1e-4)
+    assert measure.memory_gb(s2.scale("standard"), s2) == pytest.approx(6 * s2.scale("standard").train_tokens / 2**30)
+
+    # stages.cost MUST pass season into measure.memory_gb.
+    rows = stages.cost(s3, [(std3, 1), (large3_x4, 1)])
+    assert rows[0]["memory_gb"] == pytest.approx(12 * std3.train_tokens / 2**30)
+    assert rows[1]["memory_gb"] == pytest.approx(12 * large3_x4.train_tokens / 2**30)
+
+    # docs/OPERATING.md table MUST match every row of stages.cost(s3, ...) across all columns.
+    operating = (Path(__file__).resolve().parents[1] / "docs" / "OPERATING.md").read_text(encoding="utf-8")
+    for name in ("standard", "large"):
+        sc = s3.scale(name)
+        for mult, suffix in ((0.5, "at ½×"), (1.0, ""), (2.0, "at 2×"), (4.0, "at 4×")):
+            row = stages.cost(s3, [(measure.at_multiple(sc, mult), 1)])[0]
+            label = f"{name} {suffix}".strip()
+            want = f"| {label} | {row['tokens'] / 1e6:.1f}M | {row['hours_each']:.2f} | {row['hold_minutes']} | {row['memory_gb']:.2f} GB |"
+            assert want in operating, f"missing/stale operating table row: {want}"

@@ -175,33 +175,48 @@ def report(out: Out, result: dict, base: dict | None, season) -> None:
         item_desc = f"{e['items']:,} items"
     out.line("exam", f"{item_desc} · mean {e['mean']:.4f} bits per byte" + (f"   baseline {base['exam']['mean']:.4f}" if base else ""))
     if base and "gain" in result:
-        out.line("", "          " + " · ".join(f"{k} {v:+.3f}" for k, v in (result.get("pillars") or {}).items()))
+        pillars = result.get("pillars") or {}
+        if pillars:
+            out.line("", "          " + " · ".join(f"{k} {v:+.3f}" for k, v in pillars.items()))
         groups = (season.raw.get("exam") or {}).get("groups") or {}
         scored_groups = {g for g, w in groups.items() if float(w) > 0}
-        if "comprehension" in scored_groups and "reasoning" in scored_groups:
-            text = out.bold(f"{result['gain']:+.4f}") + " (fresh twin-context comprehension and reasoning, of those above)"
-        elif "reasoning" in scored_groups and "comprehension" not in scored_groups:
-            text = out.bold(f"{result['gain']:+.4f}") + " (fresh harvest-derived reasoning, 100% of score; human-written comprehension shown at 0%)"
-        elif "comprehension" in scored_groups:
-            text = out.bold(f"{result['gain']:+.4f}") + " (fresh twin-context comprehension and skills, of those above)"
+        if result["gain"] is None:
+            missing = ", ".join(result.get("partial_exam") or sorted(scored_groups) or ["scored"])
+            diag = "; diagnostic pillars shown above" if pillars else ""
+            text = out.dim("unavailable") + f" (no scored {missing} items in this exam{diag})"
+            out.line("gain", text)
         else:
-            text = out.bold(f"{result['gain']:+.4f}") + " bits per byte: writing three quarters, skills one, of those above"
-        m = multiplier(season, result["round"]["kind"], result["scale"], result["gain"])
-        if m:
-            text += f"   →   {out.bold(format_multiplier(m))} data efficiency"
-        noise = (season.raw.get("noise") or {}).get(result["scale"]) or {}
-        if noise.get("gain_sd"):
-            note = f"training again moves this by about ±{noise['gain_sd']:.3f}"
-            if noise.get("order_sd"):  # measured: docs/EXPERIMENTS.md, the order of a script
-                note += f", another shuffle of the same pages by about ±{noise['order_sd']:.3f}"
-            text += out.dim(f"   ({note})")
-        out.line("gain", text)
+            if "comprehension" in scored_groups and "reasoning" in scored_groups:
+                text = out.bold(f"{result['gain']:+.4f}") + " (fresh twin-context comprehension and reasoning, of those above)"
+            elif "reasoning" in scored_groups and "comprehension" not in scored_groups:
+                text = out.bold(f"{result['gain']:+.4f}") + " (fresh harvest-derived reasoning, 100% of score; human-written comprehension shown at 0%)"
+            elif "comprehension" in scored_groups:
+                text = out.bold(f"{result['gain']:+.4f}") + " (fresh twin-context comprehension and skills, of those above)"
+            else:
+                text = out.bold(f"{result['gain']:+.4f}") + " bits per byte: writing three quarters, skills one, of those above"
+            m = multiplier(season, result["round"]["kind"], result["scale"], result["gain"])
+            if m:
+                text += f"   →   {out.bold(format_multiplier(m))} data efficiency"
+            noise = (season.raw.get("noise") or {}).get(result["scale"]) or {}
+            if noise.get("gain_sd"):
+                note = f"training again moves this by about ±{noise['gain_sd']:.3f}"
+                if noise.get("order_sd"):  # measured: docs/EXPERIMENTS.md, the order of a script
+                    note += f", another shuffle of the same pages by about ±{noise['order_sd']:.3f}"
+                text += out.dim(f"   ({note})")
+            out.line("gain", text)
         if subset.get("public_subset") and subset.get("total_items"):
-            out.line(
-                "note",
-                f"replayed on the {subset['public_items']:,} openly licensed items of {subset['total_items']:,}; "
-                f"the official board score uses all {subset['total_items']:,} items, so this gain differs from the board.",
-            )
+            if result["gain"] is None:
+                out.line(
+                    "note",
+                    f"replayed on the {subset['public_items']:,} openly licensed items of {subset['total_items']:,}; "
+                    f"none are in a scored pillar, so only diagnostic pillars are shown (the official board score uses all {subset['total_items']:,} items).",
+                )
+            else:
+                out.line(
+                    "note",
+                    f"replayed on the {subset['public_items']:,} openly licensed items of {subset['total_items']:,}; "
+                    f"the official board score uses all {subset['total_items']:,} items, so this gain differs from the board.",
+                )
 
 
 # --- commands -------------------------------------------------------------------------------
@@ -316,10 +331,12 @@ def _with_baseline(
         plan = plan_of(rnd.season)
         shares = data.round_shares(rnd)
         agg = round_score(exam, gains(result["exam"]["item_scores"], base["exam"]["item_scores"]), shares=shares, plan=plan)
-        result["gain"] = round(agg["score"], 5)
         result["pillars"] = {k: v["score"] for k, v in agg["pillars"].items()}
         present_groups = {plan.pillars[p] for p in agg["pillars"]}
-        missing_groups = [g for g, w in plan.groups.items() if w > 0 and g not in present_groups]
+        scored_groups = [g for g, w in plan.groups.items() if w > 0]
+        missing_groups = [g for g in scored_groups if g not in present_groups]
+        has_scored_group = any(g in present_groups for g in scored_groups)
+        result["gain"] = round(agg["score"], 5) if has_scored_group else None
         if missing_groups:
             result["partial_exam"] = missing_groups
             if rnd.kind == "practice":
@@ -341,16 +358,35 @@ def _emit(args, result: dict):
         sys.stdout.write("\n")
 
 
-def _summary(out: Out, results: list[dict]) -> dict:
+def _summary(out: Out, results: list[dict], *, no_baseline: bool = False) -> dict:
     """Mean gain over several rounds, with its standard error."""
     import math
 
-    gains = [r.get("gain", 0.0) if r["valid"] else 0.0 for r in results]
+    if no_baseline or (results and any(r["valid"] and "gain" not in r for r in results) and not any(r["valid"] and "gain" in r for r in results)):
+        out.line("", "")
+        out.line("mean gain", out.dim("unavailable") + " (baseline skipped)")
+        return {"rounds": [r["round"]["id"] for r in results], "gains": [], "mean_gain": None, "se": None}
+    scored = [r for r in results if not (r["valid"] and r.get("gain") is None)]
+    excluded = [r["round"]["id"] for r in results if r["valid"] and "gain" in r and r["gain"] is None]
+    gains = [r["gain"] if r["valid"] else 0.0 for r in scored]
+    out.line("", "")
+    if not gains:
+        reason = f" ({len(excluded)} round{'s' if len(excluded) != 1 else ''} excluded: no scored pillars present)" if excluded else ""
+        out.line("mean gain", out.dim("unavailable") + reason)
+        summary: dict = {"rounds": [], "gains": [], "mean_gain": None, "se": None}
+        if excluded:
+            summary["excluded_rounds"] = excluded
+        return summary
     mean = sum(gains) / len(gains)
     se = math.sqrt(sum((g - mean) ** 2 for g in gains) / (len(gains) - 1) / len(gains)) if len(gains) > 1 else None
-    out.line("", "")
-    out.line("mean gain", out.bold(f"{mean:+.4f}") + (f" ± {se:.4f} (standard error over {len(gains)} rounds)" if se is not None else ""))
-    return {"rounds": [r["round"]["id"] for r in results], "gains": gains, "mean_gain": round(mean, 5), "se": None if se is None else round(se, 5)}
+    suffix = f" ± {se:.4f} (standard error over {len(gains)} rounds)" if se is not None else ""
+    if excluded:
+        suffix += out.dim(f"   ({len(excluded)} round{'s' if len(excluded) != 1 else ''} excluded: no scored pillars present)")
+    out.line("mean gain", out.bold(f"{mean:+.4f}") + suffix)
+    summary = {"rounds": [r["round"]["id"] for r in scored], "gains": gains, "mean_gain": round(mean, 5), "se": None if se is None else round(se, 5)}
+    if excluded:
+        summary["excluded_rounds"] = excluded
+    return summary
 
 
 def _edit_time_line(out: Out, result: dict, season) -> None:
@@ -453,7 +489,7 @@ def cmd_run(args):
     if len(results) == 1:
         _emit(args, results[0])
     else:
-        summary = _summary(out, results)
+        summary = _summary(out, results, no_baseline=args.no_baseline)
         if args.json:
             json.dump(summary, sys.stdout, indent=1)
             sys.stdout.write("\n")

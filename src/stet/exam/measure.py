@@ -266,7 +266,8 @@ def pool(reports: list[dict]) -> dict:
 BACKWARD = 3.0  # a training step is a forward pass and a backward one: about three forward passes of arithmetic
 SERVER_HOLD = 45 * 60  # how long the server lets a machine hold a farm student unless its batch says (server/farm.go)
 LONGEST_HOLD = 24 * 3600  # and the longest a batch may say
-TOKEN_BYTES = 6  # memory the trainer needs for each token of the budget, at its peak: see memory_gb
+TOKEN_BUFFERS = 3  # first-pass arrays, lane matrix, and hash copy held simultaneously by script.materialize
+TOKEN_BYTES = 2 * TOKEN_BUFFERS  # uint16 default (vocab_size <= 65535); prefer token_bytes(season)
 
 
 def work_per_token(layers: int, width: int, length: int, vocab: int = 0) -> float:
@@ -305,8 +306,15 @@ def hold_seconds(season, scale) -> int:
     return min(LONGEST_HOLD, math.ceil((1.25 * t + 3600) / 300) * 300)
 
 
-def memory_gb(scale) -> float:
+def token_bytes(season=None) -> int:
+    """Peak host memory bytes per token across script.materialize's three simultaneous buffers:
+    uint16 (2 B/token -> 6 B/token) when vocab_size <= 65535, uint32 (4 B/token -> 12 B/token)
+    otherwise (matching script.materialize)."""
+    width = 2 if (season is None or int(season.vocab_size) <= 65535) else 4
+    return TOKEN_BUFFERS * width
+
+
+def memory_gb(scale, season=None) -> float:
     """Memory a machine needs to train the student: script.materialize holds the first pass's
-    tokens, the lanes they are dealt into and, while it hashes them, a copy, two bytes a token
-    each."""
-    return TOKEN_BYTES * scale.train_tokens / 2**30
+    tokens, the lanes they are dealt into and, while it hashes them, a copy."""
+    return token_bytes(season) * scale.train_tokens / 2**30

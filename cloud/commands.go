@@ -322,6 +322,23 @@ func until(now, t time.Time) string {
 	return "in " + strings.TrimSuffix(d.String(), "0s")
 }
 
+func (f *Fleet) examinerReserveHourly() float64 {
+	if f.o.MaxHourly <= 0 {
+		return 0
+	}
+	reserve := f.o.Examiner.MaxPrice
+	if f.examiner != nil && validRate(f.examiner.cfg.MaxPrice) {
+		reserve = f.examiner.cfg.MaxPrice
+	}
+	if !validRate(reserve) {
+		reserve = 1.50
+	}
+	if reserve > f.o.MaxHourly {
+		reserve = f.o.MaxHourly
+	}
+	return reserve
+}
+
 // tick is one round of scale: look, decide, act. What it saw, decided and did is kept, a line a
 // look (history.go).
 func tick(ctx context.Context, f *Fleet) (err error) {
@@ -361,7 +378,10 @@ func tick(ctx context.Context, f *Fleet) (err error) {
 	}
 	var exErr error
 	var snapErr error
-	if f.examiner != nil {
+	reconcileTickExaminer := func() {
+		if f.examiner == nil {
+			return
+		}
 		var rateErr error
 		if v.hourlyUnknown() {
 			rateErr = fmt.Errorf("live hourly spend is incomplete (%s has no reported hourly rate)", v.unknownRateSummary())
@@ -406,13 +426,16 @@ func tick(ctx context.Context, f *Fleet) (err error) {
 			}
 		}
 	}
+	reconcileTickExaminer()
+	now := f.now()
 	pol := f.o.Policy
+	needExaminer := roundNeedingExam(v.Work) != ""
 	reserved := v.ExaminerLive
-	if reserved == 0 && f.examiner != nil && roundNeedingExam(v.Work) != "" {
+	if reserved == 0 && (f.examiner != nil || f.o.Examiner.Addr != "") && needExaminer {
 		reserved = 1
 	}
 	pol.MaxWorkers = max(0, pol.MaxWorkers-reserved-v.extraWorkerLiveCount())
-	d := pol.decideNext(v.Work, v.Workers, v.Today, f.now(), next)
+	d := pol.decideNext(v.Work, v.Workers, v.Today, now, next)
 	for _, orph := range v.OrphanRentals {
 		if orph != nil && (orph.State == "stopped" || orph.Terminating) {
 			why := "stopped unpooled machine"
@@ -422,6 +445,67 @@ func tick(ctx context.Context, f *Fleet) (err error) {
 			d.End = append(d.End, Ending{Rental: orph, Why: why})
 		}
 	}
+	// If an available examiner offer was blocked solely by --max-hourly, reclaim headroom from
+	// idle (waiting) workers so existing workers cannot strand a required examiner.
+	if f.examiner != nil && v.ExaminerLive == 0 && needExaminer && exErr == nil && snapErr == nil && !v.hourlyUnknown() && f.o.MaxHourly > 0 {
+		if needHourly := f.examiner.blockedHourly(); needHourly > 0 {
+			endingWorkers := make(map[*Worker]bool, len(d.End))
+			projectedHourly := v.Hourly
+			for _, e := range d.End {
+				if e.Worker != nil && (e.Rental == nil || e.Rental == e.Worker.Rental) {
+					endingWorkers[e.Worker] = true
+				}
+				r := e.Rental
+				if r == nil && e.Worker != nil {
+					r = e.Worker.Rental
+				}
+				if r == nil {
+					continue
+				}
+				switch {
+				case r.live() && validRate(r.Price):
+					projectedHourly = max(0, projectedHourly-r.Price)
+				case r.State == "stopped":
+					diskRate := r.DiskCost
+					if recPod := v.Ledger.Pods[ledgerKey(r.Market, r.ID)]; recPod != nil && recPod.stoppedHourlyRate() > diskRate {
+						diskRate = recPod.stoppedHourlyRate()
+					}
+					if validRate(diskRate) {
+						projectedHourly = max(0, projectedHourly-diskRate)
+					}
+				}
+			}
+			if projectedHourly+needHourly > f.o.MaxHourly+1e-9 {
+				var idle []*Worker
+				for _, wk := range v.Workers {
+					if wk == nil || endingWorkers[wk] || wk.Rental == nil || !wk.Rental.live() || !validRate(wk.Rental.Price) {
+						continue
+					}
+					if wk.state(now, f.o.Policy) == "waiting" {
+						idle = append(idle, wk)
+					}
+				}
+				sort.SliceStable(idle, func(i, j int) bool {
+					if idle[i].Rental.Price != idle[j].Rental.Price {
+						return idle[i].Rental.Price > idle[j].Rental.Price
+					}
+					if idle[i].Speed != idle[j].Speed {
+						return idle[i].Speed < idle[j].Speed
+					}
+					return idle[i].Key.Handle < idle[j].Key.Handle
+				})
+				for _, wk := range idle {
+					if projectedHourly+needHourly <= f.o.MaxHourly+1e-9 {
+						break
+					}
+					d.End = append(d.End, Ending{Worker: wk, Why: "idle while hourly budget is needed for the round's examiner"})
+					endingWorkers[wk] = true
+					projectedHourly = max(0, projectedHourly-wk.Rental.Price)
+					d.Live = max(0, d.Live-1)
+				}
+			}
+		}
+	}
 	rec.decided(d, next)
 	ended := len(v.Ledger.Pods)
 	if err := f.end(ctx, v, d.End); err != nil {
@@ -429,6 +513,20 @@ func tick(ctx context.Context, f *Fleet) (err error) {
 	}
 	rec.Ended = max(ended-len(v.Ledger.Pods), 0)
 	f.release(ctx, d.Release)
+	// If ending idle/stopped workers freed a slot or hourly headroom while a required examiner is
+	// still absent, give the examiner an immediate second chance before launching new workers.
+	if f.examiner != nil && v.ExaminerLive == 0 && needExaminer && exErr == nil && snapErr == nil && !f.o.DryRun && rec.Ended > 0 && !v.hourlyUnknown() && v.liveWorkerCount() < f.o.MaxWorkers {
+		reconcileTickExaminer()
+		reserved = v.ExaminerLive
+		if reserved == 0 && needExaminer {
+			reserved = 1
+		}
+	}
+	if reserved > v.ExaminerLive {
+		v.ExaminerReservedHourly = f.examinerReserveHourly()
+	} else {
+		v.ExaminerReservedHourly = 0
+	}
 	if d.Note != "" {
 		f.say("%s", d.Note)
 	}
@@ -1139,10 +1237,10 @@ func cmdWorkersResolve(ctx context.Context, f *Fleet, end bool, clearIDs ...stri
 		endAt := now
 		var stoppedAt time.Time
 		if p.State == "stopped" {
-			// No provider stop timestamp is available: preserve the conservative compute-rate
-			// accrual reserved while pending up through this first confirmed stop, then accrue
-			// storage from now forward.
-			stoppedAt = now
+			// Use a trustworthy provider stop timestamp when available; otherwise preserve the
+			// conservative compute-rate accrual reserved while pending up through this first
+			// confirmed stop, then accrue storage from now forward.
+			stoppedAt = resolveStopTime(start, now, p.StoppedAt)
 		} else if !p.live() {
 			alive = start
 			endAt = start
