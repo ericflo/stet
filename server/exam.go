@@ -536,7 +536,7 @@ func (a *App) baselinesAgree(rd *Round, x, y *Baseline) bool {
 		return false
 	}
 	dev, _, err := a.season.Exam.ScoreItems(rd.ExamTable, diffItems(x.Items, y.Items), rd.Shares)
-	return err == nil && within(dev, a.tolerance().Baseline)
+	return err == nil && within(dev, a.roundTolerance(rd).Baseline)
 }
 
 // baselinesPairAgree reports whether two baselines mutually agree symmetrically within baseline
@@ -792,7 +792,7 @@ func hasCompetingBaselineCliqueFromAdj(bs []*Baseline, adj [][]bool, winning []*
 // at least two baselines survived and every surviving baseline agreed within tolerance of the
 // surviving set's item-wise median in the final pass.
 func (a *App) pruneBaselinesToMedian(rd *Round, bs []*Baseline) (kept []*Baseline, converged bool) {
-	tol := a.tolerance().Baseline
+	tol := a.roundTolerance(rd).Baseline
 	kept = bs
 	for len(kept) >= 2 {
 		mid := medianItems(itemsOf(kept))
@@ -1031,7 +1031,7 @@ func (a *App) baselineAdmissionRefuses(s *State, rd *Round, acct *Account, est b
 		return 0, false
 	}
 	dev, ok := a.baselineDev(s, rd, acct.ID, incoming.Items)
-	if !ok || within(dev, a.tolerance().Baseline) {
+	if !ok || within(dev, a.roundTolerance(rd).Baseline) {
 		return dev, false
 	}
 	if !a.baselineConsensusLocked(s, rd, acct, est, incoming) {
@@ -1060,7 +1060,7 @@ func (a *App) baselineAgrees(rd *Round, b *Baseline) bool {
 		return false
 	}
 	dev, _, err := a.season.Exam.ScoreItems(rd.ExamTable, diffItems(b.Items, rd.BaseItems), rd.Shares)
-	return err == nil && within(dev, a.tolerance().Baseline)
+	return err == nil && within(dev, a.roundTolerance(rd).Baseline)
 }
 
 // --- who measures a round's baseline -----------------------------------------------------------

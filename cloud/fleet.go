@@ -240,26 +240,29 @@ type podRecord struct {
 	Refused  string `json:"refused,omitempty"`
 	// What it was rented for (curators, early grades, grades, bigger students), the round, and
 	// when it was expected to report its last grade (history.go).
-	For             string           `json:"for,omitempty"`
-	Round           string           `json:"round,omitempty"`
-	Report          time.Time        `json:"report,omitzero"`
-	Handle          string           `json:"handle"`
-	GPU             string           `json:"gpu"`
-	Cloud           string           `json:"cloud"`
-	PendingID       string           `json:"pending_id,omitempty"` // original pendingRent.ID when adopted/ended from l.Pending
-	Cost            float64          `json:"cost"`
-	DiskCost        float64          `json:"disk_cost,omitempty"`
-	DiskCostUnknown bool             `json:"disk_cost_unknown,omitempty"`
-	TransferCost    float64          `json:"transfer_cost,omitempty"`
-	FixedCost       float64          `json:"fixed_cost,omitempty"` // one-time cold-start charge (e.g. metered examiner model download) incurred at Start
-	PartialCost     bool             `json:"partial_cost,omitempty"`
-	Start           time.Time        `json:"start"`
-	Alive           time.Time        `json:"alive"`                 // last seen running
-	StoppedAt       time.Time        `json:"stopped_at,omitzero"`   // when current stopped interval began (disk billing continues until ResumeAt/End)
-	StoppedSeen     time.Time        `json:"stopped_seen,omitzero"` // last confirmed stopped observation (bounds confirmed storage across downtime)
-	ResumeAt        time.Time        `json:"resume_at,omitzero"`    // when current running interval began after prior Segments
-	End             time.Time        `json:"end,omitzero"`
-	Segments        []billingSegment `json:"segments,omitempty"` // completed prior billing intervals preserved across stop/resume
+	For                  string           `json:"for,omitempty"`
+	Round                string           `json:"round,omitempty"`
+	Report               time.Time        `json:"report,omitzero"`
+	Handle               string           `json:"handle"`
+	GPU                  string           `json:"gpu"`
+	Cloud                string           `json:"cloud"`
+	PendingID            string           `json:"pending_id,omitempty"` // original pendingRent.ID when adopted/ended from l.Pending
+	Cost                 float64          `json:"cost"`
+	DiskCost             float64          `json:"disk_cost,omitempty"`
+	DiskCostUnknown      bool             `json:"disk_cost_unknown,omitempty"`
+	TransferCost         float64          `json:"transfer_cost,omitempty"`
+	FixedCost            float64          `json:"fixed_cost,omitempty"`             // exact fixed order fee (Clore) or role-based cold-start transfer estimate (Vast) incurred at Start
+	FixedCostEstimated   bool             `json:"fixed_cost_estimated,omitempty"`   // true when FixedCost is a pre-launch transfer estimate rather than an exact provider fee
+	ObservedTransferCost float64          `json:"observed_transfer_cost,omitempty"` // provider-reported observed transfer spend when usage is available
+	TransferObserved     bool             `json:"transfer_observed,omitempty"`      // true when the provider reported observed transfer usage for this contract
+	PartialCost          bool             `json:"partial_cost,omitempty"`
+	Start                time.Time        `json:"start"`
+	Alive                time.Time        `json:"alive"`                 // last seen running
+	StoppedAt            time.Time        `json:"stopped_at,omitzero"`   // when current stopped interval began (disk billing continues until ResumeAt/End)
+	StoppedSeen          time.Time        `json:"stopped_seen,omitzero"` // last confirmed stopped observation (bounds confirmed storage across downtime)
+	ResumeAt             time.Time        `json:"resume_at,omitzero"`    // when current running interval began after prior Segments
+	End                  time.Time        `json:"end,omitzero"`
+	Segments             []billingSegment `json:"segments,omitempty"` // completed prior billing intervals preserved across stop/resume
 }
 
 // billingSegment is one completed, immutable billing interval for a worker contract so stop/resume
@@ -284,16 +287,49 @@ func (r *podRecord) market() string {
 // also has no known positive running rate.
 const unknownStoppedFallbackRate = 0.50
 
+// oneTimeSpend returns the one-time startup/transfer charge attributed to Start in daily spend:
+//   - For exact fixed fees (!FixedCostEstimated, e.g. Clore order fee), charges FixedCost plus
+//     any provider-reported ObservedTransferCost.
+//   - For estimated cold-start transfer allowances (FixedCostEstimated, e.g. Vast ingress):
+//   - If the provider reported observed transfer usage (TransferObserved), uses max(FixedCost,
+//     ObservedTransferCost) while the contract is still live (!retired: conservative floor while
+//     cold start may still be downloading, immediately reflecting overruns), and uses the observed
+//     ObservedTransferCost once the contract is retired.
+//   - Otherwise falls back to the pre-launch role-based FixedCost estimate.
+func (r podRecord) oneTimeSpend(retired bool) float64 {
+	fixed := 0.0
+	if validRate(r.FixedCost) {
+		fixed = r.FixedCost
+	}
+	obs := 0.0
+	if nonNegFinite(r.ObservedTransferCost) {
+		obs = r.ObservedTransferCost
+	}
+	if !r.FixedCostEstimated {
+		if r.TransferObserved {
+			return fixed + obs
+		}
+		return fixed
+	}
+	if r.TransferObserved {
+		if retired {
+			return obs
+		}
+		return max(fixed, obs)
+	}
+	return fixed
+}
+
 // runningSpendRate returns the ongoing hourly compute+disk rate used for daily spend accrual.
-// When FixedCost already accounts for a one-time startup charge (e.g. Vast cold-start download or
-// Clore order creation fee) whose amortized equivalent TransferCost is folded into Cost for hourly
-// cap comparisons, subtract TransferCost so daily spend bills FixedCost once at Start plus actual
-// ongoing hourly compute+disk without double-counting.
+// When FixedCost or ObservedTransferCost already accounts for a one-time startup charge (e.g. Vast
+// cold-start download or Clore order creation fee) whose amortized equivalent TransferCost is
+// folded into Cost for hourly cap comparisons, subtract TransferCost so daily spend bills one-time
+// startup/transfer charges once at Start plus actual ongoing hourly compute+disk without double-counting.
 func (r podRecord) runningSpendRate() float64 {
 	if !validRate(r.Cost) {
 		return 0
 	}
-	if validRate(r.FixedCost) && validRate(r.TransferCost) {
+	if (validRate(r.FixedCost) || r.TransferObserved) && validRate(r.TransferCost) {
 		return max(0, r.Cost-r.TransferCost)
 	}
 	return r.Cost
@@ -455,13 +491,17 @@ func (r *podRecord) markLiveAt(now, providerResumedAt time.Time) {
 }
 
 func (r podRecord) dollarsBetween(from, to time.Time) float64 {
+	return r.dollarsBetweenMode(from, to, !r.End.IsZero())
+}
+
+func (r podRecord) dollarsBetweenMode(from, to time.Time, retired bool) float64 {
 	end := r.End
 	if end.IsZero() {
 		end = r.Alive
 	}
 	total := 0.0
-	if validRate(r.FixedCost) && !r.Start.IsZero() && !r.Start.Before(from) && !r.Start.After(to) {
-		total += r.FixedCost
+	if ot := r.oneTimeSpend(retired); ot > 0 && !r.Start.IsZero() && !r.Start.Before(from) && !r.Start.After(to) {
+		total += ot
 	}
 	runRate := r.runningSpendRate()
 	stopRate := r.stoppedSpendRate()
@@ -478,10 +518,10 @@ func (r podRecord) dollarsBetween(from, to time.Time) float64 {
 			rate := seg.Rate
 			if !validRate(rate) {
 				if seg.Stopped {
-					if validRate(r.DiskCost) {
-						rate = r.DiskCost
-					} else if seg.RateUnknown || r.DiskCostUnknown {
-						if validRate(runRate) {
+					if seg.RateUnknown {
+						if validRate(r.DiskCost) {
+							rate = r.DiskCost
+						} else if validRate(runRate) {
 							rate = runRate
 						} else {
 							rate = unknownStoppedFallbackRate
@@ -566,33 +606,34 @@ func minTime(a, b time.Time) time.Time {
 // its slot, handle, and hourly rate durably until the contract is adopted from provider listings
 // or explicitly resolved via `stet-cloud workers resolve`.
 type pendingRent struct {
-	ID           string    `json:"id"`
-	Market       string    `json:"market"`
-	Handle       string    `json:"handle"`
-	OfferID      string    `json:"offer_id,omitempty"`
-	GPU          string    `json:"gpu"`
-	Cloud        string    `json:"cloud,omitempty"`
-	Cost         float64   `json:"cost"`
-	DiskCost     float64   `json:"disk_cost,omitempty"`
-	TransferCost float64   `json:"transfer_cost,omitempty"`
-	FixedCost    float64   `json:"fixed_cost,omitempty"`
-	Created      time.Time `json:"created"`
-	Grades       int       `json:"grades,omitempty"`
-	Host         string    `json:"host,omitempty"`
-	CPU          string    `json:"cpu,omitempty"`
-	Curators     bool      `json:"curators,omitempty"`
-	For          string    `json:"for,omitempty"`
-	Round        string    `json:"round,omitempty"`
-	Report       time.Time `json:"report,omitzero"`
-	Error        string    `json:"error,omitempty"`
-	KnownIDs     []string  `json:"known_ids,omitempty"`
+	ID                 string    `json:"id"`
+	Market             string    `json:"market"`
+	Handle             string    `json:"handle"`
+	OfferID            string    `json:"offer_id,omitempty"`
+	GPU                string    `json:"gpu"`
+	Cloud              string    `json:"cloud,omitempty"`
+	Cost               float64   `json:"cost"`
+	DiskCost           float64   `json:"disk_cost,omitempty"`
+	TransferCost       float64   `json:"transfer_cost,omitempty"`
+	FixedCost          float64   `json:"fixed_cost,omitempty"`
+	FixedCostEstimated bool      `json:"fixed_cost_estimated,omitempty"`
+	Created            time.Time `json:"created"`
+	Grades             int       `json:"grades,omitempty"`
+	Host               string    `json:"host,omitempty"`
+	CPU                string    `json:"cpu,omitempty"`
+	Curators           bool      `json:"curators,omitempty"`
+	For                string    `json:"for,omitempty"`
+	Round              string    `json:"round,omitempty"`
+	Report             time.Time `json:"report,omitzero"`
+	Error              string    `json:"error,omitempty"`
+	KnownIDs           []string  `json:"known_ids,omitempty"`
 }
 
 func (pr *pendingRent) dollarsBetween(from, to time.Time) float64 {
 	if pr == nil || (!validRate(pr.Cost) && !validRate(pr.FixedCost)) {
 		return 0
 	}
-	r := podRecord{Cost: pr.Cost, TransferCost: pr.TransferCost, FixedCost: pr.FixedCost, Start: pr.Created, End: to}
+	r := podRecord{Cost: pr.Cost, TransferCost: pr.TransferCost, FixedCost: pr.FixedCost, FixedCostEstimated: pr.FixedCostEstimated, Start: pr.Created, End: to}
 	return r.dollarsBetween(from, to)
 }
 
@@ -649,12 +690,13 @@ func owner(l *ledger, r *Rental) string {
 }
 
 // matchPendingRentals returns pointers into rentals that match an unresolved pendingRent
-// (same market, not already tracked in l.Pods, not in pr.KnownIDs, and matching provider
-// identity/handle), ordered live-first and newest-first.
+// (same market, not already tracked in l.Pods or already retired in spentSum, not in pr.KnownIDs,
+// and matching provider identity/handle), ordered live-first, then stopped, then gone/expired,
+// and newest-first within each state.
 // For Clore (which carries no worker handle on orders), an explicit server ID match (si ==
 // pr.OfferID/pr.Host) is required so recovery on a shared account never adopts or cancels
 // somebody else's order on a different server.
-func matchPendingRentals(pr *pendingRent, l *ledger, rentals []Rental) []*Rental {
+func matchPendingRentals(pr *pendingRent, l *ledger, spentSum *spentSummary, rentals []Rental) []*Rental {
 	known := make(map[string]bool, len(pr.KnownIDs))
 	for _, id := range pr.KnownIDs {
 		known[id] = true
@@ -665,10 +707,13 @@ func matchPendingRentals(pr *pendingRent, l *ledger, rentals []Rental) []*Rental
 		if p.Market != pr.Market || p.ID == "" || known[p.ID] {
 			continue
 		}
-		if !p.live() && p.State != "stopped" {
+		if !p.live() && p.State != "stopped" && p.State != "gone" {
 			continue
 		}
 		if l.Pods[ledgerKey(p.Market, p.ID)] != nil {
+			continue
+		}
+		if spentSum != nil && spentSum.hasContract(p.Market, p.ID) {
 			continue
 		}
 		if pr.Market == "clore" {
@@ -679,6 +724,9 @@ func matchPendingRentals(pr *pendingRent, l *ledger, rentals []Rental) []*Rental
 			if wantServer == "" || p.Host == "" || p.Host != wantServer {
 				continue
 			}
+			if p.State == "gone" && (p.Created.IsZero() || pr.Created.IsZero()) {
+				continue
+			}
 			if !p.Created.IsZero() && !pr.Created.IsZero() && p.Created.Before(pr.Created.Add(-2*time.Minute)) {
 				continue
 			}
@@ -686,13 +734,29 @@ func matchPendingRentals(pr *pendingRent, l *ledger, rentals []Rental) []*Rental
 			continue
 		}
 		if p.Name == pr.Handle {
+			if p.State == "gone" {
+				// Require a credible post-reservation creation timestamp before attributing an
+				// already-gone non-Clore contract (e.g. a pre-existing DELETING pod).
+				if p.Created.IsZero() || pr.Created.IsZero() || p.Created.Before(pr.Created.Add(-2*time.Minute)) {
+					continue
+				}
+			}
 			matches = append(matches, p)
 		}
 	}
+	stateRank := func(r *Rental) int {
+		if r.live() {
+			return 2
+		}
+		if r.State == "stopped" {
+			return 1
+		}
+		return 0
+	}
 	sort.SliceStable(matches, func(i, j int) bool {
-		li, lj := matches[i].live(), matches[j].live()
-		if li != lj {
-			return li
+		ri, rj := stateRank(matches[i]), stateRank(matches[j])
+		if ri != rj {
+			return ri > rj
 		}
 		if !matches[i].Created.Equal(matches[j].Created) {
 			return matches[i].Created.After(matches[j].Created)
@@ -706,7 +770,7 @@ func matchPendingRentals(pr *pendingRent, l *ledger, rentals []Rental) []*Rental
 // the distinct worker handles claiming each candidate contract, so callers leave genuinely
 // ambiguous matches (multiple contracts for one reservation, or multiple handles competing for
 // the same contract) pending rather than guessing or canceling unrelated contracts.
-func resolvePendingMatches(l *ledger, rentalsByMarket map[string][]Rental, pkeys []string) (map[string][]*Rental, map[string]map[string]bool) {
+func resolvePendingMatches(l *ledger, spentSum *spentSummary, rentalsByMarket map[string][]Rental, pkeys []string) (map[string][]*Rental, map[string]map[string]bool) {
 	matchesByID := make(map[string][]*Rental, len(pkeys))
 	claimants := map[string]map[string]bool{}
 	for _, id := range pkeys {
@@ -718,7 +782,7 @@ func resolvePendingMatches(l *ledger, rentalsByMarket map[string][]Rental, pkeys
 		if !ok {
 			continue
 		}
-		ms := matchPendingRentals(pr, l, rs)
+		ms := matchPendingRentals(pr, l, spentSum, rs)
 		matchesByID[id] = ms
 		for _, p := range ms {
 			key := ledgerKey(p.Market, p.ID)
@@ -765,6 +829,9 @@ func applyOfferRateToRental(o Offer, r *Rental) {
 	r.TransferCost = transfer
 	if nonNegFinite(o.FixedCost) && o.FixedCost > r.FixedCost {
 		r.FixedCost = o.FixedCost
+		r.FixedCostEstimated = o.FixedCostEstimated
+	} else if o.FixedCostEstimated && r.FixedCost > 0 {
+		r.FixedCostEstimated = true
 	}
 	missingDisk := max(0, disk-origDisk)
 	missingTransfer := max(0, transfer-origTransfer)
@@ -794,6 +861,16 @@ func applyOfferRateToRental(o Offer, r *Rental) {
 			r.Price = 0
 		}
 	}
+}
+
+// rentalObservedTransferTrusted reports whether a provider rental's observed transfer reading
+// should latch TransferObserved on a podRecord: ignores $0.00 startup snapshots on contracts whose
+// transfer charge is estimated while the container is still starting (before cold-start downloads).
+func rentalObservedTransferTrusted(fixedEstimated bool, p *Rental) bool {
+	if p == nil || !p.TransferObserved {
+		return false
+	}
+	return !(fixedEstimated && p.ObservedTransferCost == 0 && p.State == "starting")
 }
 
 // reconcileRentalRate merges a provider-reported Rental rate with a persisted podRecord,
@@ -830,8 +907,22 @@ func reconcileRentalRate(r *podRecord, p *Rental) {
 	p.TransferCost = r.TransferCost
 	if nonNegFinite(p.FixedCost) && p.FixedCost > r.FixedCost {
 		r.FixedCost = p.FixedCost
+		r.FixedCostEstimated = p.FixedCostEstimated
 	}
 	p.FixedCost = r.FixedCost
+	if r.FixedCostEstimated {
+		p.FixedCostEstimated = true
+	}
+	if rentalObservedTransferTrusted(r.FixedCostEstimated, p) {
+		r.TransferObserved = true
+		if nonNegFinite(p.ObservedTransferCost) && p.ObservedTransferCost > r.ObservedTransferCost {
+			r.ObservedTransferCost = p.ObservedTransferCost
+		}
+	}
+	if r.TransferObserved {
+		p.TransferObserved = true
+		p.ObservedTransferCost = r.ObservedTransferCost
+	}
 	missingTransfer := max(0, r.TransferCost-origTransfer)
 	switch {
 	case validRate(p.Price) && !p.PartialRate:
@@ -942,7 +1033,7 @@ func (f *Fleet) note(ctx context.Context, l *ledger, rentals []Rental, answered 
 				rentalsByMarket[mName] = rentals
 			}
 		}
-		matchesByID, claimants := resolvePendingMatches(l, rentalsByMarket, pkeys)
+		matchesByID, claimants := resolvePendingMatches(l, spentSum, rentalsByMarket, pkeys)
 		adopted := map[string]bool{}
 		for _, id := range pkeys {
 			pr := l.Pending[id]
@@ -989,6 +1080,36 @@ func (f *Fleet) note(ctx context.Context, l *ledger, rentals []Rental, answered 
 			if start.IsZero() || start.After(now) {
 				start = now
 			}
+			if p.State == "gone" {
+				// Uniquely attributable terminal/expired provider contract (e.g. a Clore order
+				// that already expired before first reconciliation): retire it once through the
+				// supported or conservatively observed end time instead of leaving the pending
+				// reservation accruing indefinitely.
+				statusWord := strings.ToLower(p.Status)
+				if statusWord == "" {
+					statusWord = "gone"
+				}
+				rec := &podRecord{
+					ID: p.ID, Market: p.Market, Handle: pr.Handle, GPU: gpu, Cloud: pr.Cloud, PendingID: pr.ID,
+					Cost: pr.Cost, DiskCost: pr.DiskCost, TransferCost: pr.TransferCost,
+					FixedCost: pr.FixedCost, FixedCostEstimated: pr.FixedCostEstimated,
+					PartialCost: !validRate(pr.Cost), Start: start, Alive: now, Tracked: true, Gone: true,
+					Why:    "its market already has it " + statusWord,
+					Grades: pr.Grades, Host: host, CPU: pr.CPU, Curators: pr.Curators,
+					For: pr.For, Round: pr.Round, Report: pr.Report,
+				}
+				reconcileRentalRate(rec, p)
+				endAt := resolveStopTime(start, now, p.EndedAt)
+				l.Pods[key] = rec
+				if rerr := f.retire(l, key, endAt); rerr != nil {
+					delete(l.Pods, key)
+					return rentals, rerr
+				}
+				delete(l.Pending, id)
+				f.event(p, pr.Handle, "gone", rec.Why)
+				f.say("retired already-%s pending worker %s on %s (machine %s)", statusWord, pr.Handle, marketTitle(p.Market), p.ID)
+				continue
+			}
 			alive := now
 			var stoppedAt, stoppedSeen time.Time
 			if p.State == "stopped" {
@@ -1002,8 +1123,10 @@ func (f *Fleet) note(ctx context.Context, l *ledger, rentals []Rental, answered 
 			}
 			rec := &podRecord{
 				ID: p.ID, Market: p.Market, Handle: pr.Handle, GPU: gpu, Cloud: pr.Cloud, PendingID: pr.ID,
-				Cost: pr.Cost, DiskCost: pr.DiskCost, TransferCost: pr.TransferCost, FixedCost: pr.FixedCost, PartialCost: !validRate(pr.Cost),
-				Start: start, Alive: alive, StoppedAt: stoppedAt, StoppedSeen: stoppedSeen, Tracked: true, Stopped: p.State == "stopped",
+				Cost: pr.Cost, DiskCost: pr.DiskCost, TransferCost: pr.TransferCost,
+				FixedCost: pr.FixedCost, FixedCostEstimated: pr.FixedCostEstimated,
+				PartialCost: !validRate(pr.Cost),
+				Start:       start, Alive: alive, StoppedAt: stoppedAt, StoppedSeen: stoppedSeen, Tracked: true, Stopped: p.State == "stopped",
 				Grades: pr.Grades, Host: host, CPU: pr.CPU, Curators: pr.Curators,
 				For: pr.For, Round: pr.Round, Report: pr.Report,
 			}
@@ -1053,8 +1176,10 @@ func (f *Fleet) note(ctx context.Context, l *ledger, rentals []Rental, answered 
 				stoppedSeen = now
 			}
 			r = &podRecord{ID: p.ID, Market: p.Market, Handle: h, Host: p.Host, GPU: p.Card,
-				Cost: cost, DiskCost: max(0, p.DiskCost), DiskCostUnknown: p.DiskCostUnknown, FixedCost: max(0, p.FixedCost), PartialCost: p.PartialRate || p.State == "stopped",
-				Start: start, Alive: alive, StoppedAt: stoppedAt, StoppedSeen: stoppedSeen, Tracked: true, Stopped: p.State == "stopped"}
+				Cost: cost, DiskCost: max(0, p.DiskCost), DiskCostUnknown: p.DiskCostUnknown,
+				FixedCost: max(0, p.FixedCost), FixedCostEstimated: p.FixedCostEstimated,
+				PartialCost: p.PartialRate || p.State == "stopped",
+				Start:       start, Alive: alive, StoppedAt: stoppedAt, StoppedSeen: stoppedSeen, Tracked: true, Stopped: p.State == "stopped"}
 			l.Pods[key] = r
 		}
 		if r.Host == "" && p.Host != "" {
@@ -1069,6 +1194,11 @@ func (f *Fleet) note(ctx context.Context, l *ledger, rentals []Rental, answered 
 		}
 	}
 	retireGone := func(key string, r *podRecord, p *Rental) error {
+		if p == nil && r.FixedCostEstimated && r.TransferObserved && r.ObservedTransferCost == 0 {
+			// If an instance vanished from provider listings without a terminal billing payload,
+			// do not let an earlier zero-transfer snapshot erase the pre-launch estimate.
+			r.TransferObserved = false
+		}
 		r.Gone = true
 		gone := Rental{Market: r.market(), ID: r.ID, Card: r.GPU}
 		why := "its market no longer lists it"
@@ -1522,7 +1652,7 @@ func (f *Fleet) spentFor(l *ledger, since time.Time, unconfirmed map[string]bool
 			rc.markLiveAt(now, time.Time{})
 		}
 		rc.End = now
-		total += rc.dollarsBetween(since, now)
+		total += rc.dollarsBetweenMode(since, now, false)
 	}
 	for _, pr := range l.Pending {
 		if pr == nil || sum.byPendingID[pr.ID] {
@@ -1836,7 +1966,10 @@ func recordedRental(r *podRecord, status string) Rental {
 	}
 	return Rental{
 		Market: r.market(), ID: r.ID, Name: r.Handle, Host: r.Host, Card: r.GPU,
-		Price: cost, DiskCost: r.DiskCost, DiskCostUnknown: r.DiskCostUnknown, TransferCost: r.TransferCost, FixedCost: r.FixedCost, PartialRate: r.PartialCost, State: state, Status: status, Created: r.Start, Terminating: r.Terminating, Unconfirmed: true,
+		Price: cost, DiskCost: r.DiskCost, DiskCostUnknown: r.DiskCostUnknown, TransferCost: r.TransferCost,
+		FixedCost: r.FixedCost, FixedCostEstimated: r.FixedCostEstimated,
+		ObservedTransferCost: r.ObservedTransferCost, TransferObserved: r.TransferObserved,
+		PartialRate: r.PartialCost, State: state, Status: status, Created: r.Start, Terminating: r.Terminating, Unconfirmed: true,
 	}
 }
 
@@ -1882,12 +2015,13 @@ func (f *Fleet) look(ctx context.Context) (*View, error) {
 	for _, k := range f.keys {
 		knownHandles[k.Handle] = true
 	}
-	// Record every non-gone rental ID seen on each market (including unowned contracts on shared
-	// accounts) so subsequent worker creates include them in Launch.KnownIDs / pr.KnownIDs.
+	// Record every live, stopped, or gone rental ID seen on each market (including unowned or
+	// already-expired contracts on shared accounts) so subsequent worker creates include them in
+	// Launch.KnownIDs / pr.KnownIDs.
 	marketSeen := map[string]map[string]bool{}
 	for i := range rentals {
 		p := &rentals[i]
-		if p.Market == "" || p.ID == "" || (!p.live() && p.State != "stopped") {
+		if p.Market == "" || p.ID == "" || (!p.live() && p.State != "stopped" && p.State != "gone") {
 			continue
 		}
 		if marketSeen[p.Market] == nil {
@@ -2168,8 +2302,12 @@ func (f *Fleet) needFor(m Market, curators bool) Need {
 	n := f.need()
 	if !curators || !f.curators(m.Name()) {
 		n.DiskGB = min(n.DiskGB, graderDisk)
-	} else if f.o.MinCuratorGPUMemory > 0 {
-		n.MinGPUMemGB = max(n.MinGPUMemGB, f.o.MinCuratorGPUMemory)
+		n.Curators = false
+	} else {
+		n.Curators = true
+		if f.o.MinCuratorGPUMemory > 0 {
+			n.MinGPUMemGB = max(n.MinGPUMemGB, f.o.MinCuratorGPUMemory)
+		}
 	}
 	return n
 }
@@ -2886,25 +3024,26 @@ func (f *Fleet) rent(ctx context.Context, v *View, k *Key, gpus []Offer, site st
 		}
 		began := f.now()
 		pr := &pendingRent{
-			ID:           newID()[:16],
-			Market:       c.Market,
-			Handle:       k.Handle,
-			OfferID:      c.ID,
-			GPU:          c.Card,
-			Cloud:        cloud,
-			Cost:         price,
-			DiskCost:     c.DiskCost,
-			TransferCost: c.TransferCost,
-			FixedCost:    fixed,
-			Created:      began,
-			Grades:       plannedGrades,
-			Host:         c.Host,
-			CPU:          c.CPU,
-			Curators:     l.Env["STET_WORKER_EDITS"] == "1",
-			For:          plan.what,
-			Round:        plan.round,
-			Report:       plannedReport,
-			KnownIDs:     knownSlice,
+			ID:                 newID()[:16],
+			Market:             c.Market,
+			Handle:             k.Handle,
+			OfferID:            c.ID,
+			GPU:                c.Card,
+			Cloud:              cloud,
+			Cost:               price,
+			DiskCost:           c.DiskCost,
+			TransferCost:       c.TransferCost,
+			FixedCost:          fixed,
+			FixedCostEstimated: c.FixedCostEstimated,
+			Created:            began,
+			Grades:             plannedGrades,
+			Host:               c.Host,
+			CPU:                c.CPU,
+			Curators:           l.Env["STET_WORKER_EDITS"] == "1",
+			For:                plan.what,
+			Round:              plan.round,
+			Report:             plannedReport,
+			KnownIDs:           knownSlice,
 		}
 		v.Ledger.Pending[pr.ID] = pr
 		if err := f.writeLedger(v.Ledger); err != nil {
@@ -2962,8 +3101,16 @@ func (f *Fleet) rent(ctx context.Context, v *View, k *Key, gpus []Offer, site st
 		}
 		v.Hourly += r.Price
 		v.addLiveRental(r)
+		fixedEst := c.FixedCostEstimated || r.FixedCostEstimated
+		obsTrusted := rentalObservedTransferTrusted(fixedEst, r)
+		obsTransfer := 0.0
+		if obsTrusted && nonNegFinite(r.ObservedTransferCost) {
+			obsTransfer = r.ObservedTransferCost
+		}
 		rec := &podRecord{ID: r.ID, Market: r.Market, Handle: k.Handle, GPU: c.Card, Cloud: cloud,
-			Cost: r.Price, DiskCost: max(c.DiskCost, r.DiskCost), TransferCost: c.TransferCost, FixedCost: max(fixed, r.FixedCost),
+			Cost: r.Price, DiskCost: max(c.DiskCost, r.DiskCost), TransferCost: c.TransferCost,
+			FixedCost: max(fixed, r.FixedCost), FixedCostEstimated: fixedEst,
+			ObservedTransferCost: obsTransfer, TransferObserved: obsTrusted,
 			Start: began, Alive: f.now(), Tracked: true, PendingID: pr.ID,
 			Host: c.Host, CPU: c.CPU, Curators: l.Env["STET_WORKER_EDITS"] == "1", For: plan.what, Round: plan.round, Report: plannedReport}
 		// Seen from its start: a machine that asks for work before the next look still has its

@@ -4420,7 +4420,7 @@ func TestReview21VastWorkerOfferUsesConservativePricingAndSkipsZero(t *testing.T
 	if math.Abs(byID["8001"].Price-0.62) > 1e-6 {
 		t.Fatalf("offer 8001 (dph_total=0.62, no dph_base): got price %.6f, want 0.62", byID["8001"].Price)
 	}
-	want8002 := 0.40 + 120*0.36/720.0 + 3*0.01/expectedLife.Hours()
+	want8002 := 0.40 + 120*0.36/720.0 + workerGraderDownloadGB*0.01/expectedLife.Hours()
 	if math.Abs(byID["8002"].Price-want8002) > 1e-6 {
 		t.Fatalf("offer 8002 (component sum > dph_total): got price %.6f, want %.6f", byID["8002"].Price, want8002)
 	}
@@ -5143,11 +5143,11 @@ func TestReview23BaseOnlyVastListingPreservesWorkerStorageCostsAcrossReload(t *t
 	basePrice.Store(0.40)
 	var rented atomic.Bool
 	// 35 GB graderDisk * storage_cost / 720 = 0.06 => storage_cost = 0.06 * 720 / 35 = 1.2342857142857142
-	// 3 GB download * inet_down_cost / 1h = 0.03 => inet_down_cost = 0.01
+	// 6 GB grader download * inet_down_cost / 1h = 0.03 => inet_down_cost = 0.005
 	vastSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == "POST" && r.URL.Path == "/api/v0/bundles/":
-			_, _ = w.Write([]byte(`{"offers":[{"id":9101,"gpu_name":"RTX 4090","gpu_ram":24576,"num_gpus":1,"dph_base":0.40,"dph_total":0.46,"storage_cost":1.2342857142857142,"inet_down_cost":0.01,"cuda_max_good":13.2,"verification":"verified","hosting_type":1,"geolocation":"US"}]}`))
+			_, _ = w.Write([]byte(`{"offers":[{"id":9101,"gpu_name":"RTX 4090","gpu_ram":24576,"num_gpus":1,"dph_base":0.40,"dph_total":0.46,"storage_cost":1.2342857142857142,"inet_down_cost":0.005,"cuda_max_good":13.2,"verification":"verified","hosting_type":1,"geolocation":"US"}]}`))
 		case r.Method == "PUT" && strings.HasPrefix(r.URL.Path, "/api/v0/asks/"):
 			rented.Store(true)
 			_, _ = w.Write([]byte(`{"success":true,"new_contract":99101}`))
@@ -9496,9 +9496,9 @@ func TestReview31MeteredWorkerColdStartTransferBudgetAndShortRentalAccounting(t 
 					_, _ = w.Write([]byte(`{"instances":[],"next_token":null}`))
 					return
 				}
-				_, _ = w.Write([]byte(fmt.Sprintf(`{"instances":[{"id":993111,"label":"stet-rp-01","actual_status":"running","intended_status":"running","cur_state":"running","gpu_name":"RTX 4090","dph_base":0.50,"dph_total":0.50,"storage_cost":0,"inet_down_cost":0.10,"start_date":%d}],"next_token":null}`, t0.Unix())))
+				_, _ = w.Write([]byte(fmt.Sprintf(`{"instances":[{"id":993111,"label":"stet-rp-01","actual_status":"running","intended_status":"running","cur_state":"running","gpu_name":"RTX 4090","dph_base":0.50,"dph_total":0.50,"storage_cost":0,"inet_down_cost":0.05,"start_date":%d}],"next_token":null}`, t0.Unix())))
 			case r.Method == "POST" && r.URL.Path == "/api/v0/bundles/":
-				_, _ = w.Write([]byte(`{"offers":[{"id":3111,"gpu_name":"RTX 4090","gpu_ram":24576,"num_gpus":1,"dph_base":0.50,"dph_total":0.50,"storage_cost":0,"inet_down_cost":0.10,"cuda_max_good":13.2,"verification":"verified","hosting_type":1,"geolocation":"US"}]}`))
+				_, _ = w.Write([]byte(`{"offers":[{"id":3111,"gpu_name":"RTX 4090","gpu_ram":24576,"num_gpus":1,"dph_base":0.50,"dph_total":0.50,"storage_cost":0,"inet_down_cost":0.05,"cuda_max_good":13.2,"verification":"verified","hosting_type":1,"geolocation":"US"}]}`))
 			case r.Method == "PUT" && r.URL.Path == "/api/v0/asks/3111/":
 				if failCreate.Load() {
 					http.Error(w, "upstream timeout", http.StatusGatewayTimeout)
@@ -9587,10 +9587,10 @@ func TestReview31MeteredWorkerColdStartTransferBudgetAndShortRentalAccounting(t 
 				_, _ = w.Write([]byte(`{"instances":[],"next_token":null}`))
 			case r.Method == "POST" && r.URL.Path == "/api/v0/bundles/":
 				if includeFree.Load() {
-					_, _ = w.Write([]byte(`{"offers":[{"id":3151,"gpu_name":"RTX 4090","gpu_ram":24576,"num_gpus":1,"dph_base":0.50,"dph_total":0.50,"storage_cost":0,"inet_down_cost":0.10,"cuda_max_good":13.2,"verification":"verified","hosting_type":1,"geolocation":"US"},{"id":3152,"gpu_name":"RTX 4090","gpu_ram":24576,"num_gpus":1,"dph_base":0.90,"dph_total":0.90,"storage_cost":0,"inet_down_cost":0.0,"cuda_max_good":13.2,"verification":"verified","hosting_type":1,"geolocation":"US"}]}`))
+					_, _ = w.Write([]byte(`{"offers":[{"id":3151,"gpu_name":"RTX 4090","gpu_ram":24576,"num_gpus":1,"dph_base":0.50,"dph_total":0.50,"storage_cost":0,"inet_down_cost":0.05,"cuda_max_good":13.2,"verification":"verified","hosting_type":1,"geolocation":"US"},{"id":3152,"gpu_name":"RTX 4090","gpu_ram":24576,"num_gpus":1,"dph_base":0.90,"dph_total":0.90,"storage_cost":0,"inet_down_cost":0.0,"cuda_max_good":13.2,"verification":"verified","hosting_type":1,"geolocation":"US"}]}`))
 					return
 				}
-				_, _ = w.Write([]byte(`{"offers":[{"id":3151,"gpu_name":"RTX 4090","gpu_ram":24576,"num_gpus":1,"dph_base":0.50,"dph_total":0.50,"storage_cost":0,"inet_down_cost":0.10,"cuda_max_good":13.2,"verification":"verified","hosting_type":1,"geolocation":"US"}]}`))
+				_, _ = w.Write([]byte(`{"offers":[{"id":3151,"gpu_name":"RTX 4090","gpu_ram":24576,"num_gpus":1,"dph_base":0.50,"dph_total":0.50,"storage_cost":0,"inet_down_cost":0.05,"cuda_max_good":13.2,"verification":"verified","hosting_type":1,"geolocation":"US"}]}`))
 			default:
 				http.NotFound(w, r)
 			}
@@ -10050,6 +10050,866 @@ func TestReview31UnknownStoppedStorageRetainsConservativeHistoricalSpendAfterDel
 		}
 		if vDay2.Today > 1e-6 {
 			t.Fatalf("Day 2 spend after 404 retirement should be $0.00, got $%.4f", vDay2.Today)
+		}
+	})
+}
+
+// Review 32 P2 #3: At full capacity (MaxWorkers == live workers), examiner admission MUST probe
+// across bandwidth tiers and apply the same staged feasibility check to BOTH slot reclamation and
+// hourly reclamation before committing any idle-worker eviction.
+func TestReview32ExaminerAdmissionAtFullCapacityDoesNotEvictForUnaffordableOffer(t *testing.T) {
+	t0 := time.Date(2026, 11, 27, 17, 0, 0, 0, time.UTC)
+
+	makeFixture := func(t *testing.T, busyPrice, idlePrice, dailyBudget, priorSpend float64) (*Fleet, *fakeRunPod, *string) {
+		t.Helper()
+		var rentedOffer string
+		vastSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == "GET" && r.URL.Path == "/api/v1/instances/":
+				_, _ = w.Write([]byte(`{"instances":[],"next_token":null}`))
+			case r.Method == "POST" && r.URL.Path == "/api/v0/bundles/":
+				var q map[string]any
+				_ = json.NewDecoder(r.Body).Decode(&q)
+				maxP := 999.0
+				if dp, ok := q["dph_total"].(map[string]any); ok {
+					if lte, ok := dp["lte"].(float64); ok {
+						maxP = lte
+					}
+				}
+				if 0.69 <= maxP+1e-9 {
+					_, _ = w.Write([]byte(`{"offers":[{"id":3201,"gpu_name":"RTX 5090","num_gpus":1,"dph_total":0.69,"dph_base":0.64,"storage_cost":0.45,"inet_down_cost":0.0,"cuda_max_good":13.3,"inet_down":2000,"geolocation":"US"}]}`))
+					return
+				}
+				_, _ = w.Write([]byte(`{"offers":[]}`))
+			case r.Method == "PUT" && strings.HasPrefix(r.URL.Path, "/api/v0/asks/"):
+				rentedOffer = strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v0/asks/"), "/")
+				_, _ = w.Write([]byte(`{"success":true,"new_contract":993201}`))
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		t.Cleanup(vastSrv.Close)
+
+		rp, st := newFakeRunPod(t), newFakeStet(t)
+		f, _ := testFleet(t, rp, st, 2)
+		f.now = func() time.Time { return t0 }
+		f.o.MaxWorkers = 2 // exact reviewer repro: full capacity!
+		f.o.MaxHourly = 1.00
+		f.o.DailyBudget = dailyBudget
+		f.o.Examiner.MaxPrice = 1.00
+		vm := newVast(vastSrv.URL, "vast-key")
+		vm.a.sleep = func(context.Context, time.Duration) error { return nil }
+		f.examiner = newExaminer(ExaminerConfig{Addr: "127.0.0.1:0", Timeout: 45 * time.Minute, MaxPrice: 1.00}, f.o.Home, vm, func() time.Time { return t0 }, f.say, false)
+		f.examiner.owner = "abcdef012345"
+
+		if priorSpend > 0 {
+			if _, err := appendSpendRecord(f.spentLog(), podRecord{
+				ID: "prior-r32", Market: "runpod", Cost: priorSpend, Start: t0.Add(-time.Hour), Alive: t0, End: t0,
+			}, true); err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		rp.pods["rp-busy"] = &Pod{ID: "rp-busy", Name: f.keys[0].Handle, Status: "RUNNING", Cost: busyPrice, CreatedAt: t0.Add(-10 * time.Minute)}
+		rp.pods["rp-idle"] = &Pod{ID: "rp-idle", Name: f.keys[1].Handle, Status: "RUNNING", Cost: idlePrice, CreatedAt: t0.Add(-10 * time.Minute)}
+		st.work = Work{
+			Rounds: []WorkRound{{ID: "s3-o00032", GradesWanted: 2, ExamAt: 0}},
+			Machines: []Machine{
+				{Handle: f.keys[0].Handle, Busy: "grade", LastSeen: t0.Add(-5 * time.Second).Unix()},
+				{Handle: f.keys[1].Handle, LastSeen: t0.Add(-5 * time.Second).Unix()},
+			},
+		}
+		if err := f.writeLedger(&ledger{Pods: map[string]*podRecord{
+			ledgerKey("runpod", "rp-busy"): {ID: "rp-busy", Market: "runpod", Handle: f.keys[0].Handle, GPU: "RTX 4090", Cost: busyPrice, Start: t0.Add(-10 * time.Minute), Alive: t0},
+			ledgerKey("runpod", "rp-idle"): {ID: "rp-idle", Market: "runpod", Handle: f.keys[1].Handle, GPU: "RTX 3060", Cost: idlePrice, Start: t0.Add(-10 * time.Minute), Alive: t0},
+		}}); err != nil {
+			t.Fatal(err)
+		}
+		return f, rp, &rentedOffer
+	}
+
+	t.Run("max_workers_2_unaffordable_examiner_keeps_warm_idle_alive", func(t *testing.T) {
+		f, rp, rented := makeFixture(t, 0.80, 0.10, 50.0, 0)
+		if err := tick(context.Background(), f); err != nil {
+			t.Fatalf("tick: %v", err)
+		}
+		rp.mu.Lock()
+		_, idleAlive := rp.pods["rp-idle"]
+		_, busyAlive := rp.pods["rp-busy"]
+		rp.mu.Unlock()
+		if !idleAlive || !busyAlive || *rented != "" {
+			t.Fatalf("at MaxWorkers=2 with unaffordable $0.69/h examiner ($0.80+$0.69>$1.00), warm idle worker MUST NOT be evicted: idleAlive=%v busyAlive=%v rented=%q", idleAlive, busyAlive, *rented)
+		}
+	})
+
+	t.Run("max_workers_2_affordable_examiner_evicts_idle_and_rents_same_tick", func(t *testing.T) {
+		f, rp, rented := makeFixture(t, 0.30, 0.30, 50.0, 0)
+		if err := tick(context.Background(), f); err != nil {
+			t.Fatalf("tick: %v", err)
+		}
+		rp.mu.Lock()
+		_, idleAlive := rp.pods["rp-idle"]
+		_, busyAlive := rp.pods["rp-busy"]
+		rp.mu.Unlock()
+		if idleAlive || !busyAlive || *rented != "3201" {
+			t.Fatalf("at MaxWorkers=2 with affordable $0.69/h examiner ($0.30+$0.69<=$1.00), want idle evicted and examiner rented: idleAlive=%v busyAlive=%v rented=%q", idleAlive, busyAlive, *rented)
+		}
+	})
+
+	t.Run("max_workers_2_exhausted_daily_budget_keeps_warm_idle_alive", func(t *testing.T) {
+		f, rp, rented := makeFixture(t, 0.30, 0.30, 1.00, 1.00)
+		if err := tick(context.Background(), f); err != nil {
+			t.Fatalf("tick: %v", err)
+		}
+		rp.mu.Lock()
+		_, idleAlive := rp.pods["rp-idle"]
+		_, busyAlive := rp.pods["rp-busy"]
+		rp.mu.Unlock()
+		if !idleAlive || !busyAlive || *rented != "" {
+			t.Fatalf("with exhausted daily budget at MaxWorkers=2, warm idle worker MUST NOT be evicted: idleAlive=%v busyAlive=%v rented=%q", idleAlive, busyAlive, *rented)
+		}
+	})
+}
+
+// Review 32 P2 #4 (controller path): Even when daily spend is slightly below DailyBudget, if the
+// replacement grader for a disputed baseline cannot pass offer admission (e.g. metered startup
+// transfer exceeds remaining daily budget or hourly ceiling), tick() MUST NOT evict a warm worker.
+func TestReview32DisputedBaselineTickDoesNotEvictWhenReplacementFailsAdmission(t *testing.T) {
+	t0 := time.Date(2026, 11, 27, 17, 30, 0, 0, time.UTC)
+	vastSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "GET" && r.URL.Path == "/api/v1/instances/":
+			_, _ = w.Write([]byte(`{"instances":[],"next_token":null}`))
+		case r.Method == "POST" && r.URL.Path == "/api/v0/bundles/":
+			// Only available grader offer has $0.10/GB * 6 GB = $0.60 cold-start transfer (> $0.10 remaining!).
+			_, _ = w.Write([]byte(`{"offers":[{"id":3211,"gpu_name":"RTX 4090","gpu_ram":24576,"num_gpus":1,"dph_base":0.40,"dph_total":0.40,"storage_cost":0,"inet_down_cost":0.10,"cuda_max_good":13.2,"verification":"verified","hosting_type":1,"geolocation":"US"}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer vastSrv.Close()
+
+	rp, st := newFakeRunPod(t), newFakeStet(t)
+	f, _ := testFleet(t, rp, st, 4)
+	f.now = func() time.Time { return t0 }
+	f.o.MaxWorkers = 2
+	f.o.MaxHourly = 4.00
+	f.o.MaxPrice = 2.00
+	f.o.DailyBudget = 1.00
+	f.o.MinCUDA = "13.0"
+	f.o.MinGPUMemory = 12
+	f.o.Edits = true
+	vm := newVast(vastSrv.URL, "vast-key")
+	vm.a.sleep = func(context.Context, time.Duration) error { return nil }
+	// RunPod unarmed, Vast armed (only metered offer available).
+	f.markets = append(f.markets, vm)
+	if err := (&Arming{Armed: map[string]Armed{"vast": {At: 1}}}).save(f.o.Home); err != nil {
+		t.Fatal(err)
+	}
+	// Seed $0.90 already spent today -> $0.10 left (< $0.60 Vast grader transfer).
+	if _, err := appendSpendRecord(f.spentLog(), podRecord{
+		ID: "prev-r32-disp", Market: "runpod", Cost: 0.90, Start: t0.Add(-time.Hour), Alive: t0, End: t0,
+	}, true); err != nil {
+		t.Fatal(err)
+	}
+	rp.pods["rp-w1"] = &Pod{ID: "rp-w1", Name: f.keys[0].Handle, Status: "RUNNING", Cost: 0.30, CreatedAt: t0.Add(-5 * time.Minute)}
+	rp.pods["rp-w2"] = &Pod{ID: "rp-w2", Name: f.keys[1].Handle, Status: "RUNNING", Cost: 0.30, CreatedAt: t0.Add(-5 * time.Minute)}
+	one := 1
+	st.work = Work{
+		Rounds: []WorkRound{{
+			ID: "s3-o00033", Entries: 2, RunsWanted: 2, GradesWanted: 1, BaselinesWanted: &one,
+			BaselineDisputed: true, FreshGradersWanted: &one, ExamAt: t0.Add(-5 * time.Minute).Unix(),
+		}},
+		Machines: []Machine{
+			{Handle: f.keys[0].Handle, LastSeen: t0.Add(-5 * time.Second).Unix()},
+			{Handle: f.keys[1].Handle, LastSeen: t0.Add(-5 * time.Second).Unix()},
+		},
+	}
+	if err := f.writeLedger(&ledger{Pods: map[string]*podRecord{
+		ledgerKey("runpod", "rp-w1"): {ID: "rp-w1", Market: "runpod", Handle: f.keys[0].Handle, GPU: "RTX 4090", Cost: 0.30, Start: t0.Add(-5 * time.Minute), Alive: t0},
+		ledgerKey("runpod", "rp-w2"): {ID: "rp-w2", Market: "runpod", Handle: f.keys[1].Handle, GPU: "RTX 4090", Cost: 0.30, Start: t0.Add(-5 * time.Minute), Alive: t0},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := tick(context.Background(), f); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	rp.mu.Lock()
+	aliveCount := len(rp.pods)
+	rp.mu.Unlock()
+	if aliveCount != 2 {
+		t.Fatalf("when disputed-baseline replacement fails offer admission, tick() MUST keep both warm workers alive; got %d alive", aliveCount)
+	}
+}
+
+// Review 32 P2 #5: An ambiguous Clore create whose first observed matching order is already
+// expired (`State == "gone"`) MUST retire cleanly once, preserving spend through the conservatively
+// observed end time instead of growing forever or being zeroed by --clear; genuinely ambiguous
+// matches (2+ expired orders) MUST remain pending.
+func TestReview32AmbiguousCloreCreateReconcilesUniquelyAttributableExpiredOrder(t *testing.T) {
+	t0 := time.Date(2026, 11, 27, 10, 0, 0, 0, time.UTC)
+	tObs := t0.Add(3 * time.Hour) // 13:00 UTC: $0.50/h * 3h = $1.50 (+ $0.10 order fee)
+	tNext := tObs.Add(time.Hour)  // 14:00 UTC: spend must stay frozen after retirement!
+
+	t.Run("single_expired_clore_order_retires_once_and_freezes_spend", func(t *testing.T) {
+		cloreSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/my_orders" {
+				// 1 matching expired order for server 77001 created at t0; price $10.909/day * 1.1 / 24 ≈ $0.50/h.
+				_, _ = w.Write([]byte(fmt.Sprintf(`{"code":0,"orders":[{"id":88001,"si":77001,"ct":%d,"expired":true,"currency":"USD-Blockchain","price":10.909090909090908,"specs":{"gpu":"1x NVIDIA RTX 4090"}}]}`, t0.Unix())))
+				return
+			}
+			http.NotFound(w, r)
+		}))
+		defer cloreSrv.Close()
+
+		cur := tObs
+		rp, st := newFakeRunPod(t), newFakeStet(t)
+		f, _ := testFleet(t, rp, st, 1)
+		f.now = func() time.Time { return cur }
+		cm := newClore(cloreSrv.URL, "clore-key")
+		f.markets = []Market{cm}
+		if err := f.writeLedger(&ledger{Pending: map[string]*pendingRent{
+			"p-clore-exp": {
+				ID: "p-clore-exp", Market: "clore", Handle: f.keys[0].Handle, OfferID: "77001", Host: "77001", GPU: "RTX 4090",
+				Cost: 0.60, TransferCost: 0.10, FixedCost: 0.10, Created: t0,
+			},
+		}}); err != nil {
+			t.Fatal(err)
+		}
+
+		// 1. cmdWorkersResolve reconciles the single expired Clore order without needing --clear!
+		if err := cmdWorkersResolve(context.Background(), f, false); err != nil {
+			t.Fatalf("cmdWorkersResolve on single expired Clore order: %v", err)
+		}
+		l, err := f.readLedger()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(l.Pending) != 0 || len(l.Pods) != 0 {
+			t.Fatalf("expected expired pending Clore order retired cleanly, got Pending=%d Pods=%d", len(l.Pending), len(l.Pods))
+		}
+		spentObs, err := f.spent(l, startOfDay(tObs))
+		if err != nil {
+			t.Fatal(err)
+		}
+		// $0.10 fixed order fee + 3h * $0.50/h = $1.60!
+		if math.Abs(spentObs-1.60) > 1e-3 {
+			t.Fatalf("expected retired expired Clore order spend $1.60 ($0.10 fee + 3h*$0.50/h), got $%.4f", spentObs)
+		}
+
+		// 2. Advancing clock +1h MUST NOT grow spend past $1.60!
+		cur = tNext
+		vNext, err := f.look(context.Background())
+		if err != nil {
+			t.Fatalf("look +1h after retirement: %v", err)
+		}
+		if math.Abs(vNext.Today-1.60) > 1e-3 {
+			t.Fatalf("retired expired Clore order spend must stay frozen at $1.60 (+1h), got $%.4f", vNext.Today)
+		}
+
+		// 3. A later ambiguous create on the SAME server 77001 MUST NOT falsely re-match already-retired order 88001!
+		if err := f.writeLedger(&ledger{Pending: map[string]*pendingRent{
+			"p-clore-later": {
+				ID: "p-clore-later", Market: "clore", Handle: f.keys[0].Handle, OfferID: "77001", Host: "77001", GPU: "RTX 4090",
+				Cost: 0.60, TransferCost: 0.10, FixedCost: 0.10, Created: t0.Add(1 * time.Minute),
+			},
+		}}); err != nil {
+			t.Fatal(err)
+		}
+		if err := cmdWorkersResolve(context.Background(), f, false); err == nil {
+			t.Fatal("expected already-retired order 88001 to be ignored for a later pending reservation")
+		}
+		l2, _ := f.readLedger()
+		if len(l2.Pending) != 1 {
+			t.Fatalf("expected second reservation to remain pending rather than reusing retired 88001, got %+v", l2.Pending)
+		}
+	})
+
+	t.Run("two_expired_clore_orders_stay_ambiguous_and_pending", func(t *testing.T) {
+		cloreSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/my_orders" {
+				_, _ = w.Write([]byte(fmt.Sprintf(`{"code":0,"orders":[{"id":88011,"si":77002,"ct":%d,"expired":true,"currency":"USD-Blockchain","price":10.909090909090908,"specs":{"gpu":"1x NVIDIA RTX 4090"}},{"id":88012,"si":77002,"ct":%d,"expired":true,"currency":"USD-Blockchain","price":10.909090909090908,"specs":{"gpu":"1x NVIDIA RTX 4090"}}]}`, t0.Unix(), t0.Add(10*time.Second).Unix())))
+				return
+			}
+			http.NotFound(w, r)
+		}))
+		defer cloreSrv.Close()
+
+		rp, st := newFakeRunPod(t), newFakeStet(t)
+		f, _ := testFleet(t, rp, st, 1)
+		f.now = func() time.Time { return tObs }
+		f.markets = []Market{newClore(cloreSrv.URL, "clore-key")}
+		if err := f.writeLedger(&ledger{Pending: map[string]*pendingRent{
+			"p-clore-ambig": {
+				ID: "p-clore-ambig", Market: "clore", Handle: f.keys[0].Handle, OfferID: "77002", Host: "77002", GPU: "RTX 4090",
+				Cost: 0.60, TransferCost: 0.10, FixedCost: 0.10, Created: t0,
+			},
+		}}); err != nil {
+			t.Fatal(err)
+		}
+		if err := cmdWorkersResolve(context.Background(), f, false); err == nil {
+			t.Fatal("expected ambiguous error for two matching expired Clore orders")
+		}
+		l, _ := f.readLedger()
+		if len(l.Pending) != 1 {
+			t.Fatalf("ambiguous expired Clore match MUST remain pending, got %+v", l.Pending)
+		}
+	})
+}
+
+// Review 32 P2 #6: A closed stopped billingSegment recorded with an explicitly free storage rate
+// (Rate=0, RateUnknown=false) MUST NOT be retroactively repriced when a later stop has missing
+// storage pricing (DiskCostUnknown=true) or reports a positive DiskCost.
+func TestReview32ClosedExplicitlyFreeStoppedSegmentNotRewrittenByLaterUnknownStop(t *testing.T) {
+	t0 := time.Date(2026, 11, 27, 10, 0, 0, 0, time.UTC)
+	tStop1 := t0.Add(1 * time.Hour)  // 10:00..11:00 running @ $0.60/h = $0.60
+	tResume := t0.Add(2 * time.Hour) // 11:00..12:00 stopped @ KNOWN $0.00/h = $0.00
+	tStop2 := t0.Add(3 * time.Hour)  // 12:00..13:00 running @ $0.60/h = $0.60
+	tEnd := t0.Add(4 * time.Hour)    // 13:00..14:00 stopped @ UNKNOWN rate -> conservative $0.60/h = $0.60
+
+	r := podRecord{
+		ID: "993261", Market: "vast", Handle: "stet-rp-01",
+		Cost: 0.60, DiskCost: 0, DiskCostUnknown: false,
+		Start: t0, Alive: tStop1,
+	}
+	// Stop #1 at known $0.00 storage rate, then resume at 12:00.
+	r.markStoppedAt(tStop1, time.Time{})
+	r.markStoppedAt(tResume, time.Time{})
+	r.markLiveAt(tResume, time.Time{})
+	if len(r.Segments) != 2 || !r.Segments[1].Stopped || r.Segments[1].Rate != 0 || r.Segments[1].RateUnknown {
+		t.Fatalf("expected closed explicitly-free stopped segment (Rate=0, RateUnknown=false), got %+v", r.Segments)
+	}
+	// Run until 13:00, then Stop #2 with missing storage pricing (DiskCostUnknown=true).
+	r.markLiveAt(tStop2, time.Time{})
+	r.DiskCostUnknown = true
+	r.markStoppedAt(tStop2, time.Time{})
+	r.markStoppedAt(tEnd, time.Time{})
+	r.End = tEnd
+
+	// Total MUST be: 1h*$0.60 (run1) + 1h*$0.00 (free stop1) + 1h*$0.60 (run2) + 1h*$0.60 (unknown stop2) = $1.80 (NOT $2.40!).
+	if got := r.dollarsBetween(startOfDay(tEnd), tEnd); math.Abs(got-1.80) > 1e-4 {
+		t.Fatalf("later unknown-rate stop rewrote finished explicitly-free stopped segment: got $%.4f, want $1.80", got)
+	}
+
+	// Even if a later provider reading supplies a positive DiskCost ($0.05/h), the finished
+	// explicitly-free segment from Stop #1 MUST still remain $0.00!
+	r.DiskCost = 0.05
+	r.DiskCostUnknown = false
+	// 1h*$0.60 + 1h*$0.00 + 1h*$0.60 + 1h*$0.05 = $1.25 (NOT $1.30!).
+	if got := r.dollarsBetween(startOfDay(tEnd), tEnd); math.Abs(got-1.25) > 1e-4 {
+		t.Fatalf("later positive DiskCost rewrote finished explicitly-free stopped segment: got $%.4f, want $1.25", got)
+	}
+}
+
+// Review 32 P2 #7: Vast worker transfer allowance MUST account for worker role (6 GB grader-only
+// vs 16 GB curator-capable covering DCLM's 3.56 GB assets + other shipped curators + corpus +
+// student) AND distinguish estimated transfer from observed transfer spend when provider usage is
+// reported.
+func TestReview32VastRoleBasedTransferAllowanceAndObservedSpendDistinction(t *testing.T) {
+	t0 := time.Date(2026, 11, 27, 14, 0, 0, 0, time.UTC)
+
+	t.Run("role_based_allowance_blocks_dclm_curator_and_grader_when_budget_too_small", func(t *testing.T) {
+		var rented atomic.Int32
+		vastSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == "GET" && r.URL.Path == "/api/v1/instances/":
+				_, _ = w.Write([]byte(`{"instances":[],"next_token":null}`))
+			case r.Method == "POST" && r.URL.Path == "/api/v0/bundles/":
+				_, _ = w.Write([]byte(`{"offers":[{"id":3271,"gpu_name":"RTX 4090","gpu_ram":24576,"num_gpus":1,"dph_base":0.50,"dph_total":0.50,"storage_cost":0,"inet_down_cost":0.10,"cuda_max_good":13.2,"verification":"verified","hosting_type":1,"geolocation":"US"}]}`))
+			case r.Method == "PUT" && strings.HasPrefix(r.URL.Path, "/api/v0/asks/"):
+				rented.Add(1)
+				_, _ = w.Write([]byte(`{"success":true,"new_contract":993271}`))
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer vastSrv.Close()
+
+		vm := newVast(vastSrv.URL, "vast-key")
+		vm.a.sleep = func(context.Context, time.Duration) error { return nil }
+
+		graderOffers, err := vm.Offers(context.Background(), Need{MinGPUMemGB: 12, DiskGB: 35, Curators: false})
+		if err != nil || len(graderOffers) != 1 {
+			t.Fatalf("grader Offers: err=%v len=%d", err, len(graderOffers))
+		}
+		curatorOffers, err := vm.Offers(context.Background(), Need{MinGPUMemGB: 24, DiskGB: 120, Curators: true})
+		if err != nil || len(curatorOffers) != 1 {
+			t.Fatalf("curator Offers: err=%v len=%d", err, len(curatorOffers))
+		}
+		if math.Abs(graderOffers[0].FixedCost-0.60) > 1e-6 || !graderOffers[0].FixedCostEstimated {
+			t.Fatalf("grader-only FixedCost = $%.4f (est=%v), want $0.60 (est=true)", graderOffers[0].FixedCost, graderOffers[0].FixedCostEstimated)
+		}
+		if math.Abs(curatorOffers[0].FixedCost-1.60) > 1e-6 || !curatorOffers[0].FixedCostEstimated {
+			t.Fatalf("curator-capable FixedCost = $%.4f (est=%v), want $1.60 (est=true)", curatorOffers[0].FixedCost, curatorOffers[0].FixedCostEstimated)
+		}
+
+		// Exact reviewer repro: $0.33 remaining ($0.67 spent of $1.00 budget) at $0.10/GB MUST block!
+		newBudgetFleet := func(edits bool, priorSpend, budget float64) *Fleet {
+			rp, st := newFakeRunPod(t), newFakeStet(t)
+			f, _ := testFleet(t, rp, st, 1)
+			f.now = func() time.Time { return t0 }
+			f.o.MaxWorkers = 2
+			f.o.MaxHourly = 5.0
+			f.o.MaxPrice = 3.0
+			f.o.DailyBudget = budget
+			f.o.MinCUDA = "13.0"
+			f.o.MinGPUMemory = 12
+			f.o.MinCuratorGPUMemory = 24
+			f.o.Edits = edits
+			f.o.Market = "vast"
+			f.markets = []Market{vm}
+			if err := (&Arming{Armed: map[string]Armed{"vast": {At: 1}}, Curators: map[string]Armed{"vast": {At: 1}}}).save(f.o.Home); err != nil {
+				t.Fatal(err)
+			}
+			if priorSpend > 0 {
+				if _, err := appendSpendRecord(f.spentLog(), podRecord{
+					ID: "prior-r32-dl", Market: "runpod", Cost: priorSpend, Start: t0.Add(-time.Hour), Alive: t0, End: t0,
+				}, true); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if edits {
+				st.work = Work{Rounds: []WorkRound{{ID: "s3-o00032", RunsWanted: 1}}}
+			}
+			return f
+		}
+
+		// With $0.33 left, BOTH curator ($1.60) and grader ($0.60) are rejected!
+		if err := cmdUp(context.Background(), newBudgetFleet(true, 0.67, 1.00), 1); err != nil {
+			t.Fatalf("cmdUp curator $0.33 left: %v", err)
+		}
+		if err := cmdUp(context.Background(), newBudgetFleet(false, 0.67, 1.00), 1); err != nil {
+			t.Fatalf("cmdUp grader $0.33 left: %v", err)
+		}
+		if rented.Load() != 0 {
+			t.Fatalf("expected 0 rentals with $0.33 left at $0.10/GB, got %d", rented.Load())
+		}
+
+		// With $1.00 left, curator ($1.60) is STILL rejected while grader ($0.60) IS admitted!
+		if err := cmdUp(context.Background(), newBudgetFleet(true, 0.0, 1.00), 1); err != nil {
+			t.Fatalf("cmdUp curator $1.00 left: %v", err)
+		}
+		if rented.Load() != 0 {
+			t.Fatalf("curator worker ($1.60 estimated transfer) must be blocked with $1.00 left, got %d", rented.Load())
+		}
+		if err := cmdUp(context.Background(), newBudgetFleet(false, 0.0, 1.00), 1); err != nil {
+			t.Fatalf("cmdUp grader $1.00 left: %v", err)
+		}
+		if rented.Load() != 1 {
+			t.Fatalf("grader worker ($0.60 estimated transfer) should be admitted with $1.00 left, got %d", rented.Load())
+		}
+	})
+
+	t.Run("observed_transfer_spend_distinguished_from_estimated_transfer_across_live_and_retired", func(t *testing.T) {
+		var downBilled atomic.Value
+		downBilled.Store(4.2) // 4.2 GB * $0.10/GB = $0.42 observed vs $0.60 pre-launch estimate
+		var deleted atomic.Bool
+		vastSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == "GET" && r.URL.Path == "/api/v1/instances/":
+				if deleted.Load() {
+					_, _ = w.Write([]byte(`{"instances":[],"next_token":null}`))
+					return
+				}
+				gb := downBilled.Load().(float64)
+				_, _ = w.Write([]byte(fmt.Sprintf(`{"instances":[{"id":993272,"label":"stet-rp-01","actual_status":"running","intended_status":"running","cur_state":"running","gpu_name":"RTX 4090","dph_base":0.50,"dph_total":0.50,"storage_cost":0,"inet_down_cost":0.10,"inet_down_billed":%.2f,"start_date":%d}],"next_token":null}`, gb, t0.Unix())))
+			case r.Method == "DELETE" && r.URL.Path == "/api/v0/instances/993272/":
+				deleted.Store(true)
+				_, _ = w.Write([]byte(`{"success":true}`))
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer vastSrv.Close()
+
+		cur := t0.Add(30 * time.Minute) // 0.5h * $0.50/h = $0.25 compute
+		rp, st := newFakeRunPod(t), newFakeStet(t)
+		f, _ := testFleet(t, rp, st, 1)
+		f.now = func() time.Time { return cur }
+		vm := newVast(vastSrv.URL, "vast-key")
+		vm.a.sleep = func(context.Context, time.Duration) error { return nil }
+		f.markets = []Market{vm}
+		if err := f.writeLedger(&ledger{Pods: map[string]*podRecord{
+			ledgerKey("vast", "993272"): {
+				ID: "993272", Market: "vast", Handle: f.keys[0].Handle, GPU: "RTX 4090",
+				Cost: 1.10, TransferCost: 0.60, FixedCost: 0.60, FixedCostEstimated: true,
+				Start: t0, Alive: t0, Tracked: true,
+			},
+		}}); err != nil {
+			t.Fatal(err)
+		}
+
+		// 1. Live with observed $0.42 < estimated $0.60: keeps conservative max($0.60, $0.42) + $0.25 = $0.85!
+		vLive, err := f.look(context.Background())
+		if err != nil {
+			t.Fatalf("look live: %v", err)
+		}
+		if math.Abs(vLive.Today-0.85) > 1e-4 {
+			t.Fatalf("live spend with $0.42 observed < $0.60 estimate want $0.85, got $%.4f", vLive.Today)
+		}
+
+		// 2. Live overrun: observed jumps to 11.0 GB ($1.10 > $0.60 estimate) -> live spend immediately reflects $1.10 + $0.25 = $1.35!
+		downBilled.Store(11.0)
+		vOver, err := f.look(context.Background())
+		if err != nil {
+			t.Fatalf("look live overrun: %v", err)
+		}
+		if math.Abs(vOver.Today-1.35) > 1e-4 {
+			t.Fatalf("live overrun spend with $1.10 observed > $0.60 estimate want $1.35, got $%.4f", vOver.Today)
+		}
+
+		// 3. Retired with lower observed transfer ($0.42): once ended, spent.jsonl records BOTH
+		//    FixedCost=$0.60 (estimated) and ObservedTransferCost=$0.42 (observed) and bills observed $0.42 + $0.25 = $0.67!
+		downBilled.Store(4.2)
+		if err := f.writeLedger(&ledger{Pods: map[string]*podRecord{
+			ledgerKey("vast", "993272"): {
+				ID: "993272", Market: "vast", Handle: f.keys[0].Handle, GPU: "RTX 4090",
+				Cost: 1.10, TransferCost: 0.60, FixedCost: 0.60, FixedCostEstimated: true,
+				Start: t0, Alive: cur, Tracked: true,
+			},
+		}}); err != nil {
+			t.Fatal(err)
+		}
+		if err := cmdDown(context.Background(), f, true, nil); err != nil {
+			t.Fatalf("cmdDown: %v", err)
+		}
+		vRet, err := f.look(context.Background())
+		if err != nil {
+			t.Fatalf("look retired: %v", err)
+		}
+		if math.Abs(vRet.Today-0.67) > 1e-4 {
+			t.Fatalf("retired spend with observed $0.42 transfer + $0.25 compute want $0.67, got $%.4f", vRet.Today)
+		}
+		sum, err := f.readSpentSummary()
+		if err != nil {
+			t.Fatal(err)
+		}
+		rec := sum.byContract[ledgerKey("vast", "993272")]
+		if !rec.FixedCostEstimated || !rec.TransferObserved || math.Abs(rec.FixedCost-0.60) > 1e-4 || math.Abs(rec.ObservedTransferCost-0.42) > 1e-4 {
+			t.Fatalf("spent.jsonl must distinguish estimated vs observed transfer: got %+v", rec)
+		}
+	})
+}
+
+// Review 32 Gate 4 regressions (Findings 2, 3, 4, 5, 6, 8):
+//   - MarketKnownIDs includes pre-existing State=="gone" contracts, and non-Clore gone contracts
+//     require credible post-reservation Created timestamps before retiring a pending reservation.
+//   - Dispute eviction respects MaxHourly==0, Stock==1 single-host offers, and pre-existing free slots.
+//   - Partial f.retire failure cleans up l.Pods[key] so fleet.json never keeps both pod & pending.
+//   - vastInstanceObservedTransfer rejects positive billed GB with omitted unit rate, and startup/
+//     unconfirmed-vanish zero transfer never erases a pre-launch transfer estimate.
+func TestReview32Gate4Regressions(t *testing.T) {
+	t0 := time.Date(2026, 11, 28, 12, 0, 0, 0, time.UTC)
+
+	t.Run("market_known_ids_captures_gone_orders_and_stale_lium_deleting_pod_ignored", func(t *testing.T) {
+		cloreSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/my_orders" {
+				// Pre-existing expired order 700 on server 77099 created 1m before t0.
+				_, _ = w.Write([]byte(fmt.Sprintf(`{"code":0,"orders":[{"id":700,"si":77099,"ct":%d,"expired":true,"currency":"USD-Blockchain","price":10.909090909090908,"specs":{"gpu":"1x NVIDIA RTX 4090"}}]}`, t0.Add(-1*time.Minute).Unix())))
+				return
+			}
+			http.NotFound(w, r)
+		}))
+		defer cloreSrv.Close()
+
+		rp, st := newFakeRunPod(t), newFakeStet(t)
+		f, _ := testFleet(t, rp, st, 2)
+		f.now = func() time.Time { return t0 }
+		f.markets = []Market{newClore(cloreSrv.URL, "clore-key")}
+		v, err := f.look(context.Background())
+		if err != nil {
+			t.Fatalf("look: %v", err)
+		}
+		found700 := false
+		for _, id := range v.MarketKnownIDs["clore"] {
+			if id == "700" {
+				found700 = true
+			}
+		}
+		if !found700 {
+			t.Fatalf("MarketKnownIDs must include pre-existing expired/gone Clore order 700, got %v", v.MarketKnownIDs)
+		}
+
+		// Non-Clore (Lium) pre-existing DELETING pod (State=="gone") with missing or stale Created
+		// MUST NOT match a new pending reservation even if absent from KnownIDs.
+		pr := &pendingRent{ID: "p-lium", Market: "lium", Handle: "stet-rp-01", Created: t0}
+		l := &ledger{Pods: map[string]*podRecord{}, Pending: map[string]*pendingRent{"p-lium": pr}}
+		staleRentals := []Rental{
+			{Market: "lium", ID: "old-nodate", Name: "stet-rp-01", State: "gone"},
+			{Market: "lium", ID: "old-stale", Name: "stet-rp-01", State: "gone", Created: t0.Add(-10 * time.Minute)},
+		}
+		if got := matchPendingRentals(pr, l, nil, staleRentals); len(got) != 0 {
+			t.Fatalf("stale/undated non-Clore gone pods MUST NOT match new pending reservation, got %+v", got)
+		}
+	})
+
+	t.Run("dispute_eviction_respects_max_hourly_zero_stock_one_and_free_slots", func(t *testing.T) {
+		one, two := 1, 2
+		// Sub-case A: MaxHourly == 0 MUST keep both warm idle workers alive (no eviction).
+		{
+			rp, st := newFakeRunPod(t), newFakeStet(t)
+			f, _ := testFleet(t, rp, st, 4)
+			f.now = func() time.Time { return t0 }
+			f.o.MaxWorkers = 2
+			f.o.MaxHourly = 0
+			f.o.DailyBudget = 50.0
+			rp.pods["rp-1"] = &Pod{ID: "rp-1", Name: f.keys[0].Handle, Status: "RUNNING", Cost: 0.30, CreatedAt: t0.Add(-5 * time.Minute)}
+			rp.pods["rp-2"] = &Pod{ID: "rp-2", Name: f.keys[1].Handle, Status: "RUNNING", Cost: 0.30, CreatedAt: t0.Add(-5 * time.Minute)}
+			st.work = Work{
+				Rounds: []WorkRound{{ID: "s3-o00040", Entries: 2, GradesWanted: 1, BaselinesWanted: &one, BaselineDisputed: true, FreshGradersWanted: &one, ExamAt: t0.Add(-5 * time.Minute).Unix()}},
+				Machines: []Machine{
+					{Handle: f.keys[0].Handle, LastSeen: t0.Add(-5 * time.Second).Unix()},
+					{Handle: f.keys[1].Handle, LastSeen: t0.Add(-5 * time.Second).Unix()},
+				},
+			}
+			if err := f.writeLedger(&ledger{Pods: map[string]*podRecord{
+				ledgerKey("runpod", "rp-1"): {ID: "rp-1", Market: "runpod", Handle: f.keys[0].Handle, GPU: "RTX 4090", Cost: 0.30, Start: t0.Add(-5 * time.Minute), Alive: t0},
+				ledgerKey("runpod", "rp-2"): {ID: "rp-2", Market: "runpod", Handle: f.keys[1].Handle, GPU: "RTX 4090", Cost: 0.30, Start: t0.Add(-5 * time.Minute), Alive: t0},
+			}}); err != nil {
+				t.Fatal(err)
+			}
+			if err := tick(context.Background(), f); err != nil {
+				t.Fatalf("tick MaxHourly=0: %v", err)
+			}
+			rp.mu.Lock()
+			n := len(rp.pods)
+			rp.mu.Unlock()
+			if n != 2 {
+				t.Fatalf("MaxHourly=0 MUST NOT evict warm idle workers for a dispute; got %d alive", n)
+			}
+		}
+
+		// Sub-case B: Stock==1 affordable offer + unaffordable offer -> evict ONLY 1 warm worker, NOT 2!
+		{
+			var rented atomic.Int32
+			vastSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == "GET" && r.URL.Path == "/api/v1/instances/":
+					_, _ = w.Write([]byte(`{"instances":[],"next_token":null}`))
+				case r.Method == "POST" && r.URL.Path == "/api/v0/bundles/":
+					_, _ = w.Write([]byte(`{"offers":[` +
+						`{"id":3401,"gpu_name":"RTX 4090","gpu_ram":24576,"num_gpus":1,"dph_base":0.30,"dph_total":0.30,"storage_cost":0,"inet_down_cost":0,"cuda_max_good":13.2,"verification":"verified","hosting_type":1,"geolocation":"US"},` +
+						`{"id":3402,"gpu_name":"RTX 4090","gpu_ram":24576,"num_gpus":1,"dph_base":0.90,"dph_total":0.90,"storage_cost":0,"inet_down_cost":0,"cuda_max_good":13.2,"verification":"verified","hosting_type":1,"geolocation":"US"}` +
+						`]}`))
+				case r.Method == "PUT" && strings.HasPrefix(r.URL.Path, "/api/v0/asks/"):
+					rented.Add(1)
+					_, _ = w.Write([]byte(`{"success":true,"new_contract":993401}`))
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer vastSrv.Close()
+
+			rp, st := newFakeRunPod(t), newFakeStet(t)
+			f, _ := testFleet(t, rp, st, 4)
+			f.now = func() time.Time { return t0 }
+			f.o.MaxWorkers = 2
+			f.o.MaxHourly = 0.80
+			f.o.MaxPrice = 2.00
+			f.o.DailyBudget = 50.0
+			f.o.MinCUDA = "13.0"
+			f.o.MinGPUMemory = 12
+			vm := newVast(vastSrv.URL, "vast-key")
+			vm.a.sleep = func(context.Context, time.Duration) error { return nil }
+			f.markets = append(f.markets, vm)
+			if err := (&Arming{Armed: map[string]Armed{"vast": {At: 1}}}).save(f.o.Home); err != nil {
+				t.Fatal(err)
+			}
+			rp.pods["rp-1"] = &Pod{ID: "rp-1", Name: f.keys[0].Handle, Status: "RUNNING", Cost: 0.20, CreatedAt: t0.Add(-5 * time.Minute)}
+			rp.pods["rp-2"] = &Pod{ID: "rp-2", Name: f.keys[1].Handle, Status: "RUNNING", Cost: 0.20, CreatedAt: t0.Add(-5 * time.Minute)}
+			st.work = Work{
+				Rounds: []WorkRound{{ID: "s3-o00041", Entries: 2, GradesWanted: 2, BaselinesWanted: &two, BaselineDisputed: true, FreshGradersWanted: &two, ExamAt: t0.Add(-5 * time.Minute).Unix()}},
+				Machines: []Machine{
+					{Handle: f.keys[0].Handle, LastSeen: t0.Add(-5 * time.Second).Unix()},
+					{Handle: f.keys[1].Handle, LastSeen: t0.Add(-5 * time.Second).Unix()},
+				},
+			}
+			if err := f.writeLedger(&ledger{Pods: map[string]*podRecord{
+				ledgerKey("runpod", "rp-1"): {ID: "rp-1", Market: "runpod", Handle: f.keys[0].Handle, GPU: "RTX 4090", Cost: 0.20, Start: t0.Add(-5 * time.Minute), Alive: t0},
+				ledgerKey("runpod", "rp-2"): {ID: "rp-2", Market: "runpod", Handle: f.keys[1].Handle, GPU: "RTX 4090", Cost: 0.20, Start: t0.Add(-5 * time.Minute), Alive: t0},
+			}}); err != nil {
+				t.Fatal(err)
+			}
+			if err := tick(context.Background(), f); err != nil {
+				t.Fatalf("tick Stock==1: %v", err)
+			}
+			rp.mu.Lock()
+			rpAlive := len(rp.pods)
+			rp.mu.Unlock()
+			if rpAlive != 1 || rented.Load() != 1 {
+				t.Fatalf("with one Stock==1 affordable offer, want 1 warm worker kept and 1 replacement rented; got rpAlive=%d rented=%d", rpAlive, rented.Load())
+			}
+		}
+
+		// Sub-case C: Pre-existing free slot already consumes hourly budget -> evict 0 warm workers!
+		{
+			var vastRented atomic.Int32
+			vastSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == "GET" && r.URL.Path == "/api/v1/instances/":
+					_, _ = w.Write([]byte(`{"instances":[],"next_token":null}`))
+				case r.Method == "POST" && r.URL.Path == "/api/v0/bundles/":
+					_, _ = w.Write([]byte(`{"offers":[` +
+						`{"id":3421,"gpu_name":"RTX 4090","gpu_ram":24576,"num_gpus":1,"dph_base":0.40,"dph_total":0.40,"storage_cost":0,"inet_down_cost":0,"cuda_max_good":13.2,"verification":"verified","hosting_type":1,"geolocation":"US"},` +
+						`{"id":3422,"gpu_name":"RTX 4090","gpu_ram":24576,"num_gpus":1,"dph_base":0.40,"dph_total":0.40,"storage_cost":0,"inet_down_cost":0,"cuda_max_good":13.2,"verification":"verified","hosting_type":1,"geolocation":"US"}` +
+						`]}`))
+				case r.Method == "PUT" && strings.HasPrefix(r.URL.Path, "/api/v0/asks/"):
+					n := vastRented.Add(1)
+					_, _ = w.Write([]byte(fmt.Sprintf(`{"success":true,"new_contract":%d}`, 993420+n)))
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer vastSrv.Close()
+
+			rp, st := newFakeRunPod(t), newFakeStet(t)
+			f, _ := testFleet(t, rp, st, 5)
+			f.now = func() time.Time { return t0 }
+			f.o.MaxWorkers = 4
+			f.o.MaxHourly = 1.00
+			f.o.MaxPrice = 2.00
+			f.o.DailyBudget = 50.0
+			f.o.MinCUDA = "13.0"
+			f.o.MinGPUMemory = 12
+			vm := newVast(vastSrv.URL, "vast-key")
+			vm.a.sleep = func(context.Context, time.Duration) error { return nil }
+			f.markets = append(f.markets, vm)
+			if err := (&Arming{Armed: map[string]Armed{"vast": {At: 1}}}).save(f.o.Home); err != nil {
+				t.Fatal(err)
+			}
+			rp.pods["rp-busy"] = &Pod{ID: "rp-busy", Name: f.keys[0].Handle, Status: "RUNNING", Cost: 0.20, CreatedAt: t0.Add(-5 * time.Minute)}
+			rp.pods["rp-w1"] = &Pod{ID: "rp-w1", Name: f.keys[1].Handle, Status: "RUNNING", Cost: 0.20, CreatedAt: t0.Add(-5 * time.Minute)}
+			rp.pods["rp-w2"] = &Pod{ID: "rp-w2", Name: f.keys[2].Handle, Status: "RUNNING", Cost: 0.20, CreatedAt: t0.Add(-5 * time.Minute)}
+			st.work = Work{
+				Rounds: []WorkRound{{ID: "s3-o00042", Entries: 2, GradesWanted: 2, BaselinesWanted: &two, BaselineDisputed: true, FreshGradersWanted: &two, ExamAt: t0.Add(-5 * time.Minute).Unix()}},
+				Machines: []Machine{
+					{Handle: f.keys[0].Handle, Busy: "grade", LastSeen: t0.Add(-5 * time.Second).Unix()},
+					{Handle: f.keys[1].Handle, LastSeen: t0.Add(-5 * time.Second).Unix()},
+					{Handle: f.keys[2].Handle, LastSeen: t0.Add(-5 * time.Second).Unix()},
+				},
+			}
+			if err := f.writeLedger(&ledger{Pods: map[string]*podRecord{
+				ledgerKey("runpod", "rp-busy"): {ID: "rp-busy", Market: "runpod", Handle: f.keys[0].Handle, GPU: "RTX 4090", Cost: 0.20, Start: t0.Add(-5 * time.Minute), Alive: t0},
+				ledgerKey("runpod", "rp-w1"):   {ID: "rp-w1", Market: "runpod", Handle: f.keys[1].Handle, GPU: "RTX 4090", Cost: 0.20, Start: t0.Add(-5 * time.Minute), Alive: t0},
+				ledgerKey("runpod", "rp-w2"):   {ID: "rp-w2", Market: "runpod", Handle: f.keys[2].Handle, GPU: "RTX 4090", Cost: 0.20, Start: t0.Add(-5 * time.Minute), Alive: t0},
+			}}); err != nil {
+				t.Fatal(err)
+			}
+			if err := tick(context.Background(), f); err != nil {
+				t.Fatalf("tick free-slot baseline: %v", err)
+			}
+			rp.mu.Lock()
+			_, w1Alive := rp.pods["rp-w1"]
+			_, w2Alive := rp.pods["rp-w2"]
+			rpAlive := len(rp.pods)
+			rp.mu.Unlock()
+			if !w1Alive || !w2Alive || rpAlive != 3 || vastRented.Load() != 1 {
+				t.Fatalf("evicting a warm worker unlocks 0 extra replacements (hourly $1.00 fits 1 $0.40/h either way); want both warm workers kept and 1 Vast replacement rented, got w1=%v w2=%v rpAlive=%d vastRented=%d", w1Alive, w2Alive, rpAlive, vastRented.Load())
+			}
+		}
+	})
+
+	t.Run("partial_retire_failure_cleans_up_transient_pod_in_ledger", func(t *testing.T) {
+		cloreSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/my_orders" {
+				_, _ = w.Write([]byte(fmt.Sprintf(`{"code":0,"orders":[{"id":88051,"si":77051,"ct":%d,"expired":true,"currency":"USD-Blockchain","price":10.909090909090908,"specs":{"gpu":"1x NVIDIA RTX 4090"}}]}`, t0.Unix())))
+				return
+			}
+			http.NotFound(w, r)
+		}))
+		defer cloreSrv.Close()
+
+		rp, st := newFakeRunPod(t), newFakeStet(t)
+		f, _ := testFleet(t, rp, st, 2)
+		f.now = func() time.Time { return t0.Add(time.Hour) }
+		f.markets = append(f.markets, newClore(cloreSrv.URL, "clore-key"))
+		// Also include a live RunPod contract matched by a second pending entry so `changed` becomes true.
+		rp.pods["rp-ok"] = &Pod{ID: "rp-ok", Name: f.keys[1].Handle, Status: "RUNNING", Cost: 0.30, CreatedAt: t0}
+		if err := f.writeLedger(&ledger{Pending: map[string]*pendingRent{
+			"p-1-ok":   {ID: "p-1-ok", Market: "runpod", Handle: f.keys[1].Handle, GPU: "RTX 4090", Cost: 0.30, Created: t0},
+			"p-2-fail": {ID: "p-2-fail", Market: "clore", Handle: f.keys[0].Handle, OfferID: "77051", Host: "77051", GPU: "RTX 4090", Cost: 0.60, Created: t0},
+		}}); err != nil {
+			t.Fatal(err)
+		}
+		// Make spent.jsonl unwritable (replace with a directory) so f.retire fails on p-2-fail.
+		if err := os.MkdirAll(f.spentLog(), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := cmdWorkersResolve(context.Background(), f, false); err == nil {
+			t.Fatal("expected cmdWorkersResolve error when spent.jsonl is unwritable")
+		}
+		l, err := f.readLedger()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if l.Pods[ledgerKey("clore", "88051")] != nil {
+			t.Fatalf("failed f.retire MUST NOT leave transient clore:88051 in l.Pods alongside l.Pending: Pods=%+v Pending=%+v", l.Pods, l.Pending)
+		}
+		if l.Pending["p-2-fail"] == nil {
+			t.Fatalf("failed f.retire must preserve l.Pending[p-2-fail] for retry")
+		}
+	})
+
+	t.Run("vast_observed_transfer_requires_unit_rate_and_guards_startup_zero_vanish", func(t *testing.T) {
+		// 1. Positive inet_down_billed WITHOUT inet_down_cost MUST return (0, false).
+		var instMissingRate vastInstance
+		if err := json.Unmarshal([]byte(`{"id":1,"inet_down_billed":12.0}`), &instMissingRate); err != nil {
+			t.Fatal(err)
+		}
+		if got, ok := vastInstanceObservedTransfer(instMissingRate); ok || got != 0 {
+			t.Fatalf("positive inet_down_billed with omitted inet_down_cost MUST return (0,false), got (%v,%v)", got, ok)
+		}
+		// 2. Explicit inet_down_cost: 0.0 with positive inet_down_billed returns (0, true).
+		var instFreeRate vastInstance
+		if err := json.Unmarshal([]byte(`{"id":2,"inet_down_billed":12.0,"inet_down_cost":0.0}`), &instFreeRate); err != nil {
+			t.Fatal(err)
+		}
+		if got, ok := vastInstanceObservedTransfer(instFreeRate); !ok || got != 0 {
+			t.Fatalf("explicit free inet_down_cost:0 with billed GB want (0,true), got (%v,%v)", got, ok)
+		}
+		// 3. Starting state reporting $0.00 observed MUST NOT latch TransferObserved on estimated contract.
+		r := &podRecord{ID: "99", Market: "vast", Cost: 2.10, TransferCost: 1.60, FixedCost: 1.60, FixedCostEstimated: true, Start: t0, Alive: t0}
+		pStart := &Rental{Market: "vast", ID: "99", State: "starting", Price: 0.50, TransferObserved: true, ObservedTransferCost: 0}
+		reconcileRentalRate(r, pStart)
+		if r.TransferObserved {
+			t.Fatalf("starting state with $0.00 transfer must not latch TransferObserved=true")
+		}
+		// 4. Running state reporting $0.00 followed by unconfirmed vanish (p == nil) MUST retain $1.60 estimate!
+		vastSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			switch {
+			case req.Method == "GET" && req.URL.Path == "/api/v1/instances/":
+				_, _ = w.Write([]byte(`{"instances":[],"next_token":null}`))
+			case req.Method == "GET" && req.URL.Path == "/api/v0/instances/993499/":
+				http.NotFound(w, req)
+			default:
+				http.NotFound(w, req)
+			}
+		}))
+		defer vastSrv.Close()
+		rp, st := newFakeRunPod(t), newFakeStet(t)
+		f, _ := testFleet(t, rp, st, 1)
+		f.now = func() time.Time { return t0.Add(time.Hour) }
+		vm := newVast(vastSrv.URL, "vast-key")
+		vm.a.sleep = func(context.Context, time.Duration) error { return nil }
+		f.markets = []Market{vm}
+		if err := f.writeLedger(&ledger{Pods: map[string]*podRecord{
+			ledgerKey("vast", "993499"): {
+				ID: "993499", Market: "vast", Handle: f.keys[0].Handle, GPU: "RTX 4090",
+				Cost: 2.10, TransferCost: 1.60, FixedCost: 1.60, FixedCostEstimated: true,
+				TransferObserved: true, ObservedTransferCost: 0.0,
+				Start: t0, Alive: t0.Add(time.Hour), Tracked: true,
+			},
+		}}); err != nil {
+			t.Fatal(err)
+		}
+		vVanish, err := f.look(context.Background())
+		if err != nil {
+			t.Fatalf("look vanish: %v", err)
+		}
+		// 1h * $0.50 compute + $1.60 pre-launch estimate = $2.10 (NOT $0.50!).
+		if math.Abs(vVanish.Today-2.10) > 1e-4 {
+			t.Fatalf("unconfirmed vanished instance with prior $0.00 snapshot must retain $1.60 estimate ($2.10 total), got $%.4f", vVanish.Today)
 		}
 	})
 }

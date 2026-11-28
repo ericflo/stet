@@ -6090,3 +6090,168 @@ def test_review31_official_replay_uses_published_round_scale_and_preserves_cli_o
     _, practice_scale, practice_rnd = cli.resolve_round(argparse.Namespace(round="3", scale=None, season="s3"))
     assert practice_rnd.kind == "practice"
     assert practice_scale.name == "nano"
+
+
+def test_review32_verify_loop_uses_claimed_job_scale_and_deferred_sit_scale(monkeypatch, tmp_path):
+    """Review 32 P2 #2: A running `stet verify` loop whose startup `/api/v1/season` returned `nano`
+    MUST resolve the scale per claimed job (from job/round scale), carry that scale through
+    deferred Pending sitting, record pass timings under the job's scale (not startup scale), and
+    reject jobs whose job scale and round scale conflict before running."""
+    import argparse
+
+    from stet import client
+    from stet.spec import official_round
+
+    monkeypatch.setenv("STET_CONFIG", str(tmp_path / "cfg"))
+    monkeypatch.setenv("STET_CACHE", str(tmp_path / "cache"))
+    monkeypatch.setenv("STET_DEV", "1")
+    monkeypatch.setattr(client, "verify_beacon", lambda season, beacon: None)
+
+    s3 = load_season("s3")
+    beacon = {"round": 12345, "randomness": "a" * 64}
+    crawl = {"crawl": "CC-MAIN-2026-08", "paths_sha256": "b" * 64, "n_shards": 1000}
+    exam_sha = "e" * 64
+    script_sha = "d" * 64
+    editor_id = "f" * 64
+
+    std_round_desc = official_round(s3, 1, beacon, crawl).describe()
+    std_round_desc["scale"] = "standard"
+    std_round_desc["exam_digest"] = exam_sha
+
+    micro_round_early = official_round(s3, 2, beacon, crawl).describe()
+    micro_round_early["scale"] = "micro"
+
+    bad_round_desc = official_round(s3, 3, beacon, crawl).describe()
+    bad_round_desc["scale"] = "nano"
+    bad_round_desc["exam_digest"] = exam_sha
+
+    # Prepare fake key, device, and isolated _verify stubs (stub stet.train in sys.modules
+    # so this test runs cleanly in no-Torch CI environments).
+    import sys as _sys
+    import types as _types
+
+    key = type("K", (), {"handle": "verifier-r32", "public_hex": "11" * 32})()
+    device = type("D", (), {"type": "cuda", "index": 0})()
+    monkeypatch.setattr(client, "need_key", lambda: key)
+    fake_train = _types.ModuleType("stet.train")
+    fake_train.pick_device = lambda dev=None: device
+    fake_train.hardware_info = lambda dev: {
+        "gpu": "NVIDIA RTX 4090",
+        "vram_gb": 24,
+        "backend": "cuda",
+        "cc": "8.9",
+        "bf16_native": True,
+    }
+    monkeypatch.setitem(_sys.modules, "stet.train", fake_train)
+    monkeypatch.setattr("stet.runner.remove_tree", lambda p: True)
+    monkeypatch.setattr(client.time, "sleep", lambda s: None)
+
+    seen_grade_scales: list[str] = []
+    seen_sit_scales: list[str] = []
+    seen_edit_scales: list[str] = []
+    recorded_passes: list[tuple[str, float]] = []
+    released_jobs: list[tuple[int, str]] = []
+    posted_results: list[tuple[str, str]] = []
+
+    orig_note_pass = client.note_pass
+
+    def spy_note_pass(scale_name, gpu, result, season_digest=None):
+        recorded_passes.append((scale_name, float((result or {}).get("train", {}).get("seconds", 0))))
+        orig_note_pass(scale_name, gpu, result, season_digest)
+
+    monkeypatch.setattr(client, "note_pass", spy_note_pass)
+    monkeypatch.setattr(client, "_release", lambda jid, k, reason: (released_jobs.append((jid, reason)) or True))
+
+    def fake_grade_job(job, season, scale, dev, k, out, work, bases=None):
+        seen_grade_scales.append(scale.name)
+        if job["id"] == 202:
+            # Early pre-exam job: returns Pending carrying its resolved scale ("micro").
+            rnd = client.round_from_api(season, job["round"])
+            trained = type("T", (), {"result": {"train": {"seconds": 321.0}}, "model": object()})()
+            return client.Pending(job, rnd, trained, dev, scale=scale)
+        res = {
+            "valid": True,
+            "scale": scale.name,
+            "train": {"seconds": 1812.5},
+            "exam": {"mean": -2.1},
+        }
+        return res, {"exam": {"mean": -2.2}}
+
+    def fake_sit(p, bases, k, scale):
+        seen_sit_scales.append(scale.name)
+        return {"valid": True, "scale": scale.name, "train": {"seconds": 321.0}, "exam": {"mean": -2.0}}, {"exam": {"mean": -2.2}}
+
+    def fake_edit_job(job, season, scale, k, out, work, sandbox, gpu=0):
+        seen_edit_scales.append(scale.name)
+        return {"scale": scale.name, "edit": {"status": "ok", "seconds": 12.0}, "script_sha256": script_sha, "script_size": 100}
+
+    monkeypatch.setattr(client, "_grade_job", fake_grade_job)
+    monkeypatch.setattr(client, "_sit", fake_sit)
+    monkeypatch.setattr(client, "_edit_job", fake_edit_job)
+    monkeypatch.setattr(client, "slim_result", lambda res, base: {"scale": res["scale"]})
+
+    # Queue of claims:
+    #  1) job 201: posted-exam grade at `standard` (server active scale switched to `standard`!)
+    #  2) job 202: early pre-exam grade at `micro` (older mixed-scale round while server scale is `standard`)
+    #  3) job 204: malformed job with mismatched job.scale="standard" vs round.scale="nano" -> rejected & released!
+    #  4) job 203: edit job at `standard`
+    #  5) None -> done
+    claims = [
+        {"scale": "standard", "job": {"id": 201, "kind": "grade", "scale": "standard", "round": std_round_desc, "editor": {"name": "ed", "version": 1}, "script": {"sha256": script_sha}}},
+        {"scale": "standard", "job": {"id": 202, "kind": "grade", "scale": "micro", "round": micro_round_early, "editor": {"name": "ed", "version": 1}, "script": {"sha256": script_sha}}},
+        {"scale": "standard", "job": {"id": 204, "kind": "grade", "scale": "standard", "round": bad_round_desc, "editor": {"name": "ed", "version": 1}, "script": {"sha256": script_sha}}},
+        {"scale": "standard", "job": {"id": 203, "kind": "edit", "scale": "standard", "round": std_round_desc, "editor": {"id": editor_id, "name": "ed", "version": 1}}},
+        {"scale": "standard", "job": None, "message": "done"},
+    ]
+    claim_bodies: list[dict] = []
+    exam_polls = [0]
+
+    def fake_request(method, path, body=None, **kw):
+        if method == "GET" and path == "/api/v1/season":
+            return {"scale": "nano", "season": "s3", "digest": s3.digest}
+        if method == "POST" and path == "/api/v1/jobs/claim":
+            claim_bodies.append(dict(body or {}))
+            return claims.pop(0) if claims else {"scale": "standard", "job": None}
+        if method == "GET" and path == "/api/v1/rounds/s3-o00002":
+            exam_polls[0] += 1
+            # Exam posts after job 204 (poll 1) and job 203 (poll 2) finish, on poll 3.
+            if exam_polls[0] >= 3:
+                return {"round": dict(micro_round_early, exam_digest=exam_sha, status="open")}
+            return {"round": dict(micro_round_early, status="open")}
+        raise AssertionError(f"unexpected request {method} {path}")
+
+    monkeypatch.setattr(client, "request", fake_request)
+    monkeypatch.setattr(client, "report", lambda path, payload, k, log=None: (posted_results.append((path, payload["scale"])) or {"status": "ok"}))
+
+    args = argparse.Namespace(
+        season="s3", device="cuda", any_device=True, edits=True, no_sandbox=True, sandbox="none",
+        once=False, max_jobs=3, exit_when_idle=0, no_upgrade=True,
+    )
+    client._verify(args)
+
+    assert seen_grade_scales == ["standard", "micro"]
+    assert seen_edit_scales == ["standard"]
+    assert seen_sit_scales == ["micro"]
+    assert recorded_passes == [("standard", 1812.5), ("micro", 321.0)]
+    assert released_jobs == [(204, "this client does not understand the job")]
+    assert posted_results == [
+        ("/api/v1/jobs/201/result", "standard"),
+        ("/api/v1/jobs/203/script", "standard"),
+        ("/api/v1/jobs/202/result", "micro"),
+    ]
+    # Verify per-scale pass.json retention and pass_scale tagging on claims:
+    # Claim 1 has no saved pass yet; after job 201 (`standard`, 1812.5s), Claim 2 sends standard/1812.5;
+    # after job 202 (`micro`, 321.0s) while server active scale remains `standard`, Claims 3 & 4 MUST
+    # continue sending `standard` / 1812.5s (NOT contaminated by micro's 321.0s!).
+    assert "pass_seconds" not in claim_bodies[0]
+    assert claim_bodies[1].get("pass_seconds") == 1812.5 and claim_bodies[1].get("pass_scale") == "standard"
+    assert claim_bodies[2].get("pass_seconds") == 1812.5 and claim_bodies[2].get("pass_scale") == "standard"
+    assert claim_bodies[3].get("pass_seconds") == 1812.5 and claim_bodies[3].get("pass_scale") == "standard"
+    assert client.saved_pass("standard", "NVIDIA RTX 4090", s3.digest) == 1812.5
+    assert client.saved_pass("micro", "NVIDIA RTX 4090", s3.digest) == 321.0
+    # Verify mismatched job/round scale is rejected cleanly before dispatch.
+    try:
+        client._job_scale(s3, {"scale": "standard", "round": bad_round_desc}, s3.scale("nano"))
+        raise AssertionError("expected ValueError on conflicting job/round scale")
+    except ValueError as err:
+        assert "does not match" in str(err)

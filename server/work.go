@@ -265,7 +265,7 @@ func (a *App) work(s *State) Work {
 	for _, acct := range s.Accounts {
 		if acct.Anchor {
 			passSecs := acct.PassSeconds
-			if a.season.Digest != "" && acct.PassSeason != a.season.Digest {
+			if (a.season.Digest != "" && acct.PassSeason != a.season.Digest) || acct.PassScale != a.cfg.Scale {
 				passSecs = 0
 			}
 			out.Machines = append(out.Machines, WorkMachine{Handle: acct.Handle, Worker: acct.Worker, LastSeen: acct.LastSeen, Busy: busy[acct.ID], Long: busy[acct.ID] == "farm" && long[acct.ID],

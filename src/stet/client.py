@@ -789,6 +789,25 @@ def _job_round(season, job: dict, out):
     return rnd
 
 
+def _job_scale(season, job: dict, fallback):
+    """Resolve the scale a claimed job must run at, preferring the job and round's own scale
+    over the server default read when `stet verify` started."""
+    raw_job = job.get("scale")
+    raw_round = job["round"].get("scale") if isinstance(job.get("round"), dict) else None
+    name_job = raw_job.strip() if isinstance(raw_job, str) else ""
+    name_round = raw_round.strip() if isinstance(raw_round, str) else ""
+    if raw_job is not None and (not isinstance(raw_job, str) or not name_job):
+        raise ValueError("the server sent a job with an invalid scale")
+    if raw_round is not None and (not isinstance(raw_round, str) or not name_round):
+        raise ValueError("the server sent a round with an invalid scale")
+    if name_job and name_round and name_job != name_round:
+        raise ValueError(f"job scale {name_job!r} does not match round scale {name_round!r}")
+    name = name_job or name_round
+    if name:
+        return season.scale(name)
+    return fallback
+
+
 def check_job(job) -> int:
     """A job as the server described it, checked before any of it reaches a path or a URL.
 
@@ -907,18 +926,19 @@ class Pending:
     machine may be handed another grade, which trains in a single pass: the round's unedited
     student, if this machine was asked for it, is trained already."""
 
-    def __init__(self, job: dict, rnd, trained, device):
-        self.job, self.rnd, self.trained, self.device = job, rnd, trained, device
+    def __init__(self, job: dict, rnd, trained, device, scale=None):
+        self.job, self.rnd, self.trained, self.device, self.scale = job, rnd, trained, device, scale
         self.trained_at = time.monotonic()
 
 
 class _SatBaseline:
     """In-memory record that THIS verifier already sat its trained baseline for a round's exam."""
 
-    def __init__(self, exam_digest: str, result: dict, *, cached: bool = True):
+    def __init__(self, exam_digest: str, result: dict, *, cached: bool = True, scale: str = ""):
         self.exam_digest = exam_digest
         self.result = result
         self.cached = cached
+        self.scale = scale
 
 
 class _FailedBaseline:
@@ -986,7 +1006,7 @@ def _grade_job(job, season, scale, device, key, out, work: Path, bases: dict | N
     if rnd.exam_digest:
         fetch_exam(rnd, key)
         entry = (bases or {}).get(rnd.id)
-        if isinstance(entry, _SatBaseline) and entry.exam_digest == rnd.exam_digest:
+        if isinstance(entry, _SatBaseline) and entry.exam_digest == rnd.exam_digest and (not entry.scale or entry.scale == scale.name):
             base = entry.result
             if not entry.cached:
                 dev = device if hasattr(device, "type") else pick_device(device)
@@ -1019,6 +1039,7 @@ def _grade_job(job, season, scale, device, key, out, work: Path, bases: dict | N
                     rnd.exam_digest,
                     base,
                     cached=(cache_ok[-1] if cache_ok else True),
+                    scale=scale.name,
                 )
         else:
             # What an earlier job of the round measured on THIS verifier and GPU is still
@@ -1042,7 +1063,7 @@ def _grade_job(job, season, scale, device, key, out, work: Path, bases: dict | N
             if base is not None and dev_gpu and isinstance(base.get("hardware"), dict) and base["hardware"].get("gpu") != dev_gpu:
                 base = None
             if base is not None and bases is not None:
-                bases[rnd.id] = _SatBaseline(rnd.exam_digest, base, cached=True)
+                bases[rnd.id] = _SatBaseline(rnd.exam_digest, base, cached=True, scale=scale.name)
     want = job["script"]["sha256"]
     limit = int(season.raw["script"]["max_bytes"])
     # Signed: until its round settles, a script is given only to whoever was handed it to grade.
@@ -1085,7 +1106,7 @@ def _grade_job(job, season, scale, device, key, out, work: Path, bases: dict | N
     trained = train_round(rnd, scale, path, device=device, progress=out.progress("training"), log=lambda m: out.line("", out.dim(m)))
     if bases is not None:
         _offload_cpu(trained)
-        return Pending(job, rnd, trained, device)
+        return Pending(job, rnd, trained, device, scale=scale)
 
     rnd = wait_for_exam(rnd, out)
     fetch_exam(rnd, key)
@@ -1250,7 +1271,7 @@ def _sit(p: Pending, bases: dict, key, scale) -> tuple[dict, dict | None]:
 
     entry = bases.get(p.rnd.id)
     if wants_baseline(p.job):
-        if isinstance(entry, _SatBaseline) and entry.exam_digest == p.rnd.exam_digest:
+        if isinstance(entry, _SatBaseline) and entry.exam_digest == p.rnd.exam_digest and (not entry.scale or entry.scale == scale.name):
             base = entry.result
             if not entry.cached:
                 entry.cached = _call_supported(
@@ -1283,11 +1304,11 @@ def _sit(p: Pending, bases: dict, key, scale) -> tuple[dict, dict | None]:
                 if getattr(entry, "model", None) is None:
                     bases[p.rnd.id] = _FailedBaseline(p.rnd.exam_digest, recovered=False)
                 raise
-            bases[p.rnd.id] = _SatBaseline(p.rnd.exam_digest, base, cached=cached_ok)
+            bases[p.rnd.id] = _SatBaseline(p.rnd.exam_digest, base, cached=cached_ok, scale=scale.name)
         else:
             base = _load_disk_base()
             if base is not None:
-                bases[p.rnd.id] = _SatBaseline(p.rnd.exam_digest, base, cached=True)
+                bases[p.rnd.id] = _SatBaseline(p.rnd.exam_digest, base, cached=True, scale=scale.name)
             else:
                 if isinstance(entry, _FailedBaseline) and entry.exam_digest == p.rnd.exam_digest and entry.recovered:
                     raise RuntimeError(f"the unedited student of round {p.rnd.id} is no longer in memory")
@@ -1310,9 +1331,10 @@ def _sit(p: Pending, bases: dict, key, scale) -> tuple[dict, dict | None]:
                     p.rnd.exam_digest,
                     base,
                     cached=(cache_ok[-1] if cache_ok else True),
+                    scale=scale.name,
                 )
     else:
-        if isinstance(entry, _SatBaseline) and entry.exam_digest == p.rnd.exam_digest:
+        if isinstance(entry, _SatBaseline) and entry.exam_digest == p.rnd.exam_digest and (not entry.scale or entry.scale == scale.name):
             base = entry.result
             if not entry.cached:
                 entry.cached = _call_supported(
@@ -1372,26 +1394,49 @@ def saved_pass(scale: str, gpu, season_digest: str | None = None) -> float | Non
         d = json.loads(_pass_path().read_text())
     except (OSError, ValueError):
         return None
-    if not isinstance(d, dict) or d.get("scale") != scale or d.get("gpu") != gpu:
+    if not isinstance(d, dict) or d.get("gpu") != gpu:
         return None
     if season_digest is not None and d.get("season_digest") != season_digest:
         return None
-    x = d.get("seconds")
+    x = None
+    scales = d.get("scales")
+    if isinstance(scales, dict) and scale in scales:
+        x = scales[scale]
+    elif d.get("scale") == scale:
+        x = d.get("seconds")
     return float(x) if isinstance(x, (int, float)) and not isinstance(x, bool) and 0 < x < 86400 else None
 
 
 def note_pass(scale: str, gpu, result, season_digest: str | None = None) -> None:
-    """Keep how long the student of a grade just trained took (its result's train.seconds)."""
+    """Keep how long the student of a grade just trained took (its result's train.seconds),
+    preserving timings per scale for the same GPU and season so grading a mixed-scale round
+    never erases the active scale's timing."""
     try:
         x = float(result["train"]["seconds"])
     except (KeyError, TypeError, ValueError):
         return
     if not 0 < x < 86400:
         return
-    payload: dict = {"scale": scale, "gpu": gpu, "seconds": round(x, 2), "at": int(time.time())}
+    path = _pass_path()
+    scales: dict[str, float] = {}
+    try:
+        prev = json.loads(path.read_text())
+    except (OSError, ValueError):
+        prev = None
+    if isinstance(prev, dict) and prev.get("gpu") == gpu and prev.get("season_digest") == (season_digest or None):
+        if isinstance(prev.get("scales"), dict):
+            for k, v in prev["scales"].items():
+                if isinstance(k, str) and isinstance(v, (int, float)) and not isinstance(v, bool) and 0 < v < 86400:
+                    scales[k] = float(v)
+        elif isinstance(prev.get("scale"), str):
+            v = prev.get("seconds")
+            if isinstance(v, (int, float)) and not isinstance(v, bool) and 0 < v < 86400:
+                scales[prev["scale"]] = float(v)
+    secs = round(x, 2)
+    scales[scale] = secs
+    payload: dict = {"scale": scale, "gpu": gpu, "seconds": secs, "at": int(time.time()), "scales": scales}
     if season_digest:
         payload["season_digest"] = season_digest
-    path = _pass_path()
     tmp = path.with_name(f"{path.name}.tmp{os.getpid()}")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -1956,6 +2001,7 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
             ask["skip_early_rounds"] = sorted(exam_timed_out)[-32:]
         if (p := saved_pass(scale_name, gpu_name, season.digest)) is not None:
             ask["pass_seconds"] = p
+            ask["pass_scale"] = scale_name
         return ask
 
     try:
@@ -2022,6 +2068,15 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
                 continue
             if not isinstance(r, dict):
                 r = {}
+            srv_scale = r.get("scale")
+            if isinstance(srv_scale, str) and srv_scale:
+                try:
+                    parsed_scale = season.scale(srv_scale)
+                except ValueError:
+                    pass
+                else:
+                    scale = parsed_scale
+                    scale_name = srv_scale
             job = sit.job if sit is not None else r.get("job")
             if sit is None and isinstance(job, dict) and job.get("id") in waiting:
                 job = None  # a server older than this client hands back a job it holds: it is trained, and waits
@@ -2094,6 +2149,7 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
             idle, idle_for = False, 0
             try:
                 job_id = check_job(job)
+                job_scale = sit.scale if (sit is not None and sit.scale is not None) else _job_scale(season, job, scale)
             except ValueError as err:
                 if holding is not None:
                     hand_back("this client does not understand the job")
@@ -2139,19 +2195,19 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
             result = base = None
             try:
                 if job["kind"] == "edit":
-                    payload = _edit_job(job, season, scale, key, out, work, sandbox, gpu=getattr(device, "index", None) or 0)
+                    payload = _edit_job(job, season, job_scale, key, out, work, sandbox, gpu=getattr(device, "index", None) or 0)
                     path = f"/api/v1/jobs/{job_id}/script"
                 elif sit is not None:
-                    result, base = _sit(sit, bases, key, scale)
+                    result, base = _sit(sit, bases, key, job_scale)
                     forget_base(sit)  # sat, and kept on disk for the round's later grades
                     payload = slim_result(result, base)
                     path = f"/api/v1/jobs/{job_id}/result"
                 else:
                     for rid in [rid for rid in bases if rid not in {p.rnd.id for p in waiting.values()} | {job["round"].get("id")}]:
                         del bases[rid]  # a round nothing waits for any more
-                    got = _grade_job(job, season, scale, device, key, out, work, bases=bases)
+                    got = _grade_job(job, season, job_scale, device, key, out, work, bases=bases)
                     if isinstance(got, Pending):
-                        note_pass(scale_name, gpu_name, getattr(got.trained, "result", None), season.digest)
+                        note_pass(job_scale.name, gpu_name, getattr(got.trained, "result", None), season.digest)
                         waiting[job_id] = got
                         holding = None
                         remove_tree(work)
@@ -2161,7 +2217,7 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
                         out.line("", out.dim("trained; it sits the exam once it is posted"))
                         continue
                     result, base = got
-                    note_pass(scale_name, gpu_name, result, season.digest)
+                    note_pass(job_scale.name, gpu_name, result, season.digest)
                     payload = slim_result(result, base)
                     path = f"/api/v1/jobs/{job_id}/result"
             except RoundRefused as err:
@@ -2304,7 +2360,7 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
                     if err.status == 409 and refused[round_id] == 1:
                         # Our corpus or baseline differs from the round's. The copy on disk is the first suspect.
                         bases.pop(round_id, None)
-                        _forget_round(job, season, scale)
+                        _forget_round(job, season, job_scale)
                         out.line("", out.dim(f"dropped this machine's copy of round {round_id}; it is rebuilt once, in case the copy was at fault"))
                 stop_if_once()
                 continue

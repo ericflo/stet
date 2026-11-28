@@ -151,11 +151,27 @@ func vastOfferBreakdown(o vastOffer, diskGB int, downloadGB float64) (price, dis
 	return price, diskCost, dlCost, true
 }
 
-const workerDownloadGB = 3.0
+// Cold-start download allowances for Vast.ai workers on metered-ingress hosts (inet_down_cost):
+//   - Grader-only workers download a standard round's Common Crawl shards (~4 GB), the pinned
+//     ERNIE-4.5-0.3B student (~0.73 GB), exam/scripts, and runtime packages -> 6 GB.
+//   - Curator-capable workers (--edits) additionally download shipped/submitted curator assets
+//     (e.g. DCLM's two fastText models alone total 3.56 GB, reader's Qwen3-0.6B is 1.52 GB, with
+//     a 10 GiB Season 3 asset cap) -> 16 GB.
+const (
+	workerGraderDownloadGB  = 6.0
+	workerCuratorDownloadGB = 16.0
+)
 
-func workerOfferTransferDollars(inetDownCost float64) float64 {
-	if nonNegFinite(inetDownCost) && inetDownCost > 0 {
-		return workerDownloadGB * inetDownCost
+func workerDownloadGBFor(curators bool) float64 {
+	if curators {
+		return workerCuratorDownloadGB
+	}
+	return workerGraderDownloadGB
+}
+
+func workerOfferTransferDollars(inetDownCost, downloadGB float64) float64 {
+	if nonNegFinite(inetDownCost) && inetDownCost > 0 && downloadGB > 0 {
+		return downloadGB * inetDownCost
 	}
 	return 0
 }
@@ -167,12 +183,13 @@ func (m *vastMarket) Offers(ctx context.Context, n Need) ([]Offer, error) {
 	if _, err := m.a.do(ctx, "POST", "/api/v0/bundles/", vastQuery(n), &out); err != nil {
 		return nil, err
 	}
+	dlGB := workerDownloadGBFor(n.Curators)
 	var offers []Offer
 	for _, o := range out.Offers {
 		if o.NumGPUs != 1 {
 			continue
 		}
-		price, diskCost, dlCost, ok := vastOfferBreakdown(o, n.DiskGB, workerDownloadGB)
+		price, diskCost, dlCost, ok := vastOfferBreakdown(o, n.DiskGB, dlGB)
 		if !ok {
 			continue
 		}
@@ -180,9 +197,11 @@ func (m *vastMarket) Offers(ctx context.Context, n Need) ([]Offer, error) {
 		if o.HostingType == 1 {
 			trust = "datacenter"
 		}
+		fixedEst := workerOfferTransferDollars(o.InetDownCost, dlGB)
 		offers = append(offers, Offer{
 			Market: "vast", Card: vastCard(o.GPUName), Model: o.GPUName, Name: o.GPUName, ID: strconv.FormatInt(o.ID, 10),
-			Maker: "NVIDIA", MemoryGB: int(math.Round(o.GPURAM / 1024)), Price: price, DiskCost: diskCost, TransferCost: dlCost, FixedCost: workerOfferTransferDollars(o.InetDownCost), Stock: 1,
+			Maker: "NVIDIA", MemoryGB: int(math.Round(o.GPURAM / 1024)), Price: price, DiskCost: diskCost, TransferCost: dlCost,
+			FixedCost: fixedEst, FixedCostEstimated: fixedEst > 0, Stock: 1,
 			CUDA: strconv.FormatFloat(o.CUDAMaxGood, 'f', -1, 64), Trust: trust, Region: o.Geolocation,
 			Host: vastHost(o.MachineID), CPU: strings.TrimSpace(o.CPUName),
 		})
@@ -230,7 +249,7 @@ func (m *vastMarket) Rent(ctx context.Context, o Offer, l Launch) (*Rental, erro
 	switch {
 	case err == nil && out.NewContract > 0 && (out.Success == nil || *out.Success):
 		return &Rental{Market: "vast", ID: strconv.FormatInt(out.NewContract, 10), Name: l.Name, Card: o.Card,
-			Price: o.Price, DiskCost: o.DiskCost, TransferCost: o.TransferCost, FixedCost: o.FixedCost, State: "starting", Status: "created", Created: time.Now()}, nil
+			Price: o.Price, DiskCost: o.DiskCost, TransferCost: o.TransferCost, FixedCost: o.FixedCost, FixedCostEstimated: o.FixedCostEstimated, State: "starting", Status: "created", Created: time.Now()}, nil
 	case err == nil && out.Success != nil && !*out.Success:
 		return nil, fmt.Errorf("%w: Vast.ai refused new instance (%d): %s", errRentRejected, status, out.Msg)
 	case err == nil:
@@ -260,31 +279,39 @@ type vastPort struct {
 
 // vastInstance is one of the account's instances, of the fields read here.
 type vastInstance struct {
-	ID             int64                 `json:"id"`
-	Label          *string               `json:"label"`
-	ActualStatus   *string               `json:"actual_status"`
-	IntendedStatus string                `json:"intended_status"`
-	CurState       string                `json:"cur_state"`
-	StatusMsg      *string               `json:"status_msg"`
-	GPUName        string                `json:"gpu_name"`
-	DPHBase        float64               `json:"dph_base"`
-	DPHTotal       float64               `json:"dph_total"`
-	DiskSpace      float64               `json:"disk_space"`
-	StorageCost    float64               `json:"storage_cost"`
-	InetDownCost   float64               `json:"inet_down_cost"`
-	StartDate      float64               `json:"start_date"`
-	PublicIPAddr   string                `json:"public_ipaddr"`
-	Ports          map[string][]vastPort `json:"ports"`
-	diskSpaceSet   bool
-	storageCostSet bool
+	ID                 int64                 `json:"id"`
+	Label              *string               `json:"label"`
+	ActualStatus       *string               `json:"actual_status"`
+	IntendedStatus     string                `json:"intended_status"`
+	CurState           string                `json:"cur_state"`
+	StatusMsg          *string               `json:"status_msg"`
+	GPUName            string                `json:"gpu_name"`
+	DPHBase            float64               `json:"dph_base"`
+	DPHTotal           float64               `json:"dph_total"`
+	DiskSpace          float64               `json:"disk_space"`
+	StorageCost        float64               `json:"storage_cost"`
+	InetDownCost       float64               `json:"inet_down_cost"`
+	InetUpCost         float64               `json:"inet_up_cost"`
+	InetDownBilled     *float64              `json:"inet_down_billed,omitempty"`
+	InetUpBilled       *float64              `json:"inet_up_billed,omitempty"`
+	TransferCostBilled *float64              `json:"transfer_cost,omitempty"`
+	StartDate          float64               `json:"start_date"`
+	PublicIPAddr       string                `json:"public_ipaddr"`
+	Ports              map[string][]vastPort `json:"ports"`
+	diskSpaceSet       bool
+	storageCostSet     bool
+	inetDownCostSet    bool
+	inetUpCostSet      bool
 }
 
 func (v *vastInstance) UnmarshalJSON(data []byte) error {
 	type alias vastInstance
 	var raw struct {
 		alias
-		RawDiskSpace   *float64 `json:"disk_space"`
-		RawStorageCost *float64 `json:"storage_cost"`
+		RawDiskSpace    *float64 `json:"disk_space"`
+		RawStorageCost  *float64 `json:"storage_cost"`
+		RawInetDownCost *float64 `json:"inet_down_cost"`
+		RawInetUpCost   *float64 `json:"inet_up_cost"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
@@ -297,6 +324,14 @@ func (v *vastInstance) UnmarshalJSON(data []byte) error {
 	if raw.RawStorageCost != nil {
 		v.StorageCost = *raw.RawStorageCost
 		v.storageCostSet = true
+	}
+	if raw.RawInetDownCost != nil {
+		v.InetDownCost = *raw.RawInetDownCost
+		v.inetDownCostSet = true
+	}
+	if raw.RawInetUpCost != nil {
+		v.InetUpCost = *raw.RawInetUpCost
+		v.inetUpCostSet = true
 	}
 	return nil
 }
@@ -382,6 +417,49 @@ func vastStoppedDiskCostUnknown(state string, i vastInstance, basePrice, diskCos
 	return true
 }
 
+// vastInstanceObservedTransfer extracts provider-reported observed transfer spend when an instance
+// payload includes actual billed bandwidth usage (with confirmed unit rates whenever billed usage
+// is positive) or direct transfer charges, distinguishing observed spend from the pre-launch
+// role-based cold-start estimate.
+func vastInstanceObservedTransfer(i vastInstance) (float64, bool) {
+	if i.TransferCostBilled != nil && nonNegFinite(*i.TransferCostBilled) {
+		return *i.TransferCostBilled, true
+	}
+	if i.InetDownBilled == nil && i.InetUpBilled == nil {
+		return 0, false
+	}
+	total := 0.0
+	observed := false
+	if i.InetDownBilled != nil {
+		if !nonNegFinite(*i.InetDownBilled) {
+			return 0, false
+		}
+		if *i.InetDownBilled > 0 {
+			if !nonNegFinite(i.InetDownCost) || (i.InetDownCost == 0 && !i.inetDownCostSet) {
+				return 0, false
+			}
+			total += *i.InetDownBilled * i.InetDownCost
+		}
+		observed = true
+	}
+	if i.InetUpBilled != nil {
+		if !nonNegFinite(*i.InetUpBilled) {
+			return 0, false
+		}
+		if *i.InetUpBilled > 0 {
+			if !nonNegFinite(i.InetUpCost) || (i.InetUpCost == 0 && !i.inetUpCostSet) {
+				return 0, false
+			}
+			total += *i.InetUpBilled * i.InetUpCost
+		}
+		observed = true
+	}
+	if !observed || !nonNegFinite(total) {
+		return 0, false
+	}
+	return total, true
+}
+
 func vastInstanceRental(i vastInstance) Rental {
 	state, status := vastState(i)
 	name := ""
@@ -391,13 +469,17 @@ func vastInstanceRental(i vastInstance) Rental {
 	price, basePrice, diskCost, partial := vastInstanceRate(i)
 	diskCost = vastStoppedDiskCost(state, i.DPHTotal, basePrice, diskCost)
 	diskCostUnknown := vastStoppedDiskCostUnknown(state, i, basePrice, diskCost)
+	fixedEst := workerOfferTransferDollars(i.InetDownCost, workerGraderDownloadGB)
+	obsTransfer, transferObserved := vastInstanceObservedTransfer(i)
 	var created time.Time
 	if i.StartDate > 0 {
 		created = time.Unix(int64(i.StartDate), 0)
 	}
 	r := Rental{Market: "vast", ID: strconv.FormatInt(i.ID, 10), Name: name, Card: vastCard(i.GPUName),
-		Price: price, BasePrice: basePrice, DiskCost: diskCost, DiskCostUnknown: diskCostUnknown, FixedCost: workerOfferTransferDollars(i.InetDownCost), PartialRate: partial,
-		State: state, Status: status, Created: created}
+		Price: price, BasePrice: basePrice, DiskCost: diskCost, DiskCostUnknown: diskCostUnknown,
+		FixedCost: fixedEst, FixedCostEstimated: fixedEst > 0,
+		ObservedTransferCost: obsTransfer, TransferObserved: transferObserved,
+		PartialRate: partial, State: state, Status: status, Created: created}
 	r.Phase = status
 	if r.Phase == "" {
 		r.Phase = "scheduling"

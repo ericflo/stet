@@ -584,12 +584,13 @@ func (p Policy) decideNext(w *Work, workers []*Worker, spentToday float64, now t
 	}
 	freshNeed := p.freshGraders(w)
 	shortFreshKeys := 0
+	budgetBlocked := p.DailyBudget > 0 && spentToday >= p.DailyBudget
 	if freshNeed > starting && len(waitingIdle) > 0 {
 		wantExtra := freshNeed - starting
 		extra := min(wantExtra, freshFree)
 		shortFreshKeys = wantExtra - extra
 		if extra > 0 {
-			if d.Live+extra > p.MaxWorkers {
+			if !budgetBlocked && d.Live+extra > p.MaxWorkers {
 				drop := min(d.Live+extra-p.MaxWorkers, len(waitingIdle))
 				sort.SliceStable(waitingIdle, func(i, j int) bool { return waitingIdle[i].Speed < waitingIdle[j].Speed })
 				for _, wk := range waitingIdle[:drop] {
@@ -620,7 +621,7 @@ func (p Policy) decideNext(w *Work, workers []*Worker, spentToday float64, now t
 	if shortFreshKeys > 0 && d.Note == "" {
 		d.Note = fmt.Sprintf("need %d more fresh key(s) to break a dispute (all %d keys are in use or already participated in this round): run `stet-cloud keys --add %d`", shortFreshKeys, len(workers), shortFreshKeys)
 	}
-	if d.Launch > 0 && p.DailyBudget > 0 && spentToday >= p.DailyBudget {
+	if budgetBlocked && (d.Launch > 0 || (freshNeed > starting && len(waitingIdle) > 0 && freshFree > 0)) {
 		d.Launch, d.Note = 0, fmt.Sprintf("about $%.2f spent today, and the daily budget is $%.2f", spentToday, p.DailyBudget)
 	}
 	if p.LongFarm {

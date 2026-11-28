@@ -1256,7 +1256,7 @@ func (a *App) apiClaim(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	out := map[string]any{"job": handed.Job}
+	out := map[string]any{"job": handed.Job, "scale": a.cfg.Scale}
 	if handed.Runner != nil {
 		out["runner"] = handed.Runner // whether this machine is handed editors to run, and if not, why
 	}

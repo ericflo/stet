@@ -2484,7 +2484,7 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 		e.say("not renting examiner GPU for %s: fleet accounting unavailable (%v)", needRound, budget.AccountingErr)
 		return budget.AccountingErr
 	}
-	if budget.MaxWorkers <= 0 || budget.LiveWorkers >= budget.MaxWorkers {
+	if budget.MaxWorkers <= 0 {
 		e.say("not renting examiner GPU for %s: %d machines already live and --max is %d; waiting for a slot", needRound, budget.LiveWorkers, budget.MaxWorkers)
 		return nil
 	}
@@ -2570,6 +2570,13 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 	maxBudget := budget.MaxHourly
 	if e.cfg.MaxPrice > 0 && e.cfg.MaxPrice < maxBudget {
 		maxBudget = e.cfg.MaxPrice
+	}
+	if budget.LiveWorkers >= budget.MaxWorkers {
+		e.say("not renting examiner GPU for %s: %d machines already live and --max is %d; waiting for a slot", needRound, budget.LiveWorkers, budget.MaxWorkers)
+		if budget.MaxHourly > 0 && maxBudget > 0 {
+			e.setBlockedHourly(minFeasibleHourly(maxBudget, maxTransfer, nil))
+		}
+		return nil
 	}
 	headroom := budget.MaxHourly - budget.HourlyNow
 	if budget.MaxHourly <= 0 || headroom <= 1e-9 {

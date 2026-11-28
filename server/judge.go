@@ -225,7 +225,10 @@ type Hello struct {
 	Trained []int64 `json:"trained,omitempty"`
 	// PassSeconds is how long this machine last took to train a grade's student, kept on its
 	// disk from its latest grade (stet 0.4.4 and later); 0 until it has graded.
+	// PassScale is the scale PassSeconds was measured at (empty for older clients, which are
+	// stamped with the server's active scale when saved).
 	PassSeconds float64 `json:"pass_seconds,omitempty"`
+	PassScale   string  `json:"pass_scale,omitempty"`
 	// SkipEarlyRounds lists round IDs on which this machine already timed out waiting for the
 	// exam and must not be handed another pre-exam grade (while still taking early grades on
 	// newer rounds).
@@ -455,8 +458,11 @@ type ScriptPayload struct {
 	ScriptZst    string     `json:"script_zst"` // base64 of the zstd-compressed script
 }
 
-func (a *App) tolerance() Tolerance {
-	t, ok := a.season.Tolerance[a.cfg.Scale]
+func (a *App) toleranceFor(scale string) Tolerance {
+	if scale == "" {
+		scale = a.cfg.Scale
+	}
+	t, ok := a.season.Tolerance[scale]
 	if !ok {
 		t = Tolerance{Grade: 0.1, Baseline: 0.1}
 	}
@@ -464,6 +470,21 @@ func (a *App) tolerance() Tolerance {
 		t.Run = 1.5 * t.Grade
 	}
 	return t
+}
+
+func (a *App) roundTolerance(rd *Round) Tolerance {
+	if rd != nil && rd.Scale != "" {
+		return a.toleranceFor(rd.Scale)
+	}
+	return a.toleranceFor(a.cfg.Scale)
+}
+
+func (a *App) tolerance() Tolerance {
+	return a.toleranceFor(a.cfg.Scale)
+}
+
+func (j *judge) roundToleranceByIdx(roundIdx int) Tolerance {
+	return j.a.roundTolerance(j.s.Rounds[roundIdx])
 }
 
 // recentAgreed counts each account's grades that agreed in the last two weeks: what the
@@ -845,7 +866,7 @@ func (j *judge) same(x, y *gradeView) bool {
 			return false
 		}
 	}
-	return !x.r.Valid || within(x.gain-y.gain, j.a.tolerance().Grade)
+	return !x.r.Valid || within(x.gain-y.gain, j.roundToleranceByIdx(x.r.RoundIdx).Grade)
 }
 
 // agrees reports whether a grade is consistent with what a script was found to be.
@@ -859,7 +880,7 @@ func (j *judge) agrees(g *gradeView, v *verdict) bool {
 	if v.valid && v.tokensSHA != "" && g.r.TokensSHA != "" && g.r.TokensSHA != v.tokensSHA {
 		return false
 	}
-	return !v.valid || within(g.gain-v.gain, j.a.tolerance().Grade)
+	return !v.valid || within(g.gain-v.gain, j.roundToleranceByIdx(g.r.RoundIdx).Grade)
 }
 
 // maxAgreeingCluster returns the exact size of the largest subset of sorted valid grades in which
@@ -894,7 +915,7 @@ func (j *judge) maxAgreeingCluster(sorted []*gradeView, require map[*gradeView]b
 	if len(toks) == 0 {
 		toks = []string{""}
 	}
-	tol := j.a.tolerance().Grade
+	tol := j.roundToleranceByIdx(sorted[0].r.RoundIdx).Grade
 	best := 0
 	compat := make([]*gradeView, 0, len(sorted))
 	for _, initSHA := range inits {
@@ -1421,7 +1442,7 @@ func (j *judge) runsWanted(st *entryState) int {
 			known = append(known, outcome{failed: !v.valid, gain: v.gain})
 		}
 	}
-	tol := j.a.tolerance().Run
+	tol := j.a.roundTolerance(st.Round).Run
 	for x := range known {
 		for y := x + 1; y < len(known); y++ {
 			if known[x].failed != known[y].failed || (!known[x].failed && !within(known[x].gain-known[y].gain, tol)) {
@@ -1965,9 +1986,17 @@ func (a *App) claim(ctx context.Context, acctID int64, h *Hello) (*Handed, error
 		}
 		// Said with every request, and nothing when it has not graded yet: a key moves from
 		// one rented machine to the next, and the last one's GPU may have been another.
-		acct.PassSeconds, acct.PassSeason = 0, ""
+		acct.PassSeconds, acct.PassSeason, acct.PassScale = 0, "", ""
+		passScale := ""
 		if p := h.PassSeconds; finite(p) && p > 0 && p < 86400 {
-			acct.PassSeconds, acct.PassSeason = p, a.season.Digest
+			if h.PassScale == "" {
+				passScale = a.cfg.Scale
+			} else if _, ok := a.season.Scales[h.PassScale]; ok {
+				passScale = h.PassScale
+			}
+			if passScale != "" {
+				acct.PassSeconds, acct.PassSeason, acct.PassScale = p, a.season.Digest, passScale
+			}
 		}
 		tx.touch(acct)
 		if canEdit && a.established(acct) {
@@ -2035,12 +2064,16 @@ func (a *App) claim(ctx context.Context, acctID int64, h *Hello) (*Handed, error
 		}
 		q := &asker{acct: acct, est: j.est[acctID], canEdit: canEdit, gpuMake: hw.gpuMake(), early: h.Early, skipEarly: skipEarly}
 		for _, rd := range openRounds(s) {
-			if held > 0 && !j.more(rd, q, held, h.PassSeconds) {
+			passSecs := 0.0
+			if passScale != "" && passScale == rd.Scale {
+				passSecs = acct.PassSeconds
+			}
+			if held > 0 && !j.more(rd, q, held, passSecs) {
 				continue
 			}
 			states := j.states(rd)
 			closing := j.closing(states)
-			early := j.tooEarly(rd, q, held, h.PassSeconds)
+			early := j.tooEarly(rd, q, held, passSecs)
 			var offers []offer
 			for _, st := range states {
 				for _, o := range j.offers(st, q, closing) {
@@ -2342,11 +2375,19 @@ func handedScript(s *State, acct *Account, round int, editor string) bool {
 
 // editSeconds is the GPU time a run is credited with: what the runner said the edit took,
 // and never more than an edit can take.
-func (a *App) editSeconds(run *Run) float64 {
+func (a *App) editSeconds(rd *Round, run *Run) float64 {
 	if run.Edit == nil || !finite(run.Edit.Seconds) || run.Edit.Seconds < 0 {
 		return 0
 	}
-	return math.Min(run.Edit.Seconds, 2*float64(a.season.Scales[a.cfg.Scale].EditSeconds))
+	scale := a.cfg.Scale
+	if rd != nil && rd.Scale != "" {
+		scale = rd.Scale
+	}
+	sc, ok := a.season.Scales[scale]
+	if !ok {
+		sc = a.season.Scales[a.cfg.Scale]
+	}
+	return math.Min(run.Edit.Seconds, 2*float64(sc.EditSeconds))
 }
 
 // expireClaims ends the outstanding jobs on an entry that has settled.
@@ -2632,7 +2673,7 @@ func (a *App) submitResult(ctx context.Context, acctID, claimID int64, p *Result
 		if baseInitSHA != "" && rd.InitSHA != "" && rd.InitSHA != baseInitSHA {
 			return refuse("init", 0, "your baseline initial weights hash for %s differs from the round's. Check your student model cache and harness version", p.Round)
 		}
-		tol := a.tolerance()
+		tol := a.roundTolerance(rd)
 		var incomingBase *Baseline
 		saveIncomingBase := false
 		if p.Baseline != nil {
@@ -3246,7 +3287,7 @@ func (a *App) settleScript(tx *Tx, j *judge, st *entryState, sc *scriptState) *g
 // settleEntry makes an entry's score public: the median of its runs, each run the median of
 // the established grades of the script it wrote.
 func (a *App) settleEntry(tx *Tx, j *judge, st *entryState) {
-	e, rd, tol := st.Entry, st.Round, a.tolerance()
+	e, rd, tol := st.Entry, st.Round, a.roundTolerance(st.Round)
 	if e.Status != "open" {
 		return
 	}
@@ -3287,7 +3328,7 @@ func (a *App) settleEntry(tx *Tx, j *judge, st *entryState) {
 			}
 			if by := tx.s.Accounts[run.By]; by != nil && run.Owed {
 				by.Runs++
-				by.GPUSeconds += a.editSeconds(run)
+				by.GPUSeconds += a.editSeconds(rd, run)
 				tx.saveAccount(by)
 			}
 			run.Owed = false
@@ -3320,7 +3361,7 @@ func (a *App) settleEntry(tx *Tx, j *judge, st *entryState) {
 	for _, run := range runs {
 		if by := tx.s.Accounts[run.By]; by != nil && run.Owed {
 			by.Runs++
-			by.GPUSeconds += a.editSeconds(run)
+			by.GPUSeconds += a.editSeconds(rd, run)
 			tx.saveAccount(by)
 		}
 		run.Owed = false
@@ -3568,7 +3609,7 @@ func (a *App) closeDisputedBaselineRound(tx *Tx, j *judge, rd *Round, states []*
 				}
 				if by := tx.s.Accounts[run.By]; by != nil && run.Owed {
 					by.Runs++
-					by.GPUSeconds += a.editSeconds(run)
+					by.GPUSeconds += a.editSeconds(rd, run)
 					tx.saveAccount(by)
 				}
 				run.Owed = false

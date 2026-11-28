@@ -734,4 +734,21 @@ func TestTieBreakBaselineRentsAFreshMachineWhileBaselineGradersIdle(t *testing.T
 		t.Fatalf("explicit fresh_graders_wanted=0 on disputed baseline must not evict or rent: End=%s Launch=%d",
 			handles(d14.End), d14.Launch)
 	}
+	// Review 32 P2 #4: disputed baseline with 2 waiting workers at --max 2, 2 free keys, 2 curator
+	// runs waiting, and daily rental budget already exhausted ($1 spent against $1 budget) MUST NOT
+	// evict a warm waiting worker when the replacement launch cannot pass budget admission.
+	p.MaxWorkers = 2
+	p.DailyBudget = 1.00
+	p.Edits = true
+	wDispBudget := &Work{Rounds: []WorkRound{{
+		ID: "s3-o00005", Entries: 2, RunsWanted: 2, GradesWanted: 1, BaselinesWanted: &one,
+		BaselineDisputed: true, FreshGradersWanted: &one,
+	}}}
+	wsBudget := pool(wDispBudget, "waiting", "waiting", "free", "free")
+	wsBudget[0].Speed, wsBudget[1].Speed = 1.0, 2.0
+	d15 := p.decide(wDispBudget, wsBudget, 1.00, t0)
+	if len(d15.End) != 0 || d15.Launch != 0 || !strings.Contains(d15.Note, "daily budget") {
+		t.Fatalf("disputed baseline under exhausted daily budget must not evict warm workers: End=%s Launch=%d Note=%q",
+			handles(d15.End), d15.Launch, d15.Note)
+	}
 }

@@ -110,8 +110,8 @@ func TestVastsOffersArePricedAllIn(t *testing.T) {
 		}
 	}
 	o := byID(offers)
-	// $0.0533 for the GPU, 100 GB at $0.40 a GB a month for an hour, and 3 GB down.
-	if c := o["50121277"]; c.Card != "RTX 3060" || c.MemoryGB != 12 || !near(c.Price, 0.05333333333333334+100*0.39999999999999997/720+3*0.0013020833333333333) || c.Trust != "verified" || c.CUDA != "13" {
+	// $0.0533 for the GPU, 100 GB at $0.40 a GB a month for an hour, and workerGraderDownloadGB (6 GB) down.
+	if c := o["50121277"]; c.Card != "RTX 3060" || c.MemoryGB != 12 || !near(c.Price, 0.05333333333333334+100*0.39999999999999997/720+workerGraderDownloadGB*0.0013020833333333333) || c.Trust != "verified" || c.CUDA != "13" {
 		t.Errorf("the cheapest 3060: %+v", c)
 	}
 	if c := o["44053844"]; c.Trust != "datacenter" || c.Card != "RTX 5060 Ti" || c.MemoryGB != 16 {

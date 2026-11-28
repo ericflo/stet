@@ -1452,7 +1452,7 @@ func (s *Site) round(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sc := a.season.Scales[rs.Scale]
-	d := map[string]any{"R": rs, "ID": rs.ID, "Entries": entries, "Top": topGain(entries), "Scale": sc, "Tolerance": a.tolerance(),
+	d := map[string]any{"R": rs, "ID": rs.ID, "Entries": entries, "Top": topGain(entries), "Scale": sc, "Tolerance": a.toleranceFor(rs.Scale),
 		"RunsPerEntry": a.cfg.RunsPerEntry, "Prev": prev, "Next": next,
 		"Expected": expected, "Later": later, "QualifyRounds": a.cfg.QualifyRounds, "Work": work,
 		"Scores": scores}

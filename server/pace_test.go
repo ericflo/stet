@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 )
@@ -340,7 +341,7 @@ func TestReview27PassTimesScopedBySeasonDigest(t *testing.T) {
 		return nil
 	})
 	w.app.st.view(func(s *State) {
-		pt := passTimes(s, w.app.cfg.Scale, w.app.season.Digest)
+		pt := passTimes(s, w.app.season.Digest)
 		if _, ok := pt[w.app.cfg.Scale]["RTX 4090"]; ok {
 			t.Fatalf("stale season PassSeconds leaked into passTimes: %+v", pt)
 		}
@@ -349,18 +350,123 @@ func TestReview27PassTimesScopedBySeasonDigest(t *testing.T) {
 		t.Fatalf("stale season PassSeconds leaked into /admin/work: %+v", m)
 	}
 
-	// Once bob reports a current-season pass time (1800s), PassSeason stamps the active season.
+	// Once bob reports a current-season pass time (1800s), PassSeason and PassScale stamp the active season/scale.
 	w.waiting(bob, "RTX 4090", 1800)
 	w.app.st.view(func(s *State) {
 		if got := s.Accounts[bobID].PassSeason; got != w.app.season.Digest {
 			t.Fatalf("expected PassSeason=%q, got %q", w.app.season.Digest, got)
 		}
-		pt := passTimes(s, w.app.cfg.Scale, w.app.season.Digest)
+		if got := s.Accounts[bobID].PassScale; got != w.app.cfg.Scale {
+			t.Fatalf("expected PassScale=%q, got %q", w.app.cfg.Scale, got)
+		}
+		pt := passTimes(s, w.app.season.Digest)
 		if got := pt[w.app.cfg.Scale]["RTX 4090"]; got != 1800 {
 			t.Fatalf("expected current-season pass time 1800, got %v", got)
 		}
 	})
 	if m := w.machine(w.work(anchor), "bob"); m.PassSeconds != 1800 {
 		t.Fatalf("expected /admin/work PassSeconds=1800, got %+v", m)
+	}
+}
+
+// Review 32 Gate 4 P2 #1: PassSeconds MUST be scoped by PassScale so timings reported from
+// another scale (mixed-scale open rounds or running verifiers across a server scale restart) and
+// legacy persisted accounts lacking PassScale never contaminate passTimes, /admin/work, or
+// j.more / j.tooEarly on rounds of a different scale.
+func TestReview32PassSecondsScopedByScaleAcrossMixedRoundsAndRestarts(t *testing.T) {
+	pub, priv := newKey()
+	w := newWorld(t, pub)
+	w.app.cfg.Scale = "standard"
+	w.app.cfg.EarlyWindow = 300 * time.Second
+	anchor := w.join("anchor-one", priv)
+	bob := w.rented(anchor, "bob")
+
+	// 1. Legacy persisted account with matching PassSeason but empty PassScale MUST NOT leak.
+	w.app.st.update(context.Background(), func(tx *Tx) error {
+		for _, acct := range tx.s.Accounts {
+			if acct.Pubkey == bob.pub {
+				acct.Hardware = []byte(`{"gpu":"RTX 4090","device":"cuda","backend":"cuda"}`)
+				acct.PassSeconds = 30
+				acct.PassSeason = w.app.season.Digest
+				acct.PassScale = ""
+				tx.touch(acct)
+			}
+		}
+		return nil
+	})
+	w.app.st.view(func(s *State) {
+		pt := passTimes(s, w.app.season.Digest)
+		if _, ok := pt["standard"]["RTX 4090"]; ok {
+			t.Fatalf("legacy empty-PassScale PassSeconds leaked into standard passTimes: %+v", pt)
+		}
+	})
+	if m := w.machine(w.work(anchor), "bob"); m.PassSeconds != 0 {
+		t.Fatalf("legacy empty-PassScale PassSeconds leaked into /admin/work: %+v", m)
+	}
+
+	// 2. Claiming with pass_scale="nano" (30s) against a "standard" server MUST bucket under "nano"
+	//    (not "standard"), report 0 in /admin/work for "standard", AND return active server scale.
+	body := w.hello(false)
+	body["early"] = true
+	body["hardware"] = map[string]any{"gpu": "RTX 4090", "device": "cuda", "backend": "cuda"}
+	body["pass_seconds"] = 30.0
+	body["pass_scale"] = "nano"
+	var raw map[string]any
+	if code := bob.do("POST", "/api/v1/jobs/claim", body, &raw); code != 200 {
+		t.Fatalf("claim failed: %d %+v", code, raw)
+	}
+	if raw["scale"] != "standard" {
+		t.Fatalf("claim response must include active server scale=\"standard\", got %v", raw["scale"])
+	}
+	w.app.st.view(func(s *State) {
+		pt := passTimes(s, w.app.season.Digest)
+		if _, ok := pt["standard"]["RTX 4090"]; ok {
+			t.Fatalf("nano pass_seconds contaminated standard passTimes: %+v", pt)
+		}
+		if got := pt["nano"]["RTX 4090"]; got != 30 {
+			t.Fatalf("expected nano passTimes=30, got %+v", pt)
+		}
+	})
+	if m := w.machine(w.work(anchor), "bob"); m.PassSeconds != 0 {
+		t.Fatalf("nano pass_seconds leaked into standard /admin/work: %+v", m)
+	}
+
+	// 3. Open a pre-exam "standard" round with examDue 1500s away and a prior standard baseline
+	//    timing of 1000s. Sending nano pass_seconds=30s MUST NOT trigger tooEarly on the standard
+	//    round (3*30s + 120s = 210s < 1200s would falsely say tooEarly, whereas standard's 1000s
+	//    is well inside the window and hands out the grade!).
+	w.submit(w.join("owner-ed", nil), "ed-one", "print(1)")
+	// Seed a settled standard round with 1500s draw->exam gap and 1000s RTX 4090 train time.
+	w.app.st.update(context.Background(), func(tx *Tx) error {
+		rd0 := &Round{Idx: 1, Scale: "standard", Status: "settled", DrawnAt: now() - 3600, ExamAt: now() - 2100}
+		tx.saveRound(rd0)
+		edID := ""
+		for id := range tx.s.Editors {
+			edID = id
+		}
+		e0 := &Entry{
+			RoundIdx: 1, EditorID: edID, Status: "settled", SettledAt: now() - 1000,
+			Detail: &EntryDetail{
+				Train:    &TrainInfo{Seconds: 1000},
+				Hardware: json.RawMessage(`{"gpu":"RTX 4090","device":"cuda","backend":"cuda"}`),
+			},
+		}
+		tx.saveEntry(e0)
+		return nil
+	})
+	w.drawWithoutExam()
+	// Produce script so a pre-exam grade is available on the open standard round.
+	if n := w.editAll(anchor); n != 1 {
+		t.Fatalf("expected 1 edit run on open standard round, got %d", n)
+	}
+	// Now bob asks with pass_seconds=30, pass_scale="nano": MUST NOT be turned away as tooEarly!
+	var out2 struct {
+		Job *Job `json:"job"`
+	}
+	if code := bob.do("POST", "/api/v1/jobs/claim", body, &out2); code != 200 {
+		t.Fatalf("claim 2 failed: %d", code)
+	}
+	if out2.Job == nil || out2.Job.Kind != "grade" {
+		t.Fatalf("nano pass_seconds=30 falsely triggered tooEarly on standard round; got job=%+v", out2.Job)
 	}
 }

@@ -439,8 +439,16 @@ func tick(ctx context.Context, f *Fleet) (err error) {
 	pol := f.o.Policy
 	needExaminer := roundNeedingExam(v.Work) != ""
 	reserved := v.ExaminerLive
-	if reserved == 0 && (f.examiner != nil || f.o.Examiner.Addr != "") && needExaminer {
-		reserved = 1
+	reserveSlotOnly := false
+	if reserved == 0 && needExaminer {
+		if f.examiner != nil {
+			// Managed examiner: reserve a free slot against new worker launches, but defer any
+			// slot-reclaiming idle eviction until examiner admission confirms an affordable offer
+			// actually fits both --max and --max-hourly after eviction.
+			reserveSlotOnly = true
+		} else if f.o.Examiner.Addr != "" {
+			reserved = 1
+		}
 	}
 	pol.MaxWorkers = max(0, pol.MaxWorkers-reserved-v.extraWorkerLiveCount())
 	d := pol.decideNext(v.Work, v.Workers, v.Today, now, next)
@@ -453,41 +461,215 @@ func tick(ctx context.Context, f *Fleet) (err error) {
 			d.End = append(d.End, Ending{Rental: orph, Why: why})
 		}
 	}
-	// If an available examiner offer was blocked solely by --max-hourly, reclaim headroom from
-	// idle (waiting) workers so existing workers cannot strand a required examiner.
-	if f.examiner != nil && v.ExaminerLive == 0 && needExaminer && exErr == nil && snapErr == nil && !v.hourlyUnknown() && f.o.MaxHourly > 0 {
-		if needHourly := f.examiner.blockedHourly(); needHourly > 0 {
-			endingWorkers := make(map[*Worker]bool, len(d.End))
-			projectedHourly := v.Hourly
-			projectedLive := v.liveWorkerCount()
-			for _, e := range d.End {
-				if e.Worker != nil && (e.Rental == nil || e.Rental == e.Worker.Rental) {
-					endingWorkers[e.Worker] = true
+	projectAfterEnds := func(ends []Ending) (endingWorkers map[*Worker]bool, projectedHourly float64, projectedLive int) {
+		endingWorkers = make(map[*Worker]bool, len(ends))
+		projectedHourly = v.Hourly
+		projectedLive = v.liveWorkerCount()
+		for _, e := range ends {
+			if e.Worker != nil && (e.Rental == nil || e.Rental == e.Worker.Rental) {
+				endingWorkers[e.Worker] = true
+			}
+			r := e.Rental
+			if r == nil && e.Worker != nil {
+				r = e.Worker.Rental
+			}
+			if r == nil {
+				continue
+			}
+			switch {
+			case r.live() || r.Unconfirmed:
+				projectedLive = max(0, projectedLive-1)
+				if validRate(r.Price) {
+					projectedHourly = max(0, projectedHourly-r.Price)
 				}
-				r := e.Rental
-				if r == nil && e.Worker != nil {
-					r = e.Worker.Rental
+			case r.State == "stopped":
+				diskRate := r.DiskCost
+				if recPod := v.Ledger.Pods[ledgerKey(r.Market, r.ID)]; recPod != nil && recPod.stoppedHourlyRate() > diskRate {
+					diskRate = recPod.stoppedHourlyRate()
 				}
-				if r == nil {
-					continue
-				}
-				switch {
-				case r.live() || r.Unconfirmed:
-					projectedLive = max(0, projectedLive-1)
-					if validRate(r.Price) {
-						projectedHourly = max(0, projectedHourly-r.Price)
-					}
-				case r.State == "stopped":
-					diskRate := r.DiskCost
-					if recPod := v.Ledger.Pods[ledgerKey(r.Market, r.ID)]; recPod != nil && recPod.stoppedHourlyRate() > diskRate {
-						diskRate = recPod.stoppedHourlyRate()
-					}
-					if validRate(diskRate) {
-						projectedHourly = max(0, projectedHourly-diskRate)
-					}
+				if validRate(diskRate) {
+					projectedHourly = max(0, projectedHourly-diskRate)
 				}
 			}
-			if projectedHourly+needHourly > f.o.MaxHourly+1e-9 {
+		}
+		return endingWorkers, projectedHourly, projectedLive
+	}
+	// Make dispute-breaker evictions conditional on a replacement grader actually passing admission
+	// (no unknown hourly rates, no examiner/accounting error blocking launches, and at least one
+	// armed offer fitting post-eviction --max, --max-hourly, and remaining --daily-budget).
+	const disputeEvictWhy = "idle while a fresh machine is needed to break a dispute"
+	var nonDisputeEnds, disputeEnds []Ending
+	for _, e := range d.End {
+		if e.Why == disputeEvictWhy {
+			disputeEnds = append(disputeEnds, e)
+		} else {
+			nonDisputeEnds = append(nonDisputeEnds, e)
+		}
+	}
+	if len(disputeEnds) > 0 {
+		launchReservedPre := reserved
+		if launchReservedPre == 0 && reserveSlotOnly && needExaminer {
+			launchReservedPre = 1
+		}
+		exReserveHourly := 0.0
+		if launchReservedPre > v.ExaminerLive {
+			exReserveHourly = f.examinerReserveHourly()
+		}
+		admitOK := !v.hourlyUnknown() && exErr == nil && snapErr == nil &&
+			f.o.MaxHourly > 0 &&
+			(f.o.DailyBudget <= 0 || v.Today < f.o.DailyBudget) &&
+			(f.o.MaxWorkers <= 0 || f.o.MaxWorkers-launchReservedPre > 0)
+		var offers []Offer
+		if admitOK {
+			if got, oerr := f.choicesFor(ctx, false, false, false); oerr == nil {
+				for _, c := range got {
+					m := f.market(c.Market)
+					if m == nil || (!f.armed(c.Market) && c.Market != f.o.Market) || !validRate(c.Price) {
+						continue
+					}
+					offers = append(offers, c)
+				}
+			}
+		}
+		// Order dispute eviction candidates so keeping a prefix frees the highest hourly cost
+		// (tie-broken by slowest speed, then handle) first.
+		sort.SliceStable(disputeEnds, func(i, j int) bool {
+			ri, rj := disputeEnds[i].Rental, disputeEnds[j].Rental
+			if ri == nil && disputeEnds[i].Worker != nil {
+				ri = disputeEnds[i].Worker.Rental
+			}
+			if rj == nil && disputeEnds[j].Worker != nil {
+				rj = disputeEnds[j].Worker.Rental
+			}
+			pi, pj := 0.0, 0.0
+			if ri != nil && validRate(ri.Price) {
+				pi = ri.Price
+			}
+			if rj != nil && validRate(rj.Price) {
+				pj = rj.Price
+			}
+			if pi != pj {
+				return pi > pj
+			}
+			si, sj := 0.0, 0.0
+			if disputeEnds[i].Worker != nil {
+				si = disputeEnds[i].Worker.Speed
+			}
+			if disputeEnds[j].Worker != nil {
+				sj = disputeEnds[j].Worker.Speed
+			}
+			if si != sj {
+				return si < sj
+			}
+			hi, hj := "", ""
+			if disputeEnds[i].Worker != nil && disputeEnds[i].Worker.Key != nil {
+				hi = disputeEnds[i].Worker.Key.Handle
+			}
+			if disputeEnds[j].Worker != nil && disputeEnds[j].Worker.Key != nil {
+				hj = disputeEnds[j].Worker.Key.Handle
+			}
+			return hi < hj
+		})
+		_, baseHourly, baseLive := projectAfterEnds(nonDisputeEnds)
+		workerCap := f.o.MaxWorkers - launchReservedPre
+		simulateLaunches := func(want, liveCount int, hourlyNow, todayNow float64) int {
+			if !admitOK || want <= 0 {
+				return 0
+			}
+			capN := want
+			if f.o.MaxWorkers > 0 {
+				capN = min(capN, max(0, workerCap-liveCount))
+			}
+			if capN <= 0 {
+				return 0
+			}
+			remStock := make([]int, len(offers))
+			for i, c := range offers {
+				remStock[i] = c.Stock
+			}
+			launched := 0
+			curHourly := hourlyNow
+			curToday := todayNow
+			for launched < capN {
+				if f.o.DailyBudget > 0 && curToday >= f.o.DailyBudget {
+					break
+				}
+				pickedIdx := -1
+				for i := range offers {
+					if offers[i].Stock > 0 && remStock[i] <= 0 {
+						continue
+					}
+					c := &offers[i]
+					if curHourly+exReserveHourly+c.Price > f.o.MaxHourly+1e-9 {
+						continue
+					}
+					fixed := 0.0
+					if nonNegFinite(c.FixedCost) && c.FixedCost > 0 {
+						fixed = c.FixedCost
+					}
+					if f.o.DailyBudget > 0 && curToday+fixed > f.o.DailyBudget+1e-9 {
+						continue
+					}
+					pickedIdx = i
+					break
+				}
+				if pickedIdx < 0 {
+					break
+				}
+				if offers[pickedIdx].Stock > 0 {
+					remStock[pickedIdx]--
+				}
+				curHourly += offers[pickedIdx].Price
+				if nonNegFinite(offers[pickedIdx].FixedCost) && offers[pickedIdx].FixedCost > 0 {
+					curToday += offers[pickedIdx].FixedCost
+				}
+				launched++
+			}
+			return launched
+		}
+		// Keep the smallest prefix of dispute evictions that strictly increases the number of
+		// affordable replacement launches beyond what already fits in free slots without evicting.
+		baseWant := max(0, d.Launch-len(disputeEnds))
+		curHourly, curLive := baseHourly, baseLive
+		bestK := 0
+		bestAchievable := simulateLaunches(baseWant, curLive, curHourly, v.Today)
+		for k := 1; k <= len(disputeEnds); k++ {
+			e := disputeEnds[k-1]
+			r := e.Rental
+			if r == nil && e.Worker != nil {
+				r = e.Worker.Rental
+			}
+			if r != nil && (r.live() || r.Unconfirmed) {
+				curLive = max(0, curLive-1)
+				if validRate(r.Price) {
+					curHourly = max(0, curHourly-r.Price)
+				}
+			}
+			wantK := min(d.Launch, baseWant+k)
+			if achievable := simulateLaunches(wantK, curLive, curHourly, v.Today); achievable > bestAchievable {
+				bestAchievable = achievable
+				bestK = k
+			}
+		}
+		keptDispute := disputeEnds[:bestK]
+		if dropped := len(disputeEnds) - bestK; dropped > 0 {
+			d.Live += dropped
+			d.Launch = max(0, d.Launch-dropped)
+			d.LaunchLong = min(d.LaunchLong, d.Launch)
+			d.LaunchEarly = min(d.LaunchEarly, max(0, d.Launch-d.LaunchLong))
+			d.LaunchRuns = min(d.LaunchRuns, max(0, d.Launch-d.LaunchLong-d.LaunchEarly))
+		}
+		d.End = append(nonDisputeEnds, keptDispute...)
+	}
+	// If a required managed examiner is absent and blocked by --max or --max-hourly, reclaim
+	// headroom from idle (waiting) workers ONLY when evicting available idle workers satisfies
+	// BOTH --max and --max-hourly for the cheapest feasible examiner offer.
+	if f.examiner != nil && v.ExaminerLive == 0 && needExaminer && exErr == nil && snapErr == nil && !v.hourlyUnknown() && f.o.MaxHourly > 0 {
+		if needHourly := f.examiner.blockedHourly(); needHourly > 0 {
+			endingWorkers, projectedHourly, projectedLive := projectAfterEnds(d.End)
+			needSlot := f.o.MaxWorkers > 0 && projectedLive >= f.o.MaxWorkers
+			needBudget := projectedHourly+needHourly > f.o.MaxHourly+1e-9
+			if needSlot || needBudget {
 				var idle []*Worker
 				for _, wk := range v.Workers {
 					if wk == nil || endingWorkers[wk] || wk.Rental == nil || !wk.Rental.live() || !validRate(wk.Rental.Price) {
@@ -498,11 +680,14 @@ func tick(ctx context.Context, f *Fleet) (err error) {
 					}
 				}
 				sort.SliceStable(idle, func(i, j int) bool {
-					if idle[i].Rental.Price != idle[j].Rental.Price {
+					if needBudget && idle[i].Rental.Price != idle[j].Rental.Price {
 						return idle[i].Rental.Price > idle[j].Rental.Price
 					}
 					if idle[i].Speed != idle[j].Speed {
 						return idle[i].Speed < idle[j].Speed
+					}
+					if idle[i].Rental.Price != idle[j].Rental.Price {
+						return idle[i].Rental.Price > idle[j].Rental.Price
 					}
 					return idle[i].Key.Handle < idle[j].Key.Handle
 				})
@@ -513,16 +698,24 @@ func tick(ctx context.Context, f *Fleet) (err error) {
 				candLive := projectedLive
 				var evict []*Worker
 				for _, wk := range idle {
-					if candHourly+needHourly <= f.o.MaxHourly+1e-9 && (f.o.MaxWorkers <= 0 || candLive < f.o.MaxWorkers) {
+					hourlyOK := f.o.MaxHourly > 0 && candHourly+needHourly <= f.o.MaxHourly+1e-9
+					slotOK := f.o.MaxWorkers <= 0 || candLive < f.o.MaxWorkers
+					if hourlyOK && slotOK {
 						break
 					}
 					evict = append(evict, wk)
 					candHourly = max(0, candHourly-wk.Rental.Price)
 					candLive = max(0, candLive-1)
 				}
-				if candHourly+needHourly <= f.o.MaxHourly+1e-9 && (f.o.MaxWorkers <= 0 || candLive < f.o.MaxWorkers) {
+				hourlyOK := f.o.MaxHourly > 0 && candHourly+needHourly <= f.o.MaxHourly+1e-9
+				slotOK := f.o.MaxWorkers <= 0 || candLive < f.o.MaxWorkers
+				if len(evict) > 0 && hourlyOK && slotOK {
+					why := "idle while hourly budget is needed for the round's examiner"
+					if needSlot && !needBudget {
+						why = "idle while a slot is needed for the round's examiner"
+					}
 					for _, wk := range evict {
-						d.End = append(d.End, Ending{Worker: wk, Why: "idle while hourly budget is needed for the round's examiner"})
+						d.End = append(d.End, Ending{Worker: wk, Why: why})
 						endingWorkers[wk] = true
 						d.Live = max(0, d.Live-1)
 					}
@@ -547,7 +740,11 @@ func tick(ctx context.Context, f *Fleet) (err error) {
 			reserved = 1
 		}
 	}
-	if reserved > v.ExaminerLive {
+	launchReserved := reserved
+	if launchReserved == 0 && reserveSlotOnly && needExaminer {
+		launchReserved = 1
+	}
+	if launchReserved > v.ExaminerLive {
 		v.ExaminerReservedHourly = f.examinerReserveHourly()
 	} else {
 		v.ExaminerReservedHourly = 0
@@ -565,7 +762,7 @@ func tick(ctx context.Context, f *Fleet) (err error) {
 		}
 	}
 	postLive := v.liveWorkerCount()
-	launchN := min(d.Launch, max(0, (f.o.MaxWorkers-reserved)-postLive))
+	launchN := min(d.Launch, max(0, (f.o.MaxWorkers-launchReserved)-postLive))
 	if exErr != nil || snapErr != nil {
 		launchN = 0
 	}
@@ -1311,7 +1508,7 @@ func cmdWorkersResolve(ctx context.Context, f *Fleet, end bool, clearIDs ...stri
 		}
 		listedByMarket[mName] = rs
 	}
-	matchesByID, claimants := resolvePendingMatches(l, listedByMarket, pkeys)
+	matchesByID, claimants := resolvePendingMatches(l, spentSum, listedByMarket, pkeys)
 	handled := map[string]bool{}
 	for _, id := range pkeys {
 		pr := l.Pending[id]
@@ -1398,6 +1595,48 @@ func cmdWorkersResolve(ctx context.Context, f *Fleet, end bool, clearIDs ...stri
 		if start.IsZero() || start.After(now) {
 			start = now
 		}
+		if p.State == "gone" {
+			statusWord := strings.ToLower(p.Status)
+			if statusWord == "" {
+				statusWord = "gone"
+			}
+			if f.o.DryRun {
+				f.say("would retire already-%s matching contract %s for pending worker %s on %s", statusWord, p.ID, pr.Handle, marketTitle(pr.Market))
+				continue
+			}
+			gpu := p.Card
+			if gpu == "" {
+				gpu = pr.GPU
+			}
+			host := p.Host
+			if host == "" {
+				host = pr.Host
+			}
+			rec := &podRecord{
+				ID: p.ID, Market: p.Market, Handle: pr.Handle, GPU: gpu, Cloud: pr.Cloud, PendingID: pr.ID,
+				Cost: pr.Cost, DiskCost: pr.DiskCost, TransferCost: pr.TransferCost,
+				FixedCost: pr.FixedCost, FixedCostEstimated: pr.FixedCostEstimated,
+				PartialCost: !validRate(pr.Cost), Start: start, Alive: now, Tracked: true, Gone: true,
+				Why:    "its market already has it " + statusWord,
+				Grades: pr.Grades, Host: host, CPU: pr.CPU, Curators: pr.Curators,
+				For: pr.For, Round: pr.Round, Report: pr.Report,
+			}
+			reconcileRentalRate(rec, p)
+			endAt := resolveStopTime(start, now, p.EndedAt)
+			l.Pods[key] = rec
+			if rerr := f.retire(l, key, endAt); rerr != nil {
+				delete(l.Pods, key)
+				if firstErr == nil {
+					firstErr = rerr
+				}
+				continue
+			}
+			delete(l.Pending, id)
+			changed = true
+			f.event(p, pr.Handle, "gone", rec.Why)
+			f.say("retired already-%s pending worker %s on %s (machine %s)", statusWord, pr.Handle, marketTitle(p.Market), p.ID)
+			continue
+		}
 		alive := now
 		endAt := now
 		var stoppedAt, stoppedSeen time.Time
@@ -1421,8 +1660,10 @@ func cmdWorkersResolve(ctx context.Context, f *Fleet, end bool, clearIDs ...stri
 		}
 		rec := &podRecord{
 			ID: p.ID, Market: p.Market, Handle: pr.Handle, GPU: gpu, Cloud: pr.Cloud, PendingID: pr.ID,
-			Cost: pr.Cost, DiskCost: pr.DiskCost, TransferCost: pr.TransferCost, FixedCost: pr.FixedCost, PartialCost: !validRate(pr.Cost),
-			Start: start, Alive: alive, StoppedAt: stoppedAt, StoppedSeen: stoppedSeen, Tracked: true, Stopped: p.State == "stopped",
+			Cost: pr.Cost, DiskCost: pr.DiskCost, TransferCost: pr.TransferCost,
+			FixedCost: pr.FixedCost, FixedCostEstimated: pr.FixedCostEstimated,
+			PartialCost: !validRate(pr.Cost),
+			Start:       start, Alive: alive, StoppedAt: stoppedAt, StoppedSeen: stoppedSeen, Tracked: true, Stopped: p.State == "stopped",
 			Grades: pr.Grades, Host: host, CPU: pr.CPU, Curators: pr.Curators,
 			For: pr.For, Round: pr.Round, Report: pr.Report,
 		}
@@ -1567,6 +1808,13 @@ func cmdDownRentalMeta(ctx context.Context, f *Fleet, market, id string, meta *R
 					}
 					if nonNegFinite(meta.FixedCost) {
 						rec.FixedCost = meta.FixedCost
+						rec.FixedCostEstimated = meta.FixedCostEstimated
+					}
+					if rentalObservedTransferTrusted(rec.FixedCostEstimated, meta) {
+						rec.TransferObserved = true
+						if nonNegFinite(meta.ObservedTransferCost) {
+							rec.ObservedTransferCost = meta.ObservedTransferCost
+						}
 					}
 					if !meta.Created.IsZero() && !meta.Created.After(now) {
 						rec.Start = meta.Created
@@ -1604,6 +1852,7 @@ func cmdDownRentalMeta(ctx context.Context, f *Fleet, market, id string, meta *R
 					}
 					if rec.FixedCost == 0 && nonNegFinite(pr.FixedCost) {
 						rec.FixedCost = pr.FixedCost
+						rec.FixedCostEstimated = pr.FixedCostEstimated
 					}
 					if !pr.Created.IsZero() && !pr.Created.After(now) && pr.Created.Before(rec.Start) {
 						rec.Start = pr.Created

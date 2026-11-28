@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -3806,5 +3807,264 @@ func TestReview30ConsensusDoesNotStrikeStrongestAgreeingGroup(t *testing.T) {
 		if j.numericalSplit(vClean) {
 			t.Fatal("3 mutually agreeing valid grades vs 2 invalid grades should settle (numericalSplit=false)")
 		}
+	})
+}
+
+// Review 32 P1 #1: Restarting the server with a different default scale (STET_SCALE) on the same
+// store MUST judge every already-drawn round against its persisted Round.Scale across baseline
+// agreement, grade agreement, and run agreement — exercised in BOTH directions (standard -> nano
+// and nano -> standard) all the way through settlement.
+func TestReview32RoundJudgedAgainstPersistedRoundScaleAcrossServerRestart(t *testing.T) {
+	initSHA := strings.Repeat("b", 64)
+	tokSHA := strings.Repeat("c", 64)
+
+	roundState := func(w *world, idx int) Round {
+		var rd Round
+		w.app.st.view(func(s *State) {
+			if r := s.Rounds[idx]; r != nil {
+				rd = *r
+			}
+		})
+		return rd
+	}
+
+	submitGradeWithBase := func(t *testing.T, w *world, idx int, a *actor, c *claimed, baseLoss, gain float64) (int, string) {
+		t.Helper()
+		rd := roundState(w, idx)
+		n := len(rd.ExamTable)
+		baseItems := make([]float64, n)
+		examItems := make([]float64, n)
+		for i := range n {
+			baseItems[i] = -baseLoss
+			examItems[i] = -(baseLoss - gain)
+		}
+		var ack struct {
+			Status string `json:"status"`
+			Error  string `json:"error"`
+		}
+		p := map[string]any{
+			"harness": w.app.season.Harness, "season": w.app.season.ID, "season_digest": w.app.season.Digest,
+			"round": c.Job.Round["id"], "scale": c.Job.Scale,
+			"corpus_sha256": rd.CorpusSHA, "exam_sha256": rd.ExamSHA,
+			"script_sha256": c.Job.Script.SHA256, "valid": true,
+			"hardware": map[string]any{"gpu": "NVIDIA RTX 4090", "vram_gb": 24, "backend": "cuda", "cc": "8.9", "bf16_native": true},
+			"train":    map[string]any{"seconds": 120.0, "init_sha256": initSHA},
+			"script":   map[string]any{"tokens_sha256": tokSHA},
+			"exam":     map[string]any{"mean": -(baseLoss - gain), "items": n, "item_scores": examItems},
+			"baseline": map[string]any{
+				"mean": -baseLoss, "items": n, "item_scores": baseItems, "init_sha256": initSHA,
+				"hardware": map[string]any{"gpu": "NVIDIA RTX 4090", "vram_gb": 24, "backend": "cuda", "cc": "8.9", "bf16_native": true},
+			},
+		}
+		code := a.do("POST", fmt.Sprintf("/api/v1/jobs/%d/result", c.Job.ID), p, &ack)
+		if ack.Error != "" {
+			return code, ack.Error
+		}
+		return code, ack.Status
+	}
+
+	repoint := func(w *world, actors ...*actor) {
+		for _, a := range actors {
+			a.srv = w.srv
+		}
+	}
+
+	t.Run("standard_round_after_restart_to_nano_enforces_standard_baseline_grade_and_run_tolerances", func(t *testing.T) {
+		pub, priv := newKey()
+		kv := newMemKV()
+		cfg := testConfig(t, pub)
+		cfg.Scale = "standard"
+		cfg.RunsPerEntry = 2
+		blobs := dirBlobs{filepath.Join(cfg.DataDir, "blobs")}
+		w1 := startWorld(t, cfg, kv, blobs)
+		w1.app.season.Baselines.PerRound = 2
+		w1.app.season.Tolerance["standard"] = Tolerance{Grade: 0.012, Baseline: 0.015, Run: 0.015}
+		w1.app.season.Tolerance["nano"] = Tolerance{Grade: 0.15, Baseline: 0.20, Run: 0.20}
+
+		anchor := w1.join("r32-s2n-anchor", priv)
+		g := w1.volunteers("r32-s2n-g1", "r32-s2n-g2", "r32-s2n-g3", "r32-s2n-g4", "r32-s2n-g5", "r32-s2n-g6", "r32-s2n-r3")
+		w1.submit(w1.join("r32-s2n-owner", nil), "entry-std", "print(1)")
+		idx := w1.drawWithoutExam()
+		// Submit run 1 and hold run 2 open while baseline + grade agreement run on script 1.
+		ce1 := w1.claim(anchor, true)
+		if code, _ := w1.edit(anchor, ce1, "0\n1\n"); code != 200 {
+			t.Fatalf("edit1: HTTP %d", code)
+		}
+		ce2 := w1.claim(g[4], true)
+		if ce2.Job == nil || ce2.Job.Kind != "edit" {
+			t.Fatalf("expected run 2 edit claim, got %+v", ce2.Job)
+		}
+		c1 := w1.claimEarly(g[0])
+		c2 := w1.claimEarly(g[1])
+		c3 := w1.claimEarly(g[2])
+		if c1.Job.Scale != "standard" || c2.Job.Scale != "standard" || c3.Job.Scale != "standard" {
+			t.Fatalf("expected standard claims before restart, got %q/%q/%q", c1.Job.Scale, c2.Job.Scale, c3.Job.Scale)
+		}
+		w1.exam(idx)
+		// Verifier 1 submits baseline 6.00 (gain +0.100) BEFORE restart.
+		if code, st := submitGradeWithBase(t, w1, idx, g[0], c1, 6.00, 0.100); code != 200 || st != "pending" {
+			t.Fatalf("g1 submit before restart: HTTP %d %q", code, st)
+		}
+
+		// Restart server on the SAME store with STET_SCALE=nano!
+		cfgNano := cfg
+		cfgNano.Scale = "nano"
+		w2 := startWorld(t, cfgNano, kv, blobs)
+		w2.app.season.Baselines.PerRound = 2
+		w2.app.season.Tolerance["standard"] = Tolerance{Grade: 0.012, Baseline: 0.015, Run: 0.015}
+		w2.app.season.Tolerance["nano"] = Tolerance{Grade: 0.15, Baseline: 0.20, Run: 0.20}
+		repoint(w2, anchor, g[0], g[1], g[2], g[3], g[4], g[5], g[6])
+
+		// 1. Baseline comparison: Verifier 2 submits baseline 6.02 (|0.02| > 0.015 standard tol, < 0.20 nano tol) ->
+		//    MUST remain disputed (NOT settle with 2 baselines)!
+		if code, st := submitGradeWithBase(t, w2, idx, g[1], c2, 6.02, 0.100); code != 200 {
+			t.Fatalf("g2 submit after restart: HTTP %d %q", code, st)
+		}
+		var disputed bool
+		w2.app.st.view(func(s *State) {
+			disputed = w2.app.baselineDisputed(s, s.Rounds[idx])
+		})
+		if !disputed {
+			t.Fatal("standard round with baselines 6.00 and 6.02 MUST be disputed after restart to STET_SCALE=nano (0.02 > 0.015)")
+		}
+		if rd := roundState(w2, idx); rd.Status == "settled" {
+			t.Fatalf("standard round MUST NOT settle with conflicting baselines 6.00 vs 6.02 after restart to nano")
+		}
+
+		// 2. Verifier 3 breaks the baseline tie with 6.00, AND submits gain +0.115 on script 1
+		//    (|0.115 - 0.100| = 0.015 > 0.012 standard grade tol, < 0.15 nano grade tol) ->
+		//    grade agreement MUST still use standard 0.012 tol so script 1 needs a tie-breaker!
+		if code, st := submitGradeWithBase(t, w2, idx, g[2], c3, 6.00, 0.115); code != 200 || st != "pending" {
+			t.Fatalf("g3 tie-break baseline + disagreeing grade (+0.115 vs +0.100): HTTP %d %q, want 200 pending", code, st)
+		}
+		c4 := w2.claim(g[3], false)
+		if c4.Job == nil || c4.Job.Kind != "grade" || c4.Job.Scale != "standard" || c4.Job.Script.SHA256 != c1.Job.Script.SHA256 {
+			t.Fatalf("standard round grade split (+0.100 vs +0.115) MUST request standard tie-break grade on script 1 after restart to nano, got %+v", c4.Job)
+		}
+		if code, st := submitGradeWithBase(t, w2, idx, g[3], c4, 6.00, 0.100); code != 200 {
+			t.Fatalf("g4 agree on script 1: HTTP %d %q", code, st)
+		}
+
+		// 3. Run agreement: submit run 2 (distinct script) and grade it at +0.120 (|0.120 - 0.100| = 0.020 >
+		//    0.015 standard run tol, < 0.20 nano run tol) -> with a 3rd fresh runner (g[6]) online,
+		//    j.runsWanted MUST request a 3rd run instead of settling!
+		_ = w2.claim(g[6], true) // mark g[6] as an active fresh runner (RunnerSeen)
+		if code, _ := w2.edit(g[4], ce2, "0\n1\n2\n"); code != 200 {
+			t.Fatalf("edit2: HTTP %d", code)
+		}
+		c5 := w2.claim(g[5], false)
+		if c5.Job == nil || c5.Job.Scale != "standard" {
+			t.Fatalf("expected standard g6 claim for script 2, got %+v", c5.Job)
+		}
+		if code, st := submitGradeWithBase(t, w2, idx, g[5], c5, 6.00, 0.120); code != 200 {
+			t.Fatalf("g6 grade script 2: HTTP %d %q", code, st)
+		}
+		var wantRuns int
+		w2.app.st.view(func(s *State) {
+			j := w2.app.newJudge(s)
+			for _, st := range j.states(s.Rounds[idx]) {
+				wantRuns = j.runsWanted(st)
+			}
+		})
+		if wantRuns != 3 {
+			t.Fatalf("standard round with runs +0.100 and +0.120 after restart to nano: runsWanted=%d, want 3 (0.020 > 0.015)", wantRuns)
+		}
+		// Complete 3rd run matching script 1 (+0.100) -> round settles cleanly!
+		ce3 := w2.claim(g[6], true)
+		if ce3.Job == nil || ce3.Job.Kind != "edit" {
+			t.Fatalf("expected 3rd edit claim, got %+v", ce3.Job)
+		}
+		if code, _ := w2.edit(g[6], ce3, "0\n1\n"); code != 200 {
+			t.Fatalf("edit3: HTTP %d", code)
+		}
+		if rd := roundState(w2, idx); rd.Status != "settled" {
+			t.Fatalf("expected standard round to settle after 3rd confirming run, got status=%q", rd.Status)
+		}
+		w2.check()
+	})
+
+	t.Run("nano_round_after_restart_to_standard_enforces_nano_baseline_grade_and_run_tolerances", func(t *testing.T) {
+		pub, priv := newKey()
+		kv := newMemKV()
+		cfg := testConfig(t, pub)
+		cfg.Scale = "nano"
+		cfg.RunsPerEntry = 2
+		blobs := dirBlobs{filepath.Join(cfg.DataDir, "blobs")}
+		w1 := startWorld(t, cfg, kv, blobs)
+		w1.app.season.Baselines.PerRound = 2
+		w1.app.season.Tolerance["standard"] = Tolerance{Grade: 0.012, Baseline: 0.015, Run: 0.015}
+		w1.app.season.Tolerance["nano"] = Tolerance{Grade: 0.15, Baseline: 0.20, Run: 0.20}
+
+		anchor := w1.join("r32-n2s-anchor", priv)
+		g := w1.volunteers("r32-n2s-g1", "r32-n2s-g2", "r32-n2s-g3", "r32-n2s-g4")
+		w1.submit(w1.join("r32-n2s-owner", nil), "entry-nano", "print(2)")
+		idx := w1.drawWithoutExam()
+		// Submit run 1 and hold run 2 open so script 1 is graded deterministically.
+		ce1 := w1.claim(anchor, true)
+		if code, _ := w1.edit(anchor, ce1, "0\n1\n"); code != 200 {
+			t.Fatalf("edit1: HTTP %d", code)
+		}
+		ce2 := w1.claim(g[2], true)
+		if ce2.Job == nil || ce2.Job.Kind != "edit" {
+			t.Fatalf("expected run 2 edit claim, got %+v", ce2.Job)
+		}
+		c1 := w1.claimEarly(g[0])
+		c2 := w1.claimEarly(g[1])
+		if c1.Job.Scale != "nano" || c2.Job.Scale != "nano" {
+			t.Fatalf("expected nano claims before restart, got %q/%q", c1.Job.Scale, c2.Job.Scale)
+		}
+		w1.exam(idx)
+		// Verifier 1 submits baseline 6.00 (gain +0.100) on script 1 BEFORE restart.
+		if code, st := submitGradeWithBase(t, w1, idx, g[0], c1, 6.00, 0.100); code != 200 || st != "pending" {
+			t.Fatalf("g1 submit before restart: HTTP %d %q", code, st)
+		}
+
+		// Restart server on the SAME store with STET_SCALE=standard!
+		cfgStd := cfg
+		cfgStd.Scale = "standard"
+		w2 := startWorld(t, cfgStd, kv, blobs)
+		w2.app.season.Baselines.PerRound = 2
+		w2.app.season.Tolerance["standard"] = Tolerance{Grade: 0.012, Baseline: 0.015, Run: 0.015}
+		w2.app.season.Tolerance["nano"] = Tolerance{Grade: 0.15, Baseline: 0.20, Run: 0.20}
+		repoint(w2, anchor, g[0], g[1], g[2], g[3])
+
+		// 1. Baseline (6.10 vs 6.00 -> diff 0.10 <= 0.20 nano tol, > 0.015 standard tol) AND
+		//    Grade (+0.200 vs +0.100 -> diff 0.10 <= 0.15 nano grade tol, > 0.012 standard tol) MUST agree!
+		if code, st := submitGradeWithBase(t, w2, idx, g[1], c2, 6.10, 0.200); code != 200 {
+			t.Fatalf("g2 submit after restart to standard: HTTP %d %q", code, st)
+		}
+		var disputed bool
+		w2.app.st.view(func(s *State) {
+			disputed = w2.app.baselineDisputed(s, s.Rounds[idx])
+		})
+		if disputed {
+			t.Fatal("nano round with baselines 6.00 and 6.10 MUST NOT be disputed after restart to STET_SCALE=standard (0.10 <= 0.20)")
+		}
+		// Script 1 MUST already be decided (no extra tie-break grade needed under nano 0.15 grade tol)!
+		if extra := w2.claim(g[3], false); extra.Job != nil {
+			t.Fatalf("nano round grades +0.100 and +0.200 MUST agree without requesting extra grade after restart to standard, got %+v", extra.Job)
+		}
+
+		// 2. Run agreement: submit run 2 (distinct script) and grade it at +0.270 (diff from script 1's +0.150
+		//    is 0.12 <= 0.20 nano run tol, > 0.015 standard run tol) -> MUST settle with ONLY 2 runs!
+		if code, _ := w2.edit(g[2], ce2, "0\n1\n2\n"); code != 200 {
+			t.Fatalf("edit2: HTTP %d", code)
+		}
+		c3 := w2.claim(g[3], false)
+		if c3.Job == nil || c3.Job.Scale != "nano" {
+			t.Fatalf("expected persisted round scale 'nano' for g4 after restart to standard, got %+v", c3.Job)
+		}
+		if code, st := submitGradeWithBase(t, w2, idx, g[3], c3, 6.00, 0.270); code != 200 {
+			t.Fatalf("g4 grade script 2: HTTP %d %q", code, st)
+		}
+		rd := roundState(w2, idx)
+		if rd.Status != "settled" {
+			t.Fatalf("nano round MUST settle with 2 agreeing baselines/grades/runs after restart to standard, got status=%q", rd.Status)
+		}
+		e := w2.entry(idx, "entry-nano")
+		if e.RunsDiffer || !e.Confirmed {
+			t.Fatalf("nano round runs within 0.20 run tolerance must settle Confirmed=true RunsDiffer=false, got %+v", e)
+		}
+		w2.check()
 	})
 }
