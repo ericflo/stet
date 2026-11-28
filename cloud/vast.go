@@ -279,41 +279,54 @@ type vastPort struct {
 	HostPort string `json:"HostPort"`
 }
 
+// vastInstancePricing is the nested pricing summary Vast.ai returns under `instance`.
+type vastInstancePricing struct {
+	GPUCostPerHour         *float64 `json:"gpuCostPerHour,omitempty"`
+	DiskHour               *float64 `json:"diskHour,omitempty"`
+	TotalHour              *float64 `json:"totalHour,omitempty"`
+	DiscountTotalHour      *float64 `json:"discountTotalHour,omitempty"`
+	DiscountedTotalPerHour *float64 `json:"discountedTotalPerHour,omitempty"`
+}
+
 // vastInstance is one of the account's instances, of the fields read here.
 type vastInstance struct {
-	ID                 int64                 `json:"id"`
-	Label              *string               `json:"label"`
-	ActualStatus       *string               `json:"actual_status"`
-	IntendedStatus     string                `json:"intended_status"`
-	CurState           string                `json:"cur_state"`
-	StatusMsg          *string               `json:"status_msg"`
-	GPUName            string                `json:"gpu_name"`
-	DPHBase            float64               `json:"dph_base"`
-	DPHTotal           float64               `json:"dph_total"`
-	DiskSpace          float64               `json:"disk_space"`
-	StorageCost        float64               `json:"storage_cost"`
-	InetDownCost       float64               `json:"inet_down_cost"`
-	InetUpCost         float64               `json:"inet_up_cost"`
-	InetDownBilled     *float64              `json:"inet_down_billed,omitempty"`
-	InetUpBilled       *float64              `json:"inet_up_billed,omitempty"`
-	TransferCostBilled *float64              `json:"transfer_cost,omitempty"`
-	StartDate          float64               `json:"start_date"`
-	PublicIPAddr       string                `json:"public_ipaddr"`
-	Ports              map[string][]vastPort `json:"ports"`
-	diskSpaceSet       bool
-	storageCostSet     bool
-	inetDownCostSet    bool
-	inetUpCostSet      bool
+	ID                  int64                 `json:"id"`
+	Label               *string               `json:"label"`
+	ActualStatus        *string               `json:"actual_status"`
+	IntendedStatus      string                `json:"intended_status"`
+	CurState            string                `json:"cur_state"`
+	StatusMsg           *string               `json:"status_msg"`
+	GPUName             string                `json:"gpu_name"`
+	DPHBase             float64               `json:"dph_base"`
+	DPHTotal            float64               `json:"dph_total"`
+	DiskSpace           float64               `json:"disk_space"`
+	StorageCost         float64               `json:"storage_cost"`
+	StorageTotalCost    float64               `json:"storage_total_cost"`
+	InstancePricing     *vastInstancePricing  `json:"instance,omitempty"`
+	InetDownCost        float64               `json:"inet_down_cost"`
+	InetUpCost          float64               `json:"inet_up_cost"`
+	InetDownBilled      *float64              `json:"inet_down_billed,omitempty"`
+	InetUpBilled        *float64              `json:"inet_up_billed,omitempty"`
+	TransferCostBilled  *float64              `json:"transfer_cost,omitempty"`
+	StartDate           float64               `json:"start_date"`
+	PublicIPAddr        string                `json:"public_ipaddr"`
+	Ports               map[string][]vastPort `json:"ports"`
+	diskSpaceSet        bool
+	storageCostSet      bool
+	storageTotalCostSet bool
+	inetDownCostSet     bool
+	inetUpCostSet       bool
 }
 
 func (v *vastInstance) UnmarshalJSON(data []byte) error {
 	type alias vastInstance
 	var raw struct {
 		alias
-		RawDiskSpace    *float64 `json:"disk_space"`
-		RawStorageCost  *float64 `json:"storage_cost"`
-		RawInetDownCost *float64 `json:"inet_down_cost"`
-		RawInetUpCost   *float64 `json:"inet_up_cost"`
+		RawDiskSpace        *float64 `json:"disk_space"`
+		RawStorageCost      *float64 `json:"storage_cost"`
+		RawStorageTotalCost *float64 `json:"storage_total_cost"`
+		RawInetDownCost     *float64 `json:"inet_down_cost"`
+		RawInetUpCost       *float64 `json:"inet_up_cost"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
@@ -327,6 +340,10 @@ func (v *vastInstance) UnmarshalJSON(data []byte) error {
 		v.StorageCost = *raw.RawStorageCost
 		v.storageCostSet = true
 	}
+	if raw.RawStorageTotalCost != nil {
+		v.StorageTotalCost = *raw.RawStorageTotalCost
+		v.storageTotalCostSet = true
+	}
 	if raw.RawInetDownCost != nil {
 		v.InetDownCost = *raw.RawInetDownCost
 		v.inetDownCostSet = true
@@ -339,14 +356,25 @@ func (v *vastInstance) UnmarshalJSON(data []byte) error {
 }
 
 // vastInstanceRate extracts the conservative hourly rate from a Vast.ai instance listing.
+// Explicit hourly storage fields (`instance.diskHour`, `storage_total_cost`, and
+// `disk_space * storage_cost / 720`) are decoded before aggregate differences so stopped instances
+// that report `dph_total == dph_base` or omit `dph_total` still preserve their storage rate.
 // When Vast omits dph_total and falls back to dph_base (+ any reported disk storage component),
 // partial is true so the ledger preserves previously known storage/transfer cost components.
 func vastInstanceRate(i vastInstance) (price, basePrice, diskCost float64, partial bool) {
 	if nonNegFinite(i.DiskSpace) && i.DiskSpace > 0 && nonNegFinite(i.StorageCost) {
 		diskCost = i.DiskSpace * i.StorageCost / 720.0
 	}
+	if i.storageTotalCostSet && nonNegFinite(i.StorageTotalCost) && i.StorageTotalCost > diskCost {
+		diskCost = i.StorageTotalCost
+	}
+	if i.InstancePricing != nil && i.InstancePricing.DiskHour != nil && nonNegFinite(*i.InstancePricing.DiskHour) && *i.InstancePricing.DiskHour > diskCost {
+		diskCost = *i.InstancePricing.DiskHour
+	}
 	if validRate(i.DPHBase) {
 		basePrice = i.DPHBase
+	} else if i.InstancePricing != nil && i.InstancePricing.GPUCostPerHour != nil && validRate(*i.InstancePricing.GPUCostPerHour) {
+		basePrice = *i.InstancePricing.GPUCostPerHour
 	}
 	if validRate(i.DPHTotal) {
 		price = i.DPHTotal
@@ -381,32 +409,43 @@ func vastStoppedDiskCost(state string, dphTotal, basePrice, diskCost float64) fl
 	return diskCost
 }
 
-// vastState is what an instance's state comes to: starting until its container runs, and
-// stopped once it has exited, gone offline, or been stopped (which still bills its disk).
+// vastState is what an instance's state comes to: starting until its container runs, stopped once
+// it has exited, gone offline, or been stopped (which still bills its disk unless offline), gone
+// when explicitly destroyed/deleted, and unknown for Vast's documented unrecoverable "unknown"
+// (or any unrecognized non-terminal) status so the fleet keeps ownership/billing and destroys it.
 func vastState(i vastInstance) (state, status string) {
 	s := ""
 	if i.ActualStatus != nil {
-		s = *i.ActualStatus
+		s = strings.ToLower(strings.TrimSpace(*i.ActualStatus))
 	}
 	switch {
 	case s == "running":
 		return "running", s
+	case s == "destroyed" || s == "deleted":
+		return "gone", s
+	case s == "unknown":
+		return "unknown", s
 	case s == "exited" || s == "offline" || s == "stopped" || i.IntendedStatus == "stopped" || i.CurState == "stopped":
 		return "stopped", s
-	case s == "" || s == "loading" || s == "created" || s == "scheduling":
+	case s == "" || s == "loading" || s == "created" || s == "scheduling" || s == "starting":
 		return "starting", s
 	}
-	return s, s
+	return "unknown", s
 }
 
 // vastStoppedDiskCostUnknown reports whether a stopped Vast.ai instance's storage rate could not
-// be determined (omitted/null storage_cost and no positive dph_total while disk storage is
-// attached or unreported), distinguishing unknown pricing from an explicit $0.00/h free-storage
-// report (storage_cost: 0, disk_space: 0, or positive dph_total == dph_base). Confirmed offline
-// instances are exempt from Vast compute and storage charges so their storage rate is not needed
-// while offline.
+// be determined (no explicit storage_total_cost, instance.diskHour, or storage_cost and no
+// positive dph_total while disk storage is attached or unreported), distinguishing unknown pricing
+// from an explicit $0.00/h free-storage report. Confirmed offline instances are exempt from Vast
+// compute and storage charges so their storage rate is not needed while offline.
 func vastStoppedDiskCostUnknown(state, status string, i vastInstance, basePrice, diskCost float64) bool {
 	if state != "stopped" || status == "offline" || validRate(diskCost) {
+		return false
+	}
+	if i.InstancePricing != nil && i.InstancePricing.DiskHour != nil && nonNegFinite(*i.InstancePricing.DiskHour) && *i.InstancePricing.DiskHour == 0 {
+		return false
+	}
+	if i.storageTotalCostSet && nonNegFinite(i.StorageTotalCost) && i.StorageTotalCost == 0 {
 		return false
 	}
 	if i.storageCostSet && nonNegFinite(i.StorageCost) && i.StorageCost == 0 {
@@ -1009,7 +1048,7 @@ func (m *vastMarket) RentExaminer(ctx context.Context, offerID string, l Examine
 		// return an ambiguous (non-errRentRejected) error so the controller keeps the reservation.
 		if rs, lerr := m.ListExaminers(ctx); lerr == nil {
 			for _, r := range rs {
-				if r.Label == l.Label && r.State != "stopped" {
+				if r.Label == l.Label && examinerStateUsable(r.State) {
 					return r.ID, nil
 				}
 			}
@@ -1024,7 +1063,7 @@ func (m *vastMarket) RentExaminer(ctx context.Context, offerID string, l Examine
 	case status == 0 || status == http.StatusRequestTimeout || status >= 500:
 		if rs, lerr := m.ListExaminers(ctx); lerr == nil {
 			for _, r := range rs {
-				if r.Label == l.Label && r.State != "stopped" {
+				if r.Label == l.Label && examinerStateUsable(r.State) {
 					return r.ID, nil
 				}
 			}
@@ -1072,12 +1111,14 @@ func (m *vastMarket) ListExaminers(ctx context.Context) ([]ExaminerInstance, err
 			}
 			price, basePrice, diskCost, partial := vastInstanceRate(i)
 			diskCost = vastStoppedDiskCost(state, i.DPHTotal, basePrice, diskCost)
+			diskCostUnknown := vastStoppedDiskCostUnknown(state, status, i, basePrice, diskCost)
 			transferDollars := examinerOfferTransferDollars(i.InetDownCost)
 			tr := vastInstanceTransferReading(i)
 			all = append(all, ExaminerInstance{
 				ID: strconv.FormatInt(i.ID, 10), Label: label, State: state, Status: status,
+				Stopped: state == "stopped", Offline: state == "stopped" && status == "offline",
 				PublicIP: strings.TrimSpace(i.PublicIPAddr), HostPort: hostPort,
-				Price: price, BasePrice: basePrice, DiskCost: diskCost,
+				Price: price, BasePrice: basePrice, DiskCost: diskCost, DiskCostUnknown: diskCostUnknown,
 				TransferDollars: transferDollars, TransferEstimated: transferDollars > 0,
 				ObservedTransferCost: tr.Effective, TransferObserved: tr.Observed,
 				ObservedTransferDown: tr.Down, TransferDownObserved: tr.DownObserved, TransferDownUnpriced: tr.DownUnpriced,
@@ -1092,6 +1133,144 @@ func (m *vastMarket) ListExaminers(ctx context.Context) ([]ExaminerInstance, err
 		after = *out.NextToken
 	}
 	return all, fmt.Errorf("Vast listed more than 2,500 instances")
+}
+
+// TransferCharges queries Vast.ai's dated charges endpoint (GET /api/v0/charges) for instance
+// bandwidth line items (`bwd` download, `bwu` upload) within [from, to] (UTC day granularity),
+// keyed by contract ID -> UTC day ("2006-01-02") -> dayTransferCharge. Returns (nil, nil) if the
+// endpoint is absent (HTTP 404/405/501) so minimal mocks continue using listing/estimate fallbacks.
+func (m *vastMarket) TransferCharges(ctx context.Context, from, to time.Time) (map[string]map[string]dayTransferCharge, error) {
+	fromDay := startOfDay(from)
+	toDay := startOfDay(to)
+	if toDay.Before(fromDay) {
+		toDay = fromDay
+	}
+	filters, err := json.Marshal(map[string]any{
+		"day": map[string]int64{
+			"gte": fromDay.Unix(),
+			"lte": toDay.Add(24*time.Hour - time.Second).Unix(),
+		},
+		"type": map[string][]string{
+			"in": {"instance"},
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+	type vastChargeItem struct {
+		Start  float64 `json:"start"`
+		End    float64 `json:"end"`
+		Type   string  `json:"type"`
+		Amount float64 `json:"amount"`
+	}
+	type vastChargeRow struct {
+		Start      float64          `json:"start"`
+		End        float64          `json:"end"`
+		Day        float64          `json:"day"`
+		Type       string           `json:"type"`
+		Source     string           `json:"source"`
+		InstanceID int64            `json:"instance_id"`
+		Amount     float64          `json:"amount"`
+		Items      []vastChargeItem `json:"items"`
+	}
+	outMap := map[string]map[string]dayTransferCharge{}
+	addCharge := func(cid string, ts float64, kind string, amount float64) {
+		if cid == "" || !validRate(amount) {
+			return
+		}
+		var day time.Time
+		if ts > 0 {
+			day = startOfDay(time.Unix(int64(ts), 0).UTC())
+		} else {
+			day = toDay
+		}
+		if day.Before(fromDay) || day.After(toDay) {
+			return
+		}
+		dayKey := day.Format("2006-01-02")
+		if outMap[cid] == nil {
+			outMap[cid] = map[string]dayTransferCharge{}
+		}
+		cur := outMap[cid][dayKey]
+		switch strings.ToLower(strings.TrimSpace(kind)) {
+		case "bwd":
+			cur.Down += amount
+		case "bwu":
+			cur.Up += amount
+		default:
+			return
+		}
+		outMap[cid][dayKey] = cur
+	}
+	after := ""
+	for page := 0; page < 50; page++ {
+		q := url.Values{
+			"select_filters": {string(filters)},
+			"format":         {"table"},
+			"latest_first":   {"true"},
+			"limit":          {"500"},
+		}
+		if after != "" {
+			q.Set("after_token", after)
+		}
+		var resp struct {
+			Results   []vastChargeRow `json:"results"`
+			Charges   []vastChargeRow `json:"charges"`
+			NextToken *string         `json:"next_token"`
+		}
+		status, err := m.a.do(ctx, "GET", "/api/v0/charges?"+q.Encode(), nil, &resp)
+		if err != nil {
+			if status == http.StatusNotFound || status == http.StatusMethodNotAllowed || status == http.StatusNotImplemented {
+				return nil, nil
+			}
+			return nil, err
+		}
+		rows := resp.Results
+		if len(rows) == 0 && len(resp.Charges) > 0 {
+			rows = resp.Charges
+		}
+		for _, row := range rows {
+			rowType := strings.ToLower(strings.TrimSpace(row.Type))
+			cid := ""
+			if strings.HasPrefix(row.Source, "instance-") {
+				cid = strings.TrimSpace(strings.TrimPrefix(row.Source, "instance-"))
+			} else if row.InstanceID > 0 {
+				cid = strconv.FormatInt(row.InstanceID, 10)
+			}
+			if cid == "" {
+				continue
+			}
+			if rowType != "" && rowType != "instance" && rowType != "bwd" && rowType != "bwu" {
+				continue
+			}
+			rowTS := row.Start
+			if rowTS <= 0 {
+				rowTS = row.End
+			}
+			if rowTS <= 0 {
+				rowTS = row.Day
+			}
+			if len(row.Items) > 0 {
+				for _, it := range row.Items {
+					itTS := it.Start
+					if itTS <= 0 {
+						itTS = it.End
+					}
+					if itTS <= 0 {
+						itTS = rowTS
+					}
+					addCharge(cid, itTS, it.Type, it.Amount)
+				}
+			} else if rowType == "bwd" || rowType == "bwu" {
+				addCharge(cid, rowTS, rowType, row.Amount)
+			}
+		}
+		if resp.NextToken == nil || *resp.NextToken == "" || *resp.NextToken == after {
+			return outMap, nil
+		}
+		after = *resp.NextToken
+	}
+	return outMap, nil
 }
 
 func (m *vastMarket) EndExaminer(ctx context.Context, id string) error {

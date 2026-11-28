@@ -188,6 +188,19 @@ type rentalLookup interface {
 	Lookup(ctx context.Context, id string) (*Rental, bool, error)
 }
 
+// dayTransferCharge is the provider-reported transfer spend for one contract on one UTC day.
+type dayTransferCharge struct {
+	Down float64 `json:"down,omitempty"`
+	Up   float64 `json:"up,omitempty"`
+}
+
+// transferChargesLookup is an optional market/provider extension that queries dated per-contract
+// bandwidth charges (e.g. Vast.ai GET /api/v0/charges) when instance listings omit usage counters.
+// Returned map is contractID -> UTC day ("2006-01-02") -> dayTransferCharge.
+type transferChargesLookup interface {
+	TransferCharges(ctx context.Context, from, to time.Time) (map[string]map[string]dayTransferCharge, error)
+}
+
 // logLines are the lines a market's log answer holds, whatever its shape: strings, or objects
 // with the line in one of a few fields.
 func logLines(data []byte) []string {
@@ -245,8 +258,11 @@ func lastLines(lines []string, n int) []string {
 	return lines[max(0, len(lines)-n):]
 }
 
-// live is a machine that is, or is about to be, billed for.
-func (r *Rental) live() bool { return r.State == "starting" || r.State == "running" }
+// live is a machine that is, or is about to be, billed for (including provider-reported
+// "unknown" status, which remains owned, accrues full rate, and is queued for destruction).
+func (r *Rental) live() bool {
+	return r.State == "starting" || r.State == "running" || r.State == "unknown"
+}
 
 // Account is what a market says of the account.
 type Account struct {

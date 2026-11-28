@@ -6378,3 +6378,207 @@ def test_review33_select_context_strict_cap_and_review34_season2_exam_digest_par
     assert digest(items) == digest(s2_fresh)
     # A strict-cap selector would have truncated to 9 items and produced a different exam digest.
     assert digest(items) != digest(s2_fresh[:9])
+
+
+def test_review35_multigpu_verifier_and_curator_selection(monkeypatch, tmp_path):
+    """Review 35 P2 #5: Verifier admission (`bench`, `sandbox_selftest`), `gpu_total_bytes`,
+    `pipeline.run_round`, and curator `one_gpu` MUST all operate on the selected `--device` GPU
+    (and honor CUDA_VISIBLE_DEVICES remapping) instead of hardcoding card 0."""
+    import argparse
+    import importlib.util
+    import sys as _sys
+    import types
+
+    from stet import bench, client, runner
+    from stet.runner import HarnessError
+
+    has_real_torch = importlib.util.find_spec("torch") is not None
+    real_pipeline = None
+    if has_real_torch:
+        from stet import pipeline as real_pipeline
+
+    # Heterogeneous two-card machine: cuda:0 = 12 GB RTX 3060 (below floor), cuda:1 = 24 GB RTX 4090 (above floor).
+    cards = {
+        0: ("NVIDIA GeForce RTX 3060", 12 << 30, 80_000),
+        1: ("NVIDIA GeForce RTX 4090", 24 << 30, 450_000),
+    }
+
+    fake_torch = types.ModuleType("torch")
+    fake_torch.version = types.SimpleNamespace(hip=None)
+    fake_torch.device = lambda typ, idx=None: types.SimpleNamespace(type=typ, index=idx)
+    fake_torch.cuda = types.SimpleNamespace(
+        is_available=lambda: True,
+        get_device_name=lambda idx=0: cards[int(idx)][0],
+        mem_get_info=lambda idx=0: (cards[int(idx)][1] - (1 << 30), cards[int(idx)][1]),
+        empty_cache=lambda: None,
+    )
+    monkeypatch.setitem(_sys.modules, "torch", fake_torch)
+    monkeypatch.setattr(runner, "_gpu_total", {})
+    monkeypatch.setenv("STET_CONFIG", str(tmp_path / "cfg"))
+    monkeypatch.setenv("STET_CACHE", str(tmp_path / "cache"))
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    monkeypatch.delenv("HIP_VISIBLE_DEVICES", raising=False)
+
+    # 1. runner.gpu_total_bytes(index) reads each selected GPU's own VRAM and caches per device.
+    assert runner.gpu_total_bytes(0) == 12 << 30
+    assert runner.gpu_total_bytes(1) == 24 << 30
+
+    # 2. runner.one_gpu(environ, index) picks the index-th visible GPU under CUDA_VISIBLE_DEVICES=2,0!
+    assert runner.one_gpu({"CUDA_VISIBLE_DEVICES": "2,0"}, index=0) == {"CUDA_VISIBLE_DEVICES": "2"}
+    assert runner.one_gpu({"CUDA_VISIBLE_DEVICES": "2,0"}, index=1) == {"CUDA_VISIBLE_DEVICES": "0"}
+    assert runner.one_gpu({"HIP_VISIBLE_DEVICES": "3,1"}, index=1) == {"HIP_VISIBLE_DEVICES": "1"}
+    assert runner.one_gpu({}, index=1) == {"CUDA_VISIBLE_DEVICES": "1", "HIP_VISIBLE_DEVICES": "1"}
+    try:
+        runner.one_gpu({"CUDA_VISIBLE_DEVICES": "2"}, index=1)
+        raise AssertionError("expected HarnessError when index exceeds visible device list")
+    except HarnessError as exc:
+        assert "out of range" in str(exc)
+
+    # 3. bench.facts / bench.measure / bench.save / bench.saved isolate cuda:0 vs cuda:1!
+    s3 = load_season("s3")
+    monkeypatch.setattr(bench, "physical_cores", lambda: 16)
+    monkeypatch.setattr(bench, "cpu_rate", lambda cores, rounds=6: 350.0)
+    monkeypatch.setattr(bench, "gpu_rate", lambda seconds=4.0, device=None: float(cards[bench._cuda_index(device) or 0][2]))
+    f0 = bench.facts(device="cuda:0")
+    f1 = bench.facts(device="cuda:1")
+    assert f0["gpu"] == "NVIDIA GeForce RTX 3060" and f0["gpu_memory_gb"] == 12.0 and f0["gpu_device"] == "0"
+    assert f1["gpu"] == "NVIDIA GeForce RTX 4090" and f1["gpu_memory_gb"] == 24.0 and f1["gpu_device"] == "1"
+
+    m0 = bench.measure(s3, device="cuda:0")
+    bench.save(m0, device="cuda:0")
+    assert bench.saved(device="cuda:0")["gpu"] == "NVIDIA GeForce RTX 3060"
+    # Card 1 MUST miss card 0's cached measurement!
+    assert bench.saved(device="cuda:1") is None
+    m1 = bench.measure(s3, device="cuda:1")
+    bench.save(m1, device="cuda:1")
+    assert bench.saved(device="cuda:1")["gpu"] == "NVIDIA GeForce RTX 4090"
+    assert bench.saved(device="cuda:0")["gpu"] == "NVIDIA GeForce RTX 3060"
+
+    # 4. pipeline.run_round forwards selected cuda:1 index into edit_round!
+    seen_edit_gpus: list[int] = []
+    had_pipeline = "stet.pipeline" in _sys.modules
+    if real_pipeline is None and not had_pipeline:
+        stub_grade = types.ModuleType("stet.grade")
+        for _attr in ("Trained", "grade", "sit_exam", "train_script"):
+            setattr(stub_grade, _attr, lambda *a, **kw: None)
+        stub_train = types.ModuleType("stet.train")
+        stub_train.device_backend = lambda *a, **kw: "cuda"
+        stub_train.hardware_backend = lambda *a, **kw: "cuda"
+        stub_train.pick_device = lambda d=None: types.SimpleNamespace(type="cuda", index=1 if d == "cuda:1" else 0)
+        monkeypatch.setitem(_sys.modules, "stet.grade", stub_grade)
+        monkeypatch.setitem(_sys.modules, "stet.train", stub_train)
+    try:
+        if real_pipeline is not None:
+            pipeline = real_pipeline
+        else:
+            from stet import pipeline
+
+        monkeypatch.setattr(
+            pipeline,
+            "edit_round",
+            lambda *a, **kw: (seen_edit_gpus.append(kw.get("gpu", -1)) or runner.EditRun("ok", 1.0, 60.0, 0, tmp_path / "s.jsonl", "", "none", "", {})),
+        )
+        monkeypatch.setattr(pipeline, "grade_round", lambda *a, **kw: {"valid": True})
+        pipeline.run_round(tmp_path, "python curator.py", types.SimpleNamespace(id="r", season=s3), s3.scale("nano"), tmp_path / "work", device=types.SimpleNamespace(type="cuda", index=1))
+        assert seen_edit_gpus == [1]
+    finally:
+        if real_pipeline is None and not had_pipeline:
+            import stet as _stet_pkg
+
+            _sys.modules.pop("stet.pipeline", None)
+            if hasattr(_stet_pkg, "pipeline"):
+                delattr(_stet_pkg, "pipeline")
+
+    # 5. client._verify(--edits --device cuda:1) passes gpu=1 to sandbox_selftest AND measures cuda:1
+    #    (admitting the 24 GB RTX 4090 even though cuda:0 is a 12 GB RTX 3060 below the curator floor!).
+    monkeypatch.delenv("STET_DEV", raising=False)
+    selftest_gpus: list[int] = []
+    monkeypatch.setattr(runner, "bwrap_available", lambda: (True, ""))
+    monkeypatch.setattr(runner, "scope_available", lambda: (True, ""))
+    monkeypatch.setattr(runner, "sandbox_selftest", lambda sandbox="bwrap", gpu=0: (selftest_gpus.append(gpu) or (True, "")))
+    monkeypatch.setattr("stet.env.problems", lambda season, only=None: [])
+    fake_train = types.ModuleType("stet.train")
+    fake_train.pick_device = lambda d=None: types.SimpleNamespace(type="cuda", index=1 if d == "cuda:1" else 0)
+    fake_train.hardware_info = lambda dev: {
+        "device": "cuda", "gpu": cards[dev.index][0], "vram_gb": cards[dev.index][1] / 2**30,
+        "backend": "cuda", "cuda_capability": "8.9", "bf16_native": True,
+    }
+    monkeypatch.setitem(_sys.modules, "stet.train", fake_train)
+    monkeypatch.setattr(client, "need_key", lambda: types.SimpleNamespace(handle="v-multi", secret="s"))
+    monkeypatch.setattr(client, "claim_workdir", lambda: (tmp_path / "slot", object()))
+    (tmp_path / "slot").mkdir(exist_ok=True)
+    # Remove cached bench.json so _verify must actually measure cuda:1 itself.
+    bench._file().unlink(missing_ok=True)
+    # Force high memory/disk so only GPU specs differentiate card 0 vs card 1.
+    orig_facts = bench.facts
+
+    def rich_facts(device=None):
+        f = orig_facts(device=device)
+        f["memory_gb"] = 64.0
+        f["disk_gb"] = 300.0
+        return f
+
+    monkeypatch.setattr(bench, "facts", rich_facts)
+    hellos: list[dict] = []
+
+    class _Done(Exception):
+        pass
+
+    def fake_req(method, path, body=None, **kw):
+        if method == "GET" and path == "/api/v1/season":
+            return {"scale": "standard", "season": "s3", "digest": s3.digest}
+        if method == "POST" and path == "/api/v1/jobs/claim":
+            hellos.append(dict(body or {}))
+            raise _Done()
+        raise AssertionError(f"unexpected {method} {path}")
+
+    monkeypatch.setattr(client, "request", fake_req)
+    args = argparse.Namespace(
+        season="s3", device="cuda:1", any_device=False, edits=True, no_sandbox=False, sandbox="bwrap",
+        once=True, max_jobs=1, exit_when_idle=0, no_upgrade=True,
+    )
+    try:
+        client._verify(args)
+    except _Done:
+        pass
+    assert selftest_gpus == [1], f"expected sandbox_selftest(gpu=1), got {selftest_gpus}"
+    assert len(hellos) == 1
+    assert hellos[0]["hardware"]["gpu"] == "NVIDIA GeForce RTX 4090"
+    assert hellos[0]["hardware"]["bench"]["gpu_memory_gb"] == 24.0
+    assert hellos[0]["hardware"]["bench"]["gpu_tokens_per_second"] == 450_000
+
+
+def test_review35_zero_language_shares_replay_parity(monkeypatch, tmp_path):
+    """Review 35 P3 #7: Local replay MUST preserve valid already-recorded all-zero language share
+    tables so Python `round_score` matches Go `server/aggregate.go:ScoreItems` (0.05000 on the
+    40-item explain fixture) instead of reverting to published crawl SHARES (0.01042)."""
+    from types import SimpleNamespace
+
+    from stet import client, data
+    from stet.exam.aggregate import plan_of, round_score
+    from stet.exam.items import Item
+
+    monkeypatch.setenv("STET_CACHE", str(tmp_path / "cache"))
+    s3 = load_season("s3")
+    plan = plan_of(s3)
+    rnd = SimpleNamespace(id="s3-o00035", kind="official", exam_digest="a" * 64, season=s3)
+
+    # All-zero share mapping is accepted and cached cleanly; malformed entries are still rejected.
+    zero_shares = {"en": 0.0, "ja": 0.0}
+    assert data.normalize_round_shares(zero_shares) == zero_shares
+    assert data.normalize_round_shares({"en": 0.0, "bad": -1.0}) is None
+    assert data.normalize_round_shares({"en": True, "ja": 0.0}) is None
+    assert client.fetch_round_shares(rnd, {"status": "settled", "languages": zero_shares}) == zero_shares
+    assert data.round_shares(rnd) == zero_shares
+
+    # Shared 40-item explain fixture: 20 en @ gain 0.0, 20 ja @ gain 0.1 -> exact 0.05000 (matching Go).
+    items: list[Item] = []
+    gains: list[float] = []
+    for i in range(20):
+        items.append(Item(kind="answer", corner=f"explain/en/{i}", fmt="prose", lang="en", source="gen:explain", ctx="q", cont="a"))
+        gains.append(0.0)
+    for i in range(20):
+        items.append(Item(kind="answer", corner=f"explain/ja/{i}", fmt="prose", lang="ja", source="gen:explain", ctx="q", cont="a"))
+        gains.append(0.1)
+    got = round_score(items, gains, shares=data.round_shares(rnd), plan=plan)["score"]
+    assert abs(got - 0.05) < 1e-9, f"expected 0.05000 matching Go ScoreItems, got {got:.6f}"

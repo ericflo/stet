@@ -48,14 +48,54 @@ def floor(season: Season) -> dict:
     return {**NO_FLOOR, **(season.raw.get("runner") or {})}
 
 
-def gpu_rate(seconds: float = GPU_SECONDS) -> float:
-    """Tokens per second through the fixed model, or 0.0 with no CUDA or ROCm GPU."""
+def _cuda_index(device=None) -> int | None:
+    """Logical CUDA/ROCm device index for `device`, or None for a non-CUDA device."""
+    if device is None:
+        return 0
+    if isinstance(device, str):
+        s = device.strip().lower()
+        if s == "cuda":
+            return 0
+        if s.startswith("cuda:"):
+            try:
+                return int(s.split(":", 1)[1])
+            except ValueError:
+                return None
+        return None
+    dev_type = getattr(device, "type", None)
+    if dev_type == "cuda":
+        idx = getattr(device, "index", None)
+        return 0 if idx is None else int(idx)
+    return None
+
+
+def _gpu_device_token(index: int, environ=None) -> str:
+    """Physical GPU token for logical `index` under CUDA_VISIBLE_DEVICES / HIP_VISIBLE_DEVICES."""
+    env = os.environ if environ is None else environ
+    for name in ("CUDA_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES"):
+        value = str(env.get(name) or "").strip()
+        if value:
+            parts = [p.strip() for p in value.split(",") if p.strip()]
+            if 0 <= index < len(parts):
+                return parts[index]
+            return f"cuda:{index}"
+    return str(index)
+
+
+def _cache_key(m: dict) -> str:
+    return f"{m.get('backend') or 'none'}:{m.get('gpu_device') or ''}:{m.get('gpu') or ''}"
+
+
+def gpu_rate(seconds: float = GPU_SECONDS, device=None) -> float:
+    """Tokens per second through the fixed model on `device`, or 0.0 with no CUDA or ROCm GPU."""
     import torch
     import torch.nn.functional as F
     from torch import nn
 
-    if not torch.cuda.is_available():
+    idx = _cuda_index(device)
+    if idx is None or not torch.cuda.is_available():
         return 0.0
+    dev = torch.device("cuda", idx)
     width, layers, heads, vocab, batch, length = (GPU_MODEL[k] for k in ("width", "layers", "heads", "vocab", "batch", "length"))
 
     class Block(nn.Module):
@@ -73,12 +113,12 @@ def gpu_rate(seconds: float = GPU_SECONDS) -> float:
 
     torch.manual_seed(0)
     model = nn.Sequential(nn.Embedding(vocab, width), *[Block() for _ in range(layers)], nn.LayerNorm(width))
-    model = model.half().cuda().eval()
-    ids = torch.randint(0, vocab, (batch, length), generator=torch.Generator().manual_seed(0)).cuda()
+    model = model.half().to(dev).eval()
+    ids = torch.randint(0, vocab, (batch, length), generator=torch.Generator().manual_seed(0)).to(dev)
     with torch.inference_mode():
         for _ in range(3):  # the first passes pay for set-up that a curator pays once
             model(ids)
-        torch.cuda.synchronize()
+        torch.cuda.synchronize(dev)
         n, t0 = 0, time.perf_counter()
         while time.perf_counter() - t0 < seconds:
             model(ids).float().sum().item()  # the answer is read back, so the work is done
@@ -141,39 +181,42 @@ def physical_cores() -> int:
     return len(seen)
 
 
-def facts() -> dict:
-    """What this machine has, without measuring anything."""
+def facts(device=None) -> dict:
+    """What this machine has on `device`, without measuring anything."""
     import shutil
 
     from .data import cache_dir
 
-    out: dict = {"cores": physical_cores(), "memory_gb": 0.0, "gpu": "", "gpu_memory_gb": 0.0, "backend": ""}
+    out: dict = {"cores": physical_cores(), "memory_gb": 0.0, "gpu": "", "gpu_memory_gb": 0.0, "backend": "", "gpu_device": ""}
     try:
         out["memory_gb"] = round(os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / 2**30, 1)
     except (ValueError, OSError, AttributeError):
         pass
-    try:
-        import torch
+    idx = _cuda_index(device)
+    if idx is not None:
+        try:
+            import torch
 
-        if torch.cuda.is_available():
-            out["gpu"] = torch.cuda.get_device_name(0)
-            out["gpu_memory_gb"] = round(torch.cuda.mem_get_info()[1] / 2**30, 1)
-            out["backend"] = "rocm" if getattr(torch.version, "hip", None) else "cuda"
-    except ImportError:
-        pass
+            if torch.cuda.is_available():
+                out["gpu"] = torch.cuda.get_device_name(idx)
+                out["gpu_memory_gb"] = round(torch.cuda.mem_get_info(idx)[1] / 2**30, 1)
+                out["backend"] = "rocm" if getattr(torch.version, "hip", None) else "cuda"
+                out["gpu_device"] = _gpu_device_token(idx)
+        except ImportError:
+            pass
     cache = cache_dir()
     cache.mkdir(parents=True, exist_ok=True)
     out["disk_gb"] = round(shutil.disk_usage(cache).free / 2**30, 1)
     return out
 
 
-def measure(season: Season, quiet: bool = False) -> dict:
-    """Run both measurements. A few seconds each."""
+def measure(season: Season, quiet: bool = False, device=None) -> dict:
+    """Run both measurements on `device`. A few seconds each."""
     need = floor(season)
-    out = facts()
+    out = facts() if device is None else facts(device=device)
     out["cpu_mb_per_second"] = round(cpu_rate(min(int(need["cores"]) or 1, max(out["cores"], 1))), 1)
     try:
-        out["gpu_tokens_per_second"] = round(gpu_rate())
+        out["gpu_tokens_per_second"] = round(gpu_rate() if device is None else gpu_rate(device=device))
     except ImportError:
         out["gpu_tokens_per_second"] = 0
     out["at"] = int(time.time())
@@ -215,24 +258,64 @@ def _file() -> Path:
     return config_dir() / "bench.json"
 
 
-def saved(max_age: float = 7 * 86400) -> dict | None:
-    """The last measurement, if it is recent and was made on the GPU this machine has now."""
+def saved(max_age: float = 7 * 86400, device=None) -> dict | None:
+    """The last measurement for `device`, if recent and matching this device and core count."""
     try:
-        m = json.loads(_file().read_text())
+        raw = json.loads(_file().read_text())
     except (OSError, ValueError):
         return None
+    if not isinstance(raw, dict):
+        return None
+    now = facts() if device is None else facts(device=device)
+    dev_key = _cache_key(now)
+    m: dict | None = None
+    by_device = raw.get("by_device")
+    if isinstance(by_device, dict) and isinstance(by_device.get(dev_key), dict):
+        m = dict(by_device[dev_key])
+    else:
+        cand = {k: v for k, v in raw.items() if k != "by_device"}
+        saved_dev = cand.get("gpu_device") or ""
+        now_dev = now.get("gpu_device") or ""
+        idx = _cuda_index(device)
+        if saved_dev and now_dev and saved_dev != now_dev:
+            return None
+        if not saved_dev and device is not None and idx not in (None, 0):
+            return None
+        m = cand
     if not isinstance(m, dict) or time.time() - m.get("at", 0) > max_age:
         return None
-    now = facts()
     if m.get("gpu") != now["gpu"] or m.get("cores") != now["cores"]:
         return None
+    if m.get("gpu_device") and now.get("gpu_device") and m.get("gpu_device") != now["gpu_device"]:
+        return None
     m.update({k: now[k] for k in ("memory_gb", "gpu_memory_gb", "disk_gb", "backend")})
+    if now.get("gpu_device"):
+        m["gpu_device"] = now["gpu_device"]
     return m
 
 
-def save(m: dict) -> None:
+def save(m: dict, device=None) -> None:
     f = _file()
     f.parent.mkdir(parents=True, exist_ok=True)
+    entry = {k: v for k, v in m.items() if k != "by_device"}
+    if not entry.get("gpu_device") and device is not None:
+        idx = _cuda_index(device)
+        if idx is not None:
+            entry["gpu_device"] = _gpu_device_token(idx)
+    by_device: dict[str, dict] = {}
+    try:
+        old = json.loads(f.read_text())
+        if isinstance(old, dict):
+            if isinstance(old.get("by_device"), dict):
+                by_device = {k: v for k, v in old["by_device"].items() if isinstance(k, str) and isinstance(v, dict)}
+            else:
+                legacy = {k: v for k, v in old.items() if k != "by_device"}
+                if legacy:
+                    by_device[_cache_key(legacy)] = legacy
+    except (OSError, ValueError):
+        pass
+    by_device[_cache_key(entry)] = entry
+    payload = {**entry, "by_device": by_device}
     tmp = f.with_suffix(f".tmp{os.getpid()}")
-    tmp.write_text(json.dumps(m))
+    tmp.write_text(json.dumps(payload))
     tmp.replace(f)

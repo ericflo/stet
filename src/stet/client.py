@@ -1834,6 +1834,7 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
         )
         sys.exit(1)
     sandbox = "none"
+    gpu_idx = device.index or 0 if device.type == "cuda" else 0
     if args.edits:
         sandbox = "none" if args.no_sandbox else (getattr(args, "sandbox", None) or "bwrap")
 
@@ -1846,7 +1847,8 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
         if sandbox == "none" and not dev:
             decline("no sandbox was chosen", "stet: edit jobs run other people's code, and only ever in the sandbox\n")
         if sandbox == "bwrap":
-            for ok, why in (bwrap_available(), scope_available(), sandbox_selftest()):
+            selftest = sandbox_selftest() if gpu_idx == 0 else sandbox_selftest(gpu=gpu_idx)
+            for ok, why in (bwrap_available(), scope_available(), selftest):
                 if not ok:
                     decline(f"the sandbox would not hold: {why}", f"stet: edit jobs run other people's code and need the sandbox: {why}\n")
         elif sandbox == "container":
@@ -1854,7 +1856,8 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
             # (cage.py). The server hands curators to it from the organisers' machines only.
             from .cage import available as cage_available
 
-            for check in (cage_available, lambda: sandbox_selftest("container")):
+            selftest_fn = (lambda: sandbox_selftest("container")) if gpu_idx == 0 else (lambda: sandbox_selftest("container", gpu=gpu_idx))
+            for check in (cage_available, selftest_fn):
                 ok, why = check()
                 if not ok:
                     decline(f"the sandbox would not hold: {why}", f"stet: edit jobs run other people's code and need the sandbox: {why}\n", EXIT_NO_SANDBOX)
@@ -1864,16 +1867,17 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
             decline("this machine's Python or libraries differ from the season's: " + "; ".join(wrong),
                     "stet: curators are promised the season's Python and libraries, and this machine's differ:\n  " + "\n  ".join(w[:400] for w in wrong)
                     + "\n  The installer puts it right: curl -fsSL https://www.stetrun.com/install.sh | sh\n")  # fmt: skip
-        measured = bench.saved()
+        measured = bench.saved(device=device)
         if measured is None:
             out.line("", out.dim("measuring this machine's speed (about half a minute; it is kept for a week) ..."))
-            measured = bench.measure(season)
-            bench.save(measured)
+            measured = bench.measure(season, device=device)
+            bench.save(measured, device=device)
         if (short := bench.shortfalls(season, measured)) and not dev:
+            bench_cmd = f"stet bench --device {args.device}" if args.device else "stet bench"
             decline(
                 "; ".join(short),
                 "stet: this machine cannot run curators for the leaderboard: " + "; ".join(short) + ".\n"
-                "  If the GPU or the CPU was busy when that was measured, measure again with nothing else running: stet bench\n"
+                f"  If the GPU or the CPU was busy when that was measured, measure again with nothing else running: {bench_cmd}\n"
                 "  It can still grade: stet verify\n",
             )
         note_declined(None)
@@ -1884,7 +1888,7 @@ def _verify(args, organiser: bool = False, me: dict | None = None):
         # which the organisers' tools read to stop renting such machines for curators. Only
         # said, so nothing that goes wrong reading it stops a grader.
         try:
-            measured = bench.saved()
+            measured = bench.saved(device=device)
         except Exception:
             measured = None
         if measured:

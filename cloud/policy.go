@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -300,6 +301,8 @@ func (w *Worker) state(now time.Time, p Policy) string {
 		return "unconfirmed"
 	case w.Rental.State == "stopped":
 		return "stopped"
+	case w.Rental.State == "unknown":
+		return "unknown"
 	case w.Machine != nil && w.Machine.Busy == "grade":
 		return "grading"
 	case w.Machine != nil && w.Machine.Busy == "farm":
@@ -470,10 +473,16 @@ func (p Policy) decideNext(w *Work, workers []*Worker, spentToday float64, now t
 	var idle, waitingIdle []*Worker
 	for _, wk := range workers {
 		for _, extra := range wk.ExtraRentals {
-			if extra != nil && (extra.Terminating || (extra.State == "stopped" && !extra.Unconfirmed)) {
+			if extra != nil && (extra.Terminating || ((extra.State == "stopped" || extra.State == "unknown") && !extra.Unconfirmed)) {
 				why := "stopped duplicate machine on the same key"
 				if extra.Terminating {
 					why = "outstanding termination on duplicate machine"
+				} else if extra.State == "unknown" {
+					statusWord := strings.ToLower(extra.Status)
+					if statusWord == "" {
+						statusWord = "unknown"
+					}
+					why = "duplicate machine in unrecoverable status (" + statusWord + ")"
 				}
 				d.End = append(d.End, Ending{Worker: wk, Rental: extra, Why: why})
 			}
@@ -493,6 +502,12 @@ func (p Policy) decideNext(w *Work, workers []*Worker, spentToday float64, now t
 			d.End = append(d.End, Ending{Worker: wk, Rental: wk.Rental, Why: "outstanding termination"})
 		case "stopped":
 			d.End = append(d.End, Ending{Worker: wk, Why: "it stopped, or never asked for work", Failed: true})
+		case "unknown":
+			statusWord := strings.ToLower(wk.Rental.Status)
+			if statusWord == "" {
+				statusWord = "unknown"
+			}
+			d.End = append(d.End, Ending{Worker: wk, Why: "its market reports an unrecoverable status (" + statusWord + ")", Failed: true})
 		case "quiet":
 			d.End = append(d.End, Ending{Worker: wk, Why: fmt.Sprintf("nothing heard from it for %s, and it holds no job", now.Sub(time.Unix(wk.Machine.LastSeen, 0)).Round(time.Minute)), Failed: true})
 		case "waiting":

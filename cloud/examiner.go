@@ -58,6 +58,7 @@ const (
 	examinerServerName      = "stet-examiner.internal"
 	examinerDiskGB          = 80
 	examinerDownloadGB      = 18.0 // pinned Inkling-2-Mini model weight pull billed on metered-ingress hosts
+	examinerStopGrace       = 3 * time.Minute
 )
 
 // errRentRejected marks a provider response that definitively refused to create an instance
@@ -132,34 +133,50 @@ type ExaminerLaunch struct {
 	DiskGB     int
 }
 
+// examinerStateUsable reports whether an examiner instance's provider state can serve or
+// progress toward serving exams; "stopped", "unknown", and any other non-usable status must
+// be destroyed and retried rather than retained.
+func examinerStateUsable(state string) bool {
+	return state == "running" || state == "starting"
+}
+
 // ExaminerInstance is one live or stopped examiner instance returned by Vast.ai.
 type ExaminerInstance struct {
 	ID                    string
 	Label                 string
-	State                 string // starting | running | stopped
+	State                 string // starting | running | stopped | unknown
 	Status                string
+	Stopped               bool `json:"stopped,omitempty"`
+	Offline               bool `json:"offline,omitempty"`
+	Unconfirmed           bool `json:"unconfirmed,omitempty"`
 	PublicIP              string
 	HostPort              string
 	Price                 float64
-	BasePrice             float64          `json:"base_price,omitempty"`
-	DiskCost              float64          `json:"disk_cost,omitempty"`
-	TransferDollars       float64          `json:"transfer_dollars,omitempty"`
-	TransferEstimated     bool             `json:"transfer_estimated,omitempty"`
-	ObservedTransferCost  float64          `json:"observed_transfer_cost,omitempty"`
-	TransferObserved      bool             `json:"transfer_observed,omitempty"`
-	ObservedTransferDown  float64          `json:"observed_transfer_down,omitempty"`
-	TransferDownObserved  bool             `json:"transfer_down_observed,omitempty"`
-	TransferDownUnpriced  bool             `json:"transfer_down_unpriced,omitempty"`
-	ObservedTransferUp    float64          `json:"observed_transfer_up,omitempty"`
-	TransferUpObserved    bool             `json:"transfer_up_observed,omitempty"`
-	TransferUpUnpriced    bool             `json:"transfer_up_unpriced,omitempty"`
-	ObservedTransferTotal float64          `json:"observed_transfer_total,omitempty"`
-	TransferTotalObserved bool             `json:"transfer_total_observed,omitempty"`
-	TransferTotalUnpriced bool             `json:"transfer_total_unpriced,omitempty"`
-	TransferCharges       []transferCharge `json:"transfer_charges,omitempty"`
-	PartialRate           bool             `json:"partial_rate,omitempty"`
+	BasePrice             float64                      `json:"base_price,omitempty"`
+	DiskCost              float64                      `json:"disk_cost,omitempty"`
+	DiskCostUnknown       bool                         `json:"disk_cost_unknown,omitempty"`
+	TransferDollars       float64                      `json:"transfer_dollars,omitempty"`
+	TransferEstimated     bool                         `json:"transfer_estimated,omitempty"`
+	ObservedTransferCost  float64                      `json:"observed_transfer_cost,omitempty"`
+	TransferObserved      bool                         `json:"transfer_observed,omitempty"`
+	ObservedTransferDown  float64                      `json:"observed_transfer_down,omitempty"`
+	TransferDownObserved  bool                         `json:"transfer_down_observed,omitempty"`
+	TransferDownUnpriced  bool                         `json:"transfer_down_unpriced,omitempty"`
+	ObservedTransferUp    float64                      `json:"observed_transfer_up,omitempty"`
+	TransferUpObserved    bool                         `json:"transfer_up_observed,omitempty"`
+	TransferUpUnpriced    bool                         `json:"transfer_up_unpriced,omitempty"`
+	ObservedTransferTotal float64                      `json:"observed_transfer_total,omitempty"`
+	TransferTotalObserved bool                         `json:"transfer_total_observed,omitempty"`
+	TransferTotalUnpriced bool                         `json:"transfer_total_unpriced,omitempty"`
+	TransferCharges       []transferCharge             `json:"transfer_charges,omitempty"`
+	DatedTransfer         map[string]dayTransferCharge `json:"dated_transfer,omitempty"`
+	PartialRate           bool                         `json:"partial_rate,omitempty"`
 	Created               time.Time
-	ObservedLiveAt        time.Time `json:"observed_live_at,omitempty"`
+	ObservedLiveAt        time.Time        `json:"observed_live_at,omitempty"`
+	StoppedAt             time.Time        `json:"stopped_at,omitzero"`
+	StoppedSeen           time.Time        `json:"stopped_seen,omitzero"`
+	ResumeAt              time.Time        `json:"resume_at,omitzero"`
+	Segments              []billingSegment `json:"segments,omitempty"`
 }
 
 func (i ExaminerInstance) transferReading() transferReading {
@@ -209,6 +226,7 @@ func (i ExaminerInstance) transferState() transferState {
 		TotalObserved: i.TransferTotalObserved,
 		TotalUnpriced: i.TransferTotalUnpriced,
 		Charges:       cloneTransferCharges(i.TransferCharges),
+		Dated:         cloneDatedTransfer(i.DatedTransfer),
 	}
 }
 
@@ -225,10 +243,13 @@ func (i *ExaminerInstance) setTransferState(ts transferState) {
 	i.TransferTotalObserved = ts.TotalObserved
 	i.TransferTotalUnpriced = ts.TotalUnpriced
 	i.TransferCharges = cloneTransferCharges(ts.Charges)
+	i.DatedTransfer = cloneDatedTransfer(ts.Dated)
 }
 
 func cloneExaminerInstance(i ExaminerInstance) ExaminerInstance {
 	i.TransferCharges = cloneTransferCharges(i.TransferCharges)
+	i.DatedTransfer = cloneDatedTransfer(i.DatedTransfer)
+	i.Segments = cloneBillingSegments(i.Segments)
 	return i
 }
 
@@ -251,6 +272,8 @@ func clonePendingSpends(src []podRecord) []podRecord {
 	for idx := range src {
 		cp := src[idx]
 		cp.TransferCharges = cloneTransferCharges(cp.TransferCharges)
+		cp.DatedTransfer = cloneDatedTransfer(cp.DatedTransfer)
+		cp.Segments = cloneBillingSegments(cp.Segments)
 		dst[idx] = cp
 	}
 	return dst
@@ -279,33 +302,42 @@ type examinerTieredOfferSearcher interface {
 // API key, pinned peer certificate, pre-rental reservation, unrecorded terminal spend charges,
 // or leak an orphaned 5090 on Vast.ai.
 type examinerState struct {
-	InstanceID            string             `json:"instance_id,omitempty"`
-	PendingRent           bool               `json:"pending_rent,omitempty"`
-	ReservedLabel         string             `json:"reserved_label,omitempty"`
-	RoundID               string             `json:"round_id,omitempty"`
-	APIKey                string             `json:"api_key,omitempty"`
-	CertPEM               string             `json:"cert_pem,omitempty"`
-	Upstream              string             `json:"upstream,omitempty"`
-	Price                 float64            `json:"price,omitempty"`
-	DiskCost              float64            `json:"disk_cost,omitempty"`
-	TransferDollars       float64            `json:"transfer_dollars,omitempty"`
-	TransferEstimated     bool               `json:"transfer_estimated,omitempty"`
-	ObservedTransferCost  float64            `json:"observed_transfer_cost,omitempty"`
-	TransferObserved      bool               `json:"transfer_observed,omitempty"`
-	ObservedTransferDown  float64            `json:"observed_transfer_down,omitempty"`
-	TransferDownObserved  bool               `json:"transfer_down_observed,omitempty"`
-	TransferDownUnpriced  bool               `json:"transfer_down_unpriced,omitempty"`
-	ObservedTransferUp    float64            `json:"observed_transfer_up,omitempty"`
-	TransferUpObserved    bool               `json:"transfer_up_observed,omitempty"`
-	TransferUpUnpriced    bool               `json:"transfer_up_unpriced,omitempty"`
-	ObservedTransferTotal float64            `json:"observed_transfer_total,omitempty"`
-	TransferTotalObserved bool               `json:"transfer_total_observed,omitempty"`
-	TransferTotalUnpriced bool               `json:"transfer_total_unpriced,omitempty"`
-	TransferCharges       []transferCharge   `json:"transfer_charges,omitempty"`
-	Created               time.Time          `json:"created,omitempty"`
-	ObservedLiveAt        time.Time          `json:"observed_live_at,omitempty"`
-	PendingSpends         []podRecord        `json:"pending_spends,omitempty"`
-	Unresolved            []ExaminerInstance `json:"unresolved,omitempty"`
+	InstanceID            string                       `json:"instance_id,omitempty"`
+	PendingRent           bool                         `json:"pending_rent,omitempty"`
+	ReservedLabel         string                       `json:"reserved_label,omitempty"`
+	RoundID               string                       `json:"round_id,omitempty"`
+	APIKey                string                       `json:"api_key,omitempty"`
+	CertPEM               string                       `json:"cert_pem,omitempty"`
+	Upstream              string                       `json:"upstream,omitempty"`
+	Price                 float64                      `json:"price,omitempty"`
+	DiskCost              float64                      `json:"disk_cost,omitempty"`
+	DiskCostUnknown       bool                         `json:"disk_cost_unknown,omitempty"`
+	TransferDollars       float64                      `json:"transfer_dollars,omitempty"`
+	TransferEstimated     bool                         `json:"transfer_estimated,omitempty"`
+	ObservedTransferCost  float64                      `json:"observed_transfer_cost,omitempty"`
+	TransferObserved      bool                         `json:"transfer_observed,omitempty"`
+	ObservedTransferDown  float64                      `json:"observed_transfer_down,omitempty"`
+	TransferDownObserved  bool                         `json:"transfer_down_observed,omitempty"`
+	TransferDownUnpriced  bool                         `json:"transfer_down_unpriced,omitempty"`
+	ObservedTransferUp    float64                      `json:"observed_transfer_up,omitempty"`
+	TransferUpObserved    bool                         `json:"transfer_up_observed,omitempty"`
+	TransferUpUnpriced    bool                         `json:"transfer_up_unpriced,omitempty"`
+	ObservedTransferTotal float64                      `json:"observed_transfer_total,omitempty"`
+	TransferTotalObserved bool                         `json:"transfer_total_observed,omitempty"`
+	TransferTotalUnpriced bool                         `json:"transfer_total_unpriced,omitempty"`
+	TransferCharges       []transferCharge             `json:"transfer_charges,omitempty"`
+	DatedTransfer         map[string]dayTransferCharge `json:"dated_transfer,omitempty"`
+	Created               time.Time                    `json:"created,omitempty"`
+	ObservedLiveAt        time.Time                    `json:"observed_live_at,omitempty"`
+	Stopped               bool                         `json:"stopped,omitempty"`
+	Offline               bool                         `json:"offline,omitempty"`
+	Unconfirmed           bool                         `json:"unconfirmed,omitempty"`
+	StoppedAt             time.Time                    `json:"stopped_at,omitzero"`
+	StoppedSeen           time.Time                    `json:"stopped_seen,omitzero"`
+	ResumeAt              time.Time                    `json:"resume_at,omitzero"`
+	Segments              []billingSegment             `json:"segments,omitempty"`
+	PendingSpends         []podRecord                  `json:"pending_spends,omitempty"`
+	Unresolved            []ExaminerInstance           `json:"unresolved,omitempty"`
 }
 
 func (s examinerState) transferState() transferState {
@@ -322,6 +354,7 @@ func (s examinerState) transferState() transferState {
 		TotalObserved: s.TransferTotalObserved,
 		TotalUnpriced: s.TransferTotalUnpriced,
 		Charges:       cloneTransferCharges(s.TransferCharges),
+		Dated:         cloneDatedTransfer(s.DatedTransfer),
 	}
 }
 
@@ -338,6 +371,172 @@ func (s *examinerState) setTransferState(ts transferState) {
 	s.TransferTotalObserved = ts.TotalObserved
 	s.TransferTotalUnpriced = ts.TotalUnpriced
 	s.TransferCharges = cloneTransferCharges(ts.Charges)
+	s.DatedTransfer = cloneDatedTransfer(ts.Dated)
+}
+
+func examinerBillingPod(
+	price, diskCost float64,
+	diskCostUnknown bool,
+	created, alive time.Time,
+	stopped, offline bool,
+	stoppedAt, stoppedSeen, resumeAt time.Time,
+	segments []billingSegment,
+) podRecord {
+	return podRecord{
+		Cost:            price,
+		DiskCost:        max(0, diskCost),
+		DiskCostUnknown: diskCostUnknown,
+		Start:           created,
+		Alive:           alive,
+		Stopped:         stopped,
+		Offline:         offline,
+		StoppedAt:       stoppedAt,
+		StoppedSeen:     stoppedSeen,
+		ResumeAt:        resumeAt,
+		Segments:        cloneBillingSegments(segments),
+	}
+}
+
+func (i ExaminerInstance) hasBillingHistory() bool {
+	return len(i.Segments) > 0 || !i.StoppedAt.IsZero() || !i.StoppedSeen.IsZero() || !i.ResumeAt.IsZero()
+}
+
+func (i ExaminerInstance) latestBillingTime() time.Time {
+	best := maxTime(maxTime(i.ObservedLiveAt, i.StoppedSeen), maxTime(i.StoppedAt, i.ResumeAt))
+	if n := len(i.Segments); n > 0 && i.Segments[n-1].End.After(best) {
+		best = i.Segments[n-1].End
+	}
+	return best
+}
+
+func (s examinerState) hasBillingHistory() bool {
+	return len(s.Segments) > 0 || s.Stopped || s.Offline || !s.StoppedAt.IsZero() || !s.StoppedSeen.IsZero() || !s.ResumeAt.IsZero()
+}
+
+func (s examinerState) latestBillingTime() time.Time {
+	best := maxTime(maxTime(s.ObservedLiveAt, s.StoppedSeen), maxTime(s.StoppedAt, s.ResumeAt))
+	if n := len(s.Segments); n > 0 && s.Segments[n-1].End.After(best) {
+		best = s.Segments[n-1].End
+	}
+	return best
+}
+
+func (i *ExaminerInstance) applyBillingPod(p podRecord) {
+	i.DiskCost = max(0, p.DiskCost)
+	i.DiskCostUnknown = p.DiskCostUnknown
+	i.ObservedLiveAt = p.Alive
+	i.Stopped = p.Stopped
+	i.Offline = p.Offline
+	i.StoppedAt = p.StoppedAt
+	i.StoppedSeen = p.StoppedSeen
+	i.ResumeAt = p.ResumeAt
+	i.Segments = cloneBillingSegments(p.Segments)
+}
+
+func (s *examinerState) applyBillingPod(p podRecord) {
+	s.DiskCost = max(0, p.DiskCost)
+	s.DiskCostUnknown = p.DiskCostUnknown
+	s.ObservedLiveAt = p.Alive
+	s.Stopped = p.Stopped
+	s.Offline = p.Offline
+	s.StoppedAt = p.StoppedAt
+	s.StoppedSeen = p.StoppedSeen
+	s.ResumeAt = p.ResumeAt
+	s.Segments = cloneBillingSegments(p.Segments)
+}
+
+// observeExaminerPoll merges historical billing segments from prior Unresolved / saved state
+// into a fresh provider listing observation and advances running / stopped / offline billing
+// segments through `now`.
+func observeExaminerPoll(prev *ExaminerInstance, saved *examinerState, cur *ExaminerInstance, now time.Time) {
+	if cur == nil {
+		return
+	}
+	var pod podRecord
+	switch {
+	case prev != nil && saved != nil && saved.latestBillingTime().After(prev.latestBillingTime()):
+		created := saved.Created
+		if created.IsZero() {
+			created = prev.Created
+		}
+		if created.IsZero() {
+			created = cur.Created
+		}
+		pod = examinerBillingPod(
+			higherValidRate(saved.Price, prev.Price), nonNegMax(saved.DiskCost, prev.DiskCost),
+			saved.DiskCostUnknown && !validRate(nonNegMax(saved.DiskCost, prev.DiskCost)),
+			created, saved.ObservedLiveAt, saved.Stopped, saved.Offline,
+			saved.StoppedAt, saved.StoppedSeen, saved.ResumeAt, saved.Segments,
+		)
+	case prev != nil:
+		created := prev.Created
+		if created.IsZero() {
+			created = cur.Created
+		}
+		if saved != nil && !saved.Created.IsZero() && (created.IsZero() || saved.Created.Before(created)) {
+			created = saved.Created
+		}
+		basePrice := prev.Price
+		baseDisk := prev.DiskCost
+		if saved != nil {
+			basePrice = higherValidRate(basePrice, saved.Price)
+			baseDisk = nonNegMax(baseDisk, saved.DiskCost)
+		}
+		pod = examinerBillingPod(
+			basePrice, baseDisk, prev.DiskCostUnknown && !validRate(baseDisk),
+			created, prev.ObservedLiveAt, prev.Stopped, prev.Offline,
+			prev.StoppedAt, prev.StoppedSeen, prev.ResumeAt, prev.Segments,
+		)
+	case saved != nil:
+		created := saved.Created
+		if created.IsZero() {
+			created = cur.Created
+		}
+		pod = examinerBillingPod(
+			saved.Price, saved.DiskCost, saved.DiskCostUnknown,
+			created, saved.ObservedLiveAt, saved.Stopped, saved.Offline,
+			saved.StoppedAt, saved.StoppedSeen, saved.ResumeAt, saved.Segments,
+		)
+	default:
+		created := cur.Created
+		if created.IsZero() {
+			created = now
+		}
+		pod = examinerBillingPod(
+			cur.Price, cur.DiskCost, cur.DiskCostUnknown,
+			created, created, false, false,
+			time.Time{}, time.Time{}, time.Time{}, nil,
+		)
+	}
+	if pod.Start.IsZero() {
+		pod.Start = cur.Created
+		if pod.Start.IsZero() {
+			pod.Start = now
+		}
+	}
+	if cur.Created.IsZero() {
+		cur.Created = pod.Start
+	}
+	curPrice, curDisk := examinerObservedRate(pod.Cost, pod.DiskCost, *cur)
+	pod.Cost = curPrice
+	pod.DiskCost = curDisk
+	if validRate(pod.DiskCost) {
+		pod.DiskCostUnknown = false
+	} else if cur.State == "stopped" && !cur.Offline {
+		// Examiners always provision an 80 GB NVMe disk; when a non-offline stopped examiner
+		// reports no separate positive storage rate, keep DiskCostUnknown=true so daily/hourly
+		// accounting conservatively retains its full rate until deleted.
+		pod.DiskCostUnknown = true
+	}
+	if cur.State == "stopped" {
+		offline := cur.Offline || strings.EqualFold(strings.TrimSpace(cur.Status), "offline")
+		pod.markStoppedStateAt(now, time.Time{}, offline)
+	} else {
+		pod.markLiveAt(now, time.Time{})
+	}
+	cur.Price = pod.Cost
+	cur.Unconfirmed = false
+	cur.applyBillingPod(pod)
 }
 
 func mergeExaminerTransfer(
@@ -371,7 +570,7 @@ func mergeExaminerInstanceTransfer(
 	if est > estA+1e-9 || (estFlag && !estFlagA) {
 		changed = true
 	}
-	if len(inst.TransferCharges) == 0 {
+	if len(inst.TransferCharges) == 0 && len(inst.DatedTransfer) == 0 {
 		if ts.mergeReading(inst.transferReading(), estFlag, inst.State, start, now) {
 			changed = true
 		}
@@ -405,7 +604,7 @@ func normalizeFreshExaminerTransfer(inst *ExaminerInstance, now time.Time) {
 		start = now
 	}
 	var ts transferState
-	if len(inst.TransferCharges) == 0 {
+	if len(inst.TransferCharges) == 0 && len(inst.DatedTransfer) == 0 {
 		ts.mergeReading(inst.transferReading(), estFlag, inst.State, start, now)
 	} else {
 		ts.mergeState(inst.transferState(), estFlag, inst.State, start, now)
@@ -693,6 +892,48 @@ func nonNegMax(a, b float64) float64 {
 	return best
 }
 
+func examinerStopConfirmed(stopped, unconfirmed bool, stoppedSeen, at time.Time) bool {
+	if !stopped || unconfirmed || stoppedSeen.IsZero() {
+		return false
+	}
+	return !at.After(stoppedSeen.Add(examinerStopGrace))
+}
+
+func examinerSnapshotBilling(
+	rate, diskCost float64,
+	diskCostUnknown bool,
+	transfer float64,
+	created, obs time.Time,
+	stopped, offline, unconfirmed bool,
+	stoppedAt, stoppedSeen, resumeAt time.Time,
+	segments []billingSegment,
+	now, dayStart time.Time,
+	timeout time.Duration,
+) (hourly float64, computeAccrued float64) {
+	start := created
+	if start.IsZero() || start.After(now) {
+		start = now
+	}
+	rc := examinerBillingPod(rate, diskCost, diskCostUnknown, start, obs, stopped, offline, stoppedAt, stoppedSeen, resumeAt, segments)
+	if rc.Stopped {
+		if !examinerStopConfirmed(rc.Stopped, unconfirmed, rc.StoppedSeen, now) {
+			// Unconfirmed (listing outage, omission, or stale past examinerStopGrace): preserve
+			// confirmed stopped/offline segment through StoppedSeen and conservatively bill the
+			// unobserved tail at full rate.
+			rc.markLiveAt(now, time.Time{})
+			rc.End = examinerAccrualEnd(start, rc.Alive, now, timeout)
+			return rate + transfer, rc.dollarsBetweenMode(dayStart, rc.End, false)
+		}
+		rc.End = now
+		if rc.Offline {
+			return 0, rc.dollarsBetweenMode(dayStart, rc.End, false)
+		}
+		return rc.stoppedSpendRate(), rc.dollarsBetweenMode(dayStart, rc.End, false)
+	}
+	rc.End = examinerAccrualEnd(start, rc.Alive, now, timeout)
+	return rate + transfer, rc.dollarsBetweenMode(dayStart, rc.End, false)
+}
+
 func snapshotFromState(st examinerState, home string, now time.Time, timeout time.Duration, maxPrice float64) (live int, hourly float64, accrued float64) {
 	fallbackRate := maxPrice
 	if !validRate(fallbackRate) {
@@ -708,19 +949,48 @@ func snapshotFromState(st examinerState, home string, now time.Time, timeout tim
 			obs := st.ObservedLiveAt
 			created := st.Created
 			rate := st.Price
+			diskCost := st.DiskCost
+			diskCostUnknown := st.DiskCostUnknown
+			stopped := st.Stopped
+			offline := st.Offline
+			unconfirmed := st.Unconfirmed
+			stoppedAt := st.StoppedAt
+			stoppedSeen := st.StoppedSeen
+			resumeAt := st.ResumeAt
+			segments := st.Segments
 			transfer := nonNegMax(st.TransferDollars, 0)
 			transferEst := st.TransferEstimated || transfer > 0
 			ts := st.transferState()
 			if st.InstanceID != "" {
 				seenLive[st.InstanceID] = true
 				if u, ok := findUnresolved(st.Unresolved, st.InstanceID); ok {
-					if u.ObservedLiveAt.After(obs) {
-						obs = u.ObservedLiveAt
-					}
 					if created.IsZero() && !u.Created.IsZero() {
 						created = u.Created
 					}
 					rate = higherValidRate(rate, u.Price)
+					diskCost = nonNegMax(diskCost, u.DiskCost)
+					if validRate(diskCost) {
+						diskCostUnknown = false
+					} else if u.DiskCostUnknown {
+						diskCostUnknown = true
+					}
+					if u.hasBillingHistory() && (!st.hasBillingHistory() || !st.latestBillingTime().After(u.latestBillingTime())) {
+						obs = u.ObservedLiveAt
+						stopped = u.Stopped
+						offline = u.Offline
+						unconfirmed = u.Unconfirmed || (st.Unconfirmed && !u.latestBillingTime().After(st.latestBillingTime()))
+						stoppedAt = u.StoppedAt
+						stoppedSeen = u.StoppedSeen
+						resumeAt = u.ResumeAt
+						segments = u.Segments
+					} else {
+						if u.Unconfirmed && !st.latestBillingTime().After(u.latestBillingTime()) {
+							unconfirmed = true
+						}
+						if u.ObservedLiveAt.After(obs) {
+							obs = u.ObservedLiveAt
+						}
+					}
 					startForMerge := created
 					if startForMerge.IsZero() {
 						startForMerge = now
@@ -739,9 +1009,13 @@ func snapshotFromState(st examinerState, home string, now time.Time, timeout tim
 			if startForTransfer.IsZero() {
 				startForTransfer = now
 			}
-			hourly += rate + transfer
-			accrued += boundedExaminerAccrual(rate, created, obs, now, dayStart, timeout) +
-				ts.dollarsBetween(transfer, transferEst, startForTransfer, dayStart, now, false)
+			h, computeAcc := examinerSnapshotBilling(
+				rate, diskCost, diskCostUnknown, transfer,
+				created, obs, stopped, offline, unconfirmed, stoppedAt, stoppedSeen, resumeAt, segments,
+				now, dayStart, timeout,
+			)
+			hourly += h
+			accrued += computeAcc + ts.dollarsBetween(transfer, transferEst, startForTransfer, dayStart, now, false)
 		}
 	}
 	for _, u := range st.Unresolved {
@@ -764,9 +1038,13 @@ func snapshotFromState(st examinerState, home string, now time.Time, timeout tim
 		if startForTransfer.IsZero() {
 			startForTransfer = now
 		}
-		hourly += rate + transfer
-		accrued += boundedExaminerAccrual(rate, u.Created, u.ObservedLiveAt, now, dayStart, timeout) +
-			ts.dollarsBetween(transfer, transferEst, startForTransfer, dayStart, now, false)
+		h, computeAcc := examinerSnapshotBilling(
+			rate, u.DiskCost, u.DiskCostUnknown, transfer,
+			u.Created, u.ObservedLiveAt, u.Stopped, u.Offline, u.Unconfirmed, u.StoppedAt, u.StoppedSeen, u.ResumeAt, u.Segments,
+			now, dayStart, timeout,
+		)
+		hourly += h
+		accrued += computeAcc + ts.dollarsBetween(transfer, transferEst, startForTransfer, dayStart, now, false)
 	}
 	for _, p := range st.PendingSpends {
 		if p.ID != "" && !seenLive[p.ID] && !spentHasExaminer(home, p.ID) {
@@ -1008,9 +1286,12 @@ func (e *Examiner) persistState(st *examinerState) error {
 		obs := e.state.ObservedLiveAt
 		memPrice := e.state.Price
 		memDisk := e.state.DiskCost
+		memDiskUnknown := e.state.DiskCostUnknown
 		memTransfer := e.state.TransferDollars
 		memTransferEst := e.state.TransferEstimated
 		memTS := e.state.transferState()
+		memBilling := e.state
+		memBilling.Segments = cloneBillingSegments(e.state.Segments)
 		e.mu.RUnlock()
 		if !match {
 			return nil
@@ -1020,6 +1301,11 @@ func (e *Examiner) persistState(st *examinerState) error {
 		cp.Unresolved = unresolved
 		cp.Price = higherValidRate(cp.Price, memPrice)
 		cp.DiskCost = nonNegMax(cp.DiskCost, memDisk)
+		if validRate(cp.DiskCost) {
+			cp.DiskCostUnknown = false
+		} else if memDiskUnknown {
+			cp.DiskCostUnknown = true
+		}
 		est, estFlag, ts, _ := mergeExaminerTransfer(
 			cp.TransferDollars, cp.TransferEstimated, cp.transferState(),
 			memTransfer, memTransferEst, memTS,
@@ -1028,8 +1314,22 @@ func (e *Examiner) persistState(st *examinerState) error {
 		cp.TransferDollars = est
 		cp.TransferEstimated = estFlag
 		cp.setTransferState(ts)
-		if obs.After(cp.ObservedLiveAt) {
-			cp.ObservedLiveAt = obs
+		if memBilling.hasBillingHistory() && (!cp.hasBillingHistory() || memBilling.latestBillingTime().After(cp.latestBillingTime())) {
+			cp.Stopped = memBilling.Stopped
+			cp.Offline = memBilling.Offline
+			cp.Unconfirmed = memBilling.Unconfirmed
+			cp.StoppedAt = memBilling.StoppedAt
+			cp.StoppedSeen = memBilling.StoppedSeen
+			cp.ResumeAt = memBilling.ResumeAt
+			cp.Segments = cloneBillingSegments(memBilling.Segments)
+			cp.ObservedLiveAt = memBilling.ObservedLiveAt
+		} else {
+			if memBilling.Unconfirmed && !cp.latestBillingTime().After(memBilling.latestBillingTime()) {
+				cp.Unconfirmed = true
+			}
+			if obs.After(cp.ObservedLiveAt) {
+				cp.ObservedLiveAt = obs
+			}
 		}
 		written = &cp
 		err = writeExaminerState(e.home, &cp)
@@ -1412,6 +1712,11 @@ func (e *Examiner) reloadState(tryFlush bool) error {
 	if !changed && e.state.InstanceID != "" && e.state.InstanceID == next.InstanceID {
 		next.Price = higherValidRate(next.Price, e.state.Price)
 		next.DiskCost = nonNegMax(next.DiskCost, e.state.DiskCost)
+		if validRate(next.DiskCost) {
+			next.DiskCostUnknown = false
+		} else if e.state.DiskCostUnknown {
+			next.DiskCostUnknown = true
+		}
 		est, estFlag, ts, _ := mergeExaminerTransfer(
 			next.TransferDollars, next.TransferEstimated, next.transferState(),
 			e.state.TransferDollars, e.state.TransferEstimated, e.state.transferState(),
@@ -1420,8 +1725,22 @@ func (e *Examiner) reloadState(tryFlush bool) error {
 		next.TransferDollars = est
 		next.TransferEstimated = estFlag
 		next.setTransferState(ts)
-		if e.state.ObservedLiveAt.After(next.ObservedLiveAt) {
+		if e.state.hasBillingHistory() && (!next.hasBillingHistory() || e.state.latestBillingTime().After(next.latestBillingTime())) {
+			next.Stopped = e.state.Stopped
+			next.Offline = e.state.Offline
+			next.Unconfirmed = e.state.Unconfirmed
+			next.StoppedAt = e.state.StoppedAt
+			next.StoppedSeen = e.state.StoppedSeen
+			next.ResumeAt = e.state.ResumeAt
+			next.Segments = cloneBillingSegments(e.state.Segments)
 			next.ObservedLiveAt = e.state.ObservedLiveAt
+		} else {
+			if e.state.Unconfirmed && !next.latestBillingTime().After(e.state.latestBillingTime()) {
+				next.Unconfirmed = true
+			}
+			if e.state.ObservedLiveAt.After(next.ObservedLiveAt) {
+				next.ObservedLiveAt = e.state.ObservedLiveAt
+			}
 		}
 	}
 	e.state = next
@@ -1471,6 +1790,8 @@ func (e *Examiner) ownerID() string {
 func (e *Examiner) cloneStateLocked() examinerState {
 	st := e.state
 	st.TransferCharges = cloneTransferCharges(e.state.TransferCharges)
+	st.DatedTransfer = cloneDatedTransfer(e.state.DatedTransfer)
+	st.Segments = cloneBillingSegments(e.state.Segments)
 	st.PendingSpends = clonePendingSpends(e.state.PendingSpends)
 	st.Unresolved = cloneExaminerInstances(e.state.Unresolved)
 	return st
@@ -1526,9 +1847,14 @@ func mergeExaminerInstance(prev, cur ExaminerInstance) ExaminerInstance {
 		cur.Created = prev.Created
 	}
 	cur.Price, cur.DiskCost = examinerObservedRate(prev.Price, prev.DiskCost, cur)
-	at := cur.ObservedLiveAt
+	if validRate(cur.DiskCost) {
+		cur.DiskCostUnknown = false
+	} else if !cur.DiskCostUnknown && prev.DiskCostUnknown && !cur.Offline {
+		cur.DiskCostUnknown = true
+	}
+	at := cur.latestBillingTime()
 	if at.IsZero() {
-		at = prev.ObservedLiveAt
+		at = prev.latestBillingTime()
 	}
 	if at.IsZero() {
 		at = cur.Created
@@ -1540,8 +1866,24 @@ func mergeExaminerInstance(prev, cur ExaminerInstance) ExaminerInstance {
 	cur.TransferDollars = est
 	cur.TransferEstimated = estFlag
 	cur.setTransferState(ts)
-	if prev.ObservedLiveAt.After(cur.ObservedLiveAt) {
+	switch {
+	case cur.hasBillingHistory() && (!prev.hasBillingHistory() || !prev.latestBillingTime().After(cur.latestBillingTime())):
+		cur.Segments = cloneBillingSegments(cur.Segments)
+	case prev.hasBillingHistory() && !cur.hasBillingHistory() && cur.State != "" && !cur.ObservedLiveAt.IsZero():
+		observeExaminerPoll(&prev, nil, &cur, cur.ObservedLiveAt)
+	case prev.hasBillingHistory():
+		cur.Stopped = prev.Stopped
+		cur.Offline = prev.Offline
+		cur.Unconfirmed = cur.Unconfirmed || prev.Unconfirmed
+		cur.StoppedAt = prev.StoppedAt
+		cur.StoppedSeen = prev.StoppedSeen
+		cur.ResumeAt = prev.ResumeAt
+		cur.Segments = cloneBillingSegments(prev.Segments)
 		cur.ObservedLiveAt = prev.ObservedLiveAt
+	default:
+		if prev.ObservedLiveAt.After(cur.ObservedLiveAt) {
+			cur.ObservedLiveAt = prev.ObservedLiveAt
+		}
 	}
 	return cur
 }
@@ -1878,11 +2220,34 @@ func (e *Examiner) recordEndedAtFull(id, label string, price, transferDollars fl
 }
 
 func (e *Examiner) recordEndedWithTransfer(id, label string, price, transferDollars float64, transferEst bool, ts transferState, start, end time.Time, roundID, why string) (float64, error) {
+	return e.recordEndedWithBilling(id, label, price, 0, false, transferDollars, transferEst, ts, start, end, end, false, false, false, time.Time{}, time.Time{}, time.Time{}, nil, false, roundID, why)
+}
+
+func (e *Examiner) recordEndedWithBilling(
+	id, label string,
+	price, diskCost float64,
+	diskCostUnknown bool,
+	transferDollars float64,
+	transferEst bool,
+	ts transferState,
+	start, alive, end time.Time,
+	stopped, offline, unconfirmed bool,
+	stoppedAt, stoppedSeen, resumeAt time.Time,
+	segments []billingSegment,
+	missing bool,
+	roundID, why string,
+) (float64, error) {
 	if id == "" {
 		return 0, nil
 	}
 	if start.IsZero() || start.After(end) {
 		start = end
+	}
+	if alive.IsZero() || alive.Before(start) {
+		alive = start
+	}
+	if alive.After(end) {
+		alive = end
 	}
 	if roundID == "" {
 		roundID = examinerLabelRound(label, e.ownerID())
@@ -1903,10 +2268,23 @@ func (e *Examiner) recordEndedWithTransfer(id, label string, price, transferDoll
 	fixed := nonNegMax(transferDollars, 0)
 	rec := podRecord{
 		ID: id, Market: "vast", Handle: examinerLabelPrefix, GPU: "RTX 5090",
-		Cloud: "verified", Cost: price, FixedCost: fixed, FixedCostEstimated: transferEst || fixed > 0,
-		Start: start, Alive: end, End: end,
+		Cloud: "verified", Cost: price, DiskCost: max(0, diskCost), DiskCostUnknown: diskCostUnknown && !validRate(diskCost),
+		FixedCost: fixed, FixedCostEstimated: transferEst || fixed > 0,
+		Start: start, Alive: alive, Stopped: stopped, Offline: offline,
+		StoppedAt: stoppedAt, StoppedSeen: stoppedSeen, ResumeAt: resumeAt,
+		Segments: cloneBillingSegments(segments), End: end,
 		For: "examiner", Round: roundID, Why: why,
 	}
+	if rec.Stopped {
+		if missing || !examinerStopConfirmed(rec.Stopped, unconfirmed, rec.StoppedSeen, end) {
+			rec.markLiveAt(end, time.Time{})
+		} else {
+			rec.markStoppedStateAt(end, time.Time{}, rec.Offline)
+		}
+	} else {
+		rec.Alive = end
+	}
+	rec.End = end
 	rec.setTransferState(ts.clone())
 	now := e.now()
 	todayDollars := rec.dollarsBetween(startOfDay(now), end)
@@ -1942,7 +2320,12 @@ func (e *Examiner) recordEndedDollars(inst ExaminerInstance, fallbackStart time.
 	if inst.State == "starting" {
 		ts.clearUnconfirmedZero(estFlag)
 	}
-	return e.recordEndedWithTransfer(inst.ID, inst.Label, price, est, estFlag, ts, start, now, roundID, why)
+	return e.recordEndedWithBilling(
+		inst.ID, inst.Label, price, inst.DiskCost, inst.DiskCostUnknown,
+		est, estFlag, ts, start, inst.ObservedLiveAt, now,
+		inst.Stopped, inst.Offline, inst.Unconfirmed, inst.StoppedAt, inst.StoppedSeen, inst.ResumeAt, inst.Segments,
+		false, roundID, why,
+	)
 }
 
 // recordMissingSaved records a bounded, idempotent terminal spend charge for a saved examiner
@@ -1961,17 +2344,39 @@ func (e *Examiner) recordMissingSavedDollars(saved examinerState, why string) (f
 	created := saved.Created
 	obs := saved.ObservedLiveAt
 	price := saved.Price
+	diskCost := saved.DiskCost
+	diskCostUnknown := saved.DiskCostUnknown
+	stopped := saved.Stopped
+	offline := saved.Offline
+	stoppedAt := saved.StoppedAt
+	stoppedSeen := saved.StoppedSeen
+	resumeAt := saved.ResumeAt
+	segments := saved.Segments
 	transfer := nonNegMax(saved.TransferDollars, 0)
 	transferEst := saved.TransferEstimated || transfer > 0
 	ts := saved.transferState()
 	if u, ok := findUnresolved(saved.Unresolved, saved.InstanceID); ok {
-		if u.ObservedLiveAt.After(obs) {
-			obs = u.ObservedLiveAt
-		}
 		if created.IsZero() && !u.Created.IsZero() {
 			created = u.Created
 		}
 		price = higherValidRate(price, u.Price)
+		diskCost = nonNegMax(diskCost, u.DiskCost)
+		if validRate(diskCost) {
+			diskCostUnknown = false
+		} else if u.DiskCostUnknown {
+			diskCostUnknown = true
+		}
+		if u.hasBillingHistory() && (!saved.hasBillingHistory() || !saved.latestBillingTime().After(u.latestBillingTime())) {
+			obs = u.ObservedLiveAt
+			stopped = u.Stopped
+			offline = u.Offline
+			stoppedAt = u.StoppedAt
+			stoppedSeen = u.StoppedSeen
+			resumeAt = u.ResumeAt
+			segments = u.Segments
+		} else if u.ObservedLiveAt.After(obs) {
+			obs = u.ObservedLiveAt
+		}
 		transfer, transferEst, ts, _ = mergeExaminerTransfer(
 			transfer, transferEst, ts,
 			u.TransferDollars, u.TransferEstimated, u.transferState(),
@@ -1984,7 +2389,12 @@ func (e *Examiner) recordMissingSavedDollars(saved examinerState, why string) (f
 		start = now
 	}
 	end := examinerAccrualEnd(created, obs, now, e.cfg.Timeout)
-	return e.recordEndedWithTransfer(saved.InstanceID, saved.ReservedLabel, price, transfer, transferEst, ts, start, end, saved.RoundID, why)
+	return e.recordEndedWithBilling(
+		saved.InstanceID, saved.ReservedLabel, price, diskCost, diskCostUnknown,
+		transfer, transferEst, ts, start, obs, end,
+		stopped, offline, true, stoppedAt, stoppedSeen, resumeAt, segments,
+		true, saved.RoundID, why,
+	)
 }
 
 // recordMissingInstance records a bounded, idempotent terminal spend charge for a tracked
@@ -2009,7 +2419,12 @@ func (e *Examiner) recordMissingInstanceDollars(inst ExaminerInstance, why strin
 	estFlag := inst.TransferEstimated || est > 0
 	ts := inst.transferState()
 	ts.clearUnconfirmedZero(estFlag)
-	return e.recordEndedWithTransfer(inst.ID, inst.Label, inst.Price, est, estFlag, ts, start, end, "", why)
+	return e.recordEndedWithBilling(
+		inst.ID, inst.Label, inst.Price, inst.DiskCost, inst.DiskCostUnknown,
+		est, estFlag, ts, start, inst.ObservedLiveAt, end,
+		inst.Stopped, inst.Offline, true, inst.StoppedAt, inst.StoppedSeen, inst.ResumeAt, inst.Segments,
+		true, "", why,
+	)
 }
 
 func findUnresolved(prev []ExaminerInstance, id string) (ExaminerInstance, bool) {
@@ -2024,14 +2439,27 @@ func findUnresolved(prev []ExaminerInstance, id string) (ExaminerInstance, bool)
 func savedOrphanInstance(saved examinerState, prev []ExaminerInstance) ExaminerInstance {
 	obs := saved.ObservedLiveAt
 	if u, ok := findUnresolved(prev, saved.InstanceID); ok {
-		if obs.After(u.ObservedLiveAt) {
-			u.ObservedLiveAt = obs
-		}
 		if u.Created.IsZero() {
 			u.Created = saved.Created
 		}
 		u.Price, u.DiskCost = examinerObservedRate(saved.Price, saved.DiskCost, u)
-		at := u.ObservedLiveAt
+		if validRate(u.DiskCost) {
+			u.DiskCostUnknown = false
+		} else if saved.DiskCostUnknown && !u.Offline {
+			u.DiskCostUnknown = true
+		}
+		if saved.hasBillingHistory() && (!u.hasBillingHistory() || saved.latestBillingTime().After(u.latestBillingTime())) {
+			u.Stopped = saved.Stopped
+			u.Offline = saved.Offline
+			u.StoppedAt = saved.StoppedAt
+			u.StoppedSeen = saved.StoppedSeen
+			u.ResumeAt = saved.ResumeAt
+			u.Segments = cloneBillingSegments(saved.Segments)
+			u.ObservedLiveAt = saved.ObservedLiveAt
+		} else if obs.After(u.ObservedLiveAt) {
+			u.ObservedLiveAt = obs
+		}
+		at := u.latestBillingTime()
 		if at.IsZero() {
 			at = u.Created
 		}
@@ -2043,21 +2471,82 @@ func savedOrphanInstance(saved examinerState, prev []ExaminerInstance) ExaminerI
 		u.TransferDollars = est
 		u.TransferEstimated = estFlag
 		u.setTransferState(ts)
+		u.Unconfirmed = true
 		return u
+	}
+	state := "unknown"
+	if saved.Stopped {
+		state = "stopped"
 	}
 	inst := ExaminerInstance{
 		ID:                saved.InstanceID,
 		Label:             saved.ReservedLabel,
-		State:             "unknown",
+		State:             state,
+		Stopped:           saved.Stopped,
+		Offline:           saved.Offline,
+		Unconfirmed:       true,
 		Price:             saved.Price,
 		DiskCost:          saved.DiskCost,
+		DiskCostUnknown:   saved.DiskCostUnknown,
 		TransferDollars:   saved.TransferDollars,
 		TransferEstimated: saved.TransferEstimated || saved.TransferDollars > 0,
 		Created:           saved.Created,
 		ObservedLiveAt:    obs,
+		StoppedAt:         saved.StoppedAt,
+		StoppedSeen:       saved.StoppedSeen,
+		ResumeAt:          saved.ResumeAt,
+		Segments:          cloneBillingSegments(saved.Segments),
 	}
 	inst.setTransferState(saved.transferState())
 	return inst
+}
+
+func (e *Examiner) noteSavedBilling(saved *examinerState, inst ExaminerInstance) {
+	if saved == nil {
+		return
+	}
+	if inst.hasBillingHistory() && (!saved.hasBillingHistory() || !saved.latestBillingTime().After(inst.latestBillingTime())) {
+		saved.Stopped = inst.Stopped
+		saved.Offline = inst.Offline
+		saved.Unconfirmed = inst.Unconfirmed
+		saved.StoppedAt = inst.StoppedAt
+		saved.StoppedSeen = inst.StoppedSeen
+		saved.ResumeAt = inst.ResumeAt
+		saved.Segments = cloneBillingSegments(inst.Segments)
+		saved.ObservedLiveAt = inst.ObservedLiveAt
+		if validRate(inst.DiskCost) {
+			saved.DiskCost = nonNegMax(saved.DiskCost, inst.DiskCost)
+			saved.DiskCostUnknown = false
+		} else if inst.DiskCostUnknown && !inst.Offline {
+			saved.DiskCostUnknown = true
+		}
+	} else if !inst.Stopped && inst.ObservedLiveAt.After(saved.ObservedLiveAt) {
+		saved.ObservedLiveAt = inst.ObservedLiveAt
+		saved.Unconfirmed = inst.Unconfirmed
+	}
+	e.mu.Lock()
+	if e.state.InstanceID == saved.InstanceID && saved.InstanceID != "" {
+		if saved.hasBillingHistory() && (!e.state.hasBillingHistory() || !e.state.latestBillingTime().After(saved.latestBillingTime())) {
+			e.state.Stopped = saved.Stopped
+			e.state.Offline = saved.Offline
+			e.state.Unconfirmed = saved.Unconfirmed
+			e.state.StoppedAt = saved.StoppedAt
+			e.state.StoppedSeen = saved.StoppedSeen
+			e.state.ResumeAt = saved.ResumeAt
+			e.state.Segments = cloneBillingSegments(saved.Segments)
+			e.state.ObservedLiveAt = saved.ObservedLiveAt
+			if validRate(saved.DiskCost) {
+				e.state.DiskCost = nonNegMax(e.state.DiskCost, saved.DiskCost)
+				e.state.DiskCostUnknown = false
+			} else if saved.DiskCostUnknown && !saved.Offline {
+				e.state.DiskCostUnknown = true
+			}
+		} else if !saved.Stopped && saved.ObservedLiveAt.After(e.state.ObservedLiveAt) {
+			e.state.ObservedLiveAt = saved.ObservedLiveAt
+			e.state.Unconfirmed = saved.Unconfirmed
+		}
+	}
+	e.mu.Unlock()
 }
 
 func (e *Examiner) noteSavedObservedLive(saved *examinerState, now time.Time) {
@@ -2164,6 +2653,10 @@ func (e *Examiner) teardownKnownDueOnListErr(ctx context.Context, saved examiner
 			continue
 		}
 		if err := e.prov.EndExaminer(ctx, u.ID); err != nil {
+			if !u.Unconfirmed {
+				u.Unconfirmed = true
+				changedUnresolved = true
+			}
 			keepUnresolved = append(keepUnresolved, u)
 			e.say("could not end known unresolved examiner GPU (machine %s) during listing outage: %v", u.ID, err)
 			continue
@@ -2176,6 +2669,11 @@ func (e *Examiner) teardownKnownDueOnListErr(ctx context.Context, saved examiner
 	if savedDue {
 		if err := e.prov.EndExaminer(ctx, saved.InstanceID); err != nil {
 			e.proxyOffline()
+			e.mu.Lock()
+			if e.state.InstanceID == saved.InstanceID {
+				e.state.Unconfirmed = true
+			}
+			e.mu.Unlock()
 			keepUnresolved = append(keepUnresolved, savedOrphanInstance(saved, saved.Unresolved))
 			changedUnresolved = true
 			e.say("could not end known due examiner GPU (machine %s) during listing outage: %v", saved.InstanceID, err)
@@ -2190,6 +2688,14 @@ func (e *Examiner) teardownKnownDueOnListErr(ctx context.Context, saved examiner
 			_ = e.recordMissingSaved(saved, why)
 			e.clearState()
 		}
+	} else if saved.InstanceID != "" && saved.Stopped && !saved.Unconfirmed {
+		e.mu.Lock()
+		if e.state.InstanceID == saved.InstanceID {
+			e.state.Unconfirmed = true
+		}
+		stCopy := e.cloneStateLocked()
+		e.mu.Unlock()
+		_ = e.saveState(&stCopy)
 	}
 	if changedUnresolved || len(endedIDs) > 0 {
 		e.setUnresolved(keepUnresolved)
@@ -2214,6 +2720,7 @@ func (e *Examiner) confirmMissingUnresolved(ctx context.Context, prevUnresolved,
 			continue
 		}
 		if err := e.prov.EndExaminer(ctx, prev.ID); err != nil {
+			prev.Unconfirmed = true
 			still = append(still, prev)
 			e.say("could not confirm termination of missing examiner GPU (machine %s): %v", prev.ID, err)
 			if endErr == nil {
@@ -2259,14 +2766,22 @@ func (e *Examiner) EnforceTimeout(ctx context.Context) error {
 	now := e.now()
 	matchedReserved := false
 	for i := range owned {
-		owned[i].ObservedLiveAt = now
+		var prevPtr *ExaminerInstance
 		if prev, ok := findUnresolved(saved.Unresolved, owned[i].ID); ok {
-			owned[i] = mergeExaminerInstance(prev, owned[i])
-		} else if saved.InstanceID != "" && owned[i].ID == saved.InstanceID {
-			// saved state carries this instance's transfer history
+			prevCopy := prev
+			prevPtr = &prevCopy
+		}
+		var savedPtr *examinerState
+		if saved.InstanceID != "" && owned[i].ID == saved.InstanceID {
+			savedPtr = &saved
 		} else if !matchedReserved && saved.ReservedLabel != "" && owned[i].Label == saved.ReservedLabel {
 			matchedReserved = true
-		} else {
+			savedPtr = &saved
+		}
+		observeExaminerPoll(prevPtr, savedPtr, &owned[i], now)
+		if prevPtr != nil {
+			owned[i] = mergeExaminerInstance(*prevPtr, owned[i])
+		} else if savedPtr == nil {
 			normalizeFreshExaminerTransfer(&owned[i], now)
 		}
 	}
@@ -2295,7 +2810,7 @@ func (e *Examiner) enforceOwnedTimeouts(ctx context.Context, owned []ExaminerIns
 			(saved.ReservedLabel != "" && inst.Label == saved.ReservedLabel)
 		if inst.ID == saved.InstanceID {
 			foundSaved = true
-			e.noteSavedObservedLive(&saved, now)
+			e.noteSavedBilling(&saved, inst)
 			if e.noteSavedPrice(&saved, inst) && !logDeferred && !e.dryRun {
 				if perr := e.persistState(&saved); perr != nil && firstErr == nil {
 					firstErr = fmt.Errorf("saving updated examiner.json price: %w", perr)
@@ -2327,7 +2842,7 @@ func (e *Examiner) enforceOwnedTimeouts(ctx context.Context, owned []ExaminerIns
 			e.promoteReservedInstance(&saved, inst)
 			if inst.ID == saved.InstanceID {
 				foundSaved = true
-				e.noteSavedObservedLive(&saved, now)
+				e.noteSavedBilling(&saved, inst)
 			}
 			if inst.Created.IsZero() && !created.IsZero() {
 				inst.Created = created
@@ -2340,7 +2855,6 @@ func (e *Examiner) enforceOwnedTimeouts(ctx context.Context, owned []ExaminerIns
 				normalizeFreshExaminerTransfer(&inst, now)
 			}
 			inst.Price, inst.DiskCost = examinerObservedRate(fallbackPrice, fallbackDisk, inst)
-			inst.ObservedLiveAt = now
 			e.proxyOffline()
 			failedEnds = append(failedEnds, inst)
 			e.say("could not end timed-out examiner GPU (machine %s): %v", inst.ID, err)
@@ -2445,6 +2959,107 @@ func (e *Examiner) promoteReservedInstance(saved *examinerState, inst ExaminerIn
 	e.mu.Unlock()
 }
 
+// syncDatedCharges reconciles provider-reported dated bandwidth charges (e.g. Vast.ai
+// GET /api/v0/charges) exclusively onto owned examiner contracts (active saved instance, listed
+// owned instances, Unresolved orphans, and PendingSpends). Unrelated account contracts are ignored.
+func (e *Examiner) syncDatedCharges(ctx context.Context, saved *examinerState, insts []ExaminerInstance, now time.Time) bool {
+	tcLookup, ok := e.prov.(transferChargesLookup)
+	if !ok {
+		return false
+	}
+	from := startOfDay(now)
+	minLookback := from.AddDate(0, 0, -7)
+	considerStart := func(t time.Time) {
+		if !t.IsZero() {
+			if sd := startOfDay(t); sd.Before(from) {
+				from = sd
+			}
+		}
+	}
+	considerStart(saved.Created)
+	for _, inst := range insts {
+		considerStart(inst.Created)
+	}
+	for _, u := range saved.Unresolved {
+		considerStart(u.Created)
+	}
+	for _, p := range saved.PendingSpends {
+		considerStart(p.Start)
+	}
+	if from.Before(minLookback) {
+		from = minLookback
+	}
+	byContract, err := tcLookup.TransferCharges(ctx, from, now)
+	if err != nil || len(byContract) == 0 {
+		return false
+	}
+	stateChanged := false
+	for i := range insts {
+		if days := byContract[insts[i].ID]; len(days) > 0 {
+			ts := insts[i].transferState().clone()
+			if ts.mergeDatedCharges(days, insts[i].Created, now) {
+				insts[i].setTransferState(ts)
+			}
+		}
+	}
+	if saved.InstanceID != "" {
+		if days := byContract[saved.InstanceID]; len(days) > 0 {
+			ts := saved.transferState().clone()
+			if ts.mergeDatedCharges(days, saved.Created, now) {
+				saved.setTransferState(ts)
+				stateChanged = true
+			}
+		}
+	}
+	for i := range saved.Unresolved {
+		if days := byContract[saved.Unresolved[i].ID]; len(days) > 0 {
+			ts := saved.Unresolved[i].transferState().clone()
+			if ts.mergeDatedCharges(days, saved.Unresolved[i].Created, now) {
+				saved.Unresolved[i].setTransferState(ts)
+				stateChanged = true
+			}
+		}
+	}
+	for i := range saved.PendingSpends {
+		if days := byContract[saved.PendingSpends[i].ID]; len(days) > 0 {
+			ts := saved.PendingSpends[i].transferState().clone()
+			if ts.mergeDatedCharges(days, saved.PendingSpends[i].Start, now) {
+				saved.PendingSpends[i].setTransferState(ts)
+				stateChanged = true
+			}
+		}
+	}
+	if stateChanged {
+		e.mu.Lock()
+		if e.state.InstanceID != "" && e.state.InstanceID == saved.InstanceID {
+			if days := byContract[e.state.InstanceID]; len(days) > 0 {
+				ts := e.state.transferState().clone()
+				if ts.mergeDatedCharges(days, e.state.Created, now) {
+					e.state.setTransferState(ts)
+				}
+			}
+		}
+		for i := range e.state.Unresolved {
+			if days := byContract[e.state.Unresolved[i].ID]; len(days) > 0 {
+				ts := e.state.Unresolved[i].transferState().clone()
+				if ts.mergeDatedCharges(days, e.state.Unresolved[i].Created, now) {
+					e.state.Unresolved[i].setTransferState(ts)
+				}
+			}
+		}
+		for i := range e.state.PendingSpends {
+			if days := byContract[e.state.PendingSpends[i].ID]; len(days) > 0 {
+				ts := e.state.PendingSpends[i].transferState().clone()
+				if ts.mergeDatedCharges(days, e.state.PendingSpends[i].Start, now) {
+					e.state.PendingSpends[i].setTransferState(ts)
+				}
+			}
+		}
+		e.mu.Unlock()
+	}
+	return stateChanged
+}
+
 // Reconcile brings the ephemeral 1x RTX 5090 examiner in line with /admin/work:
 //   - Scopes all discovery, adoption, and teardown strictly to this deployment's owner ID.
 //   - When no open round needs an exam, destroys every owned examiner instance at once.
@@ -2485,17 +3100,36 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 	}
 	matchedReserved := false
 	for i := range insts {
-		insts[i].ObservedLiveAt = now
+		var prevPtr *ExaminerInstance
 		if prev, ok := findUnresolved(prevUnresolved, insts[i].ID); ok {
-			insts[i] = mergeExaminerInstance(prev, insts[i])
-		} else if saved.InstanceID != "" && insts[i].ID == saved.InstanceID {
-			// saved state carries this instance's transfer history
+			prevCopy := prev
+			prevPtr = &prevCopy
+		}
+		var savedPtr *examinerState
+		if saved.InstanceID != "" && insts[i].ID == saved.InstanceID {
+			savedPtr = &saved
 		} else if !matchedReserved && saved.ReservedLabel != "" && insts[i].Label == saved.ReservedLabel {
 			matchedReserved = true
-		} else {
+			savedPtr = &saved
+		}
+		observeExaminerPoll(prevPtr, savedPtr, &insts[i], now)
+		if prevPtr != nil {
+			insts[i] = mergeExaminerInstance(*prevPtr, insts[i])
+		} else if savedPtr == nil {
 			normalizeFreshExaminerTransfer(&insts[i], now)
 		}
 		listedIDs[insts[i].ID] = true
+	}
+	if e.syncDatedCharges(ctx, &saved, insts, now) {
+		prevUnresolved = cloneExaminerInstances(saved.Unresolved)
+		if !e.dryRun && loadErr == nil {
+			e.mu.RLock()
+			stCopy := e.cloneStateLocked()
+			e.mu.RUnlock()
+			if serr := e.saveState(&stCopy); serr != nil && spendErr == nil {
+				spendErr = fmt.Errorf("saving reconciled examiner dated transfer charges: %w", serr)
+			}
+		}
 	}
 
 	// Case 1: no open round needs an exam -> tear down every owned examiner instance immediately.
@@ -2513,7 +3147,7 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 			if err := e.prov.EndExaminer(ctx, inst.ID); err != nil {
 				e.promoteReservedInstance(&saved, inst)
 				if inst.ID == saved.InstanceID {
-					e.noteSavedObservedLive(&saved, now)
+					e.noteSavedBilling(&saved, inst)
 					e.noteSavedPrice(&saved, inst)
 					if inst.Created.IsZero() && !saved.Created.IsZero() {
 						inst.Created = saved.Created
@@ -2523,7 +3157,6 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 				} else if !hadUnresolved[inst.ID] {
 					normalizeFreshExaminerTransfer(&inst, now)
 				}
-				inst.ObservedLiveAt = now
 				failedEnds = append(failedEnds, inst)
 				e.say("could not end examiner GPU (machine %s): %v", inst.ID, err)
 				if firstEndErr == nil {
@@ -2635,7 +3268,7 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 	dryRunTimedOut := false
 	for i := range insts {
 		inst := insts[i]
-		if inst.State != "stopped" &&
+		if examinerStateUsable(inst.State) &&
 			saved.InstanceID == "" &&
 			saved.PendingRent &&
 			saved.ReservedLabel != "" &&
@@ -2644,19 +3277,19 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 			saved.CertPEM != "" &&
 			active == nil {
 			e.promoteReservedInstance(&saved, inst)
-			e.noteSavedObservedLive(&saved, now)
+			e.noteSavedBilling(&saved, inst)
 			if err := e.persistState(&saved); err != nil && spendErr == nil {
 				spendErr = fmt.Errorf("saving adopted examiner.json: %w", err)
 			}
 		}
-		keep := inst.State != "stopped" &&
+		keep := examinerStateUsable(inst.State) &&
 			saved.InstanceID != "" &&
 			inst.ID == saved.InstanceID &&
 			saved.APIKey != "" &&
 			saved.CertPEM != "" &&
 			active == nil
 		if keep {
-			e.noteSavedObservedLive(&saved, now)
+			e.noteSavedBilling(&saved, inst)
 			if e.noteSavedPrice(&saved, inst) && !e.dryRun {
 				if err := e.persistState(&saved); err != nil && spendErr == nil {
 					spendErr = fmt.Errorf("saving updated examiner.json price: %w", err)
@@ -2678,7 +3311,7 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 					}
 					inst.Price, inst.DiskCost = examinerObservedRate(saved.Price, saved.DiskCost, inst)
 					mergeSavedTransferIntoInstance(saved, &inst, now)
-					inst.ObservedLiveAt = now
+					e.noteSavedBilling(&saved, inst)
 					e.proxyOffline()
 					failedEnds = append(failedEnds, inst)
 					e.say("could not end timed-out examiner GPU (machine %s): %v", inst.ID, err)
@@ -2711,7 +3344,7 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 		if err := e.prov.EndExaminer(ctx, inst.ID); err != nil {
 			e.promoteReservedInstance(&saved, inst)
 			if inst.ID == saved.InstanceID {
-				e.noteSavedObservedLive(&saved, now)
+				e.noteSavedBilling(&saved, inst)
 				e.noteSavedPrice(&saved, inst)
 				if inst.Created.IsZero() && !saved.Created.IsZero() {
 					inst.Created = saved.Created
@@ -2721,7 +3354,6 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 			} else if !hadUnresolved[inst.ID] {
 				normalizeFreshExaminerTransfer(&inst, now)
 			}
-			inst.ObservedLiveAt = now
 			failedEnds = append(failedEnds, inst)
 			e.say("could not end stray examiner GPU (machine %s): %v", inst.ID, err)
 			if strayEndErr == nil {
@@ -2800,6 +3432,15 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 				}
 			} else {
 				missingSavedHeld = true
+				if saved.Stopped && !saved.Unconfirmed {
+					saved.Unconfirmed = true
+					e.mu.Lock()
+					if e.state.InstanceID == saved.InstanceID {
+						e.state.Unconfirmed = true
+					}
+					e.mu.Unlock()
+					_ = e.persistState(&saved)
+				}
 				e.say("examiner GPU %s omitted from provider listing; keeping reservation until it reappears or terminates", saved.InstanceID)
 			}
 		}
@@ -2809,7 +3450,7 @@ func (e *Examiner) Reconcile(ctx context.Context, w *Work, budget ExaminerBudget
 	}
 
 	if active != nil {
-		if active.State != "stopped" && active.PublicIP != "" && active.HostPort != "" {
+		if examinerStateUsable(active.State) && active.PublicIP != "" && active.HostPort != "" {
 			upstream := "https://" + net.JoinHostPort(active.PublicIP, active.HostPort)
 			if !wasReady || wasUpstream != upstream {
 				if e.probeModels(ctx, upstream, saved.APIKey, saved.CertPEM) {
@@ -3413,10 +4054,10 @@ func (e *Examiner) ProbeIfBooting(ctx context.Context) {
 		return
 	}
 	for _, inst := range filterOwnedExaminers(rawInsts, owner, saved.InstanceID, saved.ReservedLabel) {
-		if inst.ID == saved.InstanceID && inst.State != "stopped" {
+		if inst.ID == saved.InstanceID && examinerStateUsable(inst.State) {
 			e.noteSavedPrice(&saved, inst)
 		}
-		if inst.ID == saved.InstanceID && inst.State != "stopped" && inst.PublicIP != "" && inst.HostPort != "" {
+		if inst.ID == saved.InstanceID && examinerStateUsable(inst.State) && inst.PublicIP != "" && inst.HostPort != "" {
 			upstream := "https://" + net.JoinHostPort(inst.PublicIP, inst.HostPort)
 			if e.probeModels(ctx, upstream, saved.APIKey, saved.CertPEM) {
 				if ok, changed := e.diskMatchesSaved(saved); !ok {
@@ -3490,18 +4131,54 @@ func resolvePendingExaminer(
 		target.Upstream = ""
 		target.Price = 0
 		target.DiskCost = 0
+		target.DiskCostUnknown = false
 		target.TransferDollars = 0
 		target.TransferEstimated = false
 		target.setTransferState(transferState{})
 		target.Created = time.Time{}
 		target.ObservedLiveAt = time.Time{}
+		target.Stopped = false
+		target.Offline = false
+		target.Unconfirmed = false
+		target.StoppedAt = time.Time{}
+		target.StoppedSeen = time.Time{}
+		target.ResumeAt = time.Time{}
+		target.Segments = nil
+	}
+	refreshUnresolved := func(u *ExaminerInstance, listedByID map[string]ExaminerInstance, listOK bool) {
+		var savedPtr *examinerState
+		if u.ID == st.InstanceID {
+			savedPtr = st
+			if st.hasBillingHistory() && (!u.hasBillingHistory() || st.latestBillingTime().After(u.latestBillingTime())) {
+				u.Stopped = st.Stopped
+				u.Offline = st.Offline
+				u.Unconfirmed = u.Unconfirmed || st.Unconfirmed
+				u.StoppedAt = st.StoppedAt
+				u.StoppedSeen = st.StoppedSeen
+				u.ResumeAt = st.ResumeAt
+				u.Segments = cloneBillingSegments(st.Segments)
+				u.ObservedLiveAt = st.ObservedLiveAt
+			}
+		}
+		if listOK {
+			if fresh, ok := listedByID[u.ID]; ok {
+				prevCopy := *u
+				observeExaminerPoll(&prevCopy, savedPtr, &fresh, now)
+				*u = mergeExaminerInstance(prevCopy, fresh)
+				return
+			}
+		}
+		u.Unconfirmed = true
 	}
 	endUnresolved := func(u *ExaminerInstance, roundID, why string, next *examinerState) (ended bool, endErr, spendErr error) {
 		if err := prov.EndExaminer(ctx, u.ID); err != nil {
-			u.ObservedLiveAt = now
+			if !u.Stopped {
+				u.ObservedLiveAt = now
+			}
 			return false, fmt.Errorf("ending unresolved examiner GPU %s: %w", u.ID, err), nil
 		}
 		price := u.Price
+		diskCost := u.DiskCost
 		start := u.Created
 		if start.IsZero() {
 			start = st.Created
@@ -3513,7 +4190,7 @@ func resolvePendingExaminer(
 		transferEst := u.TransferEstimated || transfer > 0
 		ts := u.transferState()
 		if u.ID == st.InstanceID || st.PendingRent || !validRate(price) {
-			price, _ = examinerObservedRate(st.Price, st.DiskCost, *u)
+			price, diskCost = examinerObservedRate(st.Price, st.DiskCost, *u)
 		}
 		if u.ID == st.InstanceID || st.PendingRent {
 			transfer, transferEst, ts, _ = mergeExaminerTransfer(
@@ -3527,11 +4204,28 @@ func resolvePendingExaminer(
 		if !validRate(price) {
 			price = 1.50
 		}
+		alive := u.ObservedLiveAt
+		if alive.IsZero() || alive.Before(start) {
+			alive = start
+		}
 		rec := podRecord{
 			ID: u.ID, Market: "vast", Handle: "examiner", GPU: "RTX 5090",
-			Cost: price, FixedCost: transfer, FixedCostEstimated: transferEst || transfer > 0, Start: start, Alive: now, End: now,
+			Cost: price, DiskCost: max(0, diskCost), DiskCostUnknown: u.DiskCostUnknown && !validRate(diskCost),
+			FixedCost: transfer, FixedCostEstimated: transferEst || transfer > 0, Start: start, Alive: alive,
+			Stopped: u.Stopped, Offline: u.Offline, StoppedAt: u.StoppedAt, StoppedSeen: u.StoppedSeen,
+			ResumeAt: u.ResumeAt, Segments: cloneBillingSegments(u.Segments), End: now,
 			For: "examiner", Round: roundID, Why: why,
 		}
+		if rec.Stopped {
+			if !examinerStopConfirmed(rec.Stopped, u.Unconfirmed, rec.StoppedSeen, now) {
+				rec.markLiveAt(now, time.Time{})
+			} else {
+				rec.markStoppedStateAt(now, time.Time{}, rec.Offline)
+			}
+		} else {
+			rec.Alive = now
+		}
+		rec.End = now
 		rec.setTransferState(ts)
 		if onSpent != nil && !spentHasExaminer(home, u.ID) {
 			if serr := onSpent(rec); serr != nil {
@@ -3557,6 +4251,16 @@ func resolvePendingExaminer(
 			}
 			return nil
 		}
+		listedByID := map[string]ExaminerInstance{}
+		listOK := false
+		if rawList, lerr := prov.ListExaminers(ctx); lerr == nil {
+			listOK = true
+			for _, inst := range rawList {
+				if inst.ID != "" {
+					listedByID[inst.ID] = inst
+				}
+			}
+		}
 		next := *st
 		next.Unresolved = nil
 		var firstEndErr, spendErr error
@@ -3565,6 +4269,7 @@ func resolvePendingExaminer(
 			if u.ID == "" {
 				continue
 			}
+			refreshUnresolved(&u, listedByID, listOK)
 			ok, eErr, sErr := endUnresolved(&u, st.RoundID, "resolved unresolved examiner teardown (--end)", &next)
 			if !ok {
 				next.Unresolved = append(next.Unresolved, u)
@@ -3590,8 +4295,12 @@ func resolvePendingExaminer(
 	if err != nil {
 		return fmt.Errorf("listing examiner instances on provider: %w", err)
 	}
+	listedByID := make(map[string]ExaminerInstance, len(rawInsts))
 	var matches []ExaminerInstance
 	for i := range rawInsts {
+		if rawInsts[i].ID != "" {
+			listedByID[rawInsts[i].ID] = rawInsts[i]
+		}
 		if st.ReservedLabel != "" && rawInsts[i].Label == st.ReservedLabel {
 			matches = append(matches, rawInsts[i])
 		}
@@ -3618,6 +4327,12 @@ func resolvePendingExaminer(
 			handledIDs := map[string]bool{}
 			for _, match := range matches {
 				handledIDs[match.ID] = true
+				var prevPtr *ExaminerInstance
+				if prev, ok := findUnresolved(st.Unresolved, match.ID); ok {
+					prevCopy := prev
+					prevPtr = &prevCopy
+				}
+				observeExaminerPoll(prevPtr, st, &match, now)
 				if err := prov.EndExaminer(ctx, match.ID); err != nil {
 					u := match
 					if u.Created.IsZero() {
@@ -3625,14 +4340,13 @@ func resolvePendingExaminer(
 					}
 					u.Price, u.DiskCost = examinerObservedRate(st.Price, st.DiskCost, u)
 					mergeSavedTransferIntoInstance(*st, &u, now)
-					u.ObservedLiveAt = now
 					failedEnds = append(failedEnds, u)
 					if firstEndErr == nil {
 						firstEndErr = fmt.Errorf("ending examiner GPU %s for reservation: %w", match.ID, err)
 					}
 					continue
 				}
-				price, _ := examinerObservedRate(st.Price, st.DiskCost, match)
+				price, diskCost := examinerObservedRate(st.Price, st.DiskCost, match)
 				start := match.Created
 				if start.IsZero() {
 					start = st.Created
@@ -3645,11 +4359,28 @@ func resolvePendingExaminer(
 					match.TransferDollars, match.TransferEstimated, match.transferState(),
 					match.State, start, now,
 				)
+				alive := match.ObservedLiveAt
+				if alive.IsZero() || alive.Before(start) {
+					alive = start
+				}
 				rec := podRecord{
 					ID: match.ID, Market: "vast", Handle: "examiner", GPU: "RTX 5090",
-					Cost: price, FixedCost: transfer, FixedCostEstimated: transferEst || transfer > 0, Start: start, Alive: now, End: now,
+					Cost: price, DiskCost: max(0, diskCost), DiskCostUnknown: match.DiskCostUnknown && !validRate(diskCost),
+					FixedCost: transfer, FixedCostEstimated: transferEst || transfer > 0, Start: start, Alive: alive,
+					Stopped: match.Stopped, Offline: match.Offline, StoppedAt: match.StoppedAt, StoppedSeen: match.StoppedSeen,
+					ResumeAt: match.ResumeAt, Segments: cloneBillingSegments(match.Segments), End: now,
 					For: "examiner", Round: st.RoundID, Why: "resolved pending examiner reservation (--end)",
 				}
+				if rec.Stopped {
+					if !examinerStopConfirmed(rec.Stopped, match.Unconfirmed, rec.StoppedSeen, now) {
+						rec.markLiveAt(now, time.Time{})
+					} else {
+						rec.markStoppedStateAt(now, time.Time{}, rec.Offline)
+					}
+				} else {
+					rec.Alive = now
+				}
+				rec.End = now
 				rec.setTransferState(ts)
 				if onSpent != nil && !spentHasExaminer(home, match.ID) {
 					if serr := onSpent(rec); serr != nil {
@@ -3666,6 +4397,7 @@ func resolvePendingExaminer(
 				if u.ID == "" || handledIDs[u.ID] {
 					continue
 				}
+				refreshUnresolved(&u, listedByID, true)
 				ok, eErr, sErr := endUnresolved(&u, st.RoundID, "resolved unresolved examiner teardown (--end)", &next)
 				if !ok {
 					failedEnds = append(failedEnds, u)
@@ -3691,11 +4423,11 @@ func resolvePendingExaminer(
 			}
 			return spendErr
 		}
-		// Adopt mode: prefer a live (non-stopped) match over any stopped duplicate; any remaining
-		// duplicates will be terminated as strays on the next Reconcile tick.
+		// Adopt mode: prefer a usable (running/starting) match over any stopped or unknown duplicate;
+		// any remaining duplicates will be terminated as strays on the next Reconcile tick.
 		match := matches[0]
 		for _, cand := range matches {
-			if cand.State != "stopped" {
+			if examinerStateUsable(cand.State) {
 				match = cand
 				break
 			}
@@ -3704,6 +4436,12 @@ func resolvePendingExaminer(
 			say("would adopt examiner GPU (machine %s, state %s) for reservation %s", match.ID, match.State, st.ReservedLabel)
 			return nil
 		}
+		var prevPtr *ExaminerInstance
+		if prev, ok := findUnresolved(st.Unresolved, match.ID); ok {
+			prevCopy := prev
+			prevPtr = &prevCopy
+		}
+		observeExaminerPoll(prevPtr, st, &match, now)
 		label := st.ReservedLabel
 		st.InstanceID = match.ID
 		st.PendingRent = false
@@ -3721,7 +4459,15 @@ func resolvePendingExaminer(
 		st.TransferDollars = est
 		st.TransferEstimated = estFlag
 		st.setTransferState(ts)
-		st.ObservedLiveAt = now
+		st.Stopped = match.Stopped
+		st.Offline = match.Offline
+		st.Unconfirmed = false
+		st.StoppedAt = match.StoppedAt
+		st.StoppedSeen = match.StoppedSeen
+		st.ResumeAt = match.ResumeAt
+		st.Segments = cloneBillingSegments(match.Segments)
+		st.DiskCostUnknown = match.DiskCostUnknown && !validRate(st.DiskCost)
+		st.ObservedLiveAt = match.ObservedLiveAt
 		if err := writeExaminerState(home, st); err != nil {
 			return fmt.Errorf("saving adopted examiner.json: %w", err)
 		}
@@ -3743,6 +4489,7 @@ func resolvePendingExaminer(
 					if u.ID == "" {
 						continue
 					}
+					refreshUnresolved(&u, listedByID, true)
 					ok, eErr, sErr := endUnresolved(&u, st.RoundID, "resolved unresolved examiner teardown (--end)", &next)
 					if !ok {
 						next.Unresolved = append(next.Unresolved, u)
@@ -3792,6 +4539,7 @@ func resolvePendingExaminer(
 			if u.ID == "" {
 				continue
 			}
+			refreshUnresolved(&u, listedByID, true)
 			ok, eErr, sErr := endUnresolved(&u, st.RoundID, "resolved unresolved examiner teardown (--end)", &next)
 			if !ok {
 				next.Unresolved = append(next.Unresolved, u)

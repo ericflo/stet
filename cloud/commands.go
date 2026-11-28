@@ -453,10 +453,16 @@ func tick(ctx context.Context, f *Fleet) (err error) {
 	pol.MaxWorkers = max(0, pol.MaxWorkers-reserved-v.extraWorkerLiveCount())
 	d := pol.decideNext(v.Work, v.Workers, v.Today, now, next)
 	for _, orph := range v.OrphanRentals {
-		if orph != nil && (orph.Terminating || (orph.State == "stopped" && !orph.Unconfirmed)) {
+		if orph != nil && (orph.Terminating || ((orph.State == "stopped" || orph.State == "unknown") && !orph.Unconfirmed)) {
 			why := "stopped unpooled machine"
 			if orph.Terminating {
 				why = "outstanding termination on unpooled machine"
+			} else if orph.State == "unknown" {
+				statusWord := strings.ToLower(orph.Status)
+				if statusWord == "" {
+					statusWord = "unknown"
+				}
+				why = "unpooled machine in unrecoverable status (" + statusWord + ")"
 			}
 			d.End = append(d.End, Ending{Rental: orph, Why: why})
 		}
@@ -1141,7 +1147,7 @@ func cmdDown(ctx context.Context, f *Fleet, force bool, handles []string) error 
 			if ex == nil {
 				continue
 			}
-			if (ex.live() || ex.Unconfirmed) && !ex.Terminating && !force && (ex.Unconfirmed || st == "grading" || st == "running" || st == "training") {
+			if ((ex.live() && ex.State != "unknown") || ex.Unconfirmed) && !ex.Terminating && !force && (ex.Unconfirmed || st == "grading" || st == "running" || st == "training") {
 				whySt := st
 				if ex.Unconfirmed {
 					whySt = "unconfirmed"
@@ -1163,7 +1169,7 @@ func cmdDown(ctx context.Context, f *Fleet, force bool, handles []string) error 
 			found[orph.Name] = true
 		}
 		found[orph.ID] = true
-		if (orph.live() || orph.Unconfirmed) && !orph.Terminating && !force {
+		if ((orph.live() && orph.State != "unknown") || orph.Unconfirmed) && !orph.Terminating && !force {
 			name := orph.Name
 			if name == "" {
 				name = orph.ID

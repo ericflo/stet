@@ -411,7 +411,13 @@ def run_round(
 ) -> dict:
     """Edit, then grade. If the curator leaves no script the result is invalid and carries no
     exam score: by the rules its student is the one trained on the unedited corpus."""
-    edit = edit_round(bundle, entry, rnd, scale, work, sandbox=sandbox, echo=echo, log=log, assets=assets, time_limit=time_limit)
+    from .bench import _cuda_index
+
+    gpu_idx = _cuda_index(device)
+    edit = edit_round(
+        bundle, entry, rnd, scale, work, sandbox=sandbox, echo=echo, log=log, assets=assets,
+        time_limit=time_limit, gpu=0 if gpu_idx is None else gpu_idx,
+    )  # fmt: skip
     if edit.script is None:
         if exam is None:
             corpus, exam = data.materialize(rnd, scale)

@@ -2995,3 +2995,62 @@ func BenchmarkWorkAdminBaselineConsensus(b *testing.B) {
 		}
 	})
 }
+
+func TestReview35ZeroLanguageSharesRejectedAndScoreParity(t *testing.T) {
+	season := loadSeason()
+	cfg := Config{DataDir: t.TempDir(), Scale: season.OfficialScale}
+	app, err := newApp(context.Background(), cfg, season, newMemKV(), dirBlobs{filepath.Join(cfg.DataDir, "blobs")})
+	if err != nil {
+		t.Fatalf("newApp: %v", err)
+	}
+	// Shared 40-item explain fixture: 20 en @ gain 0.0, 20 ja @ gain 0.1.
+	plName, partName := "", ""
+	for _, pl := range season.Exam.Pillars {
+		for _, pt := range pl.Parts {
+			if pt == "explain" {
+				plName, partName = pl.Name, pt
+				break
+			}
+		}
+		if plName != "" {
+			break
+		}
+	}
+	if plName == "" {
+		t.Fatalf("season.json missing explain part: %+v", season.Exam.Pillars)
+	}
+	table := make([]ItemInfo, 0, 40)
+	gains := make([]float64, 0, 40)
+	for range 20 {
+		table = append(table, ItemInfo{Pillar: plName, Part: partName, Lang: "en", Stratum: "prose/answer"})
+		gains = append(gains, 0.0)
+	}
+	for range 20 {
+		table = append(table, ItemInfo{Pillar: plName, Part: partName, Lang: "ja", Stratum: "prose/answer"})
+		gains = append(gains, 0.1)
+	}
+	// 1. checkTable MUST reject all-zero language shares and empty language keys with HTTP 400!
+	err = app.checkTable(table, map[string]float64{"en": 0, "ja": 0})
+	ae, ok := err.(*apiError)
+	if !ok || ae.Status != 400 || !strings.Contains(ae.Error(), "positive percentage") {
+		t.Fatalf("checkTable with all-zero language shares: want HTTP 400 positive-percentage error, got %T %v", err, err)
+	}
+	err = app.checkTable(table, map[string]float64{"": 50.0, "en": 50.0})
+	ae, ok = err.(*apiError)
+	if !ok || ae.Status != 400 {
+		t.Fatalf("checkTable with empty language key: want HTTP 400 *apiError, got %T %v", err, err)
+	}
+	// Positive language shares pass checkTable.
+	if err := app.checkTable(table, map[string]float64{"en": 43.0, "ja": 5.0}); err != nil {
+		t.Fatalf("checkTable rejected valid positive language shares: %v", err)
+	}
+	// 2. For any already-recorded table carrying all-zero shares, ScoreItems treats both en and ja
+	//    via otherShare (equal weights -> 0.05000), matching Python replay parity!
+	score, _, err := season.Exam.ScoreItems(table, gains, map[string]float64{"en": 0, "ja": 0})
+	if err != nil {
+		t.Fatalf("ScoreItems: %v", err)
+	}
+	if math.Abs(score-0.05) > 1e-9 {
+		t.Fatalf("ScoreItems with all-zero shares: want 0.05000, got %.6f", score)
+	}
+}

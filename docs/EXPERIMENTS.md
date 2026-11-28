@@ -641,8 +641,11 @@ GPU scoring)*.
         Draw B), and compresses `fineweb2` CJK raw mean gain (`+0.018 → +0.005`, 95% CI diff
         `[−0.026, −0.001]` across `n=50` CJK items). And while rotating excerpts raises absolute
         mean NLL by `~0.19–0.21 bpb` (worse likelihood; vs `~0.14 bpb` on `Qwen3-8B`),
-        **`fineweb2 − unedited` still retains `110.1%` under rotation**, so between-curator
-        rankings on multilingual crawls still do not rely on the source excerpt.
+        **`fineweb2 − unedited` still retains `110.1%` under rotation**, showing that large gains
+        over `unedited` remain driven primarily by prompt-conditioned answer-prose likelihood—even
+        as rotation lowers English DataDecide (`58/66 → 52/66`) and reverses the close
+        `adv_ppl_qwen06b − fineweb2` margin (`+0.00110 → −0.00143`), so closer between-curator
+        rankings are not invariant to the excerpt.
 
    - **Full Safety-Case Re-Validation on Shipped `Inkling-2-Mini` Exams (`r10_gate`, 3 Disjoint
      Harvest Draws, 34 Official CUDA `standard` Students, Saved `bf16` Weights, Cold-Start 5090
@@ -713,7 +716,11 @@ GPU scoring)*.
        `p9_fineweb2 − p9_mimic = +0.01770` (`[+0.01618, +0.01915]`, `P(<=0)=0.000`);
        `p9_fineweb2 − p9_adv_qa_spam = +0.04144` (`[+0.03974, +0.04293]`, `P(<=0)=0.000`);
        `db_fineweb2 − db_mimic = +0.02226` (`[+0.02080, +0.02357]`, `P(<=0)=0.000`);
-       `db_adv_ppl_qwen06b − db_fineweb2 = +0.00184` (`[+0.00036, +0.00330]`, `P(<=0)=0.008`);
+       `db_adv_ppl_qwen06b − db_fineweb2 = +0.00184` (`[+0.00036, +0.00330]`, `P(<=0)=0.008` on
+       unrotated excerpts; under excerpt rotation, this ordering reverses on all 3 draws to
+       `−0.002751 / −0.000100 / −0.000823`, 3-draw mean `−0.001225` vs original `+0.001843` on
+       `1,854` v2 items, and `−0.002751 / −0.000100 / −0.000825`, mean `−0.001226` vs `+0.001844`,
+       on the `1,853` retained v3+ items);
        `db_adv_ppl_ernie03b − db_fineweb2 = −0.00238` (`[−0.00428, −0.00076]`, `P(<=0)=0.995`,
        meaning cross-family ERNIE-0.3B lowest-PPL loses to `fineweb2` under `Inkling-2-Mini`!);
        `db_fineweb2 − db_adv_tiny_lang_boost = +0.03647` (`[+0.03515, +0.03753]`, `P(<=0)=0.000`).
@@ -726,11 +733,17 @@ GPU scoring)*.
        pool and training budget across held-out draws and seeds is the right follow-up test.
        Multi-seed paired gain deltas (`s1 − s0`): `p9_reader_v2` `−0.00081 / −0.00100 / −0.00043`,
        `p9_fineweb2` `−0.00029 / +0.00106 / +0.00250`, `db_unedited` `+0.00009 / −0.00011 / −0.00012`.
-       Between-curator rotation survival across all 3 Inkling draws remains `107.8%–118.0%` on
-       `fineweb2` even though rotating excerpts raises absolute mean NLL by `+0.180–+0.190 bpb`
-       (e.g. Draw B unedited seed-0 mean NLL rose from `1.337` to `1.522 bpb`), confirming that
-       between-curator rankings still rely on prompt-conditioned answer-prose modeling rather than
-       the excerpt.
+       Under excerpt rotation across all 3 Inkling draws, `fineweb2`'s gain over `unedited`
+       retains `107.8%–118.0%` even though rotating excerpts raises absolute mean NLL by
+       `+0.180–+0.190 bpb` (e.g. Draw B unedited seed-0 mean NLL rose from `1.337` to `1.522 bpb`),
+       showing that large gains over `unedited` remain driven largely by prompt-conditioned
+       answer-prose likelihood. However, excerpt rotation **does** alter closer between-curator
+       orderings: English DataDecide 1B drops from `53/66` to `49/66`, and `db_adv_ppl_qwen06b − db_fineweb2`
+       reverses sign on all three draws (`+0.001530 / +0.001712 / +0.002289`, mean `+0.001843`
+       original vs `−0.002751 / −0.000100 / −0.000823`, mean `−0.001225` rotated on the `1,854`-item
+       v2 rescore; `+0.001530 / +0.001712 / +0.002290`, mean `+0.001844` vs `−0.002751 / −0.000100 / −0.000825`,
+       mean `−0.001226` on the `1,853`-item v3+ subset), so retained gain over `unedited` alone
+       does not establish that between-curator rankings are invariant to excerpt rotation.
      - **Cross-Card NVIDIA RTX 5090 vs RTX 4090 Replay of Archived Measurement Path on Shipped `Inkling-2-Mini` (~525-byte answers; 1 training draw re-sat on 3 exams):**
        All four archived RTX 5090 and RTX 4090 students (`db_unedited_s0` and `db_fineweb2_s0`)
        were trained on **Draw B only** (`init_sha256 = 5bd1d5ce4547697e...`, Draw B corpus and

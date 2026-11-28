@@ -407,7 +407,7 @@ def _summary(out: Out, results: list[dict], *, no_baseline: bool = False) -> dic
     return summary
 
 
-def _edit_time_line(out: Out, result: dict, season) -> None:
+def _edit_time_line(out: Out, result: dict, season, device=None) -> None:
     """How long the edit took here, and what that means on the slowest machine that runs
     curators. A time limit in seconds is only as fair as the comparison is plain."""
     from . import bench
@@ -416,7 +416,7 @@ def _edit_time_line(out: Out, result: dict, season) -> None:
     took, limit = edit.get("seconds"), edit.get("time_limit")
     if not took or not limit:
         return
-    m = bench.saved()
+    m = bench.saved(device=device)
     if m is None:
         out.line("edit", f"{took:.0f}s of {limit:.0f}s here. `stet bench` says how this machine compares with the slowest that runs curators")
         return
@@ -480,7 +480,7 @@ def cmd_run(args):
         result["writing"] = bool(pinned_hours) if rnd.kind == "practice" else _has_writing(rnd)
         (work / "result.json").write_text(json.dumps(result, indent=1))
         report(out, result, base, season)
-        _edit_time_line(out, result, season)
+        _edit_time_line(out, result, season, device=device)
         if not result["writing"]:
             if season.raw.get("exam", {}).get("practice_pack"):
                 teacher = ((season.raw.get("exam") or {}).get("reasoning") or {}).get("model", "pinned teacher")
@@ -1134,12 +1134,14 @@ def cmd_bench(args):
     need_torch()
     from . import bench
     from .spec import load_season
+    from .train import pick_device
 
     out = Out()
     season = load_season()
+    device = pick_device(getattr(args, "device", None))
     out.line("", out.dim("measuring CPU and GPU (about half a minute; close other GPU work first) ..."))
-    m = bench.measure(season)
-    bench.save(m)
+    m = bench.measure(season, device=device)
+    bench.save(m, device=device)
     need = bench.floor(season)
     g, c = bench.ratios(season, m)
     machine = season.raw.get("machine") or {}
@@ -1309,6 +1311,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(fn=cmd_asset)
 
     p = sub.add_parser("bench", help="measure this machine against the slowest that runs curators")
+    p.add_argument("--device", default=None, help="torch device to measure (default: best available)")
     p.add_argument("--json", action="store_true")
     p.set_defaults(fn=cmd_bench)
 

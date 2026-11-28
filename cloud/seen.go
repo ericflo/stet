@@ -136,7 +136,7 @@ func (f *Fleet) stillInstalling(ctx context.Context, w *Worker, now time.Time) b
 	g, age := w.grace(f.o.Policy), now.Sub(r.Created)
 	asked := w.Machine != nil && w.Machine.LastSeen >= r.Created.Unix()
 	lg, ok := f.market(r.Market).(logger)
-	if !ok || asked || r.State == "stopped" || age < g-slowLook || age > 2*g {
+	if !ok || asked || r.State == "stopped" || r.State == "unknown" || age < g-slowLook || age > 2*g {
 		delete(f.lastLog, key)
 		delete(f.logGrew, key)
 		return false
@@ -264,6 +264,12 @@ func (f *Fleet) diagnose(ctx context.Context, w *Worker) (cause, said string) {
 	}
 	asked := w.Machine != nil && w.Machine.LastSeen >= r.Created.Unix()
 	switch {
+	case r.State == "unknown":
+		statusWord := strings.ToLower(r.Status)
+		if statusWord == "" {
+			statusWord = "unknown"
+		}
+		cause, said = causeMarketStopped, fmt.Sprintf("%s reports it %s", title, statusWord)
 	case asked:
 		cause, said = causeQuiet, fmt.Sprintf("it asked for work, then said nothing for %s", f.now().Sub(time.Unix(w.Machine.LastSeen, 0)).Round(time.Minute))
 	case r.State == "stopped":

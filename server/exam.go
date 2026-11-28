@@ -253,10 +253,17 @@ func (a *App) checkTable(table []ItemInfo, shares map[string]float64) error {
 	if len(shares) == 0 || len(shares) > 1000 {
 		return fail(400, "the exam names no languages, or too many: a round's share of each is part of its score")
 	}
+	hasPos := false
 	for k, v := range shares {
-		if len(k) > 32 || !finite(v) || v < 0 || v > 100 {
+		if k == "" || len(k) > 32 || !finite(v) || v < 0 || v > 100 {
 			return fail(400, "the share of %q is not a percentage", clip(k, 32))
 		}
+		if v > 0 {
+			hasPos = true
+		}
+	}
+	if !hasPos {
+		return fail(400, "the exam's language shares must include at least one positive percentage")
 	}
 	return nil
 }

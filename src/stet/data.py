@@ -910,22 +910,26 @@ def exam_shares_path(rnd: Round, digest: str) -> Path:
 
 
 def normalize_round_shares(shares: object) -> dict[str, float] | None:
-    """Validate and normalize a language-share mapping (percent weights in [0, 100], sum > 0)."""
+    """Validate and normalize a language-share mapping (percent weights in [0, 100]).
+
+    Accepts valid non-empty mappings including already-recorded all-zero share tables so local
+    replays match server/aggregate.go (which falls back to otherShare per listed language) rather
+    than silently reverting to published crawl SHARES.
+    """
     if not isinstance(shares, dict) or not shares:
         return None
     clean: dict[str, float] = {}
     for k, v in shares.items():
         if not isinstance(k, str) or not k or isinstance(v, bool):
-            continue
+            return None
         try:
             fv = float(v)
         except (TypeError, ValueError):
-            continue
-        if math.isfinite(fv) and 0.0 <= fv <= 100.0:
-            clean[k] = fv
-    if not clean or not any(v > 0.0 for v in clean.values()):
-        return None
-    return clean
+            return None
+        if not (math.isfinite(fv) and 0.0 <= fv <= 100.0):
+            return None
+        clean[k] = fv
+    return clean or None
 
 
 def save_round_shares(rnd: Round, shares: dict[str, float]) -> None:
